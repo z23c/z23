@@ -1,0 +1,19 @@
+[Unit]
+Description=Z23 Log Rotation Timer — daily ~03:00
+
+[Timer]
+# 03:00 nightly with up to 10 min jitter. Off-peak; sits at the front of
+# the 03:xx cluster the other nightly timer comments already reference
+# (see platform/deploy/zclassic23-replay-canary-nightly.timer and
+# platform/deploy/zclassic23-coverage.timer): logrotate ~03:00, simnet-nightly
+# ~03:1x, coverage weekly Sun ~03:3x, replay-canary-nightly 04:30. A
+# oneshot size check + copytruncate is sub-second work, so the exact
+# minute doesn't need to be disjoint from the others the way the
+# heavier CPU/IO lanes do.
+OnCalendar=*-*-* 03:00:00
+RandomizedDelaySec=600
+Persistent=true
+Unit=zclassic23-logrotate.service
+
+[Install]
+WantedBy=timers.target

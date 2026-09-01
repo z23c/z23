@@ -60,7 +60,7 @@ CC_BIN="${ZCL_MINGW_CC:-x86_64-w64-mingw32-gcc}"
 BASELINE="tools/lint/windows_cross_syntax_baseline.txt"
 SRC_FLOOR=150
 INC_FLOOR=50
-SCAN_ROOTS=(adapters app application config core domain lib ports src tools/command)
+SCAN_ROOTS=(core engine contexts cognition platform tools/command)
 TEST_COMPAT_HEADER="test/windows_compat.h"
 
 echo "══ LINT: Windows cross-syntax (mingw -fsyntax-only over every _WIN32 TU) ══"
@@ -249,8 +249,8 @@ case "$test_compat_assignment" in
         exit 1
         ;;
 esac
-[ -f "lib/test/include/$TEST_COMPAT_HEADER" ] || {
-    echo "  $GATE: FAIL — missing lib/test/include/$TEST_COMPAT_HEADER." >&2
+[ -f "tests/harness/include/$TEST_COMPAT_HEADER" ] || {
+    echo "  $GATE: FAIL — missing tests/harness/include/$TEST_COMPAT_HEADER." >&2
     exit 1
 }
 
@@ -454,7 +454,7 @@ fi
 # force-included compatibility header; standalone platform acceptance sources
 # receive test declarations only.
 case "$src" in
-    lib/test/*) flags+=(-DZCL_TESTING -include "$ZCL_GATE_TEST_COMPAT_HEADER") ;;
+    tests/harness/include/test/*) flags+=(-DZCL_TESTING -include "$ZCL_GATE_TEST_COMPAT_HEADER") ;;
     */tests/*.c) flags+=(-DZCL_TESTING) ;;
 esac
 set +e

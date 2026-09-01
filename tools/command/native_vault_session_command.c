@@ -5,7 +5,7 @@
  * (docs/work/agent-spend-policy-design.md, "Minting + presentation"). These
  * leaves are grants, not custody: nothing here builds, signs or broadcasts a
  * transaction, and nothing here enforces a policy — mint/list/revoke only.
- * The workflow itself lives in app/services/src/agent_session_service.c;
+ * The workflow itself lives in cognition/services/src/agent_session_service.c;
  * every handler below is a thin parse → service → render over it, matching
  * the conventions of native_vault_command.c (named-error reply bodies, the
  * plan/commit confirm gate, no silent failures).

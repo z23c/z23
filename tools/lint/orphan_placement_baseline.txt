@@ -9,18 +9,18 @@
 # file may only shrink. Goal: empty (gate graduates to FAIL).
 #
 # Format: one repo-relative path per line; lines starting with # are comments.
-examples/01_mint_and_spend.c
-examples/02_multi_io_p2sh.c
-examples/03_op_return_overlay.c
-examples/04_zslp_token.c
-examples/05_znam_names.c
-examples/06_htlc_swap.c
-examples/07_cluster_reorg.c
-examples/08_byzantine_blocks.c
-examples/09_seed_replay.c
-examples/10_wire_adversaries.c
-examples/11_collectible_market.c
-src/cli.c
-src/main.c
-src/main_cli_modes.c
-src/main_cli_modes.h
+docs/examples/01_mint_and_spend.c
+docs/examples/02_multi_io_p2sh.c
+docs/examples/03_op_return_overlay.c
+docs/examples/04_zslp_token.c
+docs/examples/05_znam_names.c
+docs/examples/06_htlc_swap.c
+docs/examples/07_cluster_reorg.c
+docs/examples/08_byzantine_blocks.c
+docs/examples/09_seed_replay.c
+docs/examples/10_wire_adversaries.c
+docs/examples/11_collectible_market.c
+engine/entry/cli.c
+engine/entry/main.c
+engine/entry/main_cli_modes.c
+engine/entry/main_cli_modes.h

@@ -3,10 +3,10 @@
  * gen_utxo_root_ladder: one-shot tool that reads the per-boundary UTXO
  * roots this node's own locally validated fold already recorded (coins_kv
  * boundary_root store, keyed "mmb_utxo_root:<height>" in progress_meta —
- * see lib/storage/src/coins_kv.c:548-589) at stride heights and emits
+ * see engine/modules/storage/src/coins_kv.c:548-589) at stride heights and emits
  *
- *   lib/chain/include/chain/utxo_root_ladder.h  (declarations — stable)
- *   lib/chain/src/utxo_root_ladder.c            (table + lookup)
+ *   core/modules/chain/include/chain/utxo_root_ladder.h  (declarations — stable)
+ *   core/modules/chain/src/utxo_root_ladder.c            (table + lookup)
  *
  * WHY A NODE.DB READER, NOT AN RPC CLIENT (unlike gen_sha3_windows):
  * zclassicd's gettxoutsetinfo only reports the UTXO set at the CURRENT
@@ -14,13 +14,13 @@
  * height H". Historical boundary roots exist ONLY in a node's own
  * coins_kv boundary-root store, written once by the live connect path
  * as its local fold passed each MMR_COMMITMENT_INTERVAL-aligned
- * height (app/models/src/mmb_leaf_store.c:180-191). So the ladder's
+ * height (engine/models/src/mmb_leaf_store.c:180-191). So the ladder's
  * source of truth is a copy of a zclassic23 datadir, not a JSON-RPC peer.
  *
  * TWO FILES PER DATADIR: block hashes live in `node.db` (`blocks` table);
  * boundary UTXO roots live in the SEPARATE kernel store `consensus.db`
  * (`progress_meta` table, key "mmb_utxo_root:<height>" — see
- * lib/storage/src/consensus_db.c, coins_kv.c:548-589). Pre-flip datadirs
+ * engine/modules/storage/src/consensus_db.c, coins_kv.c:548-589). Pre-flip datadirs
  * kept that table in `progress.kv` instead; `--source-progress-kv=`/
  * `--second-progress-kv=` remain accepted as aliases of
  * `--source-kernel-db=`/`--second-kernel-db=` so old runbooks still work.
@@ -34,7 +34,7 @@
  *
  * CROSS-CHECKS PERFORMED:
  *   (a) The one existing zclassicd-verified anchor (SHA3 UTXO checkpoint,
- *       lib/chain/src/checkpoints.c, height 3,056,758) is always included
+ *       core/modules/chain/src/checkpoints.c, height 3,056,758) is always included
  *       as its own ladder rung (provenance=CHECKPOINT), and this tool
  *       cross-checks the compiled checkpoint's block_hash against the
  *       SOURCE db's own blocks table at that exact height (a plain block
@@ -60,12 +60,12 @@
  *
  * DENSE LAYER (optional, --leaf-store=<path to mmb_leaves.bin>):
  * recomputes mmb_root() from the SAME leaf hashes the live MMB pipeline
- * produced (app/models/src/mmb_leaf_store.c), up to one pinned height,
+ * produced (engine/models/src/mmb_leaf_store.c), up to one pinned height,
  * and locks the result as ONE compiled constant
  * (g_utxo_root_ladder_dense_height / g_utxo_root_ladder_dense_mmb_root).
  * This is a clean read-side reuse: mmb_leaves.bin is a flat file of
  * 32-byte leaf hashes (one per height, in order) and mmb_append_hash /
- * mmb_root (lib/chain/src/mmb.c) are pure functions with no DB or app
+ * mmb_root (core/modules/chain/src/mmb.c) are pure functions with no DB or app
  * dependency, so no invasive plumbing was needed.
  *
  * Usage:
@@ -82,8 +82,8 @@
  * The operator ALWAYS points this at a COPY (never a live datadir) —
  * see docs/work/ and the golden-height ladder lane notes.
  *
- * Links only standalone libs: lib/chain/src/mmb.c (pure, no DB) +
- * lib/sha3/src/sha3.c (mmb.c's own dependency) + libsqlite3.a.
+ * Links only standalone libs: core/modules/chain/src/mmb.c (pure, no DB) +
+ * platform/modules/sha3/src/sha3.c (mmb.c's own dependency) + libsqlite3.a.
  * No node libs, no Tor, no RPC. */
 
 #define _POSIX_C_SOURCE 200809L
@@ -105,16 +105,16 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-#define DEFAULT_OUT_H "lib/chain/include/chain/utxo_root_ladder.h"
-#define DEFAULT_OUT_C "lib/chain/src/utxo_root_ladder.c"
+#define DEFAULT_OUT_H "core/modules/chain/include/chain/utxo_root_ladder.h"
+#define DEFAULT_OUT_C "core/modules/chain/src/utxo_root_ladder.c"
 #define DEFAULT_STRIDE 100000
 #define MAX_ENTRIES 128   /* generous: ~3.1M/100000 strides + 1 checkpoint rung */
 
-/* Independently re-stated from lib/chain/src/checkpoints.c
+/* Independently re-stated from core/modules/chain/src/checkpoints.c
  * (get_sha3_utxo_checkpoint's g_sha3_checkpoint) so this standalone tool
  * does not have to pull in the full chain.h/block_index header graph for
  * one constant — the same "re-state so drift trips a test" doctrine
- * lib/test/src/test_self_folded_anchor.c already uses for this same
+ * tests/harness/src/test_self_folded_anchor.c already uses for this same
  * checkpoint (SFA_CHECKPOINT_HEIGHT/SFA_CHECKPOINT_UTXO_COUNT). The
  * hermetic test_utxo_root_ladder test asserts these bytes match the
  * COMPILED checkpoint (get_sha3_utxo_checkpoint()) in the full build —
@@ -384,7 +384,7 @@ static bool parse_cli(int argc, char **argv, struct cli *c)
     if (!c->source_kernel_db) {
         fprintf(stderr, "missing required --source-kernel-db=PATH "
                         "(boundary UTXO roots live there, not in node.db — "
-                        "see lib/storage/src/consensus_db.c)\n");
+                        "see engine/modules/storage/src/consensus_db.c)\n");
         return false;
     }
     if (c->stride <= 0 || (c->stride % MMR_COMMITMENT_INTERVAL) != 0) {
@@ -415,7 +415,7 @@ static bool emit_header(const char *path)
         " * never changes — this table is a free, permanent reproducibility\n"
         " * anchor a node can verify its own coins_kv against without\n"
         " * re-folding from genesis. See utxo_root_ladder_verify_against_store()\n"
-        " * (app/models/src/utxo_root_ladder_verify.c) for the live tripwire:\n"
+        " * (engine/models/src/utxo_root_ladder_verify.c) for the live tripwire:\n"
         " * any mismatch between a locked rung and this node's OWN boundary-root\n"
         " * store is a named divergence at a named height, never a silent stop.\n"
         " *\n"
@@ -437,7 +437,7 @@ static bool emit_header(const char *path)
         "    /* Two independently-folded node.db copies agree bit-for-bit\n"
         "     * on both the block hash and the UTXO root at this height. */\n"
         "    UTXO_ROOT_LADDER_SOURCE_DUAL       = 1,\n"
-        "    /* The compiled SHA3 UTXO checkpoint (lib/chain/src/checkpoints.c),\n"
+        "    /* The compiled SHA3 UTXO checkpoint (core/modules/chain/src/checkpoints.c),\n"
         "     * independently verified bit-for-bit against zclassicd. */\n"
         "    UTXO_ROOT_LADDER_SOURCE_CHECKPOINT = 2,\n"
         "};\n"

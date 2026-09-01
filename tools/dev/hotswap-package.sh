@@ -10,7 +10,7 @@
 #   tools/dev/hotswap-package.sh --all                   # write a manifest for every .so there
 #
 # ── THE MANIFEST IS A RECORD, NOT AN AUTHORIZATION ─────────────────────────
-# Nothing in lib/hotswap reads this file. hotswap_activate() decides whether a
+# Nothing in engine/modules/hotswap reads this file. hotswap_activate() decides whether a
 # module mounts by dlsym'ing the REAL `zcl_hotswap_module` struct out of the
 # .so itself and running hotswap_module_admit() against it — the sidecar
 # manifest never enters that path and never will as shipped here. It exists so
@@ -29,7 +29,7 @@
 #
 # ── WHERE source_tu / leaves COME FROM ─────────────────────────────────────
 # Both are read by driving tools/dev/hotswap_verify_so (built the same way
-# tools/dev/hotswap-verify.sh builds it: lib/hotswap/src/hotswap_activate.c +
+# tools/dev/hotswap-verify.sh builds it: engine/modules/hotswap/src/hotswap_activate.c +
 # hotswap_islands.c, the real hotswap_verify_module_so()) and parsing its
 # `source_tu   :` and `  leaf[ N]  :` lines. That is deliberate: it is the
 # SAME dlopen + dlsym + hotswap_module_admit() code path the resident loader
@@ -85,7 +85,7 @@
 #   apart from the real pin. Anchoring to the symbol's own address rules that
 #   out by construction.
 #
-#   abi_version: `struct zcl_hotswap_module` (lib/hotswap/include/hotswap/
+#   abi_version: `struct zcl_hotswap_module` (engine/modules/hotswap/include/hotswap/
 #   hotswap_module.h) declares `uint32_t abi_version` as its FIRST member.
 #   C guarantees a struct's first named member starts at offset 0 with no
 #   leading padding — that is the one struct-layout fact that does not depend
@@ -106,8 +106,8 @@
 # ── SHA3-256 ────────────────────────────────────────────────────────────────
 # Computed IN-TREE, by the same hotswap_verify_so binary this script already
 # builds and drives: `hotswap_verify_so --sha3 <file>` opens the file, hashes
-# the descriptor with hotswap_artifact_sha3_fd() (lib/hotswap/src/
-# hotswap_artifact_digest.c over the FIPS-202 SHA3-256 in lib/sha3), and
+# the descriptor with hotswap_artifact_sha3_fd() (engine/modules/hotswap/src/
+# hotswap_artifact_digest.c over the FIPS-202 SHA3-256 in platform/modules/sha3), and
 # prints one `artifact_sha3 : <64 hex>` line. No dlopen, no admission claim —
 # just the bytes.
 #
@@ -331,13 +331,13 @@ ensure_verifier_built() {
     if ! $cc $cflags -ffunction-sections -fdata-sections \
             -o "$VERIFIER_BIN" \
             tools/dev/hotswap_verify_so.c \
-            lib/hotswap/src/hotswap_activate.c \
-            lib/hotswap/src/hotswap_islands.c \
-            lib/base/src/safe_alloc.c \
-            lib/hotswap/src/hotswap_sealed_image.c \
-            lib/hotswap/src/hotswap_elf_probe.c \
-            lib/hotswap/src/hotswap_artifact_digest.c \
-            lib/sha3/src/sha3.c \
+            engine/modules/hotswap/src/hotswap_activate.c \
+            engine/modules/hotswap/src/hotswap_islands.c \
+            platform/modules/base/src/safe_alloc.c \
+            engine/modules/hotswap/src/hotswap_sealed_image.c \
+            engine/modules/hotswap/src/hotswap_elf_probe.c \
+            engine/modules/hotswap/src/hotswap_artifact_digest.c \
+            platform/modules/sha3/src/sha3.c \
             -Wl,--gc-sections -ldl 2>"$SCRATCH/verifier_build.log"; then
         sed 's/^/    /' "$SCRATCH/verifier_build.log" >&2
         fatal "verifier build failed"

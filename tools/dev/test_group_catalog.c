@@ -17,7 +17,7 @@ static const char *const g_test_groups[] = {
 };
 
 static const char *const g_semantic_leaf_sources[] = {
-#define ZCL_TEST_SEMANTIC_LEAF(name) "lib/test/src/test_" #name ".c",
+#define ZCL_TEST_SEMANTIC_LEAF(name) "tests/harness/src/test_" #name ".c",
 #include "test_semantic_leaves.def"
 #undef ZCL_TEST_SEMANTIC_LEAF
     NULL, /* Zero declared leaves is the safe, valid state. */

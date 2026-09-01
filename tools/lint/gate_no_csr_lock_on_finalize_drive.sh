@@ -15,18 +15,18 @@
 # csr->lock; an RPC healthcheck holding csr->lock wanting coins_kv).
 #
 # The safe split is note+drain: the drive only NOTES the published tip via a
-# LEAF mutex (chain_evidence_note_finalized_tip, app/services/src/
-# chain_evidence_live_advance.c:80, called from app/jobs/src/
+# LEAF mutex (chain_evidence_note_finalized_tip, engine/services/src/
+# chain_evidence_live_advance.c:80, called from engine/jobs/src/
 # tip_finalize_post_step.c:53). A SEPARATE thread DRAINS in the correct
 # csr->lock-then-coins_kv order (node_health_service.c:476 ->
 # chain_evidence_drain_pending_tip). This gate freezes that boundary.
 #
 # WHAT IS SCANNED (the drive callgraph ONLY — comments stripped)
 # --------------------------------------------------------------
-#   A) ALL of app/jobs/src/tip_finalize_post_step.c — entirely the drive
+#   A) ALL of engine/jobs/src/tip_finalize_post_step.c — entirely the drive
 #      post-finalize side-effect path.
 #   B) ONLY the chain_evidence_note_finalized_tip() function body in
-#      app/services/src/chain_evidence_live_advance.c. The OTHER functions in
+#      engine/services/src/chain_evidence_live_advance.c. The OTHER functions in
 #      that file ARE the drain path and legitimately take csr->lock / call the
 #      record + snapshot helpers — they must NOT be scanned, so we extract just
 #      the note function (the single drive-side entry; its only caller is the
@@ -64,8 +64,8 @@ else
 fi
 cd "$ROOT" || { echo "gate_no_csr_lock_on_finalize_drive: bad root '$ROOT'" >&2; exit 2; }
 
-DRIVE_FILE="app/jobs/src/tip_finalize_post_step.c"
-NOTE_FILE="app/services/src/chain_evidence_live_advance.c"
+DRIVE_FILE="engine/jobs/src/tip_finalize_post_step.c"
+NOTE_FILE="engine/services/src/chain_evidence_live_advance.c"
 NOTE_FN="chain_evidence_note_finalized_tip"
 
 for f in "$DRIVE_FILE" "$NOTE_FILE"; do

@@ -1,5 +1,5 @@
-lib/test/src/test_zcode_package_registry.c:30:10: fatal error: ../../../config/zcode_package_registry.def: No such file or directory
-   30 | #include "../../../config/zcode_package_registry.def"
+tests/harness/src/test_zcode_package_registry.c:30:10: fatal error: ../../../engine/composition/zcode_package_registry.def: No such file or directory
+   30 | #include "../../../engine/composition/zcode_package_registry.def"
       |          ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 compilation terminated.
 exit_code=1

@@ -4,4 +4,4 @@ upstream=https://github.com/nayuki/QR-Code-generator
 revision=720f62bddb7226106071d4728c292cb1df519ceb
 license=MIT
 files=qrcodegen.c,qrcodegen.h,LICENSE
-integration=dependency-free QR backend behind lib/encoding/qr
+integration=dependency-free QR backend behind platform/modules/encoding/qr

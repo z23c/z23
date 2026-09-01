@@ -33,7 +33,7 @@ NODE_BIN="${ZCL_FAST_NODE_BIN:-build/bin/z23}"
 DEV_NODE_BIN="${ZCL_FAST_DEV_NODE_BIN:-build/bin/z23-dev}"
 FAST_JOBS="${ZCL_FAST_JOBS:-}"
 FAST_TEST_JOBS="${ZCL_FAST_TEST_JOBS:-}"
-IMPACT_RULES_FILE="${ZCL_FAST_IMPACT_RULES_FILE:-app/controllers/include/controllers/agent_impact_rules.def}"
+IMPACT_RULES_FILE="${ZCL_FAST_IMPACT_RULES_FILE:-cognition/controllers/include/controllers/agent_impact_rules.def}"
 FROZEN_SOURCE_RECORD="${ZCL_FAST_BUILD_SOURCE_RECORD:-}"
 FOCUSED_RECEIPT_RAN=0
 FOCUSED_RECEIPT_REUSED=0
@@ -277,7 +277,7 @@ add_unmapped_code_change() {
 # the actual push is clean. Treat it as never a real source change everywhere
 # the changed-file set feeds a classification decision. Kept in sync with
 # zcl_devloop_path_is_relevant() in tools/dev/devloop_plan.c (real, tracked
-# fixture sources live under lib/test/fixtures/ and have no leading '_').
+# fixture sources live under tests/harness/fixtures/ and have no leading '_').
 is_transient_lint_fixture() {
     case "$1" in
         */_*fixture*.c|_*fixture*.c)
@@ -296,7 +296,7 @@ is_code_like_change() {
         *.c|*.h|Makefile|*.mk|tools/*.sh|tools/githooks/*)
             return 0
             ;;
-        app/*|application/*|adapters/*|config/*|domain/*|lib/*|ports/*)
+        app/*|engine/application/*|platform/adapters/*|config/*|domain/*|lib/*|platform/ports/*)
             return 0
             ;;
         *)
@@ -308,7 +308,7 @@ is_code_like_change() {
 is_graph_wide_compile_change() {
     local file="$1"
     case "$file" in
-        *.h|Makefile|*.mk|app/views/templates/*|app/views/css/*|tools/gen_templates.c|vendor/include/*)
+        *.h|Makefile|*.mk|contexts/explorer/views/templates/*|contexts/explorer/views/css/*|tools/gen_templates.c|vendor/include/*)
             return 0
             ;;
         *)
@@ -321,11 +321,11 @@ is_node_c_source() {
     local file="$1"
     is_transient_lint_fixture "$file" && return 1
     case "$file" in
-        src/main.c|app/*/src/*.c|config/src/*.c|\
-        lib/*/src/*.c|domain/*/src/*.c|application/*/src/*.c|\
-        adapters/outbound/persistence/src/*.c)
+        engine/entry/main.c|app/*/src/*.c|engine/composition/src/*.c|\
+        lib/*/src/*.c|domain/*/src/*.c|engine/application/*/src/*.c|\
+        platform/adapters/outbound/persistence/src/*.c)
             case "$file" in
-                lib/test/*|tools/sim/*)
+                tests/harness/include/test/*|tools/sim/*)
                     return 1
                     ;;
                 *)
@@ -532,17 +532,17 @@ cache_manifest() {
         tools/scripts/build_vendor.sh \
         tools/scripts/background_quality_lane.sh \
         tools/scripts/check_agentdeployguard_cli_exit.sh \
-        deploy/examples/zclassic23-remote-test-node.service \
-        deploy/examples/zclassic23-remote-test.env.example \
-        deploy/examples/zclassic23-self-update.service \
-        deploy/examples/zclassic23-self-update.timer \
-        deploy/zclassic23-fuzz.service deploy/zclassic23-fuzz.timer \
-        deploy/zclassic23-coverage.service deploy/zclassic23-coverage.timer \
-        deploy/zclassic23-test-suite.service deploy/zclassic23-test-suite.timer \
-        lib/test/src/test_make_lint_gates.c docs/work/fast-path.md \
-        docs/AGENT_API.md app/controllers/src/agent_controller.c \
-        app/controllers/src/agent_lane_runtime.c \
-        app/controllers/src/agent_runtime_controller.c; do
+        platform/deploy/examples/zclassic23-remote-test-node.service \
+        platform/deploy/examples/zclassic23-remote-test.env.example \
+        platform/deploy/examples/zclassic23-self-update.service \
+        platform/deploy/examples/zclassic23-self-update.timer \
+        platform/deploy/zclassic23-fuzz.service platform/deploy/zclassic23-fuzz.timer \
+        platform/deploy/zclassic23-coverage.service platform/deploy/zclassic23-coverage.timer \
+        platform/deploy/zclassic23-test-suite.service platform/deploy/zclassic23-test-suite.timer \
+        tests/harness/src/test_make_lint_gates.c docs/work/fast-path.md \
+        docs/AGENT_API.md cognition/controllers/src/agent_controller.c \
+        cognition/controllers/src/agent_lane_runtime.c \
+        cognition/controllers/src/agent_runtime_controller.c; do
         cache_manifest_file "$file" "$file"
     done
 
@@ -571,7 +571,7 @@ cache_authority_selftest() {
     cd "$ROOT"
     CACHE_ROOT="$ROOT/.cache/zcl-agent-fast-ci"
     NODE_BIN="build/bin/z23"
-    IMPACT_RULES_FILE="app/controllers/include/controllers/agent_impact_rules.def"
+    IMPACT_RULES_FILE="cognition/controllers/include/controllers/agent_impact_rules.def"
     FAST_CC=cc
     CACHE_TOOL=none
     FAST_JOBS=1

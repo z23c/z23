@@ -29,10 +29,10 @@ live/canonical datadirs are rejected rather than guessed.
 
 Every table below is emitted by
 [`tools/gen_api_reference.c`](../tools/gen_api_reference.c) directly from the
-declarative `.def` files under [`config/commands/`](../config/commands/) — the
-same files [`config/src/command_catalog.c`](../config/src/command_catalog.c)
+declarative `.def` files under [`engine/composition/commands/`](../engine/composition/commands/) — the
+same files [`engine/composition/src/command_catalog.c`](../engine/composition/src/command_catalog.c)
 expands into the immutable `g_catalog_commands[]` table
-([`lib/kernel/src/command_registry.c`](../lib/kernel/src/command_registry.c)).
+([`engine/modules/kernel/src/command_registry.c`](../engine/modules/kernel/src/command_registry.c)).
 The generator is a second consumer of the identical X-macro grammar, so the C
 preprocessor — not a hand-rolled parser — reads the catalog. A leaf added,
 promoted, or re-scheduled in a `.def` file shows up here the moment the page is
@@ -45,7 +45,7 @@ verbatim; everything derived from the catalog replaces a
 `<!-- ZCL-GEN:… -->` marker.
 
 ```bash
-make docs-api-reference      # regenerate this page from config/commands/*.def
+make docs-api-reference      # regenerate this page from engine/composition/commands/*.def
 make lint                    # check-api-reference-generated fails on any drift
 ```
 
@@ -97,11 +97,11 @@ proves via `nm` that the release binary links none of the dev executors, so the
 distinction is structural, not a convention.
 
 **Never RPC/REST-bound**: everything under `dev.*` is checkout-local by design
-(see [`config/commands/README.md`](../config/commands/README.md): "No `lib/`
+(see [`engine/composition/commands/README.md`](../engine/composition/commands/README.md): "No `lib/`
 source may include App, controller, service, or development handler headers").
 Almost every `ready` leaf under `core.*` and `ops.*` dispatches through
 `zcl_native_bridge_command` — a direct call into either a native handler body
-(`app/controllers/src/*_native_handlers.c`) or the backing JSON-RPC method,
+(`engine/controllers/src/*_native_handlers.c`) or the backing JSON-RPC method,
 through the command bridge.
 
 ## Roots
@@ -152,7 +152,7 @@ internal contract failure.
 
 | Invariant | Test |
 |---|---|
-| This page matches `config/commands/*.def` byte for byte | `tools/lint/check_api_reference_generated.sh` (lint gate `check-api-reference-generated`) |
+| This page matches `engine/composition/commands/*.def` byte for byte | `tools/lint/check_api_reference_generated.sh` (lint gate `check-api-reference-generated`) |
 | Catalog well-formed, every leaf has schemas/example, ready⇒handler, planned⇒no handler | `test_command_registry_catalog.c::test_catalog_wellformed`, `test_ready_leaves_bound`, `test_planned_fail_closed` |
 | Root menu stays in budget; branch menus stay shallow | `test_command_registry_catalog.c::test_root_menu_budget`, `test_branch_menus_shallow` |
 | **Every** branch menu lists only its own immediate children, fixed 5-field shape | `test_native_api_contract.c::test_every_branch_menu_lists_only_own_children` |

@@ -20,7 +20,7 @@
 #
 # Fixture preference (product-aligned, never live datadir surgery):
 #   1. consensus-state-bundle-<H>.sqlite  (complete-state; zero-flag autodetect
-#      after deploy/zclassic23-bundle-bootstrap.sh stages it into
+#      after platform/deploy/zclassic23-bundle-bootstrap.sh stages it into
 #      <datadir>/bundles/)
 #   2. utxo-seed-*.snapshot + block_index.bin  (legacy assisted starter pack,
 #      -load-snapshot-at-own-height)
@@ -68,7 +68,7 @@ BUNDLE_SUCCESS_PATTERN='-load-snapshot-at-own-height: coin set RE-SEEDED'
 CONSENSUS_BUNDLE_SUCCESS_PATTERN='autodetected consensus bundle installed'
 CONSENSUS_BUNDLE_REQUEST_PATTERN='install-on-next-boot request installed'
 CONSENSUS_BUNDLE_MARKER='consensus-bundle-installed.marker'
-BUNDLE_BOOTSTRAP="$REPO_ROOT/deploy/zclassic23-bundle-bootstrap.sh"
+BUNDLE_BOOTSTRAP="$REPO_ROOT/platform/deploy/zclassic23-bundle-bootstrap.sh"
 MAX_BOOTS="${ZCL_C3_MAX_BOOTS:-12}"
 ARTIFACT_ROOT="${ZCL_C3_ARTIFACT_ROOT:-$REPO_ROOT/build/c3-probe}"
 RUN_ID="${ZCL_C3_RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)-$$}"

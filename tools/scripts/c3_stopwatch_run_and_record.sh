@@ -40,7 +40,7 @@
 #   line carried neither the reason nor the precheck, so no ledger-only
 #   consumer could tell a week-dead fixture peer from a typo in a flag. Both
 #   are recorded now, plus the class that reason maps to (the shared table in
-#   app/services/include/services/stopwatch_skip_classes.def) and the trailing
+#   engine/services/include/services/stopwatch_skip_classes.def) and the trailing
 #   streaks. The streak fields are a CONVENIENCE for readers: every consumer
 #   that acts on them recomputes them from the verdict values rather than
 #   trusting the recorded number, so a forged field cannot silence anything.

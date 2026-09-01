@@ -7,7 +7,7 @@
 # test-rel ...); it does not stop the watcher's `make ff` (dev profile,
 # test_parallel --only=...) from running at the same wall-clock instant as a
 # human's `make test-parallel` (test-rel profile, full suite) in the SAME
-# checkout. Both drive lib/test/src/test_make_lint_gates.c and
+# checkout. Both drive tests/harness/src/test_make_lint_gates.c and
 # test_consensus_state_snapshot_install through fixed, non-PID-namespaced
 # fixture paths, so two concurrent test_parallel processes racing those
 # paths is a real false-failure source, not just a build-object collision.

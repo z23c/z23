@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # Gate: sysinit boot-boundary ordering (HARD).
 #
-# The declarative boot-stage boundary records live in config/src/boot.c
+# The declarative boot-stage boundary records live in engine/composition/src/boot.c
 # (k_boot_sysinit_records[]). sysinit_run_stage() runs each stage's records in
 # the deterministic (stage, order, name) sort order — the SAME order this gate
 # reconstructs. This gate pins that sorted order in a golden file so that
 # adding, removing, or reordering a boundary record is a conscious, reviewed
 # change (update the golden) rather than a silent shift in what runs when.
 #
-# Mirrors the sysinit_cmp() total order (lib/util/src/sysinit.c): stage number
+# Mirrors the sysinit_cmp() total order (platform/modules/util/src/sysinit.c): stage number
 # ascending, then `order` ascending, then `name` strcmp. The stage-name→number
 # map below mirrors enum boot_stage (util/boot_phase.h) — keep them in lockstep.
 #
@@ -20,7 +20,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 cd "$ROOT"
 
-SRC="config/src/boot.c"
+SRC="engine/composition/src/boot.c"
 GOLDEN="$SCRIPT_DIR/sysinit_ordering_golden.txt"
 
 [[ -f "$SRC" ]] || { echo "check_sysinit_ordering: FATAL — missing $SRC" >&2; exit 2; }

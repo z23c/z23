@@ -14,7 +14,7 @@
 #       zclassicd chainstate via the terminal boot flag
 #         zclassic23 -datadir=COPY -import-complete-shielded=ZCLASSICD-DATADIR
 #       This is the NAMED CANONICAL CURE the live node's own remedy machinery
-#       points operators at (app/controllers/src/shielded_gap_remedy_controller.c
+#       points operators at (engine/controllers/src/shielded_gap_remedy_controller.c
 #       SGR_REMEDY_COPY_PROVE_STEP hard-codes this script + these flags; keep
 #       the bare `--src=... --chainstate-src=...` invocation working). It is
 #       self_folded=false BY DESIGN (release_assisted trust, not sovereign),
@@ -110,7 +110,7 @@
 #   - --copy-dir (or the generated default) MUST contain the literal
 #     "/.zclassic-c23-COPY-" marker and MUST NOT equal a known live/protected
 #     datadir path — refuses otherwise (mirrors
-#     app/controllers/src/agent_copy_prove_controller.c's cp_path_safety_ok()).
+#     cognition/controllers/src/agent_copy_prove_controller.c's cp_path_safety_ok()).
 #   - --copy-dir must not already exist (never silently overwrites/reuses).
 #   - the live `~/.zclassic/chainstate` LevelDB is never opened directly (import
 #     mode): the importer takes its own FNV-stable point-in-time snapshot
@@ -278,7 +278,7 @@ if [ -z "$COPY_DIR" ]; then
 fi
 
 # Safety invariant: never a live datadir, always the throwaway marker. Same
-# rule as app/controllers/src/agent_copy_prove_controller.c cp_path_safety_ok().
+# rule as cognition/controllers/src/agent_copy_prove_controller.c cp_path_safety_ok().
 case "$COPY_DIR" in
     *"/.zclassic-c23-COPY-"*) : ;;
     *) echo "import-copy-prove: REFUSED — --copy-dir must contain the '/.zclassic-c23-COPY-' marker: $COPY_DIR" >&2
@@ -507,7 +507,7 @@ if [ "$MODE" = "import" ]; then
             echo "           be parsed from $IMPORT_LOG, and no --expect-climb-past=H override"
             echo "           was given — refusing to gate blind. Pass --expect-climb-past=H"
             echo "           explicitly, or check that this build's importer still logs"
-            echo "           boundary= (app/services/src/shielded_history_import_service.c)."
+            echo "           boundary= (engine/services/src/shielded_history_import_service.c)."
             echo "======================================================================"
             exit 1
         fi
@@ -551,7 +551,7 @@ fi
 
 # ── step 3b: clear any stale auto_reindex_request ──────────────────────
 # The copy was cp -a'd from a datadir that may have armed a self-rebuild
-# request (config/src/boot_crashonly.c, storage/boot_auto_reindex.h); the
+# request (engine/composition/src/boot_crashonly.c, storage/boot_auto_reindex.h); the
 # terminal argv paths above return before the normal boot sequence runs, so
 # they never consume it — left in place, the very next normal boot (phase 2)
 # would silently detour into -reindex-chainstate instead of exercising the

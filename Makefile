@@ -100,7 +100,7 @@ ZCL_LTO_FLAG = $(if $(ZCL_CROSS_TRIPLE),-flto=thin,-flto=auto)
 # libregex/libtre/libintl/libiconv are MSYS2 packages, not part of the
 # mingw-w64 target sysroot a cross toolchain installs, and nothing this
 # repository wrote needs them: the node carries its own ERE matcher precisely
-# because <regex.h> does not exist on Windows (lib/util/include/util/
+# because <regex.h> does not exist on Windows (platform/modules/util/include/util/
 # ere_match.h). They stay on the native MSYS2 link, where the real-Tor build
 # reaches them and where they have always been; a cross link asks for the
 # Windows system libraries only. If a real cross Tor ever needs one, the link
@@ -123,7 +123,7 @@ ZCL_PLATFORM_CPPFLAGS = -mmacosx-version-min=$(ZCL_MACOS_DEPLOYMENT_TARGET) \
 	-Dst_atim=st_atimespec -Dst_mtim=st_mtimespec \
 	-Dst_ctim=st_ctimespec -fblocks
 ZCL_LTO_FLAG = -flto=thin
-# Apple's linker has no weak-undefined default: lib/net/tor_integration.c
+# Apple's linker has no weak-undefined default: core/modules/net/tor_integration.c
 # declares the vendored Tor and dynhost entry points ZCL_WEAK_IMPORT and tests
 # each against NULL at runtime, and on Darwin that only links if the linker is
 # told each name is allowed to stay undefined. That permission is STUB
@@ -218,7 +218,7 @@ GUI_APPS := $(sort $(GUI_APPS))
 ZCL_GUI_APP_GOALS := $(foreach a,$(GUI_APPS),$(a) $(a)-selftest $(a)-clean \
 	$(a)-app build/bin/$(a))
 # `new-app` is the front door of that journey and only copies + rewrites files
-# under packages/ and config/, so it belongs here too: measured on this host,
+# under contexts/commons/packages/ and config/, so it belongs here too: measured on this host,
 # the authoritative parse it would otherwise pay turned a 0.5 s scaffold into a
 # ~17 s one. Its selftest runs in a throwaway repo and needs even less.
 ZCL_HOTSWAP_LOOP_GOALS := hotswap-try hotswap-apply hotswap \
@@ -339,8 +339,8 @@ endif
 # parse would correctly trip post-link verification. Remaking this included
 # marker forces a parse restart whenever either generated header is missing or
 # stale, so the authoritative capture always observes the bytes actually used.
-VIEW_GEN_HEADERS_EARLY := app/views/include/views/wallet_templates_gen.h \
-	app/views/include/views/site_css.h
+VIEW_GEN_HEADERS_EARLY := contexts/wallet/views/include/views/wallet_templates_gen.h \
+	contexts/explorer/views/include/views/site_css.h
 VIEW_BOOTSTRAP_MK := build/identity/view-inputs-ready.mk
 ifneq ($(ZCL_STANDALONE_CLEAN),1)
 ifeq ($(strip $(MAKE_RESTARTS)),)
@@ -507,13 +507,13 @@ windows-headless-run: $(WINDOWS_HEADLESS_RUN_BIN)
 # no longer a single self-contained translation unit: it needs their header
 # and their definition. Left out, this rule fails on a real Windows host at
 # the #include, and nothing on a POSIX host would notice, because there is no
-# rule here to run. lib/platform/tests/windows_acceptance.mk carries the same
+# rule here to run. platform/modules/platform/tests/windows_acceptance.mk carries the same
 # two inputs so a Linux box cross-links the same program.
 $(WINDOWS_HEADLESS_RUN_BIN): tools/dev/windows_headless_run.c \
-		lib/base/src/safe_alloc.c
+		platform/modules/base/src/safe_alloc.c
 	@mkdir -p $(dir $@)
 	$(CC) -std=c23 -Wall -Wextra -Werror -pedantic \
-		-Ilib/base/include \
+		-Iplatform/modules/base/include \
 		-D_WIN32_WINNT=0x0A00 -DWIN32_LEAN_AND_MEAN -municode $^ -o $@
 
 windows-headless-run-selftest: $(WINDOWS_HEADLESS_RUN_BIN)
@@ -638,68 +638,93 @@ CHAOS_SWEEP_SCENARIO ?= tools/sim/scenarios/seeded_peer_churn.scenario
 # auto-vendor prerequisite machinery still supplies missing pinned archives.
 .DEFAULT_GOAL := z23
 
-# App layer (MVC)
+# Product rooms and architectural shapes.  A source path now states both its
+# owning authority and its role: contexts/wallet/services/... is wallet service
+# code; engine/jobs/... is generic orchestration; cognition/... owns the
+# software-understanding loop.  Keep this list small and derived from the tree.
+PRODUCT_CONTEXTS = wallet explorer naming messaging market commons
+PRODUCT_CONTEXT_DIRS = $(addprefix contexts/,$(PRODUCT_CONTEXTS))
+APP_AUTHORITIES = engine cognition $(PRODUCT_CONTEXT_DIRS)
 APP_DIRS = models controllers views services supervisors conditions jobs
-APP_INCLUDES = $(foreach d,$(APP_DIRS),-Iapp/$(d)/include)
+APP_INCLUDES = $(foreach a,$(APP_AUTHORITIES),\
+	$(foreach d,$(APP_DIRS),\
+		$(if $(wildcard $(a)/$(d)/include),-I$(a)/$(d)/include) \
+		$(if $(wildcard $(a)/$(d)/src),-I$(a)/$(d)/src)))
 # Lint-gate tests intentionally plant short-lived fixture files inside the
 # production scan tree so the lint scopes stay honest. Those files must remain
 # visible to lint, but concurrent builds must never compile them.
 zcl_ephemeral_sources = $(foreach s,$(1),$(if $(findstring /_,$(s)),$(s)))
 zcl_filter_ephemeral_sources = $(filter-out $(call zcl_ephemeral_sources,$(1)),$(1))
 APP_SRCS = $(call zcl_filter_ephemeral_sources,\
-	$(foreach d,$(APP_DIRS),$(wildcard app/$(d)/src/*.c)))
+	$(foreach a,$(APP_AUTHORITIES),\
+		$(foreach d,$(APP_DIRS),$(wildcard $(a)/$(d)/src/*.c))))
 
-# Config layer
-CONFIG_INCLUDES = -Iconfig/include
+# The one-writer chain-state authority is physically isolated.  Conditions,
+# jobs, and services may support it, but every reducer-owned translation unit
+# lives beneath this one room and is admitted explicitly here.
+REDUCER_DIRS = conditions jobs services
+REDUCER_INCLUDES = $(foreach d,$(REDUCER_DIRS),\
+	-Iengine/reducer/$(d)/include -Iengine/reducer/$(d)/src)
+REDUCER_SRCS = $(call zcl_filter_ephemeral_sources,\
+	$(foreach d,$(REDUCER_DIRS),$(wildcard engine/reducer/$(d)/src/*.c)))
+
+# Engine composition owns boot wiring and the declarative command registry.
+CONFIG_INCLUDES = -Iengine/composition/include
 CONFIG_SRCS = $(call zcl_filter_ephemeral_sources,\
-	$(wildcard config/src/*.c))
+	$(wildcard engine/composition/src/*.c))
 
 # Library layer
-# DERIVED, never restated. config/lib_module_order.def is the one declaration
-# of which lib/ modules exist; this reads its set. Sorted rather than kept in
+# DERIVED, never restated. engine/composition/lib_module_order.def is the one declaration
+# of which reusable modules exist; this reads its set. Sorted rather than kept in
 # the file's rank order because rank governs the LINK graph, not the compile
 # order, and a canonical sort makes the source list stable no matter how the
 # ranks are later rearranged. `sort` also dedupes, so a doubled row there
 # cannot double a wildcard here.
-LIB_MODULE_ORDER_DEF = config/lib_module_order.def
+LIB_MODULE_ORDER_DEF = engine/composition/lib_module_order.def
 LIB_MODULES := $(sort $(shell sed -n 's/^[[:space:]]*LIB_MODULE("\([A-Za-z0-9_]*\)").*/\1/p' \
 	$(LIB_MODULE_ORDER_DEF) 2>/dev/null))
 ifeq ($(strip $(LIB_MODULES)),)
-$(error could not derive LIB_MODULES from $(LIB_MODULE_ORDER_DEF) — every lib/ \
+$(error could not derive LIB_MODULES from $(LIB_MODULE_ORDER_DEF) — every module \
 source glob and -I flag comes from that file, so an empty parse would silently \
 build nothing rather than fail. Check the file exists and its LIB_MODULE rows \
 are intact)
 endif
-LIB_INCLUDES = $(foreach m,$(LIB_MODULES),-Ilib/$(m)/include)
+LIB_MODULE_DIRS := $(sort $(wildcard core/modules/* engine/modules/* \
+	cognition/modules/* platform/modules/* contexts/*/modules/*))
+LIB_TREE_MODULES := $(sort $(notdir $(LIB_MODULE_DIRS)))
+ifneq ($(LIB_MODULES),$(LIB_TREE_MODULES))
+$(error reusable-module tree does not match $(LIB_MODULE_ORDER_DEF); \
+declared='$(LIB_MODULES)' tree='$(LIB_TREE_MODULES)')
+endif
+LIB_INCLUDES = $(foreach d,$(LIB_MODULE_DIRS),-I$(d)/include)
 LIB_SRCS = $(call zcl_filter_ephemeral_sources,\
-	$(foreach m,$(LIB_MODULES),$(wildcard lib/$(m)/src/*.c)))
+	$(foreach d,$(LIB_MODULE_DIRS),$(wildcard $(d)/src/*.c)))
 ifneq ($(filter Linux,$(ZCL_HOST_OS)),)
-LIB_SRCS := $(filter-out lib/platform/src/os_sandbox_stub.c \
-	lib/util/src/self_backtrace_stub.c \
-	lib/vcs/src/vcs_devloop_windows.c,$(LIB_SRCS))
+LIB_SRCS := $(filter-out platform/modules/platform/src/os_sandbox_stub.c \
+	platform/modules/util/src/self_backtrace_stub.c \
+	contexts/commons/modules/vcs/src/vcs_devloop_windows.c,$(LIB_SRCS))
 else ifeq ($(ZCL_HOST_WINDOWS),1)
-LIB_SRCS := $(filter-out lib/platform/src/os_sandbox_linux.c \
-	lib/platform/src/os_sandbox_terminal_worker.c \
-	lib/util/src/self_backtrace_stub.c \
-	lib/vcs/src/vcs_devloop.c,$(LIB_SRCS))
+LIB_SRCS := $(filter-out platform/modules/platform/src/os_sandbox_linux.c \
+	platform/modules/platform/src/os_sandbox_terminal_worker.c \
+	platform/modules/util/src/self_backtrace_stub.c \
+	contexts/commons/modules/vcs/src/vcs_devloop.c,$(LIB_SRCS))
 else
-LIB_SRCS := $(filter-out lib/platform/src/os_sandbox_linux.c \
-	lib/platform/src/os_sandbox_terminal_worker.c \
-	lib/util/src/self_backtrace.c \
-	lib/vcs/src/vcs_devloop_windows.c,$(LIB_SRCS))
+LIB_SRCS := $(filter-out platform/modules/platform/src/os_sandbox_linux.c \
+	platform/modules/platform/src/os_sandbox_terminal_worker.c \
+	platform/modules/util/src/self_backtrace.c \
+	contexts/commons/modules/vcs/src/vcs_devloop_windows.c,$(LIB_SRCS))
 endif
 
-# Ports layer (Clean Architecture / Hexagonal interface headers).
-# Headers only — adapters that implement these interfaces live elsewhere.
-# See ports/include/ports/README.md for the convention.
-PORTS_INCLUDES = -Iports/include
+# Platform ports say what the product needs. Platform adapters provide those
+# contracts without leaking operating-system or persistence choices inward.
+# See platform/ports/include/ports/README.md for the convention.
+PORTS_INCLUDES = -Iplatform/ports/include
 
-# Domain layer (pure, framework-free, no I/O).
-# Bounded contexts under domain/<context>/ each expose include/domain/<context>/.
-DOMAIN_CONTEXTS = wallet encoding
-DOMAIN_INCLUDES = $(foreach c,$(DOMAIN_CONTEXTS),-Idomain/$(c)/include)
+# Pure, framework-free domains remain beside their owning authority.
+DOMAIN_DIRS = contexts/wallet/domain platform/domain/encoding
+DOMAIN_INCLUDES = $(foreach d,$(DOMAIN_DIRS),-I$(d)/include)
 DOMAIN_SRCS = $(call zcl_filter_ephemeral_sources,\
-	$(foreach c,$(DOMAIN_CONTEXTS),$(wildcard domain/$(c)/src/*.c)))
+	$(foreach d,$(DOMAIN_DIRS),$(wildcard $(d)/src/*.c)))
 
 # Sealed consensus core (Wave 1.1 split). Bounded contexts under core/<context>/
 # hold the consensus predicates + static parameter tables. Include TOKENS are
@@ -707,8 +732,8 @@ DOMAIN_SRCS = $(call zcl_filter_ephemeral_sources,\
 # token via -Icore/consensus/include; core/params keeps the "consensus/" token
 # via -Icore/params/include; core/math keeps the "core/" token via
 # -Icore/math/include over core/math/include/core/*.h — absorbing the pure
-# lib/core primitives resolves the core/ namespace collision, the reduced
-# lib/core keeps only the dirty leaves amount/random/utiltime; core/chainparams
+# core/modules/core primitives resolves the core/ namespace collision, the reduced
+# core/modules/core keeps only the dirty leaves amount/random/utiltime; core/chainparams
 # keeps the "chain/" token via -Icore/chainparams/include over
 # core/chainparams/include/chain/*.h — the pure params/verify subset
 # chainparams/chainparamsbase/equihash/pow/subsidy/checkpoints, with the
@@ -723,19 +748,19 @@ CORE_SRCS = $(call zcl_filter_ephemeral_sources,\
 	$(foreach c,$(CORE_CONTEXTS),$(wildcard core/$(c)/src/*.c)))
 
 # Application layer (use cases / service objects).
-# May depend on domain/, ports/, primitives, util — never on adapters or I/O.
+# May depend on domain/, platform/ports/, primitives, util — never on adapters or I/O.
 APPLICATION_CONTEXTS = consensus
-APPLICATION_INCLUDES = $(foreach c,$(APPLICATION_CONTEXTS),-Iapplication/$(c)/include)
+APPLICATION_INCLUDES = $(foreach c,$(APPLICATION_CONTEXTS),-Iengine/application/$(c)/include)
 APPLICATION_SRCS = $(call zcl_filter_ephemeral_sources,\
-	$(foreach c,$(APPLICATION_CONTEXTS),$(wildcard application/$(c)/src/*.c)))
+	$(foreach c,$(APPLICATION_CONTEXTS),$(wildcard engine/application/$(c)/src/*.c)))
 
 # Adapters layer (port implementations).
 # Outbound adapters implement the port interfaces. Inbound surfaces currently
 # live in app/controllers and tools/command until a real adapter shape
 # is introduced.
-ADAPTERS_INCLUDES = -Iadapters/outbound/persistence/include
+ADAPTERS_INCLUDES = -Iplatform/adapters/outbound/persistence/include
 ADAPTERS_SRCS = $(call zcl_filter_ephemeral_sources,\
-	$(wildcard adapters/outbound/persistence/src/*.c))
+	$(wildcard platform/adapters/outbound/persistence/src/*.c))
 
 # tools/ header root (the "command/" prefix for the native command adapter,
 # plus any other tools headers).
@@ -751,8 +776,9 @@ TOOLS_INCLUDES = -Itools
 # expand, a reader of `make print-includes` cannot disagree with the build.
 ZCL_ALL_INCLUDES = $(APP_INCLUDES) $(CONFIG_INCLUDES) $(LIB_INCLUDES) \
 	$(CORE_INCLUDES) $(PORTS_INCLUDES) $(DOMAIN_INCLUDES) \
-	$(APPLICATION_INCLUDES) $(ADAPTERS_INCLUDES) $(TOOLS_INCLUDES) \
-	$(DEVLOOP_INCLUDES) -Ilib/test/include -Ivendor/include -Ivendor/x11/include
+	$(APPLICATION_INCLUDES) $(ADAPTERS_INCLUDES) $(REDUCER_INCLUDES) \
+	$(TOOLS_INCLUDES) \
+	$(DEVLOOP_INCLUDES) -Itests/harness/include -Ivendor/include -Ivendor/x11/include
 
 .PHONY: print-includes
 print-includes:
@@ -796,7 +822,7 @@ DEV_ONLY_SRCS = tools/dev/devloop_cli.c tools/dev/devloop_cycle.c \
 	tools/dev/dev_proof_receipt.c $(MUTATION_LIB_SRCS)
 DEVLOOP_SRCS = $(filter-out $(DEV_ONLY_SRCS),$(DEVLOOP_ALL_SRCS))
 
-# The stable public Core -> App ABI is lib/framework/include/zclassic23/app.h,
+# The stable public Core -> App ABI is engine/modules/framework/include/zclassic23/app.h,
 # reached through LIB_INCLUDES. It deliberately exposes no consensus, storage,
 # wallet-key, socket, or boot internals; the header itself states the rule.
 
@@ -808,11 +834,13 @@ COMMAND_SRCS = $(call zcl_filter_ephemeral_sources,\
 # Declarative command rows are C include inputs, but the whole-program release
 # rules below do not emit depfiles.  Keep them as explicit prerequisites so a
 # command-contract-only edit cannot leave build/bin/zclassic23 stale.
-COMMAND_CATALOG_DEFS = $(wildcard config/commands/*.def) \
-	$(wildcard config/commands/*/*.def)
+COMMAND_CATALOG_DEFS = $(wildcard engine/composition/commands/*.def) \
+	$(wildcard engine/composition/commands/*/*.def)
 
-NODE_ENTRY_SRCS = src/main.c src/main_cli_modes.c
-ALL_SRCS = $(APP_SRCS) $(CONFIG_SRCS) $(LIB_SRCS) $(CORE_SRCS) $(DOMAIN_SRCS) $(APPLICATION_SRCS) $(ADAPTERS_SRCS) $(DEVLOOP_SRCS) $(COMMAND_SRCS)
+NODE_ENTRY_SRCS = engine/entry/main.c engine/entry/main_cli_modes.c
+ALL_SRCS = $(APP_SRCS) $(REDUCER_SRCS) $(CONFIG_SRCS) $(LIB_SRCS) \
+	$(CORE_SRCS) $(DOMAIN_SRCS) $(APPLICATION_SRCS) $(ADAPTERS_SRCS) \
+	$(DEVLOOP_SRCS) $(COMMAND_SRCS)
 ALL_OBJS = $(patsubst %.c,$(OBJ_DIR)/%.o,$(ALL_SRCS))
 
 # The DEV binary keeps everything: the release source set plus the dev-only
@@ -968,7 +996,7 @@ ZCL_TU_RANDOM_SEED = $(if $(filter Darwin,$(ZCL_HOST_OS)),,-frandom-seed=$<)
 #
 # The SHIPPED tree is now clean: every ALL_SRCS TU was rebuilt at -O3 with the
 # suppression defeated and reported zero, with a deliberately-planted ignored
-# write() confirming the scan was armed. What remains is lib/test/ alone.
+# write() confirming the scan was armed. What remains is tests/harness/include/test/ alone.
 # Deleting the flag means fixing those, and only then does [[nodiscard]] on
 # struct zcl_result start doing anything — both ride this one diagnostic.
 #
@@ -984,8 +1012,8 @@ ZCL_WARN_UNUSED_RESULT = -Wno-unused-result
 #
 # -Wstringop-overflow hides a memory-safety diagnostic class. Deleting it is
 # likewise a source change, not a flag change: the sites live in
-# lib/script/include/script/script.h, lib/script/include/script/op_return_push.h,
-# app/controllers/src/nodelog_controller.c and one test, plus the glibc
+# core/modules/script/include/script/script.h, core/modules/script/include/script/op_return_push.h,
+# engine/controllers/src/nodelog_controller.c and one test, plus the glibc
 # fortify header they induce. Note the per-TU compile is clean — these only
 # appear in the whole-program LTO build, so `make build-only` alone will
 # report zero and mislead you. Re-derive with the same substitution as above,
@@ -1048,12 +1076,12 @@ endif
 # -flto=auto OUT and keeps -Werror, and there the same flag reports 393
 # warnings, i.e. it would compile the node fine and then break
 # `make test-parallel`. All 393 are the same one line (the zcl_malloc wrapper
-# in lib/base/include/base/safe_alloc.h:49) re-reported once per inlined
+# in platform/modules/base/include/base/safe_alloc.h:49) re-reported once per inlined
 # caller, so they are one inlining artifact, not 393 defects. A flag whose
 # output depends on optimizer visibility is a poor permanent -Werror gate.
 #
 # -Wvla + -Walloca together close stack-exhaustion-by-runtime-length. The six
-# production VLAs (domain/encoding/src/{base58,bech32}.c) were already bounded
+# production VLAs (platform/domain/encoding/src/{base58,bech32}.c) were already bounded
 # by a constant, so they became fixed arrays plus an explicit bounds check;
 # a VLA turns a weakened length check into stack exhaustion, a fixed array
 # turns it into a failed call.
@@ -1078,7 +1106,7 @@ endif
 
 # C23 has two accepted spellings and one language: GCC 14+ takes -std=c23,
 # GCC 13 only the earlier -std=c2x. Every mingw-w64 package on Debian/Ubuntu
-# is GCC 13, and lib/platform/tests/windows_acceptance.mk has compiled the
+# is GCC 13, and platform/modules/platform/tests/windows_acceptance.mk has compiled the
 # Windows acceptance catalog as -std=c2x for exactly that reason since it was
 # written. So ask the selected compiler instead of asserting; the host answers
 # c23, leaving its command line byte-identical. The probe runs only when a
@@ -1092,8 +1120,7 @@ CFLAGS = -std=$(ZCL_C_STD) -g -O3 $(ZCL_ARCH_CFLAGS) $(ZCL_LTO_FLAG) -Wall -Wext
 	$(HARDEN_CFLAGS) \
 	$(ZCL_WARN_EXTRA_GATES) \
 	$(ZCL_WARN_STRINGOP_OVERFLOW) $(ZCL_WARN_UNUSED_RESULT) \
-	$(APP_INCLUDES) $(CONFIG_INCLUDES) $(LIB_INCLUDES) $(CORE_INCLUDES) $(PORTS_INCLUDES) $(DOMAIN_INCLUDES) $(APPLICATION_INCLUDES) $(ADAPTERS_INCLUDES) $(TOOLS_INCLUDES) $(DEVLOOP_INCLUDES) \
-	-Ilib/test/include \
+	$(ZCL_ALL_INCLUDES) \
 	-D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) -DZCL_AR_ENFORCE $(BUILD_IDENTITY_CPPFLAGS) $(ZCL_VENDOR_INC_FLAGS) -Ivendor/x11/include $(GTK_DEF) $(GTK_CFLAGS) \
 	$(WEBKIT_DEF) $(WEBKIT_CFLAGS)
 ZCL_EXPORT_DYNAMIC_FLAG = $(if $(filter Darwin,$(ZCL_HOST_OS)),,$(if $(ZCL_HOST_WINDOWS),,-rdynamic))
@@ -1154,8 +1181,8 @@ override ASAN_COMMON_SAN_FLAGS := -fsanitize=address,undefined -fno-omit-frame-p
 # check-no-adx-overclaim validates the exact allowlist, both object rules, and
 # the compile-epoch bindings below (including a mutation self-test).
 override ASAN_ADX_FRAME_POINTER_EXCEPTION_SRCS := \
-	lib/sapling/src/bn254_accel.c \
-	lib/sapling/src/fr_avx512.c
+	core/modules/sapling/src/bn254_accel.c \
+	core/modules/sapling/src/fr_avx512.c
 override ASAN_ADX_FRAME_POINTER_EXCEPTION_FLAGS := -fomit-frame-pointer
 # dev-asan: the dev node profile (-Og, -g3, -DZCL_DEV_BUILD, non-LTO, dev
 # linker) plus ASan+UBSan. Uniform optimization for every TU — no DEV_HOT
@@ -1449,7 +1476,7 @@ DEV_TSAN_LEASE = $(DEV_TSAN_OBJ_DIR)/.leases/$(BUILD_INVOCATION_ID)
 # The epoch key binds the IDENTITY-FREE flags on purpose. $(BUILD_IDENTITY_CPPFLAGS)
 # carries the source-id hash, so folding it into the key would re-key every
 # object on every edit and reproduce the all-or-nothing miss this rule exists
-# to remove. Only lib/util/src/clientversion.c reads those macros (the sole
+# to remove. Only platform/modules/util/src/clientversion.c reads those macros (the sole
 # reference in the node source set), and it gets them as a per-target flag on
 # the object rule below — exactly what the build-only profile already does.
 NODE_C23_OBJECT_CFLAGS_BASE = \
@@ -1664,20 +1691,20 @@ check-vendor-provenance:
 # closure: twelve project TUs plus pinned RGFW headers, with no node/app objects.
 PRESENTATION_BUILD_DIR := build/presentation
 PRESENTATION_PACKAGE_CFLAGS := -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
-	-Ilib/presentation/include -Ilib/base/include -Ivendor/x11/include
+	-Icontexts/explorer/modules/presentation/include -Iplatform/modules/base/include -Ivendor/x11/include
 PRESENTATION_PACKAGE_SRCS := \
-	lib/presentation/src/presentation.c \
-	lib/presentation/src/presentation_canvas_model.c \
-	lib/presentation/src/presentation_canvas_select.c \
-	lib/presentation/src/presentation_focus.c \
-	lib/presentation/src/presentation_form.c \
-	lib/presentation/src/presentation_form_model.c \
-	lib/presentation/src/presentation_input.c \
-	lib/presentation/src/canvas.c \
-	lib/presentation/src/model.c \
-	lib/presentation/src/model_text.c \
-	lib/presentation/src/model_render.c \
-	lib/presentation/src/zclassic_brand.c
+	contexts/explorer/modules/presentation/src/presentation.c \
+	contexts/explorer/modules/presentation/src/presentation_canvas_model.c \
+	contexts/explorer/modules/presentation/src/presentation_canvas_select.c \
+	contexts/explorer/modules/presentation/src/presentation_focus.c \
+	contexts/explorer/modules/presentation/src/presentation_form.c \
+	contexts/explorer/modules/presentation/src/presentation_form_model.c \
+	contexts/explorer/modules/presentation/src/presentation_input.c \
+	contexts/explorer/modules/presentation/src/canvas.c \
+	contexts/explorer/modules/presentation/src/model.c \
+	contexts/explorer/modules/presentation/src/model_text.c \
+	contexts/explorer/modules/presentation/src/model_render.c \
+	contexts/explorer/modules/presentation/src/zclassic_brand.c
 PRESENTATION_PACKAGE_OBJS := \
 	$(PRESENTATION_BUILD_DIR)/presentation.o \
 	$(PRESENTATION_BUILD_DIR)/presentation_canvas_model.o \
@@ -1734,126 +1761,126 @@ $(PRESENTATION_PROVENANCE_STAMP): $(PRESENTATION_VENDOR_INPUTS)
 	@touch $@
 
 $(PRESENTATION_BUILD_DIR)/presentation.o: \
-	lib/presentation/src/presentation.c \
-	lib/presentation/src/presentation_canvas_internal.h \
-	lib/presentation/src/presentation_focus_internal.h \
-	lib/presentation/src/presentation_form_internal.h \
-	lib/presentation/include/presentation/presentation.h \
-	lib/presentation/include/presentation/model_render.h \
+	contexts/explorer/modules/presentation/src/presentation.c \
+	contexts/explorer/modules/presentation/src/presentation_canvas_internal.h \
+	contexts/explorer/modules/presentation/src/presentation_focus_internal.h \
+	contexts/explorer/modules/presentation/src/presentation_form_internal.h \
+	contexts/explorer/modules/presentation/include/presentation/presentation.h \
+	contexts/explorer/modules/presentation/include/presentation/model_render.h \
 	vendor/rgfw/RGFW.h vendor/rgfw/XDL.h \
 	$(PRESENTATION_PROVENANCE_STAMP)
 	@mkdir -p $(PRESENTATION_BUILD_DIR)
 	$(CC) $(PRESENTATION_PACKAGE_CFLAGS) -c \
-	lib/presentation/src/presentation.c \
+	contexts/explorer/modules/presentation/src/presentation.c \
 		-o $(PRESENTATION_BUILD_DIR)/presentation.o
 
 $(PRESENTATION_BUILD_DIR)/presentation_canvas_select.o: \
-	lib/presentation/src/presentation_canvas_select.c \
-	lib/presentation/src/presentation_canvas_internal.h \
-	lib/presentation/include/presentation/presentation.h \
-	lib/presentation/include/presentation/canvas.h \
-	lib/presentation/include/presentation/model_render.h
+	contexts/explorer/modules/presentation/src/presentation_canvas_select.c \
+	contexts/explorer/modules/presentation/src/presentation_canvas_internal.h \
+	contexts/explorer/modules/presentation/include/presentation/presentation.h \
+	contexts/explorer/modules/presentation/include/presentation/canvas.h \
+	contexts/explorer/modules/presentation/include/presentation/model_render.h
 	@mkdir -p $(PRESENTATION_BUILD_DIR)
 	$(CC) $(PRESENTATION_PACKAGE_CFLAGS) -c \
-		lib/presentation/src/presentation_canvas_select.c \
+		contexts/explorer/modules/presentation/src/presentation_canvas_select.c \
 		-o $(PRESENTATION_BUILD_DIR)/presentation_canvas_select.o
 
 $(PRESENTATION_BUILD_DIR)/presentation_canvas_model.o: \
-	lib/presentation/src/presentation_canvas_model.c \
-	lib/presentation/src/presentation_canvas_internal.h \
-	lib/presentation/include/presentation/presentation.h \
-	lib/presentation/include/presentation/model.h
+	contexts/explorer/modules/presentation/src/presentation_canvas_model.c \
+	contexts/explorer/modules/presentation/src/presentation_canvas_internal.h \
+	contexts/explorer/modules/presentation/include/presentation/presentation.h \
+	contexts/explorer/modules/presentation/include/presentation/model.h
 	@mkdir -p $(PRESENTATION_BUILD_DIR)
 	$(CC) $(PRESENTATION_PACKAGE_CFLAGS) -c \
-		lib/presentation/src/presentation_canvas_model.c \
+		contexts/explorer/modules/presentation/src/presentation_canvas_model.c \
 		-o $(PRESENTATION_BUILD_DIR)/presentation_canvas_model.o
 
 $(PRESENTATION_BUILD_DIR)/presentation_focus.o: \
-	lib/presentation/src/presentation_focus.c \
-	lib/presentation/src/presentation_focus_internal.h \
-	lib/presentation/include/presentation/presentation.h \
-	lib/presentation/include/presentation/model_render.h
+	contexts/explorer/modules/presentation/src/presentation_focus.c \
+	contexts/explorer/modules/presentation/src/presentation_focus_internal.h \
+	contexts/explorer/modules/presentation/include/presentation/presentation.h \
+	contexts/explorer/modules/presentation/include/presentation/model_render.h
 	@mkdir -p $(PRESENTATION_BUILD_DIR)
 	$(CC) $(PRESENTATION_PACKAGE_CFLAGS) -c \
-		lib/presentation/src/presentation_focus.c \
+		contexts/explorer/modules/presentation/src/presentation_focus.c \
 		-o $(PRESENTATION_BUILD_DIR)/presentation_focus.o
 
 $(PRESENTATION_BUILD_DIR)/presentation_form.o: \
-	lib/presentation/src/presentation_form.c \
-	lib/presentation/src/presentation_form_internal.h \
-	lib/presentation/include/presentation/presentation.h \
-	lib/presentation/include/presentation/canvas.h \
-	lib/presentation/include/presentation/model_render.h
+	contexts/explorer/modules/presentation/src/presentation_form.c \
+	contexts/explorer/modules/presentation/src/presentation_form_internal.h \
+	contexts/explorer/modules/presentation/include/presentation/presentation.h \
+	contexts/explorer/modules/presentation/include/presentation/canvas.h \
+	contexts/explorer/modules/presentation/include/presentation/model_render.h
 	@mkdir -p $(PRESENTATION_BUILD_DIR)
 	$(CC) $(PRESENTATION_PACKAGE_CFLAGS) -c \
-		lib/presentation/src/presentation_form.c \
+		contexts/explorer/modules/presentation/src/presentation_form.c \
 		-o $(PRESENTATION_BUILD_DIR)/presentation_form.o
 
 $(PRESENTATION_BUILD_DIR)/presentation_form_model.o: \
-	lib/presentation/src/presentation_form_model.c \
-	lib/presentation/include/presentation/presentation.h \
-	lib/presentation/include/presentation/model.h
+	contexts/explorer/modules/presentation/src/presentation_form_model.c \
+	contexts/explorer/modules/presentation/include/presentation/presentation.h \
+	contexts/explorer/modules/presentation/include/presentation/model.h
 	@mkdir -p $(PRESENTATION_BUILD_DIR)
 	$(CC) $(PRESENTATION_PACKAGE_CFLAGS) -c \
-		lib/presentation/src/presentation_form_model.c \
+		contexts/explorer/modules/presentation/src/presentation_form_model.c \
 		-o $(PRESENTATION_BUILD_DIR)/presentation_form_model.o
 
 $(PRESENTATION_BUILD_DIR)/presentation_input.o: \
-	lib/presentation/src/presentation_input.c \
-	lib/presentation/include/presentation/presentation.h \
-	lib/presentation/include/presentation/model_render.h
+	contexts/explorer/modules/presentation/src/presentation_input.c \
+	contexts/explorer/modules/presentation/include/presentation/presentation.h \
+	contexts/explorer/modules/presentation/include/presentation/model_render.h
 	@mkdir -p $(PRESENTATION_BUILD_DIR)
 	$(CC) $(PRESENTATION_PACKAGE_CFLAGS) -c \
-		lib/presentation/src/presentation_input.c \
+		contexts/explorer/modules/presentation/src/presentation_input.c \
 		-o $(PRESENTATION_BUILD_DIR)/presentation_input.o
 
 $(PRESENTATION_BUILD_DIR)/zclassic_brand.o: \
-	lib/presentation/src/zclassic_brand.c \
-	lib/presentation/src/zclassic_icon_mask.inc \
-	lib/presentation/include/presentation/zclassic_brand.h
+	contexts/explorer/modules/presentation/src/zclassic_brand.c \
+	contexts/explorer/modules/presentation/src/zclassic_icon_mask.inc \
+	contexts/explorer/modules/presentation/include/presentation/zclassic_brand.h
 	@mkdir -p $(PRESENTATION_BUILD_DIR)
 	$(CC) $(PRESENTATION_PACKAGE_CFLAGS) -c \
-		lib/presentation/src/zclassic_brand.c \
+		contexts/explorer/modules/presentation/src/zclassic_brand.c \
 		-o $(PRESENTATION_BUILD_DIR)/zclassic_brand.o
 
 $(PRESENTATION_BUILD_DIR)/canvas.o: \
-	lib/presentation/src/canvas.c \
-	lib/presentation/include/presentation/canvas.h \
+	contexts/explorer/modules/presentation/src/canvas.c \
+	contexts/explorer/modules/presentation/include/presentation/canvas.h \
 	vendor/typography/stb_truetype.h \
 	vendor/typography/noto_sans_ascii.inc \
 	$(PRESENTATION_PROVENANCE_STAMP)
 	@mkdir -p $(PRESENTATION_BUILD_DIR)
 	$(CC) $(PRESENTATION_PACKAGE_CFLAGS) -c \
-		lib/presentation/src/canvas.c \
+		contexts/explorer/modules/presentation/src/canvas.c \
 		-o $(PRESENTATION_BUILD_DIR)/canvas.o
 
 $(PRESENTATION_BUILD_DIR)/model.o: \
-	lib/presentation/src/model.c \
-	lib/presentation/include/presentation/model.h \
-	lib/base/include/base/serialize_le.h
+	contexts/explorer/modules/presentation/src/model.c \
+	contexts/explorer/modules/presentation/include/presentation/model.h \
+	platform/modules/base/include/base/serialize_le.h
 	@mkdir -p $(PRESENTATION_BUILD_DIR)
 	$(CC) $(PRESENTATION_PACKAGE_CFLAGS) -c \
-		lib/presentation/src/model.c \
+		contexts/explorer/modules/presentation/src/model.c \
 		-o $(PRESENTATION_BUILD_DIR)/model.o
 
 $(PRESENTATION_BUILD_DIR)/model_render.o: \
-	lib/presentation/src/model_render.c \
-	lib/presentation/src/presentation_canvas_internal.h \
-	lib/presentation/include/presentation/model_render.h \
-	lib/presentation/include/presentation/model.h \
-	lib/presentation/include/presentation/canvas.h
+	contexts/explorer/modules/presentation/src/model_render.c \
+	contexts/explorer/modules/presentation/src/presentation_canvas_internal.h \
+	contexts/explorer/modules/presentation/include/presentation/model_render.h \
+	contexts/explorer/modules/presentation/include/presentation/model.h \
+	contexts/explorer/modules/presentation/include/presentation/canvas.h
 	@mkdir -p $(PRESENTATION_BUILD_DIR)
 	$(CC) $(PRESENTATION_PACKAGE_CFLAGS) -c \
-		lib/presentation/src/model_render.c \
+		contexts/explorer/modules/presentation/src/model_render.c \
 		-o $(PRESENTATION_BUILD_DIR)/model_render.o
 
 $(PRESENTATION_BUILD_DIR)/model_text.o: \
-	lib/presentation/src/model_text.c \
-	lib/presentation/include/presentation/model_text.h \
-	lib/presentation/include/presentation/model.h
+	contexts/explorer/modules/presentation/src/model_text.c \
+	contexts/explorer/modules/presentation/include/presentation/model_text.h \
+	contexts/explorer/modules/presentation/include/presentation/model.h
 	@mkdir -p $(PRESENTATION_BUILD_DIR)
 	$(CC) $(PRESENTATION_PACKAGE_CFLAGS) -c \
-		lib/presentation/src/model_text.c \
+		contexts/explorer/modules/presentation/src/model_text.c \
 		-o $(PRESENTATION_BUILD_DIR)/model_text.o
 
 $(PRESENTATION_PACKAGE_ARCHIVE): $(PRESENTATION_PACKAGE_OBJS) \
@@ -1863,11 +1890,11 @@ $(PRESENTATION_PACKAGE_ARCHIVE): $(PRESENTATION_PACKAGE_OBJS) \
 
 presentation-demo: $(PRESENTATION_DEMO_BIN)
 
-$(PRESENTATION_DEMO_BIN): lib/presentation/examples/bitmap_demo.c \
+$(PRESENTATION_DEMO_BIN): contexts/explorer/modules/presentation/examples/bitmap_demo.c \
 	$(PRESENTATION_PACKAGE_ARCHIVE)
 	@mkdir -p $(PRESENTATION_BUILD_DIR)
 	$(CC) $(PRESENTATION_PACKAGE_CFLAGS) \
-		lib/presentation/examples/bitmap_demo.c \
+		contexts/explorer/modules/presentation/examples/bitmap_demo.c \
 		$(PRESENTATION_PACKAGE_ARCHIVE) $(PRESENTATION_HOST_LIBS) \
 		-o $@
 
@@ -1885,9 +1912,9 @@ presentation-relaunch: presentation-demo
 presentation-desktop-install:
 	@install -d "$(HOME)/.local/share/applications" \
 		"$(HOME)/.local/share/icons/hicolor/scalable/apps"
-	@install -m 0644 packaging/linux/org.zclassic.ZClassic23.desktop \
+	@install -m 0644 platform/packaging/linux/org.zclassic.ZClassic23.desktop \
 		"$(HOME)/.local/share/applications/org.zclassic.ZClassic23.desktop"
-	@install -m 0644 packaging/linux/org.zclassic.ZClassic23.svg \
+	@install -m 0644 platform/packaging/linux/org.zclassic.ZClassic23.svg \
 		"$(HOME)/.local/share/icons/hicolor/scalable/apps/org.zclassic.ZClassic23.svg"
 	@if command -v update-desktop-database >/dev/null 2>&1; then \
 		update-desktop-database "$(HOME)/.local/share/applications"; \
@@ -1905,20 +1932,20 @@ presentation-portability: presentation-demo
 	@if command -v x86_64-w64-mingw32-gcc >/dev/null 2>&1; then \
 		mkdir -p $(PRESENTATION_BUILD_DIR)/windows; \
 		x86_64-w64-mingw32-gcc -std=c2x -O2 -Wall -Wextra -Werror \
-			-pedantic -Ilib/presentation/include -Ilib/base/include \
-			lib/presentation/src/presentation.c \
-			lib/presentation/src/presentation_canvas_model.c \
-			lib/presentation/src/presentation_canvas_select.c \
-			lib/presentation/src/presentation_focus.c \
-			lib/presentation/src/presentation_form.c \
-			lib/presentation/src/presentation_form_model.c \
-			lib/presentation/src/presentation_input.c \
-			lib/presentation/src/canvas.c \
-			lib/presentation/src/model.c \
-			lib/presentation/src/model_text.c \
-			lib/presentation/src/model_render.c \
-			lib/presentation/src/zclassic_brand.c \
-			lib/presentation/examples/bitmap_demo.c \
+			-pedantic -Icontexts/explorer/modules/presentation/include -Iplatform/modules/base/include \
+			contexts/explorer/modules/presentation/src/presentation.c \
+			contexts/explorer/modules/presentation/src/presentation_canvas_model.c \
+			contexts/explorer/modules/presentation/src/presentation_canvas_select.c \
+			contexts/explorer/modules/presentation/src/presentation_focus.c \
+			contexts/explorer/modules/presentation/src/presentation_form.c \
+			contexts/explorer/modules/presentation/src/presentation_form_model.c \
+			contexts/explorer/modules/presentation/src/presentation_input.c \
+			contexts/explorer/modules/presentation/src/canvas.c \
+			contexts/explorer/modules/presentation/src/model.c \
+			contexts/explorer/modules/presentation/src/model_text.c \
+			contexts/explorer/modules/presentation/src/model_render.c \
+			contexts/explorer/modules/presentation/src/zclassic_brand.c \
+			contexts/explorer/modules/presentation/examples/bitmap_demo.c \
 			-luser32 -lgdi32 -lshell32 -lole32 \
 			-o $(PRESENTATION_BUILD_DIR)/windows/bitmap-demo.exe; \
 		printf '%s\n' 'presentation-portability: Windows cross-link OK'; \
@@ -1951,12 +1978,12 @@ $(ZCL_WINDOWS_ACCEPTANCE_SQLITE): vendor/sqlite3.c
 		-DSQLITE_THREADSAFE=1 -c vendor/sqlite3.c -o $(@D)/sqlite3.o
 	$(ZCL_WINDOWS_ACCEPTANCE_AR) rcs $@ $(@D)/sqlite3.o
 
-include lib/platform/tests/windows_acceptance.mk
+include platform/modules/platform/tests/windows_acceptance.mk
 
 ZCL_WINDOWS_ACCEPTANCE_FLAGS := -std=c2x -O2 -Wall -Wextra -Werror \
 	-pedantic -static -D_POSIX_C_SOURCE=200809L $(ZCL_WINDOWS_API_FLOOR) \
 	-DWIN32_LEAN_AND_MEAN -D__USE_MINGW_ANSI_STDIO=1 \
-	$(APP_INCLUDES) $(CONFIG_INCLUDES) $(LIB_INCLUDES) $(CORE_INCLUDES) \
+	$(APP_INCLUDES) $(REDUCER_INCLUDES) $(CONFIG_INCLUDES) $(LIB_INCLUDES) $(CORE_INCLUDES) \
 	$(PORTS_INCLUDES) $(DOMAIN_INCLUDES) $(APPLICATION_INCLUDES) \
 	$(ADAPTERS_INCLUDES) -Ivendor/include
 ZCL_WINDOWS_ACCEPTANCE_BINS := $(addprefix \
@@ -2098,13 +2125,13 @@ macos-acceptance: z23 zclassic23-package-verify zclassic23-acme
 
 .PHONY: windows-service-install windows-service-status windows-service-remove
 windows-service-install: z23
-	@packaging/windows/install-service.sh install
+	@platform/packaging/windows/install-service.sh install
 
 windows-service-status:
-	@packaging/windows/install-service.sh status
+	@platform/packaging/windows/install-service.sh status
 
 windows-service-remove:
-	@packaging/windows/install-service.sh remove
+	@platform/packaging/windows/install-service.sh remove
 
 # ── GUI packages: the prompt-to-pixel loop ───────────────────────────────
 # `make <app>` opens a real window on this host and prints the timestamp it
@@ -2114,7 +2141,7 @@ windows-service-remove:
 # the reproducible .app bundle. One package, two C23 TUs, no node objects:
 # the whole build is two zcc-cached compiles and one link.
 #
-# Every GUI package has exactly zhello's shape — packages/zhello is the
+# Every GUI package has exactly zhello's shape — contexts/commons/packages/zhello is the
 # template of record and `make new-app NAME=…` stamps new ones out of it — so
 # the rules are generated, not copied: GUI_APPS (top of this file, extended by
 # the gitignored config/gui_apps.mk) is the one list, and the template below
@@ -2129,7 +2156,7 @@ windows-service-remove:
 #
 # Host seams: RGFW needs Cocoa on macOS and loads X11 at runtime on Linux, so
 # the per-host link inputs live here rather than in the source (same shape as
-# ZCL_TOOL_SANDBOX_SRC above; lib/presentation carries the same table).
+# ZCL_TOOL_SANDBOX_SRC above; contexts/explorer/modules/presentation carries the same table).
 GUI_APP_HOST_CPPFLAGS := -D_POSIX_C_SOURCE=200809L
 GUI_APP_HOST_LIBS := -ldl -lm
 ifeq ($(ZCL_HOST_OS),Darwin)
@@ -2149,24 +2176,24 @@ GUI_APP_CFLAGS := -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 # run with an empty path.
 APP_BUNDLE_OUT ?= $(BUILD_DIR)/app-bundle
 
-# $(1) = the package name under packages/. Recipe lines escape `$$` for the
+# $(1) = the package name under contexts/commons/packages/. Recipe lines escape `$$` for the
 # automatic variables ($$@, $$<, $$^), which make must not expand until the
 # recipe runs; everything else in the recipe is fixed as the template is
 # expanded.
 define GUI_APP_RULES
-$(BUILD_DIR)/$(1)/$(1).o: packages/$(1)/src/$(1).c \
-		packages/$(1)/include/$(1)/$(1).h
+$(BUILD_DIR)/$(1)/$(1).o: contexts/commons/packages/$(1)/src/$(1).c \
+		contexts/commons/packages/$(1)/include/$(1)/$(1).h
 	@mkdir -p $$(dir $$@)
-	$$(CC) $(GUI_APP_CFLAGS) -Ipackages/$(1)/include -c $$< -o $$@
+	$$(CC) $(GUI_APP_CFLAGS) -Icontexts/commons/packages/$(1)/include -c $$< -o $$@
 
-$(BUILD_DIR)/$(1)/main.o: packages/$(1)/app/main.c \
-		packages/$(1)/include/$(1)/$(1).h vendor/rgfw/RGFW.h
+$(BUILD_DIR)/$(1)/main.o: contexts/commons/packages/$(1)/app/main.c \
+		contexts/commons/packages/$(1)/include/$(1)/$(1).h vendor/rgfw/RGFW.h
 	@mkdir -p $$(dir $$@)
-	$$(CC) $(GUI_APP_CFLAGS) -Ipackages/$(1)/include -c $$< -o $$@
+	$$(CC) $(GUI_APP_CFLAGS) -Icontexts/commons/packages/$(1)/include -c $$< -o $$@
 
 $(BIN_DIR)/$(1): $(BUILD_DIR)/$(1)/$(1).o $(BUILD_DIR)/$(1)/main.o
 	@mkdir -p $$(dir $$@)
-	$$(CC) $(GUI_APP_CFLAGS) -Ipackages/$(1)/include $$^ \
+	$$(CC) $(GUI_APP_CFLAGS) -Icontexts/commons/packages/$(1)/include $$^ \
 		$(GUI_APP_HOST_LIBS) -o $$@
 
 .PHONY: $(1) $(1)-selftest $(1)-clean $(1)-app
@@ -2192,7 +2219,7 @@ $(1)-app: $(BIN_DIR)/$(1)
 	@tools/scripts/make_app_bundle.sh $(BIN_DIR)/$(1) \
 		$(if $($(1)_APP_TITLE),$($(1)_APP_TITLE),$(1)) $(APP_BUNDLE_OUT)
 endef
-# zhello's run-args spelling is documented in packages/zhello/README.md as
+# zhello's run-args spelling is documented in contexts/commons/packages/zhello/README.md as
 # ZHELLO_ARGS (it predates the generated template); the alias keeps that
 # documented interface working, and its .app keeps the macOS capitalized
 # form. Every per-app variable here is keyed by the package name EXACTLY as
@@ -2208,7 +2235,7 @@ zdemo_APP_TITLE := Zdemo
 $(foreach a,$(GUI_APPS),$(eval $(call GUI_APP_RULES,$(a))))
 
 .PHONY: new-app
-# Scaffold a new GUI package out of packages/zhello: copies the template,
+# Scaffold a new GUI package out of contexts/commons/packages/zhello: copies the template,
 # renames zhello→NAME in symbols, header guards and README, registers the app
 # in config/gui_apps.mk, and refuses to touch anything that already exists.
 #
@@ -2365,7 +2392,7 @@ $(filter-out $(ZCL_VENDOR_LIB)/libsecp256k1.a,$(VENDOR_LIBS)):
         install-slo-probe slo-probe-status slo-probe-selftest \
         install-tip-agreement tip-agreement-status tip-agreement-selftest
 
-CLI_SRCS = lib/rpc/src/client.c lib/json/src/json.c lib/encoding/src/utilstrencodings.c lib/base/src/log_level.c
+CLI_SRCS = engine/modules/rpc/src/client.c platform/modules/json/src/json.c platform/modules/encoding/src/utilstrencodings.c platform/modules/base/src/log_level.c
 ZCL_ADAPTER_RUNNER_TARGET = zclassic23-zcode-adapter-runner
 ifneq ($(ZCL_HOST_WINDOWS),)
 # Windows has no Landlock-equivalent backend in tree. Do not ship an
@@ -2376,7 +2403,7 @@ all: test_zcl zclassic23 zcl-rpc zclassic23-package-verify \
 	$(ZCL_POSIX_ONLY_BINS) $(ZCL_ADAPTER_RUNNER_TARGET)
 
 # ── Hot-swap ROLLBACK fixture images ──────────────────────────────────────
-# lib/test/src/test_hotswap_rollback.c drives a rollback that SUCCEEDS, and a
+# tests/harness/src/test_hotswap_rollback.c drives a rollback that SUCCEEDS, and a
 # rollback re-enters the full admission gauntlet over a SEALED IMAGE: ELF shape
 # probe, artifact hash, map, symbol, consensus pin, admit, probe-before-publish,
 # one batch commit. A shelf entry is BYTES, so that group cannot be driven with
@@ -2394,20 +2421,20 @@ all: test_zcl zclassic23 zcl-rpc zclassic23-package-verify \
 # Compiled at $(TEST_FAST_CFLAGS): non-LTO (the module link is a plain -shared
 # and never expands an LTO plugin) and carrying -DZCL_TESTING, so the struct
 # layouts the module writes through are the ones every test binary reads.
-HOTSWAP_ROLLBACK_FIXTURE_SRC = lib/test/fixtures/hotswap_rollback_module.c
-HOTSWAP_ROLLBACK_FIXTURE_TU  = app/controllers/src/status_native_handlers.c
+HOTSWAP_ROLLBACK_FIXTURE_SRC = tests/harness/fixtures/hotswap_rollback_module.c
+HOTSWAP_ROLLBACK_FIXTURE_TU  = engine/controllers/src/status_native_handlers.c
 HOTSWAP_ROLLBACK_FIXTURE_SOS = \
 	$(BUILD_DIR)/hotswap/zcl_rollback_fixture_a.so \
 	$(BUILD_DIR)/hotswap/zcl_rollback_fixture_b.so
 
 TEST_SRCS = $(call zcl_filter_ephemeral_sources,\
-	$(wildcard lib/test/src/*.c))
+	$(wildcard tests/harness/src/*.c))
 TEST_DEV_EXECUTOR_SRCS = tools/dev/devloop_cycle.c tools/dev/dev_failure_store.c \
 	tools/dev/dev_source_identity.c tools/dev/devloop_process.c \
 	tools/dev/devloop_hotswap_build.c tools/dev/devloop_restart_build.c \
 	tools/dev/dev_proof.c tools/dev/dev_proof_receipt.c \
 	$(MUTATION_LIB_SRCS)
-SPEC_SRCS = $(wildcard lib/test/spec/*.c)
+SPEC_SRCS = $(wildcard tests/harness/spec/*.c)
 CHAOS_SIM_SRCS = tools/sim/sim_peer.c
 # The landing queue's two library translation units. land_main.c owns a
 # main() and is deliberately NOT here — the queue logic is what the test
@@ -2424,16 +2451,16 @@ TEST_LAND_SRCS = tools/land/land_queue.c tools/land/land_record.c
 # the test_parallel_fast monolith — they build and run as individual
 # binaries via windows-acceptance.
 ZCL_WINDOWS_ACCEPTANCE_MONOLITH_EXCLUDES = $(if $(ZCL_HOST_WINDOWS),\
-	$(filter lib/test/src/%,\
+	$(filter tests/harness/src/%,\
 	$(foreach t,$(ZCL_WINDOWS_ACCEPTANCE_TESTS),\
 	$(ZCL_WINDOWS_ACCEPTANCE_$(t)_SOURCES))),)
-TEST_SRCS_NO_MAIN = $(filter-out lib/test/src/test.c lib/test/src/test_parallel.c \
+TEST_SRCS_NO_MAIN = $(filter-out tests/harness/src/test.c tests/harness/src/test_parallel.c \
 	$(ZCL_WINDOWS_ACCEPTANCE_MONOLITH_EXCLUDES), $(TEST_SRCS)) \
 	$(TEST_DEV_EXECUTOR_SRCS) $(TEST_LAND_SRCS)
 TEST_FAST_OBJ_ROOT = $(BUILD_DIR)/test-obj
 TEST_PARALLEL_FAST_BIN = $(BIN_DIR)/test_parallel_fast
-TEST_PARALLEL_FAST_SRCS = $(TEST_SRCS_NO_MAIN) lib/test/src/test_parallel.c $(SPEC_SRCS) $(CHAOS_SIM_SRCS) $(ALL_SRCS)
-# Windows test-lane compat shims (lib/test/include/test/windows_compat.h):
+TEST_PARALLEL_FAST_SRCS = $(TEST_SRCS_NO_MAIN) tests/harness/src/test_parallel.c $(SPEC_SRCS) $(CHAOS_SIM_SRCS) $(ALL_SRCS)
+# Windows test-lane compat shims (tests/harness/include/test/windows_compat.h):
 # force-included into test-fast TUs on Windows hosts only. Test-only, never
 # production: where a POSIX capability genuinely does not exist the shim
 # fails the call (ENOSYS) instead of faking success.
@@ -2520,7 +2547,7 @@ else
 TEST_REL_COMPILE_EPOCH := $(ZCL_ZERO_SHA256)
 endif
 TEST_REL_OBJ_DIR = $(TEST_REL_OBJ_ROOT)/epochs/$(TEST_REL_COMPILE_EPOCH)
-TEST_PARALLEL_REL_SRCS = $(TEST_SRCS_NO_MAIN) lib/test/src/test_parallel.c $(SPEC_SRCS) $(CHAOS_SIM_SRCS) $(ALL_SRCS)
+TEST_PARALLEL_REL_SRCS = $(TEST_SRCS_NO_MAIN) tests/harness/src/test_parallel.c $(SPEC_SRCS) $(CHAOS_SIM_SRCS) $(ALL_SRCS)
 TEST_PARALLEL_REL_OBJS = $(patsubst %.c,$(TEST_REL_OBJ_DIR)/%.o,$(TEST_PARALLEL_REL_SRCS))
 TEST_PARALLEL_REL_LINK_RSP = $(TEST_REL_OBJ_DIR)/link-inputs.rsp
 TEST_PARALLEL_REL_CANDIDATE = $(BIN_DIR)/test-strict/epochs/$(TEST_REL_COMPILE_EPOCH)/test_parallel
@@ -2659,21 +2686,24 @@ ifneq ($(filter test-tsan,$(ZCL_DEPFILE_PROFILES)),)
 endif
 
 # Generate templates from .chtml and .ccss files
-TMPL_GEN = app/views/include/views/wallet_templates_gen.h
-TMPL_SRC = $(wildcard app/views/templates/*.chtml) $(wildcard app/views/css/*.ccss)
+TMPL_GEN = contexts/wallet/views/include/views/wallet_templates_gen.h
+TMPL_DIR = contexts/explorer/views/templates
+TMPL_CSS_DIR = contexts/wallet/views/css
+TMPL_SRC = $(wildcard $(TMPL_DIR)/*.chtml) \
+	$(wildcard $(TMPL_CSS_DIR)/*.ccss)
 TMPL_TOOL = $(BIN_DIR)/gen_templates
-SITE_CSS_GEN = app/views/include/views/site_css.h
-SITE_CSS_SRC = app/views/src/site.css
+SITE_CSS_GEN = contexts/explorer/views/include/views/site_css.h
+SITE_CSS_SRC = contexts/explorer/views/src/site.css
 VIEW_GEN_HEADERS = $(VIEW_GEN_HEADERS_EARLY)
 
-$(TMPL_TOOL): tools/gen_templates.c lib/base/src/safe_alloc.c
+$(TMPL_TOOL): tools/gen_templates.c platform/modules/base/src/safe_alloc.c
 	@mkdir -p $(dir $@)
-	$(CC) -std=c23 -O2 -Wall -Wextra -Ilib/base/include -Ilib/util/include -o $@ $^
+	$(CC) -std=c23 -O2 -Wall -Wextra -Iplatform/modules/base/include -Iplatform/modules/util/include -o $@ $^
 
-$(BIN_DIR)/inspect_html: tools/inspect_html.c lib/base/src/safe_alloc.c
+$(BIN_DIR)/inspect_html: tools/inspect_html.c platform/modules/base/src/safe_alloc.c
 	@mkdir -p $(dir $@)
 	$(CC) -std=c23 -O2 -Wall -Wextra \
-	    -Ilib/base/include -Ilib/util/include -o $@ $^
+	    -Iplatform/modules/base/include -Iplatform/modules/util/include -o $@ $^
 
 # These two run on EVERY make invocation (they are prerequisites of the
 # -include'd view bootstrap, so they are re-checked before any goal), which
@@ -2683,7 +2713,7 @@ $(BIN_DIR)/inspect_html: tools/inspect_html.c lib/base/src/safe_alloc.c
 # suppressed; nothing is lost, because gen_templates itself reports what it
 # did (file counts, byte counts, "unchanged") on stderr either way.
 $(TMPL_GEN): $(TMPL_SRC) tools/gen_templates.c | $(TMPL_TOOL)
-	@$(TMPL_TOOL) app/views/templates $@ app/views/css
+	@$(TMPL_TOOL) $(TMPL_DIR) $@ $(TMPL_CSS_DIR)
 
 $(SITE_CSS_GEN): $(SITE_CSS_SRC) tools/gen_templates.c | $(TMPL_TOOL)
 	@$(TMPL_TOOL) --single-css $< $@ site_css SITE_CSS_H
@@ -2714,7 +2744,7 @@ templates: $(VIEW_GEN_HEADERS)
 templates-no-touch-selftest: $(VIEW_GEN_HEADERS)
 	@set -eu; \
 	before="$$(tools/dev/source-identity.sh capture-record)"; \
-	$(TMPL_TOOL) app/views/templates $(TMPL_GEN) app/views/css >/dev/null; \
+	$(TMPL_TOOL) contexts/explorer/views/templates $(TMPL_GEN) contexts/explorer/views/css >/dev/null; \
 	$(TMPL_TOOL) --single-css $(SITE_CSS_SRC) $(SITE_CSS_GEN) site_css SITE_CSS_H >/dev/null; \
 	after="$$(tools/dev/source-identity.sh capture-record)"; \
 	[ "$$before" = "$$after" ] || { \
@@ -2754,12 +2784,12 @@ $$(BIN_DIR)/$(1): $$(VIEW_GEN_HEADERS) $$(BUILD_IDENTITY_STAMP) \
 	trap - EXIT HUP INT TERM
 endef
 
-$(eval $(call BUILD_NODE_TOOL,test_zcl,$(TEST_SRCS_NO_MAIN) lib/test/src/test.c $(SPEC_SRCS) $(CHAOS_SIM_SRCS),,-DZCL_TESTING $(DEV_SOURCE_RECEIPT_CPPFLAGS)))
+$(eval $(call BUILD_NODE_TOOL,test_zcl,$(TEST_SRCS_NO_MAIN) tests/harness/src/test.c $(SPEC_SRCS) $(CHAOS_SIM_SRCS),,-DZCL_TESTING $(DEV_SOURCE_RECEIPT_CPPFLAGS)))
 # Whole-program LTO test_parallel, kept for debugging any per-TU-vs-LTO
 # divergence. `make t`/`make test` no longer build this — they use the cached
 # per-TU $(TEST_PARALLEL_BIN) rule below — but `make test_parallel_wpo` still
 # produces the original monolithic binary at build/bin/test_parallel_wpo.
-$(eval $(call BUILD_NODE_TOOL,test_parallel_wpo,$(TEST_SRCS_NO_MAIN) lib/test/src/test_parallel.c $(SPEC_SRCS) $(CHAOS_SIM_SRCS),,-DZCL_TESTING $(DEV_SOURCE_RECEIPT_CPPFLAGS)))
+$(eval $(call BUILD_NODE_TOOL,test_parallel_wpo,$(TEST_SRCS_NO_MAIN) tests/harness/src/test_parallel.c $(SPEC_SRCS) $(CHAOS_SIM_SRCS),,-DZCL_TESTING $(DEV_SOURCE_RECEIPT_CPPFLAGS)))
 
 # test_parallel is built as an immutable epoch candidate. The familiar
 # build/bin alias is a locked atomic copy and is FORCE-driven so A -> B -> A
@@ -2946,7 +2976,7 @@ test-parallel-fast-active-locked: $(TEST_PARALLEL_FAST_CANDIDATE) dev-package-ve
 
 .PHONY: test-parallel
 # Checkout-locked (see CHECKOUT_LOCK above): the make_lint_gates exclusive lane
-# plants a fixture into the live worktree (app/services/src/ and the repo root)
+# plants a fixture into the live worktree (engine/services/src/ and the repo root)
 # and unlinks it, so two concurrent test_parallel processes racing this run
 # inside ONE checkout is a real false-failure source, not just a build-object
 # collision. It is per-checkout on purpose and that is sufficient: every path
@@ -3137,7 +3167,7 @@ ifneq ($(EXACT_ONLY_ACTIVE_GOALS),)
 endif
 
 # Print every REGISTERED test group, one per line. No build, no test binary —
-# it parses the X-macro registry in lib/test/src/test_parallel.c. This is THE
+# it parses the X-macro registry in tests/harness/src/test_parallel.c. This is THE
 # documented way to enumerate groups; the old `git grep -hoE 'X\(...\)'`
 # incantation drops the test_/spec_ prefixes and mislabels 28 spec groups.
 .PHONY: t-list
@@ -3203,7 +3233,7 @@ transaction-micro-lab-wallets-selftest:
 # shared by several semantic transaction types.
 TRANSACTION_LAB_PROOF_TESTS := $(shell { \
 	awk -F'|' 'substr($$0, 1, 1) != sprintf("%c", 35) && NF { print $$5 }' tools/dev/transaction_lab_catalog.def; \
-	awk -F'"' '/^TX_TYPE_SUPPLEMENTAL/ { print $$4 }' app/controllers/include/controllers/transaction_type_supplemental_tests.def; \
+	awk -F'"' '/^TX_TYPE_SUPPLEMENTAL/ { print $$4 }' engine/controllers/include/controllers/transaction_type_supplemental_tests.def; \
 	} | sort -u | paste -sd, -)
 .PHONY: transaction-lab-status transaction-lab-check transaction-lab-proof \
 	transaction-micro-lab-status transaction-micro-lab-check
@@ -3270,12 +3300,12 @@ worktree-gc:
 # tools/agent/gate-receipt.sh — this is EVIDENCE, not proof.
 .PHONY: gate-receipt check-claims agent-velocity agent-sha3
 
-AGENT_SHA3_SRCS := tools/agent/agent_sha3.c lib/sha3/src/sha3.c
+AGENT_SHA3_SRCS := tools/agent/agent_sha3.c platform/modules/sha3/src/sha3.c
 agent-sha3: $(BIN_DIR)/agent_sha3
 $(BIN_DIR)/agent_sha3: $(AGENT_SHA3_SRCS)
 	@mkdir -p $(dir $@)
 	$(CC) -std=c23 -O2 -Wall -Wextra -Werror \
-	    -Ilib/sha3/include -Ilib/crypto/include -Ilib/support/include -Ilib/base/include \
+	    -Iplatform/modules/sha3/include -Icore/modules/crypto/include -Iplatform/modules/support/include -Iplatform/modules/base/include \
 	    -o $@ $(AGENT_SHA3_SRCS)
 
 # Independent package gates compile only the authoritative package trees and
@@ -3290,29 +3320,29 @@ ZCODE_PACKAGE_REGISTRY_CHECK_BIN := $(BIN_DIR)/zcode-package-registry-check
 .PHONY: zcode-package-base-test zcode-package-sha3-test zcode-package-codec-test zcode-package-foundation-test zcode-package-registry-check zcode-package-asan zclassic23-package-sign
 zcode-package-base-test: $(ZCODE_PACKAGE_BASE_TEST_BIN)
 	@$(ZCODE_PACKAGE_BASE_TEST_BIN)
-$(ZCODE_PACKAGE_BASE_TEST_BIN): lib/base/tests/test_base.c \
-		lib/base/tests/cleanse_probe.c lib/base/src/cleanse.c \
-		lib/base/src/log_level.c lib/base/src/result.c \
-		lib/base/src/safe_alloc.c
+$(ZCODE_PACKAGE_BASE_TEST_BIN): platform/modules/base/tests/test_base.c \
+		platform/modules/base/tests/cleanse_probe.c platform/modules/base/src/cleanse.c \
+		platform/modules/base/src/log_level.c platform/modules/base/src/result.c \
+		platform/modules/base/src/safe_alloc.c
 	@mkdir -p $(dir $@)
 	$(CC) -std=c23 -O3 -flto -Wall -Wextra -Werror -pedantic \
-	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) -Ilib/base/include -o $@ $^
+	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) -Iplatform/modules/base/include -o $@ $^
 
 zcode-package-sha3-test: $(ZCODE_PACKAGE_SHA3_TEST_BIN)
 	@$(ZCODE_PACKAGE_SHA3_TEST_BIN)
-$(ZCODE_PACKAGE_SHA3_TEST_BIN): lib/sha3/tests/test_sha3.c \
-		lib/sha3/src/sha3.c
+$(ZCODE_PACKAGE_SHA3_TEST_BIN): platform/modules/sha3/tests/test_sha3.c \
+		platform/modules/sha3/src/sha3.c
 	@mkdir -p $(dir $@)
 	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
-	    -Ilib/sha3/include -Ilib/base/include -o $@ $^
+	    -Iplatform/modules/sha3/include -Iplatform/modules/base/include -o $@ $^
 
 zcode-package-codec-test: $(ZCODE_PACKAGE_CODEC_TEST_BIN)
 	@$(ZCODE_PACKAGE_CODEC_TEST_BIN)
-$(ZCODE_PACKAGE_CODEC_TEST_BIN): lib/codec/tests/test_codec.c \
-		lib/codec/src/cursor.c
+$(ZCODE_PACKAGE_CODEC_TEST_BIN): platform/modules/codec/tests/test_codec.c \
+		platform/modules/codec/src/cursor.c
 	@mkdir -p $(dir $@)
 	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
-	    -Ilib/codec/include -Ilib/base/include -o $@ $^
+	    -Iplatform/modules/codec/include -Iplatform/modules/base/include -o $@ $^
 
 zcode-package-foundation-test: zcode-package-base-test zcode-package-sha3-test zcode-package-codec-test
 
@@ -3334,23 +3364,23 @@ ZCODE_PACKAGE_ASAN_GROUPS := test_base_foundation test_codec_cursor \
 	test_zcode_package_dev test_zcode_recipe test_zcode_verify \
 	test_zcode_dev_objects
 
-$(ZCODE_PACKAGE_BASE_ASAN_BIN): lib/base/tests/test_base.c \
-		lib/base/tests/cleanse_probe.c lib/base/src/cleanse.c
+$(ZCODE_PACKAGE_BASE_ASAN_BIN): platform/modules/base/tests/test_base.c \
+		platform/modules/base/tests/cleanse_probe.c platform/modules/base/src/cleanse.c
 	@mkdir -p $(dir $@)
 	$(CC) -std=c23 $(ZCODE_PACKAGE_ASAN_FLAGS) -Wall -Wextra -Werror -pedantic \
-	    -Ilib/base/include -o $@ $^
+	    -Iplatform/modules/base/include -o $@ $^
 
-$(ZCODE_PACKAGE_SHA3_ASAN_BIN): lib/sha3/tests/test_sha3.c \
-		lib/sha3/src/sha3.c
+$(ZCODE_PACKAGE_SHA3_ASAN_BIN): platform/modules/sha3/tests/test_sha3.c \
+		platform/modules/sha3/src/sha3.c
 	@mkdir -p $(dir $@)
 	$(CC) -std=c23 $(ZCODE_PACKAGE_ASAN_FLAGS) -Wall -Wextra -Werror -pedantic \
-	    -Ilib/sha3/include -Ilib/base/include -o $@ $^
+	    -Iplatform/modules/sha3/include -Iplatform/modules/base/include -o $@ $^
 
-$(ZCODE_PACKAGE_CODEC_ASAN_BIN): lib/codec/tests/test_codec.c \
-		lib/codec/src/cursor.c
+$(ZCODE_PACKAGE_CODEC_ASAN_BIN): platform/modules/codec/tests/test_codec.c \
+		platform/modules/codec/src/cursor.c
 	@mkdir -p $(dir $@)
 	$(CC) -std=c23 $(ZCODE_PACKAGE_ASAN_FLAGS) -Wall -Wextra -Werror -pedantic \
-	    -Ilib/codec/include -Ilib/base/include -o $@ $^
+	    -Iplatform/modules/codec/include -Iplatform/modules/base/include -o $@ $^
 
 zcode-package-asan: $(ZCODE_PACKAGE_BASE_ASAN_BIN) \
 		$(ZCODE_PACKAGE_SHA3_ASAN_BIN) $(ZCODE_PACKAGE_CODEC_ASAN_BIN) \
@@ -3390,28 +3420,28 @@ check-capability-closure:
 print-zcode-monolith-lib-sources:
 	@printf '%s\n' $(LIB_SRCS)
 $(ZCODE_PACKAGE_REGISTRY_CHECK_BIN): tools/zcode_package_registry_check.c \
-        config/zcode_package_registry.def \
-		config/zcode_c23_commons_app.def \
-		lib/vcs/src/package_prepare.c lib/vcs/src/package_prepare_schema.c \
-		lib/vcs/src/package_manifest.c \
-		lib/vcs/src/package_recipe.c lib/vcs/src/package_deps.c \
-		lib/vcs/src/package_capsule.c lib/vcs/src/package_release.c \
-		lib/json/src/json.c lib/codec/src/cursor.c lib/sha3/src/sha3.c \
-		lib/base/src/safe_alloc.c lib/base/src/log_level.c \
-		lib/platform/src/clock.c lib/platform/src/directory_compat.c
+        engine/composition/zcode_package_registry.def \
+		engine/composition/zcode_c23_commons_app.def \
+		contexts/commons/modules/vcs/src/package_prepare.c contexts/commons/modules/vcs/src/package_prepare_schema.c \
+		contexts/commons/modules/vcs/src/package_manifest.c \
+		contexts/commons/modules/vcs/src/package_recipe.c contexts/commons/modules/vcs/src/package_deps.c \
+		contexts/commons/modules/vcs/src/package_capsule.c contexts/commons/modules/vcs/src/package_release.c \
+		platform/modules/json/src/json.c platform/modules/codec/src/cursor.c platform/modules/sha3/src/sha3.c \
+		platform/modules/base/src/safe_alloc.c platform/modules/base/src/log_level.c \
+		platform/modules/platform/src/clock.c platform/modules/platform/src/directory_compat.c
 	@mkdir -p $(dir $@)
 	$(CC) -std=c23 -D_GNU_SOURCE $(ZCL_PLATFORM_CPPFLAGS) \
 	    -O0 -Wall -Wextra -Werror -pedantic \
-	    -Ilib/vcs/include -Ilib/json/include -Ilib/codec/include -Ilib/sha3/include \
-	    -Ilib/crypto/include -Ilib/base/include -Ilib/util/include \
-	    -Ilib/platform/include -Ivendor/include -o $@ $(filter %.c,$^) \
+	    -Icontexts/commons/modules/vcs/include -Iplatform/modules/json/include -Iplatform/modules/codec/include -Iplatform/modules/sha3/include \
+	    -Icore/modules/crypto/include -Iplatform/modules/base/include -Iplatform/modules/util/include \
+	    -Iplatform/modules/platform/include -Ivendor/include -o $@ $(filter %.c,$^) \
 	    $(NODE_SECP_ARCHIVE) -lpthread -lm
 
 zclassic23-package-sign: $(BIN_DIR)/zclassic23-package-sign
-$(BIN_DIR)/zclassic23-package-sign: FORCE tools/zcode_dev_signer.c lib/base/src/cleanse.c
+$(BIN_DIR)/zclassic23-package-sign: FORCE tools/zcode_dev_signer.c platform/modules/base/src/cleanse.c
 	@mkdir -p $(dir $@)
 	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
-	    -Ilib/base/include -Ivendor/include -o $@ $(filter-out FORCE,$^) \
+	    -Iplatform/modules/base/include -Ivendor/include -o $@ $(filter-out FORCE,$^) \
 	    -Lvendor/lib $(NODE_SECP_ARCHIVE) -lpthread -lm
 
 # Run a gate and leave a receipt. The wrapper is transparent — same output,
@@ -3570,7 +3600,7 @@ zcode-adapter-readiness-acceptance: $(BIN_DIR)/z23 \
 # accounting. The structural gates bind the same graph to exact-once monolith
 # source ownership and keep ZVCS independent of Git/Git SHA-1 while stable
 # publication remains separately contained. Do not split this into per-package
-# runners: config/zcode_package_registry.def is the package parameter set.
+# runners: engine/composition/zcode_package_registry.def is the package parameter set.
 zcode-c23-commons-alpha:
 	@$(MAKE) --no-print-directory check-zcode-package-registry
 	@$(MAKE) --no-print-directory t-fast-exact \
@@ -4194,7 +4224,7 @@ HOTSWAP_OBJ_DIR = $(BUILD_DIR)/hotswap-obj
 HOTSWAP_SO_DIR  = $(BUILD_DIR)/hotswap
 
 .PHONY: hotswap-so hotswap
-# make hotswap-so FILES="app/controllers/src/status_native_handlers.c ..."
+# make hotswap-so FILES="engine/controllers/src/status_native_handlers.c ..."
 # Compile one manifest-admitted stateless provider into a read-only,
 # input-addressed candidate. The digest covers the compiler identity, exact
 # C23/dev flags, source identity, and fully preprocessed source (therefore every
@@ -4203,20 +4233,20 @@ HOTSWAP_SO_DIR  = $(BUILD_DIR)/hotswap
 # reload_required until they share one generated aggregate manifest/entrypoint.
 hotswap-so: $(VIEW_GEN_HEADERS) $(BUILD_IDENTITY_STAMP)
 	@if [ -z "$(FILES)" ]; then \
-	  echo "usage: make hotswap-so FILES=\"app/controllers/src/status_native_handlers.c\"" >&2; \
+	  echo "usage: make hotswap-so FILES=\"engine/controllers/src/status_native_handlers.c\"" >&2; \
 	  exit 2; fi
 	@set -eu; \
 	count=0; selected=""; probe=""; \
-	eligible="$$(sed -n 's/^[[:space:]]*HOTSWAP_ELIGIBLE("\([^"]*\)").*/\1/p' config/hotswap_eligible.def)"; \
+	eligible="$$(sed -n 's/^[[:space:]]*HOTSWAP_ELIGIBLE("\([^"]*\)").*/\1/p' engine/composition/hotswap_eligible.def)"; \
 	for f in $(FILES); do \
 	  count=$$((count + 1)); selected="$$f"; \
 	  [ -f "$$f" ] || { echo "hotswap-so: source does not exist: $$f" >&2; exit 2; }; \
 	  printf '%s\n' "$$eligible" | grep -Fqx "$$f" || { \
-	    echo "hotswap-so: reload_required: $$f is not admitted by config/hotswap_eligible.def" >&2; exit 2; }; \
+	    echo "hotswap-so: reload_required: $$f is not admitted by engine/composition/hotswap_eligible.def" >&2; exit 2; }; \
 	done; \
 	[ "$$count" -eq 1 ] || { \
 	  echo "hotswap-so: reload_required: v2 pilot admits one atomic provider per generation (got $$count)" >&2; exit 2; }; \
-	probe="$$(sed -n 's/^[[:space:]]*HOTSWAP_ELIGIBLE("\([^"]*\)")[[:space:]]*HOTSWAP_PROBE("\([^"]*\)").*/\1\t\2/p' config/hotswap_eligible.def | awk -F '\t' -v selected="$$selected" '$$1 == selected { print $$2 }')"; \
+	probe="$$(sed -n 's/^[[:space:]]*HOTSWAP_ELIGIBLE("\([^"]*\)")[[:space:]]*HOTSWAP_PROBE("\([^"]*\)").*/\1\t\2/p' engine/composition/hotswap_eligible.def | awk -F '\t' -v selected="$$selected" '$$1 == selected { print $$2 }')"; \
 	case "$$probe" in ''|*[!A-Za-z0-9_.]*) echo "hotswap-so: missing/unsafe canonical probe for $$selected" >&2; exit 2;; esac; \
 	mkdir -p "$(HOTSWAP_OBJ_DIR)" "$(HOTSWAP_SO_DIR)"; \
 	inputs="$$(mktemp "$(HOTSWAP_SO_DIR)/.inputs.XXXXXX")"; \
@@ -4294,9 +4324,9 @@ hotswap:
 	  $(if $(FILE),$(FILE),$(if $(LEAF),--leaf $(LEAF),--all))
 
 .PHONY: hotswap-module-so
-# make hotswap-module-so FILE=app/controllers/src/status_native_handlers.c
+# make hotswap-module-so FILE=engine/controllers/src/status_native_handlers.c
 # make hotswap-module-so HANDLER=core.status      (compat: leaf -> owning file)
-# Compile ONE swappable TU (a row in config/hotswap_swappable.def) into a
+# Compile ONE swappable TU (a row in engine/composition/hotswap_swappable.def) into a
 # content-addressed, MULTI-LEAF module .so that exports `zcl_hotswap_module`
 # carrying every leaf that file owns. This is the REAL (activatable) ABI's build
 # path — deliberately NOT the whole-program LTO node compile: ONE non-LTO
@@ -4360,9 +4390,9 @@ endif
 # the compile, catching an edit-during-build TOCTOU right before publish).
 # BUILD_SOURCE_ID/CLEAN/MUTATION themselves are ordinary parse-time variables
 # and remain available regardless.
-$(HOTSWAP_ACTION_PLAN): Makefile config/hotswap_swappable.def \
-		config/hotswap_islands.def config/hotswap_services.def \
-		config/hotswap_shadow_owners.def config/hotfork_capsules.def
+$(HOTSWAP_ACTION_PLAN): Makefile engine/composition/hotswap_swappable.def \
+		engine/composition/hotswap_islands.def engine/composition/hotswap_services.def \
+		engine/composition/hotswap_shadow_owners.def engine/composition/hotfork_capsules.def
 	@set -eu; \
 	mkdir -p "$(dir $@)"; \
 	tmp="$$(mktemp "$(dir $@).flags.XXXXXX")"; \
@@ -4379,25 +4409,25 @@ $(HOTSWAP_ACTION_PLAN): Makefile config/hotswap_swappable.def \
 
 hotswap-module-so: $(VIEW_GEN_HEADERS) $(HOTSWAP_ACTION_PLAN)
 	@if [ -z "$(HANDLER)$(FILE)" ]; then \
-	  echo "usage: make hotswap-module-so FILE=app/controllers/src/status_native_handlers.c" >&2; \
+	  echo "usage: make hotswap-module-so FILE=engine/controllers/src/status_native_handlers.c" >&2; \
 	  echo "   or: make hotswap-module-so HANDLER=core.status" >&2; exit 2; fi
 	@set -eu; \
-	rows="$$(tr '\n' ' ' < config/hotswap_swappable.def \
+	rows="$$(tr '\n' ' ' < engine/composition/hotswap_swappable.def \
 	  | grep -oE 'HOTSWAP_SWAPPABLE\("[^"]*"[[:space:]]*,[[:space:]]*"[^"]*"\)')"; \
-	[ -n "$$rows" ] || { echo "hotswap-module-so: config/hotswap_swappable.def parsed to zero rows" >&2; exit 2; }; \
+	[ -n "$$rows" ] || { echo "hotswap-module-so: engine/composition/hotswap_swappable.def parsed to zero rows" >&2; exit 2; }; \
 	if [ -n "$(FILE)" ]; then \
 	  src="$(FILE)"; \
 	  printf '%s\n' "$$rows" | grep -Fq "HOTSWAP_SWAPPABLE(\"$$src\"" || { \
-	    echo "hotswap-module-so: '$$src' is not a row in config/hotswap_swappable.def (the swappable shape-leaf allowlist)" >&2; exit 2; }; \
+	    echo "hotswap-module-so: '$$src' is not a row in engine/composition/hotswap_swappable.def (the swappable shape-leaf allowlist)" >&2; exit 2; }; \
 	else \
 	  src="$$(printf '%s\n' "$$rows" | awk -v leaf='$(HANDLER)' -F '"' '{ n = split($$4, L, " "); for (i = 1; i <= n; i++) if (L[i] == leaf) { print $$2; exit } }')"; \
-	  [ -n "$$src" ] || { echo "hotswap-module-so: leaf '$(HANDLER)' is not on config/hotswap_swappable.def (the swappable shape-leaf allowlist)" >&2; exit 2; }; \
+	  [ -n "$$src" ] || { echo "hotswap-module-so: leaf '$(HANDLER)' is not on engine/composition/hotswap_swappable.def (the swappable shape-leaf allowlist)" >&2; exit 2; }; \
 	fi; \
 	[ -f "$$src" ] || { echo "hotswap-module-so: source does not exist: $$src" >&2; exit 2; }; \
 	mkdir -p "$(HOTSWAP_OBJ_DIR)" "$(HOTSWAP_SO_DIR)" "$(HOTSWAP_SO_DIR)/fast"; \
 	safe="$$(printf '%s' "$$src" | tr -c 'A-Za-z0-9_.-' '_')"; \
 	compile_src="$$src"; \
-	island_rows="$$(tr '\n' ' ' < config/hotswap_islands.def \
+	island_rows="$$(tr '\n' ' ' < engine/composition/hotswap_islands.def \
 	  | grep -oE 'HOTSWAP_ISLAND\("[^"]*"[[:space:]]*,[[:space:]]*"[^"]*"\)' || true)"; \
 	members="$$(printf '%s\n' "$$island_rows" | awk -v owner="$$src" -F '"' '$$2 == owner { print $$4; exit }')"; \
 	if [ -n "$$members" ]; then \
@@ -4468,7 +4498,7 @@ hotswap-module-so: $(VIEW_GEN_HEADERS) $(HOTSWAP_ACTION_PLAN)
 # Prove an allowlist row is LOADABLE, not merely listed: build the module .so
 # with the shipping recipe, then dlopen it and run the REAL
 # hotswap_module_admit() gauntlet against the REAL, compiler-emitted
-# `zcl_hotswap_module` (hotswap_verify_module_so, lib/hotswap, dev-only).
+# `zcl_hotswap_module` (hotswap_verify_module_so, engine/modules/hotswap, dev-only).
 #
 # Every hot-swap test in lib/test drives the gauntlet with a struct FABRICATED
 # in the test's own TU, so nothing in the tree ever loaded a real artifact. A
@@ -4480,7 +4510,7 @@ hotswap-verify:
 
 .PHONY: hotswap-apply
 # make hotswap-apply HANDLER=core.status
-# make hotswap-apply FILE=app/controllers/src/status_native_handlers.c
+# make hotswap-apply FILE=engine/controllers/src/status_native_handlers.c
 # One shot from edit to live: build the MULTI-LEAF module .so for the owning TU
 # (hotswap-module-so, seconds) and hand it to the RUNNING dev node's resident
 # dev_hotswap_native RPC via `dev hotswap apply`, which re-points EVERY leaf that
@@ -4506,13 +4536,13 @@ hotswap-apply:
 
 .PHONY: hotswap-try
 # make hotswap-try HANDLER=core.status ARGS="core status"
-# make hotswap-try FILE=app/controllers/src/status_native_handlers.c ARGS="core status"
+# make hotswap-try FILE=engine/controllers/src/status_native_handlers.c ARGS="core status"
 # The OBSERVABLE dev loop: build the MULTI-LEAF module .so for the owning TU,
 # then run ARGS in a one-shot CLI with ZCL_HOTSWAP_PRELOAD — every leaf that
 # file owns is installed in ONE batch and the freshly compiled bodies execute in
 # the CLI process (probe-class authority; the overrides die with the process)
 # while fetching live data from the dev lane. No resident restart; the full
-# edit->see loop is seconds. Only config/hotswap_swappable.def READY read-only
+# edit->see loop is seconds. Only engine/composition/hotswap_swappable.def READY read-only
 # leaves can be built into a module. The module rebuild goes through
 # tools/dev/hotswap-module-fast.sh (cached compile metadata, no second make
 # parse on the happy path) and falls back to the authoritative
@@ -4539,11 +4569,11 @@ hotswap-try:
 # objects.
 #
 # What makes this trustworthy rather than a test-only shortcut:
-#   - the loader is hotswap_activate_local() in lib/hotswap/src/hotswap_activate.c
+#   - the loader is hotswap_activate_local() in engine/modules/hotswap/src/hotswap_activate.c
 #     — the same function ZCL_HOTSWAP_PRELOAD uses in zclassic23-dev — with the
 #     same publish hooks from tools/command/native_dev_hotswap.c. There is no
 #     second loader anywhere. Every production gate runs: path confinement, the
-#     dev-datadir classification, ABI version, the config/hotswap_swappable.def
+#     dev-datadir classification, ABI version, the engine/composition/hotswap_swappable.def
 #     allowlist, leaf uniqueness, the module self_test, probe-before-publish
 #     against the leaf's declared output schema, and the all-or-nothing
 #     registry batch that re-checks READY + EFFECT_READ per leaf;
@@ -4560,34 +4590,34 @@ hotswap-try:
 HOTSWAP_TEST_SO_DIR = $(BUILD_DIR)/hotswap/test-fast/$(TEST_FAST_COMPILE_EPOCH)
 
 .PHONY: hotswap-test-so
-# make hotswap-test-so FILE=app/controllers/src/status_native_handlers.c
+# make hotswap-test-so FILE=engine/controllers/src/status_native_handlers.c
 # make hotswap-test-so HANDLER=core.status
-# Compile one swappable TU (plus its config/hotswap_islands.def members) into a
+# Compile one swappable TU (plus its engine/composition/hotswap_islands.def members) into a
 # module .so using the TEST harness's exact compile flags. Prints the .so path
 # as the LAST line. Never activates anything by itself.
 hotswap-test-so: $(VIEW_GEN_HEADERS)
 	@if [ -z "$(HANDLER)$(FILE)" ]; then \
-	  echo "usage: make hotswap-test-so FILE=app/controllers/src/status_native_handlers.c" >&2; \
+	  echo "usage: make hotswap-test-so FILE=engine/controllers/src/status_native_handlers.c" >&2; \
 	  echo "   or: make hotswap-test-so HANDLER=core.status" >&2; exit 2; fi
 	@set -eu; \
-	rows="$$(tr '\n' ' ' < config/hotswap_swappable.def \
+	rows="$$(tr '\n' ' ' < engine/composition/hotswap_swappable.def \
 	  | grep -oE 'HOTSWAP_SWAPPABLE\("[^"]*"[[:space:]]*,[[:space:]]*"[^"]*"\)')"; \
-	[ -n "$$rows" ] || { echo "hotswap-test-so: config/hotswap_swappable.def parsed to zero rows" >&2; exit 2; }; \
+	[ -n "$$rows" ] || { echo "hotswap-test-so: engine/composition/hotswap_swappable.def parsed to zero rows" >&2; exit 2; }; \
 	if [ -n "$(FILE)" ]; then \
 	  src="$(FILE)"; \
 	  printf '%s\n' "$$rows" | grep -Fq "HOTSWAP_SWAPPABLE(\"$$src\"" || { \
-	    echo "hotswap-test-so: reload_required: '$$src' is not a row in config/hotswap_swappable.def" >&2; \
+	    echo "hotswap-test-so: reload_required: '$$src' is not a row in engine/composition/hotswap_swappable.def" >&2; \
 	    echo "  a TU outside that allowlist can only be proven by rebuilding: make t-fast ONLY=<group>" >&2; \
 	    exit 2; }; \
 	else \
 	  src="$$(printf '%s\n' "$$rows" | awk -v leaf='$(HANDLER)' -F '"' '{ n = split($$4, L, " "); for (i = 1; i <= n; i++) if (L[i] == leaf) { print $$2; exit } }')"; \
-	  [ -n "$$src" ] || { echo "hotswap-test-so: leaf '$(HANDLER)' is not on config/hotswap_swappable.def" >&2; exit 2; }; \
+	  [ -n "$$src" ] || { echo "hotswap-test-so: leaf '$(HANDLER)' is not on engine/composition/hotswap_swappable.def" >&2; exit 2; }; \
 	fi; \
 	[ -f "$$src" ] || { echo "hotswap-test-so: source does not exist: $$src" >&2; exit 2; }; \
 	mkdir -p "$(HOTSWAP_TEST_SO_DIR)"; \
 	safe="$$(printf '%s' "$$src" | tr -c 'A-Za-z0-9_.-' '_')"; \
 	compile_src="$$src"; \
-	island_rows="$$(tr '\n' ' ' < config/hotswap_islands.def \
+	island_rows="$$(tr '\n' ' ' < engine/composition/hotswap_islands.def \
 	  | grep -oE 'HOTSWAP_ISLAND\("[^"]*"[[:space:]]*,[[:space:]]*"[^"]*"\)' || true)"; \
 	members="$$(printf '%s\n' "$$island_rows" | awk -v owner="$$src" -F '"' '$$2 == owner { print $$4; exit }')"; \
 	if [ -n "$$members" ]; then \
@@ -4670,12 +4700,13 @@ EQUIHASH_FACT_TOOL = $(BIN_DIR)/equihash-params-fact
 EQUIHASH_FACT_SRCS = tools/equihash_params_fact.c \
     core/chainparams/src/chainparams.c core/chainparams/src/chainparamsbase.c \
     core/params/src/upgrades.c core/consensus/src/upgrades.c \
-    core/math/src/uint256.c lib/encoding/src/utilstrencodings.c \
-    lib/base/src/log_level.c lib/base/src/result.c
+    core/math/src/uint256.c platform/modules/encoding/src/utilstrencodings.c \
+    platform/modules/base/src/log_level.c platform/modules/base/src/result.c
 
 LINT_FAST_GATES := \
     check-no-stray-untracked-source \
     check-no-stray-root-files \
+    check-architecture-tree \
     check-no-live-lab-history \
     check-raw-sqlite \
     check-malloc \
@@ -4716,7 +4747,7 @@ endif
 #   ZCL_FAST_CACHE_RESET=1 make fast-ci
 #   ZCL_FAST_LIVE=0 make fast-ci   # skip live linger-service probe
 #   ZCL_FAST_CHANGED_FILES_FILE=/tmp/files make fast-ci
-#   ZCL_FAST_CHANGED_FILES='app/controllers/src/agent_controller.c' make fast-ci
+#   ZCL_FAST_CHANGED_FILES='cognition/controllers/src/agent_controller.c' make fast-ci
 #   ZCL_FAST_CHANGED_FILES_ONLY=1  # trust only the explicit changed-file list
 #   ZCL_FAST_COMPILE=dev make fast-ci  # force full dev-object fast-compile
 #   make pre-push-ci               # skips live probe; code gate only
@@ -4849,7 +4880,7 @@ repro-on-copy:
 	    $(if $(CLIMB_PAST),"--expect-climb-past=$(CLIMB_PAST)",) \
 	    $(if $(ARGS),-- $(ARGS),)
 
-$(eval $(call BUILD_NODE_TOOL,spec_zcl,lib/test/spec_main.c $(SPEC_SRCS) lib/test/src/test_helpers.c))
+$(eval $(call BUILD_NODE_TOOL,spec_zcl,tests/harness/spec_main.c $(SPEC_SRCS) tests/harness/src/test_helpers.c))
 $(eval $(call BUILD_NODE_TOOL,wallet_dump,tools/wallet_dump.c))
 $(eval $(call BUILD_NODE_TOOL,snapshot_from_coinskv,tools/snapshot_from_coinskv.c))
 $(eval $(call BUILD_NODE_TOOL,mint_v2_snapshot,tools/mint_v2_snapshot.c))
@@ -5028,7 +5059,7 @@ $(BIN_DIR)/mock_rpc: tools/mock_rpc.c
 # `zclassic23-acme` is the ONLY program in this tree that is a TLS client and
 # the only one that carries a CA trust store. That is not incidental: the node
 # must never be able to be told who to trust by whoever ships a trust store,
-# and lib/test/src/test_cold_join_sovereign.c P2 asserts exactly that by
+# and tests/harness/src/test_cold_join_sovereign.c P2 asserts exactly that by
 # scanning every Z23 object under build/*obj*/epochs for an undefined
 # reference to a TLS-client or trust-store entry point.
 #
@@ -5041,7 +5072,7 @@ $(BIN_DIR)/mock_rpc: tools/mock_rpc.c
 # and platform.clock. The clock is here because `check-no-raw-clock-outside-
 # platform` is a whole-tree rule and this program is not exempt from it: its
 # deadlines and its renewal reference both read time through platform.clock
-# like everything else. lib/platform/src/clock.c pulls in nothing but
+# like everything else. platform/modules/platform/src/clock.c pulls in nothing but
 # base/log_macros.h, which is already on this link line.
 ACME_WORKER_SRCS = \
 	tools/acme/acme_main.c \
@@ -5051,20 +5082,20 @@ ACME_WORKER_SRCS = \
 	tools/acme/tls_client.c \
 	tools/acme/acme_selftest_transport.c \
 	tools/acme/acme_selftest_protocol.c \
-	lib/net/src/acme_arm_file.c \
-	lib/net/src/acme_b64url.c \
-	lib/net/src/acme_renewal.c \
-	lib/net/src/acme_selfsigned.c \
-	lib/json/src/json.c \
-	lib/base/src/log_level.c \
-	lib/base/src/safe_alloc.c \
-	lib/platform/src/clock.c \
-	lib/platform/src/temp_directory.c \
-	lib/platform/src/private_directory.c \
-	lib/platform/src/private_acl_internal.c \
-	lib/platform/src/rng.c
-ACME_WORKER_INCLUDES = -Ilib/base/include -Ilib/json/include -Ilib/net/include \
-	-Ilib/platform/include -Ilib/util/include -Itools/acme \
+	core/modules/net/src/acme_arm_file.c \
+	core/modules/net/src/acme_b64url.c \
+	core/modules/net/src/acme_renewal.c \
+	core/modules/net/src/acme_selfsigned.c \
+	platform/modules/json/src/json.c \
+	platform/modules/base/src/log_level.c \
+	platform/modules/base/src/safe_alloc.c \
+	platform/modules/platform/src/clock.c \
+	platform/modules/platform/src/temp_directory.c \
+	platform/modules/platform/src/private_directory.c \
+	platform/modules/platform/src/private_acl_internal.c \
+	platform/modules/platform/src/rng.c
+ACME_WORKER_INCLUDES = -Iplatform/modules/base/include -Iplatform/modules/json/include -Icore/modules/net/include \
+	-Iplatform/modules/platform/include -Iplatform/modules/util/include -Itools/acme \
 	$(ZCL_VENDOR_INC_FLAGS)
 ACME_WORKER_CFLAGS = -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 	-D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) $(ACME_WORKER_INCLUDES)
@@ -5095,14 +5126,14 @@ LAND_SRCS = \
 	tools/land/land_main.c \
 	tools/land/land_queue.c \
 	tools/land/land_record.c \
-	lib/chainlog/src/chainlog.c \
-	lib/sha3/src/sha3.c \
-	lib/base/src/log_level.c \
-	lib/base/src/safe_alloc.c \
-	lib/platform/src/private_file.c \
-	lib/platform/src/private_acl_internal.c
-LAND_INCLUDES = -Ilib/base/include -Ilib/chainlog/include -Ilib/sha3/include \
-	-Ilib/platform/include -Itools/land
+	engine/modules/chainlog/src/chainlog.c \
+	platform/modules/sha3/src/sha3.c \
+	platform/modules/base/src/log_level.c \
+	platform/modules/base/src/safe_alloc.c \
+	platform/modules/platform/src/private_file.c \
+	platform/modules/platform/src/private_acl_internal.c
+LAND_INCLUDES = -Iplatform/modules/base/include -Iengine/modules/chainlog/include -Iplatform/modules/sha3/include \
+	-Iplatform/modules/platform/include -Itools/land
 LAND_CFLAGS = -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 	-D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) $(LAND_INCLUDES)
 
@@ -5120,32 +5151,32 @@ $(BIN_DIR)/zclassic23-acme$(ZCL_HOST_EXEEXT): $(ACME_WORKER_SRCS) Makefile | $(N
 		$(ACME_WORKER_SRCS) $(ACME_WORKER_LIBS)
 
 # ── The install front door ────────────────────────────────────────────────
-# `z23-bootstrap` is the program packaging/install/install.sh downloads,
+# `z23-bootstrap` is the program platform/packaging/install/install.sh downloads,
 # digest-checks and runs. It is the SECOND program in this tree that is a TLS
 # client (it fetches the release pin and the second-stage installer over
 # HTTPS), so it is built exactly the way zclassic23-acme is and for exactly
 # the same reason: STRAIGHT FROM SOURCE to an executable, with no intermediate
-# object files. lib/test/src/test_cold_join_sovereign.c P2 scans every Z23
+# object files. tests/harness/src/test_cold_join_sovereign.c P2 scans every Z23
 # object under build/*obj*/epochs for an undefined reference to a TLS-client
 # or trust-store entry point, and nothing compiled here can ever land in a
 # scanned epoch tree. That keeps P2 green honestly rather than by exemption.
 #
 # The pure judgement it makes — pin parsing, three-channel agreement, the
-# platform triple, the DNS TXT wire format — is lib/install, which links into
+# platform triple, the DNS TXT wire format — is platform/modules/install, which links into
 # the node like any other module and is proven by the z23_front_door test
 # group. Only the transports are here.
 Z23_BOOTSTRAP_SRCS = \
 	tools/install/z23_bootstrap.c \
 	tools/acme/tls_client.c \
-	lib/install/src/front_door_pin.c \
-	lib/install/src/front_door_platform.c \
-	lib/install/src/front_door_dns_txt.c \
-	lib/crypto/src/sha256.c \
-	lib/base/src/log_level.c \
-	lib/base/src/safe_alloc.c \
-	lib/platform/src/clock.c
-Z23_BOOTSTRAP_INCLUDES = -Ilib/base/include -Ilib/crypto/include \
-	-Ilib/install/include -Ilib/platform/include -Ilib/util/include \
+	platform/modules/install/src/front_door_pin.c \
+	platform/modules/install/src/front_door_platform.c \
+	platform/modules/install/src/front_door_dns_txt.c \
+	core/modules/crypto/src/sha256.c \
+	platform/modules/base/src/log_level.c \
+	platform/modules/base/src/safe_alloc.c \
+	platform/modules/platform/src/clock.c
+Z23_BOOTSTRAP_INCLUDES = -Iplatform/modules/base/include -Icore/modules/crypto/include \
+	-Iplatform/modules/install/include -Iplatform/modules/platform/include -Iplatform/modules/util/include \
 	-Itools/acme -Ivendor/include
 Z23_BOOTSTRAP_CFLAGS = -std=c2x -O2 -Wall -Wextra -Werror -pedantic \
 	-D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) $(Z23_BOOTSTRAP_INCLUDES)
@@ -5168,7 +5199,7 @@ $(Z23_BOOTSTRAP_BIN): $(Z23_BOOTSTRAP_SRCS) Makefile | $(NODE_VENDOR_LIBS)
 # the project domain root; nothing in this repository does that step yet.
 .PHONY: z23-front-door
 z23-front-door: $(Z23_BOOTSTRAP_BIN)
-	@bash packaging/release/build_release.sh --front-door
+	@bash platform/packaging/release/build_release.sh --front-door
 
 $(eval $(call BUILD_NODE_TOOL,wallet_sim,tools/wallet_sim.c))
 $(eval $(call BUILD_NODE_TOOL,wallet_check,tools/wallet_check.c,-lm))
@@ -5227,16 +5258,16 @@ $(BIN_DIR)/zclassic23-package-verify: $(VIEW_GEN_HEADERS) \
 # Opt-in C23 development adapter. This small front process enters Landlock and
 # scrubs credentials before it invokes the fixed Codex CLI; the node handler
 # never executes a caller-supplied command.
-ZCL_TOOL_SANDBOX_SRC = lib/platform/src/os_sandbox_linux.c
+ZCL_TOOL_SANDBOX_SRC = platform/modules/platform/src/os_sandbox_linux.c
 ifneq ($(filter-out Linux,$(ZCL_HOST_OS)),)
 # The confinement entry points exist per host; on Darwin the backend stub
 # refuses them at runtime, which is the honest degradation of an adapter
 # whose sandbox primitive is Linux Landlock.
-ZCL_TOOL_SANDBOX_SRC = lib/platform/src/os_sandbox_stub.c
+ZCL_TOOL_SANDBOX_SRC = platform/modules/platform/src/os_sandbox_stub.c
 endif
 ZCODE_ADAPTER_RUNNER_SRCS = tools/zcode_adapter_runner.c \
-	$(ZCL_TOOL_SANDBOX_SRC) lib/base/src/cleanse.c \
-	lib/base/src/log_level.c lib/base/src/result.c lib/sha3/src/sha3.c
+	$(ZCL_TOOL_SANDBOX_SRC) platform/modules/base/src/cleanse.c \
+	platform/modules/base/src/log_level.c platform/modules/base/src/result.c platform/modules/sha3/src/sha3.c
 .PHONY: zclassic23-zcode-adapter-runner
 zclassic23-zcode-adapter-runner: $(BIN_DIR)/zclassic23-zcode-adapter-runner
 $(BIN_DIR)/zclassic23-zcode-adapter-runner: $(BUILD_IDENTITY_STAMP) \
@@ -5256,7 +5287,7 @@ $(BIN_DIR)/zclassic23-zcode-adapter-runner: $(BUILD_IDENTITY_STAMP) \
 # Measurement-only Codex app-server client. It exposes no command or external
 # tool surface and drives exactly one candidate-rooted thread over JSON-RPC.
 ZCODE_APP_SERVER_BENCHMARK_SRCS = tools/zcode_app_server_benchmark.c \
-	lib/json/src/json.c lib/base/src/safe_alloc.c lib/platform/src/clock.c
+	platform/modules/json/src/json.c platform/modules/base/src/safe_alloc.c platform/modules/platform/src/clock.c
 .PHONY: zcode-app-server-benchmark
 zcode-app-server-benchmark: $(BIN_DIR)/zclassic23-zcode-app-server-benchmark
 $(BIN_DIR)/zclassic23-zcode-app-server-benchmark: $(BUILD_IDENTITY_STAMP) \
@@ -5276,7 +5307,7 @@ $(BIN_DIR)/zclassic23-zcode-app-server-benchmark: $(BUILD_IDENTITY_STAMP) \
 # market acceptance.  The shell harness retains process-group orchestration;
 # all JSON interpretation and content hashing stays in this bounded binary.
 MARKET_ACCEPTANCE_HELPER_SRCS = tools/market_acceptance_helper.c \
-	lib/json/src/json.c lib/base/src/safe_alloc.c lib/sha3/src/sha3.c
+	platform/modules/json/src/json.c platform/modules/base/src/safe_alloc.c platform/modules/sha3/src/sha3.c
 .PHONY: market-acceptance-helper test-market-acceptance-helper
 market-acceptance-helper: $(BIN_DIR)/zclassic23-market-acceptance-helper
 $(BIN_DIR)/zclassic23-market-acceptance-helper: \
@@ -5345,7 +5376,7 @@ release-deploy:
 	test -z "$$(git status --porcelain)" || \
 		{ echo "release-deploy: REFUSE: working tree is dirty" >&2; exit 2; }; \
 	$(MAKE) c23-portable-release; \
-	packaging/release/build_release.sh; \
+	platform/packaging/release/build_release.sh; \
 	tools/scripts/deploy_z23_release.sh --hosts="$(Z23_RELEASE_HOSTS)"
 
 # Split-debug: CFLAGS carries -g, but the shipped binary stays stripped —
@@ -5389,7 +5420,7 @@ $(ZCLASSIC23_BIN): $(VIEW_GEN_HEADERS) $(BUILD_IDENTITY_STAMP) \
 
 .PHONY: zclassic-cli
 zclassic-cli: $(ZCLASSIC_CLI_BIN)
-$(ZCLASSIC_CLI_BIN): $(BUILD_IDENTITY_STAMP) src/cli.c $(CLI_SRCS) lib/base/src/safe_alloc.c
+$(ZCLASSIC_CLI_BIN): $(BUILD_IDENTITY_STAMP) engine/entry/cli.c $(CLI_SRCS) platform/modules/base/src/safe_alloc.c
 	@mkdir -p $(dir $@)
 	@set -eu; \
 	tmp="$$(mktemp "$@.link.XXXXXX")"; \
@@ -5586,58 +5617,58 @@ $(BIN_DIR)/fbsh: $(FBSH_OBJS)
 	$(CC) -std=c23 -O2 $(FBSH_LINK_MODE) -o $@ $(FBSH_OBJS)
 
 # gen_sha3_windows: one-shot tool that queries a fully-synced reference
-# node and overwrites lib/chain/{include/chain,src}/sha3_windows.{h,c}
+# node and overwrites core/modules/chain/{include/chain,src}/sha3_windows.{h,c}
 # with SHA3-256 commitments over 1000-block windows. Standalone build:
 # only the libs it directly uses, no DB, no Tor.
 .PHONY: tools/gen_sha3_windows
 tools/gen_sha3_windows: $(BIN_DIR)/gen_sha3_windows
 $(BIN_DIR)/gen_sha3_windows: tools/gen_sha3_windows.c \
-		lib/chain/src/sha3_windows.c \
-		lib/sha3/src/sha3.c lib/crypto/src/keccak_x4.c lib/crypto/src/simd_dispatch.c lib/encoding/src/utilstrencodings.c \
-		lib/json/src/json.c lib/platform/src/clock.c \
-		lib/base/src/safe_alloc.c lib/base/src/cleanse.c
+		core/modules/chain/src/sha3_windows.c \
+		platform/modules/sha3/src/sha3.c core/modules/crypto/src/keccak_x4.c core/modules/crypto/src/simd_dispatch.c platform/modules/encoding/src/utilstrencodings.c \
+		platform/modules/json/src/json.c platform/modules/platform/src/clock.c \
+		platform/modules/base/src/safe_alloc.c platform/modules/base/src/cleanse.c
 	@mkdir -p $(dir $@)
 	$(CC) -std=c23 -O3 -march=native -Wall -Wextra -Werror -pedantic \
 	    $(ZCL_WARN_STRINGOP_OVERFLOW) \
-	    -Ilib/chain/include -Ilib/sha3/include -Ilib/crypto/include -Ilib/encoding/include \
-	    -Ilib/json/include -Ilib/platform/include -Ilib/base/include -Ilib/util/include \
-	    -Ilib/support/include \
+	    -Icore/modules/chain/include -Iplatform/modules/sha3/include -Icore/modules/crypto/include -Iplatform/modules/encoding/include \
+	    -Iplatform/modules/json/include -Iplatform/modules/platform/include -Iplatform/modules/base/include -Iplatform/modules/util/include \
+	    -Iplatform/modules/support/include \
 	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) \
 	    -o $@ $^ -pthread
 
 # corpus-census: offline driver for the C23 corpus odometer (slice 1b).
-# Reads corpus/scopes.def, enumerates scopes via git ls-files, binds every
+# Reads contexts/commons/corpus/scopes.def, enumerates scopes via git ls-files, binds every
 # census evidence bit to a real recomputable artifact, and emits the signed
 # checkpoint/shard/evidence/report set under corpus/. Standalone build: the
 # pure census core plus the vcs evidence objects it drives — no DB, no Tor.
 .PHONY: tools/corpus-census
 tools/corpus-census: $(BIN_DIR)/corpus-census
 $(BIN_DIR)/corpus-census: tools/corpus_census.c \
-		lib/vcs/src/zcode_c23_corpus_census.c \
-		lib/vcs/src/zcode_c23_corpus_objects.c \
-		lib/vcs/src/zcode_c23_corpus_shard.c \
-		lib/vcs/src/zcode_c23_corpus_checkpoint.c \
-		lib/vcs/src/zcode_family_admission_object.c \
-		lib/vcs/src/zcode_family_moderation.c \
-		lib/vcs/src/signed_evidence.c \
-		lib/vcs/src/package_score.c lib/vcs/src/package_release.c \
-		lib/vcs/src/package_manifest.c lib/vcs/src/package_recipe.c \
-		lib/vcs/src/package_build.c lib/vcs/src/package_reproduce.c \
-		lib/vcs/src/vcs_object.c \
-		lib/crypto/src/ed25519.c lib/crypto/src/sha512.c \
-		lib/sha3/src/sha3.c \
-		lib/base/src/cleanse.c lib/base/src/log_level.c \
-		lib/base/src/safe_alloc.c \
-		lib/codec/src/cursor.c lib/json/src/json.c \
-		lib/platform/src/rng.c lib/platform/src/clock.c \
-		lib/platform/src/positioned_file.c \
-		lib/platform/src/read_mapping.c \
-		lib/platform/src/private_file.c \
-		lib/platform/src/private_directory.c \
-		lib/platform/src/private_acl_internal.c \
-		lib/platform/src/file_metadata.c \
-		lib/platform/src/directory_compat.c \
-		lib/platform/src/os_proc.c
+		contexts/commons/modules/vcs/src/zcode_c23_corpus_census.c \
+		contexts/commons/modules/vcs/src/zcode_c23_corpus_objects.c \
+		contexts/commons/modules/vcs/src/zcode_c23_corpus_shard.c \
+		contexts/commons/modules/vcs/src/zcode_c23_corpus_checkpoint.c \
+		contexts/commons/modules/vcs/src/zcode_family_admission_object.c \
+		contexts/commons/modules/vcs/src/zcode_family_moderation.c \
+		contexts/commons/modules/vcs/src/signed_evidence.c \
+		contexts/commons/modules/vcs/src/package_score.c contexts/commons/modules/vcs/src/package_release.c \
+		contexts/commons/modules/vcs/src/package_manifest.c contexts/commons/modules/vcs/src/package_recipe.c \
+		contexts/commons/modules/vcs/src/package_build.c contexts/commons/modules/vcs/src/package_reproduce.c \
+		contexts/commons/modules/vcs/src/vcs_object.c \
+		core/modules/crypto/src/ed25519.c core/modules/crypto/src/sha512.c \
+		platform/modules/sha3/src/sha3.c \
+		platform/modules/base/src/cleanse.c platform/modules/base/src/log_level.c \
+		platform/modules/base/src/safe_alloc.c \
+		platform/modules/codec/src/cursor.c platform/modules/json/src/json.c \
+		platform/modules/platform/src/rng.c platform/modules/platform/src/clock.c \
+		platform/modules/platform/src/positioned_file.c \
+		platform/modules/platform/src/read_mapping.c \
+		platform/modules/platform/src/private_file.c \
+		platform/modules/platform/src/private_directory.c \
+		platform/modules/platform/src/private_acl_internal.c \
+		platform/modules/platform/src/file_metadata.c \
+		platform/modules/platform/src/directory_compat.c \
+		platform/modules/platform/src/os_proc.c
 	@mkdir -p $(dir $@)
 	# --gc-sections: ed25519's batch-verify path (never called here) pulls
 	# zcl_random_secret_bytes -> sealed-tree random.c; the collector drops it.
@@ -5645,10 +5676,10 @@ $(BIN_DIR)/corpus-census: tools/corpus_census.c \
 	    $(ZCL_WARN_STRINGOP_OVERFLOW) \
 	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) \
 	    -ffunction-sections -fdata-sections $(ZCL_GC_SECTIONS_LDFLAG) \
-	    -Ilib/vcs/include -Ilib/base/include -Ilib/util/include \
-	    -Ilib/crypto/include -Ilib/sha3/include -Ilib/codec/include \
-	    -Ilib/json/include -Ilib/platform/include -Ilib/support/include \
-	    -Ilib/core/include -Ivendor/include \
+	    -Icontexts/commons/modules/vcs/include -Iplatform/modules/base/include -Iplatform/modules/util/include \
+	    -Icore/modules/crypto/include -Iplatform/modules/sha3/include -Iplatform/modules/codec/include \
+	    -Iplatform/modules/json/include -Iplatform/modules/platform/include -Iplatform/modules/support/include \
+	    -Icore/modules/core/include -Ivendor/include \
 	    -o $@ $^ -Lvendor/lib $(NODE_SECP_ARCHIVE) -lpthread -lm
 
 # Run the corpus census. The default is a SMOKE run into build/corpus-census/
@@ -5662,7 +5693,7 @@ $(BIN_DIR)/corpus-census: tools/corpus_census.c \
 #   (CORPUS_PREDECESSOR_ROOT / CORPUS_PREVIOUS_REPORT override discovery)
 .PHONY: corpus-census
 corpus-census: $(BIN_DIR)/corpus-census
-	$(BIN_DIR)/corpus-census --repo . --def corpus/scopes.def \
+	$(BIN_DIR)/corpus-census --repo . --def contexts/commons/corpus/scopes.def \
 	    --out $${CORPUS_OUT:-build/corpus-census} \
 	    --cutoff-height $${CORPUS_CUTOFF_HEIGHT:-1} \
 	    --cutoff-mtp $${CORPUS_CUTOFF_MTP:-1700000000} \
@@ -5686,34 +5717,34 @@ corpus-census: $(BIN_DIR)/corpus-census
 .PHONY: tools/package-factory
 tools/package-factory: $(BIN_DIR)/package-factory
 $(BIN_DIR)/package-factory: tools/package_factory.c \
-		lib/vcs/src/package_prepare.c lib/vcs/src/package_prepare_schema.c \
-		lib/vcs/src/package_manifest.c \
-		lib/vcs/src/package_recipe.c lib/vcs/src/package_deps.c \
-		lib/vcs/src/package_capsule.c lib/vcs/src/package_release.c \
-		lib/vcs/src/package_build.c lib/vcs/src/package_reproduce.c \
-		lib/vcs/src/zcode_c23_corpus_objects.c \
-		lib/vcs/src/zcode_family_admission_object.c \
-		lib/vcs/src/zcode_family_moderation.c \
-		lib/vcs/src/signed_evidence.c \
-		lib/crypto/src/ed25519.c lib/crypto/src/sha512.c \
-		lib/sha3/src/sha3.c \
-		lib/base/src/cleanse.c lib/base/src/log_level.c \
-		lib/base/src/safe_alloc.c \
-		lib/codec/src/cursor.c lib/json/src/json.c \
-		lib/platform/src/rng.c lib/platform/src/clock.c
+		contexts/commons/modules/vcs/src/package_prepare.c contexts/commons/modules/vcs/src/package_prepare_schema.c \
+		contexts/commons/modules/vcs/src/package_manifest.c \
+		contexts/commons/modules/vcs/src/package_recipe.c contexts/commons/modules/vcs/src/package_deps.c \
+		contexts/commons/modules/vcs/src/package_capsule.c contexts/commons/modules/vcs/src/package_release.c \
+		contexts/commons/modules/vcs/src/package_build.c contexts/commons/modules/vcs/src/package_reproduce.c \
+		contexts/commons/modules/vcs/src/zcode_c23_corpus_objects.c \
+		contexts/commons/modules/vcs/src/zcode_family_admission_object.c \
+		contexts/commons/modules/vcs/src/zcode_family_moderation.c \
+		contexts/commons/modules/vcs/src/signed_evidence.c \
+		core/modules/crypto/src/ed25519.c core/modules/crypto/src/sha512.c \
+		platform/modules/sha3/src/sha3.c \
+		platform/modules/base/src/cleanse.c platform/modules/base/src/log_level.c \
+		platform/modules/base/src/safe_alloc.c \
+		platform/modules/codec/src/cursor.c platform/modules/json/src/json.c \
+		platform/modules/platform/src/rng.c platform/modules/platform/src/clock.c
 	@mkdir -p $(dir $@)
 	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 	    $(ZCL_WARN_STRINGOP_OVERFLOW) \
 	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) \
 	    -ffunction-sections -fdata-sections $(ZCL_GC_SECTIONS_LDFLAG) \
-	    -Ilib/vcs/include -Ilib/base/include -Ilib/util/include \
-	    -Ilib/crypto/include -Ilib/sha3/include -Ilib/codec/include \
-	    -Ilib/json/include -Ilib/platform/include -Ilib/support/include \
-	    -Ilib/core/include -Ivendor/include \
+	    -Icontexts/commons/modules/vcs/include -Iplatform/modules/base/include -Iplatform/modules/util/include \
+	    -Icore/modules/crypto/include -Iplatform/modules/sha3/include -Iplatform/modules/codec/include \
+	    -Iplatform/modules/json/include -Iplatform/modules/platform/include -Iplatform/modules/support/include \
+	    -Icore/modules/core/include -Ivendor/include \
 	    -o $@ $^ -Lvendor/lib $(NODE_SECP_ARCHIVE) -lpthread -lm
 
 # arena_runner: deterministic 2-team zdogfight match driver (dev tool; NOT a
-# native command — config/commands/*.def untouched). Spawns one confined
+# native command — engine/composition/commands/*.def untouched). Spawns one confined
 # pilot process per team (os_sandbox session child profile, zero fs grants),
 # drives the fixed obs/ctl pipe protocol, and emits replay/final-state roots
 # for cross-node byte-identical replay verification. Standalone target like
@@ -5722,27 +5753,27 @@ $(BIN_DIR)/package-factory: tools/package_factory.c \
 tools/arena-runner: $(BIN_DIR)/arena_runner
 tools/arena-product-journey-c23: $(BIN_DIR)/arena_product_journey_c23
 $(BIN_DIR)/arena_product_journey_c23: tools/arena_product_journey_c23.c \
-		lib/json/src/json.c lib/base/src/safe_alloc.c \
-		lib/base/src/log_level.c
+		platform/modules/json/src/json.c platform/modules/base/src/safe_alloc.c \
+		platform/modules/base/src/log_level.c
 	@mkdir -p $(dir $@)
 	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 	    $(ZCL_WARN_STRINGOP_OVERFLOW) -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) \
-	    -Ilib/json/include -Ilib/base/include -o $@ $^ -lpthread -lm
+	    -Iplatform/modules/json/include -Iplatform/modules/base/include -o $@ $^ -lpthread -lm
 $(BIN_DIR)/arena_runner: tools/arena_runner.c \
-		packages/zdogfight/src/zdogfight.c packages/zdogfight/src/zdogfix.c \
-		packages/zprng/src/zprng.c \
-		$(ZCL_TOOL_SANDBOX_SRC) lib/platform/src/clock.c \
-		lib/base/src/result.c lib/base/src/log_level.c \
-		lib/base/src/safe_alloc.c \
-		lib/sha3/src/sha3.c
+		contexts/commons/packages/zdogfight/src/zdogfight.c contexts/commons/packages/zdogfight/src/zdogfix.c \
+		contexts/commons/packages/zprng/src/zprng.c \
+		$(ZCL_TOOL_SANDBOX_SRC) platform/modules/platform/src/clock.c \
+		platform/modules/base/src/result.c platform/modules/base/src/log_level.c \
+		platform/modules/base/src/safe_alloc.c \
+		platform/modules/sha3/src/sha3.c
 	@mkdir -p $(dir $@)
 	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 	    $(ZCL_WARN_STRINGOP_OVERFLOW) \
 	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) \
 	    -ffunction-sections -fdata-sections $(ZCL_GC_SECTIONS_LDFLAG) \
-	    -Ipackages/zdogfight/include -Ipackages/zprng/include \
-	    -Ilib/platform/include -Ilib/base/include -Ilib/util/include \
-	    -Ilib/sha3/include -Ilib/support/include -Ivendor/include \
+	    -Icontexts/commons/packages/zdogfight/include -Icontexts/commons/packages/zprng/include \
+	    -Iplatform/modules/platform/include -Iplatform/modules/base/include -Iplatform/modules/util/include \
+	    -Iplatform/modules/sha3/include -Iplatform/modules/support/include -Ivendor/include \
 	    -o $@ $^ -lm
 
 # arena_present: bridge one zdogfight replay stream into the bounded
@@ -5753,19 +5784,19 @@ $(BIN_DIR)/arena_runner: tools/arena_runner.c \
 .PHONY: tools/arena-present
 tools/arena-present: $(BIN_DIR)/arena_present
 $(BIN_DIR)/arena_present: tools/arena_present.c \
-		packages/zdogfight/src/zdogfight.c packages/zdogfight/src/zdogfix.c \
-		packages/zprng/src/zprng.c \
-		lib/presentation/src/model.c \
-		lib/base/src/safe_alloc.c \
-		lib/sha3/src/sha3.c
+		contexts/commons/packages/zdogfight/src/zdogfight.c contexts/commons/packages/zdogfight/src/zdogfix.c \
+		contexts/commons/packages/zprng/src/zprng.c \
+		contexts/explorer/modules/presentation/src/model.c \
+		platform/modules/base/src/safe_alloc.c \
+		platform/modules/sha3/src/sha3.c
 	@mkdir -p $(dir $@)
 	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 	    $(ZCL_WARN_STRINGOP_OVERFLOW) \
 	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) \
 	    -ffunction-sections -fdata-sections $(ZCL_GC_SECTIONS_LDFLAG) \
-	    -Ipackages/zdogfight/include -Ipackages/zprng/include \
-	    -Ilib/presentation/include -Ilib/base/include -Ilib/util/include \
-	    -Ilib/sha3/include -Ilib/support/include -Ivendor/include \
+	    -Icontexts/commons/packages/zdogfight/include -Icontexts/commons/packages/zprng/include \
+	    -Icontexts/explorer/modules/presentation/include -Iplatform/modules/base/include -Iplatform/modules/util/include \
+	    -Iplatform/modules/sha3/include -Iplatform/modules/support/include -Ivendor/include \
 	    -o $@ $^ -lm
 
 # arena-selftest: build and run the born-red package test suites for the
@@ -5782,63 +5813,63 @@ tools/arena-selftest: $(BIN_DIR)/test_zdogfight $(BIN_DIR)/test_zdogace \
 	$(BIN_DIR)/test_zdogdrone
 	$(BIN_DIR)/test_zdogview
 
-$(BIN_DIR)/test_zdogfight: packages/zdogfight/tests/test_zdogfight.c \
-		packages/zdogfight/src/zdogfight.c packages/zdogfight/src/zdogfix.c \
-		packages/zprng/src/zprng.c
+$(BIN_DIR)/test_zdogfight: contexts/commons/packages/zdogfight/tests/test_zdogfight.c \
+		contexts/commons/packages/zdogfight/src/zdogfight.c contexts/commons/packages/zdogfight/src/zdogfix.c \
+		contexts/commons/packages/zprng/src/zprng.c
 	@mkdir -p $(dir $@)
 	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 	    $(ZCL_WARN_STRINGOP_OVERFLOW) \
 	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) \
-	    -Ipackages/zdogfight/include -Ipackages/zprng/include \
+	    -Icontexts/commons/packages/zdogfight/include -Icontexts/commons/packages/zprng/include \
 	    -o $@ $^ -lm
 
-$(BIN_DIR)/test_zdogace: packages/zdogace/tests/test_zdogace.c \
-		packages/zdogace/src/zdogace.c \
-		packages/zdogfight/src/zdogfight.c packages/zdogfight/src/zdogfix.c \
-		packages/zprng/src/zprng.c
+$(BIN_DIR)/test_zdogace: contexts/commons/packages/zdogace/tests/test_zdogace.c \
+		contexts/commons/packages/zdogace/src/zdogace.c \
+		contexts/commons/packages/zdogfight/src/zdogfight.c contexts/commons/packages/zdogfight/src/zdogfix.c \
+		contexts/commons/packages/zprng/src/zprng.c
 	@mkdir -p $(dir $@)
 	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 	    $(ZCL_WARN_STRINGOP_OVERFLOW) \
 	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) \
-	    -Ipackages/zdogace/include -Ipackages/zdogfight/include \
-	    -Ipackages/zprng/include \
+	    -Icontexts/commons/packages/zdogace/include -Icontexts/commons/packages/zdogfight/include \
+	    -Icontexts/commons/packages/zprng/include \
 	    -o $@ $^ -lm
 
-$(BIN_DIR)/test_zdogdrone: packages/zdogdrone/tests/test_zdogdrone.c \
-		packages/zdogdrone/src/zdogdrone.c \
-		packages/zprng/src/zprng.c
+$(BIN_DIR)/test_zdogdrone: contexts/commons/packages/zdogdrone/tests/test_zdogdrone.c \
+		contexts/commons/packages/zdogdrone/src/zdogdrone.c \
+		contexts/commons/packages/zprng/src/zprng.c
 	@mkdir -p $(dir $@)
 	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 	    $(ZCL_WARN_STRINGOP_OVERFLOW) \
 	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) \
-	    -Ipackages/zdogdrone/include -Ipackages/zdogfight/include \
-	    -Ipackages/zprng/include \
+	    -Icontexts/commons/packages/zdogdrone/include -Icontexts/commons/packages/zdogfight/include \
+	    -Icontexts/commons/packages/zprng/include \
 	    -o $@ $^ -lm
 
-$(BIN_DIR)/test_zdogview: packages/zdogview/tests/test_zdogview.c \
-		packages/zdogview/src/zdogview.c \
-		packages/zdogfight/src/zdogfight.c packages/zdogfight/src/zdogfix.c \
-		packages/zprng/src/zprng.c
+$(BIN_DIR)/test_zdogview: contexts/commons/packages/zdogview/tests/test_zdogview.c \
+		contexts/commons/packages/zdogview/src/zdogview.c \
+		contexts/commons/packages/zdogfight/src/zdogfight.c contexts/commons/packages/zdogfight/src/zdogfix.c \
+		contexts/commons/packages/zprng/src/zprng.c
 	@mkdir -p $(dir $@)
 	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 	    $(ZCL_WARN_STRINGOP_OVERFLOW) \
 	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) \
-	    -Ipackages/zdogview/include -Ipackages/zdogfight/include \
-	    -Ipackages/zprng/include \
+	    -Icontexts/commons/packages/zdogview/include -Icontexts/commons/packages/zdogfight/include \
+	    -Icontexts/commons/packages/zprng/include \
 	    -o $@ $^ -lm
 
 .PHONY: tools/zdogview
 tools/zdogview: $(BIN_DIR)/zdogview
-$(BIN_DIR)/zdogview: packages/zdogview/app/main.c \
-		packages/zdogview/src/zdogview.c \
-		packages/zdogfight/src/zdogfight.c packages/zdogfight/src/zdogfix.c \
-		packages/zprng/src/zprng.c
+$(BIN_DIR)/zdogview: contexts/commons/packages/zdogview/app/main.c \
+		contexts/commons/packages/zdogview/src/zdogview.c \
+		contexts/commons/packages/zdogfight/src/zdogfight.c contexts/commons/packages/zdogfight/src/zdogfix.c \
+		contexts/commons/packages/zprng/src/zprng.c
 	@mkdir -p $(dir $@)
 	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 	    $(ZCL_WARN_STRINGOP_OVERFLOW) \
 	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) \
-	    -Ipackages/zdogview/include -Ipackages/zdogfight/include \
-	    -Ipackages/zprng/include \
+	    -Icontexts/commons/packages/zdogview/include -Icontexts/commons/packages/zdogfight/include \
+	    -Icontexts/commons/packages/zprng/include \
 	    -o $@ $^ -lm
 
 # ── ZCODE Arena: the public demo ──────────────────────────────────────────
@@ -5859,24 +5890,24 @@ $(BIN_DIR)/zdogview: packages/zdogview/app/main.c \
 ARENA_PILOT_CFLAGS = -std=c23 -O1 $(ZCL_STATIC_FLAG) -Wall -Wextra -Werror -pedantic \
     $(ZCL_WARN_STRINGOP_OVERFLOW) -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS)
 
-$(BIN_DIR)/pilot_zdogace: packages/zdogace/app/main.c \
-		packages/zdogace/src/zdogace.c \
-		packages/zdogfight/src/zdogfight.c packages/zdogfight/src/zdogfix.c \
-		packages/zprng/src/zprng.c
+$(BIN_DIR)/pilot_zdogace: contexts/commons/packages/zdogace/app/main.c \
+		contexts/commons/packages/zdogace/src/zdogace.c \
+		contexts/commons/packages/zdogfight/src/zdogfight.c contexts/commons/packages/zdogfight/src/zdogfix.c \
+		contexts/commons/packages/zprng/src/zprng.c
 	@mkdir -p $(dir $@)
 	$(CC) $(ARENA_PILOT_CFLAGS) \
-	    -Ipackages/zdogace/include -Ipackages/zdogfight/include \
-	    -Ipackages/zprng/include \
+	    -Icontexts/commons/packages/zdogace/include -Icontexts/commons/packages/zdogfight/include \
+	    -Icontexts/commons/packages/zprng/include \
 	    -o $@ $^ -lm
 
-$(BIN_DIR)/pilot_zdogdrone: packages/zdogdrone/app/main.c \
-		packages/zdogdrone/src/zdogdrone.c \
-		packages/zdogfight/src/zdogfight.c packages/zdogfight/src/zdogfix.c \
-		packages/zprng/src/zprng.c
+$(BIN_DIR)/pilot_zdogdrone: contexts/commons/packages/zdogdrone/app/main.c \
+		contexts/commons/packages/zdogdrone/src/zdogdrone.c \
+		contexts/commons/packages/zdogfight/src/zdogfight.c contexts/commons/packages/zdogfight/src/zdogfix.c \
+		contexts/commons/packages/zprng/src/zprng.c
 	@mkdir -p $(dir $@)
 	$(CC) $(ARENA_PILOT_CFLAGS) \
-	    -Ipackages/zdogdrone/include -Ipackages/zdogfight/include \
-	    -Ipackages/zprng/include \
+	    -Icontexts/commons/packages/zdogdrone/include -Icontexts/commons/packages/zdogfight/include \
+	    -Icontexts/commons/packages/zprng/include \
 	    -o $@ $^ -lm
 
 # arena_svg: deterministic headless replay renderer (see the file header).
@@ -5884,18 +5915,18 @@ $(BIN_DIR)/pilot_zdogdrone: packages/zdogdrone/app/main.c \
 .PHONY: tools/arena-svg
 tools/arena-svg: $(BIN_DIR)/arena_svg
 $(BIN_DIR)/arena_svg: tools/arena_svg.c \
-		packages/zdogfight/src/zdogfight.c packages/zdogfight/src/zdogfix.c \
-		packages/zprng/src/zprng.c \
-		lib/base/src/safe_alloc.c \
-		lib/sha3/src/sha3.c
+		contexts/commons/packages/zdogfight/src/zdogfight.c contexts/commons/packages/zdogfight/src/zdogfix.c \
+		contexts/commons/packages/zprng/src/zprng.c \
+		platform/modules/base/src/safe_alloc.c \
+		platform/modules/sha3/src/sha3.c
 	@mkdir -p $(dir $@)
 	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 	    $(ZCL_WARN_STRINGOP_OVERFLOW) \
 	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) \
 	    -ffunction-sections -fdata-sections $(ZCL_GC_SECTIONS_LDFLAG) \
-	    -Ipackages/zdogfight/include -Ipackages/zprng/include \
-	    -Ilib/base/include -Ilib/util/include \
-	    -Ilib/sha3/include -Ilib/support/include -Ivendor/include \
+	    -Icontexts/commons/packages/zdogfight/include -Icontexts/commons/packages/zprng/include \
+	    -Iplatform/modules/base/include -Iplatform/modules/util/include \
+	    -Iplatform/modules/sha3/include -Iplatform/modules/support/include -Ivendor/include \
 	    -o $@ $^ -lm
 
 # arena_view: interactive raylib 3D replay viewer (see the file header).
@@ -5907,11 +5938,11 @@ tools/arena-view: $(BIN_DIR)/arena_view
 RAYLIB_CFLAGS := $(shell pkg-config --cflags raylib 2>/dev/null)
 RAYLIB_LIBS := $(shell pkg-config --libs raylib 2>/dev/null)
 $(BIN_DIR)/arena_view: tools/arena_view.c \
-		packages/zdogview/src/zdogview.c \
-		packages/zdogfight/src/zdogfight.c packages/zdogfight/src/zdogfix.c \
-		packages/zprng/src/zprng.c \
-		lib/base/src/safe_alloc.c \
-		lib/sha3/src/sha3.c
+		contexts/commons/packages/zdogview/src/zdogview.c \
+		contexts/commons/packages/zdogfight/src/zdogfight.c contexts/commons/packages/zdogfight/src/zdogfix.c \
+		contexts/commons/packages/zprng/src/zprng.c \
+		platform/modules/base/src/safe_alloc.c \
+		platform/modules/sha3/src/sha3.c
 	@mkdir -p $(dir $@)
 	@if ! pkg-config --exists raylib; then \
 	    echo "arena_view: raylib not found via pkg-config."; \
@@ -5921,10 +5952,10 @@ $(BIN_DIR)/arena_view: tools/arena_view.c \
 	    $(ZCL_WARN_STRINGOP_OVERFLOW) \
 	    -D_POSIX_C_SOURCE=200809L $(RAYLIB_CFLAGS) \
 	    -ffunction-sections -fdata-sections $(ZCL_GC_SECTIONS_LDFLAG) \
-	    -Ipackages/zdogview/include -Ipackages/zdogfight/include \
-	    -Ipackages/zprng/include \
-	    -Ilib/base/include -Ilib/util/include \
-	    -Ilib/sha3/include -Ilib/support/include -Ivendor/include \
+	    -Icontexts/commons/packages/zdogview/include -Icontexts/commons/packages/zdogfight/include \
+	    -Icontexts/commons/packages/zprng/include \
+	    -Iplatform/modules/base/include -Iplatform/modules/util/include \
+	    -Iplatform/modules/sha3/include -Iplatform/modules/support/include -Ivendor/include \
 	    -o $@ $^ $(RAYLIB_LIBS) -lm
 
 ARENA_DEMO_BINS = $(BIN_DIR)/arena_runner $(BIN_DIR)/arena_svg \
@@ -6029,24 +6060,24 @@ package-factory-selftest: $(BIN_DIR)/package-factory $(BIN_DIR)/corpus-census \
 
 # gen_utxo_root_ladder: one-shot tool that reads a COPY of a zclassic23
 # node.db (never the live datadir) and overwrites
-# lib/chain/{include/chain,src}/utxo_root_ladder.{h,c} with the golden-height
+# core/modules/chain/{include/chain,src}/utxo_root_ladder.{h,c} with the golden-height
 # UTXO root ladder — cross-checked SHA3 UTXO-set commitments at fixed stride
 # heights plus the zclassicd-verified checkpoint rung (re-stated as a local
 # constant in the tool — see the comment above g_checkpoint_anchor — so this
 # standalone tool avoids pulling in the full chain.h/block_index header
-# graph just for chain/checkpoints.h). Standalone build: lib/chain/src/mmb.c
+# graph just for chain/checkpoints.h). Standalone build: core/modules/chain/src/mmb.c
 # (pure, no DB) for the dense layer + libsqlite3.a for the node.db reads.
 # No node libs, no Tor, no RPC.
 .PHONY: tools/gen_utxo_root_ladder
 tools/gen_utxo_root_ladder: $(BIN_DIR)/gen_utxo_root_ladder
 $(BIN_DIR)/gen_utxo_root_ladder: tools/gen_utxo_root_ladder.c \
-		lib/chain/src/mmb.c lib/sha3/src/sha3.c lib/crypto/src/keccak_x4.c lib/crypto/src/simd_dispatch.c lib/base/src/cleanse.c \
-		lib/base/src/log_level.c
+		core/modules/chain/src/mmb.c platform/modules/sha3/src/sha3.c core/modules/crypto/src/keccak_x4.c core/modules/crypto/src/simd_dispatch.c platform/modules/base/src/cleanse.c \
+		platform/modules/base/src/log_level.c
 	@mkdir -p $(dir $@)
 	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 	    $(ZCL_WARN_STRINGOP_OVERFLOW) \
-	    -Ilib/chain/include -Ilib/sha3/include -Ilib/crypto/include -Ilib/support/include \
-	    -Ilib/base/include -Ilib/util/include -Ivendor/include \
+	    -Icore/modules/chain/include -Iplatform/modules/sha3/include -Icore/modules/crypto/include -Iplatform/modules/support/include \
+	    -Iplatform/modules/base/include -Iplatform/modules/util/include -Ivendor/include \
 	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) \
 	    -o $@ $^ -Lvendor/lib vendor/lib/libsqlite3.a -lpthread -lm
 
@@ -6055,16 +6086,16 @@ $(BIN_DIR)/gen_utxo_root_ladder: tools/gen_utxo_root_ladder.c \
 # consensus-state bundles (bit-exact codec preimages) and asserts each bundle
 # is self-consistent and the two are byte-identical in chain content. Run
 # after every independent from-genesis producer fold BEFORE baking ROM
-# commitments. Standalone build: vendored sqlite + lib/crypto sha3 only;
+# commitments. Standalone build: vendored sqlite + core/modules/crypto sha3 only;
 # opens both bundles read-only, never touches a datadir.
 .PHONY: tools/rom_two_builder_compare
 tools/rom_two_builder_compare: $(BIN_DIR)/rom_two_builder_compare
 $(BIN_DIR)/rom_two_builder_compare: tools/rom_two_builder_compare.c \
-		lib/sha3/src/sha3.c lib/crypto/src/keccak_x4.c lib/crypto/src/simd_dispatch.c lib/base/src/cleanse.c
+		platform/modules/sha3/src/sha3.c core/modules/crypto/src/keccak_x4.c core/modules/crypto/src/simd_dispatch.c platform/modules/base/src/cleanse.c
 	@mkdir -p $(dir $@)
 	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 	    $(ZCL_WARN_STRINGOP_OVERFLOW) \
-	    -Ilib/sha3/include -Ilib/crypto/include -Ilib/support/include -Ilib/base/include \
+	    -Iplatform/modules/sha3/include -Icore/modules/crypto/include -Iplatform/modules/support/include -Iplatform/modules/base/include \
 	    -Ivendor/include \
 	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) \
 	    -o $@ $^ -Lvendor/lib vendor/lib/libsqlite3.a -lpthread -lm
@@ -6074,19 +6105,19 @@ $(BIN_DIR)/rom_two_builder_compare: tools/rom_two_builder_compare.c \
 # artifact (parseable by the node's checkpoint_ladder verifier) and a C
 # designated-initializer fragment for the sealed keystone table (owner unseal
 # ritual only). Reuses the CANONICAL node rung module
-# (lib/storage/src/checkpoint_rung.c) so tool + node artifacts are byte-
+# (engine/modules/storage/src/checkpoint_rung.c) so tool + node artifacts are byte-
 # identical; that TU is deliberately free of the chain/ include tree so it
-# links standalone here alongside vendored sqlite + lib/crypto sha3 + log_level.
+# links standalone here alongside vendored sqlite + core/modules/crypto sha3 + log_level.
 .PHONY: tools/checkpoint_rung_export
 tools/checkpoint_rung_export: $(BIN_DIR)/checkpoint_rung_export
 $(BIN_DIR)/checkpoint_rung_export: tools/checkpoint_rung_export.c \
-		lib/storage/src/checkpoint_rung.c lib/base/src/log_level.c \
-		lib/sha3/src/sha3.c lib/crypto/src/keccak_x4.c lib/crypto/src/simd_dispatch.c lib/base/src/cleanse.c
+		engine/modules/storage/src/checkpoint_rung.c platform/modules/base/src/log_level.c \
+		platform/modules/sha3/src/sha3.c core/modules/crypto/src/keccak_x4.c core/modules/crypto/src/simd_dispatch.c platform/modules/base/src/cleanse.c
 	@mkdir -p $(dir $@)
 	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 	    $(ZCL_WARN_STRINGOP_OVERFLOW) \
-	    -Ilib/storage/include -Ilib/sha3/include -Ilib/crypto/include -Ilib/base/include -Ilib/util/include \
-	    -Ilib/support/include -Ivendor/include \
+	    -Iengine/modules/storage/include -Iplatform/modules/sha3/include -Icore/modules/crypto/include -Iplatform/modules/base/include -Iplatform/modules/util/include \
+	    -Iplatform/modules/support/include -Ivendor/include \
 	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) \
 	    -o $@ $^ -Lvendor/lib vendor/lib/libsqlite3.a -lpthread -lm
 
@@ -6101,7 +6132,7 @@ $(BIN_DIR)/checkpoint_rung_export: tools/checkpoint_rung_export.c \
 # millions of blocks past the tip, and prints one SHA3-256 digest. Two builds
 # that print the same digest agree on the whole swept forward schedule.
 # Standalone build: the sealed consensus core (core/{chainparams,params,
-# consensus,math}) plus lib/sha3 + result/log_level/utilstrencodings. No
+# consensus,math}) plus platform/modules/sha3 + result/log_level/utilstrencodings. No
 # sqlite, no node libs, no Tor, no RPC — and no datadir, disk, network or
 # clock at RUNTIME either, so it is safe to run beside a live node.
 .PHONY: tools/consensus_rule_sweep
@@ -6111,18 +6142,18 @@ $(BIN_DIR)/consensus_rule_sweep: tools/consensus_rule_sweep.c \
 		core/chainparams/src/chainparams.c core/chainparams/src/chainparamsbase.c \
 		core/params/src/params.c core/params/src/upgrades.c \
 		core/consensus/src/upgrades.c core/consensus/src/subsidy.c \
-		core/math/src/uint256.c lib/encoding/src/utilstrencodings.c \
-		lib/base/src/result.c lib/base/src/log_level.c \
-		lib/sha3/src/sha3.c
+		core/math/src/uint256.c platform/modules/encoding/src/utilstrencodings.c \
+		platform/modules/base/src/result.c platform/modules/base/src/log_level.c \
+		platform/modules/sha3/src/sha3.c
 	@mkdir -p $(dir $@)
 	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 	    $(ZCL_WARN_STRINGOP_OVERFLOW) \
 	    -Itools -Icore/chainparams/include -Icore/params/include \
 	    -Icore/consensus/include -Icore/math/include \
-	    -Ilib/chain/include -Ilib/primitives/include -Ilib/core/include \
-	    -Ilib/encoding/include -Ilib/script/include -Ilib/sha3/include \
-	    -Ilib/sapling/include -Ilib/crypto/include \
-	    -Ilib/base/include -Ilib/util/include -Ilib/support/include \
+	    -Icore/modules/chain/include -Icore/modules/primitives/include -Icore/modules/core/include \
+	    -Iplatform/modules/encoding/include -Icore/modules/script/include -Iplatform/modules/sha3/include \
+	    -Icore/modules/sapling/include -Icore/modules/crypto/include \
+	    -Iplatform/modules/base/include -Iplatform/modules/util/include -Iplatform/modules/support/include \
 	    -Ivendor/include \
 	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) \
 	    -o $@ $(filter %.c,$^) -lpthread -lm
@@ -6130,16 +6161,16 @@ $(BIN_DIR)/consensus_rule_sweep: tools/consensus_rule_sweep.c \
 # rom_bundle_sha3: standalone whole-file SHA3-256 digest tool used by
 # tools/scripts/rom-bundle-replicate.sh to verify a ROM bundle replication
 # copy byte-for-byte against its source. No node libs, no sqlite, no Tor —
-# links only lib/sha3/src/sha3.c, the same primitive rom_seed.c and every
+# links only platform/modules/sha3/src/sha3.c, the same primitive rom_seed.c and every
 # other consensus-facing digest in the node uses.
 .PHONY: tools/rom_bundle_sha3
 tools/rom_bundle_sha3: $(BIN_DIR)/rom_bundle_sha3
 $(BIN_DIR)/rom_bundle_sha3: tools/rom_bundle_sha3.c \
-		lib/sha3/src/sha3.c lib/crypto/src/keccak_x4.c lib/crypto/src/simd_dispatch.c lib/base/src/cleanse.c
+		platform/modules/sha3/src/sha3.c core/modules/crypto/src/keccak_x4.c core/modules/crypto/src/simd_dispatch.c platform/modules/base/src/cleanse.c
 	@mkdir -p $(dir $@)
 	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 	    $(ZCL_WARN_STRINGOP_OVERFLOW) \
-	    -Ilib/sha3/include -Ilib/crypto/include -Ilib/support/include -Ilib/base/include \
+	    -Iplatform/modules/sha3/include -Icore/modules/crypto/include -Iplatform/modules/support/include -Iplatform/modules/base/include \
 	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) \
 	    -o $@ $^ -lm
 
@@ -6161,8 +6192,8 @@ rom-bundle-replicate: $(BIN_DIR)/rom_bundle_sha3
 # bundle-bootstrap: BYTE DELIVERY ONLY — stage a release-shipped
 # consensus-state bundle into <datadir>/bundles/ so a fresh node's zero-flag
 # cold-boot autodetect (boot_autodetect_consensus_bundle,
-# config/src/boot_auto_install_bundle.c) finds it with no further operator
-# action at boot time (deploy/zclassic23-bundle-bootstrap.sh; see
+# engine/composition/src/boot_auto_install_bundle.c) finds it with no further operator
+# action at boot time (platform/deploy/zclassic23-bundle-bootstrap.sh; see
 # docs/ROM_DELIVERY.md "Local bundle bootstrap"). Idempotent: a no-op if
 # <datadir>/bundles/ already holds a *.sqlite or the datadir already has an
 # installed-bundle marker. Never a trust decision — that stays entirely at
@@ -6174,7 +6205,7 @@ bundle-bootstrap: $(BIN_DIR)/rom_bundle_sha3
 	@if [ -z "$(SOURCE)" ]; then \
 	    echo "usage: make bundle-bootstrap SOURCE=... [DATADIR=...]"; \
 	    exit 2; fi
-	deploy/zclassic23-bundle-bootstrap.sh --source="$(SOURCE)" \
+	platform/deploy/zclassic23-bundle-bootstrap.sh --source="$(SOURCE)" \
 	    --sha3-tool="$(BIN_DIR)/rom_bundle_sha3" \
 	    $(if $(DATADIR),--datadir="$(DATADIR)",)
 
@@ -6190,25 +6221,25 @@ zcl-nodectl: $(ZCL_NODECTL_BIN)
 # zcl-nodectl is a portable-release product: opt into the fresh atomic link
 # so a host-built binary cannot pass the timestamp check into the ABI audit
 # (see C23_PORTABLE_RELINK at the top of this file).
-$(ZCL_NODECTL_BIN): tools/zcl-nodectl.c lib/util/include/util/rpc_paths.h \
-		lib/platform/include/platform/os_binary_slots.h \
-		lib/platform/include/platform/process_compat.h \
-		lib/platform/src/os_binary_slots.c lib/platform/src/clock.c \
-		lib/base/src/log_level.c $(C23_PORTABLE_RELINK)
+$(ZCL_NODECTL_BIN): tools/zcl-nodectl.c platform/modules/util/include/util/rpc_paths.h \
+		platform/modules/platform/include/platform/os_binary_slots.h \
+		platform/modules/platform/include/platform/process_compat.h \
+		platform/modules/platform/src/os_binary_slots.c platform/modules/platform/src/clock.c \
+		platform/modules/base/src/log_level.c $(C23_PORTABLE_RELINK)
 	@mkdir -p $(dir $@)
 	$(CC) -std=c23 -O2 -Wall -Wextra -Werror \
-	    -Ilib/base/include -Ilib/util/include -Ilib/platform/include \
+	    -Iplatform/modules/base/include -Iplatform/modules/util/include -Iplatform/modules/platform/include \
 	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) -o $@ \
-	    tools/zcl-nodectl.c lib/platform/src/os_binary_slots.c \
-	    lib/platform/src/clock.c lib/base/src/log_level.c
+	    tools/zcl-nodectl.c platform/modules/platform/src/os_binary_slots.c \
+	    platform/modules/platform/src/clock.c platform/modules/base/src/log_level.c
 
 .PHONY: export_snapshot
 export_snapshot: $(BIN_DIR)/export_snapshot
 $(BIN_DIR)/export_snapshot: tools/export_snapshot.c \
-		lib/platform/src/clock.c lib/base/src/log_level.c
+		platform/modules/platform/src/clock.c platform/modules/base/src/log_level.c
 	@mkdir -p $(dir $@)
 	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -Ivendor/include \
-	    -Ilib/platform/include -Ilib/base/include -Ilib/util/include \
+	    -Iplatform/modules/platform/include -Iplatform/modules/base/include -Iplatform/modules/util/include \
 	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) \
 	    -o $@ $^ -Lvendor/lib vendor/lib/libsqlite3.a -lpthread -lm
 
@@ -6224,7 +6255,7 @@ $(BIN_DIR)/verify_anchor_completeness: tools/verify_anchor_completeness.c
 	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -Ivendor/include -o $@ $< -Lvendor/lib vendor/lib/libleveldb.a vendor/lib/libsqlite3.a -lstdc++ -lpthread -lm -ldl
 
 # ldb_verify_c23: differential proof that the C23 read-only LevelDB reader
-# (lib/storage/src/ldb_reader_*.c) returns byte-identical data to the
+# (engine/modules/storage/src/ldb_reader_*.c) returns byte-identical data to the
 # vendored C++ libleveldb.a. Links BOTH implementations and walks the whole
 # ordered keyspace of two COPIES of the same directory — the C++ open
 # mutates its target, so each side needs its own. This is the only rule in
@@ -6233,19 +6264,19 @@ $(BIN_DIR)/verify_anchor_completeness: tools/verify_anchor_completeness.c
 .PHONY: ldb_verify_c23
 ldb_verify_c23: $(BIN_DIR)/ldb_verify_c23
 $(BIN_DIR)/ldb_verify_c23: tools/ldb_verify_c23.c \
-		lib/storage/src/ldb_reader_format.c \
-		lib/storage/src/ldb_reader_table.c \
-		lib/storage/src/ldb_reader_version.c \
-		lib/storage/src/ldb_reader_db.c \
-		lib/storage/src/ldb_reader_api.c \
-		lib/util/src/crc32c.c lib/base/src/safe_alloc.c \
-		lib/platform/src/positioned_file.c \
-		lib/platform/src/read_mapping.c
+		engine/modules/storage/src/ldb_reader_format.c \
+		engine/modules/storage/src/ldb_reader_table.c \
+		engine/modules/storage/src/ldb_reader_version.c \
+		engine/modules/storage/src/ldb_reader_db.c \
+		engine/modules/storage/src/ldb_reader_api.c \
+		platform/modules/util/src/crc32c.c platform/modules/base/src/safe_alloc.c \
+		platform/modules/platform/src/positioned_file.c \
+		platform/modules/platform/src/read_mapping.c
 	@mkdir -p $(dir $@)
 	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) \
-	    -Ivendor/include -Ilib/base/include -Ilib/util/include \
-	    -Ilib/storage/include -Ilib/platform/include \
+	    -Ivendor/include -Iplatform/modules/base/include -Iplatform/modules/util/include \
+	    -Iengine/modules/storage/include -Iplatform/modules/platform/include \
 	    -o $@ $^ -Lvendor/lib vendor/lib/libleveldb.a -lstdc++ -lpthread -lm -ldl
 
 .PHONY: zcl-blog
@@ -6280,7 +6311,7 @@ test-full-locked: test_zcl
 
 # zclassic23-chaos links the FULL node source tree ($(ALL_SRCS), same
 # whole-program LTO shape as wire_sweep/test_parallel below) rather than a
-# hand-picked file list. `mode simnet` scenarios drive lib/sim/simnet_cluster
+# hand-picked file list. `mode simnet` scenarios drive engine/modules/sim/simnet_cluster
 # (real connect_block/disconnect_block/fork-choice), so the binary needs the
 # real consensus/coins/script/validation stack, not just sim_peer's counters.
 $(eval $(call BUILD_NODE_TOOL,zclassic23-chaos,tools/sim/chaos.c $(CHAOS_SIM_SRCS)))
@@ -6317,19 +6348,19 @@ chaos-clean:
 	rm -rf build/chaos-output/ chaos-output/
 
 # ── simnet_trace_query: linear-scan filter over a simnet state trace ─────
-# (lib/sim/include/sim/simnet_trace.h; docs/CHAOS_HARNESS.md "Recording a
-# full-state trace"). Standalone build: only lib/json (the trace's own
+# (engine/modules/sim/include/sim/simnet_trace.h; docs/CHAOS_HARNESS.md "Recording a
+# full-state trace"). Standalone build: only platform/modules/json (the trace's own
 # format) plus the safe_alloc/log_level it transitively needs — no DB, no
 # node libs, no Tor, no simulator/consensus code, same discipline as
 # tools/postmortem_to_scenario.c.
 .PHONY: tools/sim/simnet_trace_query
 tools/sim/simnet_trace_query: $(BIN_DIR)/simnet_trace_query
 $(BIN_DIR)/simnet_trace_query: tools/sim/simnet_trace_query.c \
-		lib/json/src/json.c \
-		lib/base/src/safe_alloc.c lib/base/src/log_level.c
+		platform/modules/json/src/json.c \
+		platform/modules/base/src/safe_alloc.c platform/modules/base/src/log_level.c
 	@mkdir -p $(dir $@)
 	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
-	    -Ilib/json/include -Ilib/base/include -Ilib/util/include \
+	    -Iplatform/modules/json/include -Iplatform/modules/base/include -Iplatform/modules/util/include \
 	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) \
 	    -o $@ $^ -lpthread -lm
 
@@ -6456,7 +6487,7 @@ simnet-replay: wire_sweep
 # being buried inside the generic "full corpus" step, and the perf/mixed
 # smoke (ZCL_SIMNET_PERF=1) is opt-in-cheap (sub-second, N=100 nodes) and
 # otherwise SKIPped by test_parallel itself — see fz_perf_smoke /
-# fz_byz_perf_smoke in lib/test/src/test_simnet_fuzz.c.
+# fz_byz_perf_smoke in tests/harness/src/test_simnet_fuzz.c.
 DETECTIVE_SCENARIOS = \
     tools/sim/scenarios/detective_100_80.scenario \
     tools/sim/scenarios/detective_66_honest_partition.scenario \
@@ -6593,15 +6624,15 @@ JSONQ_BIN = $(BIN_DIR)/jsonq
 .PHONY: jsonq
 jsonq: $(JSONQ_BIN)
 $(JSONQ_BIN): tools/jsonq.c \
-    packages/zjsonp/src/zjsonp.c packages/zutf8/src/zutf8.c \
-    packages/zjsonp/include/zjsonp/zjsonp.h \
-    packages/zutf8/include/zutf8/zutf8.h
+    contexts/commons/packages/zjsonp/src/zjsonp.c contexts/commons/packages/zutf8/src/zutf8.c \
+    contexts/commons/packages/zjsonp/include/zjsonp/zjsonp.h \
+    contexts/commons/packages/zutf8/include/zutf8/zutf8.h
 	@mkdir -p $(dir $@)
 	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) \
-	    -Ipackages/zjsonp/include -Ipackages/zutf8/include \
-	    -o $@ tools/jsonq.c packages/zjsonp/src/zjsonp.c \
-	    packages/zutf8/src/zutf8.c
+	    -Icontexts/commons/packages/zjsonp/include -Icontexts/commons/packages/zutf8/include \
+	    -o $@ tools/jsonq.c contexts/commons/packages/zjsonp/src/zjsonp.c \
+	    contexts/commons/packages/zutf8/src/zutf8.c
 
 # Strict line-protocol adapter over the maintained retrieval evaluator. The
 # historical runner supplies two sealed rank lists per reviewed task; this
@@ -6611,21 +6642,21 @@ RETRIEVAL_EVAL_BIN = $(BIN_DIR)/retrieval-eval
 .PHONY: retrieval-eval
 retrieval-eval: $(RETRIEVAL_EVAL_BIN)
 $(RETRIEVAL_EVAL_BIN): tools/retrieval_eval.c \
-    lib/retrieval/src/retrieval_eval.c \
-    lib/retrieval/src/retrieval_experiment.c \
-    lib/retrieval/src/retrieval_profile.c \
-    lib/retrieval/include/retrieval/retrieval_experiment.h \
-    lib/base/src/safe_alloc.c lib/base/include/base/safe_alloc.h \
-    lib/retrieval/include/retrieval/retrieval.h \
-    lib/sha3/src/sha3.c lib/sha3/include/sha3/sha3.h \
-    lib/base/include/base/hex.h lib/base/include/base/serialize_le.h
+    cognition/modules/retrieval/src/retrieval_eval.c \
+    cognition/modules/retrieval/src/retrieval_experiment.c \
+    cognition/modules/retrieval/src/retrieval_profile.c \
+    cognition/modules/retrieval/include/retrieval/retrieval_experiment.h \
+    platform/modules/base/src/safe_alloc.c platform/modules/base/include/base/safe_alloc.h \
+    cognition/modules/retrieval/include/retrieval/retrieval.h \
+    platform/modules/sha3/src/sha3.c platform/modules/sha3/include/sha3/sha3.h \
+    platform/modules/base/include/base/hex.h platform/modules/base/include/base/serialize_le.h
 	@mkdir -p $(dir $@)
 	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
-	    -Ilib/retrieval/include -Ilib/base/include -Ilib/sha3/include -o $@ \
-	    tools/retrieval_eval.c lib/retrieval/src/retrieval_eval.c \
-	    lib/retrieval/src/retrieval_experiment.c \
-	    lib/retrieval/src/retrieval_profile.c \
-	    lib/base/src/safe_alloc.c lib/sha3/src/sha3.c
+	    -Icognition/modules/retrieval/include -Iplatform/modules/base/include -Iplatform/modules/sha3/include -o $@ \
+	    tools/retrieval_eval.c cognition/modules/retrieval/src/retrieval_eval.c \
+	    cognition/modules/retrieval/src/retrieval_experiment.c \
+	    cognition/modules/retrieval/src/retrieval_profile.c \
+	    platform/modules/base/src/safe_alloc.c platform/modules/sha3/src/sha3.c
 
 .PHONY: retrieval-eval-selftest retrieval-gold-corpus-check \
     retrieval-gold-benchmark-scope-selftest \
@@ -6701,14 +6732,14 @@ retrieval-prefix-sweep-check: jsonq agent-sha3 retrieval-eval
 # once per perturbation, so it is a long measurement, never part of `make lint`
 # or a push gate; the cheap ratchet below guards the recorded result instead.
 DETERMINISM_LIB_SRCS = \
-    lib/determinism/src/verdict.c \
-    lib/determinism/src/classify.c \
-    lib/determinism/src/perturbation.c \
-    lib/determinism/src/receipt.c
+    engine/modules/determinism/src/verdict.c \
+    engine/modules/determinism/src/classify.c \
+    engine/modules/determinism/src/perturbation.c \
+    engine/modules/determinism/src/receipt.c
 DETERMINISM_DEP_SRCS = \
-    lib/codec/src/cursor.c lib/sha3/src/sha3.c lib/base/src/log_level.c
-DETERMINISM_CPPFLAGS = -Ilib/determinism/include -Ilib/codec/include \
-    -Ilib/sha3/include -Ilib/base/include -Itools/dev
+    platform/modules/codec/src/cursor.c platform/modules/sha3/src/sha3.c platform/modules/base/src/log_level.c
+DETERMINISM_CPPFLAGS = -Iengine/modules/determinism/include -Iplatform/modules/codec/include \
+    -Iplatform/modules/sha3/include -Iplatform/modules/base/include -Itools/dev
 DETERMINISM_SCAN_BIN = $(BIN_DIR)/determinism_scan
 .PHONY: determinism-scan determinism-receipt-abi
 determinism-scan: $(DETERMINISM_SCAN_BIN)
@@ -6753,7 +6784,7 @@ check-determinism-ratchet:
 	@./tools/lint/check_determinism_ratchet.sh --selftest
 	@./tools/lint/check_determinism_ratchet.sh
 
-# ── Behavioral fingerprinting (lib/fingerprint) ──────────────────────────
+# ── Behavioral fingerprinting (cognition/modules/fingerprint) ──────────────────────────
 # `make fingerprint-scan` indexes what every in-tree function DOES rather than
 # what it is called: it derives which functions are pure and synthesisable,
 # generates a call harness for each one, runs them on a shape-seeded corpus
@@ -6767,8 +6798,8 @@ check-determinism-ratchet:
 FPSCAN_BIN = $(BIN_DIR)/fpscan
 FP_WORK = $(BUILD_DIR)/fingerprint
 FP_TREE_ARCHIVE = $(FP_WORK)/libtree.a
-FP_SRCS = tools/fingerprint_scan.c $(wildcard lib/fingerprint/src/*.c) \
-    lib/base/src/safe_alloc.c
+FP_SRCS = tools/fingerprint_scan.c $(wildcard cognition/modules/fingerprint/src/*.c) \
+    platform/modules/base/src/safe_alloc.c
 # Probe translation units are GENERATED, so warnings there are noise about the
 # generator rather than about the tree; -w keeps a compile FAILURE meaningful
 # (it excludes that probe) without a warning ever doing so.
@@ -6778,18 +6809,18 @@ FP_SRCS = tools/fingerprint_scan.c $(wildcard lib/fingerprint/src/*.c) \
 # undefined — measured: 1532 of 1532 probes blamed and excluded, and the run
 # still finishes "successfully" reporting zero fingerprintable functions.
 FP_PROBE_CFLAGS = $(filter-out -Werror -O3,$(BUILD_ONLY_CFLAGS)) \
-    -I. -Ilib/fingerprint/include
+    -I. -Icognition/modules/fingerprint/include
 FP_PROBE_LDFLAGS = $(LDFLAGS)
 
 .PHONY: fpscan fingerprint-scan
 fpscan: $(FPSCAN_BIN)
 $(FPSCAN_BIN): $(FP_SRCS) \
-    lib/fingerprint/include/fingerprint/fingerprint.h \
-    lib/fingerprint/include/fingerprint/fp_runtime.h
+    cognition/modules/fingerprint/include/fingerprint/fingerprint.h \
+    cognition/modules/fingerprint/include/fingerprint/fp_runtime.h
 	@mkdir -p $(dir $@)
 	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) \
-	    -Ilib/fingerprint/include -Ilib/base/include -o $@ $(FP_SRCS)
+	    -Icognition/modules/fingerprint/include -Iplatform/modules/base/include -o $@ $(FP_SRCS)
 
 fingerprint-scan: $(FPSCAN_BIN) build-only
 	@mkdir -p $(FP_WORK)
@@ -6869,11 +6900,11 @@ $(NATIVE_UI_DRIVER_BIN): tools/native_ui_driver.c
 # depends on the node binary and the CLI RPC helper.
 .PHONY: crash_recovery_test
 crash_recovery_test: $(CRASH_RECOVERY_TEST_BIN)
-$(CRASH_RECOVERY_TEST_BIN): tools/crash_recovery_test.c lib/platform/src/clock.c
+$(CRASH_RECOVERY_TEST_BIN): tools/crash_recovery_test.c platform/modules/platform/src/clock.c
 	@mkdir -p $(dir $@)
 	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pthread \
-	    -Ilib/platform/include -Ilib/base/include -Ilib/util/include -Ivendor/include -o $@ \
-	    tools/crash_recovery_test.c lib/platform/src/clock.c \
+	    -Iplatform/modules/platform/include -Iplatform/modules/base/include -Iplatform/modules/util/include -Ivendor/include -o $@ \
+	    tools/crash_recovery_test.c platform/modules/platform/src/clock.c \
 	    -Lvendor/lib vendor/lib/libsqlite3.a -lpthread -ldl -lm
 
 .PHONY: test-crash
@@ -7170,12 +7201,12 @@ THREAD_JOIN_ACCEPTANCE_BIN := $(BIN_DIR)/thread-join-acceptance
 test-windows-thread-join-acceptance: $(THREAD_JOIN_ACCEPTANCE_BIN)
 	@$(THREAD_JOIN_ACCEPTANCE_BIN)
 
-$(THREAD_JOIN_ACCEPTANCE_BIN): lib/platform/tests/thread_join_windows_acceptance.c \
-		lib/platform/include/platform/thread_compat.h
+$(THREAD_JOIN_ACCEPTANCE_BIN): platform/modules/platform/tests/thread_join_windows_acceptance.c \
+		platform/modules/platform/include/platform/thread_compat.h
 	@mkdir -p $(dir $@)
 	$(CC) $(ZCL_PLATFORM_CPPFLAGS) -D_GNU_SOURCE \
 		-std=c23 -Wall -Wextra -Werror -pedantic \
-		-Ilib/platform/include $< $(ZCL_STATIC_FLAG) -pthread -o $@
+		-Iplatform/modules/platform/include $< $(ZCL_STATIC_FLAG) -pthread -o $@
 
 # ── STICKINESS fault-injection matrix (sticky-node-plan §4 metric) ──
 #
@@ -7637,7 +7668,7 @@ test-store-operator-proof: zclassic23 zcl-rpc
 # fall-through into a loud failure. Redirect (not pipe) so the test's real exit
 # status survives on dash. $(1)=label $(2)=selector $(3)=unique sentinel.
 define mvp_gate
-@echo "══ $(1) ══"; l=$$(mktemp); if ! ZCL_STRESS_TESTS=1 ZCL_TEST_ONLY=$(2) $(TEST_ZCL_BIN) >"$$l" 2>&1; then cat "$$l"; rm -f "$$l"; echo "MVP GATE FAILED: $(1) (ZCL_TEST_ONLY=$(2) exited non-zero)"; exit 1; fi; cat "$$l"; if ! grep -qF "$(3)" "$$l"; then rm -f "$$l"; echo "MVP GATE FALSE-GREEN GUARD: $(1) — sentinel \"$(3)\" not printed; the ZCL_TEST_ONLY=$(2) selector likely no longer exists in lib/test/src/test.c so the full suite ran. Restore the selector or re-point this gate."; exit 1; fi; rm -f "$$l"
+@echo "══ $(1) ══"; l=$$(mktemp); if ! ZCL_STRESS_TESTS=1 ZCL_TEST_ONLY=$(2) $(TEST_ZCL_BIN) >"$$l" 2>&1; then cat "$$l"; rm -f "$$l"; echo "MVP GATE FAILED: $(1) (ZCL_TEST_ONLY=$(2) exited non-zero)"; exit 1; fi; cat "$$l"; if ! grep -qF "$(3)" "$$l"; then rm -f "$$l"; echo "MVP GATE FALSE-GREEN GUARD: $(1) — sentinel \"$(3)\" not printed; the ZCL_TEST_ONLY=$(2) selector likely no longer exists in tests/harness/src/test.c so the full suite ran. Restore the selector or re-point this gate."; exit 1; fi; rm -f "$$l"
 endef
 
 .PHONY: ci-mvp-gates ci-stress
@@ -7852,7 +7883,7 @@ mvp-coldstart-to-tip-local: zclassic23 zcl-rpc
 # actual MVP claim — H* (dumpstate reducer_frontier's "hstar", the reducer's
 # provable authoritative tip) reaching "network_tip" (the best height any
 # handshake-complete peer advertised) — never on "the FSM says at_tip", which
-# is all the ~7s in-process stub (lib/test/src/test_cold_start_sync.c,
+# is all the ~7s in-process stub (tests/harness/src/test_cold_start_sync.c,
 # already in ci-mvp-gates) proves. Prints a real WALL_CLOCK_SECONDS=<n> line
 # on PASS — the published wipe-to-tip stopwatch number FORWARD_PLAN.md says
 # does not exist yet.
@@ -7971,7 +8002,7 @@ mvp-coldstart-to-tip-triple: zclassic23
 # (127.0.0.1:8033). This is not a convenience alias. Every other sync proof in
 # this repo dials a peer on the SAME machine, and loopback is structurally
 # privileged on both sides of the wire:
-#   - client side: lib/net/src/net.c is_trusted_peer() exempts 127.0.0.0/8 and
+#   - client side: core/modules/net/src/net.c is_trusted_peer() exempts 127.0.0.0/8 and
 #     -whitelist peers from peer_misbehaving(), so a loopback run can never
 #     exercise the score-to-ban path a real remote client rides;
 #   - server side: the per-IP inbound sybil cap ("too many inbound connections
@@ -8158,7 +8189,7 @@ mvp: test_zcl zclassic23 zcl-rpc
 # ── libFuzzer harnesses ───────────────────────────────────────
 #
 # Fuzz targets use clang + libFuzzer + ASan + UBSan. They compile
-# the same ALL_SRCS as the main build (minus src/main.c), so the same
+# the same ALL_SRCS as the main build (minus engine/entry/main.c), so the same
 # code paths the node exercises are the code paths the fuzzer
 # exercises. -O1 + -g because aggressive optimisation confuses
 # sanitizer reports.
@@ -8191,8 +8222,8 @@ FUZZ_CFLAGS = -std=c23 -O1 -g -Wall -Wextra \
 	-Wno-deprecated-declarations \
 	$(APP_INCLUDES) $(CONFIG_INCLUDES) $(LIB_INCLUDES) $(CORE_INCLUDES) \
 	$(PORTS_INCLUDES) $(DOMAIN_INCLUDES) $(APPLICATION_INCLUDES) \
-	$(ADAPTERS_INCLUDES) $(TOOLS_INCLUDES) $(DEVLOOP_INCLUDES) \
-	-Ilib/test/include -Ivendor/x11/include \
+	$(ADAPTERS_INCLUDES) $(REDUCER_INCLUDES) $(TOOLS_INCLUDES) $(DEVLOOP_INCLUDES) \
+	-Itests/harness/include -Ivendor/x11/include \
 	-D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) -D_DEFAULT_SOURCE \
 	-DZCL_FUZZ_QUIET_LOG_MACROS -Ivendor/include \
 	-fsanitize=fuzzer,address,undefined \
@@ -8358,7 +8389,7 @@ fuzz-ci: check-fuzz-ci-tools $(FUZZ_TARGETS)
 # because a libFuzzer corpus run stops at the first bad unit and tells you
 # nothing about the other 72. This target is the verdict route that was missing:
 # it replays each artifact-prefixed seed individually against a written verdict
-# in lib/test/fuzz_seeds/ARTIFACT_VERDICTS.txt and names every disagreement.
+# in tests/harness/fuzz_seeds/ARTIFACT_VERDICTS.txt and names every disagreement.
 #
 # Why it is not part of `make lint`: measured on the dev reference host, the
 # replay itself is 18.3 s for 22 artifacts at -P6, and it needs the large
@@ -8388,7 +8419,7 @@ fuzz-ci-leaks: check-fuzz-ci-tools $(FUZZ_TARGETS)
 # ── P11.6 — 7-day soak runner ─────────────────────────────────
 #
 # Separate binary that polls a running zclassic23 every 60 s
-# against the analyzer in lib/test/src/soak_harness.c. Verdict
+# against the analyzer in tests/harness/src/soak_harness.c. Verdict
 # failure (crash / tip-stall / RSS-walk / too-short / no-samples)
 # causes exit non-zero, so systemd / CI can gate on a 7-day run
 # without the operator having to read the log.
@@ -8405,14 +8436,14 @@ fuzz-ci-leaks: check-fuzz-ci-tools $(FUZZ_TARGETS)
 # node on the same host, which most CI workers don't provide.
 .PHONY: soak_runner
 soak_runner: $(SOAK_RUNNER_BIN)
-$(SOAK_RUNNER_BIN): tools/soak/main.c lib/test/src/soak_harness.c \
-                        lib/platform/src/clock.c \
-                        lib/test/include/test/soak_harness.h
+$(SOAK_RUNNER_BIN): tools/soak/main.c tests/harness/src/soak_harness.c \
+                        platform/modules/platform/src/clock.c \
+                        tests/harness/include/test/soak_harness.h
 	@mkdir -p $(dir $@)
 	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) \
-	    -Ilib/test/include -Ilib/platform/include -Ilib/base/include -Ilib/util/include -o $@ \
-	    tools/soak/main.c lib/test/src/soak_harness.c lib/platform/src/clock.c
+	    -Itests/harness/include -Iplatform/modules/platform/include -Iplatform/modules/base/include -Iplatform/modules/util/include -o $@ \
+	    tools/soak/main.c tests/harness/src/soak_harness.c platform/modules/platform/src/clock.c
 
 soak-7day: soak_runner zcl-rpc
 	$(SOAK_RUNNER_BIN) \
@@ -8437,9 +8468,9 @@ bench-sync: zclassic23 bench_fresh_sync
 .PHONY: bench_fresh_sync
 bench_fresh_sync: $(BIN_DIR)/bench_fresh_sync
 $(BIN_DIR)/bench_fresh_sync: tools/bench_fresh_sync.c \
-		lib/platform/src/clock.c lib/base/src/log_level.c
+		platform/modules/platform/src/clock.c platform/modules/base/src/log_level.c
 	@mkdir -p $(dir $@)
-	$(CC) -O2 -Ilib/platform/include -Ilib/base/include -Ilib/util/include \
+	$(CC) -O2 -Iplatform/modules/platform/include -Iplatform/modules/base/include -Iplatform/modules/util/include \
 	    -D_DEFAULT_SOURCE -o $@ $^
 
 # Per-ISA-tier crypto microbenchmark (tools/simd_bench.c). Drives the SAME
@@ -8454,13 +8485,13 @@ $(BIN_DIR)/bench_fresh_sync: tools/bench_fresh_sync.c \
 # Exits 2 if any tier diverges — a faster path returning different bytes is a
 # chain split, not a win.
 SIMD_BENCH_SRCS = tools/simd_bench.c \
-	lib/crypto/src/chacha20poly1305.c \
-	lib/crypto/src/sha256.c lib/sha3/src/sha3.c lib/crypto/src/keccak_x4.c lib/crypto/src/simd_dispatch.c \
-	lib/crypto/src/sha3_avx512.c lib/crypto/src/sha3_256_x4.c \
-	lib/crypto/src/blake2b.c lib/crypto/src/blake2b_avx2.c \
-	lib/sapling/src/bn254_accel.c lib/sapling/src/fr_avx512.c \
-	lib/base/src/cleanse.c lib/base/src/log_level.c lib/base/src/safe_alloc.c \
-	lib/platform/src/clock.c lib/support/src/log_throttle.c
+	core/modules/crypto/src/chacha20poly1305.c \
+	core/modules/crypto/src/sha256.c platform/modules/sha3/src/sha3.c core/modules/crypto/src/keccak_x4.c core/modules/crypto/src/simd_dispatch.c \
+	core/modules/crypto/src/sha3_avx512.c core/modules/crypto/src/sha3_256_x4.c \
+	core/modules/crypto/src/blake2b.c core/modules/crypto/src/blake2b_avx2.c \
+	core/modules/sapling/src/bn254_accel.c core/modules/sapling/src/fr_avx512.c \
+	platform/modules/base/src/cleanse.c platform/modules/base/src/log_level.c platform/modules/base/src/safe_alloc.c \
+	platform/modules/platform/src/clock.c platform/modules/support/src/log_throttle.c
 
 .PHONY: simd_bench
 simd_bench: $(BIN_DIR)/simd_bench
@@ -8468,8 +8499,8 @@ $(BIN_DIR)/simd_bench: $(SIMD_BENCH_SRCS)
 	@mkdir -p $(dir $@)
 	$(CC) -std=c23 -O3 $(ZCL_ARCH_CFLAGS) \
 	    -Wall -Wextra -Werror -pedantic -pthread \
-	    -Ilib/sha3/include -Ilib/crypto/include -Ilib/sapling/include -Ilib/base/include \
-	    -Ilib/util/include -Ilib/platform/include -Ilib/support/include \
+	    -Iplatform/modules/sha3/include -Icore/modules/crypto/include -Icore/modules/sapling/include -Iplatform/modules/base/include \
+	    -Iplatform/modules/util/include -Iplatform/modules/platform/include -Iplatform/modules/support/include \
 	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) -o $@ $^
 
 # Run it. REPS= and CPU= override the defaults. Linux CPU= selects and reports
@@ -8498,12 +8529,12 @@ bench-simd: $(BIN_DIR)/simd_bench
 #   for h in ...; do zclassic-cli getblock $$(zclassic-cli getblockhash $$h) 0; done
 # With no CORPUS it falls back to a synthetic block and labels it as such.
 SERIAL_BENCH_SRCS = tools/serial_bench.c \
-	lib/primitives/src/transaction.c lib/primitives/src/block.c \
-	lib/bloom/src/merkle.c \
+	core/modules/primitives/src/transaction.c core/modules/primitives/src/block.c \
+	core/modules/bloom/src/merkle.c \
 	core/math/src/serialize.c core/math/src/uint256.c core/math/src/hash.c \
-	lib/crypto/src/sha256.c lib/crypto/src/sha512.c lib/crypto/src/ripemd160.c \
-	lib/crypto/src/hmac_sha512.c lib/encoding/src/utilstrencodings.c \
-	lib/base/src/cleanse.c lib/base/src/safe_alloc.c lib/base/src/log_level.c
+	core/modules/crypto/src/sha256.c core/modules/crypto/src/sha512.c core/modules/crypto/src/ripemd160.c \
+	core/modules/crypto/src/hmac_sha512.c platform/modules/encoding/src/utilstrencodings.c \
+	platform/modules/base/src/cleanse.c platform/modules/base/src/safe_alloc.c platform/modules/base/src/log_level.c
 
 .PHONY: serial_bench
 serial_bench: $(BIN_DIR)/serial_bench
@@ -8511,10 +8542,10 @@ $(BIN_DIR)/serial_bench: $(SERIAL_BENCH_SRCS)
 	@mkdir -p $(dir $@)
 	$(CC) -std=c23 -O3 $(ZCL_ARCH_CFLAGS) \
 	    -Wall -Wextra -Werror -pedantic \
-	    -Ilib/primitives/include -Ilib/script/include -Ilib/bloom/include \
-	    -Ilib/crypto/include -Ilib/encoding/include -Ilib/base/include \
-	    -Ilib/util/include -Ilib/support/include -Ilib/sapling/include \
-	    -Ilib/keys/include -Ilib/core/include $(CORE_INCLUDES) \
+	    -Icore/modules/primitives/include -Icore/modules/script/include -Icore/modules/bloom/include \
+	    -Icore/modules/crypto/include -Iplatform/modules/encoding/include -Iplatform/modules/base/include \
+	    -Iplatform/modules/util/include -Iplatform/modules/support/include -Icore/modules/sapling/include \
+	    -Icontexts/wallet/modules/keys/include -Icore/modules/core/include $(CORE_INCLUDES) \
 	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) -o $@ $^
 
 .PHONY: bench-serial
@@ -8557,15 +8588,15 @@ check-crypto-perf: zclassic23
 
 # The STANDING Groth16 differential parity gate (docs/CRYPTO_PERF.md
 # "Optimizing safely"). Compiles the in-tree consensus verifier
-# (lib/sapling/src/bls12_381.c) straight from source and replays a frozen
+# (core/modules/sapling/src/bls12_381.c) straight from source and replays a frozen
 # corpus of adversarial encodings + crafted proofs, asserting every
-# accept/reject verdict still matches lib/test/differential/*.bin. Any flip is
+# accept/reject verdict still matches tests/harness/differential/*.bin. Any flip is
 # a consensus break, so this must be run — and pass — before ANY optimization
 # of the verifier lands. `record` re-freezes the golden and is ONLY legitimate
 # after a deliberate, replay-approved consensus change.
 .PHONY: check-groth16-parity
 check-groth16-parity:
-	@bash lib/test/differential/run_parity_oracle.sh check
+	@bash tests/harness/differential/run_parity_oracle.sh check
 
 # Times the two public-input paths (naive double-and-add vs the precomputed
 # fixed-base tables) in ONE process against the same key, at the public-input
@@ -8574,7 +8605,7 @@ check-groth16-parity:
 # speedup that came from diverging.
 .PHONY: bench-groth16-comb
 bench-groth16-comb:
-	@bash lib/test/differential/run_parity_oracle.sh bench $(or $(ITERS),30)
+	@bash tests/harness/differential/run_parity_oracle.sh bench $(or $(ITERS),30)
 
 bench-regress: zclassic23
 	@ZCL_BENCH_COMMIT="$(BUILD_COMMIT)" $(ZCLASSIC23_BIN) -bench-regress
@@ -8604,7 +8635,7 @@ ci-sync-smoke: zclassic23
 	@echo "[ci-sync-smoke] OK"
 
 BUILD_ONLY_OBJECT_CFLAGS = $(BUILD_ONLY_CFLAGS)
-$(OBJ_DIR)/lib/util/src/clientversion.o: BUILD_ONLY_OBJECT_CFLAGS += $(BUILD_IDENTITY_CPPFLAGS)
+$(OBJ_DIR)/platform/modules/util/src/clientversion.o: BUILD_ONLY_OBJECT_CFLAGS += $(BUILD_IDENTITY_CPPFLAGS)
 $(OBJ_DIR)/%.o: %.c $(VIEW_GEN_HEADERS) $(BUILD_FAST_EPOCH_OBJECT_PREREQ) | $(BUILD_ONLY_LEASE)
 	@$(BUILD_FAST_EPOCH_OBJECT_COMMAND) dep "$@" "$<" \
 	  "$(BUILD_SOURCE_ID)" "$(BUILD_CLEAN)" "$(BUILD_MUTATION)" \
@@ -8612,7 +8643,7 @@ $(OBJ_DIR)/%.o: %.c $(VIEW_GEN_HEADERS) $(BUILD_FAST_EPOCH_OBJECT_PREREQ) | $(BU
 	  $(CC) $(BUILD_ONLY_OBJECT_CFLAGS) $(ZCL_TU_RANDOM_SEED)
 
 # The one TU that bakes display + source identity — see the stamp above.
-$(OBJ_DIR)/lib/util/src/clientversion.o: $(BUILD_IDENTITY_STAMP)
+$(OBJ_DIR)/platform/modules/util/src/clientversion.o: $(BUILD_IDENTITY_STAMP)
 
 # Same shape for the shipped node's own profile. clientversion.c is the only
 # TU in $(NODE_C23_SRCS) that references ZCL_BUILD_SOURCE_ID/ZCL_BUILD_CLEAN,
@@ -8622,8 +8653,8 @@ $(OBJ_DIR)/lib/util/src/clientversion.o: $(BUILD_IDENTITY_STAMP)
 # -D emits nothing, and $(REPRO_CFLAGS) carries -gno-record-gcc-switches so the
 # command line never reaches the debug info either.
 NODE_C23_OBJECT_CFLAGS = $(NODE_C23_OBJECT_CFLAGS_BASE)
-$(NODE_C23_OBJ_DIR)/lib/util/src/clientversion.o: NODE_C23_OBJECT_CFLAGS += $(BUILD_IDENTITY_CPPFLAGS)
-$(NODE_C23_OBJ_DIR)/lib/util/src/clientversion.o: $(BUILD_IDENTITY_STAMP)
+$(NODE_C23_OBJ_DIR)/platform/modules/util/src/clientversion.o: NODE_C23_OBJECT_CFLAGS += $(BUILD_IDENTITY_CPPFLAGS)
+$(NODE_C23_OBJ_DIR)/platform/modules/util/src/clientversion.o: $(BUILD_IDENTITY_STAMP)
 $(NODE_C23_OBJ_DIR)/%.o: %.c $(VIEW_GEN_HEADERS) $(BUILD_EPOCH_OBJECT_TOOL) | $(NODE_C23_LEASE)
 	@$(BUILD_EPOCH_OBJECT_TOOL) dep "$@" "$<" \
 	  "$(BUILD_SOURCE_ID)" "$(BUILD_CLEAN)" "$(BUILD_MUTATION)" \
@@ -8635,16 +8666,16 @@ $(NODE_C23_OBJ_DIR)/%.o: %.c $(VIEW_GEN_HEADERS) $(BUILD_EPOCH_OBJECT_TOOL) | $(
 # level. This catches more optimizer-sensitive behavior without paying global
 # LTO or making every unrelated edit slow.
 DEV_COMPILE_CFLAGS = $(DEV_RESTART_CFLAGS)
-$(DEV_OBJ_DIR)/lib/chain/src/%.o: DEV_COMPILE_CFLAGS = $(DEV_HOT_CFLAGS)
+$(DEV_OBJ_DIR)/core/modules/chain/src/%.o: DEV_COMPILE_CFLAGS = $(DEV_HOT_CFLAGS)
 $(DEV_OBJ_DIR)/core/chainparams/src/%.o: DEV_COMPILE_CFLAGS = $(DEV_HOT_CFLAGS)
 $(DEV_OBJ_DIR)/core/params/src/%.o: DEV_COMPILE_CFLAGS = $(DEV_HOT_CFLAGS)
-$(DEV_OBJ_DIR)/lib/crypto/src/%.o: DEV_COMPILE_CFLAGS = $(DEV_HOT_CFLAGS)
-$(DEV_OBJ_DIR)/lib/primitives/src/%.o: DEV_COMPILE_CFLAGS = $(DEV_HOT_CFLAGS)
-$(DEV_OBJ_DIR)/lib/sapling/src/%.o: DEV_COMPILE_CFLAGS = $(DEV_HOT_CFLAGS)
-$(DEV_OBJ_DIR)/lib/script/src/%.o: DEV_COMPILE_CFLAGS = $(DEV_HOT_CFLAGS)
-$(DEV_OBJ_DIR)/lib/validation/src/%.o: DEV_COMPILE_CFLAGS = $(DEV_HOT_CFLAGS)
+$(DEV_OBJ_DIR)/core/modules/crypto/src/%.o: DEV_COMPILE_CFLAGS = $(DEV_HOT_CFLAGS)
+$(DEV_OBJ_DIR)/core/modules/primitives/src/%.o: DEV_COMPILE_CFLAGS = $(DEV_HOT_CFLAGS)
+$(DEV_OBJ_DIR)/core/modules/sapling/src/%.o: DEV_COMPILE_CFLAGS = $(DEV_HOT_CFLAGS)
+$(DEV_OBJ_DIR)/core/modules/script/src/%.o: DEV_COMPILE_CFLAGS = $(DEV_HOT_CFLAGS)
+$(DEV_OBJ_DIR)/core/modules/validation/src/%.o: DEV_COMPILE_CFLAGS = $(DEV_HOT_CFLAGS)
 
-$(DEV_OBJ_DIR)/lib/util/src/clientversion.o: DEV_COMPILE_CFLAGS += $(BUILD_IDENTITY_CPPFLAGS) $(DEV_SOURCE_RECEIPT_CPPFLAGS)
+$(DEV_OBJ_DIR)/platform/modules/util/src/clientversion.o: DEV_COMPILE_CFLAGS += $(BUILD_IDENTITY_CPPFLAGS) $(DEV_SOURCE_RECEIPT_CPPFLAGS)
 $(DEV_OBJ_DIR)/%.o: %.c $(VIEW_GEN_HEADERS) $(BUILD_EPOCH_OBJECT_TOOL) $(BUILD_EPOCH_OBJECT_FORCE) | $(DEV_LEASE)
 	@$(BUILD_EPOCH_OBJECT_TOOL) dep "$@" "$<" \
 	  "$(BUILD_SOURCE_ID)" "$(BUILD_CLEAN)" "$(BUILD_MUTATION)" \
@@ -8652,9 +8683,9 @@ $(DEV_OBJ_DIR)/%.o: %.c $(VIEW_GEN_HEADERS) $(BUILD_EPOCH_OBJECT_TOOL) $(BUILD_E
 	  $(CC) $(DEV_COMPILE_CFLAGS) $(ZCL_TU_RANDOM_SEED)
 
 # The dev object tree also needs the identity TU refreshed when its stamp changes.
-$(DEV_OBJ_DIR)/lib/util/src/clientversion.o: $(BUILD_IDENTITY_STAMP)
+$(DEV_OBJ_DIR)/platform/modules/util/src/clientversion.o: $(BUILD_IDENTITY_STAMP)
 
-# The content-addressed test cache (lib/test/src/testcache.c) folds a
+# The content-addressed test cache (tests/harness/src/testcache.c) folds a
 # toolchain+FLAGS fingerprint into every per-group key.
 #
 # BUILD_COMPILER_ID alone was not enough and shipped a false green:
@@ -8698,13 +8729,13 @@ TESTCACHE_TOOLKEY_CPPFLAGS = \
 # (2) test_parallel.o learns its own compile epoch, so the harness can REFUSE a
 #     module .so built under any other flag set. That is the mechanical half of
 #     "the module cannot diverge from the linked binary".
-HOTSWAP_TEST_LOADER_REL = lib/hotswap/src/hotswap_activate.o
+HOTSWAP_TEST_LOADER_REL = engine/modules/hotswap/src/hotswap_activate.o
 TEST_FAST_OBJECT_CFLAGS = $(TEST_FAST_CFLAGS)
 $(TEST_FAST_OBJ_DIR)/$(HOTSWAP_TEST_LOADER_REL): TEST_FAST_OBJECT_CFLAGS += -DZCL_DEV_BUILD
-$(TEST_FAST_OBJ_DIR)/lib/test/src/test_parallel.o: TEST_FAST_OBJECT_CFLAGS += \
+$(TEST_FAST_OBJ_DIR)/tests/harness/src/test_parallel.o: TEST_FAST_OBJECT_CFLAGS += \
   -DZCL_TEST_COMPILE_EPOCH=\"$(TEST_FAST_COMPILE_EPOCH)\"
-$(TEST_FAST_OBJ_DIR)/lib/util/src/clientversion.o: TEST_FAST_OBJECT_CFLAGS += $(BUILD_IDENTITY_CPPFLAGS) $(DEV_SOURCE_RECEIPT_CPPFLAGS)
-$(TEST_FAST_OBJ_DIR)/lib/test/src/testcache.o: TEST_FAST_OBJECT_CFLAGS += \
+$(TEST_FAST_OBJ_DIR)/platform/modules/util/src/clientversion.o: TEST_FAST_OBJECT_CFLAGS += $(BUILD_IDENTITY_CPPFLAGS) $(DEV_SOURCE_RECEIPT_CPPFLAGS)
+$(TEST_FAST_OBJ_DIR)/tests/harness/src/testcache.o: TEST_FAST_OBJECT_CFLAGS += \
   $(call TESTCACHE_TOOLKEY_CPPFLAGS,$(TEST_FAST_PROFILE),TEST_FAST_EPOCH_COMPILE_FLAGS)
 $(TEST_FAST_OBJ_DIR)/%.o: %.c $(VIEW_GEN_HEADERS) $(BUILD_FAST_EPOCH_OBJECT_PREREQ) | $(TEST_FAST_LEASE)
 	@$(BUILD_FAST_EPOCH_OBJECT_COMMAND) dep "$@" "$<" \
@@ -8713,7 +8744,7 @@ $(TEST_FAST_OBJ_DIR)/%.o: %.c $(VIEW_GEN_HEADERS) $(BUILD_FAST_EPOCH_OBJECT_PRER
 	  $(CC) $(TEST_FAST_OBJECT_CFLAGS) $(ZCL_TU_RANDOM_SEED)
 
 # The fast test harness has its own object tree and identity stamp.
-$(TEST_FAST_OBJ_DIR)/lib/util/src/clientversion.o: $(BUILD_IDENTITY_STAMP)
+$(TEST_FAST_OBJ_DIR)/platform/modules/util/src/clientversion.o: $(BUILD_IDENTITY_STAMP)
 
 # Strict cached test_parallel object tree: same flags as the old whole-program
 # test_parallel minus -flto=auto (see the TEST_REL_* comment above). -MMD -MP
@@ -8722,10 +8753,10 @@ TEST_REL_OBJECT_CFLAGS = $(TEST_REL_CFLAGS)
 # Same two module-mode injections as the fast tree (see above), so `make t` and
 # `make t-fast` agree about what the hot-swap loader is in a test binary.
 $(TEST_REL_OBJ_DIR)/$(HOTSWAP_TEST_LOADER_REL): TEST_REL_OBJECT_CFLAGS += -DZCL_DEV_BUILD
-$(TEST_REL_OBJ_DIR)/lib/test/src/test_parallel.o: TEST_REL_OBJECT_CFLAGS += \
+$(TEST_REL_OBJ_DIR)/tests/harness/src/test_parallel.o: TEST_REL_OBJECT_CFLAGS += \
   -DZCL_TEST_COMPILE_EPOCH=\"$(TEST_REL_COMPILE_EPOCH)\"
-$(TEST_REL_OBJ_DIR)/lib/util/src/clientversion.o: TEST_REL_OBJECT_CFLAGS += $(BUILD_IDENTITY_CPPFLAGS) $(DEV_SOURCE_RECEIPT_CPPFLAGS)
-$(TEST_REL_OBJ_DIR)/lib/test/src/testcache.o: TEST_REL_OBJECT_CFLAGS += \
+$(TEST_REL_OBJ_DIR)/platform/modules/util/src/clientversion.o: TEST_REL_OBJECT_CFLAGS += $(BUILD_IDENTITY_CPPFLAGS) $(DEV_SOURCE_RECEIPT_CPPFLAGS)
+$(TEST_REL_OBJ_DIR)/tests/harness/src/testcache.o: TEST_REL_OBJECT_CFLAGS += \
   $(call TESTCACHE_TOOLKEY_CPPFLAGS,$(TEST_REL_PROFILE),TEST_REL_EPOCH_COMPILE_FLAGS)
 $(TEST_REL_OBJ_DIR)/%.o: %.c $(VIEW_GEN_HEADERS) $(BUILD_EPOCH_OBJECT_TOOL) | $(TEST_REL_LEASE)
 	@$(BUILD_EPOCH_OBJECT_TOOL) dep "$@" "$<" \
@@ -8734,7 +8765,7 @@ $(TEST_REL_OBJ_DIR)/%.o: %.c $(VIEW_GEN_HEADERS) $(BUILD_EPOCH_OBJECT_TOOL) | $(
 	  $(CC) $(TEST_REL_OBJECT_CFLAGS) $(ZCL_TU_RANDOM_SEED)
 
 # The strict test tree also needs the identity TU refreshed with its stamp.
-$(TEST_REL_OBJ_DIR)/lib/util/src/clientversion.o: $(BUILD_IDENTITY_STAMP)
+$(TEST_REL_OBJ_DIR)/platform/modules/util/src/clientversion.o: $(BUILD_IDENTITY_STAMP)
 
 # ASan/UBSan test harness object tree: TEST_FAST flags plus
 # ASAN_COMMON_SAN_FLAGS (see the TEST_ASAN_* block above). -MMD -MP records
@@ -8742,11 +8773,11 @@ $(TEST_REL_OBJ_DIR)/lib/util/src/clientversion.o: $(BUILD_IDENTITY_STAMP)
 TEST_ASAN_OBJECT_CFLAGS = $(TEST_ASAN_CFLAGS)
 TEST_ASAN_ADX_FRAME_POINTER_EXCEPTION_OBJS := $(addprefix $(TEST_ASAN_OBJ_DIR)/,$(ASAN_ADX_FRAME_POINTER_EXCEPTION_SRCS:.c=.o))
 $(TEST_ASAN_ADX_FRAME_POINTER_EXCEPTION_OBJS): TEST_ASAN_OBJECT_CFLAGS += $(ASAN_ADX_FRAME_POINTER_EXCEPTION_FLAGS)
-$(TEST_ASAN_OBJ_DIR)/lib/util/src/clientversion.o: TEST_ASAN_OBJECT_CFLAGS += $(BUILD_IDENTITY_CPPFLAGS) $(DEV_SOURCE_RECEIPT_CPPFLAGS)
+$(TEST_ASAN_OBJ_DIR)/platform/modules/util/src/clientversion.o: TEST_ASAN_OBJECT_CFLAGS += $(BUILD_IDENTITY_CPPFLAGS) $(DEV_SOURCE_RECEIPT_CPPFLAGS)
 # The ASan tree needs its OWN testcache keyspace, by design rather than by
 # accident: without this the -D is absent and testcache.c falls back to
 # __VERSION__, which pins the compiler but not the sanitizer flags.
-$(TEST_ASAN_OBJ_DIR)/lib/test/src/testcache.o: TEST_ASAN_OBJECT_CFLAGS += \
+$(TEST_ASAN_OBJ_DIR)/tests/harness/src/testcache.o: TEST_ASAN_OBJECT_CFLAGS += \
   $(call TESTCACHE_TOOLKEY_CPPFLAGS,$(TEST_ASAN_PROFILE),TEST_ASAN_EPOCH_COMPILE_FLAGS)
 $(TEST_ASAN_OBJ_DIR)/%.o: %.c $(VIEW_GEN_HEADERS) $(BUILD_EPOCH_OBJECT_TOOL) | $(TEST_ASAN_LEASE)
 	@$(BUILD_EPOCH_OBJECT_TOOL) dep "$@" "$<" \
@@ -8755,14 +8786,14 @@ $(TEST_ASAN_OBJ_DIR)/%.o: %.c $(VIEW_GEN_HEADERS) $(BUILD_EPOCH_OBJECT_TOOL) | $
 	  $(CC) $(TEST_ASAN_OBJECT_CFLAGS) $(ZCL_TU_RANDOM_SEED)
 
 # The asan test tree also needs the identity TU refreshed with its stamp.
-$(TEST_ASAN_OBJ_DIR)/lib/util/src/clientversion.o: $(BUILD_IDENTITY_STAMP)
+$(TEST_ASAN_OBJ_DIR)/platform/modules/util/src/clientversion.o: $(BUILD_IDENTITY_STAMP)
 
 # ASan/UBSan dev node object tree: uniform DEV_ASAN_CFLAGS for every TU (no
 # hot-path split — sanitizer fidelity over optimizer-sensitivity coverage).
 DEV_ASAN_OBJECT_CFLAGS = $(DEV_ASAN_CFLAGS)
 DEV_ASAN_ADX_FRAME_POINTER_EXCEPTION_OBJS := $(addprefix $(DEV_ASAN_OBJ_DIR)/,$(ASAN_ADX_FRAME_POINTER_EXCEPTION_SRCS:.c=.o))
 $(DEV_ASAN_ADX_FRAME_POINTER_EXCEPTION_OBJS): DEV_ASAN_OBJECT_CFLAGS += $(ASAN_ADX_FRAME_POINTER_EXCEPTION_FLAGS)
-$(DEV_ASAN_OBJ_DIR)/lib/util/src/clientversion.o: DEV_ASAN_OBJECT_CFLAGS += $(BUILD_IDENTITY_CPPFLAGS) $(DEV_SOURCE_RECEIPT_CPPFLAGS)
+$(DEV_ASAN_OBJ_DIR)/platform/modules/util/src/clientversion.o: DEV_ASAN_OBJECT_CFLAGS += $(BUILD_IDENTITY_CPPFLAGS) $(DEV_SOURCE_RECEIPT_CPPFLAGS)
 $(DEV_ASAN_OBJ_DIR)/%.o: %.c $(VIEW_GEN_HEADERS) $(BUILD_EPOCH_OBJECT_TOOL) | $(DEV_ASAN_LEASE)
 	@$(BUILD_EPOCH_OBJECT_TOOL) dep "$@" "$<" \
 	  "$(BUILD_SOURCE_ID)" "$(BUILD_CLEAN)" "$(BUILD_MUTATION)" \
@@ -8770,13 +8801,13 @@ $(DEV_ASAN_OBJ_DIR)/%.o: %.c $(VIEW_GEN_HEADERS) $(BUILD_EPOCH_OBJECT_TOOL) | $(
 	  $(CC) $(DEV_ASAN_OBJECT_CFLAGS) $(ZCL_TU_RANDOM_SEED)
 
 # The dev-asan tree also needs the identity TU refreshed with its stamp.
-$(DEV_ASAN_OBJ_DIR)/lib/util/src/clientversion.o: $(BUILD_IDENTITY_STAMP)
+$(DEV_ASAN_OBJ_DIR)/platform/modules/util/src/clientversion.o: $(BUILD_IDENTITY_STAMP)
 
 # TSan test harness object tree: TEST_FAST flags plus TSAN_COMMON_SAN_FLAGS
 # (see the TEST_TSAN_* block above). -MMD -MP records the project include
 # closure inside the exact epoch; compiler search roots bind the rest.
 TEST_TSAN_OBJECT_CFLAGS = $(TEST_TSAN_CFLAGS)
-$(TEST_TSAN_OBJ_DIR)/lib/util/src/clientversion.o: TEST_TSAN_OBJECT_CFLAGS += $(BUILD_IDENTITY_CPPFLAGS) $(DEV_SOURCE_RECEIPT_CPPFLAGS)
+$(TEST_TSAN_OBJ_DIR)/platform/modules/util/src/clientversion.o: TEST_TSAN_OBJECT_CFLAGS += $(BUILD_IDENTITY_CPPFLAGS) $(DEV_SOURCE_RECEIPT_CPPFLAGS)
 $(TEST_TSAN_OBJ_DIR)/%.o: %.c $(VIEW_GEN_HEADERS) $(BUILD_EPOCH_OBJECT_TOOL) | $(TEST_TSAN_LEASE)
 	@$(BUILD_EPOCH_OBJECT_TOOL) dep "$@" "$<" \
 	  "$(BUILD_SOURCE_ID)" "$(BUILD_CLEAN)" "$(BUILD_MUTATION)" \
@@ -8784,12 +8815,12 @@ $(TEST_TSAN_OBJ_DIR)/%.o: %.c $(VIEW_GEN_HEADERS) $(BUILD_EPOCH_OBJECT_TOOL) | $
 	  $(CC) $(TEST_TSAN_OBJECT_CFLAGS) $(ZCL_TU_RANDOM_SEED)
 
 # The tsan test tree also needs the identity TU refreshed with its stamp.
-$(TEST_TSAN_OBJ_DIR)/lib/util/src/clientversion.o: $(BUILD_IDENTITY_STAMP)
+$(TEST_TSAN_OBJ_DIR)/platform/modules/util/src/clientversion.o: $(BUILD_IDENTITY_STAMP)
 
 # TSan dev node object tree: uniform DEV_TSAN_CFLAGS for every TU (no
 # hot-path split — sanitizer fidelity over optimizer-sensitivity coverage).
 DEV_TSAN_OBJECT_CFLAGS = $(DEV_TSAN_CFLAGS)
-$(DEV_TSAN_OBJ_DIR)/lib/util/src/clientversion.o: DEV_TSAN_OBJECT_CFLAGS += $(BUILD_IDENTITY_CPPFLAGS) $(DEV_SOURCE_RECEIPT_CPPFLAGS)
+$(DEV_TSAN_OBJ_DIR)/platform/modules/util/src/clientversion.o: DEV_TSAN_OBJECT_CFLAGS += $(BUILD_IDENTITY_CPPFLAGS) $(DEV_SOURCE_RECEIPT_CPPFLAGS)
 $(DEV_TSAN_OBJ_DIR)/%.o: %.c $(VIEW_GEN_HEADERS) $(BUILD_EPOCH_OBJECT_TOOL) | $(DEV_TSAN_LEASE)
 	@$(BUILD_EPOCH_OBJECT_TOOL) dep "$@" "$<" \
 	  "$(BUILD_SOURCE_ID)" "$(BUILD_CLEAN)" "$(BUILD_MUTATION)" \
@@ -8797,7 +8828,7 @@ $(DEV_TSAN_OBJ_DIR)/%.o: %.c $(VIEW_GEN_HEADERS) $(BUILD_EPOCH_OBJECT_TOOL) | $(
 	  $(CC) $(DEV_TSAN_OBJECT_CFLAGS) $(ZCL_TU_RANDOM_SEED)
 
 # The dev-tsan tree also needs the identity TU refreshed with its stamp.
-$(DEV_TSAN_OBJ_DIR)/lib/util/src/clientversion.o: $(BUILD_IDENTITY_STAMP)
+$(DEV_TSAN_OBJ_DIR)/platform/modules/util/src/clientversion.o: $(BUILD_IDENTITY_STAMP)
 
 # Deploy: lint → WAL checkpoint → install service → restart → RPC verify.
 #
@@ -8875,7 +8906,7 @@ if [ -z "$(DESTDIR)" ]; then \
 	install -d "$(HOME)/.config/systemd/user"; \
 	sed -e 's|%h/zclassic23/build/bin/zcl-nodectl|$(PREFIX)/bin/zcl-nodectl|' \
 	    -e 's|%h/zclassic23/build/bin/z23|$(PREFIX)/bin/z23|' \
-		deploy/zclassic23.service \
+		platform/deploy/zclassic23.service \
 		> "$(HOME)/.config/systemd/user/zclassic23.service"; \
 	(systemctl --user daemon-reload 2>/dev/null || true); \
 	echo "installed systemd --user unit; start: systemctl --user start zclassic23"; \
@@ -8941,7 +8972,7 @@ __service-install:
 	    -e 's|@DATADIR@|$(ZCL_DATADIR)|g' \
 	    -e 's|@EXTRA_FLAGS@|$(ZCL_SERVICE_EXTRA_FLAGS_PLIST)|g' \
 	    -e "s|@ENV_VARS@|$$env_vars|g" \
-	    config/launchd/org.z23.zclassic.plist.template \
+	    engine/composition/launchd/org.z23.zclassic.plist.template \
 	    > "$(ZCL_LAUNCHD_PLIST)"
 	@launchctl unload "$(ZCL_LAUNCHD_PLIST)" 2>/dev/null || true
 	@launchctl load "$(ZCL_LAUNCHD_PLIST)"
@@ -9114,7 +9145,7 @@ deploy: vendor-ready lint zclassic-cli zcl-nodectl tools/wal_checkpoint
 	if [ ! -f "$$service_unit" ] || \
 	   grep -q '/deploy/zclassic23-launch.sh' "$$service_unit"; then \
 	    service_tmp="$$(mktemp "$$service_unit.tmp.XXXXXX")"; \
-	    sed 's|%h/zclassic23|$(CURDIR)|g' deploy/zclassic23.service > "$$service_tmp"; \
+	    sed 's|%h/zclassic23|$(CURDIR)|g' platform/deploy/zclassic23.service > "$$service_tmp"; \
 	    install -m 644 "$$service_tmp" "$$service_unit"; \
 	    rm -f "$$service_tmp"; service_tmp=""; \
 	    echo "deploy: installed/migrated canonical service unit from template"; \
@@ -9354,8 +9385,8 @@ background-tests:
 .PHONY: install-remote-status-linger remote-status install-self-update-linger self-update-status
 install-remote-status-linger:
 	@install -d "$(HOME)/.config/systemd/user"
-	@install -m 644 deploy/examples/zclassic23-self-update.service "$(HOME)/.config/systemd/user/zclassic23-remote-status.service"
-	@install -m 644 deploy/examples/zclassic23-self-update.timer "$(HOME)/.config/systemd/user/zclassic23-remote-status.timer"
+	@install -m 644 platform/deploy/examples/zclassic23-self-update.service "$(HOME)/.config/systemd/user/zclassic23-remote-status.service"
+	@install -m 644 platform/deploy/examples/zclassic23-self-update.timer "$(HOME)/.config/systemd/user/zclassic23-remote-status.timer"
 	@systemctl --user daemon-reload
 	@systemctl --user enable --now zclassic23-remote-status.timer
 	@echo "installed read-only remote status timer: zclassic23-remote-status.timer"
@@ -9375,10 +9406,10 @@ self-update-status: remote-status
 install-remote-test-node-linger:
 	@install -d "$(HOME)/.config/systemd/user" "$(HOME)/.config/zclassic23" "$(HOME)/.zclassic23-test"
 	@if [ ! -f "$(HOME)/.config/zclassic23/remote-test.env" ]; then \
-		install -m 600 deploy/examples/zclassic23-remote-test.env.example "$(HOME)/.config/zclassic23/remote-test.env"; \
+		install -m 600 platform/deploy/examples/zclassic23-remote-test.env.example "$(HOME)/.config/zclassic23/remote-test.env"; \
 		echo "installed editable env: $(HOME)/.config/zclassic23/remote-test.env"; \
 	fi
-	@install -m 644 deploy/examples/zclassic23-remote-test-node.service "$(HOME)/.config/systemd/user/zclassic23-test.service"
+	@install -m 644 platform/deploy/examples/zclassic23-remote-test-node.service "$(HOME)/.config/systemd/user/zclassic23-test.service"
 	@systemctl --user daemon-reload
 	@systemctl --user enable zclassic23-test.service
 	@echo "installed remote test node service: zclassic23-test.service"
@@ -9391,12 +9422,12 @@ remote-test-node-status:
 
 install-quality-linger:
 	@install -d "$(HOME)/.config/systemd/user"
-	@install -m 644 deploy/zclassic23-fuzz.service "$(HOME)/.config/systemd/user/zclassic23-fuzz.service"
-	@install -m 644 deploy/zclassic23-fuzz.timer "$(HOME)/.config/systemd/user/zclassic23-fuzz.timer"
-	@install -m 644 deploy/zclassic23-coverage.service "$(HOME)/.config/systemd/user/zclassic23-coverage.service"
-	@install -m 644 deploy/zclassic23-coverage.timer "$(HOME)/.config/systemd/user/zclassic23-coverage.timer"
-	@install -m 644 deploy/zclassic23-test-suite.service "$(HOME)/.config/systemd/user/zclassic23-test-suite.service"
-	@install -m 644 deploy/zclassic23-test-suite.timer "$(HOME)/.config/systemd/user/zclassic23-test-suite.timer"
+	@install -m 644 platform/deploy/zclassic23-fuzz.service "$(HOME)/.config/systemd/user/zclassic23-fuzz.service"
+	@install -m 644 platform/deploy/zclassic23-fuzz.timer "$(HOME)/.config/systemd/user/zclassic23-fuzz.timer"
+	@install -m 644 platform/deploy/zclassic23-coverage.service "$(HOME)/.config/systemd/user/zclassic23-coverage.service"
+	@install -m 644 platform/deploy/zclassic23-coverage.timer "$(HOME)/.config/systemd/user/zclassic23-coverage.timer"
+	@install -m 644 platform/deploy/zclassic23-test-suite.service "$(HOME)/.config/systemd/user/zclassic23-test-suite.service"
+	@install -m 644 platform/deploy/zclassic23-test-suite.timer "$(HOME)/.config/systemd/user/zclassic23-test-suite.timer"
 	@systemctl --user daemon-reload
 	@systemctl --user enable --now zclassic23-fuzz.timer zclassic23-coverage.timer zclassic23-test-suite.timer
 	@echo "installed background quality lanes: zclassic23-fuzz.timer zclassic23-coverage.timer zclassic23-test-suite.timer"
@@ -9417,9 +9448,9 @@ install-slo-probe:
 	@install -d "$(HOME)/.config/systemd/user"
 	@set -eu; tmp="$$(mktemp "$(HOME)/.config/systemd/user/zclassic23-slo-probe.service.tmp.XXXXXX")"; \
 		trap 'rm -f "$$tmp"' EXIT HUP INT TERM; \
-		sed 's|%h/github/zclassic23|$(CURDIR)|g' deploy/zclassic23-slo-probe.service > "$$tmp"; \
+		sed 's|%h/github/zclassic23|$(CURDIR)|g' platform/deploy/zclassic23-slo-probe.service > "$$tmp"; \
 		install -m 644 "$$tmp" "$(HOME)/.config/systemd/user/zclassic23-slo-probe.service"
-	@install -m 644 deploy/zclassic23-slo-probe.timer "$(HOME)/.config/systemd/user/zclassic23-slo-probe.timer"
+	@install -m 644 platform/deploy/zclassic23-slo-probe.timer "$(HOME)/.config/systemd/user/zclassic23-slo-probe.timer"
 	@systemctl --user daemon-reload
 	@systemctl --user enable --now zclassic23-slo-probe.timer
 	@echo "installed external SLO prober: zclassic23-slo-probe.timer (every 60s)"
@@ -9433,8 +9464,8 @@ install-slo-probe:
 # canonical no-advance >2h, ledger stale >5m, canonical unreachable >10m.
 install-slo-pager:
 	@install -d "$(HOME)/.config/systemd/user"
-	@install -m 644 deploy/zclassic23-slo-pager.service "$(HOME)/.config/systemd/user/zclassic23-slo-pager.service"
-	@install -m 644 deploy/zclassic23-slo-pager.timer "$(HOME)/.config/systemd/user/zclassic23-slo-pager.timer"
+	@install -m 644 platform/deploy/zclassic23-slo-pager.service "$(HOME)/.config/systemd/user/zclassic23-slo-pager.service"
+	@install -m 644 platform/deploy/zclassic23-slo-pager.timer "$(HOME)/.config/systemd/user/zclassic23-slo-pager.timer"
 	@systemctl --user daemon-reload
 	@systemctl --user enable --now zclassic23-slo-pager.timer
 	@echo "installed external SLO pager: zclassic23-slo-pager.timer (every 5 min)"
@@ -9449,8 +9480,8 @@ install-slo-pager:
 .PHONY: install-hold-certifier
 install-hold-certifier:
 	@install -d "$(HOME)/.config/systemd/user"
-	@install -m 644 deploy/zclassic23-hold-certifier.service "$(HOME)/.config/systemd/user/zclassic23-hold-certifier.service"
-	@install -m 644 deploy/zclassic23-hold-certifier.timer "$(HOME)/.config/systemd/user/zclassic23-hold-certifier.timer"
+	@install -m 644 platform/deploy/zclassic23-hold-certifier.service "$(HOME)/.config/systemd/user/zclassic23-hold-certifier.service"
+	@install -m 644 platform/deploy/zclassic23-hold-certifier.timer "$(HOME)/.config/systemd/user/zclassic23-hold-certifier.timer"
 	@systemctl --user daemon-reload
 	@systemctl --user enable --now zclassic23-hold-certifier.timer
 	@echo "installed 72h hold certifier: zclassic23-hold-certifier.timer (every 15 min)"
@@ -9464,9 +9495,9 @@ install-intervention-ledger:
 	@install -d "$(HOME)/.config/systemd/user"
 	@set -eu; tmp="$$(mktemp "$(HOME)/.config/systemd/user/zclassic23-intervention.service.tmp.XXXXXX")"; \
 		trap 'rm -f "$$tmp"' EXIT HUP INT TERM; \
-		sed 's|%h/github/zclassic23|$(CURDIR)|g' deploy/zclassic23-intervention.service > "$$tmp"; \
+		sed 's|%h/github/zclassic23|$(CURDIR)|g' platform/deploy/zclassic23-intervention.service > "$$tmp"; \
 		install -m 644 "$$tmp" "$(HOME)/.config/systemd/user/zclassic23-intervention.service"
-	@install -m 644 deploy/zclassic23-intervention.timer "$(HOME)/.config/systemd/user/zclassic23-intervention.timer"
+	@install -m 644 platform/deploy/zclassic23-intervention.timer "$(HOME)/.config/systemd/user/zclassic23-intervention.timer"
 	@systemctl --user daemon-reload
 	@systemctl --user enable --now zclassic23-intervention.timer
 	@echo "installed intervention detector: zclassic23-intervention.timer (every 60s)"
@@ -9521,9 +9552,9 @@ install-tip-agreement:
 	@install -d "$(HOME)/.config/systemd/user"
 	@set -eu; tmp="$$(mktemp "$(HOME)/.config/systemd/user/zclassic23-tip-agreement.service.tmp.XXXXXX")"; \
 		trap 'rm -f "$$tmp"' EXIT HUP INT TERM; \
-		sed 's|%h/github/zclassic23|$(CURDIR)|g' deploy/zclassic23-tip-agreement.service > "$$tmp"; \
+		sed 's|%h/github/zclassic23|$(CURDIR)|g' platform/deploy/zclassic23-tip-agreement.service > "$$tmp"; \
 		install -m 644 "$$tmp" "$(HOME)/.config/systemd/user/zclassic23-tip-agreement.service"
-	@install -m 644 deploy/zclassic23-tip-agreement.timer "$(HOME)/.config/systemd/user/zclassic23-tip-agreement.timer"
+	@install -m 644 platform/deploy/zclassic23-tip-agreement.timer "$(HOME)/.config/systemd/user/zclassic23-tip-agreement.timer"
 	@systemctl --user daemon-reload
 	@systemctl --user enable --now zclassic23-tip-agreement.timer
 	@echo "installed off-host tip-hash agreement recorder: zclassic23-tip-agreement.timer (every 10 min)"
@@ -9582,15 +9613,15 @@ evidence-selftest:
 # The canonical serving identity (ports 8033/18232, ~/.zclassic-c23) had no
 # failover. install-standby installs the always-warm understudy unit; cutover
 # promotes a healthy candidate to canonical with a hard preflight + auto-
-# rollback. See deploy/zclassic23-standby.service and deploy/zclassic23-cutover.sh.
+# rollback. See platform/deploy/zclassic23-standby.service and deploy/zclassic23-cutover.sh.
 .PHONY: install-standby cutover cutover-selftest host-watchdog-selftest migrate-role-names-selftest
 
 install-standby:
 	@install -d "$(HOME)/.config/systemd/user"
-	@install -m 644 deploy/zclassic23-standby.service "$(HOME)/.config/systemd/user/zclassic23-standby.service"
+	@install -m 644 platform/deploy/zclassic23-standby.service "$(HOME)/.config/systemd/user/zclassic23-standby.service"
 	@if [ ! -e "$(HOME)/.config/zclassic23/standby.env" ]; then \
 	    install -d "$(HOME)/.config/zclassic23"; \
-	    install -m 644 deploy/zclassic23-standby.env.example "$(HOME)/.config/zclassic23/standby.env"; \
+	    install -m 644 platform/deploy/zclassic23-standby.env.example "$(HOME)/.config/zclassic23/standby.env"; \
 	    echo "seeded $(HOME)/.config/zclassic23/standby.env (edit STANDBY_DATADIR/PORT/RPCPORT)"; \
 	fi
 	@echo "installed zclassic23-standby.service. To arm the understudy:"
@@ -9615,14 +9646,14 @@ cutover:
 	 $(if $(CANDIDATE_RPCPORT),CANDIDATE_RPCPORT="$(CANDIDATE_RPCPORT)",) \
 	 $(if $(TIMEOUT),READY_TIMEOUT="$(TIMEOUT)",) \
 	 $(if $(STALL_TIMEOUT),READY_STALL_TIMEOUT="$(STALL_TIMEOUT)",) \
-	 ./deploy/zclassic23-cutover.sh $(if $(filter 1 yes YES true,$(YES)),--yes,)
+	 ./platform/deploy/zclassic23-cutover.sh $(if $(filter 1 yes YES true,$(YES)),--yes,)
 
 # cutover-selftest: hermetic fixture proof of the preflight comparison + the
 # auto-rollback logic — mock units (SYSTEMCTL=echo), injected H* readers, two
 # throwaway fixture datadirs. No live nodes, no real systemd.
 cutover-selftest:
 	@bash -c 'set -uo pipefail; \
-	 set +e; out=$$(bash deploy/zclassic23-cutover-selftest.sh 2>&1); rc=$$?; set -e; \
+	 set +e; out=$$(bash platform/deploy/zclassic23-cutover-selftest.sh 2>&1); rc=$$?; set -e; \
 	 echo "$$out"; \
 	 pass=1; case "$$out" in *"cutover-selftest: PASS"*) pass=0;; esac; \
 	 if [ "$$rc" != "0" ] || [ "$$pass" != "0" ]; then \
@@ -9635,7 +9666,7 @@ cutover-selftest:
 # a sandbox state file, no root and no node.
 host-watchdog-selftest:
 	@bash -c 'set -uo pipefail; \
-	 set +e; out=$$(bash deploy/zclassic23-host-watchdog.sh --selftest 2>&1); rc=$$?; set -e; \
+	 set +e; out=$$(bash platform/deploy/zclassic23-host-watchdog.sh --selftest 2>&1); rc=$$?; set -e; \
 	 echo "$$out"; \
 	 pass=1; case "$$out" in *"host-watchdog-selftest: PASS"*) pass=0;; esac; \
 	 if [ "$$rc" != "0" ] || [ "$$pass" != "0" ]; then \
@@ -9644,7 +9675,7 @@ host-watchdog-selftest:
 	 fi'
 
 # migrate-role-names-selftest: hermetic regression proof for
-# deploy/migrate-role-names.sh's "%h" specifier handling (see that script's
+# platform/deploy/migrate-role-names.sh's "%h" specifier handling (see that script's
 # NAMING LAW header) — sandboxed $HOME, stubbed systemctl on PATH, no real
 # unit or datadir is ever touched. Guards the silent-orphan regression: an
 # earlier version extracted "-datadir=%h/..." from the old unit as a raw
@@ -9652,7 +9683,7 @@ host-watchdog-selftest:
 # the script still enabled/started the new unit against an empty datadir.
 migrate-role-names-selftest:
 	@bash -c 'set -uo pipefail; \
-	 set +e; out=$$(bash deploy/migrate-role-names-selftest.sh 2>&1); rc=$$?; set -e; \
+	 set +e; out=$$(bash platform/deploy/migrate-role-names-selftest.sh 2>&1); rc=$$?; set -e; \
 	 echo "$$out"; \
 	 if [ "$$rc" != "0" ] || ! echo "$$out" | grep -q "^\[migrate-role-names-selftest\] ALL CHECKS PASSED"; then \
 	     echo "migrate-role-names-selftest: FAIL (rc=$$rc; no ALL CHECKS PASSED line)"; \
@@ -9669,8 +9700,8 @@ migrate-role-names-selftest:
 .PHONY: install-logrotate logrotate-status logrotate-selftest
 install-logrotate:
 	@install -d "$(HOME)/.config/systemd/user"
-	@install -m 644 deploy/zclassic23-logrotate.service "$(HOME)/.config/systemd/user/zclassic23-logrotate.service"
-	@install -m 644 deploy/zclassic23-logrotate.timer "$(HOME)/.config/systemd/user/zclassic23-logrotate.timer"
+	@install -m 644 platform/deploy/zclassic23-logrotate.service "$(HOME)/.config/systemd/user/zclassic23-logrotate.service"
+	@install -m 644 platform/deploy/zclassic23-logrotate.timer "$(HOME)/.config/systemd/user/zclassic23-logrotate.timer"
 	@systemctl --user daemon-reload
 	@systemctl --user enable --now zclassic23-logrotate.timer
 	@echo "installed log rotation: zclassic23-logrotate.timer (daily ~03:00)"
@@ -9693,16 +9724,16 @@ logrotate-selftest:
 	 echo "logrotate-selftest: PASS"'
 
 # install-bundle-export: scheduled, verified consensus-state-bundle export +
-# retention + off-disk copy hook (deploy/zclassic23-bundle-export.sh wraps
+# retention + off-disk copy hook (platform/deploy/zclassic23-bundle-export.sh wraps
 # the existing TERMINAL -export-consensus-bundle verb). Only the TIMER is
 # started (enable --now); review the target datadir and ZCL_EXPORT_SECONDARY
-# in deploy/zclassic23-bundle-export.service BEFORE enabling on a given box —
+# in platform/deploy/zclassic23-bundle-export.service BEFORE enabling on a given box —
 # see that file's header comment.
 .PHONY: install-bundle-export bundle-export-status bundle-export-selftest
 install-bundle-export:
 	@install -d "$(HOME)/.config/systemd/user"
-	@install -m 644 deploy/zclassic23-bundle-export.service "$(HOME)/.config/systemd/user/zclassic23-bundle-export.service"
-	@install -m 644 deploy/zclassic23-bundle-export.timer "$(HOME)/.config/systemd/user/zclassic23-bundle-export.timer"
+	@install -m 644 platform/deploy/zclassic23-bundle-export.service "$(HOME)/.config/systemd/user/zclassic23-bundle-export.service"
+	@install -m 644 platform/deploy/zclassic23-bundle-export.timer "$(HOME)/.config/systemd/user/zclassic23-bundle-export.timer"
 	@systemctl --user daemon-reload
 	@systemctl --user enable --now zclassic23-bundle-export.timer
 	@echo "installed bundle export: zclassic23-bundle-export.timer (nightly ~04:00)"
@@ -9718,7 +9749,7 @@ bundle-export-status:
 # datadir touched.
 bundle-export-selftest:
 	@bash -c 'set -uo pipefail; \
-	 set +e; out=$$(bash deploy/zclassic23-bundle-export.sh --selftest 2>&1); rc=$$?; set -e; \
+	 set +e; out=$$(bash platform/deploy/zclassic23-bundle-export.sh --selftest 2>&1); rc=$$?; set -e; \
 	 echo "$$out"; \
 	 if [ "$$rc" != "0" ] || ! echo "$$out" | grep -q "^selftest: PASS"; then \
 	     echo "bundle-export-selftest: FAIL zclassic23-bundle-export.sh (rc=$$rc; no selftest: PASS line)"; \
@@ -9741,11 +9772,11 @@ bundle-export-selftest:
 .PHONY: install-replay-canary replay-canary-linger-status
 install-replay-canary:
 	@install -d "$(HOME)/.config/systemd/user"
-	@install -m 644 deploy/zclassic23-replay-canary-nightly.service "$(HOME)/.config/systemd/user/zclassic23-replay-canary-nightly.service"
-	@install -m 644 deploy/zclassic23-replay-canary-nightly.timer "$(HOME)/.config/systemd/user/zclassic23-replay-canary-nightly.timer"
-	@install -m 644 deploy/zclassic23-replay-canary-weekly.service "$(HOME)/.config/systemd/user/zclassic23-replay-canary-weekly.service"
-	@install -m 644 deploy/zclassic23-replay-canary-weekly.timer "$(HOME)/.config/systemd/user/zclassic23-replay-canary-weekly.timer"
-	@install -m 644 "deploy/zclassic23-replay-canary-onfailure@.service" "$(HOME)/.config/systemd/user/zclassic23-replay-canary-onfailure@.service"
+	@install -m 644 platform/deploy/zclassic23-replay-canary-nightly.service "$(HOME)/.config/systemd/user/zclassic23-replay-canary-nightly.service"
+	@install -m 644 platform/deploy/zclassic23-replay-canary-nightly.timer "$(HOME)/.config/systemd/user/zclassic23-replay-canary-nightly.timer"
+	@install -m 644 platform/deploy/zclassic23-replay-canary-weekly.service "$(HOME)/.config/systemd/user/zclassic23-replay-canary-weekly.service"
+	@install -m 644 platform/deploy/zclassic23-replay-canary-weekly.timer "$(HOME)/.config/systemd/user/zclassic23-replay-canary-weekly.timer"
+	@install -m 644 "platform/deploy/zclassic23-replay-canary-onfailure@.service" "$(HOME)/.config/systemd/user/zclassic23-replay-canary-onfailure@.service"
 	@systemctl --user daemon-reload
 	@systemctl --user enable --now zclassic23-replay-canary-nightly.timer zclassic23-replay-canary-weekly.timer
 	@echo "installed replay canary timers: zclassic23-replay-canary-nightly.timer zclassic23-replay-canary-weekly.timer"
@@ -9765,10 +9796,10 @@ release:
 GIT_HOOK_BIN = $(BIN_DIR)/z23-git-hook
 GIT_HOOK_DIR = $(abspath $(BUILD_DIR)/githooks)
 GIT_HOOK_SRCS = tools/dev/z23_git_hook.c tools/dev/dev_proof_receipt.c \
-	lib/sha3/src/sha3.c
+	platform/modules/sha3/src/sha3.c
 GIT_HOOK_CFLAGS = -std=$(ZCL_C_STD) -O2 -Wall -Wextra -Werror -pedantic \
 	$(ZCL_WARN_EXTRA_GATES) $(HARDEN_CFLAGS) -D_POSIX_C_SOURCE=200809L \
-	-Itools/dev -Ilib/base/include -Ilib/sha3/include
+	-Itools/dev -Iplatform/modules/base/include -Iplatform/modules/sha3/include
 
 .PHONY: git-hook git-hook-selftest install-hooks
 ifeq ($(ZCL_HOST_WINDOWS),1)
@@ -9864,8 +9895,8 @@ clean:
 #
 # 2. Object-file layout.  The main `test_zcl` target compiles all
 #    sources in ONE `cc` invocation — that's fast for LTO but ruinous
-#    for gcov, because files like `lib/net/src/protocol.c` and
-#    `lib/rpc/src/protocol.c` share a basename and collide at .gcda
+#    for gcov, because files like `core/modules/net/src/protocol.c` and
+#    `engine/modules/rpc/src/protocol.c` share a basename and collide at .gcda
 #    write time ("overwriting an existing profile data with a
 #    different checksum").  For the coverage build we therefore
 #    compile each source into its own
@@ -9945,19 +9976,19 @@ endif
 endif
 endif
 
-COV_TEST_SRCS := $(filter-out lib/test/src/test_parallel.c, $(TEST_SRCS)) $(TEST_DEV_EXECUTOR_SRCS) $(TEST_LAND_SRCS)
+COV_TEST_SRCS := $(filter-out tests/harness/src/test_parallel.c, $(TEST_SRCS)) $(TEST_DEV_EXECUTOR_SRCS) $(TEST_LAND_SRCS)
 COV_OBJS := $(patsubst %.c,$(COV_BUILD_DIR)/%.o,$(COV_TEST_SRCS) $(SPEC_SRCS) $(CHAOS_SIM_SRCS) $(ALL_SRCS))
 COV_LINK_RSP = $(COV_BUILD_DIR)/link-inputs.rsp
 
 COV_OBJECT_CFLAGS = $(COV_CFLAGS) -Wno-deprecated-declarations
-$(COV_BUILD_DIR)/lib/util/src/clientversion.o: COV_OBJECT_CFLAGS += $(BUILD_IDENTITY_CPPFLAGS) $(DEV_SOURCE_RECEIPT_CPPFLAGS)
+$(COV_BUILD_DIR)/platform/modules/util/src/clientversion.o: COV_OBJECT_CFLAGS += $(BUILD_IDENTITY_CPPFLAGS) $(DEV_SOURCE_RECEIPT_CPPFLAGS)
 $(COV_BUILD_DIR)/%.o: %.c $(VIEW_GEN_HEADERS) $(BUILD_EPOCH_OBJECT_TOOL) | $(COV_LEASE)
 	@$(BUILD_EPOCH_OBJECT_TOOL) coverage "$@" "$<" \
 	  "$(BUILD_SOURCE_ID)" "$(BUILD_CLEAN)" "$(BUILD_MUTATION)" \
 	  "$(COV_COMPILE_EPOCH)" "$(BUILD_COMPILER_ID)" "$(COV_SESSION)" -- \
 	  $(CC) $(COV_OBJECT_CFLAGS)
 
-$(COV_BUILD_DIR)/lib/util/src/clientversion.o: $(BUILD_IDENTITY_STAMP)
+$(COV_BUILD_DIR)/platform/modules/util/src/clientversion.o: $(BUILD_IDENTITY_STAMP)
 
 # The coverage depfile graph now joins the profile table above instead of
 # importing on every goal. It never held dependency information for anything
@@ -10038,7 +10069,7 @@ coverage-locked:
 		lcov --capture --directory $(COV_BUILD_DIR) --output-file $(COV_INFO) \
 		     --rc geninfo_unexecuted_blocks=1 --quiet || true; \
 		lcov --remove $(COV_INFO) \
-		     '*/lib/test/*' '*/vendor/*' '*/tools/fuzz/*' '/usr/*' \
+		     '*/tests/harness/include/test/*' '*/vendor/*' '*/tools/fuzz/*' '/usr/*' \
 		     --output-file $(COV_INFO) --quiet || true; \
 		lcov --summary $(COV_INFO); \
 		if command -v genhtml >/dev/null 2>&1; then \
@@ -10050,19 +10081,19 @@ coverage-locked:
 	elif command -v gcovr >/dev/null 2>&1; then \
 		echo "== Rendering coverage via gcovr =="; \
 		gcovr --root . --filter 'app/' --filter 'lib/' --filter 'tools/' \
-		      --exclude 'lib/test/.*' --exclude 'vendor/.*' \
+		      --exclude 'tests/harness/include/test/.*' --exclude 'vendor/.*' \
 		      --exclude 'tools/fuzz/.*' --print-summary; \
 	elif command -v gcov >/dev/null 2>&1; then \
 		echo "== Rendering coverage via plain gcov (install lcov or gcovr for full report) =="; \
 		gcov_sum=$$(mktemp); \
 		find $(COV_BUILD_DIR) -name '*.gcda' \
-		    -not -path '*/lib/test/*' -not -path '*/tools/fuzz/*' \
+		    -not -path '*/tests/harness/include/test/*' -not -path '*/tools/fuzz/*' \
 		    -print0 2>/dev/null \
 		    | xargs -0 -r gcov -n 2>/dev/null \
 		    > $$gcov_sum || true; \
 		awk ' \
 		    /^File / { cur=$$2; gsub(/'\''/, "", cur); \
-		               sysheader = (index(cur, "/usr/") == 1 || index(cur, "vendor/") > 0 || index(cur, "lib/test/") > 0); \
+		               sysheader = (index(cur, "/usr/") == 1 || index(cur, "vendor/") > 0 || index(cur, "tests/harness/include/test/") > 0); \
 		               next } \
 		    /^Lines executed:/ { \
 		        if (sysheader) next; \
@@ -10133,7 +10164,7 @@ check-raw-sqlite:
 	@tools/scripts/check_raw_sqlite.sh
 
 check-vcs-no-git:
-	@echo "══ LINT: lib/vcs is git-free + spawns no processes ══"
+	@echo "══ LINT: contexts/commons/modules/vcs is git-free + spawns no processes ══"
 	@tools/scripts/check_vcs_no_git.sh
 
 check-vcs-no-sha1:
@@ -10143,15 +10174,15 @@ check-vcs-no-sha1:
 	@tools/dev/sovereign-source-identity-selftest.sh
 
 # Release purity for the Tier-1 hot-swap loader (HARD). Two invariants:
-#   (1) no dlopen/dlsym/dlclose CALL in any .c outside lib/hotswap/ + vendor/;
-#   (2) inside lib/hotswap sources, every such call sits within a
+#   (1) no dlopen/dlsym/dlclose CALL in any .c outside engine/modules/hotswap/ + vendor/;
+#   (2) inside engine/modules/hotswap sources, every such call sits within a
 #       `#ifdef ZCL_DEV_BUILD` region (a pragmatic toggle scan — see below),
 # so a release build links zero dynamic-loading code.
 check-hotswap-dev-only:
-	@echo "══ LINT: hot-swap dlopen confined to lib/hotswap under ZCL_DEV_BUILD ══"
+	@echo "══ LINT: hot-swap dlopen confined to engine/modules/hotswap under ZCL_DEV_BUILD ══"
 	@./tools/lint/check_hotswap_dev_only.sh
 
-# Tier-1 hot-swap eligibility manifest (config/hotswap_eligible.def) is kept
+# Tier-1 hot-swap eligibility manifest (engine/composition/hotswap_eligible.def) is kept
 # honest by two REAL gates (self-tested in test_make_lint_gates.c): eligible
 # TUs must be app-layer surfaces, and must hold no mutable file-scope statics
 # (a .so gets its own zero copy). See docs/work/HOTSWAP.md.
@@ -10164,7 +10195,7 @@ check-hotswap-eligible-scope:
 # both are ZCL_COMMAND_READY_READ, so every generic check passes them. They
 # RENDER BLOCK AND TRANSACTION BYTES — a swapped generation misreports the
 # chain to every RPC reader with validation untouched. The names and the
-# per-leaf reason are DATA in config/hotswap_denied_leaves.def, never in the
+# per-leaf reason are DATA in engine/composition/hotswap_denied_leaves.def, never in the
 # script. Fails closed: a missing or empty denylist is exit 2, not a pass.
 # --selftest runs first and proves the gate fires on a seeded fixture.
 check-hotswap-denied-leaves:
@@ -10172,13 +10203,13 @@ check-hotswap-denied-leaves:
 	@tools/lint/check_hotswap_denied_leaves.sh
 
 # Every command leaf carries exactly one remote class in
-# config/remote_command_classes.def — the decision "may a peer on our own mesh
+# engine/composition/remote_command_classes.def — the decision "may a peer on our own mesh
 # ask this node to run it?" (design: docs/work/REMOTE_COMMAND_CHANNEL.md). The
 # table's default is never_remote, so a MISSING row is safe today and therefore
 # invisible; this gate makes registering a command leaf a two-file operation so
 # the decision cannot be skipped. Symmetric: a row naming a leaf the registry no
 # longer has is a permission with no owner and fails too. Covers both dispatch
-# surfaces — the typed config/commands catalog and the flat AGENT_CONTRACT
+# surfaces — the typed engine/composition/commands catalog and the flat AGENT_CONTRACT
 # table. No baseline: the tree is clean, and a baseline here would only be
 # somewhere to hide the next omission. --selftest runs first and proves the gate
 # fires on each defect class.
@@ -10187,8 +10218,8 @@ check-remote-command-classes:
 	@./tools/lint/check_remote_command_classes.sh --selftest
 	@./tools/lint/check_remote_command_classes.sh
 
-# Scans the UNION of config/hotswap_eligible.def and
-# config/hotswap_swappable.def: every TU either manifest can recompile into a
+# Scans the UNION of engine/composition/hotswap_eligible.def and
+# engine/composition/hotswap_swappable.def: every TU either manifest can recompile into a
 # .so must be free of mutable file-scope statics.
 check-hotswap-static-state:
 	@tools/lint/check_hotswap_static_state.sh
@@ -10200,10 +10231,10 @@ check-hotswap-service-islands:
 	@tools/lint/check_hotswap_service_islands.sh
 
 # THE HARD LINE for the REAL (activatable) module ABI, both halves: every
-# swappable source_tu (config/hotswap_swappable.def) must be owned by a
+# swappable source_tu (engine/composition/hotswap_swappable.def) must be owned by a
 # controller/view/condition LEAF — never a reducer/consensus/storage/supervisor
 # TU — AND every leaf in its leaf list must be declared ZCL_COMMAND_READY_READ
-# (READY + read-only) in the config/commands catalog and be claimed by exactly
+# (READY + read-only) in the engine/composition/commands catalog and be claimed by exactly
 # one file. Self-tested with seeded-violation fixtures in
 # test_make_lint_gates.c. See docs/work/HOTSWAP.md "Real module ABI".
 check-hotswap-swappable-shape:
@@ -10215,7 +10246,7 @@ check-hotswap-swappable-shape:
 # it says. Two independent parsers of one manifest set rot quietly: a drifted
 # walk does not crash, it UNDER-REPORTS. This gate holds the tool to the counts
 # check-hotswap-swappable-shape already publishes, proves every
-# config/hotswap_denied_leaves.def leaf still comes back BLOCKED from the tool
+# engine/composition/hotswap_denied_leaves.def leaf still comes back BLOCKED from the tool
 # (the denylist has to hold in the ADVICE, not just in the manifests), and
 # proves `make hotswap FILES=/PROBE=` still hits its refusal + exit 3 — that
 # runtime-publication form must stay unreachable now that the bare goal prints
@@ -10247,7 +10278,7 @@ check-hotswap-package-receipt-is-not-authority:
 # what the artifact LINKS AGAINST, so one added #include could acquire a door
 # into the reducer, coins, wallet or chain state and still mount. This gate
 # reads `nm -D --undefined-only` over every built module and refuses any name
-# absent from config/hotswap_module_imports.def (282 rows, derived from the
+# absent from engine/composition/hotswap_module_imports.def (282 rows, derived from the
 # real union across 93 artifacts, each grouped with the reason it is allowed).
 # The allowlist leg is fail-closed and needs no build; the artifact leg is
 # UNOBSERVED (loud, never "OK") when build/hotswap has never been produced,
@@ -10288,7 +10319,7 @@ check-blob-read-bounds:
 
 # Gate — ONE fixed-width byte-order codec. Packing or unpacking a
 # 16/32/64-bit integer at a byte address lives only in
-# lib/base/include/base/serialize_le.h; a private shift ladder anywhere else
+# platform/modules/base/include/base/serialize_le.h; a private shift ladder anywhere else
 # fails (RATCHET at file granularity; tools/lint/byte_order_codec_baseline.txt
 # may only shrink). 23 hand-rolled helpers across 11 files existed when this
 # gate was written, despite a canonical set already sitting in
@@ -10303,7 +10334,7 @@ check-byte-order-codec-single:
 # preprocessor arms (platform, feature flag, test-vs-release, ...), and each
 # such pair is a place two bodies can silently drift apart under one name —
 # exactly what happened to three pure ROM wire-parsers duplicated inside
-# lib/net/src/file_service.c's `#if defined(_WIN32)` split (RATCHET at
+# core/modules/net/src/file_service.c's `#if defined(_WIN32)` split (RATCHET at
 # <path>\t<function> granularity; tools/lint/arm_symbol_single_baseline.txt
 # may only shrink).
 check-arm-symbol-single:
@@ -10340,18 +10371,18 @@ check-observability-pairing: tools/check_observability_pairing
 	@$(BIN_DIR)/check_observability_pairing
 
 # Gate E1's binary — the file-size policy checker (see check-file-size-ceiling
-# below). Three sources, no external deps: the tool, lib/platform's UTF-8
+# below). Three sources, no external deps: the tool, platform/modules/platform's UTF-8
 # directory listing (dirent on POSIX, FindFirstFileW on Win32) and the checked
 # allocators that listing uses.
 FILE_SIZE_POLICY_SRCS = tools/file_size_policy.c \
-    lib/platform/src/directory_compat.c lib/base/src/safe_alloc.c
+    platform/modules/platform/src/directory_compat.c platform/modules/base/src/safe_alloc.c
 .PHONY: tools/file_size_policy
 tools/file_size_policy: $(FILE_SIZE_POLICY_BIN)
 $(FILE_SIZE_POLICY_BIN): $(FILE_SIZE_POLICY_SRCS)
 	@mkdir -p $(dir $@)
 	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 	    $(ZCL_PLATFORM_CPPFLAGS) \
-	    -Ilib/platform/include -Ilib/base/include \
+	    -Iplatform/modules/platform/include -Iplatform/modules/base/include \
 	    -o $@ $(FILE_SIZE_POLICY_SRCS)
 
 # mutation-campaign measures whether a test group would NOTICE if the code it
@@ -10369,66 +10400,66 @@ $(FILE_SIZE_POLICY_BIN): $(FILE_SIZE_POLICY_SRCS)
 # place, so the two can never disagree about what "the group ran" means.
 #
 #   make mutation-campaign
-#   build/bin/mutation-campaign --file=lib/metaverse/src/node_character.c \
+#   build/bin/mutation-campaign --file=contexts/commons/modules/metaverse/src/node_character.c \
 #                               --group=test_node_character
 #   build/bin/mutation-campaign --file=<any .c> --list   # builds nothing
 MUTATION_CAMPAIGN_BIN = $(BIN_DIR)/mutation-campaign
 MUTATION_CAMPAIGN_SRCS = tools/dev/mutation_campaign.c $(MUTATION_LIB_SRCS) \
-    tools/command/native_devagent.c lib/sha3/src/sha3.c \
-    lib/crypto/src/keccak_x4.c lib/crypto/src/simd_dispatch.c \
-    lib/platform/src/clock.c lib/platform/src/directory_compat.c \
-    lib/base/src/safe_alloc.c
+    tools/command/native_devagent.c platform/modules/sha3/src/sha3.c \
+    core/modules/crypto/src/keccak_x4.c core/modules/crypto/src/simd_dispatch.c \
+    platform/modules/platform/src/clock.c platform/modules/platform/src/directory_compat.c \
+    platform/modules/base/src/safe_alloc.c
 .PHONY: mutation-campaign
 mutation-campaign: $(MUTATION_CAMPAIGN_BIN)
 $(MUTATION_CAMPAIGN_BIN): $(MUTATION_CAMPAIGN_SRCS)
 	@mkdir -p $(dir $@)
 	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) \
-	    -Itools -Itools/dev -Ilib/base/include -Ilib/sha3/include \
-	    -Ilib/crypto/include -Ilib/support/include -Ilib/test/include \
-	    -Ilib/platform/include -Ilib/util/include \
+	    -Itools -Itools/dev -Iplatform/modules/base/include -Iplatform/modules/sha3/include \
+	    -Icore/modules/crypto/include -Iplatform/modules/support/include -Itests/harness/include \
+	    -Iplatform/modules/platform/include -Iplatform/modules/util/include \
 	    -o $@ $(MUTATION_CAMPAIGN_SRCS) -lpthread
 # ── The engine unit dispatcher ──────────────────────────────────────────────
 # `engine_unit` sends ONE scoped unit of work to a model, applies the result in
 # an isolated worktree, and judges it by running the gate. The law it is built
-# on is in lib/engine/include/engine/engine.h: the model proposes, the gate
+# on is in engine/modules/engine/include/engine/engine.h: the model proposes, the gate
 # decides. It is the one C23 engine-unit path; the earlier shell dispatcher
 # and self-report extractor were retired once this lifecycle was proven.
 #
 # Like $(BIN_DIR)/zclassic23-acme above, this is compiled STRAIGHT FROM SOURCE
 # to an executable with no intermediate object files, and for the same reason:
-# it links tools/acme/tls_client.c, and lib/test/src/test_cold_join_sovereign.c
+# it links tools/acme/tls_client.c, and tests/harness/src/test_cold_join_sovereign.c
 # P2 asserts that no Z23 object under build/*obj*/epochs carries an undefined
 # reference to a TLS-client or trust-store entry point. Nothing compiled here
 # can ever appear in a scanned epoch tree, which keeps P2 green honestly rather
 # than by exemption.
 #
-# lib/engine itself carries no transport at all — it is pure logic, is a normal
+# engine/modules/engine itself carries no transport at all — it is pure logic, is a normal
 # lib module, and is linked into the node like any other. That split is the
 # whole reason this program can exist without weakening the node's claim that
 # it consults no certificate authority.
 ENGINE_UNIT_BIN = $(BIN_DIR)/zclassic23-engine-unit
 ENGINE_UNIT_SRCS = tools/engine_unit.c \
 	tools/acme/tls_client.c \
-	lib/engine/src/engine_registry.c \
-	lib/engine/src/engine_cli.c \
-	lib/engine/src/engine_err.c \
-	lib/engine/src/engine_patch.c \
-	lib/engine/src/engine_prompt.c \
-	lib/engine/src/engine_secret.c \
-	lib/engine/src/engine_verdict.c \
-	lib/engine/src/engine_wire_request.c \
-	lib/engine/src/engine_wire_response.c \
-	lib/json/src/json.c \
-	lib/sha3/src/sha3.c \
-	lib/util/src/spawn.c \
-	lib/base/src/log_level.c \
-	lib/base/src/result.c \
-	lib/base/src/safe_alloc.c \
-	lib/platform/src/clock.c
-ENGINE_UNIT_INCLUDES = -Ilib/base/include -Ilib/engine/include -Ilib/json/include \
-	-Ilib/sha3/include \
-	-Ilib/platform/include -Ilib/util/include -Itools/acme -Ivendor/include
+	engine/modules/engine/src/engine_registry.c \
+	engine/modules/engine/src/engine_cli.c \
+	engine/modules/engine/src/engine_err.c \
+	engine/modules/engine/src/engine_patch.c \
+	engine/modules/engine/src/engine_prompt.c \
+	engine/modules/engine/src/engine_secret.c \
+	engine/modules/engine/src/engine_verdict.c \
+	engine/modules/engine/src/engine_wire_request.c \
+	engine/modules/engine/src/engine_wire_response.c \
+	platform/modules/json/src/json.c \
+	platform/modules/sha3/src/sha3.c \
+	platform/modules/util/src/spawn.c \
+	platform/modules/base/src/log_level.c \
+	platform/modules/base/src/result.c \
+	platform/modules/base/src/safe_alloc.c \
+	platform/modules/platform/src/clock.c
+ENGINE_UNIT_INCLUDES = -Iplatform/modules/base/include -Iengine/modules/engine/include -Iplatform/modules/json/include \
+	-Iplatform/modules/sha3/include \
+	-Iplatform/modules/platform/include -Iplatform/modules/util/include -Itools/acme -Ivendor/include
 .PHONY: engine-unit
 engine-unit: $(ENGINE_UNIT_BIN)
 $(ENGINE_UNIT_BIN): $(ENGINE_UNIT_SRCS) $(NODE_VENDOR_LIBS)
@@ -10453,11 +10484,11 @@ CORE_UNSEAL_TOKEN := .core-unseal-token
 # a bug in a sealed check_block predicate (2026-08-01 review), so those files
 # carry the same ritual: editing them requires `make core-unseal REASON=…`.
 CORE_SEAL_PATHS := core/ \
-    lib/validation/src/connect_block.c \
-    lib/validation/src/chainstate.c \
-    lib/validation/include/validation/connect_block.h \
-    lib/validation/include/validation/chainstate.h
-CORE_SEAL_SRCS := tools/core_seal.c lib/sha3/src/sha3.c lib/crypto/src/keccak_x4.c lib/crypto/src/simd_dispatch.c lib/base/src/cleanse.c
+    core/modules/validation/src/connect_block.c \
+    core/modules/validation/src/chainstate.c \
+    core/modules/validation/include/validation/connect_block.h \
+    core/modules/validation/include/validation/chainstate.h
+CORE_SEAL_SRCS := tools/core_seal.c platform/modules/sha3/src/sha3.c core/modules/crypto/src/keccak_x4.c core/modules/crypto/src/simd_dispatch.c platform/modules/base/src/cleanse.c
 
 .PHONY: tools/core_seal
 tools/core_seal: $(BIN_DIR)/core_seal
@@ -10465,7 +10496,7 @@ $(BIN_DIR)/core_seal: $(CORE_SEAL_SRCS)
 	@mkdir -p $(dir $@)
 	$(CC) -std=c23 -O2 -Wall -Wextra -Werror \
 	    $(ZCL_PLATFORM_CPPFLAGS) \
-	    -Ilib/sha3/include -Ilib/crypto/include -Ilib/support/include -Ilib/base/include \
+	    -Iplatform/modules/sha3/include -Icore/modules/crypto/include -Iplatform/modules/support/include -Iplatform/modules/base/include \
 	    -o $@ $(CORE_SEAL_SRCS)
 
 # Freeze the seal: recompute and (re)write core/MANIFEST.sha3 over every tracked
@@ -10484,10 +10515,10 @@ core-seal: tools/core_seal
 # against and the resident can verify each of them IN ADDITION to ROOT.
 #
 # Regenerated by `make core-seal` above. It is a derived file, never
-# hand-edited, and lib/test/src/test_hotswap_module.c re-derives it from
+# hand-edited, and tests/harness/src/test_hotswap_module.c re-derives it from
 # core/MANIFEST.sha3 on every run of the hotswap_module group — a forgotten
 # regeneration fails a test, it does not ship.
-CORE_SEAL_SECTIONS_H = lib/hotswap/include/hotswap/core_seal_sections.h
+CORE_SEAL_SECTIONS_H = engine/modules/hotswap/include/hotswap/core_seal_sections.h
 .PHONY: core-seal-sections
 core-seal-sections:
 	@set -eu; \
@@ -10535,14 +10566,14 @@ core-unseal:
 	echo "  Make the core/ edit, then 'make core-seal' + 'make lint && make test_parallel' before commit."
 
 # ── ZVCS unseal ritual (owner-run, separate from core-unseal above) ────────
-# ZVCS's own sealed-path pin (lib/vcs/src/vcs_seal.c: pin in .zvcs/index.kv,
+# ZVCS's own sealed-path pin (contexts/commons/modules/vcs/src/vcs_seal.c: pin in .zvcs/index.kv,
 # one-shot token via vcs_seal_grant_unseal()) has no operator surface of its
 # own — nothing outside lib/test ever called the grant primitive. This
 # target is that surface: it mirrors core-unseal's shape (REASON mandatory,
 # an append-only record, a one-shot token) but drives the registry-owned
 # dev.vcs.seal.grant command (tools/command/native_dev_command.c) instead of
 # writing core/UNSEAL.md directly. It authorizes exactly the CURRENT tree's
-# sealed content (app/jobs/, core/, lib/consensus/, ... — see
+# sealed content (engine/jobs/, core/, lib/consensus/, ... — see
 # .zvcs/sealed_paths or the compiled default set) for the next ZVCS
 # green-cycle anchor (vcs_snapshot); a further sealed-path change after that
 # anchor requires a new grant. No agent source edit can produce this — it is
@@ -10575,12 +10606,12 @@ check-core-seal: tools/core_seal
 	fi
 
 # Sealed-core include boundary: core/ may not depend upward/sideways (esp. not
-# on lib/validation). Clone of check_domain_purity.sh over the core/ subdirs.
+# on core/modules/validation). Clone of check_domain_purity.sh over the core/ subdirs.
 check-core-include-boundary:
 	@echo "══ LINT: sealed consensus-core include boundary ══"
 	@./tools/scripts/check_core_include_boundary.sh
 
-# The hot-swap consensus pin: lib/hotswap/include/hotswap/core_seal_root.h must
+# The hot-swap consensus pin: engine/modules/hotswap/include/hotswap/core_seal_root.h must
 # mirror core/MANIFEST.sha3's ROOT, the module emitter must stamp it into every
 # .so, and hotswap_activate.c must compare it on BOTH dlsym paths. A seal re-cut
 # that lands without regenerating the mirror leaves every module claiming the OLD
@@ -10627,22 +10658,22 @@ check-simd-os-support:
 
 check-silent-errors-services:
 	@echo "══ LINT: silent error returns in services ══"
-	@./tools/lint/check_silent_error_returns.sh app/services/src services service \
+	@./tools/lint/check_silent_error_returns.sh engine/services/src services service \
 	    "use LOG_ERR/LOG_FAIL/LOG_RETURN, prev-line error log, or mark // raw-return-ok:<reason>"
 
 check-silent-errors-controllers:
 	@echo "══ LINT: silent error returns in controllers ══"
-	@./tools/lint/check_silent_error_returns.sh app/controllers/src controllers controller \
+	@./tools/lint/check_silent_error_returns.sh engine/controllers/src controllers controller \
 	    "use LOG_ERR/LOG_RETURN, prev-line fprintf, or mark // raw-return-ok:<reason>"
 
 check-silent-errors-jobs:
 	@echo "══ LINT: silent error returns in jobs ══"
-	@./tools/lint/check_silent_error_returns.sh app/jobs/src jobs job \
+	@./tools/lint/check_silent_error_returns.sh engine/jobs/src jobs job \
 	    "use LOG_ERR/LOG_FAIL/LOG_RETURN, prev-line error log, or mark // raw-return-ok:<reason>"
 
 check-silent-errors-conditions:
 	@echo "══ LINT: silent error returns in conditions ══"
-	@./tools/lint/check_silent_error_returns.sh app/conditions/src conditions condition \
+	@./tools/lint/check_silent_error_returns.sh engine/conditions/src conditions condition \
 	    "use LOG_ERR/LOG_FAIL/LOG_RETURN, prev-line error log, or mark // raw-return-ok:<reason>"
 
 # Closes the bool/`return false;` blind spot of the four int-convention gates
@@ -10672,13 +10703,13 @@ check-before-save-hooks:
 # Short-burst workers joined within the same function, and pthread_attr-using
 # detached-helper wrappers, are explicitly opted out with a `raw-pthread-ok`
 # marker on the call line or the line immediately above. The registry's own
-# implementation in lib/util/src/thread_registry.c is implicitly skipped.
+# implementation in platform/modules/util/src/thread_registry.c is implicitly skipped.
 check-pthread-create:
 	@echo "══ LINT: raw pthread_create outside thread_registry ══"
 	@./tools/lint/check_pthread_create.sh
 
-# Move 11: every app/models/src/*.c either invokes validates_* macros
-# from app/models/include/models/activerecord.h, or carries an
+# Move 11: every engine/models/src/*.c either invokes validates_* macros
+# from engine/models/include/models/activerecord.h, or carries an
 # ar-validate-skip:<tag> marker explaining why the AR validation
 # lifecycle does not apply (infrastructure wrapper, registry, etc.).
 check-model-validation:
@@ -10690,7 +10721,7 @@ check-model-ar-lifecycle:
 	@./tools/scripts/check_model_ar_lifecycle.sh
 
 # A model file must not carry a hand-written SQL statement: reads and writes
-# build one with app/models/include/models/query_builder.h, whose identifiers
+# build one with engine/models/include/models/query_builder.h, whose identifiers
 # come from the closed set in query_schema.def and whose values can only
 # arrive as bound parameters. 70 of 87 model files carried literal SQL when
 # this gate landed, with no injection hole but also no rail — safety resting
@@ -10707,7 +10738,7 @@ check-model-sql-literals:
 	@./tools/lint/check_model_sql_literals.sh --selftest
 	@./tools/lint/check_model_sql_literals.sh
 
-# lib/engine/include/engine/personas.def writes down the one thing about a
+# engine/modules/engine/include/engine/personas.def writes down the one thing about a
 # territory that cannot be derived: an authored refusal. Everything else a
 # brief reports is regenerated from the code index on every call, precisely
 # so it cannot go stale while still reading as true. Writing a stance buys
@@ -10758,7 +10789,7 @@ check-lib-layering:
 	@echo "══ LINT: lib/ layer purity ══"
 	@./tools/scripts/check_lib_layering.sh
 
-# lib/ module link order. config/lib_module_order.def declares every lib module
+# lib/ module link order. engine/composition/lib_module_order.def declares every lib module
 # in link order (rank = line position) and a module may reference only strictly
 # lower ranks. Unlike check-lib-layering above, which greps #include lines, this
 # gate asks the linker: tools/dev/module-linkgraph.sh joins nm's defined and
@@ -10793,8 +10824,8 @@ lint-armed:
 	@ZCL_LINT_REQUIRE_LINKGRAPH=1 $(MAKE) --no-print-directory lint
 
 # Inter-shape include direction: the eight app/ shapes include DOWNWARD only
-# (controllers -> services -> models -> lib/core). Flags app/models/** files
-# including "services/..." or "controllers/...", and app/services/** files
+# (controllers -> services -> models -> core/modules/core). Flags engine/models/** files
+# including "services/..." or "controllers/...", and engine/services/** files
 # including "controllers/...". Baseline
 # tools/scripts/shape_include_direction_baseline.txt grandfathers pre-existing
 # debt; override with `// shape-layer-ok:<tag>`.
@@ -10822,7 +10853,7 @@ check-domain-purity:
 	@./tools/scripts/check_domain_purity.sh
 
 # Supervisor registration: every long-running service in
-# app/services/src/*_service.c must register a liveness contract with
+# engine/services/src/*_service.c must register a liveness contract with
 # the supervisor (Round 5) OR appear in supervisor_baseline.txt OR
 # carry a per-file `// supervisor-ok:<tag>` override marker. Drives
 # opt-in adoption of the supervisor primitive over Rounds 6-8.
@@ -10857,7 +10888,7 @@ check-no-runtime-abort:
 # Lint gate #16 — typed blocker primitive adoption (Round 6 C6).
 # Ratchets raw `char *_blocker[]` string fields / `lms_set_blocker(`
 # legacy setters / `last_blocker_code` mutations to the typed
-# `blocker_set()` primitive (lib/util/blocker.h). Baseline file
+# `blocker_set()` primitive (platform/modules/util/blocker.h). Baseline file
 # enumerates the grandfathered sites; must shrink over Rounds 7-9.
 check-typed-blocker:
 	@echo "══ LINT: typed blocker adoption ══"
@@ -10868,7 +10899,7 @@ check-typed-blocker:
 # blocker_set call site (app/ config/ lib/ src/, excluding lib/test) must
 # resolve to a blocker_register_escape() registration somewhere in the tree.
 # A misspelled or never-registered name silently dead-ends
-# blocker_supervisor_sweep's lookup (lib/util/src/blocker.c ~:492) and is
+# blocker_supervisor_sweep's lookup (platform/modules/util/src/blocker.c ~:492) and is
 # invisible to the blocker_stall_meta_detector.c empty-escape backstop too
 # (that one only catches an EMPTY string). Empty strings are exempt.
 check-blocker-escape-registered:
@@ -10882,7 +10913,7 @@ check-blocker-escape-registered:
 # empty escape_action and no auto-remedy condition looks exactly like any
 # other well-formed typed blocker. This gate makes every blocker id/pattern a
 # production call site can raise resolve to a checked-in row in
-# app/conditions/include/conditions/blocker_remedy_bindings.def — a real
+# engine/conditions/include/conditions/blocker_remedy_bindings.def — a real
 # condition name (checked to exist) or the honest token OWNER — so a new
 # permanent-no-cure blocker cannot be added without declaring that fact.
 check-blocker-remedy:
@@ -10932,7 +10963,7 @@ check-no-raw-clock-outside-platform:
 
 # Gate: sysinit boot-boundary ordering (HARD). Pins the deterministic
 # (stage, order, name) run order of the declarative boot-stage records in
-# config/src/boot.c against a golden file. See check_sysinit_ordering.sh.
+# engine/composition/src/boot.c against a golden file. See check_sysinit_ordering.sh.
 check-sysinit-ordering:
 	@echo "→ Gate: sysinit_ordering"
 	@./tools/lint/check_sysinit_ordering.sh
@@ -10955,8 +10986,8 @@ check-peer-floor-single-source:
 	@./tools/lint/check_peer_floor_single_source.sh
 
 # os-substrate Rung 0: no system()/popen()/execlp() in the resident node
-# binary's own code — every shell-out migrated onto lib/util spawn +
-# file_tree_ops. HARD (FAIL); tools/ and lib/test/ are out of scope.
+# binary's own code — every shell-out migrated onto platform/modules/util spawn +
+# file_tree_ops. HARD (FAIL); tools/ and tests/harness/include/test/ are out of scope.
 check-no-shellouts:
 	@echo "→ Gate: no_shellouts (os-substrate Rung 0)"
 	@./tools/lint/check_no_shellouts.sh
@@ -10965,13 +10996,13 @@ check-no-shellouts:
 # API, so this tree now has a reason to hold a key near it; a key in a tracked
 # file is spent the moment it lands. HARD (FAIL), no baseline — a committed
 # credential is not something to ratchet down over time. Proven to actually
-# fail by lib/test/src/test_engine.c, which plants one in a fixture tree.
+# fail by tests/harness/src/test_engine.c, which plants one in a fixture tree.
 check-no-api-keys:
 	@echo "→ Gate: no_api_keys (no committed credential)"
 	@./tools/lint/check_no_api_keys.sh
 
 # The cheap half of the fuzz-artifact replay contract (21 ms, text + git only):
-# every saved finding under lib/test/fuzz_seeds/ has a live fuzz binary behind
+# every saved finding under tests/harness/fuzz_seeds/ has a live fuzz binary behind
 # it and a written verdict in ARTIFACT_VERDICTS.txt, with no orphan entries and
 # no untracked repro sitting uncommitted in the corpus. The replay itself needs
 # the nine fuzz binaries (34 s to build cold at -j6), so it lives in `make fuzz-replay`,
@@ -11013,7 +11044,7 @@ check-no-writer-below-sealed-frontier:
 	@./tools/lint/check_no_writer_below_sealed_frontier.sh
 
 # os-substrate Rung 1: no raw /proc/self/* or /proc/uptime reads outside
-# lib/platform/ — every such read migrates onto platform/os_proc.h.
+# platform/modules/platform/ — every such read migrates onto platform/os_proc.h.
 # RATCHET: tools/lint/proc_self_shim_baseline.txt grandfathers today's
 # sites; shrink-only.
 check-proc-self-shim:
@@ -11070,7 +11101,7 @@ check-no-gnu-va-args:
 	@echo "══ LINT: C23 __VA_OPT__, never the GNU comma-swallowing extension ══"
 	@./tools/lint/check_no_gnu_va_args.sh
 
-# struct platform_positioned_file_snapshot (lib/platform/include/platform/
+# struct platform_positioned_file_snapshot (platform/modules/platform/include/platform/
 # positioned_file.h) is 64 bytes wide but holds only 56 bytes of fields --
 # two uint32_t nanosecond members sit in front of wider int64_t/uint64_t
 # ones, so the compiler inserts 8 bytes of alignment padding it never has to
@@ -11095,14 +11126,14 @@ check-no-snapshot-struct-memcmp:
 # Second-compiler portability. The node ships as one whole-program GCC build,
 # so nothing ever asked a different compiler whether the tree is well-formed
 # and GCC-only spellings landed invisibly — including real undefined behaviour
-# in lib/net/src/p2p_game.c that only clang rejects. Ratchets realized
+# in core/modules/net/src/p2p_game.c that only clang rejects. Ratchets realized
 # diagnostic sites against a recorded baseline. SKIPs loudly when clang is
 # absent, so a contributor without it is never blocked by a tool they lack.
 check-clang-portability:
 	@echo "══ LINT: second-compiler portability (clang -std=c23 -pedantic) ══"
 	@./tools/lint/check_clang_portability.sh --self-test && ./tools/lint/check_clang_portability.sh
 
-# Windows cross-compile check for the platform seam (lib/platform/src/*.c),
+# Windows cross-compile check for the platform seam (platform/modules/platform/src/*.c),
 # the layer whose entire job is hiding OS differences behind one header per
 # primitive. mingw-w64 is already on the dev reference host and already
 # cross-links the presentation demo (see presentation-portability above); this
@@ -11119,9 +11150,9 @@ check-windows-platform-seam:
 # BEGIN windows-acceptance lane — one contiguous block, nothing above or below
 # this belongs to it.
 #
-# The platform-seam acceptance programs live in lib/test/src/,
-# lib/platform/tests/ and lib/base/tests/, and are cross-compiled for Windows
-# by the catalog in lib/platform/tests/windows_acceptance.mk (included near
+# The platform-seam acceptance programs live in tests/harness/src/,
+# platform/modules/platform/tests/ and platform/modules/base/tests/, and are cross-compiled for Windows
+# by the catalog in platform/modules/platform/tests/windows_acceptance.mk (included near
 # the top of this file, where ZCL_WINDOWS_ACCEPTANCE_FLAGS is defined).
 #
 # That catalog was invoked by NOTHING until this entry existed:
@@ -11133,8 +11164,8 @@ check-windows-platform-seam:
 #
 # And a catalog nothing RECONCILES is the next false green along, which this
 # gate went through for real: test_directory_watcher.c and
-# test_watcher_record.c sat under lib/platform/tests read by nothing at all --
-# no catalog row, no Makefile rule, not in lib/platform/zcode-package.json --
+# test_watcher_record.c sat under platform/modules/platform/tests read by nothing at all --
+# no catalog row, no Makefile rule, not in platform/modules/platform/zcode-package.json --
 # while this target printed a clean PASS. So the work is now in
 # tools/lint/check_windows_acceptance.sh, which does TWO steps in this order:
 #
@@ -11177,7 +11208,7 @@ check-windows-acceptance:
 # ─────────────────────────────────────────────────────────────────────────
 
 # Syntax-only mingw sweep of every .c under the node source roots, including
-# adapters/ application/ src/ and tools/command/, whose text contains _WIN32.
+# platform/adapters/ engine/application/ src/ and tools/command/, whose text contains _WIN32.
 # windows-acceptance-compile cross-links the catalogued acceptance programs;
 # gcc/clang on this box never take the _WIN32 branch of the rest, so a
 # Windows-only syntax error sat undetected.
@@ -11223,7 +11254,7 @@ check-no-raw-sqlite-in-controllers:
 # A model must not hand-maintain the column indices of a multi-column row
 # read: that is the shape where inserting a column in the middle of the SQL
 # column list silently shifts every index below it with no compiler error.
-# The fix is a field list in app/models/include/models/def/ derived through
+# The fix is a field list in engine/models/include/models/def/ derived through
 # models/model_fields.h. Baseline of pre-existing models lives in
 # tools/lint/model_column_drift_baseline.txt (may only shrink).
 check-model-column-drift:
@@ -11259,6 +11290,12 @@ check-group-purpose:
 	@echo "→ Gate P2: check_group_purpose"
 	@ZCL_LINT_MODE=FAIL ./tools/lint/check_group_purpose.sh
 
+# The source tree is an executable architecture contract: five authorities,
+# a closed product-context set, single-owner modules, and one reducer room.
+check-architecture-tree:
+	@echo "→ architecture_tree"
+	@./tools/lint/check_architecture_tree.sh
+
 # Gate P3 (docs/work/palace-design.md §3) — every tracked .c/.h resolves to a
 # known navigator group (lib/<mod>, app/<shape>, core, config, tools, domain,
 # adapters, ports); a file falling through to the catch-all "root" group is a
@@ -11280,7 +11317,7 @@ check-consensus-parity:
 	@./tools/scripts/check_consensus_parity.sh
 
 # Gate — command-contract ratchet (lane OS-B1). Every native command leaf in
-# config/commands/*.def must supply a non-empty `semantics` argument (the
+# engine/composition/commands/*.def must supply a non-empty `semantics` argument (the
 # OUTPUT-interpretation contract). The compiler enforces presence; this gate
 # rejects the empty/blank placeholder and fails loud on a hollow scan.
 check-command-contract:
@@ -11288,7 +11325,7 @@ check-command-contract:
 	@./tools/lint/check_command_contract.sh
 
 # Gate — command-availability truthfulness (HARD). The `availability` a leaf
-# declares in config/commands/*.def must match what the catalog actually
+# declares in engine/composition/commands/*.def must match what the catalog actually
 # binds: a READY leaf must bind a non-NULL handler (READY with no handler
 # advertises a command the engine cannot dispatch), and a PLANNED/COMPAT leaf
 # must state a non-empty availability_reason (a typed refusal with no stated
@@ -11325,7 +11362,7 @@ check-read-leaf-no-boot-ceremony:
 # Gate — telemetry-ontology coverage. Every network telemetry field a covered
 # dumpstate function emits must carry a machine-readable meaning row (what it
 # counts, its health rule, what a bad value implies, what to read next) in
-# lib/util/include/util/telemetry_ontology.def. A new field with no meaning
+# platform/modules/util/include/util/telemetry_ontology.def. A new field with no meaning
 # fails here, named with its file:line.
 check-telemetry-ontology:
 	@echo "══ LINT: telemetry field ontology ══"
@@ -11357,7 +11394,7 @@ check-no-new-coin-backfill-caller:
 
 # Route<->command parity (OS-B3b) — every fixed REST route in
 # api_controller_routes.c carries a command_path naming the native command
-# leaf (config/commands/*.def) that owns the same data/service, or an
+# leaf (engine/composition/commands/*.def) that owns the same data/service, or an
 # honest "none:<reason>" listed in the shrink-only
 # tools/lint/route_command_parity_baseline.txt. A new unmapped route or a
 # command_path that doesn't resolve to a real leaf fails the gate.
@@ -11421,7 +11458,7 @@ check-no-live-lab-history:
 
 # Gate E9 — EV_OPERATOR_NEEDED emit must reach a registered sink (HARD).
 # The silent-halt fix: the loud "human needed" signal can never be emitted
-# without a subscriber in lib/event/src/alerts.c.
+# without a subscriber in engine/modules/event/src/alerts.c.
 check-operator-needed-sink:
 	@echo "══ LINT: operator-needed sink (E9) ══"
 	@./tools/scripts/check_operator_needed_sink.sh
@@ -11496,7 +11533,7 @@ check-proof-server-pin:
 	@./tools/lint/check_proof_server_pin.sh
 
 # Gate — promotion evidence survives this machine and cannot be rewritten. The
-# pin above is a LOCAL, MUTABLE, UNSIGNED tag; deploy/promotion-receipts.jsonl
+# pin above is a LOCAL, MUTABLE, UNSIGNED tag; platform/deploy/promotion-receipts.jsonl
 # is the authority: tracked (so it replicates on push), hash-chained (so an
 # edited/removed/re-ordered record breaks a link) and ssh-signed (so a third
 # party verifies authorship offline with no private key). This runs the
@@ -11542,18 +11579,18 @@ check-ship-remote-transaction: jsonq
 # gate at all.
 check-z23-release-install: $(Z23_BOOTSTRAP_BIN)
 	@echo "══ LINT: z23 release package + fail-closed installer ══"
-	@bash packaging/release/build_release.sh --selftest
+	@bash platform/packaging/release/build_release.sh --selftest
 	@bash tools/scripts/install_z23.sh --selftest
 	@bash tools/scripts/deploy_z23_release.sh --selftest
 
 # Gate — every platform the install front door CLAIMS must be one the release
-# process actually produces. Widening packaging/install/install.sh's
+# process actually produces. Widening platform/packaging/install/install.sh's
 # PUBLISHED_PLATFORMS (or install.ps1's $$BootPins, or FD_PUBLISHED in
-# lib/install) is a one-word edit; producing that platform's artifact is a
+# platform/modules/install) is a one-word edit; producing that platform's artifact is a
 # toolchain, a second-stage installer and a service lifecycle. A name with
 # nothing behind it turns an honest refusal into a 404 on a stranger's
 # machine, so the claim is measured against what
-# packaging/release/build_release.sh reports it can cut. The same gate holds
+# platform/packaging/release/build_release.sh reports it can cut. The same gate holds
 # the all-zero sentinel as the checked-in default: real digests belong only in
 # the copies `build_release.sh --front-door` publishes.
 check-published-platforms:
@@ -11592,7 +11629,7 @@ check-source-identity-authority:
 # inline if/else-if ladder assigning `operator_needed` plus their own copies of
 # every rung's status/summary wording, and the two had already drifted — the
 # node could give two different answers to "does a human need to act".
-# app/controllers/include/controllers/operator_needed_policy.def is now that
+# engine/controllers/include/controllers/operator_needed_policy.def is now that
 # one place. This gate matches the ladder by SHAPE, not by any variable or
 # function name (a name-keyed gate is dodged by one rename), over a shrink-only
 # baseline at tools/lint/status_reason_baseline.txt.
@@ -11713,7 +11750,7 @@ check-error-doc-refs:
 	@echo "══ LINT: operator-named docs exist (C string literals) ══"
 	@./tools/lint/check_error_doc_refs.sh
 
-# docs/API_REFERENCE.md is GENERATED from config/commands/*.def by
+# docs/API_REFERENCE.md is GENERATED from engine/composition/commands/*.def by
 # tools/gen_api_reference.c (editorial prose lives in docs/API_REFERENCE.md.in).
 # It used to be hand-transcribed, and drifted: the page still claimed 106 leaves
 # across 41 branches long after the catalog had more than doubled. This gate
@@ -11743,11 +11780,11 @@ check-describe-budget:
 API_REFERENCE_TOOL = $(BIN_DIR)/gen_api_reference
 
 $(API_REFERENCE_TOOL): tools/gen_api_reference.c \
-                       lib/kernel/include/kernel/command_registry.h \
-                       $(wildcard config/commands/*.def) \
-                       $(wildcard config/commands/*/*.def)
+                       engine/modules/kernel/include/kernel/command_registry.h \
+                       $(wildcard engine/composition/commands/*.def) \
+                       $(wildcard engine/composition/commands/*/*.def)
 	@mkdir -p $(dir $@)
-	$(CC) -std=c23 -O2 -Wall -Wextra -Ilib/kernel/include -Ilib/json/include \
+	$(CC) -std=c23 -O2 -Wall -Wextra -Iengine/modules/kernel/include -Iplatform/modules/json/include \
 	    -o $@ tools/gen_api_reference.c
 
 .PHONY: tools/gen_api_reference docs-api-reference
@@ -11761,27 +11798,27 @@ docs-api-reference: $(API_REFERENCE_TOOL)
 # The checked-in artifact is never edited: regenerate it with this target.
 CAPABILITY_INVENTORY_TOOL = $(BIN_DIR)/gen_capability_inventory$(ZCL_HOST_EXEEXT)
 CAPABILITY_INVENTORY_PLATFORM_SRCS = $(if $(ZCL_HOST_WINDOWS), \
-	lib/platform/src/directory_compat.c lib/platform/src/positioned_file.c,)
+	platform/modules/platform/src/directory_compat.c platform/modules/platform/src/positioned_file.c,)
 CAPABILITY_INVENTORY_PLATFORM_LIBS = $(if $(ZCL_HOST_WINDOWS),-ladvapi32,)
 CAPABILITY_INVENTORY_SRCS = tools/gen_capability_inventory.c \
-	lib/codeindex/src/codeindex_inventory.c \
-	lib/codeindex/src/codeindex_inventory_scan.c \
-	lib/codeindex/src/codeindex_inventory_body.c \
-	lib/codeindex/src/codeindex_inventory_evidence.c \
-	lib/codeindex/src/codeindex_scan.c \
-	lib/codeindex/src/codeindex_scan_doc.c \
-	lib/base/src/safe_alloc.c lib/base/src/log_level.c lib/sha3/src/sha3.c \
+	cognition/modules/codeindex/src/codeindex_inventory.c \
+	cognition/modules/codeindex/src/codeindex_inventory_scan.c \
+	cognition/modules/codeindex/src/codeindex_inventory_body.c \
+	cognition/modules/codeindex/src/codeindex_inventory_evidence.c \
+	cognition/modules/codeindex/src/codeindex_scan.c \
+	cognition/modules/codeindex/src/codeindex_scan_doc.c \
+	platform/modules/base/src/safe_alloc.c platform/modules/base/src/log_level.c platform/modules/sha3/src/sha3.c \
 	$(CAPABILITY_INVENTORY_PLATFORM_SRCS)
 
 $(CAPABILITY_INVENTORY_TOOL): $(CAPABILITY_INVENTORY_SRCS) \
-	lib/codeindex/include/codeindex/codeindex_inventory.h \
-	lib/codeindex/src/codeindex_inventory_internal.h
+	cognition/modules/codeindex/include/codeindex/codeindex_inventory.h \
+	cognition/modules/codeindex/src/codeindex_inventory_internal.h
 	@mkdir -p $(dir $@)
 	$(CC) -std=c23 -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) \
 	    -O2 -Wall -Wextra -Werror \
-	    -pedantic -Ilib/codeindex/include -Ilib/codeindex/src \
-	    -Ilib/base/include -Ilib/util/include -Ilib/sha3/include \
-	    -Ilib/crypto/include -Ilib/platform/include \
+	    -pedantic -Icognition/modules/codeindex/include -Icognition/modules/codeindex/src \
+	    -Iplatform/modules/base/include -Iplatform/modules/util/include -Iplatform/modules/sha3/include \
+	    -Icore/modules/crypto/include -Iplatform/modules/platform/include \
 	    -o $@ $(CAPABILITY_INVENTORY_SRCS) $(CAPABILITY_INVENTORY_PLATFORM_LIBS)
 
 .PHONY: tools/gen_capability_inventory docs-capability-inventory
@@ -11812,11 +11849,11 @@ $(EQUIHASH_FACT_TOOL): $(EQUIHASH_FACT_SRCS)
 	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) \
 	    -Icore/chainparams/include -Icore/params/include -Icore/math/include \
-	    -Icore/consensus/include -Ilib/chain/include -Ilib/base/include \
-	    -Ilib/util/include -Ilib/core/include -Ilib/crypto/include \
-	    -Ilib/codec/include -Ilib/primitives/include -Ilib/support/include \
-	    -Ilib/encoding/include -Ilib/script/include -Ilib/json/include \
-	    -Ilib/sapling/include -Ilib/keys/include -Ilib/event/include \
+	    -Icore/consensus/include -Icore/modules/chain/include -Iplatform/modules/base/include \
+	    -Iplatform/modules/util/include -Icore/modules/core/include -Icore/modules/crypto/include \
+	    -Iplatform/modules/codec/include -Icore/modules/primitives/include -Iplatform/modules/support/include \
+	    -Iplatform/modules/encoding/include -Icore/modules/script/include -Iplatform/modules/json/include \
+	    -Icore/modules/sapling/include -Icontexts/wallet/modules/keys/include -Iengine/modules/event/include \
 	    -o $@ $(EQUIHASH_FACT_SRCS)
 
 .PHONY: tools/equihash-params-fact docs-equihash-params equihash-facts equihash-facts-check
@@ -11845,7 +11882,7 @@ binary-size:
 	@./tools/scripts/binary_size.sh
 
 # Gate — ONE hex codec. Base-16 encode/decode lives only in
-# lib/base/include/base/hex.h; a private copy anywhere else fails
+# platform/modules/base/include/base/hex.h; a private copy anywhere else fails
 # (RATCHET at file granularity; tools/lint/hex_codec_baseline.txt may only
 # shrink). 56 disagreeing copies existed when this gate was written.
 check-hex-codec-single:
@@ -11862,7 +11899,7 @@ check-one-result-type:
 
 # Gate — service-shape convergence SHRINKING-FLOOR ratchet (Phase 3, sibling
 # to E2): counts exported bool-returning function DEFINITIONS per
-# app/services/src/*.c file (E2 only requires a file to reference struct
+# engine/services/src/*.c file (E2 only requires a file to reference struct
 # zcl_result somewhere, so a "mixed" file can be E2-clean forever). Baseline
 # at tools/scripts/service_result_convergence_baseline.txt may only shrink;
 # see docs/work/service-result-convergence.md for the inventory + lane plan.
@@ -11876,10 +11913,10 @@ check-service-result-convergence:
 # matching the exemplars so it passes the framework lint gates the day it
 # lands. The generator never edits a registry — it prints the wiring step.
 #
-#   make new-condition  NAME=foo_bar   -> app/conditions/src/foo_bar.c
-#   make new-model      NAME=foo        -> app/models/src/foo.c
-#   make new-job        NAME=foo_stage  -> app/jobs/src/foo_stage.c
-#   make new-controller NAME=foo        -> app/controllers/src/foo_controller.c
+#   make new-condition  NAME=foo_bar   -> engine/conditions/src/foo_bar.c
+#   make new-model      NAME=foo        -> engine/models/src/foo.c
+#   make new-job        NAME=foo_stage  -> engine/jobs/src/foo_stage.c
+#   make new-controller NAME=foo        -> engine/controllers/src/foo_controller.c
 .PHONY: new-condition new-model new-job new-controller
 new-condition:
 	@test -n "$(NAME)" || { echo "usage: make new-condition NAME=foo_bar"; exit 1; }
@@ -11931,7 +11968,7 @@ check-no-authoritative-ram-state:
 	@echo "══ LINT: no authoritative RAM state (E7) ══"
 	@./tools/scripts/check_no_authoritative_ram_state.sh
 
-# Gate E5 — Job stages advance OR block (HARD). Every app/jobs/src/*_stage.c
+# Gate E5 — Job stages advance OR block (HARD). Every engine/jobs/src/*_stage.c
 # step must surface JOB_BLOCKED/JOB_IDLE on non-progress AND reference a cursor
 # (cursor_out / c->cursor_in / stage_cursor) — no silent forward spin. The 8
 # stages already comply, so the gate runs HARD.
@@ -11981,7 +12018,7 @@ check-honest-witness:
 # (whether standalone `make check-foo` or as a `lint:` prerequisite) runs
 # with ZCL_LINT_PRODUCTION_SCAN=1, so tools/lint/scan_exclusions.sh's
 # arrays exclude the shared lint-fixture-name glob + build/vendor/worktree
-# noise for EVERY production scan. Gate selftests (lib/test/src/
+# noise for EVERY production scan. Gate selftests (tests/harness/src/
 # test_make_lint_gates.c) exec the gate scripts directly — bypassing
 # `make` entirely — so this var stays unset there and detection power for
 # a freshly-planted selftest fixture is unchanged. See
@@ -12037,7 +12074,7 @@ check-no-retired-agent-protocol:
 #      shrink-only, 13 sites in 5 files, including the `app service access`
 #      example that ran the boot ceremony on the operator's node.db.
 # The datadir-taking leaf set is derived from argument 10 of the leaf macros in
-# config/commands/*.def, never hand-listed.
+# engine/composition/commands/*.def, never hand-listed.
 check-live-datadir-isolation:
 	@echo "══ LINT: nothing under test aims at the live datadir ══"
 	@./tools/lint/check_live_datadir_isolation.sh --selftest
@@ -12284,6 +12321,7 @@ LINT_GATES := \
     check-thread-supervision \
     check-file-purpose \
     check-group-purpose \
+    check-architecture-tree \
     check-no-orphan-placement \
     check-file-size-ceiling \
     check-operator-needed-sink \
@@ -12610,7 +12648,7 @@ check-restart-follow:
 
 # ── postmortem_to_scenario: capsule -> chaos-scenario skeleton bridge ─────
 # (Super-Reliability / Detective Node program, lane B5). Converts an
-# unpacked postmortem crash capsule (lib/sim/include/sim/postmortem.h)
+# unpacked postmortem crash capsule (engine/modules/sim/include/sim/postmortem.h)
 # into a .scenario SKELETON for the chaos DSL (tools/sim/chaos.c,
 # docs/CHAOS_HARNESS.md "From Capsule To Scenario"). Automates ONLY the
 # seed + best-effort boot-phase steps; translating the recorded events
@@ -12618,26 +12656,26 @@ check-restart-follow:
 # bug stays manual — see the TODO block the tool emits. Standalone build:
 # only the libs it directly uses (sim/postmortem + sim/seed_tape,
 # platform/clock + platform/rng, util/signal_handler + util/clientversion
-# + util/safe_alloc, lib/json) — no DB, no node libs, no Tor, same
+# + util/safe_alloc, platform/modules/json) — no DB, no node libs, no Tor, same
 # discipline as tools/gen_sha3_windows.c. Appended as a single
 # self-contained block at the end of this file to minimize merge conflict
 # surface with other in-flight sim/* lanes.
 .PHONY: tools/postmortem_to_scenario
 tools/postmortem_to_scenario: $(BIN_DIR)/postmortem_to_scenario
 $(BIN_DIR)/postmortem_to_scenario: tools/postmortem_to_scenario.c \
-		lib/sim/src/postmortem.c lib/sim/src/postmortem_archive.c \
-		lib/sim/src/postmortem_inventory.c \
-		lib/sim/src/postmortem_stub.c lib/sim/src/seed_tape.c \
-		lib/platform/src/clock.c lib/platform/src/rng.c \
-		lib/util/src/signal_handler.c lib/util/src/clientversion.c \
-		lib/util/src/async_safe_write.c \
-		lib/base/src/safe_alloc.c lib/base/src/log_level.c \
-		lib/json/src/json.c
+		engine/modules/sim/src/postmortem.c engine/modules/sim/src/postmortem_archive.c \
+		engine/modules/sim/src/postmortem_inventory.c \
+		engine/modules/sim/src/postmortem_stub.c engine/modules/sim/src/seed_tape.c \
+		platform/modules/platform/src/clock.c platform/modules/platform/src/rng.c \
+		platform/modules/util/src/signal_handler.c platform/modules/util/src/clientversion.c \
+		platform/modules/util/src/async_safe_write.c \
+		platform/modules/base/src/safe_alloc.c platform/modules/base/src/log_level.c \
+		platform/modules/json/src/json.c
 	@mkdir -p $(dir $@)
 	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 	    -Wno-format-truncation \
-	    -Ilib/sim/include -Ilib/platform/include -Ilib/base/include -Ilib/util/include \
-	    -Ilib/json/include \
+	    -Iengine/modules/sim/include -Iplatform/modules/platform/include -Iplatform/modules/base/include -Iplatform/modules/util/include \
+	    -Iplatform/modules/json/include \
 	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) \
 	    -o $@ $^ -Lvendor/lib vendor/lib/libz.a -lpthread -lm
 
@@ -12776,7 +12814,7 @@ build-bench-selftest:
 
 # ── Zcash proving parameters ───────────────────────────────────────────
 # A validating node needs none of these: the verifying keys are compiled in
-# (lib/sapling/src/params_vk_embedded.c). This target checks a parameter
+# (core/modules/sapling/src/params_vk_embedded.c). This target checks a parameter
 # directory for the operator who wants to CREATE shielded transactions, which
 # is the only capability the files buy. PARAMSDIR overrides the default.
 # See docs/PARAMS.md.

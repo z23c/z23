@@ -4,7 +4,7 @@
  * (the `state` object `dumpstate rom_compile` returns, NOT the outer
  * dumpstate envelope). Backs the `ops.rom` native leaf's human view; the
  * structured JSON stays the machine contract (see
- * app/jobs/src/rom_compile_status.c). No I/O, no RPC — a test can drive this
+ * engine/jobs/src/rom_compile_status.c). No I/O, no RPC — a test can drive this
  * with a synthetic json_value fixture. */
 
 #ifndef ZCL_TOOLS_ROM_COMPILE_RENDER_H

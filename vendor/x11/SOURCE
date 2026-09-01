@@ -5,4 +5,4 @@ revision=ubuntu-noble libx11-dev_2:1.8.7-1build1_amd64, x11proto-dev_2023.2-1_al
 license=X.Org MIT (see LICENSE — the canonical X.Org permission notice; permissive)
 files=include/X11/Xlib.h,include/X11/X.h,include/X11/Xfuncproto.h,include/X11/Xosdefs.h,include/X11/Xutil.h,include/X11/keysym.h,include/X11/keysymdef.h,include/X11/Xatom.h,include/X11/cursorfont.h,include/X11/XKBlib.h,include/X11/Xresource.h,include/X11/extensions/sync.h,include/X11/extensions/syncconst.h,include/X11/extensions/shape.h,include/X11/extensions/shapeconst.h,include/X11/extensions/XKB.h,include/X11/extensions/XKBstr.h
 integration=compile-time header closure for vendor/rgfw (RGFW.h/XDL.h) so headless hosts build with zero system -dev packages; X11 itself is loaded at RUNTIME by the vendored XDL layer (-ldl), never at link time
-local_patch=none — verbatim upstream headers; the exact 17-file closure `cc -M` reports for lib/presentation/src/presentation.c with the project's RGFW_NO_* defines
+local_patch=none — verbatim upstream headers; the exact 17-file closure `cc -M` reports for contexts/explorer/modules/presentation/src/presentation.c with the project's RGFW_NO_* defines

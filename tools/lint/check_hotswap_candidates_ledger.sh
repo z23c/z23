@@ -25,7 +25,7 @@
 #      --summary line must report the same four numbers. Either parser
 #      drifting is a failure; agreement off two independent walks is the point.
 #   B. THE DENYLIST HOLDS IN THE ADVICE, not just in the manifests. Every
-#      config/hotswap_denied_leaves.def leaf, asked of the tool with --leaf,
+#      engine/composition/hotswap_denied_leaves.def leaf, asked of the tool with --leaf,
 #      must come back BLOCKED (exit 2). check-hotswap-denied-leaves already
 #      keeps denied leaves out of the .def files; this keeps them out of the
 #      tool's RECOMMENDATIONS, which is a separate surface an agent acts on.
@@ -62,7 +62,7 @@ cd "$ROOT" || exit 2
 # with these env vars set, and a top-level expansion would freeze the real
 # paths in before the seeded fixture could take effect.
 SHAPE_GATE="tools/lint/check_hotswap_swappable_shape.sh"
-DENIED_DEF="config/hotswap_denied_leaves.def"
+DENIED_DEF="engine/composition/hotswap_denied_leaves.def"
 
 run_check() {
     local TOOL="${ZCL_HOTSWAP_CANDIDATES_TOOL:-tools/dev/hotswap-candidates.sh}"

@@ -247,7 +247,7 @@ observe_stages() {
     fi
 }
 
-# Success-only publication, matching lib/net/src/tor_integration.c
+# Success-only publication, matching core/modules/net/src/tor_integration.c
 # tor_log_has_descriptor_publication(). Hostname-file presence, the
 # "waiting for DESCRIPTOR PUBLICATION" stdout line, hs_service_callback
 # running, calling dynhost_check_and_activate, and "Dynhost service

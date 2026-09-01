@@ -3,7 +3,7 @@
 #
 # lint_cache.sh — the content-addressed per-gate lint result cache.
 #
-# Bazel-style, and a direct mirror of lib/test/src/testcache.c (the test-group
+# Bazel-style, and a direct mirror of tests/harness/src/testcache.c (the test-group
 # cache) down to its safety properties: a gate is SKIPPED when the exact input
 # it can see is byte-identical to the last time that gate PASSED. The key is
 # SHA-256 over the whole scannable tree plus the gate's own invocation, and a
@@ -186,9 +186,9 @@ lint_cache_never_reason() {
         check-no-stray-root-files)
             echo "'ls -A .' reads the real root directory listing, ignored entries included" ;;
         check-fuzz-artifact-ledger)
-            echo "enumerates UNTRACKED repro files left in lib/test/fuzz_seeds/ and resolves each corpus to a build/bin/fuzz_* target" ;;
+            echo "enumerates UNTRACKED repro files left in tests/harness/fuzz_seeds/ and resolves each corpus to a build/bin/fuzz_* target" ;;
         check-live-datadir-isolation)
-            echo "reads lib/test/src by filesystem glob rather than git ls-files, on purpose: it must see an UNCOMMITTED test file, which is exactly when a live-datadir read gets introduced" ;;
+            echo "reads tests/harness/src by filesystem glob rather than git ls-files, on purpose: it must see an UNCOMMITTED test file, which is exactly when a live-datadir read gets introduced" ;;
         check-toolchain)
             echo "runs the host compiler on an empty translation unit — the verdict depends on the installed toolchain" ;;
         *)

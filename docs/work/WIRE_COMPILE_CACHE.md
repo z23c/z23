@@ -33,7 +33,7 @@ the cache.
 
 **The P2P half is this lane's work**, in ordered slices:
 
-1. **BLAKE3 primitive.** A portable C23 implementation in `lib/crypto/`
+1. **BLAKE3 primitive.** A portable C23 implementation in `core/modules/crypto/`
    beside blake2b/blake2s, pinned to the official test vectors. No consumer
    yet; it is the foundation of the transfer-verification layer below.
 2. **Object-set carrier (offline proof).** A builder's cached objects plus

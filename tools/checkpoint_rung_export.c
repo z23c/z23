@@ -18,9 +18,9 @@
  * tool does not (and cannot) elevate it.
  *
  * The rung fold/serialize/self-digest all come from the CANONICAL node module
- * lib/storage/src/checkpoint_rung.c (linked here), so a tool artifact and a
+ * engine/modules/storage/src/checkpoint_rung.c (linked here), so a tool artifact and a
  * node-produced artifact are byte-identical by construction. Standalone build:
- * vendored sqlite + lib/crypto sha3 + the pure rung TU + log_level. Opens the
+ * vendored sqlite + core/modules/crypto sha3 + the pure rung TU + log_level. Opens the
  * bundle read-only; writes only into out_dir.
  *
  * Usage: checkpoint_rung_export BUNDLE.sqlite OUT_DIR [--chainwork=<64hex-BE>]

@@ -39,7 +39,7 @@ source and trust class only. Any `unsafe_overrides_total > 0` is fail-loud.
 
 A fresh node downloads a verified UTXO snapshot from another z23 peer,
 then catches up the tail via standard P2P. Activation is automatic — any peer
-advertising service bit `NODE_ZCL23` (`lib/net/include/net/fast_sync.h`)
+advertising service bit `NODE_ZCL23` (`core/modules/net/include/net/fast_sync.h`)
 becomes a snapshot candidate. Caught-up z23 peers also advertise SHA3
 block-piece manifests for IBD assist without the UTXO-export lock cost.
 The machinery below is built and code-tested;
@@ -137,7 +137,7 @@ Skipping step 1 is a footgun: importing UTXOs without the header import leaves a
 (`-cold-import=`/`-fastimport=`) no longer exist. Passing one does **not**
 silently no-op: the argv loop prints
 `Warning: unrecognized flag '<f>' (ignored) — check spelling or docs/RUNBOOK.md`
-to stderr on every boot (`config/src/args.c`). It is advisory, never fatal, so
+to stderr on every boot (`engine/composition/src/args.c`). It is advisory, never fatal, so
 grep stderr for `unrecognized flag` after any flag change.
 
 **Caveat:** the legacy cold import is slow (a ~12k-block header band backfills
@@ -152,7 +152,7 @@ Verify current sync state with `z23 status` /
 `z23 dumpstate reducer_frontier`; `docs/HANDOFF.md` holds current
 state, never this doc. The snapshot's `anchor_block_hash` must byte-equal
 this node's in-binary PoW header at the seed height or boot FATALs — a
-wrong-chain or missing anchor fails closed (`config/src/boot_refold_staged.c`,
+wrong-chain or missing anchor fails closed (`engine/composition/src/boot_refold_staged.c`,
 the load-snapshot-at-own-height path; the anchor-hash cross-check is at ~line
 585). When the seed height is above the coins-best active-chain window, the
 loader extends that window forward to the PoW-proven header tip

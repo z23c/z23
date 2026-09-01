@@ -2,7 +2,7 @@
 # Copyright 2026 Rhett Creighton - Apache License 2.0
 #
 # check_windows_platform_seam.sh — Windows CROSS-COMPILE gate for the
-# platform seam (lib/platform/src/*.c).
+# platform seam (platform/modules/platform/src/*.c).
 #
 # ── WHY THIS EXISTS ─────────────────────────────────────────────────────────
 # Three people now write this repo on Linux, macOS and Windows, and nothing
@@ -20,7 +20,7 @@
 #
 #     x86_64-w64-mingw32-gcc -std=c2x -fsyntax-only <lib/*/include -I flags>
 #
-# over every lib/platform/src/*.c — the platform seam, the one layer whose
+# over every platform/modules/platform/src/*.c — the platform seam, the one layer whose
 # entire job is hiding OS differences behind one header per primitive — and
 # ratchets the realized diagnostic sites against a recorded baseline, the
 # same shape tools/lint/check_clang_portability.sh already established for
@@ -37,7 +37,7 @@
 # files still carry sites. A number written into this comment can only rot.
 #
 # ── THE EXEMPTION: os_sandbox_linux.c ────────────────────────────────────
-# lib/platform/src/os_sandbox_linux.c is Linux's confinement backend; it is
+# platform/modules/platform/src/os_sandbox_linux.c is Linux's confinement backend; it is
 # CORRECTLY excluded from every non-Linux build by the node's own Makefile
 # (the `else` branch of the `ifeq ($(ZCL_HOST_OS),Linux)` guard around
 # LIB_SRCS). Counting it as a Windows failure would be grading code the real
@@ -89,11 +89,13 @@ ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 cd "$ROOT"
 # shellcheck source=tools/lint/gate_lib.sh
 . tools/lint/gate_lib.sh
+# shellcheck source=tools/lint/repo_shape.sh
+. tools/lint/repo_shape.sh
 
 GATE="check-windows-platform-seam"
 CC_BIN="${ZCL_MINGW_CC:-x86_64-w64-mingw32-gcc}"
 MAKEFILE="Makefile"
-SEAM_DIR="lib/platform/src"
+SEAM_DIR="platform/modules/platform/src"
 BASELINE="tools/lint/windows_platform_seam_baseline.txt"
 
 # Known floor for the in-scope seam file count (12 files on disk today, one
@@ -171,12 +173,15 @@ if [ "${1:-}" != "--self-test" ] && ! command -v "$CC_BIN" >/dev/null 2>&1; then
 fi
 
 # ── Include search path ───────────────────────────────────────────────────
-# Same set the measured baseline reproduction used: every lib/*/include root
+# Same set the measured baseline reproduction used: every module include root
 # (superset by construction — headers are namespaced per module, so an extra
 # -I can only add a search path, never collide).
-mapfile -t INC_DIRS < <(find lib -maxdepth 2 -type d -name include 2>/dev/null | sort)
+INC_DIRS=()
+for module_dir in "${ZCL_MODULE_DIRS[@]}"; do
+    [[ -d "$module_dir/include" ]] && INC_DIRS+=("$module_dir/include")
+done
 gate_require_scanned "${#INC_DIRS[@]}" 15 "$GATE" \
-    "no lib/*/include roots found — the lib/ layout moved"
+    "module include roots are incomplete"
 INC_FLAGS=()
 for d in "${INC_DIRS[@]}"; do INC_FLAGS+=("-I$d"); done
 
@@ -223,7 +228,7 @@ fi
 # ── Exemption set: parsed from the Makefile's OWN non-Linux LIB_SRCS filter,
 # not hardcoded ─────────────────────────────────────────────────────────────
 # Mirrors exactly the `else` branch of the `ifeq ($(ZCL_HOST_OS),Linux)`
-# guard around LIB_SRCS: whatever lib/platform/src/*.c the real build itself
+# guard around LIB_SRCS: whatever platform/modules/platform/src/*.c the real build itself
 # drops when the host is not Linux is exempt here too, so this gate tracks
 # the build's own decision instead of drifting from it. If the build ever
 # stops exempting a file, this gate starts grading it on the same commit —
@@ -310,7 +315,7 @@ if [ "${ZCL_LINT_MODE:-}" = "UPDATE" ]; then
         echo "# Windows platform-seam ratchet baseline — regenerate with:"
         echo "#   ZCL_LINT_MODE=UPDATE tools/lint/check_windows_platform_seam.sh"
         echo "#"
-        echo "# One '<path> <count>' line per lib/platform/src/*.c file that"
+        echo "# One '<path> <count>' line per platform/modules/platform/src/*.c file that"
         echo "# still holds mingw diagnostic sites under"
         echo "#   $CC_BIN ${WARN_FLAGS[*]} <lib/*/include -I flags>"
         echo "# A file absent from this list must produce ZERO diagnostics."

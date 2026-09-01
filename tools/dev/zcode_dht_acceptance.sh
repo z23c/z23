@@ -143,50 +143,50 @@ esac
 
 dht_build_helper() {
     cc -std=c23 -O1 -w -D_GNU_SOURCE -ffunction-sections -fdata-sections \
-        -Wl,--gc-sections -I"$REPO_ROOT/lib/base/include" \
-        -I"$REPO_ROOT/lib/sha3/include" -I"$REPO_ROOT/lib/crypto/include" \
-        -I"$REPO_ROOT/lib/support/include" \
-        -I"$REPO_ROOT/lib/util/include" -I"$REPO_ROOT/lib/platform/include" \
-        -I"$REPO_ROOT/lib/json/include" -I"$REPO_ROOT/lib/core/include" \
-        -I"$REPO_ROOT/lib/net/include" -I"$REPO_ROOT/lib/noise/include" \
-        -I"$REPO_ROOT/lib/vcs/include" -I"$REPO_ROOT/lib/zid/include" \
+        -Wl,--gc-sections -I"$REPO_ROOT/platform/modules/base/include" \
+        -I"$REPO_ROOT/platform/modules/sha3/include" -I"$REPO_ROOT/core/modules/crypto/include" \
+        -I"$REPO_ROOT/platform/modules/support/include" \
+        -I"$REPO_ROOT/platform/modules/util/include" -I"$REPO_ROOT/platform/modules/platform/include" \
+        -I"$REPO_ROOT/platform/modules/json/include" -I"$REPO_ROOT/core/modules/core/include" \
+        -I"$REPO_ROOT/core/modules/net/include" -I"$REPO_ROOT/core/modules/noise/include" \
+        -I"$REPO_ROOT/contexts/commons/modules/vcs/include" -I"$REPO_ROOT/contexts/wallet/modules/zid/include" \
         -I"$REPO_ROOT/core/math/include" -o "$DHT_WORK/dht-peer" \
         "$REPO_ROOT/tools/zcode_dht_acceptance_peer.c" \
-        "$REPO_ROOT/lib/net/src/noise_transport.c" \
-        "$REPO_ROOT/lib/noise/src/noise_handshake.c" \
-        "$REPO_ROOT/lib/noise/src/session_transport.c" \
-        "$REPO_ROOT/lib/vcs/src/zcode_dht.c" \
-        "$REPO_ROOT/lib/vcs/src/zcode_dht_delegation.c" \
-        "$REPO_ROOT/lib/vcs/src/zcode_dht_identity.c" \
-        "$REPO_ROOT/lib/vcs/src/zcode_dht_msgs.c" \
-        "$REPO_ROOT/lib/zid/src/zid.c" \
-        "$REPO_ROOT/lib/zid/src/zendp.c" \
-        "$REPO_ROOT/lib/crypto/src/ed25519.c" \
-        "$REPO_ROOT/lib/crypto/src/sha512.c" \
-        "$REPO_ROOT/lib/crypto/src/sha256.c" \
-        "$REPO_ROOT/lib/sha3/src/sha3.c" \
-        "$REPO_ROOT/lib/crypto/src/hmac_sha256.c" \
-        "$REPO_ROOT/lib/crypto/src/hkdf_sha256.c" \
-        "$REPO_ROOT/lib/crypto/src/chacha20poly1305.c" \
-        "$REPO_ROOT/lib/support/src/log_throttle.c" \
-        "$REPO_ROOT/lib/crypto/src/curve25519.c" \
-        "$REPO_ROOT/lib/crypto/src/x25519_safe.c" \
-        "$REPO_ROOT/lib/crypto/src/random_secret.c" \
+        "$REPO_ROOT/core/modules/net/src/noise_transport.c" \
+        "$REPO_ROOT/core/modules/noise/src/noise_handshake.c" \
+        "$REPO_ROOT/core/modules/noise/src/session_transport.c" \
+        "$REPO_ROOT/contexts/commons/modules/vcs/src/zcode_dht.c" \
+        "$REPO_ROOT/contexts/commons/modules/vcs/src/zcode_dht_delegation.c" \
+        "$REPO_ROOT/contexts/commons/modules/vcs/src/zcode_dht_identity.c" \
+        "$REPO_ROOT/contexts/commons/modules/vcs/src/zcode_dht_msgs.c" \
+        "$REPO_ROOT/contexts/wallet/modules/zid/src/zid.c" \
+        "$REPO_ROOT/contexts/wallet/modules/zid/src/zendp.c" \
+        "$REPO_ROOT/core/modules/crypto/src/ed25519.c" \
+        "$REPO_ROOT/core/modules/crypto/src/sha512.c" \
+        "$REPO_ROOT/core/modules/crypto/src/sha256.c" \
+        "$REPO_ROOT/platform/modules/sha3/src/sha3.c" \
+        "$REPO_ROOT/core/modules/crypto/src/hmac_sha256.c" \
+        "$REPO_ROOT/core/modules/crypto/src/hkdf_sha256.c" \
+        "$REPO_ROOT/core/modules/crypto/src/chacha20poly1305.c" \
+        "$REPO_ROOT/platform/modules/support/src/log_throttle.c" \
+        "$REPO_ROOT/core/modules/crypto/src/curve25519.c" \
+        "$REPO_ROOT/core/modules/crypto/src/x25519_safe.c" \
+        "$REPO_ROOT/core/modules/crypto/src/random_secret.c" \
         "$REPO_ROOT/core/math/src/hash.c" \
-        "$REPO_ROOT/lib/core/src/utiltime.c" \
-        "$REPO_ROOT/lib/core/src/random.c" \
-        "$REPO_ROOT/lib/base/src/safe_alloc.c" \
-        "$REPO_ROOT/lib/base/src/log_level.c" \
-        "$REPO_ROOT/lib/base/src/result.c" \
-        "$REPO_ROOT/lib/base/src/cleanse.c" \
-        "$REPO_ROOT/lib/platform/src/clock.c" \
-        "$REPO_ROOT/lib/platform/src/rng.c" \
-        "$REPO_ROOT/lib/platform/src/positioned_file.c" \
-        "$REPO_ROOT/lib/platform/src/private_directory.c" \
-        "$REPO_ROOT/lib/util/src/write_all.c" \
-        "$REPO_ROOT/lib/json/src/json.c" \
-        "$REPO_ROOT/lib/util/src/hw_profile.c" \
-        "$REPO_ROOT/lib/util/src/cpu_topology.c" ||
+        "$REPO_ROOT/core/modules/core/src/utiltime.c" \
+        "$REPO_ROOT/core/modules/core/src/random.c" \
+        "$REPO_ROOT/platform/modules/base/src/safe_alloc.c" \
+        "$REPO_ROOT/platform/modules/base/src/log_level.c" \
+        "$REPO_ROOT/platform/modules/base/src/result.c" \
+        "$REPO_ROOT/platform/modules/base/src/cleanse.c" \
+        "$REPO_ROOT/platform/modules/platform/src/clock.c" \
+        "$REPO_ROOT/platform/modules/platform/src/rng.c" \
+        "$REPO_ROOT/platform/modules/platform/src/positioned_file.c" \
+        "$REPO_ROOT/platform/modules/platform/src/private_directory.c" \
+        "$REPO_ROOT/platform/modules/util/src/write_all.c" \
+        "$REPO_ROOT/platform/modules/json/src/json.c" \
+        "$REPO_ROOT/platform/modules/util/src/hw_profile.c" \
+        "$REPO_ROOT/platform/modules/util/src/cpu_topology.c" ||
         dht_die "acceptance helper compile failed"
 }
 

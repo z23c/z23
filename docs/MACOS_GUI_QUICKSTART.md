@@ -6,7 +6,7 @@ another machine can rebuild byte for byte. No Xcode, no package manager, no
 project file — the app is C23 you can read in one sitting, and the build is
 `make`.
 
-The template of record is [`packages/zhello`](../packages/zhello/README.md):
+The template of record is [`contexts/commons/packages/zhello`](../contexts/commons/packages/zhello/README.md):
 one native window, an animated canvas, and a headless selftest that proves the
 frame code without a window. `make new-app` turns that shape into your own
 application. Everything on this page is one pass through that journey.
@@ -77,14 +77,14 @@ worktree.
 make new-app NAME=myapp
 ```
 
-The name becomes the package (`packages/myapp/`), the make targets, the C
+The name becomes the package (`contexts/commons/packages/myapp/`), the make targets, the C
 symbol prefix and the header guard, so it must be a lowercase C identifier:
 `^[a-z][a-z0-9_]*$`. The command finishes in well under a second and prints
 the next three commands.
 
 What it does:
 
-- copies `packages/zhello` to `packages/myapp`, renaming `zhello` → `myapp` in
+- copies `contexts/commons/packages/zhello` to `contexts/commons/packages/myapp`, renaming `zhello` → `myapp` in
   the sources, the header guard, the log strings, the usage text and the README
   — your app *is* the template under its own name, not a fork of it;
 - appends one registration block to `config/gui_apps.mk`, which the top-level
@@ -123,7 +123,7 @@ machine with no WindowServer still proves the frame code runs.
 
 ## Edit and see
 
-The loop is one command. Open `packages/<name>/src/<name>.c` — the painter,
+The loop is one command. Open `contexts/commons/packages/<name>/src/<name>.c` — the painter,
 two palette stops and a bouncing square, no windowing code — change something,
 and re-run:
 
@@ -135,10 +135,10 @@ make myapp              # see it on screen
 Because a GUI app's parse is deliberately tiny (see
 [Measured on one host](#measured-on-one-host)), the rebuild you wait for is the
 recompile of one file, not a scan of a tree. The whole program is two
-translation units: the painter, and the driver under `packages/<name>/app/`,
+translation units: the painter, and the driver under `contexts/commons/packages/<name>/app/`,
 which owns the window and the selftest and is the only file that mentions the
 windowing layer. Its shape is
-[`packages/zhello/app/main.c`](../packages/zhello/app/main.c).
+[`contexts/commons/packages/zhello/app/main.c`](../contexts/commons/packages/zhello/app/main.c).
 
 ## Ship it
 
@@ -218,7 +218,7 @@ registered. Check that `config/gui_apps.mk` contains `GUI_APPS += myapp` —
 `make new-app` writes it, a hand-edit or a sync that dropped the gitignored
 file removes it. Re-run `make new-app NAME=myapp`; it refuses to overwrite your
 sources, but it does not re-register either, so add the line by hand or delete
-`packages/myapp` and scaffold again.
+`contexts/commons/packages/myapp` and scaffold again.
 
 **The parse takes ~11 s for every command.** Your goal fell out of the lean
 set, so make is doing the authoritative parse: it captures the whole-tree
@@ -248,7 +248,7 @@ because ASan with an unlimited stack intermittently aborts at startup
 **Your new file trips the file-size limit.** The hard limit is 1500 lines for
 every production `.c` (800 lines is the advisory target, and 801..1500 is an
 allowed buffer that never fails); a GUI package's sources live under
-`packages/`, so they are outside the scan, but the discipline is the same one
+`contexts/commons/packages/`, so they are outside the scan, but the discipline is the same one
 rule everywhere: a file that wants to grow past 1500 lines is two files. See
 [`DEFENSIVE_CODING.md`](DEFENSIVE_CODING.md) for the bands and the legacy
 baseline.
@@ -260,7 +260,7 @@ the bundle on that machine (`make myapp-app`) or clear the attribute with
 `xattr -dr com.apple.quarantine Myapp.app`; the ad-hoc signature is what makes
 the bundle runnable, not what makes it trusted.
 
-**You edited `packages/zhello` to make your app and now `make zhello-selftest`
+**You edited `contexts/commons/packages/zhello` to make your app and now `make zhello-selftest`
 fails.** Put it back: zhello is the template of record, the reference every
 new app is stamped from, and its selftest is the proof that the template still
-works. `git checkout -- packages/zhello`, then scaffold.
+works. `git checkout -- contexts/commons/packages/zhello`, then scaffold.

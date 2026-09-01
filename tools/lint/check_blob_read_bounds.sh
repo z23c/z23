@@ -12,7 +12,7 @@ source "$ROOT/tools/lint/scan_exclusions.sh"
 fail=0
 shopt -s nullglob
 
-for f in app/models/src/*.c; do
+for f in engine/models/src/*.c; do
     lint_path_is_excluded "$f" && continue
     awk '
     function trim(s) {

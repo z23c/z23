@@ -8,16 +8,16 @@
 # exemplar for its shape exactly so it passes the framework lint gates the day
 # it lands:
 #
-#   condition  -> app/conditions/src/<name>.c
+#   condition  -> engine/conditions/src/<name>.c
 #                 ({detect,remedy,witness} struct + register fn; E3 shape
 #                  header "framework/condition.h")
-#   model      -> app/models/src/<name>.c
+#   model      -> engine/models/src/<name>.c
 #                 (DEFINE_MODEL_CALLBACKS + validates_* + AR_*_SAVE lifecycle;
 #                  E3 "models/" header, Move-11 validation coverage)
-#   job        -> app/jobs/src/<name>_stage.c
+#   job        -> engine/jobs/src/<name>_stage.c
 #                 (cursor-stamped advance-or-block step; E5 JOB_BLOCKED/IDLE +
 #                  cursor reference)
-#   controller -> app/controllers/src/<name>_controller.c
+#   controller -> engine/controllers/src/<name>_controller.c
 #                 (parse -> one service call -> return; route table)
 #   scenario   -> tools/sim/scenarios/<name>.scenario
 #                 (chaos DSL skeleton: mode simnet + a small honest cluster +
@@ -60,7 +60,7 @@ guard_new() {
 }
 
 emit_condition() {
-    local out="$ROOT/app/conditions/src/${NAME}.c"
+    local out="$ROOT/engine/conditions/src/${NAME}.c"
     guard_new "$out"
     mkdir -p "$(dirname "$out")"
     cat > "$out" <<EOF
@@ -147,13 +147,13 @@ EOF
 
 NEXT — add one ordered manifest row (it generates declaration, registration,
 and regression expectations):
-  app/conditions/include/conditions/condition_registry.def
+  engine/conditions/include/conditions/condition_registry.def
     add:  ZCL_CONDITION(${NAME})
 EOF
 }
 
 emit_model() {
-    local out="$ROOT/app/models/src/${NAME}.c"
+    local out="$ROOT/engine/models/src/${NAME}.c"
     guard_new "$out"
     mkdir -p "$(dirname "$out")"
     cat > "$out" <<EOF
@@ -178,7 +178,7 @@ ${LICENSE}
 
 /* A dense, POD record (Law 5: fat models, lean structs). Replace these
  * fields with the real columns; keep it cache-friendly. Lives in a model
- * header (app/models/include/models/${NAME}.h) once the table is real. */
+ * header (engine/models/include/models/${NAME}.h) once the table is real. */
 struct db_${NAME} {
     int64_t id;
     int     height;
@@ -251,7 +251,7 @@ EOF
 
 NEXT — for a model with a persistent table:
   - declare struct db_${NAME} and the public fns in a header under
-    app/models/include/models/${NAME}.h (it must #include "models/activerecord.h").
+    engine/models/include/models/${NAME}.h (it must #include "models/activerecord.h").
   - prepare/cache the INSERT statement on your db handle (node_db or a
     progress_store/kernel-db wrapper) and step it through an AR_*_SAVE macro.
   - critical models (utxo/block/wallet_*) must keep a before_save hook
@@ -262,7 +262,7 @@ EOF
 emit_job() {
     # Jobs are always *_stage.c (the lint gate and folder convention expect it).
     local base="${NAME%_stage}_stage"
-    local out="$ROOT/app/jobs/src/${base}.c"
+    local out="$ROOT/engine/jobs/src/${base}.c"
     local stage_name="${NAME%_stage}"
     guard_new "$out"
     mkdir -p "$(dirname "$out")"
@@ -386,16 +386,16 @@ EOF
 
 NEXT — wire the stage into its supervisor and (optionally) the diagnostics dump:
   - call ${stage_name}_stage_init() from the staged-sync supervisor
-    (app/supervisors/src/staged_sync_supervisor.c) and tick
+    (engine/supervisors/src/staged_sync_supervisor.c) and tick
     ${stage_name}_stage_step_once() on its schedule.
-  - declare the public fns in a header under app/jobs/include/jobs/${base}.h.
+  - declare the public fns in a header under engine/jobs/include/jobs/${base}.h.
   - to expose runtime state via z23 dumpstate, add a *_dump_state_json and register
     it (see CLAUDE.md "Adding state introspection").
 EOF
 }
 
 emit_controller() {
-    local out="$ROOT/app/controllers/src/${NAME}_controller.c"
+    local out="$ROOT/engine/controllers/src/${NAME}_controller.c"
     guard_new "$out"
     mkdir -p "$(dirname "$out")"
     local upper
@@ -455,7 +455,7 @@ EOF
 
 NEXT — wire the controller into RPC registration:
   - declare void register_${NAME}_rpc_commands(struct rpc_table *t); in a
-    header under app/controllers/include/controllers/${NAME}_controller.h
+    header under engine/controllers/include/controllers/${NAME}_controller.h
   - call register_${NAME}_rpc_commands(t) where the other controllers are
     registered (grep for register_health_rpc_commands).
   - (used the placeholder category "${NAME}" / "${upper}"; rename to a real

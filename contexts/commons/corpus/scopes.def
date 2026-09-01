@@ -1,0 +1,197 @@
+# contexts/commons/corpus/scopes.def — canonical scope definition for the C23 corpus census
+# (build/bin/corpus-census, tools/corpus_census.c). One scope per line:
+#
+#   scope <name> | kind <human|ai|import> | spdx <SPDX-ID> \
+#       | src <prefix>[,<prefix>...] | tests <prefix>[,<prefix>...]
+#
+# Prefixes are repo-relative. A trailing '/' means "this directory tree";
+# otherwise the prefix is a literal file prefix (e.g. tests/harness/src/test_base
+# claims tests/harness/src/test_base_foundation.c). Only tracked files
+# (git ls-files) with a .c/.h/.def extension enter the census.
+#
+# File-claim precedence (deterministic; ambiguity fails closed): a tests
+# claim beats a src claim of another scope; among same-kind claims the
+# LONGEST matching prefix wins (so tests/harness/src/test_base beats the shared
+# tests/harness/include/test/ remainder); two equal-length competing claims are a fatal
+# overlap error. No file is ever counted twice.
+#
+# kind is DECLARED provenance: no per-file authorship marker exists in-tree,
+# so every scope below is declared `human` (pre-existing node code). The
+# census report carries this disclosure verbatim.
+#
+# spdx is bound to a real license file by the driver: a scope-local LICENSE
+# when one exists (platform/modules/base, platform/modules/codec, contexts/commons/modules/commons_demo, core/modules/crypto,
+# platform/modules/encoding, platform/modules/json, platform/modules/platform, contexts/explorer/modules/presentation, platform/modules/sha3, contexts/commons/modules/vcs),
+# otherwise the repo-root LICENSE (Apache-2.0). contexts/commons/modules/commons_demo,
+# platform/modules/encoding and platform/modules/sha3 carry MIT texts; everything else is Apache-2.0.
+#
+# vendor/ and core/ are deliberately NOT scopes: vendor/ is third-party
+# material (the census would exclude it as VENDOR) and core/ is the
+# byte-sealed consensus core, which is not C23 Commons package content.
+#
+# ── package lines, and why `store` is a LABEL ───────────────────────
+#
+#   package <name> | root <64hex> | store <label> \
+#       | kind <human|ai|import> | spdx <SPDX-ID>
+#
+# A package scope is enumerated from a published C23 Commons package store
+# instead of from git. `store` names WHICH local store to read; it is one
+# path component drawn from [A-Za-z0-9._-] (never '.', '..', '/' or '~'),
+# and the census resolves it to <store-root>/<label>/zcode, where store-root
+# comes from --store-root, else $ZCL_CORPUS_STORE_ROOT, else $HOME.
+#
+# It is a label and not a path because this line is copied VERBATIM into
+# every evidence record (`scopes_def_line`) and hashed into
+# assignment_evidence_root. While the field held an absolute datadir, the
+# operator's home directory shipped 2,302 times in the committed corpus
+# artifacts — a local filesystem locator in a repository whose privacy rule
+# is that committed files carry no clearnet address, hostname, username, or
+# local path. The path was never what the evidence was ABOUT: `root` is the
+# package manifest root, re-derived from the store and refused on mismatch,
+# and that is what binds the bytes. Where those bytes sit on one host is an
+# operator-local coordinate and belongs in a flag, not in this file.
+#
+# FLAG DAY: these lines carried `store /home/<user>/<label>` through
+# sequence 42. Sequences from 43 on hash the label form, so the sequence-42
+# assignment_evidence_root values are NOT reproducible from this file. That
+# is recorded rather than hidden — see corpus/README.md.
+
+# ── repo subtrees ───────────────────────────────────────────────────
+scope zclassic23/adapters | kind human | spdx Apache-2.0 | src platform/adapters/
+scope zclassic23/app | kind human | spdx Apache-2.0 | src app/
+scope zclassic23/application | kind human | spdx Apache-2.0 | src engine/application/
+scope zclassic23/apps/blog | kind human | spdx Apache-2.0 | src apps/blog/
+scope zclassic23/apps/social | kind human | spdx Apache-2.0 | src apps/social/
+scope zclassic23/apps/yardsale | kind human | spdx Apache-2.0 | src apps/yardsale/
+scope zclassic23/config | kind human | spdx Apache-2.0 | src config/
+scope zclassic23/domain | kind human | spdx Apache-2.0 | src domain/
+scope zclassic23/examples | kind human | spdx Apache-2.0 | src examples/
+scope zclassic23/ports | kind human | spdx Apache-2.0 | src platform/ports/
+scope zclassic23/src | kind human | spdx Apache-2.0 | src src/
+scope zclassic23/tests-fixtures | kind human | spdx Apache-2.0 | src tests/
+scope zclassic23/tools | kind human | spdx Apache-2.0 | src tools/
+
+# ── shared test suite (lib/test remainder after per-lib claims) ─────
+scope zclassic23/lib-test-shared | kind human | spdx Apache-2.0 | tests tests/harness/include/test/
+
+# ── libraries ───────────────────────────────────────────────────────
+scope zclassic23/platform/modules/base | kind human | spdx Apache-2.0 | src platform/modules/base/ | tests platform/modules/base/tests/,tests/harness/src/test_base
+scope zclassic23/core/modules/bloom | kind human | spdx Apache-2.0 | src core/modules/bloom/ | tests tests/harness/src/test_bloom
+scope zclassic23/core/modules/chain | kind human | spdx Apache-2.0 | src core/modules/chain/ | tests tests/harness/src/test_chain_
+scope zclassic23/platform/modules/codec | kind human | spdx Apache-2.0 | src platform/modules/codec/ | tests platform/modules/codec/tests/,tests/harness/src/test_codec
+scope zclassic23/cognition/modules/codeindex | kind human | spdx Apache-2.0 | src cognition/modules/codeindex/ | tests tests/harness/src/test_codeindex
+scope zclassic23/core/modules/coins | kind human | spdx Apache-2.0 | src core/modules/coins/ | tests tests/harness/src/test_coins_
+scope zclassic23/contexts/commons/modules/commons_demo | kind human | spdx MIT | src contexts/commons/modules/commons_demo/ | tests contexts/commons/modules/commons_demo/tests/
+scope zclassic23/core/modules/core | kind human | spdx Apache-2.0 | src core/modules/core/ | tests tests/harness/src/test_core
+scope zclassic23/core/modules/crypto | kind human | spdx Apache-2.0 | src core/modules/crypto/ | tests core/modules/crypto/tests/,tests/harness/src/test_crypto_
+scope zclassic23/core/modules/crypto_registry | kind human | spdx Apache-2.0 | src core/modules/crypto_registry/ | tests tests/harness/src/test_crypto_registry
+scope zclassic23/platform/modules/encoding | kind human | spdx MIT | src platform/modules/encoding/ | tests platform/modules/encoding/tests/
+scope zclassic23/engine/modules/event | kind human | spdx Apache-2.0 | src engine/modules/event/ | tests tests/harness/src/test_event_
+scope zclassic23/engine/modules/framework | kind human | spdx Apache-2.0 | src engine/modules/framework/
+scope zclassic23/engine/modules/health | kind human | spdx Apache-2.0 | src engine/modules/health/ | tests tests/harness/src/test_health_
+scope zclassic23/engine/modules/hotswap | kind human | spdx Apache-2.0 | src engine/modules/hotswap/ | tests tests/harness/src/test_hotswap_
+scope zclassic23/platform/modules/json | kind human | spdx Apache-2.0 | src platform/modules/json/ | tests platform/modules/json/tests/
+scope zclassic23/engine/modules/kernel | kind human | spdx Apache-2.0 | src engine/modules/kernel/
+scope zclassic23/contexts/wallet/modules/keys | kind human | spdx Apache-2.0 | src contexts/wallet/modules/keys/ | tests tests/harness/src/test_keys_
+scope zclassic23/contexts/commons/modules/metaverse | kind human | spdx Apache-2.0 | src contexts/commons/modules/metaverse/ | tests tests/harness/src/test_metaverse_
+scope zclassic23/engine/modules/metrics | kind human | spdx Apache-2.0 | src engine/modules/metrics/
+scope zclassic23/core/modules/mining | kind human | spdx Apache-2.0 | src core/modules/mining/ | tests tests/harness/src/test_mining
+scope zclassic23/core/modules/net | kind human | spdx Apache-2.0 | src core/modules/net/ | tests tests/harness/src/test_net_
+scope zclassic23/core/modules/noise | kind human | spdx Apache-2.0 | src core/modules/noise/ | tests tests/harness/src/test_noise_
+scope zclassic23/engine/modules/overlay | kind human | spdx Apache-2.0 | src engine/modules/overlay/ | tests tests/harness/src/test_overlay_
+scope zclassic23/platform/modules/platform | kind human | spdx Apache-2.0 | src platform/modules/platform/ | tests platform/modules/platform/tests/
+scope zclassic23/core/modules/policy | kind human | spdx Apache-2.0 | src core/modules/policy/ | tests tests/harness/src/test_policy
+scope zclassic23/contexts/explorer/modules/presentation | kind human | spdx Apache-2.0 | src contexts/explorer/modules/presentation/ | tests contexts/explorer/modules/presentation/tests/
+scope zclassic23/core/modules/primitives | kind human | spdx Apache-2.0 | src core/modules/primitives/ | tests tests/harness/src/test_primitives
+scope zclassic23/engine/modules/rpc | kind human | spdx Apache-2.0 | src engine/modules/rpc/ | tests tests/harness/src/test_rpc_
+scope zclassic23/core/modules/sapling | kind human | spdx Apache-2.0 | src core/modules/sapling/ | tests tests/harness/src/test_sapling_
+scope zclassic23/core/modules/script | kind human | spdx Apache-2.0 | src core/modules/script/ | tests tests/harness/src/test_script_
+scope zclassic23/cognition/modules/session | kind human | spdx Apache-2.0 | src cognition/modules/session/
+scope zclassic23/platform/modules/sha3 | kind human | spdx MIT | src platform/modules/sha3/ | tests platform/modules/sha3/tests/,tests/harness/src/test_sha3_
+scope zclassic23/engine/modules/sim | kind human | spdx Apache-2.0 | src engine/modules/sim/
+scope zclassic23/engine/modules/storage | kind human | spdx Apache-2.0 | src engine/modules/storage/ | tests tests/harness/src/test_storage_
+scope zclassic23/platform/modules/support | kind human | spdx Apache-2.0 | src platform/modules/support/
+scope zclassic23/core/modules/sync | kind human | spdx Apache-2.0 | src core/modules/sync/ | tests tests/harness/src/test_sync_
+scope zclassic23/platform/modules/util | kind human | spdx Apache-2.0 | src platform/modules/util/ | tests tests/harness/src/test_util_
+scope zclassic23/core/modules/validation | kind human | spdx Apache-2.0 | src core/modules/validation/ | tests tests/harness/src/test_validation_
+scope zclassic23/contexts/commons/modules/vcs | kind human | spdx Apache-2.0 | src contexts/commons/modules/vcs/ | tests contexts/commons/modules/vcs/tests/,tests/harness/src/test_vcs_
+scope zclassic23/contexts/wallet/modules/wallet | kind human | spdx Apache-2.0 | src contexts/wallet/ | tests tests/harness/src/test_wallet_
+scope zclassic23/contexts/commons/modules/zanc | kind human | spdx Apache-2.0 | src contexts/commons/modules/zanc/ | tests tests/harness/src/test_zanc
+scope zclassic23/contexts/naming/modules/zdir | kind human | spdx Apache-2.0 | src contexts/naming/modules/zdir/ | tests tests/harness/src/test_zdir_
+scope zclassic23/contexts/wallet/modules/zid | kind human | spdx Apache-2.0 | src contexts/wallet/modules/zid/ | tests tests/harness/src/test_zid_
+scope zclassic23/contexts/naming/modules/znam | kind human | spdx Apache-2.0 | src contexts/naming/modules/znam/ | tests tests/harness/src/test_znam_
+scope zclassic23/contexts/market/modules/zslp | kind human | spdx Apache-2.0 | src contexts/market/modules/zslp/ | tests tests/harness/src/test_zslp_
+scope zclassic23/contexts/market/modules/zswap | kind human | spdx Apache-2.0 | src contexts/market/modules/zswap/ | tests tests/harness/src/test_zswap_
+package zclassic23-commons/zcsv | root f864f254758d5da85058ca18c6411cd5cf71999eaaaae00ecee73fc6b6a08638 | store .zclassic-c23-commons-factory-a | kind ai | spdx MIT
+package zmap/zmap | root ae1c1bb4922688ea0020c4831c833bbf5410956719c1347ebe9f74a6a65e65d6 | store .zclassic-c23-commons-factory-c | kind ai | spdx MIT
+package zini/zini | root 2b08ba41a58a837cfafbdb10921a86da096df74f428a06ad99e8d7e0b7f3ed03 | store .zclassic-c23-commons-factory-c | kind ai | spdx MIT
+package zsemver/zsemver | root b919d97ad8a9f9754d2357a3cda8f1cace35e677fe38cdc1452f321c38562ab5 | store .zclassic-c23-commons-factory-a | kind human | spdx MIT
+package zbase64/zbase64 | root e82a1c1410dcc4f22e4e53cc0eea9d4e8b794f18f7a70731d065ebb2922b4eb7 | store .zclassic-c23-commons-factory-a | kind human | spdx MIT
+package zglob/zglob | root 13914d634838bcde336606b8e7cf89b439653a108e676d1baec065685c25f06a | store .zclassic-c23-commons-factory-a | kind human | spdx MIT
+package zrange/zrange | root e0999bc8bc206749dae55a49f5ece8f0856e42a2742310b58e65c9267312957b | store .zclassic-c23-commons-factory-a | kind human | spdx MIT
+package zutf8/zutf8 | root 6495fd455de7b7dca7c9fd5e5e6a4e1f8b0637252cc558635fe6c99e9cb90b3c | store .zclassic-c23-commons-factory-a | kind human | spdx MIT
+package ztime/ztime | root 6f0dbbec7acb7ffc62fd11d4b22bb0766573e8e297d65013f5960bcd27972a9e | store .zclassic-c23-commons-factory-a | kind human | spdx MIT
+package zlru/zlru | root 39029891486280a8d72b7364ffe2192bdd31986743c8e184f81fa36d20dabd58 | store .zclassic-c23-commons-factory-c | kind human | spdx MIT
+package zpool/zpool | root 36278394be0af171d0d6bfed09d637e42f289539037b92c54b6b4fad860d8a3b | store .zclassic-c23-commons-factory-a | kind human | spdx MIT
+package zjson/zjson | root c093252d4dbc485cbd830774b2dc1e81c53fd04e2c7c10dfc8f1da4991ae519d | store .zclassic-c23-commons-factory-a | kind human | spdx MIT
+package zdiff/zdiff | root 2e64fa60550a999758ec74fe5b8eb1f16dd52bacdfb9ee116ebfbf752a271d1a | store .zclassic-c23-commons-factory-a | kind human | spdx MIT
+package zjsonp/zjsonp | root 8c7914335303a9c0e5f2f9649660ab66f671965944fc4852e09a6292faf46294 | store .zclassic-c23-commons-factory-a | kind human | spdx MIT
+package zurl/zurl | root 588899b84c51e0624431112c145d0ea173f3119f5c154574d1f86a69f6785736 | store .zclassic-c23-commons-factory-a | kind human | spdx MIT
+package zarg/zarg | root 350aa0de13413c2506d6f5cf50314007260b86db17bf348091a326cbe1a39c8e | store .zclassic-c23-commons-factory-a | kind human | spdx MIT
+package zpath/zpath | root d7ee2ac72e0990f5af3091043ac4a67156e90693977c432a19cb6b33550a3a4a | store .zclassic-c23-commons-factory-a | kind human | spdx MIT
+package zhash/zhash | root 5c36f2f55cc0f42ce06d174bf0238528326620af873becb29b54adb6d89accc4 | store .zclassic-c23-commons-factory-a | kind human | spdx MIT
+package zpct/zpct | root 2167080f5f6b0557bf601bfa69cac99efa0c4c79e84f8348c1e52b67c2452709 | store .zclassic-c23-commons-factory-a | kind human | spdx MIT
+package ztoml/ztoml | root ded95915d3787c38a6a84a5881c29cebc644c432353d6e45e9a65836a3e7c109 | store .zclassic-c23-commons-factory-a | kind human | spdx MIT
+package zlev/zlev | root d3bf2491747a8f8a0d4d081bb25137f6ada843da4d338f00fe9a1eed921dd0f3 | store .zclassic-c23-commons-factory-a | kind human | spdx MIT
+package zring/zring | root 11e0d020646d281f10daba4775fb7f2736e4a561caa5d15f30f90ff704e6afcc | store .zclassic-c23-commons-factory-a | kind human | spdx MIT
+package zhtml/zhtml | root 49b8c06f6b3d3fe1d9c3e156c608d38e6faa6f061d899381826d3f69c147e0de | store .zclassic-c23-commons-factory-a | kind human | spdx MIT
+package zutf16/zutf16 | root 3e4362557aec5e38b2128441b1fc48add99f53001982f7c0ba1ecbf26e4d44f4 | store .zclassic-c23-commons-factory-a | kind human | spdx MIT
+package zb32/zb32 | root 9e7c443c6dc37f149b4939ef08882bf6f050684c0b33b9d0bf5073b72d0d07a2 | store .zclassic-c23-commons-factory-a | kind human | spdx MIT
+package zbuf/zbuf | root 3b34b548c9abad342e6c73aed5dae0b7d023dcfe2d660e2b0f44a37d5a5a8fa3 | store .zclassic-c23-commons-factory-a | kind human | spdx MIT
+package zbits/zbits | root eccfb349eb0b6ab90e8c40528243a5193932922b038f700c85a4ff80da05f52b | store .zclassic-c23-commons-factory-a | kind human | spdx MIT
+package zslug/zslug | root fbe71d404fe260f19c0a60ce6c4ac1cb5e86150fc7230fffbdb3026245296939 | store .zclassic-c23-commons-factory-a | kind human | spdx MIT
+package zcron/zcron | root 35909689ad111042aab31f62bf8ae80b2eae23657916d89d2a0f3f1c650e233b | store .zclassic-c23-commons-factory-a | kind human | spdx MIT
+package zcidr/zcidr | root 8c453dfb7d10b7831e06c72ade9c30d519e5264a9762442579e3814c2eba01d8 | store .zclassic-c23-commons-factory-a | kind human | spdx MIT
+package zsort/zsort | root dc6ad1b144c55f267441c030682ad42a2b8064ac877df01e4ebb24dae26e996e | store .zclassic-c23-commons-factory-a | kind human | spdx MIT
+package zcrc/zcrc | root 18bfffb63d6b4178b03a9e535e9352823120f15ec1b3e571eaf7f5e2a1458d36 | store .zclassic-c23-commons-factory-a | kind human | spdx MIT
+package zwrap/zwrap | root a60f58e7081bf790e943eef4f8b009407cb5f770486e4eedd7647d1c90c19b3f | store .zclassic-c23-commons-factory-a | kind human | spdx MIT
+package zmime/zmime | root ef5cc37f9348a8335a955972bacb8bfa42b8ab26f61f8e43441bdf098eee5f7a | store .zclassic-c23-commons-factory-a | kind human | spdx MIT
+package zhex/zhex | root 56419b192c73f3d5d823239542d09ac36d73d629457ae5a4cd5e20de977f42cc | store .zclassic-c23-commons-factory-a | kind human | spdx MIT
+package zuuid/zuuid | root f37d1aa701a2619da9ab5ab02ed88773f46d82aae8de068db148f7e30949e205 | store .zclassic-c23-commons-factory-a | kind human | spdx MIT
+package zvarint/zvarint | root 7932360a256e3cfa25a1555f80a3fab3bcb73ed75342565001454a8fee3716e9 | store .zclassic-c23-commons-factory-a | kind human | spdx MIT
+package zsha256/zsha256 | root a39759e55a6346f259d1da3fe36519c341aae46de6631bae7c26645d2319a047 | store .zclassic-c23-commons-factory-a | kind human | spdx MIT
+package zrand/zrand | root 35ac26c6d20d02cd44a46637393474eb873aa47ed70dfec2242f5705b60360a8 | store .zclassic-c23-commons-factory-a | kind human | spdx MIT
+package zhuman/zhuman | root 2021a9eec1ecf6eaf15581be3427e0ffbc024cfed7fb10fb32c2ae4115682014 | store .zclassic-c23-commons-factory-a | kind human | spdx MIT
+package zescape/zescape | root 37a7593bd9e7c6780f8b3284a9eafccc077e9985e9fa0f2adab87c561bfb9cc4 | store .zclassic-c23-commons-factory-a | kind human | spdx MIT
+package zstr/zstr | root af10b76b360788fe9308ed53759ef6b97546bf39f5f1265b5e8cb714a039b6e8 | store .zclassic-c23-commons-factory-a | kind human | spdx MIT
+package zvec/zvec | root c01fd06bb65c0f49064f5271fc0a7318f91c4488c0dde33cdf68a936144a4145 | store .zclassic-c23-commons-factory-a | kind human | spdx MIT
+package zmath/zmath | root 0aaa3de4ca99c9b11405d28bbd5d666b662d3e0333c02010fbba7701a18663c4 | store .zclassic-c23-commons-factory-a | kind human | spdx MIT
+package zfmt/zfmt | root d1e99f0605a1125b40eaa95ce9dd300714ea43d55d11381556737906d0e2c80a | store .zclassic-c23-commons-factory-a | kind human | spdx MIT
+package zlog/zlog | root 0b06c6c3ee940b25bbb281d1618f794b6465704aa286d15a80e109b1c13755b4 | store .zclassic-c23-commons-factory-a | kind human | spdx MIT
+package zrate/zrate | root 7c26e756c6ea84170483181f663c515e581938097e5bd6fb2e60437fcd5bd42a | store .zclassic-c23-commons-factory-a | kind human | spdx MIT
+package zbase58/zbase58 | root 9fb0beaa23ad19b035d387a3f4fd71e0900cd83aaf24c2d7f7f80ce564192a7d | store .zclassic-c23-commons-factory-a | kind human | spdx MIT
+package zpq/zpq | root c4b6939596774d2394edffeebccf83dad3c78a59a485c70b7aca70dd126599e2 | store .zclassic-c23-commons-factory-a | kind human | spdx MIT
+package zstats/zstats | root 6e0e35d6d10d0274d5b1a7097cf7f13f83e71231ce09cac3c95e2bc39fdb2c40 | store .zclassic-c23-commons-factory-a | kind human | spdx MIT
+package ztrie/ztrie | root eecd684cb2bf81789e075dc48650e013d8109677cf2769609aad6aea0c0f1073 | store .zclassic-c23-commons-factory-a | kind human | spdx MIT
+package zpuny/zpuny | root 1fea52d0ebae0a62a3194f93e667a413736d258b4fceb05c01a0ccf768d48348 | store .zclassic-c23-commons-factory-a | kind human | spdx MIT
+package ztemplate/ztemplate | root e37ff36394c939a37d0a4e59fb731d86b86f48dfb175c28d2803a559f3396456 | store .zclassic-c23-commons-factory-a | kind human | spdx MIT
+package zintern/zintern | root 0718d979a69f62863414f62aac3665b020ee0e72a74c37cd145800d9f0ac4ccf | store .zclassic-c23-commons-factory-a | kind human | spdx MIT
+package zu256/zu256 | root aceed4bddfb4a595f4a141fce141291767d73453a5208b9cc1da7b7815b359f4 | store .zclassic-c23-commons-factory-a | kind human | spdx MIT
+package znetstring/znetstring | root d13b56d9b13af4cda54baaf9b3e7c6a8ec941145eb72485c6e66be7c85d0412e | store .zclassic-c23-commons-factory-a | kind human | spdx MIT
+package zmd5/zmd5 | root 2dc59d540076085aac2ff2178e40b6f16c1940bc1d326ac7f9a9a31eda4570ed | store .zclassic-c23-commons-factory-a | kind human | spdx MIT
+package zsha1/zsha1 | root a7c6b1b72b7300c15194c053c4808c163c75638a764bf6f52ce269b477281167 | store .zclassic-c23-commons-factory-a | kind human | spdx MIT
+package zdeque/zdeque | root fde6a9285d03c4d97fd456bf72095c4625675b6a2d966b8c18482d3cb454876d | store .zclassic-c23-commons-factory-a | kind human | spdx MIT
+package zpem/zpem | root 0b187d177b120743b7b423df2f2e79153a4ec826f246309db94b79dcd3d58564 | store .zclassic-c23-commons-factory-a | kind human | spdx MIT
+package zotp/zotp | root fcc80f654f0ef96b61ff9f7d8ddb98ae9fca97e87bf789b6adb973f930e95407 | store .zclassic-c23-commons-factory-a | kind human | spdx MIT
+package zhkdf/zhkdf | root 49dcacb11efa8b62f6457d80e1c13f16f0f143462953c2fcf84b032d4366595e | store .zclassic-c23-commons-factory-a | kind human | spdx MIT
+package zscrypt/zscrypt | root e0e5a09074d166274a59c6e077bd724e8c64ee8b6126cade57925b3304d46723 | store .zclassic-c23-commons-factory-a | kind human | spdx MIT
+package zripemd/zripemd | root d08855f817b1bf66b45032f53aff713757c67dd856424c4018850af2b289b796 | store .zclassic-c23-commons-factory-a | kind human | spdx MIT
+package zprng/zprng | root 91e9406a1016bcc224bb5e229377b1841e21c8ede1e0a00bc0d45d1989c41563 | store .zclassic-c23-commons-factory-a | kind human | spdx MIT
+package zarena/zarena | root 02c59d23224e07c30ba9128310d65042ab152988bc0e63bb682eaa7751ad610c | store .zclassic-c23-commons-factory-a | kind human | spdx MIT
+package zmd/zmd | root c913aee9624951a0ce5fef6665a24e8119e8a1c82ad4aadab10b2670b064d0f5 | store .zclassic-c23-commons-factory-a | kind ai | spdx MIT
+package zwalk/zwalk | root 2423c3486ce669d8bfa16ba8fb1e75b9e634526a3e00d6fd5b3c5c28824eec77 | store .zclassic-c23-commons-fast-d | kind ai | spdx MIT
+package zre/zre | root 469991668432703c0dfc7486ac21ffece405a1e2e7468ba58269e782d6b282a6 | store .zclassic-c23-commons-factory-a | kind ai | spdx MIT
+package zxml/zxml | root 1dae888755e91b5723298318c003076e18a1b4d9329a6d542a1107ee6c3bd4ab | store .zclassic-c23-commons-factory-a | kind ai | spdx MIT
+package zdogfight/zdogfight | root 3ea608b29cdee1df15d560a930455faa264b3ac9ded8b557efc28e3e720ef40a | store .zclassic-c23-commons-arena-a | kind ai | spdx MIT
+package zdogdrone/zdogdrone | root 10568ebc2876a6e3ecded390b012b0b8983613f3717949db1c9144ede2d78cf8 | store .zclassic-c23-commons-arena-a | kind ai | spdx MIT
+package zdogace/zdogace | root 28ed0430ce3d12bd75bcc09fa1223a79a45ff61a3554b3e3318265378573722a | store .zclassic-c23-commons-arena-a | kind ai | spdx Apache-2.0

@@ -26,7 +26,7 @@
 
 /* Little-endian helpers — the Equihash challenge serialization is
  * defined by the consensus rules to be little-endian. We avoid the
- * heap-allocating byte_stream primitive in lib/core/ to keep the
+ * heap-allocating byte_stream primitive in core/modules/core/ to keep the
  * domain function observably allocation-free. */
 static void le32_into(uint8_t buf[4], uint32_t v)
 {

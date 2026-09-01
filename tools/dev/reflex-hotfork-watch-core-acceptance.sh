@@ -8,7 +8,7 @@ ROOT="${ZCL_SOURCE_ROOT:-$(pwd -P)}"
 BIN="${ZCL_DEV_BIN:-$ROOT/build/bin/zclassic23-dev}"
 OWNER_KIND="${ZCL_REFLEX_OWNER_KIND:-watch}"
 SOURCE="$ROOT/tools/dev/devloop_watch.c"
-UNRELATED="$ROOT/app/services/src/market_moderation_service.c"
+UNRELATED="$ROOT/contexts/market/services/src/market_moderation_service.c"
 OUTPUT="${ZCL_REFLEX_WATCH_CORE_ACCEPTANCE_OUTPUT:-$ROOT/build/dev-loop/reflex-hotfork-watch-core-acceptance.json}"
 STORY='devloop-watch-classification-core.v1'
 FORBIDDEN='git|github|make|shell|sqlite|dht|network|publication|full_link|full_suite'
@@ -33,13 +33,13 @@ elif [[ "$OWNER_KIND" == plan ]]; then
     MUTANT_OLD='strcmp(name, "build") == 0'
     MUTANT_NEW='strcmp(name, "build") != 0'
 elif [[ "$OWNER_KIND" == shop-want ]]; then
-    SOURCE="$ROOT/app/controllers/src/shop_native_want.c"
+    SOURCE="$ROOT/contexts/market/controllers/src/shop_native_want.c"
     OUTPUT="${ZCL_REFLEX_SHOP_WANT_CORE_ACCEPTANCE_OUTPUT:-$ROOT/build/dev-loop/reflex-hotfork-shop-want-core-acceptance.json}"
     STORY='shop-want-command-input-core.v1'
     MUTANT_OLD='w->expires_unix <= now_unix'
     MUTANT_NEW='w->expires_unix < now_unix'
 elif [[ "$OWNER_KIND" == command-input ]]; then
-    SOURCE="$ROOT/lib/kernel/src/command_registry.c"
+    SOURCE="$ROOT/engine/modules/kernel/src/command_registry.c"
     OUTPUT="${ZCL_REFLEX_COMMAND_INPUT_CORE_ACCEPTANCE_OUTPUT:-$ROOT/build/dev-loop/reflex-hotfork-command-input-core-acceptance.json}"
     STORY='command-registry-input-validation-core.v1'
     MUTANT_OLD='json_get_int(value) <= 600;'
@@ -51,13 +51,13 @@ elif [[ "$OWNER_KIND" == native-dev ]]; then
     MUTANT_OLD='strstr(path, "..")'
     MUTANT_NEW='strstr(path, "__never__")'
 elif [[ "$OWNER_KIND" == curve25519 ]]; then
-    SOURCE="$ROOT/lib/crypto/src/curve25519.c"
+    SOURCE="$ROOT/core/modules/crypto/src/curve25519.c"
     OUTPUT="${ZCL_REFLEX_CURVE25519_ACCEPTANCE_OUTPUT:-$ROOT/build/dev-loop/reflex-hotfork-curve25519-acceptance.json}"
     STORY='curve25519-rfc7748-calculation.v1'
     MUTANT_OLD='c * (1LL << 16)'
     MUTANT_NEW='c * (1LL << 15)'
 elif [[ "$OWNER_KIND" == package-policy ]]; then
-    SOURCE="$ROOT/lib/vcs/src/package_policy.c"
+    SOURCE="$ROOT/contexts/commons/modules/vcs/src/package_policy.c"
     OUTPUT="${ZCL_REFLEX_PACKAGE_POLICY_ACCEPTANCE_OUTPUT:-$ROOT/build/dev-loop/reflex-hotfork-package-policy-acceptance.json}"
     STORY='package-policy-boundary-calculation.v1'
     MUTANT_OLD='VCS_POLICY_FREE_REQUEST_BURST_PER_WINDOW,'

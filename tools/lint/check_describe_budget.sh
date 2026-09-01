@@ -20,11 +20,11 @@
 # every leaf. No `make`, no build/ dependency, no second size model.
 #
 # Fix a failure by TRIMMING the named leaf's `semantics` in
-# config/commands/*.def. Never by raising ZCL_COMMAND_SPEC_BUDGET: the budget
+# engine/composition/commands/*.def. Never by raising ZCL_COMMAND_SPEC_BUDGET: the budget
 # is what keeps a describe document cheap enough for every transport to carry,
 # and raising it would also re-hide the baselined pre-existing overflow.
 #
-# --selftest compiles the same tool against a COPY of config/commands with one
+# --selftest compiles the same tool against a COPY of engine/composition/commands with one
 # leaf's summary padded past the budget and proves the gate goes red on it, so
 # the gate cannot rot into a no-op.
 set -euo pipefail
@@ -37,7 +37,7 @@ source "$SCRIPT_DIR/gate_lib.sh"
 
 TOOL_SRC="tools/check_describe_budget.c"
 BASELINE="tools/lint/describe_budget_baseline.txt"
-DEF_DIR="config/commands"
+DEF_DIR="engine/composition/commands"
 
 # Floors: refuse to report clean off a catalog that moved or emptied out.
 DEF_FLOOR=8
@@ -46,17 +46,17 @@ LEAF_FLOOR=200
 # The renderer and its transitive dependencies. Kept explicit so a missing
 # object is a compile error here rather than a silently skipped gate.
 LINK_SRCS=(
-    lib/kernel/src/command_registry.c
-    lib/json/src/json.c
-    lib/crypto/src/sha256.c
-    lib/base/src/safe_alloc.c
-    lib/base/src/log_level.c
-    lib/platform/src/clock.c
+    engine/modules/kernel/src/command_registry.c
+    platform/modules/json/src/json.c
+    core/modules/crypto/src/sha256.c
+    platform/modules/base/src/safe_alloc.c
+    platform/modules/base/src/log_level.c
+    platform/modules/platform/src/clock.c
 )
 INCS=(
-    -Ilib/kernel/include -Ilib/json/include -Ilib/crypto/include
-    -Ilib/base/include -Ilib/platform/include -Ilib/util/include
-    -Ilib/vcs/include -Iapp/services/include
+    -Iengine/modules/kernel/include -Iplatform/modules/json/include -Icore/modules/crypto/include
+    -Iplatform/modules/base/include -Iplatform/modules/platform/include -Iplatform/modules/util/include
+    -Icontexts/commons/modules/vcs/include -Iengine/services/include -Icognition/services/include
 )
 
 # Build the gate binary. $1 = output path, $2 = directory holding `commands/`.
@@ -80,7 +80,7 @@ run_selftest() {
     trap "rm -rf '$tmp'" EXIT HUP INT TERM
 
     # 1. The unmodified tree must pass.
-    if ! build_tool "$tmp/gate" config "$tmp/cc.log"; then
+    if ! build_tool "$tmp/gate" engine/composition "$tmp/cc.log"; then
         echo "check_describe_budget selftest: FAIL — $TOOL_SRC does not compile:" >&2
         sed 's/^/    /' "$tmp/cc.log" >&2
         exit 1
@@ -160,7 +160,7 @@ gate_require_scanned "$def_count" "$DEF_FLOOR" check_describe_budget \
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/zcl-describe-budget.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT HUP INT TERM
 
-if ! build_tool "$TMP/gate" config "$TMP/cc.log"; then
+if ! build_tool "$TMP/gate" engine/composition "$TMP/cc.log"; then
     echo "check_describe_budget: FATAL — $TOOL_SRC does not compile:" >&2
     sed 's/^/    /' "$TMP/cc.log" >&2
     exit 2

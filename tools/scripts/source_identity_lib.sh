@@ -12,7 +12,7 @@
 #   Q1. "What source tree was this BINARY built from?"
 #       A property of the executable. Baked in at compile time by
 #       -DZCL_BUILD_SOURCE_ID (Makefile BUILD_IDENTITY_CPPFLAGS, scoped to the
-#       single TU lib/util/src/clientversion.c) and returned by
+#       single TU platform/modules/util/src/clientversion.c) and returned by
 #       zcl_build_source_id_sha256(). CONSTANT wherever you run the binary
 #       from: it does not read the filesystem, the cwd, or any environment.
 #
@@ -185,7 +185,7 @@ zcl_json_unanimous_sha256() {
 
 # zcl_healthcheck_v1_running_source_id <json-text> — the Q1 identity of the
 # process that answered a `healthcheck` RPC: the source tree ITS OWN
-# executable was built from (app/controllers/src/event_healthcheck_controller.c
+# executable was built from (engine/controllers/src/event_healthcheck_controller.c
 # publishes zcl_build_source_id_sha256() at the top level of both the bounded
 # and the full payload; the nested `agent` block repeats the same value, and
 # the nested `runtime_build` block deliberately uses the distinct names

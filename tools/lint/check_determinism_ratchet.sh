@@ -39,7 +39,7 @@
 #                   and the full id is test_x / spec_x.
 #   perturbations : build/bin/determinism_scan list-profiles when it is built;
 #                   otherwise the enum in
-#                   lib/determinism/include/determinism/perturbation.h. Never a
+#                   engine/modules/determinism/include/determinism/perturbation.h. Never a
 #                   third hand-kept list.
 #
 # Usage:
@@ -60,7 +60,7 @@ source "$REPO_ROOT/tools/scripts/sh_str.sh"
 
 BASELINE_REL="tools/lint/determinism_baseline.txt"
 CATALOG_REL="tools/dev/test_group_catalog.def"
-PERTURBATION_HEADER_REL="lib/determinism/include/determinism/perturbation.h"
+PERTURBATION_HEADER_REL="engine/modules/determinism/include/determinism/perturbation.h"
 
 # ── the registry, from the catalog ──────────────────────────────────────────
 registered_groups() {
@@ -272,7 +272,7 @@ selftest_cleanup() { [ -n "$FIXTURE_ROOT" ] && rm -rf "$FIXTURE_ROOT"; }
 make_fixture() {
     local d="$1"; shift
     mkdir -p "$d/tools/lint" "$d/tools/dev" \
-             "$d/lib/determinism/include/determinism"
+             "$d/engine/modules/determinism/include/determinism"
     cat > "$d/$CATALOG_REL" <<'CATALOG'
 ZCL_TEST_GROUP(alpha)
 ZCL_TEST_GROUP(bravo)

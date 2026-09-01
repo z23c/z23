@@ -1,0 +1,231 @@
+/* Canonical field table for the `agents` telemetry domain. Data only.
+ *
+ * Row grammar and what each row generates: util/telemetry_field_table.h.
+ * Every field name in this domain is spelled here and nowhere else.
+ *
+ * Lane ownership: this file belongs to the agents domain alone. Append groups
+ * below the `meta` group; do not reorder or reword existing rows, and keep
+ * each group's rows contiguous.
+ *
+ * WHAT THIS DOMAIN DESCRIBES, and the rule that follows from it: this is the
+ * surface that says what OTHER AI agents may do to this node and what they
+ * have done — so it is read by the very things it describes. No leaf here
+ * carries a credential. A session id is a BEARER grant (docs/CUSTODY_MODEL.md
+ * §5-6): presenting it IS the act that makes a spend run under its caps.
+ * Nothing below is a session id, a nonce, a cookie, an address or a public
+ * key — only counts, ages, caps and outcomes. Keep it that way; a per-identity
+ * leaf here would be one rename away from publishing the thing it bounds.
+ *
+ * WHY THE COUNTS ARE FLAT AND NOT PER-SESSION. A fixed-offset table has no
+ * array leaf (util/telemetry_field_table.h) and the grant population is
+ * operator-driven and unbounded, so the AGGREGATE is modelled here — totals,
+ * worst, oldest, soonest — and per-row listing stays on `vault session list`,
+ * the surface that already owns the redaction rule.
+ *
+ * WHAT A GRANT ACTUALLY BOUNDS (docs/CUSTODY_MODEL.md §5, checked against
+ * cognition/models/include/models/agent_session.h): amount per transaction, amount
+ * per rolling window, destination allowlist, and lifetime. It does NOT bound
+ * an agent that declines to present it (§7) — that is an operating-system
+ * boundary, not this one — so no leaf below may be read as "the node is safe
+ * from an agent". They report what the cooperating-agent bound is set to. */
+
+TL_DOMAIN_META(agents, "zcl.telemetry.agents.v1",
+    "agent sessions, capability grants and recorded activity")
+
+TL_GROUP(meta, "how and when this snapshot itself was taken")
+
+TL_LEAF(meta, collected_unix, TLC_I64, TFU_UNIX_TIME, TLV_NORMAL,
+    TFR_INFO, TL_NONE, 0, TFS_INFO,
+    "wall-clock second at which the provider began filling this snapshot; "
+    "every other leaf's observed_unix is at or after this instant",
+    "", "")
+
+TL_GROUP_END(meta)
+
+/* ── agents groups start here (owned by this domain's lane) ── */
+
+TL_GROUP(sessions,
+    "the agent_sessions grant rows this node holds, as a population")
+
+TL_LEAF(sessions, store_readable, TLC_BOOL, TFU_BOOL, TLV_SUMMARY,
+    TFR_EXPECT_TRUE, TL_NONE, 0, TFS_WARN,
+    "true when the running node answered for its agent_sessions store on this "
+    "call; false means every other count here is unavailable, never zero",
+    "nothing can be said about which agents hold spend authority right now: "
+    "the node is down, pointed at another datadir, or its node.db is not open",
+    "z23 core status")
+
+TL_LEAF(sessions, sessions_total, TLC_I64, TFU_GAUGE, TLV_SUMMARY,
+    TFR_INFO, TL_NONE, 0, TFS_INFO,
+    "rows in agent_sessions, counted by the node itself: every grant ever "
+    "minted and not deleted, revoked and expired ones included. Compare "
+    "against sessions_usable — the gap is dead rows, not live authority",
+    "", "")
+
+TL_LEAF(sessions, sessions_usable, TLC_I64, TFU_GAUGE, TLV_SUMMARY,
+    TFR_INFO, TL_NONE, 0, TFS_INFO,
+    "grants that would pass agent_session_is_usable at collection time: not "
+    "revoked and not past expires_at. This is the count that can authorize a "
+    "spend; zero means no bounded agent can move value through the typed "
+    "surface today",
+    "", "")
+
+TL_LEAF(sessions, sessions_revoked, TLC_I64, TFU_GAUGE, TLV_NORMAL,
+    TFR_INFO, TL_NONE, 0, TFS_INFO,
+    "grants with revoked=1. Revocation is the operator's emergency lever and "
+    "is permanent for that row, so a rising count is normal hygiene rather "
+    "than a fault",
+    "", "")
+
+TL_LEAF(sessions, sessions_expired, TLC_I64, TFU_GAUGE, TLV_NORMAL,
+    TFR_INFO, TL_NONE, 0, TFS_INFO,
+    "grants past expires_at that were never revoked. They authorize nothing — "
+    "expiry is checked on every authorize — so this is hygiene: rows still "
+    "naming a principal after their lifetime ended. Compare to sessions_total",
+    "", "")
+
+TL_LEAF(sessions, session_holders, TLC_I64, TFU_GAUGE, TLV_NORMAL,
+    TFR_INFO, TL_NONE, 0, TFS_INFO,
+    "distinct principal accounts holding at least one usable grant. Compare "
+    "against principals_total: the difference is the identities that exist but "
+    "carry no spend authority at all",
+    "", "")
+
+TL_LEAF(sessions, principals_total, TLC_I64, TFU_GAUGE, TLV_NORMAL,
+    TFR_INFO, TL_NONE, 0, TFS_INFO,
+    "rows in the principals identity registry — every public key that has "
+    "authenticated to this node. A principal is not authority by itself; the "
+    "grant is. This is the population grants are minted from",
+    "", "")
+
+TL_LEAF(sessions, oldest_session_age_seconds, TLC_I64, TFU_SECONDS, TLV_FULL,
+    TFR_INFO, TL_NONE, 0, TFS_INFO,
+    "seconds since created_at of the oldest USABLE grant; not applicable when "
+    "none is usable. Long-lived is not wrong — read it beside "
+    "soonest_expiry_seconds to see whether lifetimes are bounded at all",
+    "", "")
+
+TL_LEAF(sessions, scan_truncated, TLC_BOOL, TFU_BOOL, TLV_NORMAL,
+    TFR_EXPECT_FALSE, TL_NONE, 0, TFS_WARN,
+    "true when the grant enumeration returned fewer rows than the node's own "
+    "agent_sessions count, so every derived figure in the sessions, grants and "
+    "activity groups is a FLOOR over a prefix of the table",
+    "the aggregate understates: there are grants this reply never saw, and the "
+    "widest cap or the soonest expiry may be among them",
+    "z23 vault session list")
+
+TL_LEAF(sessions, malformed_rows, TLC_I64, TFU_GAUGE, TLV_NORMAL,
+    TFR_EXPECT_ZERO, TL_NONE, 0, TFS_CRITICAL,
+    "enumerated grants violating the agent_sessions table's own CHECK "
+    "constraints — empty account, window_seconds outside 1..31536000, or a cap "
+    "outside 0..MAX_MONEY. The model makes these unwritable",
+    "a writer reached agent_sessions without going through the model, or the "
+    "store is corrupt; a grant whose window_seconds is nonsense has no working "
+    "rolling cap",
+    "z23 vault session list")
+
+TL_GROUP_END(sessions)
+
+TL_GROUP(grants,
+    "what the usable grants are permitted to move, and for how long")
+
+TL_LEAF(grants, grants_any_recipient, TLC_I64, TFU_GAUGE, TLV_SUMMARY,
+    TFR_INFO, TL_NONE, 0, TFS_INFO,
+    "usable grants whose recipient_allowlist is empty, which the model reads "
+    "as ANY destination: bounded by amount and lifetime, not by where the "
+    "money goes. Equal to sessions_usable means no live grant constrains its "
+    "destination",
+    "", "")
+
+TL_LEAF(grants, grants_never_expire, TLC_I64, TFU_GAUGE, TLV_SUMMARY,
+    TFR_INFO, TL_NONE, 0, TFS_INFO,
+    "usable grants with expires_at=0, which the model reads as never expiring; "
+    "only revocation ends one. Compare against sessions_usable to see how much "
+    "live authority carries no time bound",
+    "", "")
+
+TL_LEAF(grants, max_per_tx_zat_highest, TLC_I64, TFU_GAUGE, TLV_NORMAL,
+    TFR_INFO, TL_NONE, 0, TFS_INFO,
+    "zatoshis: the largest single-transaction cap any usable grant carries — "
+    "the most one cooperating agent invocation can move. The model's own "
+    "ceiling is 2100000000000000, which doubles as unbounded",
+    "", "")
+
+TL_LEAF(grants, max_per_window_zat_highest, TLC_I64, TFU_GAUGE, TLV_NORMAL,
+    TFR_INFO, TL_NONE, 0, TFS_INFO,
+    "zatoshis: the largest rolling-window cap any usable grant carries. Read "
+    "beside max_per_tx_zat_highest — the window cap is the one that bounds a "
+    "sequence of small spends rather than a single large one",
+    "", "")
+
+TL_LEAF(grants, soonest_expiry_seconds, TLC_I64, TFU_SECONDS, TLV_NORMAL,
+    TFR_INFO, TL_NONE, 0, TFS_INFO,
+    "seconds from now until the next usable grant reaches its expires_at. Not "
+    "applicable when every usable grant is non-expiring; 0 when one expires "
+    "this second",
+    "", "")
+
+TL_GROUP_END(grants)
+
+TL_GROUP(activity,
+    "what has been done under those grants, and the login and diagnostic "
+    "traffic beside them")
+
+TL_LEAF(activity, window_spent_zat_total, TLC_I64, TFU_GAUGE, TLV_SUMMARY,
+    TFR_INFO, TL_NONE, 0, TFS_INFO,
+    "zatoshis debited against the CURRENT rolling window of every usable "
+    "grant, summed. Not a lifetime total: each grant's figure resets when its "
+    "window rolls, and a released debit subtracts from it",
+    "", "")
+
+TL_LEAF(activity, grants_with_spend, TLC_I64, TFU_GAUGE, TLV_SUMMARY,
+    TFR_INFO, TL_NONE, 0, TFS_INFO,
+    "usable grants whose current window carries a nonzero debit — the grants "
+    "an agent is actually spending through. Compare against sessions_usable: "
+    "the remainder are minted but idle",
+    "", "")
+
+TL_LEAF(activity, window_used_permille_worst, TLC_I64, TFU_GAUGE, TLV_NORMAL,
+    TFR_INFO, TL_NONE, 0, TFS_INFO,
+    "per mille 0..1000 of its own rolling cap consumed by the most-used grant; "
+    "not applicable when no usable grant has a nonzero cap. At 1000 that "
+    "grant's next spend is refused POLICY_WINDOW_LIMIT until its window rolls",
+    "", "")
+
+TL_LEAF(activity, principals_ever_logged_in, TLC_I64, TFU_GAUGE, TLV_NORMAL,
+    TFR_INFO, TL_NONE, 0, TFS_INFO,
+    "principals whose last_login is nonzero. Compare against principals_total: "
+    "identities that have never logged in are registrations, not users",
+    "", "")
+
+TL_LEAF(activity, last_login_age_seconds, TLC_I64, TFU_SECONDS, TLV_NORMAL,
+    TFR_INFO, TL_NONE, 0, TFS_INFO,
+    "seconds since the most recent principal login recorded here; not "
+    "applicable when no principal has ever logged in. There is no healthy "
+    "range — an idle multi-user node and a busy one differ legitimately",
+    "", "")
+
+TL_LEAF(activity, auth_challenges_pending, TLC_I64, TFU_GAUGE, TLV_NORMAL,
+    TFR_INFO, TL_NONE, 0, TFS_INFO,
+    "single-use login nonces issued and not yet consumed. Compare against "
+    "principals_total: a count far above it means challenges are issued and "
+    "abandoned — a failing login loop, or the reaper not running",
+    "", "")
+
+TL_LEAF(activity, backtrace_handler_armed, TLC_BOOL, TFU_BOOL, TLV_NORMAL,
+    TFR_EXPECT_TRUE, TL_NONE, 0, TFS_WARN,
+    "true when the node's SIGRTMIN+2 self-backtrace handler is installed. Boot "
+    "arms it unconditionally and only warns on failure, so false on a running "
+    "node means that boot step failed",
+    "ops.debug.backtrace cannot answer, so the one way to see what every "
+    "thread is doing on this host is gone until the node restarts",
+    "z23 ops logs --pattern=self_backtrace_install")
+
+TL_LEAF(activity, backtrace_dumps_total, TLC_I64, TFU_COUNT_TOTAL, TLV_FULL,
+    TFR_INFO, TL_NONE, 0, TFS_INFO,
+    "all-thread backtrace dumps this node process has written since boot, one "
+    "per ops.debug.backtrace call. Cumulative: read as a rate against uptime, "
+    "never as a level",
+    "", "")
+
+TL_GROUP_END(activity)

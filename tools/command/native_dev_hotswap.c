@@ -1,7 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * Native Tier-1 hot-swap command glue. The activatable machinery lives here
- * and in lib/hotswap:
+ * and in engine/modules/hotswap:
  *
  *   - `dev.hotswap.probe`  — VERIFY-ONLY, in the CLI's own throwaway process:
  *     dlopen + ABI-validate + self_test of a module .so, NEVER commits. This is
@@ -111,7 +111,7 @@ static char g_resident_datadir[512];
  *
  * They are widened past ZCL_DEV_BUILD to ZCL_TESTING for one reason: the
  * parallel test harness can load a freshly compiled module .so through the
- * REAL loader (lib/hotswap/src/hotswap_activate.c) instead of relinking the
+ * REAL loader (engine/modules/hotswap/src/hotswap_activate.c) instead of relinking the
  * whole test binary. If the harness re-implemented these hooks, a test would
  * pass through a validation path production never runs — the exact divergence
  * this facility exists to avoid. A release build (neither macro) still links

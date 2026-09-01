@@ -1,0 +1,29 @@
+[Unit]
+Description=Z23 test-tmp Scratch Reclaimer
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/github/zclassic23
+# tools/scripts/test_tmp_clean.sh removes ./test-tmp entries older than
+# --days N (default 2, find -mtime semantics) left behind by
+# tests/harness/src/test_parallel.c per-run captures and fixture scratch dirs
+# (anchor_selfmint_*, ...) — nothing else deletes them. --apply is
+# required; the script is dry-run/report-only otherwise. Guarded against
+# the wrong tree: an explicit path argument is accepted only if its
+# basename is literally "test-tmp".
+#
+# This is the janitor, not the fix — the STRUCTURAL fix (test_parallel
+# deleting each child's scratch on success) is a separate change and is
+# deliberately not done here. This unit only ever touches ./test-tmp; it
+# has no notion of worktrees or locks (see zclassic23-worktree-gc.service
+# for the LOCKED-worktree-aware janitor).
+ExecStart=%h/github/zclassic23/tools/scripts/test_tmp_clean.sh --apply
+TimeoutStartSec=600
+
+Nice=15
+CPUWeight=10
+IOWeight=10
+IOSchedulingClass=idle
+
+StandardOutput=journal
+StandardError=journal

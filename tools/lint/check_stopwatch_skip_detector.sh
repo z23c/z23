@@ -66,7 +66,7 @@ run_selftest tools/scripts/stopwatch_evidence_judge.sh
 # #includes it and would fail to compile on a malformed row; the shell side
 # would silently parse zero rows and classify everything as unclassified, so
 # assert a non-empty table here rather than discovering it in production.
-DEF=app/services/include/services/stopwatch_skip_classes.def
+DEF=engine/services/include/services/stopwatch_skip_classes.def
 rows_in_file="$(grep -cE '^STOPWATCH_SKIP_(CLASS|FALLBACK)\(' "$DEF" 2>/dev/null || echo 0)"
 rows_parsed="$(bash -c '. tools/scripts/stopwatch_skip_class.sh; stopwatch_skip_class_table' | grep -c '|')"
 if [ "$rows_in_file" -lt 5 ] || [ "$rows_in_file" != "$rows_parsed" ]; then

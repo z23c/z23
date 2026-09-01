@@ -5,7 +5,7 @@
  * gate, prepare, offline digest sign, seal, publish, install + confined
  * build in two independent stores, bit-identical reproduction, self-screened
  * admission, and optional corpus registration — reusing only the existing
- * machinery: lib/vcs package_prepare/release/build/reproduce, the
+ * machinery: contexts/commons/modules/vcs package_prepare/release/build/reproduce, the
  * zclassic23 native CLI (zcode package dev/publish/add/verify), and the
  * offline signers (zclassic23-package-sign, zclassic23-package-verify).
  * It adds NO second scheduler, store, transport, or receipt family.
@@ -16,7 +16,7 @@
  *       --report <out.json> [--publisher-sequence N] [--kind human|ai|import]
  *       [--chain-id <id>] [--cutoff-height N] [--cutoff-mtp N]
  *       [--signer-seed-file PATH] [--bin-dir <dir>]
- *       [--register-corpus --census-def corpus/scopes.def]
+ *       [--register-corpus --census-def contexts/commons/corpus/scopes.def]
  *   package-factory pin-dep --package <dir> --dep-name <name>
  *       --dep-root <64hex>
  *   package-factory selftest [--repo <repo>] [--scratch <dir>]
@@ -216,7 +216,7 @@ static bool pf_read_file(const char *path, size_t max_bytes, uint8_t **out,
 }
 
 /* Atomic write: <dest>.pfstmp.<pid> beside the destination, fsync, rename
- * (the lib/vcs revert convention). */
+ * (the contexts/commons/modules/vcs revert convention). */
 static bool pf_write_atomic(const char *path, const uint8_t *data, size_t len)
 {
     size_t cap = strlen(path) + 64u;
@@ -2911,7 +2911,7 @@ static int cmd_selftest(const char *repo, const char *scratch,
                 scratch);
     char fixture[PF_PATH_CAP];
     if (snprintf(fixture, sizeof(fixture),
-                 "%s/lib/test/fixtures/zcode/tiny-lines", repo) >=
+                 "%s/tests/harness/fixtures/zcode/tiny-lines", repo) >=
         (int)sizeof(fixture))
         LOG_ERR(PF_LOG, "fixture path overflow");
     if (access(fixture, R_OK) != 0)
@@ -3287,7 +3287,7 @@ static void usage(FILE *stream)
         "      $HOME/.cache, plus /zclassic23/fast-obj; per-TU object\n"
         "      cache for the confined rebuilds, admission=local_candidate;\n"
         "      pass an empty --fast-cache= to disable)\n"
-        "      [--register-corpus --census-def corpus/scopes.def]\n"
+        "      [--register-corpus --census-def contexts/commons/corpus/scopes.def]\n"
         "  package-factory pin-dep --package <dir> --dep-name <name>\n"
         "      --dep-root <64hex>\n"
         "  package-factory selftest [--repo <repo>] [--scratch <dir>]\n"
@@ -3326,7 +3326,7 @@ int main(int argc, char **argv)
     /* Generic --key value / --key=value parsing. */
     const char *package_dir = NULL, *key_file = NULL, *pubkey = NULL,
                *store_a = NULL, *store_b = NULL, *report = NULL,
-               *bin_dir = "build/bin", *census_def = "corpus/scopes.def",
+               *bin_dir = "build/bin", *census_def = "contexts/commons/corpus/scopes.def",
                *seed_file = NULL, *chain_id = "zclassic-main",
                *kind = "ai", *dep_name = NULL, *dep_root = NULL,
                *repo = ".", *scratch = "test-tmp/factory-selftest",

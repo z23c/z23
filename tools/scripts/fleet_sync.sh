@@ -79,7 +79,7 @@
 # Per-box configuration lives OUTSIDE the repo at
 # ~/.config/zclassic23-fleetsync/<box>.env (uncommitted: local paths, clearnet
 # endpoints, and unit names never land in a public repository). See
-# deploy/devfleet/README.md and the .example files beside it.
+# platform/deploy/devfleet/README.md and the .example files beside it.
 #
 # Usage: tools/scripts/fleet_sync.sh <box>
 
@@ -104,7 +104,7 @@ fi
 if [ ! -f "$ENV_FILE" ]; then
     echo "fleet_sync: no local mesh configured for '$BOX'" >&2
     echo "fleet_sync: expected $HOME/.config/zclassic23-fleetsync/$BOX.env" >&2
-    echo "fleet_sync: see deploy/devfleet/README.md" >&2
+    echo "fleet_sync: see platform/deploy/devfleet/README.md" >&2
     exit 2
 fi
 # shellcheck disable=SC1090

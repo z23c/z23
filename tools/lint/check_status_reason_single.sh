@@ -7,13 +7,13 @@
 # WHY THIS EXISTS: two operator surfaces each carried their OWN if/else-if
 # ladder assigning `operator_needed`, plus their own copies of every rung's
 # `status` and `summary` string:
-#   app/controllers/src/api_controller_status.c   (public REST /api/status)
-#   app/controllers/src/event_agent_summary.c     (agent first-call summary)
+#   engine/controllers/src/api_controller_status.c   (public REST /api/status)
+#   cognition/controllers/src/event_agent_summary.c     (agent first-call summary)
 # The node could therefore give TWO different answers to "does an operator
 # need to intervene", and the two had already drifted — the agent ladder
 # observed four signals the REST ladder did not (peer-telemetry availability,
 # catch-up stall, download-dispatch stall, projection lag).
-# app/controllers/include/controllers/operator_needed_policy.def is now the
+# engine/controllers/include/controllers/operator_needed_policy.def is now the
 # one table that decides it; both surfaces select an
 # `enum node_status_reason` and read the verdict back. This gate is the
 # anti-rot check that keeps a third ladder from being pasted in.
@@ -81,7 +81,7 @@ LADDER_ASSIGN_MIN=3
 # 2026-07-30 across all 2089 tracked *.c files: thresholds 2 and 3 produce
 # IDENTICAL results (one hit, the baselined false positive), so 2 is free
 # tightening. Dropping to 1 adds a real false positive
-# (app/conditions/src/block_failed_mask_at_tip.c), which is where the line is.
+# (engine/conditions/src/block_failed_mask_at_tip.c), which is where the line is.
 LADDER_ELSEIF_MIN=2
 
 # ── the detector ─────────────────────────────────────────────────────────
@@ -341,8 +341,8 @@ FIXTURE
 
     # The real consolidated surfaces must be clean, or this gate would be
     # passing only because its scan set does not reach them.
-    for f in app/controllers/src/api_controller_status.c \
-             app/controllers/src/event_agent_summary.c; do
+    for f in engine/controllers/src/api_controller_status.c \
+             cognition/controllers/src/event_agent_summary.c; do
         if [ ! -f "$f" ]; then
             echo "$GATE: SELFTEST FAILED — $f is missing; the consolidated surfaces moved and this gate no longer watches them" >&2
             exit 2
@@ -373,13 +373,13 @@ if [ -n "${ZCL_STATUS_REASON_GATE_SCAN_GLOB:-}" ]; then
     mapfile -t scan_files < <(ls -1 ${ZCL_STATUS_REASON_GATE_SCAN_GLOB} 2>/dev/null || true)
     FILE_FLOOR="${ZCL_STATUS_REASON_GATE_FILE_FLOOR:-1}"
 else
-    mapfile -t scan_files < <(git ls-files 'app/*.c' 'lib/*.c' 'config/*.c' 'core/*.c' \
-        | grep -Ev "$EXCLUDE_RE" || true)
+    mapfile -t scan_files < <(git ls-files core engine contexts cognition platform \
+        | grep -E '\.c$' | grep -Ev "$EXCLUDE_RE" || true)
     FILE_FLOOR="${ZCL_STATUS_REASON_GATE_FILE_FLOOR:-1500}"
 fi
 
 gate_require_scanned "${#scan_files[@]}" "$FILE_FLOOR" "$GATE" \
-    "no *.c files found — the scan set (git ls-files over app/ lib/ config/ core/) moved or emptied"
+    "no *.c files found under the five production authorities"
 
 mapfile -t COUNT_ROWS < <(scan_counts "${scan_files[@]}")
 

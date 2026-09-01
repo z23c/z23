@@ -12,14 +12,14 @@
 - **Deciders:** Project maintainer.
 - **Related:** [`0006-always-sync-spine-file-size-raises.md`](./0006-always-sync-spine-file-size-raises.md),
   [`0008-seed-floor-declaration-file-size-raises.md`](./0008-seed-floor-declaration-file-size-raises.md),
-  `app/controllers/src/swap_controller.c` (the guarded controller).
+  `engine/controllers/src/swap_controller.c` (the guarded controller).
 
 ---
 
 ## Context
 
 The E1 file-size ceiling (then an 800-line hard
-ceiling for `app/`+`config/src/`) ratchets: growth above a recorded baseline
+ceiling for `app/`+`engine/composition/src/`) ratchets: growth above a recorded baseline
 costs an explicit raise.
 
 The swap RPC controllers (`swap_initiate` / `swap_participate`) parsed their
@@ -33,7 +33,7 @@ The fix is an exported pure gate, `swap_amount_to_zat()`, refusing all of
 those shapes before any address decodes or state persists, pinned by seven
 refusal/conversion edges in the vault-read lane. It costs **26 net lines**:
 
-- `app/controllers/src/swap_controller.c` **1027 → 1053** — the gate
+- `engine/controllers/src/swap_controller.c` **1027 → 1053** — the gate
   implementation at top of the build path, with its rationale comment placed
   where the unchecked cast used to live.
 - (`swap_controller.h` +9 and `test_vault_read.c` +27 do not count against
@@ -48,7 +48,7 @@ nine cohesive RPC handlers).
 
 ## Decision
 
-Raise the enforced-tier baseline for `app/controllers/src/swap_controller.c`
+Raise the enforced-tier baseline for `engine/controllers/src/swap_controller.c`
 to its current line count (recorded in
 `tools/lint/file_size_policy_baseline.txt`).
 

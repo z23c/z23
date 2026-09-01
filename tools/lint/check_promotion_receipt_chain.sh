@@ -8,7 +8,7 @@
 # WHY THIS GATE EXISTS. Promotion evidence used to be one LOCAL, MUTABLE,
 # UNSIGNED git tag (tools/scripts/proof_server_pin.sh). Tags are never pushed —
 # origin holds only `main` — so the record died with the machine, and
-# `git tag -d` erased it with no trace. deploy/promotion-receipts.jsonl replaces
+# `git tag -d` erased it with no trace. platform/deploy/promotion-receipts.jsonl replaces
 # it as the authority: tracked (so it replicates on every push), hash-chained
 # (so an edited or removed record is detectable), and signed with
 # `ssh-keygen -Y sign` (so authorship is checkable offline from the committed
@@ -62,8 +62,8 @@ cd "$ROOT" || exit 1
 source "$ROOT/tools/lint/gate_lib.sh"
 
 TOOL=tools/scripts/promotion_receipt.sh
-LEDGER=deploy/promotion-receipts.jsonl
-SIGNERS=deploy/promotion-signers
+LEDGER=platform/deploy/promotion-receipts.jsonl
+SIGNERS=platform/deploy/promotion-signers
 SHIP=tools/ship.sh
 
 fail=0

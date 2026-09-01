@@ -18,7 +18,7 @@
  * "unavailable" in v1 — balances arrive with the owner-reviewed real
  * token, slice 14).
  *
- * The leaderboard is a REBUILDABLE PROJECTION (lib/vcs/package_rank.*)
+ * The leaderboard is a REBUILDABLE PROJECTION (contexts/commons/modules/vcs/package_rank.*)
  * over the durable reward-history ledger under <datadir>/zcode/rewards —
  * the ledger is replayed and the projection rebuilt on every call, never
  * a second truth. The window is shown explicitly (first/last civil day

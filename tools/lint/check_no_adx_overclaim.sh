@@ -4,8 +4,8 @@
 #
 # WHAT WENT WRONG
 # ---------------
-# lib/sapling/src/bn254_accel.c and the BLS12-381 Fr/Fp tier in
-# lib/sapling/src/fr_avx512.c both carried __attribute__((target("bmi2,adx")))
+# core/modules/sapling/src/bn254_accel.c and the BLS12-381 Fr/Fp tier in
+# core/modules/sapling/src/fr_avx512.c both carried __attribute__((target("bmi2,adx")))
 # and both described themselves as "BMI2+ADX (MULX+ADCX+ADOX)" —
 # bn254_accel_implementation() returned that string into `zclassic23`'s boot
 # banner. The target attribute only makes the compiler WILLING to emit
@@ -23,7 +23,7 @@
 # operator reads to decide whether a host is on the fast path, and the line a
 # future optimiser reads to decide the work is already done.
 #
-# Both files have since been repaired (lib/sapling/src/mont_adx.h, inline asm
+# Both files have since been repaired (core/modules/sapling/src/mont_adx.h, inline asm
 # with the two flag chains pinned to the two flags explicitly). This gate keeps
 # them repaired and grades anything that joins them.
 #
@@ -71,22 +71,20 @@ command -v objdump >/dev/null 2>&1 || {
 # construction today (bn254_accel.c, fr_avx512.c).
 mapfile -t adx_files < <(
     {
-        git grep -l -E '__attribute__\(\(target\("[^"]*adx' -- 'lib/*.c' 'lib/**/*.c' || true
-        git grep -l -E '#[[:space:]]*include[[:space:]]+"mont_adx\.h"' -- 'lib/*.c' 'lib/**/*.c' || true
+        git grep -l -E '__attribute__\(\(target\("[^"]*adx' -- core engine contexts cognition platform || true
+        git grep -l -E '#[[:space:]]*include[[:space:]]+"mont_adx\.h"' -- core engine contexts cognition platform || true
     } | sort -u
 )
 
 scanned=${#adx_files[@]}
 gate_require_scanned "$scanned" 2 "check_no_adx_overclaim" \
-    "expected at least lib/sapling/src/bn254_accel.c and lib/sapling/src/fr_avx512.c"
+    "expected at least core/modules/sapling/src/bn254_accel.c and core/modules/sapling/src/fr_avx512.c"
 
 # Include path: every lib/*/include plus the shared roots, so a standalone
 # -c of one file resolves its headers without the full Makefile.
-incs=()
-for d in lib/*/include; do [[ -d "$d" ]] && incs+=("-I$d"); done
-for d in app/*/include core/include config/include src/include; do
-    [[ -d "$d" ]] && incs+=("-I$d")
-done
+read -r -a incs <<< "$(make -s print-includes)"
+gate_require_scanned "${#incs[@]}" 20 "check_no_adx_overclaim" \
+    "canonical build include set came back hollow"
 
 tmpdir=$(mktemp -d)
 trap 'rm -rf "$tmpdir"' EXIT
@@ -138,7 +136,7 @@ for f in "${adx_files[@]}"; do
     while IFS= read -r line; do
         [[ -n "$line" ]] && echo "    $line" >&2
     done <<< "$claims"
-    echo "    -> pin the two carry chains in inline asm (lib/sapling/src/mont_adx.h)," >&2
+    echo "    -> pin the two carry chains in inline asm (core/modules/sapling/src/mont_adx.h)," >&2
     echo "       or report the tier honestly as \"BMI2 MULX\"" >&2
     violations=$((violations + 1))
 done

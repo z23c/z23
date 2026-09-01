@@ -179,8 +179,8 @@ if grep -q 'command -v cmake' "$vendor_builder"; then
     die "LevelDB vendor route still depends on optional host CMake presence"
 fi
 
-presentation_src="$repo_root/lib/presentation/src/presentation.c"
-presentation_include="$repo_root/lib/presentation/include"
+presentation_src="$repo_root/contexts/explorer/modules/presentation/src/presentation.c"
+presentation_include="$repo_root/contexts/explorer/modules/presentation/include"
 presentation_x11_include="$repo_root/vendor/x11/include"
 presentation_deps="$tmp/presentation.d"
 presentation_pp="$tmp/presentation.i"

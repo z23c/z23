@@ -24,7 +24,7 @@
 # would be a category error. That set is bounded and correct-by-design; it
 # does NOT belong on this ratchet and never appears here. See
 # DEFENSIVE_CODING.md §1 "The one principled exception" and
-# lib/storage/src/progress_store.c.
+# engine/modules/storage/src/progress_store.c.
 
 # Migration complete: all production node.db *model* writes now route
 # through AR_STEP_ROW_READONLY / AR_STEP_WRITE / AR_BEGIN_SAVE. This

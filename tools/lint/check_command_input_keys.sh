@@ -100,7 +100,7 @@ cd "$(dirname "$0")/../.."
 # shellcheck source=tools/lint/gate_lib.sh
 . tools/lint/gate_lib.sh
 
-DEF_DIR="${ZCL_COMMAND_INPUT_KEYS_DEF_DIR:-config/commands}"
+DEF_DIR="${ZCL_COMMAND_INPUT_KEYS_DEF_DIR:-engine/composition/commands}"
 BASELINE="${ZCL_COMMAND_INPUT_KEYS_BASELINE:-tools/lint/command_input_keys_baseline.txt}"
 MODE="${ZCL_LINT_MODE:-FAIL}"
 VERBOSE="${ZCL_COMMAND_INPUT_KEYS_VERBOSE:-0}"
@@ -120,7 +120,7 @@ gate_require_scanned "${#def_files[@]}" 1 check_command_input_keys \
 # One LEAF record per handler-binding leaf:
 #   LEAF <path> <file> <line> <macro> <input_keys> <positional_keys> <handler>
 # `input_keys` is argument 10 and `positional_keys` argument 11 in EVERY leaf
-# macro shape (config/src/command_catalog.c); the handler slot differs per
+# macro shape (engine/composition/src/command_catalog.c); the handler slot differs per
 # shape, and each shape's arity is asserted before any slot is read.
 DEF_OUT=$(awk '
 function trim(s) { gsub(/^[ \t\r\n]+/, "", s); gsub(/[ \t\r\n]+$/, "", s); return s }
@@ -137,7 +137,7 @@ function want_arity(n) {
     if (nargs != n) {
         fatal(sprintf("macro grammar drift: expected %d arguments, parsed %d." \
               " This gate reads fixed argument slots; re-read the macro in" \
-              " config/src/command_catalog.c and fix the arity table here.", \
+              " engine/composition/src/command_catalog.c and fix the arity table here.", \
               n, nargs))
         return 0
     }

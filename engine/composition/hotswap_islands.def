@@ -1,0 +1,32 @@
+/* Reloadable-island membership beyond the owning command controller.
+ *
+ * Consumer defines HOTSWAP_ISLAND(owner_tu, members). `members` is a
+ * space-separated set of stateless implementation TUs compiled into the same
+ * -Bsymbolic module as owner_tu. Every member is subject to the mutable-static
+ * lint gate. A member may belong to exactly one owner. State roots, reducers,
+ * networking ownership, storage, wallet state, consensus, and release builds
+ * are forbidden here.
+ */
+
+/* status_brief_native_handler.c defines zcl_native_status_brief_body, the body
+ * behind the core.status.brief leaf. A body that lives OUTSIDE the module is
+ * imported from the resident node at dlopen, so re-pointing the leaf would
+ * dispatch into the OLD code and the swap would silently do nothing for that
+ * leaf. Pulling the body TU into the island is what makes core.status.brief
+ * genuinely recompiled rather than merely re-dispatched. Verified free of
+ * mutable file-scope statics (check-hotswap-static-state scans island members
+ * too). */
+HOTSWAP_ISLAND("engine/controllers/src/status_native_handlers.c",
+               "engine/controllers/src/status_native_helpers.c engine/controllers/src/status_brief_native_handler.c")
+HOTSWAP_ISLAND("contexts/wallet/controllers/src/wallet_native_handlers.c",
+               "contexts/wallet/controllers/src/wallet_native_read_bodies.c")
+HOTSWAP_ISLAND("contexts/commons/controllers/src/metaverse_controller.c",
+               "cognition/services/src/metaverse_agent_service.c engine/services/src/property_catalog_service.c contexts/commons/modules/metaverse/src/property_id.c contexts/commons/modules/metaverse/src/property_view.c contexts/commons/modules/metaverse/src/property_work.c contexts/commons/modules/metaverse/src/property_action.c contexts/commons/modules/metaverse/src/adapter_registry.c contexts/commons/modules/metaverse/src/manifest_read.c contexts/commons/modules/metaverse/src/adapter_content.c contexts/commons/modules/metaverse/src/adapter_zcode.c contexts/commons/modules/metaverse/src/adapter_znam.c contexts/commons/modules/metaverse/src/adapter_zslp.c")
+
+/* The frozen ZCODE local P2P ratio + anti-spam policy table. A genuinely pure
+ * decision TU: no wall-clock, no filesystem, no network, and no mutable
+ * file-scope statics (the lint gate re-checks that on every run). It joins the
+ * island so that editing the POLICY RULE itself — not just its projection —
+ * takes effect from a single-TU module rebuild with no relink. */
+HOTSWAP_ISLAND("engine/controllers/src/policy_native_handlers.c",
+               "contexts/commons/modules/vcs/src/package_policy.c")

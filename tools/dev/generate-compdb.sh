@@ -114,8 +114,8 @@ write_input_manifest()
                 stat -c '%n\t%s\t%Y' "$path"
             fi
         done
-        find app application adapters config domain lib ports src tools \
-            vendor/include -type f \
+        find core engine contexts cognition platform tools vendor/include \
+            -type f \
             \( -name '*.c' -o -name '*.h' -o -name '*.def' -o \
                -name '*.inc' -o -name '*.mk' -o -name '*.tmpl' -o \
                -name '*.css' \) \
@@ -172,9 +172,9 @@ emit_runtime_status()
             [ "$ROOT/Makefile" -nt "$database" ] && printf '%s\n' Makefile
             [ "$ROOT/tools/dev/generate-compdb.sh" -nt "$database" ] &&
                 printf '%s\n' tools/dev/generate-compdb.sh
-            find "$ROOT/app" "$ROOT/application" "$ROOT/adapters" \
-                "$ROOT/config" "$ROOT/domain" "$ROOT/lib" "$ROOT/ports" \
-                "$ROOT/src" "$ROOT/tools" "$ROOT/vendor/include" -type f \
+            find "$ROOT/core" "$ROOT/engine" "$ROOT/contexts" \
+                "$ROOT/cognition" "$ROOT/platform" "$ROOT/tools" \
+                "$ROOT/vendor/include" -type f \
                 \( -name '*.c' -o -name '*.h' -o -name '*.def' -o \
                    -name '*.inc' -o -name '*.mk' -o -name '*.tmpl' -o \
                    -name '*.css' \) -newer "$database" -print -quit 2>/dev/null
@@ -349,7 +349,7 @@ main()
         if [ "$clangd_available" != true ]; then
             clangd_status="unavailable"
         else
-            check_file="${ZCL_AGENT_INDEX_CHECK_FILE:-app/controllers/src/agent_controller.c}"
+            check_file="${ZCL_AGENT_INDEX_CHECK_FILE:-cognition/controllers/src/agent_controller.c}"
             if clangd --compile-commands-dir="$ROOT" \
                     --check="$ROOT/$check_file" --log=error \
                     > "$clangd_log" 2>&1; then

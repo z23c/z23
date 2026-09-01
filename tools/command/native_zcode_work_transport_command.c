@@ -48,7 +48,7 @@
  * chain — and refuses unless the task the package ITSELF proves equals the
  * root the reader asked about. That is what stops a hostile pointer in
  * this namespace from delivering a solution to a different problem. The
- * publish-side gate in config/src/boot_zcode_dht_publish_gate.c is local
+ * publish-side gate in engine/composition/src/boot_zcode_dht_publish_gate.c is local
  * hygiene and constrains nobody else.
  *
  * PULLING IS NOT ACCEPTING, AND IT IS NOT EXECUTING. A verified row means
@@ -63,7 +63,7 @@
  *
  * This lives in its own translation unit rather than in
  * native_zcode_work_command.c so the transport half of the work surface
- * has one file. Bound by config/commands/zcode.def. */
+ * has one file. Bound by engine/composition/commands/zcode.def. */
 
 #include "base/hex.h"
 #include "base/log_macros.h"

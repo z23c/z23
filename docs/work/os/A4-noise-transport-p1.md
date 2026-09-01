@@ -4,12 +4,12 @@ This is the implementation contract for `docs/work/secure-transport-design.md`'s
 Phase-1 slice. Re-grep the anchor tokens (`send_segment_create(buf, total)`,
 `recv(target_fd`) before editing — lines rot.
 
-Built on `lib/noise/noise_handshake.{c,h}` (Noise_XX/_NK driver) and
-`lib/noise/session_transport.{c,h}` (record layer: 3-byte-length ChaCha20-
+Built on `core/modules/noise/noise_handshake.{c,h}` (Noise_XX/_NK driver) and
+`core/modules/noise/session_transport.{c,h}` (record layer: 3-byte-length ChaCha20-
 Poly1305 frames, per-direction counters, epoch-in-AAD rekey), over
-`lib/crypto/{x25519_safe,hkdf_sha256,chacha20poly1305,curve25519,hmac_sha256}`.
-The transport is implemented and armed as INITIATOR in `lib/net/src/net.c`
-(decrypted/torn down in `lib/net/src/connman.c`), default OFF pending
+`core/modules/crypto/{x25519_safe,hkdf_sha256,chacha20poly1305,curve25519,hmac_sha256}`.
+The transport is implemented and armed as INITIATOR in `core/modules/net/src/net.c`
+(decrypted/torn down in `core/modules/net/src/connman.c`), default OFF pending
 rollout.
 
 ## 0. The one structural invariant (why parity holds)
@@ -25,15 +25,15 @@ raw, and the ciphertext is produced from the exact `struct msg_header` + payload
 observe transport mode. This is the load-bearing claim the byte-parity test (§7)
 proves and the whole design rests on.
 
-## 1. New translation unit — `lib/net/src/noise_transport.c` + `include/net/noise_transport.h`
+## 1. New translation unit — `core/modules/net/src/noise_transport.c` + `include/net/noise_transport.h`
 
-All new logic lives here. It is a thin driver over Phase-0. `lib/net` already
+All new logic lives here. It is a thin driver over Phase-0. `core/modules/net` already
 lists `session` transitively via LIB_MODULES (both are in `Makefile:169-170`); add
-`-Ilib/session/include` reach is automatic (LIB_INCLUDES foreach). `noise_transport.c`
-is picked up by the `lib/net/src/*.c` wildcard (`Makefile:173-174`) — no Makefile
+`-Icognition/modules/session/include` reach is automatic (LIB_INCLUDES foreach). `noise_transport.c`
+is picked up by the `core/modules/net/src/*.c` wildcard (`Makefile:173-174`) — no Makefile
 source edit.
 
-### 1.1 Public header `lib/net/include/net/noise_transport.h`
+### 1.1 Public header `core/modules/net/include/net/noise_transport.h`
 
 ```c
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
@@ -138,7 +138,7 @@ bool noise_transport_dump_peer(struct json_value *out, const struct noise_transp
 
 ## 2. Struct fields (the only edits to `net.h`)
 
-`lib/net/include/net/net.h` — `struct p2p_node` ends at **:329**. Add before it:
+`core/modules/net/include/net/net.h` — `struct p2p_node` ends at **:329**. Add before it:
 ```c
     struct noise_transport *transport;   /* NULL = plaintext v1 path (zclassicd) */
 ```
@@ -152,7 +152,7 @@ Add `#include "net/noise_transport.h"` fwd via `struct noise_transport;` already
 forward-declared — keep net.h free of the session includes (the pointer is opaque
 here; the TU that touches it includes noise_transport.h).
 
-## 3. WRITE seam — `lib/net/src/net.c:708`
+## 3. WRITE seam — `core/modules/net/src/net.c:708`
 
 Current (inside `p2p_node_end_message`, holding `node->cs_send`):
 ```c
@@ -180,7 +180,7 @@ Do NOT touch `socket_send_data` (`net.c:735`): it partial-drains via
 tag. Pre-ESTABLISHED handshake bytes for the initiator are queued at
 `noise_transport_begin` time (§5), not here.
 
-## 4. READ seam — `lib/net/src/connman.c:1392`
+## 4. READ seam — `core/modules/net/src/connman.c:1392`
 
 Current (holding `node->cs_recv`, locked at :1369):
 ```c
@@ -257,7 +257,7 @@ handshake messages precede any `session_transport` and must go out verbatim.
 ## 6. Negotiation in the version exchange (service bit)
 
 - Add `NODE_NOISE_TRANSPORT = (1 << 25)` to the service-flags enum in
-  `lib/net/include/net/protocol.h` (adjacent to `NODE_BOOTSTRAP = (1<<24)`,
+  `core/modules/net/include/net/protocol.h` (adjacent to `NODE_BOOTSTRAP = (1<<24)`,
   **protocol.h:25**; free — used bits are 0,2,10,24). Open question §9(1):
   confirm zclassicd ignores 1<<25 (it is in the zcl23-reserved high range, same
   family as the working NODE_BOOTSTRAP).
@@ -280,7 +280,7 @@ argv loop next to existing net flags). Phase-1 lands dark — the byte-parity fl
 All four are required by the plan's A4 bar (`think-more-about-our-keen-crown.md`
 OS-A4). Tests are the load-bearing proofs; the parity claim is structural.
 
-1. **Differential byte-parity test** — NEW `lib/test/src/test_noise_transport_parity.c`
+1. **Differential byte-parity test** — NEW `tests/harness/src/test_noise_transport_parity.c`
    (auto-collected, `Makefile:491-492`; add its group to the counts). Two
    sub-assertions: (a) with `noise_enabled=false`, drive a `p2p_node` over a
    `socketpair()` (fixture template `test_net_handshake_adversarial.c`) and assert
@@ -289,7 +289,7 @@ OS-A4). Tests are the load-bearing proofs; the parity claim is structural.
    literally unchanged). (b) with `noise_enabled=true` on both ends, assert the
    plaintext delivered to `p2p_node_receive_bytes` after decrypt EQUALS the (a)
    golden plaintext for the same messages — proving the seam is transparent.
-2. **Noise handshake KAT** — extend `lib/test/src/test_noise_transport.c` (its
+2. **Noise handshake KAT** — extend `tests/harness/src/test_noise_transport.c` (its
    header notes no canonical XX vector was in-tree). Pin a DETERMINISTIC transcript:
    fixed prologue + fixed statics + `noise_hs_set_ephemeral` with fixed scalars on
    both sides → assert exact `msg1/msg2/msg3` bytes AND the two Split() transport
@@ -301,7 +301,7 @@ OS-A4). Tests are the load-bearing proofs; the parity claim is structural.
    `nm->nodes`, per peer emit `{id, mode: "plaintext"|"noise_xx", state,
    send_frames, recv_frames}` + top-line `plaintext_peers`/`noise_peers` counts —
    plaintext peers NAMED and COUNTED). Register ONE row in
-   `app/controllers/include/controllers/diagnostics_dumpers.def` mirroring the
+   `engine/controllers/include/controllers/diagnostics_dumpers.def` mirroring the
    `DIAG_LOCAL("sandbox", …)` row (**:62**):
    `DIAG_LOCAL("transport", net_transport_dump_state_json, "per-peer P2P transport: plaintext vs noise_xx, handshake state, frame counters; names+counts plaintext peers")`.
    Update the native diagnostics registry assertion if it pins the list (per

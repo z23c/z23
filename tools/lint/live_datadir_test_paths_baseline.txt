@@ -6,10 +6,10 @@
 # The trailing comment on each row is hand analysis (whose $HOME
 # the path is built from); regeneration preserves it.
 # Regenerate: ZCL_LINT_MODE=UPDATE tools/lint/check_live_datadir_isolation.sh
-lib/test/src/test_agent_copy_prove.c 1   # REAL $HOME. Negative test: asserts copy-prove REFUSES the exact live path. Never opened.
-lib/test/src/test_consensus_state_snapshot_install.c 1   # SANDBOX. `home` is "$root/gate-home", not the real $HOME.
-lib/test/src/test_dev_activation.c 1   # SANDBOX. `sb.home` is the test's own sandbox home.
-lib/test/src/test_hotswap_loader.c 2   # REAL $HOME. Pure string classification (hotswap_datadir_is_dev). Never opened.
-lib/test/src/test_hotswap_module.c 1   # SANDBOX. `home` is an mkdtemp() result.
-lib/test/src/test_shielded_gap_remedy.c 1   # REAL $HOME. Builds live_dir alongside a -COPY- sibling; re-read before removing.
-lib/test/src/test_syncdiag_agent_ops.c 1   # SAFE. A literal "~/.zclassic-c23" passed as boot-context METADATA; never resolved.
+tests/harness/src/test_agent_copy_prove.c 1   # REAL $HOME. Negative test: asserts copy-prove REFUSES the exact live path. Never opened.
+tests/harness/src/test_consensus_state_snapshot_install.c 1   # SANDBOX. `home` is "$root/gate-home", not the real $HOME.
+tests/harness/src/test_dev_activation.c 1   # SANDBOX. `sb.home` is the test's own sandbox home.
+tests/harness/src/test_hotswap_loader.c 2   # REAL $HOME. Pure string classification (hotswap_datadir_is_dev). Never opened.
+tests/harness/src/test_hotswap_module.c 1   # SANDBOX. `home` is an mkdtemp() result.
+tests/harness/src/test_shielded_gap_remedy.c 1   # REAL $HOME. Builds live_dir alongside a -COPY- sibling; re-read before removing.
+tests/harness/src/test_syncdiag_agent_ops.c 1   # SAFE. A literal "~/.zclassic-c23" passed as boot-context METADATA; never resolved.

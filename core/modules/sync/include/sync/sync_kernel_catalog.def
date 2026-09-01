@@ -1,0 +1,95 @@
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ *
+ * X-macro catalog for the pure sync reducer (sync_reduce.h). One declarative
+ * source generates BOTH the enums and the name-lookup tables + count guards,
+ * so a phase/event/action can never be added in one place and forgotten in
+ * another (pattern: engine/composition/src/command_catalog.c count-guard).
+ *
+ * Usage: before each #include of this file, define the ONE macro you want to
+ * expand — SYNC_PHASE(id,name), SYNC_EVENT(id,name), or SYNC_ACTION(id,name).
+ * The other two expand to nothing. This file provides empty defaults for any
+ * macro left undefined and then UNCONDITIONALLY undefs all three at the end,
+ * so the includer redefines the one it needs before the next include. There is
+ * deliberately no include guard — the file is meant to be re-included.
+ *
+ * Design law mirrored from sync_state.c (g_snapsync_transitions): the ACTION
+ * enum has NO ACTIVATE / PUBLISH value. Tip activation is UNREPRESENTABLE by
+ * this kernel — the highest it can go is STAGE_BUNDLE + (on the contained
+ * edge) RAISE_CONTAINMENT_BLOCKER. Containment stays the reference FSM's job. */
+
+#ifndef SYNC_PHASE
+#define SYNC_PHASE(id, name)
+#endif
+#ifndef SYNC_EVENT
+#define SYNC_EVENT(id, name)
+#endif
+#ifndef SYNC_ACTION
+#define SYNC_ACTION(id, name)
+#endif
+
+/* Snapshot-sync lifecycle phases. Mirrors enum snapshot_sync_state plus an
+ * explicit STAGED step between "verified" and the contained activation door. */
+SYNC_PHASE(IDLE, "idle")
+SYNC_PHASE(NEGOTIATING, "negotiating")
+SYNC_PHASE(RECEIVING, "receiving")
+SYNC_PHASE(VERIFYING, "verifying")
+SYNC_PHASE(STAGED, "staged")
+SYNC_PHASE(ACTIVATION_CONTAINED, "activation_contained")
+SYNC_PHASE(FAILED, "failed")
+
+/* Inputs the reducer folds. A minimal coherent set covering the existing
+ * snapshot_sync flow: offer negotiation, chunk streaming, proof verification,
+ * peer/time faults, and an explicit stop. */
+SYNC_EVENT(START, "start")
+SYNC_EVENT(OFFER_RECEIVED, "offer_received")
+SYNC_EVENT(OFFER_ACCEPTED, "offer_accepted")
+SYNC_EVENT(CHUNK_RECEIVED, "chunk_received")
+SYNC_EVENT(CHUNK_REJECTED, "chunk_rejected")
+SYNC_EVENT(RECEIVE_COMPLETE, "receive_complete")
+SYNC_EVENT(PROOF_VERIFIED, "proof_verified")
+SYNC_EVENT(PROOF_FAILED, "proof_failed")
+SYNC_EVENT(PEER_LOST, "peer_lost")
+SYNC_EVENT(TIMEOUT, "timeout")
+SYNC_EVENT(STOP_REQUESTED, "stop_requested")
+
+/* ── Typed offer/manifest verdict (WF sync-authority P1) ────────────────
+ * MANIFEST_VALIDATED carries the verdict of the SOLE offer-validity authority
+ * (app/services snapshot_manifest_validate_offer), mapped to a coarse sync-
+ * local `enum sync_offer_verdict` by the adapter. The kernel does NOT duplicate
+ * the range/schema/finality/work rules — it only orchestrates on the verdict:
+ * ACCEPT stores the offer and moves toward NEGOTIATING; REJECT is inert. This
+ * is the typed successor to the quality-blind OFFER_RECEIVED path. */
+SYNC_EVENT(MANIFEST_VALIDATED, "manifest_validated")
+
+/* ── Generic-artifact catalog stubs (Phase 3 wires the installer) ───────
+ * Reserved surface for the future generic-artifact install/activate path.
+ * They are TYPES ONLY this slice: every phase arm folds them as inert no-ops
+ * (they carry NO phase forward and emit NO action), so the exhaustive switches
+ * stay total while install/activation remains UNREPRESENTABLE — there is still
+ * no ACTIVATE/PUBLISH action, and no phase transition reaches an installed or
+ * committed state. Do not add behavior here without the Phase-3 installer. */
+SYNC_EVENT(ARTIFACT_VERIFIED, "artifact_verified")
+SYNC_EVENT(INSTALL_PREPARED, "install_prepared")
+SYNC_EVENT(INSTALL_COMMITTED, "install_committed")
+SYNC_EVENT(TAIL_PIECE_VERIFIED, "tail_piece_verified")
+SYNC_EVENT(REDUCER_ADVANCED, "reducer_advanced")
+SYNC_EVENT(READY_REACHED, "ready_reached")
+SYNC_EVENT(SOVEREIGN_REACHED, "sovereign_reached")
+
+/* Side-effect intents the reducer may emit (executed by the impure adapter,
+ * never by the reducer itself). NONE is the zero slot for the fixed-size
+ * actions[] array. CRITICAL: no ACTIVATE / PUBLISH — see the file header. */
+SYNC_ACTION(NONE, "none")
+SYNC_ACTION(STORE_OFFER, "store_offer")
+SYNC_ACTION(RESET_OFFSET, "reset_offset")
+SYNC_ACTION(BEGIN_RECEIVE, "begin_receive")
+SYNC_ACTION(APPLY_CHUNK, "apply_chunk")
+SYNC_ACTION(START_VERIFY, "start_verify")
+SYNC_ACTION(STAGE_BUNDLE, "stage_bundle")
+SYNC_ACTION(RAISE_CONTAINMENT_BLOCKER, "raise_containment_blocker")
+SYNC_ACTION(PENALIZE_PEER, "penalize_peer")
+SYNC_ACTION(FAIL, "fail")
+
+#undef SYNC_PHASE
+#undef SYNC_EVENT
+#undef SYNC_ACTION

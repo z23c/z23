@@ -4,7 +4,7 @@
 # escape_action is dual-purpose, and a literal is valid in any of three
 # forms:
 #
-#   1. A DISPATCH KEY: blocker_supervisor_sweep() (lib/util/src/blocker.c
+#   1. A DISPATCH KEY: blocker_supervisor_sweep() (platform/modules/util/src/blocker.c
 #      ~:492) looks the string up in the blocker_register_escape() registry
 #      via exact strcmp and calls the matching function. Valid iff a
 #      blocker_register_escape("<same string>") call exists anywhere in the
@@ -20,13 +20,13 @@
 #      cadence and the literal is documentation of which one owns the fix.
 #      Valid iff the identifier matches a registered condition name, i.e. a
 #      ZCL_CONDITION(<name>) entry in
-#      app/conditions/include/conditions/condition_registry.def and/or a
+#      engine/conditions/include/conditions/condition_registry.def and/or a
 #      `#define <X>_COND_NAME "<name>"` literal anywhere in the tree.
 #
 # A literal that is none of the three — an identifier matching no
 # registered escape function AND no registered condition name — silently
 # dead-ends blocker_supervisor_sweep's lookup AND is invisible to
-# app/conditions/src/blocker_stall_meta_detector.c's empty-escape backstop
+# engine/conditions/src/blocker_stall_meta_detector.c's empty-escape backstop
 # (which only catches truly empty strings), so nothing catches it. That is
 # what this gate exists to catch.
 #
@@ -40,7 +40,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")/../.."
 
-ROOTS=(app config lib src)
+ROOTS=(core engine contexts cognition platform)
 
 # The primitive's own file is excluded: it DEFINES blocker_register_escape
 # (a function definition, not a call) and internally re-copies escape_action
@@ -50,9 +50,9 @@ collect_registry_files() {
     for root in "${ROOTS[@]}"; do
         [ -d "$root" ] || continue
         find "$root" -type f \( -name '*.c' -o -name '*.h' -o -name '*.def' \) \
-            ! -path 'lib/test/*' \
-            ! -path 'lib/util/src/blocker.c' \
-            ! -path 'lib/util/include/util/blocker.h' \
+            ! -path 'tests/harness/include/test/*' \
+            ! -path 'platform/modules/util/src/blocker.c' \
+            ! -path 'platform/modules/util/include/util/blocker.h' \
             2>/dev/null
     done
 }
@@ -121,7 +121,7 @@ extract_registered_names() {
 
 # One condition name per line: every ZCL_CONDITION(<name>) entry (the data
 # table in condition_registry.def, where <name> IS the condition's string
-# name — see lib/test/src/test_condition_engine.c's `#define
+# name — see tests/harness/src/test_condition_engine.c's `#define
 # ZCL_CONDITION(name) #name,` stringization) plus every literal on a
 # `#define <X>_COND_NAME "<name>"` line, wherever it appears in the tree.
 extract_condition_names() {
@@ -186,11 +186,11 @@ echo ""
 echo "Fix options:"
 echo "  1. Register the escape: blocker_register_escape(\"<same string>\", <fn>)"
 echo "     at the owning subsystem's init (see"
-echo "     app/services/src/chain_activation_service.c for the pattern)."
+echo "     engine/services/src/chain_activation_service.c for the pattern)."
 echo "  2. If the string names the condition-engine healer that actually"
 echo "     drives the fix (e.g. \"reducer_frontier_reconcile_light\"), add a"
 echo "     ZCL_CONDITION(<name>) entry to"
-echo "     app/conditions/include/conditions/condition_registry.def (or a"
+echo "     engine/conditions/include/conditions/condition_registry.def (or a"
 echo "     matching <X>_COND_NAME #define) so the gate recognizes it."
 echo "  3. If it's operator guidance rather than a dispatch key, phrase it as"
 echo "     a sentence (e.g. \"re-run script_validate for selected block"

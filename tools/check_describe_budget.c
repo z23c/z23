@@ -25,7 +25,7 @@
  * it is written, not a rejected push later.
  *
  * Mechanism. This tool is a SECOND consumer of the same X-macro grammar
- * config/src/command_catalog.c uses (the same trick tools/gen_api_reference.c
+ * engine/composition/src/command_catalog.c uses (the same trick tools/gen_api_reference.c
  * plays): it defines every ZCL_COMMAND_* macro to emit one real
  * `struct zcl_command_spec` initializer, #includes the same eleven .def files
  * in the same order, and then calls the REAL
@@ -63,7 +63,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* lib/kernel/src/command_registry.c calls the agent spend policy from
+/* engine/modules/kernel/src/command_registry.c calls the agent spend policy from
  * zcl_command_registry_invoke() — the dispatch path — and nowhere else. This
  * gate only renders describe documents, so neither of these can be reached.
  * Defining them here keeps the gate a seven-file link instead of dragging
@@ -292,7 +292,7 @@ void agent_spend_policy_release(const char *session_id,
 
 /* The catalogs are reached through the include PATH (`-Iconfig`), not a
  * relative path, so the gate's --selftest can compile this same file against a
- * padded copy of config/commands by putting that copy's parent first on -I. */
+ * padded copy of engine/composition/commands by putting that copy's parent first on -I. */
 static struct zcl_command_spec g_specs[] = {
 #include "commands/root.def"
 #include "commands/core.def"
@@ -540,7 +540,7 @@ int main(int argc, char **argv)
             "ZCL_COMMAND_SPEC_BUDGET is %u. `discover describe %s` cannot be "
             "read at all: the renderer reports DESCRIBE_BUDGET and the leaf's "
             "written contract is invisible. Trim its `semantics` in "
-            "config/commands/*.def by at least %zu bytes. Do NOT raise the "
+            "engine/composition/commands/*.def by at least %zu bytes. Do NOT raise the "
             "budget.\n",
             spec->path, need, ZCL_COMMAND_SPEC_BUDGET, spec->path,
             need - ZCL_COMMAND_SPEC_BUDGET);

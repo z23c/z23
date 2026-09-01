@@ -1,0 +1,1717 @@
+/* Consensus-bound Core capabilities (contract §5).
+ *
+ * READ-ONLY leaves that have a genuine live handler bind the generic native
+ * bridge (zcl_native_bridge_command), which proxies the resolved leaf to the
+ * canonical RPC handler for this build. The path-to-method binding lives in
+ * the transport adapter (tools/command/native_command.c), never in this
+ * metadata. Mutations and reads that are not yet bridged are PLANNED — the
+ * engine fail-closes a PLANNED leaf with exit 3, so nothing is advertised as
+ * working before its handler exists. Do NOT promote a handlerless node to
+ * READY. */
+
+ZCL_COMMAND_READY_READ(
+    "core.status", "core", "", "Consensus node status: height, sync, health",
+    "Live node health, tip height, peer count, and the single most useful "
+    "next action, read from the running node at call time; a named "
+    "blocker replaces height when sync is stalled.", 0,
+    "status,height,sync,consensus,tip", "zcl.command.empty_input.v1",
+    "zcl.core_status.v2", "", "", "z23 core status",
+    ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_PUBLIC,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_CHAIN_READ,
+    ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_bridge_command)
+ZCL_COMMAND_BRANCH("core.wallet.security", "core.wallet",
+                   "Encryption-at-rest and runtime key custody",
+                   ZCL_COMMAND_LAYER_CORE)
+ZCL_COMMAND_READY_READ(
+    "core.wallet.security.status", "core.wallet.security", "",
+    "Report wallet encryption and lock state",
+    "The running wallet's current encrypted-at-rest, locked, and unlocked "
+    "posture; no secret material is returned.", 0,
+    "wallet,security,encryption,lock,status",
+    "zcl.command.empty_input.v1", "zcl.wallet_security.v1", "", "",
+    "z23 core wallet security status",
+    ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_WALLET_REQUEST, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_wallet_security_status)
+ZCL_COMMAND_READY_COMMAND(
+    "core.wallet.security.encrypt", "core.wallet.security", "",
+    "Encrypt every wallet secret at rest, then lock",
+    "Atomically wraps plaintext transparent keys, Sapling spending keys, and "
+    "the wallet seed in WKS1 envelopes, then scrubs resident keys. The "
+    "passphrase is accepted only through --input=- and is never echoed.", 0,
+    "wallet,security,encrypt,passphrase",
+    "zcl.wallet_security_encrypt.input.v1", "zcl.wallet_security.v1",
+    "passphrase", "", "z23 core wallet security encrypt --input=-",
+    ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_WALLET,
+    ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_CONFIRM_NONE,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_WALLET_REQUEST, ZCL_COMMAND_TRAIT_NONE,
+    zcl_native_handle_wallet_security_encrypt)
+ZCL_COMMAND_READY_COMMAND(
+    "core.wallet.security.unlock", "core.wallet.security", "",
+    "Unlock wallet keys for a bounded interval",
+    "Loads encrypted keys for timeout_seconds (default 300, maximum 3600), "
+    "then automatically scrubs the passphrase and private keys. Passphrase "
+    "input is stdin-only and never echoed.", 0,
+    "wallet,security,unlock,timeout,passphrase",
+    "zcl.wallet_security_unlock.input.v1", "zcl.wallet_security.v1",
+    "passphrase,timeout_seconds", "",
+    "z23 core wallet security unlock --input=-",
+    ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_WALLET,
+    ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_CONFIRM_NONE,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_WALLET_REQUEST, ZCL_COMMAND_TRAIT_NONE,
+    zcl_native_handle_wallet_security_unlock)
+ZCL_COMMAND_READY_COMMAND(
+    "core.wallet.security.lock", "core.wallet.security", "",
+    "Lock the wallet and scrub resident keys",
+    "Immediately scrubs the cached passphrase and every resident private key; "
+    "idempotent and never changes encrypted bytes on disk.", 0,
+    "wallet,security,lock,scrub", "zcl.command.empty_input.v1",
+    "zcl.wallet_security.v1", "", "",
+    "z23 core wallet security lock",
+    ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_WALLET,
+    ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW, ZCL_COMMAND_CONFIRM_NONE,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_WALLET_REQUEST, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    zcl_native_handle_wallet_security_lock)
+
+ZCL_COMMAND_READY_READ(
+    "core.status.brief", "core", "",
+    "Flat lean status: hstar, gap, blocker, conditions, peers, rss "
+    "(full field list: docs/NATIVE_COMMAND_INTERFACE.md CLI UX contract)",
+    "Same live status fields as core.status flattened to bare scalars "
+    "for scripting, read from the running node at call time; one "
+    "snapshot per call, not a stream.", 0,
+    "status,brief,lean,flat,gap,serving,healthy", "zcl.command.empty_input.v1",
+    "zcl.core_status_brief.v1", "", "", "z23 core status brief",
+    ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_PUBLIC,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_CHAIN_READ,
+    ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_bridge_command)
+
+/* ── chain ─────────────────────────────────────────────────────────── */
+ZCL_COMMAND_BRANCH("core.chain", "core", "Blocks, transactions, and mempool",
+                   ZCL_COMMAND_LAYER_CORE)
+
+ZCL_COMMAND_READY_READ(
+    "core.chain.tip", "core.chain", "", "Active chain tip in one call",
+    "Best-known local chain tip height, hash, and cumulative work, "
+    "read live from the running node's block index at call time; a "
+    "named blocker may replace height mid-sync.", 0,
+    "tip,best,height,hash,work", "zcl.command.empty_input.v1",
+    "zcl.chain_tip.v1", "", "", "z23 core chain tip",
+    ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_PUBLIC,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_CHAIN_READ, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_bridge_command)
+
+ZCL_COMMAND_BRANCH("core.chain.block", "core.chain", "Block by height or hash",
+                   ZCL_COMMAND_LAYER_CORE)
+ZCL_COMMAND_READY_READ(
+    "core.chain.block.get", "core.chain.block", "",
+    "Get one block by height or hash",
+    "One full block record (header, transactions) resolved from the "
+    "local block index at call time by height or hash; heights are in "
+    "blocks, absent below the node's synced range.", 0,
+    "block,get,height,hash",
+    "zcl.core_block_get.input.v1", "zcl.block.v1", "height,hash,verbosity",
+    "height", "z23 core chain block get --height=478544",
+    ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_PUBLIC,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_CHAIN_READ, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_bridge_command)
+
+ZCL_COMMAND_BRANCH("core.chain.transaction", "core.chain",
+                   "Transaction by id", ZCL_COMMAND_LAYER_CORE)
+ZCL_COMMAND_READY_READ(
+    "core.chain.transaction.get", "core.chain.transaction", "",
+    "Get one transaction by id",
+    "One transaction looked up live by txid from mempool or the local block "
+    "index at call time: full decoded fields by default, or a bounded typed "
+    "raw_hex page with verbose=false and optional raw_offset/raw_bytes; absent "
+    "if unknown to this node.", 0,
+    "transaction,tx,get,txid",
+    "zcl.core_tx_get.input.v1", "zcl.transaction.v1",
+    "txid,verbose,raw_offset,raw_bytes", "txid",
+    "z23 core chain transaction get --txid=<hex>",
+    ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_PUBLIC,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_CHAIN_READ, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_bridge_command)
+
+ZCL_COMMAND_BRANCH("core.chain.mempool", "core.chain", "Mempool state",
+                   ZCL_COMMAND_LAYER_CORE)
+ZCL_COMMAND_READY_READ(
+    "core.chain.mempool.status", "core.chain.mempool", "",
+    "Mempool size, bytes, and fee summary",
+    "Live mempool transaction count, total size in bytes, and fee-rate "
+    "summary read from the running node's mempool at call time; a "
+    "point-in-time snapshot that changes every block/relay.", 0,
+    "mempool,status,fees",
+    "zcl.command.empty_input.v1", "zcl.mempool_status.v1", "", "",
+    "z23 core chain mempool status",
+    ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_PUBLIC,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_CHAIN_READ, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_bridge_command)
+ZCL_COMMAND_READY_READ(
+    "core.chain.mempool.list", "core.chain.mempool", "",
+    "List mempool transaction ids",
+    "Every mempool transaction id present at call time, read live from "
+    "the running node; bounded to the list budget row cap, not a paged "
+    "or historical view.", ZCL_COMMAND_LIST_BUDGET,
+    "mempool,list,txids",
+    "zcl.command.empty_input.v1", "zcl.mempool_list.v1", "", "",
+    "z23 core chain mempool list",
+    ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_PUBLIC,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_CHAIN_READ, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_bridge_command)
+
+ZCL_COMMAND_BRANCH("core.chain.wait", "core.chain",
+                   "Block until a chain condition holds", ZCL_COMMAND_LAYER_CORE)
+ZCL_COMMAND_PLANNED_READ(
+    "core.chain.wait.height", "core.chain.wait", "",
+    "Wait until the tip reaches a target height",
+    "Will report whether the tip reached the target height within the "
+    "timeout once wired; today the handler is unbound and the call "
+    "fails closed with exit 3.", 0,
+    "wait,height,sync",
+    "zcl.core_wait_height.input.v1", "zcl.wait_result.v1", "height,timeout_ms",
+    "height", "z23 core chain wait height --height=3200000",
+    ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_PERSISTENT, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_CHAIN_READ,
+    "blocking wait proxy is deferred to the Wave 2.2 job protocol")
+ZCL_COMMAND_PLANNED_READ(
+    "core.chain.wait.blocker", "core.chain.wait", "",
+    "Wait until a named blocker is raised or cleared",
+    "Will report the raised/cleared transition of the named sync "
+    "blocker once wired; today the handler is unbound and fails "
+    "closed with exit 3.", 0,
+    "wait,blocker,stall",
+    "zcl.core_wait_blocker.input.v1", "zcl.wait_result.v1", "blocker,timeout_ms",
+    "blocker", "z23 core chain wait blocker",
+    ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_PERSISTENT, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_CHAIN_READ,
+    "blocking wait proxy is deferred to the Wave 2.2 job protocol")
+ZCL_COMMAND_PLANNED_READ(
+    "core.chain.wait.halt", "core.chain.wait", "",
+    "Wait until the node halts on a named blocker",
+    "Will report the blocker name that caused the node to halt once "
+    "wired; today the handler is unbound and fails closed with "
+    "exit 3.", 0,
+    "wait,halt,blocker",
+    "zcl.core_wait_halt.input.v1", "zcl.wait_result.v1", "timeout_ms", "",
+    "z23 core chain wait halt",
+    ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_PERSISTENT, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_CHAIN_READ,
+    "blocking wait proxy is deferred to the Wave 2.2 job protocol")
+
+/* ── sync ──────────────────────────────────────────────────────────── */
+ZCL_COMMAND_BRANCH("core.sync", "core", "Sync phase and validation progress",
+                   ZCL_COMMAND_LAYER_CORE)
+ZCL_COMMAND_READY_READ(
+    "core.sync.status", "core.sync", "", "Sync phase and header/block gap",
+    "Current sync phase and the live header/block gap to the network "
+    "tip, read from the running node at call time; gap is measured in "
+    "blocks.", 0,
+    "sync,status,phase,gap", "zcl.command.empty_input.v1", "zcl.sync_status.v1",
+    "", "", "z23 core sync status",
+    ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_PUBLIC,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_CHAIN_READ, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_bridge_command)
+ZCL_COMMAND_READY_READ(
+    "core.sync.validation", "core.sync", "",
+    "Background validation progress",
+    "Background proof-verification progress (blocks walked from "
+    "genesis vs chain height), read live from the running node at "
+    "call time; disabled entirely under -nobgvalidation.", 0,
+    "validation,proofs,progress",
+    "zcl.command.empty_input.v1", "zcl.validation_status.v1", "", "",
+    "z23 core sync validation",
+    ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_PUBLIC,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_CHAIN_READ, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_bridge_command)
+ZCL_COMMAND_READY_READ(
+    "core.sync.blockers", "core.sync", "", "Active named sync blockers",
+    "Every named blocker currently stalling sync, read live from the "
+    "running node's blocker registry at call time; empty when sync is "
+    "advancing normally.", 0,
+    "blockers,stall,sync", "zcl.command.empty_input.v1", "zcl.blockers.v1",
+    "", "", "z23 core sync blockers",
+    ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_PUBLIC,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_CHAIN_READ, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_bridge_command)
+ZCL_COMMAND_READY_READ(
+    "core.sync.diagnose", "core.sync", "", "Diagnose why sync is not advancing",
+    "A live diagnostic snapshot (stage cursor, gap, likely cause) "
+    "computed from the running node's reducer state at call time, "
+    "not a cached or historical report.", 0,
+    "sync,diagnose,stall,gap", "zcl.command.empty_input.v1", "zcl.syncdiag.v1",
+    "", "", "z23 core sync diagnose",
+    ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_CHAIN_READ, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_bridge_command)
+ZCL_COMMAND_READY_READ(
+    "core.sync.frontier.offline", "core.sync", "",
+    "H* (reducer frontier) of a STOPPED/COPIED datadir",
+    "The pure SELECT-only L0 H* fold (reducer_frontier_compute_hstar) and "
+    "static sovereignty/spend predicates run directly against "
+    "--datadir=<path>'s own consensus.db/progress.kv at call time — no node "
+    "contact, no RPC; works on a stopped node or copy. Static spend posture "
+    "never replaces the required two-sample runtime H* climb or current "
+    "identity-bound money snapshot.", 0,
+    "sync,frontier,hstar,offline,datadir,copy,sovereignty,spend",
+    "zcl.core_sync_frontier_offline.input.v1",
+    "zcl.core_sync_frontier_offline.v1", "datadir", "",
+    "z23 core sync frontier offline "
+    "--input='{\"datadir\":\"/home/you/.zclassic-c23\"}'",
+    ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_SCOPE_OFFLINE_COPY,
+    ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_CHAIN_READ, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_core_sync_frontier_offline)
+
+/* ── generic ZANC digest anchors ─────────────────────────────────── */
+ZCL_COMMAND_BRANCH("core.anchor", "core",
+                   "Generic ZANC digest-anchor composition and inspection",
+                   ZCL_COMMAND_LAYER_CORE)
+ZCL_COMMAND_READY_READ(
+    "core.anchor.compose", "core.anchor", "",
+    "Compose one canonical generic ZANC digest anchor",
+    "Validates an explicit SHA2-256 or SHA3-256 digest and optional public "
+    "label, then returns the exact standard-relay ZANC OP_RETURN plus the "
+    "op_return_hex fragment accepted by core.wallet.transaction.raw.create. "
+    "It is deterministic and never reads a file, wallet, key, or node; "
+    "funding, signing, and broadcast remain separate owner-only steps.", 0,
+    "anchor,zanc,digest,op_return,compose,transaction",
+    "zcl.core_anchor_compose.input.v1", "zcl.core_anchor_compose.v1",
+    "digest,hash_type,label", "digest",
+    "z23 core anchor compose --digest=<64hex> --label=release@1",
+    ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_PUBLIC, ZCL_COMMAND_LATENCY_INSTANT,
+    ZCL_COMMAND_COST_TINY, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_NONE,
+    ZCL_COMMAND_TRAIT_DETERMINISTIC | ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_core_anchor_compose)
+ZCL_COMMAND_READY_READ(
+    "core.anchor.inspect", "core.anchor", "",
+    "Strictly decode one canonical ZANC OP_RETURN",
+    "Parses exact OP_RETURN script hex through the production ZANC codec and "
+    "returns its version, hash algorithm, digest, label, and size. Malformed, "
+    "non-canonical, trailing, wrong-tag, or oversize bytes fail closed. It "
+    "never reads a wallet or changes chain state.", 0,
+    "anchor,zanc,digest,op_return,inspect,decode",
+    "zcl.core_anchor_inspect.input.v1", "zcl.core_anchor_inspect.v1",
+    "op_return_hex", "op_return_hex",
+    "z23 core anchor inspect <op_return_hex>",
+    ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_PUBLIC, ZCL_COMMAND_LATENCY_INSTANT,
+    ZCL_COMMAND_COST_TINY, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_NONE,
+    ZCL_COMMAND_TRAIT_DETERMINISTIC | ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_core_anchor_inspect)
+
+/* ── epoch (Bounded Node keystone) ─────────────────────────────────
+ * The OP_RETURN catalog's incremental digest-chain commits every overlay
+ * record the chain has ever carried; one ZANC anchor per epoch commits
+ * the whole overlay state in ~40 bytes. v1: no service, no auto-broadcast
+ * — anchoring spends fees and stays an operator decision. Label semantics
+ * (shared with dumpstate zepoch): "zepoch@<H>", H = catalog cursor height
+ * the digest was read at; an anchor covers epoch E = tip/1000 when
+ * H >= E*1000. */
+ZCL_COMMAND_BRANCH("core.epoch", "core",
+                   "Epoch anchors: commit the overlay catalog digest on-chain",
+                   ZCL_COMMAND_LAYER_CORE)
+ZCL_COMMAND_READY_READ(
+    "core.epoch.status", "core.epoch", "",
+    "Catalog digest, epoch position, and anchor presence",
+    "The OP_RETURN catalog state read from the datadir's node.db at call "
+    "time (works on a stopped or copied datadir): tip (cursor) height, "
+    "catalog digest hex, catalog row count, the current epoch "
+    "(height/1000) and blocks into it, and whether a ZANC anchor labeled "
+    "zepoch@<H> with H inside the current epoch already exists (with its "
+    "label/txid/height/confirmations/digest and a digest_match flag). A "
+    "missing anchor comes with the exact next command to run.", 0,
+    "epoch,anchor,catalog,digest,status,zepoch",
+    "zcl.core_epoch_status.input.v1", "zcl.core_epoch_status.v1",
+    "datadir", "",
+    "z23 core epoch status",
+    ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_SCOPE_OFFLINE_COPY,
+    ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_CHAIN_READ, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_core_epoch_status)
+ZCL_COMMAND_READY_COMMAND(
+    "core.epoch.anchor", "core.epoch", "",
+    "Anchor the current catalog digest on-chain (spends a fee)",
+    "Builds a ZANC anchor (SHA3, label zepoch@<tip>) committing the "
+    "current OP_RETURN catalog digest. With a live node: dispatches the "
+    "wallet compose+broadcast through anchor_publish and returns the txid "
+    "(the node itself returns op_return_hex when no wallet is loaded). "
+    "With no live node: returns op_return_hex plus the exact next step. "
+    "Never runs on a timer — every anchor is an explicit operator "
+    "decision.", 0,
+    "epoch,anchor,commit,broadcast,zepoch,fee",
+    "zcl.core_epoch_anchor.input.v1", "zcl.core_epoch_anchor.v1",
+    "datadir", "",
+    "z23 core epoch anchor",
+    ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_WALLET, ZCL_COMMAND_SCOPE_NODE,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_CONFIRM_NONE,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_NONE,
+    zcl_native_handle_core_epoch_anchor)
+ZCL_COMMAND_READY_READ(
+    "core.epoch.verify", "core.epoch", "",
+    "Check the current epoch's anchor against the live digest",
+    "Without inputs: fresh-reads the tip catalog digest from the "
+    "datadir's node.db, looks up the latest zepoch@ anchor in the current "
+    "epoch, and reports anchored/txid/confirmations plus digest "
+    "match/mismatch (a mismatch means the catalog advanced past the "
+    "anchor — re-anchor). With --height=N: collects EVERY anchor labeled "
+    "zepoch@<N> and reports two independent things — whether those "
+    "anchors agree with each other (distinct_roots; >1 is a finding on "
+    "its own and exits non-zero as EPOCH_DIGEST_DISAGREEMENT) and "
+    "whether this node agrees with them (agree/disagree per anchor, only "
+    "when the catalog cursor sits exactly at N, since the digest chain "
+    "folds forward and is recomputable only at the cursor). A node whose "
+    "declared base_height is above N reports `incomparable`, never "
+    "`disagree` — digests over different declared ranges are supposed to "
+    "differ. Any state without a local digest is named in "
+    "local_digest_reason, never silently treated as a match.", 0,
+    "epoch,verify,anchor,digest,match,zepoch",
+    "zcl.core_epoch_verify.input.v1", "zcl.core_epoch_verify.v1",
+    "height,datadir", "",
+    "z23 core epoch verify",
+    ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_SCOPE_OFFLINE_COPY,
+    ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_CHAIN_READ, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_core_epoch_verify)
+
+/* ── consensus ─────────────────────────────────────────────────────── */
+ZCL_COMMAND_BRANCH("core.consensus", "core",
+                   "Consensus reports, integrity, and mutation",
+                   ZCL_COMMAND_LAYER_CORE)
+ZCL_COMMAND_READY_READ(
+    "core.consensus.report", "core.consensus", "",
+    "Consensus parity and rule report",
+    "Live consensus-parity check results against the zclassicd golden "
+    "values, computed from the running node's current chain state at "
+    "call time.", 0,
+    "consensus,report,parity",
+    "zcl.command.empty_input.v1", "zcl.consensus_report.v1", "", "",
+    "z23 core consensus report",
+    ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_PUBLIC,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_CHAIN_READ, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_bridge_command)
+ZCL_COMMAND_READY_READ(
+    "core.consensus.integrity", "core.consensus", "",
+    "SHA3 over consensus tables",
+    "A SHA3-256 digest computed live over the node's consensus-critical "
+    "tables at call time; foreground cost scales with table size, not "
+    "a cached value.", 0,
+    "integrity,sha3,dataintegrity",
+    "zcl.command.empty_input.v1", "zcl.data_integrity.v1", "", "",
+    "z23 core consensus integrity",
+    ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_PUBLIC,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_CHAIN_READ, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_bridge_command)
+ZCL_COMMAND_BRANCH("core.consensus.utxo", "core.consensus",
+                   "UTXO set commitment and audit", ZCL_COMMAND_LAYER_CORE)
+ZCL_COMMAND_READY_READ(
+    "core.consensus.utxo.commitment", "core.consensus.utxo", "",
+    "SHA3 commitment over the UTXO set",
+    "A SHA3-256 commitment computed live over the full current UTXO "
+    "set at call time; recomputed on every call, not a cached "
+    "snapshot.", 0,
+    "utxo,commitment,sha3",
+    "zcl.command.empty_input.v1", "zcl.utxo_commitment.v1", "", "",
+    "z23 core consensus utxo commitment",
+    ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_PUBLIC,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_CHAIN_READ, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_bridge_command)
+ZCL_COMMAND_READY_READ(
+    "core.consensus.utxo.audit", "core.consensus.utxo", "",
+    "Audit the UTXO set for drift",
+    "Live drift-detection results comparing the running node's UTXO "
+    "set against expected invariants at call time; a foreground scan, "
+    "not a cached report.", 0,
+    "utxo,audit,drift",
+    "zcl.command.empty_input.v1", "zcl.utxo_audit.v1", "", "",
+    "z23 core consensus utxo audit",
+    ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_CHAIN_READ, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_bridge_command)
+ZCL_COMMAND_READY_READ(
+    "core.consensus.mmb", "core.consensus", "",
+    "Merkle Mountain Belt commitment state",
+    "Live FlyClient Merkle Mountain Belt commitment state read from "
+    "the running node at call time; the utxo_root it carries is not "
+    "committed by ZClassic headers.", 0,
+    "mmb,flyclient,commitment",
+    "zcl.command.empty_input.v1", "zcl.mmb.v1", "", "",
+    "z23 core consensus mmb",
+    ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_PUBLIC,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_CHAIN_READ, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_bridge_command)
+ZCL_COMMAND_READY_COMMAND(
+    "core.consensus.producer-session.retire", "core.consensus", "",
+    "Retire a foreign producer start session from a STOPPED datadir",
+    "Deletes the consensus_state_producer_session row when it was written "
+    "by a DIFFERENT build than this z23, so the next boot's begin() inserts "
+    "a fresh session and the exporter requalifies — the operator remedy for "
+    "STATUS_SOURCE_UNAVAILABLE / bundle_exporter.degraded after a binary "
+    "upgrade. Refuses (SESSION_CURRENT) when the session matches this very "
+    "build, answers SESSION_ABSENT when there is nothing to retire, and "
+    "refuses NODE_RUNNING when a node still answers on the datadir's RPC. "
+    "Audits the retired session's binary digest into progress_meta.", 0,
+    "consensus,producer,session,retire,offline,datadir,exporter,degraded",
+    "zcl.core_producer_session_retire.input.v1",
+    "zcl.core_producer_session_retire.v1", "datadir,rpc_port", "datadir",
+    "z23 core consensus producer-session retire "
+    "--input='{\"datadir\":\"/home/you/.zclassic-c23\","
+    "\"rpc_port\":18232}'",
+    ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_CORE_RECOVERY, ZCL_COMMAND_SCOPE_OFFLINE_COPY,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_CONFIRM_NONE,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    zcl_native_handle_core_consensus_producer_session_retire)
+ZCL_COMMAND_BRANCH("core.consensus.block", "core.consensus",
+                   "Invalidate or reconsider a block", ZCL_COMMAND_LAYER_CORE)
+ZCL_COMMAND_PLANNED_COMMAND(
+    "core.consensus.block.invalidate", "core.consensus.block", "",
+    "Mark a block invalid and reorg away from it",
+    "Will report the reorg outcome of invalidating the given block "
+    "once wired; today the handler is unbound and fails closed with "
+    "exit 3 rather than mutating chain state.", 0,
+    "invalidate,reorg,block",
+    "zcl.core_block_ref.input.v1", "zcl.block_mutation.v1", "hash", "hash",
+    "z23 core consensus block invalidate --hash=<hash>",
+    ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_EFFECT_DESTRUCTIVE,
+    ZCL_COMMAND_RISK_CORE_RECOVERY, ZCL_COMMAND_SCOPE_NODE,
+    ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_CONFIRM_PLAN_COMMIT,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_CHAIN_READ, ZCL_COMMAND_TRAIT_NONE,
+    "chain-mutation confirmation handshake is a Wave 2.2 deliverable")
+ZCL_COMMAND_PLANNED_COMMAND(
+    "core.consensus.block.reconsider", "core.consensus.block", "",
+    "Clear an invalid mark and reconsider a block",
+    "Will report whether the previously invalidated block was "
+    "reconsidered and reorganized back in once wired; today unbound "
+    "and fails closed with exit 3.", 0,
+    "reconsider,block",
+    "zcl.core_block_ref.input.v1", "zcl.block_mutation.v1", "hash", "hash",
+    "z23 core consensus block reconsider --hash=<hash>",
+    ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_CORE_RECOVERY, ZCL_COMMAND_SCOPE_NODE,
+    ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_CONFIRM_PLAN_COMMIT,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_CHAIN_READ, ZCL_COMMAND_TRAIT_REVERSIBLE,
+    "chain-mutation confirmation handshake is a Wave 2.2 deliverable")
+
+/* ── network ───────────────────────────────────────────────────────── */
+ZCL_COMMAND_BRANCH("core.network", "core", "Peers and onion transport",
+                   ZCL_COMMAND_LAYER_CORE)
+ZCL_COMMAND_READY_READ(
+    "core.network.status", "core.network", "", "Network info and connections",
+    "Live network transport info and connection counts, read from the "
+    "running node's P2P subsystem at call time.", 0,
+    "network,status,connections", "zcl.command.empty_input.v1",
+    "zcl.network_status.v1", "", "", "z23 core network status",
+    ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_PUBLIC,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_CHAIN_READ, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_bridge_command)
+ZCL_COMMAND_READY_READ(
+    "core.network.chain_view", "core.network", "",
+    "Reachable-network chain view: modal tip, max height, our delta, forks",
+    "Aggregated live view of every connected peer's reported tip, "
+    "computed from current peer state at call time; modal/max heights "
+    "and our delta shift as peers connect or advance.", 0,
+    "network,chain,view,fork,tip,modal,consensus,behind",
+    "zcl.command.empty_input.v1",
+    "zcl.network_chain_view.v1", "", "",
+    "z23 core network chain_view",
+    ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_PUBLIC,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_CHAIN_READ, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_network_chain_view)
+ZCL_COMMAND_BRANCH("core.network.peers", "core.network",
+                   "Connected peers", ZCL_COMMAND_LAYER_CORE)
+ZCL_COMMAND_READY_READ(
+    "core.network.peers.list", "core.network.peers", "",
+    "List connected peers",
+    "Every currently connected peer's address, version, and stats, "
+    "read live from the running node's peer table at call time; "
+    "bounded to the list budget row cap. Z23 peers are listed first, "
+    "then MagicBean, then other. Per-peer lifecycle is dumpstate "
+    "peer_lifecycle. Continue with --cursor when _page.truncated is true.",
+    ZCL_COMMAND_LIST_BUDGET,
+    "peers,list,addresses,latency",
+    "zcl.command.empty_input.v1", "zcl.peers.v1", "", "",
+    "z23 core network peers list",
+    ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_PUBLIC,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_CHAIN_READ, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_bridge_command)
+ZCL_COMMAND_READY_READ(
+    "core.network.peers.incidents", "core.network.peers", "",
+    "Recent peer misbehavior incidents",
+    "Recent peer misbehavior/ban-score incidents recorded by the "
+    "running node, most-recent-first as of call time; bounded to the "
+    "list budget row cap, not full history.", ZCL_COMMAND_LIST_BUDGET,
+    "peers,incidents,ban,misbehavior",
+    "zcl.command.empty_input.v1", "zcl.peer_incidents.v2", "", "",
+    "z23 core network peers incidents",
+    ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_CHAIN_READ, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_bridge_command)
+ZCL_COMMAND_READY_READ(
+    "core.network.peers.latency", "core.network.peers", "",
+    "Round-trip latency for every peer",
+    "Round-trip latency in microseconds for every connected peer, "
+    "measured live at call time via the P2P ping game; bounded to the "
+    "list budget row cap.", ZCL_COMMAND_LIST_BUDGET,
+    "peers,latency,ping",
+    "zcl.command.empty_input.v1", "zcl.peer_latency.v1", "", "",
+    "z23 core network peers latency",
+    ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_PUBLIC,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_CHAIN_READ, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_bridge_command)
+ZCL_COMMAND_READY_COMMAND(
+    "core.network.peers.add", "core.network.peers", "",
+    "Add an outbound peer connection",
+    "A numeric IP:port or v3 onion endpoint is persisted and scheduled "
+    "directly. Onion P2P uses embedded Tor and remains operator-directed; "
+    "onion endpoints are never learned through peer gossip. Success means a "
+    "dial was requested, not that VERSION/VERACK completed.", 0,
+    "peers,add,connect,addnode",
+    "zcl.core_peer_add.input.v1", "zcl.peer_add.v1", "address", "address",
+    "z23 core network peers add --address=<ip:port|v3.onion>",
+    ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_CORE_RECOVERY, ZCL_COMMAND_SCOPE_NODE,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW, ZCL_COMMAND_CONFIRM_NONE,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_CHAIN_READ, ZCL_COMMAND_TRAIT_NONE,
+    zcl_native_handle_network_peer_add)
+/* Network-omniscience operator surface over the banked census + topology
+ * stores (node_census, census_observations under <datadir>/peers_projection.db;
+ * topology_edges, topology_sweeps under <datadir>/topology.db). Read-only;
+ * degrade gracefully when the indexer lane has not populated a table yet. See
+ * tools/command/native_net_census.c. */
+ZCL_COMMAND_READY_READ(
+    "core.network.census", "core.network", "",
+    "Paginated list of every node the crawler has seen",
+    "Nodes from the banked network census (node_census) read from "
+    "<datadir>/peers_projection.db at call time, newest-last_seen first, "
+    "bounded to a hard page cap; filters --ua-contains/--min-height/"
+    "--seen-within and --page/--limit. SQL fallback: SELECT hex(ip),port,"
+    "user_agent,protocol_version,last_reported_height,last_seen FROM "
+    "node_census ORDER BY last_seen DESC. Says 'census empty: indexer not "
+    "yet populated' when the store is absent.", ZCL_COMMAND_LIST_BUDGET,
+    "network,census,nodes,useragent,version,peers,population,omniscience",
+    "zcl.network_census.input.v1", "zcl.network_census.v1",
+    "ua-contains,min-height,seen-within,page,limit", "",
+    "z23 core network census --ua-contains=MagicBean --limit=25",
+    ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_PUBLIC,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_CHAIN_READ, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_network_census)
+ZCL_COMMAND_READY_READ(
+    "core.network.node", "core.network", "",
+    "Everything known about one node (census row, history, edges)",
+    "The census row for one ip[:port] plus its bounded observation history "
+    "(census_observations in peers_projection.db) and the bounded topology "
+    "edges referencing it (topology_edges in topology.db), read at call time. "
+    "SQL fallback: SELECT * FROM node_census WHERE ip_to_str(ip)=? AND port=?. "
+    "Reports found=false when the endpoint is not in the census.", 0,
+    "network,node,peer,history,edges,observations,topology",
+    "zcl.network_node.input.v1", "zcl.network_node.v1", "target", "target",
+    "z23 core network node 1.2.3.4:8033",
+    ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_PUBLIC,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_CHAIN_READ, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_network_node)
+ZCL_COMMAND_READY_READ(
+    "core.network.versions", "core.network", "",
+    "User-agent / version distribution across the census",
+    "Distribution of user_agent strings across the census with each "
+    "bucket's node count, integer share (basis points), and max reported "
+    "height, descending by count, read at call time. SQL fallback: SELECT "
+    "user_agent, COUNT(*) FROM node_census GROUP BY user_agent ORDER BY 2 "
+    "DESC (peers_projection.db).", ZCL_COMMAND_LIST_BUDGET,
+    "network,versions,useragent,magicbean,distribution,census",
+    "zcl.command.empty_input.v1", "zcl.network_versions.v1", "", "",
+    "z23 core network versions",
+    ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_PUBLIC,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_CHAIN_READ, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_network_versions)
+ZCL_COMMAND_READY_READ(
+    "core.network.graph", "core.network", "",
+    "Topology stats: node/edge counts and top-advertised endpoints",
+    "Network graph summary from topology_edges: node/edge/observation "
+    "counts, how many advertised endpoints are themselves in the census, "
+    "the last crawler sweep's finished_unix, and the top-10 most-advertised "
+    "endpoints, read at call time. SQL fallback: SELECT advertised_ip,"
+    "advertised_port, SUM(times_seen) FROM topology_edges GROUP BY "
+    "advertised_ip, advertised_port ORDER BY 3 DESC LIMIT 10 (topology.db).",
+    ZCL_COMMAND_LIST_BUDGET,
+    "network,graph,topology,edges,advertised,connectivity,census",
+    "zcl.command.empty_input.v1", "zcl.network_graph.v1", "", "",
+    "z23 core network graph",
+    ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_PUBLIC,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_CHAIN_READ, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_network_graph)
+ZCL_COMMAND_BRANCH("core.network.onion", "core.network",
+                   "Embedded onion service", ZCL_COMMAND_LAYER_CORE)
+ZCL_COMMAND_READY_READ(
+    "core.network.onion.status", "core.network.onion", "",
+    "Onion address, port map, bootstrap, and handshake stages",
+    "Live embedded-Tor onion address, P2P publish readiness, setup state, "
+    "installed virtual-port map, monotonic stream counters, aggregate P2P "
+    "handshake stages, and a bounded newest-first per-target dial ledger read "
+    "from the running node at call time. Each dial joins Tor circuit/byte "
+    "progress to the matching P2P lifecycle and names its first incomplete "
+    "stage, so concurrent peers need no counter-delta inference. Tor state is "
+    "absent when the stub build is linked.", 0,
+    "onion,tor,status,address,port,map,p2p,setup,handshake,version,verack,dial,target",
+    "zcl.command.empty_input.v1", "zcl.onion_status.v1", "", "",
+    "z23 core network onion status",
+    ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_PUBLIC,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_CHAIN_READ, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_bridge_command)
+ZCL_COMMAND_READY_READ(
+    "core.network.onion.health", "core.network.onion", "",
+    "Onion reachability health",
+    "Live onion-service reachability check result from the running "
+    "node at call time; reflects the most recent self-probe, not a "
+    "continuous monitor.", 0,
+    "onion,tor,health,reachability",
+    "zcl.command.empty_input.v1", "zcl.onion_health.v1", "", "",
+    "z23 core network onion health",
+    ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_CHAIN_READ, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_bridge_command)
+
+/* ── wallet ────────────────────────────────────────────────────────── */
+ZCL_COMMAND_BRANCH("core.wallet", "core", "Keys, balance, and transactions",
+                   ZCL_COMMAND_LAYER_CORE)
+ZCL_COMMAND_READY_READ(
+    "core.wallet.status", "core.wallet", "", "Wallet summary and key counts",
+    "Live wallet summary (key/address counts, load state) read from "
+    "the running node's wallet subsystem at call time.", 0,
+    "wallet,status,info", "zcl.command.empty_input.v1", "zcl.wallet_status.v1",
+    "", "", "z23 core wallet status",
+    ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_WALLET_REQUEST, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_bridge_command)
+ZCL_COMMAND_READY_READ(
+    "core.wallet.balance", "core.wallet", "", "Confirmed and total balance",
+    "Spendable, encumbered, and total wallet balance in zatoshi, computed "
+    "live from wallet state; total retains inputs reserved by an "
+    "unconfirmed wallet transaction.", 0,
+    "wallet,balance", "zcl.command.empty_input.v1", "zcl.wallet_balance.v1",
+    "", "", "z23 core wallet balance",
+    ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_WALLET_REQUEST, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_bridge_command)
+ZCL_COMMAND_BRANCH("core.wallet.address", "core.wallet",
+                   "Transparent addresses", ZCL_COMMAND_LAYER_CORE)
+ZCL_COMMAND_READY_COMMAND(
+    "core.wallet.address.new", "core.wallet.address", "",
+    "Derive and persist a new transparent address",
+    "The freshly derived transparent address, persisted in the wallet "
+    "by the running node's getnewaddress at call time; created is true "
+    "when a new key was written.", 0,
+    "wallet,address,new",
+    "zcl.command.empty_input.v1", "zcl.wallet_address.v1", "", "",
+    "z23 core wallet address new",
+    ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_WALLET,
+    ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW, ZCL_COMMAND_CONFIRM_NONE,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_WALLET_REQUEST, ZCL_COMMAND_TRAIT_NONE,
+    zcl_native_handle_wallet_address_new)
+ZCL_COMMAND_READY_READ(
+    "core.wallet.address.public-key", "core.wallet.address", "",
+    "Get a wallet-owned address's public key",
+    "The canonical SEC public key for one wallet-owned transparent key "
+    "address, resolved by the running node without exporting or reading "
+    "private-key material. Invalid, watch-only, external, and script "
+    "addresses fail closed.", 0,
+    "wallet,address,pubkey,multisig",
+    "zcl.wallet_address_public_key.input.v1",
+    "zcl.wallet_public_key.v1", "address", "address",
+    "z23 core wallet address public-key --address=<addr>",
+    ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_WALLET_REQUEST, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_bridge_command)
+ZCL_COMMAND_READY_READ(
+    "core.wallet.address.list", "core.wallet.address", "",
+    "List transparent addresses",
+    "Every transparent address currently held in the wallet, read "
+    "live at call time; bounded to the list budget row cap.",
+    ZCL_COMMAND_LIST_BUDGET,
+    "wallet,address,list",
+    "zcl.command.empty_input.v1", "zcl.wallet_addresses.v1", "", "",
+    "z23 core wallet address list",
+    ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_WALLET_REQUEST, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_bridge_command)
+ZCL_COMMAND_READY_COMMAND(
+    "core.wallet.address.import", "core.wallet.address", "",
+    "Import a watch-only address",
+    "The watch-only address the running node's importaddress "
+    "registered in the wallet at call time; imported is true once the "
+    "address is being tracked.", 0,
+    "wallet,address,import",
+    "zcl.core_addr_import.input.v1", "zcl.wallet_address.v1", "address",
+    "address", "z23 core wallet address import --address=<addr>",
+    ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_WALLET,
+    ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW, ZCL_COMMAND_CONFIRM_NONE,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_WALLET_REQUEST, ZCL_COMMAND_TRAIT_NONE,
+    zcl_native_handle_wallet_address_import)
+ZCL_COMMAND_READY_COMMAND(
+    "core.wallet.address.export-key", "core.wallet.address", "",
+    "Export the private key for an address",
+    "Owner-gated plan/commit: without confirm, a non-revealing plan "
+    "naming the address; with confirm:true, the raw private key from "
+    "the node's dumpprivkey at call time (stage=committed).", 0,
+    "wallet,export,privkey",
+    "zcl.core_addr_ref.input.v1", "zcl.wallet_privkey.v1", "address,confirm",
+    "address",
+    "z23 core wallet address export-key --address=<addr>",
+    /* MUTATE/WALLET, not READ/READ. This leaf writes a raw spending key to
+     * the caller's terminal: one call and every balance cap, confirm gate
+     * and session bound below it is moot. It sat at the bottom rung —
+     * literally the same tier as `core wallet balance` — so any consumer
+     * keying on `risk` alone handed the key over; only a capability bit and
+     * the confirm gate stood in the way.
+     *
+     * The registry couples the two axes (EFFECT_READ demands RISK_READ, see
+     * zcl_command_registry_validate), so the risk cannot be raised without
+     * the effect. Calling an irreversible disclosure an "effect" is the far
+     * smaller inaccuracy of the two available ones. */
+    ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_WALLET,
+    ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_CONFIRM_PLAN_COMMIT,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_WALLET_REQUEST, ZCL_COMMAND_TRAIT_NONE,
+    zcl_native_handle_wallet_address_export_key)
+ZCL_COMMAND_READY_COMMAND(
+    "core.wallet.address.label", "core.wallet.address", "",
+    "Set or clear the label on an address",
+    "The address's label row as persisted after the upsert (address, "
+    "label, updated_at); idempotent, so re-setting the same label "
+    "returns that settled state. An empty label clears it. Carries no "
+    "key or fund risk: it writes a plain annotation row, never the "
+    "wallet keystore.", 0,
+    "wallet,address,label,rename,contact",
+    "zcl.wallet_label_input.v1", "zcl.wallet_label.v1", "address,label",
+    "address",
+    "z23 core wallet address label --input='{\"address\":\"t1...\","
+    "\"label\":\"friends\"}'",
+    ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_NODE,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW, ZCL_COMMAND_CONFIRM_NONE,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_WALLET_REQUEST, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    zcl_native_handle_wallet_address_label)
+ZCL_COMMAND_READY_READ(
+    "core.wallet.address.by-label", "core.wallet.address", "",
+    "List addresses carrying a given label",
+    "Every address currently carrying the given label, read live from "
+    "the wallet_labels table at call time; an unrecognized label "
+    "returns an empty list, not an error, and truncated is true when "
+    "the row cap bounded the answer.", ZCL_COMMAND_LIST_BUDGET,
+    "wallet,address,label,lookup",
+    "zcl.wallet_by_label_input.v1", "zcl.wallet_by_label.v1", "label",
+    "label",
+    "z23 core wallet address by-label friends",
+    ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_WALLET_REQUEST, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_wallet_address_by_label)
+ZCL_COMMAND_BRANCH("core.wallet.utxo", "core.wallet", "Spendable outputs",
+                   ZCL_COMMAND_LAYER_CORE)
+ZCL_COMMAND_READY_READ(
+    "core.wallet.utxo.list", "core.wallet.utxo", "", "List spendable UTXOs",
+    "Every currently spendable UTXO the wallet holds, read live from "
+    "the running node's UTXO set at call time; bounded to the list "
+    "budget row cap.", ZCL_COMMAND_LIST_BUDGET,
+    "wallet,utxo,unspent", "zcl.command.empty_input.v1", "zcl.wallet_utxos.v1",
+    "", "", "z23 core wallet utxo list",
+    ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_WALLET_REQUEST, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_bridge_command)
+ZCL_COMMAND_BRANCH("core.wallet.transaction", "core.wallet",
+                   "Wallet transactions", ZCL_COMMAND_LAYER_CORE)
+ZCL_COMMAND_READY_READ(
+    "core.wallet.transaction.list", "core.wallet.transaction", "",
+    "List recent wallet transactions",
+    "The wallet's most recent transactions, read live from the "
+    "running node at call time, newest first; bounded to the list "
+    "budget row cap, not full history.", ZCL_COMMAND_LIST_BUDGET,
+    "wallet,transaction,list,history",
+    "zcl.command.empty_input.v1", "zcl.wallet_tx_list.v1", "", "",
+    "z23 core wallet transaction list",
+    ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_WALLET_REQUEST, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_bridge_command)
+ZCL_COMMAND_READY_READ(
+    "core.wallet.transaction.get", "core.wallet.transaction", "",
+    "Get one wallet transaction by id",
+    "One wallet transaction's full decoded fields looked up live by "
+    "txid at call time; absent if the txid does not belong to this "
+    "wallet.", 0,
+    "wallet,transaction,get,txid",
+    "zcl.core_tx_get.input.v1", "zcl.wallet_tx.v1", "txid", "txid",
+    "z23 core wallet transaction get --txid=<hex>",
+    ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_WALLET_REQUEST, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_bridge_command)
+ZCL_COMMAND_READY_COMMAND(
+    "core.wallet.transaction.send", "core.wallet.transaction", "",
+    "Build, sign, and broadcast a payment",
+    "Plan/commit spend: without confirm, a non-mutating plan "
+    "(recipient, amount) plus the commit next-action; with "
+    "confirm:true, the broadcast txid from sendtoaddress "
+    "(stage=committed). idempotency_key correlates plan to commit; it "
+    "is not node-side deduplication.", 0,
+    "wallet,send,pay,broadcast",
+    "zcl.core_wallet_send.input.v1", "zcl.wallet_send.v1",
+    "wallet_scope,address,amount,idempotency_key,confirm", "",
+    "z23 core wallet transaction send --input='<obj>'",
+    ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_WALLET, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OWNER,
+    ZCL_COMMAND_MODE_SYNC, ZCL_COMMAND_LATENCY_FOREGROUND,
+    ZCL_COMMAND_COST_MODERATE, ZCL_COMMAND_CONFIRM_PLAN_COMMIT,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_WALLET_REQUEST, ZCL_COMMAND_TRAIT_NONE,
+    zcl_native_handle_wallet_transaction_send)
+ZCL_COMMAND_BRANCH("core.wallet.transaction.multisig", "core.wallet.transaction",
+                   "Transparent P2SH multisig composition",
+                   ZCL_COMMAND_LAYER_CORE)
+ZCL_COMMAND_READY_READ(
+    "core.wallet.transaction.multisig.compose",
+    "core.wallet.transaction.multisig", "",
+    "Compose a P2SH multisig address and redeem script",
+    "Deterministically derives one standard P2SH address and its exact "
+    "CHECKMULTISIG redeem script from 1..16 public keys and an explicit "
+    "signature threshold. It accepts no private keys, stores nothing, moves "
+    "no funds, and returns the typed fund/create/sign/broadcast command path "
+    "for the two-transaction workflow.", 0,
+    "wallet,transaction,multisig,p2sh,compose,public-key",
+    "zcl.core_wallet_multisig_compose.input.v1",
+    "zcl.wallet_multisig_composition.v1",
+    "required_signatures,public_keys", "",
+    "z23 core wallet transaction multisig compose "
+    "--input='<obj>'",
+    ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_SCOPE_NODE,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_LATENCY_FAST,
+    ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_WALLET_REQUEST,
+    ZCL_COMMAND_TRAIT_DETERMINISTIC | ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE,
+    zcl_native_handle_wallet_multisig_compose)
+ZCL_COMMAND_BRANCH("core.wallet.transaction.raw", "core.wallet.transaction",
+                   "Raw transparent transaction composition",
+                   ZCL_COMMAND_LAYER_CORE)
+ZCL_COMMAND_READY_COMMAND(
+    "core.wallet.transaction.raw.create", "core.wallet.transaction.raw", "",
+    "Create an unsigned raw transaction",
+    "Builds canonical unsigned transaction hex from explicit outpoints and "
+    "address-to-amount outputs through createrawtransaction. An optional exact "
+    "op_return_hex appends one zero-value standard-relay OP_RETURN output, so "
+    "typed overlay composers can feed the raw owner workflow without string "
+    "surgery. It never selects coins, signs, broadcasts, or mutates wallet "
+    "state.", 0,
+    "wallet,transaction,raw,create,compose",
+    "zcl.core_wallet_raw_create.input.v1", "zcl.wallet_raw_create.v1",
+    "inputs,outputs,op_return_hex", "inputs,outputs",
+    "z23 core wallet transaction raw create --input='<obj>'",
+    ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_WALLET,
+    ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW, ZCL_COMMAND_CONFIRM_NONE,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_WALLET_REQUEST, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    zcl_native_handle_wallet_raw_create)
+ZCL_COMMAND_READY_COMMAND(
+    "core.wallet.transaction.raw.sign", "core.wallet.transaction.raw", "",
+    "Sign a raw transaction with wallet keys",
+    "Signs every input the running wallet can satisfy, using optional explicit "
+    "previous-output metadata for offline or multisig composition. Returns "
+    "signed hex plus complete=false and per-input errors when signatures are "
+    "still missing; it neither imports keys nor broadcasts.", 0,
+    "wallet,transaction,raw,sign,multisig",
+    "zcl.core_wallet_raw_sign.input.v1", "zcl.wallet_raw_sign.v1",
+    "raw_hex,prevtxs", "raw_hex",
+    "z23 core wallet transaction raw sign --input='<obj>'",
+    ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_WALLET,
+    ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_CONFIRM_NONE,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_WALLET_REQUEST, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    zcl_native_handle_wallet_raw_sign)
+ZCL_COMMAND_READY_COMMAND(
+    "core.wallet.transaction.raw.broadcast", "core.wallet.transaction.raw", "",
+    "Validate and broadcast a signed raw transaction",
+    "Plan/commit relay: without confirm, returns a non-mutating plan binding "
+    "the exact transaction bytes; with confirm:true, admits the transaction "
+    "through the shared full mempool gate and relays it only after acceptance.",
+    0, "wallet,transaction,raw,broadcast,relay",
+    "zcl.core_wallet_raw_broadcast.input.v1", "zcl.wallet_raw_broadcast.v1",
+    "raw_hex,allow_high_fees,confirm", "raw_hex",
+    "z23 core wallet transaction raw broadcast --input='<obj>'",
+    ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_WALLET,
+    ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_CONFIRM_PLAN_COMMIT,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_WALLET_REQUEST, ZCL_COMMAND_TRAIT_NONE,
+    zcl_native_handle_wallet_raw_broadcast)
+ZCL_COMMAND_BRANCH("core.wallet.shielded", "core.wallet",
+                   "Sapling shielded addresses and notes",
+                   ZCL_COMMAND_LAYER_CORE)
+ZCL_COMMAND_READY_COMMAND(
+    "core.wallet.shielded.address", "core.wallet.shielded", "",
+    "Derive a new shielded address",
+    "The freshly derived Sapling shielded address, persisted in the "
+    "wallet by the running node's z_getnewaddress at call time; created "
+    "is true when a new spending key was written.", 0,
+    "shielded,sapling,address,new",
+    "zcl.command.empty_input.v1", "zcl.shielded_address.v1", "", "",
+    "z23 core wallet shielded address",
+    ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_WALLET,
+    ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW, ZCL_COMMAND_CONFIRM_NONE,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_WALLET_REQUEST, ZCL_COMMAND_TRAIT_NONE,
+    zcl_native_handle_wallet_shielded_address)
+ZCL_COMMAND_READY_READ(
+    "core.wallet.shielded.balance", "core.wallet.shielded", "",
+    "Shielded balance for one address",
+    "The balance held at one address in ZCL (8-decimal string), read "
+    "live from the running node's z_getbalance at call time with a "
+    "1-confirmation floor; a shielded address sums its unspent Sapling "
+    "notes, a transparent one its UTXOs. address and minconf echo the "
+    "question the number answers. Absent notes read 0.00000000, not an "
+    "error; balance always parses as a number, and an address the node "
+    "rejects fails instead of reporting prose.", 0,
+    "shielded,balance,sapling",
+    "zcl.core_shielded_ref.input.v1", "zcl.shielded_balance.v1", "address",
+    "address", "z23 core wallet shielded balance --address=<zaddr>",
+    ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_WALLET_REQUEST, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_bridge_command)
+ZCL_COMMAND_READY_READ(
+    "core.wallet.shielded.notes", "core.wallet.shielded", "",
+    "List spendable shielded notes",
+    "Every unspent Sapling note the wallet holds, read live from the "
+    "running node's z_listunspent at call time with no confirmation "
+    "floor — each note carries its own confirmations, amount in ZCL, "
+    "and block_height, so the caller filters rather than the node. "
+    "count is the full note count; the list itself is bounded to the "
+    "list budget row cap and pages beyond it. An empty wallet answers "
+    "count 0 with an empty list.", ZCL_COMMAND_LIST_BUDGET,
+    "shielded,notes,unspent",
+    "zcl.command.empty_input.v1", "zcl.shielded_notes.v1", "", "",
+    "z23 core wallet shielded notes",
+    ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_WALLET_REQUEST, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_bridge_command)
+ZCL_COMMAND_READY_COMMAND(
+    "core.wallet.shielded.send", "core.wallet.shielded", "",
+    "Send a shielded payment",
+    "Plan/commit shielded spend: without confirm, a non-mutating plan "
+    "bound to wallet_scope, from, to, exact amount, memo, and idempotency "
+    "key; with confirm:true, the synchronous z_sendmany transaction id "
+    "(stage=committed). memo attaches a UTF-8 Sapling memo to a "
+    "shielded recipient (memo_hex for raw bytes; memo_hex wins if both "
+    "are given) and is echoed back as memo_attached — this is how a "
+    "payment carries an application binding such as a store order id. "
+    "idempotency_key correlates plan to commit; it "
+    "is not node-side deduplication.", 0,
+    "shielded,send,z_sendmany,memo",
+    "zcl.core_shielded_send.input.v1", "zcl.shielded_send.v1",
+    "wallet_scope,from,to,amount,memo,memo_hex,idempotency_key,confirm", "",
+    "z23 core wallet shielded send --input='{\"wallet_scope\":\"dev\",\"from\":\"zs1..\",\"to\":\"zs1..\",\"amount\":\"0.01000000\"}'",
+    ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_WALLET,
+    ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_HIGH,
+    ZCL_COMMAND_CONFIRM_PLAN_COMMIT,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_WALLET_REQUEST, ZCL_COMMAND_TRAIT_NONE,
+    zcl_native_handle_wallet_shielded_send)
+ZCL_COMMAND_BRANCH("core.wallet.backup", "core.wallet", "Wallet backup",
+                   ZCL_COMMAND_LAYER_CORE)
+ZCL_COMMAND_READY_READ(
+    "core.wallet.backup.status", "core.wallet.backup", "",
+    "Wallet backup freshness",
+    "Live wallet backup age and last-backup timestamp, read from the "
+    "running node at call time; freshness is measured in seconds "
+    "since the last successful backup.", 0,
+    "wallet,backup,status",
+    "zcl.command.empty_input.v1", "zcl.wallet_backup_status.v1", "", "",
+    "z23 core wallet backup status",
+    ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_WALLET_REQUEST, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_bridge_command)
+ZCL_COMMAND_READY_COMMAND(
+    "core.wallet.backup.now", "core.wallet.backup", "",
+    "Take a wallet backup now",
+    "Plan/commit: without confirm, a plan naming the exposure and "
+    "whether WALLET_BACKUP_PASSWORD is set, writing nothing; with "
+    "confirm:true, the outcome and path of an on-demand wallet backup "
+    "written by the running node's walletbackupnow at call time "
+    "(stage=committed, created true once the file is on disk).", 0,
+    "wallet,backup,now",
+    "zcl.wallet_backup_now.input.v2", "zcl.wallet_backup.v1",
+    "confirm,password", "",
+    "z23 core wallet backup now",
+    /* CONFIRM_PLAN_COMMIT, not CONFIRM_NONE. This exports EVERY key at once
+     * into a file that is plaintext unless WALLET_BACKUP_PASSWORD happens to
+     * be set — a strictly larger disclosure than export-key, which has
+     * always demanded confirmation for one key. The periodic background
+     * service is unaffected: it calls wallet_backup_now() directly. */
+    ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_WALLET,
+    ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_CONFIRM_PLAN_COMMIT,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_WALLET_REQUEST, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    zcl_native_handle_wallet_backup_now)
+ZCL_COMMAND_READY_COMMAND(
+    "core.wallet.backup.decrypt", "core.wallet.backup", "",
+    "Decrypt an encrypted wallet backup file",
+    "Plan/commit over the WBE1 decrypt that used to be reachable only "
+    "through the undocumented --decrypt-wallet-backup argv mode: "
+    "without confirm, the source and destination paths and whether a "
+    "password is available, writing nothing; with confirm:true, "
+    "decrypted is true once the plaintext SQLite file is on disk. Runs "
+    "in-process and needs no running node. The password comes from "
+    "the password input or WALLET_BACKUP_PASSWORD.", 0,
+    "wallet,backup,decrypt,restore,recovery",
+    "zcl.wallet_backup_decrypt.input.v1", "zcl.wallet_backup_decrypt.v1",
+    "from,to,password,confirm", "from",
+    "z23 core wallet backup decrypt --input='{\"from\":"
+    "\"~/wallet_backups/wallet_backup_1.sqlite.enc\",\"to\":\"/tmp/wb.sqlite\"}'",
+    ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_WALLET,
+    ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_CONFIRM_PLAN_COMMIT,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_WALLET_REQUEST, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    zcl_native_handle_wallet_backup_decrypt)
+ZCL_COMMAND_READY_COMMAND(
+    "core.wallet.restore", "core.wallet", "",
+    "Restore a wallet backup into a datadir",
+    "Plan/commit merge of a backup file's wallet tables into "
+    "<datadir>/node.db. The plan half runs the whole merge in a "
+    "transaction and rolls it back, so its per-table counts (rows in "
+    "the backup, rows that would land, rows that would collide with an "
+    "existing row, rows the schema would reject) are exactly what the "
+    "commit does. Collision policy is keep-existing: a row whose "
+    "primary key is already in the target is never overwritten. "
+    "Refuses with DATADIR_LOCKED while a node holds the datadir. "
+    "Needs no running node; merging rows rebuilds no derived state, so "
+    "next_steps names the rescans that do.", ZCL_COMMAND_LIST_BUDGET,
+    "wallet,restore,recovery,backup,merge",
+    "zcl.wallet_restore.input.v1", "zcl.wallet_restore.v1",
+    "from,datadir,password,confirm", "from",
+    "z23 core wallet restore --from=<backup.sqlite>",
+    ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_WALLET,
+    ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_CONFIRM_PLAN_COMMIT,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_WALLET_REQUEST, ZCL_COMMAND_TRAIT_NONE,
+    zcl_native_handle_wallet_restore)
+/* ── recovery phrase ───────────────────────────────────────────────
+ * The twelve words a wallet is born with. There is deliberately no leaf
+ * that prints an existing wallet's phrase — the node stores only the seed
+ * the words derive, the words cannot be worked back out of it, and a
+ * command that could reprint them would turn one read of node.db into the
+ * loss of every coin in it. Both leaves run offline against a datadir. */
+ZCL_COMMAND_BRANCH("core.wallet.recovery", "core.wallet",
+                   "Recovery phrase (the twelve words)",
+                   ZCL_COMMAND_LAYER_CORE)
+ZCL_COMMAND_READY_READ(
+    "core.wallet.recovery.status", "core.wallet.recovery", "",
+    "Can this wallet be rebuilt from its words",
+    "Whether a datadir's wallet descends from a recovery phrase, read "
+    "offline from <datadir>/node.db at call time and answered by "
+    "derivation, not by a stored flag. recoverable_from_phrase true means "
+    "the twelve words written down when the wallet was created bring every "
+    "one of its keys back; the phrase itself is NEVER shown, here or "
+    "anywhere, because only the key material it derives is stored and the "
+    "words cannot be worked back out of it. A wallet created before "
+    "recovery phrases answers false and is sent to file backup instead. "
+    "seed_state names WHICH kind of seed the wallet holds, because 'there "
+    "is no seed' and 'there is a seed I could not decrypt' are opposite "
+    "answers: an encrypted wallet that cannot be opened here is refused "
+    "with WALLET_LOCKED and told to unlock and retry, never told it "
+    "predates recovery phrases. "
+    "Answering it reads and decrypts the wallet's keys, so on an "
+    "encrypted-at-rest wallet this takes seconds, not milliseconds, and "
+    "reports budget_exceeded. node.db is opened strictly read-only, so this "
+    "cannot create, migrate or quarantine the datadir it is aimed at — and "
+    "it aims at the running node's datadir when the caller names none, so "
+    "name one. NO_NODE_DB (no wallet made here yet) and NODE_DB_UNREADABLE "
+    "are separate answers; neither is ever reported as ok. Still refuses "
+    "with DATADIR_LOCKED while a node holds the datadir, because a wallet "
+    "being migrated underneath is not a wallet to answer about.", 0,
+    "wallet,recovery,phrase,seed,mnemonic,backup",
+    "zcl.wallet_recovery_status.input.v1", "zcl.wallet_recovery_status.v1",
+    "datadir", "",
+    "z23 core wallet recovery status",
+    ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OWNER,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_WALLET_REQUEST, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_wallet_recovery_status)
+ZCL_COMMAND_READY_COMMAND(
+    "core.wallet.recovery.restore", "core.wallet.recovery", "",
+    "Rebuild a wallet from its recovery phrase",
+    /* KEEP THIS UNDER BUDGET. This text is only readable through
+     * `discover describe`, and that renderer caps a leaf's whole document at
+     * ZCL_COMMAND_SPEC_BUDGET; over it, the document does not render at all
+     * and this warning becomes invisible. check-describe-budget holds the
+     * line. Trim here — never raise the budget. */
+    "Plan/commit rebuild of a whole wallet from the recovery phrase alone "
+    "into an EMPTY datadir — the disaster case where the machine and the "
+    "backup file are both gone. These words restore your money in "
+    "Z23 only. They will not work in Electrum, on a hardware wallet, "
+    "or in any other wallet software; a phrase from elsewhere opens a "
+    "different EMPTY wallet here with no error at all. datadir is REQUIRED "
+    "and has NO default: this installs spending keys and the master seed, "
+    "and a default would have aimed that at the running node's own datadir. "
+    "The plan half shows the first transparent and shielded addresses the "
+    "words open, so you can check one against memory before committing; it "
+    "creates nothing and reads an existing target read-only. The commit "
+    "rebuilds the keys by the BIP44 gap-limit convention — derive until 20 "
+    "consecutive unused addresses, asking this datadir's own chain what was "
+    "used, never a fixed count, because the first address a wallet hands "
+    "out is index 100. With no chain to consult it derives the standard "
+    "lookahead and says so, as does a scan that hits its 1000-per-chain "
+    "ceiling. Needs no running node. Same at-rest rule as node wallet "
+    "creation: set ZCL_WALLET_PASSPHRASE to encrypt the keys, or "
+    "ZCL_ALLOW_PLAINTEXT_WALLET=1 to accept plaintext, else "
+    "WALLET_AT_REST_UNDECIDED; node.db is left mode 0600. An existing "
+    "node.db is read strictly READ-ONLY: a damaged one is refused with "
+    "NODE_DB_UNREADABLE, never renamed aside or replaced. REFUSES with "
+    "DATADIR_LOCKED while a node holds the datadir or another recovery is "
+    "writing it, and WALLET_ALREADY_PRESENT if a wallet is already there. "
+    "Pass the words as phrase, or set ZCL_RECOVERY_PHRASE to keep them out "
+    "of shell history; they are never logged or echoed back. Keys come "
+    "back, history does not — next_steps names the rescans that rebuild "
+    "it.", ZCL_COMMAND_LIST_BUDGET,
+    "wallet,recovery,phrase,seed,mnemonic,restore",
+    "zcl.wallet_recovery_restore.input.v1", "zcl.wallet_recovery_restore.v1",
+    "phrase,datadir,confirm", "",
+    "z23 core wallet recovery restore "
+    "--input='{\"datadir\":\"/tmp/recovered\"}'",
+    ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_WALLET,
+    ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_CONFIRM_PLAN_COMMIT,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_WALLET_REQUEST, ZCL_COMMAND_TRAIT_NONE,
+    zcl_native_handle_wallet_recovery_restore)
+ZCL_COMMAND_READY_COMMAND(
+    "core.wallet.rescan-witnesses", "core.wallet", "",
+    "Rebuild Sapling witnesses for unspent notes",
+    "The rescanwitnesses result from the running node at call time "
+    "under result: it walks the chain rebuilding the Sapling "
+    "commitment tree, checks its final root against the block header, "
+    "and refuses to save a diverged tree. A restored shielded note has "
+    "rows but no witness and cannot be spent until this has run.", 0,
+    "wallet,rescan,witness,sapling,shielded,restore",
+    "zcl.command.empty_input.v1", "zcl.wallet_rescan_witnesses.v1", "", "",
+    "z23 core wallet rescan-witnesses",
+    ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_WALLET,
+    ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_JOB,
+    ZCL_COMMAND_LATENCY_BACKGROUND, ZCL_COMMAND_COST_HIGH,
+    ZCL_COMMAND_CONFIRM_NONE,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_WALLET_REQUEST, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    zcl_native_handle_wallet_rescan_witnesses)
+ZCL_COMMAND_READY_READ(
+    "core.wallet.audit", "core.wallet", "", "Audit wallet key/UTXO consistency",
+    "Live consistency check between the wallet's key set and its "
+    "UTXO/address records, computed from the running node's state at "
+    "call time; a foreground scan, not cached.", 0,
+    "wallet,audit,consistency", "zcl.command.empty_input.v1",
+    "zcl.wallet_audit.v1", "", "", "z23 core wallet audit",
+    ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_WALLET_REQUEST, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_bridge_command)
+ZCL_COMMAND_READY_COMMAND(
+    "core.wallet.rescan", "core.wallet", "",
+    "Rescan the chain for wallet transactions",
+    "The rescanblockchain result from the running node under result, "
+    "rescanning from the given start_height (or genesis when omitted). "
+    "The scan runs to completion before this returns: completed is true "
+    "and result carries blocks_scanned, blocks_missing_data, "
+    "outputs_found and shielded_notes_found. A rescan that could not "
+    "read the block bodies it was asked to scan FAILS with a typed "
+    "blocker (RESCAN_NO_BLOCK_DATA, RESCAN_INCOMPLETE_COVERAGE or "
+    "RESCAN_INCONCLUSIVE_ZERO) rather than reporting zero found.", 0,
+    "wallet,rescan",
+    "zcl.core_wallet_rescan.input.v1", "zcl.wallet_rescan.v2", "start_height",
+    "", "z23 core wallet rescan",
+    ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_WALLET,
+    ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_BACKGROUND, ZCL_COMMAND_COST_HIGH,
+    ZCL_COMMAND_CONFIRM_NONE,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_WALLET_REQUEST, ZCL_COMMAND_TRAIT_NONE,
+    zcl_native_handle_wallet_rescan)
+ZCL_COMMAND_PLANNED_COMMAND(
+    "core.wallet.replay", "core.wallet", "",
+    "Replay wallet state from chain",
+    "Will report replay job progress rebuilding wallet state from "
+    "chain history once wired; today the handler is unbound and fails "
+    "closed with exit 3, so no replay runs.", 0,
+    "wallet,replay,rebuild",
+    "zcl.command.empty_input.v1", "zcl.wallet_replay.v1", "", "",
+    "z23 core wallet replay",
+    ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_WALLET,
+    ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_JOB,
+    ZCL_COMMAND_LATENCY_BACKGROUND, ZCL_COMMAND_COST_HIGH,
+    ZCL_COMMAND_CONFIRM_NONE,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_WALLET_REQUEST, ZCL_COMMAND_TRAIT_NONE,
+    "wallet replay job binding is a Wave 2.2 deliverable")
+
+/* ── storage ───────────────────────────────────────────────────────── */
+ZCL_COMMAND_BRANCH("core.storage", "core", "Raw node storage",
+                   ZCL_COMMAND_LAYER_CORE)
+ZCL_COMMAND_READY_READ(
+    "core.storage.stats", "core.storage", "", "Database size and table stats",
+    "Live on-disk database size and per-table row/byte stats, read "
+    "from the running node's storage layer at call time; sizes are "
+    "in bytes.", 0,
+    "storage,stats,db,size", "zcl.command.empty_input.v1", "zcl.db_stats.v1",
+    "", "", "z23 core storage stats",
+    ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_CHAIN_READ, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_bridge_command)
+ZCL_COMMAND_PLANNED_READ(
+    "core.storage.integrity", "core.storage", "",
+    "Verify raw storage integrity",
+    "Will report raw SQLite/storage integrity check results once a "
+    "distinct handler is wired; today the handler is unbound and "
+    "fails closed with exit 3.", 0,
+    "storage,integrity,check",
+    "zcl.command.empty_input.v1", "zcl.storage_integrity.v1", "", "",
+    "z23 core storage integrity",
+    ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_CHAIN_READ,
+    "a distinct storage-integrity handler is a Wave 2.2 deliverable")
+ZCL_COMMAND_READY_READ(
+    "core.storage.query", "core.storage", "",
+    "Run one SELECT-only query over node.db",
+    "Raw SELECT-only query results read live from node.db at call "
+    "time; rows are auto-LIMITed and capped by the list budget, "
+    "non-SELECT statements are rejected.", ZCL_COMMAND_LIST_BUDGET,
+    "storage,query,sql,select",
+    "zcl.core_storage_query.input.v1", "zcl.storage_query.v1", "sql,limit",
+    "sql", "z23 core storage query --sql='SELECT ...'",
+    ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_CHAIN_READ, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_bridge_command)
+ZCL_COMMAND_READY_READ(
+    "core.storage.query.offline", "core.storage", "",
+    "Run one SELECT-only query over a STOPPED/COPIED datadir's node.db",
+    "Raw SELECT-only query results read directly from --datadir=<path>'s "
+    "own node.db at call time via an ad hoc SQLITE_OPEN_READONLY handle — "
+    "no node contact, no RPC; rows are auto-LIMITed and capped by the "
+    "list budget, non-SELECT statements are rejected.",
+    ZCL_COMMAND_LIST_BUDGET,
+    "storage,query,sql,select,offline,datadir,copy",
+    "zcl.core_storage_query_offline.input.v1", "zcl.storage_query.v1",
+    "datadir,sql,limit", "",
+    "z23 core storage query offline "
+    "--input='{\"datadir\":\"/home/you/.zclassic-c23\",\"sql\":\"SELECT ...\"}'",
+    ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_SCOPE_OFFLINE_COPY,
+    ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_CHAIN_READ, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_core_storage_query_offline)
+
+/* ── mining ────────────────────────────────────────────────────────── */
+ZCL_COMMAND_BRANCH("core.mining", "core", "Mining info and benchmarks",
+                   ZCL_COMMAND_LAYER_CORE)
+ZCL_COMMAND_READY_READ(
+    "core.mining.status", "core.mining", "", "Mining info and difficulty",
+    "Live mining info (difficulty, network hashrate estimate) read "
+    "from the running node's chain state at call time.", 0,
+    "mining,status,difficulty,hashrate", "zcl.command.empty_input.v1",
+    "zcl.mining_status.v1", "", "", "z23 core mining status",
+    ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_PUBLIC,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_CHAIN_READ, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_bridge_command)
+ZCL_COMMAND_READY_READ(
+    "core.mining.benchmark", "core.mining", "", "Run an Equihash solver benchmark",
+    "A freshly measured Equihash solver benchmark (solutions/sec) run "
+    "live on this call on the node's hardware, not a cached or "
+    "historical figure.", 0,
+    "mining,benchmark,equihash,solver", "zcl.command.empty_input.v1",
+    "zcl.mining_benchmark.v1", "", "", "z23 core mining benchmark",
+    ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_CHAIN_READ, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_bridge_command)
+
+/* core.node — local node lifecycle. Pre-RPC boot observability: unlike every
+ * other core leaf these do NOT contact a running node. They read
+ * <datadir>/boot_status.json straight off disk (tools/command/native_command.c),
+ * so they answer "what boot stage / is it serving?" during the window before
+ * RPC binds — the typed replacement for ss/ps/tail node.log boot watching.
+ * Core owns boot + process ownership (NATIVE_COMMAND_INTERFACE §2). */
+ZCL_COMMAND_BRANCH("core.node", "core", "Local node lifecycle",
+                   ZCL_COMMAND_LAYER_CORE)
+ZCL_COMMAND_READY_READ(
+    "core.node.bootstatus", "core.node", "", "Pre-RPC boot status",
+    "Boot stage, progress, and serving state read directly from "
+    "<datadir>/boot_status.json on disk at call time, not via RPC; "
+    "valid even before the node's RPC port binds.", 0,
+    "boot,bootstatus,startup,progress,phase,stage,serving",
+    "zcl.core_bootstatus.input.v1", "zcl.core_bootstatus.v1", "datadir", "",
+    "z23 core node bootstatus -datadir=/home/you/.zclassic-c23",
+    ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_CHAIN_READ, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_core_node_bootstatus)
+ZCL_COMMAND_READY_READ(
+    "core.node.bootwait", "core.node", "", "Wait for boot to serve",
+    "Polls <datadir>/boot_status.json on disk at the given heartbeat "
+    "interval and reports once the node starts serving or the timeout "
+    "elapses; valid even before RPC binds.", 0,
+    "boot,bootwait,wait,startup,serving,ready",
+    "zcl.core_bootwait.input.v1", "zcl.core_bootstatus.v1",
+    "datadir,timeout_ms,heartbeat_ms", "",
+    "z23 core node bootwait -datadir=/home/you/.zclassic-c23 --timeout_ms=120000",
+    ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_CHAIN_READ, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_core_node_bootwait)
+
+/* ── identity (sovereign master keys) ──────────────────────────────
+ * The chain-rooted answer to "whose key is this, and is it still live?".
+ * Reads resolve the zid_identities projection (engine/models/src/
+ * zid_identity.c), fed from confirmed chain data by both identity feeds
+ * (contexts/explorer/models/src/explorer_index_zid.c): the dedicated ZID\0 OP_RETURN
+ * overlay and the ZNAM "zid" text-record convention. Writes build that
+ * same overlay: with a live node they dispatch the wallet compose +
+ * broadcast through the identity_* RPCs; with no live node (or no wallet)
+ * they return op_return_hex for the operator to include. Never on a
+ * timer — anchoring spends a fee and stays an operator decision. */
+ZCL_COMMAND_BRANCH("core.identity", "core",
+                   "Sovereign identities: resolve and anchor master keys",
+                   ZCL_COMMAND_LAYER_CORE)
+ZCL_COMMAND_READY_READ(
+    "core.identity.resolve", "core.identity", "",
+    "Resolve one master key by pubkey or ZNAM name",
+    "The identity row the chain says exists for a 32-byte ed25519 master "
+    "key, read from the datadir's node.db at call time (works on a "
+    "stopped or copied datadir): pubkey, name, anchor_txid, "
+    "anchor_height, updated_height, status (active/rotated/revoked), "
+    "successor (set exactly when rotated), owner_address, and source "
+    "(zid_overlay or znam_text). Select with --pubkey=<64hex> or "
+    "--name=<znam name>, never both. A key with no anchor row is a hard "
+    "KEY_NOT_ANCHORED and an unknown name a hard NAME_NOT_FOUND — an "
+    "unanchored key is a real answer, not an empty one.", 0,
+    "identity,zid,resolve,pubkey,anchor,master,key,name",
+    "zcl.core_identity_resolve.input.v1", "zcl.core_identity_resolve.v1",
+    "pubkey,name,datadir", "pubkey",
+    "z23 core identity resolve --pubkey=<64hex>",
+    ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_SCOPE_OFFLINE_COPY,
+    ZCL_COMMAND_AUTH_PUBLIC,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_CHAIN_READ, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_core_identity_resolve)
+ZCL_COMMAND_READY_COMMAND(
+    "core.identity.anchor", "core.identity", "",
+    "Anchor a master key on-chain (spends a fee)",
+    "Prepares the exact signed ZID\\0 ANCHOR transaction under explicit "
+    "identity-bound custody, atomically reserving every input plus maximum "
+    "fee. Commit accepts only the returned scope/plan_id and publishes the "
+    "same bytes once; stale wallet, tip, or snapshot state fails closed.", 0,
+    "identity,zid,anchor,publish,master,key,broadcast,fee",
+    "zcl.core_identity_anchor.input.v2", "zcl.core_identity_anchor.v2",
+    "wallet_scope,pubkey,idempotency_key,plan_id,confirm,datadir", "wallet_scope",
+    "z23 core identity anchor --input='{\"wallet_scope\":\"dev\",\"pubkey\":\"<64hex>\",\"idempotency_key\":\"zid-anchor-1\"}'",
+    ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_WALLET, ZCL_COMMAND_SCOPE_NODE,
+    ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_CONFIRM_PLAN_COMMIT,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    zcl_native_handle_core_identity_anchor)
+ZCL_COMMAND_READY_COMMAND(
+    "core.identity.rotate", "core.identity", "",
+    "Rotate an anchored master key to a successor (spends a fee)",
+    "Prepares an exact owner-funded ZID\\0 ROTATE transaction, preserving "
+    "the existing projection preflight while atomically reserving its input "
+    "and maximum fee. Commit publishes the durable plan exactly once.", 0,
+    "identity,zid,rotate,successor,master,key,broadcast,fee",
+    "zcl.core_identity_rotate.input.v2", "zcl.core_identity_anchor.v2",
+    "wallet_scope,pubkey,new_pubkey,idempotency_key,plan_id,confirm,datadir", "wallet_scope",
+    "z23 core identity rotate --input='{\"wallet_scope\":\"dev\",\"pubkey\":\"<64hex>\",\"new_pubkey\":\"<64hex>\",\"idempotency_key\":\"zid-rotate-1\"}'",
+    ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_WALLET, ZCL_COMMAND_SCOPE_NODE,
+    ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_CONFIRM_PLAN_COMMIT,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    zcl_native_handle_core_identity_rotate)
+ZCL_COMMAND_READY_COMMAND(
+    "core.identity.revoke", "core.identity", "",
+    "Retire an anchored master key with no successor (spends a fee)",
+    "Prepares an exact owner-funded ZID\\0 REVOKE transaction, preserving "
+    "the one-way projection preflight while atomically reserving its input "
+    "and maximum fee. Commit publishes the durable plan exactly once.", 0,
+    "identity,zid,revoke,retire,master,key,broadcast,fee",
+    "zcl.core_identity_revoke.input.v2", "zcl.core_identity_anchor.v2",
+    "wallet_scope,pubkey,idempotency_key,plan_id,confirm,datadir", "wallet_scope",
+    "z23 core identity revoke --input='{\"wallet_scope\":\"dev\",\"pubkey\":\"<64hex>\",\"idempotency_key\":\"zid-revoke-1\"}'",
+    ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_WALLET, ZCL_COMMAND_SCOPE_NODE,
+    ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_CONFIRM_PLAN_COMMIT,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    zcl_native_handle_core_identity_revoke)
+ZCL_COMMAND_READY_READ(
+    "core.identity.list", "core.identity", "",
+    "Page the anchored identities, newest anchor first",
+    "One page of the zid_identities projection read from the datadir's "
+    "node.db, newest anchor height first: --limit (default 25, capped at "
+    "100) and --offset walk it. Each row carries the same fields as "
+    "resolve. The page header reports the total row count and the "
+    "active/rotated/revoked split, so a caller can see the whole "
+    "population without walking every page.", ZCL_COMMAND_LIST_BUDGET,
+    "identity,zid,list,index,page,anchors",
+    "zcl.core_identity_list.input.v1", "zcl.core_identity_index.v1",
+    "limit,offset,datadir", "",
+    "z23 core identity list --limit=25",
+    ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_SCOPE_OFFLINE_COPY,
+    ZCL_COMMAND_AUTH_PUBLIC,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_CHAIN_READ, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_core_identity_list)
+
+/* ── core.zdir.* — the on-chain node directory, WRITE side ──────────
+ * A ZDIR record says one thing: "this v3 onion hostname is a node, and
+ * this t-address paid for saying so." Every node folds confirmed records
+ * out of block history into its onion_directory projection and may dial
+ * them, so this is how a node stops being invisible to strangers without
+ * asking any seed operator for permission. A row is a HINT ABOUT WHERE TO
+ * LOOK, never proof of who is there: the directory only ever ADDS dial
+ * candidates alongside DNS seeds, fixed seeds and addrman, and has no path
+ * to exclude a peer. With a live node these dispatch the wallet
+ * compose+broadcast through the zdir_* RPCs; with no live node (or no
+ * wallet) they return op_return_hex for the operator to include. There is
+ * no transfer leaf on purpose — ZDIR command byte 3 is reserved and
+ * zdir_parse rejects it, so handing a hostname to another operator is
+ * deregister by the current owner then register by the new one. Never on a
+ * timer — publishing spends a fee and stays an operator decision. */
+ZCL_COMMAND_BRANCH("core.zdir", "core",
+                   "On-chain node directory: announce and retire onion hostnames",
+                   ZCL_COMMAND_LAYER_CORE)
+ZCL_COMMAND_READY_READ(
+    "core.zdir.guide", "core.zdir", "",
+    "How to find Z23 nodes from the chain, without seed IPs",
+    "The on-chain onion directory is the stranger's front door: list "
+    "hostnames the chain has already paid to announce, then dial them. "
+    "It is a hint about where to look, never proof of who is there, and "
+    "never a host allowlist. Extra input is refused.",
+    ZCL_COMMAND_LIST_BUDGET,
+    "zdir,directory,onion,guide,discover,peer,decentralized",
+    "zcl.core_zdir_guide.input.v1", "zcl.core_zdir_guide.v1", "", "",
+    "z23 core zdir guide",
+    ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_PUBLIC, ZCL_COMMAND_LATENCY_INSTANT,
+    ZCL_COMMAND_COST_TINY,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE,
+    ZCL_COMMAND_TRAIT_DETERMINISTIC | ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_core_zdir_guide)
+ZCL_COMMAND_READY_READ(
+    "core.zdir.list", "core.zdir", "",
+    "Active onion hostnames folded from confirmed ZDIR records",
+    "One page of active onion_directory rows, senior registration first. "
+    "Each row is a hostname and height — a dial hint from the chain, not "
+    "an IP and not an owner address. An absent node.db is an empty "
+    "directory, not a seed list.", ZCL_COMMAND_LIST_BUDGET,
+    "zdir,directory,onion,list,discover,peer",
+    "zcl.core_zdir_list.input.v1", "zcl.core_zdir_list.v1",
+    "datadir", "",
+    "z23 core zdir list",
+    ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_SCOPE_OFFLINE_COPY,
+    ZCL_COMMAND_AUTH_PUBLIC, ZCL_COMMAND_LATENCY_FAST,
+    ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_CHAIN_READ, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_core_zdir_list)
+ZCL_COMMAND_READY_COMMAND(
+    "core.zdir.register", "core.zdir", "",
+    "Announce a v3 onion hostname on-chain as a node (spends a fee)",
+    "Prepares the exact signed ZDIR REGISTER transaction under explicit "
+    "custody, optionally binding --pubkey=<64hex>. The plan atomically "
+    "reserves its input and maximum fee; commit publishes the durable bytes "
+    "once. Tor-v3 validation and ownership preflight run before reservation. "
+    "A row with no owner remains immutable and no timer invokes this leaf.", 0,
+    "zdir,directory,onion,register,announce,publish,peer,discovery,broadcast,fee",
+    "zcl.core_zdir_register.input.v2", "zcl.core_zdir_register.v2",
+    "wallet_scope,hostname,pubkey,idempotency_key,plan_id,confirm,datadir", "wallet_scope",
+    "z23 core zdir register --input='{\"wallet_scope\":\"dev\",\"hostname\":\"<56base32>.onion\",\"idempotency_key\":\"zdir-register-1\"}'",
+    ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_WALLET, ZCL_COMMAND_SCOPE_NODE,
+    ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_CONFIRM_PLAN_COMMIT,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    zcl_native_handle_core_zdir_register)
+ZCL_COMMAND_READY_COMMAND(
+    "core.zdir.deregister", "core.zdir", "",
+    "Retire an onion hostname from the on-chain directory (spends a fee)",
+    "Prepares the exact owner-funded ZDIR DEREGISTER transaction after "
+    "checking the confirmed directory row. Its input and maximum fee are "
+    "reserved atomically; commit publishes the durable bytes once. The row "
+    "history remains on-chain and there is deliberately no transfer stub.", 0,
+    "zdir,directory,onion,deregister,retire,withdraw,peer,discovery,broadcast,fee",
+    "zcl.core_zdir_deregister.input.v2", "zcl.core_zdir_register.v2",
+    "wallet_scope,hostname,idempotency_key,plan_id,confirm,datadir", "wallet_scope",
+    "z23 core zdir deregister --input='{\"wallet_scope\":\"dev\",\"hostname\":\"<56base32>.onion\",\"idempotency_key\":\"zdir-deregister-1\"}'",
+    ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_WALLET, ZCL_COMMAND_SCOPE_NODE,
+    ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_CONFIRM_PLAN_COMMIT,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    zcl_native_handle_core_zdir_deregister)

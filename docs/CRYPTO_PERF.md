@@ -17,14 +17,14 @@ cited Rust numbers, never a live Rust link.
 
 | piece | path | role |
 |---|---|---|
-| Benchmark | `build/bin/z23 -bench-crypto-vs-rust` (`src/main.c`) — `make bench-crypto-vs-rust` | Times every consensus-path C primitive as a **median of N** ns/op, prints machine-readable `CRYPTOPERF <key> <ns> <ops/s>` lines, appends medians to `docs/bench-history.csv`. |
+| Benchmark | `build/bin/z23 -bench-crypto-vs-rust` (`engine/entry/main.c`) — `make bench-crypto-vs-rust` | Times every consensus-path C primitive as a **median of N** ns/op, prints machine-readable `CRYPTOPERF <key> <ns> <ops/s>` lines, appends medians to `docs/bench-history.csv`. |
 | Baseline | `tools/crypto_perf_baseline.csv` | Per primitive: `c_ns_baseline` (a **ceiling that may only shrink**), `rust_ns_baseline`, `gate_mode`, `rust_source`. |
 | Gate | `tools/scripts/check_crypto_perf.sh` — `make check-crypto-perf` | Measures C live and enforces the ratchet + the ratio-vs-Rust rule below. |
 
 The benchmark cannot go **hollow-fast**: every primitive is TEETH-checked
 (valid → true, perturbed → false / avalanche / square-consistency) before any
 number is recorded, and the same teeth run independently in the fast test pool
-as the `crypto_perf_selftest` group (`lib/test/src/test_crypto_perf_selftest.c`).
+as the `crypto_perf_selftest` group (`tests/harness/src/test_crypto_perf_selftest.c`).
 A no-op hash / always-true verify / operand-returning multiply fails there
 before the gate can ratchet a broken primitive.
 
@@ -157,7 +157,7 @@ does **not** define `__SHA__`, `__AVX512*__`, `__ADX__`, `__AES__` or
 `__attribute__((target(...)))` plus a runtime CPUID (**and** XCR0/XGETBV)
 predicate is the only shape that ships.
 
-Every accelerated path under `lib/crypto/src/` and `lib/sapling/src/` now
+Every accelerated path under `core/modules/crypto/src/` and `core/modules/sapling/src/` now
 follows it. The audited inventory is `sha256.c`, `sha3_avx512.c`,
 `keccak_avx512.c`, `sha3_256_x4.c`, `blake2b_avx2.c`, `fr_avx512.c`,
 `bn254_accel.c` — every other file in those two directories has no
@@ -194,7 +194,7 @@ It was also **slower than the portable C it displaced**, in all six measured
 cases — so the tier cost speed *and* told the operator a false story about why.
 
 The fix was to write the thing the name promised: a real CIOS dual carry chain
-in inline asm (`lib/sapling/src/mont_adx.h`), ADCX on CF and ADOX on OF. Asm and
+in inline asm (`core/modules/sapling/src/mont_adx.h`), ADCX on CF and ADOX on OF. Asm and
 not intrinsics because C has no way to keep two carry chains in two flag bits —
 that is *why* the intrinsic version degraded, and it will degrade again for the
 next person who "simplifies" it back.
@@ -236,10 +236,10 @@ have caught the original overclaim on day one, and it fails on the parent commit
 
 Any optimization to a consensus crypto primitive must stay **bit-identical** to
 the frozen verify logic. The differential parity oracle
-(`lib/test/differential/`, run with `make check-groth16-parity`) proves an
+(`tests/harness/differential/`, run with `make check-groth16-parity`) proves an
 optimized implementation returns the exact same accept/reject verdict as the
 frozen reference on adversarial inputs. It compiles
-`lib/sapling/src/bls12_381.c` straight from source and replays a frozen corpus
+`core/modules/sapling/src/bls12_381.c` straight from source and replays a frozen corpus
 of point encodings (canonical + non-canonical infinity, out-of-field x,
 on-curve non-subgroup), malformed proofs, and crafted single/batch
 verifications against `groth16_parity_golden.bin` +
@@ -264,7 +264,7 @@ after a deliberate, full-history-replay-approved consensus change.
 the life of a verifying key, yet the naive path paid a full 256-bit
 double-and-add per non-zero input on every verify. `groth16_vk_build_combs()`
 precomputes a windowed table per IC point once at param load
-(`lib/sapling/src/params_init.c`), and each per-verify scalar-mul becomes 64
+(`core/modules/sapling/src/params_init.c`), and each per-verify scalar-mul becomes 64
 table lookups plus adds with zero doublings. Tables are read-only after the
 build, so one VK stays shareable across verify threads.
 

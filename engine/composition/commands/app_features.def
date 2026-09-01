@@ -1,0 +1,1151 @@
+/* ZCL built-in application features, mounted under the `app` root (the frozen
+ * root set stays at seven: status/core/app/dev/ops/discover/code). These are the
+ * native command surface for names (ZNAM), ZSLP tokens, messaging (ZMSG), the
+ * file market, and cross-chain atomic swaps.
+ *
+ * Read leaves are READY and dispatch through zcl_native_bridge_command
+ * (body functions in engine/controllers/src/app_native_handlers.c, bound in
+ * tools/command/native_command.c's g_bridge_tools[]/g_bridge_native_body[]).
+ *
+ * The WRITE leaves split on one question: does the backing RPC actually finish
+ * the job its summary promises?
+ *
+ *   READY — the ZNAM writes, ZMSG send/read, and the two swap contract mints.
+ *   Each backing handler builds, signs, admits and relays its own transaction
+ *   (or writes to the peer socket / flips the read bit), so the native leaf is
+ *   a typed front door onto finished work. Handlers live in
+ *   engine/controllers/src/app_write_native_handlers.c; every value-moving leaf
+ *   honours its declared ZCL_COMMAND_CONFIRM_PLAN_COMMIT — a first call
+ *   without confirm:true returns a non-mutating plan, only the confirmed call
+ *   broadcasts — and a backing RPC that succeeds WITHOUT doing the job (a ZNAM
+ *   write answering status="ready" because the node carries no wallet) is
+ *   reported BLOCKED, never PASSED.
+ *
+ *   PLANNED — the two whose backing RPC stops short of its own summary. Each
+ *   availability_reason below names the exact missing code path, not a generic
+ *   "not implemented"; opening a native door onto them would mint a PASSED
+ *   reply for work the node never performs.
+ *
+ * Consumer defines ZCL_COMMAND_*. */
+
+/* Branch summaries are deliberately terse single words: they render inside the
+ * parent `app` branch menu, which is bounded by ZCL_COMMAND_BRANCH_BUDGET and
+ * already carries six longer-summary children (auth/account/list/inspect/
+ * protocols/invoke). Keeping these short keeps the `app` menu well under
+ * budget (verified in test_native_api_contract's per-branch menu sweep). */
+ZCL_COMMAND_BRANCH("app.names", "app", "Names", ZCL_COMMAND_LAYER_APP)
+ZCL_COMMAND_BRANCH("app.tokens", "app", "Tokens", ZCL_COMMAND_LAYER_APP)
+ZCL_COMMAND_BRANCH("app.messaging", "app", "Messaging", ZCL_COMMAND_LAYER_APP)
+ZCL_COMMAND_BRANCH("app.market", "app", "Market", ZCL_COMMAND_LAYER_APP)
+ZCL_COMMAND_BRANCH("app.market.content", "app.market", "Seller content",
+                   ZCL_COMMAND_LAYER_APP)
+ZCL_COMMAND_BRANCH("app.market.purchase", "app.market", "Buyer purchase",
+                   ZCL_COMMAND_LAYER_APP)
+ZCL_COMMAND_BRANCH("app.market.moderation", "app.market", "Moderation",
+                   ZCL_COMMAND_LAYER_APP)
+ZCL_COMMAND_BRANCH("app.market.moderation.profile", "app.market.moderation",
+                   "Profiles", ZCL_COMMAND_LAYER_APP)
+ZCL_COMMAND_BRANCH("app.market.moderation.relay", "app.market.moderation",
+                   "Relay rule", ZCL_COMMAND_LAYER_APP)
+ZCL_COMMAND_BRANCH("app.market.moderation.review", "app.market.moderation",
+                   "Review marks", ZCL_COMMAND_LAYER_APP)
+ZCL_COMMAND_BRANCH("app.store", "app", "Store", ZCL_COMMAND_LAYER_APP)
+ZCL_COMMAND_BRANCH("app.shop", "app", "Shop", ZCL_COMMAND_LAYER_APP)
+ZCL_COMMAND_BRANCH("app.shop.want", "app.shop", "Buyer wants",
+                   ZCL_COMMAND_LAYER_APP)
+ZCL_COMMAND_BRANCH("app.shop.want.fulfill", "app.shop.want", "Fulfillments",
+                   ZCL_COMMAND_LAYER_APP)
+ZCL_COMMAND_BRANCH("app.swap", "app", "Swaps", ZCL_COMMAND_LAYER_APP)
+ZCL_COMMAND_BRANCH("app.qr", "app", "QR", ZCL_COMMAND_LAYER_APP)
+ZCL_COMMAND_BRANCH("app.presentation", "app", "Native presentation",
+                   ZCL_COMMAND_LAYER_APP)
+ZCL_COMMAND_BRANCH("app.blog", "app", "Blog", ZCL_COMMAND_LAYER_APP)
+ZCL_COMMAND_BRANCH("app.payments", "app", "Payments", ZCL_COMMAND_LAYER_APP)
+ZCL_COMMAND_BRANCH("app.payments.zpay", "app.payments", "ZPAY",
+                   ZCL_COMMAND_LAYER_APP)
+
+/* ── ZPAY Sapling-memo payment envelopes ────────────────────────── */
+
+ZCL_COMMAND_READY_READ(
+    "app.payments.zpay.compose", "app.payments.zpay", "",
+    "Compose an anonymous canonical ZPAY Sapling memo",
+    "Deterministically encodes one complete ZPAY v1 invoice, payment, or "
+    "receipt envelope from explicit network, clock, nonce, request, invoice, "
+    "asset, and commitment fields. Returns the exact 512-byte memo_hex for "
+    "core.wallet.shielded.send. It never reads a wallet, signs an identity, "
+    "or broadcasts; optional ZID signing is deliberately unavailable because "
+    "identity seeds must not enter agent command context.",
+    ZCL_COMMAND_RESULT_BUDGET, "payments,zpay,sapling,memo,compose,invoice",
+    "zcl.app_zpay_compose.input.v1", "zcl.app_zpay_memo.v1",
+    "network,message_type,created_at,expires_at,nonce,request_id,invoice_digest,asset,amount_commitment,reply_ref",
+    "network,message_type,created_at,expires_at,nonce,request_id,invoice_digest,asset,amount_commitment",
+    "z23 app payments zpay compose --input='<obj>'",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_PUBLIC, ZCL_COMMAND_LATENCY_INSTANT,
+    ZCL_COMMAND_COST_TINY, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_NONE,
+    ZCL_COMMAND_TRAIT_DETERMINISTIC | ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_zpay_compose)
+
+ZCL_COMMAND_READY_READ(
+    "app.payments.zpay.inspect", "app.payments.zpay", "",
+    "Decode, authenticate, and policy-check one ZPAY Sapling memo",
+    "Strictly decodes an exact 512-byte ZPAY memo, verifies any embedded ZID "
+    "document against the caller-supplied clock, and reports whether its "
+    "network and lifetime are current. A malformed, wrong-network, expired, "
+    "or invalidly signed memo is never upgraded to a payment fact.",
+    ZCL_COMMAND_RESULT_BUDGET, "payments,zpay,sapling,memo,inspect,verify",
+    "zcl.app_zpay_inspect.input.v1", "zcl.app_zpay_envelope.v1",
+    "memo_hex,network,now_unix", "memo_hex,network,now_unix",
+    "z23 app payments zpay inspect --input='<obj>'",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_PUBLIC, ZCL_COMMAND_LATENCY_INSTANT,
+    ZCL_COMMAND_COST_TINY, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_NONE,
+    ZCL_COMMAND_TRAIT_DETERMINISTIC | ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_zpay_inspect)
+
+ZCL_COMMAND_READY_COMMAND(
+    "app.qr.show", "app.qr", "", "Show a payload as a native QR window",
+    "Launches a portable C QR window through the warm same-binary presentation "
+    "host, retaining the detached reviewed child as a portable fallback. The "
+    "bounded payload crosses only length-framed local IPC or framed stdin, "
+    "never argv, environment, node transport, or logs. The native result "
+    "does not echo it; explicit output=text returns the complete deterministic "
+    "companion when it fits, otherwise a bounded payload page with exact page "
+    "count, without launching a window. The "
+    "window copies with C, closes with Escape/Q, and uses an integer-scaled "
+    "four-module quiet zone for reliable scanning. RGFW and the QR encoder are "
+    "pinned permissive source in this repository.", 0,
+    "qr,display,popup,payment,uri,presentation", "zcl.app_qr_show.input.v1",
+    "zcl.app_qr_show.v1", "payload,title,output,page", "payload",
+    "z23 app qr show 'zclassic:t1...?amount=0.01'",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_DISPLAY_ONLY,
+    zcl_native_handle_qr_show)
+
+ZCL_COMMAND_READY_COMMAND(
+    "app.presentation.show", "app.presentation", "",
+    "Show a bounded renderer-neutral model in a native C23 window",
+    "Validates a closed visual document, encodes it without structure padding, "
+    "and submits it to a warm same-binary display-only host. Status, tables, "
+    "progress, charts, timelines, code diffs, and evidence graphs return after "
+    "the first native blit; a later non-interactive model with the same "
+    "request_id replaces that display-only view. Choices and exact-root "
+    "confirmations return only a numbered action ID or dismissal. Bounded "
+    "forms additionally return at most four exact ID/value pairs only on "
+    "Submit. A bounded canvas returns one selected point ID and normalized "
+    "x/y coordinates only on Submit. Cancel and dismissal return none. The full "
+    "node must independently recheck policy and plan/commit state before "
+    "acting. The host receives no wallet, Internet, datadir, package, "
+    "publication, deployment, or consensus authority. Set output=text to "
+    "receive the complete deterministic plain-text companion when it fits; "
+    "oversized documents return one bounded page and exact page count, and an "
+    "optional zero-based page selects another page. No window is opened.", 0,
+    "presentation,native,status,progress,diff,evidence,agent",
+    "zcl.app_presentation_show.input.v1", "zcl.app_presentation_show.v1",
+    "kind,request_id,title,summary,exact_root,items,actions,output,page",
+    "kind,request_id,title",
+    "z23 app presentation show --input='<bounded-model>'",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_DISPLAY_ONLY,
+    zcl_native_handle_presentation_show)
+
+ZCL_COMMAND_READY_COMMAND(
+    "app.presentation.status", "app.presentation", "",
+    "Show canonical node facts in a native C23 status card",
+    "Reads the target node's canonical status, full health projection, wallet "
+    "backup snapshot, and bounded ZCODE worker-capacity snapshot, then builds "
+    "one closed renderer-neutral model. Every row is labeled NODE FACT. The "
+    "agent supplies no fact or status text; unavailable projections remain "
+    "named unavailable. The display host receives only the inert model and "
+    "holds no node authority.", 0,
+    "presentation,native,status,node,facts,backup,onion,workers",
+    "zcl.app_presentation_status.input.v1",
+    "zcl.app_presentation_status.v1", "output,page", "",
+    "z23 app presentation status",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_NODE,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_DISPLAY_ONLY,
+    zcl_native_handle_presentation_status)
+
+ZCL_COMMAND_READY_COMMAND(
+    "app.presentation.corpus", "app.presentation", "",
+    "Show the canonical C23 corpus lower bound in a native status card",
+    "Calls the existing typed corpus-status path and turns its exact signed-"
+    "checkpoint facts into one display-only model. Production, test, durable, "
+    "semantic-unit, admitted-package and exclusion counts stay bound to the "
+    "canonical checkpoint. Downstream-used LOC, velocity, and exclusion "
+    "reason LOC remain visibly unavailable until the canonical status binds "
+    "them; the instrument never guesses or starts another census. The display "
+    "host receives only inert facts and no corpus, package, filesystem, "
+    "publication, or node authority.", 0,
+    "presentation,native,status,corpus,c23,loc,packages,exact,agent",
+    "zcl.app_presentation_corpus.input.v1",
+    "zcl.app_presentation_corpus.v1", "output,page", "",
+    "z23 app presentation corpus",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_DISPLAY_ONLY,
+    zcl_native_handle_presentation_corpus)
+
+ZCL_COMMAND_READY_COMMAND(
+    "app.presentation.code-change", "app.presentation", "",
+    "Show an exact ZVCS-backed C code change in a native window",
+    "Loads and rederives two immutable ZVCS source manifests, verifies the "
+    "selected C blob at each exact address, and computes a bounded before/after "
+    "diff, affected test route, and candidate include tokens inside Z23. "
+    "Requested/before/after behavior prose is visibly labeled AGENT SUMMARY; "
+    "source paths, roots, diff lines, test routes, includes, and byte counts are "
+    "labeled LOCAL OBSERVATION. The presentation host receives only the inert "
+    "model and no source-store or software authority.", 0,
+    "presentation,native,code,diff,zvcs,source,tests,dependencies,agent",
+    "zcl.app_presentation_code_change.input.v1",
+    "zcl.app_presentation_code_change.v1",
+    "workspace,before_root,candidate_root,path,requested_behavior,before_behavior,after_behavior,output,page",
+    "workspace,before_root,candidate_root,path,requested_behavior,before_behavior,after_behavior",
+    "z23 app presentation code-change --input='<exact-roots-and-summaries>'",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_DISPLAY_ONLY,
+    zcl_native_handle_presentation_code_change)
+
+ZCL_COMMAND_READY_COMMAND(
+    "app.presentation.development", "app.presentation", "",
+    "Show the latest exact local development consequence in native C23",
+    "Reads the canonical sealed dev-cycle verdict for the selected workspace "
+    "and renders edit, impact, compile, candidate-behavior and clean-proof "
+    "stages plus affected closure, candidate identity, resource counts, any "
+    "named mismatch, remaining independent-proof unknown and one dominant "
+    "agent next action. It can alternatively project one canonical local "
+    "package-build receipt by exact receipt_id. Repeating the same exact epoch "
+    "replaces its resident window. It never runs a build, selects a candidate "
+    "or performs an effect.",
+    0, "presentation,native,development,reflex,candidate,impact,proof,red,agent",
+    "zcl.app_presentation_development.input.v1",
+    "zcl.app_presentation_development.v1", "workspace,receipt_id,output,page", "",
+    "z23 app presentation development",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_DISPLAY_ONLY,
+    zcl_native_handle_presentation_development)
+
+ZCL_COMMAND_READY_COMMAND(
+    "app.presentation.reproduction", "app.presentation", "",
+    "Show live independent-reproduction progress in one native window",
+    "Reads the exact action's latest root-rederived build-proof event from "
+    "the target node and renders the closed queued, admitted, running, output "
+    "received, receipt verified, and matching-artifact stages. Repeating the "
+    "command for the same action replaces that resident window instead of "
+    "opening another. REMOTE_RED and SUPERSEDED remain named red refusals. "
+    "The agent supplies only the action identity and cannot supply status "
+    "text or evidence facts.", 0,
+    "presentation,native,reproduction,progress,proof,receipt,agent",
+    "zcl.app_presentation_reproduction.input.v1",
+    "zcl.app_presentation_reproduction.v1", "action_id,output,page", "action_id",
+    "z23 app presentation reproduction --input='{\"action_id\":\"<64hex>\"}'",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_NODE,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_DISPLAY_ONLY,
+    zcl_native_handle_presentation_reproduction)
+
+ZCL_COMMAND_READY_COMMAND(
+    "app.presentation.publication-confirm", "app.presentation", "",
+    "Ask for an exact local package-commit decision in native C23",
+    "Re-runs the ordinary read-only ZCODE package publication plan over the "
+    "exact signed release, manifest, recipe, and local chunk source. Only a "
+    "ready plan receives Z23-authored confirmation chrome and fixed "
+    "Confirm/Cancel actions. The returned human decision is bound to the "
+    "exact plan and view identities. Six fixed evidence stages make clear "
+    "that confirmation, local commit, pointer announcement, provider "
+    "announcement, peer discovery, and exact peer fetch are distinct. This "
+    "command cannot commit or publish; the "
+    "separate commit command independently re-validates current inputs and "
+    "policy before any local-store effect.", 0,
+    "presentation,native,confirmation,publication,package,plan,human",
+    "zcl.zcode_publish_plan.input.v1",
+    "zcl.app_presentation_publication_confirm.v1",
+    "release_hex,manifest_hex,recipe_hex,dir,datadir,output,page", "",
+    "z23 app presentation publication-confirm --input='"
+    "{\"release_hex\":\"..\",\"manifest_hex\":\"..\","
+    "\"recipe_hex\":\"..\",\"dir\":\"/tmp/pkg\"}'",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_NODE,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_DISPLAY_ONLY,
+    zcl_native_handle_presentation_publication_confirm)
+
+ZCL_COMMAND_READY_COMMAND(
+    "app.presentation.release-confirm", "app.presentation", "",
+    "Ask for one exact proven-candidate decision in native C23",
+    "Rebuilds the canonical work status and proof evaluation, then shows a "
+    "Z23-authored Confirm/Cancel decision only when the exact candidate "
+    "satisfies its task-bound proof policy. The inert confirmation identity "
+    "binds task, candidate, proof-policy and proof-set roots. This command "
+    "cannot accept, apply, sign or publish anything; it returns a typed action "
+    "for the separate zcode work accept command unless the user cancels. That "
+    "command re-derives the identity and rechecks current evidence.", 0,
+    "presentation,native,confirmation,release,candidate,proof,human",
+    "zcl.app_presentation_release_confirm.input.v1",
+    "zcl.app_presentation_release_confirm.v1",
+    "workspace,work,datadir,output,page", "",
+    "z23-dev app presentation release-confirm --input='"
+    "{\"workspace\":\".\",\"work\":\"latest\"}'",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_DISPLAY_ONLY,
+    zcl_native_handle_presentation_release_confirm)
+
+ZCL_COMMAND_READY_COMMAND(
+    "app.presentation.publication-status", "app.presentation", "",
+    "Show exact package publication progress in native C23",
+    "Reads this node's resident package store, completed carrier-download "
+    "record, local node identity and active signed DHT projection for exact "
+    "package and transport roots. It renders local commit, pointer, provider, "
+    "non-self peer discovery and exact fetched-byte stages separately. Human "
+    "confirmation remains bound to the earlier exact response and is visibly "
+    "not re-derived. The agent supplies identities only; this command cannot "
+    "fetch, commit, publish, or perform another privileged action.", 0,
+    "presentation,native,publication,progress,package,dht,fetch,evidence,agent",
+    "zcl.app_presentation_publication_status.input.v1",
+    "zcl.app_presentation_publication_status.v1",
+    "package_root,transport_root,confirmation_identity,output,page",
+    "package_root,transport_root,confirmation_identity",
+    "z23 app presentation publication-status --input='"
+    "{\"package_root\":\"<64hex>\",\"transport_root\":\"<64hex>\","
+    "\"confirmation_identity\":\"<64hex>\"}'",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_NODE,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_DISPLAY_ONLY,
+    zcl_native_handle_presentation_publication_status)
+
+/* ── Blog (ZBLG) ─────────────────────────────────────────────────── */
+
+ZCL_COMMAND_READY_COMMAND(
+    "app.blog.anchor", "app.blog", "", "Anchor a signed Blog event on-chain",
+    "Plan/commit the strict ZBLG v1 OP_RETURN for an already stored, "
+    "wallet-signed Blog event. Plan requires an explicit dev/prod scope, "
+    "prepares exact signed bytes, and atomically reserves the maximum fee in "
+    "the identity-bound vault-intent ledger. Commit accepts only that durable "
+    "plan ID and rechecks wallet instance, genesis, tip, snapshot root, exact "
+    "transaction, event signature, and current ZNAM owner before relay. It does not "
+    "create or sign the off-chain Blog event; that capability remains "
+    "contained behind the runtime App grant broker.", 0,
+    "blog,zblg,anchor,op_return,event,znam,custody,wallet_scope",
+    "zcl.app_blog_anchor.input.v1", "zcl.app_blog_anchor.v1",
+    "wallet_scope,name,event_id,idempotency_key,plan_id,confirm", "wallet_scope",
+    "z23 app blog anchor --input='{\"wallet_scope\":\"dev\",\"name\":\"alice\",\"event_id\":\"<64-hex>\",\"idempotency_key\":\"blog-alice-1\"}'",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_NODE,
+    ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_CONFIRM_PLAN_COMMIT,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_ZNAM, ZCL_COMMAND_TRAIT_NONE,
+    zcl_native_handle_blog_anchor)
+
+/* ── Names (ZNAM) ──────────────────────────────────────────────────── */
+
+ZCL_COMMAND_READY_READ(
+    "app.names.resolve", "app.names", "", "Resolve a ZCL Name to its target",
+    "One ZCL Name's resolved target (.onion, z-address, or t-address) looked up "
+    "live on-chain at call time; absent/error if the name is not registered.", 0,
+    "names,znam,resolve", "zcl.app_name_resolve.input.v1",
+    "zcl.app_name_record.v1", "name", "name",
+    "z23 app names resolve alice",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_PUBLIC,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE, ZCL_COMMAND_CAP_ZNAM,
+    ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_bridge_command)
+
+ZCL_COMMAND_READY_READ(
+    "app.names.list", "app.names", "", "List registered ZCL Names",
+    "Every ZCL Name registered on the network, read live at call time; bounded "
+    "to the list budget row cap, not full history.", ZCL_COMMAND_LIST_BUDGET,
+    "names,znam,list", "zcl.command.empty_input.v1", "zcl.app_name_index.v1",
+    "", "", "z23 app names list",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_PUBLIC,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE, ZCL_COMMAND_CAP_ZNAM,
+    ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_bridge_command)
+
+/* The six ZNAM writes use one durable identity-bound intent seam. Planning
+ * signs the exact transaction, reserves its exact inputs plus maximum fee,
+ * and returns only a sanitized plan receipt. Commit accepts only the explicit
+ * wallet scope and durable plan ID, then publishes those same bytes once. */
+
+ZCL_COMMAND_READY_COMMAND(
+    "app.names.register", "app.names", "", "Register a ZCL Name on-chain",
+    "Prepare an exact signed ZNAM registration and atomically reserve its "
+    "inputs and maximum fee. Commit only the returned scope/plan_id; stale "
+    "custody, changed tip/snapshot, duplicate input, or replay mismatch fails "
+    "closed before publication.",
+    0,
+    "names,znam,register", "zcl.app_name_register.input.v1",
+    "zcl.app_name_txresult.v1", "wallet_scope,name,type,value,idempotency_key,plan_id,confirm", "wallet_scope",
+    "z23 app names register --input='{\"wallet_scope\":\"dev\",\"name\":\"alice\",\"type\":\"zaddr\",\"value\":\"zs1..\",\"idempotency_key\":\"name-register-1\"}'",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_APP_WRITE,
+    ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_CONFIRM_PLAN_COMMIT,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE, ZCL_COMMAND_CAP_ZNAM,
+    ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    zcl_native_handle_name_register)
+
+ZCL_COMMAND_READY_COMMAND(
+    "app.names.update", "app.names", "", "Replace a ZCL Name's primary target",
+    "Prepare an exact owner-authorized target replacement under explicit "
+    "custody, then commit the durable plan once. Exact inputs and maximum fee "
+    "remain reserved across restart until terminal reconciliation.", 0,
+    "names,znam,update", "zcl.app_name_register.input.v1",
+    "zcl.app_name_txresult.v1", "wallet_scope,name,type,value,idempotency_key,plan_id,confirm", "wallet_scope",
+    "z23 app names update --input='{\"wallet_scope\":\"dev\",\"name\":\"alice\",\"type\":\"zaddr\",\"value\":\"zs1..\",\"idempotency_key\":\"name-update-1\"}'",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_APP_WRITE,
+    ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_CONFIRM_PLAN_COMMIT,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE, ZCL_COMMAND_CAP_ZNAM,
+    ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    zcl_native_handle_name_update)
+
+ZCL_COMMAND_READY_COMMAND(
+    "app.names.transfer", "app.names", "", "Transfer ZCL Name ownership",
+    "Prepare an exact owner-authorized transfer under explicit custody, then "
+    "commit the durable plan once. The new owner is projected only after the "
+    "transaction confirms.", 0,
+    "names,znam,transfer", "zcl.app_name_transfer.input.v1",
+    "zcl.app_name_txresult.v1", "wallet_scope,name,new_owner,idempotency_key,plan_id,confirm", "wallet_scope",
+    "z23 app names transfer --input='{\"wallet_scope\":\"dev\",\"name\":\"alice\",\"new_owner\":\"t1..\",\"idempotency_key\":\"name-transfer-1\"}'",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_APP_WRITE,
+    ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_CONFIRM_PLAN_COMMIT,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE, ZCL_COMMAND_CAP_ZNAM,
+    ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    zcl_native_handle_name_transfer)
+
+ZCL_COMMAND_READY_COMMAND(
+    "app.names.renew", "app.names", "", "Renew a ZCL Name registration term",
+    "Prepare an exact permissionless renewal funded by the explicit custody "
+    "scope, reserve its exact inputs and fee, then commit the durable plan "
+    "once.", 0,
+    "names,znam,renew", "zcl.app_name_renew.input.v1",
+    "zcl.app_name_txresult.v1", "wallet_scope,name,idempotency_key,plan_id,confirm", "wallet_scope",
+    "z23 app names renew --input='{\"wallet_scope\":\"dev\",\"name\":\"alice\",\"idempotency_key\":\"name-renew-1\"}'",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_APP_WRITE,
+    ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_CONFIRM_PLAN_COMMIT,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE, ZCL_COMMAND_CAP_ZNAM,
+    ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    zcl_native_handle_name_renew)
+
+ZCL_COMMAND_READY_COMMAND(
+    "app.names.set-record", "app.names", "", "Set a multi-coin address record",
+    "Prepare an exact owner-authorized multi-coin record under explicit "
+    "custody, reserve its exact inputs and fee, then commit the durable plan "
+    "once. This does not replace the primary target.", 0,
+    "names,znam,record", "zcl.app_name_register.input.v1",
+    "zcl.app_name_txresult.v1", "wallet_scope,name,type,value,idempotency_key,plan_id,confirm", "wallet_scope",
+    "z23 app names set-record --input='{\"wallet_scope\":\"dev\",\"name\":\"alice\",\"type\":\"btc\",\"value\":\"bc1..\",\"idempotency_key\":\"name-record-1\"}'",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_APP_WRITE,
+    ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_CONFIRM_PLAN_COMMIT,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE, ZCL_COMMAND_CAP_ZNAM,
+    ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    zcl_native_handle_name_set_record)
+
+ZCL_COMMAND_READY_COMMAND(
+    "app.names.set-text", "app.names", "", "Set a text record on a ZCL Name",
+    "Prepare an exact owner-authorized text record under explicit custody, "
+    "reserve its exact inputs and fee, then commit the durable plan once. "
+    "Omitting value clears the key.", 0,
+    "names,znam,text", "zcl.app_name_set_text.input.v1",
+    "zcl.app_name_txresult.v1", "wallet_scope,name,key,value,idempotency_key,plan_id,confirm", "wallet_scope",
+    "z23 app names set-text --input='{\"wallet_scope\":\"dev\",\"name\":\"alice\",\"key\":\"url\",\"value\":\"https://..\",\"idempotency_key\":\"name-text-1\"}'",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_APP_WRITE,
+    ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_CONFIRM_PLAN_COMMIT,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE, ZCL_COMMAND_CAP_ZNAM,
+    ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    zcl_native_handle_name_set_text)
+
+/* ── ZSLP tokens ───────────────────────────────────────────────────── */
+
+ZCL_COMMAND_READY_READ(
+    "app.tokens.list", "app.tokens", "", "List ZSLP tokens on the network",
+    "Every ZSLP token seen on the network, read live at call time; bounded to "
+    "the list budget row cap, not full token history.", ZCL_COMMAND_LIST_BUDGET,
+    "tokens,zslp,list", "zcl.command.empty_input.v1", "zcl.app_token_index.v1",
+    "", "", "z23 app tokens list",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_PUBLIC,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_CHAIN_READ, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_bridge_command)
+
+ZCL_COMMAND_READY_COMMAND(
+    "app.tokens.create", "app.tokens", "", "Create a ZSLP token",
+    "Prepare one exact signed ZSLP GENESIS under an explicit custody wallet, "
+    "atomically reserve its fee inputs, then commit only by durable plan ID. "
+    "Private wallet material never appears in the receipt.", 0,
+    "tokens,zslp,create,genesis", "zcl.app_token_create.input.v1",
+    "zcl.app_token_txresult.v1", "wallet_scope,ticker,name,decimals,supply,idempotency_key,plan_id,confirm", "wallet_scope",
+    "z23 app tokens create --input='{\"wallet_scope\":\"dev\",\"ticker\":\"DEMO\",\"name\":\"Demo Token\",\"decimals\":0,\"supply\":\"1000\",\"idempotency_key\":\"demo-genesis-1\"}'",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_WALLET,
+    ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_CONFIRM_PLAN_COMMIT,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_WALLET_REQUEST, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    zcl_native_handle_token_create)
+
+ZCL_COMMAND_READY_COMMAND(
+    "app.tokens.send", "app.tokens", "", "Send ZSLP token units",
+    "Prepare one exact signed token transfer under an explicit custody wallet, "
+    "atomically reserve its token and fee inputs, then commit only by durable "
+    "plan ID. The private recipient is omitted from receipts.", 0,
+    "tokens,zslp,send", "zcl.app_token_send.input.v1",
+    "zcl.app_token_txresult.v1", "wallet_scope,token_id,to,units,idempotency_key,plan_id,confirm", "wallet_scope",
+    "z23 app tokens send --input='{\"wallet_scope\":\"dev\",\"token_id\":\"<64-hex>\",\"to\":\"t1...\",\"units\":\"25\",\"idempotency_key\":\"token-send-1\"}'",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_WALLET,
+    ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_CONFIRM_PLAN_COMMIT,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_WALLET_REQUEST, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    zcl_native_handle_token_send)
+
+ZCL_COMMAND_READY_COMMAND(
+    "app.tokens.mint", "app.tokens", "", "Mint ZSLP token units",
+    "Prepare one exact authorized MINT under an explicit custody wallet, "
+    "atomically reserve its unique mint baton and fee inputs, then commit only "
+    "by durable plan ID.", 0,
+    "tokens,zslp,mint", "zcl.app_token_send.input.v1",
+    "zcl.app_token_txresult.v1", "wallet_scope,token_id,to,units,idempotency_key,plan_id,confirm", "wallet_scope",
+    "z23 app tokens mint --input='{\"wallet_scope\":\"dev\",\"token_id\":\"<64-hex>\",\"to\":\"t1...\",\"units\":\"100\",\"idempotency_key\":\"token-mint-1\"}'",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_WALLET,
+    ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_CONFIRM_PLAN_COMMIT,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_WALLET_REQUEST, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    zcl_native_handle_token_mint)
+
+ZCL_COMMAND_READY_COMMAND(
+    "app.tokens.burn", "app.tokens", "", "Burn ZSLP token units",
+    "Prepare one exact explicit burn under an explicit custody wallet, "
+    "atomically reserve its VALID token and fee inputs, then commit only by "
+    "durable plan ID. Supply changes only after strict confirmation.", 0,
+    "tokens,zslp,burn,supply", "zcl.app_token_burn.input.v1",
+    "zcl.app_token_txresult.v1", "wallet_scope,token_id,units,idempotency_key,plan_id,confirm", "wallet_scope",
+    "z23 app tokens burn --input='{\"wallet_scope\":\"dev\",\"token_id\":\"<64-hex>\",\"units\":\"10\",\"idempotency_key\":\"token-burn-1\"}'",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_WALLET,
+    ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_CONFIRM_PLAN_COMMIT,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_WALLET_REQUEST, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    zcl_native_handle_token_burn)
+
+/* ── Messaging (ZMSG) ──────────────────────────────────────────────── */
+
+ZCL_COMMAND_READY_READ(
+    "app.messaging.inbox", "app.messaging", "", "List inbox messages",
+    "Every message in the inbox, newest first, read live at call time; bounded "
+    "to the list budget row cap.", ZCL_COMMAND_LIST_BUDGET,
+    "messaging,zmsg,inbox", "zcl.command.empty_input.v1",
+    "zcl.app_message_index.v2", "", "", "z23 app messaging inbox",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OWNER,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_P2P_TOPIC, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_bridge_command)
+
+ZCL_COMMAND_READY_COMMAND(
+    "app.messaging.send", "app.messaging", "", "Send a message",
+    "Plan/commit ZMSG send over one of two channels: p2p writes the serialized "
+    "message straight to a connected peer's socket (free, no funds move, "
+    "plaintext on the wire until the Noise transport is negotiated); onchain composes "
+    "a shielded Sapling-memo z_sendmany, which SPENDS the dust output plus fee "
+    "and needs the Sapling prover ready. Without confirm, a non-mutating plan "
+    "whose spends_funds flag says which of the two this call would be; with "
+    "confirm:true, the stored msg_id plus the peer id or broadcast txid "
+    "(stage=committed, status=sent).", 0,
+    "messaging,zmsg,send", "zcl.app_message_send.input.v1",
+    "zcl.app_message_send_result.v1",
+    "message,channel,peer_id,to,from_address,reply_to,confirm", "",
+    "z23 app messaging send --input='{\"channel\":\"p2p\",\"peer_id\":1,\"message\":\"hi\",\"confirm\":true}'",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_APP_WRITE,
+    ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_CONFIRM_PLAN_COMMIT,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_P2P_TOPIC, ZCL_COMMAND_TRAIT_NONE,
+    zcl_native_handle_message_send)
+
+ZCL_COMMAND_PLANNED_COMMAND(
+    "app.messaging.send-named", "app.messaging", "", "Send a message to a ZCL Name",
+    "Will resolve the ZCL Name and deliver the message once an outbound "
+    "delivery path exists; today the handler is unbound and fails closed with "
+    "exit 3 rather than reporting a delivery that cannot happen.", 0,
+    "messaging,zmsg,send,name", "zcl.app_message_send_named.input.v1",
+    "zcl.app_message_send_result.v1", "name,message,confirm", "name",
+    "z23 app messaging send-named --input='{\"name\":\"alice\",\"message\":\"hi\"}'",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_APP_WRITE,
+    ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_CONFIRM_PLAN_COMMIT,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_P2P_TOPIC, ZCL_COMMAND_TRAIT_NONE,
+    "needs an outbound delivery path before it can be exposed natively: "
+    "rpc_msg_send_named (messaging_controller.c) resolves the name, calls "
+    "zmsg_store_add + db_zmsg_save, and answers status=queued, but nothing in "
+    "the tree ever drains that store onto a peer socket — no writer sends "
+    "MSG_ZMSG for a stored message, so the queue has no consumer and the "
+    "message is never delivered. Use app messaging send with an explicit "
+    "peer_id, whose write to the peer socket is real")
+
+ZCL_COMMAND_READY_COMMAND(
+    "app.messaging.read", "app.messaging", "", "Mark a message read",
+    "The read receipt for one message: msg_id echoed back with status=read "
+    "after msg_read flipped the bit in both the in-memory ZMSG store and the "
+    "SQLite row at call time. It returns the receipt only — the message body "
+    "is not part of msg_read's answer, so read the content from app messaging "
+    "inbox. An unknown msg_id is not an error: the mark is idempotent.", 0,
+    "messaging,zmsg,read", "zcl.app_message_read.input.v1",
+    "zcl.app_message_read_result.v1", "msg_id", "msg_id",
+    "z23 app messaging read --input='{\"msg_id\":\"<64hex>\"}'",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_APP_WRITE,
+    ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW, ZCL_COMMAND_CONFIRM_NONE,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_P2P_TOPIC, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    zcl_native_handle_message_read)
+
+/* ── File market ───────────────────────────────────────────────────── */
+
+ZCL_COMMAND_READY_READ(
+    "app.market.list", "app.market", "", "List files on the ZCL Market",
+    "The admitted file offers in the bounded live cache, filtered through "
+    "this node's own listing-visibility profile (per-node moderation: a "
+    "hidden offer is kept and never deleted, but is neither listed nor "
+    "served from here; relay is a separate rule). "
+    "Every row carries its local review_state; the reply carries an honest "
+    "hidden_count. The optional profile key (\"open\") is the explicit "
+    "per-request override showing everything ingested. Paid rows have a "
+    "seller-verified, network-bound offer_id, exact integer total, and "
+    "expiry; legacy unsigned rows are price-zero recovery artifacts only.",
+    ZCL_COMMAND_LIST_BUDGET,
+    "market,files,list,moderation", "zcl.app_market_list.input.v1",
+    "zcl.app_market_index.v1",
+    "profile", "", "z23 app market list",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_PUBLIC,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_P2P_TOPIC, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_bridge_command)
+
+ZCL_COMMAND_READY_READ(
+    "app.market.status", "app.market", "", "ZCL Market status",
+    "The market's current status — cached offers, persisted offers, and active "
+    "downloads — read live at call time.", 0,
+    "market,status", "zcl.command.empty_input.v1", "zcl.app_market_status.v1",
+    "", "", "z23 app market status",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_P2P_TOPIC, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_bridge_command)
+
+ZCL_COMMAND_READY_READ(
+    "app.market.content.list", "app.market.content", "",
+    "List owner-registered paid content",
+    "Every local paid-content binding, showing only its signed offer ID, "
+    "manifest root, size, chunk count, and registration time. Private paths "
+    "and chunk manifests never enter the response.", ZCL_COMMAND_LIST_BUDGET,
+    "market,content,seller,files,list", "zcl.command.empty_input.v1",
+    "zcl.market_contents.index.v1", "", "",
+    "z23 app market content list",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OWNER,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_bridge_command)
+
+ZCL_COMMAND_READY_COMMAND(
+    "app.market.content.register", "app.market.content", "",
+    "Bind private seller bytes to a signed offer",
+    "Hashes one non-symlink regular file, verifies its exact size and chunk "
+    "manifest root against the authenticated paid offer, and atomically "
+    "records the private canonical binding. Exact plan/commit: mode plan "
+    "mints a plan_token bound to the offer, the target path, and the "
+    "registration as it stands; commit requires that token (STALE_PLAN if "
+    "any of the three moved in between). The path is accepted only as "
+    "owner input and is absent from results, logs, REST, and peer traffic.", 0,
+    "market,content,seller,register,manifest",
+    "zcl.app_market_content_register.input.v1", "zcl.market_content.v1",
+    "offer_id,content_path,mode,plan_token", "offer_id,mode",
+    "z23 app market content register --input='{\"offer_id\":\"<64hex>\",\"content_path\":\"/private/file\",\"mode\":\"plan\"}'",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_NODE,
+    ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_CONFIRM_PLAN_COMMIT,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    zcl_native_handle_market_content_register)
+
+ZCL_COMMAND_READY_READ(
+    "app.market.purchase.guide", "app.market.purchase", "",
+    "Show the paid-file purchase workflow",
+    "Renders the exact plan, commit, status, and retrieve sequence plus the "
+    "live-calculation/static-authority boundary. It reads no wallet, storage, "
+    "network, offer, payment, or purchase state.", ZCL_COMMAND_LIST_BUDGET,
+    "market,buy,purchase,guide,workflow,hotswap,boundary",
+    "zcl.app_market_purchase_guide.input.v1",
+    "zcl.app_market_purchase_guide.v1", "", "",
+    "z23 app market purchase guide",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_PUBLIC, ZCL_COMMAND_LATENCY_INSTANT,
+    ZCL_COMMAND_COST_TINY,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_market_purchase_guide)
+
+ZCL_COMMAND_READY_COMMAND(
+    "app.market.purchase.plan", "app.market.purchase", "",
+    "Reserve one exact paid chunk range",
+    "Loads an authenticated network-bound offer, prices one exact chunk range "
+    "with integer arithmetic, mints an encrypted buyer credential and canonical "
+    "Sapling memo, then atomically reserves recipient value plus the wallet's "
+    "maximum fee. Requires a current identity-bound custody snapshot and a "
+    "caller idempotency key. Source and seller addresses, memo, credential, "
+    "paths, and keys are absent from the result and logs. This mutates only the "
+    "durable reservation; it does not broadcast or download bytes.", 0,
+    "market,buy,purchase,payment,plan,reservation,idempotent",
+    "zcl.app_market_purchase_plan.input.v1", "zcl.market_purchase.v1",
+    "wallet_scope,offer_id,source_address,chunk_start,chunks_paid,idempotency_key",
+    "wallet_scope,offer_id,source_address,chunk_start,chunks_paid,idempotency_key",
+    "printf '%s' '{\"wallet_scope\":\"dev\",\"offer_id\":\"<64hex>\",\"source_address\":\"<owned-address>\",\"chunk_start\":0,\"chunks_paid\":1,\"idempotency_key\":\"lab-001\"}' | z23 app market purchase plan --input=-",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_WALLET, ZCL_COMMAND_SCOPE_NODE,
+    ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_CONFIRM_NONE,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_WALLET_REQUEST, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    zcl_native_handle_market_purchase_plan)
+
+ZCL_COMMAND_READY_COMMAND(
+    "app.market.purchase.commit", "app.market.purchase", "",
+    "Commit one exact reserved market payment",
+    "Requires the explicit wallet scope, durable plan ID, and confirm:true. "
+    "Rechecks wallet identity, genesis, tip, complete money snapshot, signed "
+    "offer, exact range, amount, maximum fee, and source ownership before one "
+    "Sapling-memo send. The txid and buyer-signed claim persist across restart; "
+    "replay never broadcasts twice. A crash at the unresolved send boundary "
+    "returns COMMIT_UNCERTAIN and requires reconciliation.", 0,
+    "market,buy,purchase,payment,commit,txid,idempotent",
+    "zcl.app_market_purchase_commit.input.v1", "zcl.market_purchase.v1",
+    "wallet_scope,plan_id,confirm", "wallet_scope,plan_id,confirm",
+    "z23 app market purchase commit --input='{\"wallet_scope\":\"dev\",\"plan_id\":\"<64hex>\",\"confirm\":true}'",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_WALLET, ZCL_COMMAND_SCOPE_NODE,
+    ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_HIGH,
+    ZCL_COMMAND_CONFIRM_IDEMPOTENCY,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_WALLET_REQUEST, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    zcl_native_handle_market_purchase_commit)
+
+ZCL_COMMAND_READY_READ(
+    "app.market.purchase.status", "app.market.purchase", "",
+    "Read one durable market purchase state",
+    "Reconstructs the public, path-free purchase view from encrypted intent "
+    "state: exact range, value, fee reservation, state, txid and claim ID when "
+    "present, plus path-free durable download progress and publication state. "
+    "Buyer credentials, addresses, memo, paths, endpoints and keys are never "
+    "returned.", 0,
+    "market,buy,purchase,payment,status,txid,claim,download",
+    "zcl.app_market_purchase_status.input.v1", "zcl.market_purchase.v1",
+    "plan_id", "plan_id",
+    "z23 app market purchase status --input='{\"plan_id\":\"<64hex>\"}'",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OWNER,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_WALLET_REQUEST, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_market_purchase_status)
+
+ZCL_COMMAND_READY_COMMAND(
+    "app.market.purchase.retrieve", "app.market.purchase", "",
+    "Retrieve and atomically publish a paid file",
+    "Uses the encrypted buyer credential retained by the committed plan to "
+    "target the exact signed seller endpoint. It accepts only a full-file "
+    "payment, authenticates every session-bound request and reply, fsyncs and "
+    "persists sequential chunk progress, re-verifies staged bytes after "
+    "restart, verifies the complete signed manifest root, and atomically "
+    "publishes into an existing owner-selected directory. The destination, "
+    "staging path, endpoint, credential, addresses, and memo are absent from "
+    "results and logs.", 0,
+    "market,buy,purchase,retrieve,download,manifest,resume,publish",
+    "zcl.app_market_purchase_retrieve.input.v1", "zcl.market_purchase.v1",
+    "plan_id,destination_path", "plan_id,destination_path",
+    "printf '%s' '{\"plan_id\":\"<64hex>\",\"destination_path\":\"/private/output.bin\"}' | z23 app market purchase retrieve --input=-",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_NODE,
+    ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_HIGH,
+    ZCL_COMMAND_CONFIRM_NONE,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_P2P_TOPIC, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    zcl_native_handle_market_purchase_retrieve)
+
+ZCL_COMMAND_READY_COMMAND(
+    "app.market.offer", "app.market", "", "Announce a file for sale",
+    "Builds the canonical chunk manifest from a private local file, mints or "
+    "loads the owner-controlled seller signing key (encrypted under the "
+    "wallet metadata DEK, same custody as purchase plans), binds a fresh "
+    "wallet Sapling payee address, signs the self-authenticating "
+    "zfileoffer.v1 contract, persists it, binds the private content for paid "
+    "chunk serving, and floods the exact signed wire from the origin. A "
+    "first call without confirm:true hashes and prices the file without "
+    "mutating anything; only the confirmed call persists, binds, and "
+    "announces. Requires -externalip so the signed endpoint is reachable. "
+    "Re-commit of the same live offer replays idempotently without "
+    "re-announcing. The private filepath is absent from results and logs.", 0,
+    "market,offer,sell", "zcl.app_market_offer.input.v1",
+    "zcl.app_market_offer_result.v1", "filepath,price_per_mb_zat,confirm", "",
+    "z23 app market offer --input='{\"filepath\":\"/data/f\",\"price_per_mb_zat\":1000}'",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_APP_WRITE,
+    ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_CONFIRM_PLAN_COMMIT,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_P2P_TOPIC, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    zcl_native_handle_market_offer)
+
+/* ── Per-node hosting + listing moderation ─────────────────────────── */
+
+ZCL_COMMAND_READY_READ(
+    "app.market.moderation.guide", "app.market.moderation", "",
+    "Show the marketplace moderation boundary",
+    "Renders the live pure-calculation surface and the static authority "
+    "boundary. It reads no profile file, review mark, offer cache, storage, "
+    "network, or signed-wire state.", ZCL_COMMAND_LIST_BUDGET,
+    "market,moderation,guide,workflow,hotswap,boundary",
+    "zcl.app_market_moderation_guide.input.v1",
+    "zcl.app_market_moderation_guide.v1", "", "",
+    "z23 app market moderation guide",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_PUBLIC, ZCL_COMMAND_LATENCY_INSTANT,
+    ZCL_COMMAND_COST_TINY,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_market_moderation_guide)
+
+ZCL_COMMAND_READY_READ(
+    "app.market.moderation.status", "app.market.moderation", "",
+    "Show this node's market moderation posture",
+    "The node's own moderation posture: local review_state counts over "
+    "stored offers plus the TWO independently-valued rules — serve_rule "
+    "(what this node hands out; default general-audience.v1, reviewed_ok "
+    "only) and relay_rule (whether it forwards other people's offer "
+    "announcements; default relay-all.v1, yes). They have separate defaults "
+    "and separate set commands, and neither moves the other. No "
+    "network-wide bans and no deletion authority: a hidden offer stays "
+    "stored with its signed wire intact and stays reachable from any node "
+    "that does host it, and neither rule reaches block or transaction "
+    "acceptance.", 0,
+    "market,moderation,status,profile,review",
+    "zcl.command.empty_input.v1", "zcl.market_moderation_status.v1",
+    "", "", "z23 app market moderation status",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_P2P_TOPIC, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_market_moderation_status)
+
+ZCL_COMMAND_READY_READ(
+    "app.market.moderation.profile.show", "app.market.moderation.profile",
+    "", "Describe one immutable moderation profile",
+    "What one named per-node listing-visibility profile shows and hides, "
+    "and whether it is the active one here. Profiles are immutable and "
+    "named — the node picks one; it never edits one.", 0,
+    "market,moderation,profile,show",
+    "zcl.app_market_moderation_profile_show.input.v1",
+    "zcl.market_moderation_profile.v1", "profile", "profile",
+    "z23 app market moderation profile show --input='{\"profile\":\"open-view\"}'",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_P2P_TOPIC, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE,
+    zcl_native_handle_market_moderation_profile_show)
+
+ZCL_COMMAND_READY_COMMAND(
+    "app.market.moderation.profile.set", "app.market.moderation.profile",
+    "", "Set this node's listing-visibility profile",
+    "Exact plan/commit over the node's own moderation profile, persisted "
+    "to <datadir>/market/moderation.v1. mode=plan mints a plan_token bound "
+    "to the current active profile and the target; mode=commit requires "
+    "that token (STALE_PLAN after any concurrent change). Boot default is "
+    "the immutable general-audience.v1 (unreviewed and sensitive offers are "
+    "kept but neither listed nor served from here); open-view is the named "
+    "opt-in showing and hosting everything ingested. This is the SERVE leg "
+    "only — relay is a separate rule with its own default, set by "
+    "app.market.moderation.relay.set, and this command never moves it. A "
+    "local decision that binds no other node and never touches consensus.", 0,
+    "market,moderation,profile,set,policy",
+    "zcl.app_market_moderation_profile_set.input.v1",
+    "zcl.market_moderation_profile_set.v1",
+    "profile,mode,plan_token", "profile,mode",
+    "z23 app market moderation profile set --input='{\"profile\":\"open-view\",\"mode\":\"plan\"}'",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_NODE,
+    ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_CONFIRM_PLAN_COMMIT,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_P2P_TOPIC, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    zcl_native_handle_market_moderation_profile_set)
+
+ZCL_COMMAND_READY_COMMAND(
+    "app.market.moderation.relay.set", "app.market.moderation.relay",
+    "", "Set this node's offer-relay rule",
+    "Exact plan/commit over the node's own RELAY rule, persisted to "
+    "<datadir>/market/moderation.v1 alongside, and independent of, the "
+    "serve profile — setting one leg never moves the other, and their plan "
+    "tokens are not interchangeable. Boot default is relay-all.v1: forward "
+    "every valid offer announcement. Relaying passes on a POINTER, not "
+    "content, so gating it by default would cut an honest seller's reach to "
+    "one hop and hand discovery to whoever has operators awake. "
+    "relay-reviewed-only.v1 is the opt-in that forwards only offers this "
+    "node marked reviewed_ok; refusals stay counted, never silently "
+    "dropped. A local decision that binds no other node and never touches "
+    "consensus.", 0,
+    "market,moderation,relay,gossip,set,policy",
+    "zcl.app_market_moderation_relay_set.input.v1",
+    "zcl.market_moderation_relay_set.v1",
+    "relay_rule,mode,plan_token", "relay_rule,mode",
+    "z23 app market moderation relay set --input='{\"relay_rule\":\"relay-reviewed-only.v1\",\"mode\":\"plan\"}'",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_NODE,
+    ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_CONFIRM_PLAN_COMMIT,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_P2P_TOPIC, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    zcl_native_handle_market_moderation_relay_set)
+
+ZCL_COMMAND_READY_COMMAND(
+    "app.market.moderation.review.set", "app.market.moderation.review", "",
+    "Mark one offer's local review_state",
+    "The node's OWN curation mark on one signed offer: sets the local-only "
+    "review_state (unreviewed / reviewed_ok / sensitive) and writes one "
+    "audit log line per mark. The mark is never gossiped, never enters the "
+    "signed wire, and never deletes anything — the offer stays stored, "
+    "served, and tradable; only this node's listing view changes. Exact "
+    "plan/commit: mode plan mints a plan_token bound to the offer's current "
+    "mark and the target; commit requires that token (STALE_PLAN if the "
+    "mark moved in between). A local decision that binds no other node and "
+    "never touches consensus.", 0,
+    "market,moderation,review,mark,curation",
+    "zcl.app_market_moderation_review_set.input.v1",
+    "zcl.market_review_set.v1",
+    "offer_id,review_state,mode,plan_token", "offer_id,review_state,mode",
+    "z23 app market moderation review set --input='{\"offer_id\":\"<64hex>\",\"review_state\":\"reviewed_ok\",\"mode\":\"plan\"}'",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_NODE,
+    ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_CONFIRM_PLAN_COMMIT,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_P2P_TOPIC, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    zcl_native_handle_market_moderation_review_set)
+
+ZCL_COMMAND_PLANNED_COMMAND(
+    "app.market.buy", "app.market", "", "Buy and download a market file",
+    "Will provide an optional one-shot coordinator over the shipped explicit "
+    "app.market.purchase plan, commit, status, and retrieve workflow. It "
+    "remains unbound so owner review between reservation and broadcast cannot "
+    "be bypassed by the legacy shortcut.", 0,
+    "market,buy,download", "zcl.app_market_buy.input.v1",
+    "zcl.app_market_buy_result.v1", "wallet_scope,root_hash,confirm", "root_hash",
+    "z23 app market buy --input='{\"root_hash\":\"<64hex>\"}'",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_WALLET,
+    ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_CONFIRM_PLAN_COMMIT,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_WALLET_REQUEST, ZCL_COMMAND_TRAIT_NONE,
+    "the explicit app.market.purchase plan, commit, status, and retrieve "
+    "commands implement the complete reviewed workflow; the optional one-shot "
+    "coordinator still needs an owner-review-preserving design. The legacy "
+    "zmarket_buy placeholder refuses without starting a session")
+
+/* ── Store (the /store storefront) ───────────────────────────────────
+ *
+ * NOT the ZCL Market above. app.market.* gossips file offers over P2P and is
+ * PLANNED because nothing announces a locally created offer. app.store.* is
+ * the shipped storefront served at /store — per-order Sapling payment
+ * addresses, memo-bound reconciliation, token-gated download — and its
+ * merchant side is executable here.
+ *
+ * These leaves address `<datadir>/node.db` directly (input.datadir, else the
+ * process --datadir), exactly as the /store HTTP handler does on every
+ * request. That is why a product listed here needs no restart to appear, and
+ * why the command also works against a stopped node's datadir. */
+
+ZCL_COMMAND_READY_COMMAND(
+    "app.store.list-product", "app.store", "",
+    "List a product for sale in the store",
+    "The product row as the store will serve it, re-read from the products "
+    "table after the write (not an echo of the request): its assigned id, "
+    "normalized token_id, price in both units, and — when a file was "
+    "attached — the SHA3-256 of the stored FILE BYTES. Refuses rather than "
+    "half-lists: an unreadable/empty/over-cap content_path or a token_id an "
+    "active product already holds writes nothing.", 0,
+    "store,product,sell,merchant,listing",
+    "zcl.app_store_list_product_input.v1", "zcl.app_store_product.v1",
+    "datadir,name,description,price_zcl,price_zatoshi,token_id,"
+    "tokens_per_purchase,content_path,content_type,content_filename", "",
+    "z23 app store list-product --input='{\"name\":\"Field guide\","
+    "\"token_id\":\"GUIDE\",\"price_zcl\":0.25,"
+    "\"content_path\":\"/srv/guide.pdf\"}'",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_NODE,
+    ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_NONE,
+    zcl_native_handle_store_list_product)
+
+ZCL_COMMAND_READY_READ(
+    "app.store.products", "app.store", "", "List the store's active products",
+    "Every ACTIVE product the storefront will show, read from the products "
+    "table at call time — the same rows /store renders, whether they were "
+    "written by app.store.list-product, by the store/products.json loader, "
+    "or by the built-in demo seed. Inactive products are omitted.",
+    ZCL_COMMAND_LIST_BUDGET,
+    "store,products,catalog,listing", "zcl.app_store_products_input.v1",
+    "zcl.app_store_products.v1", "datadir", "",
+    "z23 app store products",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_SCOPE_NODE,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_LATENCY_FAST,
+    ZCL_COMMAND_COST_LOW, ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_store_products)
+
+/* ── Atomic swaps (ZSWP) ───────────────────────────────────────────── */
+
+ZCL_COMMAND_READY_READ(
+    "app.swap.chains", "app.swap", "", "List supported atomic-swap chains",
+    "The set of chains supported for cross-chain atomic swaps (ZCL, BTC, LTC, "
+    "DOGE), read from the node at call time.", ZCL_COMMAND_LIST_BUDGET,
+    "swap,zswp,chains", "zcl.command.empty_input.v1", "zcl.app_swap_chains.v1",
+    "", "", "z23 app swap chains",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_WALLET_REQUEST, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_bridge_command)
+
+ZCL_COMMAND_READY_READ(
+    "app.swap.list", "app.swap", "", "List atomic-swap contracts",
+    "Every atomic-swap contract the node tracks, optionally filtered by state, "
+    "read live at call time; bounded to the list budget row cap.",
+    ZCL_COMMAND_LIST_BUDGET,
+    "swap,zswp,list", "zcl.app_swap_list.input.v1", "zcl.app_swap_index.v1",
+    "state", "state", "z23 app swap list --input='{\"state\":\"pending\"}'",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_WALLET_REQUEST, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_bridge_command)
+
+/* Both swap leaves are READY. Neither moves funds: swap_initiate /
+ * swap_participate mint an HTLC contract row (secret, redeem script, P2SH
+ * address) and persist it — the operator funds the returned P2SH address
+ * separately, and settlement is swap_redeem / swap_refund. locktime_blocks is
+ * a DURATION from the current tip; swap_locktime_to_absolute fails closed on a
+ * non-ZCL chain or an unknown tip rather than minting a contract whose CLTV
+ * would already be refundable. */
+
+ZCL_COMMAND_READY_COMMAND(
+    "app.swap.initiate", "app.swap", "", "Initiate an atomic swap",
+    "Plan/commit HTLC mint: without confirm, a non-mutating plan; with "
+    "confirm:true, the freshly minted contract from swap_initiate at call "
+    "time (stage=committed) — a generated secret and its SHA-256 hash, the "
+    "97-byte redeem script, and the P2SH address to fund. No funds move: this "
+    "call broadcasts nothing, and the swap only becomes live once you pay the "
+    "returned p2sh_address. locktime is stored as an absolute CLTV height "
+    "(tip + locktime_blocks); ZCL chain only.", 0,
+    "swap,zswp,initiate", "zcl.app_swap_initiate.input.v1",
+    "zcl.app_swap_contract.v1",
+    "wallet_scope,my_address,counter_address,amount,locktime_blocks,chain,confirm", "",
+    "z23 app swap initiate --input='{\"my_address\":\"t1..\",\"counter_address\":\"t1..\",\"amount\":1,\"locktime_blocks\":20,\"confirm\":true}'",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_WALLET,
+    ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_CONFIRM_PLAN_COMMIT,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_WALLET_REQUEST, ZCL_COMMAND_TRAIT_NONE,
+    zcl_native_handle_swap_initiate)
+
+ZCL_COMMAND_READY_COMMAND(
+    "app.swap.participate", "app.swap", "", "Participate in an atomic swap",
+    "Plan/commit counter-HTLC mint: without confirm, a non-mutating plan; "
+    "with confirm:true, the counter-contract from swap_participate at call "
+    "time (stage=committed) built against the initiator's secret_hash, with "
+    "no secret of its own. No funds move — fund the returned p2sh_address to "
+    "activate it. Pass a locktime_blocks SHORTER than the initiator's; it is "
+    "stored as an absolute CLTV height (tip + locktime_blocks), ZCL chain "
+    "only.", 0,
+    "swap,zswp,participate", "zcl.app_swap_participate.input.v1",
+    "zcl.app_swap_contract.v1",
+    "wallet_scope,my_address,counter_address,amount,locktime_blocks,secret_hash,chain,confirm",
+    "",
+    "z23 app swap participate --input='{\"my_address\":\"t1..\",\"counter_address\":\"t1..\",\"amount\":1,\"locktime_blocks\":10,\"secret_hash\":\"<64hex>\",\"confirm\":true}'",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_WALLET,
+    ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_CONFIRM_PLAN_COMMIT,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_WALLET_REQUEST, ZCL_COMMAND_TRAIT_NONE,
+    zcl_native_handle_swap_participate)

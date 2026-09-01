@@ -24,7 +24,7 @@ replacement for the sovereign (self-derived) cure.
 
 ## Data model
 
-**`anchor_kv`** (`lib/storage/src/anchor_kv.c`):
+**`anchor_kv`** (`engine/modules/storage/src/anchor_kv.c`):
 `sprout_anchors(anchor BLOB PK, height INTEGER, tree BLOB)` and
 `sapling_anchors(...)` — the value is the **complete incremental frontier**,
 not just the root (`anchor_kv.h`) — plus `anchor_state(pool PK,
@@ -32,12 +32,12 @@ activation_cursor)`. Sole per-root writer: `anchor_kv_add_tree(db, pool, tree,
 height)` — `INSERT OR IGNORE`, idempotent, empty-root no-op. Lookup
 `anchor_kv_get` returns `ANCHOR_KV_FOUND` / `ANCHOR_KV_HISTORY_INCOMPLETE`
 (missing **and** `activation_cursor > 0`) — never a silent forge. The blocker
-`utxo_apply_anchor_gap_blocker_refresh` (`app/jobs/src/utxo_apply_anchors.c`)
+`utxo_apply_anchor_gap_blocker_refresh` (`engine/jobs/src/utxo_apply_anchors.c`)
 reads `anchor_kv_activation_cursor` for both pools and raises the permanent
 blocker `utxo_apply.anchor_backfill_gap` on `incomplete`, clearing only when
 both pools report `activation_cursor == 0`.
 
-**`nullifier_kv`** (`lib/storage/src/nullifier_kv.c`):
+**`nullifier_kv`** (`engine/modules/storage/src/nullifier_kv.c`):
 `nullifiers(nf BLOB, pool INTEGER, height INTEGER, PRIMARY KEY(nf,pool))` +
 `idx_nullifiers_height`. Sole writer: `nullifier_kv_add(db, nf, pool,
 height)` — `INSERT OR REPLACE`. `nullifier_kv_get` fails **closed** on any
@@ -55,7 +55,7 @@ nullifier side.
 
 ZClassic headers commit `hashFinalSaplingRoot` (Heartwood was never activated
 on this chain, so the field was never repurposed) — `struct block_header`
-(`lib/primitives/include/primitives/block.h`), mirrored in
+(`core/modules/primitives/include/primitives/block.h`), mirrored in
 `struct block_index`. An imported **Sapling** frontier's root is therefore
 byte-verifiable against `block_index.hashFinalSaplingRoot` at any height. The
 **Sprout** frontier has no header commitment; its trust bottoms out at the
@@ -80,12 +80,12 @@ spend against — the completeness property the importer relies on.
 
 ## The importer
 
-Reused foundation: `lib/storage/src/chainstate_legacy_reader.c` (clean-room
+Reused foundation: `engine/modules/storage/src/chainstate_legacy_reader.c` (clean-room
 C23 reader over the `zclassicd` chainstate LevelDB), the wire-compatible tree
 codec `incremental_tree_serialize/deserialize`
-(`lib/sapling/include/sapling/incremental_merkle_tree.h`), and the
+(`core/modules/sapling/include/sapling/incremental_merkle_tree.h`), and the
 WAL-inclusive stable copy `utxo_recovery_copy_chainstate_stable`
-(`app/services/src/utxo_recovery_service.c`) — a full `cp -a` of the
+(`engine/services/src/utxo_recovery_service.c`) — a full `cp -a` of the
 chainstate (SSTs + the `.log` WAL) proven point-in-time by a dir signature.
 The SST-only `ldb_snapshot_make` is NOT usable here: it drops the `.log`
 WAL, so the `'B'`/`'z'` pointers read the last compacted state while coin
@@ -99,7 +99,7 @@ fail-closed root re-hash check per row), `chainstate_legacy_iter_sapling_nullifi
 (by-root lookup, `FOUND`/not-found), `chainstate_legacy_get_best_sapling_anchor`
 / `_best_sprout_anchor` (`'z'`/`'a'` pointers — provenance only, never the bind).
 
-Service: `app/services/src/shielded_history_import_service.c` —
+Service: `engine/services/src/shielded_history_import_service.c` —
 `shielded_history_import_from_chainstate(progress_db, chainstate_src_path,
 height, block_hash, sapling_root, out)`. Algorithm: point-in-time copy the
 chainstate → require its `'B'` best block to equal the target resume block
@@ -138,7 +138,7 @@ a seeded boot's fold-resume anchor is a header-only height — canary FAIL#6)
 and NOT the event-log block_index projection (a bulk P2P header sync emits
 no EV_BLOCK_HEADER events, so the projection is empty on a fresh
 cold-import datadir — canary FAIL#7). The point reader
-(`block_index_flat_header_at`, app/services/src/block_index_loader.c)
+(`block_index_flat_header_at`, engine/services/src/block_index_loader.c)
 mmaps the flat, verifies the embedded BIIE SHA3 (legacy sidecar-only files
 are refused — a bind this load-bearing does not read unverified bytes), and
 binary-searches the height-sorted 172-byte rows; its format math is proven
@@ -148,7 +148,7 @@ service's by-root source lookup (a sibling never connected has no anchor
 record), never a misbind.
 
 Entry point: boot flag `-import-complete-shielded=ZCLASSICD-DATADIR`
-(`src/main.c`, `import_complete_shielded_mode`) — not a native command.
+(`engine/entry/main.c`, `import_complete_shielded_mode`) — not a native command.
 `import_shielded_is_live_datadir()` refuses `~/.zclassic-c23` and
 `~/.zclassic-c23-mint` by construction, so it only runs against an operator
 `-datadir=<COPY>`. On success it prints `IMPORT COMPLETE (committed=1):

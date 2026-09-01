@@ -2,9 +2,9 @@
 
 Client half of [`docs/ROM_DELIVERY.md`](../ROM_DELIVERY.md): pulls the
 two-builder-verified consensus-state bundle from a seeding peer instead of
-paying the from-genesis fold. The serving side (`lib/net/src/rom_seed.c`,
-`fs_serve_rom_chunk`) and the fetch side (`lib/net/src/rom_fetch.c`,
-`app/controllers/src/rom_fetch_controller.c`) are both implemented; do not
+paying the from-genesis fold. The serving side (`core/modules/net/src/rom_seed.c`,
+`fs_serve_rom_chunk`) and the fetch side (`core/modules/net/src/rom_fetch.c`,
+`engine/controllers/src/rom_fetch_controller.c`) are both implemented; do not
 build another transport.
 
 ## Trust model (inviolable — do not create a third activation door)
@@ -41,7 +41,7 @@ design, not a gap.
 - `rom_fetch_download_parallel` — bounded multi-seeder worker pool with a
   shared chunk queue and per-chunk round-robin retry across all peers.
 - `ops.debug.rom_fetch.{status,bundle}` native commands
-  (`app/controllers/src/rom_fetch_controller.c`); `bundle` is owner-auth and
+  (`engine/controllers/src/rom_fetch_controller.c`); `bundle` is owner-auth and
   takes the expected `(root, whole_sha3, size)` as explicit input.
 - `dumpstate rom_fetch` state introspection.
 

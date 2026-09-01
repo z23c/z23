@@ -2,7 +2,7 @@
 # Lint gate #16 — typed blocker primitive adoption.
 #
 # Goal: every "this is blocked" signal in the codebase is a typed
-# blocker_record routed through `blocker_set()` (lib/util/blocker.h),
+# blocker_record routed through `blocker_set()` (platform/modules/util/blocker.h),
 # not a raw `char *_blocker[N]` string field or a bare `state == "blocked"`
 # bool. The typed primitive is the only path with rate-limiting,
 # escape dispatch, retry budget, and class-aware policy.
@@ -28,7 +28,7 @@
 #   - appear in `tools/scripts/typed_blocker_baseline.txt`.
 #
 # To clean up debt: pick a baseline entry, migrate it to blocker_set()
-# (see app/services/src/block_source_policy_runtime.c
+# (see engine/services/src/block_source_policy_runtime.c
 # classify_mirror_blocker_class() + score_source for the typed pattern),
 # delete the baseline line, re-run `make lint`.
 set -euo pipefail
@@ -45,7 +45,7 @@ while IFS= read -r line; do
 done < "$BASELINE"
 
 # Scan only production code (not tests, not vendor).
-roots=(app/services app/controllers lib/validation lib/util lib/net)
+roots=(app/services app/controllers core/modules/validation platform/modules/util core/modules/net)
 
 fail=0
 new_violations=()
@@ -55,7 +55,7 @@ for root in "${roots[@]}"; do
         [ -f "$f" ] || continue
         # Skip the typed primitive itself and its tests.
         case "$f" in
-            lib/util/src/blocker.c|lib/util/include/util/blocker.h) continue ;;
+            platform/modules/util/src/blocker.c|platform/modules/util/include/util/blocker.h) continue ;;
         esac
         # Match a raw blocker site.
         if ! grep -qE 'char[[:space:]]+[a-z_]*_blocker(_code)?\[|lms_set_blocker\(|g_[a-z_]*\.last_blocker_code\b' "$f"; then
@@ -92,7 +92,7 @@ done
 echo ""
 echo "Fix options (preferred → fallback):"
 echo "  1. Call blocker_set() to register the blocker through the typed"
-echo "     primitive. See app/services/src/block_source_policy_runtime.c"
+echo "     primitive. See engine/services/src/block_source_policy_runtime.c"
 echo "     classify_mirror_blocker_class() for the classification pattern."
 echo "  2. Add a per-file marker '// blocker-ok:<tag>' explaining why"
 echo "     this site uses raw strings (typically: scheduled for migration"

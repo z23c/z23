@@ -1,10 +1,10 @@
 # E2 check-one-result-type baseline — service .c files that predate the
 # struct zcl_result discipline (DEFENSIVE_CODING.md §2). Each file here is
-# grandfathered: it returns bare bool/int today. A NEW app/services/src/*.c
+# grandfathered: it returns bare bool/int today. A NEW engine/services/src/*.c
 # file not in this list must use struct zcl_result.
 #
 # This baseline may ONLY SHRINK. To pay down debt: migrate a file's fallible
 # functions to struct zcl_result (ZCL_OK / ZCL_ERR), then delete its line
 # here — the gate will enforce that it stays migrated.
 #
-# One path per line, repo-relative. The gate scans app/services/src/*.c only.
+# One path per line, repo-relative. The gate scans engine/services/src/*.c only.

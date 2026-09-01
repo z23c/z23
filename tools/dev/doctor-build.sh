@@ -107,7 +107,7 @@ if have clangd; then
         "C23 language server over compile_commands.json (make agent-index; ff warns when stale)"
 else
     absent clangd "no language-server indexing of the tree" \
-        "no iteration-time cost — clangd is optional; lib/codeindex + \`make agent-index\` cover agent-side navigation. Install only if you want IDE go-to-def"
+        "no iteration-time cost — clangd is optional; cognition/modules/codeindex + \`make agent-index\` cover agent-side navigation. Install only if you want IDE go-to-def"
 fi
 
 echo ""

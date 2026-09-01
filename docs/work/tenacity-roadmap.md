@@ -36,7 +36,7 @@ standing-nightly-replay institution (commitment == zclassicd
 
 ### 3. Reindex epilogue derivation — recovery must not manufacture the next wedge
 
-`reindex_epilogue.c` (wired at `config/src/boot_index.c:402`), guarded by
+`reindex_epilogue.c` (wired at `engine/composition/src/boot_index.c:402`), guarded by
 `test_reindex_epilogue.c`. The epilogue derives in one ordered commit:
 reseeds `coins_kv` from the replayed set, recomputes (never deletes) the
 SHA3 commitment, clamps the reducer cursors to the replayed tip.
@@ -67,7 +67,7 @@ never written. Doctrine home: `docs/TENACITY.md`.
 Window inventory (everything > S; all IS, survey-verified): the 8 stage cursors + 8 stage logs in progress.kv; `coins`/`nullifiers` rows above S + `utxo_apply_delta` inverses (the one window artifact the verb reads, only to invert it); `coins_applied_height`; `created_outputs_index`; misc `progress_meta` markers; the node.db `utxos` mirror + `node_state` keys (`coins_best_block`, `utxo_commitment`, `utxo_sha3`, tip pair, sapling_tree); the tip_finalize last-advance pair; block_map verdict bits above S (the header *tree* below S is sealed; *verdicts* above S are window); `pindex_best_header` projection; dirty coins cache; projection-db residue; the rolling-anchor runtime evidence file. NOT window: the rebuild/reindex sentinels, the seal ring, blocks/ files, the read-only LevelDB import source.
 
 #### 4c. The primitive — `window_rebuild`
-- **Home:** `app/jobs/src/window_rebuild.c` (+ header) — a Job: the reducer resetting its own state via the stages' storage contracts. Sentinel: `lib/storage/src/window_rebuild_sentinel.c`, byte-for-byte the `boot_auto_reindex.h` pattern (request/pending/clear, fsync-durable, `WINDOW_REBUILD_MAX=3`).
+- **Home:** `engine/jobs/src/window_rebuild.c` (+ header) — a Job: the reducer resetting its own state via the stages' storage contracts. Sentinel: `engine/modules/storage/src/window_rebuild_sentinel.c`, byte-for-byte the `boot_auto_reindex.h` pattern (request/pending/clear, fsync-durable, `WINDOW_REBUILD_MAX=3`).
 - **Crash-only execution:** a runtime trigger only writes the sentinel (typed reason + anchor + attempt) and requests a restart; the verb runs ONLY at boot, after block_index load and before any stage thread starts. A crash during rebuild looks like a fresh trigger (sentinel clears only after post-rebuild verify); the attempt budget burns honestly across crashes.
 - **Steps:** (1) log `window_rebuild begin reason=… attempt=N`; (2) select S = newest self-hash-valid *ratified* seal, else the compiled checkpoint; (3) discard the window in ONE progress.kv `BEGIN IMMEDIATE`: unwind coins/nullifiers C→S+1 via `utxo_apply_delta_reorg.c` (fork-point generalized to S), delete the 8 stage logs above S, reset all 8 cursors to S (one anchor row in tip_finalize_log, the trusted-seed stamp pattern), `coins_applied_height := S`; (4) recompute coins + nullifier SHA3 and verify vs the seal (+count/supply) — mismatch steps the ring back one seal and repeats; (5) reset derived mirrors FROM the just-verified seal values (closes item 3's delete-but-never-recompute gap), clear verdict bits above S; (6) replay forward S+1→target on the reindex connect path (`boot_index.c:183-305` grown a start-height parameter); a missing body above S just stops the replay — the rest is re-fetched by the stages after resume; (7) reseal at the highest grid point ≤ frontier, run the boot integrity gate, clear the sentinel, resume; (8) budget: 120 s wall (17× headroom), 3 attempts ⇒ fall back one rung to full auto-reindex from the compiled anchor (kept verbatim) ⇒ if that also exhausts, **page** (`EV_OPERATOR_NEEDED` + typed trail). The verb never reads/re-fetches below S — sealed-domain corruption pages, always.
 - **Entry points:** runtime `window_rebuild_trigger(reason, anchor)` from every §4d site; boot direct-call from `boot_crashonly.c` classification and the coins-integrity gate; operator: one typed native recovery command plus `z23 ops state --subsystem=seal`.
@@ -116,7 +116,7 @@ re-derive LOC estimates here.
 - **Ladder removal proof:** grep-zero-callers per module before each delete; build + lint (incl. the new ratchet + E13) + **test_parallel 0/409 green** after every wave; canaries #5/#7 green 7 consecutive days with the ladder gone.
 - **Size:** M1–M2 ≈ 1 session each; M3–M4 ≈ 2 sessions, mechanical after fixtures exist.
 
-### 5. Standing full-history replay canary — DONE (harness + gate): `tools/scripts/replay_canary.sh` + `tools/scripts/isolated_mainnet_env.sh` spawn an isolated mainnet node, import headers read-only vs `~/.zclassic`, seed the UTXO snapshot to anchor 3,056,758, replay anchor→tip, and assert (a) bg_validation COMPLETE with zero header-admit rejects, (b) the compiled anchor checkpoint passes without integrity FATAL, (c) coarse UTXO stats match co-located zclassicd `gettxoutsetinfo`. A weekly variant replays genesis→tip. The authoritative verdict is a sentinel FILE (`~/.local/state/zclassic23-canary/replay_canary_<from>.json`, atomic tmp+sync+rename) written only after every assertion passes — shell exit is advisory only, drives `OnFailure=` paging. Guarded by hermetic gate `lib/test/src/test_replay_canary_verdict.c` (in `make ci`), which red-fails on seeded known-bad reducers and green-passes clean fixtures.
+### 5. Standing full-history replay canary — DONE (harness + gate): `tools/scripts/replay_canary.sh` + `tools/scripts/isolated_mainnet_env.sh` spawn an isolated mainnet node, import headers read-only vs `~/.zclassic`, seed the UTXO snapshot to anchor 3,056,758, replay anchor→tip, and assert (a) bg_validation COMPLETE with zero header-admit rejects, (b) the compiled anchor checkpoint passes without integrity FATAL, (c) coarse UTXO stats match co-located zclassicd `gettxoutsetinfo`. A weekly variant replays genesis→tip. The authoritative verdict is a sentinel FILE (`~/.local/state/zclassic23-canary/replay_canary_<from>.json`, atomic tmp+sync+rename) written only after every assertion passes — shell exit is advisory only, drives `OnFailure=` paging. Guarded by hermetic gate `tests/harness/src/test_replay_canary_verdict.c` (in `make ci`), which red-fails on seeded known-bad reducers and green-passes clean fixtures.
   **OPEN (owner-gated):** install the systemd timers (`deploy/examples/zclassic23-replay-canary-*`), accumulate 7 consecutive green nights, then flip the `docs/MVP.md` rows from ◐.
 
 ### 6. Chain-derived golden extremals for every bounded consensus predicate *(OPEN)*
@@ -161,7 +161,7 @@ these harden the bridge.
 - **(b) Cold-import restart-fragility — OPTION 1 *(keystone)*.** Stop the destructive
   `zclassicd_import_best` backward commit (and the clamped flat re-save) when the
   node's own derived frontier is **strictly above** zclassicd's index tip. Derive the
-  frontier via `boot_derive_coins_best(&ndcb)` (`config/src/boot.c:820`); suppress
+  frontier via `boot_derive_coins_best(&ndcb)` (`engine/composition/src/boot.c:820`); suppress
   `boot_promote_tip_via_csr(best, "zclassicd_import_best", false)` (`:2110-2113`) ONLY
   when `have_ndcb && ndcb.height > zcd_best_h` (**strictly** `>`); emit a loud WARN +
   `EV_RECOVERY_ACTION zcd_import_tip_suppressed`. Keep the index import + blk-file
@@ -232,18 +232,18 @@ these harden the bridge.
 ## Hold-class doctrine
 
 The stickiness invariant applied to reducer holds: **a stall must always be a
-NAMED typed blocker (`lib/util/include/util/blocker.h`) with either an auto-remedy
+NAMED typed blocker (`platform/modules/util/include/util/blocker.h`) with either an auto-remedy
 condition or an honest, documented owner-gate rationale** — never a bare
 fail-closed refusal invisible to `z23 core sync blockers` /
 `z23 dumpstate subsystem=blocker`. An audit of every fail-closed hold
-in `app/jobs/src/` (`utxo_apply`, `script_validate`, `proof_validate`,
+in `engine/jobs/src/` (`utxo_apply`, `script_validate`, `proof_validate`,
 `coin_backfill`) found 12 typed hold sites; the generic backstop
-(`app/conditions/src/blocker_stall_meta_detector.c`) now arms the sticky
+(`engine/conditions/src/blocker_stall_meta_detector.c`) now arms the sticky
 escalator + pages by blocker id for any hold whose H\*-freeze exceeds the
 window, covering every *typed* hold even with an empty `escape_action` — it
 is a backstop, not a substitute for an instance cure.
 
-**Still-open defect:** `app/jobs/src/utxo_apply_delta_repair.c`'s
+**Still-open defect:** `engine/jobs/src/utxo_apply_delta_repair.c`'s
 value-overflow repair owner-gate refuses via four bare local flags
 (`author_refused`/`owner_refused`/`cursor_stale_refused`/`walk_torn_refused`)
 with **no `blocker_set` call anywhere in the file** — invisible to the
@@ -253,7 +253,7 @@ env-ack gate. Fix: give it a typed `DEPENDENCY` blocker
 (`utxo_apply.value_overflow_owner_gate`) mirroring `coin_backfill_page_refusal`.
 (The audit's other two flagged defects are resolved: the nullifier-backfill
 no-auto-remedy gap has an owner-gated populate-only walker,
-`app/services/src/nullifier_backfill_service.c`; the
+`engine/services/src/nullifier_backfill_service.c`; the
 `proof_validate.internal_error` transient-held-permanent class is backstopped
 by the meta-detector above.)
 
@@ -275,16 +275,16 @@ before starting):
 - **Local band-fill from already-hardlinked zclassicd bodies** — scan local
   `blk*.dat` instead of crawling the ~12k-block band over P2P at
   ~160 headers/round-trip when the bodies are already on local disk.
-- **`system("cp …")` block-file copy** (`config/src/boot.c`) should be a
+- **`system("cp …")` block-file copy** (`engine/composition/src/boot.c`) should be a
   checked in-process copy that refuses-to-bless + pages on a failed/truncated
   copy instead of proceeding silently.
 - **Chain-aware peer-floor "healthy" definition** — count a peer toward the
   anti-eclipse floor only if it recently served a header/block at/above our
   tip; never lower the floor.
 - **DRY backlog** (~900 duplicated lines, each its own reviewed change):
-  the 8 `lib/storage/src/*_projection.c` lifecycle preambles (~340 lines);
-  the `adapters/outbound/persistence/*` scalar-read idiom (~160 lines); the
-  8 `app/jobs/src/*_stage.c` reducer-stage prologue + the `*_log_store.c`
+  the 8 `engine/modules/storage/src/*_projection.c` lifecycle preambles (~340 lines);
+  the `platform/adapters/outbound/persistence/*` scalar-read idiom (~160 lines); the
+  8 `engine/jobs/src/*_stage.c` reducer-stage prologue + the `*_log_store.c`
   cross-table readers (~200 lines, consensus-adjacent — gate + review); the
   24-controller rpc-table register tail + related controller boilerplate.
 
@@ -292,11 +292,11 @@ before starting):
 without a full-history replay + a `test_consensus_parity` golden, per the
 h=478544 doctrine):** a within-block cross-transaction double-spend is
 silently accepted on the live reducer path —
-`app/jobs/src/utxo_apply_delta.c`'s per-input spend loop records each spent
+`engine/jobs/src/utxo_apply_delta.c`'s per-input spend loop records each spent
 outpoint into `spent[]` with no check against outpoints **already recorded
 earlier in the same block**, so a second input spending the same outpoint a
 prior tx in the block already spent is not rejected (the canonical catch,
-`update_coins_with_undo` in `lib/validation/src/update_coins.c`, has no
+`update_coins_with_undo` in `core/modules/validation/src/update_coins.c`, has no
 production caller on this path — `connect_block.c`'s boot-reindex path is
 the only caller). History-safe (no such block exists on the immutable
 chain — zclassicd's `ConnectBlock` already rejects it), but a crafted

@@ -3,7 +3,7 @@
 #
 # anchor-snapshot-copy-prove.sh — SYNC-STRENGTH Workflow-1 Lane-4 copy-prove
 # harness for the fold-from-checkpoint cold-start/recovery seam
-# (config/src/boot_refold_staged.c: boot_refold_from_anchor_reset,
+# (engine/composition/src/boot_refold_staged.c: boot_refold_from_anchor_reset,
 # boot_refold_from_anchor_artifact_available). Mirrors the safety scaffolding
 # and gate discipline of tools/scripts/import-copy-prove.sh (the canonical
 # copy-prove driver for the shielded-state cure family) and the SKIP-when-
@@ -31,8 +31,8 @@
 # This is the harness for the ORCHESTRATOR to run END-TO-END once the real
 # multi-GB -mint-anchor snapshot artifact exists on a lane/worker datadir; it
 # is not a synthetic-fixture unit test (that lives in
-# lib/test/src/test_refold_from_anchor_artifact_reachable.c and
-# lib/test/src/test_refold_from_anchor_fatal.c, which prove the same
+# tests/harness/src/test_refold_from_anchor_artifact_reachable.c and
+# tests/harness/src/test_refold_from_anchor_fatal.c, which prove the same
 # predicates deterministically without a real snapshot or a live boot).
 #
 # SAFETY (identical invariants to import-copy-prove.sh):
@@ -205,7 +205,7 @@ if [ -z "$SNAPSHOT" ]; then
     if [ -f "$SRC/utxo-anchor.snapshot" ]; then
         SNAPSHOT="$SRC/utxo-anchor.snapshot"
     else
-        skip "no --snapshot=PATH given and no $SRC/utxo-anchor.snapshot present — this harness needs a real verified anchor snapshot artifact (the offline -mint-anchor ceremony's output); see tools/seed_anchor_snapshot.sh to stage one, or lib/test/src/test_refold_from_anchor_artifact_reachable.c for the synthetic-fixture proof that does not need one"
+        skip "no --snapshot=PATH given and no $SRC/utxo-anchor.snapshot present — this harness needs a real verified anchor snapshot artifact (the offline -mint-anchor ceremony's output); see tools/seed_anchor_snapshot.sh to stage one, or tests/harness/src/test_refold_from_anchor_artifact_reachable.c for the synthetic-fixture proof that does not need one"
     fi
 fi
 [ -s "$SNAPSHOT" ] || skip "snapshot not found or empty: $SNAPSHOT"
@@ -317,7 +317,7 @@ else
     RESET_PID=$!
 fi
 
-# The reset runs INSIDE the normal boot sequence (config/src/boot.c), not as a
+# The reset runs INSIDE the normal boot sequence (engine/composition/src/boot.c), not as a
 # one-shot terminal verb — the process keeps running afterward as a normal
 # node. Poll the log for the RE-SEEDED banner (success) or a FATAL banner
 # (proven failure — the snapshot did not reproduce the compiled checkpoint),

@@ -85,7 +85,7 @@
 #                       stopwatch_evidence_judge.sh and soak_evidence.sh, so
 #                       an operator reading three judges reads one clock.
 #   --max-age-secs 1800 The recorder's shipped cadence is 10 minutes
-#                       (deploy/zclassic23-tip-agreement.timer), so 1800s is
+#                       (platform/deploy/zclassic23-tip-agreement.timer), so 1800s is
 #                       three missed runs. One missed run is a busy box; a
 #                       dead timer crosses this within half an hour and the
 #                       verdict becomes STALE rather than a stale PASS.

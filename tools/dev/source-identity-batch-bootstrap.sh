@@ -9,11 +9,11 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "${0%/*}" && pwd)" || exit 0
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)" || exit 0
 SRC="$SCRIPT_DIR/source_identity_batch.c"
-SHA256="$REPO_ROOT/packages/zsha256/src/zsha256.c"
-SHA256_HEADER="$REPO_ROOT/packages/zsha256/include/zsha256/zsha256.h"
-ALLOC="$REPO_ROOT/lib/base/src/safe_alloc.c"
-ALLOC_HEADER="$REPO_ROOT/lib/base/include/base/safe_alloc.h"
-HEX_HEADER="$REPO_ROOT/lib/base/include/base/hex.h"
+SHA256="$REPO_ROOT/contexts/commons/packages/zsha256/src/zsha256.c"
+SHA256_HEADER="$REPO_ROOT/contexts/commons/packages/zsha256/include/zsha256/zsha256.h"
+ALLOC="$REPO_ROOT/platform/modules/base/src/safe_alloc.c"
+ALLOC_HEADER="$REPO_ROOT/platform/modules/base/include/base/safe_alloc.h"
+HEX_HEADER="$REPO_ROOT/platform/modules/base/include/base/hex.h"
 BIN="${ZCL_BIN_DIR:-$REPO_ROOT/build/bin}/source-identity-batch"
 INPUTS=("$0" "$SRC" "$SHA256" "$SHA256_HEADER" "$ALLOC" "$ALLOC_HEADER"
         "$HEX_HEADER")
@@ -76,8 +76,8 @@ tmp="$BIN.build.$$"
 trap 'rm -f "$tmp" 2>/dev/null' EXIT HUP INT TERM
 if ! "$BOOTSTRAP_CC" "${FLAGS[@]}" \
         -DZCL_SOURCE_IDENTITY_BATCH_INPUT_ID=\"$INPUT_ID\" \
-        -I"$REPO_ROOT/packages/zsha256/include" \
-        -I"$REPO_ROOT/lib/base/include" \
+        -I"$REPO_ROOT/contexts/commons/packages/zsha256/include" \
+        -I"$REPO_ROOT/platform/modules/base/include" \
         -o "$tmp" "$SRC" "$SHA256" "$ALLOC" >/dev/null 2>&1; then
     exit 0
 fi

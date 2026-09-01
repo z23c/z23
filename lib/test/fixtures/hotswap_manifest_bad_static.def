@@ -1,3 +1,0 @@
-/* Lint-gate fixture manifest: points at a TU with a mutable file-scope static.
- * Used by the check_hotswap_static_state self-test to prove the gate trips. */
-HOTSWAP_ELIGIBLE("lib/test/fixtures/hotswap_bad_static_fixture.c") HOTSWAP_PROBE("fixture_probe")

@@ -3,7 +3,7 @@
 #
 # Enforces "a raw sqlite3_prepare_v2() whose prepared-stmt NULL check returns
 # WITHOUT logging is forbidden". This is the exact class fixed in
-# app/models/src/wallet_tx.c (the null checks now LOG_FAIL/LOG_RETURN). The
+# contexts/wallet/models/src/wallet_tx.c (the null checks now LOG_FAIL/LOG_RETURN). The
 # four check-silent-errors-* gates + check-silent-errors-bool do not see it:
 # the failure here is a `if (!s) return 0;` after a BARE prepare, not the
 # `if (!call(...)) return false;` shape those gates key on.
@@ -30,7 +30,7 @@
 # function of the SAME file collapse to one key.
 #
 # Excluded from scanning: tools/lint/ itself, and the AR_* macro-definition
-# header app/models/include/models/activerecord.h (a header, so not in the
+# header engine/models/include/models/activerecord.h (a header, so not in the
 # *.c set anyway) — callers that route a prepare through the AR_PREPARE_*/
 # AR_QUERY_* macros carry no raw `sqlite3_prepare_v2(` token and are compliant
 # by construction.

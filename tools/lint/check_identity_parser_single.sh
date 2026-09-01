@@ -99,7 +99,7 @@ RATCHET_CEILING=16
 # shape — but this gate's normal remedy ("source
 # tools/scripts/source_identity_lib.sh instead") provably cannot apply to it:
 # install_z23.sh is a SHIPPED RELEASE ARTIFACT that the front door
-# (packaging/install/install.sh) fetches ALONE into a mktemp directory and
+# (platform/packaging/install/install.sh) fetches ALONE into a mktemp directory and
 # runs there, with no repository and no sibling library beside it. Shipping a
 # second file to source would also break the two-digest
 # z23-pin-v1:<manifest>:<installer> pin published in three independent

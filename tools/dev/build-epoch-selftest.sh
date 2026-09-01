@@ -195,7 +195,7 @@ for forbidden in "${FORBIDDEN_COMPILE_FLAGS[@]}"; do
     fi
 done
 "$KEY_TOOL" key "$COMPILER_ID" selftest \
-    '-std=c23 -O2 -Ilib/base/include -include test/windows_compat.h' \
+    '-std=c23 -O2 -Iplatform/modules/base/include -include test/windows_compat.h' \
     no-link "$COMPILER_ID" >/dev/null ||
     fail 'compile epoch rejected ordinary tracked include flags'
 

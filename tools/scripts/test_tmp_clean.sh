@@ -4,7 +4,7 @@
 # test-tmp scratch reclaimer (environment hygiene).
 #
 # The parallel test runner creates ./test-tmp/ and per-run captures
-# (lib/test/src/test_parallel.c:465-477) and the fixtures leave scratch dirs
+# (tests/harness/src/test_parallel.c:465-477) and the fixtures leave scratch dirs
 # behind (anchor_selfmint_*, ...); nothing ever deletes them — 5,463 entries
 # / ~1.4 G at last measure. This script removes entries older than --days N
 # (default 2, find -mtime semantics).

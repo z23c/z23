@@ -66,7 +66,7 @@
 #
 # C. A COPYABLE INVOCATION OF A datadir-TAKING LEAF WITH NO --datadir
 #    (ratchet, per-file count). The leaf set is DERIVED from argument 10
-#    (`input_keys`) of the leaf macros in config/commands/*.def — 69 leaves
+#    (`input_keys`) of the leaf macros in engine/composition/commands/*.def — 69 leaves
 #    today — never from a hand list, so a leaf that gains a `datadir` input is
 #    covered the day it lands. Scanned: tracked *.md (where an agent copies
 #    its commands from) and tracked *.sh with comments stripped. A hit is a
@@ -116,9 +116,9 @@ BASELINE_A="${ZCL_LDI_BASELINE_A:-tools/lint/live_datadir_test_paths_baseline.tx
 BASELINE_C="${ZCL_LDI_BASELINE_C:-tools/lint/live_datadir_examples_baseline.txt}"
 
 # Scan roots (overridable so --selftest can run against a sandbox tree).
-TEST_GLOBS_DEFAULT='lib/test/src/*.c lib/test/src/*.h lib/test/include/test/*.h'
+TEST_GLOBS_DEFAULT='tests/harness/src/*.c tests/harness/src/*.h tests/harness/include/test/*.h'
 TEST_GLOBS="${ZCL_LDI_TEST_GLOBS:-$TEST_GLOBS_DEFAULT}"
-DEF_DIR="${ZCL_LDI_DEF_DIR:-config/commands}"
+DEF_DIR="${ZCL_LDI_DEF_DIR:-engine/composition/commands}"
 DOC_GLOBS="${ZCL_LDI_DOC_GLOBS:-}"     # empty => git ls-files '*.md' '*.sh'
 
 TEST_FLOOR="${ZCL_LDI_TEST_FLOOR:-300}"
@@ -172,7 +172,7 @@ prong_b_scan() {
 
 # ── PRONG C ───────────────────────────────────────────────────────────────
 # Derive the leaves that accept a `datadir` input from the .def macros.
-# `input_keys` is argument 10 in every leaf macro shape (config/src/
+# `input_keys` is argument 10 in every leaf macro shape (engine/composition/src/
 # command_catalog.c); a row with fewer than 10 top-level arguments is not a
 # leaf macro and is skipped rather than read at the wrong slot.
 derive_datadir_leaves() {
@@ -379,7 +379,7 @@ fi
 # ── run ───────────────────────────────────────────────────────────────────
 mapfile -t test_files < <(collect_test_files)
 gate_require_scanned "${#test_files[@]}" "$TEST_FLOOR" "$GATE" \
-    "test scan set is empty — did lib/test/src move? (globs: $TEST_GLOBS)"
+    "test scan set is empty — did tests/harness/src move? (globs: $TEST_GLOBS)"
 
 mapfile -t doc_files < <(collect_doc_files)
 gate_require_scanned "${#doc_files[@]}" "$DOC_FLOOR" "$GATE" \

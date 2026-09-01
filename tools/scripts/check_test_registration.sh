@@ -3,15 +3,15 @@
 #
 # THE BUG THIS PREVENTS (lane-3, 2026-06-22): three test entry points
 # (test_refold_from_anchor_fatal, test_refold_auto_arm, test_anchor_selfmint)
-# lived in dedicated lib/test/src/test_<name>.c files, COMPILED and linked
+# lived in dedicated tests/harness/src/test_<name>.c files, COMPILED and linked
 # into the test binaries, yet were ABSENT from the canonical test group catalog
 # (and not dispatched by the legacy serial runner
-# lib/test/src/test.c either). They therefore proved NOTHING — green forever,
+# tests/harness/src/test.c either). They therefore proved NOTHING — green forever,
 # never executed. This gate makes that drift FAIL CI.
 #
 # ── CONVENTION (verified against the source) ──────────────────────────────
 # A test "entry point" is the function that bears the SAME name as its
-# dedicated file: lib/test/src/test_<name>.c defining
+# dedicated file: tests/harness/src/test_<name>.c defining
 #     int test_<name>(void)
 # (with the body opener on its own line — the project style). Multi-test files
 # (e.g. test_coins_amount_codec.c, test_models.c) and group files define helper
@@ -81,7 +81,7 @@ if ! tools/dev/test-group-list.sh --check-impact-rules; then
     exit 1
 fi
 
-TEST_DIR="lib/test/src"
+TEST_DIR="tests/harness/src"
 PARALLEL="$TEST_DIR/test_parallel.c"
 SERIAL="$TEST_DIR/test.c"
 CATALOG="tools/dev/test_group_catalog.def"
@@ -174,13 +174,11 @@ if [ "$control_symbols" != $'exported_helper\nmultiline_helper\ntest_owner' ]; t
     exit 2
 fi
 
-LEAF_INCLUDE_FLAGS=()
-for dir in app/*/include config/include lib/*/include core/*/include \
-           domain/*/include application/*/include adapters/*/*/include \
-           ports/include; do
-    [ -d "$dir" ] && LEAF_INCLUDE_FLAGS+=("-I$dir")
-done
-LEAF_INCLUDE_FLAGS+=("-Itools" "-Itools/dev" "-Ivendor/include")
+read -r -a LEAF_INCLUDE_FLAGS <<< "$(make -s print-includes)"
+if [ "${#LEAF_INCLUDE_FLAGS[@]}" -lt 20 ]; then
+    echo "check_test_registration: FATAL — canonical include set came back hollow" >&2
+    exit 2
+fi
 if [ "$(uname -s)" = "Darwin" ]; then
     LEAF_INCLUDE_FLAGS+=("-D_DARWIN_C_SOURCE")
 fi
@@ -215,7 +213,7 @@ for name in $semantic_leaves; do
     while IFS= read -r ref; do
         [ -n "$ref" ] || continue
         case "$ref" in
-            "$source"|"$SERIAL"|lib/test/include/test/test_core.h) ;;
+            "$source"|"$SERIAL"|tests/harness/include/test/test_core.h) ;;
             *) leaf_drift="${leaf_drift}${name}\tcalled by $ref\n" ;;
         esac
     done <<< "$refs"
@@ -358,7 +356,7 @@ for name in $dispatched; do
         serial_checked=$((serial_checked + 1))
         continue
     fi
-    # Not defined in a dedicated lib/test/src file: a helper or an out-of-tree
+    # Not defined in a dedicated tests/harness/src file: a helper or an out-of-tree
     # symbol, not a registrable group. Out of scope.
     def_file="${DEF_FILE[$name]:-}"
     [ -n "$def_file" ] || continue
@@ -409,7 +407,7 @@ if [ -n "$orphans" ]; then
     echo ""
     echo "  Fix: add ZCL_TEST_GROUP(<name>) to $CATALOG (the doctrine"
     echo "  \`make test\` runner), or"
-    echo "  dispatch it from lib/test/src/test.c. Do NOT delete the test to"
+    echo "  dispatch it from tests/harness/src/test.c. Do NOT delete the test to"
     echo "  silence this gate."
     exit 1
 fi

@@ -12,7 +12,7 @@ the omnipotent local argv operator (`tools/command/native_command.c:3149` —
 `granted_capabilities=~0`, `authority_ceiling=OWNER`). There is no way to hand
 an agent **bounded** authority: spend up to X per tx, Y per window, only to
 these recipients. The kernel already enforces authority ceilings and capability
-masks per session (`lib/kernel/src/command_registry.c:1683-1705`); what is
+masks per session (`engine/modules/kernel/src/command_registry.c:1683-1705`); what is
 missing is (a) a persisted session/policy store and (b) a policy check at the
 two dispatch choke points.
 
@@ -48,7 +48,7 @@ Table `agent_sessions` — one row per minted session grant:
 - `recipient_allowlist TEXT NOT NULL DEFAULT ''` — CSV of t-/zs-addresses; empty = any recipient
 - `created_at INTEGER NOT NULL`, `expires_at INTEGER NOT NULL` (0 = never), `revoked INTEGER NOT NULL DEFAULT 0`
 
-AR model `app/models/src/agent_session.c` + `models/agent_session.h`, patterned on
+AR model `cognition/models/src/agent_session.c` + `models/agent_session.h`, patterned on
 `principal.c`: enum-as-text nowhere needed, before_validate clamps nothing but
 validates ranges (`validates_money_range`), `AR_ADHOC_SAVE` upsert, find/list,
 `agent_session_dump_state_json` registered in `diagnostics_dumpers.def`
@@ -186,7 +186,7 @@ Hook points:
 - `vault.session.create --input='{"account":"<addr>","max_per_tx":..,"max_per_window":..,"window_seconds":..,"allowlist":"a,b,c","expires_in":..}'`
   (OWNER, plan/commit) → returns the `session_id` once. `vault.session.list`
   (redacted: no token echo), `vault.session.revoke --input='{"session_id":..,"confirm":true}'`.
-  Registered in `config/commands/vault.def`; handlers in
+  Registered in `engine/composition/commands/vault.def`; handlers in
   `native_vault_session_command.c` (no spend logic there — these are grants,
   not custody). All three go through the `agentsession` RPC, and all three are
   refused outright when a grant is presented.

@@ -8,7 +8,7 @@
  * a TLS-client or CA-trust-store entry point. Compiling tls_client.c into
  * the test binary would put such an object under a scanned path and turn
  * that property red. So the assertions travel with the program they cover,
- * and lib/test/src/test_acme_worker.c RUNS this program and grades its
+ * and tests/harness/src/test_acme_worker.c RUNS this program and grades its
  * output — the coverage stays in the suite, the symbols do not.
  *
  * Each function returns the number of failed checks (0 = clean) and prints

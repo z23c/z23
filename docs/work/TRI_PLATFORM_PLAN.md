@@ -44,13 +44,13 @@ without re-running them.
 The install row is the sharpest and the least ambiguous. Asked directly:
 
 ```bash
-packaging/release/build_release.sh --print-bootstrap-platforms   # linux-x86_64
-packaging/release/build_release.sh --print-runtime-platforms     # linux-x86_64 darwin-arm64 windows-x86_64
+platform/packaging/release/build_release.sh --print-bootstrap-platforms   # linux-x86_64
+platform/packaging/release/build_release.sh --print-runtime-platforms     # linux-x86_64 darwin-arm64 windows-x86_64
 ```
 
 The cutter already produces a **runtime** for all three. It produces a
-**bootstrap** for one. `packaging/install/install.sh` therefore carries
-`PUBLISHED_PLATFORMS=" linux-x86_64 "` and `packaging/install/install.ps1`
+**bootstrap** for one. `platform/packaging/install/install.sh` therefore carries
+`PUBLISHED_PLATFORMS=" linux-x86_64 "` and `platform/packaging/install/install.ps1`
 carries `$BootPins = @{}`. Both refuse honestly rather than 404, which is the
 correct behaviour for an unpublished platform — but it means the answer to
 "can my friend with a Mac install this in one command" is still no. Native Mac
@@ -62,8 +62,8 @@ stranger-install proof, not the local package cutter or compiler portability.
 
 Two vocabularies disagreed about the name of the same machine. The front door
 normalised `arm64` to `aarch64`, so a Mac named itself `darwin-aarch64`, while
-`packaging/release/build_release.sh`, `lib/platform/src/toolchain.c`,
-`config/platform/macos_capabilities.def` and
+`platform/packaging/release/build_release.sh`, `platform/modules/platform/src/toolchain.c`,
+`engine/composition/platform/macos_capabilities.def` and
 [`BOOTSTRAP_PLAN.md`](./BOOTSTRAP_PLAN.md) all name the Mac artifact
 `darwin-arm64`. `tools/lint/check_published_platforms.sh` compares the two by
 exact string.
@@ -84,7 +84,7 @@ The rail that makes it stay closed is check 7 in
 `tools/lint/check_published_platforms.sh`. Checks 1-6 all ask whether a claim
 EXCEEDS what is produced; check 7 asks the other direction — whether what is
 produced is REACHABLE by the machine it is for. It reads the fold table out of
-`packaging/install/install.sh` rather than restating it, so the gate cannot
+`platform/packaging/install/install.sh` rather than restating it, so the gate cannot
 hold a second copy that drifts, and it refuses any produced platform whose cpu
 is a fold source. Its selftest case restores the old `arm64` fold and asserts
 the gate goes red, so the bug is frozen as a regression rather than written

@@ -194,7 +194,7 @@ int acme_selftest_transport(void)
     {
         static const char raw[] =
             "HTTP/1.1 200 OK\r\n"
-            "Content-Type: application/json\r\n"
+            "Content-Type: engine/application/json\r\n"
             "Replay-Nonce:   oFvnlFP1wIhRlYS2jTaXbA  \r\n"
             "Content-Length: 13\r\n"
             "\r\n"

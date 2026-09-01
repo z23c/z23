@@ -59,7 +59,7 @@
  * which exits immediately. zendp_directory_global() in a CLI process is
  * therefore write-only memory, so nothing here relies on it: the durable
  * artifact is the record FILE under <datadir>/zcode/endpoints/<key>.zid,
- * and config/src/boot_endpoint_records.c re-verifies those files into the
+ * and engine/composition/src/boot_endpoint_records.c re-verifies those files into the
  * node's live directory at start, on the boot thread.
  *
  * DISCARD, NOT FLAG. `accept` writes the record file ONLY after
@@ -385,7 +385,7 @@ static bool zec_read_seed(const char *path, uint8_t seed_out[32], char *err,
  *
  * Named by the BLINDED record key, holding the doc hex. This is the
  * ONLY durable output of this surface: the CLI process's in-memory
- * directory dies with it, and config/src/boot_endpoint_records.c reads
+ * directory dies with it, and engine/composition/src/boot_endpoint_records.c reads
  * these files back into the node's live directory at start. Written
  * only after the record has verified. */
 
@@ -821,7 +821,7 @@ static struct zendp_directory g_cli_dir;
 /* ── the chain binding, in a CLI process ───────────────────────────
  *
  * The node registers the anchor lookup at boot
- * (config/src/boot_onion_discovery.c). A CLI invocation is a different
+ * (engine/composition/src/boot_onion_discovery.c). A CLI invocation is a different
  * process that never runs boot, so without this every verify would come
  * back NO_CHAIN_LOOKUP — fail-closed, correct, and useless. So the CLI
  * opens <datadir>/node.db READONLY for itself, the same pre-flight
@@ -1345,7 +1345,7 @@ void zcl_native_handle_zendp_resolve(const struct zcl_command_request *request,
 /* ── zcode.endpoint.list ───────────────────────────────────────────── */
 
 /* Every filed record, each re-verified against the chain right now.
- * This is the same work config/src/boot_endpoint_records.c does at node
+ * This is the same work engine/composition/src/boot_endpoint_records.c does at node
  * start, so it answers "which of these will my node actually use, and
  * why not the rest" without restarting anything. */
 void zcl_native_handle_zendp_list(const struct zcl_command_request *request,

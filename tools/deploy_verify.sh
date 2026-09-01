@@ -267,7 +267,7 @@ proc_exec_arg_values() {
 }
 
 # Classify the subversion a running node advertises. Since
-# lib/net/include/net/version.h, a node states which build it is running by
+# core/modules/net/include/net/version.h, a node states which build it is running by
 # appending its baked source prefix: "/ZClassic23:0.1.0(src:<12 hex>)/".
 # An unstamped build publishes the bare "/ZClassic23:0.1.0/" instead, and that
 # is a normal answer, never a deploy failure. The one failure this can see is

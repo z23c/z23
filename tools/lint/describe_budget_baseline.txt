@@ -6,7 +6,7 @@
 # baselined leaf that now fits ALSO fails, so a fix cannot leave a stale
 # exemption behind.
 #
-# Fix an entry by trimming that leaf's `semantics` in config/commands/*.def
+# Fix an entry by trimming that leaf's `semantics` in engine/composition/commands/*.def
 # until the gate reports it fits, then delete its line here.  Never by raising
 # ZCL_COMMAND_SPEC_BUDGET — the budget is what keeps a describe document
 # cheap enough for every transport to carry.

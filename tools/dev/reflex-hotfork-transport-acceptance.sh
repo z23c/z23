@@ -6,7 +6,7 @@ set -euo pipefail
 
 ROOT="${ZCL_SOURCE_ROOT:-$(pwd -P)}"
 BIN="${ZCL_DEV_BIN:-$ROOT/build/bin/zclassic23-dev}"
-SOURCE="$ROOT/lib/vcs/src/source_package_transport.c"
+SOURCE="$ROOT/contexts/commons/modules/vcs/src/source_package_transport.c"
 OUTPUT="${ZCL_REFLEX_TRANSPORT_ACCEPTANCE_OUTPUT:-$ROOT/build/dev-loop/reflex-hotfork-transport-acceptance.json}"
 
 fail() { printf 'reflex-hotfork-transport-acceptance: %s\n' "$*" >&2; exit 2; }
@@ -70,14 +70,14 @@ drive_candidate()
         fail "candidate did not return bound $expected: $(jq -c . <<<"$result")"
 }
 
-green="$(mktemp "$ROOT/lib/vcs/src/.reflex-transport-green.XXXXXX")"
+green="$(mktemp "$ROOT/contexts/commons/modules/vcs/src/.reflex-transport-green.XXXXXX")"
 cp -p -- "$backup" "$green"
 printf '\n/* ZCL_REFLEX_TRANSPORT_ACCEPTANCE:%s */\n' "$nonce" >>"$green"
 drive_candidate "$green" STORY_GREEN
 green_result="$result"
 green_epoch="$after"
 
-mutant="$(mktemp "$ROOT/lib/vcs/src/.reflex-transport-red.XXXXXX")"
+mutant="$(mktemp "$ROOT/contexts/commons/modules/vcs/src/.reflex-transport-red.XXXXXX")"
 cp -p -- "$SOURCE" "$mutant"
 perl -0pi -e 's/if \(index == 0\) \{/if (index == 1) {/' "$mutant"
 [[ "$(LC_ALL=C grep -c 'if (index == 1) {' "$mutant")" -ge 1 ]] ||
@@ -86,7 +86,7 @@ drive_candidate "$mutant" STORY_RED
 red_result="$result"
 red_epoch="$after"
 
-revert="$(mktemp "$ROOT/lib/vcs/src/.reflex-transport-revert.XXXXXX")"
+revert="$(mktemp "$ROOT/contexts/commons/modules/vcs/src/.reflex-transport-revert.XXXXXX")"
 cp -p -- "$backup" "$revert"
 printf '\n/* ZCL_REFLEX_TRANSPORT_ACCEPTANCE:%s */\n' "$nonce" >>"$revert"
 drive_candidate "$revert" STORY_GREEN
@@ -106,7 +106,7 @@ jq -e --arg object "$(jq -r '.data.candidate_object_root' <<<"$green_result")" \
     fail 'exact revert did not reuse the exact verified capsule cache'
 
 mkdir -p "$(dirname "$OUTPUT")"
-jq -n --arg owner 'lib/vcs/src/source_package_transport.c' \
+jq -n --arg owner 'contexts/commons/modules/vcs/src/source_package_transport.c' \
   --argjson green "$green_result" --argjson red "$red_result" \
   --argjson revert "$revert_result" --argjson green_raw "$green_raw" \
   --argjson revert_raw "$revert_raw" '

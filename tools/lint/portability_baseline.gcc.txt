@@ -11,4 +11,4 @@
 # A different compiler VERSION legitimately reports a different
 # set; that is why CI scopes its verdict with
 # ZCL_PORTABILITY_SCOPE instead of trusting this file verbatim.
-config/src/boot_services_shutdown.c 1
+engine/composition/src/boot_services_shutdown.c 1

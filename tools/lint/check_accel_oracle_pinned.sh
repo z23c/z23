@@ -10,21 +10,21 @@
 # core/MANIFEST.sha3 and check-core-seal fails the build on any drift. That
 # seal covers the TEXT of the consensus predicates and nothing below them.
 # Confirmed call edges out of the sealed text:
-#     core/math/src/hash.c            -> lib/crypto/src/sha256.c
-#     core/consensus/src/script_interp.c -> lib/crypto/src/sha256.c
-#     core/consensus/src/equihash.c   -> lib/crypto/src/blake2b_avx2.c
+#     core/math/src/hash.c            -> core/modules/crypto/src/sha256.c
+#     core/consensus/src/script_interp.c -> core/modules/crypto/src/sha256.c
+#     core/consensus/src/equihash.c   -> core/modules/crypto/src/blake2b_avx2.c
 #     core/ -> coins/coins.h -> sapling/incremental_merkle_tree.h
-#                                     -> lib/sapling/src/fr_avx512.c
-#                                     -> lib/sapling/src/bn254_accel.c
+#                                     -> core/modules/sapling/src/fr_avx512.c
+#                                     -> core/modules/sapling/src/bn254_accel.c
 # Editing any of those changes what a sealed predicate DOES — which block is
 # valid — without moving a byte inside core/. Proven: appending a comment to
-# lib/crypto/src/sha256.c leaves `make lint` fully green.
+# core/modules/crypto/src/sha256.c leaves `make lint` fully green.
 #
 # WHAT THIS GATE PROTECTS
 # Not the bytes — the PROPERTY. These files exist to get faster and must stay
 # editable; what must never lapse is that each one is pinned, by a test that
 # actually runs, to a portable reference producing identical output. Expanding
-# the core/ seal to swallow lib/crypto would freeze the optimisation surface
+# the core/ seal to swallow core/modules/crypto would freeze the optimisation surface
 # and force the owner unseal ritual for every speedup; that is the wrong trade
 # and is deliberately not what this does.
 #
@@ -54,7 +54,7 @@
 # `#include "…"` edges through PUBLIC headers (lib/<x>/include/<inc>/<stem>.h ->
 # lib/<x>/src/<stem>*.c). An accelerator reached only through a private
 # same-directory header is invisible to the discovery leg. One exists today —
-# lib/crypto/src/keccak_x4.c, the AVX-512 Keccak permutation behind
+# core/modules/crypto/src/keccak_x4.c, the AVX-512 Keccak permutation behind
 # keccak_x4_internal.h. It is pinned in practice, because the sha3_256_x4 and
 # sha3_512_x4 oracles drive their AVX-512 tier through it, but the gate would
 # not notice a NEW private-header accelerator of the same shape. Give a new
@@ -84,6 +84,8 @@ bad()  { echo "FAIL: $*" >&2; fail=1; }
 
 [ -f "$REGISTRY" ] || { echo "$GATE: FATAL — missing $REGISTRY" >&2; exit 2; }
 [ -f "$TEST_CATALOG" ] || { echo "$GATE: FATAL — missing $TEST_CATALOG" >&2; exit 2; }
+# shellcheck source=tools/lint/repo_shape.sh
+. tools/lint/repo_shape.sh
 
 # ── header -> implementation index ────────────────────────────────────────
 # lib/<x>/include/<inc>/<stem>.h  maps to  lib/<x>/src/<stem>*.c, which is how
@@ -92,7 +94,7 @@ bad()  { echo "FAIL: $*" >&2; fail=1; }
 declare -A HDR2IMPL
 hdr_count=0
 while IFS= read -r h; do
-    case "$h" in lib/*/include/*) ;; *) continue ;; esac
+    case "$h" in */modules/*/include/*) ;; *) continue ;; esac
     libdir="${h%%/include/*}"
     stem="$(basename "$h" .h)"
     key="${h#*/include/}"
@@ -102,9 +104,9 @@ while IFS= read -r h; do
     done
     HDR2IMPL["$key"]="$impls"
     hdr_count=$((hdr_count + 1))
-done < <(git ls-files 'lib/*/include/*.h' 'lib/*/include/*/*.h' 'lib/*/include/*/*/*.h')
+done < <(for d in "${ZCL_MODULE_DIRS[@]}"; do git ls-files "$d/include/*.h" "$d/include/**/*.h"; done)
 gate_require_scanned "$hdr_count" 100 "$GATE" \
-    "expected >=100 lib/*/include headers; the include tree moved."
+    "expected >=100 reusable-module headers; the include tree moved."
 
 # ── leg 1a: include-closure of core/ over lib/*/src ───────────────────────
 declare -A SEEN
@@ -137,6 +139,9 @@ gate_require_scanned "${#SEEN[@]}" "$CLOSURE_FLOOR" "$GATE" \
 ISA_RE='<(immintrin|x86intrin|cpuid)\.h>|__builtin_cpu_supports|__attribute__[[:space:]]*\(\([[:space:]]*target[[:space:]]*\('
 declare -A ISA
 for f in "${!SEEN[@]}"; do
+    # Hardware-profile discovery chooses among separately pinned
+    # implementations; it does not implement consensus arithmetic itself.
+    [ "$f" = "platform/modules/util/src/hw_profile.c" ] && continue
     scan=("$f")
     d="$(dirname "$f")"
     # Private same-directory headers count: sha3_avx512.c keeps its intrinsics

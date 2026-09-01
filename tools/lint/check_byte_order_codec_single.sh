@@ -4,10 +4,10 @@
 # What it enforces
 # ----------------
 # Loading and storing a 16/32/64-bit integer at a byte address in a declared
-# byte order lives in exactly one place: lib/base/include/base/serialize_le.h
+# byte order lives in exactly one place: platform/modules/base/include/base/serialize_le.h
 # (zcl_write_u{16,32,64}_le / zcl_read_u{16,32,64}_le, the i32/i64 forms, and
-# the u32/u64 big-endian pair). No production file outside lib/base may carry
-# its own — including via lib/crypto/include/crypto/common.h, which now
+# the u32/u64 big-endian pair). No production file outside platform/modules/base may carry
+# its own — including via core/modules/crypto/include/crypto/common.h, which now
 # forwards ReadLE/WriteLE to the canonical header rather than defining them.
 #
 # Why
@@ -18,7 +18,7 @@
 # under 18 different names for the same 8 lines. Two symptoms are worth
 # naming, because they are what a codec pile actually costs:
 #
-#   - lib/zid defined the family THREE times inside ONE module, under three
+#   - contexts/wallet/modules/zid defined the family THREE times inside ONE module, under three
 #     prefixes (put_le64, zdesc_put_le64, zendp_put_le64) — three chances
 #     for one module to disagree with itself about its own wire format.
 #   - consensus_state_snapshot_candidate.c wrote a persisted 8-byte field
@@ -50,8 +50,8 @@
 # function, and a gate that guesses is a gate that lies.
 #
 # Excluded from the scan, with reasons:
-#   lib/base/  — the canonical home. It IS the codec.
-#   lib/test/  — a test MUST hold an independent implementation of what it
+#   platform/modules/base/  — the canonical home. It IS the codec.
+#   tests/harness/include/test/  — a test MUST hold an independent implementation of what it
 #                checks. test_byte_order_codec.c deliberately carries a
 #                verbatim copy of all 23 replaced helpers and asserts the
 #                canonical functions agree with them byte for byte; that is
@@ -78,12 +78,15 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 # shellcheck source=tools/lint/gate_lib.sh
 . tools/lint/gate_lib.sh
+# shellcheck source=tools/lint/repo_shape.sh
+. tools/lint/repo_shape.sh
 
 GATE=check_byte_order_codec_single
 MODE="${ZCL_LINT_MODE:-FAIL}"
 BASELINE="${ZCL_BYTE_ORDER_BASELINE:-tools/lint/byte_order_codec_baseline.txt}"
 
-SCAN_ROOTS_DEFAULT="app config lib src tools"
+SCAN_ROOTS_DEFAULT="$(repo_shape_dirs app | tr '\n' ' ')${ZCL_MODULE_DIRS[*]} engine/composition engine/entry tools"
+SCAN_ROOTS_REDUCED="${SCAN_ROOTS_DEFAULT% tools}"
 read -r -a SCAN_ROOTS <<< "${ZCL_BYTE_ORDER_SCAN_ROOTS:-$SCAN_ROOTS_DEFAULT}"
 
 # An indexed shift loop: `>> (8 * i)`, `<< (8u * i)`, `>> (i * 8)`, ...
@@ -97,14 +100,14 @@ RE_BSWAP='0x00FF00FF|0x00ff00ff|0x00FF000000FF0000|0xFF00FF00FF00FF00'
 if [ "${1:-}" = "--selftest" ]; then
     tmp="$(mktemp -d)"
     trap 'rm -rf "$tmp"' EXIT
-    mkdir -p "$tmp/app/services/src"
+    mkdir -p "$tmp/engine/services/src"
     self="$PWD/tools/lint/$GATE.sh"
     : > "$tmp/empty_baseline.txt"
 
-    plant() { printf '%s\n' "$1" > "$tmp/app/services/src/selftest_le.c"; }
+    plant() { printf '%s\n' "$1" > "$tmp/engine/services/src/selftest_le.c"; }
 
     run_sandbox() {
-        ZCL_BYTE_ORDER_SCAN_ROOTS="$tmp/app" \
+        ZCL_BYTE_ORDER_SCAN_ROOTS="$tmp/engine" \
         ZCL_BYTE_ORDER_COVERAGE=0 \
         ZCL_BYTE_ORDER_FILE_FLOOR=1 \
         ZCL_BYTE_ORDER_BASELINE="$tmp/empty_baseline.txt" \
@@ -216,7 +219,7 @@ static void emit(uint8_t *p, uint64_t height)
     #     root dropped) is UNPROVEN exit 2 — never 0, never 1. The floor
     #     cannot see this: the reduced set still towers over 800.
     cov_case 2 "a scan missing a whole declared root was not UNPROVEN" \
-        ZCL_BYTE_ORDER_SCAN_ROOTS="app config lib src" ZCL_BYTE_ORDER_FILE_FLOOR=1
+        ZCL_BYTE_ORDER_SCAN_ROOTS="$SCAN_ROOTS_REDUCED" ZCL_BYTE_ORDER_FILE_FLOOR=1
     # (c) a shortfall SMALLER than the recorded allowance is a stale
     #     ratchet, exit 1 — an allowance that may only rise rusts shut.
     cov_case 1 "an allowance above the true shortfall was silently tolerated" \
@@ -232,8 +235,9 @@ collect_files() {
     for root in "${SCAN_ROOTS[@]}"; do
         [ -d "$root" ] || continue
         find "$root" \( -name '*.c' -o -name '*.h' \) -type f \
-            ! -path 'lib/base/*' \
-            ! -path 'lib/test/*' \
+            ! -path 'platform/modules/base/*' \
+            ! -path 'contexts/commons/packages/*' \
+            ! -path 'tests/harness/include/test/*' \
             2>/dev/null
     done
 }
@@ -253,14 +257,14 @@ gate_require_scanned "${#scan_files[@]}" "${ZCL_BYTE_ORDER_FILE_FLOOR:-800}" "$G
 # The expectation is derived from the git index, which knows nothing about
 # the find above — the two cannot fail together, which is the whole point of
 # an independent oracle. It is derived from SCAN_ROOTS_DEFAULT and the same
-# lib/base + lib/test carve-outs the find applies, never from the
+# platform/modules/base + lib/test carve-outs the find applies, never from the
 # (overridable) SCAN_ROOTS actually in use, so aiming this gate at a subset
 # reads as a shortfall rather than as a quiet redefinition of "covered".
 #
-# Scope, unchanged. lib/base is carved out because it DEFINES the canonical
+# Scope, unchanged. platform/modules/base is carved out because it DEFINES the canonical
 # codec this gate requires callers to use, lib/test because a fixture may
 # legitimately hand-roll one. Tracked sources outside SCAN_ROOTS_DEFAULT
-# (core/, domain/, adapters/, packages/, examples/) were never in this
+# (core/, domain/, platform/adapters/, contexts/commons/packages/, examples/) were never in this
 # gate's declared surface and are not added here — widening the roots is a
 # separate, riskier change needing its own clean-tree proof.
 #
@@ -273,10 +277,10 @@ if [ "${ZCL_BYTE_ORDER_COVERAGE:-1}" = "1" ]; then
     for cov_root in $SCAN_ROOTS_DEFAULT; do
         cov_specs+=("$cov_root/*.c" "$cov_root/*.h")
     done
-    cov_specs+=(':!:lib/base/*' ':!:lib/test/*')
+    cov_specs+=(':!:platform/modules/base/*' ':!:contexts/commons/packages/*' ':!:tests/harness/include/test/*')
     gate_require_git_coverage - "$BYTE_ORDER_COVERAGE_ALLOWANCE" "$GATE" \
         ZCL_BYTE_ORDER_COVERAGE_ALLOWANCE \
-        "Re-run from a clean checkout. A named file that genuinely left this gate's surface belongs outside $SCAN_ROOTS_DEFAULT or in an explicit carve-out beside lib/base and lib/test — not in a raised allowance." \
+        "Re-run from a clean checkout. A named file that genuinely left this gate's surface belongs outside $SCAN_ROOTS_DEFAULT or in an explicit carve-out beside platform/modules/base and lib/test — not in a raised allowance." \
         -- "${cov_specs[@]}" < <(printf '%s\n' "${scan_files[@]}")
 fi
 
@@ -310,7 +314,7 @@ if [ "$MODE" = "UPDATE" ]; then
     {
         echo "# $GATE baseline — production files that still pack or unpack a"
         echo "# fixed-width integer by hand instead of calling"
-        echo "# lib/base/include/base/serialize_le.h."
+        echo "# platform/modules/base/include/base/serialize_le.h."
         echo "# One path per line. THE LIST MAY ONLY SHRINK."
         echo "#"
         echo "# Fix a row by deleting the private helper and calling:"
@@ -330,7 +334,7 @@ fail=0
 if [ "${#violations[@]}" -gt 0 ]; then
     echo ""
     echo "[$GATE] ${#violations[@]} file(s) pack or unpack a fixed-width"
-    echo "        integer by hand outside lib/base:"
+    echo "        integer by hand outside platform/modules/base:"
     printf '  %s\n' "${violations[@]}" | sort
     echo ""
     echo "  Delete it and include \"base/serialize_le.h\" instead:"

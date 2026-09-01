@@ -6,7 +6,7 @@ set -euo pipefail
 
 ROOT="${ZCL_SOURCE_ROOT:-$(pwd -P)}"
 BIN="${ZCL_DEV_BIN:-$ROOT/build/bin/zclassic23-dev}"
-SOURCE="$ROOT/app/services/src/vault_intent_decision_service.c"
+SOURCE="$ROOT/contexts/wallet/services/src/vault_intent_decision_service.c"
 RUNS="${ZCL_REFLEX_BENCH_RUNS:-20}"
 OUTPUT="${ZCL_REFLEX_BENCH_OUTPUT:-$ROOT/build/dev-loop/reflex-reactor-benchmark.json}"
 MARKER='ZCL_REFLEX_BENCH:'
@@ -60,7 +60,7 @@ main_start_ns="$(date +%s%N)"
 
 for ((i = 1; i <= RUNS; i++)); do
     nonce="$(printf '%08d' $(((nonce_base + i) % 100000000)))"
-    staged="$(mktemp "$ROOT/app/services/src/.reflex-bench.XXXXXX")"
+    staged="$(mktemp "$ROOT/engine/services/src/.reflex-bench.XXXXXX")"
     sed "s/${MARKER} 00000000/${MARKER} ${nonce}/" "$backup" >"$staged"
     chmod --reference="$SOURCE" "$staged"
     start_ns="$(date +%s%N)"
@@ -82,7 +82,7 @@ done
 # Prove the useful-RED budget with a compile-valid behavior regression. This
 # changes only the proposal returned by the pure shadow core; the static vault
 # authority shell is never loaded, invoked, or published by the benchmark.
-staged="$(mktemp "$ROOT/app/services/src/.reflex-bench-red.XXXXXX")"
+staged="$(mktemp "$ROOT/engine/services/src/.reflex-bench-red.XXXXXX")"
 red_nonce="$(printf '%08d' $(((nonce_base + RUNS + 1) % 100000000)))"
 sed -e "s/${MARKER} 00000000/${MARKER} ${red_nonce}/" \
     -e 's/decision->code = VAULT_INTENT_DECISION_ALLOW;/decision->code = VAULT_INTENT_DECISION_INSUFFICIENT_FUNDS;/' \
@@ -117,7 +117,7 @@ candidate_b="$(printf '%08d' $(((nonce_base + RUNS + 3) % 100000000)))"
 run_green_candidate()
 {
     local nonce="$1" label="${2:-}" staged start_ns end_ns result raw epoch
-    staged="$(mktemp "$ROOT/app/services/src/.reflex-cache.XXXXXX")"
+    staged="$(mktemp "$ROOT/engine/services/src/.reflex-cache.XXXXXX")"
     sed "s/${MARKER} 00000000/${MARKER} ${nonce}/" "$backup" >"$staged"
     chmod --reference="$SOURCE" "$staged"
     start_ns="$(date +%s%N)"
@@ -171,7 +171,7 @@ done
 mkdir -p "$(dirname "$OUTPUT")"
 jq -n --slurpfile samples "$samples" --slurpfile events "$events" \
     --slurpfile cache_samples "$cache_samples" \
-    --arg source_tu 'app/services/src/vault_intent_decision_service.c' \
+    --arg source_tu 'contexts/wallet/services/src/vault_intent_decision_service.c' \
     --argjson runs "$RUNS" \
     --argjson red_feedback_us "$red_feedback_us" \
     --argjson red_wall_us "$red_wall_us" \

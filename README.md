@@ -99,9 +99,45 @@ it informs the next story.
 This is **direction, not a claim of a finished monolithic compiler**.
 StoryGraph, ontology, focus, evidence, and typed discovery primitives exist in
 the tree today; the complete seven-stage journey is still being assembled and
-accepted. Likewise, the `core / engine / contexts / cognition / platform`
-layers in the hero are a conceptual product map, not the current filesystem or
-an agent-routing contract.
+accepted.
+
+## Architecture you can read at a glance
+
+The five layers in the hero are also the physical source tree:
+
+```text
+core/                       sealed consensus, math, crypto, primitives, proofs
+engine/                     composition, execution, and the one-writer reducer
+  reducer/                  the only authoritative chain-state advancement room
+contexts/                   feature-first product rooms
+  wallet/services/...       feature + role + purpose in one path
+  explorer/...
+  naming/...
+  messaging/...
+  market/...
+  commons/...
+cognition/                  stories, ontology, focus, evidence, experience
+platform/
+  ports/                     what the system needs from the outside world
+  adapters/                  how an OS or infrastructure provides it
+tests/                      the canonical test harness and specifications
+tools/                      developer and operator tooling
+```
+
+Reusable modules live beneath the authority that owns them—for example,
+`core/modules/validation`, `contexts/wallet/modules/keys`, and
+`cognition/modules/ontology`. Product behavior stays with its feature instead
+of being scattered across global shape folders. The build rejects an unknown
+room, legacy root, duplicate module owner, module-manifest mismatch, or reducer
+path outside `engine/reducer`.
+
+Ask the binary for the generated view rather than memorizing the tree:
+
+```bash
+build/bin/z23 code map
+build/bin/z23 code context-map
+build/bin/z23 code room engine/reducer/services/src/reducer_ingest_service.c
+```
 
 ## Build and ask the binary
 

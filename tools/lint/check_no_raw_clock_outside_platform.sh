@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Gate #19: no direct clock_gettime/gettimeofday/time(NULL)/getrandom outside lib/platform.
+# Gate #19: no direct clock_gettime/gettimeofday/time(NULL)/getrandom outside platform/modules/platform.
 # Mode: WARN | FAIL (controlled by ZCL_LINT_MODE; default FAIL for Phase 1)
 set -euo pipefail
 
@@ -12,17 +12,20 @@ cd "$ROOT"
 source tools/lint/scan_exclusions.sh
 # shellcheck source=tools/lint/gate_lib.sh
 source tools/lint/gate_lib.sh
+# shellcheck source=tools/lint/repo_shape.sh
+source tools/lint/repo_shape.sh
 
-roots=()
-for root in app lib config tools; do
-    [[ -d "$root" ]] && roots+=("$root")
-done
+roots=(tools engine/composition engine/application platform/adapters platform/ports)
+mapfile -t app_roots < <(repo_shape_dirs app)
+mapfile -t module_roots < <(repo_shape_dirs lib)
+roots+=("${app_roots[@]}" "${module_roots[@]}" "${ZCL_DOMAIN_DIRS[@]}"
+        core/consensus core/params core/math core/chainparams)
 
 matches=$(
     grep -rn --include='*.c' --include='*.h' \
         -E '\bclock_gettime\s*\(|\bgettimeofday\s*\(|\btime\s*\(\s*NULL\s*\)|\bgetrandom\s*\(' \
         "${roots[@]}" "${LINT_GREP_EXCLUDE_ARGS[@]}" 2>/dev/null \
-    | grep -v '^lib/platform/' \
+    | grep -v '^platform/modules/platform/' \
     | grep -v '^tools/lint/check_no_raw_clock_outside_platform.sh:' \
     | grep -v '// platform-ok' \
     || true

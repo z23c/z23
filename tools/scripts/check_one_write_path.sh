@@ -24,7 +24,7 @@ source tools/lint/scan_exclusions.sh
 # Scan roots are overridable via ZCL_OWP_SCAN_ROOTS (space-separated) so the
 # lint-gate self-test can point the gate at an EMPTY dir and prove the
 # non-empty-floor preflight trips (exit 2) instead of passing hollow.
-SCAN_ROOTS="${ZCL_OWP_SCAN_ROOTS:-app domain lib config tools}"
+SCAN_ROOTS="${ZCL_OWP_SCAN_ROOTS:-core engine contexts cognition platform tools}"
 # A custom (test) scan root has no 200-file production floor; the meta-gate's
 # whole point is to feed an empty/tiny root and watch the floor fire.
 if [ -n "${ZCL_OWP_SCAN_ROOTS:-}" ]; then

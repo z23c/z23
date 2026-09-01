@@ -30,7 +30,7 @@
  *       it's a registry/lookup specific to a single global table, not a
  *       reusable predicate — there's nothing to test that wouldn't be a
  *       trivial identity check, and the table value is verified at the
- *       integration level (gettxoutsetinfo SHA3). Stays in lib/chain.
+ *       integration level (gettxoutsetinfo SHA3). Stays in core/modules/chain.
  *
  * Layering: this header only depends on chain/checkpoints.h (for the
  * `struct checkpoint_data` and `struct checkpoint_entry` definitions,
@@ -62,7 +62,7 @@ struct uint256;
  * false and leaves `*out_hash` untouched.
  *
  * NULL `data` or NULL `out_hash` -> false (no crash). The wrapper in
- * lib/chain logs a LOG_FAIL on NULL args; the domain layer treats
+ * core/modules/chain logs a LOG_FAIL on NULL args; the domain layer treats
  * NULL as "no pin found" so callers can compose this safely.
  *
  * O(n) linear scan over data->nEntries. The list is tiny (single

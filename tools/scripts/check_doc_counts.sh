@@ -50,6 +50,8 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/../.."
+# shellcheck source=tools/lint/repo_shape.sh
+. tools/lint/repo_shape.sh
 
 fail=0
 fail_lines=()
@@ -61,14 +63,16 @@ add_fail() { fail_lines+=("$1"); fail=1; }
 # definition; keep them in sync with how the counts are defined.
 # --------------------------------------------------------------------------
 test_groups_file=tools/dev/test_group_catalog.def
-ports_glob='ports/include/ports/*.h'
-adapters_glob='adapters/outbound/persistence/src/*.c'
-conditions_glob='app/conditions/src/*.c'
-# Both the flat bundles and the nested ones. A bare config/commands/*.def
+ports_glob='platform/ports/include/ports/*.h'
+adapters_glob='platform/adapters/outbound/persistence/src/*.c'
+shopt -s nullglob
+condition_files=(engine/conditions/src/*.c engine/reducer/conditions/src/*.c \
+                 contexts/*/conditions/src/*.c cognition/conditions/src/*.c)
+# Both the flat bundles and the nested ones. A bare engine/composition/commands/*.def
 # stopped being the whole catalog when the telemetry bundles moved into
-# config/commands/telemetry/, and this measurement went on reporting the flat
+# engine/composition/commands/telemetry/, and this measurement went on reporting the flat
 # count as if it were the total.
-commands_glob='config/commands/*.def config/commands/*/*.def'
+commands_glob='engine/composition/commands/*.def engine/composition/commands/*/*.def'
 # The DIAG_* rows live in per-domain files under a pure aggregator; resolving
 # the set has exactly one owner. See tools/lint/dumper_defs.sh.
 # shellcheck source=tools/lint/dumper_defs.sh
@@ -90,7 +94,7 @@ code_test_groups=$(grep -Ec \
 code_ports=$(ls $ports_glob 2>/dev/null | wc -l)
 code_adapters=$(ls $adapters_glob 2>/dev/null | wc -l)
 code_conditions=$(grep -RhoE 'condition_register[[:space:]]*\(' \
-    $conditions_glob 2>/dev/null | wc -l)
+    "${condition_files[@]}" 2>/dev/null | wc -l)
 
 # Native command surface. `command_bundles` is one .def per catalog bundle;
 # `command_roots` is the branches declared with an EMPTY parent, i.e. the
@@ -110,8 +114,8 @@ code_command_roots=$(grep -h 'ZCL_COMMAND_BRANCH(' $commands_glob 2>/dev/null \
 code_dumpstate=$(grep -chE '^[[:space:]]*DIAG_[A-Z]+\(' "${dumper_defs[@]}" \
     | awk '{ n += $1 } END { print n + 0 }')
 
-# Physical app shape folders (the Event shape deliberately has none).
-code_app_shapes=$(find app -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l)
+# Distinct product shapes; each may recur beneath multiple feature rooms.
+code_app_shapes=${#ZCL_APP_SHAPES[@]}
 
 echo "code-measured: test_groups=$code_test_groups port_interfaces=$code_ports persistence_adapters=$code_adapters condition_registrations=$code_conditions command_bundles=$code_command_bundles command_roots=$code_command_roots dumpstate_subsystems=$code_dumpstate app_shape_folders=$code_app_shapes"
 

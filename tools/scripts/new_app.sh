@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
 # Copyright 2026 Rhett Creighton - Apache License 2.0
 #
-# new_app.sh — turn packages/zhello into a new GUI package, in one command.
+# new_app.sh — turn contexts/commons/packages/zhello into a new GUI package, in one command.
 #
 #   usage: tools/scripts/new_app.sh <name>          (also: make new-app NAME=<name>)
 #
-# packages/zhello is the template of record: window + animated canvas + a
+# contexts/commons/packages/zhello is the template of record: window + animated canvas + a
 # headless `--frames=N` selftest, two C23 translation units, no node objects.
 # A new app is that same program under a different name, so this script does
 # ONLY what a copy cannot do for itself:
 #
-#   1. packages/zhello -> packages/<name>, with zhello spelled <name>
+#   1. contexts/commons/packages/zhello -> contexts/commons/packages/<name>, with zhello spelled <name>
 #      everywhere it names itself: symbols, header guards, log strings, usage
 #      text and README. The app is not a fork of zhello, it IS zhello under
 #      its own name.
@@ -68,7 +68,7 @@ selftest() {
     # the root and nothing more.
     git init -q "$tmp/repo"
     mkdir -p "$tmp/repo/packages"
-    cp -R "$ROOT/packages/zhello" "$tmp/repo/packages/zhello"
+    cp -R "$ROOT/contexts/commons/packages/zhello" "$tmp/repo/contexts/commons/packages/zhello"
     printf 'lint:\n\t@true\nclean:\n\t@true\n' > "$tmp/repo/Makefile"
     mkdir -p "$tmp/repo/config"
 
@@ -79,11 +79,11 @@ selftest() {
     # 1. The happy path: scaffolded, renamed everywhere, registered.
     (cd "$tmp/repo" && $run zdemo > "$tmp/run.out" 2>&1) ||
         { echo "$0: selftest FAIL — a clean scaffold exited nonzero" >&2; return 1; }
-    [ -f "$tmp/repo/packages/zdemo/src/zdemo.c" ] ||
+    [ -f "$tmp/repo/contexts/commons/packages/zdemo/src/zdemo.c" ] ||
         { echo "$0: selftest FAIL — src/zdemo.c missing after the scaffold" >&2; return 1; }
-    [ -f "$tmp/repo/packages/zdemo/include/zdemo/zdemo.h" ] ||
+    [ -f "$tmp/repo/contexts/commons/packages/zdemo/include/zdemo/zdemo.h" ] ||
         { echo "$0: selftest FAIL — include/zdemo/zdemo.h missing after the scaffold" >&2; return 1; }
-    if grep -rq "zhello" "$tmp/repo/packages/zdemo"; then
+    if grep -rq "zhello" "$tmp/repo/contexts/commons/packages/zdemo"; then
         echo "$0: selftest FAIL — the scaffold still names zhello somewhere" >&2
         return 1
     fi
@@ -99,7 +99,7 @@ selftest() {
             return 1
         fi
     done
-    [ -f "$tmp/repo/packages/zdemo/src/zdemo.c" ] ||
+    [ -f "$tmp/repo/contexts/commons/packages/zdemo/src/zdemo.c" ] ||
         { echo "$0: selftest FAIL — a refusal damaged the existing scaffold" >&2; return 1; }
 
     # 3. A failure mid-run must leave neither package nor registration: once
@@ -115,7 +115,7 @@ selftest() {
         echo "$0: selftest FAIL — a simulated post-move failure did not fail the run" >&2
         return 1
     fi
-    [ -d "$tmp/repo/packages/other_app" ] &&
+    [ -d "$tmp/repo/contexts/commons/packages/other_app" ] &&
         { echo "$0: selftest FAIL — a failed run left a package behind" >&2; return 1; }
     grep -q "other_app" "$tmp/repo/config/gui_apps.mk" &&
         { echo "$0: selftest FAIL — a failed run left a registration behind" >&2; return 1; }
@@ -147,8 +147,8 @@ if [ "${1:-}" = "--selftest" ]; then
     exit $?
 fi
 
-TEMPLATE="packages/zhello"
-PKG_DIR="packages/$NAME"
+TEMPLATE="contexts/commons/packages/zhello"
+PKG_DIR="contexts/commons/packages/$NAME"
 REGISTRY="config/gui_apps.mk"
 BUILD_OUT="build/app-bundle"
 

@@ -21,8 +21,8 @@ cd "$ROOT"
 source "$SCRIPT_ROOT/tools/lint/scan_exclusions.sh"
 
 SYMBOL='stage_repair_coin_backfill_try('
-DEF_FILE='app/jobs/src/stage_repair_coin_backfill.c'
-ALLOWED_FILE='app/jobs/src/stage_repair_reducer_frontier_coin.c'
+DEF_FILE='engine/jobs/src/stage_repair_coin_backfill.c'
+ALLOWED_FILE='engine/reducer/jobs/src/stage_repair_reducer_frontier_coin.c'
 
 if [ ! -f "$DEF_FILE" ] || ! grep -qF "$SYMBOL" "$DEF_FILE"; then
     echo "check_no_new_coin_backfill_caller: FATAL — '$SYMBOL' no longer found in $DEF_FILE."
@@ -33,11 +33,11 @@ fi
 
 bad=()
 allowed_count=0
-SCAN_ROOTS=(app config lib tools domain application adapters/outbound/persistence)
+SCAN_ROOTS=(core engine contexts cognition platform tools)
 while IFS= read -r f; do
     [ -n "$f" ] || continue
     [ "$f" = "$DEF_FILE" ] && continue
-    case "$f" in lib/test/*) continue ;; esac
+    case "$f" in tests/harness/include/test/*) continue ;; esac
 
     count=$(grep -oF "$SYMBOL" "$f" | wc -l | tr -d ' ')
     if [ "$f" = "$ALLOWED_FILE" ]; then

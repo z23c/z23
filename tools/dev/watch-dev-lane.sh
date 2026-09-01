@@ -110,13 +110,13 @@ Environment:
                                       --once, check mode and isolated state
   ZCL_DEV_WATCH_CHECK_SOURCE_RECORD=  already captured v2 record for a
                                       bounded check worker; always reverified
-  ZCL_DEV_WARM_CODEINDEX=1            warm lib/codeindex after each green
+  ZCL_DEV_WARM_CODEINDEX=1            warm cognition/modules/codeindex after each green
                                       cycle (default on); set 0 to disable
 
 Examples:
   make dev-watch
   ZCL_DEV_WATCH_MODE=check make dev-watch
-  ZCL_DEV_WATCH_ONCE_FILES=lib/net/src/msg_tx.c make dev-watch-once
+  ZCL_DEV_WATCH_ONCE_FILES=core/modules/net/src/msg_tx.c make dev-watch-once
 EOF
 }
 
@@ -349,7 +349,7 @@ is_relevant_path()
     local path="${1#./}"
     case "$path" in
         Makefile|README.md|AGENTS.md|docs/*.md|*.mk) return 0 ;;
-        app/*|application/*|adapters/*|config/*|core/*|domain/*|lib/*|ports/*|src/*|tools/*|vendor/include/*)
+        app/*|engine/application/*|platform/adapters/*|config/*|core/*|domain/*|lib/*|platform/ports/*|src/*|tools/*|vendor/include/*)
             case "$path" in
                 *.c|*.h|*.def|*.inc|*.md|*.mk|*.service|*.sh|*.css|*.js|*.html|*.tmpl)
                     return 0
@@ -1045,7 +1045,7 @@ self_test()
     printf '# handoff\n' > "$ROOT/docs/HANDOFF.md"
     printf '%s\n' \
         'HOTSWAP_ELIGIBLE("app/a.c") HOTSWAP_PROBE("probe_a")' \
-        > "$ROOT/config/hotswap_eligible.def"
+        > "$ROOT/engine/composition/hotswap_eligible.def"
     (
         cd "$ROOT" || exit 1
         git init -q

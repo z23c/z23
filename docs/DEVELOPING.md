@@ -100,9 +100,9 @@ Real output from this checkout, abridged (warm: ~85 ms):
   "symbol_count":12,"used_by_files":72,
   "count_basis":"callers-of-matched-symbols"},
  {"what":"activerecord (24 matching symbols)",
-  "header":"app/models/include/models/activerecord.h",
+  "header":"engine/models/include/models/activerecord.h",
   "symbol_count":24,"used_by_files":66,
-  "example_caller":"app/controllers/src/store_controller.c"}]}
+  "example_caller":"engine/controllers/src/store_controller.c"}]}
 ```
 
 `used_by_files` is the field to read: it counts files holding a recorded CALL
@@ -176,21 +176,26 @@ development inspection. Command registry extension details live in
 
 ## 3. Edit within ownership boundaries
 
-Every `.c` under `app/` has one lint-enforced shape:
+The physical source tree is the ownership contract:
 
-- `controllers/` parse and authorize, then call a service;
-- `services/` orchestrate use cases;
-- `models/` own persisted reads and writes;
-- `jobs/` advance reducer cursors or name blockers;
-- `supervisors/` own liveness trees;
-- `conditions/` contain detect/remedy/witness repair loops;
-- `events/` is the event shape;
-- `views/` renders public surfaces.
+- `core/` owns sealed consensus, math, cryptography, primitives, and proofs;
+- `engine/` owns composition and generic execution;
+- `engine/reducer/` is the sole authoritative chain-state advancement room;
+- `contexts/<feature>/` keeps each product's controllers, services, models,
+  jobs, views, domains, and reusable modules together;
+- `cognition/` owns stories, ontology, predicates, focus, heuristics, evidence,
+  and experience machinery;
+- `platform/ports/` states outside-world needs and `platform/adapters/`
+  implements them;
+- reusable modules live under the authority that owns them in `modules/`.
 
-Consensus predicates and parameters live under byte-sealed `core/` paths.
-Pure bounded contexts live under `domain/`, reusable primitives under `lib/`,
-write ports and adapters under `ports/` and `adapters/`, boot composition under
-`config/src/`, and repository tooling under `tools/`.
+Within an engine, cognition, or product room, `controllers/` parse and
+authorize, `services/` orchestrate use cases, `models/` own persisted reads and
+writes, `jobs/` run background work, `supervisors/` own liveness,
+`conditions/` implement detect/remedy/witness loops, and `views/` render public
+surfaces. `make check-architecture-tree` rejects an unknown room, legacy root,
+duplicate module owner, module-manifest mismatch, or reducer-owned path outside
+`engine/reducer/`.
 
 The consensus core cannot be edited casually. `make lint` rejects drift from
 `core/MANIFEST.sha3`; an authorized change uses:
@@ -302,7 +307,7 @@ and relinks the whole test harness. The link, not the compile, is the cost: the
 harness is one binary over thousands of objects, and it is paid again for every
 one-line edit.
 
-For a translation unit on `config/hotswap_swappable.def`, module mode skips the
+For a translation unit on `engine/composition/hotswap_swappable.def`, module mode skips the
 relink. It compiles that one TU into a module `.so` and loads it into the
 already-linked harness through the hot-swap loader, then runs the real group:
 
@@ -343,7 +348,7 @@ copy. Before you treat any verdict as proof, re-run `make t-fast ONLY=<group>`
 
 What it cannot cover, and why:
 
-- **Anything not on `config/hotswap_swappable.def`.** That allowlist is
+- **Anything not on `engine/composition/hotswap_swappable.def`.** That allowlist is
   restricted to controller/view/condition shape leaves; reducers, consensus,
   validation, storage, networking, wallet state and supervisors can never be
   swapped, so groups covering them are always a rebuild.
@@ -380,7 +385,7 @@ covers it, and reports the fraction the group killed.
 
 ```bash
 make mutation-campaign
-build/bin/mutation-campaign --file=lib/metaverse/src/node_character.c \
+build/bin/mutation-campaign --file=contexts/commons/modules/metaverse/src/node_character.c \
                             --group=test_node_character
 build/bin/mutation-campaign --file=<any .c> --list   # enumerate only; no build
 ```
@@ -457,7 +462,7 @@ are the reason the target prints propositions instead of a checkmark: the
 narrow, true form of each claim is asserted, and where the flattering form does
 not hold the transcript says so instead of asserting it away. The propositions,
 and which are narrower than the story, are enumerated at the top of
-[`lib/test/src/test_cold_join_sovereign.c`](../lib/test/src/test_cold_join_sovereign.c).
+[`tests/harness/src/test_cold_join_sovereign.c`](../tests/harness/src/test_cold_join_sovereign.c).
 
 For an exact push checkpoint, commit first. The notification hook makes a
 best-effort detached request to the checkout's development service and returns;

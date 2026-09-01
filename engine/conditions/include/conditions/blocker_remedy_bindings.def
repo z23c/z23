@@ -1,0 +1,487 @@
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ *
+ * blocker_remedy_bindings — the ratchet baseline for "every named blocker
+ * declares its remedy" (doctrine: docs/work/tenacity-roadmap.md "Hold-class
+ * doctrine").
+ *
+ * Why this exists
+ * ----------------
+ * A typed blocker (platform/modules/util/blocker.h) can pin H* forever with an empty
+ * escape_action AND no auto-remedy condition, and still look "handled"
+ * because it IS a typed, registry-visible fact. That is exactly the class
+ * that wedged the canonical node for weeks: `utxo_apply.nullifier_backfill_
+ * gap` had zero auto-remedy path in the tree — only a human-readable reason
+ * string claiming an owner-gate that no code enforced or surfaced anywhere
+ * else (since remedied by the owner-gated populate-only walker,
+ * engine/services/src/nullifier_backfill_service.c). Nothing FAILED A BUILD
+ * over that gap. This table is the fix: every blocker id (or dynamic-id
+ * pattern) that any `blocker_init()`-family call in production code can
+ * produce MUST have a row here, and every row's remedy must be either a
+ * condition name (a live self-cure path, checked to exist in
+ * condition_registry.def) or the literal token OWNER (an honest admission
+ * that no auto-remedy exists in-tree and only an operator can clear it).
+ *
+ * This is a RATCHET, not a design document: it doesn't invent new remedies
+ * (see hold-class-audit D2/D3 — those stay OWNER until a real cure lands),
+ * it just makes the "no cure path" class impossible to add silently. The
+ * enforcing gate is tools/scripts/check_blocker_remedy.sh (wired into
+ * `make lint`): it extracts every blocker id/pattern a production call
+ * site can actually construct and fails the build if any of them is
+ * missing from this table, or if a row's remedy names a condition that
+ * doesn't exist.
+ *
+ * Row format
+ * ----------
+ *   ZCL_BLOCKER_REMEDY(id_or_pattern, remedy)
+ *
+ * `id_or_pattern` is either:
+ *   - an EXACT blocker id, as passed verbatim to blocker_init() / the
+ *     handful of wrapper functions the gate also recognizes
+ *     (chain_linkage_hold_raise, sentinel_raise_blocker,
+ *     name_dependency_blocker); or
+ *   - a PATTERN containing literal `*` wildcard(s) for the
+ *     runtime-substituted part(s) of a dynamically-built id (e.g.
+ *     "coin_backfill.unprovable.*" for `snprintf(id, ..., "coin_backfill.
+ *     unprovable.%d", h)`). The pattern text must match, character for
+ *     character (specifiers collapsed to `*`), a `/​* blocker-id: <pattern>
+ *     *​/` marker comment the gate finds at the id's construction site —
+ *     see e.g. engine/conditions/src/catalog_lag_exceeded.c. A blocker_init
+ *     call whose id argument is a bare (non-literal, non-macro) variable
+ *     is a "dynamic site": its FILE must carry at least one such marker or
+ *     the gate fails it directly, independent of this table.
+ *
+ * `remedy` is one of:
+ *   - the name of a condition-engine healer (a ZCL_CONDITION(<name>) entry
+ *     in condition_registry.def, or a matching `#define <X>_COND_NAME`
+ *     literal) that detects/witnesses/clears this exact blocker (either
+ *     directly — it IS the same condition that raised it — or drives the
+ *     underlying state that lets the original raiser self-clear, e.g.
+ *     sapling_anchor_frontier_unavailable arming the refold that lets
+ *     utxo_apply_anchors.c's own blocker_clear() fire); or
+ *   - `ESCAPE(<action>)`, where <action> is a literal action name passed
+ *     to a `blocker_register_escape("<action>", fn)` call site somewhere
+ *     in scope: the blocker's OWN escape_action names that same action,
+ *     and the supervisor sweep's edge-triggered escape ladder (blocker.h)
+ *     — not the condition engine — IS the auto-remedy path (see
+ *     chain_activation_service.c's "activation_drive_connect" escape); or
+ *   - the literal token OWNER: no auto-remedy exists in-tree. The blocker
+ *     is either a genuine terminal/consensus-refusal fact (never meant to
+ *     self-clear), a bounded-retry TRANSIENT that pages the operator on
+ *     budget exhaustion, or a documented gap (D2/D3) awaiting a real fix.
+ *     OWNER is never a judgment that the blocker is *fine* to leave
+ *     uncured forever — it is the honest admission the audit demanded so
+ *     the gap is visible instead of silently assumed-handled.
+ *
+ * Adding a new blocker: add exactly one row here (condition name if a
+ * genuine self-cure path exists and is verified in code; OWNER otherwise).
+ * The gate fails the build until the row exists — that is the ratchet. */
+
+#ifndef ZCL_BLOCKER_REMEDY
+#error "define ZCL_BLOCKER_REMEDY(id_or_pattern, remedy) before including blocker_remedy_bindings.def"
+#endif
+
+/* ── Self-witnessing conditions: the condition that raises the blocker  ──
+ * also detects/witnesses its own clear (poll_secs cadence, cleared on
+ * real state movement, not on blocker-registry state alone). ────────── */
+ZCL_BLOCKER_REMEDY(sync_rate_below_floor,                    sync_rate_below_floor)
+ZCL_BLOCKER_REMEDY(consensus.parity_slo_breach,              parity_slo_breach)
+ZCL_BLOCKER_REMEDY(header_repair_no_source,                  stale_validate_headers_repair)
+ZCL_BLOCKER_REMEDY(checkpoint_header_solution_no_peer,       checkpoint_header_solution_repair)
+ZCL_BLOCKER_REMEDY(net_partition_suspected,                  net_partition_suspected)
+ZCL_BLOCKER_REMEDY(reducer_drive_stuck,                      reducer_drive_watchdog)
+ZCL_BLOCKER_REMEDY(net_eclipse_suspected,                    net_eclipse_suspected)
+ZCL_BLOCKER_REMEDY(chain.reorg_uncorroborated,               chain_reorg_uncorroborated)
+ZCL_BLOCKER_REMEDY(net_tip_regression,                       net_tip_regression)
+ZCL_BLOCKER_REMEDY(stage_step_budget_exceeded,                stage_step_budget_exceeded)
+ZCL_BLOCKER_REMEDY(net_fork_detected,                         net_fork_detected)
+ZCL_BLOCKER_REMEDY(bootstrap.no_state_source,                 no_state_source)
+ZCL_BLOCKER_REMEDY(batch_fsync_slow,                          batch_fsync_slow)
+ZCL_BLOCKER_REMEDY(memory-pressure,                            memory_pressure_high)
+ZCL_BLOCKER_REMEDY(disk-full,                                  disk_full_pause)
+ZCL_BLOCKER_REMEDY(mirror.divergence_located,                  mirror_divergence_located)
+ZCL_BLOCKER_REMEDY(catalog.*.lag_exceeded,                     catalog_lag_exceeded)
+/* T6.2 degraded mode. netsplit_degraded_mode is the condition that raises this
+ * id (via directory_influence_observe) and the one that clears it: its detect
+ * pass folds the netsplit verdict into the directory-influence posture in BOTH
+ * directions on the poll cadence, so the true->false edge restores influence
+ * and calls blocker_clear itself. Same self-witnessing shape as
+ * net_partition_suspected above. It does not claim to CURE a network split —
+ * nothing in-tree can — it owns the node's posture while one is suspected, and
+ * retires the blocker the moment the corroborated evidence stops standing.
+ * No ZCL_BLOCKER_DECISION row, on purpose — see the note at the foot of
+ * blocker_operator_decisions.def; the operator-facing sentence rides in the
+ * blocker's own reason instead, where it is actually rendered. */
+ZCL_BLOCKER_REMEDY(SUSPECTED_NETSPLIT,                         netsplit_degraded_mode)
+ZCL_BLOCKER_REMEDY(state_auditor.*.mismatch,                   state_auditor_mismatch)
+
+/* ── Cross-condition remedies: a different condition's escalation ladder
+ * drives the state that lets the original raiser's own blocker_clear()
+ * fire (verified by reading both sides — `utxo_apply.anchor_backfill_gap`'s
+ * remedy `sapling_anchor_frontier_unavailable` and
+ * `reducer_frontier.upstream_log_hole`'s remedy `reducer_frontier_reconcile_light`
+ * are the two direct instances; `script_validate.prevout_unresolved`'s remedy
+ * is the same condition reached indirectly, via coin_backfill re-deriving the
+ * missing prevout). */
+ZCL_BLOCKER_REMEDY(reducer_frontier.upstream_log_hole,        reducer_frontier_reconcile_light)
+ZCL_BLOCKER_REMEDY(utxo_apply.anchor_backfill_gap,             sapling_anchor_frontier_unavailable)
+ZCL_BLOCKER_REMEDY(script_validate.prevout_unresolved,         reducer_frontier_reconcile_light)
+ZCL_BLOCKER_REMEDY(*.upstream_log_hole,                        reducer_frontier_reconcile_light)
+/* net.last_peer_ban is raised by peer_misbehaving() (core/modules/net/src/net.c) when
+ * a ban would leave the node with zero peers; it is cleared by the raiser's
+ * own subsystem at peer_lifecycle_note_handshake_complete()
+ * (core/modules/net/src/peer_lifecycle.c), the single choke point every completed
+ * handshake passes through. peer_floor_violated is what DRIVES that state:
+ * with healthy outbound below the floor its remedy drops stuck pre-handshake
+ * peers, clears every addnode backoff at zero-outbound, and kicks seed /
+ * onion-directory discovery — i.e. it produces the re-dial whose handshake
+ * fires the clear. Both sides read, same shape as the utxo_apply.apply_failed
+ * row above. The ban itself is bounded (ZCL_PEER_LAST_PEER_BAN_SECS, default
+ * 600s) so the peer becomes re-dialable on its own even with no remedy. */
+ZCL_BLOCKER_REMEDY(net.last_peer_ban,                          peer_floor_violated)
+/* net.block_intake_body_dropped is raised in msg_processor_enqueue_p2p_block()
+ * (core/modules/net/src/msgprocessor.c) when a block body arrives with no free slot in
+ * the fixed intake ring and is destroyed. The raiser's own caller re-queues the
+ * hash at priority (msg_blocks.c::msg_block_requeue_after_intake_backpressure)
+ * and the getdata window is now bounded by the ring's free space, so the state
+ * clears itself once intake drains. It is bound to sync_rate_below_floor
+ * because that is the condition that DETECTS the consequence: sustained body
+ * loss is exactly a fold rate at or near zero while peers are connected and
+ * work is pending, and its remedy kicks the recovery ladder. */
+ZCL_BLOCKER_REMEDY(net.block_intake_body_dropped,              sync_rate_below_floor)
+
+/* ── OWNER — no auto-remedy condition exists in-tree (the visible debt).
+ * `proof_validate.internal_error` (transient-held-permanent, backstopped by
+ * blocker_stall_meta_detector.c) and `utxo_apply.nullifier_backfill_gap`
+ * (below) were the two most-cited instances in the 2026-07-10 hold-class
+ * audit; the rest of this list is the FULL enumeration that audit warned
+ * was needed for every already-typed hold, not just those two. */
+/* Move 2a: the sovereign shielded-gap self-heal ladder now AUTO-drives the
+ * populate-only nullifier walker (nullifier_backfill_service.c) from local
+ * bodies — Rung A of remedy_named_gap() in
+ * engine/conditions/src/sapling_anchor_frontier_unavailable.c, the same condition
+ * that heals the anchor half. It re-derives proven state (never borrows), so it
+ * routes to that healer instead of OWNER. The witness still requires the blocker
+ * cleared + H* climbed, and the .progressing hook bounds a multi-round backfill;
+ * a genuinely absent-body / no-bundle case self-terminates at Rung C's named
+ * page. */
+ZCL_BLOCKER_REMEDY(utxo_apply.nullifier_backfill_gap,          sapling_anchor_frontier_unavailable)
+ZCL_BLOCKER_REMEDY(utxo_apply.apply_failed,                    reducer_frontier_reconcile_light) /* same class as script_validate.prevout_unresolved: a held apply pins H*, tip_age grows past the reconcile detect gate, the dry-run re-derives the hole and the apply's own blocker_clear() fires (utxo_apply_stage.c:228/583) */
+ZCL_BLOCKER_REMEDY(bundle_exporter.degraded,                   OWNER)
+ZCL_BLOCKER_REMEDY(utxo_apply.fatal_store,                     OWNER)
+ZCL_BLOCKER_REMEDY(utxo_apply.commit_invariant_violation,      OWNER)
+/* work/db-lock-fixes: 8 consecutive aborted catchup passes park the
+ * projection-backfill worker. No in-tree condition can decide the abort
+ * cause is gone (the park exists precisely because retries stopped
+ * helping); the operator inspects the logged abort reason and clears the
+ * blocker, which half-opens one pass — a success self-resets the streak
+ * (node_db_catchup_lock_guard.c). OWNER is the honest binding. */
+ZCL_BLOCKER_REMEDY(node_db_catchup.abort_storm,                OWNER)
+ZCL_BLOCKER_REMEDY(utxo_apply.label_splice,                    reducer_frontier_reconcile_light) /* TRANSIENT: the height-keyed script_validate/proof_validate verdict row is hash-bound to a foreign block; the reconcile dry-run purges the non-canonical residue row + re-derives the correct verdict, so the next apply attempt matches and the raiser's own utxo_apply_label_splice_healed() blocker_clear() fires (utxo_apply_stage.c:354) — same self-clear class as utxo_apply.apply_failed */
+ZCL_BLOCKER_REMEDY(utxo_apply.apply_candidate_anomaly,         reducer_frontier_reconcile_light) /* Task A: a REAL apply-candidate-selection anomaly (block map / durable-or-visible parent / on-disk body disagreeing with the ok-bound height-keyed verdict) that HOLDS utxo_apply's cursor — same self-clear class as utxo_apply.apply_failed / .label_splice: the held apply pins H*, tip_age grows past the reconcile detect gate, the dry-run re-derives the contiguous frontier + re-drives selection, and the raiser's own utxo_apply_select_idle_blocker_clear() fires on the next resolved candidate (utxo_apply_stage_fallback.c) */
+ZCL_BLOCKER_REMEDY(utxo_apply.upstream_evidence_mode,          OWNER)
+ZCL_BLOCKER_REMEDY(utxo_apply.stale_upstream_hash,             OWNER)
+ZCL_BLOCKER_REMEDY(proof_validate.internal_error,              OWNER) /* D2 */
+ZCL_BLOCKER_REMEDY(params_missing,                             OWNER)
+ZCL_BLOCKER_REMEDY(shielded_spend_unavailable,                 OWNER)
+ZCL_BLOCKER_REMEDY(proof_validate.stale_upstream_hash,         OWNER)
+ZCL_BLOCKER_REMEDY(proof_validate.invalid_upstream_verdict,    OWNER)
+ZCL_BLOCKER_REMEDY(proof_validate.upstream_evidence_mode,      OWNER)
+ZCL_BLOCKER_REMEDY(header_admit,                               OWNER)
+ZCL_BLOCKER_REMEDY(reducer_frontier.script_undetermined,       OWNER)
+/* Lane E3: raised when stage_repair_read_active_block_checked cannot read a
+ * torn/wrong canonical body (quarantine). have_data_unreadable detects the
+ * noted height (candidate 3), drops BLOCK_HAVE_DATA for a body_fetch refetch,
+ * and its witness clears this blocker (reducer_frontier_body_read_note_clear_if). */
+ZCL_BLOCKER_REMEDY(reducer_frontier.body_read_torn,            have_data_unreadable)
+ZCL_BLOCKER_REMEDY(body_fetch.header_solution_missing,         OWNER)
+ZCL_BLOCKER_REMEDY(validate_headers.window_resolve_miss,       OWNER)
+/* J5 blocks-hydrate per-row quarantine: a poisoned `blocks` header row was
+ * purged (db_block_delete) during boot hydration; its height is re-fetched by
+ * the always-running header sync + body_fetch stages and the reducer stages
+ * revalidate it. No CONDITION targets/clears this exact id (the operational
+ * cure is ordinary forward sync, not a named remedy), so OWNER is the honest
+ * binding — it flags that a quarantine happened, visible via dumpstate. */
+ZCL_BLOCKER_REMEDY(block_index.blocks_hydrate_quarantine,      OWNER)
+/* Lane B3 RUNTIME per-row quarantine: a poisoned durable `blocks` row at the
+ * frontier is purged (stage_repair_quarantine_blocks_row) by the
+ * stale_validate_headers_repair remedy at ladder exhaustion. That SAME condition
+ * owns the clear: its H*-advance witness fires once the purged height re-fetches
+ * a clean body and the reducer frontier advances past it, and the TRANSIENT
+ * blocker is re-raised ONLY while the poison persists — so the condition that
+ * raises it is exactly the one whose driven state retires it. */
+ZCL_BLOCKER_REMEDY(block_index.runtime_row_quarantine,         stale_validate_headers_repair)
+/* Flat-cache (block_index.bin) per-row admission quarantine: a flat entry whose
+ * stored hash no longer meets its own PoW target was dropped from the map during
+ * load_block_index_flat rather than admitted below PoW strength; the height is
+ * re-supplied by the always-running header sync + body_fetch stages. Same shape
+ * as the blocks-hydrate quarantine above — the cure is ordinary forward sync,
+ * not a named remedy, so OWNER (the whole-file SHA3 envelope + reindex ladder is
+ * the outer bound for gross corruption). Visible via dumpstate. */
+ZCL_BLOCKER_REMEDY(block_index.flat_row_quarantine,            OWNER)
+/* Headers-as-artifact import (engine/composition/src/boot_header_seed_import.c): the
+ * swarm-downloaded block_index.bin header seed failed to stage/load, or the
+ * imported chain does not own the baked checkpoint block hash. All TRANSIENT
+ * and self-clearing — the header chain still arrives via the always-running
+ * P2P header sync, so the cure is ordinary forward sync, not a named remedy
+ * (OWNER). Visible via dumpstate. */
+ZCL_BLOCKER_REMEDY(header_seed.*,                              OWNER)
+/* A header re-validates clean (unchanged PoW+Equihash) but its block_index
+ * entry carries a stale BLOCK_FAILED mask (set by the getheaders serve path for
+ * a locally missing/corrupt solution) that mark_valid_header refuses. The stage
+ * backs off JOB_IDLE (no storm) and self-clears the blocker when a repairable
+ * clear succeeds; the standing auto-remedy is block_failed_mask_at_tip, whose
+ * remedy runs process_block_revalidate to clear the FAILED mask consensus-safely
+ * once the reducer drive is un-starved. */
+ZCL_BLOCKER_REMEDY(validate_headers.mark_failed,               block_failed_mask_at_tip)
+ZCL_BLOCKER_REMEDY(header_band_hole,                           OWNER)
+ZCL_BLOCKER_REMEDY(utxo_recovery.rewind_overshoot,              OWNER)
+/* Scoped ancestry-height relink refused a GENUINE hash-linkage break (a torn
+ * parent above the SHA3 anchor extent, not a repairable label scramble). No
+ * condition healer drives it: it self-clears once the missing parent header
+ * connects via normal net download (the header_band planner) and the next
+ * boot's relink succeeds — same honest OWNER shape as header_band_hole. */
+ZCL_BLOCKER_REMEDY(utxo_recovery.ancestry_tear,                 OWNER)
+ZCL_BLOCKER_REMEDY(ops.binary_stale,                            OWNER)
+ZCL_BLOCKER_REMEDY(binary.fallback_active,                      OWNER)
+ZCL_BLOCKER_REMEDY(utxo_ladder_mismatch,                        OWNER)
+ZCL_BLOCKER_REMEDY(chain.tip_behind_header_chain,               ESCAPE(activation_drive_connect))
+ZCL_BLOCKER_REMEDY(sha3_window_mismatch,                        OWNER)
+ZCL_BLOCKER_REMEDY(tip_finalize.uv_cursor_gap,                  OWNER)
+ZCL_BLOCKER_REMEDY(tip_finalize.current_tip_missing,            OWNER) /* Task A: the block finalize must extend FROM is absent from the active-chain window, the durable finalized-hash table, AND the best-header ancestry — a data-availability anomaly cured by the body/header for that height connecting via normal net download (no condition drives it), same honest OWNER shape as tip_finalize.uv_cursor_gap; the raiser self-clears via tip_finalize_observe_clear_tip_missing() once old_tip resolves */
+ZCL_BLOCKER_REMEDY(tip_finalize.validation_evidence,            OWNER)
+ZCL_BLOCKER_REMEDY(tip_finalize.rewind_churn,                   OWNER)
+ZCL_BLOCKER_REMEDY(chain.coinbase_label_mismatch,               tip_label_divergence) /* window_rebuild seam wired: tip_label_divergence.c remedy re-derives [refuse_from_h, tip] via stage_rederive_range + releases the linkage holds; a persistent divergence re-raises at the first offending connect (witness reads still-present) */
+ZCL_BLOCKER_REMEDY(chain.linkage_violation,                     tip_label_divergence) /* same window_rebuild seam (both holds share the tip_label_divergence condition) */
+/* T6.2: the deep-reorg refusal in engine/jobs/src/utxo_apply_delta_reorg.c. It
+ * was silent — a LOG_WARN plus EV_BLOCK_REJECTED and nothing typed — while
+ * being the one refusal that CANNOT resolve itself: with ZCL_FINALITY_DEPTH =
+ * 10, a partition surviving more than 10 blocks on both sides never
+ * reconverges. There is deliberately no auto-remedy: the only automatic
+ * "cure" would be to rewind final state, and rewinding below the finality
+ * floor because a peer asked is the one thing consensus forbids. OWNER, with
+ * a decision row stating what the person actually chooses between. */
+ZCL_BLOCKER_REMEDY(chain.reorg_refused_below_finality,          OWNER)
+ZCL_BLOCKER_REMEDY(authority_projection_divergence,             OWNER)
+ZCL_BLOCKER_REMEDY(self_heal.unsupervised,                      OWNER)
+/* Set by self_heal_on_stall when a condition remedy hangs past the runner's
+ * stall deadline. The runner SELF-CLEARS it on its next completed pass
+ * (self_heal.c self_heal_worker_main), so a transient wedge auto-resolves; a
+ * persistent one is a genuine hung remedy needing operator attention (OWNER).
+ * The root supervisor sweep is unaffected either way — never a frozen root. */
+ZCL_BLOCKER_REMEDY(self_heal.worker_wedged,                     OWNER)
+/* Same law, one layer down: a child on_tick wedging the supervisor's shared
+ * tick-runner thread past its deadline. Sweep-raised, self-clears when the
+ * runner heartbeats again; persistent = a hung child tick (OWNER). */
+ZCL_BLOCKER_REMEDY(supervisor.tick_runner_wedged,               OWNER)
+ZCL_BLOCKER_REMEDY(connman_reactor_overflow,                    OWNER)
+ZCL_BLOCKER_REMEDY(bg_validation.reverify_failed,               OWNER)
+ZCL_BLOCKER_REMEDY(bg_validation.full_history_unproven,         OWNER)
+ZCL_BLOCKER_REMEDY(recovery_coordinator.no_applicable_rung,     OWNER)
+ZCL_BLOCKER_REMEDY(seed.linkage_gate,                           OWNER)
+ZCL_BLOCKER_REMEDY(seed.torn_import,                            OWNER)
+ZCL_BLOCKER_REMEDY(importblockindex_row_quarantine,             OWNER)
+ZCL_BLOCKER_REMEDY(snapshot_sync.activation_unified_installer_required, OWNER)
+/* Two raise sites reached only through blocker_name_dependency() — the static
+ * inline wrapper in util/blocker.h. check_blocker_remedy.sh enumerates
+ * blocker_init / chain_linkage_hold_raise / sentinel_raise_blocker /
+ * name_dependency_blocker and not that one, so these two ids were raisable in
+ * production while resolving to no row at all (runtime remedy_kind: unknown).
+ * Found by tools/lint/check_blocker_handoff_declared.sh, which does scan it. */
+ZCL_BLOCKER_REMEDY(snapshot_sync.utxo_sha3_mismatch,            OWNER) /* core/modules/net/src/msgprocessor_snapshot.c: the applied swarm chunk range is untrusted; re-fetch vs. discard is a person's call */
+ZCL_BLOCKER_REMEDY(utxo.parity_bh_drift,                        OWNER) /* engine/conditions/src/utxo_drift_detected.c: the remedy is a DELIBERATE no-op — a destructive wipe/reimport is never auto-run */
+ZCL_BLOCKER_REMEDY(coin_backfill.owner_gate,                    OWNER)
+ZCL_BLOCKER_REMEDY(sticky_escalator.resnapshot_no_base,         OWNER)
+ZCL_BLOCKER_REMEDY(sticky_escalator.resnapshot_no_consumer,     OWNER)
+ZCL_BLOCKER_REMEDY(sticky_escalator.refold_no_anchor_artifact,  OWNER)
+ZCL_BLOCKER_REMEDY(coins.commitment_spot_check,                 state_window_inconsistent)
+ZCL_BLOCKER_REMEDY(authority.pair_self_check,                   OWNER)
+ZCL_BLOCKER_REMEDY(window.consistency,                          OWNER)
+
+/* ── OWNER, dynamic-id families (cross-cutting supervisory infra + sim/
+ * fuzz harnesses — a per-name/height/reason-code blocker id, not a
+ * single subsystem's own condition). ────────────────────────────────── */
+ZCL_BLOCKER_REMEDY(stage_spin_*,                                OWNER)
+ZCL_BLOCKER_REMEDY(*.disk_low,                                  OWNER)
+ZCL_BLOCKER_REMEDY(*.below_snapshot_seed,                       OWNER)
+/* The DECLARED successor to below_snapshot_seed: the projection adopted the
+ * seed floor as its base and folds forward. Standing fact, not a stall — but
+ * still OWNER, because only a person can decide to buy the pre-seed history. */
+ZCL_BLOCKER_REMEDY(*.partial_coverage,                          OWNER)
+/* The other shape of the same wall: the body is FLAGGED present but its
+ * indexed bytes do not read back. OWNER because the only repairs (re-point the
+ * index at a surviving copy, or clear HAVE_DATA and re-fetch) are datadir
+ * decisions a projection backfill must not make for itself. */
+ZCL_BLOCKER_REMEDY(*.body_unreadable,                           OWNER)
+ZCL_BLOCKER_REMEDY(stage_stalled_*,                             OWNER)
+ZCL_BLOCKER_REMEDY(thread_stalled_*,                            OWNER)
+ZCL_BLOCKER_REMEDY(thread_restart_storm_*,                      OWNER)
+ZCL_BLOCKER_REMEDY(mirror.*,                                    OWNER)
+ZCL_BLOCKER_REMEDY(coin_backfill.unprovable.*,                  OWNER)
+ZCL_BLOCKER_REMEDY(coin_backfill.*,                             OWNER)
+ZCL_BLOCKER_REMEDY(simnet_byz.*,                                OWNER)
+ZCL_BLOCKER_REMEDY(*.body_read_failed,                          OWNER)
+/* body_persist cleared BLOCK_HAVE_DATA for a re-fetch that never produced a
+ * body. Self-clears the instant the stage advances past the height (the
+ * requeue_hold_disarm call on every JOB_ADVANCED path in
+ * engine/jobs/src/body_persist_stage.c). No named ZCL_CONDITION drives it — a
+ * height at or below the active tip is not re-requestable by the header-driven
+ * body queue, so the honest binding is OWNER. */
+ZCL_BLOCKER_REMEDY(body_persist.body_unfetchable,               OWNER)
+ZCL_BLOCKER_REMEDY(worker.stall.*,                              OWNER)
+/* projection_backfill gave up repairing a hole (rewind budget spent, missing
+ * connected block still absent). Self-clears via projection_backfill_clear_-
+ * stuck_blocker once forward sync backfills the block — no named ZCL_CONDITION
+ * drives it, so OWNER is the honest binding (same shape as worker.stall.* and
+ * block_index.blocks_hydrate_quarantine). */
+ZCL_BLOCKER_REMEDY(worker.projection_stuck,                     OWNER)
+ZCL_BLOCKER_REMEDY(chaos.stage_stall,                           OWNER)
+/* Generic rewind driver (engine/jobs/src/rewind_driver.c): escalation when the
+ * nearest-self-verified-base re-derive is refused (LCC: applied height lacks an
+ * inverse delta) or no self-verified base is reachable — needs a refold-from-
+ * anchor / operator. The driver self-clears the blocker on a committed re-derive
+ * or a clean no-op, so this is OWNER (no cheap condition heals the refused
+ * class). */
+ZCL_BLOCKER_REMEDY(rewind_driver.*,                             OWNER)
+
+/* ── OWNER — boot-time one-shot mint/refold tooling (engine/composition/src/, not the
+ * live reducer). ─────────────────────────────────────────────────────── */
+ZCL_BLOCKER_REMEDY(mint_fold.frontier_walled,                   OWNER)
+ZCL_BLOCKER_REMEDY(mint_bundle.export_failed,                   OWNER)
+ZCL_BLOCKER_REMEDY(refold.body_gap,                             OWNER)
+
+/* ── OWNER — boot-time -confine kernel-confinement apply failure. Raised at the
+ * SERVICES_RUNNING boundary (engine/composition/src/boot.c sr_confine_enter) when os_sandbox
+ * _enter(node_confine) cannot install Landlock+seccomp cleanly: the node runs
+ * UNCONFINED rather than half-applied, and only an operator can widen the
+ * allow-list / enable the kernel features and restart. ─────────────────────── */
+ZCL_BLOCKER_REMEDY(confine.apply_failed,                        OWNER)
+
+/* ── OWNER — boot-phase flight recorder (engine/composition/src/boot_flight_recorder.c):
+ * a boot stage took > max(5s, 4x its own recorded median across prior
+ * boots). BLOCKER_TRANSIENT, fail-LOUD not fail-stop — boot always
+ * proceeds regardless; this is a named signal for the operator to
+ * investigate (disk contention, a cold page cache, a regressed code
+ * path), not an auto-curable condition. ─────────────────────────────── */
+ZCL_BLOCKER_REMEDY(boot.stage_regression,                       OWNER)
+
+/* ── OWNER — boot-loop detector (engine/composition/src/boot_loop_guard.c): >= 3 distinct
+ * boots landed within the last 15 minutes (durable boot_stage_timings
+ * history, see boot_flight_recorder.c). BLOCKER_TRANSIENT, fail-LOUD not
+ * fail-stop — boot always proceeds regardless; this is the named signal
+ * that closes the "orderly shutdown + self-respawn exits 0, Restart=always
+ * loops silently" incident class — a restart loop can no longer happen with
+ * zero named signal. Only an operator can diagnose+fix the underlying
+ * liveness stall or bad deploy driving the loop. ─────────────────────── */
+ZCL_BLOCKER_REMEDY(boot.restart_loop,                            OWNER)
+
+/* ── OWNER — first-run wallet creation refused (engine/composition/src/
+ * boot_wallet_phrase.c). A brand-new wallet's ONLY backup is the twelve
+ * words it is born with, they are shown exactly once on stdout, and under
+ * the shipped systemd unit stdout IS node.log. So when stdout is not a
+ * terminal and the wallet about to be created is a real spendable one, boot
+ * refuses rather than either printing the words into a log file or leaving
+ * an owner a backup they never saw. BLOCKER_PERMANENT, fail-STOP: the
+ * caller exits. No automatic remedy is possible or wanted — every escape is
+ * a statement of intent only a person can make. ────────────────────── */
+ZCL_BLOCKER_REMEDY(wallet_phrase_no_terminal,                    OWNER)
+/* ── OWNER — Sapling commitment tree rebuild (engine/controllers/src/
+ * sync_controller_sapling_tree.c). `persist_busy` fires when the bounded
+ * BEGIN-retry against node_db is exhausted (the reducer held the store
+ * past the retry budget) — self-clears the next time the same rebuild
+ * call succeeds, but there is no in-tree condition that actively drives
+ * that retry, so it is an honest OWNER (watch it, or just let the next
+ * rebuild attempt clear it). `fail_closed` fires on any fail-closed exit
+ * from sapling_tree_rebuild() (root mismatch against the tip anchor, or a
+ * serialize/persist plumbing failure) — a real derived-state disagreement
+ * that needs an operator to run `rebuildsaplingtree` or investigate,
+ * never an auto-cure. ───────────────────────────────────────────────── */
+ZCL_BLOCKER_REMEDY(sapling_tree_rebuild.persist_busy,           OWNER)
+ZCL_BLOCKER_REMEDY(sapling_tree_rebuild.fail_closed,            OWNER)
+/* ── OWNER — checkpoint ladder divergence (engine/modules/storage/src/checkpoint_ladder.c).
+ * Fires when the ladder verifier finds a candidate rung artifact under
+ * <datadir>/checkpoint_rungs/ that is self-inconsistent, out of monotonic
+ * order, or CONFLICTS the compiled sealed keystone at its own height — a
+ * divergent state artifact. There is no auto-cure: the operator inspects
+ * `dumpstate checkpoint_ladder`, removes/replaces the offending artifact, or
+ * investigates why the node's own state diverges from a baked rung. The dumper
+ * self-clears the blocker on the next pass with no divergence. ──────────── */
+ZCL_BLOCKER_REMEDY(checkpoint_ladder.mismatch,                  OWNER)
+
+/* ── Plain code-raised, self-clearing-in-place (not condition-engine) ──
+ * Both self-clear on the SAME code path's next clean pass (block_index_
+ * cache_envelope.c: bic_verify_or_demote's ok branch;
+ * sapling_checkpoint_hook.c: a subsequent ANCHOR_KV_FOUND read) — no
+ * condition-engine tick is involved, so per the OWNER definition above
+ * (no in-tree condition/ESCAPE remedy) these are OWNER, same convention as
+ * binary.fallback_active. ─────────────────────────────────────────────── */
+ZCL_BLOCKER_REMEDY(block_index_cache.integrity_demoted,         OWNER)
+ZCL_BLOCKER_REMEDY(sapling_checkpoint_hook.anchor_read_error,   OWNER)
+/* ── OWNER — a long node.db maintenance op (PRAGMA quick_check / staging
+ * cleanup) that outran ZCL_DB_LONG_OP_DEADLINE_MS (15 min) on the shared
+ * connection (engine/models/src/database_long_op.c, raised from the SQLite
+ * progress callback in database.c). BLOCKER_TRANSIENT, fail-LOUD not
+ * fail-stop: the node stays servable from the in-memory status snapshot
+ * while it fires. It SELF-CLEARS the moment the op completes
+ * (db_long_op_unpublish → blocker_clear), so no condition-engine healer
+ * drives it; a run past 15 min is a genuinely stuck op (the legitimately
+ * slowest observed op is ~11 min) that an operator investigates. This
+ * closes the "healthy node's status goes silently dark for ~11 minutes"
+ * incident class — the maintenance is now a named blocker, never a quiet
+ * hang. ──────────────────────────────────────────────────────────────── */
+ZCL_BLOCKER_REMEDY(db.maintenance_slow,                         OWNER)
+/* ── OWNER — Task D/E supervision-coverage watchdogs (2026-07-21). Each of
+ * these is a supervisor-tree liveness contract's own on_stall naming a
+ * blocker for a detached worker/thread it watches from the OUTSIDE; none
+ * has a condition-engine healer because the whole point is that the
+ * watched worker itself is unresponsive:
+ *   - api_cache_refresh_stalled / api_lookup_stalled: the REST /api
+ *     cache-refresh and block/tx/address lookup-worker detached threads
+ *     (engine/controllers/src/api_controller_cache_liveness.c,
+ *     api_controller_lookup.c) stopped heartbeating past their supervisor
+ *     deadline — BLOCKER_TRANSIENT, self-clears on the next successful
+ *     heartbeat if the hang was transient; a genuine wedge needs an
+ *     operator restart.
+ *   - chain_integrity_restore_stuck: the background
+ *     chain_restore_finalize repair worker
+ *     (engine/conditions/src/chain_integrity_failed.c) exceeded its 30-minute
+ *     deadline — BLOCKER_DEPENDENCY, self-clears when the worker returns
+ *     (chain_integrity_restore_worker's finish path calls blocker_clear).
+ *   - node_db_unopened: node.db failed to open at boot
+ *     (engine/composition/src/boot_node_db_gate.c) — BLOCKER_PERMANENT; an unopenable
+ *     database needs an operator to look at disk/permissions/corruption,
+ *     not an auto-retry. ─────────────────────────────────────────────── */
+ZCL_BLOCKER_REMEDY(api_cache_refresh_stalled,                   OWNER)
+ZCL_BLOCKER_REMEDY(api_lookup_stalled,                           OWNER)
+ZCL_BLOCKER_REMEDY(chain_integrity_restore_stuck,               OWNER)
+ZCL_BLOCKER_REMEDY(node_db_unopened,                             OWNER)
+/* sovereign_promotion.seam_mismatch: a borrowed RELEASE_ASSISTED node's
+ * background re-derivation from the compiled anchor DISAGREED with the recorded
+ * seam (sovereign_promotion_service.c) — BLOCKER_PERMANENT. The node keeps
+ * serving on the borrowed state and never self-promotes; an operator must
+ * investigate the bundle source, not an auto-retry. */
+ZCL_BLOCKER_REMEDY(sovereign_promotion.seam_mismatch,           OWNER)
+/* ── 2026-07-24 (wf/supervision) — three named faults of the upper layer.
+ * Each replaces a fallback that was SAFE but silent; silence is the defect,
+ * because a quiet accumulation is indistinguishable from a healthy node.
+ *
+ *   hotswap.retired_generation_undrained — a superseded module .so kept
+ *     mapped because in-flight dispatch drain could not be confirmed inside
+ *     retire_handle()'s bounded window (engine/modules/hotswap/src/hotswap_activate.c
+ *     → hotswap_retire_blocker.c). BLOCKER_DEPENDENCY: it is waiting on
+ *     command dispatch to drain, and DEPENDENCY keeps it below a genuine
+ *     resource exhaustion in blocker_causal_priority. The escape IS the
+ *     auto-remedy — it retries the drain and dlcloses everything that has
+ *     since quiesced, clearing the blocker only when NOTHING is retained.
+ *
+ *   config.reload_diverged / service.declaration_diverged — the effective
+ *     configuration is not the requested one; the declared service catalog
+ *     is not what is running (engine/composition/src/boot_declaration_drift.c). OWNER,
+ *     not ESCAPE: the escapes exist and are registered, but they route
+ *     through a reconciler seam that the detecting organs (not yet in-tree)
+ *     must install, and a service declaration is observation only — nothing
+ *     is allowed to reshape a running service because a manifest said so.
+ *     Until an organ installs a reconciler these escalate to the operator
+ *     and honestly leave the blocker standing. ──────────────────────────── */
+ZCL_BLOCKER_REMEDY(hotswap.retired_generation_undrained,        ESCAPE(hotswap_reclaim_retry))
+ZCL_BLOCKER_REMEDY(config.reload_diverged,                      OWNER)
+ZCL_BLOCKER_REMEDY(service.declaration_diverged,                OWNER)

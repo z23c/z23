@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # check_model_validation.sh — gate #11
 #
-# Every app/models/src/*.c must either invoke at least one validates_*
-# macro from app/models/include/models/activerecord.h, or carry a
+# Every engine/models/src/*.c must either invoke at least one validates_*
+# macro from engine/models/include/models/activerecord.h, or carry a
 # deliberate `ar-validate-skip:<reason>` marker explaining why the AR
 # validation lifecycle does not apply (e.g. infrastructure wrappers,
 # registries, helper-only modules).
@@ -20,7 +20,7 @@ missing=()
 unTagged=()
 
 shopt -s nullglob
-for f in app/models/src/*.c; do
+for f in engine/models/src/*.c; do
     if grep -qE "ar-validate-skip:[A-Za-z][A-Za-z0-9_-]+" "$f"; then
         continue
     fi

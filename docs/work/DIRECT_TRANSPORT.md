@@ -24,7 +24,7 @@ fallbacks that hide a broken path.
 
 ## Component 1 — UDP session transport
 
-New `lib/net/udp_transport.{h,c}`:
+New `core/modules/net/udp_transport.{h,c}`:
 
 - One bound UDP port per node (`-udpport`, defaults adjacent to the P2P
   port). The port is application-plane only; block relay never rides it.
@@ -108,7 +108,7 @@ adjectives.
 
 | Lane | Owner | Owns | Gate |
 |---|---|---|---|
-| A | dev-1 | `lib/net/udp_transport.*`, noise handshake, PEX msg + posture hook | M1 loopback handshake prints RTT |
+| A | dev-1 | `core/modules/net/udp_transport.*`, noise handshake, PEX msg + posture hook | M1 loopback handshake prints RTT |
 | B | dev-2 | announce plumbing, directory/ZDIR fields, census RTT column | M2 PEX learning + hermit capture-test |
 | C | dev-3 | `zses:v1` schema, invite/accept leaves, drill script, truth card | M3 real-internet session <100 ms recorded |
 

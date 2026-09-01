@@ -313,7 +313,7 @@ case "$leaf" in
         printf '[mock] ops logs line 1\n[mock] ops logs line 2\n'; exit 0 ;;
 esac
 # No leaf command -> this is the node boot. Emit the same [boot] marker shapes
-# config/src/boot.c does (one space = top-level, three = sub-phase), plus the
+# engine/composition/src/boot.c does (one space = top-level, three = sub-phase), plus the
 # prose "[boot] ..." decoys a looser parser would turn into invented phases.
 printf '%s INFO mock node starting\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 printf '[boot] %-30s %sms\n' prologue 63

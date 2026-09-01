@@ -223,7 +223,7 @@ iso_init() {
 # Read-only justification: `--importblockindex` copies blocks/index to a
 # temp dir next to ISO_DD's node.db and strips the COPIED LOCK; it never
 # opens the source LevelDB for write and never touches the source LOCK
-# (src/main.c:1473-1509). zclassicd keeps running on 8034/8232 untouched.
+# (engine/entry/main.c:1473-1509). zclassicd keeps running on 8034/8232 untouched.
 # This is the proven cold-sync recipe step 1 the operator runs by hand.
 iso_import_blockindex() {
     local src="${1:-}"
@@ -269,7 +269,7 @@ iso_import_blockindex() {
 #     network alongside zclassicd — an isolation-invariant violation
 #     confirmed live 2026-07-19 (a weekly run reached four real mainnet
 #     IPs). -connect= still adds its argument as a peer exactly like
-#     -addnode= does (src/main.c applies app_add_node() to both
+#     -addnode= does (engine/entry/main.c applies app_add_node() to both
 #     identically), so this keeps fetching bodies from zclassicd while
 #     actually enforcing "never a public peer".
 #
@@ -281,12 +281,12 @@ iso_spawn_mainnet_node() {
 
     # -allow-plaintext-wallet: the throwaway /tmp datadir holds NO real keys
     # (0 keys, 0 sapling keys — a fresh replay node never imports a wallet), so
-    # the wallet-encryption-default boot gate (src/main.c) has nothing to
+    # the wallet-encryption-default boot gate (engine/entry/main.c) has nothing to
     # protect here. Without this flag that gate FATALs at boot ("refusing to
     # create a new PLAINTEXT wallet") and the node never reaches RPC-ready —
     # every from-fresh canary would FAIL with reason=rpc_never_ready.
     #
-    # -wallet-no-phrase-backup: the SECOND wallet gate (config/src/
+    # -wallet-no-phrase-backup: the SECOND wallet gate (engine/composition/src/
     # boot_wallet_phrase.c) refuses a headless first boot even after the
     # plaintext opt-in, because the twelve words could only land in node.log.
     # Its SKIP list is ZCL_WALLET_PASSPHRASE / mint-anchor / a declared

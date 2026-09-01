@@ -1,5 +1,5 @@
 # Program H1 baseline — the demoted event-sourced UTXO projection is GONE.
-# Program H1 deleted lib/storage/src/utxo_projection.c + coins_view_projection.c,
+# Program H1 deleted engine/modules/storage/src/utxo_projection.c + coins_view_projection.c,
 # the EV_UTXO_* emit/consume path, and the author-flag threading; the kernel
 # coins store (coins_kv) is the one UTXO ledger. This baseline is now
 # comments-only: any NEW file that references utxo_projection_* / EV_UTXO_ADD /

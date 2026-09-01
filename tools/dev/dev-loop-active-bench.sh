@@ -28,8 +28,8 @@ is_source_path()
 is_c23_zcode_path()
 {
     case "$1" in
-        *zcode*|*c23*|*market*|*shop*|config/hotswap_services.def|\
-        config/hotswap_probe_cases.def)
+        *zcode*|*c23*|*market*|*shop*|engine/composition/hotswap_services.def|\
+        engine/composition/hotswap_probe_cases.def)
             return 0
             ;;
     esac
@@ -39,9 +39,9 @@ is_c23_zcode_path()
 is_forbidden_path()
 {
     case "$1" in
-        core/*|lib/consensus/*|lib/validation/*|lib/storage/*|lib/coins/*|\
-        lib/chain/*|lib/mining/*|lib/wallet/*|lib/net/*|app/jobs/*|\
-        app/models/*|app/supervisors/*|config/src/*)
+        core/*|lib/consensus/*|core/modules/validation/*|engine/modules/storage/*|core/modules/coins/*|\
+        core/modules/chain/*|core/modules/mining/*|contexts/wallet/*|core/modules/net/*|engine/jobs/*|\
+        engine/models/*|engine/supervisors/*|engine/composition/src/*)
             return 0
             ;;
     esac
@@ -60,8 +60,8 @@ load_live_paths()
             *.c|*/src/*.h) LIVE_PATH["$path"]=1;;
         esac
     done < <(git -C "$ROOT" grep -h -o '"[^"]*\.[ch]"' -- \
-        config/hotswap_swappable.def config/hotswap_islands.def \
-        config/hotswap_services.def)
+        engine/composition/hotswap_swappable.def engine/composition/hotswap_islands.def \
+        engine/composition/hotswap_services.def)
 }
 
 classify_path()
@@ -176,11 +176,11 @@ aggregate_samples()
 self_test()
 {
     load_live_paths
-    [ "$(classify_path app/services/src/zcode_c23_corpus_service.c)" = hot_swap ] ||
+    [ "$(classify_path contexts/commons/services/src/zcode_c23_corpus_service.c)" = hot_swap ] ||
         fail 'corpus service source is not live'
-    [ "$(classify_path app/services/src/zcode_c23_economics_internal.h)" = hot_swap ] ||
+    [ "$(classify_path contexts/commons/services/src/zcode_c23_economics_internal.h)" = hot_swap ] ||
         fail 'economics private header is not live'
-    [ "$(classify_path app/services/include/services/zcode_c23_corpus_service.h)" = dev_restart ] ||
+    [ "$(classify_path contexts/commons/services/include/services/zcode_c23_corpus_service.h)" = dev_restart ] ||
         fail 'public service contract did not select restart'
     [ "$(classify_path core/consensus/src/check_block.c)" = forbidden ] ||
         fail 'consensus path is not forbidden'
@@ -194,14 +194,14 @@ self_test()
     session="$scratch/session.json"
     printf '%s\n' \
       '{"schema":"zcl.dev_watch_heartbeat.v1","status":"watching","pid":101}' \
-      '{"schema":"zcl.dev_cycle.v1","status":"passed","action":"hotswap","elapsed_us":900000,"runtime_published":true,"source_tu":"app/services/src/zcode_c23_corpus_service.c"}' \
+      '{"schema":"zcl.dev_cycle.v1","status":"passed","action":"hotswap","elapsed_us":900000,"runtime_published":true,"source_tu":"contexts/commons/services/src/zcode_c23_corpus_service.c"}' \
       '{"schema":"zcl.dev_watch_heartbeat.v1","status":"stopped","pid":101}' \
       '{"schema":"zcl.dev_watch_heartbeat.v1","status":"watching","pid":202}' \
       'not-json' \
-      '{"schema":"zcl.dev_cycle.v1","status":"rejected","action":"hotswap","elapsed_us":800000,"runtime_published":false,"source_tu":"app/services/src/zcode_c23_corpus_service.c","why_not_live":"candidate KAT refused publication"}' \
-      '{"schema":"zcl.dev_cycle.v1","status":"passed","action":"hotswap","elapsed_us":100000,"runtime_published":true,"source_tu":"app/services/src/zcode_c23_corpus_service.c"}' \
-      '{"schema":"zcl.dev_cycle.v1","status":"passed","action":"hotswap","elapsed_us":120000,"runtime_published":true,"source_tu":"app/services/src/shop_reputation_view_service.c"}' \
-      '{"schema":"zcl.dev_cycle.v1","status":"blocked","action":"reload","runtime_published":false,"service_source":"app/services/src/shop_want_view_service.c","why_not_live":"frozen service contract changed"}' \
+      '{"schema":"zcl.dev_cycle.v1","status":"rejected","action":"hotswap","elapsed_us":800000,"runtime_published":false,"source_tu":"contexts/commons/services/src/zcode_c23_corpus_service.c","why_not_live":"candidate KAT refused publication"}' \
+      '{"schema":"zcl.dev_cycle.v1","status":"passed","action":"hotswap","elapsed_us":100000,"runtime_published":true,"source_tu":"contexts/commons/services/src/zcode_c23_corpus_service.c"}' \
+      '{"schema":"zcl.dev_cycle.v1","status":"passed","action":"hotswap","elapsed_us":120000,"runtime_published":true,"source_tu":"contexts/market/services/src/shop_reputation_view_service.c"}' \
+      '{"schema":"zcl.dev_cycle.v1","status":"blocked","action":"reload","runtime_published":false,"service_source":"contexts/market/services/src/shop_want_view_service.c","why_not_live":"frozen service contract changed"}' \
       >"$native_log"
     extract_active_session_samples "$native_log" "$samples" "$session"
     jq -e '.status == "watching" and .pid == 202' "$session" >/dev/null ||

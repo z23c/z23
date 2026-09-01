@@ -150,14 +150,14 @@ configure_cases()
 {
     CASE_COMMAND[no_op]="${ZCL_DEV_BENCH_CMD_NOOP:-:}"
     CASE_COMMAND[one_controller]="${ZCL_DEV_BENCH_CMD_CONTROLLER:-$(
-        default_safe_watch_command app/controllers/src/agent_controller.c)}"
+        default_safe_watch_command cognition/controllers/src/agent_controller.c)}"
     CASE_COMMAND[one_service]="${ZCL_DEV_BENCH_CMD_SERVICE:-$(
-        default_safe_watch_command app/services/src/block_source_policy.c)}"
+        default_safe_watch_command engine/services/src/block_source_policy.c)}"
     CASE_COMMAND[one_header]="${ZCL_DEV_BENCH_CMD_HEADER:-$(
-        default_safe_watch_command lib/json/include/json/json.h)}"
+        default_safe_watch_command platform/modules/json/include/json/json.h)}"
     CASE_COMMAND[hot_swap]="${ZCL_DEV_BENCH_CMD_HOTSWAP:-make --no-print-directory hotswap-apply HANDLER=core.status}"
     CASE_COMMAND[process_reload]="${ZCL_DEV_BENCH_CMD_RELOAD:-$(
-        default_safe_watch_command app/controllers/src/agent_controller.c |
+        default_safe_watch_command cognition/controllers/src/agent_controller.c |
             sed 's/ZCL_DEV_WATCH_MODE=check/ZCL_DEV_WATCH_MODE=reload/')}"
 
     CASE_CONFIGURED[no_op]=true

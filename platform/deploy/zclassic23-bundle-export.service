@@ -1,0 +1,33 @@
+[Unit]
+Description=Z23 Consensus-State Bundle Export — scheduled backup primitive
+# READ-ONLY exporter, never restarts/stops/writes to a live node. See
+# platform/deploy/zclassic23-bundle-export.sh header for the full contract (wraps the
+# TERMINAL -export-consensus-bundle verb, self-verifies, retains, copies
+# off-disk). NOT enabled by installing this file — enabling the TIMER is an
+# explicit operator action (`systemctl --user enable --now
+# zclassic23-bundle-export.timer`), because the target datadir below and
+# ZCL_EXPORT_SECONDARY must be reviewed for THIS box first.
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/github/zclassic23
+# Target datadir: default points at mint3, the independent from-genesis cure
+# source (docs/HANDOFF.md "THE RELIABLE PATH") — a validated, durable,
+# non-live-copy chain, which is exactly the precondition
+# -export-consensus-bundle needs. Review/replace this path before enabling
+# on a given box; NEVER point it at a datadir a live systemd unit holds the
+# datadir lock on (the export verb refuses cleanly if so — see boot log
+# "[boot] Cannot lock data directory").
+Environment=ZCL_EXPORT_TARGET_DATADIR=%h/.zclassic-c23-mint3
+# Off-disk redundancy: unset by default (loud WARN each run, never silent).
+# Uncomment and point at a second disk/mount/remote-mounted path to close
+# the "only copy lives on this NVMe" gap.
+#Environment=ZCL_EXPORT_SECONDARY=/mnt/backup/zclassic23-bundles
+ExecStart=%h/github/zclassic23/platform/deploy/zclassic23-bundle-export.sh ${ZCL_EXPORT_TARGET_DATADIR}
+# A full checkpoint-content export walks the whole coins/anchor/nullifier
+# set; generous budget for a large datadir on a loaded box.
+TimeoutStartSec=3600
+Nice=15
+IOSchedulingClass=idle
+StandardOutput=journal
+StandardError=journal

@@ -26,7 +26,7 @@
  * Layering: domain/consensus/ may #include from util/, core/, consensus/.
  * The fact this module depends only on arith_uint256 + consensus_params
  * is what makes it eligible to live here. The legacy chain/pow.h API
- * stays unchanged — lib/chain/src/pow.c becomes a thin wrapper layer.
+ * stays unchanged — core/modules/chain/src/pow.c becomes a thin wrapper layer.
  */
 
 #ifndef ZCL_DOMAIN_CONSENSUS_POW_H

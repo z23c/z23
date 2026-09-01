@@ -2,19 +2,19 @@
 # Lint gate E3 — shape source files include their shape header (HARD).
 #
 # The framework places each app/.c file in a shape folder (Gate #18). That
-# is a PATH-only claim: a file under app/conditions/src/ is "a Condition"
+# is a PATH-only claim: a file under engine/conditions/src/ is "a Condition"
 # by virtue of where it sits, even if it never touches the Condition shape
 # contract. This gate closes that mislabel hole — a shape file must include
 # the header that defines its shape's contract:
 #
-#   app/conditions/src/*.c   -> "framework/condition.h"  (the Condition
+#   engine/conditions/src/*.c   -> "framework/condition.h"  (the Condition
 #                               shape contract) OR a "conditions/" header.
-#   app/models/src/*.c       -> a "models/" header (each model header pulls
+#   engine/models/src/*.c       -> a "models/" header (each model header pulls
 #                               in models/activerecord.h, the AR lifecycle).
-#   app/supervisors/src/*.c  -> a "supervisors/" header OR "util/supervisor.h"
+#   engine/supervisors/src/*.c  -> a "supervisors/" header OR "util/supervisor.h"
 #                               (the supervisor liveness contract).
 #
-# app/jobs/ is intentionally skipped: its job.h shape header does not exist
+# engine/jobs/ is intentionally skipped: its job.h shape header does not exist
 # yet. The tree fully satisfies this gate today, so it runs HARD — any new
 # off-shape file (e.g. a Service mislabeled as a Condition because it lacks
 # the contract include) fails immediately.
@@ -48,7 +48,7 @@ while IFS= read -r f; do
     fi
     violations+=("$f: condition file includes neither \"framework/condition.h\" nor a \"conditions/\" header")
     fail=1
-done < <(find app/conditions/src -type f -name '*.c' "${LINT_FIND_PRUNE_ARGS[@]}" 2>/dev/null | sort)
+done < <(find engine/conditions/src -type f -name '*.c' "${LINT_FIND_PRUNE_ARGS[@]}" 2>/dev/null | sort)
 
 # Models: a models/ header (transitively pulls activerecord.h).
 while IFS= read -r f; do
@@ -58,7 +58,7 @@ while IFS= read -r f; do
     fi
     violations+=("$f: model file includes no \"models/\" header (activerecord lifecycle)")
     fail=1
-done < <(find app/models/src -type f -name '*.c' "${LINT_FIND_PRUNE_ARGS[@]}" 2>/dev/null | sort)
+done < <(find engine/models/src -type f -name '*.c' "${LINT_FIND_PRUNE_ARGS[@]}" 2>/dev/null | sort)
 
 # Supervisors: a supervisors/ header OR util/supervisor.h.
 while IFS= read -r f; do
@@ -68,7 +68,7 @@ while IFS= read -r f; do
     fi
     violations+=("$f: supervisor file includes neither a \"supervisors/\" header nor \"util/supervisor.h\"")
     fail=1
-done < <(find app/supervisors/src -type f -name '*.c' "${LINT_FIND_PRUNE_ARGS[@]}" 2>/dev/null | sort)
+done < <(find engine/supervisors/src -type f -name '*.c' "${LINT_FIND_PRUNE_ARGS[@]}" 2>/dev/null | sort)
 
 if [ "$fail" = "0" ]; then
     echo "check_shape_includes_header: clean — every condition/model/supervisor file includes its shape header"

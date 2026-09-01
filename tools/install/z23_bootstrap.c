@@ -22,12 +22,12 @@
  * independently verified bootstrap must authenticate the shim against an
  * anchor obtained outside z23.sh. See docs/work/BOOTSTRAP_PLAN.md.
  *
- * THE JUDGEMENT ITSELF is in lib/install (pure, no I/O, unit-tested by
- * lib/test/src/test_z23_front_door.c). This file is the transports: uname,
+ * THE JUDGEMENT ITSELF is in platform/modules/install (pure, no I/O, unit-tested by
+ * tests/harness/src/test_z23_front_door.c). This file is the transports: uname,
  * a DNS datagram, two HTTPS GETs, a SHA-256, and the handoff. It is compiled
  * STRAIGHT FROM SOURCE to an executable with no intermediate object files,
  * for the same reason zclassic23-acme is: it links a TLS client and a CA
- * trust store, and lib/test/src/test_cold_join_sovereign.c P2 scans every Z23
+ * trust store, and tests/harness/src/test_cold_join_sovereign.c P2 scans every Z23
  * object under the build obj epochs for exactly those symbols. Nothing compiled here
  * can appear in a scanned epoch tree, which keeps that assertion green
  * honestly rather than by exemption.
@@ -97,7 +97,7 @@ static const char k_default_origin[] = "https://z23.sh";
 static const char k_default_pin_dns[] = "_z23-pin.z23.sh";
 static const char k_default_pin_repo[] =
     "https://raw.githubusercontent.com/ZclassiC23/zclassic/main/"
-    "packaging/install/RELEASE_PIN";
+    "platform/packaging/install/RELEASE_PIN";
 
 /* The scratch directory, and the only two names we ever create inside it.
  * They are listed rather than scanned because the signal handler below has to
@@ -166,7 +166,7 @@ static const char *env_or(const char *name, const char *fallback)
 }
 
 /* ── SHA-256 of a buffer, as lowercase hex ────────────────────────────────
- * lib/crypto owns the only SHA-256 in this tree and lib/base owns the only
+ * core/modules/crypto owns the only SHA-256 in this tree and platform/modules/base owns the only
  * hex codec; a second copy of either here would be a second thing to keep
  * correct, and this is the program that decides whether a stranger's machine
  * runs a downloaded installer. */
@@ -320,7 +320,7 @@ static size_t dns_ask(const char *server, const unsigned char *query,
 /* The harness hook. A file of TXT character-strings, one per line, standing
  * in for a datagram — the shim's selftest mocked `dig` on PATH for the same
  * reason. The WIRE parser is not mocked here: it is fed hostile datagrams
- * byte by byte by lib/test/src/test_z23_front_door.c. */
+ * byte by byte by tests/harness/src/test_z23_front_door.c. */
 static bool dns_txt_from_file(const char *path, struct fd_dns_txt *out,
                               const char **reason)
 {

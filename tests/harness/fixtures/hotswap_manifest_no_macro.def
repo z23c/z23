@@ -1,0 +1,7 @@
+/* Lint-gate fixture manifest: an app-layer .c that does NOT invoke
+ * ZCL_HOTSWAP_EXPORT_LEAVES and is intentionally NOT eligible. Used by the
+ * check_hotswap_eligible_scope
+ * self-test to prove the macro-presence check is not hollow: an app-layer path
+ * that would pass the forbidden-root check must still trip (exit 1) because it
+ * cannot actually export a generation. */
+HOTSWAP_ELIGIBLE("engine/controllers/src/health_controller.c") HOTSWAP_PROBE("fixture_probe")

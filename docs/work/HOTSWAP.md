@@ -43,22 +43,22 @@ to the superseded generation, the loader may unmap its module.
 
 | Piece | Where |
 |-------|-------|
-| ABI struct + emitter + activation API | `lib/hotswap/include/hotswap/hotswap_module.h` |
-| Loader, gate, retirement, and telemetry | `lib/hotswap/src/hotswap_activate.c` |
+| ABI struct + emitter + activation API | `engine/modules/hotswap/include/hotswap/hotswap_module.h` |
+| Loader, gate, retirement, and telemetry | `engine/modules/hotswap/src/hotswap_activate.c` |
 | Admit → probe → ONE batch commit | `hotswap_module_publish()` (same file) |
-| Epoch/refcount drain + 64-entry batch replace | `lib/kernel/src/command_registry.c` |
-| Swappable allowlist (ONE row per file) | `config/hotswap_swappable.def` |
-| Stateless multi-TU island membership | `config/hotswap_islands.def` |
-| Probe leaf per file | `config/hotswap_eligible.def` |
-| Shape + READY-read-only lint, self-tested | `tools/lint/check_hotswap_swappable_shape.sh`, `lib/test/src/test_make_lint_gates.c` |
+| Epoch/refcount drain + 64-entry batch replace | `engine/modules/kernel/src/command_registry.c` |
+| Swappable allowlist (ONE row per file) | `engine/composition/hotswap_swappable.def` |
+| Stateless multi-TU island membership | `engine/composition/hotswap_islands.def` |
+| Probe leaf per file | `engine/composition/hotswap_eligible.def` |
+| Shape + READY-read-only lint, self-tested | `tools/lint/check_hotswap_swappable_shape.sh`, `tests/harness/src/test_make_lint_gates.c` |
 | Static-state lint over BOTH manifests | `tools/lint/check_hotswap_static_state.sh` |
 | Per-file build | `make hotswap-module-so FILE=<tu.c>` (or `HANDLER=<leaf>`) |
 | Resident no-Make compiler/linker authority | `tools/dev/devloop_hotswap_build.c` |
 | 20-edit latency gate | `tools/dev/hotswap-resident-bench.sh` |
 | Native verify/apply commands + publish hooks | `tools/command/native_dev_hotswap.c` |
-| Stable host/App ABI + transactional state runtime | `lib/framework/include/zclassic23/app.h`, `lib/framework/src/app_runtime.c` |
-| Activation flag | `src/main.c` |
-| Tests | `lib/test/src/test_hotswap_module.c`, `lib/test/src/test_hotswap_module_v2.c` |
+| Stable host/App ABI + transactional state runtime | `engine/modules/framework/include/zclassic23/app.h`, `engine/modules/framework/src/app_runtime.c` |
+| Activation flag | `engine/entry/main.c` |
+| Tests | `tests/harness/src/test_hotswap_module.c`, `tests/harness/src/test_hotswap_module_v2.c` |
 
 Each module exports one `zcl_hotswap_module` symbol:
 
@@ -99,7 +99,7 @@ every build and have direct unit coverage with fabricated module descriptors
 
 ### Pure service islands
 
-`config/hotswap_services.def` separately admits versioned calculation vtables.
+`engine/composition/hotswap_services.def` separately admits versioned calculation vtables.
 These islands receive caller-owned values and buffers only; the static host
 keeps parsing, authentication, storage, networking and every external effect.
 Publication is an immutable snapshot swap with reader leases and quiescent
@@ -132,7 +132,7 @@ The publish order is fixed:
 
 1. **Admit every leaf.** A partial admit publishes ZERO leaves — the loader
    never calls the commit hook at all.
-2. **Probe.** The file's DECLARED probe leaf (from `config/hotswap_eligible.def`
+2. **Probe.** The file's DECLARED probe leaf (from `engine/composition/hotswap_eligible.def`
    — a module never chooses its own probe, and must export it) is dispatched
    against the public command registry's contract for that leaf: the
    registry-resolved spec (still READY, read-only, non-alias), the registry's
@@ -162,7 +162,7 @@ be proved, the module remains mapped. The no-override fast path stays zero-RMW.
 
 ### The hard line
 
-`config/hotswap_swappable.def` is the authority allowlist, ONE row per owner:
+`engine/composition/hotswap_swappable.def` is the authority allowlist, ONE row per owner:
 `HOTSWAP_SWAPPABLE("<source_tu>", "<space-separated leaves>")`. The
 `check-hotswap-swappable-shape` lint gate enforces BOTH halves of the line:
 
@@ -172,14 +172,14 @@ be proved, the module remains mapped. The no-override fast path stays zero-RMW.
   rejected. Reducers, consensus code, storage, and supervisors are never
   swappable.
 - **Leaf contract.** Every leaf must be declared with `ZCL_COMMAND_READY_READ`
-  in the `config/commands` catalog — the READY, `EFFECT_READ` macro form — and
+  in the `engine/composition/commands` catalog — the READY, `EFFECT_READ` macro form — and
   must be claimed by exactly ONE source file. A leaf declared with any
   `COMMAND`/`PLANNED`/`COMPAT`/`DEV` form (which can carry `EFFECT_MUTATE` or a
   non-READY availability) fails the gate before it can reach the runtime, and a
   leaf claimed by two files fails too, which is what makes a duplicate leaf
   across two modules unrepresentable.
 
-`config/hotswap_islands.def` widens code coverage, never command authority. An
+`engine/composition/hotswap_islands.def` widens code coverage, never command authority. An
 island row binds additional stateless implementation TUs to one already-admitted
 owner. Members may live only under controllers, views, conditions, pure
 services, metaverse, or encoding roots; they gain no leaves of their own and
@@ -190,23 +190,23 @@ builds remain outside the boundary.
 
 Before the def grew a leaf column the gate checked shape FOLDERS only, and the
 READY/read-only property was asserted nowhere but at runtime. Likewise
-`check-hotswap-static-state` read only `config/hotswap_eligible.def`; it now
+`check-hotswap-static-state` read only `engine/composition/hotswap_eligible.def`; it now
 scans the UNION of both manifests, because a TU reachable only through the
 swappable list would otherwise get a zero-initialized copy of its module-level
 state inside the `.so` and silently lose live process state — no crash, just
 wrong answers. Both holes were invisible only because the two lists happened to
 name the same six files. Both gates are proven to trip by seeded-violation
-fixtures in `lib/test/src/test_make_lint_gates.c`.
+fixtures in `tests/harness/src/test_make_lint_gates.c`.
 
-The current owners are read-only `app/controllers/` leaves, each with its
+The current owners are read-only `engine/controllers/` leaves, each with its
 emitter in the owning TU. Status and wallet carry their read helpers. The
 Metaverse owner carries its pure property-catalog closure and the read-only
 agent status/audit/money/liquidity service. That service receives its
 controller-owned RPC transport explicitly on each call; it owns no mutable
 transport slot and cannot create wallet or transaction authority. All island
-members are declared in `config/hotswap_islands.def`:
+members are declared in `engine/composition/hotswap_islands.def`:
 
-| Owning TU (`app/controllers/src/`) | Swappable leaves | Probe leaf |
+| Owning TU (`engine/controllers/src/`) | Swappable leaves | Probe leaf |
 |---|---|---|
 | `status_native_handlers.c` | `core.status` | `core.status` |
 | `net_native_handlers.c` | `core.network.peers.incidents` | `core.network.peers.incidents` |
@@ -402,7 +402,7 @@ conservative path.
 On this host, the first candidate-only watcher event for
 `tools/dev/devloop_restart_build.c` took 1.993 seconds end to end: 168 ms
 compile, 1.416 seconds link, and 70 ms candidate probe. The first complete
-resident proof, for `app/services/src/bg_validation_dump.c`, took 73.150
+resident proof, for `engine/services/src/bg_validation_dump.c`, took 73.150
 seconds: the process candidate took 2.649 seconds, the proof artifact took
 2.078 seconds to compile/link, and 21 cold mapped groups took 63.412 seconds.
 Every group passed with zero self-skips. This misses the five-second proof
@@ -525,7 +525,7 @@ today — `report->artifact_sha256`, surfaced in the slot table and in the
 `dumpstate hotswap` JSON — but nothing in the activation path compares that
 digest against any list of approved artifacts. The comparison primitive itself
 exists (`zcl_hotswap_hotfork_visit_so()` in
-`lib/hotswap/src/hotswap_activate.c`, which hashes an artifact and refuses to
+`engine/modules/hotswap/src/hotswap_activate.c`, which hashes an artifact and refuses to
 proceed unless it matches a caller-supplied expected digest); today only the
 disposable HOT_FORK capsule path (`tools/dev/devloop_hotswap_build.c`) calls
 it. The module-mount path never does.
@@ -558,7 +558,7 @@ containment refusal publishes no leaves.
 This mechanism is dev-only. Release builds are static and have no dynamic-load
 path. Every load operation is guarded by `ZCL_DEV_BUILD`; the
 `check-hotswap-dev-only` gate enforces that dynamic-loader calls stay inside
-`lib/hotswap/` and inside a development-build region.
+`engine/modules/hotswap/` and inside a development-build region.
 
 ### Ephemerality and module identity
 
@@ -573,13 +573,13 @@ can make the dynamic loader return its cached object.
 
 | Piece | Where |
 |-------|-------|
-| Loader, generation registry, state dumper | `lib/hotswap/` |
-| Manifest + `ZCL_HOTSWAP_EXPORT_LEAVES` | `lib/hotswap/include/hotswap/hotswap.h` |
-| Eligibility allowlist | `config/hotswap_eligible.def` |
-| Atomic leaf override layer | `lib/kernel/src/command_registry.c` |
-| Eligible native translation units | `app/controllers/src/*_native_handlers.c` |
+| Loader, generation registry, state dumper | `engine/modules/hotswap/` |
+| Manifest + `ZCL_HOTSWAP_EXPORT_LEAVES` | `engine/modules/hotswap/include/hotswap/hotswap.h` |
+| Eligibility allowlist | `engine/composition/hotswap_eligible.def` |
+| Atomic leaf override layer | `engine/modules/kernel/src/command_registry.c` |
+| Eligible native translation units | `engine/controllers/src/*_native_handlers.c` |
 | Native bridge used by generated trampolines | `zcl_native_bridge_run()` in `tools/command/native_command.c` |
-| Native probe/apply commands | `config/commands/dev.def`, `tools/command/native_dev_hotswap.{c,h}` |
+| Native probe/apply commands | `engine/composition/commands/dev.def`, `tools/command/native_dev_hotswap.{c,h}` |
 | Build and verification | `make hotswap-so`, `make hotswap-sim`, focused loader tests |
 
 No extra linker or watcher dependency is required: generation builds use the
@@ -618,7 +618,7 @@ development executable's exported global scope so handlers use live node state.
 
 ```sh
 # Build one eligible native controller generation.
-make hotswap-so FILES="app/controllers/src/status_native_handlers.c"
+make hotswap-so FILES="engine/controllers/src/status_native_handlers.c"
 
 # Verify loader policy without entering a resident node.
 make t ONLY=hotswap_loader
@@ -667,14 +667,14 @@ ZCL_HOTSWAP_EXPORT_LEAVES(k_leaves,
 #endif
 ```
 
-`lib/hotswap` forward-declares the command request/reply structures. Their
+`engine/modules/hotswap` forward-declares the command request/reply structures. Their
 concrete definitions are needed only in the controller that emits the
 trampolines, keeping the loader independent of app and kernel headers.
 
 ### Native development commands
 
 The native registry exposes `dev.hotswap.apply` and `dev.hotswap.probe` through
-`config/commands/dev.def`, with handlers in
+`engine/composition/commands/dev.def`, with handlers in
 `tools/command/native_dev_hotswap.c`:
 
 ```sh
@@ -734,16 +734,16 @@ a specific failure mode cannot happen. Conditions 1–3 bound authority, 4–6
 bound state, 7–8 bound the artifact, 9 bounds behaviour.
 
 **1. It is a shape LEAF, never an authority.**
-The source TU must live under `app/controllers/`, `app/views/`, or
-`app/conditions/`, and must never resolve under `core/`, `lib/consensus/`, <!-- doc-path-ok: lib/consensus/ mirrors the gate's FORBIDDEN regex; it does not exist and is listed so it is forbidden the day it does -->
-`lib/validation/`, `lib/storage/`, `lib/net/`, `lib/coins/`, `lib/chain/`,
-`lib/mining/`, `app/jobs/`, `lib/kernel/`, `lib/supervisor/`, <!-- doc-path-ok: lib/supervisor/ mirrors the gate's FORBIDDEN regex; it does not exist and is listed so it is forbidden the day it does -->
-`app/supervisors/`, or `domain/consensus/`. A dlopen'd module of any of those <!-- doc-path-ok: domain/consensus/ was absorbed into core/consensus by the seal split; the gate still forbids the old root on purpose -->
+The source TU must live under `engine/controllers/`, `contexts/explorer/views/`, or
+`engine/conditions/`, and must never resolve under `core/`, `lib/consensus/`, <!-- doc-path-ok: lib/consensus/ mirrors the gate's FORBIDDEN regex; it does not exist and is listed so it is forbidden the day it does -->
+`core/modules/validation/`, `engine/modules/storage/`, `core/modules/net/`, `core/modules/coins/`, `core/modules/chain/`,
+`core/modules/mining/`, `engine/jobs/`, `engine/modules/kernel/`, `lib/supervisor/`, <!-- doc-path-ok: lib/supervisor/ mirrors the gate's FORBIDDEN regex; it does not exist and is listed so it is forbidden the day it does -->
+`engine/supervisors/`, or `domain/consensus/`. A dlopen'd module of any of those <!-- doc-path-ok: domain/consensus/ was absorbed into core/consensus by the seal split; the gate still forbids the old root on purpose -->
 could silently diverge the node's consensus state or the reducer fold — a live
 code swap that can change a consensus rule is a chain-split mechanism.
 Enforced by `check-hotswap-swappable-shape`.
 **2. Every leaf it re-points is READY and read-only.**
-Each leaf must be declared `ZCL_COMMAND_READY_READ` in `config/commands/*.def`
+Each leaf must be declared `ZCL_COMMAND_READY_READ` in `engine/composition/commands/*.def`
 — the READY, `EFFECT_READ`, non-alias macro form. A leaf declared with any
 `COMMAND`/`PLANNED`/`COMPAT`/`DEV` form can carry `EFFECT_MUTATE` or a
 non-READY availability and is refused before it reaches the runtime. The
@@ -751,7 +751,7 @@ command-registry batch commit re-checks READY + `EFFECT_READ` + non-alias for
 every leaf independently, so this is asserted twice on different evidence.
 
 **3. Each leaf is owned by exactly one file.**
-Globally unique across `config/hotswap_swappable.def`, which is what makes "two
+Globally unique across `engine/composition/hotswap_swappable.def`, which is what makes "two
 modules racing to own one leaf" unrepresentable rather than merely unlikely.
 
 **4. The TU defines no mutable file-scope statics.**
@@ -781,7 +781,7 @@ the unit of swap is a *command leaf*, not "a function".
 **7. Every leaf body is inside the module's own island.**
 The `.so` is linked `-Wl,-Bsymbolic` with `-Wl,-z,now`. A body defined in a TU
 that is neither the owner nor one of its
-`config/hotswap_islands.def` members is **imported from the resident node** at
+`engine/composition/hotswap_islands.def` members is **imported from the resident node** at
 dlopen. Re-pointing such a leaf gives you new *dispatch* into **old code** —
 the swap silently does nothing for that leaf. The unity-include that builds an
 island is what makes a multi-file module genuinely recompiled. (`core.status.brief`
@@ -794,8 +794,8 @@ had to join the status island before the leaf could really be swapped.)
 artifact* below — this is an ABI property, not a policy choice.
 
 **9. It declares a resident-owned probe, and passes its own self-test.**
-The TU names a canonical probe leaf in `config/hotswap_eligible.def`, resolved
-to exactly one case in `config/hotswap_probe_cases.def`. The case freezes
+The TU names a canonical probe leaf in `engine/composition/hotswap_eligible.def`, resolved
+to exactly one case in `engine/composition/hotswap_probe_cases.def`. The case freezes
 bounded canonical JSON, the expected output schema, and a byte ceiling;
 candidate code cannot choose or weaken any of them. The probe leaf must be one
 of the leaves the module actually re-points, or probe-before-publish would be
@@ -806,14 +806,14 @@ validating code the module never installs. The module also supplies a
 
 The rule is deliberately narrow, and the narrowing is almost entirely
 conditions 1, 4 and 7 — not the allowlist's length. Against the 1,967
-production TUs in the tree (excluding `lib/test/`, `vendor/`, `tools/`):
+production TUs in the tree (excluding `tests/harness/include/test/`, `vendor/`, `tools/`):
 
 | Class | TUs | Why |
 |---|---|---|
 | Forbidden (consensus/state/supervisor roots) | 367 | Condition 1. Never eligible, at any effort. |
 | Ineligible root (not a shape leaf, not an island root) | 947 | Condition 1. Would have to be restructured into a controller/view/condition to qualify. |
-| Owner-eligible root (`app/controllers`, `app/views`, `app/conditions`) | 373 | Of these, 271 already hold no mutable file-scope statics and 102 are blocked by condition 4. |
-| Island-member-eligible root (`app/services`, `lib/metaverse`, `lib/encoding`, …) | 280 | 198 statically clean, 82 blocked by condition 4. |
+| Owner-eligible root (`engine/controllers`, `contexts/explorer/views`, `engine/conditions`) | 373 | Of these, 271 already hold no mutable file-scope statics and 102 are blocked by condition 4. |
+| Island-member-eligible root (`engine/services`, `contexts/commons/modules/metaverse`, `platform/modules/encoding`, …) | 280 | 198 statically clean, 82 blocked by condition 4. |
 
 Within the 373 owner-eligible TUs, only **10** currently define a
 `zcl_native_*_body` — i.e. actually own a native command leaf. That, not the
@@ -827,10 +827,10 @@ not declared `ZCL_COMMAND_READY_READ` and so fails condition 2.
 The unit of swap is a command leaf re-pointed in the registry's override layer,
 and a trampoline can only re-point a leaf that dispatches through the native
 command bridge. Of every `ZCL_COMMAND_READY_READ` leaf in
-`config/commands/*.def` (re-derive the count with
-`LC_ALL=C grep -rn '^ZCL_COMMAND_READY_READ($' config/commands/*.def | wc -l`), only the
+`engine/composition/commands/*.def` (re-derive the count with
+`LC_ALL=C grep -rn '^ZCL_COMMAND_READY_READ($' engine/composition/commands/*.def | wc -l`), only the
 minority that name `zcl_native_bridge_command` as their handler (re-derive with
-`LC_ALL=C grep -rn 'zcl_native_bridge_command' config/commands/*.def`, then
+`LC_ALL=C grep -rn 'zcl_native_bridge_command' engine/composition/commands/*.def`, then
 drop the one comment-line hit) sit behind this seam. The rest carry bespoke
 `zcl_native_handle_*` handlers, which are not this seam.
 
@@ -879,7 +879,7 @@ multiple definition of `zcl_hotswap_manifest_v2'
 
 What that limit does **not** constrain is the thing developers actually need:
 
-- **Files per artifact** is already unbounded — `config/hotswap_islands.def`
+- **Files per artifact** is already unbounded — `engine/composition/hotswap_islands.def`
   unity-includes N stateless TUs into one `.so` behind one provider symbol.
   `metaverse_controller.c` ships **13 files** in a single module today.
 - **Leaves per swap** is 64 (`ZCL_HOTSWAP_MODULE_MAX_LEAVES`, matching
@@ -894,15 +894,15 @@ design needs that; widen the island instead.
 
 | Native translation unit | Probe leaf | Leaves |
 |---|---|---|
-| `app/controllers/src/status_native_handlers.c` | `core.status` | 8 |
-| `app/controllers/src/wallet_native_handlers.c` | `core.wallet.address.list` | 6 |
-| `app/controllers/src/net_native_handlers.c` | `core.network.peers.incidents` | 2 |
-| `app/controllers/src/meta_native_handlers.c` | `ops.metrics` | 2 |
-| `app/controllers/src/chain_native_handlers.c` | `core.consensus.utxo.audit` | 1 |
-| `app/controllers/src/app_native_handlers.c` | `app.names.list` | 9 |
-| `app/controllers/src/ops_native_handlers.c` | `ops.debug.dash.summary` | 6 |
-| `app/controllers/src/metaverse_controller.c` | `metaverse.property.list` | 6 |
-| `app/controllers/src/diagnostics_native_handlers.c` | `ops.logs` with a fixed one-row, one-second case | 2 |
+| `engine/controllers/src/status_native_handlers.c` | `core.status` | 8 |
+| `contexts/wallet/controllers/src/wallet_native_handlers.c` | `core.wallet.address.list` | 6 |
+| `engine/controllers/src/net_native_handlers.c` | `core.network.peers.incidents` | 2 |
+| `engine/controllers/src/meta_native_handlers.c` | `ops.metrics` | 2 |
+| `engine/controllers/src/chain_native_handlers.c` | `core.consensus.utxo.audit` | 1 |
+| `engine/controllers/src/app_native_handlers.c` | `app.names.list` | 9 |
+| `engine/controllers/src/ops_native_handlers.c` | `ops.debug.dash.summary` | 6 |
+| `contexts/commons/controllers/src/metaverse_controller.c` | `metaverse.property.list` | 6 |
+| `engine/controllers/src/diagnostics_native_handlers.c` | `ops.logs` with a fixed one-row, one-second case | 2 |
 
 `core.chain.block.get` and `core.chain.transaction.get` are deliberately
 withheld from `chain_native_handlers.c`. Both are `ZCL_COMMAND_READY_READ` and
@@ -920,7 +920,7 @@ datadir. Almost every admitted TU is an RPC front door: its bodies call
 `hotswap_activate_local()` refuses at `stage=probe` without one. That refusal is
 the gate working, and must not be suppressed.
 
-**`app/controllers/src/meta_native_handlers.c` is the exception, and it is
+**`engine/controllers/src/meta_native_handlers.c` is the exception, and it is
 already admitted.** The TU contains **zero** `node_rpc_call` — its only
 functional include is `metrics/prometheus_metrics.h`. Its declared probe
 `ops.metrics` runs `zcl_native_metrics_body`, which ignores `args`, calls
@@ -939,13 +939,13 @@ Two honest caveats, neither measured here:
 - The `ops.metrics` probe case budget is **8192 bytes**. A bare process renders
   a nearly-empty registry and should fit easily; a busy resident node renders
   much more and could exceed it. If a hermetic harness trips the budget, that is
-  a byte ceiling to raise in `config/hotswap_probe_cases.def`, not a schema
+  a byte ceiling to raise in `engine/composition/hotswap_probe_cases.def`, not a schema
   failure.
 
 #### Proving a row, rather than claiming it
 
 An allowlist row that has never been loaded is a claim, not an admission. Every
-hot-swap test in `lib/test/` drives `hotswap_module_admit()` with a struct
+hot-swap test in `tests/harness/include/test/` drives `hotswap_module_admit()` with a struct
 **fabricated in the test's own TU**, which proves the gauntlet's logic and
 nothing about any real artifact. Two failure classes pass every text gate and
 fail at load:
@@ -965,7 +965,7 @@ make hotswap-verify                 # every row of hotswap_swappable.def
 make hotswap-verify FILE=<tu.c>     # one row
 ```
 
-All dlopen/dlsym/dlclose stays in `lib/hotswap` behind `#ifdef ZCL_DEV_BUILD`
+All dlopen/dlsym/dlclose stays in `engine/modules/hotswap` behind `#ifdef ZCL_DEV_BUILD`
 (`hotswap_verify_module_so`), so `check-hotswap-dev-only` still proves a
 release build links zero dynamic-loading code.
 
@@ -991,7 +991,7 @@ RPC handler while the island owns only request composition.
 
 ### Stable host/App ABI and stateful islands
 
-`lib/framework/include/zclassic23/app.h` is the project-neutral C ABI: opaque
+`engine/modules/framework/include/zclassic23/app.h` is the project-neutral C ABI: opaque
 host-owned state handles, bounded route/topic tables, an explicit capability
 ceiling, self-test/quiesce hooks, and prepare/commit/abort migrations. The host
 copies its function table and never lends modules raw SQLite handles, sockets,
@@ -1012,7 +1012,7 @@ not cross this boundary.
 Every warm passed development-cycle verdict—hot-swap, transactional reload, or
 docs-only check—auto-anchors through `finish_cycle()` in
 `tools/dev/devloop_cycle.c` and `vcs_devloop_anchor_cycle()` in
-`lib/vcs/src/vcs_devloop.c`. The ZVCS commit binds the source tree, cycle
+`contexts/commons/modules/vcs/src/vcs_devloop.c`. The ZVCS commit binds the source tree, cycle
 verdict, produced binary generation, and agent/session/task metadata.
 
 The first durable snapshot can require thousands of object writes, so it is
@@ -1080,4 +1080,4 @@ exit status, persisted verdict, and token-authorized progression.
 
 The durable ZVCS record lives under `.zvcs/`: `commits.log` is the append-only
 self-verifying history and `objects/` holds content-addressed data. Read paths
-are demonstrated in `lib/test/src/test_vcs_devloop.c`.
+are demonstrated in `tests/harness/src/test_vcs_devloop.c`.

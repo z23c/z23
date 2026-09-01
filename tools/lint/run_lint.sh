@@ -138,10 +138,10 @@ gate_command() {
         check-package-anatomy)             echo './tools/lint/check_package_anatomy.sh --selftest && ./tools/lint/check_package_anatomy.sh' ;;
         check-coins-lookup-nullcheck)      echo 'tools/scripts/check_coins_lookup_nullcheck.sh' ;;
         check-observability-pairing)       echo '"$ZCL_LINT_BIN_DIR/check_observability_pairing"' ;;
-        check-silent-errors-services)      echo './tools/lint/check_silent_error_returns.sh app/services/src services service "use LOG_ERR/LOG_FAIL/LOG_RETURN, prev-line error log, or mark // raw-return-ok:<reason>"' ;;
-        check-silent-errors-controllers)   echo './tools/lint/check_silent_error_returns.sh app/controllers/src controllers controller "use LOG_ERR/LOG_RETURN, prev-line fprintf, or mark // raw-return-ok:<reason>"' ;;
-        check-silent-errors-jobs)          echo './tools/lint/check_silent_error_returns.sh app/jobs/src jobs job "use LOG_ERR/LOG_FAIL/LOG_RETURN, prev-line error log, or mark // raw-return-ok:<reason>"' ;;
-        check-silent-errors-conditions)    echo './tools/lint/check_silent_error_returns.sh app/conditions/src conditions condition "use LOG_ERR/LOG_FAIL/LOG_RETURN, prev-line error log, or mark // raw-return-ok:<reason>"' ;;
+        check-silent-errors-services)      echo './tools/lint/check_silent_error_returns.sh engine/services/src services service "use LOG_ERR/LOG_FAIL/LOG_RETURN, prev-line error log, or mark // raw-return-ok:<reason>"' ;;
+        check-silent-errors-controllers)   echo './tools/lint/check_silent_error_returns.sh engine/controllers/src controllers controller "use LOG_ERR/LOG_RETURN, prev-line fprintf, or mark // raw-return-ok:<reason>"' ;;
+        check-silent-errors-jobs)          echo './tools/lint/check_silent_error_returns.sh engine/jobs/src jobs job "use LOG_ERR/LOG_FAIL/LOG_RETURN, prev-line error log, or mark // raw-return-ok:<reason>"' ;;
+        check-silent-errors-conditions)    echo './tools/lint/check_silent_error_returns.sh engine/conditions/src conditions condition "use LOG_ERR/LOG_FAIL/LOG_RETURN, prev-line error log, or mark // raw-return-ok:<reason>"' ;;
         check-silent-errors-bool)          echo 'ZCL_LINT_MODE=FAIL ./tools/lint/check_silent_bool_errors.sh' ;;
         check-log-macro-return-type)       echo './tools/lint/check_log_macro_return_type.sh' ;;
         check-no-runtime-abort)            echo './tools/lint/check_no_runtime_abort.sh' ;;
@@ -176,7 +176,7 @@ gate_command() {
         check-promotion-receipt-chain)     echo './tools/lint/check_promotion_receipt_chain.sh' ;;
         check-verification-coverage)       echo './tools/lint/check_verification_coverage.sh' ;;
         check-ship-remote-transaction)     echo './tools/ship.sh --selftest && ./tools/ship_selftest.sh && ./tools/lint/check_ship_remote_transaction.sh' ;;
-        check-z23-release-install)         echo 'bash packaging/release/build_release.sh --selftest && bash tools/scripts/install_z23.sh --selftest && bash tools/scripts/deploy_z23_release.sh --selftest' ;;
+        check-z23-release-install)         echo 'bash platform/packaging/release/build_release.sh --selftest && bash tools/scripts/install_z23.sh --selftest && bash tools/scripts/deploy_z23_release.sh --selftest' ;;
         check-published-platforms)         echo './tools/lint/check_published_platforms.sh --selftest && ./tools/lint/check_published_platforms.sh' ;;
         check-identity-parser-single)      echo './tools/lint/check_identity_parser_single.sh --selftest && ./tools/lint/check_identity_parser_single.sh' ;;
         check-source-identity-authority)   echo './tools/lint/check_source_identity_authority.sh --selftest && ./tools/lint/check_source_identity_authority.sh' ;;
@@ -210,6 +210,7 @@ gate_command() {
         check-thread-supervision)          echo './tools/lint/check_thread_supervision.sh --selftest && ./tools/lint/check_thread_supervision.sh' ;;
         check-file-purpose)                echo 'ZCL_LINT_MODE=RATCHET ./tools/lint/check_file_purpose.sh' ;;
         check-group-purpose)               echo 'ZCL_LINT_MODE=FAIL ./tools/lint/check_group_purpose.sh' ;;
+        check-architecture-tree)           echo './tools/lint/check_architecture_tree.sh' ;;
         check-no-orphan-placement)         echo 'ZCL_LINT_MODE=RATCHET ./tools/lint/check_no_orphan_placement.sh' ;;
         check-file-size-ceiling)           echo '"$ZCL_LINT_BIN_DIR/file_size_policy"' ;;
         check-operator-needed-sink)        echo './tools/scripts/check_operator_needed_sink.sh' ;;
@@ -298,10 +299,10 @@ run_gate_body() {
         # CORE_SEAL_PATHS mirror — MUST match the Makefile variable of the
         # same name (core/ + the sealed block-connection ordering layer).
         local seal_paths="core/
-lib/validation/src/connect_block.c
-lib/validation/src/chainstate.c
-lib/validation/include/validation/connect_block.h
-lib/validation/include/validation/chainstate.h"
+core/modules/validation/src/connect_block.c
+core/modules/validation/src/chainstate.c
+core/modules/validation/include/validation/connect_block.h
+core/modules/validation/include/validation/chainstate.h"
         if [ -f .core-unseal-token ]; then
             echo "check-core-seal: unseal token present — seal check lifted for this commit"
             echo "  (owner unseal ritual active; re-run 'make core-seal' to refreeze before commit.)"

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # check-lib-module-order — lib/ module link order (RATCHET).
 #
-# config/lib_module_order.def declares every lib/ module in LINK ORDER: rank
+# engine/composition/lib_module_order.def declares every lib/ module in LINK ORDER: rank
 # is line position, and a module may reference only STRICTLY LOWER ranks. This
 # gate proves that against the MEASURED graph, not against #include lines —
 # tools/dev/module-linkgraph.sh joins `nm` defined-symbols (owner module)
@@ -9,13 +9,13 @@
 # it also sees references made through a bare `extern` with no include at all.
 #
 # Three things fail the gate:
-#   (a) the module SET in config/lib_module_order.def disagreeing with the
+#   (a) the module SET in engine/composition/lib_module_order.def disagreeing with the
 #       lib/ tree itself. That file is the DECLARATION — the Makefile derives
 #       LIB_MODULES from it and repo_shape.sh reads it — so it is checked
 #       against the filesystem, the one witness that is still independent of
 #       it. Checking it against anything derived from it would compare it to
 #       itself,
-#   (b) a lib/ module in the link graph that config/lib_module_order.def does
+#   (b) a lib/ module in the link graph that engine/composition/lib_module_order.def does
 #       not declare (someone added lib/<mod>/ without ranking it), and
 #   (c) an edge lib/A -> lib/B where rank(B) >= rank(A) and the edge is not
 #       grandfathered in tools/scripts/lib_module_order_baseline.txt.
@@ -31,7 +31,7 @@
 # over both components: 6! and 2! orderings give 3 + 1), not a heuristic's
 # leftovers. That has a
 # consequence worth stating plainly:
-# re-ranking config/lib_module_order.def can NEVER remove a baseline line. Each
+# re-ranking engine/composition/lib_module_order.def can NEVER remove a baseline line. Each
 # one is paid down only by breaking the cycle — move the symbol down, or invert
 # the dependency behind a seam the lower module owns. See the .def's header for
 # how to re-derive all of this. A new back edge fails immediately. The gate
@@ -61,8 +61,10 @@ cd "$(dirname "$0")/../.."
 
 # shellcheck source=tools/lint/gate_lib.sh
 . tools/lint/gate_lib.sh
+# shellcheck source=tools/lint/repo_shape.sh
+. tools/lint/repo_shape.sh
 
-DEF=config/lib_module_order.def
+DEF=engine/composition/lib_module_order.def
 BASELINE=tools/scripts/lib_module_order_baseline.txt
 GRAPH_TOOL=tools/dev/module-linkgraph.sh
 # The one object tree this gate measures. Must match the baseline's
@@ -99,11 +101,11 @@ fi
 # Makefile variable and is outside the production link order (see the .def
 # header).
 def_set=$(sed -n 's/^[[:space:]]*LIB_MODULE("\([A-Za-z0-9_]*\)").*/\1/p' "$DEF" | LC_ALL=C sort -u)
-disk_set=$(git ls-files lib | cut -d/ -f2 | LC_ALL=C sort -u | grep -vx test || true)
+disk_set=$(printf '%s\n' "${ZCL_MODULE_DIRS[@]}" | awk -F/ '{print $NF}' | LC_ALL=C sort -u)
 
 gate_require_scanned "$(printf '%s\n' "$disk_set" | grep -c . || true)" 1 \
     check_lib_module_order \
-    "no lib/<mod>/ directories found — is this a checkout, and did git ls-files run?"
+    "no physical module directories found — is this a checkout?"
 
 if [ "$def_set" != "$disk_set" ]; then
     echo "check_lib_module_order: FAIL — $DEF does not match the lib/ tree."
@@ -244,7 +246,7 @@ if [ "${#violations[@]}" -gt 0 ]; then
     echo "  1. Move the referenced symbol DOWN into a lower-ranked module."
     echo "  2. Invert the dependency: register a callback/port seam so the lower"
     echo "     module never names the higher one (see"
-    echo "     node_db_set_quick_check_skip_probe in app/models/include/models/database.h)."
+    echo "     node_db_set_quick_check_skip_probe in engine/models/include/models/database.h)."
     echo "  3. Re-rank in $DEF — legitimate ONLY when the new position is"
     echo "     genuinely correct for the whole graph. Re-run"
     echo "     'tools/dev/module-linkgraph.sh --summary' and confirm the total"

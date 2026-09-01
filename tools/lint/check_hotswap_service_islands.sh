@@ -11,9 +11,9 @@ ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 cd "$ROOT"
 . tools/lint/gate_lib.sh
 
-MANIFEST="${ZCL_HOTSWAP_SERVICE_MANIFEST:-config/hotswap_services.def}"
-PROBE_CASES="${ZCL_HOTSWAP_PROBE_CASES:-config/hotswap_probe_cases.def}"
-SHADOW_OWNERS="${ZCL_HOTSWAP_SHADOW_OWNERS:-config/hotswap_shadow_owners.def}"
+MANIFEST="${ZCL_HOTSWAP_SERVICE_MANIFEST:-engine/composition/hotswap_services.def}"
+PROBE_CASES="${ZCL_HOTSWAP_PROBE_CASES:-engine/composition/hotswap_probe_cases.def}"
+SHADOW_OWNERS="${ZCL_HOTSWAP_SHADOW_OWNERS:-engine/composition/hotswap_shadow_owners.def}"
 FIXTURE_MODE="${ZCL_HOTSWAP_SERVICE_FIXTURE:-0}"
 echo "══ LINT: pure hot-swap service islands ══"
 if [ ! -r "$MANIFEST" ]; then
@@ -57,6 +57,7 @@ gate_require_scanned "${#ROWS[@]}" 1 check_hotswap_service_islands \
 
 violations=""
 scanned=0
+forbidden='(^|[^A-Za-z0-9_])(sqlite3_[A-Za-z0-9_]*|fopen|freopen|open|openat|close|read|write|pread|pwrite|stat|lstat|fstat|opendir|readdir|unlink|rename|mkdir|socket|connect|bind|listen|accept|send|recv|clock_gettime|gettimeofday|time|rand|random|getrandom|fork|vfork|exec[A-Za-z0-9_]*|system|popen|posix_spawn)[[:space:]]*\('
 declare -A seen_ids=() seen_sources=()
 for row in "${ROWS[@]}"; do
     IFS=$'\t' read -r id source headers contract_headers imports abi schema wire kat probe <<<"$row"
@@ -69,9 +70,9 @@ for row in "${ROWS[@]}"; do
         violations+="  $source (translation unit belongs to two services)"$'\n'
     fi
     seen_sources[$source]=1
-    if [[ ! "$source" =~ ^app/services/src/.+\.c$ ]] &&
-       { [ "$FIXTURE_MODE" != 1 ] || [[ ! "$source" =~ ^lib/test/fixtures/.+\.c$ ]]; }; then
-        violations+="  $source (service TU must live under app/services/src)"$'\n'
+    if [[ ! "$source" =~ ^(engine|cognition|contexts/[^/]+)/services/src/.+\.c$ ]] &&
+       { [ "$FIXTURE_MODE" != 1 ] || [[ ! "$source" =~ ^tests/harness/fixtures/.+\.c$ ]]; }; then
+        violations+="  $source (service TU must live under a physical service room)"$'\n'
         continue
     fi
     if [ ! -f "$source" ]; then
@@ -135,7 +136,6 @@ for row in "${ROWS[@]}"; do
     if [ -n "$hits" ]; then violations+="$hits"$'\n'; fi
 
     # Calls that imply effects/ambient authority. Match call tokens, not prose.
-    forbidden='(^|[^A-Za-z0-9_])(sqlite3_[A-Za-z0-9_]*|fopen|freopen|open|openat|close|read|write|pread|pwrite|stat|lstat|fstat|opendir|readdir|unlink|rename|mkdir|socket|connect|bind|listen|accept|send|recv|clock_gettime|gettimeofday|time|rand|random|getrandom|fork|vfork|exec[A-Za-z0-9_]*|system|popen|posix_spawn)[[:space:]]*\('
     bad_calls="$(grep -nE "$forbidden" "${scan_files[@]}" || true)"
     if [ -n "$bad_calls" ]; then violations+="$source:$bad_calls"$'\n'; fi
     bad_includes="$(grep -nE '^#[[:space:]]*include[[:space:]]*[<"]([^>"]*/)?(wallet|storage|consensus|validation|net|coins|chain|mining|rpc)/' "${scan_files[@]}" || true)"
@@ -165,7 +165,7 @@ while IFS=$'\t' read -r owner service; do
     fi
     seen_shadow_owners[$owner]=1
     case "$owner" in
-        tools/command/*.c|tools/dev/*.c|app/controllers/src/*.c|app/services/src/*.c|lib/vcs/src/vcs_devloop.c) ;;
+        tools/command/*.c|tools/dev/*.c|engine/controllers/src/*.c|engine/services/src/*.c|cognition/controllers/src/*.c|cognition/services/src/*.c|contexts/*/controllers/src/*.c|contexts/*/services/src/*.c|contexts/commons/modules/vcs/src/vcs_devloop.c) ;;
         *) violations+="  $owner (shadow shell is outside admitted static-shell roots)"$'\n';;
     esac
     [ -f "$owner" ] || violations+="  $owner (missing static authority shell)"$'\n'
@@ -196,7 +196,7 @@ while IFS=$'\t' read -r service members; do
     for member in $members; do
         scanned=$((scanned + 1))
         case "$member" in
-            lib/base/src/*.c|lib/codec/src/*.c|lib/json/src/*.c|lib/vcs/src/*.c) ;;
+            platform/modules/base/src/*.c|platform/modules/codec/src/*.c|platform/modules/json/src/*.c|contexts/commons/modules/vcs/src/*.c) ;;
             *) violations+="  $member (HOT_EXECUTE member is outside pure library roots)"$'\n';;
         esac
         if [ ! -f "$member" ]; then

@@ -12,7 +12,7 @@
  * It never checks a published hash against the file it was published beside.
  * That check has one participant and proves nothing: whoever wrote the
  * artifact wrote the hash. The refusal is structural, not a convention —
- * lib/vcs/node_reproduce.c will not compare two receipts unless one carries
+ * contexts/commons/modules/vcs/node_reproduce.c will not compare two receipts unless one carries
  * producer RECEIVED and the other producer LOCAL_REBUILD, so there is no
  * argument list that makes this command grade a publisher against
  * themselves.
@@ -25,7 +25,7 @@
  *   1. the artifact you have — SHA3-256 over its bytes, and (when it is this
  *      very process's own executable) the source identity BAKED INTO it,
  *      which is directory-independent by construction
- *      (lib/util/include/util/clientversion.h);
+ *      (platform/modules/util/include/util/clientversion.h);
  *   2. the artifact your machine builds — tools/scripts/node_reproduce.sh
  *      builds z23 in an isolated build dir and emits a receipt;
  *   3. the toolchain BOTH artifacts record, read the SAME way from each
@@ -336,7 +336,7 @@ static void nv_toolchain(const char *path, char hex[65], char *desc,
 /* ── the local rebuild driver ───────────────────────────────────────────── */
 
 /* Test-only seam, precedent consensus_state_producer_receipt_test_set_identity
- * (config/include/config/consensus_state_producer_receipt.h). A test
+ * (engine/composition/include/config/consensus_state_producer_receipt.h). A test
  * substitutes a driver that writes a controlled receipt so the parse,
  * compare and render path can be proven in seconds instead of the minutes a
  * whole-program LTO link costs. There is deliberately NO input field and no

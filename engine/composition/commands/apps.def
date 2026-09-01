@@ -1,0 +1,247 @@
+/* Dynamic application mounts. App-specific children come from app.def. */
+
+ZCL_COMMAND_READY_READ(
+    "app.list", "app", "", "List installed App manifests",
+    "Every installed App manifest from the local App registry; a complete "
+    "snapshot at call time, unpaged, static until an App is mounted or removed.",
+    ZCL_COMMAND_LIST_BUDGET,
+    "apps,manifest,installed", "zcl.command.empty_input.v1",
+    "zcl.app_index.v1", "", "", "z23 app list",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_PUBLIC, ZCL_COMMAND_LATENCY_FAST,
+    ZCL_COMMAND_COST_LOW, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_APP_MANIFEST_READ,
+    ZCL_COMMAND_TRAIT_DETERMINISTIC | ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_app_list)
+
+ZCL_COMMAND_READY_READ(
+    "app.inspect", "app", "", "Inspect one App manifest and bindings",
+    "One App's manifest, declared capabilities, and route bindings from the "
+    "local registry; complete for that App as currently installed.", 0,
+    "app,manifest,capabilities,bindings", "zcl.app_ref_input.v1",
+    "zcl.app_manifest_summary.v1", "app_id", "app_id",
+    "z23 app inspect social",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_PUBLIC, ZCL_COMMAND_LATENCY_FAST,
+    ZCL_COMMAND_COST_LOW, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_APP_MANIFEST_READ,
+    ZCL_COMMAND_TRAIT_DETERMINISTIC | ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_app_inspect)
+
+ZCL_COMMAND_COMPAT_READ(
+    "app.protocols", "app", "appprotocols", "List App protocol contracts",
+    "The wire and event protocol contracts each installed App declares, read "
+    "from the node; enumerates every registered App protocol at call time.",
+    ZCL_COMMAND_LIST_BUDGET,
+    "protocols,events,p2p,wire", "zcl.command.empty_input.v1",
+    "zcl.app_protocols.v1", "", "", "z23 app protocols",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_PUBLIC,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_ALL_NODE, ZCL_COMMAND_CAP_CHAIN_READ,
+    ZCL_COMMAND_TRANSPORT_NATIVE | ZCL_COMMAND_TRANSPORT_RPC,
+    "z23 appprotocols")
+
+/* Semantic chain-transaction discovery.  This is deliberately separate from
+ * core.wallet.transaction.list, which lists one wallet's transaction history. */
+ZCL_COMMAND_BRANCH("app.transaction-types", "app",
+                   "Discover every semantic ZCL transaction shape and its safe workflow",
+                   ZCL_COMMAND_LAYER_APP)
+
+ZCL_COMMAND_READY_READ(
+    "app.transaction-types.list", "app.transaction-types", "",
+    "List base, overlay, composite, process-only, contained, and planned transaction types",
+    "The compile-time semantic transaction catalog: exact builder/commit/inspect "
+    "commands, chain encoding, privacy, network policy, current proof level, "
+    "and transaction-lab case for every known Z23 transaction shape. "
+    "Discovery only; this leaf grants no wallet or broadcast authority.",
+    ZCL_COMMAND_EXTENDED_LIST_BUDGET,
+    "transactions,catalog,zcl,znam,zslp,zcode,sapling,htlc",
+    "zcl.command.empty_input.v1", "zcl.transaction_types.index.v2", "", "",
+    "z23 app transaction-types list",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_PUBLIC, ZCL_COMMAND_LATENCY_INSTANT,
+    ZCL_COMMAND_COST_TINY, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_APP_MANIFEST_READ,
+    ZCL_COMMAND_TRAIT_DETERMINISTIC | ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_transaction_types_list)
+
+ZCL_COMMAND_READY_READ(
+    "app.transaction-types.show", "app.transaction-types", "",
+    "Inspect one semantic ZCL transaction type and its safe workflow",
+    "One exact catalog entry selected by type: its availability, chain encoding, "
+    "builder/commit/inspect commands, component commands, network containment, "
+    "proof level, and focused test group. Discovery only; it cannot spend.", 0,
+    "transactions,catalog,type,workflow", "zcl.transaction_type_ref.input.v1",
+    "zcl.transaction_type.v2", "type", "type",
+    "z23 app transaction-types show --type=znam_register",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_PUBLIC, ZCL_COMMAND_LATENCY_INSTANT,
+    ZCL_COMMAND_COST_TINY, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_APP_MANIFEST_READ,
+    ZCL_COMMAND_TRAIT_DETERMINISTIC | ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_transaction_type_show)
+
+ZCL_COMMAND_READY_READ(
+    "app.transaction-types.guide", "app.transaction-types", "",
+    "Get one AI-ready transaction workflow with exact command contracts",
+    "Joins one semantic transaction type to the live native command registry. "
+    "Returns role-labeled builder, commit, component, and inspection contracts "
+    "with exact schemas, allowed keys, examples, risk, authority, confirmation "
+    "mode, and a fail-closed execution decision. Discovery only; it cannot "
+    "create a plan, authorize a wallet, sign, or broadcast.",
+    ZCL_COMMAND_EXTENDED_LIST_BUDGET,
+    "transactions,catalog,type,workflow,ai,schema,plan,commit",
+    "zcl.transaction_type_ref.input.v1", "zcl.transaction_type_guide.v1",
+    "type", "type",
+    "z23 app transaction-types guide --type=znam_register",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_PUBLIC, ZCL_COMMAND_LATENCY_INSTANT,
+    ZCL_COMMAND_COST_TINY, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_APP_MANIFEST_READ,
+    ZCL_COMMAND_TRAIT_DETERMINISTIC | ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_transaction_type_guide)
+
+ZCL_COMMAND_READY_READ(
+    "app.transaction-types.command", "app.transaction-types", "",
+    "Reverse-map one native command to every transaction workflow it can serve",
+    "Joins one exact native command leaf to every semantic transaction type "
+    "that names it as builder, plan, commit, alternate route, component, or "
+    "inspection. An unmapped leaf is explicitly unclassified and is never "
+    "claimed to be off-chain merely because the catalog lacks a row. Returns "
+    "only registry and compile-time catalog facts; it grants no wallet or "
+    "broadcast authority.",
+    ZCL_COMMAND_LIST_BUDGET,
+    "transactions,catalog,command,reverse,workflow,ai,audit",
+    "zcl.transaction_command_ref.input.v1", "zcl.transaction_command.v1",
+    "path", "path",
+    "z23 app transaction-types command core.wallet.transaction.send",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_PUBLIC, ZCL_COMMAND_LATENCY_INSTANT,
+    ZCL_COMMAND_COST_TINY, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_APP_MANIFEST_READ,
+    ZCL_COMMAND_TRAIT_DETERMINISTIC | ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_transaction_command)
+
+ZCL_COMMAND_READY_READ(
+    "app.transaction-types.wire", "app.transaction-types", "",
+    "List every consensus transaction wire era and script-processing bucket",
+    "The finite source-derived wire catalog: legacy v1/v2, Overwinter v3, "
+    "Sapling v4, their shielded proof/component gates, all standard output "
+    "script classes plus the nonstandard consensus bucket, and the generic "
+    "opaque-memo/unknown-OP_RETURN paths. This complements semantic workflows "
+    "without pretending arbitrary scripts or future application tags are a "
+    "finite list. Discovery only; it cannot construct or broadcast.",
+    ZCL_COMMAND_LIST_BUDGET,
+    "transactions,wire,version,overwinter,sapling,sprout,script,op_return",
+    "zcl.command.empty_input.v1", "zcl.transaction_wire_catalog.v1", "", "",
+    "z23 app transaction-types wire",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_PUBLIC, ZCL_COMMAND_LATENCY_INSTANT,
+    ZCL_COMMAND_COST_TINY, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_APP_MANIFEST_READ,
+    ZCL_COMMAND_TRAIT_DETERMINISTIC | ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_transaction_wire_catalog)
+
+ZCL_COMMAND_READY_READ(
+    "app.transaction-types.micro-lab", "app.transaction-types", "",
+    "Inspect the checked 100-transaction micro-lab campaign or one numbered slot",
+    "The compile-time mainnet-micro-100-v1 plan: 100 exact 1,000-zatoshi "
+    "recipient transactions across 14 amount-bearing semantic types, current "
+    "typed-wallet fee, setup and lifetime envelopes, prerequisites, and the "
+    "next typed guide input. This is discovery only: it reads no wallet or "
+    "notebook and cannot plan, reserve, sign, rebalance, or broadcast.",
+    ZCL_COMMAND_EXTENDED_LIST_BUDGET,
+    "transactions,micro-lab,campaign,ai,fee,budget,slot",
+    "zcl.transaction_micro_lab.input.v1", "zcl.transaction_micro_lab.v1",
+    "slot", "slot",
+    "z23 app transaction-types micro-lab --slot=1",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_PUBLIC, ZCL_COMMAND_LATENCY_INSTANT,
+    ZCL_COMMAND_COST_TINY, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_APP_MANIFEST_READ,
+    ZCL_COMMAND_TRAIT_DETERMINISTIC | ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_transaction_micro_lab)
+
+ZCL_COMMAND_BRANCH("app.invoke", "app", "Invoke a manifest-owned App route",
+                   ZCL_COMMAND_LAYER_APP)
+
+/* Declared services (zcl.service_binding.v1). This branch is also the
+ * namespace root every service's own leaves live under: a service named `x`
+ * owns exactly `app.service.x` and `app.service.x.*`, which is why `list`,
+ * `inspect`, `access`, and `status` are reserved service names. Adding a
+ * service means appending to engine/composition/services/bindings.def and declaring its
+ * leaves in a engine/composition/commands .def — `discover` and the generated API
+ * reference then carry them with no further work. */
+ZCL_COMMAND_BRANCH("app.service", "app",
+                   "Token-gated services declared in the service catalog",
+                   ZCL_COMMAND_LAYER_APP)
+
+ZCL_COMMAND_READY_READ(
+    "app.service.list", "app.service", "",
+    "List declared services and their catalog identity",
+    "Every service declared by engine/composition/services/bindings.def with its command "
+    "namespace, owned state prefix, host role, and the catalog's SHA3 root; a "
+    "complete compile-time snapshot, static until the binary changes.",
+    ZCL_COMMAND_LIST_BUDGET,
+    "services,bindings,catalog,token", "zcl.command.empty_input.v1",
+    "zcl.service_binding_index.v1", "", "", "z23 app service list",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_PUBLIC, ZCL_COMMAND_LATENCY_INSTANT,
+    ZCL_COMMAND_COST_TINY, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_APP_MANIFEST_READ,
+    ZCL_COMMAND_TRAIT_DETERMINISTIC | ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_service_list)
+
+ZCL_COMMAND_READY_READ(
+    "app.service.inspect", "app.service", "",
+    "Inspect one service binding: namespaces, token gate, isolation",
+    "One declared service's full binding — command prefix, owned state table "
+    "prefix, state schema, ZSLP token gate (genesis txid, threshold, snapshot "
+    "rule), the enforced isolation flag set, and its SHA3 identity; complete "
+    "for that service as compiled, with no node contact.", 0,
+    "service,binding,gate,isolation,digest", "zcl.service_ref_input.v1",
+    "zcl.service_binding.v1", "service", "service",
+    "z23 app service inspect reference",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_PUBLIC, ZCL_COMMAND_LATENCY_INSTANT,
+    ZCL_COMMAND_COST_TINY, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_APP_MANIFEST_READ,
+    ZCL_COMMAND_TRAIT_DETERMINISTIC | ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_service_inspect)
+
+ZCL_COMMAND_READY_READ(
+    "app.service.access", "app.service", "",
+    "Evaluate one service's token gate and explain the verdict",
+    "A granted/denied verdict for one service's ZSLP token gate, read from "
+    "the debit-correct zslp_ledger at the binding's declared snapshot height "
+    "(never from the credit-only zslp_balances): the verdict, the named "
+    "reason, the snapshot height, the ledger's fold cursor, the balance, and "
+    "the threshold. Reproducible — the same ledger and height always answer "
+    "the same. Fails closed: an unreadable or under-folded ledger denies.", 0,
+    "service,token,access,zslp,gate,snapshot", "zcl.service_access_input.v1",
+    "zcl.service_access_verdict.v1", "service,address,datadir,tip_height",
+    "service", "z23 app service access reference",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_SCOPE_NODE,
+    ZCL_COMMAND_AUTH_PUBLIC, ZCL_COMMAND_LATENCY_FAST,
+    ZCL_COMMAND_COST_LOW, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_CHAIN_READ,
+    ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_service_access)
+
+ZCL_COMMAND_READY_READ(
+    "app.service.status", "app.service", "",
+    "Show each declared service's runtime lifecycle state",
+    "Per-service lifecycle state (declared/starting/ready/degraded/blocked/"
+    "stopping/exited), the blocker reason when blocked, and transition and "
+    "fault counters, read from the in-process registry at call time; the "
+    "registry is rebuilt from the compiled catalog each boot, so every "
+    "service reads `declared` until something registers it.", 0,
+    "service,lifecycle,state,blocker", "zcl.service_ref_input.v1",
+    "zcl.service_lifecycle.v1", "service", "service",
+    "z23 app service status",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_SCOPE_NODE,
+    ZCL_COMMAND_AUTH_PUBLIC, ZCL_COMMAND_LATENCY_INSTANT,
+    ZCL_COMMAND_COST_TINY, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_APP_MANIFEST_READ,
+    ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_service_status)

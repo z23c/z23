@@ -22,7 +22,7 @@ references** for that file *and* its precondition holds.
 |-----|---------|----------------|
 | (a) | direct callers | `grep` each exported symbol across `app/ lib/ config/ src/` |
 | (b) | registration tables | `condition_registry.def`, `blocker_remedy_bindings.def`, `diagnostics_dumpers.def`, boot service specs |
-| (c) | tests + **content asserts** | `lib/test/**`, esp. `test_make_lint_gates.c` string asserts on FILE/SYMBOL |
+| (c) | tests + **content asserts** | `tests/harness/include/test/**`, esp. `test_make_lint_gates.c` string asserts on FILE/SYMBOL |
 | (d) | lint-gate greps + baselines | `tools/scripts/check_*.sh`, `tools/lint/*_baseline.txt` |
 | (e) | doc contracts | `docs/**` that name the file/symbol as a contract |
 | (f) | build refs | `Makefile`, include graph |
@@ -46,7 +46,7 @@ structural reason Phase A is empty; it is not a failure to look hard enough.
 
 ## 3. Consumer graph — utxo_recovery_* cluster (2,749 LOC → all Phase B/C)
 
-Live boot integration (surface a): `config/src/boot.c` calls
+Live boot integration (surface a): `engine/composition/src/boot.c` calls
 `utxo_recovery_restore_chain_tip` (`:2926`), `utxo_recovery_execute` (`:3133`),
 `utxo_recovery_import_ldb` (`:2705`), `utxo_recovery_clean_above_tip` (`:3670`),
 `utxo_recovery_backfill_shielded_if_needed` (`:482`),
@@ -95,14 +95,14 @@ coupling).
 Sibling files that follow `reducer_frontier_reconcile_light` on any carve (not
 in the target list but part of the same condition): `reducer_frontier_light_observe.c`
 / `.h` (the observe half), and the job-side implementation
-`app/jobs/src/stage_repair_reducer_frontier*.c` (`silent_bool_errors_baseline.txt:14-24`
+`engine/jobs/src/stage_repair_reducer_frontier*.c` (`silent_bool_errors_baseline.txt:14-24`
 + `stage_reducer_frontier_reconcile_light[_needed]` at
 `stage_repair_reducer_frontier.c:825,833`). Deleting the condition without these
 leaves dangling `stage_*` externs.
 
 ## 5. Consumer graph — mirror-sync services (2,584 LOC → Phase B/C)
 
-Both services are **booted live** in `config/src/boot_runtime_sync_services.c`:
+Both services are **booted live** in `engine/composition/src/boot_runtime_sync_services.c`:
 `legacy_mirror_sync_init/start/stop` (`:99,102,113`) and
 `boot_utxo_mirror_sync_register/start` (`:238,273`).
 
@@ -140,16 +140,16 @@ the surface the prior deletion missed.
 
 | Surface | Location | Entries to remove/update on delete |
 |---|---|---|
-| Content asserts | `lib/test/src/test_make_lint_gates.c` | `:4196` (legacy_mirror path), `:4999-5004` (stale_validate rules), `:5807` (legacy json contract), `:6805` (header-absence assert), `:7293` (utxo_recovery_service.h), `:7794-7814` (restore boot contract), `:8047,8147-8159` (file manifest array in `t_production_comments_do_not_carry_refactor_scaffold_labels`), `:3784,3842` (reducer_reconcile condition-name asserts) |
-| Condition registry | `app/conditions/include/conditions/condition_registry.def` | lines `33,34,42,58` for the four conditions |
-| Blocker remedies | `app/conditions/include/conditions/blocker_remedy_bindings.def` | `:88,89,113,115,116,134,137,138,169` — re-point each remedy to its B7 replacement first |
-| Diagnostics dumpers | `app/controllers/include/controllers/diagnostics_dumpers.def` | `:124` (legacy_mirror), `:568` (utxo_mirror_sync); update the diagnostics-registry test if it asserts the catalog |
+| Content asserts | `tests/harness/src/test_make_lint_gates.c` | `:4196` (legacy_mirror path), `:4999-5004` (stale_validate rules), `:5807` (legacy json contract), `:6805` (header-absence assert), `:7293` (utxo_recovery_service.h), `:7794-7814` (restore boot contract), `:8047,8147-8159` (file manifest array in `t_production_comments_do_not_carry_refactor_scaffold_labels`), `:3784,3842` (reducer_reconcile condition-name asserts) |
+| Condition registry | `engine/conditions/include/conditions/condition_registry.def` | lines `33,34,42,58` for the four conditions |
+| Blocker remedies | `engine/conditions/include/conditions/blocker_remedy_bindings.def` | `:88,89,113,115,116,134,137,138,169` — re-point each remedy to its B7 replacement first |
+| Diagnostics dumpers | `engine/controllers/include/controllers/diagnostics_dumpers.def` | `:124` (legacy_mirror), `:568` (utxo_mirror_sync); update the diagnostics-registry test if it asserts the catalog |
 | Lint baselines | `tools/lint/file_purpose_baseline.txt` (`13,22,35,46,53,157,164-168`), `tools/lint/borrowed_seed_caller_baseline.txt:11`, `tools/scripts/repair_rung_baseline.txt:5,6,26`, `tools/lint/silent_bool_errors_baseline.txt:14-24,47,48,53,54,55` | remove the row(s) for each deleted file/symbol |
 | Lint scripts | `check_blocker_escape_registered.sh`, `check_condition_cooldown.sh`, `check_no_new_repair_rung.sh`, `check_lag_slo_observable.sh`, `check_honest_witness.sh`, `fresh-boot-proof.sh`, `sticky_fault_inject.sh` | confirm each still passes with the symbol gone (some grep for it) |
 | Build / Makefile | `Makefile:4934` (lag-SLO observability on `legacy_mirror_sync_service`) | re-source before deleting the service |
 | Consumer headers | §3/§4/§5 header lists | trim decls; delete dangling `stage_repair_reducer_frontier*` externs if the condition goes |
-| Agent-impact map | `app/controllers/include/controllers/agent_impact_rules.def:120,121` | remove the reducer_frontier / stale_validate rows |
-| Condition tests | `lib/test/src/test_reducer_frontier_reconcile_light.c`, `test_reducer_reconcile_witness.c`, `test_stale_validate_headers_repair_condition.c`, `test_header_probe_p2p_fallback.c`, `test_sticky_conditions.c` | delete/rewrite; each calls `register_*` |
+| Agent-impact map | `cognition/controllers/include/controllers/agent_impact_rules.def:120,121` | remove the reducer_frontier / stale_validate rows |
+| Condition tests | `tests/harness/src/test_reducer_frontier_reconcile_light.c`, `test_reducer_reconcile_witness.c`, `test_stale_validate_headers_repair_condition.c`, `test_header_probe_p2p_fallback.c`, `test_sticky_conditions.c` | delete/rewrite; each calls `register_*` |
 
 ## 8. Ordering (from never-stuck-plan §4, unchanged)
 

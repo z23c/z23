@@ -9,15 +9,15 @@
 # Two tiers, same mechanics, different consequence (E1's file-size gate
 # dropped its own tier split in 2026-08; this one keeps it):
 #
-#   ENFORCED (fails the build) — app/controllers/src/*.c,
-#   app/services/src/*.c, and config/src/*.c (the composition root — same
-#   tier config/src/*.c sits in for E1). RATCHET-mode: grandfathered
-#   offenders (e.g. config/src/boot.c's app_init, a pre-existing
+#   ENFORCED (fails the build) — engine/controllers/src/*.c,
+#   engine/services/src/*.c, and engine/composition/src/*.c (the composition root — same
+#   tier engine/composition/src/*.c sits in for E1). RATCHET-mode: grandfathered
+#   offenders (e.g. engine/composition/src/boot.c's app_init, a pre-existing
 #   single-function boot sequence) are recorded in
 #   tools/scripts/check_long_functions_baseline.txt at their current length
 #   so the gate stays green on today's tree; new/grown functions fail.
 #
-#   WARN (prints, never fails) — lib/**/*.c, excluding lib/test/ (fixtures
+#   WARN (prints, never fails) — lib/**/*.c, excluding tests/harness/include/test/ (fixtures
 #   and test registrations, legitimately long and not a "god function"
 #   signal). lib/ is primitives, not the app-shape surfaces this gate was
 #   written to police, so a violation here is a heads-up, not a build
@@ -41,6 +41,8 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 # shellcheck source=tools/lint/gate_lib.sh
 . tools/lint/gate_lib.sh
+# shellcheck source=tools/lint/repo_shape.sh
+. tools/lint/repo_shape.sh
 # shellcheck source=tools/lint/scan_exclusions.sh
 source tools/lint/scan_exclusions.sh
 
@@ -50,8 +52,8 @@ LIMIT=500
 # ZCL_LONGFN_LIB_ROOTS so the lint-gate self-test can point either tier at
 # an empty dir and prove the non-empty-scan-set preflight trips (exit 2)
 # instead of reporting "clean" off a hollow scan.
-ENFORCED_ROOTS_DEFAULT="app/controllers/src app/services/src config/src"
-LIB_ROOTS_DEFAULT="lib"
+ENFORCED_ROOTS_DEFAULT="$(repo_shape_room_dirs controllers | sed 's@$@/src@' | tr '\n' ' ')$(repo_shape_room_dirs services | sed 's@$@/src@' | tr '\n' ' ')engine/composition/src"
+LIB_ROOTS_DEFAULT="${ZCL_MODULE_DIRS[*]}"
 ENFORCED_ROOTS="${ZCL_LONGFN_ENFORCED_ROOTS:-$ENFORCED_ROOTS_DEFAULT}"
 LIB_ROOTS="${ZCL_LONGFN_LIB_ROOTS:-$LIB_ROOTS_DEFAULT}"
 
@@ -80,13 +82,13 @@ if [ "${1:-}" = "--selftest" ]; then
     #      files could vanish and the floor still cleared.
     cov_case 2 "an ENFORCED scan missing a whole declared root was not UNPROVEN" \
         ZCL_LINT_PRODUCTION_SCAN=1 ZCL_LONGFN_COVERAGE_ONLY=1 \
-        ZCL_LONGFN_ENFORCED_ROOTS="app/controllers/src app/services/src"
+        ZCL_LONGFN_ENFORCED_ROOTS="engine/controllers/src engine/services/src"
     # (2b) the WARN tier narrowed to one subtree of lib/ is UNPROVEN too. A
     #      WARN tier that never fails the build is exactly where a silently
     #      shrunk scan would go unnoticed forever.
     cov_case 2 "a WARN-tier scan narrowed below lib/ was not UNPROVEN" \
         ZCL_LINT_PRODUCTION_SCAN=1 ZCL_LONGFN_COVERAGE_ONLY=1 \
-        ZCL_LONGFN_LIB_ROOTS="lib/util"
+        ZCL_LONGFN_LIB_ROOTS="platform/modules/util"
     # (3) a shortfall SMALLER than the recorded allowance is a stale ratchet,
     #     exit 1 — an allowance that may only ever rise rusts shut.
     cov_case 1 "an allowance above the true shortfall was silently tolerated" \
@@ -172,7 +174,7 @@ check_functions_tier() {
 
 overall_fail=0
 
-# ── ENFORCED tier: controllers/services + config/src/ ────────────────────
+# ── ENFORCED tier: controllers/services + engine/composition/src/ ────────────────────
 
 ENFORCED_BASELINE="${ZCL_LONGFN_BASELINE:-tools/scripts/check_long_functions_baseline.txt}"
 [ -f "$ENFORCED_BASELINE" ] || touch "$ENFORCED_BASELINE"
@@ -181,12 +183,12 @@ load_function_baseline enforced_baseline "$ENFORCED_BASELINE"
 enforced_baseline_count="${#enforced_baseline[@]}"
 
 # Fail-loud preflight: the scan set MUST be non-empty. A gate that silently
-# iterates zero files (a renamed/moved controllers or config/src dir) would
+# iterates zero files (a renamed/moved controllers or engine/composition/src dir) would
 # otherwise report "clean" while blind.
 mapfile -t enforced_files < <(find $ENFORCED_ROOTS -maxdepth 1 -type f -name '*.c' \
     "${LINT_FIND_PRUNE_ARGS[@]}" 2>/dev/null | sort)
 gate_require_scanned "${#enforced_files[@]}" 1 check_long_functions \
-    "roots: $ENFORCED_ROOTS — was app/controllers/src, app/services/src, or config/src renamed/moved?"
+    "roots: $ENFORCED_ROOTS — was engine/controllers/src, engine/services/src, or engine/composition/src renamed/moved?"
 
 # ── Coverage: did each tier reach everything it claims to cover? ────────────
 # The two floors answer "did the scan produce anything at all" — and both were
@@ -207,7 +209,7 @@ gate_require_scanned "${#enforced_files[@]}" 1 check_long_functions \
 # Scope, unchanged. ENFORCED: each declared root is scanned NON-recursively
 # (`-maxdepth 1`), so its pathspecs carry `:(glob)`, which stops `*` at a `/`,
 # instead of git's default cross-directory `*`. WARN: all of lib/ recursively
-# EXCEPT lib/test/ (fixtures and test registrations are legitimately long and
+# EXCEPT tests/harness/include/test/ (fixtures and test registrations are legitimately long and
 # are excluded by the find, so the expectation excludes them too).
 #
 # Allowance 0 for both tiers, shrink-only: measured ENFORCED expected 743,
@@ -217,15 +219,19 @@ LONGFN_COVERAGE_ALLOWANCE="${ZCL_LONGFN_COVERAGE_ALLOWANCE:-0}"
 # WARN-tier scan set, discovered here (next to the ENFORCED one) so BOTH
 # coverage verdicts land before either tier's analysis runs — a partial scan is
 # not something to report a WARN off.
-mapfile -t lib_files < <(find $LIB_ROOTS -type f -name '*.c' -not -path 'lib/test/*' \
+mapfile -t lib_files < <(find $LIB_ROOTS -type f -name '*.c' -not -path 'tests/harness/include/test/*' \
     "${LINT_FIND_PRUNE_ARGS[@]}" 2>/dev/null | sort)
 gate_require_scanned "${#lib_files[@]}" 1 check_long_functions \
-    "roots: $LIB_ROOTS (excl. lib/test/) — was lib/ renamed/moved?"
+    "roots: $LIB_ROOTS (excl. tests/harness/include/test/) — was lib/ renamed/moved?"
 
 if [ "${ZCL_LONGFN_COVERAGE:-1}" = "1" ]; then
     longfn_cov_specs=()
+    longfn_lib_specs=()
     for longfn_cov_root in $ENFORCED_ROOTS_DEFAULT; do
         longfn_cov_specs+=(":(glob)$longfn_cov_root/*.c")
+    done
+    for longfn_cov_root in $LIB_ROOTS_DEFAULT; do
+        longfn_lib_specs+=("$longfn_cov_root/*.c")
     done
     # Per-root non-emptiness. KNOWN LIMIT of any git-oracle coverage check over
     # hardcoded roots: the oracle is independent of the gate's FIND, not of its
@@ -250,7 +256,7 @@ if [ "${ZCL_LONGFN_COVERAGE:-1}" = "1" ]; then
     gate_require_git_coverage - "$LONGFN_COVERAGE_ALLOWANCE" check_long_functions \
         ZCL_LONGFN_COVERAGE_ALLOWANCE \
         "WARN tier. Re-run from a clean checkout. If a listed file genuinely left this gate's scope, move it out of $LIB_ROOTS_DEFAULT — raising ZCL_LONGFN_COVERAGE_ALLOWANCE is a last resort and needs the reason written down." \
-        -- "$LIB_ROOTS_DEFAULT/*.c" ":(exclude)$LIB_ROOTS_DEFAULT/test/*" \
+        -- "${longfn_lib_specs[@]}" \
         < <(printf '%s\n' "${lib_files[@]}")
 fi
 if [ "${ZCL_LONGFN_COVERAGE_ONLY:-0}" = "1" ]; then
@@ -295,7 +301,7 @@ if [ "${#enforced_shrink[@]}" -gt 0 ]; then
     done
 fi
 
-# ── WARN tier: lib/ (excluding lib/test/) ─────────────────────────────────
+# ── WARN tier: lib/ (excluding tests/harness/include/test/) ─────────────────────────────────
 
 LIB_BASELINE="${ZCL_LONGFN_LIB_BASELINE:-tools/scripts/check_long_functions_lib_baseline.txt}"
 [ -f "$LIB_BASELINE" ] || touch "$LIB_BASELINE"

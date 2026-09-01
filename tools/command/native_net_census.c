@@ -7,7 +7,7 @@
  *   core.network.graph    — topology stats + our connectivity vs the census
  *
  * These open the banked census stores (<datadir>/peers_projection.db +
- * topology.db) with SQLITE_OPEN_READONLY via lib/storage census_read — no
+ * topology.db) with SQLITE_OPEN_READONLY via engine/modules/storage census_read — no
  * running node needed,
  * consensus never touched. When the indexer lane has not yet created a table,
  * every command degrades to a successful { populated:false, note:... } body

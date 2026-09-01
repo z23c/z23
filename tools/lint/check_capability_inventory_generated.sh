@@ -15,23 +15,23 @@ trap 'rm -rf "$TMP"' EXIT HUP INT TERM
 
 SOURCES=(
     tools/gen_capability_inventory.c
-    lib/codeindex/src/codeindex_inventory.c
-    lib/codeindex/src/codeindex_inventory_scan.c
-    lib/codeindex/src/codeindex_inventory_body.c
-    lib/codeindex/src/codeindex_inventory_evidence.c
-    lib/codeindex/src/codeindex_scan.c
-    lib/codeindex/src/codeindex_scan_doc.c
-    lib/base/src/safe_alloc.c
-    lib/base/src/log_level.c
-    lib/sha3/src/sha3.c
+    cognition/modules/codeindex/src/codeindex_inventory.c
+    cognition/modules/codeindex/src/codeindex_inventory_scan.c
+    cognition/modules/codeindex/src/codeindex_inventory_body.c
+    cognition/modules/codeindex/src/codeindex_inventory_evidence.c
+    cognition/modules/codeindex/src/codeindex_scan.c
+    cognition/modules/codeindex/src/codeindex_scan_doc.c
+    platform/modules/base/src/safe_alloc.c
+    platform/modules/base/src/log_level.c
+    platform/modules/sha3/src/sha3.c
 )
 GEN="$TMP/gen_capability_inventory"
 LIBS=()
 case "$(uname -s 2>/dev/null || true)" in
     MINGW*|MSYS*)
         SOURCES+=(
-            lib/platform/src/directory_compat.c
-            lib/platform/src/positioned_file.c
+            platform/modules/platform/src/directory_compat.c
+            platform/modules/platform/src/positioned_file.c
         )
         LIBS+=( -ladvapi32 )
         GEN="$GEN.exe"
@@ -47,9 +47,9 @@ fi
 CC_BIN="${CC:-cc}"
 if ! "$CC_BIN" -std=c23 -D_POSIX_C_SOURCE=200809L -D_DARWIN_C_SOURCE \
         -O2 -Wall -Wextra \
-        -Werror -pedantic -Ilib/codeindex/include -Ilib/codeindex/src \
-        -Ilib/base/include -Ilib/util/include -Ilib/sha3/include \
-        -Ilib/crypto/include -Ilib/platform/include \
+        -Werror -pedantic -Icognition/modules/codeindex/include -Icognition/modules/codeindex/src \
+        -Iplatform/modules/base/include -Iplatform/modules/util/include -Iplatform/modules/sha3/include \
+        -Icore/modules/crypto/include -Iplatform/modules/platform/include \
         -o "$GEN" "${SOURCES[@]}" "${LIBS[@]}" \
         2>"$TMP/cc.log"; then
     echo "check_capability_inventory_generated: FATAL — generator compile failed" >&2
@@ -84,7 +84,7 @@ if [ "${capabilities:-0}" -lt 1000 ] || [ "${roots_found:-0}" -lt 500 ]; then
     exit 2
 fi
 
-git ls-files lib app core config domain ports adapters packages |
+git ls-files core engine contexts cognition platform contexts/commons/packages |
     awk '/\/include\/.*\.h$/ && $0 !~ /^lib\/test\//' |
     LC_ALL=C sort -u >"$TMP/tracked_headers"
 sed -n 's/^{"record":"capability","header":"\([^"]*\)".*/\1/p' \

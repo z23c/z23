@@ -91,7 +91,7 @@ is spent every time) and will shift if the funding recipe changes; the
 token math, projection rows, and settlement outcomes are the invariant
 part. Like example 06, the
 two HTLC secrets are **not** reproducible run to run: `htlc_generate_secret()`
-(`lib/script/src/htlc.c`) draws from the real OS CSPRNG, not the seed
+(`core/modules/script/src/htlc.c`) draws from the real OS CSPRNG, not the seed
 tape's mockable RNG hook — genuine cryptographic secret material must
 never be routed through a replayable test hook, even in a demo. Every
 height, fee, size, hash, and projection row around the secrets is still
@@ -112,42 +112,42 @@ P2PKH transfer.
 
 | API | File |
 |---|---|
-| `slp_build_genesis`, `slp_build_send`, `slp_parse`, `struct slp_message` | `lib/zslp/include/zslp/slp.h` |
-| `explorer_index_apply_slp`, `db_zslp_token_find`, `db_zslp_transfer_list_by_token` | `app/models/include/models/explorer_index.h`, `app/models/include/models/zslp.h` |
-| `znam_build_register`, `znam_build_set_text`, `db_znam_find`, `db_znam_text_get` | `lib/znam/include/znam/znam.h`, `app/models/include/models/znam.h` |
-| `explorer_index_block` | `app/models/include/models/explorer_index.h` |
-| `htlc_build_script`, `htlc_generate_secret`, `htlc_extract_secret`, `htlc_build_redeem_scriptsig`, `htlc_build_refund_scriptsig` (via `script_id_from_script`/`script_for_p2sh`) | `lib/script/include/script/htlc.h` |
-| `simnet_init`, `simnet_use_seed_tape`, `simnet_mint_coinbase`, `simnet_spend`, `simnet_mint_to_height`, `simnet_tip_height`, `simnet_free` | `lib/sim/include/sim/simnet.h` |
-| `simnet_mempool_add`, `simnet_mempool_mint`, `simnet_mempool_size`, `simnet_mempool_reject_name`, `SIMNET_MEMPOOL_REJECT_NONFINAL` | `lib/sim/include/sim/simnet_mempool.h` |
-| `simnet_wallet_default_fee_rate` | `lib/sim/include/sim/simnet_wallet.h` |
-| `sha3_256` (macro for `zcl_sha3_256`) | `lib/crypto/include/crypto/sha3.h` |
-| `transaction_init`, `transaction_alloc`, `transaction_compute_hash`, `transaction_serialize_size`, `transaction_free`, `fee_rate_get_fee` | `lib/primitives/include/primitives/transaction.h`, `lib/core/include/core/amount.h` |
+| `slp_build_genesis`, `slp_build_send`, `slp_parse`, `struct slp_message` | `contexts/market/modules/zslp/include/zslp/slp.h` |
+| `explorer_index_apply_slp`, `db_zslp_token_find`, `db_zslp_transfer_list_by_token` | `contexts/explorer/models/include/models/explorer_index.h`, `contexts/market/models/include/models/zslp.h` |
+| `znam_build_register`, `znam_build_set_text`, `db_znam_find`, `db_znam_text_get` | `contexts/naming/modules/znam/include/znam/znam.h`, `contexts/naming/models/include/models/znam.h` |
+| `explorer_index_block` | `contexts/explorer/models/include/models/explorer_index.h` |
+| `htlc_build_script`, `htlc_generate_secret`, `htlc_extract_secret`, `htlc_build_redeem_scriptsig`, `htlc_build_refund_scriptsig` (via `script_id_from_script`/`script_for_p2sh`) | `core/modules/script/include/script/htlc.h` |
+| `simnet_init`, `simnet_use_seed_tape`, `simnet_mint_coinbase`, `simnet_spend`, `simnet_mint_to_height`, `simnet_tip_height`, `simnet_free` | `engine/modules/sim/include/sim/simnet.h` |
+| `simnet_mempool_add`, `simnet_mempool_mint`, `simnet_mempool_size`, `simnet_mempool_reject_name`, `SIMNET_MEMPOOL_REJECT_NONFINAL` | `engine/modules/sim/include/sim/simnet_mempool.h` |
+| `simnet_wallet_default_fee_rate` | `engine/modules/sim/include/sim/simnet_wallet.h` |
+| `sha3_256` (macro for `zcl_sha3_256`) | `core/modules/crypto/include/crypto/sha3.h` |
+| `transaction_init`, `transaction_alloc`, `transaction_compute_hash`, `transaction_serialize_size`, `transaction_free`, `fee_rate_get_fee` | `core/modules/primitives/include/primitives/transaction.h`, `core/modules/core/include/core/amount.h` |
 
-Ground-truth references this file was built from: `examples/04_zslp_token.c`,
-`examples/05_znam_names.c`, `examples/06_htlc_swap.c`,
-`lib/test/src/test_simnet.c` (sections 6-7), `lib/test/src/test_simnet_txkit.c`,
+Ground-truth references this file was built from: `docs/examples/04_zslp_token.c`,
+`docs/examples/05_znam_names.c`, `docs/examples/06_htlc_swap.c`,
+`tests/harness/src/test_simnet.c` (sections 6-7), `tests/harness/src/test_simnet_txkit.c`,
 `docs/SIMULATOR_TXNS.md`.
 
 ## Production counterpart
 
-- **Mint the deed** — `zslp_createtoken` (`app/controllers/src/zslp_controller.c`)
+- **Mint the deed** — `zslp_createtoken` (`contexts/market/controllers/src/zslp_controller.c`)
   builds the exact `slp_build_genesis` OP_RETURN this example built by
   hand; `z23 app tokens list` reads it
   back.
 - **Claim the storefront** — `name_register`
-  (`app/controllers/src/name_controller.c`, `z23 rpc name_register`)
+  (`engine/controllers/src/name_controller.c`, `z23 rpc name_register`)
   wires REGISTER end to end today. UPDATE/SET_TEXT are assembled the same
   way (`znam_build_update`/`znam_build_set_text` plus a normal transparent
   send) but have **no dedicated RPC yet** — see
-  `examples/05_znam_names.c`'s production-counterpart note for the exact
+  `docs/examples/05_znam_names.c`'s production-counterpart note for the exact
   gap; this example builds those transactions by hand for the same reason
   05 does.
 - **Direct sale** — `zslp_send` moves the token; the payment itself is an
   ordinary wallet send. Both go through the normal transparent
-  broadcast path in `app/controllers/src/wallet_controller.c`, exactly
+  broadcast path in `contexts/wallet/controllers/src/wallet_controller.c`, exactly
   like this example's plain payment transaction.
 - **Escrow sale** — `swap_initiate` / `swap_participate`
-  (`app/controllers/src/swap_controller.c`, `z23 app swap initiate` /
+  (`engine/controllers/src/swap_controller.c`, `z23 app swap initiate` /
   `z23 rpc swap_participate`) build the same `htlc_build_script`
   contract this example built by hand. **Gap, same as example 06:** there
   is still no node-broadcast redeem/refund/settlement path today — an
@@ -158,7 +158,7 @@ Ground-truth references this file was built from: `examples/04_zslp_token.c`,
   address above, the actual asset bytes ship over the P2P file market's
   chunk service (`fs_send_chunk_fast`), unlocked only after a
   mempool-verified payment txid (`handle_zfilepay` in
-  `lib/net/src/msgprocessor.c`) — the same "pay, then receive" shape as
+  `core/modules/net/src/msgprocessor.c`) — the same "pay, then receive" shape as
   this example's direct sale, at the byte-transport layer instead of the
   token layer. The seller offer command (`z23 app market offer`)
   signs, binds, and announces paid offers; the optional one-shot buy

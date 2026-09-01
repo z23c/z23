@@ -58,46 +58,46 @@ does not mean.
 
 - **Nullifier double-spend is enforced** on the live block-application (reducer
   fold) path — `utxo_apply_check_and_insert_nullifiers()`
-  (`app/jobs/src/utxo_apply_nullifiers.c`): a two-pass check rejects a nullifier
+  (`engine/jobs/src/utxo_apply_nullifiers.c`): a two-pass check rejects a nullifier
   reused against the durable set or within the same block, then inserts the
   block's nullifiers only after it validates.
 - **Shielded anchor membership is enforced** on that same reducer fold path.
   `coins_view_cache_check_shielded_requirements()`
-  (`lib/coins/src/coins_view.c`) is a real implementation — no longer the
+  (`core/modules/coins/src/coins_view.c`) is a real implementation — no longer the
   `return true` placeholder earlier revisions of this doc described. It
   resolves every JoinSplit and Sapling Spend anchor through
   `coins_view_get_anchor()`, honors the empty-tree root as a per-pool
   constant, and reproduces zclassicd's per-transaction `intermediates` map
   (an anchor produced by an earlier JoinSplit of the *same* transaction is
   valid; one produced by an earlier transaction of the same block is not yet
-  pushed). The enforcement point is `app/jobs/src/utxo_apply_anchors.c`;
+  pushed). The enforcement point is `engine/jobs/src/utxo_apply_anchors.c`;
   `coins_view_cache_have_joinsplit_requirements()` is now a thin bool wrapper
-  over it. Pinned by `lib/test/src/test_parity_lockin_anchor_membership.c`,
+  over it. Pinned by `tests/harness/src/test_parity_lockin_anchor_membership.c`,
   registered in the canonical catalog as
   `ZCL_TEST_GROUP(parity_lockin_anchor_membership)`.
-  <!-- claim: symbol-present coins_view_get_anchor lib/coins/src/coins_view.c # membership really resolves anchors -->
-  <!-- claim: symbol-present coins_view_cache_check_shielded_requirements app/jobs/src/utxo_apply_anchors.c # and is really called on the fold path -->
+  <!-- claim: symbol-present coins_view_get_anchor core/modules/coins/src/coins_view.c # membership really resolves anchors -->
+  <!-- claim: symbol-present coins_view_cache_check_shielded_requirements engine/jobs/src/utxo_apply_anchors.c # and is really called on the fold path -->
   <!-- claim: symbol-present parity_lockin_anchor_membership tools/dev/test_group_catalog.def # the lock-in test actually runs -->
 - **Groth16 spend/output proofs, the binding signature, and the JoinSplit
   Ed25519 signature are checkpoint-gated ONLY in the legacy `connect_block()`
-  path** (`lib/validation/src/connect_block.c`), equivalent to Bitcoin Core's
+  path** (`core/modules/validation/src/connect_block.c`), equivalent to Bitcoin Core's
   `-assumevalid` (removed as a direct flag; controlled via
   `-deferproofvalidationbelow=<blockhash|0>`, default the highest in-binary
   PoW checkpoint, height 3,100,000; `core/chainparams/src/chainparams.c`). That path
   is driven by `-reindex-chainstate` (`reindex_chainstate()` in
-  `config/src/boot_index.c`), by the offline harness/simnet code, and by the
-  background revalidation walker (`app/services/src/bg_validation_service.c`,
+  `engine/composition/src/boot_index.c`), by the offline harness/simnet code, and by the
+  background revalidation walker (`engine/services/src/bg_validation_service.c`,
   `-nobgvalidation` to disable) — which itself re-verifies every proof it
   walks and clears the deferred-height gate once the walk passes it.
   **The reducer's state-advancing path — `proof_validate_stage()`
-  (`app/jobs/src/proof_validate_stage.c`), which owns the durable `ok=1`
+  (`engine/jobs/src/proof_validate_stage.c`), which owns the durable `ok=1`
   cursor and H\* on a normal boot — verifies every Groth16 spend/output
   proof, binding signature, and JoinSplit Ed25519 signature
   UNCONDITIONALLY on every height; it has no checkpoint-gated skip.** The
   only crypto pass-through in that reducer pipeline is the `mint_skip_crypto`
-  toggle (`app/jobs/include/jobs/mint_skip_crypto.h`), which is exclusively
+  toggle (`engine/jobs/include/jobs/mint_skip_crypto.h`), which is exclusively
   set by the offline one-shot `-mint-anchor` driver
-  (`config/src/boot_mint_anchor.c`, gated under `ctx->mint_anchor`), defaults
+  (`engine/composition/src/boot_mint_anchor.c`, gated under `ctx->mint_anchor`), defaults
   OFF on every normal boot (a normal boot never calls the setter), and its
   output is durably marked `checkpoint_fold` (never `verified`) —
   excluded from serving validity, H\*, and tip finalization. Enforced by the
@@ -105,7 +105,7 @@ does not mean.
 - **Anchor (note-commitment-tree root) membership is not checked independently.**
   It is certified *implicitly* by the Groth16 proof, whose circuit constrains the
   Merkle path of the commitment to equal the claimed anchor
-  (`lib/sapling/src/sapling_circuit.c`). On the reducer path this proof is
+  (`core/modules/sapling/src/sapling_circuit.c`). On the reducer path this proof is
   verified unconditionally (above); on the legacy `connect_block()` path it
   carries the same deferred-height gating as proof verification there.
 
@@ -134,7 +134,7 @@ item, not a claimed property.
   local receipts remain admission authority.
 - **Operator-private HTTP routes:** `/api/wallet`, `/api/messages`, and
   `/api/swaps` are classified operator-private (`api_route_is_operator_private`,
-  `lib/net/src/https_server.c`) and 403'd before dispatch on the 0.0.0.0 TLS
+  `core/modules/net/src/https_server.c`) and 403'd before dispatch on the 0.0.0.0 TLS
   clearnet listener (no CORS header); public chain-data routes are unaffected,
   the onion listener exposes no `/api`, and the in-process `wallet_gui`
   consumer bypasses the listener entirely.
@@ -145,7 +145,7 @@ item, not a claimed property.
   `script_get_sig_op_count` fix so sigops after an oversized push are never
   undercounted.
 - **Coinbase subsidy is capped** on the live reducer path
-  (`app/jobs/src/utxo_apply_delta.c`, status `bad_cb_amount` — deliberately
+  (`engine/jobs/src/utxo_apply_delta.c`, status `bad_cb_amount` — deliberately
   distinct from `value_overflow` so repair machinery never treats inflation as
   repairable).
 - **Nullifier double-spend is enforced by a consensus nullifier set**
@@ -155,7 +155,7 @@ item, not a claimed property.
   snapshot-seeded datadirs (a from-genesis replay/reindex gets the complete
   set automatically); the pre-activation backfill gap is a permanent typed
   blocker (`utxo_apply.nullifier_backfill_gap`), remediated by the owner-gated
-  `app/services/src/nullifier_backfill_service.c` populate-only walker.
+  `engine/services/src/nullifier_backfill_service.c` populate-only walker.
 - **Wallet backups are encrypted** when `WALLET_BACKUP_PASSWORD` is set
   (ChaCha20-Poly1305 via `wallet_backup_encrypt_file`); no password means
   plaintext continues with a loud boot warning, since refusing would silently
@@ -167,7 +167,7 @@ item, not a claimed property.
   GetNextWorkRequired` (`bad-diffbits`); and "SIGHASH_SINGLE should return the
   Bitcoin `uint256(1)` sentinel" is a false positive — zclassicd itself throws
   and catches a `logic_error` there and returns false (bug-for-bug parity,
-  pinned by `lib/test/src/test_sighash_malleability.c`); implementing the
+  pinned by `tests/harness/src/test_sighash_malleability.c`); implementing the
   sentinel would be the actual fork.
 - **Data-integrity discipline:** application writes go through the ActiveRecord
   lifecycle or explicit storage-layer APIs; chain progress is represented as
@@ -263,7 +263,7 @@ and byte-compares. It contacts nothing.
 
 It structurally cannot perform the worthless check. Comparing a published hash
 against the file it was published beside has one participant; the comparator
-(`lib/vcs/src/node_reproduce.c`) refuses unless one receipt carries producer
+(`contexts/commons/modules/vcs/src/node_reproduce.c`) refuses unless one receipt carries producer
 `received` and the other `local-rebuild`, so no argument list reaches that
 comparison, and no input key accepts a hash or someone else's receipt.
 

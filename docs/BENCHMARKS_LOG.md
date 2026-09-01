@@ -53,7 +53,7 @@ cannot "get fast" and pass the gate.
 
 | date | commit | primitive | value | how / notes |
 |---|---|---|---|---|
-| 2026-07-10 | de89ee8d4 | Equihash 200,9 solution verify | **~120.6 µs/op** (~8,300 ops/s) | `check_equihash_solution` on a baked real (200,9) witness (`lib/test/include/test/verify_bench_fixture.h`); AMD Ryzen 9 7950X3D. |
+| 2026-07-10 | de89ee8d4 | Equihash 200,9 solution verify | **~120.6 µs/op** (~8,300 ops/s) | `check_equihash_solution` on a baked real (200,9) witness (`tests/harness/include/test/verify_bench_fixture.h`); AMD Ryzen 9 7950X3D. |
 | 2026-07-10 | de89ee8d4 | Groth16 BLS12-381 output-proof verify | **~7.85 ms/op** (~127 ops/s) | `sapling_check_output` (full pure-C23 BLS12-381 pairing) on a real prover output proof; needs `~/.zcash-params`; AMD Ryzen 9 7950X3D. |
 
 ## Crypto-vs-Rust standing invariant (`make check-crypto-perf`)
@@ -104,7 +104,7 @@ contention, not instruction set.
 
 **SHA-256 is the only instruction-set path worth compiling in — it is not the
 first of several, it is the only one.** SHA-NI is guarded by `#ifdef __SHA__`
-(`lib/crypto/src/sha256.c`), which `-march=x86-64-v3` does not define, so the
+(`core/modules/crypto/src/sha256.c`), which `-march=x86-64-v3` does not define, so the
 shipped binary runs the portable transform on a CPU that has the instruction.
 That is a real 4.1x left on the table, and it is worth a targeted fix — a
 per-file `-msha` on `sha256.c` plus the runtime CPUID self-test that already
@@ -129,7 +129,7 @@ re-baselined from a `ZCL_NATIVE=1` run.
 
 ### Where the 7.7 ms of a Groth16 verify actually goes
 
-`bash lib/test/differential/run_parity_oracle.sh profile` — exact Fp-multiply
+`bash tests/harness/differential/run_parity_oracle.sh profile` — exact Fp-multiply
 counts per phase (linker-interposed `fp_mont_mul_accel`, which every multiply
 in `bls12_381.c` reaches through) plus per-phase wall time, decomposed with
 the public multi-pairing API at n=0/1/4. No edit to the frozen verifier.
@@ -172,7 +172,7 @@ verify and the pairing as a whole (Miller + final exponentiation) is 62%.
 Restructuring pairing arithmetic cannot touch the other 38%, which is a
 public-input MSM. The
 already-shipped fixed-base comb tables (`groth16_vk_build_combs`, wired at
-`lib/sapling/src/params_init.c:176`) take that MSM down and are worth **1.40x
+`core/modules/sapling/src/params_init.c:176`) take that MSM down and are worth **1.40x
 on OUTPUT (k=5) and 1.54x on SPEND (k=7)** measured end to end —
 `run_parity_oracle.sh bench`. The cheapest remaining wins are outside the
 pairing restructure: hoist the constant-point to-affine inversions out of the
@@ -248,12 +248,12 @@ real `make -j32 build-only` run immediately after.
 | Probe | TUs recompiled (before → after) | Wall (before → after) |
 |---|---|---|
 | no change | 0 → 0 | 7.0s → 6.2–7.0s |
-| one-line `.c` edit (`src/main.c`*, `lib/net/src/addrman.c`) | 1199 → 2 (TU + `clientversion.o`) | 7.0s → 6.3s |
+| one-line `.c` edit (`engine/entry/main.c`*, `core/modules/net/src/addrman.c`) | 1199 → 2 (TU + `clientversion.o`) | 7.0s → 6.3s |
 | narrow header edit (3 dependents, `event_controller.h`) | 1199 → 4 (3 + `clientversion.o`) | 6.9s → 6.4s |
 | `BUILD_ONLY_CFLAGS` flags edit (reverted) | 1199 → 1199 (new epoch, by design) | — |
 | per-object `DEV_COMPILE_CFLAGS` override edit (reverted) | epoch did not move → dev epoch re-keys, all 1207 dev TUs scheduled | — |
 
-*`src/main.c` is node-entry, not in `build-only`'s object set — its "1 TU" run
+*`engine/entry/main.c` is node-entry, not in `build-only`'s object set — its "1 TU" run
 was the identity TU alone; the `addrman.c` row is the real per-TU proof.
 
 CPU per edit (user+sys): ~35s → ~7s. Remaining wall floor is parse-time source

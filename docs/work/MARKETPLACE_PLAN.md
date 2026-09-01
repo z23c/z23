@@ -7,15 +7,15 @@ plan/commit with a fee preview.
 
 ## What already exists (reuse, do not rebuild)
 
-- **ZSWP HTLC swaps** (`app/controllers/src/swap_controller.c`,
-  `lib/script/src/htlc.c`): initiate/participate/redeem/refund wired
+- **ZSWP HTLC swaps** (`engine/controllers/src/swap_controller.c`,
+  `core/modules/script/src/htlc.c`): initiate/participate/redeem/refund wired
   end-to-end for ZCL/BTC/LTC/DOGE — secret extraction, settlement-tx build,
   broadcast, persisted SWAP_REDEEMED/SWAP_REFUNDED state.
-- **ZSLP** (`lib/zslp/`, `app/models/src/zslp_ledger.c`,
-  `app/services/src/zslp_command_service.c`): GENESIS/MINT/SEND codec,
+- **ZSLP** (`contexts/market/modules/zslp/`, `contexts/market/models/src/zslp_ledger.c`,
+  `contexts/market/services/src/zslp_command_service.c`): GENESIS/MINT/SEND codec,
   debit-correct UTXO ledger, wallet compose paths shared by RPC + site.
-- **ZCL Market gossip** (`lib/net/src/msgprocessor.c` zfile* family,
-  `app/models/src/file_offer.c`): offer gossip with TTL + AR model — the
+- **ZCL Market gossip** (`core/modules/net/src/msgprocessor.c` zfile* family,
+  `engine/models/src/file_offer.c`): offer gossip with TTL + AR model — the
   pattern for signed order announcements.
 - **ZCL fuel economics** (`docs/work/ZCODE_PLAN.md`): the cost estimator
   covers swap/offer tx fees; every plan previews ZCL cost before commit.
@@ -34,7 +34,7 @@ plan/commit with a fee preview.
    valid SLP SEND to the buyer (secret revealed on redeem, extractable from
    the spending tx — the existing `swap_extractsecret` primitive). Refund
    returns the token to the seller after CLTV. Reuse the 97-byte dcrdex
-   contract shape already in `lib/script/src/htlc.c`.
+   contract shape already in `core/modules/script/src/htlc.c`.
 
 ## Slices (each lands green, plan/commit, adversarial tests)
 

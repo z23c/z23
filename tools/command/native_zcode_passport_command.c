@@ -593,7 +593,7 @@ static bool passport_view_frozen_kat(const void *opaque, char *why,
 
 static const struct zcl_hotswap_service_contract k_passport_view_contract = {
     .service_id = ZCODE_PASSPORT_VIEW_SERVICE_ID,
-    .source_tu = "app/services/src/zcode_passport_view_service.c",
+    .source_tu = "contexts/commons/services/src/zcode_passport_view_service.c",
     .abi_version = ZCL_HOTSWAP_SERVICE_ABI_V1,
     .vtable_size = sizeof(struct zcode_passport_view_service_v1),
     .abi_fingerprint = ZCODE_PASSPORT_VIEW_ABI_FINGERPRINT,

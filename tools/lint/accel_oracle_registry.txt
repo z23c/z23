@@ -6,9 +6,9 @@
 # WHY THIS FILE EXISTS
 # core/{consensus,chainparams,params,math} is byte-sealed by core/MANIFEST.sha3.
 # The seal covers the TEXT of the consensus predicates. It does not cover the
-# arithmetic underneath them: core/math/src/hash.c calls lib/crypto's SHA-256,
-# core/consensus/src/equihash.c calls lib/crypto's batched BLAKE2b, and the
-# Sapling commitment tree reached through coins/coins.h calls lib/sapling's
+# arithmetic underneath them: core/math/src/hash.c calls core/modules/crypto's SHA-256,
+# core/consensus/src/equihash.c calls core/modules/crypto's batched BLAKE2b, and the
+# Sapling commitment tree reached through coins/coins.h calls core/modules/sapling's
 # Montgomery multiply. Editing any of those changes what the sealed predicate
 # DOES without moving a byte inside core/, so check-core-seal stays green.
 #
@@ -30,11 +30,12 @@
 # implementation itself is gone or is no longer reachable from core/; the gate
 # fails on a stale row too.
 
-lib/crypto/src/sha256.c          lib/test/src/test_sha256_isa_parity.c      sha256_isa_parity
-lib/crypto/src/chacha20poly1305.c lib/test/src/test_chacha20_isa_parity.c   chacha20_isa_parity
-lib/crypto/src/blake2b_avx2.c    lib/test/src/test_blake2b_batch_parity.c   blake2b_batch_parity
-lib/crypto/src/sha3_256_x4.c     lib/test/src/test_sha3_256_x4.c            sha3_256_x4
-lib/crypto/src/sha3_avx512.c     lib/test/src/test_sha3_512_x4.c            sha3_512_x4
-lib/sapling/src/bn254_accel.c    lib/test/src/test_bn254_accel.c            bn254_accel
-lib/sapling/src/fr_avx512.c      lib/test/src/test_fr_mont_parity.c         fr_mont_parity
-lib/crypto/src/simd_dispatch.c   lib/test/src/test_simd_os_support.c        simd_os_support
+core/modules/crypto/src/sha256.c          tests/harness/src/test_sha256_isa_parity.c      sha256_isa_parity
+core/modules/crypto/src/chacha20poly1305.c tests/harness/src/test_chacha20_isa_parity.c   chacha20_isa_parity
+core/modules/crypto/src/blake2b_avx2.c    tests/harness/src/test_blake2b_batch_parity.c   blake2b_batch_parity
+core/modules/crypto/src/sha3_256_x4.c     tests/harness/src/test_sha3_256_x4.c            sha3_256_x4
+core/modules/crypto/src/sha3_avx512.c     tests/harness/src/test_sha3_512_x4.c            sha3_512_x4
+core/modules/sapling/src/bn254_accel.c    tests/harness/src/test_bn254_accel.c            bn254_accel
+core/modules/sapling/src/fr_avx512.c      tests/harness/src/test_fr_mont_parity.c         fr_mont_parity
+core/modules/crypto/src/simd_dispatch.c   tests/harness/src/test_simd_os_support.c        simd_os_support
+platform/modules/util/src/crc32c.c        tests/harness/src/test_arm_hw_tiers.c           arm_hw_tiers

@@ -5,7 +5,7 @@
 **Status: design + classification only. This increment enables no remote
 execution.** There is no new listener, no new dispatch path, and no wire code
 that runs anything. What lands with this document is the decision table
-[`config/remote_command_classes.def`](../../config/remote_command_classes.def)
+[`engine/composition/remote_command_classes.def`](../../engine/composition/remote_command_classes.def)
 and its gate
 [`tools/lint/check_remote_command_classes.sh`](../../tools/lint/check_remote_command_classes.sh).
 The transport is the next increment and needs review first. See
@@ -37,10 +37,10 @@ network" — picks the wrong primitive for four concrete reasons.
 
 **1. A shell is not portable, and the registry already is.** Windows has no
 bash. The typed registry does not care: it is data in
-[`config/commands`](../../config/commands) expanded by
-[`config/src/command_catalog.c`](../../config/src/command_catalog.c) into one
+[`engine/composition/commands`](../../engine/composition/commands) expanded by
+[`engine/composition/src/command_catalog.c`](../../engine/composition/src/command_catalog.c) into one
 immutable table, dispatched by the transport-neutral engine in
-[`lib/kernel/src/command_registry.c`](../../lib/kernel/src/command_registry.c).
+[`engine/modules/kernel/src/command_registry.c`](../../engine/modules/kernel/src/command_registry.c).
 The same leaf, the same input schema and the same output schema exist on every
 platform the binary builds for. A shell channel would need a second, different,
 untested command vocabulary per operating system — which is three products, not
@@ -49,7 +49,7 @@ one.
 **2. A shell is unbounded authority on a machine holding keys and consensus
 state.** The registry's authority vocabulary is not decorative: every leaf
 declares an auth level and a capability mask in
-[`lib/kernel/include/kernel/command_registry.h`](../../lib/kernel/include/kernel/command_registry.h)
+[`engine/modules/kernel/include/kernel/command_registry.h`](../../engine/modules/kernel/include/kernel/command_registry.h)
 — `ZCL_COMMAND_AUTH_OWNER`, `ZCL_COMMAND_CAP_COMPILER`,
 `ZCL_COMMAND_CAP_WALLET_REQUEST` and the rest. `AGENTS.md` lists what an agent
 may never implicitly do: spend, export keys, mutate a canonical datadir, deploy
@@ -79,7 +79,7 @@ decision.**
 Reuse the file-service session unchanged. Add exactly one request tag.
 
 The session in
-[`lib/net/include/net/file_service.h`](../../lib/net/include/net/file_service.h)
+[`core/modules/net/include/net/file_service.h`](../../core/modules/net/include/net/file_service.h)
 already provides everything a command channel needs and nothing it does not:
 `fs_handshake_until()` derives a forward-secret key with X25519 + HKDF-SHA3-256,
 `fs_send_frame()` / `fs_recv_frame()` carry fixed 64 KB MAC'd frames, and
@@ -89,7 +89,7 @@ runs over clearnet sockets and over Tor circuits, and the serve side already
 demultiplexes several tags in one place.
 
 **Client side** — model it on
-[`lib/net/src/rom_fetch_directory.c`](../../lib/net/src/rom_fetch_directory.c),
+[`core/modules/net/src/rom_fetch_directory.c`](../../core/modules/net/src/rom_fetch_directory.c),
 which is the shortest correct example of this pattern in the tree:
 
 1. connect, then stamp **one absolute deadline** for everything after connect
@@ -108,7 +108,7 @@ which is the shortest correct example of this pattern in the tree:
    compare in constant time before parsing one byte of the reply.
 
 **Serve side** — one more branch beside the existing ones. In
-[`lib/net/src/file_service.c`](../../lib/net/src/file_service.c) the request
+[`core/modules/net/src/file_service.c`](../../core/modules/net/src/file_service.c) the request
 handler already dispatches `ROM`, `RMF`, `RLS`, `ALL` and `RNG` through small
 pure parsers (`fs_parse_rom_request`, `fs_parse_rom_manifest_request`,
 `fs_parse_rom_list_request`, `fs_parse_serve_request`). The new tag adds
@@ -143,13 +143,13 @@ by a remote caller.
 No capability, or an unknown one, is a refusal.
 
 *Point three — the class.* The named leaf is looked up in
-[`config/remote_command_classes.def`](../../config/remote_command_classes.def).
+[`engine/composition/remote_command_classes.def`](../../engine/composition/remote_command_classes.def).
 Anything not classified `read_only` or `owner_capability` is refused before the
 leaf is reached.
 
 Only after all three does the existing leaf run — with **all** of its local
 checks intact. The remote class only ever subtracts. `hotswap_activation_authorized()`
-in [`lib/hotswap`](../../lib/hotswap) still demands `-hotswap-activate`,
+in [`engine/modules/hotswap`](../../engine/modules/hotswap) still demands `-hotswap-activate`,
 `ZCL_HOTSWAP_ACTIVATE=1` and the dev datadir; the wallet grant surface still
 default-denies. Nothing in this design can grant an authority a leaf would
 refuse locally.
@@ -157,14 +157,14 @@ refuse locally.
 ### The capability
 
 Reuse the *shape* of `agent_session`, not the instance. `struct db_agent_session`
-in [`app/models/include/models/agent_session.h`](../../app/models/include/models/agent_session.h)
+in [`cognition/models/include/models/agent_session.h`](../../cognition/models/include/models/agent_session.h)
 already has the right skeleton, and
-[`app/controllers/include/controllers/agent_session_client.h`](../../app/controllers/include/controllers/agent_session_client.h)
+[`cognition/controllers/include/controllers/agent_session_client.h`](../../cognition/controllers/include/controllers/agent_session_client.h)
 already has the right verbs: `agent_session_client_mint()`,
 `agent_session_client_list()`, `agent_session_client_revoke()`,
 `agent_session_client_authorize()`. Expiry is an `expires_at` epoch field,
 revocation is a `revoked` flag checked on every authorize, and the model layer
-in [`app/models/src/agent_session.c`](../../app/models/src/agent_session.c) is a
+in [`cognition/models/src/agent_session.c`](../../cognition/models/src/agent_session.c) is a
 single-writer record with the usual save lifecycle.
 
 One thing is genuinely missing and must be added rather than borrowed:
@@ -227,22 +227,22 @@ z23 remote <node> dev hotswap --source-root=<hash>
 Three existing pieces, none of them new.
 
 **Source by content hash.** `zcode.workspace.source.bundle.fetch` (declared in
-[`config/commands/zcode.def`](../../config/commands/zcode.def), handler in
+[`engine/composition/commands/zcode.def`](../../engine/composition/commands/zcode.def), handler in
 [`tools/command/native_zcode_source_bundle_command.c`](../../tools/command/native_zcode_source_bundle_command.c))
 calls `source_bundle_fetch()` in
-[`app/services/src/source_bundle_fetch.c`](../../app/services/src/source_bundle_fetch.c).
+[`engine/services/src/source_bundle_fetch.c`](../../engine/services/src/source_bundle_fetch.c).
 The header
-[`app/services/include/services/source_bundle_fetch.h`](../../app/services/include/services/source_bundle_fetch.h)
+[`engine/services/include/services/source_bundle_fetch.h`](../../engine/services/include/services/source_bundle_fetch.h)
 states the rule that makes this safe to expose at all: *you may make bytes
 easier to find; you may not make them easier to accept.* Acceptance is
 `vcs_source_bundle_verify()` in
-[`lib/vcs/src/source_bundle.c`](../../lib/vcs/src/source_bundle.c) against the
+[`contexts/commons/modules/vcs/src/source_bundle.c`](../../contexts/commons/modules/vcs/src/source_bundle.c) against the
 root the **caller** supplied. So the capability grants "go find these bytes",
 never "trust these bytes", and the target node converges to a named source root
 **itself** rather than having code pushed into it.
 
 **Hot swap.** `dev.hotswap.probe` and `dev.hotswap.apply`
-([`config/commands/dev.def`](../../config/commands/dev.def), handler
+([`engine/composition/commands/dev.def`](../../engine/composition/commands/dev.def), handler
 [`tools/command/native_dev_hotswap.c`](../../tools/command/native_dev_hotswap.c))
 compile, ABI-validate, self-test and activate one module in the resident dev
 process. [`docs/work/HOTSWAP.md`](./HOTSWAP.md) records the measured local cost:
@@ -280,7 +280,7 @@ conflating them would overstate the whole thing.
 session and content-addressed source fetch build wherever the binary builds —
 that is reason 1 above, and the reason the channel is worth having at all.
 
-*The hot-swap half is not.* `lib/hotswap/src/hotswap_loader.c` nests the entire
+*The hot-swap half is not.* `engine/modules/hotswap/src/hotswap_loader.c` nests the entire
 `dlopen` implementation inside `#ifdef ZCL_DEV_BUILD` and then inside
 `#if defined(__linux__) && !defined(_WIN32)`. Every other combination —
 macOS, Windows, and any release build on any platform — compiles the
@@ -303,17 +303,17 @@ guarantees.
 
 Every command leaf gets exactly one class, and there is no unclassified state.
 The table covers both dispatchable surfaces: the typed dotted registry under
-[`config/commands`](../../config/commands), and the flat method table in
-[`app/controllers/include/controllers/agent_contracts.def`](../../app/controllers/include/controllers/agent_contracts.def)
+[`engine/composition/commands`](../../engine/composition/commands), and the flat method table in
+[`cognition/controllers/include/controllers/agent_contracts.def`](../../cognition/controllers/include/controllers/agent_contracts.def)
 that backs `z23 agentops`, `z23 dbquery` and `z23 agentdeployguard`
 (dispatched at
-[`app/controllers/src/event_controller.c`](../../app/controllers/src/event_controller.c),
+[`engine/controllers/src/event_controller.c`](../../engine/controllers/src/event_controller.c),
 handler in
-[`app/controllers/src/agent_interface_controller.c`](../../app/controllers/src/agent_interface_controller.c)).
+[`cognition/controllers/src/agent_interface_controller.c`](../../cognition/controllers/src/agent_interface_controller.c)).
 Leaving the second surface out would have left arbitrary SQL unclassified.
 
 The counts, the per-class arguments and the per-leaf reasons live in
-[`config/remote_command_classes.def`](../../config/remote_command_classes.def)
+[`engine/composition/remote_command_classes.def`](../../engine/composition/remote_command_classes.def)
 rather than being restated here, so there is one place to read and one place to
 change.
 
@@ -350,7 +350,7 @@ Stated explicitly so the boundary is not read as an oversight:
   here does not exist yet.
 - **No capability record.** The command capability above is a design, not a
   migration. `agent_session` is untouched; nothing gained a `leaves` field.
-- **No transport change.** `lib/net` is untouched. `"RLS"`, `"ROM"`, `"RMF"`,
+- **No transport change.** `core/modules/net` is untouched. `"RLS"`, `"ROM"`, `"RMF"`,
   `"ALL"` and `"RNG"` remain the only tags the file service dispatches.
 - **No leaf's local authority changed.** Not one `ZCL_COMMAND_AUTH_*` or
   capability mask was edited. A class in the table has no effect on a local

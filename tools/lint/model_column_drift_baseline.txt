@@ -1,20 +1,20 @@
 # Baseline — models that still hand-maintain multi-column row read indices.
 #
-# check_model_column_drift (RATCHET) flags any app/models/src/*.c that reads
+# check_model_column_drift (RATCHET) flags any engine/models/src/*.c that reads
 # two or more DISTINCT literal column indices through AR_READ_* / AR_COL_*.
 # That is the shape where inserting a column in the middle of the SQL column
 # list silently shifts every index below it, with no compiler error and no
 # test failure — one field reads its neighbour's value and the data still
 # looks plausible.
 #
-# These files predate app/models/include/models/model_fields.h and are
+# These files predate engine/models/include/models/model_fields.h and are
 # recorded here honestly. The gate fails when a file NOT listed here
 # introduces the shape, and it ALSO fails when a listed file stops violating
 # without its line being deleted. The baseline may only SHRINK; the goal is
 # an empty file and the gate flipped to FAIL.
 #
 # To remove a line: declare that model's fields once in
-# app/models/include/models/def/<model>_fields.def and derive its column
+# engine/models/include/models/def/<model>_fields.def and derive its column
 # string, read index and bind position from that one list. Worked examples:
 # blog_post.c, market_download.c, tx_index.c.
 #
@@ -22,47 +22,47 @@
 # list, such as an owning heap blob): `// model-columns-ok: <reason>`.
 #
 # Format: one repo-relative path per line; `#` lines are comments.
-app/models/src/agent_session.c
-app/models/src/app_event.c
-app/models/src/auth_challenge.c
-app/models/src/block.c
-app/models/src/build_fabric.c
-app/models/src/contact.c
-app/models/src/explorer_index_zslp.c
-app/models/src/file_offer.c
-app/models/src/file_service.c
-app/models/src/market_content.c
-app/models/src/market_payment_claim.c
-app/models/src/market_seller_key.c
-app/models/src/mempool_entry.c
-app/models/src/mesh_capability_grant.c
-app/models/src/mesh_machine_observation.c
-app/models/src/mesh_pairing.c
-app/models/src/onion_announcement.c
-app/models/src/onion_directory.c
-app/models/src/parity_sample.c
-app/models/src/peer_chain_observation.c
-app/models/src/principal.c
-app/models/src/sapling_note.c
-app/models/src/shop_fulfill.c
-app/models/src/shop_want.c
-app/models/src/store_blob.c
-app/models/src/store.c
-app/models/src/store_purchase.c
-app/models/src/utxo.c
-app/models/src/vault_intent.c
-app/models/src/wallet_backup_receipt.c
-app/models/src/wallet_identity.c
-app/models/src/wallet_key.c
-app/models/src/wallet_label.c
-app/models/src/wallet_metadata_crypto.c
-app/models/src/wallet_tx.c
-app/models/src/wallet_tx_reads.c
-app/models/src/yardsale_plan.c
-app/models/src/zcode_lane.c
-app/models/src/zcode_science.c
-app/models/src/zid_domain.c
-app/models/src/zid_identity.c
-app/models/src/zslp.c
-app/models/src/zslp_ledger.c
-app/models/src/zslp_validity.c
+cognition/models/src/agent_session.c
+engine/models/src/app_event.c
+engine/models/src/auth_challenge.c
+engine/models/src/block.c
+engine/models/src/build_fabric.c
+engine/models/src/contact.c
+contexts/market/models/src/explorer_index_zslp.c
+engine/models/src/file_offer.c
+engine/models/src/file_service.c
+contexts/market/models/src/market_content.c
+contexts/market/models/src/market_payment_claim.c
+contexts/market/models/src/market_seller_key.c
+engine/models/src/mempool_entry.c
+engine/models/src/mesh_capability_grant.c
+engine/models/src/mesh_machine_observation.c
+engine/models/src/mesh_pairing.c
+engine/models/src/onion_announcement.c
+engine/models/src/onion_directory.c
+engine/models/src/parity_sample.c
+engine/models/src/peer_chain_observation.c
+engine/models/src/principal.c
+engine/models/src/sapling_note.c
+contexts/market/models/src/shop_fulfill.c
+contexts/market/models/src/shop_want.c
+engine/models/src/store_blob.c
+engine/models/src/store.c
+engine/models/src/store_purchase.c
+engine/models/src/utxo.c
+contexts/wallet/models/src/vault_intent.c
+contexts/wallet/models/src/wallet_backup_receipt.c
+contexts/wallet/models/src/wallet_identity.c
+contexts/wallet/models/src/wallet_key.c
+contexts/wallet/models/src/wallet_label.c
+contexts/wallet/models/src/wallet_metadata_crypto.c
+contexts/wallet/models/src/wallet_tx.c
+contexts/wallet/models/src/wallet_tx_reads.c
+contexts/market/models/src/yardsale_plan.c
+contexts/commons/models/src/zcode_lane.c
+cognition/models/src/zcode_science.c
+engine/models/src/zid_domain.c
+engine/models/src/zid_identity.c
+contexts/market/models/src/zslp.c
+contexts/market/models/src/zslp_ledger.c
+contexts/market/models/src/zslp_validity.c

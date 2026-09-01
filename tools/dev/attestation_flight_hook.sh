@@ -117,7 +117,7 @@ afl_allow_policy() {
 }
 
 # A PROVIDER record's maximum validity window, from
-# VCS_ZCODE_DHT_PROVIDER_MAX_SECONDS in lib/vcs/include/vcs/zcode_dht_record.h.
+# VCS_ZCODE_DHT_PROVIDER_MAX_SECONDS in contexts/commons/modules/vcs/include/vcs/zcode_dht_record.h.
 # Pinned here because the flight must be able to SAY when a record it was
 # handed cannot legally be published, instead of reporting the refusal as a
 # mystery.
@@ -594,8 +594,8 @@ honestly declines to count it (rule=signer-not-approved, quorum_reached=false) \
 # actually protects a reader — a hostile node runs its own build and never
 # calls the gate. This acceptance CANNOT stage that record, precisely
 # because 8a refuses first, so it does not pretend to. That rule is proven
-# in-process by lib/test/src/test_zcode_attest_transport.c and over a real
-# two-node swarm by lib/test/src/test_zcode_swarm_net.c; driving it on a
+# in-process by tests/harness/src/test_zcode_attest_transport.c and over a real
+# two-node swarm by tests/harness/src/test_zcode_swarm_net.c; driving it on a
 # live daemon needs a hostile build or a no-DHT admit leaf.
 AFL_STAGE=leg8a_hostile_pointer_refused
 AFL_HOSTILE="{\"mode\":\"plan\",\"kind\":\"pointer\",\"namespace\":\"zclassic23.attestation\",\"semantic_root\":\"$AFL_DECOY_ROOT\",\"transport_root\":\"$AFL_TRANSPORT\",\"sequence\":$(date +%s),\"not_before\":$(( $(date +%s) - 5 )),\"expiry\":$(( $(date +%s) + 3600 ))}"

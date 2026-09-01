@@ -103,9 +103,9 @@ must be read from the judge, not from a removed aggregate score.
 
 ### The class table
 
-`app/services/include/services/stopwatch_skip_classes.def` is the one table.
+`engine/services/include/services/stopwatch_skip_classes.def` is the one table.
 Three consumers read it and none keeps a private copy:
-`app/services/src/stopwatch_skip_watch.c` (the typed surface),
+`engine/services/src/stopwatch_skip_watch.c` (the typed surface),
 `tools/scripts/stopwatch_skip_class.sh` (sourced by the collector and the
 judge). Add a `skip()` site to a harness, add its row there.
 
@@ -348,7 +348,7 @@ caller tested `peers <= 0` and printed that as an absence of peers. The two are
 now kept apart and the blocker names whichever actually held, carrying the real
 connected-peer count. A refusal that names the wrong cause sends the recovery
 ladder and the operator looking in the wrong place.
-`lib/test/src/test_stale_validate_headers_repair_condition.c` holds the
+`tests/harness/src/test_stale_validate_headers_repair_condition.c` holds the
 regression: peers present, target off the active chain, and the blocker must not
 claim there is no peer. Red before the change, green after.
 
@@ -372,7 +372,7 @@ zclassic23 -rpcport=18232 -datadir=~/.zclassic-c23 dumpstate bundle_exporter
 That is the standing exporter refusing by name, not a missing feature. The
 running process was started on 2026-08-15 07:48 from a binary built at 07:47,
 so its source claim cannot equal any candidate committed since; the session
-`config/src/consensus_state_producer_receipt.c` demands is exact, and it is
+`engine/composition/src/consensus_state_producer_receipt.c` demands is exact, and it is
 right to be. The one generation it has ever produced is the bundle it already
 serves, and `dumpstate rom_seed` confirms that is the only artifact it
 advertises — a 513,867,776-byte `consensus_bundle`, and no
@@ -410,7 +410,7 @@ verdict on the underlying claim.
 
 ## Periodic timers
 
-`deploy/examples/zcl-stopwatch-peer.service` is a dedicated minimal
+`platform/deploy/examples/zcl-stopwatch-peer.service` is a dedicated minimal
 serving peer (ports 39070-39073) the C3 harness dials, kept separate from
 the canonical `zclassic23.service` (port 8033) so these gates can never
 contend with or churn the live node. `zcl-c3-stopwatch-run@.service` /
@@ -418,4 +418,4 @@ contend with or churn the live node. `zcl-c3-stopwatch-run@.service` /
 collectors every 6h (offset 30 minutes apart); both `OnFailure=` into
 `zcl-stopwatch-onfailure.service`, which fires only on a lock/append
 failure, never on a legitimate non-PASS run verdict. See
-`deploy/examples/README.md` for the full unit descriptions.
+`platform/deploy/examples/README.md` for the full unit descriptions.

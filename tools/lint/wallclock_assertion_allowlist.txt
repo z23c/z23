@@ -4,12 +4,12 @@
 # a file with no row may carry ZERO.
 #
 # Regenerate: ZCL_LINT_MODE=UPDATE tools/lint/check_no_wallclock_assertion.sh
-lib/test/src/test_chain_restore_service.c 2
-lib/test/src/test_event_log.c 1
-lib/test/src/test_ibd_throttle.c 3
-lib/test/src/test_simnet_fuzz.c 2
-lib/test/src/test_stage_crash_sweep.c 1
-lib/test/src/test_utxo_apply_crash_replay.c 1
-lib/test/src/test_vcs_core.c 2
-lib/test/src/test_yardsale_app.c 1
-lib/test/src/test_zswap_yardsale.c 2
+tests/harness/src/test_chain_restore_service.c 2
+tests/harness/src/test_event_log.c 1
+tests/harness/src/test_ibd_throttle.c 3
+tests/harness/src/test_simnet_fuzz.c 2
+tests/harness/src/test_stage_crash_sweep.c 1
+tests/harness/src/test_utxo_apply_crash_replay.c 1
+tests/harness/src/test_vcs_core.c 2
+tests/harness/src/test_yardsale_app.c 1
+tests/harness/src/test_zswap_yardsale.c 2

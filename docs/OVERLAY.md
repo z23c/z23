@@ -23,12 +23,12 @@ build/bin/z23 discover help
 ## The onion lives inside this binary
 
 There is no second program to install. These facts are load-bearing for
-anyone touching `lib/net/src/tor_integration.c`, `onion_service.c`, or
+anyone touching `core/modules/net/src/tor_integration.c`, `onion_service.c`, or
 `onion_stream.c`:
 
 - **In-process, not a spawned daemon.** The vendored dynhost Tor fork is
   linked into z23 and its `tor_run_main()` loop runs on a thread we own
-  (`g_tor_thread`; `lib/net/src/tor_integration.c`). Nothing ever forks,
+  (`g_tor_thread`; `core/modules/net/src/tor_integration.c`). Nothing ever forks,
   execs, or supervises an external `tor` binary. Supervisor liveness
   watches a proxy signal from our monitor poll — it does not instrument
   the vendored loop.
@@ -42,7 +42,7 @@ anyone touching `lib/net/src/tor_integration.c`, `onion_service.c`, or
 - **No SOCKS exists anywhere in this architecture** (owner decision,
   2026-08-22). Outbound onion dials open raw dynhost streams that a
   socketpair bridge presents to connman as ordinary connected fds
-  (`lib/net/src/onion_stream.c`), so reactor, handshake, and message
+  (`core/modules/net/src/onion_stream.c`), so reactor, handshake, and message
   layers are transport-unaware.
 - **Onion peers are operator-directed only.** They are parsed locally,
   never DNS-resolved, never dialed clearnet, and never gossiped.
@@ -76,11 +76,11 @@ locally validated; see [`SYNC.md`](SYNC.md).
    already has bodies within 1024 headers of tip advertises SHA3-addressed
    64-block pieces over the file-service overlay. IBD nodes skip publishing
    so boot is not spent hashing a manifest they will replace. Source:
-   `config/src/boot_snapshot_offer.c`, `lib/net/src/fast_sync.c`.
+   `engine/composition/src/boot_snapshot_offer.c`, `core/modules/net/src/fast_sync.c`.
 2. **FlyClient proofs.** Peers challenge header history (`zsnapshot` →
    `zfcchallenge` → `zfcproofs` → `zsnapreq`). Sample selection and MMB
    nodes are SHA3-256. This proves advertised header chainwork, not a UTXO
-   root. Source: `lib/net/src/flyclient.c`, `lib/chain/src/mmb.c`.
+   root. Source: `core/modules/net/src/flyclient.c`, `core/modules/chain/src/mmb.c`.
 3. **UTXO snapshot (opt-in).** Export takes DB read locks, so it stays
    behind `ZCL_PUBLISH_FASTSYNC_ON_BOOT`. Chunk hashes are SHA3-256.
    Activation remains contained until the unified installer can bind
@@ -163,12 +163,12 @@ build/bin/z23 code map
 
 Primary files:
 
-- `lib/crypto/src/{hmac_sha3,hkdf_sha3}.c` — overlay HMAC / HKDF
-- `lib/net/src/tor_integration.c` — in-process Tor thread, identity persistence
-- `lib/net/src/onion_stream.c` — dynhost raw stream ↔ socketpair bridge
-- `lib/net/src/file_service_handshake.c` — X25519 + HKDF-SHA3-256
-- `lib/net/src/fast_sync.c` — snapshot / piece manifests (SHA3 ids)
-- `lib/net/src/flyclient.c` — FlyClient challenge / proof
-- `lib/net/src/file_market_delivery.c` — paid overlay delivery
-- `lib/net/src/file_market_delivery_onion.c` — onion GET path
-- `config/src/boot_snapshot_offer.c` — boot-time swarm / snapshot publish
+- `core/modules/crypto/src/{hmac_sha3,hkdf_sha3}.c` — overlay HMAC / HKDF
+- `core/modules/net/src/tor_integration.c` — in-process Tor thread, identity persistence
+- `core/modules/net/src/onion_stream.c` — dynhost raw stream ↔ socketpair bridge
+- `core/modules/net/src/file_service_handshake.c` — X25519 + HKDF-SHA3-256
+- `core/modules/net/src/fast_sync.c` — snapshot / piece manifests (SHA3 ids)
+- `core/modules/net/src/flyclient.c` — FlyClient challenge / proof
+- `core/modules/net/src/file_market_delivery.c` — paid overlay delivery
+- `core/modules/net/src/file_market_delivery_onion.c` — onion GET path
+- `engine/composition/src/boot_snapshot_offer.c` — boot-time swarm / snapshot publish

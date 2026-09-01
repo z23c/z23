@@ -1,0 +1,132 @@
+/* YARDSALE — wallet-backed seller arm and wallet-backed buy for the
+ * for-sale-by-owner signed ads (apps/yardsale, Stage 4). Gossip only
+ * carries pointers to where something is for sale; every transaction
+ * settles directly between the two nodes in ONE ZCL transaction through
+ * the two-message zswap ceremony. Every wallet-touching write is an
+ * exact, expiring (600s) plan followed by a confirm:true commit,
+ * idempotent by request identity; keys are fetched from the wallet at
+ * commit time only and never persist anywhere.
+ *
+ * Consumer defines ZCL_COMMAND_*; see engine/composition/src/command_catalog.c. */
+
+ZCL_COMMAND_BRANCH("yardsale", "",
+                   "For-sale-by-owner signed ads, settled bilaterally",
+                   ZCL_COMMAND_LAYER_APP)
+
+ZCL_COMMAND_READY_READ(
+    "yardsale.guide", "yardsale", "",
+    "Pay ZCL and sell a 1/1 collectible",
+    "One read-only map from intent to the exact plan commands: pay ZCL at "
+    "the min-relay fee, mint a 1/1 ZSLP collectible, arm a yardsale ad, "
+    "announce a file on the package swarm, or open an onion shop. It reads "
+    "no wallet, gossip, or network state and never broadcasts.",
+    ZCL_COMMAND_LIST_BUDGET,
+    "yardsale,guide,nft,sell,pay,onion,torrent,market,fee,zslp,shop",
+    "zcl.yardsale_guide.input.v1", "zcl.yardsale_guide.v1", "", "",
+    "z23 yardsale guide",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_PUBLIC, ZCL_COMMAND_LATENCY_INSTANT,
+    ZCL_COMMAND_COST_TINY,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_yardsale_guide)
+
+ZCL_COMMAND_BRANCH("yardsale.seller", "yardsale",
+                   "Seller profile: arm, disarm, status",
+                   ZCL_COMMAND_LAYER_APP)
+
+ZCL_COMMAND_READY_COMMAND(
+    "yardsale.seller.arm", "yardsale.seller", "",
+    "Arm the seller profile from the wallet",
+    "PLAN_COMMIT in one leaf: without confirm, verifies the named token "
+    "outpoint is a confirmed, spendable, P2PKH wallet coin holding exactly "
+    "the live sign's token_amount of its token (a mismatched coin would "
+    "burn the remainder under the SLP overlay), derives the ZCL receive + "
+    "change addresses from the wallet, and persists an exact, expiring "
+    "(600s) plan rendering token in, ZCL out, addresses, and expiry. With "
+    "confirm:true and an unexpired plan, re-verifies the coin, fetches the "
+    "owning key from the wallet, and configures the process-memory seller "
+    "profile — the node then answers accepts for the sign with a partial "
+    "signature. The key never persists; idempotent by request identity.",
+    0,
+    "yardsale,seller,arm,wallet,token,sign,plan,confirm",
+    "zcl.yardsale_seller_arm.input.v1", "zcl.yardsale_seller_arm.v1",
+    "token_txid,token_vout,ad_root,confirm,now_unix",
+    "token_txid,token_vout,ad_root",
+    "z23 yardsale.seller.arm --input='{\"token_txid\":\"<64hex>\",\"token_vout\":1,\"ad_root\":\"<64hex>\",\"confirm\":true}'",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_WALLET, ZCL_COMMAND_SCOPE_NODE,
+    ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_CONFIRM_PLAN_COMMIT,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_WALLET_REQUEST, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    zcl_native_handle_yardsale_seller_arm)
+
+ZCL_COMMAND_READY_COMMAND(
+    "yardsale.seller.disarm", "yardsale.seller", "",
+    "Disarm the seller profile",
+    "Clears the process-memory seller profile immediately, cleansing the "
+    "retained key: after disarm the node relays ceremony accepts for its "
+    "own sign instead of answering them. Idempotent — disarming an "
+    "unarmed node is a clean no-op that says so.", 0,
+    "yardsale,seller,disarm,clear,cleanse",
+    "zcl.yardsale_seller_disarm.input.v1", "zcl.yardsale_seller_disarm.v1",
+    "", "",
+    "z23 yardsale.seller.disarm",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_NODE,
+    ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_CONFIRM_NONE,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_WALLET_REQUEST, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    zcl_native_handle_yardsale_seller_disarm)
+
+ZCL_COMMAND_READY_READ(
+    "yardsale.seller.status", "yardsale.seller", "",
+    "Seller profile status",
+    "Whether the seller profile is configured, and when it is: the terms "
+    "digest, the token outpoint, the ZCL receive + change addresses, the "
+    "deadline, and the live pending-buy count. The key is process memory "
+    "and is never rendered.", 0,
+    "yardsale,seller,status,profile,digest",
+    "zcl.yardsale_seller_status.input.v1",
+    "zcl.yardsale_seller_status.v1",
+    "now_unix", "",
+    "z23 yardsale.seller.status",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_SCOPE_NODE,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_LATENCY_FAST,
+    ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_WALLET_REQUEST,
+    ZCL_COMMAND_TRAIT_DETERMINISTIC | ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE,
+    zcl_native_handle_yardsale_seller_status)
+
+ZCL_COMMAND_READY_COMMAND(
+    "yardsale.buy", "yardsale", "",
+    "Buy a live sign with wallet funds",
+    "PLAN_COMMIT in one leaf: without confirm, selects confirmed ordinary "
+    "wallet ZCL inputs covering the sign's price plus the network fee "
+    "(ordinary selection never touches SLP-reserved coins; an insufficient "
+    "balance refuses and names the shortfall), derives the token receive + "
+    "change addresses, and persists an exact, expiring (600s) plan "
+    "rendering price, fee, inputs, addresses, and expiry. With "
+    "confirm:true and an unexpired plan, fetches one wallet key per input "
+    "and begins the two-message ceremony — the zswapaccept accept floods "
+    "to the seller and completion lands via the partial-ingest path. "
+    "Idempotent by request identity: a repeated buy never double-registers "
+    "a pending buy.", 0,
+    "yardsale,buy,sign,token,wallet,ceremony,plan,confirm",
+    "zcl.yardsale_buy.input.v1", "zcl.yardsale_buy.v1",
+    "ad_root,confirm,now_unix", "ad_root",
+    "z23 yardsale.buy --input='{\"ad_root\":\"<64hex>\",\"confirm\":true}'",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_WALLET, ZCL_COMMAND_SCOPE_NODE,
+    ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_CONFIRM_PLAN_COMMIT,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_WALLET_REQUEST, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    zcl_native_handle_yardsale_buy)

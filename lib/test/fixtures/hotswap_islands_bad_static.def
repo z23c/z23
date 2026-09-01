@@ -1,3 +1,0 @@
-/* Seeded violation: an island-only member with mutable file-scope state. */
-HOTSWAP_ISLAND("app/controllers/src/status_native_handlers.c",
-               "lib/test/fixtures/hotswap_bad_static_fixture.c")

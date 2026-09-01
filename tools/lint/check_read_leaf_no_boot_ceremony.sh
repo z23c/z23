@@ -11,7 +11,7 @@
 #
 # `app.service.access` is ZCL_COMMAND_READY_READ / AUTH_PUBLIC /
 # TRAIT_IDEMPOTENT and its handler called node_db_open(). That is
-# node_db_open_impl(boot_ceremony=true) (app/models/src/database.c): it
+# node_db_open_impl(boot_ceremony=true) (engine/models/src/database.c): it
 # opens <datadir>/node.db READWRITE|CREATE, runs PRAGMA quick_check and on
 # failure db_quarantine_files() rename()s node.db/-wal/-shm aside to
 # node.db.corrupt-<ts>, then create_schema(), then node_db_migrate(), then
@@ -30,13 +30,13 @@
 # native_zcode_release_command.c and native_zcode_contributor_command.c.
 # The property has nothing to do with which file the call sits in: it is
 # reachability from a leaf whose DECLARED effect is read. So this gate keys
-# off the declaration in config/commands and follows the call graph
+# off the declaration in engine/composition/commands and follows the call graph
 # wherever it goes.
 #
 # It also refuses the REJECTED WEAKER FIX for free. Swapping node_db_open()
 # for node_db_open_runtime() looks like a fix and is not: the runtime open
 # is still READWRITE|CREATE and still calls create_schema() and
-# node_db_migrate(). Because app/models/src is inside the scanned corpus,
+# node_db_migrate(). Because engine/models/src is inside the scanned corpus,
 # the closure walks node_db_open_runtime -> create_schema and the leaf is
 # still refused.
 #
@@ -60,10 +60,10 @@
 #
 # SCANNED CORPUS — stated, not hidden. Every tracked .c that names a bound
 # handler symbol, UNION every tracked .c under tools/command,
-# app/controllers/src, app/services/src, app/models/src and lib/storage/src.
+# engine/controllers/src, engine/services/src, engine/models/src and engine/modules/storage/src.
 # The closure only walks through functions DEFINED in that corpus, so a read
 # handler that reached the ceremony through a helper defined outside it
-# (lib/net, lib/wallet, ...) would be missed. That is the honest limit; the
+# (core/modules/net, contexts/wallet/modules/wallet, ...) would be missed. That is the honest limit; the
 # corpus covers every layer a command handler has ever used to reach a
 # database, and widening it is a one-line change to CORPUS_DIRS.
 #
@@ -86,12 +86,12 @@ cd "$(dirname "$0")/../.."
 # shellcheck source=tools/lint/gate_lib.sh
 . tools/lint/gate_lib.sh
 
-DEF_DIR="${ZCL_READ_LEAF_DEF_DIR:-config/commands}"
+DEF_DIR="${ZCL_READ_LEAF_DEF_DIR:-engine/composition/commands}"
 BASELINE="${ZCL_READ_LEAF_BASELINE:-tools/lint/read_leaf_boot_ceremony_baseline.txt}"
 MODE="${ZCL_LINT_MODE:-FAIL}"
 
-CORPUS_DIRS=(tools/command app/controllers/src app/services/src \
-             app/models/src lib/storage/src)
+CORPUS_DIRS=(tools/command engine/controllers/src engine/services/src \
+             engine/models/src engine/modules/storage/src)
 
 # The boot-ceremony entry points. Every one of these either opens
 # READWRITE|CREATE or mutates the file it was handed.
@@ -113,7 +113,7 @@ gate_require_scanned "${#def_files[@]}" 1 check_read_leaf_no_boot_ceremony \
 # ── Phase 1: parse the leaf macros ────────────────────────────────────────
 # One READ record per READ leaf that binds a handler:
 #   READ <path> <file> <line> <macro> <handler>
-# The handler argument slot differs per macro shape (config/src/
+# The handler argument slot differs per macro shape (engine/composition/src/
 # command_catalog.c); each shape's arity is asserted before a slot is read,
 # so a macro grammar change aborts LOUD instead of reading the wrong slot.
 DEF_OUT=$(awk '
@@ -129,7 +129,7 @@ function want_arity(n) {
     if (nargs != n) {
         fatal(sprintf("macro grammar drift: expected %d arguments, parsed %d." \
               " This gate reads a fixed handler slot; re-read the macro in" \
-              " config/src/command_catalog.c and fix the arity table here.", \
+              " engine/composition/src/command_catalog.c and fix the arity table here.", \
               n, nargs))
         return 0
     }

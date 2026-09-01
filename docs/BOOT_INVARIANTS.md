@@ -1,12 +1,12 @@
 # Boot Invariants
 
-`config/src/boot.c` is the sequential, ordering-sensitive entry point
+`engine/composition/src/boot.c` is the sequential, ordering-sensitive entry point
 that initializes every long-lived global the node depends on.
 
 This file is the source of truth for the boot ordering and what
 each stage guarantees. The state machine that enforces the
-ordering lives in `lib/util/include/util/boot_phase.h` (`enum boot_stage`)
-and `lib/util/src/boot_phase.c` (`boot_stage_advance_to()`).
+ordering lives in `platform/modules/util/include/util/boot_phase.h` (`enum boot_stage`)
+and `platform/modules/util/src/boot_phase.c` (`boot_stage_advance_to()`).
 
 Cross-references: `CLAUDE.md` (top-level architecture),
 `DEFENSIVE_CODING.md` (rules that boot steps must follow),
@@ -48,7 +48,7 @@ Stages are strictly **monotonic**. The advance API enforces:
 
 All twelve boundaries are wired. The five middle boundaries (WALLET_LOADED …
 SERVICES_RUNNING) are advanced through the **SYSINIT** declarative table
-(`util/sysinit.h`, `config/src/boot.c:k_boot_sysinit_records[]`): each is a
+(`util/sysinit.h`, `engine/composition/src/boot.c:k_boot_sysinit_records[]`): each is a
 `struct sysinit_record` whose init runs at its true boundary, and
 `sysinit_run_stage(stage, ctx)` advances the state machine only if the records
 succeed (fail-closed — a failed boundary returns a typed `zcl_result` and boot
@@ -106,7 +106,7 @@ When wiring `BOOT_STAGE_BLOCK_INDEX_LOADED` and
 during `DB_OPEN`. It catches the dangerous class "UTXO writes landed but
 the tip pointer didn't" (crash mid-flush), which could double-spend on
 restart. Its verdict (`true` = consistent/healed, `false` = halt) gates
-boot at `config/src/boot.c` — a `false` is FATAL.
+boot at `engine/composition/src/boot.c` — a `false` is FATAL.
 
 The gate's branches, in order, when `max_utxo_height > resolved_tip`:
 
@@ -151,13 +151,13 @@ Don't reorder existing stages unless you understand every other
 boot path that depends on them. If you need a new boundary:
 
 1. Add it to `enum boot_stage` in
-   `lib/util/include/util/boot_phase.h`. Pick a position that
+   `platform/modules/util/include/util/boot_phase.h`. Pick a position that
    reflects when the guarantee becomes true — every prior stage must
    already hold.
 2. Add its name to `k_boot_stage_names` in
-   `lib/util/src/boot_phase.c`.
+   `platform/modules/util/src/boot_phase.c`.
 3. Call `boot_stage_advance_to(BOOT_STAGE_<NAME>)` at the point in
-   `config/src/boot.c` (or `boot_services.c`) where the guarantee is
+   `engine/composition/src/boot.c` (or `boot_services.c`) where the guarantee is
    established.
 4. Document the guarantee in the table above.
 
@@ -179,7 +179,7 @@ Steps to investigate:
 
 1. Look at the most recent `[boot-stage]` lines preceding the abort
    in node.log. They show the linear path.
-2. Search `config/src/boot.c` (and `boot_services.c`) for calls to
+2. Search `engine/composition/src/boot.c` (and `boot_services.c`) for calls to
    `boot_stage_advance_to(BOOT_STAGE_<from>)` and
    `boot_stage_advance_to(BOOT_STAGE_<to>)`.
 3. Identify which code path reached the second call while the

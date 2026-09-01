@@ -1,0 +1,498 @@
+/* ZCODE Scientific Metaverse (S3) — canonical CAS storage plus rebuildable
+ * projections for studies, benchmark evidence, reproductions, findings,
+ * reviews, and curation votes.
+ *
+ * THE INVARIANT OF THIS BRANCH: the addressed wires under the workspace CAS
+ * (.zvcs/objects) are the only truth. Every write is an exact expiring plan
+ * (persisted request identity + wire + 600s expiry) followed by a
+ * confirm:true commit; re-committing the same request reattaches to the
+ * same result root and stores one CAS object. SQL tables are rebuildable
+ * projections only. Expiry gates NEW submissions; it never erases stored
+ * evidence. Every rejection names the exact failed rule.
+ *
+ * Consumer defines ZCL_COMMAND_*; see engine/composition/src/command_catalog.c. */
+
+ZCL_COMMAND_BRANCH("zcode.science", "zcode",
+                   "Scientific evidence",
+                   ZCL_COMMAND_LAYER_APP)
+
+ZCL_COMMAND_BRANCH("zcode.science.study", "zcode.science",
+                   "Preregistered study lifecycle",
+                   ZCL_COMMAND_LAYER_APP)
+
+ZCL_COMMAND_BRANCH("zcode.science.work", "zcode.science",
+                   "Benchmark results and reproductions",
+                   ZCL_COMMAND_LAYER_APP)
+
+ZCL_COMMAND_BRANCH("zcode.science.review", "zcode.science",
+                   "Findings reviews",
+                   ZCL_COMMAND_LAYER_APP)
+
+ZCL_COMMAND_BRANCH("zcode.science.vote", "zcode.science",
+                   "Curation votes",
+                   ZCL_COMMAND_LAYER_APP)
+
+ZCL_COMMAND_BRANCH("zcode.science.findings", "zcode.science",
+                   "Findings lifecycle",
+                   ZCL_COMMAND_LAYER_APP)
+
+ZCL_COMMAND_BRANCH("zcode.science.rank", "zcode.science",
+                   "Local discovery ranking",
+                   ZCL_COMMAND_LAYER_APP)
+
+ZCL_COMMAND_READY_COMMAND(
+    "zcode.science.study.plan", "zcode.science.study", "",
+    "Plan a study submission",
+    "Validates the exact study_spec.v1 wire (structural rules plus the "
+    "submission window at now) and persists an exact, expiring (600s) plan "
+    "binding the wire and its request identity hash. No CAS object and no "
+    "projection row is written; re-planning the same request returns the "
+    "same plan_root.", 0,
+    "zcode,science,study,plan,preregistration",
+    "zcl.zcode_science_study_plan.input.v1", "zcl.zcode_science_plan.v1",
+    "wire_hex,now_unix,datadir,workspace", "wire_hex",
+    "z23 zcode.science.study.plan --input='{\"wire_hex\":\"<844hex>\"}'",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_NODE,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_CONFIRM_PLAN_COMMIT,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    zcl_native_handle_zcode_science_study_plan)
+
+ZCL_COMMAND_READY_COMMAND(
+    "zcode.science.study.commit", "zcode.science.study", "",
+    "Commit a planned study",
+    "With confirm:true and an unexpired plan whose stored wire matches "
+    "wire_hex exactly, stores the study_spec.v1 wire in the CAS addressed "
+    "by its canonical root and updates the rebuildable projection. "
+    "Re-committing the same request reattaches to the same study_root; one "
+    "CAS object is stored.", 0,
+    "zcode,science,study,commit,confirm",
+    "zcl.zcode_science_study_commit.input.v1", "zcl.zcode_science_commit.v1",
+    "wire_hex,confirm,now_unix,datadir,workspace", "wire_hex,confirm",
+    "z23 zcode.science.study.commit --input='{\"wire_hex\":\"<844hex>\",\"confirm\":true}'",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_NODE,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_CONFIRM_PLAN_COMMIT,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    zcl_native_handle_zcode_science_study_commit)
+
+ZCL_COMMAND_READY_COMMAND(
+    "zcode.science.study.show", "zcode.science.study", "",
+    "Show one study",
+    "Projection read of one committed study by root: hypothesis roots, "
+    "required reproductions/reviews, sequence, and the created/expires "
+    "window. The projection is rebuildable from the CAS; the canonical wire "
+    "stays the authority.", 0,
+    "zcode,science,study,show",
+    "zcl.zcode_science_study_show.input.v1", "zcl.zcode_science_study.v1",
+    "study_root,datadir", "study_root",
+    "z23 zcode.science.study.show --input='{\"study_root\":\"<64hex>\"}'",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_READ,
+    ZCL_COMMAND_RISK_READ, ZCL_COMMAND_SCOPE_NODE,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_CONFIRM_NONE,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_DETERMINISTIC,
+    zcl_native_handle_zcode_science_study_show)
+
+ZCL_COMMAND_READY_COMMAND(
+    "zcode.science.study.list", "zcode.science.study", "",
+    "List studies",
+    "Bounded projection read of committed studies ordered by creation time. "
+    "found=false rows never appear: only validated CAS-addressed wires are "
+    "projected.", 0,
+    "zcode,science,study,list",
+    "zcl.zcode_science_study_list.input.v1", "zcl.zcode_science_studies.v1",
+    "datadir,max", "",
+    "z23 zcode.science.study.list --input='{\"max\":32}'",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_READ,
+    ZCL_COMMAND_RISK_READ, ZCL_COMMAND_SCOPE_NODE,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_CONFIRM_NONE,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_DETERMINISTIC,
+    zcl_native_handle_zcode_science_study_list)
+
+ZCL_COMMAND_READY_COMMAND(
+    "zcode.science.findings.plan", "zcode.science.findings", "",
+    "Plan a findings submission",
+    "Validates the exact science_findings.v1 wire (structural rules: the "
+    "study, task, candidate, result, and proof-set roots it discusses plus "
+    "methods/limitations/conflicts documents and the optional retraction "
+    "target) and persists an exact, expiring (600s) plan binding the wire "
+    "and its request identity hash. No CAS object and no projection row is "
+    "written; re-planning the same request returns the same plan_root.", 0,
+    "zcode,science,findings,plan",
+    "zcl.zcode_science_findings_plan.input.v1", "zcl.zcode_science_plan.v1",
+    "wire_hex,now_unix,datadir,workspace", "wire_hex",
+    "z23 zcode.science.findings.plan --input='{\"wire_hex\":\"<634hex>\"}'",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_NODE,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_CONFIRM_PLAN_COMMIT,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    zcl_native_handle_zcode_science_findings_plan)
+
+ZCL_COMMAND_READY_COMMAND(
+    "zcode.science.findings.commit", "zcode.science.findings", "",
+    "Commit planned findings",
+    "With confirm:true and an unexpired plan whose stored wire matches "
+    "wire_hex exactly, stores the science_findings.v1 wire in the CAS "
+    "addressed by its canonical root and updates the rebuildable findings "
+    "projection. Re-committing the same request reattaches to the same "
+    "findings_root; one CAS object is stored. This is the command-leaf "
+    "admission reviews bind against (review.submit requires the findings "
+    "wire in CAS).", 0,
+    "zcode,science,findings,commit,confirm",
+    "zcl.zcode_science_findings_commit.input.v1", "zcl.zcode_science_commit.v1",
+    "wire_hex,confirm,now_unix,datadir,workspace", "wire_hex,confirm",
+    "z23 zcode.science.findings.commit --input='{\"wire_hex\":\"<634hex>\",\"confirm\":true}'",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_NODE,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_CONFIRM_PLAN_COMMIT,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    zcl_native_handle_zcode_science_findings_commit)
+
+ZCL_COMMAND_READY_COMMAND(
+    "zcode.science.work.plan", "zcode.science.work", "",
+    "Plan benchmark evidence",
+    "Validates a benchmark_result.v2 wire (with its method and hardware "
+    "profile wires, stored to CAS addressed by their canonical roots) or a "
+    "reproduction.v1 wire, plus the executed fixed action, and persists an "
+    "exact expiring (600s) plan. No evidence is committed; re-planning the "
+    "same request returns the same plan_root.", 0,
+    "zcode,science,work,benchmark,reproduction,plan",
+    "zcl.zcode_science_work_plan.input.v1", "zcl.zcode_science_plan.v1",
+    "wire_hex,method_hex,profile_hex,action_kind,action_sequence,"
+    "action_source_cas_sha3,action_input_root_sha3,"
+    "action_toolchain_capsule_sha3,now_unix,datadir,workspace", "wire_hex",
+    "z23 zcode.science.work.plan --input='{\"wire_hex\":\"<726hex>\",\"method_hex\":\"<242hex>\",\"profile_hex\":\"<444hex>\"}'",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_NODE,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_CONFIRM_PLAN_COMMIT,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    zcl_native_handle_zcode_science_work_plan)
+
+ZCL_COMMAND_READY_COMMAND(
+    "zcode.science.work.commit", "zcode.science.work", "",
+    "Commit planned benchmark evidence",
+    "With confirm:true and an unexpired plan, re-runs the hardened "
+    "cross-validators (validate_for_study incl. the canonical fixed-action "
+    "binding, or validate_for_results for reproductions) against the study, "
+    "task, candidate, method, and profile wires loaded from CAS, then stores "
+    "the evidence wire addressed by root and updates the projection. Null "
+    "and negative results are accepted observations; contradictory "
+    "reproductions are both storable. Idempotent by request identity.", 0,
+    "zcode,science,work,benchmark,reproduction,commit,confirm",
+    "zcl.zcode_science_work_commit.input.v1", "zcl.zcode_science_commit.v1",
+    "wire_hex,confirm,action_kind,action_sequence,"
+    "action_source_cas_sha3,action_input_root_sha3,"
+    "action_toolchain_capsule_sha3,now_unix,datadir,workspace", "wire_hex,confirm",
+    "z23 zcode.science.work.commit --input='{\"wire_hex\":\"<726hex>\",\"confirm\":true}'",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_NODE,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_CONFIRM_PLAN_COMMIT,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    zcl_native_handle_zcode_science_work_commit)
+
+/* S4 (2026-08-03, additive): the closed benchmark/reproduction executor.
+ * One leaf, plan -> confirm:true commit -> receipt, feeding the landed S3
+ * work.plan/commit admission path — never a parallel one. */
+ZCL_COMMAND_READY_COMMAND(
+    "zcode.science.work.execute", "zcode.science.work", "",
+    "Execute a confined benchmark or reproduction",
+    "Runs the closed executor: loads the study/task/candidate/method wires, "
+    "the environment policy, and the workload payload from the workspace "
+    "CAS (a root not in CAS is a refusal), verifies the captured hardware "
+    "profile against the study's environment policy, and runs ONLY the "
+    "registry fixed action (c23.benchmark.v1, or c23.benchmark.reproduce.v1 "
+    "against original_result_root) in os_sandbox confinement — no network, "
+    "bounded CPU/RAM/process/output, escape-suite self-check first. Emits "
+    "a benchmark_result.v2 observation plus raw-sample manifest, sample "
+    "payload, evidence, and hardware-profile CAS objects. Without confirm "
+    "only the exact expiring plan persists; with confirm:true the S3 "
+    "commit re-runs the hardened cross-validators and stores the evidence "
+    "addressed by root. Null and negative observations commit; execution "
+    "failures store nothing. EXECUTE must be allowed by the node's local "
+    "sovereignty policy. A benchmark is an observation, never truth.",
+    0,
+    "zcode,science,work,execute,benchmark,reproduction,confined",
+    "zcl.zcode_science_work_execute.input.v1",
+    "zcl.zcode_science_execute.v1",
+    "study_root,task_root,candidate_root,method_root,original_result_root,"
+    "action_kind,action_sequence,result_sequence,reproduction_sequence,"
+    "challenge_block_height,challenge_block_hash,reproducer_pubkey,"
+    "confirm,now_unix,datadir,workspace",
+    "challenge_block_height,challenge_block_hash",
+    "z23 zcode.science.work.execute --input='{\"study_root\":\"<64hex>\",\"task_root\":\"<64hex>\",\"candidate_root\":\"<64hex>\",\"method_root\":\"<64hex>\",\"challenge_block_height\":3200000,\"challenge_block_hash\":\"<64hex>\",\"confirm\":true}'",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_NODE,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_CONFIRM_PLAN_COMMIT,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    zcl_native_handle_zcode_science_work_execute)
+
+ZCL_COMMAND_READY_COMMAND(
+    "zcode.science.work.status", "zcode.science.work", "",
+    "Show evidence status",
+    "Projection read of one committed benchmark result or reproduction by "
+    "root: kind, owning study, status or verdict, sequence, and observation "
+    "window. found=false when the root is not projected.", 0,
+    "zcode,science,work,status",
+    "zcl.zcode_science_work_status.input.v1", "zcl.zcode_science_work.v1",
+    "root,datadir", "root",
+    "z23 zcode.science.work.status --input='{\"root\":\"<64hex>\"}'",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_READ,
+    ZCL_COMMAND_RISK_READ, ZCL_COMMAND_SCOPE_NODE,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_CONFIRM_NONE,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_DETERMINISTIC,
+    zcl_native_handle_zcode_science_work_status)
+
+ZCL_COMMAND_READY_COMMAND(
+    "zcode.science.work.receipt", "zcode.science.work", "",
+    "Show evidence receipt",
+    "Like status, plus a re-load of the canonical CAS wire addressed by the "
+    "root with parse, validation, and rederived-root verification — the "
+    "receipt proves the projection row against the persisted bytes, never "
+    "the row alone. CAS_INVALID is returned when the wire fails agreement.",
+    0,
+    "zcode,science,work,receipt",
+    "zcl.zcode_science_work_receipt.input.v1", "zcl.zcode_science_work.v1",
+    "root,datadir,workspace", "root",
+    "z23 zcode.science.work.receipt --input='{\"root\":\"<64hex>\"}'",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_READ,
+    ZCL_COMMAND_RISK_READ, ZCL_COMMAND_SCOPE_NODE,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_CONFIRM_NONE,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_DETERMINISTIC,
+    zcl_native_handle_zcode_science_work_receipt)
+
+ZCL_COMMAND_READY_COMMAND(
+    "zcode.science.review.submit", "zcode.science.review", "",
+    "Submit a findings review",
+    "PLAN_COMMIT in one leaf: without confirm, validates the review.v1 wire "
+    "and persists an exact expiring plan; with confirm:true, requires the "
+    "bound findings wire in CAS and review.created_unix >= "
+    "findings.created_unix (a stale review predating its findings is "
+    "rejected), then stores the wire addressed by root and projects it. "
+    "Idempotent by request identity.", 0,
+    "zcode,science,review,submit",
+    "zcl.zcode_science_review_submit.input.v1",
+    "zcl.zcode_science_review.v1",
+    "wire_hex,confirm,now_unix,datadir,workspace", "wire_hex",
+    "z23 zcode.science.review.submit --input='{\"wire_hex\":\"<438hex>\",\"confirm\":true}'",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_NODE,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_CONFIRM_PLAN_COMMIT,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    zcl_native_handle_zcode_science_review_submit)
+
+ZCL_COMMAND_READY_COMMAND(
+    "zcode.science.vote.submit", "zcode.science.vote", "",
+    "Submit a curation vote",
+    "PLAN_COMMIT in one leaf: without confirm, validates the sealed "
+    "curation_vote.v1 wire and persists an exact expiring plan; with "
+    "confirm:true, verifies the seal against the expected network genesis, "
+    "voter zid, and signer (a cross-network vote is rejected), rejects "
+    "voter+sequence replay, and stores the wire addressed by its canonical "
+    "vote id. Re-submitting the identical vote id is an idempotent "
+    "reattach.", 0,
+    "zcode,science,vote,curation,submit",
+    "zcl.zcode_science_vote_submit.input.v1", "zcl.zcode_science_vote.v1",
+    "wire_hex,confirm,network_genesis_root,voter_zid_root,signer_pubkey,"
+    "now_unix,datadir,workspace", "wire_hex",
+    "z23 zcode.science.vote.submit --input='{\"wire_hex\":\"<438hex>\",\"confirm\":true,\"network_genesis_root\":\"<64hex>\",\"voter_zid_root\":\"<64hex>\",\"signer_pubkey\":\"<64hex>\"}'",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_NODE,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_CONFIRM_PLAN_COMMIT,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    zcl_native_handle_zcode_science_vote_submit)
+
+/* S5 (2026-08-03, additive): local discovery PageRank over the rebuildable
+ * science projection. Explanatory only — rank, votes, and mass are never
+ * proof-acceptance, routing, reward, or protocol-control input, and the
+ * evidence-admission path never reads this projection. */
+ZCL_COMMAND_READY_COMMAND(
+    "zcode.science.discover", "zcode.science.rank", "",
+    "Search and rank study properties",
+    "Filters FIRST over the SQL study projection (search is a substring of "
+    "the study or hypothesis root hex; category is the projection state "
+    "active|expired|retracted at now_unix; hardware keeps only studies with "
+    "a projected result carrying that hardware profile root), then ranks "
+    "ONLY the bounded filtered graph (4096 nodes, 64 citation edges per "
+    "node, versions/forks of one lineage collapsed). Entries carry mass, "
+    "mass share in millionths, direct citation count, and seed weight; the "
+    "reply binds the corpus, graph, seed-set, and filter-policy roots, the "
+    "omitted node/edge counts, truncation, coverage mass, and the "
+    "convergence residual. Local and explanatory only: never proof, "
+    "routing, or reward input.", 0,
+    "zcode,science,discover,rank,pagerank",
+    "zcl.zcode_science_discover.input.v1", "zcl.zcode_science_discover.v1",
+    "search,category,hardware,network_genesis_root,now_unix,max,"
+    "datadir,workspace", "",
+    "z23 zcode.science.discover --input='{\"category\":\"active\",\"max\":16}'",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_READ,
+    ZCL_COMMAND_RISK_READ, ZCL_COMMAND_SCOPE_NODE,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_CONFIRM_NONE,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_DETERMINISTIC,
+    zcl_native_handle_zcode_science_discover)
+
+ZCL_COMMAND_READY_COMMAND(
+    "zcode.science.rank.snapshot", "zcode.science.rank", "",
+    "Discovery graph snapshot",
+    "Cheap introspection of the rebuildable discovery projection over the "
+    "workspace CAS: the corpus, graph, and seed-set roots with node, edge, "
+    "seed, and omitted counts — no entries rendered. Zero roots mark the "
+    "empty corpus. Local and explanatory only: never proof, routing, or "
+    "reward input.", 0,
+    "zcode,science,rank,snapshot",
+    "zcl.zcode_science_rank_snapshot.input.v1",
+    "zcl.zcode_science_rank_snapshot.v1",
+    "workspace,network_genesis_root,now_unix", "workspace",
+    "z23 zcode.science.rank.snapshot --input='{\"workspace\":\"/path/to/workspace\"}'",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_READ,
+    ZCL_COMMAND_RISK_READ, ZCL_COMMAND_SCOPE_NODE,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_CONFIRM_NONE,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_DETERMINISTIC,
+    zcl_native_handle_zcode_science_rank_snapshot)
+
+/* Acceptance-proof glue (2026-08-03, additive): the operator surface for
+ * zcode_science_rebuild — drop the six SQL projection tables and re-derive
+ * them from the workspace CAS. Previously reachable only from tests; the
+ * two-node acceptance proof (tools/dev/science_acceptance.sh) drives it to
+ * demonstrate the projection is disposable and the CAS is the truth. */
+ZCL_COMMAND_READY_COMMAND(
+    "zcode.science.rebuild", "zcode.science", "",
+    "Rebuild the science projection from the CAS",
+    "Drops the six rebuildable science projection tables (studies, results, "
+    "reproductions, findings, votes, reviews — never the plan ledger) and "
+    "re-derives every row from the addressed wires under the workspace CAS "
+    "(.zvcs/objects). Rebuild-equivalence: the projection after rebuild is "
+    "identical to the projection before the drop; the CAS wires are the "
+    "only truth. The reply reports the re-projected row counts per table.",
+    0,
+    "zcode,science,rebuild,projection,cas",
+    "zcl.zcode_science_rebuild.input.v1",
+    "zcl.zcode_science_rebuild.v1",
+    "now_unix,datadir,workspace", "",
+    "z23 zcode.science.rebuild --input='{\"now_unix\":1500}'",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_NODE,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_CONFIRM_NONE,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    zcl_native_handle_zcode_science_rebuild)
+
+/* G1/S7 carrier (2026-08-04, additive): science objects ride the existing
+ * package swarm as one-chunk content.v2 blob packages (vcs/blob_store.h)
+ * — no new wire, no new store. publish mirrors a committed workspace-CAS
+ * wire into the package store and files signed generic POINTER/PROVIDER
+ * records; fetch resolves a semantic root, schedules the swarm download and
+ * admits the bytes. Dual addressing remains explicit: the blob root is the
+ * transport address; the science root is re-derived from admitted bytes,
+ * never trusted from a record. */
+ZCL_COMMAND_READY_COMMAND(
+    "zcode.science.publish", "zcode.science", "",
+    "Publish a science object to the swarm as a blob",
+    "Mirrors a committed science wire (study, result, reproduction, "
+    "findings, review, vote, hardware profile, benchmark method) from the "
+    "workspace CAS into the package store as a one-chunk blob package, so "
+    "the package swarm carries it to peers. The wire is re-parsed and its "
+    "canonical root re-derived before mirroring; corrupt or non-science "
+    "content is refused. A hosting node also commits a signed one-day "
+    "science POINTER and two-hour PROVIDER through the generic S7 record "
+    "service. Reply includes both roots and the wire kind for diagnostics; "
+    "a fetching node needs only the semantic science root. One-shot mode "
+    "persists the blob, while discovery publication requires the running "
+    "authenticated DHT identity. STORE, INDEX, SERVE and FORWARD must each "
+    "be allowed by the node's local sovereignty policy.",
+    0,
+    "zcode,science,publish,blob,swarm,cas",
+    "zcl.zcode_science_publish.input.v1",
+    "zcl.zcode_science_publish.v1",
+    "root,datadir,workspace", "root",
+    "z23 zcode.science.publish --input='{\"root\":\"<64hex>\"}'",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_NODE,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_CONFIRM_NONE,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    zcl_native_handle_zcode_science_publish)
+
+ZCL_COMMAND_READY_COMMAND(
+    "zcode.science.fetch", "zcode.science", "",
+    "Fetch and admit a blob-carried science object",
+    "Iteratively resolves the supplied semantic science root through signed "
+    "POINTER records, preserves deterministic conflicts as fallback "
+    "candidates, discovers each candidate's signed PROVIDER records, and "
+    "restricts swarm requests to freshly authenticated provider peers. It "
+    "schedules (or resumes) the transport-root swarm download and "
+    "— once bytes are local — admits them: re-derives the science root "
+    "from bytes (never trusted from a record), stores the wire in the CAS, "
+    "and refreshes the projection via the CAS-authoritative rebuild. "
+    "blob_root remains an explicit transport-address compatibility input. "
+    "Idempotent: re-admitting reports new=false. With no live engine the "
+    "resumable download record is persisted fail-closed for the next "
+    "-packagehost=1 boot; a fresh provider route must be established after "
+    "restart, then re-invoke after delivery to admit. FETCH, STORE and INDEX "
+    "are rechecked for semantic root, transport root, publisher ZID and "
+    "science service type. Reply includes discovery/conflict/provider "
+    "diagnostics plus the download and admission result. cancel=true with "
+    "an exact blob_root cancels outstanding requests and deletes only that "
+    "root's resumable restricted-fetch record.",
+    0,
+    "zcode,science,fetch,blob,swarm,admit",
+    "zcl.zcode_science_fetch.input.v1",
+    "zcl.zcode_science_fetch.v1",
+    "root,blob_root,datadir,workspace,now_unix,cancel", "",
+    "z23 zcode.science.fetch --input='{\"root\":\"<science-root-64hex>\"}'",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_NODE,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_CONFIRM_NONE,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    zcl_native_handle_zcode_science_fetch)

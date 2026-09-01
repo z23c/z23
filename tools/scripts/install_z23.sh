@@ -96,11 +96,11 @@ CURL_MINIMUM_VERSION="8.4.0"
 #   --attest-unreachable=<origin>=<reason>
 #
 # The GATHERER is the C23 front door (tools/install/z23_bootstrap.c over
-# lib/install), which packaging/install/install.sh fetches and digest-checks
+# platform/modules/install), which platform/packaging/install/install.sh fetches and digest-checks
 # before running. It classifies each source as answered-with-a-pin or
 # unreachable-for-<reason>. This script is the JUDGE. Judging here as well as
 # in the front door is deliberate duplication, not an oversight: this file is
-# fetched and run ALONE, so it cannot link lib/install, and it must be able to
+# fetched and run ALONE, so it cannot link platform/modules/install, and it must be able to
 # refuse on its own evidence rather than on the gatherer's word.
 #
 # POLICY, stated plainly so it can be argued with:

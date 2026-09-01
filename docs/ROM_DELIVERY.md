@@ -37,8 +37,8 @@ the policy layer below bounds.
 
 ## Policy layer
 
-The policy surface lives in `lib/net/include/net/rom_seed_policy.h` /
-`lib/net/src/rom_seed_policy.c`. It is deliberately narrow: config-backed
+The policy surface lives in `core/modules/net/include/net/rom_seed_policy.h` /
+`core/modules/net/src/rom_seed_policy.c`. It is deliberately narrow: config-backed
 knobs, pure admission/boost decision helpers, and live counters. It never
 opens a socket, reads a chunk off disk, or speaks the wire protocol — the
 seed engine (the artifact registry + chunk-serving path, `dumpstate
@@ -92,12 +92,12 @@ stays trivial regardless of naming differences on either side.
 
 ## Serve-log ledger
 
-`lib/net/include/net/rom_seed_ledger.h` /
-`lib/net/src/rom_seed_ledger.c` is an append-only, retention-capped record
+`core/modules/net/include/net/rom_seed_ledger.h` /
+`core/modules/net/src/rom_seed_ledger.c` is an append-only, retention-capped record
 of completed (or aborted) serve sessions — which peer, which artifact, how
 many chunks/bytes, when — stored in `<datadir>/rom_seed_ledger.db`
 (`artifact_serve_log` table), following the same append-then-prune shape as
-the `peer_sessions` ledger in `lib/storage/src/peers_projection.c`. It caps
+the `peer_sessions` ledger in `engine/modules/storage/src/peers_projection.c`. It caps
 at `ROM_SEED_LEDGER_RETENTION_CAP` rows (delete-oldest past the cap) so
 telemetry never grows unbounded. This is observability, not consensus state
 or a rebuildable projection — there is no upstream event log this table
@@ -138,7 +138,7 @@ almost never the node that ran `-verify-consensus-bundle`.
 canonical `consensus_state_replay_receipt.v1` the gate looks for) + a SHA3
 record of the producing binary into `DIR`, then re-hashes both copies with
 the standalone `rom_bundle_sha3` tool (`make tools/rom_bundle_sha3`; links
-only `lib/sha3/src/sha3.c`, no node libs) and refuses to report success
+only `platform/modules/sha3/src/sha3.c`, no node libs) and refuses to report success
 unless every digest matches the source exactly. `make rom-bundle-replicate
 BUNDLE=... RECEIPT=... DEST=...` wraps the same script. Point a node's
 `-rombundlereplicadir=DIR` at the result (or at a further copy of it, on a
@@ -152,7 +152,7 @@ All three live under `ops.debug.rom_seed.*` (native command registry — see
 nest under `ops.debug` rather than a new top-level `ops.*` branch because
 the top-level `ops` menu is already at its listing-budget ceiling
 (`ZCL_COMMAND_BRANCH_BUDGET`) — see the precedent comment above
-`ops.debug.dash` in `config/commands/ops.def`:
+`ops.debug.dash` in `engine/composition/commands/ops.def`:
 
 ```bash
 z23 ops debug rom_seed status      # policy + live counters + ledger availability
@@ -211,7 +211,7 @@ acceleration, not a hard dependency.
 > covers.
 
 The recipe above needs a peer that is both reachable and already serving the
-artifact. Today's P2P fetch client (`lib/net/src/rom_fetch.c`,
+artifact. Today's P2P fetch client (`core/modules/net/src/rom_fetch.c`,
 `ops.debug.rom_fetch.bundle`) is operator-driven by design: it commits to a
 `(chunk_root, whole_sha3, size)` triple **before** requesting a single byte,
 either from explicit operator input or a manifest parsed out of a peer's
@@ -222,11 +222,11 @@ trust with zero prior operator input is explicitly still on that lane's "Next
 (not done yet)" list. Until it lands, a genuinely first-boot node — no peers
 proven yet, no digest an operator has committed to — has nothing in
 `<datadir>/bundles/` for the zero-flag cold-boot autodetect
-(`boot_autodetect_consensus_bundle`, `config/src/boot_auto_install_bundle.c`)
+(`boot_autodetect_consensus_bundle`, `engine/composition/src/boot_auto_install_bundle.c`)
 to find, and folds from genesis or waits on an operator to run the manual
 fetch command.
 
-**`deploy/zclassic23-bundle-bootstrap.sh`** closes that gap the simplest way
+**`platform/deploy/zclassic23-bundle-bootstrap.sh`** closes that gap the simplest way
 available without opening any new activation door: it is a plain courier that
 copies an operator/packaging-designated bundle straight into
 `<datadir>/bundles/` so the *existing*, already-wired autodetect finds it with
@@ -246,7 +246,7 @@ this script establishes **zero** trust in them:
 - the one and only trust boundary stays exactly where it already is: the
   RECEIPT / CHECKPOINT_ROM / CHECKPOINT_CONTENT authority resolved at INSTALL
   time
-  (`config/src/consensus_state_snapshot_install_checkpoint_authority.c`),
+  (`engine/composition/src/consensus_state_snapshot_install_checkpoint_authority.c`),
   which independently re-derives the bundle's coins/anchor/nullifier content
   digests against the compiled-in checkpoint
   (`core/chainparams/src/checkpoints.c`) before ever lifting admission
@@ -265,7 +265,7 @@ nothing left half-written — copy-then-atomic-rename inside
 `<datadir>/bundles/`, never visible at its final name until proven
 byte-identical to the source. It also `chmod 0444`s the staged file before
 that rename: the installer's immutable-admission check
-(`config/src/consensus_state_snapshot_install.c`) refuses any bundle with a
+(`engine/composition/src/consensus_state_snapshot_install.c`) refuses any bundle with a
 write bit set for anyone, so this is required for the auto-install to ever
 accept the staged file, not merely defense in depth.
 
@@ -278,8 +278,8 @@ make bundle-bootstrap SOURCE=/path/to/consensus-state-bundle-3056758.sqlite \
 
 **Usage** — wired for every boot, zero manual steps thereafter: set
 `ZCL_CHECKPOINT_BUNDLE_SOURCE=/path/to/consensus-state-bundle-<height>.sqlite`
-in `~/.config/zclassic23/env` (see `deploy/zclassic23.env.example`).
-`deploy/zclassic23.service`'s `ExecStartPre` then runs the bootstrap script
+in `~/.config/zclassic23/env` (see `platform/deploy/zclassic23.env.example`).
+`platform/deploy/zclassic23.service`'s `ExecStartPre` then runs the bootstrap script
 before every node start; leaving the variable unset (the default) makes the
 step a no-op, so a fresh `~/.config/zclassic23/env` with nothing configured
 behaves exactly as it does today.

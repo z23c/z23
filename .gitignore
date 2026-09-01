@@ -98,7 +98,7 @@ chaos-output/
 .codeindex/
 
 # Scaffolded GUI apps are user-local content, never tree content. `make
-# new-app NAME=…` copies packages/zhello into packages/<name> (untracked by
+# new-app NAME=…` copies contexts/commons/packages/zhello into contexts/commons/packages/<name> (untracked by
 # construction) and registers the app here, which is what puts its targets on
 # the lean parse path; zhello itself stays tracked as the template of record.
 # Delete the line for an app you are contributing; keep this file gitignored.
@@ -112,7 +112,7 @@ deploy/devfleet/*.env
 # their addresses, ports, running-source hashes, heartbeats, drill output and
 # install pins all live under
 # ${XDG_STATE_HOME:-$HOME/.local/state}/zclassic23/fleet/, not here. Only
-# deploy/devfleet/README.md and *.example templates are tracked. These
+# platform/deploy/devfleet/README.md and *.example templates are tracked. These
 # patterns exist so a stray copy in the working tree can never come back.
 deploy/devfleet/*.txt
 deploy/devfleet/*.sync

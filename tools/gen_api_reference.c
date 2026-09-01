@@ -1,11 +1,11 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * Generates docs/API_REFERENCE.md from the declarative command catalogs under
- * the config/commands .def catalogs, so the operator-facing command reference
+ * the engine/composition/commands .def catalogs, so the operator-facing command reference
  * can never drift from the table the binary actually compiles.
  *
  * Mechanism: this tool is a SECOND consumer of the same X-macro grammar
- * config/src/command_catalog.c uses. It defines every ZCL_COMMAND_* macro to
+ * engine/composition/src/command_catalog.c uses. It defines every ZCL_COMMAND_* macro to
  * emit one `struct row` initializer, #includes the same ten .def files in the
  * same order, and renders Markdown from the resulting table. The C
  * preprocessor does the parsing, so multi-line invocations, adjacent
@@ -260,84 +260,84 @@ struct row {
       .is_branch = false },
 
 static const struct row g_rows[] = {
-#define ZCL_DEF_FILE "config/commands/root.def"
-#include "../config/commands/root.def"
+#define ZCL_DEF_FILE "engine/composition/commands/root.def"
+#include "../engine/composition/commands/root.def"
 #undef ZCL_DEF_FILE
-#define ZCL_DEF_FILE "config/commands/core.def"
-#include "../config/commands/core.def"
+#define ZCL_DEF_FILE "engine/composition/commands/core.def"
+#include "../engine/composition/commands/core.def"
 #undef ZCL_DEF_FILE
-#define ZCL_DEF_FILE "config/commands/apps.def"
-#include "../config/commands/apps.def"
+#define ZCL_DEF_FILE "engine/composition/commands/apps.def"
+#include "../engine/composition/commands/apps.def"
 #undef ZCL_DEF_FILE
-#define ZCL_DEF_FILE "config/commands/app_features.def"
-#include "../config/commands/app_features.def"
+#define ZCL_DEF_FILE "engine/composition/commands/app_features.def"
+#include "../engine/composition/commands/app_features.def"
 #undef ZCL_DEF_FILE
-#define ZCL_DEF_FILE "config/commands/store.def"
-#include "../config/commands/store.def"
+#define ZCL_DEF_FILE "engine/composition/commands/store.def"
+#include "../engine/composition/commands/store.def"
 #undef ZCL_DEF_FILE
-#define ZCL_DEF_FILE "config/commands/ops.def"
-#include "../config/commands/ops.def"
+#define ZCL_DEF_FILE "engine/composition/commands/ops.def"
+#include "../engine/composition/commands/ops.def"
 #undef ZCL_DEF_FILE
-#define ZCL_DEF_FILE "config/commands/dev.def"
-#include "../config/commands/dev.def"
+#define ZCL_DEF_FILE "engine/composition/commands/dev.def"
+#include "../engine/composition/commands/dev.def"
 #undef ZCL_DEF_FILE
-#define ZCL_DEF_FILE "config/commands/code.def"
-#include "../config/commands/code.def"
+#define ZCL_DEF_FILE "engine/composition/commands/code.def"
+#include "../engine/composition/commands/code.def"
 #undef ZCL_DEF_FILE
-#define ZCL_DEF_FILE "config/commands/accounts.def"
-#include "../config/commands/accounts.def"
+#define ZCL_DEF_FILE "engine/composition/commands/accounts.def"
+#include "../engine/composition/commands/accounts.def"
 #undef ZCL_DEF_FILE
-#define ZCL_DEF_FILE "config/commands/vault.def"
-#include "../config/commands/vault.def"
+#define ZCL_DEF_FILE "engine/composition/commands/vault.def"
+#include "../engine/composition/commands/vault.def"
 #undef ZCL_DEF_FILE
-#define ZCL_DEF_FILE "config/commands/zcode.def"
-#include "../config/commands/zcode.def"
+#define ZCL_DEF_FILE "engine/composition/commands/zcode.def"
+#include "../engine/composition/commands/zcode.def"
 #undef ZCL_DEF_FILE
-#define ZCL_DEF_FILE "config/commands/zcode_science.def"
-#include "../config/commands/zcode_science.def"
+#define ZCL_DEF_FILE "engine/composition/commands/zcode_science.def"
+#include "../engine/composition/commands/zcode_science.def"
 #undef ZCL_DEF_FILE
-#define ZCL_DEF_FILE "config/commands/metaverse.def"
-#include "../config/commands/metaverse.def"
+#define ZCL_DEF_FILE "engine/composition/commands/metaverse.def"
+#include "../engine/composition/commands/metaverse.def"
 #undef ZCL_DEF_FILE
-#define ZCL_DEF_FILE "config/commands/yardsale.def"
-#include "../config/commands/yardsale.def"
+#define ZCL_DEF_FILE "engine/composition/commands/yardsale.def"
+#include "../engine/composition/commands/yardsale.def"
 #undef ZCL_DEF_FILE
-#define ZCL_DEF_FILE "config/commands/zses.def"
-#include "../config/commands/zses.def"
+#define ZCL_DEF_FILE "engine/composition/commands/zses.def"
+#include "../engine/composition/commands/zses.def"
 #undef ZCL_DEF_FILE
-#define ZCL_DEF_FILE "config/commands/story.def"
-#include "../config/commands/story.def"
+#define ZCL_DEF_FILE "engine/composition/commands/story.def"
+#include "../engine/composition/commands/story.def"
 #undef ZCL_DEF_FILE
-#define ZCL_DEF_FILE "config/commands/telemetry/root.def"
-#include "../config/commands/telemetry/root.def"
+#define ZCL_DEF_FILE "engine/composition/commands/telemetry/root.def"
+#include "../engine/composition/commands/telemetry/root.def"
 #undef ZCL_DEF_FILE
 
-#define ZCL_DEF_FILE "config/commands/telemetry/watch.def"
-#include "../config/commands/telemetry/watch.def"
+#define ZCL_DEF_FILE "engine/composition/commands/telemetry/watch.def"
+#include "../engine/composition/commands/telemetry/watch.def"
 #undef ZCL_DEF_FILE
-#define ZCL_DEF_FILE "config/commands/telemetry/runtime.def"
-#include "../config/commands/telemetry/runtime.def"
+#define ZCL_DEF_FILE "engine/composition/commands/telemetry/runtime.def"
+#include "../engine/composition/commands/telemetry/runtime.def"
 #undef ZCL_DEF_FILE
-#define ZCL_DEF_FILE "config/commands/telemetry/sync.def"
-#include "../config/commands/telemetry/sync.def"
+#define ZCL_DEF_FILE "engine/composition/commands/telemetry/sync.def"
+#include "../engine/composition/commands/telemetry/sync.def"
 #undef ZCL_DEF_FILE
-#define ZCL_DEF_FILE "config/commands/telemetry/network.def"
-#include "../config/commands/telemetry/network.def"
+#define ZCL_DEF_FILE "engine/composition/commands/telemetry/network.def"
+#include "../engine/composition/commands/telemetry/network.def"
 #undef ZCL_DEF_FILE
-#define ZCL_DEF_FILE "config/commands/telemetry/storage.def"
-#include "../config/commands/telemetry/storage.def"
+#define ZCL_DEF_FILE "engine/composition/commands/telemetry/storage.def"
+#include "../engine/composition/commands/telemetry/storage.def"
 #undef ZCL_DEF_FILE
-#define ZCL_DEF_FILE "config/commands/telemetry/wallet.def"
-#include "../config/commands/telemetry/wallet.def"
+#define ZCL_DEF_FILE "engine/composition/commands/telemetry/wallet.def"
+#include "../engine/composition/commands/telemetry/wallet.def"
 #undef ZCL_DEF_FILE
-#define ZCL_DEF_FILE "config/commands/telemetry/agents.def"
-#include "../config/commands/telemetry/agents.def"
+#define ZCL_DEF_FILE "engine/composition/commands/telemetry/agents.def"
+#include "../engine/composition/commands/telemetry/agents.def"
 #undef ZCL_DEF_FILE
-#define ZCL_DEF_FILE "config/commands/telemetry/zcode.def"
-#include "../config/commands/telemetry/zcode.def"
+#define ZCL_DEF_FILE "engine/composition/commands/telemetry/zcode.def"
+#include "../engine/composition/commands/telemetry/zcode.def"
 #undef ZCL_DEF_FILE
-#define ZCL_DEF_FILE "config/commands/telemetry/metaverse.def"
-#include "../config/commands/telemetry/metaverse.def"
+#define ZCL_DEF_FILE "engine/composition/commands/telemetry/metaverse.def"
+#include "../engine/composition/commands/telemetry/metaverse.def"
 #undef ZCL_DEF_FILE
 };
 
@@ -969,7 +969,7 @@ int main(int argc, char **argv)
         fprintf(stderr,
                 "usage: %s <template.md.in> <out.md>\n"
                 "  Generates the native command reference from "
-                "config/commands/*.def\n",
+                "engine/composition/commands/*.def\n",
                 argv[0]);
         return 2;
     }
@@ -988,7 +988,7 @@ int main(int argc, char **argv)
     }
 
     fputs("<!-- GENERATED FILE — DO NOT EDIT BY HAND.\n"
-          "     Source of truth: config/commands/*.def\n"
+          "     Source of truth: engine/composition/commands/*.def\n"
           "     Template (editorial prose): docs/API_REFERENCE.md.in\n"
           "     Generator: tools/gen_api_reference.c\n"
           "     Regenerate: make docs-api-reference\n"

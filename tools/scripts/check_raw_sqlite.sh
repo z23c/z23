@@ -28,7 +28,7 @@
 #      across the flip) — a separate singleton WAL KERNEL store that sits
 #      BELOW the AR/domain-model layer (a stage_cursor row is not a model;
 #      see DEFENSIVE_CODING.md §1 "The one principled exception" and
-#      lib/storage/src/progress_store.c). Routing these through AR would be
+#      engine/modules/storage/src/progress_store.c). Routing these through AR would be
 #      a category error. The count here is bounded and stable-by-design —
 #      it changes only when the reducer gains/drops a stage table, NOT a
 #      migration that ratchets to zero. progress_store.c's own home-module
@@ -51,6 +51,11 @@ cd "$ROOT"
 source "$ROOT/tools/lint/scan_exclusions.sh"
 # shellcheck source=tools/lint/gate_lib.sh
 source "$ROOT/tools/lint/gate_lib.sh"
+# shellcheck source=tools/lint/repo_shape.sh
+source "$ROOT/tools/lint/repo_shape.sh"
+
+PRODUCTION_ROOTS=(core engine contexts cognition platform tools)
+mapfile -t CONTEXT_ROOTS < <({ repo_shape_room_dirs controllers; repo_shape_room_dirs services; } | sort -u)
 
 ALLOWLIST="$SCRIPT_DIR/raw_sqlite_allowlist.txt"
 
@@ -62,10 +67,10 @@ gate_load_list_file "$ALLOWLIST" ALLOWED
 # `2>/dev/null ... || true`, so the producer silently emptied and the gate
 # passed "clean" exit 0 over zero scanned hits. Capture the first grep's
 # exit explicitly: 0=hits, 1=no-hits (fine), >=2=fatal.
-raw_scan=$(grep -rn 'sqlite3_step[[:space:]]*(' app/ tools/ lib/ config/ src/ --include='*.c' "${LINT_GREP_EXCLUDE_ARGS[@]}")
+raw_scan=$(grep -rn 'sqlite3_step[[:space:]]*(' "${PRODUCTION_ROOTS[@]}" --include='*.c' "${LINT_GREP_EXCLUDE_ARGS[@]}")
 grep_rc=$?
 if [[ $grep_rc -ge 2 ]]; then
-    echo "check_raw_sqlite: FATAL — grep exited $grep_rc scanning app/ tools/ lib/ config/ src/." >&2
+    echo "check_raw_sqlite: FATAL — grep exited $grep_rc scanning physical authorities." >&2
     echo "  This is a real error (bad pattern / unreadable tree / non-GNU grep)," >&2
     echo "  not 'no matches'. Refusing to pass hollow." >&2
     exit 2
@@ -80,7 +85,7 @@ raw_hits=$(printf '%s\n' "$raw_scan" \
 # layer. Bounded, NOT migration debt — we report the count for visibility,
 # but it does not gate or ratchet.
 kernel_store_total=$(grep -rn '// raw-sql-ok:progress-kv-kernel-store' \
-    app/ lib/ config/ src/ --include='*.c' 2>/dev/null \
+    core engine contexts cognition platform --include='*.c' 2>/dev/null \
     | grep -v 'vendor/\|/test/' | wc -l | tr -d ' ')
 
 violations=""
@@ -96,12 +101,12 @@ while IFS= read -r hit; do
 done <<< "$raw_hits"
 
 exec_scan=$(
-    find app tools lib config src \
+    find "${PRODUCTION_ROOTS[@]}" \
         \( -path '*/vendor/*' -o -path '*/build/*' -o -path '*/test/*' \) -prune \
         -o \( \( -name '*.c' -o -name '*.h' \) \
               "${LINT_FIND_PRUNE_ARGS[@]}" \) -type f -print |
     while IFS= read -r path; do
-        [[ "$path" == "app/models/include/models/activerecord.h" ]] && continue
+        [[ "$path" == "engine/models/include/models/activerecord.h" ]] && continue
         awk -v path="$path" '
             {
                 lines[NR] = $0
@@ -151,7 +156,7 @@ fi
 # not invoke the destructive model APIs because the scan Service owns atomic
 # replacement. Strip comments, then normalize case/whitespace/adjacent string
 # literals so the rule judges the SQL consequence rather than one spelling.
-context_files=$(find app/controllers app/services -type f \
+context_files=$(find "${CONTEXT_ROOTS[@]}" -type f \
     \( -name '*.c' -o -name '*.h' \) -print 2>/dev/null)
 context_find_rc=$?
 if [[ $context_find_rc -ne 0 ]]; then
@@ -183,7 +188,7 @@ while IFS= read -r path; do
             violations="${violations}${path}: wallet projection DML for ${table}; call its model API"$'\n'
         fi
     done
-    if [[ "$path" == app/controllers/* ]] &&
+    if [[ "$path" == */controllers/* ]] &&
        [[ "$normalized" == *db_wallet_utxo_delete_all* ||
           "$normalized" == *db_wallet_tx_delete_all* ||
           "$normalized" == *db_sapling_note_delete_all* ]]; then
@@ -195,7 +200,7 @@ if [[ -n "${violations//[[:space:]]/}" ]]; then
     echo "$violations"
     echo "FAIL: raw SQLite write primitive in production code"
     echo "  Use AR_STEP_ROW / AR_STEP_DONE / AR_STEP_ROW_READONLY (see"
-    echo "  app/models/include/models/activerecord.h), wrap in AR_BEGIN_SAVE /"
+    echo "  engine/models/include/models/activerecord.h), wrap in AR_BEGIN_SAVE /"
     echo "  AR_EXEC_BOOL, ar_exec_write_sql(), or — for unavoidable cases like schema bootstrap —"
     echo "  add a // raw-sql-ok:<tag> comment on the line (no space after the"
     echo "  colon). Kernel-store (consensus.db) sites use the canonical tag"

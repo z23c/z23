@@ -374,7 +374,7 @@ if cmp -s "$TRIMMED" "$BLOB"; then
 fi
 rm -f "$TRIMMED"
 BLOB_BYTES="$(stat -c %s "$BLOB")"
-LIST_OUT="$(sp_cli app store list-product --input="{\"name\":\"Operator Proof Blob\",\"description\":\"MVP C5 rung-A operator proof payload\",\"price_zatoshi\":$PRICE_ZAT,\"token_id\":\"$TOKEN_ID\",\"tokens_per_purchase\":1,\"content_path\":\"$BLOB\",\"content_filename\":\"operator-proof-blob.bin\",\"content_type\":\"application/octet-stream\"}")"
+LIST_OUT="$(sp_cli app store list-product --input="{\"name\":\"Operator Proof Blob\",\"description\":\"MVP C5 rung-A operator proof payload\",\"price_zatoshi\":$PRICE_ZAT,\"token_id\":\"$TOKEN_ID\",\"tokens_per_purchase\":1,\"content_path\":\"$BLOB\",\"content_filename\":\"operator-proof-blob.bin\",\"content_type\":\"engine/application/octet-stream\"}")"
 str_contains "$LIST_OUT" '"ok":true' || sp_fail LIST_PRODUCT "$LIST_OUT"
 PRODUCT_ID="$(sp_json_int "$LIST_OUT" id)"
 CONTENT_HASH="$(sp_json_str "$LIST_OUT" content_hash)"

@@ -27,11 +27,11 @@ INCLUDES=$( {
 } | sort -u | sed 's|^|-I|' | tr '\n' ' ')
 
 for FILE in \
-    lib/vcs/src/package_store.c \
-    lib/vcs/src/package_store_io.c \
-    lib/vcs/src/source_package_checkout.c \
-    lib/vcs/src/vcs_devloop_mirror.c \
-    lib/vcs/src/vcs_walk.c
+    contexts/commons/modules/vcs/src/package_store.c \
+    contexts/commons/modules/vcs/src/package_store_io.c \
+    contexts/commons/modules/vcs/src/source_package_checkout.c \
+    contexts/commons/modules/vcs/src/vcs_devloop_mirror.c \
+    contexts/commons/modules/vcs/src/vcs_walk.c
 do
     x86_64-w64-mingw32-gcc -std=c2x -fsyntax-only \
         -D_WIN32_WINNT=0x0A00 -DWINVER=0x0A00 \

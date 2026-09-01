@@ -71,14 +71,14 @@ the master key (i.e. knows the service) can derive the record key.
 
 - **v1 (no new overlay):** ZNAM `SET_TEXT key="zid" value=<64-hex pubkey>`
   binds a human name to a master key using the existing registry
-  (`lib/znam/include/znam/znam.h`; text values ≤128 chars). Zero new
+  (`contexts/naming/modules/znam/include/znam/znam.h`; text values ≤128 chars). Zero new
   protocol — usable the day the client codec ships.
 - **v2 (dedicated `ZID` overlay):** lokad `ZID\0`, commands
   ANCHOR/ROTATE/REVOKE carrying raw 32-byte keys — for pseudonymous
   identities that don't want a name, and for machine-readable projections.
   Same push-framing as ZNAM/ZSLP via
-  `lib/script/include/script/op_return_push.h`, inside the 223-byte
-  standardness cap (`lib/script/include/script/standard.h:33`).
+  `core/modules/script/include/script/op_return_push.h`, inside the 223-byte
+  standardness cap (`core/modules/script/include/script/standard.h:33`).
 
 ## Scaling to infinite services: anchor domains
 
@@ -89,10 +89,10 @@ L1 footprint constant per batch instead of per record, which is what makes
 
 An **anchor domain** is:
 
-- an **append-only MMR** (SHA3-256, domain-separated; codec in `lib/zid`)
+- an **append-only MMR** (SHA3-256, domain-separated; codec in `contexts/wallet/modules/zid`)
   of 32-byte record digests, owned by one zid identity;
 - **anchored on-chain via ZANC** — one ~40-byte OP_RETURN commits the
-  tree root (`lib/zanc`, lokad `ZANC`; its own doc lists "bind anchor to
+  tree root (`contexts/commons/modules/zanc`, lokad `ZANC`; its own doc lists "bind anchor to
   identity" as future work — zid is that layer);
 - **served off-chain** — records and inclusion proofs move over the ZCODE
   swarm, verified locally against the anchored root.
@@ -146,7 +146,7 @@ never overstates either case: `node_free` says whether a database was
 read, `chain_complete` is true only when all seven rungs passed, and
 `verified_prefix` counts only consecutive passing rungs from rung 1.
 
-**Hash conventions** (mirror `lib/chain/src/mmr.c`, with a zid-specific
+**Hash conventions** (mirror `core/modules/chain/src/mmr.c`, with a zid-specific
 leaf tag that blocks cross-protocol proof replay). All zid domain
 separators are 4-byte uppercase lokad-style tags, same convention as the
 on-chain lokads (ZNAM, `SLP\0`, ZANC):
@@ -196,7 +196,7 @@ worst to quadratic Grover speedup. Consequences:
   history fully optional; (2) epoch-anchor validity proofs — upgrading
   attestation to math; (3) PQ ownership circuits — STARK-based shielded
   ownership, which also retires Groth16's trusted setup; (4) verifiable
-  builds for the registry. `lib/crypto_registry` is the scheme-plugging
+  builds for the registry. `core/modules/crypto_registry` is the scheme-plugging
   surface; provers are heavy, so these land at epoch/IVC cadences, never
   per-message.
 - **Lane discipline:** migrating L1 transparent ownership (P2PKH/PQ
@@ -232,7 +232,7 @@ whose bytes are sorted by fate does. There are exactly three kinds:
 
 **The epoch anchor** is the mechanism that makes overlay state provable
 without history. The OP_RETURN catalog projection
-(`app/models/src/op_return_index.c`) already maintains an incremental
+(`engine/models/src/op_return_index.c`) already maintains an incremental
 digest-chain over every OP_RETURN the chain has ever carried — every
 ZNAM name, ZSLP transfer, ZANC anchor, and future ZID record, in one
 digest. Anchoring that digest via ZANC (label `zepoch@<height>`) commits
@@ -276,15 +276,15 @@ controls its own signature scheme, so it takes the Schnorr family:
   threshold Schnorr, two-round signing, one compact 64-byte signature
   from any t of n operators. This is the Zcash ecosystem's own standard
   (ZIP-312) and fits zid keys (ed25519/ristretto) or RedJubjub
-  (`lib/sapling/include/sapling/jubjub.h` ships in-tree). A service run
+  (`core/modules/sapling/include/sapling/jubjub.h` ships in-tree). A service run
   by n nodes keeps serving descriptors when any t are online; no single
   offline master key.
 - **Massively aggregated attestations (A4 bandwidth receipts): BLS12-381**
-  — pairing code already in-tree (`lib/sapling/src/bls12_381.c`). n
+  — pairing code already in-tree (`core/modules/sapling/src/bls12_381.c`). n
   measurement receipts aggregate to one 48-byte signature; the BWAuth
   replacement settles one signature per epoch instead of n.
 - **Raw ingest performance: batch ed25519 verification** — multi-scalar
-  batch verify in `lib/crypto` (~2× per-signature throughput for nodes
+  batch verify in `core/modules/crypto` (~2× per-signature throughput for nodes
   consuming domain records). This is where "high performance" actually
   comes from at the codec layer — not from threshold schemes.
 - **GG20's one real niche:** threshold custody of on-chain *transparent*
@@ -314,7 +314,7 @@ Three versioned layers, three different mechanisms — never mix them:
    interpretable forever. Content freshness is **seq/expiry** (the
    zid_doc monotonic rule), never format versioning.
 3. **Command schemas** follow the house pattern
-   (`zcl.<command>.input.v1` in `config/commands/*.def`): additive
+   (`zcl.<command>.input.v1` in `engine/composition/commands/*.def`): additive
    optional keys within a version; any breaking input change bumps the
    schema version.
 
@@ -327,8 +327,8 @@ an algorithm field is a *new version*, not a mutation of v1.
 
 The service's master key is anchored on-chain (v1: via ZNAM). Current
 introduction-point descriptors are signed documents served from the
-content-addressed ZCODE swarm (`lib/vcs/src/package_swarm.c`,
-wired in `lib/net/src/msgprocessor_zcode_swarm.c`). Clients fetch the blob
+content-addressed ZCODE swarm (`contexts/commons/modules/vcs/src/package_swarm.c`,
+wired in `core/modules/net/src/msgprocessor_zcode_swarm.c`). Clients fetch the blob
 from any peer and verify it against the chain-anchored key.
 
 - Kills HSDir address harvesting: no relay ever sees descriptors for
@@ -352,7 +352,7 @@ A relay is a master key that signs endpoint announcements:
   owner (first-input P2PKH signer, ZNAM convention). Nothing else.
   Operators write these with `core zdir register` / `core zdir deregister`
   (`tools/command/native_zdir_command.c` → the `zdir_*` RPCs in
-  `app/controllers/src/zdir_controller.c`), never on a timer.
+  `contexts/naming/controllers/src/zdir_controller.c`), never on a timer.
 - **TRANSFER is not implemented and is not a gap.** Command byte 3 is
   reserved for it and `zdir_parse` rejects it, because a parsed-but-
   unhandled command would be a silent stub. Handing a hostname to a new
@@ -374,7 +374,7 @@ A relay is a master key that signs endpoint announcements:
 ### A4 — Incentives (last, only if A1–A3 earn it)
 
 A bandwidth-credit ZSLP token settling over the existing batched daily
-SEND rails (`app/services/include/services/zslp_command_service.h`).
+SEND rails (`contexts/market/services/include/services/zslp_command_service.h`).
 Weight must come from seniority and measurement, never raw stake: paying
 for relays at scale attracts Sybils — in 2023 the Tor Project had to
 remove relays tied to a crypto scheme
@@ -400,7 +400,7 @@ with influence sought, not with existence.
 updates, zmsg off-chain messages, zgame traffic, file chunks, bandwidth
 receipts, swarm WANT/DATA, addr gossip.
 
-**Verified constants** (`lib/validation/include/validation/main_constants.h`):
+**Verified constants** (`core/modules/validation/include/validation/main_constants.h`):
 `DEFAULT_MIN_RELAY_TX_FEE = 100` zatoshis, `MAX_BLOCK_SIZE = 2,000,000`
 consensus / `DEFAULT_BLOCK_MAX_SIZE = 200,000` mining policy,
 `ZCL_FINALITY_DEPTH = 10` (see below). At 150 s blocks: 576 blocks/day,
@@ -429,12 +429,12 @@ the very PoW that secures it.
 ## Finality, forks, and netsplit monitoring
 
 `ZCL_FINALITY_DEPTH = 10`
-(`lib/validation/include/validation/main_constants.h:33`) with deep-reorg
+(`core/modules/validation/include/validation/main_constants.h:33`) with deep-reorg
 refusal (`reorg_is_allowed` / `height_is_immutable`, both declared in
-`lib/validation/include/validation/checkpoint.h:38,43` — NOT in
+`core/modules/validation/include/validation/checkpoint.h:38,43` — NOT in
 `main_constants.h`, which holds only the constant) means a partition
 surviving >10 blocks on both sides **never reconverges**. The refusal is not
-silent: both refusal paths in `app/jobs/src/utxo_apply_delta_reorg.c` raise
+silent: both refusal paths in `engine/jobs/src/utxo_apply_delta_reorg.c` raise
 the named blocker `chain.reorg_refused_below_finality`. Rules:
 
 - **Provisional below 10 deep, final at or beyond.** Anchors feed hints
@@ -444,16 +444,16 @@ the named blocker `chain.reorg_refused_below_finality`. Rules:
   `height_is_immutable` draws and the same one `reorg_is_allowed` enforces;
   in wallet "confirmations" terms (which count the record's own block) that
   is 11. Implemented as a pure, total predicate in
-  `lib/policy/include/policy/anchor_finality.h`
+  `core/modules/policy/include/policy/anchor_finality.h`
   (`anchor_confers_influence`), with the withdrawal rail — a reorg that
   drops a record below finality takes its weight back — in
-  `lib/policy/src/anchor_finality.c` and proven in
-  `lib/test/src/test_anchor_finality.c`.
+  `core/modules/policy/src/anchor_finality.c` and proven in
+  `tests/harness/src/test_anchor_finality.c`.
 - **10 deep is anti-flapping, not trust.** It does not make anything safe.
   An attacker with ~10 blocks of private hashpower can rewrite the recent
   window; influence comes only from seniority (hours–days), never recency.
 - **Netsplit detection is directory-safety infrastructure**, wired into
-  the existing `app/conditions` + supervisor liveness tree:
+  the existing `engine/conditions` + supervisor liveness tree:
   1. peer tip disagreement at same-or-greater height,
   2. block-arrival rate divergence vs difficulty (minority-side signal),
   3. tip staleness beyond expected variance.
@@ -486,7 +486,7 @@ the named blocker `chain.reorg_refused_below_finality`. Rules:
 
 ## Phases
 
-1. **Phase 1 — `lib/zid` codec (pure library, no networking).** Blinded
+1. **Phase 1 — `contexts/wallet/modules/zid` codec (pure library, no networking).** Blinded
    key derivation (`SHA3-256("ZIDB" ‖ pubkey ‖ period)`), signed
    document encode/decode/verify with monotonic-seq rule, anchor-domain
    MMR (append/root/prove/**verify** — the verifier function everyone must
@@ -507,26 +507,26 @@ the named blocker `chain.reorg_refused_below_finality`. Rules:
 
 ## Concrete files
 
-Existing (built on): `lib/znam/include/znam/znam.h`,
-`lib/zslp/include/zslp/slp.h`,
-`lib/script/include/script/op_return_push.h`,
-`lib/script/include/script/standard.h` (223 B cap),
-`app/models/src/op_return_index.c`,
-`lib/vcs/src/package_swarm.c` + `lib/vcs/include/vcs/package_swarm.h`,
-`lib/net/src/msgprocessor_zcode_swarm.c`,
-`lib/net/src/onion_ratelimit.c`, `lib/net/src/onion_service.c`,
-`lib/net/src/noise_transport.c` + `lib/noise/src/noise_handshake.c`,
-`lib/validation/include/validation/main_constants.h` (fee/finality/size
+Existing (built on): `contexts/naming/modules/znam/include/znam/znam.h`,
+`contexts/market/modules/zslp/include/zslp/slp.h`,
+`core/modules/script/include/script/op_return_push.h`,
+`core/modules/script/include/script/standard.h` (223 B cap),
+`engine/models/src/op_return_index.c`,
+`contexts/commons/modules/vcs/src/package_swarm.c` + `contexts/commons/modules/vcs/include/vcs/package_swarm.h`,
+`core/modules/net/src/msgprocessor_zcode_swarm.c`,
+`core/modules/net/src/onion_ratelimit.c`, `core/modules/net/src/onion_service.c`,
+`core/modules/net/src/noise_transport.c` + `core/modules/noise/src/noise_handshake.c`,
+`core/modules/validation/include/validation/main_constants.h` (fee/finality/size
 constants only),
-`lib/validation/include/validation/checkpoint.h` (`reorg_is_allowed` /
+`core/modules/validation/include/validation/checkpoint.h` (`reorg_is_allowed` /
 `height_is_immutable` — the finality *predicates*),
-`lib/policy/include/policy/anchor_finality.h` (provisional-vs-final gate on
+`core/modules/policy/include/policy/anchor_finality.h` (provisional-vs-final gate on
 directory influence, and the reorg withdrawal rail),
-`lib/zanc/include/zanc/zanc.h` (generic 32-byte on-chain anchor),
-`lib/chain/src/mmr.c` (MMR hash conventions the domain tree mirrors),
+`contexts/commons/modules/zanc/include/zanc/zanc.h` (generic 32-byte on-chain anchor),
+`core/modules/chain/src/mmr.c` (MMR hash conventions the domain tree mirrors),
 `core/chainparams/src/checkpoints.c` (baked trust anchor),
 `docs/spec/power-node-contract.md` (ZClassicDNS + onion gateway).
 
-Built (Phase 1): `lib/zid/include/zid/zid.h`, `lib/zid/src/zid.c`,
-`lib/test/src/test_zid.c` — signed documents, blinded keys, anchor-domain
+Built (Phase 1): `contexts/wallet/modules/zid/include/zid/zid.h`, `contexts/wallet/modules/zid/src/zid.c`,
+`tests/harness/src/test_zid.c` — signed documents, blinded keys, anchor-domain
 MMR with inclusion proofs.

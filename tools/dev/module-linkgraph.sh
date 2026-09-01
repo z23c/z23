@@ -5,7 +5,7 @@
 # Why symbols and not includes: the include graph is the COMPILE order; the
 # symbol graph is the LINK order, and they differ. A file can reach into
 # another module through a bare `extern` declaration with no #include at all
-# (lib/storage/src/catalog_completeness.c does exactly this, on purpose).
+# (engine/modules/storage/src/catalog_completeness.c does exactly this, on purpose).
 # Depfiles cannot see that edge. `nm` over the compiled objects can, because
 # the reference is an undefined symbol in one object and a defined symbol in
 # another.
@@ -31,7 +31,7 @@
 #   --fas       the lib/ subgraph's cycle structure: strongly-connected
 #               components plus the EXACT minimum feedback arc set — the
 #               fewest edges that must run backward under any ranking. This is
-#               what makes config/lib_module_order.def's "5 back edges is
+#               what makes engine/composition/lib_module_order.def's "5 back edges is
 #               optimal" claim checkable rather than asserted; re-run it after
 #               any change to the graph. Scoped to lib/ (minus lib/test)
 #               because that is precisely what the .def ranks.
@@ -140,7 +140,7 @@ fi
 # A root-selected production epoch can retain an object after its source was
 # deleted or moved: `make` knows not to link it, but `find *.o` used to feed it
 # to this graph forever. That produced a false architectural edge after
-# log_throttle.c moved from lib/util to lib/support. Filter root scans through
+# log_throttle.c moved from platform/modules/util to platform/modules/support. Filter root scans through
 # the same repo-relative `.o` -> `.c` mapping used below. An explicit --obj-dir
 # remains an unfiltered diagnostic seam so synthetic gate fixtures need not
 # manufacture a source checkout beside their objects.
@@ -182,7 +182,7 @@ command -v "$NM_BIN" >/dev/null 2>&1 || {
 # non-empty object tree. Exit 3 marks exactly that condition.
 #
 # The in-binary link graph makes the OPPOSITE call, deliberately, and the two
-# are not in conflict. lib/codeindex/src/codeindex_linkdeps.c is a C ELF reader
+# are not in conflict. cognition/modules/codeindex/src/codeindex_linkdeps.c is a C ELF reader
 # with no LTO plugin to load, so it probes for the `__gnu_lto_*` marker and
 # SKIPS a slim root entirely rather than parse a compiler-internal format —
 # meaning `code linkdeps` reads a test/dev tree while these gates read
@@ -416,7 +416,7 @@ printf '%s\n' "$OUT" \
         for (c = 0; c < nc; c++) { r = mfas(c); if (r > 0) total += r }
         printf "\nMINIMUM FEEDBACK ARC SET over the whole lib/ subgraph = %d\n", total
         printf "That is the floor on how many entries tools/scripts/lib_module_order_baseline.txt\n"
-        printf "can hold: no reordering of config/lib_module_order.def gets below it. Paying one\n"
+        printf "can hold: no reordering of engine/composition/lib_module_order.def gets below it. Paying one\n"
         printf "down means breaking a cycle, not re-ranking.\n"
     }
 '

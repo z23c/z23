@@ -1150,7 +1150,7 @@ static bool rr_overlay_for_base(const struct rr_plan *plan, const char *root,
 
 static bool rr_source_is_test_only(const char *source)
 {
-    static const char prefix[] = "lib/test/";
+    static const char prefix[] = "tests/harness/";
     return source && strncmp(source, prefix, sizeof(prefix) - 1) == 0;
 }
 
@@ -1400,7 +1400,7 @@ static bool rr_prepare_overlays(
     int64_t *compile_us, int64_t *startup_us, int64_t *body_us,
     char *why, size_t why_len)
 {
-    static const char identity_source[] = "lib/util/src/clientversion.c";
+    static const char identity_source[] = "platform/modules/util/src/clientversion.c";
     char source_flag[96], mutation_flag[104], cas_flag[104], clean_flag[24];
     if (!rr_identity_flags(epoch_source, source_flag, mutation_flag, cas_flag,
                            clean_flag)) {

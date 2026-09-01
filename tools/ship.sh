@@ -404,7 +404,7 @@ die()  { printf '\033[1;31mship: REFUSE:\033[0m %s\n' "$*" >&2; exit 1; }
 # Promotion is a deliberate act: ZCL_SHIP_ALLOW_PROOF_SERVER=1. A successful
 # promotion records itself twice in step 4 below, right after the running
 # daemon proves it took the candidate: a signed, hash-chained line in the
-# TRACKED ledger deploy/promotion-receipts.jsonl (the authority — it replicates
+# TRACKED ledger platform/deploy/promotion-receipts.jsonl (the authority — it replicates
 # to origin and cannot be rewritten undetected), plus a local
 # proof-server/<timestamp> tag as a convenience index.
 # `tools/scripts/promotion_receipt.sh verify` checks the chain offline;
@@ -714,10 +714,10 @@ deploy_local() {
     git cat-file -e "$prior_commit^{commit}" 2>/dev/null ||
         die "local rollback commit $prior_commit is unavailable"
     if ! git diff --quiet "$prior_commit" "$HEAD_SHA" -- \
-        'app/models/src/database*.c' \
-        'app/models/include/models/database*.h' \
-        'app/models/src/schema_migration.c' \
-        'app/models/include/models/schema_migration.h'; then
+        'engine/models/src/database*.c' \
+        'engine/models/include/models/database*.h' \
+        'engine/models/src/schema_migration.c' \
+        'engine/models/include/models/schema_migration.h'; then
         die "local candidate changes persistent-schema code; local automatic rollback cannot yet be safely disarmed (ship remote targets explicitly after owner acceptance)"
     fi
     svc_dir="$(dirname "$(ship_exe_of "$pid")")"
@@ -924,10 +924,10 @@ REMOTE_HASH
         die "$host rollback commit $prior_commit is unavailable locally"
     one_way_schema=0
     if ! git diff --quiet "$prior_commit" "$HEAD_SHA" -- \
-        'app/models/src/database*.c' \
-        'app/models/include/models/database*.h' \
-        'app/models/src/schema_migration.c' \
-        'app/models/include/models/schema_migration.h'; then
+        'engine/models/src/database*.c' \
+        'engine/models/include/models/database*.h' \
+        'engine/models/src/schema_migration.c' \
+        'engine/models/include/models/schema_migration.h'; then
         # A FORWARD-ONLY deploy is a deliberate act, in the same shape as
         # ZCL_SHIP_ALLOW_PROOF_SERVER above: refuse by default, proceed only
         # when the operator names the risk. It is not a way to make a red
@@ -1399,7 +1399,7 @@ ROLLBACK_SCRIPT
     # docs/PROMOTION_RECEIPTS.md; the chain must also have been started with
     # `promotion_receipt.sh init` before the first append can land.
         if tools/scripts/promotion_receipt.sh append "$HEAD_SHA" "$CAND_SOURCE_ID" "$ARTIFACT_SHA" "$host"; then
-            say "commit deploy/promotion-receipts.jsonl — until committed the receipt is local only"
+            say "commit platform/deploy/promotion-receipts.jsonl — until committed the receipt is local only"
         else
             say "WARNING: could not append the promotion receipt for $host"
         fi

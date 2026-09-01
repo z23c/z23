@@ -22,7 +22,7 @@
 # compiled into g_dumpers[] either, so it must not count toward any gate's view
 # of reality — globbing would credit rows the binary never sees.
 
-DUMPER_DEF_AGGREGATOR="app/controllers/include/controllers/diagnostics_dumpers.def"
+DUMPER_DEF_AGGREGATOR="engine/controllers/include/controllers/diagnostics_dumpers.def"
 
 # Minimum number of per-domain includes expected under the aggregator. This is
 # an anti-hollowness floor, not a target: it exists so that a consumer which
@@ -45,18 +45,21 @@ dumper_def_files() {
         return 1
     fi
 
-    local dir
-    dir="$(dirname "$DUMPER_DEF_AGGREGATOR")"
     _out+=("$DUMPER_DEF_AGGREGATOR")
 
-    local rel
+    local rel match_count
     while IFS= read -r rel; do
         [[ -n "$rel" ]] || continue
-        if [[ ! -f "$dir/$rel" ]]; then
-            echo "dumper_defs: $DUMPER_DEF_AGGREGATOR includes '$rel' but $dir/$rel does not exist" >&2
+        mapfile -t matches < <(git ls-files -- \
+            "engine/controllers/include/controllers/$rel" \
+            "cognition/controllers/include/controllers/$rel" \
+            "contexts/*/controllers/include/controllers/$rel")
+        match_count="${#matches[@]}"
+        if (( match_count != 1 )); then
+            echo "dumper_defs: $DUMPER_DEF_AGGREGATOR includes '$rel' but the feature-first controller rooms resolve $match_count owners" >&2
             return 1
         fi
-        _out+=("$dir/$rel")
+        _out+=("${matches[0]}")
     done < <(sed -nE 's|^[[:space:]]*#include[[:space:]]+"controllers/(diagnostics_dumpers_[A-Za-z0-9_]+\.def)".*|\1|p' \
                  "$DUMPER_DEF_AGGREGATOR")
 

@@ -9,8 +9,8 @@
 #
 # Probes the DEPLOYED local instances by CLIENT-VIEWPOINT RPC (never
 # in-process introspection):
-#   canonical  rpcport 18232  datadir ~/.zclassic-c23      (deploy/zclassic23.service)
-#   dev        rpcport 18252  datadir ~/.zclassic-c23-dev  (deploy/zcl23-dev.service)
+#   canonical  rpcport 18232  datadir ~/.zclassic-c23      (platform/deploy/zclassic23.service)
+#   dev        rpcport 18252  datadir ~/.zclassic-c23-dev  (platform/deploy/zcl23-dev.service)
 # Ports/datadirs are hardcoded defaults (each also overridable via env, see
 # below) rather than parsed from the unit files: the ports are a stable,
 # documented contract (see CLAUDE.md "Running" + the unit files themselves),
@@ -25,7 +25,7 @@
 # health, and (b) trains every reader to ignore any_unreachable — the exact
 # way a monitor goes blind. The soak lane (rpcport 18242, datadir
 # ~/.zclassic-c23-soak) is such a case: its unit ships as an EXAMPLE
-# (deploy/examples/zclassic23-soak-node.service) and is not installed here,
+# (platform/deploy/examples/zclassic23-soak-node.service) and is not installed here,
 # so it is not probed. Installing that unit means adding its row back to
 # INSTANCES below — one line, and the example unit says so.
 #

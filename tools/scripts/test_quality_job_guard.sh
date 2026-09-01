@@ -90,10 +90,10 @@ rc=$?
 set -e
 [ "$rc" -eq 64 ]
 
-grep -Fq 'quality_job_guard.sh fuzz' "$ROOT/deploy/zclassic23-fuzz.service"
-grep -Fq 'quality_job_guard.sh tests' "$ROOT/deploy/zclassic23-test-suite.service"
-grep -Fq 'quality_job_guard.sh coverage' "$ROOT/deploy/zclassic23-coverage.service"
-grep -Fq 'quality_job_guard.sh simnet-nightly' "$ROOT/deploy/zclassic23-simnet-nightly.service"
+grep -Fq 'quality_job_guard.sh fuzz' "$ROOT/platform/deploy/zclassic23-fuzz.service"
+grep -Fq 'quality_job_guard.sh tests' "$ROOT/platform/deploy/zclassic23-test-suite.service"
+grep -Fq 'quality_job_guard.sh coverage' "$ROOT/platform/deploy/zclassic23-coverage.service"
+grep -Fq 'quality_job_guard.sh simnet-nightly' "$ROOT/platform/deploy/zclassic23-simnet-nightly.service"
 
 set +e
 ZCL_QUALITY_LOG_MAX_BYTES=0 "$TMP/scripts/quality_log_retention.sh" fuzz \

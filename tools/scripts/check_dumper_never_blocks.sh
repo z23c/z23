@@ -163,7 +163,7 @@ fi
 
 MANIFEST="${ZCL_DUMPER_BLOCKING_MANIFEST:-tools/scripts/dumper_blocking_primitives.tsv}"
 BASELINE="${ZCL_DUMPER_BLOCKING_BASELINE:-tools/scripts/dumper_blocking_baseline.tsv}"
-SCAN_ROOTS_TEXT="${ZCL_DUMPER_BLOCKING_SCAN_ROOTS:-app lib config core src}"
+SCAN_ROOTS_TEXT="${ZCL_DUMPER_BLOCKING_SCAN_ROOTS:-core engine contexts cognition platform}"
 read -r -a SCAN_ROOTS <<< "$SCAN_ROOTS_TEXT"
 [ -f "$BASELINE" ] || touch "$BASELINE"
 

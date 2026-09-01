@@ -1,0 +1,51 @@
+/* Per-domain dumpstate subsystem descriptors: wallet-facing views and backups: vault read model, wallet/contacts/HODL projections, Sapling checkpoint, wallet-table backup, UTXO mirror sync
+ *
+ * Split from diagnostics_dumpers.def (see that file's aggregator
+ * comment for the shared #include contract). Data-only: no macro
+ * definitions or include guards belong in this file. */
+
+    DIAG_ENTRY("vault", vault_read_dump_state_json,
+               "vault read model: one row per asset class the node can hold "
+               "(transparent_zcl, shielded_zcl, zslp_tokens, znam_names, "
+               "swap_encumbered, file_market_offers), each with an evidence "
+               "grade (exact_*/heuristic_*), the primitive the number came "
+               "from, and separate spendable/pending/immature/encumbered "
+               "columns. Swap-encumbered HTLC funds appear here and in no "
+               "other balance surface. A class that cannot be determined "
+               "emits a row saying why rather than being omitted.",
+               "projection", "service",
+               "contexts/wallet/services/src/vault_read.c",
+               "persisted_projection_snapshot", "bounded_lookup",
+               "a class name, or empty for every class",
+               "swap_encumbered", "transparent_zcl",
+               "tests/harness/src/test_vault_read.c", false),
+    DIAG_PROJECTION("wallet_projection", wallet_projection_dump_state_json,
+                    "wallet view projection: public-only "
+                    "address/tx/UTXO/note counts, total value, cursor, "
+                    "and emit counters.",
+                    "engine/modules/storage/src/wallet_projection.c",
+                    "tests/harness/src/test_wallet_projection.c"),
+    DIAG_PROJECTION("contacts_projection", contacts_projection_dump_state_json,
+                    "contacts projection: count, cursor, "
+                    "consume counters, emit counters, catch_up timing.",
+                    "engine/modules/storage/src/contacts_projection.c",
+                    "tests/harness/src/test_small_projections.c"),
+    DIAG_PROJECTION("onion_announcements_projection",
+                    onion_ann_projection_dump_state_json,
+                    "onion announcements projection: count, cursor, "
+                    "consume counters, emit counters, catch_up timing.",
+                    "engine/modules/storage/src/onion_announcements_projection.c",
+                    "tests/harness/src/test_small_projections.c"),
+    DIAG_PROJECTION("hodl_history_projection",
+                    hodl_history_projection_dump_state_json,
+                    "HODL history projection: count, cursor, "
+                    "consume counters, emit counters, catch_up timing.",
+                    "engine/modules/storage/src/hodl_history_projection.c",
+                    "tests/harness/src/test_small_projections.c"),
+    DIAG_LOCAL("sapling_checkpoint", sapling_checkpoint_dump_state_json,
+               "flat-file Sapling note-commitment tree cache: periodic write "
+               "height/count/fails + boot load outcome (absent/loaded_verified/discarded)"),
+    DIAG_LOCAL("wallet_backup", wallet_backup_dump_state_json,
+               "periodic wallet-table backup thread: running, total_runs/failures, last run time/size/key_count/duration/path/error"),
+    DIAG_LOCAL("utxo_mirror_sync", utxo_mirror_sync_dump_state_json,
+               "node.db `utxos` explorer mirror worker: state, rebuilds_run, rows_written, last_mirror_height, last_frontier, last_pass/error_unix"),

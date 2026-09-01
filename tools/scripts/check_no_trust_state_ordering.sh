@@ -15,7 +15,7 @@
 # source trees contains such a comparison. The enum's own loop-bound over the
 # COUNT sentinel (`s < SYNC_TRUST_STATE_COUNT`) is a legitimate iteration bound,
 # not an ordinal trust comparison, so hits whose compared token is
-# SYNC_TRUST_STATE_COUNT are excluded. Test sources (lib/test/) are excluded.
+# SYNC_TRUST_STATE_COUNT are excluded. Test sources (tests/harness/include/test/) are excluded.
 #
 # House style mirrors the other repo-scanning gates: exit 0 clean,
 # exit 1 on a violation, exit 2 (via gate_require_scanned) on a hollow/empty
@@ -27,6 +27,13 @@ cd "$(dirname "$0")/../.."
 . tools/lint/gate_lib.sh
 # shellcheck source=tools/lint/scan_exclusions.sh
 source tools/lint/scan_exclusions.sh
+# shellcheck source=tools/lint/repo_shape.sh
+source tools/lint/repo_shape.sh
+
+scan_pathspecs=()
+for source_root in "${ZCL_SOURCE_AUTHORITIES[@]}" tools; do
+    scan_pathspecs+=("$source_root/**/*.c" "$source_root/**/*.h")
+done
 
 # Comparators immediately adjacent to a SYNC_TRUST_* enumerator or the
 # `enum sync_trust_state` type, in either operand position.
@@ -39,13 +46,7 @@ ORDER_RE='(<=|>=|<|>)[[:space:]]*SYNC_TRUST_|SYNC_TRUST_[A-Z_]+[[:space:]]*(<=|>
 # through when a selftest execs this script directly.
 mapfile -t hits < <(
     git grep --untracked -nE "$ORDER_RE" -- \
-        'app/**/*.c' 'app/**/*.h' \
-        'config/**/*.c' 'config/**/*.h' \
-        'src/**/*.c' 'src/**/*.h' \
-        'lib/**/*.c' 'lib/**/*.h' \
-        'domain/**/*.c' 'domain/**/*.h' \
-        'tools/**/*.c' 'tools/**/*.h' \
-        ':!lib/test/**' 2>/dev/null \
+        "${scan_pathspecs[@]}" 2>/dev/null \
     | grep -vE 'SYNC_TRUST_STATE_COUNT' \
     | lint_filter_excluded || true
 )
@@ -55,16 +56,10 @@ mapfile -t hits < <(
 # producer emptied (renamed/moved tree) — never report clean off a hollow scan.
 mapfile -t universe < <(
     git grep --untracked -lE 'SYNC_TRUST_|enum[[:space:]]+sync_trust_state' -- \
-        'app/**/*.c' 'app/**/*.h' \
-        'config/**/*.c' 'config/**/*.h' \
-        'src/**/*.c' 'src/**/*.h' \
-        'lib/**/*.c' 'lib/**/*.h' \
-        'domain/**/*.c' 'domain/**/*.h' \
-        'tools/**/*.c' 'tools/**/*.h' \
-        ':!lib/test/**' 2>/dev/null || true
+        "${scan_pathspecs[@]}" 2>/dev/null || true
 )
 gate_require_scanned "${#universe[@]}" 1 check_no_trust_state_ordering \
-    "no source under app/config/src/lib/domain/tools mentions SYNC_TRUST_ — was services/sync_trust_policy.* renamed/moved?"
+    "no source under the architecture authorities mentions SYNC_TRUST_ — was services/sync_trust_policy.* renamed/moved?"
 
 if [ "${#hits[@]}" -gt 0 ]; then
     echo ""

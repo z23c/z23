@@ -2,8 +2,8 @@
 
 ## What this demonstrates
 
-`examples/10_wire_adversaries.c` drives `simnet_wire` (the deterministic
-in-memory P2P harness in `lib/sim/src/simnet_wire.c`) with two peers against
+`docs/examples/10_wire_adversaries.c` drives `simnet_wire` (the deterministic
+in-memory P2P harness in `engine/modules/sim/src/simnet_wire.c`) with two peers against
 one node-under-test: an honest peer that completes the handshake, and a
 `FLOOD` adversary that pushes unbounded bytes at the same node. It then closes
 (`simnet_wire_partition_peer`) the honest peer's link mid-run — modeling "the
@@ -19,9 +19,9 @@ ping/pong round trip. Everything is tick-keyed off a fixed seed, so the run
 make -C examples && ./examples/bin/10_wire_adversaries
 ```
 
-The file compiles against the same public `lib/sim` + `lib/net` + `lib/util`
+The file compiles against the same public `engine/modules/sim` + `core/modules/net` + `platform/modules/util`
 headers the real test binary uses (`-Ilib/*/include`, `-DZCL_TESTING`); see
-`lib/test/src/test_simnet_wire.c` for the equivalent test-harness coverage
+`tests/harness/src/test_simnet_wire.c` for the equivalent test-harness coverage
 (`test_simnet_wire_partition_recovery`).
 
 ## Expected output (sketch)
@@ -47,29 +47,29 @@ step or invariant does not hold.
 
 ## Key APIs used
 
-- `lib/sim/include/sim/simnet_wire.h` / `lib/sim/src/simnet_wire_peer.c` —
+- `engine/modules/sim/include/sim/simnet_wire.h` / `engine/modules/sim/src/simnet_wire_peer.c` —
   `simnet_wire_create_scenario`, `simnet_wire_start_peer_kind` (via the
   scenario's `peers[]`), `simnet_wire_run`.
-- `lib/sim/src/simnet_wire.c` — `simnet_wire_partition_peer` (per-link
+- `engine/modules/sim/src/simnet_wire.c` — `simnet_wire_partition_peer` (per-link
   `WIRE_EVENT_OPEN`/`WIRE_EVENT_CLOSE`, egress pinned to peer slot 0),
   `simnet_wire_peer_send_ping`, `simnet_wire_peer_pong_received`,
   `simnet_wire_get_stats` (`peers_open`, `no_unexpected_permanent_blocker`,
   `monitor_failed`, `fingerprint`).
-- `lib/util/include/util/blocker.h` / `lib/util/src/blocker.c` —
+- `platform/modules/util/include/util/blocker.h` / `platform/modules/util/src/blocker.c` —
   `blocker_reset_for_testing` (clean baseline before creating a wire; not
   `ZCL_TESTING`-gated).
-- `lib/net/include/net/net.h` — `MAX_RECV_MESSAGES` (the receive-queue bound
+- `core/modules/net/include/net/net.h` — `MAX_RECV_MESSAGES` (the receive-queue bound
   the flood peer is checked against).
 
 ## Production counterpart
 
 - Real handshake/framing/backpressure over actual sockets:
-  `lib/net/src/msgprocessor.c` (dispatch table) and `lib/net/src/net.c`
+  `core/modules/net/src/msgprocessor.c` (dispatch table) and `core/modules/net/src/net.c`
   (`p2p_node` receive/send, `MAX_RECV_MESSAGES` enforcement) — the exact code
   `simnet_wire` drives directly, minus the socket layer.
 - Real no-silent-halt / partitioned-peer detection on a live node:
-  `app/services/src/sync_monitor.c` and the supervisor liveness tree
-  (`lib/util/src/supervisor.c`; see `CLAUDE.md` "Adding state introspection"
+  `engine/services/src/sync_monitor.c` and the supervisor liveness tree
+  (`platform/modules/util/src/supervisor.c`; see `CLAUDE.md` "Adding state introspection"
   and `z23 dumpstate supervisor`), surfaced via `z23 dumpstate
   subsystem=blocker` instead of this example's direct
   `simnet_wire_get_stats()` polling.

@@ -14,8 +14,8 @@ mental model L2 and L3 sit inside).
 | Layer | What it is | What it guarantees | What it does NOT guarantee |
 |---|---|---|---|
 | **L0 — ROM** | The compiled-in SHA3 UTXO checkpoint (`get_sha3_utxo_checkpoint()`, `core/chainparams/src/checkpoints.c`): a height, a block hash, a SHA3-256 digest over the canonical-order transparent UTXO set at that height, a UTXO count, and a total supply. | A single, irreversible floor a node can verify its own fold against without trusting any peer. `reducer_frontier_floor()` never lets H* fall below this height on mainnet. | It does not commit shielded (Sapling/Sprout) state or nullifiers — see "What ZClassic headers commit" below. It is a fact about ONE height, not a live sync state. |
-| **L1 — sealed history** | The immutable, hash-committed segment store for finalized block bodies (`lib/storage/chain_segment`, `<datadir>/segments`). | Any segment present is byte-identical to what was originally sealed (whole-segment + per-block SHA3, checked on open). | It does not by itself prove the bodies were consensus-valid — validation happens once, during fold; the segment store only proves the bytes were not altered afterward. An empty/absent segment store is not an error — reads fall through to `blk*.dat`. |
-| **L2 — delta fold** | The 8-stage reducer (`header_admit` → `tip_finalize`) folding block bodies forward from L0/L1 into durable state, tracked in `consensus.db`. H\* = the deepest height with a provably-consistent, contiguous `ok=1` prefix across every stage log (`app/jobs/src/reducer_frontier.c`). | `[0, H*]` is provably consistent: every stage's success log agrees, hashes match across stages, and the coins frontier does not contradict it. H* never rewinds below the L0 floor (except mid-refold, which reports 0 by design — see `reducer_frontier_floor()`). | `[H*+1, ...)` may have a hole, a failed row, or a hash split — that is the definition of H*, not a defect in this doc. H* is a computed floor, not "how far P2P has downloaded." |
+| **L1 — sealed history** | The immutable, hash-committed segment store for finalized block bodies (`engine/modules/storage/chain_segment`, `<datadir>/segments`). | Any segment present is byte-identical to what was originally sealed (whole-segment + per-block SHA3, checked on open). | It does not by itself prove the bodies were consensus-valid — validation happens once, during fold; the segment store only proves the bytes were not altered afterward. An empty/absent segment store is not an error — reads fall through to `blk*.dat`. |
+| **L2 — delta fold** | The 8-stage reducer (`header_admit` → `tip_finalize`) folding block bodies forward from L0/L1 into durable state, tracked in `consensus.db`. H\* = the deepest height with a provably-consistent, contiguous `ok=1` prefix across every stage log (`engine/reducer/jobs/src/reducer_frontier.c`). | `[0, H*]` is provably consistent: every stage's success log agrees, hashes match across stages, and the coins frontier does not contradict it. H* never rewinds below the L0 floor (except mid-refold, which reports 0 by design — see `reducer_frontier_floor()`). | `[H*+1, ...)` may have a hole, a failed row, or a hash split — that is the definition of H*, not a defect in this doc. H* is a computed floor, not "how far P2P has downloaded." |
 | **L3 — live tip** | The currently active, validated chain tip (`active_chain_tip()`) and the height this node advertises to external consumers (`reducer_frontier_external_tip_height()`). | The active tip is the head of a chain whose ancestors passed PoW, script, and (background) proof validation as they were folded. | The active/external tip can sit AHEAD of H* mid-fold or right after a reorg — it is the pipeline's leading edge, not the provable floor. It is never used as a substitute for H* in reconciliation logic. |
 
 ## What ZClassic headers commit — and what they don't
@@ -66,11 +66,11 @@ returns one JSON object with four sections:
     `docs/HOW_THE_NODE_WORKS.md`).
   - `utxo_root_ladder` — `rung_count`, `stride`, `highest_rung_height`,
     `dense_height` (the compiled golden-height UTXO-root cross-checks,
-    `lib/chain/include/chain/utxo_root_ladder.h`).
+    `core/modules/chain/include/chain/utxo_root_ladder.h`).
 
 Every field is either a compiled-in constant or a cheap read through an
 existing public accessor (no new state, no writes, no O(chain) work) — see
-`app/controllers/src/diagnostics_registry_rom.c`. This subsystem is a
+`engine/controllers/src/diagnostics_registry_rom.c`. This subsystem is a
 **projection**: it is derived from L0-L3, rebuildable from scratch, and
 carries no authority of its own over consensus.
 

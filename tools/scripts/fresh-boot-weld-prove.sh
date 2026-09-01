@@ -2,7 +2,7 @@
 # Copyright 2026 Rhett Creighton - Apache License 2.0
 #
 # fresh-boot-weld-prove.sh — copy-prove that the ZERO-FLAG cold-boot "weld"
-# (config/src/boot_auto_install_bundle.c: boot_maybe_auto_install_consensus_bundle,
+# (engine/composition/src/boot_auto_install_bundle.c: boot_maybe_auto_install_consensus_bundle,
 # the 1b passive autodetect of <datadir>/bundles/<name>.sqlite) actually welds a
 # verified `zcl.consensus_state_bundle.v1` checkpoint bundle onto a WIPED/empty
 # temp datadir with a completely ordinary boot — no `-install-consensus-bundle=`
@@ -33,7 +33,7 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # SUBSTRATE REALITY — READ BEFORE ASSUMING A LITERAL-BLANK DATADIR PASSES THE
 # POSITIVE LEG TODAY. consensus_state_chain_binding_service.c's -3/-4/-11
-# predicates (config/src/consensus_state_install_runtime.c calls them "ALWAYS
+# predicates (engine/composition/src/consensus_state_install_runtime.c calls them "ALWAYS
 # target-derived / checkpoint authority never relaxes") require the target's
 # OWN durable served height to already be >= the bundle height and its
 # selected frontier to be an established, durable, consistent one — properties

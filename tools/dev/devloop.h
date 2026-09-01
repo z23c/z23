@@ -205,7 +205,7 @@ struct zcl_devloop_plan {
  * or UNAVAILABLE dimension means the union may be missing a group nobody can
  * name, so any consumer that would treat the plan as sufficient evidence —
  * proof reuse, test-cache admission, an "is this change proven" gate — must
- * refuse. This is deliberately the same standard lib/test/src/testcache.c
+ * refuse. This is deliberately the same standard tests/harness/src/testcache.c
  * already applies to its own closure (TESTCACHE_R_TRUNCATED /
  * TESTCACHE_R_NO_INCLUDE_GRAPH => UNCACHEABLE, and an UNCACHEABLE group always
  * runs), and *out_reason receives the same label vocabulary so the two never

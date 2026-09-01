@@ -37,7 +37,7 @@ build_htlc_deed_spend|tx|transaction
 build_htlc_redeem|tx|transaction
 build_htlc_spend|tx|transaction
 
-# ── lib/net ─────────────────────────────────────────────────────────────
+# ── core/modules/net ─────────────────────────────────────────────────────────────
 # compact_block_from_block(): LOG_FAIL on an empty block sits above
 # compact_block_msg_init(cb) — the exact shape of the fixed bug, in the same
 # file. Its ONE production caller (msg_blocks.c, the BIP152 announce path)
@@ -45,11 +45,11 @@ build_htlc_spend|tx|transaction
 # compact_block_msg_free(&cb); }`, so the free is inside the success branch
 # and never runs on the failing return. It is safe only because that caller
 # happens to gate; a second caller written the natural way would be a wild
-# free. lib/net/src/compact_blocks.c is owned by another lane as of this
+# free. core/modules/net/src/compact_blocks.c is owned by another lane as of this
 # sweep, which is why it is recorded here rather than fixed.
 compact_block_from_block|cb|compact_block_msg
 
-# ── lib/storage ─────────────────────────────────────────────────────────
+# ── engine/modules/storage ─────────────────────────────────────────────────────────
 # bpc_segment_try(): several returns above block_init(out) (bad datadir,
 # segment store miss, short/failed segment read). Its only caller,
 # block_parse_cache.c's lookup, runs block_init(&loaded) BEFORE the call —
@@ -105,7 +105,7 @@ snapshot_deserialize_index_block|blk|block
 # result as an `if (found) { ... free ... }` gate.
 db_store_blob_find|out|db_store_blob
 
-# ── lib/sim — deterministic simulator, no peer input ────────────────────
+# ── engine/modules/sim — deterministic simulator, no peer input ────────────────────
 # finish_block()/build_oversize_vtx build a byzantine block case into a
 # caller-declared struct; simnet_chain_capture_undo/store_entry build undo
 # data. Every caller checks the bool and returns/goto's out WITHOUT calling
@@ -114,7 +114,7 @@ finish_block|out|simnet_byzantine_block_case
 simnet_chain_capture_undo|out_undo|block_undo
 simnet_chain_store_entry|undo|block_undo
 
-# ── lib/vcs ─────────────────────────────────────────────────────────────
+# ── contexts/commons/modules/vcs ─────────────────────────────────────────────────────────────
 # blob_build_manifest(): blob_check_input() and the chunk-hash LOG_RETURN sit
 # above vcs_package_manifest_init(out). Both callers (vcs_blob_root_of,
 # vcs_blob_put_to) write `if (vr != VCS_BLOB_OK) return vr;` and reach

@@ -35,7 +35,7 @@
  * What is NOT here (deliberately): mempool greedy packing, sigop
  * accounting, fee summation, header timestamp/nBits, merkle-root
  * computation, broadcast / process_new_block. Those remain block-
- * template *orchestration* in `lib/mining/src/miner.c::create_new_block`
+ * template *orchestration* in `core/modules/mining/src/miner.c::create_new_block`
  * because they touch the live UTXO cache, mempool, chain tip, and
  * wall-clock.
  *

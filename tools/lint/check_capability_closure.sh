@@ -4,16 +4,16 @@
 #          objects reach is classified, and every file that reaches a
 #          classified capability has said so, and only what it uses.
 #
-# WHY THIS EXISTS. config/capability_classes.def names nine kinds of reach a
+# WHY THIS EXISTS. engine/composition/capability_classes.def names nine kinds of reach a
 # translation unit can have (network, process spawn, dynamic load, filesystem
 # read/write, wallet-key reach, randomness, clock, privilege). Two files make
 # that design real:
 #
-#   config/capability_symbols.def   — every external symbol this tree calls,
+#   engine/composition/capability_symbols.def   — every external symbol this tree calls,
 #                                      and which class it belongs to (or
 #                                      CAP_HARMLESS, meaning none).
-#   config/module_capabilities.def  — cross-target source declarations.
-#   config/module_capabilities_linux.def / _windows.def — exact overrides for
+#   engine/composition/module_capabilities.def  — cross-target source declarations.
+#   engine/composition/module_capabilities_linux.def / _windows.def — exact overrides for
 #                                      paths whose selected host arm differs.
 #
 # Neither file enforces anything by existing. This script is the enforcement:
@@ -40,7 +40,7 @@
 #   4. HOLLOWNESS.    Fewer than CAP_CLOSURE_MIN_OBJECTS_SCANNED objects
 #                     scanned prints UNPROVEN and exits 2 — never 0. Modeled
 #                     on CJ_MIN_OBJECTS_SCANNED in
-#                     lib/test/src/test_cold_join_sovereign.c.
+#                     tests/harness/src/test_cold_join_sovereign.c.
 #   5. RAW SYSCALL BAN. A hand-rolled syscall reaches the kernel with no
 #                     symbol for `nm` to see, which defeats checks 1-3
 #                     entirely. Every tracked .c file with no CAP_PRIVILEGE
@@ -49,7 +49,7 @@
 #                     bare `syscall` mnemonic inside an asm block). Files
 #                     that declare CAP_PRIVILEGE are exempt — they have
 #                     already told a reviewer to look.
-#   6. COVERAGE FLOOR. Every row in config/module_capabilities.def names a
+#   6. COVERAGE FLOOR. Every row in engine/composition/module_capabilities.def names a
 #                     source file that was compiled into an epoch when the
 #                     table was written — the table is a coverage
 #                     expectation. Runs immediately after the epoch's object
@@ -95,7 +95,7 @@
 #
 # Exit: 0 clean, 1 violations (including a stale, too-high coverage
 # baseline), 2 hollow/partial scan, broken selftest, or cannot read
-# config/capability_symbols.def (that file is owned by a different lane; its
+# engine/composition/capability_symbols.def (that file is owned by a different lane; its
 # absence is a broken precondition, not zero violations).
 #
 # Usage:
@@ -109,13 +109,13 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 source "$REPO_ROOT/tools/scripts/sh_str.sh"
 
 # Anti-hollow floor. Named after CJ_MIN_OBJECTS_SCANNED in
-# lib/test/src/test_cold_join_sovereign.c, same discipline: a tree below the
+# tests/harness/src/test_cold_join_sovereign.c, same discipline: a tree below the
 # floor is refused, never reported clean.
 CAP_CLOSURE_MIN_OBJECTS_SCANNED=500
 
 # Coverage floor, shrink-only ratchet (same discipline as RATCHET_CEILING in
 # check_no_wallclock_assertion.sh — read that script's header for the
-# convention this mirrors). Every row in config/module_capabilities.def names
+# convention this mirrors). Every row in engine/composition/module_capabilities.def names
 # a source file that WAS compiled into an epoch when the table was written;
 # the table is itself a coverage expectation. A partial rebuild (e.g.
 # `make z23-dev` alone) produces a newer-but-incomplete epoch that silently
@@ -138,7 +138,7 @@ CAP_CLOSURE_MIN_OBJECTS_SCANNED=500
 # Of the host-selected module declaration set, exactly 2 have no compiled
 # object anywhere in that epoch, both genuine standalone binaries neither
 # target links:
-#   lib/test/src/test_thread_qos.c   — built only by the test harness
+#   tests/harness/src/test_thread_qos.c   — built only by the test harness
 #   tools/rebuild_recent.c           — its own BUILD_NODE_TOOL binary
 # Neither belongs in z23-dev or the package verifier; this is the honest
 # floor for THIS pair of targets, not padding. Host alternatives that Makefile
@@ -177,11 +177,11 @@ CAP_CLOSURE_HOST_WINDOWS=false
 cap_closure_coverage_applicable() {
     local path="$1"
     case "$CAP_CLOSURE_HOST_OS:$path" in
-        Linux:lib/platform/src/os_sandbox_stub.c|\
-        Darwin:lib/platform/src/os_sandbox_linux.c|\
-        Darwin:lib/util/src/self_backtrace.c|\
-        Windows:lib/platform/src/os_sandbox_linux.c|\
-        Windows:lib/vcs/src/vcs_devloop.c|\
+        Linux:platform/modules/platform/src/os_sandbox_stub.c|\
+        Darwin:platform/modules/platform/src/os_sandbox_linux.c|\
+        Darwin:platform/modules/util/src/self_backtrace.c|\
+        Windows:platform/modules/platform/src/os_sandbox_linux.c|\
+        Windows:contexts/commons/modules/vcs/src/vcs_devloop.c|\
         Windows:tools/package_verify.c)
             return 1
             ;;
@@ -258,7 +258,7 @@ cap_closure_find_epoch() {
     [ -n "$newest" ] && printf '%s\n' "$newest"
 }
 
-# ── config/capability_symbols.def ───────────────────────────────────────────
+# ── engine/composition/capability_symbols.def ───────────────────────────────────────────
 # cap_closure_symbols_tsv prints "symbol\tCAP_XXX" pairs, tolerant of a
 # ZCL_CAPABILITY_SYMBOL(...) call wrapped across multiple lines (a long
 # symbol name pushes the class onto the next line). It is a pure function —
@@ -322,7 +322,7 @@ cap_closure_load_symbols() {
     return 0
 }
 
-# ── config/module_capabilities.def ──────────────────────────────────────────
+# ── engine/composition/module_capabilities.def ──────────────────────────────────────────
 # Same subshell discipline as the symbols loader above: cap_closure_module_tsv
 # is the pure, $()-safe half; cap_closure_load_module_rows must be called
 # directly so it can actually populate CAP_MOD_RAW in the caller's shell.
@@ -412,15 +412,15 @@ cap_closure_grants() {
 # (hollow / cannot read required input).
 check_root() {
     local root="$1"
-    local symbols_file="$root/config/capability_symbols.def"
-    local module_file="$root/config/module_capabilities.def"
+    local symbols_file="$root/engine/composition/capability_symbols.def"
+    local module_file="$root/engine/composition/module_capabilities.def"
     local platform_module_file=""
     case "$CAP_CLOSURE_HOST_OS" in
         Linux)
-            platform_module_file="$root/config/module_capabilities_linux.def"
+            platform_module_file="$root/engine/composition/module_capabilities_linux.def"
             ;;
         Windows)
-            platform_module_file="$root/config/module_capabilities_windows.def"
+            platform_module_file="$root/engine/composition/module_capabilities_windows.def"
             ;;
     esac
     local violations=0
@@ -567,7 +567,7 @@ check_root() {
     fi
 
     # names defined ANYWHERE in the tree: an in-tree cross-TU call, out of
-    # scope for config/capability_symbols.def (see that file's SCOPE note).
+    # scope for engine/composition/capability_symbols.def (see that file's SCOPE note).
     cut -f3 "$work/defined.tsv" | LC_ALL=C sort -u > "$work/defined_names.txt"
     # every undefined reference, U/w/v alike (see header note on weak symbols)
     awk -F'\t' '$2 == "U" || $2 == "w" || $2 == "v"' "$work/undef.tsv" > "$work/undef_uw.tsv"
@@ -801,21 +801,21 @@ EOF
 # "connect" -> CAP_NETWORK, which is all the synthetic objects reference.
 fixture_symbols() {
     local d="$1"
-    mkdir -p "$d/config"
-    cat > "$d/config/capability_symbols.def" <<'EOF'
+    mkdir -p "$d/engine/composition"
+    cat > "$d/engine/composition/capability_symbols.def" <<'EOF'
 ZCL_CAPABILITY_SYMBOL("connect", CAP_NETWORK, "")
 EOF
 }
 
-# fixture_module_rows <dir> <row>... — config/module_capabilities.def with
+# fixture_module_rows <dir> <row>... — engine/composition/module_capabilities.def with
 # exactly the given rows (each a pre-formatted ZCL_MODULE_CAPABILITY line).
 fixture_module_rows() {
     local d="$1"; shift
-    mkdir -p "$d/config"
-    : > "$d/config/module_capabilities.def"
+    mkdir -p "$d/engine/composition"
+    : > "$d/engine/composition/module_capabilities.def"
     local row
     for row in "$@"; do
-        printf '%s\n' "$row" >> "$d/config/module_capabilities.def"
+        printf '%s\n' "$row" >> "$d/engine/composition/module_capabilities.def"
     done
 }
 
@@ -1040,8 +1040,8 @@ EOF
     # H. MinGW nm rewrites /c/... to C:/... and therefore emits two colons.
     # The drive colon is not the record delimiter.
     local parsed expected
-    parsed="$(printf '%s\n' 'C:/work/epoch/lib/net/dialer.o:         U connect' | cap_closure_parse_nm)"
-    expected="$(printf 'C:/work/epoch/lib/net/dialer.o\tU\tconnect')"
+    parsed="$(printf '%s\n' 'C:/work/epoch/core/modules/net/dialer.o:         U connect' | cap_closure_parse_nm)"
+    expected="$(printf 'C:/work/epoch/core/modules/net/dialer.o\tU\tconnect')"
     if [ "$parsed" != "$expected" ]; then
         echo "SELFTEST FAIL: H: Windows drive-letter nm path was parsed as '$parsed'"
         rc=1
@@ -1054,7 +1054,7 @@ EOF
     d="$FIXTURE_ROOT/i"; fixture_symbols "$d"
     CAP_CLOSURE_HOST_OS=Windows
     CAP_CLOSURE_HOST_WINDOWS=true
-    if ! cap_closure_load_symbols "$d/config/capability_symbols.def" ||
+    if ! cap_closure_load_symbols "$d/engine/composition/capability_symbols.def" ||
        [ "${CAP_SYM[__imp_connect]:-}" != "CAP_NETWORK" ] ||
        [ "${CAP_SYM[__imp__connect]:-}" != "CAP_NETWORK" ] ||
        [ "${CAP_SYM[__mingw_connect]:-}" != "CAP_NETWORK" ]; then
@@ -1067,14 +1067,14 @@ EOF
     # J. The portable row is a cross-target/package claim; Windows symmetry
     # must grade the exact replacement. CAP_NONE is deliberately explicit so
     # a harmless refusal/native arm can replace a non-empty portable row.
-    d="$FIXTURE_ROOT/j"; mkdir -p "$d/fixture_src" "$d/lib/platform/src"
+    d="$FIXTURE_ROOT/j"; mkdir -p "$d/fixture_src" "$d/platform/modules/platform/src"
     make_epoch "$d"
     fixture_symbols "$d"
     cat > "$d/fixture_src/platform_user.c" <<'EOF'
 static int local_only(int x) { return x + 1; }
 int platform_export(int x) { return local_only(x); }
 EOF
-    cat > "$d/lib/platform/src/os_sandbox_linux.c" <<'EOF'
+    cat > "$d/platform/modules/platform/src/os_sandbox_linux.c" <<'EOF'
 int linux_only_fixture(void) { return 1; }
 EOF
     mkdir -p "$d/build/dev-obj/epochs/fx0/fixture_src"
@@ -1084,8 +1084,8 @@ EOF
         -o "$d/build/dev-obj/epochs/fx0/fixture_src/platform_user.o"
     fixture_module_rows "$d" \
         'ZCL_MODULE_CAPABILITY("fixture_src/platform_user.c", CAP_NETWORK, "portable arm")' \
-        'ZCL_MODULE_CAPABILITY("lib/platform/src/os_sandbox_linux.c", CAP_NETWORK, "Linux-only arm")'
-    cat > "$d/config/module_capabilities_windows.def" <<'EOF'
+        'ZCL_MODULE_CAPABILITY("platform/modules/platform/src/os_sandbox_linux.c", CAP_NETWORK, "Linux-only arm")'
+    cat > "$d/engine/composition/module_capabilities_windows.def" <<'EOF'
 ZCL_MODULE_CAPABILITY("fixture_src/platform_user.c", CAP_NONE, "Windows exact empty arm")
 EOF
     expect_accept "J: Windows exact CAP_NONE override replaces portable reach and skips only the named Linux arm" "$d" || rc=1
@@ -1107,7 +1107,7 @@ EOF
         -o "$d/build/dev-obj/epochs/fx0/fixture_src/platform_user.o"
     fixture_module_rows "$d" \
         'ZCL_MODULE_CAPABILITY("fixture_src/platform_user.c", CAP_NETWORK, "portable arm")'
-    cat > "$d/config/module_capabilities_linux.def" <<'EOF'
+    cat > "$d/engine/composition/module_capabilities_linux.def" <<'EOF'
 ZCL_MODULE_CAPABILITY("fixture_src/platform_user.c", CAP_NONE, "Linux exact empty arm")
 EOF
     CAP_CLOSURE_HOST_OS=Linux
@@ -1119,26 +1119,26 @@ EOF
     # arm is not an honest addition to the unobserved-row baseline.
     CAP_CLOSURE_HOST_OS=Linux
     if cap_closure_coverage_applicable \
-           "lib/platform/src/os_sandbox_stub.c" ||
+           "platform/modules/platform/src/os_sandbox_stub.c" ||
        ! cap_closure_coverage_applicable \
-           "lib/test/src/test_thread_qos.c" ||
+           "tests/harness/src/test_thread_qos.c" ||
        ! cap_closure_coverage_applicable "tools/rebuild_recent.c"; then
         echo "SELFTEST FAIL: L: Linux host-source selection or standalone rows drifted"
         rc=1
     else
         CAP_CLOSURE_HOST_OS=Darwin
         if cap_closure_coverage_applicable \
-               "lib/platform/src/os_sandbox_linux.c" ||
+               "platform/modules/platform/src/os_sandbox_linux.c" ||
            cap_closure_coverage_applicable \
-               "lib/util/src/self_backtrace.c"; then
+               "platform/modules/util/src/self_backtrace.c"; then
             echo "SELFTEST FAIL: L: Darwin host-source selection drifted"
             rc=1
         else
             CAP_CLOSURE_HOST_OS=Windows
             if cap_closure_coverage_applicable \
-                   "lib/platform/src/os_sandbox_linux.c" ||
+                   "platform/modules/platform/src/os_sandbox_linux.c" ||
                cap_closure_coverage_applicable \
-                   "lib/vcs/src/vcs_devloop.c" ||
+                   "contexts/commons/modules/vcs/src/vcs_devloop.c" ||
                cap_closure_coverage_applicable "tools/package_verify.c"; then
                 echo "SELFTEST FAIL: L: Windows host-source selection drifted"
                 rc=1

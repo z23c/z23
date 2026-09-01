@@ -8,7 +8,7 @@
 # converted surface. That lets a file sit "mixed" forever — E2 goes green
 # and nothing forces the rest of the file to converge. This gate closes
 # that gap by counting the exported (non-static, top-level) bool-returning
-# function DEFINITIONS in each app/services/src/*.c file and ratcheting
+# function DEFINITIONS in each engine/services/src/*.c file and ratcheting
 # that count down to zero, file by file:
 #
 #   - A pre-existing legacy file is recorded in the baseline as
@@ -24,7 +24,7 @@
 #          listed), OR
 #       3. a baselined file no longer exists on disk (stale path —
 #          renamed/deleted without updating the baseline), OR
-#       4. a NEW (non-baselined, non-marker) app/services/src/*.c file has
+#       4. a NEW (non-baselined, non-marker) engine/services/src/*.c file has
 #          ANY legacy bool export (a regression: new service code must be
 #          written with struct zcl_result from the start).
 #     Shrinking a baselined count while it stays > 0 is fine and earns an
@@ -39,7 +39,7 @@
 #
 # "Legacy bool export" = a function DEFINITION (not a forward declaration)
 # whose signature starts in column 0 with `bool <name>(` (i.e. non-static,
-# non-inline, top-level — a real exported symbol) in an app/services/src/
+# non-inline, top-level — a real exported symbol) in an engine/services/src/
 # .c file, whether the opening brace sits alone on its own line (this
 # project's usual style) or shares the (possibly wrapped) signature's last
 # line, e.g. `bool foo(void) {`. A same-signature forward declaration (ends
@@ -53,11 +53,11 @@ cd "$(dirname "$0")/../.."
 BASELINE="${ZCL_SERVICE_RESULT_CONVERGENCE_BASELINE:-tools/scripts/service_result_convergence_baseline.txt}"
 [ -f "$BASELINE" ] || touch "$BASELINE"
 # Scan-dir override (test-only): lets the self-test point the gate at an
-# isolated test-tmp/ fixture directory instead of the real app/services/src
+# isolated test-tmp/ fixture directory instead of the real engine/services/src
 # tree, so a self-test can prove grown/new/stale behavior without ever
 # touching the real baseline or the real service files. Mirrors
 # ZCL_COINS_LOOKUP_SCAN_DIR in check_coins_lookup_nullcheck.sh.
-SCAN_DIR="${ZCL_SERVICE_RESULT_CONVERGENCE_SCAN_DIR:-app/services/src}"
+SCAN_DIR="${ZCL_SERVICE_RESULT_CONVERGENCE_SCAN_DIR:-engine/services/src}"
 
 # Count exported (non-static, top-level) bool-returning function
 # DEFINITIONS in a file. A signature is a definition when its header

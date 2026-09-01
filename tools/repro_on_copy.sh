@@ -89,7 +89,7 @@
 #   --install-consensus-bundle=PATH
 #                     ALTERNATE cutover mode to -refold-from-anchor, for the v1
 #                     consensus-state bundle consumer (-install-consensus-bundle
-#                     on build/bin/zclassic23, config/src/boot_install_consensus_bundle.c).
+#                     on build/bin/zclassic23, engine/composition/src/boot_install_consensus_bundle.c).
 #                     Two-phase on the COPY: (1) run the node ONCE with
 #                     `-install-consensus-bundle=PATH` and nothing else — this
 #                     call is TERMINAL (it _exit()s after installing or a typed
@@ -345,7 +345,7 @@ case "$CONNECT" in *:*) refuse_live_connect "$CONNECT" ;; esac
 
 case " $PASS " in
     *" -addnode="*|*" -connect="*|*" -rpcport="*|*" -port="*|*" -fsport="*|*" -httpsport="*|*" -install-consensus-bundle="*)
-        echo "repro_on_copy: pass-through may not override network ports/peers/bundle-install; use script options" >&2
+        echo "repro_on_copy: pass-through may not override network platform/ports/peers/bundle-install; use script options" >&2
         exit 2
         ;;
 esac
@@ -469,7 +469,7 @@ derive_like_live_flags() {
         Darwin) derive_like_live_launchd ;;
         *) derive_like_live_systemd ;;
     esac
-    # Defensive: the harness OWNS ports/peers/datadir — a passthrough flag must never carry them.
+    # Defensive: the harness OWNS platform/ports/peers/datadir — a passthrough flag must never carry them.
     case " $LIKE_LIVE_FLAGS " in
         *" -port="*|*" -rpcport="*|*" -addnode="*|*" -connect="*|*" -externalip="*|*" -datadir="*)
             echo "repro_on_copy: --like-live: refused to pass a network/port/datadir flag through" >&2

@@ -69,7 +69,7 @@ Every fallback class is exact:
 | dev RPC cookie absent | 1 | 1 | legacy app handler's local probe still requires a running dev node |
 
 The highest-churn eligible owners became either direct pure service islands or
-static authority shells mapped through `config/hotswap_shadow_owners.def` to a
+static authority shells mapped through `engine/composition/hotswap_shadow_owners.def` to a
 pure candidate core. Static shells receive an exact semantic compile but are
 never linked or loaded. Package, process, database, signing, wallet, network,
 publication and other real authority stays in the resident/static code.

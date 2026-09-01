@@ -51,6 +51,22 @@ The node also provides an optional decentralized C23 software commons. Ordinary
 full nodes can publish, discover, fetch, verify, build, independently reproduce,
 and serve exact C23 packages without GitHub or a central package registry.
 
+## Physical architecture
+
+Paths declare ownership. `core/` is sealed truth; `engine/` composes and runs
+the node; `engine/reducer/` is the one authoritative chain-state advancement
+room; `contexts/<feature>/` contains feature-first product rooms; `cognition/`
+contains software-understanding machinery; and `platform/ports/` plus
+`platform/adapters/` isolate the outside world. Reusable modules live beneath
+the authority that owns them. Do not recreate global `app/`, `lib/`, `config/`,
+`domain/`, `platform/ports/`, or `platform/adapters/` roots.
+
+Run `make check-architecture-tree` after placement changes. It rejects legacy
+roots, unknown rooms, duplicate module owners, module-manifest drift, and
+reducer-owned paths outside `engine/reducer/`. The generated view is
+`build/bin/z23 code context-map`; do not hand-maintain a competing ownership
+catalog.
+
 ## Operating rules
 
 **VERIFY, DON'T TRUST.** Any agent may propose code. Any node may perform
@@ -157,8 +173,8 @@ catalogs from the binary instead of copying counts into prose.
 
 <!-- claim: symbol-present t-fast Makefile # focused registered-test target -->
 <!-- claim: symbol-present test-parallel Makefile # full registered-test target -->
-<!-- claim: symbol-present discover.schema config/commands/root.def # live schema leaf -->
-<!-- claim: symbol-present code.map config/commands/code.def # live source-map leaf -->
+<!-- claim: symbol-present discover.schema engine/composition/commands/root.def # live schema leaf -->
+<!-- claim: symbol-present code.map engine/composition/commands/code.def # live source-map leaf -->
 <!-- claim: file-present docs/API_REFERENCE.md # generated command catalog -->
 
 ## Verified platform baseline

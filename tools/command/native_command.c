@@ -8,7 +8,7 @@
  * executable next action and NEVER becomes an arbitrary RPC method.
  *
  * READ-ONLY Core/Ops leaves execute through zcl_native_bridge_command: a leaf
- * either calls its transport-neutral body function (app/controllers/
+ * either calls its transport-neutral body function (engine/controllers/
  * *_native_handlers.c) or, for a pure 1:1 proxy, calls the backing JSON-RPC
  * method directly. Discovery
  * leaves (help/search/describe/schema) render the native discovery document
@@ -81,17 +81,17 @@ bool zcl_native_command_is_root(const char *word)
         /* Operator-UX convenience roots: bare aliases of ops.explain /
          * ops.profile so `z23 explain sync` / `zclassic23 profile`
          * work without the `ops` prefix (each leaf carries the matching
-         * alias in config/commands/ops.def). `meaning` joins them because the
+         * alias in engine/composition/commands/ops.def). `meaning` joins them because the
          * field ontology is most needed by an operator who does not yet know
          * which report — let alone which prefix — to reach for. */
         "explain", "profile", "meaning",
         /* Onboarding roots: `z23 join` is the first command a stranger runs
          * after installing, and `z23 update` the one they reach for later.
-         * Both are bare aliases of zcode.node.* (config/commands/zcode.def)
+         * Both are bare aliases of zcode.node.* (engine/composition/commands/zcode.def)
          * for exactly the reason above: a four-word canonical path is not
          * what someone types on their first day. */
         "join", "update",
-        /* `general` is the dispatch brief for one territory (config/commands/
+        /* `general` is the dispatch brief for one territory (engine/composition/commands/
          * code.def). It is a root rather than a `code.*` child because it is
          * what an agent runs BEFORE it starts work, and putting a prefix
          * between an agent and the inventory it keeps mis-remembering is how
@@ -1332,7 +1332,7 @@ void zcl_native_handle_network_chain_view(
  * The discovery half of `ops state`. `ops state` demands a subsystem name
  * and errors MISSING_SUBSYSTEM without one, so until this leaf existed an
  * agent could only learn the names by reading
- * app/controllers/include/controllers/diagnostics_dumpers.def out of the
+ * engine/controllers/include/controllers/diagnostics_dumpers.def out of the
  * source tree — which is not shipped in a release binary. The catalog was
  * already reachable as the flat legacy `z23 statecatalog` shim,
  * but flat shims carry no typed envelope, no declared risk/authority, and
@@ -1629,7 +1629,7 @@ void zcl_native_handle_ops_meaning(const struct zcl_command_request *request,
                            "zcl.telemetry_ontology.v1");
     (void)json_push_kv_bool(&reply->data, "node_free", true);
     (void)json_push_kv_str(&reply->data, "source",
-                           "lib/util/include/util/telemetry_ontology.def");
+                           "platform/modules/util/include/util/telemetry_ontology.def");
 
     /* A question routes to a command; that is the whole point of the index. */
     if (question && question[0]) {
@@ -2237,7 +2237,7 @@ void zcl_native_handle_ops_producer_status(
 }
 
 /* ── ops.rom native leaf ─────────────────────────────────────────────────
- * Dispatches `dumpstate rom_compile` (app/jobs/src/rom_compile_status.c —
+ * Dispatches `dumpstate rom_compile` (engine/jobs/src/rom_compile_status.c —
  * pure composition over EXISTING telemetry: the per-stage step-EWMA
  * counters, the refold-in-progress signal, the L0 reducer frontier, the
  * sealed segment store, and the state-seal ring — no second producer)
@@ -3551,7 +3551,7 @@ bool zcl_native_render_field_selection(const struct json_value *obj,
 
 /* ── CLI UX contract: unrecognized-command diagnostic ────────────────
  * See docs/NATIVE_COMMAND_INTERFACE.md "CLI UX contract". Pure text
- * builder — src/main.c's raw-RPC fallback calls this once it has confirmed
+ * builder — engine/entry/main.c's raw-RPC fallback calls this once it has confirmed
  * (via the RPC layer's method-not-found response) that `method` is not a
  * real command, then fprintf's the result to stderr. */
 size_t zcl_native_render_unknown_command(

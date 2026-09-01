@@ -26,7 +26,7 @@ providing that property.
 
 ## What exists
 
-`packaging/release/build_release.sh` packages `linux-x86_64`, native
+`platform/packaging/release/build_release.sh` packages `linux-x86_64`, native
 `darwin-arm64`, and `windows-x86_64` runtimes. It decides which by reading the
 object format of the binary it is handed, not by asking what machine it is
 running on.
@@ -42,7 +42,7 @@ fails. Its remote source is not hardcoded. The lifecycle is fault-tested with
 isolated launchd fixtures; it has not yet passed the fresh-host physical-Mac
 publication acceptance below.
 
-`packaging/install/install.sh` and `install.ps1` are fail-closed front-door
+`platform/packaging/install/install.sh` and `install.ps1` are fail-closed front-door
 shims. Each is roughly thirty lines and makes exactly one decision: it names
 the machine, fetches the one C23 bootstrap binary published for it, checks its
 SHA-256 against a digest baked into the shim, and runs it with every argument
@@ -54,15 +54,15 @@ at all, even though a Windows runtime is now built and packaged — see
 
 Every other front-door decision — the three pin channels, the agreement rule,
 the platform refusal, the second-stage installer verification and the handoff —
-lives in `tools/install/z23_bootstrap.c` over the pure `lib/install` library,
+lives in `tools/install/z23_bootstrap.c` over the pure `platform/modules/install` library,
 written once for every platform and executed only after a digest check. This
 matters because a shim served at the domain is executing before anything has
 been verified, so logic inside it is logic a compromised origin replaces for
 free; the shim's remaining surface is one hash comparison. The judgement is
 proved by the `z23_front_door` test group and driven end to end against the
-real binary by `packaging/install/install_selftest.sh`.
+real binary by `platform/packaging/install/install_selftest.sh`.
 
-`packaging/release/build_release.sh --front-door` is the release cutter's
+`platform/packaging/release/build_release.sh --front-door` is the release cutter's
 front-door stage: it packages `z23-bootstrap` per platform triple under
 `bootstrap/<triple>/` and writes the digests into COPIES of both shims, so the
 copies that get served name real bytes while the copies in this repository stay
@@ -144,7 +144,7 @@ and rollback proof on each platform. A successful build is none of those.
 
 ## Building a release for another platform
 
-`packaging/release/build_release.sh` packages `linux-x86_64`,
+`platform/packaging/release/build_release.sh` packages `linux-x86_64`,
 `darwin-arm64`, and `windows-x86_64`. None is published yet; each is produced
 from this checkout and verified by an exact closed SHA256SUMS manifest.
 
@@ -152,13 +152,13 @@ from this checkout and verified by an exact closed SHA256SUMS manifest.
 # linux-x86_64 (native)
 make vendor && make tor-full
 make -j"$(nproc)" z23 zclassic23-package-verify zclassic23-acme
-packaging/release/build_release.sh --platform linux-x86_64
+platform/packaging/release/build_release.sh --platform linux-x86_64
 
 # windows-x86_64 (cross-linked on Linux; needs clang >= 20 and the
 # mingw-w64 target sysroot, e.g. Debian/Ubuntu's mingw-w64 package)
 VENDOR_TARGET=x86_64-w64-mingw32 tools/scripts/build_vendor.sh
 make ZCL_TARGET=windows-x86_64 -j"$(nproc)" z23 zclassic23-acme
-packaging/release/build_release.sh --platform windows-x86_64
+platform/packaging/release/build_release.sh --platform windows-x86_64
 ```
 
 The Windows cross build uses clang, not the mingw-w64 gcc: every mingw-w64
@@ -176,7 +176,7 @@ under a name that promises confinement.
 The Windows runtime is **built and packaged, not published**. It has never
 been executed: this host has no Windows machine and no Wine, so the evidence
 stops at "genuine x86-64 PE that links and imports only Windows system DLLs".
-`packaging/install/install.ps1` therefore still publishes no platform, and
+`platform/packaging/install/install.ps1` therefore still publishes no platform, and
 its second stage (`install_z23.ps1`) does not exist.
 
 ## macOS: what a Mac worker has to run
@@ -209,7 +209,7 @@ make tor-full
 make -j"$(sysctl -n hw.ncpu)" z23 zclassic23-package-verify zclassic23-acme
 
 # 4. Package the measured thin Apple Silicon runtime.
-packaging/release/build_release.sh --platform darwin-arm64
+platform/packaging/release/build_release.sh --platform darwin-arm64
 ```
 
 The runtime cutter was proved natively on Apple Silicon on 2026-08-30. It
@@ -261,7 +261,7 @@ reading it does not grant deployment, wallet, consensus, or shell authority.
 
 ## Publication gate
 
-Keep `packaging/install/RELEASE_PIN` at the all-zero sentinel until all of the
+Keep `platform/packaging/install/RELEASE_PIN` at the all-zero sentinel until all of the
 following are true:
 
 1. an external release key and recovery/rotation procedure are documented;

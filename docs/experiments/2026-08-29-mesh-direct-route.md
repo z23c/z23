@@ -42,14 +42,14 @@ INCLUDES=$( {
 } | sort -u | sed 's|^|-I|' | tr '\n' ' ')
 
 for FILE in \
-    config/src/boot_mesh_route.c \
-    config/src/boot_zcode_dht_reachability.c \
-    config/src/boot_mesh_status_requester.c \
-    config/src/boot_mesh_status.c \
-    config/src/boot_mesh_status_refresh.c \
-    config/src/boot_mesh_status_rpc.c \
-    config/src/boot_mesh_machines.c \
-    config/src/boot_mesh_machines_rpc.c \
+    engine/composition/src/boot_mesh_route.c \
+    engine/composition/src/boot_zcode_dht_reachability.c \
+    engine/composition/src/boot_mesh_status_requester.c \
+    engine/composition/src/boot_mesh_status.c \
+    engine/composition/src/boot_mesh_status_refresh.c \
+    engine/composition/src/boot_mesh_status_rpc.c \
+    engine/composition/src/boot_mesh_machines.c \
+    engine/composition/src/boot_mesh_machines_rpc.c \
     tools/command/native_mesh_command.c
 do
     x86_64-w64-mingw32-gcc -std=c2x -fsyntax-only \

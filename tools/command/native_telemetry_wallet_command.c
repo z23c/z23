@@ -7,7 +7,7 @@
  * and builds no document. Those all belong to the two layers either side of
  * it: util/telemetry/wallet_fields.def declares the fields and their meaning,
  * services/wallet_telemetry.h collects the values, and
- * lib/util/src/telemetry_render.c is the single renderer. If a change here
+ * platform/modules/util/src/telemetry_render.c is the single renderer. If a change here
  * needs to know a field's name, the change belongs in one of those files.
  *
  * The two leaves differ by exactly one argument:
@@ -23,7 +23,7 @@
  * never `ok` and never a plausible zero - see the provider header for which
  * facts are process-local and which are build facts.
  *
- * Bound by config/commands/telemetry/wallet.def.
+ * Bound by engine/composition/commands/telemetry/wallet.def.
  */
 
 #include "command/native_command.h"

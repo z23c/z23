@@ -9,7 +9,7 @@
 # script_validate skip its per-input ECDSA verify_script loop and proof_validate
 # skip its Groth16/Ed25519/PHGR13/binding-sig verification. That is SOUND only
 # for PRODUCING the one anchor snapshot, whose correctness is certified by the
-# terminal SHA3==checkpoint hard-assert (config/src/boot_mint_anchor.c). It must
+# terminal SHA3==checkpoint hard-assert (engine/composition/src/boot_mint_anchor.c). It must
 # NEVER be reachable on a running node: if the SETTER (mint_skip_crypto_set)
 # were ever called outside the offline -mint-anchor mint driver — e.g. from a
 # P2P/RPC/relay/connect_block path — a signature bypass on a live node would
@@ -19,8 +19,8 @@
 # WHAT IS SCANNED (non-empty by construction — the gate FAILS LOUD if the scan
 # set is empty, the MEMORY "fail-silent lint gate" trap)
 # -----------------------------------------------------------------------------
-#   - Every .c under app/, config/, src/, tools/, domain/, application/,
-#     adapters/, plus the module .c itself, comments stripped.
+#   - Every .c under app/, config/, src/, tools/, domain/, engine/application/,
+#     platform/adapters/, plus the module .c itself, comments stripped.
 #   - Any line that CALLS the setter `mint_skip_crypto_set(` is a hit UNLESS it
 #     is in one of the ALLOWED files (the mint driver + the module + its test).
 #   - The READER (mint_skip_crypto_get) may be called from the two crypto
@@ -28,10 +28,10 @@
 #     is OFF (the default).
 #
 # ALLOWED setter call sites (the offline mint driver TUs + the module + test):
-#   config/src/boot_refold_staged.c   boot_mint_anchor_reset (gated on -mint-anchor)
-#   config/src/boot_mint_anchor.c     the one-shot mint driver
-#   app/jobs/src/mint_skip_crypto.c   the module definition
-#   lib/test/src/test_mint_skip_crypto.c  the equivalence test
+#   engine/composition/src/boot_refold_staged.c   boot_mint_anchor_reset (gated on -mint-anchor)
+#   engine/composition/src/boot_mint_anchor.c     the one-shot mint driver
+#   engine/jobs/src/mint_skip_crypto.c   the module definition
+#   tests/harness/src/test_mint_skip_crypto.c  the equivalence test
 #
 # Exit 0 = pass; non-zero + message = fail. PASSES on the current tree by
 # construction; FAILS the instant the setter is called from any other TU.
@@ -54,10 +54,10 @@ SETTER='mint_skip_crypto_set'
 
 # The ONLY files allowed to call the setter.
 ALLOW=(
-    "config/src/boot_refold_staged.c"
-    "config/src/boot_mint_anchor.c"
-    "app/jobs/src/mint_skip_crypto.c"
-    "lib/test/src/test_mint_skip_crypto.c"
+    "engine/composition/src/boot_refold_staged.c"
+    "engine/composition/src/boot_mint_anchor.c"
+    "engine/jobs/src/mint_skip_crypto.c"
+    "tests/harness/src/test_mint_skip_crypto.c"
 )
 
 is_allowed() {
@@ -80,20 +80,20 @@ fi
 
 # Confirm the module + the allowed driver TU actually exist and the setter is
 # defined/declared — a rename must break the gate, not silently pass.
-if [ ! -f "app/jobs/src/mint_skip_crypto.c" ]; then
-    echo "check_mint_skip_crypto_offline_only: FAIL — module app/jobs/src/mint_skip_crypto.c missing" >&2
+if [ ! -f "engine/jobs/src/mint_skip_crypto.c" ]; then
+    echo "check_mint_skip_crypto_offline_only: FAIL — module engine/jobs/src/mint_skip_crypto.c missing" >&2
     exit 1
 fi
-if ! grep -q "${SETTER}" "app/jobs/src/mint_skip_crypto.c"; then
+if ! grep -q "${SETTER}" "engine/jobs/src/mint_skip_crypto.c"; then
     echo "check_mint_skip_crypto_offline_only: FAIL — ${SETTER} not defined in the module" >&2
     echo "  The setter was renamed; update this gate deliberately." >&2
     exit 1
 fi
 # The mint driver TU must actually CALL the setter — proves the fence has teeth
 # (a non-empty allowed reference exists), not just an empty allowlist.
-if ! grep -q "${SETTER}(" "config/src/boot_refold_staged.c"; then
+if ! grep -q "${SETTER}(" "engine/composition/src/boot_refold_staged.c"; then
     echo "check_mint_skip_crypto_offline_only: FAIL — the mint driver" >&2
-    echo "  config/src/boot_refold_staged.c no longer calls ${SETTER}(. Either the" >&2
+    echo "  engine/composition/src/boot_refold_staged.c no longer calls ${SETTER}(. Either the" >&2
     echo "  wiring regressed or it moved — update this gate deliberately." >&2
     exit 1
 fi

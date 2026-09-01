@@ -5,14 +5,14 @@
 > SOCKS port. Outbound onion dials use the fork's raw bidirectional stream
 > API (`dynhost_stream_open/write/close`,
 > `vendor/tor/src/feature/dynhost/dynhost_stream.h`) via the socketpair <!-- doc-path-ok: vendor/tor is a submodule; the dynhost fork header lives inside it -->
-> bridge in `lib/net/src/onion_stream.c`, which presents the circuit to connman as an
+> bridge in `core/modules/net/src/onion_stream.c`, which presents the circuit to connman as an
 > ordinary connected fd — the reactor, version handshake, and message layer
 > are unchanged. Onion peers are **operator-directed only** (`addnode`,
 > `-addnode`, seed entries): they are parsed locally
 > (`net_addr_from_onion`), never DNS-resolved, never dialed over clearnet,
 > and **never gossiped** — deliberately no BIP155-style addr wire change.
 > Inbound P2P rides the persistent onion identity's SECOND port mapping
-> (`tor_try_install_persistent_identity` in `lib/net/src/tor_integration.c`):
+> (`tor_try_install_persistent_identity` in `core/modules/net/src/tor_integration.c`):
 > virtual port = the node's P2P port, forwarded by stock hidden-service
 > machinery to `127.0.0.1:<p2p_port>`; it is NOT a dynhost virtual port
 > (that would land in the HTTP interception layer). The
@@ -46,7 +46,7 @@ signaling channel that is guaranteed to exist.
 
 - Embedded modified Tor (dynhost fork) running in-process; ephemeral or
   persistent onion; the whole REST surface served over onion by direct C
-  dispatch (`lib/net/src/onion_service.c`) — no SOCKS, no HTTP parsing.
+  dispatch (`core/modules/net/src/onion_service.c`) — no SOCKS, no HTTP parsing.
 - `/directory.json` on each onion: advertises onion address, clearnet
   IP:port, height, version. A fresh node bootstraps Tor (~10 s), fetches
   directory records from hardcoded onion seeds, extracts clearnet IPs, and
@@ -54,7 +54,7 @@ signaling channel that is guaranteed to exist.
 - ZNAM `ZNAM_TYPE_ONION` records — a human name can point at an onion;
   `ZNAM_TYPE_CONTENT` fits package roots. Names are pointers, never trust.
 - Noise XX/NK handshake + encrypted transport
-  (`lib/noise/src/noise_handshake.c`, `lib/net/src/noise_transport.c`),
+  (`core/modules/noise/src/noise_handshake.c`, `core/modules/net/src/noise_transport.c`),
   armed as initiator, default OFF pending rollout.
 - P2P ping wire type (game framework Type 0) — per-peer RTT measurement in
   microseconds (`core network peers latency`), exactly the signal transport
@@ -104,8 +104,8 @@ binding options, in order of preference:
 Directory records are SIGNED by the peer key (onion + clearnet endpoints
 + port + services + height + expiry), so a poisoned directory cannot
 reroute peers to attacker endpoints. The record is a `zid_doc` with body
-tag `ZIDE` (`lib/zid/include/zid/zendp.h`), distributed as a blob over
-the already-frozen `zpkgswm` swarm codec (`lib/vcs/include/vcs/zendp_swarm.h`)
+tag `ZIDE` (`contexts/wallet/modules/zid/include/zid/zendp.h`), distributed as a blob over
+the already-frozen `zpkgswm` swarm codec (`contexts/commons/modules/vcs/include/vcs/zendp_swarm.h`)
 — no new wire message. The signing key is resolved against the on-chain
 identity projection (`db_zid_identity_find`), and a key that was never
 anchored, was rotated away, or was revoked is refused with its own named
@@ -121,7 +121,7 @@ sanctioned influence path is `addrman_publish_reputation_weights`, bounded to
 a [1.0, 4.0] dial-chance multiplier. Signed sources together may fill at
 most half of any discovery slate, so a flood of records cannot squeeze
 out the source that always works. That discipline is explicit in
-`net/onion_discovery.h` and `config/src/boot_onion_discovery.c`.
+`net/onion_discovery.h` and `engine/composition/src/boot_onion_discovery.c`.
 
 Still open on this record: the clearnet address + port it carries are
 verified and unused — feeding them in as addrman candidates (via the

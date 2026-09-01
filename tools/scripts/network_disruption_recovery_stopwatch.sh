@@ -338,7 +338,7 @@ rpc_frontier() {
 }
 
 # client_pid_alive — best-effort liveness check via the datadir's own
-# boot_datadir_lock pidfile (config/src/boot_datadir_lock.c writes the
+# boot_datadir_lock pidfile (engine/composition/src/boot_datadir_lock.c writes the
 # holder's plain-text pid to <datadir>/zclassic23.pid). Returns success
 # (treated as "can't tell, don't fail on this alone") when the pidfile is
 # absent/unreadable — RPC unreachability is still caught separately by

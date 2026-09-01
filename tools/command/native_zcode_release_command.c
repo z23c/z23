@@ -4,7 +4,7 @@
  * sign and verify zid release records (docs/spec/sovereign-identity-
  * layer.md). A release record is the canonical zid_doc body ("ZIDR" ‖
  * name ‖ version ‖ manifest_root) binding a package release to an
- * identity's master ed25519 key (lib/zid). v1 is file-based only: no DB,
+ * identity's master ed25519 key (contexts/wallet/modules/zid). v1 is file-based only: no DB,
  * no swarm distribution — sign writes <datadir>/zcode/releases/
  * <name>-<version>.zid, verify reads a doc from hex or file.
  *

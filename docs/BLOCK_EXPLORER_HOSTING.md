@@ -1,7 +1,7 @@
 # Hosting the z23 Block Explorer over HTTPS on your own domain
 
 z23 **is its own web server** — the explorer, REST API, and onion service are
-all served by the single binary's built-in HTTPS server (`lib/net/src/https_server.c`).
+all served by the single binary's built-in HTTPS server (`core/modules/net/src/https_server.c`).
 **There is no nginx / Caddy / reverse proxy, and you should never add one.** One C
 binary is the entire serving surface.
 
@@ -19,7 +19,7 @@ own domain.
 | Clearnet HTTPS | node's own server on **port 8443** | on **iff** a TLS cert is present |
 | Clearnet HTTP | port **8080** (8443 − 363) | redirect → HTTPS |
 
-At boot, `config/src/boot_frontend_services.c:boot_https_explorer_start()`:
+At boot, `engine/composition/src/boot_frontend_services.c:boot_https_explorer_start()`:
 1. Looks for `~/.zclassic-c23/ssl/fullchain.pem` + `~/.zclassic-c23/ssl/privkey.pem`
    (datadir-relative; replace `~/.zclassic-c23` with your `-datadir`).
 2. If absent → logs `HTTPS: no cert … not on clearnet` and stays onion-only.

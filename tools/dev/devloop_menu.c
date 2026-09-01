@@ -2,8 +2,8 @@
  *
  * Registry-driven discovery for the `dev` tree (Wave 2.2). These two entry
  * points used to walk a hardcoded node table; they now delegate to the single
- * canonical command registry (config/src/command_catalog.c via
- * lib/kernel/command_registry). The registry owns the dev subtree's shape,
+ * canonical command registry (engine/composition/src/command_catalog.c via
+ * engine/modules/kernel/command_registry). The registry owns the dev subtree's shape,
  * summaries, availability, and budgets, so menu/help/search here can never
  * drift from the leaves the dispatcher actually serves.
  *

@@ -37,12 +37,12 @@
 # original commit) where the flag/service this script drives did not exist
 # yet anywhere on a local branch. That gap closed the same day, commit
 # 3c316a452 "feat(cure): verified shielded-history promote into a wedged
-# COPY datadir" — config/src/boot_promote_shielded_history.c,
-# app/services/src/shielded_history_promote_service.c, and
-# lib/test/src/test_shielded_history_promote.c are all present at HEAD.
+# COPY datadir" — engine/composition/src/boot_promote_shielded_history.c,
+# engine/services/src/shielded_history_promote_service.c, and
+# tests/harness/src/test_shielded_history_promote.c are all present at HEAD.
 # The success banner this script matches by default
 # (PROMOTE_OK_REGEX='^PROMOTED: -promote-shielded-history:') was verified
-# against config/src/boot_promote_shielded_history.c's actual fprintf
+# against engine/composition/src/boot_promote_shielded_history.c's actual fprintf
 # literal ("PROMOTED: -promote-shielded-history: %s -> %s installed ...")
 # — no override needed. This script is live-functional, not aspirational;
 # the DEPENDENCY NOTICE below is kept verbatim as the historical record of
@@ -58,7 +58,7 @@
 # branch (verified via `git grep` across every refs/heads/* branch, no match
 # for "promote-shielded-history" or "promote_shielded_history"). What DOES
 # exist, landed by a sibling lane building toward the same mechanism:
-#   - app/services/include/services/shielded_history_body_crosscheck.h: a
+#   - engine/services/include/services/shielded_history_body_crosscheck.h: a
 #     read-only local-body witness that re-derives Sprout frontiers + the
 #     nullifier set from PoW/merkle-verified block bodies and compares them
 #     against a producer's tables — its header comment explicitly says it
@@ -82,7 +82,7 @@
 # ============================================================================
 #
 # Safety invariants (same class as cure-copy-prove.sh / import-copy-prove.sh
-# / app/controllers/src/agent_copy_prove_controller.c cp_path_safety_ok()):
+# / cognition/controllers/src/agent_copy_prove_controller.c cp_path_safety_ok()):
 #   - --producer is a READ-ONLY input: this script never writes into it, in
 #     dry-run or real mode. It must itself already be a throwaway COPY of
 #     the real producer (never point this at a live producer directly) —
@@ -313,7 +313,7 @@ echo "[promote-shielded-copy-prove] promote matched /$PROMOTE_OK_REGEX/ — boot
 
 # ── step 2b: clear any stale auto_reindex_request ──────────────────────
 # The copy was cp -a'd from --src; if that datadir had ever armed a
-# self-rebuild request (config/src/boot_crashonly.c
+# self-rebuild request (engine/composition/src/boot_crashonly.c
 # boot_crashonly_consume_reindex_request(), storage/boot_auto_reindex.h) the
 # sentinel file <datadir>/auto_reindex_request rides along in the copy. The
 # terminal -promote-shielded-history argv path returns before the normal

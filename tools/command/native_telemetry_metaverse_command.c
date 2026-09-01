@@ -11,9 +11,9 @@
  * because nothing in this build can answer them honestly: there is no property
  * market subsystem at all, and the confined agent broker is a separate process
  * whose state lives in an operator-named directory rather than in this one.
- * See config/commands/telemetry/metaverse.def for the stated reasons.
+ * See engine/composition/commands/telemetry/metaverse.def for the stated reasons.
  *
- * Bound by config/commands/telemetry/metaverse.def.
+ * Bound by engine/composition/commands/telemetry/metaverse.def.
  */
 
 #include "command/native_command.h"

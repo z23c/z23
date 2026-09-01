@@ -11,7 +11,7 @@
 # line must name the branch. Anything that is NOT that shape is a real
 # uncallable-input bug — declare the key instead of listing it here.
 
-app.messaging.read confirm    # awn_run() (app/controllers/src/app_write_native_handlers.c) reads confirm only under `leaf->plan_commit`; the message-read leaf sets .plan_commit = false, so the read is dead here. The ZNAM write leaves that DO set it all declare confirm.
+app.messaging.read confirm    # awn_run() (engine/controllers/src/app_write_native_handlers.c) reads confirm only under `leaf->plan_commit`; the message-read leaf sets .plan_commit = false, so the read is dead here. The ZNAM write leaves that DO set it all declare confirm.
 zcode.leaderboard.all day     # zl_leaderboard() (tools/command/native_zcode_leaderboard_command.c) reads day to pin "today" for the period window; the all-time period's window is unbounded, so day cannot move this leaf's answer. daily/weekly/monthly share the function and declare day.
 zcode.network.providers kind  # handler injects fixed kind=provider into a private RPC object; kind is never read from request->input.
 zcode.network.publish operation # handler injects fixed operation=publish into a private RPC object; operation is never read from request->input.

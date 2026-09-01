@@ -435,7 +435,7 @@ void zcl_native_handle_zcode_patronage_list(
 
 /* ── simulated settlement / refund ────────────────────────────────────────
  *
- * The settlement verifier (lib/vcs/src/zcode_patronage_settlement_verify.c)
+ * The settlement verifier (contexts/commons/modules/vcs/src/zcode_patronage_settlement_verify.c)
  * refuses to run without an active-chain anchor authority, an immutable
  * ZC23 policy root and continuity-uniqueness facts — the contexts the
  * PLANNED rows were blocked on. This adapter binds all three from explicit

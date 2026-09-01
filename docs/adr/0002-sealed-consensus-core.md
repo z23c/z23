@@ -18,7 +18,7 @@ ahead of the reference chain, even framed as opt-in or miner-signaled (see
 `docs/CONSENSUS_PARITY_DOCTRINE.md`). Before this ADR, that line was
 enforced entirely by *review discipline*: the consensus predicates and
 static parameter tables lived scattered across `domain/consensus/`, <!-- doc-path-ok: pre-ADR location, named so the move is legible -->
-`lib/consensus/`, `lib/chain/`, and `lib/core/`, alongside ordinary <!-- doc-path-ok: pre-ADR location, named so the move is legible -->
+`lib/consensus/`, `core/modules/chain/`, and `core/modules/core/`, alongside ordinary <!-- doc-path-ok: pre-ADR location, named so the move is legible -->
 application code, with no structural barrier stopping an autonomous dev-loop
 cycle from editing a validity predicate and auto-publishing it the same way
 it would publish an explorer template fix.
@@ -47,8 +47,8 @@ did not need touching:
 |---------|-----------|--------------------------|
 | `core/consensus/` | `domain/consensus/` | `-Icore/consensus/include` → `domain/consensus/*.h` | <!-- doc-path-ok: "moved from" column — the old paths are gone by design -->
 | `core/params/` | `lib/consensus/` | `-Icore/params/include` → `consensus/*.h` | <!-- doc-path-ok: "moved from" column — the old paths are gone by design -->
-| `core/math/` | `lib/core/` (pure math) | `-Icore/math/include` → `core/*.h` |
-| `core/chainparams/` | the pure params/verify subset of `lib/chain/` | `-Icore/chainparams/include` → `chain/*.h` |
+| `core/math/` | `core/modules/core/` (pure math) | `-Icore/math/include` → `core/*.h` |
+| `core/chainparams/` | the pure params/verify subset of `core/modules/chain/` | `-Icore/chainparams/include` → `chain/*.h` |
 
 (See the `CORE_CONTEXTS` / `CORE_INCLUDES` block in `Makefile`, just above
 the `core-seal` targets, for the exact `-I` wiring.) Every `core/*.c` under
@@ -75,7 +75,7 @@ inside `tools/core_seal.c` itself.
 
 A second gate, `check-core-include-boundary`
 (`tools/scripts/check_core_include_boundary.sh`), enforces that `core/` may
-not depend upward or sideways — in particular, not on `lib/validation/` —
+not depend upward or sideways — in particular, not on `core/modules/validation/` —
 the same discipline `check_domain_purity.sh` already applies to `domain/`.
 
 ### 3. The owner-only unseal ritual
@@ -122,14 +122,14 @@ checks `plan.sealed_core` **before any hot-swap or reload publish step**:
   all, so the running binary is never touched.
 - A valid token present → the seal is lifted for *this* cycle, which is
   simultaneously marked `consensus_risk` (so it routes to the heaviest
-  proof path, the same treatment a `lib/validation/` edit gets today). The
+  proof path, the same treatment a `core/modules/validation/` edit gets today). The
   token is consumed by `make core-seal`, not by the dev-loop check itself,
   so one `make core-unseal` authorizes exactly one landed commit — which may
   span several iterative dev-cycles while the fix converges — never just one
   cycle.
 
 The dev fast loop structurally refuses to auto-publish the sealed consensus
-core. ZVCS's own independent seal guard (`lib/vcs/src/vcs_seal.c`, described
+core. ZVCS's own independent seal guard (`contexts/commons/modules/vcs/src/vcs_seal.c`, described
 in `docs/ZVCS.md`) is a second, defense-in-depth check at the
 source-snapshot layer; it runs *after* the dev-loop's own publish step
 (advisory only at that integration point) — the dev-loop refusal above is
@@ -140,15 +140,15 @@ the one that is load-bearing for blocking the running binary.
 The seal covers the **text of the consensus predicates**. It does not cover the
 arithmetic they call. Sealed code calls unsealed code on every block:
 `core/math/src/hash.c` and `core/consensus/src/script_interp.c` reach
-`lib/crypto/src/sha256.c` (block hash, txid, merkle root, `OP_SHA256`);
+`core/modules/crypto/src/sha256.c` (block hash, txid, merkle root, `OP_SHA256`);
 `core/consensus/src/equihash.c` reaches the batched BLAKE2b in
-`lib/crypto/src/blake2b_avx2.c`; and the include-closure of `core/` through
+`core/modules/crypto/src/blake2b_avx2.c`; and the include-closure of `core/` through
 `coins/coins.h` reaches the Montgomery multiplies in
-`lib/sapling/src/fr_avx512.c` and `lib/sapling/src/bn254_accel.c`, which decide
+`core/modules/sapling/src/fr_avx512.c` and `core/modules/sapling/src/bn254_accel.c`, which decide
 the Sapling anchor and every Groth16 verdict. Editing any of them changes which
 blocks are valid while `check-core-seal` reports clean.
 
-Widening the manifest to swallow `lib/crypto` and `lib/sapling` was rejected:
+Widening the manifest to swallow `core/modules/crypto` and `core/modules/sapling` was rejected:
 those files exist to get faster, and sealing them would put the owner unseal
 ritual in front of every optimisation — turning a ritual that should mark a
 consensus decision into routine paperwork, which is how rituals stop being
@@ -212,7 +212,7 @@ seal gave.
 ## Alternatives considered
 
 **(a) Lint-only boundary, no physical move.** Keep the consensus code where
-it lived (`domain/consensus/`, `lib/consensus/`, `lib/chain/`, `lib/core/`) <!-- doc-path-ok: rejected-alternative narration of the pre-ADR layout -->
+it lived (`domain/consensus/`, `lib/consensus/`, `core/modules/chain/`, `core/modules/core/`) <!-- doc-path-ok: rejected-alternative narration of the pre-ADR layout -->
 and rely solely on a `check-consensus-parity`-style gate scanning a hardcoded
 path list. Rejected: a hardcoded path list is exactly the kind of thing the
 lint-gate-hollowness audit (`docs/work/lint-gate-hollowness-audit.md`)
@@ -247,8 +247,8 @@ predicate; only a build/publish-time gate does.
 ## Addendum 2026-08-01 — seal boundary widened to the ordering layer
 
 External review observed that the seal covered predicates and parameter
-tables only, while `lib/validation/src/connect_block.c` (block connection /
-UTXO application order) and `lib/validation/src/chainstate.c` (chain-state
+tables only, while `core/modules/validation/src/connect_block.c` (block connection /
+UTXO application order) and `core/modules/validation/src/chainstate.c` (chain-state
 ordering) sat outside it — and an ordering bug forks the node exactly as
 hard as a bug in a sealed `check_block` predicate. The sealed set is now
 `core/` **plus** those two files and their public headers, enumerated in

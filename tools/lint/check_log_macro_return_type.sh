@@ -31,7 +31,7 @@ use strict;
 use warnings;
 use File::Find;
 
-my @roots = @ARGV ? @ARGV : qw(app lib config tools);
+my @roots = @ARGV ? @ARGV : qw(core engine contexts cognition platform tools);
 my @files;
 
 find(
@@ -40,8 +40,8 @@ find(
         return unless /\.(?:c|h)\z/;
         my $path = $File::Find::name;
         return if $path =~ m{(?:^|/)(?:build|vendor|\.git)(?:/|\z)};
-        return if $path =~ m{^(?:\./)?lib/test/};
-        return if $path eq './lib/util/include/util/log_macros.h';
+        return if $path =~ m{^(?:\./)?tests/harness/include/test/};
+        return if $path eq './platform/modules/util/include/util/log_macros.h';
         # wf/dx-scanner-immunity: under a production scan (ZCL_LINT_PRODUCTION_SCAN=1,
         # set by the Makefile's check-% pattern — see tools/lint/scan_exclusions.sh)
         # skip the shared transient-fixture-name glob so a sibling gate's selftest

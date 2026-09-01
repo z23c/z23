@@ -44,7 +44,7 @@
 #       identifier" errors that say nothing about clang. -fsyntax-only stops
 #       before IR generation, so the -O costs nothing.
 #       (Passing -D_DEFAULT_SOURCE instead was tried and rejected: several
-#       lib/net TUs #define it themselves, so the command-line define
+#       core/modules/net TUs #define it themselves, so the command-line define
 #       collides into -Wmacro-redefined — a gate artifact, not a finding.)
 #
 #   -Wno-gnu-zero-variadic-macro-arguments   util/log_macros.h and its
@@ -115,6 +115,8 @@ ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 cd "$ROOT"
 # shellcheck source=tools/lint/gate_lib.sh
 . tools/lint/gate_lib.sh
+# shellcheck source=tools/lint/repo_shape.sh
+. tools/lint/repo_shape.sh
 
 CC_BIN="${ZCL_CC:-clang}"
 # Overridable so --self-test can aim the parse at a deliberately truncated
@@ -211,7 +213,7 @@ fi
 # project's own build host carries clang 18, and clang 18 rejects STANDARD
 # C23 as an extension:
 #
-#   lib/sapling/src/circuit_gadgets.c:475:38: error: binary integer literals
+#   core/modules/sapling/src/circuit_gadgets.c:475:38: error: binary integer literals
 #     are a GNU extension [-Werror,-Wgnu-binary-literal]
 #
 # Binary literals are C23 (they are one of the few genuinely-C23 constructs
@@ -275,8 +277,8 @@ BASELINE="tools/lint/portability_baseline.${FAMILY}.txt"
 # Superset by construction (every include/ root under the layer dirs); an
 # extra -I can only add a search path, and headers are namespaced under
 # include/<module>/ so there is nothing to collide.
-mapfile -t INC_DIRS < <(find app config lib core domain application adapters \
-    ports -maxdepth 3 -type d -name include 2>/dev/null | sort)
+mapfile -t INC_DIRS < <(find "${ZCL_SOURCE_AUTHORITIES[@]}" \
+    -type d -name include 2>/dev/null | sort)
 gate_require_scanned "${#INC_DIRS[@]}" 20 check-clang-portability \
     "no include/ roots found — the layer directory layout moved"
 
@@ -305,12 +307,10 @@ makefile_list() {
 
 # APP_DIRS / LIB_MODULES / DOMAIN_CONTEXTS come from the shared reader rather
 # than the local awk above: LIB_MODULES is no longer a literal in the Makefile
-# at all — it is derived from config/lib_module_order.def — so scraping its
+# at all — it is derived from engine/composition/lib_module_order.def — so scraping its
 # assignment line here would yield the $(shell ...) text and silently collapse
 # the lib/ arm of this scan to nothing. CORE_CONTEXTS and APPLICATION_CONTEXTS
 # have no shared reader yet, so they keep using it.
-# shellcheck source=tools/lint/repo_shape.sh
-. "$(dirname "${BASH_SOURCE[0]}")/repo_shape.sh"
 APP_DIRS="${ZCL_APP_SHAPES[*]}"
 LIB_MODULES="${ZCL_LIB_MODULES[*]}"
 CORE_CONTEXTS="$(makefile_list CORE_CONTEXTS)"
@@ -325,16 +325,17 @@ SRC_RAW="$WORK/srcs.raw"
 : > "$SRC_RAW"
 collect() { find "$1" -maxdepth 1 -name '*.c' -type f 2>/dev/null >> "$SRC_RAW"; }
 
-for d in $APP_DIRS;             do collect "app/$d/src"; done
-for m in $LIB_MODULES;          do collect "lib/$m/src"; done
+mapfile -t APP_SOURCE_DIRS < <(repo_shape_dirs app src)
+for d in "${APP_SOURCE_DIRS[@]}"; do collect "$d"; done
+for m in "${ZCL_MODULE_DIRS[@]}"; do collect "$m/src"; done
 for c in $CORE_CONTEXTS;        do collect "core/$c/src"; done
-for c in $DOMAIN_CONTEXTS;      do collect "domain/$c/src"; done
-for c in $APPLICATION_CONTEXTS; do collect "application/$c/src"; done
-collect config/src
-collect adapters/outbound/persistence/src
+for c in "${ZCL_DOMAIN_DIRS[@]}"; do collect "$c/src"; done
+for c in $APPLICATION_CONTEXTS; do collect "engine/application/$c/src"; done
+collect engine/composition/src
+collect platform/adapters/outbound/persistence/src
 collect tools/dev
 collect tools/command
-collect src
+collect engine/entry
 
 # `/_` marks an ephemeral source the build itself filters out
 # (zcl_filter_ephemeral_sources in the Makefile) — mirror that exactly.
@@ -364,7 +365,7 @@ gate_require_scanned "$SRC_COUNT" "$SRC_FLOOR" check-clang-portability \
 # below narrows it to exactly the depth this gate's `find -maxdepth 1`
 # reaches. `/_` mirrors the build's own ephemeral-source filter.
 #
-# lib/test is excluded because config/lib_module_order.def says so in as many
+# lib/test is excluded because engine/composition/lib_module_order.def says so in as many
 # words: "Not listed here: lib/test (the test runner is not part of the
 # production link order)". It is not a lib module, this gate never compiled
 # it, and pulling its 1040 sources in here would be a scope change wearing a
@@ -376,17 +377,17 @@ gate_require_scanned "$SRC_COUNT" "$SRC_FLOOR" check-clang-portability \
 CLANG_COVERAGE_ALLOWANCE="${ZCL_CLANG_PORTABILITY_COVERAGE_ALLOWANCE:-0}"
 if [ "${ZCL_CLANG_PORTABILITY_COVERAGE:-1}" = "1" ]; then
     gate_git_oracle "$WORK/oracle.raw" check-clang-portability \
-        'app/*/src/*.c' 'lib/*/src/*.c' 'core/*/src/*.c' 'domain/*/src/*.c' \
-        'application/*/src/*.c' 'config/src/*.c' \
-        'adapters/outbound/persistence/src/*.c' \
-        'tools/dev/*.c' 'tools/command/*.c' 'src/*.c' ':!:lib/test/*'
+        'core/**/*.c' 'engine/**/*.c' 'contexts/**/*.c' 'cognition/**/*.c' \
+        'platform/**/*.c' \
+        'platform/adapters/outbound/persistence/src/*.c' \
+        'tools/dev/*.c' 'tools/command/*.c'
     grep -vF '/_' "$WORK/oracle.raw" \
-        | grep -E '^(app|lib|core|domain|application)/[^/]+/src/[^/]+\.c$|^config/src/[^/]+\.c$|^adapters/outbound/persistence/src/[^/]+\.c$|^tools/(dev|command)/[^/]+\.c$|^src/[^/]+\.c$' \
+        | grep -E '^((engine|cognition|contexts/[^/]+)/(models|controllers|views|services|supervisors|conditions|jobs)/src/[^/]+\.c|((core|engine|cognition|platform|contexts/[^/]+)/modules/[^/]+/src/[^/]+\.c)|core/(consensus|params|math|chainparams)/src/[^/]+\.c|(contexts/wallet/domain|platform/domain/encoding)/src/[^/]+\.c|engine/application/[^/]+/src/[^/]+\.c|engine/composition/src/[^/]+\.c|platform/adapters/outbound/persistence/src/[^/]+\.c|tools/(dev|command)/[^/]+\.c|engine/entry/[^/]+\.c)$' \
         > "$WORK/oracle.txt" || true
     gate_require_coverage "$SRC_LIST" "$WORK/oracle.txt" \
         "$CLANG_COVERAGE_ALLOWANCE" check-clang-portability \
         ZCL_CLANG_PORTABILITY_COVERAGE_ALLOWANCE \
-        "A named file is a compiled source this gate never reached. Check that its layer still appears in APP_DIRS/LIB_MODULES/CORE_CONTEXTS/DOMAIN_CONTEXTS/APPLICATION_CONTEXTS as $MAKEFILE and config/lib_module_order.def define them — a layer that drops out of those lists drops out of this gate silently."
+        "A named file is a compiled source this gate never reached. Check that its layer still appears in APP_DIRS/LIB_MODULES/CORE_CONTEXTS/DOMAIN_CONTEXTS/APPLICATION_CONTEXTS as $MAKEFILE and engine/composition/lib_module_order.def define them — a layer that drops out of those lists drops out of this gate silently."
 fi
 
 # ── Self-test: prove the flag set actually rejects a violation ────────────

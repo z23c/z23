@@ -13,10 +13,10 @@ and what is pending.
 
 | Lane | File | What it proves |
 |------|------|----------------|
-| H2 | `lib/test/src/groth16_spend_oracle.c` | Native `nsk_to_nk` / `crh_ivk` / `ivk_to_pkd` / `compute_cm` / `compute_nf` == librustzcash, byte-for-byte, for one pinned KAT witness. |
-| H3 | `lib/sapling/src/sapling_circuit.c` + `circuit_bits.c` + shape gate in `test_groth16_selfverify.c` | Ported spend sections **1..10** synthesize with per-section cumulative constraint counts equal to the reference trace; in-circuit `nk`/`rk` wires carry reference-correct points; §10's blake2s digest bits equal `CRH^ivk`; every §10 wire is bound (single-bit witness flips break the R1CS); synthesis deterministic. Single witness. |
-| H4 | `lib/test/src/groth16_spend_parity.c` | **Standing** differential parity oracle over a **corpus** of witnesses — generalizes H2+H3 and auto-tightens as H3 ports more sections. |
-| **H5** | `lib/test/src/groth16_spend_adversarial.c` | Adversarial + negative-control gate over the **active production proving path** (reference-oracle prover -> native C23 verifier) — the only lane that runs a real prove/verify round-trip and tries to break it. Requires `~/.zcash-params` (SKIPs cleanly when absent, same convention as the rest of the self-test block). |
+| H2 | `tests/harness/src/groth16_spend_oracle.c` | Native `nsk_to_nk` / `crh_ivk` / `ivk_to_pkd` / `compute_cm` / `compute_nf` == librustzcash, byte-for-byte, for one pinned KAT witness. |
+| H3 | `core/modules/sapling/src/sapling_circuit.c` + `circuit_bits.c` + shape gate in `test_groth16_selfverify.c` | Ported spend sections **1..10** synthesize with per-section cumulative constraint counts equal to the reference trace; in-circuit `nk`/`rk` wires carry reference-correct points; §10's blake2s digest bits equal `CRH^ivk`; every §10 wire is bound (single-bit witness flips break the R1CS); synthesis deterministic. Single witness. |
+| H4 | `tests/harness/src/groth16_spend_parity.c` | **Standing** differential parity oracle over a **corpus** of witnesses — generalizes H2+H3 and auto-tightens as H3 ports more sections. |
+| **H5** | `tests/harness/src/groth16_spend_adversarial.c` | Adversarial + negative-control gate over the **active production proving path** (reference-oracle prover -> native C23 verifier) — the only lane that runs a real prove/verify round-trip and tries to break it. Requires `~/.zcash-params` (SKIPs cleanly when absent, same convention as the rest of the self-test block). |
 
 Run: `make t-fast ONLY=groth16_selfverify` (H2/H3/H4 are params-free; no
 `~/.zcash-params`, no proving key required — H5 needs real params and SKIPs
@@ -24,7 +24,7 @@ without them). `make t-fast ONLY=snark_kat` is the sibling KAT gate.
 
 ## H5 — acceptance bar per check category
 
-H5 (`lib/test/src/groth16_spend_adversarial.c`) is the only lane that drives
+H5 (`tests/harness/src/groth16_spend_adversarial.c`) is the only lane that drives
 the ACTIVE production proving path end to end: the reference-oracle prover
 (librustzcash) generates a real spend proof, the independent native C23
 verifier (`sapling_check_spend`) accepts or rejects it, using real
@@ -166,8 +166,8 @@ blake2s written against it misses 21006 by thousands and no amount of tuning
 closes the gap.
 
 That stack is now ported as its own module —
-**`lib/sapling/include/sapling/circuit_bits.h`**
-+ `lib/sapling/src/circuit_bits.c`: `struct cbit` (Boolean),
+**`core/modules/sapling/include/sapling/circuit_bits.h`**
++ `core/modules/sapling/src/circuit_bits.c`: `struct cbit` (Boolean),
 `struct cu32` (UInt32), `struct multieq` (MultiEq), and `gadget_blake2s`. Every
 function carries its exact reference constraint cost in its doc comment. Three
 numbers are load-bearing and mutation-tested:
@@ -203,7 +203,7 @@ different QAP domain while still passing ordinary FFT round-trip tests.
 
 ## Honest self-test surface — the native prover names its own blocker
 
-`sapling_spend_prover_native_status()` (lib/sapling/src/sapling_circuit.c) is the
+`sapling_spend_prover_native_status()` (core/modules/sapling/src/sapling_circuit.c) is the
 production, params-free coverage probe: it runs a canonical (non-secret)
 synthesis, reports `sections_ported / sections_total`,
 `constraints_ported / constraints_total`, and `next_blocker`. It reports

@@ -21,7 +21,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")/../.."
 
-LMS_FILE="app/services/src/legacy_mirror_sync_service.c"
+LMS_FILE="engine/services/src/legacy_mirror_sync_service.c"
 
 if [ ! -f "$LMS_FILE" ]; then
     echo "FAIL: $LMS_FILE not found"
@@ -41,7 +41,7 @@ fi
 # The block source policy must honor the mirror_lag_sla_breach_blocks field.
 # If a refactor drops the field from cac_plan_input or removes the
 # concurrent-redundancy override, this gate fails.
-POLICY_FILE="app/services/src/block_source_policy.c"
+POLICY_FILE="engine/services/src/block_source_policy.c"
 if [ ! -f "$POLICY_FILE" ]; then
     echo "FAIL: $POLICY_FILE not found"
     exit 1

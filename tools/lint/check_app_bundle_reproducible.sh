@@ -47,7 +47,7 @@
 #
 # ── ARBITRARY SUBJECT: --bin ────────────────────────────────────────────────
 # The default subject proves the BUNDLER; a GUI app scaffolded by
-# `make new-app` (packages/<name>, built to build/bin/<name>) wants the same
+# `make new-app` (contexts/commons/packages/<name>, built to build/bin/<name>) wants the same
 # two-run proof run over ITSELF, and it cannot use the default subject: a
 # painter's output carries frame timings, so no exact stdout is available to
 # assert. `--bin <path>` swaps the subject for an already-built binary:
@@ -125,9 +125,9 @@ compile_subject() {
     local out="$1"
     cc -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
         -D_POSIX_C_SOURCE=200809L -D_DARWIN_C_SOURCE -fblocks \
-        -Ipackages/zjsonp/include -Ipackages/zutf8/include \
-        -o "$out" tools/jsonq.c packages/zjsonp/src/zjsonp.c \
-        packages/zutf8/src/zutf8.c || die "subject compile failed"
+        -Icontexts/commons/packages/zjsonp/include -Icontexts/commons/packages/zutf8/include \
+        -o "$out" tools/jsonq.c contexts/commons/packages/zjsonp/src/zjsonp.c \
+        contexts/commons/packages/zutf8/src/zutf8.c || die "subject compile failed"
     [ -x "$out" ] || die "subject compile produced no executable at $out"
 }
 

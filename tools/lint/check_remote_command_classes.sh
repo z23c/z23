@@ -5,7 +5,7 @@
 # class, and the class table names nothing that does not exist.
 #
 # ── WHY THIS EXISTS ─────────────────────────────────────────────────────────
-# config/remote_command_classes.def answers, for each command leaf, "may a peer
+# engine/composition/remote_command_classes.def answers, for each command leaf, "may a peer
 # on our own mesh ask this node to run it?" (design:
 # docs/work/REMOTE_COMMAND_CHANNEL.md). The table is only worth anything if it
 # is COMPLETE. Two ways it rots, both silent:
@@ -26,16 +26,16 @@
 # between two sources of truth, which is what this gate does.
 #
 # ── SOURCES OF TRUTH (never re-parsed by hand) ──────────────────────────────
-#   typed registry : config/commands/**/*.def, read with
+#   typed registry : engine/composition/commands/**/*.def, read with
 #                    tools/lint/command_leaf_paths.awk (the eight
 #                    ZCL_COMMAND_*_{READ,COMMAND} leaf macros; ZCL_COMMAND_BRANCH
 #                    is not a leaf and dispatches nothing).
-#   agent registry : app/controllers/include/controllers/agent_contracts.def,
+#   agent registry : cognition/controllers/include/controllers/agent_contracts.def,
 #                    the flat AGENT_CONTRACT() method table that backs
 #                    `z23 agentops`, `z23 agentdeployguard` and friends. It is a
 #                    SECOND dispatchable command surface; leaving it out would
 #                    leave `dbquery` and `dumpstate` unclassified.
-#   class table    : config/remote_command_classes.def, read with
+#   class table    : engine/composition/remote_command_classes.def, read with
 #                    tools/lint/remote_command_class_rows.awk.
 #
 # ── WHAT IS ASSERTED (all fail-closed) ──────────────────────────────────────
@@ -99,9 +99,9 @@ run_gate() {
     # Resolved per call, not once at load: the self-test re-invokes run_gate
     # with the three env overrides pointing at planted fixtures.
     local DEF_DIR AGENT_DEF TABLE
-    DEF_DIR="${ZCL_REMOTE_CLASS_DEF_DIR:-config/commands}"
-    AGENT_DEF="${ZCL_REMOTE_CLASS_AGENT_DEF:-app/controllers/include/controllers/agent_contracts.def}"
-    TABLE="${ZCL_REMOTE_CLASS_TABLE:-config/remote_command_classes.def}"
+    DEF_DIR="${ZCL_REMOTE_CLASS_DEF_DIR:-engine/composition/commands}"
+    AGENT_DEF="${ZCL_REMOTE_CLASS_AGENT_DEF:-cognition/controllers/include/controllers/agent_contracts.def}"
+    TABLE="${ZCL_REMOTE_CLASS_TABLE:-engine/composition/remote_command_classes.def}"
 
     local tmp
     tmp="$(mktemp -d "${TMPDIR:-/tmp}/zcl-remote-class.XXXXXX")"

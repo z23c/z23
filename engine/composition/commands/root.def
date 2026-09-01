@@ -1,0 +1,103 @@
+/* Canonical root and discovery branch. Consumer defines ZCL_COMMAND_*.
+ * Root order is a wire contract: status, core, app, dev, ops, discover, code,
+ * vault, zcode, metaverse, yardsale. The last two roots are declared in their
+ * own .def files (engine/composition/commands/metaverse.def and
+ * engine/composition/commands/yardsale.def), not here. */
+
+ZCL_COMMAND_READY_READ(
+    "status", "", "", "Node and wallet readiness with one next action",
+    "The safe real-money front door: node health and sync, wallet readiness, "
+    "receive/send capability, custody-authoritative spendable/pending/reserved "
+    "amounts, encryption, encrypted backup, Sapling prover/checkpoint posture, "
+    "mempool size, one stable blocker, and one executable next action. It emits "
+    "no address, key, wallet identity, path, cookie, memo, grant, or raw error. "
+    "Use `core status brief` for the lean chain-only script surface.", 4096,
+    "health,sync,wallet,balance,backup,sapling,blocker,next", "zcl.command.empty_input.v1",
+    "zcl.status_journey.v1", "", "", "z23 status",
+    ZCL_COMMAND_LAYER_ROOT, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_CHAIN_READ | ZCL_COMMAND_CAP_WALLET_REQUEST,
+    ZCL_COMMAND_TRAIT_IDEMPOTENT, ZCL_COMMAND_TRANSPORT_NATIVE,
+    zcl_native_bridge_command)
+
+ZCL_COMMAND_BRANCH("core", "", "Consensus-bound node capabilities",
+                   ZCL_COMMAND_LAYER_CORE)
+ZCL_COMMAND_BRANCH("app", "", "Capability-scoped sovereign applications",
+                   ZCL_COMMAND_LAYER_APP)
+ZCL_COMMAND_BRANCH("dev", "", "Native edit, proof, and publication loop",
+                   ZCL_COMMAND_LAYER_DEV)
+ZCL_COMMAND_BRANCH("ops", "", "Node diagnostics",
+                   ZCL_COMMAND_LAYER_OPS)
+ZCL_COMMAND_BRANCH("discover", "", "Search and describe the command registry",
+                   ZCL_COMMAND_LAYER_DISCOVER)
+
+ZCL_COMMAND_READY_READ(
+    "discover.help", "discover", "help,dev.help",
+    "Show one branch or leaf without loading the whole tree",
+    "One registry node's immediate children or a leaf's contract, derived from "
+    "the static in-binary command registry; deterministic and node-free.", 0,
+    "help,menu,branch,context", "zcl.discover.path_input.v1",
+    "zcl.discovery_document.v1", "path", "path",
+    "z23 discover help dev.app",
+    ZCL_COMMAND_LAYER_DISCOVER, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_PUBLIC, ZCL_COMMAND_LATENCY_INSTANT,
+    ZCL_COMMAND_COST_TINY,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE,
+    ZCL_COMMAND_TRAIT_DETERMINISTIC | ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE,
+    zcl_native_handle_discover_help)
+
+ZCL_COMMAND_READY_READ(
+    "discover.search", "discover", "search,dev.search,dev.diagnose.search",
+    "Rank at most five commands by local deterministic intent search",
+    "At most five registry commands ranked by deterministic local intent "
+    "match against the static catalog; no node contact; empty when nothing "
+    "scores.", 0,
+    "search,find,intent,error,capability", "zcl.discover.search_input.v1",
+    "zcl.command_search.v1", "query", "query",
+    "z23 discover search 'ABI mismatch'",
+    ZCL_COMMAND_LAYER_DISCOVER, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_PUBLIC, ZCL_COMMAND_LATENCY_INSTANT,
+    ZCL_COMMAND_COST_TINY,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE,
+    ZCL_COMMAND_TRAIT_DETERMINISTIC | ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE,
+    zcl_native_handle_discover_search)
+
+ZCL_COMMAND_READY_READ(
+    "discover.describe", "discover", "",
+    "Describe one leaf's schemas, safety, authority, and availability",
+    "One leaf's full contract — schemas, policy, semantics, and availability — "
+    "from the static in-binary registry; deterministic and complete for that "
+    "leaf.", 0,
+    "describe,schema,risk,authority,availability",
+    "zcl.discover.path_input.v1", "zcl.command_spec.v1", "path", "path",
+    "z23 discover describe dev.app.simulate",
+    ZCL_COMMAND_LAYER_DISCOVER, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_PUBLIC, ZCL_COMMAND_LATENCY_INSTANT,
+    ZCL_COMMAND_COST_TINY,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE,
+    ZCL_COMMAND_TRAIT_DETERMINISTIC | ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE,
+    zcl_native_handle_discover_describe)
+
+ZCL_COMMAND_READY_READ(
+    "discover.schema", "discover", "",
+    "Return the compact input or output schema contract for one leaf",
+    "The requested-side schema id and its allowed/positional key list for one "
+    "leaf, from the static registry; deterministic and node-free.", 0,
+    "schema,input,output,contract", "zcl.discover.schema_input.v1",
+    "zcl.command_schema.v1", "path,side", "path",
+    "z23 discover schema dev.app.simulate --side=input",
+    ZCL_COMMAND_LAYER_DISCOVER, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_PUBLIC, ZCL_COMMAND_LATENCY_INSTANT,
+    ZCL_COMMAND_COST_TINY,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE,
+    ZCL_COMMAND_TRAIT_DETERMINISTIC | ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE,
+    zcl_native_handle_discover_schema)

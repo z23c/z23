@@ -2,7 +2,7 @@
 # Gate: sandbox wired (HARD).
 #
 # The os_sandbox node steady-state profile is only a defense if boot actually
-# ENTERS it. This gate asserts that config/src/boot.c both (a) registers a
+# ENTERS it. This gate asserts that engine/composition/src/boot.c both (a) registers a
 # SYSINIT boundary record named "sandbox" and (b) calls os_sandbox_enter(),
 # so the confinement wiring cannot silently regress to zero-sandbox while the
 # -sandbox=steady flag still advertises confinement.
@@ -12,10 +12,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 cd "$ROOT"
 
-SRC="config/src/boot.c"
+SRC="engine/composition/src/boot.c"
 [[ -f "$SRC" ]] || { echo "check_sandbox_wired: FATAL — missing $SRC" >&2; exit 2; }
 
-SANDBOX_SRC="lib/platform/src/os_sandbox_linux.c"
+SANDBOX_SRC="platform/modules/platform/src/os_sandbox_linux.c"
 [[ -f "$SANDBOX_SRC" ]] || { echo "check_sandbox_wired: FATAL — missing $SANDBOX_SRC" >&2; exit 2; }
 
 fail=0
@@ -63,7 +63,7 @@ fi
 #      issues landlock_create_ruleset(2), which is absent from both -confine
 #      seccomp allow-sets — a probe from inside a confined process is
 #      SECCOMP_RET_KILL_PROCESS. The witness reads the cached ABI instead.
-WITNESS_SRC="lib/platform/src/os_sandbox_witness.c"
+WITNESS_SRC="platform/modules/platform/src/os_sandbox_witness.c"
 # The descriptor rows live in per-domain files under a pure aggregator, so the
 # row is searched for across the whole resolved set — see tools/lint/dumper_defs.sh
 # for why this is not a hardcoded single path.

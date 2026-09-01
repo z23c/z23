@@ -16,7 +16,7 @@ with `explorer_index_block`.
 make -C examples && ./examples/bin/05_znam_names
 ```
 
-The example is a standalone C23 program (`examples/05_znam_names.c`) built
+The example is a standalone C23 program (`docs/examples/05_znam_names.c`) built
 with `-DZCL_TESTING` against the same `-I` include set as the main binary
 (see the root `Makefile`'s `APP_INCLUDES`/`LIB_INCLUDES`/etc.). It is fully
 deterministic — fixed seeds/values/names everywhere, no wall clock, no
@@ -55,20 +55,20 @@ part.
 
 | File | Function |
 |------|----------|
-| `lib/sim/include/sim/simnet.h` | `simnet_init`, `simnet_mint_coinbase`, `simnet_mint_to_height`, `simnet_mint_txs`, `simnet_tip_height`, `simnet_free` |
-| `lib/znam/include/znam/znam.h` | `znam_build_register`, `znam_build_update`, `znam_build_set_text`, `znam_parse`, `struct znam_message` |
-| `app/models/include/models/explorer_index.h` | `explorer_index_block` — the per-block hook that dispatches every OP_RETURN through `znam_parse` + `apply_znam` (`app/models/src/explorer_index.c`) |
-| `app/models/include/models/znam.h` | `db_znam_find`, `db_znam_text_get`, `struct znam_entry` |
-| `app/models/include/models/database.h` | `node_db_open`, `node_db_close` (in-memory `:memory:` projection DB) |
-| `lib/primitives/include/primitives/transaction.h` | `transaction_init`, `transaction_alloc`, `transaction_compute_hash`, `transaction_free` |
+| `engine/modules/sim/include/sim/simnet.h` | `simnet_init`, `simnet_mint_coinbase`, `simnet_mint_to_height`, `simnet_mint_txs`, `simnet_tip_height`, `simnet_free` |
+| `contexts/naming/modules/znam/include/znam/znam.h` | `znam_build_register`, `znam_build_update`, `znam_build_set_text`, `znam_parse`, `struct znam_message` |
+| `contexts/explorer/models/include/models/explorer_index.h` | `explorer_index_block` — the per-block hook that dispatches every OP_RETURN through `znam_parse` + `apply_znam` (`contexts/explorer/models/src/explorer_index.c`) |
+| `contexts/naming/models/include/models/znam.h` | `db_znam_find`, `db_znam_text_get`, `struct znam_entry` |
+| `engine/models/include/models/database.h` | `node_db_open`, `node_db_close` (in-memory `:memory:` projection DB) |
+| `core/modules/primitives/include/primitives/transaction.h` | `transaction_init`, `transaction_alloc`, `transaction_compute_hash`, `transaction_free` |
 
 The funding/OP_RETURN transaction-builder pattern, and the owner-authorized
-UPDATE vs. non-owner UPDATE contrast, mirror `lib/test/src/test_simnet.c`
+UPDATE vs. non-owner UPDATE contrast, mirror `tests/harness/src/test_simnet.c`
 section 7 (search for `znam_build_register` there) — that file is the
 ground-truth reference this example was built from. The owner-authorization
 mechanism itself is real, not simulated: `apply_znam` derives the
 authorizing address from `tx->vin[0].prevout` (`znam_owner_address` in
-`app/models/src/explorer_index.c`) and compares it against the name's stored
+`contexts/explorer/models/src/explorer_index.c`) and compares it against the name's stored
 `owner_address` — it is not a field carried inside the OP_RETURN message, so
 `znam_parse` alone cannot tell a legitimate UPDATE from a forged one; only
 the projection's address check can.
@@ -80,9 +80,9 @@ transaction is built the same way this example does it (an OP_RETURN
 vout[0] from `znam_build_register`/`update`/`transfer`/`renew`/
 `set_record`/`set_text`, plus an ordinary transparent change output) and
 submitted through the normal transparent send path in
-`app/controllers/src/wallet_controller.c`. The RPC-facing entry point is
+`contexts/wallet/controllers/src/wallet_controller.c`. The RPC-facing entry point is
 `name_register` and its sibling handlers in
-`app/controllers/src/name_controller.c` (also reachable via the
+`engine/controllers/src/name_controller.c` (also reachable via the
 `z23 rpc name_register`). The read side in this example —
 `explorer_index_block` → `apply_znam` — is the literal production path: a
 live node's forward-sync indexer calls it for every block, and the

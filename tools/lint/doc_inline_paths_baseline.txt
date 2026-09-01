@@ -24,14 +24,14 @@ docs/BUILD.md -> vendor/sqlite3.c
 
 # (a) design memos — files the plan would create.
 docs/work/ladder-carve-audit.md -> tools/scripts/check_no_rowcount_install.sh
-docs/work/reducer-shielded-consensus-plan.md -> lib/test/src/test_shielded_consensus_stage.c
-docs/work/self-verified-tip-plan.md -> lib/validation/src/verify_queue.c
+docs/work/reducer-shielded-consensus-plan.md -> tests/harness/src/test_shielded_consensus_stage.c
+docs/work/self-verified-tip-plan.md -> core/modules/validation/src/verify_queue.c
 docs/work/shielded-history-importer.md -> chainstate_legacy_reader.c/.h
-docs/work/tenacity-roadmap.md -> app/jobs/src/window_rebuild.c
-docs/work/tenacity-roadmap.md -> lib/storage/src/window_rebuild_sentinel.c
-docs/work/wire-next-wave-specs.md -> lib/sim/include/sim/simnet_wire_app.h
-docs/work/wire-next-wave-specs.md -> lib/sim/src/simnet_wire_app.c
-docs/work/wire-next-wave-specs.md -> lib/test/src/test_simnet_wire_app.c
+docs/work/tenacity-roadmap.md -> engine/jobs/src/window_rebuild.c
+docs/work/tenacity-roadmap.md -> engine/modules/storage/src/window_rebuild_sentinel.c
+docs/work/wire-next-wave-specs.md -> engine/modules/sim/include/sim/simnet_wire_app.h
+docs/work/wire-next-wave-specs.md -> engine/modules/sim/src/simnet_wire_app.c
+docs/work/wire-next-wave-specs.md -> tests/harness/src/test_simnet_wire_app.c
 
 # (b) a roadmap doc that never landed under that name.
 docs/work/shielded-history-importer.md -> docs/SOVEREIGN-NETWORK-ROADMAP.md

@@ -1,0 +1,61 @@
+/* The `ops.telemetry.watch` leaf. Owned by the sync/watch lane.
+ *
+ * It lives in its own file because the change feed is built by a different
+ * lane than the top-level rollups in root.def, and two lanes editing one file
+ * is how merges go wrong.
+ */
+
+/* watch is the only STREAM-mode leaf in the registry, and it is a CURSOR POLL,
+ * not a long-lived connection: one call returns the bounded batch of changes
+ * after `since` and exits, and the agent re-invokes with the last sequence it
+ * saw. The mode says what the leaf IS; the kernel has no persistent dispatch
+ * path and the handler does not add one.
+ *
+ * FRESHNESS. Records are produced by a supervised sampler
+ * (engine/services/src/telemetry_watch_service.c) that diffs one typed snapshot
+ * per sampled domain every few seconds; a poll reads the ring and does not
+ * itself sample — EXCEPT in a one-shot CLI process, where no sampler is
+ * registered, and the poll then takes one sample itself and reports
+ * `sampler.sampled_on_poll` so the caller knows which happened. The feed is
+ * in-memory and process-local: the sequence is NOT persisted, which is exactly
+ * why every reply carries an `epoch`.
+ *
+ * COVERAGE. Only a domain with a real typed provider can be sampled, and today
+ * that is `sync` alone. The other seven are declared unsampled with a reason
+ * each and the whole table is published as `coverage`, because a reader who is
+ * shown only what IS covered will assume the rest is quiet. `metaverse` is
+ * declared node-free rather than pending: its data is directory-scoped, so
+ * there is no ambient in-process state a sampler could read, and inventing a
+ * change feed for it would be inventing state. */
+ZCL_COMMAND_READY_COMMAND(
+    "ops.telemetry.watch", "ops.telemetry", "",
+    "Resumable telemetry change feed",
+    "The bounded batch of telemetry changes recorded after `since` — each "
+    "record carrying sequence, captured_at, canonical_path, changed_fields, "
+    "health and dropped_count — plus the cursor block that says WHY the batch "
+    "looks the way it does. Three outcomes are deliberately different shapes "
+    "and never one ambiguous empty: a quiet period is record_count 0 with "
+    "gap=false and dropped_count 0; a resume that fell behind the ring is a "
+    "NON-EMPTY batch with gap=true and dropped_count set (also stamped on the "
+    "first record); a restarted feed is epoch_changed=true, which is the only "
+    "way to tell a restart from a stall because the sequence is not persisted. "
+    "Resume with `resume_invocation`, which is data rather than a next[] step "
+    "because a next[] entry may not point back at the command serving it. The "
+    "record count is capped from a static worst-case record size BEFORE "
+    "anything is encoded and the built document is measured and shrunk if that "
+    "estimate was optimistic, so an over-budget batch is never returned empty. "
+    "`coverage` states which domains are sampled and why the rest are not; "
+    "`ignored_group` names the snapshot-meta group the diff skips, since its "
+    "clock moves on every sample and would make every tick a false change.",
+    ZCL_COMMAND_LIST_BUDGET,
+    "telemetry,watch,stream,changes,since,resume,cursor,epoch,gap",
+    "zcl.telemetry.watch.input.v1", "zcl.telemetry.change.v1",
+    "since,since_epoch,limit", "since",
+    "z23 ops telemetry watch --since=41",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_EFFECT_READ, ZCL_COMMAND_RISK_READ,
+    ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_MODE_STREAM, ZCL_COMMAND_LATENCY_FAST,
+    ZCL_COMMAND_COST_STREAM, ZCL_COMMAND_CONFIRM_NONE,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_DEV_STATE_READ, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    zcl_native_handle_telemetry_watch)

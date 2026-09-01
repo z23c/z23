@@ -52,11 +52,11 @@ dev.agent.mutate           exempt: edits one line of one CHECKOUT source file an
 ops.recovery.rebuild       exempt: refold reset, gated by copy-prove doctrine
 ops.mesh.pair.commit       exempt: node.db pairing AR write via mesh_pairing_service, no artifact install
 
-# ZCL app-feature writes (config/commands/app_features.def). None of them
+# ZCL app-feature writes (engine/composition/commands/app_features.def). None of them
 # installs a privileged datadir artifact, so every row stays `exempt` — the
 # disposition CLASS is unchanged, only the recorded rationale is refreshed
 # now that ten of the thirteen bind a real native handler
-# (app/controllers/src/app_write_native_handlers.c). The ZNAM rows are the
+# (engine/controllers/src/app_write_native_handlers.c). The ZNAM rows are the
 # same class as core.wallet.transaction.send: sign + broadcast, no install.
 app.names.register         exempt: signs+broadcasts an OP_RETURN tx, no privileged datadir install
 app.names.update           exempt: signs+broadcasts an OP_RETURN tx, no privileged datadir install
@@ -87,7 +87,7 @@ ops.debug.rom_seed.disable exempt: in-process policy flag flip + JSON persist, n
 ops.debug.rom_fetch.bundle exempt: downloads+content-verifies a file into the datadir only; activation is the separate receipt-gated -install-consensus-bundle path
 ops.debug.rom_seed.publish exempt: idempotent re-scan registering already-on-disk content-verified artifacts for serving; produces and installs nothing
 
-# Vault custody verbs (config/commands/vault.def). None of them builds, signs
+# Vault custody verbs (engine/composition/commands/vault.def). None of them builds, signs
 # or installs anything: each resolves the path that already owns the spend and
 # dispatches to it, so the Law-7 disposition of the routed leaf governs. If a
 # vault verb ever grows its own artifact install it stops being a route, and
@@ -101,7 +101,7 @@ vault.intent.commit        exempt: signs+broadcasts the exact planned transactio
 vault.swap.redeem          exempt: pure route to the swap_redeem RPC, which owns build/sign/broadcast
 vault.swap.refund          exempt: pure route to the swap_refund RPC, which owns build/sign/broadcast
 
-# Agent session grants (config/commands/vault.def). Minting/revoking writes an
+# Agent session grants (engine/composition/commands/vault.def). Minting/revoking writes an
 # agent_sessions ROW through the AR lifecycle — a scoped, revocable grant
 # record in node.db, not a privileged artifact installed over the datadir or
 # the running binary, and the row is itself fail-closed policy input (an
@@ -116,7 +116,7 @@ core.wallet.security.encrypt exempt: wallet-local WKS1 wrapping plus runtime loc
 core.wallet.security.unlock  exempt: bounded in-memory key residency, no artifact install
 core.wallet.security.lock    exempt: scrubs in-memory keys, no artifact install
 
-# Wallet key-disclosure and wallet-recovery leaves (config/commands/core.def).
+# Wallet key-disclosure and wallet-recovery leaves (engine/composition/commands/core.def).
 # None installs a privileged artifact over the datadir or the running binary.
 #
 # export-key was reclassified from EFFECT_READ/RISK_READ to

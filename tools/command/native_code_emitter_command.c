@@ -10,7 +10,7 @@
  * them were joined:
  *
  *   the SOURCE TEXT              which literal formatted the string
- *                                (lib/codeindex/src/codeindex_emitter.c)
+ *                                (cognition/modules/codeindex/src/codeindex_emitter.c)
  *   the codeindex symbol table   which function that literal sits in, and who
  *                                calls that function
  *   blocker_remedy_bindings.def  which blocker-id pattern owns the id, and
@@ -47,7 +47,7 @@
 #include <string.h>
 
 /* ── the blocker-remedy registry, expanded in place ──────────────────────
- * app/conditions/include/conditions/blocker_remedy_bindings.def is the ratchet
+ * engine/conditions/include/conditions/blocker_remedy_bindings.def is the ratchet
  * that requires every blocker id a production call site can build to declare
  * its remedy (condition name, ESCAPE(action), or the honest token OWNER). Its
  * rows are bare tokens, so they stringize; that is the whole projection. */
@@ -523,7 +523,7 @@ void zcl_native_handle_code_emitter(const struct zcl_command_request *request,
                            "longest-segment floor %d). Either retry with a "
                            "longer verbatim fragment (values included), or this "
                            "text is not ours: the scan covers lib/ app/ core/ "
-                           "config/ tools/ domain/ adapters/ src/ lib/test/ and "
+                           "config/ tools/ domain/ platform/adapters/ src/ tests/harness/include/test/ and "
                            "NOT vendor/, so a libsqlite3, OpenSSL or Tor message "
                            "resolves nowhere in-tree.",
                            scan.files_scanned, scan.best_rejected_chars,

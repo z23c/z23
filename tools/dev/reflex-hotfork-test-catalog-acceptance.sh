@@ -7,7 +7,7 @@ set -euo pipefail
 ROOT="${ZCL_SOURCE_ROOT:-$(pwd -P)}"
 BIN="${ZCL_DEV_BIN:-$ROOT/build/bin/zclassic23-dev}"
 SOURCE="$ROOT/tools/dev/test_group_catalog.c"
-UNRELATED="$ROOT/app/services/src/market_moderation_service.c"
+UNRELATED="$ROOT/contexts/market/services/src/market_moderation_service.c"
 OUTPUT="${ZCL_REFLEX_TEST_CATALOG_ACCEPTANCE_OUTPUT:-$ROOT/build/dev-loop/reflex-hotfork-test-catalog-acceptance.json}"
 
 fail() { printf 'reflex-hotfork-test-catalog-acceptance: %s\n' "$*" >&2; exit 2; }

@@ -3,7 +3,7 @@
 #
 # check_malloc.sh — bare malloc/calloc/realloc in app/tools code (Makefile
 # `check-malloc` gate). Every allocation must go through zcl_malloc/zcl_calloc/
-# zcl_realloc (lib/util safe_alloc) or carry a `raw-alloc-ok` marker. Extracted
+# zcl_realloc (platform/modules/util safe_alloc) or carry a `raw-alloc-ok` marker. Extracted
 # verbatim from the former inline Makefile recipe so the gate can run under
 # tools/lint/run_lint.sh (and standalone in ~ms without a Make parse).
 

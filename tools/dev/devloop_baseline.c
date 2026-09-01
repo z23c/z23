@@ -2,8 +2,8 @@
  *
  * devloop_baseline — the dev-loop's detach launcher for the generation-
  * neutral initial ZVCS baseline. This is the ONLY place the POSIX double-fork
- * mechanics live: lib/vcs/ must stay process-spawn
- * free (check-vcs-no-git — ZVCS sovereignty; lib/vcs is release-linkable),
+ * mechanics live: contexts/commons/modules/vcs/ must stay process-spawn
+ * free (check-vcs-no-git — ZVCS sovereignty; contexts/commons/modules/vcs is release-linkable),
  * so it exports a purely synchronous
  * vcs_devloop_run_initial_baseline(repo_root, out) and leaves detaching that
  * call to whoever wants it off their foreground path. The interactive dev

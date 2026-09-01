@@ -252,7 +252,7 @@ run_fuzz() {
     local failed_kinds=""
     for kind in $kinds; do
         local bin="$tree/build/bin/fuzz_$kind"
-        local seed_dir="$tree/lib/test/fuzz_seeds/$kind"
+        local seed_dir="$tree/tests/harness/fuzz_seeds/$kind"
         local work_dir
         work_dir="$(mktemp -d "${TMPDIR:-/tmp}/zcl_fuzz_${kind}.XXXXXX")"
         echo "=== $bin (${duration}s background lane) ===" | tee -a "$log"
@@ -283,7 +283,7 @@ run_fuzz() {
     # Triage step (final, always runs — best-effort, never flips the lane's
     # own verdict): promote every crash/timeout/oom artifact this run (or
     # any prior run) deposited under $ARTIFACT_DIR into the checked-in
-    # regression corpus lib/test/fuzz_seeds/<harness>/, deduped by content
+    # regression corpus tests/harness/fuzz_seeds/<harness>/, deduped by content
     # hash. Deliberately targets the REAL checkout ($SCRIPT_DIR is this
     # script's own tools/scripts/, i.e. $ROOT, not the throwaway isolated
     # $tree from prepare_lane_tree — that tree gets `reset --hard` + `clean
@@ -291,7 +291,7 @@ run_fuzz() {
     # discarded). See tools/scripts/promote_fuzz_artifacts.sh for the
     # dedup/size-cap contract; promoted seeds still need `git add` +
     # a commit to actually enter history.
-    echo "=== promote_fuzz_artifacts (triage $ARTIFACT_DIR -> lib/test/fuzz_seeds/) ===" | tee -a "$log"
+    echo "=== promote_fuzz_artifacts (triage $ARTIFACT_DIR -> tests/harness/fuzz_seeds/) ===" | tee -a "$log"
     "$SCRIPT_DIR/promote_fuzz_artifacts.sh" --artifact-dir="$ARTIFACT_DIR" 2>&1 | tee -a "$log" || true
 
     finished="$(utc_now)"

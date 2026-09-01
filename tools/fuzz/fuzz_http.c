@@ -10,7 +10,7 @@
  * door — was not.
  *
  * The on-the-wire request line + header parsing in
- * lib/net/src/https_server.c (read_line + `sscanf("%15s %2047s")`,
+ * core/modules/net/src/https_server.c (read_line + `sscanf("%15s %2047s")`,
  * then a drain-headers loop) is welded to the SSL/socket transport,
  * so it cannot be invoked as a (bytes,len) function directly. We
  * therefore reproduce that exact wire-parse here, byte-for-byte
@@ -75,7 +75,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size);
  *
  * "The contexts are zero-initialised, so no datadir, so no DB access" was not
  * true, and the cost of it being untrue was the whole harness. A NULL datadir
- * is not "no datadir": lib/storage/src/census_read.c census_datadir() falls
+ * is not "no datadir": engine/modules/storage/src/census_read.c census_datadir() falls
  * back to $HOME/.zclassic-c23, so `GET /explorer/network` opened the machine's
  * REAL node store — on the dev host that is the operator's live node, a 3.8 MB
  * topology.db plus peers_projection.db — and ran the census + topology
@@ -120,7 +120,7 @@ int LLVMFuzzerInitialize(int *argc, char ***argv)
     return 0;
 }
 
-/* read_line, faithful to lib/net/src/https_server.c:132. Reads from
+/* read_line, faithful to core/modules/net/src/https_server.c:132. Reads from
  * the byte buffer [*p, end), stops at '\n' (consumed), drops '\r',
  * NUL-terminates, and bounds at `max-1` bytes like the real reader.
  * Returns false at end-of-input with nothing buffered (mirrors the

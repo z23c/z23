@@ -1,0 +1,88 @@
+[Unit]
+Description=Z23 continuous verification watcher for checkout %i (verify-only; builds and tests nothing else)
+# One instance per checkout. The instance name is the directory name under
+# %h/github, so the lane in %h/github/zcl-w5-devd is:
+#
+#   systemctl --user start zcl-devd@zcl-w5-devd
+#
+# This unit runs NO node. It has no datadir, no P2P or RPC port, no wallet and
+# no network listener: it only watches source files and runs the same
+# verify-only cycle a developer would run by hand (tools/dev/watch-dev-lane.sh
+# in its default MODE=verify). It therefore cannot interact with the operator's
+# live node, %h/.zclassic-c23, %h/.zclassic, or any other lane's datadir.
+#
+# Deliberately NOT installable at boot: there is no [Install] section, so
+# `systemctl --user enable` refuses until the operator adds one on purpose.
+# Start it explicitly when wanted; it stops cleanly on SIGTERM.
+#
+# Install:
+#   cp platform/deploy/zcl-devd@.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user start zcl-devd@zcl-w5-devd
+#   systemctl --user status zcl-devd@zcl-w5-devd
+#   journalctl --user -u zcl-devd@zcl-w5-devd -f
+#
+# Remove completely:
+#   systemctl --user stop zcl-devd@zcl-w5-devd
+#   rm ~/.config/systemd/user/zcl-devd@.service
+#   systemctl --user daemon-reload
+#   rm -rf ~/.local/state/zclassic23-devd
+
+# A crashed watcher should come back, but a watcher that cannot start must not
+# spin: five failures in ten minutes and systemd gives up.
+StartLimitIntervalSec=600
+StartLimitBurst=5
+
+[Service]
+Type=simple
+WorkingDirectory=%h/github/%i
+
+# MODE=verify is the watcher's default and its safe one: it compiles and tests
+# but never stages, deploys, hot-swaps, or restarts anything. Runtime
+# publication modes are refused before compilation.
+Environment="ZCL_DEV_WATCH_MODE=verify"
+Environment="ZCL_DEV_WATCH_ROOT=%h/github/%i"
+Environment="ZCL_DEV_WATCH_STATE_DIR=%h/.local/state/zclassic23-devd/%i"
+
+# Bound the compile fan-out well below the 32-core box. Four sibling lanes and
+# the live node share this machine; CPUQuota is the hard ceiling and
+# ZCL_FAST_JOBS keeps make from spawning more than the quota can run.
+Environment="ZCL_FAST_JOBS=4"
+CPUQuota=400%
+CPUWeight=10
+IOWeight=10
+Nice=19
+IOSchedulingClass=idle
+IOSchedulingPriority=7
+# Sized to fit under check-systemd-memory-budget alongside the live node and
+# the dev lane: MemoryHigh applies backpressure first, MemoryMax is the hard
+# stop. A verify cycle compiles at -j4 and runs the test pool; if a future
+# group needs more than this the right answer is to raise the cap here on
+# purpose and re-run the budget gate, not to drop the cap.
+MemoryHigh=4G
+MemoryMax=6G
+MemorySwapMax=512M
+TasksMax=512
+OOMScoreAdjust=500
+
+ExecStart=%h/github/%i/tools/dev/watch-dev-lane.sh
+
+# The watcher handles SIGTERM cooperatively: it finishes or abandons the
+# current cycle, releases the checkout lock, and removes its singleton lock.
+KillMode=control-group
+TimeoutStopSec=180
+
+Restart=on-failure
+RestartSec=30
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+# Exactly the paths a verify cycle writes: the checkout's own build tree and
+# scratch, this instance's state directory, and the shared compiler cache.
+ReadWritePaths=%h/github/%i
+ReadWritePaths=%h/.local/state/zclassic23-devd
+ReadWritePaths=%h/.ccache
+
+StandardOutput=journal
+StandardError=journal

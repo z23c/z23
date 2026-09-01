@@ -116,10 +116,10 @@ if git -C "$ROOT" grep -Fq '$(BUILD_IDENTITY_STAMP) tools/package_verify.c $(ALL
     fail 'release package verifier recompiles the complete source tree'
 fi
 git -C "$ROOT" grep -q 'zclassic23-package-verify-dev' -- \
-    app/services/src/build_fabric_worker.c ||
+    engine/services/src/build_fabric_worker.c ||
     fail 'fixed worker does not resolve the development package verifier'
 git -C "$ROOT" grep -q 'PKGL_DEV_WORKER_NAME "zclassic23-package-verify-dev"' -- \
-    app/services/src/package_lifecycle_install.c ||
+    contexts/commons/services/src/package_lifecycle_install.c ||
     fail 'package lifecycle does not resolve the development package verifier'
 git -C "$ROOT" grep -q '\$(CC) \$(DEV_RESTART_CFLAGS) -Wno-deprecated-declarations' -- \
     Makefile ||

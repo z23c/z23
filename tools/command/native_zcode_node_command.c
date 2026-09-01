@@ -12,7 +12,7 @@
  *      -buildworker=1 on a box with no compiler advertises compile capacity
  *      that can never be delivered;
  *   3. persists -packagehost=1 (always) and -buildworker=1 (only when a
- *      compiler was found) into <datadir>/z23.conf, which src/main.c reads
+ *      compiler was found) into <datadir>/z23.conf, which engine/entry/main.c reads
  *      after ParseParameters so the next boot picks them up.
  *
  * ── WHAT IT DELIBERATELY DOES NOT DO ──────────────────────────────────────
@@ -24,12 +24,12 @@
  *
  * ── THE TWO TIERS, REPORTED BY NAME ───────────────────────────────────────
  * SWARM needs only -packagehost=1 and rides ordinary P2P peers (gated at
- * config/src/boot_zcode_swarm.c:494 and :776). No coins, no on-chain
+ * engine/composition/src/boot_zcode_swarm.c:494 and :776). No coins, no on-chain
  * identity, no invitation. That is the tier `join` actually delivers.
  *
  * DHT additionally needs -noisetransport plus an ACTIVE on-chain ZID anchor,
  * whose registration spends a fee (chain check
- * config/src/boot_zcode_dht_chain.c:124-155). It is reported as an OPTIONAL
+ * engine/composition/src/boot_zcode_dht_chain.c:124-155). It is reported as an OPTIONAL
  * named upgrade and is never presented as a blocker for joining: a node that
  * cannot afford an anchor is still a full member of the swarm.
  */
@@ -593,7 +593,7 @@ void zcl_native_handle_zcode_node_join(
     }
 
     /* ONE typed next command, hard-validated against the registry
-     * (lib/kernel/src/command_registry.c:1993-2034) rather than an untyped
+     * (engine/modules/kernel/src/command_registry.c:1993-2034) rather than an untyped
      * next_safe_command string: after the restart, `zcode package offered`
      * reports the same posture plus the resident engine and eligible peer
      * facts needed to distinguish configured hosting from live service.

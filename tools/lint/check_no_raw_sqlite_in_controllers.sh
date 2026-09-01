@@ -18,17 +18,16 @@ cd "$ROOT"
 source tools/lint/scan_exclusions.sh
 # shellcheck source=tools/lint/gate_lib.sh
 source tools/lint/gate_lib.sh
+# shellcheck source=tools/lint/repo_shape.sh
+source tools/lint/repo_shape.sh
 
 # Load baseline (set of relative file paths allowed to carry raw sqlite).
 declare -A BASELINED=()
 gate_load_list_file "$BASELINE" BASELINED
 
-roots=()
-for root in app/controllers; do
-    [[ -d "$root" ]] && roots+=("$root")
-done
+mapfile -t roots < <(repo_shape_room_dirs controllers)
 set +e
-scan_files=$(find app/controllers -type f \( -name '*.c' -o -name '*.h' \) \
+scan_files=$(find "${roots[@]}" -type f \( -name '*.c' -o -name '*.h' \) \
     -print 2>/dev/null)
 find_rc=$?
 set -e
@@ -57,7 +56,8 @@ fi
 # catches case changes, split string literals, and generic SQL forwarding
 # helpers without banning legitimate high-level mentions of the receipt.
 set +e
-context_files=$(find app/controllers app/services -type f \
+mapfile -t context_roots < <({ repo_shape_room_dirs controllers; repo_shape_room_dirs services; } | sort -u)
+context_files=$(find "${context_roots[@]}" -type f \
     \( -name '*.c' -o -name '*.h' \) -print 2>/dev/null)
 context_find_rc=$?
 set -e
@@ -98,9 +98,9 @@ if [[ -n "${matches//[[:space:]]/}" ]]; then
         # ad-hoc SQL. Unlike the remaining grandfathered read-only controller
         # projections, neither an inline exception nor a baseline entry can
         # reopen this dependency.
-        if [[ "$file" == app/controllers/src/sync_controller*.c ||
-              "$file" == app/controllers/src/sync_controller*.h ||
-              "$file" == app/controllers/include/controllers/sync_controller*.h ]]; then
+        if [[ "$file" == */controllers/src/sync_controller*.c ||
+              "$file" == */controllers/src/sync_controller*.h ||
+              "$file" == */controllers/include/controllers/sync_controller*.h ]]; then
             violations=$((violations + 1))
             echo "$line" >&2
             continue

@@ -8,13 +8,13 @@
   (capability service fabric — the sandboxed program tier), the consensus
   parity doctrine ([`CONSENSUS_PARITY_DOCTRINE.md`](../CONSENSUS_PARITY_DOCTRINE.md)),
   and the software-anchoring overlay ([`SOFTWARE_ANCHORING.md`](../SOFTWARE_ANCHORING.md)).
-- **Enabled by:** the overlay SDK (`lib/overlay/`), the generalized
-  authority-receipt idiom (`lib/util/authority_receipt.*`), and the
-  sandbox/hotload program tier (`lib/hotswap/`, `os_sandbox`).
-- **Related primitives already in tree:** `lib/script/src/htlc.c`
-  (HTLC build/redeem/refund + secret extraction), `app/controllers/src/anchor_controller.c`
+- **Enabled by:** the overlay SDK (`engine/modules/overlay/`), the generalized
+  authority-receipt idiom (`platform/modules/util/authority_receipt.*`), and the
+  sandbox/hotload program tier (`engine/modules/hotswap/`, `os_sandbox`).
+- **Related primitives already in tree:** `core/modules/script/src/htlc.c`
+  (HTLC build/redeem/refund + secret extraction), `engine/controllers/src/anchor_controller.c`
   (ZANC on-chain software anchoring), the P2P messaging channels
-  (`lib/net/src/zmsg.c`), and the file-market chunk-unlock-on-payment path
+  (`core/modules/net/src/zmsg.c`), and the file-market chunk-unlock-on-payment path
   (`file_service.c` → `handle_zfilepay`).
 
 ---
@@ -56,7 +56,7 @@ participates in all three tiers; there is no privileged coordinator.
 A contract program is a **deterministic, sandboxed state-transition function**:
 `f(state, input) -> (state', output)`, pure over its declared inputs, with no
 clock, RNG, network, or filesystem authority except what the capability fabric
-grants (ADR-0004). It is a hotloadable module (`lib/hotswap/`) whose bytes are
+grants (ADR-0004). It is a hotloadable module (`engine/modules/hotswap/`) whose bytes are
 **content-addressed and ZANC-anchored on-chain**, so both counterparties prove
 they are running byte-identical logic by comparing one SHA3 digest against the
 chain — no "did you run the real code?" trust.
@@ -74,7 +74,7 @@ Two (or N) nodes:
 1. **Discover** — a node advertises which programs (by ZANC digest) it offers
    as services, gossiped via an overlay built on the OS-D1 overlay SDK.
 2. **Open** — the parties agree on a program digest, fund an on-chain escrow
-   (a 2-of-2 output, or an HTLC via `lib/script/src/htlc.c`), and exchange a
+   (a 2-of-2 output, or an HTLC via `core/modules/script/src/htlc.c`), and exchange a
    co-signed genesis state.
 3. **Execute** — off-chain, each party runs the *same* Tier-1 program locally
    on shared inputs, obtains the *same* output, and co-signs the new state.
@@ -184,9 +184,9 @@ a projection folded from settled contracts.
 - **New surface to build (ordered):** (1) the overlay SDK as the
   service-advertisement and oracle-outcome-publication substrate (landed);
   (2) the authority-receipt idiom as the co-signed-state binder (landed);
-  (3) an adaptor-signature primitive (`lib/script/`, new) — the one genuinely
+  (3) an adaptor-signature primitive (`core/modules/script/`, new) — the one genuinely
   new cryptographic piece, itself consensus-parity-neutral (it produces
-  standard signatures); (4) a channel state machine (`app/services/`, new) for
+  standard signatures); (4) a channel state machine (`engine/services/`, new) for
   open/update/cooperative-close/dispute; (5) a deterministic oracle-program
   registry over the sandbox + ZANC.
 - **Determinism becomes a hard contract, not a convention.** Contract programs
@@ -201,16 +201,16 @@ a projection folded from settled contracts.
 
 ## Verification notes (what this ADR could and could not confirm)
 
-- **Confirmed by reading code:** `lib/script/include/script/htlc.h` exposes
+- **Confirmed by reading code:** `core/modules/script/include/script/htlc.h` exposes
   `htlc_build_script`, `htlc_build_redeem_scriptsig`, `htlc_build_refund_scriptsig`,
   `htlc_extract_secret`, and `htlc_generate_secret` — the HTLC + secret
-  machinery the settlement/dispute tier reuses; `app/controllers/src/anchor_controller.c`
+  machinery the settlement/dispute tier reuses; `engine/controllers/src/anchor_controller.c`
   provides `anchor_publish`/`anchor_verify`/`anchor_self` for ZANC content
-  anchoring; the P2P messaging channels exist in `lib/net/src/zmsg.c`.
+  anchoring; the P2P messaging channels exist in `core/modules/net/src/zmsg.c`.
 - **Design-only, not yet implemented:** the adaptor-signature primitive, the
   channel state machine, and the oracle-program registry do not exist in the
-  tree. The overlay SDK (`lib/overlay/`) and authority-receipt primitive
-  (`lib/util/authority_receipt.*`) are landed prerequisites this ADR builds on.
+  tree. The overlay SDK (`engine/modules/overlay/`) and authority-receipt primitive
+  (`platform/modules/util/authority_receipt.*`) are landed prerequisites this ADR builds on.
 - **Not evaluated here:** the precise adaptor-signature scheme (Schnorr vs
   ECDSA adaptor) and its interaction with ZClassic's signature format — that is
   the first design question of the implementation program this ADR authorizes,

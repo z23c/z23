@@ -1,6 +1,6 @@
 # Simulator Transaction Toolkit
 
-`lib/sim` now has a small transparent-transaction toolkit for deterministic
+`engine/modules/sim` now has a small transparent-transaction toolkit for deterministic
 simnet tests. The harness still mints through the real `connect_block(...)`
 path with `expensive_checks=false`, so transaction structure, values,
 outpoints, scripts, finality, and coinbase maturity matter; PoW and script
@@ -76,7 +76,7 @@ Measured by `test_simnet_txkit` at the default fee rate:
 | HTLC refund path | 292 | 0.00002920 | 3 | 7.5 |
 | chained spend after mint | 87 | 0.00000870 | 2 | 5.0 |
 
-The HTLC rows use the real builders in `lib/script/src/htlc.c` for the contract,
+The HTLC rows use the real builders in `core/modules/script/src/htlc.c` for the contract,
 redeem scriptSig, and refund scriptSig. The refund row uses a lock height three
 blocks past the funding setup in the test, so it is only accepted after
 `simnet_mint_to_height` advances past the lock boundary.

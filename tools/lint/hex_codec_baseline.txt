@@ -1,5 +1,5 @@
 # check_hex_codec_single baseline — production files that still carry their own
-# hex encode/decode instead of lib/base/include/base/hex.h.
+# hex encode/decode instead of platform/modules/base/include/base/hex.h.
 # One path per line. THE LIST MAY ONLY SHRINK.
 #
 # Fix a row by deleting the private codec and calling:
@@ -9,6 +9,6 @@
 #   zcl_hex_decode_n(hex, out, cap, &n)   1..cap bytes
 # then delete the line here. Adding a row is not a fix.
 # Regenerate: ZCL_LINT_MODE=UPDATE tools/lint/check_hex_codec_single.sh
-app/views/src/explorer_factoids_difficulty.c
-config/src/consensus_state_producer_status.c
-lib/encoding/src/utilstrencodings.c
+contexts/explorer/views/src/explorer_factoids_difficulty.c
+engine/composition/src/consensus_state_producer_status.c
+platform/modules/encoding/src/utilstrencodings.c

@@ -111,7 +111,7 @@ same host. All five passed: `test_crypto_registry`, `test_dev_platform`, and
 lint-gate shards 03, 06, and 07. The crypto benchmark still records elapsed
 time, but its correctness verdict now requires exact successful operation
 counts instead of comparing scheduler-sensitive wall-clock intervals. The
-file-size gate passed at the existing application/config baseline and the
+file-size gate passed at the existing engine/application/config baseline and the
 existing 22/22 library drift ratchet; neither acceptance threshold changed.
 The following pre-push shell phase caught a whitespace-only drift in sealed
 `connect_block.c` before publication. Restoring its exact manifest bytes made

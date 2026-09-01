@@ -4,7 +4,7 @@
 #
 # Why this gate exists
 # --------------------
-# Three boot refusals in config/src/boot.c told the operator
+# Three boot refusals in engine/composition/src/boot.c told the operator
 # "To recover: see WALLET_PERSISTENCE_RECOVERY.md". No such file has ever
 # existed in this repository. The refusals were on the wallet path — the node
 # stops there precisely because private keys are on disk and it will not write
@@ -84,8 +84,8 @@ while IFS= read -r file; do
             done
         done <<< "$literals"
     done < "$file"
-done < <(git ls-files '*.c' '*.h' | grep -v '^lib/test/')
-# lib/test/ is excluded: its literals are fixture paths the test itself
+done < <(git ls-files '*.c' '*.h' | grep -v '^tests/harness/')
+# tests/harness/ is excluded: its literals are fixture paths the test itself
 # creates and removes (docs/notes.md, .claude/commands/kept.md, test-tmp/*.md).
 # Those never reach an operator, and asserting they exist at lint time would be
 # asserting the opposite of what the tests are for.

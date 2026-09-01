@@ -29,7 +29,7 @@
 # ---------------------------------------------------------------
 #   expectation_match  drop-in ZCL_AGENT_EXPECT_SOURCE_ID vs running
 #                      -> "does the box still run what the box was told to run"
-#   pin_match          deploy/release-candidates.jsonl vs running
+#   pin_match          platform/deploy/release-candidates.jsonl vs running
 #                      -> "does the box run the CANDIDATE under proof"
 #   tree_distance      commits between the pinned commit and repo HEAD
 #                      -> "how far has development moved past what is running"
@@ -58,7 +58,7 @@
 # Env:
 #   ZCL_DRIFT_LEDGER_DIR    ledger dir (default ~/.local/state/zclassic23-drift)
 #   ZCL_DRIFT_UNIT          unit to inspect (default zclassic23)
-#   ZCL_DRIFT_PIN_FILE      candidate pin record (default deploy/release-candidates.jsonl)
+#   ZCL_DRIFT_PIN_FILE      candidate pin record (default platform/deploy/release-candidates.jsonl)
 #   ZCL_DRIFT_PIN_TAG       pin a specific rc- tag (default: last line of pin file)
 #   ZCL_DRIFT_ROTATE_BYTES  rotation threshold (default 52428800)
 
@@ -75,7 +75,7 @@ UNIT="${ZCL_DRIFT_UNIT:-zclassic23}"
 LEDGER_DIR="${ZCL_DRIFT_LEDGER_DIR:-${HOME:-/root}/.local/state/zclassic23-drift}"
 LEDGER_FILE="$LEDGER_DIR/build-drift-ledger.jsonl"
 ROTATE_BYTES="${ZCL_DRIFT_ROTATE_BYTES:-52428800}"
-PIN_FILE="${ZCL_DRIFT_PIN_FILE:-$REPO/deploy/release-candidates.jsonl}"
+PIN_FILE="${ZCL_DRIFT_PIN_FILE:-$REPO/platform/deploy/release-candidates.jsonl}"
 PIN_TAG="${ZCL_DRIFT_PIN_TAG:-}"
 
 fail() { echo "build-drift-probe: FAIL $*" >&2; exit 1; }

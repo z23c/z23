@@ -8,7 +8,7 @@
 # --------------
 # Each stage-log store records per-height witness rows in a table whose
 # PRIMARY KEY is `height` and writes them with `INSERT OR REPLACE` (verified
-# this run, e.g. app/jobs/src/utxo_apply_log_store.c:18 `height INTEGER
+# this run, e.g. engine/jobs/src/utxo_apply_log_store.c:18 `height INTEGER
 # PRIMARY KEY` + :68 `INSERT OR REPLACE INTO utxo_apply_log`). That UPSERT
 # is keyed by height alone, so a reorg that re-applies a DIFFERENT block at
 # the same height silently overwrites the prior witness instead of being a
@@ -49,14 +49,14 @@ cd "$REPO_ROOT"
 BASELINE=8
 
 FILES=(
-    app/models/src/header_admit_log.c
-    app/jobs/src/body_fetch_log_store.c
-    app/jobs/src/script_validate_log_store.c
-    app/jobs/src/utxo_apply_log_store.c
-    app/jobs/src/validate_headers_log_store.c
-    app/jobs/src/tip_finalize_log_store.c
-    app/jobs/src/proof_validate_log_store.c
-    app/jobs/src/body_persist_log_store.c
+    engine/models/src/header_admit_log.c
+    engine/jobs/src/body_fetch_log_store.c
+    engine/jobs/src/script_validate_log_store.c
+    engine/jobs/src/utxo_apply_log_store.c
+    engine/jobs/src/validate_headers_log_store.c
+    engine/jobs/src/tip_finalize_log_store.c
+    engine/jobs/src/proof_validate_log_store.c
+    engine/jobs/src/body_persist_log_store.c
 )
 
 # Optional override of the tracked FILES set (space-separated) so the lint-gate

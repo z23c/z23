@@ -128,7 +128,7 @@ in the logs. That is the worst possible failure mode, and it is exactly what an
 AI agent writing a plausible witness function will produce by default.
 
 **What it does.** For every `static bool witness_<name>(...)` in
-`app/conditions/src/*.c`, the gate extracts the function body and fails it if
+`engine/conditions/src/*.c`, the gate extracts the function body and fails it if
 **any** of three properties hold:
 
 1. **TRIVIAL** — every return is a bare `return true;` / `return false;`. A
@@ -145,7 +145,7 @@ state-machine reads (`sync_get_state()`) and poison-flag reads do **not**
 count as observing progress. They are precisely what the three broken witnesses
 were doing.
 
-The exemplar of an honest witness is `app/conditions/src/block_failed_mask_at_tip.c`:
+The exemplar of an honest witness is `engine/conditions/src/block_failed_mask_at_tip.c`:
 `current_tip_height(ms) > g_tip_at_detect` — the tip moved. That is a fact about
 the world, not about the healer.
 
@@ -217,7 +217,7 @@ remains the rule for the entry documents regardless of gate coverage.
 **The failure it was written for.** From the script's header: on 2026-06-22,
 three test entry points — `test_refold_from_anchor_fatal`,
 `test_refold_auto_arm`, and `test_anchor_selfmint` — lived in dedicated
-`lib/test/src/test_<name>.c` files and were **compiled and linked into the test
+`tests/harness/src/test_<name>.c` files and were **compiled and linked into the test
 binaries**, yet appeared in neither the canonical test group catalog of the parallel
 runner nor the legacy serial runner's dispatch. They had been written,
 reviewed, and merged. *"They therefore proved NOTHING — green forever, never
@@ -231,7 +231,7 @@ that gets dropped. The failure is silent and permanent, and it makes the suite
 an unregistered test is a false assurance.
 
 **What it does.** It enumerates every filename-matching entry point (a
-`lib/test/src/test_<name>.c` defining `int test_<name>(void)`) and requires each
+`tests/harness/src/test_<name>.c` defining `int test_<name>(void)`) and requires each
 to be dispatched by at least one runner — registered as
 `ZCL_TEST_GROUP(<name>)` in `tools/dev/test_group_catalog.def`, or called as
 `test_<name>()` from `test.c`. Anything

@@ -103,7 +103,7 @@ domain_consensus_signature_hash_version(const struct transaction *tx);
  * clock).
  *
  * Bit-for-bit equivalent to validation/sighash.h:signature_hash and
- * pinned by lib/test/src/test_domain_consensus_sighash.c. */
+ * pinned by tests/harness/src/test_domain_consensus_sighash.c. */
 bool domain_consensus_signature_hash(
         const struct script *script_code,
         const struct transaction *tx,

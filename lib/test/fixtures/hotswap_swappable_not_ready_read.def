@@ -1,8 +1,0 @@
-/* Lint-gate fixture: an in-shape controller TU whose swappable leaf list names
- * a leaf that is NOT declared with ZCL_COMMAND_READY_READ (core.wallet.transaction.send
- * is a ZCL_COMMAND_READY_COMMAND mutating leaf). Used by the
- * check_hotswap_swappable_shape self-test to prove the READY-read-only half of
- * the hard line trips (exit 1) — the hole that existed while the gate checked
- * shape folders only. NOT a real allowlist. */
-HOTSWAP_SWAPPABLE("app/controllers/src/status_native_handlers.c",
-                  "core.status core.wallet.transaction.send")

@@ -6,8 +6,8 @@ set -euo pipefail
 
 ROOT="${ZCL_SOURCE_ROOT:-$(pwd -P)}"
 BIN="${ZCL_DEV_BIN:-$ROOT/build/bin/zclassic23-dev}"
-SOURCE="$ROOT/app/controllers/src/shop_native_reputation.c"
-UNRELATED="$ROOT/app/services/src/market_moderation_service.c"
+SOURCE="$ROOT/contexts/market/controllers/src/shop_native_reputation.c"
+UNRELATED="$ROOT/contexts/market/services/src/market_moderation_service.c"
 OUTPUT="${ZCL_REFLEX_SHOP_REPUTATION_ACCEPTANCE_OUTPUT:-$ROOT/build/dev-loop/reflex-hotfork-shop-reputation-acceptance.json}"
 STORY='shop-reputation-view-contract.v1'
 
@@ -71,7 +71,7 @@ drive_candidate()
         fail "candidate did not return bound $expected: $(jq -c . <<<"$result")"
 }
 
-green="$(mktemp "$ROOT/app/controllers/src/.reflex-shop-reputation-green.XXXXXX")"
+green="$(mktemp "$ROOT/engine/controllers/src/.reflex-shop-reputation-green.XXXXXX")"
 cp -p -- "$backup" "$green"
 printf '\n/* ZCL_REFLEX_SHOP_REPUTATION_ACCEPTANCE:%s */\n' "$nonce" >>"$green"
 drive_candidate "$green" STORY_GREEN
@@ -93,14 +93,14 @@ done
 jq -e --arg story "$STORY" '.ok==true and (.data.story_id//"")!=$story' \
     <<<"$unrelated_event" >/dev/null || fail 'unrelated owner was falsely attributed'
 
-unrelated_proof="$(mktemp "$ROOT/app/controllers/src/.reflex-shop-reputation-unrelated-proof.XXXXXX")"
+unrelated_proof="$(mktemp "$ROOT/engine/controllers/src/.reflex-shop-reputation-unrelated-proof.XXXXXX")"
 cp -p -- "$backup" "$unrelated_proof"
 printf '\n/* ZCL_REFLEX_SHOP_REPUTATION_ACCEPTANCE:%s */\n' "$nonce" >>"$unrelated_proof"
 drive_candidate "$unrelated_proof" STORY_GREEN
 unrelated_result="$result"
 unrelated_raw="$($BIN dev loop wait --input="{\"after_epoch\":$((after-1)),\"timeout_ms\":100}")"
 
-mutant="$(mktemp "$ROOT/app/controllers/src/.reflex-shop-reputation-red.XXXXXX")"
+mutant="$(mktemp "$ROOT/engine/controllers/src/.reflex-shop-reputation-red.XXXXXX")"
 cp -p -- "$SOURCE" "$mutant"
 perl -0pi -e 's/result\.row_count != SHOP_REPUTATION_VIEW_ROW_COUNT/result.row_count == SHOP_REPUTATION_VIEW_ROW_COUNT/' "$mutant"
 [[ "$(LC_ALL=C grep -c 'result.row_count == SHOP_REPUTATION_VIEW_ROW_COUNT' "$mutant")" -eq 1 ]] ||
@@ -108,7 +108,7 @@ perl -0pi -e 's/result\.row_count != SHOP_REPUTATION_VIEW_ROW_COUNT/result.row_c
 drive_candidate "$mutant" STORY_RED
 red_result="$result"
 
-revert="$(mktemp "$ROOT/app/controllers/src/.reflex-shop-reputation-revert.XXXXXX")"
+revert="$(mktemp "$ROOT/engine/controllers/src/.reflex-shop-reputation-revert.XXXXXX")"
 cp -p -- "$backup" "$revert"
 printf '\n/* ZCL_REFLEX_SHOP_REPUTATION_ACCEPTANCE:%s */\n' "$nonce" >>"$revert"
 drive_candidate "$revert" STORY_GREEN
@@ -127,7 +127,7 @@ for raw in "$unrelated_raw" "$revert_raw"; do
 done
 
 mkdir -p "$(dirname "$OUTPUT")"
-jq -n --arg owner 'app/controllers/src/shop_native_reputation.c' \
+jq -n --arg owner 'contexts/market/controllers/src/shop_native_reputation.c' \
   --argjson green "$green_result" --argjson red "$red_result" \
   --argjson unrelated "$unrelated_result" --argjson unrelated_raw "$unrelated_raw" \
   --argjson revert "$revert_result" --argjson revert_raw "$revert_raw" '

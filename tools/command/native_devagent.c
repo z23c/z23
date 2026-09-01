@@ -335,7 +335,7 @@ bool zcl_devagent_checkout_root(const char *start, char *out, size_t out_cap)
      * becomes a hang. */
     for (int depth = 0; depth < 40; depth++) {
         if (dva_marker_present(dir, "Makefile") &&
-            dva_marker_present(dir, "config/commands/root.def") &&
+            dva_marker_present(dir, "engine/composition/commands/root.def") &&
             dva_marker_present(dir, "tools/dev/test_group_catalog.def")) {
             int n = snprintf(out, out_cap, "%s", dir);
             return n > 0 && (size_t)n < out_cap;

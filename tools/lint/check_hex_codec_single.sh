@@ -4,13 +4,13 @@
 # What it enforces
 # ----------------
 # Base-16 encode/decode of a byte buffer lives in exactly one place:
-# lib/base/include/base/hex.h (zcl_hex_encode / zcl_hex_decode /
+# platform/modules/base/include/base/hex.h (zcl_hex_encode / zcl_hex_decode /
 # zcl_hex_decode_lower / zcl_hex_decode_n / zcl_hex_nibble). No production
-# file outside lib/base may carry its own.
+# file outside platform/modules/base may carry its own.
 #
 # Why
 # ---
-# lib/encoding exported only the raw `p_util_hexdigit` lookup table, never a
+# platform/modules/encoding exported only the raw `p_util_hexdigit` lookup table, never a
 # bytes<->hex function, so every module that needed one wrote it again.
 # Measured when this gate was written: 56 files. They did not agree —
 # some validated the input length, some did not; some accepted A-F, some
@@ -38,8 +38,8 @@
 # harmless here — a file with no codec matches neither detector.
 #
 # Excluded from the scan, with reasons:
-#   lib/base/  — the canonical home. It IS the codec.
-#   lib/test/  — a test fixture must parse its known-answer vectors with an
+#   platform/modules/base/  — the canonical home. It IS the codec.
+#   tests/harness/include/test/  — a test fixture must parse its known-answer vectors with an
 #                implementation independent of the one under test. Checking
 #                zcl_hex_decode with zcl_hex_decode proves nothing.
 #
@@ -58,12 +58,15 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 # shellcheck source=tools/lint/gate_lib.sh
 . tools/lint/gate_lib.sh
+# shellcheck source=tools/lint/repo_shape.sh
+. tools/lint/repo_shape.sh
 
 GATE=check_hex_codec_single
 MODE="${ZCL_LINT_MODE:-FAIL}"
 BASELINE="${ZCL_HEX_CODEC_BASELINE:-tools/lint/hex_codec_baseline.txt}"
 
-SCAN_ROOTS_DEFAULT="app config lib src tools"
+SCAN_ROOTS_DEFAULT="$(repo_shape_dirs app | tr '\n' ' ')${ZCL_MODULE_DIRS[*]} engine/composition engine/entry tools"
+SCAN_ROOTS_REDUCED="${SCAN_ROOTS_DEFAULT% tools}"
 read -r -a SCAN_ROOTS <<< "${ZCL_HEX_CODEC_SCAN_ROOTS:-$SCAN_ROOTS_DEFAULT}"
 
 RE_TABLE="0123456789(abcdef|ABCDEF)"
@@ -75,14 +78,14 @@ RE_SCANF='"%2x"'
 if [ "${1:-}" = "--selftest" ]; then
     tmp="$(mktemp -d)"
     trap 'rm -rf "$tmp"' EXIT
-    mkdir -p "$tmp/app/services/src"
+    mkdir -p "$tmp/engine/services/src"
     self="$PWD/tools/lint/$GATE.sh"
     : > "$tmp/empty_baseline.txt"
 
-    plant() { printf '%s\n' "$1" > "$tmp/app/services/src/selftest_hex.c"; }
+    plant() { printf '%s\n' "$1" > "$tmp/engine/services/src/selftest_hex.c"; }
 
     run_sandbox() {
-        ZCL_HEX_CODEC_SCAN_ROOTS="$tmp/app" \
+        ZCL_HEX_CODEC_SCAN_ROOTS="$tmp/engine" \
         ZCL_HEX_CODEC_COVERAGE=0 \
         ZCL_HEX_CODEC_FILE_FLOOR=1 \
         ZCL_HEX_CODEC_BASELINE="$tmp/empty_baseline.txt" \
@@ -170,7 +173,7 @@ static void emit(const unsigned char id[32], char out[65])
     #     root dropped) is UNPROVEN exit 2 — never 0, never 1. The floor
     #     cannot see this: the reduced set still towers over 800.
     cov_case 2 "a scan missing a whole declared root was not UNPROVEN" \
-        ZCL_HEX_CODEC_SCAN_ROOTS="app config lib src" ZCL_HEX_CODEC_FILE_FLOOR=1
+        ZCL_HEX_CODEC_SCAN_ROOTS="$SCAN_ROOTS_REDUCED" ZCL_HEX_CODEC_FILE_FLOOR=1
     # (c) a shortfall SMALLER than the recorded allowance is a stale
     #     ratchet, exit 1 — an allowance that may only rise rusts shut.
     cov_case 1 "an allowance above the true shortfall was silently tolerated" \
@@ -186,8 +189,9 @@ collect_files() {
     for root in "${SCAN_ROOTS[@]}"; do
         [ -d "$root" ] || continue
         find "$root" \( -name '*.c' -o -name '*.h' \) -type f \
-            ! -path 'lib/base/*' \
-            ! -path 'lib/test/*' \
+            ! -path 'platform/modules/base/*' \
+            ! -path 'contexts/commons/packages/*' \
+            ! -path 'tests/harness/include/test/*' \
             2>/dev/null
     done
 }
@@ -207,14 +211,14 @@ gate_require_scanned "${#scan_files[@]}" "${ZCL_HEX_CODEC_FILE_FLOOR:-800}" "$GA
 # The expectation is derived from the git index, which knows nothing about
 # the find above — the two cannot fail together, which is the whole point of
 # an independent oracle. It is derived from SCAN_ROOTS_DEFAULT and the same
-# lib/base + lib/test carve-outs the find applies, never from the
+# platform/modules/base + lib/test carve-outs the find applies, never from the
 # (overridable) SCAN_ROOTS actually in use, so aiming this gate at a subset
 # reads as a shortfall rather than as a quiet redefinition of "covered".
 #
-# Scope, unchanged. lib/base is carved out because it DEFINES the canonical
+# Scope, unchanged. platform/modules/base is carved out because it DEFINES the canonical
 # codec this gate requires callers to use, lib/test because a fixture may
 # legitimately hand-roll one. Tracked sources outside SCAN_ROOTS_DEFAULT
-# (core/, domain/, adapters/, packages/, examples/) were never in this
+# (core/, domain/, platform/adapters/, contexts/commons/packages/, examples/) were never in this
 # gate's declared surface and are not added here — widening the roots is a
 # separate, riskier change needing its own clean-tree proof.
 #
@@ -227,10 +231,10 @@ if [ "${ZCL_HEX_CODEC_COVERAGE:-1}" = "1" ]; then
     for cov_root in $SCAN_ROOTS_DEFAULT; do
         cov_specs+=("$cov_root/*.c" "$cov_root/*.h")
     done
-    cov_specs+=(':!:lib/base/*' ':!:lib/test/*')
+    cov_specs+=(':!:platform/modules/base/*' ':!:contexts/commons/packages/*' ':!:tests/harness/include/test/*')
     gate_require_git_coverage - "$HEX_CODEC_COVERAGE_ALLOWANCE" "$GATE" \
         ZCL_HEX_CODEC_COVERAGE_ALLOWANCE \
-        "Re-run from a clean checkout. A named file that genuinely left this gate's surface belongs outside $SCAN_ROOTS_DEFAULT or in an explicit carve-out beside lib/base and lib/test — not in a raised allowance." \
+        "Re-run from a clean checkout. A named file that genuinely left this gate's surface belongs outside $SCAN_ROOTS_DEFAULT or in an explicit carve-out beside platform/modules/base and lib/test — not in a raised allowance." \
         -- "${cov_specs[@]}" < <(printf '%s\n' "${scan_files[@]}")
 fi
 
@@ -270,7 +274,7 @@ done
 if [ "$MODE" = "UPDATE" ]; then
     {
         echo "# $GATE baseline — production files that still carry their own"
-        echo "# hex encode/decode instead of lib/base/include/base/hex.h."
+        echo "# hex encode/decode instead of platform/modules/base/include/base/hex.h."
         echo "# One path per line. THE LIST MAY ONLY SHRINK."
         echo "#"
         echo "# Fix a row by deleting the private codec and calling:"
@@ -290,7 +294,7 @@ fail=0
 if [ "${#violations[@]}" -gt 0 ]; then
     echo ""
     echo "[$GATE] ${#violations[@]} file(s) carry a private hex encoder or"
-    echo "        decoder outside lib/base:"
+    echo "        decoder outside platform/modules/base:"
     printf '  %s\n' "${violations[@]}" | sort
     echo ""
     echo "  Delete it and include \"base/hex.h\" instead:"

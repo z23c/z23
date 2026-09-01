@@ -8,7 +8,7 @@
  * -D_POSIX_C_SOURCE=200809L declares it nowhere. Without this the file
  * compiles by accident of optimisation and breaks at -O0, under
  * -U_FORTIFY_SOURCE, and on any non-glibc libc. It must precede every
- * include: after them it does nothing. See lib/util/src/hw_profile.c. */
+ * include: after them it does nothing. See platform/modules/util/src/hw_profile.c. */
 #if !defined(_WIN32) && !defined(_DEFAULT_SOURCE)
 #define _DEFAULT_SOURCE
 #endif

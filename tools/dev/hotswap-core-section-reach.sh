@@ -24,7 +24,7 @@
 #                compiled INTO the module. There is no dynamic symbol for this,
 #                so CALL reach alone would miss it entirely.
 #
-# Island modules (config/hotswap_islands.def) are compiled as a unity TU; the
+# Island modules (engine/composition/hotswap_islands.def) are compiled as a unity TU; the
 # COMPILE axis unions the owner TU and every island member, matching the real
 # `hotswap-module-so` recipe.
 #
@@ -40,8 +40,8 @@ REPO=$(cd -- "$(dirname -- "$0")/../.." && pwd)
 cd -- "$REPO"
 
 MANIFEST=core/MANIFEST.sha3
-SWAPPABLE=config/hotswap_swappable.def
-ISLANDS=config/hotswap_islands.def
+SWAPPABLE=engine/composition/hotswap_swappable.def
+ISLANDS=engine/composition/hotswap_islands.def
 SO_DIR=build/hotswap
 CMD_DIR=build/hotswap/fast
 OBJ_ROOT=build/node-obj/epochs
@@ -105,7 +105,7 @@ printf '#   nm                 %s\n' "$(nm --version 2>/dev/null | head -1)"
 # module manifests and the compiled pin header carry the ROOT they were built
 # against; compare all three and say so out loud.
 M_ROOT=$(awk '$1=="ROOT"{print $2}' "$MANIFEST")
-H_ROOT=$(sed -n 's/.*"\([0-9a-f]\{64\}\)".*/\1/p' lib/hotswap/include/hotswap/core_seal_root.h | head -1)
+H_ROOT=$(sed -n 's/.*"\([0-9a-f]\{64\}\)".*/\1/p' engine/modules/hotswap/include/hotswap/core_seal_root.h | head -1)
 P_ROOT=$(cat "$SO_DIR"/*-"$BUILD_ID".so.manifest 2>/dev/null \
   | sed -n 's/^core_seal_root=//p' | sort -u | tr '\n' ' ')
 printf '#   header pin ROOT    %s  %s\n' "$H_ROOT" \

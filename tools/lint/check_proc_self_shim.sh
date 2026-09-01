@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Gate — no raw /proc/self/* or /proc/uptime reads outside lib/platform/
+# Gate — no raw /proc/self/* or /proc/uptime reads outside platform/modules/platform/
 # (Rung 1, docs/adr/0003-os-substrate-verdict.md). RATCHET: a file in
 # tools/lint/proc_self_shim_baseline.txt is grandfathered; any OTHER file
 # with a match fails. Shrink the baseline as sites migrate onto
@@ -27,7 +27,7 @@ gate_load_list_file "$BASELINE" baseline
 matches=$(
     grep -rln --include='*.c' -E '"/proc/self|"/proc/uptime' \
         "${roots[@]}" "${LINT_GREP_EXCLUDE_ARGS[@]}" 2>/dev/null \
-    | grep -v '^lib/platform/' \
+    | grep -v '^platform/modules/platform/' \
     || true
 )
 
@@ -45,8 +45,8 @@ if [[ "${#violations[@]}" -eq 0 ]]; then
     exit 0
 fi
 
-echo "check_proc_self_shim: raw /proc/self or /proc/uptime read(s) outside lib/platform/, not in $BASELINE:" >&2
+echo "check_proc_self_shim: raw /proc/self or /proc/uptime read(s) outside platform/modules/platform/, not in $BASELINE:" >&2
 for v in "${violations[@]}"; do echo "  $v" >&2; done
 echo "" >&2
-echo "Route through platform/os_proc.h, or add the file to $BASELINE with a reason if genuinely exempt (e.g. async-signal-safety, per lib/sim/src/postmortem.c:1040)." >&2
+echo "Route through platform/os_proc.h, or add the file to $BASELINE with a reason if genuinely exempt (e.g. async-signal-safety, per engine/modules/sim/src/postmortem.c:1040)." >&2
 exit 1

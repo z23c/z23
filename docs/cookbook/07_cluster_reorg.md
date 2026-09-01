@@ -2,8 +2,8 @@
 
 ## What it demonstrates
 
-`examples/07_cluster_reorg.c` runs two independent simulated nodes in one
-process via `simnet_cluster` (`lib/sim/include/sim/simnet_cluster.h`). Each
+`docs/examples/07_cluster_reorg.c` runs two independent simulated nodes in one
+process via `simnet_cluster` (`engine/modules/sim/include/sim/simnet_cluster.h`). Each
 node mints its own branch in isolation (a simulated network partition) —
 node 0 a 3-block branch, node 1 a 6-block branch — then both branches are
 broadcast and delivered into the cluster. Delivery drives the real
@@ -53,39 +53,39 @@ step or the final convergence check fails.
 
 | File | Symbol |
 |------|--------|
-| `lib/sim/include/sim/simnet_cluster.h` | `simnet_cluster_init`, `simnet_cluster_free` |
-| `lib/sim/include/sim/simnet_cluster.h` | `simnet_cluster_mint_on` |
-| `lib/sim/include/sim/simnet_cluster.h` | `simnet_cluster_broadcast` |
-| `lib/sim/include/sim/simnet_cluster.h` | `simnet_cluster_deliver_pending` |
-| `lib/sim/include/sim/simnet_cluster.h` | `simnet_cluster_tip_hash`, `simnet_cluster_coins_digest` |
-| `lib/coins/include/coins/utxo_commitment.h` | `struct utxo_commitment`, `utxo_commitment_equal` |
+| `engine/modules/sim/include/sim/simnet_cluster.h` | `simnet_cluster_init`, `simnet_cluster_free` |
+| `engine/modules/sim/include/sim/simnet_cluster.h` | `simnet_cluster_mint_on` |
+| `engine/modules/sim/include/sim/simnet_cluster.h` | `simnet_cluster_broadcast` |
+| `engine/modules/sim/include/sim/simnet_cluster.h` | `simnet_cluster_deliver_pending` |
+| `engine/modules/sim/include/sim/simnet_cluster.h` | `simnet_cluster_tip_hash`, `simnet_cluster_coins_digest` |
+| `core/modules/coins/include/coins/utxo_commitment.h` | `struct utxo_commitment`, `utxo_commitment_equal` |
 | `core/math/include/core/uint256.h` | `struct uint256`, `uint256_eq`, `uint256_get_hex` |
 
 Underneath `simnet_cluster_deliver_pending`, the reorg replay itself lives in
-`lib/sim/src/simnet_chain.c`: it calls `disconnect_block()` in reverse order
+`engine/modules/sim/src/simnet_chain.c`: it calls `disconnect_block()` in reverse order
 to unwind the losing branch, then `connect_block()` forward to apply the
 winning branch — the same pair a live node calls. **Both live in
-`lib/validation/src/connect_block.c`**; there is no `disconnect_block.c` under
+`core/modules/validation/src/connect_block.c`**; there is no `disconnect_block.c` under
 any prefix.
 
 ## Production counterpart
 
 The equivalent live-node machinery:
 
-- `find_most_work_chain()` — `lib/validation/src/process_block_core.c` — picks
+- `find_most_work_chain()` — `core/modules/validation/src/process_block_core.c` — picks
   the best-work tip across all known block-index entries. It is a thin wrapper
-  over `select_most_work_eligible()` in `lib/validation/src/chainstate.c`,
+  over `select_most_work_eligible()` in `core/modules/validation/src/chainstate.c`,
   which holds the actual selection rule (including the refuse-below-tip guard).
   There is **no** `activate_best_chain()` in this tree — the disconnect/connect
   walk is driven by the reducer stage below, not by a Bitcoin-Core-named
   activation function.
 - `connect_block()` / `disconnect_block()` — both in
-  `lib/validation/src/connect_block.c`.
-- `app/jobs/src/utxo_apply_delta_reorg.c` — the reducer-side job that applies
+  `core/modules/validation/src/connect_block.c`.
+- `engine/jobs/src/utxo_apply_delta_reorg.c` — the reducer-side job that applies
   a block-index reorg to the on-disk `coins_kv` authority table (the
   persistent-storage analogue of this example's in-RAM UTXO digest).
 - `z23 ops timeline` — inspect recent reorg events a live node has
   actually processed.
 
-See also: `docs/SIMULATOR.md` (simulator model), `lib/test/src/test_simnet_cluster.c`
+See also: `docs/SIMULATOR.md` (simulator model), `tests/harness/src/test_simnet_cluster.c`
 (the ground-truth test this example's API usage is derived from).

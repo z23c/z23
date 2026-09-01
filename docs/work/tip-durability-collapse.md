@@ -1,7 +1,7 @@
 # Chain-Tip-Durability Collapse — the wedge-class kill
 
 The corrected mechanism (move the coins set INTO progress.kv as a `coins` table)
-has **landed** (`lib/storage/src/coins_kv.c`); `coins_kv` is now the **sole live
+has **landed** (`engine/modules/storage/src/coins_kv.c`); `coins_kv` is now the **sole live
 UTXO author and read source** (the event_log / `utxo_projection.db` is seed-only).
 This doc is the rationale of record for the `coins_kv` subsystem — the WHY/invariant
 anchor cited by the source.

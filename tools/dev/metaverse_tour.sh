@@ -82,25 +82,25 @@ tour_build_helper() {
     cc -std=c23 -O1 -w -D_GNU_SOURCE -ffunction-sections -fdata-sections \
         -Wl,--gc-sections $incs -o "$out" \
         "$REPO_ROOT/tools/metaverse_tour_fixture.c" \
-        "$REPO_ROOT/lib/crypto/src/ed25519.c" \
-        "$REPO_ROOT/lib/crypto/src/sha512.c" \
-        "$REPO_ROOT/lib/crypto/src/sha256.c" \
-        "$REPO_ROOT/lib/crypto/src/hmac_sha512.c" \
-        "$REPO_ROOT/lib/crypto/src/hmac_sha256.c" \
-        "$REPO_ROOT/lib/crypto/src/random_secret.c" \
-        "$REPO_ROOT/lib/base/src/cleanse.c" \
-        "$REPO_ROOT/lib/base/src/safe_alloc.c" \
-        "$REPO_ROOT/lib/base/src/log_level.c" \
-        "$REPO_ROOT/lib/base/src/result.c" \
-        "$REPO_ROOT/lib/sha3/src/sha3.c" \
-        "$REPO_ROOT/lib/vcs/src/package_manifest.c" \
-        "$REPO_ROOT/lib/vcs/src/package_recipe.c" \
-        "$REPO_ROOT/lib/vcs/src/package_release.c" \
-        "$REPO_ROOT/lib/vcs/src/package_accept.c" \
-        "$REPO_ROOT/lib/keys/src/key.c" \
-        "$REPO_ROOT/lib/keys/src/key_io.c" \
-        "$REPO_ROOT/lib/keys/src/pubkey.c" \
-        "$REPO_ROOT/lib/keys/src/secp256k1_compat.c" \
+        "$REPO_ROOT/core/modules/crypto/src/ed25519.c" \
+        "$REPO_ROOT/core/modules/crypto/src/sha512.c" \
+        "$REPO_ROOT/core/modules/crypto/src/sha256.c" \
+        "$REPO_ROOT/core/modules/crypto/src/hmac_sha512.c" \
+        "$REPO_ROOT/core/modules/crypto/src/hmac_sha256.c" \
+        "$REPO_ROOT/core/modules/crypto/src/random_secret.c" \
+        "$REPO_ROOT/platform/modules/base/src/cleanse.c" \
+        "$REPO_ROOT/platform/modules/base/src/safe_alloc.c" \
+        "$REPO_ROOT/platform/modules/base/src/log_level.c" \
+        "$REPO_ROOT/platform/modules/base/src/result.c" \
+        "$REPO_ROOT/platform/modules/sha3/src/sha3.c" \
+        "$REPO_ROOT/contexts/commons/modules/vcs/src/package_manifest.c" \
+        "$REPO_ROOT/contexts/commons/modules/vcs/src/package_recipe.c" \
+        "$REPO_ROOT/contexts/commons/modules/vcs/src/package_release.c" \
+        "$REPO_ROOT/contexts/commons/modules/vcs/src/package_accept.c" \
+        "$REPO_ROOT/contexts/wallet/modules/keys/src/key.c" \
+        "$REPO_ROOT/contexts/wallet/modules/keys/src/key_io.c" \
+        "$REPO_ROOT/contexts/wallet/modules/keys/src/pubkey.c" \
+        "$REPO_ROOT/contexts/wallet/modules/keys/src/secp256k1_compat.c" \
         "$REPO_ROOT/core/chainparams/src/chainparams.c" \
         "$REPO_ROOT/core/chainparams/src/chainparamsbase.c" \
         "$REPO_ROOT/core/consensus/src/upgrades.c" \
@@ -109,13 +109,13 @@ tour_build_helper() {
         "$REPO_ROOT/core/math/src/arith_uint256.c" \
         "$REPO_ROOT/core/math/src/core_io.c" \
         "$REPO_ROOT/core/math/src/serialize.c" \
-        "$REPO_ROOT/lib/core/src/random.c" \
-        "$REPO_ROOT/lib/core/src/utiltime.c" \
-        "$REPO_ROOT/lib/encoding/src/utilstrencodings.c" \
-        "$REPO_ROOT/domain/encoding/src/base58.c" \
-        "$REPO_ROOT/lib/codec/src/cursor.c" \
-        "$REPO_ROOT/lib/platform/src/rng.c" \
-        "$REPO_ROOT/lib/platform/src/clock.c" \
+        "$REPO_ROOT/core/modules/core/src/random.c" \
+        "$REPO_ROOT/core/modules/core/src/utiltime.c" \
+        "$REPO_ROOT/platform/modules/encoding/src/utilstrencodings.c" \
+        "$REPO_ROOT/platform/domain/encoding/src/base58.c" \
+        "$REPO_ROOT/platform/modules/codec/src/cursor.c" \
+        "$REPO_ROOT/platform/modules/platform/src/rng.c" \
+        "$REPO_ROOT/platform/modules/platform/src/clock.c" \
         -L"$REPO_ROOT/vendor/lib" -l:libsecp256k1.a -lpthread -lm ||
         tour_fail "fixture helper compile failed"
 }
@@ -342,7 +342,7 @@ tour_note "restarting so the forward-folded coins set stamps its authority"
 tour_restart_node "-operator-lane=dev -wallet-no-phrase-backup -packagehost=0"
 tour_wait_fold 101
 # Direct outbound onetry: an operator dial, so it bypasses the
-# reachable-port policy (lib/net/include/net/port_policy.h) and lands
+# reachable-port policy (core/modules/net/include/net/port_policy.h) and lands
 # immediately — the peer is up, listening, and not connected to us.
 iso_rpc addnode "\"127.0.0.1:$ISO_PEER_PORT\"" "\"onetry\"" >/dev/null || true
 iso_wait_peer_connected 60 \

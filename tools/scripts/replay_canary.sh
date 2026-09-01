@@ -89,7 +89,7 @@ for arg in "$@"; do
     esac
 done
 
-# The expected checkpoint SHA3 + anchor (lib/chain/src/checkpoints.c:86-104,
+# The expected checkpoint SHA3 + anchor (core/modules/chain/src/checkpoints.c:86-104,
 # mirrored by REDUCER_FRONTIER_TRUSTED_ANCHOR). The canary asserts the node
 # passed through this without an integrity FATAL; for the local commitment
 # path the value is the recompute target.
@@ -124,7 +124,7 @@ GENESIS_ELAPSED_MAX=28800
 # anchor run, while the node was simultaneously folding post-seed tip blocks
 # from the 8034 oracle and running the bg-validation walk). The RPC server's
 # per-request watchdog (ZCL_RPC_TIMEOUT_MS, default 10000 ms — see
-# lib/rpc/include/rpc/rpc_timeout.h) shutdown()s the socket at the deadline:
+# engine/modules/rpc/include/rpc/rpc_timeout.h) shutdown()s the socket at the deadline:
 # the client then reads an EMPTY reply while the worker keeps computing and
 # logs its span OK ~0.5 s later — surfacing here as the false
 # rpc_unreachable_getutxocommitment FAIL (observed 2026-08-01, elapsed=383 s,
@@ -272,7 +272,7 @@ write_verdict() {
 #             disagreement, a crash mid-replay, ...) — a consensus-grade
 #             alarm. This is the only value the in-node
 #             `replay_canary_failed` Condition pages on (see
-#             app/services/include/services/canary_sentinel_watch.h:
+#             engine/services/include/services/canary_sentinel_watch.h:
 #             "only an explicit verdict==\"FAIL\" field pages").
 #   BLOCKED — the harness could not even ATTEMPT a replay (missing binary,
 #             an unusable source datadir, insufficient disk, ...) — an
@@ -776,7 +776,7 @@ run_live() {
         # place a real peer is dialed" invariant above was therefore
         # violated in practice: a live weekly run (2026-07-19) dialed four
         # real mainnet IPs alongside zclassicd. -connect= (like -addnode=)
-        # still adds the given host as a peer (src/main.c's argv loop
+        # still adds the given host as a peer (engine/entry/main.c's argv loop
         # applies app_add_node() to BOTH flags identically), so switching
         # to -connect= keeps fetching bodies from zclassicd while actually
         # enforcing the "no public peer" contract.
@@ -794,7 +794,7 @@ run_live() {
     # ── from=anchor shielded-history import interlude ─────────────────
     # The cold-import staged seed borrows the anchor-tier shielded frontier
     # but the shielded ACTIVATION cursors stay >0, and the shielded
-    # preflight (app/jobs/src/utxo_apply_nullifiers.c) fail-closed-HOLDs any
+    # preflight (engine/jobs/src/utxo_apply_nullifiers.c) fail-closed-HOLDs any
     # post-seed block carrying a shielded SPEND (canary FAIL#5, 2026-08-02:
     # fold resumed after the memo-clear fix, then pinned at seed+25 on the
     # first spend block — no auto-remedy can cure it BY DESIGN; the cursors

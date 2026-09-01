@@ -32,8 +32,8 @@ downloading and persisting real block bodies at 178k+ and admitting headers at
 
 ### 1.1 The decision point
 
-`config/src/boot_auto_install_bundle.c:643-652` (inside
-`boot_select_state_source`, called from `config/src/boot.c:3798`):
+`engine/composition/src/boot_auto_install_bundle.c:643-652` (inside
+`boot_select_state_source`, called from `engine/composition/src/boot.c:3798`):
 
 ```c
     if (!out->auto_installed_bundle && !out->consumed_auto_refold &&
@@ -48,14 +48,14 @@ downloading and persisting real block bodies at 178k+ and admitting headers at
     }
 ```
 
-`no_state_source_raise` is `app/conditions/src/no_state_source.c:87`; the
+`no_state_source_raise` is `engine/conditions/src/no_state_source.c:87`; the
 typed blocker id is `bootstrap.no_state_source`, class `dependency`,
 `retry_budget = -1`.
 
 ### 1.2 The predicate that actually refuses
 
 The seven conjuncts above are all *consequences*. The single upstream refusal
-is in the weld's seed assembly, `config/src/boot_bundle_fetch.c:486-497`:
+is in the weld's seed assembly, `engine/composition/src/boot_bundle_fetch.c:486-497`:
 
 ```c
     if (ctx && ctx->file_service_peer && ctx->file_service_peer[0]) {
@@ -70,9 +70,9 @@ is in the weld's seed assembly, `config/src/boot_bundle_fetch.c:486-497`:
     return np;
 ```
 
-`ctx->connect_only` is set by `-connect=` at `config/src/args.c:259`. With
+`ctx->connect_only` is set by `-connect=` at `engine/composition/src/args.c:259`. With
 `-connect=` and no `-fileservice=`, `np == 0` and
-`boot_bundle_fetch_maybe` returns at `config/src/boot_bundle_fetch.c:817-822`
+`boot_bundle_fetch_maybe` returns at `engine/composition/src/boot_bundle_fetch.c:817-822`
 before discovery, before the header seed, before the bundle:
 
 ```c
@@ -92,9 +92,9 @@ own isolation choice. It is not a measurement of the weld.
 
 ### 1.3 The blocker reason mislabels this
 
-`nss_classify` (`config/src/boot_auto_install_bundle.c:556-583`) asks
+`nss_classify` (`engine/composition/src/boot_auto_install_bundle.c:556-583`) asks
 `boot_bundle_fetch_should_run(ctx->datadir, ctx)`, which does **not** consult
-`connect_only` (`config/src/boot_bundle_fetch.c:42-64`). So the classifier
+`connect_only` (`engine/composition/src/boot_bundle_fetch.c:42-64`). So the classifier
 concludes "eligible + attempted, nothing landed", finds no
 `<datadir>/bundles/directory.json`, and reports
 `NO_STATE_SOURCE_FETCH_NO_SEED`. The published reason is
@@ -111,13 +111,13 @@ observationally indistinguishable today from a genuine discovery miss.
 
 | Source | Where it would be selected | What refuses it on a bare boot |
 |---|---|---|
-| **Compiled SHA3/ROM checkpoint** (`core/chainparams/src/checkpoints.c`, `get_sha3_utxo_checkpoint` / `get_rom_state_checkpoint`) | as the *authority* for a bundle install, `config/src/consensus_state_install_runtime.c:592-602` | Nothing refuses it — but it is a **commitment, not loadable state**: `struct sha3_utxo_checkpoint` (`core/chainparams/include/chain/checkpoints.h`) holds height, block hash, a SHA3 over the canonical UTXO set, count and supply. It can *verify* a UTXO set; it cannot *be* one. It is inert without bytes to check. |
-| **rom_fetch swarm download** (`lib/net/src/rom_fetch.c`, `config/src/boot_bundle_fetch.c`) | `boot_select_state_source` → `boot_bundle_fetch_maybe`, `config/src/boot_auto_install_bundle.c:605` | `np == 0` under `-connect=` without `-fileservice=` (§1.2). Without `-connect=` it runs against `ZCL_BUNDLE_FETCH_CLEARNET_SEEDS` (`config/include/config/bundle_fetch_seeds.h`). |
-| **Header-chain seed artifact** (`block_index.bin`) | `boot_header_seed_import_maybe`, `config/src/boot_auto_install_bundle.c:614` | `config/src/boot_header_seed_import.c:57-59` — `stat("<datadir>/bundles/block_index.bin")` fails because the fetch above never ran. Pure no-op, fail-open. |
-| **Consensus-state bundle install** (`config/src/consensus_state_snapshot_install.c`, `consensus_state_install_runtime.c`) | `boot_maybe_auto_install_consensus_bundle`, `config/src/boot_auto_install_bundle.c:395` | `boot_autodetect_consensus_bundle` returns NULL: `opendir("<datadir>/bundles")` fails (`config/src/boot_auto_install_bundle.c:92-94`). Nothing was downloaded. If a bundle *were* staged, the next gate is §3. |
-| **Legacy `~/.zclassic` import** | `config/src/boot.c` legacy-import ladder | Two refusals: the harness passes `-nolegacyimport`, and the isolated `$HOME` has no `~/.zclassic` at all. On a genuinely fresh machine the second refusal is the real one and is correct. |
-| **`utxo-anchor.snapshot` from-anchor reset** | `out->do_from_anchor`, `config/src/boot_auto_install_bundle.c:628-632` | `config/src/boot_anchor_snapshot_reachability.c:131-138` — `stat("<datadir>/utxo-anchor.snapshot")` returns `ANCHOR_SNAPSHOT_ABSENT`. This artifact is minted by an already-synced node (`-mint-anchor` / `tools/seed_anchor_snapshot.sh`) and is **not** among the artifacts the weld fetches. A fresh datadir cannot have one. |
-| **From-genesis fold** | the declared fallback in the comment at `config/src/boot_auto_install_bundle.c:636-642` | Not refused — *wedged*. See §4. |
+| **Compiled SHA3/ROM checkpoint** (`core/chainparams/src/checkpoints.c`, `get_sha3_utxo_checkpoint` / `get_rom_state_checkpoint`) | as the *authority* for a bundle install, `engine/composition/src/consensus_state_install_runtime.c:592-602` | Nothing refuses it — but it is a **commitment, not loadable state**: `struct sha3_utxo_checkpoint` (`core/chainparams/include/chain/checkpoints.h`) holds height, block hash, a SHA3 over the canonical UTXO set, count and supply. It can *verify* a UTXO set; it cannot *be* one. It is inert without bytes to check. |
+| **rom_fetch swarm download** (`core/modules/net/src/rom_fetch.c`, `engine/composition/src/boot_bundle_fetch.c`) | `boot_select_state_source` → `boot_bundle_fetch_maybe`, `engine/composition/src/boot_auto_install_bundle.c:605` | `np == 0` under `-connect=` without `-fileservice=` (§1.2). Without `-connect=` it runs against `ZCL_BUNDLE_FETCH_CLEARNET_SEEDS` (`engine/composition/include/config/bundle_fetch_seeds.h`). |
+| **Header-chain seed artifact** (`block_index.bin`) | `boot_header_seed_import_maybe`, `engine/composition/src/boot_auto_install_bundle.c:614` | `engine/composition/src/boot_header_seed_import.c:57-59` — `stat("<datadir>/bundles/block_index.bin")` fails because the fetch above never ran. Pure no-op, fail-open. |
+| **Consensus-state bundle install** (`engine/composition/src/consensus_state_snapshot_install.c`, `consensus_state_install_runtime.c`) | `boot_maybe_auto_install_consensus_bundle`, `engine/composition/src/boot_auto_install_bundle.c:395` | `boot_autodetect_consensus_bundle` returns NULL: `opendir("<datadir>/bundles")` fails (`engine/composition/src/boot_auto_install_bundle.c:92-94`). Nothing was downloaded. If a bundle *were* staged, the next gate is §3. |
+| **Legacy `~/.zclassic` import** | `engine/composition/src/boot.c` legacy-import ladder | Two refusals: the harness passes `-nolegacyimport`, and the isolated `$HOME` has no `~/.zclassic` at all. On a genuinely fresh machine the second refusal is the real one and is correct. |
+| **`utxo-anchor.snapshot` from-anchor reset** | `out->do_from_anchor`, `engine/composition/src/boot_auto_install_bundle.c:628-632` | `engine/composition/src/boot_anchor_snapshot_reachability.c:131-138` — `stat("<datadir>/utxo-anchor.snapshot")` returns `ANCHOR_SNAPSHOT_ABSENT`. This artifact is minted by an already-synced node (`-mint-anchor` / `tools/seed_anchor_snapshot.sh`) and is **not** among the artifacts the weld fetches. A fresh datadir cannot have one. |
+| **From-genesis fold** | the declared fallback in the comment at `engine/composition/src/boot_auto_install_bundle.c:636-642` | Not refused — *wedged*. See §4. |
 
 ---
 
@@ -127,7 +127,7 @@ The historically reported circularity — "the install gate reads a
 validated-header frontier only the install can populate" — is **refuted** by
 current code. Both sides:
 
-**The gate** (`config/src/consensus_state_install_runtime.c:505-520`):
+**The gate** (`engine/composition/src/consensus_state_install_runtime.c:505-520`):
 
 ```c
         if (checkpoint_bundle && ms) {
@@ -144,7 +144,7 @@ current code. Both sides:
                          "h=%d) — retriable wait, not a bundle rejection",
 ```
 
-**The breaker** (`config/src/consensus_state_install_header_frontier.c:33-83`):
+**The breaker** (`engine/composition/src/consensus_state_install_header_frontier.c:33-83`):
 
 ```c
 bool consensus_state_install_restore_checkpoint_header_frontier(
@@ -173,10 +173,10 @@ real requirement is narrower than "a validated-header frontier": it is
 Two things can put it there, and neither is the install:
 
 1. `boot_header_seed_import_maybe` → `load_block_index_flat` (the downloaded
-   `block_index.bin` artifact), `config/src/boot_header_seed_import.c:101`.
+   `block_index.bin` artifact), `engine/composition/src/boot_header_seed_import.c:101`.
 2. Ordinary P2P header sync, which happens *after* `boot_select_state_source`
    and re-arms the install through the `checkpoint_bundle_install_ready`
-   condition (`app/conditions/src/checkpoint_bundle_install_ready.c:89,129`).
+   condition (`engine/conditions/src/checkpoint_bundle_install_ready.c:89,129`).
 
 **The residual dependency is a timing wall, not a cycle.** Measured header rate
 on a bare boot against one peer is ~730 headers/s (449,600 validated headers in
@@ -187,7 +187,7 @@ seed set that §1.2 empties.
 
 The design already anticipates a zero-fold node: the chain-binding decision has
 an explicit clean-genesis relaxation,
-`app/services/src/consensus_state_chain_binding_service.c:231-232`
+`engine/services/src/consensus_state_chain_binding_service.c:231-232`
 (`fresh_genesis_admissible = (cp_auth || assisted) && observation->fresh_genesis_bootstrap`),
 and the compiled-checkpoint content authority
 (`consensus_state_chain_binding_uses_checkpoint_authority`,
@@ -205,7 +205,7 @@ stays at 0 while the node is demonstrably healthy on the wire.
 
 ### 4.1 Genesis is marked `HAVE_DATA` with no body
 
-`app/services/src/block_index_loader.c:783-793` (fresh datadir path):
+`engine/services/src/block_index_loader.c:783-793` (fresh datadir path):
 
 ```c
     if (ms->map_block_index.size == 0) {
@@ -215,15 +215,15 @@ stays at 0 while the node is demonstrably healthy on the wire.
             genesis->nStatus = BLOCK_VALID_SCRIPTS | BLOCK_HAVE_DATA;
 ```
 
-and again defensively at `config/src/boot.c:2988-2995`. Neither writes block
+and again defensively at `engine/composition/src/boot.c:2988-2995`. Neither writes block
 bytes. `disk_block_pos_init` sets `nFile = -1`
-(`lib/chain/include/chain/chain.h:85`), and no `write_block_to_disk` call ever
-targets genesis — the only writer is `app/services/src/reducer_ingest_service.c:301`,
+(`core/modules/chain/include/chain/chain.h:85`), and no `write_block_to_disk` call ever
+targets genesis — the only writer is `engine/reducer/services/src/reducer_ingest_service.c:301`,
 fed by P2P block ingest, and no peer sends the node its own tip.
 
 ### 4.2 `body_persist` reads it, fails, and clears the bit forever
 
-`app/jobs/src/body_persist_stage.c:188-210`:
+`engine/jobs/src/body_persist_stage.c:188-210`:
 
 ```c
     struct block_index *bi = stage_body_index_at(ms, next_h);
@@ -243,7 +243,7 @@ fed by P2P block ingest, and no peer sends the node its own tip.
 `requeue_body_for_refetch` (same file, 129-142) clears `BLOCK_HAVE_DATA`, holds
 the cursor, and returns `JOB_IDLE`. The remedy it relies on — "let the normal
 `!HAVE_DATA` sync path re-download the body" — **cannot fire for genesis**. The
-block-request collector at `lib/net/src/msg_headers.c:112-129` starts at
+block-request collector at `core/modules/net/src/msg_headers.c:112-129` starts at
 `active_chain_tip(&ms->chain_active)` and only ever collects
 `main_state_best_known_successor(...)` entries; the headers-driven sequence
 queue at the same file, lines 709-716, additionally requires
@@ -291,7 +291,7 @@ recovery artifacts. The wedge itself is unnamed, and is only visible by reading
 Both routes want an artifact a fresh datadir cannot have, and both name it
 correctly.
 
-**`sticky_escalator.resnapshot_no_base`** — `app/services/src/sticky_escalator.c:457-471`.
+**`sticky_escalator.resnapshot_no_base`** — `engine/services/src/sticky_escalator.c:457-471`.
 It asks `reducer_frontier_nearest_loadable_self_verified_base(...)` for either a
 self-valid seal (needs a prior successful fold — `H*` is 0, so none) or the
 compiled checkpoint *plus its snapshot artifact*
@@ -299,10 +299,10 @@ compiled checkpoint *plus its snapshot artifact*
 Refuses fail-closed, correctly: the compiled checkpoint is a proven hash, not
 loadable state.
 
-**`sticky_escalator.refold_no_anchor_artifact`** — `app/services/src/sticky_escalator.c:654-678`.
+**`sticky_escalator.refold_no_anchor_artifact`** — `engine/services/src/sticky_escalator.c:654-678`.
 Same predicate, same artifact:
 `<datadir>/utxo-anchor.snapshot`, resolved by
-`boot_anchor_snapshot_path_resolve` (`config/src/boot_anchor_snapshot_reachability.c:49-75`)
+`boot_anchor_snapshot_path_resolve` (`engine/composition/src/boot_anchor_snapshot_reachability.c:49-75`)
 and rejected `ANCHOR_SNAPSHOT_ABSENT` at line 132.
 
 **Who was supposed to produce it:** an already-synced node running the
@@ -325,7 +325,7 @@ produces. The sovereignty-clean options, cheapest first:
 
 * Serialize the compiled genesis block (already fully specified in
   `core/chainparams`) to `blocks/blk*.dat` once, on the fresh-datadir path in
-  `app/services/src/block_index_loader.c:783-793`, and set `nFile`/`nDataPos`
+  `engine/services/src/block_index_loader.c:783-793`, and set `nFile`/`nDataPos`
   on the index entry. The bytes come from the binary, so no trust is added.
 * Or make `body_persist`/`script_validate`/`utxo_apply` treat height 0 as a
   compiled constant and advance without a disk read (genesis has one coinbase,
@@ -337,7 +337,7 @@ so this class can never be silent again.
 
 **(2) Stop `-connect=` from emptying the file-service seed set. [required, small]**
 `-connect=` is a *P2P* containment flag; `bbf_assemble_seeds`
-(`config/src/boot_bundle_fetch.c:492`) currently reads it as a file-service
+(`engine/composition/src/boot_bundle_fetch.c:492`) currently reads it as a file-service
 containment flag too. Options: honour the compiled clearnet seeds under
 `connect_only` (they are unauthenticated transport and every byte is
 content-verified before it lands, per that file's own trust note), or give the
@@ -350,10 +350,10 @@ attempted.
 The install correctly defers until the baked checkpoint header is in the block
 map (§3). By P2P that is ~70 minutes. `boot_bundle_fetch_maybe` already
 downloads the header seed first
-(`config/src/boot_bundle_fetch.c:866-877`) — but it is `have_header_seed`-optional
+(`engine/composition/src/boot_bundle_fetch.c:866-877`) — but it is `have_header_seed`-optional
 and a miss is only a `LOG_WARN`. On a bare boot the header seed is on the
 critical path and its absence should raise a named blocker
-(`header_seed.*` ids already exist in `config/src/boot_header_seed_import.c:37-43`),
+(`header_seed.*` ids already exist in `engine/composition/src/boot_header_seed_import.c:37-43`),
 not a warning.
 
 ### Is the honest fix small?
@@ -379,7 +379,7 @@ the shielded frontier nor nullifiers. The only admissible shape is the one
 already implemented: the bundle's manifest must reproduce the compiled
 checkpoint's block hash, Sapling frontier root and frontier height
 byte-for-byte
-(`app/services/src/consensus_state_chain_binding_service.c:99-121`), and real
+(`engine/services/src/consensus_state_chain_binding_service.c:99-121`), and real
 block bodies are folded forward from there.
 
 ---
@@ -409,18 +409,18 @@ Both seams are closed in code. The bare-boot path now folds; it does **not**
 yet fast-start, because no reachable seed served a bundle manifest in the
 smoke run.
 
-**Seam B — closed.** `config/src/boot_services.c` seeds the genesis anchor on
+**Seam B — closed.** `engine/composition/src/boot_services.c` seeds the genesis anchor on
 **every** network, not just regtest: when nothing else seeded this boot, the
 tip is at height 0, the tip hash equals the compiled
 `consensus.hashGenesisBlock`, and the finalize cursor is unseeded, it stamps
 every upstream cursor to 1. This is the correct fold verdict, not a skip —
 zclassicd's `ConnectBlock` special-cases the genesis block by hash and returns
 before `UpdateCoins` (its coinbase is consensus-unspendable), the exemption
-`app/jobs/src/utxo_apply_delta.c` and `app/jobs/src/psc_extract.c` already
+`engine/jobs/src/utxo_apply_delta.c` and `engine/jobs/src/psc_extract.c` already
 mirror. The identity asserted comes from the byte-sealed `core/`; the anchor
 row carries no UTXOs, anchors or nullifiers.
 
-**The §4 hold is now NAMED.** `app/jobs/src/body_persist_stage.c` arms a
+**The §4 hold is now NAMED.** `engine/jobs/src/body_persist_stage.c` arms a
 wall-clock hold when `requeue_body_for_refetch` fires and raises
 `body_persist.body_unfetchable` once the height has gone 60 s without a body,
 clearing on any cursor advance. A repeat *count* cannot work here: the requeue
@@ -430,7 +430,7 @@ new id to `OWNER` — a height at or below the active tip is not re-requestable,
 so no condition can honestly claim to remedy it.
 
 **Seam A — closed.** The file-service seed set moved to
-`config/src/boot_bundle_fetch_seeds.c`. Under `-connect=` with no
+`engine/composition/src/boot_bundle_fetch_seeds.c`. Under `-connect=` with no
 `-fileservice=` it now assembles the operator's own `-connect` hosts at
 `FS_PORT` instead of assembling to zero. Containment is unchanged: no compiled
 seed, no gossiped address, nothing the operator did not name. `nss_classify`

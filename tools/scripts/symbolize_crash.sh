@@ -3,7 +3,7 @@
 # file:line stack walk, using the build-id-matched binary (+ its
 # .gnu_debuglink split-debug sidecar, written next to it by the link rule).
 #
-# The node's fatal-signal handler (lib/util/src/signal_handler.c) appends
+# The node's fatal-signal handler (platform/modules/util/src/signal_handler.c) appends
 # glibc backtrace_symbols_fd() lines to $datadir/crash_log.txt:
 #
 #   [fatal-signal] sig=11 code=1 addr=0x0 pid=123 tid=456 time=1721...

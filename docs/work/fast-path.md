@@ -34,7 +34,7 @@ symptom as a body gap, and shipping a chain-reset fix that deletes
    stamp: prove `can_reset_tip=false` and `weakens_gate=false`.
 
 3. **RESET-SAFE UNIT TEST — before live.** Mirror
-   `lib/test/src/test_stage_reducer_unwedge.c`: synthesize the broken state,
+   `tests/harness/src/test_stage_reducer_unwedge.c`: synthesize the broken state,
    assert the invariant the fix must hold (e.g. the public tip never drops
    below `coins_best`; no `*_log` rows deleted). Run it with
    `make t ONLY=<group>` (seconds).
@@ -142,7 +142,7 @@ the binary or skip the live probe explicitly. Unmapped C/header/source-tree
 changes fail closed until you either add a focused-test mapping or pass
 `ZCL_FAST_TESTS=...`. The focused-test map is shared with native
 `z23 agentimpact` in
-`app/controllers/include/controllers/agent_impact_rules.def`; keep new mappings
+`cognition/controllers/include/controllers/agent_impact_rules.def`; keep new mappings
 there so the CLI and fast-CI shell lane do not drift.
 
 Use `make dev-bin` when you need to run a changed node/agent CLI locally without

@@ -198,35 +198,35 @@ reimplemented:
 - Noise XX and the Noise record layer provide authenticated encryption, transcript
   state, directional counters, replay resistance, rekey limits, and a persistent
   node static key. See
-  [`lib/noise/include/noise/noise_handshake.h`](../../lib/noise/include/noise/noise_handshake.h),
-  [`lib/noise/include/noise/session_transport.h`](../../lib/noise/include/noise/session_transport.h),
-  [`lib/net/include/net/noise_transport.h`](../../lib/net/include/net/noise_transport.h),
-  and [`lib/net/include/net/v2_identity.h`](../../lib/net/include/net/v2_identity.h).
+  [`core/modules/noise/include/noise/noise_handshake.h`](../../core/modules/noise/include/noise/noise_handshake.h),
+  [`core/modules/noise/include/noise/session_transport.h`](../../core/modules/noise/include/noise/session_transport.h),
+  [`core/modules/net/include/net/noise_transport.h`](../../core/modules/net/include/net/noise_transport.h),
+  and [`core/modules/net/include/net/v2_identity.h`](../../core/modules/net/include/net/v2_identity.h).
 - ZID delegation binds the network genesis, online signing key, Noise static
   key, finality-delayed beacon, and validity interval. The DHT validates signed
   frames against the active delegation and the current Noise session. See
-  [`lib/vcs/include/vcs/zcode_dht_delegation.h`](../../lib/vcs/include/vcs/zcode_dht_delegation.h)
-  and [`config/src/boot_zcode_dht.c`](../../config/src/boot_zcode_dht.c).
+  [`contexts/commons/modules/vcs/include/vcs/zcode_dht_delegation.h`](../../contexts/commons/modules/vcs/include/vcs/zcode_dht_delegation.h)
+  and [`engine/composition/src/boot_zcode_dht.c`](../../engine/composition/src/boot_zcode_dht.c).
 - Signed endpoint records, DHT reachability, ZNAM, and onion-directory entries
   provide discovery hints. They do not prove the identity of the responder;
   the completed Noise session and active ZID delegation do. See
-  [`config/include/config/boot_endpoint_records.h`](../../config/include/config/boot_endpoint_records.h),
-  [`config/src/boot_zcode_dht_reachability.c`](../../config/src/boot_zcode_dht_reachability.c),
-  [`lib/net/include/net/onion_discovery.h`](../../lib/net/include/net/onion_discovery.h),
-  and [`lib/znam/include/znam/znam.h`](../../lib/znam/include/znam/znam.h).
+  [`engine/composition/include/config/boot_endpoint_records.h`](../../engine/composition/include/config/boot_endpoint_records.h),
+  [`engine/composition/src/boot_zcode_dht_reachability.c`](../../engine/composition/src/boot_zcode_dht_reachability.c),
+  [`core/modules/net/include/net/onion_discovery.h`](../../core/modules/net/include/net/onion_discovery.h),
+  and [`contexts/naming/modules/znam/include/znam/znam.h`](../../contexts/naming/modules/znam/include/znam/znam.h).
 - The package store and swarm already provide manifest-first, bounded,
   content-addressed public transfer with SHA3 chunk verification, persistent
   resume state, quota enforcement, and path confinement. See
-  [`lib/vcs/include/vcs/package_store.h`](../../lib/vcs/include/vcs/package_store.h),
-  [`lib/vcs/include/vcs/package_swarm_node.h`](../../lib/vcs/include/vcs/package_swarm_node.h),
+  [`contexts/commons/modules/vcs/include/vcs/package_store.h`](../../contexts/commons/modules/vcs/include/vcs/package_store.h),
+  [`contexts/commons/modules/vcs/include/vcs/package_swarm_node.h`](../../contexts/commons/modules/vcs/include/vcs/package_swarm_node.h),
   and [`docs/P2P_SOURCE_HOSTING.md`](../P2P_SOURCE_HOSTING.md).
 - Signed transfer receipts, storage acknowledgements, source-reproduction
   acknowledgements, local verifier policy, and the package lifecycle already
   separate transport, evidence, acceptance, build, install, and rollback. See
-  [`config/include/config/boot_zcode_swarm_receipt.h`](../../config/include/config/boot_zcode_swarm_receipt.h),
-  [`lib/vcs/include/vcs/zcode_dht_record.h`](../../lib/vcs/include/vcs/zcode_dht_record.h),
-  [`lib/vcs/include/vcs/package_verify_policy.h`](../../lib/vcs/include/vcs/package_verify_policy.h),
-  and [`app/services/include/services/package_lifecycle.h`](../../app/services/include/services/package_lifecycle.h).
+  [`engine/composition/include/config/boot_zcode_swarm_receipt.h`](../../engine/composition/include/config/boot_zcode_swarm_receipt.h),
+  [`contexts/commons/modules/vcs/include/vcs/zcode_dht_record.h`](../../contexts/commons/modules/vcs/include/vcs/zcode_dht_record.h),
+  [`contexts/commons/modules/vcs/include/vcs/package_verify_policy.h`](../../contexts/commons/modules/vcs/include/vcs/package_verify_policy.h),
+  and [`contexts/commons/services/include/services/package_lifecycle.h`](../../contexts/commons/services/include/services/package_lifecycle.h).
 - Linux has an embedded Tor onion path when the full Tor archives are built and
   linked; a binary linked to the offline stub must not claim Tor. The native
   macOS full-Tor build path exists but has not completed native-host acceptance.
@@ -873,7 +873,7 @@ peers, never production wallet state.
   (fresh/stale/never-seen, fingerprints only); the live-probe fan-out became
   the bounded refresh that populates that store. Persistence moved into the
   status lane as `boot_mesh_status_persist_observation`
-  (config/src/boot_mesh_status.c), called by both the single-machine poll
+  (engine/composition/src/boot_mesh_status.c), called by both the single-machine poll
   RPC and the fleet refresh, so both writers share one handoff and one
   truth. The unified document keeps every upstream field and adds the live
   rollup (`live_probed`/`live_online`/… plus per-row `live_reachability`)

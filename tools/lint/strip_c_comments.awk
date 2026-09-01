@@ -2,7 +2,7 @@
 # text gate matches CODE and not PROSE.
 #
 # WHY THIS EXISTS. check_model_sql_literals.sh reported
-# app/models/include/models/model_fields.h for "carrying a hand-written SQL
+# engine/models/include/models/model_fields.h for "carrying a hand-written SQL
 # statement". The file carries no SQL at all: its header comment documents
 # how to USE the column macros, with example lines like
 #     "SELECT " BLOG_POST_COLUMNS " FROM blog_posts WHERE event_id=?"

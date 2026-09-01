@@ -10,7 +10,7 @@
 # the exact Law-7 lie W2 fixed for stale_validate_headers_repair /
 # peer_floor_violated / sync_state_stuck. This gate stops it regressing.
 #
-# For each `static bool witness_<name>(...)` in app/conditions/src/*.c the
+# For each `static bool witness_<name>(...)` in engine/conditions/src/*.c the
 # gate fails the witness if ANY of:
 #   (1) TRIVIAL    — every return is a bare `return true;` / `return false;`
 #                    (a constant post-condition observes nothing).
@@ -33,7 +33,7 @@
 #             the baseline may only shrink. (E10 graduation mode.)
 #   FAIL    — fail on ANY violation, baseline ignored.
 #
-# The exemplar honest witness is app/conditions/src/block_failed_mask_at_tip.c
+# The exemplar honest witness is engine/conditions/src/block_failed_mask_at_tip.c
 # (`current_tip_height(ms) > g_tip_at_detect` — the tip MOVED).
 set -euo pipefail
 
@@ -41,7 +41,7 @@ MODE="${ZCL_LINT_MODE:-WARN}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 BASELINE="$SCRIPT_DIR/honest_witness_baseline.txt"
-COND_DIR="app/conditions/src"
+COND_DIR="engine/conditions/src"
 
 cd "$ROOT"
 # shellcheck source=tools/lint/scan_exclusions.sh

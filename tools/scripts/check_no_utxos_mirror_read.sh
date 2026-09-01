@@ -8,18 +8,29 @@
 # `FROM utxos`: a NEW such reader fails the build; as Program H4 re-points a
 # reader at the kernel its baseline row goes stale and must be removed
 # (shrink-only). Scope is the demotion-relevant trees only (app/services,
-# app/jobs, app/conditions, config/src) — explorer/wallet views keep their own
+# app/jobs, app/conditions, engine/composition/src) — explorer/wallet views keep their own
 # mirror coupling until H4.
 #
 # Model: tools/scripts/check_frontier_single_writer.sh (same ratchet discipline).
 set -euo pipefail
 
 cd "$(dirname "$0")/../.."
+# shellcheck source=tools/lint/repo_shape.sh
+source tools/lint/repo_shape.sh
 
 PATTERN='FROM utxos'
 BASELINE="${ZCL_NO_UTXOS_MIRROR_READ_BASELINE:-tools/scripts/check_no_utxos_mirror_read_baseline.txt}"
-SCAN_ROOTS_TEXT="${ZCL_NO_UTXOS_MIRROR_READ_SCAN_ROOTS:-app/services app/jobs app/conditions config/src}"
-read -r -a SCAN_ROOTS <<< "$SCAN_ROOTS_TEXT"
+if [ -n "${ZCL_NO_UTXOS_MIRROR_READ_SCAN_ROOTS:-}" ]; then
+    read -r -a SCAN_ROOTS <<< "$ZCL_NO_UTXOS_MIRROR_READ_SCAN_ROOTS"
+else
+    mapfile -t SCAN_ROOTS < <(
+        repo_shape_room_dirs services
+        repo_shape_room_dirs jobs
+        repo_shape_room_dirs conditions
+        printf '%s\n' engine/reducer/services engine/reducer/jobs \
+            engine/reducer/conditions engine/composition/src
+    )
+fi
 
 if [ ! -r "$BASELINE" ]; then
     echo "check_no_utxos_mirror_read: FATAL — baseline missing: $BASELINE" >&2

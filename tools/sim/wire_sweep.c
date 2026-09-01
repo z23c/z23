@@ -24,7 +24,7 @@
  *
  * `make wire-sweep SEEDS=200` is the short local smoke run.
  *
- * KNOWN FINDING (FIXED — Step E, lib/sim/src/simnet_wire.c): the
+ * KNOWN FINDING (FIXED — Step E, engine/modules/sim/src/simnet_wire.c): the
  * BAD_HANDSHAKE archetype's GARBAGE_AFTER_VERACK sub-case
  * (SIMNET_WIRE_BAD_HANDSHAKE_GARBAGE_AFTER_VERACK,
  * wire_start_garbage_after_verack() in simnet_wire_peer.c) used to hang for
@@ -60,7 +60,7 @@
 
 /* Required by the node's whole-program link: thread_registry.h documents
  * this as the shutdown-signal flag every entry point must define (see
- * lib/util/include/util/thread_registry.h). wire_sweep runs no background
+ * platform/modules/util/include/util/thread_registry.h). wire_sweep runs no background
  * threads, but the symbol is referenced by code paths pulled in via the
  * full ALL_SRCS link (same as tools/wallet_dump.c, tools/wallet_sim.c,
  * tools/bot.c, etc.). */
@@ -170,7 +170,7 @@ struct wire_sweep_result {
  * honest peer — the adversary IS peer 0), a parse-breaking sub-case makes
  * p2p_node_receive_bytes() reject the bytes and disconnect — see
  * simnet_wire_pump_to_nut()'s "NUT rejected inbound bytes" LOG_FAIL
- * (lib/sim/src/simnet_wire.c:642). That is the harness correctly
+ * (engine/modules/sim/src/simnet_wire.c:642). That is the harness correctly
  * refusing garbage, the same accepted outcome sw_run_bad_handshake
  * asserts for its DATA_BEFORE_VERSION case (`st.nut_disconnected`
  * expected true, not a failure). Genuinely bad outcomes are: (a) a real
@@ -379,7 +379,7 @@ int main(int argc, char **argv)
         return 2;
 
     /* Same global init the test runners do before touching simnet_wire —
-     * see lib/test/src/test.c and lib/test/src/test_parallel.c. Without
+     * see tests/harness/src/test.c and tests/harness/src/test_parallel.c. Without
      * this, chain_params_get() (called deep inside connect_block via the
      * scenario's block-mint/validation path) hits an unset-params assert. */
     chain_params_select(CHAIN_MAIN);

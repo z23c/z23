@@ -30,7 +30,7 @@
  *     Legacy `is_expiring_soon_tx`. True if `tx_is_expired` at
  *     `n_next_block_height + TX_EXPIRING_SOON_THRESHOLD`.
  *
- * What's NOT here (deliberately left in lib/validation/):
+ * What's NOT here (deliberately left in core/modules/validation/):
  *   - reading the active chain tip / MTP / wall clock (the caller
  *     hands us the already-computed height + time as scalars)
  *   - network-upgrade activation rules

@@ -4,7 +4,7 @@
  * Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * Pure block structural checks. Mirrors the two structural branches of
- * legacy lib/validation/check_block.c::check_block_impl():
+ * legacy core/modules/validation/check_block.c::check_block_impl():
  *
  *   - check_merkle_root  -> domain_consensus_check_block_merkle_root
  *   - check_size_limits  -> domain_consensus_check_block_size_coinbase_sigops
@@ -179,7 +179,7 @@ struct zcl_result domain_consensus_check_block_sigops(
     for (size_t i = 0; i < block->num_vtx; i++) {
         /* Call the core sigops predicate directly (validation/sigops.h's
          * get_legacy_sig_op_count is only a thin wrapper over this — see
-         * lib/validation/src/sigops.c — so this is byte-for-byte identical
+         * core/modules/validation/src/sigops.c — so this is byte-for-byte identical
          * to the pre-W5 count). The wrapper's fail-safe returned 0 on a null
          * tx; mirror that by contributing 0 on the (unreachable here — vtx[i]
          * is a live struct and out_count is a stack local) error path. */

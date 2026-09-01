@@ -1,0 +1,48 @@
+# allowed-signers for zcl.promotion_receipt.v1 — see docs/PROMOTION_RECEIPTS.md
+#
+# THIS FILE IS INTENTIONALLY EMPTY OF KEYS. The evidence-signing identity is the
+# owner's decision, and publishing "this specific key is the evidence authority"
+# is part of that decision, so no key was chosen on the owner's behalf. Until a
+# key is added here the receipt ledger has zero records, and
+# `tools/scripts/promotion_receipt.sh verify` reports that honestly rather than
+# implying a promotion happened.
+#
+# It must NOT be a login or push key. That key's job is authenticating pushes;
+# making it the evidence authority would mean anyone who can push can mint
+# receipts, and rotating it for an ordinary git-access reason would silently
+# invalidate the evidence chain. Generate a key whose only job is signing
+# evidence.
+#
+# One-time owner setup (full version in docs/PROMOTION_RECEIPTS.md,
+# "Owner setup"):
+#
+#   ssh-keygen -t ed25519 -C 'zclassic23 promotion receipts' \
+#       -f ~/.ssh/zcl-promotion-receipt
+#   printf '%s %s\n' <principal> \
+#       "$(cut -d' ' -f1-2 ~/.ssh/zcl-promotion-receipt.pub)" \
+#       >> platform/deploy/promotion-signers
+#   ZCL_RECEIPT_KEY=~/.ssh/zcl-promotion-receipt \
+#       tools/scripts/promotion_receipt.sh init
+#   git add platform/deploy/promotion-signers platform/deploy/promotion-receipts.jsonl && git commit
+#
+# Format (ssh-keygen(1), ALLOWED SIGNERS): one line per identity permitted to
+# sign a record in platform/deploy/promotion-receipts.jsonl —
+#
+#   <principal> <keytype> <base64-public-key>
+#
+# e.g.  promotions@example.invalid ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA...
+#
+# Only PUBLIC keys ever belong here. Nothing in this file is a secret and
+# nothing in it can sign anything; it exists so a third party who does not trust
+# whoever handed them this repository can still check every receipt offline:
+#
+#   tools/scripts/promotion_receipt.sh verify
+#
+# That command reads only this file and the ledger — no private key, no network,
+# no cooperation from the author.
+#
+# ONE signing identity, on purpose. Key rotation is deliberately not built here:
+# adding a second line is a reviewed commit, which is exactly the audit trail a
+# rotation needs. A receipt signed by a key later removed from this file stops
+# verifying — the honest outcome, since the whole claim of a receipt is "this
+# identity vouched for this promotion".

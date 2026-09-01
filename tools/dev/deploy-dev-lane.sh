@@ -740,7 +740,7 @@ cleanup_dropins() {
             echo "[dev-lane] preserving explicit memory-budget drop-in: $STALE_OOM_BUDGET_DROPIN"
         else
             echo "[dev-lane] removing stale memory-budget drop-in: $STALE_OOM_BUDGET_DROPIN"
-            echo "[dev-lane]   deploy/zcl23-dev.service owns the dev lane memory budget"
+            echo "[dev-lane]   platform/deploy/zcl23-dev.service owns the dev lane memory budget"
             echo "[dev-lane]   set ZCL_DEV_ALLOW_OOM_BUDGET_DROPIN=1 to keep a deliberate override"
             rm -f "$STALE_OOM_BUDGET_DROPIN"
         fi

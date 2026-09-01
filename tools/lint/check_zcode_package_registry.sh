@@ -11,8 +11,8 @@ checker="build/bin/zcode-package-registry-check"
 # with all-zero roots still passed here. Build it first, so the verdict is
 # about the tree being gated. tools/scripts/zcode_registry_rederive.sh has
 # always done this; only the lint side was missing it. Do not swap this for
-# an mtime comparison -- the binary also embeds config/zcode_c23_commons_app.def
-# and lib/vcs/src/package_*.c, so only make knows the real prerequisite set.
+# an mtime comparison -- the binary also embeds engine/composition/zcode_c23_commons_app.def
+# and contexts/commons/modules/vcs/src/package_*.c, so only make knows the real prerequisite set.
 if ! make -s --no-print-directory "$checker" >/dev/null 2>&1; then
     echo "check-zcode-package-registry: FAIL — could not build $checker" >&2
     exit 1
@@ -25,8 +25,8 @@ fi
 
 mapfile -t package_dirs < <(
     sed -n 's/^ZCODE_PACKAGE("[^"]*", "\([^"]*\)".*/\1/p' \
-        config/zcode_package_registry.def \
-        config/zcode_c23_commons_app.def | LC_ALL=C sort -u
+        engine/composition/zcode_package_registry.def \
+        engine/composition/zcode_c23_commons_app.def | LC_ALL=C sort -u
 )
 package_patterns=()
 for package_dir in "${package_dirs[@]}"; do
@@ -37,11 +37,11 @@ mapfile -t package_sources < <(
 )
 mapfile -t monolith_sources < <(
     make -s --no-print-directory print-zcode-monolith-lib-sources |
-        sed -n '/^lib\/.*\/src\/.*\.c$/p'
+        sed -nE '/^(core|engine|contexts|cognition|platform)\/.*\/src\/.*\.c$/p'
 )
 platform_alternative_groups=(
-    "lib/platform/src/os_sandbox_linux.c lib/platform/src/os_sandbox_stub.c"
-    "lib/vcs/src/vcs_devloop.c lib/vcs/src/vcs_devloop_windows.c"
+    "platform/modules/platform/src/os_sandbox_linux.c platform/modules/platform/src/os_sandbox_stub.c"
+    "contexts/commons/modules/vcs/src/vcs_devloop.c contexts/commons/modules/vcs/src/vcs_devloop_windows.c"
 )
 # The devloop pair used to live here, because the Windows implementation was
 # compiled on EVERY host: only the POSIX one was host-optional, so "expected 1
@@ -56,7 +56,7 @@ platform_alternative_groups=(
 # Windows/macOS builds, whose worker implementation refuses before sandbox
 # entry.
 host_optional_sources=(
-    lib/platform/src/os_sandbox_terminal_worker.c
+    platform/modules/platform/src/os_sandbox_terminal_worker.c
 )
 
 if (( ${#package_sources[@]} == 0 || ${#monolith_sources[@]} == 0 )); then
@@ -119,9 +119,9 @@ for group in "${platform_alternative_groups[@]}"; do
 done
 
 codec_consumers=(
-    lib/vcs/src/package_release.c
-    lib/vcs/src/package_recipe.c
-    lib/vcs/src/package_deps.c
+    contexts/commons/modules/vcs/src/package_release.c
+    contexts/commons/modules/vcs/src/package_recipe.c
+    contexts/commons/modules/vcs/src/package_deps.c
 )
 for source in "${codec_consumers[@]}"; do
     if ! git grep -q '#include "codec/cursor.h"' -- "$source"; then

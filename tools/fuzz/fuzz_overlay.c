@@ -11,19 +11,19 @@
  * payload, and every indexing node parses it:
  *
  *   peer block -> connect_block -> explorer index fold
- *     -> app/models/src/explorer_index_overlays.c — one dispatch table,
+ *     -> contexts/explorer/models/src/explorer_index_overlays.c — one dispatch table,
  *        keyed on the four lokad bytes, five entries:
  *          slp_parse(tx->vout[0].script_pub_key.data, ...)
  *          znam_parse(script, script_len, ...)
  *          zanc_parse(script, script_len, ...)
  *          zid_anchor_parse(...) via explorer_index_apply_zid_overlay
- *     -> app/models/src/explorer_index_zdir.c:161
+ *     -> contexts/naming/models/src/explorer_index_zdir.c:161
  *          zdir_parse(script, script_len, ...)
- *   and again on render, app/controllers/src/explorer_controller_block.c:220
+ *   and again on render, contexts/explorer/controllers/src/explorer_controller_block.c:220
  *   and explorer_controller_tx.c:379, for anyone browsing the explorer.
  *
  * The zid codecs take the same shape of input from a different pipe:
- * lib/vcs/src/zdesc_swarm.c:148 and lib/vcs/src/zendp_swarm.c:248 call
+ * contexts/commons/modules/vcs/src/zdesc_swarm.c:148 and contexts/commons/modules/vcs/src/zendp_swarm.c:248 call
  * zid_doc_decode on swarm-fetched record bytes BEFORE any signature is
  * checked, then hand the decoded body to zdesc_decode_body /
  * zendp_decode_body. So the decoders below run on unauthenticated bytes
@@ -32,7 +32,7 @@
  * None of these nine functions allocates — they are pure codecs writing
  * into caller-owned structs (verified: slp/znam/zanc/zid_anchor/zdir fill
  * fixed-size message structs via read_push/overlay_reader, which return
- * pointers INTO the input; lib/zid is documented "no allocation anywhere:
+ * pointers INTO the input; contexts/wallet/modules/zid is documented "no allocation anywhere:
  * caller buffers only"). There is therefore nothing to free on either the
  * success or the failure branch, and no output buffer outlives an input.
  * What must hold is that not one of them reads past `size` or faults on
@@ -72,7 +72,7 @@
 volatile sig_atomic_t g_shutdown_requested = 0;
 
 /* Number of demux arms. Keep in sync with the switch below. Byte 0 of
- * every seed in lib/test/fuzz_seeds/overlay/ is the literal arm index, so
+ * every seed in tests/harness/fuzz_seeds/overlay/ is the literal arm index, so
  * adding an arm here does not silently re-route the existing corpus. */
 #define FUZZ_OVERLAY_ARMS 9
 

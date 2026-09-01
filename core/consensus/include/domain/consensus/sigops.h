@@ -9,7 +9,7 @@
  * The P2SH counter never touches a `coins_view_cache`; the caller is
  * responsible for resolving each input's prevout up front. This split is
  * what keeps the domain hexagonally clean — IO/state lives in the
- * lib/validation thin wrapper.
+ * core/modules/validation thin wrapper.
  *
  * No clock, no RNG, no I/O, no state reads. Replays from inputs alone.
  *

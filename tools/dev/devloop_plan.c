@@ -27,7 +27,7 @@ struct hotswap_eligible_entry {
 static const struct hotswap_eligible_entry g_hotswap_eligible[] = {
 #define HOTSWAP_ELIGIBLE(path_) { .path = path_, .probe =
 #define HOTSWAP_PROBE(probe_) probe_ },
-#include "../../config/hotswap_eligible.def"
+#include "../../engine/composition/hotswap_eligible.def"
 #undef HOTSWAP_PROBE
 #undef HOTSWAP_ELIGIBLE
 };
@@ -35,7 +35,7 @@ static const struct hotswap_eligible_entry g_hotswap_eligible[] = {
 static const struct hotswap_eligible_entry g_hotswap_services[] = {
 #define HOTSWAP_SERVICE(id_, source_, headers_, contract_headers_, imports_, abi_, schema_, wire_, kat_, probe_) \
     { .path = source_, .probe = probe_ },
-#include "../../config/hotswap_services.def"
+#include "../../engine/composition/hotswap_services.def"
 #undef HOTSWAP_SERVICE
 };
 
@@ -159,7 +159,7 @@ bool zcl_devloop_path_is_relevant(const char *path)
      * mentions "fixture" is never a real edit; reacting to it fires a phantom
      * reload cycle on every test-suite run (the file is already gone by the
      * time the cycle rebuilds). No tracked source matches this shape — the
-     * real fixture sources under lib/test/fixtures/ have no leading '_'. */
+     * real fixture sources under tests/harness/fixtures/ have no leading '_'. */
     if (base[0] == '_' && strstr(base, "fixture"))
         return false;
     if (strcmp(base, "Makefile") == 0)
@@ -271,7 +271,7 @@ static bool path_include_applies(const char *path)
 static bool plan_semantic_leaf_group(
     const char *path, char full[ZCL_TEST_GROUP_FULL_MAX])
 {
-    static const char prefix[] = "lib/test/src/";
+    static const char prefix[] = "tests/harness/src/";
     size_t path_len = path ? strlen(path) : 0;
     size_t prefix_len = sizeof(prefix) - 1;
     if (!full || !zcl_test_group_source_is_semantic_leaf(path) ||
@@ -408,9 +408,9 @@ static bool path_is_consensus_risk(const char *path)
 {
     static const char *const prefixes[] = {
         "core/consensus/", "core/params/", "core/chainparams/",
-        "lib/validation/", "lib/chain/", "lib/primitives/", "lib/crypto/",
-        "lib/sha3/",
-        "lib/sapling/", "app/jobs/",
+        "core/modules/validation/", "core/modules/chain/", "core/modules/primitives/", "core/modules/crypto/",
+        "platform/modules/sha3/",
+        "core/modules/sapling/", "engine/jobs/",
     };
     if (!path)
         return false;

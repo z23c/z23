@@ -6,9 +6,9 @@
  *
  * Reads (resolve/list) open <datadir>/node.db READONLY — the
  * core.storage.query.offline pattern — and answer straight out of the
- * zid_identities projection (app/models/src/zid_identity.c), which is
+ * zid_identities projection (engine/models/src/zid_identity.c), which is
  * fed from confirmed chain data by both identity feeds
- * (app/models/src/explorer_index_zid.c). So a stopped or copied datadir
+ * (contexts/explorer/models/src/explorer_index_zid.c). So a stopped or copied datadir
  * answers exactly like a running one, with no RPC.
  *
  * Writes (anchor/rotate/revoke) require an explicit dev/prod custody scope.

@@ -107,7 +107,7 @@ static bool dva_root(struct zcl_command_reply *reply, const char *leaf,
     char next[256];
     (void)snprintf(next, sizeof(next),
                    "cd into a Z23 checkout (the directory holding Makefile and "
-                   "config/commands/root.def), then rerun: z23 %s",
+                   "engine/composition/commands/root.def), then rerun: z23 %s",
                    strcmp(leaf, DVA_READY_PATH) == 0 ? "dev agent ready"
                                                      : "dev agent test");
     dva_refuse(reply, ZCL_COMMAND_STATUS_BLOCKED, ZCL_COMMAND_EXIT_BLOCKED,

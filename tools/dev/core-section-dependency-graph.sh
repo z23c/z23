@@ -16,7 +16,7 @@
 # core/chainparams/include, ...). This tool keeps only the sections that own a
 # source layout of their own — a SECTION directory that has a SECTION child
 # ending in /include or /src. On today's manifest that rule yields exactly
-# core/chainparams, core/consensus, core/math, core/params, lib/validation.
+# core/chainparams, core/consensus, core/math, core/params, core/modules/validation.
 # The rule is mechanical; if the manifest gains a subsystem the tool finds it.
 #
 # THREE INDEPENDENT AXES, all measured, none inferred from a name:

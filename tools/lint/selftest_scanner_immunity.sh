@@ -13,7 +13,7 @@
 #      IGNORES it — no false violation, no matter which gate's fixture it
 #      is or which gate is scanning.
 #   2. A SELFTEST-style direct invocation (no ZCL_LINT_PRODUCTION_SCAN, i.e.
-#      what lib/test/src/test_make_lint_gates.c does) still DETECTS it —
+#      what tests/harness/src/test_make_lint_gates.c does) still DETECTS it —
 #      proving the exclusion mechanism does not weaken any gate's real
 #      detection power.
 #   3. A REAL violation in a file that does NOT match the shared

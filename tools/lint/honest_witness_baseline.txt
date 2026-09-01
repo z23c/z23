@@ -1,7 +1,7 @@
 # Lint gate #honest-witness baseline — grandfathered dishonest witnesses.
 #
 # check_honest_witness (RATCHET mode) flags any Condition witness in
-# app/conditions/src/*.c whose post-condition is TRIVIAL (constant),
+# engine/conditions/src/*.c whose post-condition is TRIVIAL (constant),
 # PURE-INVERSE (just re-runs detect), or NO-OBSERVABLE (reads only FSM /
 # poison-absence state, never that the symptom MOVED — tip/cursor/block_map/
 # SELECT). These witnesses pre-date the ratchet and are recorded here. The

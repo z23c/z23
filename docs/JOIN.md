@@ -81,7 +81,7 @@ an explicit flag stays in charge.
 node process, and a second node process on one data directory corrupts it, so
 there is no launcher hidden inside this command.
 
-The unit that [`deploy/setup.sh`](../deploy/setup.sh) installs is named
+The unit that [`platform/deploy/setup.sh`](../platform/deploy/setup.sh) installs is named
 `zclassic23`, so the restart is:
 
 ```bash

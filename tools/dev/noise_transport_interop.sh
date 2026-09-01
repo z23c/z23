@@ -32,7 +32,7 @@
 #
 # Port discipline: P2P listeners that a noise peer redials after the
 # capability-learning upgrade must pass the production reachable-port
-# policy (lib/net/include/net/port_policy.h) — only 8033, 18033, 8034,
+# policy (core/modules/net/include/net/port_policy.h) — only 8033, 18033, 8034,
 # 9033 and 20022-20028 qualify, and 8033/8034 are in the live refuse-set.
 # The harness uses 9033, 18033, 20028 for P2P and disjoint 392xx/393xx/394xx
 # quads for RPC/FS/HTTPS. Process ownership, cleanup traps and port

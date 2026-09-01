@@ -20,7 +20,7 @@
  * recognised tx_out types here pins the explorer / wallet view layer
  * and the standardness gate in the mempool admission path.
  *
- * The lib/script/standard.{c,h} module is a thin signature-preserving
+ * The core/modules/script/standard.{c,h} module is a thin signature-preserving
  * wrapper around these functions; existing callers (wallet, explorer,
  * controllers) are unchanged.
  */
@@ -40,7 +40,7 @@ struct key_id;
 struct script_id;
 struct tx_destination;
 
-/* Standard tx_out type tags. Matches lib/script/standard.h::txnouttype
+/* Standard tx_out type tags. Matches core/modules/script/standard.h::txnouttype
  * verbatim — the typed alias exists so the domain layer is the source
  * of truth and the lib wrapper just typedefs to it. */
 enum domain_script_txnouttype {

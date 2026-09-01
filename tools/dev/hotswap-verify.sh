@@ -4,10 +4,10 @@
 # hotswap-verify.sh — prove a hot-swap module allowlist row is actually
 # LOADABLE, not merely listed.
 #
-#   tools/dev/hotswap-verify.sh app/controllers/src/status_native_handlers.c
+#   tools/dev/hotswap-verify.sh engine/controllers/src/status_native_handlers.c
 #   tools/dev/hotswap-verify.sh --all
 #
-# For each row of config/hotswap_swappable.def this:
+# For each row of engine/composition/hotswap_swappable.def this:
 #   1. builds the module .so via `make hotswap-module-so FILE=<tu>` (the exact
 #      shipping recipe: same compiler, same DEV_LIVE_CFLAGS, same
 #      -DZCL_HOTSWAP_MODULE_GEN, same island unity-include);
@@ -43,7 +43,7 @@ cd "$ROOT"
 SCRATCH="${ZCL_HOTSWAP_VERIFY_DIR:-$HOME/.local/state/zclassic23/scratch/hotswap-verify}"
 mkdir -p "$SCRATCH" || { echo "hotswap-verify: cannot create $SCRATCH" >&2; exit 2; }
 
-MANIFEST="${ZCL_HOTSWAP_SWAPPABLE_MANIFEST:-config/hotswap_swappable.def}"
+MANIFEST="${ZCL_HOTSWAP_SWAPPABLE_MANIFEST:-engine/composition/hotswap_swappable.def}"
 FLAGS_ENV="build/hotswap/fast/flags.env"
 # The node a module will be dlopen'd into. Step 4 resolves against it.
 SYMBOL_NODE="${ZCL_HOTSWAP_NODE_BINARY:-build/bin/zclassic23-dev}"
@@ -93,12 +93,12 @@ else
     TARGETS=("$@")
 fi
 
-# The verifier itself is built once, against the real lib/hotswap admission
+# The verifier itself is built once, against the real engine/modules/hotswap admission
 # code. --gc-sections drops hotswap_activate()'s dlopen core and its json /
 # logging imports, which the admit path never reaches; without it the link
 # would drag most of the node in for a pure predicate. The SHA-256 and
 # SHA3-256 hashers deliberately survive: the verify path fd-pins and records
-# both artifact digests, so lib/sha3 is linked in on purpose, not by accident.
+# both artifact digests, so platform/modules/sha3 is linked in on purpose, not by accident.
 build_verifier() {
     [ -r "$FLAGS_ENV" ] || {
         echo "hotswap-verify: $FLAGS_ENV missing — run 'make hotswap-module-so FILE=<tu>' once first." >&2
@@ -115,14 +115,14 @@ build_verifier() {
     $cc $cflags -ffunction-sections -fdata-sections \
         -o "$SCRATCH/hotswap_verify_so" \
         tools/dev/hotswap_verify_so.c \
-        lib/hotswap/src/hotswap_activate.c \
-        lib/hotswap/src/hotswap_islands.c \
-        lib/base/src/safe_alloc.c \
-        lib/hotswap/src/hotswap_sealed_image.c \
-        lib/hotswap/src/hotswap_elf_probe.c \
-        lib/hotswap/src/hotswap_elf_probe_tables.c \
-        lib/hotswap/src/hotswap_artifact_digest.c \
-        lib/sha3/src/sha3.c \
+        engine/modules/hotswap/src/hotswap_activate.c \
+        engine/modules/hotswap/src/hotswap_islands.c \
+        platform/modules/base/src/safe_alloc.c \
+        engine/modules/hotswap/src/hotswap_sealed_image.c \
+        engine/modules/hotswap/src/hotswap_elf_probe.c \
+        engine/modules/hotswap/src/hotswap_elf_probe_tables.c \
+        engine/modules/hotswap/src/hotswap_artifact_digest.c \
+        platform/modules/sha3/src/sha3.c \
         -Wl,--gc-sections -ldl || return 1
     return 0
 }

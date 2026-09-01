@@ -1,0 +1,32 @@
+[Unit]
+Description=Z23 SLO Pager — fail-state IS the page (canonical no-advance / stale ledger / unreachable)
+# THE PAGE SURFACE. This oneshot runs
+# tools/scripts/slo_page_if_stalled.sh. `evaluate` reads the external
+# ledger this pager does NOT itself produce
+# (~/.local/state/zclassic23-slo/uptime-ledger.jsonl, written by
+# platform/deploy/zclassic23-slo-probe.service) and decides whether any page
+# condition is active:
+#   - canonical NO-ADVANCE  : served height unchanged for > 2h
+#   - ledger STALE          : newest sample older than > 5m (the probe died)
+#   - canonical UNREACHABLE : no reachable canonical sample for > 10m
+#
+# The pager PAGES BY FAILING: `evaluate` exits NONZERO for as long as any
+# page condition holds, so the unit sits in `failed` state and shows up in
+# `systemctl --user --failed` — the failed unit itself IS the standing alarm,
+# self-clearing the moment the condition resolves (a later green run leaves
+# it active/inactive again). On first fire (and every ~6h while still
+# firing) the script additionally raises a wall(1) broadcast and appends a
+# record to ~/.local/state/zclassic23-slo/pages.jsonl. Deliberately NO
+# Restart= and NO OnFailure= here: a restart or an OnFailure handler would
+# paper over exactly the failed state we are using as the signal.
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/github/zclassic23
+ExecStart=%h/github/zclassic23/tools/scripts/slo_page_if_stalled.sh evaluate
+# One ledger read + a little arithmetic + at most a wall/append on fire —
+# sub-second work. 30s is a wide margin against a slow disk.
+TimeoutStartSec=30
+Nice=10
+StandardOutput=journal
+StandardError=journal

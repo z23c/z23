@@ -24,7 +24,7 @@ Diagnostics:
 
 ---
 # Node sources missing from compile_commands.json (not in the dev-object
-# graph: src/cli.c, examples/, fuzz harnesses, vendored C) get a minimal
+# graph: engine/entry/cli.c, examples/, fuzz harnesses, vendored C) get a minimal
 # working flag set on top of clangd's bare fallback. Relative -I paths
 # resolve against this file's directory.
 If:
@@ -36,9 +36,9 @@ CompileFlags:
     - -Wextra
     - -D_POSIX_C_SOURCE=200809L
     - -Ivendor/include
-    - -Ilib/util/include
-    - -Ilib/crypto/include
-    - -Ilib/framework/include
+    - -Iplatform/modules/util/include
+    - -Icore/modules/crypto/include
+    - -Iengine/modules/framework/include
     - -Iports/include
 
 ---

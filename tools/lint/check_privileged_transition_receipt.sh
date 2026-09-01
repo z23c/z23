@@ -33,7 +33,7 @@ cd "$ROOT"
 # Test-isolation overrides (default to the real tree). The gate scans only the
 # command .def files and specific receipt handler files — no broad source walk —
 # so there is no self-match to exclude.
-DEFDIR="${ZCL_PRIV_RECEIPT_DEF_DIR:-config/commands}"
+DEFDIR="${ZCL_PRIV_RECEIPT_DEF_DIR:-engine/composition/commands}"
 BASELINE="${ZCL_PRIV_RECEIPT_BASELINE:-$SCRIPT_DIR/privileged_transition_receipt_baseline.txt}"
 
 # ── Enumerate owner-mutating leaves from the command catalog (build-free) ──

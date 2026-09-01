@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Copyright 2026 Rhett Creighton - Apache License 2.0
 # Harvest (height, hash) checkpoint pairs from a running zclassicd.
-# Emits two C source fragments for lib/chain/src/chainparams.c:
+# Emits two C source fragments for core/modules/chain/src/chainparams.c:
 #   /tmp/checkpoints_decl.c  — the array declaration (heights only)
 #   /tmp/checkpoints_init.c  — the uint256_set_hex initializers
 #

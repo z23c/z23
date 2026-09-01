@@ -5,8 +5,8 @@
  *
  * Pure UTXO/coins arithmetic. Replays from inputs alone — no clock,
  * no RNG, no allocation, no I/O, no view/cache reads. Extracted from
- * lib/coins/src/{coins,compressor}.c and the pure slice of
- * lib/validation/src/update_coins.c (the "capture undo for one
+ * core/modules/coins/src/{coins,compressor}.c and the pure slice of
+ * core/modules/validation/src/update_coins.c (the "capture undo for one
  * already-resolved coin" portion). The lib/ wrappers are now thin
  * forwarders.
  *

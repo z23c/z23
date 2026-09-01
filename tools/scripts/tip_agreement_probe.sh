@@ -6,9 +6,9 @@
 # WHAT THIS IS FOR
 # ----------------
 # Every parity reference that existed before this file dialled 127.0.0.1:
-#   app/services/src/zclassicd_oracle_service.c        ORACLE_DEFAULT_HOST
-#   app/services/src/utxo_parity_service.c             PARITY_RPC_DEFAULT_HOST
-#   app/services/src/utxo_reference_source_zclassicd.c same
+#   engine/services/src/zclassicd_oracle_service.c        ORACLE_DEFAULT_HOST
+#   engine/services/src/utxo_parity_service.c             PARITY_RPC_DEFAULT_HOST
+#   engine/services/src/utxo_reference_source_zclassicd.c same
 # All three read the sibling zclassicd on THIS box — same disk, same clock,
 # same operator, same binary lineage. docs/HANDOFF.md states the consequence
 # plainly: gap_vs_oracle "is one network view from one box, and it compares
@@ -23,7 +23,7 @@
 #
 # WHERE THE REMOTE FACTS COME FROM
 # --------------------------------
-# app/services/src/network_monitor.c samples every connected peer every 30 s
+# engine/services/src/network_monitor.c samples every connected peer every 30 s
 # and persists one row per peer per tick to the peer_chain_observations
 # table (10,000 rows retained): peer address, advertised best height, and the
 # LEARNABLE TIP HASH — a real 32-byte block hash from a real remote node.
@@ -80,7 +80,7 @@
 # NM_FORK_MIN_CLUSTER (services/network_monitor.h) requires 2 peers behind
 # each side before calling a fork, NM_NETSPLIT_MIN_RIVAL_PEERS/GROUPS
 # requires 2 before peer testimony counts at all, and
-# lib/net/include/net/header_corroboration.h holds a deep best-header switch
+# core/modules/net/include/net/header_corroboration.h holds a deep best-header switch
 # until 2 distinct address groups vouch. One peer is an anecdote in all four
 # places, and it is an anecdote here. Below the floor the sample records
 # could-not-ask with reason no_hash_with_min_distinct_peers_<n> — NOT
@@ -105,7 +105,7 @@
 #     -addnode dial goes through net_service_to_string (connman_dialer.c,
 #     connman_complete_dial) and BRACKETS the address: "[2001:...:0001]:8033".
 #     An addrman dial or any inbound peer goes through p2p_node_create's
-#     fallback (lib/net/src/net.c), which is net_addr_to_string + ":port" and
+#     fallback (core/modules/net/src/net.c), which is net_addr_to_string + ":port" and
 #     does NOT bracket: "2001:...:0001:8033". Under plain rtrim those are two
 #     distinct keys, so one IPv6 machine reached both ways is two witnesses
 #     and can mint an "agrees" on its own.
@@ -273,7 +273,7 @@ fi
 # by a colon (so a portless "1.2.3.4" keeps its last octet), then drop any
 # trailing colon, unbracket, and lowercase.
 #   `replace()` is NOT available: `core storage query` blocks the REPLACE
-#   keyword outright (app/controllers/src/dbquery_controller.c), so bracket
+#   keyword outright (engine/controllers/src/dbquery_controller.c), so bracket
 #   removal uses trim(X,'[]'), which is also what keeps this under the
 #   1024-byte DBQUERY_MAX_SQL_LEN when it appears twice in one statement.
 HOSTKEY="lower(trim(rtrim(CASE WHEN rtrim(addr,'0123456789')<>addr AND \

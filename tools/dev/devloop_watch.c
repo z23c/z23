@@ -1758,7 +1758,7 @@ int zcl_devloop_watch_mode_until(const char *repo_root,
         if (fast == ZCL_DEVLOOP_RESTART_EVENT_PROOF_PENDING &&
             epoch_count == 1 &&
             strcmp(files[0],
-                   "app/services/src/vault_intent_decision_service.c") == 0) {
+                   "contexts/wallet/services/src/vault_intent_decision_service.c") == 0) {
             fast = zcl_devloop_restart_story_prove_event(
                 ctx.root, files, epoch_count, publish_mode);
         }

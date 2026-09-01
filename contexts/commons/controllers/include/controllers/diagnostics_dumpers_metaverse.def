@@ -1,0 +1,15 @@
+/* Per-domain dumpstate subsystem descriptors: metaverse property/world state.
+ *
+ * Split from diagnostics_dumpers.def (see that file's aggregator comment for
+ * the shared #include contract). Data-only: no macro definitions or include
+ * guards belong in this file.
+ *
+ * Build-fabric runtime owns the first metaverse diagnostics provider. */
+
+DIAG_ENTRY("build_fabric", build_fabric_dump_state_json,
+           "Build coordinator/worker supervision and exact action progress",
+           "diagnostic", "service",
+           "engine/services/src/build_fabric_runtime.c",
+           "persisted_projection_snapshot", "bounded_lookup", "action_id",
+           "<64-lowercase-hex>", NULL, "tests/harness/src/test_build_fabric.c",
+           true)

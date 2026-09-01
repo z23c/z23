@@ -4,8 +4,8 @@
 # The eight app/ shapes include DOWNWARD only:
 #   controllers -> services -> models -> (lib -> core)
 # This gate forbids the two upward edges that can occur in practice:
-#   (a) app/models/**   #include-ing "services/..." or "controllers/..."
-#   (b) app/services/** #include-ing "controllers/..."
+#   (a) engine/models/**   #include-ing "services/..." or "controllers/..."
+#   (b) engine/services/** #include-ing "controllers/..."
 # A models/ file reaching UP into services/ (or controllers/), or a
 # services/ file reaching UP into controllers/, typically means the symbol
 # belongs lower in the stack, or the dependency should be inverted (pass the
@@ -44,10 +44,20 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 # shellcheck source=tools/lint/scan_exclusions.sh
 source tools/lint/scan_exclusions.sh
+# shellcheck source=tools/lint/repo_shape.sh
+source tools/lint/repo_shape.sh
 
 BASELINE="${ZCL_SHAPE_DIRECTION_BASELINE:-tools/scripts/shape_include_direction_baseline.txt}"
-MODELS_DIR="${ZCL_SHAPE_DIRECTION_MODELS_DIR:-app/models}"
-SERVICES_DIR="${ZCL_SHAPE_DIRECTION_SERVICES_DIR:-app/services}"
+if [ -n "${ZCL_SHAPE_DIRECTION_MODELS_DIR:-}" ]; then
+    MODELS_DIRS=("$ZCL_SHAPE_DIRECTION_MODELS_DIR")
+else
+    mapfile -t MODELS_DIRS < <(repo_shape_room_dirs models)
+fi
+if [ -n "${ZCL_SHAPE_DIRECTION_SERVICES_DIR:-}" ]; then
+    SERVICES_DIRS=("$ZCL_SHAPE_DIRECTION_SERVICES_DIR")
+else
+    mapfile -t SERVICES_DIRS < <(repo_shape_room_dirs services)
+fi
 
 if [ "${1:-}" = "--selftest" ]; then
     fixture_root=$(mktemp -d "${TMPDIR:-/tmp}/z23-shape-direction.XXXXXX")
@@ -142,8 +152,8 @@ scan_dir() {
     done
 }
 
-scan_dir "$MODELS_DIR"   "services|controllers"
-scan_dir "$SERVICES_DIR" "controllers"
+for dir in "${MODELS_DIRS[@]}"; do scan_dir "$dir" "services|controllers"; done
+for dir in "${SERVICES_DIRS[@]}"; do scan_dir "$dir" "controllers"; done
 
 stale_baseline=()
 for key in "${!baseline[@]}"; do
@@ -179,7 +189,7 @@ echo "  2. Move the needed symbol DOWN into models/ (or lib/) where both sides"
 echo "     can reference it cleanly (e.g. a pure policy table)."
 echo "  3. Invert the dependency: pass the value in from the upstream caller,"
 echo "     or register a callback/port seam (see node_db_set_quick_check_skip_probe"
-echo "     in app/models/include/models/database.h for the pattern)."
+echo "     in engine/models/include/models/database.h for the pattern)."
 echo "  4. As a deliberate, reviewed exception only, add an override marker"
 echo "     '// shape-layer-ok:<tag>' to the include line, or add a reviewed"
 echo "     baseline entry (grandfathering pre-existing debt only — never a"

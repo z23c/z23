@@ -16,8 +16,8 @@
 # row to a .def tomorrow and this tool reflects it with no edit here.
 #
 # ── THE THREE VERDICTS ─────────────────────────────────────────────────────
-#   SWAPPABLE  registered today (a config/hotswap_swappable.def row, or a
-#              config/hotswap_islands.def member of one). The 9-second loop is
+#   SWAPPABLE  registered today (a engine/composition/hotswap_swappable.def row, or a
+#              engine/composition/hotswap_islands.def member of one). The 9-second loop is
 #              available right now and the exact command is printed.
 #   ELIGIBLE   passes every MECHANICAL rule but is not registered. The exact
 #              .def rows to add are printed — together with the standing rule
@@ -25,8 +25,8 @@
 #   BLOCKED    names the specific leaf and the specific rule that fails.
 #
 # ── A LINT PASS IS NOT AN APPROVAL ─────────────────────────────────────────
-# Read the comment above HOTSWAP_SWAPPABLE("app/controllers/src/
-# chain_native_handlers.c", ...) in config/hotswap_swappable.def:
+# Read the comment above HOTSWAP_SWAPPABLE("engine/controllers/src/
+# chain_native_handlers.c", ...) in engine/composition/hotswap_swappable.def:
 # core.chain.block.get and core.chain.transaction.get are ZCL_COMMAND_READY_READ
 # and pass every mechanical gate, and are STILL withheld, because they render
 # block and transaction bytes. The standing rule is that anything one cannot
@@ -48,13 +48,13 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 cd "$ROOT" || exit 2
 
-SWAPPABLE_DEF="${ZCL_HOTSWAP_SWAPPABLE_MANIFEST:-config/hotswap_swappable.def}"
-ELIGIBLE_DEF="${ZCL_HOTSWAP_MANIFEST:-config/hotswap_eligible.def}"
-ISLANDS_DEF="${ZCL_HOTSWAP_ISLAND_MANIFEST:-config/hotswap_islands.def}"
-DENIED_DEF="${ZCL_HOTSWAP_DENIED_LEAVES:-config/hotswap_denied_leaves.def}"
-PROBE_DEF="${ZCL_HOTSWAP_PROBE_CASES:-config/hotswap_probe_cases.def}"
-SERVICES_DEF="${ZCL_HOTSWAP_SERVICES:-config/hotswap_services.def}"
-CMD_DEF_DIR="${ZCL_HOTSWAP_COMMAND_DEF_DIR:-config/commands}"
+SWAPPABLE_DEF="${ZCL_HOTSWAP_SWAPPABLE_MANIFEST:-engine/composition/hotswap_swappable.def}"
+ELIGIBLE_DEF="${ZCL_HOTSWAP_MANIFEST:-engine/composition/hotswap_eligible.def}"
+ISLANDS_DEF="${ZCL_HOTSWAP_ISLAND_MANIFEST:-engine/composition/hotswap_islands.def}"
+DENIED_DEF="${ZCL_HOTSWAP_DENIED_LEAVES:-engine/composition/hotswap_denied_leaves.def}"
+PROBE_DEF="${ZCL_HOTSWAP_PROBE_CASES:-engine/composition/hotswap_probe_cases.def}"
+SERVICES_DEF="${ZCL_HOTSWAP_SERVICES:-engine/composition/hotswap_services.def}"
+CMD_DEF_DIR="${ZCL_HOTSWAP_COMMAND_DEF_DIR:-engine/composition/commands}"
 BRIDGE_TU="${ZCL_HOTSWAP_BRIDGE_TU:-tools/command/native_command.c}"
 
 # The shape roots, copied verbatim from the two gates that enforce them:
@@ -524,7 +524,7 @@ verdict_tu() {
         [ "$verbose" = 1 ] && {
             echo "VERDICT: SWAPPABLE — island member of $owner"
             echo "  file:   $tu"
-            echo "  This TU is compiled INTO that module (config/hotswap_islands.def),"
+            echo "  This TU is compiled INTO that module (engine/composition/hotswap_islands.def),"
             echo "  so editing it gets the same ~9 second loop through its owner:"
             echo "    $(swappable_command_for "$owner")"
         }
@@ -543,7 +543,7 @@ verdict_tu() {
         { bad="under a forbidden consensus/state/supervisor root — check_hotswap_swappable_shape.sh FORBIDDEN='$SHAPE_FORBIDDEN'. Consensus, validation, storage, net, coins, chain, mining, reducer stages, the kernel and supervisors are NEVER hot-swappable, not even in dev."
           LAST_BLOCK_CLASS="forbidden-root"; }
     [ -z "$bad" ] && [[ ! "$tu" =~ $SHAPE_ALLOWED ]] && \
-        { bad="not under an allowed shape-leaf folder (app/controllers/, app/views/, app/conditions/) — a swappable TU must be a controller/view/condition LEAF. check_hotswap_swappable_shape.sh ALLOWED='$SHAPE_ALLOWED'."
+        { bad="not under an allowed shape-leaf folder (engine/controllers/, contexts/explorer/views/, engine/conditions/) — a swappable TU must be a controller/view/condition LEAF. check_hotswap_swappable_shape.sh ALLOWED='$SHAPE_ALLOWED'."
           LAST_BLOCK_CLASS="not-a-shape-leaf"; }
     if [ -z "$bad" ] && [ -z "$leaves" ]; then
         bad="owns no ZCL_COMMAND_READY_READ command leaf, so a module built from it would re-point nothing"
@@ -804,8 +804,8 @@ ledger() {
             seen_cls="${seen_cls} $cls"
             case "$cls" in
               not-a-shape-leaf)
-                echo "  RULE: not under an allowed shape-leaf folder (app/controllers/,"
-                echo "        app/views/, app/conditions/). A swappable TU must be a"
+                echo "  RULE: not under an allowed shape-leaf folder (engine/controllers/,"
+                echo "        contexts/explorer/views/, engine/conditions/). A swappable TU must be a"
                 echo "        controller/view/condition LEAF — check_hotswap_swappable_shape.sh"
                 echo "        ALLOWED='$SHAPE_ALLOWED'"
                 echo "        $n TU(s):" ;;

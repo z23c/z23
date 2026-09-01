@@ -36,13 +36,13 @@
     <text x="788" y="198" text-anchor="middle" font-size="19" font-weight="750" fill="#e9eef6">INDEPENDENT CHECKS</text>
     <line x1="692" y1="220" x2="884" y2="220" stroke="#313b4e"/>
     <text x="714" y="258" font-size="17" font-weight="700" fill="#3ddc97">1</text>
-    <text x="746" y="258" font-size="17" fill="#c3ccd9">re-root every byte</text>
+    <text x="744" y="258" font-size="15" fill="#c3ccd9">re-root every byte</text>
     <text x="714" y="294" font-size="17" font-weight="700" fill="#3ddc97">2</text>
-    <text x="746" y="294" font-size="17" fill="#c3ccd9">verify the statement</text>
+    <text x="744" y="294" font-size="15" fill="#c3ccd9">verify the statement</text>
     <text x="714" y="330" font-size="17" font-weight="700" fill="#3ddc97">3</text>
-    <text x="746" y="330" font-size="17" fill="#c3ccd9">admit bounded work</text>
+    <text x="744" y="330" font-size="15" fill="#c3ccd9">admit bounded work</text>
     <text x="714" y="366" font-size="17" font-weight="700" fill="#3ddc97">4</text>
-    <text x="746" y="366" font-size="17" fill="#c3ccd9">rebuild and compare</text>
+    <text x="744" y="366" font-size="15" fill="#c3ccd9">rebuild and compare</text>
     <rect x="697" y="389" width="182" height="34" rx="17" fill="#171d2a" stroke="#3ddc97"/>
     <text x="788" y="412" text-anchor="middle" font-size="13" font-weight="750" fill="#86edbd">EVIDENCE, NOT VOUCHING</text>
 

@@ -22,7 +22,7 @@
 #
 # Outputs:
 #   core/consensus/src/oversize_grandfather_table.inc   (default)
-#   lib/test/src/fixture_tx_oversize_478544.c             (--fixture)
+#   tests/harness/src/fixture_tx_oversize_478544.c             (--fixture)
 #
 # Per-entry verification against zclassicd before anything is emitted:
 #   - getblockhash <height>       -> THE canonical main-chain hash at that
@@ -46,7 +46,7 @@ RPC_URL="${ZCLASSICD_RPC_URL:-http://127.0.0.1:8232}"
 CONF="${ZCLASSICD_CONF:-$HOME/.zclassic/zclassic.conf}"
 DATA=tools/data/oversize_grandfather_txids.txt
 OUT_INC=core/consensus/src/oversize_grandfather_table.inc
-OUT_FIXTURE=lib/test/src/fixture_tx_oversize_478544.c
+OUT_FIXTURE=tests/harness/src/fixture_tx_oversize_478544.c
 FIXTURE_TXID=e3eeb123a79945cc74e6107422b124dc130ddd4b61fe5c74087317c256c79700
 FIXTURE_SIZE=125811
 

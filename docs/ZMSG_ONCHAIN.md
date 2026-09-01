@@ -6,7 +6,7 @@ treats the memo as opaque free-form bytes, so this format changes **no**
 consensus predicate, tx-validity rule, or serialization — it is a pure
 application-layer overlay (same discipline as ZNAM/ZSLP OP_RETURN payloads).
 
-Two ZMSG channels exist (see `lib/net/include/net/zmsg.h`):
+Two ZMSG channels exist (see `core/modules/net/include/net/zmsg.h`):
 
 - **P2P** (`ZMSG_CHANNEL_P2P`) — instant, free, plaintext-on-wire, between
   connected nodes. Default.
@@ -47,7 +47,7 @@ needs no variable-offset arithmetic. All integers are little-endian.
 
 A non-ZMSG memo is expected and returns `false` quietly (no log spam).
 
-## Codec API (`lib/net/src/zmsg.c`)
+## Codec API (`core/modules/net/src/zmsg.c`)
 
 ```c
 bool zmsg_memo_encode(uint8_t out[512], const uint8_t *payload,
@@ -56,7 +56,7 @@ bool zmsg_memo_decode(const uint8_t memo[512], struct zmsg_memo *out);
 ```
 
 Unit + negative tests (bad magic, bad version, reserved flag, over-long
-payload, round-trip, reply-to) live in the fast pool: `lib/test/src/test_protocols.c`.
+payload, round-trip, reply-to) live in the fast pool: `tests/harness/src/test_protocols.c`.
 
 ## Send path
 
@@ -69,7 +69,7 @@ msg_send recipient "message" [channel] [from_address] [reply_to]
 ```
 
 The on-chain path (`msg_send_onchain` in
-`app/controllers/src/messaging_controller.c`):
+`contexts/messaging/controllers/src/messaging_controller.c`):
 
 1. **Fails closed** if `sapling_params_loaded()` is false (prover not READY),
    if the recipient is not a `zs1…` address, if `from_address` is missing, or
@@ -92,10 +92,10 @@ The on-chain path (`msg_send_onchain` in
 ## Receive path
 
 When the wallet decrypts an incoming Sapling note
-(`app/jobs/src/tip_finalize_post_step.c`, right after
+(`engine/jobs/src/tip_finalize_post_step.c`, right after
 `node_db_sync_sapling_note`), it calls
 `zmsg_ingest_onchain_note(ndb, note->memo, note->txid)`
-(`app/models/src/zmsg.c`). If the memo parses as a ZMSG it is stored as an
+(`contexts/messaging/models/src/zmsg.c`). If the memo parses as a ZMSG it is stored as an
 **inbound** message with:
 
 - `channel = onchain`, `direction = inbound`, `txid` stamped,
@@ -107,7 +107,7 @@ When the wallet decrypts an incoming Sapling note
 
 ## End-to-end test
 
-`lib/test/src/test_simnet_zmsg_onchain.c` (params-gated group
+`tests/harness/src/test_simnet_zmsg_onchain.c` (params-gated group
 `simnet_zmsg_onchain`) proves the full round-trip in the deterministic
 simulator: a `t→z` output built with the real Sapling prover carrying a ZMSG
 memo, decrypted by the recipient, parsed, ingested, and surfaced in the store.

@@ -1,0 +1,187 @@
+/* Pure service islands. Consumer defines:
+ * HOTSWAP_SERVICE(id, source_tu, private_headers, contract_headers, stable_imports,
+ *                 abi_fingerprint, schema_fingerprint, wire_fingerprint,
+ *                 kat_fingerprint, probe_leaf)
+ *
+ * Static callers retain parsing, authentication, persistence and effects.
+ * Listed sources may calculate only over caller-owned values/buffers. */
+
+HOTSWAP_SERVICE(
+    "dev.reflex.policy.v1",
+    "cognition/services/src/dev_reflex_policy_service.c",
+    "-",
+    "cognition/services/include/services/dev_reflex_policy_service.h",
+    "-",
+    "dev.reflex.policy.abi.v2:event-projection+semantic-proof-handoff",
+    "zcl.dev_cycle.v1+zcl.dev_drive.v1+zcl.dev_proof_handoff.v2",
+    "progress-phase+semantic-class+candidate-story-roots.v2",
+    "4f44bc02d76cd948b4c85de32bbf5225021d852790c4976a0d069c554e8f03e7",
+    "dev.test.story")
+
+HOTSWAP_SERVICE(
+    "zcode.c23.corpus.v1",
+    "contexts/commons/services/src/zcode_c23_corpus_service.c",
+    "contexts/commons/services/src/zcode_c23_corpus_internal.h",
+    "contexts/commons/services/include/services/zcode_c23_corpus_service.h",
+    "vcs_zcode_c23_corpus_rules_v1_validate vcs_zcode_c23_corpus_shard_v1_validate vcs_zcode_c23_corpus_shard_v1_page vcs_zcode_c23_corpus_checkpoint_v1_validate vcs_zcode_productivity_receipt_v1_validate vcs_zcode_c23_corpus_rules_v1_default vcs_zcode_c23_corpus_rules_v1_root zcl_hex_encode zcl_u64_add",
+    "zcode.c23.corpus.abi.v3:impact-readiness",
+    "zcode.c23.corpus.schemas.v5:status-ux.v2+impact-readiness.v1+show.v1+shard-page.v1",
+    "c23-rules+shard+checkpoint+productivity+status-ux+impact-readiness.v1",
+    "ae0c059c8c925464a7d9376b17687b207027833f5337dc49944bcd1b55d3be23",
+    "zcode.commons.corpus.show")
+
+HOTSWAP_SERVICE(
+    "zcode.c23.economics.v1",
+    "contexts/commons/services/src/zcode_c23_economics_service.c",
+    "contexts/commons/services/src/zcode_c23_economics_internal.h",
+    "contexts/commons/services/include/services/zcode_c23_economics_service.h",
+    "vcs_zcode_creation_award_atoms_v2 vcs_zcode_policy_candidate_v2_init vcs_zcode_policy_candidate_v2_validate vcs_zcode_policy_candidate_v2_root vcs_zcode_epoch_select_v2 vcs_zcode_epoch_schedule_validate vcs_zcode_epoch_schedule_class_weight vcs_zcode_claim_epoch_validate",
+    "zcode.c23.economics.abi.v3:claim-epoch-view",
+    "zcl.zcode_commons_economics_status.v2+schedule_proposal_view.v2+backlog-readiness.v1+claim_epoch_view.v2",
+    "zc23-policy+claim+backlog-readiness+epoch-selection+claim-epoch-proposal.v2",
+    "988f572ab350e79e76515506025f3db334809c8f2a89d397274c542f26580016",
+    "zcode.commons.economics.status")
+
+HOTSWAP_SERVICE(
+    "app.market.purchase.view.v1",
+    "contexts/market/services/src/market_purchase_view_service.c",
+    "-",
+    "contexts/market/services/include/services/market_purchase_view_service.h",
+    "-",
+    "app.market.purchase.view.abi.v1:1f17fa01",
+    "zcl.app_market_purchase_guide.v1",
+    "market-purchase-error-map+commit-hint+guide.v1",
+    "59a6e2f7944682cb4707701e59a7fa960c054c6f76b40821aeb3c02f24ea1ba5",
+    "app.market.purchase.guide")
+
+HOTSWAP_SERVICE(
+    "app.market.moderation.view.v1",
+    "contexts/market/services/src/market_moderation_view_service.c",
+    "contexts/market/services/src/market_moderation_view_internal.h",
+    "contexts/market/services/include/services/market_moderation_view_service.h",
+    "-",
+    "app.market.moderation.view.abi.v1:74ac9e20",
+    "zcl.app_market_moderation_guide.v1+zcl.market_moderation_profile.v1",
+    "profile-resolve+visibility+description+guide.v1",
+    "b3bb4162ded56964518aca6175fba41521ed9b121029a5eb38dd893267f80f26",
+    "app.market.moderation.guide")
+
+HOTSWAP_SERVICE(
+    "zcode.package.view.v1",
+    "contexts/commons/services/src/zcode_package_view_service.c",
+    "-",
+    "contexts/commons/services/include/services/zcode_package_view_service.h",
+    "-",
+    "zcode.package.view.abi.v2:publish-plan",
+    "zcl.zcode_package_guide.v1+zcl.zcode_package_search.v1+zcl.zcode_package_show.v1+zcl.zcode_publish_plan.v1",
+    "package-index-entry+bounded-view+guide+publish-plan-readiness.v1",
+    "d6f4333f02a190347c7d3b22a9bd934d9c5f9634589021151477c49de18c4641",
+    "zcode.package.guide")
+
+HOTSWAP_SERVICE(
+    "zcode.moderation.view.v1",
+    "contexts/commons/services/src/zcode_moderation_view_service.c",
+    "-",
+    "contexts/commons/services/include/services/zcode_moderation_view_service.h",
+    "-",
+    "zcode.moderation.view.abi.v2:admission-status",
+    "zcl.zcode_moderation_status.v1:admission-readiness+service-status.v1+policy-list.v1+policy-show.v1",
+    "family-policy+service-readiness+admission-readiness-caller-owned-view.v2",
+    "09fa2911b1af51e7b919ee61d09819f5bdc810f5b4f7d0a22573c5353f8ca3b5",
+    "zcode.moderation.status")
+
+HOTSWAP_SERVICE(
+    "zcode.workspace.view.v1",
+    "contexts/commons/services/src/zcode_workspace_view_service.c",
+    "-",
+    "contexts/commons/services/include/services/zcode_workspace_view_service.h",
+    "vcs_zcode_module_passport_v1_root vcs_zcode_workspace_entry_v1_root zcl_bytes_any_set",
+    "zcode.workspace.view.abi.v2:manifest-render",
+    "zcl.zcode_workspace_status.v1+plan.v1+verify.v1+manifest-plan.v1+manifest-commit.v1",
+    "module-passport+workspace-entry-binding+manifest-unsigned.v1",
+    "a027432310c2e02e8460b2757159fc0d40a24c176d6935fffd1de2d2b765e84b",
+    "zcode.workspace.status")
+
+HOTSWAP_SERVICE(
+    "zcode.passport.view.v1",
+    "contexts/commons/services/src/zcode_passport_view_service.c",
+    "-",
+    "contexts/commons/services/include/services/zcode_passport_view_service.h",
+    "-",
+    "zcode.passport.view.abi.v1:0b2ee4ac",
+    "zcl.zcode_passport_status.v1+plan.v1+commit.v1+verify.v1",
+    "module-passport-presentation.v1",
+    "8e03105430bec13a6766e00ab21bc1ac6f5f234ee4d17f08f8be6943d8e4140f",
+    "zcode.passport.status")
+
+HOTSWAP_SERVICE(
+    "zcode.goal-context.calc.v1",
+    "cognition/services/src/zcode_goal_context_calc_service.c",
+    "-",
+    "cognition/services/include/services/zcode_goal_context_calc_service.h",
+    "-",
+    "zcode.goal-context.calc.abi.v1:8683e1da",
+    "zcl.zcode_work_context.v1+goal-tokens.v1+candidate-rank.v1",
+    "goal-tokenization+candidate-ranking.v1",
+    "1f7706241e21a6a0630abe43242a44101d059739bd45f5a64f62a5adc16e2a66",
+    "zcode.work.context")
+
+HOTSWAP_SERVICE(
+    "zcode.lane.view.v1",
+    "contexts/commons/services/src/zcode_lane_view_service.c",
+    "-",
+    "contexts/commons/services/include/services/zcode_lane_view_service.h",
+    "-",
+    "zcode.lane.view.abi.v1:08a820c2",
+    "zcl.zcode_lane.v1+zcl.zcode_lane_guide.v1",
+    "frontier-candidate-proven-presentation.v1",
+    "d362c0ecd095ade5ec43eecfd0e5a00750d3b5ba4d2eef7848e8337163b1a8ae",
+    "zcode.package.dev.promotion-guide")
+
+HOTSWAP_SERVICE(
+    "app.shop.reputation.view.v1",
+    "contexts/market/services/src/shop_reputation_view_service.c",
+    "-",
+    "contexts/market/services/include/services/shop_reputation_view_service.h",
+    "-",
+    "app.shop.reputation.view.abi.v1:1f33b720",
+    "zcl.shop_reputation.v1",
+    "publisher-evidence-rows+local-window.v1",
+    "21f8f1dfcc3f10c53af1299c283b15624a8e8d17c3c7d16869a31c5d318872de",
+    "app.shop.reputation")
+
+HOTSWAP_SERVICE(
+    "app.shop.status.view.v1",
+    "contexts/market/services/src/shop_status_view_service.c",
+    "-",
+    "contexts/market/services/include/services/shop_status_view_service.h",
+    "-",
+    "app.shop.status.view.abi.v1:6bb63120",
+    "zcl.shop_status.v1",
+    "shop-posture+verification+named-gaps.v1",
+    "6ca6c3464c42512173ab79649d15964fd0c296b20c93c792c1fcaa93a01280a1",
+    "app.shop.status")
+
+HOTSWAP_SERVICE(
+    "app.shop.want.view.v1",
+    "contexts/market/services/src/shop_want_view_service.c",
+    "contexts/market/services/src/shop_want_view_internal.h",
+    "contexts/market/services/include/services/shop_want_view_service.h",
+    "zcl_hex_encode zcl_bytes_any_set",
+    "app.shop.want.view.abi.v2:fulfillment-status",
+    "zcl.shop_want_post.v1+zcl.shop_want_list.v1+zcl.shop_want_status.v1+zcl.shop_want_fulfill_status.v1",
+    "buyer-want-state+preview+fulfillment-readiness+next-action.v1",
+    "0a9a13ce03b8588002b63e8553350a62cbe948bb7b79b8f1df83765943c5ea72",
+    "app.shop.want.list")
+
+HOTSWAP_SERVICE(
+    "app.vault.intent.decision.v1",
+    "contexts/wallet/services/src/vault_intent_decision_service.c",
+    "-",
+    "contexts/wallet/services/include/services/vault_intent_decision_service.h",
+    "-",
+    "app.vault.intent.decision.abi.v1:immutable-snapshot",
+    "zcl.vault_intent_decision_story.v1",
+    "vault-plan-snapshot+proposal-only.v1",
+    "0fa5c1bb3a44554fcc56c759c8dd1ebbbe30af9f5f3762ee76ba843a0a6aa543",
+    "dev.test.story")

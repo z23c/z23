@@ -4,7 +4,7 @@
 # zcl-logrotate.sh — size-threshold log rotation with NO external logrotate
 # dependency (repo rule: no external deps — see CLAUDE.md "NO external
 # dependencies"). Phase E2 of the approved plan: node.log grows unbounded
-# under `StandardOutput=append:...node.log` (deploy/zclassic23.service and
+# under `StandardOutput=append:...node.log` (platform/deploy/zclassic23.service and
 # friends never truncate it).
 #
 # Targets (overridable via ZCL_LOGROTATE_TARGETS, space-separated glob

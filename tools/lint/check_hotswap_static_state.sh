@@ -10,8 +10,8 @@
 # non-eligible trampoline TU.
 #
 # SCAN SET = the UNION of the two manifests that can name a recompiled TU:
-#   config/hotswap_eligible.def   HOTSWAP_ELIGIBLE("<tu>")   (generation .so)
-#   config/hotswap_swappable.def  HOTSWAP_SWAPPABLE("<tu>",…) (module .so)
+#   engine/composition/hotswap_eligible.def   HOTSWAP_ELIGIBLE("<tu>")   (generation .so)
+#   engine/composition/hotswap_swappable.def  HOTSWAP_SWAPPABLE("<tu>",…) (module .so)
 # Scanning only the eligible list was a silent hole: the two lists happened to
 # name the same six files, so a swappable-only TU would have been swapped with
 # zero-initialized module-level state and never tripped a gate.
@@ -37,9 +37,9 @@ cd "$ROOT"
 # shellcheck source=tools/lint/gate_lib.sh
 . tools/lint/gate_lib.sh
 
-MANIFEST="${ZCL_HOTSWAP_MANIFEST:-config/hotswap_eligible.def}"
-SWAPPABLE="${ZCL_HOTSWAP_SWAPPABLE_MANIFEST:-config/hotswap_swappable.def}"
-ISLANDS="${ZCL_HOTSWAP_ISLAND_MANIFEST:-config/hotswap_islands.def}"
+MANIFEST="${ZCL_HOTSWAP_MANIFEST:-engine/composition/hotswap_eligible.def}"
+SWAPPABLE="${ZCL_HOTSWAP_SWAPPABLE_MANIFEST:-engine/composition/hotswap_swappable.def}"
+ISLANDS="${ZCL_HOTSWAP_ISLAND_MANIFEST:-engine/composition/hotswap_islands.def}"
 
 echo "══ LINT: hot-swap recompiled TUs hold no mutable file-scope statics ══"
 

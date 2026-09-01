@@ -90,13 +90,13 @@ traces to violating one of them.
 encoding. For chain progress that is the stage cursor + logs + coins inside
 consensus.db (the kernel store; `progress.kv` on a pre-flip datadir),
 committed as one `BEGIN IMMEDIATE`
-(`lib/storage/include/storage/coins_kv.h:6-13` states the theorem: two WAL
+(`engine/modules/storage/include/storage/coins_kv.h:6-13` states the theorem: two WAL
 databases have no atomic cross-commit; a crash drifts copies apart and no
 forward path realigns them).
 
 **I2 — Derive views, never install state.** Everything that is not the source is
 a projection, recomputed from the source, never written independently. H* is the
-model: pure-derived, read-only (`app/jobs/include/jobs/reducer_frontier.h:73-76`).
+model: pure-derived, read-only (`engine/reducer/jobs/include/jobs/reducer_frontier.h:73-76`).
 Invariant B applied this to the coin-tear — derived from utxo_apply's OWN
 co-committed log, not the lagging frontier (`c8018a388`).
 

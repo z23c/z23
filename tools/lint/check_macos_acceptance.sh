@@ -19,7 +19,7 @@
 # ── WHAT IS ACTUALLY CHECKED HERE, AND WHAT IS NOT ──────────────────────────
 # The script has two modes and only one of them needs an Apple machine:
 #
-#   --check   Pure text. It reads config/platform/macos_capabilities.def and
+#   --check   Pure text. It reads engine/composition/platform/macos_capabilities.def and
 #             asserts: the capability SET has not drifted from the validator's
 #             closed list; every row carries one of the three legal states
 #             (available / degraded / unavailable); every row carries a typed
@@ -71,9 +71,9 @@ cd "$ROOT" || exit 2
 
 GATE="check-macos-acceptance"
 ACCEPT="tools/scripts/macos_acceptance.sh"
-MATRIX="config/platform/macos_capabilities.def"
+MATRIX="engine/composition/platform/macos_capabilities.def"
 CATALOG="tools/dev/test_group_catalog.def"
-RELEASE_CUTTER="packaging/release/build_release.sh"
+RELEASE_CUTTER="platform/packaging/release/build_release.sh"
 # The union is a closed acceptance contract: 30 capability-evidence groups
 # plus eight required platform-baseline groups.  A floor would miss deletions.
 EXPECTED_GROUPS=38
@@ -96,7 +96,7 @@ macos_make_target_reachable() {
 
 macos_runtime_package_reachable() {
     local accept="${1:-$ACCEPT}"
-    grep -Fq '"$REPO_ROOT/packaging/release/build_release.sh" --bin "$REPO_ROOT/build/bin" --out "$package_root/runtime" --platform darwin-arm64' "$accept" &&
+    grep -Fq '"$REPO_ROOT/platform/packaging/release/build_release.sh" --bin "$REPO_ROOT/build/bin" --out "$package_root/runtime" --platform darwin-arm64' "$accept" &&
         grep -Fq '"$package_root/runtime/z23" code guide >"$package_root/code-guide.json"' "$accept"
 }
 

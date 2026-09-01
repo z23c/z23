@@ -393,23 +393,23 @@ feature slice:
 
 | Responsibility | Authority |
 |---|---|
-| fixed offer codec/signature/amount | `lib/net/src/file_market_offer.c` |
-| bounded peer ingress/cache | `lib/net/src/file_market.c`, `msgprocessor.c` |
-| durable offer rows and validation | `app/models/src/file_offer.c` |
-| schema migration | `app/models/src/database_migrate_features_v49_up.c` |
-| payment claim/memo codec | `lib/net/src/file_market_payment.c` |
-| durable payment locator | `app/models/src/market_payment_claim.c` |
-| exact chain/note reconciliation | `app/services/src/file_market_payment_service.c` |
-| signed delivery codec and no-read gate | `lib/net/src/file_market_delivery.c` |
-| private content rows and path-free projection | `app/models/src/market_content.c` |
-| registration and verified chunk reader | `app/services/src/file_market_content_service.c` |
-| boot authorization + content adapter | `config/src/boot_file_market_delivery.c` |
-| buyer plan/commit and encrypted credential | `app/services/src/file_market_purchase_service.c` |
-| restart-safe buyer assembly and publication | `app/services/src/file_market_purchase_service.c`, `app/models/src/market_download.c` |
-| authenticated buyer endpoint client | `lib/net/src/file_market_delivery.c` |
-| node wallet/send/claim adapters | `app/controllers/src/file_market_controller.c` |
-| typed path-free commands | `app/controllers/src/market_purchase_native_handler.c`, `config/commands/app_features.def` |
-| thin native/REST adapters | `app/controllers/` plus `config/commands/` |
+| fixed offer codec/signature/amount | `core/modules/net/src/file_market_offer.c` |
+| bounded peer ingress/cache | `core/modules/net/src/file_market.c`, `msgprocessor.c` |
+| durable offer rows and validation | `engine/models/src/file_offer.c` |
+| schema migration | `engine/models/src/database_migrate_features_v49_up.c` |
+| payment claim/memo codec | `core/modules/net/src/file_market_payment.c` |
+| durable payment locator | `contexts/market/models/src/market_payment_claim.c` |
+| exact chain/note reconciliation | `contexts/market/services/src/file_market_payment_service.c` |
+| signed delivery codec and no-read gate | `core/modules/net/src/file_market_delivery.c` |
+| private content rows and path-free projection | `contexts/market/models/src/market_content.c` |
+| registration and verified chunk reader | `contexts/market/services/src/file_market_content_service.c` |
+| boot authorization + content adapter | `engine/composition/src/boot_file_market_delivery.c` |
+| buyer plan/commit and encrypted credential | `contexts/market/services/src/file_market_purchase_service.c` |
+| restart-safe buyer assembly and publication | `contexts/market/services/src/file_market_purchase_service.c`, `contexts/market/models/src/market_download.c` |
+| authenticated buyer endpoint client | `core/modules/net/src/file_market_delivery.c` |
+| node wallet/send/claim adapters | `contexts/market/controllers/src/file_market_controller.c` |
+| typed path-free commands | `contexts/market/controllers/src/market_purchase_native_handler.c`, `engine/composition/commands/app_features.def` |
+| thin native/REST adapters | `engine/controllers/` plus `engine/composition/commands/` |
 | semantic readiness/proof | `transaction_types.def` and transaction lab |
 
 The purchase service reuses wallet, UTXO/note, mempool, vault-intent, chain,
@@ -476,15 +476,15 @@ confirmation authority, conflict, reorg handling, real encrypted loopback
 delivery, restart-safe assembly, complete-manifest verification, atomic
 no-overwrite publication, and replay safety.
 
-<!-- claim: symbol-present MSG_FILE_OFFER lib/net/include/net/file_market.h -->
-<!-- claim: symbol-present file_market_offer_total_zat lib/net/src/file_market_offer.c -->
-<!-- claim: symbol-present file_payment_auth_verify_for_offer lib/net/src/file_market_payment.c -->
-<!-- claim: symbol-present market_payment_authorize_chunk app/services/src/file_market_payment_service.c -->
-<!-- claim: symbol-present file_market_delivery_prepare lib/net/src/file_market_delivery.c -->
-<!-- claim: symbol-present file_market_content_register app/services/src/file_market_content_service.c -->
-<!-- claim: symbol-present market_purchase_plan app/services/src/file_market_purchase_service.c -->
-<!-- claim: symbol-present market_purchase_retrieve app/services/src/file_market_purchase_retrieval_service.c -->
-<!-- claim: symbol-present app.market.purchase.commit config/commands/app_features.def -->
-<!-- claim: symbol-present app.market.purchase.retrieve config/commands/app_features.def -->
-<!-- claim: symbol-present db_market_content_save app/models/src/market_content.c -->
-<!-- claim: symbol-present market_purchase app/controllers/include/controllers/transaction_types.def -->
+<!-- claim: symbol-present MSG_FILE_OFFER core/modules/net/include/net/file_market.h -->
+<!-- claim: symbol-present file_market_offer_total_zat core/modules/net/src/file_market_offer.c -->
+<!-- claim: symbol-present file_payment_auth_verify_for_offer core/modules/net/src/file_market_payment.c -->
+<!-- claim: symbol-present market_payment_authorize_chunk contexts/market/services/src/file_market_payment_service.c -->
+<!-- claim: symbol-present file_market_delivery_prepare core/modules/net/src/file_market_delivery.c -->
+<!-- claim: symbol-present file_market_content_register contexts/market/services/src/file_market_content_service.c -->
+<!-- claim: symbol-present market_purchase_plan contexts/market/services/src/file_market_purchase_service.c -->
+<!-- claim: symbol-present market_purchase_retrieve cognition/services/src/file_market_purchase_retrieval_service.c -->
+<!-- claim: symbol-present app.market.purchase.commit engine/composition/commands/app_features.def -->
+<!-- claim: symbol-present app.market.purchase.retrieve engine/composition/commands/app_features.def -->
+<!-- claim: symbol-present db_market_content_save contexts/market/models/src/market_content.c -->
+<!-- claim: symbol-present market_purchase engine/controllers/include/controllers/transaction_types.def -->

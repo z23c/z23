@@ -14,7 +14,7 @@
 #
 # Exit 0 = pass. Non-zero + message on stderr = fail.
 #
-# Scope: NON-TEST source only — app/ lib/ config/ src/. The agent impact
+# Scope: NON-TEST source only — the five physical architecture authorities.
 # registry is excluded because it stores path strings, not runtime code.
 # Excluded: lib/test, tools/soak, *_test.c, tools/crash_recovery_test.c.
 #
@@ -23,16 +23,18 @@ set -u
 if [ "${1:-}" = "--selftest" ]; then
   tmp="$(mktemp -d)"
   trap 'rm -rf "$tmp"' EXIT
-  mkdir -p "$tmp/app/controllers/include/controllers" \
-           "$tmp/app/services/src" "$tmp/lib" "$tmp/config" \
-           "$tmp/src" "$tmp/tools/lint"
+  mkdir -p "$tmp/core" "$tmp/contexts" "$tmp/platform" \
+           "$tmp/engine/controllers/include/controllers" \
+           "$tmp/engine/services/src" \
+           "$tmp/cognition/controllers/include/controllers" \
+           "$tmp/tools/lint"
   cp tools/lint/scan_exclusions.sh "$tmp/tools/lint/scan_exclusions.sh"
   self="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
-  metadata="$tmp/app/controllers/include/controllers/agent_impact_rules.def"
-  runtime="$tmp/app/services/src/runtime_probe.c"
-  near_name="$tmp/app/controllers/include/controllers/agent_impact_rules_extra.def"
+  metadata="$tmp/cognition/controllers/include/controllers/agent_impact_rules.def"
+  runtime="$tmp/engine/services/src/runtime_probe.c"
+  near_name="$tmp/engine/controllers/include/controllers/agent_impact_rules_extra.def"
 
-  printf '%s\n' 'AGENT_IMPACT_RULE("app/services/src/zclassicd_oracle_service.c", "rpc")' > "$metadata"
+  printf '%s\n' 'AGENT_IMPACT_RULE("engine/services/src/zclassicd_oracle_service.c", "rpc")' > "$metadata"
   if ! GATE_ROOT="$tmp" bash "$self" >/dev/null 2>&1; then
     echo "gate_zclassicd_reach_allowlist: SELFTEST FAILED — exact metadata registry was treated as runtime code" >&2
     exit 2
@@ -54,7 +56,9 @@ fi
 
 # Repo root: dir this script is wired into, or argv[1], or CWD.
 ROOT="${1:-${GATE_ROOT:-$(pwd)}}"
-if [ ! -d "$ROOT/app" ] || [ ! -d "$ROOT/lib" ]; then
+if [ ! -d "$ROOT/core" ] || [ ! -d "$ROOT/engine" ] || \
+   [ ! -d "$ROOT/contexts" ] || [ ! -d "$ROOT/cognition" ] || \
+   [ ! -d "$ROOT/platform" ]; then
   echo "gate_zclassicd_reach_allowlist: '$ROOT' is not a zclassic23 checkout" >&2
   exit 2
 fi
@@ -67,40 +71,41 @@ source tools/lint/scan_exclusions.sh
 # (the legacy mirror RPC, the oracle services, or its loopback ports).
 PAT='legacy_chain_rpc_|legacy_chain_oracle|zclassicd_oracle|127\.0\.0\.1:8232|:8034|:8232|getblock-from-mirror'
 
-# --- Search roots (non-test source) ----------------------------------------
-SEARCH_DIRS="app lib config src"
+# --- Search roots (non-test C source and definition files) -----------------
+SEARCH_DIRS="core engine contexts cognition platform"
 
 # --- Exclusions (test / soak harness code is allowed to reach freely) ------
 # The impact registry contains source-path strings only; it is test-selection
 # metadata, not compiled runtime code and cannot create a daemon dependency.
-EXCLUDE_RE='(^|/)lib/test/|(^|/)tools/soak/|_test\.c$|(^|/)tools/crash_recovery_test\.c$|(^|/)app/controllers/include/controllers/agent_impact_rules\.def$'
+EXCLUDE_RE='(^|/)tests/harness/include/test/|(^|/)tools/soak/|_test\.c$|(^|/)tools/crash_recovery_test\.c$|(^|/)cognition/controllers/include/controllers/agent_impact_rules\.def$'
 
 # --- Frozen baseline allowlist (verified 2026-07-14 against current tree) ---
 # Every non-test source file that CURRENTLY contains a zclassicd reach.
 # 17 files. Keep sorted. Removing a reach from a file may leave its name here
 # harmlessly; ADDING a reach to any file NOT here is what fails the gate.
 read -r -d '' ALLOWLIST <<'EOF'
-app/conditions/src/tip_stall_oracle_rebuild.c
-app/controllers/src/diagnostics_registry.c
-app/controllers/src/probe_controller.c
-app/controllers/src/repair_controller_rebuild.c
-app/services/include/services/oracle_policy.h
-app/services/include/services/quorum_oracle_service.h
-app/services/include/services/zclassicd_oracle_service.h
-app/services/src/quorum_oracle_service.c
-app/services/src/snapshot_verify.c
-app/services/src/zclassicd_oracle_service.c
-config/include/config/boot_internal.h
-config/src/boot_runtime_sync_services.c
-config/src/boot_services.c
-lib/net/src/fast_sync.c
-lib/rpc/include/rpc/legacy_chain_oracle.h
-lib/rpc/src/legacy_chain_oracle.c
-src/main.c
+engine/conditions/src/tip_stall_oracle_rebuild.c
+engine/controllers/src/diagnostics_registry.c
+engine/controllers/src/probe_controller.c
+engine/controllers/src/repair_controller_rebuild.c
+engine/services/include/services/oracle_policy.h
+engine/services/include/services/quorum_oracle_service.h
+engine/services/include/services/zclassicd_oracle_service.h
+engine/services/src/quorum_oracle_service.c
+engine/services/src/snapshot_verify.c
+engine/services/src/zclassicd_oracle_service.c
+engine/composition/include/config/boot_internal.h
+engine/composition/src/boot_runtime_sync_services.c
+engine/composition/src/boot_services.c
+core/modules/net/src/fast_sync.c
+engine/modules/rpc/include/rpc/legacy_chain_oracle.h
+engine/modules/rpc/src/legacy_chain_oracle.c
+engine/entry/main.c
 EOF
 
 # --- Compute the CURRENT reaching set --------------------------------------
-CURRENT="$(grep -rEl "$PAT" $SEARCH_DIRS "${LINT_GREP_EXCLUDE_ARGS[@]}" 2>/dev/null \
+CURRENT="$(find $SEARCH_DIRS -type f \( -name '*.c' -o -name '*.h' -o -name '*.def' \) \
+            -exec grep -El "$PAT" {} + 2>/dev/null \
             | grep -vE "$EXCLUDE_RE" \
             | sort -u)"
 

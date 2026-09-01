@@ -2,7 +2,7 @@
 
 **Status: proven mechanism.** `-install-consensus-bundle` reaches the
 **CHECKPOINT_CONTENT ACTIVATE** authority
-(`config/src/consensus_state_snapshot_install_checkpoint_authority.c`) and
+(`engine/composition/src/consensus_state_snapshot_install_checkpoint_authority.c`) and
 admits-and-activates a bundle whose coins reproduce the compiled SHA3
 checkpoint and whose Sapling frontier roots to the local validated header.
 This runbook is the **reference procedure** for installing that cure (a
@@ -26,15 +26,15 @@ it in place of this bundle-install cure.
   fold that reaches the compiled checkpoint height (currently 3,056,758,
   `core/chainparams/src/checkpoints.c`) exports a `zcl.consensus_state_bundle.v1`
   file to `<producer-datadir>/consensus-state-bundle-3056758.sqlite`
-  (`config/src/boot_mint_anchor.c:boot_mint_anchor_export_bundle`,
-  `config/include/config/boot.h:420-430`). The export is proof-bound to the
+  (`engine/composition/src/boot_mint_anchor.c:boot_mint_anchor_export_bundle`,
+  `engine/composition/include/config/boot.h:420-430`). The export is proof-bound to the
   exact running binary (`running_binary_digest == SHA3(/proc/self/exe)`) and
   refuses while the in-RAM fold overlay is live. Current producer status:
   `docs/HANDOFF.md`.
 - **Consumer side** (this doc, currently contained in production):
   `-install-consensus-bundle=PATH`
-  (`config/src/boot_install_consensus_bundle.c`, wired in `config/src/boot.c`
-  right after snapshot autodetect, contract in `config/include/config/boot.h`).
+  (`engine/composition/src/boot_install_consensus_bundle.c`, wired in `engine/composition/src/boot.c`
+  right after snapshot autodetect, contract in `engine/composition/include/config/boot.h`).
   Steps, all fail-closed:
   1. Containment — refuses on the canonical datadir (`~/.zclassic-c23`)
      unless `ZCL_DEPLOY_ALLOW_CANONICAL` is set non-empty in the environment;
@@ -93,7 +93,7 @@ it in place of this bundle-install cure.
 A bundle can also `ADMIT`/`ACTIVATE` via an independent replay receipt
 instead of (or in addition to) the `CHECKPOINT_CONTENT` authority the
 "Known-good" section above exercised. `-verify-consensus-bundle=PATH`
-(`config/src/boot_verify_consensus_bundle.c`) replays the bundle against a
+(`engine/composition/src/boot_verify_consensus_bundle.c`) replays the bundle against a
 datadir whose own folded tables (`coins`, `sprout_anchors`,
 `sapling_anchors`, `nullifiers`) independently re-derive the bundle's
 digests, and on success writes `consensus_state_replay_receipt.v1` into that
@@ -102,7 +102,7 @@ datadir. Two binding rules make this receipt easy to misuse if skimmed:
 - **The receipt must physically live inside the exact datadir that
   `-install-consensus-bundle=PATH` is about to run against** —
   `activate_receipt_authority_available()`
-  (`config/src/consensus_state_snapshot_install_checkpoint_authority.c`) reads it via the
+  (`engine/composition/src/consensus_state_snapshot_install_checkpoint_authority.c`) reads it via the
   install target's own `datadir_fd`, not a path argument. Copying the bundle
   without also copying the receipt file leaves the install target on the
   `CHECKPOINT_CONTENT` fallback (or `VERIFIED_CONTAINED`/refused, if that
@@ -137,9 +137,9 @@ pair together as the portable artifact for every subsequent install call
    but do not spend a copy-prove run on a file that is not even present.
 2. **The A3 consumer lane is merged to `main`** — `boot_install_consensus_bundle`,
    `consensus_state_snapshot_install_activate`, and the `-install-consensus-bundle`
-   flag wiring in `config/src/boot.c` / `config/include/config/boot.h` must be
+   flag wiring in `engine/composition/src/boot.c` / `engine/composition/include/config/boot.h` must be
    on the branch you build. Confirm with
-   `grep -n install_consensus_bundle config/include/config/boot.h` — the field
+   `grep -n install_consensus_bundle engine/composition/include/config/boot.h` — the field
    and the `boot_install_consensus_bundle()` declaration must both be present.
 3. **Gates green on that build.** `make build-only`, `make lint`, and
    `make test-parallel` clean (`test_consensus_state_snapshot_install` in

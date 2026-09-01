@@ -6,9 +6,9 @@
 #
 # This is the "produce bytes" half of `z23 zcode node verify`. It deliberately
 # does no comparing: the verdict belongs to the pure comparator in
-# lib/vcs/src/node_reproduce.c, which cannot be talked into accepting a
+# contexts/commons/modules/vcs/src/node_reproduce.c, which cannot be talked into accepting a
 # publisher's own hash as evidence. Keeping the two apart is the same split
-# lib/vcs already keeps between package_recipe (declare), package_verify
+# contexts/commons/modules/vcs already keeps between package_recipe (declare), package_verify
 # (compile), and package_reproduce (judge) — nothing that builds also decides.
 #
 # WHY THE RECEIPT NAMES WHAT IT COULD NOT REBUILD. The node binary is

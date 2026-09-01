@@ -7,7 +7,7 @@
 #
 # ── THE DEFECT CLASS ─────────────────────────────────────────────────────
 # `struct platform_positioned_file_snapshot`
-# (lib/platform/include/platform/positioned_file.h) is 64 bytes wide but
+# (platform/modules/platform/include/platform/positioned_file.h) is 64 bytes wide but
 # holds only 56 bytes of fields: two `uint32_t` nanosecond members sit in
 # front of wider `int64_t`/`uint64_t` members, so the compiler inserts 8
 # bytes of alignment padding it is never required to initialize. A
@@ -16,12 +16,12 @@
 # change when nothing about the file changed.
 #
 # This exact bug landed THREE TIMES. Three call sites were fixed once; three
-# more (lib/vcs/src/vcs_object.c, lib/vcs/src/zcode_dht_record_store.c,
-# lib/vcs/src/package_swarm_receipt_session.c) turned up later in commit
+# more (contexts/commons/modules/vcs/src/vcs_object.c, contexts/commons/modules/vcs/src/zcode_dht_record_store.c,
+# contexts/commons/modules/vcs/src/package_swarm_receipt_session.c) turned up later in commit
 # 44c45f255 and had taken twenty test groups red, mostly reporting nothing
 # more specific than "object changed while read". The correct comparison
 # already exists: platform_positioned_file_snapshot_equal()
-# (lib/platform/include/platform/positioned_file.h:53), which compares
+# (platform/modules/platform/include/platform/positioned_file.h:53), which compares
 # field-by-field and never touches the padding.
 #
 # ── WHAT THIS GATE CATCHES ──────────────────────────────────────────────
@@ -99,7 +99,7 @@ cd "$ROOT"
 
 GATE="check-no-snapshot-struct-memcmp"
 STRUCT_TYPE="platform_positioned_file_snapshot"
-SCAN_DIRS=(app config lib src tools)
+SCAN_DIRS=(core engine contexts cognition platform tools)
 
 # A plain (non-pointer) object declaration, one or more names, on one
 # physical line. Excluding any line that contains a `*` between the type
@@ -209,7 +209,7 @@ BEGIN {
                   "raw bytes -- the struct has 8 bytes of never-initialized " \
                   "alignment padding, so this can report an unchanged file " \
                   "as CHANGED. Use platform_positioned_file_snapshot_equal() " \
-                  "(lib/platform/include/platform/positioned_file.h) instead."
+                  "(platform/modules/platform/include/platform/positioned_file.h) instead."
         }
         rest = substr(rest, closepos + 1)
     }
@@ -375,7 +375,7 @@ if [ -n "$SCAN_VIOLATIONS" ]; then
     echo "" >&2
     echo "FAIL: raw memcmp()/bcmp() over a struct $STRUCT_TYPE object." >&2
     echo "  The struct carries 8 bytes of never-initialized alignment" >&2
-    echo "  padding (see lib/platform/include/platform/positioned_file.h)," >&2
+    echo "  padding (see platform/modules/platform/include/platform/positioned_file.h)," >&2
     echo "  so comparing the whole object by raw bytes can report an" >&2
     echo "  UNCHANGED file as changed. Use" >&2
     echo "  platform_positioned_file_snapshot_equal() instead." >&2

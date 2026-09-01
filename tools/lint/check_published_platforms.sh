@@ -17,14 +17,14 @@
 #
 # FOUR CLAIMS, FOUR AUTHORITIES:
 #
-#   packaging/install/install.sh        PUBLISHED_PLATFORMS + BOOT_* rows
+#   platform/packaging/install/install.sh        PUBLISHED_PLATFORMS + BOOT_* rows
 #                                       -> what a POSIX machine may fetch
-#   packaging/install/install.ps1       $BootPins keys
+#   platform/packaging/install/install.ps1       $BootPins keys
 #                                       -> what a Windows machine may fetch
-#   lib/install/src/front_door_platform.c  FD_PUBLISHED
+#   platform/modules/install/src/front_door_platform.c  FD_PUBLISHED
 #                                       -> what RUNTIME the bootstrap will
 #                                          admit to publishing
-#   packaging/release/build_release.sh  bootstrap_platforms/runtime_platforms
+#   platform/packaging/release/build_release.sh  bootstrap_platforms/runtime_platforms
 #                                       -> what is actually produced
 #
 # The cutter is the authority, and it is ASKED (--print-bootstrap-platforms,
@@ -52,10 +52,10 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 # Overridable so --selftest can point the same checks at mutated fixtures.
 # A gate that has only ever been observed passing is not a gate.
-PP_INSTALL_SH="${ZCL_PP_INSTALL_SH:-$REPO_ROOT/packaging/install/install.sh}"
-PP_INSTALL_PS1="${ZCL_PP_INSTALL_PS1:-$REPO_ROOT/packaging/install/install.ps1}"
-PP_FRONT_DOOR_C="${ZCL_PP_FRONT_DOOR_C:-$REPO_ROOT/lib/install/src/front_door_platform.c}"
-PP_CUTTER="${ZCL_PP_CUTTER:-$REPO_ROOT/packaging/release/build_release.sh}"
+PP_INSTALL_SH="${ZCL_PP_INSTALL_SH:-$REPO_ROOT/platform/packaging/install/install.sh}"
+PP_INSTALL_PS1="${ZCL_PP_INSTALL_PS1:-$REPO_ROOT/platform/packaging/install/install.ps1}"
+PP_FRONT_DOOR_C="${ZCL_PP_FRONT_DOOR_C:-$REPO_ROOT/platform/modules/install/src/front_door_platform.c}"
+PP_CUTTER="${ZCL_PP_CUTTER:-$REPO_ROOT/platform/packaging/release/build_release.sh}"
 
 FAIL=0
 fail() { printf 'check-published-platforms: FAIL: %s\n' "$*" >&2; FAIL=1; }
@@ -339,7 +339,7 @@ case "${1:-}" in
 esac
 
 if run_checks; then
-    note "PASS — install.sh publishes [$(posix_claimed | tr '\n' ' ')], install.ps1 publishes [$(windows_claimed | tr '\n' ' ')], FD_PUBLISHED runtimes [$(runtime_claimed | tr '\n' ' ')]; every one is produced by packaging/release/build_release.sh, and every checked-in digest is the sentinel."
+    note "PASS — install.sh publishes [$(posix_claimed | tr '\n' ' ')], install.ps1 publishes [$(windows_claimed | tr '\n' ' ')], FD_PUBLISHED runtimes [$(runtime_claimed | tr '\n' ' ')]; every one is produced by platform/packaging/release/build_release.sh, and every checked-in digest is the sentinel."
     exit 0
 fi
 printf 'check-published-platforms: a front door claims a platform the release process does not produce.\n' >&2

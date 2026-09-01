@@ -60,7 +60,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 STATE_ROOT="${ZCL_QUALITY_STATE_DIR:-${XDG_STATE_HOME:-${HOME:-/tmp}/.local/state}/zclassic23-quality}"
 ARTIFACT_DIR="$STATE_ROOT/artifacts"
-SEED_ROOT="$REPO_ROOT/lib/test/fuzz_seeds"
+SEED_ROOT="$REPO_ROOT/tests/harness/fuzz_seeds"
 SIZE_CAP_BYTES=1048576   # 1 MiB
 DRY_RUN=0
 BUILD_MISSING=1

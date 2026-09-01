@@ -105,8 +105,8 @@ simulation-only). C3, in order:
 ## 8. Codified in (C2 proposer slice, 2026-08-09)
 
 Step 1 above landed as a simulation-only proposer, alongside the frozen era
-curve (never inside it): `lib/vcs/src/zcode_epoch_schedule.c` (header
-`lib/vcs/include/vcs/zcode_epoch_schedule.h`) encodes the 21,000,000 cap,
+curve (never inside it): `contexts/commons/modules/vcs/src/zcode_epoch_schedule.c` (header
+`contexts/commons/modules/vcs/include/vcs/zcode_epoch_schedule.h`) encodes the 21,000,000 cap,
 the `(cap − already_emitted) / 1040` weekly budget, and the 100/40/20/5
 class weights, reading `already_emitted` from the commons projection's
 minted totals. The native pair `zcode commons schedule propose plan|commit`

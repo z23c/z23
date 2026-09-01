@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Gate — telemetry-ontology coverage. Every network telemetry field a covered
 # dump function emits must carry a MEANING row in
-# lib/util/include/util/telemetry_ontology.def.
+# platform/modules/util/include/util/telemetry_ontology.def.
 #
 # Why this gate exists. `dumpstate peer_lifecycle` prints
 # "pre_handshake_disconnects":27 and nothing states what that counts, what
@@ -43,7 +43,7 @@
 #   1. every TL_LEAF(group, member, ...) in the named .def must resolve to
 #      "<domain>|values.<group>.<member>" in the merged ontology set — and that
 #      set is read off the PASTE SITE (the `#define TL_SUB` / `#include
-#      "util/telemetry/<d>_fields.def"` pairs in lib/util/src/telemetry_ontology.c),
+#      "util/telemetry/<d>_fields.def"` pairs in platform/modules/util/src/telemetry_ontology.c),
 #      not off the domain registry, so a row naming a table the build never
 #      pastes into g_fields[] fails here;
 #   2. the .def's own TL_DOMAIN_META must declare the same domain the row does;
@@ -89,7 +89,7 @@ GATE=check_telemetry_ontology
 MODE="${ZCL_LINT_MODE:-FAIL}"
 
 # ── `--selftest`: prove the gate still BITES ─────────────────────────────
-# The C group `make_lint_gates` (lib/test/src/lint_gate_quality_selftests.c)
+# The C group `make_lint_gates` (tests/harness/src/lint_gate_quality_selftests.c)
 # runs the first three cases; this flag runs those plus one case per way a
 # TABLE row can be violated, so the structural coverage proof can be watched
 # failing without a test build. Every case that needs a bad input builds it in
@@ -203,13 +203,13 @@ ST_EOF
     # 9 — the g_fields[] paste site files one domain's table under another's
     # subsystem name.
     sed 's/#define TL_SUB "agents"/#define TL_SUB "wallet"/' \
-        lib/util/src/telemetry_ontology.c > "$st_tmp/mispaired.c"
+        platform/modules/util/src/telemetry_ontology.c > "$st_tmp/mispaired.c"
     st_run "ZCL_TELEMETRY_ONTOLOGY_TU=$st_tmp/mispaired.c"
     st_expect "9 mis-paired TL_SUB over a field table" 1 "MIS-PAIRED PASTE"
 
     # 10 — a domain registered in the registry but never pasted, so its fields
     # would ship with no meaning while the registry says it is covered.
-    grep -v 'telemetry/metaverse_fields.def' lib/util/src/telemetry_ontology.c \
+    grep -v 'telemetry/metaverse_fields.def' platform/modules/util/src/telemetry_ontology.c \
         > "$st_tmp/half_registered.c"
     st_run "ZCL_TELEMETRY_ONTOLOGY_TU=$st_tmp/half_registered.c"
     st_expect "10 registered domain never pasted" 1 "HALF-REGISTERED DOMAIN"
@@ -280,17 +280,17 @@ MANIFEST="${ZCL_TELEMETRY_SCAN_MANIFEST-tools/lint/telemetry_ontology_scan.txt}"
 # path is exercised against the REAL ontology and the REAL floors — never
 # against a shrunken scan that would trip for the wrong reason.
 EXTRA_MANIFEST="${ZCL_TELEMETRY_SCAN_EXTRA_MANIFEST:-}"
-ONTOLOGY="${ZCL_TELEMETRY_ONTOLOGY_DEF-lib/util/include/util/telemetry_ontology.def}"
+ONTOLOGY="${ZCL_TELEMETRY_ONTOLOGY_DEF-platform/modules/util/include/util/telemetry_ontology.def}"
 AWKLIB="tools/lint/telemetry_scan_lib.awk"
 # The registry of table-driven domains, and the directory holding their field
 # tables. Together these produce the ontology rows a TABLE row must resolve
 # against: a domain is only in the merged set because telemetry_domains.def
 # registers it, which is what makes the TABLE check non-circular.
-DOMAINS_DEF="${ZCL_TELEMETRY_DOMAINS_DEF-lib/util/include/util/telemetry_domains.def}"
-FIELDS_DIR="${ZCL_TELEMETRY_FIELDS_DIR-lib/util/include/util/telemetry}"
+DOMAINS_DEF="${ZCL_TELEMETRY_DOMAINS_DEF-platform/modules/util/include/util/telemetry_domains.def}"
+FIELDS_DIR="${ZCL_TELEMETRY_FIELDS_DIR-platform/modules/util/include/util/telemetry}"
 # Where a domain's `*_fill.c` providers are looked for (check 4 above).
 read -r -a FILL_SCAN_ROOTS \
-    <<< "${ZCL_TELEMETRY_FILL_SCAN_ROOTS:-app lib config core src}"
+    <<< "${ZCL_TELEMETRY_FILL_SCAN_ROOTS:-core engine contexts cognition platform}"
 
 for f in "$MANIFEST" "$ONTOLOGY" "$AWKLIB" "$DOMAINS_DEF"; do
     if [ ! -r "$f" ]; then
@@ -345,7 +345,7 @@ gate_require_scanned "$QUESTIONS" 8 "$GATE" \
 # "<domain>|values.<g>.<m>" resolvable for a TABLE manifest row.
 #
 # THE MERGE IS READ OFF THE PASTE SITE, NOT ASSUMED. g_fields[] is built in
-# lib/util/src/telemetry_ontology.c by a `#define TL_SUB "<domain>"` immediately
+# platform/modules/util/src/telemetry_ontology.c by a `#define TL_SUB "<domain>"` immediately
 # above `#include "util/telemetry/<domain>_fields.def"`, once per domain. This
 # gate parses those pairs, so the merged set is what the COMPILER pastes rather
 # than what the domain registry promises. That distinction is the whole point:
@@ -390,7 +390,7 @@ gate_require_scanned "${#REGISTERED_DOMAIN[@]}" 8 "$GATE" \
 registry collapsed"
 
 # Every "<TL_SUB subsystem> <included table's domain>" pair at the paste site.
-ONTOLOGY_TU="${ZCL_TELEMETRY_ONTOLOGY_TU-lib/util/src/telemetry_ontology.c}"
+ONTOLOGY_TU="${ZCL_TELEMETRY_ONTOLOGY_TU-platform/modules/util/src/telemetry_ontology.c}"
 if [ ! -r "$ONTOLOGY_TU" ]; then
     echo "$GATE: FATAL — the g_fields[] paste site is missing or unreadable:" >&2
     echo "  $ONTOLOGY_TU" >&2

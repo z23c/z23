@@ -24,7 +24,7 @@
  * tier. The free allowance is absolute: a zero-score user can always
  * download public packages (the weekly allowance is a rate limit, never a
  * permanent denial). Every policy constant in the replies is the frozen
- * table from lib/vcs/package_policy.*. */
+ * table from contexts/commons/modules/vcs/package_policy.*. */
 
 #include "base/hex.h"
 #include "command/native_command.h"

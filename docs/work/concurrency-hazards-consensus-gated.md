@@ -17,7 +17,7 @@ the genesis probe :670-671) reads `c->height` then dereferences `c->chain[h]`.
 
 Concurrently the reducer's `tip_finalize_stage.c:380 →
 active_chain_move_window_tip → active_chain_fill_window`
-(`lib/validation/src/chainstate.c:298`) does `zcl_realloc(c->chain, …)`
+(`core/modules/validation/src/chainstate.c:298`) does `zcl_realloc(c->chain, …)`
 (chainstate.c:305) — **freeing the old `c->chain` array** — and rewrites
 `c->height` as the tip advances. `struct active_chain` has NO internal lock; the
 protecting lock is `ms->cs_main`, which `bg_validation_service.c` **never takes**
@@ -45,7 +45,7 @@ without the live reducer-vs-bg-thread realloc race.
 ## 2 — chainstate.c `nChainWork` 256-bit torn read (consensus-critical)
 
 `block_index.nChainWork` is a 32-byte `arith_uint256` (4× uint64), plain/non-atomic
-(`lib/chain/include/chain/chain.h:87`). The header/validation thread updates it
+(`core/modules/chain/include/chain/chain.h:87`). The header/validation thread updates it
 field-by-field via `arith_uint256_add` (accept_block_header.c:198/251/283/366;
 boot.c:2122) while `msg_headers.c:83-84,125-128` (message-handler thread, no lock)
 and `header_sync_service.c:598` read it **lock-free** to compare chain work for

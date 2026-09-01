@@ -26,7 +26,7 @@ on the current tree rather than trusted.
 | Quality-job guard/retention selftest | `bash tools/scripts/test_quality_job_guard.sh` | PASS after bash 3.2 / BSD tool fixes |
 | Regtest node boots and shuts down cleanly | Isolated `/tmp/zcl-mesh-id` node | PASS; RPC ready in ~2 s, graceful shutdown in ~5 s |
 | `ops mesh identity` capsule on macOS | `z23 ops mesh identity --datadir=/tmp/<fixture>` against running regtest node | PASS; reports `platform.os=macos`, `architecture=aarch64`, live observation fields populated |
-| Native kqueue directory watcher | `make -j t-fast ONLY=directory_watcher` | PASS; `lib/platform/src/directory_watcher.c` uses kqueue and recursively watches real subdirectories |
+| Native kqueue directory watcher | `make -j t-fast ONLY=directory_watcher` | PASS; `platform/modules/platform/src/directory_watcher.c` uses kqueue and recursively watches real subdirectories |
 | Embedded full Tor | `make tor-full` | PASS; builds `vendor/tor/libtor.a` from vendored OpenSSL/libevent/zlib, ~110 s, no source changes |
 
 ## What required fixes
@@ -69,7 +69,7 @@ height 0 has none.
 
 | Area | Current state | Next step |
 |---|---|---|
-| Dev watcher | Native kqueue backend landed in `lib/platform/src/directory_watcher.c`; `tools/dev/devloop_watch.c` still hard-codes inotify | Move `devloop_watch.c` onto the platform directory watcher so the dev loop gets sub-50 ms detection on macOS |
+| Dev watcher | Native kqueue backend landed in `platform/modules/platform/src/directory_watcher.c`; `tools/dev/devloop_watch.c` still hard-codes inotify | Move `devloop_watch.c` onto the platform directory watcher so the dev loop gets sub-50 ms detection on macOS |
 | Resident hot swap | Mach-O probe/validation landed, but `zcl_hotswap_hotfork_visit_so()` still fails closed on Darwin because descriptor-bound A/B execution is unavailable | Implement immutable executable-image staging with ad-hoc signed bundle loading, or keep activation "Unavailable" |
 | `make test-two-node-peer-tip` | PASS on arm64 macOS after replacing the absent util-linux `setsid(1)` command with the in-tree C23 `process-group-exec` launcher | Keep the gate green as the sync path evolves |
 | Embedded Tor | PASS on arm64 macOS; `vendor/tor/libtor.a` builds from vendored deps | Update capability docs and remove from open-gap list |
@@ -119,10 +119,10 @@ adds:
 
 - `make service-install` / `make dev-service-install` / `make service-uninstall` /
   `make service-status` for native macOS LaunchAgent management.
-- `config/launchd/org.z23.zclassic.plist.template`.
+- `engine/composition/launchd/org.z23.zclassic.plist.template`.
 - macOS service instructions in `docs/GETTING_STARTED.md`.
 - macOS portability fixes for the quality-job guard/retention scripts.
-- Impact-rule mapping for `config/launchd/*`.
+- Impact-rule mapping for `engine/composition/launchd/*`.
 
 Subsequent fixes:
 
@@ -154,7 +154,7 @@ node was trying to pull ~3.1M bodies over a small P2P set.
 
 Fix: make `boot_legacy_default_blocks_dir()` platform-aware, checking (in
 order) `%APPDATA%\Zclassic\blocks`, `$HOME/Library/Application Support/Zclassic/blocks`,
-and `$HOME/.zclassic/blocks`. `config/src/boot.c` now uses the first existing
+and `$HOME/.zclassic/blocks`. `engine/composition/src/boot.c` now uses the first existing
 candidate for both the initial `--importblockindex` copy pass and the
 warm-boot link pass. This is a read-only hardlink/copy; it does not touch the
 legacy node's LevelDB or wallet.
@@ -180,13 +180,13 @@ change.
 
 Second macOS slice:
 
-- `lib/platform/src/directory_watcher.c` got a native kqueue backend that
+- `platform/modules/platform/src/directory_watcher.c` got a native kqueue backend that
   recursively watches real subdirectories, drains events, and passes the
   focused `directory_watcher` test. The watcher is no longer fail-closed on
   Darwin.
 - `make tor-full` completed on the first arm64 Mac host in ~110 s, producing
   `vendor/tor/libtor.a` from the vendored OpenSSL/libevent/zlib trees.
-- `lib/test/include/test/test_core.h` normalizes the pointer fallback printer
+- `tests/harness/include/test/test_core.h` normalizes the pointer fallback printer
   so NULL renders as `(nil)` on Darwin as well as glibc; this fixes the
   `test_test_group_selector` pointer-message assertion on macOS.
 - Stale "v2 transport" strings were canonicalized to "Noise transport" and the

@@ -23,8 +23,8 @@ static bool has_c_suffix(const char *path)
 
 static bool is_test_path(const char *path)
 {
-    return strncmp(path, "lib/test/", 9) == 0 ||
-           strstr(path, "/lib/test/") != NULL;
+    return strncmp(path, "tests/harness/include/test/", 9) == 0 ||
+           strstr(path, "/tests/harness/include/test/") != NULL;
 }
 
 static bool line_has_obs_ok(const char *line)
@@ -198,7 +198,7 @@ static int run_default_scan(int *checked)
     const char *scan_all = getenv("ZCL_OBS_SCAN_ALL");
     if (scan_all && strcmp(scan_all, "1") == 0) {
         return run_list_command("find app lib -type f -name '*.c' "
-                                "! -path 'lib/test/*' | sort",
+                                "! -path 'tests/harness/include/test/*' | sort",
                                 checked, NULL);
     }
 

@@ -19,7 +19,7 @@
  *                              validates every row against CURRENT facts
  *                              and the CURRENT store, signs each badge
  *                              with the operator-held issuer key (the
- *                              secret never enters lib/vcs — the handler
+ *                              secret never enters contexts/commons/modules/vcs — the handler
  *                              signs through a callback), persists the
  *                              signed badge wires, and writes the commit
  *                              record last. Idempotent: a replay is a
@@ -416,7 +416,7 @@ struct zb_sign_ctx {
     struct privkey secret;
 };
 
-/* The signer closure: the handler holds the operator key; lib/vcs only
+/* The signer closure: the handler holds the operator key; contexts/commons/modules/vcs only
  * ever verifies. RFC6979 deterministic — a replay signs the identical
  * signature, so the identical badge wire dedups by id. */
 static bool zb_sign_badge(struct vcs_badge *badge,

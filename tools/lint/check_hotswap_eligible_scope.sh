@@ -2,7 +2,7 @@
 # Copyright 2026 Rhett Creighton - Apache License 2.0
 #
 # check_hotswap_eligible_scope.sh — every TU in the Tier-1 hot-swap
-# eligibility manifest (config/hotswap_eligible.def) must be an app-layer
+# eligibility manifest (engine/composition/hotswap_eligible.def) must be an app-layer
 # surface. Consensus / validation / storage / net / coins / reducer-stage
 # code is NEVER hot-swappable, not even in a dev build: a dlopen'd generation
 # of any of those could silently diverge the node's consensus state or the
@@ -19,8 +19,8 @@ cd "$ROOT"
 # shellcheck source=tools/lint/gate_lib.sh
 . tools/lint/gate_lib.sh
 
-MANIFEST="${ZCL_HOTSWAP_MANIFEST:-config/hotswap_eligible.def}"
-PROBE_CASES="${ZCL_HOTSWAP_PROBE_CASES:-config/hotswap_probe_cases.def}"
+MANIFEST="${ZCL_HOTSWAP_MANIFEST:-engine/composition/hotswap_eligible.def}"
+PROBE_CASES="${ZCL_HOTSWAP_PROBE_CASES:-engine/composition/hotswap_probe_cases.def}"
 
 echo "══ LINT: hot-swap eligibility manifest scope (app-layer only) ══"
 
@@ -111,7 +111,7 @@ if [ -n "${violations//[[:space:]]/}" ]; then
     echo "FAIL: hot-swap eligibility manifest lists an out-of-scope TU."
     echo "  Eligible TUs must be app-layer .c files that invoke"
     echo "  ZCL_HOTSWAP_EXPORT_LEAVES, NEVER under core, lib/consensus,"
-    echo "  lib/validation, lib/storage, lib/net, lib/coins, or app/jobs."
+    echo "  core/modules/validation, engine/modules/storage, core/modules/net, core/modules/coins, or app/jobs."
     exit 1
 fi
 

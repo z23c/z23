@@ -5,7 +5,7 @@
  *
  * Split of concerns inside this file:
  *   1. URL parsing and HTTP response framing — pure, no sockets, unit-tested
- *      byte by byte from lib/test/src/test_tls_client.c.
+ *      byte by byte from tests/harness/src/test_tls_client.c.
  *   2. The trust store probe — filesystem only, resolved once.
  *   3. The socket + TLS conversation — bounded reads, one total deadline.
  */
@@ -792,7 +792,7 @@ bool tls_client_fetch(const struct tls_client_request *req,
             const int m = snprintf(head + n, sizeof(head) - (size_t)n,
                                    "Content-Type: %s\r\nContent-Length: %zu\r\n",
                                    req->content_type ? req->content_type
-                                                     : "application/octet-stream",
+                                                     : "engine/application/octet-stream",
                                    req->body_len);
             if (m < 0 || (size_t)(n + m) >= sizeof(head)) {
                 LOG_WARN("tlsclient", "request head does not fit its buffer");

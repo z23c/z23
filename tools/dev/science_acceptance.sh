@@ -88,7 +88,7 @@
 #       candidate, method), which are content roots, not ledger objects.
 #       Historical: the deterministic now_unix pin (and the science int
 #       keys) had no input-validator rule, so the leaves were uninvokable
-#       from the shell — fixed in lib/kernel/src/command_registry.c as
+#       from the shell — fixed in engine/modules/kernel/src/command_registry.c as
 #       sanctioned glue.
 #
 # SAFETY: mirrors isolated_node_env.sh / two_node_peer_tip.sh —
@@ -446,37 +446,37 @@ sa_jget() { printf '%s' "$1" | "$JSONQ" get "$2"; }
 # ── fixture tool compile ───────────────────────────────────────────────
 sa_build_fixture() {
     cc -std=c23 -O1 -w -D_GNU_SOURCE \
-        -I"$REPO_ROOT/lib/vcs/include" -I"$REPO_ROOT/lib/base/include" \
-        -I"$REPO_ROOT/lib/sha3/include" -I"$REPO_ROOT/lib/crypto/include" \
-        -I"$REPO_ROOT/lib/json/include" -I"$REPO_ROOT/lib/codec/include" \
-        -I"$REPO_ROOT/lib/util/include" -I"$REPO_ROOT/lib/platform/include" \
-        -I"$REPO_ROOT/lib/support/include" \
+        -I"$REPO_ROOT/contexts/commons/modules/vcs/include" -I"$REPO_ROOT/platform/modules/base/include" \
+        -I"$REPO_ROOT/platform/modules/sha3/include" -I"$REPO_ROOT/core/modules/crypto/include" \
+        -I"$REPO_ROOT/platform/modules/json/include" -I"$REPO_ROOT/platform/modules/codec/include" \
+        -I"$REPO_ROOT/platform/modules/util/include" -I"$REPO_ROOT/platform/modules/platform/include" \
+        -I"$REPO_ROOT/platform/modules/support/include" \
         -o "$SA_WORK/zcode_science_fixture" \
         "$REPO_ROOT/tools/zcode_science_fixture.c" \
-        "$REPO_ROOT/lib/vcs/src/zcode_science.c" \
-        "$REPO_ROOT/lib/vcs/src/zcode_dev.c" \
-        "$REPO_ROOT/lib/vcs/src/zcode_benchmark_receipt.c" \
-        "$REPO_ROOT/lib/vcs/src/vcs_object.c" \
-        "$REPO_ROOT/lib/vcs/src/package_store.c" \
-        "$REPO_ROOT/lib/vcs/src/package_store_io.c" \
-        "$REPO_ROOT/lib/vcs/src/package_manifest.c" \
-        "$REPO_ROOT/lib/vcs/src/build_action.c" \
-        "$REPO_ROOT/lib/codec/src/cursor.c" \
-        "$REPO_ROOT/lib/sha3/src/sha3.c" \
-        "$REPO_ROOT/lib/crypto/src/ed25519.c" \
-        "$REPO_ROOT/lib/crypto/src/sha512.c" \
-        "$REPO_ROOT/lib/crypto/src/sha256.c" \
-        "$REPO_ROOT/lib/crypto/src/chacha20poly1305.c" \
-        "$REPO_ROOT/lib/support/src/log_throttle.c" \
-        "$REPO_ROOT/lib/base/src/safe_alloc.c" \
-        "$REPO_ROOT/lib/base/src/log_level.c" \
-        "$REPO_ROOT/lib/base/src/result.c" \
-        "$REPO_ROOT/lib/base/src/cleanse.c" \
-        "$REPO_ROOT/lib/platform/src/clock.c" \
-        "$REPO_ROOT/lib/json/src/json.c" \
-        "$REPO_ROOT/lib/util/src/hw_profile.c" \
-        "$REPO_ROOT/lib/util/src/spawn.c" \
-        "$REPO_ROOT/lib/util/src/cpu_topology.c" 2>/dev/null \
+        "$REPO_ROOT/contexts/commons/modules/vcs/src/zcode_science.c" \
+        "$REPO_ROOT/contexts/commons/modules/vcs/src/zcode_dev.c" \
+        "$REPO_ROOT/contexts/commons/modules/vcs/src/zcode_benchmark_receipt.c" \
+        "$REPO_ROOT/contexts/commons/modules/vcs/src/vcs_object.c" \
+        "$REPO_ROOT/contexts/commons/modules/vcs/src/package_store.c" \
+        "$REPO_ROOT/contexts/commons/modules/vcs/src/package_store_io.c" \
+        "$REPO_ROOT/contexts/commons/modules/vcs/src/package_manifest.c" \
+        "$REPO_ROOT/contexts/commons/modules/vcs/src/build_action.c" \
+        "$REPO_ROOT/platform/modules/codec/src/cursor.c" \
+        "$REPO_ROOT/platform/modules/sha3/src/sha3.c" \
+        "$REPO_ROOT/core/modules/crypto/src/ed25519.c" \
+        "$REPO_ROOT/core/modules/crypto/src/sha512.c" \
+        "$REPO_ROOT/core/modules/crypto/src/sha256.c" \
+        "$REPO_ROOT/core/modules/crypto/src/chacha20poly1305.c" \
+        "$REPO_ROOT/platform/modules/support/src/log_throttle.c" \
+        "$REPO_ROOT/platform/modules/base/src/safe_alloc.c" \
+        "$REPO_ROOT/platform/modules/base/src/log_level.c" \
+        "$REPO_ROOT/platform/modules/base/src/result.c" \
+        "$REPO_ROOT/platform/modules/base/src/cleanse.c" \
+        "$REPO_ROOT/platform/modules/platform/src/clock.c" \
+        "$REPO_ROOT/platform/modules/json/src/json.c" \
+        "$REPO_ROOT/platform/modules/util/src/hw_profile.c" \
+        "$REPO_ROOT/platform/modules/util/src/spawn.c" \
+        "$REPO_ROOT/platform/modules/util/src/cpu_topology.c" 2>/dev/null \
         || sa_die "fixture tool compile failed"
 }
 

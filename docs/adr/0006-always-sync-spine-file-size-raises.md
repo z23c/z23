@@ -20,25 +20,25 @@
 ## Context
 
 The E1 file-size ceiling (then an 800-line hard
-ceiling for `app/`+`config/src/`) is a beauty ratchet whose baseline "can only
+ceiling for `app/`+`engine/composition/src/`) is a beauty ratchet whose baseline "can only
 shrink, never grow, and growing it costs an ADR." The always-sync spine's
 Wave-1 core (Pillars 0 + 2) legitimately grew three enforced-tier files past
 their recorded baselines:
 
-- **`app/services/src/block_index_loader.c` 844 → 949** — Pillar 0's
+- **`engine/services/src/block_index_loader.c` 844 → 949** — Pillar 0's
   `promote_best_header_after_load()`: on a full-index boot it promotes the
   max-chainwork header into the active-chain window and seats it via
   `chain_set_active_tip`, so `active_chain_tip()` is never NULL and the
   getheaders locator anchors at the frontier instead of genesis. This is the
   linchpin fix that lets the node escape the ~160-header wedge.
-- **`app/services/src/sticky_escalator.c` 873 → 1104** — Pillar 2 made the
+- **`engine/services/src/sticky_escalator.c` 873 → 1104** — Pillar 2 made the
   three stub recovery rungs (resnapshot, self_mint_refold, rebootstrap) real,
   in-process, self-derived remedies driven by `stage_rederive_range`, plus the
   reconcile alignment to the landed primitive signature.
-- **`app/services/src/header_sync_service.c` → 812 (new over-ceiling)** —
+- **`engine/services/src/header_sync_service.c` → 812 (new over-ceiling)** —
   Pillar 0's `best_header_fallback` locator path: when `active_chain_tip()` is
   NULL, build the getheaders locator from `pindex_best_header`, never genesis.
-- **`config/src/boot.c` 4070 → 4071 (+1)** — Track B's one-line call-site change
+- **`engine/composition/src/boot.c` 4070 → 4071 (+1)** — Track B's one-line call-site change
   passing the derived coins-best `hash_found` flag into
   `boot_crashonly_clear_reindex_request_if_covered` so a hash-verified coins-best
   at the reindex anchor is treated as covered (no destructive wipe). `boot.c` is

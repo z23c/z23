@@ -14,16 +14,16 @@
 # transferred to the remote and rebuilt there (physical_machines=2).
 #
 # Resolution reuses the factory's own authorities, read-only:
-#   - corpus/scopes.def:            package name -> published root + store
+#   - contexts/commons/corpus/scopes.def:            package name -> published root + store
 #   - `zcode package dev prepare`   (risk: read) re-derives package root,
 #                                   dependency lock root and recipe wire
-#                                   from packages/<short>; the derived root
+#                                   from contexts/commons/packages/<short>; the derived root
 #                                   MUST equal the published root or the run
 #                                   is BLOCKED (source drift)
 #   - corpus/factory/<short>.report.json: published recipe root; the
 #                                   re-derived recipe wire is byte-compared
 #                                   against <store>/zcode/recipes/<root>
-#   - packages/*/zcode-package.json: dependency pins, walked transitively
+#   - contexts/commons/packages/*/zcode-package.json: dependency pins, walked transitively
 #                                   (post-order, deduped); each dep must be
 #                                   installed at <store>/zcode/installed/
 #                                   <root>/ with a build-report
@@ -58,7 +58,7 @@ VERIFY_BIN="$ROOT/build/bin/zclassic23-package-verify"
 NODE_BIN="$ROOT/build/bin/zclassic23"
 SIGN_BIN="$ROOT/build/bin/zclassic23-package-sign"
 JSONQ="${JSONQ:-$ROOT/build/bin/jsonq}"
-SCOPES="$ROOT/corpus/scopes.def"
+SCOPES="$ROOT/contexts/commons/corpus/scopes.def"
 OUTDIR="$ROOT/.cache/zcl-cross-machine"
 KEEP="${ZCL_XMR_KEEP:-0}"
 
@@ -122,7 +122,7 @@ if [ -n "$SSH_HOST" ]; then
         "scp not installed; cannot attempt host $SSH_HOST"
 fi
 
-# ── resolve the published package (corpus/scopes.def) ──────────────────
+# ── resolve the published package (contexts/commons/corpus/scopes.def) ──────────────────
 
 SCOPE_LINE="$(awk -v n="$PKG_ARG" \
     '$1 == "package" && $2 == n { print; exit }' "$SCOPES")"
@@ -145,11 +145,11 @@ FULL_NAME="$(printf '%s\n' "$SCOPE_LINE" | awk '{ print $2 }')"
 PUB_ROOT="$(printf '%s\n' "$SCOPE_LINE" | awk '{ print $5 }')"
 STORE="$(printf '%s\n' "$SCOPE_LINE" | awk '{ print $8 }')"
 SHORT="${FULL_NAME##*/}"
-SRC_DIR="$ROOT/packages/$SHORT"
+SRC_DIR="$ROOT/contexts/commons/packages/$SHORT"
 REPORT_JSON="$ROOT/corpus/factory/$SHORT.report.json"
 
 [ -d "$SRC_DIR" ] || blocked 3 source-missing \
-    "packages/$SHORT not in this checkout — cannot rebuild from source"
+    "contexts/commons/packages/$SHORT not in this checkout — cannot rebuild from source"
 [ -d "$STORE/zcode" ] || blocked 3 store-missing \
     "published store $STORE has no zcode/ tree"
 [ -d "$STORE/zcode/installed/$PUB_ROOT" ] || blocked 3 not-installed \
@@ -171,7 +171,7 @@ cleanup()
 }
 trap cleanup EXIT
 
-# SHA3-256 file hasher from the in-tree lib/sha3.
+# SHA3-256 file hasher from the in-tree platform/modules/sha3.
 SHA3FILE="$WORK/sha3file"
 cat > "$WORK/sha3file.c" <<'EOF'
 #include "sha3/sha3.h"
@@ -209,8 +209,8 @@ int main(int argc, char **argv)
     return 0;
 }
 EOF
-cc -std=c23 -O1 -I "$ROOT/lib/sha3/include" -I "$ROOT/lib/base/include" \
-    -o "$SHA3FILE" "$WORK/sha3file.c" "$ROOT/lib/sha3/src/sha3.c" ||
+cc -std=c23 -O1 -I "$ROOT/platform/modules/sha3/include" -I "$ROOT/platform/modules/base/include" \
+    -o "$SHA3FILE" "$WORK/sha3file.c" "$ROOT/platform/modules/sha3/src/sha3.c" ||
     fail "cannot compile in-tree SHA3-256 helper"
 
 # ── read-only re-derivation of roots + recipe (factory's own path) ─────
@@ -223,7 +223,7 @@ printf '{"dir":"%s","publisher_pubkey":"%s","publisher_sequence":1}' \
     "$SRC_DIR" "$PREP_PUB" |
     "$NODE_BIN" zcode package dev prepare --input=- > "$WORK/prepare.json" ||
     blocked 3 dev-prepare-failed \
-        "zcode package dev prepare failed for packages/$SHORT"
+        "zcode package dev prepare failed for contexts/commons/packages/$SHORT"
 
 "$JSONQ" eq ok true < "$WORK/prepare.json" ||
     blocked 3 dev-prepare-failed "dev prepare not ok"
@@ -233,7 +233,7 @@ recipe_hex="$("$JSONQ" get data.recipe_hex < "$WORK/prepare.json")"
 printf '%s' "$recipe_hex" | xxd -r -p > "$WORK/recipe.wire"
 if [ "$DERIVED_ROOT" != "$PUB_ROOT" ]; then
     blocked 3 source-drift \
-        "packages/$SHORT no longer derives the published root $PUB_ROOT"
+        "contexts/commons/packages/$SHORT no longer derives the published root $PUB_ROOT"
 fi
 
 # Cross-check the re-derived recipe wire against the published store's
@@ -251,7 +251,7 @@ log "lock=${LOCK_ROOT:0:16}… recipe=${RECIPE_ROOT:0:16}… (store byte-identic
 # be installed in the store with its build-report.
 xmr_dep_visit() {
     local short="$1"
-    local manifest="$ROOT/packages/$short/zcode-package.json"
+    local manifest="$ROOT/contexts/commons/packages/$short/zcode-package.json"
     if [ ! -f "$manifest" ]; then
         printf 'dep manifest missing: %s\n' "$manifest" >&2
         return 3

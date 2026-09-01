@@ -1,0 +1,63 @@
+[Unit]
+Description=Z23 Serve lane (secondary full node + block explorer)
+After=network-online.target
+Wants=network-online.target
+# The serve role is a secondary node instance: same binary/consensus code as
+# the canonical unit (platform/deploy/zclassic23.service) but its own datadir and its
+# own 39xxx port quad, so it can run alongside the canonical node without
+# colliding on ports, datadir, or lock files. Used for a second public
+# explorer/RPC surface, canary builds, or operator experimentation that
+# should not risk the canonical lane.
+#
+# NAMING LAW: this unit is named by ROLE ("serve"), never by instance number
+# ("serve1", "serve2", ...). Only one serve instance runs per host; a second
+# concurrent instance is a different role name, not a numbered sibling of
+# this one. See platform/deploy/migrate-role-names.sh to move an existing numbered
+# zcl-serve<N>.service + ~/.zclassic-c23-serve<N> datadir onto this name.
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+
+# ExecStart below points at the repo build, matching the canonical and test
+# units. An operator running the mint-candidates promotion lane
+# (~/.local/lib/zclassic23-mint-candidates/<role>-<githash>/zclassic23 — the
+# <githash> suffix is content-addressed, not a sequence number, so it is not
+# in scope for renaming) should repoint this ExecStart at their own promoted
+# candidate path instead; migrate-role-names.sh preserves whatever ExecStart
+# an existing numbered unit already used when it renames it onto this name.
+ExecStart=%h/zclassic23/build/bin/zclassic23 \
+    -datadir=%h/.zclassic-c23-serve \
+    -port=39072 \
+    -rpcport=39073 \
+    -fsport=39074 \
+    -httpsport=39473 \
+    -listen \
+    -txindex \
+    -tor \
+    -showmetrics=0
+
+# Role-appropriate restart posture: unlike the canonical lane (which defers
+# every restart decision to the operator, see platform/deploy/zclassic23.service),
+# the serve lane is a secondary/disposable instance — auto-restart with a
+# short stop timeout is fine here.
+Restart=always
+RestartSec=5
+TimeoutStopSec=90
+KillMode=control-group
+
+OOMScoreAdjust=-500
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=%h/.zclassic-c23-serve %h/zclassic23/vendor/tor/etc
+PrivateTmp=yes
+
+StandardOutput=append:%h/.zclassic-c23-serve/node.log
+StandardError=append:%h/.zclassic-c23-serve/node.log
+
+LimitCORE=infinity
+Environment="ZCL_CORE_DIR=%h/.zclassic-c23-serve/cores"
+
+[Install]
+WantedBy=default.target

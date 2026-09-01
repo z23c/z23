@@ -4,18 +4,18 @@
  * Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * Pure ZClassic script VM. Extracted byte-exactly from
- * lib/script/src/interpreter.c (the historic EvalScript / VerifyScript
+ * core/modules/script/src/interpreter.c (the historic EvalScript / VerifyScript
  * orchestrator). The lib wrapper now forwards `eval_script` and
  * `verify_script` to these domain entry points; impure surfaces
- * (sigcache, ECDSA verifier) live entirely in lib/script and are
+ * (sigcache, ECDSA verifier) live entirely in core/modules/script and are
  * supplied via the `struct sig_checker` callback table.
  *
  * No I/O, no clock, no RNG, no global-state reads. Allocator use is
  * limited to the altstack scratch buffer inside `eval_script` and to
- * the two stacks in `verify_script` (via stack_init in lib/script).
+ * the two stacks in `verify_script` (via stack_init in core/modules/script).
  *
  * The stack helper functions (stack_init/stack_free/stack_copy_active)
- * remain in lib/script because they call zcl_calloc, which is
+ * remain in core/modules/script because they call zcl_calloc, which is
  * allocator-side glue rather than consensus logic; they are pure too,
  * but they are also part of the existing public API used by external
  * callers like fuzz_script.c. */

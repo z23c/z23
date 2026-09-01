@@ -76,7 +76,7 @@ hide.
   changes. Distinguish lag at different heights from an exact same-height hash
   disagreement.
 - Keep standing docs and command output aligned with live truth.
-- Trust-capability centralization exists: `app/services/include/services/sync_trust_policy.h`
+- Trust-capability centralization exists: `engine/services/include/services/sync_trust_policy.h`
   derives one `sync_trust_state` from the same provenance bits every gate
   above already reads (self-derived, proven authority, refold marker) and
   maps it to a capability mask; export, offer-advertisement, and guard call

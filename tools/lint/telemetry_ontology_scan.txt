@@ -7,7 +7,7 @@
 # (json_push_kv_int / _str / _bool / _dbl / _uint), maps the emission's target
 # object variable to the JSON path prefix named here, and requires the
 # resulting `<subsystem>|<prefix><field>` key to carry a meaning row in
-# lib/util/include/util/telemetry_ontology.def.
+# platform/modules/util/include/util/telemetry_ontology.def.
 #
 # Two ways this bites:
 #   * a NEW field emitted inside a covered function with no ontology row
@@ -29,7 +29,7 @@
 # Columns: TABLE <domain> <path-to-fields.def> <min-rows>
 #
 # A table-driven domain emits every field from ONE generic renderer
-# (lib/util/src/telemetry_render.c), so there is no per-domain function to
+# (platform/modules/util/src/telemetry_render.c), so there is no per-domain function to
 # slice and no per-field json_push_kv_* call to grep: emission-grepping would
 # extract ZERO fields and the domain would read as covered while being
 # completely unchecked. A TABLE row proves coverage structurally instead —
@@ -43,54 +43,54 @@
 # <min-rows> RATCHETS UP, NEVER DOWN. Raise it when a domain gains fields;
 # lowering it to make the gate pass is how a domain silently loses telemetry.
 
-# ── peer_lifecycle (lib/net/src/peer_lifecycle.c) ────────────────────────
-peer_lifecycle lib/net/src/peer_lifecycle.c summary_to_json out summary.
-peer_lifecycle lib/net/src/peer_lifecycle.c entry_to_json out peers[].
-peer_lifecycle lib/net/src/peer_lifecycle.c append_sources_locked &entry sources[].
-peer_lifecycle lib/net/src/peer_lifecycle.c peer_lifecycle_dump_state_json &reactor reactor.
+# ── peer_lifecycle (core/modules/net/src/peer_lifecycle.c) ────────────────────────
+peer_lifecycle core/modules/net/src/peer_lifecycle.c summary_to_json out summary.
+peer_lifecycle core/modules/net/src/peer_lifecycle.c entry_to_json out peers[].
+peer_lifecycle core/modules/net/src/peer_lifecycle.c append_sources_locked &entry sources[].
+peer_lifecycle core/modules/net/src/peer_lifecycle.c peer_lifecycle_dump_state_json &reactor reactor.
 
-# ── connman (app/controllers/src/diagnostics_connman.c) ──────────────────
-connman app/controllers/src/diagnostics_connman.c connman_diag_dump_state_json out -
-connman app/controllers/src/diagnostics_connman.c connman_diag_dump_state_json &outbound outbound.
-connman app/controllers/src/diagnostics_connman.c connman_diag_dump_state_json &inbound inbound.
-connman app/controllers/src/diagnostics_connman.c connman_diag_dump_state_json &addnode addnode.
-connman app/controllers/src/diagnostics_connman.c connman_diag_dump_state_json &zcl23_db zcl23_db.
-connman app/controllers/src/diagnostics_connman.c connman_diag_dump_state_json &reactor reactor.
-connman app/controllers/src/diagnostics_connman.c connman_diag_dump_state_json &socket_buffers_j socket_buffers.
-connman app/controllers/src/diagnostics_connman.c connman_diag_dump_state_json &census_j noisetransport.
-connman app/controllers/src/diagnostics_connman.c connman_diag_dump_state_json &msg message_cycle.
-connman app/controllers/src/diagnostics_connman.c connman_diag_dump_state_json &am addrman_summary.
-connman app/controllers/src/diagnostics_connman.c push_connman_floor_json &pf floor.
-connman app/controllers/src/diagnostics_connman.c push_addnode_entries_json &e addnode.entries[].
+# ── connman (engine/controllers/src/diagnostics_connman.c) ──────────────────
+connman engine/controllers/src/diagnostics_connman.c connman_diag_dump_state_json out -
+connman engine/controllers/src/diagnostics_connman.c connman_diag_dump_state_json &outbound outbound.
+connman engine/controllers/src/diagnostics_connman.c connman_diag_dump_state_json &inbound inbound.
+connman engine/controllers/src/diagnostics_connman.c connman_diag_dump_state_json &addnode addnode.
+connman engine/controllers/src/diagnostics_connman.c connman_diag_dump_state_json &zcl23_db zcl23_db.
+connman engine/controllers/src/diagnostics_connman.c connman_diag_dump_state_json &reactor reactor.
+connman engine/controllers/src/diagnostics_connman.c connman_diag_dump_state_json &socket_buffers_j socket_buffers.
+connman engine/controllers/src/diagnostics_connman.c connman_diag_dump_state_json &census_j noisetransport.
+connman engine/controllers/src/diagnostics_connman.c connman_diag_dump_state_json &msg message_cycle.
+connman engine/controllers/src/diagnostics_connman.c connman_diag_dump_state_json &am addrman_summary.
+connman engine/controllers/src/diagnostics_connman.c push_connman_floor_json &pf floor.
+connman engine/controllers/src/diagnostics_connman.c push_addnode_entries_json &e addnode.entries[].
 
-# ── addrman (app/controllers/src/diagnostics_connman.c) ──────────────────
-addrman app/controllers/src/diagnostics_connman.c addrman_diag_dump_state_json out -
-addrman app/controllers/src/diagnostics_connman.c addrman_diag_dump_state_json &buckets buckets.
-addrman app/controllers/src/diagnostics_connman.c addrman_diag_dump_state_json &index address_index.
-addrman app/controllers/src/diagnostics_connman.c addrman_diag_dump_state_json &candidates candidates.
+# ── addrman (engine/controllers/src/diagnostics_connman.c) ──────────────────
+addrman engine/controllers/src/diagnostics_connman.c addrman_diag_dump_state_json out -
+addrman engine/controllers/src/diagnostics_connman.c addrman_diag_dump_state_json &buckets buckets.
+addrman engine/controllers/src/diagnostics_connman.c addrman_diag_dump_state_json &index address_index.
+addrman engine/controllers/src/diagnostics_connman.c addrman_diag_dump_state_json &candidates candidates.
 
-# ── network rollup (app/controllers/src/diagnostics_network.c) ───────────
-network app/controllers/src/diagnostics_network.c push_connman_json &obj connman.
-network app/controllers/src/diagnostics_network.c push_addnode_json &obj addnode.
-network app/controllers/src/diagnostics_network.c push_peer_floor_json &pf peer_floor.
-network app/controllers/src/diagnostics_network.c push_tip_comparison_json &tc tip_comparison.
+# ── network rollup (engine/controllers/src/diagnostics_network.c) ───────────
+network engine/controllers/src/diagnostics_network.c push_connman_json &obj connman.
+network engine/controllers/src/diagnostics_network.c push_addnode_json &obj addnode.
+network engine/controllers/src/diagnostics_network.c push_peer_floor_json &pf peer_floor.
+network engine/controllers/src/diagnostics_network.c push_tip_comparison_json &tc tip_comparison.
 
-# ── fast_sync (lib/net/src/fast_sync.c) ──────────────────────────────────
-fast_sync lib/net/src/fast_sync.c fast_sync_dump_state_json &uc utxo_root_cache.
-fast_sync lib/net/src/fast_sync.c fast_sync_dump_state_json &sc snapshot_cache.
+# ── fast_sync (core/modules/net/src/fast_sync.c) ──────────────────────────────────
+fast_sync core/modules/net/src/fast_sync.c fast_sync_dump_state_json &uc utxo_root_cache.
+fast_sync core/modules/net/src/fast_sync.c fast_sync_dump_state_json &sc snapshot_cache.
 
-# ── sync_rate (app/conditions/src/sync_rate_below_floor.c) ───────────────
-sync_rate app/conditions/src/sync_rate_below_floor.c sync_rate_below_floor_dump_state_json out -
+# ── sync_rate (engine/conditions/src/sync_rate_below_floor.c) ───────────────
+sync_rate engine/conditions/src/sync_rate_below_floor.c sync_rate_below_floor_dump_state_json out -
 
 # ── TABLE rows: every domain in util/telemetry_domains.def ───────────────
 # Order matches the registry (node machinery outward to hosted applications).
 # Each table currently carries exactly one leaf — meta.collected_unix — so the
 # floor is 1. Raise each floor as its domain's lane lands real groups.
-TABLE runtime   lib/util/include/util/telemetry/runtime_fields.def   26
-TABLE sync      lib/util/include/util/telemetry/sync_fields.def      1
-TABLE network   lib/util/include/util/telemetry/network_fields.def   1
-TABLE storage   lib/util/include/util/telemetry/storage_fields.def   1
-TABLE wallet    lib/util/include/util/telemetry/wallet_fields.def    1
-TABLE agents    lib/util/include/util/telemetry/agents_fields.def    1
-TABLE zcode     lib/util/include/util/telemetry/zcode_fields.def     1
-TABLE metaverse lib/util/include/util/telemetry/metaverse_fields.def 14
+TABLE runtime   platform/modules/util/include/util/telemetry/runtime_fields.def   26
+TABLE sync      platform/modules/util/include/util/telemetry/sync_fields.def      1
+TABLE network   platform/modules/util/include/util/telemetry/network_fields.def   1
+TABLE storage   platform/modules/util/include/util/telemetry/storage_fields.def   1
+TABLE wallet    platform/modules/util/include/util/telemetry/wallet_fields.def    1
+TABLE agents    platform/modules/util/include/util/telemetry/agents_fields.def    1
+TABLE zcode     platform/modules/util/include/util/telemetry/zcode_fields.def     1
+TABLE metaverse platform/modules/util/include/util/telemetry/metaverse_fields.def 14

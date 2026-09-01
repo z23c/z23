@@ -329,7 +329,7 @@ done < "$WORK/tracked-index"
 # nodes there: a compiler-followed symlink would bind only its target pathname,
 # not the mutable target bytes. `.git` metadata inside a future nested worktree
 # is pruned; initialized gitlinks are handled by collect_gitlink() above.
-BUILD_INPUT_ROOTS=(adapters app application config core domain lib ports src tools)
+BUILD_INPUT_ROOTS=(core engine contexts cognition platform tests tools)
 existing_build_roots=()
 for path in "${BUILD_INPUT_ROOTS[@]}"; do
     if [ -e "$path" ] || [ -L "$path" ]; then

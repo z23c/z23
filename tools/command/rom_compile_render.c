@@ -242,7 +242,7 @@ static void rcr_rom_pipeline(const struct json_value *state, char *out,
     }
 }
 
-/* shielded_import section (app/jobs/src/rom_compile_status.c): makes the
+/* shielded_import section (engine/jobs/src/rom_compile_status.c): makes the
  * -import-complete-shielded import -> resume transition visible in the
  * human ops.rom view, not just the JSON. A healthy node (no gap on either
  * pool) gets one compact line; a node still behind an anchor or nullifier

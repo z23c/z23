@@ -30,7 +30,7 @@ source tools/lint/scan_exclusions.sh
 source tools/lint/gate_lib.sh
 
 BASELINE=tools/lint/borrowed_seed_caller_baseline.txt
-DEF_FILE=lib/storage/src/coins_kv_boot_rebuild.c
+DEF_FILE=engine/modules/storage/src/coins_kv_boot_rebuild.c
 SYMBOL='coins_kv_seed_from_node_db('
 
 # Hollow-gate guard: the symbol must still be defined where we expect it.
@@ -54,12 +54,14 @@ new_callers=()
 while IFS= read -r f; do
     [ -n "$f" ] || continue
     [ "$f" = "$DEF_FILE" ] && continue
-    case "$f" in lib/test/*) continue ;; esac
+    case "$f" in tests/harness/include/test/*) continue ;; esac
     if [ -z "${baseline[$f]+x}" ]; then
         new_callers+=("$f")
         fail=1
     fi
-done < <(grep -rl --include='*.c' "$SYMBOL" app config src lib tools "${LINT_GREP_EXCLUDE_ARGS[@]}" 2>/dev/null | sort -u)
+done < <(grep -rl --include='*.c' "$SYMBOL" \
+    core engine contexts cognition platform tools \
+    "${LINT_GREP_EXCLUDE_ARGS[@]}" 2>/dev/null | sort -u)
 
 # Also flag a STALE baseline entry (a listed caller that no longer calls it):
 # keep the ratchet honest so deletions are reflected, not silently grandfathered.

@@ -2,7 +2,7 @@
 # Copyright 2026 Rhett Creighton - Apache License 2.0
 #
 # Wave-2 lane B2: nightly simulator sweep driver, invoked by
-# deploy/zclassic23-simnet-nightly.service (systemd --user timer). Mirrors
+# platform/deploy/zclassic23-simnet-nightly.service (systemd --user timer). Mirrors
 # tools/scripts/background_quality_lane.sh's structure (dated log under a
 # state dir, PASS/FAIL summary, exit code == rc of the sweep) but stays
 # POSIX sh — no bash-isms, no python (project ban), so it runs under any

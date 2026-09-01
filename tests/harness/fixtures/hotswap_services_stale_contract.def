@@ -1,0 +1,11 @@
+HOTSWAP_SERVICE(
+    "fixture.service.v1",
+    "tests/harness/fixtures/hotswap_service_contract_fixture.c",
+    "-",
+    "tests/harness/fixtures/hotswap_service_contract_fixture.h",
+    "",
+    "fixture.abi.stale",
+    "fixture.schema.v1",
+    "fixture.wire.v1",
+    "fixture.kat.v1",
+    "core.status")

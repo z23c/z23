@@ -6,10 +6,10 @@
 # them build the node, the test runners, the fuzzers and two lint helpers —
 # and nothing else. Every other `$(BIN_DIR)/<tool>` rule in the Makefile was
 # unreachable from any gate, so those rules rotted silently: a tool kept
-# compiling in the author's head and in no CI anywhere. When lib/base absorbed
+# compiling in the author's head and in no CI anywhere. When platform/modules/base absorbed
 # logging and allocation behind forwarding headers, SIX standalone rules broke
-# at once (missing -I paths, missing lib/base/src/log_level.c,
-# missing lib/platform/src/clock.c) and every gate stayed green for it. That is
+# at once (missing -I paths, missing platform/modules/base/src/log_level.c,
+# missing platform/modules/platform/src/clock.c) and every gate stayed green for it. That is
 # the class this gate closes.
 #
 # Mechanism: the tool list is DERIVED from the Makefile, never hand-written, so
@@ -135,7 +135,7 @@ declare -A WINDOWS_ONLY_EXEMPT=(
 declare -A WINDOWS_ONLY_COVER=(
     [z23-headless-run.exe]="headless_run tools/dev/windows_headless_run.c"
 )
-WINDOWS_ACCEPTANCE_CATALOG="lib/platform/tests/windows_acceptance.mk"
+WINDOWS_ACCEPTANCE_CATALOG="platform/modules/platform/tests/windows_acceptance.mk"
 
 # Is <src> still cross-compiled by catalog row <row>? BOTH halves are checked,
 # because either one alone can be true while nothing gets compiled:

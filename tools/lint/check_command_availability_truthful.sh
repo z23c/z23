@@ -4,10 +4,10 @@
 # Gate — command-availability truthfulness (HARD). Sibling of
 # check_command_contract.sh, same scan shape, different predicate.
 #
-# The typed command surface is declared in config/commands/*.def and expanded
-# by config/src/command_catalog.c into one immutable g_catalog_commands[].
+# The typed command surface is declared in engine/composition/commands/*.def and expanded
+# by engine/composition/src/command_catalog.c into one immutable g_catalog_commands[].
 # Every leaf carries an `availability` (READY / COMPAT / PLANNED, see
-# lib/kernel/include/kernel/command_registry.h) that the engine acts on: a
+# engine/modules/kernel/include/kernel/command_registry.h) that the engine acts on: a
 # READY leaf is dispatched to its handler, a PLANNED leaf is fail-closed with
 # a typed BLOCKED reply that quotes its `availability_reason`.
 #
@@ -46,7 +46,7 @@ cd "$(dirname "$0")/../.."
 
 # Scan root overridable so a self-test can point at a planted fixture;
 # production scans the command catalog fragments.
-DEF_DIR="${ZCL_COMMAND_AVAILABILITY_DIR:-config/commands}"
+DEF_DIR="${ZCL_COMMAND_AVAILABILITY_DIR:-engine/composition/commands}"
 
 mapfile -t def_files < <(find "$DEF_DIR" -type f -name '*.def' 2>/dev/null | sort)
 gate_require_scanned "${#def_files[@]}" 1 check_command_availability_truthful \
@@ -87,7 +87,7 @@ function fatal(msg) {
 function want_arity(n) {
     if (nargs != n) {
         fatal(sprintf("macro grammar drift: expected %d arguments, parsed %d." \
-              " Re-read the macro definition in config/src/command_catalog.c" \
+              " Re-read the macro definition in engine/composition/src/command_catalog.c" \
               " and fix this gate before trusting it.", n, nargs))
         return 0
     }
@@ -215,7 +215,7 @@ if [ "$FATAL_COUNT" -gt 0 ] || [ -n "${FATALS//[[:space:]]/}" ]; then
     echo "  This gate reads a fixed argument slot per macro shape. A changed" >&2
     echo "  arity means it would be reading the WRONG slot, so it refuses to" >&2
     echo "  report a verdict at all. Fix the arity table in this script" >&2
-    echo "  against config/src/command_catalog.c." >&2
+    echo "  against engine/composition/src/command_catalog.c." >&2
     exit 2
 fi
 
@@ -235,8 +235,8 @@ if [ "$VIOL_COUNT" -gt 0 ]; then
          "(mode: $MODE)"
     echo "  A READY leaf must bind a non-NULL handler; a PLANNED/COMPAT leaf"
     echo "  must state a non-empty availability_reason (and a COMPAT leaf its"
-    echo "  compat_target). See lib/kernel/include/kernel/command_registry.h"
-    echo "  (enum zcl_command_availability) and config/commands/README.md."
+    echo "  compat_target). See engine/modules/kernel/include/kernel/command_registry.h"
+    echo "  (enum zcl_command_availability) and engine/composition/commands/README.md."
     if [ "$MODE" = "FAIL" ]; then exit 1; fi
 fi
 

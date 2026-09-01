@@ -17,7 +17,7 @@
 # The check
 # ---------
 # The single block-connection authority is
-#   app/services/src/chain_activation_service.c
+#   engine/services/src/chain_activation_service.c
 # It owns the transition to ACTIVATION_READY. Any file that performs an
 #   activation_set_state(..., ACTIVATION_READY, ...)
 # on a non-progress path MUST also route a typed blocker through the blocker
@@ -43,9 +43,9 @@ source tools/lint/scan_exclusions.sh
 
 # Files that own a transition into ACTIVATION_READY. Today this is the single
 # block-connection authority; the glob keeps the gate honest if the authority
-# is ever split or relocated within app/services/.
+# is ever split or relocated within engine/services/.
 mapfile -t files < <(grep -rlE 'activation_set_state[[:space:]]*\([^;]*ACTIVATION_READY' \
-                        app/services/src --include='*.c' "${LINT_GREP_EXCLUDE_ARGS[@]}" 2>/dev/null | sort || true)
+                        engine/services/src --include='*.c' "${LINT_GREP_EXCLUDE_ARGS[@]}" 2>/dev/null | sort || true)
 
 # FAIL-LOUD preflight (never report "clean" off an empty discovery). The
 # producer finds the READY authority by grepping for the setter + the enum. If
@@ -55,7 +55,7 @@ mapfile -t files < <(grep -rlE 'activation_set_state[[:space:]]*\([^;]*ACTIVATIO
 # wide open. So: the discovery must be non-empty AND must still contain the
 # known block-connection authority. A legitimate rename/split forces a
 # deliberate update here (and a re-verify of the silent-ready boundary).
-EXPECTED_AUTHORITY="app/services/src/chain_activation_service.c"
+EXPECTED_AUTHORITY="engine/services/src/chain_activation_service.c"
 if (( ${#files[@]} == 0 )); then
     echo "check_no_silent_ready: BROKEN — found 0 ACTIVATION_READY authorities." >&2
     echo "  The setter (activation_set_state) or enum (ACTIVATION_READY) was likely" >&2

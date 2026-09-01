@@ -7,7 +7,7 @@ set -euo pipefail
 ROOT="${ZCL_SOURCE_ROOT:-$(pwd -P)}"
 BIN="${ZCL_DEV_BIN:-$ROOT/build/bin/zclassic23-dev}"
 SOURCE="$ROOT/tools/command/native_zcode_work_command.c"
-UNRELATED="$ROOT/app/services/src/market_moderation_service.c"
+UNRELATED="$ROOT/contexts/market/services/src/market_moderation_service.c"
 OUTPUT="${ZCL_REFLEX_ZCODE_WORK_ACCEPTANCE_OUTPUT:-$ROOT/build/dev-loop/reflex-hotfork-zcode-work-acceptance.json}"
 STORY='zcode-work-input-core.v1'
 

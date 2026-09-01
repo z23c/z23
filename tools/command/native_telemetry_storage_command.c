@@ -11,7 +11,7 @@
  * zeroes describing nothing.
  *
  * The snapshot is therefore filled and rendered INSIDE the node, by
- * app/services/src/storage_telemetry_fill.c, and reached through the same
+ * engine/services/src/storage_telemetry_fill.c, and reached through the same
  * SELECT-only `dumpstate` RPC that `ops.state` uses, pinned to the
  * `storage_telemetry` subsystem. One round trip per call.
  *

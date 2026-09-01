@@ -55,7 +55,7 @@
  *
  * This lives in its own translation unit rather than in
  * native_zcode_work_command.c so the posting half of the task surface has
- * one file beside its solution half. Bound by config/commands/zcode.def.
+ * one file beside its solution half. Bound by engine/composition/commands/zcode.def.
  */
 
 #include "base/hex.h"

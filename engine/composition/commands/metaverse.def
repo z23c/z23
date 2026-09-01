@@ -1,0 +1,582 @@
+/* METAVERSE — sovereign digital property: PRINCIPAL -> PROPERTY -> RIGHTS ->
+ * ACTION -> RECEIPT. This file is jointly owned by the peer lanes that
+ * declare leaves under the `metaverse` root; keep one branch row per level
+ * and do not declare a second `metaverse` branch in another .def file.
+ *
+ * `metaverse.agent` — the confined-agent broker's two observation surfaces.
+ * Both leaves are READ-ONLY and node-free: they read a broker directory that
+ * an operator names, and they CREATE NOTHING. A missing directory is an
+ * explicit not-present verdict, never an implicit mkdir — see the read-leaf
+ * contract in docs/NATIVE_COMMAND_INTERFACE.md.
+ *
+ * `metaverse.property` — the READ half of the property catalog.
+ *
+ * THE INVARIANT OF THIS BRANCH: there is no second ownership truth. The
+ * catalog is a PROJECTION rebuilt at call time over the models that already
+ * own each kind (the package store, the blob store, and — as their readers
+ * are wired — ZNAM, ZSLP, the store, and the swap contracts). It caches no
+ * owner, no revision, and no status, so it cannot disagree with them. Both
+ * leaves here are strictly read-only, including on open: they reach store
+ * bytes by path and never open a handle whose open() rewrites the datadir.
+ *
+ * Every view states its EVIDENCE GRADE — what THIS node checked, in this
+ * call. `local_content_hash` means a root re-derived from bytes held here;
+ * `local_signature` adds a publisher signature verified during the call;
+ * only `chain_validated_local` is chain-bound, and `chain_bound` is emitted
+ * as its own boolean so no consumer has to infer it. There is no grade that
+ * means "verified" in the abstract.
+ *
+ * Every view ALSO states its SETTLEMENT CLASS, which is a different
+ * question: the evidence grade says what this node checked, the settlement
+ * class says what kind of answer the authority gives at all.
+ * `content_addressed` — the id is a hash; anyone can recheck it with no
+ * authority. `proof_of_work` — ownership is an ordering settled by
+ * accumulated work, and the `work` block reports the anchor height,
+ * confirmation depth, and chainwork since the anchor. `local_declaration`
+ * — this node asserts it and nothing outside this node has agreed.
+ * `chain_anchored_incomplete` — the record points at an on-chain object
+ * this node tracks no anchor height for. The `work` block appears on every
+ * view: for anything but a proof-of-work kind it reports measurable=false
+ * with a named gap and -1 in every number, because "does not apply" and
+ * "zero confirmations" are different facts. No field ranks, scores, or
+ * rates a property; the surface reports the mechanism and the measurement.
+ *
+ * Consumer defines ZCL_COMMAND_*; see engine/composition/src/command_catalog.c. */
+
+ZCL_COMMAND_BRANCH("metaverse", "",
+                   "Sovereign digital property: catalog, rights, receipts",
+                   ZCL_COMMAND_LAYER_APP)
+
+ZCL_COMMAND_BRANCH("metaverse.agent", "metaverse",
+                   "Confined agents acting under a scoped grant",
+                   ZCL_COMMAND_LAYER_APP)
+
+ZCL_COMMAND_READY_READ(
+    "metaverse.agent.status", "metaverse.agent", "",
+    "What confinement the agent broker actually achieved",
+    "The confined-agent broker's recorded state for one broker directory: the "
+    "broker and agent pids, the socket, the SO_PEERCRED identity the broker "
+    "accepted, the grant's id and fingerprint (never the grant itself), and the "
+    "counts of requests served, refused, and receipted. The confinement block "
+    "reports what the agent ACHIEVED, not what was requested: `agent_uid_"
+    "posture` is separate_uid only where a real uid switch happened and "
+    "same_uid where the host allowed no such switch, and the Landlock and "
+    "seccomp flags are the broker's and the child's own measurements. A "
+    "directory with no broker.json answers broker_state_present=false with a "
+    "reason; a recorded broker pid that is no longer alive answers "
+    "broker_running=false rather than implying liveness from the file.",
+    ZCL_COMMAND_LIST_BUDGET,
+    "metaverse,agent,broker,confinement,landlock,seccomp,peercred,grant",
+    "zcl.metaverse_agent_status.input.v1", "zcl.metaverse_agent_status.v1",
+    "dir", "dir",
+    "z23 metaverse agent status --dir=/tmp/mv-broker",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_INSTANT, ZCL_COMMAND_COST_TINY,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_metaverse_agent_status)
+
+ZCL_COMMAND_READY_READ(
+    "metaverse.agent.money", "metaverse.agent", "",
+    "Identity-bound dev/prod custody, never an implied zero",
+    "Reconciles the owner-created dev and prod wallet bindings in one broker "
+    "directory against each running node's persistent wallet identity and "
+    "authoritative vault/intent readers. Every wallet reports CURRENT, "
+    "UNKNOWN, STALE, or CONFLICTED with completeness, reason, confirmed, "
+    "pending, encumbered, intent-reserved, and agent-available ZCL plus tip "
+    "and observation evidence. Missing or unreachable readers never collapse "
+    "to zero. The portfolio total appears only when both assigned wallets are "
+    "current and complete. Output contains no endpoint, datadir, address, key, "
+    "or grant token.",
+    ZCL_COMMAND_LIST_BUDGET,
+    "metaverse,agent,money,custody,wallet,balance,identity,reserve",
+    "zcl.metaverse_agent_money.input.v1", "zcl.metaverse_agent_money.v1",
+    "dir", "dir",
+    "z23 metaverse agent money --dir=/tmp/mv-broker",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_metaverse_agent_money)
+
+ZCL_COMMAND_READY_READ(
+    "metaverse.agent.liquidity", "metaverse.agent", "",
+    "Plan parallel transaction liquidity without moving funds",
+    "Reads one explicitly bound dev or prod wallet through the broker and "
+    "reports whether the requested number of simultaneous payments has enough "
+    "independent reservation-eligible transparent UTXOs. Exact recipient value "
+    "plus maximum fee is budgeted per slot. If value exists but coin fan-out is "
+    "needed, returns aggregate output count/value and the existing vault-intent "
+    "address/plan/commit route. This is advisory: it creates no address, plan, "
+    "reservation, signature, transaction, or automatic rebalance. Missing, "
+    "stale, conflicting, or unreachable custody remains explicit and no "
+    "address, outpoint, endpoint, datadir, key, or grant token is returned.",
+    ZCL_COMMAND_LIST_BUDGET,
+    "metaverse,agent,liquidity,utxo,fanout,parallel,transaction,plan",
+    "zcl.metaverse_agent_liquidity.input.v1",
+    "zcl.metaverse_agent_liquidity.v1",
+    "dir,wallet_scope,recipient_value_zat,maximum_fee_zat,concurrency",
+    "dir,wallet_scope,recipient_value_zat,maximum_fee_zat,concurrency",
+    "z23 metaverse agent liquidity --input='{\"dir\":\"/private/broker\",\"wallet_scope\":\"dev\",\"recipient_value_zat\":1000,\"maximum_fee_zat\":10000,\"concurrency\":10}'",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE,
+    zcl_native_handle_metaverse_agent_liquidity)
+
+ZCL_COMMAND_READY_READ(
+    "metaverse.agent.audit", "metaverse.agent", "",
+    "Every action the confined agent took, and whether the log is intact",
+    "The broker's append-only receipt log for one broker directory, verified "
+    "before it is rendered. Each receipt commits to the previous receipt's id "
+    "and is Ed25519-signed over that id, so the verdict block separates the "
+    "three ways a log can be wrong: `chain_breaks` (a row was edited, "
+    "reordered, or removed), `bad_signatures` (a row was written by something "
+    "other than this broker), and `malformed` (a row does not parse). "
+    "`tamper_evident_ok` is true only when the log has at least one row and all "
+    "three counters are zero — an empty or absent log is never reported as "
+    "verified. The rendered tail is bounded by `limit`; the verdict always "
+    "covers the whole file, not just the tail.",
+    ZCL_COMMAND_LIST_BUDGET,
+    "metaverse,agent,audit,receipt,tamper,chain,signature,evidence",
+    "zcl.metaverse_agent_audit.input.v1", "zcl.metaverse_agent_audit.v1",
+    "dir,limit", "dir",
+    "z23 metaverse agent audit --dir=/tmp/mv-broker",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_metaverse_agent_audit)
+
+ZCL_COMMAND_BRANCH("metaverse.property", "metaverse",
+                   "What property exists, who controls it, and how we know",
+                   ZCL_COMMAND_LAYER_APP)
+
+ZCL_COMMAND_READY_READ(
+    "metaverse.property.list", "metaverse.property", "",
+    "Every property this datadir holds, one row per kind scanned",
+    "A bounded page of property views projected at call time from each "
+    "kind's own authoritative model — never from a catalog table, because "
+    "there is none. Each item carries property_id, kind, authority_source, "
+    "settlement (+ settlement_means), immutable/content/descriptor roots, "
+    "owner principal, revision, status, provenance, evidence_grade (+ the "
+    "explicit chain_bound boolean), a `work` block, and the "
+    "actions its CURRENT state supports (availability, not authority — "
+    "intersect with a grant before acting). Every property kind emits a row "
+    "in `kinds[]` even when its reader is not wired, with "
+    "available:false and the exact reason: a kind dropped from the output "
+    "would be indistinguishable from a kind that owns nothing. Each of "
+    "those rows also states its settlement class, so the mix of "
+    "hash-verifiable, work-settled, and merely locally-asserted kinds is "
+    "visible without opening a single property. `total` is "
+    "the real inventory and `items_truncated` says when the page is shorter "
+    "than it. Narrow with `kind`; unscanned kinds are still listed, marked "
+    "not-scanned.",
+    ZCL_COMMAND_LIST_BUDGET,
+    "metaverse,property,catalog,own,inventory,evidence,kind",
+    "zcl.metaverse_property_list.input.v1", "zcl.metaverse_property_list.v1",
+    "kind,limit,datadir", "kind",
+    "z23 metaverse property list",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE,
+    zcl_native_handle_metaverse_property_list)
+
+ZCL_COMMAND_READY_READ(
+    "metaverse.property.show", "metaverse.property", "",
+    "One property: its roots, controller, status, and evidence grade",
+    "The full current view of one property named by `property_id` "
+    "('<kind>:<64-hex immutable root>'), re-derived from the authoritative "
+    "model during this call — so an object that changed or disappeared "
+    "since the last read is reflected here, never served from a cache. "
+    "`status` is present|incomplete|absent|unknown; absent is a determined "
+    "verdict (the authority was asked and holds nothing), not a lookup "
+    "failure. `evidence_grade` names what this node checked and "
+    "`evidence_source` names the primitive that answered it; "
+    "`has_freshness_height` is false for every kind whose authority is not "
+    "chain-anchored, because stamping a tip height beside a claim the tip "
+    "does not commit would be a false freshness claim. `settlement` names "
+    "what kind of answer the authority gives — a hash anyone can recheck, "
+    "an ordering settled by accumulated work, a bare assertion by this "
+    "node, or a chain reference with no anchor height tracked — and "
+    "`settlement_means` spells it out. The `work` block quantifies only the "
+    "work-settled case (anchor_height, confirmation_depth, "
+    "chainwork_since_anchor); for every other kind it reports "
+    "measurable:false with a named gap and -1 in each number, never a zero "
+    "that could be read as a measurement. A kind whose reader "
+    "is not wired is refused by name (KIND_UNAVAILABLE), never answered "
+    "empty.",
+    ZCL_COMMAND_LIST_BUDGET,
+    "metaverse,property,show,detail,evidence,owner,root",
+    "zcl.metaverse_property_show.input.v1", "zcl.metaverse_property_show.v1",
+    "property_id,datadir", "property_id",
+    "z23 metaverse property show content:<64hex>",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE,
+    zcl_native_handle_metaverse_property_show)
+
+ZCL_COMMAND_BRANCH("metaverse.space", "metaverse",
+                   "Signed sovereign spaces and generic typed services",
+                   ZCL_COMMAND_LAYER_APP)
+
+ZCL_COMMAND_READY_READ(
+    "metaverse.space.plan", "metaverse.space", "",
+    "Plan one signed space manifest or typed service descriptor",
+    "Canonicalizes and validates either a read-only service_descriptor.v1 or "
+    "a delegated, expiring space_manifest.v1, then returns its semantic root "
+    "and an exact stateless plan token. Planning writes no CAS bytes, DHT "
+    "records, policy rows, or indexes. A manifest signature proves its ZID "
+    "delegation only when the running node independently confirms that "
+    "delegation against current chain state. Service descriptors carry roots "
+    "and read verbs only: they grant no authority and are never executable.",
+    ZCL_COMMAND_RESULT_BUDGET,
+    "metaverse,space,manifest,service,plan,signature,sovereignty",
+    "zcl.metaverse_space_plan.input.v1", "zcl.metaverse_space_plan.v1",
+    "kind,protocol_root,read_only_verbs,object_roots,capability_roots,sequence,not_before,expiry,name,description,service_roots,portal_roots,admission_root,datadir",
+    "kind",
+    "z23 metaverse space plan --input='{\"kind\":\"service_descriptor\",\"protocol_root\":\"<64hex>\",\"read_only_verbs\":[\"discover\"]}'",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_SCOPE_NODE,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_LATENCY_FAST,
+    ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_metaverse_space_plan)
+
+ZCL_COMMAND_READY_COMMAND(
+    "metaverse.space.commit", "metaverse.space", "",
+    "Commit one exactly planned space object to local CAS",
+    "Requires confirm:true and the exact stateless plan token, revalidates the "
+    "whole object and current local STORE and INDEX policy, then writes the "
+    "canonical bytes to the named workspace CAS. Existing bytes are re-read "
+    "and re-hashed before an idempotent success; a corrupt or colliding object "
+    "fails closed. This does not publish, fetch, execute, or grant authority.",
+    0, "metaverse,space,manifest,service,commit,cas,policy",
+    "zcl.metaverse_space_commit.input.v1", "zcl.metaverse_space_commit.v1",
+    "kind,protocol_root,read_only_verbs,object_roots,capability_roots,sequence,not_before,expiry,name,description,service_roots,portal_roots,admission_root,plan_token,confirm,datadir,workspace",
+    "kind,plan_token,confirm",
+    "z23 metaverse space commit --input='{\"kind\":\"service_descriptor\",\"protocol_root\":\"<64hex>\",\"read_only_verbs\":[\"discover\"],\"plan_token\":\"<64hex>\",\"confirm\":true}'",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_NODE,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_CONFIRM_PLAN_COMMIT,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    zcl_native_handle_metaverse_space_commit)
+
+ZCL_COMMAND_READY_READ(
+    "metaverse.space.show", "metaverse.space", "",
+    "Re-derive one local space object and its evidence grade",
+    "Reads canonical CAS bytes by semantic root and re-derives the root and "
+    "typed contents. A manifest reports its preserved signature evidence, "
+    "current validity window and current chain-authorization separately; an "
+    "expired manifest remains inspectable but is not called chain-bound. A "
+    "service descriptor is content-hash evidence only and never executable.",
+    ZCL_COMMAND_RESULT_BUDGET, "metaverse,space,show,evidence,cas,signature",
+    "zcl.metaverse_space_show.input.v1", "zcl.metaverse_space_show.v1",
+    "root,workspace,datadir", "root",
+    "z23 metaverse space show <64hex>",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_SCOPE_NODE,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_LATENCY_FAST,
+    ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_metaverse_space_show)
+
+ZCL_COMMAND_READY_READ(
+    "metaverse.space.status", "metaverse.space", "",
+    "Explain whether this node can publish, discover, or scout a Space",
+    "Composes the existing identity/delegation, authenticated DHT, package "
+    "store, sovereignty-policy, Space CAS and local signed-record owners into "
+    "one non-creating readiness view. An optional exact semantic root adds "
+    "local manifest/descriptor visibility plus publication and declared "
+    "replication state. Replies expose readiness booleans, counts, blocker "
+    "codes and one safe next command—never keys, identities, peer addresses, "
+    "private policy rules, endpoints, or filesystem paths.",
+    ZCL_COMMAND_RESULT_BUDGET,
+    "metaverse,space,status,readiness,blockers,publication,replication",
+    "zcl.metaverse_space_status.input.v1",
+    "zcl.metaverse_space_status.v1",
+    "root,kind,workspace,datadir", "",
+    "z23 metaverse space status --input='{\"root\":\"<64hex>\",\"kind\":\"space_manifest\"}'",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_SCOPE_NODE,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_LATENCY_FAST,
+    ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_metaverse_space_status)
+
+ZCL_COMMAND_READY_COMMAND(
+    "metaverse.space.publish", "metaverse.space", "",
+    "Publish one local space object through the existing signed DHT",
+    "Revalidates the local CAS object, derives a bounded generic blob carrier, "
+    "and checks this node's STORE, INDEX, SERVE and FORWARD policy before any "
+    "write. It then publishes existing generic POINTER and PROVIDER records "
+    "under the space.manifest or space.service namespace; it introduces no "
+    "second discovery protocol. Manifest publication also requires current "
+    "chain authorization. Publication never executes object contents.",
+    0, "metaverse,space,publish,dht,provider,pointer,policy",
+    "zcl.metaverse_space_publish.input.v1", "zcl.metaverse_space_publish.v1",
+    "root,workspace,datadir", "root",
+    "z23 metaverse space publish <64hex>",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_NODE,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_CONFIRM_NONE,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    zcl_native_handle_metaverse_space_publish)
+
+ZCL_COMMAND_READY_COMMAND(
+    "metaverse.space.discover", "metaverse.space", "",
+    "Discover one exact space root under local admission policy",
+    "Looks up generic signed POINTER records for one exact semantic root, "
+    "deterministically filters conflicts and superseded records, then routes "
+    "only through authenticated restricted PROVIDER records. DISCOVER and "
+    "FETCH policy are checked before routing; STORE and INDEX policy are "
+    "rechecked after bytes are verified and before local CAS admission. The "
+    "reply distinguishes pointer publisher evidence from the manifest owner. "
+    "Operational outcomes are closed as present, pending, blocked, not_found "
+    "or invalid, with retryability, the exact phase, bounded progress and one "
+    "safe next action. A foreground call spends at most ten seconds trying to "
+    "finish a scheduled healthy fetch. No candidate can trigger execution or "
+    "confer authority.",
+    0, "metaverse,space,discover,dht,provider,policy,admission",
+    "zcl.metaverse_space_discover.input.v1", "zcl.metaverse_space_discover.v1",
+    "root,kind,workspace,datadir", "root",
+    "z23 metaverse space discover <64hex> --kind=space_manifest",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_NODE,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_CONFIRM_NONE,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    zcl_native_handle_metaverse_space_discover)
+
+ZCL_COMMAND_BRANCH("metaverse.space.scout", "metaverse.space",
+                   "Bounded read-only space missions and signed local evidence",
+                   ZCL_COMMAND_LAYER_APP)
+
+ZCL_COMMAND_READY_READ(
+    "metaverse.space.scout.plan", "metaverse.space.scout", "",
+    "Plan one bounded read-only traversal of sovereign spaces",
+    "Canonicalizes sorted starting roots plus explicit depth, space, portal, "
+    "byte and monotonic-duration caps under the local observer's network. "
+    "Returns an exact stateless plan token and writes nothing. Planning grants "
+    "no interaction or execution authority.",
+    ZCL_COMMAND_RESULT_BUDGET,
+    "metaverse,space,scout,plan,bounds,read-only,evidence",
+    "zcl.metaverse_space_scout_plan.input.v1",
+    "zcl.metaverse_space_scout_plan.v1",
+    "starting_roots,observation_unix,maximum_depth,maximum_spaces,maximum_portals,maximum_bytes,deadline_ms,datadir",
+    "", "z23 metaverse space scout plan --input='<mission-json>'",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_SCOPE_NODE,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_LATENCY_FAST,
+    ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE,
+    zcl_native_handle_metaverse_space_scout_plan)
+
+ZCL_COMMAND_READY_COMMAND(
+    "metaverse.space.scout.run", "metaverse.space.scout", "",
+    "Run one exactly planned bounded read-only space scout mission",
+    "Requires confirm:true and the exact stateless plan token. The scout may "
+    "read or discover signed manifests and follow permitted portal roots until "
+    "the first hard cap. Every network lookup uses the mission's monotonic "
+    "deadline and existing generic POINTER/PROVIDER transport. It records a "
+    "deterministic unsigned evidence map plus a separate local signature; it "
+    "never invokes service verbs, packages, wallets, doorbells or messages.",
+    ZCL_COMMAND_LIST_BUDGET,
+    "metaverse,space,scout,run,portal,policy,deadline,evidence",
+    "zcl.metaverse_space_scout_run.input.v1",
+    "zcl.metaverse_space_scout_run.v1",
+    "starting_roots,observation_unix,maximum_depth,maximum_spaces,maximum_portals,maximum_bytes,deadline_ms,plan_token,confirm,workspace,datadir",
+    "", "z23 metaverse space scout run --input='<confirmed-mission-json>'",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_NODE,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_CONFIRM_PLAN_COMMIT,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    zcl_native_handle_metaverse_space_scout_run)
+
+ZCL_COMMAND_READY_READ(
+    "metaverse.space.scout.show", "metaverse.space.scout", "",
+    "Show one signed local scout attestation and its canonical evidence map",
+    "Loads the attestation root, verifies its observer delegation/signature, "
+    "loads and re-derives the linked deterministic map root, and renders every "
+    "visited root, owner, advertised service, portal outcome, typed failure, "
+    "policy denial count and truncation reason. The result explicitly remains "
+    "local evidence, never authority or global truth.",
+    ZCL_COMMAND_LIST_BUDGET,
+    "metaverse,space,scout,show,map,attestation,local-evidence",
+    "zcl.metaverse_space_scout_show.input.v1",
+    "zcl.metaverse_space_scout_show.v1",
+    "root,workspace,datadir", "root",
+    "z23 metaverse space scout show <attestation-root>",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_SCOPE_NODE,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_LATENCY_FAST,
+    ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE,
+    zcl_native_handle_metaverse_space_scout_show)
+
+ZCL_COMMAND_BRANCH("metaverse.build", "metaverse",
+                   "Content-addressed C23 build jobs, actions, and receipts",
+                   ZCL_COMMAND_LAYER_APP)
+
+ZCL_COMMAND_READY_COMMAND(
+    "metaverse.build.plan", "metaverse.build", "",
+    "Persist one immutable preprocessed C23 compile action",
+    "Computes domain-separated build_action.v1 and build_job.v1 identities "
+    "from pre-hashed source, toolchain, flags, environment, and preprocessed "
+    "TU inputs, then atomically records a SNAPSHOTTED "
+    "c23.compile.preprocessed.v1 action. V1 fixes target linux-x86_64-v3, "
+    "virtual root /zbuild/src, output unit.o, no network, and bounded CPU, "
+    "memory, and time. Repeating identical inputs is idempotent; an identity "
+    "collision with different immutable inputs refuses.",
+    0, "metaverse,build,plan,c23,compile,sha3,immutable",
+    "zcl.build_plan.input.v1", "zcl.build_plan.v1",
+    "source_sha256,source_cas_sha3,toolchain_sha3,input_root_sha3,flags_sha3,environment_sha3,profile,datadir",
+    "source_sha256,source_cas_sha3,toolchain_sha3,input_root_sha3,flags_sha3,environment_sha3,profile",
+    "z23 metaverse build plan --input='{\"source_sha256\":\"<64hex>\",\"source_cas_sha3\":\"<64hex>\",\"toolchain_sha3\":\"<64hex>\",\"input_root_sha3\":\"<64hex>\",\"flags_sha3\":\"<64hex>\",\"environment_sha3\":\"<64hex>\",\"profile\":\"dev\"}'",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_NODE,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW, ZCL_COMMAND_CONFIRM_NONE,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    zcl_native_handle_metaverse_build_plan)
+
+ZCL_COMMAND_READY_COMMAND(
+    "metaverse.build.submit", "metaverse.build", "",
+    "Queue every action in one planned build",
+    "Atomically advances a planned build and each nonterminal action to "
+    "QUEUED. It records coordinator intent only; worker loss or timeout is "
+    "resolved by the coordinator as a named LOCAL_FALLBACK, never by this "
+    "command waiting on a peer. Re-submission of an already queued job is "
+    "idempotent.",
+    0, "metaverse,build,submit,queue,idempotent",
+    "zcl.build_submit.input.v1", "zcl.build_job.v1",
+    "job_id,datadir", "job_id",
+    "z23 metaverse build submit <job_id>",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_NODE,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW, ZCL_COMMAND_CONFIRM_NONE,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    zcl_native_handle_metaverse_build_submit)
+
+ZCL_COMMAND_READY_READ(
+    "metaverse.build.status", "metaverse.build", "",
+    "Read one durable build and its ordered actions",
+    "Opens node.db strictly read-only and returns the job lifecycle plus its "
+    "bounded, sequence-ordered immutable actions, named outcomes, worker "
+    "bindings, output roots, and last errors.",
+    ZCL_COMMAND_LIST_BUDGET, "metaverse,build,status,actions,lifecycle",
+    "zcl.build_status.input.v1", "zcl.build_status.v1",
+    "job_id,datadir", "job_id", "z23 metaverse build status <job_id>",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_metaverse_build_status)
+
+ZCL_COMMAND_READY_COMMAND(
+    "metaverse.build.cancel", "metaverse.build", "",
+    "Cancel one non-completed build",
+    "Atomically marks the job and all nonterminal actions CANCELLED. Accepted "
+    "or cache-hit jobs refuse cancellation; repeating cancellation is safe.",
+    0, "metaverse,build,cancel,lifecycle,idempotent",
+    "zcl.build_cancel.input.v1", "zcl.build_job.v1",
+    "job_id,datadir", "job_id", "z23 metaverse build cancel <job_id>",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_NODE,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW, ZCL_COMMAND_CONFIRM_NONE,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    zcl_native_handle_metaverse_build_cancel)
+
+ZCL_COMMAND_READY_READ(
+    "metaverse.build.receipt", "metaverse.build", "",
+    "Read one signed worker build receipt",
+    "Returns the exact persisted build_receipt.v1 evidence: action/job/worker "
+    "binding, output root, achieved confinement facts, exit status, canonical "
+    "receipt id, signature, and creation time. The read is strictly read-only.",
+    ZCL_COMMAND_RESULT_BUDGET, "metaverse,build,receipt,signature,confinement",
+    "zcl.build_receipt.input.v1", "zcl.build_receipt.v1",
+    "receipt_id,datadir", "receipt_id",
+    "z23 metaverse build receipt <receipt_id>",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_TINY,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_metaverse_build_receipt)
+
+ZCL_COMMAND_BRANCH("metaverse.build.worker", "metaverse.build",
+                   "Opt-in compile workers and their approved signing keys",
+                   ZCL_COMMAND_LAYER_APP)
+
+ZCL_COMMAND_READY_READ(
+    "metaverse.build.worker.list", "metaverse.build.worker", "",
+    "List build workers and current trust state",
+    "Returns a bounded read-only view of worker ids, signer keys, declared "
+    "capabilities, approval/revocation, expiry, and last-seen time.",
+    ZCL_COMMAND_LIST_BUDGET, "metaverse,build,worker,list,trust",
+    "zcl.build_worker_list.input.v1", "zcl.build_worker_list.v1",
+    "datadir", "", "z23 metaverse build worker list",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_metaverse_build_worker_list)
+
+ZCL_COMMAND_READY_COMMAND(
+    "metaverse.build.worker.approve", "metaverse.build.worker", "",
+    "Approve one Ed25519 build-receipt signer",
+    "Creates or updates the operator-owned trust row for a worker id and "
+    "Ed25519 public key. Approval never executes worker-supplied commands; V1 "
+    "workers remain confined to the fixed preprocessed-TU compile action.",
+    0, "metaverse,build,worker,approve,ed25519,trust",
+    "zcl.build_worker_approve.input.v1", "zcl.build_worker.v1",
+    "worker_id,signer_pubkey,capabilities,expires_at,datadir",
+    "worker_id,signer_pubkey",
+    "z23 metaverse build worker approve <worker_id> --signer_pubkey=<64hex>",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_NODE,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW, ZCL_COMMAND_CONFIRM_NONE,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    zcl_native_handle_metaverse_build_worker_approve)
+
+ZCL_COMMAND_READY_COMMAND(
+    "metaverse.build.worker.revoke", "metaverse.build.worker", "",
+    "Revoke one build-receipt signer without deleting evidence",
+    "Durably revokes the worker. Existing receipts remain queryable, while "
+    "all later receipt acceptance fails before signature trust. Repeated "
+    "revocation is idempotent.",
+    0, "metaverse,build,worker,revoke,trust,receipt",
+    "zcl.build_worker_revoke.input.v1", "zcl.build_worker.v1",
+    "worker_id,datadir", "worker_id",
+    "z23 metaverse build worker revoke <worker_id>",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_NODE,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW, ZCL_COMMAND_CONFIRM_NONE,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    zcl_native_handle_metaverse_build_worker_revoke)

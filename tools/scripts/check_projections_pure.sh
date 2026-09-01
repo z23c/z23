@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # Lint gate E4 — projections are pure folds over the event log (HARD).
 #
-# A projection (lib/storage/src/*_projection.c) rebuilds a read-optimized
+# A projection (engine/modules/storage/src/*_projection.c) rebuilds a read-optimized
 # view by folding the event/storage log into its OWN table(s). It must NOT
 # reach upward into the app layer or mutate state through the model write
 # path. Concretely, a projection must NOT:
 #
-#   1. #include anything from app/services/ or app/controllers/ — that
+#   1. #include anything from engine/services/ or engine/controllers/ — that
 #      inverts the dependency arrow (storage is the foundation; services
 #      and controllers are upstream consumers) and turns a pure fold into
 #      a side-effecting coordinator.
@@ -33,8 +33,8 @@ source tools/lint/scan_exclusions.sh
 
 # Scan dir is overridable via ZCL_PROJ_SCAN_DIR so the lint-gate self-test can
 # point the gate at an EMPTY dir and prove the non-empty-floor preflight fires
-# (exit 2). Production scans lib/storage/src.
-PROJ_SCAN_DIR="${ZCL_PROJ_SCAN_DIR:-lib/storage/src}"
+# (exit 2). Production scans engine/modules/storage/src.
+PROJ_SCAN_DIR="${ZCL_PROJ_SCAN_DIR:-engine/modules/storage/src}"
 
 fail=0
 violations=()

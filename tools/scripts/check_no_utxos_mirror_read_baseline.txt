@@ -3,19 +3,19 @@
 # One repo-relative path per line. Program H4 shrinks this file to comments-only
 # as it re-points readers at the kernel coins store; a stale row (reader gone)
 # FAILS the gate. Never add a new row.
-app/conditions/src/orphan_utxo_above_tip.c
-app/services/src/consensus_snapshot_export_service.c
-app/services/src/invariant_sentinel.c
-app/services/src/utxo_mirror_sync_service.c
-app/services/src/utxo_recovery_cleanup.c
-app/services/src/utxo_recovery_mirror_walk.c
-app/services/src/utxo_recovery_service.c
-app/services/src/utxo_recovery_stale_cursor.c
-app/services/src/utxo_recovery_torn_anchor.c
-config/src/boot_address_backfill.c
-config/src/boot.c
-config/src/boot_index.c
-config/src/boot_services.c
-config/src/boot_snapshot_import.c
-config/src/consensus_state_install_derived_state.c
-config/src/runtime.c
+engine/conditions/src/orphan_utxo_above_tip.c
+engine/services/src/consensus_snapshot_export_service.c
+engine/services/src/invariant_sentinel.c
+engine/services/src/utxo_mirror_sync_service.c
+engine/services/src/utxo_recovery_cleanup.c
+engine/services/src/utxo_recovery_mirror_walk.c
+engine/services/src/utxo_recovery_service.c
+engine/services/src/utxo_recovery_stale_cursor.c
+engine/services/src/utxo_recovery_torn_anchor.c
+engine/composition/src/boot_address_backfill.c
+engine/composition/src/boot.c
+engine/composition/src/boot_index.c
+engine/composition/src/boot_services.c
+engine/composition/src/boot_snapshot_import.c
+engine/composition/src/consensus_state_install_derived_state.c
+engine/composition/src/runtime.c

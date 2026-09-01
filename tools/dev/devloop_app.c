@@ -211,14 +211,14 @@ size_t zcl_devloop_app_plan_json(const char *repo_root, const char *app_id,
     devbuf_addstr(&b, resource);
     devbuf_addf(&b, ",\"files\":[");
     static const char *const patterns[] = {
-        "app/models/include/models/%s.h",
-        "app/models/src/%s.c",
-        "app/services/include/services/%s_service.h",
-        "app/services/src/%s_service.c",
-        "app/controllers/include/controllers/%s_controller.h",
-        "app/controllers/src/%s_controller.c",
-        "app/views/include/views/%s_view.h",
-        "app/views/src/%s_view.c",
+        "engine/models/include/models/%s.h",
+        "engine/models/src/%s.c",
+        "engine/services/include/services/%s_service.h",
+        "engine/services/src/%s_service.c",
+        "engine/controllers/include/controllers/%s_controller.h",
+        "engine/controllers/src/%s_controller.c",
+        "contexts/explorer/views/include/views/%s_view.h",
+        "contexts/explorer/views/src/%s_view.c",
     };
     for (size_t i = 0; i < sizeof(patterns) / sizeof(patterns[0]); i++) {
         if (i) devbuf_addf(&b, ",");
@@ -228,9 +228,9 @@ size_t zcl_devloop_app_plan_json(const char *repo_root, const char *app_id,
             return 0;
         devbuf_addstr(&b, path);
     }
-    devbuf_addf(&b, ",\"app/models/src/database_migrate_features.c\","
-                    "\"apps/%s/app.def\",\"lib/test/src/test_%s.c\","
-                    "\"app/controllers/include/controllers/agent_impact_rules.def\"],"
+    devbuf_addf(&b, ",\"engine/models/src/database_migrate_features.c\","
+                    "\"apps/%s/app.def\",\"tests/harness/src/test_%s.c\","
+                    "\"cognition/controllers/include/controllers/agent_impact_rules.def\"],"
                     "\"bindings\":[", app_id, app_id);
     comma = false;
     static const struct { uint64_t bit; const char *name; } bindings[] = {

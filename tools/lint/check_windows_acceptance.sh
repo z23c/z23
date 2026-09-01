@@ -5,15 +5,15 @@
 # steps, in this order: RECONCILE the catalog against the tree, then COMPILE.
 #
 # ── WHY THE RECONCILE STEP EXISTS ───────────────────────────────────────────
-# lib/platform/tests/windows_acceptance.mk declares the acceptance programs
+# platform/modules/platform/tests/windows_acceptance.mk declares the acceptance programs
 # that `make windows-acceptance-compile` cross-links with mingw. Until this
 # script existed, NOTHING checked the other direction: that every acceptance
 # program ON DISK is named by the catalog. The catalog could only ever be as
 # complete as the last person to remember to edit it.
 #
 # It was not complete. test_directory_watcher.c and test_watcher_record.c
-# arrived under lib/platform/tests and sat there read by nothing at all — no
-# catalog row, no Makefile rule, not in lib/platform/zcode-package.json — while
+# arrived under platform/modules/platform/tests and sat there read by nothing at all — no
+# catalog row, no Makefile rule, not in platform/modules/platform/zcode-package.json — while
 # `make check-windows-acceptance` printed a clean PASS the whole time. A green
 # gate over an incomplete catalog is the same false green as no gate: a test
 # file existing proves nothing runs it, and a catalog row is the only thing
@@ -82,7 +82,7 @@ list_has() {
     esac
 }
 
-CATALOG_REL="lib/platform/tests/windows_acceptance.mk"
+CATALOG_REL="platform/modules/platform/tests/windows_acceptance.mk"
 REGISTRY_REL="tools/dev/test_group_catalog.def"
 
 # ── EXEMPT ──────────────────────────────────────────────────────────────────
@@ -92,9 +92,9 @@ REGISTRY_REL="tools/dev/test_group_catalog.def"
 # the file is not covered by this gate, so say who does cover it.
 exempt_table() {
     cat <<'EXEMPT_EOF'
-lib/platform/tests/test_platform.c	Not an acceptance program: it is the zclassic23/platform zcode package's own standalone test, shipped in the files list of lib/platform/zcode-package.json. It carries its own AGENT_IMPACT_RULE in app/controllers/include/controllers/agent_impact_rules.def, which names the dev_platform and os_proc groups. Cross-linking it for Windows would say nothing the package pipeline does not already own.
-lib/base/tests/test_base.c	Not an acceptance program: it is the zclassic23/base zcode package's own test binary. The Makefile builds and runs it as $(ZCODE_PACKAGE_BASE_TEST_BIN) and again under ASan as $(ZCODE_PACKAGE_BASE_ASAN_BIN), so it is executed natively on every run of those targets -- stronger evidence than a cross-link.
-lib/base/tests/cleanse_probe.c	Not a program at all: it defines package_base_cleanse_probe() and no main(). It exists as a separate translation unit so memory_cleanse() cannot be optimised away, and it is compiled into both zcode base test binaries above.
+platform/modules/platform/tests/test_platform.c	Not an acceptance program: it is the zclassic23/platform zcode package's own standalone test, shipped in the files list of platform/modules/platform/zcode-package.json. It carries its own AGENT_IMPACT_RULE in cognition/controllers/include/controllers/agent_impact_rules.def, which names the dev_platform and os_proc groups. Cross-linking it for Windows would say nothing the package pipeline does not already own.
+platform/modules/base/tests/test_base.c	Not an acceptance program: it is the zclassic23/base zcode package's own test binary. The Makefile builds and runs it as $(ZCODE_PACKAGE_BASE_TEST_BIN) and again under ASan as $(ZCODE_PACKAGE_BASE_ASAN_BIN), so it is executed natively on every run of those targets -- stronger evidence than a cross-link.
+platform/modules/base/tests/cleanse_probe.c	Not a program at all: it defines package_base_cleanse_probe() and no main(). It exists as a separate translation unit so memory_cleanse() cannot be optimised away, and it is compiled into both zcode base test binaries above.
 EXEMPT_EOF
 }
 
@@ -189,7 +189,7 @@ registry_groups() {
 #       there, and this is the rule that would have caught the two dead
 #       programs: they were named test_*.c, so a *_acceptance.c-only scan
 #       would have walked right past them, which is the whole defect.
-#   any other directory (lib/test/src) -> *_acceptance.c only. That directory
+#   any other directory (tests/harness/src) -> *_acceptance.c only. That directory
 #       holds the entire native suite; every other file in it is a registered
 #       group and has nothing to do with this catalog.
 scan_dir_files() {
@@ -342,7 +342,7 @@ reconcile_root() {
         echo ""
         echo "  A test file existing proves nothing runs it. Pick one:"
         echo "    - add a catalog row so mingw cross-links it, or"
-        echo "    - rehome it into lib/test/src as a registered group so the suite"
+        echo "    - rehome it into tests/harness/src as a registered group so the suite"
         echo "      EXECUTES it (strictly better, when the program has a POSIX arm), or"
         echo "    - exempt it here and say why."
         return 1
@@ -391,7 +391,7 @@ make_fixture() {
     while read -r p; do
         [ -n "$p" ] || continue
         case "$p" in
-            lib/test/src/*_acceptance.c|*/tests/*.c) ;;
+            tests/harness/src/*_acceptance.c|*/tests/*.c) ;;
             *) continue ;;
         esac
         mkdir -p "$d/$(dirname "$p")"
@@ -451,7 +451,7 @@ run_selftest() {
     # 2. THE defect: an undeclared program in a catalog directory goes red and
     #    is named. Note the name — test_*.c, not *_acceptance.c — because that
     #    is the shape the two real dead programs had.
-    planted="lib/platform/tests/test_planted_undeclared.c"
+    planted="platform/modules/platform/tests/test_planted_undeclared.c"
     printf 'int main(void) { return 0; }\n' > "$d/$planted"
     expect_red "2. a planted UNDECLARED program is caught and named" "$planted" "$d" || rc=1
 
@@ -466,18 +466,18 @@ run_selftest() {
     expect_green "4. the same file passes once it defines a registered group entry" "$d" || rc=1
     rm -f "$d/$planted"
 
-    # 5. A program in lib/test/src named *_acceptance.c and declared nowhere is
+    # 5. A program in tests/harness/src named *_acceptance.c and declared nowhere is
     #    caught too — the second scanned directory, with its narrower glob.
-    planted="lib/test/src/planted_undeclared_acceptance.c"
+    planted="tests/harness/src/planted_undeclared_acceptance.c"
     printf 'int main(void) { return 0; }\n' > "$d/$planted"
-    expect_red "5. an undeclared *_acceptance.c under lib/test/src is caught" "$planted" "$d" || rc=1
+    expect_red "5. an undeclared *_acceptance.c under tests/harness/src is caught" "$planted" "$d" || rc=1
     rm -f "$d/$planted"
 
     # 6. An EMPTY scan set must be a HARD FAIL, never a clean pass. This is the
     #    direction that matters most: a broken glob reading as "nothing to
     #    check" is exactly how the real defect survived.
     d="$FIXTURE_ROOT/empty"; mkdir -p "$d"; make_fixture "$d"
-    find "$d/lib" -name '*.c' -type f -delete
+    find "$d" -type f \( -path '*/tests/*.c' -o -path '*/tests/harness/src/*_acceptance.c' \) -delete
     expect_red "6. an empty scan set fails closed" "scan set came back EMPTY" "$d" || rc=1
 
     # 7. A catalog this gate cannot parse must also fail closed, rather than

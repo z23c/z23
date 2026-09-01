@@ -2,10 +2,10 @@
 # do not yet register a supervisor liveness contract.
 #
 # Each entry is a long-running service (originally scoped to
-# app/services/src/, widened 2026-07-21 to app/controllers/src,
-# app/conditions/src, app/jobs/src, config/src, and the audited lib/net,
-# lib/health, lib/rpc production daemons — see check_supervisor_registration.sh)
-# that spawns threads or subscribes to lib/health periodic callbacks but
+# engine/services/src/, widened 2026-07-21 to engine/controllers/src,
+# engine/conditions/src, engine/jobs/src, engine/composition/src, and the audited core/modules/net,
+# engine/modules/health, engine/modules/rpc production daemons — see check_supervisor_registration.sh)
+# that spawns threads or subscribes to engine/modules/health periodic callbacks but
 # was not migrated to supervisor_register() in Round 5. Future rounds
 # will pick these off one by one; the gate fails on any NEW long-
 # running file that isn't in this list and isn't supervised.
@@ -34,39 +34,39 @@
 # bounded: one-shot snapshot block-index/UTXO/wallet import workers
 # (zcl_snap_idx/zcl_snap_utxo/zcl_snap_wallet — already in
 # tools/lint/thread_supervision_baseline.txt Gate #23)
-app/controllers/src/snapshot_controller_import.c
+engine/controllers/src/snapshot_controller_import.c
 # bounded: one-shot snapshot tx-index import worker (zcl_snap_txidx —
 # Gate #23 baseline)
-app/controllers/src/snapshot_controller_txindex.c
+engine/controllers/src/snapshot_controller_txindex.c
 # bounded: one-shot catch-up sync + legacy-db import jobs
 # (zcl_catchup/zcl_db_import — Gate #23 baseline)
-app/controllers/src/sync_controller_catchup_jobs.c
+engine/controllers/src/sync_controller_catchup_jobs.c
 # bounded: parallel-fold worker pool, joined at range-fold end (dynamic
 # per-worker thread names)
-app/jobs/src/psc_range_fold.c
+engine/jobs/src/psc_range_fold.c
 # bounded: header-validation worker pool, joined at pool shutdown (dynamic
 # per-worker thread names)
-app/jobs/src/validate_headers_pool.c
+engine/jobs/src/validate_headers_pool.c
 # bounded: PoW-validation worker pool, joined at pool shutdown (dynamic
 # per-worker thread names)
-app/jobs/src/validate_work_pool.c
+engine/jobs/src/validate_work_pool.c
 # bounded: one-shot boot-time block-file scan worker, joined (zcl_blk_scan
 # — Gate #23 baseline)
-config/src/boot_block_file_scan.c
+engine/composition/src/boot_block_file_scan.c
 # bounded: one-shot boot-time fast-restart quick check, joined
 # (bg_quick_check — Gate #23 baseline)
-config/src/boot_fast_restart.c
+engine/composition/src/boot_fast_restart.c
 # observer: systemd WATCHDOG=1 heartbeat pinger; reads (does not drive) the
 # root supervisor's own sweep heartbeat as its liveness gate — see its
 # file-header "Pillar 7" note; a wedge here stops the ping and lets
 # systemd's WatchdogSec timer restart the unit, an independent recovery path
-config/src/boot_sd_watchdog.c
+engine/composition/src/boot_sd_watchdog.c
 # bounded: one-shot ROM parallel-fetch + verify worker pools
 # (zcl_romfetch/zcl_romver), joined at job end
-lib/net/src/rom_fetch.c
+core/modules/net/src/rom_fetch.c
 #
 # ── 2026-07-24 (wf/supervision) two entries RETIRED, not exempted ────────
-# lib/health/src/heartbeat.c and lib/rpc/src/rpc_timeout.c are gone from
+# engine/modules/health/src/heartbeat.c and engine/modules/rpc/src/rpc_timeout.c are gone from
 # this list because they are genuinely supervised, not because the bar
 # moved: both register through thread_liveness_register_restartable(),
 # which calls thread_liveness_register() and lands the child on the root

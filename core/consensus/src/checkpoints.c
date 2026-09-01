@@ -4,7 +4,7 @@
  *
  * Pure checkpoint matching. Replays from inputs alone — no clock,
  * no RNG, no I/O, no state reads. Extracted from
- * lib/chain/src/checkpoints.c. The single clock read in the legacy
+ * core/modules/chain/src/checkpoints.c. The single clock read in the legacy
  * `guess_verification_progress` was lifted to a parameter
  * (`now_unix_sec`); the lib/ wrapper holds the `platform_time_wall_time_t()`
  * call and forwards.

@@ -8,7 +8,7 @@
 `-refold-staged` resets the 8 staged cursors + coins_kv to genesis, but does
 NOT reset `pindex_best_header` — it stays pinned at the imported old tip
 because `header_admit` advances it forward-only
-(`app/jobs/src/header_admit_stage.c:420-429`). So every staged step extends the
+(`engine/jobs/src/header_admit_stage.c:420-429`). So every staged step extends the
 active-chain window to a target far above the fold frontier.
 
 ## Ranked bottlenecks (dominant first)
@@ -16,28 +16,28 @@ active-chain window to a target far above the fold frontier.
 ### #1 — per-block full-height `pprev` walk (CPU/cache-bound)
 `tip_finalize` no longer retracts the active-chain coverage window during a
 refold — `active_chain_move_window_tip` is gated on `!refold_in_progress()`
-(`app/jobs/src/tip_finalize_stage.c:586`), so the first window-fill pass is
+(`engine/jobs/src/tip_finalize_stage.c:586`), so the first window-fill pass is
 the only full walk and every later extend is an O(1) no-op. (An earlier
 attempt to route this through `active_chain_extend_window_have_data` was
 rejected — that primitive had an unbounded scan and a heap-overflow defect on
 forked chains; do not resurrect it.)
 
 ### #2 — scheduler ceiling: 1 thread, 2s period, batch 100 → ~50 blk/s
-All 8 stages run on ONE supervisor thread (`lib/util/src/supervisor.c:323-340`);
+All 8 stages run on ONE supervisor thread (`platform/modules/util/src/supervisor.c:323-340`);
 each `on_tick` fires only when `now-last_tick >= period_secs(=2)*1e6`
-(`app/supervisors/src/staged_sync_supervisor.c:249`), draining a batch (tail
+(`engine/supervisors/src/staged_sync_supervisor.c:249`), draining a batch (tail
 stages capped 100). Sequential gating (`utxo_apply` idle when `next_h >=
 proof_validate`, `utxo_apply_stage.c:302`) makes the slowest tail stage the rate.
 Once #1 lands, 100/2s = 50 blk/s is the next ceiling → still ~17h to checkpoint.
 
 FIX (#2): during refold, lower the tail-stage period to sub-second and/or raise
-the tail batch (100→~2000). Compile-time consts in `app/jobs/include/jobs/*_stage.h`
+the tail batch (100→~2000). Compile-time consts in `engine/jobs/include/jobs/*_stage.h`
 today; thread a refold-gated override. Needs batched commits (io-speedups) so a
 big batch is one fsync, not 2000.
 
 ### #3 — utxo_mirror_sync full wipe+reinsert every 5s (O(n), goes quadratic)
 `utxo_mirror_sync_run_once` early-returns during a refold
-(`app/services/src/utxo_mirror_sync_service.c:446`) instead of doing a full
+(`engine/services/src/utxo_mirror_sync_service.c:446`) instead of doing a full
 `DELETE FROM utxos` + per-row reinsert on every 5s tick; the mirror rebuilds
 once, after the fold completes.
 
@@ -56,9 +56,9 @@ incrementally instead.
 
 ## io-speedups reorg bug — fixed, watch for regression
 The batch-aware cursor writers (`cursor_txn_begin/commit/rollback`,
-`STAGE_CURSOR_SP` savepoint in `lib/sync/src/stage.c`) are guarded by focused
+`STAGE_CURSOR_SP` savepoint in `core/modules/sync/src/stage.c`) are guarded by focused
 regression coverage in `test_stage.c` (group `stage`, "batch-cursor" checks).
-`stage_set_cursor` (`lib/sync/src/stage.c:510`) and
+`stage_set_cursor` (`core/modules/sync/src/stage.c:510`) and
 `stage_set_named_cursor_if_behind` (`:551`) do an unconditional `BEGIN IMMEDIATE`.
 Inside an open batch (the reorg-rewind path `tip_finalize_stage.c:286` calls
 set_cursor) SQLite rejects the nested BEGIN → "cannot start a transaction within

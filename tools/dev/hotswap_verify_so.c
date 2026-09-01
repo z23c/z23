@@ -8,14 +8,14 @@
  * (test_hotswap_module.c, test_hotswap_module_v2.c) drove
  * hotswap_module_admit() with a struct FABRICATED in the test's own
  * translation unit. That proves the gauntlet's logic and nothing about any
- * real artifact: a row in config/hotswap_swappable.def whose TU never emits
+ * real artifact: a row in engine/composition/hotswap_swappable.def whose TU never emits
  * the `zcl_hotswap_module` symbol at all, or whose leaf body lives in a TU
  * outside its island, passed every gate in the repo and would have failed the
  * first time a human tried it. (That was the exact state of
- * app/controllers/src/diagnostics_native_handlers.c.) An entry in an allowlist
+ * engine/controllers/src/diagnostics_native_handlers.c.) An entry in an allowlist
  * that has never been loaded is a claim, not an admission.
  *
- * All dlopen/dlsym/dlclose lives in lib/hotswap behind #ifdef ZCL_DEV_BUILD —
+ * All dlopen/dlsym/dlclose lives in engine/modules/hotswap behind #ifdef ZCL_DEV_BUILD —
  * the invariant tools/lint/check_hotswap_dev_only.sh enforces, so a release
  * build links zero dynamic-loading code. This file deliberately contains none.
  *
@@ -41,7 +41,7 @@
  * A packaging receipt must record the digest of the file that will actually
  * ship, so that digest has to be readable without loading anything. This mode
  * is exactly that: open, hash the descriptor, print. It is the in-tree
- * FIPS-202 implementation (lib/sha3) reached through the fd-pinned primitive,
+ * FIPS-202 implementation (platform/modules/sha3) reached through the fd-pinned primitive,
  * so no host `sha3sum`/`openssl` needs to exist for a module to be packaged.
  *
  * It proves integrity of bytes, never that they are safe to load — see

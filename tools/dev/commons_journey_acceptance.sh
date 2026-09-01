@@ -58,7 +58,7 @@ CJ_SIGNER="${ZCL_PACKAGE_SIGN_BIN:-$REPO_ROOT/build/bin/zclassic23-package-sign}
 
 # Three nodes, all on the production reachable-port policy's test-safe ports.
 # Both P2P ports must be in the production reachable-port allowlist
-# (lib/net/include/net/port_policy.h). The initial operator-directed dial
+# (core/modules/net/include/net/port_policy.h). The initial operator-directed dial
 # bypasses that policy, but the controlled Noise reconnect does not, so an
 # arbitrary high port connects once and then silently drops to zero peers.
 A_PORT=20028; A_RPC=29281; A_FS=29282; A_HTTPS=29283
@@ -458,48 +458,48 @@ cj_identities() {
 cj_build_peer_helper() {
     cc -std=c23 -O1 -w -D_GNU_SOURCE -ffunction-sections -fdata-sections \
         -Wl,--gc-sections \
-        -I"$REPO_ROOT/lib/base/include" -I"$REPO_ROOT/lib/sha3/include" \
-        -I"$REPO_ROOT/lib/crypto/include" -I"$REPO_ROOT/lib/support/include" \
-        -I"$REPO_ROOT/lib/util/include" -I"$REPO_ROOT/lib/platform/include" \
-        -I"$REPO_ROOT/lib/json/include" -I"$REPO_ROOT/lib/core/include" \
-        -I"$REPO_ROOT/lib/net/include" -I"$REPO_ROOT/lib/noise/include" \
-        -I"$REPO_ROOT/lib/vcs/include" -I"$REPO_ROOT/lib/zid/include" \
+        -I"$REPO_ROOT/platform/modules/base/include" -I"$REPO_ROOT/platform/modules/sha3/include" \
+        -I"$REPO_ROOT/core/modules/crypto/include" -I"$REPO_ROOT/platform/modules/support/include" \
+        -I"$REPO_ROOT/platform/modules/util/include" -I"$REPO_ROOT/platform/modules/platform/include" \
+        -I"$REPO_ROOT/platform/modules/json/include" -I"$REPO_ROOT/core/modules/core/include" \
+        -I"$REPO_ROOT/core/modules/net/include" -I"$REPO_ROOT/core/modules/noise/include" \
+        -I"$REPO_ROOT/contexts/commons/modules/vcs/include" -I"$REPO_ROOT/contexts/wallet/modules/zid/include" \
         -I"$REPO_ROOT/core/math/include" -o "$DHT_WORK/journey-peer" \
         "$REPO_ROOT/tools/zcode_dht_acceptance_peer.c" \
-        "$REPO_ROOT/lib/net/src/noise_transport.c" \
-        "$REPO_ROOT/lib/noise/src/noise_handshake.c" \
-        "$REPO_ROOT/lib/noise/src/session_transport.c" \
-        "$REPO_ROOT/lib/vcs/src/zcode_dht.c" \
-        "$REPO_ROOT/lib/vcs/src/zcode_dht_delegation.c" \
-        "$REPO_ROOT/lib/vcs/src/zcode_dht_identity.c" \
-        "$REPO_ROOT/lib/vcs/src/zcode_dht_msgs.c" \
-        "$REPO_ROOT/lib/zid/src/zid.c" "$REPO_ROOT/lib/zid/src/zendp.c" \
-        "$REPO_ROOT/lib/crypto/src/ed25519.c" \
-        "$REPO_ROOT/lib/crypto/src/sha512.c" \
-        "$REPO_ROOT/lib/crypto/src/sha256.c" \
-        "$REPO_ROOT/lib/sha3/src/sha3.c" \
-        "$REPO_ROOT/lib/crypto/src/hmac_sha256.c" \
-        "$REPO_ROOT/lib/crypto/src/hkdf_sha256.c" \
-        "$REPO_ROOT/lib/crypto/src/chacha20poly1305.c" \
-        "$REPO_ROOT/lib/support/src/log_throttle.c" \
-        "$REPO_ROOT/lib/crypto/src/curve25519.c" \
-        "$REPO_ROOT/lib/crypto/src/x25519_safe.c" \
-        "$REPO_ROOT/lib/crypto/src/random_secret.c" \
+        "$REPO_ROOT/core/modules/net/src/noise_transport.c" \
+        "$REPO_ROOT/core/modules/noise/src/noise_handshake.c" \
+        "$REPO_ROOT/core/modules/noise/src/session_transport.c" \
+        "$REPO_ROOT/contexts/commons/modules/vcs/src/zcode_dht.c" \
+        "$REPO_ROOT/contexts/commons/modules/vcs/src/zcode_dht_delegation.c" \
+        "$REPO_ROOT/contexts/commons/modules/vcs/src/zcode_dht_identity.c" \
+        "$REPO_ROOT/contexts/commons/modules/vcs/src/zcode_dht_msgs.c" \
+        "$REPO_ROOT/contexts/wallet/modules/zid/src/zid.c" "$REPO_ROOT/contexts/wallet/modules/zid/src/zendp.c" \
+        "$REPO_ROOT/core/modules/crypto/src/ed25519.c" \
+        "$REPO_ROOT/core/modules/crypto/src/sha512.c" \
+        "$REPO_ROOT/core/modules/crypto/src/sha256.c" \
+        "$REPO_ROOT/platform/modules/sha3/src/sha3.c" \
+        "$REPO_ROOT/core/modules/crypto/src/hmac_sha256.c" \
+        "$REPO_ROOT/core/modules/crypto/src/hkdf_sha256.c" \
+        "$REPO_ROOT/core/modules/crypto/src/chacha20poly1305.c" \
+        "$REPO_ROOT/platform/modules/support/src/log_throttle.c" \
+        "$REPO_ROOT/core/modules/crypto/src/curve25519.c" \
+        "$REPO_ROOT/core/modules/crypto/src/x25519_safe.c" \
+        "$REPO_ROOT/core/modules/crypto/src/random_secret.c" \
         "$REPO_ROOT/core/math/src/hash.c" \
-        "$REPO_ROOT/lib/core/src/utiltime.c" \
-        "$REPO_ROOT/lib/core/src/random.c" \
-        "$REPO_ROOT/lib/base/src/safe_alloc.c" \
-        "$REPO_ROOT/lib/base/src/log_level.c" \
-        "$REPO_ROOT/lib/base/src/result.c" \
-        "$REPO_ROOT/lib/base/src/cleanse.c" \
-        "$REPO_ROOT/lib/platform/src/clock.c" \
-        "$REPO_ROOT/lib/platform/src/rng.c" \
-        "$REPO_ROOT/lib/platform/src/positioned_file.c" \
-        "$REPO_ROOT/lib/platform/src/private_directory.c" \
-        "$REPO_ROOT/lib/util/src/write_all.c" \
-        "$REPO_ROOT/lib/json/src/json.c" \
-        "$REPO_ROOT/lib/util/src/hw_profile.c" \
-        "$REPO_ROOT/lib/util/src/cpu_topology.c" ||
+        "$REPO_ROOT/core/modules/core/src/utiltime.c" \
+        "$REPO_ROOT/core/modules/core/src/random.c" \
+        "$REPO_ROOT/platform/modules/base/src/safe_alloc.c" \
+        "$REPO_ROOT/platform/modules/base/src/log_level.c" \
+        "$REPO_ROOT/platform/modules/base/src/result.c" \
+        "$REPO_ROOT/platform/modules/base/src/cleanse.c" \
+        "$REPO_ROOT/platform/modules/platform/src/clock.c" \
+        "$REPO_ROOT/platform/modules/platform/src/rng.c" \
+        "$REPO_ROOT/platform/modules/platform/src/positioned_file.c" \
+        "$REPO_ROOT/platform/modules/platform/src/private_directory.c" \
+        "$REPO_ROOT/platform/modules/util/src/write_all.c" \
+        "$REPO_ROOT/platform/modules/json/src/json.c" \
+        "$REPO_ROOT/platform/modules/util/src/hw_profile.c" \
+        "$REPO_ROOT/platform/modules/util/src/cpu_topology.c" ||
         cj_die "node identity helper compile failed"
 }
 
@@ -1631,7 +1631,7 @@ cj_fetch_fastobj_carrier() {
 # already works, change one thing about how it behaves, keep that exact
 # version, and have another machine run it.
 #
-# The subject is the repository's own packages/zdogfight — a deterministic,
+# The subject is the repository's own contexts/commons/packages/zdogfight — a deterministic,
 # integer-only dogfight match core — and the change is the smallest visible
 # one there is: the aircraft turns faster. Nothing here is a second demo. It
 # is the SAME nodes, the SAME overlay and the SAME lifecycle leaves the nine
@@ -1689,7 +1689,7 @@ PROBE
 # the published file list is exactly what this lap claims it is. The zprng
 # dependency keeps the root the repository package already declares: a package
 # root is derived from content, so the root published here is the same 64 hex
-# characters packages/zdogfight names on disk.
+# characters contexts/commons/packages/zdogfight names on disk.
 cj_zdog_write_manifest() {
     cat >"$1/zcode-package.json" <<JSON
 {
@@ -1794,7 +1794,7 @@ cj_zdog_turn_rate() {
 # measurement, the change, the decision, the reproduction — is step 10 below.
 cj_journey_turn_faster_stage() {
     cj_step "staging step 10: the commons receives two real packages, unchanged"
-    # These are the repository's own packages/zprng and packages/zdogfight,
+    # These are the repository's own contexts/commons/packages/zprng and contexts/commons/packages/zdogfight,
     # not fixtures. zdogfight names zprng by root, and a package root is
     # derived from content, so the root the node computes here is the same one
     # the manifest on disk already declares — which is the whole point of
@@ -1802,8 +1802,8 @@ cj_journey_turn_faster_stage() {
     CJ_ZPRNG_SRC="$DHT_WORK/zprng"
     CJ_ZDOG_SRC="$DHT_WORK/zdogfight"
     rm -rf "$CJ_ZPRNG_SRC" "$CJ_ZDOG_SRC"
-    cp -a "$REPO_ROOT/packages/zprng" "$CJ_ZPRNG_SRC"
-    cp -a "$REPO_ROOT/packages/zdogfight" "$CJ_ZDOG_SRC"
+    cp -a "$REPO_ROOT/contexts/commons/packages/zprng" "$CJ_ZPRNG_SRC"
+    cp -a "$REPO_ROOT/contexts/commons/packages/zdogfight" "$CJ_ZDOG_SRC"
 
     CJ_ZPRNG_PUBLISHER="$("$CJ_SIGNER" --generate "$DHT_WORK/zprng-publisher.key")"
     CJ_ZDOG_PUBLISHER_PKG="$("$CJ_SIGNER" --generate "$DHT_WORK/zdog-publisher.key")"
@@ -1815,8 +1815,8 @@ cj_journey_turn_faster_stage() {
     CJ_ZPRNG_ROOT="$CJ_PKG_ROOT"
     CJ_ZPRNG_TRANSPORT="$CJ_PKG_TRANSPORT"
     [ "$CJ_ZPRNG_ROOT" = \
-      "$(cj_jget dependencies.0.root '' <"$REPO_ROOT/packages/zdogfight/zcode-package.json")" ] ||
-        cj_die "the published zprng root does not match the one packages/zdogfight names on disk: $CJ_ZPRNG_ROOT"
+      "$(cj_jget dependencies.0.root '' <"$REPO_ROOT/contexts/commons/packages/zdogfight/zcode-package.json")" ] ||
+        cj_die "the published zprng root does not match the one contexts/commons/packages/zdogfight names on disk: $CJ_ZPRNG_ROOT"
 
     cj_zdog_write_probe "$CJ_ZDOG_SRC"
     cj_zdog_write_manifest "$CJ_ZDOG_SRC"

@@ -3,7 +3,7 @@
 # NEON_CRYPTO_MATRIX — crypto acceleration across x86-64 and arm64
 
 Status: work-document. Owner: the arm64/NEON crypto lane. It records, for
-every crypto family in `lib/crypto/src/` and `lib/sapling/src/`, what the x86
+every crypto family in `core/modules/crypto/src/` and `core/modules/sapling/src/`, what the x86
 tier is, what the arm64 tier is, how each tier is gated, which test group
 proves bit-identity, and which bench times it — with the honest "no clean NEON
 equivalent" markers where the ISA does not offer one.
@@ -21,7 +21,7 @@ A tier is not "some intrinsics in a file". It ships only with all of:
    binary built on a capable host runs on incapable hosts. The three gate
    shapes in use:
    - **CPU probe** — the audited CPUID/OSXSAVE/XCR0 predicate in
-     `lib/crypto/include/crypto/simd_dispatch.h` (`simd_cpu_words_probe`,
+     `core/modules/crypto/include/crypto/simd_dispatch.h` (`simd_cpu_words_probe`,
      `simd_avx2_usable`, `simd_avx512f_usable`, `simd_avx512_dq_vl_usable`,
      `simd_avx512_ifma_usable`). x86 only, and only for instruction sets with
      XSAVE state the OS can refuse to save (that is what
@@ -33,7 +33,7 @@ A tier is not "some intrinsics in a file". It ships only with all of:
      against the portable implementation, and stay scalar for the life of the
      process on a single divergent byte. Used where the instruction set needs
      no OS permission (SHA-NI's self-test, crc32c's self-test, and the NEON
-     gate in `lib/crypto/src/blake2b_avx2.c`).
+     gate in `core/modules/crypto/src/blake2b_avx2.c`).
    - **Portable-only** — no second tier, so nothing to gate. The gate is then
      the functional KAT vectors that already pin the primitive.
 2. **A differential oracle group** — an in-suite test that drives the same
@@ -64,23 +64,23 @@ with the command in the cell rather than trusting the prose.
 
 | Family (files) | x86-64 tier | x86 gate | arm64 tier | arm64 gate | Bit-identity proof | Bench |
 |---|---|---|---|---|---|---|
-| BLAKE2b, Equihash batch — `lib/crypto/src/blake2b_avx2.c` | AVX-512F 8-way + AVX2 4-way (`target("avx512f")`, `target("avx2")`) | `simd_cpu_words_probe` + `simd_avx2_usable` / `simd_avx512f_usable`, two-layer cap/use atomics | **NEON 4-way** (this lane) | **one-time KAT** — `blake2b_neon_kat()` drives four Equihash-shaped fixed vectors through the NEON compress and the portable sequential path; any divergent bit → scalar for the life of the process | `test_blake2b_batch_parity` (all tiers vs the sequential reference, both batch entry points, contiguous + strided + repeated indices, plus teeth) | `make bench-simd` — the Equihash BLAKE2b row; `CRYPTOPERF equihash-200-9` |
-| BLAKE2b scalar — `lib/crypto/src/blake2b.c` | portable (the frozen reference) | n/a — single tier | identical portable file | n/a | the RFC 7693 vectors inside `test_crypto`; every batch-oracle leg above pins the vector tiers *to this file* | `CRYPTOPERF blake2b`; `tools/crypto_perf_baseline.csv` row `blake2b` |
-| SHA-256 — `lib/crypto/src/sha256.c` | SHA-NI, `target("sha,sse4.1")` | CPUID leaf 7 EBX[29] **plus a KAT self-test** (`detect_sha_ni`) | FEAT_SHA256 (`vsha256hq`/`vsha256su*`) | macOS `hw.optional.arm.FEAT_SHA256` plus a one-time transform KAT; any mismatch stays portable | `test_sha256_isa_parity`, plus `test_arm_hw_tiers` for OS-advertised reachability | `make bench-simd` — the SHA-256 row; `CRYPTOPERF sha256`; CSV row `sha256` |
-| SHA-3 / Keccak x4 — `lib/crypto/src/keccak_x4.c`, `keccak_x4_internal.h`, `sha3_avx512.c`, `sha3_256_x4.c` | AVX-512F+VL+DQ (`target("avx512f,avx512vl,avx512dq")`): `vprolq` rotations + `vpternlogd` theta/chi | `keccak_x4_available()` → `simd_host_has_avx512_dq_vl()`, plus per-call-site default-enable macros and `sha3_*_x4_select_impl` force hooks | verified NEON x4 lane, explicitly selectable; **AUTO is scalar on arm64** because the Apple-Silicon oracle measures NEON at about 0.55x scalar | macOS `hw.optional.arm.FEAT_SHA3`; forced-vector parity against the scalar reference before promotion | `test_sha3_256_x4`, `test_sha3_512_x4` assert parity and that AUTO refuses the slower arm64 tier | the two oracle groups print scalar-vs-NEON throughput; scalar remains the shipped arm64 winner |
-| CRC32C — `lib/util/src/crc32c.c` (not under `lib/crypto`, listed because it carries a hardware tier) | SSE4.2 `_mm_crc32_u64`, `target("sse4.2")` | `__builtin_cpu_supports("sse4.2")` under `pthread_once`, **plus a KAT** comparing `crc32c_hw` against the software table across a spread of lengths | FEAT_CRC32 (`crc32cx`) | macOS `hw.optional.arm.FEAT_CRC32` plus the same one-time hardware-vs-table KAT | `test_arm_hw_tiers` proves OS-advertised reachability and parity; `test_event_log` proves storage framing through active/software paths | inline in `test_event_log`; implementation is reported by `zcl_crc32c_impl_name()` |
-| BN254 Fq Montgomery — `lib/sapling/src/bn254.c`, `bn254_accel.c`, `mont_adx.h` | BMI2+ADX inline asm (`MULX`+`ADCX`+`ADOX`), `target("bmi2,adx")` — the asm exists because the `_addcarry*` intrinsics collapse the two carry chains | CPUID leaf 7 EBX[8]/EBX[19], dispatch through `g_bn_fq_mont_mul` | **portable `unsigned __int128` CIOS** — see §3; **no clean NEON equivalent** (marker below) | none needed — portable is the fallback tier and the dispatch table just points at it | `test_bn254_accel`, plus `test_mont_adx_honest` (checks the implementation string against what is actually compiled) | `make bench-simd` — the BN254 Fq latency/throughput rows |
-| BLS12-381 Fr / Fp Montgomery — `lib/sapling/src/fr.c`, `fr_avx512.c`, `mont_adx.h` | same BMI2+ADX tier; AVX-512 IFMA is *probed* (`simd_avx512_ifma_usable`) but deliberately unimplemented — the reporter string says so | CPUID leaf 7 EBX[8]/EBX[19] + IFMA probe, dispatch through `g_fr_mont_mul` / `g_fp_mont_mul` | portable `__int128` CIOS; **no clean NEON equivalent** (§3) | none needed | `test_fr_mont_parity`, `test_fr_accel`, `test_mont_adx_honest` | `make bench-simd` — the Fr and Fp latency/throughput rows; `CRYPTOPERF bls12-381-fp-mul` |
-| Equihash verifier — `lib/crypto/src/equihash.c` | inherits the BLAKE2b batch tiers; no intrinsics of its own | inherits | inherits the NEON 4-way tier through the same two call sites | inherits the NEON KAT | `test_blake2b_batch_parity` is the oracle for the hashing; consensus-side pins in `test_equihash_blake2b_state_seal`, `test_domain_consensus_equihash` | the `simd_bench` Equihash row *is* the verifier's hash-generation cost |
-| Equihash solver — `lib/crypto/src/equihash_solver.c` | portable C23 (bucket-based Wagner, fixed parameters) | n/a — single tier | identical | n/a | the equihash groups above | none — the solver has no bench primitive today |
+| BLAKE2b, Equihash batch — `core/modules/crypto/src/blake2b_avx2.c` | AVX-512F 8-way + AVX2 4-way (`target("avx512f")`, `target("avx2")`) | `simd_cpu_words_probe` + `simd_avx2_usable` / `simd_avx512f_usable`, two-layer cap/use atomics | **NEON 4-way** (this lane) | **one-time KAT** — `blake2b_neon_kat()` drives four Equihash-shaped fixed vectors through the NEON compress and the portable sequential path; any divergent bit → scalar for the life of the process | `test_blake2b_batch_parity` (all tiers vs the sequential reference, both batch entry points, contiguous + strided + repeated indices, plus teeth) | `make bench-simd` — the Equihash BLAKE2b row; `CRYPTOPERF equihash-200-9` |
+| BLAKE2b scalar — `core/modules/crypto/src/blake2b.c` | portable (the frozen reference) | n/a — single tier | identical portable file | n/a | the RFC 7693 vectors inside `test_crypto`; every batch-oracle leg above pins the vector tiers *to this file* | `CRYPTOPERF blake2b`; `tools/crypto_perf_baseline.csv` row `blake2b` |
+| SHA-256 — `core/modules/crypto/src/sha256.c` | SHA-NI, `target("sha,sse4.1")` | CPUID leaf 7 EBX[29] **plus a KAT self-test** (`detect_sha_ni`) | FEAT_SHA256 (`vsha256hq`/`vsha256su*`) | macOS `hw.optional.arm.FEAT_SHA256` plus a one-time transform KAT; any mismatch stays portable | `test_sha256_isa_parity`, plus `test_arm_hw_tiers` for OS-advertised reachability | `make bench-simd` — the SHA-256 row; `CRYPTOPERF sha256`; CSV row `sha256` |
+| SHA-3 / Keccak x4 — `core/modules/crypto/src/keccak_x4.c`, `keccak_x4_internal.h`, `sha3_avx512.c`, `sha3_256_x4.c` | AVX-512F+VL+DQ (`target("avx512f,avx512vl,avx512dq")`): `vprolq` rotations + `vpternlogd` theta/chi | `keccak_x4_available()` → `simd_host_has_avx512_dq_vl()`, plus per-call-site default-enable macros and `sha3_*_x4_select_impl` force hooks | verified NEON x4 lane, explicitly selectable; **AUTO is scalar on arm64** because the Apple-Silicon oracle measures NEON at about 0.55x scalar | macOS `hw.optional.arm.FEAT_SHA3`; forced-vector parity against the scalar reference before promotion | `test_sha3_256_x4`, `test_sha3_512_x4` assert parity and that AUTO refuses the slower arm64 tier | the two oracle groups print scalar-vs-NEON throughput; scalar remains the shipped arm64 winner |
+| CRC32C — `platform/modules/util/src/crc32c.c` (not under `core/modules/crypto`, listed because it carries a hardware tier) | SSE4.2 `_mm_crc32_u64`, `target("sse4.2")` | `__builtin_cpu_supports("sse4.2")` under `pthread_once`, **plus a KAT** comparing `crc32c_hw` against the software table across a spread of lengths | FEAT_CRC32 (`crc32cx`) | macOS `hw.optional.arm.FEAT_CRC32` plus the same one-time hardware-vs-table KAT | `test_arm_hw_tiers` proves OS-advertised reachability and parity; `test_event_log` proves storage framing through active/software paths | inline in `test_event_log`; implementation is reported by `zcl_crc32c_impl_name()` |
+| BN254 Fq Montgomery — `core/modules/sapling/src/bn254.c`, `bn254_accel.c`, `mont_adx.h` | BMI2+ADX inline asm (`MULX`+`ADCX`+`ADOX`), `target("bmi2,adx")` — the asm exists because the `_addcarry*` intrinsics collapse the two carry chains | CPUID leaf 7 EBX[8]/EBX[19], dispatch through `g_bn_fq_mont_mul` | **portable `unsigned __int128` CIOS** — see §3; **no clean NEON equivalent** (marker below) | none needed — portable is the fallback tier and the dispatch table just points at it | `test_bn254_accel`, plus `test_mont_adx_honest` (checks the implementation string against what is actually compiled) | `make bench-simd` — the BN254 Fq latency/throughput rows |
+| BLS12-381 Fr / Fp Montgomery — `core/modules/sapling/src/fr.c`, `fr_avx512.c`, `mont_adx.h` | same BMI2+ADX tier; AVX-512 IFMA is *probed* (`simd_avx512_ifma_usable`) but deliberately unimplemented — the reporter string says so | CPUID leaf 7 EBX[8]/EBX[19] + IFMA probe, dispatch through `g_fr_mont_mul` / `g_fp_mont_mul` | portable `__int128` CIOS; **no clean NEON equivalent** (§3) | none needed | `test_fr_mont_parity`, `test_fr_accel`, `test_mont_adx_honest` | `make bench-simd` — the Fr and Fp latency/throughput rows; `CRYPTOPERF bls12-381-fp-mul` |
+| Equihash verifier — `core/modules/crypto/src/equihash.c` | inherits the BLAKE2b batch tiers; no intrinsics of its own | inherits | inherits the NEON 4-way tier through the same two call sites | inherits the NEON KAT | `test_blake2b_batch_parity` is the oracle for the hashing; consensus-side pins in `test_equihash_blake2b_state_seal`, `test_domain_consensus_equihash` | the `simd_bench` Equihash row *is* the verifier's hash-generation cost |
+| Equihash solver — `core/modules/crypto/src/equihash_solver.c` | portable C23 (bucket-based Wagner, fixed parameters) | n/a — single tier | identical | n/a | the equihash groups above | none — the solver has no bench primitive today |
 | secp256k1 (vendored) — `vendor/lib/libsecp256k1*.a` | the linked archive; no in-tree source | n/a — vendored | the Darwin archive is built on the host by `tools/scripts/build_vendor.sh` with no field/scalar override, so upstream defaults apply: **`__int128` limb arithmetic, which is native on arm64 — no NEON needed, and upstream has no NEON path** | none — upstream's own constant-time portable/`__int128` code | upstream's own exhaustive/ct testing is disabled in the vendored build; the node pins it through `CRYPTOPERF secp256k1-ecdsa-verify` timing and the CSV ratchet row `secp256k1-ecdsa-verify` | `CRYPTOPERF secp256k1-ecdsa-verify` |
-| ChaCha20-Poly1305 — `lib/crypto/src/chacha20poly1305.c` | SSE2 four-block word-sliced tier, explicitly selectable | mandatory x86-64 ABI plus a stable one-time portable-oracle KAT | NEON four-block word-sliced tier, explicitly selectable; **AUTO remains portable pending physical promotion evidence** | mandatory arm64 ABI plus the same stable one-time KAT; concurrent first callers converge and a divergent bit disables the vector tier | `test_chacha20_isa_parity`: RFC vector, every length 0..1024, randomized differential cases, in-place operation, exact caller-shaped opens, auth-before-output tamper teeth, AEAD caller boundaries, and counter-exhaustion refusal | `make bench-simd CHACHA_ONLY=1 REQUIRE_CHACHA_WINS=1 REPS=41` runs paired portable/vector seal **and open** rows for Sapling notes, Noise frames, and private-object chunks with p50/p90/p95/max. Run it in three separate physical-Mac processes; even three clean observations are a promotion candidate, not a sealed receipt or AUTO authority |
-| AES-256 (FF1) — `lib/crypto/src/aes256.c` | portable — **no AES-NI tier even on x86** | n/a | portable. FEAT_AES exists on arm64 but a one-sided tier would break the parity posture | n/a | the `test_zip32_*` FF1 groups that consume it | none |
-| Curve25519 / X25519 — `lib/crypto/src/curve25519.c`, `x25519_safe.c` | portable (TweetNaCl-style 16-limb) | n/a | portable | n/a | `test_ed25519_differential` and the note-encryption groups | `CRYPTOPERF ed25519-verify` is the nearest timed sibling |
-| Ed25519 — `lib/crypto/src/ed25519.c` | portable | n/a | portable | n/a | `test_ed25519_differential` | `CRYPTOPERF ed25519-verify` |
-| SHA-512 / SHA-1 / RIPEMD-160 — `lib/crypto/src/sha512.c`, `sha1.c`, `ripemd160.c` | portable — no tier on either arch | n/a | portable | n/a | the KAT vectors inside `test_crypto` | none |
-| BLAKE2s / BLAKE3 — `lib/crypto/src/blake2s.c`, `blake3.c` | portable | n/a | portable | n/a | `test_blake3_kat` for BLAKE3; BLAKE2s via `test_crypto` | none |
-| Sapling note encryption / PRF / FF1 — `lib/sapling/src/note_encryption.c`, `prf.c`, `ff1.c` | inherit the tiers of BLAKE2b, ChaCha20-Poly1305, Curve25519, SHA-256, AES-256 | inherit | inherit (including the NEON BLAKE2b tier on the KDF path) | inherit | the KDF/KAT groups (`test_note_encryption_*`, `test_sapling_kdf_*`, `test_zip32_*`) | none of their own |
+| ChaCha20-Poly1305 — `core/modules/crypto/src/chacha20poly1305.c` | SSE2 four-block word-sliced tier, explicitly selectable | mandatory x86-64 ABI plus a stable one-time portable-oracle KAT | NEON four-block word-sliced tier, explicitly selectable; **AUTO remains portable pending physical promotion evidence** | mandatory arm64 ABI plus the same stable one-time KAT; concurrent first callers converge and a divergent bit disables the vector tier | `test_chacha20_isa_parity`: RFC vector, every length 0..1024, randomized differential cases, in-place operation, exact caller-shaped opens, auth-before-output tamper teeth, AEAD caller boundaries, and counter-exhaustion refusal | `make bench-simd CHACHA_ONLY=1 REQUIRE_CHACHA_WINS=1 REPS=41` runs paired portable/vector seal **and open** rows for Sapling notes, Noise frames, and private-object chunks with p50/p90/p95/max. Run it in three separate physical-Mac processes; even three clean observations are a promotion candidate, not a sealed receipt or AUTO authority |
+| AES-256 (FF1) — `core/modules/crypto/src/aes256.c` | portable — **no AES-NI tier even on x86** | n/a | portable. FEAT_AES exists on arm64 but a one-sided tier would break the parity posture | n/a | the `test_zip32_*` FF1 groups that consume it | none |
+| Curve25519 / X25519 — `core/modules/crypto/src/curve25519.c`, `x25519_safe.c` | portable (TweetNaCl-style 16-limb) | n/a | portable | n/a | `test_ed25519_differential` and the note-encryption groups | `CRYPTOPERF ed25519-verify` is the nearest timed sibling |
+| Ed25519 — `core/modules/crypto/src/ed25519.c` | portable | n/a | portable | n/a | `test_ed25519_differential` | `CRYPTOPERF ed25519-verify` |
+| SHA-512 / SHA-1 / RIPEMD-160 — `core/modules/crypto/src/sha512.c`, `sha1.c`, `ripemd160.c` | portable — no tier on either arch | n/a | portable | n/a | the KAT vectors inside `test_crypto` | none |
+| BLAKE2s / BLAKE3 — `core/modules/crypto/src/blake2s.c`, `blake3.c` | portable | n/a | portable | n/a | `test_blake3_kat` for BLAKE3; BLAKE2s via `test_crypto` | none |
+| Sapling note encryption / PRF / FF1 — `core/modules/sapling/src/note_encryption.c`, `prf.c`, `ff1.c` | inherit the tiers of BLAKE2b, ChaCha20-Poly1305, Curve25519, SHA-256, AES-256 | inherit | inherit (including the NEON BLAKE2b tier on the KDF path) | inherit | the KDF/KAT groups (`test_note_encryption_*`, `test_sapling_kdf_*`, `test_zip32_*`) | none of their own |
 
 ## 3. The honest markers — where NEON is not the answer
 
@@ -124,20 +124,20 @@ These paths are code, not promises. Re-derive each instead of trusting this
 list, and keep measured-slower implementations available for proof without
 making them the automatic default:
 
-- **SHA-256 FEAT_SHA256** — `lib/crypto/src/sha256.c`. Re-derive:
-  `git grep -n "vsha256hq\|__ARM_FEATURE_SHA" -- lib/crypto/src/sha256.c`.
-- **CRC32C FEAT_CRC32** — `lib/util/src/crc32c.c`. Re-derive:
-  `git grep -n "crc32cx\|__ARM_FEATURE_CRC32" -- lib/util/src/crc32c.c`.
-- **SHA3/Keccak x4 NEON** — `lib/crypto/src/keccak_x4*.c`,
-  `lib/crypto/src/sha3_*x4*.c`. Re-derive:
-  `git grep -ln "arm_neon" -- lib/crypto/src`.
-- **BLAKE2b NEON 4-way** — `lib/crypto/src/blake2b_avx2.c`.
+- **SHA-256 FEAT_SHA256** — `core/modules/crypto/src/sha256.c`. Re-derive:
+  `git grep -n "vsha256hq\|__ARM_FEATURE_SHA" -- core/modules/crypto/src/sha256.c`.
+- **CRC32C FEAT_CRC32** — `platform/modules/util/src/crc32c.c`. Re-derive:
+  `git grep -n "crc32cx\|__ARM_FEATURE_CRC32" -- platform/modules/util/src/crc32c.c`.
+- **SHA3/Keccak x4 NEON** — `core/modules/crypto/src/keccak_x4*.c`,
+  `core/modules/crypto/src/sha3_*x4*.c`. Re-derive:
+  `git grep -ln "arm_neon" -- core/modules/crypto/src`.
+- **BLAKE2b NEON 4-way** — `core/modules/crypto/src/blake2b_avx2.c`.
 
 The tree-wide re-derivation for "what arm64 SIMD exists at all" is:
 
 ```sh
-git grep -ln "__aarch64__" -- lib/crypto lib/sapling lib/util
-git grep -ln "arm_neon"    -- lib/crypto lib/sapling lib/util
+git grep -ln "__aarch64__" -- core/modules/crypto core/modules/sapling platform/modules/util
+git grep -ln "arm_neon"    -- core/modules/crypto core/modules/sapling platform/modules/util
 ```
 
 and, for the x86 side, the set of files the OS-state gate holds to the

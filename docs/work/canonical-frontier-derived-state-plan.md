@@ -106,17 +106,17 @@ network serving, chain-hash binding, and client activation remain unproved.
   `utxo_projection` half of this question is CLOSED, not open — Program H1
   (commit 9b5add018) deleted the event-log-fed projection and its view, and
   `check-no-utxo-projection` now enforces that the copy stays dead.
-  <!-- claim: file-absent lib/storage/src/utxo_projection.c # deleted by Program H1, 9b5add018 -->
+  <!-- claim: file-absent engine/modules/storage/src/utxo_projection.c # deleted by Program H1, 9b5add018 -->
   <!-- claim: gate-passes check-no-utxo-projection # the copy must stay dead -->
-  <!-- claim: symbol-absent coins_view_projection lib/storage # the view is gone -->
+  <!-- claim: symbol-absent coins_view_projection engine/modules/storage # the view is gone -->
 
   The `data_integrity_compute` half is still OPEN: the symbol is live in
-  `lib/coins/src/utxo_commitment.c` and read by
-  `app/controllers/src/blockchain_controller_chain.c`.
-  <!-- claim: symbol-present data_integrity_compute lib/coins/src/utxo_commitment.c # open while this still exists -->
+  `core/modules/coins/src/utxo_commitment.c` and read by
+  `engine/controllers/src/blockchain_controller_chain.c`.
+  <!-- claim: symbol-present data_integrity_compute core/modules/coins/src/utxo_commitment.c # open while this still exists -->
 
 - `reconcile_light`: shrink-vs-delete after the step-7 grep shows registration sites.
   Still OPEN — the only production registration site is
-  `app/jobs/src/reducer_frontier_replay.c` (the rest are tests), so this is a
+  `engine/reducer/jobs/src/reducer_frontier_replay.c` (the rest are tests), so this is a
   one-caller decision, not a survey.
-  <!-- claim: symbol-present reconcile_light app/jobs/src/reducer_frontier_replay.c # open until it shrinks or goes -->
+  <!-- claim: symbol-present reconcile_light engine/reducer/jobs/src/reducer_frontier_replay.c # open until it shrinks or goes -->

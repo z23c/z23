@@ -59,7 +59,7 @@ rpc() {
 
     curl -s -u "$cookie" "http://127.0.0.1:$PORT/" \
         -d "$body" \
-        -H "Content-Type: application/json"
+        -H "Content-Type: engine/application/json"
 }
 
 require_jsonq() {

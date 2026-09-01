@@ -217,18 +217,18 @@ OPT_PARITY_LINE=""
 if [ "${ARENA_OPT_PARITY:-0}" = 1 ]; then
     for opt in -O0 -O2; do
         cc -std=c23 "$opt" -static -D_POSIX_C_SOURCE=200809L \
-            -Ipackages/zdogace/include -Ipackages/zdogfight/include \
-            -Ipackages/zprng/include \
-            packages/zdogace/app/main.c packages/zdogace/src/zdogace.c \
-            packages/zdogfight/src/zdogfight.c \
-            packages/zdogfight/src/zdogfix.c packages/zprng/src/zprng.c \
+            -Icontexts/commons/packages/zdogace/include -Icontexts/commons/packages/zdogfight/include \
+            -Icontexts/commons/packages/zprng/include \
+            contexts/commons/packages/zdogace/app/main.c contexts/commons/packages/zdogace/src/zdogace.c \
+            contexts/commons/packages/zdogfight/src/zdogfight.c \
+            contexts/commons/packages/zdogfight/src/zdogfix.c contexts/commons/packages/zprng/src/zprng.c \
             -o "$WORK/red$opt" -lm || ad_die "pilot build failed at $opt"
         cc -std=c23 "$opt" -static -D_POSIX_C_SOURCE=200809L \
-            -Ipackages/zdogdrone/include -Ipackages/zdogfight/include \
-            -Ipackages/zprng/include \
-            packages/zdogdrone/app/main.c packages/zdogdrone/src/zdogdrone.c \
-            packages/zdogfight/src/zdogfight.c \
-            packages/zdogfight/src/zdogfix.c packages/zprng/src/zprng.c \
+            -Icontexts/commons/packages/zdogdrone/include -Icontexts/commons/packages/zdogfight/include \
+            -Icontexts/commons/packages/zprng/include \
+            contexts/commons/packages/zdogdrone/app/main.c contexts/commons/packages/zdogdrone/src/zdogdrone.c \
+            contexts/commons/packages/zdogfight/src/zdogfight.c \
+            contexts/commons/packages/zdogfight/src/zdogfix.c contexts/commons/packages/zprng/src/zprng.c \
             -o "$WORK/blue$opt" -lm || ad_die "pilot build failed at $opt"
         ad_play "$WORK/red$opt" "$WORK/blue$opt" "$WORK/replay$opt" \
             "$WORK/report$opt"

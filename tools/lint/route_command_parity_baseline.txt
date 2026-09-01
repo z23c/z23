@@ -1,9 +1,9 @@
 # Shrink-only baseline for check_route_command_parity.sh (OS-B3b).
 #
 # Each line is a "none:<reason>" command_path value that a route in
-# app/controllers/src/api_controller_routes.c's k_api_resource_routes[]
+# engine/controllers/src/api_controller_routes.c's k_api_resource_routes[]
 # is honestly allowed to carry because no native command registry leaf
-# (config/commands/*.def) owns the same data/service yet. A NEW none:
+# (engine/composition/commands/*.def) owns the same data/service yet. A NEW none:
 # entry not listed here fails the gate. Removing a line (because the
 # route got wired to a real leaf, or the route was deleted) is always
 # welcome — the gate also flags a stale line that no route emits any more.

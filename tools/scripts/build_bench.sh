@@ -77,14 +77,14 @@ FAKE="${ZCL_BUILD_BENCH_FAKE:-}"
 # exercise: it is the highest-fan-out header in the tree, so a one-line change
 # to it is the worst incremental build this repository can produce.
 #
-# The LOG_*/GUARD* macros live in lib/base; lib/util/include/util/log_macros.h
+# The LOG_*/GUARD* macros live in lib/base; platform/modules/util/include/util/log_macros.h
 # is a one-line forwarder that stayed put so the ~63% of the tree that already
-# spelled the include that way did not have to change. Editing the lib/base
+# spelled the include that way did not have to change. Editing the platform/modules/base
 # file therefore reaches BOTH sets. Every count below is derived at run time by
 # git grep — none is pinned here.
-HDR="lib/base/include/base/log_macros.h"
-HDR_FORWARDER="lib/util/include/util/log_macros.h"
-IMPL="lib/util/src/crc32c.c"
+HDR="platform/modules/base/include/base/log_macros.h"
+HDR_FORWARDER="platform/modules/util/include/util/log_macros.h"
+IMPL="platform/modules/util/src/crc32c.c"
 
 say()  { printf '%s\n' "$*" >&2; }
 die()  { printf 'build-bench: FATAL — %s\n' "$*" >&2; exit 2; }
@@ -458,7 +458,7 @@ measure() {
 
     # 5. One-line INTERFACE edit to the highest-fan-out header in the tree.
     #    This is the scenario the cache design exists to improve. The edit lands
-    #    in the lib/base file; the dependents reach it through the util/
+    #    in the platform/modules/base file; the dependents reach it through the util/
     #    forwarder, and the artifact records both counts.
     HDR_NOTE="interface edit: $hdr_via translation unit(s) reach this header through $HDR_FORWARDER, $hdr_direct directly, $hdr_fanout distinct .c/.h in all"
     run_case compile_edit_header "$SAMPLES" recompile_many off edit_header "$(mk off build-only)"

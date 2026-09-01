@@ -1,0 +1,88 @@
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ *
+ * fact_store_writers.def — the manifest of DERIVATIONS for the writer census.
+ *
+ * Nothing here is a FACT about the system. Not one key name, not one file
+ * path that writes one, not one count.
+ * Every row states only *how to re-derive* writers of a class of durable named
+ * slot from sources that are already canonical — the store's own header (which
+ * declares its write API) and the tree's own text (which contains the call
+ * sites). Author a list of keys or of known writers and you have minted the
+ * second ledger this census exists to find; it would then need a freshness
+ * gate, and a freshness gate is the drift mechanism the design refuses.
+ *
+ * ── What a FACT is here ──
+ *
+ * A fact is one durable NAMED SLOT: a (store, key) pair in a keyed key/value
+ * table the node persists. `progress_meta` and `stage_cursor` in progress.kv,
+ * `node_state` in node.db. Every stage cursor, every trusted-base floor, every
+ * install marker and provenance stamp is exactly one such slot addressed by an
+ * exact string, so the fact carries a canonical name that no analyzer has to
+ * invent. Facts whose address is not a string (a block header keyed by hash, a
+ * utxo keyed by outpoint) are deliberately OUT of scope — see
+ * fact_writers.h "What this cannot see".
+ *
+ * ── Row contract ──
+ *
+ *   FACT_STORE(store, table, key_column, api_headers)
+ *
+ *     store        the census's name for the slot namespace, lowercase.
+ *     table        the SQL table name. Used to find RAW writers: a mutation
+ *                  statement naming this table that did not go through the
+ *                  declared API below.
+ *     key_column   the column the key string lands in ("key" / "name"). Used
+ *                  three ways: to pull the key out of raw SQL, to recognise a
+ *                  keyed-write declaration in api_headers, and to notice that a
+ *                  mutation BOUND its key — which is how the census discovers a
+ *                  file's own local write helper without anyone naming it.
+ *     api_headers  ':'-separated repo-relative headers that declare this
+ *                  store's write API. This is the COVERAGE source: every
+ *                  write-verb declaration in them taking a
+ *                  `const char *<key_column>` must be claimed by a
+ *                  FACT_WRITE_API row below, or fact_writers_unclaimed_apis()
+ *                  names it and test_fact_writers fails. A canonical registry
+ *                  no row claims is a structural failure, not a warning.
+ *
+ *   FACT_WRITE_API(store, fn, key_arg_index)
+ *
+ *     store          must match a FACT_STORE row.
+ *     fn             C identifier, NOT a string. fact_writers.c takes its
+ *                    address, so a row naming a function that does not exist
+ *                    fails the compile and the link.
+ *     key_arg_index  0-based position of the key argument in the call.
+ *
+ * Adding a store costs one FACT_STORE row plus one FACT_WRITE_API row per
+ * declared write entry point. Do not widen an existing row to swallow a new
+ * store: which table a slot lives in is the decision, and burying it defeats
+ * the coverage check. */
+
+/* clang-format off */
+
+FACT_STORE("progress_meta", "progress_meta", "key",
+           "engine/modules/storage/include/storage/progress_store.h")
+
+FACT_STORE("stage_cursor", "stage_cursor", "name",
+           "core/modules/sync/include/sync/stage.h:core/modules/sync/include/sync/stage_lcc.h:engine/jobs/include/jobs/stage_repair_internal.h")
+
+FACT_STORE("node_state", "node_state", "key",
+           "engine/models/include/models/database.h:engine/composition/include/config/runtime.h:engine/modules/storage/include/storage/node_db_runtime.h")
+
+FACT_WRITE_API("progress_meta", progress_meta_set,             1)
+FACT_WRITE_API("progress_meta", progress_meta_set_in_tx,       1)
+FACT_WRITE_API("progress_meta", progress_meta_delete,          1)
+FACT_WRITE_API("progress_meta", progress_meta_delete_in_tx,    1)
+FACT_WRITE_API("progress_meta", progress_meta_raise_u64_in_tx, 1)
+
+FACT_WRITE_API("stage_cursor", stage_set_named_cursor,           1)
+FACT_WRITE_API("stage_cursor", stage_set_named_cursor_if_behind, 1)
+FACT_WRITE_API("stage_cursor", stage_cursor_clamp_to,            1)
+FACT_WRITE_API("stage_cursor", stage_repair_force_stage_cursor,  1)
+
+FACT_WRITE_API("node_state", node_db_state_set,               1)
+FACT_WRITE_API("node_state", node_db_state_set_detached,       1)
+FACT_WRITE_API("node_state", node_db_state_set_int,            1)
+FACT_WRITE_API("node_state", node_db_state_delete,             1)
+FACT_WRITE_API("node_state", node_db_runtime_state_set,        1)
+FACT_WRITE_API("node_state", app_runtime_node_db_state_set,    1)
+
+/* clang-format on */

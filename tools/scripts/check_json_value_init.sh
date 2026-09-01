@@ -6,9 +6,9 @@
 #
 # WHY THIS GATE EXISTS. json_set_object()/json_set_array()/json_set_str() and
 # friends all call json_free(v) FIRST, to release what the value held before
-# (lib/json/src/json.c). On an uninitialised stack local that "release" reads
+# (platform/modules/json/src/json.c). On an uninitialised stack local that "release" reads
 # garbage type/num_children/children and frees or walks it. The contract is
-# already stated in lib/json/include/json/json.h ("Stack values must be
+# already stated in platform/modules/json/include/json/json.h ("Stack values must be
 # zero-initialized or passed through json_init()") — this gate is what makes
 # the statement true.
 #
@@ -104,7 +104,7 @@ if [ -n "${violations//[[:space:]]/}" ]; then
     echo "  json_set_*() and json_free() release the value's PREVIOUS contents"
     echo "  first, so on an uninitialised local they free/walk stack garbage."
     echo "  Declare it 'struct json_value x = {0};' or call json_init(&x) first"
-    echo "  (contract: lib/json/include/json/json.h)."
+    echo "  (contract: platform/modules/json/include/json/json.h)."
     exit 1
 fi
 

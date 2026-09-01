@@ -1,0 +1,178 @@
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ *
+ * Site route registry — the ONE inventory of the app MVC web mounts.
+ * Include with SITE_ROUTE(...) defined; every consumer expands the columns
+ * it needs and discards the rest (the X-macro idiom of
+ * tools/dev/test_group_catalog.def). Adding a web section is one row here
+ * instead of hand-edits to the onion dispatch chain, the HTTPS dispatch
+ * chain, the ratelimit classifier, and both site navs.
+ *
+ * Consumers (keep this list current):
+ *   core/modules/net/src/onion_service.c     — handler externs + dispatch ifs
+ *   core/modules/net/src/https_server.c      — handler externs + dispatch ifs
+ *   core/modules/net/src/onion_ratelimit.c   — default cost classification
+ *   core/modules/net/src/site_routes.c       — the test-visible descriptor table and
+ *                                     both nav tables + the landing grid
+ *   contexts/explorer/views/include/views/site_layout.h — reads the app-nav table
+ *
+ * Columns:
+ *   id        — stable row name (test + malloc-label identity)
+ *   prefix    — URL prefix the mount owns
+ *   handler   — app/ handler symbol. core/modules/net must never include app/
+ *               headers (layering), so each dispatch site extern-declares
+ *               it from this registry.
+ *   flavor    — dispatch personality; selects the generated code shape:
+ *               STORE      onion-only, no prefix guard, requires the node
+ *                          datadir and passes it (7-arg handler)
+ *               PLAIN      both transports, no prefix guard, 6-arg handler
+ *               DATADIR    both transports, prefix guard, requires the
+ *                          node datadir on onion / passes NULL on HTTPS
+ *                          (7-arg handler; NULL → the handler resolves
+ *                          GetDataDir(true) itself, that listener carrying
+ *                          no datadir context)
+ *               FAILCLOSED both transports, prefix guard, 6-arg handler,
+ *                          and a handler return of 0 becomes a 503 carrying
+ *                          fail_body — never a fall-through
+ *               ONIONCLOSED onion-only FAILCLOSED: same guard + 503
+ *                          contract, but (like STORE) never dispatched on
+ *                          the HTTPS listener
+ *   methods   — method flags: 0 for a GET/HEAD-only surface, or
+ *               ZCL_SITE_F_POST_ONION when the family also answers POSTs.
+ *               POST is honored ONLY on the onion transport: the HTTPS
+ *               listener rejects non-GET/HEAD before dispatch.
+ *   cost      — default onion_ratelimit tier for the prefix
+ *               (ZCL_SITE_COST_*). The method/sub-path-sensitive EXPENSIVE
+ *               specials stay hand-written in onion_route_classify() above
+ *               this table's expansion.
+ *   route_key — puzzle-binding key onion_route_classify() reports for an
+ *               EXPENSIVE row ("" for none)
+ *   nav_app   — slot in the app-side global nav (site_layout.h):
+ *               NONE or P1..P6 ([0] is always the Explorer chrome entry,
+ *               [7] always Directory)
+ *   nav_onion — slot in the onion front-door nav: NONE or P1..P6
+ *               (same chrome: [0] Explorer, [7] Directory)
+ *   grid      — slot in the onion landing-page app grid: NONE or P1..P4
+ *   nav_label / nav_href / nav_id — link text, href, and the `active`
+ *               match id for nav members (NULL when the row is in no nav)
+ *   grid_desc — landing-grid description (NULL when not in the grid)
+ *   fail_body — 503 body text for FAILCLOSED rows (NULL otherwise)
+ *   app_id    — the app-catalog id (apps/<id>/app.def) this mount serves,
+ *               or NULL when the mount is not an app-catalog App (store,
+ *               names, zcode, metaverse predate the catalog). The set of
+ *               rows with an app_id IS this node's onion App advertisement
+ *               (the "apps" list on the self /directory.json row);
+ *               test_site_routes cross-checks each against the app.def
+ *               ZCL_APP_ONION(true) + ZCL_APP_WEB_MOUNT declarations so the
+ *               column can never drift from the catalog.
+ *
+ * ROW ORDER IS ONION DISPATCH ORDER — the test_site_routes group pins it.
+ * No app prefix is a prefix of another, so relative order changes no
+ * routing decision; the pin exists so a reorder is a deliberate,
+ * review-visible act. */
+
+/* Store — ZSLP token commerce. POSTs (/store/orders, /store/buy/...) mint
+ * a z-address and write a row: onion-only, and priced EXPENSIVE by the
+ * hand-written method-sensitive special in onion_route_classify() — the
+ * row's CHEAP class covers the listing/status GETs. */
+SITE_ROUTE(store, "/store", store_handle_request, STORE,
+           ZCL_SITE_F_POST_ONION, ZCL_SITE_COST_CHEAP, "",
+           P2, P2, P1,
+           "Store", "/store", "store",
+           "Commerce and token purchase flows hosted directly on the node.",
+           NULL, NULL)
+
+/* ZCL Names — name→site resolution gateway. With the operator opt-in
+ * ZCL_NAMES_ONION_GATEWAY on, /n/<name> DIALS a third-party onion on an
+ * anonymous visitor's behalf and blocks the serving thread while the
+ * circuit builds, so this prefix is EXPENSIVE unconditionally (lib/ must
+ * not read app/ policy; over-limiting is the fail-safe direction for a
+ * DoS guard). */
+SITE_ROUTE(names_gateway, "/n/", name_site_handle_request, PLAIN,
+           0, ZCL_SITE_COST_EXPENSIVE, "name-gateway",
+           NONE, NONE, NONE,
+           NULL, NULL, NULL, NULL, NULL, NULL)
+
+/* ZCL Names — registry browse/profile pages. CHEAP: indexed lookups, not
+ * the gateway prefix above. The register POST is onion-only, like the
+ * store's order POSTs. Same handler as names_gateway, so a name resolves
+ * identically over onion and HTTPS. */
+SITE_ROUTE(names, "/names", name_site_handle_request, PLAIN,
+           ZCL_SITE_F_POST_ONION, ZCL_SITE_COST_CHEAP, "",
+           P1, P1, NONE,
+           "Names", "/names", "names", NULL, NULL, NULL)
+
+/* ZCODE Library — packages, publishers, rankings, badges, downloads.
+ * Read-only: no POST surface. Bounded listing/lookup pages over the
+ * rebuildable ZCODE read projections (row caps mirror the zcode.* command
+ * render caps); /zcode/download serves one bounded CAS object, no write,
+ * no scan, no mint. */
+SITE_ROUTE(zcode, "/zcode", zcode_site_handle_request, DATADIR,
+           0, ZCL_SITE_COST_CHEAP, "",
+           P6, P6, P4,
+           "Zcode", "/zcode", "zcode",
+           "Packages, publishers, rankings, and downloads from the "
+           "on-node ZCODE library.",
+           NULL, NULL)
+
+/* Metaverse — landing, sovereign property catalog, published spaces, and
+ * the Living Commons (SIMULATION). Read-only: no POST surface. */
+SITE_ROUTE(metaverse, "/metaverse", metaverse_site_handle_request, DATADIR,
+           0, ZCL_SITE_COST_CHEAP, "",
+           P4, P4, NONE,
+           "Metaverse", "/metaverse", "metaverse", NULL, NULL, NULL)
+
+/* Blog MVC App — a signed mount: it must never degrade into the unrelated
+ * legacy static-file Blog when proof storage is absent, so a handler 0 is
+ * a 503, not a fall-through. GET/HEAD-only (the handler itself 405s the
+ * rest). */
+SITE_ROUTE(blog, "/blog", blog_site_handle_request, FAILCLOSED,
+           0, ZCL_SITE_COST_CHEAP, "",
+           P3, P3, P2,
+           "Blog", "/blog", "blog",
+           "Static site hosting from your datadir over the onion service.",
+           "Blog storage is unavailable.\n", "blog")
+
+/* Yardsale MVC App — the for-sale-by-owner swap signs plus the bilateral
+ * ceremony endpoints. The ceremony POSTs (/yardsale/buy,
+ * /yardsale/accept) are onion-only, like the store's order POSTs; onion
+ * and HTTPS read the same zswap_ads projection. */
+SITE_ROUTE(yardsale, "/yardsale", yardsale_site_handle_request, FAILCLOSED,
+           ZCL_SITE_F_POST_ONION, ZCL_SITE_COST_CHEAP, "",
+           P5, P5, P3,
+           "Yardsale", "/yardsale", "yardsale",
+           "Signed for-sale-by-owner token signs; buyers settle directly "
+           "with sellers.",
+           "Yardsale storage is unavailable.\n", "yardsale")
+
+/* ZCL Market — paid file chunk delivery over the onion transport
+ * (docs/work/MARKET_ONION_DELIVERY.md). Onion-only by construction: the
+ * whole point is that neither side's IP appears, so the HTTPS listener
+ * expands this row to nothing. GET with the signed zfileget request
+ * hex-encoded in the path; the handler verifies the buyer signature
+ * against the onion-derived session id, re-checks chain-confirmed payment
+ * via the injected delivery ports, and serves one <=60 KiB chunk slice.
+ * The handler is a core/modules/net symbol (the one deliberate exception to the
+ * app/-handler convention above): the serve logic reuses core/modules/net's
+ * injected authorize/load ports and has no app dependency. */
+SITE_ROUTE(market_chunk, "/market/chunk",
+           file_market_delivery_onion_handle_request, ONIONCLOSED,
+           0, ZCL_SITE_COST_CHEAP, "",
+           NONE, NONE, NONE,
+           NULL, NULL, NULL, NULL,
+           "Paid file chunk delivery is unavailable.\n", NULL)
+
+/* The observation document — services/mesh_observation.h. Onion-only by
+ * construction: it is served to PEERS, and the reader that fetches it is
+ * another node, never a browser. The torv3 address IS the publisher's
+ * ed25519 public key, so the transport authenticates the document and no
+ * signature key needs to exist — a signing key would create an identity
+ * readers must TRUST, which is the authority shape this surface removes.
+ * Before the first sample the handler returns 0 and the flavor's 503 says
+ * so by name: an unsampled node has nothing, rather than an
+ * empty-but-healthy document. */
+SITE_ROUTE(observation, "/observation.json",
+           observation_site_handle_request, ONIONCLOSED,
+           0, ZCL_SITE_COST_CHEAP, "",
+           NONE, NONE, NONE,
+           NULL, NULL, NULL, NULL,
+           "Observation record unavailable.\n", NULL)

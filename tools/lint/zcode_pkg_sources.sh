@@ -16,7 +16,7 @@
 # THE RULE, in the order the manifest states it:
 #   * a manifest declaring "files" is honoured EXACTLY — the array is the
 #     shipped set, wherever in the tree its entries live. That is why this
-#     enumerates files[] rather than globbing and filtering: lib/commons_demo
+#     enumerates files[] rather than globbing and filtering: contexts/commons/modules/commons_demo
 #     ships app/main.c, which no src/ + tests/ glob can see, and a gate that
 #     cannot see it cannot grade it.
 #   * a manifest with no "files" ships its whole tree; the compilable part of
@@ -25,14 +25,14 @@
 # A listed-but-absent path is PRINTED, not skipped. Skipping it would make a
 # manifest that names a file it does not carry look like a smaller, cleaner
 # package to every caller; letting it through makes the caller fail on it,
-# which is the honest outcome. (lib/vcs/src/package_prepare.c refuses such a
+# which is the honest outcome. (contexts/commons/modules/vcs/src/package_prepare.c refuses such a
 # manifest outright when it prepares the package for real.)
 #
 # HISTORY: this began as pkg_sources() private to
 # tools/lint/check_zcode_package_standalone.sh, which globbed src/ + tests/
 # and then narrowed to files[] by substring grep. Lifting it here widened it
 # to honour files[] entries OUTSIDE src/ and tests/ — the only such entry in
-# the registry today is lib/commons_demo/app/main.c, which was verified to
+# the registry today is contexts/commons/modules/commons_demo/app/main.c, which was verified to
 # compile from its declared dependencies before the widening landed.
 
 # zcode_pkg_json_array <manifest> <key>

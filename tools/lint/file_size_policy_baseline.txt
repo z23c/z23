@@ -18,25 +18,25 @@
 # Files at or under 1500 lines need no entry at all — 801..1500 is an
 # allowed band with no paperwork. Generated/tabular code is skipped entirely
 # via ALLOWLIST in tools/file_size_policy.c, not listed here.
-config/src/boot.c 4001
-config/src/boot_refold_staged.c 1810
-lib/codeindex/src/codeindex_merkle.c 1776
-lib/hotswap/src/hotswap_activate.c 2314
-lib/kernel/src/command_registry.c 2403
-lib/net/src/connman.c 3081
-lib/net/src/download.c 1793
-lib/net/src/fast_sync.c 1684
-lib/net/src/file_service.c 2517
-lib/net/src/msg_headers.c 2370
-lib/net/src/msgprocessor.c 3031
-lib/net/src/msgprocessor_snapshot.c 1810
-lib/net/src/net.c 2373
-lib/net/src/onion_directory.c 1516
-lib/net/src/peer_lifecycle.c 1634
-lib/platform/src/os_sandbox_linux.c 1526
-lib/vcs/src/package_reward.c 1986
-lib/vcs/src/package_swarm_node.c 2015
-lib/vcs/src/vcs_devloop.c 2367
-lib/wallet/src/wallet.c 1560
-lib/wallet/src/wallet_sqlite.c 1603
-src/main_cli_modes.c 4275
+engine/composition/src/boot.c 4001
+engine/composition/src/boot_refold_staged.c 1810
+cognition/modules/codeindex/src/codeindex_merkle.c 1776
+engine/modules/hotswap/src/hotswap_activate.c 2314
+engine/modules/kernel/src/command_registry.c 2403
+core/modules/net/src/connman.c 3081
+core/modules/net/src/download.c 1793
+core/modules/net/src/fast_sync.c 1684
+core/modules/net/src/file_service.c 2517
+core/modules/net/src/msg_headers.c 2370
+core/modules/net/src/msgprocessor.c 3031
+core/modules/net/src/msgprocessor_snapshot.c 1810
+core/modules/net/src/net.c 2373
+core/modules/net/src/onion_directory.c 1516
+core/modules/net/src/peer_lifecycle.c 1634
+platform/modules/platform/src/os_sandbox_linux.c 1526
+contexts/commons/modules/vcs/src/package_reward.c 1986
+contexts/commons/modules/vcs/src/package_swarm_node.c 2015
+contexts/commons/modules/vcs/src/vcs_devloop.c 2367
+contexts/wallet/modules/wallet/src/wallet.c 1560
+contexts/wallet/modules/wallet/src/wallet_sqlite.c 1603
+engine/entry/main_cli_modes.c 4275

@@ -151,14 +151,14 @@ mutation_receipt_confined()
                 ;;
             *'$(eval $(call BUILD_NODE_TOOL,test_zcl,'*'$(DEV_SOURCE_RECEIPT_CPPFLAGS))'*|\
             *'$(eval $(call BUILD_NODE_TOOL,test_parallel_wpo,'*'$(DEV_SOURCE_RECEIPT_CPPFLAGS))'*|\
-            '$(TEST_FAST_OBJ_DIR)/lib/util/src/clientversion.o: TEST_FAST_OBJECT_CFLAGS += $(BUILD_IDENTITY_CPPFLAGS) $(DEV_SOURCE_RECEIPT_CPPFLAGS)'|\
-            '$(TEST_REL_OBJ_DIR)/lib/util/src/clientversion.o: TEST_REL_OBJECT_CFLAGS += $(BUILD_IDENTITY_CPPFLAGS) $(DEV_SOURCE_RECEIPT_CPPFLAGS)'|\
-            '$(TEST_ASAN_OBJ_DIR)/lib/util/src/clientversion.o: TEST_ASAN_OBJECT_CFLAGS += $(BUILD_IDENTITY_CPPFLAGS) $(DEV_SOURCE_RECEIPT_CPPFLAGS)'|\
-            '$(DEV_ASAN_OBJ_DIR)/lib/util/src/clientversion.o: DEV_ASAN_OBJECT_CFLAGS += $(BUILD_IDENTITY_CPPFLAGS) $(DEV_SOURCE_RECEIPT_CPPFLAGS)'|\
-            '$(TEST_TSAN_OBJ_DIR)/lib/util/src/clientversion.o: TEST_TSAN_OBJECT_CFLAGS += $(BUILD_IDENTITY_CPPFLAGS) $(DEV_SOURCE_RECEIPT_CPPFLAGS)'|\
-            '$(DEV_TSAN_OBJ_DIR)/lib/util/src/clientversion.o: DEV_TSAN_OBJECT_CFLAGS += $(BUILD_IDENTITY_CPPFLAGS) $(DEV_SOURCE_RECEIPT_CPPFLAGS)'|\
-            '$(COV_BUILD_DIR)/lib/util/src/clientversion.o: COV_OBJECT_CFLAGS += $(BUILD_IDENTITY_CPPFLAGS) $(DEV_SOURCE_RECEIPT_CPPFLAGS)'|\
-            '$(DEV_OBJ_DIR)/lib/util/src/clientversion.o: DEV_COMPILE_CFLAGS += $(BUILD_IDENTITY_CPPFLAGS) $(DEV_SOURCE_RECEIPT_CPPFLAGS)')
+            '$(TEST_FAST_OBJ_DIR)/platform/modules/util/src/clientversion.o: TEST_FAST_OBJECT_CFLAGS += $(BUILD_IDENTITY_CPPFLAGS) $(DEV_SOURCE_RECEIPT_CPPFLAGS)'|\
+            '$(TEST_REL_OBJ_DIR)/platform/modules/util/src/clientversion.o: TEST_REL_OBJECT_CFLAGS += $(BUILD_IDENTITY_CPPFLAGS) $(DEV_SOURCE_RECEIPT_CPPFLAGS)'|\
+            '$(TEST_ASAN_OBJ_DIR)/platform/modules/util/src/clientversion.o: TEST_ASAN_OBJECT_CFLAGS += $(BUILD_IDENTITY_CPPFLAGS) $(DEV_SOURCE_RECEIPT_CPPFLAGS)'|\
+            '$(DEV_ASAN_OBJ_DIR)/platform/modules/util/src/clientversion.o: DEV_ASAN_OBJECT_CFLAGS += $(BUILD_IDENTITY_CPPFLAGS) $(DEV_SOURCE_RECEIPT_CPPFLAGS)'|\
+            '$(TEST_TSAN_OBJ_DIR)/platform/modules/util/src/clientversion.o: TEST_TSAN_OBJECT_CFLAGS += $(BUILD_IDENTITY_CPPFLAGS) $(DEV_SOURCE_RECEIPT_CPPFLAGS)'|\
+            '$(DEV_TSAN_OBJ_DIR)/platform/modules/util/src/clientversion.o: DEV_TSAN_OBJECT_CFLAGS += $(BUILD_IDENTITY_CPPFLAGS) $(DEV_SOURCE_RECEIPT_CPPFLAGS)'|\
+            '$(COV_BUILD_DIR)/platform/modules/util/src/clientversion.o: COV_OBJECT_CFLAGS += $(BUILD_IDENTITY_CPPFLAGS) $(DEV_SOURCE_RECEIPT_CPPFLAGS)'|\
+            '$(DEV_OBJ_DIR)/platform/modules/util/src/clientversion.o: DEV_COMPILE_CFLAGS += $(BUILD_IDENTITY_CPPFLAGS) $(DEV_SOURCE_RECEIPT_CPPFLAGS)')
                 ;;
             *)
                 printf 'FAIL: host-local mutation receipt escaped dev/test identity TU: %s\n' "$line"
@@ -176,9 +176,9 @@ mutation_receipt_confined()
 scan_tree()
 {
     local root="$1" hits record_line source_line clean_line mutation_line path
-    local vcs="$root/lib/vcs"
+    local vcs="$root/contexts/commons/modules/vcs"
     local source_identity="$root/tools/dev/source-identity.sh"
-    local receipt="$root/config/src/consensus_state_producer_receipt.c"
+    local receipt="$root/engine/composition/src/consensus_state_producer_receipt.c"
     local makefile="$root/Makefile"
     local publish_tool="$root/tools/dev/publish-build-alias.sh"
     local session_tool="$root/tools/dev/build-epoch-session.sh"
@@ -190,14 +190,14 @@ scan_tree()
     [ -f "$session_tool" ] || fatal "missing authority surface: $session_tool"
 
     # Internal VCS/package code may not even name or call a SHA-1 primitive.
-    # Consensus OP_SHA1 and RFC6455 live outside lib/vcs and are intentionally
+    # Consensus OP_SHA1 and RFC6455 live outside contexts/commons/modules/vcs and are intentionally
     # not part of this source-authority gate.
     # Match the token anywhere in an identifier: prefixed APIs such as
     # EVP_sha1(), mbedtls_sha1_init(), and git_sha1_entry() are still SHA-1.
     hits="$(grep_checked 'sha[-_]?1' "$vcs")" || return $?
     if [ -n "$hits" ]; then
         printf '%s\n' "$hits"
-        printf '%s\n' 'FAIL: lib/vcs must use SHA3-256/SHA-256, never SHA-1'
+        printf '%s\n' 'FAIL: contexts/commons/modules/vcs must use SHA3-256/SHA-256, never SHA-1'
         return 1
     fi
 
@@ -215,17 +215,17 @@ scan_tree()
     # receipt writer. Display-only controller fields live outside this list.
     local authority_paths=(
         "$vcs"
-        "$root/config/src/consensus_state_bundle_validate.c"
-        "$root/config/src/consensus_state_producer_receipt.c"
-        "$root/config/src/consensus_state_producer_status.c"
-        "$root/config/src/consensus_state_snapshot_candidate.c"
-        "$root/config/src/consensus_state_snapshot_candidate_validate.c"
-        "$root/config/src/consensus_state_snapshot_export.c"
-        "$root/config/src/consensus_state_snapshot_export_proof.c"
-        "$root/config/src/consensus_state_snapshot_export_write.c"
-        "$root/config/src/consensus_state_snapshot_install.c"
-        "$root/config/src/consensus_state_snapshot_install_activate.c"
-        "$root/app/services/src/consensus_state_publication_cas.c"
+        "$root/engine/composition/src/consensus_state_bundle_validate.c"
+        "$root/engine/composition/src/consensus_state_producer_receipt.c"
+        "$root/engine/composition/src/consensus_state_producer_status.c"
+        "$root/engine/composition/src/consensus_state_snapshot_candidate.c"
+        "$root/engine/composition/src/consensus_state_snapshot_candidate_validate.c"
+        "$root/engine/composition/src/consensus_state_snapshot_export.c"
+        "$root/engine/composition/src/consensus_state_snapshot_export_proof.c"
+        "$root/engine/composition/src/consensus_state_snapshot_export_write.c"
+        "$root/engine/composition/src/consensus_state_snapshot_install.c"
+        "$root/engine/composition/src/consensus_state_snapshot_install_activate.c"
+        "$root/engine/services/src/consensus_state_publication_cas.c"
         "$publish_tool"
         "$session_tool"
         "$root/tools/dev/build-epoch-key.sh"
@@ -243,17 +243,17 @@ scan_tree()
     done
 
     local authority_c=(
-        "$root/config/src/consensus_state_bundle_validate.c"
-        "$root/config/src/consensus_state_producer_receipt.c"
-        "$root/config/src/consensus_state_producer_status.c"
-        "$root/config/src/consensus_state_snapshot_candidate.c"
-        "$root/config/src/consensus_state_snapshot_candidate_validate.c"
-        "$root/config/src/consensus_state_snapshot_export.c"
-        "$root/config/src/consensus_state_snapshot_export_proof.c"
-        "$root/config/src/consensus_state_snapshot_export_write.c"
-        "$root/config/src/consensus_state_snapshot_install.c"
-        "$root/config/src/consensus_state_snapshot_install_activate.c"
-        "$root/app/services/src/consensus_state_publication_cas.c"
+        "$root/engine/composition/src/consensus_state_bundle_validate.c"
+        "$root/engine/composition/src/consensus_state_producer_receipt.c"
+        "$root/engine/composition/src/consensus_state_producer_status.c"
+        "$root/engine/composition/src/consensus_state_snapshot_candidate.c"
+        "$root/engine/composition/src/consensus_state_snapshot_candidate_validate.c"
+        "$root/engine/composition/src/consensus_state_snapshot_export.c"
+        "$root/engine/composition/src/consensus_state_snapshot_export_proof.c"
+        "$root/engine/composition/src/consensus_state_snapshot_export_write.c"
+        "$root/engine/composition/src/consensus_state_snapshot_install.c"
+        "$root/engine/composition/src/consensus_state_snapshot_install_activate.c"
+        "$root/engine/services/src/consensus_state_publication_cas.c"
     )
     for path in "${authority_c[@]}"; do
         hits="$(grep_checked 'zcl_build_commit(_full)?[[:space:]]*\(' "$path")" || return $?
@@ -312,14 +312,14 @@ self_test()
 {
     local sandbox="$DEFAULT_ROOT/test-tmp/_vcs_sha1_policy_fixture"
     rm -rf "$sandbox"
-    mkdir -p "$sandbox/lib/vcs/src" "$sandbox/tools/dev" \
-        "$sandbox/config/src" "$sandbox/app/services/src"
-    printf '%s\n' 'void sha3_only(void);' > "$sandbox/lib/vcs/src/object.c"
+    mkdir -p "$sandbox/contexts/commons/modules/vcs/src" "$sandbox/tools/dev" \
+        "$sandbox/engine/composition/src" "$sandbox/engine/services/src"
+    printf '%s\n' 'void sha3_only(void);' > "$sandbox/contexts/commons/modules/vcs/src/object.c"
     printf '%s\n' '#!/bin/sh' 'git ls-files --stage -z --' 'sha256sum' \
         > "$sandbox/tools/dev/source-identity.sh"
     printf '%s\n' 'const char *zcl_build_source_id_sha256(void);' \
         'void receipt(void) { (void)zcl_build_source_id_sha256(); }' \
-        > "$sandbox/config/src/consensus_state_producer_receipt.c"
+        > "$sandbox/engine/composition/src/consensus_state_producer_receipt.c"
     local authority_fixture
     for authority_fixture in \
         consensus_state_bundle_validate.c \
@@ -332,10 +332,10 @@ self_test()
         consensus_state_snapshot_install.c \
         consensus_state_snapshot_install_activate.c; do
         printf '%s\n' 'void authority_sha256_only(void);' \
-            > "$sandbox/config/src/$authority_fixture"
+            > "$sandbox/engine/composition/src/$authority_fixture"
     done
     printf '%s\n' 'void publication_sha256_only(void);' \
-        > "$sandbox/app/services/src/consensus_state_publication_cas.c"
+        > "$sandbox/engine/services/src/consensus_state_publication_cas.c"
     printf '%s\n' '#!/bin/sh' '"$SESSION_TOOL" verify' \
         'mv -f -- "$TMP" "$ALIAS"' \
         > "$sandbox/tools/dev/publish-build-alias.sh"
@@ -353,7 +353,7 @@ self_test()
         'BUILD_CLEAN := $(word 2,$(BUILD_SOURCE_RECORD))' \
         'BUILD_MUTATION := $(word 3,$(BUILD_SOURCE_RECORD))' \
         'DEV_SOURCE_RECEIPT_CPPFLAGS = -DZCL_BUILD_SOURCE_MUTATION=\"$(BUILD_MUTATION)\"' \
-        '$(DEV_OBJ_DIR)/lib/util/src/clientversion.o: DEV_COMPILE_CFLAGS += $(BUILD_IDENTITY_CPPFLAGS) $(DEV_SOURCE_RECEIPT_CPPFLAGS)' \
+        '$(DEV_OBJ_DIR)/platform/modules/util/src/clientversion.o: DEV_COMPILE_CFLAGS += $(BUILD_IDENTITY_CPPFLAGS) $(DEV_SOURCE_RECEIPT_CPPFLAGS)' \
         'artifact: $(BUILD_IDENTITY_STAMP)' \
         '	@set -eu; \
 	tmp="$@.tmp"; \
@@ -382,17 +382,17 @@ self_test()
         fatal 'grep/discovery failure false-greened the hard gate'
     fi
     printf '%s\n' 'void bad(void) { sha1_init(0); }' \
-        >> "$sandbox/lib/vcs/src/object.c"
+        >> "$sandbox/contexts/commons/modules/vcs/src/object.c"
     if scan_tree "$sandbox" >/dev/null 2>&1; then
-        fatal 'lib/vcs SHA-1 fixture passed'
+        fatal 'contexts/commons/modules/vcs SHA-1 fixture passed'
     fi
     printf '%s\n' \
         'void prefixed(void) { EVP_sha1(); mbedtls_sha1_init();' \
-        ' git_sha1_entry(); }' > "$sandbox/lib/vcs/src/object.c"
+        ' git_sha1_entry(); }' > "$sandbox/contexts/commons/modules/vcs/src/object.c"
     if scan_tree "$sandbox" >/dev/null 2>&1; then
-        fatal 'prefixed lib/vcs SHA-1 API fixtures passed'
+        fatal 'prefixed contexts/commons/modules/vcs SHA-1 API fixtures passed'
     fi
-    printf '%s\n' 'void sha3_only(void);' > "$sandbox/lib/vcs/src/object.c"
+    printf '%s\n' 'void sha3_only(void);' > "$sandbox/contexts/commons/modules/vcs/src/object.c"
     printf '%s\n' 'git rev-parse HEAD' >> "$sandbox/tools/dev/source-identity.sh"
     if scan_tree "$sandbox" >/dev/null 2>&1; then
         fatal 'Git HEAD source-identity fixture passed'
@@ -428,13 +428,13 @@ self_test()
         'const char *zcl_build_commit_full(void);' \
         'void receipt(void) { (void)zcl_build_source_id_sha256();' \
         ' (void)zcl_build_commit_full(); }' \
-        > "$sandbox/config/src/consensus_state_producer_receipt.c"
+        > "$sandbox/engine/composition/src/consensus_state_producer_receipt.c"
     if scan_tree "$sandbox" >/dev/null 2>&1; then
         fatal 'Git commit receipt-authority fixture passed'
     fi
     printf '%s\n' 'const char *zcl_build_source_id_sha256(void);' \
         'void receipt(void) { (void)zcl_build_source_id_sha256(); }' \
-        > "$sandbox/config/src/consensus_state_producer_receipt.c"
+        > "$sandbox/engine/composition/src/consensus_state_producer_receipt.c"
     printf '%s\n' 'CFLAGS += -DZCL_BUILD_COMMIT_FULL="deadbeef"' \
         >> "$sandbox/Makefile"
     if scan_tree "$sandbox" >/dev/null 2>&1; then

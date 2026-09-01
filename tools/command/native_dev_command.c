@@ -2143,7 +2143,7 @@ static bool dev_reflex_policy_frozen_kat(const void *vtable,
 
 static const struct zcl_hotswap_service_contract k_dev_reflex_contract = {
     .service_id = DEV_REFLEX_POLICY_SERVICE_ID,
-    .source_tu = "app/services/src/dev_reflex_policy_service.c",
+    .source_tu = "cognition/services/src/dev_reflex_policy_service.c",
     .abi_version = ZCL_HOTSWAP_SERVICE_ABI_V1,
     .vtable_size = sizeof(struct dev_reflex_policy_service_v1),
     .abi_fingerprint = DEV_REFLEX_POLICY_ABI,
@@ -3634,7 +3634,7 @@ static bool dev_vault_story_frozen_kat(const void *vtable,
 
 static const struct zcl_hotswap_service_contract k_vault_story_contract = {
     .service_id = VAULT_INTENT_DECISION_SERVICE_ID,
-    .source_tu = "app/services/src/vault_intent_decision_service.c",
+    .source_tu = "contexts/wallet/services/src/vault_intent_decision_service.c",
     .abi_version = ZCL_HOTSWAP_SERVICE_ABI_V1,
     .vtable_size = sizeof(struct vault_intent_decision_service_v1),
     .abi_fingerprint = VAULT_INTENT_DECISION_ABI,
@@ -3683,9 +3683,9 @@ void zcl_native_handle_dev_test_story(
     (void)json_push_kv_str(&reply->data, "kat_expected",
                            VAULT_INTENT_DECISION_KAT);
     (void)json_push_kv_str(&reply->data, "authority_shell",
-                           "app/controllers/src/vault_intent_controller.c");
+                           "contexts/wallet/controllers/src/vault_intent_controller.c");
     (void)json_push_kv_str(&reply->data, "decision_core",
-                           "app/services/src/vault_intent_decision_service.c");
+                           "contexts/wallet/services/src/vault_intent_decision_service.c");
     (void)json_push_kv_str(&reply->data, "authority", "proposal_only");
     (void)json_push_kv_bool(&reply->data, "forbidden_effects_absent", true);
     json_init(&capabilities); json_set_array(&capabilities);
@@ -4089,7 +4089,7 @@ void zcl_native_handle_dev_diagnose_show(
  *     default): rebuilds the binary from the just-reverted source tree and
  *     redeploys it via the same fixed argv devloop's transactional-reload
  *     path uses (tools/dev/devloop_cycle.c: `make agent-deploy-fast`) —
- *     never a shell string, never touching lib/vcs/. It cannot tell a full
+ *     never a shell string, never touching contexts/commons/modules/vcs/. It cannot tell a full
  *     binary-generation hash apart from a bare hotswap .so hash, so it
  *     always issues a full rebuild+redeploy from the now-reverted source
  *     tree: always a safe way to activate ANY generation, just not the
@@ -4335,7 +4335,7 @@ void zcl_native_handle_dev_vcs_revert(
 }
 
 /* ── dev.vcs.seal.grant — owner-run ZVCS unseal-token ritual ─────────
- * ZVCS's seal pin (lib/vcs/src/vcs_seal.c: pin in index.kv, one-shot token
+ * ZVCS's seal pin (contexts/commons/modules/vcs/src/vcs_seal.c: pin in index.kv, one-shot token
  * via vcs_seal_grant_unseal(), VCS_SEAL_TOKEN_KEY) has NO operator surface —
  * vcs_seal_grant_unseal() has zero callers outside lib/test. This executor
  * IS that surface, mirroring the core-unseal Makefile ritual's shape
@@ -4343,7 +4343,7 @@ void zcl_native_handle_dev_vcs_revert(
  * edit can produce this — owner make target") but for the ZVCS pin instead
  * of core/MANIFEST.sha3.
  *
- * lib/vcs/ stays git-free and process-spawn-free (the ZVCS sovereignty
+ * contexts/commons/modules/vcs/ stays git-free and process-spawn-free (the ZVCS sovereignty
  * gate): this file computes the CURRENT worktree's sealset with the exact
  * same primitives vcs_snapshot() itself uses (vcs_manifest_build +
  * vcs_seal_load_globs + vcs_sealset_hash), calls vcs_seal_grant_unseal() to

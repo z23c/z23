@@ -289,7 +289,7 @@ static void av_city_build(av_city *city, uint64_t seed)
 
 static Vector3 av_forward(const zdog_plane *p)
 {
-    /* Exact reference convention from packages/zdogfight: fx =
+    /* Exact reference convention from contexts/commons/packages/zdogfight: fx =
      * sin(yaw)*cos(pitch), fy = -sin(pitch), fz = cos(yaw)*cos(pitch),
      * all Q1.15. */
     const float sy = (float)zdog_sin16(p->yaw) / 32768.0f;

@@ -10,8 +10,8 @@
  *       two-builder proof: two independent producers folded the same
  *       immutable history to the same complete state).
  *
- * The byte preimages mirror lib/storage/src/consensus_state_bundle_codec.c
- * and lib/coins/src/utxo_commitment.c EXACTLY:
+ * The byte preimages mirror engine/modules/storage/src/consensus_state_bundle_codec.c
+ * and core/modules/coins/src/utxo_commitment.c EXACTLY:
  *
  *   coins      — bare SHA3-256 (NO domain separator), rows ORDER BY txid,vout;
  *                record = txid(32) | vout LE4 | value LE8 | script_len LE4 |
@@ -44,7 +44,7 @@
  * core/chainparams/src/checkpoints.c; the parity test re-derives it
  * independently as the bake's cross-check.
  *
- * Standalone build (see the Makefile target): vendored sqlite + lib/crypto
+ * Standalone build (see the Makefile target): vendored sqlite + core/modules/crypto
  * sha3 only. Reads both bundles read-only; never opens a datadir. */
 
 #include "crypto/sha3.h"

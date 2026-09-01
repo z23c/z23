@@ -2,7 +2,7 @@
 
 ## What this is
 
-`simperf` (`tools/sim/simperf.c`, library in `lib/sim/src/simnet_perf.c`) runs a
+`simperf` (`tools/sim/simperf.c`, library in `engine/modules/sim/src/simnet_perf.c`) runs a
 fixed, deterministic workload through the **real** consensus fold — assemble a
 block, drive it through `connect_block()` over a real `coins_view_cache` — at
 several workload sizes, measures the CPU cost of each stage, and gates on how
@@ -86,9 +86,9 @@ At scale `s`, with `blocks` measured blocks and `M` spends per block:
 
 Only phase 3 is timed, and it is timed `reps` times per ladder point (default
 **3**), of which the **minimum** is reported. Timing uses
-`clock_thread_cpu_ns()` (`lib/platform/include/platform/clock.h`,
+`clock_thread_cpu_ns()` (`platform/modules/platform/include/platform/clock.h`,
 `CLOCK_THREAD_CPUTIME_ID`) — the existing per-thread CPU clock this tree
-already uses for work-ratio measurement in `lib/test/src/test_sapling.c`.
+already uses for work-ratio measurement in `tests/harness/src/test_sapling.c`.
 Per-thread CPU time removes plain scheduler preemption from the count, but not
 memory-bandwidth or cache/SMT interference from a co-resident process, which
 inflate CPU time too. Every ladder point also runs one further **discarded
@@ -118,13 +118,13 @@ one-sided error model the minimum is the maximum-likelihood estimate of the
 uncontaminated cost and the only estimator whose error goes to zero as `reps`
 grows; a median still reports whatever the middle sample's contamination
 happened to be. It is also the *stricter* choice for the self-test in
-`lib/test/src/test_simnet_perf.c`, which requires the armed arm to cost at
+`tests/harness/src/test_simnet_perf.c`, which requires the armed arm to cost at
 least 4.0x the clean arm at every ladder point: additive one-sided noise `d`
 on both arms drags the observed ratio `(A+d)/(C+d)` toward 1.0, so noise is
 what could either mask a real regression or manufacture a false one. Taking
 the minimum on both arms strips `d` from both, so it can neither inflate the
 armed arm into passing nor inflate the clean arm into failing. Default
-`reps = 3` (`SIMNET_PERF_DEFAULT_REPS` in `lib/sim/include/sim/simnet_perf.h`)
+`reps = 3` (`SIMNET_PERF_DEFAULT_REPS` in `engine/modules/sim/include/sim/simnet_perf.h`)
 costs roughly 2x the wall time of `reps = 1`.
 
 ### Why `funding_multiple` exists, and why the ballast order is load-bearing
@@ -140,7 +140,7 @@ workload itself does not contain.
 `funding_multiple` (default **2**) decouples the two: it mints
 `funding_multiple - 1` untimed **ballast** coinbases per spendable one (phase
 1a above), so the map holds more live entries than the measured phase ever
-touches. `coins_map` (`lib/coins/src/coins_view.c`) is open addressing with
+touches. `coins_map` (`core/modules/coins/src/coins_view.c`) is open addressing with
 linear probing, and the self-test's injected regression
 (`SIMNET_PERF_INJECT_COINS_HASH_COLLAPSE`, see "Proving the detector has
 teeth" below) collapses every key to bucket 0, so live entries form one
@@ -189,12 +189,12 @@ span only together with a re-calibration of both directions.
 ## The budget, and how it was calibrated
 
 `SIMNET_PERF_GROWTH_BUDGET_PERMILLE = 1800`
-(`lib/sim/include/sim/simnet_perf.h`).
+(`engine/modules/sim/include/sim/simnet_perf.h`).
 
 **2026-08-28 recalibration.** The workload changed that day (`reps` 1 → 3
 min-of-samples, `funding_multiple` 1 → 2 — see "The workload" above), which
 moves every absolute figure below it, so the growth-ratio numbers are quoted
-from `lib/sim/include/sim/simnet_perf.h`'s own calibration comment, not
+from `engine/modules/sim/include/sim/simnet_perf.h`'s own calibration comment, not
 re-derived here: 17 observations on a 32-core 7950X3D spanning an idle box, a
 32-worker synthetic memory load, and four real 32-worker `test_parallel` suite
 runs, at the default workload:
@@ -234,7 +234,7 @@ until it has been shown to discriminate real-bad from real-good. So the budget
 ships with a **parent-failing prover**.
 
 `coins/coins_fault.h` arms one test-only regression in the real UTXO map. The
-map (`struct coins_map`, `lib/coins/include/coins/coins_view.h`) is
+map (`struct coins_map`, `core/modules/coins/include/coins/coins_view.h`) is
 open-addressed with linear probing, keyed by `coins_map_hash()` = the txid's
 first 8 bytes. Arming `degraded_hash` collapses that bucket index to a single
 constant, so:
@@ -259,8 +259,8 @@ one already-resident struct-field load when unarmed (no global, no atomic, no
 call), and `coins_fault_arm_map_hash_collapse()` **refuses on a non-empty map** —
 flipping the hash under live entries would strand entries behind an empty slot,
 which would turn a perf hook into a correctness fault. Nothing in the node ever
-calls it; the only callers are `lib/sim/src/simnet_perf.c` and
-`lib/test/src/test_simnet_perf.c`.
+calls it; the only callers are `engine/modules/sim/src/simnet_perf.c` and
+`tests/harness/src/test_simnet_perf.c`.
 
 ### The proof
 
@@ -314,7 +314,7 @@ regression is completely invisible to every count-based check. That is the whole
 argument for owning a cost detector.
 
 `make sim-perf-teeth` runs exactly that pair and fails loudly if the armed run
-*passes*. `make t ONLY=simnet_perf` (`lib/test/src/test_simnet_perf.c`) runs
+*passes*. `make t ONLY=simnet_perf` (`tests/harness/src/test_simnet_perf.c`) runs
 the same comparison in-process on every suite run, but does **not** assert
 either absolute growth budget in-suite (see above) — instead it requires the
 armed arm's per-transaction fold cost to beat the clean arm's by **at least
@@ -325,7 +325,7 @@ binding one: the collapsed map's probe run is shortest there, so the
 armed/clean ratio is weakest at scale 1 and grows with scale. Calibrated
 worst case at scale 1: idle 6.29–8.38x; under a 32-worker synthetic load
 across 10 runs, 5.48–6.58x — both comfortably clear of the 4.0x floor (see
-`lib/test/src/test_simnet_perf.c`'s own calibration comment above that
+`tests/harness/src/test_simnet_perf.c`'s own calibration comment above that
 assertion). It also re-checks that both arms folded the same transaction
 count and ended with the same UTXO count and tip height, i.e. that the
 injected regression is completely invisible to every count-based check.
@@ -345,7 +345,7 @@ trusted again:
 - **`coins_map`'s implementation changes.** The whole `funding_multiple`
   argument rests on `coins_map` being open addressing with linear probing, so
   a coin's cost under the collapsed hash is its position in the insertion
-  run. If `coins_map` (`lib/coins/src/coins_view.c`) ever moves to a different
+  run. If `coins_map` (`core/modules/coins/src/coins_view.c`) ever moves to a different
   collision strategy (chaining, robin hood probing, a different bucket
   layout), the ballast-ordering effect this section describes may shrink,
   vanish, or invert, and the calibration above would no longer describe the
@@ -353,10 +353,10 @@ trusted again:
 
 If either changes: re-run `make sim-perf-teeth` and `make t ONLY=simnet_perf`
 repeatedly (loaded and idle) and update the calibration comments in
-`lib/sim/include/sim/simnet_perf.h`, `lib/test/src/test_simnet_perf.c`, and
+`engine/modules/sim/include/sim/simnet_perf.h`, `tests/harness/src/test_simnet_perf.c`, and
 this file together — they are three views of the same measurement and must
 not drift apart. Do not "simplify" the ballast-before-funding ordering in
-`lib/sim/src/simnet_perf.c` without re-measuring first; it is the entire
+`engine/modules/sim/src/simnet_perf.c` without re-measuring first; it is the entire
 source of the discrimination margin at the smallest ladder point (see "Why
 `funding_multiple` exists" above), and a change that looks like harmless
 cleanup there can quietly collapse the margin back to a coin flip.
@@ -422,11 +422,11 @@ The DSL's *assertion* shape is reused verbatim, which is the part worth sharing.
 
 ## Files
 
-- `lib/sim/include/sim/simnet_perf.h` — contract, budget constant, metric list
-- `lib/sim/src/simnet_perf.c` — workload, staged timing, growth math
+- `engine/modules/sim/include/sim/simnet_perf.h` — contract, budget constant, metric list
+- `engine/modules/sim/src/simnet_perf.c` — workload, staged timing, growth math
 - `tools/sim/simperf.c` — CLI, `--expect` parsing, verdict
-- `lib/coins/include/coins/coins_fault.h` — the injected regression + its
+- `core/modules/coins/include/coins/coins_fault.h` — the injected regression + its
   arming contract
-- `lib/coins/src/coins_fault.c` — arming surface
-- `lib/test/src/test_simnet_perf.c` — the both-directions self-test
+- `core/modules/coins/src/coins_fault.c` — arming surface
+- `tests/harness/src/test_simnet_perf.c` — the both-directions self-test
 - `Makefile` — `sim-perf`, `sim-perf-teeth`, `sim-perf-clean`

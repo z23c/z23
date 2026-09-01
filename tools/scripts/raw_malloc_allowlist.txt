@@ -1,7 +1,7 @@
 # tools/scripts/raw_malloc_allowlist.txt
 #
 # Files allowed to contain raw malloc/calloc/realloc() calls outside the
-# zcl_malloc / zcl_calloc / zcl_realloc wrappers (lib/util/include/util/safe_alloc.h).
+# zcl_malloc / zcl_calloc / zcl_realloc wrappers (platform/modules/util/include/util/safe_alloc.h).
 # Each entry is a path relative to the repo root.
 #
 # This is a *ratchet* list. Files are removed as each subsystem

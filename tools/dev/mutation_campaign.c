@@ -3,7 +3,7 @@
  * mutation-campaign — measure whether a registered test group would NOTICE
  * if the code it covers were wrong.
  *
- *   build/bin/mutation-campaign --file=lib/metaverse/src/node_character.c \
+ *   build/bin/mutation-campaign --file=contexts/commons/modules/metaverse/src/node_character.c \
  *                               --group=test_node_character
  *
  * It enumerates every realistic one-token defect in the file, compiles each

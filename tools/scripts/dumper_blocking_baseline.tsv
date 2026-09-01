@@ -11,9 +11,9 @@
 # tip_finalize's dump already trylocks (never blocks) but still runs a COUNT(*)
 # for its optional durable log_rows — migrate it to a stage_log_rows counter
 # (add "tip_finalize_log" to jobs/stage_log_rows.c) and delete this row.
-stage_log_row_count	app/jobs/src/tip_finalize_stage_observe.c
+stage_log_row_count	engine/jobs/src/tip_finalize_stage_observe.c
 # These two take progress_store_tx_lock BLOCKING in their dump body — convert to
 # progress_store_tx_trylock + a "progress_store_busy" marker (the pattern the A2
 # dumpers use) and delete the row.
-progress_store_tx_lock	config/src/boot_bundle_fetch_discovery_outcome.c
-progress_store_tx_lock	lib/storage/src/seal_kv.c
+progress_store_tx_lock	engine/composition/src/boot_bundle_fetch_discovery_outcome.c
+progress_store_tx_lock	engine/modules/storage/src/seal_kv.c

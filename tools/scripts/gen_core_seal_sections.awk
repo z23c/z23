@@ -26,7 +26,7 @@ END {
     print " * WHAT IT IS FOR. hotswap/core_seal_root.h carries ONE value: the flat ROOT";
     print " * fold over every sealed file. It is a whole-tree pin — every module is";
     print " * invalidated by a change to any of the 70 sealed files. These rows carry the";
-    print " * SAME sealed set at directory granularity, in lib/codeindex's source Merkle";
+    print " * SAME sealed set at directory granularity, in cognition/modules/codeindex's source Merkle";
     print " * dialect (a structurally different fold over the same bytes), so a module can";
     print " * RECORD which sections it actually compiled against and the resident can";
     print " * verify each of them IN ADDITION to ROOT.";

@@ -576,9 +576,9 @@ int main(int argc, char **argv)
     die("usage: fixture_gen write PATH PRICE SIZE | root PATH | onion PUBKEY_HEX");
 }
 C
-cc -std=c23 -O2 -I"$REPO_ROOT/lib/sha3/include" -I"$REPO_ROOT/lib/base/include" \
+cc -std=c23 -O2 -I"$REPO_ROOT/platform/modules/sha3/include" -I"$REPO_ROOT/platform/modules/base/include" \
     -o "$FIXTURE_GEN" "$MKT_WORK/fixture_gen.c" \
-    "$REPO_ROOT/lib/sha3/src/sha3.c" || mkt_die "fixture_gen compile failed"
+    "$REPO_ROOT/platform/modules/sha3/src/sha3.c" || mkt_die "fixture_gen compile failed"
 read -r FIXTURE_SIZE EXPECT_ROOT EXPECT_TOTAL_ZAT \
     <<<"$("$FIXTURE_GEN" write "$FIXTURE" "$PRICE_PER_MB_ZAT" "$FIXTURE_BYTES")" \
     || mkt_die "fixture build failed"

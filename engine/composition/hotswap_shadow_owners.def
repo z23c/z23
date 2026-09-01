@@ -1,0 +1,133 @@
+/* Static authority shells whose deterministic decisions live in one pure
+ * service island. Consumer defines HOTSHADOW_OWNER(shell_tu, service_tu).
+ *
+ * The shell is compile-checked but never loaded or activated. The service is
+ * compiled as a proposal and its resident-frozen KAT runs in a disposable
+ * fork. This is coverage routing, never runtime authority. */
+
+HOTSHADOW_OWNER("tools/command/native_dev_command.c",
+                "cognition/services/src/dev_reflex_policy_service.c")
+HOTSHADOW_OWNER("tools/command/native_dev_hotswap.c",
+                "cognition/services/src/dev_reflex_policy_service.c")
+HOTSHADOW_OWNER("tools/dev/devloop_plan.c",
+                "cognition/services/src/dev_reflex_policy_service.c")
+HOTSHADOW_OWNER("tools/dev/devloop_cycle.c",
+                "cognition/services/src/dev_reflex_policy_service.c")
+HOTSHADOW_OWNER("tools/dev/devloop_watch.c",
+                "cognition/services/src/dev_reflex_policy_service.c")
+HOTSHADOW_OWNER("tools/dev/devloop_restart_build.c",
+                "cognition/services/src/dev_reflex_policy_service.c")
+HOTSHADOW_OWNER("tools/dev/devloop_hotswap_build.c",
+                "cognition/services/src/dev_reflex_policy_service.c")
+
+HOTSHADOW_OWNER("tools/command/native_zcode_moderation_command.c",
+                "contexts/commons/services/src/zcode_moderation_view_service.c")
+HOTSHADOW_OWNER("tools/command/native_zcode_epoch_propose_command.c",
+                "contexts/commons/services/src/zcode_c23_economics_service.c")
+HOTSHADOW_OWNER("tools/command/native_zcode_corpus_command.c",
+                "contexts/commons/services/src/zcode_c23_corpus_service.c")
+HOTSHADOW_OWNER("tools/command/native_zcode_passport_command.c",
+                "contexts/commons/services/src/zcode_passport_view_service.c")
+HOTSHADOW_OWNER("tools/command/native_zcode_workspace_command.c",
+                "contexts/commons/services/src/zcode_workspace_view_service.c")
+HOTSHADOW_OWNER("tools/command/native_zcode_package_view_command.c",
+                "contexts/commons/services/src/zcode_package_view_service.c")
+HOTSHADOW_OWNER("tools/command/native_zcode_dev_command.c",
+                "contexts/commons/services/src/zcode_lane_view_service.c")
+HOTSHADOW_OWNER("contexts/market/controllers/src/market_moderation_native_handler.c",
+                "contexts/market/services/src/market_moderation_view_service.c")
+HOTSHADOW_OWNER("contexts/market/controllers/src/market_purchase_native_handler.c",
+                "contexts/market/services/src/market_purchase_view_service.c")
+HOTSHADOW_OWNER("contexts/market/controllers/src/shop_native_reputation.c",
+                "contexts/market/services/src/shop_reputation_view_service.c")
+HOTSHADOW_OWNER("contexts/market/controllers/src/shop_native_want_view_contract.c",
+                "contexts/market/services/src/shop_want_view_service.c")
+HOTSHADOW_OWNER("contexts/market/controllers/src/shop_native_handler.c",
+                "contexts/market/services/src/shop_status_view_service.c")
+HOTSHADOW_OWNER("contexts/market/controllers/src/shop_native_want.c",
+                "contexts/market/services/src/market_moderation_view_service.c")
+HOTSHADOW_OWNER("contexts/market/controllers/src/file_market_controller.c",
+                "contexts/market/services/src/market_moderation_view_service.c")
+HOTSHADOW_OWNER("contexts/market/controllers/src/shop_native_fulfill.c",
+                "contexts/market/services/src/shop_want_view_service.c")
+HOTSHADOW_OWNER("contexts/market/controllers/src/shop_native_fulfill_support.c",
+                "contexts/market/services/src/market_moderation_view_service.c")
+HOTSHADOW_OWNER("contexts/wallet/controllers/src/vault_intent_controller.c",
+                "contexts/wallet/services/src/vault_intent_decision_service.c")
+HOTSHADOW_OWNER("contexts/commons/services/src/zcode_lane_service.c",
+                "contexts/commons/services/src/zcode_lane_view_service.c")
+HOTSHADOW_OWNER("cognition/services/src/zcode_goal_context_service.c",
+                "cognition/services/src/zcode_goal_context_calc_service.c")
+HOTSHADOW_OWNER("tools/command/native_zcode_command.c",
+                "contexts/commons/services/src/zcode_package_view_service.c")
+HOTSHADOW_OWNER("tools/command/native_zcode_work_command.c",
+                "cognition/services/src/zcode_goal_context_calc_service.c")
+
+/* Development/build authority shells: exact semantic compile + the frozen
+ * reflex/lane policy story. Process control and durable effects stay static. */
+HOTSHADOW_OWNER("tools/dev/test_group_catalog.c",
+                "cognition/services/src/dev_reflex_policy_service.c")
+HOTSHADOW_OWNER("tools/dev/devloop_process.c",
+                "cognition/services/src/dev_reflex_policy_service.c")
+HOTSHADOW_OWNER("tools/dev/dev_source_identity.c",
+                "cognition/services/src/dev_reflex_policy_service.c")
+HOTSHADOW_OWNER("tools/dev/dev_workspace.c",
+                "cognition/services/src/dev_reflex_policy_service.c")
+HOTSHADOW_OWNER("tools/command/native_command.c",
+                "cognition/services/src/dev_reflex_policy_service.c")
+HOTSHADOW_OWNER("tools/command/native_dev_mirror_command.c",
+                "cognition/services/src/dev_reflex_policy_service.c")
+/* Durable evidence/publication remains entirely static and asynchronous. Its
+ * only reflex-side contract is the immutable proof-handoff envelope. */
+HOTSHADOW_OWNER("contexts/commons/modules/vcs/src/vcs_devloop.c",
+                "cognition/services/src/dev_reflex_policy_service.c")
+HOTSHADOW_OWNER("tools/command/native_code_command.c",
+                "cognition/services/src/zcode_goal_context_calc_service.c")
+
+/* Zcode/package authority shells retain object-store, signing, process and
+ * network effects; only their caller-owned planning/view cores run shadow. */
+HOTSHADOW_OWNER("tools/command/native_zcode_source_bundle_command.c",
+                "contexts/commons/services/src/zcode_package_view_service.c")
+HOTSHADOW_OWNER("tools/command/native_zcode_network_command.c",
+                "contexts/commons/services/src/zcode_lane_view_service.c")
+HOTSHADOW_OWNER("tools/command/native_zcode_claim_command.c",
+                "contexts/commons/services/src/zcode_c23_economics_service.c")
+HOTSHADOW_OWNER("tools/command/native_zcode_swarm_command.c",
+                "contexts/commons/services/src/zcode_lane_view_service.c")
+HOTSHADOW_OWNER("tools/command/native_zcode_work_run_command.c",
+                "cognition/services/src/zcode_goal_context_calc_service.c")
+HOTSHADOW_OWNER("engine/services/src/build_fabric_async.c",
+                "contexts/commons/services/src/zcode_lane_view_service.c")
+HOTSHADOW_OWNER("contexts/commons/services/src/build_fabric_package_executor.c",
+                "contexts/commons/services/src/zcode_package_view_service.c")
+HOTSHADOW_OWNER("engine/services/src/build_fabric_runtime.c",
+                "contexts/commons/services/src/zcode_lane_view_service.c")
+HOTSHADOW_OWNER("engine/services/src/build_fabric_service.c",
+                "contexts/commons/services/src/zcode_lane_view_service.c")
+HOTSHADOW_OWNER("contexts/commons/services/src/package_lifecycle_store.c",
+                "contexts/commons/services/src/zcode_package_view_service.c")
+
+/* Marketplace/agent shells keep persistence and external effects static. */
+HOTSHADOW_OWNER("contexts/market/services/src/market_moderation_service.c",
+                "contexts/market/services/src/market_moderation_view_service.c")
+HOTSHADOW_OWNER("contexts/market/services/src/shop_fulfill_evidence_service.c",
+                "contexts/market/services/src/shop_want_view_service.c")
+HOTSHADOW_OWNER("contexts/market/controllers/src/shop_native_probes.c",
+                "contexts/market/services/src/shop_status_view_service.c")
+HOTSHADOW_OWNER("cognition/controllers/src/agent_build_status_collector.c",
+                "contexts/commons/services/src/zcode_lane_view_service.c")
+HOTSHADOW_OWNER("cognition/controllers/src/agent_controller.c",
+                "cognition/services/src/zcode_goal_context_calc_service.c")
+
+/* Pure implementation members compiled into the candidate service itself.
+ * Unlike authority shells these bytes execute in HOT_SHADOW, so they must pass
+ * the same no-state/no-effects lint as the service. */
+HOTSHADOW_SERVICE_MEMBERS(
+    "contexts/commons/services/src/zcode_workspace_view_service.c",
+    "contexts/commons/modules/vcs/src/zcode_workspace_manifest.c")
+HOTSHADOW_SERVICE_MEMBERS(
+    "contexts/commons/services/src/zcode_c23_economics_service.c",
+    "contexts/commons/modules/vcs/src/zcode_commons_economics.c contexts/commons/modules/vcs/src/zcode_epoch_schedule.c contexts/commons/modules/vcs/src/zcode_claim_epoch.c")
+HOTSHADOW_SERVICE_MEMBERS(
+    "contexts/commons/services/src/zcode_c23_corpus_service.c",
+    "contexts/commons/modules/vcs/src/zcode_c23_corpus_objects.c contexts/commons/modules/vcs/src/zcode_c23_corpus_shard.c contexts/commons/modules/vcs/src/zcode_c23_productivity_receipt.c")

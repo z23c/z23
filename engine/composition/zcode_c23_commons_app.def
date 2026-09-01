@@ -1,0 +1,13 @@
+/* The standalone stranger-facing application is package ten in the Commons
+ * graph. It uses the same row shape as zcode_package_registry.def so every
+ * generic graph consumer can append it without an application-specific
+ * runner. The key is a deterministic public alpha fixture identity, never an
+ * owner or stable-release key. */
+ZCODE_PACKAGE("zclassic23/commons-demo", "contexts/commons/modules/commons_demo", 10,
+    "25cd55fd434ccf288bcec94c0036c627c9904449b12a57503910567056c61800",
+    "1db3df949e5995b0a9d21bf48672da30ede87a1d18106ecc3c92b8316471cb62",
+    "8c59ac8051fc8cc00756930ea2104079bd5fc3d15eb825d679892ebec8b275ac",
+    "bf7bdd6251896ef9512f6f6c7ff2c6b5e99079f24677ecfc2e05f47e1d42ea72",
+    "772140125030b70046d385ad60301af90ab5acac86160d58b7612cf075c8f4ed",
+    "021492bc6a132ac91cb8b9f57d2b809dd2bdb8e1a294d3edbb6c6f7fc03bf11cac",
+    "8bb63005c0cd899b13b704d64fe8917cd047ecc914cc921f646410026909c8ef2640a9ca3f7af9be4fb93cbd202dd41352a8f2be1a06ddc154b322a0bb31feef")

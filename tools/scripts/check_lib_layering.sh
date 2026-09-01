@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Lint gate #14 — lib/ layer purity (HARD).
 #
-# Files under lib/ should not #include from app/controllers/, app/models/,
-# app/services/, app/views/, or config/. lib/ is the foundation; app/ is the
+# Files under lib/ should not #include from engine/controllers/, engine/models/,
+# engine/services/, contexts/explorer/views/, or config/. lib/ is the foundation; app/ is the
 # upstream consumer and config/ is the composition root that wires the whole
 # process together — both sit ABOVE lib/. A backward include typically means
 # the lib/ file is doing something that belongs upstairs, or relying on a
@@ -13,16 +13,16 @@
 # lib/ file that names a config/ symbol makes the two layers cyclic. When
 # lib/ genuinely needs something the composition root owns (a live handle, a
 # policy answer), declare a port in lib/ and let config/ register the
-# implementation — see lib/net/include/net/net_runtime_port.h and
-# lib/storage/include/storage/node_db_runtime.h for the two shapes in tree.
+# implementation — see core/modules/net/include/net/net_runtime_port.h and
+# engine/modules/storage/include/storage/node_db_runtime.h for the two shapes in tree.
 #
-# Not matched, deliberately: lib/hotswap's `../../../config/*.def` includes.
+# Not matched, deliberately: engine/modules/hotswap's `../../../config/*.def` includes.
 # Those are X-macro DATA tables pasted into the translation unit; `nm` over
 # hotswap_activate.o / hotswap_loader.o shows zero undefined config symbols,
 # so they carry no link edge. Their paths are also named in docs/DEVELOPING.md,
 # docs/AGENT_TRAPS.md and three other lint gates.
 #
-# lib/test/ is out of scope (the find below prunes it): the test harness
+# tests/harness/include/test/ is out of scope (the find below prunes it): the test harness
 # links and drives the composition root by design.
 #
 # Promotion (architecture audit): the baseline has reached zero — there are

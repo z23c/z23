@@ -67,7 +67,7 @@
  *   file_size_policy --fix        tighten/delete baseline rows, then gate
  *
  * Environment overrides (used by the self-tests in
- * lib/test/src/lint_gate_shape_selftests.c; unset in normal runs):
+ * tests/harness/src/lint_gate_shape_selftests.c; unset in normal runs):
  *
  *   ZCL_FILE_SIZE_POLICY_BASELINE     baseline file path
  *   ZCL_FILE_SIZE_POLICY_SCAN_ROOTS   ':'- or ' '-separated scan roots
@@ -103,10 +103,10 @@
 /* Generated/tabular code: skipped entirely, never baselined. Carried over
  * verbatim from the predecessor gate's LIB_ALLOWLIST. */
 static const char *const ALLOWLIST[] = {
-    "lib/chain/src/sha3_windows.c",
-    "lib/sapling/src/bn254.c",
-    "lib/sapling/src/bls12_381.c",
-    "domain/wallet/src/mnemonic.c",
+    "core/modules/chain/src/sha3_windows.c",
+    "core/modules/sapling/src/bn254.c",
+    "core/modules/sapling/src/bls12_381.c",
+    "contexts/wallet/domain/src/mnemonic.c",
 };
 #define ALLOWLIST_COUNT (sizeof ALLOWLIST / sizeof ALLOWLIST[0])
 
@@ -118,29 +118,29 @@ struct legacy_ceiling {
     long maximum;
 };
 static const struct legacy_ceiling LEGACY_CEILINGS[] = {
-    { "config/src/boot.c", 4001 },
-    { "config/src/boot_refold_staged.c", 1810 },
-    { "lib/codeindex/src/codeindex_merkle.c", 1776 },
-    { "lib/hotswap/src/hotswap_activate.c", 2325 },
-    { "lib/kernel/src/command_registry.c", 2403 },
-    { "lib/net/src/connman.c", 3432 },
-    { "lib/net/src/download.c", 1793 },
-    { "lib/net/src/fast_sync.c", 1688 },
-    { "lib/net/src/file_service.c", 3058 },
-    { "lib/net/src/msg_headers.c", 2370 },
-    { "lib/net/src/msgprocessor.c", 3031 },
-    { "lib/net/src/msgprocessor_snapshot.c", 1810 },
-    { "lib/net/src/net.c", 2373 },
-    { "lib/net/src/onion_directory.c", 1516 },
-    { "lib/net/src/peer_lifecycle.c", 1634 },
-    { "lib/net/src/rom_fetch.c", 1599 },
-    { "lib/platform/src/os_sandbox_linux.c", 1526 },
-    { "lib/vcs/src/package_reward.c", 1986 },
-    { "lib/vcs/src/package_swarm_node.c", 2015 },
-    { "lib/vcs/src/vcs_devloop.c", 2390 },
-    { "lib/wallet/src/wallet.c", 1560 },
-    { "lib/wallet/src/wallet_sqlite.c", 1603 },
-    { "src/main_cli_modes.c", 4275 },
+    { "engine/composition/src/boot.c", 4001 },
+    { "engine/composition/src/boot_refold_staged.c", 1810 },
+    { "cognition/modules/codeindex/src/codeindex_merkle.c", 1776 },
+    { "engine/modules/hotswap/src/hotswap_activate.c", 2325 },
+    { "engine/modules/kernel/src/command_registry.c", 2403 },
+    { "core/modules/net/src/connman.c", 3432 },
+    { "core/modules/net/src/download.c", 1793 },
+    { "core/modules/net/src/fast_sync.c", 1688 },
+    { "core/modules/net/src/file_service.c", 3058 },
+    { "core/modules/net/src/msg_headers.c", 2370 },
+    { "core/modules/net/src/msgprocessor.c", 3031 },
+    { "core/modules/net/src/msgprocessor_snapshot.c", 1810 },
+    { "core/modules/net/src/net.c", 2373 },
+    { "core/modules/net/src/onion_directory.c", 1516 },
+    { "core/modules/net/src/peer_lifecycle.c", 1634 },
+    { "core/modules/net/src/rom_fetch.c", 1599 },
+    { "platform/modules/platform/src/os_sandbox_linux.c", 1526 },
+    { "contexts/commons/modules/vcs/src/package_reward.c", 1986 },
+    { "contexts/commons/modules/vcs/src/package_swarm_node.c", 2015 },
+    { "contexts/commons/modules/vcs/src/vcs_devloop.c", 2390 },
+    { "contexts/wallet/modules/wallet/src/wallet.c", 1560 },
+    { "contexts/wallet/modules/wallet/src/wallet_sqlite.c", 1603 },
+    { "engine/entry/main_cli_modes.c", 4275 },
 };
 #define LEGACY_CEILING_COUNT \
     (sizeof LEGACY_CEILINGS / sizeof LEGACY_CEILINGS[0])
@@ -152,11 +152,11 @@ struct scan_root {
     int max_depth;
 };
 static const struct scan_root DEFAULT_ROOTS[] = {
-    { "app",        0 },
-    { "config/src", 0 },
-    { "lib",        0 },
-    { "domain",     0 },
-    { "src",        1 },
+    { "core",       0 },
+    { "engine",     0 },
+    { "contexts",   0 },
+    { "cognition",  0 },
+    { "platform",   0 },
 };
 #define DEFAULT_ROOT_COUNT (sizeof DEFAULT_ROOTS / sizeof DEFAULT_ROOTS[0])
 
@@ -400,7 +400,7 @@ static bool is_transient_fixture(const char *name)
     return name[0] == '_' && strstr(name, "fixture") != NULL;
 }
 
-/* Directory names never walked. `test` covers lib/test/ (fixtures and group
+/* Directory names never walked. `test` covers tests/harness/include/test/ (fixtures and group
  * registrations, legitimately huge) and any domain module test/ dir. The rest is
  * build/vendor/worktree noise, excluded only under a production scan so a
  * self-test pointing the roots at test-tmp/ still sees its own fixtures. */
@@ -413,7 +413,7 @@ static bool skip_directory(const char *name, bool production)
            strcmp(name, "planted") == 0;
 }
 
-/* ── The walk. One pass, portable: lib/platform's UTF-8 directory listing
+/* ── The walk. One pass, portable: platform/modules/platform's UTF-8 directory listing
  * backed by dirent on POSIX and FindFirstFileW on Win32. ───────────────── */
 
 static void classify(struct policy_run *run, const char *rel, long loc)

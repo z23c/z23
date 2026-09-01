@@ -27,7 +27,7 @@ satisfied by the wrong artifact:
 | `source_id_sha256` | what the binary was compiled FROM (baked in, read via `agentbuild`) | survives a rebuild, so two different artifacts can share it |
 | `artifact_sha256` | the exact bytes | says nothing about provenance on its own |
 
-All three live in `deploy/release-candidates.jsonl`, one JSON object per line,
+All three live in `platform/deploy/release-candidates.jsonl`, one JSON object per line,
 append-only. The last line is the active pin unless `ZCL_DRIFT_PIN_TAG` names
 another.
 
@@ -49,7 +49,7 @@ Cutting a candidate is two steps, both owner-run:
 
 ```bash
 git tag -a rc-20260728-75afb4361 -m 'proof lane candidate' 75afb4361
-# then append the observed triple to deploy/release-candidates.jsonl
+# then append the observed triple to platform/deploy/release-candidates.jsonl
 ```
 
 `tools/release.sh` is deliberately left alone here: it refuses everything but
@@ -67,7 +67,7 @@ A row is a record of what was observed, never a wish. Do not hand-write one.
 ## Promotions have their own ledger
 
 This page's ledger says which build is *under proof*. The separate, signed,
-hash-chained ledger `deploy/promotion-receipts.jsonl` records the act of
+hash-chained ledger `platform/deploy/promotion-receipts.jsonl` records the act of
 *promoting* one to the proof server — see
 [`PROMOTION_RECEIPTS.md`](./PROMOTION_RECEIPTS.md). It is written by
 `tools/scripts/promotion_receipt.sh` from `tools/ship.sh`, never by hand, and it

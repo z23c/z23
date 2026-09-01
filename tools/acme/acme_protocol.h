@@ -5,7 +5,7 @@
  * Everything here is a pure function of bytes: hand it a response body and
  * it either fills a fixed-size struct or refuses. No sockets, no clock, no
  * global state — which is what makes the recorded-fixture tests in
- * lib/test/src/test_acme_protocol.c able to cover the hostile cases (a
+ * tests/harness/src/test_acme_protocol.c able to cover the hostile cases (a
  * missing field, a wrong type, an oversized URL, a challenge array with no
  * tls-alpn-01 member) that a live staging run would never produce on demand.
  *

@@ -62,7 +62,7 @@ check_contract() {
     flags="$(read_make_var ASAN_ADX_FRAME_POINTER_EXCEPTION_FLAGS)"
     common="$(read_make_var ASAN_COMMON_SAN_FLAGS)"
 
-    [ "$sources" = "lib/sapling/src/bn254_accel.c lib/sapling/src/fr_avx512.c" ] ||
+    [ "$sources" = "core/modules/sapling/src/bn254_accel.c core/modules/sapling/src/fr_avx512.c" ] ||
         fail "exception source allowlist changed: '$sources'"
     [ "$flags" = "-fomit-frame-pointer" ] ||
         fail "exception flags changed: '$flags'"
@@ -102,8 +102,8 @@ if [ "${1:-}" = "--selftest" ]; then
     # GNU's `sed -i '0,/re/{s//.../}'` has no BSD spelling: Apple sed would
     # take the whole program string as an in-place backup suffix and mutate
     # nothing, hollowing this selftest.
-    FROM='lib/sapling/src/bn254_accel.c'
-    TO='lib/sapling/src/bn254_accel.c lib/sapling/src/unaudited_accel.c'
+    FROM='core/modules/sapling/src/bn254_accel.c'
+    TO='core/modules/sapling/src/bn254_accel.c core/modules/sapling/src/unaudited_accel.c'
     awk -v from="$FROM" -v to="$TO" '
         BEGIN { done = 0 }
         !done && (i = index($0, from)) {

@@ -379,7 +379,7 @@ static const char *cr_verdict_name(enum cr_verdict v)
  * Reads $datadir/node.db DIRECTLY (read-only) and counts UTXO rows
  * whose height exceeds the coins_best_block tip height. This is the
  * EXACT invariant the in-process kill9 unit test asserts
- * (lib/test/src/test_kill9_recovery.c:p11_7_count_utxos_above_tip):
+ * (tests/harness/src/test_kill9_recovery.c:p11_7_count_utxos_above_tip):
  *
  *   tip  = SELECT b.height FROM blocks b, node_state n
  *          WHERE n.key='coins_best_block' AND b.hash=n.value
@@ -390,7 +390,7 @@ static const char *cr_verdict_name(enum cr_verdict v)
  * left above the tip is a recovery regression.
  *
  * IMPORTANT: the canonical UTXO set lives in node.db, NOT a "coins.db"
- * (there is no such file — see lib/storage/src/coins_view_sqlite.c).
+ * (there is no such file — see engine/modules/storage/src/coins_view_sqlite.c).
  *
  * The two row-step calls below carry a
  * `// raw-sql-ok:crash-harness-readonly-foreign-db` marker: this is a

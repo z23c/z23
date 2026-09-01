@@ -143,7 +143,7 @@ the maintainer live-state handoff as an ordinary work queue.
 
 ## Real package retrieval and coordination rerun
 
-The next controlled task used the tracked `packages/zdemo` package and the
+The next controlled task used the tracked `contexts/commons/packages/zdemo` package and the
 user-visible goal “Reject malformed or overflowing `--frames` and `--seconds`
 values without opening a window.” The package source root remained
 `b16fe46f77995f0b088088e0a66f1f0085cee13a55c74b14b9df571e21c4a080`
@@ -318,7 +318,7 @@ exact task source root
 Five subsequent code commands did not share that bounded source universe.
 `code capsule` and `code find` could not resolve the identifier, while a broad
 intent change plan selected a consensus macro. The global code index omitted
-tracked `packages/` sources even though package-local work indexing already
+tracked `contexts/commons/packages/` sources even though package-local work indexing already
 supported `app`, `include`, `src`, and `tests`.
 
 The intervention adds tracked packages to the POSIX and Windows repository

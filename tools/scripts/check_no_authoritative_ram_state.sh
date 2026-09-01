@@ -22,7 +22,7 @@ gate_load_list_file "$BASELINE" baseline baseline_count
 
 pattern='(\.|->)chain_active\.(height|chain|capacity)|(^|[[:space:]])static[[:space:]]+struct[[:space:]]+active_chain[[:space:]]+[A-Za-z_][A-Za-z0-9_]*|(^|[[:space:]])struct[[:space:]]+active_chain[[:space:]]+g_[A-Za-z_][A-Za-z0-9_]*'
 
-mapfile -t scan_files < <(find app lib config tools -type f \( -name '*.c' -o -name '*.h' \) \
+mapfile -t scan_files < <(find core engine contexts cognition platform tools -type f \( -name '*.c' -o -name '*.h' \) \
     ! -path '*/test/*' \
     ! -path 'tools/scripts/*' \
     ! -path 'tools/lint/*' \

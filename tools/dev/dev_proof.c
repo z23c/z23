@@ -1968,7 +1968,7 @@ static bool proof_worker(const struct proof_paths *paths,
     }
     char policy_path[PATH_MAX], action_path[PATH_MAX];
     if (snprintf(policy_path, sizeof(policy_path),
-                 "%s/app/controllers/include/controllers/agent_impact_rules.def",
+                 "%s/cognition/controllers/include/controllers/agent_impact_rules.def",
                  generation) >= (int)sizeof(policy_path) ||
         snprintf(action_path, sizeof(action_path),
                  "%s/build/dev-loop/restart.env", paths->root) >=

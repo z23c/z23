@@ -22,7 +22,7 @@
 # defines `<domain>_dump_state_fill(`, for a domain named by a TABLE row.
 #
 # 8 today — one per telemetry domain: agents, metaverse, network, runtime,
-# storage, sync, wallet, zcode. Each is `app/services/src/<domain>_telemetry_
+# storage, sync, wallet, zcode. Each is `engine/services/src/<domain>_telemetry_
 # fill.c` defining `<domain>_dump_state_fill`, and all eight are covered by the
 # no-hand-written-JSON rule.
 #

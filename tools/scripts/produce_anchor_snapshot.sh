@@ -10,7 +10,7 @@
 # base, and the shielded frontier for every node.
 #
 # PRODUCTION PATH CHOSEN (see docs/work/self-verified-tip-plan.md +
-# config/src/boot_mint_anchor.c): drive the node's own `-mint-anchor` offline
+# engine/composition/src/boot_mint_anchor.c): drive the node's own `-mint-anchor` offline
 # reducer ceremony against a COPY of an already-synced-past-the-checkpoint
 # archived datadir (default: ~/.zclassic-c23-serve1.archived). Reusing a
 # datadir that already has every block BODY on disk means the
@@ -23,12 +23,12 @@
 # OPTION-B FINDING (export at height 3,056,758 straight from an
 # already-tip-synced node) — INVESTIGATED, NOT VIABLE: coins_kv is a mutable
 # projection of the CURRENT tip only, with no per-height history.
-# `-export-consensus-bundle` (config/src/boot_export_consensus_bundle.c)
+# `-export-consensus-bundle` (engine/composition/src/boot_export_consensus_bundle.c)
 # hardcodes `expected_height = cp->height` and its underlying
 # consensus_state_snapshot_export requires the FROZEN coins_kv to already
 # equal the state AT expected_height — see the doc comment on
 # consensus_state_snapshot_export_from_progress_snapshot in
-# config/include/config/consensus_state_snapshot_export.h: "a bundle can only
+# engine/composition/include/config/consensus_state_snapshot_export.h: "a bundle can only
 # be exported at the snapshot's frozen H*". A node synced past the checkpoint
 # has a coins_kv reflecting ITS OWN tip (~3.18M), not h=3,056,758, so the
 # transparent-coin SHA3 check would simply fail. There is no way to skip the
@@ -36,7 +36,7 @@
 # body-fetch, which this script does by folding over an already-bodied copy.
 #
 # -mint-anchor-fast, NOT plain -mint-anchor: proven live against the real
-# archived serve1 datadir (config/src/mint_anchor_progress.c
+# archived serve1 datadir (engine/composition/src/mint_anchor_progress.c
 # mint_anchor_producer_lane_bind) — a datadir that already fully synced to
 # tip carries "pre-lane" script_validate_log/proof_validate_log rows from
 # BEFORE the producer-lane-profile tracking existed, with no recorded proof
@@ -61,7 +61,7 @@
 #
 # VERIFICATION: two independent passes.
 #   (1) PRIMARY / authoritative — -mint-anchor's own internal hard-assert
-#       (config/src/boot_mint_anchor.c:669-704 recomputes coins SHA3+count vs
+#       (engine/composition/src/boot_mint_anchor.c:669-704 recomputes coins SHA3+count vs
 #       the compiled sha3_utxo_checkpoint; boot_mint_anchor_rom_keystone.c
 #       recomputes the shielded anchor/nullifier/Sprout-frontier digest vs
 #       the compiled rom_state_checkpoint). Either mismatch UNLINKS the
@@ -83,7 +83,7 @@
 # IDEMPOTENT + RESUMABLE: the datadir copy happens once (a second run reuses
 # the existing work datadir instead of re-copying); the mint ceremony itself
 # resumes from its own durable progress marker
-# (config/include/config/mint_anchor_progress.h) rather than re-folding from
+# (engine/composition/include/config/mint_anchor_progress.h) rather than re-folding from
 # genesis after an interrupted run — so re-running this script, or a systemd
 # Restart=on-failure, is always safe and never restarts the fold from height 0.
 #
@@ -105,7 +105,7 @@
 #                           (default: unset — auto-adopted from the copy, see
 #                           OPERATOR LANE below)
 #
-# OPERATOR LANE: wallet_identity_ensure (app/models/src/wallet_identity.c:107)
+# OPERATOR LANE: wallet_identity_ensure (contexts/wallet/models/src/wallet_identity.c:107)
 # FAILS the boot when the runtime lane does not equal the lane persisted in the
 # datadir, and the copy inherits the SOURCE datadir's persisted lane. A mint
 # driven with no -operator-lane therefore dies at db_open with
@@ -139,7 +139,7 @@ VERIFY_LOG="$WORK_DATADIR/produce-anchor-snapshot-secondary-verify.log"
 OUT_SNAPSHOT="$WORK_DATADIR/utxo-anchor.snapshot"
 CHECKPOINT_HEIGHT=3056758
 # -mint-anchor -mint-anchor-fast (the checkpoint_fold lane; -fast is honored
-# ONLY together with -mint-anchor, per src/main.c) — see the PRODUCTION PATH
+# ONLY together with -mint-anchor, per engine/entry/main.c) — see the PRODUCTION PATH
 # comment above for why plain -mint-anchor alone refuses against pre-lane
 # legacy state. Override only if you know the source datadir already carries
 # a matching "full" producer-lane marker (a fresh, never-before-minted
@@ -229,7 +229,7 @@ else
 fi
 
 # ── Step 2: drive the offline anchor mint (resumable via its own progress
-# marker — config/include/config/mint_anchor_progress.h). Foreground: this
+# marker — engine/composition/include/config/mint_anchor_progress.h). Foreground: this
 # script is meant to run under a durable systemd --user unit, so blocking for
 # hours here is correct, not a bug. ─────────────────────────────────────────
 if [ -n "$OPERATOR_LANE" ] && ! mint_flags_have_lane; then

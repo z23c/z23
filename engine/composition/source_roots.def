@@ -1,0 +1,18 @@
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ * purpose: Canonical maintained C23 source roots for repository-wide scans. */
+
+SOURCE_ROOT("core")
+SOURCE_ROOT("engine")
+SOURCE_ROOT("contexts")
+SOURCE_ROOT("cognition")
+SOURCE_ROOT("platform")
+SOURCE_ROOT("tools")
+SOURCE_ROOT("tests")
+/* Conventional roots remain available when the index is opened on an
+ * external C23 package workspace rather than on Z23 itself. */
+SOURCE_ROOT("app")
+SOURCE_ROOT("include")
+SOURCE_ROOT("src")
+SOURCE_ROOT("lib")
+SOURCE_ROOT("packages")
+SOURCE_ROOT("examples")

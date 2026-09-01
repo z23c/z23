@@ -11,9 +11,9 @@
  * so observable purity holds.
  *
  * Reject-reason strings are byte-identical to the legacy
- * lib/validation/src/check_transaction.c, because they are
+ * core/modules/validation/src/check_transaction.c, because they are
  * tx-relay-visible (peers DoS-score us against them). The wrapper
- * in lib/validation/ copies these literals into validation_state. */
+ * in core/modules/validation/ copies these literals into validation_state. */
 
 #include "domain/consensus/tx_structural.h"
 

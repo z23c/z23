@@ -232,7 +232,7 @@ _gate_lib_tmp_done() {
 # Derive the expected scan set from the git index — a mechanism wholly
 # independent of any find/glob a gate runs — into OUT-FILE, LC_ALL=C sorted
 # and unique. Every argument after GATE-NAME is a git pathspec (magic
-# pathspecs such as ':!:lib/test/*' work).
+# pathspecs such as ':!:tests/harness/include/test/*' work).
 #
 # Deliberately not `git ls-files -z`: bash command substitution drops NUL
 # bytes, which would fuse the whole listing into one line. Plain output is

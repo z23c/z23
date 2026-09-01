@@ -5,10 +5,10 @@ has only ever been run against a peer on the same machine. Loopback is
 structurally privileged on **both** sides of the wire, so a loopback pass
 cannot stand in for a remote one:
 
-- **client side** — `is_trusted_peer()` in `lib/net/src/net.c` exempts
+- **client side** — `is_trusted_peer()` in `core/modules/net/src/net.c` exempts
   `127.0.0.0/8` and `-whitelist` peers from `peer_misbehaving()`, so a loopback
   client never rides the score-to-ban path;
-- **server side** — the per-IP inbound sybil cap in `lib/net/src/net.c`
+- **server side** — the per-IP inbound sybil cap in `core/modules/net/src/net.c`
   ("too many inbound connections from same IP", max 3) is only ever contended
   when several clients share one source IP, which is the remote case and never
   the one-node-per-loopback case.
@@ -69,7 +69,7 @@ whole budget — independent of any reducer-side defect.
 
 ## The peer-ban theory is refuted for this run
 
-The client-side ban path (`lib/net/src/peer_scoring.c` weights `invalid_block`
+The client-side ban path (`core/modules/net/src/peer_scoring.c` weights `invalid_block`
 / `protocol_violation` at 100 against a threshold of 100) was never entered: no
 `banlist.dat` is written in the wiped datadir (`banlist_present: false`), no
 `peer_banned` line appears in the node log, and `peer_misbehaving()` requires a
@@ -77,7 +77,7 @@ message-layer offence that a connection dying pre-version can never produce.
 The exclusion happens on the **serving** side, at `accept()`, before scoring
 exists.
 
-The fitting server-side rule is the per-IP inbound cap in `lib/net/src/net.c`:
+The fitting server-side rule is the per-IP inbound cap in `core/modules/net/src/net.c`:
 `same_ip_count >= 3` closes the socket immediately with
 `too many inbound connections from same IP`. `ss -tn state established 'dst
 198.51.100.10:8033'` shows this host already holding exactly three
@@ -133,7 +133,7 @@ without that peer also running the new code. What landed is the removal of the
 two structural reasons a single-peer node cannot be recovered:
 
 1. **The per-IP inbound cap is no longer a bare literal.** `accept_connection()`
-   (`lib/net/src/net.c`) now reads `peer_scoring_max_inbound_per_ip()` —
+   (`core/modules/net/src/net.c`) now reads `peer_scoring_max_inbound_per_ip()` —
    `ZCL_PEER_MAX_INBOUND_PER_IP`, default 3, clamped to `[1, 4096]`. An operator
    serving a host that legitimately runs several nodes (or any NAT) can raise it
    without a patch. The refusal log line now names the cap, the env var, and the

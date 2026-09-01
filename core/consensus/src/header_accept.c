@@ -6,11 +6,11 @@
  * Pure block-header acceptance structural checks. Mirrors the PURE
  * branches of the two legacy entry points:
  *
- *   lib/validation/check_block::check_block_header_impl
+ *   core/modules/validation/check_block::check_block_header_impl
  *     - version-too-low gate
  *     - time-too-new gate (parameterised by now_upper_bound)
  *
- *   lib/validation/check_block::contextual_check_block_header
+ *   core/modules/validation/check_block::contextual_check_block_header
  *     - bad-equihash-solution-size gate
  *     - bad-diffbits gate (parameterised by expected_bits)
  *     - time-too-old gate (parameterised by prev_mtp)

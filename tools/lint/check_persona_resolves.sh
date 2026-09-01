@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Gate: every authored persona still points at things that exist (HARD).
 #
-# lib/engine/include/engine/personas.def is the one place a territory's
+# engine/modules/engine/include/engine/personas.def is the one place a territory's
 # authored STANCE is written down. Everything else about a territory is
 # derived from the code index on every call, precisely so it cannot go stale
 # while still reading as true. A stance cannot be derived — it is a refusal
@@ -13,7 +13,7 @@
 #
 #   TERRITORY  a directory in the tree that holds at least one tracked C
 #              source or header. That is the same independent witness
-#              config/lib_module_order.def uses for its own set — the tree
+#              engine/composition/lib_module_order.def uses for its own set — the tree
 #              itself, which exists whether or not anyone declared it —
 #              rather than a second .def, which would only prove two files
 #              agree with each other.
@@ -34,7 +34,7 @@ set -euo pipefail
 cd "$(dirname "$0")/../.." || exit 2
 
 GATE="check_persona_resolves"
-DEF="${ZCL_PERSONA_DEF:-lib/engine/include/engine/personas.def}"
+DEF="${ZCL_PERSONA_DEF:-engine/modules/engine/include/engine/personas.def}"
 ROW_FLOOR="${ZCL_PERSONA_ROW_FLOOR:-3}"
 STANCE_MIN=40
 STANCE_MAX=700
@@ -75,8 +75,8 @@ territory_resolves() {
     # `set -o pipefail`, head exits after one line, git takes SIGPIPE, and the
     # pipeline reports 141 — so the BIGGEST modules, the ones with the most
     # files, would be the ones reported as holding no C. That is not a
-    # hypothetical: lib/net, lib/test and app/models all failed that way and
-    # lib/base did not, purely on how fast git filled the pipe.
+    # hypothetical: core/modules/net, lib/test and app/models all failed that way and
+    # platform/modules/base did not, purely on how fast git filled the pipe.
     local found
     found="$(git ls-files -- "$t/*.c" "$t/*.h" 2>/dev/null)"
     [ -n "$found" ] || return 1
@@ -137,34 +137,34 @@ if [ "${1:-}" = "--selftest" ]; then
         fi
     }
 
-    good='PERSONA("lib/base",
+    good='PERSONA("platform/modules/base",
     "LOG_FAIL, LOG_ERR and LOG_NULL RETURN; they are not print statements.",
-    "lib/base/include/base/log_macros.h")'
+    "platform/modules/base/include/base/log_macros.h")'
 
     printf '%s\n' "$good" > "$tmp/def"
     expect clean "a row whose territory and evidence both exist"
 
     printf '%s\n' 'PERSONA("lib/nope",
     "LOG_FAIL, LOG_ERR and LOG_NULL RETURN; they are not print statements.",
-    "lib/base/include/base/log_macros.h")' > "$tmp/def"
+    "platform/modules/base/include/base/log_macros.h")' > "$tmp/def"
     expect dirty "a territory the tree does not declare"
 
-    printf '%s\n' 'PERSONA("docs",
+    printf '%s\n' 'PERSONA(".github",
     "LOG_FAIL, LOG_ERR and LOG_NULL RETURN; they are not print statements.",
-    "lib/base/include/base/log_macros.h")' > "$tmp/def"
+    "platform/modules/base/include/base/log_macros.h")' > "$tmp/def"
     expect dirty "a directory that exists but holds no C"
 
-    printf '%s\n' 'PERSONA("lib/base",
+    printf '%s\n' 'PERSONA("platform/modules/base",
     "LOG_FAIL, LOG_ERR and LOG_NULL RETURN; they are not print statements.",
-    "lib/base/include/base/deleted_yesterday.h")' > "$tmp/def"
+    "platform/modules/base/include/base/deleted_yesterday.h")' > "$tmp/def"
     expect dirty "evidence that is not a tracked file"
 
     printf '%s\n%s\n' "$good" "$good" > "$tmp/def"
     expect dirty "two stances for one territory"
 
-    printf '%s\n' 'PERSONA("lib/base",
+    printf '%s\n' 'PERSONA("platform/modules/base",
     "be careful",
-    "lib/base/include/base/log_macros.h")' > "$tmp/def"
+    "platform/modules/base/include/base/log_macros.h")' > "$tmp/def"
     expect dirty "a stance too short to act on"
 
     # A hollow scan must be LOUD, never a quiet pass.

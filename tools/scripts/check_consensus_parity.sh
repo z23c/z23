@@ -60,7 +60,7 @@
 # by the `consensus-parity-ok:` comment: the comment marks a line the GATE
 # AUTHOR could edit; classes 1/2 exist specifically to be checkable by
 # someone who does NOT own the flagged file (this rollout registered four
-# pre-existing wall-clock sites in lib/validation and lib/mining without
+# pre-existing wall-clock sites in core/modules/validation and core/modules/mining without
 # touching either directory). A matching FLAG_DAYS.txt row still doesn't
 # stop a hostile publisher who edits the registry alongside the bomb in the
 # same commit — nothing textual can. What it buys is that the edit is
@@ -84,10 +84,10 @@ source tools/lint/scan_exclusions.sh
 # shellcheck source=tools/scripts/sh_str.sh
 source tools/scripts/sh_str.sh
 
-# Consensus-critical source surface. docs/ and lib/test/ are intentionally
+# Consensus-critical source surface. docs/ and tests/harness/include/test/ are intentionally
 # NOT scanned — the doctrine and the parity test may name these tokens
 # defensively without being a real mechanism.
-PATHS=(core/params core/chainparams lib/validation lib/chain lib/mining app/jobs core/consensus)
+PATHS=(core/params core/chainparams core/modules/validation core/modules/chain core/modules/mining engine/jobs engine/reducer/jobs core/consensus)
 
 # The registry required by scan classes 1/2 (see the header above and the
 # format comment at the top of the file itself).

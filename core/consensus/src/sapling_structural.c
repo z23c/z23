@@ -12,9 +12,9 @@
  * is preserved.
  *
  * Reject-reason strings are byte-identical to the legacy
- * lib/validation/src/contextual_check_tx.c, because they are
+ * core/modules/validation/src/contextual_check_tx.c, because they are
  * tx-relay-visible (peers DoS-score us against them). The wrapper
- * in lib/validation/ copies these literals into validation_state. */
+ * in core/modules/validation/ copies these literals into validation_state. */
 
 #include "domain/consensus/sapling_structural.h"
 

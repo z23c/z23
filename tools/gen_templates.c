@@ -6,7 +6,7 @@
  * .ccss files support {{var}} and {{{var}}} template variables.
  *
  * Usage: gen_templates <template_dir> <output.h> [css_dir]
- * Example: gen_templates app/views/templates app/views/include/views/wallet_templates_gen.h app/views/css */
+ * Example: gen_templates contexts/explorer/views/templates contexts/wallet/views/include/views/wallet_templates_gen.h contexts/explorer/views/css */
 
 #include <stdio.h>
 #include <stdlib.h>

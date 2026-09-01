@@ -76,7 +76,7 @@
 # is why the /proc parsers live here in full rather than being imported.
 #
 # The parser bodies and the compose-don't-collapse shape are deliberately the
-# same as the ones proven in deploy/zclassic23-host-watchdog.sh and
+# same as the ones proven in platform/deploy/zclassic23-host-watchdog.sh and
 # tools/deploy_verify.sh, so all four sites answer a slow box identically.
 #
 # STRICTLY POSIX sh: no arrays, no `local`, no process substitution. It is

@@ -16,7 +16,7 @@ Layering stays:
 
 1. pure canonical codecs and cryptographic bindings;
 2. bounded stateful engines with caller-driven clocks;
-3. the existing full-node adapters in `config/`, `app/`, and `lib/net/`.
+3. the existing full-node adapters in `config/`, `app/`, and `core/modules/net/`.
 
 Libraries do not acquire sockets, wallet authority, consensus state, a live
 datadir, deployment authority, or command ownership.
@@ -26,7 +26,7 @@ datadir, deployment authority, or command ownership.
 | Concept | Canonical candidate | Existing consumers | Duplication / difference audit | Deletion path |
 |---|---|---|---|---|
 | Content-addressed bytes | `package_store` content.v2 chunk CAS for node-carried bytes; `vcs_object` for working-copy ZVCS objects | package/source swarm, blob facade, work contexts; ZVCS commits/manifests/evidence | Two stores are necessary today: different roots, locations, quotas, and lifecycle owners. `blob_store` is already a facade over content.v2, not a third CAS. | Do not merge stores. Remove any future raw node-byte store in favor of content.v2; keep explicit bridges such as package mappings. |
-| Manifests | `package_manifest` for transferable content; `vcs_manifest` for source-tree semantics | packages/blobs/work context; ZVCS tree/commit | Different commitments and path semantics are necessary. Candidate trees and action inputs bind these roots rather than redefining transfer manifests. | Keep both formats; delete ad-hoc transfer manifests if found. |
+| Manifests | `package_manifest` for transferable content; `vcs_manifest` for source-tree semantics | contexts/commons/packages/blobs/work context; ZVCS tree/commit | Different commitments and path semantics are necessary. Candidate trees and action inputs bind these roots rather than redefining transfer manifests. | Keep both formats; delete ad-hoc transfer manifests if found. |
 | Missing-object transfer | `package_swarm` codec + `package_swarm_node` / engine | package hosting, source checkout, `blob_store`, `zcode_work_context` | This is already the shared ANNOUNCE/WANT/DATA/CANCEL path. Work control messages are not byte transfer. | Route new bounded objects through content.v2; no second object-transfer protocol. |
 | Signed evidence root | `signed_evidence` (this slice) | work/lane/score and benchmark receipts; work-swarm control; continuity, creation, patronage, science, seed, contributor, C23 corpus, and space evidence | The codecs repeated domain SHA3, Ed25519 seal, and signer-bound verification. Payload/domain differences are necessary; the crypto lifecycle was accidental. | Completed for compatible root-based objects without changing roots, signatures, or wires. Extend only when another codec has the exact root-signing contract. |
 | Signed preimage records | Domain codecs over Ed25519 (`zcode_dht_record`, delegation, package attest/release, and selected C23/space records) | DHT, publication, reproduction, and discovery | Some contracts sign canonical preimages directly rather than a 32-byte root, and expected-signer rules differ. Those are wire-contract differences, not permission to duplicate common validation forever. | Keep the direct-preimage formats until an independent rule-of-two primitive can preserve their exact bytes and policy. Do not rewrite formats merely to share code. |

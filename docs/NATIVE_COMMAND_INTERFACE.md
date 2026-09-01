@@ -6,7 +6,7 @@ adapters
 
 This document is the grammar/tree/envelope contract. For every leaf the
 registry currently declares, see [`docs/API_REFERENCE.md`](./API_REFERENCE.md)
-(generated from `config/commands/` by `tools/gen_api_reference.c`; regenerate
+(generated from `engine/composition/commands/` by `tools/gen_api_reference.c`; regenerate
 with `make docs-api-reference`). For the practical field-by-field
 reference of the implemented agent surface (`agentops`, `agentdiagnose`,
 `healthcheck`, `agentlanes`, the service/operation catalog, and more), see
@@ -65,7 +65,7 @@ authority from an environment switch.
 | Raw storage, reducers, boot, and process ownership | Web, onion, ZNAM, and UI bindings |
 | Never hot-swappable | Transactionally hot-swappable after ABI/state proof |
 
-Apps compile against `lib/framework/include/zclassic23/app.h`, not project internals.
+Apps compile against `engine/modules/framework/include/zclassic23/app.h`, not project internals.
 The public App ABI intentionally exposes no consensus mutation, raw SQL,
 filesystem, socket, private-key, peer-state, boot, or process capability.
 
@@ -313,7 +313,7 @@ manifest admission. `dev.hotswap.apply` forwards to the resident node's
 `dev_hotswap_native` RPC and is live on the armed `zcl23-dev` lane — gated by
 `-hotswap-activate` + `ZCL_HOTSWAP_ACTIVATE=1` + the exact dev datadir
 (canonical hard-refused), re-pointing only the six read-only leaves on
-`config/hotswap_swappable.def`. Full mechanism, ABI, and prerequisites
+`engine/composition/hotswap_swappable.def`. Full mechanism, ABI, and prerequisites
 for disposable probing/publication: `docs/work/HOTSWAP.md`.
 
 The ordinary agent runs `loop ensure` in verify mode once, edits files, then
@@ -471,7 +471,7 @@ state is not re-emitted.
 ### Input budgets
 
 Input is bounded per key, not globally. `zcl_command_registry_input_str_max()`
-(`lib/kernel/src/command_registry.c`) is the single source of truth: a string
+(`engine/modules/kernel/src/command_registry.c`) is the single source of truth: a string
 key nobody has ruled on may carry 4,096 characters, and a key that carries a
 hex-encoded wire object gets twice that wire's own maximum, so the two can
 never disagree.
@@ -523,11 +523,11 @@ Each major branch lives in its own declarative C definition file so an agent
 working on Apps does not need to load Core operations:
 
 ```text
-config/commands/root.def
-config/commands/core.def
-config/commands/apps.def
-config/commands/dev.def
-config/commands/ops.def
+engine/composition/commands/root.def
+engine/composition/commands/core.def
+engine/composition/commands/apps.def
+engine/composition/commands/dev.def
+engine/composition/commands/ops.def
 ```
 
 Menus and command specifications carry a registry digest. An LLM may cache a
@@ -778,17 +778,17 @@ without renaming the grammar.
 
 ### Phase B — Native registry and discovery
 
-**Status (read `config/commands/*.def` and `config/src/command_catalog.c`
+**Status (read `engine/composition/commands/*.def` and `engine/composition/src/command_catalog.c`
 directly): partially landed.**
 
-- **Done:** the split `config/commands/*.def` registry exists —
+- **Done:** the split `engine/composition/commands/*.def` registry exists —
   `root.def`, `core.def`, `apps.def`, `ops.def`, and `dev.def`.
-  `config/src/command_catalog.c` `#include`s `root.def` + `core.def` +
+  `engine/composition/src/command_catalog.c` `#include`s `root.def` + `core.def` +
   `apps.def` + `ops.def`, expands them via the `ZCL_COMMAND_*` X-macros into
   one immutable `g_catalog_commands[]` table, and binds native handler
   pointers. This is wired to real dispatch:
   `tools/command/native_command.c` calls `zcl_command_catalog()`, and
-  `src/main.c` reaches it through `zcl_native_command_main()` for any
+  `engine/entry/main.c` reaches it through `zcl_native_command_main()` for any
   method `zcl_native_command_is_root()` recognizes. `status` and the
   read-only Core/operator commands in `core.def` are among the first
   mapped leaves.
@@ -798,7 +798,7 @@ directly): partially landed.**
   in the dev build (`tools/command/native_dev_command.c`, `ZCL_DEV_BUILD`)
   and an honest `ZCL_COMMAND_COMPAT` stub with a `compat_target` in the
   release build. The legacy checkout-local devloop dispatcher is deleted
-  from `src/main.c`; `tools/dev/devloop_menu.c` is a thin wrapper over
+  from `engine/entry/main.c`; `tools/dev/devloop_menu.c` is a thin wrapper over
   `zcl_command_registry_menu_json`/`_search_json`;
   `tools/lint/check_release_no_dev_symbols.sh` proves via `nm` that the
   release binary links no dev-mutation executors.
@@ -807,7 +807,7 @@ directly): partially landed.**
   single-leaf module path is live on the armed `zcl23-dev` lane:
   `dev.hotswap.probe` verifies a module `.so` in a throwaway CLI process, and
   `dev.hotswap.apply` re-points one allowlisted read-only leaf
-  (`config/hotswap_swappable.def`) in the running dev node — gated on
+  (`engine/composition/hotswap_swappable.def`) in the running dev node — gated on
   `-hotswap-activate` + `ZCL_HOTSWAP_ACTIVATE=1` + the exact dev datadir,
   canonical refused. `dev.generation.activate` is the separate full-image
   transaction: immutable staging, exact source/resident CAS, bounded expiry,
@@ -892,9 +892,9 @@ default LLM context contains only the selected branch.
 
 ## 21. Current prototype and gaps
 
-The registry engine (`lib/kernel/{include/kernel/command_registry.h,src/command_registry.c}`),
-the composition-root catalog (`config/src/command_catalog.c`), and the
-`root`/`core`/`apps`/`ops`/`dev` `.def` definitions under `config/commands/`
+The registry engine (`engine/modules/kernel/{include/kernel/command_registry.h,src/command_registry.c}`),
+the composition-root catalog (`engine/composition/src/command_catalog.c`), and the
+`root`/`core`/`apps`/`ops`/`dev` `.def` definitions under `engine/composition/commands/`
 are wired end to end — this superseded an earlier dev-only prototype
 described in older revisions of this section. Typed effect/authority/
 availability/schema/execution-mode metadata, the common result envelope, the
@@ -1033,7 +1033,7 @@ brief is `z23 core status brief`; the large diagnostic document is explicit as
 `dumpstate` output.
 
 **No-arg entry point.** Bare `z23` (zero arguments — the real node
-service never invokes the binary this way; `deploy/zclassic23.service`
+service never invokes the binary this way; `platform/deploy/zclassic23.service`
 always passes `-datadir=`/`-rpcport=`/etc.) prints the brief line plus one
 suggested next command, never a wall of text:
 
@@ -1081,7 +1081,7 @@ Implementation: `zcl_native_status_brief_render`,
 and `zcl_native_render_unknown_command` (`tools/command/native_command.c`) —
 one implementation each, called from both the native registry path
 (`status`, `--field=`) and the raw-RPC CLI path (`dumpstate ...
-field=`, the no-arg entry point, unrecognized commands in `src/main.c`).
+field=`, the no-arg entry point, unrecognized commands in `engine/entry/main.c`).
 
 ## 25. Auth auto-discovery + connection error taxonomy (E4)
 
@@ -1095,7 +1095,7 @@ apart.
 
 **Cookie auto-discovery.** Every node records its bound RPC port next to
 its cookie at `<datadir>/.rpcport` (`rpc_http_start`,
-`lib/rpc/src/httpserver.c`). When `-rpcport=<N>` is given WITHOUT
+`engine/modules/rpc/src/httpserver.c`). When `-rpcport=<N>` is given WITHOUT
 `-datadir=`, the CLI scans `<HOME>/.zclassic-c23*` (client-side only, no
 network change) for the one sibling datadir whose recorded port is `<N>`
 and a readable `.cookie`, uses that datadir, and names it on one loud
@@ -1133,7 +1133,7 @@ bounded live/dead TCP probe) instead of a bare failure — one command answers
 The canonical typed-JSON contract above is unchanged — this section
 describes a presentation layer that sits strictly AFTER it
 (`tools/command/cli_render.c`, wired at the print sites in
-`tools/command/native_command.c` and `src/main_cli_modes.c`). The rule is:
+`tools/command/native_command.c` and `engine/entry/main_cli_modes.c`). The rule is:
 **machines get canonical JSON, humans get beauty.** The canonical document
 is always computed first, byte-identical; only the final print swaps in a
 human rendering, and only when a human is watching.

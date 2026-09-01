@@ -11,7 +11,7 @@
 # The leading ~6 KB of each file is the *verifying* key; everything after it
 # is the *proving* key. Consensus validation — checking the shielded proofs
 # in blocks other people made — uses only the verifying keys, and those are
-# compiled into this node (lib/sapling/src/params_vk_embedded.c). A node with
+# compiled into this node (core/modules/sapling/src/params_vk_embedded.c). A node with
 # an empty $HOME syncs, validates every shielded proof, and serves peers with
 # nothing downloaded.
 #
@@ -56,7 +56,7 @@ PARAM_SHA256=(
 PARAM_BYTES=(47958396 3592860 725523612 1449)
 
 # Groth16 verifying-key prefix layout, matching groth16_vk_read_raw() in
-# lib/sapling/src/bls12_381.c:
+# core/modules/sapling/src/bls12_381.c:
 #   alpha_g1(96) beta_g1(96) beta_g2(192) gamma_g2(192)
 #   delta_g1(96) delta_g2(192) ic_len(4, big-endian) ic[](96 each)
 VK_HEADER_BYTES=868
@@ -232,7 +232,7 @@ unverified parameter set"
  * GENERATED FILE — do not edit by hand.
  * Regenerate with:
  *   tools/scripts/zcash_params.sh vk-extract <params-dir> \
- *       lib/sapling/src/params_vk_embedded.c
+ *       core/modules/sapling/src/params_vk_embedded.c
  *
  * Embedded Groth16 / PHGR13 VERIFYING keys.
  *

@@ -11,7 +11,7 @@ cd "$(dirname "$0")/../.."
 
 MANIFEST="${ZCL_FRONTIER_MANIFEST:-tools/scripts/arch_frontier_owners.tsv}"
 BASELINE="${ZCL_FRONTIER_BASELINE:-tools/scripts/frontier_single_writer_baseline.tsv}"
-SCAN_ROOTS_TEXT="${ZCL_FRONTIER_SCAN_ROOTS:-app lib config src core}"
+SCAN_ROOTS_TEXT="${ZCL_FRONTIER_SCAN_ROOTS:-core engine contexts cognition platform}"
 read -r -a SCAN_ROOTS <<< "$SCAN_ROOTS_TEXT"
 
 if [ ! -r "$MANIFEST" ] || [ ! -r "$BASELINE" ]; then

@@ -78,7 +78,7 @@ behavior used by the z23 parity-diff service.
 
 The cross-chain atomic-swap HTLC script format (P2SH-wrapped, 97-byte contract)
 used by the ZCL atomic-swap protocol (ZSWP) was **reimplemented** from dcrdex's
-design in `lib/script/` (`lib/script/{src/htlc.c,include/script/htlc.h}`) — no dcrdex source is vendored in this
+design in `core/modules/script/` (`core/modules/script/{src/htlc.c,include/script/htlc.h}`) — no dcrdex source is vendored in this
 tree. Credited here for the script-format concept.
 
 ## SQLite — Public Domain
@@ -96,7 +96,7 @@ index (with CRC), and application state.
 **Vendored path:** `vendor/rgfw/`
 **Attribution:** Copyright © 2022-2025 Riley Mabb (@ColleagueRiley)
 
-The private software-window backend for `lib/presentation`. Z23 exposes
+The private software-window backend for `contexts/explorer/modules/presentation`. Z23 exposes
 its own bounded bitmap ABI; no RGFW type crosses the public boundary.
 
 ## X.Org client headers — X.Org MIT License
@@ -120,7 +120,7 @@ headless host with no system `-dev` packages still builds the full binary.
 **Vendored path:** `vendor/qrcodegen/`
 **Attribution:** Copyright © Project Nayuki
 
-The dependency-free QR Model 2 encoder behind `lib/encoding/qr`.
+The dependency-free QR Model 2 encoder behind `platform/modules/encoding/qr`.
 
 ## System Reference Document 5.1 — CC BY 4.0
 
@@ -134,7 +134,7 @@ The dependency-free QR Model 2 encoder behind `lib/encoding/qr`.
 > licensed under the Creative Commons Attribution 4.0 International License
 > available at https://creativecommons.org/licenses/by/4.0/legalcode.
 
-Used by `lib/metaverse/` (`character_sheet.h`, `character_sheet.c`), and this
+Used by `contexts/commons/modules/metaverse/` (`character_sheet.h`, `character_sheet.c`), and this
 is the complete list:
 
 | SRD 5.1 material | Where it is used |
@@ -152,7 +152,7 @@ restraint binds anything that extends the module.
 **Source:** https://commons.wikimedia.org/wiki/File:ZClassic_Logo.svg
 **Attribution:** @jojo, ZClassic Slack/Rocket.Chat, 2016-12-05
 
-`lib/presentation/src/zclassic_icon_mask.inc` is a 64px one-bit rasterization
+`contexts/explorer/modules/presentation/src/zclassic_icon_mask.inc` is a 64px one-bit rasterization
 of the official mark. The shape and canonical `#C87035` color are unchanged.
 
 ## stb_truetype — MIT or Public Domain

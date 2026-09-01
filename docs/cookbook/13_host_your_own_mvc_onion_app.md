@@ -8,9 +8,9 @@ and one mount, all plain C, all reviewed like every other file in the
 tree. This recipe walks the whole loop using the two apps that ship in
 the repo as the worked examples:
 
-- `apps/blog/app.def` — the reference MVC/ActiveRecord application
+- `contexts/commons/apps/blog/app.def` — the reference MVC/ActiveRecord application
   (signed posts, a publication projection, read-only public pages).
-- `apps/yardsale/app.def` — the for-sale-by-owner swap app: sellers pin
+- `contexts/commons/apps/yardsale/app.def` — the for-sale-by-owner swap app: sellers pin
   signed, expiring ads into the gossip yardsale, and a buyer settles
   directly with the seller through the two-message ceremony. Never a
   matching engine — the app remembers signs and carries ceremony wires.
@@ -21,7 +21,7 @@ The shape, end to end:
    it names the app, the capabilities it ASKS for
    (`ZCL_APP_CAPABILITY(...)`), its resources, its P2P topic, its web
    mount, and whether it binds the onion and a ZNAM name. The strict
-   compiler (`lib/framework/src/app_definition.c`) rejects anything else,
+   compiler (`engine/modules/framework/src/app_definition.c`) rejects anything else,
    and the `site_routes` test group proves the declared mount and the
    route registry can never drift apart. Copy the yardsale's:
 
@@ -38,12 +38,12 @@ The shape, end to end:
    ```
 
 2. **Register the app id** — add it to `g_builtin_app_ids[]` in
-   `lib/framework/src/app_catalog.c`, and extend the catalog asserts in
-   `lib/test/src/test_dev_platform.c` (the strict-compiler test pins the
+   `engine/modules/framework/src/app_catalog.c`, and extend the catalog asserts in
+   `tests/harness/src/test_dev_platform.c` (the strict-compiler test pins the
    builtin list; it will fail until you teach it your app exists).
 
-3. **Write the controller** — `app/controllers/src/<id>_controller.c`
-   (plus its header under `app/controllers/include/controllers/`). One
+3. **Write the controller** — `engine/controllers/src/<id>_controller.c`
+   (plus its header under `engine/controllers/include/controllers/`). One
    function is the whole web contract, the same shape the blog uses:
 
    ```c
@@ -56,12 +56,12 @@ The shape, end to end:
    the length. Read-only pages take the db from `app_runtime_node_db()`
    and fail closed (return 0 — the dispatcher serves 503) when the
    projection is absent. Look at
-   `app/controllers/src/yardsale_site_controller.c` for the bounded
+   `contexts/market/controllers/src/yardsale_site_controller.c` for the bounded
    version: security headers, urlencoded form parsing, named error pages,
    and the 800-line file-size ceiling in mind from the first keystroke.
 
 4. **Mount it — one registry row.** Add a single `SITE_ROUTE(...)` row to
-   `lib/net/include/net/site_routes.def`. That one row is expanded by
+   `core/modules/net/include/net/site_routes.def`. That one row is expanded by
    every consumer at once: the onion dispatch chain, the HTTPS dispatch
    chain, the rate-limit cost classifier, the onion + app navs, and the
    landing-page grid. There is no step two — the days of hand-editing
@@ -75,13 +75,13 @@ The shape, end to end:
    construction. Choose the cost class honestly: it is your DoS budget
    on an unauthenticated surface.
 
-5. **Prove it** — a new `lib/test/src/test_<id>_app.c` with
+5. **Prove it** — a new `tests/harness/src/test_<id>_app.c` with
    `int test_<id>_app(void)`, registered in BOTH places the
    check-test-registration gate cross-checks: a
    `ZCL_TEST_GROUP(<id>_app)` row in `tools/dev/test_group_catalog.def`
-   and an extern call in `lib/test/src/test.c`. Add an
+   and an extern call in `tests/harness/src/test.c`. Add an
    `AGENT_IMPACT_RULE` row mapping your files to your group in
-   `app/controllers/include/controllers/agent_impact_rules.def`. Then:
+   `cognition/controllers/include/controllers/agent_impact_rules.def`. Then:
 
    ```bash
    make -j"$(nproc)"
@@ -91,9 +91,9 @@ The shape, end to end:
    ```
 
 If your app carries P2P messages of its own, do it the yardsale way: a
-dispatch row in `lib/net/src/msgprocessor.c`'s table plus an injected
-port (lib/net never names your lib's symbols — the composition root in
-`config/src/boot_msg_callbacks.c` wires it), and the ceremony/app logic
+dispatch row in `core/modules/net/src/msgprocessor.c`'s table plus an injected
+port (core/modules/net never names your lib's symbols — the composition root in
+`engine/composition/src/boot_msg_callbacks.c` wires it), and the ceremony/app logic
 in your controller where tests can drive it in-process.
 
 ## Privacy posture — why the onion is the whole point

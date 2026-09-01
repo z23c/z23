@@ -200,7 +200,7 @@ AWK_EOF
 
 # ── leg 2: the same class with a PUBLISHED GLOBAL as the out-parameter ────
 #
-# lib/sapling/src/params_init.c (fixed in 69518f2f3) published the three
+# core/modules/sapling/src/params_init.c (fixed in 69518f2f3) published the three
 # Groth16 verifying keys — sapling_set_spend_vk(&spend_vk) and friends store
 # the pointer in a file-scope variable the verifiers read — and then a later
 # Sprout failure path freed their ic[] arrays and comb tables WITHOUT storing
@@ -572,7 +572,7 @@ gate_require_scanned "$pub_count" 20 check-outparam-init-before-return \
     "expected >=20 publisher functions (a store of a caller pointer into a file-scope var); the derivation is empty"
 
 mapfile -t PROD_SRCS < <(printf '%s\n' "${SRCS[@]}" \
-    | grep -vE '^(lib/test/|tests/|tools/fuzz/|examples/|lib/vcs/tests/)' || true)
+    | grep -vE '^(tests/harness/include/test/|tests/|tools/fuzz/|examples/|contexts/commons/modules/vcs/tests/)' || true)
 gate_require_scanned "${#PROD_SRCS[@]}" 1000 check-outparam-init-before-return \
     "expected >=1000 production .c files after excluding harnesses"
 
@@ -595,7 +595,7 @@ if [ "${pubfree_hits:-0}" -gt 0 ]; then
         echo "  pointer is NULL. That reading is true only while every failure path"
         echo "  actually produces NULL. Publish BELOW every fallible step, and"
         echo "  unpublish BEFORE freeing — see the invariant comment in"
-        echo "  lib/sapling/src/params_init.c."
+        echo "  core/modules/sapling/src/params_init.c."
     } >&2
     pubfree_failed=1
 else
@@ -665,7 +665,7 @@ if [ "${#new[@]}" -gt 0 ]; then
         echo "  Remember LOG_FAIL / LOG_ERR / LOG_RETURN EXPAND TO a return."
         echo "  Fix by moving the *_init()/memset() ABOVE the first thing that can"
         echo "  fail, and state the post-condition in the header so the next caller"
-        echo "  can rely on it — see lib/net/include/net/compact_blocks.h."
+        echo "  can rely on it — see core/modules/net/include/net/compact_blocks.h."
         echo "  If the caller provably never frees on that path, add the key to"
         echo "  $BASELINE with a one-line reviewed reason:"
         for k in "${new[@]}"; do echo "    $k"; done

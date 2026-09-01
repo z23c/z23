@@ -31,9 +31,9 @@ ref_hits="$(git grep -n -E "$ref_pattern" -- \
     AGENTS.md CLAUDE.md README.md Makefile config app core domain lib \
     ports adapters packages src tools docs \
     ':!tools/lint/check_no_python.sh' \
-    ':!lib/test/src/test_mnemonic.c' \
-    ':!lib/test/src/test_domain_wallet_mnemonic.c' \
-    ':!packages/zu256/tests/vectors.h' \
+    ':!tests/harness/src/test_mnemonic.c' \
+    ':!tests/harness/src/test_domain_wallet_mnemonic.c' \
+    ':!contexts/commons/packages/zu256/tests/vectors.h' \
     || true)"
 
 filtered="$ref_hits"

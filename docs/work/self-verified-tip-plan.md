@@ -2,18 +2,18 @@
 
 > **Live sovereignty (`G-SOV`) is proven via the checkpoint-content
 > consensus-bundle install path** (`docs/work/sovereign-cutover-runbook.md`,
-> `config/src/consensus_state_snapshot_install_checkpoint_authority.c`), which
+> `engine/composition/src/consensus_state_snapshot_install_checkpoint_authority.c`), which
 > proves the same G-SOV predicate (coins reproduce the compiled SHA3
 > checkpoint + Sapling frontier roots to the validated header) a different
 > way than the from-anchor refold sequence below. That from-anchor sequence
 > is NOT done: `REDUCER_FRONTIER_TRUSTED_ANCHOR` is still a hardcoded
-> `3056758` (`app/jobs/include/jobs/reducer_frontier.h`, not self-derived —
+> `3056758` (`engine/reducer/jobs/include/jobs/reducer_frontier.h`, not self-derived —
 > re-grep the exact line before editing, it drifts), `-refold-from-anchor` is
-> still an explicit opt-in flag, not the cold-start default (`src/main.c`,
-> `config/src/boot.c` — re-grep the exact line before editing), and the
+> still an explicit opt-in flag, not the cold-start default (`engine/entry/main.c`,
+> `engine/composition/src/boot.c` — re-grep the exact line before editing), and the
 > borrowed-seed loader is not deleted. This file is retained as the **design
 > reference** for the `G-SOV` predicate (the live sovereignty gate,
-> `app/controllers/src/sovereignty_controller.c`) and for the still-open
+> `engine/controllers/src/sovereignty_controller.c`) and for the still-open
 > hardening items below. Read `docs/HANDOFF.md` for current live status, not
 > this file.
 
@@ -40,7 +40,7 @@ baked SHA3 checkpoint @3,056,758, `core/chainparams/src/checkpoints.c`). The
 checkpoint is not a ZClassic-header state commitment; sovereignty comes from
 reproducing it from validated bodies. The remaining defect: some paths still
 read conclusions off persisted `*_log.ok` cursors and a *borrowed* `coins_kv`
-copy minted by `zclassicd` (`app/services/src/utxo_recovery_restore.c:369`)
+copy minted by `zclassicd` (`engine/services/src/utxo_recovery_restore.c:369`)
 instead of re-deriving from the evidence, because re-deriving is currently
 too slow to be the default reflex everywhere.
 
@@ -70,10 +70,10 @@ names as "a second write path," "authoritative chain state in RAM," or a
 ## Current baseline
 
 - The sapling-tree rebuild resolves its endpoint from coins-applied state
-  (`app/controllers/src/sync_controller_sapling_tree.c:46-71`: caps
+  (`engine/controllers/src/sync_controller_sapling_tree.c:46-71`: caps
   `chain_tip` to `coins_best = coins_applied_height − 1`), so a copy boots
   without the pre-fold sapling FATAL. Minting (`-mint-anchor`,
-  `config/src/boot_mint_anchor.c:62`) is also live — see
+  `engine/composition/src/boot_mint_anchor.c:62`) is also live — see
   [`refold-fold-rate-bottlenecks.md`](./refold-fold-rate-bottlenecks.md).
 - A transient `internal_error` is retriable, not terminal, on both the
   script-validate and proof-validate paths: the heal deletes the stale
@@ -88,7 +88,7 @@ names as "a second write path," "authoritative chain state in RAM," or a
 
 - **The move:** the dominant refold cost is the per-block ~3.1M-node
   `pprev`-walk in `active_chain_fill_window`
-  (`lib/validation/src/chainstate.c:350-391`, via
+  (`core/modules/validation/src/chainstate.c:350-391`, via
   `reducer_extend_window_to_candidate`), ~76% of refold CPU (measured —
   `docs/work/refold-fold-rate-bottlenecks.md`). Build a **refold-gated** fast
   path: under refold, fill the window from coins state / a cached pointer;
@@ -107,14 +107,14 @@ names as "a second write path," "authoritative chain state in RAM," or a
 
 - **Three unlock changes, then the deletion:**
   1. **Self-derive the anchor** — fold genesis→3,056,758 vs the baked
-     checkpoint (`config/src/boot_mint_anchor.c:152-186`); replace the
+     checkpoint (`engine/composition/src/boot_mint_anchor.c:152-186`); replace the
      hardcoded `REDUCER_FRONTIER_TRUSTED_ANCHOR=3056758`
-     (`app/jobs/include/jobs/reducer_frontier.h`, re-grep before editing —
+     (`engine/reducer/jobs/include/jobs/reducer_frontier.h`, re-grep before editing —
      the line drifts) with the self-derived value at its call sites
-     (`app/jobs/src/reducer_frontier.c`).
+     (`engine/reducer/jobs/src/reducer_frontier.c`).
   2. **Flip the default** — make `-refold-from-anchor` the default cold
-     start (today needs a CLI flag, `src/main.c`; default boot imports the
-     borrowed seed via `utxo_recovery_import_ldb`, `config/src/boot.c` —
+     start (today needs a CLI flag, `engine/entry/main.c`; default boot imports the
+     borrowed seed via `utxo_recovery_import_ldb`, `engine/composition/src/boot.c` —
      re-grep both before editing).
   3. **Delete the borrow** — remove the `coins_kv` seed copy
      (`utxo_recovery_restore.c:369`) and the ~9k-LOC carve in dependency
@@ -122,7 +122,7 @@ names as "a second write path," "authoritative chain state in RAM," or a
      per-file consumer graph and phasing).
 - **9-caller caution:** `tip_finalize_stage_seed_anchor` has 9 production
   callers. KEEP the consensus-critical ones
-  (`app/services/src/reducer_ingest_service.c` live fold; the from-anchor
+  (`engine/reducer/services/src/reducer_ingest_service.c` live fold; the from-anchor
   `boot_refold_staged.c`; `snapshot_apply.c`); DELETE cold-import ones
   (`block_index_loader_rebuild.c`, `reindex_epilogue.c`) after the cure
   ships. Classify each caller before cutting — deleting a KEEP caller trips
@@ -130,9 +130,9 @@ names as "a second write path," "authoritative chain state in RAM," or a
 - **Gate:** a **FRESH** datadir (no `~/.zclassic`) folds genesis→tip,
   reproduces the SHA3 root + 1,354,769 UTXOs; copy-prove `G-SOV`; *then*
   delete. `test_self_folded_anchor` **exists** —
-  `lib/test/src/test_self_folded_anchor.c`, registered in the canonical catalog
+  `tests/harness/src/test_self_folded_anchor.c`, registered in the canonical catalog
   as `ZCL_TEST_GROUP(self_folded_anchor)`, so it really runs. Extend it rather than writing it.
-  <!-- claim: file-present lib/test/src/test_self_folded_anchor.c # written; do not re-create -->
+  <!-- claim: file-present tests/harness/src/test_self_folded_anchor.c # written; do not re-create -->
   <!-- claim: symbol-present self_folded_anchor tools/dev/test_group_catalog.def # registered, so it actually runs -->
 - **False-green traps:**
   - *Borrowed-seed no-op:* `-load-verify-boot` no-ops on a stamped
@@ -151,7 +151,7 @@ names as "a second write path," "authoritative chain state in RAM," or a
 
 - **(a) Kill the forgeable XOR feed — HALF-DONE.** The MMB leaf already
   reads the real persisted `boundary_root`
-  (`app/controllers/src/blockchain_controller.c:189`), but
+  (`engine/controllers/src/blockchain_controller.c:189`), but
   `rpc_blockchain_maybe_commit` still writes the O(1) `xor_accumulator` into
   the commitment MMR (`:285`) — a forgeable, never-set-verified value.
   **First confirm whether that commitment MMR is consensus-critical or
@@ -164,7 +164,7 @@ names as "a second write path," "authoritative chain state in RAM," or a
   can't let a forbidden pattern back in via a renamed symbol. Doc:
   [`lint-gate-hollowness-audit.md`](./lint-gate-hollowness-audit.md).
 - **(c) Delete confirmed-dead scaffolding** —
-  `lib/validation/src/verify_queue.c:130` is `additive_unwired` (no
+  `core/modules/validation/src/verify_queue.c:130` is `additive_unwired` (no
   non-test callers) + the other confirmed-dead paths.
 - **(d) CI invariant:** no path advances `coins_applied_height` without the
   co-committed log row (`tip_finalize_log` vs `utxo_apply_log` continuity —

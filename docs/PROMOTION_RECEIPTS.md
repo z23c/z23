@@ -23,8 +23,8 @@ trustworthy as one local mutable ref.
 
 ## The record we have now
 
-`deploy/promotion-receipts.jsonl` — one JSON object per line, append-only,
-following the same shape conventions as `deploy/release-candidates.jsonl` (see
+`platform/deploy/promotion-receipts.jsonl` — one JSON object per line, append-only,
+following the same shape conventions as `platform/deploy/release-candidates.jsonl` (see
 [`RELEASE_CANDIDATE_PIN.md`](./RELEASE_CANDIDATE_PIN.md)). Four properties, each
 load-bearing:
 
@@ -35,7 +35,7 @@ load-bearing:
    build, minted once by the owner (see "Owner setup" below).
 2. **Signed.** Every record is signed with `ssh-keygen -Y sign` under the
    namespace `zcl-promotion-receipt`. Verification reads only
-   `deploy/promotion-signers`, a committed OpenSSH allowed-signers file — no
+   `platform/deploy/promotion-signers`, a committed OpenSSH allowed-signers file — no
    private key, no network, no cooperation from the author. Stock OpenSSH; this
    repository already runs `ssh`/`scp` for every fleet operation, so nothing new
    was added. The signing identity is never a default: writing refuses until
@@ -59,7 +59,7 @@ They catch different attacks, and neither is sufficient:
 
 ## Owner setup — the one-time root-of-trust decision
 
-**The ledger ships with zero records and `deploy/promotion-signers` ships with
+**The ledger ships with zero records and `platform/deploy/promotion-signers` ships with
 zero keys.** Not even genesis. That is not an oversight: the identity that signs
 evidence is the owner's decision, and so is publishing which key holds that
 authority. Nothing in the tooling picks one, and both write paths refuse until
@@ -91,7 +91,7 @@ ssh-keygen -t ed25519 -C 'z23 promotion receipts' \
 # 2. Publish its PUBLIC half as the evidence authority.
 printf '%s %s\n' promotions@example.invalid \
     "$(cut -d' ' -f1-2 ~/.ssh/zcl-promotion-receipt.pub)" \
-    >> deploy/promotion-signers
+    >> platform/deploy/promotion-signers
 
 # 3. Mint the genesis record under that key.
 ZCL_RECEIPT_KEY=~/.ssh/zcl-promotion-receipt \
@@ -99,7 +99,7 @@ ZCL_RECEIPT_KEY=~/.ssh/zcl-promotion-receipt \
 
 # 4. Commit both. Uncommitted, they exist on one disk — the exact defect
 #    this page is about.
-git add deploy/promotion-signers deploy/promotion-receipts.jsonl
+git add platform/deploy/promotion-signers platform/deploy/promotion-receipts.jsonl
 git commit -m 'start the promotion receipt chain'
 ```
 
@@ -191,7 +191,7 @@ the lint gate passes on it.
 
 ## Signing identity
 
-One identity, listed in `deploy/promotion-signers` — chosen by the owner, in the
+One identity, listed in `platform/deploy/promotion-signers` — chosen by the owner, in the
 one-time ritual above, and **absent from the shipped tree**. Key management and
 rotation are deliberately **not** built here. Adding a second line to that file
 is a reviewed commit, which is the audit trail a rotation actually needs. A

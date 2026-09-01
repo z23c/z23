@@ -179,7 +179,7 @@ M5_REPLAY_ROOT=681956eb17678dc9289fdff693825fd22282d086ef3bf8f0f3082e632bccb4c8
 M5_FINAL_STATE_ROOT=f7c6ac02d6c251263756efe37583cb8f163db653c9938369012d6179b4fc1cbb
 M5_STATE_ROOT_CHAIN=c39939a4e5e02bdeba9a0ed770263795981c373d886cbe3628eb719111bc6ce2
 # The 11941-tick KPI reference: seed 7, 3v3, repo-source dev pilots with
-# the UNPUBLISHED sign-fixed zdogace (packages/ tree, not the published
+# the UNPUBLISHED sign-fixed zdogace (contexts/commons/packages/ tree, not the published
 # package). M3b reference roots, proven byte-identical on this host.
 REF_SEED=7
 REF_TICKS=11941
@@ -918,25 +918,25 @@ k1=$(now_ms)
 DEAD_TICKS="$(aa_match_field "$AA_WORK/match-dead.out" ticks)"
 [ "$DEAD_TICKS" = "36000" ] || aa_die "dead-pilot run did not go the distance: ticks=$DEAD_TICKS"
 # (c) 11941-tick reference: repo-source dev pilots (UNPUBLISHED sign-fixed
-# zdogace; packages/ tree — explicitly outside the published-package
+# zdogace; contexts/commons/packages/ tree — explicitly outside the published-package
 # proof), asserted against the M3b reference roots.
-for f in packages/zdogace/src/zdogace.c packages/zdogdrone/src/zdogdrone.c \
-         packages/zdogfight/src/zdogfight.c packages/zdogfight/src/zdogfix.c \
-         packages/zprng/src/zprng.c; do
+for f in contexts/commons/packages/zdogace/src/zdogace.c contexts/commons/packages/zdogdrone/src/zdogdrone.c \
+         contexts/commons/packages/zdogfight/src/zdogfight.c contexts/commons/packages/zdogfight/src/zdogfix.c \
+         contexts/commons/packages/zprng/src/zprng.c; do
     [ -f "$REPO_ROOT/$f" ] || aa_die "missing $f for the dev-pilot KPI build"
 done
 cc -std=c23 -O1 -static -fno-omit-frame-pointer -D_POSIX_C_SOURCE=200809L \
-    -I "$REPO_ROOT/packages/zdogace/include" -I "$REPO_ROOT/packages/zdogfight/include" \
-    -I "$REPO_ROOT/packages/zprng/include" \
-    "$REPO_ROOT/packages/zdogace/app/main.c" "$REPO_ROOT/packages/zdogace/src/zdogace.c" \
-    "$REPO_ROOT/packages/zdogfight/src/zdogfight.c" "$REPO_ROOT/packages/zdogfight/src/zdogfix.c" \
-    "$REPO_ROOT/packages/zprng/src/zprng.c" -o "$AA_WORK/pilot-dev-red" || aa_die "dev ace pilot build failed"
+    -I "$REPO_ROOT/contexts/commons/packages/zdogace/include" -I "$REPO_ROOT/contexts/commons/packages/zdogfight/include" \
+    -I "$REPO_ROOT/contexts/commons/packages/zprng/include" \
+    "$REPO_ROOT/contexts/commons/packages/zdogace/app/main.c" "$REPO_ROOT/contexts/commons/packages/zdogace/src/zdogace.c" \
+    "$REPO_ROOT/contexts/commons/packages/zdogfight/src/zdogfight.c" "$REPO_ROOT/contexts/commons/packages/zdogfight/src/zdogfix.c" \
+    "$REPO_ROOT/contexts/commons/packages/zprng/src/zprng.c" -o "$AA_WORK/pilot-dev-red" || aa_die "dev ace pilot build failed"
 cc -std=c23 -O1 -static -fno-omit-frame-pointer -D_POSIX_C_SOURCE=200809L \
-    -I "$REPO_ROOT/packages/zdogdrone/include" -I "$REPO_ROOT/packages/zdogfight/include" \
-    -I "$REPO_ROOT/packages/zprng/include" \
-    "$REPO_ROOT/packages/zdogdrone/app/main.c" "$REPO_ROOT/packages/zdogdrone/src/zdogdrone.c" \
-    "$REPO_ROOT/packages/zdogfight/src/zdogfight.c" "$REPO_ROOT/packages/zdogfight/src/zdogfix.c" \
-    "$REPO_ROOT/packages/zprng/src/zprng.c" -o "$AA_WORK/pilot-dev-blue" || aa_die "dev drone pilot build failed"
+    -I "$REPO_ROOT/contexts/commons/packages/zdogdrone/include" -I "$REPO_ROOT/contexts/commons/packages/zdogfight/include" \
+    -I "$REPO_ROOT/contexts/commons/packages/zprng/include" \
+    "$REPO_ROOT/contexts/commons/packages/zdogdrone/app/main.c" "$REPO_ROOT/contexts/commons/packages/zdogdrone/src/zdogdrone.c" \
+    "$REPO_ROOT/contexts/commons/packages/zdogfight/src/zdogfight.c" "$REPO_ROOT/contexts/commons/packages/zdogfight/src/zdogfix.c" \
+    "$REPO_ROOT/contexts/commons/packages/zprng/src/zprng.c" -o "$AA_WORK/pilot-dev-blue" || aa_die "dev drone pilot build failed"
 k2=$(now_ms)
 aa_run_match "$AA_WORK/pilot-dev-red" "$AA_WORK/pilot-dev-blue" "$REF_SEED" "$MATCH_PLANES" \
     "$AA_WORK/replay-dev.bin" "$AA_WORK/match-dev.out" \

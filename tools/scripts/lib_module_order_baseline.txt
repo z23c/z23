@@ -2,7 +2,7 @@
 # tools/scripts/check_lib_module_order.sh.
 #
 # Each line is an edge "lib/<from> -> lib/<to>" where <to> is ranked at or
-# above <from> in config/lib_module_order.def, i.e. a reference that runs the
+# above <from> in engine/composition/lib_module_order.def, i.e. a reference that runs the
 # wrong way along the declared link order.
 #
 # WHICH TREE THIS WAS MEASURED FROM — load-bearing, and asserted by the gate:
@@ -23,9 +23,9 @@
 # {util health}. A cycle cannot be ordered, so some edges must run backward
 # whatever order is chosen.
 #
-# 2026-08-29: the unused zcashconsensus C-ABI shim (lib/script/src/
-# zcashconsensus.c) was deleted. It carried lib/script's entire upward reach,
-# so lib/script left the big component — now {metrics sync validation net rpc
+# 2026-08-29: the unused zcashconsensus C-ABI shim (core/modules/script/src/
+# zcashconsensus.c) was deleted. It carried core/modules/script's entire upward reach,
+# so core/modules/script left the big component — now {metrics sync validation net rpc
 # storage} — and the floor below dropped by one.
 #
 # THESE FOUR ARE THE PROVEN MINIMUM, not a heuristic's leftovers. Re-check it
@@ -34,7 +34,7 @@
 #   tools/dev/module-linkgraph.sh --fas --obj-root build/obj
 #
 # It solves each component exactly and reports the floor as 3 + 1 = 4, which
-# the order in config/lib_module_order.def hits exactly. Minimum feedback arc
+# the order in engine/composition/lib_module_order.def hits exactly. Minimum feedback arc
 # set decomposes over strongly-connected components — an edge between two
 # components can always be made forward by ordering the components
 # topologically — so solving those two components settles the whole graph.
@@ -50,15 +50,15 @@
 #
 # What each line owes (symbol counts re-measured 2026-07-26 from build/obj;
 # tools/dev/module-linkgraph.sh --summary):
-#   lib/net -> lib/rpc            1 sym   legacy_chain_rpc_get_chainwork
-#   lib/storage -> lib/net        2 syms  net_addr_to_string, net_addr_is_routable
-#   lib/sync -> lib/storage       5 syms  progress_meta_get, progress_meta_set_in_tx,
+#   core/modules/net -> engine/modules/rpc            1 sym   legacy_chain_rpc_get_chainwork
+#   engine/modules/storage -> core/modules/net        2 syms  net_addr_to_string, net_addr_is_routable
+#   core/modules/sync -> engine/modules/storage       5 syms  progress_meta_get, progress_meta_set_in_tx,
 #                                         progress_store_tx_lock/_unlock,
 #                                         progress_store_epoch
-#   lib/util -> lib/health        4 syms  health_start, health_register,
+#   platform/modules/util -> engine/modules/health        4 syms  health_start, health_register,
 #                                         health_register_periodic, health_unregister
 #
-# lib/net -> lib/rpc is the cheapest cut on the board: one symbol.
+# core/modules/net -> engine/modules/rpc is the cheapest cut on the board: one symbol.
 #
 # To pay one down: move the symbol into a lower-ranked module, or invert the
 # dependency behind a registered seam, then delete the line here. The gate
@@ -68,7 +68,7 @@
 # Reference sites for any one edge:
 #   tools/dev/module-linkgraph.sh --edges | grep -P '^lib/net\tlib/rpc\t'
 
-lib/net -> lib/rpc
-lib/storage -> lib/net
-lib/sync -> lib/storage
-lib/util -> lib/health
+core/modules/net -> engine/modules/rpc
+engine/modules/storage -> core/modules/net
+core/modules/sync -> engine/modules/storage
+platform/modules/util -> engine/modules/health

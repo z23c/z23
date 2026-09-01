@@ -1,0 +1,24 @@
+[Unit]
+Description=Z23 Build Drift Probe Timer — every 5 minutes
+
+[Timer]
+# OnCalendar (wall-clock), NOT OnBootSec/OnUnitActiveSec (monotonic).
+# The monotonic form is how the SLO ledger silently died on 2026-07-20:
+# Persistent=true is honored ONLY for OnCalendar timers, and
+# OnUnitActiveSec schedules relative to the service's last activation in the
+# CURRENT manager runtime, so after a user-manager restart the timer has no
+# anchor and never fires again. See platform/deploy/zclassic23-slo-probe.timer for the
+# full post-mortem. Do not "simplify" this to OnUnitActiveSec.
+#
+# 5 minutes, not 60 seconds: build identity changes only at a deploy, so the
+# useful resolution is "which 5-minute window did the binary change in", and
+# each run costs two subprocess launches plus a 22MB hash. Persistent=true
+# fires one catch-up run after downtime, so a deploy that happened while the
+# box was down still gets a line rather than being lost.
+OnCalendar=*-*-* *:0/5:00
+RandomizedDelaySec=20
+Persistent=true
+Unit=zclassic23-build-drift.service
+
+[Install]
+WantedBy=timers.target

@@ -30,8 +30,8 @@ else
         *) LEDGER="$LEDGER_TEMPLATE" ;;
     esac
 fi
-TYPE_CATALOG="${ZCL_TRANSACTION_TYPE_CATALOG:-$REPO/app/controllers/include/controllers/transaction_types.def}"
-SUPPLEMENTAL_TESTS="${ZCL_TRANSACTION_LAB_SUPPLEMENTAL_TESTS:-$REPO/app/controllers/include/controllers/transaction_type_supplemental_tests.def}"
+TYPE_CATALOG="${ZCL_TRANSACTION_TYPE_CATALOG:-$REPO/engine/controllers/include/controllers/transaction_types.def}"
+SUPPLEMENTAL_TESTS="${ZCL_TRANSACTION_LAB_SUPPLEMENTAL_TESTS:-$REPO/engine/controllers/include/controllers/transaction_type_supplemental_tests.def}"
 LIVE_CATALOG="${ZCL_TRANSACTION_LIVE_CATALOG:-$REPO/tools/dev/transaction_live_catalog.def}"
 
 die() {

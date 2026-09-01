@@ -7,7 +7,7 @@
 # is spent: it is in the history, on every clone, and on every mirror, and
 # rotating it is the only remedy. The rule that a key lives in the environment
 # or in a 0600 file OUTSIDE the repository is enforced in code
-# (lib/engine/src/engine_secret.c), and this gate is the second half — the one
+# (engine/modules/engine/src/engine_secret.c), and this gate is the second half — the one
 # that notices when somebody pastes one in anyway.
 #
 # ── WHAT IS MATCHED ─────────────────────────────────────────────────────────
@@ -25,7 +25,7 @@
 # because it does not collide with a digest.
 #
 # Binary fixtures are also out of scope — vendor/, images, archives, and the
-# generated `.bin`/`.dat` corpora under lib/test/fuzz_seeds/. A fuzz seed is
+# generated `.bin`/`.dat` corpora under tests/harness/fuzz_seeds/. A fuzz seed is
 # random bytes, and random bytes reliably contain every shape; scanning them
 # produced a false positive on the first run of this gate. Nobody pastes a
 # credential into a generated corpus, and the cost of pretending otherwise is
@@ -36,7 +36,7 @@
 #
 # ── PROVING IT WORKS ────────────────────────────────────────────────────────
 # A gate nobody has seen fail is a gate nobody has tested.
-# lib/test/src/test_engine.c case_key_gate() plants a key in a fixture tree,
+# tests/harness/src/test_engine.c case_key_gate() plants a key in a fixture tree,
 # points ZCL_API_KEY_SCAN_FILES at it, and requires a NON-ZERO exit — and
 # requires a clean fixture to pass, so the failure is attributable.
 #
@@ -84,7 +84,7 @@ else
         ':!:vendor/**' ':!:tools/lint/check_no_api_keys.sh' \
         ':!:**/*.png' ':!:**/*.jpg' ':!:**/*.gz' ':!:**/*.xz' \
         ":!:**/*.zip" ":!:**/*.pdf" ":!:**/*.ico" \
-        ":!:**/*.bin" ":!:**/*.dat" ":!:lib/test/fuzz_seeds/**")
+        ":!:**/*.bin" ":!:**/*.dat" ":!:tests/harness/fuzz_seeds/**")
     floor=1000
 fi
 

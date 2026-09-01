@@ -1,3 +1,0 @@
-/* Seeded violation: storage ownership may never enter a reloadable island. */
-HOTSWAP_ISLAND("app/controllers/src/status_native_handlers.c",
-               "lib/storage/src/anchor_kv.c")

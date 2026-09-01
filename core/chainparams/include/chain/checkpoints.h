@@ -120,7 +120,7 @@ void checkpoints_reset_sha3_override_for_test(void);
  *
  * Digest preimages are the bundle-canonical ones (mirrored byte-for-byte
  * by tools/rom_two_builder_compare.c and by the production codec
- * lib/storage/src/consensus_state_bundle_codec.c):
+ * engine/modules/storage/src/consensus_state_bundle_codec.c):
  *   anchor_digest    — SHA3-256 over domain
  *                      "zcl.consensus_state_bundle.v1/anchors" (NUL included),
  *                      rows in the combined bundle-canonical order

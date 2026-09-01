@@ -158,7 +158,7 @@ The result has three deliberately different states:
 
 Vault pass-through commands are alternate routes, not independent transaction
 implementations. Their declarations live in
-`app/controllers/include/controllers/transaction_type_command_aliases.def`.
+`engine/controllers/include/controllers/transaction_type_command_aliases.def`.
 Reviewed negative assertions live separately in
 `transaction_type_nonchain_commands.def`; absence from that file proves
 nothing. `test_api` scans every ready mutating wallet-risk command and every
@@ -756,10 +756,10 @@ the same transaction ID.
 Future developers make one coherent feature slice:
 
 1. Add one semantic row to
-   `app/controllers/include/controllers/transaction_types.def`. Reuse a type id
+   `engine/controllers/include/controllers/transaction_types.def`. Reuse a type id
    only if the on-chain meaning is unchanged; aliases are component commands,
    not new semantic types.
-2. Add or update the typed native builder/reader in `config/commands/*.def`.
+2. Add or update the typed native builder/reader in `engine/composition/commands/*.def`.
    Every non-empty command named by the catalog is test-checked against the
    live command registry and exposed through `app transaction-types guide`.
 3. Query the new leaf with `app transaction-types command <path>`. A canonical
@@ -782,12 +782,12 @@ Future developers make one coherent feature slice:
 7. Run `make t-fast ONLY=test_api`, the referenced transaction test group,
    `make transaction-lab-check`, `make lint`, and the normal build/test gates.
 
-<!-- claim: symbol-present app.transaction-types.list config/commands/apps.def -->
-<!-- claim: symbol-present app.transaction-types.show config/commands/apps.def -->
-<!-- claim: symbol-present app.transaction-types.guide config/commands/apps.def -->
-<!-- claim: symbol-present app.transaction-types.command config/commands/apps.def -->
-<!-- claim: symbol-present app.transaction-types.wire config/commands/apps.def -->
-<!-- claim: file-present app/controllers/include/controllers/transaction_types.def -->
-<!-- claim: file-present app/controllers/include/controllers/transaction_type_command_aliases.def -->
-<!-- claim: file-present app/controllers/include/controllers/transaction_type_nonchain_commands.def -->
+<!-- claim: symbol-present app.transaction-types.list engine/composition/commands/apps.def -->
+<!-- claim: symbol-present app.transaction-types.show engine/composition/commands/apps.def -->
+<!-- claim: symbol-present app.transaction-types.guide engine/composition/commands/apps.def -->
+<!-- claim: symbol-present app.transaction-types.command engine/composition/commands/apps.def -->
+<!-- claim: symbol-present app.transaction-types.wire engine/composition/commands/apps.def -->
+<!-- claim: file-present engine/controllers/include/controllers/transaction_types.def -->
+<!-- claim: file-present engine/controllers/include/controllers/transaction_type_command_aliases.def -->
+<!-- claim: file-present engine/controllers/include/controllers/transaction_type_nonchain_commands.def -->
 <!-- claim: file-present tools/dev/transaction_lab_catalog.def -->

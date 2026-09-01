@@ -2,7 +2,7 @@
 #
 # check_service_result_convergence.sh (sibling to E2
 # check_one_result_type.sh) counts exported (non-static, top-level)
-# bool-returning function DEFINITIONS per app/services/src/*.c file. E2
+# bool-returning function DEFINITIONS per engine/services/src/*.c file. E2
 # only requires a file to reference `struct zcl_result` SOMEWHERE, so a
 # file can be E2-clean while still exporting bare-bool functions
 # elsewhere — this baseline tracks and ratchets THAT residue down.

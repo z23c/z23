@@ -1,7 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * simnet_trace_query — linear-scan filter over a simnet full-state trace
- * (lib/sim/include/sim/simnet_trace.h; docs/CHAOS_HARNESS.md "Recording a
+ * (engine/modules/sim/include/sim/simnet_trace.h; docs/CHAOS_HARNESS.md "Recording a
  * full-state trace").
  *
  * A trace is one NDJSON object per (node, event) snapshot, written by
@@ -14,7 +14,7 @@
  *
  * Standalone-build discipline (mirrors tools/postmortem_to_scenario.c):
  * a trace file is plain NDJSON once written, so this tool links ONLY
- * lib/json (the trace's own format) plus the safe_alloc/log_level it
+ * platform/modules/json (the trace's own format) plus the safe_alloc/log_level it
  * transitively needs — no DB, no node libs, no Tor, no simulator/consensus
  * code at all.
  */

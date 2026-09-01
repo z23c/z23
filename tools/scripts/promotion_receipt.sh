@@ -83,8 +83,8 @@
 #       the operator's own keys.
 #
 # Environment (paths default to the in-repo files; the self-test overrides them):
-#   ZCL_RECEIPT_LEDGER       ledger path      (default deploy/promotion-receipts.jsonl)
-#   ZCL_RECEIPT_SIGNERS      allowed-signers  (default deploy/promotion-signers)
+#   ZCL_RECEIPT_LEDGER       ledger path      (default platform/deploy/promotion-receipts.jsonl)
+#   ZCL_RECEIPT_SIGNERS      allowed-signers  (default platform/deploy/promotion-signers)
 #   ZCL_RECEIPT_KEY          private key used to SIGN. NO DEFAULT — init/append
 #                            refuse without it, on purpose. Never point this at
 #                            a login/push key.
@@ -105,8 +105,8 @@ SCHEMA='zcl.promotion_receipt.v1'
 SIG_NAMESPACE='zcl-promotion-receipt'
 ZERO_HASH='0000000000000000000000000000000000000000000000000000000000000000'
 
-LEDGER="${ZCL_RECEIPT_LEDGER:-$ROOT/deploy/promotion-receipts.jsonl}"
-SIGNERS="${ZCL_RECEIPT_SIGNERS:-$ROOT/deploy/promotion-signers}"
+LEDGER="${ZCL_RECEIPT_LEDGER:-$ROOT/platform/deploy/promotion-receipts.jsonl}"
+SIGNERS="${ZCL_RECEIPT_SIGNERS:-$ROOT/platform/deploy/promotion-signers}"
 
 # NO DEFAULT SIGNING KEY, deliberately. An earlier draft of this script
 # defaulted to $HOME/.ssh/id_ed25519 — the operator's personal SSH

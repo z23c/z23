@@ -5,7 +5,7 @@ and monitor any adversarial network without sockets or wall-clock time.
 
 ## Core insight
 The NUT's code above recv()/send() is already isolated behind two calls:
-- INGRESS seam: `p2p_node_receive_bytes(node,data,nbytes,msgstart)` — lib/net/src/net.c:428.
+- INGRESS seam: `p2p_node_receive_bytes(node,data,nbytes,msgstart)` — core/modules/net/src/net.c:428.
   Real recv() at connman.c:1223 feeds it at 1225. Substitute here: feed bytes from memory.
   Framing/partial-reads native (net.c:437-497). Recv queue+OOM cap MAX_RECV_MESSAGES
   (net.c:438-458,482). Checksum+dispatch+handshake gate msg_process_messages (msgprocessor.c:1603,
@@ -19,7 +19,7 @@ The NUT's code above recv()/send() is already isolated behind two calls:
 - THREADS: spawn NEITHER thread_socket_handler (connman.c:1113) NOR thread_message_handler
   (connman.c:1657). One deterministic single-threaded pump.
 
-## Module: simnet_wire (lib/sim/src/simnet_wire.{c,h})
+## Module: simnet_wire (engine/modules/sim/src/simnet_wire.{c,h})
 In-memory transport carrying REAL wire frames between a real struct p2p_node (NUT) and N peers,
 scheduled by seed_tape, cloning simnet_cluster's delivery queue.
 - wire_link: byte_ring to_nut/to_peer, open flag, bw tokens.
@@ -63,11 +63,11 @@ identically.
 ## Harness security (owner emphasized)
 1. No socket syscalls: simnet_wire never includes <sys/socket.h>, never connman_start/thread_*/
    accept/dns_seed; NUT = p2p_node_create(nm, ZCL_INVALID_SOCKET,...) (fuzz_p2p.c:133); egress
-   drained from send_head. CI grep-gate: lib/sim/src/simnet_wire.c + tools/sim/*wire* contain no
+   drained from send_head. CI grep-gate: engine/modules/sim/src/simnet_wire.c + tools/sim/*wire* contain no
    recv(/send(/socket(/connect(/bind(/getaddrinfo(.
 2. No wall clock/entropy: seed_tape_install hooks platform_rng+clock; assert seed_tape_rng_count
    accounts for all randomness; clock only via seed_tape_advance.
-3. Adversarial generators unreachable from prod: all under lib/sim/+tools/sim/ (not linked into
+3. Adversarial generators unreachable from prod: all under engine/modules/sim/+tools/sim/ (not linked into
    zclassicd, same as simnet_byzantine); no net/validation may #include "sim/".
 4. Sandboxed to read-only fixtures; no /tmp writes except explicit capsule path.
 5. Bounded runtime: max_ticks + stuck-guard (simnet_cluster.c:327-330).

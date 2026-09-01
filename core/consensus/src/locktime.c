@@ -7,7 +7,7 @@
  * scalars alone — no clock, no RNG, no I/O, no globals.
  *
  * Three predicates extracted from
- * lib/validation/include/validation/contextual_check_tx.h:
+ * core/modules/validation/include/validation/contextual_check_tx.h:
  *
  *   is_final_tx           — BIP65/BIP113 finality boundary
  *   is_expired_tx         — Overwinter expiry boundary
@@ -18,7 +18,7 @@
  * the callers (check_block.c REJECT_UNLESS, mempool eviction) are
  * tight loops where a richer error type would just be discarded.
  *
- * The wrappers in lib/validation/ remain consensus-critical: they
+ * The wrappers in core/modules/validation/ remain consensus-critical: they
  * compose these scalars with the impure chain-state reads
  * (block_index_get_median_time_past, active tip height) that the
  * domain layer must not touch. */

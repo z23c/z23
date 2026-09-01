@@ -60,7 +60,7 @@
  * of any struct are ever hashed, so the digest does not depend on the ABI.
  *
  * Layering: this header is consumed by tools/consensus_rule_sweep.c (the CLI)
- * and by lib/test/src/test_consensus_rule_sweep.c (the gate). Keeping the
+ * and by tests/harness/src/test_consensus_rule_sweep.c (the gate). Keeping the
  * engine here means the test drives the IDENTICAL code the tool ships, so a
  * green test is evidence about the tool and not about a parallel copy.
  */

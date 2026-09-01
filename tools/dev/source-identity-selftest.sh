@@ -22,8 +22,8 @@ git init -q
 git config user.email source-identity-selftest@example.invalid
 git config user.name source-identity-selftest
 printf '%s\n' '_module-origin/' 'vendor/lib/*.a' 'vendor/include/' \
-    'app/controllers/src/ignored-*.c' \
-    'app/controllers/include/controllers/ignored-*.h' \
+    'engine/controllers/src/ignored-*.c' \
+    'engine/controllers/include/controllers/ignored-*.h' \
     >> .git/info/exclude
 
 # A real gitlink proves the source id follows current submodule bytes rather
@@ -52,11 +52,11 @@ printf 'generated header input\n' > vendor/include/openssl/fixture.h
 # These tracked anchors create real Make wildcard/include roots. Later tests
 # add locally ignored compiler inputs beside them; Git must not control whether
 # those bytes enter the authoritative source inventory.
-mkdir -p app/controllers/src app/controllers/include/controllers
+mkdir -p engine/controllers/src engine/controllers/include/controllers
 printf 'int app_fixture(void) { return 1; }\n' \
-    > app/controllers/src/fixture.c
+    > engine/controllers/src/fixture.c
 printf '#define APP_FIXTURE 1\n' \
-    > app/controllers/include/controllers/fixture.h
+    > engine/controllers/include/controllers/fixture.h
 
 # Enough files to exercise the batched path rather than accidentally testing
 # only the zero/single-file envelope.
@@ -116,38 +116,38 @@ printf 'generated header input\n' > vendor/include/openssl/fixture.h
     fail 'restoring linked archive bytes did not restore source identity'
 
 printf 'int ignored_source(void) { return 1; }\n' \
-    > app/controllers/src/ignored-fixture.c
-git check-ignore -q app/controllers/src/ignored-fixture.c ||
+    > engine/controllers/src/ignored-fixture.c
+git check-ignore -q engine/controllers/src/ignored-fixture.c ||
     fail 'ignored source fixture is not actually ignored'
 ignored_source_a="$($SCRIPT capture)" ||
     fail 'ignored wildcard source capture failed'
 [ "$ignored_source_a" != "$submodule_after" ] ||
     fail 'ignored wildcard-selected C source was omitted'
 printf 'int ignored_source(void) { return 2; }\n' \
-    > app/controllers/src/ignored-fixture.c
+    > engine/controllers/src/ignored-fixture.c
 ignored_source_b="$($SCRIPT capture)" ||
     fail 'mutated ignored wildcard source capture failed'
 [ "$ignored_source_b" != "$ignored_source_a" ] ||
     fail 'ignored wildcard-selected C source mutation was omitted'
-rm app/controllers/src/ignored-fixture.c
+rm engine/controllers/src/ignored-fixture.c
 [ "$($SCRIPT capture)" = "$submodule_after" ] ||
     fail 'removing ignored wildcard source did not restore identity'
 
 printf '#define IGNORED_FIXTURE 1\n' \
-    > app/controllers/include/controllers/ignored-fixture.h
-git check-ignore -q app/controllers/include/controllers/ignored-fixture.h ||
+    > engine/controllers/include/controllers/ignored-fixture.h
+git check-ignore -q engine/controllers/include/controllers/ignored-fixture.h ||
     fail 'ignored header fixture is not actually ignored'
 ignored_header_a="$($SCRIPT capture)" ||
     fail 'ignored include-root header capture failed'
 [ "$ignored_header_a" != "$submodule_after" ] ||
     fail 'ignored include-root header was omitted'
 printf '#define IGNORED_FIXTURE 2\n' \
-    > app/controllers/include/controllers/ignored-fixture.h
+    > engine/controllers/include/controllers/ignored-fixture.h
 ignored_header_b="$($SCRIPT capture)" ||
     fail 'mutated ignored include-root header capture failed'
 [ "$ignored_header_b" != "$ignored_header_a" ] ||
     fail 'ignored include-root header mutation was omitted'
-rm app/controllers/include/controllers/ignored-fixture.h
+rm engine/controllers/include/controllers/ignored-fixture.h
 [ "$($SCRIPT capture)" = "$submodule_after" ] ||
     fail 'removing ignored include-root header did not restore identity'
 
@@ -318,7 +318,7 @@ run_verify_mutation_race()
 
 # Ignored input under a recursive compiler root: directory epoch.
 race_kind=file
-race_source="$PWD/app/controllers/src/ignored-verify-race.c"
+race_source="$PWD/engine/controllers/src/ignored-verify-race.c"
 race_gitlink_root= race_gitlink_file= race_exclude_file= race_exclude_keep=
 run_verify_mutation_race 'ignored compiler-input traversal race'
 [ -f "$race_source" ] || fail 'ignored compiler-input race fixture did not fire'

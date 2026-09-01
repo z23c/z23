@@ -1,9 +1,9 @@
-lib/test/src/test_sha3_stream.c: In function ‘test_sha3_stream’:
-lib/test/src/test_sha3_stream.c:165:19: error: implicit declaration of function ‘zcl_shake128’; did you mean ‘zcl_sha3_512’? [-Wimplicit-function-declaration]
+tests/harness/src/test_sha3_stream.c: In function ‘test_sha3_stream’:
+tests/harness/src/test_sha3_stream.c:165:19: error: implicit declaration of function ‘zcl_shake128’; did you mean ‘zcl_sha3_512’? [-Wimplicit-function-declaration]
   165 |         bool ok = zcl_shake128(NULL, 0, got128, sizeof(got128)) &&
       |                   ^~~~~~~~~~~~
       |                   zcl_sha3_512
-lib/test/src/test_sha3_stream.c:166:19: error: implicit declaration of function ‘zcl_shake256’; did you mean ‘zcl_sha3_256’? [-Wimplicit-function-declaration]
+tests/harness/src/test_sha3_stream.c:166:19: error: implicit declaration of function ‘zcl_shake256’; did you mean ‘zcl_sha3_256’? [-Wimplicit-function-declaration]
   166 |                   zcl_shake256(NULL, 0, got256, sizeof(got256)) &&
       |                   ^~~~~~~~~~~~
       |                   zcl_sha3_256

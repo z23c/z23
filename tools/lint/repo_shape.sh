@@ -1,160 +1,130 @@
 # shellcheck shell=bash
 # Copyright 2026 Rhett Creighton - Apache License 2.0
 #
-# repo_shape.sh — the ONE place a shell script learns the repo's directory
-# taxonomy. Source it; never execute it.
-#
-# The set of app shapes, lib modules and top-level source roots was written
-# out by hand in four gate scripts and three more places besides, with no
-# gate cross-checking any of them. docs/AGENT_TRAPS.md recorded that hole
-# rather than closing it, and undercounted it: it named three copies when
-# there were four, the fourth being inside check_group_purpose.sh — the gate
-# whose own subject is this taxonomy.
-#
-# Drift here is silent in the worst way. Add a top-level directory, forget
-# one copy, and lint stays green while `code map` files every file in the new
-# tree under the catch-all group and the orphan-placement gate reports the
-# whole tree as misplaced.
-#
-# The Makefile is the source of truth for the shapes and domain contexts
-# because the BUILD already depends on them: APP_DIRS and DOMAIN_CONTEXTS feed
-# ALL_SRCS and the -I flag lists, so they cannot rot without the build
-# breaking. That makes them load-bearing rather than descriptive.
-#
-# The lib module set is read from config/lib_module_order.def instead, because
-# that file — not the Makefile — is now where the set is declared. The
-# Makefile derives LIB_MODULES from it. Reading the Makefile's copy here would
-# work, but it would be reading a derivation of the real answer and would go
-# quiet the day that derivation broke; reading the declaration means this file
-# and the build cannot disagree about which modules exist.
-#
-# This file is PARSED LIVE on every source, and is deliberately NOT a
-# generated artifact checked into the tree. A generated copy would need a
-# freshness gate, and a freshness gate is exactly the detect-the-drift
-# mechanism this file exists to replace. Parsing costs ~1.6 ms; `make lint`
-# is a 23.6 s wall, so the whole-suite cost is under a tenth of a percent.
-#
-#   ZCL_APP_SHAPES[]       app/<shape>       from APP_DIRS
-#   ZCL_LIB_MODULES[]      lib/<module>      from config/lib_module_order.def
-#   ZCL_DOMAIN_CONTEXTS[]  domain/<context>  from DOMAIN_CONTEXTS
-#   ZCL_REPO_TOPS[]        top-level roots   DERIVED from the -I flag lists,
-#                                            not declared: a REPO_TOPS variable
-#                                            the build did not need would be
-#                                            one more copy to keep honest.
-#   repo_shape_dirs <top> <leaf>   -> "app/models/src app/controllers/src ..."
-#
-# An empty parse is a LOUD exit 2 via gate_require_scanned, never a quiet
-# pass — a consumer that silently degraded to an empty scan set is the
-# hollow-gate failure gate_lib.sh was written to stop.
-#
-# Set ZCL_REPO_SHAPE_MAKEFILE / ZCL_REPO_SHAPE_MODULE_DEF to point at fixtures
-# in tests.
+# The one shell view of Z23's physical architecture. Consumers source this
+# file instead of restating roots, contexts, shapes, or module locations.
 
 _repo_shape_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=tools/lint/gate_lib.sh
 . "$_repo_shape_dir/gate_lib.sh"
 
-ZCL_REPO_SHAPE_MAKEFILE="${ZCL_REPO_SHAPE_MAKEFILE:-$_repo_shape_dir/../../Makefile}"
-ZCL_REPO_SHAPE_MODULE_DEF="${ZCL_REPO_SHAPE_MODULE_DEF:-$_repo_shape_dir/../../config/lib_module_order.def}"
+ZCL_REPO_SHAPE_ROOT="${ZCL_REPO_SHAPE_ROOT:-$_repo_shape_dir/../..}"
+ZCL_REPO_SHAPE_MAKEFILE="${ZCL_REPO_SHAPE_MAKEFILE:-$ZCL_REPO_SHAPE_ROOT/Makefile}"
+ZCL_REPO_SHAPE_MODULE_DEF="${ZCL_REPO_SHAPE_MODULE_DEF:-$ZCL_REPO_SHAPE_ROOT/engine/composition/lib_module_order.def}"
 
-if [ ! -r "$ZCL_REPO_SHAPE_MAKEFILE" ]; then
-    echo "repo-shape: FATAL — cannot read '$ZCL_REPO_SHAPE_MAKEFILE'." >&2
-    echo "  The directory taxonomy is derived from the Makefile; without it" >&2
-    echo "  every consumer would scan an empty set and pass silently." >&2
+if [ ! -r "$ZCL_REPO_SHAPE_MAKEFILE" ] ||
+   [ ! -r "$ZCL_REPO_SHAPE_MODULE_DEF" ]; then
+    echo "repo-shape: FATAL — architecture declarations are unreadable" >&2
     exit 2
 fi
 
-if [ ! -r "$ZCL_REPO_SHAPE_MODULE_DEF" ]; then
-    echo "repo-shape: FATAL — cannot read '$ZCL_REPO_SHAPE_MODULE_DEF'." >&2
-    echo "  That file declares which lib/ modules exist; the Makefile derives" >&2
-    echo "  LIB_MODULES from it. Without it every lib-scoped gate would scan" >&2
-    echo "  an empty set and report clean." >&2
-    exit 2
-fi
-
-# One pass. Emits "VAR<TAB>tok" lines. Handles backslash line continuation
-# (DOMAIN_CONTEXTS/APP_DIRS may span lines) and strips any trailing comment.
-_repo_shape_parse() {
-    awk '
-        function emit(name, rest,   i, n, a) {
-            gsub(/#.*$/, "", rest)
-            n = split(rest, a, /[ \t]+/)
-            for (i = 1; i <= n; i++)
-                if (a[i] != "" && a[i] != "\\") print name "\t" a[i]
+_repo_shape_make_list() {
+    local variable="$1"
+    awk -v wanted="$variable" '
+        function emit(line,   n, item, values) {
+            sub(/#.*/, "", line); gsub(/\\/, " ", line)
+            n = split(line, values, /[ \t]+/)
+            for (item = 1; item <= n; item++)
+                if (values[item] != "") print values[item]
         }
-        # Top-level roots: first path component of every literal -I<dir>/ in
-        # the *_INCLUDES variables. Derived, never declared. This rule must
-        # precede the generic assignment rule below, which would otherwise
-        # swallow these lines with its next.
-        /^[A-Z_]+_INCLUDES[ \t]*=/ {
-            s = $0
-            while (match(s, /-I[a-zA-Z_]+\//)) {
-                tok = substr(s, RSTART + 2, RLENGTH - 3)
-                print "TOPS\t" tok
-                s = substr(s, RSTART + RLENGTH)
+        $0 ~ "^" wanted "[ \t]*=" {
+            line=$0; sub(/^[^=]*=/, "", line)
+            while ($0 ~ /\\[ \t]*$/) {
+                if (getline <= 0) exit 2
+                line=line " " $0
             }
-            next
-        }
-        # Accumulate backslash-continued assignments into one logical line.
-        /^[A-Z_]+[ \t]*=/ && !cont {
-            line = $0; name = $0
-            sub(/[ \t]*=.*$/, "", name)
-            sub(/^[^=]*=/, "", line)
-            if (line ~ /\\[ \t]*$/) { cont = 1; acc = line; keep = name; next }
-            if (name == "APP_DIRS")        emit("APP_DIRS", line)
-            if (name == "DOMAIN_CONTEXTS") emit("DOMAIN_CONTEXTS", line)
-            next
-        }
-        cont {
-            acc = acc " " $0
-            if ($0 ~ /\\[ \t]*$/) next
-            cont = 0
-            if (keep == "APP_DIRS")        emit("APP_DIRS", acc)
-            if (keep == "DOMAIN_CONTEXTS") emit("DOMAIN_CONTEXTS", acc)
-            next
+            emit(line); exit
         }
     ' "$ZCL_REPO_SHAPE_MAKEFILE"
 }
 
-_repo_shape_raw="$(_repo_shape_parse)"
-
-# shellcheck disable=SC2034  # consumed by sourcing gates
-mapfile -t ZCL_APP_SHAPES < <(printf '%s\n' "$_repo_shape_raw" | awk -F'\t' '$1=="APP_DIRS"{print $2}')
+# shellcheck disable=SC2034
+mapfile -t ZCL_PRODUCT_CONTEXTS < <(_repo_shape_make_list PRODUCT_CONTEXTS)
+# shellcheck disable=SC2034
+mapfile -t ZCL_APP_SHAPES < <(_repo_shape_make_list APP_DIRS)
 # shellcheck disable=SC2034
 mapfile -t ZCL_LIB_MODULES < <(sed -n 's/^[[:space:]]*LIB_MODULE("\([A-Za-z0-9_]*\)").*/\1/p' \
     "$ZCL_REPO_SHAPE_MODULE_DEF" | LC_ALL=C sort -u)
-# shellcheck disable=SC2034
-mapfile -t ZCL_DOMAIN_CONTEXTS < <(printf '%s\n' "$_repo_shape_raw" | awk -F'\t' '$1=="DOMAIN_CONTEXTS"{print $2}')
-# shellcheck disable=SC2034
-mapfile -t ZCL_REPO_TOPS < <(printf '%s\n' "$_repo_shape_raw" | awk -F'\t' '$1=="TOPS"{print $2}' | sort -u)
 
+gate_require_scanned "${#ZCL_PRODUCT_CONTEXTS[@]}" 1 repo-shape \
+    "PRODUCT_CONTEXTS parse came back empty"
 gate_require_scanned "${#ZCL_APP_SHAPES[@]}" 1 repo-shape \
-    "APP_DIRS parse came back empty — Makefile:256 layout changed?"
+    "APP_DIRS parse came back empty"
 gate_require_scanned "${#ZCL_LIB_MODULES[@]}" 1 repo-shape \
-    "no LIB_MODULE rows in $ZCL_REPO_SHAPE_MODULE_DEF — row layout changed?"
-gate_require_scanned "${#ZCL_DOMAIN_CONTEXTS[@]}" 1 repo-shape \
-    "DOMAIN_CONTEXTS parse came back empty — Makefile:295 layout changed?"
-gate_require_scanned "${#ZCL_REPO_TOPS[@]}" 1 repo-shape \
-    "no -I<top>/ flags found — the *_INCLUDES layout changed?"
+    "module declaration parse came back empty"
 
-unset _repo_shape_raw
+# These are the only source authorities visible at repository root. Tests and
+# tools are navigable support roots, not production authorities.
+# shellcheck disable=SC2034
+ZCL_SOURCE_AUTHORITIES=(core engine contexts cognition platform)
+# shellcheck disable=SC2034
+ZCL_REPO_TOPS=(core engine contexts cognition platform tools tests)
 
-# "app src" -> app/models/src app/controllers/src ... for each shape.
-# Only the taxonomies this file owns; anything else is a caller's own scope.
+# Physical directories are discovered beneath fixed authorities. The declared
+# module names are checked against these directories by the Makefile and by
+# check_architecture_tree.sh; this reader never guesses their owners.
+mapfile -t ZCL_MODULE_DIRS < <(
+    find "$ZCL_REPO_SHAPE_ROOT/core" "$ZCL_REPO_SHAPE_ROOT/engine" \
+         "$ZCL_REPO_SHAPE_ROOT/cognition" "$ZCL_REPO_SHAPE_ROOT/platform" \
+         "$ZCL_REPO_SHAPE_ROOT/contexts" \
+         -type d -path '*/modules/*' -mindepth 2 -maxdepth 4 2>/dev/null |
+    awk -v root="$ZCL_REPO_SHAPE_ROOT/" '
+        { sub("^" root, ""); if ($0 ~ /\/modules\/[^/]+$/) print }
+    ' | LC_ALL=C sort -u
+)
+gate_require_scanned "${#ZCL_MODULE_DIRS[@]}" "${#ZCL_LIB_MODULES[@]}" repo-shape \
+    "physical module directory set is incomplete"
+
+ZCL_APP_AUTHORITY_DIRS=(engine cognition)
+for _repo_context in "${ZCL_PRODUCT_CONTEXTS[@]}"; do
+    ZCL_APP_AUTHORITY_DIRS+=("contexts/$_repo_context")
+done
+unset _repo_context
+
+ZCL_DOMAIN_DIRS=(contexts/wallet/domain platform/domain/encoding)
+
+# Compatibility query used by lint consumers. `app` means every physical
+# authority/shape room, `lib` means every physical module, and `domain` means
+# each pure domain room. Output includes only paths that actually exist.
 repo_shape_dirs() {
-    local top="$1" leaf="${2:-}" name out=()
-    local -n _rs_list=ZCL_APP_SHAPES
-    case "$top" in
-        app)    local -n _rs_list=ZCL_APP_SHAPES ;;
-        lib)    local -n _rs_list=ZCL_LIB_MODULES ;;
-        domain) local -n _rs_list=ZCL_DOMAIN_CONTEXTS ;;
+    local family="$1" leaf="${2:-}" base name path
+    local -a candidates=()
+    case "$family" in
+        app)
+            for base in "${ZCL_APP_AUTHORITY_DIRS[@]}"; do
+                for name in "${ZCL_APP_SHAPES[@]}"; do
+                    candidates+=("$base/$name")
+                done
+            done
+            ;;
+        lib) candidates=("${ZCL_MODULE_DIRS[@]}") ;;
+        domain) candidates=("${ZCL_DOMAIN_DIRS[@]}") ;;
         *)
-            echo "repo_shape_dirs: FATAL — unknown top '$top'" >&2
+            echo "repo_shape_dirs: FATAL — unknown family '$family'" >&2
             exit 2
             ;;
     esac
-    for name in "${_rs_list[@]}"; do
-        if [ -n "$leaf" ]; then out+=("$top/$name/$leaf"); else out+=("$top/$name"); fi
+    for base in "${candidates[@]}"; do
+        path="$base${leaf:+/$leaf}"
+        [ -d "$ZCL_REPO_SHAPE_ROOT/$path" ] && printf '%s\n' "$path"
     done
-    printf '%s\n' "${out[@]}"
+    return 0
+}
+
+# Emit one named product shape across all authorities. This is distinct from
+# repo_shape_dirs app <leaf>, which appends a leaf below every existing shape.
+repo_shape_room_dirs() {
+    local shape="$1" base path count=0
+    for base in "${ZCL_APP_AUTHORITY_DIRS[@]}"; do
+        path="$base/$shape"
+        if [ -d "$ZCL_REPO_SHAPE_ROOT/$path" ]; then
+            printf '%s\n' "$path"
+            count=$((count + 1))
+        fi
+    done
+    if (( count == 0 )); then
+        echo "repo_shape_room_dirs: FATAL — no '$shape' room exists" >&2
+        exit 2
+    fi
+    return 0
 }

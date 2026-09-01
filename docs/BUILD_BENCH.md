@@ -38,12 +38,12 @@ Other useful arguments: `--samples=N` (default 3), `--jobs=N` (default `nproc`),
 | `codeindex_cold` / `codeindex_warm` | the source navigator's store deleted, then reused |
 
 The interface-edit scenarios are the point of the exercise. The edit lands in
-`lib/base/include/base/log_macros.h`, where the `LOG_*` / `GUARD*` macros live.
+`platform/modules/base/include/base/log_macros.h`, where the `LOG_*` / `GUARD*` macros live.
 Almost every dependent reaches it through
-`lib/util/include/util/log_macros.h`, a one-line forwarder kept in place so the
+`platform/modules/util/include/util/log_macros.h`, a one-line forwarder kept in place so the
 files that already spelled the include that way did not have to change when
-lib/base was extracted. The artifact records both counts — files that include
-the forwarder, files that include the lib/base path directly, and the distinct
+platform/modules/base was extracted. The artifact records both counts — files that include
+the forwarder, files that include the platform/modules/base path directly, and the distinct
 union — each derived at run time by `git grep` on the include directive, never
 pinned and never a filename-substring count.
 

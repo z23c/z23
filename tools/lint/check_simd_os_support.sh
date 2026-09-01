@@ -11,7 +11,7 @@
 # `clearcpuid=avx512f`, and hypervisors that mask XCR0 all produce exactly
 # that machine.
 #
-# lib/crypto/src/blake2b_avx2.c shipped with this bug: detect_features() read
+# core/modules/crypto/src/blake2b_avx2.c shipped with this bug: detect_features() read
 # CPUID.7.0:EBX bit 5 and dispatched straight into the 4-way AVX2 compress with
 # no XGETBV check at all. That code path is Equihash verification, so the fault
 # would have landed on the consensus path on a host whose boot flags we do not
@@ -36,7 +36,7 @@
 #      predicate defined in another file, which this gate then holds to
 #      rule 1 or 2 in turn, so delegation cannot launder the requirement.
 # Form 1 is strongly preferred: the pure policy functions there are unit
-# tested against synthetic register words in lib/test/src/test_simd_os_support.c,
+# tested against synthetic register words in tests/harness/src/test_simd_os_support.c,
 # which is how the AVX-512-disabled machine gets covered without owning one.
 #
 # NOT in scope: target("sha,..."), target("sse..."), target("bmi2,adx").
@@ -62,13 +62,13 @@ mapfile -t avx_files < <(
 
 scanned=${#avx_files[@]}
 gate_require_scanned "$scanned" 1 "check_simd_os_support" \
-    "expected at least lib/crypto/src/blake2b_avx2.c to carry target(\"avx...\")"
+    "expected at least core/modules/crypto/src/blake2b_avx2.c to carry target(\"avx...\")"
 
 # Delegated predicates: "<function name> <file that defines it>". The
 # defining file is itself graded by checks_locally() below, so a delegate
 # whose own OS check is removed re-arms this gate for every caller.
 DELEGATES=(
-    "keccak_x4_available lib/crypto/src/keccak_x4.c"
+    "keccak_x4_available core/modules/crypto/src/keccak_x4.c"
 )
 
 checks_locally() {

@@ -97,8 +97,8 @@ calling an App or package stable.
 - [ ] Keep dynamic loading on canonical/soak/release lanes at zero.
 - [ ] Name the event stores precisely instead of calling all of them "the
   event log": `progress.kv` (consensus/reducer authority),
-  `lib/storage/event_log` (durable application/projection replay),
-  `lib/event` (volatile bounded observability), development receipts and
+  `engine/modules/storage/event_log` (durable engine/application/projection replay),
+  `engine/modules/event` (volatile bounded observability), development receipts and
   the proposed telemetry ledger (non-consensus evidence).
 - [ ] Permit consensus state to flow into diagnostics; never let telemetry
   loss/truncation/contents flow into consensus validity or cursor advance.
@@ -108,9 +108,9 @@ calling an App or package stable.
 Foundations already present, not proof the target platform is complete.
 
 - [x] Native registry has typed effect/risk/authority/cost/capability
-  metadata + hard response budgets (`lib/kernel/include/kernel/command_registry.h`).
+  metadata + hard response budgets (`engine/modules/kernel/include/kernel/command_registry.h`).
 - [x] Native `code` branch exposes bounded map/group/room/file/symbol/ref/test
-  queries (`lib/codeindex/`, `tools/command/native_code_command.c`).
+  queries (`cognition/modules/codeindex/`, `tools/command/native_code_command.c`).
 - [x] Verify-only native dev loop classifies changes, runs proofs, persists
   a verdict, refuses runtime publication (`tools/dev/`, `make dev-watch`).
 - [x] Watcher + native diagnostics share worktree-scoped, SHA3-sealed cycle
@@ -118,8 +118,8 @@ Foundations already present, not proof the target platform is complete.
   compiler failures coalesce, every other red reruns.
 - [x] Public App ABI skeleton declares capabilities/routes/topics/state/
   migration/self-test/quiescence/leases without exposing consensus or
-  private keys (`lib/framework/include/zclassic23/app.h`).
-- [x] `apps/social/app.def` + a deterministic Social simulation prove the
+  private keys (`engine/modules/framework/include/zclassic23/app.h`).
+- [x] `contexts/commons/apps/social/app.def` + a deterministic Social simulation prove the
   manifest and seeded-scenario shape.
 - [x] Bounded event ring, traces, metrics, state dumpers, postmortem
   capsules, deterministic simnet, 64-bit replay seeds.
@@ -248,12 +248,12 @@ Use this loop while the later platform items remain incomplete.
 | What commands exist now? | `discover search/describe` |
 | Where is a symbol and who uses it? | `code sym/refs/room` |
 | Which proof is required? | `dev test plan` + `code tests` |
-| What can an App request? | `lib/framework/include/zclassic23/app.h` |
+| What can an App request? | `engine/modules/framework/include/zclassic23/app.h` |
 | What does an App declare? | `dev app describe` + `apps/<id>/app.def` |
 | What apparent bug may be intentional? | `docs/AGENT_TRAPS.md` |
 
 Detailed contracts: `../NATIVE_COMMAND_INTERFACE.md`,
-`../AGENT_ARCHITECTURE.md`, `../../lib/framework/include/zclassic23/app.h`. Daily
+`../AGENT_ARCHITECTURE.md`, `../../engine/modules/framework/include/zclassic23/app.h`. Daily
 operating loop: `.claude/skills/z23-dev/SKILL.md`.
 
 ## Target compact protocol — extend, do not fork

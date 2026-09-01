@@ -1,0 +1,28 @@
+[Unit]
+Description=Z23 SLO Pager Timer — every 5 min (separate from the probe: self-watchdog)
+
+[Timer]
+# Every 5 minutes, on the :00/:05/:10/... minute. WHY a SEPARATE timer from
+# the probe (platform/deploy/zclassic23-slo-probe.timer) instead of chaining the
+# pager off the probe's success: independence is the whole point. If the
+# probe timer, the probe script, or the node all die, THIS timer keeps
+# firing on its own clock — the pager then reads a ledger whose newest
+# sample is aging past the 5m staleness threshold and PAGES on exactly
+# that. A pager wired to only run after a successful probe would go silent
+# at the precise moment the probe stopped, which is the moment you most
+# need paging. That is the self-watchdog property: the alarm does not
+# depend on the thing it watches.
+#
+# 5m is fine-grained enough for the >2h no-advance / >10m unreachable
+# windows it evaluates while keeping wall(1) noise and journal churn low.
+# RandomizedDelaySec jitters it off the exact boundary; Persistent=true
+# fires a catch-up evaluation after suspend/reboot so a page condition that
+# began during downtime is surfaced promptly rather than after a full idle
+# interval.
+OnCalendar=*-*-* *:0/5:00
+RandomizedDelaySec=10
+Persistent=true
+Unit=zclassic23-slo-pager.service
+
+[Install]
+WantedBy=timers.target

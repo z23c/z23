@@ -2,7 +2,7 @@
  *
  * Native handlers for the `core epoch` tree — the Bounded Node keystone
  * (docs/spec/sovereign-identity-layer.md). The OP_RETURN catalog projection
- * (app/models/src/op_return_index.c, folded forward by the backfill
+ * (engine/models/src/op_return_index.c, folded forward by the backfill
  * service) maintains an incremental digest-chain over EVERY OP_RETURN the
  * chain has ever carried; anchoring that digest in a ZANC anchor commits
  * the entire overlay state (ZNAM/ZSLP/ZANC/ZID) in one ~40-byte tx.

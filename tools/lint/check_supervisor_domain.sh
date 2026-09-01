@@ -17,7 +17,7 @@ cd "$(dirname "$0")/../.."
 # Scan roots are overridable via ZCL_SUPDOM_SCAN_ROOTS so the lint-gate
 # self-test can point the gate at an EMPTY dir and prove the non-empty-floor
 # preflight fires (exit 2). Production scans app/ lib/ config/.
-SUPDOM_ROOTS_DEFAULT="app lib config"
+SUPDOM_ROOTS_DEFAULT="core engine contexts cognition platform"
 read -r -a SUPDOM_ROOTS <<< "${ZCL_SUPDOM_SCAN_ROOTS:-$SUPDOM_ROOTS_DEFAULT}"
 
 # ── --selftest: the coverage check, exercised on every `make lint` ──────────
@@ -129,8 +129,8 @@ if [ "$grc" -ge 2 ]; then
 fi
 HITS=$(printf '%s\n' "$RAW" \
     | grep -v 'supervisor_register_in_domain' \
-    | grep -v 'lib/util/src/supervisor.c' \
-    | grep -v 'lib/test/' \
+    | grep -v 'platform/modules/util/src/supervisor.c' \
+    | grep -v 'tests/harness/include/test/' \
     | grep -v '// supervisor-root-ok:' || true)
 # The filter chain above may legitimately empty HITS (every hit was an
 # in_domain call); printf of an empty RAW yields a blank line that the wc -l
@@ -147,7 +147,7 @@ if [ "$COUNT" -gt 0 ]; then
     if [ "$MODE" = "FAIL" ]; then exit 1; fi
 fi
 
-# ── Background-worker supervision (config/src boot worker TUs) ──
+# ── Background-worker supervision (engine/composition/src boot worker TUs) ──
 #
 # The boot background workers (payment_processor, background_utxo_replay,
 # address_backfill, projection_backfill, hodl_history — in
@@ -156,7 +156,7 @@ fi
 # liveness contract so a wedged loop is not silent (Shape 5 — Supervisor,
 # MONITOR / disk_monitor.c exemplar). This block widens Gate #21 to the
 # boot worker file the same way Gate #15 (check_supervisor_registration.sh)
-# guards app/services/src/*.c: any spawn — a raw pthread_create /
+# guards engine/services/src/*.c: any spawn — a raw pthread_create /
 # thread_registry_spawn, OR a call to the shared thread-start wrapper
 # boot_start_thread_service( (which a split-out worker TU uses instead of a
 # raw spawn) — in a worker file must be paired with at least one
@@ -167,7 +167,7 @@ fi
 # Scan set is overridable via ZCL_SUPERVISOR_WORKER_FILES (space-separated
 # paths) so the lint-gate self-test can point it at a planted fixture; it
 # defaults to the production boot worker file.
-WORKER_FILES="${ZCL_SUPERVISOR_WORKER_FILES:-config/src/boot_background_workers.c config/src/boot_snapshot_offer.c}"
+WORKER_FILES="${ZCL_SUPERVISOR_WORKER_FILES:-engine/composition/src/boot_background_workers.c engine/composition/src/boot_snapshot_offer.c}"
 BASELINE="tools/scripts/supervisor_baseline.txt"
 
 worker_violations=""
@@ -200,7 +200,7 @@ if [ "$WORKER_COUNT" -gt 0 ]; then
     echo "[check_supervisor_domain] $WORKER_COUNT background worker file(s) spawn threads without supervisor_register_in_domain (mode: $MODE)"
     echo "  Fix: in each boot_start_*_service, init a static liveness_contract"
     echo "  and call supervisor_register_in_domain(g_op_sup|g_chain_sup, &c)."
-    echo "  See app/services/src/disk_monitor.c (dm_register_supervisor)."
+    echo "  See engine/services/src/disk_monitor.c (dm_register_supervisor)."
     if [ "$MODE" = "FAIL" ]; then exit 1; fi
 fi
 

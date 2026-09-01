@@ -3,7 +3,7 @@
 #
 # DEFENSIVE_CODING.md §2: "every function that can fail returns a result
 # type — not bare bool". A `return false;` with no context leaves the
-# caller blind. The standard is `struct zcl_result` (lib/util/include/
+# caller blind. The standard is `struct zcl_result` (platform/modules/util/include/
 # util/result.h): a {ok, code, message, file, line} carrier that forces
 # the failure reason to travel with the failure.
 #
@@ -12,7 +12,7 @@
 #   - A service .c file is "result-clean" if it references `struct
 #     zcl_result` anywhere (it has adopted the result type).
 #   - Every file that does NOT is grandfathered via the baseline.
-#   - A NEW app/services/src/*.c file that is not in the baseline and does
+#   - A NEW engine/services/src/*.c file that is not in the baseline and does
 #     not use `struct zcl_result` fails the gate.
 # The baseline may only shrink: migrate a file to zcl_result, delete its
 # baseline line, and the gate then enforces that it stays migrated.
@@ -57,7 +57,7 @@ while IFS= read -r f; do
         new_violations+=("$f")
         fail=1
     fi
-done < <(find app/services/src -type f -name '*.c' | sort)
+done < <(find engine/services/src -type f -name '*.c' | sort)
 
 if [ "$fail" = "0" ]; then
     echo "check_one_result_type: clean — ${baseline_count} grandfathered service file(s), no new bare-result files"

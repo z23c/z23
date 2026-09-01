@@ -18,8 +18,8 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 SRC="$REPO_ROOT/tools/zcc.c"
-SHA3="$REPO_ROOT/lib/sha3/src/sha3.c"
-ALLOC="$REPO_ROOT/lib/base/src/safe_alloc.c"
+SHA3="$REPO_ROOT/platform/modules/sha3/src/sha3.c"
+ALLOC="$REPO_ROOT/platform/modules/base/src/safe_alloc.c"
 BIN="${ZCL_BIN_DIR:-$REPO_ROOT/build/bin}/zcc"
 INPUT_CATALOG="$SCRIPT_DIR/zcc-bootstrap-inputs.list"
 BOOTSTRAP_INPUTS=()
@@ -67,8 +67,8 @@ fi
 mkdir -p "$(dirname "$BIN")" 2>/dev/null || exit 0
 tmp="$BIN.build.$$"
 if "$BOOTSTRAP_CC" "${BOOTSTRAP_FLAGS[@]}" \
-        -I"$REPO_ROOT/lib/sha3/include" -I"$REPO_ROOT/lib/base/include" \
-        -I"$REPO_ROOT/lib/platform/include" \
+        -I"$REPO_ROOT/platform/modules/sha3/include" -I"$REPO_ROOT/platform/modules/base/include" \
+        -I"$REPO_ROOT/platform/modules/platform/include" \
         -o "$tmp" "$SRC" "$SHA3" "$ALLOC" >/dev/null 2>&1; then
     mv -f "$tmp" "$BIN" 2>/dev/null && printf '%s\n' "$BIN"
 else

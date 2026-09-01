@@ -91,7 +91,7 @@ to tens of thousands of files.
 `<object-root>/.current-epoch` while holding the lock that mints the epoch
 directory and hands out the compile lease. Every profile reaches a compiler only
 through that acquire, so the name and the build cannot disagree, and
-`collect_dep_paths()` in `lib/codeindex/src/codeindex_deps.c` reads an
+`collect_dep_paths()` in `cognition/modules/codeindex/src/codeindex_deps.c` reads an
 epoch-managed object root through that name and through nothing else — retained
 generations stay out, and so do the pre-epoch `.d` files still sitting loose in
 the old flat object roots.
@@ -124,7 +124,7 @@ environment digest**; the group name; and, for every file in the group's
 `SHA3-256` content hash.
 
 The forward closure is `codeindex_forward_closure()`
-(`lib/codeindex/src/codeindex_impact.c`) — the mirror of the `code impact`
+(`cognition/modules/codeindex/src/codeindex_impact.c`) — the mirror of the `code impact`
 reverse-closure engine. From the entry symbol it walks the callee call graph and
 collects every in-tree file that **defines** a reachable symbol, plus every
 in-tree prerequisite those files pull in (compiler depfile edges — headers *and*
@@ -176,7 +176,7 @@ A group is **UNCACHEABLE (always runs)** when its inputs cannot be bounded:
   node DB, an external `zclassicd`, `~/.zcash-params`, a legacy datadir, or (the
   load-bearing case) **execs a built binary**, whose behavior comes from the
   whole link and which the forward source closure never reaches
-  (`group_reads_external_inputs()` in `lib/test/src/testcache.c`). Matching is on
+  (`group_reads_external_inputs()` in `tests/harness/src/testcache.c`). Matching is on
   the **exact** group name — the previous `strstr()` form could not list `net`
   without also swallowing `netmask`/`subnet`/`net_bootstrap`, which is exactly
   why `test_net` went uncovered,
@@ -209,8 +209,8 @@ loudly:
 
 ## Files
 
-- `lib/codeindex/src/codeindex_impact.c` — `codeindex_forward_closure()`.
-- `lib/test/src/testcache.c` + `lib/test/include/test/testcache.h` — the cache.
-- `lib/test/src/test_parallel.c` — dispatch wiring, `--cache/--no-cache/--cold-audit`.
-- `lib/test/src/test_testcache.c` — the cache's own contract test group.
+- `cognition/modules/codeindex/src/codeindex_impact.c` — `codeindex_forward_closure()`.
+- `tests/harness/src/testcache.c` + `tests/harness/include/test/testcache.h` — the cache.
+- `tests/harness/src/test_parallel.c` — dispatch wiring, `--cache/--no-cache/--cold-audit`.
+- `tests/harness/src/test_testcache.c` — the cache's own contract test group.
 - `Makefile` — bakes `BUILD_COMPILER_ID` into `testcache.o` as the toolchain key.

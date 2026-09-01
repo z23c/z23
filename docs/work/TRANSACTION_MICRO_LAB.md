@@ -107,7 +107,7 @@ cannot spend or aggregate the dev, prod, legacy, or sibling lab wallet.
 ## The 100 numbered slots
 
 The stable machine-readable allocation is
-[`transaction_micro_lab_profiles.def`](../../app/controllers/include/controllers/transaction_micro_lab_profiles.def).
+[`transaction_micro_lab_profiles.def`](../../engine/controllers/include/controllers/transaction_micro_lab_profiles.def).
 The shell notebook's developer catalog is mechanically checked against that
 compiled C23 authority. It covers 14 transaction shapes:
 

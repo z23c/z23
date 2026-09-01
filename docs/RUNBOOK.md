@@ -36,8 +36,8 @@ Not installed by default (owner-gated deploy step). To enable:
 systemctl --user enable --now zclassic23-simnet-nightly.timer
 ```
 
-installs `deploy/zclassic23-simnet-nightly.timer` +
-`deploy/zclassic23-simnet-nightly.service`, mirroring the existing
+installs `platform/deploy/zclassic23-simnet-nightly.timer` +
+`platform/deploy/zclassic23-simnet-nightly.service`, mirroring the existing
 `zclassic23-fuzz.timer` / `zclassic23-test-suite.timer` pattern. Runs daily
 at 03:10 (jittered up to 5 min), distinct from the hourly fuzz timer and the
 `*:20:00` test-suite timer. Set `Environment=ZCL_SIMNET_NIGHTLY_FUZZ_SWEEP=1`
@@ -149,7 +149,7 @@ build/bin/z23 dumpstate disk_monitor
    ```bash
    sqlite3 ~/.zclassic-c23/node.db 'PRAGMA wal_checkpoint(TRUNCATE);'
    ```
-4. If block files consume >5GB and you don't need full history, enable block pruning (`app/services/src/block_pruning_service.c`).
+4. If block files consume >5GB and you don't need full history, enable block pruning (`engine/services/src/block_pruning_service.c`).
 5. Move datadir to larger volume: stop node, `mv ~/.zclassic-c23 /mnt/bigger/`, symlink or use `-datadir=`.
 
 **Prevention:** Set `ZCL_WAL_MAX_BYTES=104857600` (100MB cap, auto-checkpoint). Monitor `zcl_disk_free_bytes` in Grafana with alert at 1GB.
@@ -238,7 +238,7 @@ with `compatibility_fallback=true` while preserving the
 
 Backups are written to **`$HOME/wallet_backups`**, NOT inside the datadir —
 the service refuses to back up into the source directory, because a copy that
-dies with the datadir is not a backup (`config/src/boot.c`, and
+dies with the datadir is not a backup (`engine/composition/src/boot.c`, and
 `wallet_backup_start` returns `-21` on a same-directory config).
 
 **Diagnose:**
@@ -511,11 +511,11 @@ lines are skipped, max 32 entries loaded. This file is read **before** the
 hardcoded `kOnionSeeds` array, requires no rebuild, and takes effect on the
 next onion-seed pass (boot-time discovery, and any time the
 `peer_floor_violated` condition's peer-of-last-resort remedy fires — see
-`app/conditions/src/peer_floor_violated.c` / `connman_kick_onion_seeds()` in
-`lib/net/src/connman.c`).
+`engine/conditions/src/peer_floor_violated.c` / `connman_kick_onion_seeds()` in
+`core/modules/net/src/connman.c`).
 
 **When this fires automatically:** the `peer_floor_violated` condition
-(`app/conditions/src/peer_floor_violated.c`) detects when healthy outbound
+(`engine/conditions/src/peer_floor_violated.c`) detects when healthy outbound
 peers stay below 3 for 60+ seconds. Its remedy is independent of whether the
 legacy `zclassicd` oracle/mirror is reachable — that source is not consulted
 by this decision at all. When healthy outbound is exactly zero it additionally

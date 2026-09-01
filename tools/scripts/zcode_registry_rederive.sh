@@ -7,7 +7,7 @@
 # registered package directory moves that package's content root, which
 # invalidates two independent places the old value was written down:
 #
-#   1. its row in config/zcode_package_registry.def, and
+#   1. its row in engine/composition/zcode_package_registry.def, and
 #   2. the `dependencies[].root` pin in every OTHER package's
 #      zcode-package.json that depends on it.
 #
@@ -37,14 +37,14 @@ set -Eeuo pipefail
 
 cd "$(dirname "$0")/../.."
 
-# The registry is spread over MORE THAN ONE .def -- config/
+# The registry is spread over MORE THAN ONE .def -- engine/composition/
 # zcode_package_registry.def holds the library packages and
-# config/zcode_c23_commons_app.def holds the commons app. A tool that
+# engine/composition/zcode_c23_commons_app.def holds the commons app. A tool that
 # assumes a single file silently fails to rewrite the rows it cannot
 # find, and then loops forever re-deriving a row it never changed.
 # Discover them instead of naming one.
-mapfile -t DEFS < <(LC_ALL=C grep -rl '^ZCODE_PACKAGE(' --include='*.def' config/ | sort)
-[ "${#DEFS[@]}" -gt 0 ] || { echo "FAIL: no registry .def found under config/" >&2; exit 2; }
+mapfile -t DEFS < <(LC_ALL=C grep -rl '^ZCODE_PACKAGE(' --include='*.def' engine/composition/ | sort)
+[ "${#DEFS[@]}" -gt 0 ] || { echo "FAIL: no registry .def found under engine/composition/" >&2; exit 2; }
 
 # Which .def owns a given package row.
 def_for() {
@@ -93,7 +93,7 @@ for round in $(seq 1 "$MAX_ROUNDS"); do
         if [ "$changed_any" = 1 ]; then
             echo "registry: CLEAN after $((round - 1)) re-derivation(s)"
             # This script rebuilds ONLY $BIN. Three test sources include the
-            # same config/zcode_package_registry.def and compile the row into
+            # same engine/composition/zcode_package_registry.def and compile the row into
             # build/bin/test_parallel, so until that is relinked the suite is
             # still asserting the OLD root and will report a mismatch that no
             # longer exists. That exact stale-binary reading has already been
@@ -152,7 +152,7 @@ for round in $(seq 1 "$MAX_ROUNDS"); do
         echo "      look for a dependencies[].root in a zcode-package.json" >&2
         echo "      that names none of the current registry roots." >&2
         echo "      Compare: grep -rn '\"root\"' --include=zcode-package.json ." >&2
-        echo "      against the content column of config/*.def." >&2
+        echo "      against the content column of engine/composition/*.def." >&2
         exit 2
     fi
     prev_name=$name
@@ -161,7 +161,7 @@ for round in $(seq 1 "$MAX_ROUNDS"); do
     #    we cannot locate is a hard failure, never a skipped edit: a
     #    silent no-op here is precisely what makes the loop spin.
     def=$(def_for "$name") || {
-        echo "FAIL: $name is not declared in any registry .def under config/." >&2
+        echo "FAIL: $name is not declared in any registry .def under engine/composition/." >&2
         echo "      The checker knows a package the registry files do not." >&2
         exit 2
     }

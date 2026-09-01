@@ -23,7 +23,7 @@
 #       (domain leaking UP into an application shape), and
 #   (b) any quoted slash-include whose top-level prefix is NOT in the allow
 #       set {domain + the 12 lib subsystems above} — e.g. "app/...",
-#       "ports/...", "tools/...", or an outer lib subsystem not on the list
+#       "platform/ports/...", "tools/...", or an outer lib subsystem not on the list
 #       (domain leaking SIDEWAYS into an unlisted module).
 #
 # The allow set is implemented positively: any quoted slash-include whose
@@ -48,10 +48,12 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 # shellcheck source=tools/lint/scan_exclusions.sh
 source tools/lint/scan_exclusions.sh
+# shellcheck source=tools/lint/repo_shape.sh
+source tools/lint/repo_shape.sh
 
 # The allow set: domain self-includes + the 12 lib subsystem prefixes. Any
 # quoted slash-include whose first path component is not in this set is a
-# violation (this is what makes the gate catch app/ + ports/ + unlisted lib/).
+# violation (this is what makes the gate catch app/ + platform/ports/ + unlisted lib/).
 declare -A allow
 for p in domain bloom chain coins consensus core crypto keys \
          primitives script support util validation; do
@@ -85,7 +87,12 @@ while IFS= read -r f; do
         violations+=("$f:$lineno domain may not include $hdr")
         fail=1
     done < <(grep -nE '^[[:space:]]*#include[[:space:]]+"[^"]+/' "$f" || true)
-done < <(find domain -type f \( -name '*.c' -o -name '*.h' \) ! -path '*/test/*' "${LINT_FIND_PRUNE_ARGS[@]}")
+done < <(
+    while IFS= read -r domain_dir; do
+        find "$domain_dir" -type f \( -name '*.c' -o -name '*.h' \) \
+            ! -path '*/test/*' "${LINT_FIND_PRUNE_ARGS[@]}"
+    done < <(repo_shape_dirs domain)
+)
 
 if [ "$fail" = "0" ]; then
     echo "check_domain_purity: clean — domain/ has no app/lib includes"

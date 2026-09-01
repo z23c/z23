@@ -57,8 +57,8 @@ jobs:
         run: |
           sudo apt-get update -qq
           # zlib.h + <openssl/*.h> are included directly by four TUs
-          # (lib/sim/src/postmortem.c, lib/wallet/src/wallet_keystore.c,
-          # lib/net/src/https_server.c, lib/rpc/src/httpserver.c). The real
+          # (engine/modules/sim/src/postmortem.c, contexts/wallet/modules/wallet/src/wallet_keystore.c,
+          # core/modules/net/src/https_server.c, engine/modules/rpc/src/httpserver.c). The real
           # build uses the vendored OpenSSL instead; for a syntax pass the
           # distribution headers are equivalent and cost seconds, not the
           # from-source dependency build Job 2 pays for.
@@ -66,7 +66,7 @@ jobs:
             zlib1g-dev libssl-dev
 
           # Clang 18 rejects the "vaes"/"sha"
-          # __builtin_cpu_supports() feature strings that lib/util/src/hw_profile.c
+          # __builtin_cpu_supports() feature strings that platform/modules/util/src/hw_profile.c
           # uses and that GCC — and clang 20 — both accept (this is the exact
           # skew tools/lint/check_clang_portability.sh's own header comment
           # already documents and SKIPs around). The portability ratchet
@@ -342,7 +342,7 @@ jobs:
   # ── JOB 4 — saved fuzz findings must not still reproduce ───────────────
   # Why this is a job and not a lint gate. On 2026-07-14 a fuzzer found that a
   # five-byte script from any peer hangs the node forever. The bytes were
-  # committed to lib/test/fuzz_seeds/script/ and read by nobody for two weeks.
+  # committed to tests/harness/fuzz_seeds/script/ and read by nobody for two weeks.
   # Three mechanisms had already replayed them and already gone red — `make
   # fuzz-ci`, the hourly background quality lane, and the artifact promoter —
   # and not one of them could fail a build. `make fuzz-ci` in particular is

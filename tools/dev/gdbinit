@@ -1,0 +1,36 @@
+# z23 gdb init — load with `gdb -x tools/dev/gdbinit build/bin/z23`
+# (or run gdb from the repo root with tools/dev/gdbinit auto-load permitted).
+#
+# The node names its threads via pthread_setname_np() in
+# platform/modules/util/src/thread_registry.c (kernel comm cap: 15 chars + NUL), so
+# `info threads` shows the registry names directly.
+
+set print pretty on
+set pagination off
+set confirm off
+set breakpoint pending on
+
+# The node ignores SIGPIPE process-wide before worker threads spawn
+# (signal_handler_install); stopping on it in the debugger is pure noise
+# on the network threads.
+handle SIGPIPE nostop noprint pass
+
+define zcl-threads
+    info threads
+    printf "names: pthread_setname_np via platform/modules/util/src/thread_registry.c (15-char kernel cap)\n"
+end
+document zcl-threads
+List all threads with their thread_registry names.
+The node names every spawned thread (pthread_setname_np, 15-char kernel
+cap) in platform/modules/util/src/thread_registry.c, so gdb's native thread list shows
+e.g. "zcl_rpc_worker", "zcl_miner", "zcl_health_swe" (truncated at 15).
+Use `thread <N>` to switch.
+end
+
+define zcl-bt-all
+    thread apply all bt
+end
+document zcl-bt-all
+Backtrace every thread. Pair with zcl-threads to map registry names to
+frames — the thread list and the backtraces share gdb thread numbers.
+end

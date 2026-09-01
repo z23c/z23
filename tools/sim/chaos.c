@@ -1596,7 +1596,7 @@ static int run_scenario(struct chaos_ctx *ctx)
 #ifndef CHAOS_NO_MAIN
 /* Standalone-binary-only: chaos.c is also #include-d into
  * test_chaos_harness.c (under CHAOS_NO_MAIN), whose translation unit is
- * linked into test_parallel alongside lib/test/src/test_parallel.c, which
+ * linked into test_parallel alongside tests/harness/src/test_parallel.c, which
  * already defines this global — defining it unconditionally here would be
  * a duplicate-definition link error in that build. Every other standalone
  * ALL_SRCS tool (wire_sweep, wallet_dump, ...) defines its own copy the

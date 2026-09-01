@@ -6,11 +6,11 @@ set -euo pipefail
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/../.." && pwd)
-BOOT="$ROOT/config/src/boot_services.c"
-TOR="$ROOT/lib/net/src/tor_integration.c"
-STREAM="$ROOT/lib/net/src/onion_stream.c"
-CONNMAN="$ROOT/lib/net/src/connman.c"
-WATCHDOG="$ROOT/config/src/boot_sd_watchdog.c"
+BOOT="$ROOT/engine/composition/src/boot_services.c"
+TOR="$ROOT/core/modules/net/src/tor_integration.c"
+STREAM="$ROOT/core/modules/net/src/onion_stream.c"
+CONNMAN="$ROOT/core/modules/net/src/connman.c"
+WATCHDOG="$ROOT/engine/composition/src/boot_sd_watchdog.c"
 
 die() {
     printf 'check_tor_dial_prewarm: FAIL: %s\n' "$*" >&2

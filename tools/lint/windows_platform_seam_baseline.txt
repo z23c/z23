@@ -1,7 +1,7 @@
 # Windows platform-seam ratchet baseline — regenerate with:
 #   ZCL_LINT_MODE=UPDATE tools/lint/check_windows_platform_seam.sh
 #
-# One '<path> <count>' line per lib/platform/src/*.c file that
+# One '<path> <count>' line per platform/modules/platform/src/*.c file that
 # still holds mingw diagnostic sites under
 #   x86_64-w64-mingw32-gcc -std=c2x -fsyntax-only <lib/*/include -I flags>
 # A file absent from this list must produce ZERO diagnostics.

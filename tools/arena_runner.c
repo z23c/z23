@@ -5,7 +5,7 @@
  * Runs one zdogfight match between two CONFINED pilot processes (one per
  * team) and emits replay/final-state roots for cross-node, byte-identical
  * replay verification. This is a standalone developer tool — NOT a native
- * command (the config/commands def files are deliberately untouched).
+ * command (the engine/composition/commands def files are deliberately untouched).
  *
  * Usage:
  *   arena_runner --seed <u64> --planes-per-team <1..4>

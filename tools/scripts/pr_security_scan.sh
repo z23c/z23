@@ -63,7 +63,7 @@ ADDED_TAGGED="$(printf '%s\n' "$DIFF" | awk '
 # describe/forbid them). Exclude them from the naming-sensitive checks so the
 # scanner never flags itself or the doctrine. Genuine code/secret risks are
 # still scanned everywhere else.
-SELF_RE='^(docs/|tools/scripts/pr_security_scan\.sh|tools/scripts/check_consensus_parity\.sh|lib/test/src/test_consensus_parity\.c)'
+SELF_RE='^(docs/|tools/scripts/pr_security_scan\.sh|tools/scripts/check_consensus_parity\.sh|tests/harness/src/test_consensus_parity\.c)'
 ADDED_SCAN="$(printf '%s\n' "$ADDED_TAGGED" | grep -vE "$SELF_RE")"
 ADDED="$(printf '%s\n' "$ADDED_SCAN" | cut -f2-)"
 

@@ -9,7 +9,7 @@
  * verdict, names a telemetry field, measures a document, or steps a view down
  * — the field table owns the names and the rules, the collector owns the
  * reads, and the renderer owns the JSON. Anything that looks like judgement
- * belongs in app/services/src/agents_telemetry_fill.c instead.
+ * belongs in engine/services/src/agents_telemetry_fill.c instead.
  *
  * WHY THREE LEAVES OVER ONE SNAPSHOT. All three fill the whole domain and then
  * render one group of it. That is deliberate: health is evaluated over all 25

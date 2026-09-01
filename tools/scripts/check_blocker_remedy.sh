@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Lint gate — blocker remedy totality (docs/work/tenacity-roadmap.md "Hold-class doctrine").
 #
-# Goal: every named typed blocker (lib/util/blocker.h) a production call
+# Goal: every named typed blocker (platform/modules/util/blocker.h) a production call
 # site can raise has a declared remedy — a condition-engine healer name
 # checked to exist in condition_registry.def, or the honest token OWNER —
 # in the checked-in ratchet table
-# app/conditions/include/conditions/blocker_remedy_bindings.def. The class
+# engine/conditions/include/conditions/blocker_remedy_bindings.def. The class
 # this closes: a PERMANENT blocker with an empty escape_action and NO
 # auto-remedy condition anywhere in the tree looks exactly like every
 # other typed blocker (registry-visible, well-formed) but can pin H*
@@ -31,13 +31,13 @@
 #      resolved by string matching alone. Its construction site must carry
 #      a `/* blocker-id: <pattern> */` marker comment (conversion
 #      specifiers collapsed to a single `*`, e.g. "coin_backfill.*") — see
-#      app/jobs/src/stage_repair_coin_backfill_util.c for worked examples.
+#      engine/jobs/src/stage_repair_coin_backfill_util.c for worked examples.
 #      Any FILE containing a call site whose id argument resolves to
 #      neither (1) nor a known baseline exemption is a hard failure
 #      independent of the table: the marker is how a dynamic id declares
 #      itself at all, table membership is the separate remedy declaration.
 #
-# Scope mirrors check_blocker_escape_registered.sh: app config lib src,
+# Scope mirrors check_blocker_escape_registered.sh: core engine contexts cognition platform,
 # excluding lib/test (production + sim/fuzz harness code; test fixtures
 # intentionally use synthetic ids never meant to be enumerated) and the
 # blocker primitive's own file (defines the functions, doesn't call them).
@@ -45,8 +45,8 @@ set -euo pipefail
 
 cd "$(dirname "$0")/../.."
 
-TABLE=app/conditions/include/conditions/blocker_remedy_bindings.def
-REGISTRY_ROOTS=(app config lib src)
+TABLE=engine/conditions/include/conditions/blocker_remedy_bindings.def
+REGISTRY_ROOTS=(core engine contexts cognition platform)
 
 [ -f "$TABLE" ] || { echo "check_blocker_remedy: missing $TABLE" >&2; exit 1; }
 
@@ -54,9 +54,9 @@ collect_files() {
     for root in "${REGISTRY_ROOTS[@]}"; do
         [ -d "$root" ] || continue
         find "$root" -type f \( -name '*.c' -o -name '*.h' -o -name '*.def' \) \
-            ! -path 'lib/test/*' \
-            ! -path 'lib/util/src/blocker.c' \
-            ! -path 'lib/util/include/util/blocker.h' \
+            ! -path 'tests/harness/include/test/*' \
+            ! -path 'platform/modules/util/src/blocker.c' \
+            ! -path 'platform/modules/util/include/util/blocker.h' \
             2>/dev/null
     done
 }
@@ -348,7 +348,7 @@ done < <(extract_condition_names "${scan_files[@]}")
 # ── ESCAPE(<action>) remedies — a row may instead name a blocker escape
 # action registered via blocker_register_escape("<action>", fn): the
 # supervisor sweep's own edge-triggered escape ladder IS the auto-remedy
-# (see app/services/src/chain_activation_service.c:211). Only literal
+# (see engine/services/src/chain_activation_service.c:211). Only literal
 # quoted action-name registrations are recognized (a macro-built action
 # name can't be resolved by string matching, same limitation as the id
 # extraction above). ──
@@ -437,7 +437,7 @@ echo "  2. New dynamic (snprintf-built) blocker id: add a"
 echo "     '/* blocker-id: <pattern-with-*> */' marker comment at the"
 echo "     construction site (collapse each conversion specifier to a"
 echo "     single '*'), matching an existing example in"
-echo "     app/jobs/src/stage_repair_coin_backfill_util.c."
+echo "     engine/jobs/src/stage_repair_coin_backfill_util.c."
 echo "  3. Remedy names no condition: fix the typo, or add a"
 echo "     ZCL_CONDITION(<name>) entry to condition_registry.def if the"
 echo "     condition genuinely exists but isn't registered yet."

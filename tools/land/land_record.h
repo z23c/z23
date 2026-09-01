@@ -6,7 +6,7 @@
  * -----------------------------------------------
  * Every fact this queue records is evidence a person will later quote back:
  * "you said my branch landed", "you said it was refused, and why". The
- * receipts live in a chainlog (lib/chainlog), whose whole claim is that
+ * receipts live in a chainlog (engine/modules/chainlog), whose whole claim is that
  * nothing in the history can be edited without the edit showing. That claim
  * is only worth as much as the bytes it hashes. If the same submission could
  * be encoded two ways, two honest recorders would produce two different

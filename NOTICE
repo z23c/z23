@@ -98,7 +98,7 @@ Vendored:   vendor/rgfw/
 QR Code generator 1.8.0 — MIT License
 Copyright (c) Project Nayuki
 
-  Dependency-free QR Model 2 encoder behind lib/encoding/qr.
+  Dependency-free QR Model 2 encoder behind platform/modules/encoding/qr.
 
 Upstream:   https://github.com/nayuki/QR-Code-generator
 Revision:   720f62bddb7226106071d4728c292cb1df519ceb
@@ -157,7 +157,7 @@ Copyright (c) The Decred Developers
 
 Upstream:   https://github.com/decred/dcrdex
 License:    https://blueoakcouncil.org/license/1.0.0
-Reimplemented from the dcrdex design in lib/script/ (script/htlc.*);
+Reimplemented from the dcrdex design in core/modules/script/ (script/htlc.*);
 no dcrdex source is vendored in this tree.
 
 --------------------------------------------------------------------------------
@@ -171,7 +171,7 @@ System Reference Document 5.1 — Creative Commons Attribution 4.0
   International License available at
   https://creativecommons.org/licenses/by/4.0/legalcode.
 
-  Used in lib/metaverse/ (character_sheet.*): the six ability names
+  Used in contexts/commons/modules/metaverse/ (character_sheet.*): the six ability names
   (Strength, Dexterity, Constitution, Intelligence, Wisdom, Charisma),
   the ability modifier rule floor((score - 10) / 2), and the standard
   array's point total of 72, which that module adopts as the fixed

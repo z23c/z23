@@ -26,7 +26,7 @@ independent copy in RAM rather than relying on mutable object alternates.
 Run from the persistent, clean `main` checkout:
 
 ```bash
-sudo deploy/provision-z23-build-host.sh install \
+sudo platform/deploy/provision-z23-build-host.sh install \
   --user="$USER" --repo="$PWD"
 sudo -u "$USER" z23-ram-dev bootstrap
 sudo -u "$USER" z23-ram-dev run -- make -j"$(nproc)"
@@ -64,8 +64,8 @@ checkpoint remains unpublished.
 ## Verify and remove
 
 ```bash
-sudo deploy/provision-z23-build-host.sh status
-sudo deploy/provision-z23-build-host.sh uninstall
+sudo platform/deploy/provision-z23-build-host.sh status
+sudo platform/deploy/provision-z23-build-host.sh uninstall
 ```
 
 Uninstall refuses when the current RAM commit lacks a clean, verified

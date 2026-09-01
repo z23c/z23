@@ -1,0 +1,1 @@
+HOTSWAP_SERVICE("bad.service.v1", "tests/harness/fixtures/hotswap_service_bad.c", "tests/harness/fixtures/hotswap_service_bad.c", "-", "none", "abi", "schema", "wire", "kat", "bad.probe")

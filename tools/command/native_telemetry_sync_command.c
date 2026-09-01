@@ -36,10 +36,10 @@
  *
  * BUDGETS BITE SILENTLY, so this file measures instead of hoping. An
  * over-budget reply is written by the kernel as an EMPTY document, not a
- * truncated one (write_bounded_json, lib/kernel/src/command_registry.c), and
+ * truncated one (write_bounded_json, engine/modules/kernel/src/command_registry.c), and
  * the native CLI's whole envelope buffer is ZCL_COMMAND_LIST_BUDGET+1 bytes. A
  * FULL sync document is 44 values PLUS a provenance entry each and does not
- * fit. telemetry_reply_render_fitting() (lib/util) therefore sizes every
+ * fit. telemetry_reply_render_fitting() (platform/modules/util) therefore sizes every
  * document with a json_write() probe and steps the view down until it fits,
  * recording that it did so, and reporting the measurement when even the
  * smallest view overflows. A stated downgrade is diagnosable; an empty reply
@@ -317,7 +317,7 @@ static bool tls_push_bottleneck(struct json_value *doc,
 
 /* ── rendering, sized before it is shipped ───────────────────────────── */
 
-/* The ladder itself is telemetry_reply_render_fitting() in lib/util — it is
+/* The ladder itself is telemetry_reply_render_fitting() in platform/modules/util — it is
  * domain-agnostic and every ops.telemetry.* leaf needs it. What stays here is
  * only the part that is this leaf's business: what to SAY when the document
  * does not fit. */
@@ -502,7 +502,7 @@ static bool tls_prepare(struct sync_snapshot *snap,
                                "SNAPSHOT_UNAVAILABLE", "execute", false, false,
                                "the sync telemetry provider did not fill a "
                                "snapshot",
-                               "app/services/src/sync_telemetry_fill.c");
+                               "engine/services/src/sync_telemetry_fill.c");
         return false;
     }
     if (!telemetry_evaluate(s, snap, verdict)) {
@@ -745,7 +745,7 @@ void zcl_native_handle_telemetry_sync_stage(
     ok &= json_push_kv_str(&reply->data, "upstream_stage",
                            idx > 0 ? set.name[idx - 1] : "");
     /* The upstream drill-down is DATA, not a next[] step, and that is forced:
-     * push_next_array() (lib/kernel/src/command_registry.c) refuses any next[]
+     * push_next_array() (engine/modules/kernel/src/command_registry.c) refuses any next[]
      * entry whose command equals the command being served — a loop guard — and
      * a refusal there aborts the whole serialization, so the caller receives an
      * EMPTY reply reported as RESPONSE_BUDGET_EXCEEDED rather than a document

@@ -111,7 +111,7 @@
     "preserved_commit_count": 14,
     "range": "60ed79ddc3727c31d198c41e3a4e113ce2ae3393..13d0d255b09548a21ccd05936186f8efc849394a",
     "merge": "6e61feeb3b4c806991686d47c0b8688036b9f812",
-    "chain_evidence_implementation": "app/controllers/src/diagnostics_chain_evidence.c",
+    "chain_evidence_implementation": "engine/controllers/src/diagnostics_chain_evidence.c",
     "chain_evidence_function": "diag_chain_evidence_dump_state_json",
     "implementation_count": 1,
     "registry_names": ["chain_evidence", "chain_evidence_controller"],
@@ -119,7 +119,7 @@
     "reconciled_behavior": "local keyed chain-evidence fast path plus upstream bounded private explorer-database helper"
   },
   "package_dag": {
-    "projection": "config/zcode_package_registry.def",
+    "projection": "engine/composition/zcode_package_registry.def",
     "monolith_exact_roots": [
       "7f15ba590a82de200152b1c02b5b1dc11b4932a9b690fbe332e7c2fa60d764fe",
       "ea54d7038792764c059a697792d46ee92fe75e29aa302d3c8db3a208a580876e",
@@ -227,12 +227,12 @@
       "test_consensus_parity"
     ],
     "byte_oracle_blob_identity": {
-      "lib/test/src/test_sha3_256_x4.c": "e4be481e7ba6bd8b6f2ff133e0e6eab9dcf26b6f",
-      "lib/test/src/test_sha3_512_x4.c": "f03338767e3795bc8dfd0e7be877923f4001aaf0",
-      "lib/test/src/test_mmb.c": "2414e435635fcac6f088994abb64053425329dd4",
-      "lib/test/src/test_mmr.c": "8816ea3179843fdf71773b14dadf93b4ca32f9f6",
-      "lib/test/src/test_utxo_commitment.c": "49ab89acfcce8858d58d2fe05b8fab026b7bd53d",
-      "lib/test/src/test_consensus_parity.c": "a9989d75762e7b5429a41c361b4c1cb54d85f40e"
+      "tests/harness/src/test_sha3_256_x4.c": "e4be481e7ba6bd8b6f2ff133e0e6eab9dcf26b6f",
+      "tests/harness/src/test_sha3_512_x4.c": "f03338767e3795bc8dfd0e7be877923f4001aaf0",
+      "tests/harness/src/test_mmb.c": "2414e435635fcac6f088994abb64053425329dd4",
+      "tests/harness/src/test_mmr.c": "8816ea3179843fdf71773b14dadf93b4ca32f9f6",
+      "tests/harness/src/test_utxo_commitment.c": "49ab89acfcce8858d58d2fe05b8fab026b7bd53d",
+      "tests/harness/src/test_consensus_parity.c": "a9989d75762e7b5429a41c361b4c1cb54d85f40e"
     },
     "sha3_stream_oracle": {
       "pre_blob": "9c4d411dc197b3b8f9c1a8a083590dcee2fbf397",
@@ -299,7 +299,7 @@
       "package recipe wire",
       "target-inclusive dependency lock wire"
     ],
-    "authority": "lib/codec/include/codec/cursor.h",
+    "authority": "platform/modules/codec/include/codec/cursor.h",
     "private_codec_references_remaining_in_migrated_files": 0,
     "root_effect": "INITIAL_WIRE_MIGRATION_PRESERVED_ROOTS; LATER_CURSOR_UB_FIX_ROTATED_ONLY_CODEC_CONTENT_RELEASE_TARGET_INCLUSIVE_LOCK_AND_EVIDENCE_ROOTS",
     "permanent_gate": "check-zcode-package-registry",

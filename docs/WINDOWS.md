@@ -68,7 +68,7 @@ against the distro MinGW sysroot to link and audit an x86-64 PE:
 ```bash
 VENDOR_TARGET=x86_64-w64-mingw32 tools/scripts/build_vendor.sh
 make ZCL_TARGET=windows-x86_64 -j"$(nproc)" z23 zclassic23-acme
-packaging/release/build_release.sh --platform windows-x86_64
+platform/packaging/release/build_release.sh --platform windows-x86_64
 ```
 
 That is compile, link, PE-import-audit, and package evidence only. It is not a
@@ -211,7 +211,7 @@ Linux build and focused tests pass:
 
 ```bash
 cd "$HOME/src/z23"
-sudo bash deploy/setup.sh
+sudo bash platform/deploy/setup.sh
 systemctl --user enable --now zclassic23.service
 systemctl --user status zclassic23.service
 ```
@@ -256,8 +256,8 @@ build.
 
 | Gate | What a compiler actually reads | What it does not do |
 | --- | --- | --- |
-| `make windows-acceptance-compile` | Every active program in the source-derived catalog at `lib/platform/tests/windows_acceptance.mk`; reconciliation requires the active IDs and `_SOURCES` IDs to match exactly | Does not read the rest of the `_WIN32` set or execute a native Windows program |
-| `check-windows-cross-syntax` (`make lint`) | Every `.c` whose text contains `_WIN32` under the maintained scan roots: `adapters/`, `app/`, `application/`, `config/`, `core/`, `domain/`, `lib/`, `ports/`, `src/`, and release-visible `tools/command/` | Syntax-only: no objects, archives, link, Wine run, or native observation |
+| `make windows-acceptance-compile` | Every active program in the source-derived catalog at `platform/modules/platform/tests/windows_acceptance.mk`; reconciliation requires the active IDs and `_SOURCES` IDs to match exactly | Does not read the rest of the `_WIN32` set or execute a native Windows program |
+| `check-windows-cross-syntax` (`make lint`) | Every `.c` whose text contains `_WIN32` under the maintained scan roots: `platform/adapters/`, `app/`, `engine/application/`, `config/`, `core/`, `domain/`, `lib/`, `platform/ports/`, `src/`, and release-visible `tools/command/` | Syntax-only: no objects, archives, link, Wine run, or native observation |
 
 The syntax sweep uses `x86_64-w64-mingw32-gcc -std=c2x -fsyntax-only` and
 every directory named `include` (plus `-I.` and `-Itools`, so

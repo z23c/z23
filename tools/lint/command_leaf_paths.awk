@@ -1,11 +1,11 @@
 # Copyright 2026 Rhett Creighton - Apache License 2.0
 #
 # command_leaf_paths.awk — emit one dotted command-leaf path per line from the
-# authored command registry fragments (config/commands/**/*.def).
+# authored command registry fragments (engine/composition/commands/**/*.def).
 #
 # The registry is X-macro source: every LEAF is registered by one of the eight
 # ZCL_COMMAND_*_{READ,COMMAND} macros whose FIRST argument is `path_` (see the
-# macro definitions in config/src/command_catalog.c). ZCL_COMMAND_BRANCH is
+# macro definitions in engine/composition/src/command_catalog.c). ZCL_COMMAND_BRANCH is
 # deliberately NOT a leaf: its first argument is a single name segment, not a
 # dotted path, and a branch dispatches nothing.
 #

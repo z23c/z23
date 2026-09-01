@@ -17,7 +17,7 @@ with a correct rejection before the timeout).
 make -C examples && ./examples/bin/06_htlc_swap
 ```
 
-(The example source lives at `examples/06_htlc_swap.c`; the harness
+(The example source lives at `docs/examples/06_htlc_swap.c`; the harness
 compiles it against the library sources it calls into — sim, script,
 core, crypto — the same as any other example in this directory.)
 
@@ -48,7 +48,7 @@ core, crypto — the same as any other example in this directory.)
 
 Heights are deterministic given the fixed seed (`0x06874C5350`) and
 `simnet_init`'s fixed base tip — but the exact 32 HTLC secret bytes are
-**not**: `htlc_generate_secret()` (`lib/script/src/htlc.c`) draws from the
+**not**: `htlc_generate_secret()` (`core/modules/script/src/htlc.c`) draws from the
 real OS CSPRNG (`GetRandBytes`), not the seed tape's mockable `rng_u64()`
 hook, by design — genuine cryptographic secret material must never go
 through a replayable test hook, even in a demo. So the secret differs on
@@ -60,15 +60,15 @@ of each step, never the secret's exact bytes.
 
 | API | File |
 |---|---|
-| `htlc_generate_secret`, `htlc_build_script`, `htlc_p2sh_address` (via `script_id_from_script`/`script_for_p2sh`), `htlc_extract_secret`, `htlc_build_redeem_scriptsig`, `htlc_build_refund_scriptsig` | `lib/script/include/script/htlc.h`, `lib/script/src/htlc.c` |
-| `seed_tape_open` / `seed_tape_install` / `seed_tape_uninstall` / `seed_tape_close` | `lib/sim/include/sim/seed_tape.h` |
-| `simnet_init`, `simnet_use_seed_tape`, `simnet_tip_height`, `simnet_mint_to_height`, `simnet_coin_value`, `simnet_free` | `lib/sim/include/sim/simnet.h` |
-| `simnet_wallet_create`, `simnet_wallet_fund`, `simnet_wallet_send`, `simnet_wallet_balance`, `simnet_wallet_script`, `simnet_wallet_default_fee_rate` | `lib/sim/include/sim/simnet_wallet.h` |
-| `simnet_mempool_add`, `simnet_mempool_mint`, `simnet_mempool_reject_name`, `SIMNET_MEMPOOL_REJECT_NONFINAL` | `lib/sim/include/sim/simnet_mempool.h` |
-| `transaction_init`, `transaction_alloc`, `transaction_compute_hash`, `transaction_serialize_size`, `transaction_free`, `fee_rate_get_fee` | `lib/primitives/include/primitives/transaction.h`, `lib/core/include/core/amount.h` |
+| `htlc_generate_secret`, `htlc_build_script`, `htlc_p2sh_address` (via `script_id_from_script`/`script_for_p2sh`), `htlc_extract_secret`, `htlc_build_redeem_scriptsig`, `htlc_build_refund_scriptsig` | `core/modules/script/include/script/htlc.h`, `core/modules/script/src/htlc.c` |
+| `seed_tape_open` / `seed_tape_install` / `seed_tape_uninstall` / `seed_tape_close` | `engine/modules/sim/include/sim/seed_tape.h` |
+| `simnet_init`, `simnet_use_seed_tape`, `simnet_tip_height`, `simnet_mint_to_height`, `simnet_coin_value`, `simnet_free` | `engine/modules/sim/include/sim/simnet.h` |
+| `simnet_wallet_create`, `simnet_wallet_fund`, `simnet_wallet_send`, `simnet_wallet_balance`, `simnet_wallet_script`, `simnet_wallet_default_fee_rate` | `engine/modules/sim/include/sim/simnet_wallet.h` |
+| `simnet_mempool_add`, `simnet_mempool_mint`, `simnet_mempool_reject_name`, `SIMNET_MEMPOOL_REJECT_NONFINAL` | `engine/modules/sim/include/sim/simnet_mempool.h` |
+| `transaction_init`, `transaction_alloc`, `transaction_compute_hash`, `transaction_serialize_size`, `transaction_free`, `fee_rate_get_fee` | `core/modules/primitives/include/primitives/transaction.h`, `core/modules/core/include/core/amount.h` |
 
-Ground-truth reference for this exact flow: `lib/test/src/test_simnet_txkit.c`
-(`txk_htlc_scripts` / `txk_build_htlc_spend`), `lib/test/src/test_htlc.c`
+Ground-truth reference for this exact flow: `tests/harness/src/test_simnet_txkit.c`
+(`txk_htlc_scripts` / `txk_build_htlc_spend`), `tests/harness/src/test_htlc.c`
 (unit coverage of each `htlc_*` builder), and
 `docs/SIMULATOR_TXNS.md` ("test a timelocked contract").
 
@@ -77,11 +77,11 @@ Ground-truth reference for this exact flow: `lib/test/src/test_simnet_txkit.c`
 The script-level functions (`htlc_build_script`, `htlc_p2sh_address`,
 `htlc_generate_secret`, `htlc_extract_secret`,
 `htlc_build_redeem_scriptsig`, `htlc_build_refund_scriptsig` in
-`lib/script/src/htlc.c`) are the exact same functions a live node calls —
+`core/modules/script/src/htlc.c`) are the exact same functions a live node calls —
 nothing in this example is simulator-only.
 
 The RPC/controller glue is `rpc_swap_initiate` / `rpc_swap_participate` in
-`app/controllers/src/swap_controller.c` (also exposed as the
+`engine/controllers/src/swap_controller.c` (also exposed as the
 `z23 rpc swap_initiate` / `z23 rpc swap_participate`), which build the
 HTLC params, P2SH script, and local swap-state record from an
 initiate/participate RPC call.

@@ -61,14 +61,14 @@ the following honest mint.
 
 | File | Function | Role |
 |------|----------|------|
-| `lib/sim/include/sim/simnet_byzantine.h` | `simnet_byzantine_run_connect_case` | Tier-1 case: builds one malformed block for a class and drives it through `connect_block()` on a fresh in-RAM chain. |
-| `lib/sim/include/sim/simnet_byzantine.h` | `simnet_byzantine_run_header_case` | Tier-2 case: builds one malformed header and drives it through `check_block_header()` / `contextual_check_block_header()` (before any body is fetched). |
-| `lib/sim/include/sim/simnet_byzantine.h` | `simnet_byzantine_class_tier`, `simnet_byzantine_class_name`, `simnet_byzantine_expected_reason` | Metadata per `enum simnet_byzantine_class` — which gate applies and what reason string a correct rejection must carry. |
-| `lib/sim/src/simnet_byzantine.c` | `simnet_byzantine_observation_ok` | The invariant this example re-derives independently: rejected, non-empty reason, tip unchanged, and the follow-up honest mint succeeded. |
-| `lib/util/include/util/blocker.h` | `blocker_module_init`, `blocker_reset_for_testing`, `blocker_class_name` | Every rejection in this example becomes a typed `BLOCKER_PERMANENT` record, the same primitive a live node exposes via `z23 ops state --subsystem=blocker` and `z23 core sync blockers`. |
+| `engine/modules/sim/include/sim/simnet_byzantine.h` | `simnet_byzantine_run_connect_case` | Tier-1 case: builds one malformed block for a class and drives it through `connect_block()` on a fresh in-RAM chain. |
+| `engine/modules/sim/include/sim/simnet_byzantine.h` | `simnet_byzantine_run_header_case` | Tier-2 case: builds one malformed header and drives it through `check_block_header()` / `contextual_check_block_header()` (before any body is fetched). |
+| `engine/modules/sim/include/sim/simnet_byzantine.h` | `simnet_byzantine_class_tier`, `simnet_byzantine_class_name`, `simnet_byzantine_expected_reason` | Metadata per `enum simnet_byzantine_class` — which gate applies and what reason string a correct rejection must carry. |
+| `engine/modules/sim/src/simnet_byzantine.c` | `simnet_byzantine_observation_ok` | The invariant this example re-derives independently: rejected, non-empty reason, tip unchanged, and the follow-up honest mint succeeded. |
+| `platform/modules/util/include/util/blocker.h` | `blocker_module_init`, `blocker_reset_for_testing`, `blocker_class_name` | Every rejection in this example becomes a typed `BLOCKER_PERMANENT` record, the same primitive a live node exposes via `z23 ops state --subsystem=blocker` and `z23 core sync blockers`. |
 
 Reference test (ground truth for expected reason strings and blocker
-classes per class): `lib/test/src/test_simnet_byzantine.c`.
+classes per class): `tests/harness/src/test_simnet_byzantine.c`.
 
 ## Byzantine classes covered here
 
@@ -89,14 +89,14 @@ diffbits, bad timestamp) not exercised in this example — see the header's
 The same functions this example calls directly are reached from real P2P
 messages in production:
 
-- `lib/validation/include/validation/connect_block.h` (`connect_block()`) —
-  called from `app/controllers/src/sync_controller_blocks.c` while advancing
+- `core/modules/validation/include/validation/connect_block.h` (`connect_block()`) —
+  called from `engine/controllers/src/sync_controller_blocks.c` while advancing
   the chain over the real, disk-backed `coins_view`.
-- `lib/validation/include/validation/check_block.h`
+- `core/modules/validation/include/validation/check_block.h`
   (`check_block_header()` / `contextual_check_block_header()`) — called from
-  `lib/validation/src/accept_block_header.c` and
-  `lib/validation/src/process_block_contextual_header.c` the moment a
+  `core/modules/validation/src/accept_block_header.c` and
+  `core/modules/validation/src/process_block_contextual_header.c` the moment a
   `headers` P2P message arrives, before the block body is even requested.
-- `lib/util/include/util/blocker.h` (`blocker_set()`) — turns a production
+- `platform/modules/util/include/util/blocker.h` (`blocker_set()`) — turns a production
   reject into a durable, typed, observable record instead of a log line that
   scrolls away.

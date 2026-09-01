@@ -4,11 +4,11 @@
 # The healthy-outbound peer floor is a first-class liveness threshold read by
 # four independent surfaces:
 #
-#   1. lib/net/src/connman.c            — thread_open_connections backfill floor
+#   1. core/modules/net/src/connman.c            — thread_open_connections backfill floor
 #                                          + the dns-seed loop's PEER_FLOOR_MIN
-#   2. app/supervisors/src/net_supervisor.c
+#   2. engine/supervisors/src/net_supervisor.c
 #                                        — the net.outbound_floor supervisor child
-#   3. app/conditions/src/peer_floor_violated.c
+#   3. engine/conditions/src/peer_floor_violated.c
 #                                        — the operator_needed escalation condition
 #
 # For years these each hardcoded their OWN numeric literal (2, 3, 3, 3), so the
@@ -50,11 +50,11 @@ fi
 
 cd "$(dirname "$0")/../.."
 
-DEF_HDR="lib/net/include/net/net.h"
+DEF_HDR="core/modules/net/include/net/net.h"
 SITES=(
-    "lib/net/src/connman.c"
-    "app/supervisors/src/net_supervisor.c"
-    "app/conditions/src/peer_floor_violated.c"
+    "core/modules/net/src/connman.c"
+    "engine/supervisors/src/net_supervisor.c"
+    "engine/conditions/src/peer_floor_violated.c"
 )
 
 fail=0

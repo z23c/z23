@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # check-no-writer-below-sealed-frontier — the North Star's single-writer rule
 # (docs/ARCHITECTURE_NORTH_STAR.md invariant 1) made mechanical for the sealed
-# ROM segment store (lib/storage/chain_segment): written-once-then-immutable
+# ROM segment store (engine/modules/storage/chain_segment): written-once-then-immutable
 # (chmod 0444, never rewritten/appended — see chain_segment.h's on-disk format
 # doc), so exactly ONE designated surface may mutate it.
 #
@@ -19,15 +19,15 @@
 #
 # The designated writer surface (the only files allowed to call either
 # function):
-#   lib/storage/src/chain_segment.c                  the writer implementation
-#   lib/storage/include/storage/chain_segment.h      the API declaration
-#   app/services/src/segment_sealer_service.c        the background sealer
-#   app/controllers/src/chain_segment_controller.c   the manual `sealsegments` RPC
-#   app/conditions/src/segment_corruption.c          the corruption healer's
+#   engine/modules/storage/src/chain_segment.c                  the writer implementation
+#   engine/modules/storage/include/storage/chain_segment.h      the API declaration
+#   engine/services/src/segment_sealer_service.c        the background sealer
+#   engine/controllers/src/chain_segment_controller.c   the manual `sealsegments` RPC
+#   engine/conditions/src/segment_corruption.c          the corruption healer's
 #                                                     manifest rebuild-after-unlink
 #
 # Every other production `.c`/`.h` file is FORBIDDEN from calling either
-# function. lib/test/** (fixtures exercise the writer directly) is out of
+# function. tests/harness/include/test/** (fixtures exercise the writer directly) is out of
 # scope, same as check_no_shellouts; a fixture builder that lives outside
 # lib/test carries an in-code `// writer-below-frontier-ok` marker naming why,
 # so the exception is visible at the call site rather than hidden in this
@@ -51,11 +51,11 @@ cd "$ROOT"
 GATE=check_no_writer_below_sealed_frontier
 
 ALLOWLIST=(
-    "lib/storage/src/chain_segment.c"
-    "lib/storage/include/storage/chain_segment.h"
-    "app/services/src/segment_sealer_service.c"
-    "app/controllers/src/chain_segment_controller.c"
-    "app/conditions/src/segment_corruption.c"
+    "engine/modules/storage/src/chain_segment.c"
+    "engine/modules/storage/include/storage/chain_segment.h"
+    "engine/services/src/segment_sealer_service.c"
+    "engine/controllers/src/chain_segment_controller.c"
+    "engine/conditions/src/segment_corruption.c"
 )
 
 # The designated writer surface must actually exist — a renamed/moved file
@@ -79,11 +79,11 @@ is_allowed() {
 }
 
 roots=()
-for root in app lib src config; do
+for root in core engine contexts cognition platform; do
     [[ -d "$root" ]] && roots+=("$root")
 done
-gate_require_scanned "${#roots[@]}" 2 "$GATE" \
-    "expected at least the app/ and lib/ source roots to exist"
+gate_require_scanned "${#roots[@]}" 5 "$GATE" \
+    "expected all five production authorities to exist"
 
 # Raw scan: every mention of either write entry point across the production
 # source roots, before any filtering. This is what the floor is asserted on.
@@ -99,7 +99,7 @@ gate_require_scanned "$raw_count" 5 "$GATE" \
 
 matches=$(
     printf '%s\n' "$raw" \
-    | grep -v '^lib/test/' \
+    | grep -v '^tests/' \
     | grep -v '// writer-below-frontier-ok' \
     | grep -vE ':[0-9]+:[[:space:]]*(\*|//|/\*)' \
     || true

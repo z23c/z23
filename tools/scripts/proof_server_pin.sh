@@ -50,7 +50,7 @@
 # trustworthy as one mutable ref on one disk: it is never pushed (origin holds
 # only main), `git tag -d`/`-f` rewrites it with no trace, and nothing signs or
 # chains it. The authoritative record of a promotion is now the signed,
-# hash-chained, TRACKED ledger deploy/promotion-receipts.jsonl, written by
+# hash-chained, TRACKED ledger platform/deploy/promotion-receipts.jsonl, written by
 # tools/scripts/promotion_receipt.sh (also called from tools/ship.sh's promotion
 # path) and verifiable offline by a third party. That ledger ships with zero
 # records: its genesis is minted once by the owner under a signing key the owner

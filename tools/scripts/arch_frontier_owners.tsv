@@ -13,7 +13,7 @@ header_frontier	validate_headers_validator.c	pindex_best_header->nHeight[[:space
 state_frontier	utxo_apply_stage.c	coins_kv_set_applied_height
 # block-index snapshot: the EV_BLOCK_HEADER projection feed. After Program H0
 # re-homed the emit off the legacy LevelDB writer, the ONLY emitter is the
-# shared helper in app/jobs/include/jobs/block_header_emit.h (header_admit, the
+# shared helper in engine/jobs/include/jobs/block_header_emit.h (header_admit, the
 # reducer ingest, tip_finalize self-heal, the repairs, and the invalidate/
 # reconsider status-flip paths all call it) — clean, single writer today.
 block_index_snapshot	block_header_emit.h	event_log_append\(.*EV_BLOCK_HEADER

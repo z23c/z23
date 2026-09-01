@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Gate — command-contract ratchet (lane OS-B1). Every native command leaf
-# registered in config/commands/*.def must supply a NON-EMPTY `semantics`
+# registered in engine/composition/commands/*.def must supply a NON-EMPTY `semantics`
 # argument (the OUTPUT-interpretation contract inserted right after `summary`).
 # The compiler already guarantees the argument is PRESENT (a missing macro arg
 # fails the build); this gate guarantees it is not the empty/blank placeholder
@@ -14,7 +14,7 @@ cd "$(dirname "$0")/../.."
 
 # Scan roots overridable so the lint-gate self-test can point at a planted
 # fixture; production scans the seven command catalog fragments.
-DEF_DIR="${ZCL_COMMAND_CONTRACT_DIR:-config/commands}"
+DEF_DIR="${ZCL_COMMAND_CONTRACT_DIR:-engine/composition/commands}"
 
 mapfile -t def_files < <(find "$DEF_DIR" -type f -name '*.def' 2>/dev/null)
 gate_require_scanned "${#def_files[@]}" 1 check_command_contract \
@@ -64,7 +64,7 @@ if [ "$COUNT" -gt 0 ]; then
          "semantics argument (mode: $MODE)"
     echo "  Every leaf must supply a specific one-line OUTPUT-interpretation"
     echo "  semantics (source/freshness/units/completeness) — not \"\" and not"
-    echo "  a restatement of summary. See lib/kernel/include/kernel/"
+    echo "  a restatement of summary. See engine/modules/kernel/include/kernel/"
     echo "  command_registry.h (struct zcl_command_spec.semantics)."
     if [ "$MODE" = "FAIL" ]; then exit 1; fi
 fi

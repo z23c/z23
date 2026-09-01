@@ -15,7 +15,7 @@
 #
 #   (a) SUPERVISED — its translation unit registers a liveness contract
 #       (`supervisor_register(`, `supervisor_register_in_domain(`, or the
-#       lib/util adapter `thread_liveness_register(`), OR the spawn call line
+#       platform/modules/util adapter `thread_liveness_register(`), OR the spawn call line
 #       (or the line above) carries a `// supervised:<child>` marker.
 #   (b) MARKED-EXEMPT — the spawn call line (or the line above) carries a
 #       `// thread-supervision-ok:<reason>` marker (a bounded/joined worker
@@ -32,7 +32,7 @@
 # now-redundant baseline line).
 #
 # To clean up debt: pick a baselined thread, give it a liveness contract via
-# util/thread_liveness.h (see lib/health/src/heartbeat.c for the exemplar),
+# util/thread_liveness.h (see engine/modules/health/src/heartbeat.c for the exemplar),
 # delete its baseline line, re-run `make lint`.
 set -euo pipefail
 
@@ -45,7 +45,7 @@ cd "$(dirname "$0")/../.."
 # Scan roots + baseline are overridable so the lint-gate self-test can point
 # the gate at a planted fixture dir / empty baseline (and prove the
 # non-empty-scan floor + trip/pass behavior) without touching the live tree.
-THREADSUP_ROOTS_DEFAULT="app lib config"
+THREADSUP_ROOTS_DEFAULT="core engine contexts cognition platform"
 read -r -a ROOTS <<< "${ZCL_THREADSUP_SCAN_ROOTS:-$THREADSUP_ROOTS_DEFAULT}"
 
 # ── --selftest: the coverage check, exercised on every `make lint` ──────────
@@ -102,8 +102,8 @@ mapfile -t files < <(find "${ROOTS[@]}" -type f -name '*.c' 2>/dev/null \
     | grep -v '/test/' \
     | grep -v -i 'fuzz' \
     | grep -v '/vendor/' \
-    | grep -v 'lib/util/src/thread_registry.c' \
-    | grep -v 'lib/util/src/supervisor.c' \
+    | grep -v 'platform/modules/util/src/thread_registry.c' \
+    | grep -v 'platform/modules/util/src/supervisor.c' \
     | lint_filter_excluded \
     | sort)
 gate_require_scanned "${#files[@]}" 1 check_thread_supervision \
@@ -158,8 +158,8 @@ if [ "${ZCL_THREADSUP_COVERAGE:-1}" = "1" ]; then
         ':(exclude)*/test/*'
         ':(exclude,icase)*fuzz*'
         ':(exclude)*/vendor/*'
-        ':(exclude)lib/util/src/thread_registry.c'
-        ':(exclude)lib/util/src/supervisor.c'
+        ':(exclude)platform/modules/util/src/thread_registry.c'
+        ':(exclude)platform/modules/util/src/supervisor.c'
     )
     gate_require_git_coverage - "$THREADSUP_COVERAGE_ALLOWANCE" check_thread_supervision \
         ZCL_THREADSUP_COVERAGE_ALLOWANCE \
@@ -256,7 +256,7 @@ if [ "${#new_violations[@]}" -gt 0 ]; then
     echo ""
     echo "  Fix (preferred → fallback):"
     echo "    1. Supervise it: register a liveness contract via"
-    echo "       util/thread_liveness.h (exemplar: lib/health/src/heartbeat.c),"
+    echo "       util/thread_liveness.h (exemplar: engine/modules/health/src/heartbeat.c),"
     echo "       or add '// supervised:<child>' at the spawn site."
     echo "    2. If short-lived/joined/one-shot: add"
     echo "       '// thread-supervision-ok:<reason>' at the spawn site."

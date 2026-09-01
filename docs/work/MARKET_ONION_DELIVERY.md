@@ -19,26 +19,26 @@ acceptance-proven.
 ## Why the current path leaks
 
 A paid offer carries the seller's file-service endpoint as clearnet
-`peer_ip:peer_port` (`struct file_offer`, `lib/net/include/net/file_market.h`)
+`peer_ip:peer_port` (`struct file_offer`, `core/modules/net/include/net/file_market.h`)
 and the buyer connects directly
 (`file_market_purchase_retrieval_service.c` →
-`file_market_delivery_fetch_endpoint`, `lib/net/src/file_market_delivery.c`).
+`file_market_delivery_fetch_endpoint`, `core/modules/net/src/file_market_delivery.c`).
 `/directory.json` also publishes `clearnet_ip`/`clearnet_port`
-(`lib/net/src/onion_service.c:696-702`), so an onion-first seller leaks its
+(`core/modules/net/src/onion_service.c:696-702`), so an onion-first seller leaks its
 IP there too unless that row is suppressed.
 
 ## Building blocks that already exist
 
 - **Inbound**: dynhost bridges onion requests into
-  `onion_service_handle_request()` (`lib/net/src/onion_service.c:1046`) —
+  `onion_service_handle_request()` (`core/modules/net/src/onion_service.c:1046`) —
   `(method, path, body, body_len, response, response_max)`, arbitrary binary
   both directions, HTTP-framed. New endpoint = one row in
-  `lib/net/include/net/site_routes.def` (single registry; POST honored
+  `core/modules/net/include/net/site_routes.def` (single registry; POST honored
   onion-only). Binary-serving precedent: `/zcode/download`.
 - **Outbound .onion client, no SOCKS**:
-  `tor_integration_fetch_onion_blocking()` (`lib/net/src/tor_integration.c:515`)
+  `tor_integration_fetch_onion_blocking()` (`core/modules/net/src/tor_integration.c:515`)
   over weak-linked `dynhost_client_fetch` — used today for the
-  `/directory.json` seed fetch (`lib/net/src/connman.c:357`). **GET-only**
+  `/directory.json` seed fetch (`core/modules/net/src/connman.c:357`). **GET-only**
   (literal `GET %s HTTP/1.0`, `vendor/tor/src/feature/dynhost/dynhost_client.c:125`), <!-- doc-path-ok: optional vendor/tor submodule source is absent from the default checkout -->
   1 MiB response ceiling (`ONION_FETCH_BODY_MAX`, `tor_integration.c:461`).
 - **Transport-independent authorization**: the buyer ed25519 request
@@ -61,7 +61,7 @@ IP there too unless that row is suppressed.
 
 ## Recommended minimal design
 
-1. **Offer v2** (`file_market.h`, `lib/net/src/file_market_offer.c`): decode
+1. **Offer v2** (`file_market.h`, `core/modules/net/src/file_market_offer.c`): decode
    v1 + v2 keyed on `auth_version`; v2 body adds `endpoint_type u8`
    (0=clearnet, 1=onion) + `onion_pubkey[32]`, fixed-width layout, wire
    ~568 bytes. `offer_id`/body-root chain stays self-consistent

@@ -45,7 +45,7 @@ exact packages without a central registry.
   machine, and what peer discovery does with no flags.
 - [`MACOS_GUI_QUICKSTART.md`](MACOS_GUI_QUICKSTART.md) — a fresh Mac with only
   Apple's command-line tools to a native GUI application: scaffold it from
-  `packages/zhello`, see your change on screen, ship a reproducible `.app`.
+  `contexts/commons/packages/zhello`, see your change on screen, ship a reproducible `.app`.
 - [`WINDOWS.md`](WINDOWS.md) — MSYS2 UCRT64 native C23 development, the
   remaining Win32 port boundary, and the current WSL2 full-node/service lane.
 - [`PARAMS.md`](PARAMS.md) — why a node validates shielded proofs out of the
@@ -176,7 +176,7 @@ These are useful but do not define the primary product or current critical
 path:
 
 - [`METAVERSE.md`](METAVERSE.md) and [`METAVERSE_MVP.md`](METAVERSE_MVP.md) —
-  application/creation layer; token economics remain simulation-only.
+  engine/application/creation layer; token economics remain simulation-only.
 - [`FILE_MARKET_PROTOCOL.md`](FILE_MARKET_PROTOCOL.md) — marketplace protocol;
   the operator acceptance journey it once planned now lives as
   `make commons-multihost-acceptance` (see the top-level README).

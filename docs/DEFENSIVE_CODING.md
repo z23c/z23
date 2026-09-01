@@ -20,7 +20,7 @@ a UTXO set gets silently corrupted at scale.
 
 **Enforcement:** `activerecord.h` poisons raw `sqlite3_step` in app code at
 compile time (a `_Pragma("GCC error …")` macro, guarded by `ZCL_AR_ENFORCE` /
-opt-out `ZCL_AR_RAW_SQL` — see `app/models/include/models/activerecord.h`),
+opt-out `ZCL_AR_RAW_SQL` — see `engine/models/include/models/activerecord.h`),
 plus a CI lint that re-checks the same surface. The Makefile adds
 `-DZCL_AR_ENFORCE` globally, so raw SQL becomes a conscious, visible decision.
 
@@ -35,10 +35,10 @@ identically. Pick the one that fits the call site:
 | `AR_CACHED_SAVE(stmt, cbs, name, rec, validate_fn, bind_code)` | Hot path with a cached prepared stmt owned by `node_db` | Same lifecycle, skips prepare — call `AR_RESET(stmt)` and bind |
 
 For a worked call-site example (`db_wallet_script_save` using `AR_ADHOC_SAVE`),
-see `app/models/src/wallet_key.c`.
+see `contexts/wallet/models/src/wallet_key.c`.
 
 Storage primitives that legitimately need raw SQL
-(`lib/storage/src/coins_view_sqlite.c`) opt out with `#define ZCL_AR_RAW_SQL`.
+(`engine/modules/storage/src/coins_view_sqlite.c`) opt out with `#define ZCL_AR_RAW_SQL`.
 
 **Status: shipped.** The ratchet allowlist
 `tools/scripts/raw_sqlite_allowlist.txt` is empty. Raw `sqlite3_step()` is
@@ -61,7 +61,7 @@ wallet keys, peers, mempool entries. Those rows have an identity, a
 
 The reducer pipeline does **not** write its stage state to `node.db`. It writes
 to `consensus.db` — a separate, singleton, WAL kernel store
-(`lib/storage/src/progress_store.c`/`consensus_db.c`, opened once at boot via
+(`engine/modules/storage/src/progress_store.c`/`consensus_db.c`, opened once at boot via
 `progress_store_open()`) holding the F-2 `stage` primitive's `stage_cursor`
 table plus the per-stage `*_log` tables (`header_admit_log`, `body_fetch_log`,
 `validate_headers_log`, `utxo_apply_log`, `utxo_apply_delta`, `created_outputs`,
@@ -101,7 +101,7 @@ row) does NOT get the kernel-store marker — it goes through the AR lifecycle.
 
 **Enforcement:** standard result type `struct zcl_result` (`.ok`, `.code`,
 `.message[256]`, `.source_file`, `.source_line`) with `ZCL_OK`, `ZCL_ERR`, and
-`ZCL_CHECK` macros — see `lib/base/include/base/result.h`.
+`ZCL_CHECK` macros — see `platform/modules/base/include/base/result.h`.
 
 **Rule:** new service functions MUST return `struct zcl_result` instead of
 `bool`. Existing code migrates incrementally.
@@ -118,7 +118,7 @@ the failure.
 **Problem:** 15+ unchecked malloc/calloc calls in sync services → silent NULL
 dereference.
 
-**Enforcement:** `lib/base/include/base/safe_alloc.h` provides:
+**Enforcement:** `platform/modules/base/include/base/safe_alloc.h` provides:
 
 - `zcl_malloc(size, label)` — logs (`malloc_failed` + `EV_OOM`) and returns
   NULL; use when graceful degradation is possible.
@@ -137,7 +137,7 @@ and `vendor/`. Files needing raw alloc add `// raw-alloc-ok` on the line.
 
 **Problem:** 100+ `return -1;` / `return false;` with no logging.
 
-**Enforcement:** `lib/util/include/util/log_macros.h` provides log-and-return
+**Enforcement:** `platform/modules/util/include/util/log_macros.h` provides log-and-return
 macros (each logs `error` with `file`/`line`/`func` + varargs):
 
 - `LOG_FAIL(domain, fmt, ...)` — log + `return false`.
@@ -160,10 +160,10 @@ explicit `// raw-return-ok:<reason>` marker (no space after the colon):
 
 | Gate | Surface |
 |------|---------|
-| `check-silent-errors-services` | `app/services/src/` |
-| `check-silent-errors-controllers` | `app/controllers/src/` |
-| `check-silent-errors-jobs` | `app/jobs/src/` |
-| `check-silent-errors-conditions` | `app/conditions/src/` |
+| `check-silent-errors-services` | `engine/services/src/` |
+| `check-silent-errors-controllers` | `engine/controllers/src/` |
+| `check-silent-errors-jobs` | `engine/jobs/src/` |
+| `check-silent-errors-conditions` | `engine/conditions/src/` |
 | `check-silent-errors-bool` | `app/{controllers,services,jobs,conditions,models}/src/` (RATCHET) |
 | `check-wallet-raw-prepare-log` | raw `sqlite3_prepare_v2()` + unlogged NULL-check in `app/`, `lib/` (RATCHET) |
 
@@ -201,14 +201,14 @@ site). The same gate ratchets that the plaintext model saves never return.
 
 `after_save` fires when the **statement** steps, not when the **transaction**
 commits. Saves do happen inside transactions
-(`app/services/src/blog_publication.c` wraps `db_blog_post_save` in
+(`engine/services/src/blog_publication.c` wraps `db_blog_post_save` in
 `db_txn_begin`/`db_txn_commit`) and some `after_save` hooks have effects the
 database cannot take back — `wallet_tx_after_save` emits `EV_WALLET_TX_SAVED`
 and pushes a wallet projection. Put those together and an external observer
 can be told about a row a later `ROLLBACK` erases.
 
 `ar_register_after_commit(cbs, fn, sizeof(*record))`
-(`app/models/include/models/ar_after_commit.h`) queues a hook instead: it
+(`engine/models/include/models/ar_after_commit.h`) queues a hook instead: it
 fires once, in registration order, after the **outermost** transaction
 commits, and not at all if the transaction rolls back. Outside a transaction
 it fires immediately after the statement succeeds. A queued hook is handed a
@@ -241,7 +241,7 @@ Gates fall into three modes:
   baseline; the baseline file may only shrink (growing it requires an ADR).
 - **WARN** — measures only, per-file, never fails on any ONE violation. Gate
   **#12** (`check-long-functions`) carries a WARN sub-tier for `lib/` (excl.
-  `lib/test/`) + `domain/`, alongside its ENFORCED tier for the app-shape
+  `tests/harness/include/test/`) + `domain/`, alongside its ENFORCED tier for the app-shape
   surfaces. #18 and #20 graduated WARN → RATCHET as **E10**; #19 ratcheted
   WARN → FAIL. **E1** (`check-file-size-ceiling`) used to carry a WARN tier
   with an aggregate drift-count ratchet; both are gone. E1 is now one policy
@@ -251,7 +251,7 @@ Gates fall into three modes:
 
 Each gate's intent is one row below. Implementation scripts live under
 `tools/scripts/` or `tools/lint/`. The E-series gates are tested in
-`lib/test/src/test_make_lint_gates.c` (plant fixture → assert trip → remove →
+`tests/harness/src/test_make_lint_gates.c` (plant fixture → assert trip → remove →
 assert green).
 
 ### §3–§6 core gates
@@ -292,7 +292,7 @@ assert green).
   but do hold the entropy sources, the boot-order state machine and the RPC
   command table — the process-wide invariants whose violation must stay loud,
   so the gate counts them to keep those aborts justified rather than merely
-  inherited. Note `lib/core/` is an ordinary subsystem; the byte-sealed
+  inherited. Note `core/modules/core/` is an ordinary subsystem; the byte-sealed
   directory is top-level `core/`, whose rows are **counted and frozen** and
   only editable through the owner unseal ritual.
 
@@ -315,24 +315,24 @@ assert green).
   `// thread-supervision-ok:<reason>`. Annotating in place rather than
   baselining is deliberate: the baseline must stay a list of genuine debt that
   may only shrink, so nobody is ever pressured into "fixing" a correct abort to
-  lower a number. Current holders: `lib/sapling/src/note_encryption.c` (an
+  lower a number. Current holders: `core/modules/sapling/src/note_encryption.c` (an
   `esk` repeat would emit a two-time pad under the fixed zero nonce and leak
-  the note plaintext), `lib/keys/src/key.c` and `lib/keys/src/pubkey.c` (the
+  the note plaintext), `contexts/wallet/modules/keys/src/key.c` and `contexts/wallet/modules/keys/src/pubkey.c` (the
   process-wide secp256k1 signing/verification context lifecycle, and the
   entropy source feeding it — no external input reaches them, each runs once at
   boot, and a node that carried on would silently mis-verify signatures or hand
-  out a guessable key), `lib/sapling/src/sapling.c` (a fixed Jubjub generator
+  out a guessable key), `core/modules/sapling/src/sapling.c` (a fixed Jubjub generator
   that failed to derive, after which every scalar multiplication is garbage),
-  `lib/core/src/random.c` and `lib/platform/src/rng.c` (no entropy source, on
+  `core/modules/core/src/random.c` and `platform/modules/platform/src/rng.c` (no entropy source, on
   functions whose return type has no error value — continuing means handing
   back a zero-filled buffer or a predictable integer, and every key minted from
-  it is guessable), `lib/util/src/boot_phase.c` (a backward or out-of-range
+  it is guessable), `platform/modules/util/src/boot_phase.c` (a backward or out-of-range
   boot-stage move, which is the one thing that state machine exists to catch),
-  `lib/rpc/src/server.c` (a duplicate or overflowing command name at static
+  `engine/modules/rpc/src/server.c` (a duplicate or overflowing command name at static
   registration — a node serving a half-built RPC table is worse than one that
   refuses to start).
 
-  *A hatch is a claim, and it is checkable.* `lib/rpc/src/server.c`'s other
+  *A hatch is a claim, and it is checkable.* `engine/modules/rpc/src/server.c`'s other
   site — `assert(rpc_in_warmup)` in `set_rpc_warmup_finished()` — is
   deliberately **baselined rather than hatched**, and carries a comment saying
   so. It enforces "called exactly once" with a live abort while the paired stop
@@ -348,14 +348,14 @@ assert green).
   Impl: `tools/lint/check_no_runtime_abort.sh`, with a mandatory `--selftest`
   whose `_Static_assert` case is a negative control.
 
-- **Gate #11: `check-model-validation`** (HARD) — every `app/models/src/*.c`
+- **Gate #11: `check-model-validation`** (HARD) — every `engine/models/src/*.c`
   has at least one `validates_*` call (from
-  `app/models/include/models/activerecord.h`) OR a top-of-file
+  `engine/models/include/models/activerecord.h`) OR a top-of-file
   `ar-validate-skip:<tag>` marker explaining why AR validation does not apply
   (e.g. `connection-handle-not-a-row`). Impl:
   `tools/scripts/check_model_validation.sh`.
 
-- **Gate #11b: `check-model-ar-lifecycle`** (HARD) — `app/models/src/*.c` may
+- **Gate #11b: `check-model-ar-lifecycle`** (HARD) — `engine/models/src/*.c` may
   not call `ar_run_before_save()` or `ar_run_after_save()` directly. Save paths
   must use `AR_BEGIN_SAVE`, `AR_ADHOC_SAVE`, `AR_CACHED_SAVE`, and
   `AR_FINISH_SAVE` so `before_validate -> validate -> before_save -> SQL ->
@@ -364,9 +364,9 @@ assert green).
 
 - **Gate #11c: `check-model-sql-literals`** (RATCHET, shrink-only) — a model
   file must not carry a hand-written SQL statement. Reads and writes build
-  one with `app/models/include/models/query_builder.h`: table and column
+  one with `engine/models/include/models/query_builder.h`: table and column
   names come from the closed set in
-  `app/models/include/models/query_schema.def` and are passed as generated
+  `engine/models/include/models/query_schema.def` and are passed as generated
   enums, so there is no entry point that accepts an identifier as a string;
   values arrive through `qb_value_*` / `qb_set_*` / `qb_where_*` / `qb_limit`,
   each of which emits a `?` and pushes the value onto a bind list. An
@@ -397,7 +397,7 @@ assert green).
   in prose.
 
 - **Gate #11e: `check-cookbook`** (HARD, no baseline) — every recipe in
-  `config/cookbook.def` must still work, and `docs/COOKBOOK.md` must still be
+  `engine/composition/cookbook.def` must still work, and `docs/COOKBOOK.md` must still be
   what the registry generates. A written how-to rots: a recipe telling a
   newcomer to run a command that no longer exists costs more than no recipe,
   because they believe it and spend an hour. So a RUN recipe has its command
@@ -412,17 +412,17 @@ assert green).
   in a `.def`.
 
 - **Gate #11d: `check-persona-resolves`** (HARD, no baseline) — every row in
-  `lib/engine/include/engine/personas.def` must still point at things that
+  `engine/modules/engine/include/engine/personas.def` must still point at things that
   exist. A persona is the one piece of prose this project keeps about a
   territory, and it is allowed to exist only because it carries what no index
   can derive: an authored refusal. Everything else a territory brief reports
   is regenerated from the code index on every call, exactly so a written copy
   cannot go stale while still reading as true — see the long comment in
-  `lib/territory/include/territory/territory.h`. Writing a stance down buys
+  `cognition/modules/territory/include/territory/territory.h`. Writing a stance down buys
   that staleness problem back, and this gate is the price. Each row's
   TERRITORY must be a directory holding at least one tracked `.c` or `.h`
   (the tree itself is the witness, the same independent one
-  `config/lib_module_order.def` uses for its set — comparing two `.def` files
+  `engine/composition/lib_module_order.def` uses for its set — comparing two `.def` files
   would only prove they agree with each other), and each row's EVIDENCE must
   be a tracked file: a stance whose reasoning was deleted is one nobody is
   holding to any more. A duplicate territory, an empty or one-word stance,
@@ -439,18 +439,18 @@ assert green).
 - **Gate #12: `check-long-functions`** — flags any top-level function whose
   body spans >500 lines. Two tiers (a split Gate E1 no longer uses — E1 is
   one policy for all production C now): ENFORCED (HARD, fails the build) covers
-  `app/controllers/src/*.c`, `app/services/src/*.c`, and `config/src/*.c`,
+  `engine/controllers/src/*.c`, `engine/services/src/*.c`, and `engine/composition/src/*.c`,
   ratchet-baselined at
   `tools/scripts/check_long_functions_baseline.txt` for grandfathered
-  offenders (e.g. `config/src/boot.c`'s `app_init`); WARN (prints, never
-  fails) covers `lib/**/*.c` excl. `lib/test/`, baselined at
+  offenders (e.g. `engine/composition/src/boot.c`'s `app_init`); WARN (prints, never
+  fails) covers `lib/**/*.c` excl. `tests/harness/include/test/`, baselined at
   `tools/scripts/check_long_functions_lib_baseline.txt`. Long functions
   conceal multiple concerns. Override `// long-function-ok:<tag>` on the
   signature line (tag matches `[A-Za-z][A-Za-z0-9_-]+`) exempts a function
   entirely in either tier. Impl: `tools/scripts/check_long_functions.sh`.
 
 - **Gate #13: `check-rpc-registrar`** — every RPC handler declared in
-  `lib/rpc/src/` must appear in the registrar table at the bottom of the same
+  `engine/modules/rpc/src/` must appear in the registrar table at the bottom of the same
   file, so "method not found" is caught at build time.
 
 - **Gate #14: `check-lag-slo-observable`** — any code path that can produce
@@ -459,15 +459,15 @@ assert green).
 
 - **Gate #15: `check-lib-layering`** (RATCHET) — flags any
   `#include "controllers/…"`, `"models/…"`, `"services/…"`, `"views/…"`, or
-  `"config/…"` in `lib/**/*.c|.h` outside `lib/test/`. lib/ is the
+  `"config/…"` in `lib/**/*.c|.h` outside `tests/harness/include/test/`. lib/ is the
   foundation; app/ consumes it and config/ composes the whole process, so
   both sit above it. A backward include means a lib/ file is doing upstairs
   work — and for `config/` it is worse than a misplaced dependency: config/
   constructs the message processor, the reducer and the databases, so naming
   a config/ symbol from lib/ makes the two layers cyclic. When lib/ needs
   something the composition root owns, declare a port in lib/ and register
-  the implementation from config/ (`lib/net/include/net/net_runtime_port.h`,
-  `lib/storage/include/storage/node_db_runtime.h`). lib/hotswap's
+  the implementation from config/ (`core/modules/net/include/net/net_runtime_port.h`,
+  `engine/modules/storage/include/storage/node_db_runtime.h`). engine/modules/hotswap's
   `../../../config/*.def` X-macro data tables are not matched and carry no
   link edge. Baseline `tools/scripts/lib_layering_baseline.txt` is empty (98
   originals all remediated). Override `// lib-layer-ok:<tag>`. Impl:
@@ -475,16 +475,16 @@ assert green).
 
 - **Gate #49: `check-shape-include-direction`** (RATCHET) — the eight app/
   shapes include DOWNWARD only (`controllers -> services -> models ->
-  lib/core`). Flags any `#include "services/…"` or `"controllers/…"` from an
-  `app/models/**` file, and any `#include "controllers/…"` from an
-  `app/services/**` file. Baseline
+  core/modules/core`). Flags any `#include "services/…"` or `"controllers/…"` from an
+  `engine/models/**` file, and any `#include "controllers/…"` from an
+  `engine/services/**` file. Baseline
   `tools/scripts/shape_include_direction_baseline.txt`: zero on the
   models/ -> services/controllers edge (its two originals — `principal.c` ->
   `services/authz_policy.h` and `db_txn.c` -> `services/disk_monitor.h` — <!-- doc-path-ok: illustrative bad include, not a real path -->
   were fixed at gate-introduction: the authz policy table moved down into
-  `app/models/`, and db_txn's disk-critical check now goes through a
+  `engine/models/`, and db_txn's disk-critical check now goes through a
   registered callback, `db_txn_set_disk_critical_probe`, wired from
-  `disk_monitor_start()` itself (`app/services/src/disk_monitor.c`);
+  `disk_monitor_start()` itself (`engine/services/src/disk_monitor.c`);
   pre-existing entries remain grandfathered on the services/ -> controllers/
   edge (undiscovered until this gate existed). New edges fail, and stale
   baseline rows fail until removed so paid-down debt cannot silently return.
@@ -505,7 +505,7 @@ assert green).
   12 allowed lib subsystems (`bloom chain coins consensus core crypto keys
   primitives script support util validation`). Any include from an app/ shape
   (`controllers/`, `models/`, `services/`, `views/`) or an unlisted lib/
-  subsystem (`storage/`, `ports/`, …) fails the build. No baseline (the tree is
+  subsystem (`storage/`, `platform/ports/`, …) fails the build. No baseline (the tree is
   already clean). Override `// domain-purity-ok:<tag>`. Impl:
   `tools/scripts/check_domain_purity.sh`.
 
@@ -514,7 +514,7 @@ assert green).
   layer. A `core/**/*.c|.h|.inc` file may only `#include` its own preserved
   headers (`"domain/consensus/…"`, `"consensus/…"`, `"core/…"`,
   `"chainparams/…"`), C/system `<…>` headers, bare siblings, or a pure leaf lib
-  subsystem — **never** `lib/validation` (validation *drives* consensus, it is
+  subsystem — **never** `core/modules/validation` (validation *drives* consensus, it is
   not consensus) or any app/ shape. The gate is **exception-free**:
   `check_block.c` calls the core sigops predicate instead of
   `"validation/sigops.h"`, and `chainparams.h` gets `MESSAGE_START_SIZE` from
@@ -543,7 +543,7 @@ assert green).
   `consensus_subsidy_slow_start_shift()`, the compact-size sizing in
   `core/serialize.h`), and a controller including one compiles a PRIVATE COPY
   into its .so — so a module built before a seal re-cut still mounted and still
-  ran its stale copy. `lib/hotswap/include/hotswap/core_seal_root.h` mirrors
+  ran its stale copy. `engine/modules/hotswap/include/hotswap/core_seal_root.h` mirrors
   `core/MANIFEST.sha3`'s ROOT, the module emitter stamps it into every artifact
   as `zcl_hotswap_module_core_seal_root`, and `hotswap_activate.c` compares it
   on BOTH dlsym paths (resident mount and offline verifier) before admit. This
@@ -585,7 +585,7 @@ assert green).
   a tree containing no sources, and names the directories and file counts it
   actually scanned in its OK line. `--selftest` mirrors those directories into
   scratch, plants a violating TU in the COPY, and asserts the gate trips and
-  then recovers — never writing into `lib/hotswap/`, because a fixture living
+  then recovers — never writing into `engine/modules/hotswap/`, because a fixture living
   briefly in the real tree races the other gates under `make -j24 lint`.
 
 - **Gate #54: `check-hotswap-module-imports`** (HARD) — a Tier-2 hot-swap
@@ -603,7 +603,7 @@ assert green).
   acquire a door into the reducer, the coins view, the wallet spend path or
   chain state, pass every one of them, and mount — with no diff a reviewer
   could read as a reach change, because the change *is* an `#include`. The
-  declared contract is `config/hotswap_module_imports.def`: 282 rows derived
+  declared contract is `engine/composition/hotswap_module_imports.def`: 282 rows derived
   mechanically from the real undefined-symbol union across the 93 built module
   artifacts (`nm -D --undefined-only`, `@GLIBC_x.y.z` version suffix stripped —
   a glibc bump renames a symbol without widening reach), each row carrying the
@@ -650,21 +650,21 @@ assert green).
   `tools/lint/privileged_transition_receipt_baseline.txt`: `receipt:<file>` (the
   handler binds an authority receipt — an independently-derived record over
   {artifact digest, context anchor, the exact running-binary image} re-checked
-  fail-closed at use time, see `lib/util/include/util/authority_receipt.h`) or
+  fail-closed at use time, see `platform/modules/util/include/util/authority_receipt.h`) or
   `exempt:<reason>` (not an artifact-install transition). A NEW owner-mutating
   leaf with no disposition FAILS, forcing a conscious Law-7 review. Each
   `receipt:<file>` line is positively checked: `<file>` must still call
   `authority_receipt_*_available(` (or the pre-generalized
   `consensus_state_replay_receipt_authority_available(`), so a wired gate cannot
-  silently vanish. The generalized idiom (`lib/util/src/authority_receipt.c`) is
+  silently vanish. The generalized idiom (`platform/modules/util/src/authority_receipt.c`) is
   the foundation for safe hotload AND signed off-chain contracts; the original
-  live instance is `config/src/consensus_state_replay_receipt.c` (the sovereign-
+  live instance is `engine/composition/src/consensus_state_replay_receipt.c` (the sovereign-
   cure ACTIVATE gate, intentionally not rewired). Impl:
   `tools/lint/check_privileged_transition_receipt.sh`.
 
 - **Gate #50: `check-telemetry-ontology`** (HARD) — every network telemetry
   field a covered `dumpstate` function emits must carry a machine-readable
-  meaning row in `lib/util/include/util/telemetry_ontology.def`: what it
+  meaning row in `platform/modules/util/include/util/telemetry_ontology.def`: what it
   counts, a machine-evaluable health rule, what an unhealthy value implies,
   and the exact next command. The defect it closes is real —
   `"pre_handshake_disconnects":27` on a healthy node and the same field at 8
@@ -677,16 +677,16 @@ assert green).
   so its fields could not be checked at all). Floors on manifest rows,
   ontology rows, judged (non-info) rows and extracted fields make a hollow
   scan exit 2 rather than pass. Self-test:
-  `lib/test/src/lint_gate_quality_selftests.c:t_telemetry_ontology_gate`.
+  `tests/harness/src/lint_gate_quality_selftests.c:t_telemetry_ontology_gate`.
   Impl: `tools/lint/check_telemetry_ontology.sh`.
 
 - **Gate #51: `check-accel-oracle-pinned`** (HARD) — the `core/` seal (Gate #47)
   covers the TEXT of the consensus predicates, not the ISA-dispatched
   arithmetic they call. `core/math/src/hash.c` and
-  `core/consensus/src/script_interp.c` call `lib/crypto/src/sha256.c`,
+  `core/consensus/src/script_interp.c` call `core/modules/crypto/src/sha256.c`,
   `core/consensus/src/equihash.c` calls the batched BLAKE2b in
-  `lib/crypto/src/blake2b_avx2.c`, and `coins/coins.h` reaches the BLS12-381 /
-  BN254 Montgomery multiplies in `lib/sapling/`. Editing any of those changes
+  `core/modules/crypto/src/blake2b_avx2.c`, and `coins/coins.h` reaches the BLS12-381 /
+  BN254 Montgomery multiplies in `core/modules/sapling/`. Editing any of those changes
   which blocks are valid while `check-core-seal` stays green (proven: appending
   a comment to `sha256.c` leaves `make lint` fully green). Freezing them is the
   wrong answer — they exist to get faster — so this gate pins the PROPERTY
@@ -705,8 +705,8 @@ assert green).
 - **`check-no-adx-overclaim`** (HARD) — the companion to the gate above. The
   accel oracle proves an accelerator computes the RIGHT answer; this one proves
   its operator-visible label describes the instructions it actually runs. The
-  bug it exists for: `lib/sapling/src/bn254_accel.c` and the BLS12-381 Fr/Fp
-  tier in `lib/sapling/src/fr_avx512.c` both carried
+  bug it exists for: `core/modules/sapling/src/bn254_accel.c` and the BLS12-381 Fr/Fp
+  tier in `core/modules/sapling/src/fr_avx512.c` both carried
   `__attribute__((target("bmi2,adx")))` and both reported themselves as
   `"BMI2+ADX (MULX+ADCX+ADOX)"` into the boot banner — while
   `bn_fq_mont_mul_bmi2` disassembled to 8 `mulx`, 4 `adc`, 24 `add`, 13 `setb`
@@ -717,7 +717,7 @@ assert green).
   operator read that banner to decide a host was on the fast path, and an
   optimiser read it to decide the work was done. The gate grades object code,
   not prose: for every `lib/` source that carries the ADX target attribute **or**
-  includes the shared inline-asm core `lib/sapling/src/mont_adx.h`, it compiles
+  includes the shared inline-asm core `core/modules/sapling/src/mont_adx.h`, it compiles
   the file with the node's own `-std=c23 -O3 -march=x86-64-v3` and counts
   `adcx`/`adox` in the disassembly. Naming ADCX/ADOX outside a negation with
   none emitted is a violation. Fail-closed — a compiler or `objdump` it cannot
@@ -733,7 +733,7 @@ assert green).
   register state across a context switch. If it did not, the first wide
   instruction is `#UD` — the process takes a SIGILL even though CPUID said the
   feature was present. `noxsave`, `clearcpuid=avx512f`, and hypervisors that
-  mask XCR0 all produce exactly that machine. `lib/crypto/src/blake2b_avx2.c`
+  mask XCR0 all produce exactly that machine. `core/modules/crypto/src/blake2b_avx2.c`
   shipped with it: `detect_features()` dispatched its AVX2 tier on CPUID.7.0:EBX
   bit 5 with no OS-state check at all, and that code path is Equihash PoW
   verification — the fault would have landed on the consensus path on a host
@@ -752,16 +752,16 @@ assert green).
   what 64-bit mode always enables, so CPUID alone settles them. Form (1) is
   preferred because `crypto/simd_dispatch.h` splits the hardware PROBE from a
   PURE policy over three register words, which lets
-  `lib/test/src/test_simd_os_support.c` hand the policy the exact CPUID/XCR0
+  `tests/harness/src/test_simd_os_support.c` hand the policy the exact CPUID/XCR0
   contents of an AVX-512 host whose OS disabled ZMM state — a machine we do not
   own — and pin that the answer is "no". Impl:
   `tools/lint/check_simd_os_support.sh`.
 
 - **Gate #16: `check-supervisor-registration`** (RATCHET) — flags any
-  `app/services/src/*_service.c` that spawns work (`pthread_create`,
+  `engine/services/src/*_service.c` that spawns work (`pthread_create`,
   `thread_registry_spawn`, `health_register_periodic`) but does NOT call
   `supervisor_register(`, is not baselined, and has no `// supervisor-ok:<tag>`.
-  The time-driven supervisor in `lib/util/supervisor.{c,h}` exists because an
+  The time-driven supervisor in `platform/modules/util/supervisor.{c,h}` exists because an
   untracked periodic sweeper can wedge and leave every check it owns silently
   dead; registered children fire `on_tick` / edge-trigger `on_stall`
   independently. Standing children include `sync.watchdog`,
@@ -770,7 +770,7 @@ assert green).
   `tools/scripts/check_supervisor_registration.sh`.
 
 - **Gate #17: `check-typed-blocker`** — any code raising a `block_id` must use a
-  typed kind from `enum blocker_kind` (`lib/util/src/blocker.c`); raw string
+  typed kind from `enum blocker_kind` (`platform/modules/util/src/blocker.c`); raw string
   blockers fall in a baseline.
 
 ### Framework refactor gates (#18–#22)
@@ -784,20 +784,20 @@ assert green).
 
 - **Gate #19: `check-no-raw-clock-outside-platform`** (FAIL) —
   `tools/lint/check_no_raw_clock_outside_platform.sh`. Bans direct
-  `clock_gettime(`, `time(NULL)`, `getrandom(` outside `lib/platform/`. Route
+  `clock_gettime(`, `time(NULL)`, `getrandom(` outside `platform/modules/platform/`. Route
   wall-clock/monotonic through the platform clock and entropy through platform
   RNG. Override `// platform-ok` on the line.
 
 - **Gate: `check-no-shellouts`** (FAIL) —
   `tools/lint/check_no_shellouts.sh`. Bans `system(`, `popen(`, `execlp(` in
-  the resident node binary's own code (`app/`, `lib/` excl. `lib/test/`,
+  the resident node binary's own code (`app/`, `lib/` excl. `tests/harness/include/test/`,
   `src/`, `config/`). Every shell-out has been migrated onto the two in-tree
-  primitives — `lib/util` `file_tree_ops` (`zcl_tree_copy` / `zcl_tree_remove`,
-  fd-based, no shell) and `lib/util` `spawn` (`zcl_spawn_detached` /
+  primitives — `platform/modules/util` `file_tree_ops` (`zcl_tree_copy` / `zcl_tree_remove`,
+  fd-based, no shell) and `platform/modules/util` `spawn` (`zcl_spawn_detached` /
   `zcl_spawn_capture`, argv-array, no `/bin/sh`). This is os-substrate Rung 0
   (`docs/work/os-substrate-plan.md` §1) and the precondition for a future
   seccomp `execve` deny-list. Standalone dev/bench/CLI binaries under `tools/`
-  and the `lib/test/` fixtures are out of scope. Override `// shellout-ok` for
+  and the `tests/harness/include/test/` fixtures are out of scope. Override `// shellout-ok` for
   a documented, reviewed exception.
 
 - **Gate: `check-no-api-keys`** (FAIL) —
@@ -806,7 +806,7 @@ assert green).
   has a reason to hold a key near it, and a key that lands in a tracked file is
   spent: it is in the history, on every clone, and on every mirror. The rule
   that a key lives in the environment or in a 0600 file **outside** the
-  repository is enforced in code (`lib/engine/include/engine/engine_secret.h`);
+  repository is enforced in code (`engine/modules/engine/include/engine/engine_secret.h`);
   this gate is the half that notices when somebody pastes one in anyway. It
   matches credential *shapes* — vendor-prefixed tokens, a `Bearer` header with
   a long opaque value, and the two-part `<32+ hex>.<16+ alnum>` form — not a
@@ -816,24 +816,24 @@ assert green).
   of scope for the same reason. No baseline and no WARN tier: a committed
   credential is not something to ratchet down over time. Override with the
   marker `api-key-example-ok` on the line for a documented non-credential.
-  `lib/test/src/test_engine.c` plants a key in a fixture tree and requires this
+  `tests/harness/src/test_engine.c` plants a key in a fixture tree and requires this
   gate to fail on it, so it is a gate that has been seen to fail.
 
 - **Gate: `check-no-writer-below-sealed-frontier`** (FAIL) —
   `tools/lint/check_no_writer_below_sealed_frontier.sh`. The North Star's
   single-writer-per-frontier invariant
   (`docs/ARCHITECTURE_NORTH_STAR.md` invariant 1) made mechanical for the
-  sealed ROM segment store (`lib/storage/chain_segment`), which is
+  sealed ROM segment store (`engine/modules/storage/chain_segment`), which is
   written-once-then-immutable (chmod 0444, never rewritten/appended). Only the
-  designated sealer/RPC/healer surface — `lib/storage/src/chain_segment.c`, its
-  header, `app/services/src/segment_sealer_service.c`,
-  `app/controllers/src/chain_segment_controller.c`,
-  `app/conditions/src/segment_corruption.c` — may call the store's two WRITE
+  designated sealer/RPC/healer surface — `engine/modules/storage/src/chain_segment.c`, its
+  header, `engine/services/src/segment_sealer_service.c`,
+  `engine/controllers/src/chain_segment_controller.c`,
+  `engine/conditions/src/segment_corruption.c` — may call the store's two WRITE
   entry points, `chain_segment_seal_range()` /
   `chain_segment_manifest_rebuild()`. Any other production caller is addressing
   a block position below the sealed frontier with write intent and can race the
   one background sealer or the corruption healer's unlink-then-rebuild repair.
-  `lib/test/` is out of scope. Override `// writer-below-frontier-ok` for a
+  `tests/harness/include/test/` is out of scope. Override `// writer-below-frontier-ok` for a
   documented, reviewed exception (today: the deterministic simulator's
   sealed-segment corruption fixture, which seals only into a tmpdir it owns).
   Not hollow: the raw scan set is asserted against a floor via
@@ -843,30 +843,30 @@ assert green).
 - **Gate: `check-proc-self-shim`** (RATCHET) —
   `tools/lint/check_proc_self_shim.sh`. Bans raw `"/proc/self` / `"/proc/uptime`
   string literals in `app/`, `config/`, `lib/`, `tools/` outside
-  `lib/platform/`. Route process/host memory, uptime, and exe-path reads
+  `platform/modules/platform/`. Route process/host memory, uptime, and exe-path reads
   through `platform/os_proc.h` (os-substrate Rung 1,
   `docs/work/os-substrate-plan.md` §2). Baseline
   `tools/lint/proc_self_shim_baseline.txt` (shrink-only); the one permanent
-  exemption is `lib/sim/src/postmortem.c`'s async-signal-safe crash-handler
+  exemption is `engine/modules/sim/src/postmortem.c`'s async-signal-safe crash-handler
   copy, which cannot route through a non-signal-safe shim.
 
 - **Gate #20: `check-no-raw-sqlite-in-controllers`** (RATCHET, was WARN) —
   `tools/lint/check_no_raw_sqlite_in_controllers.sh`. Bans
-  `sqlite3_prepare_v2(` / `sqlite3_exec(` in `app/controllers/`. Baseline
+  `sqlite3_prepare_v2(` / `sqlite3_exec(` in `engine/controllers/`. Baseline
   `tools/lint/no_raw_sqlite_in_controllers_baseline.txt` (may only shrink). Fix:
   move reads behind projections/models, writes through the AR lifecycle.
   Override `// raw-controller-sql-ok`.
 
 - **`check-model-column-drift`** (RATCHET) —
-  `tools/lint/check_model_column_drift.sh`. A model in `app/models/src/` must
+  `tools/lint/check_model_column_drift.sh`. A model in `engine/models/src/` must
   not hand-maintain the column indices of a multi-column row read: two or more
   distinct literal indices in `AR_READ_*` / `AR_COL_*` is the shape where
   inserting a column in the middle of the SQL column list silently shifts
   every index below it, with no compiler error and no test failure unless a
   test covers that exact field. Fix: declare the fields once in
-  `app/models/include/models/def/<model>_fields.def` and derive the column
+  `engine/models/include/models/def/<model>_fields.def` and derive the column
   string, read index and bind position through
-  `app/models/include/models/model_fields.h` (worked examples: `blog_post.c`,
+  `engine/models/include/models/model_fields.h` (worked examples: `blog_post.c`,
   `market_download.c`, `tx_index.c`). Baseline
   `tools/lint/model_column_drift_baseline.txt` (may only shrink; a baselined
   file that stops violating must lose its line). Per-line override
@@ -892,7 +892,7 @@ assert green).
   services dir to EVERY `thread_registry_spawn(` call site under `app/`,
   `lib/`, `config/`. Each spawned long-running thread must be accounted for:
   (a) SUPERVISED — its TU registers a liveness contract
-  (`supervisor_register{,_in_domain}(` or the lib/util adapter
+  (`supervisor_register{,_in_domain}(` or the platform/modules/util adapter
   `thread_liveness_register(`), or the spawn line/line-above carries a
   `// supervised:<child>` marker; (b) MARKED-EXEMPT — a
   `// thread-supervision-ok:<reason>` marker (bounded/joined worker pool,
@@ -901,7 +901,7 @@ assert green).
   justification. Anything else is a NEW unaccounted thread → FAIL. The
   baseline may only SHRINK: a stale entry (thread renamed/removed/now-covered)
   fails, forcing the count down as threads gain contracts via
-  `util/thread_liveness.h` (exemplar `lib/health/src/heartbeat.c`). Closes the
+  `util/thread_liveness.h` (exemplar `engine/modules/health/src/heartbeat.c`). Closes the
   gap where the lib/ + config/ infrastructure threads (health sweep, metrics,
   event dispatch, RPC-timeout, DB worker/checkpoint) were spawned but never on
   the supervisor tree — a wedged loop there was silent, the exact Round-5
@@ -914,7 +914,7 @@ assert green).
 Universal supervision (Gate #23) makes a wedged/dead infra thread a *named
 blocker* instead of a silent stop. The restart policy goes one step further for
 threads that are safe to auto-restart: it *respawns* them under a bounded
-intensity cap (`lib/util/include/util/supervisor.h` +
+intensity cap (`platform/modules/util/include/util/supervisor.h` +
 `util/thread_liveness.h`). The policy is opt-in per child; the default is
 `SUPERVISOR_RESTART_TEMPORARY`, i.e. unchanged named-blocker behavior.
 
@@ -961,54 +961,54 @@ current green tree.
 
 | Gate | Mode | Intent / baseline / override |
 |------|------|------------------------------|
-| **E1: `check-file-size-ceiling`** | RATCHET | The file-size policy for every production `.c` (`app/`, `config/src/`, `lib/` excl. `lib/test/`, `domain/`, `src/`), in three bands: **800 lines is the advisory TARGET** (95% of the tree already meets it), **801..1500 is an ALLOWED buffer** — never fails, no baseline row, no churn — and **over 1500 FAILS**. 1500 is where a file stops fitting in one agent read, so past it every later reader works blind. Files already over 1500 are carried in `tools/lint/file_size_policy_baseline.txt` (`<path> <max-loc>`), which may only shrink: a row that grows fails, a row whose file drops to 1500 or fewer must be deleted, and nothing is ever added. No inline override; generated/tabular code is skipped via the tool's `ALLOWLIST`. Implemented as a C23 binary, `tools/file_size_policy.c`. |
-| **`check-hex-codec-single`** | RATCHET | Base-16 encode/decode lives only in `lib/base/include/base/hex.h` (`zcl_hex_encode`, `zcl_hex_decode`, `zcl_hex_decode_lower`, `zcl_hex_decode_n`, `zcl_hex_nibble`). Per-file shape detectors: a hex-digit table **plus** a high-nibble index (encoder), or nibble-ladder arithmetic / `sscanf("%2x")` (decoder). Baseline `tools/lint/hex_codec_baseline.txt` (one path per line; may only shrink, and a row that no longer matches must be deleted). `lib/base/` is the canonical home; `lib/test/` is excluded because a known-answer fixture must not parse its vectors with the implementation under test. No inline override — the fix is to call the codec. `--selftest` plants a fresh encoder and decoder and requires the scan to reject them. |
-| **`check-byte-order-codec-single`** | RATCHET | Packing/unpacking a fixed-width 16/32/64-bit integer at a byte address lives only in `lib/base/include/base/serialize_le.h` (`zcl_write_u{16,32,64}_le` / `zcl_read_u{16,32,64}_le`, the `i32`/`i64` forms, and the `u32`/`u64` big-endian pair); `crypto/common.h`'s `ReadLE`/`WriteLE` forward to it. Per-file shape detectors: an indexed shift loop (`>> (8 * i)` in either operand order), an unrolled ladder (a shift by 24 or 56 **plus** a byte-array subscript on the same line — a bare `>> 24` is ordinary bit work and does not match), or a hand-rolled byte-swap mask. Baseline `tools/lint/byte_order_codec_baseline.txt` (one path per line; may only shrink, and a row that no longer matches must be deleted). `lib/base/` is the canonical home; `lib/test/` is excluded because `test_byte_order_codec.c` deliberately keeps a verbatim copy of every replaced helper and asserts the canonical functions agree with it byte for byte; `core/` is excluded because it is byte-sealed. No inline override — the fix is to call the codec. `--selftest` plants each detected shape and requires rejection, plus innocent bit work and a canonical caller and requires acceptance. |
-| **`check-arm-symbol-single`** | RATCHET | A non-static function is DEFINED (has a body) only ONCE per translation unit. Since the C standard already forbids two unconditional definitions of one external symbol, any hit is necessarily two disjoint preprocessor arms (platform, feature flag, test-vs-release, ...) — a place two bodies can silently drift apart under one name. Found live 2026-08-29: `lib/net/src/file_service.c`'s `fs_parse_rom_request`/`_manifest_request`/`_list_request` had a full body in both its `#if defined(_WIN32)` and POSIX arms, and the two had drifted on exact-length vs. `>=`-length and on NULL-output handling — a Windows node and a Linux node could disagree about whether identical wire bytes were a valid request. Scans every production `.c` under `app config lib src tools` with a brace/paren-depth-tracking awk analyzer (not a compiler — see the gate's own header for its stated blind spots: function-generating macros, and a `static` keyword wrapped onto its own line above the signature). Baseline `tools/lint/arm_symbol_single_baseline.txt` (`<path>\t<function>`; may only shrink, and a row that no longer duplicates must be deleted) — most rows are reviewed, accepted platform-seam/SIMD-dispatch/test-arm pairs, not bugs; the gate makes them visible for that per-row human judgment rather than proving each one wrong. `--selftest` plants a cross-arm non-static duplicate (must fail) and a static duplicate, a function-generating-macro pair, and an `__attribute__`-prefixed function (must all pass). |
+| **E1: `check-file-size-ceiling`** | RATCHET | The file-size policy for every production `.c` (`app/`, `engine/composition/src/`, `lib/` excl. `tests/harness/include/test/`, `domain/`, `src/`), in three bands: **800 lines is the advisory TARGET** (95% of the tree already meets it), **801..1500 is an ALLOWED buffer** — never fails, no baseline row, no churn — and **over 1500 FAILS**. 1500 is where a file stops fitting in one agent read, so past it every later reader works blind. Files already over 1500 are carried in `tools/lint/file_size_policy_baseline.txt` (`<path> <max-loc>`), which may only shrink: a row that grows fails, a row whose file drops to 1500 or fewer must be deleted, and nothing is ever added. No inline override; generated/tabular code is skipped via the tool's `ALLOWLIST`. Implemented as a C23 binary, `tools/file_size_policy.c`. |
+| **`check-hex-codec-single`** | RATCHET | Base-16 encode/decode lives only in `platform/modules/base/include/base/hex.h` (`zcl_hex_encode`, `zcl_hex_decode`, `zcl_hex_decode_lower`, `zcl_hex_decode_n`, `zcl_hex_nibble`). Per-file shape detectors: a hex-digit table **plus** a high-nibble index (encoder), or nibble-ladder arithmetic / `sscanf("%2x")` (decoder). Baseline `tools/lint/hex_codec_baseline.txt` (one path per line; may only shrink, and a row that no longer matches must be deleted). `platform/modules/base/` is the canonical home; `tests/harness/include/test/` is excluded because a known-answer fixture must not parse its vectors with the implementation under test. No inline override — the fix is to call the codec. `--selftest` plants a fresh encoder and decoder and requires the scan to reject them. |
+| **`check-byte-order-codec-single`** | RATCHET | Packing/unpacking a fixed-width 16/32/64-bit integer at a byte address lives only in `platform/modules/base/include/base/serialize_le.h` (`zcl_write_u{16,32,64}_le` / `zcl_read_u{16,32,64}_le`, the `i32`/`i64` forms, and the `u32`/`u64` big-endian pair); `crypto/common.h`'s `ReadLE`/`WriteLE` forward to it. Per-file shape detectors: an indexed shift loop (`>> (8 * i)` in either operand order), an unrolled ladder (a shift by 24 or 56 **plus** a byte-array subscript on the same line — a bare `>> 24` is ordinary bit work and does not match), or a hand-rolled byte-swap mask. Baseline `tools/lint/byte_order_codec_baseline.txt` (one path per line; may only shrink, and a row that no longer matches must be deleted). `platform/modules/base/` is the canonical home; `tests/harness/include/test/` is excluded because `test_byte_order_codec.c` deliberately keeps a verbatim copy of every replaced helper and asserts the canonical functions agree with it byte for byte; `core/` is excluded because it is byte-sealed. No inline override — the fix is to call the codec. `--selftest` plants each detected shape and requires rejection, plus innocent bit work and a canonical caller and requires acceptance. |
+| **`check-arm-symbol-single`** | RATCHET | A non-static function is DEFINED (has a body) only ONCE per translation unit. Since the C standard already forbids two unconditional definitions of one external symbol, any hit is necessarily two disjoint preprocessor arms (platform, feature flag, test-vs-release, ...) — a place two bodies can silently drift apart under one name. Found live 2026-08-29: `core/modules/net/src/file_service.c`'s `fs_parse_rom_request`/`_manifest_request`/`_list_request` had a full body in both its `#if defined(_WIN32)` and POSIX arms, and the two had drifted on exact-length vs. `>=`-length and on NULL-output handling — a Windows node and a Linux node could disagree about whether identical wire bytes were a valid request. Scans every production `.c` under `app config lib src tools` with a brace/paren-depth-tracking awk analyzer (not a compiler — see the gate's own header for its stated blind spots: function-generating macros, and a `static` keyword wrapped onto its own line above the signature). Baseline `tools/lint/arm_symbol_single_baseline.txt` (`<path>\t<function>`; may only shrink, and a row that no longer duplicates must be deleted) — most rows are reviewed, accepted platform-seam/SIMD-dispatch/test-arm pairs, not bugs; the gate makes them visible for that per-row human judgment rather than proving each one wrong. `--selftest` plants a cross-arm non-static duplicate (must fail) and a static duplicate, a function-generating-macro pair, and an `__attribute__`-prefixed function (must all pass). |
 | **`check-fortify-masked-decls`** | EMPTY BASELINE | A `.c` file may not call a POSIX/GNU function whose declaration reaches it ONLY through a glibc fortify inline — that is, only when optimisation is on. Found live 2026-08-30: the build compiles with `-D_POSIX_C_SOURCE=200809L -D_FORTIFY_SOURCE=2`, but glibc declares `realpath()` under `__USE_MISC`/`__USE_XOPEN_EXTENDED`, which `_POSIX_C_SOURCE` sets neither of. The only route to the declaration was the fortify inline, and glibc enables fortify **only when optimisation is on** — so 17 translation units were compiling purely as a side effect of `-O1+`, and an implicit declaration is a hard error in C23, not a warning. Every one broke at `-O0`, under `-U_FORTIFY_SOURCE`, and on any non-glibc libc; the class was invisible because nobody builds at `-O0` here. The gate **re-measures** the masked set on every run — for each candidate it compiles a four-line TU with the project's real flags at `-O0` and `-O2` and calls it masked when it fails at `-O0` and succeeds at `-O2` — because which functions are masked is a property of the compiler and libc in use, not of this tree, and a hardcoded list would go stale in the silent direction. It refuses (exit 2) rather than passing vacuously if its own control probe will not compile. Scans with comments and string literals stripped, so prose naming a function does not trigger it; it does not expand macros, so a call produced by macro expansion is invisible. Fix by adding the `_DEFAULT_SOURCE` guard **before the first `#include`** — after them it does nothing, since feature-test macros are read when `<features.h>` is first pulled in. **The baseline is empty by design:** unlike a platform seam there is no legitimate reason to depend on optimisation for a declaration, so all 17 callers were fixed rather than recorded. `--selftest` plants an unguarded caller (must fail), a guarded caller (must pass) and a comment-only mention (must pass), and refuses if no function is masked at all. |
-| **`check-zcode-package-registry`** | HARD | Re-derives the content manifest, unsigned release/signing root, recipe, target-inclusive exact dependency lock, and API capsule roots for the nine real C23 Commons Alpha packages directly from their authoritative `lib/<module>` trees. The public alpha-fixture publisher, sequences, empty reward address, `zclassic-main`, exact roots, and closed dependency DAG are projected in `config/zcode_package_registry.def`. Drift, an unresolved dependency, or a selected package source/API change without regenerating the projection fails. Production source ownership remains the unique `LIB_MODULE` row checked independently by `check-lib-module-order`, so the monolith compiles each package module source exactly once. No baseline or override. |
-| **`check-zcode-package-standalone`** | HARD | Every registry package compiles from its OWN declared dependencies and nothing else. A package ships to a node that has only the packages its manifest names, so an include reaching outside that set makes it unbuildable there however well it builds inside this monolith, where every `-I` is already on the command line. For each `ZCODE_PACKAGE` in `config/zcode_package_registry.def` and `config/zcode_c23_commons_app.def`, every shipped source is compiled with `-I<pkg>/include` plus the include dir of each declared dependency, under the recipe's own quick profile read from `config/include/config/c23_commons_build_profile.h` so the gate cannot drift from the contract it mirrors. A manifest declaring `files[]` is honoured exactly. Include CLOSURE only: it does not link, run tests, or judge roots. Hollow scans (zero packages parsed, or zero sources compiled) exit 2. No baseline or override. |
-| **`check-capability-closure`** | HARD | Every source file states what it can REACH, and reach it did not declare fails the build. You cannot decide whether a billion lines are malicious — that is undecidable — so this asks the decidable question the compiler already answered: every external entry point a translation unit calls is an undefined symbol in its object file. `config/capability_symbols.def` classifies the closed platform-boundary vocabulary into the 9 classes of `config/capability_classes.def`, so a symbol nobody has classified fails rather than passing as harmless. `config/module_capabilities.def` declares the portable object shape and `config/module_capabilities_windows.def` supplies exact replacements where the selected Windows arm differs; package claims use their cross-target union. A file with no active row declares nothing, enforced positively. Symmetric, so a declared capability nothing uses also fails on the measured target. A hand-rolled `syscall(` is banned in any file that has not declared PRIVILEGE on any target, because it reaches the kernel leaving no symbol to see. Scans below 500 objects are UNPROVEN, and so is an epoch missing objects it should have — a partial rebuild once made this gate report clean while three unclassified symbols were invisible to it. |
-| **E2: `check-one-result-type`** | RATCHET | New `app/services/src/*.c` reference `struct zcl_result` (§2) instead of bare bool/int. File-granularity. Baseline `one_result_type_baseline.txt` (empty; 9 originals migrated). Override `// one-result-type-ok:<tag>` (pure table/registry helper). |
-| **`check-service-result-convergence`** | RATCHET | Phase 3 sibling to E2: counts *exported* (non-static, top-level) bare-bool function DEFINITIONS per `app/services/src/*.c` file, so a file cannot stay E2-clean forever while still exporting legacy bool functions alongside its one `zcl_result` use. Baseline `service_result_convergence_baseline.txt` (`<path> <count>`; may only shrink; a file whose live count reaches 0, or that gains the `// one-result-type-ok:<tag>` marker, must be deleted from it). Same override marker as E2. Inventory + lane plan: `docs/work/service-result-convergence.md`. |
-| **E3: `check-shape-includes-header`** | HARD | A shape file must include its shape contract header: conditions → `"framework/condition.h"` or `"conditions/"`; models → a `"models/"` header (pulls AR lifecycle); supervisors → `"supervisors/"` or `"util/supervisor.h"`. `app/jobs/` skipped (no `job.h` yet). Override `// shape-include-ok:<tag>`. |
-| **E4: `check-projections-pure`** | HARD | A projection (`lib/storage/src/*_projection.c`) is a pure fold: no `#include` from `app/services/`-`app/controllers/`, and no AR save path (`AR_*_SAVE`, which would fire another model's hooks). Override `// projection-cache-ok:<tag>` (memoize a derived value into the projection's own table). |
+| **`check-zcode-package-registry`** | HARD | Re-derives the content manifest, unsigned release/signing root, recipe, target-inclusive exact dependency lock, and API capsule roots for the nine real C23 Commons Alpha packages directly from their authoritative `lib/<module>` trees. The public alpha-fixture publisher, sequences, empty reward address, `zclassic-main`, exact roots, and closed dependency DAG are projected in `engine/composition/zcode_package_registry.def`. Drift, an unresolved dependency, or a selected package source/API change without regenerating the projection fails. Production source ownership remains the unique `LIB_MODULE` row checked independently by `check-lib-module-order`, so the monolith compiles each package module source exactly once. No baseline or override. |
+| **`check-zcode-package-standalone`** | HARD | Every registry package compiles from its OWN declared dependencies and nothing else. A package ships to a node that has only the packages its manifest names, so an include reaching outside that set makes it unbuildable there however well it builds inside this monolith, where every `-I` is already on the command line. For each `ZCODE_PACKAGE` in `engine/composition/zcode_package_registry.def` and `engine/composition/zcode_c23_commons_app.def`, every shipped source is compiled with `-I<pkg>/include` plus the include dir of each declared dependency, under the recipe's own quick profile read from `engine/composition/include/config/c23_commons_build_profile.h` so the gate cannot drift from the contract it mirrors. A manifest declaring `files[]` is honoured exactly. Include CLOSURE only: it does not link, run tests, or judge roots. Hollow scans (zero packages parsed, or zero sources compiled) exit 2. No baseline or override. |
+| **`check-capability-closure`** | HARD | Every source file states what it can REACH, and reach it did not declare fails the build. You cannot decide whether a billion lines are malicious — that is undecidable — so this asks the decidable question the compiler already answered: every external entry point a translation unit calls is an undefined symbol in its object file. `engine/composition/capability_symbols.def` classifies the closed platform-boundary vocabulary into the 9 classes of `engine/composition/capability_classes.def`, so a symbol nobody has classified fails rather than passing as harmless. `engine/composition/module_capabilities.def` declares the portable object shape and `engine/composition/module_capabilities_windows.def` supplies exact replacements where the selected Windows arm differs; package claims use their cross-target union. A file with no active row declares nothing, enforced positively. Symmetric, so a declared capability nothing uses also fails on the measured target. A hand-rolled `syscall(` is banned in any file that has not declared PRIVILEGE on any target, because it reaches the kernel leaving no symbol to see. Scans below 500 objects are UNPROVEN, and so is an epoch missing objects it should have — a partial rebuild once made this gate report clean while three unclassified symbols were invisible to it. |
+| **E2: `check-one-result-type`** | RATCHET | New `engine/services/src/*.c` reference `struct zcl_result` (§2) instead of bare bool/int. File-granularity. Baseline `one_result_type_baseline.txt` (empty; 9 originals migrated). Override `// one-result-type-ok:<tag>` (pure table/registry helper). |
+| **`check-service-result-convergence`** | RATCHET | Phase 3 sibling to E2: counts *exported* (non-static, top-level) bare-bool function DEFINITIONS per `engine/services/src/*.c` file, so a file cannot stay E2-clean forever while still exporting legacy bool functions alongside its one `zcl_result` use. Baseline `service_result_convergence_baseline.txt` (`<path> <count>`; may only shrink; a file whose live count reaches 0, or that gains the `// one-result-type-ok:<tag>` marker, must be deleted from it). Same override marker as E2. Inventory + lane plan: `docs/work/service-result-convergence.md`. |
+| **E3: `check-shape-includes-header`** | HARD | A shape file must include its shape contract header: conditions → `"framework/condition.h"` or `"conditions/"`; models → a `"models/"` header (pulls AR lifecycle); supervisors → `"supervisors/"` or `"util/supervisor.h"`. `engine/jobs/` skipped (no `job.h` yet). Override `// shape-include-ok:<tag>`. |
+| **E4: `check-projections-pure`** | HARD | A projection (`engine/modules/storage/src/*_projection.c`) is a pure fold: no `#include` from `engine/services/`-`engine/controllers/`, and no AR save path (`AR_*_SAVE`, which would fire another model's hooks). Override `// projection-cache-ok:<tag>` (memoize a derived value into the projection's own table). |
 | **E6: `check-one-write-path`** | RATCHET | New chain-state write surfaces forbidden unless they route through the reducer/log authority. Scans for legacy writers (`active_chain_set_tip`, `coins_view_*` flush/write, `process_new_block`, `connect_tip`, `disconnect_tip`, `utxo_projection_set_author`) vs `one_write_path_baseline.txt`. Override `// one-write-path-ok:<tag>` (compat wrapper, not a second consensus writer). |
 | **E6b: `check-frontier-single-writer`** | RATCHET | Every frontier in `arch_frontier_owners.tsv` has one canonical owner. Current non-owner writers are explicit in `frontier_single_writer_baseline.tsv`; a new clone or stale baseline row fails, and Q2 must shrink the baseline to empty. No inline override. |
 | **E6c: `check-dumper-never-blocks`** | RATCHET | No `*_dump_state_json` function body reaches a blocking primitive (`progress_store_tx_lock(`, `stage_log_row_count(`, `stage_cursor_count(`, `from_anchor_target`) — it publishes through the snapshot plane (`util/subsystem_snapshot.h` / `jobs/stage_log_rows.h`) and reads lock-free, using `progress_store_tx_trylock` only for cold single-row detail. Manifest `dumper_blocking_primitives.tsv`; reviewed-but-unmigrated sites in `dumper_blocking_baseline.tsv` (goal empty). No inline override. |
 | **E7: `check-no-authoritative-ram-state`** | RATCHET | No direct `active_chain` internals access / new global-static `struct active_chain`. Derived RAM indexes only via accessors; consensus authority is the log/projection/cursor surface. Baseline `no_authoritative_ram_state_baseline.txt` (empty). Override `// ram-state-ok:<tag>` (documented derived cache). |
-| **E8: `check-no-silent-ready`** | HARD | The block-connection authority (`app/services/src/chain_activation_service.c`) must advance-the-tip OR name a typed blocker every tick (FRAMEWORK.md Prime Directive). Any `activation_set_state(…, ACTIVATION_READY, …)` must also route a typed blocker via `blocker_set(` (or `activation_set_behind_blocker(`). Closes the silent-ready hole class (e.g. READY reported as "behind_peers" while hundreds of blocks behind). Override `// no-silent-ready-ok:<tag>`. |
-| **E9: `check-operator-needed-sink`** | HARD | `EV_OPERATOR_NEEDED` ("auto-healing gave up, page a human") is emitted in production AND has a registered subscriber in `lib/event/src/alerts.c` (rule with `.trigger = EV_OPERATOR_NEEDED` via `event_observe(`). Prevents the silent-halt class where the loud signal reaches no sink. No override. |
+| **E8: `check-no-silent-ready`** | HARD | The block-connection authority (`engine/services/src/chain_activation_service.c`) must advance-the-tip OR name a typed blocker every tick (FRAMEWORK.md Prime Directive). Any `activation_set_state(…, ACTIVATION_READY, …)` must also route a typed blocker via `blocker_set(` (or `activation_set_behind_blocker(`). Closes the silent-ready hole class (e.g. READY reported as "behind_peers" while hundreds of blocks behind). Override `// no-silent-ready-ok:<tag>`. |
+| **E9: `check-operator-needed-sink`** | HARD | `EV_OPERATOR_NEEDED` ("auto-healing gave up, page a human") is emitted in production AND has a registered subscriber in `engine/modules/event/src/alerts.c` (rule with `.trigger = EV_OPERATOR_NEEDED` via `event_observe(`). Prevents the silent-halt class where the loud signal reaches no sink. No override. |
 | **P1-3: `check-systemd-memory-budget`** | HARD | Systemd service hard caps (`MemoryMax` plus finite `MemorySwapMax`) must stay below 70% of the documented 96 GiB operator-host reference; deploy validation may override that capacity explicitly. The verdict is independent of a developer machine's RAM, and explicit `MemoryMax=infinity` fails. Prevents host-level OOM from cap drift without making 16 GiB contributors unable to lint the same source. |
 | **E11: `check-doc-accuracy`** | HARD | The canonical gate block below matches the `check-*` prerequisites of the Makefile `lint:` target by count AND name set. On mismatch, fix the doc block — the Makefile is authoritative. No override. It also scans every in-tree `.md` for prose `<N> lint gates` claims and requires each to equal the derived count. **That scan enumerates via `git ls-files` only when the CWD is itself the worktree root git answers for** — merely being "inside a work tree" is not enough, because the lint-gate test sandbox is a private clone at `<root>.lint_sb_<pid>`, a sibling that still sits under an outer repo: `git ls-files` then answers for the OUTER repo (where the sandbox is untracked/ignored) and returns nothing, silently emptying the scan. Any other tree (tarball, export, sandbox) falls back to `find`. A fail-loud floor guards the SCAN SET, not the hit count — the repo legitimately carries zero prose claims today, so `<50` .md files enumerated exits 2 rather than reporting a clean pass off a dead scan. |
 | **`check-markdown-links`** | HARD | Every local file/directory target in tracked Markdown resolves inside the repository. Network/mail/app URIs, page anchors, images, code examples, and explicit generated placeholders are outside this filesystem-only contract. The gate fails loud on an empty scan/parser result and carries isolated positive/negative self-tests. No baseline or override. |
 | **`check-no-stale-pinned-facts`** | HARD (binary size) / RATCHET (height pin) | "Make staleness impossible": docs (CLAUDE.md + README.md + docs/\*\*/\*.md) must not hand-pin a fact with a live source. (A) A "\<N\> MB" size ADJACENT to "binary" fails HARD — de-pin to size-agnostic prose or quote `tools/scripts/binary_size.sh`; never baseline-exemptible (the stale "~15 MB" survived because it was hand-pinned). (B) A live-state HEIGHT PIN (`H*=`, "wedged at", "held at", "currently …at", "live tip", "stuck/pinned at" next to a height-shaped number) outside the one live-state page `docs/HANDOFF.md` fails RATCHET against the shrink-only `tools/lint/stale_pinned_facts_baseline.txt`. `docs/work/archive/**` (frozen narratives) is exempt. Per-line override `<!-- stale-ok: <reason> -->`. |
-| **E12: `check-honest-witness`** | FAIL | Law 7 ("heal in the open, page when stuck"): a Condition's `witness_<name>()` must observe the symptom MOVE, not a constant, the pure inverse of `detect`, or an FSM/poison-flag the remedy itself set. Fails if TRIVIAL (every return a bare `true`/`false`), PURE-INVERSE (`return !detect_x()`), or NO-OBSERVABLE (references none of `active_chain_height`, reducer-frontier H\*, block_map iteration, a durable `SELECT`, a peer/inflight/staged/received progress counter). Exemplar: `app/conditions/src/block_failed_mask_at_tip.c`. Baseline `tools/lint/honest_witness_baseline.txt` (empty). Override `// honest-witness-ok:<reason>` (witness whose remedy returns `COND_REMEDY_FAILED` or re-verifies real structural state). |
-| **`check-doc-inline-paths`** | RATCHET (`tools/lint/doc_inline_paths_baseline.txt`, shrink-only) | `check-markdown-links` gates Markdown LINK targets and explicitly excludes inline code — so a doc could say `` `domain/consensus/src/tx_structural.c:121` `` for months with lint green while the directory had moved to `core/`. A precise-looking dead path costs an agent more budget than a vague one, because it reads as verified. This gate resolves every backticked token in tracked `*.md` that contains a `/` and ends in `.c/.h/.cc/.def/.inc/.sh/.md/.txt/.tsv/.py/.json` (optionally `:LINE`), accepting a tracked path, a `/`-anchored suffix of one (so `util/log_macros.h` finds `lib/util/include/util/log_macros.h`), or a path relative to the doc's own directory. A second prong resolves MODULE DIRECTORIES: for any backticked token rooted at a top-level source directory, the first two components (`lib/consensus`, `app/events`) must be a tracked directory. A whole module that moves is invisible to a file-extension scan — `lib/consensus` and `domain/consensus` both survived the `core/` split in six docs with lint green — and a dead directory is the most expensive dead reference there is, because an agent greps it, finds nothing, and concludes the feature was deleted. Two components only: deeper shorthand (`lib/storage/chain_segment`) names a file stem, not a directory. Absolute paths, globs/brace expansions, external-URL link text, `vendor/` (submodule content absent until `make setup`), and `build/`/`.cache/`/`test-tmp/` are out of scope. Baseline keys omit the line number so a doc edit cannot churn them. Per-line override `<!-- doc-path-ok: <reason> -->` for a path that is deliberately absent (a deleted file cited for `git log` recovery, an upstream project's file in an attribution, a `X.c`-style recipe placeholder). Fails loud on an empty scan (`gate_require_scanned`). |
-| **`check-error-doc-refs`** | HARD | A remedy the operator cannot follow is worse than none: three wallet-path boot refusals in `config/src/boot.c` said "see WALLET_PERSISTENCE_RECOVERY.md", a file that had never existed — and they fire exactly when private keys are already on disk and the node refuses to write over them. Scans every string literal in a tracked `.c`/`.h` for a token ending in `.md` and resolves it against the repo root, or by basename under `docs/` / `docs/work/`. Comments are ignored (only literals reach an operator); literals carrying a printf conversion or a shell/SQL glob are skipped, since the gate cannot know what they expand to. Complements `check-markdown-links`, which only covers `.md`-to-`.md`. Per-line override `// error-doc-ref-ok:<reason>` for a genuinely runtime-created path. Hermetic `--selftest`. Zero violations, no baseline. |
-| **`check-api-reference-generated`** | HARD | `docs/API_REFERENCE.md` is GENERATED output — `tools/gen_api_reference.c` expands the same `ZCL_COMMAND_*` X-macros `config/src/command_catalog.c` uses over the same `config/commands/*.def` catalogs, so the C preprocessor (not a hand-rolled parser) reads the table, and editorial prose is copied through from the template `docs/API_REFERENCE.md.in` at `<!-- ZCL-GEN:… -->` markers. The page previously said of itself that every row was "transcribed directly" — by hand — and drifted accordingly: it still claimed 106 leaves across 41 branches long after the catalog had more than doubled, i.e. it named commands as `ready` that were `planned`. The gate compiles the generator (`-Werror`), regenerates into a temp file, and `diff`s; any difference fails and prints the drift. Fix with `make docs-api-reference`, never by editing the generated page. Fail-loud floors on the `.def` scan set and on the emitted entry count, so an emptied catalog exits 2 instead of reporting clean. Hermetic `--selftest` plants a hand edit and proves the gate trips. No baseline, no override. |
+| **E12: `check-honest-witness`** | FAIL | Law 7 ("heal in the open, page when stuck"): a Condition's `witness_<name>()` must observe the symptom MOVE, not a constant, the pure inverse of `detect`, or an FSM/poison-flag the remedy itself set. Fails if TRIVIAL (every return a bare `true`/`false`), PURE-INVERSE (`return !detect_x()`), or NO-OBSERVABLE (references none of `active_chain_height`, reducer-frontier H\*, block_map iteration, a durable `SELECT`, a peer/inflight/staged/received progress counter). Exemplar: `engine/conditions/src/block_failed_mask_at_tip.c`. Baseline `tools/lint/honest_witness_baseline.txt` (empty). Override `// honest-witness-ok:<reason>` (witness whose remedy returns `COND_REMEDY_FAILED` or re-verifies real structural state). |
+| **`check-doc-inline-paths`** | RATCHET (`tools/lint/doc_inline_paths_baseline.txt`, shrink-only) | `check-markdown-links` gates Markdown LINK targets and explicitly excludes inline code — so a doc could say `` `domain/consensus/src/tx_structural.c:121` `` for months with lint green while the directory had moved to `core/`. A precise-looking dead path costs an agent more budget than a vague one, because it reads as verified. This gate resolves every backticked token in tracked `*.md` that contains a `/` and ends in `.c/.h/.cc/.def/.inc/.sh/.md/.txt/.tsv/.py/.json` (optionally `:LINE`), accepting a tracked path, a `/`-anchored suffix of one (so `util/log_macros.h` finds `platform/modules/util/include/util/log_macros.h`), or a path relative to the doc's own directory. A second prong resolves MODULE DIRECTORIES: for any backticked token rooted at a top-level source directory, the first two components (`lib/consensus`, `app/events`) must be a tracked directory. A whole module that moves is invisible to a file-extension scan — `lib/consensus` and `domain/consensus` both survived the `core/` split in six docs with lint green — and a dead directory is the most expensive dead reference there is, because an agent greps it, finds nothing, and concludes the feature was deleted. Two components only: deeper shorthand (`engine/modules/storage/chain_segment`) names a file stem, not a directory. Absolute paths, globs/brace expansions, external-URL link text, `vendor/` (submodule content absent until `make setup`), and `build/`/`.cache/`/`test-tmp/` are out of scope. Baseline keys omit the line number so a doc edit cannot churn them. Per-line override `<!-- doc-path-ok: <reason> -->` for a path that is deliberately absent (a deleted file cited for `git log` recovery, an upstream project's file in an attribution, a `X.c`-style recipe placeholder). Fails loud on an empty scan (`gate_require_scanned`). |
+| **`check-error-doc-refs`** | HARD | A remedy the operator cannot follow is worse than none: three wallet-path boot refusals in `engine/composition/src/boot.c` said "see WALLET_PERSISTENCE_RECOVERY.md", a file that had never existed — and they fire exactly when private keys are already on disk and the node refuses to write over them. Scans every string literal in a tracked `.c`/`.h` for a token ending in `.md` and resolves it against the repo root, or by basename under `docs/` / `docs/work/`. Comments are ignored (only literals reach an operator); literals carrying a printf conversion or a shell/SQL glob are skipped, since the gate cannot know what they expand to. Complements `check-markdown-links`, which only covers `.md`-to-`.md`. Per-line override `// error-doc-ref-ok:<reason>` for a genuinely runtime-created path. Hermetic `--selftest`. Zero violations, no baseline. |
+| **`check-api-reference-generated`** | HARD | `docs/API_REFERENCE.md` is GENERATED output — `tools/gen_api_reference.c` expands the same `ZCL_COMMAND_*` X-macros `engine/composition/src/command_catalog.c` uses over the same `engine/composition/commands/*.def` catalogs, so the C preprocessor (not a hand-rolled parser) reads the table, and editorial prose is copied through from the template `docs/API_REFERENCE.md.in` at `<!-- ZCL-GEN:… -->` markers. The page previously said of itself that every row was "transcribed directly" — by hand — and drifted accordingly: it still claimed 106 leaves across 41 branches long after the catalog had more than doubled, i.e. it named commands as `ready` that were `planned`. The gate compiles the generator (`-Werror`), regenerates into a temp file, and `diff`s; any difference fails and prints the drift. Fix with `make docs-api-reference`, never by editing the generated page. Fail-loud floors on the `.def` scan set and on the emitted entry count, so an emptied catalog exits 2 instead of reporting clean. Hermetic `--selftest` plants a hand edit and proves the gate trips. No baseline, no override. |
 | **`check-capability-inventory-generated`** | HARD | `docs/CAPABILITY_INVENTORY.jsonl` is GENERATED evidence, never authored findings. Its `zcl.generated_artifact.v1` header states its assertions, generator, exact regeneration command, and consumed arm-symbol artifact. The C23 generator rescans maintained public headers and packages, exposed symbols, direct call/include use sites, canonical registered-test reachability, normalized function bodies, and contract-like untested declarations; then the gate diffs every byte. The gate separately derives the exact tracked public-header set and canonical registry count, reconciles every record type to its metadata, and requires every unresolved or conditional test root to carry a named `test_root_gap`. Header prose, path-ambiguous calls, unresolved definitions, test-root gaps, and alpha-shape matches carry explicit `UNPROVEN` ceilings. A generated multi-arm baseline row suppresses the aggregate definition/constant answer and produces separately guarded `definition_arm` rows; it never hides the symbol. Fix with `make docs-capability-inventory`, never by editing the JSONL. Hermetic `--selftest` proves a planted row fails. No override. |
 | **`check-generated-artifact-contradictions`** | HARD | Generated evidence must compose instead of silently disagreeing. Each artifact carries its own `zcl.generated_artifact.v1` identity, asserted relation, generator, exact regeneration command, and consumed-artifact edge; there is no central registry. The capability inventory consumes `arm_symbol_single_baseline.txt` directly. Every exposed `<path>,<symbol>` on that generated multi-arm list must emit at least two separately scoped `definition_arm` rows, while the aggregate definition and aggregate constant-return answer remain `UNPROVEN`. An unscoped constant-stub claim for the same pair is a contradiction and fails. A missing, malformed, or stale input is also red and explicitly reported as `UNPROVEN`, never treated as an empty agreement set. The selftest proves compatible artifacts pass, absence is `UNPROVEN`, and an incompatible aggregate constant claim fails. No override. |
 | **`check-describe-budget`** | RATCHET (`tools/lint/describe_budget_baseline.txt`, shrink-only) | Every leaf's `discover describe` document must FIT `ZCL_COMMAND_SPEC_BUDGET`. `discover describe` is the only surface that renders a leaf's long-form `semantics` contract at all — `docs/API_REFERENCE.md` carries summaries and `discover help` a five-field child row — and an over-budget document renders as NOTHING: `zcl_command_registry_describe_json()` returns 0, the leaf keeps dispatching, help and search keep listing it, and its written contract is silently unreadable. `core.wallet.recovery.restore` shipped that way with a money-safety warning inside the invisible text, and the CLI reported it as `UNKNOWN_PATH` (it now reports `DESCRIBE_BUDGET`, the same shape as `nc_emit_menu`'s `MENU_BUDGET`). `tools/check_describe_budget.c` is a SECOND consumer of the same `.def` X-macro grammar and calls the REAL renderer on every leaf, so there is no size model to drift; it reports how many bytes to trim. Fix by TRIMMING `semantics`, never by raising the budget — raising it would also re-hide the baselined pre-existing overflow. Baseline entries carry a written reason and may only shrink; a baselined leaf that now fits also fails, so a fix cannot leave a stale exemption. Hermetic `--selftest` pads a leaf past the budget and proves the gate trips. |
 | **`check-no-uncited-victory`** | HARD | A progress claim without an external ledger line is not trustworthy — false "cured / at tip / fully synced" claims have repeatedly re-wedged without one. Splits the one live-state page `docs/HANDOFF.md` into blank-line paragraphs; a paragraph carrying a word-bounded VICTORY PHRASE (`at tip`, `at-tip`, `reaches tip`, `holds tip`, `fully synced`, `cured`, `unwedged`, `wedge cleared`/`closed`/`fixed`, `soak window open`/`running`, `proven live`, `live-proven`, `stable at tip`) FAILS unless the SAME paragraph carries a CITATION TOKEN (`uptime-ledger`, `slo-summary:`, `VERDICT=PASS`, `WALL_CLOCK_SECONDS`, `gap_vs_oracle`, a `ts=<digits>` stamp) or the explicit per-paragraph override `<!-- victory-ok: <reason> -->` (HISTORICAL narration only, never a current-state claim). Hollow-gate rule: `docs/HANDOFF.md` missing or < 10 lines FAILs. Hermetic `--selftest`. No baseline. |
 | **`check-doc-claims`** | HARD | Doc freshness, author-owned. Generalizes the two hardcoded rows in `check-doc-no-false-deleted` into an annotation any author can write: one HTML comment binds one prose assertion to one machine-checkable predicate — a path that must still exist or still be absent, a symbol that must still be present or absent under a `git` pathspec, or an existing `check-*` gate that must still pass or still FAIL. The gate names the file, the line, the claim text and the contradicting reality. The `gate-fails` form turns the existing `check-no-*` ratchets into freshness oracles: an item that says work is outstanding goes red the day the gate watching that work turns green — exactly the failure that cost three agents a re-run of commit `9b5add018`. Predicates resolve against the repo root wherever the document lives; annotations inside fenced code blocks are syntax documentation and are skipped. Fail-loud floors (`gate_require_scanned`) on both the tracked-`*.md` scan set and the parsed-claim count, and a self-check with known-good/known-bad fixtures runs BEFORE every tree scan, so "clean" is only printed after the evaluator has demonstrated it still fires. `--selftest`, `--list`. **Covers tracked `*.md` only** — out-of-repo plans (`~/.claude/plans/`) need the explicit `--scan <dir>` invocation, which `make lint` does not and cannot run. Syntax and worked example: the section below this table. No baseline. |
-| **E14: `check-condition-cooldown`** | HARD | Closes the multi-hour page-storm bug class: a `COND_CRITICAL` condition whose `detect()` calls a known peer/network-liveness primitive (`connman_max_peer_height`, `connman_get_node_count`, `sync_monitor_connman`, `sync_monitor_max_peer_height`) or the legacy `zclassicd` RPC oracle (`legacy_chain_rpc_*`) must set `.cooldown_secs > 0` (condition.c re-arms the remedy instead of latching permanently at `max_attempts`) or wire a `.progressing` callback (TL-1's alternate anti-latch mechanism, e.g. `reducer_frontier_reconcile_light.c`). Exemplar fix: `app/conditions/src/sync_violation_lag.c`. Self-tested against an isolated tmp dir (`ZCL_CONDITION_COOLDOWN_SELFTEST=1`), proven in `make test`/`make test-parallel` via `t_e14_condition_cooldown_gate()`. No baseline (structural, not a ratchet). |
+| **E14: `check-condition-cooldown`** | HARD | Closes the multi-hour page-storm bug class: a `COND_CRITICAL` condition whose `detect()` calls a known peer/network-liveness primitive (`connman_max_peer_height`, `connman_get_node_count`, `sync_monitor_connman`, `sync_monitor_max_peer_height`) or the legacy `zclassicd` RPC oracle (`legacy_chain_rpc_*`) must set `.cooldown_secs > 0` (condition.c re-arms the remedy instead of latching permanently at `max_attempts`) or wire a `.progressing` callback (TL-1's alternate anti-latch mechanism, e.g. `reducer_frontier_reconcile_light.c`). Exemplar fix: `engine/conditions/src/sync_violation_lag.c`. Self-tested against an isolated tmp dir (`ZCL_CONDITION_COOLDOWN_SELFTEST=1`), proven in `make test`/`make test-parallel` via `t_e14_condition_cooldown_gate()`. No baseline (structural, not a ratchet). |
 | **`check-c23-only`** | HARD | Z23 has one compiled-language path: C23. Rejects tracked Rust source/manifests (`*.rs`, `Cargo.toml`, `Cargo.lock`, `build.rs`, `.cargo/`) and any Rust toolchain, archive, linker, build-flag, or FFI route on the executable build/configuration surface. Historical source attribution and inert fixed vectors may remain in prose, but cannot become a fetch/build/link authority. Hermetic matcher selftest; no baseline or override. |
 | **`check-toolchain`** | HARD | `$CC` (default `cc`) must accept `-std=c23`, proven by compiling an empty translation unit — capability, not a version parse. Distinguishes "too old" (accepts `-std=c2x` but not `-std=c23`, the gcc 13 case) from "not a C compiler this project recognises" (accepts neither). Failure names what was tried, the compiler's `--version` line, the minimum that works (gcc 14 or newer; Apple Clang 17 is also known to work), and `make CC=gcc-14`. The Makefile also runs this at parse time before vendor bootstrap so a gcc 13 box does not spend minutes compiling archives and then print the same error 51 times. `--selftest` proves a gcc-13-shaped wrapper is refused and a usable compiler is accepted; gcc 13 need not be installed. No baseline or override. |
 | **`check-no-python`** | HARD | Z23 has no Python runtime path. Rejects tracked interpreter-source files plus runtime invocations, discovery probes, and matching shebangs on the executable and operator surface. Comments that name the ban, `requires_python: false`, and historical vector attributions (for example python-mnemonic) are not invocations. Operator JSON uses grep/sed or `build/bin/jsonq`; SQLite inspection uses `build/bin/sqlq`. Hermetic matcher selftest; no baseline or override. |
-| **`check-no-gnu-va-args`** | HARD | Variadic macros use the C23 `__VA_OPT__(,) __VA_ARGS__`, never the GNU comma-swallowing `, ##__VA_ARGS__`. A GNU-only idiom is invisible while exactly one compiler ever reads the tree, and this one was load-bearing: twelve uses — ten in `lib/util/include/util/log_macros.h` and `lib/net/src/addrman.c`, two inside the sealed consensus tree — produced 7,141 diagnostics under `clang -std=c23 -pedantic`, enough to bury every real finding. The two spellings expand to an identical token stream for the zero-, one-, and n-argument cases; the sealed-tree conversion was proven by compiling both revisions to **identical object files**. Opt out with `// gnu-va-args-ok: <reason>` on the line or the line above (no site uses it today). |
-| **`check-clang-portability`** | RATCHET | Second-compiler portability: a whole-tree `clang -std=c23 -Wall -Wextra -Werror -pedantic -fsyntax-only` over the same source set the node binary is built from, ratcheted against `tools/lint/portability_baseline.clang.txt` (counts may only go DOWN). The node ships as one whole-program GCC build, so nothing had ever asked a second compiler whether the tree is even well-formed — and GCC-only spellings landed invisibly, including genuine undefined behaviour in `lib/net/src/p2p_game.c` where a `#undef` sat inside a function call's argument list (GCC tolerates it; clang rejects it and every use fails). Measured 3.0 s wall at 32 workers over 1174 translation units. **SKIP contract:** prints a loud SKIP and exits 0 when clang is absent, exactly like `check-ci-symbol-floor` without objdump — an outside contributor must never be blocked by a gate whose tool they do not have. |
-| **`check-no-snapshot-struct-memcmp`** | HARD | No raw `memcmp`/`bcmp` over a `struct platform_positioned_file_snapshot` object. That struct (`lib/platform/include/platform/positioned_file.h`) is 64 bytes wide holding only 56 bytes of fields — two `uint32_t` nanosecond members sit in front of wider `int64_t`/`uint64_t` ones, so the compiler inserts 8 bytes of alignment padding it never has to initialize, and comparing the whole object by raw bytes can report an unchanged file as CHANGED. This landed three times — twenty test groups red the second time (commit `44c45f255`) — and the fix already exists: `platform_positioned_file_snapshot_equal()`. The gate is a text scan, not a type checker: per file, it collects identifiers declared on one line as a plain (non-pointer) `struct platform_positioned_file_snapshot <name>[, <name>...];`, then flags any `memcmp(`/`bcmp(` call in that SAME file naming one of those identifiers as its first or second argument. It deliberately cannot see a helper function doing the comparison elsewhere, a macro-wrapped `memcmp`, or a call whose argument list spans multiple lines — see the script's own header for the full, honest limitation list. |
-| **`check-windows-platform-seam`** | RATCHET | Windows portability of the platform seam: cross-compiles every `lib/platform/src` translation unit the node still links off-Linux with `x86_64-w64-mingw32-gcc -std=c2x -fsyntax-only` at the build's own `ZCL_PLATFORM_CPPFLAGS` Windows API floor (read from the Makefile, not copied here -- compiling at mingw's permissive default asks an easier question and produced a real false green), ratcheted against `tools/lint/windows_platform_seam_baseline.txt` (counts may only go DOWN; the baseline is currently EMPTY — the whole seam compiles). Exists because a Windows worker's first symptom of a broken seam was a failed build on somebody else's machine, days later; this asks the question on the Linux box that is already running `make lint`. The exempt set is deliberately **not** a second hand-kept list — `exempt_files()` parses the Makefile's own `ifeq ($(ZCL_HOST_OS),Linux)` branch, so a file the build itself drops off-Linux is exempt here for exactly as long as the build drops it, and re-enters this gate on the same commit that re-enables it. `SRC_FLOOR=8` guards the file glob, because a "clean" verdict over a directory that silently emptied is hollow, not honest. **UNOBSERVED contract:** an optional contributor invocation with no MinGW prints `UNOBSERVED` and exits 0, explicitly not a pass. `windows-portability-acceptance`, `pre-push-ci`, and hosted lint set `ZCL_REQUIRE_MINGW=1`, making compiler absence a hard failure before a zero-input result can be accepted. |
-| **`check-windows-acceptance`** | FAIL | Two steps over the platform-seam acceptance catalog (`lib/platform/tests/windows_acceptance.mk`), in this order. **1. Reconcile:** the active IDs in `ZCL_WINDOWS_ACCEPTANCE_TESTS` must exactly match the IDs with `_SOURCES` definitions; this prevents an orphan source row from making reconciliation look complete after its executable was removed from Make's active list. Every acceptance program on disk -- in the directories the catalog itself keeps programs in, derived from its `_SOURCES` rows rather than typed into the gate -- must then be a catalog source, *or* the `int test_<name>(void)` entry point of a registered group, *or* an EXEMPT entry **with a written reason**. Empty scans, duplicate IDs, a list/source mismatch, an unparseable catalog, and an empty registry all fail closed. **2. Compile:** cross-links every selected program for Windows with MinGW at the product's own `$(ZCL_WINDOWS_API_FLOOR)`, then verifies the selected count is nonzero and every expected `.exe` is nonempty. Compile, not execute: the honest POSIX-host deliverable is a cross-link; native Windows runtime remains `UNOBSERVED`. Optional `make windows-acceptance-wine` is labelled Wine compatibility and cannot close native status. An optional contributor invocation may report compiler absence as `UNOBSERVED`; `windows-portability-acceptance`, `pre-push-ci`, and hosted lint require MinGW and fail instead. The nine-case self-test includes both directions of active-ID/source-definition drift. | `tools/lint/check_windows_acceptance.sh` |
-| **`check-windows-cross-syntax`** | RATCHET | Syntax-only MinGW sweep of every `.c` containing `_WIN32` under all node source roots, including `adapters/`, `application/`, `src/`, and the release-visible `tools/command/` adapters that were previously omitted. Standalone/dev-only tools retain their own build targets. `lib/test/*` inputs receive the exact test-only `-include test/windows_compat.h` selected by `ZCL_TEST_WINDOWS_COMPAT_FLAGS`; production inputs never receive that shim. The file set is self-maintaining and the shrink-only baseline is empty. Missing generated command or unbuilt OpenSSL headers remain named skips only under their documented conditions. Optional contributors without MinGW receive an explicit `SKIP`, not a pass; acceptance/pre-push/hosted CI require the compiler with `ZCL_REQUIRE_MINGW=1` and fail before compiling zero inputs. `--self-test` plants a Windows-only undeclared identifier. |
-| **`check-platform-header-guards`** | HARD | A platform-only system header may not be `#include`d outside a conditional whose condition NAMES that platform. Exists because `1e1ce62af` shipped `lib/hotswap/src/hotswap_macho_probe.c` including `<mach-o/fat.h>`, `<mach-o/loader.h>`, `<mach-o/nlist.h>` and `<mach-o/swap.h>` with no `__APPLE__` guard at all: every Linux build that reached that translation unit died at `fatal error: mach-o/fat.h: No such file or directory`, `main` was red for a day, and nothing said so — the tree had four Windows gates and zero for Darwin, and the build-epoch object cache still held pre-commit objects, so only an unrelated epoch rotation surfaced it. Unlike every Windows gate this one needs **no cross-compiler**: an unguarded platform header is a lexical fact, so it closes the class in all three directions (Apple, Win32, Linux) on whatever host runs `make lint`, in ~2.5 s (~2.8 s including its own self-test) over `lib/` `app/` `config/` `core/` `domain/` `ports/`. The header table is **derived, not remembered** — every angle-bracket include in the tracked tree was enumerated and classified, and the rows deliberately NOT in it (`<sys/syscall.h>` and `<execinfo.h>`, which Darwin also ships; `<immintrin.h>` / `<arm_neon.h>`, which key on the ARCH and not the OS) are written down in the script with the reason. Acceptance is decided by a real preprocessor-conditional depth tracker, never a grep: a grep for "does this file mention `__APPLE__`" passes the exact macho defect, because the file did mention it — in a block that had already closed. `#else` inverts a frame (the `#else` of `#ifdef __APPLE__` is the *non*-Apple branch; the `#else` of `#ifndef __APPLE__` is the Apple one), `#elif` replaces it, comments are stripped so a header named in prose is not a finding, backslash continuations are joined, and `__has_include(<H>)` around `#include <H>` is accepted as the stronger guard it is. **Nothing is exempt by a hand-kept list in the gate**: the two platform-EXCLUSIVE file sets are parsed out of the build's own text — the `LIB_SRCS` per-host `filter-out` branches in `Makefile` (a source dropped on every host but one is exclusive to that one) and the `ZCL_WINDOWS_ACCEPTANCE_*_SOURCES` rows of `lib/platform/tests/windows_acceptance.mk` — and an exemption is per-PLATFORM, so a Linux-exclusive source is still graded for Apple headers. Either parse coming back empty is a REFUSAL (exit 2), never a wider or narrower scan. **Baseline: none, and none is wanted.** The tree reached zero by deleting one dead `#ifdef HAVE_SYS_PRCTL_H` block in `lib/util/src/util.c` that included a header nothing used, keyed on a macro defined nowhere in the repo. `--self-test` plants twelve fixtures OUTSIDE the repository — a `.c` file inside it that spells the Windows macro would silently enlist itself in `check-windows-cross-syntax`, whose file set is a `grep -l` for that token — and proves both directions: unguarded, wrong-platform-guarded, `#else`-side and after-an-already-closed-block includes go red; correctly guarded, `#ifndef`/`#else`, comment-only, `__has_include` and build-exclusive ones pass. | `tools/lint/check_platform_header_guards.sh` |
-| **`check-macos-acceptance`** | HARD | The **static** half of `tools/scripts/macos_acceptance.sh`, run for real. `config/platform/macos_capabilities.def` is the closed declarative darwin-arm64 truth: 13 capability rows each carry a legal state, typed reason, and registered evidence, while eight exact `ZCL_MACOS_REQUIRED_TEST(...)` rows pin the documented baseline groups not already selected by capability evidence. Their sorted union must equal the pinned, sorted set of exactly 38 macOS evidence groups—not merely retain its cardinality—so deletion, unknown-group substitution, and same-size registered substitutions in either half fail. The Make reachability check structurally requires the complete Mac runtime prerequisites (`z23`, `zclassic23-package-verify`, `zclassic23-acme`) and the tabbed `macos_acceptance.sh --run` recipe; a prose mention cannot satisfy it. The native script must also reach the canonical release cutter and execute the stripped packaged node's node-free code guide. A degraded capability still names evidence—local package acceptance does not imply installation, notarization, publication, or sync. **UNOBSERVED contract:** the native leg—38 exact groups with zero skips followed by an audited/checksummed temporary `darwin-arm64` runtime cut and packaged-node execution—is reported `UNOBSERVED`, in that word, on Linux; `make macos-acceptance` closes it on an arm64 Mac. The static self-test drives 16 positive/adversarial fixtures through the shipped validator and reachability rails. | `tools/lint/check_macos_acceptance.sh` |
+| **`check-no-gnu-va-args`** | HARD | Variadic macros use the C23 `__VA_OPT__(,) __VA_ARGS__`, never the GNU comma-swallowing `, ##__VA_ARGS__`. A GNU-only idiom is invisible while exactly one compiler ever reads the tree, and this one was load-bearing: twelve uses — ten in `platform/modules/util/include/util/log_macros.h` and `core/modules/net/src/addrman.c`, two inside the sealed consensus tree — produced 7,141 diagnostics under `clang -std=c23 -pedantic`, enough to bury every real finding. The two spellings expand to an identical token stream for the zero-, one-, and n-argument cases; the sealed-tree conversion was proven by compiling both revisions to **identical object files**. Opt out with `// gnu-va-args-ok: <reason>` on the line or the line above (no site uses it today). |
+| **`check-clang-portability`** | RATCHET | Second-compiler portability: a whole-tree `clang -std=c23 -Wall -Wextra -Werror -pedantic -fsyntax-only` over the same source set the node binary is built from, ratcheted against `tools/lint/portability_baseline.clang.txt` (counts may only go DOWN). The node ships as one whole-program GCC build, so nothing had ever asked a second compiler whether the tree is even well-formed — and GCC-only spellings landed invisibly, including genuine undefined behaviour in `core/modules/net/src/p2p_game.c` where a `#undef` sat inside a function call's argument list (GCC tolerates it; clang rejects it and every use fails). Measured 3.0 s wall at 32 workers over 1174 translation units. **SKIP contract:** prints a loud SKIP and exits 0 when clang is absent, exactly like `check-ci-symbol-floor` without objdump — an outside contributor must never be blocked by a gate whose tool they do not have. |
+| **`check-no-snapshot-struct-memcmp`** | HARD | No raw `memcmp`/`bcmp` over a `struct platform_positioned_file_snapshot` object. That struct (`platform/modules/platform/include/platform/positioned_file.h`) is 64 bytes wide holding only 56 bytes of fields — two `uint32_t` nanosecond members sit in front of wider `int64_t`/`uint64_t` ones, so the compiler inserts 8 bytes of alignment padding it never has to initialize, and comparing the whole object by raw bytes can report an unchanged file as CHANGED. This landed three times — twenty test groups red the second time (commit `44c45f255`) — and the fix already exists: `platform_positioned_file_snapshot_equal()`. The gate is a text scan, not a type checker: per file, it collects identifiers declared on one line as a plain (non-pointer) `struct platform_positioned_file_snapshot <name>[, <name>...];`, then flags any `memcmp(`/`bcmp(` call in that SAME file naming one of those identifiers as its first or second argument. It deliberately cannot see a helper function doing the comparison elsewhere, a macro-wrapped `memcmp`, or a call whose argument list spans multiple lines — see the script's own header for the full, honest limitation list. |
+| **`check-windows-platform-seam`** | RATCHET | Windows portability of the platform seam: cross-compiles every `platform/modules/platform/src` translation unit the node still links off-Linux with `x86_64-w64-mingw32-gcc -std=c2x -fsyntax-only` at the build's own `ZCL_PLATFORM_CPPFLAGS` Windows API floor (read from the Makefile, not copied here -- compiling at mingw's permissive default asks an easier question and produced a real false green), ratcheted against `tools/lint/windows_platform_seam_baseline.txt` (counts may only go DOWN; the baseline is currently EMPTY — the whole seam compiles). Exists because a Windows worker's first symptom of a broken seam was a failed build on somebody else's machine, days later; this asks the question on the Linux box that is already running `make lint`. The exempt set is deliberately **not** a second hand-kept list — `exempt_files()` parses the Makefile's own `ifeq ($(ZCL_HOST_OS),Linux)` branch, so a file the build itself drops off-Linux is exempt here for exactly as long as the build drops it, and re-enters this gate on the same commit that re-enables it. `SRC_FLOOR=8` guards the file glob, because a "clean" verdict over a directory that silently emptied is hollow, not honest. **UNOBSERVED contract:** an optional contributor invocation with no MinGW prints `UNOBSERVED` and exits 0, explicitly not a pass. `windows-portability-acceptance`, `pre-push-ci`, and hosted lint set `ZCL_REQUIRE_MINGW=1`, making compiler absence a hard failure before a zero-input result can be accepted. |
+| **`check-windows-acceptance`** | FAIL | Two steps over the platform-seam acceptance catalog (`platform/modules/platform/tests/windows_acceptance.mk`), in this order. **1. Reconcile:** the active IDs in `ZCL_WINDOWS_ACCEPTANCE_TESTS` must exactly match the IDs with `_SOURCES` definitions; this prevents an orphan source row from making reconciliation look complete after its executable was removed from Make's active list. Every acceptance program on disk -- in the directories the catalog itself keeps programs in, derived from its `_SOURCES` rows rather than typed into the gate -- must then be a catalog source, *or* the `int test_<name>(void)` entry point of a registered group, *or* an EXEMPT entry **with a written reason**. Empty scans, duplicate IDs, a list/source mismatch, an unparseable catalog, and an empty registry all fail closed. **2. Compile:** cross-links every selected program for Windows with MinGW at the product's own `$(ZCL_WINDOWS_API_FLOOR)`, then verifies the selected count is nonzero and every expected `.exe` is nonempty. Compile, not execute: the honest POSIX-host deliverable is a cross-link; native Windows runtime remains `UNOBSERVED`. Optional `make windows-acceptance-wine` is labelled Wine compatibility and cannot close native status. An optional contributor invocation may report compiler absence as `UNOBSERVED`; `windows-portability-acceptance`, `pre-push-ci`, and hosted lint require MinGW and fail instead. The nine-case self-test includes both directions of active-ID/source-definition drift. | `tools/lint/check_windows_acceptance.sh` |
+| **`check-windows-cross-syntax`** | RATCHET | Syntax-only MinGW sweep of every `.c` containing `_WIN32` under all node source roots, including `platform/adapters/`, `engine/application/`, `src/`, and the release-visible `tools/command/` adapters that were previously omitted. Standalone/dev-only tools retain their own build targets. `tests/harness/include/test/*` inputs receive the exact test-only `-include test/windows_compat.h` selected by `ZCL_TEST_WINDOWS_COMPAT_FLAGS`; production inputs never receive that shim. The file set is self-maintaining and the shrink-only baseline is empty. Missing generated command or unbuilt OpenSSL headers remain named skips only under their documented conditions. Optional contributors without MinGW receive an explicit `SKIP`, not a pass; acceptance/pre-push/hosted CI require the compiler with `ZCL_REQUIRE_MINGW=1` and fail before compiling zero inputs. `--self-test` plants a Windows-only undeclared identifier. |
+| **`check-platform-header-guards`** | HARD | A platform-only system header may not be `#include`d outside a conditional whose condition NAMES that platform. Exists because `1e1ce62af` shipped `engine/modules/hotswap/src/hotswap_macho_probe.c` including `<mach-o/fat.h>`, `<mach-o/loader.h>`, `<mach-o/nlist.h>` and `<mach-o/swap.h>` with no `__APPLE__` guard at all: every Linux build that reached that translation unit died at `fatal error: mach-o/fat.h: No such file or directory`, `main` was red for a day, and nothing said so — the tree had four Windows gates and zero for Darwin, and the build-epoch object cache still held pre-commit objects, so only an unrelated epoch rotation surfaced it. Unlike every Windows gate this one needs **no cross-compiler**: an unguarded platform header is a lexical fact, so it closes the class in all three directions (Apple, Win32, Linux) on whatever host runs `make lint`, in ~2.5 s (~2.8 s including its own self-test) over `lib/` `app/` `config/` `core/` `domain/` `platform/ports/`. The header table is **derived, not remembered** — every angle-bracket include in the tracked tree was enumerated and classified, and the rows deliberately NOT in it (`<sys/syscall.h>` and `<execinfo.h>`, which Darwin also ships; `<immintrin.h>` / `<arm_neon.h>`, which key on the ARCH and not the OS) are written down in the script with the reason. Acceptance is decided by a real preprocessor-conditional depth tracker, never a grep: a grep for "does this file mention `__APPLE__`" passes the exact macho defect, because the file did mention it — in a block that had already closed. `#else` inverts a frame (the `#else` of `#ifdef __APPLE__` is the *non*-Apple branch; the `#else` of `#ifndef __APPLE__` is the Apple one), `#elif` replaces it, comments are stripped so a header named in prose is not a finding, backslash continuations are joined, and `__has_include(<H>)` around `#include <H>` is accepted as the stronger guard it is. **Nothing is exempt by a hand-kept list in the gate**: the two platform-EXCLUSIVE file sets are parsed out of the build's own text — the `LIB_SRCS` per-host `filter-out` branches in `Makefile` (a source dropped on every host but one is exclusive to that one) and the `ZCL_WINDOWS_ACCEPTANCE_*_SOURCES` rows of `platform/modules/platform/tests/windows_acceptance.mk` — and an exemption is per-PLATFORM, so a Linux-exclusive source is still graded for Apple headers. Either parse coming back empty is a REFUSAL (exit 2), never a wider or narrower scan. **Baseline: none, and none is wanted.** The tree reached zero by deleting one dead `#ifdef HAVE_SYS_PRCTL_H` block in `platform/modules/util/src/util.c` that included a header nothing used, keyed on a macro defined nowhere in the repo. `--self-test` plants twelve fixtures OUTSIDE the repository — a `.c` file inside it that spells the Windows macro would silently enlist itself in `check-windows-cross-syntax`, whose file set is a `grep -l` for that token — and proves both directions: unguarded, wrong-platform-guarded, `#else`-side and after-an-already-closed-block includes go red; correctly guarded, `#ifndef`/`#else`, comment-only, `__has_include` and build-exclusive ones pass. | `tools/lint/check_platform_header_guards.sh` |
+| **`check-macos-acceptance`** | HARD | The **static** half of `tools/scripts/macos_acceptance.sh`, run for real. `engine/composition/platform/macos_capabilities.def` is the closed declarative darwin-arm64 truth: 13 capability rows each carry a legal state, typed reason, and registered evidence, while eight exact `ZCL_MACOS_REQUIRED_TEST(...)` rows pin the documented baseline groups not already selected by capability evidence. Their sorted union must equal the pinned, sorted set of exactly 38 macOS evidence groups—not merely retain its cardinality—so deletion, unknown-group substitution, and same-size registered substitutions in either half fail. The Make reachability check structurally requires the complete Mac runtime prerequisites (`z23`, `zclassic23-package-verify`, `zclassic23-acme`) and the tabbed `macos_acceptance.sh --run` recipe; a prose mention cannot satisfy it. The native script must also reach the canonical release cutter and execute the stripped packaged node's node-free code guide. A degraded capability still names evidence—local package acceptance does not imply installation, notarization, publication, or sync. **UNOBSERVED contract:** the native leg—38 exact groups with zero skips followed by an audited/checksummed temporary `darwin-arm64` runtime cut and packaged-node execution—is reported `UNOBSERVED`, in that word, on Linux; `make macos-acceptance` closes it on an arm64 Mac. The static self-test drives 16 positive/adversarial fixtures through the shipped validator and reachability rails. | `tools/lint/check_macos_acceptance.sh` |
 | **`check-app-bundle-reproducible`** | HARD | The macOS `.app` bundler is reproducible **and** its product actually launches. `tools/scripts/make_app_bundle.sh` wraps a built tool in the minimal launchable bundle and ad-hoc signs it, because arm64 macOS refuses to execute an unsigned binary at all — so "no signature" is not available and "whatever `codesign` did this time" is not reproducible. Two failures rot silently here and neither is visible by reading the script: `codesign` stamps a trusted timestamp unless it is disabled, and any input-dependent field drifting between runs makes two bundles of identical input differ; and a bundle whose signature does not verify is **SIGKILLed by the kernel**, so a smoke test that only checks an exit status cannot distinguish "ran and declined" from "never ran at all". The gate builds the subject tool twice byte-identically first (otherwise the comparison below would be over different inputs, and it says so rather than passing), then asserts the exact printed output *and* the exit status of the bundled executable. |
-| **`check-result-discard`** | RATCHET | Shrink-only ratchet over `(void)` casts that discard a `struct zcl_result`, baseline `tools/lint/result_discard_baseline.txt`. Exists because C23 lets an explicit cast suppress `[[nodiscard]]`: annotating the type (done — see `lib/util/include/util/result.h`) fences off NEW silent discards but cannot excavate the existing population, measured at 94 cast discards versus ~67 bare ones. Fix a site with `ZCL_IGNORE_RESULT(expr, "why the failure is safe to drop")`, which requires a non-empty reason at compile time via `static_assert` — the point being to make the discard *expressible* rather than merely tolerated. |
+| **`check-result-discard`** | RATCHET | Shrink-only ratchet over `(void)` casts that discard a `struct zcl_result`, baseline `tools/lint/result_discard_baseline.txt`. Exists because C23 lets an explicit cast suppress `[[nodiscard]]`: annotating the type (done — see `platform/modules/util/include/util/result.h`) fences off NEW silent discards but cannot excavate the existing population, measured at 94 cast discards versus ~67 bare ones. Fix a site with `ZCL_IGNORE_RESULT(expr, "why the failure is safe to drop")`, which requires a non-empty reason at compile time via `static_assert` — the point being to make the discard *expressible* rather than merely tolerated. |
 | **`check-no-warning-suppression`** | HARD | A blanket warning suppression may not sit on a build surface unexplained. `-Wno-unused-result` and `-Wno-stringop-overflow` — in flag form, or as `#pragma GCC diagnostic ignored` — fail on any tracked makefile, `*.c`/`*.h`, or `*.sh` unless the line, or the line above it, carries `suppression-ok: <reason>` with a non-empty reason. `-Wno-unused-result` matters most: it is the SAME diagnostic GCC and Clang use to report `[[nodiscard]]`, so leaving it on silently voids the result-type discipline the repository is built around — a result type could be annotated and nothing would change. Both flags entered in the first commit as copy-forward defaults and had spread to seven compile rules; each now has one named definition (`ZCL_WARN_UNUSED_RESULT`, `ZCL_WARN_STRINGOP_OVERFLOW`) carrying the reason and the command to re-derive its blocking sites. `vendor/` (third-party recipes) and `.clangd` (editor diagnostics, never emitted code) are out of scope. Hermetic detector fixtures run BEFORE the tree scan on every invocation, so the gate cannot report clean while its matcher is broken, and an empty scan set exits 2. `--self-test`. No baseline. |
-| **`check-fuzz-artifact-ledger`** | HARD | Every saved fuzz finding under `lib/test/fuzz_seeds/` carries a written verdict, and the cheap half of that contract runs in `make lint` (21 ms, text + git only). Exists because on 2026-07-14 a fuzzer found that a five-byte script from any peer hangs the node forever, the bytes were committed as `script/timeout-689f73ac…bin`, and nobody read them for two weeks — while THREE mechanisms had already replayed them and already gone red (`make fuzz-ci`, reachable only from `make ci` which nothing automatic runs; the hourly `background_quality_lane.sh`, whose verdict lands in a JSON file nothing gates on; and `promote_fuzz_artifacts.sh`, which exits 0 by design). The replay capability was never missing — the verdict had nowhere to go. This gate checks: every file matching a libFuzzer artifact prefix (`timeout-`/`crash-`/`leak-`/`oom-`/`slow-unit-`) has exactly one line in `lib/test/fuzz_seeds/ARTIFACT_VERDICTS.txt` with a valid verdict, an ISO date and a reason; no orphan ledger lines; no untracked repro sitting uncommitted in the corpus; and the corpus↔binary map is 1:1, DERIVED from the Makefile's `$(BIN_DIR)/fuzz_<kind>:` rules so a new target is covered the day it lands. The actual replay is `make fuzz-replay` (in `make ci`, plus its own CI job) — separated because the replay is 18.3 s at `-P6` while building the nine fuzz binaries it needs is 34 s cold at `-j6`. Verdicts are `regression-seed` (audited clean; reproducing again FAILS), `open` (a real unfixed bug — this does NOT suppress the failure, it only names it), and `accepted` (the only pass-while-reproducing path: per-file, dated, reason ≥ 30 chars, reprinted by name every run; **zero entries today**). An entry that stops being true fails in both directions, so the ledger cannot rot. Added 2026-08-26: a `crash-`/`leak-` artifact cannot close `regression-seed` on "it replayed clean" alone — the reason must name a fix (`fixed by <commit>`) or record a pattern-init replay (`pattern-init: clean (Nx)`), enforced via `tools/scripts/fuzz_verdict_lib.sh`; see the pattern-init section below. `promote_fuzz_artifacts.sh` no longer files a verdict from the filename either — it replays the artifact (stock, and pattern-init for `crash-`/`leak-` kinds) before writing anything, and files `unreplayable` (also rejected on sight, same as `unaudited`) rather than a false clean when it cannot get that evidence. Never cached (it reads untracked worktree state). `--selftest` plants an untriaged artifact and asserts the gate trips AND names the file. No baseline, no directory-wide exemption. |
-| **`check-standalone-tools-link`** | HARD | Every standalone tool rule in the Makefile must actually BUILD. `make lint`, `make test-parallel` and `make ci` between them build the node, the test runners, the fuzzers and two lint helpers — and nothing else, so every other `$(BIN_DIR)/<tool>` rule was reachable from no gate and rotted unobserved. When `lib/base` absorbed logging and allocation behind forwarding headers, SIX standalone rules broke at once (missing `-I` paths, missing `lib/base/src/log_level.c`, missing `lib/platform/src/clock.c`) and every gate stayed green through it. The tool list is DERIVED from the Makefile — both the literal `$(BIN_DIR)/<name>:` spelling and the `$(SOME_BIN):` spelling resolved through its `SOME_BIN = $(BIN_DIR)/<name>` definition — never hand-written, so a newly added tool is covered the day it lands and an unknown tool is NOT exempt (fail-closed). Per-epoch CANDIDATE staging paths are skipped. The exempt set is closed and carries a mandatory reason per entry: already built by lint/ci (`gen_templates`, `core_seal`, `check_observability_pairing`, the nine `fuzz_*`, `crash_recovery_test`, `zcl-rpc`), whole-program relinks (`z23` + dev/asan/tsan variants, the test runners, `session`, `bot`), or outside the base toolchain (`zcl-blog` needs webkit2gtk). Covered tools are single-translation-unit builds: ~9 s warm, and a no-op once built. No baseline. |
+| **`check-fuzz-artifact-ledger`** | HARD | Every saved fuzz finding under `tests/harness/fuzz_seeds/` carries a written verdict, and the cheap half of that contract runs in `make lint` (21 ms, text + git only). Exists because on 2026-07-14 a fuzzer found that a five-byte script from any peer hangs the node forever, the bytes were committed as `script/timeout-689f73ac…bin`, and nobody read them for two weeks — while THREE mechanisms had already replayed them and already gone red (`make fuzz-ci`, reachable only from `make ci` which nothing automatic runs; the hourly `background_quality_lane.sh`, whose verdict lands in a JSON file nothing gates on; and `promote_fuzz_artifacts.sh`, which exits 0 by design). The replay capability was never missing — the verdict had nowhere to go. This gate checks: every file matching a libFuzzer artifact prefix (`timeout-`/`crash-`/`leak-`/`oom-`/`slow-unit-`) has exactly one line in `tests/harness/fuzz_seeds/ARTIFACT_VERDICTS.txt` with a valid verdict, an ISO date and a reason; no orphan ledger lines; no untracked repro sitting uncommitted in the corpus; and the corpus↔binary map is 1:1, DERIVED from the Makefile's `$(BIN_DIR)/fuzz_<kind>:` rules so a new target is covered the day it lands. The actual replay is `make fuzz-replay` (in `make ci`, plus its own CI job) — separated because the replay is 18.3 s at `-P6` while building the nine fuzz binaries it needs is 34 s cold at `-j6`. Verdicts are `regression-seed` (audited clean; reproducing again FAILS), `open` (a real unfixed bug — this does NOT suppress the failure, it only names it), and `accepted` (the only pass-while-reproducing path: per-file, dated, reason ≥ 30 chars, reprinted by name every run; **zero entries today**). An entry that stops being true fails in both directions, so the ledger cannot rot. Added 2026-08-26: a `crash-`/`leak-` artifact cannot close `regression-seed` on "it replayed clean" alone — the reason must name a fix (`fixed by <commit>`) or record a pattern-init replay (`pattern-init: clean (Nx)`), enforced via `tools/scripts/fuzz_verdict_lib.sh`; see the pattern-init section below. `promote_fuzz_artifacts.sh` no longer files a verdict from the filename either — it replays the artifact (stock, and pattern-init for `crash-`/`leak-` kinds) before writing anything, and files `unreplayable` (also rejected on sight, same as `unaudited`) rather than a false clean when it cannot get that evidence. Never cached (it reads untracked worktree state). `--selftest` plants an untriaged artifact and asserts the gate trips AND names the file. No baseline, no directory-wide exemption. |
+| **`check-standalone-tools-link`** | HARD | Every standalone tool rule in the Makefile must actually BUILD. `make lint`, `make test-parallel` and `make ci` between them build the node, the test runners, the fuzzers and two lint helpers — and nothing else, so every other `$(BIN_DIR)/<tool>` rule was reachable from no gate and rotted unobserved. When `platform/modules/base` absorbed logging and allocation behind forwarding headers, SIX standalone rules broke at once (missing `-I` paths, missing `platform/modules/base/src/log_level.c`, missing `platform/modules/platform/src/clock.c`) and every gate stayed green through it. The tool list is DERIVED from the Makefile — both the literal `$(BIN_DIR)/<name>:` spelling and the `$(SOME_BIN):` spelling resolved through its `SOME_BIN = $(BIN_DIR)/<name>` definition — never hand-written, so a newly added tool is covered the day it lands and an unknown tool is NOT exempt (fail-closed). Per-epoch CANDIDATE staging paths are skipped. The exempt set is closed and carries a mandatory reason per entry: already built by lint/ci (`gen_templates`, `core_seal`, `check_observability_pairing`, the nine `fuzz_*`, `crash_recovery_test`, `zcl-rpc`), whole-program relinks (`z23` + dev/asan/tsan variants, the test runners, `session`, `bot`), or outside the base toolchain (`zcl-blog` needs webkit2gtk). Covered tools are single-translation-unit builds: ~9 s warm, and a no-op once built. No baseline. |
 | **`check-no-operator-paths`** | HARD (shrink-only ratchet) | No tracked file may name an absolute home path, the operator username, or the host name. A stranger who clones this repository must not learn where the machines that run it are: onion addresses are the committed network identity precisely because they carry no location, and an absolute `/home/<user>/...` path in a committed artifact silently undoes that. Three prongs: **A** absolute `/home/<x>` or `/Users/<x>` (universal, works on any checkout), **B** the operator username from `id -un`, **C** the host name — B and C are host-derived, so the PASS line says so rather than implying coverage they cannot have on someone else's machine. Keyed `<prong> <path> <occurrences>`, not lines: the corpus evidence records are single-line JSON, so a per-line ratchet would score a file holding sixty leaks as one. A new pair fails hard; a count above baseline fails; a count that has fallen to zero fails as a stale row so the baseline can only shrink. The gate runs a planted-violation selftest per prong first — a lint gate here has silently inverted before, and one that has never been seen to fail is not evidence. It is deliberately not exempt from itself. |
 | **`check-no-unattended-publish`** | HARD (closed allowlist) | No script in the repository writes to the shared remote. Publishing is a deliberate act a person performs, never a side effect of a background loop: a timer that can move `main` moves it for every checkout that fast-forwards from it, with nobody reviewing what went out. **What motivated it:** a sync script ran on cron every ten minutes on four machines and pushed a per-box heartbeat commit to `origin/main` each cycle, carrying that box's onion address, P2P port, running-binary source hash, peer count, liveness and last error — filling public history with machine chatter, shipping live operator state to every reader, and making a project anyone can join look like it had a designated in-crowd. Two patterns are refused: `git push`, and `git commit-tree` — the subtle one, because it builds a commit object without touching the index or working tree, so `git commit-tree … \| git push origin <sha>:main` moves a branch from a detached HEAD while the checkout still looks untouched, and a reviewer scanning for `git commit` would never see it. A line whose first non-blank character is `#` cannot execute and is not matched, so an explanation of the rule is not itself a violation. The scan set is derived from `git ls-files`, never hand-listed, so a script added tomorrow is covered the day it lands, and an unknown file is refused rather than assumed benign. The allowlist is closed and every entry carries a mandatory reason: the operator-run deploy path, two hooks that only print advice naming the command, two lint fixtures whose input is the forbidden string, and this gate itself — listed rather than skipped, because a gate exempt from itself is a place to hide. Scan-floor guarded, so a scan set that silently emptied exits 2 instead of reporting a clean pass. No baseline. |
 
@@ -1058,7 +1058,7 @@ inline, next to the claim, in an HTML comment that renders invisibly.
 - `data_integrity_compute` shadow-seed: confirm non-consensus or repoint. The
   `utxo_projection` half of this question is CLOSED, not open — Program H1
   deleted the event-log-fed projection and its view.
-  <!-- claim: file-absent lib/storage/src/utxo_projection.c # deleted by Program H1 -->
+  <!-- claim: file-absent engine/modules/storage/src/utxo_projection.c # deleted by Program H1 -->
   <!-- claim: gate-passes check-no-utxo-projection # the copy must stay dead -->
 ```
 
@@ -1150,7 +1150,7 @@ and belongs nowhere near `make lint`. What it measures is the **verdict vector**
 the ordered `(check name, outcome)` sequence the harness already prints, never
 the raw transcript, which carries durations, temp paths, pids and pointer
 values and would measure the clock instead of the test. Read
-`lib/determinism/include/determinism/perturbation.h` for what each perturbation
+`engine/modules/determinism/include/determinism/perturbation.h` for what each perturbation
 means, which ones this host can apply, and why the result is a lower bound: a
 test that is wrong the same way every time has a perfectly stable vector.
 
@@ -1205,6 +1205,7 @@ add/remove a gate.
 - `check-framework-shape`
 - `check-git-hooks-installed`
 - `check-group-purpose`
+- `check-architecture-tree`
 - `check-honest-witness`
 - `check-lag-slo-observable`
 - `check-lib-layering`
@@ -1562,12 +1563,12 @@ mechanically hold:
 | `// raw-alloc-ok:<tag>` | line with `malloc/calloc/realloc` outside the `zcl_*` wrappers | `check-raw-malloc` |
 | `// long-function-ok:<tag>` | signature line of a function whose body spans >500 lines (controllers/services/config-src ENFORCED, lib/ WARN) | `check-long-functions` |
 | `// lib-layer-ok:<tag>` | line in `lib/` that includes a `controllers/`, `models/`, `services/`, `views/`, or `config/` header | `check-lib-layering` |
-| `// shape-layer-ok:<tag>` | line in `app/models/` that includes a `services/`/`controllers/` header, or in `app/services/` that includes a `controllers/` header | `check-shape-include-direction` |
+| `// shape-layer-ok:<tag>` | line in `engine/models/` that includes a `services/`/`controllers/` header, or in `engine/services/` that includes a `controllers/` header | `check-shape-include-direction` |
 | `// domain-purity-ok:<tag>` | line in `domain/` that includes an app/ shape or an unlisted lib/ subsystem header | `check-domain-purity` |
-| `// supervisor-ok:<tag>` | any line in a long-running `app/services/src/*_service.c` that intentionally does not register a supervisor liveness contract | `check-supervisor-registration` |
+| `// supervisor-ok:<tag>` | any line in a long-running `engine/services/src/*_service.c` that intentionally does not register a supervisor liveness contract | `check-supervisor-registration` |
 | `// supervised:<child>` | a `thread_registry_spawn(` call site whose thread IS on the supervisor tree; names the watching contract | `check-thread-supervision` |
 | `// thread-supervision-ok:<reason>` | a `thread_registry_spawn(` call site for a bounded/joined/one-shot thread that needs no liveness contract | `check-thread-supervision` |
-| `// one-result-type-ok:<tag>` | top of an `app/services/src/*.c` that owns no fallible service surface (pure table/registry helper) | `check-one-result-type` |
+| `// one-result-type-ok:<tag>` | top of an `engine/services/src/*.c` that owns no fallible service surface (pure table/registry helper) | `check-one-result-type` |
 | `// one-write-path-ok:<tag>` | chain-state compatibility wrapper that is not a second consensus writer | `check-one-write-path` |
 | `// shape-include-ok:<tag>` | any line in a shape file (condition/model/supervisor) that is a genuine registry/aggregator and cannot include the shape header | `check-shape-includes-header` |
 | `// projection-cache-ok:<tag>` | line in a `*_projection.c` with a legitimate cache write outside the strict fold | `check-projections-pure` |
@@ -1644,7 +1645,7 @@ on-disk format markers.
 This law governs names picked from here forward; it does not license
 breaking references to already-existing artifacts or established labels.
 `mint3` (`~/.zclassic-c23-mint3` on disk, distinct from `~/.zclassic-c23-mint`
-— see `config/src/boot_promote_shielded_history.c`) is a real, currently-live
+— see `engine/composition/src/boot_promote_shielded_history.c`) is a real, currently-live
 datadir name and stays literal in docs until it is naturally re-created under
 a role-based name. Likewise the historical feature-round labels used
 elsewhere in this document and in `CLAUDE.md` (Round 5, Round 6) predate

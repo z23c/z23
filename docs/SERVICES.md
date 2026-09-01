@@ -11,19 +11,19 @@ cannot drift:
 
 | Question | Where the answer actually lives |
 |---|---|
-| What can a service declare? | `lib/kernel/include/kernel/service_binding.h` |
-| How do I add one? | the header comment of `config/services/bindings.def` |
+| What can a service declare? | `engine/modules/kernel/include/kernel/service_binding.h` |
+| How do I add one? | the header comment of `engine/composition/services/bindings.def` |
 | What services are declared here? | `z23 app service list` |
 | What does one declare exactly? | `z23 app service inspect <name>` |
-| What commands does the branch expose? | `docs/API_REFERENCE.md` — generated from `config/commands`, drift-gated |
+| What commands does the branch expose? | `docs/API_REFERENCE.md` — generated from `engine/composition/commands`, drift-gated |
 | Does a holder qualify? | `z23 app service access <name>` |
 | What state is each service in? | `z23 app service status` |
 
 ## Why a binding rather than a new registry
 
 The process-isolation charter already existed: `zcl.service_manifest.v1`
-(`lib/kernel/include/kernel/service_manifest.h`, declared in
-`config/services/catalog.def`) gives the six node roles their trust classes,
+(`engine/modules/kernel/include/kernel/service_manifest.h`, declared in
+`engine/composition/services/catalog.def`) gives the six node roles their trust classes,
 descriptor grants, resource budgets, and restart policy. It answers *what may
 this process touch*. It does not answer *what commands does this unit register,
 what state does it own, and who may call it* — and its per-manifest SHA3
@@ -42,7 +42,7 @@ unchanged. A service can never widen them, and hosting on `core`, `wallet`, or
    service's own name. It cannot reach `core.`, `dev.`, or `ops.`, and it cannot
    take one of the registry's own leaf names (`list`, `inspect`, `access`,
    `status`, `catalog`). The leaves themselves are still declared in a
-   `config/commands` `.def`, so `discover` and the generated reference carry
+   `engine/composition/commands` `.def`, so `discover` and the generated reference carry
    them for free — and their auth, effect, and risk are the catalog's
    declaration, not the service's.
 2. **`state_table_prefix`** — the `node.db` table namespace it owns. Must end in

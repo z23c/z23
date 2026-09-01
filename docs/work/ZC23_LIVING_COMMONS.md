@@ -492,8 +492,8 @@ linkage, active opening and maturity anchors, no repeated candidate or
 continuity event, checked cumulative accounting, and the rule that every
 epoch's unused capacity expires rather than carrying forward.
 
-The permanent fixture uses the actual permissively licensed `lib/base`,
-`lib/sha3`, and `lib/codec` package trees as three distinct challenge-mature
+The permanent fixture uses the actual permissively licensed `platform/modules/base`,
+`platform/modules/sha3`, and `platform/modules/codec` package trees as three distinct challenge-mature
 contributions in epochs 0–2; epoch 3 intentionally issues zero. It rebuilds
 the Commons projection twice after every epoch and requires byte-identical
 roots. Replacing the fixture branch at the epoch-2 boundary invalidates the

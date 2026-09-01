@@ -127,7 +127,7 @@ receipts or maintainer review.
 
 ## Adding a test
 
-Add `lib/test/src/test_<name>.c` and register its group in the
+Add `tests/harness/src/test_<name>.c` and register its group in the
 canonical `tools/dev/test_group_catalog.def` as
 `ZCL_TEST_GROUP(<name>)`. Run it with
 `make t-fast ONLY=<name>`.
@@ -208,4 +208,4 @@ Copyleft code (GPL/LGPL/AGPL/MPL) cannot be accepted into this tree.
 **Attribution:** contributor authorship is preserved in git history —
 PRs are merged with merge commits, never rewritten under someone else's
 name — and contributors are recognized in
-[`CONTRIBUTORS.md`](../CONTRIBUTORS.md) and GitHub's contributor graph.
+[`docs/CONTRIBUTORS.md`](../docs/CONTRIBUTORS.md) and GitHub's contributor graph.

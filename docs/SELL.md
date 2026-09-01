@@ -63,7 +63,7 @@ z23 discover schema app.shop.init
   overlay (`-tor -onion-persist`). Session keys are HKDF-SHA3-256; chunk ids
   are SHA3-256. Consensus hashes stay SHA-256d. See [`OVERLAY.md`](OVERLAY.md).
 
-The simnet collectible example (`examples/11_collectible_market.c`) proves the
+The simnet collectible example (`docs/examples/11_collectible_market.c`) proves the
 same primitives on an isolated chain. Use it to see the shape; use the commands
 above on a funded node.
 

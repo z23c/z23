@@ -9,7 +9,7 @@ task/candidate authority.
 ## Frozen baseline
 
 The frozen owner is `zpd_test_twelve_task_benchmark` in
-`lib/test/src/test_zcode_package_dev.c`: twelve exact goals over three synthetic
+`tests/harness/src/test_zcode_package_dev.c`: twelve exact goals over three synthetic
 C23 projects, including two impossible out-of-scope goals. On source
 `7d739720138dd8c82d0a691a1d32eab9899c38d4`, the uncached acceptance reported:
 

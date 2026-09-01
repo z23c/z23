@@ -23,7 +23,7 @@
  *
  *   * a restart is invisible (the state was never in RAM to begin with),
  *   * a receipt can never contradict the queue,
- *   * two submitters cannot corrupt it, because lib/chainlog opens its file
+ *   * two submitters cannot corrupt it, because engine/modules/chainlog opens its file
  *     under an exclusive whole-file lock that WAITS. The second submitter
  *     blocks in open() and appends after the first, rather than interleaving
  *     with it.

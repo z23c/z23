@@ -20,8 +20,8 @@
  * of them writes, and the guard itself only stats.
  *
  * AND SQLITE_OPEN_READONLY IS NOT ENOUGH ON ITS OWN. Both stores under a
- * datadir are WAL-mode (app/models/src/database.c sets journal_mode=WAL for
- * node.db, lib/storage/src/progress_store.c for consensus.db), and a
+ * datadir are WAL-mode (engine/models/src/database.c sets journal_mode=WAL for
+ * node.db, engine/modules/storage/src/progress_store.c for consensus.db), and a
  * read-only connection to a WAL database still has to materialize the
  * wal-index before it can read consistently. So sqlite CREATES <db>-shm and
  * <db>-wal beside the database — and a read-only connection cannot unlink

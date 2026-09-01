@@ -16,8 +16,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 cd "$ROOT"
 
-for model in utxo block wallet_tx; do
-    f=app/models/src/$model.c
+for model_path in engine/models/src/utxo.c engine/models/src/block.c \
+                  contexts/wallet/models/src/wallet_tx.c; do
+    f="$model_path"
     test -f "$f" \
     || { echo "FAIL: $f missing (model file moved/renamed)"; exit 1; }
     grep -qE 'ar_register_before_save[[:space:]]*\(' "$f" \
@@ -30,7 +31,7 @@ done
 # wallet_sapling_keys / wallet_seed secret columns (the plaintext model
 # saves and their "passphrase_set_pending_encryption" hooks were removed).
 # Ratchet the invariant: the plaintext writers must never come back.
-f=app/models/src/wallet_key.c
+f=contexts/wallet/models/src/wallet_key.c
 test -f "$f" \
 || { echo "FAIL: $f missing (model file moved/renamed)"; exit 1; }
 if grep -qE '^bool (db_wallet_key_save|db_sapling_key_save|db_wallet_seed_save)[[:space:]]*\(' "$f"; then

@@ -15,7 +15,7 @@ if ! make lint >"$LINTLOG" 2>&1; then
   echo "GATE: LINT FAILED"; grep -iE "FAIL —|grew to|Error 1|violation" "$LINTLOG" | tail -8; exit 1
 fi
 echo "GATE: LINT OK"
-# Full binary link — build-only compiles library objects but NOT src/main.c or
+# Full binary link — build-only compiles library objects but NOT engine/entry/main.c or
 # the final binaries, so it cannot catch a broken entry point or a link gap.
 if ! make -j"$(nproc)" >>"$LINTLOG" 2>&1; then
   echo "GATE: FULL BUILD FAILED"; grep -iE "error:|undefined reference|Error 1" "$LINTLOG" | tail -8; exit 1

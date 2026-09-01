@@ -8,9 +8,9 @@ on:
   push:
     branches: [main]
     paths:
-      - 'lib/presentation/**'
-      - 'lib/encoding/src/qr.c'
-      - 'lib/encoding/src/qrcodegen_backend.c'
+      - 'contexts/explorer/modules/presentation/**'
+      - 'platform/modules/encoding/src/qr.c'
+      - 'platform/modules/encoding/src/qrcodegen_backend.c'
       - 'vendor/rgfw/**'
       - 'vendor/qrcodegen/**'
       - 'vendor/typography/**'
@@ -55,15 +55,15 @@ jobs:
           set -euo pipefail
           mkdir -p build/presentation-ci
           clang -std=c2x -O2 -Wall -Wextra -Werror -pedantic \
-            -Ilib/presentation/include \
-            lib/presentation/src/presentation.c \
-            lib/presentation/src/presentation_canvas_select.c \
-            lib/presentation/src/presentation_focus.c \
-            lib/presentation/src/presentation_form.c \
-            lib/presentation/src/presentation_input.c \
-            lib/presentation/src/canvas.c \
-            lib/presentation/src/zclassic_brand.c \
-            lib/presentation/examples/bitmap_demo.c \
+            -Icontexts/explorer/modules/presentation/include \
+            contexts/explorer/modules/presentation/src/presentation.c \
+            contexts/explorer/modules/presentation/src/presentation_canvas_select.c \
+            contexts/explorer/modules/presentation/src/presentation_focus.c \
+            contexts/explorer/modules/presentation/src/presentation_form.c \
+            contexts/explorer/modules/presentation/src/presentation_input.c \
+            contexts/explorer/modules/presentation/src/canvas.c \
+            contexts/explorer/modules/presentation/src/zclassic_brand.c \
+            contexts/explorer/modules/presentation/examples/bitmap_demo.c \
             ${{ matrix.libs }} \
             -o build/presentation-ci/bitmap-demo
           clang -std=c2x -O2 -Wall -Wextra -Werror -pedantic \

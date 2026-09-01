@@ -43,7 +43,7 @@
 
 /* ── THE READ SEAM ─────────────────────────────────────────────────────────
  * The vault does not aggregate. Everything the read leaves report is
- * projected from ONE call into the read model owned by app/services/vault_read
+ * projected from ONE call into the read model owned by engine/services/vault_read
  * (a peer lane), through the single function vault_read_seam() below. That
  * function is the whole integration surface: if the read model lands with a
  * different signature, this one function body is the only edit.
@@ -90,33 +90,33 @@ struct vault_route {
 static const struct vault_route k_vault_routes[] = {
     { "transparent", "transparent_zcl", "fungible_zat", "native_command",
       "core.wallet.transaction.send",
-      "app/controllers/src/wallet_native_handlers.c -> sendtoaddress",
+      "contexts/wallet/controllers/src/wallet_native_handlers.c -> sendtoaddress",
       "vault.send",
       "the wallet's own send builds, signs and broadcasts" },
     { "shielded", "shielded_zcl", "fungible_zat", "native_command",
       "core.wallet.shielded.send",
-      "app/controllers/src/wallet_native_handlers.c -> z_sendmany",
+      "contexts/wallet/controllers/src/wallet_native_handlers.c -> z_sendmany",
       "vault.send-shielded",
       "requires Sapling parameters loaded and a passing prover self-test" },
     { "tokens", "zslp_tokens", "record", "native_command", "app.tokens.send",
-      "app/services/src/zslp_command_service.c",
+      "contexts/market/services/src/zslp_command_service.c",
       "vault.send-token",
       "the ZSLP owner explicitly spends token outputs and returns token "
       "change; ordinary wallet selection reserves every token/baton output" },
     { "names", "znam_names", "record", "node_rpc",
       "name_register,name_update,name_transfer,name_renew",
-      "app/controllers/src/name_controller.c", "",
+      "engine/controllers/src/name_controller.c", "",
       "the ZNAM writes are reachable as their own typed leaves "
       "(app names register/update/transfer/renew/set-record/set-text, each "
       "plan/commit gated); the vault mints no second verb over them because "
       "a name is a record, not a vault balance" },
     { "market", "file_market_offers", "record", "node_rpc", "zmarket_offer,zmarket_buy",
-      "app/controllers/src/file_market_controller.c", "",
+      "contexts/market/controllers/src/file_market_controller.c", "",
       "app.market.* write leaves are PLANNED: nothing announces a locally "
       "created offer to peers, and no code path builds the purchase payment "
       "transaction, so on-chain settlement is not wired end to end" },
     { "swaps", "swap_encumbered", "contract", "node_rpc", "swap_redeem,swap_refund",
-      "app/controllers/src/swap_controller.c",
+      "engine/controllers/src/swap_controller.c",
       "vault.swap.redeem,vault.swap.refund",
       "the swap controller builds, signs, broadcasts and persists state" },
 };
@@ -826,7 +826,7 @@ void zcl_native_handle_vault_routes(const struct zcl_command_request *request,
     (void)json_push_kv_int(&reply->data, "class_count", VAULT_ROUTE_COUNT);
     (void)json_push_kv_bool(&reply->data, "spend_logic_in_vault", false);
     (void)json_push_kv_str(&reply->data, "source",
-                           "config/src/command_catalog.c (live registry) + "
+                           "engine/composition/src/command_catalog.c (live registry) + "
                            "tools/command/native_vault_command.c route table");
     (void)json_push_kv_str(&reply->data, "evidence",
                            "every custody leaf ends in vault_dispatch() or "
@@ -1099,7 +1099,7 @@ void zcl_native_handle_vault_send_token(
 
 /* ── swap settlement: the same routing, one layer lower ────────────────────
  * No native leaf binds swap_redeem / swap_refund, so the owning path is the
- * RPC method itself (app/controllers/src/swap_controller.c), which builds,
+ * RPC method itself (engine/controllers/src/swap_controller.c), which builds,
  * signs, broadcasts and persists. The vault supplies only the plan/commit gate
  * the RPC lacks, and encodes the arguments through the sanctioned params
  * builder — it never touches the transaction. */
@@ -1170,7 +1170,7 @@ static void vault_rpc_settle(const struct zcl_command_request *request,
     (void)json_push_kv_str(&reply->data, "routed_from", request->spec->path);
     (void)json_push_kv_str(&reply->data, "routed_via",
                            "vault_rpc_settle: the node RPC method registered "
-                           "by app/controllers/src/swap_controller.c");
+                           "by engine/controllers/src/swap_controller.c");
 
     if (!json_get_bool_or(request->input, "confirm", false)) {
         struct json_value ci;

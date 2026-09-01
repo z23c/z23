@@ -7,7 +7,7 @@
 # The documented way to enumerate test groups was an incantation in the
 # project's front-page CLAUDE.md:
 #
-#     git grep -hoE 'X\([a-z_0-9]+\)' lib/test/src/test_parallel.c | tr -d 'X()'
+#     git grep -hoE 'X\([a-z_0-9]+\)' tests/harness/src/test_parallel.c | tr -d 'X()'
 #
 # It has two defects and both were being hit. Dropping -h glues the filename
 # onto every name (CLAUDE.md warns about it, which means everyone trips it).
@@ -29,7 +29,7 @@
 #   --count            the number of registered groups
 #   --match SUBSTR     the groups a `--only=SUBSTR` run would select, using the
 #                      runner's own rule (plain substring of the FULL name,
-#                      lib/test/src/test_parallel.c strstr()). Exit 1, no
+#                      tests/harness/src/test_parallel.c strstr()). Exit 1, no
 #                      output, when nothing matches.
 #   --resolve-exact ID... resolve proof-plan IDs to canonical FULL names.
 #                      Accepts either the full name or the legacy prefixless
@@ -55,7 +55,7 @@ cd "$REPO"
 . "$REPO/tools/scripts/sh_str.sh"  # str_contains / str_lacks — see F-note
 
 REGISTRY="${ZCL_TEST_REGISTRY_SRC:-tools/dev/test_group_catalog.def}"
-RUNNER="${ZCL_TEST_RUNNER_SRC:-lib/test/src/test_parallel.c}"
+RUNNER="${ZCL_TEST_RUNNER_SRC:-tests/harness/src/test_parallel.c}"
 FAMILIES="${ZCL_TEST_PROOF_FAMILIES_SRC:-tools/dev/test_proof_families.def}"
 
 for required in "$REGISTRY" "$RUNNER" "$FAMILIES"; do
@@ -176,7 +176,7 @@ check_impact_rules() {
     }
     load_registered_cache
     registered_tests="$(git ls-files --cached --others --exclude-standard -- \
-        'lib/test/src/test_*.c')"
+        'tests/harness/src/test_*.c')"
     tracked_haystack="
 ${registered_tests}
 "
@@ -206,7 +206,7 @@ ${registered_tests}
         IFS='|' read -r -a rule_patterns <<<"$patterns"
         for pattern in "${rule_patterns[@]}"; do
             case "$pattern" in
-                lib/test/src/test_*.c) ;;
+                tests/harness/src/test_*.c) ;;
                 *) continue ;;
             esac
             while IFS= read -r test_file; do
@@ -354,7 +354,7 @@ case "$mode" in
         resolve_exact_set "$needle"
         ;;
     --check-impact-rules)
-        check_impact_rules "${2:-app/controllers/include/controllers/agent_impact_rules.def}"
+        check_impact_rules "${2:-cognition/controllers/include/controllers/agent_impact_rules.def}"
         ;;
     --suggest)
         needle="${2:-}"

@@ -64,7 +64,7 @@ vendor/typography/stb_truetype.h -whitespace
 # Impact rules are an unordered SET of independent mappings that every lane
 # appends to. Concurrent appends are not semantically conflicting, so take the
 # union rather than stopping the merge on a textual collision at EOF.
-app/controllers/include/controllers/agent_impact_rules.def merge=union
+cognition/controllers/include/controllers/agent_impact_rules.def merge=union
 
 # Build and operator entry points execute in MSYS2, WSL, Linux, and macOS.
 # Pin their working-tree bytes to LF even when a Windows-wide Git installation
@@ -79,7 +79,7 @@ Makefile     text eol=lf
 # the same LF bytes as Linux and macOS even when a machine-wide Git setting
 # requests CRLF conversion. Keep this list aligned with CORE_SEAL_PATHS.
 core/** text eol=lf
-lib/validation/src/connect_block.c text eol=lf
-lib/validation/src/chainstate.c text eol=lf
-lib/validation/include/validation/connect_block.h text eol=lf
-lib/validation/include/validation/chainstate.h text eol=lf
+core/modules/validation/src/connect_block.c text eol=lf
+core/modules/validation/src/chainstate.c text eol=lf
+core/modules/validation/include/validation/connect_block.h text eol=lf
+core/modules/validation/include/validation/chainstate.h text eol=lf

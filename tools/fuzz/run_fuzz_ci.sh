@@ -58,7 +58,7 @@ status=0
 for t in "${TARGETS[@]}"; do
     echo "=== $t (${SLOT}s${LABEL}) ==="
     base=$(basename "$t"); kind="${base#fuzz_}"
-    seed_dir="lib/test/fuzz_seeds/$kind"
+    seed_dir="tests/harness/fuzz_seeds/$kind"
     work_dir="/tmp/zcl_fuzz_${kind}${SUFFIX}"
     log="$work_dir.log"
     rm -rf "$work_dir"; mkdir -p "$work_dir"

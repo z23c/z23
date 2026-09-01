@@ -25,7 +25,7 @@ struct zcl_hotswap_service_report;
 /* Register the resident-node RPC method `dev_hotswap_native` on `table`.
  * DEV-ONLY, and a successful no-op on a release build or a non-dev-lane
  * datadir (returns true without registering).
- * Called once at boot from config/src/boot_services.c. Returns false only if a
+ * Called once at boot from engine/composition/src/boot_services.c. Returns false only if a
  * required registration could not be completed. */
 bool register_dev_native_hotswap_rpc(struct rpc_table *table,
                                      const char *datadir, int rpc_port);

@@ -9,7 +9,7 @@ node parked at boot, read the next two sections and stop.
 
 Previously, a mainnet node with no parameter files at `$HOME/.zcash-params`
 parked at boot: no P2P listener, no RPC, no peers, held at a named gate
-(`crypto_params_missing` in `config/src/boot.c`). Getting the files was a
+(`crypto_params_missing` in `engine/composition/src/boot.c`). Getting the files was a
 precondition for running the software at all.
 
 That gate is gone. A mainnet node with an empty `$HOME` now boots, opens its
@@ -37,7 +37,7 @@ new shielded proof needs the proving key as well, and that is the only thing
 the proving key is for.
 
 The verifying-key prefix has an exact, fixed size:
-`groth16_vk_read_raw()` in `lib/sapling/src/bls12_381.c` reads precisely
+`groth16_vk_read_raw()` in `core/modules/sapling/src/bls12_381.c` reads precisely
 `868 + ic_len * 96` bytes and stops. Measured against the real files:
 
 | file | verifying-key prefix | ic_len | full file size |
@@ -55,7 +55,7 @@ output you are sending. Nothing in block validation, header sync, or peer
 serving touches them.
 
 Those 6357 bytes are now compiled directly into the node binary, generated
-into `lib/sapling/src/params_vk_embedded.c`. Each blob carries its own
+into `core/modules/sapling/src/params_vk_embedded.c`. Each blob carries its own
 pinned SHA-256, checked by `sapling_install_embedded_vks()` before the bytes
 are parsed, so a build that patched one of these arrays would fail closed
 rather than validate proofs against the wrong key.
@@ -72,7 +72,7 @@ project controls.
 
 With no proving keys loaded, the native prover reports itself
 `NATIVE_PROVER_UNINITIALIZED` and `zclassic_sapling_prover_is_ready()`
-returns false. `app/controllers/src/wallet_shielded_send.c` checks that
+returns false. `contexts/wallet/controllers/src/wallet_shielded_send.c` checks that
 before doing any coin selection or touching spend state, and if it is false
 it refuses the send with a named error —
 `Shielded proving unavailable (backend=..., status=...)` — instead of ever
@@ -187,7 +187,7 @@ today, for three separate reasons:
 
 - The artifact registry classifies a served file into exactly two kinds by
   its exact filename — a consensus-state bundle or a header-chain seed
-  (`rom_seed_classify()` in `lib/net/src/rom_seed.c`). There is no artifact
+  (`rom_seed_classify()` in `core/modules/net/src/rom_seed.c`). There is no artifact
   kind for a parameter file, so nothing would admit or serve one yet.
 - The ZCODE package store is a separate, local-only content store today,
   capped at 64 MiB per package — well under the ~777 MB parameter set, and
@@ -203,11 +203,11 @@ syncs, and validates on its own, with or without that fetch ever landing.
 
 ## Maintainer regeneration
 
-`lib/sapling/src/params_vk_embedded.c` is generated, not hand-written. To
+`core/modules/sapling/src/params_vk_embedded.c` is generated, not hand-written. To
 regenerate it from a verified parameter set:
 
 ```bash
-tools/scripts/zcash_params.sh vk-extract <params-dir> lib/sapling/src/params_vk_embedded.c
+tools/scripts/zcash_params.sh vk-extract <params-dir> core/modules/sapling/src/params_vk_embedded.c
 ```
 
 This is a maintainer-only path: it reads a proving-parameter directory

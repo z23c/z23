@@ -18,9 +18,9 @@
 # It gates on the real MVP claim — H* (the reducer's authoritative,
 # provable tip) reaching network_tip (the best height any handshake-complete
 # P2P peer advertised) — never on "the sync FSM says at_tip", which the ~7s
-# in-process FSM stub (lib/test/src/test_cold_start_sync.c) asserts without
+# in-process FSM stub (tests/harness/src/test_cold_start_sync.c) asserts without
 # downloading or validating a single real block. Both fields come straight off
-# `dumpstate reducer_frontier` (app/jobs/src/reducer_frontier_dump.c):
+# `dumpstate reducer_frontier` (engine/reducer/jobs/src/reducer_frontier_dump.c):
 # "hstar" and "network_tip"/"network_tip_read_ok".
 #
 # Binary-path argument: pass the binary to time via --bin=PATH (or the first
@@ -270,7 +270,7 @@ LAST_DISK_READ_BYTES="-1"
 LAST_DISK_WRITE_BYTES="-1"
 # Block-body payload bytes, read as a DELTA across the window this harness
 # brackets itself. The source is the node's own download manager
-# (lib/net/src/download.c total_bytes_received) surfaced by
+# (core/modules/net/src/download.c total_bytes_received) surfaced by
 # `dumpstate sync_monitor` as download_bytes_received.
 #
 # WHY A DELTA AND NOT THE RAW READING. That counter lives in the in-memory
@@ -370,7 +370,7 @@ refresh_process_counters() {
 #
 # WHAT THIS NUMBER IS, EXACTLY. `dumpstate sync_monitor` →
 # download_bytes_received is fed by dl_add_bytes_received()
-# (lib/net/src/download.c), whose only two production call sites are
+# (core/modules/net/src/download.c), whose only two production call sites are
 # msg_blocks.c (the `block` P2P message payload length, s->size) and
 # msgprocessor_snapshot.c (each serialized block inside a `zblkdata` batch).
 # Both are reached only AFTER the oversize reject and AFTER block_deserialize()
@@ -574,7 +574,7 @@ samples_tsv_row() {
 
 # boot_timings_median_pairs <boot_timings.json> — emit `stage<TAB>median_ms`
 # rows from a captured `dumpstate boot_timings` doc (the flight recorder's
-# durable per-stage history, config/src/boot_flight_recorder.c: rows are
+# durable per-stage history, engine/composition/src/boot_flight_recorder.c: rows are
 # {"stage":..,"last_ms":..,"median_ms":..}, median_ms present only once a stage
 # has >=3 retained samples). Splitting on '}' isolates each row so the shared
 # readers below anchor within one row instead of across the whole doc.
@@ -605,7 +605,7 @@ boot_timings_median_pairs() {
 #
 # `boot` is the 1-based boot ordinal within the run: it increments on each
 # top-level "prologue" marker, which boot.c emits as the first topmark of every
-# boot (config/src/boot.c boot_topmark("prologue", t_boot_start)). A run that
+# boot (engine/composition/src/boot.c boot_topmark("prologue", t_boot_start)). A run that
 # followed a self-respawn therefore reports each boot's phases separately rather
 # than silently blending two boots' timings into one set of names.
 phases_json_from_log() {
@@ -682,7 +682,7 @@ harness_phases_json() {
         out="$out,\"counters_source\":\"/proc/<pid>/stat utime+stime over CLK_TCK and rss pages; /proc/<pid>/io read_bytes and write_bytes (block layer)\""
         out="$out,\"counters_scope\":\"cumulative for the FINAL node process only — a followed self-respawn starts a new pid and resets these; see samples.tsv boot column\""
         out="$out,\"block_body_payload_bytes_received\":$(json_number_or_null "$BYTES_DELTA")"
-        out="$out,\"block_body_payload_bytes_source\":\"delta of download_bytes_received between two reads of \`dumpstate sync_monitor\` (app/services/src/sync_monitor.c), fed by dl_add_bytes_received() in lib/net/src/download.c\""
+        out="$out,\"block_body_payload_bytes_source\":\"delta of download_bytes_received between two reads of \`dumpstate sync_monitor\` (engine/services/src/sync_monitor.c), fed by dl_add_bytes_received() in core/modules/net/src/download.c\""
         out="$out,\"block_body_payload_bytes_scope\":\"successfully-parsed block-body message payload ONLY, summed over all peers: the \`block\` message payload length plus each block inside a \`zblkdata\` batch. EXCLUDES headers messages, version/verack handshake, inv/getdata/getheaders, tx relay, addr, compact blocks, the 24-byte per-message header, and all TCP/IP framing. It is therefore a LOWER BOUND on wire bytes and must not be read as total network bytes\""
         out="$out,\"block_body_payload_bytes_window\":\"open read at unix $BYTES_OPEN_UNIX on boot $BYTES_OPEN_BOOT (value $BYTES_OPEN), close read on boot $BYTES_CLOSE_BOOT (value $BYTES_CLOSE); a delta is emitted only when both ends came from the same boot, because the counter resets to 0 per process\""
         if [ "${BYTES_DELTA:--1}" = "-1" ]; then
@@ -726,7 +726,7 @@ harness_phases_json() {
 #                                                       EXACT (node-recorded)
 #                      AND, alongside it, the node's OWN latched measurement:
 #                      `dumpstate omniscience` time_to_first_peer_us
-#                      (lib/net/src/connman.c g_first_peer_us) — microseconds
+#                      (core/modules/net/src/connman.c g_first_peer_us) — microseconds
 #                      from connman_start() to the first fully-handshaked peer.
 #                      It is reported as its own field and NOT as this phase's
 #                      duration, because it brackets a DIFFERENT window
@@ -750,7 +750,7 @@ harness_phases_json() {
 #                                                POLL BOUND (SAMPLE_SECS res.)
 #
 #   sync.bodies        start  the first tick on which sync_monitor
-#                             download_requested > 0 (lib/net/src/download.c).
+#                             download_requested > 0 (core/modules/net/src/download.c).
 #                             UPPER BOUND — the request went out before the
 #                             counter was read.  POLL BOUND (SAMPLE_SECS res.)
 #                      end    the first tick on which the frontier's
@@ -1155,7 +1155,7 @@ phase_rows_json() {
         out="$out,\"poll_resolution_secs\":$(json_number_or_null "$SAMPLE_SECS")"
         if [ "$p" = "peer_connect" ]; then
             out="$out,\"node_time_to_first_handshaked_peer_us\":$([ "$PHASE_TTFP_US" = "-1" ] && printf null || printf '%s' "$PHASE_TTFP_US")"
-            out="$out,\"node_time_to_first_handshaked_peer_source\":\"dumpstate omniscience time_to_first_peer_us (lib/net/src/connman.c g_first_peer_us, latched write-once)\""
+            out="$out,\"node_time_to_first_handshaked_peer_source\":\"dumpstate omniscience time_to_first_peer_us (core/modules/net/src/connman.c g_first_peer_us, latched write-once)\""
             out="$out,\"node_time_to_first_handshaked_peer_scope\":\"microseconds from connman_start() to the FIRST fully-handshaked peer. This is NOT this phase's duration: it starts at connman_start (not process launch) and ends at ANY handshake (not one that advertised a height). Both are reported because they bracket different windows; neither is derived from the other.\""
             if [ "$PHASE_TTFP_US" = "-1" ]; then
                 out="$out,\"node_time_to_first_handshaked_peer_unobserved_reason\":\"dumpstate omniscience reported time_to_first_peer_us as 0 (its 'no peer yet' sentinel) for the whole window, or the dumper was unreachable — no peer ever completed a handshake.\""
@@ -1277,10 +1277,10 @@ omitted_fields_json() {
     }
     # ── structural: nothing in this tree sources these ──────────────────────
     _of_row "phases[].network_bytes" "structural" \
-        "TOTAL WIRE BYTES have no source in this tree. Nothing counts them: /proc has no per-process network accounting, and the only byte counter the node keeps (download_bytes_received, via dl_add_bytes_received in lib/net/src/download.c) counts ONLY successfully-parsed block-body message payload — it excludes headers messages, the version/verack handshake, inv/getdata/getheaders, tx relay, addr, compact blocks, the 24-byte per-message header, and all TCP/IP framing. An earlier revision of this row claimed that counter reached no dumper at all; that was WRONG (dumpstate sync_monitor has exposed it all along) and the correction is why this row is now scoped to total wire bytes rather than to bytes in general." \
+        "TOTAL WIRE BYTES have no source in this tree. Nothing counts them: /proc has no per-process network accounting, and the only byte counter the node keeps (download_bytes_received, via dl_add_bytes_received in core/modules/net/src/download.c) counts ONLY successfully-parsed block-body message payload — it excludes headers messages, the version/verack handshake, inv/getdata/getheaders, tx relay, addr, compact blocks, the 24-byte per-message header, and all TCP/IP framing. An earlier revision of this row claimed that counter reached no dumper at all; that was WRONG (dumpstate sync_monitor has exposed it all along) and the correction is why this row is now scoped to total wire bytes rather than to bytes in general." \
         "harness.observed_sync.block_body_payload_bytes_received — a real measurement of the block-body payload subset, named for the subset it is. It is a LOWER BOUND on wire bytes; do not present it as the total, and do not infer the total from wall-clock time."
     _of_row "phases[].cpu_seconds (boot-level phases)" "structural" \
-        "config/src/boot.c boot_topmark/boot_submark emit a phase NAME and a DURATION and nothing else. The harness's own /proc sampling only starts once its sample loop is running, by which time boot has already finished, so there is no window it genuinely bracketed." \
+        "engine/composition/src/boot.c boot_topmark/boot_submark emit a phase NAME and a DURATION and nothing else. The harness's own /proc sampling only starts once its sample loop is running, by which time boot has already finished, so there is no window it genuinely bracketed." \
         "harness.observed_sync carries cpu_seconds for the window the harness DID bracket; samples.tsv carries the per-tick series."
     _of_row "phases[].disk_read_bytes / phases[].disk_write_bytes (boot-level phases)" "structural" \
         "same as cpu_seconds: the boot markers carry only a duration, and the harness was not yet sampling /proc during boot." \
@@ -1301,10 +1301,10 @@ omitted_fields_json() {
     # its place. A bound reported as if it were the instant is the same
     # false-green defect as a fabricated zero, only harder to notice.
     _of_row "phases[].sync.headers.start (the true first getheaders SENT)" "structural" \
-        "nothing in this tree counts getheaders SENT. lib/net/src/msg_headers.c keeps only SERVE-side counters (g_getheaders_served_requests and the suppression counters) and they reach no dumpstate topic; the per-node last_getheaders_time in app/services/src/sync_monitor.c is reset, never dumped. So the instant our first getheaders left this node is unobservable." \
+        "nothing in this tree counts getheaders SENT. core/modules/net/src/msg_headers.c keeps only SERVE-side counters (g_getheaders_served_requests and the suppression counters) and they reach no dumpstate topic; the per-node last_getheaders_time in engine/services/src/sync_monitor.c is reset, never dumped. So the instant our first getheaders left this node is unobservable." \
         "sync.headers.start as emitted: the first sample tick on which a header had ALREADY been admitted. It is a strict UPPER BOUND — the request went out earlier — and is labelled start_kind=upper_bound_poll_observed, never presented as the instant."
     _of_row "phases[].sync.bodies.start (the true first block body REQUESTED)" "structural" \
-        "download_requested (lib/net/src/download.c, surfaced by dumpstate sync_monitor) is a COUNTER with no first-request timestamp, and the node latches no such instant. Only the counter's rising edge is observable, and only at the harness's poll cadence." \
+        "download_requested (core/modules/net/src/download.c, surfaced by dumpstate sync_monitor) is a COUNTER with no first-request timestamp, and the node latches no such instant. Only the counter's rising edge is observable, and only at the harness's poll cadence." \
         "sync.bodies.start as emitted: the first tick with download_requested>0, labelled start_kind=upper_bound_poll_observed."
     _of_row "phases[].sync.bodies.end (the last body NEEDED for the target height RECEIVED)" "structural" \
         "no dumper stamps an instant for this boundary. sync_monitor's last_block_connected_time LOOKS like it and is not: on the one real PASS artifact on disk (20260821T135540Z-2484174) that run ended with hstar 3224110 and every frontier stage cursor at 3224111, while last_block_connected_height sat at 3056758 and last_block_connected_time at 1787320659 — 437 seconds before the run finished. It does not track this build's fold, so it is not used. Separately, no counter distinguishes 'the last needed body arrived on the wire' from 'the last needed body was persisted', and persistence happens after receive." \
@@ -1358,7 +1358,7 @@ omitted_fields_json() {
 # is_self_respawn_reason — true iff the given boot-exit-reason.v1 `reason` value
 # is a supervised self-respawn request (self_respawn_tip_watchdog /
 # self_respawn_supervisor_backstop / self_respawn_both — see
-# lib/util/include/util/shutdown_stagewatch.h). The node writes this breadcrumb
+# platform/modules/util/include/util/shutdown_stagewatch.h). The node writes this breadcrumb
 # EARLY in its clean shutdown (fsync + atomic rename, before any teardown
 # stage) when the chain-tip watchdog, the supervisor backstop, or the
 # checkpoint-bundle install-ready condition asked to be relaunched. A clean
@@ -1472,7 +1472,7 @@ classify_peer_precheck() {
 # This exists because a bare "did TCP connect succeed" test is only a valid
 # serving-peer test on LOOPBACK. Against a remote peer, a serving node can
 # accept() and then immediately close — e.g. the per-IP inbound sybil cap in
-# lib/net/src/net.c ("too many inbound connections from same IP: count=%d",
+# core/modules/net/src/net.c ("too many inbound connections from same IP: count=%d",
 # max 3), which another node on the SAME host can have already saturated. The
 # connect still succeeds, so the old check reported "reachable" and the run
 # burned its entire budget against a peer that would never handshake.
@@ -2282,7 +2282,7 @@ capture_run_bundle() {
         "$NODE_BIN" -rpcport="$RPC" -datadir="$DATADIR" dumpstate reducer_stage_profile \
             >"$ARTIFACT_DIR/reducer_stage_profile.json" 2>/dev/null && [ -s "$ARTIFACT_DIR/reducer_stage_profile.json" ] && got_profile=1
         # boot_timings: the flight recorder's durable per-stage boot history
-        # (config/src/boot_flight_recorder.c). It is the ONLY source of the
+        # (engine/composition/src/boot_flight_recorder.c). It is the ONLY source of the
         # median_ms a phases[] row can be compared against, so phases[] would
         # be un-baselineable without it — one boot's ms with nothing to judge it
         # by is a number, not a measurement.
@@ -2715,7 +2715,7 @@ rpc_frontier() {
     printf '%s' "$out"
 }
 
-# Some boot-storage gates (config/src/boot.c boot_park_until_shutdown, e.g.
+# Some boot-storage gates (engine/composition/src/boot.c boot_park_until_shutdown, e.g.
 # crypto_params_missing) fire BEFORE the RPC server starts, so `dumpstate
 # blocker` never sees them (RPC has nothing to answer with). The node still
 # names the gate on stderr into node.log ("[boot] PARKED alive-degraded at

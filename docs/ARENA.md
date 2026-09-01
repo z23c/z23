@@ -99,11 +99,11 @@ Related targets:
 
 | Package | Role |
 |---|---|
-| [`packages/zdogfight`](../packages/zdogfight) | the match core: world, flight model, guns, kills, scoring, canonical state encoding, pilot ABI |
-| [`packages/zdogace`](../packages/zdogace) | a pursuit pilot — flies red |
-| [`packages/zdogdrone`](../packages/zdogdrone) | a simple patrol pilot — flies blue |
-| [`packages/zprng`](../packages/zprng) | the only entropy source, drawn solely by respawns |
-| [`packages/zdogview`](../packages/zdogview) | integer 3D view of a verified replay (C23, Apache-2.0; no raylib) |
+| [`contexts/commons/packages/zdogfight`](../contexts/commons/packages/zdogfight) | the match core: world, flight model, guns, kills, scoring, canonical state encoding, pilot ABI |
+| [`contexts/commons/packages/zdogace`](../contexts/commons/packages/zdogace) | a pursuit pilot — flies red |
+| [`contexts/commons/packages/zdogdrone`](../contexts/commons/packages/zdogdrone) | a simple patrol pilot — flies blue |
+| [`contexts/commons/packages/zprng`](../contexts/commons/packages/zprng) | the only entropy source, drawn solely by respawns |
+| [`contexts/commons/packages/zdogview`](../contexts/commons/packages/zdogview) | integer 3D view of a verified replay (C23, Apache-2.0; no raylib) |
 | [`tools/arena_runner.c`](../tools/arena_runner.c) | plays a match between two confined pilot processes; also verifies a replay |
 | [`tools/arena_svg.c`](../tools/arena_svg.c) | renders a verified replay to a deterministic SVG |
 | [`tools/arena_view.c`](../tools/arena_view.c) | local raylib window over `zdogview` (`make arena-view` passes `--show`) |
@@ -166,10 +166,10 @@ use a kernel that can confine it.
 Copy the smaller pilot and change its decision function:
 
 ```bash
-cp -r packages/zdogdrone packages/mypilot
+cp -r contexts/commons/packages/zdogdrone contexts/commons/packages/mypilot
 ```
 
-Then edit `packages/mypilot/src/`. The decision function receives a
+Then edit `contexts/commons/packages/mypilot/src/`. The decision function receives a
 `zdog_obs` — your plane's position, attitude, speed, health, the score, ticks
 left, and the nearest living enemy's relative position, distance, velocity and
 health — and fills a `zdog_ctl` with roll, pitch, throttle and a fire flag.
@@ -183,11 +183,11 @@ Build and fly it against the shipped pilots:
 
 ```bash
 cc -std=c23 -O1 -static -D_POSIX_C_SOURCE=200809L \
-   -Ipackages/mypilot/include -Ipackages/zdogfight/include \
-   -Ipackages/zprng/include \
-   packages/mypilot/app/main.c packages/mypilot/src/*.c \
-   packages/zdogfight/src/zdogfight.c packages/zdogfight/src/zdogfix.c \
-   packages/zprng/src/zprng.c -o /tmp/mypilot -lm
+   -Icontexts/commons/packages/mypilot/include -Icontexts/commons/packages/zdogfight/include \
+   -Icontexts/commons/packages/zprng/include \
+   contexts/commons/packages/mypilot/app/main.c contexts/commons/packages/mypilot/src/*.c \
+   contexts/commons/packages/zdogfight/src/zdogfight.c contexts/commons/packages/zdogfight/src/zdogfix.c \
+   contexts/commons/packages/zprng/src/zprng.c -o /tmp/mypilot -lm
 
 build/bin/arena_runner --seed 7 --planes-per-team 3 \
     --pilot-red /tmp/mypilot --pilot-blue build/bin/pilot_zdogdrone \
@@ -263,7 +263,7 @@ These are named because they are real, not because they are about to be fixed.
   no live ZC23 token economics; scoring is a simulation.
 - **The pinned demo pilots are repo-source, not the published packages.** The
   published `zdogace` 0.1.0 carries a steering-sign quirk; the sign-fixed 0.1.1
-  in `packages/` is what the demo builds. Both are exact and deterministic —
+  in `contexts/commons/packages/` is what the demo builds. Both are exact and deterministic —
   they simply play different matches. The published-package leg of the
   acceptance script pins its own separate roots.
 - **The cross-node proof runs two nodes on one host.** It proves independent

@@ -6,7 +6,7 @@
 #
 # ── WHY THIS EXISTS ─────────────────────────────────────────────────────────
 # Commit 1e1ce62af ("macOS: portable toolchain, package worker, and registry
-# gates") added lib/hotswap/src/hotswap_macho_probe.c, which included
+# gates") added engine/modules/hotswap/src/hotswap_macho_probe.c, which included
 # <mach-o/fat.h>, <mach-o/loader.h>, <mach-o/nlist.h> and <mach-o/swap.h> with
 # NO platform guard at all. Those headers ship only in the Apple SDK, so every
 # Linux build that reached that translation unit died at
@@ -85,10 +85,10 @@
 # the build's own text so they track it instead of drifting from it:
 #
 #   1. lib/ sources the Makefile's LIB_SRCS host branch filters out of every
-#      host but one (lib/platform/src/os_sandbox_linux.c is dropped on Windows
+#      host but one (platform/modules/platform/src/os_sandbox_linux.c is dropped on Windows
 #      and on Darwin, so it is Linux-exclusive and needs no __linux__ guard).
 #   2. Sources named in a ZCL_WINDOWS_ACCEPTANCE_*_SOURCES row of
-#      lib/platform/tests/windows_acceptance.mk. Those programs are only ever
+#      platform/modules/platform/tests/windows_acceptance.mk. Those programs are only ever
 #      cross-linked for Windows, and check-windows-acceptance already refuses
 #      an acceptance program that is not in that catalog.
 #
@@ -97,7 +97,7 @@
 # the gate REFUSES (exit 2) instead of quietly grading a wider or narrower set.
 #
 # ── SCAN ROOTS ──────────────────────────────────────────────────────────────
-# lib app config core domain ports — the same product surface
+# core engine contexts cognition platform — the same product surface
 # check-windows-cross-syntax scans, .c and .h alike. tools/ is deliberately
 # OUT: those are host-local developer programs built by explicit rules, never
 # by directory enumeration, and several (tools/zcl_portfwd.c's epoll loop,
@@ -127,8 +127,8 @@ cd "$ROOT" || exit 2
 . tools/scripts/sh_str.sh
 
 GATE="check-platform-header-guards"
-SCAN_ROOTS=(lib app config core domain ports)
-WIN_CATALOG="lib/platform/tests/windows_acceptance.mk"
+SCAN_ROOTS=(core engine contexts cognition platform)
+WIN_CATALOG="platform/modules/platform/tests/windows_acceptance.mk"
 
 # Anti-hollow floors. Every one is well under today's realized count (4543
 # files / 470 candidates / 9135 includes / 203 classified / 27 catalogued
@@ -436,7 +436,7 @@ inb && /^endif$/  { inb = 0; next }
 inb && /^else/    { b++; printf "BRANCH\t%d\t%s\n", b, $0; next }
 inb {
     line = $0
-    while (match(line, /(lib|app|config|core|domain|ports)\/[A-Za-z0-9_\/]+\.c/)) {
+    while (match(line, /(core|engine|contexts|cognition|platform)\/[A-Za-z0-9_\/]+\.c/)) {
         printf "%d\t%s\n", b, substr(line, RSTART, RLENGTH)
         line = substr(line, RSTART + RLENGTH)
     }
@@ -521,7 +521,7 @@ run_scan() {
         exit 2
     fi
     local win_n
-    grep -oE 'lib/platform/tests/[A-Za-z0-9_]+\.c' "$WIN_CATALOG" \
+    grep -oE 'platform/modules/platform/tests/[A-Za-z0-9_]+\.c' "$WIN_CATALOG" \
         | LC_ALL=C sort -u > "$w/wincat.txt" || true
     win_n="$(grep -c . "$w/wincat.txt" || true)"
     if [ "${win_n:-0}" -lt "$wincat_floor" ]; then
@@ -616,7 +616,7 @@ run_scan() {
         echo "    2. Guard the whole TU, and give the other platforms one" >&2
         echo "       declaration so the file is not an empty translation unit" >&2
         echo "       (ISO C forbids that under -Wpedantic -Werror). See" >&2
-        echo "       lib/hotswap/src/hotswap_macho_probe.c for the shape." >&2
+        echo "       engine/modules/hotswap/src/hotswap_macho_probe.c for the shape." >&2
         echo "    3. If the file is compiled on ONE platform only, say so in the" >&2
         echo "       BUILD (the LIB_SRCS host branch in Makefile, or the Windows" >&2
         echo "       acceptance catalog) — this gate reads both and exempts what" >&2
@@ -635,7 +635,7 @@ run_scan() {
 # A gate nobody has watched fail is a gate nobody should trust. Every case
 # below plants ONE fixture OUTSIDE the repository — never a .c file inside it,
 # because writing the Windows macro into a tracked source under lib/ app/
-# config/ core/ domain/ ports/ silently enlists that file in
+# config/ core/ domain/ platform/ports/ silently enlists that file in
 # check-windows-cross-syntax, whose file set is `grep -l` for that token.
 FIXTURE_ROOT=""
 selftest_cleanup() { [ -n "$FIXTURE_ROOT" ] && rm -rf "$FIXTURE_ROOT"; }
@@ -645,29 +645,29 @@ selftest_cleanup() { [ -n "$FIXTURE_ROOT" ] && rm -rf "$FIXTURE_ROOT"; }
 # padding source so the floors have something to stand on.
 make_fixture() {
     local d="$1"
-    mkdir -p "$d/lib/util/src" "$d/lib/platform/src" "$d/lib/platform/tests"
+    mkdir -p "$d/platform/modules/util/src" "$d/platform/modules/platform/src" "$d/platform/modules/platform/tests"
     cat > "$d/Makefile" <<'END_MK'
-LIB_SRCS = $(wildcard lib/*/src/*.c)
+LIB_SRCS = $(wildcard platform/modules/*/src/*.c)
 ifneq ($(filter Linux,$(ZCL_HOST_OS)),)
-LIB_SRCS := $(filter-out lib/platform/src/os_sandbox_stub.c,$(LIB_SRCS))
+LIB_SRCS := $(filter-out platform/modules/platform/src/os_sandbox_stub.c,$(LIB_SRCS))
 else ifeq ($(ZCL_HOST_WINDOWS),1)
-LIB_SRCS := $(filter-out lib/platform/src/os_sandbox_linux.c,$(LIB_SRCS))
+LIB_SRCS := $(filter-out platform/modules/platform/src/os_sandbox_linux.c,$(LIB_SRCS))
 else
-LIB_SRCS := $(filter-out lib/platform/src/os_sandbox_linux.c,$(LIB_SRCS))
+LIB_SRCS := $(filter-out platform/modules/platform/src/os_sandbox_linux.c,$(LIB_SRCS))
 endif
 END_MK
     # 12 catalogued Windows-only programs, enough to clear the catalog floor.
-    : > "$d/lib/platform/tests/windows_acceptance.mk"
+    : > "$d/platform/modules/platform/tests/windows_acceptance.mk"
     local i
     for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
-        printf 'ZCL_WINDOWS_ACCEPTANCE_p%s_SOURCES := lib/platform/tests/p%s_windows_acceptance.c\n' \
-            "$i" "$i" >> "$d/lib/platform/tests/windows_acceptance.mk"
-        : > "$d/lib/platform/tests/p${i}_windows_acceptance.c"
+        printf 'ZCL_WINDOWS_ACCEPTANCE_p%s_SOURCES := platform/modules/platform/tests/p%s_windows_acceptance.c\n' \
+            "$i" "$i" >> "$d/platform/modules/platform/tests/windows_acceptance.mk"
+        : > "$d/platform/modules/platform/tests/p${i}_windows_acceptance.c"
     done
     # Padding: enough table-header mentions to clear the candidate/include
     # floors the self-test runs with, all of them correctly guarded.
     for i in 1 2 3 4 5 6 7 8; do
-        cat > "$d/lib/util/src/pad$i.c" <<'END_C'
+        cat > "$d/platform/modules/util/src/pad$i.c" <<'END_C'
 #include <stdio.h>
 #if defined(__linux__)
 #include <sys/epoll.h>
@@ -717,10 +717,10 @@ run_selftest() {
     echo "══ $GATE selftest ══"
 
     # A. THE defect: an Apple SDK header with no guard at all. This is the
-    #    literal shape lib/hotswap/src/hotswap_macho_probe.c shipped in
+    #    literal shape engine/modules/hotswap/src/hotswap_macho_probe.c shipped in
     #    1e1ce62af and the reason this gate exists.
     d="$FIXTURE_ROOT/a"; make_fixture "$d"
-    cat > "$d/lib/util/src/probe.c" <<'END_C'
+    cat > "$d/platform/modules/util/src/probe.c" <<'END_C'
 #include <stdio.h>
 #include <mach-o/fat.h>
 END_C
@@ -730,7 +730,7 @@ END_C
     # B. The same include, correctly guarded. Positive control: without this
     #    an unconditionally-failing script would pass every other case.
     d="$FIXTURE_ROOT/b"; make_fixture "$d"
-    cat > "$d/lib/util/src/probe.c" <<'END_C'
+    cat > "$d/platform/modules/util/src/probe.c" <<'END_C'
 #include <stdio.h>
 #if defined(__APPLE__)
 #include <mach-o/fat.h>
@@ -746,14 +746,14 @@ END_C
         printf '#if defined(%s)\n' "_WIN32"
         printf '#include <mach-o/fat.h>\n'
         printf '#endif\n'
-    } > "$d/lib/util/src/probe.c"
+    } > "$d/platform/modules/util/src/probe.c"
     expect_reject "C: <mach-o/fat.h> guarded by the Windows macro is caught" \
                   "mach-o/fat.h" "$d" || rc=1
 
     # D. Inside the #else of an Apple guard — the NON-Apple branch. A depth
     #    tracker that ignores #else calls this guarded; it is the opposite.
     d="$FIXTURE_ROOT/d"; make_fixture "$d"
-    cat > "$d/lib/util/src/probe.c" <<'END_C'
+    cat > "$d/platform/modules/util/src/probe.c" <<'END_C'
 #include <stdio.h>
 #ifdef __APPLE__
 #include <stdlib.h>
@@ -766,7 +766,7 @@ END_C
 
     # E. The mirror: the #else of #ifndef __APPLE__ IS the Apple branch.
     d="$FIXTURE_ROOT/e"; make_fixture "$d"
-    cat > "$d/lib/util/src/probe.c" <<'END_C'
+    cat > "$d/platform/modules/util/src/probe.c" <<'END_C'
 #include <stdio.h>
 #ifndef __APPLE__
 #include <stdlib.h>
@@ -780,7 +780,7 @@ END_C
     #    would have survived a "does this file mention __APPLE__ anywhere"
     #    grep, because the file did mention it — elsewhere.
     d="$FIXTURE_ROOT/f"; make_fixture "$d"
-    cat > "$d/lib/util/src/probe.c" <<'END_C'
+    cat > "$d/platform/modules/util/src/probe.c" <<'END_C'
 #include <stdio.h>
 #if defined(__APPLE__)
 #define HOST_IS_APPLE 1
@@ -792,16 +792,16 @@ END_C
 
     # G. The header named only in a comment is not an include.
     d="$FIXTURE_ROOT/g"; make_fixture "$d"
-    cat > "$d/lib/util/src/probe.c" <<'END_C'
+    cat > "$d/platform/modules/util/src/probe.c" <<'END_C'
 #include <stdio.h>
 /* On Apple this would need #include <mach-o/fat.h>; it does not here. */
 END_C
     expect_accept "G: a header named inside a comment is not a finding" "$d" || rc=1
 
     # H. __has_include of the very same header is a stronger guard than any
-    #    platform macro, and lib/platform/src/os_sandbox_linux.c relies on it.
+    #    platform macro, and platform/modules/platform/src/os_sandbox_linux.c relies on it.
     d="$FIXTURE_ROOT/h"; make_fixture "$d"
-    cat > "$d/lib/util/src/probe.c" <<'END_C'
+    cat > "$d/platform/modules/util/src/probe.c" <<'END_C'
 #include <stdio.h>
 #if defined(__has_include)
 #  if __has_include(<linux/landlock.h>)
@@ -815,14 +815,14 @@ END_C
     #    os_sandbox_linux.c is Linux-exclusive per the fixture Makefile, which
     #    excuses <sys/epoll.h> and excuses nothing about Apple.
     d="$FIXTURE_ROOT/i"; make_fixture "$d"
-    cat > "$d/lib/platform/src/os_sandbox_linux.c" <<'END_C'
+    cat > "$d/platform/modules/platform/src/os_sandbox_linux.c" <<'END_C'
 #include <stdio.h>
 #include <sys/epoll.h>
 END_C
     expect_accept "I: a Linux-exclusive source needs no __linux__ guard" "$d" || rc=1
 
     d="$FIXTURE_ROOT/j"; make_fixture "$d"
-    cat > "$d/lib/platform/src/os_sandbox_linux.c" <<'END_C'
+    cat > "$d/platform/modules/platform/src/os_sandbox_linux.c" <<'END_C'
 #include <stdio.h>
 #include <mach-o/fat.h>
 END_C
@@ -833,13 +833,13 @@ END_C
     #    The exemption set is the one input where an empty parse silently
     #    changes the verdict in both directions.
     d="$FIXTURE_ROOT/k"; make_fixture "$d"
-    printf 'LIB_SRCS = $(wildcard lib/*/src/*.c)\n' > "$d/Makefile"
+    printf 'LIB_SRCS = $(wildcard platform/modules/*/src/*.c)\n' > "$d/Makefile"
     expect_reject "K: an unparseable LIB_SRCS host branch fails closed" \
                   "could not read the LIB_SRCS per-host branch" "$d" || rc=1
 
     # L. An emptied scan set must REFUSE, not report clean.
     d="$FIXTURE_ROOT/l"; make_fixture "$d"
-    rm -rf "$d/lib/util/src"
+    rm -rf "$d/platform/modules/util/src"
     expect_reject "L: an emptied scan set fails closed" "FATAL" "$d" || rc=1
 
     if [ "$rc" -eq 0 ]; then

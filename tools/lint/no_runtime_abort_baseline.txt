@@ -22,7 +22,7 @@ core/chainparams/src/chainparamsbase.c 2
 core/consensus/src/script_interp.c 2
 core/math/src/arith_uint256.c 2
 core/params/src/upgrades.c 3
-lib/crypto/src/equihash.c 8
-lib/keys/src/key.c 2
-lib/sapling/src/incremental_merkle_tree.c 1
-lib/storage/src/coins_ram.c 1
+core/modules/crypto/src/equihash.c 8
+contexts/wallet/modules/keys/src/key.c 2
+core/modules/sapling/src/incremental_merkle_tree.c 1
+engine/modules/storage/src/coins_ram.c 1

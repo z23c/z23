@@ -22,7 +22,7 @@
 #
 # ── USAGE ──────────────────────────────────────────────────────────────────
 #   make agent-baseline
-#   make agent-baseline BASELINE_FILES="core/MANIFEST.sha3 lib/test/src/test_parallel.c"
+#   make agent-baseline BASELINE_FILES="core/MANIFEST.sha3 tests/harness/src/test_parallel.c"
 #   tools/dev/agent-baseline.sh core/MANIFEST.sha3        # same, standalone
 #
 # Files may also arrive in the BASELINE_FILES environment variable

@@ -12,7 +12,7 @@
 #
 # The single most dangerous thing that could happen to this design is the
 # loader growing a "helpful" fast path that trusts the label instead of
-# re-deriving the truth itself. The moment lib/hotswap/ reads a manifest FILE
+# re-deriving the truth itself. The moment engine/modules/hotswap/ reads a manifest FILE
 # off disk, forging that file becomes equivalent to mounting arbitrary code —
 # the label would be authorizing the disk. Every real admission decision in
 # this tree (hotswap_manifest_v2_validate in hotswap_loader.c, the seal-root
@@ -23,7 +23,7 @@
 # "does this still call hotswap_manifest_v2_validate somewhere".
 #
 # DISCRIMINATION RULE (how legitimate "manifest" mentions are told apart from
-# a forbidden one): lib/hotswap/src/hotswap_loader.c legitimately says
+# a forbidden one): engine/modules/hotswap/src/hotswap_loader.c legitimately says
 # "manifest" ~40 times — `zcl_hotswap_manifest_v2`, `MANIFEST_REJECT`,
 # `manifest_copy`, `k_service_manifest` — all identifiers naming the OLD
 # Tier-1 GENERATION manifest, a struct exported as a data symbol and read via
@@ -34,7 +34,7 @@
 # three concrete shapes a file-backed manifest read would actually take:
 #
 #   1. A quoted string literal containing ".manifest" anywhere under
-#      lib/hotswap/src/ or lib/hotswap/include/hotswap/ (a real path suffix
+#      engine/modules/hotswap/src/ or engine/modules/hotswap/include/hotswap/ (a real path suffix
 #      always shows up as a quoted literal; `prep.manifest->self_test`, a
 #      bare struct-member access with no surrounding quotes, does not match).
 #   2. A quoted string literal containing the new package-manifest schema
@@ -74,14 +74,14 @@ SELF="$SCRIPT_DIR/$(basename "${BASH_SOURCE[0]}")"
 
 GATE="check_hotswap_package_receipt_is_not_authority"
 
-SRC_DIR="lib/hotswap/src"
-INC_DIR="lib/hotswap/include/hotswap"
+SRC_DIR="engine/modules/hotswap/src"
+INC_DIR="engine/modules/hotswap/include/hotswap"
 PACKAGE_TOOL="tools/dev/hotswap-package.sh"
 SCRATCH="$HOME/.local/state/zclassic23/scratch/lane-c"
 
 # SANDBOX MODE (--selftest only). The selftest must prove this gate trips on a
 # manifest-file read, which means a violating TU has to exist somewhere the
-# scan can see it. Planting that TU in the LIVE lib/hotswap/src/ is not an
+# scan can see it. Planting that TU in the LIVE engine/modules/hotswap/src/ is not an
 # option: `make -j24 lint` runs ~156 gates concurrently and many of them glob
 # lib/**/src/*.c, so a fixture that exists for the length of two grep passes
 # is a race — one gate enumerates the tree, the fixture is deleted, and that
@@ -204,7 +204,7 @@ check_package_tool_is_dev_only() {
 
     local base stray
     base="$(basename "$PACKAGE_TOOL")"
-    stray="$(find lib app core src config -type f -name "$base" 2>/dev/null || true)"
+    stray="$(find core engine contexts cognition platform -type f -name "$base" 2>/dev/null || true)"
     if [ -n "$stray" ]; then
         bad "a second copy of the packaging tool exists outside tools/: $stray"
         return 1
@@ -313,7 +313,7 @@ run_selftest() {
 
     cat > "$fixture" <<'FIXEOF'
 /* Planted ONLY by check_hotswap_package_receipt_is_not_authority.sh
- * --selftest, into a scratch MIRROR of lib/hotswap — never into the repo.
+ * --selftest, into a scratch MIRROR of engine/modules/hotswap — never into the repo.
  * It exercises the manifest-file-read prohibition on purpose and is deleted
  * before this script returns. It must never survive a run. */
 #include <stdio.h>

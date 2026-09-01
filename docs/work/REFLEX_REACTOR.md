@@ -53,12 +53,12 @@ Verify mode never publishes a runtime.
 ## Why this owner
 
 The frozen recent-history replay selected
-`app/controllers/src/vault_intent_controller.c` as the highest-frequency
+`contexts/wallet/controllers/src/vault_intent_controller.c` as the highest-frequency
 ordinary production owner (6 weighted edits), rather than choosing a toy file.
 That controller mixed custody authority with a deterministic planning decision.
 The refactor leaves parsing, wallet snapshots, coin reservation, persistence,
 signing and broadcast in the static controller. Only the proposal moves to
-`app/services/src/vault_intent_decision_service.c`:
+`contexts/wallet/services/src/vault_intent_decision_service.c`:
 
 ```text
 STATIC AUTHORITY SHELL                 PURE DECISION CORE
@@ -153,7 +153,7 @@ Recent-edit coverage is measured, not inferred, by `make
 reflex-coverage-audit`. It freezes the most recent 100 production-C commits,
 weights repeated edits as repeated occurrences, applies two distinct safe edits
 to every registered fast owner, and records the first result-bound event plus
-every fallback reason. `config/hotswap_shadow_owners.def` is the coverage map:
+every fallback reason. `engine/composition/hotswap_shadow_owners.def` is the coverage map:
 a static authority shell is compile-checked exactly, while only its declared
 pure service core runs as `HOT_SHADOW`. `HOTSHADOW_SERVICE_MEMBERS` admits a
 helper TU into executable candidate bytes only after the same no-state,

@@ -6,8 +6,8 @@ set -euo pipefail
 
 ROOT="${ZCL_SOURCE_ROOT:-$(pwd -P)}"
 BIN="${ZCL_DEV_BIN:-$ROOT/build/bin/zclassic23-dev}"
-SOURCE="$ROOT/app/controllers/src/shop_native_want_view_contract.c"
-UNRELATED="$ROOT/app/services/src/market_moderation_service.c"
+SOURCE="$ROOT/contexts/market/controllers/src/shop_native_want_view_contract.c"
+UNRELATED="$ROOT/contexts/market/services/src/market_moderation_service.c"
 OUTPUT="${ZCL_REFLEX_SHOP_WANT_VIEW_ACCEPTANCE_OUTPUT:-$ROOT/build/dev-loop/reflex-hotfork-shop-want-view-acceptance.json}"
 STORY='shop-want-view-contract.v1'
 
@@ -74,7 +74,7 @@ drive_candidate()
         fail "candidate did not return bound $expected: $(jq -c . <<<"$result")"
 }
 
-green="$(mktemp "$ROOT/app/controllers/src/.reflex-shop-want-view-green.XXXXXX")"
+green="$(mktemp "$ROOT/engine/controllers/src/.reflex-shop-want-view-green.XXXXXX")"
 cp -p -- "$backup" "$green"
 printf '\n/* ZCL_REFLEX_SHOP_WANT_VIEW_ACCEPTANCE:%s */\n' "$nonce" >>"$green"
 drive_candidate "$green" STORY_GREEN
@@ -99,7 +99,7 @@ jq -e --arg story "$STORY" '.ok==true and (.data.story_id//"")!=$story' \
     <<<"$unrelated_event" >/dev/null ||
     fail "unrelated owner was falsely attributed to want-view story"
 
-unrelated_proof="$(mktemp "$ROOT/app/controllers/src/.reflex-shop-want-view-unrelated-proof.XXXXXX")"
+unrelated_proof="$(mktemp "$ROOT/engine/controllers/src/.reflex-shop-want-view-unrelated-proof.XXXXXX")"
 cp -p -- "$backup" "$unrelated_proof"
 printf '\n/* ZCL_REFLEX_SHOP_WANT_VIEW_ACCEPTANCE:%s */\n' "$nonce" >>"$unrelated_proof"
 drive_candidate "$unrelated_proof" STORY_GREEN
@@ -115,7 +115,7 @@ jq -e --arg object "$(jq -r '.data.candidate_object_root' <<<"$green_result")" \
   <<<"$unrelated_raw" >/dev/null ||
     fail 'unrelated edit perturbed the want-view capsule identity or cache'
 
-mutant="$(mktemp "$ROOT/app/controllers/src/.reflex-shop-want-view-red.XXXXXX")"
+mutant="$(mktemp "$ROOT/engine/controllers/src/.reflex-shop-want-view-red.XXXXXX")"
 cp -p -- "$SOURCE" "$mutant"
 perl -0pi -e 's/strcmp\(status_out\.readiness, "hidden_by_profile"\) != 0/strcmp(status_out.readiness, "hidden_by_profile") == 0/' "$mutant"
 [[ "$(LC_ALL=C grep -c 'strcmp(status_out.readiness, "hidden_by_profile") == 0' "$mutant")" -eq 1 ]] ||
@@ -123,7 +123,7 @@ perl -0pi -e 's/strcmp\(status_out\.readiness, "hidden_by_profile"\) != 0/strcmp
 drive_candidate "$mutant" STORY_RED
 red_result="$result"
 
-revert="$(mktemp "$ROOT/app/controllers/src/.reflex-shop-want-view-revert.XXXXXX")"
+revert="$(mktemp "$ROOT/engine/controllers/src/.reflex-shop-want-view-revert.XXXXXX")"
 cp -p -- "$backup" "$revert"
 printf '\n/* ZCL_REFLEX_SHOP_WANT_VIEW_ACCEPTANCE:%s */\n' "$nonce" >>"$revert"
 drive_candidate "$revert" STORY_GREEN
@@ -139,7 +139,7 @@ jq -e --arg object "$(jq -r '.data.candidate_object_root' <<<"$green_result")" \
   <<<"$revert_raw" >/dev/null || fail 'exact revert did not reuse the capsule cache'
 
 mkdir -p "$(dirname "$OUTPUT")"
-jq -n --arg owner 'app/controllers/src/shop_native_want_view_contract.c' \
+jq -n --arg owner 'contexts/market/controllers/src/shop_native_want_view_contract.c' \
   --argjson green "$green_result" --argjson red "$red_result" \
   --argjson unrelated "$unrelated_result" --argjson unrelated_raw "$unrelated_raw" \
   --argjson revert "$revert_result" --argjson revert_raw "$revert_raw" '

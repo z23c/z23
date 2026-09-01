@@ -31,7 +31,7 @@ else
     esac
 fi
 LIVE_CATALOG="${ZCL_TRANSACTION_LIVE_CATALOG:-$REPO/tools/dev/transaction_live_catalog.def}"
-NATIVE_CATALOG="${ZCL_TRANSACTION_MICRO_NATIVE_CATALOG:-$REPO/app/controllers/include/controllers/transaction_micro_lab_profiles.def}"
+NATIVE_CATALOG="${ZCL_TRANSACTION_MICRO_NATIVE_CATALOG:-$REPO/engine/controllers/include/controllers/transaction_micro_lab_profiles.def}"
 CAMPAIGN_ID=mainnet-micro-100-v1
 TARGET_COUNT=100
 RECIPIENT_ZAT=1000

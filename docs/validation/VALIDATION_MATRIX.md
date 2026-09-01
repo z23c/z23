@@ -81,14 +81,14 @@ Sync methods and self-healing recovery are documented operator-side in
 
 | Mechanism | Files |
 |-----------|-------|
-| Method 1 — LDB snapshot import (decode `'c'+txid` CCoins → SQLite, SHA3-verify) | `config/src/boot.c`, `app/controllers/src/sync_controller.c` |
-| Method 2 — P2P fast sync (NODE_ZCL23 chunks, FlyClient MMR binding) | `lib/net/src/fast_sync.c` |
-| Method 3 — full P2P sync (headers → `connect_block`) | `app/services/src/chain_activation_service.c`, `app/jobs/src/*_stage.c`, `lib/validation/src/connect_block.c` |
-| Heal: missing UTXO (look up via tx index, inject, retry `connect_block` ≤100×) | `lib/validation/src/process_block_self_heal{,_hot_loop,_scan_state}.c` |
-| Heal: reorg unwind (inverse deltas, rewind cursors to fork) | `app/jobs/src/utxo_apply_delta.c`, `app/jobs/src/utxo_apply_stage.c` |
-| Heal: wrong block on disk (clear `BLOCK_HAVE_DATA`, re-request) | `lib/validation/src/process_block_tip_child.c`, `app/conditions/src/have_data_unreadable.c` |
-| Heal: stale `coins_best_block` (`BOOT_RECOVER_WIPE_WAIT`) | `config/src/boot_index.c` (`validate_coins_chain_agreement`) |
-| Heal: download stall (scan 10-height window, alt peers) | `app/services/src/block_sync_service.c` |
+| Method 1 — LDB snapshot import (decode `'c'+txid` CCoins → SQLite, SHA3-verify) | `engine/composition/src/boot.c`, `engine/controllers/src/sync_controller.c` |
+| Method 2 — P2P fast sync (NODE_ZCL23 chunks, FlyClient MMR binding) | `core/modules/net/src/fast_sync.c` |
+| Method 3 — full P2P sync (headers → `connect_block`) | `engine/services/src/chain_activation_service.c`, `engine/jobs/src/*_stage.c`, `core/modules/validation/src/connect_block.c` |
+| Heal: missing UTXO (look up via tx index, inject, retry `connect_block` ≤100×) | `core/modules/validation/src/process_block_self_heal{,_hot_loop,_scan_state}.c` |
+| Heal: reorg unwind (inverse deltas, rewind cursors to fork) | `engine/jobs/src/utxo_apply_delta.c`, `engine/jobs/src/utxo_apply_stage.c` |
+| Heal: wrong block on disk (clear `BLOCK_HAVE_DATA`, re-request) | `core/modules/validation/src/process_block_tip_child.c`, `engine/conditions/src/have_data_unreadable.c` |
+| Heal: stale `coins_best_block` (`BOOT_RECOVER_WIPE_WAIT`) | `engine/composition/src/boot_index.c` (`validate_coins_chain_agreement`) |
+| Heal: download stall (scan 10-height window, alt peers) | `engine/services/src/block_sync_service.c` |
 
 ## Data Formats
 
@@ -118,7 +118,7 @@ Sync methods and self-healing recovery are documented operator-side in
 **LevelDB tx index (key: `'t' + txid[32]`):**
 - Value (zclassicd): `varint(nFile) | varint(nDataPos) | varint(nTxOffset)`
 - Value (z23): raw struct `{ int nFile; uint nPos; uint nTxOffset; }`
-- Reader handles both formats (`lib/storage/src/txdb.c`)
+- Reader handles both formats (`engine/modules/storage/src/txdb.c`)
 
 **SQLite UTXO table:**
 - `utxos(txid BLOB, vout INT, value INT, script BLOB, script_type INT,`
@@ -141,4 +141,4 @@ Sync methods and self-healing recovery are documented operator-side in
 - Key: `0x0e 0x00 "obfuscate_key"` (15 bytes)
 - Value: `compact_size(N) + N random bytes`
 - All LevelDB values XORed with this key (cyclic) before storage.
-- Reader deobfuscates transparently (`lib/storage/src/dbwrapper.c`)
+- Reader deobfuscates transparently (`engine/modules/storage/src/dbwrapper.c`)

@@ -3,8 +3,8 @@
 #
 # check_hotswap_dev_only.sh — release purity for the Tier-1 hot-swap loader
 # (HARD; Makefile `check-hotswap-dev-only` gate). Two invariants:
-#   (1) no dlopen/dlsym/dlclose CALL in any .c outside lib/hotswap/ + vendor/;
-#   (2) inside lib/hotswap sources, every such call sits within a
+#   (1) no dlopen/dlsym/dlclose CALL in any .c outside engine/modules/hotswap/ + vendor/;
+#   (2) inside engine/modules/hotswap sources, every such call sits within a
 #       `#ifdef ZCL_DEV_BUILD` region (a pragmatic toggle scan),
 # so a release build links zero dynamic-loading code. Extracted verbatim from
 # the former inline Makefile recipe for tools/lint/run_lint.sh + standalone use.
@@ -19,10 +19,10 @@ DL_CALL_RE='(^|[^[:alnum:]_])dl(open|sym|close)[[:space:]]*[(]'
 HITS=$(grep -rnE --include='*.c' \
     "$DL_CALL_RE" \
     app tools lib config src domain application adapters 2>/dev/null \
-    | grep -v '^lib/hotswap/' || true)
+    | grep -v '^engine/modules/hotswap/' || true)
 if [ -n "$HITS" ]; then
     echo "$HITS"
-    echo "FAIL: dlopen/dlsym/dlclose outside lib/hotswap/ (release must be static)"
+    echo "FAIL: dlopen/dlsym/dlclose outside engine/modules/hotswap/ (release must be static)"
     exit 1
 fi
 
@@ -77,7 +77,7 @@ if [ -n "$NESTED_BAD" ] || [ -z "$ELSE_BAD" ] || \
     exit 1
 fi
 
-for f in $(ls lib/hotswap/src/*.c 2>/dev/null); do
+for f in $(ls engine/modules/hotswap/src/*.c 2>/dev/null); do
     # Nesting-aware toggle scan. The old one-line matcher treated every
     # `#endif` as the end of the dev region, so a per-host `#if defined(...)`
     # pair INSIDE the dev half silently switched it off. Counting conditional

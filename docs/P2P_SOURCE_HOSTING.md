@@ -8,7 +8,7 @@ but block and transaction validity remain exactly compatible with `zclassicd`.
 ## Trust model
 
 The source tree is the authority; transport is not. A release is identified by
-the `content.v2` package root from `lib/vcs/package_manifest.*`: canonical
+the `content.v2` package root from `contexts/commons/modules/vcs/package_manifest.*`: canonical
 portable paths, regular-file modes, exact sizes, and ordered 1 MiB raw
 SHA3-256 chunk hashes. The current root is a flat domain-separated commitment,
 not a Merkle tree. A peer therefore fetches the bounded manifest, recomputes the
@@ -17,7 +17,7 @@ position, length, and SHA3 hash match that manifest.
 
 The hash preimage is frozen, not prose-dependent. Both ASCII domains include
 their trailing `00` byte: `zcl.package_file.v1\0` and
-`zcl.package_manifest.v1\0`. The single-file KAT for path `src/main.c`, mode
+`zcl.package_manifest.v1\0`. The single-file KAT for path `engine/entry/main.c`, mode
 `0100644`, and bytes `int main(void) { return 23; }\n` is:
 
 ```text
@@ -29,7 +29,7 @@ package root   = 5f6f1019c07539f6b2a45fe1d88c1b7c7b820c869e6b84776be81c48876615b
 Manifest storage and swarm `file_index` both use strict ascending canonical
 path order; caller insertion order is never a wire coordinate.
 
-The first network primitive is `lib/vcs/package_swarm.*`. It defines strict
+The first network primitive is `contexts/commons/modules/vcs/package_swarm.*`. It defines strict
 announce, want, data, and cancel frames with request/package binding, canonical
 little-endian encoding, a one-chunk-per-frame 1 MiB ceiling, exact-length
 parsing, and content.v2 verification. That translation unit is still a pure
@@ -37,9 +37,9 @@ codec — no socket, filesystem, wallet, install, build, execution, or
 publication authority of its own.
 
 **The subsystem as a whole is socket-wired and has been since slice 12**
-(commit 833d7f398). `lib/vcs/src/package_swarm_node.c` is the swarm engine —
+(commit 833d7f398). `contexts/commons/modules/vcs/src/package_swarm_node.c` is the swarm engine —
 the manifest-first, rarest-first, multi-peer scheduler plus serving and
-accounting decisions — and `config/src/boot_zcode_swarm_membership.c` puts
+accounting decisions — and `engine/composition/src/boot_zcode_swarm_membership.c` puts
 its frames on the real P2P wire under the `zpkgswm` message tag via
 `p2p_node_begin_message()`. Hosting is **off by default** and enabled with
 `-packagehost=1`; the boot glue returns early otherwise, so a default node
@@ -49,9 +49,9 @@ succeeds and reports `enabled`/`present` false; when the engine is wired
 it reports peer count, active downloads, bounded per-peer served and
 fetched bytes, and the union of roots those peers have ANNOUNCEd, never
 keys or datadir paths.
-<!-- claim: symbol-present vcs_package_swarm_status_dump_state_json lib/vcs/src/package_swarm_status.c # dumpstate zcode_swarm leaf -->
-<!-- claim: symbol-present zcode_swarm app/controllers/include/controllers/diagnostics_dumpers_zcode.def # dumpstate leaf registered -->
-<!-- claim: symbol-present vcs_swarm_engine_advertised lib/vcs/src/package_swarm_ads.c # live advertised-root union -->
+<!-- claim: symbol-present vcs_package_swarm_status_dump_state_json contexts/commons/modules/vcs/src/package_swarm_status.c # dumpstate zcode_swarm leaf -->
+<!-- claim: symbol-present zcode_swarm contexts/commons/controllers/include/controllers/diagnostics_dumpers_zcode.def # dumpstate leaf registered -->
+<!-- claim: symbol-present vcs_swarm_engine_advertised contexts/commons/modules/vcs/src/package_swarm_ads.c # live advertised-root union -->
 
 Read "pure codec" as a statement about the two lower layers only
 (`package_swarm.c` and the engine, both of which stay free of sockets, threads,
@@ -70,14 +70,14 @@ unavailable the dump still succeeds and reports `enabled`/`present` false
 with `settled_peers` 0; when the session is open it reports a short local
 pubkey prefix, settled peer count, and bounded per-peer settled and
 have_remote flags, never secret keys.
-<!-- claim: symbol-present boot_zcode_swarm_receipt_dump_state_json config/src/boot_zcode_swarm_receipt.c # dumpstate zcode_swarm_receipts leaf -->
-<!-- claim: symbol-present zcode_swarm_receipts app/controllers/include/controllers/diagnostics_dumpers_zcode.def # dumpstate leaf registered -->
-<!-- claim: symbol-present p2p_node_begin_message config/src/boot_zcode_swarm_membership.c # the swarm IS socket-wired -->
-<!-- claim: file-present lib/vcs/src/package_swarm_node.c # the transport half exists -->
-<!-- claim: symbol-absent socket lib/vcs/src/package_swarm.c # the codec half stays pure -->
-<!-- claim: symbol-present packagehost config/src/boot_zcode_swarm.c # hosting stays flag-gated, default off -->
-<!-- claim: symbol-present vcs_swarm_receipt_session_open lib/vcs/src/package_swarm_receipt_session.c # receipts ride zpkgswm beside frozen types -->
-<!-- claim: symbol-present boot_zcode_swarm_receipt_frame config/src/boot_zcode_swarm_receipt.c # boot glue consumes ZSID/ZSR1 -->
+<!-- claim: symbol-present boot_zcode_swarm_receipt_dump_state_json engine/composition/src/boot_zcode_swarm_receipt.c # dumpstate zcode_swarm_receipts leaf -->
+<!-- claim: symbol-present zcode_swarm_receipts contexts/commons/controllers/include/controllers/diagnostics_dumpers_zcode.def # dumpstate leaf registered -->
+<!-- claim: symbol-present p2p_node_begin_message engine/composition/src/boot_zcode_swarm_membership.c # the swarm IS socket-wired -->
+<!-- claim: file-present contexts/commons/modules/vcs/src/package_swarm_node.c # the transport half exists -->
+<!-- claim: symbol-absent socket contexts/commons/modules/vcs/src/package_swarm.c # the codec half stays pure -->
+<!-- claim: symbol-present packagehost engine/composition/src/boot_zcode_swarm.c # hosting stays flag-gated, default off -->
+<!-- claim: symbol-present vcs_swarm_receipt_session_open contexts/commons/modules/vcs/src/package_swarm_receipt_session.c # receipts ride zpkgswm beside frozen types -->
+<!-- claim: symbol-present boot_zcode_swarm_receipt_frame engine/composition/src/boot_zcode_swarm_receipt.c # boot glue consumes ZSID/ZSR1 -->
 
 
 Do not put source packages through the legacy file-market trust path. Its offer
@@ -177,7 +177,7 @@ A complete Z23 workspace is larger than the package store's deliberately
 conservative 64 MiB per-release admission bound when represented as loose
 files. It is therefore carried without weakening that bound by
 the `vcs_source_bundle` family
-(`lib/vcs/{include/vcs/source_bundle.h,src/source_bundle*.c}`). The explicit
+(`contexts/commons/modules/vcs/{include/vcs/source_bundle.h,src/source_bundle*.c}`). The explicit
 create/verify/import/checkout leaves retain the original bounded v1 monolith.
 PROVEN publication uses v2: the canonical ZVCS manifest plus independently
 zlib-compressed, stable path-selected shards. This is not another source
@@ -316,7 +316,7 @@ Its success report states `github_contacted=false`.
 Hosting is off until `-packagehost=1`, and announcing yourself as a provider on
 the overlay is a further, separate step. Once hosting is on, completeness is
 still not enough to reach a stranger. The engine classifies every tracked root
-against a closed set of shapes (`lib/vcs/include/vcs/package_public_shape.h`)
+against a closed set of shapes (`contexts/commons/modules/vcs/include/vcs/package_public_shape.h`)
 before it will announce it or answer a WANT for it, and every refusal names the
 requirement that failed rather than going quiet:
 
@@ -352,7 +352,7 @@ successful transport never grants checkout authority.
 ## Swarm flow
 
 The serving set is a real C23 library shelf, not only the Arena demo. In-tree
-`packages/` holds dozens of independent titles; an opted-in host announces
+`contexts/commons/packages/` holds dozens of independent titles; an opted-in host announces
 every complete public-serveable root it actually holds, up to the local
 announce bound (`VCS_SWARM_MAX_LOCAL_ANNOUNCES`). There is no central tracker
 and no Python path.
@@ -384,7 +384,7 @@ and no Python path.
 7. Re-serving what you fetched is not automatic. The fetched root must itself
    pass the public-hosting admission above before this node announces it or
    answers a WANT for it.
-<!-- claim: symbol-present vcs_swarm_complete_download lib/vcs/src/package_swarm_complete.c # COMPLETE immediately announces -->
+<!-- claim: symbol-present vcs_swarm_complete_download contexts/commons/modules/vcs/src/package_swarm_complete.c # COMPLETE immediately announces -->
 
 ![how the bytes travel between two nodes](assets/z23-term-commons-topology.svg)
 
@@ -564,10 +564,10 @@ namespace, only the founder and live grantees can publish into it.
 
 ## Tasks are posted for strangers to pick up
 
-<!-- claim: symbol-present vcs_zcode_task_context_admit lib/vcs/src/zcode_task_context.c # the receiver-side binding check exists -->
-<!-- claim: symbol-present boot_zcode_dht_task_pointer_publish_gate config/src/boot_zcode_dht_publish_gate.c # the pointer hygiene gate exists -->
+<!-- claim: symbol-present vcs_zcode_task_context_admit contexts/commons/modules/vcs/src/zcode_task_context.c # the receiver-side binding check exists -->
+<!-- claim: symbol-present boot_zcode_dht_task_pointer_publish_gate engine/composition/src/boot_zcode_dht_publish_gate.c # the pointer hygiene gate exists -->
 <!-- claim: symbol-present zcl_native_handle_zcode_task_pull tools/command/native_zcode_task_transport_command.c # the pull leaf exists -->
-<!-- claim: symbol-present zcode.task.pull config/commands/zcode.def # the task lane is a bound command -->
+<!-- claim: symbol-present zcode.task.pull engine/composition/commands/zcode.def # the task lane is a bound command -->
 
 The work lane answers "who has solved this task?" — but a stranger on
 another node cannot even *start* from the task wire alone: the wire commits
@@ -672,10 +672,10 @@ review and tests.
 - [x] Pure bounded announce/want/data/cancel codec tied to package roots.
 - [x] Signed release envelope using wallet-brokered secp256k1 keys.
 - [x] Staging-only content-addressed store with quotas and atomic verified puts
-  — `lib/vcs/src/package_store.c`, `-packagequota` (default 10 GiB) split over
+  — `contexts/commons/modules/vcs/src/package_store.c`, `-packagequota` (default 10 GiB) split over
   frozen pool fractions.
 - [x] Durable resume bitmap and multi-peer rarest-first scheduler —
-  `lib/vcs/src/package_swarm_node.c`; resume records persist under
+  `contexts/commons/modules/vcs/src/package_swarm_node.c`; resume records persist under
   `<zcode_dir>/downloads/<root-hex>` with temp + fsync + atomic rename.
 - [x] Peer inventory, backpressure, timeout, retry, and offence accounting —
   same engine: bounded per-peer in-flight, fresh request id per retry,
@@ -683,7 +683,7 @@ review and tests.
 - [ ] Authenticated direct transport plus HTTPS and onion adapters. *Partly
   done, and the remainder is a deliberate reframe rather than pending work.*
   The HTTPS/onion side shipped in slice 13 (`/zcode*` routes,
-  `app/controllers/src/zcode_site_controller.c`). Noise is **not** armed
+  `contexts/commons/controllers/src/zcode_site_controller.c`). Noise is **not** armed
   under the swarm and is not planned to be: chunk bytes are authenticated
   against the content.v2 manifest before they are ever stored, and the peer's
   33-byte accounting key is an explicitly LOCAL session pseudo-key, not a
@@ -695,16 +695,16 @@ review and tests.
   "receipts" are the contributor-reward ledger, a different object; do not
   mistake one for the other.)
 - [ ] Optional proof-of-burn parser/indexer and reorg-aware credit projection.
-  *Genuinely absent — no burn parser exists in `lib/vcs` or the ZCODE catalog.*
+  *Genuinely absent — no burn parser exists in `contexts/commons/modules/vcs` or the ZCODE catalog.*
 - [x] Explicit build/test/install transaction; downloads never execute.
   `zcode package add plan|commit` is the one lifecycle. It resolves the
   root-pinned dependency DAG, re-derives an expiring plan at commit, invokes
   only `zclassic23-package-verify --emit` under confinement, rehashes emitted
   artifacts, installs atomically, and pins the generation. There is no generic
   downloaded `zcode.install`/shell-script surface, by design.
-<!-- claim: symbol-present zcode.package.add.commit config/commands/zcode.def # the explicit lifecycle exists -->
+<!-- claim: symbol-present zcode.package.add.commit engine/composition/commands/zcode.def # the explicit lifecycle exists -->
 - [ ] End-to-end simulator. *Substantially done, with named gaps.*
-  `lib/test/src/test_zcode_swarm_net.c` runs real `zpkgswm` frames between
+  `tests/harness/src/test_zcode_swarm_net.c` runs real `zpkgswm` frames between
   independent engines behind real msg_processors (only socket syscalls elided)
   and covers the golden path, malicious wrong-hash chunks, unrequested DATA,
   restart-mid-download resume, disconnect requeue, and the A→B→C hop:
@@ -712,11 +712,11 @@ review and tests.
   `zdogace`, `zdogview`) and a second ordinary catalog (`zhex`, `zstr`, `zbuf`,
   `zsha256`, `zring`, `zmap`, `zvec`, `zutf8`, `zjson`); B mirrors and pins; A
   disappears; C fetches the exact carriers from B. The in-process engine gate
-  (`lib/test/src/test_zcode_swarm.c`) seeds that ordinary shelf and proves
+  (`tests/harness/src/test_zcode_swarm.c`) seeds that ordinary shelf and proves
   keep-alive of those roots is inventory, not unique-root flood. Still
   uncovered: reorg.
-<!-- claim: file-present lib/test/src/test_zcode_swarm_net.c # the real-wire swarm harness exists -->
-<!-- claim: file-present lib/test/src/test_zcode_swarm.c # the in-process engine gate seeds an ordinary C23 shelf -->
+<!-- claim: file-present tests/harness/src/test_zcode_swarm_net.c # the real-wire swarm harness exists -->
+<!-- claim: file-present tests/harness/src/test_zcode_swarm.c # the in-process engine gate seeds an ordinary C23 shelf -->
 
 The foundations this section once gated on — signed release envelope, staging
 CAS, runtime gossip, and explicit build/test/install — have shipped. The

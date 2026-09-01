@@ -4,7 +4,7 @@
 # Golden-table tip-coverage-lag check (item 2b of the golden immutable-
 # history evidence wiring lane).
 #
-# test_golden_staleness_canary (lib/test/src/test_golden_staleness_canary.c)
+# test_golden_staleness_canary (tests/harness/src/test_golden_staleness_canary.c)
 # already catches a REGRESSION that silently drops entries from the
 # compiled SHA3 window table / UTXO root ladder — that runs hermetically in
 # every `make ci` / `make test`. What it CANNOT catch is the golden tables
@@ -37,9 +37,9 @@ fi
 
 LAG_MAX="${ZCL_GOLDEN_FRESHNESS_LAG_MAX:-70000}"
 
-SHA3_SRC=lib/chain/src/sha3_windows.c
-SHA3_HDR=lib/chain/include/chain/sha3_windows.h
-LADDER_SRC=lib/chain/src/utxo_root_ladder.c
+SHA3_SRC=core/modules/chain/src/sha3_windows.c
+SHA3_HDR=core/modules/chain/include/chain/sha3_windows.h
+LADDER_SRC=core/modules/chain/src/utxo_root_ladder.c
 
 # ── Highest height either golden table actually corroborates ──────────────
 sha3_count=$(sed -n 's/.*g_sha3_windows_count = \([0-9][0-9]*\).*/\1/p' "$SHA3_SRC" | head -1)

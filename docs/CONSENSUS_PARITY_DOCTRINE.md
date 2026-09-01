@@ -55,13 +55,13 @@ observability. Here z23 is free to be better than zclassicd.
 | Layer | What | Where |
 |---|---|---|
 | **1. `check-consensus-parity` (lint gate E13)** | Forbids the *shape* of a divergence: forbidden mechanism tokens, plus registry-checked future-height literals and wall-clock reads | `tools/scripts/check_consensus_parity.sh`; run by `make lint` / `make ci` / `make deploy` |
-| **2. `test_consensus_parity` (test group)** | Pins the consensus *values* | `lib/test/src/test_consensus_parity.c`; run by `make test_parallel` / `make ci` |
+| **2. `test_consensus_parity` (test group)** | Pins the consensus *values* | `tests/harness/src/test_consensus_parity.c`; run by `make test_parallel` / `make ci` |
 | **3. Runtime cross-check** | Compares live block hashes against zclassicd | `legacy_mirror` / `z23 ops mirror` / `z23 core consensus report` |
 
 **Lint gate E13** fails if a **non-zclassicd consensus mechanism** appears in
 the consensus source path — the `PATHS` array in
 `tools/scripts/check_consensus_parity.sh`: `core/params`, `core/chainparams`,
-`core/consensus`, `lib/validation`, `lib/chain`, `lib/mining`, `app/jobs`.
+`core/consensus`, `core/modules/validation`, `core/modules/chain`, `core/modules/mining`, `engine/jobs`.
 Every entry must exist on disk or the gate hard-fails rather than scanning
 nothing. Banned token classes:
 `versionbits`, `VersionBitsState`, `ComputeBlockVersion`, `ehUpgrade` /
@@ -168,11 +168,11 @@ Sealed code calls unsealed code on every block:
 
 | Sealed caller | Unsealed callee | What it decides |
 |---|---|---|
-| `core/math/src/hash.c` | `lib/crypto/src/sha256.c` | block hash, txid, merkle root |
-| `core/consensus/src/script_interp.c` | `lib/crypto/src/sha256.c` | `OP_SHA256` / `OP_HASH256` |
-| `core/consensus/src/equihash.c` | `lib/crypto/src/blake2b_avx2.c` | Equihash PoW (height-selected N,K) |
-| `core/` → `coins/coins.h` → `sapling/incremental_merkle_tree.h` | `lib/sapling/src/fr_avx512.c` | Sapling commitment-tree anchor, Groth16 verdicts |
-| same closure, via `sapling/bn254.h` | `lib/sapling/src/bn254_accel.c` | Sprout Groth16 JoinSplit verdicts |
+| `core/math/src/hash.c` | `core/modules/crypto/src/sha256.c` | block hash, txid, merkle root |
+| `core/consensus/src/script_interp.c` | `core/modules/crypto/src/sha256.c` | `OP_SHA256` / `OP_HASH256` |
+| `core/consensus/src/equihash.c` | `core/modules/crypto/src/blake2b_avx2.c` | Equihash PoW (height-selected N,K) |
+| `core/` → `coins/coins.h` → `sapling/incremental_merkle_tree.h` | `core/modules/sapling/src/fr_avx512.c` | Sapling commitment-tree anchor, Groth16 verdicts |
+| same closure, via `sapling/bn254.h` | `core/modules/sapling/src/bn254_accel.c` | Sprout Groth16 JoinSplit verdicts |
 
 Editing any of those changes which blocks the node accepts without moving a
 byte inside `core/`, so `check-core-seal` stays green. That is by design and
@@ -264,16 +264,16 @@ closed:
 | # | Divergence | Landed at |
 |---|---|---|
 | 1 | CHECKDATASIG/CHECKDATASIGVERIFY undercounted as 0 sigops in the context-free structural count | `core/consensus/src/check_block.c:57` `DOMAIN_CONSENSUS_SIGOP_COUNT_FLAGS = SCRIPT_VERIFY_CHECKDATASIG_SIGOPS`, unconditional |
-| 2 | Per-tx contextual rules (Overwinter expiry, NU version gating, per-tx finality, BIP34 `bad-cb-height`) unwired on connect | `contextual_check_block()` (`lib/validation/src/check_block.c:436`) called from `app/jobs/src/script_validate_contextual.c:107`, IBD- and tip-window-gated (see `docs/AGENT_TRAPS.md` for the gating rationale) |
-| 3 | JoinSplit Ed25519 signature not verified on the block-connect path | `app/jobs/src/proof_validate_stage.c` verifies it before the per-joinsplit zk-SNARK loop; failure tags `first_failure_proof_type="joinsplit_sig"` |
+| 2 | Per-tx contextual rules (Overwinter expiry, NU version gating, per-tx finality, BIP34 `bad-cb-height`) unwired on connect | `contextual_check_block()` (`core/modules/validation/src/check_block.c:436`) called from `engine/jobs/src/script_validate_contextual.c:107`, IBD- and tip-window-gated (see `docs/AGENT_TRAPS.md` for the gating rationale) |
+| 3 | JoinSplit Ed25519 signature not verified on the block-connect path | `engine/jobs/src/proof_validate_stage.c` verifies it before the per-joinsplit zk-SNARK loop; failure tags `first_failure_proof_type="joinsplit_sig"` |
 | 4 | Height-gated Sapling/Overwinter structural tx rules (version-group-id, version floors) unwired on connect | same wiring as #2 |
-| 5 | Missing `bad-txns-coinbase-spend-has-transparent-outputs` rule | `app/jobs/src/utxo_apply_delta.c:536` and `app/jobs/src/utxo_apply_stage.c:498` |
+| 5 | Missing `bad-txns-coinbase-spend-has-transparent-outputs` rule | `engine/jobs/src/utxo_apply_delta.c:536` and `engine/jobs/src/utxo_apply_stage.c:498` |
 
 **Nuance on #1 — two separate sites, two separate postures.** zclassicd sets
 `SCRIPT_VERIFY_CHECKDATASIG_SIGOPS` in *both* `CheckBlock`
 (`STANDARD_SCRIPT_VERIFY_FLAGS`) and `ConnectBlock`. c23's context-free
 structural count (#1 above) matches unconditionally. The **`ConnectBlock`-analogue
-reindex path** (`lib/validation/src/connect_block.c`) is a *separate*,
+reindex path** (`core/modules/validation/src/connect_block.c`) is a *separate*,
 **DEFAULT-OFF** parity flag (`g_enforce_checkdatasig_sigops`,
 `-enforce-checkdatasig-sigops`) — a tightening (reject) predicate gated on a
 full-history replay confirming zero false-rejects first, per the
@@ -291,7 +291,7 @@ decision-identical on the normal path).
 
 ### Rule → zclassicd map for the connect-path contextual gate
 
-The per-tx contextual rules wired at `app/jobs/src/script_validate_contextual.c`
+The per-tx contextual rules wired at `engine/jobs/src/script_validate_contextual.c`
 (`CTX_TIP_WINDOW=16`, IBD-gated per-tx call, finality + BIP34 unconditional —
 see `docs/AGENT_TRAPS.md` for why):
 

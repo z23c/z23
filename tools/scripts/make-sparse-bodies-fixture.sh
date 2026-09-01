@@ -4,7 +4,7 @@
 # make-sparse-bodies-fixture.sh — build a synthetic "sparse bodies" mini-
 # datadir on disk, for local manual repro of the body-coverage-aware
 # auto-reindex-chainstate DECISION (lane 2B, "Track B" — see
-# lib/test/src/test_reindex_sparse_bodies.c, which builds the IDENTICAL
+# tests/harness/src/test_reindex_sparse_bodies.c, which builds the IDENTICAL
 # layout in-process for the automated regression gate).
 #
 # Scenario modeled: coins are seeded at a tip height H, but the on-disk
@@ -24,7 +24,7 @@
 #   <dir>/coins_best           — "<height> <hash_verified 0|1>"
 #   <dir>/auto_reindex_request — "<anchor> <count>" (the REAL on-disk
 #                                sentinel format — see
-#                                lib/storage/include/storage/boot_auto_reindex.h)
+#                                engine/modules/storage/include/storage/boot_auto_reindex.h)
 #
 # Usage:
 #   tools/scripts/make-sparse-bodies-fixture.sh [dir] [H] [K]
@@ -92,7 +92,7 @@ done
 printf '%s %s\n' "$H" 1 > "$DIR/coins_best"
 
 # The armed sentinel, in the REAL on-disk format boot_auto_reindex_request
-# writes (lib/storage/src/boot_auto_reindex.c): "<anchor> <count>".
+# writes (engine/modules/storage/src/boot_auto_reindex.c): "<anchor> <count>".
 printf '%s %s\n' "$H" 1 > "$DIR/auto_reindex_request"
 
 echo "make-sparse-bodies-fixture: wrote $DIR"

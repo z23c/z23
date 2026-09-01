@@ -29,9 +29,15 @@ gate_load_list_file "$ALLOWLIST" ALLOWED
 # taxonomy that nothing cross-checks.
 is_known_shape_path() {
     local path="$1" shape
-    for shape in "${ZCL_APP_SHAPES[@]}"; do
+    local base
+    for base in "${ZCL_APP_AUTHORITY_DIRS[@]}"; do
+        for shape in "${ZCL_APP_SHAPES[@]}"; do
+            case "$path" in
+                "$base/$shape/src/"*.c) return 0 ;;
+            esac
+        done
         case "$path" in
-            "app/$shape/src/"*.c) return 0 ;;
+            "$base/"*.c) return 1 ;;
         esac
     done
     return 1
@@ -55,9 +61,17 @@ while IFS= read -r file; do
     fi
     violations=$((violations + 1))
     echo "$file: not in a known shape folder (expected one of: controllers, services, models, jobs, supervisors, conditions, views)" >&2
-done < <(find app -type f -name '*.c' "${LINT_FIND_PRUNE_ARGS[@]}" | sort)
+done < <(
+    for base in "${ZCL_APP_AUTHORITY_DIRS[@]}"; do
+        find "$base" -maxdepth 1 -type f -name '*.c' 2>/dev/null
+        for shape in "${ZCL_APP_SHAPES[@]}"; do
+            find "$base/$shape/src" -maxdepth 1 -type f -name '*.c' \
+                2>/dev/null
+        done
+    done | sort -u
+)
 
-echo "[framework_shape_check] scanned $scanned .c files in app/"
+echo "[framework_shape_check] scanned $scanned application-shape .c files"
 echo "[framework_shape_check] $violations violation(s) found (mode: $MODE)"
 if (( allowlisted > 0 )); then
     echo "[framework_shape_check] $allowlisted allowlisted violation(s) ignored"

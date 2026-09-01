@@ -112,14 +112,14 @@ unconditionally fast enough; latency is a non-issue for this design.
 
 ## PROBE 6 — Tor stream API (code read, not a runtime probe)
 
-Read `lib/net/include/net/tor_integration.h`, `lib/net/include/net/onion_service.h`,
-and `lib/net/src/tor_integration.c:404-473`. Inbound:
+Read `core/modules/net/include/net/tor_integration.h`, `core/modules/net/include/net/onion_service.h`,
+and `core/modules/net/src/tor_integration.c:404-473`. Inbound:
 `onion_service_handle_request(...)` is a synchronous one-call-in/one-response-
 out callback, not a stream. Outbound: `tor_integration_fetch_onion(...)` and
 its blocking wrapper are a **single GET-shaped fetch** per call, callback
 fires exactly once with status + complete body — no handle for a second
 write, no persistent circuit/session object, no raw-socket-equivalent API
-anywhere in either header. No `.c`/`.h` in `lib/net/` or `vendor/tor_stub.c`
+anywhere in either header. No `.c`/`.h` in `core/modules/net/` or `vendor/tor_stub.c`
 exposes a bidirectional, long-lived onion stream.
 
 **VERDICT — code-confirmed:** z23's embedded-Tor surface is

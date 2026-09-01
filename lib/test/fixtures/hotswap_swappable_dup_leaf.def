@@ -1,8 +1,0 @@
-/* Lint-gate fixture: one leaf claimed by TWO source files. A leaf must belong
- * to exactly one module, otherwise two modules could each publish a handler for
- * it. Used by the check_hotswap_swappable_shape self-test (exit 1). NOT a real
- * allowlist. */
-HOTSWAP_SWAPPABLE("app/controllers/src/status_native_handlers.c",
-                  "core.status")
-HOTSWAP_SWAPPABLE("app/controllers/src/meta_native_handlers.c",
-                  "ops.metrics core.status")

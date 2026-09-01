@@ -56,7 +56,7 @@ citation, `git log --follow -- docs/work/<name>.md` recovers older intent.
 | [`ZC23_REPRODUCTION_RUNBOOK.md`](./ZC23_REPRODUCTION_RUNBOOK.md) | LIVE | O5 three-party portable-reproduction protocol, exact same-host acceptance gate, genuine second-machine verifier command, and explicit no-credit/no-live-authority boundaries |
 | [`NATIVE_MACOS_RUNBOOK.md`](./NATIVE_MACOS_RUNBOOK.md) | LIVE | native arm64 macOS maintenance: expected-green set, per-host platform-seam selection, known host quirks, and the first fix move per gate that can go red there |
 | [`NEON_CRYPTO_MATRIX.md`](./NEON_CRYPTO_MATRIX.md) | LIVE | per-crypto-family x86-64/arm64 tier matrix: gating, the test group proving bit-identity, the bench that times each tier, and honest no-clean-NEON-equivalent markers |
-| [`ZCODE_PLAN.md`](./ZCODE_PLAN.md) | FOUNDATION | original 15-slice ZCODE package-hosting order; slices 1–13 remain live foundations, while payout slices 14–15 are deferred behind the development network; `lib/vcs/include/vcs/package_reward.h` cites its "ZCL fuel economics" section by name |
+| [`ZCODE_PLAN.md`](./ZCODE_PLAN.md) | FOUNDATION | original 15-slice ZCODE package-hosting order; slices 1–13 remain live foundations, while payout slices 14–15 are deferred behind the development network; `contexts/commons/modules/vcs/include/vcs/package_reward.h` cites its "ZCL fuel economics" section by name |
 | [`MARKETPLACE_PLAN.md`](./MARKETPLACE_PLAN.md) | DESIGN | deferred application-protocol marketplace design; no consensus surface |
 | [`MARKETPLACE_NEXT.md`](./MARKETPLACE_NEXT.md) | RETAINED | 2026-08-08 marketplace dependency ordering; unchecked boxes are not current work |
 | [`MARKET_ONION_DELIVERY.md`](./MARKET_ONION_DELIVERY.md) | DESIGN | B5 onion-routed chunk delivery: offer v2 endpoint_type=onion wire, `/market/chunk` onion route, session-binding replacement, stub fail-closed policy, and the honest non-goals (timing, gossip metadata) |
@@ -77,18 +77,18 @@ citation, `git log --follow -- docs/work/<name>.md` recovers older intent.
 | [`os-substrate-plan.md`](./os-substrate-plan.md) | DESIGN | OS-substrate three-rung plan (shell-out removal, `os_proc` shim, sandbox facade) |
 | [`os/A1-authority-receipt-idiom.md`](./os/A1-authority-receipt-idiom.md) | DESIGN | the Law-7 privileged-transition authority-receipt idiom, cited by `tools/lint/check_privileged_transition_receipt.sh` |
 | [`os/A4-noise-transport-p1.md`](./os/A4-noise-transport-p1.md) | DESIGN | the Noise P2P transport implementation contract |
-| [`os/A6-adaptive-client-puzzle.md`](./os/A6-adaptive-client-puzzle.md) | LIVE | the load-adaptive client-puzzle admission primitive, shipped as `lib/net/src/puzzle.c` + `lib/net/include/net/puzzle.h` (test group `puzzle`) |
+| [`os/A6-adaptive-client-puzzle.md`](./os/A6-adaptive-client-puzzle.md) | LIVE | the load-adaptive client-puzzle admission primitive, shipped as `core/modules/net/src/puzzle.c` + `core/modules/net/include/net/puzzle.h` (test group `puzzle`) |
 | [`NAT_AND_ONION_TRANSPORT.md`](./NAT_AND_ONION_TRANSPORT.md) | DESIGN | onion-as-universal-rendezvous / clearnet-as-fast-path transport design notes (NAT traversal, onion hosting, package swarm); P2P-layer policy only, no consensus surface |
 | [`DIRECT_TRANSPORT.md`](./DIRECT_TRANSPORT.md) | DESIGN | UDP datagram fast path + PEX-lite clearnet discovery + disclosure posture (`onion`\|`clearnet`\|`none`) + `zses:v1` session invites; application plane only, no consensus surface; complements NAT_AND_ONION_TRANSPORT |
-| [`REMOTE_COMMAND_CHANNEL.md`](./REMOTE_COMMAND_CHANNEL.md) | DESIGN | `z23 remote <node> <leaf>`: carrying the typed command registry over the mesh instead of a shell — wire shape reusing the file-service session, owner-minted capability naming the leaves it grants, three typed refusals. Classification + gate have landed (`config/remote_command_classes.def`, `tools/lint/check_remote_command_classes.sh`); no transport, no dispatcher, no remote execution |
+| [`REMOTE_COMMAND_CHANNEL.md`](./REMOTE_COMMAND_CHANNEL.md) | DESIGN | `z23 remote <node> <leaf>`: carrying the typed command registry over the mesh instead of a shell — wire shape reusing the file-service session, owner-minted capability naming the leaves it grants, three typed refusals. Classification + gate have landed (`engine/composition/remote_command_classes.def`, `tools/lint/check_remote_command_classes.sh`); no transport, no dispatcher, no remote execution |
 | [`palace-design.md`](./palace-design.md) | DESIGN | code-legibility layer: file/group purpose, `code room`, the three P1/P2/P3 lint gates (§3 cited by `test_make_lint_gates.c`) |
-| [`service-result-convergence.md`](./service-result-convergence.md) | LIVE | `struct zcl_result` convergence ratchet inventory + lane plan for `app/services/`; gate is live, this is the shrinking-floor inventory |
+| [`service-result-convergence.md`](./service-result-convergence.md) | LIVE | `struct zcl_result` convergence ratchet inventory + lane plan for `engine/services/`; gate is live, this is the shrinking-floor inventory |
 | [`secure-transport-design.md`](./secure-transport-design.md) | DESIGN | Noise_XX transport protocol contract (implemented, default off) |
 | [`wire-next-wave-specs.md`](./wire-next-wave-specs.md) | DESIGN | next-wave `simnet_wire` lane specs (eclipse/partition, bandwidth/reorder, app-layer flows) |
 | [`session-substrate-probes.md`](./session-substrate-probes.md) | DESIGN | measured rootless-sandboxing capability probes for the multi-user-server program |
 | [`LLM-C23-APP-PLATFORM-CHECKLIST.md`](./LLM-C23-APP-PLATFORM-CHECKLIST.md) | DESIGN | future LLM/App platform execution checklist (Phases 3–5); not the current execution queue, cannot displace the sovereign cure |
-| [`agent-spend-policy-design.md`](./agent-spend-policy-design.md) | LIVE/RETAINED | scoped agent authority over digital assets — shipped as `agent_sessions` (migration v36) + `app/services/include/services/agent_spend_policy.h`; 16 `.c`/`.h`/test files cite its "Minting + presentation" and "Enforcement" sections by name, so keep those headings as-is |
-| [`UX_PLAN.md`](./UX_PLAN.md) | LIVE | the two-lane UX program (shared server-rendered design system + terminal presentation); both lanes have landed, `tools/command/cli_render.h`, `tools/command/native_command.c`, `src/main_cli_modes.c` and `lib/test/src/test_cli_render.c` cite its "terminal lane" by name |
+| [`agent-spend-policy-design.md`](./agent-spend-policy-design.md) | LIVE/RETAINED | scoped agent authority over digital assets — shipped as `agent_sessions` (migration v36) + `cognition/services/include/services/agent_spend_policy.h`; 16 `.c`/`.h`/test files cite its "Minting + presentation" and "Enforcement" sections by name, so keep those headings as-is |
+| [`UX_PLAN.md`](./UX_PLAN.md) | LIVE | the two-lane UX program (shared server-rendered design system + terminal presentation); both lanes have landed, `tools/command/cli_render.h`, `tools/command/native_command.c`, `engine/entry/main_cli_modes.c` and `tests/harness/src/test_cli_render.c` cite its "terminal lane" by name |
 | [`HOTSWAP.md`](./HOTSWAP.md) | LIVE | the dev-only hot-swap mechanisms |
 | [`fast-path.md`](./fast-path.md) | LIVE | the information algorithm + fast inner-loop commands for any change |
 | [`agent-protocol.md`](./agent-protocol.md) | LIVE | compact parallel-worker adapter to AGENTS.md and DEVELOPING.md; no second workflow authority |
@@ -134,7 +134,7 @@ git grep -ho 'docs/work/[A-Za-z0-9_./-]*\.md' \
   done
 ```
 
-`.def` and `.txt` matter: `app/controllers/include/controllers/agent_impact_rules.def`
+`.def` and `.txt` matter: `cognition/controllers/include/controllers/agent_impact_rules.def`
 and the `tools/lint/*_baseline.txt` files cite these paths too, and a grep
 limited to the C, header, Markdown and shell suffixes misses them.
 

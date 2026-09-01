@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # check_result_discard — RATCHET gate (shrink-only).
 #
-# struct zcl_result is [[nodiscard]] (lib/util/include/util/result.h). That
+# struct zcl_result is [[nodiscard]] (platform/modules/util/include/util/result.h). That
 # attribute catches the BARE statement discard —
 #
 #     do_thing(...);              // warning, and -Werror makes it fatal

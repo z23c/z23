@@ -8,7 +8,7 @@
 # Why this is a gate and not a style note: the tree is built by exactly one
 # compiler, so a GNU-only idiom is invisible until someone builds with a second
 # one. A single `, ##__VA_ARGS__` in a header that is included nearly
-# everywhere -- lib/util/include/util/log_macros.h is included by ~1100
+# everywhere -- platform/modules/util/include/util/log_macros.h is included by ~1100
 # translation units -- produced 7,141 diagnostics under
 # `clang -std=c23 -pedantic`, which is enough noise to bury real findings.
 #
@@ -31,7 +31,7 @@ cd "$ROOT"
 
 # `,` then optional whitespace then `##` then `__VA_ARGS__`.
 HITS=$(grep -rn ',[[:space:]]*##[[:space:]]*__VA_ARGS__' \
-        app/ config/ core/ lib/ domain/ application/ adapters/ ports/ src/ tools/ \
+        app/ config/ core/ lib/ domain/ engine/application/ platform/adapters/ platform/ports/ src/ tools/ \
         --include='*.c' --include='*.h' \
     | grep -v 'gnu-va-args-ok' \
     | while IFS= read -r line; do

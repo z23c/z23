@@ -5,7 +5,7 @@
  * The receipts written by tools/agent/gate-receipt.sh commit to the captured
  * output of a gate with a SHA3-256 digest, and tools/agent/check-claims.sh
  * recomputes it. Both need a hash the repo already owns: this links the
- * in-tree FIPS-202 SHA3-256 (lib/sha3/src/sha3.c) and nothing else, so the
+ * in-tree FIPS-202 SHA3-256 (platform/modules/sha3/src/sha3.c) and nothing else, so the
  * harness introduces no hashing dependency and no shell-out to openssl (which
  * is not a dependency of this project and whose sha3 support varies by build).
  *
@@ -51,7 +51,7 @@ static int hash_stream(FILE *fp, char hex_out[65])
     if (ferror(fp))
         return -1;
     sha3_256_finalize(&ctx, digest);
-    /* The single tree-wide hex codec (lib/base/include/base/hex.h). A private
+    /* The single tree-wide hex codec (platform/modules/base/include/base/hex.h). A private
      * one here would be a real check-hex-codec-single violation, and was —
      * this file had one until `make lint` refused it. */
     zcl_hex_encode(digest, sizeof digest, hex_out);

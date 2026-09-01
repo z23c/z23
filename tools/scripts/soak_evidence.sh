@@ -7,7 +7,7 @@
 # MEASURABLE and JUDGEABLE instead of anecdotal. Two halves:
 #
 #   collect : append ONE JSON line per invocation (hourly via the
-#             deploy/examples/zclassic23-soak-evidence.timer) to
+#             platform/deploy/examples/zclassic23-soak-evidence.timer) to
 #             ~/.local/state/zclassic23-soak-evidence/evidence.jsonl:
 #               ts              epoch the sample was taken
 #               soak_height     soak node getblockcount (RPC 18242) or null

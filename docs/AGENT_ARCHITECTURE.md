@@ -25,16 +25,16 @@ Build each feature in this order.
    backing model and REST surface stay noun-shaped.
 
 2. **Define the database schema.**
-   Baseline tables live in `app/models/src/database_schema.c`; versioned
-   feature migrations live in `app/models/src/database_migrate_features.c`.
+   Baseline tables live in `engine/models/src/database_schema.c`; versioned
+   feature migrations live in `engine/models/src/database_migrate_features.c`.
    New tables need a primary key, bounded column types, `CHECK` constraints for
    money/heights/counts where possible, and indexes for every list/filter path
    exposed through REST or native commands. Migrations are forward-only, idempotent, and
    stamped in `schema_migrations` plus `schema_version`.
 
 3. **Create the model.**
-   Put the struct and public API in `app/models/include/models/<resource>.h`
-   and the implementation in `app/models/src/<resource>.c`. The model owns all
+   Put the struct and public API in `engine/models/include/models/<resource>.h`
+   and the implementation in `engine/models/src/<resource>.c`. The model owns all
    SQL for that table. Controllers and services do not hand-roll joins or
    direct table scans.
 
@@ -54,7 +54,7 @@ Build each feature in this order.
    validator or service before saving.
 
 6. **Put workflow in a service.**
-   Services live in `app/services/src/` and return `struct zcl_result` for new
+   Services live in `engine/services/src/` and return `struct zcl_result` for new
    code. They receive typed inputs, call models and lower-level services, and
    own transactions or multi-step workflows. They do not parse HTTP, JSON-RPC,
    or native argument shapes.
@@ -65,7 +65,7 @@ Build each feature in this order.
    does not own business rules, retry loops, raw storage, or consensus policy.
 
 8. **Expose REST from the route contract.**
-   Exact REST resources are declared in `app/controllers/src/api_controller_routes.c`
+   Exact REST resources are declared in `engine/controllers/src/api_controller_routes.c`
    using `struct api_resource_route`. Each route declares method, path,
    resource, action, response schema, query parameters, freshness source, alias,
    and privacy. Dynamic/member route helpers must publish the same metadata

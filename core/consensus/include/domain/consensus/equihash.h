@@ -7,7 +7,7 @@
  * and a nonce in `nNonce`), decide whether the solution is a valid
  * Equihash answer to the challenge defined by the header's other
  * fields. This is the pure proof-checking half of the Equihash PoW —
- * not the solver. (The solver lives in lib/crypto/src/equihash_solver.c
+ * not the solver. (The solver lives in core/modules/crypto/src/equihash_solver.c
  * and is intentionally NOT part of the domain — solving is a search
  * with allocation and parallelism; verification is a tight pure check.)
  *
@@ -37,7 +37,7 @@
  * is what makes it eligible to live here.
  *
  * Background: zclassicd src/crypto/equihash.cpp::IsValidSolution is the
- * historic source-of-truth. lib/chain/src/equihash.c is the existing
+ * historic source-of-truth. core/modules/chain/src/equihash.c is the existing
  * legacy wrapper; it becomes a thin delegator after this extraction.
  */
 

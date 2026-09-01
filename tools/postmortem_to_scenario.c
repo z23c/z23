@@ -3,7 +3,7 @@
  * postmortem_to_scenario — postmortem-capsule -> chaos-scenario skeleton
  * bridge (Super-Reliability / Detective Node program, lane B5).
  *
- * Converts a postmortem crash capsule (lib/sim/include/sim/postmortem.h,
+ * Converts a postmortem crash capsule (engine/modules/sim/include/sim/postmortem.h,
  * an unpacked `.cap` directory: tape.bin + manifest.json + log.txt + ...)
  * into a `.scenario` skeleton for the chaos DSL (tools/sim/chaos.c,
  * docs/CHAOS_HARNESS.md "Simulation chaos engine"). This automates ONLY
@@ -29,7 +29,7 @@
  *   inventory + a parseable no-op body), not a proven reproduction.
  *
  *   The `seed 0x...` line the tool emits is the tape's "informational
- *   seed slot" (lib/sim/src/seed_tape.c: seed_tape_save_to_memory), i.e.
+ *   seed slot" (engine/modules/sim/src/seed_tape.c: seed_tape_save_to_memory), i.e.
  *   the live xoshiro256++ register `rng.s[0]` at capture time — NOT the
  *   original scalar seed passed to `seed_tape_open()`. Feeding it into a
  *   FRESH `zclassic23-chaos` run will NOT reproduce the capsule's exact
@@ -43,7 +43,7 @@
  * Standalone-build discipline (mirrors tools/gen_sha3_windows.c): links
  * only the libs it directly uses (sim/postmortem + sim/seed_tape,
  * platform/clock + platform/rng, util/signal_handler + util/clientversion
- * + util/safe_alloc, lib/json) — no DB, no node libs, no Tor.
+ * + util/safe_alloc, platform/modules/json) — no DB, no node libs, no Tor.
  *
  * Test-friendly shape (mirrors tools/sim/chaos.c / test_chaos_harness.c):
  * the conversion logic lives in `postmortem_to_scenario_convert()`, a
@@ -51,7 +51,7 @@
  * A test can `#define POSTMORTEM_TO_SCENARIO_NO_MAIN` then
  * `#include "../../../tools/postmortem_to_scenario.c"` to call it
  * in-process against a synthetic capsule built with the real
- * `postmortem_capture_write()` API (see lib/test/src/test_postmortem_to_scenario.c).
+ * `postmortem_capture_write()` API (see tests/harness/src/test_postmortem_to_scenario.c).
  */
 
 #define _POSIX_C_SOURCE 200809L
@@ -234,7 +234,7 @@ static bool p2s_read_manifest(const char *cap_dir,
 /* ── Tape header seed slot (raw, read-only) ──────────────────────────── */
 
 /* Reads the 8-byte "informational seed slot" straight out of tape.bin's
- * documented header layout (lib/sim/src/seed_tape.c:
+ * documented header layout (engine/modules/sim/src/seed_tape.c:
  * seed_tape_save_to_memory — TAPE_HEADER_SIZE=32, magic "ZCLTAPE!" at
  * [0..8), version at [8], flags at [9], reserved [10..16), seed slot
  * [16..24) little-endian, wall_unix_start [24..32)). There is no public
@@ -267,8 +267,8 @@ static int p2s_read_tape_seed_slot(const char *cap_dir, uint64_t *seed_out)
 /* ── Boot-phase best-effort derivation ────────────────────────────────── */
 
 /* Scans a capsule's log.txt tail for the LAST "[boot-stage] X -> Y" trace
- * line (lib/util/src/boot_phase.c: boot_stage_advance_to()) and maps the
- * real `enum boot_stage` name (lib/util/include/util/boot_phase.h) to the
+ * line (platform/modules/util/src/boot_phase.c: boot_stage_advance_to()) and maps the
+ * real `enum boot_stage` name (platform/modules/util/include/util/boot_phase.h) to the
  * chaos DSL's 3-value boot_phase (idb_complete|listening|mempool_open).
  * The two vocabularies have no 1:1 relationship — this is a coarse,
  * best-effort hint, not a verified fact. Returns false (nothing written
@@ -405,7 +405,7 @@ static void p2s_render_skeleton(const struct postmortem_to_scenario_stats *st,
     p2s_appendf(buf, cap, off,
         "# Informational seed slot: 0x%016" PRIx64 "\n"
         "#   This is the tape's live xoshiro256++ rng.s[0] register at\n"
-        "#   capture time (lib/sim/src/seed_tape.c: seed_tape_save_to_memory,\n"
+        "#   capture time (engine/modules/sim/src/seed_tape.c: seed_tape_save_to_memory,\n"
         "#   \"informational seed slot\"), NOT the original scalar seed passed\n"
         "#   to seed_tape_open(). Feeding `seed 0x%016" PRIx64 "` below into a\n"
         "#   FRESH zclassic23-chaos run will NOT reproduce this capsule's\n"
@@ -430,7 +430,7 @@ static void p2s_render_skeleton(const struct postmortem_to_scenario_stats *st,
 
     p2s_appendf(buf, cap, off,
         "# Boot phase: %s (%s)\n"
-        "#   enum boot_stage has 12 real stages (lib/util/include/util/\n"
+        "#   enum boot_stage has 12 real stages (platform/modules/util/include/util/\n"
         "#   boot_phase.h); the chaos DSL's boot_phase only distinguishes\n"
         "#   idb_complete|listening|mempool_open. This mapping is a coarse,\n"
         "#   best-effort hint from the last \"[boot-stage] X -> Y\" line in\n"
@@ -509,7 +509,7 @@ int postmortem_to_scenario_convert(const char *cap_dir_in, const char *out_path_
             ".cap directory (tape.bin + manifest.json). A compressed "
             ".cap.gz capsule must be inspected via "
             "postmortem_capsule_load_tape() directly (see "
-            "examples/09_seed_replay.c) -- decompression is out of scope "
+            "docs/examples/09_seed_replay.c) -- decompression is out of scope "
             "for this tool.", cap_dir_in);
     }
     snprintf(st->cap_dir, sizeof(st->cap_dir), "%s", cap_dir_in);
@@ -581,7 +581,7 @@ int postmortem_to_scenario_convert(const char *cap_dir_in, const char *out_path_
  *
  * Compiled out when this file is #include-d into a test with
  * POSTMORTEM_TO_SCENARIO_NO_MAIN defined first (mirrors CHAOS_NO_MAIN in
- * tools/sim/chaos.c / lib/test/src/test_chaos_harness.c). */
+ * tools/sim/chaos.c / tests/harness/src/test_chaos_harness.c). */
 #ifndef POSTMORTEM_TO_SCENARIO_NO_MAIN
 
 static void p2s_usage(const char *argv0)

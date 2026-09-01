@@ -528,9 +528,9 @@ ranked_file_in_scope() {
 }
 
 run_scope_selftest() {
-    local net_path=lib/net/src/acme_alpn_challenge.c
-    local test_path=lib/test/differential/groth16_comb_bench.c
-    local outside_path=config/src/app_context.c
+    local net_path=core/modules/net/src/acme_alpn_challenge.c
+    local test_path=tests/harness/differential/groth16_comb_bench.c
+    local outside_path=engine/composition/src/app_context.c
     local groups_file="$run_root/scope-selftest.groups"
     local literal_file="$run_root/scope-selftest.literal.tsv"
     local bm25_file="$run_root/scope-selftest.bm25.tsv"
@@ -546,7 +546,7 @@ run_scope_selftest() {
     unset invariant_membership_tree_root
     membership_check "$row" c23_codeindex "$groups_file"
     sort -u -o "$groups_file" "$groups_file"
-    [[ $(paste -sd, "$groups_file") = lib/net,lib/test ]] ||
+    [[ $(paste -sd, "$groups_file") = core/modules/net,lib/test ]] ||
         fail "scope selftest relevant directory-group union changed"
     room=$(code_room_document "$outside_path")
     group=$(validated_room_group "$room" "$outside_path")

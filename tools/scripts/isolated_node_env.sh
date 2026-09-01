@@ -298,7 +298,7 @@ iso_init() {
 # which then began re-serving it to the swarm.
 #
 # Both node-side causes are now fixed and regression-tested (see
-# lib/test/src/test_boot_bundle_fetch.c case_network_gate /
+# tests/harness/src/test_boot_bundle_fetch.c case_network_gate /
 # case_seed_set): boot_bundle_fetch_should_run is mainnet-only, and
 # bbf_add_connect_seed refuses to substitute a NON-DEFAULT port the
 # operator named (39xxx fixture sinks stay dead; :8033 is the published

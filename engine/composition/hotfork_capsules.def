@@ -1,0 +1,293 @@
+/* Development-only HOT_FORK stories. Consumer defines:
+ * HOTFORK_CAPSULE(owner_id, feedback_class, source_tu, story_id,
+ *                 fixture_id, adapter_id, max_time_ms,
+ *                 forbidden_effect_mask, exercised_surface)
+ *
+ * The manifest names frozen story authority only. The candidate descriptor
+ * is generated after compilation so it can bind the exact object root. */
+
+HOTFORK_CAPSULE(
+    "vcs.source-package-checkout.v1",
+    "HOT_FORK",
+    "contexts/commons/modules/vcs/src/source_package_checkout.c",
+    "source-package-checkout-result-and-shard-shape.v1",
+    "source-package-checkout-result-and-shard-shape.v1",
+    "source-package-checkout-result-and-shard-shape.v1",
+    1000,
+    "git|github|make|shell|sqlite|dht|network|publication|full_link|full_suite",
+    "vcs_source_package_checkout_result_string+source_checkout_shard_index")
+
+HOTFORK_CAPSULE(
+    "dev.native-command-input-policy.v1",
+    "HOT_FORK",
+    "tools/command/native_dev_command.c",
+    "native-dev-input-and-interrupt-policy.v1",
+    "native-dev-input-and-interrupt-policy.v1",
+    "native-dev-input-and-interrupt-policy.v1",
+    1000,
+    "git|github|make|shell|sqlite|dht|network|publication|full_link|full_suite",
+    "dev_request_files+dev_drive_input_int+dev_event_interrupting+dev_group_valid+dev_generation_name_valid+dev_failure_id_valid")
+
+HOTFORK_CAPSULE(
+    "dev.native-hotswap-receipt-policy.v1",
+    "HOT_FORK",
+    "tools/command/native_dev_hotswap.c",
+    "native-dev-hotswap-receipt-policy.v1",
+    "native-dev-hotswap-receipt-policy.v1",
+    "native-dev-hotswap-receipt-policy.v1",
+    1000,
+    "git|github|make|shell|sqlite|dht|network|publication|full_link|full_suite",
+    "zcl_native_hotswap_publish_hooks+report_to_reply+service_report_to_reply+registry_commit_batch_cb+registry_probe_cb")
+
+HOTFORK_CAPSULE(
+    "dev.watcher-classification-core.v1",
+    "HOT_FORK",
+    "tools/dev/devloop_watch.c",
+    "devloop-watch-classification-core.v1",
+    "devloop-watch-classification-core.v1",
+    "devloop-watch-classification-core.v1",
+    1000,
+    "git|github|make|shell|sqlite|dht|network|publication|full_link|full_suite",
+    "watch_c_source+watch_epoch_all_c+watch_component_for_files")
+
+HOTFORK_CAPSULE(
+    "dev.cycle-diagnostic-policy.v1",
+    "HOT_FORK",
+    "tools/dev/devloop_cycle.c",
+    "devloop-cycle-diagnostic-policy.v1",
+    "devloop-cycle-diagnostic-policy.v1",
+    "devloop-cycle-diagnostic-policy.v1",
+    1000,
+    "git|github|make|shell|sqlite|dht|network|publication|full_link|full_suite",
+    "distill_first_error+compiler_error_shape+cycle_text_preview+proof_complete+publish_mode+watcher_guidance")
+
+HOTFORK_CAPSULE(
+    "dev.impact-plan-classification.v1",
+    "HOT_FORK",
+    "tools/dev/devloop_plan.c",
+    "devloop-plan-classification.v1",
+    "devloop-plan-classification.v1",
+    "devloop-plan-classification.v1",
+    1000,
+    "git|github|make|shell|sqlite|dht|network|publication|full_link|full_suite",
+    "path_is_safe+path_classification+watch_event_classification+dimension_names")
+
+HOTFORK_CAPSULE(
+    "vcs.devloop-proof-envelope.v1",
+    "HOT_FORK",
+    "contexts/commons/modules/vcs/src/vcs_devloop.c",
+    "vcs-devloop-publication-envelope.v1",
+    "vcs-devloop-publication-envelope.v1",
+    "vcs-devloop-publication-envelope.v1",
+    1000,
+    "git|github|make|shell|sqlite|dht|network|publication|full_link|full_suite",
+    "publication_job_serialize+publication_job_parse+publication_receipt_serialize+publication_receipt_parse")
+
+HOTFORK_CAPSULE(
+    "app.native-read-rpc-composition.v1",
+    "HOT_FORK",
+    "engine/controllers/src/app_native_handlers.c",
+    "app-native-read-rpc-composition.v1",
+    "app-native-read-rpc-composition.v1",
+    "app-native-read-rpc-composition.v1",
+    1000,
+    "git|github|make|shell|sqlite|dht|network|publication|full_link|full_suite",
+    "app_read_rpc_method_and_param_composition+token_array_wrap")
+
+HOTFORK_CAPSULE(
+    "zcode.moderation-input-policy.v1",
+    "HOT_FORK",
+    "tools/command/native_zcode_moderation_command.c",
+    "zcode-moderation-input-policy.v1",
+    "zcode-moderation-input-policy.v1",
+    "zcode-moderation-input-policy.v1",
+    1000,
+    "git|github|make|shell|sqlite|dht|network|publication|full_link|full_suite",
+    "moderation_no_keys+moderation_backlog_input")
+
+HOTFORK_CAPSULE(
+    "zcode.dev-input-policy.v1",
+    "HOT_FORK",
+    "tools/command/native_zcode_dev_command.c",
+    "zcode-dev-input-policy.v1",
+    "zcode-dev-input-policy.v1",
+    "zcode-dev-input-policy.v1",
+    1000,
+    "git|github|make|shell|sqlite|dht|network|publication|full_link|full_suite",
+    "zdev_str+zdev_int+zdev_root+zdev_push_root+zdev_hex_wire+zdev_paths_overlap+zdev_candidate_input_path")
+
+HOTFORK_CAPSULE(
+    "zcode.epoch-propose-input-policy.v1",
+    "HOT_FORK",
+    "tools/command/native_zcode_epoch_propose_command.c",
+    "zcode-epoch-propose-input-policy.v1",
+    "zcode-epoch-propose-input-policy.v1",
+    "zcode-epoch-propose-input-policy.v1",
+    1000,
+    "git|github|make|shell|sqlite|dht|network|publication|full_link|full_suite",
+    "zep_str+zep_keys+zep_root+zep_u64_positive+zep_parse_propose")
+
+HOTFORK_CAPSULE(
+    "zcode.passport-input-policy.v1",
+    "HOT_FORK",
+    "tools/command/native_zcode_passport_command.c",
+    "zcode-passport-input-policy.v1",
+    "zcode-passport-input-policy.v1",
+    "zcode-passport-input-policy.v1",
+    1000,
+    "git|github|make|shell|sqlite|dht|network|publication|full_link|full_suite",
+    "passport_key_allowed+passport_parse_roots")
+
+HOTFORK_CAPSULE(
+    "zcode.workspace-input-policy.v1",
+    "HOT_FORK",
+    "tools/command/native_zcode_workspace_command.c",
+    "zcode-workspace-input-policy.v1",
+    "zcode-workspace-input-policy.v1",
+    "zcode-workspace-input-policy.v1",
+    1000,
+    "git|github|make|shell|sqlite|dht|network|publication|full_link|full_suite",
+    "workspace_decode_root+workspace_manifest_key_allowed+workspace_root_is_zero")
+
+HOTFORK_CAPSULE(
+    "vcs.source-package-transport-shape.v1",
+    "HOT_FORK",
+    "contexts/commons/modules/vcs/src/source_package_transport.c",
+    "source-package-transport-shape.v1",
+    "source-package-transport-shape.v1",
+    "source-package-transport-shape.v1",
+    1000,
+    "git|github|make|shell|sqlite|dht|network|publication|full_link|full_suite",
+    "vcs_source_package_transport_marker+vcs_source_package_transport_file_count+vcs_source_package_transport_file_at+vcs_source_package_offline_input_path")
+
+HOTFORK_CAPSULE(
+    "zcode.source-bundle-input-policy.v1",
+    "HOT_FORK",
+    "tools/command/native_zcode_source_bundle_command.c",
+    "zcode-source-bundle-input-policy.v1",
+    "zcode-source-bundle-input-policy.v1",
+    "zcode-source-bundle-input-policy.v1",
+    1000,
+    "git|github|make|shell|sqlite|dht|network|publication|full_link|full_suite",
+    "zsb_str+zsb_root+zsb_named_root+zsb_paths_disjoint+zsb_render")
+
+HOTFORK_CAPSULE(
+    "dev.test-group-catalog-policy.v1",
+    "HOT_FORK",
+    "tools/dev/test_group_catalog.c",
+    "test-group-catalog-selection-policy.v1",
+    "test-group-catalog-selection-policy.v1",
+    "test-group-catalog-selection-policy.v1",
+    1000,
+    "git|github|make|shell|sqlite|dht|network|publication|full_link|full_suite",
+    "catalog_contains+exclusive+semantic_leaf+resolve_exact+plan_selects+integration_policy+expand_plan+expand_immediate")
+
+HOTFORK_CAPSULE(
+    "shop.want-view-contract.v1",
+    "HOT_FORK",
+    "contexts/market/controllers/src/shop_native_want_view_contract.c",
+    "shop-want-view-contract.v1",
+    "shop-want-view-contract.v1",
+    "shop-want-view-contract.v1",
+    1000,
+    "git|github|make|shell|sqlite|dht|network|publication|full_link|full_suite",
+    "want_view_render+want_view_json+want_view_frozen_kat")
+
+HOTFORK_CAPSULE(
+    "shop.want-command-input-core.v1",
+    "HOT_FORK",
+    "contexts/market/controllers/src/shop_native_want.c",
+    "shop-want-command-input-core.v1",
+    "shop-want-command-input-core.v1",
+    "shop-want-command-input-core.v1",
+    1000,
+    "git|github|make|shell|sqlite|dht|network|publication|full_link|full_suite",
+    "shw_hex32+shw_build_want")
+
+HOTFORK_CAPSULE(
+    "kernel.command-input-validation-core.v1",
+    "HOT_FORK",
+    "engine/modules/kernel/src/command_registry.c",
+    "command-registry-input-validation-core.v1",
+    "command-registry-input-validation-core.v1",
+    "command-registry-input-validation-core.v1",
+    1000,
+    "git|github|make|shell|sqlite|dht|network|publication|full_link|full_suite",
+    "zcl_command_registry_input_validate+zcl_command_registry_input_str_max+zcl_command_registry_input_budget_bytes")
+
+HOTFORK_CAPSULE(
+    "crypto.curve25519-calculation.v1",
+    "HOT_FORK",
+    "core/modules/crypto/src/curve25519.c",
+    "curve25519-rfc7748-calculation.v1",
+    "curve25519-rfc7748-calculation.v1",
+    "curve25519-rfc7748-calculation.v1",
+    1000,
+    "git|github|make|shell|sqlite|dht|network|publication|full_link|full_suite",
+    "curve25519_scalarmult+curve25519_scalarmult_base")
+
+HOTFORK_CAPSULE(
+    "vcs.package-policy-calculation.v1",
+    "HOT_FORK",
+    "contexts/commons/modules/vcs/src/package_policy.c",
+    "package-policy-boundary-calculation.v1",
+    "package-policy-boundary-calculation.v1",
+    "package-policy-boundary-calculation.v1",
+    1000,
+    "git|github|make|shell|sqlite|dht|network|publication|full_link|full_suite",
+    "contexts/commons/modules/vcs/src/package_policy.c:all-15-public-functions.v1")
+
+HOTFORK_CAPSULE(
+    "zcode.package-view-contract.v1",
+    "HOT_FORK",
+    "tools/command/native_zcode_package_view_command.c",
+    "zcode-package-view-contract.v1",
+    "zcode-package-view-contract.v1",
+    "zcode-package-view-contract.v1",
+    1000,
+    "git|github|make|shell|sqlite|dht|network|publication|full_link|full_suite",
+    "package_view_contract+package_view_frozen_kat")
+
+HOTFORK_CAPSULE(
+    "shop.status-view-contract.v1",
+    "HOT_FORK",
+    "contexts/market/controllers/src/shop_native_handler.c",
+    "shop-status-view-contract.v1",
+    "shop-status-view-contract.v1",
+    "shop-status-view-contract.v1",
+    1000,
+    "git|github|make|shell|sqlite|dht|network|publication|full_link|full_suite",
+    "shop_status_wallet+shop_status_render+shop_status_frozen_kat")
+
+HOTFORK_CAPSULE(
+    "shop.reputation-view-contract.v1",
+    "HOT_FORK",
+    "contexts/market/controllers/src/shop_native_reputation.c",
+    "shop-reputation-view-contract.v1",
+    "shop-reputation-view-contract.v1",
+    "shop-reputation-view-contract.v1",
+    1000,
+    "git|github|make|shell|sqlite|dht|network|publication|full_link|full_suite",
+    "rep_root_seen+rep_pair_seen+reputation_view_frozen_kat")
+
+HOTFORK_CAPSULE(
+    "zcode.work-input-core.v1",
+    "HOT_FORK",
+    "tools/command/native_zcode_work_command.c",
+    "zcode-work-input-core.v1",
+    "zcode-work-input-core.v1",
+    "zcode-work-input-core.v1",
+    1000,
+    "git|github|make|shell|sqlite|dht|network|publication|full_link|full_suite",
+    "zwork_str+zwork_int+zwork_scope_add+zwork_scopes+zwork_source_bytes")
+
+HOTFORK_CAPSULE(
+    "zcode.corpus-command-core.v1",
+    "HOT_FORK",
+    "tools/command/native_zcode_corpus_command.c",
+    "zcode-corpus-command-core.v1",
+    "zcode-corpus-command-core.v1",
+    "zcode-corpus-command-core.v1",
+    1000,
+    "git|github|make|shell|sqlite|dht|network|publication|full_link|full_suite",
+    "lowercase_root+corpus_checkpoint_renderable+corpus_shard_metrics_collect")

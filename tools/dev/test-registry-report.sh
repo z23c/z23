@@ -12,7 +12,7 @@
 #
 # ── WHAT IS COMPARED, AND WHY IT IS EVIDENCE RATHER THAN A MODEL ──────────
 # REGISTERED comes from the X-macro registry itself (tools/dev/test-group-list.sh
-# parsing lib/test/src/test_parallel.c) — the same table the compiler turns into
+# parsing tests/harness/src/test_parallel.c) — the same table the compiler turns into
 # g_groups[].
 #
 # EXECUTED comes from the runner's OWN artifact, .cache/test-timing/last-run.json,
@@ -48,7 +48,7 @@ reg_count="$(printf '%s\n' "$registered" | wc -l | tr -d ' ')"
 gated="$($T_LIST --params-gated)"
 
 echo "── test registry reconciliation ────────────────────────────────────"
-echo "registry_source=lib/test/src/test_parallel.c"
+echo "registry_source=tests/harness/src/test_parallel.c"
 echo "registered_groups=$reg_count"
 
 if [ ! -f "$ARTIFACT" ]; then
@@ -63,7 +63,7 @@ if [ ! -f "$ARTIFACT" ]; then
     echo "existing one:  ZCL_TEST_TIMING_JSON=<path> make test-registry-report"
     echo
     echo "For reference, the policy that gates groups out of a default run"
-    echo "(group_is_params_heavy(), lib/test/src/test_parallel.c) currently names:"
+    echo "(group_is_params_heavy(), tests/harness/src/test_parallel.c) currently names:"
     # shellcheck disable=SC2086  # deliberate word splitting: one name per line
     printf '  %s\n' $gated
     exit 0

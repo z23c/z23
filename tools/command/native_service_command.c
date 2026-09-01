@@ -4,7 +4,7 @@
  * surface:
  *
  *   app service list      every service declared by
- *                         config/services/bindings.def, plus the catalog's
+ *                         engine/composition/services/bindings.def, plus the catalog's
  *                         SHA3 root
  *   app service inspect   one binding in full: the two namespaces it owns
  *                         (commands, state tables), its ZSLP token gate, the
@@ -32,7 +32,7 @@
  *
  * These four are the REGISTRY's own leaves. A service's own leaves live under
  * its command_prefix (app.service.<name>.*) and are declared in a
- * config/commands .def like any other native command, so they inherit the
+ * engine/composition/commands .def like any other native command, so they inherit the
  * catalog's auth/effect/risk declaration rather than asserting their own. */
 
 #include "command/native_command.h"
@@ -173,7 +173,7 @@ void zcl_native_handle_service_list(const struct zcl_command_request *request,
     (void)json_push_kv_str(&reply->data, "schema",
                            ZCL_SERVICE_BINDING_CATALOG_SCHEMA_NAME);
     (void)json_push_kv_str(&reply->data, "source",
-                           "config/services/bindings.def");
+                           "engine/composition/services/bindings.def");
     json_free(&services);
 }
 

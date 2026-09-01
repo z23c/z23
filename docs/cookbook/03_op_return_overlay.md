@@ -24,7 +24,7 @@ make -C examples && ./examples/bin/03_op_return_overlay
 
 (If `examples/` has no `Makefile` yet in your checkout, compile directly:
 `cc -std=c23 -O2 <the -I flags from the root Makefile's CFLAGS> \
-examples/03_op_return_overlay.c -o /tmp/03_op_return_overlay <link objects>`.)
+docs/examples/03_op_return_overlay.c -o /tmp/03_op_return_overlay <link objects>`.)
 
 ## Expected output sketch
 
@@ -49,19 +49,19 @@ in `docs/SIMULATOR_TXNS.md`'s cost table.
 
 ## Key APIs used
 
-- `lib/sim/include/sim/seed_tape.h` — `seed_tape_open` / `seed_tape_install` / `seed_tape_close`: deterministic RNG + virtual clock so every run is byte-identical.
-- `lib/sim/include/sim/simnet.h` — `simnet_init`, `simnet_use_seed_tape`, `simnet_tip_height`, `simnet_coin_value`: the RAM-only harness that drives blocks through the real `connect_block()`.
-- `lib/sim/include/sim/simnet_wallet.h` — `simnet_wallet_create`, `simnet_wallet_fund`, `simnet_wallet_op_return`: wallet-level helpers that build, fee, and enqueue an OP_RETURN carrier (with an optional paired value output).
-- `lib/sim/include/sim/simnet_mempool.h` — `simnet_mempool_mint`: mints the FIFO-held queued transaction(s) into the next block.
-- `lib/sim/src/simnet_mempool.c` (behavior documented in the header) — `simnet_mempool_add` deep-copies an accepted tx into `struct simnet.mempool_txs`; this example reads `sim.mempool_txs[sim.mempool_count - 1]` directly to inspect the exact queued transaction before it is mined.
-- `lib/script/include/script/script.h` — `script_get_op`: the generic script-walker used to parse the `OP_RETURN` opcode and its length-prefixed data push back out of a `scriptPubKey`; also `script_is_unspendable` (consensus definition of "provably unspendable").
-- `lib/coins/include/coins/coins.h` — `coins_from_transaction` (doc comment): the function that actually skips OP_RETURN/unspendable outputs when building the UTXO record connect_block persists — this is *why* vout 0 disappears from `simnet_coin_value` after mining.
+- `engine/modules/sim/include/sim/seed_tape.h` — `seed_tape_open` / `seed_tape_install` / `seed_tape_close`: deterministic RNG + virtual clock so every run is byte-identical.
+- `engine/modules/sim/include/sim/simnet.h` — `simnet_init`, `simnet_use_seed_tape`, `simnet_tip_height`, `simnet_coin_value`: the RAM-only harness that drives blocks through the real `connect_block()`.
+- `engine/modules/sim/include/sim/simnet_wallet.h` — `simnet_wallet_create`, `simnet_wallet_fund`, `simnet_wallet_op_return`: wallet-level helpers that build, fee, and enqueue an OP_RETURN carrier (with an optional paired value output).
+- `engine/modules/sim/include/sim/simnet_mempool.h` — `simnet_mempool_mint`: mints the FIFO-held queued transaction(s) into the next block.
+- `engine/modules/sim/src/simnet_mempool.c` (behavior documented in the header) — `simnet_mempool_add` deep-copies an accepted tx into `struct simnet.mempool_txs`; this example reads `sim.mempool_txs[sim.mempool_count - 1]` directly to inspect the exact queued transaction before it is mined.
+- `core/modules/script/include/script/script.h` — `script_get_op`: the generic script-walker used to parse the `OP_RETURN` opcode and its length-prefixed data push back out of a `scriptPubKey`; also `script_is_unspendable` (consensus definition of "provably unspendable").
+- `core/modules/coins/include/coins/coins.h` — `coins_from_transaction` (doc comment): the function that actually skips OP_RETURN/unspendable outputs when building the UTXO record connect_block persists — this is *why* vout 0 disappears from `simnet_coin_value` after mining.
 
 ## Production counterpart
 
-- Generic OP_RETURN + value transaction assembly: `wallet_create_transaction()` / `wallet_create_transaction_multi()` in `lib/wallet/include/wallet/wallet.h`.
-- ZNAM (on-chain name registry) OP_RETURN encoding + commit: `rpc_name_register()` in `app/controllers/src/name_controller.c`, using the field layout in `lib/znam/include/znam/znam.h` (`ZNAM_LOKAD_BYTES = "ZNAM"`, `ZNAM_CMD_*` command bytes).
-- ZSLP (token protocol) OP_RETURN encoding + commit: `zslp_command_commit_with_op_return()` in `app/services/include/services/zslp_command_service.h`, using the field layout in `lib/zslp/include/zslp/slp.h` (`SLP_LOKAD_BYTES = "SLP\0"`).
+- Generic OP_RETURN + value transaction assembly: `wallet_create_transaction()` / `wallet_create_transaction_multi()` in `contexts/wallet/modules/wallet/include/wallet/wallet.h`.
+- ZNAM (on-chain name registry) OP_RETURN encoding + commit: `rpc_name_register()` in `engine/controllers/src/name_controller.c`, using the field layout in `contexts/naming/modules/znam/include/znam/znam.h` (`ZNAM_LOKAD_BYTES = "ZNAM"`, `ZNAM_CMD_*` command bytes).
+- ZSLP (token protocol) OP_RETURN encoding + commit: `zslp_command_commit_with_op_return()` in `contexts/market/services/include/services/zslp_command_service.h`, using the field layout in `contexts/market/modules/zslp/include/zslp/slp.h` (`SLP_LOKAD_BYTES = "SLP\0"`).
 
 Both real protocols are read back the same way this example does: parse the
 scriptPubKey with `script_get_op()`, check the Lokad ID, then decode the

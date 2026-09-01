@@ -1,4 +1,4 @@
-lib/test/src/test_zcode_package_dev.c:8:10: fatal error: vcs/package_capsule.h: No such file or directory
+tests/harness/src/test_zcode_package_dev.c:8:10: fatal error: vcs/package_capsule.h: No such file or directory
     8 | #include "vcs/package_capsule.h"
       |          ^~~~~~~~~~~~~~~~~~~~~~~
 compilation terminated.

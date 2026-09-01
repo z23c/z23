@@ -242,7 +242,7 @@ flowchart TD
 flowchart TD
     subgraph Tor["Embedded Tor (pthread)"]
         TOR_BOOT[Bootstrap Tor circuit] --> ONION_GEN[Generate .onion address<br/>optional vanity prefix]
-        ONION_GEN --> DYNHOST[lib/net/src/onion_service.c<br/>hidden service listener]
+        ONION_GEN --> DYNHOST[core/modules/net/src/onion_service.c<br/>hidden service listener]
     end
 
     REMOTE[Remote client<br/>via Tor network] -->|.onion address| DYNHOST

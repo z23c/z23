@@ -1,7 +1,7 @@
 # OS-A6 — the adaptive client puzzle
 
-Shipped. The primitive is `lib/net/src/puzzle.c` +
-`lib/net/include/net/puzzle.h`; `lib/test/src/test_puzzle.c` is the
+Shipped. The primitive is `core/modules/net/src/puzzle.c` +
+`core/modules/net/include/net/puzzle.h`; `tests/harness/src/test_puzzle.c` is the
 behavior model (test group `puzzle`).
 
 `struct puzzle_gate` is the one admission primitive in the tree. It owns a
@@ -23,10 +23,10 @@ a fresh process starts clean.
 
 | Surface | Instance | Token binding | Policy delta |
 |---------|----------|---------------|--------------|
-| file service bulk stream | `g_fs_pow_gate` (`lib/net/src/file_service.c`) | handshake nonce | defaults |
-| onion expensive routes | `g_onion_puzzle_gate` (`lib/net/src/onion_ratelimit.c`) | route class | max 22 bits, 120 s epoch |
-| store order mint | `g_store_pow_gate` (`app/controllers/src/store_controller_pow.c`) | product id | floor 20 bits, max 24, 180 s epoch, 300 s skew |
-| snapshot serve (load census only) | `g_snapsync_serve_load_gate` (`app/services/src/snapshot_serve.c`) | n/a — `admit_external` | soft rate 2/s |
+| file service bulk stream | `g_fs_pow_gate` (`core/modules/net/src/file_service.c`) | handshake nonce | defaults |
+| onion expensive routes | `g_onion_puzzle_gate` (`core/modules/net/src/onion_ratelimit.c`) | route class | max 22 bits, 120 s epoch |
+| store order mint | `g_store_pow_gate` (`engine/controllers/src/store_controller_pow.c`) | product id | floor 20 bits, max 24, 180 s epoch, 300 s skew |
+| snapshot serve (load census only) | `g_snapsync_serve_load_gate` (`engine/services/src/snapshot_serve.c`) | n/a — `admit_external` | soft rate 2/s |
 
 The store swap replaced a fixed 20-bit `fast_sync_verify_pow()` plus a
 hand-rolled 4096-entry replay ring. The floor is pinned at the old fixed
@@ -52,12 +52,12 @@ therefore no longer what a real client should call:
 - `puzzle_solve_from()` — explicit start, when the caller owns the policy.
 
 Costs are identical; the predicate is a leading-zero test on a hash, so no
-start point is luckier. The browser solver in `app/views/src/store_view.c`
+start point is luckier. The browser solver in `contexts/explorer/views/src/store_view.c`
 starts at a random offset for the same reason.
 
 ## Snapshot serve — why the verdict is not load-bearing yet
 
-`snapsync_validate_serve_request()` (`app/services/src/snapshot_serve.c`)
+`snapsync_validate_serve_request()` (`engine/services/src/snapshot_serve.c`)
 still admits on the legacy fixed-difficulty `fast_sync_verify_pow()` plus
 the per-IP/global rate limiter. Every accepted request is additionally fed
 to `puzzle_gate_admit_external()`, so the shared gate's load EWMA finally
@@ -66,19 +66,19 @@ census (`snapsync_get_serve_puzzle_census`) and discarded for admission.
 
 The reason, verified in the source rather than inherited:
 
-- `snapsync_build_request_pow()` (`app/services/src/snapshot_offer.c`) sets
+- `snapsync_build_request_pow()` (`engine/services/src/snapshot_offer.c`) sets
   `peer_id = SHA3-256(peer_ip)` over a 16-byte address, then
   `fast_sync_solve_pow()` sets `timestamp` to whole wall seconds and walks
   `nonce` from 0. Every input is a pure function of (address, second), so
   two solves sharing both serialize to BYTE-IDENTICAL proof bytes.
 - The address hashed is `node->addr.svc.addr.ip` at the requester's call
-  site (`lib/net/src/msgprocessor_snapshot.c`) — the address of the peer
+  site (`core/modules/net/src/msgprocessor_snapshot.c`) — the address of the peer
   being ASKED. So two DIFFERENT honest peers requesting from the same
   server in the same second also collide.
 - The serve side never compares `pow.peer_id` to the connection the
   request arrived on (`peer_ip` feeds only the rate limiter), so the field
   binds nothing today.
-- `lib/test/src/test_snapshot_serve_loopback.c` runs the whole loopback
+- `tests/harness/src/test_snapshot_serve_loopback.c` runs the whole loopback
   twice in one process from one fixed loopback address, each time building
   a real `zsnapreq`; whenever the two runs land in the same wall second the
   proofs are identical. That test now asserts the request is served anyway
@@ -113,13 +113,13 @@ older binary — which is the population that matters.
 
 ## Still off the gate
 
-- **ZNAM name registration** (`app/controllers/src/name_site_controller.c`)
+- **ZNAM name registration** (`contexts/explorer/controllers/src/name_site_controller.c`)
   — fixed `FAST_SYNC_POW_BITS` behind its own 4096-entry replay ring
   (`name_pow_claim_once`), the same shape the store just shed. It binds a
   per-name token already, so it is the same direct swap the store was.
 - **`msgprocessor` snapshot-request PoW** (`SNAP_POW_*` in
-  `lib/net/include/net/msgprocessor.h`, implemented in
-  `lib/net/src/msgprocessor_snapshot_serve.c`) — a second hand-rolled
+  `core/modules/net/include/net/msgprocessor.h`, implemented in
+  `core/modules/net/src/msgprocessor_snapshot_serve.c`) — a second hand-rolled
   adaptive puzzle with its own bucket epoch, difficulty ramp and grace
   window, default-disarmed.
 

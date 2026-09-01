@@ -3,7 +3,7 @@
 #
 # "The folder is the type; the filename is the entity" (FRAMEWORK.md Law 1).
 # A file whose name ends in ANOTHER shape's suffix — e.g. a *_controller.c
-# living in app/services/src/ — lies about its shape and re-introduces the
+# living in engine/services/src/ — lies about its shape and re-introduces the
 # exact naming drift the S1 service renames removed. This gate locks that
 # in: it is the recurrence guard for "filename matches folder".
 #
@@ -74,30 +74,30 @@ fail=0
 violations=()
 
 for folder in "${!OWN[@]}"; do
-    d="app/$folder/src"
-    [ -d "$d" ] || continue
     own="${OWN[$folder]}"
-    while IFS= read -r f; do
-        [ -e "$f" ] || continue
-        b="$(basename "$f" .c)"
-        # Override marker anywhere in the file: skip.
-        if grep -qE '//[[:space:]]*suffix-ok:[A-Za-z0-9][A-Za-z0-9_-]*' "$f" 2>/dev/null; then
-            continue
-        fi
-        for shape in $ALL_SHAPES; do
-            [ "$shape" = "$own" ] && continue
-            case "$b" in
-                *_"$shape")
-                    violations+=("$f ends in foreign-shape suffix _$shape (this folder's shape: $own)")
-                    fail=1
-                    break ;;
-            esac
-        done
-    done < <(find "$d" -maxdepth 1 -type f -name '*.c' | sort)
+    while IFS= read -r d; do
+        while IFS= read -r f; do
+            [ -e "$f" ] || continue
+            b="$(basename "$f" .c)"
+            # Override marker anywhere in the file: skip.
+            if grep -qE '//[[:space:]]*suffix-ok:[A-Za-z0-9][A-Za-z0-9_-]*' "$f" 2>/dev/null; then
+                continue
+            fi
+            for shape in $ALL_SHAPES; do
+                [ "$shape" = "$own" ] && continue
+                case "$b" in
+                    *_"$shape")
+                        violations+=("$f ends in foreign-shape suffix _$shape (this folder's shape: $own)")
+                        fail=1
+                        break ;;
+                esac
+            done
+        done < <(find "$d/src" -maxdepth 1 -type f -name '*.c' 2>/dev/null | sort)
+    done < <(repo_shape_room_dirs "$folder")
 done
 
 if [ "$fail" = "0" ]; then
-    echo "check_framework_filename_suffix: clean — no app/ file carries a foreign-shape filename suffix"
+    echo "check_framework_filename_suffix: clean — no shape file carries a foreign-shape filename suffix"
     exit 0
 fi
 

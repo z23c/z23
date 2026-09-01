@@ -387,7 +387,7 @@ static bool moderation_view_frozen_kat(const void *opaque, char *why,
 
 static const struct zcl_hotswap_service_contract k_moderation_view_contract = {
     .service_id = ZCODE_MODERATION_VIEW_SERVICE_ID,
-    .source_tu = "app/services/src/zcode_moderation_view_service.c",
+    .source_tu = "contexts/commons/services/src/zcode_moderation_view_service.c",
     .abi_version = ZCL_HOTSWAP_SERVICE_ABI_V1,
     .vtable_size = sizeof(struct zcode_moderation_view_service_v1),
     .abi_fingerprint = ZCODE_MODERATION_VIEW_ABI_FINGERPRINT,
@@ -556,7 +556,7 @@ static bool economics_service_frozen_kat(const void *opaque, char *why,
 
 static const struct zcl_hotswap_service_contract k_economics_contract = {
     .service_id = ZCODE_C23_ECONOMICS_SERVICE_ID,
-    .source_tu = "app/services/src/zcode_c23_economics_service.c",
+    .source_tu = "contexts/commons/services/src/zcode_c23_economics_service.c",
     .abi_version = ZCL_HOTSWAP_SERVICE_ABI_V1,
     .vtable_size = sizeof(struct zcode_c23_economics_service_v1),
     .abi_fingerprint = ZCODE_C23_ECONOMICS_ABI_FINGERPRINT,

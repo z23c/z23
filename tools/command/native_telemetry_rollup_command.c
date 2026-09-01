@@ -8,14 +8,14 @@
  * problem, and is handed the exact command to drill into it.
  *
  * The fold itself is NOT here. It runs inside the node
- * (app/services/src/telemetry_rollup.c) and is reached over the same
+ * (engine/services/src/telemetry_rollup.c) and is reached over the same
  * SELECT-only `dumpstate` RPC the per-domain node-scoped leaves use, because
  * a rollup collects every domain and most collectors read subsystems that
  * only exist in a running node's process — in a one-shot CLI process the sync
  * collector reaches chain_params_get() and aborts on its assertion. What a
  * handler here owns is one decision: which projection to ask for.
  *
- * Bound by config/commands/telemetry/root.def.
+ * Bound by engine/composition/commands/telemetry/root.def.
  */
 
 #include "command/native_command.h"

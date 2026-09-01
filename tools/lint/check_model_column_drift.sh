@@ -22,9 +22,9 @@
 # (a COUNT, a SUM, one value column) cannot, and is not flagged.
 #
 # The fix is not to renumber carefully. It is to declare the model's fields
-# once in app/models/include/models/def/<model>_fields.def and derive the
+# once in engine/models/include/models/def/<model>_fields.def and derive the
 # column string, the read index and the bind position from that one list —
-# see app/models/include/models/model_fields.h, and blog_post.c,
+# see engine/models/include/models/model_fields.h, and blog_post.c,
 # market_download.c or tx_index.c for worked conversions. A converted model
 # has no literal column index left to get wrong, so it leaves the baseline.
 #
@@ -48,6 +48,8 @@ ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 cd "$ROOT"
 # shellcheck source=tools/lint/gate_lib.sh
 source "$SCRIPT_DIR/gate_lib.sh"
+# shellcheck source=tools/lint/repo_shape.sh
+source "$SCRIPT_DIR/repo_shape.sh"
 
 # ── selftest ───────────────────────────────────────────────────────────────
 # A gate nobody has seen fail is a gate nobody should trust. Each case plants
@@ -152,7 +154,6 @@ fi
 MODE="${ZCL_LINT_MODE:-WARN}"
 # ZCL_MODEL_DRIFT_ROOT overrides the scanned directory — selftest isolation
 # only. Unset in production.
-SCAN_ROOT="${ZCL_MODEL_DRIFT_ROOT:-app/models/src}"
 BASELINE="${ZCL_MODEL_DRIFT_BASELINE:-$SCRIPT_DIR/model_column_drift_baseline.txt}"
 
 READ_MACROS='AR_READ_BLOB|AR_READ_STR|AR_COL_INT|AR_COL_BYTES|AR_COL_TEXT|AR_COL_DOUBLE'
@@ -170,10 +171,18 @@ distinct_literal_indices() {
     | grep -c . || true
 }
 
-[ -d "$SCAN_ROOT" ] || {
-    echo "check_model_column_drift: FATAL — $SCAN_ROOT is missing" >&2
-    exit 2
-}
+if [ -n "${ZCL_MODEL_DRIFT_ROOT:-}" ]; then
+    SCAN_ROOTS=("$ZCL_MODEL_DRIFT_ROOT")
+else
+    mapfile -t SCAN_ROOTS < <(
+        repo_shape_room_dirs models | sed 's@$@/src@' |
+        while read -r d; do [ -d "$d" ] && printf '%s\n' "$d"; done
+    )
+fi
+root_floor=2
+[ -n "${ZCL_MODEL_DRIFT_ROOT:-}" ] && root_floor=1
+gate_require_scanned "${#SCAN_ROOTS[@]}" "$root_floor" check_model_column_drift \
+    "physical model-room set came back hollow"
 
 declare -A BASELINED=()
 baseline_count=0
@@ -183,23 +192,25 @@ scanned=0
 violations=0
 stale=0
 violating_files=()
-for f in "$SCAN_ROOT"/*.c; do
-    [ -f "$f" ] || continue
-    scanned=$((scanned + 1))
-    rel="${f#./}"
-    n="$(distinct_literal_indices "$f")"
-    if [ "$n" -ge 2 ]; then
-        violating_files+=("$rel")
-        if [ "$MODE" = "RATCHET" ] && [ -n "${BASELINED[$rel]:-}" ]; then
-            continue
+for root in "${SCAN_ROOTS[@]}"; do
+    for f in "$root"/*.c; do
+        [ -f "$f" ] || continue
+        scanned=$((scanned + 1))
+        rel="${f#./}"
+        n="$(distinct_literal_indices "$f")"
+        if [ "$n" -ge 2 ]; then
+            violating_files+=("$rel")
+            if [ "$MODE" = "RATCHET" ] && [ -n "${BASELINED[$rel]:-}" ]; then
+                continue
+            fi
+            violations=$((violations + 1))
+            echo "$rel: $n distinct hand-written column indices in row reads" >&2
         fi
-        violations=$((violations + 1))
-        echo "$rel: $n distinct hand-written column indices in row reads" >&2
-    fi
+    done
 done
 
 gate_require_scanned "$scanned" 20 check_model_column_drift \
-    "app/models/src should hold dozens of model sources"
+    "engine/models/src should hold dozens of model sources"
 
 # Shrink-only: a baselined file that no longer violates must lose its line.
 if [ "$MODE" = "RATCHET" ]; then
@@ -216,7 +227,7 @@ if [ "$MODE" = "RATCHET" ]; then
 fi
 
 echo "[check_model_column_drift] scanned $scanned model file(s), ${#violating_files[@]} with hand-written column indices, $violations unbaselined, $stale stale baseline entry(ies) (mode: $MODE)"
-echo "[check_model_column_drift] fix: declare the fields once in app/models/include/models/def/<model>_fields.def and derive the mapping (models/model_fields.h)"
+echo "[check_model_column_drift] fix: declare the fields once in engine/models/include/models/def/<model>_fields.def and derive the mapping (models/model_fields.h)"
 if [ "$MODE" = "RATCHET" ]; then
     echo "[check_model_column_drift] baseline: $BASELINE ($baseline_count entry(ies), may only SHRINK)"
 fi

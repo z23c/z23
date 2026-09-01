@@ -17,7 +17,7 @@
  *   - coinbase restrictions (no joinsplits/shielded, scriptSig 2..100 bytes)
  *   - non-coinbase: no null prevouts
  *
- * What's NOT here (deliberately left in lib/validation/):
+ * What's NOT here (deliberately left in core/modules/validation/):
  *   - signature, JoinSplit, or Sapling proof verification (crypto)
  *   - UTXO existence / spentness (state)
  *   - contextual locktime against block height (state)

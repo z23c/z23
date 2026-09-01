@@ -149,7 +149,7 @@ eval_claim() {
     local body="$1"
     body="${body%%#*}"                                   # strip the free-text note
     # Split on whitespace with GLOBBING OFF: a pathspec is routinely a glob
-    # (lib/vcs/src/*.c) and must reach git verbatim, never pre-expanded by
+    # (contexts/commons/modules/vcs/src/*.c) and must reach git verbatim, never pre-expanded by
     # this shell against the cwd.
     set -f
     # shellcheck disable=SC2206
@@ -309,11 +309,11 @@ selfcheck() {
         echo "The Makefile is still the build entry point."
         echo "<!-- claim: file-present Makefile -->"
         echo "The event-log-fed UTXO projection was deleted by Program H1."
-        echo "<!-- claim: file-absent lib/storage/src/utxo_projection.c # 9b5add018 -->"
+        echo "<!-- claim: file-absent engine/modules/storage/src/utxo_projection.c # 9b5add018 -->"
         echo "The package swarm is wired to a real P2P socket at boot."
-        echo "<!-- claim: symbol-present p2p_node_begin_message config/src/boot_zcode_swarm_membership.c -->"
+        echo "<!-- claim: symbol-present p2p_node_begin_message engine/composition/src/boot_zcode_swarm_membership.c -->"
         echo "No placeholder symbol survives there."
-        echo "<!-- claim: symbol-absent zzz_doc_claims_selftest_absent_zzz config/src/boot_zcode_swarm_membership.c -->"
+        echo "<!-- claim: symbol-absent zzz_doc_claims_selftest_absent_zzz engine/composition/src/boot_zcode_swarm_membership.c -->"
         echo "The projection copy stays dead."
         echo "<!-- claim: $good_gate check-no-utxo-projection -->"
     } > "$tmp/good.md"
@@ -321,18 +321,18 @@ selfcheck() {
         echo "Stale: says the Makefile is gone."
         echo "<!-- claim: file-absent Makefile -->"
         echo "Stale: says the deleted projection is still here."
-        echo "<!-- claim: file-present lib/storage/src/utxo_projection.c -->"
+        echo "<!-- claim: file-present engine/modules/storage/src/utxo_projection.c -->"
         echo "Stale: says a live symbol is gone."
-        echo "<!-- claim: symbol-absent p2p_node_begin_message config/src/boot_zcode_swarm_membership.c -->"
+        echo "<!-- claim: symbol-absent p2p_node_begin_message engine/composition/src/boot_zcode_swarm_membership.c -->"
         echo "Stale: says an absent symbol is present."
-        echo "<!-- claim: symbol-present zzz_doc_claims_selftest_absent_zzz config/src/boot_zcode_swarm_membership.c -->"
+        echo "<!-- claim: symbol-present zzz_doc_claims_selftest_absent_zzz engine/composition/src/boot_zcode_swarm_membership.c -->"
         echo "Stale: oracle now reports the opposite."
         echo "<!-- claim: $bad_gate check-no-utxo-projection -->"
     } > "$tmp/bad.md"
     {
         echo "Syntax documentation, not a live claim:"
         echo '```'
-        echo "<!-- claim: file-present lib/storage/src/utxo_projection.c -->"
+        echo "<!-- claim: file-present engine/modules/storage/src/utxo_projection.c -->"
         echo "<!-- claim: gate-fails check-no-utxo-projection -->"
         echo '```'
     } > "$tmp/fenced.md"

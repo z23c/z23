@@ -8,7 +8,7 @@
 # tip_wedged_resnapshot are CRITICAL conditions whose detect() depends on
 # peer/network state (connman_max_peer_height / sync_monitor_connman).
 # Both shipped with `cooldown_secs` unset (0 = the struct condition default).
-# lib/framework/src/condition.c's condition_cooldown_rearm() treats
+# engine/modules/framework/src/condition.c's condition_cooldown_rearm() treats
 # cooldown_secs == 0 as "legacy: latch permanently at max_attempts" — the
 # CORRECT behavior for a genuinely local, deterministic-unrecoverable fault
 # (disk full, corrupt local index), but WRONG for a condition whose only
@@ -68,14 +68,14 @@
 # --- self-test ---
 # ZCL_CONDITION_COOLDOWN_SELFTEST=1 runs an internal fixture suite against
 # an isolated tmp directory (ZCL_CONDITION_COOLDOWN_SCAN_DIR override) —
-# it NEVER touches app/conditions/src. It plants a cooldown-less CRITICAL
+# it NEVER touches engine/conditions/src. It plants a cooldown-less CRITICAL
 # fixture calling connman_max_peer_height(), asserts the gate exits 2 and
 # names the offending condition, removes it, and asserts a clean rerun
 # passes — plus sibling cases (cooldown-bearing pass, progressing-exempt
 # pass, local-only-no-network pass, WARN-severity-ignored pass, hollow-scan
 # fail-loud, recursive-selftest refusal). Wired into `make test` /
 # `make test-parallel` via
-# t_e14_condition_cooldown_gate() in lib/test/src/test_make_lint_gates.c so
+# t_e14_condition_cooldown_gate() in tests/harness/src/test_make_lint_gates.c so
 # it cannot silently rot.
 set -euo pipefail
 
@@ -118,7 +118,7 @@ condition_name_for_file() {
 }
 
 main() {
-    local scan_dir="${ZCL_CONDITION_COOLDOWN_SCAN_DIR:-app/conditions/src}"
+    local scan_dir="${ZCL_CONDITION_COOLDOWN_SCAN_DIR:-engine/conditions/src}"
     local -a files
     mapfile -t files < <(find "$scan_dir" -maxdepth 1 -type f -name '*.c' 2>/dev/null | sort)
 

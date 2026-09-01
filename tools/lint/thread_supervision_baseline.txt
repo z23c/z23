@@ -8,7 +8,7 @@
 #
 # RATCHET: this list may only SHRINK. To remove an entry, give the thread a
 # liveness contract via util/thread_liveness.h (exemplar:
-# lib/health/src/heartbeat.c) or an inline // supervised: / //
+# engine/modules/health/src/heartbeat.c) or an inline // supervised: / //
 # thread-supervision-ok: marker at the spawn site, then delete the line. A
 # stale entry (thread renamed/removed/now-covered) fails the gate, forcing
 # the count down.

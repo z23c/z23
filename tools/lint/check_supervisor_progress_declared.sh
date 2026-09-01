@@ -50,7 +50,7 @@
 # far riskier change than making the choice visible. This gate makes the debt
 # countable and one-directional; the arming is per-service work, each with
 # its own idle-vs-blocked distinction to get right (see
-# app/services/src/op_return_backfill_service.c for the worked example).
+# engine/services/src/op_return_backfill_service.c for the worked example).
 #
 # Unit of measurement
 # -------------------
@@ -78,7 +78,7 @@ GATE=check_supervisor_progress_declared
 MODE="${ZCL_LINT_MODE:-FAIL}"
 BASELINE="${ZCL_SUPERVISOR_PROGRESS_BASELINE:-tools/lint/supervisor_progress_baseline.txt}"
 
-SCAN_ROOTS_DEFAULT="app config lib src"
+SCAN_ROOTS_DEFAULT="core engine contexts cognition platform"
 read -r -a SCAN_ROOTS <<< "${ZCL_SUPERVISOR_PROGRESS_SCAN_ROOTS:-$SCAN_ROOTS_DEFAULT}"
 
 # ── --selftest ───────────────────────────────────────────────────────────
@@ -90,10 +90,10 @@ read -r -a SCAN_ROOTS <<< "${ZCL_SUPERVISOR_PROGRESS_SCAN_ROOTS:-$SCAN_ROOTS_DEF
 if [ "${1:-}" = "--selftest" ]; then
     tmp="$(mktemp -d)"
     trap 'rm -rf "$tmp"' EXIT
-    mkdir -p "$tmp/app/services/src"
+    mkdir -p "$tmp/engine/services/src"
 
     plant() { # $1 = extra declaration line (may be empty)
-        cat > "$tmp/app/services/src/selftest_service.c" <<EOF
+        cat > "$tmp/engine/services/src/selftest_service.c" <<EOF
 #include "util/supervisor.h"
 static struct liveness_contract g_c;
 void selftest_register(void)
@@ -153,7 +153,7 @@ fi
 # ── Scan set ─────────────────────────────────────────────────────────────
 # Production source only. lib/test is excluded (fixtures register synthetic
 # children on purpose, including deliberately-undeclared ones — the policy
-# test in lib/test/src/test_supervisor_progress_policy.c registers an
+# test in tests/harness/src/test_supervisor_progress_policy.c registers an
 # UNDECLARED child by design to prove it stays silent). The supervisor
 # primitive itself is excluded: it DEFINES these functions, it does not call
 # them.
@@ -162,8 +162,8 @@ collect_files() {
     for root in "${SCAN_ROOTS[@]}"; do
         [ -d "$root" ] || continue
         find "$root" -type f -name '*.c' \
-            ! -path 'lib/test/*' \
-            ! -path 'lib/util/src/supervisor.c' \
+            ! -path 'tests/harness/include/test/*' \
+            ! -path 'platform/modules/util/src/supervisor.c' \
             2>/dev/null
     done
 }
@@ -325,7 +325,7 @@ if [ "${#violations[@]}" -gt 0 ]; then
     echo "      child with no meaningful unit of work (a pure sampler, a"
     echo "      gauge publisher). The reason is shown to operators verbatim;"
     echo "      a blank one is refused by the primitive."
-    echo "  Worked example: app/services/src/op_return_backfill_service.c"
+    echo "  Worked example: engine/services/src/op_return_backfill_service.c"
     echo "  Raising a number in $BASELINE is NOT a fix; counts may only shrink."
     fail=1
 fi

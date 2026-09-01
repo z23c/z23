@@ -1045,7 +1045,7 @@ static int finish_cycle(const struct zcl_devloop_plan *plan,
         case VCS_DEVLOOP_ANCHOR_DEFERRED:
             vcsf.deferred = true;
             snprintf(vcsf.error, sizeof(vcsf.error), "%s", ar.error);
-            /* lib/vcs never launches the baseline itself (ZVCS
+            /* contexts/commons/modules/vcs never launches the baseline itself (ZVCS
              * sovereignty — check-vcs-no-git). When this cycle is the one
              * that discovered no baseline is running yet, the dev loop is
              * responsible for detaching it so the baseline's first-snapshot
@@ -1300,7 +1300,7 @@ int zcl_devloop_run_cycle_mode(const char *repo_root,
      * the author converges the fix — not one dev-cycle. With the token
      * present the cycle proceeds and (because zcl_devloop_plan_files marks any
      * sealed file consensus_risk) routes to the heaviest proof path, exactly
-     * as a lib/validation edit does today. Sealed != frozen: the refusal
+     * as a core/modules/validation edit does today. Sealed != frozen: the refusal
      * envelope always names the elevated procedure. */
     if (plan.sealed_core) {
         if (!zcl_devloop_unseal_token_present(repo_root))

@@ -264,7 +264,7 @@ handler-dispatch self-test remains a background/live diagnostic.
 **Hot-swap (Tier-1, in-process).** Build/verify without resident loading:
 
 ```bash
-make hotswap-so FILES=app/controllers/src/status_native_handlers.c
+make hotswap-so FILES=engine/controllers/src/status_native_handlers.c
 make t ONLY=hotswap_loader
 make hotswap-sim
 ```
@@ -275,7 +275,7 @@ one swappable leaf into a module `.so`, runs the command in a one-shot CLI via
 `ZCL_HOTSWAP_PRELOAD`) and `make hotswap-apply HANDLER=<leaf>` (commits the
 override in the running `zcl23-dev` node, gated on `-hotswap-activate` +
 `ZCL_HOTSWAP_ACTIVATE=1`; canonical refused). Only the six read-only leaves in
-`config/hotswap_swappable.def` are eligible. Inspect provenance with
+`engine/composition/hotswap_swappable.def` are eligible. Inspect provenance with
 `z23 dumpstate hotswap` (`zcl.hotswap_generation.v2`,
 `artifact_inode_pinned=true` per accepted generation) — full contract in
 `docs/AGENT_API.md`.
@@ -331,7 +331,7 @@ exact candidate is linked under `build/bin/test-strict/epochs/`. Consequences:
   worktree building identical source after a first worktree's cold build got
   1118/1119 objects served from cache (99.91%) — spot-checked object files
   came back byte-for-byte identical (`sha256sum`) to the first worktree's. The
-  one designed miss is `lib/util/src/clientversion.o`, which intentionally
+  one designed miss is `platform/modules/util/src/clientversion.o`, which intentionally
   gets the real per-build identity stamp appended
   (`BUILD_ONLY_OBJECT_CFLAGS += $(BUILD_IDENTITY_CPPFLAGS)`) and so is never
   cacheable across builds. No extra flag or opt-in is needed to get this — a
@@ -408,7 +408,7 @@ usual `ulimit -s unlimited`: ASan + PIE with an unlimited stack
 intermittently aborts at startup with "Shadow memory range interleaves with
 an existing memory mapping" (google/sanitizers#856).
 
-**Known limitation — UBSan "left shift" in `lib/crypto/src/ed25519.c` and
+**Known limitation — UBSan "left shift" in `core/modules/crypto/src/ed25519.c` and
 `curve25519.c`:** `make t-asan` flags UBSan shift-base reports at
 `ed25519.c:81`/`:304` and `curve25519.c:50`, the TweetNaCl `int64_t`
 carry-propagation idiom (`o[i] -= c << 16;`). The left operand is
@@ -463,7 +463,7 @@ benign with a written justification — never suppress an untriaged report. It
 ships with zero active suppressions (comments only): fix a real race in code,
 never hide it behind a suppression.
 
-`thread_liveness_child.id` (`lib/util/src/thread_liveness.c`) is
+`thread_liveness_child.id` (`platform/modules/util/src/thread_liveness.c`) is
 `_Atomic supervisor_child_id`, release-stored after `supervisor_register()`
 completes and acquire-loaded by every reader (beat, worker_alive/_exited,
 stop_begin/_finish, retire, idempotent guards) — a worker observing a valid
@@ -562,7 +562,7 @@ Notes:
   `vendor/.build/` (removed on a clean full run). To bump a version, edit the
   pinned version + SHA256 in `tools/scripts/build_vendor.sh`.
 - **X11 compile-time headers are vendored, not a system dependency.** The
-  presentation layer (`lib/presentation`) compiles the vendored RGFW single
+  presentation layer (`contexts/explorer/modules/presentation`) compiles the vendored RGFW single
   header, which `#include`s `<X11/…>` on Linux even though X11 itself is
   loaded at *runtime* by the vendored XDL layer (`-ldl`, no link-time
   `libX11`). The exact 17-header closure those includes need is committed
@@ -584,7 +584,7 @@ or direct manipulation/confirmation that is materially clearer on screen. The
 agent returns to the conversation after that bounded interaction.
 
 The primary visual path is the bounded renderer-neutral C23 model in
-`lib/presentation`. A typed `app presentation ...` command submits that inert
+`contexts/explorer/modules/presentation`. A typed `app presentation ...` command submits that inert
 model to the warm same-binary native host; the host owns pixels and bounded
 input events, never node, wallet, package, publication, network, or consensus
 authority. No browser or web runtime participates.
@@ -624,13 +624,13 @@ uses LevelDB's C++ implementation; legacy bootstrap reads route through the
 `ldbr_*` C23 API, while live state and block-index status durability use the
 SQLite/event-sourced stores.
 
-The replacement is in the tree and proven: **`lib/storage/src/ldb_reader_*.c`
+The replacement is in the tree and proven: **`engine/modules/storage/src/ldb_reader_*.c`
 is a read-only LevelDB reader written in C23** against stock `cc` and libc,
 with no new dependency. It reads the real format — CURRENT, the MANIFEST
 VersionEdit log, `.log` write-ahead logs, and `.ldb`/`.sst` tables — and
 resolves sequence numbers and tombstones the way LevelDB does. Its contract,
 including what it deliberately refuses, is documented in
-`lib/storage/include/storage/ldb_reader.h`.
+`engine/modules/storage/include/storage/ldb_reader.h`.
 
 Byte identity is the acceptance bar, and it is checked differentially rather
 than asserted:

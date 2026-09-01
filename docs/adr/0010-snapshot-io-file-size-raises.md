@@ -11,25 +11,25 @@
 - **Status:** Superseded 2026-08-27 by line-count reductions during integration.
 - **Deciders:** Project maintainer.
 - **Related:** [`0009-swap-money-shape-guard-file-size-raise.md`](./0009-swap-money-shape-guard-file-size-raise.md),
-  `config/src/consensus_state_snapshot_export.c`,
-  `config/src/consensus_state_snapshot_install_activate.c`.
+  `engine/composition/src/consensus_state_snapshot_export.c`,
+  `engine/composition/src/consensus_state_snapshot_install_activate.c`.
 
 ---
 
 ## Context
 
 The E1 file-size ceiling (then an 800-line hard
-ceiling for `app/`+`config/src/`) ratchets: growth above a recorded baseline
+ceiling for `app/`+`engine/composition/src/`) ratchets: growth above a recorded baseline
 (or a first crossing of the ceiling) costs an explicit record.
 
 The native macOS port landing in `3fd1feb5e` / `bdb40e89c` touched the
 consensus-state snapshot IO pair as part of the platform work and left the
 enforced tier red for every subsequent tree:
 
-- `config/src/consensus_state_snapshot_export.c` **800 → 801** — crosses the
+- `engine/composition/src/consensus_state_snapshot_export.c` **800 → 801** — crosses the
   ceiling by one line and has no baseline entry yet, so it reads as a NEW
   oversized file rather than a grandfathered one.
-- `config/src/consensus_state_snapshot_install_activate.c`
+- `engine/composition/src/consensus_state_snapshot_install_activate.c`
   **1169 → 1172** — grows past its recorded baseline.
 
 Neither delta is carried by a heal commit on the landing branch: the raise
@@ -42,11 +42,11 @@ debt incurred here.
 
 ## Decision
 
-1. Record `config/src/consensus_state_snapshot_export.c` at its current line
+1. Record `engine/composition/src/consensus_state_snapshot_export.c` at its current line
    count (its first baseline entry — pinning the crossing, not accepting
    further drift).
 2. Raise the enforced-tier baseline for
-   `config/src/consensus_state_snapshot_install_activate.c` from 1169 to its
+   `engine/composition/src/consensus_state_snapshot_install_activate.c` from 1169 to its
    current line count (recorded in
    `tools/lint/file_size_policy_baseline.txt`).
 
@@ -58,7 +58,7 @@ debt incurred here.
   and both carry an obvious split seam (export writer vs install/activate
   phases) that shrinking under the ceiling would let the records shrink into.
 - The WARN-tier drift-count acceptance landed alongside this ADR
-  (`src/main_cli_modes.c` +1 in the same port) rode its own valve — a
+  (`engine/entry/main_cli_modes.c` +1 in the same port) rode its own valve — a
   drift-count ratchet file that the 2026-08-29 policy change deleted, with
   this document as the reviewed provenance at the time.
 
@@ -66,6 +66,6 @@ debt incurred here.
 
 The release-hardening integration removed the new line from the exporter,
 reduced the installer to its prior 1,169-line ceiling, and reduced
-`src/main_cli_modes.c` to its prior baseline. The enforced baseline is 1,169
+`engine/entry/main_cli_modes.c` to its prior baseline. The enforced baseline is 1,169
 and the WARN-tier drift-count ceiling is 22; the now-800-line exporter needs
 no exception entry. No size ceiling was raised in the integrated release.

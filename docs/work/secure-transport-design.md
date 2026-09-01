@@ -1,9 +1,9 @@
 # Secure P2P Transport for z23 — protocol reference
 
 This is the protocol contract for the Noise-encrypted transport
-(`lib/net/src/noise_transport.c`, `lib/noise/src/noise_handshake.c`), which is
-implemented and armed as INITIATOR in `lib/net/src/net.c` / torn down in
-`lib/net/src/connman.c`, default OFF pending rollout (see [`os/A4-noise-transport-p1.md`](./os/A4-noise-transport-p1.md)
+(`core/modules/net/src/noise_transport.c`, `core/modules/noise/src/noise_handshake.c`), which is
+implemented and armed as INITIATOR in `core/modules/net/src/net.c` / torn down in
+`core/modules/net/src/connman.c`, default OFF pending rollout (see [`os/A4-noise-transport-p1.md`](./os/A4-noise-transport-p1.md)
 for rollout status). No consensus code is touched by this transport; the
 parity firewall below is the invariant that keeps it that way.
 
@@ -11,7 +11,7 @@ parity firewall below is the invariant that keeps it that way.
 
 z23 P2P links are today plaintext, unauthenticated TCP. The v1 message
 checksum (`nChecksum` in `struct msg_header`, first 4 bytes of double-SHA256 of
-the payload, `lib/net/include/net/protocol.h`) detects corruption, not tampering
+the payload, `core/modules/net/include/net/protocol.h`) detects corruption, not tampering
 — it is unkeyed and forgeable by anyone on-path. This document specifies an
 opt-in, authenticated, forward-secret transport ("Noise") that wraps the byte
 stream between two consenting z23 peers while leaving message semantics,
@@ -29,8 +29,8 @@ Goals:
 - Provable consensus parity and unconditional `zclassicd` interoperability.
 
 Non-goal note up front: this is defense-in-depth for clearnet links. The
-embedded Tor onion service (`lib/net/src/onion_service.c`,
-`lib/net/src/tor_integration.c`) remains the stronger anti-fingerprinting /
+embedded Tor onion service (`core/modules/net/src/onion_service.c`,
+`core/modules/net/src/tor_integration.c`) remains the stronger anti-fingerprinting /
 network-anonymity control; Noise does not replace it.
 
 ## 2. Non-goals & the parity firewall
@@ -41,7 +41,7 @@ Non-goals:
   Phase, §12). We are adding confidentiality/integrity to an already-versioned
   protocol between consenting peers, not evading DPI on the open internet.
 - No PKI, no certificates, no signing. The tree has **no X25519/Ed25519 signing
-  primitive** (`lib/crypto/include/crypto/ed25519.h` is verify-only), so
+  primitive** (`core/modules/crypto/include/crypto/ed25519.h` is verify-only), so
   authentication MUST be by DH (Noise implicit auth), never by signature.
 - No metadata protection (packet timing/size/graph) against a global observer.
 - No protection against malicious-but-authenticated peers (bad blocks, spam,
@@ -54,7 +54,7 @@ plaintext handed to `p2p_node_receive_bytes` after decryption is byte-identical
 to what a v1 peer would have sent raw; the ciphertext is produced from the exact
 24-byte `struct msg_header` + payload that `p2p_node_end_message` already
 assembles. Message command strings, `nMessageSize`, checksum semantics, the
-`g_msg_dispatch` table (`lib/net/src/msgprocessor.c`), the eight reducer stages,
+`g_msg_dispatch` table (`core/modules/net/src/msgprocessor.c`), the eight reducer stages,
 script/Groth16/PHGR13/Equihash verification — none of them can observe whether a
 byte arrived plaintext or decrypted. Two honest nodes reaching different tips
 because one used v1 and one used Noise is therefore structurally impossible: no
@@ -69,7 +69,7 @@ Things that WOULD break parity and are forbidden:
   plaintext v1 path.
 - Treating "peer completed a Noise handshake" as a substitute for
   `peer_scoring_record` / `PEER_OFFENCE_PROTOCOL_VIOLATION` checks
-  (`lib/net/src/msg_version.c`).
+  (`core/modules/net/src/msg_version.c`).
 
 ## 3. Protocol spec — Noise_XX_25519_ChaChaPoly_SHA256
 
@@ -169,7 +169,7 @@ Then Split(); transport frames begin.
 `dh(out, sk, pk)` = `curve25519_scalarmult(out, sk, pk)` **plus the mandatory
 all-zero reject wrapper** (§9 primitive #1) — the in-tree `scalarmult` returns
 `true` even for low-order inputs that yield an all-zero shared secret
-(`lib/crypto/src/curve25519.c`, no RFC-7748 §6.1 check).
+(`core/modules/crypto/src/curve25519.c`, no RFC-7748 §6.1 check).
 
 ## 4. Record / framing layer
 
@@ -193,7 +193,7 @@ Wire frame:
 The 2048-byte MAC-scratch cap (`chacha20poly1305.c:270`) is the one hard
 constraint on frame size. With a 32-byte AAD the one-shot AEAD caps plaintext at
 ≈2000 bytes/call, but blocks reach 2 MiB (`MAX_PROTOCOL_MESSAGE_LENGTH`,
-`lib/net/include/net/net.h`). Two options:
+`core/modules/net/include/net/net.h`). Two options:
 - **v1 chunking (no new crypto):** split any inner message > `FRAME_MAX`
   (set `FRAME_MAX = 1536` plaintext, safely under 2048 − AAD) into N sequenced
   frames with a 1-byte `CONT`/`FINAL` inner flag; the receiver reassembles the
@@ -214,7 +214,7 @@ ceiling and cannot be a memory-DoS vector.
 Two byte-stream seams, both BELOW the message layer and cleanly separable from
 socket I/O. Insert transport transforms here and nowhere else.
 
-WRITE seam — `lib/net/src/net.c`:
+WRITE seam — `core/modules/net/src/net.c`:
 - A message is assembled plaintext into the `_Thread_local` staging buffer
   `tls_msg_stream` by `p2p_node_begin_message` (`net.c:647`) /
   `p2p_node_end_message` (`net.c:668`). Note: "tls" = thread-local storage
@@ -229,7 +229,7 @@ WRITE seam — `lib/net/src/net.c`:
   via `node->send_offset` and would split an AEAD packet mid-tag.
   `socket_send_data` stays a pure byte-pump, zero change.
 
-READ seam — `lib/net/src/connman.c`:
+READ seam — `core/modules/net/src/connman.c`:
 - Raw bytes read at **`connman.c:1332`** (`recv(target_fd, buf, recv_cap,
   MSG_DONTWAIT)`) and handed to the framing accumulator
   `p2p_node_receive_bytes(node, buf, n, cm->manager.message_start)` at
@@ -244,14 +244,14 @@ READ seam — `lib/net/src/connman.c`:
   (`node->transport == NULL`) the call is unchanged.
 
 Per-connection state — add exactly ONE field to `struct p2p_node`
-(`lib/net/include/net/net.h`, near the end of the struct):
+(`core/modules/net/include/net/net.h`, near the end of the struct):
 ```c
 struct noise_transport *transport;   /* NULL = plaintext v1 (zclassicd) peer */
 ```
 `p2p_node_create` (`net.c:291`) uses `zcl_calloc`, so this zero-inits to NULL
 (v1) with no init edit. Add a teardown in `p2p_node_free`.
 
-Everything else lives in a NEW translation unit `lib/net/src/noise_transport.c` +
+Everything else lives in a NEW translation unit `core/modules/net/src/noise_transport.c` +
 `include/net/noise_transport.h`, holding:
 ```c
 struct noise_transport {
@@ -353,7 +353,7 @@ Downgrade resistance:
 - Ephemeral keys: fresh per session via `zcl_random_secret_bytes(...,
   "handshake-eph")` — the CSPRNG rejects all-zero output (guards the
   urandom-open-fails → key=0 class).
-- Zeroization: `memory_cleanse` (`lib/support/include/support/cleanse.h`) all
+- Zeroization: `memory_cleanse` (`platform/modules/support/include/support/cleanse.h`) all
   ephemeral scalars, `ck`, `k`, and DH outputs at Split() and on handshake
   abort; cleanse transport keys in `p2p_node_free`.
 - Memory-locking: consider `mlock` on the static-key buffer and the
@@ -416,7 +416,7 @@ Grounded in code:
 
 Required-now hardening (does not affect parity): the all-zero DH-output reject
 wrapper around `curve25519_scalarmult` (the base function never checks —
-`lib/crypto/src/curve25519.c`).
+`core/modules/crypto/src/curve25519.c`).
 
 ## 10. Missing primitives to write in C (no external deps)
 
@@ -497,10 +497,10 @@ test asserting frame lengths are not readable. Owner-gated; not required for v1.
 ## 12. Interop / test matrix
 
 All cases run against datadir COPIES, never the live node. Fixture template =
-`lib/test/src/test_net_handshake_adversarial.c` (real `socketpair()` fd feeding
+`tests/harness/src/test_net_handshake_adversarial.c` (real `socketpair()` fd feeding
 `p2p_node`, driving `process_version` / `msg_process_messages` with fixed-epoch
 timestamps, no wall-clock reads); flood/DoS sibling =
-`lib/test/src/test_net_msg_dos.c`.
+`tests/harness/src/test_net_msg_dos.c`.
 
 | # | Case | Proven | Fixture | Phase gate |
 |---|------|--------|---------|-----------|

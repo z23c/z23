@@ -3,7 +3,7 @@
 #
 # A header named controllers/<owner>_internal.h or <owner>_private.h belongs
 # to the dynamically-derived <owner> source family. It may be included by:
-#   - app/controllers/src/<owner>.c or <owner>_*.c;
+#   - a context/authority controllers/src/<owner>.c or <owner>_*.c;
 #   - another *_internal.h / *_private.h controller header;
 #   - test code.
 # Every other production include is an external private dependency and must
@@ -16,7 +16,7 @@ cd "$(dirname "$0")/../.."
 
 GATE=check_controller_private_headers
 SCAN_ROOT="${ZCL_CONTROLLER_PRIVATE_SCAN_ROOT:-.}"
-HEADER_ROOT="${ZCL_CONTROLLER_PRIVATE_HEADER_ROOT:-app/controllers/include/controllers}"
+HEADER_ROOT="${ZCL_CONTROLLER_PRIVATE_HEADER_ROOT:-}"
 BASELINE="${ZCL_CONTROLLER_PRIVATE_BASELINE:-tools/lint/controller_private_header_baseline.txt}"
 
 collect_files() {
@@ -38,7 +38,7 @@ display_path() {
 
 is_test_path() {
     case "$1" in
-        lib/test/*|*/test/*|*/tests/*|*/test_*.c|*/test_*.h) return 0 ;;
+        tests/*|lib/test/*|*/test/*|*/tests/*|*/test_*.c|*/test_*.h) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -64,7 +64,7 @@ scan_external_edges() {
 
             # The owning source family may consume its own private header.
             case "$path" in
-                app/controllers/src/*)
+                */controllers/src/*)
                     case "$base" in "$owner"|"$owner"_*) continue ;; esac
                     ;;
             esac
@@ -166,14 +166,19 @@ if [ "${#scan_files[@]}" -eq 0 ]; then
     echo "[$GATE] UNPROVEN: scan root has no C/H inputs: $SCAN_ROOT" >&2
     exit 2
 fi
-if [ ! -d "$HEADER_ROOT" ]; then
-    echo "[$GATE] UNPROVEN: controller header root missing: $HEADER_ROOT" >&2
-    exit 2
+if [ -n "$HEADER_ROOT" ]; then
+    if [ ! -d "$HEADER_ROOT" ]; then
+        echo "[$GATE] UNPROVEN: controller header root missing: $HEADER_ROOT" >&2
+        exit 2
+    fi
+    mapfile -t private_headers < <(find "$HEADER_ROOT" -maxdepth 1 -type f \
+        \( -name '*_internal.h' -o -name '*_private.h' \) -print)
+else
+    mapfile -t private_headers < <(printf '%s\n' "${scan_files[@]}" | \
+        grep -E '(^|/)controllers/include/controllers/[^/]+_(internal|private)\.h$' || true)
 fi
-mapfile -t private_headers < <(find "$HEADER_ROOT" -maxdepth 1 -type f \
-    \( -name '*_internal.h' -o -name '*_private.h' \) -print)
 if [ "${#private_headers[@]}" -eq 0 ]; then
-    echo "[$GATE] UNPROVEN: no controller private headers under $HEADER_ROOT" >&2
+    echo "[$GATE] UNPROVEN: no controller private headers in maintained source" >&2
     exit 2
 fi
 if [ ! -r "$BASELINE" ]; then

@@ -13,8 +13,8 @@
 #   tools/scripts/netdisrupt_stopwatch_run_and_record.sh (PROOF B collector)
 #
 # It reads its class table from
-# app/services/include/services/stopwatch_skip_classes.def — the SAME file
-# app/services/src/stopwatch_skip_watch.c #includes for the typed
+# engine/services/include/services/stopwatch_skip_classes.def — the SAME file
+# engine/services/src/stopwatch_skip_watch.c #includes for the typed
 # `z23 ops state --subsystem=stopwatch_evidence` surface. One table,
 # two consumers, no private copy to drift.
 #
@@ -43,7 +43,7 @@
 # Resolve the class table relative to this file, so a worktree, a copied
 # checkout, and the installed tree all find their own.
 _SW_SKIP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-_SW_SKIP_DEF="${ZCL_STOPWATCH_SKIP_CLASSES_DEF:-$_SW_SKIP_DIR/../../app/services/include/services/stopwatch_skip_classes.def}"
+_SW_SKIP_DEF="${ZCL_STOPWATCH_SKIP_CLASSES_DEF:-$_SW_SKIP_DIR/../../engine/services/include/services/stopwatch_skip_classes.def}"
 
 # Emit the table as class|threshold|match rows, in file order (order IS
 # precedence — first substring match wins). Fallback rows carry an empty
@@ -62,7 +62,7 @@ stopwatch_skip_class_table() {
 # — measured 2026-08-29, 34 of those in a row on the C3 ledger with
 # skip_streak 0 throughout, reported as "quiet". These two functions are the
 # shell half of that second alarm; the C half is in
-# app/services/src/stopwatch_skip_watch.c. Same one table, no private copy.
+# engine/services/src/stopwatch_skip_watch.c. Same one table, no private copy.
 
 # stopwatch_no_pass_threshold — the STOPWATCH_NO_PASS_THRESHOLD(n) row, as a
 # bare integer. Falls back LOUD (4, ~24h at the 6h C3 cadence) rather than to
@@ -128,7 +128,7 @@ stopwatch_no_pass_all_benign() {
 
 # stopwatch_skip_classify <reason> <reason_field_present 0|1> <has_artifact 0|1>
 # Echoes "<class> <threshold>". Mirrors stopwatch_skip_classify() in
-# app/services/src/stopwatch_skip_watch.c exactly, including the two
+# engine/services/src/stopwatch_skip_watch.c exactly, including the two
 # structural fallbacks.
 stopwatch_skip_classify() {
     local reason="${1:-}" present="${2:-0}" artifact="${3:-0}"

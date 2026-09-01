@@ -56,8 +56,8 @@ rc=0
 
 # ── layer 1: structural (source-level, always runs) ──────────────────────
 # main.c must not bypass the registry through the retired devloop dispatcher.
-if gate_grep -qE 'zcl_devloop_(cli_main|is_method)' src/main.c >/dev/null; then
-    echo "FAIL: src/main.c still bypasses the native registry for dev commands" >&2
+if gate_grep -qE 'zcl_devloop_(cli_main|is_method)' engine/entry/main.c >/dev/null; then
+    echo "FAIL: engine/entry/main.c still bypasses the native registry for dev commands" >&2
     rc=1
 fi
 
@@ -118,7 +118,7 @@ gate_require_scanned "$scanned_activation" 5 "check-release-no-dev-symbols" \
     "the dev_activation engine source-file set changed shape unexpectedly"
 
 # ── layer 2: artifact (nm on a FRESH release binary, when present) ────────
-if [ -x "$BIN" ] && [ "$BIN" -nt src/main.c ] && [ "$BIN" -nt Makefile ]; then
+if [ -x "$BIN" ] && [ "$BIN" -nt engine/entry/main.c ] && [ "$BIN" -nt Makefile ]; then
     # The symbol read is per-host (see the header). Linux keeps the exact
     # ELF contract it always had; only Darwin switches read.
     if [ "$(uname -s)" = "Darwin" ]; then

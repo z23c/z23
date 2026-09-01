@@ -137,7 +137,7 @@ struct hs_hotfork_def {
     { owner_id_, feedback_class_, source_tu_, story_id_, fixture_id_, \
       adapter_id_, max_time_ms_, forbidden_effect_mask_, surface_ },
 static const struct hs_hotfork_def k_hotfork_defs[] = {
-#include "../../config/hotfork_capsules.def"
+#include "../../engine/composition/hotfork_capsules.def"
 };
 #undef HOTFORK_CAPSULE
 
@@ -319,19 +319,19 @@ static bool hs_plan_load_locked(const char *root, bool *cache_hit,
         snprintf(makefile, sizeof(makefile), "%s/Makefile", root) >=
             (int)sizeof(makefile) ||
         snprintf(manifest, sizeof(manifest),
-                 "%s/config/hotswap_swappable.def", root) >=
+                 "%s/engine/composition/hotswap_swappable.def", root) >=
             (int)sizeof(manifest) ||
         snprintf(islands, sizeof(islands),
-                 "%s/config/hotswap_islands.def", root) >=
+                 "%s/engine/composition/hotswap_islands.def", root) >=
             (int)sizeof(islands) ||
         snprintf(services, sizeof(services),
-                 "%s/config/hotswap_services.def", root) >=
+                 "%s/engine/composition/hotswap_services.def", root) >=
             (int)sizeof(services) ||
         snprintf(shadow_owners, sizeof(shadow_owners),
-                 "%s/config/hotswap_shadow_owners.def", root) >=
+                 "%s/engine/composition/hotswap_shadow_owners.def", root) >=
             (int)sizeof(shadow_owners) ||
         snprintf(hotfork_capsules, sizeof(hotfork_capsules),
-                 "%s/config/hotfork_capsules.def", root) >=
+                 "%s/engine/composition/hotfork_capsules.def", root) >=
             (int)sizeof(hotfork_capsules)) {
         hs_why(why, why_len, "action plan path overflow");
         return false;
@@ -2316,7 +2316,7 @@ static int hs_hotfork_unity_source(
             " && !watch_epoch_all_c(all_c,0));"
             " char component[128]; watch_component_for_files(all_c,2,component);"
             " HF_CHECK(strcmp(component,\"tools/dev\")==0);"
-            " const char *owners[]={\"tools/dev/a.c\",\"lib/vcs/a.c\"};"
+            " const char *owners[]={\"tools/dev/a.c\",\"contexts/commons/modules/vcs/a.c\"};"
             " watch_component_for_files(owners,2,component);"
             " bool mixed_ok=strcmp(component,\"mixed\")==0;"
             " const char *root[]={\"Makefile\"};"
@@ -2353,9 +2353,9 @@ static int hs_hotfork_unity_source(
             " && zcl_test_group_requires_exclusive_run(\"test_validate_parallel_determinism\")"
             " && !zcl_test_group_requires_exclusive_run(\"test_dev_platform\"));"
             " HF_CHECK(zcl_test_group_source_is_semantic_leaf("
-            "\"lib/test/src/test_stage_repair_coin_backfill.c\")"
+            "\"tests/harness/src/test_stage_repair_coin_backfill.c\")"
             " && !zcl_test_group_source_is_semantic_leaf("
-            "\"lib/test/src/test_dev_platform.c\"));"
+            "\"tests/harness/src/test_dev_platform.c\"));"
             " HF_CHECK(zcl_test_group_resolve_exact(\"dev_platform\",resolved)"
             " && strcmp(resolved,\"test_dev_platform\")==0);"
             " HF_CHECK(zcl_test_group_resolve_exact(\"test_dev_platform\",resolved)"
@@ -2394,7 +2394,7 @@ static int hs_hotfork_unity_source(
             return -1;
         char service_path[PATH_MAX];
         int service_n = snprintf(service_path, sizeof(service_path),
-            "%.*sapp/services/src/shop_want_view_service.c",
+            "%.*scontexts/market/services/src/shop_want_view_service.c",
             (int)(source_len - suffix_len), source_path);
         if (service_n <= 0 || service_n >= (int)sizeof(service_path))
             return -1;
@@ -2454,7 +2454,7 @@ static int hs_hotfork_unity_source(
             return -1;
         char service_path[PATH_MAX];
         int service_n = snprintf(service_path, sizeof(service_path),
-            "%.*sapp/services/src/zcode_package_view_service.c",
+            "%.*scontexts/commons/services/src/zcode_package_view_service.c",
             (int)(source_len - suffix_len), source_path);
         if (service_n <= 0 || service_n >= (int)sizeof(service_path))
             return -1;
@@ -2499,7 +2499,7 @@ static int hs_hotfork_unity_source(
             return -1;
         char service_path[PATH_MAX];
         int service_n = snprintf(service_path, sizeof(service_path),
-            "%.*sapp/services/src/shop_status_view_service.c",
+            "%.*scontexts/market/services/src/shop_status_view_service.c",
             (int)(source_len - suffix_len), source_path);
         if (service_n <= 0 || service_n >= (int)sizeof(service_path))
             return -1;
@@ -2560,7 +2560,7 @@ static int hs_hotfork_unity_source(
             return -1;
         char service_path[PATH_MAX];
         int service_n = snprintf(service_path, sizeof(service_path),
-            "%.*sapp/services/src/shop_reputation_view_service.c",
+            "%.*scontexts/market/services/src/shop_reputation_view_service.c",
             (int)(source_len - suffix_len), source_path);
         if (service_n <= 0 || service_n >= (int)sizeof(service_path))
             return -1;
@@ -4566,7 +4566,7 @@ int zcl_devloop_hotswap_batch_event(
             return 2;
         }
         const bool vault_story = strcmp(
-            owner, "app/services/src/vault_intent_decision_service.c") == 0;
+            owner, "contexts/wallet/services/src/vault_intent_decision_service.c") == 0;
         bool story_emitted = hs_emit_event(
             repo_root, owner, path_count,
             story_ok ? "story_green" : "story_red",

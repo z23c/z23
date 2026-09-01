@@ -13,7 +13,7 @@
 # zclassic23/base" and "it cannot open a socket" are different sentences, and
 # only the first one was written down.
 #
-# config/capability_classes.def already answers the second question for a
+# engine/composition/capability_classes.def already answers the second question for a
 # single translation unit, and it answers it decidably: a class names a kind
 # of REACH the linker can see, never a kind of intent. What was missing was
 # the rollup — the same fact stated about a package, in the package's own
@@ -30,8 +30,8 @@
 # reader who cannot tell "reaches nothing" from "nobody wrote it down" has
 # been handed the second while believing the first.
 #
-# WHAT IT CHECKS, per ZCODE_PACKAGE row in config/zcode_package_registry.def
-# and config/zcode_c23_commons_app.def:
+# WHAT IT CHECKS, per ZCODE_PACKAGE row in engine/composition/zcode_package_registry.def
+# and engine/composition/zcode_c23_commons_app.def:
 #
 #   1. PRESENCE.   The manifest has a "capabilities" key. Absent FAILS.
 #   2. VOCABULARY. Every entry names a class declared in
@@ -43,7 +43,7 @@
 #                  so two spellings of one set would be two roots for one
 #                  package.
 #   4. SYMMETRY.   The declared set EQUALS the union of the classes
-#                  config/module_capabilities.def grants to this package's
+#                  engine/composition/module_capabilities.def grants to this package's
 #                  SHIPPED sources. Both directions fail:
 #                    - a class a shipped file reaches but the manifest omits
 #                      (the core property: the manifest must not understate
@@ -68,11 +68,11 @@
 # never see.
 #
 # WHAT THIS DOES NOT PROVE, stated here so nobody has to discover it later.
-# The derivation is exactly as strong as config/module_capabilities.def, and
+# The derivation is exactly as strong as engine/composition/module_capabilities.def, and
 # that table is a snapshot of what an OBJECT TREE showed:
 # check-capability-closure proves a file with no row reaches nothing only for
 # files it found a compiled object for. Every shipped src/*.c in the registry
-# does have one today. The shipped tests/*.c and lib/commons_demo/app/main.c
+# does have one today. The shipped tests/*.c and contexts/commons/modules/commons_demo/app/main.c
 # do NOT — they are compiled by the package recipe and the test harness, not
 # into build/dev-obj. Their empty contribution here is therefore UNOBSERVED
 # rather than measured, in the precise sense check_capability_closure.sh's
@@ -98,13 +98,13 @@ source "$SCRIPT_DIR/zcode_pkg_sources.sh"
 # The registry is spread over more than one .def — the library packages and
 # the sample application, which rides the same row shape. Same registry pair
 # check_zcode_package_standalone.sh reads.
-REGISTRY_DEF_NAMES=(config/zcode_package_registry.def config/zcode_c23_commons_app.def)
-CLASSES_DEF_NAME=config/capability_classes.def
-MODULES_DEF_NAMES=(config/module_capabilities.def
-                   config/module_capabilities_linux.def
-                   config/module_capabilities_windows.def)
+REGISTRY_DEF_NAMES=(engine/composition/zcode_package_registry.def engine/composition/zcode_c23_commons_app.def)
+CLASSES_DEF_NAME=engine/composition/capability_classes.def
+MODULES_DEF_NAMES=(engine/composition/module_capabilities.def
+                   engine/composition/module_capabilities_linux.def
+                   engine/composition/module_capabilities_windows.def)
 
-# ── config/capability_classes.def ───────────────────────────────────────────
+# ── engine/composition/capability_classes.def ───────────────────────────────────────────
 # ZCL_CAPABILITY_CLASS(NETWORK, ...) -> CAP_NETWORK, one per line.
 pkgcap_classes() {
     awk '
@@ -116,7 +116,7 @@ pkgcap_classes() {
     ' "$1"
 }
 
-# ── config/module_capabilities.def ──────────────────────────────────────────
+# ── engine/composition/module_capabilities.def ──────────────────────────────────────────
 # "<source path>\t<CAP_A|CAP_B>" per row. Tolerant of a row wrapped across
 # lines by a long `why` string, the same way
 # check_capability_closure.sh's reader is: the path and the class union are
@@ -416,28 +416,28 @@ pkgcap_render_plain() {
 FIXTURE_ROOT=""
 selftest_cleanup() { [ -n "$FIXTURE_ROOT" ] && rm -rf "$FIXTURE_ROOT"; }
 
-# fixture_base <dir> — config/capability_classes.def (three real classes) and
-# an empty config/module_capabilities.def placeholder.
+# fixture_base <dir> — engine/composition/capability_classes.def (three real classes) and
+# an empty engine/composition/module_capabilities.def placeholder.
 fixture_base() {
     local d="$1"
-    mkdir -p "$d/config"
-    cat > "$d/config/capability_classes.def" <<'EOF'
+    mkdir -p "$d/engine/composition"
+    cat > "$d/engine/composition/capability_classes.def" <<'EOF'
 ZCL_CAPABILITY_CLASS(NETWORK, "", "")
 ZCL_CAPABILITY_CLASS(FS_READ, "", "")
 ZCL_CAPABILITY_CLASS(FS_WRITE, "", "")
 EOF
-    : > "$d/config/module_capabilities.def"
+    : > "$d/engine/composition/module_capabilities.def"
 }
 
 # fixture_rows <dir> <"path CAP_A|CAP_B">... — module_capabilities.def rows.
 fixture_rows() {
     local d="$1"; shift
-    : > "$d/config/module_capabilities.def"
+    : > "$d/engine/composition/module_capabilities.def"
     local row p c
     for row in "$@"; do
         p="${row%% *}"; c="${row#* }"
         printf 'ZCL_MODULE_CAPABILITY("%s", %s, "")\n' "$p" "$c" \
-            >> "$d/config/module_capabilities.def"
+            >> "$d/engine/composition/module_capabilities.def"
     done
 }
 
@@ -446,9 +446,9 @@ fixture_rows() {
 # and an empty file for each source.
 fixture_pkg() {
     local d="$1" name="$2" pkgdir="$3" caps="$4"; shift 4
-    mkdir -p "$d/$pkgdir/src" "$d/config"
+    mkdir -p "$d/$pkgdir/src" "$d/engine/composition"
     printf 'ZCODE_PACKAGE("%s", "%s", 1,\n    "aa")\n' "$name" "$pkgdir" \
-        >> "$d/config/zcode_package_registry.def"
+        >> "$d/engine/composition/zcode_package_registry.def"
     {
         printf '{\n  "schema": 1,\n  "name": "%s",\n  "dependencies": [],\n' "$name"
         if [ "$caps" != "ABSENT" ]; then
@@ -539,7 +539,7 @@ run_selftest() {
     fixture_pkg "$d" "fx/cross-target" "lib/cross-target" \
         '"CAP_FS_READ", "CAP_NETWORK"' src/portable.c
     fixture_rows "$d" "lib/cross-target/src/portable.c CAP_FS_READ"
-    cat > "$d/config/module_capabilities_windows.def" <<'EOF'
+    cat > "$d/engine/composition/module_capabilities_windows.def" <<'EOF'
 ZCL_MODULE_CAPABILITY("lib/cross-target/src/portable.c", CAP_NETWORK, "Windows exact arm")
 EOF
     expect_rc "C3: package claims union portable and Windows exact reach" \
@@ -558,7 +558,7 @@ EOF
     # E. HOLLOW SCAN: zero packages parsed. Exit 2 UNPROVEN, never 0.
     d="$FIXTURE_ROOT/e"; fixture_base "$d"
     fixture_rows "$d" "lib/x/src/x.c CAP_NETWORK"
-    : > "$d/config/zcode_package_registry.def"
+    : > "$d/engine/composition/zcode_package_registry.def"
     expect_rc "E: zero packages parsed is UNPROVEN (exit 2), never a clean tree" \
         2 "UNPROVEN" "$d" || rc=1
     n=$((n + 1))
@@ -578,7 +578,7 @@ EOF
     #     would 'pass' off a table this script could not read.
     d="$FIXTURE_ROOT/e3"; fixture_base "$d"
     fixture_pkg "$d" "fx/inert" "lib/inert" '' src/inert.c
-    : > "$d/config/module_capabilities.def"
+    : > "$d/engine/composition/module_capabilities.def"
     expect_rc "E3: zero module rows is UNPROVEN (exit 2), not a tree of inert packages" \
         2 "parsed 0 rows" "$d" || rc=1
     n=$((n + 1))

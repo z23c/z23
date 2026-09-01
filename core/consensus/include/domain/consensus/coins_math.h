@@ -8,7 +8,7 @@
  * The "math" of the UTXO set: predicates and mutations that act on a
  * single `struct coins` (or a single tx_out / amount / script) and
  * never touch a cache, a database, or any I/O. This is the
- * arithmetic core that the lib/coins/ and lib/validation/ adapters
+ * arithmetic core that the core/modules/coins/ and core/modules/validation/ adapters
  * compose on top of.
  *
  * What lives here:
@@ -29,9 +29,9 @@
  *
  * What's NOT here (and why):
  *   - coins_alloc / coins_copy / coins_free / coins_from_transaction
- *       Allocate via the lib/util safe_alloc allocator (label-tagged
+ *       Allocate via the platform/modules/util safe_alloc allocator (label-tagged
  *       logging). Allocation policy + OOM logging belongs in lib/, not
- *       in pure domain math. The lib/coins wrappers retain those.
+ *       in pure domain math. The core/modules/coins wrappers retain those.
  *   - coins_view / coins_view_cache / coins_cache_entry
  *       Adapters (storage ports). Domain code MUST never read them.
  *   - update_coins / update_coins_with_undo
@@ -152,11 +152,11 @@ uint64_t coins_math_decompress_amount(uint64_t x);
  * at least 33 bytes of writable storage.
  *
  * On a script shape this codec doesn't recognise, returns false and
- * leaves `*out` / `*out_len` undefined (the lib/coins serializer falls
+ * leaves `*out` / `*out_len` undefined (the core/modules/coins serializer falls
  * back to writing the raw script in that case).
  *
  * The uncompressed-P2PK case validates the embedded pubkey via
- * pubkey_is_fully_valid() — that call lives in lib/keys and is pure
+ * pubkey_is_fully_valid() — that call lives in contexts/wallet/modules/keys and is pure
  * (point validation, no IO). Because keys/ is below domain/ in the
  * layering, calling it from here is allowed.
  *
@@ -171,7 +171,7 @@ bool coins_math_script_compress(const struct script *s,
  * Returns true on success. False on:
  *   - unknown n_size
  *   - the n_size==4/5 uncompressed-P2PK case where the pubkey fails
- *     to decompress (lib/keys/pubkey_decompress() returned false).
+ *     to decompress (contexts/wallet/modules/keys/pubkey_decompress() returned false).
  *
  * Pure: no IO. */
 bool coins_math_script_decompress(struct script *s, unsigned int n_size,

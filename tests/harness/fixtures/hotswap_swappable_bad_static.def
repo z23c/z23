@@ -1,0 +1,7 @@
+/* Lint-gate fixture: a SWAPPABLE row pointing at a TU that carries a mutable
+ * file-scope static. Used by the check_hotswap_static_state self-test to prove
+ * the scan really covers the swappable manifest too (before the union fix the
+ * gate read only engine/composition/hotswap_eligible.def and this fixture passed clean).
+ * NOT a real allowlist. */
+HOTSWAP_SWAPPABLE("tests/harness/fixtures/hotswap_bad_static_fixture.c",
+                  "core.status")

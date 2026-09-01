@@ -12,8 +12,8 @@
  * This tool deliberately does NOT shell to git. The Makefile feeds it the file
  * list on stdin (NUL-separated, from `git ls-files -z core/`); the tool only
  * hashes file bytes and reads/writes the manifest. No external dependencies —
- * it links the in-tree FIPS-202 SHA3-256 (lib/sha3/src/sha3.c) plus
- * memory_cleanse (lib/base/src/cleanse.c), stock libc otherwise.
+ * it links the in-tree FIPS-202 SHA3-256 (platform/modules/sha3/src/sha3.c) plus
+ * memory_cleanse (platform/modules/base/src/cleanse.c), stock libc otherwise.
  *
  * Usage (paths on stdin, NUL-separated):
  *   core_seal seal  core/MANIFEST.sha3   < filelist   (writes the manifest)
@@ -25,7 +25,7 @@
  * It answers exactly one question — "did anything under the sealed set move?"
  * — for the whole set at once. That is the right answer for the seal's
  * IDENTITY, and it is why ROOT is BYTE-FROZEN here: it is mirrored into
- * lib/hotswap/include/hotswap/core_seal_root.h, every hot-swap module pins it,
+ * engine/modules/hotswap/include/hotswap/core_seal_root.h, every hot-swap module pins it,
  * and redefining it would require the owner unseal ritual. Nothing in this
  * file may change the value ROOT computes for a given input.
  *
@@ -39,9 +39,9 @@
  *
  * ── IT IS NOT A NEW MERKLE DIALECT ────────────────────────────────────────
  *
- * lib/codeindex already defines a SHA3-256 Merkle tree over this repository's
- * source (lib/codeindex/src/codeindex_merkle.c, documented in
- * lib/codeindex/include/codeindex/codeindex_merkle.h), and in that tree a
+ * cognition/modules/codeindex already defines a SHA3-256 Merkle tree over this repository's
+ * source (cognition/modules/codeindex/src/codeindex_merkle.c, documented in
+ * cognition/modules/codeindex/include/codeindex/codeindex_merkle.h), and in that tree a
  * DIRECTORY IS ALREADY A SECTION: ci_merkle_node(m, "core/consensus", …)
  * returns that subtree's digest today. A second Merkle over source files, with
  * its own preimage and its own child order, is the duplicated-ledger shape the
@@ -117,7 +117,7 @@
  * ── UNAMBIGUOUS INPUT AND UNAMBIGUOUS SERIALISATION ────────────────────────
  *
  * A seal is only worth what its ENCODING is worth. Two rules, both enforced
- * here, both regression-tested by lib/test/src/test_core_seal.c:
+ * here, both regression-tested by tests/harness/src/test_core_seal.c:
  *
  *   1. ONE TOKENISATION OF THE INPUT STREAM. stdin is NUL-separated and
  *      nothing else. An earlier revision split a token at a NUL *or* a
@@ -171,7 +171,7 @@
  *
  * SCOPE — core_seal's file set is the Makefile's CORE_SEAL_PATHS as tracked by
  * git; codeindex's is ci_enumerate_sources()' .c/.h/.def policy. The two sets
- * are NOT identical (core/UNSEAL.md is sealed but not indexed; lib/validation
+ * are NOT identical (core/UNSEAL.md is sealed but not indexed; core/modules/validation
  * holds indexed files that are not sealed), so the WHOLE-TREE roots differ by
  * construction. A directory node's digest is comparable between the two trees
  * exactly when that directory's file set is identical in both — which is the
@@ -909,7 +909,7 @@ static size_t compute_sections(const struct entry *ents, size_t n,
 /* ── manifest line codec ───────────────────────────────────────────────────
  *
  * Writer and reader are adjacent on purpose: they are one encoding, and
- * lib/test/src/test_core_seal.c round-trips them against the historical
+ * tests/harness/src/test_core_seal.c round-trips them against the historical
  * whitespace-delimited spelling to prove the dual-parse is gone. */
 
 /* Consume `lit` from the front of `p`; NULL if it is not there. */
@@ -1419,7 +1419,7 @@ static const char *const manifest_header =
     "#       One per directory holding sealed files, path-sorted. <files> is\n"
     "#       RECURSIVE; <pathlen> is the exact byte length of <path>, which is\n"
     "#       the rest of the line (so a path containing spaces round-trips).\n"
-    "#       <hex> is that directory's node digest in lib/codeindex's source\n"
+    "#       <hex> is that directory's node digest in cognition/modules/codeindex's source\n"
     "#       Merkle dialect (codeindex_merkle.c):\n"
     "#         leaf = SHA3-256(0x10 || \"zcl.codeindex.merkle.leaf.v1\\0\"\n"
     "#                         || relpath\\0 || u64le(size) || bytes)\n"
@@ -1569,7 +1569,7 @@ static int do_check(const char *manifest_path)
     return rc;
 }
 
-/* The CLI body, kept as a named function so lib/test/src/test_core_seal.c can
+/* The CLI body, kept as a named function so tests/harness/src/test_core_seal.c can
  * `#define CORE_SEAL_NO_MAIN` and include this translation unit whole. */
 int core_seal_main(int argc, char **argv);
 int core_seal_main(int argc, char **argv)

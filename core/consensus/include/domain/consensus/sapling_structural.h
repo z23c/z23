@@ -5,7 +5,7 @@
  * Overwinter structural transaction checks.
  *
  * These checks mirror the PURE branches of legacy
- * lib/validation/src/contextual_check_tx.c — the branches that depend
+ * core/modules/validation/src/contextual_check_tx.c — the branches that depend
  * only on the transaction fields themselves plus the activation
  * height supplied by the caller (looked up against
  * consensus_params->vUpgrades). They do NOT verify any zk-SNARK

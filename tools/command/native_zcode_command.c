@@ -43,7 +43,7 @@
  * the publisher key's tier allowance for the current ISO week is not
  * exhausted (new user: 1 publication/week — the free allowance; the
  * tier resolves from the reward ledger's earned score plus the local
- * service book's verified-bytes ratio, lib/vcs/package_policy.*). A
+ * service book's verified-bytes ratio, contexts/commons/modules/vcs/package_policy.*). A
  * denial names the exact rule (publish-frequency-limit); a successful
  * fresh publish records the publication event in the service book so the
  * next commit counts it. The optional `day` input pins the window for
@@ -55,7 +55,7 @@
  * declarative ONLY — nothing here compiles or executes downloaded code.
  *
  * Truth discipline: the CAS manifest/release bytes under <datadir>/zcode
- * are authoritative; the search index (lib/vcs/package_index.*) is a
+ * are authoritative; the search index (contexts/commons/modules/vcs/package_index.*) is a
  * rebuildable projection re-read from those bytes on every call, and
  * acceptance state is replayed from the persisted releases before any
  * classification, so a one-shot CLI process agrees with the node's own

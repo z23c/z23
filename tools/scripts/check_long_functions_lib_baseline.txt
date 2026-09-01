@@ -1,5 +1,5 @@
 # Lint gate #12 (WARN tier) baseline — grandfathered over-cap functions
-# under lib/ (excl. lib/test/, which is fixtures/registrations and
+# under lib/ (excl. tests/harness/include/test/, which is fixtures/registrations and
 # legitimately long).
 #
 # check-long-functions (tools/scripts/check_long_functions.sh) treats this
@@ -14,4 +14,4 @@
 # Format: <relative-path> <function-name> <max-lines>   (# = comment)
 # Sorted by path.
 
-lib/net/src/msgprocessor.c msg_send_messages 520
+core/modules/net/src/msgprocessor.c msg_send_messages 520

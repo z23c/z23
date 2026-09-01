@@ -16,7 +16,7 @@ source tools/lint/scan_exclusions.sh
 
 # Overridable for the lint-gate self-test. Production scans the controller
 # source tree where RPC/REST handlers can reach chainstate.
-CONTROLLERS_DIR="${ZCL_COINS_LOOKUP_SCAN_DIR:-app/controllers/src}"
+CONTROLLERS_DIR="${ZCL_COINS_LOOKUP_SCAN_DIR:-engine/controllers/src}"
 mapfile -t scan_files < <(find "$CONTROLLERS_DIR" -type f -name '*.c' "${LINT_FIND_PRUNE_ARGS[@]}" 2>/dev/null | sort)
 gate_require_scanned "${#scan_files[@]}" 1 check_coins_lookup_nullcheck \
     "no controller *.c files under '$CONTROLLERS_DIR'"

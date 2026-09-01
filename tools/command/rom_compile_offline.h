@@ -2,7 +2,7 @@
  *
  * rom_compile_offline — compose a zcl.rom_compile.v1-shaped `state` body for a
  * FOREIGN producer datadir, entirely READ-ONLY and WITHOUT a running node. It
- * mirrors the shape app/jobs/src/rom_compile_status.c produces on a live node,
+ * mirrors the shape engine/jobs/src/rom_compile_status.c produces on a live node,
  * so the same pure renderer (rom_compile_render_ascii) draws it, but sources its
  * fields from on-disk artifacts of an offline `-mint-anchor` producer:
  *

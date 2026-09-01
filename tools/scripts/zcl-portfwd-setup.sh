@@ -37,7 +37,7 @@ OP_HOME="$(eval echo "~$OP_USER")"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 FWD_SRC="$REPO_ROOT/tools/zcl_portfwd.c"
-UNIT_SRC="$REPO_ROOT/deploy/systemd/zcl-portfwd.service"
+UNIT_SRC="$REPO_ROOT/platform/deploy/systemd/zcl-portfwd.service"
 FWD_BIN="$OP_HOME/.local/bin/zcl-portfwd"
 UNIT_DIR="$OP_HOME/.config/systemd/user"
 UNIT_DST="$UNIT_DIR/zcl-portfwd.service"

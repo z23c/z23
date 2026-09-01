@@ -9,7 +9,7 @@
  * task.v1, candidate.v1, benchmark_method.v1, science_findings.v1) have
  * NO command-leaf admission path — the landed tests seed them into the
  * workspace CAS with vcs_object_put_addressed (see
- * lib/test/src/test_zcode_science_store.c and test_zcode_benchmark_exec.c,
+ * tests/harness/src/test_zcode_science_store.c and test_zcode_benchmark_exec.c,
  * whose fixtures this tool mirrors field-for-field). This tool does
  * exactly the same seeding through the SAME library codecs and the SAME
  * CAS write path, for two real node datadirs. It also:
@@ -125,7 +125,7 @@ bool zcl_random_secret_bytes(uint8_t *buf, size_t n, const char *label)
     abort();
 }
 
-/* Tool-local shims for the node-global arg getters lib/vcs references.
+/* Tool-local shims for the node-global arg getters contexts/commons/modules/vcs references.
  * This tool is never a node: the store APIs it calls take an explicit
  * datadir and quota, so these exist only to satisfy the linker for the
  * global-store path it never uses (vcs_package_store_open_global). The
@@ -601,7 +601,7 @@ static int cmd_pubkey(const char *seed_hex)
 #define FIX_PKG_FILE_MAX 512u
 
 static const char *const k_pkg_paths[FIX_PKG_FILES] = {
-    "LICENSE", "include/fix.h", "src/fix.c", "src/main.c", "tests/t1.c",
+    "LICENSE", "include/fix.h", "src/fix.c", "engine/entry/main.c", "tests/t1.c",
 };
 
 static int cmd_seed_package(const char *datadir, uint8_t salt)

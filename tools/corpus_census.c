@@ -1,10 +1,10 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * corpus-census: offline driver for the C23 corpus odometer (slice 1b).
- * Reads corpus/scopes.def, enumerates each scope's tracked files with
+ * Reads contexts/commons/corpus/scopes.def, enumerates each scope's tracked files with
  * `git ls-files -z` (untracked scratch — test-tmp/, build/, .zvcs/ — can
  * never enter the census), binds every evidence bit to a REAL recomputable
- * artifact, feeds the pure census core (lib/vcs zcode_c23_corpus_census),
+ * artifact, feeds the pure census core (contexts/commons/modules/vcs zcode_c23_corpus_census),
  * and emits the first signed c23_corpus_checkpoint.v1 plus its shards, an
  * evidence bundle, and a KPI report under the --out directory.
  *
@@ -129,7 +129,7 @@
  * FILE-CLAIM PRECEDENCE (deterministic; real ambiguity fails closed): a
  * tests-prefix claim beats another scope's src-prefix claim; among
  * same-kind claims the LONGEST matching prefix wins (so
- * lib/test/src/test_base beats the shared lib/test/ remainder scope); two
+ * tests/harness/src/test_base beats the shared tests/harness/include/test/ remainder scope); two
  * equal-length competing claims from different scopes are a fatal error.
  * No file is ever counted twice.
  *

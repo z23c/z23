@@ -73,7 +73,7 @@ is now wired on the connect path with an IBD early-return gate.
   block containing an expired, non-final, or height-inappropriate-version tx was
   ACCEPTED by c23 / REJECTED by at-tip zclassicd → permanent fork. (Shielded
   *proofs* are separately enforced via the staged proof reducer.)
-- **LANDED:** `app/jobs/src/script_validate_contextual.c:107` calls
+- **LANDED:** `engine/jobs/src/script_validate_contextual.c:107` calls
   `contextual_check_block(...)` on the production connect path, gated by the
   `is_ibd` predicate (`script_validate_contextual.c:94`) matching zclassicd's IBD
   semantics so c23 does not become stricter than zclassicd during sync.
@@ -93,7 +93,7 @@ is now wired on the connect path with an IBD early-return gate.
   zk-proof but a **forged** `joinSplitSig` was accepted/finalized by c23 /
   rejected DoS(100) by zclassicd. The zk-SNARK binds `joinSplitPubKey` into
   `h_sig` but does NOT substitute for the Ed25519 signature over the tx sighash.
-- **LANDED:** `app/jobs/src/proof_validate_stage.c:141` calls `ed25519_verify`
+- **LANDED:** `engine/jobs/src/proof_validate_stage.c:141` calls `ed25519_verify`
   over the sighash before the per-joinsplit zk-SNARK loop; on failure
   `first_failure_proof_type="joinsplit_sig"` (`proof_validate_stage.c:144`),
   propagating `ok=0` to block `tip_finalize`.
@@ -115,7 +115,7 @@ is now wired on the connect path with an IBD early-return gate.
   `tx_structural` at a Sapling height, so the Sapling-group-id rule genuinely
   escapes the context-free path.)
 - **LANDED:** same surface as #2 — `contextual_check_block` is now called from
-  the connect path (`app/jobs/src/script_validate_contextual.c:107`), IBD-gated.
+  the connect path (`engine/jobs/src/script_validate_contextual.c:107`), IBD-gated.
 
 ### #5 — Missing rule: coinbase outputs must be spent only to shielded outputs
 - **c23 vs zclassicd:** c23's coinbase-input branch had the maturity check but
@@ -128,8 +128,8 @@ is now wired on the connect path with an IBD early-return gate.
   coinbase output and has a non-empty transparent `vout`; the rule was absent in
   c23, which ACCEPTED such a tx. Not height-gated (active from genesis on
   mainnet; disabled only on regtest, so the carve-out is automatic).
-- **LANDED:** `app/jobs/src/utxo_apply_delta.c:315` and
-  `app/jobs/src/utxo_apply_stage.c:475` reject
+- **LANDED:** `engine/jobs/src/utxo_apply_delta.c:315` and
+  `engine/jobs/src/utxo_apply_stage.c:475` reject
   `bad-txns-coinbase-spend-has-transparent-outputs` when a spent input is
   coinbase and the tx has transparent outputs.
 

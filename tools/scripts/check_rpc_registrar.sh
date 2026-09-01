@@ -7,8 +7,8 @@
 # unreachable for a full release cycle; this gate prevents regressions.
 #
 # Allowed callers of rpc_table_append:
-#   - lib/rpc/src/server.c          — defines both helpers, internal use
-#   - lib/test/*                    — test fixtures may need the bool form
+#   - engine/modules/rpc/src/server.c          — defines both helpers, internal use
+#   - tests/harness/include/test/*                    — test fixtures may need the bool form
 #
 # Anything else is a failure.
 
@@ -20,17 +20,17 @@ source tools/lint/scan_exclusions.sh
 
 HITS=$(grep -rn 'rpc_table_append\b' lib/ app/ tools/ config/ \
     --include='*.c' --include='*.h' "${LINT_GREP_EXCLUDE_ARGS[@]}" 2>/dev/null \
-    | grep -v '^lib/rpc/src/server.c:' \
-    | grep -v '^lib/rpc/include/rpc/server.h:' \
-    | grep -v '^lib/test/' \
+    | grep -v '^engine/modules/rpc/src/server.c:' \
+    | grep -v '^engine/modules/rpc/include/rpc/server.h:' \
+    | grep -v '^tests/harness/include/test/' \
     || true)
 
 if [ -n "$HITS" ]; then
     echo "$HITS"
     echo ""
-    echo "FAIL: rpc_table_append() used outside lib/rpc/src/server.c and lib/test/."
+    echo "FAIL: rpc_table_append() used outside engine/modules/rpc/src/server.c and tests/harness/include/test/."
     echo "      Use rpc_table_must_append() in every register_*_rpc_commands()"
-    echo "      callsite. See lib/rpc/include/rpc/server.h for the contract."
+    echo "      callsite. See engine/modules/rpc/include/rpc/server.h for the contract."
     exit 1
 fi
 

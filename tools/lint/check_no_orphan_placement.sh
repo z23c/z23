@@ -7,7 +7,7 @@
 # concept" across the WHOLE tree.
 #
 # The placement decision is the shell mirror of ci_group_for_path()
-# (lib/codeindex/src/codeindex_group.c:79-94): a path is placed iff its first
+# (cognition/modules/codeindex/src/codeindex_group.c:79-94): a path is placed iff its first
 # segment is one of the known tops followed by "/"; anything else → "root" →
 # violation.
 #
@@ -43,7 +43,7 @@ fi
 
 # Excludes: vendor (third-party), build artifacts, the test fixtures dir, and
 # the repo's `_`-prefixed ephemeral-source convention (planted lint fixtures).
-# packages/ holds C23 Commons package payloads: inert published artifacts that
+# contexts/commons/packages/ holds C23 Commons package payloads: inert published artifacts that
 # are never compiled into the node build. Their placement discipline is the
 # fixed Commons package layout (LICENSE/include/src/tests/zcode-package.json)
 # enforced by the package factory gate, and the corpus census counts them
@@ -51,7 +51,7 @@ fi
 is_excluded() {
     local f="$1" base="${1##*/}"
     case "$f" in
-        vendor/*|build/*|lib/test/fixtures/*|packages/*) return 0 ;;
+        vendor/*|build/*|tests/harness/fixtures/*|contexts/commons/packages/*) return 0 ;;
     esac
     case "$base" in
         _*) return 0 ;;
@@ -65,7 +65,7 @@ is_excluded() {
 # The list is DERIVED from the Makefile's -I flag lists by repo_shape.sh, not
 # hand-kept here. The hand-kept version omitted `application` — which the build
 # has always carried an APPLICATION_INCLUDES for — so the first file written
-# under application/ would have been reported as misplaced by this very gate.
+# under engine/application/ would have been reported as misplaced by this very gate.
 KNOWN_TOPS=("${ZCL_REPO_TOPS[@]}")
 is_placed() {
     local f="$1" top

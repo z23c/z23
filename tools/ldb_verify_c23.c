@@ -1,7 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * ldb_verify_c23 — differential proof that the C23 read-only LevelDB
- * reader (lib/storage/src/ldb_reader_*.c) returns byte-identical data to
+ * reader (engine/modules/storage/src/ldb_reader_*.c) returns byte-identical data to
  * the vendored C++ libleveldb.a on real on-disk databases.
  *
  *     build/bin/ldb_verify_c23 <dir-for-cxx> <dir-for-c23> [max-records]

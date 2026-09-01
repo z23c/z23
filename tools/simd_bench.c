@@ -92,7 +92,7 @@ static uint64_t now_ns(void)
 {
     struct timespec ts;
     /* Same exemption, and for the same reason, as
-     * lib/test/differential/groth16_comb_bench.c: this is a standalone
+     * tests/harness/differential/groth16_comb_bench.c: this is a standalone
      * benchmark that deliberately links only the crypto sources under test, so
      * it cannot call platform.clock. It also needs NANOSECOND resolution —
      * platform_time_monotonic_us() truncates to microseconds, which is coarser
@@ -428,7 +428,7 @@ static void bench_sha256(unsigned char *msg)
 
 /* ═══════════════════════════════════════════════════════════════════
  * Primitive 2 — sha3_256_x4 (4 independent messages, scalar vs AVX-512)
- * Used by the snapshot manifest / merkle combine (lib/net/src/fast_sync.c).
+ * Used by the snapshot manifest / merkle combine (core/modules/net/src/fast_sync.c).
  * ═══════════════════════════════════════════════════════════════════ */
 
 #define X4_MSG_BYTES 1024
@@ -483,7 +483,7 @@ static void bench_sha3_256_x4(unsigned char *msg)
 
 /* ═══════════════════════════════════════════════════════════════════
  * Primitive 4 — sha3_512_x4 keystream (scalar vs AVX-512)
- * Used by the file-service frame cipher (lib/net/src/file_service.c).
+ * Used by the file-service frame cipher (core/modules/net/src/file_service.c).
  * ═══════════════════════════════════════════════════════════════════ */
 
 struct k4_ctx { const uint8_t *key; const uint8_t *nonce; };

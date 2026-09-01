@@ -52,20 +52,20 @@ First `OP_RETURN` output, Bitcoin script PUSH fields after `0x6a`:
 | label     | 0..32 | optional UTF-8 label (`name@version`)   |
 
 No trailing bytes are permitted after the label push. The parser
-(`lib/zanc/src/zanc.c`, `zanc_parse`) is strict: it rejects bad lengths, an
+(`contexts/commons/modules/zanc/src/zanc.c`, `zanc_parse`) is strict: it rejects bad lengths, an
 unknown version, an unsupported hash-type byte, an oversize or non-UTF-8
 label, and any trailing data.
 
 ## Where it lives
 
-- Codec: `lib/zanc/` (`zanc_parse`, `zanc_build_anchor`, `zanc_label_valid`).
+- Codec: `contexts/commons/modules/zanc/` (`zanc_parse`, `zanc_build_anchor`, `zanc_label_valid`).
 - Projection table + model: `zanc_anchors` (schema v30 in
-  `app/models/src/database_migrate_features.c`); model in
-  `app/models/src/zanc.c`.
-- Ingestion seam: `app/models/src/explorer_index.c` — `index_op_return`
+  `engine/models/src/database_migrate_features.c`); model in
+  `contexts/commons/models/src/zanc.c`.
+- Ingestion seam: `contexts/explorer/models/src/explorer_index.c` — `index_op_return`
   dispatches to `apply_zanc`, alongside ZSLP and ZNAM, on each tx's first
   OP_RETURN.
-- Commands: `app/controllers/src/anchor_controller.c`.
+- Commands: `engine/controllers/src/anchor_controller.c`.
 
 ## Commands
 

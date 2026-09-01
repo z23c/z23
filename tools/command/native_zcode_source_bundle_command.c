@@ -408,7 +408,7 @@ void zcl_native_handle_zcode_source_bundle_checkout(
  *
  * Everything below the parse is the identity-free path this leaf exists for:
  * the ONLY input that decides acceptance is `source_root`, and it is the
- * caller's own. See app/services/src/source_bundle_fetch.c for the trust model
+ * caller's own. See engine/services/src/source_bundle_fetch.c for the trust model
  * and the bound on a hostile peer. This handler contributes exactly two things
  * the service deliberately does not do: it parses the operator's peer list, and
  * it commits the verified bytes — with the SAME O_EXCL/O_NOFOLLOW exclusive
@@ -593,7 +593,7 @@ void zcl_native_handle_zcode_source_bundle_fetch(
  * IT RUNS IN THE NODE, over RPC, and that is not an implementation detail: the
  * artifact registry is the daemon's process memory, so a registration
  * performed in this one-shot CLI process would be a publish that offered
- * nothing (see app/controllers/src/source_bundle_publish_rpc.c). This handler
+ * nothing (see engine/controllers/src/source_bundle_publish_rpc.c). This handler
  * therefore parses, forwards, and refuses loudly when the node does not
  * answer — it never falls back to a local write that would look like success.
  *

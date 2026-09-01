@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Copyright 2026 Rhett Creighton - Apache License 2.0
-# purpose: HARD gate — packages/ format discipline (docs/spec/c23-package-format.md §2).
+# purpose: HARD gate — contexts/commons/packages/ format discipline (docs/spec/c23-package-format.md §2).
 #
 # WHY THIS EXISTS. The Commons packages are the reusable C23 parts the
 # whole product is built from, and their anatomy IS the format: one package
@@ -10,7 +10,7 @@
 # or unverifiable by a node that never met its author. Today every package
 # conforms; this gate keeps it that way mechanically instead of by memory.
 #
-# RULES (per packages/<pkg>/, rooted at the spec):
+# RULES (per contexts/commons/packages/<pkg>/, rooted at the spec):
 #   R1  zcode-package.json, LICENSE, README.md, include/, src/, tests/ exist.
 #   R2  manifest: schema 1, language c23, name "<pkg>/<pkg>", license on the
 #       frozen v1 SPDX allowlist (mirrors vcs_package_release_license_allowed).
@@ -102,7 +102,7 @@ check_package() {
     [ -f "$m" ] || return
 
     # R2 — manifest shape (flat-field extraction; the byte-exact parse is
-    # lib/vcs/src/package_prepare.c's job, this gate checks the contract).
+    # contexts/commons/modules/vcs/src/package_prepare.c's job, this gate checks the contract).
     grep -q '"schema": 1' "$m" || fail "$pkg: manifest schema is not 1"
     grep -q "\"name\": \"$pkg/$pkg\"" "$m" \
         || fail "$pkg: manifest name is not \"$pkg/$pkg\""
@@ -266,8 +266,8 @@ run_required_package_kats() {
     for pkg in ball zdemo zhello; do
         bin="$work/test_$pkg"
         if ! "${cc_argv[@]}" -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
-                -I"packages/$pkg/include" "packages/$pkg/src/$pkg.c" \
-                "packages/$pkg/tests/test_$pkg.c" -o "$bin"; then
+                -I"contexts/commons/packages/$pkg/include" "contexts/commons/packages/$pkg/src/$pkg.c" \
+                "contexts/commons/packages/$pkg/tests/test_$pkg.c" -o "$bin"; then
             echo "check_package_anatomy: $pkg declared KAT does not compile" >&2
             rc=1
             continue
@@ -407,7 +407,7 @@ selftest() {
     return "$rc"
 }
 
-root=packages
+root=contexts/commons/packages
 case "${1:-}" in
     --selftest) selftest; exit $? ;;
     --root)
@@ -436,7 +436,7 @@ if [ "${#failures[@]}" -ne 0 ]; then
     echo "Rules: docs/spec/c23-package-format.md §2 (package anatomy discipline)." >&2
     exit 1
 fi
-if [ "$root" = packages ]; then
+if [ "$root" = contexts/commons/packages ]; then
     run_required_package_kats || exit $?
 fi
 echo "check_package_anatomy: clean — $n packages conform (R1-R9)"

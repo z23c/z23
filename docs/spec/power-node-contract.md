@@ -11,10 +11,10 @@ Authoritative references:
 
 - `CLAUDE.md` — current power-node feature set (full chain node, embedded Tor
   hidden service, fast sync, MVC web framework, ZSLP, Sapling, games, and store).
-- `app/services/README.md` — service-layer boundary.
-- `lib/event/include/event/event.h` — event taxonomy.
-- `config/commands/*.def` — typed native command catalog.
-- `app/controllers/src/*_native_handlers.c` — command handler bodies.
+- `engine/services/README.md` — service-layer boundary.
+- `engine/modules/event/include/event/event.h` — event taxonomy.
+- `engine/composition/commands/*.def` — typed native command catalog.
+- `engine/controllers/src/*_native_handlers.c` — command handler bodies.
 
 Consensus, P2P wire parsing, rendering, and application orchestration stay
 separated. Services may coordinate work and expose status, but must not define
@@ -42,14 +42,14 @@ Invariants:
 - Native commands and controller reads may report `node_state` values, but mutation remains
   behind the owning subsystem APIs.
 
-Concrete files: `docs/spec/schema.sql`, `app/models/src/database.c`,
-`lib/wallet/src/wallet_sqlite.c`, `lib/coins/src/utxo_commitment.c`,
-`lib/storage/src/coins_view_sqlite.c`, `config/src/boot.c`.
+Concrete files: `docs/spec/schema.sql`, `engine/models/src/database.c`,
+`contexts/wallet/modules/wallet/src/wallet_sqlite.c`, `core/modules/coins/src/utxo_commitment.c`,
+`engine/modules/storage/src/coins_view_sqlite.c`, `engine/composition/src/boot.c`.
 
 ## service_registry
 
 `service_registry` is the boot-time ownership contract for services under
-`app/services`. Services are long-lived orchestration units: sync workflows,
+`engine/services`. Services are long-lived orchestration units: sync workflows,
 snapshot lifecycle, wallet indexing/rescan, health/status aggregation,
 explorer query aggregation, peer policy.
 
@@ -66,10 +66,10 @@ Invariants:
 - Service APIs must state thread ownership for mutable state and must avoid
   returning borrowed pointers across worker-thread boundaries.
 
-Concrete files: `app/services/README.md`, `config/include/config/runtime.h`,
-`config/src/boot_services.c`, `app/services/src/node_health_service.c`,
-`app/services/src/snapshot_sync_service.c`,
-`app/conditions/src/sync_state_stuck.c`.
+Concrete files: `engine/services/README.md`, `engine/composition/include/config/runtime.h`,
+`engine/composition/src/boot_services.c`, `engine/services/src/node_health_service.c`,
+`engine/services/src/snapshot_sync_service.c`,
+`engine/conditions/src/sync_state_stuck.c`.
 
 ## Onion Gateway
 
@@ -90,9 +90,9 @@ Invariants:
   address, optional clearnet endpoint, height, and version.
 - The gateway must not bypass consensus, wallet, database, or command authorization.
 
-Concrete files: `lib/net/src/onion_service.c`,
-`lib/net/src/tor_integration.c`, `lib/net/src/https_server.c`,
-`app/controllers/src/network_controller.c`, `CLAUDE.md`.
+Concrete files: `core/modules/net/src/onion_service.c`,
+`core/modules/net/src/tor_integration.c`, `core/modules/net/src/https_server.c`,
+`engine/controllers/src/network_controller.c`, `CLAUDE.md`.
 
 ## ZClassicDNS
 
@@ -117,9 +117,9 @@ Invariants:
   not be silently treated as a payment address, and payment addresses must not
   be treated as routable hosts.
 
-Concrete files: `lib/znam/include/znam/znam.h`,
-`lib/znam/src/znam.c`, `app/controllers/src/name_controller.c`,
-`config/commands/app_features.def`, `app/models/src/database.c`.
+Concrete files: `contexts/naming/modules/znam/include/znam/znam.h`,
+`contexts/naming/modules/znam/src/znam.c`, `engine/controllers/src/name_controller.c`,
+`engine/composition/commands/app_features.def`, `engine/models/src/database.c`.
 
 ## Native Command Surface
 
@@ -139,10 +139,10 @@ Invariants:
 - The `z23 rpc` escape hatch is not the contract for new features. New
   stable functionality should get a typed command.
 
-Concrete files: `lib/kernel/include/kernel/command_registry.h`,
-`lib/kernel/src/command_registry.c`, `config/commands/*.def`,
+Concrete files: `engine/modules/kernel/include/kernel/command_registry.h`,
+`engine/modules/kernel/src/command_registry.c`, `engine/composition/commands/*.def`,
 `tools/command/native_command.c`, and
-`lib/test/src/test_command_registry_catalog.c`.
+`tests/harness/src/test_command_registry_catalog.c`.
 
 ## Permissions
 
@@ -165,11 +165,11 @@ Invariants:
 - The registry must classify destructive native commands independently from command
   descriptions so wording changes cannot alter permission policy.
 
-Concrete files: `lib/kernel/src/command_registry.c`,
-`app/models/src/authz_policy.c`,
-`lib/test/src/test_rpc_auth_hardening.c`,
-`app/controllers/include/controllers/file_controller.h`,
-`app/controllers/src/wallet_controller.c`.
+Concrete files: `engine/modules/kernel/src/command_registry.c`,
+`engine/models/src/authz_policy.c`,
+`tests/harness/src/test_rpc_auth_hardening.c`,
+`engine/controllers/include/controllers/file_controller.h`,
+`contexts/wallet/controllers/src/wallet_controller.c`.
 
 ## Event Expectations
 
@@ -193,9 +193,9 @@ Invariants:
 - Event payloads are bounded by `EVENT_PAYLOAD_SIZE`; emit compact structured
   text rather than unbounded JSON blobs.
 
-Concrete files: `lib/event/include/event/event.h`,
-`lib/event/src/event.c`, `lib/kernel/src/command_registry.c`, and
-`app/controllers/src/ops_native_handlers.c`.
+Concrete files: `engine/modules/event/include/event/event.h`,
+`engine/modules/event/src/event.c`, `engine/modules/kernel/src/command_registry.c`, and
+`engine/controllers/src/ops_native_handlers.c`.
 
 ## Change Control
 

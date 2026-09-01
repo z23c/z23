@@ -2,7 +2,7 @@
 # Copyright 2026 Rhett Creighton - Apache License 2.0
 #
 # check_hotswap_swappable_shape.sh — THE HARD LINE for the REAL (activatable)
-# Tier-1 hot-swap module ABI. config/hotswap_swappable.def carries ONE row per
+# Tier-1 hot-swap module ABI. engine/composition/hotswap_swappable.def carries ONE row per
 # swappable source TU plus the space-separated set of command leaves that TU's
 # module may re-point in a single all-or-nothing batch. This gate enforces both
 # halves of the line:
@@ -16,7 +16,7 @@
 #          node's consensus state or the reducer fold.
 #
 #   LEAF   Every leaf must be declared with ZCL_COMMAND_READY_READ in
-#          config/commands/*.def — the READY, read-only, effect=EFFECT_READ
+#          engine/composition/commands/*.def — the READY, read-only, effect=EFFECT_READ
 #          macro form. A leaf declared with any COMMAND/PLANNED/COMPAT/DEV form
 #          (which can carry EFFECT_MUTATE or a non-READY availability) is
 #          refused here, BEFORE it can reach the runtime. A leaf may be claimed
@@ -45,9 +45,9 @@ cd "$ROOT"
 # shellcheck source=tools/lint/gate_lib.sh
 . tools/lint/gate_lib.sh
 
-MANIFEST="${ZCL_HOTSWAP_SWAPPABLE_MANIFEST:-config/hotswap_swappable.def}"
-DEFDIR="${ZCL_HOTSWAP_COMMAND_DEF_DIR:-config/commands}"
-ISLANDS="${ZCL_HOTSWAP_ISLAND_MANIFEST:-config/hotswap_islands.def}"
+MANIFEST="${ZCL_HOTSWAP_SWAPPABLE_MANIFEST:-engine/composition/hotswap_swappable.def}"
+DEFDIR="${ZCL_HOTSWAP_COMMAND_DEF_DIR:-engine/composition/commands}"
+ISLANDS="${ZCL_HOTSWAP_ISLAND_MANIFEST:-engine/composition/hotswap_islands.def}"
 
 echo "══ LINT: hot-swap swappable allowlist (shape leaf + READY read-only) ══"
 
@@ -132,21 +132,21 @@ if [ "$def_count" -eq 0 ] || [ "$ready_count" -eq 0 ]; then
 fi
 
 # A shape LEAF the module ABI may re-point.
-ALLOWED='^(app/controllers|app/views|app/conditions)/'
+ALLOWED='^(engine|cognition|contexts/[^/]+)/(controllers|views|conditions)/'
 # Island membership widens the CODE a module carries, never its authority.
 # The roots below are folder-wide because everything under them is already a
 # stateless shape/codec surface. A pure DECISION leaf that lives under a
 # mixed-shape library root is admitted ONE FILE AT A TIME instead, so widening
 # never happens by accident:
-#   lib/vcs/src/package_policy.c  the frozen ZCODE local P2P ratio + anti-spam
+#   contexts/commons/modules/vcs/src/package_policy.c  the frozen ZCODE local P2P ratio + anti-spam
 #       policy table. Pure decision functions over explicit facts — no
 #       wall-clock, no filesystem, no network, no mutable file-scope statics
 #       (check_hotswap_static_state re-proves the last clause every run). The
-#       rest of lib/vcs (stores, swarm sessions, DHT services) stays out.
+#       rest of contexts/commons/modules/vcs (stores, swarm sessions, DHT services) stays out.
 # FORBIDDEN below is unchanged and still applies to every entry here.
-ISLAND_ALLOWED='^(app/(controllers|views|conditions|services)|lib/(metaverse|encoding))/.+\.c$|^lib/vcs/src/package_policy\.c$'
+ISLAND_ALLOWED='^(engine|cognition|contexts/[^/]+)/(controllers|views|conditions|services)/.+\.c$|^contexts/commons/modules/metaverse/src/.+\.c$|^platform/modules/encoding/src/.+\.c$|^contexts/commons/modules/vcs/src/package_policy\.c$'
 # Belt-and-suspenders: never under any of these, even if mislabeled a shape.
-FORBIDDEN='^(core|lib/consensus|lib/validation|lib/storage|lib/net|lib/coins|lib/chain|lib/mining|app/jobs|lib/kernel|lib/supervisor|app/supervisors|domain/consensus)/'
+FORBIDDEN='^(core/(consensus|modules/(validation|net|coins|chain|mining))|engine/(reducer|jobs|supervisors|modules/(storage|kernel|supervisor)))/'
 
 # Pre-pass: realized leaf population across every row. Asserted against a floor
 # BEFORE the violation walk, so a manifest whose leaf column silently emptied is
@@ -185,7 +185,7 @@ for row in "${ROWS[@]}"; do
         continue
     fi
     if [[ ! "$s" =~ $ALLOWED ]]; then
-        violations="${violations}  $s (not under an allowed shape-leaf folder: app/controllers, app/views, app/conditions)"$'\n'
+        violations="${violations}  $s (not under a physical controller, view, or condition room)"$'\n'
         continue
     fi
     case "$s" in

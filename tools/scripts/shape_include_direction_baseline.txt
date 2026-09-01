@@ -1,31 +1,31 @@
 # Lint gate #49 baseline — grandfathered upward inter-shape #includes
-# (app/models/** -> services/controllers, or app/services/** -> controllers).
+# (engine/models/** -> services/controllers, or engine/services/** -> controllers).
 #
 # Each entry is an existing, accepted upward #include that pre-dates this
 # lint gate (2026-07-21). The gate fails if a NEW violation appears that is
 # NOT in this baseline.
 #
 # Status by direction:
-#   app/models/**  -> services/controllers : ZERO known violations. The two
-#     that motivated this gate (app/models/src/principal.c ->
-#     services/authz_policy.h, app/models/src/db_txn.c ->
+#   engine/models/**  -> services/controllers : ZERO known violations. The two
+#     that motivated this gate (engine/models/src/principal.c ->
+#     services/authz_policy.h, engine/models/src/db_txn.c ->
 #     services/disk_monitor.h) were fixed at gate-introduction time: the
-#     authz policy table moved down into app/models/ (it is a pure
+#     authz policy table moved down into engine/models/ (it is a pure
 #     role->mask/ceiling lookup, a genuine model concept), and db_txn's
 #     disk-critical check was inverted into a registered callback/port
 #     (db_txn_set_disk_critical_probe, wired from disk_monitor_start() in
-#     app/services/src/disk_monitor.c itself, as part of its own start
+#     engine/services/src/disk_monitor.c itself, as part of its own start
 #     lifecycle) —
 #     mirroring node_db_set_quick_check_skip_probe() in models/database.h.
 #     Any NEW models/** -> services/controllers include fails immediately.
 #
-#   app/services/** -> controllers/ : pre-existing entries below,
+#   engine/services/** -> controllers/ : pre-existing entries below,
 #     discovered while writing this gate's scan (not previously tracked
 #     anywhere — there was no gate on this direction before). Paying these
 #     down means either moving the included controllers/*.h header down
 #     into services/ or lib/, or reworking the service to not need it —
 #     out of scope for the change that introduced this gate (touching
-#     app/controllers/ was outside that change's file-scope guardrail).
+#     engine/controllers/ was outside that change's file-scope guardrail).
 #     Grandfathered here exactly as check_lib_layering.sh's baseline once
 #     grandfathered its own pre-existing debt before being paid to zero.
 #
@@ -40,12 +40,12 @@
 # stays clean.
 #
 # Format: <file>:<exact #include directive>
-app/services/src/catchup_lifecycle_service.c:#include "controllers/sync_controller.h"
-app/services/src/node_db_catchup_service.c:#include "controllers/sync_controller.h"
-app/services/src/node_health_service.c:#include "controllers/network_controller.h"
-app/services/src/node_health_service.c:#include "controllers/sync_controller.h"
-app/services/src/operator_snapshot_service.c:#include "controllers/agent_security_posture.h"
-app/services/src/quorum_oracle_service.c:#include "controllers/wallet_helpers.h"
-app/services/src/soak_attestation_service.c:#include "controllers/agent_security_posture.h"
-app/services/src/utxo_parity_service.c:#include "controllers/wallet_helpers.h"
-app/services/src/zclassicd_oracle_service.c:#include "controllers/wallet_helpers.h"
+engine/services/src/catchup_lifecycle_service.c:#include "controllers/sync_controller.h"
+engine/services/src/node_db_catchup_service.c:#include "controllers/sync_controller.h"
+engine/services/src/node_health_service.c:#include "controllers/network_controller.h"
+engine/services/src/node_health_service.c:#include "controllers/sync_controller.h"
+engine/services/src/operator_snapshot_service.c:#include "controllers/agent_security_posture.h"
+engine/services/src/quorum_oracle_service.c:#include "controllers/wallet_helpers.h"
+engine/services/src/soak_attestation_service.c:#include "controllers/agent_security_posture.h"
+engine/services/src/utxo_parity_service.c:#include "controllers/wallet_helpers.h"
+engine/services/src/zclassicd_oracle_service.c:#include "controllers/wallet_helpers.h"

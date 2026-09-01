@@ -9,7 +9,7 @@
 
 The live-tip reducer (`body_persist → script_validate → proof_validate →
 utxo_apply → tip_finalize`) **never calls `connect_block`**
-(`lib/validation/src/connect_block.c`). That is no longer the only site with
+(`core/modules/validation/src/connect_block.c`). That is no longer the only site with
 shielded-consensus enforcement, and
 `coins_view_cache_have_joinsplit_requirements` is **no longer a `return true`
 stub** — it is a thin bool wrapper over the real
@@ -18,10 +18,10 @@ stub** — it is a thin bool wrapper over the real
 *claims* (`sd->anchor` at :161, `js->anchor` at :204/:215). Current state of
 the three checks on the reducer path:
 
-- **(a) nullifier double-spend** (Sapling `sd->nullifier`, Sprout `js->nullifiers[0..1]`) — **DONE** on the reducer path (`utxo_apply_check_and_insert_nullifiers`, `app/jobs/src/utxo_apply_nullifiers.c`), called from `utxo_apply_stage.c`.
-- **(b) anchor membership** (is the claimed treestate root real?) — **DONE**, not unbuilt. `utxo_apply_stage` → `utxo_apply_nullifiers.c:206` → `utxo_apply_check_and_insert_anchors()` → `coins_view_cache_check_shielded_requirements()` (`app/jobs/src/utxo_apply_anchors.c:227`). Pinned by `X(parity_lockin_anchor_membership)`.
-- **(c) ZIP-209 turnstile** (`nChainSproutValue`/`nChainSaplingValue` must never go negative) — **still unbuilt on the reducer path.** The turnstile exists only in `lib/validation/src/connect_block.c`, which the reducer never calls. This is the one remaining gap of the three.
-<!-- claim: symbol-present coins_view_cache_check_shielded_requirements app/jobs/src/utxo_apply_anchors.c # (b) is done -->
+- **(a) nullifier double-spend** (Sapling `sd->nullifier`, Sprout `js->nullifiers[0..1]`) — **DONE** on the reducer path (`utxo_apply_check_and_insert_nullifiers`, `engine/jobs/src/utxo_apply_nullifiers.c`), called from `utxo_apply_stage.c`.
+- **(b) anchor membership** (is the claimed treestate root real?) — **DONE**, not unbuilt. `utxo_apply_stage` → `utxo_apply_nullifiers.c:206` → `utxo_apply_check_and_insert_anchors()` → `coins_view_cache_check_shielded_requirements()` (`engine/jobs/src/utxo_apply_anchors.c:227`). Pinned by `X(parity_lockin_anchor_membership)`.
+- **(c) ZIP-209 turnstile** (`nChainSproutValue`/`nChainSaplingValue` must never go negative) — **still unbuilt on the reducer path.** The turnstile exists only in `core/modules/validation/src/connect_block.c`, which the reducer never calls. This is the one remaining gap of the three.
+<!-- claim: symbol-present coins_view_cache_check_shielded_requirements engine/jobs/src/utxo_apply_anchors.c # (b) is done -->
 <!-- claim: symbol-absent turnstile app/jobs # (c) is genuinely still open on the reducer path -->
 
 So a forward-path block that drives a shielded pool negative **is finalized →
@@ -171,7 +171,7 @@ These are the three §8 gaps behind the `consensus_safe=false` verdict:
 
 ## 10. Test plan
 
-New `lib/test/src/test_shielded_consensus_stage.c` (model on
+New `tests/harness/src/test_shielded_consensus_stage.c` (model on
 `test_connect_block_self_write.c` + the reorg/self-heal tests), in-process with
 injected reader/lookup:
 

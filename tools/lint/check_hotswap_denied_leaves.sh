@@ -2,14 +2,14 @@
 # Copyright 2026 Rhett Creighton - Apache License 2.0
 #
 # check_hotswap_denied_leaves.sh — no command leaf named in
-# config/hotswap_denied_leaves.def may appear in ANY hot-swap manifest.
+# engine/composition/hotswap_denied_leaves.def may appear in ANY hot-swap manifest.
 #
 # ── WHY THIS GATE IS NOT check-hotswap-eligible-scope ──────────────────────
 # That gate is PATH-based: it refuses a manifest row whose translation unit
-# sits under core/, lib/consensus/, lib/validation/, lib/storage/, lib/net/,
-# lib/coins/ or app/jobs/. It structurally cannot express the owner rule this
+# sits under core/, lib/consensus/, core/modules/validation/, engine/modules/storage/, core/modules/net/,
+# core/modules/coins/ or engine/jobs/. It structurally cannot express the owner rule this
 # gate enforces, because the TU that owns core.chain.block.get and
-# core.chain.transaction.get is app/controllers/src/chain_native_handlers.c —
+# core.chain.transaction.get is engine/controllers/src/chain_native_handlers.c —
 # an app-layer controller that is legitimately eligible and ALREADY admitted
 # (probe core.consensus.utxo.audit). What must be denied is two LEAF NAMES
 # inside an otherwise-eligible file.
@@ -25,7 +25,7 @@
 # Every "I could not look" path is exit 2, never exit 0:
 #   * denylist missing / unreadable            → exit 2
 #   * denylist parses to zero entries          → exit 2 (gate_require_scanned)
-#   * a denied leaf is not declared in the config/commands catalog → exit 1
+#   * a denied leaf is not declared in the engine/composition/commands catalog → exit 1
 #     (a typo'd row denies NOTHING; that is a hollow denial, so it is a
 #     violation, not a pass)
 #   * an entry carries no reason               → exit 1
@@ -34,7 +34,7 @@
 # A denied leaf found in a manifest is exit 1.
 #
 # The scan set is DERIVED, not enumerated: every config/hotswap*.def plus
-# config/hotfork_capsules.def, so a hot-swap manifest added after this gate
+# engine/composition/hotfork_capsules.def, so a hot-swap manifest added after this gate
 # was written is covered on the day it lands rather than on the day somebody
 # remembers to widen a list here.
 #
@@ -42,8 +42,8 @@
 # Scanning config/ alone would have been a rail around an open door. The
 # Tier-1 generation path stages whatever a TU's ZCL_HOTSWAP_EXPORT_LEAVES
 # table exports, and hotswap_leaf_stage_thunk() in
-# lib/hotswap/src/hotswap_loader.c applies NO per-leaf allowlist — it accepts
-# every row. When this gate was written, app/controllers/src/
+# engine/modules/hotswap/src/hotswap_loader.c applies NO per-leaf allowlist — it accepts
+# every row. When this gate was written, engine/controllers/src/
 # chain_native_handlers.c staged core.chain.block.get and
 # core.chain.transaction.get in exactly that table, so a recompiled
 # generation re-pointed both of them although neither leaf was named in any
@@ -56,7 +56,7 @@
 # Overrides (test isolation only; unset in production):
 #   ZCL_HOTSWAP_DENYLIST        path to the denylist .def
 #   ZCL_HOTSWAP_DENY_SCAN_DIR   directory whose hot-swap manifests are scanned
-#   ZCL_HOTSWAP_DENY_CATALOG    config/commands catalog directory
+#   ZCL_HOTSWAP_DENY_CATALOG    engine/composition/commands catalog directory
 #   ZCL_HOTSWAP_DENY_TU_ROOT    base dir manifest TU paths resolve against
 #
 # --selftest is 9 cases: an unmodified sandbox copy passes (so a later "it
@@ -78,9 +78,9 @@ cd "$ROOT"
 # shellcheck source=tools/scripts/sh_str.sh
 . tools/scripts/sh_str.sh
 
-DENYLIST="${ZCL_HOTSWAP_DENYLIST:-config/hotswap_denied_leaves.def}"
-SCAN_DIR="${ZCL_HOTSWAP_DENY_SCAN_DIR:-config}"
-CATALOG="${ZCL_HOTSWAP_DENY_CATALOG:-config/commands}"
+DENYLIST="${ZCL_HOTSWAP_DENYLIST:-engine/composition/hotswap_denied_leaves.def}"
+SCAN_DIR="${ZCL_HOTSWAP_DENY_SCAN_DIR:-engine/composition}"
+CATALOG="${ZCL_HOTSWAP_DENY_CATALOG:-engine/composition/commands}"
 TU_ROOT="${ZCL_HOTSWAP_DENY_TU_ROOT:-.}"
 
 # Quote-aware C-comment stripper. Prose in a .def header that mentions a
@@ -353,8 +353,8 @@ run_selftest() {
 
     local sandbox="$selftest_dir/config"
     mkdir -p "$sandbox"
-    cp config/hotswap*.def "$sandbox/" 2>/dev/null
-    cp config/hotfork_capsules.def "$sandbox/" 2>/dev/null
+    cp engine/composition/hotswap*.def "$sandbox/" 2>/dev/null
+    cp engine/composition/hotfork_capsules.def "$sandbox/" 2>/dev/null
     rm -f "$sandbox/$(basename "$DENYLIST")"
     local deny="$ROOT/$DENYLIST"
     local log="$selftest_dir/out.txt" rc=0
@@ -372,7 +372,7 @@ run_selftest() {
     # Case 1: denied leaf as an eligibility PROBE.
     cp "$sandbox/hotswap_eligible.def" "$selftest_dir/eligible.orig"
     printf '%s\n' \
-        'HOTSWAP_ELIGIBLE("app/controllers/src/chain_native_handlers.c") HOTSWAP_PROBE("core.chain.block.get")' \
+        'HOTSWAP_ELIGIBLE("engine/controllers/src/chain_native_handlers.c") HOTSWAP_PROBE("core.chain.block.get")' \
         >>"$sandbox/hotswap_eligible.def"
     run_case "$sandbox" "$deny" "$log"
     rc=$?
@@ -392,7 +392,7 @@ run_selftest() {
     # inside ONE string literal — the shape a token-per-argument scan misses).
     cp "$sandbox/hotswap_swappable.def" "$selftest_dir/swappable.orig"
     printf '%s\n' \
-        'HOTSWAP_SWAPPABLE("app/controllers/src/chain_native_handlers.c",' \
+        'HOTSWAP_SWAPPABLE("engine/controllers/src/chain_native_handlers.c",' \
         '                  "core.consensus.utxo.audit core.chain.transaction.get")' \
         >>"$sandbox/hotswap_swappable.def"
     run_case "$sandbox" "$deny" "$log"
@@ -436,7 +436,7 @@ run_selftest() {
     # ZCL_HOTSWAP_EXPORT_LEAVES exports and the Tier-1 loader applies no
     # per-leaf allowlist, so a denied leaf can be re-pointed while appearing in
     # no .def at all — this leg is what caught the real one in
-    # app/controllers/src/chain_native_handlers.c. The fixture TU is resolved
+    # engine/controllers/src/chain_native_handlers.c. The fixture TU is resolved
     # under ZCL_HOTSWAP_DENY_TU_ROOT so nothing is planted in the real tree.
     local turoot="$selftest_dir/turoot"
     mkdir -p "$turoot"
@@ -494,7 +494,7 @@ run_selftest() {
     fi
 
     # Case 7: recovery — the REAL tree still passes.
-    ZCL_HOTSWAP_DENY_SCAN_DIR="config" ZCL_HOTSWAP_DENYLIST="$DENYLIST" \
+    ZCL_HOTSWAP_DENY_SCAN_DIR="engine/composition" ZCL_HOTSWAP_DENYLIST="$DENYLIST" \
         bash "$SCRIPT_PATH" >"$log" 2>&1
     rc=$?
     if [ "$rc" -ne 0 ]; then

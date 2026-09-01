@@ -8,7 +8,7 @@ ROOT="${ZCL_SOURCE_ROOT:-$(pwd -P)}"
 BIN="${ZCL_DEV_BIN:-$ROOT/build/bin/zclassic23-dev}"
 DATADIR="${ZCL_DEV_DATADIR:-${HOME:?}/.zclassic-c23-dev}"
 RPC_PORT="${ZCL_DEV_RPC_PORT:-18252}"
-SOURCE="$ROOT/app/controllers/src/status_native_handlers.c"
+SOURCE="$ROOT/engine/controllers/src/status_native_handlers.c"
 RUNS="${ZCL_HOTSWAP_BENCH_RUNS:-20}"
 TARGET_US="${ZCL_HOTSWAP_BENCH_TARGET_US:-250000}"
 MARKER='ZCL_HOTSWAP_BENCH:'
@@ -59,7 +59,7 @@ nonce_base=$(( $(date +%s%N) % 90000000 ))
 
 for ((i = 1; i <= RUNS; i++)); do
     nonce="$(printf '%08d' $(((nonce_base + i) % 100000000)))"
-    staged="$(mktemp "$ROOT/app/controllers/src/.status-bench.XXXXXX")"
+    staged="$(mktemp "$ROOT/engine/controllers/src/.status-bench.XXXXXX")"
     sed "s/${MARKER}00000000/${MARKER}${nonce}/" "$backup" >"$staged"
     chmod --reference="$SOURCE" "$staged"
     start_ns="$(date +%s%N)"
@@ -76,7 +76,7 @@ for ((i = 1; i <= RUNS; i++)); do
             if [[ "$epoch" -gt "$previous_epoch" &&
                   "$producer" == resident-build-authority &&
                   "$published" == true &&
-                  "$source_tu" == app/controllers/src/status_native_handlers.c &&
+                  "$source_tu" == engine/controllers/src/status_native_handlers.c &&
                   "$hash" =~ ^[0-9a-f]{64}$ && "$hash" != "$previous_hash" ]]; then
                 break
             fi
@@ -109,7 +109,7 @@ p50_us="$(awk '{print $2}' "$samples" | sort -n | sed -n "${rank50}p")"
 receipt="$ROOT/build/hotswap/resident-benchmark.json"
 jq -n \
     --arg schema 'zcl.hotswap_edit_bench.v1' \
-    --arg source_tu 'app/controllers/src/status_native_handlers.c' \
+    --arg source_tu 'engine/controllers/src/status_native_handlers.c' \
     --argjson runs "$RUNS" --argjson target_us "$TARGET_US" \
     --argjson p50_us "$p50_us" --argjson p95_us "$p95_us" \
     --argjson passed "$([[ "$p95_us" -le "$TARGET_US" ]] && printf true || printf false)" \

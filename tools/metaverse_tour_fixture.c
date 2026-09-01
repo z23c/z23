@@ -18,7 +18,7 @@
  *       (the CLI pins CHAIN_MAIN for its acceptance replay regardless
  *       of the node's own chain).
  *
- * The fixture construction mirrors lib/test/src/test_zcode_publish.c's
+ * The fixture construction mirrors tests/harness/src/test_zcode_publish.c's
  * zp_* builders so the tour exercises the same happy-path shape the
  * unit gate proves.
  */

@@ -5,7 +5,7 @@
  * loads the signed release envelope, the manifest, the CAS chunks, and the
  * slice-5 declarative recipe from an EXPLICIT package store directory, then
  * builds and tests the package under confinement and writes ONE signed
- * attestation (lib/vcs/package_attest.*) into the store's attestations/
+ * attestation (contexts/commons/modules/vcs/package_attest.*) into the store's attestations/
  * directory. Quorum (>=2 approved independent keys) is evaluated elsewhere
  * (the node's `zcode package verify` command); this program only ever
  * produces one attestation signed by one verifier key.
@@ -132,7 +132,7 @@
 
 #define PV_LOG "package-verify"
 
-/* The node-wide shutdown flag lives in src/main.c, which is not linked
+/* The node-wide shutdown flag lives in engine/entry/main.c, which is not linked
  * into this standalone binary; the app TUs in ALL_SRCS reference it
  * extern, so every tool main defines it (tools/bot.c precedent). */
 volatile sig_atomic_t g_shutdown_requested = 0;
@@ -2240,7 +2240,7 @@ static bool pv_fast_preproc_sha3(struct pv_plan_ctx *ctx,
 
 /* The cache key: domain || capsule_root || target || profile || the exact
  * (root-normalized) compile argv || preprocessed-unit SHA3-256. The
- * derivation itself lives in lib/vcs (vcs/fastobj.h) so the carrier that
+ * derivation itself lives in contexts/commons/modules/vcs (vcs/fastobj.h) so the carrier that
  * moves cache entries between nodes proves entry placement with the SAME
  * key — one authority, no second source of truth. */
 static bool pv_fastobj_key(struct pv_plan_ctx *ctx, const char *profile,

@@ -5,7 +5,7 @@
 # ----------------
 # A model file must not carry a hand-written SQL statement. Reads and writes
 # go through the typed query builder,
-# app/models/include/models/query_builder.h, whose identifiers come from the
+# engine/models/include/models/query_builder.h, whose identifiers come from the
 # closed set in query_schema.def and whose values can only reach the
 # statement as bound parameters. Every file still holding a literal is listed
 # in model_sql_literal_baseline.txt. THAT LIST MAY ONLY SHRINK.
@@ -20,13 +20,13 @@
 # the conversion did surface are exactly the shape you get from hand-written
 # SQL, and neither was an injection:
 #
-#   - app/models/src/peer.c wrote strftime('%%s','now') in a string that is
+#   - engine/models/src/peer.c wrote strftime('%%s','now') in a string that is
 #     handed straight to sqlite3_prepare_v2 with no printf in the path. In
 #     SQLite '%%' is an escaped percent, so that expression evaluated to the
 #     TEXT "%s" and every db_peer_mark_tried() had been storing two literal
 #     characters in peers.last_try instead of the epoch. Every other
 #     strftime site in app/models uses a single '%s'.
-#   - app/models/src/op_return_index.c built its prune DELETE with snprintf
+#   - engine/models/src/op_return_index.c built its prune DELETE with snprintf
 #     ("... WHERE height<%d"). The value was a machine-derived int32_t so it
 #     was never exploitable, but it was the one place in the layer where a
 #     value reached SQL as text rather than as a parameter.
@@ -51,9 +51,9 @@
 # the list only has to shrink over time, not empty.
 #
 # Excluded from the scan, with reasons:
-#   app/models/src/query_builder.c        — it IS the SQL constructor. Every
-#   app/models/include/models/query_builder.h  keyword it emits is a builder
-#   app/models/include/models/query_schema.def token, not a hand-written
+#   engine/models/src/query_builder.c        — it IS the SQL constructor. Every
+#   engine/models/include/models/query_builder.h  keyword it emits is a builder
+#   engine/models/include/models/query_schema.def token, not a hand-written
 #                                              statement. Flagging the rail
 #                                              itself would make the gate
 #                                              unfixable.
@@ -75,11 +75,12 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 # shellcheck source=tools/lint/gate_lib.sh
 . tools/lint/gate_lib.sh
+# shellcheck source=tools/lint/repo_shape.sh
+. tools/lint/repo_shape.sh
 
 GATE=check_model_sql_literals
 MODE="${ZCL_LINT_MODE:-FAIL}"
 BASELINE="${ZCL_MODEL_SQL_BASELINE:-tools/lint/model_sql_literal_baseline.txt}"
-SCAN_ROOT="${ZCL_MODEL_SQL_SCAN_ROOT:-app/models}"
 FILE_FLOOR="${ZCL_MODEL_SQL_FILE_FLOOR:-80}"
 
 # A string literal whose first non-space token opens a SQL statement.
@@ -235,17 +236,24 @@ static const char *k = "SELECT id FROM peers";'
 fi
 
 # ── Scan set ─────────────────────────────────────────────────────────────
-[ -d "$SCAN_ROOT" ] || {
-    echo "$GATE: FATAL — scan root '$SCAN_ROOT' does not exist" >&2
-    exit 2
-}
+if [ -n "${ZCL_MODEL_SQL_SCAN_ROOT:-}" ]; then
+    SCAN_ROOTS=("$ZCL_MODEL_SQL_SCAN_ROOT")
+else
+    mapfile -t SCAN_ROOTS < <(repo_shape_room_dirs models)
+fi
+for root in "${SCAN_ROOTS[@]}"; do
+    [ -d "$root" ] || {
+        echo "$GATE: FATAL — scan root '$root' does not exist" >&2
+        exit 2
+    }
+done
 
 mapfile -t scan_files < <(
-    find "$SCAN_ROOT" \( -name '*.c' -o -name '*.h' -o -name '*.def' \) \
+    find "${SCAN_ROOTS[@]}" \( -name '*.c' -o -name '*.h' -o -name '*.def' \) \
         -type f 2>/dev/null | sort
 )
 gate_require_scanned "${#scan_files[@]}" "$FILE_FLOOR" "$GATE" \
-    "no model .c/.h under: $SCAN_ROOT"
+    "no model .c/.h under the physical model rooms"
 
 # Drop the builder itself before the grep, so its own keyword emission can
 # never be reported (and can never be "fixed" by rewriting the rail).
@@ -260,7 +268,7 @@ gate_require_scanned "${#scan_files[@]}" "$FILE_FLOOR" "$GATE" \
 # ── Detect ───────────────────────────────────────────────────────────────
 # Comments are stripped before matching, so a file that DOCUMENTS a
 # statement is not read as carrying one. This is not hypothetical: the
-# header of app/models/include/models/model_fields.h explains the column
+# header of engine/models/include/models/model_fields.h explains the column
 # macros with example lines like
 #     "SELECT " BLOG_POST_COLUMNS " FROM blog_posts WHERE event_id=?"
 # and was reported for it. The file contains no SQL whatsoever. A gate that
@@ -328,7 +336,7 @@ if [ "$MODE" = "UPDATE" ]; then
     {
         echo "# $GATE baseline — model files that still carry a hand-written"
         echo "# SQL statement instead of building it with"
-        echo "# app/models/include/models/query_builder.h."
+        echo "# engine/models/include/models/query_builder.h."
         echo "#"
         echo "# One path per line. THE LIST MAY ONLY SHRINK. Adding a row is"
         echo "# not a fix; a row whose file no longer carries literal SQL must"
@@ -336,7 +344,7 @@ if [ "$MODE" = "UPDATE" ]; then
         echo "#"
         echo "# Fix a row by converting the model:"
         echo "#   1. add its table + columns to"
-        echo "#      app/models/include/models/query_schema.def"
+        echo "#      engine/models/include/models/query_schema.def"
         echo "#   2. replace each statement with qb_select/qb_insert/"
         echo "#      qb_update/qb_delete + qb_where_*/qb_value_*/qb_set_*"
         echo "#   3. run its existing test group, then delete the line here."
@@ -363,7 +371,7 @@ if [ "${#violations[@]}" -gt 0 ]; then
     echo "    qb_where_int/_text/_blob(&q, QB_C_<table>_<col>, QB_EQ, v);"
     echo "    qb_order_by(&q, col, QB_DESC);  qb_limit(&q, n);"
     echo "    QB_QUERY_LIST(ndb, &q, s, out, max, row_reader(s, &out[count]));"
-    echo "  Identifiers come from app/models/include/models/query_schema.def"
+    echo "  Identifiers come from engine/models/include/models/query_schema.def"
     echo "  (add the table there first); values are bound, never pasted."
     echo "  Adding a row to $BASELINE is NOT a fix; the list may only shrink."
     fail=1

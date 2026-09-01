@@ -64,7 +64,7 @@ void zcl_native_overlay_intent_run(
  * leaf's canonical path to exactly one dispatch: either a transport-neutral
  * body function or, for a pure pass-through leaf, the backing JSON-RPC method
  * directly. The body is wrapped in the common zcl.result.v1 envelope. Bound
- * by config/src/command_catalog.c. */
+ * by engine/composition/src/command_catalog.c. */
 void zcl_native_bridge_command(const struct zcl_command_request *request,
                                struct zcl_command_reply *reply);
 
@@ -190,14 +190,14 @@ void zcl_native_handle_dev_change_plan(
 /* dev.vcs.revert — one-command source+binary revert (see
  * tools/command/native_dev_command.c). A release build's copy of this
  * function is a `#ifndef ZCL_DEV_BUILD` stub that fails BLOCKED without
- * touching lib/vcs/ or spawning anything. */
+ * touching contexts/commons/modules/vcs/ or spawning anything. */
 void zcl_native_handle_dev_vcs_revert(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
 /* dev.vcs.seal.grant — owner-run ZVCS unseal-token ritual (see
  * tools/command/native_dev_command.c). Mirrors dev.vcs.revert's shape: a
  * release build's copy of this function is a `#ifndef ZCL_DEV_BUILD` stub
- * that fails BLOCKED without touching lib/vcs/ or spawning anything. */
+ * that fails BLOCKED without touching contexts/commons/modules/vcs/ or spawning anything. */
 void zcl_native_handle_dev_vcs_seal_grant(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
@@ -283,7 +283,7 @@ void zcl_native_handle_service_status(
 
 /* ── code.* — the source-code navigator (tools/command/native_code_command.c
  * plus native_code_guide_command.c for the inner-loop guide). Local,
- * read-only, deterministic leaves backed by the in-binary lib/codeindex
+ * read-only, deterministic leaves backed by the in-binary cognition/modules/codeindex
  * index. Each renders one bounded JSON document (structured array + human
  * one-liners) well within ZCL_COMMAND_RESULT_BUDGET. */
 void zcl_native_handle_code_guide(
@@ -355,7 +355,7 @@ void zcl_native_handle_code_impact(
  * source tree, any directory's subtree root, or one file's leaf digest, plus
  * the direct child subtree roots and what the refresh cost (files re-read,
  * bytes hashed, directory nodes recomputed). Backed by
- * lib/codeindex/src/codeindex_merkle.c; does not open the symbol index. */
+ * cognition/modules/codeindex/src/codeindex_merkle.c; does not open the symbol index. */
 void zcl_native_handle_code_merkle(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
@@ -374,7 +374,7 @@ void zcl_native_handle_code_territory(
  * Two readings kept apart: a live walk of the maintained C23 roots for lines,
  * and the generated capability inventory for what a registered test actually
  * reaches, plus a scope check saying whether those two walks saw the same
- * tree. Backed by lib/science/science_corpus.c; opens no code index. The
+ * tree. Backed by cognition/modules/science/science_corpus.c; opens no code index. The
  * reply leads with the UNPROVEN count, which is the point of the leaf. */
 void zcl_native_handle_code_corpus(
     const struct zcl_command_request *request,
@@ -386,7 +386,7 @@ void zcl_native_handle_code_corpus(
  * each metric against the most recent PRIOR frame with its direction, verdict
  * and the exact drill-down command. The only code.* leaf that writes, which is
  * why it is classed MUTATE. A metric whose artifact could not be read is
- * UNAVAILABLE and is never rendered as 0. Backed by lib/kpi. */
+ * UNAVAILABLE and is never rendered as 0. Backed by cognition/modules/kpi. */
 void zcl_native_handle_code_kpi(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
@@ -411,7 +411,7 @@ void zcl_native_handle_general(
  * that write it, ranked multi-writer first; with a `key`, each writer as
  * file:line via its write function or SQL verb. Re-derived for each exact
  * source generation and memoized in-process by the code index's sealed content
- * root. See app/controllers/src/fact_writers.c for the two derivations and
+ * root. See engine/controllers/src/fact_writers.c for the two derivations and
  * controllers/fact_store_writers.def for the manifest that states them. */
 void zcl_native_handle_code_facts(
     const struct zcl_command_request *request,
@@ -458,7 +458,7 @@ void zcl_native_handle_app_inspect(
  * swap settlements call the RPC method the swap controller registers, so the
  * transaction is always the owning path's. `vault.routes` prints that binding
  * table, resolved from the registry at call time. Bound by
- * config/commands/vault.def. */
+ * engine/composition/commands/vault.def. */
 void zcl_native_handle_vault_list(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
@@ -567,7 +567,7 @@ void zcl_native_handle_vault_swap_refund(
  * agent session service (services/agent_session_service.h). Grants, not
  * custody — no spend logic here either, and the full session token is
  * rendered exactly once (the create commit reply); every later rendering is
- * redacted. Bound by config/commands/vault.def. */
+ * redacted. Bound by engine/composition/commands/vault.def. */
 void zcl_native_handle_vault_session_create(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
@@ -581,8 +581,8 @@ void zcl_native_handle_vault_session_revoke(
 /* zcode — ZCODE source-package hosting (slice 3: local publication and
  * search). publish plan/commit validate a candidate release against every
  * publication rule (each rejection names the rule) and commit persists
- * through the lib/vcs store; search/show read the rebuildable package
- * index projection. Bound by config/commands/zcode.def. */
+ * through the contexts/commons/modules/vcs store; search/show read the rebuildable package
+ * index projection. Bound by engine/composition/commands/zcode.def. */
 void zcl_native_handle_zcode_package_publish_plan(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
@@ -693,7 +693,7 @@ void zcl_native_handle_zcode_node_join(
  * Rebuilds the node HERE from a local checkout and byte-compares the result
  * against the artifact the user was handed (by default this process's own
  * executable). It never checks a published hash against the file it was
- * published beside: the comparator in lib/vcs/node_reproduce.c refuses
+ * published beside: the comparator in contexts/commons/modules/vcs/node_reproduce.c refuses
  * unless one side is RECEIVED and the other LOCAL_REBUILD. */
 void zcl_native_handle_zcode_node_verify(
     const struct zcl_command_request *request,
@@ -956,7 +956,7 @@ void zcl_native_handle_zcode_science_work_receipt(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
 /* S4: the closed benchmark/reproduction executor (additive leaf in
- * config/commands/zcode_science.def; handler lives in
+ * engine/composition/commands/zcode_science.def; handler lives in
  * native_zcode_science_exec_command.c). */
 void zcl_native_handle_zcode_science_work_execute(
     const struct zcl_command_request *request,
@@ -968,7 +968,7 @@ void zcl_native_handle_zcode_science_vote_submit(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
 /* S5: local discovery ranking over the rebuildable science projection
- * (additive leaves in config/commands/zcode_science.def; handlers live in
+ * (additive leaves in engine/composition/commands/zcode_science.def; handlers live in
  * native_zcode_science_discover_command.c). Explanatory only — never read
  * by evidence admission, routing, rewards, or protocol control. */
 void zcl_native_handle_zcode_science_discover(
@@ -1225,7 +1225,7 @@ void zcl_native_handle_zcode_package_attest_import(
  * receiver-side binding check, not the publish gate, is what stops a
  * hostile pointer delivering an attestation for another package. Pulling
  * is not accepting: the approved-verifier quorum is applied later by
- * zcode package verify. Bound by config/commands/zcode.def. */
+ * zcode package verify. Bound by engine/composition/commands/zcode.def. */
 void zcl_native_handle_zcode_package_attest_offer(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
@@ -1243,7 +1243,7 @@ void zcl_native_handle_zcode_package_attest_pull(
  * each package's own task chain with expect_task_root ALWAYS set — that
  * receiver-side binding check, not the publish gate, is what stops a
  * hostile pointer delivering a solution to a different problem. Pulling is
- * not accepting, and nothing is executed. Bound by config/commands/
+ * not accepting, and nothing is executed. Bound by engine/composition/commands/
  * zcode.def. */
 void zcl_native_handle_zcode_work_offer(
     const struct zcl_command_request *request,
@@ -1267,7 +1267,7 @@ void zcl_native_handle_zcode_work_pull(
  * never a peer query), enriching every row whose context is held and
  * verified. The task object is deliberately unsigned: authenticity of a
  * posting is the signed record pair; integrity is the root. Bound by
- * config/commands/zcode.def. */
+ * engine/composition/commands/zcode.def. */
 void zcl_native_handle_zcode_task_offer(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
@@ -1296,14 +1296,14 @@ void zcl_native_handle_zcode_task_board(
  * package_root — omitting it is the strictly weaker "file these bytes, I
  * am not asking about one package" case, never a safe default. Admitting
  * is not accepting: the quorum belongs to zcode package verify. Bound by
- * config/commands/zcode.def. */
+ * engine/composition/commands/zcode.def. */
 void zcl_native_handle_zcode_package_attest_admit(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
 
 /* zcode slice 4 — contributor identity + ZNAM pointers. The publisher key
  * is the only identity; ZNAM records resolve through the canonical model
- * with an explicit binding proof. Bound by config/commands/zcode.def. */
+ * with an explicit binding proof. Bound by engine/composition/commands/zcode.def. */
 void zcl_native_handle_zcode_contributor_show(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
@@ -1319,7 +1319,7 @@ void zcl_native_handle_zcode_package_resolve(
  * breakdown from the persisted CAS bytes only (same bytes, same score);
  * eligible evaluates the frozen eight-gate list and names every failed
  * gate. Read-only: settlement is the slice-8 settle handler set below.
- * Bound by config/commands/zcode.def. */
+ * Bound by engine/composition/commands/zcode.def. */
 void zcl_native_handle_zcode_reward_score(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
@@ -1333,7 +1333,7 @@ void zcl_native_handle_zcode_reward_eligible(
  * batch (the only mutation is the plan id); commit settles SIMULATED with
  * durable ledger facts, idempotent against replay (a duplicate is named,
  * never a double-pay); receipt reads the durable evidence of a settled
- * batch. Bound by config/commands/zcode.def. */
+ * batch. Bound by engine/composition/commands/zcode.def. */
 void zcl_native_handle_zcode_reward_queue(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
@@ -1351,7 +1351,7 @@ void zcl_native_handle_zcode_reward_receipt(
  * leaderboards ranking EARNED ZCODE SCORE only (never a balance — no
  * balance or transfer record kind exists), a rebuildable projection over
  * the slice-8 reward ledger with pure window arithmetic (the caller
- * passes "today"). Bound by config/commands/zcode.def. */
+ * passes "today"). Bound by engine/composition/commands/zcode.def. */
 void zcl_native_handle_zcode_leaderboard_daily(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
@@ -1372,7 +1372,7 @@ void zcl_native_handle_zcode_leaderboard_all(
  * the slice-8 ledger, slice-9 rankings, and slice-3 publish history;
  * issuance is plan/commit with the dedup rule (never the same badge
  * twice for the same contributor + achievement period) enforced at plan
- * and re-checked at issue. Bound by config/commands/zcode.def. */
+ * and re-checked at issue. Bound by engine/composition/commands/zcode.def. */
 void zcl_native_handle_zcode_badge_eligible(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
@@ -1391,7 +1391,7 @@ void zcl_native_handle_zcode_contributor_badges(
  * (no global ZCODE mint for bandwidth), tier resolution from earned
  * score + local ratio, the frozen policy table, and the store quota
  * pools with the per-tier pin-allowance policy view. Every rejection
- * names the exact rule. Bound by config/commands/zcode.def. */
+ * names the exact rule. Bound by engine/composition/commands/zcode.def. */
 void zcl_native_handle_zcode_seed_status(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
@@ -1410,7 +1410,7 @@ void zcl_native_handle_zcode_storage_status(
  * lists roots peers have ANNOUNCEd this session (no invented replica
  * counts), and pin/unpin are the operator's never-tier-gated PINS-pool
  * path. Every rejection names the exact rule. Bound by
- * config/commands/zcode.def. */
+ * engine/composition/commands/zcode.def. */
 void zcl_native_handle_zcode_package_fetch(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
@@ -1449,7 +1449,7 @@ void zcl_native_handle_zcode_package_checkout(
  * builds+tests in the confined worker, re-hashes every artifact, installs
  * atomically and pins. rollback re-activates the previous generation.
  * Nothing installed is ever loaded into this process. Every rejection names
- * the exact rule. Bound by config/commands/zcode.def. */
+ * the exact rule. Bound by engine/composition/commands/zcode.def. */
 void zcl_native_handle_zcode_package_add_plan(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
@@ -1470,7 +1470,7 @@ void zcl_native_handle_zcode_package_reproduce(
 /* ops.state — generic subsystem state dump. Dispatches the `dumpstate` RPC
  * method directly. `subsystem` (required) selects the
  * owning module's *_dump_state_json; `key` is subsystem-specific (e.g. a
- * block_index height/hash). Bound by config/src/command_catalog.c. */
+ * block_index height/hash). Bound by engine/composition/src/command_catalog.c. */
 void zcl_native_handle_ops_state(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
@@ -1481,7 +1481,7 @@ void zcl_native_handle_ops_state(
  * `statecatalog` RPC (diag_rpc_statecatalog) rather than a second copy,
  * and is node-free — the registry is compiled in. `names` is always
  * complete; per-entry metadata is paged by `limit`/`page`, or fetched
- * whole for one `subsystem`. Bound by config/src/command_catalog.c. */
+ * whole for one `subsystem`. Bound by engine/composition/src/command_catalog.c. */
 void zcl_native_handle_ops_statecatalog(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
@@ -1495,7 +1495,7 @@ void zcl_native_handle_ops_slo(
  * advertised height, our delta, fork clusters) from the node's network_monitor.
  * Reads the running node's network_monitor dumpstate over the read-only RPC.
  * Bound by
- * config/src/command_catalog.c. */
+ * engine/composition/src/command_catalog.c. */
 void zcl_native_handle_network_chain_view(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
@@ -1516,7 +1516,7 @@ void zcl_native_handle_network_peer_add(
  * indexer lane has not yet created a table they degrade gracefully
  * ("census empty: indexer not yet populated"), never error. Every result is
  * bounded (paginated node list, bounded observation/edge history, bounded
- * distribution). Bound by config/commands/core.def. */
+ * distribution). Bound by engine/composition/commands/core.def. */
 void zcl_native_handle_network_census(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
@@ -1683,7 +1683,7 @@ void zcl_native_handle_ops_meaning(
 /* ops.debug.backtrace — dump a live backtrace for every thread of the running
  * node. Dispatches the `selfbacktrace` RPC method directly and
  * projects { path, thread_count }. Answers "what is every thread doing right
- * now" where perf/gdb/ptrace are blocked. Bound by config/commands/ops.def. */
+ * now" where perf/gdb/ptrace are blocked. Bound by engine/composition/commands/ops.def. */
 void zcl_native_handle_ops_debug_backtrace(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
@@ -1692,7 +1692,7 @@ void zcl_native_handle_ops_debug_backtrace(
  * dumper + build identity + supervisor stall summary) as ONE JSON document
  * to <datadir>/debug-bundle-<utc>.json on the running node. Dispatches the
  * `debugbundle` RPC method directly and projects { path, bytes,
- * subsystems_captured, subsystems_failed }. Bound by config/commands/ops.def. */
+ * subsystems_captured, subsystems_failed }. Bound by engine/composition/commands/ops.def. */
 void zcl_native_handle_ops_debug_bundle(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
@@ -1700,7 +1700,7 @@ void zcl_native_handle_ops_debug_bundle(
 /* ops.explain <topic> — compose one prose-like diagnostic from four surfaces
  * (reducer frontier, blocker registry, condition engine, health/sync RPCs).
  * Topics: sync, blockers, health (table-dispatched, see
- * app/controllers/src/explain_native_handlers.c). Reply carries data.text +
+ * engine/controllers/src/explain_native_handlers.c). Reply carries data.text +
  * structured fields; the CLI prints text unless --format=json. */
 void zcl_native_handle_ops_explain(
     const struct zcl_command_request *request,
@@ -1729,7 +1729,7 @@ void zcl_native_handle_ops_producer_status(
  * ring / delta frontier / tip ring), each filled or empty. The structured
  * fields are also returned verbatim in reply->data for machine consumers;
  * the CLI prints data.text unless --format=json. See
- * app/jobs/src/rom_compile_status.c for the data source (all EXISTING
+ * engine/jobs/src/rom_compile_status.c for the data source (all EXISTING
  * telemetry — no second producer). */
 void zcl_native_handle_ops_rom(
     const struct zcl_command_request *request,
@@ -1793,7 +1793,7 @@ size_t zcl_native_render_unknown_command(
  * node contact, no RPC. bootstatus returns the current beacon (or BLOCKED when
  * none exists yet); bootwait polls until phase=serving or a bounded timeout.
  * This is the typed replacement for ss/ps/tail node.log boot watching. Bound
- * by config/src/command_catalog.c. */
+ * by engine/composition/src/command_catalog.c. */
 void zcl_native_handle_core_node_bootstatus(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
@@ -1828,7 +1828,7 @@ void zcl_native_handle_core_anchor_inspect(
  * so a stopped or copied datadir answers too); anchor/rotate/revoke build
  * the ZID\0 overlay and prefer the live node's identity_* RPCs, falling
  * back to op_return_hex when nothing answers. Bound by
- * config/commands/core.def. */
+ * engine/composition/commands/core.def. */
 void zcl_native_handle_core_identity_resolve(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
@@ -1853,7 +1853,7 @@ void zcl_native_handle_core_identity_revoke(
  * already-retired row is refused before a fee is spent. There is no
  * transfer leaf: ZDIR command byte 3 is reserved and zdir_parse rejects it,
  * so handing a hostname over is deregister-then-register. Bound by
- * config/commands/core.def. */
+ * engine/composition/commands/core.def. */
 void zcl_native_handle_core_zdir_guide(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
@@ -1879,7 +1879,7 @@ void zcl_native_handle_core_node_bootwait(
  * (dbquery_execute, reducer_frontier_compute_hstar) run against an ad hoc
  * handle opened straight at `--datadir=<path>` — the typed replacement for
  * `build/bin/sqlq <db> <SELECT>` (tools/sqlq.c) plus hand-known table names.
- * Bound by config/src/command_catalog.c. */
+ * Bound by engine/composition/src/command_catalog.c. */
 void zcl_native_handle_core_storage_query_offline(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
@@ -1897,12 +1897,12 @@ void zcl_native_handle_core_consensus_producer_session_retire(
     struct zcl_command_reply *reply);
 
 /* app.auth.* / app.account.* — the multi-user-server identity surface
- * (app/controllers/src/account_controller.c), mounted under the `app` root.
+ * (engine/controllers/src/account_controller.c), mounted under the `app` root.
  * app.auth.challenge/app.auth.verify are PUBLIC (no capability):
  * challenge/response public-key login. app.account.* manage principals:
  * list/show/whoami are reads, add/role/suspend/unsuspend are the first
  * executable mutating native leaves (OWNER authority). Each renders one bounded
- * JSON document. Bound by config/commands/accounts.def. */
+ * JSON document. Bound by engine/composition/commands/accounts.def. */
 void zcl_native_handle_auth_challenge(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
@@ -1932,7 +1932,7 @@ void zcl_native_handle_account_unsuspend(
     struct zcl_command_reply *reply);
 
 /* Mutating core.wallet.* leaves
- * (app/controllers/src/wallet_native_handlers.c). Each parses its input and
+ * (contexts/wallet/controllers/src/wallet_native_handlers.c). Each parses its input and
  * calls the running node's wallet RPC (getnewaddress / importaddress /
  * dumpprivkey / sendtoaddress / z_sendmany / rescanblockchain /
  * walletbackupnow) over the loopback client, then renders one bounded JSON
@@ -1941,7 +1941,7 @@ void zcl_native_handle_account_unsuspend(
  * address.export-key honour the declared CONFIRM_PLAN_COMMIT contract — a
  * first call with no `confirm:true` returns a non-mutating plan plus the
  * exact commit next-action, and only a second call with `confirm:true`
- * broadcasts or reveals. Bound in config/commands/core.def. */
+ * broadcasts or reveals. Bound in engine/composition/commands/core.def. */
 void zcl_native_handle_wallet_address_new(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
@@ -1997,7 +1997,7 @@ void zcl_native_handle_wallet_rescan_witnesses(
     struct zcl_command_reply *reply);
 
 /* The two OFFLINE recovery leaves
- * (app/controllers/src/wallet_restore_native_handlers.c). Unlike every
+ * (contexts/wallet/controllers/src/wallet_restore_native_handlers.c). Unlike every
  * other wallet leaf these call their service in-process instead of a
  * running node, because a user restoring onto a rebuilt machine has no
  * node yet. `core.wallet.restore` merges a backup file into a datadir and
@@ -2011,7 +2011,7 @@ void zcl_native_handle_wallet_backup_decrypt(
     struct zcl_command_reply *reply);
 
 /* The two OFFLINE recovery-phrase leaves
- * (app/controllers/src/wallet_recovery_native_handlers.c). `status` says
+ * (contexts/wallet/controllers/src/wallet_recovery_native_handlers.c). `status` says
  * whether a datadir's wallet can be rebuilt from words at all — a wallet
  * created before recovery phrases honestly answers no. `restore` rebuilds a
  * wallet into an empty datadir from the phrase alone (CONFIRM_PLAN_COMMIT;
@@ -2026,11 +2026,11 @@ void zcl_native_handle_wallet_recovery_restore(
     struct zcl_command_reply *reply);
 
 /* core.wallet.address.label(.by-label) — the address-book / label surface
- * (app/controllers/src/wallet_label_controller.c). Direct handlers over
+ * (contexts/wallet/controllers/src/wallet_label_controller.c). Direct handlers over
  * app_runtime_node_db(): no wallet keystore, no RPC context. `label`
  * sets or clears a label (EFFECT_MUTATE, RISK_APP_WRITE — a plain
  * annotation, not a key or fund mutation); `by-label` reads every address
- * currently carrying a label. Bound in config/commands/core.def. */
+ * currently carrying a label. Bound in engine/composition/commands/core.def. */
 void zcl_native_handle_wallet_address_label(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
@@ -2039,7 +2039,7 @@ void zcl_native_handle_wallet_address_by_label(
     struct zcl_command_reply *reply);
 
 /* Mutating app.* feature leaves
- * (app/controllers/src/app_write_native_handlers.c). Each proxies one
+ * (engine/controllers/src/app_write_native_handlers.c). Each proxies one
  * already-complete node RPC over the loopback client — the ZSLP token writes,
  * the ZNAM writes (name_register/update/transfer/renew/set_record/set_text),
  * the ZMSG writes
@@ -2051,7 +2051,7 @@ void zcl_native_handle_wallet_address_by_label(
  * broadcasts. A backing RPC that succeeds without doing the job (a ZNAM write
  * that answers status="ready" because the node carries no wallet) is reported
  * BLOCKED with mutated=false, never PASSED. Bound in
- * config/commands/app_features.def. */
+ * engine/composition/commands/app_features.def. */
 void zcl_native_handle_token_create(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
@@ -2097,7 +2097,7 @@ void zcl_native_handle_market_content_register(
 /* Per-node marketplace moderation (no network-wide bans, no deletion, no
  * consensus effect): the node's own profile decides what it lists and what
  * it hands out, from its local-only review_state curation marks.
- * app/controllers/src/market_moderation_native_handler.c. */
+ * engine/controllers/src/market_moderation_native_handler.c. */
 void zcl_native_handle_market_moderation_status(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
@@ -2141,11 +2141,11 @@ void zcl_native_handle_swap_participate(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
 
-/* Store merchant surface (app/controllers/src/store_native_handlers.c) — the
+/* Store merchant surface (engine/controllers/src/store_native_handlers.c) — the
  * typed writer behind `app.store.list-product` and the catalog read behind
  * `app.store.products`. Both address <datadir>/node.db the way the /store
  * HTTP handler does, so a listing is live on the next request with no
- * restart. Bound by config/commands/store.def. */
+ * restart. Bound by engine/composition/commands/store.def. */
 void zcl_native_handle_store_list_product(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
@@ -2154,12 +2154,12 @@ void zcl_native_handle_store_products(
     struct zcl_command_reply *reply);
 
 /* app.shop.* — the storefront orchestration
- * (app/controllers/src/shop_native_handler.c, docs/work/SHOP_COMMAND.md
+ * (contexts/market/controllers/src/shop_native_handler.c, docs/work/SHOP_COMMAND.md
  * slice B). `init` composes the slice-A persistent onion identity, the
  * wallet at-rest custody probe, the existing store schema/products.json
  * loader, and the directory apps-row announcement into one plan/commit
  * command; `status` renders the same verification block read-only with
- * every unmet prerequisite named. Bound in config/commands/store.def. */
+ * every unmet prerequisite named. Bound in engine/composition/commands/store.def. */
 void zcl_native_handle_shop_init(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
@@ -2169,7 +2169,7 @@ void zcl_native_handle_shop_status(
 /* `reputation` (slice C) is the evidence readout for one ZCODE publisher
  * key over <datadir>/zcode: provable facts only, each with its evidence
  * class and counting window; absent evidence reads 'no_record', never a
- * zero (app/controllers/src/shop_native_reputation.c). */
+ * zero (contexts/market/controllers/src/shop_native_reputation.c). */
 void zcl_native_handle_shop_reputation(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
@@ -2178,7 +2178,7 @@ void zcl_native_handle_shop_reputation(
  * persisted to the shop_wants projection, browsed under the node's own
  * community content moderation profile, cancelled by the posting key,
  * and curated by the local review mark
- * (app/controllers/src/shop_native_want.c). Declared terms only — no
+ * (contexts/market/controllers/src/shop_native_want.c). Declared terms only — no
  * escrow, no payment channel. */
 void zcl_native_handle_shop_want_post(
     const struct zcl_command_request *request,
@@ -2215,14 +2215,14 @@ void zcl_native_handle_shop_want_fulfill_review(
     struct zcl_command_reply *reply);
 
 /* app.store.* — the BUYING half of the store
- * (app/controllers/src/store_buyer_native_handlers.c). Each proxies one
+ * (contexts/market/controllers/src/store_buyer_native_handlers.c). Each proxies one
  * storebuy_* RPC, because placing an order mints a one-time Sapling payment
  * address and paying it spends, and a typed command runs in a process with
  * neither a wallet nor an open database. The storebuy_* methods report a
  * refusal as a successful call carrying {ok:false, code}; these handlers turn
  * that code back into a typed status, so PROVER_UNAVAILABLE,
  * PAYMENT_NOT_CONFIRMED and HASH_MISMATCH are distinguishable without reading
- * prose. Bound in config/commands/store.def. */
+ * prose. Bound in engine/composition/commands/store.def. */
 void zcl_native_handle_store_catalog(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
@@ -2240,13 +2240,13 @@ void zcl_native_handle_store_collect(
     struct zcl_command_reply *reply);
 
 /* metaverse.property.* — the sovereign-property CATALOG
- * (app/controllers/src/metaverse_controller.c). A read-only projection
+ * (contexts/commons/controllers/src/metaverse_controller.c). A read-only projection
  * rebuilt at call time over each property kind's own authoritative model
- * (services/property_catalog.h -> lib/metaverse adapters); it caches no
+ * (services/property_catalog.h -> contexts/commons/modules/metaverse adapters); it caches no
  * owner, revision, or status, so it cannot become a second ownership
  * truth, and it never opens a handle whose open() rewrites the datadir.
  * Every view states the evidence grade THIS node earned in THIS call.
- * Bound by config/commands/metaverse.def. */
+ * Bound by engine/composition/commands/metaverse.def. */
 void zcl_native_handle_metaverse_property_list(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
@@ -2286,8 +2286,8 @@ bool zcl_native_metaverse_space_test_admit_allowed(
     const uint8_t manifest_owner[32], bool manifest);
 #endif
 
-/* ROM-seed policy/ledger surface (app/controllers/src/rom_seed_controller.c)
- * — see config/commands/ops.def `ops.rom_seed.*` and docs/ROM_DELIVERY.md. */
+/* ROM-seed policy/ledger surface (engine/controllers/src/rom_seed_controller.c)
+ * — see engine/composition/commands/ops.def `ops.rom_seed.*` and docs/ROM_DELIVERY.md. */
 void zcl_native_handle_rom_seed_status(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
@@ -2302,13 +2302,13 @@ void zcl_native_handle_rom_seed_artifacts(
     struct zcl_command_reply *reply);
 /* Publish (register) this node's on-disk starter artifacts so a fresh peer's
  * directory listing advertises a usable manifest — see
- * config/commands/ops.def `ops.debug.rom_seed.publish`. */
+ * engine/composition/commands/ops.def `ops.debug.rom_seed.publish`. */
 void zcl_native_handle_rom_seed_publish(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
 
-/* ROM-fetch engine surface (app/controllers/src/rom_fetch_controller.c) —
- * see config/commands/ops.def `ops.debug.rom_fetch.*` and
+/* ROM-fetch engine surface (engine/controllers/src/rom_fetch_controller.c) —
+ * see engine/composition/commands/ops.def `ops.debug.rom_fetch.*` and
  * docs/ROM_DELIVERY.md. The fetch leaf downloads + content-verifies bytes
  * only; activation stays with the unified -install-consensus-bundle path. */
 void zcl_native_handle_rom_fetch_status(
@@ -2323,7 +2323,7 @@ void zcl_native_handle_rom_fetch_bundle(
  * dev-build-only: an agent has the plain `z23` it just built, and a compat
  * leaf redirecting to a second binary is the dead end this branch removes.
  * Handlers in tools/command/native_devagent_command.c and
- * native_devagent_mutate_command.c; they spawn only through lib/util spawn
+ * native_devagent_mutate_command.c; they spawn only through platform/modules/util spawn
  * and link none of the dev-only devloop executors. */
 void zcl_native_handle_dev_agent_ready(
     const struct zcl_command_request *request,
@@ -2408,7 +2408,7 @@ void zcl_native_handle_dev_diagnose_show(
  * with telemetry_render() — the single renderer — then, for `stages`/`stage`,
  * projects that already-rendered document into one row per ladder rung. No
  * telemetry field name is spelled here, no health is decided here, and no
- * database or node is contacted. Bound by config/commands/telemetry/sync.def. */
+ * database or node is contacted. Bound by engine/composition/commands/telemetry/sync.def. */
 void zcl_native_handle_telemetry_sync_summary(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
@@ -2424,16 +2424,16 @@ void zcl_native_handle_telemetry_sync_stage(
  * the bounded batch of changes recorded after `since` and exits. Declared
  * MODE_STREAM because that is what it is; there is no long-lived dispatch path
  * and this handler does not add one. Bound by
- * config/commands/telemetry/watch.def. */
+ * engine/composition/commands/telemetry/watch.def. */
 void zcl_native_handle_telemetry_watch(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
 
 /* ── metaverse.agent.* — the confined-agent broker's observation surface
- * (app/controllers/src/metaverse_controller.c). Both read one broker
+ * (contexts/commons/controllers/src/metaverse_controller.c). Both read one broker
  * DIRECTORY named by the caller and create nothing; the broker itself is a
  * separate confined process, not node state. Bound by
- * config/commands/metaverse.def. */
+ * engine/composition/commands/metaverse.def. */
 void zcl_native_handle_metaverse_agent_status(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
@@ -2450,7 +2450,7 @@ void zcl_native_handle_metaverse_agent_audit(
 /* ── ops.telemetry.runtime.* — the `runtime` telemetry domain
  * (tools/command/native_telemetry_runtime_command.c). Each picks one group of
  * the typed runtime snapshot and hands it to the single render layer; none of
- * them names a field. Bound by config/commands/telemetry/runtime.def. */
+ * them names a field. Bound by engine/composition/commands/telemetry/runtime.def. */
 void zcl_native_handle_ops_telemetry_runtime_services(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
@@ -2466,7 +2466,7 @@ void zcl_native_handle_ops_telemetry_runtime_resources(
  * snapshot, not four data sources: each handler fills a
  * `struct network_snapshot` through network_dump_state_fill() and hands it to
  * telemetry_render() at its view and group. They touch no node global, decide
- * no health, and name no field. Bound by config/commands/telemetry/network.def. */
+ * no health, and name no field. Bound by engine/composition/commands/telemetry/network.def. */
 void zcl_native_handle_telemetry_network_summary(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
@@ -2484,9 +2484,9 @@ void zcl_native_handle_telemetry_network_transport(
  * (tools/command/native_telemetry_storage_command.c). Each handler picks one
  * view/group token and makes one SELECT-only `dumpstate storage_telemetry`
  * call; the typed snapshot is filled and rendered inside the node by
- * app/services/src/storage_telemetry_fill.c, because a one-shot CLI process
+ * engine/services/src/storage_telemetry_fill.c, because a one-shot CLI process
  * has no initialized storage subsystems to read. Bound by
- * config/commands/telemetry/storage.def. */
+ * engine/composition/commands/telemetry/storage.def. */
 void zcl_native_handle_telemetry_storage_summary(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
@@ -2502,7 +2502,7 @@ void zcl_native_handle_telemetry_storage_disk(
  * wallet snapshot filled by services/wallet_telemetry.h and hand it to the
  * one shared renderer; neither names a field, decides health, or builds a
  * document. Posture only: no key, address or balance can appear in either
- * reply. Bound by config/commands/telemetry/wallet.def. */
+ * reply. Bound by engine/composition/commands/telemetry/wallet.def. */
 void zcl_native_handle_telemetry_wallet_summary(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
@@ -2513,9 +2513,9 @@ void zcl_native_handle_telemetry_wallet_security(
 /* ── ops.telemetry.agents.* — the AGENTS telemetry domain
  * (tools/command/native_telemetry_agents_command.c). Each renders one group
  * of the typed agents snapshot filled by agents_dump_state_fill()
- * (app/services/src/agents_telemetry.h); the field names live only in
- * lib/util/include/util/telemetry/agents_fields.def. Bound by
- * config/commands/telemetry/agents.def. */
+ * (engine/services/src/agents_telemetry.h); the field names live only in
+ * platform/modules/util/include/util/telemetry/agents_fields.def. Bound by
+ * engine/composition/commands/telemetry/agents.def. */
 void zcl_native_handle_ops_telemetry_agents_sessions(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
@@ -2531,8 +2531,8 @@ void zcl_native_handle_ops_telemetry_agents_activity(
  * snapshot and a view and hands both to telemetry_render(); it names no
  * field and decides no health. Field names, units and rules live in
  * util/telemetry/zcode_fields.def; the collector is
- * app/services/src/zcode_telemetry_fill.c. Bound by
- * config/commands/telemetry/zcode.def, whose `swarm` and `installs` leaves
+ * engine/services/src/zcode_telemetry_fill.c. Bound by
+ * engine/composition/commands/telemetry/zcode.def, whose `swarm` and `installs` leaves
  * stay PLANNED and so have no handler here. */
 void zcl_native_handle_ops_telemetry_zcode_summary(
     const struct zcl_command_request *request,
@@ -2542,7 +2542,7 @@ void zcl_native_handle_ops_telemetry_zcode_summary(
  * (tools/command/native_telemetry_metaverse_command.c). One READY leaf; it
  * renders the compiled-in property-kind vocabulary and its adapter registry,
  * so it needs no datadir and no running node. `market` and `services` stay
- * PLANNED — see config/commands/telemetry/metaverse.def for why. */
+ * PLANNED — see engine/composition/commands/telemetry/metaverse.def for why. */
 void zcl_native_handle_telemetry_metaverse_properties(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
@@ -2571,7 +2571,7 @@ void zcl_native_handle_metaverse_build_worker_revoke(
  * evaluator with max() over the ordered health enum — they compute no health
  * of their own, so they cannot disagree with the per-domain leaf they point
  * at. `ops.telemetry.alerts.history` stays PLANNED: there is no durable alert
- * feed to read. Bound by config/commands/telemetry/root.def. */
+ * feed to read. Bound by engine/composition/commands/telemetry/root.def. */
 void zcl_native_handle_ops_telemetry_summary(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);

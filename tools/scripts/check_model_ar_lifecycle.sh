@@ -11,9 +11,15 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT"
 # shellcheck source=tools/lint/scan_exclusions.sh
 source "$ROOT/tools/lint/scan_exclusions.sh"
+# shellcheck source=tools/lint/repo_shape.sh
+source "$ROOT/tools/lint/repo_shape.sh"
 
 shopt -s nullglob
-files=(app/models/src/*.c)
+mapfile -t model_dirs < <(repo_shape_room_dirs models)
+files=()
+for model_dir in "${model_dirs[@]}"; do
+    for model_file in "$model_dir"/src/*.c; do files+=("$model_file"); done
+done
 if [[ "${ZCL_LINT_PRODUCTION_SCAN:-0}" == "1" ]]; then
     kept=()
     for f in "${files[@]}"; do
@@ -23,7 +29,7 @@ if [[ "${ZCL_LINT_PRODUCTION_SCAN:-0}" == "1" ]]; then
 fi
 if (( ${#files[@]} < 20 )); then
     echo "FAIL: check_model_ar_lifecycle scanned only ${#files[@]} model file(s)"
-    echo "      expected app/models/src/*.c; gate would be hollow"
+    echo "      expected physical */models/src/*.c rooms; gate would be hollow"
     exit 2
 fi
 
@@ -134,7 +140,7 @@ END {
                paths[key], lines[key], names[key])
     }
 }
-' app/models/src/*.c
+' "${files[@]}"
 )
 save_rc=$?
 set -e
@@ -151,7 +157,7 @@ if (( ${#violations[@]} == 0 )); then
     exit 0
 fi
 
-echo "FAIL: app model sources call AR save callbacks directly:"
+echo "FAIL: model sources call AR save callbacks directly:"
 printf '  %s\n' "${violations[@]}"
 echo ""
 echo "Use AR_BEGIN_SAVE / AR_ADHOC_SAVE / AR_FINISH_SAVE so validation and"

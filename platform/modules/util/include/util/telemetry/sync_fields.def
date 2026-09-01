@@ -1,0 +1,480 @@
+/* Canonical field table for the `sync` telemetry domain. Data only.
+ *
+ * Row grammar and what each row generates: util/telemetry_field_table.h.
+ * Every field name in this domain is spelled here and nowhere else.
+ *
+ * Lane ownership: this file belongs to the sync domain alone. Append groups
+ * below the `meta` group; do not reorder or reword existing rows, and keep
+ * each group's rows contiguous.
+ *
+ * ── what this domain models, and what it deliberately does not ──────────
+ *
+ * The sync subsystem has 48 registered dumpers. This table wraps the LADDER an
+ * operator actually diagnoses with — the reducer L0 authority plus the six
+ * stage rungs whose cursors bound each other — and nothing else. A domain that
+ * mirrored all 48 would be a second copy of `ops state`, not a contract.
+ *
+ * The stage set is a COMPILE-TIME CONSTANT, so the ladder is flattened to one
+ * leaf per stage rather than an array of stage objects. That is not a
+ * workaround for the fixed-offset table (util/telemetry_field_table.h "arrays"):
+ * it is what buys the per-stage ordering rules below. `stages[]` could carry one
+ * rule for the whole list; one leaf per rung carries a rule per rung.
+ *
+ * ── the ordering rules, and why they are not invented thresholds ────────
+ *
+ * Four rungs refuse to advance past their upstream's DURABLE cursor, in code:
+ *   validate_headers <- header_admit    engine/jobs/src/validate_headers_stage.c
+ *   body_fetch       <- validate_headers  engine/jobs/src/body_fetch_stage.c
+ *   body_persist     <- body_fetch        engine/jobs/src/body_persist_stage.c
+ *   tip_finalize     <- utxo_apply        engine/jobs/src/tip_finalize_stage.c
+ * and utxo_apply <- body_persist holds transitively through script_validate and
+ * proof_validate, which this table does not carry. Each such pair is expressed
+ * as TFR_MAX_RATIO_OF with threshold 1000, i.e. `value <= 1.000 * upstream` —
+ * exact for heights, and evaluated against this dump alone. The threshold is
+ * the pipeline's own structure, not a number anybody picked.
+ *
+ * Everything whose healthy range this lane could NOT establish is TFR_INFO with
+ * the comparison a reader should make written into `means`. A rule that fires
+ * on a healthy node sends an operator to the wrong subsystem, which is strictly
+ * worse than declining to judge. */
+
+TL_DOMAIN_META(sync, "zcl.telemetry.sync.v1",
+    "reducer frontier, stage ladder, fold rate and tail-catchup posture")
+
+TL_GROUP(meta, "how and when this snapshot itself was taken")
+
+TL_LEAF(meta, collected_unix, TLC_I64, TFU_UNIX_TIME, TLV_NORMAL,
+    TFR_INFO, TL_NONE, 0, TFS_INFO,
+    "wall-clock second at which the provider began filling this snapshot; "
+    "every other leaf's observed_unix is at or after this instant",
+    "", "")
+
+TL_GROUP_END(meta)
+
+/* ── sync groups start here (owned by this domain's lane) ── */
+
+TL_GROUP(frontier, "the reducer L0 authority: the deepest height this node has "
+                   "PROVEN, and how far that sits below the network")
+
+TL_LEAF(frontier, hstar, TLC_I64, TFU_HEIGHT, TLV_SUMMARY,
+    TFR_INFO, TL_NONE, 0, TFS_INFO,
+    "H*, the deepest height every reducer stage has durably proven, read from "
+    "the lock-free provable-tip publication. It is the ONLY proven height on "
+    "this node: a stage cursor above it has consumed heights nothing has "
+    "verified and can be clamped back by a reorg repair. Reads 0 before the "
+    "first publish, so pair it with values.frontier.hstar_published rather "
+    "than reading 0 as an empty chain",
+    "", "")
+
+TL_LEAF(frontier, hstar_published, TLC_BOOL, TFU_BOOL, TLV_SUMMARY,
+    TFR_EXPECT_TRUE, TL_NONE, 0, TFS_WARN,
+    "whether the provable-tip cache holds a real H* rather than the "
+    "pre-publish sentinel; false until a finalize advance, a reorg rewind or "
+    "the one-time boot warm has published a height in this process",
+    "nothing has been proven in this process yet, so values.frontier.hstar is "
+    "reporting 0 and every external consumer of the height — getblockcount, "
+    "the P2P version.start_height, the explorer tip — is serving 0 or the "
+    "durable served-tip fallback instead of the real height",
+    "z23 ops state --subsystem=reducer_frontier")
+
+TL_LEAF(frontier, finality_floor, TLC_I64, TFU_HEIGHT, TLV_FULL,
+    TFR_INFO, TL_NONE, 0, TFS_INFO,
+    "the compiled SHA3 checkpoint height H* may never fall below. 0 on every "
+    "non-mainnet network, and 0 while a from-genesis refold is legitimately "
+    "re-walking the frozen prefix. Compare against values.frontier.hstar to "
+    "see how far past finality the fold has actually reached",
+    "", "")
+
+TL_LEAF(frontier, network_tip, TLC_I64, TFU_HEIGHT, TLV_SUMMARY,
+    TFR_INFO, TL_NONE, 0, TFS_INFO,
+    "best block height any handshake-complete peer has advertised, from "
+    "sync_monitor's periodic tip evaluation. Reported UNAVAILABLE with reason "
+    "no_peer_height_observed until a peer has been evaluated — there is no "
+    "honest 0 for a height nobody has told us yet",
+    "", "")
+
+TL_LEAF(frontier, hstar_to_network_tip_gap, TLC_I64, TFU_BLOCKS, TLV_SUMMARY,
+    TFR_INFO, TL_NONE, 0, TFS_INFO,
+    "network_tip minus hstar, floored at 0 — the blocks this node still has to "
+    "prove before it reaches the network. This is DISTANCE, not a fault: it is "
+    "millions during a cold sync and 0 or 1 at tip, so no absolute ceiling "
+    "would be honest. Judge it by its trend across two calls, against "
+    "values.rate.tip_finalize_blocks_per_sec_x1000; the gated throughput SLO "
+    "that does judge it lives in ops state --subsystem=sync_rate",
+    "", "")
+
+TL_LEAF(frontier, coins_applied_height, TLC_I64, TFU_HEIGHT, TLV_NORMAL,
+    TFR_INFO, TL_NONE, 0, TFS_INFO,
+    "the durable UTXO-application frontier, progress_meta.coins_applied_height, "
+    "read this call under a NON-BLOCKING trylock. Compare against "
+    "values.apply.utxo_apply_cursor: coins legitimately lags the cursor by the "
+    "in-RAM batching gap, and it is a gap that stops shrinking after the fold "
+    "goes quiet that is worth chasing, never the gap itself",
+    "", "")
+
+TL_LEAF(frontier, durable_snapshot_read, TLC_BOOL, TFU_BOOL, TLV_FULL,
+    TFR_INFO, TL_NONE, 0, TFS_INFO,
+    "whether this call won the progress-store trylock and could read the "
+    "durable leaves in this group. false is NORMAL under load — a reducer "
+    "drain owns the store for the length of its outer transaction — and the "
+    "leaves it gates then report UNAVAILABLE with reason progress_store_busy "
+    "instead of a stale number. A dumper that blocked here would make the "
+    "operator surface disappear exactly when the node is busiest",
+    "", "")
+
+TL_GROUP_END(frontier)
+
+TL_GROUP(headers, "ladder rungs 1-2: header_admit writes headers into the "
+                  "durable log, validate_headers proves their PoW and context")
+
+TL_LEAF(headers, header_admit_cursor, TLC_I64, TFU_HEIGHT, TLV_NORMAL,
+    TFR_INFO, TL_NONE, 0, TFS_INFO,
+    "next height header_admit will admit; every height below it already has a "
+    "durable header_admit_log row. The ladder's first rung, and therefore the "
+    "upper bound every cursor below it is judged against",
+    "", "")
+
+TL_LEAF(headers, header_admit_admitted_total, TLC_I64, TFU_COUNT_TOTAL, TLV_FULL,
+    TFR_INFO, TL_NONE, 0, TFS_INFO,
+    "headers admitted into the durable log since this process started. "
+    "Cumulative, so only its RATE of change carries information: difference it "
+    "across two calls, or read values.headers.header_admit_step_us_ewma",
+    "", "")
+
+TL_LEAF(headers, header_admit_produced_total, TLC_I64, TFU_COUNT_TOTAL, TLV_FULL,
+    TFR_INFO, TL_NONE, 0, TFS_INFO,
+    "block_index entries the stage CREATED from staged raw header bytes — the "
+    "reducer producer path. 0 on a node that only ingests headers over P2P, "
+    "which is the ordinary case, so 0 here is not an absence of work",
+    "", "")
+
+TL_LEAF(headers, header_admit_reorg_rewind_total, TLC_I64, TFU_COUNT_TOTAL,
+    TLV_NORMAL,
+    TFR_INFO, TL_NONE, 0, TFS_INFO,
+    "times the active chain reorged below the cursor and the cursor was "
+    "rewound to the fork point so stale log rows get re-admitted. Reorgs are a "
+    "normal fact of the network and there is no healthy ceiling; what to look "
+    "for is this climbing while values.frontier.hstar stays flat, which is "
+    "fork churn the fold is not getting past",
+    "", "")
+
+TL_LEAF(headers, header_admit_step_us_ewma, TLC_I64, TFU_MICROSECONDS, TLV_FULL,
+    TFR_INFO, TL_NONE, 0, TFS_INFO,
+    "EWMA of one header_admit step in microseconds, alpha 1/16; 0 before the "
+    "stage has ever stepped. A single step time carries no verdict on its own "
+    "— compare it against the other five step EWMAs in this domain, which is "
+    "what values.rate.slowest_stage already does for you",
+    "", "")
+
+TL_LEAF(headers, validate_headers_cursor, TLC_I64, TFU_HEIGHT, TLV_NORMAL,
+    TFR_MAX_RATIO_OF, TL_REF(headers, header_admit_cursor), 1000, TFS_WARN,
+    "next height validate_headers will prove PoW and context for. The stage "
+    "reads header_admit's durable cursor as a floor and returns idle rather "
+    "than passing it, so this can never legitimately exceed it",
+    "a rung has consumed heights its upstream never admitted — torn cursor "
+    "state from an interrupted batch, or a rewind that clamped one stage and "
+    "not the other. The heights between the two are unproven and may sit on a "
+    "losing fork, so neither cursor may be read as a better height than H*",
+    "z23 ops state --subsystem=reducer_frontier")
+
+TL_LEAF(headers, validate_headers_passed_total, TLC_I64, TFU_COUNT_TOTAL,
+    TLV_NORMAL,
+    TFR_INFO, TL_NONE, 0, TFS_INFO,
+    "headers that passed PoW and contextual validation since this process "
+    "started. Read as the denominator for "
+    "values.headers.validate_headers_failed_total",
+    "", "")
+
+TL_LEAF(headers, validate_headers_failed_total, TLC_I64, TFU_COUNT_TOTAL,
+    TLV_NORMAL,
+    TFR_INFO, TL_NONE, 0, TFS_INFO,
+    "headers that FAILED validation. There is no healthy ceiling: rejecting a "
+    "losing fork's or a hostile peer's headers is the stage doing its job, so "
+    "a nonzero value is not a fault. Read it against "
+    "values.headers.validate_headers_passed_total — a count that climbs while "
+    "passed_total stays flat is the stage refusing the chain it needs rather "
+    "than pruning garbage, and that one is worth chasing",
+    "", "")
+
+TL_LEAF(headers, validate_headers_step_us_ewma, TLC_I64, TFU_MICROSECONDS,
+    TLV_FULL,
+    TFR_INFO, TL_NONE, 0, TFS_INFO,
+    "EWMA of one validate_headers step in microseconds; 0 before the stage has "
+    "ever stepped. Equihash verification lives here, so this is normally the "
+    "largest of the header-side step times. Compare against the other five "
+    "step EWMAs, or read values.rate.slowest_stage",
+    "", "")
+
+TL_GROUP_END(headers)
+
+TL_GROUP(bodies, "ladder rungs 3-4: body_fetch observes a block body on disk, "
+                 "body_persist verifies it against the validated header")
+
+TL_LEAF(bodies, body_fetch_cursor, TLC_I64, TFU_HEIGHT, TLV_NORMAL,
+    TFR_MAX_RATIO_OF, TL_REF(headers, validate_headers_cursor), 1000, TFS_WARN,
+    "next height body_fetch will look for a body at. The stage reads "
+    "validate_headers' durable log-derived frontier as a floor, so it can "
+    "never legitimately exceed it",
+    "body_fetch has consumed heights whose headers were never validated, so a "
+    "body may be recorded against a header this node has not proven — torn "
+    "cursor state from an interrupted batch or a partial rewind",
+    "z23 ops state --subsystem=reducer_frontier")
+
+TL_LEAF(bodies, body_fetch_observed_total, TLC_I64, TFU_COUNT_TOTAL, TLV_FULL,
+    TFR_INFO, TL_NONE, 0, TFS_INFO,
+    "heights body_fetch recorded as having a body present on disk. Cumulative "
+    "since process start; only its rate of change is meaningful",
+    "", "")
+
+TL_LEAF(bodies, body_fetch_skipped_total, TLC_I64, TFU_COUNT_TOTAL, TLV_NORMAL,
+    TFR_INFO, TL_NONE, 0, TFS_INFO,
+    "heights body_fetch logged as skipped_invalid — the upstream header row "
+    "said the header did not validate, so no body is wanted. This tracks "
+    "values.headers.validate_headers_failed_total and is not a fault by "
+    "itself; read the two together",
+    "", "")
+
+TL_LEAF(bodies, body_fetch_step_us_ewma, TLC_I64, TFU_MICROSECONDS, TLV_FULL,
+    TFR_INFO, TL_NONE, 0, TFS_INFO,
+    "EWMA of one body_fetch step in microseconds; 0 before the stage has ever "
+    "stepped. Compare against the other five step EWMAs in this domain, or "
+    "read values.rate.slowest_stage",
+    "", "")
+
+TL_LEAF(bodies, body_persist_cursor, TLC_I64, TFU_HEIGHT, TLV_NORMAL,
+    TFR_MAX_RATIO_OF, TL_REF(bodies, body_fetch_cursor), 1000, TFS_WARN,
+    "next height body_persist will hash- and merkle-verify a body at. The "
+    "stage reads body_fetch's durable cursor as a floor, so it can never "
+    "legitimately exceed it",
+    "body_persist has consumed heights body_fetch never observed a body for, "
+    "so a height may be marked verified against a body the ladder never "
+    "recorded — torn cursor state from an interrupted batch or a partial "
+    "rewind",
+    "z23 ops state --subsystem=reducer_frontier")
+
+TL_LEAF(bodies, body_persist_verified_total, TLC_I64, TFU_COUNT_TOTAL, TLV_FULL,
+    TFR_INFO, TL_NONE, 0, TFS_INFO,
+    "bodies whose header bytes and transaction merkle root both reproduced the "
+    "already-validated header. Cumulative since process start",
+    "", "")
+
+TL_LEAF(bodies, body_persist_read_failed_total, TLC_I64, TFU_COUNT_TOTAL,
+    TLV_NORMAL,
+    TFR_EXPECT_ZERO, TL_NONE, 0, TFS_WARN,
+    "block bodies that could not be READ back off disk at body_persist and "
+    "were requeued for re-fetch — one per cleared HAVE_DATA episode, not a "
+    "permanent verdict on the height",
+    "the on-disk block file is missing, short or unreadable at those heights, "
+    "so the fold cannot pass them until the body is re-fetched or the file is "
+    "repaired; a value that keeps climbing at a fixed height is a body the "
+    "node will never obtain from its current peers",
+    "z23 ops state --subsystem=body_persist")
+
+TL_LEAF(bodies, body_persist_header_mismatch_total, TLC_I64, TFU_COUNT_TOTAL,
+    TLV_NORMAL,
+    TFR_EXPECT_ZERO, TL_NONE, 0, TFS_WARN,
+    "bodies whose header bytes did not match the header validate_headers had "
+    "already proven at that height, requeued for re-fetch",
+    "a peer served the body of a different block, or the on-disk bytes changed "
+    "after they were written. The height is re-fetched rather than applied, so "
+    "the fold stalls there until a matching body arrives",
+    "z23 ops state --subsystem=body_persist")
+
+TL_LEAF(bodies, body_persist_merkle_mismatch_total, TLC_I64, TFU_COUNT_TOTAL,
+    TLV_NORMAL,
+    TFR_EXPECT_ZERO, TL_NONE, 0, TFS_WARN,
+    "bodies whose transaction merkle root did not reproduce the root committed "
+    "in the validated header, requeued for re-fetch",
+    "the body's transaction list is not the one its header commits to — a "
+    "truncated or tampered serve, or corrupted on-disk bytes. The height is "
+    "re-fetched rather than applied, so the fold stalls there",
+    "z23 ops state --subsystem=body_persist")
+
+TL_LEAF(bodies, body_persist_step_us_ewma, TLC_I64, TFU_MICROSECONDS, TLV_FULL,
+    TFR_INFO, TL_NONE, 0, TFS_INFO,
+    "EWMA of one body_persist step in microseconds; 0 before the stage has "
+    "ever stepped. Compare against the other five step EWMAs in this domain, "
+    "or read values.rate.slowest_stage",
+    "", "")
+
+TL_GROUP_END(bodies)
+
+TL_GROUP(apply, "ladder rungs 7-8: utxo_apply folds the block into the coin "
+                "set, tip_finalize commits the served tip")
+
+TL_LEAF(apply, utxo_apply_cursor, TLC_I64, TFU_HEIGHT, TLV_NORMAL,
+    TFR_MAX_RATIO_OF, TL_REF(bodies, body_persist_cursor), 1000, TFS_WARN,
+    "next height utxo_apply will fold into the coin set. Two rungs this domain "
+    "does not carry — script_validate and proof_validate — sit between it and "
+    "body_persist, so the bound is transitive: each of those three refuses to "
+    "pass its own upstream's durable cursor, so utxo_apply can never "
+    "legitimately exceed body_persist",
+    "the coin-set fold has consumed heights whose bodies were never verified, "
+    "so coins may have been applied from a body the ladder never proved — torn "
+    "cursor state from an interrupted batch or a partial rewind",
+    "z23 ops state --subsystem=reducer_frontier")
+
+TL_LEAF(apply, utxo_apply_verified_total, TLC_I64, TFU_COUNT_TOTAL, TLV_FULL,
+    TFR_INFO, TL_NONE, 0, TFS_INFO,
+    "blocks utxo_apply reached a verdict on, accepted or rejected. Cumulative "
+    "since process start; it is the denominator the reject counters in this "
+    "group are read against",
+    "", "")
+
+TL_LEAF(apply, utxo_apply_spend_unknown_total, TLC_I64, TFU_COUNT_TOTAL,
+    TLV_NORMAL,
+    TFR_INFO, TL_NONE, 0, TFS_INFO,
+    "blocks utxo_apply rejected because a transparent spend named a prevout "
+    "the coin set could not resolve. This lane could not establish a healthy "
+    "ceiling: the same counter covers a genuine coin-set gap on this node and "
+    "a legitimately rejected losing-fork block, and the two are "
+    "indistinguishable from the count alone. Read it against "
+    "values.apply.utxo_apply_verified_total and against "
+    "ops state --subsystem=utxo_apply, which names the offending outpoint",
+    "", "")
+
+TL_LEAF(apply, utxo_apply_internal_error_total, TLC_I64, TFU_COUNT_TOTAL,
+    TLV_NORMAL,
+    TFR_EXPECT_ZERO, TL_NONE, 0, TFS_CRITICAL,
+    "utxo_apply verdicts that failed inside the stage itself rather than on the "
+    "block's contents — an allocation, an encode/decode error, or a store "
+    "write that did not complete. This is the ONE reject class that is never "
+    "the chain's fault",
+    "the fold cannot pass that height for a reason belonging to this node, not "
+    "to the block. The stage keeps retrying and H* stops climbing, so a tip "
+    "gap will open and keep growing until it is cleared",
+    "z23 ops logs --pattern=utxo_apply --level=error")
+
+TL_LEAF(apply, utxo_apply_select_idle_height, TLC_I64, TFU_HEIGHT, TLV_FULL,
+    TFR_INFO, TL_NONE, 0, TFS_INFO,
+    "the height utxo_apply was last observed unable to select or read a block "
+    "for. Reported NOT_APPLICABLE with reason no_select_idle_observed when the "
+    "stage has never gone select-idle. This is a HIGH-WATER reading that "
+    "survives the hold ending, so a value here is not proof of a live wedge; "
+    "the LIVE hold is published as the utxo_apply.apply_candidate_anomaly "
+    "blocker, which this provider deliberately does not read because the "
+    "blocker registry takes a mutex",
+    "", "")
+
+TL_LEAF(apply, utxo_apply_step_us_ewma, TLC_I64, TFU_MICROSECONDS, TLV_FULL,
+    TFR_INFO, TL_NONE, 0, TFS_INFO,
+    "EWMA of one utxo_apply step in microseconds; 0 before the stage has ever "
+    "stepped. Compare against the other five step EWMAs in this domain, or "
+    "read values.rate.slowest_stage",
+    "", "")
+
+TL_LEAF(apply, tip_finalize_cursor, TLC_I64, TFU_HEIGHT, TLV_SUMMARY,
+    TFR_MAX_RATIO_OF, TL_REF(apply, utxo_apply_cursor), 1000, TFS_WARN,
+    "next height tip_finalize will commit as the served tip — the log head the "
+    "whole ladder feeds, and the number `network_tip minus log_head` is taken "
+    "against. The stage reads utxo_apply's durable cursor as a floor, so it "
+    "can never legitimately exceed it",
+    "the served tip has been committed past heights the coin set never "
+    "applied, so this node would advertise a tip it cannot prove state for — "
+    "torn cursor state from an interrupted batch or a partial rewind",
+    "z23 ops state --subsystem=reducer_frontier")
+
+TL_LEAF(apply, tip_finalize_finalized_total, TLC_I64, TFU_COUNT_TOTAL,
+    TLV_NORMAL,
+    TFR_INFO, TL_NONE, 0, TFS_INFO,
+    "heights tip_finalize committed as the served tip since this process "
+    "started. Cumulative: difference it across two calls to see whether the "
+    "tip is actually moving, which is what values.rate."
+    "tip_finalize_blocks_per_sec_x1000 derives",
+    "", "")
+
+TL_LEAF(apply, tip_finalize_reorg_detected_total, TLC_I64, TFU_COUNT_TOTAL,
+    TLV_NORMAL,
+    TFR_INFO, TL_NONE, 0, TFS_INFO,
+    "reorgs tip_finalize detected and rewound its cursor for. Reorgs are "
+    "normal, so no ceiling would be honest; read it beside "
+    "values.headers.header_admit_reorg_rewind_total, which should move with it "
+    "— one climbing alone means the two ends of the ladder disagree about the "
+    "canonical chain",
+    "", "")
+
+TL_LEAF(apply, tip_finalize_utxo_count_diverged_total, TLC_I64,
+    TFU_COUNT_TOTAL, TLV_NORMAL,
+    TFR_EXPECT_ZERO, TL_NONE, 0, TFS_CRITICAL,
+    "finalize attempts where the UTXO count the stage recomputed did not match "
+    "the count the fold expected at that height",
+    "the coin set and the block this node is about to serve as its tip "
+    "disagree: the state it would advertise is not the state it derived. "
+    "tip_finalize refuses the height rather than serving it, so the tip stops "
+    "here until the divergence is located",
+    "z23 ops state --subsystem=utxo_parity")
+
+TL_LEAF(apply, tip_finalize_successor_pending_total, TLC_I64, TFU_COUNT_TOTAL,
+    TLV_FULL,
+    TFR_INFO, TL_NONE, 0, TFS_INFO,
+    "deferrals where height H was held because its successor H+1 had not "
+    "landed yet. This is the stage's NORMAL working edge, not a stall: "
+    "tip_finalize needs the successor as lookahead, so the live tip is never "
+    "finalized in the same ingest call that accepted it. Expect this to climb "
+    "steadily on a healthy node at tip",
+    "", "")
+
+TL_LEAF(apply, tip_finalize_last_blocked_reason, TLC_TEXT, TFU_ENUM,
+    TLV_NORMAL,
+    TFR_INFO, TL_NONE, 0, TFS_INFO,
+    "class token of the most recent blocked tip_finalize step, or the literal "
+    "none when no step has blocked in this process. The token set is closed "
+    "and lock-free-published by the stage. A token that does not change while "
+    "values.frontier.hstar stays flat names the rung to open next",
+    "", "")
+
+TL_LEAF(apply, tip_finalize_step_us_ewma, TLC_I64, TFU_MICROSECONDS, TLV_FULL,
+    TFR_INFO, TL_NONE, 0, TFS_INFO,
+    "EWMA of one tip_finalize step in microseconds; 0 before the stage has "
+    "ever stepped. One step commits one height, so this is the closest thing "
+    "the ladder has to a per-block cost; it is what "
+    "values.rate.tip_finalize_blocks_per_sec_x1000 inverts",
+    "", "")
+
+TL_GROUP_END(apply)
+
+TL_GROUP(rate, "how fast the ladder is moving, and which rung is the bottleneck")
+
+TL_LEAF(rate, tip_finalize_blocks_per_sec_x1000, TLC_I64, TFU_BPS_X1000,
+    TLV_SUMMARY,
+    TFR_INFO, TL_NONE, 0, TFS_INFO,
+    "derived 1000 * 1000000 / values.apply.tip_finalize_step_us_ewma — heights "
+    "the ladder's last rung commits per second, in x1000 fixed point. One "
+    "tip_finalize step commits one height, so this IS the fold rate. "
+    "UNAVAILABLE until the stage has stepped once. No floor is applied on "
+    "purpose: at tip the honest rate is near zero because there is nothing "
+    "left to fold, and a floor here would fire on the healthiest node on the "
+    "network. The gated SLO that knows the difference — it requires peers AND "
+    "pending work before it judges — is ops state --subsystem=sync_rate",
+    "", "")
+
+TL_LEAF(rate, utxo_apply_blocks_per_sec_x1000, TLC_I64, TFU_BPS_X1000,
+    TLV_NORMAL,
+    TFR_INFO, TL_NONE, 0, TFS_INFO,
+    "derived 1000 * 1000000 / values.apply.utxo_apply_step_us_ewma, in x1000 "
+    "fixed point. UNAVAILABLE until the stage has stepped once. Read it "
+    "against values.rate.tip_finalize_blocks_per_sec_x1000: the two should sit "
+    "close together on a moving fold, and utxo_apply running far faster than "
+    "tip_finalize means the tail rung, not the coin fold, is where the time "
+    "goes",
+    "", "")
+
+TL_LEAF(rate, slowest_stage, TLC_TEXT, TFU_IDENTITY, TLV_NORMAL,
+    TFR_INFO, TL_NONE, 0, TFS_INFO,
+    "which of the six ladder rungs this domain times currently has the largest "
+    "step EWMA — the bottleneck, named rather than left for the reader to "
+    "compare six numbers by hand. UNAVAILABLE with reason no_stage_has_stepped "
+    "until at least one rung has run. Names a rung, never a verdict: some rung "
+    "is always the slowest, including on a perfectly healthy node",
+    "", "")
+
+TL_LEAF(rate, slowest_stage_step_us, TLC_I64, TFU_MICROSECONDS, TLV_NORMAL,
+    TFR_INFO, TL_NONE, 0, TFS_INFO,
+    "the step EWMA of values.rate.slowest_stage, in microseconds. Read the two "
+    "together, and read this against the next-slowest rung's own "
+    "*_step_us_ewma leaf: a bottleneck that is a small multiple of its "
+    "neighbour is just the pipeline's shape, while one that is orders of "
+    "magnitude above them is where fold time is actually going",
+    "", "")
+
+TL_GROUP_END(rate)

@@ -17,7 +17,7 @@ cd "$(dirname "$0")/../.."
 
 PATTERN='utxo_projection_|EV_UTXO_ADD|EV_UTXO_SPEND'
 BASELINE="${ZCL_NO_UTXO_PROJECTION_BASELINE:-tools/scripts/check_no_utxo_projection_baseline.txt}"
-SCAN_ROOTS_TEXT="${ZCL_NO_UTXO_PROJECTION_SCAN_ROOTS:-app lib config src core}"
+SCAN_ROOTS_TEXT="${ZCL_NO_UTXO_PROJECTION_SCAN_ROOTS:-core engine contexts cognition platform}"
 read -r -a SCAN_ROOTS <<< "$SCAN_ROOTS_TEXT"
 
 if [ ! -r "$BASELINE" ]; then

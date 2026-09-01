@@ -4,8 +4,8 @@
  * zclassic{,d} reference node over JSON-RPC, computes SHA3-256 over
  * windows of SHA3_WINDOW_SIZE consecutive block payloads, and emits
  *
- *   lib/chain/include/chain/sha3_windows.h  (declarations — stable)
- *   lib/chain/src/sha3_windows.c            (table + verifier)
+ *   core/modules/chain/include/chain/sha3_windows.h  (declarations — stable)
+ *   core/modules/chain/src/sha3_windows.c            (table + verifier)
  *
  * Usage:
  *   gen_sha3_windows --rpc-host=127.0.0.1 --rpc-port=8232 \
@@ -19,9 +19,9 @@
  * without writing output files.
  *
  * Links only standalone libs:
- *   lib/sha3/src/sha3.c          (zcl_sha3_256 + streaming ctx)
- *   lib/encoding/src/utilstrencodings.c (ParseHex)
- *   lib/json/src/json.c            (json_read, json_get, ...)
+ *   platform/modules/sha3/src/sha3.c          (zcl_sha3_256 + streaming ctx)
+ *   platform/modules/encoding/src/utilstrencodings.c (ParseHex)
+ *   platform/modules/json/src/json.c            (json_read, json_get, ...)
  *
  * No DB, no node libs, no Tor — fast standalone build. */
 
@@ -47,8 +47,8 @@
 #include <time.h>
 #include <unistd.h>
 
-#define DEFAULT_OUT_H "lib/chain/include/chain/sha3_windows.h"
-#define DEFAULT_OUT_C "lib/chain/src/sha3_windows.c"
+#define DEFAULT_OUT_H "core/modules/chain/include/chain/sha3_windows.h"
+#define DEFAULT_OUT_C "core/modules/chain/src/sha3_windows.c"
 
 /* Generous response cap: a 2 MB block prints ~4 MB hex + JSON wrapper. */
 #define RPC_RESP_CAP (16u * 1024u * 1024u)

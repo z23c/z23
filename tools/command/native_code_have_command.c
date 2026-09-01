@@ -9,7 +9,7 @@
  * code you have already located; this one decides whether to go looking.
  *
  * The reply is deliberately shaped for a SKIMMING reader. `verdict` is the
- * first thing to read and is derived by lib/codeindex from the very fields
+ * first thing to read and is derived by cognition/modules/codeindex from the very fields
  * rendered below it — see codeindex_capability_verdict(). Nothing here
  * recomputes or second-guesses it, so the headline can never disagree with the
  * evidence printed under it.

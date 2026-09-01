@@ -101,7 +101,7 @@ export LC_ALL=C
 # Skip classification + streak arithmetic, shared with the collector and with
 # the node's typed `ops state --subsystem=stopwatch_evidence` surface (all
 # three read ONE class table,
-# app/services/include/services/stopwatch_skip_classes.def). Absence is never
+# engine/services/include/services/stopwatch_skip_classes.def). Absence is never
 # fatal: the verdict path below does not depend on it, so a checkout without
 # it still judges exactly as before, just without the streak report.
 _SW_JUDGE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

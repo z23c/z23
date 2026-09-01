@@ -5,7 +5,7 @@
 # pure predicates + static height-keyed parameter tables + consensus math. It
 # is the innermost layer of the layered build and must NOT depend upward or
 # sideways on the orchestration surface (drive/persist/fetch/reorg). In
-# particular it must not include from lib/validation — validation SEQUENCES
+# particular it must not include from core/modules/validation — validation SEQUENCES
 # consensus, it is not consensus, and letting core reach into it would recreate
 # the very coupling the physical split exists to break.
 #
@@ -15,7 +15,7 @@
 #   (1) its own headers, reached through preserved include tokens —
 #         "domain/consensus/<x>.h"  (core/consensus keeps this token)
 #         "consensus/<x>.h"         (core/params keeps this token)
-#         "core/<x>.h"              (core/math, absorbed from lib/core in W3)
+#         "core/<x>.h"              (core/math, absorbed from core/modules/core in W3)
 #         "chainparams/<x>.h"       (core/chainparams, later wave)
 #   (2) C / POSIX system headers  — #include <...>
 #   (3) bare domain-local siblings — a quoted include with NO slash
@@ -51,15 +51,15 @@ CORE_SUBDIRS=(core/consensus core/params core/chainparams core/math)
 # Allow set: include-token top-level prefixes a sealed-core file may depend on.
 # Mirrors check_domain_purity.sh's 12 lib subsystems MINUS `validation`
 # (forbidden), PLUS `domain`, `chainparams`, and `math` (preserved core tokens),
-# PLUS `encoding` and `json` — the pure leaf libs the absorbed lib/core math
+# PLUS `encoding` and `json` — the pure leaf libs the absorbed core/modules/core math
 # primitives depend DOWN on (uint256/core_io use encoding/utilstrencodings +
 # encoding/utilmoneystr for hex/money string conversion and json/json for
 # core_io serialization; both leaves themselves reach only core/encoding/util/
 # json, never validation or app — verified in W3),
-# PLUS `platform` — the clock/rng leaf (lib/platform reaches only platform/util);
+# PLUS `platform` — the clock/rng leaf (platform/modules/platform reaches only platform/util);
 # core/chainparams/checkpoints.c reads a single clock via platform/time_compat.h
 # (verified pure leaf in W4).
-# core/math keeps the `core` token (absorbed from lib/core in W3); core/params keeps `consensus`.
+# core/math keeps the `core` token (absorbed from core/modules/core in W3); core/params keeps `consensus`.
 declare -A allow
 for p in domain consensus core chainparams math \
          bloom chain coins crypto encoding json keys platform primitives script support util; do
@@ -147,7 +147,7 @@ done
 echo ""
 echo "The sealed core (core/) is the innermost consensus layer. It may only"
 echo "include its own headers, C/system headers, bare siblings, and pure leaf"
-echo "lib subsystems — NEVER lib/validation (validation drives consensus, it is"
+echo "lib subsystems — NEVER core/modules/validation (validation drives consensus, it is"
 echo "not consensus) or any app/ shape."
 echo ""
 echo "Fix options (HARD gate — no baseline):"

@@ -10,7 +10,7 @@
  * full second node against it. `tools/sqlq.c` exists precisely for this
  * ("cannot reach a copied fixture datadir") but is an unregistered raw
  * binary requiring hand-known table/column names — the enum value
- * ZCL_COMMAND_SCOPE_OFFLINE_COPY (lib/kernel/include/kernel/command_
+ * ZCL_COMMAND_SCOPE_OFFLINE_COPY (engine/modules/kernel/include/kernel/command_
  * registry.h) has existed with zero leaves using it until this file.
  *
  * The leaves below open an AD HOC handle straight at the caller-supplied

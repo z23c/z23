@@ -16,10 +16,10 @@ real funds.
 make -C examples && ./examples/bin/01_mint_and_spend
 ```
 
-(The example source lives at `examples/01_mint_and_spend.c`. It compiles with
+(The example source lives at `docs/examples/01_mint_and_spend.c`. It compiles with
 `-DZCL_TESTING` and the standard `lib/*/include` module include paths — see
 the root `Makefile`'s `LIB_INCLUDES`/`LIB_MODULES` for the exact flag set the
-integrator's `examples/Makefile` should reuse.)
+integrator's `docs/examples/Makefile` should reuse.)
 
 ## Expected output (sketch)
 
@@ -49,26 +49,26 @@ property the whole simulator is built around.
 
 | File | Function | Role |
 |---|---|---|
-| `lib/sim/include/sim/seed_tape.h` | `seed_tape_open`, `seed_tape_install`, `seed_tape_uninstall`, `seed_tape_close` | Deterministic RNG + virtual clock the wallet keypair and block timestamps are drawn from |
-| `lib/sim/include/sim/simnet.h` | `simnet_init`, `simnet_free`, `simnet_use_seed_tape`, `simnet_tip_height` | Own/tear down the in-RAM chain harness; bind the deterministic clock |
-| `lib/sim/include/sim/simnet.h` | `simnet_mint_coinbase_to` | Mint a coinbase block paying an explicit script through `connect_block()` |
-| `lib/sim/include/sim/simnet.h` | `simnet_mint_to_height` | Mine empty filler blocks up to a target height (used here to clear coinbase maturity) |
-| `lib/sim/include/sim/simnet.h` | `simnet_spend` | Spend a coin at `txid:vout` to a new output, at a height that satisfies `COINBASE_MATURITY` |
-| `lib/sim/include/sim/simnet.h` | `simnet_coin_exists`, `simnet_coin_value` | Query the live in-RAM UTXO view — the same fold `coins_view_cache` performs on a real node |
-| `lib/sim/include/sim/simnet_wallet.h` | `simnet_wallet_create`, `simnet_wallet_address`, `simnet_wallet_script`, `simnet_wallet_free` | Deterministic P2PKH wallet toolkit for the sim |
+| `engine/modules/sim/include/sim/seed_tape.h` | `seed_tape_open`, `seed_tape_install`, `seed_tape_uninstall`, `seed_tape_close` | Deterministic RNG + virtual clock the wallet keypair and block timestamps are drawn from |
+| `engine/modules/sim/include/sim/simnet.h` | `simnet_init`, `simnet_free`, `simnet_use_seed_tape`, `simnet_tip_height` | Own/tear down the in-RAM chain harness; bind the deterministic clock |
+| `engine/modules/sim/include/sim/simnet.h` | `simnet_mint_coinbase_to` | Mint a coinbase block paying an explicit script through `connect_block()` |
+| `engine/modules/sim/include/sim/simnet.h` | `simnet_mint_to_height` | Mine empty filler blocks up to a target height (used here to clear coinbase maturity) |
+| `engine/modules/sim/include/sim/simnet.h` | `simnet_spend` | Spend a coin at `txid:vout` to a new output, at a height that satisfies `COINBASE_MATURITY` |
+| `engine/modules/sim/include/sim/simnet.h` | `simnet_coin_exists`, `simnet_coin_value` | Query the live in-RAM UTXO view — the same fold `coins_view_cache` performs on a real node |
+| `engine/modules/sim/include/sim/simnet_wallet.h` | `simnet_wallet_create`, `simnet_wallet_address`, `simnet_wallet_script`, `simnet_wallet_free` | Deterministic P2PKH wallet toolkit for the sim |
 | `core/params/include/consensus/consensus.h` | `COINBASE_MATURITY` (=100) | The real consensus constant driving step 3 |
 
 ## Production counterpart
 
 The example's steps map onto real node code as:
 
-- **Mint a coinbase** → the miner's block-template assembly (`app/jobs/`) followed by the same `connect_block()` in `lib/validation`, driven live by the `utxo_apply` reducer stage (`app/jobs/src/utxo_apply_stage.c`).
+- **Mint a coinbase** → the miner's block-template assembly (`engine/jobs/`) followed by the same `connect_block()` in `core/modules/validation`, driven live by the `utxo_apply` reducer stage (`engine/jobs/src/utxo_apply_stage.c`).
 - **Coinbase maturity** → `core/params/include/consensus/consensus.h` (`COINBASE_MATURITY`), enforced inside `connect_block()` for every real block, not just the sim.
-- **Spend the coin** → `wallet_create_transaction()` / `wallet_create_transaction_multi()` (`lib/wallet/include/wallet/wallet.h`) followed by `wallet_commit_transaction()`, surfaced through `z23 rpc sendtoaddress` on a live node.
-- **UTXO existence/value query** → `coins_view_cache_have_coins()` and friends in `lib/coins/include/coins/coins_view.h` over the real on-disk `coins_kv` table, or `z23 core wallet utxo list` / `z23 core chain transaction get` at the command layer.
+- **Spend the coin** → `wallet_create_transaction()` / `wallet_create_transaction_multi()` (`contexts/wallet/modules/wallet/include/wallet/wallet.h`) followed by `wallet_commit_transaction()`, surfaced through `z23 rpc sendtoaddress` on a live node.
+- **UTXO existence/value query** → `coins_view_cache_have_coins()` and friends in `core/modules/coins/include/coins/coins_view.h` over the real on-disk `coins_kv` table, or `z23 core wallet utxo list` / `z23 core chain transaction get` at the command layer.
 
 ## See also
 
 - `docs/SIMULATOR.md` — the simulator model overview.
 - `docs/SIMULATOR_TXNS.md` — the transaction toolkit (wallets, fees, mempool, HTLCs) built on top of the primitives used here.
-- `lib/test/src/test_simnet.c` (sections 1-2) — the ground-truth test this example is adapted from.
+- `tests/harness/src/test_simnet.c` (sections 1-2) — the ground-truth test this example is adapted from.

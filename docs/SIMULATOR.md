@@ -5,41 +5,41 @@ application action coverage tested through it.
 
 Source anchors for this matrix are code, not project prose:
 
-- `lib/sim/include/sim/simnet.h`
-- `lib/sim/src/simnet.c`
-- `lib/test/src/test_simnet.c`
-- `lib/test/src/test_simnet_doublespend.c`
-- `lib/test/src/test_simnet_chained_tx.c`
-- `lib/test/src/test_simnet_block_sigops.c`
-- `lib/test/src/test_simnet_duplicate_input.c`
-- `lib/test/src/test_simnet_value_inflation.c`
-- `lib/test/src/test_simnet_fee_range.c`
-- `lib/test/src/test_simnet_empty_vin_vout.c`
-- `lib/test/src/test_simnet_input_value_range.c`
-- `lib/test/src/test_simnet_sapling_activation.c`
-- `lib/test/src/test_simnet_sapling_shielded_send.c`
-- `lib/sim/include/sim/simnet_sapling.h`
-- `lib/sim/src/simnet_sapling.c`
-- `lib/sim/include/sim/simnet_cluster.h`
-- `lib/sim/src/simnet_cluster.c`
-- `lib/test/src/test_simnet_cluster.c`
-- `lib/test/src/test_simnet_fuzz.c`
-- `lib/zslp/include/zslp/slp.h`
-- `lib/zslp/src/slp.c`
-- `lib/znam/include/znam/znam.h`
-- `lib/znam/src/znam.c`
-- `app/models/src/explorer_index.c`
-- `app/models/src/explorer_index_zslp.c`
-- `lib/storage/src/znam_projection.c`
-- `app/controllers/src/api_controller_app_protocols.c`
-- `lib/net/src/msgprocessor.c`
-- `lib/net/include/net/zmsg.h`
-- `lib/net/include/net/p2p_game.h`
-- `lib/net/include/net/file_market.h`
-- `lib/net/include/net/file_service.h`
-- `lib/script/include/script/htlc.h`
-- `lib/script/src/htlc.c`
-- `app/controllers/src/swap_controller.c`
+- `engine/modules/sim/include/sim/simnet.h`
+- `engine/modules/sim/src/simnet.c`
+- `tests/harness/src/test_simnet.c`
+- `tests/harness/src/test_simnet_doublespend.c`
+- `tests/harness/src/test_simnet_chained_tx.c`
+- `tests/harness/src/test_simnet_block_sigops.c`
+- `tests/harness/src/test_simnet_duplicate_input.c`
+- `tests/harness/src/test_simnet_value_inflation.c`
+- `tests/harness/src/test_simnet_fee_range.c`
+- `tests/harness/src/test_simnet_empty_vin_vout.c`
+- `tests/harness/src/test_simnet_input_value_range.c`
+- `tests/harness/src/test_simnet_sapling_activation.c`
+- `tests/harness/src/test_simnet_sapling_shielded_send.c`
+- `engine/modules/sim/include/sim/simnet_sapling.h`
+- `engine/modules/sim/src/simnet_sapling.c`
+- `engine/modules/sim/include/sim/simnet_cluster.h`
+- `engine/modules/sim/src/simnet_cluster.c`
+- `tests/harness/src/test_simnet_cluster.c`
+- `tests/harness/src/test_simnet_fuzz.c`
+- `contexts/market/modules/zslp/include/zslp/slp.h`
+- `contexts/market/modules/zslp/src/slp.c`
+- `contexts/naming/modules/znam/include/znam/znam.h`
+- `contexts/naming/modules/znam/src/znam.c`
+- `contexts/explorer/models/src/explorer_index.c`
+- `contexts/market/models/src/explorer_index_zslp.c`
+- `engine/modules/storage/src/znam_projection.c`
+- `engine/controllers/src/api_controller_app_protocols.c`
+- `core/modules/net/src/msgprocessor.c`
+- `core/modules/net/include/net/zmsg.h`
+- `core/modules/net/include/net/p2p_game.h`
+- `core/modules/net/include/net/file_market.h`
+- `core/modules/net/include/net/file_service.h`
+- `core/modules/script/include/script/htlc.h`
+- `core/modules/script/src/htlc.c`
+- `engine/controllers/src/swap_controller.c`
 
 ## Model
 
@@ -123,14 +123,14 @@ not fold through `connect_block()` and are out of simnet scope.
 | ZNAM `UPDATE` | A | `make t ONLY=simnet`: owner positive `ZNAM owner UPDATE changes primary target`; non-owner negative `ZNAM non-owner UPDATE is ignored by projection`. |
 | ZNAM `TRANSFER` | A | `make t ONLY=simnet`: `mint ZNAM TRANSFER through simnet`, `ZNAM TRANSFER changes owner`. |
 | ZNAM `RENEW` | A | `make t ONLY=simnet`: `mint ZNAM RENEW through simnet`, `ZNAM RENEW is a node.db projection no-op today`. The event-log projection has expiry/renew concepts, but the node.db explorer projection has no expiry column. |
-| ZNAM `SET_RECORD` | A | `make t ONLY=simnet`: owner positive `ZNAM SET_RECORD writes BTC address record`; non-owner negative `ZNAM non-owner SET_RECORD is ignored by projection`. Owner-auth enforced (same mechanism as `UPDATE`, `app/models/src/explorer_index.c` `apply_znam`); unit-level coverage also in `test_explorer_index`. |
-| ZNAM `SET_TEXT` | A | `make t ONLY=simnet`: owner positive `ZNAM SET_TEXT writes text record`; non-owner negative `ZNAM non-owner SET_TEXT is ignored by projection`. Owner-auth enforced (same mechanism as `UPDATE`, `app/models/src/explorer_index.c` `apply_znam`); unit-level coverage also in `test_explorer_index`. |
+| ZNAM `SET_RECORD` | A | `make t ONLY=simnet`: owner positive `ZNAM SET_RECORD writes BTC address record`; non-owner negative `ZNAM non-owner SET_RECORD is ignored by projection`. Owner-auth enforced (same mechanism as `UPDATE`, `contexts/explorer/models/src/explorer_index.c` `apply_znam`); unit-level coverage also in `test_explorer_index`. |
+| ZNAM `SET_TEXT` | A | `make t ONLY=simnet`: owner positive `ZNAM SET_TEXT writes text record`; non-owner negative `ZNAM non-owner SET_TEXT is ignored by projection`. Owner-auth enforced (same mechanism as `UPDATE`, `contexts/explorer/models/src/explorer_index.c` `apply_znam`); unit-level coverage also in `test_explorer_index`. |
 | ZNAM malformed lokad | A | Negative case: `malformed ZNAM OP_RETURN is indexed generically`, `malformed ZNAM lokad does not mutate name projection`. |
 | ZMSG P2P send (`zmsg`) | C | P2P message, not a chain action. Serialization, overflow rejection, deterministic id, and in-memory store are covered by `test_protocols`; network framing is covered by `test_net`. |
 | ZMSG P2P ack (`zmsgack`) | C | P2P acknowledgement dispatch, not a chain action. Dispatch table coverage is in `test_net`; ZMSG message primitives are in `test_protocols`. |
-| ZMSG Sapling memo channel | A | On-chain channel implemented. The v1 memo wire format (magic `ZM` + version + flags + reply-to + UTF-8 payload, ≤474 bytes; `docs/ZMSG_ONCHAIN.md`) has an encoder/decoder in `lib/net/src/zmsg.c` with unit + negative tests in `test_protocols` (fast pool). `msg_send channel=onchain` composes `z_sendmany` (memo carried via a new binary-safe `memo_hex` recipient key), failing closed when the prover isn't READY. The note-decrypt path (`tip_finalize_post_step.c` → `zmsg_ingest_onchain_note`) lands inbound ZMSGs in the store (dedup by `msg_id = SHA3(txid‖memo)`). End-to-end proof: `make t ONLY=simnet_zmsg_onchain` (params-gated) mints a real `t→z` memo tx in-sim, decrypts, parses, ingests, and surfaces it in the store. |
+| ZMSG Sapling memo channel | A | On-chain channel implemented. The v1 memo wire format (magic `ZM` + version + flags + reply-to + UTF-8 payload, ≤474 bytes; `docs/ZMSG_ONCHAIN.md`) has an encoder/decoder in `core/modules/net/src/zmsg.c` with unit + negative tests in `test_protocols` (fast pool). `msg_send channel=onchain` composes `z_sendmany` (memo carried via a new binary-safe `memo_hex` recipient key), failing closed when the prover isn't READY. The note-decrypt path (`tip_finalize_post_step.c` → `zmsg_ingest_onchain_note`) lands inbound ZMSGs in the store (dedup by `msg_id = SHA3(txid‖memo)`). End-to-end proof: `make t ONLY=simnet_zmsg_onchain` (params-gated) mints a real `t→z` memo tx in-sim, decrypts, parses, ingests, and surfaces it in the store. |
 | Sapling sim-local activation | A | `make t ONLY=simnet_sapling_activation`: `test_simnet_sapling_activation` lowers Overwinter/Sapling activation on the sim's params value-copy only (`simnet_activate_sapling_at`), proves no mainnet leak (`chain_params_get()` unchanged), and a post-activation transparent block passes the real `hashFinalSaplingRoot` check via the empty-tree-root stamp. |
-| Sapling shielded send (t→z, z→z) | A | Params-gated (`ZCL_PARAMS_TESTS=1` or `--only=simnet_sapling_shielded_send`; real Groth16 proving is seconds+RAM-heavy, so it is out of the default fast pool): `test_simnet_sapling_shielded_send` drives the full in-sim shielded pipeline — depth-32 note-commitment tree + anchor/witness (`lib/sim/src/simnet_sapling.c`), t→z and z→z built with the real prover and verified by the real consensus verifier, memo/rcm decrypt round-trip, durable nullifier set with shielded double-spend rejection, and seeded txid determinism via the `ZCL_TESTING` RNG hooks. |
+| Sapling shielded send (t→z, z→z) | A | Params-gated (`ZCL_PARAMS_TESTS=1` or `--only=simnet_sapling_shielded_send`; real Groth16 proving is seconds+RAM-heavy, so it is out of the default fast pool): `test_simnet_sapling_shielded_send` drives the full in-sim shielded pipeline — depth-32 note-commitment tree + anchor/witness (`engine/modules/sim/src/simnet_sapling.c`), t→z and z→z built with the real prover and verified by the real consensus verifier, memo/rcm decrypt round-trip, durable nullifier set with shielded double-spend rejection, and seeded txid determinism via the `ZCL_TESTING` RNG hooks. |
 | Market offer gossip (`zfilelist`) | C | P2P gossip action, out of simnet scope. Serialization/cache behavior is covered by `test_file_market` and dispatch/cache coverage in `test_net`. |
 | Market challenge (`zfilechal`) | C | P2P proof-of-possession challenge, out of simnet scope. Covered at serialization/model level by `test_file_market`. |
 | Market proof (`zfileproof`) | C | P2P challenge response, out of simnet scope. Covered at serialization/model level by `test_file_market`. |
@@ -213,7 +213,7 @@ make check-doc-accuracy
 
 ### Algorithmic-cost measurement (`simnet_perf`)
 
-Everything above measures CORRECTNESS. `lib/sim/src/simnet_perf.c` +
+Everything above measures CORRECTNESS. `engine/modules/sim/src/simnet_perf.c` +
 `tools/sim/simperf.c` (`make sim-perf`) measure COST: they replay a fixed
 mint/spend workload through the same real `connect_block()` fold at 1x/2x/4x
 size and gate on how much per-transaction CPU cost GROWS across that span, which

@@ -19,7 +19,7 @@
 #include <string.h>
 
 /* Pipeline order + abbreviations shared with the live dumper and the
- * mint-progress.log writer (config/src/boot_mint_anchor_log.c). */
+ * mint-progress.log writer (engine/composition/src/boot_mint_anchor_log.c). */
 static const char *const k_off_abbrev[8] = {
     "ha", "vh", "bf", "bp", "sv", "pv", "ua", "tf" };
 static const char *const k_off_name[8] = {

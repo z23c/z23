@@ -142,8 +142,8 @@ expected network and ZID and checks both signatures. Rotation points to the
 prior binding; revocation cannot create a replacement key implicitly.
 
 Implementation status (S2, remote coder, 2026-08-02): landed in
-`lib/vcs/include/vcs/zcode_contributor_binding.h` +
-`lib/vcs/src/zcode_contributor_binding.c` with focused tests appended to the
+`contexts/commons/modules/vcs/include/vcs/zcode_contributor_binding.h` +
+`contexts/commons/modules/vcs/src/zcode_contributor_binding.c` with focused tests appended to the
 existing `zcode_contributor` group. The 184-byte body / 312-byte full wire is
 domain-separated (`zcl.zcode.contributor_binding.v1` for the dual-signed body
 root; `zcl.zcode.contributor_binding.root.v1` for the full-wire root a
@@ -156,7 +156,7 @@ a revoked binding, replay/skip sequencing, cross-network/cross-ZID links,
 same-key rotations, new-key revocations, and tampered predecessors. S3/S6
 consume only `root()` + `verify()`/`validate_successor()`; no
 wallet/database/command surfaces were touched. Golden vectors are pinned in
-`lib/test/src/test_zcode_contributor.c` (`ZCB_KAT_*`).
+`tests/harness/src/test_zcode_contributor.c` (`ZCB_KAT_*`).
 
 Integration hardening (2026-08-02, same lane): `validate_at()` rejects use
 before `issued_unix` (`ERR_NOT_YET_VALID`); `seal()` re-derives the Ed25519
@@ -317,7 +317,7 @@ Personalized PageRank is deterministic and discovery-only:
   proof acceptance, committee authority, or rewards.
 
 The pure S5 core is implemented in
-`lib/vcs/include/vcs/zcode_discovery_rank.h`. It accepts
+`contexts/commons/modules/vcs/include/vcs/zcode_discovery_rank.h`. It accepts
 only full property roots, canonical citation edges, locally aggregated seed
 weights, and a filter-policy root. It normalizes all input order, rejects
 duplicate or missing graph members, conserves exactly `10^12` integer mass,
@@ -456,9 +456,9 @@ projection rebuild checks where applicable, and no deployment.
 | S0 | Freeze this specification and coordination boundaries | existing ZCODE foundation | complete 2026-08-02, primary |
 | S1 | Canonical science codecs, roots, cross-object validation, fixed benchmark/reproduction action identities | S0 | implemented and gate-verified 2026-08-02, primary |
 | S2 | Dual-signed `contributor_binding.v1`, rotation/revocation/network replay gates | S0 | implemented 2026-08-02, remote coder; **hardened 2026-08-03** — validity windows + key derivation `0cd86d0f8`, science-object cross-validation H1–H3 `8909454b5`, three-signature rotation + delayed recovery + retired-key reuse ban H4 `b9e61cd48` (contributor_binding.v2) |
-| S3 | CAS storage, rebuildable science projection, study/work/review/vote plan-commit services and commands | S1, S2 | **landed 2026-08-03 `bbe7f401f`**, main session — `lib/vcs/src/zcode_science_index.c(+h)`, `app/services/src/zcode_science_service.c(+h)`, app/models science projection tables (schema bump 48→49 + validator pin 26→27), `tools/command/native_zcode_science_command.c`, `config/commands/zcode_science.def`, `lib/test/src/test_zcode_science_store.c` |
-| S4 | Closed benchmark/reproduction executors and environment/raw-sample receipts | S1, recipe-derived build graph | **landed 2026-08-03 `08c858042`**, main session — `lib/vcs/src/hardware_profile.c(+h)`, `lib/vcs/src/benchmark_method.c(+h)`, benchmark/reproduction executors + receipt codecs, `zcode.science.work.execute` (additive in `config/commands/zcode_science.def`), `lib/test/src/test_zcode_benchmark_exec.c` |
-| S5 | Deterministic discovery PageRank and golden graphs | S1, S3 | pure core implemented 2026-08-02, primary; **projection/command adapter landed 2026-08-03 `44afe2952`**, main session — `lib/vcs/src/zcode_discovery_projection.c(+h)`, `zcode.science.discover` + `zcode.science.rank.snapshot` commands (additive def), `lib/test/src/test_zcode_discovery_projection.c` — pure core files untouched |
+| S3 | CAS storage, rebuildable science projection, study/work/review/vote plan-commit services and commands | S1, S2 | **landed 2026-08-03 `bbe7f401f`**, main session — `contexts/commons/modules/vcs/src/zcode_science_index.c(+h)`, `cognition/services/src/zcode_science_service.c(+h)`, app/models science projection tables (schema bump 48→49 + validator pin 26→27), `tools/command/native_zcode_science_command.c`, `engine/composition/commands/zcode_science.def`, `tests/harness/src/test_zcode_science_store.c` |
+| S4 | Closed benchmark/reproduction executors and environment/raw-sample receipts | S1, recipe-derived build graph | **landed 2026-08-03 `08c858042`**, main session — `contexts/commons/modules/vcs/src/hardware_profile.c(+h)`, `contexts/commons/modules/vcs/src/benchmark_method.c(+h)`, benchmark/reproduction executors + receipt codecs, `zcode.science.work.execute` (additive in `engine/composition/commands/zcode_science.def`), `tests/harness/src/test_zcode_benchmark_exec.c` |
+| S5 | Deterministic discovery PageRank and golden graphs | S1, S3 | pure core implemented 2026-08-02, primary; **projection/command adapter landed 2026-08-03 `44afe2952`**, main session — `contexts/commons/modules/vcs/src/zcode_discovery_projection.c(+h)`, `zcode.science.discover` + `zcode.science.rank.snapshot` commands (additive def), `tests/harness/src/test_zcode_discovery_projection.c` — pure core files untouched |
 | S2–S5 v1 acceptance proof | Two-node end-to-end acceptance: preregister → execute → reproduce → findings/review → discover → restart both nodes → rebuild from CAS hashes | S2–S5 | **landed 2026-08-03; root-only carrier upgraded by S7 on 2026-08-04**, main session — `tools/dev/science_acceptance.sh` (opt-in `make test-science-acceptance`, NOT in `make ci`), `tools/zcode_science_fixture.c`, `zcode.science.rebuild` operator leaf (def + handler + registry int-pin glue). Both nodes SIGTERM + cold boot, and `zcode.science.rebuild` remains byte-identical even after direct SQL wipe of the six projection tables; CAS object count is unchanged. **G1 CLOSED** — science objects ride the existing blob swarm and S7 removes the former out-of-band transport root: publish files signed generic POINTER/PROVIDER records, B begins with only the semantic science root, fetches through the existing verifier, re-derives the root and reaches `study.show found=true`. **G4 CLOSED** — findings command-leaf admission uses `zcode.science.findings.plan|commit`; the fixture composes the wire without touching CAS and review binds the CLI-admitted findings. Execution-context documents remain fixture-seeded content roots, not ledger objects. **G2 CLOSED** by the NEW_USER 4/hour bootstrap announce quota, deduped per-sync re-announce and supervisor clock-driven swarm (`net.zcode_swarm`, 1 s); the package leg is a hard positive regression gate. |
 | S6 | Read-only Noise-bound DHT, persisted contacts, diagnostic dumper | S2 | **complete and gate-proven 2026-08-04 at `545e6b2b9`; not deployed** — deterministic iterative Kademlia with a 64-candidate pool, closest-16 active frontier, alpha=3 global query budget, eight fairly queued lookups, explicit candidate and replacement-probe states, stable/target/timeout termination, and a 30 s ceiling. Cold COLD/UNVERIFIED IDs bootstrap autonomously only through accepted chain-bound ZENDP endpoints, a fixed reachability index, deduped/backoff-bound connman requests, and fresh Noise/delegation authentication. Public `find.begin|poll|cancel` uses opaque lookup IDs plus separate owner tokens; `find` is its client-side wrapper. Replay request/response namespaces and retained service sessions are independent, local connection serials cannot alias peer claims, external chain/disk/DB/network work runs outside the DHT lock, and captured generations reject stale results. `make test-zcode-dht-acceptance` proves seven independent sparse-topology identities, broken-nearest-path recovery, eight simultaneous external callers, canonical persistence and zero-peer cold bootstrap. A deterministic 32-node model runs 12,000 transitions under continuous invariants, and the focused ASan+UBSan gate has zero suppressions. Focused DHT/Noise/transport/argv/connman/RPC, yardsale/store plus both store stress groups, the complete `make lint` gate set, the uncached suite (898 registered, 889 run, 0 cached, 9 policy-gated, 0 failed, 19 explicit self-skips), LTO, science acceptance, and both byte-reproducibility gates are green. Provider/root or generic space/service records and STORE/ack/replication remain S7 and were not added. |
 | S7 | Generic provider/pointer/storage-ack discovery, local sovereignty, replication and root-only fetch adapters | S6 | **complete through S7.1 and gate-proven 2026-08-05; not deployed** — one exact 551-byte signed wire covers PROVIDER, POINTER and STORAGE_ACK, binding network genesis, namespace, semantic/transport roots, provider node ID, sequence/window and the chain-bound delegated signer. S7.1 derives a domain-separated DHT key and iterates signed record discovery over the existing k=16/alpha=3/64-candidate engine; `records.v1` is only a bounded cold cache. Opaque begin/poll/cancel capabilities, deterministic 64-result pagination, distinct-provider priority and separately preserved conflicts feed the synchronous provider/science wrappers. Closest-node publication persists key-free renewal intent, resumes under fresh delegation and stops on expiry, failed possession or local policy. A STORAGE_ACK can now be authored only after the package store verifies the root-bound manifest, every chunk, completeness and a local pin; STORE_RESULT is not an ACK, and byte loss/unpin/corruption prevents renewal. The single 1,024-rule policy engine decides DISCOVER/FETCH/STORE/INDEX/SERVE/FORWARD/EXECUTE by exact root, package, publisher ZID, service type or classification; advisory rules are opt-in and local rules never become global bans. Replication targets eight and says `durable` only for five live ACKs across three declared owner groups—never separate-operator proof. Provider-directed science fetch rechecks semantic/transport/publisher/service policy, uses accepted ZENDP plus connman and fresh Noise/delegation authentication, confines the swarm verifier to the selected root and falls back after absence, timeout, lies or corruption. Exact DHT and science daemon acceptances plus a separate 12-node hermetic sparse proof cover cold lookup, root-only transfer/rederivation, restart/rebuild, pagination, renewal, ACK loss, caps and one-node blocking. No space manifest, doorbell, board, mailbox, agent mission, arbitrary execution, consensus, wallet, deploy or second network stack was added. |
@@ -475,14 +475,14 @@ projection rebuild checks where applicable, and no deployment.
 Primary lane owns for S1:
 
 ```text
-lib/vcs/include/vcs/zcode_science.h
-lib/vcs/src/zcode_science.c
-lib/vcs/include/vcs/build_action.h
-lib/vcs/src/build_action.c
-lib/test/src/test_zcode_science.c
-lib/test/src/test.c
+contexts/commons/modules/vcs/include/vcs/zcode_science.h
+contexts/commons/modules/vcs/src/zcode_science.c
+contexts/commons/modules/vcs/include/vcs/build_action.h
+contexts/commons/modules/vcs/src/build_action.c
+tests/harness/src/test_zcode_science.c
+tests/harness/src/test.c
 tools/dev/test_group_catalog.def
-app/controllers/include/controllers/agent_impact_rules.def
+cognition/controllers/include/controllers/agent_impact_rules.def
 docs/work/ZCODE_SCIENTIFIC_METAVERSE.md
 docs/work/ZCODE_DEVELOPMENT_NETWORK.md
 docs/work/README.md
@@ -491,17 +491,17 @@ docs/work/README.md
 Primary lane additionally owns the S5 pure-core files:
 
 ```text
-lib/vcs/include/vcs/zcode_discovery_rank.h
-lib/vcs/src/zcode_discovery_rank.c
-lib/test/src/test_zcode_discovery_rank.c
+contexts/commons/modules/vcs/include/vcs/zcode_discovery_rank.h
+contexts/commons/modules/vcs/src/zcode_discovery_rank.c
+tests/harness/src/test_zcode_discovery_rank.c
 ```
 
 The remote coder may claim S2 without touching those files:
 
 ```text
-lib/vcs/include/vcs/zcode_contributor_binding.h
-lib/vcs/src/zcode_contributor_binding.c
-lib/test/src/test_zcode_contributor.c
+contexts/commons/modules/vcs/include/vcs/zcode_contributor_binding.h
+contexts/commons/modules/vcs/src/zcode_contributor_binding.c
+tests/harness/src/test_zcode_contributor.c
 ```
 
 S2 should reuse the existing ZID Ed25519 and wallet/secp256k1 primitives,
@@ -519,7 +519,7 @@ path, so "reproduce on a second node" cannot work for real. Investigated
 2026-08-03; the decision (smallest change, reuses the frozen wire):
 
 - Science wires are 121–422 bytes — far under the 8 KiB blob ceiling.
-  `lib/vcs/src/blob_store.c` already moves arbitrary small CAS objects over
+  `contexts/commons/modules/vcs/src/blob_store.c` already moves arbitrary small CAS objects over
   the `zpkgswm` swarm as one-file/one-chunk content.v2 packages (the zendp/
   zdesc pattern); no new wire message, no new store.
 - **Dual addressing**: the publisher mirrors each committed science wire
@@ -529,14 +529,14 @@ path, so "reproduce on a second node" cannot work for real. Investigated
   trusted from a claim. The swarm's manifest verification is untouched.
 - **CLOSED 2026-08-03**, implemented exactly as recorded above and proven
   node-to-node: `zcode_science_publish()` / `zcode_science_admit()` in
-  `app/services/src/zcode_science_carrier.c` (publish: CAS load → wire
+  `cognition/services/src/zcode_science_carrier.c` (publish: CAS load → wire
   identify → root compare → `vcs_blob_put_to`; admit: `vcs_blob_get_from`
   → identify → idempotent `put_addressed` → full `zcode_science_rebuild`
   for the projection), kind tokens + `science_identify_wire()` covering
   all nine wire types (review/vote share len 219, split by magic),
   `zcode.science.publish` / `zcode.science.fetch` leaves (def + handlers
   mirroring `zcode.package.fetch`'s live-store-first / one-shot-store
-  pattern), round-trip tests in `lib/test/src/test_zcode_science_store.c`,
+  pattern), round-trip tests in `tests/harness/src/test_zcode_science_store.c`,
   and the acceptance script's G1 leg flipped to a positive proof:
   node A publishes its study pre-restart, node B schedules the fetch and
   — post-restart, with the hosting node's announce live — admits the

@@ -9,14 +9,14 @@
 # blocker_supervisor_sweep to dispatch — must therefore carry one of:
 #
 #   (a) an AUTOMATIC remedy declared in
-#       app/conditions/include/conditions/blocker_remedy_bindings.def: a
+#       engine/conditions/include/conditions/blocker_remedy_bindings.def: a
 #       condition-engine healer name, or ESCAPE(<action>). The condition
 #       engine drives (detect, remedy, witness) off its own poll loop, so an
 #       empty escape_action is fine — something in the tree attempts a cure.
 #
 #   (b) an explicit HUMAN-decision marker: the id is bound to the honest
 #       token OWNER in that table AND a matching row exists in
-#       app/conditions/include/conditions/blocker_operator_decisions.def
+#       engine/conditions/include/conditions/blocker_operator_decisions.def
 #       stating the decision the person owns and the tradeoff.
 #
 # Neither = a stuck horn. Measured on the canonical node 2026-07-27:
@@ -63,8 +63,8 @@ cd "$(dirname "$0")/../.."
 GATE=check_blocker_handoff_declared
 MODE="${ZCL_LINT_MODE:-FAIL}"
 
-REMEDY_TABLE="${ZCL_BLOCKER_HANDOFF_REMEDY_TABLE:-app/conditions/include/conditions/blocker_remedy_bindings.def}"
-DECISION_TABLE="${ZCL_BLOCKER_HANDOFF_DECISION_TABLE:-app/conditions/include/conditions/blocker_operator_decisions.def}"
+REMEDY_TABLE="${ZCL_BLOCKER_HANDOFF_REMEDY_TABLE:-engine/conditions/include/conditions/blocker_remedy_bindings.def}"
+DECISION_TABLE="${ZCL_BLOCKER_HANDOFF_DECISION_TABLE:-engine/conditions/include/conditions/blocker_operator_decisions.def}"
 BASELINE="${ZCL_BLOCKER_HANDOFF_BASELINE:-tools/lint/blocker_handoff_baseline.txt}"
 
 for f in "$REMEDY_TABLE" "$DECISION_TABLE"; do
@@ -75,7 +75,7 @@ done
 # Same scope as check_blocker_remedy.sh: production source only. lib/test is
 # excluded (fixtures raise synthetic ids on purpose) and so is the blocker
 # primitive itself (it DEFINES the raise functions, it does not call them).
-SCAN_ROOTS_DEFAULT="app config lib src"
+SCAN_ROOTS_DEFAULT="core engine contexts cognition platform"
 read -r -a SCAN_ROOTS <<< "${ZCL_BLOCKER_HANDOFF_SCAN_ROOTS:-$SCAN_ROOTS_DEFAULT}"
 
 collect_files() {
@@ -83,9 +83,9 @@ collect_files() {
     for root in "${SCAN_ROOTS[@]}"; do
         [ -d "$root" ] || continue
         find "$root" -type f \( -name '*.c' -o -name '*.h' \) \
-            ! -path 'lib/test/*' \
-            ! -path 'lib/util/src/blocker.c' \
-            ! -path 'lib/util/include/util/blocker.h' \
+            ! -path 'tests/harness/include/test/*' \
+            ! -path 'platform/modules/util/src/blocker.c' \
+            ! -path 'platform/modules/util/include/util/blocker.h' \
             2>/dev/null
     done
 }
@@ -100,9 +100,9 @@ gate_require_scanned "${#scan_files[@]}" "${ZCL_BLOCKER_HANDOFF_FILE_FLOOR:-200}
 # a comment: if one of these files grows an escape_action assignment the
 # hardcoded table below is stale and the gate must stop, not guess.
 WRAPPER_FILES=(
-    app/services/src/invariant_sentinel.c
-    lib/validation/src/chain_linkage_check.c
-    app/services/src/sticky_escalator.c
+    engine/services/src/invariant_sentinel.c
+    core/modules/validation/src/chain_linkage_check.c
+    engine/services/src/sticky_escalator.c
 )
 for wf in "${WRAPPER_FILES[@]}"; do
     [ -f "$wf" ] || continue
@@ -183,8 +183,8 @@ extract_raise_sites() {
         # end of the enclosing function (a `}` in column 1), bounded?
         #
         # `rec.escape_action[0] = 0;` / `= ""` is an EXPLICIT empty escape, not
-        # an arming — app/jobs/src/tip_finalize_post_step.c:87 and
-        # app/jobs/src/utxo_root_ladder_tripwire.c:95 both write one on purpose.
+        # an arming — engine/jobs/src/tip_finalize_post_step.c:87 and
+        # engine/jobs/src/utxo_root_ladder_tripwire.c:95 both write one on purpose.
         # Counting those as armed is the one mistake that would let this gate
         # pass a stuck horn, so an explicit-empty anywhere in the same raise
         # window WINS over an arming line: a function that arms on one branch
@@ -362,7 +362,7 @@ gate_require_scanned "${#DECISION_PATTERNS[@]}" "${ZCL_BLOCKER_HANDOFF_DECISION_
     "parsed zero ZCL_BLOCKER_DECISION rows from $DECISION_TABLE"
 
 # Longest-match-wins glob lookup — the same rule the runtime resolver uses
-# (app/conditions/src/blocker_handoff_registry.c best_match): an exact id
+# (engine/conditions/src/blocker_handoff_registry.c best_match): an exact id
 # beats every pattern; among patterns the longest wins.
 best_pattern() {  # $1 = id; remaining args = patterns. echoes the winner or ""
     local id="$1"; shift

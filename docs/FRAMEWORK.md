@@ -32,14 +32,14 @@ Everything else — wallet, explorer, market, ZNAM, messaging, swaps — is a
 *read-model* over that one fact.
 
 That boundary is intentional: Zclassic consensus is the base layer. z23
-can act like an L2-style application/service layer over that base — ZSLP,
+can act like an L2-style engine/application/service layer over that base — ZSLP,
 ZNAM, file market, messaging, script-contract workflows, wallet flows, and
 CRUD REST resources may interpret, index, and construct transactions anchored
 to ZCL — but they must not drift from the L1 rules. Product innovation lives in
 versioned controllers, services, projections, OP_RETURN/memo/script protocols,
 and operator APIs; Equihash parameters, activation heights, block/transaction
 validity, and coin accounting remain consensus-parity territory. The working
-umbrella for that application/service layer is **ZLSP** (ZCL Layer Service
+umbrella for that engine/application/service layer is **ZLSP** (ZCL Layer Service
 Protocol): noun-shaped REST resources and typed native JSON methods over
 ZCL-anchored services. ZSLP tokens, ZNAM names, messaging, market flows, and
 script-contract workflows are ZLSP-style services; they may build valid ZCL
@@ -195,7 +195,7 @@ no third state. That is strictly stronger than detectors watching proxies.
 
 The staged reducer is the authoritative chain-advance architecture, but the
 legacy block-connect engine still ships and is live-called on the recovery path
-(`connect_block` at `config/src/boot_index.c:403`; `lib/validation/src/` ≈
+(`connect_block` at `engine/composition/src/boot_index.c:403`; `core/modules/validation/src/` ≈
 7.7k LOC across its `.c` files, still linked). Cleanup remains — the
 checklist tracks it.
 
@@ -208,14 +208,14 @@ know the shape.
 
 | # | Shape | Folder | Canonical form | Status | Exemplar |
 |---|-------|--------|----------------|--------|----------|
-| 1 | **Controller** | `app/controllers/` | `static int h_x(req,res)` + route table | partial; E1 is empty, but import/sync controllers still carry legacy orchestration and raw-SQL debt is ratcheted | `chain_projection.c` |
-| 2 | **Service** | `app/services/` | functions returning `struct zcl_result` | partial; file-level E2 and typed-blocker baselines are empty, but legacy bool compatibility APIs remain | `replay_verify_service.c` |
-| 3 | **Model** | `app/models/` | `DEFINE_MODEL_CALLBACKS` + `validates_*` + AR save | **real, enforced** (E3+E4+model-validation HARD; file count in `docs/CODEBASE_MAP.md` §1's app-shapes table) | `block.c` |
-| 4 | **Job** | `app/jobs/` | cursor-stamped stage: advance-or-blocker | **real** — eight reducer stages live in `app/jobs/`; E5 HARD (advance-or-block) | `*_stage.c` |
-| 5 | **Supervisor** | `app/supervisors/` | declared liveness tree, restart policy | partial — `net`/`chain`/`staged_sync` declared; `boot_services.c` still owns lifecycle wiring | `app/supervisors/src/staged_sync_supervisor.c` |
-| 6 | **Condition** | `app/conditions/` | `{detect, remedy, witness}` struct + `register()` | **real, the model citizen** (`condition_registrations` count is machine-checked in `docs/CODEBASE_MAP.md`'s DOC-COUNTS block) | `block_failed_mask_at_tip.c` |
-| 7 | **Event** | *(no `app/` folder — concept, not a physical shape)* | typed append-only emit + subscribers | there is no `app/events/` folder (0 files ever lived there); the concept stays owned by `lib/event/` + `lib/storage/src/event_log.c` + `lib/storage/*_projection.c` | `lib/storage/src/event_log.c` | <!-- doc-path-ok: app/events/ deliberately does not exist — that is the row's point -->
-| 8 | **Storage Adapter** | `adapters/` + `ports/` | port interface + swappable impl | **real — outbound-only by design** (§6); port/adapter counts are machine-checked in `docs/CODEBASE_MAP.md`'s DOC-COUNTS block; `check_raw_sqlite.sh` CLEAN | `adapters/outbound/persistence/` |
+| 1 | **Controller** | `engine/controllers/` | `static int h_x(req,res)` + route table | partial; E1 is empty, but import/sync controllers still carry legacy orchestration and raw-SQL debt is ratcheted | `chain_projection.c` |
+| 2 | **Service** | `engine/services/` | functions returning `struct zcl_result` | partial; file-level E2 and typed-blocker baselines are empty, but legacy bool compatibility APIs remain | `replay_verify_service.c` |
+| 3 | **Model** | `engine/models/` | `DEFINE_MODEL_CALLBACKS` + `validates_*` + AR save | **real, enforced** (E3+E4+model-validation HARD; file count in `docs/CODEBASE_MAP.md` §1's app-shapes table) | `block.c` |
+| 4 | **Job** | `engine/jobs/` | cursor-stamped stage: advance-or-blocker | **real** — eight reducer stages live in `engine/jobs/`; E5 HARD (advance-or-block) | `*_stage.c` |
+| 5 | **Supervisor** | `engine/supervisors/` | declared liveness tree, restart policy | partial — `net`/`chain`/`staged_sync` declared; `boot_services.c` still owns lifecycle wiring | `engine/supervisors/src/staged_sync_supervisor.c` |
+| 6 | **Condition** | `engine/conditions/` | `{detect, remedy, witness}` struct + `register()` | **real, the model citizen** (`condition_registrations` count is machine-checked in `docs/CODEBASE_MAP.md`'s DOC-COUNTS block) | `block_failed_mask_at_tip.c` |
+| 7 | **Event** | *(no `app/` folder — concept, not a physical shape)* | typed append-only emit + subscribers | there is no `app/events/` folder (0 files ever lived there); the concept stays owned by `engine/modules/event/` + `engine/modules/storage/src/event_log.c` + `engine/modules/storage/*_projection.c` | `engine/modules/storage/src/event_log.c` | <!-- doc-path-ok: app/events/ deliberately does not exist — that is the row's point -->
+| 8 | **Storage Adapter** | `platform/adapters/` + `platform/ports/` | port interface + swappable impl | **real — outbound-only by design** (§6); port/adapter counts are machine-checked in `docs/CODEBASE_MAP.md`'s DOC-COUNTS block; `check_raw_sqlite.sh` CLEAN | `platform/adapters/outbound/persistence/` |
 
 The honest read: **Model, Condition, Job, the projection/state-dump registry, and
 the Storage Adapter (outbound-only by design) are real and enforced; Supervisor is
@@ -228,7 +228,7 @@ code actually uses and rejects the DSL it never adopted.** A Condition is a
 plain struct you can read, grep, and step through:
 
 ```c
-// app/conditions/src/block_failed_mask_at_tip.c — the exemplar for ALL shapes
+// engine/conditions/src/block_failed_mask_at_tip.c — the exemplar for ALL shapes
 static bool detect(const struct condition_ctx *c)  { /* reads model state   */ }
 static bool remedy(const struct condition_ctx *c)  { /* calls a service     */ }
 static bool witness(const struct condition_ctx *c) { /* observable success  */ }
@@ -271,7 +271,7 @@ app/
   supervisors/   liveness trees, one root per domain
   conditions/    auto-healers, one file per halt class
   views/         explorer templates
-                 (Event shape has no app/ folder — see lib/storage/ below)
+                 (Event shape has no app/ folder — see engine/modules/storage/ below)
 
 domain/          pure consensus core — NO clock/RNG/IO    21 modules: consensus/ wallet/ encoding/
                  (each fronted by a thin lib/ legacy wrapper + a seal test)
@@ -283,7 +283,7 @@ lib/
   storage/       event_log + projections + (legacy) coins/sqlite
   net/ rpc/ crypto/ chain/ validation/ …                (primitives, incremental migration)
 
-adapters/ ports/  hexagonal seam (outbound-only by design — port/adapter counts in CODEBASE_MAP.md's DOC-COUNTS block; reads owned by Models per Law 5)
+platform/adapters/ platform/ports/  hexagonal seam (outbound-only by design — port/adapter counts in CODEBASE_MAP.md's DOC-COUNTS block; reads owned by Models per Law 5)
 config/           composition root (today: boot monoliths — to become supervisor decls)
 tools/lint/       the ratcheting gates — beauty enforced by the build
 docs/             FRAMEWORK.md (this — §9 is the debt board) · work/ (assignments)
@@ -308,7 +308,7 @@ human reviewer. The ladder is deliberate:
 
 Hygiene + adoption gates cover: no bare malloc, no raw `sqlite3_step`
 (text-scan lint gate), no silent error returns, no raw clock/RNG outside
-`lib/platform/`, threads only via the registry, observability-pairing,
+`platform/modules/platform/`, threads only via the registry, observability-pairing,
 before/after-save hooks, function ≤500 LOC, `lib/`→`app/` layering, supervisor
 registration, typed blockers, framework-shape. The gates are themselves under
 test (`test_make_lint_gates.c` plants a fixture, asserts the gate trips,
@@ -367,19 +367,19 @@ out through swappable ports (Law 2); reads are owned by the Models (Law 5),
 so no inbound "repository" port fronts them — the same kind of by-design absence
 as the deleted `app/events/` folder (§3 row 7): the concept has a real home <!-- doc-path-ok: app/events/ deliberately does not exist -->
 elsewhere and does not need an empty placeholder. App sites that call
-`lib/storage/*_sqlite.c` directly are
+`engine/modules/storage/*_sqlite.c` directly are
 legitimate (Models ARE storage; Jobs use the consensus.db kernel store; Views are
 read-only introspection), and `check_raw_sqlite.sh` stays CLEAN with an empty
 baseline. The `check-lib-layering` ratchet guards the write direction.
 
-### The `application/` tier — staged consensus logic
+### The `engine/application/` tier — staged consensus logic
 
-When `application/` (the hexagonal application-level consensus boundary) is
+When `engine/application/` (the hexagonal application-level consensus boundary) is
 populated, it should contain domain-level consensus state predicates and
 use-case invariants that cross multiple models/services — checks that express
 business rules of the chain itself before they migrate to the pure `domain/`
-core. This keeps `application/` as the staged consensus-logic tier between
-orchestration (`app/services`) and pure consensus (`domain/`).
+core. This keeps `engine/application/` as the staged consensus-logic tier between
+orchestration (`engine/services`) and pure consensus (`domain/`).
 
 ---
 
@@ -430,14 +430,14 @@ a number.
 | Item | Status |
 |------|--------|
 | `config/` boot monolith (`boot.c`, `boot_services.c`, `boot_refold_staged.c`) | GATED: `boot.c` and `boot_refold_staged.c` are over the 1500-line hard limit and carried in the shrink-only legacy baseline, so they may only get smaller. Continue only behavior-preserving extractions; larger moves need an explicit seam design. |
-| `domain/` fronted by thin `lib/` wrappers | base58 + bech32 collapsed into `domain/` (landed: callers moved to `domain_encoding_*`, the `lib/` wrappers deleted). `upgrades.c` is intentionally kept as two files — `core/params/src/upgrades.c` (the ex-`lib/consensus/upgrades.c`) owns the `NetworkUpgradeInfo`/`SPROUT_BRANCH_ID`/`EquihashUpgradeInfo` tables, `core/consensus/src/upgrades.c` (the ex-`domain/consensus/upgrades.c`) holds the pure activation-height arithmetic that reads them (correct layering, not duplication). The direction is easy to invert from the names alone — ADR-0002's "moved from" table is the authority. `lib/keys/*` + `core/params/src/params.c` remain a future scoping item. Both `core/` files are under the byte seal — see `core/UNSEAL.md`. | <!-- doc-path-ok: "ex-" names are the pre-ADR-0002 locations, deliberately gone -->
-| Supervisor shape partial | `app/supervisors/` now declares `net`, `chain`, `staged_sync`, `legacy_mirror`, `self_heal` and the three domains (`domains.c`). Every other long-running service registers its own `liveness_contract` in its own file, so nothing is off the tree — what remains in `config/src/boot_services.c` is the ORDER those registrars run in (`boot_register_core_liveness_and_reducer`), which is load-bearing and pinned by ordering asserts in `lib/test/src/test_make_lint_gates.c`. Moving that sequence needs a seam design, not code motion. Coverage is measured by six gates (`check-supervisor-registration`, `check-supervisor-domain`, `check-thread-supervision`, `check-typed-blocker`, `check-blocker-escape-registered`, `check-blocker-remedy`); the residual debt is the shrink-only `tools/scripts/supervisor_baseline.txt` (10) and `tools/lint/thread_supervision_baseline.txt` (11), both documented per entry. |
+| `domain/` fronted by thin `lib/` wrappers | base58 + bech32 collapsed into `domain/` (landed: callers moved to `domain_encoding_*`, the `lib/` wrappers deleted). `upgrades.c` is intentionally kept as two files — `core/params/src/upgrades.c` (the ex-`lib/consensus/upgrades.c`) owns the `NetworkUpgradeInfo`/`SPROUT_BRANCH_ID`/`EquihashUpgradeInfo` tables, `core/consensus/src/upgrades.c` (the ex-`domain/consensus/upgrades.c`) holds the pure activation-height arithmetic that reads them (correct layering, not duplication). The direction is easy to invert from the names alone — ADR-0002's "moved from" table is the authority. `contexts/wallet/modules/keys/*` + `core/params/src/params.c` remain a future scoping item. Both `core/` files are under the byte seal — see `core/UNSEAL.md`. | <!-- doc-path-ok: "ex-" names are the pre-ADR-0002 locations, deliberately gone -->
+| Supervisor shape partial | `engine/supervisors/` now declares `net`, `chain`, `staged_sync`, `legacy_mirror`, `self_heal` and the three domains (`domains.c`). Every other long-running service registers its own `liveness_contract` in its own file, so nothing is off the tree — what remains in `engine/composition/src/boot_services.c` is the ORDER those registrars run in (`boot_register_core_liveness_and_reducer`), which is load-bearing and pinned by ordering asserts in `tests/harness/src/test_make_lint_gates.c`. Moving that sequence needs a seam design, not code motion. Coverage is measured by six gates (`check-supervisor-registration`, `check-supervisor-domain`, `check-thread-supervision`, `check-typed-blocker`, `check-blocker-escape-registered`, `check-blocker-remedy`); the residual debt is the shrink-only `tools/scripts/supervisor_baseline.txt` (10) and `tools/lint/thread_supervision_baseline.txt` (11), both documented per entry. |
 | Controller/Service legacy compat | the file-level E1/E2/typed-blocker baselines carry no NEW violations, but import/sync controllers still carry legacy orchestration and services keep bare-`bool` compatibility APIs alongside `zcl_result`. Subtraction work, not new structure. |
 
 Not tracked as debt (do not re-flag): the storage-adapter seam is
 outbound-only **by design**, not a migration in progress (§6); there is no
-`app/events/` folder — Event stays a concept owned by `lib/event/` + <!-- doc-path-ok: app/events/ deliberately does not exist -->
-`lib/storage/src/event_log.c` + projections, never a physical `app/` folder (§3
+`app/events/` folder — Event stays a concept owned by `engine/modules/event/` + <!-- doc-path-ok: app/events/ deliberately does not exist -->
+`engine/modules/storage/src/event_log.c` + projections, never a physical `app/` folder (§3
 row 7); the sealed `core/` consensus tree is landed — see
 [`docs/adr/0002-sealed-consensus-core.md`](./adr/0002-sealed-consensus-core.md).
 
@@ -451,7 +451,7 @@ Gate mode/status is tracked in §5, not duplicated here.
 - **AR (ActiveRecord)** — the model lifecycle (`AR_*_SAVE`, before/after hooks). Real and lint-enforced.
 - **Cursor** — durable position in `consensus.db` a Job advances; enables crash-safe idempotent replay.
 - **Reducer** — the stage pipeline; the only writer; advance-cursor-or-name-blocker.
-- **Fact log** — `lib/storage/src/event_log.c`; the append-only durable source of truth.
+- **Fact log** — `engine/modules/storage/src/event_log.c`; the append-only durable source of truth.
 - **Projection** — a pure fold over the log into a queryable view; rebuildable, never authoritative.
 - **Witness** — observable post-condition confirming a Condition's remedy actually worked.
 - **Blocker** — a typed, named reason a stage cannot advance (height, missing input, source tried).

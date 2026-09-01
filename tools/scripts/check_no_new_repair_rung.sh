@@ -29,6 +29,8 @@ set -euo pipefail
 
 # shellcheck source=tools/lint/scan_exclusions.sh
 source tools/lint/scan_exclusions.sh
+# shellcheck source=tools/lint/repo_shape.sh
+source tools/lint/repo_shape.sh
 
 BASELINE=tools/scripts/repair_rung_baseline.txt
 [ -f "$BASELINE" ] || touch "$BASELINE"
@@ -56,7 +58,8 @@ is_repair_rung_base() {
     return 1
 }
 
-# First pass: filter the app/ tree to just the repair-rung-named files using
+# First pass: filter every physical application room to just the
+# repair-rung-named files using
 # pure-bash name tests (no fork). Only that small candidate set (~two dozen)
 # needs a content grep for the marker.
 rung_files=()
@@ -64,7 +67,11 @@ while IFS= read -r f; do
     [ -f "$f" ] || continue
     is_repair_rung_base "${f##*/}" || continue
     rung_files+=("$f")
-done < <(find app -type f -name '*.c' "${LINT_FIND_PRUNE_ARGS[@]}" | sort)
+done < <(
+    while IFS= read -r room; do
+        find "$room" -type f -name '*.c' "${LINT_FIND_PRUNE_ARGS[@]}"
+    done < <(repo_shape_dirs app) | sort -u
+)
 
 # One batched `grep -lE` over the candidate set names every file that carries
 # a `// repair-rung-ok:<cite>` marker, instead of a grep fork per candidate.

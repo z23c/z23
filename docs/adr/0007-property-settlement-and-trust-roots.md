@@ -16,14 +16,14 @@
 
 ## Context
 
-`lib/metaverse` gives the node one vocabulary for the things it owns. A
+`contexts/commons/modules/metaverse` gives the node one vocabulary for the things it owns. A
 property is `(kind, root)` where `root` is the underlying object's own
 immutable root as the authoritative model already computes it, and each kind
 names the **one existing model that owns its ownership truth** — the third
 column of `METAVERSE_KIND_TABLE`, read back at runtime by
 `metaverse_kind_authority()`.
-<!-- claim: symbol-present METAVERSE_KIND_TABLE lib/metaverse -->
-<!-- claim: symbol-present metaverse_kind_authority lib/metaverse -->
+<!-- claim: symbol-present METAVERSE_KIND_TABLE contexts/commons/modules/metaverse -->
+<!-- claim: symbol-present metaverse_kind_authority contexts/commons/modules/metaverse -->
 This layer mints no identifier of its own and never becomes an authority; it
 records which authority to ask.
 
@@ -108,10 +108,10 @@ all of them.
 | `contract_swap` | `swap.contract` | `CHAIN_ANCHORED_INCOMPLETE` (see §3) |
 | `character_sheet` | `metaverse.character_sheet` | `CONTENT_ADDRESSED` |
 
-<!-- claim: symbol-present CHAIN_ANCHORED_INCOMPLETE lib/metaverse -->
+<!-- claim: symbol-present CHAIN_ANCHORED_INCOMPLETE contexts/commons/modules/metaverse -->
 
 The table above is the prose form of `METAVERSE_KIND_TABLE` in
-`lib/metaverse/include/metaverse/property_id.h`, whose fourth column carries
+`contexts/commons/modules/metaverse/include/metaverse/property_id.h`, whose fourth column carries
 the settlement class. That table is the authority; if this document and it ever
 disagree, the table is right.
 
@@ -120,7 +120,7 @@ the two above it, and the difference is worth stating. `content` and
 `zcode_package` are content-addressed because a store holds the bytes and the
 id is their hash. A character has **no store at all**: its id is the hash of
 the birth seed plus the rules revision, and the whole sheet is recomputed from
-that seed by `lib/metaverse/src/character_sheet.c`. A node that has never met
+that seed by `contexts/commons/modules/metaverse/src/character_sheet.c`. A node that has never met
 the owner verifies a visiting character by hashing what it was handed. That is
 the mechanism the class names, so the class is honest — and it is also why the
 kind's adapter row is `MV_UNAVAILABLE`: nothing on disk *enumerates* the seeds
@@ -141,9 +141,9 @@ branch is chain state, and no party can quietly reverse it. That is a genuine
 `PROOF_OF_WORK` settlement.
 
 What proof of work does *not* settle is the local record. A row in
-`app/models/include/models/swap_contract.h` is created by `swap_initiate` /
+`engine/models/include/models/swap_contract.h` is created by `swap_initiate` /
 `swap_participate` before any funding exists; `funding_txid` may be all-zero,
-and `app/controllers/src/swap_controller.c` will refuse to settle with *"No
+and `engine/controllers/src/swap_controller.c` will refuse to settle with *"No
 funding outpoint known for this swap"*. The `swap_id` is
 `hex(sha256(initiator+participant+hash))` — computed locally, not a chain
 object. An unfunded swap row is therefore a local declaration wearing a
@@ -170,7 +170,7 @@ default for `contract_swap` is `CHAIN_ANCHORED_INCOMPLETE`, not
 This composes with the machinery already in `property_view.h`, where
 `METAVERSE_EVIDENCE_CHAIN_VALIDATED_LOCAL` must be *earned* by this node and
 nothing upgrades a grade.
-<!-- claim: symbol-present METAVERSE_EVIDENCE_CHAIN_VALIDATED_LOCAL lib/metaverse -->
+<!-- claim: symbol-present METAVERSE_EVIDENCE_CHAIN_VALIDATED_LOCAL contexts/commons/modules/metaverse -->
 
 ### 4. Settlement is orthogonal to evidence, and both are reported
 
@@ -184,7 +184,7 @@ is collapsed into a boolean.
 The same rule already governs freshness: `has_freshness_height` is false for
 every non-chain-anchored authority, because stamping the node's tip height
 beside a claim the tip does not commit is a false freshness claim.
-<!-- claim: symbol-present has_freshness_height lib/metaverse -->
+<!-- claim: symbol-present has_freshness_height contexts/commons/modules/metaverse -->
 Settlement class inherits that discipline exactly — a `LOCAL_DECLARATION`
 record never acquires a chain-derived qualifier.
 
@@ -244,7 +244,7 @@ being misquoted.
   `unavailable_reason` instead of a `list`/`show` pair, so their settlement
   class is a declared property of the design before it is an observable
   property of the catalog output.
-  <!-- claim: symbol-present unavailable_reason lib/metaverse -->
+  <!-- claim: symbol-present unavailable_reason contexts/commons/modules/metaverse -->
 
 ## Open work that would strengthen the claim
 
@@ -258,7 +258,7 @@ Framed as work, not as promises. None of it is scheduled by this ADR.
    part is what turned §3 from a labelling question into a fourth settlement
    class: for `contract_swap` the honest value is *unknown*, permanently, and
    the type had to be able to say so.
-   <!-- claim: symbol-present chainwork lib/metaverse -->
+   <!-- claim: symbol-present chainwork contexts/commons/modules/metaverse -->
 2. **A per-kind minimum depth for actions.** Availability of a transfer or
    spend action on a `PROOF_OF_WORK` record could require a depth floor scaled
    to the record's value, rather than treating one confirmation as settled.

@@ -14,7 +14,7 @@
  * tip=3108561 at harvest time, finalized through height 3108461.
  * 63 entries, every 50,000 blocks from genesis to 3,100,000. Each
  * entry locks 50,000 blocks of history because MAX_REORG_LENGTH < 10
- * (lib/validation/include/validation/main_constants.h). */
+ * (core/modules/validation/include/validation/main_constants.h). */
 static struct checkpoint_entry mainnet_checkpoints[] = {
     { 0, {{0}} },
     { 50000, {{0}} },
@@ -218,7 +218,7 @@ static void init_main_params(void)
      * THE CHANGE. Never invent a hostname — a dead or fabricated seed is
      * strictly worse than a short array, because each depth-0 seed fetch
      * costs a cold node up to 60 s of blocking Tor round-trip
-     * (try_onion_seed_fetch_depth, lib/net/src/connman.c) before it can
+     * (try_onion_seed_fetch_depth, core/modules/net/src/connman.c) before it can
      * move on. Re-verify EVERY entry before each release with an
      * independent Tor client, e.g.
      *   curl --socks5-hostname <tor-socks> http://<host>:80/directory.json
@@ -252,7 +252,7 @@ static void init_main_params(void)
      * ZERO-REBUILD PATH — THE PRIMARY, NOT A FALLBACK. This array is a
      * compiled-in constant that ages the moment it is written; the two
      * runtime sources below outrank it and are consulted FIRST by
-     * run_onion_seed_pass() (lib/net/src/connman.c):
+     * run_onion_seed_pass() (core/modules/net/src/connman.c):
      *   1. ~/.config/zclassic23/onion-seeds — operator-curated, one .onion
      *      per line ('#' comments, blank lines skipped, 32-line cap). An
      *      operator (or a second/third project node) adds a supplier with

@@ -1,0 +1,22 @@
+[Unit]
+Description=Z23 Consensus-State Bundle Export Timer — nightly
+# NOT enabled by installing this file. Enabling is an explicit operator
+# action: review platform/deploy/zclassic23-bundle-export.service's target datadir
+# and ZCL_EXPORT_SECONDARY for this box, then
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now zclassic23-bundle-export.timer
+
+[Timer]
+# 04:00 nightly with up to 15 min jitter — off-peak, and DISJOINT from every
+# other nightly lane on this box (see the .timer comments on the units
+# listed): zclassic23-logrotate ~03:00, zclassic23-simnet-nightly ~03:1x,
+# zclassic23-coverage weekly Sun ~03:3x, zclassic23-replay-canary-nightly
+# 04:30 (+30 min jitter). 04:00+15min always finishes draining before the
+# 04:30 canary slot begins.
+OnCalendar=*-*-* 04:00:00
+RandomizedDelaySec=900
+Persistent=true
+Unit=zclassic23-bundle-export.service
+
+[Install]
+WantedBy=timers.target

@@ -6,7 +6,7 @@
 # through thread_registry_spawn{,_ex}. Short-burst workers joined within the
 # same function, and pthread_attr-using detached-helper wrappers, opt out with
 # a `raw-pthread-ok` marker on the call line or the line immediately above.
-# The registry's own implementation in lib/util/src/thread_registry.c is
+# The registry's own implementation in platform/modules/util/src/thread_registry.c is
 # implicitly skipped. Extracted verbatim from the former inline Makefile
 # recipe for tools/lint/run_lint.sh + standalone use.
 
@@ -17,8 +17,8 @@ ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 cd "$ROOT"
 
 HITS=$(grep -rn 'pthread_create\s*(' lib/ app/ tools/ config/ --include='*.c' \
-    | grep -v 'lib/test/' \
-    | grep -v 'lib/util/src/thread_registry.c' \
+    | grep -v 'tests/harness/include/test/' \
+    | grep -v 'platform/modules/util/src/thread_registry.c' \
     | grep -v 'thread_registry_spawn\|thread_registry_trampoline' \
     | grep -v 'raw-pthread-ok' \
     | while read -r line; do

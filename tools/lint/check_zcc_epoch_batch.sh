@@ -12,8 +12,8 @@ read -r -a EXTRA_CFLAGS <<<"${CFLAGS:-}"
 read -r -a EXTRA_LDFLAGS <<<"${LDFLAGS:-}"
 "${CC_WORDS[@]}" -std=c23 -Wall -Wextra -Werror -pedantic \
     "${EXTRA_CFLAGS[@]}" \
-    -I"$ROOT/tools" -I"$ROOT/lib/base/include" \
-    "$ROOT/tools/zcc_epoch_batch.c" "$ROOT/lib/base/src/safe_alloc.c" \
+    -I"$ROOT/tools" -I"$ROOT/platform/modules/base/include" \
+    "$ROOT/tools/zcc_epoch_batch.c" "$ROOT/platform/modules/base/src/safe_alloc.c" \
     -x c - \
     -o "$WORK/check_zcc_epoch_batch" "${EXTRA_LDFLAGS[@]}" <<'EOF_C'
 #include "zcc_epoch_batch.h"

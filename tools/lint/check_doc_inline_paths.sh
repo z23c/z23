@@ -13,7 +13,7 @@
 #     and ends in a source/doc extension (optionally with a `:LINE` or
 #     `:LINE-LINE` suffix). It resolves if it is a tracked path, a
 #     "/"-anchored suffix of one (so include-style `util/log_macros.h` finds
-#     lib/util/include/util/log_macros.h), or resolves relative to the doc's
+#     platform/modules/util/include/util/log_macros.h), or resolves relative to the doc's
 #     own directory.
 #
 # (2) MODULE-DIRECTORY tokens. Prong (1) only sees paths that end in a file
@@ -24,7 +24,7 @@
 #     was deleted. For any backticked token rooted at a top-level source
 #     directory, this prong resolves the FIRST TWO components (`lib/consensus`,
 #     `app/events`) against the set of tracked directories. Two components
-#     only: deeper module shorthand (`lib/storage/chain_segment`) names a file
+#     only: deeper module shorthand (`engine/modules/storage/chain_segment`) names a file
 #     stem, not a directory, and is not this gate's business.
 #
 # Deliberately out of scope: absolute paths (/etc/..., URL paths), globs and
@@ -49,8 +49,8 @@ DOC_GLOB="${ZCL_DOC_INLINE_PATHS_GLOB:-*.md}"
 
 # Top-level source roots whose two-component children prong (2) resolves.
 # Superset of KNOWN_TOPS in tools/lint/check_no_orphan_placement.sh and of
-# ci_group_for_path() in lib/codeindex/src/codeindex_group.c (their eight, plus
-# application/, apps/, docs/, src/). Those three lists are hand-kept mirrors of
+# ci_group_for_path() in cognition/modules/codeindex/src/codeindex_group.c (their eight, plus
+# engine/application/, apps/, docs/, src/). Those three lists are hand-kept mirrors of
 # each other — adding or removing a top-level directory means editing all of
 # them; see docs/AGENT_TRAPS.md §4. `vendor/` is deliberately absent: submodule
 # content is legitimately missing until `make setup` fetches it.

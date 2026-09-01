@@ -24,7 +24,7 @@ An exact path-set comparison explained the whole disagreement:
 
 ## Change
 
-`config/source_roots.def` and `config/source_prune_dirs.def` now declare the
+`engine/composition/source_roots.def` and `engine/composition/source_prune_dirs.def` now declare the
 root and pruning policy consumed by the POSIX and Windows code-index builders,
 the capability inventory, and the science corpus walk. The index scans each
 declared root, prunes fixtures, and exposes `src`, `packages`, and `examples`

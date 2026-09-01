@@ -5,7 +5,7 @@
  * slicer ever reads it.
  *
  * It emits a network telemetry field that carries no meaning row in
- * lib/util/include/util/telemetry_ontology.def. Pointing the gate at this
+ * platform/modules/util/include/util/telemetry_ontology.def. Pointing the gate at this
  * file through ZCL_TELEMETRY_SCAN_EXTRA_MANIFEST must make it FAIL and name
  * the field; that is the proof the gate is not hollow.
  */

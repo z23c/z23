@@ -13,7 +13,7 @@
  * These handlers parse request JSON and render reply JSON. Every decision —
  * resolution, the dependency lock, verification, the confined build, the
  * atomic install, the generation log — belongs to the single lifecycle state
- * machine in app/services/src/package_lifecycle*.c, which is also the only
+ * machine in engine/services/src/package_lifecycle*.c, which is also the only
  * thing that touches disk. Nothing built or downloaded is ever loaded into
  * this process. */
 

@@ -2,7 +2,7 @@
 
 ## What this demonstrates
 
-`examples/09_seed_replay.c` opens a `seed_tape_t` (lib/sim/include/sim/seed_tape.h)
+`docs/examples/09_seed_replay.c` opens a `seed_tape_t` (engine/modules/sim/include/sim/seed_tape.h)
 with a fixed 64-bit seed, drives a tiny recording — a handful of RNG draws, clock
 advances, and injected peer-message events — then snapshots the live tape two
 ways at the same instant: a plain `.bin` file via `seed_tape_save()`, and a
@@ -17,7 +17,7 @@ recording produced — the mechanism behind "every bug becomes a 64-bit seed."
 make -C examples && ./examples/bin/09_seed_replay
 ```
 
-(The examples tree links against the same `lib/sim`, `lib/platform`, etc.
+(The examples tree links against the same `engine/modules/sim`, `platform/modules/platform`, etc.
 objects the main build produces; run `make -j$(nproc)` first if this is a
 clean checkout.)
 
@@ -58,18 +58,18 @@ Exit code 0 on success; nonzero with an `stderr` reason on any mismatch.
 
 ## Key APIs used
 
-- `lib/sim/include/sim/seed_tape.h` — `seed_tape_open`, `seed_tape_install`,
+- `engine/modules/sim/include/sim/seed_tape.h` — `seed_tape_open`, `seed_tape_install`,
   `seed_tape_advance`, `seed_tape_inject`, `seed_tape_save`, `seed_tape_load`,
   `seed_tape_next_event`, `seed_tape_uninstall`, `seed_tape_close`
-- `lib/sim/include/sim/postmortem.h` — `postmortem_capture_write`,
+- `engine/modules/sim/include/sim/postmortem.h` — `postmortem_capture_write`,
   `postmortem_capsule_load_tape`
-- `lib/platform/include/platform/rng.h` — `rng_u64` (reads through the
+- `platform/modules/platform/include/platform/rng.h` — `rng_u64` (reads through the
   installed tape while a tape is installed)
 
 ## Production counterpart
 
 Production never opens a seed tape by hand — a live node's boot path
-(`config/src/boot.c`) wires a real tape plus `postmortem_install()` at process
+(`engine/composition/src/boot.c`) wires a real tape plus `postmortem_install()` at process
 start, so a `SIGSEGV`/`SIGABRT` handler calls `postmortem_capture_write()`
 automatically, with no operator action needed. An operator (or Claude, via the
 native command surface) inspects capsules with `z23 ops postmortem list`

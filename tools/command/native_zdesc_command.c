@@ -4,8 +4,8 @@
  * descriptors (docs/spec/sovereign-identity-layer.md, "A1"). A
  * descriptor is a zid_doc whose body carries the service's v3 hostname,
  * its introduction points, and the moment its validity opens (body tag
- * "ZIDD", lib/zid/include/zid/zdesc.h). Publishing stores the canonical
- * doc wire as a content-addressed blob (lib/vcs/include/vcs/blob_store.h)
+ * "ZIDD", contexts/wallet/modules/zid/include/zid/zdesc.h). Publishing stores the canonical
+ * doc wire as a content-addressed blob (contexts/commons/modules/vcs/include/vcs/blob_store.h)
  * so it moves over the already-frozen package swarm with no new message.
  *
  * ADDRESSING: a descriptor is filed under the BLINDED record key for a
@@ -22,7 +22,7 @@
  * chain-anchored — each carries chain_anchored:false and
  * verified_against:"supplied_key" so the claim is machine-readable
  * rather than only prose. The single seam that will close this lives in
- * lib/vcs/src/zdesc_swarm.c (CHAIN-BINDING SEAM).
+ * contexts/commons/modules/vcs/src/zdesc_swarm.c (CHAIN-BINDING SEAM).
  *
  * Secret hygiene (publish): the seed file must be exactly 64 hex chars
  * with 0600/0400 perms; the seed is memory_cleanse'd after use and is
@@ -70,7 +70,7 @@ static const char *zdc_input_str(const struct json_value *input,
 
 /* Accept a number either typed (JSON_INT) or as a decimal string.
  *
- * The registry's input-key type rule (lib/kernel/src/command_registry.c)
+ * The registry's input-key type rule (engine/modules/kernel/src/command_registry.c)
  * only admits JSON_INT for keys it names explicitly and demands a
  * string for everything else, so `--seq=5` inside --input='{...}' is
  * refused INVALID_INPUT for any key without such a rule. Taking both
@@ -731,7 +731,7 @@ void zcl_native_handle_zdesc_publish(const struct zcl_command_request *request,
     }
 
     /* The global directory is what the node's signed onion-peer
-     * discovery source reads (config/src/boot_services.c), so an
+     * discovery source reads (engine/composition/src/boot_services.c), so an
      * in-node publish feeds discovery immediately. */
     struct zdesc_directory *dir = zdesc_directory_global();
     uint8_t root[32], pubkey[32];

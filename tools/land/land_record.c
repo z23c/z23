@@ -9,7 +9,7 @@
  * The test group checks exactly that property.
  *
  * There is no private integer packer and no private hex codec here. Both
- * live in lib/base (serialize_le.h, hex.h), both are `static inline` so they
+ * live in platform/modules/base (serialize_le.h, hex.h), both are `static inline` so they
  * cost this tool nothing at link time, and using them buys the one thing a
  * canonical format actually needs: exactly one implementation of "what do
  * these bytes mean", shared with everything else in this tree that writes
@@ -81,7 +81,7 @@ bool land_gate_outcome_parse(const char *text, enum land_gate_outcome *out)
 /* ── hex ──────────────────────────────────────────────────────────────
  * Named wrappers, not a second codec. A sha has ONE spelling here — exactly
  * 40 lowercase hex digits — so a short or uppercase argument is a refusal
- * rather than a silently different commit, and lib/base's canonical decoder
+ * rather than a silently different commit, and platform/modules/base's canonical decoder
  * is what enforces it. */
 
 bool land_sha_parse(const char *hex, uint8_t out[LAND_SHA_BYTES])

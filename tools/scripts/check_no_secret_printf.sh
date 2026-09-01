@@ -29,14 +29,14 @@ cd "$ROOT"
 # shellcheck source=tools/lint/scan_exclusions.sh
 source tools/lint/scan_exclusions.sh
 
-# Directories to scan — app + config + lib + tools, excluding vendor,
+# Directories to scan — the five source authorities plus tools, excluding vendor,
 # tests, and the audit corpus itself (which contains "priv" by design).
 # Overridable via ZCL_SECRET_PRINTF_SCAN_DIRS (space-separated) so the
 # lint-gate self-test can point the gate at an EMPTY dir and prove the
 # non-empty-floor preflight fires (exit 2).
-read -r -a SCAN_DIRS <<< "${ZCL_SECRET_PRINTF_SCAN_DIRS:-app config lib tools}"
+read -r -a SCAN_DIRS <<< "${ZCL_SECRET_PRINTF_SCAN_DIRS:-core engine contexts cognition platform tools}"
 EXCLUDE_PATHS=(
-    "lib/test"
+    "tests/harness"
     "tools/scripts/check_no_secret_printf.sh"
     "vendor"
 )

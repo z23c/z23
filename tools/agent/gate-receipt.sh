@@ -39,7 +39,7 @@
 # DOES NOT DEFEND: a gate run in a doctored environment (patched gate script,
 #   fixture stub). The receipt records what ran, not that what ran was honest.
 # The upgrade that would close the first gap is an out-of-band signature
-# (ssh-keygen -Y sign, as deploy/promotion-receipts.jsonl already does) with a
+# (ssh-keygen -Y sign, as platform/deploy/promotion-receipts.jsonl already does) with a
 # key the lane cannot read. On this host the lane and the orchestrator share a
 # user, so that buys nothing today; it buys everything once lanes run as
 # separate users or on separate machines.
@@ -92,11 +92,11 @@ build_sha3_helper() {
     local out="$1"
     mkdir -p "$(dirname "$out")"
     "${CC:-cc}" -std=c23 -O2 -Wall -Wextra -Werror \
-        -I"$REPO/lib/sha3/include" -I"$REPO/lib/crypto/include" \
-        -I"$REPO/lib/support/include" -I"$REPO/lib/base/include" \
+        -I"$REPO/platform/modules/sha3/include" -I"$REPO/core/modules/crypto/include" \
+        -I"$REPO/platform/modules/support/include" -I"$REPO/platform/modules/base/include" \
         -o "$out" \
         "$REPO/tools/agent/agent_sha3.c" \
-        "$REPO/lib/sha3/src/sha3.c"
+        "$REPO/platform/modules/sha3/src/sha3.c"
 }
 
 while [ "$#" -gt 0 ]; do

@@ -1,7 +1,7 @@
 # check_status_reason_single baseline — files still carrying an inline
 # operator-verdict ladder instead of selecting an enum node_status_reason and
 # reading status/summary/operator_needed back from the one policy table
-# (app/controllers/include/controllers/operator_needed_policy.def).
+# (engine/controllers/include/controllers/operator_needed_policy.def).
 #
 # Format: <path> <count>.  COUNTS MAY ONLY SHRINK.
 #
@@ -26,4 +26,4 @@
 # instead, then lower (or delete) the number here.
 #
 # Regenerate: ZCL_LINT_MODE=UPDATE tools/lint/check_status_reason_single.sh
-app/controllers/src/agent_diagnose_controller.c 1
+cognition/controllers/src/agent_diagnose_controller.c 1

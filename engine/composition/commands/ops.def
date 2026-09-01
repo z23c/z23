@@ -1,0 +1,816 @@
+/* Bounded diagnosis and node operations (contract §4).
+ *
+ * Same rule as core.def: a READ-ONLY leaf with a genuine live handler binds
+ * zcl_native_bridge_command; jobs, recovery mutations, and reads without a
+ * bridged handler are PLANNED (fail-closed, exit 3). */
+
+ZCL_COMMAND_READY_READ(
+    "ops.health", "ops", "", "Health rollup",
+    "Every registered health check with its pass/fail and the overall serving "
+    "verdict, read live from the running node at call time.", 0,
+    "health,checks,status,rollup", "zcl.command.empty_input.v1",
+    "zcl.health.v1", "", "", "z23 ops health",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_PUBLIC,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_CHAIN_READ, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_bridge_command)
+
+ZCL_COMMAND_READY_READ(
+    "ops.diagnose", "ops", "", "Operator diagnosis",
+    "A triage summary — the current primary blocker, likely cause, and "
+    "suggested next action — synthesized live from node state at call time.", 0,
+    "diagnose,triage,operator,summary", "zcl.command.empty_input.v1",
+    "zcl.ops_diagnose.v1", "", "", "z23 ops diagnose",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_CHAIN_READ, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_bridge_command)
+
+ZCL_COMMAND_READY_READ(
+    "ops.lanes", "ops", "", "Lanes",
+    "The known worktree/deploy lanes and each one's role and state, read from "
+    "the node's lane view at call time.", 0,
+    "lanes,worktree,deploy,dev", "zcl.command.empty_input.v1",
+    "zcl.ops_lanes.v1", "", "", "z23 ops lanes",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_CHAIN_READ, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_bridge_command)
+
+ZCL_COMMAND_BRANCH("ops.jobs", "ops", "Job lifecycle",
+                   ZCL_COMMAND_LAYER_OPS)
+ZCL_COMMAND_PLANNED_READ(
+    "ops.jobs.list", "ops.jobs", "", "List asynchronous jobs",
+    "Will list every asynchronous job with its state and progress from the "
+    "native job registry; that registry is not built yet, so the leaf fails "
+    "closed today.", ZCL_COMMAND_LIST_BUDGET,
+    "jobs,list,async", "zcl.command.empty_input.v1", "zcl.jobs.v1", "", "",
+    "z23 ops jobs list",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_DEV_STATE_READ,
+    "the native job registry is a Wave 2.2 deliverable")
+
+ZCL_COMMAND_READY_READ(
+    "ops.logs", "ops", "", "Log regex tail",
+    "The most recent node.log lines matching the pattern within the window, "
+    "newest-scanned-first via a server-side reverse tail; bounded by max_lines, "
+    "not the full log.", ZCL_COMMAND_LIST_BUDGET,
+    "logs,tail,grep,node.log", "zcl.ops_logs.input.v1", "zcl.ops_logs.v1",
+    "pattern,since_secs,max_lines,level", "pattern",
+    "z23 ops logs --pattern='blocker'",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_CHAIN_READ, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_bridge_command)
+
+ZCL_COMMAND_READY_READ(
+    "ops.timeline", "ops", "", "Events",
+    "Recent operational events (boot stages, blocker fires, deploys) newest "
+    "first from the node's in-memory event ring; a bounded recent window, not "
+    "full history.", ZCL_COMMAND_LIST_BUDGET,
+    "timeline,events,history", "zcl.command.empty_input.v1",
+    "zcl.ops_timeline.v1", "", "", "z23 ops timeline",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_CHAIN_READ, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_bridge_command)
+
+ZCL_COMMAND_READY_READ(
+    "ops.metrics", "ops", "", "Metrics",
+    "The node's current counters and gauges sampled live at call time; "
+    "instantaneous values (counters are cumulative since boot), not a "
+    "time series.", ZCL_COMMAND_LIST_BUDGET,
+    "metrics,counters,gauges", "zcl.command.empty_input.v1",
+    "zcl.ops_metrics.v1", "", "", "z23 ops metrics",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_CHAIN_READ, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_bridge_command)
+
+ZCL_COMMAND_READY_READ(
+    "ops.state", "ops", "", "Subsystem state",
+    "One subsystem's introspection snapshot from the running node's diagnostics "
+    "registry (the dumpstate primitive); consistent for that subsystem at "
+    "capture time, shape varies per subsystem. Pass explain=true on a "
+    "subsystem with a field ontology to have each field judged against its "
+    "healthy range instead of returned as a bare number.", 0,
+    "state,subsystem,dump,dumpstate,introspect,explain",
+    "zcl.ops_state.input.v1",
+    "zcl.ops_state.v1", "subsystem,key,explain", "subsystem",
+    "z23 ops state --subsystem=reducer_frontier",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_CHAIN_READ, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_ops_state)
+
+/* The discovery half of ops.state. ops.state requires a subsystem name and
+ * fails MISSING_SUBSYSTEM without one, so an agent that does not already know
+ * the names had no typed way to learn them — only the legacy flat
+ * `z23 statecatalog` shim, or reading diagnostics_dumpers.def out of a
+ * source tree a release binary does not carry. Same catalog, one renderer
+ * (diag_rpc_statecatalog); node-free, because the registry is compiled in. */
+ZCL_COMMAND_READY_READ(
+    "ops.statecatalog", "ops", "", "State subsystem catalog",
+    "Every subsystem `ops state` accepts, from the in-binary diagnostics "
+    "registry. With no input: `count` and the COMPLETE `names` list, which "
+    "is what you need to call ops state at all and is never truncated. Add "
+    "subsystem=<name> for that one descriptor in full (description, owner "
+    "file, state class, freshness, cost, accepted key forms, owning test), "
+    "or limit (default 5, max 5) with a zero-based page for a window of "
+    "descriptors — a window drops `names`, since the whole catalog cannot "
+    "fit one response and a silently clipped catalog would read as 'that "
+    "subsystem does not exist'. Node-free — the registry is compiled into "
+    "the binary, so this answers with the node stopped, unlike ops state.",
+    ZCL_COMMAND_LIST_BUDGET,
+    "statecatalog,subsystems,catalog,dumpstate,discover,state,list",
+    "zcl.ops_statecatalog.input.v1", "zcl.ops_statecatalog.v1",
+    "subsystem,limit,page", "",
+    "z23 ops statecatalog",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_ops_statecatalog)
+
+ZCL_COMMAND_READY_READ(
+    "ops.selftest", "ops", "", "Self-test",
+    "A node-free sweep of the in-binary command catalog for static "
+    "well-formedness defects (pass/fail/skip counts and each failure's path and "
+    "reason); complete over every catalog leaf.", 0,
+    "selftest,self-test,registry,contract,smoke", "zcl.command.empty_input.v1",
+    "zcl.ops_selftest.v1", "", "", "z23 ops selftest",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_CHAIN_READ, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_ops_selftest)
+
+/* Operator-UX diagnostics live under the existing ops.debug branch — a new
+ * top-level ops.* branch would push the ops menu over its 1600-byte budget
+ * (ZCL_COMMAND_BRANCH_BUDGET; proven by test_branch_menus_shallow). The
+ * bare-root aliases (`z23 explain sync`, `z23 profile`) are
+ * the primary invocation surface, so the canonical path barely shows. */
+ZCL_COMMAND_BRANCH("ops.debug", "ops", "Diagnostics",
+                   ZCL_COMMAND_LAYER_OPS)
+ZCL_COMMAND_READY_READ(
+    "ops.debug.explain", "ops.debug", "explain,ops.explain",
+    "Explain a subsystem in plain prose",
+    "A plain-prose explanation of one subsystem (sync, blockers, health, …) "
+    "generated from live node state at call time; narrative, not a stable "
+    "machine schema.", 0,
+    "explain,sync,blockers,health,why,diagnose,prose",
+    "zcl.ops_explain.input.v1", "zcl.ops_explain.v1", "topic", "topic",
+    "z23 explain sync",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_CHAIN_READ, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_ops_explain)
+
+ZCL_COMMAND_READY_READ(
+    "ops.debug.meaning", "ops.debug", "meaning,ops.meaning",
+    "What a telemetry field means, and which report answers a question",
+    "The field-level ontology for network telemetry read straight out of the "
+    "binary: per field its unit, a machine-evaluable healthy range, what an "
+    "unhealthy value implies and the next command; plus the question index "
+    "that routes an operator question to the one report that answers it. "
+    "Static build data, identical on every node, and answered with NO running "
+    "node — which is exactly the case where the meaning is needed most.",
+    ZCL_COMMAND_LIST_BUDGET,
+    "meaning,ontology,field,semantics,healthy,range,units,question,ask,which,"
+    "telemetry,explain,handshake,peer,why",
+    "zcl.ops_meaning.input.v1", "zcl.ops_meaning.v1",
+    /* No positional key: all three inputs are genuinely optional (a bare call
+     * returns the whole table), and positional == handler-required in the
+     * generated contract. */
+    "subsystem,name,question", "",
+    "z23 meaning --name=pre_handshake_disconnects",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_CHAIN_READ, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_ops_meaning)
+
+ZCL_COMMAND_READY_READ(
+    "ops.debug.profile", "ops.debug", "profile,ops.profile",
+    "Sample thread CPU + stage rates",
+    "Per-thread CPU and wait-channel samples plus stage advance rates gathered "
+    "over `seconds` of live sampling; a wall-clock snapshot of that window, not "
+    "cumulative.", ZCL_COMMAND_LIST_BUDGET,
+    "profile,cpu,threads,bottleneck,perf,wchan,sample",
+    "zcl.ops_profile.input.v1", "zcl.ops_profile.v1", "seconds,top_n",
+    "seconds", "z23 profile 3",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_CHAIN_READ, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_ops_profile)
+
+ZCL_COMMAND_READY_READ(
+    "ops.debug.producer", "ops.debug", "ops.producer.status",
+    "Read a producer datadir's fold progress + receipt",
+    "One producer datadir's fold cursor, receipt, and anchor ETA read from "
+    "progress.kv (not process memory or human logs); reflects successful "
+    "durable apply samples and names the compiled anchor as its target.", 0,
+    "producer,mint,anchor,receipt,fold,progress,eta",
+    "zcl.ops_producer_status.input.v1", "zcl.ops_producer_status.v1",
+    "datadir", "datadir",
+    "z23 ops producer status -datadir=/home/you/.zclassic-c23-mint",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_CHAIN_READ, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_ops_producer_status)
+
+ZCL_COMMAND_READY_READ(
+    "ops.debug.rom", "ops.debug", "ops.rom", "ROM compilation fold progress",
+    "Live ROM-compile-fold telemetry (dumpstate rom_compile) read from THIS "
+    "running node at call time — height/target/percent/rate/ETA, the eight "
+    "reducer stages' step_us_ewma, the ROM pipeline rows (fold -> seal -> "
+    "manifest -> bundle export), and the layer ladder; when no fold is "
+    "active this is the steady-state ladder, not an error. CLI-only argv "
+    "inputs (intercepted before dispatch, not part of the machine JSON "
+    "contract): --watch redraws in place until interrupted, --once renders a "
+    "single frame, --interval=<secs> sets the poll cadence (clamped 1..60s), "
+    "and --datadir=<dir> renders a FOREIGN offline producer datadir read-only "
+    "(progress.kv + segments + mint-progress.log) instead of this node.",
+    ZCL_COMMAND_LIST_BUDGET,
+    "rom,compile,fold,progress,checkpoint,anchor,layers,ascii,mint",
+    "zcl.command.empty_input.v1", "zcl.rom_compile.v1", "", "",
+    "z23 ops rom",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_CHAIN_READ, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_ops_rom)
+
+ZCL_COMMAND_READY_READ(
+    "ops.debug.backtrace", "ops.debug", "", "Dump every thread's backtrace",
+    "A captured backtrace for every live thread plus the log path it was "
+    "written to, dumped by the running node at call time; a point-in-time "
+    "snapshot of all threads.", ZCL_COMMAND_LIST_BUDGET,
+    "backtrace,threads,stacks,hang,deadlock,debug", "zcl.command.empty_input.v1",
+    "zcl.ops_debug_backtrace.v1", "", "", "z23 ops debug backtrace",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_CHAIN_READ, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_ops_debug_backtrace)
+
+ZCL_COMMAND_READY_READ(
+    "ops.debug.bundle", "ops.debug", "", "Write one-shot debug bundle JSON",
+    "One JSON document with every registered state dumper, the build "
+    "identity, and the supervisor stall summary, written by the running "
+    "node to <datadir>/debug-bundle-<utc>.json at call time; the same "
+    "bundle is also written automatically (rate-limited) when the "
+    "supervisor detects a stall.", ZCL_COMMAND_LIST_BUDGET,
+    "debug,bundle,diagnostics,postmortem,state,capture,stall",
+    "zcl.command.empty_input.v1", "zcl.ops_debug_bundle.v1", "", "",
+    "z23 ops debug bundle",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_CHAIN_READ, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_ops_debug_bundle)
+
+/* Operator rollup dashboards live under ops.debug (not new top-level ops.*
+ * children) for the same reason ops.debug.explain/profile do: the top-level
+ * ops menu is within ~70 bytes of ZCL_COMMAND_BRANCH_BUDGET (proven by
+ * test_branch_menus_shallow), so a new top-level branch would overflow it.
+ * Each leaf carries short bare-root aliases (kpi, milestone, selfheal) so the
+ * deep canonical path barely shows in practice. */
+ZCL_COMMAND_BRANCH("ops.debug.dash", "ops.debug", "Operator rollup dashboards",
+                   ZCL_COMMAND_LAYER_OPS)
+
+ZCL_COMMAND_READY_READ(
+    "ops.debug.dash.slo", "ops.debug.dash", "ops.slo",
+    "External public-node SLO evidence",
+    "A bounded, node-free fold of complete rows from the external uptime "
+    "probe ledger. Reports per-instance reachability, oracle gap, longest "
+    "outage, sample age, window coverage, parse defects and capacity limits. "
+    "Reporter-only: it grants no node authority and refuses an OK verdict "
+    "for malformed evidence, stale evidence, or an incomplete time window.",
+    ZCL_COMMAND_LIST_BUDGET,
+    "slo,uptime,reachability,evidence,external,ledger,availability",
+    "zcl.ops_slo.input.v1", "zcl.slo_evidence.v1",
+    "instance,window_hours", "",
+    "z23 ops slo --window_hours=24",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_LATENCY_FAST,
+    ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_ops_slo)
+
+ZCL_COMMAND_READY_READ(
+    "ops.debug.dash.kpi", "ops.debug.dash", "kpi,ops.kpi",
+    "One-shot subsystem KPI dashboard",
+    "Every subsystem KPI — height, peers, sync, validation, health, mempool, "
+    "wallet, chain, network — read live in one shot; each nested field is the "
+    "raw result of the corresponding read RPC at call time.",
+    ZCL_COMMAND_LIST_BUDGET,
+    "kpi,dashboard,pulse,overview,subsystems", "zcl.command.empty_input.v1",
+    "zcl.ops_kpi.v1", "", "", "z23 kpi",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_CHAIN_READ, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_bridge_command)
+
+ZCL_COMMAND_READY_READ(
+    "ops.debug.dash.snapshot", "ops.debug.dash", "ops.snapshot",
+    "Operator snapshot payload",
+    "The exact native operator snapshot: bounded target-owned component "
+    "snapshots, capture coherence, height/hash/work evidence, typed blockers, "
+    "invariants, and the summary projection, forwarded as captured.", 0,
+    "operator,snapshot,coherence,invariants,evidence",
+    "zcl.command.empty_input.v1",
+    "zcl.operator_snapshot.v3", "", "", "z23 ops snapshot",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_CHAIN_READ, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_bridge_command)
+
+ZCL_COMMAND_READY_READ(
+    "ops.debug.dash.summary", "ops.debug.dash", "ops.summary",
+    "Fail-closed operator summary",
+    "The operator summary projection — the `summary` sub-object of the native "
+    "operator snapshot — a one-glance never-optimistic verdict read live at "
+    "call time.", 0,
+    "operator,summary,verdict,rollup", "zcl.command.empty_input.v1",
+    "zcl.operator_summary.v1", "", "", "z23 ops summary",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_CHAIN_READ, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_bridge_command)
+
+ZCL_COMMAND_READY_READ(
+    "ops.debug.dash.milestone", "ops.debug.dash", "milestone,ops.milestone",
+    "Version milestone progress",
+    "Node-computed progress toward the next version milestone — "
+    "systems/goals/subgoals bars and MVP acceptance criteria — computed live "
+    "at call time.", 0,
+    "milestone,mvp,progress,version,goals", "zcl.command.empty_input.v1",
+    "zcl.milestone.v1", "", "", "z23 milestone",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_CHAIN_READ, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_bridge_command)
+
+ZCL_COMMAND_READY_READ(
+    "ops.debug.dash.mirror", "ops.debug.dash", "ops.mirror",
+    "zclassicd mirror lockstep",
+    "Canonical z23/zclassicd mirror lockstep status — both heights and "
+    "hashes, lag, reachability, running state, and catch-up counters — read "
+    "live at call time.", 0,
+    "mirror,lockstep,zclassicd,lag,parity", "zcl.command.empty_input.v1",
+    "zcl.mirror_status.v2", "", "", "z23 ops mirror",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_CHAIN_READ, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_bridge_command)
+
+ZCL_COMMAND_READY_READ(
+    "ops.debug.dash.selfheal", "ops.debug.dash", "selfheal,ops.selfheal",
+    "Self-heal recovery counters",
+    "Self-heal UTXO recovery counters — tx-index hits, bounded scan "
+    "hits/exhaustion, total scanned blocks, and the active scan depth limit — "
+    "sampled live at call time.", 0,
+    "selfheal,recovery,utxo,scan,counters", "zcl.command.empty_input.v1",
+    "zcl.self_heal_stats.v1", "", "", "z23 ops selfheal",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_CHAIN_READ, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_bridge_command)
+
+/* Free-tier P2P delivery of the ROM/sync artifacts (docs/ROM_DELIVERY.md):
+ * the policy layer's operator surface (engine/controllers/src/rom_seed_controller.c,
+ * core/modules/net/include/net/rom_seed_policy.h, core/modules/net/include/net/rom_seed_ledger.h).
+ * Nested under `ops.debug` (not a new top-level `ops.*` branch) for the same
+ * reason ops.debug.dash is: the top-level ops menu is within ~70 bytes of
+ * ZCL_COMMAND_BRANCH_BUDGET (proven by test_branch_menus_shallow, see the
+ * comment above ops.debug.dash), so a new top-level branch overflows it.
+ * Named `ops.debug.rom_seed.*` rather than colliding with `ops.debug.rom` —
+ * that path is the unrelated ROM *compile*-fold telemetry subsystem despite
+ * the shared "ROM" word; the underscore form also matches the sibling
+ * seed/fetch lanes' dumpstate subsystem names (`rom_seed`, `rom_fetch`). */
+ZCL_COMMAND_BRANCH("ops.debug.rom_seed", "ops.debug", "ROM-seed policy",
+                   ZCL_COMMAND_LAYER_OPS)
+ZCL_COMMAND_READY_READ(
+    "ops.debug.rom_seed.status", "ops.debug.rom_seed", "",
+    "ROM-seed policy + live counters",
+    "The live seeding policy (enabled, bandwidth/concurrency caps, "
+    "generosity-boost window), upload counters, and local serve-log ledger "
+    "availability, read from this node's in-process policy state at call "
+    "time.", 0,
+    "rom,seed,policy,bandwidth,generosity,status",
+    "zcl.command.empty_input.v1", "zcl.rom_seed_status.v1", "", "",
+    "z23 ops debug rom_seed status",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_PUBLIC,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_rom_seed_status)
+ZCL_COMMAND_READY_COMMAND(
+    "ops.debug.rom_seed.enable", "ops.debug.rom_seed", "",
+    "Enable ROM-seed serving",
+    "The settled policy+counters state after turning ROM-seed serving on; "
+    "idempotent, so enabling an already-enabled policy returns the same "
+    "settled state.", 0,
+    "rom,seed,enable,policy",
+    "zcl.command.empty_input.v1", "zcl.rom_seed_status.v1", "", "",
+    "z23 ops debug rom_seed enable",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_NODE,
+    ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    zcl_native_handle_rom_seed_enable)
+ZCL_COMMAND_READY_COMMAND(
+    "ops.debug.rom_seed.disable", "ops.debug.rom_seed", "",
+    "Disable ROM-seed serving",
+    "The settled policy+counters state after turning ROM-seed serving off "
+    "(new uploads are refused; the caller is expected to consult "
+    "rom_seed_policy_admit_upload on its existing serve path); idempotent, "
+    "so disabling an already-disabled policy returns the same settled "
+    "state.", 0,
+    "rom,seed,disable,policy",
+    "zcl.command.empty_input.v1", "zcl.rom_seed_status.v1", "", "",
+    "z23 ops debug rom_seed disable",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_NODE,
+    ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    zcl_native_handle_rom_seed_disable)
+ZCL_COMMAND_READY_READ(
+    "ops.debug.rom_seed.artifacts", "ops.debug.rom_seed", "",
+    "List served ROM artifacts + seed stats",
+    "Every artifact this node has served at least one chunk of, with "
+    "bytes/chunks/distinct-peer totals folded from the local serve-log "
+    "ledger; the seed engine's artifact registry (digests, names) joins in "
+    "once that lane is wired, reported honestly absent until then.",
+    ZCL_COMMAND_LIST_BUDGET,
+    "rom,seed,artifacts,ledger,stats",
+    "zcl.command.empty_input.v1", "zcl.rom_seed_artifacts.v1", "", "",
+    "z23 ops debug rom_seed artifacts",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_PUBLIC,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_rom_seed_artifacts)
+ZCL_COMMAND_READY_COMMAND(
+    "ops.debug.rom_seed.publish", "ops.debug.rom_seed", "",
+    "Publish this node's starter artifacts to the swarm",
+    "The now-served ROM artifact catalog after a single idempotent re-scan of "
+    "<datadir> + <datadir>/bundles/: every consensus-state bundle and header-"
+    "chain seed already on disk is (re)registered with the seeder — carrying "
+    "the artifact-kind the discovery quorum requires — so a fresh peer's "
+    "directory listing advertises a usable manifest. Publishes only content-"
+    "verified files already present (produces none; the standing exporter owns "
+    "production, dumpstate bundle_exporter); a corrupt/wrong-kind file is "
+    "refused and never offered. Reflects the registry at call time.",
+    ZCL_COMMAND_LIST_BUDGET,
+    "rom,seed,publish,register,bundle,starter,serve,swarm",
+    "zcl.command.empty_input.v1", "zcl.rom_seed_publish.v1", "", "",
+    "z23 ops debug rom_seed publish",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_NODE,
+    ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    zcl_native_handle_rom_seed_publish)
+
+/* ROM-fetch engine (the CLIENT half of docs/ROM_DELIVERY.md;
+ * engine/controllers/src/rom_fetch_controller.c, core/modules/net/include/net/rom_fetch.h).
+ * Same `ops.debug` nesting as ops.debug.rom_seed (top-level ops is at its
+ * ZCL_COMMAND_BRANCH_BUDGET ceiling). The `bundle` leaf takes the expected
+ * digests as EXPLICIT operator input — the operator commits to the content
+ * before a byte is fetched; the engine downloads + content-verifies and
+ * leaves the file in the datadir. It is NOT an activation path: install
+ * funnels only through -install-consensus-bundle (the unified installer's
+ * RECEIPT / CHECKPOINT_CONTENT authority). */
+ZCL_COMMAND_BRANCH("ops.debug.rom_fetch", "ops.debug", "ROM-fetch engine",
+                   ZCL_COMMAND_LAYER_OPS)
+ZCL_COMMAND_READY_READ(
+    "ops.debug.rom_fetch.status", "ops.debug.rom_fetch", "",
+    "ROM-fetch engine status",
+    "The fetch engine's last attempt (peer, filename, size, chunks done, "
+    "ok/fail + detail), in-progress flag, and cumulative "
+    "attempts/successes/failures/bytes-installed, read live from this "
+    "node's in-process fetch state at call time.", 0,
+    "rom,fetch,download,bundle,status",
+    "zcl.command.empty_input.v1", "zcl.rom_fetch_status.v1", "", "",
+    "z23 ops debug rom_fetch status",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_PUBLIC,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_rom_fetch_status)
+ZCL_COMMAND_READY_COMMAND(
+    "ops.debug.rom_fetch.bundle", "ops.debug.rom_fetch", "",
+    "Fetch + verify a ROM artifact from a peer",
+    "Downloads a ROM artifact (e.g. the consensus-state bundle) from a "
+    "seeding peer's file service and verifies it BY CONTENT against the "
+    "digests supplied here — the operator commits to (root, whole_sha3, "
+    "size) before a byte is requested; any whole-file mismatch discards "
+    "the download (no partial trust). 'peer' may be a comma-separated "
+    "host list for the parallel multi-seeder scheduler. The verified "
+    "file lands at <out_dir>/<filename> (default: the node datadir); it "
+    "is NOT activated — install funnels only through "
+    "-install-consensus-bundle. Blocks for the duration of the download.", 0,
+    "rom,fetch,download,bundle,verify",
+    "zcl.rom_fetch_bundle.input.v1", "zcl.rom_fetch_bundle.result.v1",
+    "peer,port,root,whole_sha3,size,filename,out_dir", "",
+    "z23 ops debug rom_fetch bundle --input='{\"peer\":\"203.0.113.7\",\"root\":\"<64hex>\",\"whole_sha3\":\"<64hex>\",\"size\":\"538507264\"}'",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_NODE,
+    ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_BACKGROUND, ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_NONE,
+    zcl_native_handle_rom_fetch_bundle)
+
+ZCL_COMMAND_BRANCH("ops.mesh", "ops", "Mesh",
+                   ZCL_COMMAND_LAYER_OPS)
+ZCL_COMMAND_READY_READ(
+    "ops.mesh.identity", "ops.mesh", "ops.machine.status,machine.status",
+    "Report this machine's mesh identity readiness",
+    "A redacted live-daemon capsule of exact source and binary identity, "
+    "platform/environment, stable public Noise fingerprint, encrypted "
+    "transport, authenticated DHT identity, confinement, hot-swap support, "
+    "and named blockers. It creates no identity and grants no pairing or "
+    "remote-control authority.",
+    ZCL_COMMAND_RESULT_BUDGET,
+    "mesh,machine,identity,readiness,platform,hotswap",
+    "zcl.command.empty_input.v1", "zcl.machine_mesh_identity.v1",
+    "", "", "z23 ops mesh identity",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_ops_mesh_identity)
+ZCL_COMMAND_READY_READ(
+    "ops.mesh.status", "ops.mesh", "",
+    "Request one paired machine's signed status receipt",
+    "Uses an established Noise session or spends up to 15 seconds acquiring "
+    "one current signed direct route, then waits up to 15 seconds for the "
+    "signed receipt (multiplexed on zpkgswm) and projects its status token, "
+    "responder identity fingerprints, observation times, and the redacted "
+    "status capsule. A refusal receipt is a successful answer carrying the "
+    "named refusal status. Endpoint bytes grant no authority: no private "
+    "request is sent until the live Noise static and active ZID delegation "
+    "match the pairing. Grants no authority beyond its status-read capability.",
+    ZCL_COMMAND_RESULT_BUDGET,
+    "mesh,status,receipt,pairing,noise,capsule",
+    "zcl.ops_mesh_status.input.v1", "zcl.mesh_status_receipt_view.v1",
+    "pairing_id", "pairing_id",
+    "z23 ops mesh status --pairing_id=<64hex>",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_ops_mesh_status)
+ZCL_COMMAND_READY_READ(
+    "ops.mesh.machines", "ops.mesh", "",
+    "List paired machines: durable verified evidence plus a live probe",
+    "Every durable pairing record — active, expired, and revoked — rendered "
+    "from the observation store with redacted identity fingerprints, pairing "
+    "authority state, and the latest independently verified signed status "
+    "receipt, marked fresh, stale, or never-seen from the current time (a "
+    "stale receipt is evidence of the past, never current reachability). The "
+    "call also runs a bounded live refresh: up to 8 active records are "
+    "probed over the established Noise status lane with a collective "
+    "12-second budget, each verified terminal receipt is persisted before "
+    "rendering, and each probed row additionally reports its live verdict "
+    "(online / refused:<status> / unreachable / timeout / unknown). Offline "
+    "machines stay listed; no dial is ever attempted. "
+    "total/returned/truncated make the bounds explicit.",
+    ZCL_COMMAND_RESULT_BUDGET,
+    "mesh,machines,fleet,observations,online,offline,stale,reachability",
+    "zcl.command.empty_input.v1", "zcl.mesh.machines.v1", "", "",
+    "z23 ops mesh machines",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_ops_mesh_machines)
+ZCL_COMMAND_BRANCH("ops.mesh.pair", "ops.mesh", "Pairing",
+                   ZCL_COMMAND_LAYER_OPS)
+ZCL_COMMAND_READY_READ(
+    "ops.mesh.pair.plan", "ops.mesh.pair", "",
+    "Preview pairing one connected machine",
+    "Finds the connected peer with an established Noise session "
+    "(optionally narrowed by an address substring or a Noise fingerprint hex "
+    "prefix), pulls its held ZID delegation, and renders what commit would "
+    "record: peer address, Noise fingerprint hex to compare out of band, "
+    "master pubkey, delegation validity window, the status-read-only "
+    "capability, the default expiry, and the pairing id. No durable write. "
+    "Never dials: no matching session peer is PEER_NOT_CONNECTED, more than "
+    "one is AMBIGUOUS_PEER.",
+    ZCL_COMMAND_RESULT_BUDGET,
+    "mesh,pair,plan,preview,noise,fingerprint,delegation",
+    "zcl.ops_mesh_pair_plan.input.v1", "zcl.mesh.pairing.plan.v1",
+    "peer", "peer",
+    "z23 ops mesh pair plan --peer=<addr-or-fingerprint-prefix>",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_ops_mesh_pair_plan)
+ZCL_COMMAND_READY_COMMAND(
+    "ops.mesh.pair.commit", "ops.mesh.pair", "",
+    "Pair one connected machine with status-read authority",
+    "The ceremony gate. --fingerprint is MANDATORY: the out-of-band compared "
+    "peer Noise fingerprint (ops mesh pair plan here, ops mesh identity on "
+    "the other machine). Re-derives the live session and held delegation at "
+    "commit time, then records a durable pairing with status-read-only "
+    "capability expiring in --days days (default 7, maximum 30). The pairing "
+    "authority rechecks genesis, active ZID projection, finality-delayed "
+    "beacon, delegation signature, and fingerprint binding; every refusal is "
+    "a named code and writes nothing. An identical existing record is "
+    "returned unchanged; a revoked id stays revoked. Never dials.",
+    ZCL_COMMAND_RESULT_BUDGET,
+    "mesh,pair,commit,noise,fingerprint,ceremony,status-read",
+    "zcl.ops_mesh_pair_commit.input.v1", "zcl.mesh.pairing.commit.v1",
+    "peer,fingerprint,days,terminal", "peer",
+    "z23 ops mesh pair commit --peer=<selector> --fingerprint=<64hex> [--days=7]",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_NODE,
+    ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_CONFIRM_PLAN_COMMIT,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_NONE,
+    zcl_native_handle_ops_mesh_pair_commit)
+ZCL_COMMAND_READY_READ(
+    "ops.mesh.pair.list", "ops.mesh.pair", "",
+    "List this machine's owner-approved pairings",
+    "Lists bounded, redacted local pairing authority. Public master and Noise "
+    "keys are represented only by fingerprints; no private key, endpoint, "
+    "path, capability secret, or remote status is exposed.",
+    ZCL_COMMAND_RESULT_BUDGET,
+    "mesh,machine,pairing,list,authority,revocation",
+    "zcl.command.empty_input.v1", "zcl.mesh.pairing.list.v1", "", "",
+    "z23 ops mesh pair list",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_SCOPE_NODE,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_LATENCY_FAST,
+    ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_ops_mesh_pair_list)
+ZCL_COMMAND_READY_COMMAND(
+    "ops.mesh.pair.revoke", "ops.mesh.pair", "",
+    "Revoke one local machine pairing",
+    "Plans, then commits, sticky local revocation of exactly one pairing. The "
+    "short-lived confirmation binds the pairing ID and current revocation "
+    "generation. Revocation cannot create, renew, or widen authority.",
+    ZCL_COMMAND_RESULT_BUDGET,
+    "mesh,machine,pairing,revoke,authority,security",
+    "zcl.mesh.pairing.revoke.input.v1", "zcl.mesh.pairing.revoke.v1",
+    "pairing_id,confirm", "pairing_id",
+    "z23 ops mesh pair revoke --pairing-id=<64hex>",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_NODE,
+    ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_CONFIRM_PLAN_COMMIT,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    zcl_native_handle_ops_mesh_pair_revoke)
+ZCL_COMMAND_READY_COMMAND(
+    "ops.mesh.join", "ops.mesh", "",
+    "Join a peer from a verified session invite",
+    "Dials the invite endpoint and reports join_status.peered after the "
+    "P2P handshake (VERSION/VERACK). Does not substitute addnode in the "
+    "operator contract: this leaf is the join entry.",
+    ZCL_COMMAND_RESULT_BUDGET,
+    "mesh,join,invite,session,peer",
+    "zcl.ops_mesh_join.input.v1", "zcl.ops_mesh_join_status.v1",
+    "endpoint,address", "endpoint",
+    "z23 ops mesh join --endpoint=<host:port>",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_CORE_RECOVERY, ZCL_COMMAND_SCOPE_NODE,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_CHAIN_READ, ZCL_COMMAND_TRAIT_NONE,
+    zcl_native_handle_ops_mesh_join)
+ZCL_COMMAND_READY_READ(
+    "ops.mesh.join_status", "ops.mesh", "",
+    "Report whether a mesh join has peered",
+    "join_status for one endpoint: peered=true only after VERSION/VERACK.",
+    ZCL_COMMAND_RESULT_BUDGET,
+    "mesh,join,status,peered,session",
+    "zcl.ops_mesh_join.input.v1", "zcl.ops_mesh_join_status.v1",
+    "endpoint,address", "endpoint",
+    "z23 ops mesh join_status --endpoint=<host:port>",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_CHAIN_READ, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_ops_mesh_join_status)
+ZCL_COMMAND_BRANCH("ops.postmortem", "ops", "Postmortems",
+                   ZCL_COMMAND_LAYER_OPS)
+ZCL_COMMAND_READY_READ(
+    "ops.postmortem.list", "ops.postmortem", "", "List captured postmortems",
+    "Every durably captured failure postmortem (id, time, summary) from the "
+    "node's postmortem store; complete at call time, newest first.",
+    ZCL_COMMAND_LIST_BUDGET,
+    "postmortem,list,failure,capsule", "zcl.command.empty_input.v1",
+    "zcl.postmortem_list.v1", "", "", "z23 ops postmortem list",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_DEV_STATE_READ, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_bridge_command)
+ZCL_COMMAND_PLANNED_READ(
+    "ops.postmortem.replay", "ops.postmortem", "",
+    "Replay one captured postmortem",
+    "Will replay one captured postmortem deterministically and return the "
+    "reproduced failure; the argument-to-replay mapping is not wired, so the "
+    "leaf fails closed today.", 0,
+    "postmortem,replay,failure",
+    "zcl.ops_postmortem_ref.input.v1", "zcl.postmortem_replay.v1", "id", "id",
+    "z23 ops postmortem replay <id>",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_DEV_STATE_READ,
+    "postmortem replay argument mapping is a Wave 2.2 deliverable")
+
+ZCL_COMMAND_BRANCH("ops.config", "ops", "Runtime config",
+                   ZCL_COMMAND_LAYER_OPS)
+ZCL_COMMAND_PLANNED_READ(
+    "ops.config.show", "ops.config", "", "Show effective runtime configuration",
+    "Will report the effective runtime configuration after flags, defaults, and "
+    "overrides are merged; a distinct effective-config reader is not built, so "
+    "the leaf fails closed today.", 0,
+    "config,show,settings", "zcl.command.empty_input.v1", "zcl.ops_config.v1",
+    "", "", "z23 ops config show",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_CHAIN_READ,
+    "an effective-config reader is a Wave 2.2 deliverable")
+ZCL_COMMAND_PLANNED_COMMAND(
+    "ops.config.reload", "ops.config", "", "Reload runtime configuration",
+    "Will reload runtime configuration and report which keys changed; the "
+    "reload binding is not wired, so the leaf fails closed today.", 0,
+    "config,reload", "zcl.command.empty_input.v1", "zcl.ops_config_reload.v1",
+    "", "", "z23 ops config reload",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_CORE_RECOVERY, ZCL_COMMAND_SCOPE_NODE,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC, ZCL_COMMAND_LATENCY_FAST,
+    ZCL_COMMAND_COST_LOW, ZCL_COMMAND_CONFIRM_NONE,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_CHAIN_READ, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    "config-reload binding is a Wave 2.2 deliverable")
+
+ZCL_COMMAND_BRANCH("ops.recovery", "ops", "Recovery ops",
+                   ZCL_COMMAND_LAYER_OPS)
+ZCL_COMMAND_READY_READ(
+    "ops.recovery.status", "ops.recovery", "", "Refold and recovery progress",
+    "The current refold/recovery cursor and progress read live from the node; "
+    "reflects the in-flight rebuild state at call time.", 0,
+    "recovery,refold,status,rebuild", "zcl.command.empty_input.v1",
+    "zcl.recovery_status.v1", "", "", "z23 ops recovery status",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_CHAIN_READ, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_bridge_command)
+ZCL_COMMAND_PLANNED_COMMAND(
+    "ops.recovery.rebuild", "ops.recovery", "",
+    "Rebuild recent chain state",
+    "Will rebuild recent chain state to the requested depth and report the new "
+    "cursor; the plan/commit handshake is not wired, so the leaf fails closed "
+    "today.", 0,
+    "recovery,rebuild,recent",
+    "zcl.ops_recovery_rebuild.input.v1", "zcl.recovery_rebuild.v1", "depth", "",
+    "z23 ops recovery rebuild --depth=100",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_EFFECT_DESTRUCTIVE,
+    ZCL_COMMAND_RISK_CORE_RECOVERY, ZCL_COMMAND_SCOPE_NODE,
+    ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_JOB,
+    ZCL_COMMAND_LATENCY_BACKGROUND, ZCL_COMMAND_COST_HIGH,
+    ZCL_COMMAND_CONFIRM_PLAN_COMMIT,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_CHAIN_READ, ZCL_COMMAND_TRAIT_NONE,
+    "recovery rebuild plan/commit handshake is a Wave 2.2 deliverable")

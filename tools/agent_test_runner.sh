@@ -2,7 +2,7 @@
 # Copyright 2026 Rhett Creighton - Apache License 2.0
 #
 # agent_test_runner.sh — backing script for the `agenttest` native contract
-# (app/controllers/src/agent_test_controller.c / native `dev test run`),
+# (cognition/controllers/src/agent_test_controller.c / native `dev test run`),
 # cloned from the tools/repro_on_copy.sh + agentcopyprove pattern (see that
 # script + docs/CODEBASE_MAP.md "copy-prove").
 #

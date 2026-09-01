@@ -41,7 +41,7 @@
  * straight from source into its own executable, with no intermediate object
  * files, for the same reason zclassic23-acme is: nothing that references a
  * TLS-client or trust-store symbol may appear in a Z23 object file, and
- * lib/test/src/test_cold_join_sovereign.c P2 asserts exactly that.
+ * tests/harness/src/test_cold_join_sovereign.c P2 asserts exactly that.
  *
  * ── A CLI ENGINE IS AN ENGINE, AND check-no-shellouts STILL HOLDS ────────
  * One of the registered engines is an installed agent CLI rather than an HTTP
@@ -58,11 +58,11 @@
  *     inside the resident process is what blocks the seccomp execve deny-list.
  *     Standalone tools under tools/ are out of its scope by design, and this
  *     is one: a human invokes it, the node never wraps it.
- *   - lib/engine, which IS linked into the node, launches nothing at all. It
+ *   - engine/modules/engine, which IS linked into the node, launches nothing at all. It
  *     has no spawn, no socket, and no file-system side effect. Every process
  *     this harness starts is started from this file.
  *   - and it is not a shell-out in the first place. It goes through
- *     lib/util zcl_spawn_capture, which execvp()s an argv directly. No
+ *     platform/modules/util zcl_spawn_capture, which execvp()s an argv directly. No
  *     /bin/sh, so no metacharacter ever expands, and nothing a model wrote
  *     can become a word in a command line.
  * If those three stop being true, the right answer is to fix this file, not
@@ -280,7 +280,7 @@ static char *read_file(const char *path, size_t cap, size_t *out_len)
 /* Run a program with no shell (zcl_spawn_capture: execvp, argv only) and
  * capture its stdout. stderr is discarded by that primitive's documented
  * contract; every token this harness judges on — the SUITE VERDICT line and
- * the pass/fail token — is written to stdout by lib/test/src/test_parallel.c,
+ * the pass/fail token — is written to stdout by tests/harness/src/test_parallel.c,
  * and a token that fails to arrive produces a REFUSED verdict rather than a
  * pass, so a lost message can never read as success. */
 static int run(const char *const argv[], char *buf, size_t cap, int timeout_ms)
@@ -397,7 +397,7 @@ static size_t worktree_changed_files(const char *dir)
 /* The rules a unit must read before it writes C in this tree. Kept in one
  * place so the prompt and the parser cannot describe different contracts. */
 /* The rules a unit is held to, and the decision about which wire carries
- * them, live in lib/engine (engine/engine_prompt.h). They used to be a
+ * them, live in engine/modules/engine (engine/engine_prompt.h). They used to be a
  * static here, and being a static here is how they went missing from every
  * CLI dispatch: no test links this tool, so nothing could assert them. */
 
@@ -406,7 +406,7 @@ static size_t worktree_changed_files(const char *dir)
  *
  * --territory used to be an opaque label: a string the operator typed, copied
  * into the prompt and into the receipt, meaning whatever the operator hoped
- * it meant. A model told "Territory: lib/net" learns nothing it could not
+ * it meant. A model told "Territory: core/modules/net" learns nothing it could not
  * have guessed from the task text.
  *
  * It now has to name a real territory, and the unit carries that territory's
@@ -424,12 +424,12 @@ static size_t worktree_changed_files(const char *dir)
  * reviewer reading it believed the model had been told which gates apply to
  * its change. It had not. Say what the command actually emits.
  *
- * It is fetched by RUNNING that command rather than by linking lib/territory,
- * and that is not laziness. lib/territory reaches the code index and
+ * It is fetched by RUNNING that command rather than by linking cognition/modules/territory,
+ * and that is not laziness. cognition/modules/territory reaches the code index and
  * therefore SQLite, while this program is compiled straight to an executable
  * alongside a TLS client precisely so that none of its objects can ever
  * appear in a scanned epoch tree (see ENGINE_UNIT_SRCS in the Makefile, and
- * the P2 assertion in lib/test/src/test_cold_join_sovereign.c that it keeps
+ * the P2 assertion in tests/harness/src/test_cold_join_sovereign.c that it keeps
  * honest). A subprocess leaves that property untouched.
  *
  * The exit status is checked but is not the evidence: zcl_spawn_capture
@@ -512,7 +512,7 @@ static const char *delivery_text(const struct engine_vendor *v)
 }
 
 /* The authored stance for a territory, or NULL when nobody has written one.
- * lib/engine/include/engine/personas.def is the only place one exists, and
+ * engine/modules/engine/include/engine/personas.def is the only place one exists, and
  * check-persona-resolves keeps every row pointing at things that still do.
  * A stance is pasted into a prompt and read nowhere else: nothing branches
  * on it and no verdict, gate or receipt is affected by whether one exists. */
@@ -651,7 +651,7 @@ static bool dispatch_https(const struct engine_vendor *v, const char *body,
     const struct tls_client_request req = {
         .method       = "POST",
         .url          = v->url,
-        .content_type = "application/json",
+        .content_type = "engine/application/json",
         .body         = body,
         .body_len     = body_len,
         .user_agent   = "zclassic23-engine-unit",

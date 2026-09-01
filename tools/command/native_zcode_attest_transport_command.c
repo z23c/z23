@@ -61,7 +61,7 @@
  * check: every admit here passes the caller's package_root as
  * expect_package_root, never NULL. That is what stops a hostile pointer in
  * this namespace from delivering an attestation for a DIFFERENT package.
- * The publish-side gate in config/src/boot_zcode_dht_publish_gate.c is
+ * The publish-side gate in engine/composition/src/boot_zcode_dht_publish_gate.c is
  * local hygiene and constrains nobody else.
  *
  * A row that fails stays in the report naming its rule. One bad pointer
@@ -69,7 +69,7 @@
  *
  * This lives in its own translation unit rather than in
  * native_zcode_command.c so the transport half of the attestation surface
- * has one file. Bound by config/commands/zcode.def. */
+ * has one file. Bound by engine/composition/commands/zcode.def. */
 
 #include "base/safe_alloc.h"
 #include "base/hex.h"

@@ -14,7 +14,7 @@
 # SUBSTRATE PRECONDITION — READ THIS BEFORE ASSUMING A LITERAL-BLANK DATADIR
 # WORKS. The `-install-consensus-bundle` path is a state-REPLACEMENT cure, not a
 # from-zero bootstrap. Its selected-chain binding
-# (app/services/src/consensus_state_chain_binding_service.c
+# (engine/services/src/consensus_state_chain_binding_service.c
 # consensus_state_chain_binding_decide) enforces three predicates the comment
 # there marks "ALWAYS target-derived / checkpoint authority never relaxes":
 #   -3  the target's own selected frontier must be durable + consistent;

@@ -53,7 +53,7 @@ containment_hits()
     local -a paths=()
     grep_bin="$(resolve_scanner)" || return $?
     for path in Makefile Dockerfile Jenkinsfile Justfile Taskfile \
-        app config lib src tools .github deploy; do
+        core engine contexts cognition platform tools .github deploy; do
         [[ -e "$root/$path" ]] && paths+=("$path")
     done
     if (( ${#paths[@]} == 0 )); then

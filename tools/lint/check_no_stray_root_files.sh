@@ -36,7 +36,7 @@
 #
 # Selftest override: ZCL_ROOT_STRAY_EXTRA_FOR_TEST names one additional
 # root-relative entry to treat as a stray candidate even if it would
-# otherwise be allowed. The selftest in lib/test/src/test_make_lint_gates.c
+# otherwise be allowed. The selftest in tests/harness/src/test_make_lint_gates.c
 # uses the plain plant/trip/recover path and does not need it; the variable
 # exists so a future probe can trip the gate without writing to the tree.
 set -euo pipefail
@@ -114,7 +114,7 @@ if (( ${#strays[@]} > 0 )); then
         echo "    $f [stray root entry]" >&2
     done
     echo "  Fix at the WRITER, not here: a test writes its scratch under" >&2
-    echo "  ./test-tmp/ (test_make_tmpdir in lib/test/include/test/test_core.h)," >&2
+    echo "  ./test-tmp/ (test_make_tmpdir in tests/harness/include/test/test_core.h)," >&2
     echo "  a script writes its log under a state/log dir. 'git add' it if it" >&2
     echo "  is real new content; delete it if it is debris." >&2
     exit 1

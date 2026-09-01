@@ -149,7 +149,7 @@ static bool post(struct acme_session *s, const char *url, const char *payload,
         struct tls_client_request req = {
             .method = "POST",
             .url = url,
-            .content_type = "application/jose+json",
+            .content_type = "engine/application/jose+json",
             .body = body,
             .body_len = strlen(body),
             .user_agent = ACME_USER_AGENT,

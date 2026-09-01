@@ -4,7 +4,7 @@
  * non-duplicated C23.
  *
  * This handler renders and does not decide. Every number comes from
- * lib/science/science_corpus.c: the line half from a walk of the maintained
+ * cognition/modules/science/science_corpus.c: the line half from a walk of the maintained
  * C23 roots, the proof half from the generated capability inventory, and a
  * `scope_agrees` flag saying whether those two halves were looking at the
  * same tree. The reasoning for each — and for why there is deliberately no

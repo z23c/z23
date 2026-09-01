@@ -1,0 +1,492 @@
+/* The vault: one surface that states what this node OWNS across the six asset
+ * classes (transparent, shielded, tokens, names, market, swaps), and routes
+ * every custody action to the path that already owns it.
+ *
+ * THE INVARIANT OF THIS BRANCH: the vault contains no spend logic. Not one
+ * leaf here builds, signs, or broadcasts a transaction. The read leaves
+ * project the vault read model; the custody leaves select, preview, confirm,
+ * and then dispatch — `vault.send` calls the very handler function
+ * `core.wallet.transaction.send` binds, and the swap leaves call the very RPC
+ * method the swap controller registers. A second transaction builder living
+ * here would drift from the real one and eventually sign something other than
+ * what the operator was shown, so there is none; `vault routes` prints the
+ * binding table that says so, resolved from the registry at call time.
+ *
+ * Consumer defines ZCL_COMMAND_*; see engine/composition/src/command_catalog.c. */
+
+ZCL_COMMAND_BRANCH("vault", "", "What this node owns, and what may act on it",
+                   ZCL_COMMAND_LAYER_APP)
+
+ZCL_COMMAND_READY_READ(
+    "vault.list", "vault", "",
+    "One row per asset class: everything this node owns",
+    "One row per vault asset class — transparent, shielded, tokens, names, "
+    "market, swaps — projected from the vault read model at call time. "
+    "Fungible rows carry zatoshi totals, non-fungible rows carry item counts; "
+    "each row names its own `source` and carries `complete`. A co-located "
+    "legacy zclassicd wallet is reported in a separate `legacy_wallet` "
+    "section with aggregation=excluded; it is never added to canonical Z23 "
+    "custody. A class whose "
+    "reader is absent is emitted with status=unavailable and a reason, never "
+    "dropped — a missing reader can never read as a zero balance.",
+    ZCL_COMMAND_LIST_BUDGET,
+    "vault,own,assets,balance,portfolio,classes",
+    "zcl.vault_list.input.v1", "zcl.vault_list.v1", "class", "class",
+    "z23 vault list",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_WALLET_REQUEST, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_vault_list)
+
+ZCL_COMMAND_READY_READ(
+    "vault.show", "vault", "",
+    "Itemize the holdings inside one asset class",
+    "The individual holdings inside ONE asset class, projected from the vault "
+    "read model at call time and capped by `limit` — a bounded page, with "
+    "`items_truncated` set whenever the class holds more than was rendered. "
+    "ZCL amounts are zatoshi; token amounts are base units scoped to their "
+    "token ID and are never summed across tokens. Every item carries its own "
+    "`encumbered` flag so an itemized amount is never mistaken for a "
+    "spendable one.",
+    ZCL_COMMAND_LIST_BUDGET,
+    "vault,show,class,holdings,items,detail",
+    "zcl.vault_show.input.v1", "zcl.vault_show.v1", "class,limit", "class",
+    "z23 vault show transparent",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_WALLET_REQUEST, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_vault_show)
+
+ZCL_COMMAND_READY_READ(
+    "vault.encumbered", "vault", "",
+    "What is owned but not free to move, and what would release it",
+    "Only the holdings the vault read model marks encumbered — immature "
+    "coinbase, notes under the confirmation floor, funds locked in an unsettled "
+    "swap HTLC, anything mid-transfer — with the reason per item and, where one "
+    "exists, the vault command that releases it. Amounts are zatoshi at call "
+    "time; bounded by `limit` with `items_truncated`. An empty result means the "
+    "read model reported nothing encumbered, not that nothing was checked: the "
+    "classes actually examined are listed in `classes_scanned`.",
+    ZCL_COMMAND_LIST_BUDGET,
+    "vault,encumbered,locked,immature,unspendable,htlc",
+    "zcl.vault_encumbered.input.v1", "zcl.vault_encumbered.v1", "class,limit",
+    "class", "z23 vault encumbered",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_WALLET_REQUEST, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_vault_encumbered)
+
+ZCL_COMMAND_READY_READ(
+    "vault.routes", "vault", "",
+    "Which existing path owns the spend for each asset class",
+    "The custody routing table, resolved from the in-binary command registry "
+    "at call time: for each asset class, the command or RPC method that owns "
+    "building/signing/broadcasting, that owner's live availability, and whether "
+    "a vault verb dispatches to it. Deterministic and node-free. A class with "
+    "no executable owner is listed with route=none and the reason — this leaf "
+    "is the machine-readable statement that the vault holds no spend logic of "
+    "its own, so a route that silently grew a second builder would show up "
+    "here as a changed owner.", ZCL_COMMAND_LIST_BUDGET,
+    "vault,routes,custody,dispatch,owner,registry",
+    "zcl.vault_routes.input.v1", "zcl.vault_routes.v1", "class", "class",
+    "z23 vault routes",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_PUBLIC,
+    ZCL_COMMAND_LATENCY_INSTANT, ZCL_COMMAND_COST_TINY,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE,
+    ZCL_COMMAND_TRAIT_DETERMINISTIC | ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_vault_routes)
+
+/* ── custody verbs — dispatch only ─────────────────────────────────────────
+ * Each of these declares AT LEAST the authority, capability, risk and
+ * confirmation of the path it routes to, re-checks that at dispatch time, and
+ * then hands the built input object to the owning handler. The transaction is
+ * therefore the owning path's transaction, byte for byte. */
+
+ZCL_COMMAND_READY_COMMAND(
+    "vault.send", "vault", "",
+    "Spend transparent ZCL by dispatching to the wallet's own send",
+    "A pass-through of core.wallet.transaction.send, whose plan/commit contract "
+    "is reproduced verbatim: without confirm, that command's non-mutating plan "
+    "(recipient, amount) plus its commit next-action, additionally annotated "
+    "with the vault's advisory transparent-class preflight (spendable and "
+    "encumbered zatoshi at call time, or an explicit unknown when the read "
+    "model is unavailable); with confirm:true, that command's broadcast txid "
+    "and nothing added. `routed_to` names the owning leaf. The vault builds no "
+    "transaction — the bytes are sendtoaddress's, reached through the very "
+    "handler the owning leaf binds.", 0,
+    "vault,send,pay,transparent,broadcast,route",
+    "zcl.vault_send.input.v1", "zcl.wallet_send.v1",
+    "wallet_scope,address,amount,idempotency_key,confirm", "",
+    "z23 vault send --input='{\"address\":\"t1..\",\"amount\":1.5}'",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_WALLET, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OWNER,
+    ZCL_COMMAND_MODE_SYNC, ZCL_COMMAND_LATENCY_FOREGROUND,
+    ZCL_COMMAND_COST_MODERATE, ZCL_COMMAND_CONFIRM_PLAN_COMMIT,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_WALLET_REQUEST, ZCL_COMMAND_TRAIT_NONE,
+    zcl_native_handle_vault_send)
+
+ZCL_COMMAND_READY_COMMAND(
+    "vault.send-shielded", "vault", "",
+    "Spend shielded ZCL by dispatching to the wallet's own shielded send",
+    "A pass-through of core.wallet.shielded.send, whose plan/commit contract is "
+    "reproduced verbatim: without confirm, that command's non-mutating plan "
+    "(wallet scope, from, to, exact amount, optional memo) plus its exact "
+    "commit input, additionally annotated "
+    "with the vault's advisory shielded-class preflight, or an explicit unknown "
+    "when the read model is unavailable; with confirm:true, that command's "
+    "synchronous z_sendmany transaction id and nothing added. `routed_to` names the "
+    "owning leaf. Sending still requires Sapling parameters loaded and a "
+    "passing prover self-test — that precondition belongs to the owning path "
+    "and its failure is surfaced unmodified.", 0,
+    "vault,send,shielded,sapling,z_sendmany,route",
+    "zcl.vault_send_shielded.input.v1", "zcl.shielded_send.v1",
+    "wallet_scope,from,to,amount,memo,memo_hex,idempotency_key,confirm", "",
+    "z23 vault send-shielded --input='{\"wallet_scope\":\"dev\",\"from\":\"zs1..\",\"to\":\"zs1..\",\"amount\":\"1.00000000\"}'",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_WALLET, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OWNER,
+    ZCL_COMMAND_MODE_SYNC, ZCL_COMMAND_LATENCY_FOREGROUND,
+    ZCL_COMMAND_COST_HIGH, ZCL_COMMAND_CONFIRM_PLAN_COMMIT,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_WALLET_REQUEST, ZCL_COMMAND_TRAIT_NONE,
+    zcl_native_handle_vault_send_shielded)
+
+ZCL_COMMAND_READY_COMMAND(
+    "vault.send-token", "vault", "",
+    "Send ZSLP units through the token command that owns the transaction",
+    "A pass-through of app.tokens.send. The owning command explicitly selects "
+    "confirmed token outputs, returns token change, adds only non-token fee "
+    "coins, signs, durably persists, and relays. The vault contributes the "
+    "tokens-class advisory preflight and no transaction logic.", 0,
+    "vault,send,token,zslp,route", "zcl.vault_send_token.input.v1",
+    "zcl.app_token_txresult.v1", "token_id,to,units,confirm", "token_id",
+    "z23 vault send-token --input='{\"token_id\":\"<64-hex>\",\"to\":\"t1...\",\"units\":25}'",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_WALLET, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OWNER,
+    ZCL_COMMAND_MODE_SYNC, ZCL_COMMAND_LATENCY_FOREGROUND,
+    ZCL_COMMAND_COST_MODERATE, ZCL_COMMAND_CONFIRM_PLAN_COMMIT,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_WALLET_REQUEST, ZCL_COMMAND_TRAIT_NONE,
+    zcl_native_handle_vault_send_token)
+
+ZCL_COMMAND_BRANCH("vault.intent", "vault",
+                   "Exact, expiring, durably idempotent transaction intents",
+                   ZCL_COMMAND_LAYER_APP)
+
+ZCL_COMMAND_READY_COMMAND(
+    "vault.intent.issue", "vault.intent", "",
+    "Create a fresh transparent ZCL payment request",
+    "Persists a fresh receive key before returning a simple zclassic: URI. "
+    "The current request is explicitly anonymous; identity/ZSLP commerce uses "
+    "the separately authenticated ZPAY envelope and is not misrepresented as "
+    "a URI asset extension.", 0,
+    "vault,intent,invoice,request,uri,address",
+    "zcl.vault_intent_issue.input.v1", "zcl.vault_intent_issue.v1",
+    "asset,amount", "amount",
+    "z23 vault intent issue --input='{\"asset\":\"ZCL\",\"amount\":\"0.01\"}'",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_WALLET, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OWNER,
+    ZCL_COMMAND_MODE_SYNC, ZCL_COMMAND_LATENCY_FOREGROUND,
+    ZCL_COMMAND_COST_MODERATE, ZCL_COMMAND_CONFIRM_NONE,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_WALLET_REQUEST, ZCL_COMMAND_TRAIT_NONE,
+    zcl_native_handle_vault_intent_issue)
+
+ZCL_COMMAND_READY_COMMAND(
+    "vault.intent.plan", "vault.intent", "",
+    "Persist an exact encrypted transaction plan",
+    "Accepts 1..50 effects with strict decimal-string ZCL amounts and requires "
+    "a durable idempotency_key for every route. Transparent fan-out uses "
+    "route=transparent and omits from. Sapling plans require from=<exact "
+    "owned source address> and route=private (z-to-z), shield (t-to-z), "
+    "unshield (z-to-t), or mixed (both recipient pools); a mismatched route "
+    "fails closed. Returns a "
+    "ten-minute plan_id, digest, exact effects and maximum fee, tip/money "
+    "anchor, confirmation policy, and an explicit privacy warning. "
+    "Recipient details are encrypted under the wallet metadata DEK at rest; "
+    "the sensitive effects body is accepted only with --input=-. Planning "
+    "fails closed unless custody is encrypted/unlocked, persistence and "
+    "sovereign-chain checks pass, and a fully verified encrypted wallet "
+    "backup is under 24 hours old. Private/mixed planning also proves the "
+    "source, witnesses, keys, recipients and Sapling prover can build without "
+    "admitting or relaying the candidate.", 0,
+    "vault,intent,plan,effects,fee,privacy,idempotent,mixed,sapling",
+    "zcl.vault_intent_plan.input.v1", "zcl.vault_intent_plan.v1",
+    "wallet_scope,route,from,effects,idempotency_key", "wallet_scope,effects,idempotency_key",
+    "printf '%s' '{\"wallet_scope\":\"dev\",\"route\":\"transparent\",\"idempotency_key\":\"payment-001\",\"effects\":[{\"asset\":\"ZCL\",\"to\":\"t1...\",\"amount\":\"0.01\"}]}' | z23 vault intent plan --input=-",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_WALLET, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OWNER,
+    ZCL_COMMAND_MODE_SYNC, ZCL_COMMAND_LATENCY_BACKGROUND,
+    ZCL_COMMAND_COST_HIGH, ZCL_COMMAND_CONFIRM_NONE,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_WALLET_REQUEST, ZCL_COMMAND_TRAIT_NONE,
+    zcl_native_handle_vault_intent_plan)
+
+ZCL_COMMAND_READY_COMMAND(
+    "vault.intent.fanout-plan", "vault.intent", "",
+    "Prepare private self-custody outputs for parallel transactions",
+    "Creates 2..50 fresh durable wallet-owned transparent destinations and "
+    "atomically reserves one exact transparent fanout plan after a current "
+    "encrypted-backup preflight. Each output is "
+    "recipient_value_zat plus maximum_fee_zat, so it can later fund one "
+    "independent transaction at the requested ceiling. A required durable "
+    "idempotency_key makes retries return the same plan and rejects a changed "
+    "shape. Output contains only aggregate counts, zatoshi values, plan id and "
+    "digest: generated addresses, selected inputs, endpoints and paths never "
+    "leave the wallet. This command never signs, broadcasts, commits, or "
+    "automatically rebalances; the owner must take a fresh encrypted backup "
+    "containing the new destinations, then separately call vault.intent.commit "
+    "after reviewing the plan. All normal wallet "
+    "encryption, backup, sovereignty, custody, reserve and lab-cap gates apply.",
+    0,
+    "vault,intent,fanout,liquidity,utxo,parallel,idempotent,private-address",
+    "zcl.vault_intent_fanout_plan.input.v1",
+    "zcl.vault_intent_fanout_plan.v1",
+    "wallet_scope,recipient_value_zat,maximum_fee_zat,concurrency,idempotency_key",
+    "wallet_scope,recipient_value_zat,maximum_fee_zat,concurrency,idempotency_key",
+    "z23 vault intent fanout-plan --input='{\"wallet_scope\":\"dev\",\"recipient_value_zat\":1000,\"maximum_fee_zat\":10000,\"concurrency\":10,\"idempotency_key\":\"parallel-lab-001\"}'",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_WALLET, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OWNER,
+    ZCL_COMMAND_MODE_SYNC, ZCL_COMMAND_LATENCY_BACKGROUND,
+    ZCL_COMMAND_COST_HIGH, ZCL_COMMAND_CONFIRM_NONE,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_WALLET_REQUEST, ZCL_COMMAND_TRAIT_NONE,
+    zcl_native_handle_vault_intent_fanout_plan)
+
+ZCL_COMMAND_READY_COMMAND(
+    "vault.intent.commit", "vault.intent", "",
+    "Commit one exact durable plan without double-paying",
+    "Requires plan_id and confirm:true. Atomically claims the plan, revalidates "
+    "its wallet identity, active-chain anchor, current money root, recipients "
+    "and maximum fee, then builds/proves and persists the exact signed bytes "
+    "before relay. A crash resumes those same bytes; repeated calls return the "
+    "original txid and never double-pay. No operation_id is exposed.", 0,
+    "vault,intent,commit,idempotent,txid,relay",
+    "zcl.vault_intent_commit.input.v1", "zcl.vault_intent_commit.v1",
+    "wallet_scope,plan_id,confirm", "wallet_scope,plan_id,confirm",
+    "z23 vault intent commit --input='{\"wallet_scope\":\"dev\",\"plan_id\":\"<64hex>\",\"confirm\":true}'",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_WALLET, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OWNER,
+    ZCL_COMMAND_MODE_SYNC, ZCL_COMMAND_LATENCY_FOREGROUND,
+    ZCL_COMMAND_COST_HIGH, ZCL_COMMAND_CONFIRM_IDEMPOTENCY,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_WALLET_REQUEST, ZCL_COMMAND_TRAIT_NONE,
+    zcl_native_handle_vault_intent_commit)
+
+ZCL_COMMAND_READY_COMMAND(
+    "vault.intent.submit", "vault.intent", "",
+    "Queue an exact durable plan and return immediately",
+    "Requires wallet_scope, plan_id and confirm:true. Returns operation_id "
+    "immediately; operation_id is deliberately the durable plan_id, so "
+    "vault.intent.status is the one status authority rather than a second job "
+    "ledger. A node restart requeues a planned ASYNC_QUEUED intent, duplicate "
+    "submissions share one in-process worker, transient non-current money state "
+    "waits fail-closed, and the normal commit path still revalidates identity, "
+    "snapshot, exact effects, fee, reservation and raw bytes before relay.", 0,
+    "vault,intent,submit,async,operation,queue,restart,idempotent",
+    "zcl.vault_intent_submit.input.v1", "zcl.vault_intent_submit.v1",
+    "wallet_scope,plan_id,confirm", "wallet_scope,plan_id,confirm",
+    "z23 vault intent submit --input='{\"wallet_scope\":\"dev\",\"plan_id\":\"<64hex>\",\"confirm\":true}'",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_WALLET, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OWNER,
+    ZCL_COMMAND_MODE_SYNC, ZCL_COMMAND_LATENCY_INSTANT,
+    ZCL_COMMAND_COST_LOW, ZCL_COMMAND_CONFIRM_IDEMPOTENCY,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_WALLET_REQUEST, ZCL_COMMAND_TRAIT_NONE,
+    zcl_native_handle_vault_intent_submit)
+
+ZCL_COMMAND_READY_COMMAND(
+    "vault.intent.cancel", "vault.intent", "",
+    "Cancel an unclaimed durable transaction plan",
+    "Requires wallet_scope, plan_id and confirm:true. Atomically cancels only a "
+    "still-planned intent and releases its reservation. Once proving, signed "
+    "bytes, mempool admission or confirmation may exist, cancellation refuses "
+    "as unsafe. Repeating an already completed owner cancellation is "
+    "idempotent.", 0,
+    "vault,intent,cancel,async,reservation,owner,idempotent",
+    "zcl.vault_intent_cancel.input.v1", "zcl.vault_intent_cancel.v1",
+    "wallet_scope,plan_id,confirm", "wallet_scope,plan_id,confirm",
+    "z23 vault intent cancel --input='{\"wallet_scope\":\"dev\",\"plan_id\":\"<64hex>\",\"confirm\":true}'",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_WALLET, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OWNER,
+    ZCL_COMMAND_MODE_SYNC, ZCL_COMMAND_LATENCY_INSTANT,
+    ZCL_COMMAND_COST_LOW, ZCL_COMMAND_CONFIRM_IDEMPOTENCY,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_WALLET_REQUEST, ZCL_COMMAND_TRAIT_NONE,
+    zcl_native_handle_vault_intent_cancel)
+
+ZCL_COMMAND_READY_READ(
+    "vault.intent.status", "vault.intent", "",
+    "Read one transaction intent's chain-aware state",
+    "Returns planned, proving, mempool_accepted, confirmed, finalized, reorged, "
+    "conflicted, expired or failed plus txid when one exists. For asynchronous "
+    "submission the operation_id is the same durable plan_id, so this remains "
+    "the only status authority. Terminal failures carry a stable error_code; "
+    "agents branch on it rather than log prose. Codes distinguish "
+    "SHIELDED_REQUIREMENTS_MISSING, PREPARED_NOTE_MISMATCH or conflict, "
+    "invalid proof/script, missing inputs, fee policy, locktime, expiry, and "
+    "internal admission failure. After restart, a mempool_accepted intent "
+    "revalidates and re-relays only its exact durable bytes when absent from "
+    "the new process mempool.", ZCL_COMMAND_LIST_BUDGET,
+    "vault,intent,status,txid,reorg", "zcl.vault_intent_status.input.v1",
+    "zcl.vault_intent_status.v1", "plan_id", "plan_id",
+    "z23 vault intent status --input='{\"plan_id\":\"<64hex>\"}'",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_WALLET_REQUEST, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_vault_intent_status)
+
+ZCL_COMMAND_READY_READ(
+    "vault.intent.list", "vault.intent", "",
+    "List the newest durable transaction intents",
+    "Returns at most 100 state rows without decrypting recipients, memo bodies "
+    "or invoice contents.", ZCL_COMMAND_LIST_BUDGET,
+    "vault,intent,list,history,txid", "zcl.vault_intent_list.input.v1",
+    "zcl.vault_intent_list.v1", "", "",
+    "z23 vault intent list",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_WALLET_REQUEST, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_vault_intent_list)
+
+/* ── agent session grants — mint/list/revoke, not custody ──────────────────
+ * Scoped, revocable spend-authority grants for agents
+ * (docs/work/agent-spend-policy-design.md, "Minting + presentation"). These
+ * leaves hold no spend logic either: they mint, list and revoke the grants
+ * the policy gate (services/agent_spend_policy.h) enforces at the dispatch
+ * choke points. The full session token is returned exactly once — the create
+ * commit reply — and is redacted everywhere after. */
+
+ZCL_COMMAND_BRANCH("vault.session", "vault",
+                   "Scoped, revocable spend-authority grants for agents",
+                   ZCL_COMMAND_LAYER_APP)
+
+ZCL_COMMAND_READY_COMMAND(
+    "vault.session.create", "vault.session", "",
+    "Mint a scoped agent spend session; returns the token once",
+    "Mints one agent spend session for an existing principal: a 128-bit "
+    "random session id carrying its own wallet identity binding and cap set "
+    "(per-tx limit, rolling-window limit, dev-wallet reserve floor, optional "
+    "recipient allowlist, optional expiry). The reserve floor defaults to the "
+    "historical 0.25-ZCL development floor; lowering it is explicit in the "
+    "reviewed grant and remains bound to this exact wallet identity. Without confirm, "
+    "a non-mutating plan naming the normalized grant plus the commit "
+    "next-action; with confirm:true, the grant is persisted and the full "
+    "session id is returned EXACTLY ONCE — store it then, because every "
+    "later surface (vault.session.list included) shows it redacted. An agent "
+    "presents the grant as ZCL_AGENT_SESSION on its CLI environment; the "
+    "dispatch gates then bound it to the session's caps and DEFAULT-DENY every "
+    "money leaf the policy has no rule for — key export, wallet backup and "
+    "this grant surface itself are refused outright while a grant is "
+    "presented. The grant narrows only: the principal's role still derives the "
+    "authority ceiling and capabilities, unchanged. This bounds a COOPERATING "
+    "agent at the typed surface; it is not a sandbox, because the agent owns "
+    "its own environment and the datadir cookie. Confinement is an OS job "
+    "(separate uid, or a wrapper that refuses to exec anything else).", 0,
+    "vault,session,agent,policy,mint,grant,spend",
+    "zcl.vault_session_create.input.v1", "zcl.vault_session_create.v1",
+    "account,wallet_scope,max_per_tx,max_per_window,reserve_floor,window_seconds,allowlist,expires_in,confirm", "wallet_scope",
+    "z23 vault session create --input='{\"account\":\"t1..\",\"wallet_scope\":\"dev\",\"max_per_tx\":\"0.02\",\"max_per_window\":\"0.02\",\"reserve_floor\":\"0.08\",\"window_seconds\":\"86400\"}'",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_WALLET, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OWNER,
+    ZCL_COMMAND_MODE_SYNC, ZCL_COMMAND_LATENCY_FOREGROUND,
+    ZCL_COMMAND_COST_MODERATE, ZCL_COMMAND_CONFIRM_PLAN_COMMIT,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_WALLET_REQUEST, ZCL_COMMAND_TRAIT_NONE,
+    zcl_native_handle_vault_session_create)
+
+ZCL_COMMAND_READY_READ(
+    "vault.session.list", "vault.session", "",
+    "List agent spend sessions; the token is always redacted",
+    "One row per minted agent spend session — for the named `account`, or "
+    "across every principal when `account` is omitted — with caps, window "
+    "accounting, expiry and revoked flag as persisted. The session id is "
+    "rendered redacted (first 8 chars + \"…\") on every row: the full token "
+    "is a bearer grant and crossed the wire exactly once, at mint. An empty "
+    "result means no grants exist, not that none were checked.",
+    ZCL_COMMAND_LIST_BUDGET,
+    "vault,session,agent,policy,list,grants",
+    "zcl.vault_session_list.input.v1", "zcl.vault_session_list.v1",
+    "account", "",
+    "z23 vault session list --input='{\"account\":\"t1..\"}'",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_WALLET_REQUEST, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_vault_session_list)
+
+ZCL_COMMAND_READY_COMMAND(
+    "vault.session.revoke", "vault.session", "",
+    "Revoke an agent spend session by its full token",
+    "Revokes one agent spend session, named by its full session id. Without "
+    "confirm, a non-mutating plan naming the (redacted) target plus the "
+    "commit next-action; with confirm:true, the grant is marked revoked and "
+    "the spend policy gate fails it closed from the next dispatch on — "
+    "in-flight window accounting is kept, so the revocation is auditable "
+    "rather than an edit of history. Idempotent on an already-revoked "
+    "session.", 0,
+    "vault,session,agent,policy,revoke,grant",
+    "zcl.vault_session_revoke.input.v1", "zcl.vault_session_revoke.v1",
+    "session_id,confirm", "",
+    "z23 vault session revoke --input='{\"session_id\":\"<32hex>\",\"confirm\":true}'",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_WALLET, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OWNER,
+    ZCL_COMMAND_MODE_SYNC, ZCL_COMMAND_LATENCY_FOREGROUND,
+    ZCL_COMMAND_COST_MODERATE, ZCL_COMMAND_CONFIRM_PLAN_COMMIT,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_WALLET_REQUEST, ZCL_COMMAND_TRAIT_NONE,
+    zcl_native_handle_vault_session_revoke)
+
+ZCL_COMMAND_BRANCH("vault.swap", "vault",
+                   "Release funds locked in an atomic-swap contract",
+                   ZCL_COMMAND_LAYER_APP)
+
+ZCL_COMMAND_READY_COMMAND(
+    "vault.swap.redeem", "vault.swap", "",
+    "Claim a funded swap HTLC by dispatching the node's swap_redeem",
+    "Without confirm, a non-mutating plan naming the swap id and the owning RPC "
+    "plus the commit next-action; with confirm:true, the swap_redeem RPC's own "
+    "result — that RPC builds the claim-branch redeem transaction, signs it "
+    "with the wallet's recipient key, broadcasts it and persists SWAP_REDEEMED. "
+    "The confirmation gate is the vault's only contribution; the transaction is "
+    "entirely the swap controller's. ZCL-chain leg only — a counterparty leg on "
+    "BTC/LTC/DOGE is settled by that chain's wallet, and the RPC says so.", 0,
+    "vault,swap,redeem,htlc,settle,secret,route",
+    "zcl.vault_swap_settle.input.v1", "zcl.vault_swap_settle.v1",
+    "swap_id,secret,funding_txid,vout,confirm", "",
+    "z23 vault swap redeem --input='{\"swap_id\":\"..\",\"secret\":\"<64hex>\"}'",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_WALLET, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OWNER,
+    ZCL_COMMAND_MODE_SYNC, ZCL_COMMAND_LATENCY_FOREGROUND,
+    ZCL_COMMAND_COST_MODERATE, ZCL_COMMAND_CONFIRM_PLAN_COMMIT,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_WALLET_REQUEST, ZCL_COMMAND_TRAIT_NONE,
+    zcl_native_handle_vault_swap_redeem)
+
+ZCL_COMMAND_READY_COMMAND(
+    "vault.swap.refund", "vault.swap", "",
+    "Reclaim an expired swap HTLC by dispatching the node's swap_refund",
+    "Without confirm, a non-mutating plan naming the swap id and the owning RPC "
+    "plus the commit next-action; with confirm:true, the swap_refund RPC's own "
+    "result — that RPC builds the timeout-branch refund transaction, signs it "
+    "with the wallet's refunder key, broadcasts it and persists SWAP_REFUNDED. "
+    "The CLTV precondition is enforced by that RPC, which refuses before the "
+    "locktime height and names the unlock height; the vault neither predicts "
+    "nor overrides it.", 0,
+    "vault,swap,refund,htlc,timeout,cltv,route",
+    "zcl.vault_swap_settle.input.v1", "zcl.vault_swap_settle.v1",
+    "swap_id,funding_txid,vout,confirm", "",
+    "z23 vault swap refund --input='{\"swap_id\":\"..\"}'",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_WALLET, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OWNER,
+    ZCL_COMMAND_MODE_SYNC, ZCL_COMMAND_LATENCY_FOREGROUND,
+    ZCL_COMMAND_COST_MODERATE, ZCL_COMMAND_CONFIRM_PLAN_COMMIT,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_WALLET_REQUEST, ZCL_COMMAND_TRAIT_NONE,
+    zcl_native_handle_vault_swap_refund)

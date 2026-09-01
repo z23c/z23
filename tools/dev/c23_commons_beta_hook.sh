@@ -407,8 +407,8 @@ beta_prepare_fixture() {
         "$package/src" "$package/tests" "$package/app" \
         "$second_package/include/visitor" "$second_package/src" \
         "$second_package/tests" "$second_package/app"
-    cp -a "$C23_BETA_FIXTURE_SOURCE/lib/base" "$root/dependencies/base"
-    cp -a "$C23_BETA_FIXTURE_SOURCE/lib/sha3" "$root/dependencies/sha3"
+    cp -a "$C23_BETA_FIXTURE_SOURCE/platform/modules/base" "$root/dependencies/base"
+    cp -a "$C23_BETA_FIXTURE_SOURCE/platform/modules/sha3" "$root/dependencies/sha3"
     cat >"$package/LICENSE" <<'EOF'
 MIT License
 
@@ -977,7 +977,7 @@ read -r PACKAGE_PUBLISHED BETA_PACKAGE_TRANSPORT PACKAGE_RELEASE_ID <<<"$(beta_s
 
 # Restart A so its ordinary package-host engine loads the dynamically
 # published stores. The package is absent from the compiled registry.
-! grep -q "$BETA_PACKAGE_ROOT" "$C23_BETA_FIXTURE_SOURCE/config/zcode_package_registry.def" ||
+! grep -q "$BETA_PACKAGE_ROOT" "$C23_BETA_FIXTURE_SOURCE/engine/composition/zcode_package_registry.def" ||
     beta_die "outside package leaked into the compiled registry"
 beta_restart "$BETA_A"
 # The pointer gate requires the publishing node's own reproduction evidence:
@@ -1027,7 +1027,7 @@ BETA_SECOND_API_ROOT="$BETA_VERSION_API_ROOT"
 [ "$BETA_SECOND_ROOT" != "$BETA_SHA3_ROOT" ] ||
     beta_die "second package exact root drifted: $BETA_SECOND_ROOT"
 ! grep -q "$BETA_SECOND_ROOT" \
-    "$C23_BETA_FIXTURE_SOURCE/config/zcode_package_registry.def" ||
+    "$C23_BETA_FIXTURE_SOURCE/engine/composition/zcode_package_registry.def" ||
     beta_die "second outside package leaked into the compiled registry"
 beta_restart "$BETA_B" "$BETA_A"
 # B is about to publish the second package's pointer: its own store must

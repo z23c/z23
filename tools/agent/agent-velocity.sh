@@ -129,7 +129,7 @@ echo "unique_authored_lines_basis=git diff --numstat -M -C over hand-authored fi
 # These are the files every lane edits, so two lanes touching one is where
 # conflicts come from. The list is by SHAPE, not by name, so a new .def or a
 # new lint baseline is covered without editing this script.
-REGISTRY_RE='^(Makefile|.*\.mk|lib/test/src/test_parallel\.c|config/commands/.*\.def|app/controllers/include/controllers/diagnostics_dumpers.*\.def|tools/lint/.*baseline.*\.txt|core/MANIFEST\.sha3|docs/DEFENSIVE_CODING\.md|docs/CODEBASE_MAP\.md|CLAUDE\.md|\.gitattributes|\.gitignore)$'
+REGISTRY_RE='^(Makefile|.*\.mk|tests/harness/src/test_parallel\.c|engine/composition/commands/.*\.def|engine/controllers/include/controllers/diagnostics_dumpers.*\.def|tools/lint/.*baseline.*\.txt|core/MANIFEST\.sha3|docs/DEFENSIVE_CODING\.md|docs/CODEBASE_MAP\.md|CLAUDE\.md|\.gitattributes|\.gitignore)$'
 shared=()
 for f in ${touched[@]+"${touched[@]}"}; do
     # NOT `printf … | grep -qE …`: grep -q writes nothing, so its exit status

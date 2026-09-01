@@ -5,7 +5,7 @@
 # "deleted" / "removed" / "no longer exists" while that code is STILL
 # PRESENT and STILL LIVE-CALLED. That is a lie a reader will act on
 # (e.g. "the legacy block-connect engine has been deleted" — but
-# lib/validation/src/connect_block.c still exists and boot_index.c calls
+# core/modules/validation/src/connect_block.c still exists and boot_index.c calls
 # connect_block()). This gate makes that specific class of lie a hard fail.
 #
 # It also pins one load-bearing FACT the docs cite to the real tree:
@@ -49,8 +49,8 @@ DOCS=$(printf '%s\n' $DOCS | sort -u)
 
 # Each row: regex|||path|||caller1,caller2|||symbol
 ROWS=(
-  'legacy[^.]*block-connect engine[^.]*\b(deleted|removed|no longer exists)\b|||lib/validation/src/connect_block.c|||config/src/boot_index.c,app/controllers/src/sync_controller_blocks.c|||connect_block'
-  'connect_block[^.]*\b(has been deleted|was deleted|is deleted|removed|no longer exists)\b|||lib/validation/src/connect_block.c|||config/src/boot_index.c|||connect_block'
+  'legacy[^.]*block-connect engine[^.]*\b(deleted|removed|no longer exists)\b|||core/modules/validation/src/connect_block.c|||engine/composition/src/boot_index.c,engine/controllers/src/sync_controller_blocks.c|||connect_block'
+  'connect_block[^.]*\b(has been deleted|was deleted|is deleted|removed|no longer exists)\b|||core/modules/validation/src/connect_block.c|||engine/composition/src/boot_index.c|||connect_block'
 )
 
 for row in "${ROWS[@]}"; do

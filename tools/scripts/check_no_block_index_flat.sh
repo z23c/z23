@@ -19,7 +19,7 @@ cd "$(dirname "$0")/../.."
 
 PATTERN='save_block_index_flat|load_block_index_flat|save_block_index_recent|load_block_index_sqlite|block_tree_db_write_block_index|boot_dispatch_blocks_table_hydrate'
 BASELINE="${ZCL_NO_BLOCK_INDEX_FLAT_BASELINE:-tools/scripts/check_no_block_index_flat_baseline.txt}"
-SCAN_ROOTS_TEXT="${ZCL_NO_BLOCK_INDEX_FLAT_SCAN_ROOTS:-app lib config src core}"
+SCAN_ROOTS_TEXT="${ZCL_NO_BLOCK_INDEX_FLAT_SCAN_ROOTS:-core engine contexts cognition platform}"
 read -r -a SCAN_ROOTS <<< "$SCAN_ROOTS_TEXT"
 
 if [ ! -r "$BASELINE" ]; then

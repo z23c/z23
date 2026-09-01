@@ -155,8 +155,8 @@ effective `ExecStart` via `systemctl show`, extracts the `-operator-lane=`
 argument, and refuses a canonical-lane action if that lane is declared
 canonical — but also refuses if **no** lane is declared at all, since an
 undeclared lane cannot be proven non-canonical. `-operator-lane=` is set
-directly on the process command line (see `deploy/zclassic23.service`,
-`deploy/zcl23-dev.service`, `deploy/zclassic23-standby.service`).
+directly on the process command line (see `platform/deploy/zclassic23.service`,
+`platform/deploy/zcl23-dev.service`, `platform/deploy/zclassic23-standby.service`).
 
 This is the general hazard from §3 in concrete form: if a drop-in performs an
 `ExecStart` reset (§3) and the person writing it copied an older argv that
@@ -170,11 +170,11 @@ the lane or fails closed. Any time a reconciliation touches a unit with an
 
 ## 8. Worked example: a port default shared by two units
 
-`deploy/zcl23-dev.service` and `deploy/zclassic23-standby.service` are
+`platform/deploy/zcl23-dev.service` and `platform/deploy/zclassic23-standby.service` are
 separate unit files meant to run on the same host at once, each with its own
 datadir and port set. Both currently default their P2P listen port to
-`8053` (`deploy/zcl23-dev.service:51`, and `STANDBY_PORT=8053` in
-`deploy/zclassic23-standby.service` / `deploy/zclassic23-standby.env.example`).
+`8053` (`platform/deploy/zcl23-dev.service:51`, and `STANDBY_PORT=8053` in
+`platform/deploy/zclassic23-standby.service` / `platform/deploy/zclassic23-standby.env.example`).
 Their RPC ports differ (`18252` vs `18272`), so only the P2P listener would
 collide.
 

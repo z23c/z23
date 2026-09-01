@@ -2,7 +2,7 @@
  *
  * Native handlers for the registry-owned `code` tree — the in-binary,
  * hierarchical, token-bounded source-code navigator. Each leaf opens the
- * lib/codeindex store (which self-rebuilds on open if the source tree is
+ * cognition/modules/codeindex store (which self-rebuilds on open if the source tree is
  * stale), runs one query, and renders exactly one bounded JSON document within
  * ZCL_COMMAND_RESULT_BUDGET: a structured array plus compact human one-liners.
  *
@@ -181,8 +181,8 @@ static bool code_path_is_consensus_risk(const char *path)
     if (!path) return false;
     if (strncmp(path, "core/", 5) == 0) return true;   /* whole sealed core */
     static const char *const prefixes[] = {
-        "lib/validation/", "lib/chain/", "lib/primitives/", "lib/crypto/",
-        "lib/sapling/", "app/jobs/",
+        "core/modules/validation/", "core/modules/chain/", "core/modules/primitives/", "core/modules/crypto/",
+        "core/modules/sapling/", "engine/jobs/",
     };
     for (size_t i = 0; i < sizeof(prefixes) / sizeof(prefixes[0]); i++)
         if (strncmp(path, prefixes[i], strlen(prefixes[i])) == 0) return true;
@@ -1082,12 +1082,14 @@ void zcl_native_handle_code_map(const struct zcl_command_request *request,
      * count is aggregate so lib/ and app/ include their child groups. */
     static const char *const source_roots[] = {
 #define SOURCE_ROOT(name_) name_,
-#include "../../config/source_roots.def"
+#include "../../engine/composition/source_roots.def"
 #undef SOURCE_ROOT
     };
     int total = 0, nroot = 0;
     for (size_t i = 0;
          i < sizeof(source_roots) / sizeof(source_roots[0]); i++) {
+        int fc = codeindex_count_files_in_group(ci, source_roots[i], true);
+        if (fc <= 0) continue;
         if (nroot >= CODE_MAP_ROOT_CAP) {
             json_free(&roots); json_free(&shapes);
             codeindex_close(ci);
@@ -1098,8 +1100,6 @@ void zcl_native_handle_code_map(const struct zcl_command_request *request,
                                    "increase CODE_MAP_ROOT_CAP");
             return;
         }
-        int fc = codeindex_count_files_in_group(ci, source_roots[i], true);
-        if (fc < 0) fc = 0;
         total += fc;
         const char *group_purpose = "";
         for (int g = 0; g < ng; g++)
@@ -1118,23 +1118,29 @@ void zcl_native_handle_code_map(const struct zcl_command_request *request,
         nroot++;
     }
 
-    /* The eight app/ shapes: DIRECT file counts (a shape has no sub-children),
-     * from the canonical ci_app_shapes() list, each with its baked purpose taken
-     * from the matching group row (avoids the private taxonomy function). */
+    /* Product shapes recur inside feature rooms and the engine. Aggregate
+     * their direct counts without inventing a second physical `app/` tree. */
     size_t nsh = 0;
     const char *const *sh = ci_app_shapes(&nsh);
     int nshape = 0;
     for (size_t i = 0; i < nsh && nshape < CODE_MAP_SHAPE_CAP; i++) {
         char path[64];
-        (void)snprintf(path, sizeof(path), "app/%s", sh[i]);
-        int fc = codeindex_count_files_in_group(ci, path, false);
-        if (fc < 0) fc = 0;
+        (void)snprintf(path, sizeof(path), "*/%s", sh[i]);
+        int fc = 0;
         const char *purpose = "";
-        for (int g = 0; g < ng; g++)
-            if (strcmp(groups[g].path, path) == 0) {
-                purpose = groups[g].purpose;
-                break;
-            }
+        for (int g = 0; g < ng; g++) {
+            size_t path_length = strlen(groups[g].path);
+            size_t shape_length = strlen(sh[i]);
+            if (path_length <= shape_length ||
+                groups[g].path[path_length - shape_length - 1] != '/' ||
+                strcmp(groups[g].path + path_length - shape_length,
+                       sh[i]) != 0)
+                continue;
+            int direct = codeindex_count_files_in_group(
+                ci, groups[g].path, false);
+            if (direct > 0) fc += direct;
+            if (!purpose[0]) purpose = groups[g].purpose;
+        }
         char ptrunc[64];
         code_trunc(ptrunc, sizeof(ptrunc), purpose, 48);
         struct json_value o;
@@ -1175,9 +1181,9 @@ void zcl_native_handle_code_map(const struct zcl_command_request *request,
                            counts.registry_nodes);
     char summary[176];
     (void)snprintf(summary, sizeof(summary),
-                   "%d C23 files + %d registry nodes across %d source roots; "
-                   "run `code group <path>` to descend",
-                   counts.c23_files, counts.registry_nodes, nroot);
+                   "%d C23 files + %d registry nodes across %d physical roots "
+                   "+ %d product shapes; run `code group <path>` to descend",
+                   counts.c23_files, counts.registry_nodes, nroot, nshape);
     (void)json_push_kv_str(&reply->data, "summary", summary);
 
     json_free(&roots); json_free(&shapes);
@@ -1556,7 +1562,7 @@ void zcl_native_handle_code_room(const struct zcl_command_request *request,
 /* The blast-radius leaf: given one changed FILE, the reverse-dependency
  * closure — every file that transitively depends on it, so an agent can SEE
  * "what breaks if I touch this" before editing. Entirely reuses the existing
- * engine: codeindex_impact_closure (lib/codeindex/src/codeindex_impact.c) for
+ * engine: codeindex_impact_closure (cognition/modules/codeindex/src/codeindex_impact.c) for
  * the file->symbol->reverse-caller walk, and the SAME
  * agent_impact_apply_shared_rules() resolver code.tests/devloop_plan.c use
  * (via code_emit_route) for the downstream focused test groups — no graph
@@ -1684,7 +1690,7 @@ void zcl_native_handle_code_impact(const struct zcl_command_request *request,
 /* ── code.merkle ────────────────────────────────────────────────────────── */
 /* The identity leaf: one 32-byte SHA3 answer to "what does this checkout
  * contain", and one 32-byte answer per directory to "did anything under here
- * change since I last looked". Backed by lib/codeindex/src/codeindex_merkle.c,
+ * change since I last looked". Backed by cognition/modules/codeindex/src/codeindex_merkle.c,
  * whose snapshot makes a repeat call re-read only the files whose stat cache key
  * moved — so this is cheap enough to call between edits, and the `build` object
  * reports exactly what the call cost (files_read, bytes_read, nodes_hashed).
@@ -1860,7 +1866,7 @@ void zcl_native_handle_code_merkle(const struct zcl_command_request *request,
  * The management view of one module: what it owns, what it is for, what
  * PROVES it, what it depends on, and where it is weak — all generated, none
  * of it remembered. Every list this leaf prints is derived at call time from
- * config/lib_module_order.def (through the code index's group rows), the tree
+ * engine/composition/lib_module_order.def (through the code index's group rows), the tree
  * itself, and the registered test catalog. No table in this repository has to
  * be updated when a file, a symbol, or a test group is added; such a table is
  * exactly the thing that would go stale.
@@ -1930,7 +1936,7 @@ static size_t code_territory_route(const char *path,
 
 /* The no-arg form: every territory the index declares, with its direct file
  * count. Derived from the group rows, which are themselves the X-macro paste
- * of config/lib_module_order.def plus the app shapes.
+ * of engine/composition/lib_module_order.def plus the app shapes.
  *
  * ONE array, not the usual structured-plus-`lines` pair. There are ~64
  * territories, and rendering each twice puts the menu over the 4096-byte
@@ -2590,12 +2596,12 @@ static void general_render_brief(struct codeindex *ci, const char *root,
     (void)json_push_kv_int(&weak, "unproven", b->unproven);
     /* The second declared hole, and the one closest to the failure this whole
      * command exists to prevent: near-duplicate code inside a territory is
-     * exactly what a lane re-implements when it acts on memory. lib/fingerprint
+     * exactly what a lane re-implements when it acts on memory. cognition/modules/fingerprint
      * would answer it and has not landed, so the field says UNKNOWN rather
      * than being left out — an absent duplicate section reads as "no
      * duplicates", which is the belief that cost us the ActiveRecord rebuild. */
     (void)json_push_kv_str(&weak, "duplicate_clusters",
-                           "unknown — lib/fingerprint has not landed; this "
+                           "unknown — cognition/modules/fingerprint has not landed; this "
                            "brief makes no claim either way");
     (void)json_push_kv_int(&weak, "headers_extern_c", r->headers_extern_c);
     (void)json_push_kv_int(&weak, "headers_without_functions",

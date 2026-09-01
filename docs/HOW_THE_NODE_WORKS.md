@@ -103,7 +103,7 @@ server-side regex tail, `z23 dbquery` for SELECT-only node-database
 inspection, and `z23 ops mirror` for the local reference-daemon view.
 
 The complete subsystem list is one array in code:
-`app/controllers/src/diagnostics_registry.c` (`g_dumpers[]`). Adding a new
+`engine/controllers/src/diagnostics_registry.c` (`g_dumpers[]`). Adding a new
 introspectable subsystem is one entry there plus one `*_dump_state_json` function —
 no new command route or schema.
 
@@ -121,8 +121,8 @@ no new command route or schema.
 - The eight code "shapes" (controller / service / model / job / supervisor /
   condition / event / storage-adapter). Seven live one-folder-each under `app/`
   (`controllers`, `services`, `models`, `jobs`, `supervisors`, `conditions`,
-  `events`); the Storage Adapter shape lives in the top-level `adapters/` + `ports/`
-  trees (`app/views/` holds explorer templates and is not one of the eight). Shape
+  `events`); the Storage Adapter shape lives in the top-level `platform/adapters/` + `platform/ports/`
+  trees (`contexts/explorer/views/` holds explorer templates and is not one of the eight). Shape
   placement is lint-enforced; per `docs/FRAMEWORK.md` Model/Condition/Job and the
   Storage Adapter are real and enforced, Supervisor is partial, Controller/Service
   still carry legacy debt.
@@ -137,7 +137,7 @@ re-derived from genesis.
 
 The direction (`docs/work/self-verified-tip-plan.md`) is a **self-verified
 UTXO anchor rebuild**: the internal boot path is `-refold-from-anchor`
-(`app/jobs/src/refold_progress.c`, `app/services/src/anchor_selfmint.c`),
+(`engine/jobs/src/refold_progress.c`, `engine/services/src/anchor_selfmint.c`),
 which rebuilds the coin set forward from a compiled checkpoint instead of
 borrowing it. Landing this removes the older recovery-import code that feeds
 the borrowed-seed path. A complete atomic state install and copy proof must
@@ -167,7 +167,7 @@ and `z23 dumpstate reducer_frontier`.
    Drill down with `z23 core status` and `z23 dumpstate
    reducer_frontier` only if needed. A doc can be stale;
    the node cannot.
-3. To understand one stage, open its file — `app/jobs/src/<stage>_stage.c`. Each is
+3. To understand one stage, open its file — `engine/jobs/src/<stage>_stage.c`. Each is
    one `step_*` function that does exactly the advance-or-name-a-blocker contract
    described in section 2.
 

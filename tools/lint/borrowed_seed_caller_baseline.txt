@@ -7,6 +7,6 @@
 # Enforced by tools/lint/check_no_new_borrowed_seed.sh (make lint ->
 # check-no-new-borrowed-seed). Remove a line when its caller is deleted; never
 # add one.
-app/services/src/reindex_epilogue.c
-app/services/src/utxo_recovery_restore.c
-config/src/boot_refold_staged.c
+engine/services/src/reindex_epilogue.c
+engine/services/src/utxo_recovery_restore.c
+engine/composition/src/boot_refold_staged.c

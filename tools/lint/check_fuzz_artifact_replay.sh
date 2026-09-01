@@ -6,7 +6,7 @@
 #
 # THE INCIDENT. On 2026-07-14 a fuzzer found that a five-byte script from any
 # peer hangs the node forever. The bytes were committed as
-# lib/test/fuzz_seeds/script/timeout-689f73ac89dc1264744711de8383742b90c892b0.bin
+# tests/harness/fuzz_seeds/script/timeout-689f73ac89dc1264744711de8383742b90c892b0.bin
 # and read by nobody for two weeks. It surfaced only because a human went
 # looking. The galling part: THREE mechanisms had already replayed it and
 # already gone red.
@@ -25,10 +25,10 @@
 # So the replay capability was never missing. The VERDICT ROUTING was. Nothing
 # that could fail a build ever read the answer. This gate is that route.
 #
-# WHAT IT CHECKS. Every artifact-prefixed seed under lib/test/fuzz_seeds/
+# WHAT IT CHECKS. Every artifact-prefixed seed under tests/harness/fuzz_seeds/
 # (crash- / timeout- / oom- / leak- / slow-unit- / minimized-from-, the six
 # prefixes libFuzzer writes — see ARTIFACT_RE below for where each comes from)
-# must carry exactly one verdict line in lib/test/fuzz_seeds/ARTIFACT_VERDICTS.txt,
+# must carry exactly one verdict line in tests/harness/fuzz_seeds/ARTIFACT_VERDICTS.txt,
 # and that verdict must still be TRUE of what the artifact does today:
 #
 #   ledger says      replays clean            replays as hang/crash
@@ -139,7 +139,7 @@ source "$SCRIPT_DIR/gate_lib.sh"
 # shellcheck source=tools/scripts/fuzz_verdict_lib.sh
 . "$ROOT/tools/scripts/fuzz_verdict_lib.sh" || { echo "$0: cannot source tools/scripts/fuzz_verdict_lib.sh" >&2; exit 2; }
 
-SEED_ROOT="lib/test/fuzz_seeds"
+SEED_ROOT="tests/harness/fuzz_seeds"
 LEDGER="$SEED_ROOT/ARTIFACT_VERDICTS.txt"
 GATE="check_fuzz_artifact_replay"
 
@@ -195,7 +195,7 @@ BIN_DIR="${ZCL_LINT_BIN_DIR:-build/bin}"
 PI_BIN_DIR="${ZCL_LINT_PATTERNINIT_BIN_DIR:-build/fuzz-patterninit/bin}"
 
 # Env equivalents of the two flags, so the C selftest registry in
-# lib/test/src/test_make_lint_gates.c can drive this gate through
+# tests/harness/src/test_make_lint_gates.c can drive this gate through
 # run_gate_script(), which passes a mode env var and no argv. Same shape as
 # ZCL_CONDITION_COOLDOWN_SELFTEST / ZCL_MARKDOWN_LINKS_SELFTEST.
 LEDGER_ONLY="${ZCL_FUZZ_REPLAY_LEDGER_ONLY:-0}"
@@ -274,7 +274,7 @@ fi
 # Never hand-written: a new fuzz target is covered the day its rule lands, and
 # a corpus whose binary rule was renamed away becomes a failure instead of a
 # quiet skip. The mapping the Makefile itself uses (fuzz-ci, Makefile:3932) is
-# kind = basename minus "fuzz_", corpus dir = lib/test/fuzz_seeds/<kind>.
+# kind = basename minus "fuzz_", corpus dir = tests/harness/fuzz_seeds/<kind>.
 declare -A BIN_KIND=()
 kind_count=0
 while IFS= read -r k; do
@@ -653,7 +653,7 @@ echo "[$GATE] replaying ${#selected[@]} artifact(s) at -timeout=${REPLAY_TIMEOUT
 #
 #   * `xargs` without -0 does quote processing, so ONE artifact named with a
 #     single quote aborted xargs mid-stream. Everything after it never ran.
-#     Planting lib/test/fuzz_seeds/script/crash-'x.bin took a run from
+#     Planting tests/harness/fuzz_seeds/script/crash-'x.bin took a run from
 #     "RC=1, 14 live hangs named" to "RC=0, 0 clean, 0 reproducing".
 #   * the whole pipeline sat inside `done < <( ... )`, whose exit status bash
 #     discards. ZCL_FUZZ_REPLAY_JOBS=notanumber -> "xargs: invalid number" ->

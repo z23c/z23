@@ -165,7 +165,7 @@ static int respond(int fd, const char *method, const char *params) {
     char http[16384];
     int hlen = snprintf(http, sizeof(http),
         "HTTP/1.1 200 OK\r\n"
-        "Content-Type: application/json\r\n"
+        "Content-Type: engine/application/json\r\n"
         "Content-Length: %zu\r\n"
         "\r\n%s",
         strlen(result), result);

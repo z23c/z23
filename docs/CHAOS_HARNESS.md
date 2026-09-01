@@ -19,7 +19,7 @@ seed-reproducible consensus/boot scenarios.
 `build/bin/z23`, drives it briefly, `SIGKILL`s its whole process
 group, restarts it, and asserts the recovery invariants. It is the
 end-to-end counterpart to the in-process unit test
-`lib/test/src/test_kill9_recovery.c`.
+`tests/harness/src/test_kill9_recovery.c`.
 
 ### Isolation contract (the hard rails)
 
@@ -246,7 +246,7 @@ assertions over broad smoke checks.
 
 Every command above is bookkeeping-only: `sim_peer` counts blocks and bytes
 but never calls into consensus. `mode simnet` switches a scenario into a
-different engine that drives an actual `lib/sim/simnet_cluster` — real
+different engine that drives an actual `engine/modules/sim/simnet_cluster` — real
 `connect_block`/`disconnect_block`, real nChainWork fork-choice, real
 Sapling-ready coins views. Use it when a scenario needs to prove something
 about *consensus behavior* (a reorg really disconnects and reconnects, a
@@ -319,7 +319,7 @@ and `tools/sim/scenarios/simnet_competing_reorg.scenario` (two isolated
 branches of different work, relayed and delivered together, prove the
 loser really reorgs via real `disconnect_block`/`connect_block`). Both run
 as part of `make chaos` like every other scenario. The in-process
-regression test lives in `test_chaos_harness` (`lib/test/src/test_chaos_harness.c`),
+regression test lives in `test_chaos_harness` (`tests/harness/src/test_chaos_harness.c`),
 including a deliberately-unconverged scenario proving the invariant check
 fires instead of silently reporting PASS.
 
@@ -355,13 +355,13 @@ monotonically increasing event counter — shared by every node's line for the
 same event), `event` (the command name that triggered the snapshot),
 `node_id`, and three nested objects: `chain` (`tip_height`, `tip_hash`),
 `coins` (`commitment_hex`, `utxo_count` — the XOR-accumulator UTXO
-commitment, see `lib/coins/include/coins/utxo_commitment.h`), and `cluster`
+commitment, see `core/modules/coins/include/coins/utxo_commitment.h`), and `cluster`
 (`delivery_fingerprint`, `byzantine_rejected` — cluster-wide, so identical
 across one event's lines).
 
 Query a trace after a run with `simnet_trace_query` (`tools/sim/
 simnet_trace_query.c`, `make tools/sim/simnet_trace_query`), a standalone
-linear-scan filter that links only `lib/json` — no DB, no node libs, no
+linear-scan filter that links only `platform/modules/json` — no DB, no node libs, no
 simulator code, same discipline as `tools/postmortem_to_scenario.c`:
 
 ```bash
@@ -374,18 +374,18 @@ them prints every line. A match-count summary always goes to stderr so it
 never pollutes piped stdout.
 
 **Why this isn't "reuse the live diagnostics dumpers":** every
-`<name>_dump_state_json()` registered in `app/controllers/include/
+`<name>_dump_state_json()` registered in `engine/controllers/include/
 controllers/diagnostics_dumpers.def` reads ONE live process's global
 singleton state (or a SQLite table on the live node's `node.db`) — none
 take an explicit state instance as a parameter, because a real node has
-exactly one of everything. `simnet_cluster` (`lib/sim/include/sim/
+exactly one of everything. `simnet_cluster` (`engine/modules/sim/include/sim/
 simnet_cluster.h`) is a pure in-memory, N-instance simulator: each node owns
 its own `struct coins_view_cache` and retained block set and never touches
 the live process's globals, so there is no existing per-instance dumper to
-call. `lib/sim/include/sim/simnet_trace.h` instead reuses, byte-for-byte,
+call. `engine/modules/sim/include/sim/simnet_trace.h` instead reuses, byte-for-byte,
 the public `simnet_cluster` accessors already exposed for exactly this kind
 of inspection (`simnet_cluster_tip_hash`/`_tip_height`/`_coins_digest`/
-`_delivery_fingerprint`/`_byzantine_rejected`) and the same `lib/json`
+`_delivery_fingerprint`/`_byzantine_rejected`) and the same `platform/modules/json`
 library the diagnostics registry itself uses to serialize.
 
 ## Cost assertions live next door, not in a scenario
@@ -407,8 +407,8 @@ after the command has focused unit coverage.
 
 Existing examples:
 
-- Allocation faults: `lib/base/src/safe_alloc.c` plus `trigger_oom_at`.
-- Network partitions: `lib/net/src/net_fault.c` plus `partition_network`.
+- Allocation faults: `platform/modules/base/src/safe_alloc.c` plus `trigger_oom_at`.
+- Network partitions: `core/modules/net/src/net_fault.c` plus `partition_network`.
 
 ## From Capsule To Scenario
 
@@ -461,7 +461,7 @@ labeled starting point for the manual steps below, not a proven repro. The
 emitted `seed` line is the tape's informational xoshiro register snapshot,
 not the original scalar seed — it will not reproduce the capsule's exact RNG
 stream in a fresh run (see the generated file's own comment, and
-`examples/09_seed_replay.c` for the exact-replay path via
+`docs/examples/09_seed_replay.c` for the exact-replay path via
 `postmortem_capsule_load_tape()` / `z23 ops postmortem replay`).
 
 ## Reproducing a failure

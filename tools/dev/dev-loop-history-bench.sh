@@ -26,10 +26,10 @@ git -C "$ROOT" rev-parse --verify "$HISTORY_BASE^{commit}" >/dev/null 2>&1 ||
 is_production_tu()
 {
     case "$1" in
-        src/*.c|app/*/src/*.c|config/src/*.c|lib/*/src/*.c|\
-        domain/*/src/*.c|application/*/src/*.c|ports/*/src/*.c|\
-        adapters/*/src/*.c|tools/command/*.c|tools/dev/*.c|tools/*.c)
-            case "$1" in lib/test/*|tools/fuzz/*|tools/sim/*) return 1;; esac
+        src/*.c|app/*/src/*.c|engine/composition/src/*.c|lib/*/src/*.c|\
+        domain/*/src/*.c|engine/application/*/src/*.c|platform/ports/*/src/*.c|\
+        platform/adapters/*/src/*.c|tools/command/*.c|tools/dev/*.c|tools/*.c)
+            case "$1" in tests/harness/include/test/*|tools/fuzz/*|tools/sim/*) return 1;; esac
             return 0
             ;;
     esac
@@ -39,9 +39,9 @@ is_production_tu()
 is_forbidden_authority()
 {
     case "$1" in
-        core/*|lib/consensus/*|lib/validation/*|lib/storage/*|lib/coins/*|\
-        lib/chain/*|lib/mining/*|lib/wallet/*|lib/net/*|app/jobs/*|\
-        app/models/*|app/supervisors/*|config/src/*)
+        core/*|lib/consensus/*|core/modules/validation/*|engine/modules/storage/*|core/modules/coins/*|\
+        core/modules/chain/*|core/modules/mining/*|contexts/wallet/*|core/modules/net/*|engine/jobs/*|\
+        engine/models/*|engine/supervisors/*|engine/composition/src/*)
             return 0
             ;;
     esac
@@ -72,8 +72,8 @@ has_direct_state_access()
 is_pure_candidate_root()
 {
     case "$1" in
-        lib/base/src/*.c|lib/codec/src/*.c|lib/json/src/*.c|\
-        domain/encoding/src/*.c|app/views/src/*.c|app/conditions/src/*.c)
+        platform/modules/base/src/*.c|platform/modules/codec/src/*.c|platform/modules/json/src/*.c|\
+        platform/domain/encoding/src/*.c|contexts/explorer/views/src/*.c|engine/conditions/src/*.c)
             return 0
             ;;
     esac
@@ -101,9 +101,9 @@ load_live_manifest()
           text=substr(text, RSTART+RLENGTH)
         }
       }
-    ' "$ROOT/config/hotswap_swappable.def" \
-      "$ROOT/config/hotswap_islands.def" \
-      "$ROOT/config/hotswap_services.def")
+    ' "$ROOT/engine/composition/hotswap_swappable.def" \
+      "$ROOT/engine/composition/hotswap_islands.def" \
+      "$ROOT/engine/composition/hotswap_services.def")
 }
 
 load_shadow_manifest()
@@ -123,7 +123,7 @@ load_shadow_manifest()
         }
         if (active && count>=2) { print owner "\t" service; active=0 }
       }
-    ' "$ROOT/config/hotswap_shadow_owners.def")
+    ' "$ROOT/engine/composition/hotswap_shadow_owners.def")
     while IFS=$'\t' read -r service members; do
         for owner in $members; do HOT_EXECUTE["$owner"]="$service"; done
     done < <(awk '
@@ -137,7 +137,7 @@ load_shadow_manifest()
         }
         if (active && count>=2) { print service "\t" members; active=0 }
       }
-    ' "$ROOT/config/hotswap_shadow_owners.def")
+    ' "$ROOT/engine/composition/hotswap_shadow_owners.def")
 }
 
 load_service_manifest()
@@ -155,7 +155,7 @@ load_service_manifest()
           rest=substr(rest,RSTART+RLENGTH)
         }
       }
-    ' "$ROOT/config/hotswap_services.def")
+    ' "$ROOT/engine/composition/hotswap_services.def")
 }
 
 load_hotfork_manifest()
@@ -173,7 +173,7 @@ load_hotfork_manifest()
           rest=substr(rest,RSTART+RLENGTH)
         }
       }
-    ' "$ROOT/config/hotfork_capsules.def")
+    ' "$ROOT/engine/composition/hotfork_capsules.def")
 }
 
 classify()
@@ -199,7 +199,7 @@ classify()
         printf 'eligible_but_unregistered\tpure candidate outside current islands'
     else
         case "$path" in
-            tools/command/*.c|app/controllers/*.c|app/controllers/src/*.c)
+            tools/command/*.c|engine/controllers/*.c|engine/controllers/src/*.c)
                 printf 'blocked_whole_node_build_assumptions\thost command ABI coupling'
                 ;;
             *)
@@ -217,23 +217,23 @@ load_hotfork_manifest
 if [ "$MODE" = "--self-test" ]; then
     [ "$(classify core/consensus/src/example.c | cut -f1)" = forbidden_authority_surface ] ||
         fail 'forbidden authority classification regressed'
-    [ "$(classify lib/codec/src/cursor.c | cut -f1)" = eligible_but_unregistered ] ||
+    [ "$(classify platform/modules/codec/src/cursor.c | cut -f1)" = eligible_but_unregistered ] ||
         fail 'pure codec classification regressed'
-    [ "$(classify app/controllers/src/status_native_handlers.c | cut -f1)" = COMPILE_ONLY ] ||
+    [ "$(classify engine/controllers/src/status_native_handlers.c | cut -f1)" = COMPILE_ONLY ] ||
         fail 'compiled island classification regressed'
-    [ "$(classify app/services/src/zcode_c23_corpus_service.c | cut -f1)" = HOT_SHADOW_CORE ] ||
+    [ "$(classify contexts/commons/services/src/zcode_c23_corpus_service.c | cut -f1)" = HOT_SHADOW_CORE ] ||
         fail 'service island classification regressed'
-    [ "$(classify app/services/src/vault_intent_decision_service.c | cut -f1)" = HOT_SHADOW_CORE ] ||
+    [ "$(classify contexts/wallet/services/src/vault_intent_decision_service.c | cut -f1)" = HOT_SHADOW_CORE ] ||
         fail 'shadow service classification regressed'
     [ "$(classify tools/dev/devloop_cycle.c | cut -f1)" = COMPILE_ONLY ] ||
         fail 'static-shell compile-only classification regressed'
-    [ "$(classify lib/vcs/src/source_package_checkout.c | cut -f1)" = HOT_FORK ] ||
+    [ "$(classify contexts/commons/modules/vcs/src/source_package_checkout.c | cut -f1)" = HOT_FORK ] ||
         fail 'HOT_FORK capsule classification regressed'
     [ "$(classify tools/command/native_dev_command.c | cut -f1)" = HOT_FORK ] ||
         fail 'highest-churn HOT_FORK owner classification regressed'
     [ "$(classify tools/command/native_dev_hotswap.c | cut -f1)" = HOT_FORK ] ||
         fail 'hot-swap receipt HOT_FORK owner classification regressed'
-    [ "$(classify lib/vcs/src/vcs_devloop.c | cut -f1)" = HOT_FORK ] ||
+    [ "$(classify contexts/commons/modules/vcs/src/vcs_devloop.c | cut -f1)" = HOT_FORK ] ||
         fail 'ZVCS envelope HOT_FORK owner classification regressed'
     printf 'dev-loop-history-bench: self-test PASS\n'
     exit 0

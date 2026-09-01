@@ -55,16 +55,16 @@ JSON (JSON is display-only).
 
 ## Existing foundations (reuse — do not duplicate)
 
-- `lib/vcs/package_manifest.*` — frozen content.v2 manifest + chunk verify (KAT in P2P_SOURCE_HOSTING.md)
-- `lib/vcs/package_swarm.*` — pure ANNOUNCE/WANT/DATA/CANCEL wire codec
-- `lib/vcs/vcs_object.*` — CAS put discipline (tmp/fsync/atomic rename, rehash on read)
-- `lib/zslp/` codec + `app/models/zslp_ledger.*` — contributor token + badge assets
-- `lib/znam/` + `app/models/znam.*` — ZNAM names (`ZNAM_TYPE_CONTENT` fits package roots)
-- `app/models/principal.*` + `auth_challenge.*` — external pubkey identity
-- `lib/net/peer_scoring.*` — offence taxonomy (INVALID_CHUNK=50 already exists)
-- `app/controllers/src/name_site_controller.c` — web/native/model integration template
+- `contexts/commons/modules/vcs/package_manifest.*` — frozen content.v2 manifest + chunk verify (KAT in P2P_SOURCE_HOSTING.md)
+- `contexts/commons/modules/vcs/package_swarm.*` — pure ANNOUNCE/WANT/DATA/CANCEL wire codec
+- `contexts/commons/modules/vcs/vcs_object.*` — CAS put discipline (tmp/fsync/atomic rename, rehash on read)
+- `contexts/market/modules/zslp/` codec + `engine/models/zslp_ledger.*` — contributor token + badge assets
+- `contexts/naming/modules/znam/` + `engine/models/znam.*` — ZNAM names (`ZNAM_TYPE_CONTENT` fits package roots)
+- `engine/models/principal.*` + `auth_challenge.*` — external pubkey identity
+- `core/modules/net/peer_scoring.*` — offence taxonomy (INVALID_CHUNK=50 already exists)
+- `contexts/explorer/controllers/src/name_site_controller.c` — web/native/model integration template
 - Onion routes: prefix dispatch in `https_server.c` + `onion_service.c`; classify
-  new routes in `lib/net/src/onion_ratelimit.c`
+  new routes in `core/modules/net/src/onion_ratelimit.c`
 
 ## The 15 slices (build in this order; each lands green as its own commit)
 
@@ -190,7 +190,7 @@ the tree today:
 package is **bit-identical reproduction by any third party**: an
 independent rebuild of the same package root + recipe root + dependency
 lock that emits byte-for-byte the committed artifacts
-(`lib/vcs/package_reproduce.*` compares two `package_build` receipts and
+(`contexts/commons/modules/vcs/package_reproduce.*` compares two `package_build` receipts and
 names the first divergence). It is runnable today —
 `zclassic23-package-verify <root> --store=<dir> --emit=<dir>
 --lock-root=<hex> --reproduce-against=<build-report>` exits 0 on
@@ -199,7 +199,7 @@ naming the diverging rule otherwise. `zcode package verify` reports the
 `reproduction` object over the receipts filed under
 `<datadir>/zcode/receipts/` (reproduced = ≥2 distinct build receipts
 committing byte-identical output sets), and the reward-eligibility gates
-5–8 (`lib/vcs/package_eligible.*`) pass on a recorded reproduction with
+5–8 (`contexts/commons/modules/vcs/package_eligible.*`) pass on a recorded reproduction with
 no quorum at all. The ≥2 approved-signer attestation quorum is now
 explicitly the **latency optimization** over reproduction — fast-path
 trust before a local reproduction exists, never a substitute for one.
@@ -209,7 +209,7 @@ and receipts carry no signer identity, so "independent" is currently
 "distinct build events recorded locally", not proof of distinct
 machines).
 
-- **Library:** `lib/vcs/` — release envelope + node-bound acceptance,
+- **Library:** `contexts/commons/modules/vcs/` — release envelope + node-bound acceptance,
   `package_store` (10 GiB CAS, `-packagehost`/`-packagequota`, quota pools
   20/40/30/10 pins/hot/rare/staging, 64 MiB package cap), `package_publish`
   (license + manifest grammar), `package_index`, `package_contributor` +
@@ -241,7 +241,7 @@ machines).
   `zcode.badge.{eligible,plan,issue}`, `zcode.seed.{status,ratio}`,
   `zcode.storage.status`. `discover help zcode` enumerates the live tree.
 - **Site:** `/zcode*` routes on both HTTPS and the onion service
-  (`app/controllers/src/zcode_site_controller.c` + `app/views/src/zcode_view*.c`,
+  (`contexts/commons/controllers/src/zcode_site_controller.c` + `contexts/explorer/views/src/zcode_view*.c`,
   shared `site.css`/layout, same projections as the commands).
 
 Former numbered tail (both owner-gated and now explicitly deferred — they
@@ -264,13 +264,13 @@ Known honest gaps (named by the slice agents, none blocking):
 - POPULAR_PACKAGE / RARE_PACKAGE_SEEDER badges and the verified-bytes /
   distinct-users leaderboard categories report unavailable until slice-12
   facts accumulate on a real network.
-- `lib/kernel/src/command_registry.c` gained `day` as an input key in the
+- `engine/modules/kernel/src/command_registry.c` gained `day` as an input key in the
   slice-12 commit (repairs a pre-existing CLI-side rejection of
   `zcode reward plan/commit --input='{"day":...}'`).
 - The reward ledger/service book start empty on pre-ZCODE datadirs
   (fail-open history, by design).
 - The agentic-development object wires now exist in
-  `lib/vcs/include/vcs/zcode_dev.h`; their CAS/task-index and typed command
+  `contexts/commons/modules/vcs/include/vcs/zcode_dev.h`; their CAS/task-index and typed command
   adapters are not yet live. The existing ZBuild worker supervisor does not
   yet claim or execute actions. See
   [`ZCODE_DEVELOPMENT_NETWORK.md`](./ZCODE_DEVELOPMENT_NETWORK.md) for the

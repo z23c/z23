@@ -1,0 +1,73 @@
+/* The `ops.telemetry.storage` branch. Owned by the storage telemetry lane.
+ *
+ * summary/database/disk are READY: they render the typed `storage` snapshot
+ * (platform/modules/util/include/util/telemetry/storage_fields.def, filled by
+ * engine/services/src/storage_telemetry_fill.c) through the one shared renderer.
+ *
+ * cache is still PLANNED, and honestly so. No storage subsystem in this build
+ * publishes a bounded cache's occupancy, hit ratio or eviction count: the UTXO
+ * overlay (coins_ram) keeps no hit/miss counters, and SQLite's own page-cache
+ * counters are only reachable through sqlite3_db_status() on a LIVE handle,
+ * which takes that connection's mutex on the RPC thread and would queue the
+ * reply behind the reducer's write transaction — the exact failure this whole
+ * surface exists to avoid. A leaf that cannot answer fails closed with exit 3
+ * and names what is missing; it does not return an empty object. */
+
+ZCL_COMMAND_BRANCH("ops.telemetry.storage", "ops.telemetry",
+                   "Databases, indexes, cache and disk",
+                   ZCL_COMMAND_LAYER_OPS)
+
+ZCL_COMMAND_READY_READ(
+    "ops.telemetry.storage.summary", "ops.telemetry.storage", "",
+    "Storage posture",
+    "Read live from the running node at call time from the typed storage snapshot: database reachability, block-index integrity and disk headroom against the refuse threshold.", 0,
+    "telemetry,storage,summary,database,disk",
+    "zcl.command.empty_input.v1", "zcl.telemetry.storage.summary.v1", "", "",
+    "z23 ops telemetry storage summary",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_DEV_STATE_READ, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_telemetry_storage_summary)
+
+ZCL_COMMAND_READY_READ(
+    "ops.telemetry.storage.database", "ops.telemetry.storage", "",
+    "Database handles and block-index integrity",
+    "Read live from the running node at call time from the typed storage snapshot: the progress and projection store handles with the split proof between them, block_index.bin integrity, and the transaction tracer's open-transaction holders.", 0,
+    "telemetry,storage,database,sqlite,wal,txn",
+    "zcl.command.empty_input.v1", "zcl.telemetry.storage.database.v1", "", "",
+    "z23 ops telemetry storage database",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_DEV_STATE_READ, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_telemetry_storage_database)
+
+ZCL_COMMAND_READY_READ(
+    "ops.telemetry.storage.disk", "ops.telemetry.storage", "",
+    "Disk headroom",
+    "Read live from the running node at call time from the typed storage snapshot: free bytes in the datadir with the warn and refuse thresholds it is judged against, plus the maintenance worker that reclaims space.", 0,
+    "telemetry,storage,disk,free,space,headroom",
+    "zcl.command.empty_input.v1", "zcl.telemetry.storage.disk.v1", "", "",
+    "z23 ops telemetry storage disk",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_DEV_STATE_READ, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_telemetry_storage_disk)
+
+ZCL_COMMAND_PLANNED_READ(
+    "ops.telemetry.storage.cache", "ops.telemetry.storage", "",
+    "Cache occupancy and hit rates",
+    "Will report each bounded cache with its occupancy, hit ratio and eviction count; no storage subsystem keeps those counters today, so the leaf fails closed.", 0,
+    "telemetry,storage,cache,hit,evict,memory",
+    "zcl.command.empty_input.v1", "zcl.telemetry.storage.cache.v1", "", "",
+    "z23 ops telemetry storage cache",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_DEV_STATE_READ,
+    "no storage cache publishes occupancy, hit ratio or eviction counts: "
+    "coins_ram keeps no hit/miss counters and SQLite's page-cache counters "
+    "need sqlite3_db_status() on a live handle, which would block the reply "
+    "behind the reducer's write transaction")

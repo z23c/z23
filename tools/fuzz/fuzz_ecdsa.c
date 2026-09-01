@@ -3,7 +3,7 @@
  * fuzz_ecdsa — libFuzzer harness that runs the secp256k1 DIFFERENTIAL ORACLE
  * over unbounded input.
  *
- * The hand-written corpus in lib/test/src/test_secp256k1_differential.c covers
+ * The hand-written corpus in tests/harness/src/test_secp256k1_differential.c covers
  * the adversarial shapes we thought of. This covers the ones we did not: every
  * input is decoded into a (pubkey, message, signature) triple and fed to BOTH
  * the candidate (whatever the crypto registry serves for
@@ -13,9 +13,9 @@
  * wire format is the same one the oracle's seed dump writes, that reproducer
  * drops straight back into the test corpus.
  *
- * The seed corpus (lib/test/fuzz_seeds/ecdsa/) IS the oracle's adversarial
+ * The seed corpus (tests/harness/fuzz_seeds/ecdsa/) IS the oracle's adversarial
  * vector list, exported by
- *   ZCL_SECP_DUMP_SEEDS=lib/test/fuzz_seeds/ecdsa \
+ *   ZCL_SECP_DUMP_SEEDS=tests/harness/fuzz_seeds/ecdsa \
  *     build/bin/test_parallel --only=secp256k1_differential
  * so the fuzzer starts on the interesting boundaries instead of on noise.
  *
@@ -69,7 +69,7 @@ static bool ref_verify(const uint8_t *pub, size_t publen,
 int LLVMFuzzerInitialize(int *argc, char ***argv)
 {
     (void)argc; (void)argv;
-    /* lib/keys/src/pubkey.c keeps a file-static verify context that the node
+    /* contexts/wallet/modules/keys/src/pubkey.c keeps a file-static verify context that the node
      * creates once at boot (init.c -> ecc_verify_init) and every subsequent
      * pubkey_* call assumes is live. The fuzzer is not the node, so it must
      * perform the same boot step: without it pubkey_recover_compact /

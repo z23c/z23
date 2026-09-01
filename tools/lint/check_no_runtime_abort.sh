@@ -36,8 +36,8 @@
 #     is NOT sufficient: the rationale comments this project writes are
 #     multi-line block comments, and the word `assert()` lands on a
 #     CONTINUATION line that carries no `/*` of its own (see
-#     domain/encoding/src/base58.c, lib/keys/src/key.c,
-#     lib/keys/src/pubkey.c, lib/sapling/src/incremental_merkle_tree.c).
+#     platform/domain/encoding/src/base58.c, contexts/wallet/modules/keys/src/key.c,
+#     contexts/wallet/modules/keys/src/pubkey.c, core/modules/sapling/src/incremental_merkle_tree.c).
 #     This gate therefore carries a real block-comment state machine.
 #   * Anything inside a string literal.
 #   * A site carrying the inline escape hatch (below).
@@ -48,15 +48,15 @@
 # check_silent_error_returns.sh. Some aborts are CORRECT and must not be
 # softened into a `return false`:
 #
-#   lib/sapling/src/note_encryption.c — an `esk` repeat means the AEAD key is
+#   core/modules/sapling/src/note_encryption.c — an `esk` repeat means the AEAD key is
 #     about to be reused under the fixed zero nonce. Continuing leaks
 #     plaintext; a crash does not.
-#   lib/keys/src/key.c, lib/keys/src/pubkey.c — creation and teardown of the
+#   contexts/wallet/modules/keys/src/key.c, contexts/wallet/modules/keys/src/pubkey.c — creation and teardown of the
 #     process-wide secp256k1 signing/verification contexts, and a failure of
 #     the entropy source feeding them. No external input reaches these, both
 #     run exactly once, and a node that carried on would silently accept or
 #     reject signatures.
-#   lib/sapling/src/sapling.c — a fixed Jubjub generator that failed to
+#   core/modules/sapling/src/sapling.c — a fixed Jubjub generator that failed to
 #     derive from hard-coded inputs. Every subsequent scalar multiplication
 #     would produce garbage.
 #
@@ -96,9 +96,9 @@ BASELINE="${ZCL_NO_RUNTIME_ABORT_BASELINE:-tools/lint/no_runtime_abort_baseline.
 # Network-reachable roots. Every one of these is verified to exist at the
 # time of writing; a root that disappears is skipped here and caught by the
 # file floor below rather than silently shrinking the scan.
-SCAN_ROOTS_DEFAULT="lib/crypto lib/keys lib/script lib/sapling lib/validation \
-lib/net lib/sync lib/zid lib/znam lib/zslp lib/zdir lib/storage lib/mining \
-lib/core lib/platform lib/util lib/rpc \
+SCAN_ROOTS_DEFAULT="core/modules/crypto contexts/wallet/modules/keys core/modules/script core/modules/sapling core/modules/validation \
+core/modules/net core/modules/sync contexts/wallet/modules/zid contexts/naming/modules/znam contexts/market/modules/zslp contexts/naming/modules/zdir engine/modules/storage core/modules/mining \
+core/modules/core platform/modules/platform platform/modules/util engine/modules/rpc \
 domain/encoding domain/wallet \
 core/consensus core/math core/params core/chainparams"
 read -r -a SCAN_ROOTS <<< "${ZCL_NO_RUNTIME_ABORT_SCAN_ROOTS:-$SCAN_ROOTS_DEFAULT}"
@@ -367,8 +367,8 @@ if [ "${#violations[@]}" -gt 0 ]; then
     echo "  An abort that is CORRECT — where continuing would leak plaintext,"
     echo "  forge a key, or silently mis-verify a signature — is annotated in"
     echo "  place with:  // abort-ok:<reason>   (reason required, >= 6 chars)."
-    echo "  Worked examples: lib/sapling/src/note_encryption.c (esk repeat),"
-    echo "  lib/keys/src/pubkey.c (process-wide verify context lifecycle)."
+    echo "  Worked examples: core/modules/sapling/src/note_encryption.c (esk repeat),"
+    echo "  contexts/wallet/modules/keys/src/pubkey.c (process-wide verify context lifecycle)."
     echo "  Raising a number in $BASELINE is NOT a fix; counts may only shrink."
     fail=1
 fi

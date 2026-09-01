@@ -50,7 +50,7 @@ MKT_BACKUP_PASS="market-acceptance-backup-pass"
 # Retrieve requires the full-file purchase, so chunks_paid is always
 # num_chunks below. The price keeps the whole trade inside the dev wallet
 # scope's lifetime lab cap (DEV_LAB_CAP_ZAT = 0.05 ZCL,
-# app/services/src/wallet_money_service.c) plus the wallet default fee:
+# contexts/wallet/services/src/wallet_money_service.c) plus the wallet default fee:
 # total is 100 * 30000 + ceil(12345 * 30000 / 2**20) = 3000354 zat.
 PRICE_PER_MB_ZAT=30000
 FIXTURE_TAIL_BYTES=12345

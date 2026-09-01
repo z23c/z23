@@ -108,10 +108,10 @@ done
 APJ_AUTHOR="$DHT_WORK/zdogace-author"
 APJ_DEPENDENCY_AUTHOR="$DHT_WORK/arena-dependencies-author"
 mkdir -p "$APJ_AUTHOR" "$APJ_DEPENDENCY_AUTHOR"
-git -C "$C23_BETA_FIXTURE_SOURCE" archive 2b00c4c2b^ packages/zdogace |
+git -C "$C23_BETA_FIXTURE_SOURCE" archive 2b00c4c2b^ contexts/commons/packages/zdogace |
     tar -x -C "$APJ_AUTHOR" --strip-components=2
 git -C "$C23_BETA_FIXTURE_SOURCE" archive 2b00c4c2b^ \
-        packages/zprng packages/zdogfight packages/zdogdrone |
+        contexts/commons/packages/zprng contexts/commons/packages/zdogfight contexts/commons/packages/zdogdrone |
     tar -x -C "$APJ_DEPENDENCY_AUTHOR" --strip-components=1
 [ -f "$APJ_AUTHOR/src/zdogace.c" ] || apj_die "old zdogace source was not materialized"
 

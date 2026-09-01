@@ -2,7 +2,7 @@
 # Copyright 2026 Rhett Creighton - Apache License 2.0
 #
 # check_hotswap_module_imports.sh — a hot-swap module may import only what
-# config/hotswap_module_imports.def allows.
+# engine/composition/hotswap_module_imports.def allows.
 #
 # ── THE INVARIANT ──────────────────────────────────────────────────────────
 # A Tier-2 hot-swap module is a .so compiled from ONE shape-leaf TU and
@@ -24,7 +24,7 @@
 #
 # ── WHAT IS ASSERTED ───────────────────────────────────────────────────────
 # Leg 1 (CONTRACT — always runs, needs no build artifacts, fail-closed):
-#   * config/hotswap_module_imports.def exists and parses to >= IMPORT_FLOOR
+#   * engine/composition/hotswap_module_imports.def exists and parses to >= IMPORT_FLOOR
 #     rows. A gutted or unparseable allowlist is exit 2, never a pass: an
 #     empty allowlist would make every module's import set "not allowed" and
 #     an empty PARSE would make it "all allowed" depending on which way the
@@ -38,7 +38,7 @@
 #   what that symbol can DO. `HOTSWAP_MODULE_IMPORT("socket", "LIBC")` would
 #   pass leg 1 outright — the row is well-formed, the group is valid, and no
 #   module has to import it yet for the row to sit there as a door. This leg
-#   crosses every allowlisted symbol against config/capability_symbols.def
+#   crosses every allowlisted symbol against engine/composition/capability_symbols.def
 #   and FAILS the build if any of them carries CAP_NETWORK, CAP_PROCESS,
 #   CAP_DYNLOAD, CAP_PRIVILEGE, or CAP_WALLET — reach a hot-swap module has
 #   no business holding regardless of whether anything currently calls it.
@@ -52,7 +52,7 @@
 #
 #
 # Leg 1c (CONTRACT — always runs, needs no build artifacts, fail-closed):
-#   leg 1b names five forbidden classes. config/capability_classes.def
+#   leg 1b names five forbidden classes. engine/composition/capability_classes.def
 #   declares nine. A hardcoded forbidden list over an open vocabulary is
 #   default-PERMIT: add a tenth class to the class table and leg 1b lets it
 #   onto the allowlist, because it is absent from a list of five and absence
@@ -60,7 +60,7 @@
 #   class it declares to appear in FORBIDDEN_CAP_CLASSES or
 #   PERMITTED_CAP_CLASSES, refusing (exit 2) when one appears in neither, so
 #   adding a class forces a decision in THIS file instead of inheriting one
-#   by omission. Same symmetry config/remote_command_classes.def uses. It
+#   by omission. Same symmetry engine/composition/remote_command_classes.def uses. It
 #   carries its own floor (CLASS_VOCAB_FLOOR) for the same reason leg 1b
 #   does: a vocabulary that failed to parse must not read as one where every
 #   class happened to be classified.
@@ -111,10 +111,10 @@
 #   ZCL_HOTSWAP_IMPORTS_SANDBOX_DIR      module directory to scan instead of
 #                                        build/hotswap; must live under $SCRATCH
 #   ZCL_HOTSWAP_IMPORTS_DEF_OVERRIDE     allowlist file to read instead of
-#                                        config/hotswap_module_imports.def;
+#                                        engine/composition/hotswap_module_imports.def;
 #                                        must live under $SCRATCH
 #   ZCL_HOTSWAP_IMPORTS_CAPFILE_OVERRIDE capability table to read instead of
-#                                        config/capability_symbols.def; must
+#                                        engine/composition/capability_symbols.def; must
 #                                        live under $SCRATCH
 #
 # Exit: 0 clean (or UNOBSERVED artifact leg), 1 on a forbidden import or a
@@ -128,8 +128,8 @@ cd "$ROOT" || exit 2
 SELF="$SCRIPT_DIR/$(basename "${BASH_SOURCE[0]}")"
 
 GATE="check_hotswap_module_imports"
-DEF="config/hotswap_module_imports.def"
-CAPFILE="config/capability_symbols.def"
+DEF="engine/composition/hotswap_module_imports.def"
+CAPFILE="engine/composition/capability_symbols.def"
 SO_DIR="build/hotswap"
 SCRATCH="$HOME/.local/state/zclassic23/scratch/lane-imports"
 
@@ -154,7 +154,7 @@ IMPORT_FLOOR=100
 # check_class_vocabulary() below refuses when a declared class appears in
 # neither list, so adding a class forces a decision in THIS file rather than
 # inheriting one by omission. That is the same symmetry
-# config/remote_command_classes.def uses for command leaves.
+# engine/composition/remote_command_classes.def uses for command leaves.
 FORBIDDEN_CAP_CLASSES=" CAP_NETWORK CAP_PROCESS CAP_DYNLOAD CAP_PRIVILEGE CAP_WALLET "
 
 # The other half of the vocabulary: classes a module may hold. CAP_HARMLESS is
@@ -165,7 +165,7 @@ PERMITTED_CAP_CLASSES=" CAP_HARMLESS CAP_FS_READ CAP_FS_WRITE CAP_CLOCK CAP_RAND
 # The class table itself, read so the vocabulary check has something to check
 # AGAINST. A gate that derived the vocabulary from the symbol file alone could
 # only ever see classes already in use.
-CLASSFILE="config/capability_classes.def"
+CLASSFILE="engine/composition/capability_classes.def"
 
 # Hollowness guard for the class table: it declares nine classes today and a
 # parse that returns fewer than this did not read the table.
@@ -408,7 +408,7 @@ load_capability_classes() {
 # unused waiver is a hole nobody would notice opening. If a future symbol
 # legitimately needs one, whoever adds that row writes the mechanism then.
 # ── the vocabulary check: no class may be permitted by omission ────────────
-# Reads every class config/capability_classes.def declares and requires each
+# Reads every class engine/composition/capability_classes.def declares and requires each
 # to appear in FORBIDDEN_CAP_CLASSES or PERMITTED_CAP_CLASSES. A class in
 # neither is refused: the alternative is that a class added to the table after
 # this gate was written is treated as harmless here, which is the
@@ -1035,7 +1035,7 @@ BADEOF
 
     # Scenario 4: a class table that declares a class this gate classifies
     # neither way must FATAL. Without this the gate is default-PERMIT on an
-    # open vocabulary: a class added to config/capability_classes.def after
+    # open vocabulary: a class added to engine/composition/capability_classes.def after
     # this file was written would be silently allowed on the allowlist.
     local vocab_classfile="$sandbox/capcross_vocab_classes.def"
     cp "$CLASSFILE" "$vocab_classfile" || {

@@ -1,0 +1,266 @@
+/* Per-domain dumpstate subsystem descriptors: on-disk databases, indexes, and projections: block_index, seal/progress stores, event-sourced projections, and disk/db maintenance
+ *
+ * Split from diagnostics_dumpers.def (see that file's aggregator
+ * comment for the shared #include contract). Data-only: no macro
+ * definitions or include guards belong in this file. */
+
+    DIAG_LOCAL("block_index_load_rungs", boot_blkidx_rungs_dump_state_json,
+               "boot block-index load ladder: per-rung fire counters "
+               "(rebuild_from_log/flat/sqlite/kill9_projection/"
+               "flat_union_taint_check/blocks_table_hydrate/leveldb) + last "
+               "boot's rebuilt_from_log/loaded/flat_union_tainted outcome"),
+    DIAG_ENTRY("block_index", diag_block_index_dump_state_json,
+               "block_index entry by height or hash (in `key`)",
+               "storage", "projection",
+               "engine/controllers/src/diagnostics_block_index.c",
+               "persisted_projection_snapshot", "bounded_lookup",
+               "height or 64-char block hash", "3170000",
+               "<64-char block hash>",
+               "tests/harness/src/test_block_index_integrity.c", true),
+    DIAG_ENTRY("seal", seal_dump_state_json,
+               "seal ring (last 4): candidate/ratified state seals — height, coins_sha3, "
+               "utxo_count, supply, block_hash, ratified, sealed_at, self_sha3 valid",
+               "storage", "service", "engine/services/src/seal_service.c",
+               "persisted_projection_snapshot", "projection_summary", NULL,
+               NULL, NULL, DIAG_TEST_DEFAULT, true),
+    DIAG_ENTRY("progress", progress_store_dump_state_json,
+               "progress.kv: open/path/stage_cursor row count",
+               "storage", "projection", "engine/modules/storage/src/progress_store.c",
+               "persisted_projection_snapshot", "projection_summary", NULL,
+               NULL, NULL, DIAG_TEST_DEFAULT, true),
+    DIAG_ENTRY("projection_store", projection_store_dump_state_json,
+               "projection.kv second handle (Wave A2 split): open/path, and "
+               "independent_of_kernel proving it is a distinct sqlite3 "
+               "connection from the reducer kernel handle on the same file",
+               "storage", "projection", "engine/modules/storage/src/projection_store.c",
+               "persisted_projection_snapshot", "projection_summary", NULL,
+               NULL, NULL, DIAG_TEST_DEFAULT, true),
+    DIAG_SERVICE("block_pruning", block_pruning_dump_state_json,
+                 "block pruning service: files/blocks pruned, bytes reclaimed, lowest height with data",
+                 "engine/services/src/block_pruning_service.c", DIAG_TEST_DEFAULT),
+    DIAG_SERVICE("segment_sealer", segment_sealer_dump_state_json,
+                 "sealed ROM segment sealer: enabled flag, finalized frontier, "
+                 "segments sealed/failed, last sealed first_height, last status",
+                 "engine/services/src/segment_sealer_service.c", DIAG_TEST_DEFAULT),
+    DIAG_PROJECTION("mempool_projection", mempool_projection_dump_state_json,
+                    "mempool projection over EV_TX_ADMIT_MEMPOOL / EV_TX_REMOVE_MEMPOOL",
+                    "engine/modules/storage/src/mempool_projection.c",
+                    "tests/harness/src/test_mempool_projection.c"),
+    DIAG_PROJECTION("peers_projection", peers_projection_dump_state_json,
+                    "peers projection over EV_PEER_OBSERVED / EV_PEER_DROPPED",
+                    "engine/modules/storage/src/peers_projection.c",
+                    "tests/harness/src/test_peers_projection.c"),
+    DIAG_PROJECTION("census", census_dump_state_json,
+                    "durable network census (node_census over "
+                    "EV_NODE_CENSUS_OBSERVED, real-peer + crawler): population, "
+                    "reachable-in-last-24h, top-10 user-agent distribution, "
+                    "protocol-version distribution, and a height distribution "
+                    "summary (modal/max/min). Distinct from the crawler's live "
+                    "network_census rollup.",
+                    "engine/modules/storage/src/peers_projection.c",
+                    "tests/harness/src/test_peers_projection.c"),
+    DIAG_PROJECTION("znam_projection", znam_projection_dump_state_json,
+                    "znam projection: name_count, addr/text counts, "
+                    "events_consumed_total, per-event-type counters, emit/fail "
+                    "counters, last_consumed_offset, last_catch_up_ms.",
+                    "engine/modules/storage/src/znam_projection.c",
+                    "tests/harness/src/test_znam_projection.c"),
+    DIAG_CONDITION("catalog_coverage", catalog_coverage_dump_state_json,
+                   "per-index coverage of the range it can actually reach "
+                   "[floor, target]: cursor, floor (the snapshot-seed height "
+                   "below which no body exists, so no forward fold can ever "
+                   "cover it), lag, coverage {none,partial,complete}, and "
+                   "emptiness_is_meaningful — true ONLY when coverage is "
+                   "complete, i.e. when finding zero rows in that index is "
+                   "evidence that nothing happened rather than the absence of "
+                   "evidence. Answers 'this table is empty, does that mean "
+                   "anything?' without a COUNT(*) (3.5 s on the live node).",
+                   "engine/conditions/src/catalog_lag_exceeded.c",
+                   "tests/harness/src/test_catalog_coverage.c"),
+    DIAG_PROJECTION("op_return_index", op_return_index_dump_state_json,
+                    "OP_RETURN catalog: backfill cursor height + running "
+                    "digest, provable_tip, blocks_remaining, ticks/holes/"
+                    "oversize_blocks counters, total_rows, and "
+                    "rows-by-known-tag counts (znam/zslp/zanc/other).",
+                    "engine/services/src/op_return_backfill_service.c",
+                    "tests/harness/src/test_op_return_index.c"),
+    DIAG_PROJECTION("zid_domains", zid_domain_dump_state_json,
+                    "zid anchor domains (the durable record of what a batch "
+                    "proof commits): db_open, the domain count, and a roster "
+                    "of up to 16 domains with domain_name, num_leaves, root, "
+                    "anchored + anchored_txid/anchored_height, updated_at and "
+                    "has_owner. Key form: a domain name (e.g. \"zcode\") for "
+                    "that one domain plus its stored_leaf_rows. Written by "
+                    "`zcode release anchor`, read by `zcode release prove` — "
+                    "never rebuilt from block history.",
+                    "engine/models/src/zid_domain.c",
+                    "tests/harness/src/test_zid.c"),
+    DIAG_PROJECTION("zepoch", zepoch_status_dump_state_json,
+                    "epoch anchor status (Bounded Node keystone, v1: operator "
+                    "anchoring only, no service): catalog cursor height + "
+                    "digest, current epoch (height/1000) and its start, and "
+                    "whether a ZANC anchor labeled zepoch@<H> with H inside "
+                    "the current epoch already exists (anchor label/txid/"
+                    "height/digest + digest_match when anchored).",
+                    "engine/services/src/op_return_backfill_service.c",
+                    "tests/harness/src/test_op_return_index.c"),
+    DIAG_PROJECTION("zslp_ledger", zslp_ledger_dump_state_json,
+                    "ZSLP per-(token,outpoint) ledger: backfill cursor height "
+                    "+ running digest, provable_tip, blocks_remaining, "
+                    "ticks/last_folded_height, total_rows + unspent_rows. The "
+                    "debit-correct token-balance projection (zslp_ledger_"
+                    "balance sums a holder's unspent rows).",
+                    "contexts/market/services/src/zslp_ledger_backfill_service.c",
+                    "tests/harness/src/test_zslp_ledger.c"),
+    DIAG_PROJECTION("zid_identities", zid_identity_dump_state_json,
+                    "sovereign-identity anchors: total_rows plus "
+                    "active/rotated/revoked row counts. With a key — a "
+                    "64-hex master ed25519 pubkey, or a ZNAM name — resolves "
+                    "that one identity's {master_pubkey, anchor_txid, "
+                    "anchor_height, status, successor_pubkey (rotated only), "
+                    "source, name, owner_address, updated_height}.",
+                    "engine/models/src/zid_identity.c",
+                    "tests/harness/src/test_zid_identity.c"),
+    DIAG_SERVICE("endpoint_revalidate",
+                 boot_endpoint_records_dump_state_json,
+                 "signed endpoint records: whether the chain's verdict on "
+                 "each accepted record is still current. "
+                 "identity_status_generation is the counter the block fold "
+                 "bumps on every applied ANCHOR/ROTATE/REVOKE; "
+                 "revalidated_generation is how far the worker has caught "
+                 "up, and revalidation_pending is the two disagreeing. "
+                 "sweeps_applied counts resolved changes and "
+                 "records_invalidated counts records dropped because their "
+                 "signing key is no longer active — the result, as opposed "
+                 "to identities_checked, which is only work done. "
+                 "chain_unavailable_passes counts passes that found held "
+                 "records the chain could not be asked about; those are "
+                 "left in place, never dropped on a non-answer.",
+                 "engine/composition/src/boot_endpoint_records.c",
+                 "tests/harness/src/test_zendp_revocation.c"),
+    DIAG_PROJECTION("onion_directory", onion_directory_dump_state_json,
+                    "on-chain node directory folded from confirmed ZDIR "
+                    "OP_RETURNs: total_rows plus active/retired row counts. "
+                    "With a key — a v3 onion hostname — resolves that one "
+                    "row's {hostname, txid, height (seniority), "
+                    "owner_address, master_pubkey (when bound), status, "
+                    "updated_height}. A row is a HINT about where to look, "
+                    "never proof of who is there: it only ever ADDS a peer "
+                    "candidate alongside DNS/fixed seeds, addrman and the "
+                    "signed-descriptor source, and can never exclude one.",
+                    "engine/models/src/onion_directory.c",
+                    "tests/harness/src/test_zdir.c"),
+    DIAG_PROJECTION("block_index_projection",
+                    block_index_projection_dump_state_json,
+                    "block_index_projection: cursor, entry count, "
+                    "events consumed, replace collisions, last catch_up_ms",
+                    "engine/modules/storage/src/block_index_projection.c",
+                    "tests/harness/src/test_block_index_projection.c"),
+    DIAG_PROJECTION("body_coverage",
+                    body_coverage_dump_state_json,
+                    "body_coverage: which block-body height ranges are held "
+                    "(total_covered, range_count, max_covered, ranges), plus "
+                    "the gap-fill scheduler view (needed range, active hole, "
+                    "holes, fill_rate_per_sec, no-source blocker)",
+                    "engine/modules/storage/src/body_coverage.c",
+                    "tests/harness/src/test_body_coverage.c"),
+    DIAG_PROJECTION("body_history",
+                    body_history_dump_state_json,
+                    "body_history: can this node prove it holds the block "
+                    "bodies for its own history BELOW the tip? status is "
+                    "one of complete / incomplete / unknown — unknown means "
+                    "coverage could not be established, which is NOT the "
+                    "same as no holes and blocks the at-tip claim just as "
+                    "hard. Carries missing_count, lowest_missing, "
+                    "unmeasured_count, lowest_unmeasured, and the bounded "
+                    "resumable census cursor",
+                    "engine/modules/storage/src/body_history.c",
+                    "tests/harness/src/test_body_history.c"),
+    DIAG_PROJECTION("authority_projection", ap_audit_dump_state_json,
+                    "redundant authority(coins)-vs-projection(utxos) SHA3 "
+                    "cross-check: runs/checks/passes/divergences, skip "
+                    "reasons, streak, last roots+counts+height, blocker latch",
+                    DIAG_OWNER_LOCAL, DIAG_TEST_DEFAULT),
+    DIAG_PROJECTION("state_auditor", state_auditor_dump_state_json,
+                    "continuous sampled background integrity scrubber: "
+                    "op_return_index range-digest re-extraction and "
+                    "coins_kv-authority-vs-utxos-projection XOR keyspace-"
+                    "window checks, every few seconds — ticks/skipped/"
+                    "mismatches/clears per leg, latch state, pinned range.",
+                    "engine/services/src/state_auditor.c",
+                    "tests/harness/src/test_state_auditor.c"),
+    DIAG_ENTRY("address_index", address_index_dump_state_json,
+               "script-appearance projection (-addressindex): enabled, cursor, "
+               "H*, gap, rows, SHA3 digest, coverage blocker; "
+               "key=<64-hex scripthash>[:from_height] -> appearances + balance",
+               "projection", "projection",
+               "engine/services/src/address_index_service.c",
+               "persisted_projection_snapshot", "bounded_lookup",
+               "64-hex scripthash [:from_height]", "<64-hex scripthash>",
+               "<64-hex scripthash>:3170000",
+               "tests/harness/src/test_address_index.c", true),
+    DIAG_ENTRY("txindex", txindex_dump_state_json,
+               "transaction-location projection (-txindex): enabled, cursor, "
+               "H*, gap, rows, SHA3 digest, coverage blocker; "
+               "key=<64-hex txid> -> {height, block_hash, tx_n} or a soft "
+               "'txindex behind: cursor=H' when the fold hasn't reached it",
+               "projection", "projection",
+               "engine/services/src/txindex_projection_service.c",
+               "persisted_projection_snapshot", "bounded_lookup",
+               "64-hex txid", "<64-hex txid>",
+               "<64-hex txid>",
+               "tests/harness/src/test_txindex_projection.c", true),
+    DIAG_SERVICE("disk_monitor", disk_monitor_dump_state_json,
+                 "free-space watchdog: running, level (ok/low/critical), "
+                 "last free bytes + poll time, warn/refuse thresholds, "
+                 "datadir",
+                 "engine/services/src/disk_monitor.c", DIAG_TEST_DEFAULT),
+    DIAG_SERVICE("db_maintenance", db_maintenance_dump_state_json,
+                 "WAL/ANALYZE/VACUUM worker: last-run times + durations, "
+                 "total runs/failures, last error",
+                 "engine/services/src/db_maintenance.c", DIAG_TEST_DEFAULT),
+    DIAG_LOCAL("block_index_integrity", block_index_integrity_dump_state_json,
+               "block_index.bin sidecar integrity: last verify verdict + recovery action, degraded/unsafe_override, reason, heights_repaired"),
+    DIAG_ENTRY("chain_segments", chain_segment_dump_state_json,
+               "sealed ROM segment store for finalized block bodies: segment_count, "
+               "covered height range, SHA3 manifest root, present_count (cheap file check; "
+               "verifysegments does the full digest pass)",
+               "storage", "controller",
+               "engine/controllers/src/chain_segment_controller.c",
+               "filesystem_snapshot", "bounded_lookup", NULL, NULL, NULL,
+               "tests/harness/src/test_chain_segment.c", true),
+    DIAG_ENTRY("rom", rom_dump_state_json,
+               "L0-L3 trust machine catalog: compiled SHA3 UTXO checkpoint "
+               "(height/block_hash/sha3_hash/utxo_count), what ZClassic "
+               "headers commit vs NOT commit per field, per-layer coverage "
+               "(L0 ROM height, L1 sealed-segment range, L2 reducer H*/floor, "
+               "L3 active+external tip), and cheaply-readable projection "
+               "cursors (MMB leaves/mountains, utxo_root_ladder rung/dense "
+               "height). See docs/ROM.md",
+               "storage", "controller",
+               "engine/controllers/src/diagnostics_registry_rom.c",
+               "in_process_snapshot", "cheap", NULL, NULL, NULL,
+               "tests/harness/src/test_rom_dump.c", true),
+    DIAG_ENTRY("storage_telemetry", storage_telemetry_dump_state_json,
+               "the typed `storage` telemetry domain (util/telemetry_render.h) "
+               "rendered from one snapshot: SQLite store handles + the Wave A2 "
+               "split proof, block_index.bin integrity, the transaction "
+               "tracer, disk headroom against the refuse threshold, and the "
+               "maintenance worker. Every leaf carries a presence, a source "
+               "and a derived health verdict, and a value nobody could read "
+               "says so instead of vanishing. Key selects the view: "
+               "summary|normal|full, or a group name (`database`, `disk`) for "
+               "that group at full detail",
+               "storage", "service",
+               "engine/services/src/storage_telemetry_fill.c",
+               "in_process_snapshot", "cheap",
+               "summary|normal|full|<group>", "summary", "disk",
+               "tests/harness/src/test_telemetry_storage.c", true),
+    DIAG_RUNTIME("db_txn_trace", db_txn_trace_dump_state_json,
+                 "opt-in (ZCL_DB_TXN_TRACE=1) node.db transaction tracer: per "
+                 "registered connection {owner, txn_state, busy_stmts, "
+                 "holds_open_txn} + open_txn_holders, read from the background "
+                 "dumper thread's seqlock-published snapshot (never a live "
+                 "sqlite handle on the RPC thread); enabled:false when unset",
+                 "platform/modules/util/src/db_txn_trace.c",
+                 "tests/harness/src/test_syncdiag_rpc.c"),

@@ -3,7 +3,7 @@
  * Native handlers for the `zcode reward` read pair (slice 7: bounded
  * deterministic contribution scoring + the reward eligibility gate list;
  * the queue/plan/commit/receipt settlement leaves are slice 8 and live in
- * native_zcode_reward_settle_command.c over lib/vcs/package_reward.*):
+ * native_zcode_reward_settle_command.c over contexts/commons/modules/vcs/package_reward.*):
  *
  *   zcode reward score     compute the deterministic score breakdown for
  *                          one release root: category, semantic lines

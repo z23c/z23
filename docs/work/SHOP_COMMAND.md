@@ -14,13 +14,13 @@ live" verification. Compose existing primitives; never duplicate them.
   z-address + binding memo, plan/commit pay, hash-verified atomic collect,
   token-gated downloads, `/store` web surface (onion-only POSTs), and a
   `<datadir>/store/products.json` provisioning loader
-  (`app/controllers/src/store_controller_schema.c:94-102`).
+  (`engine/controllers/src/store_controller_schema.c:94-102`).
 - Onion hosting + `/directory.json` with an `apps` row consumers already
-  parse (`lib/net/src/onion_service.c:597-606`).
+  parse (`core/modules/net/src/onion_service.c:597-606`).
 - Worker-mode precedent for future isolation: same-image self-respawn
-  (`app/services/src/build_fabric_worker.c:65-74`,
-  `lib/util/src/spawn.c:128-259`) + `os_sandbox_enter()`
-  (Landlock/seccomp/rlimits, `lib/platform/src/os_sandbox_linux.c:1165`).
+  (`engine/services/src/build_fabric_worker.c:65-74`,
+  `platform/modules/util/src/spawn.c:128-259`) + `os_sandbox_enter()`
+  (Landlock/seccomp/rlimits, `platform/modules/platform/src/os_sandbox_linux.c:1165`).
   Shop design must not foreclose restricted wallet/onion/content worker
   modes later — same LTO binary, OS-enforced authority.
 
@@ -29,7 +29,7 @@ live" verification. Compose existing primitives; never duplicate them.
 ### A. Persistent onion identity (the load-bearing primitive)
 
 Today dynhost mints an EPHEMERAL service every start
-(`lib/net/src/tor_integration.c:50-52,140-147`); `tor_write_torrc`
+(`core/modules/net/src/tor_integration.c:50-52,140-147`); `tor_write_torrc`
 writes SocksPort+DataDirectory only (`:116-138`);
 `read_onion_from_hostname_file()` (`:185-194`) reads a hostname file
 nothing configures. Slice: opt-in persistent HiddenServiceDir under the
@@ -50,7 +50,7 @@ identity and logs the old+new addresses. Test group:
 
 ### B. `app shop init` / `app shop status` (the orchestration)
 
-New native branch `app.shop` (rows in `config/commands/app_features.def`
+New native branch `app.shop` (rows in `engine/composition/commands/app_features.def`
 or a new store-adjacent def, following existing patterns).
 
 `app shop init` (plan/commit confirm idiom — it mutates):
@@ -71,15 +71,15 @@ or a new store-adjacent def, following existing patterns).
 each unmet prerequisite named with its remedy (never a silent partial).
 
 Landed 2026-08-10: `app.shop.init` (READY_COMMAND, plan/commit) and
-`app.shop.status` (READY_READ) in `config/commands/store.def`, handlers in
-`app/controllers/src/shop_native_handler.c` with the datadir-local
+`app.shop.status` (READY_READ) in `engine/composition/commands/store.def`, handlers in
+`contexts/market/controllers/src/shop_native_handler.c` with the datadir-local
 probe/provision half in `shop_native_probes.c`. Commit refuses by name on
 a non-encrypted wallet (WKS1/WKD1 envelope probe) before the Tor check,
 and on the stub-Tor build; it ensures the slice-A identity, copies
 `--input` products.json to `<datadir>/store/products.json`, runs
 `store_ensure_schema` against the live `<datadir>/node.db`, and announces
 via the new `<datadir>/directory/apps.csv` (ONION_DIR_EXTRA_APPS_REL),
-which lib/net's register_self() folds into the node's own
+which core/modules/net's register_self() folds into the node's own
 `/directory.json` apps row each round. Test group: `test_shop`. (Fix
 2026-08-10: the plan's commit instruction rides in `commit_input` /
 `commit_command` data fields — a self-referential `next[]` entry made the
@@ -97,8 +97,8 @@ challenge pass rate (when the challenge loop lands). Rule: never claim
 more than the cryptography proves.
 
 Landed 2026-08-10: `app.shop.reputation` (READY_READ) in
-`config/commands/store.def`, handler in
-`app/controllers/src/shop_native_reputation.c`. The subject is one ZCODE
+`engine/composition/commands/store.def`, handler in
+`contexts/market/controllers/src/shop_native_reputation.c`. The subject is one ZCODE
 publisher key (66-hex; the join key across signed releases, attestation
 signers, and the reward ledger's contributor key). Each evidence row
 carries fact/state/evidence_class/window/detail over the real
@@ -132,16 +132,16 @@ a "wanted" ad is the same shape with reversed terms. Shop surfaces must
 leave room for a buyer-side request board; do not build it in A–C.
 
 Landed 2026-08-10: the demand board `app.shop.want.*` (branch row in
-`config/commands/app_features.def`, leaf rows in
-`config/commands/store.def`, handlers in
-`app/controllers/src/shop_native_want.c`). A want is a signed,
+`engine/composition/commands/app_features.def`, leaf rows in
+`engine/composition/commands/store.def`, handlers in
+`contexts/market/controllers/src/shop_native_want.c`). A want is a signed,
 discoverable WANT advertisement with terms — "I will pay amount_zatoshi
 for a digital result satisfying these objectively checkable criteria" —
 NOT an escrow, NOT a payment channel: posting moves and promises no
 value (ZC23/ZCL transfer stays simulation/plan-only). The signed shape
 clones zswap_quote.v1 with the terms reversed (Ed25519 over the
 domain-separated body root; the want id commits the full signed wire;
-codec + AR model in `app/models/src/shop_want.c`), so the stored wire is
+codec + AR model in `contexts/market/models/src/shop_want.c`), so the stored wire is
 relay-ready even though this slice adds no wire-protocol message.
 Surface: `post` (plan/commit; the buyer's Ed25519 secret signs, the
 pubkey is re-derived, terms = amount + 1..1024-byte criteria + optional

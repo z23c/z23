@@ -6,7 +6,7 @@
 # class of papercut (wf/dx-scanner-immunity).
 #
 # THE BUG (observed repeatedly): a gate's own SELFTEST (see
-# lib/test/src/test_make_lint_gates.c) plants a transient fixture file
+# tests/harness/src/test_make_lint_gates.c) plants a transient fixture file
 # — by convention named `_<something>fixture<something>.c` — directly
 # into a REAL scanned directory (app/**, domain/**, lib/**) to prove the
 # gate's production scan catches a violation, then deletes it. Without
@@ -29,7 +29,7 @@
 #     production `make lint` run ever sees ANYONE's transient fixture,
 #     no matter which gate or process wrote it or when.
 #
-#  2. A gate's own selftest (lib/test/src/test_make_lint_gates.c) execs
+#  2. A gate's own selftest (tests/harness/src/test_make_lint_gates.c) execs
 #     the gate script DIRECTLY (not through `make`), so
 #     ZCL_LINT_PRODUCTION_SCAN is unset in that subprocess — the
 #     exclusion arrays come back EMPTY, so the selftest's baseline/trip/

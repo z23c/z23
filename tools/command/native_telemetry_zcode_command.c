@@ -56,7 +56,7 @@ void zcl_native_handle_ops_telemetry_zcode_summary(
             reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INTERNAL,
             "ZCODE_TELEMETRY_FILL_FAILED", "collect", true, false,
             "the zcode telemetry collector could not fill its snapshot",
-            "app/services/src/zcode_telemetry_fill.c");
+            "contexts/commons/services/src/zcode_telemetry_fill.c");
         return;
     }
 

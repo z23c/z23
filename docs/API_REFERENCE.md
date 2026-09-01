@@ -1,5 +1,5 @@
 <!-- GENERATED FILE — DO NOT EDIT BY HAND.
-     Source of truth: config/commands/*.def
+     Source of truth: engine/composition/commands/*.def
      Template (editorial prose): docs/API_REFERENCE.md.in
      Generator: tools/gen_api_reference.c
      Regenerate: make docs-api-reference
@@ -35,10 +35,10 @@ live/canonical datadirs are rejected rather than guessed.
 
 Every table below is emitted by
 [`tools/gen_api_reference.c`](../tools/gen_api_reference.c) directly from the
-declarative `.def` files under [`config/commands/`](../config/commands/) — the
-same files [`config/src/command_catalog.c`](../config/src/command_catalog.c)
+declarative `.def` files under [`engine/composition/commands/`](../engine/composition/commands/) — the
+same files [`engine/composition/src/command_catalog.c`](../engine/composition/src/command_catalog.c)
 expands into the immutable `g_catalog_commands[]` table
-([`lib/kernel/src/command_registry.c`](../lib/kernel/src/command_registry.c)).
+([`engine/modules/kernel/src/command_registry.c`](../engine/modules/kernel/src/command_registry.c)).
 The generator is a second consumer of the identical X-macro grammar, so the C
 preprocessor — not a hand-rolled parser — reads the catalog. A leaf added,
 promoted, or re-scheduled in a `.def` file shows up here the moment the page is
@@ -51,7 +51,7 @@ verbatim; everything derived from the catalog replaces a
 `<!-- ZCL-GEN:… -->` marker.
 
 ```bash
-make docs-api-reference      # regenerate this page from config/commands/*.def
+make docs-api-reference      # regenerate this page from engine/composition/commands/*.def
 make lint                    # check-api-reference-generated fails on any drift
 ```
 
@@ -90,32 +90,32 @@ Per source file:
 
 | `.def` file | Entries | Branches | Leaves |
 |---|---|---|---|
-| `config/commands/root.def` | 10 | 5 | 5 |
-| `config/commands/core.def` | 121 | 29 | 92 |
-| `config/commands/apps.def` | 16 | 3 | 13 |
-| `config/commands/app_features.def` | 73 | 20 | 53 |
-| `config/commands/store.def` | 18 | 0 | 18 |
-| `config/commands/ops.def` | 56 | 10 | 46 |
-| `config/commands/dev.def` | 66 | 16 | 50 |
-| `config/commands/code.def` | 24 | 2 | 22 |
-| `config/commands/accounts.def` | 11 | 2 | 9 |
-| `config/commands/vault.def` | 24 | 4 | 20 |
-| `config/commands/zcode.def` | 245 | 58 | 187 |
-| `config/commands/zcode_science.def` | 25 | 7 | 18 |
-| `config/commands/metaverse.def` | 30 | 7 | 23 |
-| `config/commands/yardsale.def` | 7 | 2 | 5 |
-| `config/commands/zses.def` | 4 | 2 | 2 |
-| `config/commands/story.def` | 5 | 1 | 4 |
-| `config/commands/telemetry/root.def` | 6 | 2 | 4 |
-| `config/commands/telemetry/watch.def` | 1 | 0 | 1 |
-| `config/commands/telemetry/runtime.def` | 4 | 1 | 3 |
-| `config/commands/telemetry/sync.def` | 4 | 1 | 3 |
-| `config/commands/telemetry/network.def` | 5 | 1 | 4 |
-| `config/commands/telemetry/storage.def` | 5 | 1 | 4 |
-| `config/commands/telemetry/wallet.def` | 3 | 1 | 2 |
-| `config/commands/telemetry/agents.def` | 4 | 1 | 3 |
-| `config/commands/telemetry/zcode.def` | 4 | 1 | 3 |
-| `config/commands/telemetry/metaverse.def` | 4 | 1 | 3 |
+| `engine/composition/commands/root.def` | 10 | 5 | 5 |
+| `engine/composition/commands/core.def` | 121 | 29 | 92 |
+| `engine/composition/commands/apps.def` | 16 | 3 | 13 |
+| `engine/composition/commands/app_features.def` | 73 | 20 | 53 |
+| `engine/composition/commands/store.def` | 18 | 0 | 18 |
+| `engine/composition/commands/ops.def` | 56 | 10 | 46 |
+| `engine/composition/commands/dev.def` | 66 | 16 | 50 |
+| `engine/composition/commands/code.def` | 24 | 2 | 22 |
+| `engine/composition/commands/accounts.def` | 11 | 2 | 9 |
+| `engine/composition/commands/vault.def` | 24 | 4 | 20 |
+| `engine/composition/commands/zcode.def` | 245 | 58 | 187 |
+| `engine/composition/commands/zcode_science.def` | 25 | 7 | 18 |
+| `engine/composition/commands/metaverse.def` | 30 | 7 | 23 |
+| `engine/composition/commands/yardsale.def` | 7 | 2 | 5 |
+| `engine/composition/commands/zses.def` | 4 | 2 | 2 |
+| `engine/composition/commands/story.def` | 5 | 1 | 4 |
+| `engine/composition/commands/telemetry/root.def` | 6 | 2 | 4 |
+| `engine/composition/commands/telemetry/watch.def` | 1 | 0 | 1 |
+| `engine/composition/commands/telemetry/runtime.def` | 4 | 1 | 3 |
+| `engine/composition/commands/telemetry/sync.def` | 4 | 1 | 3 |
+| `engine/composition/commands/telemetry/network.def` | 5 | 1 | 4 |
+| `engine/composition/commands/telemetry/storage.def` | 5 | 1 | 4 |
+| `engine/composition/commands/telemetry/wallet.def` | 3 | 1 | 2 |
+| `engine/composition/commands/telemetry/agents.def` | 4 | 1 | 3 |
+| `engine/composition/commands/telemetry/zcode.def` | 4 | 1 | 3 |
+| `engine/composition/commands/telemetry/metaverse.def` | 4 | 1 | 3 |
 
 
 ## Column legend
@@ -147,11 +147,11 @@ proves via `nm` that the release binary links none of the dev executors, so the
 distinction is structural, not a convention.
 
 **Never RPC/REST-bound**: everything under `dev.*` is checkout-local by design
-(see [`config/commands/README.md`](../config/commands/README.md): "No `lib/`
+(see [`engine/composition/commands/README.md`](../engine/composition/commands/README.md): "No `lib/`
 source may include App, controller, service, or development handler headers").
 Almost every `ready` leaf under `core.*` and `ops.*` dispatches through
 `zcl_native_bridge_command` — a direct call into either a native handler body
-(`app/controllers/src/*_native_handlers.c`) or the backing JSON-RPC method,
+(`engine/controllers/src/*_native_handlers.c`) or the backing JSON-RPC method,
 through the command bridge.
 
 ## Roots
@@ -696,8 +696,8 @@ represented by its children's sections.
 
 | Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
 |---|---|---|---|---|---|---|
-| `dev change plan` | ready | read / read / operator · instant/tiny | `files` | `zcl.dev_plan.v1` | `z23 dev change plan --input='{"files":["apps/social/app.def"]}'` | Classify files and select the smallest proof |
-| `dev change apply` (aliases: `dev.change.cycle`) | compat 🔧 → `z23-dev dev change cycle` | mutate / dev-mutation / **owner**, job · foreground/high | `files` | `zcl.dev_cycle.v1` | `z23 dev change apply --input='{"files":["apps/social/app.def"]}'` | Contained publication entrypoint: returns RUNTIME_PUBLICATION_CONTAINED — *change application requires the dev-only process/activation executor* |
+| `dev change plan` | ready | read / read / operator · instant/tiny | `files` | `zcl.dev_plan.v1` | `z23 dev change plan --input='{"files":["contexts/commons/apps/social/app.def"]}'` | Classify files and select the smallest proof |
+| `dev change apply` (aliases: `dev.change.cycle`) | compat 🔧 → `z23-dev dev change cycle` | mutate / dev-mutation / **owner**, job · foreground/high | `files` | `zcl.dev_cycle.v1` | `z23 dev change apply --input='{"files":["contexts/commons/apps/social/app.def"]}'` | Contained publication entrypoint: returns RUNTIME_PUBLICATION_CONTAINED — *change application requires the dev-only process/activation executor* |
 
 #### `dev.loop` — Persistent save-to-verdict loop
 
@@ -775,7 +775,7 @@ represented by its children's sections.
 |---|---|---|---|---|---|---|
 | `dev agent ready` (aliases: `dev.agent.shippable`) | ready | read / read / operator · fast/low | none | `zcl.agent_ready.v1` | `z23 dev agent ready` | Can this checkout link real Tor and produce a shippable candidate |
 | `dev agent test` (aliases: `dev.agent.group`) | ready | read / read / operator · background/high | **`group`**, `exact`, `timeout_ms` | `zcl.agent_test_run.v1` | `z23 dev agent test --group=hex_codec` | Run one registered test group and report what actually RAN |
-| `dev agent mutate` (aliases: `dev.agent.mutation`) | ready | mutate / dev-mutation / **owner** · persistent/high | **`file`**, `line`, `group`, `restore` | `zcl.agent_mutation_check.v1` | `z23 dev agent mutate --file=lib/base/src/hex.c --line=42 --group=hex_codec` | Break one source line and prove a test group notices |
+| `dev agent mutate` (aliases: `dev.agent.mutation`) | ready | mutate / dev-mutation / **owner** · persistent/high | **`file`**, `line`, `group`, `restore` | `zcl.agent_mutation_check.v1` | `z23 dev agent mutate --file=platform/modules/base/src/hex.c --line=42 --group=hex_codec` | Break one source line and prove a test group notices |
 
 ### `ops` — Node diagnostics
 
@@ -974,27 +974,27 @@ represented by its children's sections.
 | `code guide` | ready | read / read / public · instant/tiny | none | `zcl.code_guide.v1` | `z23 code guide` | Edit and prove a checkout change |
 | `code group` | ready | read / read / public · foreground/tiny | **`group`** | `zcl.code_group.v1` | `z23 code group app/services` | Browse source groups and files |
 | `code map` | ready | read / read / public · foreground/tiny | none | `zcl.code_map.v1` | `z23 code map` | Count root groups and app shapes |
-| `code tests` | ready | read / read / public · fast/tiny | **`path`** | `zcl.code_tests.v1` | `z23 code tests lib/net/src/download.c` | Route a file to focused tests |
+| `code tests` | ready | read / read / public · fast/tiny | **`path`** | `zcl.code_tests.v1` | `z23 code tests core/modules/net/src/download.c` | Route a file to focused tests |
 | `code room` | ready | read / read / public · fast/tiny | **`path`** | `zcl.code_room.v1` | `z23 code room app.messaging` | Open a file or command feature room |
 | `code context-map` | ready | read / read / public · foreground/low | none | `zcl.code_context_map.v1` | `z23 code context-map` | Map contexts, shapes, and coupling |
-| `code file` | ready | read / read / public · fast/tiny | **`path`** | `zcl.code_file.v1` | `z23 code file lib/vcs/src/vcs_index.c` | Show a file's symbols and includes |
+| `code file` | ready | read / read / public · fast/tiny | **`path`** | `zcl.code_file.v1` | `z23 code file contexts/commons/modules/vcs/src/vcs_index.c` | Show a file's symbols and includes |
 | `code sym` | ready | read / read / public · fast/tiny | **`name`** | `zcl.code_symbol.v1` | `z23 code sym codeindex_open` | Show one symbol's definition and contract |
 | `code capsule` | ready | read / read / public · fast/tiny | **`name`** | `zcl.code_capsule.v1` | `z23 code capsule sovereignty_guard_allow` | Join one symbol's code and proof surface |
 | `code change-plan` | ready | read / read / public · fast/tiny | **`name`**, `symbol`, `intent`, `patch` | `zcl.code_change_plan.v1` | `z23 code change-plan codeindex_open` | Plan evidence-backed edits and tests |
 | `code refs` | ready | read / read / public · fast/tiny | **`name`**, `limit` | `zcl.code_refs.v1` | `z23 code refs zcl_malloc` | List references to one symbol |
-| `code impact` | ready | read / read / public · fast/tiny | **`path`** | `zcl.code_impact.v1` | `z23 code impact lib/util/include/util/safe_alloc.h` | Measure one file's reverse dependencies |
+| `code impact` | ready | read / read / public · fast/tiny | **`path`** | `zcl.code_impact.v1` | `z23 code impact platform/modules/util/include/util/safe_alloc.h` | Measure one file's reverse dependencies |
 | `code find` | ready | read / read / public · fast/tiny | **`text`**, `limit` | `zcl.code_find.v1` | `z23 code find hotswap` | Rank symbols by name |
 | `code have` | ready | read / read / public · fast/tiny | **`text`**, `limit` | `zcl.code_have.v1` | `z23 code have validation` | Find existing capabilities first |
-| `code territory` | ready | read / read / public · background/moderate | **`name`** | `zcl.code_territory.v1` | `z23 code territory lib/net` | Score one module's evidence surface |
+| `code territory` | ready | read / read / public · background/moderate | **`name`** | `zcl.code_territory.v1` | `z23 code territory core/modules/net` | Score one module's evidence surface |
 | `code kpi` | ready | mutate / dev-mutation / public · background/moderate | none | `zcl.code_kpi.v1` | `z23 code kpi` | Track measured build outcomes |
 | `code corpus` | ready | read / read / public · background/moderate | none | `zcl.code_corpus.v1` | `z23 code corpus` | Measure the proven reusable C23 corpus |
-| `code general` (aliases: `general`) | ready | read / read / public · background/moderate | **`name`** | `zcl.general_brief.v1` | `z23 general lib/net` | Brief one territory or rank evidence gaps |
+| `code general` (aliases: `general`) | ready | read / read / public · background/moderate | **`name`** | `zcl.general_brief.v1` | `z23 general core/modules/net` | Brief one territory or rank evidence gaps |
 
 #### `code.provenance` — Attribute output back to the code that produced it
 
 | Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
 |---|---|---|---|---|---|---|
-| `code provenance merkle` | ready | read / read / public · fast/tiny | **`path`** | `zcl.code_merkle.v1` | `z23 code provenance merkle lib/net` | Give the SHA3 Merkle root of the tree or a subtree |
+| `code provenance merkle` | ready | read / read / public · fast/tiny | **`path`** | `zcl.code_merkle.v1` | `z23 code provenance merkle core/modules/net` | Give the SHA3 Merkle root of the tree or a subtree |
 | `code provenance facts` | ready | read / read / public · background/moderate | **`key`**, `store` | `zcl.code_facts.v1` | `z23 code provenance facts coins_applied_height` | Census the durable named slots and name the ones with several writers |
 | `code provenance relations` | ready | read / read / public · fast/tiny | **`name`** | `zcl.code_relations.v1` | `z23 code provenance relations zcl_native_handle_code_sym` | Expose typed source, command-locus, and proof-requirement relations |
 | `code provenance emitter` | ready | read / read / public · foreground/moderate | **`text`** | `zcl.code_emitter.v1` | `z23 code provenance emitter 'address_index.below_snapshot_seed'` | Resolve emitted text to its emitting code |
@@ -1786,7 +1786,7 @@ internal contract failure.
 
 | Invariant | Test |
 |---|---|
-| This page matches `config/commands/*.def` byte for byte | `tools/lint/check_api_reference_generated.sh` (lint gate `check-api-reference-generated`) |
+| This page matches `engine/composition/commands/*.def` byte for byte | `tools/lint/check_api_reference_generated.sh` (lint gate `check-api-reference-generated`) |
 | Catalog well-formed, every leaf has schemas/example, ready⇒handler, planned⇒no handler | `test_command_registry_catalog.c::test_catalog_wellformed`, `test_ready_leaves_bound`, `test_planned_fail_closed` |
 | Root menu stays in budget; branch menus stay shallow | `test_command_registry_catalog.c::test_root_menu_budget`, `test_branch_menus_shallow` |
 | **Every** branch menu lists only its own immediate children, fixed 5-field shape | `test_native_api_contract.c::test_every_branch_menu_lists_only_own_children` |

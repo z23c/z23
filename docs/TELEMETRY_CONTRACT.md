@@ -25,16 +25,16 @@ replies always return the canonical path even when an alias was invoked.
 |---|---|---|
 | Field table `<domain>_fields.def` | every field name, unit, tier, health rule, meaning | contain code |
 | Provider `<domain>_dump_state_fill` | filling a typed snapshot struct | write JSON, decide health |
-| Render `lib/util/src/telemetry_render.c` | JSON, views, health, completeness | know any domain |
+| Render `platform/modules/util/src/telemetry_render.c` | JSON, views, health, completeness | know any domain |
 | Controller | pick a snapshot and a view | name a field |
 
 A field's name token is written **once**, in the field table. The snapshot
 struct, the JSON key, the ontology path and the leaf id are all expansions of
 that one token, so they cannot drift apart.
 
-Row grammar: `lib/util/include/util/telemetry_field_table.h`.
-API: `lib/util/include/util/telemetry_render.h`.
-Domain list (frozen): `lib/util/include/util/telemetry_domains.def`.
+Row grammar: `platform/modules/util/include/util/telemetry_field_table.h`.
+API: `platform/modules/util/include/util/telemetry_render.h`.
+Domain list (frozen): `platform/modules/util/include/util/telemetry_domains.def`.
 
 ## Health is derived, never authored
 

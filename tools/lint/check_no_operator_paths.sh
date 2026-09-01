@@ -14,7 +14,7 @@
 # THE LEAK THAT MOTIVATED IT, measured 2026-08-26 before the fix: 162 tracked
 # files carried an absolute home path, essentially all of them committed
 # census evidence under corpus/. The producer wrote the package store's
-# absolute datadir into corpus/scopes.def; the census then copied that line
+# absolute datadir into contexts/commons/corpus/scopes.def; the census then copied that line
 # VERBATIM into every evidence record (`scopes_def_line`, 1,151 copies),
 # emitted the field again as `"store"` (2,302 copies) in both the evidence
 # and the KPI report, and the package factory wrote it a third time as
@@ -147,7 +147,7 @@ if [ "${1:-}" = "--selftest" ]; then
 
     # Assertion 1: a clean file passes. Guards against a gate that fails on
     # everything, which would make assertion 2 meaningless.
-    printf 'store label = zcl-store-a\npath = corpus/scopes.def\n' \
+    printf 'store label = zcl-store-a\npath = contexts/commons/corpus/scopes.def\n' \
         > "$tmp/clean.txt"
     st_run 0 "clean file" "$tmp/clean.txt"
 
@@ -235,7 +235,7 @@ count_hits() {
 # word_regex <token> — a standalone-word match for an identity token.
 #
 # The boundary class treats '-' as a SEPARATOR, not a word character, on
-# purpose: `"host":"<user>-dev"` in deploy/release-candidates.jsonl is a real
+# purpose: `"host":"<user>-dev"` in platform/deploy/release-candidates.jsonl is a real
 # hostname leak and a boundary that swallowed the hyphen would miss it. The
 # token itself is regex-escaped (a username or hostname legitimately contains
 # '.', which unescaped would match any character and turn a near-miss into a

@@ -23,7 +23,7 @@
 # tools/lint/scan_exclusions.sh) IS excluded here, unlike the description in
 # the header above might suggest: a file matching that convention is, BY
 # DESIGN, untracked and transient — it is either a currently-running gate
-# selftest's live fixture (lib/test/src/test_make_lint_gates.c plants,
+# selftest's live fixture (tests/harness/src/test_make_lint_gates.c plants,
 # scans, and unlinks one in well under a second) or leftover debris from a
 # crashed run. There is no way to tell those two cases apart from a single
 # filesystem snapshot, and `make lint` must not flake because a selftest
@@ -51,7 +51,7 @@ source "$SCRIPT_DIR/scan_exclusions.sh"
 if [[ -n "${ZCL_STRAY_SCAN_DIRS_FOR_TEST:-}" ]]; then
     read -r -a SCAN_DIRS <<< "$ZCL_STRAY_SCAN_DIRS_FOR_TEST"
 else
-    SCAN_DIRS=(app domain lib config core adapters tools)
+    SCAN_DIRS=(core engine contexts cognition platform core adapters tools)
 fi
 
 existing_dirs=()

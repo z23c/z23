@@ -4,8 +4,8 @@
  *
  * WHY THIS IS A TOOL BINARY AND NOT A `z23` COMMAND LEAF
  * -----------------------------------------------------
- * Every leaf in config/commands/ carries a row in
- * config/remote_command_classes.def answering "may a peer on our own mesh
+ * Every leaf in engine/composition/commands/ carries a row in
+ * engine/composition/remote_command_classes.def answering "may a peer on our own mesh
  * ask this node to run it?". A landing queue has no answer to that question
  * that is worth the risk of getting wrong: it is developer machinery that
  * merges branches and drives `make`, it touches no consensus state, and no

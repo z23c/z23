@@ -1,4 +1,4 @@
-lib/test/src/test_zcode_score_receipt.c:11:10: fatal error: vcs/zcode_score_receipt.h: No such file or directory
+tests/harness/src/test_zcode_score_receipt.c:11:10: fatal error: vcs/zcode_score_receipt.h: No such file or directory
    11 | #include "vcs/zcode_score_receipt.h"
       |          ^~~~~~~~~~~~~~~~~~~~~~~~~~~
 compilation terminated.

@@ -1,0 +1,83 @@
+/* The `ops.telemetry.network` branch. Owned by the network telemetry lane.
+ *
+ * All four leaves are READY: one typed snapshot
+ * (engine/services/src/network_telemetry_fill.c) rendered at four different views
+ * by the shared render layer. They are four VIEWS, not four sources — health
+ * is judged over the whole snapshot on every call, so `tor` cannot report ok
+ * while the peer floor is broken.
+ *
+ * WHY THE LIST BUDGET AND NOT THE RESULT DEFAULT. A telemetry document is a
+ * per-leaf table: values, plus one provenance record for every leaf that is
+ * not plainly present, plus a finding (with its meaning, implication and next
+ * command) for every judged leaf that is unhealthy or unreadable. When the
+ * node is unreachable EVERY judged leaf is unreadable at once, which is
+ * exactly when the document is largest and exactly when an operator needs it.
+ * At the 4096-byte RESULT default that reply would exceed its budget and come
+ * back EMPTY — the failure mode reads as "the command is broken", not "the
+ * node is unreachable". These leaves are list-shaped and declare it.
+ *
+ * READ IN A CLI PROCESS the live counts report `unavailable` with the reason
+ * `node_not_in_process` and health `unknown`; the compile-time leaves (the
+ * outbound floor, which Tor this binary linked) still answer. That is stated
+ * in each leaf's semantics rather than left for a reader to discover. */
+
+ZCL_COMMAND_BRANCH("ops.telemetry.network", "ops.telemetry",
+                   "Peers, transport, onion and address pool",
+                   ZCL_COMMAND_LAYER_OPS)
+
+ZCL_COMMAND_READY_READ(
+    "ops.telemetry.network.summary", "ops.telemetry.network", "",
+    "Connectivity posture",
+    "The typed network snapshot at the summary tier, collected in-process at call time: peer counts against the compiled outbound floor, the dial funnel, onion posture and negotiated transport. Health is judged over every leaf, not just the ones shown. A leaf this process could not read reports null with a reason token and folds to health unknown — never a zero.",
+    ZCL_COMMAND_LIST_BUDGET,
+    "telemetry,network,summary,peers,reachability",
+    "zcl.command.empty_input.v1", "zcl.telemetry.network.v1", "", "",
+    "z23 ops telemetry network summary",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_DEV_STATE_READ, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_telemetry_network_summary)
+
+ZCL_COMMAND_READY_READ(
+    "ops.telemetry.network.peers", "ops.telemetry.network", "",
+    "Peer aggregate",
+    "The typed network snapshot's peer group at full detail, collected in-process at call time: live counts by direction and state, the compiled outbound floor and whether it is met, IPv4 group diversity, connection-age extremes, and the dial-to-handshake funnel since boot. An AGGREGATE — the peer set is unbounded, so per-peer rows stay on `ops state --subsystem=connman`.",
+    ZCL_COMMAND_LIST_BUDGET,
+    "telemetry,network,peers,connections,floor",
+    "zcl.command.empty_input.v1", "zcl.telemetry.network.v1", "", "",
+    "z23 ops telemetry network peers",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_DEV_STATE_READ, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_telemetry_network_peers)
+
+ZCL_COMMAND_READY_READ(
+    "ops.telemetry.network.tor", "ops.telemetry.network", "",
+    "Onion service state",
+    "The typed network snapshot's tor group at full detail, collected in-process at call time. Reports FIRST which Tor this binary linked: the default build links a stub and cannot serve an onion at all, so its onion leaves are not_applicable with the reason tor_stub_build rather than a false 'the onion is down'. On a real-Tor build: whether Tor started, whether the descriptor is published, and the address.",
+    ZCL_COMMAND_LIST_BUDGET,
+    "telemetry,network,tor,onion,hidden,service",
+    "zcl.command.empty_input.v1", "zcl.telemetry.network.v1", "", "",
+    "z23 ops telemetry network tor",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_DEV_STATE_READ, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_telemetry_network_tor)
+
+ZCL_COMMAND_READY_READ(
+    "ops.telemetry.network.transport", "ops.telemetry.network", "",
+    "Wire transport posture",
+    "The typed network snapshot's transport group at full detail, collected in-process at call time: how many live connections actually completed the Noise handshake versus how many carry plaintext, counted per connection. The 'offered by default' and 'advertising' leaves are capability and willingness; only the encrypted count is evidence that any byte was encrypted, and it is 0 while the default stays off.",
+    ZCL_COMMAND_LIST_BUDGET,
+    "telemetry,network,transport,noise,encryption",
+    "zcl.command.empty_input.v1", "zcl.telemetry.network.v1", "", "",
+    "z23 ops telemetry network transport",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_DEV_STATE_READ, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE,
+    zcl_native_handle_telemetry_network_transport)

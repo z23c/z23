@@ -1,7 +1,7 @@
 # ZVCS — the in-binary version-control system
 
 ZVCS is z23's own content-addressed version-control system,
-implemented in `lib/vcs/` (Apache-2.0, `Copyright 2026 Rhett Creighton`). It
+implemented in `contexts/commons/modules/vcs/` (Apache-2.0, `Copyright 2026 Rhett Creighton`). It
 is not a git wrapper and does not shell out to git: `git` stays outside the
 binary entirely as an external GitHub publish/trace bridge (source-tree
 publishing, PR review, and the human-facing history this repo already has).
@@ -28,24 +28,24 @@ depending on the operator's git install:
    needs a durable record of "what source tree produced this passing
    verdict" that does not depend on an external toolchain. ZVCS supplies
    that record using only stock libc and the in-tree SHA3-256
-   (`lib/sha3/src/sha3.c`).
+   (`platform/modules/sha3/src/sha3.c`).
 2. **"Code fearlessly, not recklessly."** A sealed-path change (see
    ADR-0002) must be structurally impossible to auto-commit. Git has no
-   concept of a sealed path; ZVCS's seal guard (`lib/vcs/src/vcs_seal.c`) is
+   concept of a sealed path; ZVCS's seal guard (`contexts/commons/modules/vcs/src/vcs_seal.c`) is
    built into the commit path itself, so a snapshot that would touch a
    sealed file is refused (`VCS_REFUSED`, exit code `3`) unless a one-shot
    unseal token is present.
 
 The **hard gate** that keeps this true is
 `tools/scripts/check_vcs_no_git.sh` (wired into `make lint` as
-`check-vcs-no-git`): it fails the build if any file under `lib/vcs/`
+`check-vcs-no-git`): it fails the build if any file under `contexts/commons/modules/vcs/`
 references the word `git`, or calls `exec*`, `execve`, `system(`, `popen(`,
-or `fork(`. `lib/vcs/` is sovereign by construction, not by convention — a
+or `fork(`. `contexts/commons/modules/vcs/` is sovereign by construction, not by convention — a
 regression that adds a `system("git ...")` call anywhere in that directory
 turns the build red.
 
 `tools/scripts/check_vcs_no_sha1.sh` is the separate source-authority gate. It
-keeps SHA-1 primitives out of `lib/vcs/`, prevents the dev source identity from
+keeps SHA-1 primitives out of `contexts/commons/modules/vcs/`, prevents the dev source identity from
 hashing Git HEAD/object data, and requires producer-receipt writers to use the
 baked SHA-256 source id. Its scope is deliberately **not** all cryptographic
 code: ZClassic consensus still implements `OP_SHA1`, exactly as `zclassicd`
@@ -58,7 +58,7 @@ PoW, or activation rule.
 Git's tree object is a recursive directory DAG: one tree object per
 directory, nested arbitrarily deep. ZVCS deliberately does **not** do that.
 A ZVCS commit points at exactly **one manifest**: a flat, path-sorted list of
-every tracked file (`lib/vcs/include/vcs/vcs_manifest.h`):
+every tracked file (`contexts/commons/modules/vcs/include/vcs/vcs_manifest.h`):
 
 ```
 [1  version]
@@ -86,10 +86,10 @@ tree_hash = SHA3(0x22 || concat over sorted entries of
 
 Every hash ZVCS computes is SHA3-256 (the same in-tree FIPS-202
 implementation the sealed `core/` manifest and the node's other integrity
-checks use — `lib/sha3/src/sha3.c`), and every hashed preimage starts with
+checks use — `platform/modules/sha3/src/sha3.c`), and every hashed preimage starts with
 a one-byte **domain tag** so that a blob, a manifest entry, a manifest, and a
 commit can never collide even if their raw bytes happen to match
-(`lib/vcs/include/vcs/vcs_object.h`):
+(`contexts/commons/modules/vcs/include/vcs/vcs_object.h`):
 
 | Tag | Value | Meaning |
 |-----|-------|---------|
@@ -209,7 +209,7 @@ A ZVCS repo lives beside `.git/` in the working copy, at
 `<repo_root>/.zvcs/`:
 
 - **`objects/`** — the sharded content-addressed object store
-  (`lib/vcs/src/vcs_object.c`). Objects live at `objects/<2-hex>/<62-hex>`
+  (`contexts/commons/modules/vcs/src/vcs_object.c`). Objects live at `objects/<2-hex>/<62-hex>`
   where the 64-hex name is the object id. Writes are atomic (tmp file,
   fsync, rename) and idempotent — putting already-present content is a
   no-op. Two addressing modes exist: content-addressed (`vcs_object_put`,
@@ -218,14 +218,14 @@ A ZVCS repo lives beside `.git/` in the working copy, at
   which are addressed by their *structural* `tree_hash` rather than the raw
   serialized bytes — the reader re-derives and checks the address on load).
 - **`commits.log`** — an append-only, self-verifying commit log. This is not
-  a bespoke format: it is `lib/storage/src/event_log.c`, the same durable,
+  a bespoke format: it is `engine/modules/storage/src/event_log.c`, the same durable,
   fsync'd, CRC'd fact log the chain reducer itself uses, with one new event
-  type, `EV_VCS_COMMIT = 25` (`lib/storage/include/storage/event_log.h`).
+  type, `EV_VCS_COMMIT = 25` (`engine/modules/storage/include/storage/event_log.h`).
   Each commit record is a fixed-layout struct serialized to
   `VCS_COMMIT_RECORD_BYTES` (496) bytes and appended verbatim.
 - **`index.kv`** — a dedicated SQLite WAL file, one handle per repo, one
   writer, writes framed in `BEGIN IMMEDIATE`
-  (`lib/vcs/include/vcs/vcs_index.h`). This is deliberately **outside** the
+  (`contexts/commons/modules/vcs/include/vcs/vcs_index.h`). This is deliberately **outside** the
   node.db ActiveRecord lifecycle, following the same kernel-store doctrine
   as `consensus.db` (`storage/progress_store.h`, historically `progress.kv`)
   and `seal_kv`: a small
@@ -242,7 +242,7 @@ A ZVCS repo lives beside `.git/` in the working copy, at
 ## The commit record
 
 A commit is a self-hashing, fixed-layout, little-endian struct
-(`lib/vcs/include/vcs/vcs_commit.h`). The canonical preimage, in order:
+(`contexts/commons/modules/vcs/include/vcs/vcs_commit.h`). The canonical preimage, in order:
 
 ```
 [4   version]
@@ -283,7 +283,7 @@ the source snapshot still lands, honestly labeled as build-less.
 
 ## Auto-anchor: every green dev cycle gets a commit
 
-`lib/vcs/src/vcs_devloop.c` is the one piece of glue between the dev loop
+`contexts/commons/modules/vcs/src/vcs_devloop.c` is the one piece of glue between the dev loop
 and ZVCS: `vcs_devloop_anchor_cycle()`, called from
 `tools/dev/devloop_cycle.c:finish_cycle()` after a passing
 `zcl.dev_cycle.v1` verdict. It records the verdict's phase and any generation
@@ -314,13 +314,13 @@ skips re-reading files whose mtime/size/ctime match the cached row.
 
 ## Seal integration — a snapshot cannot silently touch consensus
 
-`lib/vcs/src/vcs_seal.c` is ZVCS's own sealed-path guard, independent of (but
+`contexts/commons/modules/vcs/src/vcs_seal.c` is ZVCS's own sealed-path guard, independent of (but
 aligned with) the physical `core/` seal described in ADR-0002. On every
 `vcs_snapshot()`:
 
 1. Load the sealed glob set — from `.zvcs/sealed_paths` if present, else the
-   compiled default: `core/`, `domain/consensus/`, `lib/consensus/`, <!-- doc-path-ok: quotes the compiled glob set in lib/vcs/src/vcs_seal.c, which still lists the pre-core/ globs -->
-   `lib/validation/`, `lib/chain/`, `lib/mining/`, `app/jobs/`.
+   compiled default: `core/`, `domain/consensus/`, `lib/consensus/`, <!-- doc-path-ok: quotes the compiled glob set in contexts/commons/modules/vcs/src/vcs_seal.c, which still lists the pre-core/ globs -->
+   `core/modules/validation/`, `core/modules/chain/`, `core/modules/mining/`, `engine/jobs/`.
 2. Compute `sealset_hash` — `SHA3(0x24 || concat over the bytewise-sorted
    entry hashes of every manifest entry matching a sealed glob)`. Sorting
    makes it order-independent and stable.
@@ -357,7 +357,7 @@ it does not rebuild, relink, deploy, or activate a generation. The lower-level
 `vcs_revert()` relink callback remains an internal seam for a future durable
 transaction, not public activation authority.
 
-## Module map (`lib/vcs/`)
+## Module map (`contexts/commons/modules/vcs/`)
 
 | File | Owns |
 |------|------|
@@ -374,7 +374,7 @@ transaction, not public activation authority.
 Test coverage: `make t ONLY=vcs_core` covers the object store, manifest,
 index, and seal guard in isolation; `make t ONLY=vcs_devloop` covers the
 dev-loop glue (`vcs_devloop_anchor_cycle`, hex decoding, and the
-sealed-refusal path). Both are registered in `lib/test/src/test_parallel.c`.
+sealed-refusal path). Both are registered in `tests/harness/src/test_parallel.c`.
 
 ## The current `dev vcs` surface
 

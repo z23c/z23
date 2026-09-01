@@ -1,7 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * Native handler for `ops.telemetry.watch` — the resumable telemetry change
- * feed. Declared in config/commands/telemetry/watch.def; the ring and its
+ * feed. Declared in engine/composition/commands/telemetry/watch.def; the ring and its
  * invariants are util/telemetry_watch.h; the sampler is
  * services/telemetry_watch_service.h.
  *
@@ -21,7 +21,7 @@
  *
  * THE BATCH IS BOUNDED BEFORE IT IS BUILT. An over-budget reply is written by
  * the kernel as an EMPTY document, not a truncated one (write_bounded_json,
- * lib/kernel/src/command_registry.c), so "emit and see" costs the caller the
+ * engine/modules/kernel/src/command_registry.c), so "emit and see" costs the caller the
  * whole answer and tells them nothing. The record count is therefore computed
  * from a STATIC worst-case record size before anything is encoded, and the
  * built document is then MEASURED and shrunk if the estimate was ever wrong.
@@ -325,7 +325,7 @@ void zcl_native_handle_telemetry_watch(
                                ZCL_COMMAND_EXIT_INTERNAL, "FEED_READ_FAILED",
                                "execute", false, false,
                                "the telemetry change feed did not answer a "
-                               "read", "lib/util/src/telemetry_watch.c");
+                               "read", "platform/modules/util/src/telemetry_watch.c");
         return;
     }
 

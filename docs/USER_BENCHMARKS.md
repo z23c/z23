@@ -23,7 +23,7 @@
 
 `make soak-ci` is a **3–5 min hermetic PROXY**: it spawns an isolated
 `/tmp` regtest node with synthetic `generate`-load and scores the run
-through the *same* verdict math (`lib/test/src/soak_harness.c`) as the
+through the *same* verdict math (`tests/harness/src/soak_harness.c`) as the
 real soak — crash → `FAIL_CRASH`, tip stall → `FAIL_TIP_STALL`, RSS walk
 past the post-warmup baseline → `FAIL_RSS_WALK`. It gives a fast green/red
 CI signal that the soak machinery and RSS-plateau logic are sound.

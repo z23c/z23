@@ -16,7 +16,7 @@ esac
 repo_root=$(cd "$(dirname "$0")/../.." && pwd -P)
 z23_bin="$repo_root/build/bin/z23"
 app_server_benchmark="$repo_root/build/bin/zclassic23-zcode-app-server-benchmark"
-case_source="$repo_root/lib/test/src/test_zcode_package_dev.c"
+case_source="$repo_root/tests/harness/src/test_zcode_package_dev.c"
 if [[ ! -x $z23_bin ]]; then
     echo "benchmark: build/bin/z23 is unavailable" >&2
     exit 69

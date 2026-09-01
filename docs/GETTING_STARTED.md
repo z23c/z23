@@ -157,7 +157,7 @@ facilities currently report unavailable or refuse safely on macOS:
 Landlock/seccomp package confinement, signal-context self-backtraces, native
 hot-swap activation, and consensus snapshot export that requires `O_TMPFILE`.
 The directory watcher now uses kqueue on macOS. `make macos-acceptance`
-validates the closed matrix in `config/platform/macos_capabilities.def`, unions
+validates the closed matrix in `engine/composition/platform/macos_capabilities.def`, unions
 its capability evidence with the eight declarative required baseline groups,
 and executes the resulting 38 exact registered groups. It refuses any
 self-skip or unobserved eligible environment. After that verdict it uses the
@@ -450,20 +450,20 @@ The repo ships a ready-to-use, already-generic `systemd --user` unit and a
 one-time setup script — use them rather than hand-writing a unit:
 
 ```bash
-sudo bash deploy/setup.sh              # one-time: installs the unit, enables linger
+sudo bash platform/deploy/setup.sh              # one-time: installs the unit, enables linger
 systemctl --user start zclassic23
 systemctl --user status zclassic23
 ```
 
-`deploy/setup.sh` installs [`deploy/zclassic23.service`](../deploy/zclassic23.service)
+`platform/deploy/setup.sh` installs [`platform/deploy/zclassic23.service`](../platform/deploy/zclassic23.service)
 to `~/.config/systemd/user/zclassic23.service` and enables
 [`loginctl` linger](https://www.freedesktop.org/software/systemd/man/loginctl.html)
 so the service survives logout/reboot. The unit already uses
-`%h`-relative paths and the default ports/datadir, so it works unmodified
+`%h`-relative paths and the default platform/ports/datadir, so it works unmodified
 after `git clone` into `~/zclassic23`; if you cloned elsewhere, edit the
 `ExecStart=`/`ReadWritePaths=` lines to match. Operator-specific flags
 (a stable external IP, seed peers) go in `~/.config/zclassic23/env` — copy
-[`deploy/zclassic23.env.example`](../deploy/zclassic23.env.example) and edit
+[`platform/deploy/zclassic23.env.example`](../platform/deploy/zclassic23.env.example) and edit
 it; the unit sources this file optionally, so a fresh clone without it still
 starts cleanly and syncs over clearnet. The unit does not request Tor by
 default because the default build links the offline stub. After building the
@@ -595,7 +595,7 @@ collides with anything running in production on the same machine:
 build/bin/z23 -datadir="$HOME/.zclassic-c23-dev" -port=8035 -rpcport=18234
 ```
 
-(The repo's own [`deploy/zclassic23-test.service`](../deploy/zclassic23-test.service)
+(The repo's own [`platform/deploy/zclassic23-test.service`](../platform/deploy/zclassic23-test.service)
 is a worked example of the same pattern: its own datadir, `-port=8035`,
 `-rpcport=18234`, `-addnode=127.0.0.1:8034`, `-nobgvalidation` for a faster
 boot — a template to copy, not something to install as-is.)

@@ -162,5 +162,5 @@ sync full history first, then rescan again.
 
 - `docs/BOOT_INVARIANTS.md` — what each boot stage guarantees, including the
   `wallet_loaded` boundary these refusals sit on.
-- `config/include/config/boot_error.h` — the contract these messages are
+- `engine/composition/include/config/boot_error.h` — the contract these messages are
   rendered in (`code` / `phase` / `message` / `evidence` / `next[]`).

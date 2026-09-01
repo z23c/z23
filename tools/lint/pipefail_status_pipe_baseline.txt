@@ -15,8 +15,8 @@
 # with no row may carry ZERO.
 #
 # Regenerate: ZCL_LINT_MODE=UPDATE tools/lint/check_pipefail_status_pipe.sh
-deploy/migrate-role-names-selftest.sh 3
-deploy/zclassic23-bundle-export.sh 2
+platform/deploy/migrate-role-names-selftest.sh 3
+platform/deploy/zclassic23-bundle-export.sh 2
 tools/agent_fast_ci.sh 11
 tools/deploy_guard.sh 2
 tools/dev/agent-dev-status.sh 4

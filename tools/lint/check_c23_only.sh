@@ -26,8 +26,8 @@ path_hits="$(git ls-files | awk '
 # Rust toolchain/archive/FFI path.
 ref_hits="$(git grep -n -E "$ref_pattern" -- \
     Makefile config app core domain lib ports adapters packages src tools \
-    ':!domain/wallet/src/mnemonic.c' \
-    ':!lib/sapling/src/circuit_gadgets.c' \
+    ':!contexts/wallet/domain/src/mnemonic.c' \
+    ':!core/modules/sapling/src/circuit_gadgets.c' \
     ':!tools/lint/check_c23_only.sh' || true)"
 
 if [[ -n "$path_hits" || -n "$ref_hits" ]]; then

@@ -15,7 +15,7 @@ carry the whole story.
 make -C examples && ./examples/bin/04_zslp_token
 ```
 
-The example is a standalone C23 program (`examples/04_zslp_token.c`) built
+The example is a standalone C23 program (`docs/examples/04_zslp_token.c`) built
 with `-DZCL_TESTING` against the same `-I` include set as the main binary
 (see the root `Makefile`'s `APP_INCLUDES`/`LIB_INCLUDES`/etc.). It is fully
 deterministic — fixed seeds/values everywhere, no wall clock, no network —
@@ -54,7 +54,7 @@ Exact heights depend on `simnet`'s coinbase-maturity mechanics (each
 token math and the projection/parse content are the invariant part.
 
 **Projection gap, shown on purpose:** `explorer_index_apply_slp()`
-(`app/models/src/explorer_index_zslp.c`) records a MINT as a
+(`contexts/market/models/src/explorer_index_zslp.c`) records a MINT as a
 `zslp_transfers` row (same shape as a SEND), but does **not** add the
 minted quantity back into the token's stored `total_minted` column — that
 field is written once, at GENESIS, and never updated again. So
@@ -67,16 +67,16 @@ learner might otherwise expect.
 
 | File | Function |
 |------|----------|
-| `lib/sim/include/sim/simnet.h` | `simnet_init`, `simnet_mint_coinbase`, `simnet_spend`, `simnet_mint_txs`, `simnet_tip_height`, `simnet_free` |
-| `lib/zslp/include/zslp/slp.h` | `slp_build_genesis`, `slp_build_mint`, `slp_build_send`, `slp_parse`, `struct slp_message` |
-| `app/models/include/models/explorer_index.h` | `explorer_index_apply_slp` — folds one parsed SLP message into the `zslp_tokens`/`zslp_transfers` projection given the carrying transaction and block height |
-| `app/models/include/models/zslp.h` | `db_zslp_token_find`, `db_zslp_transfer_list_by_token`, `struct db_zslp_token_info`, `struct db_zslp_transfer_info` |
-| `app/models/include/models/database.h` | `node_db_open`, `node_db_close` (in-memory `:memory:` projection DB) |
-| `lib/primitives/include/primitives/transaction.h` | `transaction_init`, `transaction_alloc`, `transaction_compute_hash`, `transaction_free` |
+| `engine/modules/sim/include/sim/simnet.h` | `simnet_init`, `simnet_mint_coinbase`, `simnet_spend`, `simnet_mint_txs`, `simnet_tip_height`, `simnet_free` |
+| `contexts/market/modules/zslp/include/zslp/slp.h` | `slp_build_genesis`, `slp_build_mint`, `slp_build_send`, `slp_parse`, `struct slp_message` |
+| `contexts/explorer/models/include/models/explorer_index.h` | `explorer_index_apply_slp` — folds one parsed SLP message into the `zslp_tokens`/`zslp_transfers` projection given the carrying transaction and block height |
+| `contexts/market/models/include/models/zslp.h` | `db_zslp_token_find`, `db_zslp_transfer_list_by_token`, `struct db_zslp_token_info`, `struct db_zslp_transfer_info` |
+| `engine/models/include/models/database.h` | `node_db_open`, `node_db_close` (in-memory `:memory:` projection DB) |
+| `core/modules/primitives/include/primitives/transaction.h` | `transaction_init`, `transaction_alloc`, `transaction_compute_hash`, `transaction_free` |
 
 The token OP_RETURN builder/carrier-tx pattern and the wire-order byte
 reversal for `token_id` (big-endian on the wire, little-endian in
-`struct uint256`) mirror `lib/test/src/test_simnet.c` section 6 (search for
+`struct uint256`) mirror `tests/harness/src/test_simnet.c` section 6 (search for
 `slp_build_genesis` there) — that file is the ground-truth reference this
 example was built from.
 
@@ -85,11 +85,11 @@ example was built from.
 There is no dedicated `wallet_slp_send` — a real ZSLP transaction is built
 the same way (an OP_RETURN vout[0] from `slp_build_genesis`/`mint`/`send`,
 plus ordinary transparent value outputs) and submitted through the normal
-transparent send path in `app/controllers/src/wallet_controller.c`. The read
+transparent send path in `contexts/wallet/controllers/src/wallet_controller.c`. The read
 side in this example — `slp_parse` + `explorer_index_apply_slp` — is the
 literal production path: a live node's forward-sync indexer calls the same
 two functions from `index_op_return`
-(`app/models/src/explorer_index.c`, `app/models/src/explorer_index_zslp.c`)
+(`contexts/explorer/models/src/explorer_index.c`, `contexts/market/models/src/explorer_index_zslp.c`)
 for every OP_RETURN in every synced block, and
-`app/controllers/src/zslp_controller.c` (plus `z23 app tokens list`)
+`contexts/market/controllers/src/zslp_controller.c` (plus `z23 app tokens list`)
 read the resulting `zslp_tokens`/`zslp_transfers` rows back for callers.

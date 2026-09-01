@@ -27,7 +27,7 @@ per-file leaf hashes. Chunk identity is raw SHA3-256 with no path context,
 so chunks deduplicate across files, across packages, and across the
 transport carrier for free.
 
-<!-- claim: symbol-present VCS_PACKAGE_CHUNK_BYTES lib/vcs/include/vcs/package_manifest.h # 1 MiB chunk constant -->
+<!-- claim: symbol-present VCS_PACKAGE_CHUNK_BYTES contexts/commons/modules/vcs/include/vcs/package_manifest.h # 1 MiB chunk constant -->
 
 `package_root` is the ONLY semantic identity. Everything else is a label or
 a claim about that root:
@@ -43,7 +43,7 @@ a claim about that root:
   a consumer pins a root, and an upgrade is a new root whose edge points at
   the old one.
 
-<!-- claim: symbol-present parent_root lib/vcs/include/vcs/package_release.h # lineage edge in the envelope -->
+<!-- claim: symbol-present parent_root contexts/commons/modules/vcs/include/vcs/package_release.h # lineage edge in the envelope -->
 
 - **Dependencies are exact roots.** The declaration file is itself a member
   of the content.v2 tree (editing a dependency changes the package root);
@@ -70,11 +70,11 @@ read, verify, and rebuild any package without knowing its author:
 - **Directory contract.** `zcode-package.json` manifest, `LICENSE` (bytes
   held against the declared SPDX identifier at serve time), `README.md`,
   `include/<name>/<name>.h` public headers, `src/` sources, `tests/` tests.
-  `packages/zhex/` is the reference shape.
+  `contexts/commons/packages/zhex/` is the reference shape.
 - **Single translation unit per component.** A package installs exactly one
   public compilation unit. Internal helper TUs are permitted only when they
   are listed in the manifest and install no additional public header
-  (`packages/zdogfight/` is the standing example). A component that wants
+  (`contexts/commons/packages/zdogfight/` is the standing example). A component that wants
   two public TUs is two packages joined by a dependency edge.
 - **Zero function-like macros in public headers.** Constants are `enum` or
   C23 `constexpr`; polymorphism is `_Generic`/`typeof`; contracts are
@@ -93,7 +93,7 @@ read, verify, and rebuild any package without knowing its author:
   not part of the format.
 
 These rules are enforced, not aspirational: `make check-package-anatomy`
-scans every package under `packages/` (manifest exactness, namespaced
+scans every package under `contexts/commons/packages/` (manifest exactness, namespaced
 guarded header, no function-like macros, no inline bodies, declared
 internal TUs, no executable build logic), and the public-serve shape
 refuses a package whose declared license text does not match its LICENSE
@@ -117,7 +117,7 @@ A Commons build is a confined observation, not an act of faith:
   (`ar rcsD`: zeroed uid/gid/mtime) rather than relying on a toolchain
   default.
 
-<!-- claim: symbol-present ZCL_C23_COMMONS_BUILD_FLAGS_QUICK_V2 config/include/config/c23_commons_build_profile.h # frozen portable profile -->
+<!-- claim: symbol-present ZCL_C23_COMMONS_BUILD_FLAGS_QUICK_V2 engine/composition/include/config/c23_commons_build_profile.h # frozen portable profile -->
 
 - **The receipt is the build's identity.** Everything the artifact depends
   on is committed in the receipt wire: semantic triple, compiler id and
@@ -165,7 +165,7 @@ A Commons build is a confined observation, not an act of faith:
   reproduction across DIFFERENT toolchains still counts — the comparator
   deliberately judges output bytes, with the capsule as named evidence.
 
-<!-- claim: symbol-present vcs_package_build_set_toolchain_capsule lib/vcs/include/vcs/package_build.h # receipt v2 capsule binding -->
+<!-- claim: symbol-present vcs_package_build_set_toolchain_capsule contexts/commons/modules/vcs/include/vcs/package_build.h # receipt v2 capsule binding -->
 
 ## 4. Evidence: who may say what
 
@@ -194,7 +194,7 @@ Two evidence lanes exist, and they are not interchangeable:
   and `zcode package attest offer` / `pull` / `admit` move them between
   nodes over the existing swarm with no human carrying bytes (§4.1).
 
-<!-- claim: symbol-present VCS_PACKAGE_ATTEST_ID_DOMAIN lib/vcs/include/vcs/package_attest.h # attestation id domain -->
+<!-- claim: symbol-present VCS_PACKAGE_ATTEST_ID_DOMAIN contexts/commons/modules/vcs/include/vcs/package_attest.h # attestation id domain -->
 
 **Verification is quorum over named keys, never anonymous volume.** A
 release counts as verified only when at least `VCS_VERIFY_QUORUM_REQUIRED`
@@ -207,7 +207,7 @@ possible — a named refusal, not a silent "unverified". The signer quorum is
 the latency fast path over bit-identical reproduction, never a substitute
 for it.
 
-<!-- claim: symbol-present VCS_VERIFY_QUORUM_REQUIRED lib/vcs/include/vcs/package_verify_policy.h # quorum constant -->
+<!-- claim: symbol-present VCS_VERIFY_QUORUM_REQUIRED contexts/commons/modules/vcs/include/vcs/package_verify_policy.h # quorum constant -->
 
 Evidence establishes only its exact stated claim: a hash identifies bytes,
 a signature identifies the key that made a statement, a receipt records a
@@ -259,7 +259,7 @@ contacting no network. Without it, fetched evidence is stranded wherever
 the authenticated record layer is not up, since `import` wants hex the node
 does not hold and `pull` wants a working DHT.
 
-<!-- claim: symbol-present VCS_PACKAGE_ATTEST_DHT_NAMESPACE config/src/boot_zcode_dht_rpc.c # the publish path gates on this exact namespace -->
+<!-- claim: symbol-present VCS_PACKAGE_ATTEST_DHT_NAMESPACE engine/composition/src/boot_zcode_dht_rpc.c # the publish path gates on this exact namespace -->
 
 **The publish-side gate is hygiene; the receiver-side binding check is the
 security property.** A node refuses to publish an attestation POINTER for
@@ -294,15 +294,15 @@ The approved-verifier quorum above is applied later, by
 
 | Format | Magic | Authority | Root / id domain |
 | --- | --- | --- | --- |
-| Package tree (content.v2) | `ZCLPKG` | `lib/vcs/include/vcs/package_manifest.h` | `zcl.package_file.v1`, `zcl.package_manifest.v1` |
-| Signed release envelope | `ZCLREL` | `lib/vcs/include/vcs/package_release.h` | `zcl.zcode_release.v1` |
-| Declarative build recipe | `ZCLRCP` | `lib/vcs/include/vcs/package_recipe.h` | see header |
-| Dependency lock | `ZCLLCK` | `lib/vcs/include/vcs/package_deps.h` | `zcl.zcode_lock.v1` |
-| Build receipt | `ZCLBLD` | `lib/vcs/include/vcs/package_build.h` | `zcl.zcode_build.v1` |
-| Verifier attestation | `ZCLATT` | `lib/vcs/include/vcs/package_attest.h` | `zcl.zcode_attest.v1` |
-| Transport carrier | (content.v2) | `lib/vcs/include/vcs/package_transport.h` | reuses manifest domains |
-| API capsule | `ZCLAPI` | `lib/vcs/src/package_capsule.c` | see source |
-| Toolchain capsule | (struct) | `lib/vcs/include/vcs/build_action.h` | `zcl.toolchain_capsule.v1` |
+| Package tree (content.v2) | `ZCLPKG` | `contexts/commons/modules/vcs/include/vcs/package_manifest.h` | `zcl.package_file.v1`, `zcl.package_manifest.v1` |
+| Signed release envelope | `ZCLREL` | `contexts/commons/modules/vcs/include/vcs/package_release.h` | `zcl.zcode_release.v1` |
+| Declarative build recipe | `ZCLRCP` | `contexts/commons/modules/vcs/include/vcs/package_recipe.h` | see header |
+| Dependency lock | `ZCLLCK` | `contexts/commons/modules/vcs/include/vcs/package_deps.h` | `zcl.zcode_lock.v1` |
+| Build receipt | `ZCLBLD` | `contexts/commons/modules/vcs/include/vcs/package_build.h` | `zcl.zcode_build.v1` |
+| Verifier attestation | `ZCLATT` | `contexts/commons/modules/vcs/include/vcs/package_attest.h` | `zcl.zcode_attest.v1` |
+| Transport carrier | (content.v2) | `contexts/commons/modules/vcs/include/vcs/package_transport.h` | reuses manifest domains |
+| API capsule | `ZCLAPI` | `contexts/commons/modules/vcs/src/package_capsule.c` | see source |
+| Toolchain capsule | (struct) | `contexts/commons/modules/vcs/include/vcs/build_action.h` | `zcl.toolchain_capsule.v1` |
 
 Transport framing, POINTER/PROVIDER records, and the swarm wire are the
 wire lane's concern; they carry these roots verbatim and never reinterpret

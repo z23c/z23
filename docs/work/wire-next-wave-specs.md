@@ -1,12 +1,12 @@
 # simnet_wire next-wave lane specs (Steps D/E/F + app-layer flows)
 
-Grounded in the merged step A/B code (`lib/sim/src/simnet_wire.c`,
+Grounded in the merged step A/B code (`engine/modules/sim/src/simnet_wire.c`,
 `simnet_wire_peer.c`, `simnet_wire_internal.h`,
-`lib/sim/include/sim/simnet_wire.h`, `lib/test/src/test_simnet_wire.c`),
-`lib/sim/src/simnet_cluster.c`, `lib/sim/include/sim/simnet_byzantine.h`,
-`lib/sim/src/simnet_wallet.c`, `lib/sim/include/sim/simnet_mempool.h`,
-`lib/net/src/net_fault.c`, `lib/net/include/net/net.h`
-(`struct net_manager`), and `lib/test/src/test_simnet_txkit.c`. See also
+`engine/modules/sim/include/sim/simnet_wire.h`, `tests/harness/src/test_simnet_wire.c`),
+`engine/modules/sim/src/simnet_cluster.c`, `engine/modules/sim/include/sim/simnet_byzantine.h`,
+`engine/modules/sim/src/simnet_wallet.c`, `engine/modules/sim/include/sim/simnet_mempool.h`,
+`core/modules/net/src/net_fault.c`, `core/modules/net/include/net/net.h`
+(`struct net_manager`), and `tests/harness/src/test_simnet_txkit.c`. See also
 [`io-harness-design.md`](./io-harness-design.md), `docs/SIMULATOR.md`,
 `docs/SIMULATOR_TXNS.md`.
 
@@ -47,7 +47,7 @@ D1 below), or (b) do the N-`p2p_node` refactor first (see D2, sized "L" not
 "M").
 
 **F1. `net_partition_until_unix()` is a single global atomic
-(`lib/net/src/net_fault.c:8-16`, `g_net_partition_until_unix`), not per-peer.**
+(`core/modules/net/src/net_fault.c:8-16`, `g_net_partition_until_unix`), not per-peer.**
 It is honored at `net.c:432` and `msgprocessor.c:1657` per the design doc.
 A real eclipse attack (attacker retains its own links to the NUT while all
 honest links are cut) cannot be expressed with this global switch — it
@@ -84,7 +84,7 @@ already exists as *jitter noise*, not as an *adversarial scripted reorder*.
 **F4. Step C is in-flight and NOT clean.** Branch `sim/wire-byzantine-c`
 (`git log --oneline -5`) is at commit `c3c248181 WIP checkpoint: simnet_wire
 step C byzantine bridge (18 test failures)`, then a merge-from-main on top.
-It adds `lib/sim/src/simnet_wire_byzantine.c` (536 lines), extends
+It adds `engine/modules/sim/src/simnet_wire_byzantine.c` (536 lines), extends
 `simnet_wire.h`/`simnet_wire_internal.h`/`simnet_wire.c`/`simnet_wire_peer.c`,
 and swaps `wire->mp.block_submit` from the step A/B stub
 (`simnet_wire_stub_submit_block`, `simnet_wire.c:199-208`, which
@@ -114,14 +114,14 @@ detail).
 ### D1 — per-link partition/recovery (recommended scope)
 
 - **Files (new/changed, disjoint from D2/E/F)**:
-  - `lib/sim/src/simnet_wire.c` — add `simnet_wire_partition_peer(wire,
+  - `engine/modules/sim/src/simnet_wire.c` — add `simnet_wire_partition_peer(wire,
     peer_id, bool closed)` that enqueues `WIRE_EVENT_CLOSE`/`WIRE_EVENT_OPEN`
     for that peer_id (currently dead code paths per F1 — wire them to a
     public entry point). Add a monitor: "if a peer's link closes while
     others remain open, and a majority of peers close, does the harness
     still make progress via the honest survivor" (mirrors the existing
     slowloris-recovery pattern in `test_simnet_wire.c:164-197`).
-  - `lib/sim/include/sim/simnet_wire.h` — add
+  - `engine/modules/sim/include/sim/simnet_wire.h` — add
     `simnet_wire_partition_peer()` declaration + a `struct
     wire_scenario_partition { size_t peer_id; uint64_t at_tick;
     uint64_t duration_ticks; }` timeline entry type, and extend `struct
@@ -129,12 +129,12 @@ detail).
     `simnet_wire_create_scenario()` can script them (this finally consumes
     F3's dead `duration_us`-style timing need, but keyed off tick count —
     keep determinism, don't add wall-clock).
-  - `lib/sim/src/simnet_wire_internal.h` — extend `struct wire_scenario_peer`
+  - `engine/modules/sim/src/simnet_wire_internal.h` — extend `struct wire_scenario_peer`
     handling only if the partition timeline needs peer-local bookkeeping
     beyond `wire_link.open` (likely not — reuse the existing field).
-  - `lib/test/src/test_simnet_wire.c` — new `test_simnet_wire_partition_*`
+  - `tests/harness/src/test_simnet_wire.c` — new `test_simnet_wire_partition_*`
     functions (parallel to the existing `sw_run_*` static helpers), plus
-    registration in `lib/test/src/test.c` (mirror the block at
+    registration in `tests/harness/src/test.c` (mirror the block at
     `test.c:21-68` for the `simnet_wire` argv-subset dispatch).
 - **Approach**: script N adversarial/honest peers via
   `simnet_wire_create_scenario()`; at a chosen tick, close the honest peer's
@@ -143,7 +143,7 @@ detail).
   NOT silently halt (checks `blocker_snapshot_all` per the existing
   `simnet_wire_monitor_blockers()` at `simnet_wire.c:910-925`, and/or
   `supervisor`/`watchdog` liveness state if reachable from this harness —
-  check whether `lib/util/src/supervisor.c` state is queryable without a
+  check whether `platform/modules/util/src/supervisor.c` state is queryable without a
   running node; if not, that is itself a gap to name, not silently skip).
   Then reopen the honest link and assert recovery (ping/pong round-trip,
   same pattern as `sw_run_slowloris`'s recovery-nonce check,
@@ -174,7 +174,7 @@ detail).
 ## 2. Step E — replay/reorder/bandwidth-shaping + fingerprint determinism
 
 - **Files**:
-  - `lib/sim/src/simnet_wire.c` — bandwidth: replace the `SIZE_MAX`
+  - `engine/modules/sim/src/simnet_wire.c` — bandwidth: replace the `SIZE_MAX`
     initialization at `simnet_wire.c:1069` with a scenario-configurable cap;
     thread it through the already-present `down_tokens`/`up_tokens`
     consultation sites (`simnet_wire.c:623-624`, `simnet_wire.c:793-795`) —
@@ -189,7 +189,7 @@ detail).
     previously-accepted frame (tx/block/inv) verbatim after some delay —
     assert idempotent handling (no duplicate processing side effect, no
     monitor violation).
-  - `lib/sim/src/simnet_wire_peer.c` — new adversary kinds/branches:
+  - `engine/modules/sim/src/simnet_wire_peer.c` — new adversary kinds/branches:
     `SIMNET_WIRE_PEER_REPLAY` already has an enum value
     (`simnet_wire.h:30`, `SIMNET_WIRE_PEER_REPLAY = 8`) but is currently
     routed to `wire_mark_not_implemented()` (`simnet_wire_peer.c:303`,
@@ -198,13 +198,13 @@ detail).
     (`simnet_wire_get_stats()`, `simnet_wire.c:1232`) which kinds are
     currently stubs before claiming "already have a REPLAY peer": the enum
     exists, the behavior does not.
-  - `lib/sim/include/sim/simnet_wire.h` — extend `wire_scenario_peer` or add
+  - `engine/modules/sim/include/sim/simnet_wire.h` — extend `wire_scenario_peer` or add
     a sibling struct for bandwidth caps if scenario-level configuration is
     wanted (vs. a direct `simnet_wire_set_link_bandwidth(wire, peer_id,
     down_cap, up_cap)` setter — prefer the setter; simpler, matches the
     existing imperative `simnet_wire_start_*` API style rather than growing
     `wire_scenario` further).
-  - `lib/test/src/test_simnet_wire.c` — new focused tests per adversary
+  - `tests/harness/src/test_simnet_wire.c` — new focused tests per adversary
     kind, following the existing `sw_run_*` + `SW_CHECK` pattern exactly
     (`test_simnet_wire.c:18-22` macro, `72-243` for the per-kind runner
     shape).
@@ -245,7 +245,7 @@ detail).
     `make ci`/`make test`, analogous to how `fuzz`/`fuzz-ci` are separated
     from `test` at `Makefile:1599`/`1647`). Add the grep security-gate the
     design doc calls for (`docs/work/io-harness-design.md:65-68`): CI-time
-    `grep` over `lib/sim/src/simnet_wire*.c` + `tools/sim/*wire*` asserting
+    `grep` over `engine/modules/sim/src/simnet_wire*.c` + `tools/sim/*wire*` asserting
     no `recv(`/`send(`/`socket(`/`connect(`/`bind(`/`getaddrinfo(` — **this
     gate now EXISTS and is wired**: `make check-wire-harness-security-gate`
     (`tools/scripts/check_wire_harness_security_gate.sh`), in `LINT_GATES` and
@@ -253,9 +253,9 @@ detail).
     new files.
     <!-- claim: file-present tools/scripts/check_wire_harness_security_gate.sh # the gate is built -->
     <!-- claim: gate-passes check-wire-harness-security-gate # and the harness stays socket-free -->
-  - `lib/sim/src/simnet_wire.c` (touch only if capsule replay needs a load
+  - `engine/modules/sim/src/simnet_wire.c` (touch only if capsule replay needs a load
     path — check `seed_tape` API for a load/replay entry point before
-    assuming one needs to be added; `lib/sim/src/seed_tape.c` likely already
+    assuming one needs to be added; `engine/modules/sim/src/seed_tape.c` likely already
     supports open-from-file since `seed_tape_save`/`seed_tape_open` are
     symmetric — confirm before writing new replay code).
 - **Approach**: nightly-only, thousands of seeds, one seed per adversary-kind
@@ -282,11 +282,11 @@ detail).
 ### (a) ZNAM/ZName registration via OP_RETURN through connect_block with adversarial peers present
 
 - **Already present**: `znam_build_register()` and siblings
-  (`lib/znam/include/znam/znam.h:97-126`) build the OP_RETURN payload;
-  `simnet_wallet_op_return()` (`lib/sim/src/simnet_wallet.c:534`,
-  declared `lib/sim/include/sim/simnet_wallet.h:61-64`) already builds,
+  (`contexts/naming/modules/znam/include/znam/znam.h:97-126`) build the OP_RETURN payload;
+  `simnet_wallet_op_return()` (`engine/modules/sim/src/simnet_wallet.c:534`,
+  declared `engine/modules/sim/include/sim/simnet_wallet.h:61-64`) already builds,
   fees, and enqueues an OP_RETURN carrier tx; `simnet_mempool_add`/
-  `simnet_mempool_mint` (`lib/sim/include/sim/simnet_mempool.h:48-59`)
+  `simnet_mempool_mint` (`engine/modules/sim/include/sim/simnet_mempool.h:48-59`)
   already mines it through real `connect_block()`. This whole chain is
   proven today via `simnet` (not `simnet_wire`) — see `docs/SIMULATOR.md`'s
   "ZNAM REGISTER | A" row and `make t ONLY=simnet`.
@@ -297,7 +297,7 @@ detail).
   is a `LOG_FAIL`-on-any-submit stub in steps A/B
   (`simnet_wire_stub_submit_block`, `simnet_wire.c:199-208`); Step C's
   `simnet_wire_byzantine_submit_block` (branch `sim/wire-byzantine-c`,
-  `lib/sim/src/simnet_wire_byzantine.c`) is scoped to byzantine-artifact
+  `engine/modules/sim/src/simnet_wire_byzantine.c`) is scoped to byzantine-artifact
   assertions, not general relay. **Concrete gap**: write a
   `simnet_wire_app_submit_block()` (or extend the byzantine one, name TBD by
   whoever lands C first) that runs the submitted block through the SAME
@@ -310,10 +310,10 @@ detail).
   projection DB is opened the same way `test_simnet.c` does), (iii) the
   adversarial peer's noise did not affect acceptance or the tip/coins
   monitor baselines.
-- **Files**: `lib/sim/src/simnet_wire_app.c` (new, disjoint from D/E/F and
-  from the byzantine bridge) + `lib/sim/include/sim/simnet_wire_app.h` (new)
-  + `lib/test/src/test_simnet_wire_app.c` (new). Reads-only from
-  `lib/sim/src/simnet.c`, `simnet_wallet.c`, `simnet_mempool.c` (reuse, don't
+- **Files**: `engine/modules/sim/src/simnet_wire_app.c` (new, disjoint from D/E/F and
+  from the byzantine bridge) + `engine/modules/sim/include/sim/simnet_wire_app.h` (new)
+  + `tests/harness/src/test_simnet_wire_app.c` (new). Reads-only from
+  `engine/modules/sim/src/simnet.c`, `simnet_wallet.c`, `simnet_mempool.c` (reuse, don't
   duplicate their tx-building logic — call them).
 - **Model tier: Sonnet** (integration of already-proven pieces; the
   `connect_block` plumbing pattern already exists in `simnet.c` to copy).
@@ -321,7 +321,7 @@ detail).
 ### (b) ZSLP token txs
 
 - **Already present**: `slp_build_genesis`/`_mint`/`_send`
-  (`lib/zslp/include/zslp/slp.h:73-89`) + the same
+  (`contexts/market/modules/zslp/include/zslp/slp.h:73-89`) + the same
   `simnet_wallet_op_return()` + `simnet_mempool_add/mint` path. Proven via
   `simnet` today (`docs/SIMULATOR.md`: "ZSLP GENESIS/SEND/MINT | A").
 - **Missing**: identical gap to (a) — wire-level relay-with-adversaries
@@ -334,9 +334,9 @@ detail).
 
 - **Correction to the task's framing** — HTLC redeem/refund settlement is
   **already implemented and tested end-to-end**, not just "script builders
-  exist." `lib/test/src/test_simnet_txkit.c` (`txk_htlc_scripts()` at
+  exist." `tests/harness/src/test_simnet_txkit.c` (`txk_htlc_scripts()` at
   line 149, `txk_build_htlc_spend()` at line 177) drives the real
-  `lib/script/src/htlc.c` builders through `simnet_wallet_send()` (P2SH
+  `core/modules/script/src/htlc.c` builders through `simnet_wallet_send()` (P2SH
   fund) → `simnet_mempool_add`/`simnet_mempool_mint` (redeem and refund,
   including a real timelock-finality gate via
   `simnet_mint_to_height`) — see the "P2SH HTLC fund" / "HTLC redeem path" /
@@ -353,7 +353,7 @@ detail).
   wallet, mine, relay the funding+redeem/refund txs over the wire with
   adversarial peers present, assert consensus-unchanged monitor holds and
   the correct party's redeem/refund succeeds). (ii) the ATOMIC SWAP
-  controller layer (`app/controllers/src/swap_controller.c`,
+  controller layer (`engine/controllers/src/swap_controller.c`,
   `swap_initiate`/`swap_participate`/`swap_list`) remains Class C per
   `docs/SIMULATOR.md` — it builds local state but doesn't drive on-chain
   settlement through simnet; that is a controller-integration gap distinct
@@ -371,13 +371,13 @@ detail).
 
 - **Confirmed NOT feasible today**, and this matches `docs/SIMULATOR.md`'s
   own Phase-2 roadmap (no doc drift here, unlike HTLC). Evidence:
-  `lib/sim/src/simnet.c:35-36` picks the harness's mint height explicitly
+  `engine/modules/sim/src/simnet.c:35-36` picks the harness's mint height explicitly
   "low enough that Sapling is inactive (so the all-zeros
   hashFinalSaplingRoot check is skipped)"; every `block_index` the simulator
   builds sets `has_chain_sapling_value = false` (`simnet.c:195,237`;
   `simnet_chain.c:302,529`; `simnet_byzantine.c:485`). There is no Sapling
-  note/tree/anchor/nullifier state anywhere in `lib/sim/`. A grep for
-  "sapling" across `lib/sim/` returns only these sapling-is-OFF markers —
+  note/tree/anchor/nullifier state anywhere in `engine/modules/sim/`. A grep for
+  "sapling" across `engine/modules/sim/` returns only these sapling-is-OFF markers —
   zero note-commitment-tree or memo-field code.
   `docs/work/sim-phase2-plan.md` exists and is the right place to check for
   a design before starting; it was not read in depth here (out of scope for
@@ -389,7 +389,7 @@ detail).
   height is deliberately pre-activation); (2) Sapling note commitment tree +
   anchor tracking in the coins view (real `coins_view_cache` may already
   carry Sapling tree state for the real node — check
-  `lib/coins/include/coins/coins_view.h` before assuming new state is
+  `core/modules/coins/include/coins/coins_view.h` before assuming new state is
   needed, since the simulator reuses the real `coins_view_cache` type); (3) a
   shielded-spend/output builder analogous to `simnet_wallet_send()` but
   producing Sapling Spend/Output descriptions with real Groth16 proofs (or,
@@ -405,7 +405,7 @@ detail).
   add-on** — it needs coins-view/Sapling-tree research before any code, and
   should NOT be folded into the same wave as (a)/(b)/(c) or into Steps
   D/E/F. Recommend a dedicated research spike (read
-  `docs/work/sim-phase2-plan.md` + `lib/coins/include/coins/coins_view.h` +
+  `docs/work/sim-phase2-plan.md` + `core/modules/coins/include/coins/coins_view.h` +
   wherever the real node keeps its Sapling tree) before writing an
   implementation-ready spec for it.
 - **Model tier: Opus for a future implementation lane; this wave's action
@@ -416,14 +416,14 @@ detail).
 
 | Lane | Scope | New/changed files (disjoint) | Depends on | Model tier |
 |---|---|---|---|---|
-| **L1 — Step D1** | per-link partition/recovery scenarios | `lib/sim/src/simnet_wire.c` (add partition API + monitor), `lib/sim/include/sim/simnet_wire.h` (new API + scenario timeline struct), `lib/test/src/test_simnet_wire.c` (new tests), `lib/test/src/test.c` (registration) | step A/B (merged) | **Sonnet** |
-| **L2 — Step E** | REPLAY peer kind, adversarial reorder, live bandwidth caps | `lib/sim/src/simnet_wire_peer.c` (new adversary logic), `lib/sim/src/simnet_wire.c` (bandwidth cap wiring — touches same file as L1; **sequence L1 then L2, don't run concurrently on simnet_wire.c**, or split by function region and merge carefully), `lib/sim/include/sim/simnet_wire.h` (setter API), `lib/test/src/test_simnet_wire.c` (new tests, additive) | step A/B; independent of D2 | **Sonnet** (bandwidth-only slice could be **Haiku** if split out) |
-| **L3 — Step F** | nightly wire_sweep + capsule save + security grep gate | `tools/sim/wire_sweep.c` (new), `Makefile` (new targets), possibly `lib/sim/src/seed_tape.c` (only if replay-from-file is missing — verify first) | step A/B; benefits from C for byzantine-mix seeds but doesn't require it | **Sonnet** (runner + Makefile); **Sonnet verify pass** specifically for the security grep gate |
-| **L4 — App flows (a)+(b)+(c)-wire-slice** | ZNAM/ZSLP/HTLC relay-with-adversaries through simnet_wire | `lib/sim/src/simnet_wire_app.c` (new), `lib/sim/include/sim/simnet_wire_app.h` (new), `lib/test/src/test_simnet_wire_app.c` (new) | step C landing (needs a real, non-byzantine-stub `block_submit`/mempool-relay path) OR write its own submit hook if C is delayed | **Sonnet** |
+| **L1 — Step D1** | per-link partition/recovery scenarios | `engine/modules/sim/src/simnet_wire.c` (add partition API + monitor), `engine/modules/sim/include/sim/simnet_wire.h` (new API + scenario timeline struct), `tests/harness/src/test_simnet_wire.c` (new tests), `tests/harness/src/test.c` (registration) | step A/B (merged) | **Sonnet** |
+| **L2 — Step E** | REPLAY peer kind, adversarial reorder, live bandwidth caps | `engine/modules/sim/src/simnet_wire_peer.c` (new adversary logic), `engine/modules/sim/src/simnet_wire.c` (bandwidth cap wiring — touches same file as L1; **sequence L1 then L2, don't run concurrently on simnet_wire.c**, or split by function region and merge carefully), `engine/modules/sim/include/sim/simnet_wire.h` (setter API), `tests/harness/src/test_simnet_wire.c` (new tests, additive) | step A/B; independent of D2 | **Sonnet** (bandwidth-only slice could be **Haiku** if split out) |
+| **L3 — Step F** | nightly wire_sweep + capsule save + security grep gate | `tools/sim/wire_sweep.c` (new), `Makefile` (new targets), possibly `engine/modules/sim/src/seed_tape.c` (only if replay-from-file is missing — verify first) | step A/B; benefits from C for byzantine-mix seeds but doesn't require it | **Sonnet** (runner + Makefile); **Sonnet verify pass** specifically for the security grep gate |
+| **L4 — App flows (a)+(b)+(c)-wire-slice** | ZNAM/ZSLP/HTLC relay-with-adversaries through simnet_wire | `engine/modules/sim/src/simnet_wire_app.c` (new), `engine/modules/sim/include/sim/simnet_wire_app.h` (new), `tests/harness/src/test_simnet_wire_app.c` (new) | step C landing (needs a real, non-byzantine-stub `block_submit`/mempool-relay path) OR write its own submit hook if C is delayed | **Sonnet** |
 | **L5 — Doc fix** | correct `docs/SIMULATOR.md`'s stale HTLC Class-B rows to reflect `test_simnet_txkit.c` reality | `docs/SIMULATOR.md` only | none | **Haiku** |
 | **L6 — Sapling research spike** | design doc for shielded-send-in-sim (NOT code) | new doc under `docs/work/` (or extend `sim-phase2-plan.md`) | read `docs/work/sim-phase2-plan.md` + coins_view Sapling state first | **Opus** (research/design only) |
 
-**Sequencing note**: L1 and L2 both touch `lib/sim/src/simnet_wire.c` and
+**Sequencing note**: L1 and L2 both touch `engine/modules/sim/src/simnet_wire.c` and
 `simnet_wire.h`. Land L1 first (it also introduces the scenario-timeline
 struct L2's bandwidth setter can reuse), then rebase L2. L3 and L4 touch
 disjoint new files and can run fully parallel to L1/L2 and to each other.
@@ -443,7 +443,7 @@ diff before accepting. Do not blindly trust the implementer's self-report.
 1. **`docs/SIMULATOR.md`'s action-coverage table is stale for HTLC.** It
    marks HTLC redeem/refund scriptSig build as Class B ("simnet lacks a
    mempool/timelock/script execution flow for settlement"), but
-   `lib/test/src/test_simnet_txkit.c` and `docs/SIMULATOR_TXNS.md`'s own
+   `tests/harness/src/test_simnet_txkit.c` and `docs/SIMULATOR_TXNS.md`'s own
    transaction catalog show real, working, measured HTLC fund/redeem/refund
    through `simnet_mempool_add`/`simnet_mempool_mint` with real timelock
    finality. `docs/SIMULATOR_TXNS.md` (the newer doc) is correct;

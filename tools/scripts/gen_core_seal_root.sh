@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Copyright 2026 Rhett Creighton - Apache License 2.0
 #
-# Regenerate lib/hotswap/include/hotswap/core_seal_root.h from the ROOT line of
+# Regenerate engine/modules/hotswap/include/hotswap/core_seal_root.h from the ROOT line of
 # core/MANIFEST.sha3. Invoked by `make core-seal` right after the manifest is
 # rewritten, so the mirror can never lag the seal by more than one command.
 #
@@ -21,7 +21,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
 
 MANIFEST="core/MANIFEST.sha3"
-OUT="lib/hotswap/include/hotswap/core_seal_root.h"
+OUT="engine/modules/hotswap/include/hotswap/core_seal_root.h"
 
 # The repository's single exact 64-lowercase-hex predicate.
 . "$ROOT_DIR/tools/scripts/source_identity_lib.sh"
@@ -126,7 +126,7 @@ EOF
 #
 # --check is run by check_core_seal_root_mirror.sh on EVERY `make lint`. If it
 # mktemps beside $OUT, every lint run briefly creates an untracked file inside
-# lib/hotswap/include/hotswap/. tools/dev/source-identity.sh inventories
+# engine/modules/hotswap/include/hotswap/. tools/dev/source-identity.sh inventories
 # untracked files and fails closed with "source mutated during identity
 # capture" when the tree changes under it, so that temp file randomly reds
 # whichever gate happens to be capturing at the time (observed as

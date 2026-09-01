@@ -18,7 +18,7 @@
 #      reports more than one. A plain clone has exactly one, no helper can be
 #      running in it, and there is no accident available to prevent, so
 #      `git checkout -b fix/thing && git commit` is simply allowed. This is
-#      the same shape as app/controllers/src/agent_copy_prove_controller.c,
+#      the same shape as cognition/controllers/src/agent_copy_prove_controller.c,
 #      which earns its safety by making the dangerous input not exist rather
 #      than by warning about it.
 #   4. ZCL_LANE_COMMIT_OK is unset/empty — the deliberate-override valve.

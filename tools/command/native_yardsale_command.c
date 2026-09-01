@@ -6,8 +6,8 @@
  * The wallet, the seller profile, and the pending-buy table all live in
  * the running node's process memory, so every leaf forwards its input
  * object verbatim to the RPC method registered by
- * app/controllers/src/yardsale_wallet_controller.c, which adapts the
- * wallet RPC context onto app/services/src/yardsale_wallet_service*.c —
+ * contexts/wallet/controllers/src/yardsale_wallet_controller.c, which adapts the
+ * wallet RPC context onto engine/services/src/yardsale_wallet_service*.c —
  * the one place the rules live. The plan/commit gate
  * (ZCL_COMMAND_CONFIRM_PLAN_COMMIT) is enforced node-side by the service:
  * without "confirm":true the answer is an exact expiring plan; with it,

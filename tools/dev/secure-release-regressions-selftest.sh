@@ -6,7 +6,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 MAKE_GROUPS="${1:-}"
-MANIFEST="$ROOT/lib/vcs/src/build_release_regressions.c"
+MANIFEST="$ROOT/contexts/commons/modules/vcs/src/build_release_regressions.c"
 CATALOG="$ROOT/tools/dev/test_group_catalog.def"
 
 fail()

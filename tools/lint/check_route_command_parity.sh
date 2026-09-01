@@ -3,14 +3,14 @@
 #
 # Lint gate — REST route <-> native command parity (OS-B3b).
 #
-# Every entry in k_api_resource_routes[] (app/controllers/src/
+# Every entry in k_api_resource_routes[] (engine/controllers/src/
 # api_controller_routes.c) carries a command_path naming the native command
-# registry leaf (config/commands/*.def) that owns the same data/service, or
+# registry leaf (engine/composition/commands/*.def) that owns the same data/service, or
 # "none:<short-reason>" when no leaf owns it yet. This gate proves the
 # mapping stays honest as both sides evolve:
 #
 #   - every non-"none:" command_path must exist as a real LEAF path in
-#     config/commands/*.def (a BRANCH/group node does not count — it has no
+#     engine/composition/commands/*.def (a BRANCH/group node does not count — it has no
 #     handler)
 #   - every "none:" command_path must be listed in
 #     tools/lint/route_command_parity_baseline.txt (shrink-only: a NEW
@@ -29,9 +29,9 @@ source tools/lint/scan_exclusions.sh
 # shellcheck source=tools/lint/gate_lib.sh
 source tools/lint/gate_lib.sh
 
-ROUTES_FILE=app/controllers/src/api_controller_routes.c
+ROUTES_FILE=engine/controllers/src/api_controller_routes.c
 BASELINE=tools/lint/route_command_parity_baseline.txt
-CMD_DIR=config/commands
+CMD_DIR=engine/composition/commands
 
 if [ ! -f "$ROUTES_FILE" ]; then
     echo "check_route_command_parity: FATAL — $ROUTES_FILE not found." >&2

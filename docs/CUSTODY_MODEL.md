@@ -55,11 +55,11 @@ warning and proceeds.
 
 **Export paths** (deliberate, OWNER-gated, plan/commit): `dumpprivkey` /
 `z_exportkey` over JSON-RPC, and `core.wallet.address.export-key` over the
-typed surface (`app/controllers/src/wallet_native_handlers.c:310-365`). The
+typed surface (`contexts/wallet/controllers/src/wallet_native_handlers.c:310-365`). The
 typed form refuses without `confirm:true`, warns in the plan body that commit
 reveals the key, and returns the WIF in `reply.data.privkey`. Neither path
 logs the key: `rpc_dumpprivkey` logs only the address on every failure branch
-(`app/controllers/src/wallet_controller_keys.c:29-54`).
+(`contexts/wallet/controllers/src/wallet_controller_keys.c:29-54`).
 
 ### 2.1 The sixth place — twelve words on paper, if they exist
 
@@ -71,7 +71,7 @@ cannot be added afterwards** — the node stores the seed, never the words, so n
 command can print the phrase of an existing wallet.
 
 The decision is `boot_wallet_phrase_plan_for()`
-(`config/src/boot_wallet_phrase.c`), and the input that matters is whether
+(`engine/composition/src/boot_wallet_phrase.c`), and the input that matters is whether
 stdout is a terminal:
 
 | stdout | other condition | plan | result |
@@ -110,7 +110,7 @@ Two typed commands read and use this, both `AUTH_OWNER`:
 
 ## 3. What is encrypted, with what
 
-Two authenticated envelopes are used. `lib/wallet/src/wallet_keystore.c`
+Two authenticated envelopes are used. `contexts/wallet/modules/wallet/src/wallet_keystore.c`
 provides the passphrase-facing **WKS1 envelope**:
 
 ```
@@ -121,7 +121,7 @@ PBKDF2-HMAC-SHA512 (200 000 iterations by default) from the passphrase, then
 AES-256-GCM with a fresh 12-byte nonce and a 16-byte tag. Sapling spending
 keys and the HD seed remain WKS1 rows. Transparent keys use WKS1 once to wrap
 a random 32-byte wallet data-encryption key in `wallet_key_encryption`, then
-`lib/wallet/src/wallet_sqlite_key_crypto.c` writes fast **WKD1** rows:
+`contexts/wallet/modules/wallet/src/wallet_sqlite_key_crypto.c` writes fast **WKD1** rows:
 
 ```
 magic "WKD1" | version u32be | nonce[12] | tag[16] | ciphertext
@@ -140,7 +140,7 @@ WKD1 AEAD, and migration transaction. A wallet may therefore be mixed during
 an interrupted upgrade without any row being mistaken for zero or deleted.
 
 The passphrase is resolved in one place,
-`wallet_lock_effective_passphrase()` (`lib/wallet/src/wallet_lock.c`), in this
+`wallet_lock_effective_passphrase()` (`contexts/wallet/modules/wallet/src/wallet_lock.c`), in this
 order:
 
 1. force-locked (explicit `lock`) → NULL, wins over everything
@@ -168,10 +168,10 @@ plaintext wallet still loads with a warning" is accurate for the
 
 **It is now the whole truth: `wallet_keys` has a single writer.** The former
 second writer — `db_wallet_key_save` / `db_sapling_key_save` /
-`db_wallet_seed_save` in `app/models/src/wallet_key.c`, driven by
+`db_wallet_seed_save` in `contexts/wallet/models/src/wallet_key.c`, driven by
 `node_db_sync_wallet_keys` at every boot, after legacy/snapshot imports, and
 from the `reindexdb` RPC — is deleted. The `wallet_sqlite` layer
-(`lib/wallet/src/wallet_sqlite.c`) is the only writer of the `wallet_keys` /
+(`contexts/wallet/modules/wallet/src/wallet_sqlite.c`) is the only writer of the `wallet_keys` /
 `wallet_sapling_keys` / `wallet_seed` secret columns, the
 `check-before-save-hooks` lint gate ratchets that the plaintext saves never
 return, and the key-saved event / wallet-projection feed moved into that
@@ -209,7 +209,7 @@ which rows are which (§8).
 Two independent runtime gates sit under all of them:
 
 - **`wallet_lock_spend_guard()`** — a locked wallet cannot spend even when
-  trust permits (`lib/wallet/include/wallet/wallet_lock.h`).
+  trust permits (`contexts/wallet/modules/wallet/include/wallet/wallet_lock.h`).
 - **the sync-trust `WALLET_SPEND` capability** — spending is disabled until
   the node's own state is self-verified.
 
@@ -218,7 +218,7 @@ Two independent runtime gates sit under all of them:
 ## 5. What the agent grant bounds
 
 The grant is a row in `agent_sessions` (migration v36,
-`app/models/src/database_migrate_features_v30_up.c:200-224`), minted by
+`engine/models/src/database_migrate_features_v30_up.c:200-224`), minted by
 `vault session create` for an existing principal, and presented per invocation
 as `ZCL_AGENT_SESSION=<32 hex chars>`
 (`tools/command/native_command.c:2735, 3173`).
@@ -236,14 +236,14 @@ The check and the window debit are **one indivisible step** under a
 process-local mutex, with a targeted `UPDATE` of only the two window columns
 guarded by `revoked=0` — so concurrent invocations cannot jointly blow a cap,
 and a revocation landing mid-spend is not undone by the debit rewriting the
-row (`app/models/include/models/agent_session.h`, the
+row (`cognition/models/include/models/agent_session.h`, the
 `agent_session_authorize` contract).
 
 **Can the bounded party widen it?** Through the typed surface: no.
 
 - `vault.session.*` is refused outright for any presented grant, matched on the
   branch prefix so a leaf added tomorrow is covered the day it is added
-  (`app/services/src/agent_spend_policy.c:asp_is_grant_surface`) →
+  (`cognition/services/src/agent_spend_policy.c:asp_is_grant_surface`) →
   `POLICY_NO_GRANT_MINT`.
 - The policy classifies the **leaf**, from its registry spec, not the input's
   shape. A wallet-touching or mutating leaf it has no rule for is refused
@@ -257,7 +257,7 @@ row (`app/models/include/models/agent_session.h`, the
 - The gate runs **after** the lane/authority/capability checks, because it is
   the only one that writes; ahead of them, anyone who could reach it could
   drain a session's window with commands that were then denied anyway
-  (`lib/kernel/src/command_registry.c:1740-1800`).
+  (`engine/modules/kernel/src/command_registry.c:1740-1800`).
 - A plan-stage preview enforces the caps and debits nothing; a handler that
   reports no mutation gets the debit released.
 
@@ -269,7 +269,7 @@ Through the operating system: **yes** — see §7.
 
 | surface | rule | enforced in |
 |---|---|---|
-| `core storage query` (SELECT-only SQL) | `wallet_keys`, `wallet_sapling_keys`, `wallet_seed`, `agent_sessions`, `zswp_contracts` denied wholesale; `privkey`, `xsk`, `seed`, `session_id`, `secret`, … denied as columns | `app/controllers/src/dbquery_controller.c` |
+| `core storage query` (SELECT-only SQL) | `wallet_keys`, `wallet_sapling_keys`, `wallet_seed`, `agent_sessions`, `zswp_contracts` denied wholesale; `privkey`, `xsk`, `seed`, `session_id`, `secret`, … denied as columns | `engine/controllers/src/dbquery_controller.c` |
 | refusal `evidence` in a reply | the **redacted** grant id (first 8 chars + `…`), never the bearer token | `agent_session_redact_id`, asserted on rendered bytes |
 | `vault session list` | redacted ids only; the full token crosses the service boundary exactly once, out of mint | `services/agent_session_service.h` |
 | `ops state --subsystem=agent_sessions` | count only with no key; with a key it echoes back the session the caller already named | `agent_session_dump_state_json` |
@@ -291,7 +291,7 @@ node's uid. Therefore an agent that does not cooperate can:
   `authority_ceiling=OWNER`);
 - read `<datadir>/.cookie` and call `sendtoaddress` straight over JSON-RPC,
   below the kernel and below this policy entirely
-  (`app/controllers/src/rpc_client.c:184`);
+  (`engine/controllers/src/rpc_client.c:184`);
 - read any wallet secret deliberately placed in its own environment, and—when
   it shares the node uid—may reach the node's user-scoped boot credential;
 - read the node's memory, where every spending key is resident.

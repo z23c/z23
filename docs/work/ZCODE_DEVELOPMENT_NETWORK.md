@@ -55,12 +55,12 @@ ledger, worker trust list, or P2P transport.
 
 | Fact | Canonical owner reused by this program | Current truth |
 |---|---|---|
-| Source tree and chunks | `content.v2` in `lib/vcs/package_manifest.*` and the ZCODE CAS | Live |
-| Published release | `lib/vcs/package_release.*` and package-add lifecycle | Live |
-| Dependency lock | `vcs_package_lock` in `lib/vcs/package_deps.*` | Live, root-pinned DAG |
+| Source tree and chunks | `content.v2` in `contexts/commons/modules/vcs/package_manifest.*` and the ZCODE CAS | Live |
+| Published release | `contexts/commons/modules/vcs/package_release.*` and package-add lifecycle | Live |
+| Dependency lock | `vcs_package_lock` in `contexts/commons/modules/vcs/package_deps.*` | Live, root-pinned DAG |
 | Declarative C23 graph | `vcs_package_recipe` | Live for one library/test package; workspace executables and multi-package targets still need an extension |
 | Source snapshot identity | existing path-sorted ZVCS manifest and domain-tagged blob CAS | Live local capture and task binding; content.v2 remains the P2P carrier |
-| Code context | `lib/codeindex/` plus the existing ZCODE CAS | Live bounded `agent_context.v1` capture for an exact symbol or stable symbol ID; goal-to-symbol selection and adapter invocation remain |
+| Code context | `cognition/modules/codeindex/` plus the existing ZCODE CAS | Live bounded `agent_context.v1` capture for an exact symbol or stable symbol ID; goal-to-symbol selection and adapter invocation remain |
 | Fixed build action | `vcs_build_action_v1` | Live closed registry and identity for preprocessed-TU compile, exact-executable test, deterministic exact-executable fuzz, and review. Local execution is live for compile, test, and fuzz |
 | Build coordinator ledger | `build_jobs`, `build_actions`, `build_workers`, `build_receipts`, `zcode_lane_receipts` | Live schema v45. Work receipt rows distinguish local acceptance, untrusted remote observation, local reproduction, and approved-signer quorum; lane rows are lookup projections of signed CAS receipts |
 | Local package confinement | `zclassic23-package-verify` | Live: declarative recipe, Landlock/seccomp/rlimits, no network |
@@ -78,8 +78,8 @@ candidate generation remain missing.
 
 ## Canonical development objects
 
-The first implementation lives in `lib/vcs/include/vcs/zcode_dev.h` and
-`lib/vcs/src/zcode_dev.c`. Each object has one fixed-width, closed binary wire,
+The first implementation lives in `contexts/commons/modules/vcs/include/vcs/zcode_dev.h` and
+`contexts/commons/modules/vcs/src/zcode_dev.c`. Each object has one fixed-width, closed binary wire,
 a version-specific magic, little-endian integers, a domain-separated SHA3-256
 identity, exact-length parsing, and named rejection reasons. JSON is display
 only.
@@ -117,17 +117,17 @@ and reproduction execution is a later landing unit, so an action identity is
 not misreported as a live executor.
 
 The deterministic discovery-only PageRank core is also live in
-`lib/vcs/include/vcs/zcode_discovery_rank.h`. It ranks only study/package
+`contexts/commons/modules/vcs/include/vcs/zcode_discovery_rank.h`. It ranks only study/package
 property roots, never contributors, and binds its canonical graph, local seed
 set, filter policy, exact returned mass coverage, and truncation. It has no
 database, command, proof-acceptance, committee, wallet, or reward authority;
 the rebuildable projection and `zcode.science.rank` adapter wait for the S3
 science service slice.
 
-<!-- claim: file-present lib/vcs/include/vcs/zcode_science.h # canonical scientific object contract -->
-<!-- claim: symbol-present vcs_zcode_benchmark_result_validate_for_study lib/vcs/src/zcode_science.c # study/task/candidate cross-object gate -->
-<!-- claim: symbol-present VCS_BUILD_ACTION_KIND_BENCHMARK_V1 lib/vcs/include/vcs/build_action.h # closed benchmark action identity -->
-<!-- claim: symbol-present vcs_zcode_discovery_rank_compute lib/vcs/src/zcode_discovery_rank.c # deterministic discovery-only integer PageRank -->
+<!-- claim: file-present contexts/commons/modules/vcs/include/vcs/zcode_science.h # canonical scientific object contract -->
+<!-- claim: symbol-present vcs_zcode_benchmark_result_validate_for_study contexts/commons/modules/vcs/src/zcode_science.c # study/task/candidate cross-object gate -->
+<!-- claim: symbol-present VCS_BUILD_ACTION_KIND_BENCHMARK_V1 contexts/commons/modules/vcs/include/vcs/build_action.h # closed benchmark action identity -->
+<!-- claim: symbol-present vcs_zcode_discovery_rank_compute contexts/commons/modules/vcs/src/zcode_discovery_rank.c # deterministic discovery-only integer PageRank -->
 
 The trailing NUL is part of each SHA3 preimage, matching the existing package
 manifest, recipe, lock, release, and attestation convention.
@@ -348,20 +348,20 @@ and `build_action.v1` roots and compares every one to the signed request before
 writing the objects to the existing workspace CAS or planning the existing
 ZBuild action. It never accepts a caller-supplied path or command.
 
-<!-- claim: file-present lib/vcs/include/vcs/zcode_dev.h # the canonical object contract -->
-<!-- claim: symbol-present vcs_zcode_work_receipt_verify lib/vcs/src/zcode_dev.c # signed receipt verification -->
-<!-- claim: symbol-present vcs_zcode_work_receipt_validate_for_candidate lib/vcs/src/zcode_dev.c # cross-object staleness gate -->
-<!-- claim: symbol-present vcs_zcode_proof_set_root lib/vcs/src/zcode_proof_set.c # immutable evaluated evidence set -->
-<!-- claim: file-present lib/vcs/include/vcs/zcode_agent_context.h # bounded canonical agent context wire -->
-<!-- claim: symbol-present zcode_agent_context_capture app/services/src/zcode_agent_context_service.c # source-stable context publication into existing CAS -->
-<!-- claim: symbol-present vcs_tree_capture_path lib/vcs/src/vcs.c # verified task source snapshot in existing CAS -->
-<!-- claim: symbol-present vcs_tree_capture_into lib/vcs/src/vcs.c # separate candidate workspace import into requester CAS -->
-<!-- claim: symbol-present vcs_zcode_write_scope_contains lib/vcs/src/zcode_write_scope.c # component-bounded candidate write authority -->
-<!-- claim: symbol-present vcs_zcode_patch_derive lib/vcs/src/zcode_patch.c # manifest-derived scoped patch authority -->
-<!-- claim: symbol-present vcs_zcode_candidate_bundle_import lib/vcs/src/zcode_candidate_bundle.c # validate-before-write P2P candidate authority import -->
-<!-- claim: symbol-present vcs_zcode_action_input_validate_for_candidate lib/vcs/src/zcode_action_input.c # fixed actions consume candidate-manifest bytes -->
-<!-- claim: symbol-present vcs_zcode_task_authority_validate_for_candidate lib/vcs/src/zcode_task_authority.c # lock and recipe roots resolve against base and candidate trees -->
-<!-- claim: symbol-present vcs_zcode_candidate_tree_import lib/vcs/src/zcode_candidate_tree.c # content.v2 reconstructs every candidate blob on a fresh peer -->
+<!-- claim: file-present contexts/commons/modules/vcs/include/vcs/zcode_dev.h # the canonical object contract -->
+<!-- claim: symbol-present vcs_zcode_work_receipt_verify contexts/commons/modules/vcs/src/zcode_dev.c # signed receipt verification -->
+<!-- claim: symbol-present vcs_zcode_work_receipt_validate_for_candidate contexts/commons/modules/vcs/src/zcode_dev.c # cross-object staleness gate -->
+<!-- claim: symbol-present vcs_zcode_proof_set_root contexts/commons/modules/vcs/src/zcode_proof_set.c # immutable evaluated evidence set -->
+<!-- claim: file-present contexts/commons/modules/vcs/include/vcs/zcode_agent_context.h # bounded canonical agent context wire -->
+<!-- claim: symbol-present zcode_agent_context_capture cognition/services/src/zcode_agent_context_service.c # source-stable context publication into existing CAS -->
+<!-- claim: symbol-present vcs_tree_capture_path contexts/commons/modules/vcs/src/vcs.c # verified task source snapshot in existing CAS -->
+<!-- claim: symbol-present vcs_tree_capture_into contexts/commons/modules/vcs/src/vcs.c # separate candidate workspace import into requester CAS -->
+<!-- claim: symbol-present vcs_zcode_write_scope_contains contexts/commons/modules/vcs/src/zcode_write_scope.c # component-bounded candidate write authority -->
+<!-- claim: symbol-present vcs_zcode_patch_derive contexts/commons/modules/vcs/src/zcode_patch.c # manifest-derived scoped patch authority -->
+<!-- claim: symbol-present vcs_zcode_candidate_bundle_import contexts/commons/modules/vcs/src/zcode_candidate_bundle.c # validate-before-write P2P candidate authority import -->
+<!-- claim: symbol-present vcs_zcode_action_input_validate_for_candidate contexts/commons/modules/vcs/src/zcode_action_input.c # fixed actions consume candidate-manifest bytes -->
+<!-- claim: symbol-present vcs_zcode_task_authority_validate_for_candidate contexts/commons/modules/vcs/src/zcode_task_authority.c # lock and recipe roots resolve against base and candidate trees -->
+<!-- claim: symbol-present vcs_zcode_candidate_tree_import contexts/commons/modules/vcs/src/zcode_candidate_tree.c # content.v2 reconstructs every candidate blob on a fresh peer -->
 
 ## Ordered delivery
 
@@ -379,8 +379,8 @@ ZBuild action. It never accepts a caller-supplied path or command.
   from the persisted task/candidate wires on every call and the typed
   `zcode tasks` surface lists it.
 
-<!-- claim: file-present lib/vcs/include/vcs/zcode_task_index.h # rebuildable dev-task index projection over the workspace CAS -->
-<!-- claim: symbol-present vcs_zcode_task_index_build lib/vcs/src/zcode_task_index.c # projection rebuilt from CAS wires on every call -->
+<!-- claim: file-present contexts/commons/modules/vcs/include/vcs/zcode_task_index.h # rebuildable dev-task index projection over the workspace CAS -->
+<!-- claim: symbol-present vcs_zcode_task_index_build contexts/commons/modules/vcs/src/zcode_task_index.c # projection rebuilt from CAS wires on every call -->
 <!-- claim: symbol-present zcl_native_handle_zcode_tasks tools/command/native_zcode_dev_command.c # typed task list/search surface -->
 - [x] Publish a bounded code-index context capsule whose members resolve to
   the task's immutable source root. V1 uses an exact symbol/stable ID; semantic
@@ -598,8 +598,8 @@ The local transition chain is live: `zcode improve` admits FRONTIER,
 the fixed multi-node restart/disruption/chaos action set and automatic
 failure-to-task conversion; no current command claims that evidence exists.
 
-<!-- claim: file-present lib/vcs/include/vcs/zcode_lane.h # canonical signed lane receipt -->
-<!-- claim: symbol-present zcode_lane_advance app/services/src/zcode_lane_service.c # sequential proof-gated promotion -->
+<!-- claim: file-present contexts/commons/modules/vcs/include/vcs/zcode_lane.h # canonical signed lane receipt -->
+<!-- claim: symbol-present zcode_lane_advance contexts/commons/services/src/zcode_lane_service.c # sequential proof-gated promotion -->
 <!-- claim: symbol-present zcl_native_handle_zcode_accept tools/command/native_zcode_dev_command.c # explicit operator acceptance -->
 
 ## Acceptance demonstrations

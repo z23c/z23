@@ -1,1 +1,0 @@
-HOTSWAP_SERVICE("bad.service.v1", "lib/test/fixtures/hotswap_service_bad.c", "lib/test/fixtures/hotswap_service_bad.c", "-", "none", "abi", "schema", "wire", "kat", "bad.probe")

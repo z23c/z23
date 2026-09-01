@@ -18,7 +18,7 @@ never on log scraping.
 (opt-in, not in `make ci`; process ownership via
 `tools/dev/node_lifecycle.sh`; P2P listeners that the capability-learning
 reconnect must redial use reachable-policy ports 9033/18033/20028 per
-`lib/net/include/net/port_policy.h`).
+`core/modules/net/include/net/port_policy.h`).
 
 Four scenarios:
 
@@ -77,6 +77,6 @@ Interop risk is now measured, not argued: a noise-enabled node is
 indistinguishable from a legacy node toward plaintext peers in both
 directions, and upgrades to authenticated encryption exactly when both
 sides advertise. The remaining precondition for flipping the default stays
-what `lib/net/include/net/connman.h` states: a measured population of
+what `core/modules/net/include/net/connman.h` states: a measured population of
 advertising peers on the live network (the census high-water), which is an
 owner decision, not a code property.

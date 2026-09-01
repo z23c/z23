@@ -6,7 +6,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-MATRIX="${ZCL_MACOS_CAPABILITY_MATRIX:-$REPO_ROOT/config/platform/macos_capabilities.def}"
+MATRIX="${ZCL_MACOS_CAPABILITY_MATRIX:-$REPO_ROOT/engine/composition/platform/macos_capabilities.def}"
 REGISTRY="$REPO_ROOT/tools/dev/test_group_catalog.def"
 EXPECTED_EXACT_GROUPS='test_arm_hw_tiers,test_binary_ab_fallback,test_binary_staleness,test_blake2b_batch_parity,test_boot_shutdown_marker_persistence,test_chacha20_isa_parity,test_cold_join_sovereign,test_confine,test_crypto,test_dev_activation,test_dev_platform,test_directory_watcher,test_encoding,test_fast_sync_coins_export,test_hw_profile,test_net,test_noise_nk_handshake,test_noise_transport_parity,test_noise_xx_handshake,test_os_proc,test_os_sandbox,test_rng,test_rpc,test_sandbox_process_budget,test_self_backtrace,test_service_state,test_service_state_driver,test_sha256_isa_parity,test_sha3_256_x4,test_sha3_512_x4,test_sqlite,test_thread_qos,test_tor,test_wallet,test_wallet_backup,test_watcher_record,test_z23_front_door,test_zcode_verify'
 
@@ -157,7 +157,7 @@ case "${1:---check}" in
         # the macOS 14 floor and system-runtime-only dependency boundary, then
         # verifies its closed SHA256SUMS.  The node-free guide call proves the
         # stripped packaged node executes; it never opens a datadir or network.
-        "$REPO_ROOT/packaging/release/build_release.sh" --bin "$REPO_ROOT/build/bin" --out "$package_root/runtime" --platform darwin-arm64
+        "$REPO_ROOT/platform/packaging/release/build_release.sh" --bin "$REPO_ROOT/build/bin" --out "$package_root/runtime" --platform darwin-arm64
         "$package_root/runtime/z23" code guide >"$package_root/code-guide.json"
         [ -s "$package_root/code-guide.json" ] || die "packaged z23 code guide emitted no response"
 

@@ -1,6 +1,6 @@
 # Copyright 2026 Rhett Creighton - Apache License 2.0
 #
-# remote_command_class_rows.awk — parse config/remote_command_classes.def into
+# remote_command_class_rows.awk — parse engine/composition/remote_command_classes.def into
 # one tab-separated row per classified leaf:
 #
 #   <leaf>\t<class>\t<reason>

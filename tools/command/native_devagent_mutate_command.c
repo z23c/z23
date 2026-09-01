@@ -370,7 +370,7 @@ void zcl_native_handle_dev_agent_mutate(
                    "lib/, app/, src/, tools/ or config/ — no absolute path "
                    "and no '..'",
                    rel ? rel : "(absent)",
-                   "z23 dev agent mutate --file=lib/base/src/hex.c --line=42 "
+                   "z23 dev agent mutate --file=platform/modules/base/src/hex.c --line=42 "
                    "--group=hex_codec");
         return;
     }

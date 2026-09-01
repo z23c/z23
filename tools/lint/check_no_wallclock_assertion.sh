@@ -661,7 +661,7 @@ if [ -n "${ZCL_WALLCLOCK_GATE_SCAN_GLOB:-}" ]; then
 else
     # Every tracked C test source: the monolithic suite plus every package's
     # own tests/ directory.
-    mapfile -t scan_files < <(git ls-files | grep -E '(^|/)(tests?)/.*\.(c|h)$|^lib/test/src/.*\.(c|h)$' || true)
+    mapfile -t scan_files < <(git ls-files | grep -E '(^|/)(tests?)/.*\.(c|h)$|^tests/harness/src/.*\.(c|h)$' || true)
     # Floor, not a guess: the tree carried 1079 such files when this gate was
     # written. Anything under 800 means the producer broke, and a "clean"
     # verdict off a collapsed scan set is exactly the hollow pass gate_lib.sh
@@ -670,7 +670,7 @@ else
 fi
 
 gate_require_scanned "${#scan_files[@]}" "$FILE_FLOOR" "$GATE" \
-    "Expected the tracked C test sources (lib/test/src/**, **/tests/**)."
+    "Expected the tracked C test sources (tests/harness/src/**, **/tests/**)."
 
 # The detector's exit status is CHECKED. `mapfile < <(...)` swallows it, and a
 # broken awk program then produces zero rows — which reads as "nothing is
@@ -754,8 +754,8 @@ if [ "${#violations[@]}" -gt 0 ]; then
     echo "  Pick the treatment that matches what the bound is actually for:"
     echo "    * hang detector (the bound is NOT the property) — assert the OUTCOME,"
     echo "      and let a progress watchdog catch a true wedge. See"
-    echo "      run_gate_script_watched() in lib/test/src/lint_gate_helpers.c and"
-    echo "      group_watchdog_expired() in lib/test/src/test_parallel.c: both bound"
+    echo "      run_gate_script_watched() in tests/harness/src/lint_gate_helpers.c and"
+    echo "      group_watchdog_expired() in tests/harness/src/test_parallel.c: both bound"
     echo "      SILENCE, not runtime, so a slow box keeps passing."
     echo "    * the speed IS the property — assert a load-independent proxy"
     echo "      (operation counts, bytes written, syscalls, iterations, progress"

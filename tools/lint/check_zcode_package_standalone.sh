@@ -9,8 +9,8 @@
 # unbuildable there, however well it builds inside this monolith, where every
 # -I is on the command line and the reach is invisible.
 #
-# That is not hypothetical. lib/base is the dependency-free ROOT of the
-# registry, and a portability change gave lib/base/src/log_level.c an
+# That is not hypothetical. platform/modules/base is the dependency-free ROOT of the
+# registry, and a portability change gave platform/modules/base/src/log_level.c an
 # `#include "platform/time_compat.h"`. The monolith built fine. The package
 # did not, and because base is the root, every one of the ten packages failed
 # with it. The only signal was test_zcode_package_registry reporting
@@ -18,10 +18,10 @@
 # a group that takes half a minute to reach the failure. This gate names the
 # file and prints the compiler's own error in about two seconds.
 #
-# WHAT IT CHECKS. For each ZCODE_PACKAGE in config/zcode_package_registry.def:
+# WHAT IT CHECKS. For each ZCODE_PACKAGE in engine/composition/zcode_package_registry.def:
 # compile every source the package ships with -I<pkg>/include plus the include
 # dir of each package its manifest lists under "dependencies", using the
-# recipe's own quick profile from config/include/config/c23_commons_build_profile.h.
+# recipe's own quick profile from engine/composition/include/config/c23_commons_build_profile.h.
 # A manifest that declares "files" is honoured exactly — an unlisted source is
 # not shipped, so it is not compiled here either.
 #
@@ -36,9 +36,9 @@ cd "$(dirname "$0")/../.." || { echo "FAIL: cannot reach repo root" >&2; exit 2;
 
 # Both .def files, exactly as test_zcode_package_registry.c includes them: the
 # sample application is package ten and rides the same row shape.
-REGISTRY_DEFS=(config/zcode_package_registry.def config/zcode_c23_commons_app.def)
-PROFILE="config/include/config/c23_commons_build_profile.h"
-TOOLCHAIN_SRC="lib/platform/src/toolchain.c"
+REGISTRY_DEFS=(engine/composition/zcode_package_registry.def engine/composition/zcode_c23_commons_app.def)
+PROFILE="engine/composition/include/config/c23_commons_build_profile.h"
+TOOLCHAIN_SRC="platform/modules/platform/src/toolchain.c"
 # Default to `cc`, NOT `gcc`. make's own built-in default for CC is `cc`, and
 # make does not export makefile-set variables, so this script receives CC only
 # when the environment already had it — which is to say, usually not. Falling
@@ -53,7 +53,7 @@ CC_BIN="${CC:-cc}"
 # this gate cannot drift from the profile it claims to mirror. The trailing
 # -c is already part of the macro.
 #
-# The concrete flags are now platform-specific (supplied by lib/platform at
+# The concrete flags are now platform-specific (supplied by platform/modules/platform at
 # runtime), so this script mirrors that choice for the standalone compile gate.
 read_quick_flags() {
     case "$(uname -s)" in
@@ -73,7 +73,7 @@ read_quick_flags() {
             ;;
         Linux)
             # The flags are no longer a string literal in the profile header;
-            # that macro now calls into lib/platform at runtime. The Linux
+            # that macro now calls into platform/modules/platform at runtime. The Linux
             # branch of that function preserves the historical V2 string
             # byte-for-byte on purpose, so read it from there rather than
             # copying it here — a copy is what lets a gate drift from the

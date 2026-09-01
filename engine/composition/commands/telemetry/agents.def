@@ -1,0 +1,87 @@
+/* The `ops.telemetry.agents` branch. Owned by the agents telemetry lane.
+ *
+ * All three leaves render ONE typed agents snapshot
+ * (platform/modules/util/include/util/telemetry/agents_fields.def, filled by
+ * engine/services/src/agents_telemetry_fill.c) through the shared telemetry
+ * renderer, each filtered to its own group. Health is judged over the whole
+ * 25-leaf table on every call; only the rendering is narrowed.
+ *
+ * SCOPE, stated because the earlier planned text promised more than exists:
+ * these are AGGREGATES, not listings. A fixed-offset field table has no array
+ * leaf, and the grant population is operator-driven and unbounded, so the
+ * counts/worst/oldest/soonest are here and per-row inspection stays on
+ * `vault session list` and `ops state --subsystem=agent_sessions`, which
+ * already own the redaction rule. Nothing below can emit a session id, an
+ * account, a nonce or a key.
+ *
+ * LATENCY_FOREGROUND, not FAST: a collection is five bounded loopback reads
+ * against the running node (single-digit milliseconds when it is healthy),
+ * and the collector holds its own wall budget so a slow node degrades into
+ * labelled-unavailable leaves rather than a long dispatch.
+ *
+ * LIST budget (8192) rather than the 4096 RESULT default, and that is
+ * MEASURED, not a guess. An over-budget reply in this kernel is an EMPTY
+ * document, not a truncated one, and the widest document is not the healthy
+ * one: a non-present leaf reports provenance at every view tier, so a node
+ * that is DOWN renders every leaf plus a provenance block plus a finding per
+ * judged rule. test_telemetry_agents measures that case at 5044 bytes — over
+ * the 4096 default. Healthy replies are 1945-3319 bytes. */
+
+ZCL_COMMAND_BRANCH("ops.telemetry.agents", "ops.telemetry",
+                   "Agent sessions, grants and activity",
+                   ZCL_COMMAND_LAYER_OPS)
+
+ZCL_COMMAND_READY_READ(
+    "ops.telemetry.agents.sessions", "ops.telemetry.agents", "",
+    "Agent session population",
+    "Read live from the running node at call time: how many agent grant rows "
+    "exist and how many are usable, revoked, expired or malformed, how many "
+    "distinct principals hold one, and the oldest usable grant's age — counts "
+    "and ages only, never a session id.",
+    ZCL_COMMAND_LIST_BUDGET,
+    "telemetry,agents,sessions,agent,grants,principals",
+    "zcl.command.empty_input.v1", "zcl.telemetry.agents.sessions.v1", "", "",
+    "z23 ops telemetry agents sessions",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_DEV_STATE_READ, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE,
+    zcl_native_handle_ops_telemetry_agents_sessions)
+
+ZCL_COMMAND_READY_READ(
+    "ops.telemetry.agents.grants", "ops.telemetry.agents", "",
+    "What the usable grants permit",
+    "Read live from the running node at call time: across the grants that "
+    "would authorize a spend right now, how many bound no destination, how "
+    "many never expire, the widest per-transaction and per-window caps in "
+    "zatoshis, and the seconds until the next expiry.",
+    ZCL_COMMAND_LIST_BUDGET,
+    "telemetry,agents,grants,capability,authority,caps,expiry",
+    "zcl.command.empty_input.v1", "zcl.telemetry.agents.grants.v1", "", "",
+    "z23 ops telemetry agents grants",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_DEV_STATE_READ, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE,
+    zcl_native_handle_ops_telemetry_agents_grants)
+
+ZCL_COMMAND_READY_READ(
+    "ops.telemetry.agents.activity", "ops.telemetry.agents", "",
+    "Recorded agent activity",
+    "Read live from the running node at call time: zatoshis debited against "
+    "the current rolling window of every usable grant, how many grants carry "
+    "a debit, the worst window utilisation, principal logins, pending login "
+    "challenges and self-backtrace dumps. This node keeps no per-command "
+    "invocation audit, so command counts and refusals are NOT reported here.",
+    ZCL_COMMAND_LIST_BUDGET,
+    "telemetry,agents,activity,spend,window,logins,auth,backtrace",
+    "zcl.command.empty_input.v1", "zcl.telemetry.agents.activity.v1", "", "",
+    "z23 ops telemetry agents activity",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_DEV_STATE_READ, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE,
+    zcl_native_handle_ops_telemetry_agents_activity)

@@ -3,7 +3,7 @@
 # (ratchet, shrink-only <path>\t<function> baseline).
 #
 # THE BUG CLASS THIS CLOSES (found live, 2026-08-29).
-# lib/net/src/file_service.c splits into a `#if defined(_WIN32)` arm and a
+# core/modules/net/src/file_service.c splits into a `#if defined(_WIN32)` arm and a
 # POSIX `#else` arm. Three PURE request parsers — fs_parse_rom_request,
 # fs_parse_rom_manifest_request, fs_parse_rom_list_request — had a full body
 # in BOTH arms, and the bodies had drifted apart on two axes: Windows
@@ -26,7 +26,7 @@
 # bodies can silently drift apart under one name.
 #
 # WHAT THIS DOES NOT PROVE. A duplicate is not automatically a bug: a real
-# OS-abstraction "platform seam" (lib/platform/src is the intentional home
+# OS-abstraction "platform seam" (platform/modules/platform/src is the intentional home
 # for exactly this shape — one function, N OS-specific bodies) or a real
 # SIMD/feature dispatch pair can legitimately share a name across arms. This
 # gate cannot tell "genuinely platform-dependent, correctly split" apart
@@ -84,7 +84,7 @@ MODE="${ZCL_LINT_MODE:-FAIL}"
 BASELINE="${ZCL_ARM_SYMBOL_BASELINE:-tools/lint/arm_symbol_single_baseline.txt}"
 ANALYZER_NAME="arm_symbol_scan.awk"
 
-SCAN_ROOTS_DEFAULT="app config lib src tools"
+SCAN_ROOTS_DEFAULT="core engine contexts cognition platform tools"
 read -r -a SCAN_ROOTS <<< "${ZCL_ARM_SYMBOL_SCAN_ROOTS:-$SCAN_ROOTS_DEFAULT}"
 
 # ── the analyzer, emitted here so --selftest and the real run share one text ──
@@ -366,7 +366,7 @@ void sha256_transform_generic(uint32_t *state, const unsigned char *data)
     #     root dropped) is UNPROVEN exit 2 — never 0, never 1. The old floor
     #     could not see this: 3019 files still cleared a floor of 2500.
     cov_case 2 "a scan missing a whole declared root was not UNPROVEN" \
-        ZCL_ARM_SYMBOL_SCAN_ROOTS="app config lib src" ZCL_ARM_SYMBOL_FILE_FLOOR=1
+        ZCL_ARM_SYMBOL_SCAN_ROOTS="core engine contexts cognition platform" ZCL_ARM_SYMBOL_FILE_FLOOR=1
     # 6c. a shortfall SMALLER than the recorded allowance is a stale ratchet,
     #     exit 1 — an allowance that may only ever rise rusts shut.
     cov_case 1 "an allowance above the true shortfall was silently tolerated" \
@@ -409,7 +409,7 @@ gate_require_scanned "${#scan_files[@]}" "${ZCL_ARM_SYMBOL_FILE_FLOOR:-2500}" "$
 # quiet redefinition of what "covered" means.
 #
 # Scope, unchanged: SCAN_ROOTS_DEFAULT is app/config/lib/src/tools. Tracked .c
-# outside those roots (core/, domain/, adapters/, packages/, examples/ — 297
+# outside those roots (core/, domain/, platform/adapters/, contexts/commons/packages/, examples/ — 297
 # files on 2026-08-30) is OUT of this gate's declared surface and is NOT in
 # the expectation. Widening the roots is a separate, riskier change that must
 # be proven against a clean tree; a coverage check that fired on files the

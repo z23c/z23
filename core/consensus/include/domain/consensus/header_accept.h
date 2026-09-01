@@ -5,8 +5,8 @@
  * structural checks.
  *
  * These checks mirror the PURE branches of the legacy
- * lib/validation/check_block::check_block_header_impl() and
- * lib/validation/check_block::contextual_check_block_header() — the
+ * core/modules/validation/check_block::check_block_header_impl() and
+ * core/modules/validation/check_block::contextual_check_block_header() — the
  * branches that depend only on the header bytes themselves plus a few
  * caller-supplied scalars (height, prev_MTP, expected difficulty
  * target, expected equihash solution size, "now" upper bound). They do

@@ -35,7 +35,7 @@
  *     never mistaken for a passing one at a glance.
  *
  * WHY A BROKEN CHAIN STILL RETURNS status=PASSED. serialize_reply() in
- * lib/kernel/src/command_registry.c emits `data` only for PASSED /
+ * engine/modules/kernel/src/command_registry.c emits `data` only for PASSED /
  * ACCEPTED and drops it entirely on any other status. Returning FAILED on
  * a broken rung would therefore delete the seven-rung report — the whole
  * product — and collapse it to one error code, which is exactly the lie
@@ -45,11 +45,11 @@
  * where there is no report to lose. Read `verdict` / `first_break` /
  * `chain_complete`, never the exit code, as the answer.
  *
- * Layering: this consumes lib/zid (rung 5-6), lib/zanc (rung 3),
- * lib/bloom + lib/primitives (rung 2), core/chainparams (rung 1) and
+ * Layering: this consumes contexts/wallet/modules/zid (rung 5-6), contexts/commons/modules/zanc (rung 3),
+ * core/modules/bloom + core/modules/primitives (rung 2), core/chainparams (rung 1) and
  * app/models' zid_identities read API (rung 7).
- * lib/zid ranks BELOW bloom/chain/script in config/lib_module_order.def,
- * so a walker inside lib/zid would be an upward reference; tools/ sits at
+ * contexts/wallet/modules/zid ranks BELOW bloom/chain/script in engine/composition/lib_module_order.def,
+ * so a walker inside contexts/wallet/modules/zid would be an upward reference; tools/ sits at
  * the top of the graph and this is an operator diagnostic, so it lives
  * here. Frozen wire formats (zid_proof, zid_doc, ZANC OP_RETURN) are
  * consumed, never re-implemented: zid_tree_verify() is THE verifier-side

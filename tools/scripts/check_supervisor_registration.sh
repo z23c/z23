@@ -3,19 +3,19 @@
 #
 # Goal: every long-running service in the scanned roots (below) either
 # registers a liveness contract with the supervisor (Round 5 —
-# lib/util/supervisor.h), or appears in this gate's baseline file of
+# platform/modules/util/supervisor.h), or appears in this gate's baseline file of
 # grandfathered exceptions.
 #
 # Why: on 2026-05-21 the node ran for 8.6 h with `watchdog.checks_run`
-# stuck at 0 because the lib/health sweeper wedged. The supervisor
+# stuck at 0 because the engine/modules/health sweeper wedged. The supervisor
 # primitive (Round 5 C1) provides an independent time-driven driver,
 # but only for services that opt in via supervisor_register_in_domain().
 # gate is the ratchet that drives opt-in: new long-running services
 # cannot land without a contract; baseline shrinks over Rounds 6-8.
 #
 # Scope (2026-07-21 widen — Task D/E supervision-coverage): originally
-# hardcoded to app/services/src/*.c only, which left every supervision hole
-# in app/controllers, app/conditions, app/jobs, config/src, and the
+# hardcoded to engine/services/src/*.c only, which left every supervision hole
+# in app/controllers, app/conditions, app/jobs, engine/composition/src, and the
 # production lib/ daemons (net/health/rpc) invisible to `make lint` — a
 # background daemon loop is a long-running service whatever directory it
 # lives in, and must be visible to `z23 dumpstate supervisor` so a
@@ -25,7 +25,7 @@
 #
 # A file is "long-running" if it contains either:
 #   - thread_registry_spawn      (the project's long-running wrapper)
-#   - health_register_periodic(  (lib/health sweeper subscriber)
+#   - health_register_periodic(  (engine/modules/health sweeper subscriber)
 #   - pthread_create(            (raw thread spawn) — EXCEPT when the
 #     only such call is a short-burst worker carrying a `raw-pthread-ok`
 #     marker (on the call line or the line above). Those are joined
@@ -33,9 +33,9 @@
 #     liveness contract — mirrors the check-pthread-create Makefile gate.
 #
 # Such a file must contain ≥1 call to a recognized registration site —
-# `supervisor_register(_in_domain)?(`, the lib/util/thread_liveness.h
+# `supervisor_register(_in_domain)?(`, the platform/modules/util/thread_liveness.h
 # adapters `thread_liveness_register(` /
-# `thread_liveness_register_restartable(`, or the config/src boot-worker
+# `thread_liveness_register_restartable(`, or the engine/composition/src boot-worker
 # wrapper `boot_register_worker_supervisor(` (which itself calls
 # supervisor_register_in_domain — see boot_worker_supervisor.c) — OR an
 # entry in `tools/scripts/supervisor_baseline.txt`, OR a per-file override
@@ -43,12 +43,12 @@
 #
 # The `_restartable` variant is a recognized registration site because it
 # IS one: thread_liveness_register_restartable() calls
-# thread_liveness_register() (lib/util/src/thread_liveness.c) and then adds
+# thread_liveness_register() (platform/modules/util/src/thread_liveness.c) and then adds
 # the bounded-restart wiring on top, so the child lands on the root liveness
 # tree exactly like the plain form. Before this was spelled out the anchored
 # `thread_liveness_register\(` alternative missed it, and two genuinely
-# supervised daemons — lib/health/src/heartbeat.c (zcl_health_sweep) and
-# lib/rpc/src/rpc_timeout.c (zcl_rpc_timeout) — were carried as baseline
+# supervised daemons — engine/modules/health/src/heartbeat.c (zcl_health_sweep) and
+# engine/modules/rpc/src/rpc_timeout.c (zcl_rpc_timeout) — were carried as baseline
 # debt they had already paid off.
 #
 # To clean up debt: pick a baseline entry, register a liveness
@@ -59,12 +59,24 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 # shellcheck source=tools/lint/gate_lib.sh
 . tools/lint/gate_lib.sh
+# shellcheck source=tools/lint/repo_shape.sh
+. tools/lint/repo_shape.sh
 
 # Scan roots are overridable via ZCL_SERVICES_DIR (space-separated) so the
 # lint-gate self-test can point the gate at an EMPTY dir and prove the
 # non-empty-floor preflight fires (exit 2) instead of the `for f in glob`
 # silently iterating the literal unmatched pattern and passing hollow.
-SERVICES_ROOTS_DEFAULT="app/services/src app/controllers/src app/conditions/src app/jobs/src config/src lib/net/src lib/health/src lib/rpc/src"
+mapfile -t _service_rooms < <(
+    for _shape in services controllers conditions jobs; do
+        while IFS= read -r _room; do
+            [[ -d "$_room/src" ]] && printf '%s/src\n' "$_room"
+        done < <(repo_shape_room_dirs "$_shape")
+    done
+)
+_service_rooms+=(engine/composition/src engine/reducer/conditions/src \
+    engine/reducer/jobs/src engine/reducer/services/src \
+    core/modules/net/src engine/modules/health/src engine/modules/rpc/src)
+SERVICES_ROOTS_DEFAULT="${_service_rooms[*]}"
 read -r -a SERVICES_ROOTS <<< "${ZCL_SERVICES_DIR:-$SERVICES_ROOTS_DEFAULT}"
 
 # ── --selftest: the coverage check, exercised on every `make lint` ──────────
@@ -91,7 +103,7 @@ if [ "${1:-}" = "--selftest" ]; then
     #     The old floor of 1 could not see this: ~1000 files still cleared it.
     cov_case 2 "a scan missing whole declared roots was not UNPROVEN" \
         ZCL_LINT_PRODUCTION_SCAN=1 ZCL_SUPREG_COVERAGE_ONLY=1 \
-        ZCL_SERVICES_DIR="app/services/src app/controllers/src"
+        ZCL_SERVICES_DIR="${_service_rooms[0]} ${_service_rooms[1]}"
     # (3) a shortfall SMALLER than the recorded allowance is a stale ratchet,
     #     exit 1 — an allowance that may only ever rise rusts shut.
     cov_case 1 "an allowance above the true shortfall was silently tolerated" \
@@ -148,7 +160,7 @@ file_is_long_running() {
 }
 
 # Fail-loud preflight: the service file set MUST be non-empty. A bare
-# `for f in app/services/src/*.c` with no match iterates the LITERAL unmatched
+# `for f in engine/services/src/*.c` with no match iterates the LITERAL unmatched
 # glob, `[ -f "$f" ]` skips it, the loop body runs zero times, `fail` stays 0,
 # and the gate prints "clean" exit 0 — a hollow pass when the dir is
 # renamed/moved/emptied. Discover the set with find + assert a floor instead.
@@ -254,7 +266,7 @@ done
 echo ""
 echo "Fix options (preferred → fallback):"
 echo "  1. Add a liveness contract: declare struct liveness_contract,"
-echo "     init it, register it. See app/services/src/sync_watchdog_service.c"
+echo "     init it, register it. See engine/services/src/sync_watchdog_service.c"
 echo "     (g_wd_contract + supervisor_register) for the canonical pattern."
 echo "  2. Add a per-file override marker '// supervisor-ok:<tag>' explaining"
 echo "     why this service intentionally manages its own lifecycle."

@@ -47,7 +47,7 @@ ZCL_TEST_GROUP(shared_validators_zcl_address)
 ZCL_TEST_GROUP(script)
 ZCL_TEST_GROUP(net)
 ZCL_TEST_GROUP(netbase_split_host_port)
-/* The install front door's release-pin judgement (lib/install), which used to
+/* The install front door's release-pin judgement (platform/modules/install), which used to
  * live twice in shell and PowerShell and so was proved by neither runner. */
 ZCL_TEST_GROUP(z23_front_door)
 ZCL_TEST_GROUP(engine)
@@ -1110,7 +1110,7 @@ ZCL_TEST_GROUP(arm_hw_tiers)
 /* platform-seam lane: the acceptance programs that used to live under
  * tools/tests/ and executed ONLY when a human ran the now-deleted
  * tools/scripts/winacceptance.sh by hand. The Windows-refusal members of that
- * set are cross-linked by lib/platform/tests/windows_acceptance.mk; these are
+ * set are cross-linked by platform/modules/platform/tests/windows_acceptance.mk; these are
  * the members that run natively, so they belong in the suite where every run
  * executes them. */
 ZCL_TEST_GROUP(socket_resolve)
@@ -1122,15 +1122,15 @@ ZCL_TEST_GROUP(boot_refusal_identity)
 ZCL_TEST_GROUP(boot_shutdown_marker_persistence)
 ZCL_TEST_GROUP(replay_receipt_root)
 /* dev-loop watcher lane: the two probe programs that arrived under
- * lib/platform/tests with NO reader at all -- no windows_acceptance.mk row,
- * no Makefile rule, not in lib/platform/zcode-package.json. Both have real
+ * platform/modules/platform/tests with NO reader at all -- no windows_acceptance.mk row,
+ * no Makefile rule, not in platform/modules/platform/zcode-package.json. Both have real
  * POSIX arms, so unlike the Windows-refusal set they execute here. These are
- * the only groups that drive lib/platform/src/directory_watcher.c (inotify
- * arm) and lib/platform/src/watcher_record.c at all: every production caller
+ * the only groups that drive platform/modules/platform/src/directory_watcher.c (inotify
+ * arm) and platform/modules/platform/src/watcher_record.c at all: every production caller
  * of the watcher family sits behind #if defined(_WIN32). */
 ZCL_TEST_GROUP(directory_watcher)
 ZCL_TEST_GROUP(watcher_record)
-/* astro lane: lib/astro's exact fixed-grid arithmetic and the birth chart
+/* astro lane: platform/modules/astro's exact fixed-grid arithmetic and the birth chart
  * built on it. The determinism cases are the point — a chart another node
  * recomputes must match bit for bit, so the group asserts that property by
  * construction against a `double` control rather than against golden

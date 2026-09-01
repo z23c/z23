@@ -12,4 +12,4 @@
 # set; that is why CI scopes its verdict with
 # ZCL_PORTABILITY_SCOPE instead of trusting this file verbatim.
 core/math/src/hash.c 2
-lib/net/src/compact_blocks.c 6
+core/modules/net/src/compact_blocks.c 6

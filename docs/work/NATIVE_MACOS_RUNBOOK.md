@@ -72,7 +72,7 @@ a stripped PATH you silently get 8 workers. Prefer
 
 | Surface | Where | Why |
 |---|---|---|
-| Release packager | `packaging/release/build_release.sh:57-59` | dies with "this packager produces x86_64-linux only (host is …)" — an intentional refusal, not a defect |
+| Release packager | `platform/packaging/release/build_release.sh:57-59` | dies with "this packager produces x86_64-linux only (host is …)" — an intentional refusal, not a defect |
 | Release split-debug via `objcopy --add-gnu-debuglink` | `Makefile:4228` takes the Darwin branch instead (`cp` sidecar + `strip -S -x`) | Mach-O has no `.gnu_debuglink`; there is no back-reference, so symbolize against `build/bin/z23.debug` explicitly |
 | `ci-symbol-floor` | `Makefile:10131` | designed SKIP (exit 2 → 0) when `objdump`/`ldd` are absent; both are absent here, so the gate passes by skipping, not by proving |
 | Standalone tool links | `ZCL_GC_SECTIONS_LDFLAG` and `ZCL_TOOL_SANDBOX_SRC` in `Makefile` | host-specific linker and sandbox selections are centralized; a red gate is a regression |
@@ -82,16 +82,16 @@ a stripped PATH you silently get 8 workers. Prefer
 
 ## §2 Compat-API contract
 
-`lib/platform/include/platform/` is the blessed home for direct OS calls.
+`platform/modules/platform/include/platform/` is the blessed home for direct OS calls.
 There are no `*_darwin.c` files: Darwin selection happens two ways — inline
 `#if defined(__APPLE__)` inside shared `.c` files, and whole-file swap through
 the source list (`Makefile:420-427`, non-Linux drops
-`lib/platform/src/os_sandbox_linux.c` and `lib/util/src/self_backtrace.c`,
+`platform/modules/platform/src/os_sandbox_linux.c` and `platform/modules/util/src/self_backtrace.c`,
 keeps the `_stub` variants).
 
 | Header | Purpose | Darwin primitive | Linux primitive |
 |---|---|---|---|
-| `rng.h` (+ `lib/platform/src/rng.c:76-79`) | injectable entropy | `arc4random_buf(out, len)` | `getrandom(2)` loop, `/dev/urandom` fallback |
+| `rng.h` (+ `platform/modules/platform/src/rng.c:76-79`) | injectable entropy | `arc4random_buf(out, len)` | `getrandom(2)` loop, `/dev/urandom` fallback |
 | `thread_compat.h` | bounded thread join | cancel-safe short-lived join waiter; timeout leaves the target joinable for the final owner drain | `pthread_timedjoin_np()` |
 | `path_compat.h` | one identity string per path | `realpath()`, including the parent of a not-yet-created path | verbatim copy |
 | `fd_path.h` | fd → path | root `/dev/fd`; dirfd children need `fcntl(fd, F_GETPATH)` **plus** a `fstat`/`stat` inode recheck | `/proc/self/fd/<fd>[/<leaf>]` |
@@ -104,11 +104,11 @@ keeps the `_stub` variants).
 | `system_memory.h` | total RAM | `sysctlbyname("hw.memsize")` | `sysinfo().totalram × mem_unit` |
 | `device_compat.h` | major/minor extraction | manual bit fields `(dev >> 24) & 0xff` / `dev & 0x00ffffff` | glibc `<sys/sysmacros.h>` `major()`/`minor()` |
 | `allocator_compat.h` | glibc malloc tuning | both functions compile empty (keyed on `__GLIBC__`, not on OS) | `mallopt(M_MMAP_THRESHOLD, …)`, `malloc_trim(0)` |
-| `clock.h` (+ `lib/platform/src/clock.c`) | injectable clock | same `clock_gettime(CLOCK_MONOTONIC/_REALTIME)` calls; feature-tested fallbacks for `_RAW` and per-thread CPU clocks, no Mach timebase | identical shape |
-| `os_proc.h` (+ `lib/platform/src/os_proc.c`) | process/host introspection | `proc_pid_rusage(RUSAGE_INFO_V2)`, `task_info(MACH_TASK_BASIC_INFO)`, `proc_pidinfo(PROC_PIDTBSDINFO)`, `sysctlbyname("hw.memsize")`, `_NSGetExecutablePath`, `_NSGetArgc/_NSGetArgv`; cgroup and available-memory stay `-1` | `/proc/self/status`, `/proc/meminfo`, `/proc/uptime` + field 22, `readlink("/proc/self/exe")`, cgroup v2 |
-| `os_sandbox.h` (+ `lib/platform/src/os_sandbox_stub.c`) | confinement builders | stub returns typed unavailability ("… is unavailable on this operating system"); `os_sandbox_active()` false; but uid/pgid census answers from `sysctl(KERN_PROC_ALL)` + `proc_pidinfo` | `prctl(PR_SET_NO_NEW_PRIVS)`, Landlock, seccomp-BPF, namespace clone, rlimits |
+| `clock.h` (+ `platform/modules/platform/src/clock.c`) | injectable clock | same `clock_gettime(CLOCK_MONOTONIC/_REALTIME)` calls; feature-tested fallbacks for `_RAW` and per-thread CPU clocks, no Mach timebase | identical shape |
+| `os_proc.h` (+ `platform/modules/platform/src/os_proc.c`) | process/host introspection | `proc_pid_rusage(RUSAGE_INFO_V2)`, `task_info(MACH_TASK_BASIC_INFO)`, `proc_pidinfo(PROC_PIDTBSDINFO)`, `sysctlbyname("hw.memsize")`, `_NSGetExecutablePath`, `_NSGetArgc/_NSGetArgv`; cgroup and available-memory stay `-1` | `/proc/self/status`, `/proc/meminfo`, `/proc/uptime` + field 22, `readlink("/proc/self/exe")`, cgroup v2 |
+| `os_sandbox.h` (+ `platform/modules/platform/src/os_sandbox_stub.c`) | confinement builders | stub returns typed unavailability ("… is unavailable on this operating system"); `os_sandbox_active()` false; but uid/pgid census answers from `sysctl(KERN_PROC_ALL)` + `proc_pidinfo` | `prctl(PR_SET_NO_NEW_PRIVS)`, Landlock, seccomp-BPF, namespace clone, rlimits |
 
-Read `lib/platform/src/os_sandbox_stub.c:2` as the governing sentence:
+Read `platform/modules/platform/src/os_sandbox_stub.c:2` as the governing sentence:
 *"Non-Linux confinement backend. Linux-only guarantees fail closed."*
 
 Two behavioral notes worth memorizing:
@@ -124,7 +124,7 @@ Two behavioral notes worth memorizing:
 - **Host quirk priced into the API:** Darwin implements `flock()` through
   fcntl, so lease locks and SQLite byte-range locks share one kernel lock
   space. The owner lease therefore locks a *different inode* per host
-  (`app/models/src/database_owner_lease.c:152-155`, comment quoted below).
+  (`engine/models/src/database_owner_lease.c:152-155`, comment quoted below).
 
 ```c
 /* Linux flock and SQLite's POSIX byte locks are independent, so the
@@ -135,7 +135,7 @@ Two behavioral notes worth memorizing:
 
 Consequences you can observe on disk: on Darwin the lease object is
 `<db>.owner-lock`, opened `O_RDWR|O_CLOEXEC|O_NOFOLLOW` with unconditional
-`O_CREAT` (`app/models/src/database_owner_lease.c:32-47`, `:156-161`); on
+`O_CREAT` (`engine/models/src/database_owner_lease.c:32-47`, `:156-161`); on
 Linux it is the database path itself, created only when asked. Both arms then
 take `flock(fd, LOCK_EX | LOCK_NB)` and report
 `DATABASE_OWNERSHIP_CONFLICT: canonical database owner already holds path=…`
@@ -156,9 +156,9 @@ Each row carries how it was established: (m) = measured on this host,
 | Build identity hashes with literal `sha256sum` | (c) `Makefile:211` builds `BUILD_INVOCATION_ID` from `printf … \| sha256sum`; vendor pins use `sha256sum --check vendor/*/SHA256SUMS` (`Makefile:1251-1254`) | No Makefile-level `shasum` fallback exists. Only `tools/dev/source-identity.sh:79-96` has one (`shasum -a 256`). Run `command -v sha256sum` before a long build instead of diagnosing a half-empty hash later |
 | Checkout lock needs Homebrew `flock` | (m) `/opt/homebrew/bin/flock` → Cellar 0.4.0; (c) `tools/dev/checkout-lock.sh:35` fails hard: "flock is required for the checkout lock" | Every `t`, `t-fast`, `t-fast-exact` target goes through `$(CHECKOUT_LOCK_TOOL)`; without the formula you fail before compiling anything |
 | `/bin/bash` is 3.2 | (m) `/bin/bash -c 'declare -A A=([k]=1)'` → "declare: -A: invalid option"; Homebrew bash 5.3.15 resolves first via `#!/usr/bin/env bash` | `tools/lint/*.sh` use associative arrays (`tools/lint/check_standalone_tools_link.sh:50`). Keep a modern bash ahead on PATH or the lint umbrella dies in `declare` |
-| Process ceiling is uid-wide | (m) `sysctl kern.maxprocperuid` → 2666, equal to `ulimit -u`; (c) `lib/platform/src/os_sandbox_stub.c:139-147` reads `getrlimit(RLIMIT_NPROC)` even in the stub; `RLIMIT_NPROC` is charged per REAL UID (`app/controllers/include/controllers/agent_impact_rules.def:1396`) | Symptom inside confined builds: `cc: fatal error: cannot execute '…/cc1': posix_spawn: Resource temporarily unavailable` — recorded verbatim in `lib/test/src/test_sandbox_process_budget.c:17-18`. Lower `-j` or raise `kern.maxprocperuid`; never widen a budget constant so the number looks healthy |
-| Stale-lock leads are local, not sync/indexing | (c) `config/src/boot_stale_locks.c:103-140` inspects exactly `blocks/index/LOCK`, `chainstate/LOCK`, `node.db-wal`; LevelDB LOCK carries a PID checked with `kill(pid, 0)` (`:54`) | Before blaming iCloud drive indexing or Spotlight, take the lock's word: read the boot log line, identify the holder with `lsof <path>`, and remember `kill(pid, 0)` succeeds for any process you own — including a recycled PID, which is what makes a stale `blocks/index/LOCK` look live |
-| Datadir path identity resolves symlinks | (c) `lib/platform/include/platform/path_compat.h:12-14`: "Darwin exposes /tmp through /private/tmp" → leases and ownership registries key on the resolved path | Keep datadirs on the local APFS volume, not under a synced or symlinked folder; `$TMPDIR` spellings of the same directory are one resource after resolution |
+| Process ceiling is uid-wide | (m) `sysctl kern.maxprocperuid` → 2666, equal to `ulimit -u`; (c) `platform/modules/platform/src/os_sandbox_stub.c:139-147` reads `getrlimit(RLIMIT_NPROC)` even in the stub; `RLIMIT_NPROC` is charged per REAL UID (`cognition/controllers/include/controllers/agent_impact_rules.def:1396`) | Symptom inside confined builds: `cc: fatal error: cannot execute '…/cc1': posix_spawn: Resource temporarily unavailable` — recorded verbatim in `tests/harness/src/test_sandbox_process_budget.c:17-18`. Lower `-j` or raise `kern.maxprocperuid`; never widen a budget constant so the number looks healthy |
+| Stale-lock leads are local, not sync/indexing | (c) `engine/composition/src/boot_stale_locks.c:103-140` inspects exactly `blocks/index/LOCK`, `chainstate/LOCK`, `node.db-wal`; LevelDB LOCK carries a PID checked with `kill(pid, 0)` (`:54`) | Before blaming iCloud drive indexing or Spotlight, take the lock's word: read the boot log line, identify the holder with `lsof <path>`, and remember `kill(pid, 0)` succeeds for any process you own — including a recycled PID, which is what makes a stale `blocks/index/LOCK` look live |
+| Datadir path identity resolves symlinks | (c) `platform/modules/platform/include/platform/path_compat.h:12-14`: "Darwin exposes /tmp through /private/tmp" → leases and ownership registries key on the resolved path | Keep datadirs on the local APFS volume, not under a synced or symlinked folder; `$TMPDIR` spellings of the same directory are one resource after resolution |
 | Debugger attach needs developer mode | (m) `DevToolsSecurity -status` → "Developer mode is currently disabled"; no passwordless sudo | Attaching `lldb` to a process you did not spawn prompts for credentials and fails closed otherwise. Run `DevToolsSecurity -enable` once, deliberately, on a box where that is acceptable |
 | Crash post-mortem lags and is thin | (m) reports land under `~/Library/Logs/DiagnosticReports`; (c) self-backtrace selects the non-Linux stub (`Makefile` host source selection, `docs/GETTING_STARTED.md` §"Platform capability boundary") | The aggregate's green `self_backtrace` group proves that explicit boundary, not a Darwin signal-context dump. `.ips` reports are written asynchronously after the crash, so "nothing there yet" is not evidence of health. For native crashes, reproduce against `build/bin/z23.debug` rather than waiting on DiagnosticReports |
 | Symbolicating the shipped binary | (c) Darwin branch strips the sidecar copy and keeps no debuglink (`Makefile:4228-4230`) | Use `build/bin/z23.debug`, and expect `ldd`/`readelf` habits to be wrong: `otool -L`, `nm -m`, `atos` |
@@ -178,7 +178,7 @@ Each row carries how it was established: (m) = measured on this host,
 | `check-file-size-ceiling` drift after adding macOS branches | Inline `#if defined(__APPLE__)` blocks grew existing units | Put the next variant behind a per-platform seam file or header seam. Anything up to 1500 lines is allowed outright; past that, a legacy baseline row may only shrink |
 | `zcode-package-registry: FAIL — platform sandbox alternatives appear N times` | `LIB_SRCS` selected zero or both sandbox backends | Exactly one of `os_sandbox_linux.c` / `os_sandbox_stub.c` may be present (`tools/lint/check_zcode_package_registry.sh:54-61`); check whether your edit bypassed the `filter-out` at `Makefile:420-427` |
 | Pre-push hook SIGPIPE/write failure after the gate completed | Hook pipe broke late, not a red gate (`docs/DEVELOPING.md:375-378`) | Inspect the saved log and rerun that gate out-of-band; do not accept a bypass you did not document |
-| Node refuses to boot with `DATABASE_OWNERSHIP_CONFLICT: canonical database owner already holds path=…` | Another live holder, or a stale `blocks/index/LOCK` PID that is alive because the PID was recycled | `lsof <path>` for the truth; for LevelDB LOCK, compare the PID against the actual process (`config/src/boot_stale_locks.c:54`). Never delete a lock file while any holder is identified |
+| Node refuses to boot with `DATABASE_OWNERSHIP_CONFLICT: canonical database owner already holds path=…` | Another live holder, or a stale `blocks/index/LOCK` PID that is alive because the PID was recycled | `lsof <path>` for the truth; for LevelDB LOCK, compare the PID against the actual process (`engine/composition/src/boot_stale_locks.c:54`). Never delete a lock file while any holder is identified |
 | Shutdown stalls past the diagnostic join deadline | Deadline joins do not exist off-Linux (`thread_compat.h`), so the stall hides until the watchdog acts | Reproduce with the stage watchdog enabled; treat "join timed out" telemetry as Linux-only observability |
 | Fetched-package build that demands Linux isolation refuses | Full-isolation confinement is unavailable here (`docs/GETTING_STARTED.md:123-126`) | Expected refusal. Re-run that step on a Linux host; do not weaken the refusal |
 

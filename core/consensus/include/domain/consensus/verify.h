@@ -18,10 +18,10 @@
  *     - crypto/ (sha256, equihash)
  *     - sapling/, script/, primitives/  (pure validators)
  *   It must NOT #include from:
- *     - app/, lib/net/, lib/storage/, adapters/
+ *     - app/, core/modules/net/, engine/modules/storage/, platform/adapters/
  *
- * Some implementations may delegate to the lib/chain, lib/script, and
- * lib/sapling implementations.
+ * Some implementations may delegate to the core/modules/chain, core/modules/script, and
+ * core/modules/sapling implementations.
  */
 
 #ifndef ZCL_DOMAIN_CONSENSUS_VERIFY_H

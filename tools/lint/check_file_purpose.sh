@@ -4,7 +4,7 @@
 # so `code file`/`code map` can describe a file without opening it.
 #
 # "Derivable" is the shell mirror of ci_file_purpose()
-# (lib/codeindex/src/codeindex_scan.c:194-268): a block comment must precede the
+# (cognition/modules/codeindex/src/codeindex_scan.c:194-268): a block comment must precede the
 # first code token; within it, Copyright/license lines and blank `*` fill are
 # skipped; a file PASSES if a substantive comment line exists OR an explicit
 # `purpose:` override line exists. We check DERIVABILITY only — the extractor's
@@ -39,34 +39,13 @@ BASELINE="$SCRIPT_DIR/file_purpose_baseline.txt"
 
 [[ -d "$SCAN_ROOT" ]] || { echo "check_file_purpose: FATAL — missing scan root $SCAN_ROOT" >&2; exit 2; }
 
-# ── the enumerated roots — a MIRROR of ci_enumerate_sources()
-# (lib/codeindex/src/codeindex_build.c:111). Keep this list in lockstep with
-# that function: lib/<mod>/{src,include} for each k_lib_modules[] module,
-# app/<shape>/{src,include} for each k_app_shapes[] shape, then core,
-# config/{src,include}, tools, domain, adapters (all recursive). Note: ports/
-# is NOT enumerated there, so it is NOT scanned here either.
-
-# Parse a (possibly line-continued) Makefile variable into a space list. The
-# Both lists are DERIVED from the Makefile by repo_shape.sh — the build
-# depends on LIB_MODULES and APP_DIRS, so they cannot rot without the build
-# breaking. (Event is an eighth framework shape with no app/ folder of its
-# own; see FRAMEWORK.md §3 row 7.)
-lib_modules=("${ZCL_LIB_MODULES[@]}")
-app_shapes=("${ZCL_APP_SHAPES[@]}")
-
-gate_require_scanned "${#lib_modules[@]}" 1 check-file-purpose \
-    "LIB_MODULES parse came back empty — Makefile layout changed?"
-
-# Build the directory list, then find .c/.h under it.
+# ── the enumerated roots — an exact mirror of ci_enumerate_sources(). The
+# physical authorities are deliberately the whole declaration: adding a room
+# beneath one is visible without adding another taxonomy copy here.
 scan_dirs=()
-for m in "${lib_modules[@]}"; do
-    scan_dirs+=("$SCAN_ROOT/lib/$m/src" "$SCAN_ROOT/lib/$m/include")
+for authority in "${ZCL_SOURCE_AUTHORITIES[@]}" tools; do
+    scan_dirs+=("$SCAN_ROOT/$authority")
 done
-for s in "${app_shapes[@]}"; do
-    scan_dirs+=("$SCAN_ROOT/app/$s/src" "$SCAN_ROOT/app/$s/include")
-done
-scan_dirs+=("$SCAN_ROOT/core" "$SCAN_ROOT/config/src" "$SCAN_ROOT/config/include" \
-            "$SCAN_ROOT/tools" "$SCAN_ROOT/domain" "$SCAN_ROOT/adapters")
 
 existing_dirs=()
 for d in "${scan_dirs[@]}"; do
@@ -76,11 +55,15 @@ gate_require_scanned "${#existing_dirs[@]}" 1 check-file-purpose \
     "none of the codeindex root dirs exist under $SCAN_ROOT — layout changed?"
 
 # Collect files, stripping the "$SCAN_ROOT/" prefix so baseline keys are
-# root-relative (e.g. lib/bloom/src/bloom.c).
+# root-relative (e.g. core/modules/bloom/src/bloom.c).
 prefix="$SCAN_ROOT/"
 mapfile -t files < <(
     find "${existing_dirs[@]}" -type f \( -name '*.c' -o -name '*.h' \) \
-        -not -path '*/build/*' 2>/dev/null | sort -u |
+        -not -path '*/build/*' \
+        -not -path '*/modules/*/tests/*' \
+        -not -path '*/modules/*/examples/*' \
+        -not -path '*/modules/*/app/*' \
+        -not -path '*/contexts/commons/packages/*' 2>/dev/null | sort -u |
     while IFS= read -r f; do printf '%s\n' "${f#"$prefix"}"; done
 )
 
