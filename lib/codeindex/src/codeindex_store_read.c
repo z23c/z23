@@ -397,6 +397,33 @@ int ci_store_count_files_in_group(struct ci_store *s, const char *group,
     return n;
 }
 
+bool ci_store_source_file_counts(struct ci_store *s,
+                                 struct ci_source_file_counts *out)
+{
+    if (out) memset(out, 0, sizeof(*out));
+    if (!s || !out)
+        LOG_FAIL("codeindex", "bad arg to source_file_counts");
+    pthread_mutex_lock(&s->lock);
+    sqlite3_stmt *stmt = NULL;
+    const char *sql =
+        "SELECT "
+        "SUM(CASE WHEN path LIKE '%.c' OR path LIKE '%.h' THEN 1 ELSE 0 END),"
+        "SUM(CASE WHEN path LIKE '%.def' THEN 1 ELSE 0 END) FROM files";
+    bool ok = sqlite3_prepare_v2(s->db, sql, -1, &stmt, NULL) == SQLITE_OK;
+    if (ok) {
+        int rc = sqlite3_step(stmt);  // raw-sql-ok:codeindex-derived
+        ok = rc == SQLITE_ROW;
+        if (ok) {
+            out->c23_files = sqlite3_column_int(stmt, 0);
+            out->registry_nodes = sqlite3_column_int(stmt, 1);
+        }
+    }
+    if (stmt) sqlite3_finalize(stmt);
+    pthread_mutex_unlock(&s->lock);
+    if (!ok) LOG_FAIL("codeindex", "read source file-kind counts");
+    return true;
+}
+
 int ci_store_symbols_in_file(struct ci_store *s, const char *path,
                              struct ci_symbol *out, int cap)
 {

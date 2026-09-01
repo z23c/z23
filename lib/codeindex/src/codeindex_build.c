@@ -92,11 +92,10 @@ static bool is_source_name(const char *name)
 /* pruned directory names — never descend these */
 static bool prune_dir(const char *name)
 {
-    return strcmp(name, ".git") == 0 || strcmp(name, ".codeindex") == 0 ||
-           strcmp(name, ".zvcs") == 0 || strcmp(name, "build") == 0 ||
-           strcmp(name, "bin") == 0 || strcmp(name, "obj") == 0 ||
-           strcmp(name, ".cache") == 0 || strcmp(name, "vendor") == 0 ||
-           strncmp(name, "test-tmp", 8) == 0;
+#define SOURCE_PRUNE_DIR(name_) if (strcmp(name, name_) == 0) return true;
+#include "../../../config/source_prune_dirs.def"
+#undef SOURCE_PRUNE_DIR
+    return strncmp(name, "test-tmp", 8) == 0;
 }
 
 /* Recursively collect .c/.h under <root>/<reldir> into vec. Missing optional
@@ -158,48 +157,13 @@ bool ci_enumerate_sources(const char *root, ci_enum_cb cb, void *user)
 
     struct strvec vec = {0};
 
-    /* lib/<mod>/{src,include} */
-    size_t nmod = 0;
-    const char *const *mods = ci_lib_modules(&nmod);
-    for (size_t i = 0; i < nmod; i++) {
-        char rel[CI_PATH_MAX];
-        snprintf(rel, sizeof(rel), "lib/%s/src", mods[i]);
-        if (!collect_dir(root, rel, &vec)) goto collect_failed;
-        snprintf(rel, sizeof(rel), "lib/%s/include", mods[i]);
-        if (!collect_dir(root, rel, &vec)) goto collect_failed;
-    }
-    /* app/<shape>/{src,include} */
-    size_t nsh = 0;
-    const char *const *shapes = ci_app_shapes(&nsh);
-    for (size_t i = 0; i < nsh; i++) {
-        char rel[CI_PATH_MAX];
-        snprintf(rel, sizeof(rel), "app/%s/src", shapes[i]);
-        if (!collect_dir(root, rel, &vec)) goto collect_failed;
-        snprintf(rel, sizeof(rel), "app/%s/include", shapes[i]);
-        if (!collect_dir(root, rel, &vec)) goto collect_failed;
-    }
-    /* the standalone roots */
-    if (!collect_dir(root, "core", &vec) ||
-        !collect_dir(root, "config/src", &vec) ||
-        !collect_dir(root, "config/include", &vec) ||
-        !collect_dir(root, "tools", &vec) ||
-        !collect_dir(root, "domain", &vec) ||
-        !collect_dir(root, "adapters", &vec) ||
-        !collect_dir(root, "ports", &vec) ||
-        !collect_dir(root, "packages", &vec) ||
-        !collect_dir(root, "app", &vec) ||
-        !collect_dir(root, "include", &vec) ||
-        !collect_dir(root, "src", &vec))
-        goto collect_failed;
-
-    /* Tests are not production module entries, but they are source a
-     * developer must be able to navigate. Package-local workspaces also use
-     * the conventional top-level tests/ root. collect_dir() retains the same
-     * generated-directory pruning used above; the sorted pass below de-dups
-     * a root if it is also reached through a declared module. */
-    if (!collect_dir(root, "lib/test", &vec) ||
-        !collect_dir(root, "tests", &vec))
-        goto collect_failed;
+    static const char *const roots[] = {
+#define SOURCE_ROOT(name_) name_,
+#include "../../../config/source_roots.def"
+#undef SOURCE_ROOT
+    };
+    for (size_t i = 0; i < sizeof(roots) / sizeof(roots[0]); i++)
+        if (!collect_dir(root, roots[i], &vec)) goto collect_failed;
 
     qsort(vec.v, vec.n, sizeof(vec.v[0]), sv_cmp);
 

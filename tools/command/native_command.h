@@ -321,8 +321,8 @@ void zcl_native_handle_code_find(
 void zcl_native_handle_code_have(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
-/* code.map — the whole-tree map: the 9 root groups (aggregate file counts +
- * purposes) and the 8 app/ shapes (direct file counts), plus a total. */
+/* code.map — the whole-tree map: maintained source roots (aggregate file
+ * counts), app/ shapes, and separate C23/registry-node totals. */
 void zcl_native_handle_code_map(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);

@@ -91,11 +91,10 @@ static bool source_name(const char *name)
 
 static bool pruned_directory(const char *name)
 {
-    return strcmp(name, ".git") == 0 || strcmp(name, ".codeindex") == 0 ||
-           strcmp(name, ".zvcs") == 0 || strcmp(name, "build") == 0 ||
-           strcmp(name, "bin") == 0 || strcmp(name, "obj") == 0 ||
-           strcmp(name, ".cache") == 0 || strcmp(name, "vendor") == 0 ||
-           strncmp(name, "test-tmp", 8) == 0;
+#define SOURCE_PRUNE_DIR(name_) if (strcmp(name, name_) == 0) return true;
+#include "../../../config/source_prune_dirs.def"
+#undef SOURCE_PRUNE_DIR
+    return strncmp(name, "test-tmp", 8) == 0;
 }
 
 static bool collect_directory(const char *root, const char *relative,
@@ -186,28 +185,10 @@ bool ci_enumerate_sources(const char *root, ci_enum_cb callback, void *user)
         LOG_FAIL("codeindex", "null argument to Windows source enumeration");
     struct strvec paths = {0};
 
-    size_t module_count = 0;
-    const char *const *modules = ci_lib_modules(&module_count);
-    for (size_t i = 0; i < module_count; i++) {
-        char relative[CI_PATH_MAX];
-        (void)snprintf(relative, sizeof(relative), "lib/%s/src", modules[i]);
-        if (!collect_directory(root, relative, &paths)) goto collect_failed;
-        (void)snprintf(relative, sizeof(relative), "lib/%s/include", modules[i]);
-        if (!collect_directory(root, relative, &paths)) goto collect_failed;
-    }
-    size_t shape_count = 0;
-    const char *const *shapes = ci_app_shapes(&shape_count);
-    for (size_t i = 0; i < shape_count; i++) {
-        char relative[CI_PATH_MAX];
-        (void)snprintf(relative, sizeof(relative), "app/%s/src", shapes[i]);
-        if (!collect_directory(root, relative, &paths)) goto collect_failed;
-        (void)snprintf(relative, sizeof(relative), "app/%s/include", shapes[i]);
-        if (!collect_directory(root, relative, &paths)) goto collect_failed;
-    }
     static const char *const roots[] = {
-        "core", "config/src", "config/include", "tools", "domain",
-        "adapters", "ports", "packages", "app", "include", "src",
-        "lib/test", "tests"
+#define SOURCE_ROOT(name_) name_,
+#include "../../../config/source_roots.def"
+#undef SOURCE_ROOT
     };
     for (size_t i = 0; i < sizeof(roots) / sizeof(roots[0]); i++)
         if (!collect_directory(root, roots[i], &paths)) goto collect_failed;

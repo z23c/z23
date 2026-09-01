@@ -1078,22 +1078,40 @@ void zcl_native_handle_code_map(const struct zcl_command_request *request,
     json_init(&roots);  json_set_array(&roots);
     json_init(&shapes); json_set_array(&shapes);
 
-    /* The root groups (parent "" or "root"): each with an AGGREGATE (recursive)
-     * file count so a parent totals all its module/shape children. The roots are
-     * a disjoint partition of the tree, so their counts sum to the total. */
+    /* The exact maintained roots, shared with every whole-tree scanner. Each
+     * count is aggregate so lib/ and app/ include their child groups. */
+    static const char *const source_roots[] = {
+#define SOURCE_ROOT(name_) name_,
+#include "../../config/source_roots.def"
+#undef SOURCE_ROOT
+    };
     int total = 0, nroot = 0;
-    for (int i = 0; i < ng && nroot < CODE_MAP_ROOT_CAP; i++) {
-        const char *p = groups[i].parent;
-        bool top = (p[0] == '\0') || strcmp(p, "root") == 0;
-        if (!top) continue;
-        int fc = codeindex_count_files_in_group(ci, groups[i].path, true);
+    for (size_t i = 0;
+         i < sizeof(source_roots) / sizeof(source_roots[0]); i++) {
+        if (nroot >= CODE_MAP_ROOT_CAP) {
+            json_free(&roots); json_free(&shapes);
+            codeindex_close(ci);
+            zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                                   ZCL_COMMAND_EXIT_INTERNAL,
+                                   "ROOT_CAPACITY", "render", false, false,
+                                   "code map source roots exceed reply capacity",
+                                   "increase CODE_MAP_ROOT_CAP");
+            return;
+        }
+        int fc = codeindex_count_files_in_group(ci, source_roots[i], true);
         if (fc < 0) fc = 0;
         total += fc;
+        const char *group_purpose = "";
+        for (int g = 0; g < ng; g++)
+            if (strcmp(groups[g].path, source_roots[i]) == 0) {
+                group_purpose = groups[g].purpose;
+                break;
+            }
         char purpose[64];
-        code_trunc(purpose, sizeof(purpose), groups[i].purpose, 48);
+        code_trunc(purpose, sizeof(purpose), group_purpose, 48);
         struct json_value o;
         json_init(&o); json_set_object(&o);
-        (void)json_push_kv_str(&o, "path", groups[i].path);
+        (void)json_push_kv_str(&o, "path", source_roots[i]);
         (void)json_push_kv_int(&o, "file_count", fc);
         (void)json_push_kv_str(&o, "purpose", purpose);
         code_push_obj(&roots, &o);
@@ -1128,14 +1146,38 @@ void zcl_native_handle_code_map(const struct zcl_command_request *request,
         nshape++;
     }
 
+    struct ci_source_file_counts counts;
+    if (!codeindex_source_file_counts(ci, &counts)) {
+        json_free(&roots); json_free(&shapes);
+        codeindex_close(ci);
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INTERNAL, "COUNT_FAILED",
+                               "query", false, false,
+                               "code map could not count source file kinds", "");
+        return;
+    }
+    if (counts.c23_files + counts.registry_nodes != total) {
+        json_free(&roots); json_free(&shapes);
+        codeindex_close(ci);
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INTERNAL,
+                               "COUNT_DISAGREEMENT", "verify", false, false,
+                               "code map source-kind totals disagree with roots", "");
+        return;
+    }
+
     (void)json_push_kv_str(&reply->data, "scope", "map");
     (void)json_push_kv(&reply->data, "roots", &roots);
     (void)json_push_kv(&reply->data, "shapes", &shapes);
     (void)json_push_kv_int(&reply->data, "total_files", total);
+    (void)json_push_kv_int(&reply->data, "c23_files", counts.c23_files);
+    (void)json_push_kv_int(&reply->data, "registry_nodes",
+                           counts.registry_nodes);
     char summary[176];
     (void)snprintf(summary, sizeof(summary),
-                   "%d source files across %d root groups + %d app shapes; "
-                   "run `code group <path>` to descend", total, nroot, nshape);
+                   "%d C23 files + %d registry nodes across %d source roots; "
+                   "run `code group <path>` to descend",
+                   counts.c23_files, counts.registry_nodes, nroot);
     (void)json_push_kv_str(&reply->data, "summary", summary);
 
     json_free(&roots); json_free(&shapes);

@@ -13,9 +13,9 @@
  *   7. file counts + route parity  — recursive vs direct group file counts, and
  *                                    `code tests` route == `dev test plan`
  *                                    proof_group for the same single file.
- *   8. complete source roots       — package app/include/src/tests, ports/,
- *                                    and lib/test/ are indexed; license
- *                                    boilerplate is not a purpose.
+ *   8. complete source roots       — package/example/module-local sources are
+ *                                    indexed, fixtures are pruned, and C23
+ *                                    files stay distinct from .def nodes.
  *   9. publication safety          — content freshness, old-reader retention,
  *                                    crash boundaries, and 32-way cold open.
  *
@@ -223,6 +223,24 @@ static const char *TEST_SOURCE_C =
     " */\n"
     "int test_fixture_indexed(void) { return 0; }\n";
 
+static const char *EXAMPLE_SOURCE_C =
+    "/* Copyright 2026 Rhett Creighton - Apache License 2.0\n"
+    " * example_fixture — fixture top-level example.\n"
+    " */\n"
+    "int example_fixture(void) { return 0; }\n";
+
+static const char *MODULE_EXAMPLE_C =
+    "/* Copyright 2026 Rhett Creighton - Apache License 2.0\n"
+    " * module_example_fixture — fixture module-local example.\n"
+    " */\n"
+    "int module_example_fixture(void) { return 0; }\n";
+
+static const char *MODULE_TEST_C =
+    "/* Copyright 2026 Rhett Creighton - Apache License 2.0\n"
+    " * module_test_fixture — fixture module-local test.\n"
+    " */\n"
+    "int module_test_fixture(void) { return 0; }\n";
+
 /* Seventeen literal matches prove the goal selector reports its sixteen-hit
  * per-token ceiling. The first sixteen answers remain ordered exactly as the
  * production selector already orders them; only completeness metadata is
@@ -400,13 +418,24 @@ static bool write_fixture(void)
            mk_write(FIX, "lib/net/src/purpose_license_only.c",
                     PURPOSE_LICENSE_ONLY_C) &&
            mk_write(FIX, "app/main.c", PACKAGE_APP_C) &&
-           mk_write(FIX, "include/package/api.h", PACKAGE_HEADER_H) &&
            mk_write(FIX, "src/main.c", ROOT_MAIN_C) &&
-           mk_write(FIX, "tests/test_package.c", PACKAGE_TEST_C) &&
            mk_write(FIX, "packages/widget/app/main.c",
                     NESTED_PACKAGE_APP_C) &&
+           mk_write(FIX, "packages/widget/include/package/api.h",
+                    PACKAGE_HEADER_H) &&
+           mk_write(FIX, "packages/widget/tests/test_package.c",
+                    PACKAGE_TEST_C) &&
            mk_write(FIX, "ports/include/ports/fixture_port.h", PORT_H) &&
            mk_write(FIX, "lib/test/src/test_fixture_indexed.c", TEST_SOURCE_C) &&
+           mk_write(FIX, "examples/example_fixture.c", EXAMPLE_SOURCE_C) &&
+           mk_write(FIX, "lib/net/examples/module_example_fixture.c",
+                    MODULE_EXAMPLE_C) &&
+           mk_write(FIX, "lib/net/tests/module_test_fixture.c",
+                    MODULE_TEST_C) &&
+           mk_write(FIX, "lib/net/fixtures/hidden_fixture.c",
+                    "int hidden_fixture(void) { return 0; }\n") &&
+           mk_write(FIX, "config/fixture_registry.def",
+                    "FIXTURE_REGISTRY_ROW(value)\n") &&
            mk_write(FIX, "lib/net/src/saturation.c", SATURATION_C) &&
            mk_write(FIX, "lib/test/build/generated_should_not_index.c",
                     "int generated_should_not_index(void) { return 0; }\n");
@@ -1004,8 +1033,8 @@ static int test_codeindex_platform_arm(void)
 
     /* ── 8: every developer-facing source root is indexed ── */
     codeindex_file(ci, "src/main.c", &cf, &found);
-    CI_CHECK("src/main.c is indexed in root", found &&
-             strcmp(cf.group, "root") == 0 &&
+    CI_CHECK("src/main.c is indexed in src", found &&
+             strcmp(cf.group, "src") == 0 &&
              strcmp(cf.purpose, "fixture top-level node entry.") == 0);
 
     codeindex_symbol(ci, "package_parse_options", &s, &found);
@@ -1013,10 +1042,12 @@ static int test_codeindex_platform_arm(void)
              strcmp(s.def_path, "app/main.c") == 0);
     codeindex_symbol(ci, "package_api", &s, &found);
     CI_CHECK("package public header is searchable", found && s.kind == 'T' &&
-             strcmp(s.decl_path, "include/package/api.h") == 0);
+             strcmp(s.decl_path,
+                    "packages/widget/include/package/api.h") == 0);
     codeindex_symbol(ci, "package_cli_test", &s, &found);
     CI_CHECK("package test symbol is searchable", found && s.kind == 'T' &&
-             strcmp(s.def_path, "tests/test_package.c") == 0);
+             strcmp(s.def_path,
+                    "packages/widget/tests/test_package.c") == 0);
     codeindex_symbol(ci, "nested_package_parse_options", &s, &found);
     CI_CHECK("repository package app symbol is searchable",
              found && s.kind == 't' &&
@@ -1031,6 +1062,28 @@ static int test_codeindex_platform_arm(void)
     CI_CHECK("lib/test source is indexed in lib/test", found &&
              strcmp(cf.group, "lib/test") == 0 &&
              strcmp(cf.purpose, "fixture test translation unit.") == 0);
+
+    codeindex_file(ci, "examples/example_fixture.c", &cf, &found);
+    CI_CHECK("top-level example is indexed in examples", found &&
+             strcmp(cf.group, "examples") == 0);
+    codeindex_file(ci, "lib/net/examples/module_example_fixture.c",
+                   &cf, &found);
+    CI_CHECK("module-local example is indexed with its module", found &&
+             strcmp(cf.group, "lib/net") == 0);
+    codeindex_file(ci, "lib/net/tests/module_test_fixture.c", &cf, &found);
+    CI_CHECK("module-local test is indexed with its module", found &&
+             strcmp(cf.group, "lib/net") == 0);
+    codeindex_file(ci, "lib/net/fixtures/hidden_fixture.c", &cf, &found);
+    CI_CHECK("fixture source stays outside the maintained universe", !found);
+    codeindex_file(ci, "config/fixture_registry.def", &cf, &found);
+    CI_CHECK("registry node is indexed for impact without C symbols", found &&
+             strcmp(cf.group, "config") == 0);
+
+    struct ci_source_file_counts source_counts;
+    CI_CHECK("C23 and registry-node counts are exact and separate",
+             codeindex_source_file_counts(ci, &source_counts) &&
+             source_counts.c23_files == 19 &&
+             source_counts.registry_nodes == 1);
 
     codeindex_symbol(ci, "fixture_root_main", &s, &found);
     CI_CHECK("src symbol is searchable", found && s.kind == 'T');
@@ -1047,15 +1100,23 @@ static int test_codeindex_platform_arm(void)
     struct ci_group groups[256];
     int ng = codeindex_groups(ci, groups, 256);
     bool has_libnet = false, has_appsvc = false, has_libtest = false;
+    bool has_packages = false, has_examples = false, has_src = false;
     for (int i = 0; i < ng; i++) {
         if (strcmp(groups[i].path, "lib/net") == 0 &&
             strcmp(groups[i].parent, "lib") == 0) has_libnet = true;
         if (strcmp(groups[i].path, "app/services") == 0) has_appsvc = true;
         if (strcmp(groups[i].path, "lib/test") == 0 &&
             strcmp(groups[i].parent, "lib") == 0) has_libtest = true;
+        if (strcmp(groups[i].path, "packages") == 0 &&
+            strcmp(groups[i].parent, "root") == 0) has_packages = true;
+        if (strcmp(groups[i].path, "examples") == 0 &&
+            strcmp(groups[i].parent, "root") == 0) has_examples = true;
+        if (strcmp(groups[i].path, "src") == 0 &&
+            strcmp(groups[i].parent, "root") == 0) has_src = true;
     }
-    CI_CHECK("group hierarchy has lib/net, lib/test, and app/services",
-             has_libnet && has_libtest && has_appsvc);
+    CI_CHECK("group hierarchy exposes every navigable source root",
+             has_libnet && has_libtest && has_appsvc && has_packages &&
+             has_examples && has_src);
 
     /* card render */
     char card[1024];
@@ -1095,6 +1156,7 @@ static int test_codeindex_platform_arm(void)
             "core/consensus/src/pow.c",           /* -> "consensus_parity" */
             "core/math/src/arith_uint256.c",      /* sealed core -> consensus_parity */
             "app/services/src/node_health_service.c", /* -> "node_health_service" */
+            "config/source_roots.def",             /* -> "codeindex" */
             "lib/net/src/msg_blocks.c",           /* -> "msg_handlers" */
             "lib/bloom/src/zzz_unmapped_xyz.c",   /* no rule -> "make_lint_gates" */
         };

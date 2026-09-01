@@ -1,0 +1,14 @@
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ * purpose: Canonical maintained C23 source roots for repository-wide scans. */
+
+SOURCE_ROOT("lib")
+SOURCE_ROOT("app")
+SOURCE_ROOT("core")
+SOURCE_ROOT("config")
+SOURCE_ROOT("tools")
+SOURCE_ROOT("domain")
+SOURCE_ROOT("adapters")
+SOURCE_ROOT("ports")
+SOURCE_ROOT("src")
+SOURCE_ROOT("packages")
+SOURCE_ROOT("examples")

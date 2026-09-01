@@ -131,6 +131,14 @@ int codeindex_count_files_in_group(struct codeindex *ci, const char *group,
     return ci_store_count_files_in_group(ci->store, group, recursive);
 }
 
+bool codeindex_source_file_counts(struct codeindex *ci,
+                                  struct ci_source_file_counts *out)
+{
+    if (!ci || !ci->store || !out)
+        LOG_FAIL("codeindex", "bad arg to codeindex_source_file_counts");
+    return ci_store_source_file_counts(ci->store, out);
+}
+
 int codeindex_symbols_in_file(struct codeindex *ci, const char *path,
                               struct ci_symbol *out, int cap)
 {

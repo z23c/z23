@@ -92,6 +92,14 @@ struct ci_group {
     char purpose[160];
 };
 
+/* Exact file-kind totals in one verified index generation. C23 files are the
+ * maintained .c/.h corpus; registry nodes are behavior-bearing .def files
+ * retained for source stamps and include impact, never counted as C23. */
+struct ci_source_file_counts {
+    int c23_files;
+    int registry_nodes;
+};
+
 /* A recorded call site. `enclosing` is the name of the function the call site
  * sits inside — the greatest function whose def_line <= ref_line in the same
  * file (C does not nest functions; documented best-effort). Empty string when
@@ -213,6 +221,10 @@ int codeindex_files_page(struct codeindex *ci, int offset,
  * aggregates its child modules/shapes). Returns the count (>=0), -1 on error. */
 int codeindex_count_files_in_group(struct codeindex *ci, const char *group,
                                    bool recursive);
+
+/* Count the two admitted source-node kinds without walking the checkout. */
+bool codeindex_source_file_counts(struct codeindex *ci,
+                                  struct ci_source_file_counts *out);
 
 /* The symbol table of one file: symbols DEFINED in it (for a .c) or DECLARED in
  * it (for a header), definitions first then source order. Fills up to `cap`

@@ -1,0 +1,12 @@
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ * purpose: Canonical directory exclusions for maintained-source scans. */
+
+SOURCE_PRUNE_DIR(".git")
+SOURCE_PRUNE_DIR(".codeindex")
+SOURCE_PRUNE_DIR(".zvcs")
+SOURCE_PRUNE_DIR(".cache")
+SOURCE_PRUNE_DIR("build")
+SOURCE_PRUNE_DIR("bin")
+SOURCE_PRUNE_DIR("obj")
+SOURCE_PRUNE_DIR("vendor")
+SOURCE_PRUNE_DIR("fixtures")

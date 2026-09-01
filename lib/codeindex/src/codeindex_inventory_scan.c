@@ -133,11 +133,10 @@ static bool inv_source_name(const char *name)
 
 static bool inv_prune_dir(const char *name)
 {
-    return strcmp(name, ".git") == 0 || strcmp(name, ".codeindex") == 0 ||
-           strcmp(name, ".zvcs") == 0 || strcmp(name, ".cache") == 0 ||
-           strcmp(name, "build") == 0 || strcmp(name, "vendor") == 0 ||
-           strcmp(name, "fixtures") == 0 ||
-           strncmp(name, "test-tmp", 8) == 0;
+#define SOURCE_PRUNE_DIR(name_) if (strcmp(name, name_) == 0) return true;
+#include "../../../config/source_prune_dirs.def"
+#undef SOURCE_PRUNE_DIR
+    return strncmp(name, "test-tmp", 8) == 0;
 }
 
 #if !defined(_WIN32)
@@ -286,10 +285,11 @@ bool inv_collect_paths(struct inv_scan *s)
 {
     if (!s || !s->root || !s->root[0]) return false;
     static const char *const roots[] = {
-        "lib", "app", "core", "config", "tools", "domain", "adapters",
-        "ports", "src", "packages", "examples", NULL
+#define SOURCE_ROOT(name_) name_,
+#include "../../../config/source_roots.def"
+#undef SOURCE_ROOT
     };
-    for (size_t i = 0; roots[i]; i++)
+    for (size_t i = 0; i < sizeof(roots) / sizeof(roots[0]); i++)
         if (!inv_collect_dir(s, roots[i]))
             LOG_FAIL("codeindex.inventory", "scan root %s failed: %s",
                      roots[i], strerror(errno));

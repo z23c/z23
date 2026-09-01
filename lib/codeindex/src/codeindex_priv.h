@@ -152,6 +152,8 @@ int  ci_store_files_page(struct ci_store *s, int offset,
                          struct ci_file *out, int cap);
 int  ci_store_count_files_in_group(struct ci_store *s, const char *group,
                                    bool recursive);
+bool ci_store_source_file_counts(struct ci_store *s,
+                                 struct ci_source_file_counts *out);
 int  ci_store_symbols_in_file(struct ci_store *s, const char *path,
                               struct ci_symbol *out, int cap);
 int  ci_store_includes_of_file(struct ci_store *s, const char *path,
@@ -171,9 +173,9 @@ bool ci_store_apply_pragmas(sqlite3 *db);
 bool ci_store_ensure_schema(sqlite3 *db);
 
 /* ── source enumeration ───────────────────────────────────────────────
- * Deterministic, sorted, repo-relative .c/.h paths across the configured
- * roots (lib/<mod>/{src,include}, app/<shape>/{src,include}, core, config/src,
- * tools, domain, adapters). cb returns false to abort. */
+ * Deterministic, sorted, repo-relative .c/.h and .def paths across the
+ * maintained roots declared in config/source_roots.def. cb returns false to
+ * abort. */
 typedef bool (*ci_enum_cb)(const char *relpath, const struct stat *st,
                            void *user);
 bool ci_enumerate_sources(const char *root, ci_enum_cb cb, void *user);

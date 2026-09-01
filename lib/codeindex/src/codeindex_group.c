@@ -106,6 +106,9 @@ void ci_group_for_path(const char *relpath, char out[64])
     if (starts_seg(relpath, "tools")) { snprintf(out, 64, "tools"); return; }
     if (starts_seg(relpath, "adapters")) { snprintf(out, 64, "adapters"); return; }
     if (starts_seg(relpath, "ports")) { snprintf(out, 64, "ports"); return; }
+    if (starts_seg(relpath, "src")) { snprintf(out, 64, "src"); return; }
+    if (starts_seg(relpath, "packages")) { snprintf(out, 64, "packages"); return; }
+    if (starts_seg(relpath, "examples")) { snprintf(out, 64, "examples"); return; }
     /* The Makefile carries APPLICATION_INCLUDES, so the build has always
      * known this root; every hand-written mirror of this list omitted it.
      * Without this arm the first file written under application/ lands in
@@ -129,6 +132,9 @@ const char *ci_group_purpose(const char *group)
     if (strcmp(group, "domain") == 0) return "pure framework-free bounded contexts";
     if (strcmp(group, "adapters") == 0) return "hexagonal adapters implementing ports/";
     if (strcmp(group, "ports") == 0) return "hexagonal interface headers";
+    if (strcmp(group, "src") == 0) return "public-node process entry and whole-program assembly";
+    if (strcmp(group, "packages") == 0) return "reusable and independently buildable C23 packages";
+    if (strcmp(group, "examples") == 0) return "small executable C23 usage examples";
     if (strcmp(group, "application") == 0) return "clean-architecture use-case layer";
     if (strcmp(group, "root") == 0) return "top-level entry (src/main.c) and repo root files";
     if (strcmp(group, "lib/test") == 0) return "the canonical test runner, groups, fixtures, and specifications";
@@ -236,6 +242,9 @@ bool ci_group_emit_all(struct ci_store *s)
     if (!emit(s, "domain", "root", "root")) return false;
     if (!emit(s, "adapters", "adapters", "root")) return false;
     if (!emit(s, "ports", "ports", "root")) return false;
+    if (!emit(s, "src", "src", "root")) return false;
+    if (!emit(s, "packages", "packages", "root")) return false;
+    if (!emit(s, "examples", "examples", "root")) return false;
     if (!emit(s, "application", "application", "root")) return false;
 
     /* lib/<mod> */

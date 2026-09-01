@@ -24,12 +24,11 @@
 
 enum { SCIENCE_CORPUS_PATH_MAX = 4096 };
 
-/* Mirrors codeindex_inventory_scan.c's root list on purpose — see the header.
- * A root missing here and present there makes scope_agrees false, which is the
- * intended outcome: a silent divergence is what the check exists to catch. */
+/* Shared with the capability inventory and code navigator. */
 static const char *const k_roots[] = {
-    "lib", "app", "core", "config", "tools", "domain", "adapters",
-    "ports", "src", "packages", "examples", NULL
+#define SOURCE_ROOT(name_) name_,
+#include "../../../config/source_roots.def"
+#undef SOURCE_ROOT
 };
 
 /* Also mirrored from the inventory scan. Build output, vendored third-party
@@ -37,11 +36,10 @@ static const char *const k_roots[] = {
  * would inflate the line total with lines nobody here has to prove. */
 static bool prune_dir(const char *name)
 {
-    return strcmp(name, ".git") == 0 || strcmp(name, ".codeindex") == 0 ||
-           strcmp(name, ".zvcs") == 0 || strcmp(name, ".cache") == 0 ||
-           strcmp(name, "build") == 0 || strcmp(name, "vendor") == 0 ||
-           strcmp(name, "fixtures") == 0 ||
-           strncmp(name, "test-tmp", 8) == 0;
+#define SOURCE_PRUNE_DIR(name_) if (strcmp(name, name_) == 0) return true;
+#include "../../../config/source_prune_dirs.def"
+#undef SOURCE_PRUNE_DIR
+    return strncmp(name, "test-tmp", 8) == 0;
 }
 
 static bool is_c23_source(const char *name)
@@ -242,7 +240,7 @@ bool science_corpus_measure(const char *root, const char *inventory_path,
     if (!root || !root[0])
         LOG_FAIL("science.corpus", "measure needs a source root");
 
-    for (size_t i = 0; k_roots[i]; i++)
+    for (size_t i = 0; i < sizeof(k_roots) / sizeof(k_roots[0]); i++)
         if (!walk_dir(root, k_roots[i], out))
             LOG_FAIL("science.corpus", "walk of %s/%s failed", root,
                      k_roots[i]);
