@@ -922,6 +922,7 @@ void unlink_lint_fixtures(void)
         E1_OVER_LIMIT_FIXTURE_DST,
         E10_SHAPE_FIXTURE_DST,
         E10_SQL_FIXTURE_DST,
+        E10_SQL_SERVICE_FIXTURE_DST,
         MODEL_AR_FIXTURE_DST,
         E2_FIXTURE_DST,
         E3_FIXTURE_DST,

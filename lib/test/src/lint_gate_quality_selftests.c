@@ -246,26 +246,53 @@ int t_e10_framework_shape_ratchet(void)
     return failures;
 }
 
-/* E10b — no-raw-sqlite-in-controllers RATCHET: a NEW controller file
- * (not in the baseline) with a raw sqlite call trips the gate; removing
- * it restores green. */
+/* E10b — no-raw-sqlite-in-controllers RATCHET: even an annotated raw SQL
+ * escape in a sync controller trips the gate; removing it restores green. */
 int t_e10_no_raw_sqlite_ratchet(void)
 {
     int failures = 0;
     unlink_rel(E10_SQL_FIXTURE_DST);
+    unlink_rel(E10_SQL_SERVICE_FIXTURE_DST);
     int baseline_rc = run_gate_script(E10_SQL_SCRIPT_REL, "RATCHET");
     char path[PATH_MAX];
     int planted = (repo_path(path, sizeof(path), E10_SQL_FIXTURE_DST) == 0 &&
                    write_file(path,
-                       "void f(void){ sqlite3_prepare_v2(d, s, n, &st, 0); }\n") == 0)
+                       "void f(void){ sqlite3_prepare_v3\n"
+                       "(d, s, n, 0, &st, 0); } "
+                       "// raw-controller-sql-ok:test-must-not-bypass\n") == 0)
                   ? 0 : -1;
     int trip_rc = planted == 0 ? run_gate_script(E10_SQL_SCRIPT_REL, "RATCHET") : -1;
     unlink_rel(E10_SQL_FIXTURE_DST);
+    int recover_controller_rc = run_gate_script(E10_SQL_SCRIPT_REL, "RATCHET");
+    int service_planted =
+        (repo_path(path, sizeof(path), E10_SQL_SERVICE_FIXTURE_DST) == 0 &&
+         write_file(path,
+             "const char *q = \"SELECT sha3_\" \"hash FROM view_\" "
+             "\"integrity "
+             "WHERE height=?\"; // generic-wrapper input\n") == 0) ? 0 : -1;
+    int service_trip_rc = service_planted == 0
+        ? run_gate_script(E10_SQL_SCRIPT_REL, "RATCHET") : -1;
+    unlink_rel(E10_SQL_SERVICE_FIXTURE_DST);
+    int height_planted =
+        (repo_path(path, sizeof(path), E10_SQL_SERVICE_FIXTURE_DST) == 0 &&
+         write_file(path,
+             "const char *q = \"SELECT * FROM view_\" \"integrity "
+             "WHERE height\" \" = ?\"; // generic-wrapper input\n") == 0)
+        ? 0 : -1;
+    int height_trip_rc = height_planted == 0
+        ? run_gate_script(E10_SQL_SCRIPT_REL, "RATCHET") : -1;
+    unlink_rel(E10_SQL_SERVICE_FIXTURE_DST);
     int recover_rc = run_gate_script(E10_SQL_SCRIPT_REL, "RATCHET");
-    TEST("[lint-gate] E10 no-raw-sqlite RATCHET: clean, trips new file, recovers") {
+    TEST("[lint-gate] E10 no-raw-sqlite RATCHET: clean, annotated sync "
+         "controller and service receipt wrappers trip, recovers") {
         ASSERT(baseline_rc == 0);
         ASSERT(planted == 0);
-        ASSERT(trip_rc != 0);
+        ASSERT(trip_rc == 1);
+        ASSERT(recover_controller_rc == 0);
+        ASSERT(service_planted == 0);
+        ASSERT(service_trip_rc == 1);
+        ASSERT(height_planted == 0);
+        ASSERT(height_trip_rc == 1);
         ASSERT(recover_rc == 0);
         PASS();
     } _test_next:;

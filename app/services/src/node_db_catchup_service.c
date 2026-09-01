@@ -74,7 +74,6 @@
 #include <stdatomic.h>
 #include <pthread.h>
 #include <signal.h>
-#include "util/ar_step_readonly.h"
 #include "util/log_macros.h"
 #include "util/safe_alloc.h"
 #include "util/thread_registry.h"
@@ -202,33 +201,6 @@ static bool sync_block_lean(struct node_db *ndb,
                  pindex->nHeight);
 
     return true;
-}
-
-/* Seed the integrity-receipt chain: read the sha3_hash receipt recorded
- * for height h (the block just below the catchup start). Fills `out` with
- * the 32-byte receipt and returns true, or leaves `out` untouched and
- * returns false when no row exists (genesis start → caller uses zeros). */
-static bool catchup_read_prev_receipt(struct node_db *ndb, int h,
-                                      uint8_t out[32])
-{
-    if (!ndb || !ndb->open || h < 0)
-        return false;
-    sqlite3_stmt *s = NULL;
-    if (sqlite3_prepare_v2(ndb->db,
-            "SELECT sha3_hash FROM view_integrity WHERE height=?",
-            -1, &s, NULL) != SQLITE_OK || !s)
-        return false;
-    sqlite3_bind_int64(s, 1, h);
-    bool found = false;
-    if (AR_STEP_ROW_READONLY(s) == SQLITE_ROW) {
-        const void *blob = sqlite3_column_blob(s, 0);
-        if (blob && sqlite3_column_bytes(s, 0) >= 32) {
-            memcpy(out, blob, 32);
-            found = true;
-        }
-    }
-    sqlite3_finalize(s);
-    return found;
 }
 
 static bool catchup_set_sparse_projection_tip(struct node_db *ndb,
@@ -434,7 +406,7 @@ int node_db_catchup_service_run(struct node_db *ndb,
      * across the whole ascending walk without a per-block SELECT. */
     uint8_t prev_receipt[32] = {0};
     if (start > 0)
-        catchup_read_prev_receipt(ndb, start - 1, prev_receipt);
+        (void)db_view_integrity_get(ndb, start - 1, prev_receipt);
 
     for (int h = start; h <= chain_tip; h++) {
         if (g_shutdown_requested) {

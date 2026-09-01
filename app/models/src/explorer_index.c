@@ -298,6 +298,30 @@ bool db_view_integrity_save(struct node_db *ndb, int64_t height,
     AR_FINISH_SAVE(cbs, &rec, ok);
 }
 
+bool db_view_integrity_get(struct node_db *ndb, int64_t height,
+                           uint8_t sha3_out[32])
+{
+    if (!ndb || !ndb->open || height < 0 || !sha3_out)
+        return false;
+
+    sqlite3_stmt *s = NULL;
+    AR_PREPARE_BOOL(ndb, s,
+                    "SELECT sha3_hash FROM view_integrity WHERE height=?");
+    AR_BIND_INT(s, 1, height);
+
+    bool found = false;
+    if (AR_STEP_ROW(s)) {
+        const void *blob = sqlite3_column_blob(s, 0);
+        int blob_len = sqlite3_column_bytes(s, 0);
+        if (blob && blob_len == 32) {
+            memcpy(sha3_out, blob, 32);
+            found = true;
+        }
+    }
+    AR_FINALIZE(s);
+    return found;
+}
+
 int64_t db_view_integrity_max_height(struct node_db *ndb)
 {
     if (!ndb || !ndb->open) return -1;

@@ -8,5 +8,10 @@
 # may only shrink — moving a file's reads behind projections/models lets
 # you delete its line. Goal: empty file.
 #
-# Per-line exception: add // raw-controller-sql-ok on the offending line.
+# Per-line exception outside sync-controller sources: add
+# // raw-controller-sql-ok on the offending line. sync_controller*.c/.h
+# sources have no exception or baseline path for direct prepare/exec calls;
+# they orchestrate model/service calls instead. Exact per-height
+# view_integrity receipt SQL is model-owned and has no exception anywhere in
+# controllers/services.
 # Format: one relative path per line; lines starting with # are comments.

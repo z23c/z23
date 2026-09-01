@@ -252,7 +252,10 @@
  * `*_dump_state_fill` provider, which the pre-widening scan could not see. */
 #define DUMPER_BLOCKING_SCRIPT_REL "tools/scripts/check_dumper_never_blocks.sh"
 #define E10_SQL_SCRIPT_REL "tools/lint/check_no_raw_sqlite_in_controllers.sh"
-#define E10_SQL_FIXTURE_DST "app/controllers/src/_e10_rawsql_fixture_tmp.c"
+#define E10_SQL_FIXTURE_DST \
+    "app/controllers/src/sync_controller_e10_rawsql_fixture_tmp.c"
+#define E10_SQL_SERVICE_FIXTURE_DST \
+    "app/services/src/_e10_receipt_sql_fixture_tmp.c"
 #define E11_SCRIPT_REL   "tools/scripts/check_doc_accuracy.sh"
 /* Not gitignored on purpose: E11's repo-wide prong scans tracked files plus
  * not-yet-added files git does not ignore, so an ignored path would make the

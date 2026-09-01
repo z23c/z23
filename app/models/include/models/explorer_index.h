@@ -103,6 +103,12 @@ bool db_sprout_nullifier_save(struct node_db *ndb, const uint8_t nullifier[32],
 bool db_view_integrity_save(struct node_db *ndb, int64_t height,
                             const uint8_t sha3[32]);
 
+/* Read the receipt recorded at exactly `height`. Returns false for invalid
+ * arguments, a closed db, a missing row, or a malformed blob whose length is
+ * not exactly 32 bytes. On every false return, `sha3_out` is left untouched. */
+bool db_view_integrity_get(struct node_db *ndb, int64_t height,
+                           uint8_t sha3_out[32]);
+
 /* Highest height with a recorded view_integrity receipt, or -1 when the db
  * is closed. Mirrors db_utxo_max_height(): an empty table yields 0 (the "no
  * receipts yet" floor, SQLite's MAX() over zero rows), the same quirk

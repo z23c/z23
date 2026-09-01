@@ -5,6 +5,7 @@
 #include "services/node_db_catchup_lock_guard.h"
 #include "models/database.h"
 #include "models/block.h"
+#include "models/explorer_index.h"
 #include "controllers/sync_controller.h"
 #include "util/blocker.h"
 #include "validation/chainstate.h"
@@ -263,11 +264,12 @@ int test_node_db_catchup_service(void)
      * node.db instances against one shared fixture datadir. */
     {
         enum { FIX_N = 5 };
-        char dirF[256], dirA[256], dirB[256], dirC[256];
+        char dirF[256], dirA[256], dirB[256], dirC[256], dirD[256];
         test_make_tmpdir(dirF, sizeof(dirF), "node_db_catchup", "fix");
         test_make_tmpdir(dirA, sizeof(dirA), "node_db_catchup", "batchA");
         test_make_tmpdir(dirB, sizeof(dirB), "node_db_catchup", "batchB");
         test_make_tmpdir(dirC, sizeof(dirC), "node_db_catchup", "snapC");
+        test_make_tmpdir(dirD, sizeof(dirD), "node_db_catchup", "continuousD");
         char blocksF[512];
         snprintf(blocksF, sizeof(blocksF), "%s/blocks", dirF);
         mkdir(blocksF, 0755);
@@ -313,10 +315,11 @@ int test_node_db_catchup_service(void)
         }
         NDC_CHECK("five-block fixture builds and installs", built);
 
-        char pathA[512], pathB[512], pathC[512];
+        char pathA[512], pathB[512], pathC[512], pathD[512];
         snprintf(pathA, sizeof(pathA), "%s/node.db", dirA);
         snprintf(pathB, sizeof(pathB), "%s/node.db", dirB);
         snprintf(pathC, sizeof(pathC), "%s/node.db", dirC);
+        snprintf(pathD, sizeof(pathD), "%s/node.db", dirD);
 
         /* (c1) Batch cap 2 over 5 blocks: commits at indexed=2 and 4 plus
          * the final commit — multiple transactions, never one unbounded
@@ -436,6 +439,28 @@ int test_node_db_catchup_service(void)
             int tip_halfopen = openA ? node_db_sync_get_tip_height(&ndbA) : -1;
             NDC_CHECK("the half-open pass resumes indexing",
                       res_halfopen == 1 && tip_halfopen == FIX_N + 1);
+
+            /* Differential restart proof: a resumed 1..5 then 6 walk must
+             * produce exactly the same height-6 chained receipt as a fresh
+             * continuous 1..6 walk. If the production start-1 read is
+             * deleted, changed to start, or replaced by a zero seed, these
+             * receipts diverge while all per-row writes still look green. */
+            node_db_catchup_lock_guard_test_reset();
+            struct node_db ndbD;
+            bool openD = sixth && node_db_open(&ndbD, pathD);
+            int res_continuous = openD
+                ? node_db_catchup_service_run(&ndbD, &ac, NULL, dirF) : -1;
+            uint8_t resumed_receipt[32] = {0};
+            uint8_t continuous_receipt[32] = {0};
+            bool resumed_read = openA && db_view_integrity_get(
+                &ndbA, FIX_N + 1, resumed_receipt);
+            bool continuous_read = openD && db_view_integrity_get(
+                &ndbD, FIX_N + 1, continuous_receipt);
+            NDC_CHECK("resumed catchup receipt matches continuous chain",
+                      res_continuous == FIX_N + 1 && resumed_read &&
+                      continuous_read &&
+                      memcmp(resumed_receipt, continuous_receipt, 32) == 0);
+            if (openD) node_db_close(&ndbD);
         }
 
         node_db_catchup_lock_guard_test_reset();
@@ -448,6 +473,7 @@ int test_node_db_catchup_service(void)
         test_cleanup_tmpdir(dirA);
         test_cleanup_tmpdir(dirB);
         test_cleanup_tmpdir(dirC);
+        test_cleanup_tmpdir(dirD);
     }
 
     test_cleanup_tmpdir(dir);

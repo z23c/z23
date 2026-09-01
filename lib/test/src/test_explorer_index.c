@@ -280,6 +280,23 @@ int test_explorer_index(void)
     { int n = count_rows(&ndb, "SELECT COUNT(*) FROM view_integrity WHERE height=1");
       if (n == 1) printf("OK\n"); else { printf("FAIL (got %d)\n", n); failures++; } }
 
+    printf("explorer_index: model reads the exact receipt height... ");
+    { uint8_t got[32] = {0};
+      if (db_view_integrity_get(&ndb, 1, got) &&
+          memcmp(got, out_receipt, 32) == 0)
+          printf("OK\n");
+      else { printf("FAIL\n"); failures++; } }
+
+    printf("explorer_index: missing/negative receipt leaves output untouched... ");
+    { uint8_t sentinel[32], before[32];
+      memset(sentinel, 0x6C, sizeof(sentinel));
+      memcpy(before, sentinel, sizeof(before));
+      bool missing = db_view_integrity_get(&ndb, 99, sentinel);
+      bool negative = db_view_integrity_get(&ndb, -1, sentinel);
+      if (!missing && !negative && memcmp(sentinel, before, 32) == 0)
+          printf("OK\n");
+      else { printf("FAIL\n"); failures++; } }
+
     /* Idempotency: re-index the same block; INSERT OR REPLACE must not
      * duplicate any row. */
     printf("explorer_index: re-index is idempotent (no duplicate rows)... ");
@@ -304,6 +321,33 @@ int test_explorer_index(void)
           printf("OK\n");
       else { printf("FAIL\n"); failures++; } }
 
+    printf("explorer_index: receipt read selects adjacent heights exactly... ");
+    { uint8_t second[32], got_first[32] = {0}, got_second[32] = {0};
+      memset(second, 0xA5, sizeof(second));
+      bool saved = db_view_integrity_save(&ndb, 2, second);
+      bool first_ok = db_view_integrity_get(&ndb, 1, got_first);
+      bool second_ok = db_view_integrity_get(&ndb, 2, got_second);
+      if (saved && first_ok && second_ok &&
+          memcmp(got_first, out_receipt, 32) == 0 &&
+          memcmp(got_second, second, 32) == 0)
+          printf("OK\n");
+      else { printf("FAIL\n"); failures++; } }
+
+    printf("explorer_index: malformed receipt lengths leave output untouched... ");
+    { uint8_t sentinel[32], before[32];
+      memset(sentinel, 0x3D, sizeof(sentinel));
+      memcpy(before, sentinel, sizeof(before));
+      int rc = sqlite3_exec(ndb.db,
+          "INSERT INTO view_integrity(height,sha3_hash) VALUES"
+          "(3,x'0102'),(4,zeroblob(33))",
+          NULL, NULL, NULL); // raw-sql-ok:test-malformed-receipt-fixture
+      bool short_found = db_view_integrity_get(&ndb, 3, sentinel);
+      bool long_found = db_view_integrity_get(&ndb, 4, sentinel);
+      if (rc == SQLITE_OK && !short_found && !long_found &&
+          memcmp(sentinel, before, 32) == 0)
+          printf("OK\n");
+      else { printf("FAIL\n"); failures++; } }
+
     blk.vtx = NULL;   /* tx is stack-local; don't let block_free touch it */
     blk.num_vtx = 0;
     transaction_free(&tx);
@@ -312,6 +356,15 @@ int test_explorer_index(void)
     failures += test_znam_apply_auth(&ndb);
 
     node_db_close(&ndb);
+
+    printf("explorer_index: closed-db receipt read leaves output untouched... ");
+    { uint8_t sentinel[32], before[32];
+      memset(sentinel, 0xB7, sizeof(sentinel));
+      memcpy(before, sentinel, sizeof(before));
+      bool found = db_view_integrity_get(&ndb, 1, sentinel);
+      if (!found && memcmp(sentinel, before, 32) == 0)
+          printf("OK\n");
+      else { printf("FAIL\n"); failures++; } }
 
     return failures;
 }
