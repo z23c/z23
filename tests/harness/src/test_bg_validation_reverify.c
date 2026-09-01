@@ -27,6 +27,8 @@
 #include "validation/chainstate.h"
 #include "validation/main_state.h"
 
+#include <errno.h>
+#include <pthread.h>
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
@@ -42,6 +44,8 @@ bool bg_validation_verify_shielded_proofs(const struct transaction *tx,
                                           int64_t *proofs_out);
 
 static _Atomic int g_body_read_calls;
+static pthread_mutex_t g_body_read_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t g_body_read_cv = PTHREAD_COND_INITIALIZER;
 static struct bg_validation_service *g_body_repair_svc;
 static struct main_state *g_reorg_ms;
 static struct block_index *g_reorg_replacement;
@@ -50,6 +54,32 @@ static int g_restart_progress = 1;
 static int64_t g_restart_version = 1;
 static struct block_index *g_repair_index;
 static struct disk_block_pos g_repair_position;
+
+static int body_read_count_increment(void)
+{
+    pthread_mutex_lock(&g_body_read_mu);
+    int count = atomic_fetch_add(&g_body_read_calls, 1) + 1;
+    pthread_cond_broadcast(&g_body_read_cv);
+    pthread_mutex_unlock(&g_body_read_mu);
+    return count;
+}
+
+static bool body_read_count_wait_at_least(int expected)
+{
+    struct timespec deadline;
+    if (platform_time_realtime_timespec(&deadline) != 0)
+        return false;
+    deadline.tv_sec += 10;
+    pthread_mutex_lock(&g_body_read_mu);
+    int wait_rc = 0;
+    while (atomic_load(&g_body_read_calls) < expected &&
+           wait_rc != ETIMEDOUT)
+        wait_rc = pthread_cond_timedwait(
+            &g_body_read_cv, &g_body_read_mu, &deadline);
+    bool reached = atomic_load(&g_body_read_calls) >= expected;
+    pthread_mutex_unlock(&g_body_read_mu);
+    return reached;
+}
 
 static int test_bg_validation_owns_datadir(void)
 {
@@ -105,7 +135,7 @@ static bool body_read_succeeds_third(
     (void)block;
     (void)index;
     (void)datadir;
-    return atomic_fetch_add(&g_body_read_calls, 1) + 1 >= 3;
+    return body_read_count_increment() >= 3;
 }
 
 static bool body_read_never_succeeds(
@@ -114,9 +144,9 @@ static bool body_read_never_succeeds(
     (void)block;
     (void)index;
     (void)datadir;
-    atomic_fetch_add(&g_body_read_calls, 1);
     if (atomic_load(&g_body_repair_svc->progress.reverify_active))
         atomic_store(&g_saw_reverify_read, true);
+    (void)body_read_count_increment();
     return false;
 }
 
@@ -126,7 +156,7 @@ static bool body_read_reorgs_before_success(
     (void)block;
     (void)index;
     (void)datadir;
-    int call = atomic_fetch_add(&g_body_read_calls, 1) + 1;
+    int call = body_read_count_increment();
     if (call == 1)
         return false;
     if (call == 2)
@@ -573,9 +603,7 @@ static int test_bg_validation_legacy_cursor_restarts_walk(void)
             body_read_never_succeeds, body_repair_stop_on_sleep);
 
         ASSERT(bg_validation_start(&svc));
-        for (int i = 0; i < 1000 &&
-                        atomic_load(&g_body_read_calls) == 0; i++)
-            platform_sleep_ms(1);
+        ASSERT(body_read_count_wait_at_least(1));
         ASSERT(atomic_load(&g_body_read_calls) == 1);
         ASSERT(!atomic_load(&g_saw_reverify_read));
         ASSERT(atomic_load(&svc.progress.verified_height) == 0);
@@ -701,9 +729,7 @@ static int test_bg_validation_restart_keeps_reverify_worker(void)
             body_read_never_succeeds, body_repair_stop_on_sleep);
 
         ASSERT(bg_validation_start(&svc));
-        for (int i = 0; i < 1000 &&
-                        atomic_load(&g_body_read_calls) == 0; i++)
-            platform_sleep_ms(1);
+        ASSERT(body_read_count_wait_at_least(1));
         ASSERT(atomic_load(&g_body_read_calls) == 1);
         ASSERT(atomic_load(&g_saw_reverify_read));
         bg_validation_stop(&svc);
