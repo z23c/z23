@@ -156,8 +156,8 @@ bool ci_store_source_file_counts(struct ci_store *s,
                                  struct ci_source_file_counts *out);
 int  ci_store_symbols_in_file(struct ci_store *s, const char *path,
                               struct ci_symbol *out, int cap);
-int  ci_store_includes_of_file(struct ci_store *s, const char *path,
-                               char (*out)[256], int cap);
+int  ci_store_includes_of_file_page(struct ci_store *s, const char *path,
+                                    int offset, char (*out)[256], int cap);
 /* Reverse of the above: indexed files that list `dep_path` as a compiler
  * prerequisite, sorted by path. Returns the count (>=0), -1 on error. */
 int  ci_store_dependents_of_file(struct ci_store *s, const char *dep_path,

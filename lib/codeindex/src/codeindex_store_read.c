@@ -453,29 +453,39 @@ int ci_store_symbols_in_file(struct ci_store *s, const char *path,
     return n;
 }
 
-int ci_store_includes_of_file(struct ci_store *s, const char *path,
-                              char (*out)[256], int cap)
+int ci_store_includes_of_file_page(struct ci_store *s, const char *path,
+                                   int offset, char (*out)[256], int cap)
 {
-    if (!s || !path || !out || cap <= 0)
-        LOG_ERR("codeindex", "bad arg to includes_of_file");
+    if (!s || !path || !out || offset < 0 || cap <= 0)
+        LOG_ERR("codeindex", "bad arg to includes_of_file_page");
     pthread_mutex_lock(&s->lock);
     sqlite3_stmt *stmt = NULL;
     if (sqlite3_prepare_v2(s->db,
         "SELECT i.dep_path FROM includes i JOIN files f ON f.id=i.file_id"
-        " WHERE f.path=? ORDER BY i.dep_path ASC",
+        " WHERE f.path=? ORDER BY i.dep_path ASC LIMIT ? OFFSET ?",
         -1, &stmt, NULL) != SQLITE_OK) {
         pthread_mutex_unlock(&s->lock);
-        LOG_ERR("codeindex", "prepare includes_of_file");
+        LOG_ERR("codeindex", "prepare includes_of_file_page");
     }
-    sqlite3_bind_text(stmt, 1, path, -1, SQLITE_TRANSIENT);
+    if (sqlite3_bind_text(stmt, 1, path, -1, SQLITE_TRANSIENT) != SQLITE_OK ||
+        sqlite3_bind_int(stmt, 2, cap) != SQLITE_OK ||
+        sqlite3_bind_int(stmt, 3, offset) != SQLITE_OK) {
+        (void)sqlite3_finalize(stmt);
+        pthread_mutex_unlock(&s->lock);
+        LOG_ERR("codeindex", "bind includes_of_file_page");
+    }
     int n = 0;
-    int rc;
+    int rc = SQLITE_DONE;
     while (n < cap && (rc = sqlite3_step(stmt)) == SQLITE_ROW) {  // raw-sql-ok:codeindex-derived
         ci_cpy(out[n], 256, (const char *)sqlite3_column_text(stmt, 0));
         n++;
     }
-    sqlite3_finalize(stmt);
+    const bool complete = n == cap || rc == SQLITE_DONE;
+    const int finalize_rc = sqlite3_finalize(stmt);
     pthread_mutex_unlock(&s->lock);
+    if (!complete || finalize_rc != SQLITE_OK)
+        LOG_ERR("codeindex", "read includes_of_file_page failed rc=%d finalize=%d",
+                rc, finalize_rc);
     return n;
 }
 
@@ -486,7 +496,7 @@ int ci_store_dependents_of_file(struct ci_store *s, const char *dep_path,
         LOG_ERR("codeindex", "bad arg to dependents_of_file");
     pthread_mutex_lock(&s->lock);
     sqlite3_stmt *stmt = NULL;
-    /* The mirror of ci_store_includes_of_file. Each row of `includes` is a
+    /* The reverse of the include-page query. Each row of `includes` is a
      * (translation unit -> prerequisite) pair the COMPILER recorded, and a
      * depfile's prerequisite list is already transitively flattened, so one
      * equality probe answers the whole reverse question: every TU whose bytes

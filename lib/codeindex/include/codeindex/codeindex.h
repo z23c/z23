@@ -247,6 +247,13 @@ int codeindex_symbols_in_file(struct codeindex *ci, const char *path,
 int codeindex_includes_of_file(struct codeindex *ci, const char *path,
                                char (*out)[256], int cap);
 
+/* Ordered bounded page of the same compiler-depfile prerequisites. `offset`
+ * is a zero-based row offset in dep-path order. A short page (including zero)
+ * is the exact end witness; callers that need complete coupling evidence must
+ * page instead of treating a full fixed-cap result as complete. */
+int codeindex_includes_of_file_page(struct codeindex *ci, const char *path,
+                                    int offset, char (*out)[256], int cap);
+
 /* Total include edges the index holds. ZERO means the depfile graph was absent
  * when the index was built (a fresh clone, or after `make clean`) — every
  * include question is then UNANSWERED, not answered with zero. Returns the

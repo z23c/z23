@@ -35,16 +35,19 @@
 
 #include "test/test_core.h"
 
+#include "base/safe_alloc.h"
 #include "codeindex/codeindex.h"
 #include "command/native_command.h"
 #include "kernel/command_registry.h"
 #include "json/json.h"
 
 #include <stddef.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 
 #define CI_IMPACT_FIX "test-tmp/code_impact_fix"
+#define CI_CONTEXT_PAGE_EDGES 257
 
 static bool ci_impact_mk_write(const char *dir, const char *rel,
                                const char *content)
@@ -120,6 +123,45 @@ static bool write_shape_overflow_fixture(void)
             return false;
     }
     return true;
+}
+
+static bool write_context_paging_fixture(void)
+{
+    static const size_t depfile_cap = 32768;
+    char *depfile = zcl_calloc(depfile_cap, 1,
+                               "code_impact.context_paging_depfile");
+    if (!depfile) return false;
+    int wrote = snprintf(depfile, depfile_cap,
+                         "build/obj/context_page.o: "
+                         "lib/vcs/src/context_page.c");
+    if (wrote <= 0 || (size_t)wrote >= depfile_cap) {
+        free(depfile);
+        return false;
+    }
+    size_t used = (size_t)wrote;
+    bool ok = true;
+    for (int i = 0; i < CI_CONTEXT_PAGE_EDGES; i++) {
+        wrote = snprintf(depfile + used, depfile_cap - used,
+                         " lib/net/include/net/page_%03d.h", i);
+        if (wrote <= 0 || (size_t)wrote >= depfile_cap - used) {
+            ok = false;
+            break;
+        }
+        used += (size_t)wrote;
+    }
+    if (ok && used + 2 <= depfile_cap) {
+        depfile[used++] = '\n';
+        depfile[used] = '\0';
+        ok = ci_impact_mk_write(
+                 CI_IMPACT_FIX, "lib/vcs/src/context_page.c",
+                 "int context_page_fixture(void) { return 1; }\n") &&
+             ci_impact_mk_write(CI_IMPACT_FIX,
+                                "build/obj/context_page.d", depfile);
+    } else {
+        ok = false;
+    }
+    free(depfile);
+    return ok;
 }
 
 static void ci_impact_call(const char *path, const char *source_root,
@@ -393,6 +435,8 @@ static int test_code_context_map(void)
         ASSERT(shape_sum == production);
         ASSERT(json_get_int(json_get(&reply.data, "overlap_count")) > 0);
         ASSERT(json_get_bool(json_get(&reply.data, "coupling_available")));
+        ASSERT(!json_get_bool(json_get(&reply.data,
+                                       "coupling_input_truncated")));
         ASSERT(json_get_int(json_get(&reply.data,
                                      "coupling_pair_count")) > 0);
         ASSERT(json_get_int(json_get(&reply.data,
@@ -409,6 +453,61 @@ static int test_code_context_map(void)
         size_t n = json_write(&reply.data, buf, sizeof(buf));
         ASSERT(n > 0 && n <= ZCL_COMMAND_LIST_BUDGET);
         zcl_command_reply_free(&reply);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_code_context_map_complete_pages(void)
+{
+    int failures = 0;
+    TEST("code_context_map: coupling crosses the 256-edge page boundary and "
+         "proves an exact short-page end") {
+        system("rm -rf " CI_IMPACT_FIX);
+        ASSERT(write_context_paging_fixture());
+
+        struct codeindex *index = codeindex_open(CI_IMPACT_FIX);
+        ASSERT(index != NULL);
+        static char page[256][256];
+        int first = codeindex_includes_of_file_page(
+            index, "lib/vcs/src/context_page.c", 0, page, 256);
+        ASSERT(first == 256);
+        ASSERT_STR_EQ(page[0], "lib/net/include/net/page_000.h");
+        ASSERT_STR_EQ(page[255], "lib/net/include/net/page_255.h");
+        int second = codeindex_includes_of_file_page(
+            index, "lib/vcs/src/context_page.c", 256, page, 256);
+        ASSERT(second == 1);
+        ASSERT_STR_EQ(page[0], "lib/net/include/net/page_256.h");
+        int end = codeindex_includes_of_file_page(
+            index, "lib/vcs/src/context_page.c", 257, page, 256);
+        ASSERT(end == 0);
+        codeindex_close(index);
+
+        struct zcl_command_reply reply;
+        ci_context_map_call(CI_IMPACT_FIX, &reply);
+        ASSERT(reply.status != ZCL_COMMAND_STATUS_FAILED);
+        ASSERT(json_get_bool(json_get(&reply.data, "coupling_available")));
+        ASSERT(!json_get_bool(json_get(&reply.data,
+                                       "coupling_input_truncated")));
+        ASSERT(json_get_int(json_get(&reply.data,
+                                     "observed_include_edges")) ==
+               CI_CONTEXT_PAGE_EDGES);
+        ASSERT(json_get_int(json_get(&reply.data,
+                                     "cross_context_include_edges")) ==
+               CI_CONTEXT_PAGE_EDGES);
+        const struct json_value *couplings =
+            json_get(&reply.data, "top_couplings");
+        ASSERT(couplings && couplings->type == JSON_ARR &&
+               couplings->num_children == 1);
+        ASSERT_STR_EQ(json_get_str(json_get(&couplings->children[0], "from")),
+                      "commons");
+        ASSERT_STR_EQ(json_get_str(json_get(&couplings->children[0], "to")),
+                      "core");
+        ASSERT(json_get_int(json_get(&couplings->children[0],
+                                     "edge_count")) ==
+               CI_CONTEXT_PAGE_EDGES);
+        zcl_command_reply_free(&reply);
+        system("rm -rf " CI_IMPACT_FIX);
         PASS();
     } _test_next:;
     return failures;
@@ -570,6 +669,7 @@ int test_code_impact(void)
     failures += test_code_room_route_storage();
     failures += test_code_room_command_feature();
     failures += test_code_context_map();
+    failures += test_code_context_map_complete_pages();
     failures += test_code_context_map_shape_overflow();
     failures += test_code_guide();
     return failures;

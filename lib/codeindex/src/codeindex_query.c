@@ -150,9 +150,15 @@ int codeindex_symbols_in_file(struct codeindex *ci, const char *path,
 int codeindex_includes_of_file(struct codeindex *ci, const char *path,
                                char (*out)[256], int cap)
 {
-    if (!ci || !ci->store || !path || !out || cap <= 0)
-        LOG_ERR("codeindex", "bad arg to codeindex_includes_of_file");
-    return ci_store_includes_of_file(ci->store, path, out, cap);
+    return codeindex_includes_of_file_page(ci, path, 0, out, cap);
+}
+
+int codeindex_includes_of_file_page(struct codeindex *ci, const char *path,
+                                    int offset, char (*out)[256], int cap)
+{
+    if (!ci || !ci->store || !path || !out || offset < 0 || cap <= 0)
+        LOG_ERR("codeindex", "bad arg to codeindex_includes_of_file_page");
+    return ci_store_includes_of_file_page(ci->store, path, offset, out, cap);
 }
 
 int64_t codeindex_include_edge_count(struct codeindex *ci)

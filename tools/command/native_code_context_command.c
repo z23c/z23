@@ -11,6 +11,7 @@
 #include "sha3/sha3.h"
 
 #include <inttypes.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -19,7 +20,7 @@ enum {
     CONTEXT_VIOLATION_CAP = 8,
     CONTEXT_SHAPE_CAP = 20,
     CONTEXT_FILE_PAGE_CAP = 256,
-    CONTEXT_INCLUDE_CAP = 256,
+    CONTEXT_INCLUDE_PAGE_CAP = 256,
     CONTEXT_COUPLING_CAP = 8,
 };
 
@@ -115,7 +116,8 @@ void zcl_native_handle_code_context_map(
     }
     struct ci_file *files = zcl_calloc(CONTEXT_FILE_PAGE_CAP, sizeof(*files),
                                        "code.context_map.files");
-    char (*includes)[256] = zcl_calloc(CONTEXT_INCLUDE_CAP, sizeof(*includes),
+    char (*includes)[256] = zcl_calloc(CONTEXT_INCLUDE_PAGE_CAP,
+                                       sizeof(*includes),
                                        "code.context_map.includes");
     if (!files || !includes) {
         free(files); free(includes); codeindex_close(index);
@@ -143,7 +145,6 @@ void zcl_native_handle_code_context_map(
     int shape_count = 0;
     int production = 0, classified = 0, orphans = 0, overlaps = 0;
     int64_t observed_edges = 0, cross_edges = 0;
-    bool coupling_truncated = false;
     bool shape_overflow = false, coupling_query_failed = false;
     bool digest_failed = false, page_failed = false;
     int listed_total = 0;
@@ -209,26 +210,39 @@ void zcl_native_handle_code_context_map(
                 }
             }
 
-            int ni = codeindex_includes_of_file(index, files[i].path, includes,
-                                                 CONTEXT_INCLUDE_CAP);
-            if (ni < 0) {
-                coupling_query_failed = true;
-                break;
-            }
-            if (ni == CONTEXT_INCLUDE_CAP) coupling_truncated = true;
-            for (int j = 0; j < ni; j++) {
-                struct ci_context_assignment dependency;
-                if (!codeindex_context_classify(includes[j], &dependency) ||
-                    !dependency.production || dependency.orphan)
-                    continue;
-                int to = context_index(dependency.context, contexts,
-                                       context_count);
-                if (to < 0) continue;
-                observed_edges++;
-                if (from != to) {
-                    coupling[from][to]++;
-                    cross_edges++;
+            if (codeindex_path_is_translation_unit(files[i].path)) {
+                int include_offset = 0;
+                for (;;) {
+                    int ni = codeindex_includes_of_file_page(
+                        index, files[i].path, include_offset, includes,
+                        CONTEXT_INCLUDE_PAGE_CAP);
+                    if (ni < 0) {
+                        coupling_query_failed = true;
+                        break;
+                    }
+                    for (int j = 0; j < ni; j++) {
+                        struct ci_context_assignment dependency;
+                        if (!codeindex_context_classify(
+                                includes[j], &dependency) ||
+                            !dependency.production || dependency.orphan)
+                            continue;
+                        int to = context_index(dependency.context, contexts,
+                                               context_count);
+                        if (to < 0) continue;
+                        observed_edges++;
+                        if (from != to) {
+                            coupling[from][to]++;
+                            cross_edges++;
+                        }
+                    }
+                    if (ni < CONTEXT_INCLUDE_PAGE_CAP) break;
+                    if (include_offset > INT_MAX - ni) {
+                        coupling_query_failed = true;
+                        break;
+                    }
+                    include_offset += ni;
                 }
+                if (coupling_query_failed) break;
             }
         }
         offset += listed;
@@ -342,12 +356,11 @@ void zcl_native_handle_code_context_map(
     (void)json_push_kv_bool(&reply->data, "coupling_available",
                             include_edge_count > 0);
     (void)json_push_kv_bool(&reply->data, "coupling_input_truncated",
-                            coupling_truncated);
+                            false);
     (void)json_push_kv_int(&reply->data, "coupling_pair_count", pair_count);
     (void)json_push_kv_bool(&reply->data, "top_couplings_truncated",
                             pair_count > CONTEXT_COUPLING_CAP);
     (void)json_push_kv_bool(&reply->data, "coupling_truncated",
-                            coupling_truncated ||
                             pair_count > CONTEXT_COUPLING_CAP);
     (void)json_push_kv(&reply->data, "top_couplings", &coupling_rows);
     char summary[256];
