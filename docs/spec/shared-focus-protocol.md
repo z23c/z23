@@ -90,6 +90,21 @@ evaluator evidence first. This is one-hop binding, not ancestry admission.
 Selection grants no task or execution authority, and a signed evaluator
 statement proves attribution and binding rather than the truth of its scores.
 
+Heuristic lifecycle is a separate read-only projection over an exact set of
+statement roots already admitted by caller-owned local policy. The fold loads
+and re-verifies those statements and relation sets from CAS, starts from the
+accepted `RESULT` anchor, and follows one connected, acyclic, unforked chain.
+The caller owns evidence that the anchor passed the verified attention
+selector; the lifecycle fold cannot infer selection from object bytes.
+Only explicit `SUPERSESSION` and `RETRACTION` statements are lifecycle
+transitions. A supersession head remains retained and a retraction head is
+retired. `SUPPORT`, counterevidence, and every other profile are not lifecycle
+authority and fail closed if presented as transitions. An empty snapshot or
+ambiguous transition chain is undetermined. Timestamps, CAS scans, Pareto
+exclusion, signatures, and mere object presence never choose lifecycle state.
+The snapshot root attributes the local policy and exact accepted evidence; it
+is not a new acceptance authority or a deletion instruction.
+
 ## Storage and transport
 
 All protocol wires are inert content-addressed objects in the existing ZVCS

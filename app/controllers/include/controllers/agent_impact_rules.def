@@ -1182,6 +1182,7 @@ AGENT_IMPACT_RULE("lib/test/src/test_zcode_package_dev_focus.c", "zcode_package_
  * vertical reruns focus and science alongside both attention groups. */
 AGENT_IMPACT_RULE("lib/vcs/include/vcs/zcode_attention_verified.h|lib/vcs/src/zcode_attention_verified.c|lib/test/src/test_zcode_attention_verified.c", "zcode_attention_verified zcode_attention_lineage zcode_attention_bid zcode_focus zcode_science make_lint_gates")
 AGENT_IMPACT_RULE("lib/vcs/include/vcs/zcode_attention_bid.h|lib/vcs/src/zcode_attention_bid.c|lib/vcs/src/zcode_attention_internal.h|lib/vcs/src/zcode_attention_lineage.c|lib/vcs/src/zcode_attention_frontier.c|lib/test/src/test_zcode_attention_bid.c|lib/test/src/test_zcode_attention_lineage.c", "zcode_attention_lineage zcode_attention_bid zcode_focus zcode_science make_lint_gates")
+AGENT_IMPACT_RULE("lib/vcs/include/vcs/zcode_heuristic_lifecycle.h|lib/vcs/src/zcode_heuristic_lifecycle.c|lib/test/src/test_zcode_heuristic_lifecycle.c|lib/vcs/src/zcode_science_statement.c", "zcode_heuristic_lifecycle zcode_attention_verified zcode_attention_lineage zcode_attention_bid zcode_science make_lint_gates")
 /* The registry def is a projection of the ten packaged libraries' CONTENT:
  * a bytes-only edit to any packaged source moves its derived roots exactly
  * like a manifest change does, so it must re-derive through the same proof
