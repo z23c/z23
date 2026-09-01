@@ -1,0 +1,61 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="720" viewBox="0 0 960 720" role="img" aria-labelledby="hero-title hero-desc">
+  <title id="hero-title">Z23: one user-owned node, two sovereign systems</title>
+  <desc id="hero-desc">A local-authority boundary contains a ZClassic full node, an optional C23 Commons, local policy, and five conceptual product layers. The user controls the boundary while replaceable AI workers remain outside and may only propose work.</desc>
+  <rect width="960" height="720" fill="#0a0d12"/>
+  <g font-family="system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
+    <text x="480" y="60" text-anchor="middle" font-size="42" font-weight="750" fill="#e9eef6">Z23</text>
+    <text x="480" y="96" text-anchor="middle" font-size="22" fill="#c3ccd9">Software made for you, not imposed on you.</text>
+
+    <circle cx="106" cy="137" r="34" fill="#121722" stroke="#3ddc97" stroke-width="3"/>
+    <text x="106" y="144" text-anchor="middle" font-size="19" font-weight="700" fill="#e9eef6">YOU</text>
+    <path d="M142 137 H205" stroke="#3ddc97" stroke-width="3"/>
+    <path d="M205 137 l-12 -7 v14 z" fill="#3ddc97"/>
+    <text x="218" y="130" font-size="15" font-weight="650" fill="#3ddc97">OWNER AUTHORITY</text>
+
+    <rect x="675" y="108" width="225" height="58" rx="29" fill="#171d2a" stroke="#69748a" stroke-width="2" stroke-dasharray="7 6"/>
+    <text x="787.5" y="133" text-anchor="middle" font-size="16" font-weight="700" fill="#c3ccd9">REPLACEABLE AI</text>
+    <text x="787.5" y="153" text-anchor="middle" font-size="14" fill="#97a3b6">proposals, never authority</text>
+    <path d="M745 166 L696 214" stroke="#69748a" stroke-width="2" stroke-dasharray="7 6"/>
+    <path d="M696 214 l3 -13 10 10 z" fill="#69748a"/>
+
+    <rect x="48" y="184" width="864" height="486" rx="24" fill="#0e1219" stroke="#3ddc97" stroke-width="3"/>
+    <rect x="72" y="168" width="305" height="34" rx="17" fill="#0a0d12"/>
+    <text x="224.5" y="191" text-anchor="middle" font-size="16" font-weight="700" letter-spacing="1.4" fill="#3ddc97">YOUR DEVICE · LOCAL AUTHORITY</text>
+
+    <text x="480" y="238" text-anchor="middle" font-size="18" font-weight="700" letter-spacing="2" fill="#97a3b6">ONE BINARY · TWO SOVEREIGN SYSTEMS</text>
+
+    <rect x="92" y="270" width="354" height="188" rx="18" fill="#121722" stroke="#5ea8ff" stroke-width="2"/>
+    <rect x="92" y="270" width="354" height="8" rx="4" fill="#5ea8ff"/>
+    <text x="269" y="321" text-anchor="middle" font-size="25" font-weight="750" fill="#e9eef6">ZCLASSIC FULL NODE</text>
+    <text x="269" y="354" text-anchor="middle" font-size="17" fill="#b9d9ff">consensus comes first</text>
+    <line x1="128" y1="377" x2="410" y2="377" stroke="#313b4e"/>
+    <text x="269" y="408" text-anchor="middle" font-size="18" fill="#c3ccd9">P2P · WALLET · RPC · EXPLORER</text>
+    <text x="269" y="435" text-anchor="middle" font-size="15" fill="#97a3b6">optional embedded Tor at build time</text>
+
+    <rect x="514" y="270" width="354" height="188" rx="18" fill="#121722" stroke="#a78bfa" stroke-width="2"/>
+    <rect x="514" y="270" width="354" height="8" rx="4" fill="#a78bfa"/>
+    <text x="691" y="321" text-anchor="middle" font-size="25" font-weight="750" fill="#e9eef6">C23 COMMONS</text>
+    <text x="691" y="354" text-anchor="middle" font-size="17" fill="#d8cdfd">optional and locally admitted</text>
+    <line x1="550" y1="377" x2="832" y2="377" stroke="#313b4e"/>
+    <text x="691" y="408" text-anchor="middle" font-size="18" fill="#c3ccd9">SOURCE · PACKAGES · EVIDENCE</text>
+    <text x="691" y="435" text-anchor="middle" font-size="15" fill="#97a3b6">fetch · verify · reproduce · preserve</text>
+
+    <rect x="300" y="486" width="360" height="72" rx="36" fill="#171d2a" stroke="#f0b44c" stroke-width="2"/>
+    <text x="480" y="516" text-anchor="middle" font-size="19" font-weight="750" fill="#f0b44c">LOCAL POLICY</text>
+    <text x="480" y="541" text-anchor="middle" font-size="15" fill="#c3ccd9">accept or refuse every exact version here</text>
+
+    <text x="480" y="592" text-anchor="middle" font-size="14" font-weight="700" letter-spacing="1.2" fill="#69748a">CONCEPTUAL PRODUCT MAP · NOT FILESYSTEM LAYOUT</text>
+    <g font-size="15" font-weight="700" text-anchor="middle">
+      <rect x="78" y="612" width="148" height="38" rx="9" fill="#171d2a" stroke="#5ea8ff"/>
+      <text x="152" y="637" fill="#b9d9ff">CORE</text>
+      <rect x="242" y="612" width="148" height="38" rx="9" fill="#171d2a" stroke="#3ddc97"/>
+      <text x="316" y="637" fill="#86edbd">ENGINE</text>
+      <rect x="406" y="612" width="148" height="38" rx="9" fill="#171d2a" stroke="#a78bfa"/>
+      <text x="480" y="637" fill="#d8cdfd">CONTEXTS</text>
+      <rect x="570" y="612" width="148" height="38" rx="9" fill="#171d2a" stroke="#f0b44c"/>
+      <text x="644" y="637" fill="#f7d28a">COGNITION</text>
+      <rect x="734" y="612" width="148" height="38" rx="9" fill="#171d2a" stroke="#f2708a"/>
+      <text x="808" y="637" fill="#fac0cc">PLATFORM</text>
+    </g>
+  </g>
+</svg>

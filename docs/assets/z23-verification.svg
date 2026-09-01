@@ -1,0 +1,58 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="600" viewBox="0 0 960 600" role="img" aria-labelledby="verification-title verification-desc">
+  <title id="verification-title">Independent verification and local acceptance</title>
+  <desc id="verification-desc">Authenticated source bytes cross the network inert. A receiving node independently verifies roots and signatures, performs only locally admitted bounded work, compares reproduction results, and then accepts or refuses the exact version under local policy.</desc>
+  <defs>
+    <marker id="verification-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0 0 L10 5 L0 10 z" fill="#69748a"/>
+    </marker>
+  </defs>
+  <rect width="960" height="600" fill="#0a0d12"/>
+  <g font-family="system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
+    <text x="480" y="56" text-anchor="middle" font-size="30" font-weight="750" fill="#e9eef6">Verify, rebuild, decide locally</text>
+    <text x="480" y="86" text-anchor="middle" font-size="17" fill="#97a3b6">Transfer carries bytes and claims—not execution authority.</text>
+
+    <path d="M302 278 H343" stroke="#69748a" stroke-width="3" marker-end="url(#verification-arrow)"/>
+    <path d="M617 278 H658" stroke="#69748a" stroke-width="3" marker-end="url(#verification-arrow)"/>
+
+    <rect x="42" y="132" width="260" height="292" rx="20" fill="#121722" stroke="#5ea8ff" stroke-width="2"/>
+    <text x="172" y="174" text-anchor="middle" font-size="15" font-weight="750" letter-spacing="1.5" fill="#5ea8ff">SOURCE NODE</text>
+    <text x="172" y="213" text-anchor="middle" font-size="25" font-weight="750" fill="#e9eef6">EXACT OBJECTS</text>
+    <line x1="76" y1="235" x2="268" y2="235" stroke="#313b4e"/>
+    <text x="172" y="270" text-anchor="middle" font-size="17" fill="#c3ccd9">source root</text>
+    <text x="172" y="300" text-anchor="middle" font-size="17" fill="#c3ccd9">dependency roots</text>
+    <text x="172" y="330" text-anchor="middle" font-size="17" fill="#c3ccd9">signature + claim</text>
+    <rect x="78" y="361" width="188" height="38" rx="19" fill="#171d2a" stroke="#69748a"/>
+    <text x="172" y="386" text-anchor="middle" font-size="15" font-weight="700" fill="#97a3b6">NO TRUST REQUIRED</text>
+
+    <rect x="343" y="176" width="274" height="204" rx="20" fill="#171d2a" stroke="#a78bfa" stroke-width="3"/>
+    <rect x="417" y="203" width="126" height="40" rx="20" fill="#a78bfa"/>
+    <text x="480" y="229" text-anchor="middle" font-size="15" font-weight="800" fill="#0a0d12">NETWORK</text>
+    <text x="480" y="281" text-anchor="middle" font-size="29" font-weight="800" fill="#e9eef6">INERT FETCH</text>
+    <text x="480" y="315" text-anchor="middle" font-size="17" fill="#d8cdfd">authenticated bytes only</text>
+    <text x="480" y="344" text-anchor="middle" font-size="15" fill="#97a3b6">no build · no install · no run</text>
+
+    <rect x="658" y="116" width="260" height="324" rx="20" fill="#121722" stroke="#3ddc97" stroke-width="2"/>
+    <text x="788" y="157" text-anchor="middle" font-size="15" font-weight="750" letter-spacing="1.5" fill="#3ddc97">RECEIVING NODE</text>
+    <text x="788" y="198" text-anchor="middle" font-size="19" font-weight="750" fill="#e9eef6">INDEPENDENT CHECKS</text>
+    <line x1="692" y1="220" x2="884" y2="220" stroke="#313b4e"/>
+    <text x="714" y="258" font-size="17" font-weight="700" fill="#3ddc97">1</text>
+    <text x="746" y="258" font-size="17" fill="#c3ccd9">re-root every byte</text>
+    <text x="714" y="294" font-size="17" font-weight="700" fill="#3ddc97">2</text>
+    <text x="746" y="294" font-size="17" fill="#c3ccd9">verify the statement</text>
+    <text x="714" y="330" font-size="17" font-weight="700" fill="#3ddc97">3</text>
+    <text x="746" y="330" font-size="17" fill="#c3ccd9">admit bounded work</text>
+    <text x="714" y="366" font-size="17" font-weight="700" fill="#3ddc97">4</text>
+    <text x="746" y="366" font-size="17" fill="#c3ccd9">rebuild and compare</text>
+    <rect x="697" y="389" width="182" height="34" rx="17" fill="#171d2a" stroke="#3ddc97"/>
+    <text x="788" y="412" text-anchor="middle" font-size="13" font-weight="750" fill="#86edbd">EVIDENCE, NOT VOUCHING</text>
+
+    <path d="M788 440 C788 480 744 527 700 527" fill="none" stroke="#f0b44c" stroke-width="3" marker-end="url(#verification-arrow)"/>
+    <rect x="260" y="488" width="440" height="78" rx="39" fill="#171d2a" stroke="#f0b44c" stroke-width="3"/>
+    <text x="480" y="520" text-anchor="middle" font-size="21" font-weight="800" fill="#f0b44c">LOCAL POLICY + USER</text>
+    <text x="480" y="548" text-anchor="middle" font-size="17" fill="#e9eef6">ACCEPT or REFUSE one exact version</text>
+
+    <text x="46" y="489" font-size="15" font-weight="750" fill="#f2708a">EVIDENCE SCOPE</text>
+    <text x="46" y="518" font-size="15" fill="#97a3b6">A receipt proves only</text>
+    <text x="46" y="541" font-size="15" fill="#97a3b6">its stated observation.</text>
+  </g>
+</svg>

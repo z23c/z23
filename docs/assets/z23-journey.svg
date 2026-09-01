@@ -1,76 +1,52 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1240" height="320" viewBox="0 0 1240 320" role="img" aria-label="DESCRIBE, REUSE, CREATE, SEE, KEEP, SHARE - the Z23 flow">
-<title>DESCRIBE - REUSE - CREATE - SEE - KEEP - SHARE: the Z23 flow</title>
-<rect width="1240" height="320" rx="16" fill="#0b0f16"/>
-<rect x="0.5" y="0.5" width="1239" height="319" rx="15.5" fill="none" stroke="#243044"/>
-<line x1="0" y1="96" x2="1240" y2="96" stroke="#1a2432"/>
-<line x1="0" y1="272" x2="1240" y2="272" stroke="#1a2432"/>
-<text x="620" y="52" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="21" font-weight="bold" letter-spacing="2" fill="#eef4fb">DESCRIBE &#8594; REUSE &#8594; CREATE &#8594; SEE &#8594; KEEP &#8594; SHARE</text>
-<text x="620" y="78" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" fill="#66788c">Describe what you want. Your machine assembles it from a shared C23 commons.</text>
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="620" viewBox="0 0 960 620" role="img" aria-labelledby="journey-title journey-desc">
+  <title id="journey-title">Describe, reuse, create, see, keep, share</title>
+  <desc id="journey-desc">The Z23 product journey flows from describing desired behavior through reuse and creation into a large central SEE stage, where the user observes the real result before keeping and sharing an exact version.</desc>
+  <defs>
+    <marker id="journey-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#69748a"/>
+    </marker>
+  </defs>
+  <rect width="960" height="620" fill="#0a0d12"/>
+  <g font-family="system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
+    <text x="480" y="54" text-anchor="middle" font-size="30" font-weight="750" fill="#e9eef6">From intent to owned software</text>
+    <text x="480" y="84" text-anchor="middle" font-size="17" fill="#97a3b6">The user sees the consequence before choosing what to keep.</text>
 
-<!-- DESCRIBE -->
-<rect x="42" y="118" width="176" height="136" rx="10" fill="#101725" stroke="#243044"/>
-<rect x="42" y="118" width="176" height="3" rx="1.5" fill="#6bd18a"/>
-<text x="58" y="146" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" font-weight="bold" letter-spacing="1" fill="#6bd18a">01</text>
-<text x="58" y="176" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="18" font-weight="bold" letter-spacing="1" fill="#eef4fb">DESCRIBE</text>
-<line x1="58" y1="188" x2="202" y2="188" stroke="#243044"/>
-<text x="58" y="210" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11" fill="#c3d2e2">Say what the software</text>
-<text x="58" y="228" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11" fill="#c3d2e2">should do, in your</text>
-<text x="58" y="246" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11" fill="#c3d2e2">own words.</text>
-<text x="228" y="192" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="15" fill="#3d4d61">&#8594;</text>
+    <path d="M292 171 H337" stroke="#69748a" stroke-width="3" marker-end="url(#journey-arrow)"/>
+    <path d="M623 171 H668" stroke="#69748a" stroke-width="3" marker-end="url(#journey-arrow)"/>
+    <path d="M788 239 C788 276 699 292 655 313" fill="none" stroke="#69748a" stroke-width="3" marker-end="url(#journey-arrow)"/>
+    <path d="M376 444 C331 466 273 480 250 502" fill="none" stroke="#69748a" stroke-width="3" marker-end="url(#journey-arrow)"/>
+    <path d="M402 548 H548" stroke="#69748a" stroke-width="3" marker-end="url(#journey-arrow)"/>
 
-<!-- REUSE -->
-<rect x="238" y="118" width="176" height="136" rx="10" fill="#101725" stroke="#243044"/>
-<rect x="238" y="118" width="176" height="3" rx="1.5" fill="#6db8f2"/>
-<text x="254" y="146" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" font-weight="bold" letter-spacing="1" fill="#6db8f2">02</text>
-<text x="254" y="176" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="18" font-weight="bold" letter-spacing="1" fill="#eef4fb">REUSE</text>
-<line x1="254" y1="188" x2="398" y2="188" stroke="#243044"/>
-<text x="254" y="210" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11" fill="#c3d2e2">Peers already have</text>
-<text x="254" y="228" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11" fill="#c3d2e2">C23 that does part</text>
-<text x="254" y="246" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11" fill="#c3d2e2">of it.</text>
-<text x="424" y="192" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="15" fill="#3d4d61">&#8594;</text>
+    <rect x="45" y="116" width="247" height="123" rx="16" fill="#121722" stroke="#5ea8ff" stroke-width="2"/>
+    <text x="69" y="149" font-size="15" font-weight="750" letter-spacing="1.4" fill="#5ea8ff">01</text>
+    <text x="168.5" y="183" text-anchor="middle" font-size="25" font-weight="750" fill="#e9eef6">DESCRIBE</text>
+    <text x="168.5" y="214" text-anchor="middle" font-size="16" fill="#c3ccd9">Say what should happen.</text>
 
-<!-- CREATE -->
-<rect x="434" y="118" width="176" height="136" rx="10" fill="#101725" stroke="#243044"/>
-<rect x="434" y="118" width="176" height="3" rx="1.5" fill="#b79cf2"/>
-<text x="450" y="146" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" font-weight="bold" letter-spacing="1" fill="#b79cf2">03</text>
-<text x="450" y="176" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="18" font-weight="bold" letter-spacing="1" fill="#eef4fb">CREATE</text>
-<line x1="450" y1="188" x2="594" y2="188" stroke="#243044"/>
-<text x="450" y="210" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11" fill="#c3d2e2">Only the missing</text>
-<text x="450" y="228" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11" fill="#c3d2e2">behavior is written,</text>
-<text x="450" y="246" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11" fill="#c3d2e2">built and tested.</text>
-<text x="620" y="192" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="15" fill="#3d4d61">&#8594;</text>
+    <rect x="337" y="116" width="286" height="123" rx="16" fill="#121722" stroke="#3ddc97" stroke-width="2"/>
+    <text x="361" y="149" font-size="15" font-weight="750" letter-spacing="1.4" fill="#3ddc97">02</text>
+    <text x="480" y="183" text-anchor="middle" font-size="25" font-weight="750" fill="#e9eef6">REUSE</text>
+    <text x="480" y="214" text-anchor="middle" font-size="16" fill="#c3ccd9">Find useful C23 first.</text>
 
-<!-- SEE -->
-<rect x="630" y="118" width="176" height="136" rx="10" fill="#101725" stroke="#243044"/>
-<rect x="630" y="118" width="176" height="3" rx="1.5" fill="#f2c14e"/>
-<text x="646" y="146" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" font-weight="bold" letter-spacing="1" fill="#f2c14e">04</text>
-<text x="646" y="176" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="18" font-weight="bold" letter-spacing="1" fill="#eef4fb">SEE</text>
-<line x1="646" y1="188" x2="790" y2="188" stroke="#243044"/>
-<text x="646" y="210" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11" fill="#c3d2e2">Run it. Watch the</text>
-<text x="646" y="228" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11" fill="#c3d2e2">change happen before</text>
-<text x="646" y="246" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11" fill="#c3d2e2">anything is published.</text>
-<text x="816" y="192" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="15" fill="#3d4d61">&#8594;</text>
+    <rect x="668" y="116" width="247" height="123" rx="16" fill="#121722" stroke="#a78bfa" stroke-width="2"/>
+    <text x="692" y="149" font-size="15" font-weight="750" letter-spacing="1.4" fill="#a78bfa">03</text>
+    <text x="791.5" y="183" text-anchor="middle" font-size="25" font-weight="750" fill="#e9eef6">CREATE</text>
+    <text x="791.5" y="214" text-anchor="middle" font-size="16" fill="#c3ccd9">Write only what is missing.</text>
 
-<!-- KEEP -->
-<rect x="826" y="118" width="176" height="136" rx="10" fill="#101725" stroke="#243044"/>
-<rect x="826" y="118" width="176" height="3" rx="1.5" fill="#ef8b6a"/>
-<text x="842" y="146" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" font-weight="bold" letter-spacing="1" fill="#ef8b6a">05</text>
-<text x="842" y="176" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="18" font-weight="bold" letter-spacing="1" fill="#eef4fb">KEEP</text>
-<line x1="842" y1="188" x2="986" y2="188" stroke="#243044"/>
-<text x="842" y="210" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11" fill="#c3d2e2">Accept one exact</text>
-<text x="842" y="228" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11" fill="#c3d2e2">version, by hand.</text>
-<text x="842" y="246" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11" fill="#c3d2e2">It stays yours.</text>
-<text x="1012" y="192" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="15" fill="#3d4d61">&#8594;</text>
+    <rect x="244" y="294" width="472" height="160" rx="24" fill="#171d2a" stroke="#f0b44c" stroke-width="4"/>
+    <rect x="266" y="312" width="136" height="32" rx="16" fill="#f0b44c"/>
+    <text x="334" y="334" text-anchor="middle" font-size="14" font-weight="800" fill="#0a0d12">DECISION POINT</text>
+    <text x="480" y="383" text-anchor="middle" font-size="48" font-weight="800" fill="#e9eef6">SEE</text>
+    <text x="480" y="416" text-anchor="middle" font-size="19" fill="#f7d28a">Run the real result. Watch what changed.</text>
+    <text x="684" y="329" text-anchor="end" font-size="15" font-weight="750" letter-spacing="1.4" fill="#f0b44c">04</text>
 
-<!-- SHARE -->
-<rect x="1022" y="118" width="176" height="136" rx="10" fill="#101725" stroke="#243044"/>
-<rect x="1022" y="118" width="176" height="3" rx="1.5" fill="#5fd3c4"/>
-<text x="1038" y="146" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" font-weight="bold" letter-spacing="1" fill="#5fd3c4">06</text>
-<text x="1038" y="176" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="18" font-weight="bold" letter-spacing="1" fill="#eef4fb">SHARE</text>
-<line x1="1038" y1="188" x2="1182" y2="188" stroke="#243044"/>
-<text x="1038" y="210" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11" fill="#c3d2e2">Peers fetch it,</text>
-<text x="1038" y="228" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11" fill="#c3d2e2">reproduce it,</text>
-<text x="1038" y="246" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11" fill="#c3d2e2">and preserve it.</text>
+    <rect x="78" y="502" width="324" height="90" rx="16" fill="#121722" stroke="#f2708a" stroke-width="2"/>
+    <text x="102" y="535" font-size="15" font-weight="750" letter-spacing="1.4" fill="#f2708a">05</text>
+    <text x="240" y="543" text-anchor="middle" font-size="25" font-weight="750" fill="#e9eef6">KEEP</text>
+    <text x="240" y="572" text-anchor="middle" font-size="15" fill="#c3ccd9">Accept one exact version locally.</text>
 
-<text x="620" y="300" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" fill="#5d7186">one machine &#183; one commons &#183; no central registry &#183; exact versions that outlive their tools</text>
+    <rect x="548" y="502" width="334" height="90" rx="16" fill="#121722" stroke="#3ddc97" stroke-width="2"/>
+    <text x="572" y="535" font-size="15" font-weight="750" letter-spacing="1.4" fill="#3ddc97">06</text>
+    <text x="715" y="543" text-anchor="middle" font-size="25" font-weight="750" fill="#e9eef6">SHARE</text>
+    <text x="715" y="572" text-anchor="middle" font-size="15" fill="#c3ccd9">Let peers verify and reproduce it.</text>
+  </g>
 </svg>
