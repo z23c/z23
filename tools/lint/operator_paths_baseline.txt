@@ -169,7 +169,6 @@ A corpus/report-000041.json 73
 A corpus/report-000042.json 73
 A deploy/zclassic23.env.example 1
 A deploy/zclassic23-standby.env.example 1
-A docs/agent/EXAMPLE_LANE_PROMPT.md 2
 A docs/API_REFERENCE.md 6
 A docs/NATIVE_COMMAND_INTERFACE.md 2
 A docs/work/parity-audit-round2-findings.md 1
@@ -337,7 +336,6 @@ B corpus/report-000042.json 73
 B deploy/install-host-watchdog.sh 1
 B deploy/zclassic23-host-watchdog.sh 1
 B deploy/zclassic23-standby.env.example 1
-B docs/agent/EXAMPLE_LANE_PROMPT.md 2
 B docs/NATIVE_COMMAND_INTERFACE.md 1
 B docs/work/parity-audit-round2-findings.md 1
 B lib/test/src/test_metaverse_catalog.c 1

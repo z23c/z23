@@ -229,6 +229,41 @@ static void zdev_fail(struct zcl_command_reply *reply, const char *code,
                            false, detail, "zcode.improve");
 }
 
+static void zdev_coordination_refuse(
+    struct zcl_command_reply *reply,
+    const char *workspace, const struct vcs_zcode_task_conflict *conflict)
+{
+    const char *kind = conflict
+        ? vcs_zcode_task_conflict_kind_string(conflict->kind) : "INCOMPLETE";
+    const char *task_root = conflict && conflict->task_root_hex[0]
+        ? conflict->task_root_hex : "zcode.tasks";
+    char detail[256];
+    (void)snprintf(detail, sizeof(detail),
+        "%s: canonical task admission stopped before task/context persistence; "
+        "assignment and active execution remain unobserved", kind);
+    zcl_command_reply_fail(
+        reply, ZCL_COMMAND_STATUS_BLOCKED, ZCL_COMMAND_EXIT_BLOCKED,
+        conflict && conflict->kind != VCS_ZCODE_TASK_CONFLICT_INCOMPLETE
+            ? "ACTIVE_TASK_CONFLICT" : "TASK_CONFLICT_SCAN_INCOMPLETE",
+        "coordinate", false, false, detail, task_root);
+    if (workspace && conflict && conflict->task_root_hex[0]) {
+        struct json_value input_value;
+        json_init(&input_value);
+        json_set_object(&input_value);
+        (void)json_push_kv_str(&input_value, "workspace", workspace);
+        (void)json_push_kv_str(&input_value, "task_root",
+                               conflict->task_root_hex);
+        (void)json_push_kv_bool(&input_value, "details", true);
+        char input[512];
+        size_t input_len = json_write(&input_value, input, sizeof(input));
+        if (input_len > 0 && input_len < sizeof(input))
+            (void)zcl_command_reply_add_next(
+                reply, "zcode.tasks", input,
+                "Inspect the exact conflicting CAS task and its evidence roots.");
+        json_free(&input_value);
+    }
+}
+
 static bool zdev_root(const struct json_value *input, const char *key,
                       uint8_t out[32], struct zcl_command_reply *reply)
 {
@@ -1006,6 +1041,8 @@ static void zdev_task_row_json(struct json_value *row,
     (void)json_push_kv_str(row, "goal_root", e->goal_root_hex);
     (void)json_push_kv_str(row, "proof_policy_root",
                            e->proof_policy_root_hex);
+    (void)json_push_kv_str(row, "write_scope_root",
+                           e->write_scope_root_hex);
     (void)json_push_kv_str(row, "toolchain_capsule_root",
                            e->toolchain_capsule_root_hex);
     (void)json_push_kv_int(row, "app_run_receipt_count",
@@ -1370,6 +1407,21 @@ void zcl_native_handle_zcode_improve(
                        "admit parameters changed planned %s", field);
         zdev_fail(reply, "PLANNED_TASK_MISMATCH",
                   detail);
+        return;
+    }
+    struct vcs_zcode_task_index *coordination_index =
+        vcs_zcode_task_index_build(workspace, now);
+    if (!coordination_index) {
+        zdev_coordination_refuse(reply, workspace, NULL);
+        return;
+    }
+    struct vcs_zcode_task_conflict conflict;
+    enum vcs_zcode_task_conflict_kind conflict_kind =
+        vcs_zcode_task_index_conflict(
+            coordination_index, workspace, &task, &conflict);
+    vcs_zcode_task_index_free(coordination_index);
+    if (conflict_kind != VCS_ZCODE_TASK_CONFLICT_CLEAR) {
+        zdev_coordination_refuse(reply, workspace, &conflict);
         return;
     }
     if (!vcs_object_store_init(workspace) ||

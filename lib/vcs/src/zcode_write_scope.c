@@ -170,3 +170,19 @@ bool vcs_zcode_write_scope_contains(
     }
     return false;
 }
+
+bool vcs_zcode_write_scope_overlaps(
+    const struct vcs_zcode_write_scope_v1 *a,
+    const struct vcs_zcode_write_scope_v1 *b)
+{
+    if (vcs_zcode_write_scope_validate(a) != VCS_ZCODE_WRITE_SCOPE_OK ||
+        vcs_zcode_write_scope_validate(b) != VCS_ZCODE_WRITE_SCOPE_OK)
+        return false;
+    for (size_t i = 0; i < a->count; i++)
+        if (vcs_zcode_write_scope_contains(b, a->paths[i]))
+            return true;
+    for (size_t i = 0; i < b->count; i++)
+        if (vcs_zcode_write_scope_contains(a, b->paths[i]))
+            return true;
+    return false;
+}

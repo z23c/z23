@@ -54,4 +54,11 @@ enum vcs_zcode_write_scope_result vcs_zcode_write_scope_root(
 bool vcs_zcode_write_scope_contains(
     const struct vcs_zcode_write_scope_v1 *scope, const char *path);
 
+/* True when either canonical scope grants a path prefix also granted by the
+ * other.  This is a collision predicate only: it does not establish an
+ * owner, assignment, lease, or active execution. */
+bool vcs_zcode_write_scope_overlaps(
+    const struct vcs_zcode_write_scope_v1 *a,
+    const struct vcs_zcode_write_scope_v1 *b);
+
 #endif /* ZCL_VCS_ZCODE_WRITE_SCOPE_H */

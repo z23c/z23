@@ -18,9 +18,11 @@
 #include "vcs/zcode_app_run_observation.h"
 #include "vcs/zcode_dev.h"
 #include "vcs/zcode_lane.h"
+#include "vcs/zcode_write_scope.h"
 #include "vcs/zcode_work_output.h"
 
 #include <dirent.h>
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -46,6 +48,8 @@ struct vcs_zcode_task_index {
     size_t receipt_count;
     struct vcs_zcode_task_lane_entry *lanes;
     size_t lane_count;
+    bool complete;
+    int64_t now_unix;
 };
 
 static bool index_hex_lower(const char *s, size_t want)
@@ -72,6 +76,7 @@ static void index_consider_object(const char *repo_root, const char *hex64,
     uint8_t *wire = NULL;
     size_t len = 0;
     if (vcs_object_load_raw(repo_root, address, &wire, &len) != 0) {
+        index->complete = false;
         LOG_ERROR(INDEX_LOG, "unreadable CAS object %.8s", hex64);
         return;
     }
@@ -105,6 +110,8 @@ static void index_consider_object(const char *repo_root, const char *hex64,
                            e->acceptance_tests_root_hex);
             zcl_hex_encode(task.toolchain_capsule_root, 32,
                            e->toolchain_capsule_root_hex);
+            zcl_hex_encode(task.write_scope_root, 32,
+                           e->write_scope_root_hex);
             e->expires_unix = task.expires_unix;
         }
     } else if (len == VCS_ZCODE_CANDIDATE_WIRE_BYTES &&
@@ -267,6 +274,7 @@ static void index_scan_shard(const char *repo_root, const char *shard_path,
 {
     DIR *d = opendir(shard_path);
     if (!d) {
+        index->complete = false;
         LOG_ERROR(INDEX_LOG, "cannot open CAS shard %s", shard_path);
         return;
     }
@@ -716,6 +724,8 @@ struct vcs_zcode_task_index *vcs_zcode_task_index_build(
     if (!index)
         LOG_RETURN(NULL, INDEX_LOG, "index alloc");
     memset(index, 0, sizeof(*index));
+    index->complete = now_unix > 0;
+    index->now_unix = now_unix;
     index->tasks = zcl_malloc(sizeof(*index->tasks) *
                               VCS_ZCODE_TASK_INDEX_MAX_TASKS, "task_index_rows");
     index->candidates = zcl_malloc(sizeof(*index->candidates) *
@@ -747,8 +757,11 @@ struct vcs_zcode_task_index *vcs_zcode_task_index_build(
         LOG_RETURN(NULL, INDEX_LOG, "objects path too long");
     }
     DIR *d = opendir(objects);
-    if (!d)
-        return index; /* no object store yet: an empty projection, not an error */
+    if (!d) {
+        if (errno != ENOENT)
+            index->complete = false;
+        return index; /* absent store is an empty projection, not an error */
+    }
     bool cap_logged = false;
     struct dirent *de;
     while ((de = readdir(d)) != NULL) {
@@ -757,10 +770,14 @@ struct vcs_zcode_task_index *vcs_zcode_task_index_build(
         char shard_path[4400];
         n = snprintf(shard_path, sizeof(shard_path), "%s/%s", objects,
                      de->d_name);
-        if (n <= 0 || (size_t)n >= sizeof(shard_path))
+        if (n <= 0 || (size_t)n >= sizeof(shard_path)) {
+            index->complete = false;
             continue;
+        }
         index_scan_shard(repo_root, shard_path, de->d_name, index, &cap_logged);
     }
+    if (cap_logged)
+        index->complete = false;
     closedir(d);
     if (index->task_count > 1)
         qsort(index->tasks, index->task_count, sizeof(*index->tasks),
@@ -856,6 +873,139 @@ const struct vcs_zcode_task_index_entry *vcs_zcode_task_index_find(
         if (strcmp(index->tasks[i].task_root_hex, root_hex) == 0)
             return &index->tasks[i];
     return NULL;
+}
+
+const char *vcs_zcode_task_conflict_kind_string(
+    enum vcs_zcode_task_conflict_kind kind)
+{
+    switch (kind) {
+    case VCS_ZCODE_TASK_CONFLICT_CLEAR: return "CLEAR";
+    case VCS_ZCODE_TASK_CONFLICT_DUPLICATE_ACTIVE_WORK:
+        return "DUPLICATE_ACTIVE_WORK";
+    case VCS_ZCODE_TASK_CONFLICT_WRITE_SCOPE_OVERLAP:
+        return "WRITE_SCOPE_OVERLAP";
+    case VCS_ZCODE_TASK_CONFLICT_INCOMPLETE: return "INCOMPLETE";
+    }
+    return "INCOMPLETE";
+}
+
+static bool index_scope_load(const char *repo_root, const char *root_hex,
+                             struct vcs_zcode_write_scope_v1 *out)
+{
+    uint8_t root[32], checked[32], *wire = NULL;
+    size_t wire_len = 0;
+    bool ok = repo_root && root_hex && out &&
+        zcl_hex_decode_lower(root_hex, root, sizeof(root)) &&
+        vcs_object_load_raw_bounded(repo_root, root,
+                                    VCS_ZCODE_WRITE_SCOPE_WIRE_MAX,
+                                    &wire, &wire_len) == 0 &&
+        vcs_zcode_write_scope_parse(wire, wire_len, out) ==
+            VCS_ZCODE_WRITE_SCOPE_OK &&
+        vcs_zcode_write_scope_root(out, checked) ==
+            VCS_ZCODE_WRITE_SCOPE_OK &&
+        memcmp(root, checked, sizeof(root)) == 0;
+    free(wire);
+    return ok;
+}
+
+static bool index_task_open(const struct vcs_zcode_task_index_entry *entry)
+{
+    return entry && !entry->expired &&
+        strcmp(entry->state, VCS_ZCODE_TASK_STATE_PROVEN) != 0;
+}
+
+static void index_conflict_set(
+    const struct vcs_zcode_task_index *index,
+    const struct vcs_zcode_task_index_entry *entry,
+    enum vcs_zcode_task_conflict_kind kind,
+    struct vcs_zcode_task_conflict *out)
+{
+    out->kind = kind;
+    if (!entry) return;
+    (void)snprintf(out->task_root_hex, sizeof(out->task_root_hex), "%s",
+                   entry->task_root_hex);
+    (void)snprintf(out->source_root_hex, sizeof(out->source_root_hex), "%s",
+                   entry->source_root_hex);
+    (void)snprintf(out->goal_root_hex, sizeof(out->goal_root_hex), "%s",
+                   entry->goal_root_hex);
+    (void)snprintf(out->write_scope_root_hex,
+                   sizeof(out->write_scope_root_hex), "%s",
+                   entry->write_scope_root_hex);
+    bool ambiguous = false;
+    const struct vcs_zcode_task_context_entry *context =
+        vcs_zcode_task_index_context_for_task(index, entry->task_root_hex,
+                                              &ambiguous);
+    if (context && !ambiguous)
+        (void)snprintf(out->context_root_hex, sizeof(out->context_root_hex),
+                       "%s", context->context_root_hex);
+    (void)snprintf(out->action_root_hex, sizeof(out->action_root_hex), "%s",
+                   entry->latest_action_root_hex);
+    (void)snprintf(out->work_receipt_root_hex,
+                   sizeof(out->work_receipt_root_hex), "%s",
+                   entry->latest_work_receipt_hex);
+}
+
+enum vcs_zcode_task_conflict_kind vcs_zcode_task_index_conflict(
+    const struct vcs_zcode_task_index *index, const char *repo_root,
+    const struct vcs_zcode_task_v1 *proposed,
+    struct vcs_zcode_task_conflict *out)
+{
+    if (out) memset(out, 0, sizeof(*out));
+    if (!index || !repo_root || !proposed || !out || !index->complete) {
+        if (out) out->kind = VCS_ZCODE_TASK_CONFLICT_INCOMPLETE;
+        return VCS_ZCODE_TASK_CONFLICT_INCOMPLETE;
+    }
+    uint8_t proposed_root[32];
+    char proposed_root_hex[65], source_hex[65], goal_hex[65], scope_hex[65];
+    if (vcs_zcode_task_validate_at(proposed, index->now_unix) !=
+            VCS_ZCODE_DEV_OK ||
+        vcs_zcode_task_root(proposed, proposed_root) != VCS_ZCODE_DEV_OK) {
+        out->kind = VCS_ZCODE_TASK_CONFLICT_INCOMPLETE;
+        return out->kind;
+    }
+    zcl_hex_encode(proposed_root, 32, proposed_root_hex);
+    zcl_hex_encode(proposed->source_root, 32, source_hex);
+    zcl_hex_encode(proposed->goal_root, 32, goal_hex);
+    zcl_hex_encode(proposed->write_scope_root, 32, scope_hex);
+    for (size_t i = 0; i < index->task_count; i++) {
+        const struct vcs_zcode_task_index_entry *entry = &index->tasks[i];
+        if (!index_task_open(entry) ||
+            strcmp(entry->task_root_hex, proposed_root_hex) == 0 ||
+            strcmp(entry->source_root_hex, source_hex) != 0)
+            continue;
+        if (strcmp(entry->goal_root_hex, goal_hex) == 0) {
+            index_conflict_set(index, entry,
+                               VCS_ZCODE_TASK_CONFLICT_DUPLICATE_ACTIVE_WORK,
+                               out);
+            return out->kind;
+        }
+    }
+    struct vcs_zcode_write_scope_v1 proposed_scope;
+    if (!index_scope_load(repo_root, scope_hex, &proposed_scope)) {
+        out->kind = VCS_ZCODE_TASK_CONFLICT_INCOMPLETE;
+        return out->kind;
+    }
+    for (size_t i = 0; i < index->task_count; i++) {
+        const struct vcs_zcode_task_index_entry *entry = &index->tasks[i];
+        if (!index_task_open(entry) ||
+            strcmp(entry->task_root_hex, proposed_root_hex) == 0 ||
+            strcmp(entry->source_root_hex, source_hex) != 0)
+            continue;
+        struct vcs_zcode_write_scope_v1 existing_scope;
+        if (!index_scope_load(repo_root, entry->write_scope_root_hex,
+                              &existing_scope)) {
+            out->kind = VCS_ZCODE_TASK_CONFLICT_INCOMPLETE;
+            return out->kind;
+        }
+        if (vcs_zcode_write_scope_overlaps(&proposed_scope,
+                                           &existing_scope)) {
+            index_conflict_set(index, entry,
+                VCS_ZCODE_TASK_CONFLICT_WRITE_SCOPE_OVERLAP, out);
+            return out->kind;
+        }
+    }
+    out->kind = VCS_ZCODE_TASK_CONFLICT_CLEAR;
+    return out->kind;
 }
 
 static bool index_task_has_author(const struct vcs_zcode_task_index *index,

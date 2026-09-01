@@ -48,6 +48,8 @@
 #define VCS_ZCODE_TASK_STATE_CANDIDATE_PROOFS_READY "CANDIDATE_PROOFS_READY"
 #define VCS_ZCODE_TASK_STATE_PROVEN "PROVEN"
 
+struct vcs_zcode_task_v1;
+
 struct vcs_zcode_task_index_entry {
     char task_root_hex[65];
     char source_root_hex[65];
@@ -55,6 +57,7 @@ struct vcs_zcode_task_index_entry {
     char proof_policy_root_hex[65];
     char acceptance_tests_root_hex[65];
     char toolchain_capsule_root_hex[65];
+    char write_scope_root_hex[65];
     int64_t expires_unix;
     bool expired;             /* at the build's now_unix */
     uint32_t candidate_count; /* projected candidates binding this task */
@@ -178,6 +181,37 @@ vcs_zcode_task_index_context_for_task(
 /* Look up one task entry by task root (32 bytes). NULL when absent. */
 const struct vcs_zcode_task_index_entry *vcs_zcode_task_index_find(
     const struct vcs_zcode_task_index *index, const uint8_t task_root[32]);
+
+enum vcs_zcode_task_conflict_kind {
+    VCS_ZCODE_TASK_CONFLICT_CLEAR = 0,
+    VCS_ZCODE_TASK_CONFLICT_DUPLICATE_ACTIVE_WORK,
+    VCS_ZCODE_TASK_CONFLICT_WRITE_SCOPE_OVERLAP,
+    VCS_ZCODE_TASK_CONFLICT_INCOMPLETE,
+};
+
+struct vcs_zcode_task_conflict {
+    enum vcs_zcode_task_conflict_kind kind;
+    char task_root_hex[65];
+    char source_root_hex[65];
+    char goal_root_hex[65];
+    char write_scope_root_hex[65];
+    char context_root_hex[65];
+    char action_root_hex[65];
+    char work_receipt_root_hex[65];
+};
+
+const char *vcs_zcode_task_conflict_kind_string(
+    enum vcs_zcode_task_conflict_kind kind);
+
+/* Compare a proposed canonical task against non-expired, non-PROVEN tasks in
+ * this exact-source projection. Exact source+goal duplicates take precedence
+ * over scope overlaps. CLEAR is returned only when the CAS scan and every
+ * relevant scope are complete. The result is collision evidence, never an
+ * ownership or execution claim. */
+enum vcs_zcode_task_conflict_kind vcs_zcode_task_index_conflict(
+    const struct vcs_zcode_task_index *index, const char *repo_root,
+    const struct vcs_zcode_task_v1 *proposed,
+    struct vcs_zcode_task_conflict *out);
 
 struct vcs_zcode_task_search {
     const char *task_root;   /* hex prefix of the task root, or NULL */
