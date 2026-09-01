@@ -79,13 +79,15 @@ ZCL_COMMAND_READY_READ(
 
 ZCL_COMMAND_READY_READ(
     "code.room", "code", "",
-    "Compose shape, purpose, neighbors and test route for one path",
-    "One path's shape, purpose, group with sibling neighbors, and test route "
-    "composed from the in-binary code index; complete for that path at "
-    "index-build time.", 0,
-    "code,room,shape,neighbors,tests,unified", "zcl.code_path_input.v1",
+    "Compose one file or command feature room",
+    "For a source path, its shape, purpose, siblings and proof route; for an "
+    "exact command branch, its catalog subtree joined to registered handler "
+    "definitions, proof routes and mixed-file coupling. Command-feature "
+    "implementation scope is explicit and does not claim indirect or "
+    "unregistered dependencies.", ZCL_COMMAND_LIST_BUDGET,
+    "code,room,feature,shape,neighbors,tests,commands,unified", "zcl.code_path_input.v1",
     "zcl.code_room.v1", "path", "path",
-    "z23 code room app/jobs/src/utxo_apply_stage.c",
+    "z23 code room app.messaging",
     ZCL_COMMAND_LAYER_CODE, ZCL_COMMAND_SCOPE_LOCAL,
     ZCL_COMMAND_AUTH_PUBLIC, ZCL_COMMAND_LATENCY_FAST,
     ZCL_COMMAND_COST_TINY,

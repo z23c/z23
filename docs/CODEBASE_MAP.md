@@ -51,6 +51,29 @@ the concept actually lives).
 | Conditions | `app/conditions/` | (detect, remedy, witness) healers; poll/backoff/page-on-exhaustion | `app/conditions/src/block_failed_mask_at_tip.c` |
 | Views | `app/views/` | read-only explorer templates; no persistence writes; served over HTTPS + onion | `app/views/src/explorer_dashboard_view.c` |
 
+### Feature rooms — derived across shapes
+
+Shape folders remain the enforced physical layout; they are not feature
+boundaries. Use an exact public command branch with `code room` to join the
+catalog subtree to its registered handler definitions, source groups, focused
+proof routes, and commands outside the branch that share those handler files:
+
+| Feature | Derived room |
+|---------|--------------|
+| Wallet | `z23 code room core.wallet` |
+| Naming | `z23 code room app.names` |
+| Market | `z23 code room app.market` |
+| Messaging | `z23 code room app.messaging` |
+| C23 Commons | `z23 code room zcode.commons` |
+| Agent development | `z23 code room zcode.package.dev` |
+
+This is a read-only join over the command catalog, handler index, code index,
+and shared impact rules—not a feature manifest or a new authority. Its
+`implementation_scope` states the evidence boundary: registered handler
+definitions are exact; indirect and unregistered dependencies remain
+`UNKNOWN`. Descend from a returned handler with `code capsule <symbol>` and
+check a candidate edit with `code impact <file>` before changing it.
+
 ### Sealed consensus core — `core/`
 
 `core/{consensus,chainparams,params,math}` — every consensus predicate and

@@ -20,6 +20,7 @@
 #include "codeindex/codeindex.h"
 #include "codeindex/codeindex_build.h"
 #include "codeindex/codeindex_merkle.h"
+#include "config/command_catalog.h"
 #include "config/command_handler_index.h"
 #include "controllers/agent_impact_rules.h"
 #include "base/hex.h"
@@ -1187,6 +1188,224 @@ void zcl_native_handle_code_tests(const struct zcl_command_request *request,
  *               command — a real answer, not a guess. */
 enum { CODE_ROOM_NEIGHBOR_CAP = 12 };
 
+enum {
+    CODE_ROOM_FEATURE_COMMAND_CAP = 24,
+    CODE_ROOM_FEATURE_HANDLER_CAP = 24,
+    CODE_ROOM_FEATURE_FILE_CAP = 16,
+    CODE_ROOM_FEATURE_COUPLED_CAP = 12,
+};
+
+static bool code_command_is_in_room(const char *root, const char *path)
+{
+    if (!root || !path) return false;
+    size_t n = strlen(root);
+    return strcmp(root, path) == 0 ||
+           (strncmp(root, path, n) == 0 && path[n] == '.');
+}
+
+static bool code_room_has_file(char files[][256], int count, const char *path)
+{
+    for (int i = 0; i < count; i++)
+        if (strcmp(files[i], path) == 0) return true;
+    return false;
+}
+
+/* A command branch is already the product's exact public feature boundary.
+ * Compose its registered leaves, exact handler definitions, proof routes and
+ * mixed-file coupling without introducing a second feature manifest. */
+static bool code_emit_feature_room(
+    const struct zcl_command_request *request, struct zcl_command_reply *reply,
+    struct codeindex *ci, const char *root)
+{
+    const struct zcl_command_registry *registry =
+        request && request->context && request->context->registry
+            ? request->context->registry : zcl_command_catalog();
+    const struct zcl_command_spec *root_spec =
+        zcl_command_registry_find(registry, root, NULL);
+    if (!root_spec) return false;
+
+    int command_total = 0;
+    struct json_value commands;
+    json_init(&commands); json_set_array(&commands);
+    for (size_t i = 0; i < registry->count; i++) {
+        const char *path = registry->commands[i].path;
+        if (!code_command_is_in_room(root, path)) continue;
+        command_total++;
+        if (command_total <= CODE_ROOM_FEATURE_COMMAND_CAP)
+            code_push_line(&commands, path);
+    }
+    /* A leaf is not a feature room. Preserve the historical file-path result
+     * for unknown paths and command leaves alike. */
+    if (command_total <= 1) {
+        json_free(&commands);
+        return false;
+    }
+
+    char handler_files[CODE_ROOM_FEATURE_FILE_CAP][256] = {{0}};
+    const char *handler_names[CODE_ROOM_FEATURE_HANDLER_CAP] = {0};
+    int handler_file_count = 0, handler_count = 0, handler_total = 0;
+    int handler_unindexed = 0;
+    bool handler_truncated = false;
+    bool file_truncated = false;
+    const struct zcl_command_handler_index *handlers =
+        zcl_command_handler_index();
+    for (size_t i = 0; handlers && i < handlers->count; i++) {
+        const struct zcl_command_handler_entry *entry = &handlers->entries[i];
+        if (!code_command_is_in_room(root, entry->path)) continue;
+        handler_total++;
+        struct ci_symbol symbol;
+        bool found = false;
+        if (!codeindex_symbol(ci, entry->handler_name, &symbol, &found) ||
+            !found || !symbol.def_path[0]) {
+            handler_unindexed++;
+            continue;
+        }
+        bool seen_handler = false;
+        for (int j = 0; j < handler_count; j++)
+            if (strcmp(handler_names[j], entry->handler_name) == 0)
+                seen_handler = true;
+        if (!seen_handler) {
+            if (handler_count < CODE_ROOM_FEATURE_HANDLER_CAP)
+                handler_names[handler_count++] = entry->handler_name;
+            else
+                handler_truncated = true;
+        }
+        if (!code_room_has_file(handler_files, handler_file_count,
+                                symbol.def_path)) {
+            if (handler_file_count < CODE_ROOM_FEATURE_FILE_CAP) {
+                (void)snprintf(handler_files[handler_file_count],
+                               sizeof(handler_files[handler_file_count]), "%s",
+                               symbol.def_path);
+                handler_file_count++;
+            } else {
+                file_truncated = true;
+            }
+        }
+    }
+
+    struct json_value handler_arr, file_arr;
+    json_init(&handler_arr); json_set_array(&handler_arr);
+    json_init(&file_arr); json_set_array(&file_arr);
+    for (int i = 0; i < handler_count; i++)
+        code_push_line(&handler_arr, handler_names[i]);
+    for (int i = 0; i < handler_file_count; i++)
+        code_push_line(&file_arr, handler_files[i]);
+
+    char groups[CODE_ROOM_FEATURE_FILE_CAP][128] = {{0}};
+    int group_count = 0;
+    for (int i = 0; i < handler_file_count; i++) {
+        struct ci_file file;
+        bool found = false;
+        if (!codeindex_file(ci, handler_files[i], &file, &found) || !found ||
+            !file.group[0])
+            continue;
+        bool seen = false;
+        for (int j = 0; j < group_count; j++)
+            if (strcmp(groups[j], file.group) == 0) seen = true;
+        if (!seen && group_count < CODE_ROOM_FEATURE_FILE_CAP) {
+            (void)snprintf(groups[group_count], sizeof(groups[group_count]),
+                           "%s", file.group);
+            group_count++;
+        }
+    }
+    struct json_value group_arr;
+    json_init(&group_arr); json_set_array(&group_arr);
+    for (int i = 0; i < group_count; i++)
+        code_push_line(&group_arr, groups[i]);
+
+    struct agent_impact_acc proofs = {0};
+    bool consensus_risk = false;
+    for (int i = 0; i < handler_file_count; i++) {
+        (void)agent_impact_apply_shared_rules(handler_files[i], &proofs);
+        if (code_path_is_consensus_risk(handler_files[i]))
+            consensus_risk = true;
+    }
+    if (proofs.groups_len == 0)
+        agent_impact_add_group(&proofs, "make_lint_gates");
+    struct json_value test_arr;
+    json_init(&test_arr); json_set_array(&test_arr);
+    size_t tests_shown = proofs.groups_len < (size_t)CODE_TESTS_CAP
+                             ? proofs.groups_len : (size_t)CODE_TESTS_CAP;
+    for (size_t i = 0; i < tests_shown; i++)
+        code_push_line(&test_arr, proofs.groups[i]);
+
+    int coupled_total = 0;
+    struct json_value coupled;
+    json_init(&coupled); json_set_array(&coupled);
+    for (size_t i = 0; handlers && i < handlers->count; i++) {
+        const struct zcl_command_handler_entry *entry = &handlers->entries[i];
+        if (code_command_is_in_room(root, entry->path)) continue;
+        struct ci_symbol symbol;
+        bool found = false;
+        if (!codeindex_symbol(ci, entry->handler_name, &symbol, &found) ||
+            !found || !symbol.def_path[0] ||
+            !code_room_has_file(handler_files, handler_file_count,
+                                symbol.def_path))
+            continue;
+        coupled_total++;
+        if (coupled_total <= CODE_ROOM_FEATURE_COUPLED_CAP)
+            code_push_line(&coupled, entry->path);
+    }
+
+    (void)json_push_kv_str(&reply->data, "path", root);
+    (void)json_push_kv_bool(&reply->data, "found", true);
+    (void)json_push_kv_str(&reply->data, "room_kind", "command_feature");
+    (void)json_push_kv_str(&reply->data, "purpose",
+                           root_spec->summary ? root_spec->summary : "");
+    (void)json_push_kv(&reply->data, "commands", &commands);
+    (void)json_push_kv_int(&reply->data, "command_count", command_total);
+    (void)json_push_kv_bool(&reply->data, "commands_truncated",
+                            command_total > CODE_ROOM_FEATURE_COMMAND_CAP);
+    (void)json_push_kv(&reply->data, "handler_symbols", &handler_arr);
+    (void)json_push_kv_int(&reply->data, "handler_count", handler_count);
+    (void)json_push_kv_int(&reply->data, "handler_binding_count",
+                           handler_total);
+    (void)json_push_kv_int(&reply->data, "handler_unindexed",
+                           handler_unindexed);
+    (void)json_push_kv_bool(&reply->data, "handler_symbols_truncated",
+                            handler_truncated);
+    (void)json_push_kv(&reply->data, "implementation_files", &file_arr);
+    (void)json_push_kv_int(&reply->data, "implementation_file_count",
+                           handler_file_count);
+    (void)json_push_kv(&reply->data, "implementation_groups", &group_arr);
+    (void)json_push_kv_int(&reply->data, "implementation_group_count",
+                           group_count);
+    (void)json_push_kv_bool(&reply->data, "implementation_truncated",
+                            file_truncated);
+    (void)json_push_kv_bool(&reply->data, "implementation_complete",
+                            !file_truncated && handler_unindexed == 0);
+    (void)json_push_kv(&reply->data, "test_groups", &test_arr);
+    (void)json_push_kv_bool(&reply->data, "test_groups_truncated",
+                            proofs.groups_len > (size_t)CODE_TESTS_CAP);
+    (void)json_push_kv_bool(&reply->data, "consensus_risk", consensus_risk);
+    (void)json_push_kv(&reply->data, "shared_handler_file_commands", &coupled);
+    (void)json_push_kv_int(&reply->data,
+                           "shared_handler_file_command_count",
+                           coupled_total);
+    (void)json_push_kv_bool(&reply->data,
+                            "shared_handler_file_commands_truncated",
+                            coupled_total > CODE_ROOM_FEATURE_COUPLED_CAP);
+    (void)json_push_kv_bool(&reply->data,
+                            "shared_handler_file_command_count_complete",
+                            !file_truncated && handler_unindexed == 0);
+    (void)json_push_kv_str(
+        &reply->data, "implementation_scope",
+        "exact registered handler definitions; indirect and unregistered dependencies remain UNKNOWN");
+
+    char summary[256];
+    (void)snprintf(summary, sizeof(summary),
+                   "%s: %d command row(s), %d handler file(s), %zu proof "
+                   "group(s), %d outside command(s) share those handler files",
+                   root, command_total, handler_file_count, proofs.groups_len,
+                   coupled_total);
+    (void)json_push_kv_str(&reply->data, "summary", summary);
+
+    json_free(&commands); json_free(&handler_arr); json_free(&file_arr);
+    json_free(&group_arr);
+    json_free(&test_arr); json_free(&coupled);
+    return true;
+}
+
 void zcl_native_handle_code_room(const struct zcl_command_request *request,
                                  struct zcl_command_reply *reply)
 {
@@ -1204,6 +1423,10 @@ void zcl_native_handle_code_room(const struct zcl_command_request *request,
     struct ci_file finfo;
     bool ffound = false;
     (void)codeindex_file(ci, path, &finfo, &ffound);
+    if (!ffound && code_emit_feature_room(request, reply, ci, path)) {
+        codeindex_close(ci);
+        return;
+    }
     const char *group = ffound ? finfo.group : "";
 
     /* shape: the second component of an app/<shape> group ("app/jobs" → "jobs").

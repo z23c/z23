@@ -23,7 +23,10 @@
  *                      a path absent from the index is itself only.
  *   5. room route ownership — repeated code.room summaries retain the exact
  *                      structured route after command lookup uses the stack.
- *   6. budget           — the hub reply fits ZCL_COMMAND_LIST_BUDGET.
+ *   6. command feature room — one exact command root joins catalog leaves,
+ *                      handler definitions, proof routes, and mixed-file
+ *                      coupling without a second feature manifest.
+ *   7. budget           — the hub reply fits ZCL_COMMAND_LIST_BUDGET.
  *
  * All scratch work happens under ./test-tmp/ (project no-/tmp convention). */
 
@@ -300,6 +303,90 @@ static int test_code_room_route_storage(void)
     return failures;
 }
 
+static bool json_array_has_string(const struct json_value *array,
+                                  const char *wanted)
+{
+    if (!array || array->type != JSON_ARR || !wanted) return false;
+    for (size_t i = 0; i < array->num_children; i++) {
+        const char *value = json_get_str(&array->children[i]);
+        if (value && strcmp(value, wanted) == 0) return true;
+    }
+    return false;
+}
+
+static int test_code_room_command_feature(void)
+{
+    int failures = 0;
+    TEST("code_room: command feature root joins exact handlers and proof surface") {
+        system("rm -rf " CI_IMPACT_FIX);
+        ASSERT(write_ci_impact_fixture());
+        struct zcl_command_reply incomplete;
+        ci_room_call("app.messaging", CI_IMPACT_FIX, &incomplete);
+        ASSERT(json_get_int(json_get(&incomplete.data,
+                                     "handler_unindexed")) > 0);
+        ASSERT(!json_get_bool(json_get(
+            &incomplete.data, "shared_handler_file_command_count_complete")));
+        zcl_command_reply_free(&incomplete);
+        system("rm -rf " CI_IMPACT_FIX);
+
+        static const char *const roots[] = {
+            "core.wallet", "app.names", "app.market", "app.messaging",
+            "zcode.commons", "zcode.package.dev",
+        };
+        for (size_t i = 0; i < sizeof(roots) / sizeof(roots[0]); i++) {
+            struct zcl_command_reply root_reply;
+            ci_room_call(roots[i], ".", &root_reply);
+            ASSERT(root_reply.status != ZCL_COMMAND_STATUS_FAILED);
+            ASSERT(json_get_bool(json_get(&root_reply.data, "found")));
+            ASSERT_STR_EQ(json_get_str(json_get(&root_reply.data, "room_kind")),
+                          "command_feature");
+            ASSERT(json_get_int(json_get(&root_reply.data, "command_count")) >
+                   1);
+            char root_buf[ZCL_COMMAND_LIST_BUDGET + 1];
+            size_t root_n = json_write(&root_reply.data, root_buf,
+                                       sizeof(root_buf));
+            ASSERT(root_n > 0 && root_n <= ZCL_COMMAND_LIST_BUDGET);
+            zcl_command_reply_free(&root_reply);
+        }
+
+        struct zcl_command_reply reply;
+        ci_room_call("app.messaging", ".", &reply);
+
+        ASSERT(reply.status != ZCL_COMMAND_STATUS_FAILED);
+        ASSERT(json_get_bool(json_get(&reply.data, "found")));
+        ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "room_kind")),
+                      "command_feature");
+        ASSERT(json_get_int(json_get(&reply.data, "command_count")) == 5);
+        ASSERT(json_array_has_string(json_get(&reply.data, "commands"),
+                                     "app.messaging.send"));
+        ASSERT(json_array_has_string(json_get(&reply.data, "commands"),
+                                     "app.messaging.send-named"));
+        ASSERT(json_array_has_string(
+            json_get(&reply.data, "handler_symbols"),
+            "zcl_native_handle_message_send"));
+        ASSERT(json_array_has_string(
+            json_get(&reply.data, "implementation_files"),
+            "app/controllers/src/app_write_native_handlers.c"));
+        ASSERT(json_array_has_string(
+            json_get(&reply.data, "implementation_groups"),
+            "app/controllers"));
+        ASSERT(json_get_bool(json_get(&reply.data,
+                                      "implementation_complete")));
+        ASSERT(json_get_int(json_get(
+            &reply.data, "shared_handler_file_command_count")) > 0);
+        ASSERT(json_get(&reply.data, "test_groups") != NULL);
+        ASSERT(strstr(json_get_str(json_get(&reply.data, "implementation_scope")),
+                      "UNKNOWN") != NULL);
+
+        char buf[ZCL_COMMAND_LIST_BUDGET + 1];
+        size_t n = json_write(&reply.data, buf, sizeof(buf));
+        ASSERT(n > 0 && n <= ZCL_COMMAND_LIST_BUDGET);
+        zcl_command_reply_free(&reply);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_code_guide(void)
 {
     int failures = 0;
@@ -352,6 +439,7 @@ int test_code_impact(void)
     failures += test_code_impact_missing_path();
     failures += test_code_impact_unknown_path();
     failures += test_code_room_route_storage();
+    failures += test_code_room_command_feature();
     failures += test_code_guide();
     return failures;
 }
