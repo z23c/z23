@@ -2474,11 +2474,15 @@ bool msg_send_messages(void *ctx, struct p2p_node *node, bool send_trickle)
         bool header_frontier_at_peer_tip =
             node->starting_height > 0 &&
             best_header_height >= node->starting_height - 144;
+        int64_t last_body_time = 0;
+        dl_peer_body_staleness(get_download_mgr(), (uint32_t)node->id,
+                               NULL, NULL, &last_body_time);
 
         /* ── Rule A: per-peer stale header disconnect (IBD only) ── */
         if (!mp_swarm_is_active() && !stall_peer_trusted &&
             syncsvc_should_disconnect_stale_header_peer(node, our_height,
                                                         best_header_height,
+                                                        last_body_time,
                                                         now_send)) {
             int64_t last_useful = atomic_load_explicit(
                 &node->last_useful_headers_time, memory_order_relaxed);

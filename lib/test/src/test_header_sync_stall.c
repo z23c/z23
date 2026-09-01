@@ -119,10 +119,10 @@ int test_header_sync_stall(void)
         struct p2p_node n = make_stall_node(10000, false, 1000);
         /* 119s: not yet */
         bool at_119 = syncsvc_should_disconnect_stale_header_peer(
-            &n, 100, 100, 1119);
+            &n, 100, 100, 0, 1119);
         /* 120s: fire */
         bool at_120 = syncsvc_should_disconnect_stale_header_peer(
-            &n, 100, 100, 1120);
+            &n, 100, 100, 0, 1120);
         bool ok = !at_119 && at_120;
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
@@ -134,7 +134,7 @@ int test_header_sync_stall(void)
         n.last_useful_headers_time = 1050;
         n.total_headers_delivered = 100;
         bool ok = !syncsvc_should_disconnect_stale_header_peer(
-            &n, 100, 100, 1100);
+            &n, 100, 100, 0, 1100);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
 
@@ -144,7 +144,7 @@ int test_header_sync_stall(void)
         struct p2p_node n = make_stall_node(1000, false, 1000);
         /* height 900 = within 144 of starting_height, not IBD */
         bool ok = !syncsvc_should_disconnect_stale_header_peer(
-            &n, 900, 900, 9999);
+            &n, 900, 900, 0, 9999);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
 
@@ -162,12 +162,12 @@ int test_header_sync_stall(void)
         struct p2p_node n = make_stall_node(10000, false, 1000);
         /* Arbitrarily stale (now=99999, ref=1000) — parity still wins. */
         bool at_parity = syncsvc_should_disconnect_stale_header_peer(
-            &n, 100, 10000, 99999);
+            &n, 100, 10000, 0, 99999);
         bool at_boundary = syncsvc_should_disconnect_stale_header_peer(
-            &n, 100, 10000 - 144, 99999);
+            &n, 100, 10000 - 144, 0, 99999);
         /* One below the boundary the rule is armed again. */
         bool below_boundary = syncsvc_should_disconnect_stale_header_peer(
-            &n, 100, 10000 - 145, 99999);
+            &n, 100, 10000 - 145, 0, 99999);
         bool ok = !at_parity && !at_boundary && below_boundary;
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
@@ -181,7 +181,24 @@ int test_header_sync_stall(void)
     {
         struct p2p_node n = make_stall_node(10000, false, 1000);
         bool ok = syncsvc_should_disconnect_stale_header_peer(
-            &n, 100, 5000, 1120);
+            &n, 100, 5000, 0, 1120);
+        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
+    }
+
+    /* A peer can be stale for header purposes while productively serving
+     * already-known bodies. Header accounting must not churn that source;
+     * once its body timestamp reaches the body-stall boundary, the existing
+     * body rules own the failover decision. */
+    printf("header_sync_stall: recent body source survives header stall... ");
+    {
+        struct p2p_node n = make_stall_node(10000, false, 1000);
+        bool recent = syncsvc_should_disconnect_stale_header_peer(
+            &n, 100, 5000, 1119, 1120);
+        bool boundary = syncsvc_should_disconnect_stale_header_peer(
+            &n, 100, 5000, 1000, 1120);
+        bool future_clock = syncsvc_should_disconnect_stale_header_peer(
+            &n, 100, 5000, 1200, 1120);
+        bool ok = !recent && boundary && !future_clock;
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
 
@@ -202,7 +219,7 @@ int test_header_sync_stall(void)
         net_addr_set_ipv4(&n.addr.svc.addr, lo);
         /* (a) the rule fires — trust-agnostic by design. */
         bool rule_fires = syncsvc_should_disconnect_stale_header_peer(
-            &n, 100, 100, 99999);
+            &n, 100, 100, 0, 99999);
         /* (b) the guard input classifies loopback as local. */
         bool is_local = net_addr_is_local(&n.addr.svc.addr);
         /* Composed decision exactly as written at the call site. */
@@ -225,7 +242,7 @@ int test_header_sync_stall(void)
         net_addr_set_ipv4(&n.addr.svc.addr, remote);
         bool is_local = net_addr_is_local(&n.addr.svc.addr);
         bool rule_fires = syncsvc_should_disconnect_stale_header_peer(
-            &n, 100, 100, 99999);
+            &n, 100, 100, 0, 99999);
         /* Whitelisted: composed call-site decision exempts. */
         n.whitelisted = true;
         bool wl_disconnects =

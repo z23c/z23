@@ -371,10 +371,13 @@ bool syncsvc_should_fire_reject_probe(const struct p2p_node *node,
 /* Returns false (keep the peer) when best_header_height has reached
  * the peer's handshake-claimed tip minus 144 — at frontier parity no
  * peer can deliver "useful" headers faster than block cadence, so the
- * stale-disconnect would be pure churn. */
+ * stale-disconnect would be pure churn. A peer that delivered a body within
+ * the body-stall window is also useful during deep IBD and remains owned by
+ * the body-stall rules instead of being churned by header-only accounting. */
 bool syncsvc_should_disconnect_stale_header_peer(const struct p2p_node *node,
                                                   int our_height,
                                                   int best_header_height,
+                                                  int64_t last_body_time,
                                                   int64_t now_seconds);
 
 /* Body-download stall discipline (the sibling of the header-stall rules).
