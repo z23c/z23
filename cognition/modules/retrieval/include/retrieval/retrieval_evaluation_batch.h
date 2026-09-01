@@ -45,6 +45,17 @@ enum zcl_retrieval_experiment_error zcl_retrieval_evaluation_workload_root(
     const uint8_t retrieval_projection_root[32],
     uint8_t out[32]);
 
+/* Construct the ordered runtime pair identity from one exact workload and its
+ * future parent/child arm roots. This authenticates no arm provenance,
+ * chronology, evaluator correctness, outcome, or authority. All input roots
+ * must be nonzero; out is unchanged on error and may not alias an input. */
+enum zcl_retrieval_experiment_error
+zcl_retrieval_paired_evaluation_input_root(
+    const uint8_t workload_root[32],
+    const uint8_t parent_arm_root[32],
+    const uint8_t child_arm_root[32],
+    uint8_t out[32]);
+
 /* Caller order is exact identity for tasks, relevant paths, and rankings.
  * Task ids, relevant paths within a task, and ranked paths within an arm must
  * each be unique; no sorting, deduplication, or normalization is performed. */

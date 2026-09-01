@@ -3,6 +3,7 @@
 #ifndef ZCL_RETRIEVAL_COMPARISON_H
 #define ZCL_RETRIEVAL_COMPARISON_H
 
+#include "retrieval/retrieval_evaluation_batch.h"
 #include "retrieval/retrieval_experiment.h"
 
 #include <stddef.h>
@@ -12,6 +13,10 @@
 #define ZCL_RETRIEVAL_COMPARISON_POLICY_WIRE_BYTES 88u
 #define ZCL_RETRIEVAL_COMPARISON_POLICY_DOMAIN \
     "zcl.retrieval_comparison_policy.v1"
+#define ZCL_RETRIEVAL_COMPARISON_POLICY_V2_VERSION 2u
+#define ZCL_RETRIEVAL_COMPARISON_POLICY_V2_WIRE_BYTES 88u
+#define ZCL_RETRIEVAL_COMPARISON_POLICY_V2_DOMAIN \
+    "zcl.retrieval_comparison_policy.v2"
 
 #define ZCL_RETRIEVAL_COMPARISON_GUARDS_ALL \
     ((uint16_t)(ZCL_RETRIEVAL_EVAL_RESULT_TOP20_PRESERVED | \
@@ -44,6 +49,10 @@ enum zcl_retrieval_comparison_status {
     ZCL_RETRIEVAL_COMPARISON_INCOMPLETE = 3,
 };
 
+enum zcl_retrieval_comparison_evaluation_kind {
+    ZCL_RETRIEVAL_COMPARISON_DERIVED_PROFILE_PAIRED_V1 = 1,
+};
+
 enum zcl_retrieval_comparison_error {
     ZCL_RETRIEVAL_COMPARISON_OK = 0,
     ZCL_RETRIEVAL_COMPARISON_NULL,
@@ -74,6 +83,25 @@ struct zcl_retrieval_comparison_policy_v1 {
     uint8_t evaluator_root[32];
 };
 
+/* Frozen before either derived-profile arm is observed. workload_root binds
+ * only the preregisterable paired workload; the future ordered arm identity is
+ * supplied separately to observe_v2. evaluation_kind identifies the sole
+ * adapter whose paired metrics this version accepts. It establishes no
+ * chronology, provenance, hidden-gold property, independence, evaluator
+ * correctness, replication, attention, lifecycle, or authority. */
+struct zcl_retrieval_comparison_policy_v2 {
+    uint16_t schema_version;
+    uint8_t metric;
+    uint8_t direction;
+    uint16_t required_guards;
+    uint16_t evaluation_kind;
+    uint16_t threshold_bp;
+    uint16_t reserved_threshold;
+    uint32_t expected_tasks;
+    uint8_t workload_root[32];
+    uint8_t evaluator_root[32];
+};
+
 /* Caller-owned expected identities. These are not accepted from the result
  * being checked. "parent" and "child" are labels only in this module: this
  * object proves no heuristic lineage or ancestry. */
@@ -95,6 +123,12 @@ struct zcl_retrieval_comparison_report {
     uint8_t child_result_root[32];
 };
 
+struct zcl_retrieval_comparison_report_v2 {
+    struct zcl_retrieval_comparison_report observation;
+    uint8_t workload_root[32];
+    uint8_t evaluation_input_root[32];
+};
+
 enum zcl_retrieval_comparison_error
 zcl_retrieval_comparison_policy_validate(
     const struct zcl_retrieval_comparison_policy_v1 *policy);
@@ -111,6 +145,22 @@ zcl_retrieval_comparison_policy_root(
     const struct zcl_retrieval_comparison_policy_v1 *policy,
     uint8_t out[32]);
 
+enum zcl_retrieval_comparison_error
+zcl_retrieval_comparison_policy_v2_validate(
+    const struct zcl_retrieval_comparison_policy_v2 *policy);
+enum zcl_retrieval_comparison_error
+zcl_retrieval_comparison_policy_v2_serialize(
+    const struct zcl_retrieval_comparison_policy_v2 *policy,
+    uint8_t out[ZCL_RETRIEVAL_COMPARISON_POLICY_V2_WIRE_BYTES]);
+enum zcl_retrieval_comparison_error
+zcl_retrieval_comparison_policy_v2_parse(
+    const uint8_t *wire, size_t wire_len,
+    struct zcl_retrieval_comparison_policy_v2 *out);
+enum zcl_retrieval_comparison_error
+zcl_retrieval_comparison_policy_v2_root(
+    const struct zcl_retrieval_comparison_policy_v2 *policy,
+    uint8_t out[32]);
+
 /* Pure observational fold over two existing immutable result objects. Required
  * guards apply to the child observation. Missing selected metrics yield
  * INCOMPLETE; a failed required guard is a known NOT_SATISFIED observation.
@@ -123,6 +173,24 @@ enum zcl_retrieval_comparison_error zcl_retrieval_comparison_observe(
     const struct zcl_retrieval_experiment_eval_result_v1 *child,
     const struct zcl_retrieval_comparison_arm_binding *child_binding,
     struct zcl_retrieval_comparison_report *report);
+
+/* Bind a v2 workload policy to one computed paired observation and to two
+ * immutable result objects before applying the same arithmetic as v1. Every
+ * paired metric, availability bit, selected-file count, scope count, and
+ * context-byte total must equal its result field. Guard bits remain
+ * result-owned: the paired evaluator does not establish them, and only the
+ * derived-profile adapter that observes those facts may set them. Malformed or
+ * misbound input is a hard error and leaves report unchanged. */
+enum zcl_retrieval_comparison_error zcl_retrieval_comparison_observe_v2(
+    const struct zcl_retrieval_comparison_policy_v2 *policy,
+    const uint8_t expected_policy_root[32],
+    const struct zcl_retrieval_paired_evaluation_report_v1 *paired,
+    const uint8_t expected_evaluation_input_root[32],
+    const struct zcl_retrieval_experiment_eval_result_v1 *parent,
+    const struct zcl_retrieval_comparison_arm_binding *parent_binding,
+    const struct zcl_retrieval_experiment_eval_result_v1 *child,
+    const struct zcl_retrieval_comparison_arm_binding *child_binding,
+    struct zcl_retrieval_comparison_report_v2 *report);
 
 const char *zcl_retrieval_comparison_error_string(
     enum zcl_retrieval_comparison_error error);

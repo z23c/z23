@@ -719,6 +719,14 @@ ZCL_TEST_GROUP(retrieval_paired_evaluation)
  * preservation guards remain distinct; the verdict grants no lifecycle,
  * replication, attention, or activation authority. */
 ZCL_TEST_GROUP(retrieval_comparison)
+/* Workload-preregistered comparison v2 binds the exact later paired result,
+ * both immutable observations, and every maintained evaluator metric without
+ * changing or accepting the post-arm v1 policy format. */
+ZCL_TEST_GROUP(retrieval_comparison_v2)
+/* Derived profile-pair measurement admits no caller ranking, metric, guard,
+ * result, or verdict: it projects both arms from one exact snapshot, evaluates
+ * them, and joins the result to the preregistered workload policy. */
+ZCL_TEST_GROUP(retrieval_profile_pair_measure)
 /* The profile-comparison service joins that arithmetic to one exact immediate
  * SPECIALIZE edge, frozen task/source/study/preregistration/evaluator roots,
  * and each heuristic's exact proposal and observation roots. */

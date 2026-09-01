@@ -513,6 +513,35 @@ static int case_root_only_workload(void)
         memcmp(&reachable, &reachable_before, sizeof(reachable)) == 0;
     PE_CHECK("root-only direct and reachable aliases refuse atomically",
              direct_alias && reachable_alias);
+
+    union pe_workload_hostile_alias {
+        uint8_t out[32];
+        const char *pointer_table[4];
+    } hostile, hostile_before;
+    bool hostile_aliases = true;
+    for (size_t mutation = 0; mutation < 4u && hostile_aliases; mutation++) {
+        memset(&hostile, 0xa5, sizeof(hostile));
+        hostile_before = hostile;
+        memcpy(tasks, base, sizeof(tasks));
+        const char *relevance[2] = {
+            fixture.alpha_relevant[0], fixture.alpha_relevant[1]};
+        switch (mutation) {
+        case 0: tasks[0].task_id = (const char *)hostile.out; break;
+        case 1: tasks[0].query = (const char *)hostile.out; break;
+        case 2:
+            relevance[0] = (const char *)hostile.out;
+            tasks[0].relevant_paths = relevance;
+            break;
+        default: tasks[0].relevant_paths = hostile.pointer_table; break;
+        }
+        hostile_aliases = zcl_retrieval_evaluation_workload_root(
+                tasks, 2u, fixture.task_root, fixture.source_root,
+                fixture.projection_root, hostile.out) ==
+                ZCL_RETRIEVAL_EXPERIMENT_ALIAS &&
+            memcmp(&hostile, &hostile_before, sizeof(hostile)) == 0;
+    }
+    PE_CHECK("root-only hostile text and pointer-table aliases preflight",
+             hostile_aliases);
     return failures;
 }
 
@@ -733,6 +762,48 @@ static int case_alias_refusals(void)
         memcmp(&reachable, &reachable_before, sizeof(reachable)) == 0;
     PE_CHECK("direct and reachable input aliases refuse without mutation",
              direct_alias && reachable_alias);
+
+    union pe_hostile_alias {
+        struct zcl_retrieval_paired_evaluation_report_v1 report;
+        const char *pointer_table[4];
+        uint8_t bytes[sizeof(
+            struct zcl_retrieval_paired_evaluation_report_v1)];
+    } hostile, hostile_before;
+    bool hostile_aliases = true;
+    for (size_t mutation = 0; mutation < 6u && hostile_aliases; mutation++) {
+        memset(&hostile, 0xa5, sizeof(hostile));
+        hostile_before = hostile;
+        memcpy(tasks, fixture.tasks, sizeof(tasks));
+        const char *relevance[2] = {
+            fixture.alpha_relevant[0], fixture.alpha_relevant[1]};
+        struct zcl_retrieval_ranked_file parent_rows[3], child_rows[3];
+        memcpy(parent_rows, fixture.parent[0], sizeof(parent_rows));
+        memcpy(child_rows, fixture.child[0], sizeof(child_rows));
+        switch (mutation) {
+        case 0: tasks[0].task_id = (const char *)hostile.bytes; break;
+        case 1: tasks[0].query = (const char *)hostile.bytes; break;
+        case 2:
+            relevance[0] = (const char *)hostile.bytes;
+            tasks[0].relevant_paths = relevance;
+            break;
+        case 3:
+            parent_rows[0].path = (const char *)hostile.bytes;
+            tasks[0].parent_ranked = parent_rows;
+            break;
+        case 4:
+            child_rows[0].path = (const char *)hostile.bytes;
+            tasks[0].child_ranked = child_rows;
+            break;
+        default: tasks[0].relevant_paths = hostile.pointer_table; break;
+        }
+        hostile_aliases = zcl_retrieval_paired_evaluate(
+                tasks, 2u, fixture.task_root, fixture.source_root,
+                fixture.projection_root, &hostile.report) ==
+                ZCL_RETRIEVAL_EXPERIMENT_ALIAS &&
+            memcmp(&hostile, &hostile_before, sizeof(hostile)) == 0;
+    }
+    PE_CHECK("hostile text path and pointer-table aliases preflight",
+             hostile_aliases);
     return failures;
 }
 
