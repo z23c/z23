@@ -1206,6 +1206,7 @@ add/remove a gate.
 - `check-git-hooks-installed`
 - `check-group-purpose`
 - `check-architecture-tree`
+- `check-retrieval-historical-evidence`
 - `check-honest-witness`
 - `check-lag-slo-observable`
 - `check-lib-layering`

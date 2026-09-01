@@ -169,6 +169,8 @@ lint_cache_never_reason() {
             echo "runs a built binary that scans git history via merge-base/diff" ;;
         check-determinism-ratchet)
             echo "reads git history (the baseline as of the merge-base with origin/main) and the built determinism_scan, so its verdict depends on state no tree hash covers" ;;
+        check-retrieval-historical-evidence)
+            echo "replays pinned Git epochs with built jsonq, agent_sha3, and retrieval-eval binaries, so its verdict depends on history and build state no tree hash covers" ;;
         check-cookbook)
             echo "runs the built z23-dev binary and executes each recipe against it, so its verdict depends on a binary no tree hash covers" ;;
         check-core-seal)

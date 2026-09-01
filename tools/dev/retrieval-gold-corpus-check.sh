@@ -209,13 +209,13 @@ check_paths() {
     case "$id" in
         private_object_grant_encryption_order)
             [[ $count -eq 1 &&
-               $(field "$row" 'expected_new_paths[0]') = tests/harness/src/test_mesh_private_object_grant_pipeline.c ]] ||
+               $(field "$row" 'expected_new_paths[0]') = lib/test/src/test_mesh_private_object_grant_pipeline.c ]] ||
                 fail "task $id differs from the reviewed new-path KAT" || return 1 ;;
         mesh_capability_cancel_restart)
             [[ $count -eq 3 &&
-               $(field "$row" 'expected_new_paths[0]') = cognition/modules/session/include/session/mesh_capability_proto.h &&
-               $(field "$row" 'expected_new_paths[1]') = cognition/modules/session/src/mesh_capability_proto.c &&
-               $(field "$row" 'expected_new_paths[2]') = tests/harness/src/test_mesh_capability_proto.c ]] ||
+               $(field "$row" 'expected_new_paths[0]') = lib/session/include/session/mesh_capability_proto.h &&
+               $(field "$row" 'expected_new_paths[1]') = lib/session/src/mesh_capability_proto.c &&
+               $(field "$row" 'expected_new_paths[2]') = lib/test/src/test_mesh_capability_proto.c ]] ||
                 fail "task $id differs from the reviewed new-path KAT" || return 1 ;;
         *) ((count == 0)) ||
             fail "task $id unexpectedly declares new paths" || return 1 ;;
@@ -314,7 +314,7 @@ selftest() {
     if ZCL_RETRIEVAL_GOLD_CORPUS="$bad" "$0" --check >/dev/null 2>&1; then
         fail "accepted false parent" || return 1
     fi
-    bad="$tmp/path"; sed '0,/tiny_lines.c/s#tests/harness/fixtures#./tests/harness/fixtures#' "$canonical_corpus" >"$bad"
+    bad="$tmp/path"; sed '0,/tiny_lines.c/s#lib/test/fixtures#./lib/test/fixtures#' "$canonical_corpus" >"$bad"
     if ZCL_RETRIEVAL_GOLD_CORPUS="$bad" "$0" --check >/dev/null 2>&1; then
         fail "accepted non-canonical path" || return 1
     fi
@@ -330,7 +330,7 @@ selftest() {
     if ZCL_RETRIEVAL_GOLD_CORPUS="$bad" "$0" --check >/dev/null 2>&1; then
         fail "accepted changed corpus_id" || return 1
     fi
-    bad="$tmp/deleted-relevance"; awk '{ sub(",\"tests/harness/fixtures/zcode/tiny-lines/tests/test_tiny_lines.c\"", ""); print }' "$canonical_corpus" >"$bad"
+    bad="$tmp/deleted-relevance"; awk '{ sub(",\"lib/test/fixtures/zcode/tiny-lines/tests/test_tiny_lines.c\"", ""); print }' "$canonical_corpus" >"$bad"
     if ZCL_RETRIEVAL_GOLD_CORPUS="$bad" "$0" --check >/dev/null 2>&1; then
         fail "accepted deleted relevant path" || return 1
     fi

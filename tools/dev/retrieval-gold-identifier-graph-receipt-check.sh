@@ -16,7 +16,7 @@ readonly empty_sha3=a7ffc6f8bf1ed76651c14756a061d662f580ff4de43b49fa82d80a4b80f8
 readonly corpus_path=docs/work/RETRIEVAL_GOLD_CORPUS.jsonl
 readonly runner_path=tools/dev/retrieval-gold-benchmark.sh
 readonly corpus_checker_path=tools/dev/retrieval-gold-corpus-check.sh
-readonly group_source_path=cognition/modules/codeindex/src/codeindex_group.c
+readonly group_source_path=lib/codeindex/src/codeindex_group.c
 readonly group_source_sha3=346e4747ce682533e9812d5fd9063ae8e82a9281fdf0b2a82bc869379ba58bc9
 jsonq=${ZCL_JSONQ:-$repo_root/build/bin/jsonq}
 sha3=${ZCL_AGENT_SHA3:-$repo_root/build/bin/agent_sha3}
@@ -249,9 +249,9 @@ group_for_path() {
         core/*) printf 'core' ;;
         config/*) printf 'config' ;;
         tools/*) printf 'tools' ;;
-        platform/adapters/*) printf 'adapters' ;;
-        platform/ports/*) printf 'ports' ;;
-        engine/application/*) printf 'application' ;;
+        adapters/*) printf 'adapters' ;;
+        ports/*) printf 'ports' ;;
+        application/*) printf 'application' ;;
         *) printf 'root' ;;
     esac
 }
@@ -833,9 +833,9 @@ selftest() {
     for ((i = 1; i <= 21; i++)); do
         bytes=10; ((i == 6)) && bytes=100
         if ((i % 2)); then
-            in_scope=1; path=$(printf 'core/modules/net/file-%02d.c' "$i")
+            in_scope=1; path=$(printf 'lib/net/file-%02d.c' "$i")
         else
-            in_scope=0; path=$(printf 'tests/harness/include/test/file-%02d.c' "$i")
+            in_scope=0; path=$(printf 'lib/test/file-%02d.c' "$i")
         fi
         available=1
         if ((i > 5)); then available=0; in_scope=0; fi
@@ -862,7 +862,7 @@ selftest() {
     fi
     mutations=$((mutations + 1))
     bad="$tmp/graph-top20.tsv"
-    awk -F '\t' 'BEGIN { OFS="\t" } $1 == 20 { p=$5; $5="core/modules/net/file-21.c" }
+    awk -F '\t' 'BEGIN { OFS="\t" } $1 == 20 { p=$5; $5="lib/net/file-21.c" }
         $1 == 21 { $5=p } { print }' "$graph_tsv" >"$bad"
     if (validate_graph_rank_contract "$base_tsv" "$bad" top20 \
         false false 21 21 50 50 1 0 false none true >/dev/null 2>&1); then
@@ -870,7 +870,7 @@ selftest() {
     fi
     mutations=$((mutations + 1))
     bad="$tmp/graph-context.tsv"
-    awk -F '\t' 'BEGIN { OFS="\t" } $1 == 5 { p=$5; b=$2; s=$4; $5="tests/harness/include/test/file-06.c"; $2=100; $4=0 }
+    awk -F '\t' 'BEGIN { OFS="\t" } $1 == 5 { p=$5; b=$2; s=$4; $5="lib/test/file-06.c"; $2=100; $4=0 }
         $1 == 6 { $5=p; $2=b; $4=s } { print }' "$graph_tsv" >"$bad"
     if (validate_graph_rank_contract "$base_tsv" "$bad" context \
         false false 21 21 50 140 1 0 false none true >/dev/null 2>&1); then

@@ -6664,6 +6664,15 @@ $(RETRIEVAL_EVAL_BIN): tools/retrieval_eval.c \
     retrieval-gold-benchmark-publishable-capture retrieval-gold-receipt-check \
     retrieval-gold-current-receipt-check retrieval-gold-scope-receipt-check \
     retrieval-gold-identifier-graph-receipt-check retrieval-prefix-sweep-check
+
+# Frozen retrieval evidence names paths in its exact historical source epoch.
+# Replaying both joins prevents a present-tree relocation from rewriting those
+# coordinates or the historical classifier that interprets them.
+.PHONY: check-retrieval-historical-evidence
+check-retrieval-historical-evidence: jsonq agent-sha3 retrieval-eval
+	@./tools/dev/retrieval-gold-corpus-check.sh --check
+	@./tools/dev/retrieval-gold-identifier-graph-receipt-check.sh --check
+
 retrieval-eval-selftest: retrieval-eval jsonq
 	@./tools/dev/retrieval-eval-selftest.sh
 
@@ -12323,6 +12332,7 @@ LINT_GATES := \
     check-file-purpose \
     check-group-purpose \
     check-architecture-tree \
+    check-retrieval-historical-evidence \
     check-no-orphan-placement \
     check-file-size-ceiling \
     check-operator-needed-sink \
@@ -12417,7 +12427,7 @@ LINT_GATES := \
 LINT_BUILT_PREREQS = tools/core_seal tools/check_observability_pairing \
 	$(ZCODE_PACKAGE_REGISTRY_CHECK_BIN) $(JSONQ_BIN) \
 	$(FILE_SIZE_POLICY_BIN) $(Z23_BOOTSTRAP_BIN) $(EQUIHASH_FACT_TOOL) \
-	$(BIN_DIR)/z23_bounded_run
+	$(BIN_DIR)/z23_bounded_run $(BIN_DIR)/agent_sha3 $(RETRIEVAL_EVAL_BIN)
 lint lint-cached lint-cold-audit: $(ZCLASSIC23_DEV_BIN) \
 	$(DEV_PACKAGE_VERIFY_BIN) $(LINT_BUILT_PREREQS)
 
