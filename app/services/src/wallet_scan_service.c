@@ -28,7 +28,7 @@
 #include "primitives/transaction.h"
 #include "validation/chainstate.h"
 #include "core/serialize.h"
-#include "controllers/scan_util.h"
+#include "services/scan_util.h"
 #include "views/format_helpers.h"
 #include "util/log_macros.h"
 #include "util/safe_alloc.h"
@@ -63,9 +63,9 @@ static uint8_t *ser_tx(const struct transaction *tx, size_t *len)
 
 /* Process a single block: check outputs for ownership, inputs for spends */
 static bool scan_block_txs(const struct block *blk, int height,
-                            const struct addr_ht *ht,
-                            struct utxo_set *uset,
-                            struct wtx_list *wl)
+                            const struct scan_addr_ht *ht,
+                            struct scan_utxo_set *uset,
+                            struct scan_wtx_list *wl)
 {
     bool any_found = false;
 
@@ -76,13 +76,13 @@ static bool scan_block_txs(const struct block *blk, int height,
 
         for (size_t vi = 0; vi < tx->num_vout; vi++) {
             uint8_t ah[20];
-            if (!extract_addr(tx->vout[vi].script_pub_key.data,
+            if (!scan_extract_addr(tx->vout[vi].script_pub_key.data,
                               tx->vout[vi].script_pub_key.size, ah))
                 continue;
-            if (!aht_has(ht, ah)) continue;
+            if (!scan_aht_has(ht, ah)) continue;
 
             is_ours = true;
-            struct mem_utxo u;
+            struct scan_mem_utxo u;
             memset(&u, 0, sizeof(u));
             memcpy(u.txid, tx->hash.data, 32);
             u.vout = (uint32_t)vi;
@@ -94,12 +94,12 @@ static bool scan_block_txs(const struct block *blk, int height,
             u.script_len = (uint8_t)sl;
             u.height = height;
             u.is_coinbase = (ti == 0);
-            uset_add(uset, &u);
+            scan_uset_add(uset, &u);
         }
 
         if (ti > 0) {
             for (size_t vi = 0; vi < tx->num_vin; vi++) {
-                int ui = uset_find(uset,
+                int ui = scan_uset_find(uset,
                     tx->vin[vi].prevout.hash.data,
                     tx->vin[vi].prevout.n);
                 if (ui >= 0) {
@@ -116,7 +116,7 @@ static bool scan_block_txs(const struct block *blk, int height,
 
         if (is_ours) {
             any_found = true;
-            struct mem_wtx wt;
+            struct scan_mem_wtx wt;
             memset(&wt, 0, sizeof(wt));
             memcpy(wt.txid, tx->hash.data, 32);
             wt.raw = ser_tx(tx, &wt.raw_len);
@@ -127,7 +127,7 @@ static bool scan_block_txs(const struct block *blk, int height,
                 int64_t vout_total = transaction_get_value_out(tx);
                 wt.fee = debit > vout_total ? debit - vout_total : 0;
             }
-            wl_add(wl, &wt);
+            scan_wl_add(wl, &wt);
         }
     }
     return any_found;
@@ -138,8 +138,8 @@ static bool scan_block_txs(const struct block *blk, int height,
  * populated result, so Controllers never need table knowledge or a second
  * commit/rollback policy. */
 static int wallet_scan_store_results(struct node_db *ndb,
-                                     struct utxo_set *uset,
-                                     struct wtx_list *wl)
+                                     struct scan_utxo_set *uset,
+                                     struct scan_wtx_list *wl)
 {
     bool write_tx_open = false;
 
@@ -156,7 +156,7 @@ static int wallet_scan_store_results(struct node_db *ndb,
     }
 
     for (int i = 0; i < uset->count; i++) {
-        struct mem_utxo *u = &uset->items[i];
+        struct scan_mem_utxo *u = &uset->items[i];
         struct db_wallet_utxo du;
         memset(&du, 0, sizeof(du));
         memcpy(du.txid, u->txid, 32);
@@ -181,7 +181,7 @@ static int wallet_scan_store_results(struct node_db *ndb,
     }
 
     for (int i = 0; i < wl->count; i++) {
-        struct mem_wtx *t = &wl->items[i];
+        struct scan_mem_wtx *t = &wl->items[i];
         struct db_wallet_tx dt;
         memset(&dt, 0, sizeof(dt));
         memcpy(dt.txid, t->txid, 32);
@@ -218,7 +218,7 @@ static int wallet_scan_pass2_nonempty(struct node_db *ndb,
                                       const char *datadir,
                                       int start_height,
                                       int end_height,
-                                      const struct addr_ht *aht,
+                                      const struct scan_addr_ht *aht,
                                       const bool *file_has_match,
                                       const struct timespec *ts_start,
                                       const struct timespec *ts_p1)
@@ -226,10 +226,10 @@ static int wallet_scan_pass2_nonempty(struct node_db *ndb,
     struct timespec ts_p2;
 
     /* ========== PASS 2: Selective block deserialization ========== */
-    struct utxo_set uset;
-    uset_init(&uset);
-    struct wtx_list wl;
-    wl_init(&wl);
+    struct scan_utxo_set uset;
+    scan_uset_init(&uset);
+    struct scan_wtx_list wl;
+    scan_wl_init(&wl);
 
     /* We need to process blocks in height order for correct spend tracking.
      * Build a set of heights whose blocks are in matched files, then
@@ -327,8 +327,8 @@ static int wallet_scan_pass2_nonempty(struct node_db *ndb,
     int result = wallet_scan_store_results(ndb, &uset, &wl);
 
     /* Cleanup */
-    uset_free(&uset);
-    wl_free(&wl);
+    scan_uset_free(&uset);
+    scan_wl_free(&wl);
 
     return result;
 }
@@ -338,7 +338,7 @@ int wallet_scan_pass2_execute(struct node_db *ndb,
                               const char *datadir,
                               int start_height,
                               int end_height,
-                              const struct addr_ht *aht,
+                              const struct scan_addr_ht *aht,
                               const bool *file_has_match,
                               int matched_files,
                               const struct timespec *ts_start,
@@ -351,8 +351,8 @@ int wallet_scan_pass2_execute(struct node_db *ndb,
     /* Keep the empty replacement outside the nonempty worker's large stack
      * frame and heap working sets on every compiler/profile. */
     if (matched_files == 0) {
-        struct utxo_set empty_uset = {0};
-        struct wtx_list empty_wl = {0};
+        struct scan_utxo_set empty_uset = {0};
+        struct scan_wtx_list empty_wl = {0};
         return wallet_scan_store_results(ndb, &empty_uset, &empty_wl);
     }
 

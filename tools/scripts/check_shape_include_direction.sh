@@ -45,12 +45,52 @@ cd "$(dirname "$0")/../.."
 # shellcheck source=tools/lint/scan_exclusions.sh
 source tools/lint/scan_exclusions.sh
 
-BASELINE=tools/scripts/shape_include_direction_baseline.txt
-[ -f "$BASELINE" ] || touch "$BASELINE"
+BASELINE="${ZCL_SHAPE_DIRECTION_BASELINE:-tools/scripts/shape_include_direction_baseline.txt}"
+MODELS_DIR="${ZCL_SHAPE_DIRECTION_MODELS_DIR:-app/models}"
+SERVICES_DIR="${ZCL_SHAPE_DIRECTION_SERVICES_DIR:-app/services}"
+
+if [ "${1:-}" = "--selftest" ]; then
+    fixture_root=$(mktemp -d "${TMPDIR:-/tmp}/z23-shape-direction.XXXXXX")
+    trap 'rm -rf -- "$fixture_root"' EXIT
+    fixture_models="$fixture_root/models"
+    fixture_services="$fixture_root/services"
+    fixture_baseline="$fixture_root/baseline.txt"
+    mkdir -p "$fixture_models" "$fixture_services"
+    printf '%s\n' 'int model_fixture;' > "$fixture_models/fixture.c"
+    fixture_file="$fixture_services/fixture.c"
+    printf '%s\n' '#include "controllers/fixture.h"' > "$fixture_file"
+    printf '%s\n' "$fixture_file:#include \"controllers/fixture.h\"" > "$fixture_baseline"
+    env ZCL_SHAPE_DIRECTION_BASELINE="$fixture_baseline" \
+        ZCL_SHAPE_DIRECTION_MODELS_DIR="$fixture_models" \
+        ZCL_SHAPE_DIRECTION_SERVICES_DIR="$fixture_services" \
+        "$0" >/dev/null
+    rm -f -- "$fixture_file"
+    printf '%s\n' 'int service_fixture;' > "$fixture_file"
+    if env ZCL_SHAPE_DIRECTION_BASELINE="$fixture_baseline" \
+        ZCL_SHAPE_DIRECTION_MODELS_DIR="$fixture_models" \
+        ZCL_SHAPE_DIRECTION_SERVICES_DIR="$fixture_services" \
+        "$0" >/dev/null 2>&1; then
+        echo "check_shape_include_direction selftest: stale baseline passed" >&2
+        exit 1
+    fi
+    : > "$fixture_baseline"
+    env ZCL_SHAPE_DIRECTION_BASELINE="$fixture_baseline" \
+        ZCL_SHAPE_DIRECTION_MODELS_DIR="$fixture_models" \
+        ZCL_SHAPE_DIRECTION_SERVICES_DIR="$fixture_services" \
+        "$0" >/dev/null
+    echo "check_shape_include_direction selftest: ok"
+    exit 0
+fi
+
+if [ ! -r "$BASELINE" ]; then
+    echo "check_shape_include_direction: FATAL — baseline missing: $BASELINE" >&2
+    exit 2
+fi
 
 # Read accepted violations into a hash set. Lines that start with # or
 # that are blank are ignored.
 declare -A baseline
+declare -A baseline_seen
 baseline_count=0
 while IFS= read -r line; do
     [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
@@ -65,7 +105,18 @@ new_violations=()
 # prefixes for files under that directory.
 scan_dir() {
     local dir="$1" forbidden="$2"
-    while IFS= read -r f; do
+    local -a files=()
+    if [ ! -d "$dir" ]; then
+        echo "check_shape_include_direction: FATAL — scan root missing: $dir" >&2
+        exit 2
+    fi
+    mapfile -t files < <(find "$dir" -type f \( -name '*.c' -o -name '*.h' \) \
+        ! -path '*/test/*' "${LINT_FIND_PRUNE_ARGS[@]}" | sort)
+    if [ "${#files[@]}" -eq 0 ]; then
+        echo "check_shape_include_direction: FATAL — scan root is empty: $dir" >&2
+        exit 2
+    fi
+    for f in "${files[@]}"; do
         while IFS= read -r match; do
             line_content="${match#*:}"
             # Per-line override marker: skip immediately.
@@ -82,16 +133,25 @@ scan_dir() {
             key="${f}:${include_token}"
             if [ -n "${baseline[$key]+x}" ]; then
                 # Pre-existing violation, accepted by the baseline. Continue.
+                baseline_seen["$key"]=1
                 continue
             fi
             new_violations+=("$key")
             fail=1
         done < <(grep -nE "^[[:space:]]*#include[[:space:]]+\"(${forbidden})/" "$f" || true)
-    done < <(find "$dir" -type f \( -name '*.c' -o -name '*.h' \) ! -path '*/test/*' "${LINT_FIND_PRUNE_ARGS[@]}")
+    done
 }
 
-scan_dir app/models   "services|controllers"
-scan_dir app/services "controllers"
+scan_dir "$MODELS_DIR"   "services|controllers"
+scan_dir "$SERVICES_DIR" "controllers"
+
+stale_baseline=()
+for key in "${!baseline[@]}"; do
+    if [ -z "${baseline_seen[$key]+x}" ]; then
+        stale_baseline+=("$key")
+        fail=1
+    fi
+done
 
 if [ "$fail" = "0" ]; then
     echo "check_shape_include_direction: clean — ${baseline_count} baselined (pre-existing), no NEW upward shape includes"
@@ -104,6 +164,14 @@ echo ""
 for v in "${new_violations[@]}"; do
     echo "  $v"
 done
+if [ "${#stale_baseline[@]}" -gt 0 ]; then
+    echo ""
+    echo "check_shape_include_direction: ${#stale_baseline[@]} stale baseline entry/entries"
+    for v in "${stale_baseline[@]}"; do
+        echo "  $v"
+    done
+    echo "Remove stale entries now; leaving them would let deleted debt return."
+fi
 echo ""
 echo "Fix options (RATCHET gate — new debt is never accepted):"
 echo "  1. Delete the include if it's unused (the symbol may already come from elsewhere)."

@@ -8,8 +8,8 @@
  * wtx_list:  Dynamic array of wallet transactions
  * extract_addr: Script → address hash extractor */
 
-#ifndef ZCL_CONTROLLERS_SCAN_UTIL_H
-#define ZCL_CONTROLLERS_SCAN_UTIL_H
+#ifndef ZCL_SERVICES_SCAN_UTIL_H
+#define ZCL_SERVICES_SCAN_UTIL_H
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -229,32 +229,4 @@ static inline bool scan_extract_addr(const uint8_t *s, size_t len, uint8_t h[20]
     return false;
 }
 
-/* ── Backward-compat aliases (old code used short names) ───── */
-
-#define addr_entry     scan_addr_entry
-#define addr_ht        scan_addr_ht
-#define mem_utxo       scan_mem_utxo
-#define utxo_ht_entry  scan_utxo_ht_entry
-#define utxo_set       scan_utxo_set
-#define mem_wtx        scan_mem_wtx
-#define wtx_list       scan_wtx_list
-
-#define ADDR_HT_BUCKETS SCAN_ADDR_HT_BUCKETS
-#define UTXO_HT_SIZE    SCAN_UTXO_HT_SIZE
-
-#define fnv20          scan_fnv20
-#define aht_init       scan_aht_init
-#define aht_insert     scan_aht_insert
-#define aht_has        scan_aht_has
-#define aht_free       scan_aht_free
-#define outpoint_hash  scan_outpoint_hash
-#define uset_init      scan_uset_init
-#define uset_add       scan_uset_add
-#define uset_find      scan_uset_find
-#define uset_free      scan_uset_free
-#define wl_init        scan_wl_init
-#define wl_add         scan_wl_add
-#define wl_free        scan_wl_free
-#define extract_addr   scan_extract_addr
-
-#endif
+#endif /* ZCL_SERVICES_SCAN_UTIL_H */

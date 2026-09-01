@@ -10813,6 +10813,7 @@ lint-armed:
 # debt; override with `// shape-layer-ok:<tag>`.
 check-shape-include-direction:
 	@echo "══ LINT: inter-shape include direction ══"
+	@./tools/scripts/check_shape_include_direction.sh --selftest
 	@./tools/scripts/check_shape_include_direction.sh
 
 # domain/ source purity: the innermost layer may only #include its own

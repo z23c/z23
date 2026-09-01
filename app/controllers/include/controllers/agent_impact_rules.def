@@ -858,7 +858,7 @@ AGENT_IMPACT_RULE("app/services/src/block_index_integrity.c|app/services/include
 AGENT_IMPACT_RULE("config/src/boot_cursor_state.c|config/include/config/boot_cursor_state.h", "block_index_integrity block_scan make_lint_gates")
 /* OS-S2 #4: wallet Pass-1 file-match cache (keyset/tip/size-keyed). Pure
  * helpers proven by test_block_scan. */
-AGENT_IMPACT_RULE("app/controllers/src/wallet_scan.c|app/controllers/include/controllers/wallet_scan.h|lib/test/src/test_block_scan.c", "block_scan make_lint_gates")
+AGENT_IMPACT_RULE("app/controllers/src/wallet_scan.c|app/controllers/include/controllers/wallet_scan.h|app/controllers/src/legacy_import_scan.c|app/controllers/src/legacy_import_scan.h|app/services/include/services/scan_util.h|app/services/include/services/wallet_scan_service.h|app/services/src/legacy_import_service.c|app/services/src/wallet_scan_service.c|lib/test/src/test_scan_util.c|lib/test/src/test_block_scan.c", "scan_util block_scan mint_proof_harness make_lint_gates")
 /* Fast-boot cursor stamping (import side) + shielded backfill service: the
  * skip-when-covered behavior is proven by test_block_index_integrity's
  * t_pprev_repair_cursor_skip. */

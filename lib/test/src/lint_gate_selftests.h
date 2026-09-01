@@ -285,7 +285,7 @@
 #define DOMAIN_PURITY_FIXTURE_DST "domain/wallet/src/_domain_purity_fixture_tmp.c"
 /* Gate #49 — inter-shape include direction (RATCHET). The fixture is an
  * app/models/src/ file with an upward #include "services/..."; clean tree
- * (13 pre-existing services/ -> controllers/ entries grandfathered in the
+ * (pre-existing services/ -> controllers/ entries grandfathered in the
  * baseline) -> exit 0, fixture -> exit != 0. */
 #define SHAPE_DIR_SCRIPT_REL  "tools/scripts/check_shape_include_direction.sh"
 #define SHAPE_DIR_FIXTURE_DST "app/models/src/_shape_dir_fixture_tmp.c"

@@ -42,7 +42,7 @@
 #include <string.h>
 #include <time.h>
 #include <pthread.h>
-#include "controllers/scan_util.h"
+#include "services/scan_util.h"
 #include "util/log_macros.h"
 #include "util/safe_alloc.h"
 
@@ -126,9 +126,9 @@ static bool legacy_import_open_block(
 
 /* Process a single deserialized block for wallet txns. */
 static bool scan_block_txs(const struct block *blk, int height,
-                            const struct addr_ht *ht,
-                            struct utxo_set *uset,
-                            struct wtx_list *wl)
+                            const struct scan_addr_ht *ht,
+                            struct scan_utxo_set *uset,
+                            struct scan_wtx_list *wl)
 {
     bool any_found = false;
 
@@ -139,13 +139,13 @@ static bool scan_block_txs(const struct block *blk, int height,
 
         for (size_t vi = 0; vi < tx->num_vout; vi++) {
             uint8_t ah[20];
-            if (!extract_addr(tx->vout[vi].script_pub_key.data,
+            if (!scan_extract_addr(tx->vout[vi].script_pub_key.data,
                               tx->vout[vi].script_pub_key.size, ah))
                 continue;
-            if (!aht_has(ht, ah)) continue;
+            if (!scan_aht_has(ht, ah)) continue;
 
             is_ours = true;
-            struct mem_utxo u;
+            struct scan_mem_utxo u;
             memset(&u, 0, sizeof(u));
             memcpy(u.txid, tx->hash.data, 32);
             u.vout = (uint32_t)vi;
@@ -157,12 +157,12 @@ static bool scan_block_txs(const struct block *blk, int height,
             u.script_len = (uint8_t)sl;
             u.height = height;
             u.is_coinbase = (ti == 0);
-            uset_add(uset, &u);
+            scan_uset_add(uset, &u);
         }
 
         if (ti > 0) {
             for (size_t vi = 0; vi < tx->num_vin; vi++) {
-                int ui = uset_find(uset,
+                int ui = scan_uset_find(uset,
                     tx->vin[vi].prevout.hash.data,
                     tx->vin[vi].prevout.n);
                 if (ui >= 0) {
@@ -179,7 +179,7 @@ static bool scan_block_txs(const struct block *blk, int height,
 
         if (is_ours) {
             any_found = true;
-            struct mem_wtx wt;
+            struct scan_mem_wtx wt;
             memset(&wt, 0, sizeof(wt));
             memcpy(wt.txid, tx->hash.data, 32);
             wt.raw = ser_tx(tx, &wt.raw_len);
@@ -190,7 +190,7 @@ static bool scan_block_txs(const struct block *blk, int height,
                 int64_t vout_total = transaction_get_value_out(tx);
                 wt.fee = debit > vout_total ? debit - vout_total : 0;
             }
-            wl_add(wl, &wt);
+            scan_wl_add(wl, &wt);
         }
     }
     return any_found;
@@ -199,9 +199,9 @@ static bool scan_block_txs(const struct block *blk, int height,
 /* --- Pass 2 visitor: transparent scan --- */
 
 struct transparent_ctx {
-    const struct addr_ht *ht;
-    struct utxo_set *uset;
-    struct wtx_list *wl;
+    const struct scan_addr_ht *ht;
+    struct scan_utxo_set *uset;
+    struct scan_wtx_list *wl;
     int found;
 };
 
@@ -234,14 +234,14 @@ int legacy_import_service_run(const char *legacy_datadir,
     platform_time_monotonic_timespec(&ts_start);
 
     /* Build address hash table from wallet keys. */
-    struct addr_ht aht;
-    aht_init(&aht);
+    struct scan_addr_ht aht;
+    scan_aht_init(&aht);
     for (size_t i = 0; i < w->keystore.num_keys; i++)
         if (w->keystore.keys[i].used)
-            aht_insert(&aht, w->keystore.keys[i].keyid.id.data);
+            scan_aht_insert(&aht, w->keystore.keys[i].keyid.id.data);
     for (size_t i = 0; i < w->keystore.num_scripts; i++)
         if (w->keystore.scripts[i].used)
-            aht_insert(&aht, w->keystore.scripts[i].script_id.data);
+            scan_aht_insert(&aht, w->keystore.scripts[i].script_id.data);
 
     printf("legacy_import: %d address hashes, %zu sapling keys\n",
            aht.count, w->sapling_keys.num_keys);
@@ -267,10 +267,10 @@ int legacy_import_service_run(const char *legacy_datadir,
      * reachable via the pass-1 thread-spawn-failure goto below — initialize
      * them HERE, before any goto, so cleanup never frees uninitialized
      * (garbage) structs. */
-    struct utxo_set uset;
-    uset_init(&uset);
-    struct wtx_list wl;
-    wl_init(&wl);
+    struct scan_utxo_set uset;
+    scan_uset_init(&uset);
+    struct scan_wtx_list wl;
+    scan_wl_init(&wl);
 
     /* ========== PASS 1: Parallel raw byte scan ========== */
     printf("legacy_import: pass 1 — parallel raw byte scan...\n");
@@ -394,7 +394,7 @@ int legacy_import_service_run(const char *legacy_datadir,
         }
 
         for (int i = 0; i < uset.count; i++) {
-            struct mem_utxo *u = &uset.items[i];
+            struct scan_mem_utxo *u = &uset.items[i];
             struct db_wallet_utxo du;
             memset(&du, 0, sizeof(du));
             memcpy(du.txid, u->txid, 32);
@@ -418,7 +418,7 @@ int legacy_import_service_run(const char *legacy_datadir,
         }
 
         for (int i = 0; i < wl.count; i++) {
-            struct mem_wtx *t = &wl.items[i];
+            struct scan_mem_wtx *t = &wl.items[i];
             struct db_wallet_tx dt;
             memset(&dt, 0, sizeof(dt));
             memcpy(dt.txid, t->txid, 32);
@@ -653,9 +653,9 @@ cleanup:
     }
 
     /* Cleanup. */
-    aht_free(&aht);
-    uset_free(&uset);
-    wl_free(&wl);
+    scan_aht_free(&aht);
+    scan_uset_free(&uset);
+    scan_wl_free(&wl);
     free(file_has_match);
 
     return ret;

@@ -1,7 +1,7 @@
 #ifndef ZCL_LEGACY_IMPORT_SCAN_H
 #define ZCL_LEGACY_IMPORT_SCAN_H
 
-#include "controllers/scan_util.h"
+#include "services/scan_util.h"
 #include "models/wallet_tx.h"
 #include "primitives/block.h"
 #include "wallet/wallet.h"
@@ -13,7 +13,7 @@
 struct legacy_import_scan_file_arg {
     const char *datadir;
     int file_num;
-    const struct addr_ht *ht;
+    const struct scan_addr_ht *ht;
     bool result;
 };
 

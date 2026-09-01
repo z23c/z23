@@ -589,7 +589,7 @@ int t_domain_purity(void)
 
 /* Gate #49 — check-shape-include-direction RATCHET: a models/ file with an
  * upward #include "services/..." trips the gate; removing it restores
- * green. (The services/ -> controllers/ edge already carries 13
+ * green. (The services/ -> controllers/ edge already carries
  * grandfathered baseline entries — see shape_include_direction_baseline.txt
  * — so this fixture targets the models/ edge instead, which is the one
  * this gate's own introduction paid down to zero.) */

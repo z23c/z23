@@ -354,8 +354,8 @@ static int test_wallet_scan_empty_replacement(void)
 
     struct active_chain chain;
     active_chain_init(&chain);
-    struct addr_ht ht;
-    aht_init(&ht);
+    struct scan_addr_ht ht;
+    scan_aht_init(&ht);
     bool file_has_match[1] = {false};
     struct timespec started = {.tv_sec = 1, .tv_nsec = 0};
     struct timespec pass1 = {.tv_sec = 1, .tv_nsec = 0};
@@ -410,7 +410,7 @@ static int test_wallet_scan_empty_replacement(void)
          db_wallet_utxo_balance(&ndb) == 0 &&
          node_db_has_no_open_transaction(&ndb);
 
-    aht_free(&ht);
+    scan_aht_free(&ht);
     active_chain_free(&chain);
     if (ndb.open) node_db_close(&ndb);
     if (ok) { printf("OK\n"); return 0; }

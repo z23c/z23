@@ -484,9 +484,10 @@ assert green).
   were fixed at gate-introduction: the authz policy table moved down into
   `app/models/`, and db_txn's disk-critical check now goes through a
   registered callback, `db_txn_set_disk_critical_probe`, wired from
-  `disk_monitor_start()` itself (`app/services/src/disk_monitor.c`); 13
-  pre-existing entries grandfathered on the services/ -> controllers/ edge
-  (undiscovered until this gate existed).
+  `disk_monitor_start()` itself (`app/services/src/disk_monitor.c`);
+  pre-existing entries remain grandfathered on the services/ -> controllers/
+  edge (undiscovered until this gate existed). New edges fail, and stale
+  baseline rows fail until removed so paid-down debt cannot silently return.
   Override `// shape-layer-ok:<tag>`. Impl:
   `tools/scripts/check_shape_include_direction.sh`.
 

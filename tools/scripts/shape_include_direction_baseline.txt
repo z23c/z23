@@ -19,7 +19,7 @@
 #     mirroring node_db_set_quick_check_skip_probe() in models/database.h.
 #     Any NEW models/** -> services/controllers include fails immediately.
 #
-#   app/services/** -> controllers/ : 13 pre-existing entries below,
+#   app/services/** -> controllers/ : pre-existing entries below,
 #     discovered while writing this gate's scan (not previously tracked
 #     anywhere — there was no gate on this direction before). Paying these
 #     down means either moving the included controllers/*.h header down
@@ -40,10 +40,7 @@
 # stays clean.
 #
 # Format: <file>:<exact #include directive>
-app/services/include/services/wallet_scan_service.h:#include "controllers/scan_util.h"
 app/services/src/catchup_lifecycle_service.c:#include "controllers/sync_controller.h"
-app/services/src/legacy_import_service.c:#include "controllers/scan_util.h"
-app/services/src/legacy_import_service.c:#include "controllers/sync_controller.h"
 app/services/src/node_db_catchup_service.c:#include "controllers/sync_controller.h"
 app/services/src/node_health_service.c:#include "controllers/network_controller.h"
 app/services/src/node_health_service.c:#include "controllers/sync_controller.h"
@@ -51,5 +48,4 @@ app/services/src/operator_snapshot_service.c:#include "controllers/agent_securit
 app/services/src/quorum_oracle_service.c:#include "controllers/wallet_helpers.h"
 app/services/src/soak_attestation_service.c:#include "controllers/agent_security_posture.h"
 app/services/src/utxo_parity_service.c:#include "controllers/wallet_helpers.h"
-app/services/src/wallet_scan_service.c:#include "controllers/scan_util.h"
 app/services/src/zclassicd_oracle_service.c:#include "controllers/wallet_helpers.h"

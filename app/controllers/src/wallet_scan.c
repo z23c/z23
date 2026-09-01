@@ -36,7 +36,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <pthread.h>
-#include "controllers/scan_util.h"
+#include "services/scan_util.h"
 #include "util/log_macros.h"
 #include "util/safe_alloc.h"
 
@@ -50,7 +50,7 @@ struct file_scan_result {
 /* Scan a single mmap'd block file for P2PKH/P2SH patterns
  * matching our address hash table. */
 static bool scan_file_raw(const uint8_t *data, size_t size,
-                           const struct addr_ht *ht)
+                           const struct scan_addr_ht *ht)
 {
     /* Scan for P2PKH: 76 a9 14 [20 bytes] 88 ac (25 bytes total)
      * Scan for P2SH:  a9 14 [20 bytes] 87      (23 bytes total) */
@@ -59,13 +59,13 @@ static bool scan_file_raw(const uint8_t *data, size_t size,
         if (data[i] == 0x76 && data[i + 1] == 0xa9 &&
             data[i + 2] == 0x14 &&
             data[i + 23] == 0x88 && data[i + 24] == 0xac) {
-            if (aht_has(ht, data + i + 3))
+            if (scan_aht_has(ht, data + i + 3))
                 return true;
         }
         /* P2SH check */
         if (data[i] == 0xa9 && data[i + 1] == 0x14 &&
             i + 23 <= size && data[i + 22] == 0x87) {
-            if (aht_has(ht, data + i + 2))
+            if (scan_aht_has(ht, data + i + 2))
                 return true;
         }
     }
@@ -76,7 +76,7 @@ static bool scan_file_raw(const uint8_t *data, size_t size,
 struct scan_thread_arg {
     const char *datadir;
     int file_num;
-    const struct addr_ht *ht;
+    const struct scan_addr_ht *ht;
     bool result;
 };
 
@@ -223,14 +223,14 @@ int wallet_scan_blocks(struct node_db *ndb,
     platform_time_monotonic_timespec(&ts_start);
 
     /* Build address hash table */
-    struct addr_ht aht;
-    aht_init(&aht);
+    struct scan_addr_ht aht;
+    scan_aht_init(&aht);
     for (size_t i = 0; i < w->keystore.num_keys; i++)
         if (w->keystore.keys[i].used)
-            aht_insert(&aht, w->keystore.keys[i].keyid.id.data);
+            scan_aht_insert(&aht, w->keystore.keys[i].keyid.id.data);
     for (size_t i = 0; i < w->keystore.num_scripts; i++)
         if (w->keystore.scripts[i].used)
-            aht_insert(&aht, w->keystore.scripts[i].script_id.data);
+            scan_aht_insert(&aht, w->keystore.scripts[i].script_id.data);
 
     printf("wallet_scan: %d address hashes loaded\n", aht.count);
     fflush(stdout);
@@ -244,7 +244,7 @@ int wallet_scan_blocks(struct node_db *ndb,
         int empty_result = wallet_scan_pass2_execute(
             ndb, chain, datadir, start_height, end_height,
             &aht, NULL, 0, NULL, NULL);
-        aht_free(&aht);
+        scan_aht_free(&aht);
         return empty_result;
     }
 
@@ -290,7 +290,7 @@ int wallet_scan_blocks(struct node_db *ndb,
     if (!file_has_match || !need_scan) {
         /* zcl_calloc already logged the OOM; release the address hash table
          * and fail the scan rather than dereferencing NULL at the join loop. */
-        aht_free(&aht);
+        scan_aht_free(&aht);
         free(file_has_match);
         free(need_scan);
         return -1; /* raw-return-ok:zcl_calloc-logged */
@@ -333,7 +333,7 @@ int wallet_scan_blocks(struct node_db *ndb,
                 LOG_WARN("wallet_scan", "wallet_scan: failed to start pass-1 scan thread");
                 for (int j = 0; j < n; j++)
                     if (launched[j]) pthread_join(threads[j], NULL);
-                aht_free(&aht);
+                scan_aht_free(&aht);
                 free(file_has_match);
                 free(need_scan);
                 return -1; // raw-return-ok:logged-above
@@ -397,7 +397,7 @@ int wallet_scan_blocks(struct node_db *ndb,
                                           &ts_start, &ts_p1);
 
     /* Cleanup */
-    aht_free(&aht);
+    scan_aht_free(&aht);
     free(file_has_match);
 
     return found;

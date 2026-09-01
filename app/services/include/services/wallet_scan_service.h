@@ -25,7 +25,7 @@
 
 #include "models/database.h"
 #include "validation/chainstate.h"
-#include "controllers/scan_util.h"
+#include "services/scan_util.h"
 #include <stdbool.h>
 #include <time.h>
 
@@ -49,7 +49,7 @@ int wallet_scan_pass2_execute(struct node_db *ndb,
                               const char *datadir,
                               int start_height,
                               int end_height,
-                              const struct addr_ht *aht,
+                              const struct scan_addr_ht *aht,
                               const bool *file_has_match,
                               int matched_files,
                               const struct timespec *ts_start,

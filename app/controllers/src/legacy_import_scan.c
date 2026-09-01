@@ -40,17 +40,17 @@ static int extract_bip34_height(const struct transaction *coinbase)
 }
 
 static bool scan_file_raw(const uint8_t *data, size_t size,
-                          const struct addr_ht *ht)
+                          const struct scan_addr_ht *ht)
 {
     for (size_t i = 0; i + 25 <= size; i++) {
         if (data[i] == 0x76 && data[i + 1] == 0xa9 &&
             data[i + 2] == 0x14 &&
             data[i + 23] == 0x88 && data[i + 24] == 0xac) {
-            if (aht_has(ht, data + i + 3)) return true;
+            if (scan_aht_has(ht, data + i + 3)) return true;
         }
         if (data[i] == 0xa9 && data[i + 1] == 0x14 &&
             i + 23 <= size && data[i + 22] == 0x87) {
-            if (aht_has(ht, data + i + 2)) return true;
+            if (scan_aht_has(ht, data + i + 2)) return true;
         }
     }
     return false;

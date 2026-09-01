@@ -2,14 +2,14 @@
  * Tests for shared scan utility data structures (scan_util.h). */
 
 #include "test/test_core.h"
-#include "controllers/scan_util.h"
+#include "services/scan_util.h"
 #include "util/safe_alloc.h"
 
 int test_scan_util(void)
 {
     int failures = 0;
 
-    printf("scan_util: addr_ht init and insert... ");
+    printf("scan_util: scan_addr_ht init and insert... ");
     {
         struct scan_addr_ht ht;
         scan_aht_init(&ht);
@@ -27,7 +27,7 @@ int test_scan_util(void)
         else { printf("FAIL\n"); failures++; }
     }
 
-    printf("scan_util: addr_ht dedup... ");
+    printf("scan_util: scan_addr_ht dedup... ");
     {
         struct scan_addr_ht ht;
         scan_aht_init(&ht);
@@ -41,7 +41,7 @@ int test_scan_util(void)
         else { printf("FAIL\n"); failures++; }
     }
 
-    printf("scan_util: utxo_set add and find... ");
+    printf("scan_util: scan_utxo_set add and find... ");
     {
         struct scan_utxo_set us;
         scan_uset_init(&us);
@@ -68,7 +68,7 @@ int test_scan_util(void)
         else { printf("FAIL\n"); failures++; }
     }
 
-    printf("scan_util: wtx_list add... ");
+    printf("scan_util: scan_wtx_list add... ");
     {
         struct scan_wtx_list wl;
         scan_wl_init(&wl);
@@ -84,7 +84,7 @@ int test_scan_util(void)
         else { printf("FAIL\n"); failures++; }
     }
 
-    printf("scan_util: extract_addr P2PKH... ");
+    printf("scan_util: scan_extract_addr P2PKH... ");
     {
         uint8_t script[25] = {0x76, 0xa9, 0x14,
             1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,
@@ -96,7 +96,7 @@ int test_scan_util(void)
         else { printf("FAIL\n"); failures++; }
     }
 
-    printf("scan_util: extract_addr P2SH... ");
+    printf("scan_util: scan_extract_addr P2SH... ");
     {
         uint8_t script[23] = {0xa9, 0x14,
             10,20,30,40,50,60,70,80,90,100,110,120,130,140,150,160,170,180,190,200,
@@ -108,7 +108,7 @@ int test_scan_util(void)
         else { printf("FAIL\n"); failures++; }
     }
 
-    printf("scan_util: extract_addr rejects non-standard... ");
+    printf("scan_util: scan_extract_addr rejects non-standard... ");
     {
         uint8_t script[10] = {0xAA, 0xBB};
         uint8_t h[20];
@@ -117,7 +117,7 @@ int test_scan_util(void)
         else { printf("FAIL\n"); failures++; }
     }
 
-    printf("scan_util: utxo_set grow beyond initial cap... ");
+    printf("scan_util: scan_utxo_set grow beyond initial cap... ");
     {
         struct scan_utxo_set us;
         scan_uset_init(&us);
