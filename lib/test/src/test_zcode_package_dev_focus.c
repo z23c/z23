@@ -363,7 +363,8 @@ static void zpf_request(
 static bool zpf_admission(
     struct vcs_zcode_work_admission_v1 *admission,
     const struct vcs_zcode_work_request_v1 *request, uint16_t slot,
-    const uint8_t worker_secret[32], const uint8_t worker_pubkey[32])
+    uint8_t disposition, const uint8_t worker_secret[32],
+    const uint8_t worker_pubkey[32])
 {
     memset(admission, 0, sizeof(*admission));
     admission->request_id = request->request_id;
@@ -372,7 +373,7 @@ static bool zpf_admission(
     admission->lease_generation = 1;
     admission->deadline_unix = request->deadline_unix;
     admission->slot = slot;
-    admission->disposition = VCS_ZCODE_WORK_ADMISSION_GRANTED;
+    admission->disposition = disposition;
     return vcs_zcode_work_admission_seal(
         admission, worker_secret, worker_pubkey);
 }
@@ -571,39 +572,35 @@ bool zpd_real_focus_handoff_acceptance(
                 source_receipt.candidate_root, source_receipt.action_root,
                 source_receipt.input_root, context_root,
                 source_receipt.work_kind, request_deadline_unix);
-    zpf_request(&request_b, 2, &task_b, task_root,
-                source_receipt.candidate_root, continuation_root,
-                source_receipt.output_root, context_root,
-                VCS_ZCODE_WORK_REVIEW, request_deadline_unix);
     ZPF_REQUIRE(vcs_zcode_work_request_seal(
                     &request_a, requester_secret, requester_key));
-    ZPF_REQUIRE(vcs_zcode_work_request_seal(
-                    &request_b, requester_secret, requester_key));
+    request_b = request_a;
+    ZPF_REQUIRE(memcmp(request_a.action_root, request_b.action_root, 32) == 0);
     uint8_t request_a_root[32], request_b_root[32];
     ZPF_REQUIRE(vcs_zcode_work_request_id(&request_a, request_a_root));
     ZPF_REQUIRE(vcs_zcode_work_request_id(&request_b, request_b_root));
+    ZPF_REQUIRE(memcmp(request_a_root, request_b_root, 32) == 0);
     struct vcs_zcode_work_admission_v1 admission_a, admission_b;
     ZPF_REQUIRE(zpf_admission(&admission_a, &request_a, 0,
+                              VCS_ZCODE_WORK_ADMISSION_GRANTED,
                               worker_a_secret, worker_a_key));
     ZPF_REQUIRE(zpf_admission(&admission_b, &request_b, 1,
+                              VCS_ZCODE_WORK_ADMISSION_ATTACHED,
                               worker_b_secret, worker_b_key));
+    uint32_t duplicate_actions =
+        admission_b.disposition == VCS_ZCODE_WORK_ADMISSION_ATTACHED ? 1u : 0u;
+    ZPF_REQUIRE(duplicate_actions == 1u);
 
     struct vcs_zcode_work_swarm_message message_a = {
         .type = VCS_ZCODE_WORK_SWARM_REQUEST,
         .body.request = request_a,
     };
-    struct vcs_zcode_work_swarm_message message_b = {
-        .type = VCS_ZCODE_WORK_SWARM_REQUEST,
-        .body.request = request_b,
-    };
-    uint8_t request_a_carrier[32], request_b_carrier[32];
-    size_t request_a_bytes = 0, request_b_bytes = 0;
+    struct vcs_zcode_work_swarm_message message_b;
+    uint8_t request_a_carrier[32];
+    size_t request_a_bytes = 0;
     ZPF_REQUIRE(zpf_store_work_message(
                     worker_a, &message_a, request_a_root,
                     request_a_carrier, &request_a_bytes, &metrics));
-    ZPF_REQUIRE(zpf_store_work_message(
-                    worker_b, &message_b, request_b_root,
-                    request_b_carrier, &request_b_bytes, &metrics));
     message_a = (struct vcs_zcode_work_swarm_message) {
         .type = VCS_ZCODE_WORK_SWARM_ADMISSION,
         .body.admission = admission_a,
@@ -622,8 +619,6 @@ bool zpd_real_focus_handoff_acceptance(
                     &admission_b_bytes, &metrics));
     ZPF_REQUIRE(zpf_transfer(worker_a, worker_b, request_a_root,
                              request_a_bytes, &metrics));
-    ZPF_REQUIRE(zpf_transfer(worker_b, worker_a, request_b_root,
-                             request_b_bytes, &metrics));
     ZPF_REQUIRE(zpf_transfer(worker_a, worker_b, admission_a_carrier,
                              admission_a_bytes, &metrics));
     ZPF_REQUIRE(zpf_transfer(worker_b, worker_a, admission_b_carrier,
@@ -753,8 +748,8 @@ bool zpd_real_focus_handoff_acceptance(
         .latency_us = fixture_setup_us,
         .files_opened = 0,
         .tool_calls = fixture_cas_tool_calls,
-        .duplicate_actions = 0,
-        .proof_reuse_count = 0,
+        .duplicate_actions = duplicate_actions,
+        .proof_reuse_count = 1,
     };
     memcpy(report_b.focus_root, focus_b_root, 32);
     memcpy(report_b.claim_root, claim_b_root, 32);
@@ -874,7 +869,8 @@ bool zpd_real_focus_handoff_acceptance(
            "\"source_claim_publication_order\":\"INCOMPLETE\","
            "\"real_c23_task\":true,\"claims\":2,\"reports\":2,"
            "\"scope_overlap\":\"DISPROVED\",\"conflicts\":%u,"
-           "\"retries\":%u,\"duplicate_actions\":0,"
+           "\"retries\":%u,\"duplicate_actions\":%u,"
+           "\"attached_admissions\":1,\"exact_action_reused\":true,"
            "\"proof_reuse\":1,\"context_bytes\":%zu,"
            "\"files_opened\":\"INCOMPLETE\","
            "\"per_specialist_tool_calls\":\"INCOMPLETE\","
@@ -887,7 +883,7 @@ bool zpd_real_focus_handoff_acceptance(
            "\"stale_successor_refused\":true,"
            "\"focus_root\":\"%s\",\"handoff_root\":\"%s\","
            "\"work_receipt_root\":\"%s\"}\n",
-           work_id, metrics.conflicts, metrics.retries,
+           work_id, metrics.conflicts, metrics.retries, duplicate_actions,
            context_wire_bytes, fixture_cas_tool_calls,
            metrics.coordination_bytes, fixture_setup_us,
            source_receipt_duration_seconds,
