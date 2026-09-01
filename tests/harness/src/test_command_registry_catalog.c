@@ -25,6 +25,12 @@
 #include <string.h>
 #include <unistd.h>
 
+static const char governed_source_roots[] =
+#define SOURCE_ROOT(name_) " " name_
+#include "codeindex/source_roots.def"
+#undef SOURCE_ROOT
+;
+
 static const struct zcl_command_spec *find_spec(
     const struct zcl_command_registry *reg, const char *path)
 {
@@ -59,6 +65,30 @@ static bool exec_leaf(const struct zcl_command_registry *reg,
                                                  out, out_size, exit_code);
     json_free(&input);
     return n > 0;
+}
+
+static int test_code_corpus_roots_follow_registry(void)
+{
+    int failures = 0;
+    const struct zcl_command_registry *reg = zcl_command_catalog();
+    TEST("code.corpus reports the governed source roots without a private list") {
+        const struct zcl_command_spec *spec = find_spec(reg, "code.corpus");
+        char out[ZCL_COMMAND_RESULT_BUDGET + 1];
+        enum zcl_command_exit code = ZCL_COMMAND_EXIT_INTERNAL;
+        ASSERT(spec != NULL);
+        ASSERT(exec_leaf(reg, spec, out, sizeof(out), &code));
+        ASSERT_EQ(code, ZCL_COMMAND_EXIT_OK);
+        struct json_value envelope;
+        ASSERT(json_read(&envelope, out, strlen(out)));
+        const struct json_value *data = json_get(&envelope, "data");
+        const struct json_value *scope = data ? json_get(data, "scope") : NULL;
+        const char *roots = scope ? json_get_str(json_get(scope, "roots")) : NULL;
+        ASSERT(roots != NULL);
+        ASSERT_STR_EQ(roots, governed_source_roots + 1);
+        json_free(&envelope);
+        PASS();
+    } _test_next:;
+    return failures;
 }
 
 static int test_catalog_wellformed(void)
@@ -4213,6 +4243,7 @@ int test_command_registry_catalog(void)
 {
     int failures = 0;
     failures += test_catalog_wellformed();
+    failures += test_code_corpus_roots_follow_registry();
     failures += test_network_records_leaf_input();
     failures += test_producer_session_retire_rpc_port_input();
     failures += test_retrieval_experiment_profile_input();

@@ -26,6 +26,14 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* A leading separator lets the X-macro registry form one compile-time string
+ * without a runtime join or a duplicated final-entry special case. */
+static const char corpus_source_roots[] =
+#define SOURCE_ROOT(name_) " " name_
+#include "codeindex/source_roots.def"
+#undef SOURCE_ROOT
+;
+
 /* Same resolution order as every other code.* leaf. */
 static const char *corpus_source_root(const struct zcl_command_request *request)
 {
@@ -131,9 +139,7 @@ void zcl_native_handle_code_corpus(const struct zcl_command_request *request,
                            (int64_t)r.inventory_production_files);
     (void)json_push_kv_int(&scope, "inventory_test_files",
                            (int64_t)r.inventory_test_files);
-    (void)json_push_kv_str(&scope, "roots",
-                           "lib app core config tools domain adapters ports "
-                           "src packages examples");
+    (void)json_push_kv_str(&scope, "roots", corpus_source_roots + 1);
     (void)json_push_kv_str(&scope, "excluded",
                            "vendor, build output, fixtures, scratch trees, and "
                            "top-level directories the capability inventory does "
