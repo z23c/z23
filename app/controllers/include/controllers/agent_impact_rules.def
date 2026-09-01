@@ -2923,12 +2923,11 @@ AGENT_IMPACT_RULE("lib/engine/include/engine/prompt_sections.def", "engine make_
  * module depends only on base and sha3, deliberately, so that a receipt can
  * be recomputed and compared by code holding no keys and no index. */
 AGENT_IMPACT_RULE("lib/receipt/src/*.c|lib/receipt/include/receipt/*.h|lib/test/src/test_receipt.c", "receipt make_lint_gates")
-/* Ranked retrieval. Rides its own group only: the module depends on base and
- * libm and nothing else, and nothing depends on it yet — `code have` still
- * answers by substring match. When that call site lands, the codeindex group
- * joins this rule; adding it now would claim a coverage relationship that
- * does not exist. */
-AGENT_IMPACT_RULE("lib/retrieval/src/*.c|lib/retrieval/include/retrieval/*.h|lib/test/src/test_retrieval.c", "retrieval make_lint_gates")
+/* Ranked retrieval and its bounded post-proposal experiment. The experiment
+ * consumes retrieval-shaped candidates, so changes anywhere in this small
+ * module run both exact groups. `code have` still answers by substring match;
+ * when that call site lands, the codeindex group joins this rule. */
+AGENT_IMPACT_RULE("lib/retrieval/src/*.c|lib/retrieval/include/retrieval/*.h|lib/test/src/test_retrieval.c|lib/test/src/test_retrieval_experiment.c", "retrieval retrieval_experiment make_lint_gates")
 /* The durable hash-chained log. Rides its own group and the platform group:
  * every byte it reads or writes goes through the lib/platform file seam, so a
  * change to that seam's locking, truncation or fsync behaviour changes what

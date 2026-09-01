@@ -2,6 +2,7 @@
  * Purpose: strict batch adapter for the maintained retrieval evaluator. */
 
 #include "retrieval/retrieval.h"
+#include "retrieval/retrieval_experiment.h"
 #include "base/hex.h"
 #include "sha3/sha3.h"
 
@@ -358,9 +359,20 @@ int main(int argc, char **argv)
 {
     if (argc == 3 && strcmp(argv[1], "--rank-root") == 0)
         return rank_root_mode(argv[2]);
-    if (argc != 1) {
+    bool experiment_mode = false;
+    size_t experiment_prefix = 0;
+    if (argc == 3 && strcmp(argv[1], "--experiment-prefix") == 0) {
+        if (!parse_size(argv[2], ZCL_RETRIEVAL_EXPERIMENT_TOP,
+                        &experiment_prefix)) {
+            (void)fail("experiment prefix must be 0 through 5");
+            return 64;
+        }
+        experiment_mode = true;
+    } else if (argc != 1) {
         fputs("usage: retrieval-eval < batch.txt\n"
-              "       retrieval-eval --rank-root 0|1 < ranks.tsv\n", stderr);
+              "       retrieval-eval --rank-root 0|1 < ranks.tsv\n"
+              "       retrieval-eval --experiment-prefix 0..5 < batch.txt\n",
+              stderr);
         return 64;
     }
     char line[EVAL_LINE_MAX];
@@ -417,6 +429,61 @@ int main(int argc, char **argv)
         bm25[t].ranked = g_tasks[t].bm25.ranked;
         bm25[t].ranked_count = g_tasks[t].bm25.count;
         bm25[t].ranking_complete = g_tasks[t].bm25.complete;
+    }
+    if (experiment_mode) {
+        struct zcl_retrieval_experiment_eval_task
+            tasks[EVAL_TASK_MAX] = {0};
+        for (size_t t = 0; t < task_count; t++) {
+            tasks[t] = (struct zcl_retrieval_experiment_eval_task){
+                .task_id = g_tasks[t].id,
+                .query = g_tasks[t].query,
+                .relevant_paths = g_tasks[t].relevant_ptrs,
+                .relevant_count = g_tasks[t].relevant_count,
+                .bm25 = g_tasks[t].literal.ranked,
+                .bm25_count = g_tasks[t].literal.count,
+                .bm25_complete = g_tasks[t].literal.complete,
+                .parent = g_tasks[t].bm25.ranked,
+                .parent_count = g_tasks[t].bm25.count,
+                .parent_complete = g_tasks[t].bm25.complete,
+            };
+        }
+        struct zcl_retrieval_experiment_eval_report report;
+        enum zcl_retrieval_experiment_error error =
+            zcl_retrieval_experiment_evaluate(
+                tasks, task_count, (uint8_t)experiment_prefix, &report);
+        if (error != ZCL_RETRIEVAL_EXPERIMENT_OK) {
+            fprintf(stderr, "retrieval-eval: experiment refused: %s\n",
+                    zcl_retrieval_experiment_error_string(error));
+            return 1;
+        }
+        printf("{\"schema\":\"zcl.retrieval_experiment_eval_result.v1\","
+               "\"algorithm\":\"%s\",\"bm25_prefix\":%zu,"
+               "\"tasks_evaluated\":%zu,"
+               "\"aggregation_kind\":\"macro_equal_task_weight\","
+               "\"eligible_relevance_judgments\":%zu,"
+               "\"input_arm_binding\":"
+               "\"literal_is_bm25_base_bm25_is_parent\","
+               "\"projector_gold_input\":\"none\","
+               "\"evaluation_gold_stage\":"
+               "\"same_process_after_projection\","
+               "\"scope_basis\":\"unavailable_labels_erased_before_eval\","
+               "\"candidate\":",
+               ZCL_RETRIEVAL_EXPERIMENT_ALGORITHM, experiment_prefix,
+               task_count, observed_relevance_judgments);
+        print_arm(&report.metrics);
+        printf(",\"changed_positions_at_5\":%zu,"
+               "\"fallback_tasks\":%zu,"
+               "\"top20_membership_preserved\":%s,"
+               "\"full_retained_set_preserved\":%s,"
+               "\"context_ceiling_preserved\":%s,"
+               "\"evaluation_status\":\"observed_exploratory\","
+               "\"replication_status\":\"not_run\","
+               "\"promotion_authorized\":false}\n",
+               report.changed_positions_at_5, report.fallback_tasks,
+               report.top20_membership_preserved ? "true" : "false",
+               report.full_retained_set_preserved ? "true" : "false",
+               report.context_ceiling_preserved ? "true" : "false");
+        return ferror(stdout) ? 1 : 0;
     }
     struct zcl_retrieval_eval_metrics literal_metrics, bm25_metrics;
     if (!zcl_retrieval_evaluate(literal, task_count, &literal_metrics) ||

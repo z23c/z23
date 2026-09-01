@@ -545,6 +545,7 @@ REMOTE_COMMAND_CLASS("vault.swap.refund", REMOTE_CLASS_NEVER, "")
  * argued at their rows above. */
 REMOTE_COMMAND_CLASS("dev.status", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("dev.retrieval.benchmark", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("dev.retrieval.experiment", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("dev.begin", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("dev.drive", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("dev.ff", REMOTE_CLASS_NEVER, "")

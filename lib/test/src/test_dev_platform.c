@@ -1,5 +1,9 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0 */
 
+#if !defined(_WIN32) && !defined(_DEFAULT_SOURCE)
+#define _DEFAULT_SOURCE
+#endif
+
 #include "test/test_core.h"
 
 #include "dev_activation.h"

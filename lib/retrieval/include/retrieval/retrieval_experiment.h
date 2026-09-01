@@ -11,6 +11,8 @@
 
 #define ZCL_RETRIEVAL_EXPERIMENT_TOP 5u
 #define ZCL_RETRIEVAL_EXPERIMENT_WINDOW 20u
+#define ZCL_RETRIEVAL_EXPERIMENT_TASK_MAX 32u
+#define ZCL_RETRIEVAL_EXPERIMENT_RELEVANCE_MAX 128u
 #define ZCL_RETRIEVAL_EXPERIMENT_ALGORITHM \
     "bm25_prefix_graph_fill_context_guard_v1"
 
@@ -23,6 +25,8 @@ enum zcl_retrieval_experiment_error {
     ZCL_RETRIEVAL_EXPERIMENT_BINDING,
     ZCL_RETRIEVAL_EXPERIMENT_OVERFLOW,
     ZCL_RETRIEVAL_EXPERIMENT_ALIAS,
+    ZCL_RETRIEVAL_EXPERIMENT_EVALUATION,
+    ZCL_RETRIEVAL_EXPERIMENT_ALLOCATION,
 };
 
 struct zcl_retrieval_experiment_report {
@@ -32,6 +36,28 @@ struct zcl_retrieval_experiment_report {
     size_t changed_positions_at_5;
     bool used_bm25_fallback;
     bool top20_membership_preserved;
+};
+
+struct zcl_retrieval_experiment_eval_task {
+    const char *task_id;
+    const char *query;
+    const char *const *relevant_paths;
+    size_t relevant_count;
+    const struct zcl_retrieval_ranked_file *bm25;
+    size_t bm25_count;
+    bool bm25_complete;
+    const struct zcl_retrieval_ranked_file *parent;
+    size_t parent_count;
+    bool parent_complete;
+};
+
+struct zcl_retrieval_experiment_eval_report {
+    struct zcl_retrieval_eval_metrics metrics;
+    size_t changed_positions_at_5;
+    size_t fallback_tasks;
+    bool top20_membership_preserved;
+    bool full_retained_set_preserved;
+    bool context_ceiling_preserved;
 };
 
 /* Project one candidate ranking from two already-sealed rankings. The only
@@ -51,6 +77,17 @@ enum zcl_retrieval_experiment_error zcl_retrieval_experiment_project(
     bool parent_complete, uint8_t bm25_prefix,
     struct zcl_retrieval_ranked_file *out, size_t out_capacity,
     struct zcl_retrieval_experiment_report *report);
+
+/* Measure one already-proposed prefix over independently supplied reviewed
+ * relevance. Projection remains relevance-free: every task is projected
+ * before its gold paths are attached to the maintained evaluator. Scope is
+ * intentionally unavailable because proposer-side scope labels are erased.
+ * This report is an observation only; it does not retain, promote, schedule,
+ * or authorize the candidate. */
+enum zcl_retrieval_experiment_error zcl_retrieval_experiment_evaluate(
+    const struct zcl_retrieval_experiment_eval_task *tasks,
+    size_t task_count, uint8_t bm25_prefix,
+    struct zcl_retrieval_experiment_eval_report *report);
 
 /* Canonical root used by the observational benchmark's ranked-file rows. */
 bool zcl_retrieval_ranked_files_root(

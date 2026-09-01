@@ -9,9 +9,8 @@
 # together dominate `make lint` wall time (measured 2026-07-19: 16,971 ms of
 # a 16,996 ms total, everything else in the 8-way pool effectively free).
 # Neither probe's verdict depends on anything but its own inputs: the two
-# selftest scripts, the four build-epoch tool scripts
-# (build-epoch-key.sh / publish-build-alias.sh / compile-epoch-object.sh /
-# build-epoch-session.sh) that build-epoch-selftest.sh drives, the root
+# selftest scripts, every build-epoch authority helper that those probes
+# drive (including source and process identity), the root
 # Makefile (make-depfile-scope-selftest.sh `include`s it directly and
 # build-epoch-selftest.sh's fixture flags mirror it), the active compiler's
 # identity (fingerprinted the same way build-epoch-key.sh itself does --
@@ -47,9 +46,21 @@ KEY_INPUT_FILES=(
     "$SELF_DIR/compile-epoch-object.sh"
     "$SELF_DIR/build-epoch-session.sh"
     "$SELF_DIR/build-epoch-open-file-identity.sh"
+    "$SELF_DIR/process-start-token.sh"
+    "$SELF_DIR/source-identity.sh"
     "$DEPFILE_SCOPE_SELFTEST"
     "$ROOT/Makefile"
 )
+
+hash_key_inputs()
+{
+    local f digest
+    for f in "$@"; do
+        digest="$(sha256sum < "$f" | awk '{print $1}')" || return 1
+        [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || return 1
+        printf '%s:%s:%s\n' "${#f}" "$f" "$digest"
+    done | sha256sum | awk '{print $1}'
+}
 
 # Run both probes concurrently -- they are independent (separate mktemp
 # work dirs, no shared mutable state) -- and stream both logs through on
@@ -92,7 +103,7 @@ for f in "${KEY_INPUT_FILES[@]}"; do
 done
 content_hash=""
 if [ "$key_ok" -eq 1 ]; then
-    content_hash="$(cat -- "${KEY_INPUT_FILES[@]}" 2>/dev/null | sha256sum | awk '{print $1}')"
+    content_hash="$(hash_key_inputs "${KEY_INPUT_FILES[@]}" 2>/dev/null)"
     [[ "$content_hash" =~ ^[0-9a-f]{64}$ ]] || key_ok=0
 fi
 compiler_id=""
@@ -106,7 +117,7 @@ if [ "$key_ok" -eq 1 ]; then
     [ -n "$make_version" ] || key_ok=0
 fi
 [ "$key_ok" -eq 1 ] &&
-    key="v1 cc=[$CC_COMMAND] content=$content_hash compiler=$compiler_id make=[$make_version]"
+    key="v2 cc=[$CC_COMMAND] content=$content_hash compiler=$compiler_id make=[$make_version]"
 
 if [ "$key_ok" -eq 1 ] && [ -f "$CACHE_FILE" ]; then
     cached_key="$(cat -- "$CACHE_FILE" 2>/dev/null)"

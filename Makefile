@@ -6612,6 +6612,9 @@ RETRIEVAL_EVAL_BIN = $(BIN_DIR)/retrieval-eval
 retrieval-eval: $(RETRIEVAL_EVAL_BIN)
 $(RETRIEVAL_EVAL_BIN): tools/retrieval_eval.c \
     lib/retrieval/src/retrieval_eval.c \
+    lib/retrieval/src/retrieval_experiment.c \
+    lib/retrieval/include/retrieval/retrieval_experiment.h \
+    lib/base/src/safe_alloc.c lib/base/include/base/safe_alloc.h \
     lib/retrieval/include/retrieval/retrieval.h \
     lib/sha3/src/sha3.c lib/sha3/include/sha3/sha3.h \
     lib/base/include/base/hex.h lib/base/include/base/serialize_le.h
@@ -6619,14 +6622,15 @@ $(RETRIEVAL_EVAL_BIN): tools/retrieval_eval.c \
 	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 	    -Ilib/retrieval/include -Ilib/base/include -Ilib/sha3/include -o $@ \
 	    tools/retrieval_eval.c lib/retrieval/src/retrieval_eval.c \
-	    lib/sha3/src/sha3.c
+	    lib/retrieval/src/retrieval_experiment.c \
+	    lib/base/src/safe_alloc.c lib/sha3/src/sha3.c
 
 .PHONY: retrieval-eval-selftest retrieval-gold-corpus-check \
     retrieval-gold-benchmark-scope-selftest \
     retrieval-gold-benchmark retrieval-gold-benchmark-publishable \
     retrieval-gold-benchmark-publishable-capture retrieval-gold-receipt-check \
     retrieval-gold-current-receipt-check retrieval-gold-scope-receipt-check \
-    retrieval-gold-identifier-graph-receipt-check
+    retrieval-gold-identifier-graph-receipt-check retrieval-prefix-sweep-check
 retrieval-eval-selftest: retrieval-eval jsonq
 	@./tools/dev/retrieval-eval-selftest.sh
 
@@ -6683,6 +6687,11 @@ retrieval-gold-scope-receipt-check: jsonq agent-sha3 retrieval-eval
 retrieval-gold-identifier-graph-receipt-check: jsonq agent-sha3 retrieval-eval
 	@./tools/dev/retrieval-gold-identifier-graph-receipt-check.sh --selftest
 	@./tools/dev/retrieval-gold-identifier-graph-receipt-check.sh --check
+
+# Six relevance-free projections evaluated against reviewed evidence. This
+# selects a Pareto candidate for replication only and grants no promotion.
+retrieval-prefix-sweep-check: jsonq agent-sha3 retrieval-eval
+	@./tools/dev/retrieval-prefix-sweep.sh --check
 
 # ── determinism scan ────────────────────────────────────────────────────────
 # Measures whether every registered test group gives the SAME answer under
