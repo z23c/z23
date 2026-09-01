@@ -84,12 +84,25 @@ void chain_integrity_check_post_restore(struct chain_integrity_result *out,
         }
     }
 
-    /* chain_active.chain[h] non-NULL for h in [0, tip]. */
+    /* chain_active.chain[h] non-NULL for h in [0, tip].
+     *
+     * The reducer widens and collapses this window while the condition engine
+     * polls it. Reading every slot lock-free is memory-safe (retired arrays
+     * remain alive), but it is not a coherent observation: a poll can combine
+     * the old height/slots with the new window and manufacture one transient
+     * pprev mismatch. `chain_integrity_failed` classifies any mismatch as
+     * unrecoverable and launches a disk restore under cs_main, pausing live
+     * sync for minutes. Capture the finalized height/tip before taking the
+     * leaf writer lock, then hold that lock only for the bounded pointer scan.
+     * No other lock or authority lookup occurs inside the critical section. */
     out->tip_height = active_chain_height(&ms->chain_active);
+    struct block_index *tip = active_chain_tip(&ms->chain_active);
     int window_lo = out->tip_height - CHAIN_INTEGRITY_TIP_WINDOW;
     if (window_lo < 0) window_lo = 0;
+    struct active_chain *chain = (struct active_chain *)&ms->chain_active;
+    zcl_mutex_lock(&chain->write_lock);
     for (int h = 0; h <= out->tip_height; h++) {
-        struct block_index *at = active_chain_at(&ms->chain_active, h);
+        struct block_index *at = active_chain_at(chain, h);
         if (at == NULL) {
             out->active_chain_holes++;
             if (out->first_hole_height < 0 || h < out->first_hole_height)
@@ -105,7 +118,7 @@ void chain_integrity_check_post_restore(struct chain_integrity_result *out,
             if (out->first_mismatch_height < 0 ||
                 h < out->first_mismatch_height)
                 out->first_mismatch_height = h;
-        } else if (h > 0 && at->pprev != active_chain_at(&ms->chain_active, h - 1)) {
+        } else if (h > 0 && at->pprev != active_chain_at(chain, h - 1)) {
             out->active_chain_mismatches++;
             if (out->first_mismatch_height < 0 ||
                 h < out->first_mismatch_height)
@@ -120,10 +133,10 @@ void chain_integrity_check_post_restore(struct chain_integrity_result *out,
      * RPC lookups and staged sync use active_chain_at(height) directly.
      * A height mismatch anywhere is also unsafe: callers believe the
      * slot index is the canonical height. */
-    struct block_index *tip = active_chain_tip(&ms->chain_active);
     out->tip_slot_ok =
         (out->tip_height < 0) ||
-        (active_chain_at(&ms->chain_active, out->tip_height) == tip);
+        (active_chain_at(chain, out->tip_height) == tip);
+    zcl_mutex_unlock(&chain->write_lock);
     out->tip_real =
         !tip || ((tip->nStatus & BLOCK_HAVE_DATA) && tip->nBits != 0);
     out->ok = (out->zero_nbits_count == 0 &&

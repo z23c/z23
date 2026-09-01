@@ -55,6 +55,9 @@ struct chain_integrity_result {
     bool ok;
 };
 
+/* Reads the active-chain slots as one writer-serialized snapshot. The block
+ * map's process-lifetime objects remain lock-free; only the bounded slot walk
+ * takes active_chain.write_lock, and it performs no nested authority lookup. */
 void chain_integrity_check_post_restore(struct chain_integrity_result *out,
                                         const struct main_state *ms);
 

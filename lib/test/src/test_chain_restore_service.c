@@ -4,6 +4,7 @@
  * Each test exercises the pure plan() function with struct inputs. */
 
 #include "platform/time_compat.h"
+#include "platform/private_directory.h"
 #include "test/test_core.h"
 #include "services/block_index_integrity.h"
 #include "services/chain_restore_boot_activation.h"
@@ -1672,6 +1673,8 @@ static int test_finalize_quarantine_preserves_served_floor(void) {
         char tmpdir[256];
         test_make_tmpdir(tmpdir, sizeof(tmpdir),
                          "chain_restore", "served_floor_quarantine");
+        ASSERT(test_rm_rf_recursive(tmpdir) == 0);
+        ASSERT(platform_private_directory_create(tmpdir));
 
         progress_store_close();
         ASSERT(progress_store_open(tmpdir));
