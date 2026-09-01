@@ -710,6 +710,10 @@ ZCL_TEST_GROUP(retrieval_experiment)
  * binds both outcomes into immutable immediate-parent heuristic lineage. It
  * grants no evaluation, attention, lifecycle, or activation authority. */
 ZCL_TEST_GROUP(retrieval_profile_evolution)
+/* Exact paired retrieval evaluation binds task/source/projection generation,
+ * ordered workloads, and both complete ranked arms before invoking the
+ * maintained evaluator. Unknown scope remains distinct from false. */
+ZCL_TEST_GROUP(retrieval_paired_evaluation)
 /* A preregistered retrieval comparison is a pure observation over two exact
  * existing result roots.  Threshold boundaries, missing metrics, and failed
  * preservation guards remain distinct; the verdict grants no lifecycle,
