@@ -566,12 +566,18 @@ static long slurp_file(const char *path, unsigned char **out)
 static int test_append_quarantines_hardlinked_tail(void)
 {
     int failures = 0;
+    bool deferred = false;
     char tmpdir[256], shared_path[512], alias_path[512];
     unsigned char *before = NULL, *after_shared = NULL, *after_alias = NULL;
     long before_len = -1, after_shared_len = -1, after_alias_len = -1;
     make_test_dir(tmpdir, sizeof(tmpdir));
 
     TEST("write_block_to_disk: append rotates past hardlinked tail") {
+        /* Exercise the IBD-only append hint, not merely the ordinary full
+         * scan.  A hard link created after the hint was recorded must still
+         * invalidate it and rotate to a new blk file. */
+        disk_block_io_set_deferred_sync(true);
+        deferred = true;
         struct disk_block_pos first;
         disk_block_pos_init(&first);
         if (!write_test_block(tmpdir, &first, 717171)) {
@@ -612,6 +618,10 @@ static int test_append_quarantines_hardlinked_tail(void)
         printf("OK\n");
     }
 _test_next:
+    if (deferred) {
+        (void)disk_block_io_sync_pending();
+        disk_block_io_set_deferred_sync(false);
+    }
     free(before);
     free(after_shared);
     free(after_alias);

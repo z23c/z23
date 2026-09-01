@@ -11,6 +11,7 @@
 #include "support/log_throttle.h"
 #include "platform/time_compat.h"
 #include "platform/file_sync.h"
+#include "platform/file_metadata.h"
 #include "platform/directory_compat.h"
 #include "platform/positioned_io.h"
 #include <errno.h>
@@ -74,6 +75,71 @@ static bool ensure_directory(const char *path)
  * append allocation rotates away and opened-file validation refuses writes. */
 static uint8_t g_hardlink_warned[10000 / 8 + 1];
 
+/* Sequential IBD append hint.  write_block_to_disk serializes append
+ * allocation under g_file_cache_mutex, so the last successfully flushed
+ * end position is a safe candidate for the next body.  We still stat the
+ * candidate on every use: size drift, replacement, truncation, or a newly
+ * added hard link invalidates the hint and falls back to the full scan.
+ *
+ * This removes an O(number-of-blk-files) directory/stat walk per block from
+ * the hot path.  That walk is especially costly on Windows (NTFS metadata +
+ * Defender interception) once a datadir has accumulated many blk files. */
+static bool g_append_hint_valid;
+static int g_append_hint_file = -1;
+static unsigned int g_append_hint_size;
+static char g_append_hint_datadir[512];
+
+static void append_hint_invalidate(void)
+{
+    g_append_hint_valid = false;
+    g_append_hint_file = -1;
+    g_append_hint_size = 0;
+    g_append_hint_datadir[0] = '\0';
+}
+
+static bool append_hint_try(struct disk_block_pos *pos, uint32_t block_size,
+                            const char *datadir)
+{
+    if (!g_append_hint_valid ||
+        strcmp(g_append_hint_datadir, datadir) != 0)
+        return false;
+
+    char path[512];
+    struct disk_block_pos probe = {
+        .nFile = g_append_hint_file,
+        .nPos = 0
+    };
+    get_block_pos_filename(path, sizeof(path), datadir, &probe, "blk");
+    struct platform_file_metadata metadata = {0};
+    if (platform_file_metadata_read(path, &metadata) !=
+            PLATFORM_FILE_METADATA_OK ||
+        metadata.links != 1 ||
+        metadata.size != (uint64_t)g_append_hint_size ||
+        (uint64_t)g_append_hint_size + block_size + 8u > 0x8000000u) {
+        append_hint_invalidate();
+        return false;
+    }
+
+    pos->nFile = g_append_hint_file;
+    pos->nPos = g_append_hint_size;
+    return true;
+}
+
+static void append_hint_record(const char *datadir, int file,
+                               uint64_t next_size)
+{
+    size_t n = strlen(datadir);
+    if (file < 0 || file > 9999 || next_size > UINT32_MAX ||
+        n >= sizeof(g_append_hint_datadir)) {
+        append_hint_invalidate();
+        return;
+    }
+    memcpy(g_append_hint_datadir, datadir, n + 1);
+    g_append_hint_file = file;
+    g_append_hint_size = (unsigned int)next_size;
+    g_append_hint_valid = true;
+}
+
 static void hardlink_warn_once(int file_idx, const char *path,
                                unsigned long nlink)
 {
@@ -89,7 +155,8 @@ static void hardlink_warn_once(int file_idx, const char *path,
 
 static bool choose_append_block_pos(struct disk_block_pos *pos,
                                     uint32_t block_size,
-                                    const char *datadir)
+                                    const char *datadir,
+                                    bool allow_hint)
 {
     if (!pos || !datadir)
         return false;
@@ -99,6 +166,9 @@ static bool choose_append_block_pos(struct disk_block_pos *pos,
     if (!ensure_directory(blocks_dir))
         return false;
 
+    if (allow_hint && append_hint_try(pos, block_size, datadir))
+        return true;
+
     int last_file = 0;
     unsigned int last_size = 0;
     bool last_shared = false;
@@ -106,14 +176,19 @@ static bool choose_append_block_pos(struct disk_block_pos *pos,
         char path[512];
         struct disk_block_pos probe = { .nFile = i, .nPos = 0 };
         get_block_pos_filename(path, sizeof(path), datadir, &probe, "blk");
-        struct stat st;
-        if (stat(path, &st) != 0)
+        struct platform_file_metadata metadata = {0};
+        enum platform_file_metadata_result metadata_result =
+            platform_file_metadata_read(path, &metadata);
+        if (metadata_result == PLATFORM_FILE_METADATA_MISSING)
             break;
-        last_shared = st.st_nlink > 1;
+        if (metadata_result != PLATFORM_FILE_METADATA_OK ||
+            metadata.size > UINT32_MAX)
+            return false;
+        last_shared = metadata.links > 1;
         if (last_shared)
-            hardlink_warn_once(i, path, (unsigned long)st.st_nlink);
+            hardlink_warn_once(i, path, (unsigned long)metadata.links);
         last_file = i;
-        last_size = (unsigned int)st.st_size;
+        last_size = (unsigned int)metadata.size;
     }
 
     if (last_shared || last_size + block_size + 8u > 0x8000000u) {
@@ -342,8 +417,9 @@ bool write_block_to_disk(struct block *b, struct disk_block_pos *pos,
      * read_block_from_disk from seeing partial writes or getting a
      * stale cached FILE* handle. */
     pthread_mutex_lock(&g_file_cache_mutex);
-    if (pos->nFile < 0 &&
-        !choose_append_block_pos(pos, nSize, datadir)) {
+    bool append_allocated = pos->nFile < 0;
+    if (append_allocated &&
+        !choose_append_block_pos(pos, nSize, datadir, g_deferred_sync)) {
         pthread_mutex_unlock(&g_file_cache_mutex);
         stream_free(&s);
         LOG_FAIL("disk_block_io", "write_block: append position allocation failed");
@@ -357,15 +433,32 @@ bool write_block_to_disk(struct block *b, struct disk_block_pos *pos,
     }
 
     struct stat opened = {0};
-    if (fstat(fileno(file), &opened) != 0 ||
-        !S_ISREG(opened.st_mode) || opened.st_nlink != 1) {
+    unsigned long opened_links = 0;
+    bool opened_safe = fstat(fileno(file), &opened) == 0 &&
+        S_ISREG(opened.st_mode);
+#if defined(_WIN32)
+    /* UCRT's stat/fstat reports st_nlink=1 for an NTFS hard link.  Ask the
+     * UTF-8 -> CreateFileW metadata seam for the real handle-backed link
+     * count; ordinary POSIX hosts retain fstat's race-free answer. */
+    char opened_path[512];
+    struct platform_file_metadata opened_metadata = {0};
+    get_block_pos_filename(opened_path, sizeof(opened_path), datadir, pos,
+                           "blk");
+    opened_safe = opened_safe &&
+        platform_file_metadata_read(opened_path, &opened_metadata) ==
+            PLATFORM_FILE_METADATA_OK;
+    opened_links = (unsigned long)opened_metadata.links;
+#else
+    opened_links = (unsigned long)opened.st_nlink;
+#endif
+    if (!opened_safe || opened_links != 1) {
         fclose(file);
         pthread_mutex_unlock(&g_file_cache_mutex);
         stream_free(&s);
         LOG_FAIL("disk_block_io",
                  "write_block: refusing unsafe file=%d regular=%d nlink=%lu",
                  pos->nFile, S_ISREG(opened.st_mode),
-                 (unsigned long)opened.st_nlink);
+                 opened_links);
     }
 
     long file_pos = ftell(file);
@@ -436,6 +529,11 @@ bool write_block_to_disk(struct block *b, struct disk_block_pos *pos,
     /* Only record position AFTER data is confirmed on disk.
      * If we crash before this, caller retries from scratch — safe. */
     pos->nPos = (unsigned int)data_pos;
+    if (append_allocated && g_deferred_sync)
+        append_hint_record(datadir, pos->nFile,
+                           (uint64_t)data_pos + (uint64_t)s.size);
+    else
+        append_hint_invalidate();
 
     fclose(file);
     pthread_mutex_unlock(&g_file_cache_mutex);

@@ -15,6 +15,7 @@ enum platform_file_metadata_result {
 
 struct platform_file_metadata {
     uint64_t size;
+    uint64_t links;
     int64_t modified_seconds;
 };
 

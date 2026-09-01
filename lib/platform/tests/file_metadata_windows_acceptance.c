@@ -35,6 +35,7 @@ static bool forward_slash_copy(const char *source, char *out, size_t out_size)
 int main(void)
 {
     wchar_t temp[MAX_PATH], directory[MAX_PATH], file_path[MAX_PATH];
+    wchar_t alias_path[MAX_PATH];
     if (!GetTempPathW(MAX_PATH, temp) ||
         !GetTempFileNameW(temp, L"zfm", 0, directory) ||
         !DeleteFileW(directory) || !CreateDirectoryW(directory, NULL))
@@ -62,8 +63,21 @@ int main(void)
     struct platform_file_metadata metadata = {0};
     if (platform_file_metadata_read(utf8_file, &metadata) !=
             PLATFORM_FILE_METADATA_OK ||
-        metadata.size != sizeof(payload) || metadata.modified_seconds <= 0)
+        metadata.size != sizeof(payload) || metadata.links != 1 ||
+        metadata.modified_seconds <= 0)
         return fail("regular UTF-8 file metadata");
+
+    /* UCRT stat/fstat reports one link for this NTFS shape.  The platform
+     * seam must expose GetFileInformationByHandle's real count so storage
+     * never appends through a foreign hard link. */
+    if (swprintf(alias_path, MAX_PATH, L"%ls\\hardlink.bin", directory) < 0 ||
+        !CreateHardLinkW(alias_path, file_path, NULL) ||
+        platform_file_metadata_read(utf8_file, &metadata) !=
+            PLATFORM_FILE_METADATA_OK || metadata.links != 2 ||
+        !DeleteFileW(alias_path) ||
+        platform_file_metadata_read(utf8_file, &metadata) !=
+            PLATFORM_FILE_METADATA_OK || metadata.links != 1)
+        return fail("NTFS hard-link metadata");
 
     /* The same existing file spelled with forward slashes. Callers join
      * paths with '/' and plain Win32 rewrites those for them -- but the

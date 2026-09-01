@@ -46,6 +46,7 @@ enum platform_file_metadata_result platform_file_metadata_read(
     if ((info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0)
         return PLATFORM_FILE_METADATA_NOT_REGULAR;
     out->size = ((uint64_t)info.nFileSizeHigh << 32) | info.nFileSizeLow;
+    out->links = (uint64_t)info.nNumberOfLinks;
     uint64_t ticks = ((uint64_t)info.ftLastWriteTime.dwHighDateTime << 32) |
                      info.ftLastWriteTime.dwLowDateTime;
     const uint64_t unix_epoch_ticks = UINT64_C(116444736000000000);
@@ -111,6 +112,7 @@ enum platform_file_metadata_result platform_file_metadata_read(
     if (st.st_size < 0)
         return PLATFORM_FILE_METADATA_REFUSED;
     out->size = (uint64_t)st.st_size;
+    out->links = (uint64_t)st.st_nlink;
     out->modified_seconds = (int64_t)st.st_mtime;
     return PLATFORM_FILE_METADATA_OK;
 }
