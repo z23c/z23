@@ -9,6 +9,7 @@
 
 #include "platform/time_compat.h"
 #include "platform/file_sync.h"
+#include "platform/path_replace.h"
 #include "platform/private_file.h"
 #include "util/log_macros.h"
 
@@ -490,7 +491,7 @@ static bool shutdown_stagewatch_complete(enum shutdown_outcome outcome)
                               platform_file_sync(fd) == 0;
                     if (close(fd) != 0)
                         ok = false;
-                    if (ok && rename(tmp, g_receipt_path) != 0)
+                    if (ok && platform_path_replace(tmp, g_receipt_path) != 0)
                         ok = false;
                     if (ok && !stagewatch_sync_datadir())
                         ok = false;
@@ -561,7 +562,7 @@ void shutdown_stagewatch_write_exit_reason(const char *reason)
              (platform_file_sync(fd) == 0);
     if (close(fd) != 0)
         ok = false;
-    if (ok && rename(tmp, g_exit_reason_path) != 0)
+    if (ok && platform_path_replace(tmp, g_exit_reason_path) != 0)
         ok = false;
     if (!ok) {
         LOG_WARN("shutdown", "write_exit_reason: write/rename of %s failed: %s",

@@ -15,6 +15,7 @@
 
 #include "platform/time_compat.h"
 #include "platform/file_sync.h"
+#include "platform/path_replace.h"
 #include "platform/private_file.h"
 #include "storage/sha3_sidecar_io.h"
 
@@ -224,8 +225,8 @@ struct zcl_result ssio_write_embedded(
 
     /* ONE atomic rename publishes the body + its integrity header as an
      * indivisible unit — no second file, no inter-rename crash window. */
-    if (rename(tmp_path, body_path) != 0) {
-        struct zcl_result r = ZCL_ERR(-7, "%s: rename %s -> %s: %s",
+    if (platform_path_replace(tmp_path, body_path) != 0) {
+        struct zcl_result r = ZCL_ERR(-7, "%s: replace %s -> %s: %s",
             spec->domain, tmp_path, body_path, strerror(errno));
         unlink(tmp_path);
         return r;

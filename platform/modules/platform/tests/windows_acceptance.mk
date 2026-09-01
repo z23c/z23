@@ -38,6 +38,7 @@ ZCL_WINDOWS_ACCEPTANCE_TESTS := \
 	nat_gateway \
 	package_lifecycle_store_refusal \
 	package_prepare \
+	path_replace \
 	os_binary_slots_refusal \
 	os_proc_pid_image \
 	os_proc_self_image \
@@ -334,6 +335,9 @@ ZCL_WINDOWS_ACCEPTANCE_package_prepare_SOURCES := \
 ZCL_WINDOWS_ACCEPTANCE_package_prepare_FLAGS := \
 	-ffunction-sections -fdata-sections
 ZCL_WINDOWS_ACCEPTANCE_package_prepare_LIBS := -Wl,--gc-sections
+ZCL_WINDOWS_ACCEPTANCE_path_replace_SOURCES := \
+	platform/modules/platform/tests/path_replace_windows_acceptance.c \
+	platform/modules/platform/src/path_replace.c
 ZCL_WINDOWS_ACCEPTANCE_os_binary_slots_refusal_SOURCES := \
 	tests/harness/src/os_binary_slots_refusal_acceptance.c \
 	platform/modules/platform/src/os_binary_slots.c

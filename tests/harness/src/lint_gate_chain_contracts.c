@@ -507,7 +507,7 @@ int t_block_index_flat_atomic_save_contract(void)
          * so the pin names the seam instead. The contract itself is
          * unchanged and just as strict: the tmp descriptor must be flushed
          * to stable storage, and that flush must sit strictly between the
-         * fopen and the publishing rename. */
+         * fopen and the publishing platform replace. */
         ASSERT(repo_path(path, sizeof(path),
                          "engine/modules/storage/src/sha3_sidecar_io.c") == 0);
         ASSERT(read_entire_file(path, &buf) == 0);
@@ -515,14 +515,15 @@ int t_block_index_flat_atomic_save_contract(void)
         ASSERT(fn != NULL);
         char *open_tmp  = strstr(fn, "fopen(tmp_path, \"wb\")");
         char *fsync_fd  = strstr(fn, "(void)platform_file_sync(fd)");
-        char *rename_tmp = strstr(fn, "rename(tmp_path, body_path)");
+        char *replace_tmp = strstr(
+            fn, "platform_path_replace(tmp_path, body_path)");
         char *unlink_err = strstr(fn, "unlink(tmp_path)");
         ASSERT(open_tmp != NULL);
         ASSERT(fsync_fd != NULL);
-        ASSERT(rename_tmp != NULL);
+        ASSERT(replace_tmp != NULL);
         ASSERT(unlink_err != NULL);
         ASSERT(open_tmp < fsync_fd);
-        ASSERT(fsync_fd < rename_tmp);
+        ASSERT(fsync_fd < replace_tmp);
         PASS();
     } _test_next:;
     free(buf);

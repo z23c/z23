@@ -189,12 +189,23 @@ int test_shutdown_stagewatch(void)
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
 
-    /* (f) end-to-end clean flow writes a durable receipt into the datadir. */
-    printf("shutdown_stagewatch end-to-end clean receipt on disk ... ");
+    /* (f) End-to-end clean flow replaces the previous receipt. Windows CRT
+     * rename() refuses this exact steady-state case, so pre-seeding stale
+     * content makes the platform contract observable on every run. */
+    printf("shutdown_stagewatch end-to-end replacement receipt on disk ... ");
     {
         char dir[] = "/tmp/zcl_swdd_XXXXXX";
         bool ok = mkdtemp(dir) != NULL;
         if (ok) {
+            char rpath[512];
+            snprintf(rpath, sizeof(rpath), "%s/shutdown-receipt.v1", dir);
+            FILE *stale = fopen(rpath, "wb");
+            if (!stale) {
+                ok = false;
+            } else {
+                bool wrote = fwrite("outcome=stale\n", 1, 14, stale) == 14;
+                ok = wrote && fclose(stale) == 0;
+            }
             shutdown_stagewatch_reset_for_test();
             g_fake_us = 5000000LL;
             shutdown_stagewatch_set_clock_for_test(fake_clock);
@@ -209,8 +220,6 @@ int test_shutdown_stagewatch(void)
             clock_advance_s(1);
             shutdown_stagewatch_complete_clean();
 
-            char rpath[512];
-            snprintf(rpath, sizeof(rpath), "%s/shutdown-receipt.v1", dir);
             ok = ok &&
                  file_contains(rpath, "outcome=clean\n") &&
                  file_contains(rpath, "durable=1\n") &&

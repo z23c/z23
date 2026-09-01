@@ -772,6 +772,7 @@ ZCL_MODULE_CAPABILITY("platform/modules/platform/src/os_proc.c", CAP_FS_READ|CAP
 ZCL_MODULE_CAPABILITY("platform/modules/platform/src/os_proc_mem.c", CAP_FS_READ|CAP_CLOCK|CAP_PRIVILEGE, "reads Darwin task and kernel resource facts for bounded process introspection")
 ZCL_MODULE_CAPABILITY("platform/modules/platform/src/os_sandbox_linux.c", CAP_PROCESS|CAP_FS_WRITE|CAP_FS_READ|CAP_PRIVILEGE, "the Linux backing for the process-confinement builders: forks the sandboxed child, narrows its privileges, and manages the filesystem view it is confined to")
 ZCL_MODULE_CAPABILITY("platform/modules/platform/src/os_sandbox_stub.c", CAP_FS_READ|CAP_PRIVILEGE, "reads Darwin process identity and kernel facts only to report the fail-closed confinement boundary")
+ZCL_MODULE_CAPABILITY("platform/modules/platform/src/path_replace.c", CAP_FS_WRITE, "atomic same-filesystem staged-file replacement, with UTF-8 and extended-length pathname support on Windows")
 ZCL_MODULE_CAPABILITY("platform/modules/platform/src/positioned_file.c", CAP_FS_READ|CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("platform/modules/platform/src/positioned_io.c", CAP_FS_READ|CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("platform/modules/platform/src/private_destination.c", CAP_FS_WRITE, "")
