@@ -704,6 +704,11 @@ ZCL_TEST_GROUP(retrieval)
  * features as INCOMPLETE. Candidate set and configured top-k byte ceiling are
  * preserved without seeing reviewed gold or scope labels. */
 ZCL_TEST_GROUP(retrieval_experiment)
+/* One relevance-free profile specialization changes only context_byte_scale,
+ * projects parent and child against the same exact feature snapshot, and
+ * binds both outcomes into immutable immediate-parent heuristic lineage. It
+ * grants no evaluation, attention, lifecycle, or activation authority. */
+ZCL_TEST_GROUP(retrieval_profile_evolution)
 /* One exact retrieval evaluator observation is rooted, structurally bound to
  * its heuristic/proposal/batch/evaluator, and used only as attributed input
  * to the non-authoritative attention frontier. */

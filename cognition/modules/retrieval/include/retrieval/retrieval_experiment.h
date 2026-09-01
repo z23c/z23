@@ -255,6 +255,12 @@ enum zcl_retrieval_experiment_error zcl_retrieval_profile_parse(
 enum zcl_retrieval_experiment_error zcl_retrieval_profile_root(
     const struct zcl_retrieval_profile_v1 *profile, uint8_t out[32]);
 
+/* Canonical query identity shared by feature extractors and composition
+ * services. Keeping this in retrieval prevents a second owner from silently
+ * relabeling an exact snapshot with different query bytes. */
+enum zcl_retrieval_experiment_error zcl_retrieval_query_root(
+    const char *query, uint8_t out[32]);
+
 /* Root and project are relevance-free. They accept no gold, evaluator score,
  * scope label or acceptance input. Rows are in exact baseline-rank order;
  * the root commits declared identities and observation bytes but does not

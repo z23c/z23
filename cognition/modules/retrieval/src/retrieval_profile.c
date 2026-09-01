@@ -49,6 +49,30 @@ static bool rx_canonical_path(const char *path, size_t *length_out)
     return true;
 }
 
+enum zcl_retrieval_experiment_error zcl_retrieval_query_root(
+    const char *query, uint8_t out[32])
+{
+    if (!query || !out) return ZCL_RETRIEVAL_EXPERIMENT_NULL;
+    size_t query_length = 0;
+    while (query_length <= 4096u && query[query_length]) query_length++;
+    if (query_length == 0 || query_length > 4096u)
+        return ZCL_RETRIEVAL_EXPERIMENT_BINDING;
+    if (rx_memory_overlaps(out, 32u, query, query_length + 1u))
+        return ZCL_RETRIEVAL_EXPERIMENT_ALIAS;
+    struct sha3_256_ctx sha;
+    static const char query_domain[] = "zcl.retrieval_query.v1";
+    uint8_t encoded[8], root[32];
+    sha3_256_init(&sha);
+    sha3_256_write(&sha, (const uint8_t *)query_domain,
+                   sizeof(query_domain));
+    zcl_write_u64_le(encoded, query_length);
+    sha3_256_write(&sha, encoded, sizeof(encoded));
+    sha3_256_write(&sha, (const uint8_t *)query, query_length);
+    sha3_256_finalize(&sha, root);
+    memcpy(out, root, sizeof(root));
+    return ZCL_RETRIEVAL_EXPERIMENT_OK;
+}
+
 static enum zcl_retrieval_experiment_error rx_snapshot_validate(
     const struct zcl_retrieval_feature_snapshot_v1 *snapshot,
     const struct zcl_retrieval_feature_row_v1 *rows)
@@ -256,16 +280,10 @@ zcl_retrieval_context_feature_snapshot(
             baseline, baseline_count, baseline_complete,
             snapshot.baseline_ranking_root))
         return ZCL_RETRIEVAL_EXPERIMENT_BINDING;
+    if (zcl_retrieval_query_root(query, snapshot.query_root) !=
+            ZCL_RETRIEVAL_EXPERIMENT_OK)
+        return ZCL_RETRIEVAL_EXPERIMENT_BINDING;
     struct sha3_256_ctx sha;
-    static const char query_domain[] = "zcl.retrieval_query.v1";
-    uint8_t encoded[8];
-    sha3_256_init(&sha);
-    sha3_256_write(&sha, (const uint8_t *)query_domain,
-                   sizeof(query_domain));
-    zcl_write_u64_le(encoded, query_length);
-    sha3_256_write(&sha, encoded, sizeof(encoded));
-    sha3_256_write(&sha, (const uint8_t *)query, query_length);
-    sha3_256_finalize(&sha, snapshot.query_root);
     static const char extractor_domain[] =
         "zcl.retrieval_context_feature_extractor.v1";
     sha3_256_init(&sha);

@@ -463,6 +463,7 @@ ZCL_MODULE_CAPABILITY("cognition/services/src/zcode_agent_context_service.c", CA
 ZCL_MODULE_CAPABILITY("contexts/commons/services/src/zcode_benchmark_executor.c", CAP_PROCESS|CAP_FS_WRITE|CAP_CLOCK|CAP_FS_READ, "runs the closed S4 benchmark/reproduction executor, which forks a sandboxed child process and reads/writes its scratch workspace")
 ZCL_MODULE_CAPABILITY("contexts/commons/services/src/zcode_benchmark_sandbox_selfcheck.c", CAP_PROCESS|CAP_FS_READ|CAP_FS_WRITE|CAP_NETWORK, "spawns and probes the benchmark sandbox canary, including a network-isolation self-check, to prove the sandbox actually confines its child")
 ZCL_MODULE_CAPABILITY("cognition/services/src/zcode_goal_context_service.c", CAP_FS_WRITE, "opens the source-view code index, whose documented lifecycle creates or deterministically rebuilds <workspace>/.codeindex/index.kv when missing or stale")
+ZCL_MODULE_CAPABILITY("cognition/services/src/zcode_retrieval_profile_evolution_service.c", CAP_NONE, "pure proposal-only retrieval specialization; grants no evaluation, attention, lifecycle, execution, or activation authority")
 ZCL_MODULE_CAPABILITY("contexts/commons/services/src/zcode_lane_service.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("contexts/commons/services/src/zcode_pointer.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("cognition/services/src/zcode_science_carrier.c", CAP_FS_WRITE, "")
