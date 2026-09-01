@@ -14,10 +14,14 @@
 #ifndef ZCL_JOBS_UTXO_APPLY_CREATED_OUTPUTS_PRUNE_H
 #define ZCL_JOBS_UTXO_APPLY_CREATED_OUTPUTS_PRUNE_H
 
+#include <stdbool.h>
+
 /* Best-effort post-commit retention prune of the created_outputs projection.
  * No-op when the projection store is not open. Acquires
  * projection_store_tx_lock() for a strictly-sequential (never nested wrt the
  * kernel lock) transaction on the projection handle. */
-void utxo_apply_created_outputs_prune_post_commit(void);
+/* True only when a prune transaction committed; false for a cadence skip,
+ * unavailable store, or failed transaction. */
+bool utxo_apply_created_outputs_prune_post_commit(void);
 
 #endif /* ZCL_JOBS_UTXO_APPLY_CREATED_OUTPUTS_PRUNE_H */

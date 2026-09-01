@@ -98,8 +98,12 @@ int utxo_apply_stage_drain(int max_steps)
     /* Post-commit, own-tx created_outputs prune (lane A1) — only after the
      * kernel batch durably committed at least one advance, and only once the
      * kernel tx lock has been released above (strictly sequential locks). */
-    if (committed && advanced > 0)
-        utxo_apply_created_outputs_prune_post_commit();
+    if (committed && advanced > 0) {
+        int64_t prune_t0 = GetTimeMicros();
+        bool prune_ran = utxo_apply_created_outputs_prune_post_commit();
+        utxo_apply_batch_post_commit_record(GetTimeMicros() - prune_t0,
+                                            prune_ran);
+    }
 
     return advanced;
 }

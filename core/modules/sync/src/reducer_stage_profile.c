@@ -132,6 +132,9 @@ static const char *const g_field_names[RPF_FIELD_COUNT] = {
     [RPF_UA_NULLIFIERS_US] = "ua_nullifiers_us",
     [RPF_UA_DELTA_PERSIST_US] = "ua_delta_persist_us",
     [RPF_TF_POST_FINALIZE_US] = "tf_post_finalize_us",
+    [RPF_FRAMEWORK_US] = "stage_framework_us",
+    [RPF_WINDOW_EXTEND_US] = "window_extend_us",
+    [RPF_REORG_AUDIT_US] = "reorg_audit_us",
 };
 
 static void rollover_if_needed(struct profile_domain *p, uint64_t generation)

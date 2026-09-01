@@ -107,6 +107,14 @@ enum reducer_profile_field {
     RPF_UA_NULLIFIERS_US,
     RPF_UA_DELTA_PERSIST_US,
     RPF_TF_POST_FINALIZE_US,
+    /* Shared stage-runner and authoritative-window wrapper coverage. These
+     * close the gap between reducer_drain's wall clock and RPF_TOTAL_US:
+     * cursor/savepoint framework work lives outside the stage step body,
+     * while window exposure and the UTXO reorg audit live outside
+     * stage_run_once entirely. */
+    RPF_FRAMEWORK_US,
+    RPF_WINDOW_EXTEND_US,
+    RPF_REORG_AUDIT_US,
     /* The `present`/`last_present` bitmask is ONE uint64_t per domain and a
      * field's bit is `UINT64_C(1) << field`, so the highest legal field index
      * is 63 and RPF_FIELD_COUNT must stay <= 64. Exceeding it shifts out of

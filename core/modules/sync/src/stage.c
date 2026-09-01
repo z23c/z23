@@ -489,6 +489,7 @@ job_result_t stage_run_once(stage_t *s, sqlite3 *db)
         return stage_note_fatal(s, "run_once: null arg");
     }
 
+    int64_t run_t0 = GetTimeMicros();
     pthread_mutex_lock(&s->lock);
     progress_store_tx_lock();
 
@@ -588,17 +589,25 @@ job_result_t stage_run_once(stage_t *s, sqlite3 *db)
          * record this themselves and three never did, so a fold profile could
          * show the parts and never the whole -- the 2026-08-24 C3 cold-start
          * artifact accounted for only a quarter of its own wall time because
-         * utxo_apply and tip_finalize reported no total at all. Measured here,
-         * every domain means the same thing and includes the savepoint and
-         * cursor write that a step genuinely costs. Advancing steps only, so
-         * idle ticks waiting on an upstream frontier never dilute us/block. */
+         * utxo_apply and tip_finalize reported no total at all. TOTAL begins
+         * before the stage/cursor locks and therefore includes cursor read,
+         * savepoint open, the step body, cursor write, and savepoint release.
+         * FRAMEWORK isolates the pre-body portion that the old step_t0-based
+         * total silently omitted. Advancing steps only, so idle ticks waiting
+         * on an upstream frontier never dilute us/block. */
         {
             int prof_domain = reducer_stage_profile_domain_for(s->name);
             if (prof_domain >= 0) {
-                int64_t prof_us = GetTimeMicros() - step_t0;
+                int64_t now_us = GetTimeMicros();
+                int64_t prof_us = now_us - run_t0;
+                int64_t framework_us = step_t0 - run_t0;
                 reducer_stage_profile_observe_us(
                     (enum reducer_profile_domain)prof_domain, RPF_TOTAL_US,
                     prof_us > 0 ? (uint64_t)prof_us : 0);
+                reducer_stage_profile_observe_us(
+                    (enum reducer_profile_domain)prof_domain,
+                    RPF_FRAMEWORK_US,
+                    framework_us > 0 ? (uint64_t)framework_us : 0);
                 reducer_stage_profile_add(
                     (enum reducer_profile_domain)prof_domain, RPF_BLOCKS, 1);
             }

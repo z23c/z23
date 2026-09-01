@@ -30,10 +30,17 @@
  * call that issued the COMMIT (includes any pre-commit fsync hook). Emits
  * one LOG_INFO("[batch_commit] heights=%d..%d rows=%d commit_us=%lld ...")
  * line and folds the sample into a rolling ring buffer + EWMA + running
- * max. Cheap: one mutex, no allocation, no I/O beyond the log line itself.
+ * max. The companion post-commit record separates every cleanup check from
+ * the subset that actually runs the height-cadenced retention transaction.
+ * Cheap: one mutex, no allocation, no I/O beyond the commit log line itself.
  * Reentrant-safe. */
 void utxo_apply_batch_commit_record(int64_t height_before_batch, int rows,
                                      int64_t commit_us);
+
+/* Record a post-commit cleanup check. prune_ran distinguishes a cheap cadence
+ * skip from a committed retention transaction; prune_us is accumulated only
+ * for the latter so its latency EWMA remains honest. */
+void utxo_apply_batch_post_commit_record(int64_t prune_us, bool prune_ran);
 
 /* Test-only: reset every rolling-stats field to its zero state. The
  * telemetry is process-global (one drain loop applies at a time, mirroring

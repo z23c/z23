@@ -153,9 +153,15 @@ static bool p2p_minimum_viable(const struct bsp_plan_input *in,
         return false;
     if (ph->healthy >= 3)
         return true;
-    if (ph->healthy < 2)
-        return false;
-    if (ph->healthy_ipv4_group_count < 2)
+    /* Three diverse outbound peers remains the operating-health target, but
+     * it is not a consensus prerequisite for downloading inert block bytes.
+     * Sparse public networks commonly expose one usable archival peer. When
+     * that peer advertises the already-selected header frontier (or better),
+     * let the normal local consensus pipeline validate its bodies while peer
+     * discovery continues trying to restore redundancy. Treating the ideal
+     * floor as an activation gate leaves a fully validating node permanently
+     * idle with download_requested=0. */
+    if (ph->healthy < 1)
         return false;
     if (p2p->height < 0)
         return false;
@@ -167,6 +173,9 @@ static bool p2p_minimum_viable(const struct bsp_plan_input *in,
             return true;
         if (local_gap > 1)
             return false;
+        /* A source one block behind local state cannot advance us by itself;
+         * retain the existing inbound corroboration requirement for that
+         * near-tip posture. */
         return ph->inbound_healthy > 0;
     }
     return true;

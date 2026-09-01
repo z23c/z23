@@ -34,6 +34,12 @@ static int64_t  g_last_commit_us;
 static int64_t  g_commit_us_ewma;
 static int64_t  g_commit_us_max;
 
+static uint64_t g_total_post_commits;
+static uint64_t g_total_prune_runs;
+static int64_t  g_last_prune_us;
+static int64_t  g_prune_us_ewma;
+static int64_t  g_prune_us_max;
+
 static int32_t g_last_height_lo = -1;
 static int32_t g_last_height_hi = -1;
 static int32_t g_last_rows;
@@ -76,6 +82,24 @@ void utxo_apply_batch_commit_record(int64_t height_before_batch, int rows,
     pthread_mutex_unlock(&g_lock);
 }
 
+void utxo_apply_batch_post_commit_record(int64_t prune_us, bool prune_ran)
+{
+    pthread_mutex_lock(&g_lock);
+    g_total_post_commits++;
+    if (prune_ran) {
+        if (prune_us <= 0)
+            prune_us = 1;
+        g_prune_us_ewma = (g_total_prune_runs == 0)
+            ? prune_us
+            : g_prune_us_ewma + (prune_us - g_prune_us_ewma) / 16;
+        if (prune_us > g_prune_us_max)
+            g_prune_us_max = prune_us;
+        g_total_prune_runs++;
+        g_last_prune_us = prune_us;
+    }
+    pthread_mutex_unlock(&g_lock);
+}
+
 void utxo_apply_batch_commit_reset_for_test(void)
 {
     pthread_mutex_lock(&g_lock);
@@ -87,6 +111,11 @@ void utxo_apply_batch_commit_reset_for_test(void)
     g_last_commit_us = 0;
     g_commit_us_ewma = 0;
     g_commit_us_max = 0;
+    g_total_post_commits = 0;
+    g_total_prune_runs = 0;
+    g_last_prune_us = 0;
+    g_prune_us_ewma = 0;
+    g_prune_us_max = 0;
     g_last_height_lo = -1;
     g_last_height_hi = -1;
     g_last_rows = 0;
@@ -105,6 +134,11 @@ bool utxo_apply_batch_commit_dump_state_json(struct json_value *out,
     int64_t  last_us  = g_last_commit_us;
     int64_t  ewma      = g_commit_us_ewma;
     int64_t  max_us    = g_commit_us_max;
+    uint64_t post_total = g_total_post_commits;
+    uint64_t prune_total = g_total_prune_runs;
+    int64_t  prune_last = g_last_prune_us;
+    int64_t  prune_ewma = g_prune_us_ewma;
+    int64_t  prune_max  = g_prune_us_max;
     int32_t  last_lo   = g_last_height_lo;
     int32_t  last_hi   = g_last_height_hi;
     int32_t  last_rows = g_last_rows;
@@ -118,6 +152,11 @@ bool utxo_apply_batch_commit_dump_state_json(struct json_value *out,
     json_push_kv_int(out, "last_commit_us", last_us);
     json_push_kv_int(out, "commit_us_ewma", ewma);
     json_push_kv_int(out, "commit_us_max", max_us);
+    json_push_kv_int(out, "total_post_commits", (int64_t)post_total);
+    json_push_kv_int(out, "total_prune_runs", (int64_t)prune_total);
+    json_push_kv_int(out, "last_prune_us", prune_last);
+    json_push_kv_int(out, "prune_us_ewma", prune_ewma);
+    json_push_kv_int(out, "prune_us_max", prune_max);
     json_push_kv_int(out, "ring_samples", (int64_t)ring_n);
     json_push_kv_int(out, "ring_avg_us", ring_n ? ring_sum / (int64_t)ring_n : 0);
     json_push_kv_int(out, "last_height_lo", last_lo);

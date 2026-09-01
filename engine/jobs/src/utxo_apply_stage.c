@@ -774,7 +774,11 @@ job_result_t utxo_apply_stage_step_once(void)
      * most-work candidate so both the reorg-unwind detection and the
      * forward-apply below (each reads active_chain_at) see the winning
      * branch. The stage is the sole UTXO authority, so this always runs. */
+    int64_t window_t0 = platform_time_monotonic_us();
     reducer_extend_window_to_candidate(g_ms, true);
+    reducer_stage_profile_observe_us(
+        REDUCER_PROFILE_UTXO_APPLY, RPF_WINDOW_EXTEND_US,
+        (uint64_t)(platform_time_monotonic_us() - window_t0));
 
     /* Mark THIS thread as the coins_ram writer for the fold step (the UAF
      * guard — see coins_ram.h). The overlay is mutated by apply_coins_kv →
@@ -790,10 +794,14 @@ job_result_t utxo_apply_stage_step_once(void)
      * after us, reads our cursor). Self-contained txn; on failure the
      * cursor is untouched so the next tick retries. */
     progress_store_tx_lock();
+    int64_t reorg_t0 = platform_time_monotonic_us();
     bool unwind_ok = !utxo_apply_reorg_batch_should_audit() ||
         utxo_apply_reorg_unwind_if_needed(db, g_stage, g_ms,
                                           &g_ua_reorg_unwound_total,
                                           &g_ua_last_blocked_unix);
+    reducer_stage_profile_observe_us(
+        REDUCER_PROFILE_UTXO_APPLY, RPF_REORG_AUDIT_US,
+        (uint64_t)(platform_time_monotonic_us() - reorg_t0));
     if (!unwind_ok) {
         progress_store_tx_unlock();
         coins_ram_writer_exit();

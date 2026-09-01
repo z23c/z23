@@ -966,6 +966,56 @@ static int test_bsp_selects_viable_caught_up_p2p(void)
     return failures;
 }
 
+static int test_bsp_selects_single_caught_up_p2p(void)
+{
+    int failures = 0;
+    TEST_CASE("block_source_policy: one caught-up peer can feed validation")
+    {
+        struct connman cm;
+        struct main_state ms;
+        struct block_index tip;
+        struct block_index best_header;
+        struct json_value root;
+        const struct json_value *sources;
+        const struct json_value *p2p;
+
+        memset(&cm, 0, sizeof(cm));
+        memset(&ms, 0, sizeof(ms));
+        memset(&tip, 0, sizeof(tip));
+        memset(&best_header, 0, sizeof(best_header));
+        net_manager_init(&cm.manager);
+        main_state_init(&ms);
+        cm.manager.nodes = zcl_calloc(1, sizeof(*cm.manager.nodes),
+                                      "bsp_test_single_p2p_node");
+        cm.manager.nodes_cap = 1;
+        tip.nHeight = 100;
+        best_header.nHeight = 130;
+        ASSERT(active_chain_move_window_tip(&ms.chain_active, &tip));
+        ms.pindex_best_header = &best_header;
+        ASSERT(test_bsp_add_peer(&cm, 10, 1, 0, 1,
+                                 PEER_HANDSHAKE_COMPLETE) != NULL);
+
+        block_source_policy_reset_for_test();
+        block_source_policy_init(&cm, &ms, NULL);
+        json_init(&root);
+        ASSERT(block_source_policy_dump_state_json(&root, NULL));
+        ASSERT_STR_EQ(json_get_str(json_get(&root, "selected_source")),
+                      "p2p");
+        sources = json_get(&root, "sources");
+        p2p = find_source_json(sources, "p2p");
+        ASSERT(p2p != NULL);
+        ASSERT(json_get_bool(json_get(p2p, "healthy")));
+        ASSERT(json_get_int(json_get(p2p, "healthy_peers")) == 1);
+        ASSERT_STR_EQ(json_get_str(json_get(p2p, "selection_blocker")), "");
+        json_free(&root);
+
+        block_source_policy_reset_for_test();
+        main_state_free(&ms);
+        net_manager_free(&cm.manager);
+    } TEST_END
+    return failures;
+}
+
 static int test_bsp_inbound_assists_near_tip_p2p(void)
 {
     int failures = 0;
@@ -1954,6 +2004,7 @@ int test_block_source_policy(void)
     failures += test_bsp_projection_deferral_accounting();
     failures += test_bsp_dump_populates_p2p_diversity();
     failures += test_bsp_selects_viable_caught_up_p2p();
+    failures += test_bsp_selects_single_caught_up_p2p();
     failures += test_bsp_inbound_assists_near_tip_p2p();
     failures += test_bsp_dump_explains_stale_p2p_height();
     failures += test_bsp_dump_populates_live_snapshot_source();

@@ -28,10 +28,17 @@
 #define STAGE_NAME "utxo_apply"
 
 /* Keep a large margin over the IBD reorg allowance plus the block-download
- * lookahead, then prune a bounded number of old heights per drain. */
+ * lookahead. Cleanup is intentionally height-cadenced: the projection has no
+ * consensus value and bounded reads ignore rows below their requested range,
+ * while a DELETE transaction on a large Windows SQLite file has measured at
+ * 2-4 seconds. Paying it after every one-block network batch serialized IBD.
+ * One sweep per 1024 applied heights bounds the temporary excess to 1023
+ * heights and deletes at most that same bounded span. */
 #define CREATED_OUTPUTS_PRUNE_RETAIN_BLOCKS \
     (MAX_IBD_REORG_LENGTH + BLOCK_DOWNLOAD_WINDOW + 1024)
-#define CREATED_OUTPUTS_PRUNE_MAX_HEIGHTS_PER_STEP 32
+#define CREATED_OUTPUTS_PRUNE_CADENCE_BLOCKS 1024
+#define CREATED_OUTPUTS_PRUNE_MAX_HEIGHTS_PER_STEP \
+    CREATED_OUTPUTS_PRUNE_CADENCE_BLOCKS
 
 /* Test observability: how many post-commit prune tx committed, and the
  * retention floor of the most recent one. */
@@ -66,11 +73,24 @@ static int utxo_apply_created_outputs_retain(void)
  * bounded post-commit DELETE cannot stall an in-flight fold. The cursor it
  * snapshots for the floor is read inside this tx (a read, never a stage_cursor
  * write — the reducer stays the cursor's single writer). */
-void utxo_apply_created_outputs_prune_post_commit(void)
+bool utxo_apply_created_outputs_prune_post_commit(void)
 {
     sqlite3 *db = progress_store_db();
     if (!db)
-        return;
+        return false;
+
+    int retain_override = atomic_load(&g_ua_created_outputs_retain_for_test);
+    int retain = retain_override >= 0
+        ? retain_override : CREATED_OUTPUTS_PRUNE_RETAIN_BLOCKS;
+    int cursor_hint = utxo_apply_stage_cursor();
+    if (cursor_hint <= retain)
+        return false;
+    int64_t floor_hint = (int64_t)cursor_hint - retain;
+    int64_t last_floor = atomic_load(&g_ua_post_prune_last_floor);
+    if (retain_override < 0 && last_floor >= 0 &&
+        floor_hint < last_floor + CREATED_OUTPUTS_PRUNE_CADENCE_BLOCKS)
+        return false;
+
     progress_store_tx_lock();
     char *err = NULL;
     if (sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, &err) != SQLITE_OK) {
@@ -79,24 +99,26 @@ void utxo_apply_created_outputs_prune_post_commit(void)
                  err ? err : "(no message)");
         if (err) sqlite3_free(err);
         progress_store_tx_unlock();
-        return;
+        return false;
     }
     /* Snapshot the committed cursor INSIDE the tx for a consistent floor. */
     uint64_t cursor = stage_cursor_persisted(db, STAGE_NAME, STAGE_NAME);
-    int retain = utxo_apply_created_outputs_retain();
+    retain = utxo_apply_created_outputs_retain();
     if (cursor <= (uint64_t)retain) {
         sqlite3_exec(db, "COMMIT", NULL, NULL, NULL);
         progress_store_tx_unlock();
-        return;
+        return false;
     }
     int prune_floor = (int)cursor - retain;
     int pruned_rows = 0;
     bool ok = created_outputs_index_prune_below_limited(
         db, prune_floor, CREATED_OUTPUTS_PRUNE_MAX_HEIGHTS_PER_STEP,
         &pruned_rows);
+    bool committed = false;
     if (ok && sqlite3_exec(db, "COMMIT", NULL, NULL, &err) == SQLITE_OK) {
         atomic_fetch_add(&g_ua_post_prune_runs, 1);
         atomic_store(&g_ua_post_prune_last_floor, (int64_t)prune_floor);
+        committed = true;
     } else {
         if (err) {
             LOG_WARN(STAGE_NAME,
@@ -112,4 +134,5 @@ void utxo_apply_created_outputs_prune_post_commit(void)
         sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
     }
     progress_store_tx_unlock();
+    return committed;
 }

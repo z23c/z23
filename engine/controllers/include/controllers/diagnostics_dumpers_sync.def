@@ -144,9 +144,11 @@
                "engine/jobs/src/utxo_apply_stage_dump.c", "tests/harness/src/test_stage.c"),
     DIAG_JOB("batch_commit", utxo_apply_batch_commit_dump_state_json,
              "utxo_apply kernel outer-batch COMMIT telemetry: total_commits, "
-             "last/ewma/max commit_us, a rolling ring average, and the last "
-             "batch's height range + row count — turns a slow fsync / "
-             "degraded WAL into visible data instead of a silent stall",
+             "last/ewma/max commit_us, post-commit calls vs actual retention "
+             "prune runs with last/ewma/max prune_us, a rolling commit "
+             "average, and the last batch's height range + row count — "
+             "separates slow fsync from projection cleanup instead of "
+             "leaving either as a silent stall",
              "engine/jobs/src/utxo_apply_batch_commit.c",
              "tests/harness/src/test_utxo_apply_stage.c"),
     DIAG_LOCAL("reducer_drive", reducer_drive_dump_state_json,

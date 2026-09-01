@@ -2411,6 +2411,8 @@ int test_utxo_apply_stage(void)
                  json_get_int(json_get(&idle, "total_commits")) == 0);
         UV_CHECK("batch_commit: idle ring_samples == 0",
                  json_get_int(json_get(&idle, "ring_samples")) == 0);
+        UV_CHECK("batch_commit: idle post-commit samples == 0",
+                 json_get_int(json_get(&idle, "total_post_commits")) == 0);
         json_free(&idle);
 
         /* Drain all N heights in one call -> exactly one outer-batch COMMIT,
@@ -2428,6 +2430,9 @@ int test_utxo_apply_stage(void)
                  json_get_int(json_get(&after1, "total_commits")) == 1);
         UV_CHECK("batch_commit: ring_samples == 1 after one drain",
                  json_get_int(json_get(&after1, "ring_samples")) == 1);
+        UV_CHECK("batch_commit: prune sample recorded after advancing drain",
+                 json_get_int(json_get(&after1,
+                                       "total_post_commits")) == 1);
         /* Heights are 0-indexed (h=0..N-1) and g_ua_last_advance_height
          * starts at -1 (fresh init), so a first-ever batch that folds all N
          * heights reports the range 0..N-1. */
@@ -2463,6 +2468,8 @@ int test_utxo_apply_stage(void)
             utxo_apply_batch_commit_record((int64_t)(i * 10), 1, samples[i]);
             ewma = (i == 0) ? samples[i] : ewma + (samples[i] - ewma) / 16;
         }
+        utxo_apply_batch_post_commit_record(500, true);
+        utxo_apply_batch_post_commit_record(660, true);
         struct json_value synth;
         json_init(&synth);
         UV_CHECK("batch_commit: synthetic dump",
@@ -2477,6 +2484,12 @@ int test_utxo_apply_stage(void)
                  json_get_int(json_get(&synth, "commit_us_max")) == 400);
         UV_CHECK("batch_commit: synthetic ring_avg_us == mean(100,200,300,400)",
                  json_get_int(json_get(&synth, "ring_avg_us")) == 250);
+        UV_CHECK("batch_commit: synthetic prune EWMA and max",
+                 json_get_int(json_get(&synth,
+                                       "total_prune_runs")) == 2 &&
+                 json_get_int(json_get(&synth, "last_prune_us")) == 660 &&
+                 json_get_int(json_get(&synth, "prune_us_ewma")) == 510 &&
+                 json_get_int(json_get(&synth, "prune_us_max")) == 660);
         UV_CHECK("batch_commit: synthetic last_height_lo/hi == last record's "
                  "folded height (30+1)",
                  json_get_int(json_get(&synth, "last_height_lo")) == 31 &&

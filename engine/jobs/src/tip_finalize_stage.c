@@ -726,7 +726,11 @@ job_result_t tip_finalize_stage_step_once(void)
      * extend and step_finalize's decision. stage_helpers.h
      * Lock-order: progress_store_tx_lock -> active_chain.write_lock;
      * reverse does not exist (active_chain_fill_window is array-only). */
+    int64_t window_t0 = platform_time_monotonic_us();
     reducer_extend_window_to_candidate(g_ms, true);
+    reducer_stage_profile_observe_us(
+        REDUCER_PROFILE_TIP_FINALIZE, RPF_WINDOW_EXTEND_US,
+        (uint64_t)(platform_time_monotonic_us() - window_t0));
     bool rewind_ok = rewind_cursor_if_active_chain_reorged(db);
     if (!rewind_ok) {
         progress_store_tx_unlock();
