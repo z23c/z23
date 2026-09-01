@@ -89,9 +89,9 @@ static int case_projection_binding(void)
     char workspace[PLATFORM_TEMP_PATH_MAX] = {0};
     bool ready = platform_temp_directory_create(
             "z23-rg-bind-", temporary, sizeof(temporary)) &&
-        rg_write(temporary, "lib/net/src/generation.c", rg_source_a) &&
         platform_directory_canonical_real(
-            temporary, workspace, sizeof(workspace));
+            temporary, workspace, sizeof(workspace)) &&
+        rg_write(workspace, "lib/net/src/generation.c", rg_source_a);
     uint8_t expected[32];
     ready = ready && rg_manifest_root(workspace, expected);
     char expected_hex[65];
@@ -105,7 +105,7 @@ static int case_projection_binding(void)
         json_push_kv_str(&input, "task_id", "projection-binding") &&
         json_push_kv_str(&input, "query", "generation function");
     struct zcl_native_dev_retrieval_snapshot snapshot = {0};
-    char error_code[64], error_message[256];
+    char error_code[64] = {0}, error_message[256] = {0};
     int rc = ready ? zcl_native_dev_retrieval_snapshot_compute(
         &input, &snapshot, error_code, sizeof(error_code),
         error_message, sizeof(error_message)) : ZCL_COMMAND_EXIT_INTERNAL;
@@ -319,12 +319,14 @@ static bool rg_aba_hook(enum zcl_native_dev_retrieval_test_phase phase,
     if (!schedule) return false;
     if (phase == ZCL_NATIVE_DEV_RETRIEVAL_TEST_BEFORE_CODEINDEX_OPEN) {
         schedule->before_open++;
-        return rg_write(schedule->workspace, "lib/net/src/generation.c",
+        return rg_write(schedule->workspace,
+                        "lib/net/src/generation.c",
                         rg_source_b);
     }
     if (phase == ZCL_NATIVE_DEV_RETRIEVAL_TEST_BEFORE_POST_CAPTURE) {
         schedule->before_post++;
-        return rg_write(schedule->workspace, "lib/net/src/generation.c",
+        return rg_write(schedule->workspace,
+                        "lib/net/src/generation.c",
                         rg_source_a);
     }
     return false;
@@ -335,14 +337,17 @@ static int case_aba_generation_join(void)
     int failures = 0;
     char temporary[PLATFORM_TEMP_PATH_MAX] = {0};
     char workspace[PLATFORM_TEMP_PATH_MAX] = {0};
-    bool ready = sizeof(rg_source_a) == sizeof(rg_source_b) &&
-        platform_temp_directory_create("z23-rg-", temporary,
-                                       sizeof(temporary)) &&
-        rg_write(temporary, "lib/net/src/generation.c", rg_source_a);
-    ready = ready && platform_directory_canonical_real(
+    bool same_size = sizeof(rg_source_a) == sizeof(rg_source_b);
+    bool temp_created = platform_temp_directory_create(
+        "z23-rg-", temporary, sizeof(temporary));
+    bool canonical = temp_created && platform_directory_canonical_real(
         temporary, workspace, sizeof(workspace));
+    bool source_written = canonical && rg_write(
+        workspace, "lib/net/src/generation.c", rg_source_a);
     uint8_t expected[32];
-    ready = ready && rg_manifest_root(workspace, expected);
+    bool manifested = source_written && rg_manifest_root(workspace, expected);
+    bool ready = same_size && temp_created && source_written && canonical &&
+        manifested;
     char expected_hex[65];
     if (ready) zcl_hex_encode(expected, sizeof(expected), expected_hex);
 
@@ -358,11 +363,21 @@ static int case_aba_generation_join(void)
     struct zcl_native_dev_retrieval_snapshot snapshot, sentinel;
     memset(&sentinel, 0x6d, sizeof(sentinel));
     snapshot = sentinel;
-    char error_code[64], error_message[256];
+    char error_code[64] = {0}, error_message[256] = {0};
     int rc = ready ? zcl_native_dev_retrieval_snapshot_compute(
         &input, &snapshot, error_code, sizeof(error_code),
         error_message, sizeof(error_message)) : ZCL_COMMAND_EXIT_INTERNAL;
     zcl_native_dev_retrieval_test_set_hook(NULL, NULL);
+    if (!ready || schedule.before_open != 1u ||
+        schedule.before_post != 1u || rc != ZCL_COMMAND_EXIT_INVALID) {
+        printf("retrieval_generation: state ready=%d setup=%d/%d/%d/%d/%d "
+               "before_open=%u "
+               "before_post=%u rc=%d code=%s message=%s\n",
+               ready, same_size, temp_created, canonical, source_written,
+               manifested, schedule.before_open, schedule.before_post, rc,
+               error_code[0] ? error_code : "(none)",
+               error_message[0] ? error_message : "(none)");
+    }
     RG_CHECK("A-B-A source schedule reaches both exact phase latches",
              ready && schedule.before_open == 1u &&
              schedule.before_post == 1u);

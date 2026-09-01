@@ -387,14 +387,17 @@ static int test_wallet_scan_empty_replacement(void)
 
     /* The public scanner must not bypass replacement for a zero-key wallet
      * or an empty chain range. Those were the two former early returns. */
-    struct wallet empty_wallet;
-    memset(&empty_wallet, 0, sizeof(empty_wallet));
+    /* struct wallet embeds fixed 4096-entry arrays.  Keeping this fixture on
+     * the stack makes the optimized aggregate test exceed macOS's worker
+     * stack before its first assertion. */
+    struct wallet *empty_wallet = calloc(1, sizeof(*empty_wallet));
+    if (!empty_wallet) ok = false;
     if (ok) {
         ok = db_sapling_note_delete_all(&ndb) &&
              seed_wallet_projection(&ndb);
     }
     int zero_key_result = ok ? wallet_scan_blocks(
-        &ndb, &chain, &empty_wallet, "/nonexistent", 0, 0) : -1;
+        &ndb, &chain, empty_wallet, "/nonexistent", 0, 0) : -1;
     ok = ok && zero_key_result == 0 &&
          db_wallet_tx_count(&ndb) == 0 &&
          db_wallet_utxo_balance(&ndb) == 0;
@@ -404,7 +407,7 @@ static int test_wallet_scan_empty_replacement(void)
              seed_wallet_projection(&ndb);
     }
     int empty_range_result = ok ? wallet_scan_blocks(
-        &ndb, &chain, &empty_wallet, "/nonexistent", 1, 0) : -1;
+        &ndb, &chain, empty_wallet, "/nonexistent", 1, 0) : -1;
     ok = ok && empty_range_result == 0 &&
          db_wallet_tx_count(&ndb) == 0 &&
          db_wallet_utxo_balance(&ndb) == 0 &&
@@ -412,6 +415,7 @@ static int test_wallet_scan_empty_replacement(void)
 
     scan_aht_free(&ht);
     active_chain_free(&chain);
+    free(empty_wallet);
     if (ndb.open) node_db_close(&ndb);
     if (ok) { printf("OK\n"); return 0; }
     printf("FAIL\n");

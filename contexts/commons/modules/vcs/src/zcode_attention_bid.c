@@ -280,11 +280,13 @@ enum vcs_zcode_attention_error vcs_zcode_heuristic_parse(
         memset(out, 0, sizeof(*out));
         return VCS_ZCODE_ATTENTION_NULL;
     }
+    if (wire_len != VCS_ZCODE_HEURISTIC_WIRE_BYTES) {
+        memset(out, 0, sizeof(*out));
+        return VCS_ZCODE_ATTENTION_WIRE_SIZE;
+    }
     if (memory_overlaps(wire, wire_len, out, sizeof(*out)))
         return VCS_ZCODE_ATTENTION_ALIAS;
     memset(out, 0, sizeof(*out));
-    if (wire_len != VCS_ZCODE_HEURISTIC_WIRE_BYTES)
-        return VCS_ZCODE_ATTENTION_WIRE_SIZE;
     struct zcl_codec_reader reader;
     uint8_t magic[8], reserved[3];
     zcl_codec_reader_init(&reader, wire, wire_len);
@@ -548,11 +550,13 @@ enum vcs_zcode_attention_error vcs_zcode_attention_bid_parse(
         memset(out, 0, sizeof(*out));
         return VCS_ZCODE_ATTENTION_NULL;
     }
+    if (wire_len != VCS_ZCODE_ATTENTION_BID_WIRE_BYTES) {
+        memset(out, 0, sizeof(*out));
+        return VCS_ZCODE_ATTENTION_WIRE_SIZE;
+    }
     if (memory_overlaps(wire, wire_len, out, sizeof(*out)))
         return VCS_ZCODE_ATTENTION_ALIAS;
     memset(out, 0, sizeof(*out));
-    if (wire_len != VCS_ZCODE_ATTENTION_BID_WIRE_BYTES)
-        return VCS_ZCODE_ATTENTION_WIRE_SIZE;
     struct zcl_codec_reader reader;
     uint8_t magic[8], reserved[5];
     zcl_codec_reader_init(&reader, wire, wire_len);
