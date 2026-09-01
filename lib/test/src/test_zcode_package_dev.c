@@ -810,6 +810,24 @@ static __attribute__((unused)) int zpd_test_twelve_task_benchmark(void)
                     ASSERT(json_size(json_get(
                                &reply.data, "selected_sources")) > 0);
                     ASSERT(json_get(&reply.data, "proved_relations") != NULL);
+                    ASSERT(strcmp(json_get_str(json_get(
+                                      &reply.data, "focus_schema")),
+                                  "focus.v1") == 0);
+                    ASSERT(strlen(json_get_str(json_get(
+                                      &reply.data, "focus_root"))) == 64);
+                    ASSERT(strlen(json_get_str(json_get(
+                                      &reply.data,
+                                      "focus_situation_root"))) == 64);
+                    ASSERT(strlen(json_get_str(json_get(
+                                      &reply.data, "claim_set_root"))) == 64);
+                    ASSERT(json_get_int(json_get(
+                               &reply.data, "claim_count")) == 0);
+                    ASSERT(strlen(json_get_str(json_get(
+                                      &reply.data,
+                                      "required_evidence_root"))) == 64);
+                    ASSERT(strlen(json_get_str(json_get(
+                                      &reply.data,
+                                      "authority_limits_root"))) == 64);
                     ASSERT(json_get(&reply.data, "next_action") != NULL);
                     story_focus_bytes = json_write(&reply.data, NULL, 0);
                     ASSERT(story_focus_bytes < ZCL_COMMAND_LIST_BUDGET);

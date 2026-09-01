@@ -207,9 +207,9 @@ bool story_load_work(const struct zcl_command_request *request,
     return ok;
 }
 
-static bool story_load_task(const char *workspace,
-                            const struct story_loaded_work *loaded,
-                            struct vcs_zcode_task_v1 *task)
+bool story_load_task(const char *workspace,
+                     const struct story_loaded_work *loaded,
+                     struct vcs_zcode_task_v1 *task)
 {
     uint8_t root[32], check[32], source[32], goal[32], *wire = NULL;
     size_t len = 0;

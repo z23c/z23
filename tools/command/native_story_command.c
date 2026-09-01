@@ -6,6 +6,7 @@
 #include "command/native_command.h"
 #include "command/native_story_internal.h"
 #include "json/json.h"
+#include "vcs/zcode_focus.h"
 
 #include <stdint.h>
 #include <string.h>
@@ -226,6 +227,58 @@ static bool story_push_context_sources(
     return ok;
 }
 
+static bool story_compose_focus(
+    const char *workspace, const struct story_loaded_work *loaded,
+    const struct vcs_zcode_agent_context_v1 *context,
+    struct vcs_zcode_focus_v1 *focus, uint8_t focus_root[32],
+    uint8_t situation_root[32])
+{
+    struct vcs_zcode_task_v1 task;
+    uint8_t task_root[32], context_root[32];
+    if (!story_load_task(workspace, loaded, &task) ||
+        !zcl_hex_decode_lower(loaded->task_root, task_root, 32) ||
+        vcs_zcode_agent_context_root(
+            context, (size_t)task.max_context_bytes, context_root) !=
+            VCS_ZCODE_AGENT_CONTEXT_OK)
+        return false;
+    uint8_t flags = (context->flags & VCS_ZCODE_AGENT_CONTEXT_TRUNCATED) != 0
+        ? VCS_ZCODE_FOCUS_CONTEXT_TRUNCATED : 0;
+    return vcs_zcode_focus_compose(
+               &task, task_root, context_root, loaded->show.story_root,
+               loaded->show.status, flags, NULL, 0, focus) ==
+               VCS_ZCODE_FOCUS_OK &&
+           vcs_zcode_focus_situation_root(focus, situation_root) ==
+               VCS_ZCODE_FOCUS_OK &&
+           vcs_zcode_focus_root(focus, focus_root) == VCS_ZCODE_FOCUS_OK;
+}
+
+static bool story_push_focus_identity(
+    struct json_value *object, const struct vcs_zcode_focus_v1 *focus,
+    const uint8_t focus_root[32], const uint8_t situation_root[32])
+{
+    return json_push_kv_str(object, "focus_schema", "focus.v1") &&
+        story_push_root(object, "focus_root", focus_root) &&
+        story_push_root(object, "focus_situation_root", situation_root) &&
+        story_push_root(object, "claim_set_root", focus->claim_set_root) &&
+        json_push_kv_int(object, "claim_count", focus->claim_count) &&
+        story_push_root(object, "required_evidence_root",
+                        focus->required_evidence_root) &&
+        story_push_root(object, "authority_limits_root",
+                        focus->authority_limits_root) &&
+        json_push_kv_int(object, "max_changed_files",
+                         focus->max_changed_files) &&
+        json_push_kv_int(object, "max_patch_bytes",
+                         (int64_t)focus->max_patch_bytes) &&
+        json_push_kv_int(object, "max_context_bytes",
+                         (int64_t)focus->max_context_bytes) &&
+        json_push_kv_int(object, "max_cpu_seconds",
+                         focus->max_cpu_seconds) &&
+        json_push_kv_int(object, "max_memory_bytes",
+                         (int64_t)focus->max_memory_bytes) &&
+        json_push_kv_int(object, "max_output_bytes",
+                         (int64_t)focus->max_output_bytes);
+}
+
 void zcl_native_handle_story_focus(const struct zcl_command_request *request,
                                    struct zcl_command_reply *reply)
 {
@@ -242,6 +295,17 @@ void zcl_native_handle_story_focus(const struct zcl_command_request *request,
     vcs_zcode_agent_context_init(&context);
     enum story_context_status context_status = story_load_agent_context(
         workspace, &loaded, &context);
+    struct vcs_zcode_focus_v1 focus;
+    uint8_t focus_root[32], situation_root[32];
+    bool focus_ready = context_status == STORY_CONTEXT_PROVED &&
+        story_compose_focus(workspace, &loaded, &context, &focus,
+                            focus_root, situation_root);
+    if (context_status == STORY_CONTEXT_PROVED && !focus_ready) {
+        vcs_zcode_agent_context_free(&context);
+        story_fail(reply, "STORY_FOCUS_BINDING_FAILED", "compose",
+                   "reverified task, context, and StoryGraph could not be bound into focus.v1");
+        return;
+    }
     size_t excerpt_bytes = 0;
     bool context_ok = story_push_context_sources(
         &reply->data, &context, &excerpt_bytes);
@@ -257,7 +321,8 @@ void zcl_native_handle_story_focus(const struct zcl_command_request *request,
     const char *focus_status = context_status == STORY_CONTEXT_PROVED
         ? story_status_name(loaded.show.status)
         : story_context_status_name(context_status);
-    bool ok = context_ok &&
+    bool ok = context_ok && (!focus_ready || story_push_focus_identity(
+        &reply->data, &focus, focus_root, situation_root)) &&
         json_push_kv_str(&reply->data, "status",
                          focus_status) &&
         json_push_kv_str(&reply->data, "story_status",

@@ -6,6 +6,7 @@
 #include "command/native_command.h"
 #include "ontology/story_graph.h"
 #include "vcs/zcode_agent_context.h"
+#include "vcs/zcode_dev.h"
 
 #include <stdbool.h>
 
@@ -39,6 +40,10 @@ bool story_load_work(const struct zcl_command_request *request,
                      const char *workspace, const char *work,
                      const char *datadir, struct story_loaded_work *loaded,
                      struct zcl_command_reply *reply);
+
+bool story_load_task(const char *workspace,
+                     const struct story_loaded_work *loaded,
+                     struct vcs_zcode_task_v1 *task);
 
 enum story_context_status story_load_agent_context(
     const char *workspace, const struct story_loaded_work *loaded,
