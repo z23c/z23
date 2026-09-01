@@ -172,6 +172,89 @@ static void zwork_fail(struct zcl_command_reply *reply, const char *code,
                            mutated, detail, "zcode.work");
 }
 
+/* zcode.improve owns task-conflict classification and the exact CAS handoff.
+ * The human-first wrapper may preserve only those two named coordination
+ * refusals; every other planner failure keeps the ordinary compact error.
+ * Round-tripping through a fixed buffer both preserves the exact data object
+ * and prevents a future inner handler from expanding this exception into an
+ * unbounded second response surface. */
+static bool zwork_coordination_handoff(
+    const struct zcl_command_reply *inner, const char *expected_workspace,
+    struct zcl_command_reply *reply)
+{
+    if (!inner || !reply || inner->status != ZCL_COMMAND_STATUS_BLOCKED ||
+        inner->exit_code != ZCL_COMMAND_EXIT_BLOCKED ||
+        inner->data.type != JSON_OBJ)
+        return false;
+    bool active = strcmp(inner->error.code, "ACTIVE_TASK_CONFLICT") == 0;
+    bool incomplete = strcmp(inner->error.code,
+                             "TASK_CONFLICT_SCAN_INCOMPLETE") == 0;
+    const char *kind = json_get_str(json_get(&inner->data, "conflict_kind"));
+    const char *assignment = json_get_str(json_get(
+        &inner->data, "assignment_status"));
+    const char *execution = json_get_str(json_get(
+        &inner->data, "active_execution"));
+    if ((!active && !incomplete) || !kind || !assignment || !execution ||
+        strcmp(assignment, "UNOBSERVED") != 0 ||
+        strcmp(execution, "UNOBSERVED") != 0 ||
+        (incomplete && strcmp(kind, "INCOMPLETE") != 0) ||
+        (active && strcmp(kind, "DUPLICATE_ACTIVE_WORK") != 0 &&
+         strcmp(kind, "WRITE_SCOPE_OVERLAP") != 0))
+        return false;
+
+    const struct json_value *task_value = json_get(&inner->data, "task_root");
+    const char *task_root = task_value && task_value->type == JSON_STR
+        ? json_get_str(task_value) : NULL;
+    uint8_t decoded_task_root[32];
+    if ((active && (!task_root ||
+                    !zcl_hex_decode_lower(task_root, decoded_task_root, 32u) ||
+                    inner->next_count != 1u ||
+                    strcmp(inner->next[0].command, "zcode.tasks") != 0)) ||
+        (incomplete && ((task_root && task_root[0]) ||
+                        inner->next_count != 0u)))
+        return false;
+
+    if (active) {
+        struct json_value input;
+        json_init(&input);
+        bool typed = json_read(&input, inner->next[0].input_json,
+                               strlen(inner->next[0].input_json));
+        const char *next_task = typed
+            ? json_get_str(json_get(&input, "task_root")) : NULL;
+        const char *next_workspace = typed
+            ? json_get_str(json_get(&input, "workspace")) : NULL;
+        uint8_t decoded_next_task[32];
+        typed = typed && input.type == JSON_OBJ &&
+            input.num_children == 3u && next_task && next_workspace &&
+            next_workspace[0] && expected_workspace &&
+            strcmp(next_workspace, expected_workspace) == 0 &&
+            zcl_hex_decode_lower(next_task, decoded_next_task, 32u) &&
+            strcmp(next_task, task_root) == 0 &&
+            json_get_bool(json_get(&input, "details"));
+        json_free(&input);
+        if (!typed)
+            return false;
+    }
+
+    char data_wire[ZCL_COMMAND_ROOT_BUDGET];
+    size_t data_len = json_write(&inner->data, data_wire, sizeof(data_wire));
+    struct json_value exact;
+    json_init(&exact);
+    if (data_len == 0 || data_len >= sizeof(data_wire) ||
+        !json_read(&exact, data_wire, data_len)) {
+        json_free(&exact);
+        return false;
+    }
+    json_free(&reply->data);
+    reply->data = exact;
+    reply->status = inner->status;
+    reply->exit_code = inner->exit_code;
+    reply->error = inner->error;
+    return !active || zcl_command_reply_add_next(
+        reply, inner->next[0].command, inner->next[0].input_json,
+        inner->next[0].reason);
+}
+
 static char *zwork_hex_alloc(const uint8_t *bytes, size_t len,
                              const char *label)
 {
@@ -1377,11 +1460,23 @@ void zcl_native_handle_zcode_work_start(
     zcl_native_handle_zcode_improve(&inner_request, &inner);
     json_free(&plan_input);
     if (inner.status != ZCL_COMMAND_STATUS_PASSED) {
-        zwork_fail(reply, inner.error.code[0] ? inner.error.code : "WORK_PLAN_FAILED",
-                   inner.error.phase[0] ? inner.error.phase : "plan",
-                   inner.error.message[0] ? inner.error.message
-                                          : "existing task planner refused",
-                   inner.error.retryable, inner.error.mutated);
+        bool coordination =
+            strcmp(inner.error.code, "ACTIVE_TASK_CONFLICT") == 0 ||
+            strcmp(inner.error.code, "TASK_CONFLICT_SCAN_INCOMPLETE") == 0;
+        if (coordination) {
+            if (!zwork_coordination_handoff(&inner, workspace, reply))
+                zwork_fail(reply, "WORK_COORDINATION_HANDOFF_FAILED", "render",
+                           "the bounded canonical task-conflict handoff could not be preserved",
+                           false, inner.error.mutated);
+        } else {
+            zwork_fail(
+                reply,
+                inner.error.code[0] ? inner.error.code : "WORK_PLAN_FAILED",
+                inner.error.phase[0] ? inner.error.phase : "plan",
+                inner.error.message[0] ? inner.error.message
+                                       : "existing task planner refused",
+                inner.error.retryable, inner.error.mutated);
+        }
         zcl_command_reply_free(&inner);
         json_free(&reuse_expert); json_free(&reuse_plan);
         vcs_package_prepared_free(&prepared);

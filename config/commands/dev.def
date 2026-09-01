@@ -101,6 +101,39 @@ ZCL_COMMAND_DEV_READ(
     "retrieval benchmarking requires the dev binary",
     "z23-dev dev retrieval benchmark")
 
+ZCL_COMMAND_DEV_READ(
+    "dev.retrieval.experiment", "dev.retrieval", "",
+    "Project one direct-gold-input-free retrieval heuristic",
+    "Recompute and bind the exact BM25 and identifier-graph parent rankings, "
+    "then project one bm25_prefix parameter from 0 through 5. The candidate "
+    "preserves the parent's exact top-20 membership and the BM25 top-five "
+    "full-file byte ceiling. Opaque, nonzero study, preregistration, and "
+    "evaluator roots are bound into the proposal but their objects and ordering "
+    "are not verified by this command. They are emitted for later independent "
+    "evaluation; no direct gold input, "
+    "scope, quality, promotion, or acceptance claim is produced.",
+    ZCL_COMMAND_LIST_BUDGET,
+    "dev,retrieval,experiment,heuristic,preregistration,ranking",
+    "zcl.dev_retrieval_experiment_input.v1",
+    "zcl.dev_retrieval_experiment.v1",
+    "workspace,expected_vcs_root,task_id,query,parent_ranking_root,bm25_prefix,"
+    "study_root,preregistration_root,evaluator_root", "",
+    "z23-dev dev retrieval experiment --input='"
+    "{\"workspace\":\"<canonical-absolute-checkout>\","
+    "\"expected_vcs_root\":\"<64-lowercase-hex>\","
+    "\"task_id\":\"task\",\"query\":\"goal\","
+    "\"parent_ranking_root\":\"<64-lowercase-hex>\","
+    "\"bm25_prefix\":3,\"study_root\":\"<64-lowercase-hex>\","
+    "\"preregistration_root\":\"<64-lowercase-hex>\","
+    "\"evaluator_root\":\"<64-lowercase-hex>\"}'",
+    ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_PERSISTENT, ZCL_COMMAND_COST_HIGH,
+    ZCL_COMMAND_LANE_LOCAL, ZCL_COMMAND_CAP_CHECKOUT_READ,
+    ZCL_COMMAND_TRAIT_IDEMPOTENT | ZCL_COMMAND_TRAIT_DEV_ONLY,
+    zcl_native_handle_dev_retrieval_experiment,
+    "retrieval experiments require the dev binary",
+    "z23-dev dev retrieval experiment")
+
 ZCL_COMMAND_BRANCH("dev.publication", "dev",
                    "Inspect asynchronous proven-source publication",
                    ZCL_COMMAND_LAYER_DEV)

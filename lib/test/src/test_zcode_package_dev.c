@@ -176,6 +176,32 @@ static bool zpd_next_is(const struct zcl_command_reply *reply,
     return ok;
 }
 
+static bool zpd_coordination_next_is(
+    const struct zcl_command_reply *reply, const char *workspace,
+    const char *task_root)
+{
+    if (!reply || !workspace || !task_root || reply->next_count != 1u ||
+        strcmp(reply->next[0].command, "zcode.tasks") != 0)
+        return false;
+    struct json_value input;
+    json_init(&input);
+    bool ok = json_read(&input, reply->next[0].input_json,
+                        strlen(reply->next[0].input_json)) &&
+        input.type == JSON_OBJ && input.num_children == 3u &&
+        strcmp(json_get_str(json_get(&input, "workspace")), workspace) == 0 &&
+        strcmp(json_get_str(json_get(&input, "task_root")), task_root) == 0 &&
+        json_get_bool(json_get(&input, "details"));
+    const struct zcl_command_spec *spec = ok
+        ? zcl_command_registry_find(zcl_command_catalog(), "zcode.tasks",
+                                    NULL)
+        : NULL;
+    char why[160] = {0};
+    ok = ok && spec && zcl_command_registry_input_validate(
+        spec, &input, why, sizeof(why));
+    json_free(&input);
+    return ok;
+}
+
 static bool zpd_plant_build_output(const char *root)
 {
     char path[320];
@@ -2069,6 +2095,8 @@ static int zpd_test_work_start_package_bounds(void)
                       "AWAITING_CANDIDATE") == 0);
         ASSERT(strcmp(json_get_str(json_get(&reply.data, "next_safe_command")),
                       "zcode work run") == 0);
+        ASSERT(json_get(&reply.data, "expert") == NULL);
+        ASSERT(json_get_bool(json_get(&reply.data, "details_available")));
         const struct json_value *reuse = json_get(&reply.data, "reuse_plan");
         ASSERT(reuse && strcmp(json_get_str(json_get(
                           reuse, "license_filter")), "MIT") == 0);
@@ -2133,6 +2161,7 @@ static __attribute__((unused)) int zpd_test_work_start(void)
         ASSERT(json_push_kv_str(&input, "profile", "quick"));
         ASSERT(json_push_kv_str(&input, "context_symbol",
                                 "fixture_parse_options"));
+        ASSERT(json_push_kv_bool(&input, "details", true));
         struct zcl_command_request request = { .input = &input };
         struct zcl_command_reply reply;
         zcl_command_reply_init(&reply, "zcl.zcode_work_start_test.v1");
@@ -2158,12 +2187,28 @@ static __attribute__((unused)) int zpd_test_work_start(void)
         ASSERT(context && context->type == JSON_OBJ);
         ASSERT(strcmp(json_get_str(json_get(context, "symbol")),
                       "fixture_parse_options") == 0);
-        ASSERT(json_get(context, "symbol_id") == NULL);
+        ASSERT(json_get(context, "symbol_id") != NULL);
         ASSERT(reuse && reuse->type == JSON_OBJ);
         ASSERT(strcmp(json_get_str(json_get(reuse, "search_status")),
                       "datadir_not_provided") == 0);
         ASSERT(json_get_bool(json_get(reuse, "new_code_required")));
-        ASSERT(expert == NULL);
+        const char *detailed_task_root = expert
+            ? json_get_str(json_get(expert, "task_root")) : NULL;
+        const char *detailed_source_root = expert
+            ? json_get_str(json_get(expert, "source_root")) : NULL;
+        const char *detailed_scope_root = expert
+            ? json_get_str(json_get(expert, "write_scope_root")) : NULL;
+        ASSERT(detailed_task_root &&
+               strncmp(saved_work_id + 5, detailed_task_root, 12) == 0);
+        ASSERT(detailed_source_root && strlen(detailed_source_root) == 64u);
+        ASSERT(detailed_scope_root && strlen(detailed_scope_root) == 64u);
+        char saved_task_root[65], saved_source_root[65], saved_scope_root[65];
+        (void)snprintf(saved_task_root, sizeof(saved_task_root), "%s",
+                       detailed_task_root);
+        (void)snprintf(saved_source_root, sizeof(saved_source_root), "%s",
+                       detailed_source_root);
+        (void)snprintf(saved_scope_root, sizeof(saved_scope_root), "%s",
+                       detailed_scope_root);
         ASSERT(json_get_bool(json_get(&reply.data, "details_available")));
         ASSERT(reply.next_count == 1);
         ASSERT(strcmp(reply.next[0].command, "zcode.work.run") == 0);
@@ -2187,31 +2232,152 @@ static __attribute__((unused)) int zpd_test_work_start(void)
         zcl_command_reply_free(&reply);
         json_free(&input);
 
+        /* A distinct task identity for the same exact source and goal must
+         * carry improve's rooted duplicate evidence through the normal
+         * human-first entry point. Authorship still is not assignment or an
+         * observation of active execution. */
         json_init(&input); json_set_object(&input);
         ASSERT(json_push_kv_str(&input, "workspace", root));
         ASSERT(json_push_kv_str(&input, "goal", "Fix x"));
-        ASSERT(json_push_kv_str(&input, "profile", "quick"));
-        ASSERT(json_push_kv_str(&input, "context_symbol",
-                                "fixture_parse_options"));
-        ASSERT(json_push_kv_bool(&input, "details", true));
+        ASSERT(json_push_kv_str(&input, "profile", "standard"));
         request.input = &input;
-        zcl_command_reply_init(&reply, "zcl.zcode_work_start_test.v1");
+        zcl_command_reply_init(&reply,
+                               "zcl.zcode_work_start_duplicate_test.v1");
         zcl_native_handle_zcode_work_start(&request, &reply);
-        if (reply.status != ZCL_COMMAND_STATUS_PASSED)
-            printf("exact app context failed: %s %s\n",
-                   reply.error.code, reply.error.message);
-        ASSERT(reply.status == ZCL_COMMAND_STATUS_PASSED);
-        expert = json_get(&reply.data, "expert");
-        context = json_get(&reply.data, "selected_context");
-        const char *detailed_work_id = json_get_str(json_get(
-            &reply.data, "work_id"));
-        const char *detailed_task_root = expert
-            ? json_get_str(json_get(expert, "task_root")) : NULL;
-        ASSERT(detailed_work_id && detailed_task_root &&
-               strncmp(detailed_work_id + 5, detailed_task_root, 12) == 0);
-        ASSERT(context && json_get(context, "symbol_id") != NULL);
-        ASSERT(strcmp(json_get_str(json_get(context, "symbol")),
-                      "fixture_parse_options") == 0);
+        ASSERT(reply.status == ZCL_COMMAND_STATUS_BLOCKED);
+        ASSERT(reply.exit_code == ZCL_COMMAND_EXIT_BLOCKED);
+        ASSERT(strcmp(reply.error.code, "ACTIVE_TASK_CONFLICT") == 0);
+        ASSERT(reply.error.mutated);
+        ASSERT(strcmp(json_get_str(json_get(
+                          &reply.data, "conflict_kind")),
+                      "DUPLICATE_ACTIVE_WORK") == 0);
+        ASSERT(strcmp(json_get_str(json_get(
+                          &reply.data, "task_root")),
+                      saved_task_root) == 0);
+        ASSERT(strcmp(json_get_str(json_get(
+                          &reply.data, "source_root")),
+                      saved_source_root) == 0);
+        ASSERT(strcmp(json_get_str(json_get(
+                          &reply.data, "write_scope_root")),
+                      saved_scope_root) == 0);
+        ASSERT(strcmp(json_get_str(json_get(
+                          &reply.data, "assignment_status")),
+                      "UNOBSERVED") == 0);
+        ASSERT(strcmp(json_get_str(json_get(
+                          &reply.data, "active_execution")),
+                      "UNOBSERVED") == 0);
+        ASSERT(zpd_coordination_next_is(
+            &reply, absolute_root, saved_task_root));
+        {
+            const struct zcl_command_registry *registry =
+                zcl_command_catalog();
+            const struct zcl_command_spec *spec =
+                zcl_command_registry_find(
+                    registry, "zcode.work.start", NULL);
+            struct zcl_command_context command_context = {
+                .registry = registry,
+                .granted_capabilities = ~(uint64_t)0,
+                .authority_ceiling = ZCL_COMMAND_AUTH_OWNER,
+            };
+            char rendered[ZCL_COMMAND_RESULT_BUDGET + 1u];
+            enum zcl_command_exit exit_code = ZCL_COMMAND_EXIT_OK;
+            ASSERT(spec != NULL);
+            size_t rendered_bytes = zcl_command_registry_execute_json(
+                registry, spec, &command_context, &input, false, spec->path,
+                "normal", 0, 0, NULL, rendered, sizeof(rendered),
+                &exit_code);
+            ASSERT(rendered_bytes > 0u &&
+                   rendered_bytes <= ZCL_COMMAND_RESULT_BUDGET);
+            ASSERT(exit_code == ZCL_COMMAND_EXIT_BLOCKED);
+            ASSERT(strstr(rendered, "RESPONSE_BUDGET_EXCEEDED") == NULL);
+            ASSERT(strstr(rendered, "ACTIVE_TASK_CONFLICT") != NULL);
+            ASSERT(strstr(rendered, saved_task_root) != NULL);
+            ASSERT(strstr(rendered, "\"command\":\"zcode.tasks\"") != NULL);
+        }
+        zcl_command_reply_free(&reply);
+        json_free(&input);
+
+        /* A different goal over the same component-bounded source surface is
+         * the separate overlap class, with the same exact existing task
+         * handoff and no invented owner. */
+        json_init(&input); json_set_object(&input);
+        ASSERT(json_push_kv_str(&input, "workspace", root));
+        ASSERT(json_push_kv_str(&input, "goal", "Change x"));
+        ASSERT(json_push_kv_str(&input, "profile", "quick"));
+        request.input = &input;
+        zcl_command_reply_init(&reply,
+                               "zcl.zcode_work_start_overlap_test.v1");
+        zcl_native_handle_zcode_work_start(&request, &reply);
+        ASSERT(reply.status == ZCL_COMMAND_STATUS_BLOCKED);
+        ASSERT(reply.exit_code == ZCL_COMMAND_EXIT_BLOCKED);
+        ASSERT(reply.error.mutated);
+        ASSERT(strcmp(reply.error.code, "ACTIVE_TASK_CONFLICT") == 0);
+        ASSERT(strcmp(json_get_str(json_get(
+                          &reply.data, "conflict_kind")),
+                      "WRITE_SCOPE_OVERLAP") == 0);
+        ASSERT(strcmp(json_get_str(json_get(
+                          &reply.data, "task_root")),
+                      saved_task_root) == 0);
+        ASSERT(strcmp(json_get_str(json_get(
+                          &reply.data, "source_root")),
+                      saved_source_root) == 0);
+        ASSERT(strcmp(json_get_str(json_get(
+                          &reply.data, "assignment_status")),
+                      "UNOBSERVED") == 0);
+        ASSERT(strcmp(json_get_str(json_get(
+                          &reply.data, "active_execution")),
+                      "UNOBSERVED") == 0);
+        ASSERT(zpd_coordination_next_is(
+            &reply, absolute_root, saved_task_root));
+        zcl_command_reply_free(&reply);
+        json_free(&input);
+
+        /* A recognized task wire under a false CAS address makes the scan
+         * incomplete. Preserve that refusal without fabricating a conflicting
+         * task root or a targeted continuation. */
+        uint8_t task_root_bytes[32], false_root[32];
+        uint8_t *task_wire = NULL;
+        size_t task_wire_len = 0;
+        memset(false_root, 0xa5, sizeof(false_root));
+        ASSERT(zcl_hex_decode_lower(
+            saved_task_root, task_root_bytes, sizeof(task_root_bytes)));
+        ASSERT(vcs_object_load_raw(
+            root, task_root_bytes, &task_wire, &task_wire_len) == 0);
+        ASSERT(vcs_object_put_addressed(
+            root, false_root, task_wire, task_wire_len));
+        free(task_wire);
+        char false_hex[65], false_path[512];
+        zcl_hex_encode(false_root, sizeof(false_root), false_hex);
+        ASSERT(snprintf(false_path, sizeof(false_path),
+                        "%s/.zvcs/objects/%c%c/%s", root,
+                        false_hex[0], false_hex[1], false_hex + 2) > 0);
+        json_init(&input); json_set_object(&input);
+        ASSERT(json_push_kv_str(&input, "workspace", root));
+        ASSERT(json_push_kv_str(&input, "goal", "Refactor x"));
+        ASSERT(json_push_kv_str(&input, "profile", "quick"));
+        request.input = &input;
+        zcl_command_reply_init(&reply,
+                               "zcl.zcode_work_start_incomplete_test.v1");
+        zcl_native_handle_zcode_work_start(&request, &reply);
+        int false_removed = unlink(false_path);
+        ASSERT(false_removed == 0);
+        ASSERT(reply.status == ZCL_COMMAND_STATUS_BLOCKED);
+        ASSERT(reply.exit_code == ZCL_COMMAND_EXIT_BLOCKED);
+        ASSERT(reply.error.mutated);
+        ASSERT(strcmp(reply.error.code,
+                      "TASK_CONFLICT_SCAN_INCOMPLETE") == 0);
+        ASSERT(strcmp(json_get_str(json_get(
+                          &reply.data, "conflict_kind")),
+                      "INCOMPLETE") == 0);
+        ASSERT(strcmp(json_get_str(json_get(
+                          &reply.data, "task_root")), "") == 0);
+        ASSERT(strcmp(json_get_str(json_get(
+                          &reply.data, "assignment_status")),
+                      "UNOBSERVED") == 0);
+        ASSERT(strcmp(json_get_str(json_get(
+                          &reply.data, "active_execution")),
+                      "UNOBSERVED") == 0);
+        ASSERT(reply.next_count == 0u);
         zcl_command_reply_free(&reply);
         json_free(&input);
 

@@ -2590,8 +2590,10 @@ static int test_zd_improve_command(void)
         ASSERT(json_get(&plan_reply.data, "action_id") == NULL);
 
         /* A distinct task wire for the same exact source and goal is refused
-         * before task/context persistence. The handoff is structured and
-         * rooted; assignment and execution are deliberately not inferred. */
+         * before task/context persistence. Preflight may already have filed
+         * source, authority, and scope objects, so the receipt reports that
+         * mutation honestly. The handoff is structured and rooted; assignment
+         * and execution are deliberately not inferred. */
         json_set_str((struct json_value *)json_get(
                          &plan_input, "model_policy_root"), roots[5]);
         struct zcl_command_reply conflict_reply;
@@ -2599,7 +2601,7 @@ static int test_zd_improve_command(void)
         zcl_native_handle_zcode_improve(&plan_request, &conflict_reply);
         ASSERT_EQ(conflict_reply.exit_code, ZCL_COMMAND_EXIT_BLOCKED);
         ASSERT_STR_EQ(conflict_reply.error.code, "ACTIVE_TASK_CONFLICT");
-        ASSERT(!conflict_reply.error.mutated);
+        ASSERT(conflict_reply.error.mutated);
         ASSERT_STR_EQ(json_get_str(json_get(
                           &conflict_reply.data, "conflict_kind")),
                       "DUPLICATE_ACTIVE_WORK");

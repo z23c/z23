@@ -1044,6 +1044,92 @@ static bool rb_stream_cursor_zero(const struct json_value *input)
     return false;
 }
 
+static bool rb_snapshot_rank_copy(
+    const struct rb_rank *source,
+    struct zcl_native_dev_retrieval_snapshot_rank *target)
+{
+    if (!source || !target || source->count > ZCL_RETRIEVAL_EVAL_RANK_MAX)
+        return false;
+    memset(target, 0, sizeof(*target));
+    target->count = source->count;
+    target->complete = source->complete;
+    for (size_t i = 0; i < source->count; i++) {
+        int n = snprintf(target->paths[i], sizeof(target->paths[i]), "%s",
+                         source->rows[i].path);
+        if (n < 0 || (size_t)n >= sizeof(target->paths[i])) return false;
+        target->rows[i].path = target->paths[i];
+        target->rows[i].context_bytes = source->rows[i].context_bytes;
+        target->rows[i].in_scope = false;
+        target->rows[i].in_scope_available = false;
+    }
+    return true;
+}
+
+int zcl_native_dev_retrieval_snapshot_compute(
+    const struct json_value *input,
+    struct zcl_native_dev_retrieval_snapshot *snapshot,
+    char *error_code, size_t error_code_cap,
+    char *error_message, size_t error_message_cap)
+{
+    if (error_code && error_code_cap) error_code[0] = '\0';
+    if (error_message && error_message_cap) error_message[0] = '\0';
+    if (!input || input->type != JSON_OBJ || !snapshot) {
+        rb_stream_error(error_code, error_code_cap, error_message,
+                        error_message_cap, "INVALID_INPUT",
+                        "snapshot input must be one JSON object");
+        return ZCL_COMMAND_EXIT_INVALID;
+    }
+    char workspace[PATH_MAX];
+    if (!rb_workspace(input, workspace)) {
+        rb_stream_error(error_code, error_code_cap, error_message,
+                        error_message_cap, "WORKSPACE_NOT_CANONICAL",
+                        "workspace must be a canonical absolute directory");
+        return ZCL_COMMAND_EXIT_INVALID;
+    }
+    struct zcl_command_reply reply;
+    zcl_command_reply_init(&reply, "zcl.dev_retrieval_benchmark.v2");
+    struct rb_computation computed;
+    if (!rb_compute(input, workspace, &computed, &reply)) {
+        rb_stream_error(error_code, error_code_cap, error_message,
+                        error_message_cap, reply.error.code,
+                        reply.error.message);
+        int rc = reply.exit_code;
+        zcl_command_reply_free(&reply);
+        return rc;
+    }
+    memset(snapshot, 0, sizeof(*snapshot));
+    int task_n = snprintf(snapshot->task_id, sizeof(snapshot->task_id), "%s",
+                          computed.task_id);
+    int query_n = snprintf(snapshot->query, sizeof(snapshot->query), "%s",
+                           computed.query);
+    bool copied = task_n > 0 && (size_t)task_n < sizeof(snapshot->task_id) &&
+        query_n > 0 && (size_t)query_n < sizeof(snapshot->query) &&
+        zcl_hex_decode_lower(computed.pre_hex, snapshot->source_root, 32u) &&
+        zcl_hex_decode_lower(computed.codeindex_hex,
+                             snapshot->codeindex_root, 32u) &&
+        rb_snapshot_rank_copy(&computed.bm25, &snapshot->bm25) &&
+        rb_snapshot_rank_copy(&computed.identifier_graph,
+                              &snapshot->identifier_graph);
+    if (copied) {
+        char root_hex[65];
+        rb_rank_root(&computed.bm25, root_hex);
+        copied = zcl_hex_decode_lower(root_hex,
+                                      snapshot->bm25_ranking_root, 32u);
+        rb_rank_root(&computed.identifier_graph, root_hex);
+        copied = copied && zcl_hex_decode_lower(
+            root_hex, snapshot->identifier_graph_ranking_root, 32u);
+    }
+    zcl_command_reply_free(&reply);
+    if (!copied) {
+        memset(snapshot, 0, sizeof(*snapshot));
+        rb_stream_error(error_code, error_code_cap, error_message,
+                        error_message_cap, "SNAPSHOT_COPY_FAILED",
+                        "recomputed relevance-free ranks could not be copied");
+        return ZCL_COMMAND_EXIT_INTERNAL;
+    }
+    return ZCL_COMMAND_EXIT_OK;
+}
+
 int zcl_native_dev_retrieval_stream_jsonl(
     const struct json_value *input, size_t contract_bytes, FILE *out,
     char *error_code, size_t error_code_cap,

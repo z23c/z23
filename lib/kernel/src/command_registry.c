@@ -1378,6 +1378,12 @@ bool zcl_command_registry_input_validate(const struct zcl_command_spec *spec,
              * registry aligned makes their declared typed input reachable. */
             type_ok = value->type == JSON_INT && json_get_int(value) >= 1 &&
                       json_get_int(value) <= 600;
+        } else if (strcmp(key, "bm25_prefix") == 0) {
+            /* The retrieval experiment deliberately exposes one scalar
+             * heuristic parameter. Keep the transport's closed range exact
+             * so the native leaf is reachable without widening its study. */
+            type_ok = value->type == JSON_INT && json_get_int(value) >= 0 &&
+                      json_get_int(value) <= 5;
         } else if (strcmp(key, "verbosity") == 0) {
             type_ok = value->type == JSON_INT && json_get_int(value) >= 0 &&
                       json_get_int(value) <= 2;

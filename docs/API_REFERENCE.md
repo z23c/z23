@@ -74,14 +74,14 @@ z23 discover schema <path> --side=input|output
 
 | Catalog fact | Count |
 |---|---|
-| Registry entries (branches + leaves) | 773 |
+| Registry entries (branches + leaves) | 774 |
 | Top-level roots | 13 |
 | Branches | 178 |
-| Leaves (dispatchable command paths) | 595 |
+| Leaves (dispatchable command paths) | 596 |
 | … `ready` (live handler in this build) | 535 |
-| … `compat` (metadata only, names a fallback) | 29 |
+| … `compat` (metadata only, names a fallback) | 30 |
 | … `planned` (fail-closed BLOCKED, exit 3) | 31 |
-| … dev-gated 🔧 (`ready` only in `z23-dev`) | 28 |
+| … dev-gated 🔧 (`ready` only in `z23-dev`) | 29 |
 | Leaves with `effect=mutate` | 209 |
 | Leaves with `effect=destructive` | 4 |
 | Leaves requiring **owner** authority | 119 |
@@ -96,7 +96,7 @@ Per source file:
 | `config/commands/app_features.def` | 73 | 20 | 53 |
 | `config/commands/store.def` | 18 | 0 | 18 |
 | `config/commands/ops.def` | 56 | 10 | 46 |
-| `config/commands/dev.def` | 65 | 16 | 49 |
+| `config/commands/dev.def` | 66 | 16 | 50 |
 | `config/commands/code.def` | 23 | 2 | 21 |
 | `config/commands/accounts.def` | 11 | 2 | 9 |
 | `config/commands/vault.def` | 24 | 4 | 20 |
@@ -657,6 +657,7 @@ represented by its children's sections.
 | Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
 |---|---|---|---|---|---|---|
 | `dev retrieval benchmark` | compat 🔧 → `z23-dev dev retrieval benchmark` | read / read / operator · persistent/high | `workspace`, `expected_vcs_root`, `task_id`, `query`, `cursor` | `zcl.dev_retrieval_benchmark.v2` | `z23-dev dev retrieval benchmark --input='{"workspace":"<canonical-absolute-checkout>","expected_vcs_root":"<64-lowercase-hex>","task_id":"task","query":"goal"}'` | Compare literal, BM25, and identifier-graph file retrieval — *retrieval benchmarking requires the dev binary* |
+| `dev retrieval experiment` | compat 🔧 → `z23-dev dev retrieval experiment` | read / read / operator · persistent/high | `workspace`, `expected_vcs_root`, `task_id`, `query`, `parent_ranking_root`, `bm25_prefix`, `study_root`, `preregistration_root`, `evaluator_root` | `zcl.dev_retrieval_experiment.v1` | `z23-dev dev retrieval experiment --input='{"workspace":"<canonical-absolute-checkout>","expected_vcs_root":"<64-lowercase-hex>","task_id":"task","query":"goal","parent_ranking_root":"<64-lowercase-hex>","bm25_prefix":3,"study_root":"<64-lowercase-hex>","preregistration_root":"<64-lowercase-hex>","evaluator_root":"<64-lowercase-hex>"}'` | Project one direct-gold-input-free retrieval heuristic — *retrieval experiments require the dev binary* |
 
 #### `dev.publication` — Inspect asynchronous proven-source publication
 

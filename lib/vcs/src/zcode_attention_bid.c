@@ -5,8 +5,10 @@
 #include "base/bytes.h"
 #include "codec/cursor.h"
 #include "crypto/sha3.h"
+#include "vcs/vcs_object.h"
 
 #include <stdbool.h>
+#include <stdlib.h>
 #include <string.h>
 
 static const uint8_t heuristic_magic[8] = {
@@ -77,6 +79,7 @@ const char *vcs_zcode_attention_error_string(
     case VCS_ZCODE_ATTENTION_BINDING: return "binding";
     case VCS_ZCODE_ATTENTION_DUPLICATE: return "duplicate";
     case VCS_ZCODE_ATTENTION_CAPACITY: return "capacity";
+    case VCS_ZCODE_ATTENTION_CAS: return "cas";
     default: return "unknown";
     }
 }
@@ -531,6 +534,127 @@ enum vcs_zcode_attention_error vcs_zcode_attention_bid_root(
     sha3_256_write(&sha, (const uint8_t *)domain, sizeof(domain));
     sha3_256_write(&sha, wire, sizeof(wire));
     sha3_256_finalize(&sha, out);
+    return VCS_ZCODE_ATTENTION_OK;
+}
+
+static bool heuristic_readback_exact(
+    const char *workspace, const uint8_t expected_root[32],
+    const uint8_t expected_wire[VCS_ZCODE_HEURISTIC_WIRE_BYTES],
+    struct vcs_zcode_heuristic_v1 *out)
+{
+    uint8_t *wire = NULL;
+    size_t wire_len = 0;
+    uint8_t checked_root[32];
+    bool ok = vcs_object_load_raw_bounded(
+            workspace, expected_root, VCS_ZCODE_HEURISTIC_WIRE_BYTES,
+            &wire, &wire_len) == 0 &&
+        wire_len == VCS_ZCODE_HEURISTIC_WIRE_BYTES &&
+        memcmp(wire, expected_wire, VCS_ZCODE_HEURISTIC_WIRE_BYTES) == 0 &&
+        vcs_zcode_heuristic_parse(wire, wire_len, out) ==
+            VCS_ZCODE_ATTENTION_OK &&
+        vcs_zcode_heuristic_root(out, checked_root) ==
+            VCS_ZCODE_ATTENTION_OK &&
+        memcmp(checked_root, expected_root, 32) == 0;
+    free(wire);
+    if (!ok) memset(out, 0, sizeof(*out));
+    return ok;
+}
+
+static bool bid_readback_exact(
+    const char *workspace, const uint8_t expected_root[32],
+    const uint8_t expected_wire[VCS_ZCODE_ATTENTION_BID_WIRE_BYTES],
+    struct vcs_zcode_attention_bid_v1 *out)
+{
+    uint8_t *wire = NULL;
+    size_t wire_len = 0;
+    uint8_t checked_root[32];
+    bool ok = vcs_object_load_raw_bounded(
+            workspace, expected_root, VCS_ZCODE_ATTENTION_BID_WIRE_BYTES,
+            &wire, &wire_len) == 0 &&
+        wire_len == VCS_ZCODE_ATTENTION_BID_WIRE_BYTES &&
+        memcmp(wire, expected_wire, VCS_ZCODE_ATTENTION_BID_WIRE_BYTES) == 0 &&
+        vcs_zcode_attention_bid_parse(wire, wire_len, out) ==
+            VCS_ZCODE_ATTENTION_OK &&
+        vcs_zcode_attention_bid_root(out, checked_root) ==
+            VCS_ZCODE_ATTENTION_OK &&
+        memcmp(checked_root, expected_root, 32) == 0;
+    free(wire);
+    if (!ok) memset(out, 0, sizeof(*out));
+    return ok;
+}
+
+enum vcs_zcode_attention_error vcs_zcode_attention_store_pair(
+    const char *workspace,
+    const struct vcs_zcode_heuristic_v1 *heuristic,
+    const struct vcs_zcode_attention_bid_v1 *bid,
+    uint8_t heuristic_root_out[32], uint8_t bid_root_out[32])
+{
+    size_t workspace_bytes = workspace ? strlen(workspace) + 1u : 0u;
+    bool alias = heuristic_root_out && bid_root_out &&
+            memory_overlaps(heuristic_root_out, 32, bid_root_out, 32);
+    alias = alias || (heuristic_root_out && heuristic &&
+            memory_overlaps(heuristic_root_out, 32, heuristic,
+                            sizeof(*heuristic))) ||
+        (heuristic_root_out && bid &&
+            memory_overlaps(heuristic_root_out, 32, bid, sizeof(*bid))) ||
+        (heuristic_root_out && workspace &&
+            memory_overlaps(heuristic_root_out, 32, workspace,
+                            workspace_bytes)) ||
+        (bid_root_out && heuristic &&
+            memory_overlaps(bid_root_out, 32, heuristic,
+                            sizeof(*heuristic))) ||
+        (bid_root_out && bid &&
+            memory_overlaps(bid_root_out, 32, bid, sizeof(*bid))) ||
+        (bid_root_out && workspace &&
+            memory_overlaps(bid_root_out, 32, workspace, workspace_bytes));
+    if (alias)
+        return VCS_ZCODE_ATTENTION_ALIAS;
+    if (!heuristic_root_out || !bid_root_out || !workspace || !heuristic ||
+        !bid) {
+        if (heuristic_root_out) memset(heuristic_root_out, 0, 32);
+        if (bid_root_out) memset(bid_root_out, 0, 32);
+        return VCS_ZCODE_ATTENTION_NULL;
+    }
+    memset(heuristic_root_out, 0, 32);
+    memset(bid_root_out, 0, 32);
+
+    enum vcs_zcode_attention_error error =
+        vcs_zcode_attention_bid_validate_for_heuristic(bid, heuristic);
+    if (error != VCS_ZCODE_ATTENTION_OK) return error;
+
+    uint8_t heuristic_wire[VCS_ZCODE_HEURISTIC_WIRE_BYTES];
+    uint8_t bid_wire[VCS_ZCODE_ATTENTION_BID_WIRE_BYTES];
+    uint8_t heuristic_root[32], bid_root[32];
+    error = vcs_zcode_heuristic_serialize(heuristic, heuristic_wire);
+    if (error == VCS_ZCODE_ATTENTION_OK)
+        error = vcs_zcode_attention_bid_serialize(bid, bid_wire);
+    if (error == VCS_ZCODE_ATTENTION_OK)
+        error = vcs_zcode_heuristic_root(heuristic, heuristic_root);
+    if (error == VCS_ZCODE_ATTENTION_OK)
+        error = vcs_zcode_attention_bid_root(bid, bid_root);
+    if (error != VCS_ZCODE_ATTENTION_OK) return error;
+
+    if (!vcs_object_store_init(workspace) ||
+        !vcs_object_put_addressed(
+            workspace, heuristic_root, heuristic_wire,
+            sizeof(heuristic_wire)))
+        return VCS_ZCODE_ATTENTION_CAS;
+    struct vcs_zcode_heuristic_v1 checked_heuristic;
+    if (!heuristic_readback_exact(
+            workspace, heuristic_root, heuristic_wire, &checked_heuristic))
+        return VCS_ZCODE_ATTENTION_CAS;
+
+    if (!vcs_object_put_addressed(
+            workspace, bid_root, bid_wire, sizeof(bid_wire)))
+        return VCS_ZCODE_ATTENTION_CAS;
+    struct vcs_zcode_attention_bid_v1 checked_bid;
+    if (!bid_readback_exact(workspace, bid_root, bid_wire, &checked_bid) ||
+        vcs_zcode_attention_bid_validate_for_heuristic(
+            &checked_bid, &checked_heuristic) != VCS_ZCODE_ATTENTION_OK)
+        return VCS_ZCODE_ATTENTION_CAS;
+
+    memcpy(heuristic_root_out, heuristic_root, 32);
+    memcpy(bid_root_out, bid_root, 32);
     return VCS_ZCODE_ATTENTION_OK;
 }
 

@@ -5,9 +5,41 @@
 #define ZCL_TOOLS_NATIVE_DEV_RETRIEVAL_STREAM_H
 
 #include "json/json.h"
+#include "retrieval/retrieval.h"
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdio.h>
+
+#define ZCL_NATIVE_DEV_RETRIEVAL_SNAPSHOT_PATH_MAX 256u
+
+struct zcl_native_dev_retrieval_snapshot_rank {
+    struct zcl_retrieval_ranked_file rows[ZCL_RETRIEVAL_EVAL_RANK_MAX];
+    char paths[ZCL_RETRIEVAL_EVAL_RANK_MAX]
+              [ZCL_NATIVE_DEV_RETRIEVAL_SNAPSHOT_PATH_MAX];
+    size_t count;
+    bool complete;
+};
+
+/* Recompute and copy only the relevance-free material required by a bounded
+ * experiment. This deliberately exports no evaluator, gold, relevance, or
+ * scope data and provides no path back into the frozen rankers. */
+struct zcl_native_dev_retrieval_snapshot {
+    char task_id[129];
+    char query[4097];
+    uint8_t source_root[32];
+    uint8_t codeindex_root[32];
+    uint8_t bm25_ranking_root[32];
+    uint8_t identifier_graph_ranking_root[32];
+    struct zcl_native_dev_retrieval_snapshot_rank bm25;
+    struct zcl_native_dev_retrieval_snapshot_rank identifier_graph;
+};
+
+int zcl_native_dev_retrieval_snapshot_compute(
+    const struct json_value *input,
+    struct zcl_native_dev_retrieval_snapshot *snapshot,
+    char *error_code, size_t error_code_cap,
+    char *error_message, size_t error_message_cap);
 
 /* Compute one source-bound ranking and emit every adaptive page as JSONL.
  * Nothing is written until computation, source post-check, and all page

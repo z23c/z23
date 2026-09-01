@@ -289,6 +289,35 @@ static int test_producer_session_retire_rpc_port_input(void)
     return failures;
 }
 
+static int test_retrieval_experiment_prefix_input(void)
+{
+    int failures = 0;
+    const struct zcl_command_registry *reg = zcl_command_catalog();
+    TEST("retrieval experiment accepts only the frozen BM25 prefix range") {
+        const struct zcl_command_spec *spec =
+            find_spec(reg, "dev.retrieval.experiment");
+        ASSERT(spec != NULL);
+        char why[160];
+        struct json_value input;
+        json_init(&input);
+        json_set_object(&input);
+        json_push_kv_int(&input, "bm25_prefix", 3);
+        ASSERT(zcl_command_registry_input_validate(spec, &input, why,
+                                                   sizeof(why)));
+        json_free(&input);
+
+        json_init(&input);
+        json_set_object(&input);
+        json_push_kv_int(&input, "bm25_prefix", 6);
+        ASSERT(!zcl_command_registry_input_validate(spec, &input, why,
+                                                    sizeof(why)));
+        ASSERT(strstr(why, "bm25_prefix") != NULL);
+        json_free(&input);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_code_guide_leaf(void)
 {
     int failures = 0;
@@ -4184,6 +4213,7 @@ int test_command_registry_catalog(void)
     failures += test_catalog_wellformed();
     failures += test_network_records_leaf_input();
     failures += test_producer_session_retire_rpc_port_input();
+    failures += test_retrieval_experiment_prefix_input();
     failures += test_ops_statecatalog_matches_registry();
     failures += test_ops_statecatalog_paging_and_lookup();
     failures += test_ops_statecatalog_paging_covers_all();
