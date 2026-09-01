@@ -607,6 +607,19 @@ static int test_integrity_live_tip_only_chain_is_operational(void) {
         ASSERT(chain_integrity_classify(&holes) ==
                CHAIN_INTEGRITY_RECONCILABLE);
 
+        /* A retained sparse prefix has neither a parent slot nor a pprev on
+         * its first child.  That is missing history, not conflicting
+         * ancestry, and must stay on the reconcilable path. */
+        ms.chain_active.chain[0] = NULL;
+        idx[1]->pprev = NULL;
+        struct chain_integrity_result prefix;
+        chain_integrity_check_post_restore(&prefix, &ms);
+        ASSERT(prefix.active_chain_mismatches == 0);
+        ASSERT(chain_integrity_classify(&prefix) ==
+               CHAIN_INTEGRITY_RECONCILABLE);
+        ms.chain_active.chain[0] = idx[0];
+        idx[1]->pprev = idx[0];
+
         ms.chain_active.chain[10] = idx[9];
         struct chain_integrity_result r;
         chain_integrity_check_post_restore(&r, &ms);

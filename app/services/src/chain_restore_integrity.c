@@ -121,12 +121,12 @@ void chain_integrity_check_post_restore(struct chain_integrity_result *out,
         } else if (h > 0) {
             struct block_index *prev = active_chain_at(chain, h - 1);
             /* A sparse live-tip window can intentionally omit `prev` while
-             * `at->pprev` still names the correct block-map object. The hole
-             * is already counted above and is reconcilable; absence is not
-             * evidence that the stored ancestry conflicts. A null/wrong-
-             * height pprev or disagreement with a PRESENT slot remains
-             * unrecoverable. */
-            if (!at->pprev || at->pprev->nHeight != h - 1 ||
+             * `at->pprev` still names the correct block-map object. A sparse
+             * retained prefix can also omit both (the first retained child
+             * has no loaded parent and the parent slot is a hole). Absence is
+             * reconcilable; only wrong-height ancestry or disagreement with
+             * a PRESENT slot is evidence of corruption. */
+            if ((at->pprev && at->pprev->nHeight != h - 1) ||
                 (prev && at->pprev != prev)) {
                 out->active_chain_mismatches++;
                 if (out->first_mismatch_height < 0 ||
