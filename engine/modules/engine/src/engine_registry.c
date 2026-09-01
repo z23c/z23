@@ -33,9 +33,13 @@ static const char *const k_grok_cli_argv[] = {
     "--prompt-file", ENGINE_CLI_PROMPT_TOKEN,
     "--cwd",         ENGINE_CLI_WORKDIR_TOKEN,
     "--max-turns",   ENGINE_CLI_TURNS_TOKEN,
+    "--model",       ENGINE_CLI_MODEL_TOKEN,
     "--always-approve",
     "--permission-mode", "bypassPermissions",
     "--no-plan",
+    "--no-subagents",
+    "--disable-web-search",
+    "--tools", "Read,Grep,Glob,Bash,Edit",
     "--output-format", "json",
     NULL
 };
@@ -116,7 +120,7 @@ static const struct engine_vendor k_engine_vendors[] = {
         .id            = "grok-cli",
         .display       = "xAI Grok (installed agent CLI, subscription auth)",
         .url           = NULL,
-        .default_model = NULL,
+        .default_model = "grok-4.6",
         .key_env       = NULL,
         .key_file_rel  = NULL,
         .program       = "grok",

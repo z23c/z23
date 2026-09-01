@@ -176,17 +176,24 @@ static bool cli_observation_from_grok(const char *body, size_t len,
                 &model_cache_create) &&
             read_required_nonnegative(model_row, "modelCalls",
                 &model_calls)) {
-            const bool add_ok =
+            const bool base_add_ok =
                 tmp.input_tokens <= INT64_MAX - tmp.output_tokens &&
                 tmp.cache_read_input_tokens <=
                     INT64_MAX - tmp.cache_creation_input_tokens;
-            const int64_t total = add_ok
+            const int64_t uncached_total = base_add_ok
                 ? tmp.input_tokens + tmp.output_tokens : -1;
-            const int64_t cached = add_ok
+            const int64_t cached = base_add_ok
                 ? tmp.cache_read_input_tokens +
                   tmp.cache_creation_input_tokens : -1;
-            if (tmp.turns > 0 && add_ok && total == tmp.total_tokens &&
-                cached <= tmp.input_tokens &&
+            const bool cache_inclusive = base_add_ok &&
+                uncached_total == tmp.total_tokens &&
+                cached <= tmp.input_tokens;
+            const bool additive_ok = base_add_ok && cached >= 0 &&
+                uncached_total <= INT64_MAX - cached;
+            const bool cache_additive = additive_ok &&
+                uncached_total + cached == tmp.total_tokens;
+            if (tmp.turns > 0 &&
+                (cache_inclusive || cache_additive) &&
                 tmp.reasoning_tokens <= tmp.output_tokens &&
                 model_input == tmp.input_tokens &&
                 model_output == tmp.output_tokens &&

@@ -1221,6 +1221,8 @@ static int case_cli_argv(void)
         EN_CHECK("which is NULL-terminated", n > 0 && argv[n] == NULL);
         bool carries_prompt = false, carries_workdir = false;
         bool carries_bypass = false, carries_no_plan = false;
+        bool carries_model = false, disables_subagents = false;
+        bool disables_web = false, pins_tools = false;
         bool carries_no_placeholders = true;
         for (size_t i = 1; i < n; i++) {
             if (strcmp(argv[i], in.prompt) == 0)  carries_prompt = true;
@@ -1228,6 +1230,13 @@ static int case_cli_argv(void)
             if (strcmp(argv[i], "bypassPermissions") == 0)
                 carries_bypass = true;
             if (strcmp(argv[i], "--no-plan") == 0) carries_no_plan = true;
+            if (strcmp(argv[i], in.model) == 0) carries_model = true;
+            if (strcmp(argv[i], "--no-subagents") == 0)
+                disables_subagents = true;
+            if (strcmp(argv[i], "--disable-web-search") == 0)
+                disables_web = true;
+            if (strcmp(argv[i], "Read,Grep,Glob,Bash,Edit") == 0)
+                pins_tools = true;
             if (argv[i][0] == '{') carries_no_placeholders = false;
         }
         EN_CHECK("and carries the prompt path", carries_prompt);
@@ -1236,6 +1245,10 @@ static int case_cli_argv(void)
                  carries_bypass);
         EN_CHECK("and disables the interactive plan approval stop",
                  carries_no_plan);
+        EN_CHECK("and passes the requested model", carries_model);
+        EN_CHECK("and disables hidden subagent work", disables_subagents);
+        EN_CHECK("and disables unrelated web retrieval", disables_web);
+        EN_CHECK("and pins the observable repository tool schema", pins_tools);
         EN_CHECK("and no placeholder survived substitution",
                  carries_no_placeholders);
     }
@@ -1345,6 +1358,32 @@ static int case_cli_observation(void)
              && observed.output_tokens == 25
              && observed.reasoning_tokens == 7
              && observed.total_tokens == 125);
+
+    /* Grok currently emits both accounting shapes in the wild. Older
+     * sessions report input as cache-inclusive; newer sessions report cache
+     * reads as an additive category. Preserve the exact counters and accept
+     * either shape only when its total is arithmetically consistent. */
+    static const char additive_cache[] =
+        "{\"text\":\"done\",\"stopReason\":\"cancelled\","
+        "\"sessionId\":\"8a79ed87-5aaa-4924-b75d-f29a52ac3818\","
+        "\"requestId\":\"db6794ee-c1e6-4bc8-9b9c-3961c6382f16\","
+        "\"usage\":{\"input_tokens\":231579,"
+        "\"cache_read_input_tokens\":265088,"
+        "\"cache_creation_input_tokens\":0,\"output_tokens\":9830,"
+        "\"reasoning_tokens\":8841,\"total_tokens\":506497},"
+        "\"num_turns\":10,\"modelUsage\":{\"grok-4.6-build\":{"
+        "\"inputTokens\":231579,\"outputTokens\":9830,"
+        "\"cacheReadInputTokens\":265088,"
+        "\"cacheCreationInputTokens\":0,\"modelCalls\":10}}}";
+    memset(&observed, 0xa5, sizeof(observed));
+    ok = engine_cli_observation_parse(
+        engine_by_id("grok-cli"), additive_cache,
+        sizeof(additive_cache) - 1u, &observed);
+    EN_CHECK("additive Grok cache accounting parses exactly",
+             ok && observed.known && observed.input_tokens == 231579 &&
+             observed.cache_read_input_tokens == 265088 &&
+             observed.output_tokens == 9830 &&
+             observed.total_tokens == 506497);
 
     memset(&observed, 0xa5, sizeof(observed));
     ok = engine_cli_observation_parse(engine_by_id("glm-cli"), "not json", 8u,
