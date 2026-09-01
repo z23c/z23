@@ -118,11 +118,21 @@ void chain_integrity_check_post_restore(struct chain_integrity_result *out,
             if (out->first_mismatch_height < 0 ||
                 h < out->first_mismatch_height)
                 out->first_mismatch_height = h;
-        } else if (h > 0 && at->pprev != active_chain_at(chain, h - 1)) {
-            out->active_chain_mismatches++;
-            if (out->first_mismatch_height < 0 ||
-                h < out->first_mismatch_height)
-                out->first_mismatch_height = h;
+        } else if (h > 0) {
+            struct block_index *prev = active_chain_at(chain, h - 1);
+            /* A sparse live-tip window can intentionally omit `prev` while
+             * `at->pprev` still names the correct block-map object. The hole
+             * is already counted above and is reconcilable; absence is not
+             * evidence that the stored ancestry conflicts. A null/wrong-
+             * height pprev or disagreement with a PRESENT slot remains
+             * unrecoverable. */
+            if (!at->pprev || at->pprev->nHeight != h - 1 ||
+                (prev && at->pprev != prev)) {
+                out->active_chain_mismatches++;
+                if (out->first_mismatch_height < 0 ||
+                    h < out->first_mismatch_height)
+                    out->first_mismatch_height = h;
+            }
         }
     }
 

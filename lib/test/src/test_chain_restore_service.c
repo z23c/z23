@@ -570,7 +570,7 @@ static int test_integrity_anchor_restore_is_benign(void) {
 
 static int test_integrity_live_tip_only_chain_is_operational(void) {
     int failures = 0;
-    TEST("chain_integrity: near-tip holes and mismatches need repair") {
+    TEST("chain_integrity: sparse holes reconcile; real mismatches need repair") {
         struct main_state ms;
         main_state_init(&ms);
 
@@ -599,8 +599,15 @@ static int test_integrity_live_tip_only_chain_is_operational(void) {
 
         for (int h = H - 20; h < H; h++)
             ms.chain_active.chain[h] = NULL;
-        ms.chain_active.chain[10] = idx[9];
 
+        struct chain_integrity_result holes;
+        chain_integrity_check_post_restore(&holes, &ms);
+        ASSERT(holes.tip_window_holes == 20);
+        ASSERT(holes.active_chain_mismatches == 0);
+        ASSERT(chain_integrity_classify(&holes) ==
+               CHAIN_INTEGRITY_RECONCILABLE);
+
+        ms.chain_active.chain[10] = idx[9];
         struct chain_integrity_result r;
         chain_integrity_check_post_restore(&r, &ms);
         ASSERT(r.zero_nbits_count == 0);

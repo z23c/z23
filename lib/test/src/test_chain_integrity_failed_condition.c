@@ -143,9 +143,9 @@ int test_chain_integrity_failed_condition(void)
         chain_integrity_check_post_restore(&before, &ms);
         ok = ok && before.ok == false;
         ok = ok && before.active_chain_holes == 10;
-        ok = ok && before.active_chain_mismatches == 1;
+        ok = ok && before.active_chain_mismatches == 0;
         ok = ok && chain_integrity_classify(&before) ==
-                         CHAIN_INTEGRITY_UNRECOVERABLE;
+                         CHAIN_INTEGRITY_RECONCILABLE;
 
         condition_engine_tick();
 
@@ -156,7 +156,7 @@ int test_chain_integrity_failed_condition(void)
         ok = ok && after.ok == true;
         ok = ok && after.active_chain_holes == 0;
         ok = ok && condition_engine_get_active_count() == 0;
-        CIF_CHECK("ancestor holes with active-chain mismatch trigger remedy", ok);
+        CIF_CHECK("ancestor holes stay reconcilable and trigger remedy", ok);
         cleanup_cif(&ms);
     }
 
