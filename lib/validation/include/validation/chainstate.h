@@ -85,6 +85,23 @@ bool block_map_next(const struct block_map *m, size_t *iter,
                     const struct uint256 **hash_out,
                     struct block_index **index_out);
 
+/* Copy every currently published index pointer under one read-lock lease.
+ *
+ * block_map_next() is the right API for short or interruptible walks, but a
+ * whole-map pass through a multi-million-entry index otherwise pays one
+ * pthread rwlock transition per occupied bucket.  On Windows winpthreads
+ * implements the contended release path with a kernel event, turning an O(N)
+ * memory walk into minutes of SetEvent traffic.  This snapshot pays exactly
+ * one lock/unlock pair and returns process-lifetime block_index pointers; the
+ * caller owns only the pointer array and must free() it.
+ *
+ * Concurrent inserts after the snapshot are intentionally absent.  Callers
+ * that require a stable structural view must retain their existing owner lock
+ * (normally main_state.cs_main) while taking and consuming the snapshot. */
+bool block_map_snapshot_indices(const struct block_map *m,
+                                struct block_index ***indices_out,
+                                size_t *count_out);
+
 /* A chain[] array superseded by a window grow. Lock-free readers may still
  * hold the old pointer, so it is RETIRED (kept allocated, value-stable —
  * same discipline as block_index.hashBlock) and freed only by

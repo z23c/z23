@@ -1780,6 +1780,38 @@ int test_validation(void)
         else { printf("FAIL (%d entries, expected 2)\n", count); failures++; }
     }
 
+    printf("block_map: one-lock pointer snapshot... ");
+    {
+        struct block_map m;
+        block_map_init(&m);
+
+        struct uint256 h1, h2;
+        memset(h1.data, 0xCC, 32);
+        memset(h2.data, 0xDD, 32);
+        struct block_index *bi1 = zcl_calloc(
+            1, sizeof(struct block_index), "test_block_index");
+        struct block_index *bi2 = zcl_calloc(
+            1, sizeof(struct block_index), "test_block_index");
+        bool ok = bi1 && bi2 && block_map_insert(&m, &h1, bi1) &&
+                  block_map_insert(&m, &h2, bi2);
+
+        struct block_index **snapshot = NULL;
+        size_t snapshot_count = 0;
+        ok = ok && block_map_snapshot_indices(&m, &snapshot,
+                                               &snapshot_count);
+        bool saw1 = false, saw2 = false;
+        for (size_t i = 0; i < snapshot_count; i++) {
+            saw1 = saw1 || snapshot[i] == bi1;
+            saw2 = saw2 || snapshot[i] == bi2;
+        }
+        ok = ok && snapshot_count == 2 && saw1 && saw2;
+        free(snapshot);
+        block_map_free(&m);
+
+        if (ok) printf("OK (%zu entries)\n", snapshot_count);
+        else { printf("FAIL\n"); failures++; }
+    }
+
     /* ================================================================
      * active_chain: init, set_tip, tip, at, height, contains
      * ================================================================ */

@@ -17,6 +17,7 @@
 #include "validation/main_state.h"
 #include "validation/chainstate.h"
 #include "chain/chain.h"
+#include <stdlib.h>
 #include <string.h>
 
 void chain_restore_validate(struct chain_restore_validation *out,
@@ -69,9 +70,15 @@ void chain_integrity_check_post_restore(struct chain_integrity_result *out,
      * is harmless. Failing the integrity gate on such an entry —
      * which is the only thing we ever WRITE during the anchor-recovery
      * path — would crash-loop the node forever. */
-    size_t iter = 0;
-    struct block_index *pi;
-    while (block_map_next(&ms->map_block_index, &iter, NULL, &pi)) {
+    struct block_index **indices = NULL;
+    size_t index_count = 0;
+    if (!block_map_snapshot_indices(&ms->map_block_index, &indices,
+                                    &index_count)) {
+        out->ok = false;
+        return;
+    }
+    for (size_t i = 0; i < index_count; i++) {
+        struct block_index *pi = indices[i];
         if (!pi || pi->nHeight <= 0)
             continue;
         if (!(pi->nStatus & BLOCK_HAVE_DATA))
@@ -83,6 +90,7 @@ void chain_integrity_check_post_restore(struct chain_integrity_result *out,
                 out->first_nbits_zero_height = pi->nHeight;
         }
     }
+    free(indices);
 
     /* chain_active.chain[h] non-NULL for h in [0, tip].
      *

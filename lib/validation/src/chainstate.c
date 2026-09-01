@@ -230,6 +230,70 @@ bool block_map_next(const struct block_map *m, size_t *iter,
     return false;
 }
 
+bool block_map_snapshot_indices(const struct block_map *m,
+                                struct block_index ***indices_out,
+                                size_t *count_out)
+{
+    if (indices_out) *indices_out = NULL;
+    if (count_out) *count_out = 0;
+    if (!m || !indices_out || !count_out) {
+        LOG_FAIL("chainstate",
+                 "block_map_snapshot_indices: null map=%d indices_out=%d "
+                 "count_out=%d",
+                 !m, !indices_out, !count_out);
+    }
+
+    pthread_rwlock_rdlock((pthread_rwlock_t *)&m->rwlock);
+    size_t expected = m->size;
+    if (expected == 0) {
+        pthread_rwlock_unlock((pthread_rwlock_t *)&m->rwlock);
+        return true;
+    }
+    if (expected > SIZE_MAX / sizeof(struct block_index *)) {
+        pthread_rwlock_unlock((pthread_rwlock_t *)&m->rwlock);
+        LOG_FAIL("chainstate",
+                 "block_map_snapshot_indices: size overflow for %zu entries",
+                 expected);
+    }
+
+    struct block_index **indices = zcl_malloc(
+        expected * sizeof(*indices), "block_map_snapshot_indices");
+    if (!indices) {
+        pthread_rwlock_unlock((pthread_rwlock_t *)&m->rwlock);
+        LOG_FAIL("chainstate",
+                 "block_map_snapshot_indices: malloc failed for %zu entries",
+                 expected);
+    }
+
+    size_t count = 0;
+    for (size_t i = 0; i < m->capacity; i++) {
+        if (!m->buckets[i].occupied)
+            continue;
+        if (count >= expected) {
+            free(indices);
+            pthread_rwlock_unlock((pthread_rwlock_t *)&m->rwlock);
+            LOG_FAIL("chainstate",
+                     "block_map_snapshot_indices: map size drift under read "
+                     "lock expected=%zu count=%zu",
+                     expected, count + 1);
+        }
+        indices[count++] = m->buckets[i].index;
+    }
+    pthread_rwlock_unlock((pthread_rwlock_t *)&m->rwlock);
+
+    if (count != expected) {
+        free(indices);
+        LOG_FAIL("chainstate",
+                 "block_map_snapshot_indices: occupied count mismatch "
+                 "expected=%zu actual=%zu",
+                 expected, count);
+    }
+
+    *indices_out = indices;
+    *count_out = count;
+    return true;
+}
+
 /* --- Active Chain --- */
 
 static struct active_chain_authority g_chain_authority = {0};

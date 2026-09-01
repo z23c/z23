@@ -237,8 +237,14 @@ int block_index_repair_heights_range(struct main_state *ms, int min_height,
     struct timespec t0;
     platform_time_monotonic_timespec(&t0);
 
-    size_t n = ms->map_block_index.size;
+    struct block_index **arr = NULL;
+    size_t n = 0;
+    if (!block_map_snapshot_indices(&ms->map_block_index, &arr, &n)) {
+        LOG_WARN("height", "[height-repair] block-map snapshot failed");
+        return 0;
+    }
     if (n == 0) {
+        free(arr);
         atomic_store(&g_heights_repaired, true);
         return 0;
     }
@@ -253,10 +259,9 @@ int block_index_repair_heights_range(struct main_state *ms, int min_height,
     int detached = 0;
     int max_h = -1;
     {
-        size_t iter = 0;
-        struct block_index *pi;
         const struct block_index *first_detached = NULL;
-        while (block_map_next(&ms->map_block_index, &iter, NULL, &pi)) {
+        for (size_t i = 0; i < n; i++) {
+            struct block_index *pi = arr[i];
             if (!pi) continue;
             if (pi->nHeight > max_h) max_h = pi->nHeight;
             /* Cursor gate (OS-S2 #1): a prior verified run already covered
@@ -291,27 +296,13 @@ int block_index_repair_heights_range(struct main_state *ms, int min_height,
         printf("[height-repair] all %zu block index heights correct\n", n);
         fflush(stdout);
         atomic_store(&g_heights_repaired, true);
+        free(arr);
         return 0;
     }
 
     printf("[height-repair] found %d/%zu entries with wrong heights, repairing...\n",
            wrong, n);
     fflush(stdout);
-
-    /* Collect all entries into an array for sorting. */
-    struct block_index **arr = zcl_malloc(n * sizeof(*arr), "height_repair_arr");
-    if (!arr) {
-        LOG_WARN("height", "[height-repair] malloc failed for %zu entries", n);
-        return 0;
-    }
-
-    size_t iter = 0, idx = 0;
-    struct block_index *pi;
-    while (block_map_next(&ms->map_block_index, &iter, NULL, &pi)) {
-        if (pi && idx < n)
-            arr[idx++] = pi;
-    }
-    n = idx;
 
     /* Pass 2: Fix heights via multi-pass forward propagation — but ONLY
      * through entries reachable from the TRUE genesis (by hash). A fix

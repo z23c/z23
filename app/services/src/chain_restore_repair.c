@@ -324,9 +324,16 @@ int chain_restore_rebuild_active_chain(struct main_state *ms,
                    tip_h);
     }
 
-    size_t it = 0;
-    struct block_index *cand;
-    while (block_map_next(&ms->map_block_index, &it, NULL, &cand)) {
+    struct block_index **map_indices = NULL;
+    size_t map_count = 0;
+    if (!block_map_snapshot_indices(&ms->map_block_index, &map_indices,
+                                    &map_count)) {
+        free(by_height);
+        LOG_RETURN(populated, "chain_restore",
+                   "rebuild_active_chain: block-map snapshot failed");
+    }
+    for (size_t i = 0; i < map_count; i++) {
+        struct block_index *cand = map_indices[i];
         if (!cand) continue;
         int h = cand->nHeight;
         if (h < 0 || h > tip_h) continue;
@@ -356,6 +363,7 @@ int chain_restore_rebuild_active_chain(struct main_state *ms,
                                   &best->nChainWork) > 0)
             by_height[h] = cand;
     }
+    free(map_indices);
 
     /* One write_lock hold across the whole no-I/O sweep (vs per-slot):
      * the lock-free at()/canonical reads stay valid under it. */

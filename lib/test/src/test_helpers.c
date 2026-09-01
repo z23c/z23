@@ -9,6 +9,7 @@
 #include "storage/progress_store.h"
 #include "validation/chain_linkage_check.h"
 #include "jobs/tip_finalize_stage.h"
+#include "platform/private_directory.h"
 #include <signal.h>
 
 /* Reset the process-global singletons that leak across groups in the
@@ -137,7 +138,15 @@ void test_make_tmpdir(char *buf, size_t n, const char *prefix,
      * is 0700 too, so this makes the fixture match what the write path has
      * always required rather than relaxing the requirement. The shared
      * test-tmp/ parent stays 0755: only the leaf is validated. */
+#if defined(_WIN32)
+    /* The MSVCRT mkdir mode is ignored, so a pre-created fixture inherits the
+     * parent ACL and correctly fails the production owner+SYSTEM-only datadir
+     * check.  Create Windows datadir fixtures through the same W-API boundary
+     * as production instead of weakening that check. */
+    (void)platform_private_directory_ensure(buf);
+#else
     mkdir(buf, 0700);
+#endif
 }
 
 /* Absolutize `path` against the process cwd into `abs`. The
