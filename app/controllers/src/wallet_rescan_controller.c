@@ -7,42 +7,14 @@
 
 #include "controllers/wallet_rescan_controller_internal.h"
 
-static bool wallet_reset_begin_checked(struct node_db *ndb,
-                                       const char *label)
-{
-    if (!ndb || !ndb->open || !node_db_begin(ndb))
-        LOG_FAIL("wallet_rescan", "%s failed: %s", label,
-                 (ndb && ndb->db) ? sqlite3_errmsg(ndb->db) : "db unavailable");
-    return true;
-}
-
-static bool wallet_reset_commit_checked(struct node_db *ndb,
-                                        const char *label)
-{
-    if (!ndb || !ndb->open || !node_db_commit(ndb))
-        LOG_FAIL("wallet_rescan", "%s failed: %s", label,
-                 (ndb && ndb->db) ? sqlite3_errmsg(ndb->db) : "db unavailable");
-    return true;
-}
-
-static void wallet_reset_rollback_best_effort(struct node_db *ndb,
-                                              const char *label)
-{
-    if (!ndb || !ndb->open)
-        return;
-    if (!node_db_rollback(ndb)) {
-        LOG_WARN("wallet_rescan", "[wallet_rescan] %s: rollback failed: %s", label, ndb->db ? sqlite3_errmsg(ndb->db) : "db unavailable");
-    }
-}
-
 static bool rpc_replaywalletfromchain(const struct json_value *params,
                                        bool help, struct json_value *result)
 {
     struct wallet_rpc_context *ctx = wallet_ctx();
     RPC_HELP(help, result,
         "replaywalletfromchain confirm\n"
-        "Nuclear rebuild: wipe all wallet UTXOs and transactions from SQLite,\n"
-        "then rescan all block files to rebuild from chain truth.\n"
+        "Nuclear rebuild: rescan all block files from chain truth, then\n"
+        "atomically replace wallet UTXOs and transactions in SQLite.\n"
         "\nArguments:\n"
         "1. confirm  (bool, required) Must be true to proceed\n");
 
@@ -76,24 +48,6 @@ static bool rpc_replaywalletfromchain(const struct json_value *params,
 
     int64_t old_balance = db_wallet_utxo_balance(ctx->node_db);
 
-    if (!wallet_reset_begin_checked(ctx->node_db,
-                                    "replaywalletfromchain begin")) {
-        json_set_str(result, "Failed to begin wallet reset transaction");
-        return false;
-    }
-    if (!db_wallet_utxo_delete_all(ctx->node_db) ||
-        !db_wallet_tx_delete_all(ctx->node_db)) {
-        wallet_reset_rollback_best_effort(ctx->node_db,
-                                          "replaywalletfromchain rollback");
-        json_set_str(result, "Failed to clear wallet tables before replay");
-        return false;
-    }
-    if (!wallet_reset_commit_checked(ctx->node_db,
-                                     "replaywalletfromchain commit")) {
-        json_set_str(result, "Failed to commit wallet reset before replay");
-        return false;
-    }
-
     wallet_rebuild_spent_set(ctx->wallet);
 
     int chain_tip = active_chain_height(&ctx->main_state->chain_active);
@@ -105,6 +59,11 @@ static bool rpc_replaywalletfromchain(const struct json_value *params,
     int found = wallet_scan_blocks(ctx->node_db,
         &ctx->main_state->chain_active, ctx->wallet, ctx->datadir,
         0, chain_tip);
+    if (found < 0) {
+        json_set_str(result,
+                     "Wallet replay failed; previous projection retained");
+        return false;
+    }
 
     int64_t new_balance = db_wallet_utxo_balance(ctx->node_db);
     int utxo_count = 0;
@@ -345,23 +304,8 @@ static bool rpc_rescanwallet(const struct json_value *params, bool help,
             db_wallet_utxo_free(&tmp[i]);
     }
 
-    /* Full rescan from block 0 */
-    if (!wallet_reset_begin_checked(ctx->node_db, "rescanwallet begin")) {
-        json_set_str(result, "Failed to begin wallet reset transaction");
-        return false;
-    }
-    if (!db_wallet_utxo_delete_all(ctx->node_db) ||
-        !db_wallet_tx_delete_all(ctx->node_db)) {
-        wallet_reset_rollback_best_effort(ctx->node_db,
-                                          "rescanwallet rollback");
-        json_set_str(result, "Failed to clear wallet tables before rescan");
-        return false;
-    }
-    if (!wallet_reset_commit_checked(ctx->node_db, "rescanwallet commit")) {
-        json_set_str(result, "Failed to commit wallet reset before rescan");
-        return false;
-    }
-
+    /* Full rescan from block 0. wallet_scan_blocks owns the sole atomic
+     * replacement; retain the old projection if scanning or storage fails. */
     int chain_tip = active_chain_height(&ctx->main_state->chain_active);
     printf("rescanwallet: rescanning %d blocks with %zu keys...\n",
            chain_tip + 1, ctx->wallet->keystore.num_keys);
@@ -370,6 +314,11 @@ static bool rpc_rescanwallet(const struct json_value *params, bool help,
     int found = wallet_scan_blocks(ctx->node_db,
         &ctx->main_state->chain_active, ctx->wallet, ctx->datadir,
         0, chain_tip);
+    if (found < 0) {
+        json_set_str(result,
+                     "Wallet rescan failed; previous projection retained");
+        return false;
+    }
 
     /* Now sync the in-memory wallet from the fresh SQLite data */
     struct db_wallet_utxo unspent[4096];

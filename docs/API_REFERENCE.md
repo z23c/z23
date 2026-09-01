@@ -975,7 +975,7 @@ represented by its children's sections.
 | `code group` | ready | read / read / public · foreground/tiny | **`group`** | `zcl.code_group.v1` | `z23 code group app/services` | Top source groups, or one group's subgroups and files |
 | `code map` | ready | read / read / public · foreground/tiny | none | `zcl.code_map.v1` | `z23 code map` | Map the tree: root groups and app shapes with file counts |
 | `code tests` | ready | read / read / public · fast/tiny | **`path`** | `zcl.code_tests.v1` | `z23 code tests lib/net/src/download.c` | Which focused test group a change to one file routes to |
-| `code room` | ready | read / read / public · fast/tiny | **`path`** | `zcl.code_room.v1` | `z23 code room app/jobs/src/utxo_apply_stage.c` | Compose shape, purpose, neighbors and test route for one path |
+| `code room` | ready | read / read / public · fast/tiny | **`path`** | `zcl.code_room.v1` | `z23 code room app.messaging` | Compose one file or command feature room |
 | `code file` | ready | read / read / public · fast/tiny | **`path`** | `zcl.code_file.v1` | `z23 code file lib/vcs/src/vcs_index.c` | One file's symbol table and in-tree include dependencies |
 | `code sym` | ready | read / read / public · fast/tiny | **`name`** | `zcl.code_symbol.v1` | `z23 code sym codeindex_open` | One symbol's card: kind, signature, def/decl, doc, guard |
 | `code capsule` | ready | read / read / public · fast/tiny | **`name`** | `zcl.code_capsule.v1` | `z23 code capsule sovereignty_guard_allow` | Compose one symbol's identity, call graph, includes and commands |

@@ -38,6 +38,8 @@
  * end_height:     last height to deserialize (inclusive)
  * aht:            address hash table built by Pass 1 (caller-owned)
  * file_has_match: per-file Pass-1 match flags (caller-owned)
+ * matched_files:  number of true entries; zero preserves the O(1) empty
+ *                 replacement path without a chain-height walk
  * ts_start:       monotonic timestamp captured before Pass 1 (for totals)
  * ts_p1:          monotonic timestamp captured after Pass 1
  *
@@ -49,6 +51,7 @@ int wallet_scan_pass2_execute(struct node_db *ndb,
                               int end_height,
                               const struct addr_ht *aht,
                               const bool *file_has_match,
+                              int matched_files,
                               const struct timespec *ts_start,
                               const struct timespec *ts_p1);
 

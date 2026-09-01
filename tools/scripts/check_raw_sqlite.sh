@@ -146,6 +146,51 @@ if [[ -n "${exec_scan//[[:space:]]/}" ]]; then
     violations="${violations}${exec_scan}"$'\n'
 fi
 
+# Wallet projection tables are owned by their models. Controllers and
+# Services may not reconstruct direct wallet-table DML; Controllers also may
+# not invoke the destructive model APIs because the scan Service owns atomic
+# replacement. Strip comments, then normalize case/whitespace/adjacent string
+# literals so the rule judges the SQL consequence rather than one spelling.
+context_files=$(find app/controllers app/services -type f \
+    \( -name '*.c' -o -name '*.h' \) -print 2>/dev/null)
+context_find_rc=$?
+if [[ $context_find_rc -ne 0 ]]; then
+    echo "check_raw_sqlite: FATAL — wallet-owner source enumeration failed (find=$context_find_rc)" >&2
+    exit 2
+fi
+context_count=$(awk 'NF { count++ } END { print count + 0 }' <<< "$context_files")
+gate_require_scanned "$context_count" 2 "check_raw_sqlite.wallet_owner" \
+    "expected controller and service C/header sources"
+
+while IFS= read -r path; do
+    [[ -z "$path" ]] && continue
+    normalized=$(awk -f tools/lint/strip_c_comments.awk "$path" | \
+        LC_ALL=C tr '[:upper:]' '[:lower:]' | tr -d '"[:space:]')
+    normalize_rc=$?
+    if [[ $normalize_rc -ne 0 ]]; then
+        echo "check_raw_sqlite: FATAL — wallet-owner normalization failed for $path" >&2
+        exit 2
+    fi
+    for table in wallet_utxos wallet_transactions wallet_sapling_notes; do
+        if [[ "$normalized" == *deletefrom"$table"* ||
+              "$normalized" == *deletefrommain."$table"* ||
+              "$normalized" == *"deletefrom[${table}]"* ||
+              "$normalized" == *insertinto"$table"* ||
+              "$normalized" == *insertor*into"$table"* ||
+              "$normalized" == *replaceinto"$table"* ||
+              "$normalized" == *update"$table"* ||
+              "$normalized" == *updateor*"$table"* ]]; then
+            violations="${violations}${path}: wallet projection DML for ${table}; call its model API"$'\n'
+        fi
+    done
+    if [[ "$path" == app/controllers/* ]] &&
+       [[ "$normalized" == *db_wallet_utxo_delete_all* ||
+          "$normalized" == *db_wallet_tx_delete_all* ||
+          "$normalized" == *db_sapling_note_delete_all* ]]; then
+        violations="${violations}${path}: Controller owns destructive wallet model call; delegate atomic replacement to the wallet scan Service"$'\n'
+    fi
+done <<< "$context_files"
+
 if [[ -n "${violations//[[:space:]]/}" ]]; then
     echo "$violations"
     echo "FAIL: raw SQLite write primitive in production code"

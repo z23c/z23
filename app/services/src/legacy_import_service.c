@@ -53,17 +53,6 @@
  * struct definitions (sizeof + field access), not just forward declarations. */
 #include "../../controllers/src/legacy_import_scan.h"
 
-static bool legacy_import_exec_checked(struct node_db *ndb,
-                                       const char *sql,
-                                       const char *label)
-{
-    if (!ndb || !ndb->open || !sql)
-        return false;
-    if (!node_db_exec(ndb, sql))
-        LOG_FAIL("legacy_import", "legacy_import: %s failed", label);
-    return true;
-}
-
 static bool legacy_import_begin_checked(struct node_db *ndb,
                                         const char *label)
 {
@@ -396,14 +385,11 @@ int legacy_import_service_run(const char *legacy_datadir,
             goto cleanup;
         }
         import_tx_open = true;
-        if (!legacy_import_exec_checked(ndb, "DELETE FROM wallet_utxos",
-                                        "pass 2 clear wallet_utxos") ||
-            !legacy_import_exec_checked(ndb,
-                                        "DELETE FROM wallet_transactions",
-                                        "pass 2 clear wallet_transactions") ||
-            !legacy_import_exec_checked(ndb,
-                                        "DELETE FROM wallet_sapling_notes",
-                                        "pass 2 clear wallet_sapling_notes")) {
+        if (!db_wallet_utxo_delete_all(ndb) ||
+            !db_wallet_tx_delete_all(ndb) ||
+            !db_sapling_note_delete_all(ndb)) {
+            LOG_WARN("legacy_import",
+                     "legacy_import: model-owned pass 2 reset failed");
             goto pass2_db_fail;
         }
 
@@ -449,8 +435,7 @@ int legacy_import_service_run(const char *legacy_datadir,
             }
         }
         if (!legacy_import_commit_checked(ndb, "pass 2 commit")) {
-            import_tx_open = false;
-            goto cleanup;
+            goto pass2_db_fail;
         }
         import_tx_open = false;
         goto pass2_db_done;

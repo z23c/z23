@@ -12,8 +12,13 @@
 #include "primitives/block.h"
 #include "core/serialize.h"
 #include "controllers/wallet_scan.h"
+#include "services/wallet_scan_service.h"
+#include "services/legacy_import_service.h"
+#include "models/database.h"
+#include "models/wallet_tx.h"
 #include "config/boot_cursor_state.h"
 #include "wallet/wallet.h"
+#include <fcntl.h>
 #include <stdlib.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -271,6 +276,193 @@ static int test_wallet_scan_cache_valid(void)
     return failures;
 }
 
+static bool seed_wallet_projection(struct node_db *ndb)
+{
+    static uint8_t raw_tx[] = {0x01};
+    static uint8_t script[] = {0x51};
+    struct db_wallet_tx tx;
+    struct db_wallet_utxo utxo;
+    struct db_sapling_note note;
+
+    memset(&tx, 0, sizeof(tx));
+    memset(&utxo, 0, sizeof(utxo));
+    memset(&note, 0, sizeof(note));
+
+    memset(tx.txid, 0x91, sizeof(tx.txid));
+    tx.raw_tx = raw_tx;
+    tx.raw_tx_len = sizeof(raw_tx);
+    tx.time_received = 1;
+
+    memcpy(utxo.txid, tx.txid, sizeof(utxo.txid));
+    memset(utxo.address_hash, 0x92, sizeof(utxo.address_hash));
+    utxo.value = 1234;
+    utxo.script = script;
+    utxo.script_len = sizeof(script);
+    utxo.height = 1;
+
+    memset(note.txid, 0x93, sizeof(note.txid));
+    memset(note.rcm, 0x94, sizeof(note.rcm));
+    memset(note.ivk, 0x95, sizeof(note.ivk));
+    memset(note.diversifier, 0x96, sizeof(note.diversifier));
+    memset(note.pk_d, 0x97, sizeof(note.pk_d));
+    memset(note.cm, 0x98, sizeof(note.cm));
+    memset(note.nullifier, 0x99, sizeof(note.nullifier));
+    note.value = 5678;
+    note.block_height = 1;
+    snprintf(note.address, sizeof(note.address), "%s", "zs1scanrollback");
+
+    return db_wallet_tx_save(ndb, &tx) &&
+           db_wallet_utxo_save(ndb, &utxo) &&
+           db_sapling_note_save(ndb, &note);
+}
+
+static bool wallet_projection_seed_is_present(struct node_db *ndb)
+{
+    uint8_t txid[32];
+    struct db_wallet_tx tx;
+    memset(txid, 0x91, sizeof(txid));
+    memset(&tx, 0, sizeof(tx));
+    bool tx_found = db_wallet_tx_find(ndb, txid, &tx);
+    if (tx_found) db_wallet_tx_free(&tx);
+    return tx_found && db_wallet_utxo_balance(ndb) == 1234 &&
+           db_sapling_note_balance_for_address(ndb,
+                                                "zs1scanrollback") == 5678;
+}
+
+static bool node_db_has_no_open_transaction(struct node_db *ndb)
+{
+    struct node_db_status status;
+    memset(&status, 0, sizeof(status));
+    node_db_get_status(ndb, &status);
+    return !status.tx_open && sqlite3_get_autocommit(ndb->db) != 0;
+}
+
+static int test_wallet_scan_empty_replacement(void)
+{
+    printf("GIVEN stale wallet rows WHEN empty Pass2 replaces them "
+           "THEN rollback is atomic and public empty paths converge... ");
+    struct node_db ndb;
+    memset(&ndb, 0, sizeof(ndb));
+    bool ok = node_db_open(&ndb, ":memory:") &&
+              seed_wallet_projection(&ndb);
+    if (ok) {
+        ok = sqlite3_exec(ndb.db,
+            "CREATE TRIGGER fail_wallet_tx_clear BEFORE DELETE ON "
+            "wallet_transactions BEGIN SELECT RAISE(ABORT,'injected'); END",
+            NULL, NULL, NULL) == SQLITE_OK;
+    }
+
+    struct active_chain chain;
+    active_chain_init(&chain);
+    struct addr_ht ht;
+    aht_init(&ht);
+    bool file_has_match[1] = {false};
+    struct timespec started = {.tv_sec = 1, .tv_nsec = 0};
+    struct timespec pass1 = {.tv_sec = 1, .tv_nsec = 0};
+    int failed = ok ? wallet_scan_pass2_execute(
+        &ndb, &chain, "/nonexistent", 0, 1000000000,
+        &ht, file_has_match, 0, &started, &pass1) : 0;
+    ok = ok && failed == -1 && wallet_projection_seed_is_present(&ndb) &&
+         node_db_has_no_open_transaction(&ndb);
+
+    if (ok) {
+        ok = sqlite3_exec(ndb.db, "DROP TRIGGER fail_wallet_tx_clear",
+                          NULL, NULL, NULL) == SQLITE_OK;
+    }
+    int cleared = ok ? wallet_scan_pass2_execute(
+        &ndb, &chain, "/nonexistent", 0, 1000000000,
+        &ht, file_has_match, 0, &started, &pass1) : -1;
+    uint8_t txid[32];
+    struct db_wallet_tx tx;
+    memset(txid, 0x91, sizeof(txid));
+    memset(&tx, 0, sizeof(tx));
+    bool tx_found = ok && db_wallet_tx_find(&ndb, txid, &tx);
+    if (tx_found) db_wallet_tx_free(&tx);
+    ok = ok && cleared == 0 && !tx_found &&
+         db_wallet_utxo_balance(&ndb) == 0 &&
+         db_sapling_note_balance_for_address(&ndb,
+                                              "zs1scanrollback") == 5678 &&
+         node_db_has_no_open_transaction(&ndb) &&
+         node_db_begin(&ndb) && node_db_commit(&ndb);
+
+    /* The public scanner must not bypass replacement for a zero-key wallet
+     * or an empty chain range. Those were the two former early returns. */
+    struct wallet empty_wallet;
+    memset(&empty_wallet, 0, sizeof(empty_wallet));
+    if (ok) {
+        ok = db_sapling_note_delete_all(&ndb) &&
+             seed_wallet_projection(&ndb);
+    }
+    int zero_key_result = ok ? wallet_scan_blocks(
+        &ndb, &chain, &empty_wallet, "/nonexistent", 0, 0) : -1;
+    ok = ok && zero_key_result == 0 &&
+         db_wallet_tx_count(&ndb) == 0 &&
+         db_wallet_utxo_balance(&ndb) == 0;
+
+    if (ok) {
+        ok = db_sapling_note_delete_all(&ndb) &&
+             seed_wallet_projection(&ndb);
+    }
+    int empty_range_result = ok ? wallet_scan_blocks(
+        &ndb, &chain, &empty_wallet, "/nonexistent", 1, 0) : -1;
+    ok = ok && empty_range_result == 0 &&
+         db_wallet_tx_count(&ndb) == 0 &&
+         db_wallet_utxo_balance(&ndb) == 0 &&
+         node_db_has_no_open_transaction(&ndb);
+
+    aht_free(&ht);
+    active_chain_free(&chain);
+    if (ndb.open) node_db_close(&ndb);
+    if (ok) { printf("OK\n"); return 0; }
+    printf("FAIL\n");
+    return 1;
+}
+
+static int test_legacy_import_clear_rollback(void)
+{
+    printf("GIVEN stale transparent+Sapling rows WHEN legacy clear fails "
+           "THEN all three model-owned deletes roll back... ");
+    char dir[256], blocks[320], file_path[384];
+    test_make_tmpdir(dir, sizeof(dir), "block_scan", "legacy_rollback");
+    snprintf(blocks, sizeof(blocks), "%s/blocks", dir);
+    mkdir(blocks, 0755);
+    snprintf(file_path, sizeof(file_path), "%s/blk00000.dat", blocks);
+    int fd = open(file_path, O_CREAT | O_WRONLY | O_TRUNC, 0600);
+    uint8_t invalid_byte = 0;
+    bool ok = fd >= 0 && write(fd, &invalid_byte, 1) == 1;
+    if (fd >= 0) close(fd);
+
+    struct node_db ndb;
+    memset(&ndb, 0, sizeof(ndb));
+    ok = ok && node_db_open(&ndb, ":memory:") &&
+         seed_wallet_projection(&ndb);
+    if (ok) {
+        ok = sqlite3_exec(ndb.db,
+            "CREATE TRIGGER fail_legacy_sapling_clear BEFORE DELETE ON "
+            "wallet_sapling_notes BEGIN SELECT RAISE(ABORT,'injected'); END",
+            NULL, NULL, NULL) == SQLITE_OK;
+    }
+
+    struct wallet *wallet = calloc(1, sizeof(*wallet));
+    if (wallet) wallet_init(wallet);
+    int imported = ok && wallet
+        ? legacy_import_service_run(dir, &ndb, wallet, false) : 0;
+    ok = ok && wallet && imported == -1 &&
+         wallet_projection_seed_is_present(&ndb) &&
+         node_db_has_no_open_transaction(&ndb) &&
+         node_db_begin(&ndb) && node_db_commit(&ndb);
+
+    if (wallet) {
+        wallet_free(wallet);
+        free(wallet);
+    }
+    if (ndb.open) node_db_close(&ndb);
+    (void)test_rm_rf_recursive(dir);
+    if (ok) { printf("OK\n"); return 0; }
+    printf("FAIL\n");
+    return 1;
+}
+
 /* ── Main ────────────────────────────────────────────────────── */
 
 /* ── boot wallet-scan cursor decision (O(delta) boot) ────────── */
@@ -320,8 +512,9 @@ int test_block_scan(void)
     failures += test_wallet_scan_keyset_fp();
     failures += test_wallet_scan_cache_valid();
     failures += test_wallet_scan_cursor_start();
+    failures += test_wallet_scan_empty_replacement();
+    failures += test_legacy_import_clear_rollback();
 
-    printf("%d passed, %d failed\n\n",
-           9 - failures, failures);
+    printf("block_scan: %d failure(s)\n\n", failures);
     return failures;
 }

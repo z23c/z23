@@ -40,28 +40,6 @@
 #include <fcntl.h>
 #include <unistd.h>
 
-static bool wallet_scan_begin_checked(struct node_db *ndb,
-                                      const char *label)
-{
-    if (!ndb || !ndb->open || !node_db_begin(ndb)) {
-        LOG_FAIL("wallet_scan", "wallet_scan: %s failed: %s",
-                label, (ndb && ndb->db) ? sqlite3_errmsg(ndb->db)
-                                        : "db unavailable");
-    }
-    return true;
-}
-
-static bool wallet_scan_commit_checked(struct node_db *ndb,
-                                       const char *label)
-{
-    if (!ndb || !ndb->open || !node_db_commit(ndb)) {
-        LOG_FAIL("wallet_scan", "wallet_scan: %s failed: %s",
-                label, (ndb && ndb->db) ? sqlite3_errmsg(ndb->db)
-                                        : "db unavailable");
-    }
-    return true;
-}
-
 static void wallet_scan_rollback_best_effort(struct node_db *ndb,
                                              const char *label)
 {
@@ -70,17 +48,6 @@ static void wallet_scan_rollback_best_effort(struct node_db *ndb,
     if (!node_db_rollback(ndb)) {
         LOG_WARN("wallet_scan", "wallet_scan: %s failed: %s", label, ndb->db ? sqlite3_errmsg(ndb->db) : "db unavailable");
     }
-}
-
-static bool wallet_scan_exec_checked(struct node_db *ndb,
-                                     const char *sql,
-                                     const char *label)
-{
-    if (!ndb || !ndb->open || !sql)
-        LOG_FAIL("wallet_scan", "exec_checked: invalid args (ndb=%p sql=%p)", (void *)ndb, (void *)sql);
-    if (!node_db_exec(ndb, sql))
-        LOG_FAIL("wallet_scan", "wallet_scan: %s failed", label);
-    return true;
 }
 
 static uint8_t *ser_tx(const struct transaction *tx, size_t *len)
@@ -166,15 +133,95 @@ static bool scan_block_txs(const struct block *blk, int height,
     return any_found;
 }
 
-int wallet_scan_pass2_execute(struct node_db *ndb,
-                              const struct active_chain *chain,
-                              const char *datadir,
-                              int start_height,
-                              int end_height,
-                              const struct addr_ht *aht,
-                              const bool *file_has_match,
-                              const struct timespec *ts_start,
-                              const struct timespec *ts_p1)
+/* The sole durable write path for a completed transparent wallet scan.
+ * An empty result uses the same transaction and model-owned table APIs as a
+ * populated result, so Controllers never need table knowledge or a second
+ * commit/rollback policy. */
+static int wallet_scan_store_results(struct node_db *ndb,
+                                     struct utxo_set *uset,
+                                     struct wtx_list *wl)
+{
+    bool write_tx_open = false;
+
+    if (!ndb || !ndb->open || !node_db_begin(ndb))
+        LOG_ERR("wallet_scan", "result write begin failed: %s",
+                (ndb && ndb->db) ? sqlite3_errmsg(ndb->db)
+                                 : "db unavailable");
+    write_tx_open = true;
+    if (!db_wallet_utxo_delete_all(ndb) ||
+        !db_wallet_tx_delete_all(ndb)) {
+        LOG_WARN("wallet_scan",
+                 "wallet_scan: model-owned result reset failed");
+        goto write_fail;
+    }
+
+    for (int i = 0; i < uset->count; i++) {
+        struct mem_utxo *u = &uset->items[i];
+        struct db_wallet_utxo du;
+        memset(&du, 0, sizeof(du));
+        memcpy(du.txid, u->txid, 32);
+        du.vout = u->vout;
+        du.value = u->value;
+        memcpy(du.address_hash, u->addr_hash, 20);
+        du.script = u->script;
+        du.script_len = u->script_len;
+        du.height = u->height;
+        du.is_coinbase = u->is_coinbase;
+        if (!db_wallet_utxo_save(ndb, &du)) {
+            LOG_WARN("wallet_scan", "wallet_scan: wallet_utxo save failed");
+            goto write_fail;
+        }
+        if (u->spent &&
+            !db_wallet_utxo_mark_spent(ndb, u->txid, u->vout,
+                                       u->spent_txid, u->spent_vin)) {
+            LOG_WARN("wallet_scan",
+                     "wallet_scan: wallet_utxo mark_spent failed");
+            goto write_fail;
+        }
+    }
+
+    for (int i = 0; i < wl->count; i++) {
+        struct mem_wtx *t = &wl->items[i];
+        struct db_wallet_tx dt;
+        memset(&dt, 0, sizeof(dt));
+        memcpy(dt.txid, t->txid, 32);
+        dt.raw_tx = t->raw;
+        dt.raw_tx_len = t->raw_len;
+        dt.has_block = true;
+        dt.block_height = t->height;
+        dt.time_received = (int64_t)t->time;
+        dt.from_me = t->from_me;
+        dt.fee = t->fee;
+        if (!db_wallet_tx_save(ndb, &dt)) {
+            LOG_WARN("wallet_scan", "wallet_scan: wallet_tx save failed");
+            goto write_fail;
+        }
+    }
+
+    if (!node_db_commit(ndb)) {
+        LOG_WARN("wallet_scan", "wallet_scan: result write commit failed: %s",
+                 ndb->db ? sqlite3_errmsg(ndb->db) : "db unavailable");
+        goto write_fail;
+    }
+    write_tx_open = false;
+    return wl->count;
+
+write_fail:
+    if (write_tx_open)
+        wallet_scan_rollback_best_effort(ndb, "result write rollback");
+    LOG_ERR("wallet_scan",
+            "result write failed; previous wallet projection retained");
+}
+
+static int wallet_scan_pass2_nonempty(struct node_db *ndb,
+                                      const struct active_chain *chain,
+                                      const char *datadir,
+                                      int start_height,
+                                      int end_height,
+                                      const struct addr_ht *aht,
+                                      const bool *file_has_match,
+                                      const struct timespec *ts_start,
+                                      const struct timespec *ts_p1)
 {
     struct timespec ts_p2;
 
@@ -190,7 +237,6 @@ int wallet_scan_pass2_execute(struct node_db *ndb,
 
     /* First, find which heights map to matched files */
     int blocks_deserialized = 0;
-    int found = 0;
     int cached_file = -1;
     int cached_fd = -1;
     struct platform_read_mapping cached_mapping;
@@ -247,8 +293,7 @@ int wallet_scan_pass2_execute(struct node_db *ndb,
         }
         blocks_deserialized++;
 
-        if (scan_block_txs(&blk, h, aht, &uset, &wl))
-            found++;
+        (void)scan_block_txs(&blk, h, aht, &uset, &wl);
 
         block_free(&blk);
     }
@@ -279,85 +324,40 @@ int wallet_scan_pass2_execute(struct node_db *ndb,
            total_ms, unspent, (double)balance / (double)ZATOSHI_PER_ZCL);
     fflush(stdout);
 
-    /* ========== Write results to SQLite ========== */
-    {
-        bool write_tx_open = false;
-        if (!wallet_scan_begin_checked(ndb, "result write begin")) {
-            found = -1;
-            goto write_cleanup;
-        }
-        write_tx_open = true;
-        if (!wallet_scan_exec_checked(ndb, "DELETE FROM wallet_utxos",
-                                      "result write clear wallet_utxos") ||
-            !wallet_scan_exec_checked(ndb, "DELETE FROM wallet_transactions",
-                                      "result write clear wallet_transactions")) {
-            found = -1;
-            goto write_fail;
-        }
-
-        for (int i = 0; i < uset.count; i++) {
-            struct mem_utxo *u = &uset.items[i];
-            struct db_wallet_utxo du;
-            memset(&du, 0, sizeof(du));
-            memcpy(du.txid, u->txid, 32);
-            du.vout = u->vout;
-            du.value = u->value;
-            memcpy(du.address_hash, u->addr_hash, 20);
-            du.script = u->script;
-            du.script_len = u->script_len;
-            du.height = u->height;
-            du.is_coinbase = u->is_coinbase;
-            if (!db_wallet_utxo_save(ndb, &du)) {
-                LOG_WARN("wallet_scan", "wallet_scan: wallet_utxo save failed");
-                found = -1;
-                goto write_fail;
-            }
-            if (u->spent &&
-                !db_wallet_utxo_mark_spent(ndb, u->txid, u->vout,
-                                           u->spent_txid, u->spent_vin)) {
-                LOG_WARN("wallet_scan", "wallet_scan: wallet_utxo mark_spent failed");
-                found = -1;
-                goto write_fail;
-            }
-        }
-
-        for (int i = 0; i < wl.count; i++) {
-            struct mem_wtx *t = &wl.items[i];
-            struct db_wallet_tx dt;
-            memset(&dt, 0, sizeof(dt));
-            memcpy(dt.txid, t->txid, 32);
-            dt.raw_tx = t->raw;
-            dt.raw_tx_len = t->raw_len;
-            dt.has_block = true;
-            dt.block_height = t->height;
-            dt.time_received = (int64_t)t->time;
-            dt.from_me = t->from_me;
-            dt.fee = t->fee;
-            if (!db_wallet_tx_save(ndb, &dt)) {
-                LOG_WARN("wallet_scan", "wallet_scan: wallet_tx save failed");
-                found = -1;
-                goto write_fail;
-            }
-        }
-
-        if (!wallet_scan_commit_checked(ndb, "result write commit")) {
-            found = -1;
-            write_tx_open = false;
-            goto write_cleanup;
-        }
-        write_tx_open = false;
-        goto write_cleanup;
-
-write_fail:
-        if (write_tx_open)
-            wallet_scan_rollback_best_effort(ndb, "result write rollback");
-write_cleanup:
-        ;
-    }
+    int result = wallet_scan_store_results(ndb, &uset, &wl);
 
     /* Cleanup */
     uset_free(&uset);
     wl_free(&wl);
 
-    return found < 0 ? -1 : wl.count;
+    return result;
+}
+
+int wallet_scan_pass2_execute(struct node_db *ndb,
+                              const struct active_chain *chain,
+                              const char *datadir,
+                              int start_height,
+                              int end_height,
+                              const struct addr_ht *aht,
+                              const bool *file_has_match,
+                              int matched_files,
+                              const struct timespec *ts_start,
+                              const struct timespec *ts_p1)
+{
+    if (matched_files < 0)
+        LOG_ERR("wallet_scan", "negative matched-file evidence: %d",
+                matched_files);
+
+    /* Keep the empty replacement outside the nonempty worker's large stack
+     * frame and heap working sets on every compiler/profile. */
+    if (matched_files == 0) {
+        struct utxo_set empty_uset = {0};
+        struct wtx_list empty_wl = {0};
+        return wallet_scan_store_results(ndb, &empty_uset, &empty_wl);
+    }
+
+    return wallet_scan_pass2_nonempty(ndb, chain, datadir,
+                                      start_height, end_height,
+                                      aht, file_has_match,
+                                      ts_start, ts_p1);
 }

@@ -63,7 +63,7 @@
  * ZCL_LINT_PRODUCTION_SCAN unset, so this fixture remains visible to its own
  * gate while production scans and the live dev watcher ignore it. */
 #define NODE_DB_EXEC_FIXTURE_DST_REL \
-    "app/_node_db_exec_lint_fixture_probe_tmp.c"
+    "app/controllers/src/_node_db_exec_lint_fixture_probe_tmp.c"
 #define COINS_FIXTURE_SRC_REL "lib/test/fixtures/coins_lookup_guard_fixture.c"
 #define COINS_FIXTURE_DST_REL "app/controllers/src/_coins_lookup_guard_fixture_tmp.c"
 #define OBS_FIXTURE_SRC_REL "lib/test/fixtures/observability_unpaired_stderr_fixture.c"

@@ -346,8 +346,8 @@ int t_node_db_exec_fixture_trips_gate(void)
     }
     int rc = run_check_raw_sqlite();
     (void)unlink(fixture_dst);
-    TEST("[lint-gate] raw node.db sqlite3_exec DML fixture trips the gate") {
-        ASSERT(rc != 0);
+    TEST("[lint-gate] forwarded node_db_exec wallet DML fixture trips the gate") {
+        ASSERT(rc == 1);
         PASS();
     } _test_next:;
     return failures;

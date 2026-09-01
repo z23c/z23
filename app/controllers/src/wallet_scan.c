@@ -40,49 +40,6 @@
 #include "util/log_macros.h"
 #include "util/safe_alloc.h"
 
-static bool wallet_scan_begin_checked(struct node_db *ndb,
-                                      const char *label)
-{
-    if (!ndb || !ndb->open || !node_db_begin(ndb)) {
-        LOG_FAIL("wallet_scan", "wallet_scan: %s failed: %s",
-                label, (ndb && ndb->db) ? sqlite3_errmsg(ndb->db)
-                                        : "db unavailable");
-    }
-    return true;
-}
-
-static bool wallet_scan_commit_checked(struct node_db *ndb,
-                                       const char *label)
-{
-    if (!ndb || !ndb->open || !node_db_commit(ndb)) {
-        LOG_FAIL("wallet_scan", "wallet_scan: %s failed: %s",
-                label, (ndb && ndb->db) ? sqlite3_errmsg(ndb->db)
-                                        : "db unavailable");
-    }
-    return true;
-}
-
-static void wallet_scan_rollback_best_effort(struct node_db *ndb,
-                                             const char *label)
-{
-    if (!ndb || !ndb->open)
-        return;
-    if (!node_db_rollback(ndb)) {
-        LOG_WARN("wallet_scan", "wallet_scan: %s failed: %s", label, ndb->db ? sqlite3_errmsg(ndb->db) : "db unavailable");
-    }
-}
-
-static bool wallet_scan_exec_checked(struct node_db *ndb,
-                                     const char *sql,
-                                     const char *label)
-{
-    if (!ndb || !ndb->open || !sql)
-        LOG_FAIL("wallet_scan", "exec_checked: invalid args (ndb=%p sql=%p)", (void *)ndb, (void *)sql);
-    if (!node_db_exec(ndb, sql))
-        LOG_FAIL("wallet_scan", "wallet_scan: %s failed", label);
-    return true;
-}
-
 /* --- Pass 1: Raw byte pattern scan --- */
 
 /* Scan context for parallel file scanning */
@@ -256,8 +213,10 @@ int wallet_scan_blocks(struct node_db *ndb,
     /* range fast-path. Empty range = nothing to do. */
     if (start_height > end_height) {
         printf("wallet_scan: range empty (start=%d > end=%d), "
-               "skipping\n", start_height, end_height);
-        return 0;
+               "replacing with empty result\n", start_height, end_height);
+        return wallet_scan_pass2_execute(ndb, chain, datadir,
+                                         start_height, end_height,
+                                         NULL, NULL, 0, NULL, NULL);
     }
 
     struct timespec ts_start, ts_p1;
@@ -282,7 +241,11 @@ int wallet_scan_blocks(struct node_db *ndb,
      * pointless disk I/O. */
     if (aht.count == 0) {
         printf("wallet_scan: no wallet keys, skipping block scan\n");
-        return 0;
+        int empty_result = wallet_scan_pass2_execute(
+            ndb, chain, datadir, start_height, end_height,
+            &aht, NULL, 0, NULL, NULL);
+        aht_free(&aht);
+        return empty_result;
     }
 
     /* Determine which block files exist + capture their current sizes. */
@@ -417,22 +380,6 @@ int wallet_scan_blocks(struct node_db *ndb,
 
     if (matched_files == 0) {
         printf("wallet_scan: no wallet transactions found\n");
-        aht_free(&aht);
-        free(file_has_match);
-        /* Still write empty results to clear any stale data */
-        if (!wallet_scan_begin_checked(ndb, "empty-result reset begin"))
-            LOG_ERR("wallet_scan", "empty-result: failed to begin db transaction");
-        if (!wallet_scan_exec_checked(ndb, "DELETE FROM wallet_utxos",
-                                      "empty-result clear wallet_utxos") ||
-            !wallet_scan_exec_checked(ndb, "DELETE FROM wallet_transactions",
-                                      "empty-result clear wallet_transactions")) {
-            wallet_scan_rollback_best_effort(ndb,
-                                             "empty-result reset rollback");
-            LOG_ERR("wallet_scan", "empty-result: failed to clear wallet tables");
-        }
-        if (!wallet_scan_commit_checked(ndb, "empty-result reset commit"))
-            LOG_ERR("wallet_scan", "empty-result: failed to commit db transaction");
-        return 0;
     }
 
     /* ========== PASS 2: Selective block deserialization ========== */
@@ -446,7 +393,7 @@ int wallet_scan_blocks(struct node_db *ndb,
      * Service by const reference and frees them afterward. */
     int found = wallet_scan_pass2_execute(ndb, chain, datadir,
                                           start_height, end_height,
-                                          &aht, file_has_match,
+                                          &aht, file_has_match, matched_files,
                                           &ts_start, &ts_p1);
 
     /* Cleanup */
