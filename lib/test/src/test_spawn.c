@@ -139,14 +139,23 @@ static int test_spawn_capture_echo(void)
 static int test_spawn_capture_timeout_kills(void)
 {
     int failures = 0;
-    TEST("spawn: capture timeout SIGKILLs a sleeping child") {
+    TEST("spawn: observed capture names timeout and SIGKILLs its child") {
         const char *argv[] = { "/bin/sleep", "5", NULL };
         char buf[64] = {0};
+        bool timed_out = false;
         int64_t t0 = platform_time_monotonic_ms();
-        int rc = zcl_spawn_capture(argv, buf, sizeof(buf), 200);
+        int rc = zcl_spawn_capture_observed(
+            argv, buf, sizeof(buf), 200, &timed_out);
         int64_t elapsed = platform_time_monotonic_ms() - t0;
         ASSERT(elapsed < 1500);          /* generous over the 200ms budget */
         ASSERT(rc == 128 + SIGKILL);     /* killed, not a clean exit */
+        ASSERT(timed_out);
+        const char *echo_argv[] = { "/bin/echo", "completed", NULL };
+        timed_out = true;
+        rc = zcl_spawn_capture_observed(
+            echo_argv, buf, sizeof(buf), 3000, &timed_out);
+        ASSERT(rc == 0);
+        ASSERT(!timed_out);
         PASS();
     } _test_next:;
     return failures;

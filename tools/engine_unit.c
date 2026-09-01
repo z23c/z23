@@ -932,11 +932,17 @@ static bool dispatch_cli(const struct engine_vendor *v, const char *prompt_path,
         dr->err = ENGINE_ERR_REFUSED;
         LOG_FAIL("engine_unit", "cannot allocate the CLI transcript buffer");
     }
-    const int rc = run(argv, log, UNIT_GATE_LOG_BYTES, timeout_ms);
+    bool timed_out = false;
+    const int rc = zcl_spawn_capture_observed(
+        argv, log, UNIT_GATE_LOG_BYTES, timeout_ms, &timed_out);
     free(log);
     if (rc < 0) {
         dr->err = ENGINE_ERR_NETWORK;
         LOG_FAIL("engine_unit", "could not launch %s", v->program);
+    }
+    if (timed_out) {
+        dr->err = ENGINE_ERR_TIMEOUT;
+        return false;
     }
     /* rc is deliberately NOT consulted beyond "did it launch". A CLI engine
      * exiting 0 having written nothing is one of the three measured failures

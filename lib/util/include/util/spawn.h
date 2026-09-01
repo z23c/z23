@@ -114,6 +114,15 @@ struct zcl_result zcl_spawn_detached_input(const char *const argv[],
 int zcl_spawn_capture(const char *const argv[], char *buf, size_t cap,
                        int timeout_ms);
 
+/* The same bounded capture with the deadline outcome preserved separately
+ * from the child's status. `timed_out` is always initialized when non-NULL
+ * and is true only when this function killed the process group because the
+ * supplied deadline elapsed. This is the form for callers whose protocol
+ * distinguishes an incomplete timed-out action from a completed child that
+ * happened to exit with 128 + SIGKILL. */
+int zcl_spawn_capture_observed(const char *const argv[], char *buf, size_t cap,
+                               int timeout_ms, bool *timed_out);
+
 /* Cancellable capture for long fixed actions. The parent polls
  * `should_cancel` at most every 100 ms and, when it returns true, kills the
  * child's whole process group so compiler/test/fuzz descendants cannot

@@ -58,6 +58,14 @@ int zcl_spawn_capture_cancelable(
 int zcl_spawn_capture(const char *const argv[], char *buf, size_t cap,
                       int timeout_ms)
 {
+    return zcl_spawn_capture_observed(argv, buf, cap, timeout_ms, NULL);
+}
+
+static int spawn_capture_observed_platform(
+    const char *const argv[], char *buf, size_t cap, int timeout_ms,
+    bool *timed_out)
+{
+    if (timed_out) *timed_out = false;
     return zcl_spawn_capture_cancelable(argv, buf, cap, timeout_ms,
                                         NULL, NULL, NULL);
 }
@@ -260,11 +268,13 @@ struct zcl_result zcl_spawn_detached_input(const char *const argv[],
 
 /* ── zcl_spawn_capture ───────────────────────────────────────────────── */
 
-int zcl_spawn_capture_cancelable(
+static int spawn_capture_impl(
     const char *const argv[], char *buf, size_t cap, int timeout_ms,
-    zcl_spawn_cancel_fn should_cancel, void *cancel_ctx, bool *cancelled)
+    zcl_spawn_cancel_fn should_cancel, void *cancel_ctx, bool *cancelled,
+    bool *timed_out_out)
 {
     if (cancelled) *cancelled = false;
+    if (timed_out_out) *timed_out_out = false;
     if (!argv || !argv[0] || !buf || cap == 0)
         LOG_ERR("spawn", "bad args (argv=%p buf=%p cap=%zu)",
                 (const void *)argv, (void *)buf, cap);
@@ -358,6 +368,7 @@ int zcl_spawn_capture_cancelable(
             (void)kill(pid, SIGKILL);
     }
     if (cancelled) *cancelled = was_cancelled;
+    if (timed_out_out) *timed_out_out = timed_out;
 
     int status = 0;
     if (!spawn_reap(pid, &status)) {
@@ -371,14 +382,36 @@ int zcl_spawn_capture_cancelable(
     return 0;
 }
 
+int zcl_spawn_capture_cancelable(
+    const char *const argv[], char *buf, size_t cap, int timeout_ms,
+    zcl_spawn_cancel_fn should_cancel, void *cancel_ctx, bool *cancelled)
+{
+    return spawn_capture_impl(argv, buf, cap, timeout_ms, should_cancel,
+                              cancel_ctx, cancelled, NULL);
+}
+
+static int spawn_capture_observed_platform(
+    const char *const argv[], char *buf, size_t cap, int timeout_ms,
+    bool *timed_out)
+{
+    return spawn_capture_impl(argv, buf, cap, timeout_ms, NULL, NULL, NULL,
+                              timed_out);
+}
+
 int zcl_spawn_capture(const char *const argv[], char *buf, size_t cap,
                        int timeout_ms)
 {
-    return zcl_spawn_capture_cancelable(
-        argv, buf, cap, timeout_ms, NULL, NULL, NULL);
+    return zcl_spawn_capture_observed(argv, buf, cap, timeout_ms, NULL);
 }
 
 #endif
+
+int zcl_spawn_capture_observed(const char *const argv[], char *buf, size_t cap,
+                               int timeout_ms, bool *timed_out)
+{
+    return spawn_capture_observed_platform(
+        argv, buf, cap, timeout_ms, timed_out);
+}
 
 /* ── zcl_argv_split ──────────────────────────────────────────────────── */
 
