@@ -1,4 +1,5 @@
-/* Copyright 2026 Rhett Creighton. Licensed under Apache-2.0. */
+/* Copyright 2026 Rhett Creighton. Licensed under Apache-2.0.
+ * purpose: Classify maintained source paths into bounded architectural contexts. */
 
 #ifndef ZCL_CODEINDEX_CONTEXT_H
 #define ZCL_CODEINDEX_CONTEXT_H

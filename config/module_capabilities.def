@@ -1057,6 +1057,7 @@ ZCL_MODULE_CAPABILITY("src/main_cli_modes.c", CAP_FS_READ|CAP_NETWORK|CAP_FS_WRI
 ZCL_MODULE_CAPABILITY("tools/command/cli_render.c", CAP_PRIVILEGE, "the native command registry's human presentation layer: calls ioctl() to read the terminal's window size for column-aware rendering")
 ZCL_MODULE_CAPABILITY("tools/command/native_build_command.c", CAP_FS_READ, "")
 ZCL_MODULE_CAPABILITY("tools/command/native_code_change_plan_command.c", CAP_FS_READ, "")
+ZCL_MODULE_CAPABILITY("tools/command/native_code_context_command.c", CAP_FS_WRITE, "opens or rebuilds the local source index before deriving the bounded-context map")
 ZCL_MODULE_CAPABILITY("tools/command/native_code_emitter_command.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("tools/command/native_command.c", CAP_FS_READ|CAP_FS_WRITE|CAP_CLOCK, "")
 ZCL_MODULE_CAPABILITY("tools/command/native_dev_activation_command.c", CAP_FS_READ, "")
