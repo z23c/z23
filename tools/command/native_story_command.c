@@ -228,8 +228,7 @@ static bool story_push_context_sources(
     return ok;
 }
 
-static bool story_workspace_source_root(const char *workspace,
-                                        uint8_t out[32])
+bool story_workspace_source_root(const char *workspace, uint8_t out[32])
 {
     struct vcs_manifest first, second;
     uint8_t first_root[32], second_root[32];

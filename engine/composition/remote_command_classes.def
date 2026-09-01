@@ -750,6 +750,8 @@ REMOTE_COMMAND_CLASS("zcode.workspace.source.bundle.import", REMOTE_CLASS_NEVER,
 REMOTE_COMMAND_CLASS("zcode.workspace.source.bundle.checkout", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("zcode.workspace.source.bundle.publish", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("zcode.workspace.source.package.checkout", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.focus.claim-publish", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("zcode.focus.snapshot-publish", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("zcode.passport.status", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("zcode.workspace.status", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("zcode.workspace.plan", REMOTE_CLASS_NEVER, "")

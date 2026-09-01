@@ -24,14 +24,17 @@ ZCL_COMMAND_BRANCH("zcode.project", "zcode",
 ZCL_COMMAND_BRANCH("zcode.work", "zcode",
                    "Proven work",
                    ZCL_COMMAND_LAYER_APP)
+ZCL_COMMAND_BRANCH("zcode.focus", "zcode",
+                   "Focus",
+                   ZCL_COMMAND_LAYER_APP)
 ZCL_COMMAND_BRANCH("zcode.task", "zcode",
-                   "Posted tasks and transports",
+                   "Tasks",
                    ZCL_COMMAND_LAYER_APP)
 ZCL_COMMAND_BRANCH("zcode.passport", "zcode",
-                   "Signed module passports",
+                   "Passports",
                    ZCL_COMMAND_LAYER_APP)
 ZCL_COMMAND_BRANCH("zcode.workspace", "zcode",
-                   "Workspace evidence",
+                   "Workspaces",
                    ZCL_COMMAND_LAYER_APP)
 ZCL_COMMAND_BRANCH("zcode.workspace.source", "zcode.workspace",
                    "Git-free source",
@@ -45,6 +48,58 @@ ZCL_COMMAND_BRANCH("zcode.workspace.source.package", "zcode.workspace.source",
 ZCL_COMMAND_BRANCH("zcode.workspace.manifest", "zcode.workspace",
                    "Externally signed C23 workspace manifests",
                    ZCL_COMMAND_LAYER_APP)
+
+ZCL_COMMAND_READY_COMMAND(
+    "zcode.focus.claim-publish", "zcode.focus", "",
+    "Publish one admitted worker focus claim",
+    "Reverifies one canonical work item, exact source generation, bounded "
+    "agent context, signed work request and signed worker admission. It "
+    "derives the claimant, validity interval, evidence plan and write-scope "
+    "binding, then stores the inert canonical scope, empty situation focus "
+    "and focus_claim.v1 bytes in the existing workspace CAS with bounded "
+    "readback and root verification. The claim records existing admission; "
+    "it grants no assignment, execution, acceptance or deployment authority.",
+    ZCL_COMMAND_RESULT_BUDGET,
+    "zcode,focus,claim,worker,scope,admission,cas",
+    "zcl.zcode_focus_claim_publish.input.v1",
+    "zcl.zcode_focus_claim_publish.v1",
+    "workspace,work,situation_root,write_scope,work_request_root,work_admission_carrier_root,datadir,details",
+    "workspace,work,situation_root,write_scope,work_request_root,work_admission_carrier_root",
+    "z23 zcode focus claim-publish --input='{...}'",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_CONFIRM_NONE,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_NONE,
+    zcl_native_handle_zcode_focus_claim_publish)
+
+ZCL_COMMAND_READY_COMMAND(
+    "zcode.focus.snapshot-publish", "zcode.focus", "",
+    "Publish one canonical active-claim focus snapshot",
+    "Loads and re-roots one to sixteen existing focus claims, their exact "
+    "write scopes, signed requests and signed admission carriers. It sorts "
+    "the roots canonically, rejects duplicates, overlap, stale admission and "
+    "authority or budget mismatch, then stores focus_claim_set.v1 and the "
+    "composed focus.v1 in the existing workspace CAS. This immutable "
+    "snapshot is evidence about admitted work, never a queue, lease, "
+    "scheduler, execution permission, acceptance or deployment decision.",
+    ZCL_COMMAND_RESULT_BUDGET,
+    "zcode,focus,snapshot,claims,disjoint,admission,cas",
+    "zcl.zcode_focus_snapshot_publish.input.v1",
+    "zcl.zcode_focus_snapshot_publish.v1",
+    "workspace,work,claim_roots,work_admission_carrier_roots,datadir,details",
+    "workspace,work,claim_roots,work_admission_carrier_roots",
+    "z23 zcode focus snapshot-publish --input='{...}'",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_CONFIRM_NONE,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    zcl_native_handle_zcode_focus_snapshot_publish)
 
 ZCL_COMMAND_READY_COMMAND(
     "zcode.workspace.source.capture", "zcode.workspace.source", "",
@@ -926,7 +981,7 @@ ZCL_COMMAND_READY_READ(
     ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_zcode_guide)
 
 ZCL_COMMAND_BRANCH("zcode.commons", "zcode",
-                   "Living Commons projection",
+                   "Commons",
                    ZCL_COMMAND_LAYER_APP)
 ZCL_COMMAND_BRANCH("zcode.commons.creation", "zcode.commons",
                    "Creation-attribution inspection",
@@ -971,7 +1026,7 @@ ZCL_COMMAND_BRANCH("zcode.commons.impact", "zcode.commons",
                    "Locally rendered productivity evidence",
                    ZCL_COMMAND_LAYER_APP)
 ZCL_COMMAND_BRANCH("zcode.moderation", "zcode",
-                   "Commons moderation",
+                   "Moderation",
                    ZCL_COMMAND_LAYER_APP)
 ZCL_COMMAND_BRANCH("zcode.moderation.policy", "zcode.moderation",
                    "Immutable family policy profiles",
@@ -1722,7 +1777,7 @@ ZCL_COMMAND_READY_READ(
     ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_zcode_commons_rebuild)
 
 ZCL_COMMAND_BRANCH("zcode.patronage", "zcode",
-                   "Simulated patronage",
+                   "Patronage",
                    ZCL_COMMAND_LAYER_APP)
 ZCL_COMMAND_BRANCH("zcode.patronage.offer", "zcode.patronage",
                    "Signed patronage offers", ZCL_COMMAND_LAYER_APP)
@@ -2339,7 +2394,7 @@ ZCL_COMMAND_READY_COMMAND(
     zcl_native_handle_zcode_publish_commit)
 
 ZCL_COMMAND_BRANCH("zcode.package", "zcode",
-                   "Committed packages",
+                   "Packages",
                    ZCL_COMMAND_LAYER_APP)
 
 ZCL_COMMAND_BRANCH("zcode.package.publish", "zcode.package",
@@ -2779,7 +2834,7 @@ ZCL_COMMAND_READY_COMMAND(
  * and bound only when the name owner equals the publisher key's P2PKH. */
 
 ZCL_COMMAND_BRANCH("zcode.contributor", "zcode",
-                   "Contributor identities",
+                   "Contributors",
                    ZCL_COMMAND_LAYER_APP)
 
 ZCL_COMMAND_READY_READ(
@@ -4712,19 +4767,18 @@ ZCL_COMMAND_READY_COMMAND(
  * `zcode node ...` path exists so the surface is discoverable from the
  * menu, but the alias is the primary invocation.
  *
- * BUDGET NOTE — the `zcode` branch menu is AT its ZCL_COMMAND_BRANCH_BUDGET
- * (3072-byte) ceiling; adding this one child needed four existing child
- * summaries above to be tightened first. A menu that overruns the budget
- * renders as NOTHING (write_bounded_json returns 0), so the next lane that
- * adds a `zcode.*` branch must free bytes the same way rather than assume
- * headroom. There is roughly 25 bytes of slack left.
+ * BUDGET NOTE — the `zcode` branch menu is bounded by
+ * ZCL_COMMAND_BRANCH_BUDGET. Its child labels are intentionally terse: a menu
+ * that overruns the budget renders as NOTHING (write_bounded_json returns 0),
+ * so a new `zcode.*` branch must preserve the measured menu contract rather
+ * than assume headroom.
  *
  * Everything under `update` is PLANNED on purpose. A node self-update path
  * that silently does nothing is worse than one that refuses BY NAME, so
  * each leaf carries an availability_reason and the registry grammar makes
  * it a typed blocker instead of a no-op. */
 ZCL_COMMAND_BRANCH("zcode.node", "zcode",
-                   "Join and update this node",
+                   "Node join/update",
                    ZCL_COMMAND_LAYER_APP)
 ZCL_COMMAND_BRANCH("zcode.node.update", "zcode.node",
                    "Node self-update",

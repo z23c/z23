@@ -49,4 +49,6 @@ enum story_context_status story_load_agent_context(
     const char *workspace, const struct story_loaded_work *loaded,
     struct vcs_zcode_agent_context_v1 *context);
 
+bool story_workspace_source_root(const char *workspace, uint8_t out[32]);
+
 #endif /* ZCL_COMMAND_NATIVE_STORY_INTERNAL_H */

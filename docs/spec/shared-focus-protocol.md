@@ -105,6 +105,35 @@ exclusion, signatures, and mere object presence never choose lifecycle state.
 The snapshot root attributes the local policy and exact accepted evidence; it
 is not a new acceptance authority or a deletion instruction.
 
+## Native publication surface
+
+The first ready publication leaves are explicit local writes under
+`zcode focus`:
+
+- `zcode focus claim-publish` accepts one work identity, the current
+  `situation_root`, a bounded path array, and exact signed request and
+  admission-carrier roots. It derives the claimant, validity interval,
+  evidence plan, and scope root from those verified facts. It stores the empty
+  situation focus, scope, and admitted `focus_claim.v1` in the existing ZVCS
+  CAS, then reads, parses, and re-roots every written object.
+- `zcode focus snapshot-publish` accepts one work identity plus parallel claim
+  and admission-carrier root arrays. It re-verifies the current source and
+  context, sorts claim roots, refuses duplicates, overlap, expiry, authority,
+  policy, toolchain, or budget mismatch, and stores the canonical claim set
+  and final `focus.v1` with verified readback.
+
+Both commands return `may_execute=false`, `may_accept=false`, and
+`may_deploy=false`. Claim publication records the actual local wall-clock
+creation time and is therefore not declared idempotent; exact CAS writes are
+still atomic and idempotent. Snapshot publication is idempotent while its
+signed admissions remain current. The commands do not introduce an index,
+queue, lease, scheduler, transport, or acceptance decision.
+
+Native report/handoff publication and rooted resume are not ready yet. Those
+objects remain available through the canonical C23 codecs and validators, and
+their current real-task fixture remains explicit about the dimensions it has
+not independently observed.
+
 ## Storage and transport
 
 All protocol wires are inert content-addressed objects in the existing ZVCS

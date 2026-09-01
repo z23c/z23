@@ -3,6 +3,7 @@
 #include "test/test_core.h"
 
 #include "base/hex.h"
+#include "command/native_command.h"
 #include "crypto/ed25519.h"
 #include "crypto/sha3.h"
 #include "json/json.h"
@@ -786,9 +787,8 @@ bool zpd_real_focus_preedit_acceptance(
     struct zpf_metrics metrics = {0};
     struct vcs_zcode_agent_context_v1 context;
     vcs_zcode_agent_context_init(&context);
-    uint8_t *claim_set_wire = NULL;
-    size_t claim_set_wire_len = 0;
     uint8_t worker_a_secret[32] = {0}, worker_b_secret[32] = {0};
+    uint8_t requester_secret[32] = {0};
 
     ZPF_REQUIRE(workspace && workspace[0] && work_id && work_id[0] &&
                 focus_data && focus_data->type == JSON_OBJ &&
@@ -869,74 +869,194 @@ bool zpd_real_focus_preedit_acceptance(
                 memcmp(check_root, empty_focus_root, 32) == 0 &&
                 memcmp(check_situation, situation_root, 32) == 0);
 
-    struct vcs_zcode_write_scope_v1 scope_a, scope_b;
-    vcs_zcode_write_scope_init(&scope_a);
-    vcs_zcode_write_scope_init(&scope_b);
-    ZPF_REQUIRE(vcs_zcode_write_scope_add(&scope_a, "src/x.c") ==
-                    VCS_ZCODE_WRITE_SCOPE_OK &&
-                vcs_zcode_write_scope_add(&scope_b, "include/x.h") ==
-                    VCS_ZCODE_WRITE_SCOPE_OK);
-    uint8_t scope_a_root[32], scope_b_root[32];
-    ZPF_REQUIRE(zpf_store_scope(workspace, &scope_a, scope_a_root,
-                                NULL, &metrics));
-    ZPF_REQUIRE(zpf_store_scope(workspace, &scope_b, scope_b_root,
-                                NULL, &metrics));
-
     uint8_t worker_a_seed[32], worker_a_key[32];
     uint8_t worker_b_seed[32], worker_b_key[32];
+    uint8_t requester_seed[32], requester_key[32];
     memset(worker_a_seed, 0xb7, sizeof(worker_a_seed));
     memset(worker_b_seed, 0xb9, sizeof(worker_b_seed));
+    memset(requester_seed, 0xb8, sizeof(requester_seed));
     ed25519_keypair(worker_a_key, worker_a_secret, worker_a_seed);
     ed25519_keypair(worker_b_key, worker_b_secret, worker_b_seed);
+    ed25519_keypair(requester_key, requester_secret, requester_seed);
     int64_t observed_unix = (int64_t)platform_time_wall_unix();
     ZPF_REQUIRE(observed_unix > 0 && task.expires_unix > observed_unix);
-    struct vcs_zcode_focus_claim_v1 claim_a = {
-        .schema_version = VCS_ZCODE_FOCUS_VERSION,
-        .created_unix = observed_unix,
-        .expires_unix = task.expires_unix,
-    };
-    struct vcs_zcode_focus_claim_v1 claim_b = claim_a;
-    memcpy(claim_a.situation_root, situation_root, 32);
-    memcpy(claim_a.claimant_root, worker_a_key, 32);
-    memcpy(claim_a.write_scope_root, scope_a_root, 32);
-    /* Pre-edit claims are proposals, not admitted work. Their intent is the
-     * exact task; admitted claims below bind a signed work request instead. */
-    memcpy(claim_a.intent_root, task_root, 32);
-    memcpy(claim_a.evidence_plan_root, task.proof_policy_root, 32);
-    memcpy(claim_b.situation_root, situation_root, 32);
-    memcpy(claim_b.claimant_root, worker_b_key, 32);
-    memcpy(claim_b.write_scope_root, scope_b_root, 32);
-    memcpy(claim_b.intent_root, task_root, 32);
-    memcpy(claim_b.evidence_plan_root, task.proof_policy_root, 32);
-    uint8_t claim_a_root[32], claim_b_root[32];
-    ZPF_REQUIRE(zpf_store_claim(workspace, &claim_a, claim_a_root,
-                                &metrics));
-    ZPF_REQUIRE(zpf_store_claim(workspace, &claim_b, claim_b_root,
-                                &metrics));
+
+    struct vcs_zcode_work_request_v1 requests[2];
+    zpf_request(&requests[0], UINT64_C(7101), &task, task_root,
+                task.source_root, task.acceptance_tests_root, context_root,
+                context_root, VCS_ZCODE_WORK_BUILD, task.expires_unix);
+    zpf_request(&requests[1], UINT64_C(7102), &task, task_root,
+                task.source_root, task.proof_policy_root, context_root,
+                context_root, VCS_ZCODE_WORK_BUILD, task.expires_unix);
+    ZPF_REQUIRE(vcs_zcode_work_request_seal(
+                    &requests[0], requester_secret, requester_key) &&
+                vcs_zcode_work_request_seal(
+                    &requests[1], requester_secret, requester_key));
+    uint8_t request_roots[2][32], request_carriers[2][32];
+    uint8_t admission_carriers[2][32];
+    struct vcs_zcode_work_admission_v1 admissions[2];
+    ZPF_REQUIRE(vcs_zcode_work_request_id(
+                    &requests[0], request_roots[0]) &&
+                vcs_zcode_work_request_id(
+                    &requests[1], request_roots[1]));
+    for (size_t i = 0; i < 2; i++) {
+        struct vcs_zcode_work_swarm_message message = {
+            .type = VCS_ZCODE_WORK_SWARM_REQUEST,
+            .body.request = requests[i],
+        };
+        ZPF_REQUIRE(zpf_store_work_message(
+            workspace, &message, request_roots[i], request_carriers[i],
+            NULL, &metrics));
+    }
+    ZPF_REQUIRE(zpf_admission(&admissions[0], &requests[0], 0,
+                              VCS_ZCODE_WORK_ADMISSION_GRANTED,
+                              worker_a_secret, worker_a_key) &&
+                zpf_admission(&admissions[1], &requests[1], 1,
+                              VCS_ZCODE_WORK_ADMISSION_GRANTED,
+                              worker_b_secret, worker_b_key));
+    for (size_t i = 0; i < 2; i++) {
+        struct vcs_zcode_work_swarm_message message = {
+            .type = VCS_ZCODE_WORK_SWARM_ADMISSION,
+            .body.admission = admissions[i],
+        };
+        ZPF_REQUIRE(zpf_store_work_message(
+            workspace, &message, NULL, admission_carriers[i],
+            NULL, &metrics));
+    }
+
+    char situation_hex[65], request_hex[2][65], admission_hex[2][65];
+    zcl_hex_encode(situation_root, 32, situation_hex);
+    for (size_t i = 0; i < 2; i++) {
+        zcl_hex_encode(request_roots[i], 32, request_hex[i]);
+        zcl_hex_encode(admission_carriers[i], 32, admission_hex[i]);
+    }
+    const char *scope_paths[2] = {"src/x.c", "include/x.h"};
+    uint8_t claim_roots_unsorted[2][32];
+    for (size_t i = 0; i < 2; i++) {
+        struct json_value input, paths, path;
+        json_init(&input); json_set_object(&input);
+        json_init(&paths); json_set_array(&paths);
+        json_init(&path); json_set_str(&path, scope_paths[i]);
+        ZPF_REQUIRE(json_push_back(&paths, &path) &&
+                    json_push_kv_str(&input, "workspace", workspace) &&
+                    json_push_kv_str(&input, "work", work_id) &&
+                    json_push_kv_str(&input, "situation_root",
+                                     situation_hex) &&
+                    json_push_kv(&input, "write_scope", &paths) &&
+                    json_push_kv_str(&input, "work_request_root",
+                                     request_hex[i]) &&
+                    json_push_kv_str(&input,
+                                     "work_admission_carrier_root",
+                                     admission_hex[i]));
+        struct zcl_command_request command = {.input = &input};
+        struct zcl_command_reply reply;
+        zcl_command_reply_init(&reply, "zcl.focus_claim_publish_test.v1");
+        zcl_native_handle_zcode_focus_claim_publish(&command, &reply);
+        ZPF_REQUIRE(reply.status == ZCL_COMMAND_STATUS_PASSED &&
+                    strcmp(json_get_str(json_get(
+                               &reply.data, "admitted_work_status")),
+                           "PROVED") == 0 &&
+                    zpf_json_root(&reply.data, "claim_root",
+                                  claim_roots_unsorted[i]));
+        zcl_command_reply_free(&reply);
+        json_free(&path); json_free(&paths); json_free(&input);
+    }
+
+    struct json_value snapshot_input, claim_values, admission_values;
+    json_init(&snapshot_input); json_set_object(&snapshot_input);
+    json_init(&claim_values); json_set_array(&claim_values);
+    json_init(&admission_values); json_set_array(&admission_values);
+    for (size_t i = 0; i < 2; i++) {
+        char claim_hex[65]; struct json_value claim_value, admission_value;
+        zcl_hex_encode(claim_roots_unsorted[i], 32, claim_hex);
+        json_init(&claim_value); json_set_str(&claim_value, claim_hex);
+        json_init(&admission_value);
+        json_set_str(&admission_value, admission_hex[i]);
+        ZPF_REQUIRE(json_push_back(&claim_values, &claim_value) &&
+                    json_push_back(&admission_values, &admission_value));
+        json_free(&claim_value); json_free(&admission_value);
+    }
+    ZPF_REQUIRE(json_push_kv_str(&snapshot_input, "workspace", workspace) &&
+                json_push_kv_str(&snapshot_input, "work", work_id) &&
+                json_push_kv(&snapshot_input, "claim_roots", &claim_values) &&
+                json_push_kv(&snapshot_input,
+                             "work_admission_carrier_roots",
+                             &admission_values));
+    struct zcl_command_request snapshot_command = {.input = &snapshot_input};
+    struct zcl_command_reply snapshot_reply;
+    zcl_command_reply_init(&snapshot_reply,
+                           "zcl.focus_snapshot_publish_test.v1");
+    zcl_native_handle_zcode_focus_snapshot_publish(
+        &snapshot_command, &snapshot_reply);
+    ZPF_REQUIRE(snapshot_reply.status == ZCL_COMMAND_STATUS_PASSED &&
+                strcmp(json_get_str(json_get(
+                           &snapshot_reply.data, "scope_overlap")),
+                       "DISPROVED") == 0 &&
+                zpf_json_root(&snapshot_reply.data, "focus_root",
+                              out_focus_root));
+    zcl_command_reply_free(&snapshot_reply);
+    json_free(&admission_values); json_free(&claim_values);
+    json_free(&snapshot_input);
+
+    struct json_value reverse_input, reverse_claims, reverse_admissions;
+    json_init(&reverse_input); json_set_object(&reverse_input);
+    json_init(&reverse_claims); json_set_array(&reverse_claims);
+    json_init(&reverse_admissions); json_set_array(&reverse_admissions);
+    for (size_t at = 2; at > 0; at--) {
+        size_t i = at - 1u;
+        char claim_hex[65]; struct json_value claim_value, admission_value;
+        zcl_hex_encode(claim_roots_unsorted[i], 32, claim_hex);
+        json_init(&claim_value); json_set_str(&claim_value, claim_hex);
+        json_init(&admission_value);
+        json_set_str(&admission_value, admission_hex[i]);
+        ZPF_REQUIRE(json_push_back(&reverse_claims, &claim_value) &&
+                    json_push_back(&reverse_admissions, &admission_value));
+        json_free(&claim_value); json_free(&admission_value);
+    }
+    ZPF_REQUIRE(json_push_kv_str(&reverse_input, "workspace", workspace) &&
+                json_push_kv_str(&reverse_input, "work", work_id) &&
+                json_push_kv(&reverse_input, "claim_roots",
+                             &reverse_claims) &&
+                json_push_kv(&reverse_input,
+                             "work_admission_carrier_roots",
+                             &reverse_admissions));
+    struct zcl_command_request reverse_command = {.input = &reverse_input};
+    struct zcl_command_reply reverse_reply;
+    uint8_t reverse_focus_root[32];
+    zcl_command_reply_init(&reverse_reply,
+                           "zcl.focus_snapshot_reverse_test.v1");
+    zcl_native_handle_zcode_focus_snapshot_publish(
+        &reverse_command, &reverse_reply);
+    ZPF_REQUIRE(reverse_reply.status == ZCL_COMMAND_STATUS_PASSED &&
+                zpf_json_root(&reverse_reply.data, "focus_root",
+                              reverse_focus_root) &&
+                memcmp(reverse_focus_root, out_focus_root, 32) == 0);
+    zcl_command_reply_free(&reverse_reply);
+    json_free(&reverse_admissions); json_free(&reverse_claims);
+    json_free(&reverse_input);
 
     struct vcs_zcode_focus_claim_v1 claims[2];
     struct vcs_zcode_write_scope_v1 scopes[2];
     uint8_t claim_roots[2][32];
-    size_t from_index = 0, next_index = 0;
-    zpf_order_claims(&claim_a, &scope_a, claim_a_root,
-                     &claim_b, &scope_b, claim_b_root,
-                     claims, scopes, claim_roots, &from_index, &next_index);
-    ZPF_REQUIRE(from_index != next_index);
+    bool first_before_second = memcmp(claim_roots_unsorted[0],
+                                      claim_roots_unsorted[1], 32) < 0;
+    memcpy(claim_roots[0], claim_roots_unsorted[first_before_second ? 0 : 1],
+           32);
+    memcpy(claim_roots[1], claim_roots_unsorted[first_before_second ? 1 : 0],
+           32);
+    for (size_t i = 0; i < 2; i++) {
+        ZPF_REQUIRE(zpf_load_claim(workspace, claim_roots[i],
+                                   &claims[i], &metrics));
+        ZPF_REQUIRE(zpf_load_scope(workspace, claims[i].write_scope_root,
+                                   &scopes[i], &metrics));
+    }
     struct vcs_zcode_focus_v1 focus;
-    ZPF_REQUIRE(vcs_zcode_focus_compose(
-                    &task, task_root, context_root, story_root, story_status,
-                    0, claim_roots, 2, &focus) == VCS_ZCODE_FOCUS_OK);
-    ZPF_REQUIRE(zpf_store_focus(workspace, &focus, out_focus_root,
-                                &metrics));
-    ZPF_REQUIRE(vcs_zcode_focus_claim_set_serialize(
-                    claim_roots, 2, &claim_set_wire,
-                    &claim_set_wire_len) == VCS_ZCODE_FOCUS_OK);
-    ZPF_REQUIRE(zpf_store_addressed(
-                    workspace, focus.claim_set_root, claim_set_wire,
-                    claim_set_wire_len, &metrics));
+    ZPF_REQUIRE(zpf_load_focus(workspace, out_focus_root, &focus, &metrics));
     ZPF_REQUIRE(vcs_zcode_focus_validate_for_context(
-                    &focus, &task, &context, claim_roots, 2, false) ==
+                    &focus, &task, &context, claim_roots, 2, true) ==
                 VCS_ZCODE_FOCUS_OK);
+    observed_unix = claims[0].created_unix > claims[1].created_unix
+        ? claims[0].created_unix : claims[1].created_unix;
     ZPF_REQUIRE(vcs_zcode_focus_claim_set_status(
                     &focus, claims, scopes, 2, observed_unix) ==
                 ZCL_ONTOLOGY_PROVED);
@@ -954,10 +1074,10 @@ bool zpd_real_focus_preedit_acceptance(
     accepted = true;
 
 cleanup:
-    free(claim_set_wire);
     vcs_zcode_agent_context_free(&context);
     memset(worker_a_secret, 0, sizeof(worker_a_secret));
     memset(worker_b_secret, 0, sizeof(worker_b_secret));
+    memset(requester_secret, 0, sizeof(requester_secret));
     if (!accepted && out_focus_root) memset(out_focus_root, 0, 32);
     if (!accepted && out_observed_us) *out_observed_us = 0;
     return accepted;
@@ -1046,9 +1166,7 @@ bool zpd_real_focus_handoff_acceptance(
         ZPF_REQUIRE(zpf_load_scope(workspace,
                                    preedit_claims[i].write_scope_root,
                                    &preedit_scopes[i], &metrics));
-        ZPF_REQUIRE(memcmp(preedit_claims[i].intent_root,
-                           task_root, 32) == 0 &&
-                    memcmp(preedit_claims[i].evidence_plan_root,
+        ZPF_REQUIRE(memcmp(preedit_claims[i].evidence_plan_root,
                            source_task.proof_policy_root, 32) == 0);
     }
     int64_t preedit_claim_time = preedit_claims[0].created_unix;

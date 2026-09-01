@@ -112,6 +112,8 @@ ZCL_CAPABILITY_SYMBOL("getaddrinfo", CAP_NETWORK, "")
 ZCL_CAPABILITY_SYMBOL("getpeername", CAP_NETWORK, "")
 ZCL_CAPABILITY_SYMBOL("getsockname", CAP_NETWORK, "")
 ZCL_CAPABILITY_SYMBOL("getsockopt", CAP_NETWORK, "")
+ZCL_CAPABILITY_SYMBOL("gtk_init_check", CAP_NETWORK,
+    "Connects the native GTK client to the operator's display server.")
 ZCL_CAPABILITY_SYMBOL("hs_parse_address", CAP_NETWORK,
     "Parses an onion address. Tor hidden service surface, so it is held "
     "at the network boundary rather than treated as string handling.")
@@ -185,6 +187,9 @@ ZCL_CAPABILITY_SYMBOL("tor_run_main", CAP_NETWORK, "")
 ZCL_CAPABILITY_SYMBOL("tor_shutdown_event_loop_and_exit", CAP_NETWORK,
     "Stops the embedded Tor event loop, which is the same subject as "
     "starting it.")
+ZCL_CAPABILITY_SYMBOL("webkit_web_view_load_uri", CAP_NETWORK,
+    "Can initiate URI loading; the wallet host restricts calls to its "
+    "registered in-process zcl scheme.")
 
 /* ---- CAP_PROCESS ---- */
 ZCL_CAPABILITY_SYMBOL("clearenv", CAP_PROCESS,
@@ -241,6 +246,8 @@ ZCL_CAPABILITY_SYMBOL("wait4", CAP_PROCESS,
 ZCL_CAPABILITY_SYMBOL("waitid", CAP_PROCESS,
     "Same reach as waitpid. Reached only from tools/package_verify.c, "
     "which supervises the child that performs a reproduction build.")
+ZCL_CAPABILITY_SYMBOL("webkit_web_view_run_javascript", CAP_PROCESS,
+    "Executes page JavaScript in WebKit's supervised web process.")
 
 /* ---- CAP_DYNLOAD ---- */
 ZCL_CAPABILITY_SYMBOL("dlclose", CAP_DYNLOAD,
@@ -640,6 +647,154 @@ ZCL_CAPABILITY_SYMBOL("unshare", CAP_PRIVILEGE,
     "can see.")
 
 /* ---- CAP_HARMLESS ---- */
+ZCL_CAPABILITY_SYMBOL("g_free", CAP_HARMLESS,
+    "Releases process memory owned by GLib.")
+ZCL_CAPABILITY_SYMBOL("g_idle_add", CAP_HARMLESS,
+    "Schedules a callback on the existing local GTK event loop.")
+ZCL_CAPABILITY_SYMBOL("g_input_stream_read_all", CAP_HARMLESS,
+    "Reads a stream already acquired by the caller; acquisition carries reach.")
+ZCL_CAPABILITY_SYMBOL("g_malloc", CAP_HARMLESS,
+    "Allocates process memory.")
+ZCL_CAPABILITY_SYMBOL("g_memory_input_stream_new_from_data", CAP_HARMLESS,
+    "Wraps caller-owned memory as an in-process stream.")
+ZCL_CAPABILITY_SYMBOL("g_object_new", CAP_HARMLESS,
+    "Creates a local GLib object.")
+ZCL_CAPABILITY_SYMBOL("g_object_set", CAP_HARMLESS,
+    "Sets properties on a local GLib object.")
+ZCL_CAPABILITY_SYMBOL("g_object_unref", CAP_HARMLESS,
+    "Releases a local GLib object reference.")
+ZCL_CAPABILITY_SYMBOL("g_signal_connect_data", CAP_HARMLESS,
+    "Connects an in-process callback to a local GLib object.")
+ZCL_CAPABILITY_SYMBOL("gdk_screen_get_default", CAP_HARMLESS,
+    "Returns the display screen handle acquired during GTK initialization.")
+ZCL_CAPABILITY_SYMBOL("gtk_box_new", CAP_HARMLESS, "Creates a local widget.")
+ZCL_CAPABILITY_SYMBOL("gtk_box_pack_start", CAP_HARMLESS,
+    "Arranges local widgets.")
+ZCL_CAPABILITY_SYMBOL("gtk_button_new_with_label", CAP_HARMLESS,
+    "Creates a local widget.")
+ZCL_CAPABILITY_SYMBOL("gtk_container_add", CAP_HARMLESS,
+    "Arranges local widgets.")
+ZCL_CAPABILITY_SYMBOL("gtk_css_provider_load_from_data", CAP_HARMLESS,
+    "Parses caller-owned CSS bytes.")
+ZCL_CAPABILITY_SYMBOL("gtk_css_provider_new", CAP_HARMLESS,
+    "Creates a local style provider.")
+ZCL_CAPABILITY_SYMBOL("gtk_editable_select_region", CAP_HARMLESS,
+    "Changes local input selection.")
+ZCL_CAPABILITY_SYMBOL("gtk_entry_get_text", CAP_HARMLESS,
+    "Reads text from a local widget.")
+ZCL_CAPABILITY_SYMBOL("gtk_entry_new", CAP_HARMLESS, "Creates a local widget.")
+ZCL_CAPABILITY_SYMBOL("gtk_entry_set_placeholder_text", CAP_HARMLESS,
+    "Changes local widget text.")
+ZCL_CAPABILITY_SYMBOL("gtk_entry_set_text", CAP_HARMLESS,
+    "Changes local widget text.")
+ZCL_CAPABILITY_SYMBOL("gtk_label_new", CAP_HARMLESS, "Creates a local widget.")
+ZCL_CAPABILITY_SYMBOL("gtk_label_set_text", CAP_HARMLESS,
+    "Changes local widget text.")
+ZCL_CAPABILITY_SYMBOL("gtk_label_set_xalign", CAP_HARMLESS,
+    "Changes local widget layout.")
+ZCL_CAPABILITY_SYMBOL("gtk_main", CAP_HARMLESS,
+    "Runs the already initialized local GTK event loop.")
+ZCL_CAPABILITY_SYMBOL("gtk_main_quit", CAP_HARMLESS,
+    "Stops the local GTK event loop.")
+ZCL_CAPABILITY_SYMBOL("gtk_separator_new", CAP_HARMLESS,
+    "Creates a local widget.")
+ZCL_CAPABILITY_SYMBOL("gtk_settings_get_default", CAP_HARMLESS,
+    "Returns settings from the display connection acquired at initialization.")
+ZCL_CAPABILITY_SYMBOL("gtk_style_context_add_class", CAP_HARMLESS,
+    "Changes local widget styling.")
+ZCL_CAPABILITY_SYMBOL("gtk_style_context_add_provider_for_screen", CAP_HARMLESS,
+    "Attaches caller-owned styles to the acquired display screen.")
+ZCL_CAPABILITY_SYMBOL("gtk_style_context_remove_class", CAP_HARMLESS,
+    "Changes local widget styling.")
+ZCL_CAPABILITY_SYMBOL("gtk_widget_get_style_context", CAP_HARMLESS,
+    "Returns local widget styling state.")
+ZCL_CAPABILITY_SYMBOL("gtk_widget_grab_focus", CAP_HARMLESS,
+    "Changes local input focus.")
+ZCL_CAPABILITY_SYMBOL("gtk_widget_set_can_focus", CAP_HARMLESS,
+    "Changes local widget input policy.")
+ZCL_CAPABILITY_SYMBOL("gtk_widget_set_name", CAP_HARMLESS,
+    "Names a local widget for styling.")
+ZCL_CAPABILITY_SYMBOL("gtk_widget_show_all", CAP_HARMLESS,
+    "Shows a local widget tree.")
+ZCL_CAPABILITY_SYMBOL("gtk_window_new", CAP_HARMLESS, "Creates a local window.")
+ZCL_CAPABILITY_SYMBOL("gtk_window_set_default_size", CAP_HARMLESS,
+    "Changes local window geometry.")
+ZCL_CAPABILITY_SYMBOL("gtk_window_set_title", CAP_HARMLESS,
+    "Changes local window metadata.")
+ZCL_CAPABILITY_SYMBOL("jsc_value_is_string", CAP_HARMLESS,
+    "Inspects an existing JavaScript value.")
+ZCL_CAPABILITY_SYMBOL("jsc_value_to_string", CAP_HARMLESS,
+    "Copies an existing JavaScript string value.")
+ZCL_CAPABILITY_SYMBOL("webkit_javascript_result_get_js_value", CAP_HARMLESS,
+    "Returns a value from an already completed JavaScript result.")
+ZCL_CAPABILITY_SYMBOL("webkit_javascript_result_unref", CAP_HARMLESS,
+    "Releases an existing JavaScript result.")
+ZCL_CAPABILITY_SYMBOL("webkit_navigation_action_get_request", CAP_HARMLESS,
+    "Inspects an existing navigation action.")
+ZCL_CAPABILITY_SYMBOL("webkit_navigation_policy_decision_get_navigation_action", CAP_HARMLESS,
+    "Inspects an existing navigation decision.")
+ZCL_CAPABILITY_SYMBOL("webkit_policy_decision_ignore", CAP_HARMLESS,
+    "Refuses an existing navigation decision.")
+ZCL_CAPABILITY_SYMBOL("webkit_policy_decision_use", CAP_HARMLESS,
+    "Accepts a navigation already constrained by the wallet's zcl URI policy.")
+ZCL_CAPABILITY_SYMBOL("webkit_security_manager_register_uri_scheme_as_cors_enabled", CAP_HARMLESS,
+    "Marks the in-process zcl URI scheme for WebKit's local origin policy.")
+ZCL_CAPABILITY_SYMBOL("webkit_security_manager_register_uri_scheme_as_local", CAP_HARMLESS,
+    "Marks the in-process zcl URI scheme as local.")
+ZCL_CAPABILITY_SYMBOL("webkit_settings_new", CAP_HARMLESS,
+    "Creates local WebKit settings.")
+ZCL_CAPABILITY_SYMBOL("webkit_settings_set_default_font_family", CAP_HARMLESS,
+    "Changes local rendering settings.")
+ZCL_CAPABILITY_SYMBOL("webkit_settings_set_default_font_size", CAP_HARMLESS,
+    "Changes local rendering settings.")
+ZCL_CAPABILITY_SYMBOL("webkit_settings_set_default_monospace_font_size", CAP_HARMLESS,
+    "Changes local rendering settings.")
+ZCL_CAPABILITY_SYMBOL("webkit_settings_set_enable_developer_extras", CAP_HARMLESS,
+    "Changes local rendering settings.")
+ZCL_CAPABILITY_SYMBOL("webkit_settings_set_enable_java", CAP_HARMLESS,
+    "Disables or enables a local rendering feature; the wallet disables it.")
+ZCL_CAPABILITY_SYMBOL("webkit_settings_set_enable_plugins", CAP_HARMLESS,
+    "Disables or enables a local rendering feature; the wallet disables it.")
+ZCL_CAPABILITY_SYMBOL("webkit_settings_set_enable_smooth_scrolling", CAP_HARMLESS,
+    "Changes local rendering settings.")
+ZCL_CAPABILITY_SYMBOL("webkit_settings_set_hardware_acceleration_policy", CAP_HARMLESS,
+    "Changes local rendering settings.")
+ZCL_CAPABILITY_SYMBOL("webkit_settings_set_monospace_font_family", CAP_HARMLESS,
+    "Changes local rendering settings.")
+ZCL_CAPABILITY_SYMBOL("webkit_uri_request_get_uri", CAP_HARMLESS,
+    "Reads the URI from an existing request.")
+ZCL_CAPABILITY_SYMBOL("webkit_uri_scheme_request_finish", CAP_HARMLESS,
+    "Completes an existing in-process custom-scheme request.")
+ZCL_CAPABILITY_SYMBOL("webkit_uri_scheme_request_get_http_body", CAP_HARMLESS,
+    "Returns the body stream of an existing custom-scheme request.")
+ZCL_CAPABILITY_SYMBOL("webkit_uri_scheme_request_get_http_method", CAP_HARMLESS,
+    "Reads the method of an existing custom-scheme request.")
+ZCL_CAPABILITY_SYMBOL("webkit_uri_scheme_request_get_uri", CAP_HARMLESS,
+    "Reads the URI of an existing custom-scheme request.")
+ZCL_CAPABILITY_SYMBOL("webkit_web_context_get_default", CAP_HARMLESS,
+    "Returns the existing local WebKit context.")
+ZCL_CAPABILITY_SYMBOL("webkit_web_context_get_security_manager", CAP_HARMLESS,
+    "Returns local origin-policy state.")
+ZCL_CAPABILITY_SYMBOL("webkit_web_context_register_uri_scheme", CAP_HARMLESS,
+    "Registers the in-process zcl request callback.")
+ZCL_CAPABILITY_SYMBOL("webkit_web_view_can_go_back", CAP_HARMLESS,
+    "Inspects local navigation history.")
+ZCL_CAPABILITY_SYMBOL("webkit_web_view_can_go_forward", CAP_HARMLESS,
+    "Inspects local navigation history.")
+ZCL_CAPABILITY_SYMBOL("webkit_web_view_get_type", CAP_HARMLESS,
+    "Returns local GLib type metadata.")
+ZCL_CAPABILITY_SYMBOL("webkit_web_view_get_uri", CAP_HARMLESS,
+    "Reads the current URI from a local view.")
+ZCL_CAPABILITY_SYMBOL("webkit_web_view_go_back", CAP_HARMLESS,
+    "Moves within the local view's existing navigation history.")
+ZCL_CAPABILITY_SYMBOL("webkit_web_view_go_forward", CAP_HARMLESS,
+    "Moves within the local view's existing navigation history.")
+ZCL_CAPABILITY_SYMBOL("webkit_web_view_reload", CAP_HARMLESS,
+    "Reloads the current URI under the existing URI policy.")
+ZCL_CAPABILITY_SYMBOL("webkit_web_view_run_javascript_finish", CAP_HARMLESS,
+    "Collects an already completed JavaScript result.")
+ZCL_CAPABILITY_SYMBOL("webkit_web_view_set_background_color", CAP_HARMLESS,
+    "Changes local rendering state.")
 ZCL_CAPABILITY_SYMBOL("abort", CAP_HARMLESS, "")
 ZCL_CAPABILITY_SYMBOL("acos", CAP_HARMLESS, "")
 ZCL_CAPABILITY_SYMBOL("ASN1_IA5STRING_free", CAP_HARMLESS, "")

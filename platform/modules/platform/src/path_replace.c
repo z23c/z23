@@ -12,7 +12,11 @@
 
 #include <string.h>
 #include <windows.h>
+#else
+#include <stdio.h>
+#endif
 
+#if defined(_WIN32)
 static void path_replace_set_errno(DWORD error)
 {
     switch (error) {
@@ -46,6 +50,7 @@ static void path_replace_set_errno(DWORD error)
         break;
     }
 }
+#endif
 
 int platform_path_replace(const char *staged_path,
                           const char *destination_path)
@@ -55,6 +60,7 @@ int platform_path_replace(const char *staged_path,
         errno = EINVAL;
         return -1;
     }
+#if defined(_WIN32)
     if (strlen(staged_path) >= 32764u ||
         strlen(destination_path) >= 32764u) {
         errno = ENAMETOOLONG;
@@ -74,18 +80,7 @@ int platform_path_replace(const char *staged_path,
         return -1;
     }
     return 0;
-}
 #else
-#include <stdio.h>
-
-int platform_path_replace(const char *staged_path,
-                          const char *destination_path)
-{
-    if (!staged_path || !staged_path[0] ||
-        !destination_path || !destination_path[0]) {
-        errno = EINVAL;
-        return -1;
-    }
     return rename(staged_path, destination_path);
-}
 #endif
+}

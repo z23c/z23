@@ -74,15 +74,15 @@ z23 discover schema <path> --side=input|output
 
 | Catalog fact | Count |
 |---|---|
-| Registry entries (branches + leaves) | 776 |
+| Registry entries (branches + leaves) | 779 |
 | Top-level roots | 13 |
-| Branches | 178 |
-| Leaves (dispatchable command paths) | 598 |
-| … `ready` (live handler in this build) | 537 |
+| Branches | 179 |
+| Leaves (dispatchable command paths) | 600 |
+| … `ready` (live handler in this build) | 539 |
 | … `compat` (metadata only, names a fallback) | 30 |
 | … `planned` (fail-closed BLOCKED, exit 3) | 31 |
 | … dev-gated 🔧 (`ready` only in `z23-dev`) | 29 |
-| Leaves with `effect=mutate` | 210 |
+| Leaves with `effect=mutate` | 212 |
 | Leaves with `effect=destructive` | 4 |
 | Leaves requiring **owner** authority | 119 |
 
@@ -100,7 +100,7 @@ Per source file:
 | `engine/composition/commands/code.def` | 24 | 2 | 22 |
 | `engine/composition/commands/accounts.def` | 11 | 2 | 9 |
 | `engine/composition/commands/vault.def` | 24 | 4 | 20 |
-| `engine/composition/commands/zcode.def` | 245 | 58 | 187 |
+| `engine/composition/commands/zcode.def` | 248 | 59 | 189 |
 | `engine/composition/commands/zcode_science.def` | 25 | 7 | 18 |
 | `engine/composition/commands/metaverse.def` | 30 | 7 | 23 |
 | `engine/composition/commands/yardsale.def` | 7 | 2 | 5 |
@@ -1071,7 +1071,14 @@ represented by its children's sections.
 | `zcode work pull` | ready | mutate / app-write / operator · foreground/moderate | **`task_root`**, `datadir`, `maximum_records` | `zcl.zcode_work_pull.v1` | `z23 zcode work pull --input='{"task_root":"<64hex>"}'` | Fetch and verify published solutions for one task root |
 | `zcode work review` | ready | mutate / app-write / operator · foreground/moderate | `workspace`, `work`, `adapter`, **`verdict`**, **`findings`** | `zcl.zcode_work_review.v1` | `z23-dev zcode work review --input='{"work":"latest","adapter":"manual","verdict":"approve","findings":"No blocking findings."}'` | Review one exact candidate |
 
-#### `zcode.task` — Posted tasks and transports
+#### `zcode.focus` — Focus
+
+| Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
+|---|---|---|---|---|---|---|
+| `zcode focus claim-publish` | ready | mutate / app-write / operator · foreground/low | **`workspace`**, **`work`**, **`situation_root`**, **`write_scope`**, **`work_request_root`**, **`work_admission_carrier_root`**, `datadir`, `details` | `zcl.zcode_focus_claim_publish.v1` | `z23 zcode focus claim-publish --input='{...}'` | Publish one admitted worker focus claim |
+| `zcode focus snapshot-publish` | ready | mutate / app-write / operator · foreground/low | **`workspace`**, **`work`**, **`claim_roots`**, **`work_admission_carrier_roots`**, `datadir`, `details` | `zcl.zcode_focus_snapshot_publish.v1` | `z23 zcode focus snapshot-publish --input='{...}'` | Publish one canonical active-claim focus snapshot |
+
+#### `zcode.task` — Tasks
 
 | Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
 |---|---|---|---|---|---|---|
@@ -1079,7 +1086,7 @@ represented by its children's sections.
 | `zcode task pull` | ready | mutate / app-write / operator · foreground/moderate | **`task_root`**, `datadir`, `maximum_records` | `zcl.zcode_task_pull.v1` | `z23 zcode task pull --input='{"task_root":"<64hex>"}'` | Fetch and verify posted contexts for one task root |
 | `zcode task board` | ready | read / read / operator · foreground/low | `datadir` | `zcl.zcode_task_board.v1` | `z23 zcode task board` | List task postings this node has seen |
 
-#### `zcode.passport` — Signed module passports
+#### `zcode.passport` — Passports
 
 | Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
 |---|---|---|---|---|---|---|
@@ -1088,7 +1095,7 @@ represented by its children's sections.
 | `zcode passport commit` | ready | read / read / public · instant/tiny | **`stable_api_root`**, **`recipe_root`**, **`toolchain_root`**, **`tests_root`**, **`license_root`**, **`semantic_fingerprint_root`**, **`workspace_lineage_root`**, **`source_assignment_root`**, **`quality_profiles_root`**, **`signer_pubkey`**, **`signature`**, `workspace`, `publication_job_root` | `zcl.zcode_passport_commit.v1` | `z23 zcode passport commit --input='<same roots, signer_pubkey, external signature>'` | Materialize an externally signed C23 module Passport |
 | `zcode passport verify` | ready | read / read / public · instant/tiny | **`passport`** | `zcl.zcode_passport_verify.v1` | `z23 zcode passport verify --passport=<lowercase-hex-wire>` | Verify one signed C23 module Passport |
 
-#### `zcode.workspace` — Workspace evidence
+#### `zcode.workspace` — Workspaces
 
 | Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
 |---|---|---|---|---|---|---|
@@ -1127,7 +1134,7 @@ represented by its children's sections.
 | `zcode workspace manifest plan` | ready | read / read / public · instant/tiny | **`passport`**, **`module_release_root`**, **`sequence`**, `predecessor_release_root`, **`workspace_sequence`**, `predecessor_workspace_root`, **`signer_root`**, `workspace`, `publication_job_root` | `zcl.zcode_workspace_manifest_plan.v1` | `z23 zcode workspace manifest plan --input='<verified Passport binding and signer public key>'` | Plan one externally signed workspace manifest |
 | `zcode workspace manifest commit` | ready | read / read / public · instant/tiny | **`passport`**, **`module_release_root`**, **`sequence`**, `predecessor_release_root`, **`workspace_sequence`**, `predecessor_workspace_root`, **`signer_root`**, **`signature`**, `workspace`, `publication_job_root` | `zcl.zcode_workspace_manifest_commit.v1` | `z23 zcode workspace manifest commit --input='<same plan plus external signature>'` | Verify one externally signed workspace manifest |
 
-#### `zcode.commons` — Living Commons projection
+#### `zcode.commons` — Commons
 
 | Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
 |---|---|---|---|---|---|---|
@@ -1232,7 +1239,7 @@ represented by its children's sections.
 | `zcode commons impact status` | ready | read / read / public · instant/tiny | none | `zcl.zcode_commons_impact_status.v1` | `z23 zcode commons impact status` | Show whether a productivity basis is shareable |
 | `zcode commons impact share` | ready | read / read / public · instant/tiny | none | `zcl.zcode_commons_impact_share.v1` | `z23 zcode commons impact share` | Render a locally shareable productivity statement |
 
-#### `zcode.moderation` — Commons moderation
+#### `zcode.moderation` — Moderation
 
 | Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
 |---|---|---|---|---|---|---|
@@ -1251,7 +1258,7 @@ represented by its children's sections.
 |---|---|---|---|---|---|---|
 | `zcode moderation service status` | ready | read / read / public · instant/tiny | none | `zcl.zcode_moderation_service_status.v1` | `z23 zcode moderation service status` | Show moderation service roster readiness |
 
-#### `zcode.patronage` — Simulated patronage
+#### `zcode.patronage` — Patronage
 
 | Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
 |---|---|---|---|---|---|---|
@@ -1324,7 +1331,7 @@ represented by its children's sections.
 | `zcode package dev publish plan` (aliases: `zcode.publish.plan`) | ready | read / read / operator · foreground/moderate | **`workspace`**, **`datadir`**, `acceptance_datadir`, **`source_root`**, **`publisher_pubkey`**, `name`, `semver`, `license`, `reward_address`, `znam`, `task_root`, `lane_receipt_root`, `publisher_sequence`, `parent_release_root`, `package_mapping_root`, `publication_job_root` | `zcl.zcode_publish_plan.v1` | `z23 zcode publish plan --input='{"workspace":"/src/project","datadir":"/tmp/zcode-dev","source_root":"<64hex>","publisher_pubkey":"<66hex>"}'` | Prepare a PROVEN work for offline release signing |
 | `zcode package dev publish commit` (aliases: `zcode.publish`) | ready | mutate / app-write / operator · foreground/moderate | **`workspace`**, **`datadir`**, `acceptance_datadir`, **`source_root`**, **`release_hex`**, `task_root`, `lane_receipt_root`, `day`, `package_mapping_root`, `publication_job_root` | `zcl.zcode_publish_commit.v1` | `z23 zcode publish --input='{"workspace":"/src/project","datadir":"/tmp/zcode-dev","source_root":"<64hex>","release_hex":"<hex>"}'` | Publish one offline-signed PROVEN-work release |
 
-#### `zcode.package` — Committed packages
+#### `zcode.package` — Packages
 
 | Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
 |---|---|---|---|---|---|---|
@@ -1357,7 +1364,7 @@ represented by its children's sections.
 | `zcode package attest pull` | ready | mutate / app-write / operator · foreground/moderate | **`package_root`**, `datadir`, `maximum_records` | `zcl.zcode_package_attest_pull.v1` | `z23 zcode package attest pull --input='{"package_root":"<64hex>"}'` | Fetch and admit published attestations for one package root |
 | `zcode package attest admit` | ready | mutate / app-write / operator · foreground/low | **`transport_root`**, `package_root`, `datadir` | `zcl.zcode_package_attest_admit.v1` | `z23 zcode package attest admit --input='{"transport_root":"<64hex>"}'` | Admit one attestation blob this node already holds |
 
-#### `zcode.contributor` — Contributor identities
+#### `zcode.contributor` — Contributors
 
 | Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
 |---|---|---|---|---|---|---|
@@ -1491,7 +1498,7 @@ represented by its children's sections.
 | `zcode package add plan` | ready | mutate / app-write / operator · foreground/moderate | **`name_or_root`**, `now_unix`, `datadir`, `cursor`, `max_items` | `zcl.zcode_add_plan.v1` | `z23 zcode package add plan --input='{"name_or_root":"ringbuffer"}'` | Resolve, dependency-lock, and report what installing would do |
 | `zcode package add commit` | ready | mutate / app-write / operator · background/high | **`plan_id`**, `now_unix`, `datadir`, `cursor`, `max_items` | `zcl.zcode_add_commit.v1` | `z23 zcode package add commit --input='{"plan_id":"<64hex>"}'` | Execute a plan: verify, build+test confined, install, activate, pin |
 
-#### `zcode.node` — Join and update this node
+#### `zcode.node` — Node join/update
 
 | Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
 |---|---|---|---|---|---|---|

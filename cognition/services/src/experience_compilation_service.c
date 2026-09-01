@@ -34,13 +34,22 @@ static bool experience_memory_overlaps(const void *left, size_t left_size,
            right_address < left_address + left_size;
 }
 
+static bool experience_workspace_size(const char *workspace, size_t *bytes)
+{
+    if (!workspace || !bytes) return false;
+    size_t length = 0;
+    while (length <= 4096u && workspace[length]) length++;
+    if (length == 0 || length > 4096u) return false;
+    *bytes = length + 1u;
+    return true;
+}
+
 static bool experience_output_aliases(
     const struct zcl_experience_episode_v1 *episode,
-    const struct zcl_experience_compilation_v1 *out)
+    const struct zcl_experience_compilation_v1 *out, size_t workspace_bytes)
 {
 #define EXPERIENCE_INPUT_OVERLAPS(pointer, count) \
     experience_memory_overlaps(out, sizeof(*out), (pointer), (count))
-    size_t workspace_bytes = strlen(episode->workspace) + 1u;
     bool aliases =
         EXPERIENCE_INPUT_OVERLAPS(episode, sizeof(*episode)) ||
         EXPERIENCE_INPUT_OVERLAPS(episode->workspace, workspace_bytes) ||
@@ -421,8 +430,18 @@ static enum zcl_experience_compilation_error experience_compile_checked(
                                    sizeof(*episode)))
         return experience_fail(ZCL_EXPERIENCE_COMPILATION_ALIAS,
                                "output overlaps episode shape");
-    if (!episode->workspace || !episode->workspace[0] ||
-        !episode->story || !episode->task || !episode->agent_context ||
+    if (!episode->workspace || !episode->workspace[0]) {
+        memset(out, 0, sizeof(*out));
+        return experience_fail(ZCL_EXPERIENCE_COMPILATION_NULL,
+                               "workspace absent");
+    }
+    size_t workspace_bytes = 0;
+    if (!experience_workspace_size(episode->workspace, &workspace_bytes)) {
+        memset(out, 0, sizeof(*out));
+        return experience_fail(ZCL_EXPERIENCE_COMPILATION_NULL,
+                               "workspace path is empty or unbounded");
+    }
+    if (!episode->story || !episode->task || !episode->agent_context ||
         !episode->focus || !episode->work_receipt ||
         !episode->specialist_report || !episode->heuristic ||
         !episode->attention_bid || !episode->relations ||
@@ -441,7 +460,7 @@ static enum zcl_experience_compilation_error experience_compile_checked(
         return experience_fail(ZCL_EXPERIENCE_COMPILATION_FOCUS,
                                "bounded episode count exceeded");
     }
-    if (experience_output_aliases(episode, out))
+    if (experience_output_aliases(episode, out, workspace_bytes))
         return experience_fail(ZCL_EXPERIENCE_COMPILATION_ALIAS,
                                "output overlaps episode input");
     memset(out, 0, sizeof(*out));

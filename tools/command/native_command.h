@@ -639,6 +639,12 @@ void zcl_native_handle_zcode_project_status(
 void zcl_native_handle_zcode_work_start(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
+void zcl_native_handle_zcode_focus_claim_publish(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
+void zcl_native_handle_zcode_focus_snapshot_publish(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
 void zcl_native_handle_zcode_work_context(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);

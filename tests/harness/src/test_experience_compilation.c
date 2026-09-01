@@ -36,6 +36,18 @@ int test_experience_compilation(void)
     EC_CHECK("episode-output-alias-refuses-without-write",
              alias_error == ZCL_EXPERIENCE_COMPILATION_ALIAS &&
              memcmp(&aliased.episode, &before, sizeof(before)) == 0);
+
+    char unbounded_workspace[4098];
+    memset(unbounded_workspace, 'x', sizeof(unbounded_workspace));
+    unbounded_workspace[sizeof(unbounded_workspace) - 1u] = '\0';
+    struct zcl_experience_episode_v1 unbounded = {
+        .workspace = unbounded_workspace,
+    };
+    memset(&output, 0xa5, sizeof(output));
+    EC_CHECK("unbounded-workspace-refuses-before-input-dereference",
+             zcl_experience_compile(&unbounded, &output) ==
+                 ZCL_EXPERIENCE_COMPILATION_NULL &&
+             memcmp(&output, &zero, sizeof(output)) == 0);
     EC_CHECK("public-error-contract-is-total",
              strcmp(zcl_experience_compilation_error_string(
                         ZCL_EXPERIENCE_COMPILATION_OK), "ok") == 0 &&

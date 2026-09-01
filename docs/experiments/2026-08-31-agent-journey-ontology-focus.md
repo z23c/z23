@@ -404,3 +404,43 @@ make -j"$(getconf _NPROCESSORS_ONLN)" z23
 Native Windows and macOS execution remain unobserved in this rerun. The
 repository index has the same package enumeration on both POSIX and Windows;
 the cross-syntax and platform contract gates remain required before release.
+
+## Admitted focus publication checkpoint
+
+Measured at `2026-09-01T16:31:34-04:00`
+(`2026-09-01T20:31:34+00:00`).
+
+The earlier real package fixture created both pre-edit claims and the final
+focus directly in its parent process. Its two exec-clean children only loaded
+and validated objects that already existed. That proved receiver validation,
+not independent worker publication. It also left admitted claim publication
+chronology, files opened, per-specialist tool calls, and report latency marked
+`INCOMPLETE`.
+
+The first intervention adds explicit `zcode focus claim-publish` and
+`zcode focus snapshot-publish` native commands. Each claim command reloads the
+real package work, verifies the unchanged source generation and exact agent
+context, loads a signed request and domain-tag-verified admission carrier,
+derives its worker identity and bounded lifetime, proves its path scope is
+inside task authority, and stores only self-verified inert CAS objects. The
+snapshot command sorts the independently supplied roots, proves the complete
+set is active, disjoint, and admitted, and stores the final canonical focus.
+
+The registered package-development benchmark now creates two distinct signed
+requests and worker admissions before the first source edit, publishes claims
+for `src/x.c` and `include/x.h` through the production handlers, and publishes <!-- doc-path-ok: paths belong to the isolated package fixture -->
+the two-claim snapshot through the production handler. Reversing both input
+arrays must produce the same `focus_root`. The existing real C23 edit, build,
+receipt, StoryGraph, and acceptance path continues afterward.
+
+This checkpoint does not claim the full target proof. The benchmark parent
+still invokes the two publication handlers; the exec-clean workers do not yet
+author their own reports or handoff. Native report/handoff publication,
+root-only worker IPC, exact per-worker metrics, and clean-process resume remain
+the next experiment. Windows process independence remains `INCOMPLETE`.
+
+```bash
+make -j"$(getconf _NPROCESSORS_ONLN)" t-fast-exact \
+  ONLY='test_zcode_package_dev'
+make lint-fast
+```
