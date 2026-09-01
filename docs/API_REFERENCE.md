@@ -1304,7 +1304,7 @@ represented by its children's sections.
 | `zcode package dev accept` (aliases: `zcode.accept`) | ready | mutate / app-write / operator · foreground/moderate | **`workspace`**, **`action_id`**, **`lane`**, `datadir` | `zcl.zcode_accept.v1` | `z23 zcode accept --input='{"workspace":"/src/project","action_id":"<64hex>","lane":"CANDIDATE"}'` | Record candidate proof readiness |
 | `zcode package dev lane` (aliases: `zcode.lane`) | ready | read / read / operator · foreground/low | **`workspace`**, **`source_root`**, `datadir` | `zcl.zcode_lane.v1` | `z23 zcode lane --input='{"workspace":"/src/project","source_root":"<64hex>","datadir":"/tmp/zclassic23-lane"}'` | Inspect source lane |
 | `zcode package dev promotion-guide` | ready | read / read / public · instant/tiny | none | `zcl.zcode_lane_guide.v1` | `z23 zcode package dev promotion-guide` | Show signed lane workflow readiness |
-| `zcode package dev tasks` (aliases: `zcode.tasks`) | ready | read / read / operator · foreground/low | **`workspace`**, `task_root`, `source_root`, `author`, `state`, `limit`, `details` | `zcl.zcode_tasks.v1` | `z23 zcode tasks --input='{"workspace":"/src/project"}'` | List local dev tasks |
+| `zcode package dev tasks` (aliases: `zcode.tasks`) | ready | read / read / operator · foreground/low | **`workspace`**, `task_root`, `source_root`, `author`, `state`, `limit`, `details`, `scope_offset` | `zcl.zcode_tasks.v1` | `z23 zcode tasks --input='{"workspace":"/src/project"}'` | List local dev tasks |
 
 #### `zcode.package.dev.score` — Evidence-derived signed ZC23 Score receipts
 

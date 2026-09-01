@@ -518,7 +518,9 @@ static bool zdev_load_write_scope(
     struct vcs_zcode_write_scope_v1 *out)
 {
     uint8_t *wire = NULL; size_t wire_len = 0;
-    bool ok = vcs_object_load_raw(workspace, root, &wire, &wire_len) == 0 &&
+    bool ok = vcs_object_load_raw_bounded(
+            workspace, root, VCS_ZCODE_WRITE_SCOPE_WIRE_MAX,
+            &wire, &wire_len) == 0 &&
         vcs_zcode_write_scope_parse(wire, wire_len, out) ==
             VCS_ZCODE_WRITE_SCOPE_OK;
     if (ok) {
@@ -967,6 +969,8 @@ void zcl_native_handle_zcode_lane(
 
 #define ZDEV_TASKS_MAX_ROWS 3
 #define ZDEV_TASKS_DETAIL_CANDIDATES 4
+#define ZDEV_TASKS_DETAIL_SCOPE_PATHS 16
+#define ZDEV_TASKS_DETAIL_SCOPE_JSON_BYTES 2048
 #define ZDEV_TASKS_MULTIROW_WORKSPACE_MAX 256
 #define ZDEV_TASKS_WORKSPACE_JSON_MAX 1024
 
@@ -1006,7 +1010,9 @@ static void zdev_task_safe_next(struct json_value *parent,
 static void zdev_task_row_json(struct json_value *row,
                                const struct vcs_zcode_task_index *index,
                                const struct vcs_zcode_task_index_entry *e,
-                               const char *workspace, bool details)
+                               const char *workspace, bool details,
+                               const struct vcs_zcode_write_scope_v1 *scope,
+                               size_t scope_offset)
 {
     char work_id[32];
     (void)snprintf(work_id, sizeof(work_id), "work-%.12s",
@@ -1020,6 +1026,8 @@ static void zdev_task_row_json(struct json_value *row,
     (void)json_push_kv_str(row, "work_id", work_id);
     (void)json_push_kv_str(row, "task_root", e->task_root_hex);
     (void)json_push_kv_str(row, "source_root", e->source_root_hex);
+    (void)json_push_kv_str(row, "write_scope_root",
+                           e->write_scope_root_hex);
     (void)json_push_kv_str(row, "latest_candidate_source_root",
                            e->latest_candidate_source_root_hex);
     (void)json_push_kv_str(row, "latest_patch_root",
@@ -1062,10 +1070,58 @@ static void zdev_task_row_json(struct json_value *row,
     (void)json_push_kv_str(row, "goal_root", e->goal_root_hex);
     (void)json_push_kv_str(row, "proof_policy_root",
                            e->proof_policy_root_hex);
-    (void)json_push_kv_str(row, "write_scope_root",
-                           e->write_scope_root_hex);
     (void)json_push_kv_str(row, "toolchain_capsule_root",
                            e->toolchain_capsule_root_hex);
+    struct json_value claimed_paths;
+    json_init(&claimed_paths);
+    json_set_array(&claimed_paths);
+    size_t claimed_rendered = 0;
+    size_t claimed_json_bytes = 0;
+    if (scope) {
+        for (size_t i = scope_offset; i < scope->count; i++) {
+            size_t path_bytes = zdev_json_escaped_size(scope->paths[i]);
+            if (claimed_rendered >= ZDEV_TASKS_DETAIL_SCOPE_PATHS ||
+                path_bytes > ZDEV_TASKS_DETAIL_SCOPE_JSON_BYTES -
+                    claimed_json_bytes)
+                break;
+            struct json_value path;
+            json_init(&path);
+            json_set_str(&path, scope->paths[i]);
+            (void)json_push_back(&claimed_paths, &path);
+            json_free(&path);
+            claimed_rendered++;
+            claimed_json_bytes += path_bytes;
+        }
+    }
+    (void)json_push_kv(row, "claimed_write_paths", &claimed_paths);
+    (void)json_push_kv_int(row, "claimed_write_paths_total",
+                           scope ? (int64_t)scope->count : 0);
+    (void)json_push_kv_int(row, "claimed_write_paths_rendered",
+                           (int64_t)claimed_rendered);
+    (void)json_push_kv_int(row, "claimed_write_paths_offset",
+                           (int64_t)scope_offset);
+    size_t claimed_end = scope_offset + claimed_rendered;
+    (void)json_push_kv_bool(row, "claimed_write_paths_truncated",
+                            scope && (scope_offset > 0 ||
+                                      claimed_end < scope->count));
+    (void)json_push_kv_int(row, "claimed_write_paths_next_offset",
+                           scope && claimed_end < scope->count
+                               ? (int64_t)claimed_end : -1);
+    if (scope && claimed_end < scope->count) {
+        struct json_value next, input;
+        json_init(&next); json_set_object(&next);
+        json_init(&input); json_set_object(&input);
+        (void)json_push_kv_str(&next, "command", "zcode.tasks");
+        (void)json_push_kv_str(&input, "workspace", workspace);
+        (void)json_push_kv_str(&input, "task_root", e->task_root_hex);
+        (void)json_push_kv_bool(&input, "details", true);
+        (void)json_push_kv_int(&input, "scope_offset",
+                               (int64_t)claimed_end);
+        (void)json_push_kv(&next, "input", &input);
+        (void)json_push_kv(row, "claimed_write_paths_next", &next);
+        json_free(&input); json_free(&next);
+    }
+    json_free(&claimed_paths);
     (void)json_push_kv_int(row, "app_run_receipt_count",
                            (int64_t)e->app_run_receipt_count);
     struct json_value candidates;
@@ -1126,6 +1182,18 @@ void zcl_native_handle_zcode_tasks(
         return;
     }
     bool details = json_get_bool(json_get(request->input, "details"));
+    const struct json_value *scope_offset_value =
+        json_get(request->input, "scope_offset");
+    int64_t scope_offset = zdev_int(request->input, "scope_offset", 0);
+    if ((scope_offset_value && !details) || scope_offset < 0 ||
+        scope_offset >= VCS_ZCODE_WRITE_SCOPE_MAX_PATHS) {
+        zcl_command_reply_fail(
+            reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
+            "BAD_SCOPE_OFFSET", "validate", false, false,
+            "scope_offset requires details=true and must be in 0..63",
+            "zcode.tasks");
+        return;
+    }
     int64_t limit = zdev_int(request->input, "limit",
                              ZDEV_TASKS_MAX_ROWS);
     if (limit < 1) limit = 1;
@@ -1153,13 +1221,46 @@ void zcl_native_handle_zcode_tasks(
     size_t total = vcs_zcode_task_index_search(index, &search, rows,
                                                (size_t)limit);
     size_t rendered = total < (size_t)limit ? total : (size_t)limit;
+    struct vcs_zcode_write_scope_v1 detail_scope;
+    const struct vcs_zcode_write_scope_v1 *detail_scope_ptr = NULL;
+    if (details && rendered == 1) {
+        uint8_t scope_root_bytes[32];
+        if (!zcl_hex_decode_lower(rows[0]->write_scope_root_hex,
+                                  scope_root_bytes,
+                                  sizeof(scope_root_bytes)) ||
+            !zdev_load_write_scope(workspace, scope_root_bytes,
+                                   &detail_scope)) {
+            char scope_root[65];
+            (void)snprintf(scope_root, sizeof(scope_root), "%s",
+                           rows[0]->write_scope_root_hex);
+            vcs_zcode_task_index_free(index);
+            zcl_command_reply_fail(
+                reply, ZCL_COMMAND_STATUS_BLOCKED, ZCL_COMMAND_EXIT_BLOCKED,
+                "TASK_SCOPE_INCOMPLETE", "coordinate", false, false,
+                "the task's exact write-scope object is absent, corrupt, or no longer agrees with its CAS root",
+                scope_root);
+            return;
+        }
+        if ((size_t)scope_offset >= detail_scope.count) {
+            vcs_zcode_task_index_free(index);
+            zcl_command_reply_fail(
+                reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
+                "BAD_SCOPE_OFFSET", "validate", false, false,
+                "scope_offset must select an existing claimed path",
+                "zcode.tasks");
+            return;
+        }
+        detail_scope_ptr = &detail_scope;
+    }
     struct json_value arr;
     json_init(&arr);
     json_set_array(&arr);
     for (size_t i = 0; i < rendered; i++) {
         struct json_value row;
         json_init(&row);
-        zdev_task_row_json(&row, index, rows[i], workspace, details);
+        zdev_task_row_json(&row, index, rows[i], workspace, details,
+                           details ? detail_scope_ptr : NULL,
+                           (size_t)scope_offset);
         (void)json_push_back(&arr, &row);
         json_free(&row);
     }

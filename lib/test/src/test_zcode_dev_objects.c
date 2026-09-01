@@ -5782,6 +5782,44 @@ static bool zd_index_store_scope(
     return ok;
 }
 
+static void zd_index_max_scope_path(size_t index, char path[256])
+{
+    if (index == 0) {
+        (void)snprintf(path, 256, "src");
+        return;
+    }
+    int prefix = snprintf(path, 256, "zz%02zu/", index);
+    if (prefix <= 0 || prefix >= 255) {
+        path[0] = '\0';
+        return;
+    }
+    memset(path + prefix, 'a', 255u - (size_t)prefix);
+    path[255] = '\0';
+}
+
+static bool zd_index_store_max_scope(
+    const char *workspace, uint8_t out_root[32])
+{
+    struct vcs_zcode_write_scope_v1 scope;
+    vcs_zcode_write_scope_init(&scope);
+    char path[256];
+    for (size_t i = 0; i < VCS_ZCODE_WRITE_SCOPE_MAX_PATHS; i++) {
+        zd_index_max_scope_path(i, path);
+        if (vcs_zcode_write_scope_add(&scope, path) !=
+                VCS_ZCODE_WRITE_SCOPE_OK)
+            return false;
+    }
+    uint8_t *wire = NULL;
+    size_t wire_len = 0;
+    bool ok = vcs_zcode_write_scope_serialize(&scope, &wire, &wire_len) ==
+            VCS_ZCODE_WRITE_SCOPE_OK &&
+        vcs_zcode_write_scope_root(&scope, out_root) ==
+            VCS_ZCODE_WRITE_SCOPE_OK &&
+        vcs_object_put_addressed(workspace, out_root, wire, wire_len);
+    free(wire);
+    return ok;
+}
+
 static bool zd_index_store_candidate(const char *workspace,
                                      struct vcs_zcode_candidate_v1 *candidate,
                                      uint8_t out_root[32])
@@ -5834,7 +5872,7 @@ static int test_zd_task_index(void)
                   VCS_ZCODE_DEV_OK);
 
         uint8_t scope_src[32], scope_docs[32], scope_child[32], scope_old[32];
-        ASSERT(zd_index_store_scope(workspace, "src", scope_src));
+        ASSERT(zd_index_store_max_scope(workspace, scope_src));
         ASSERT(zd_index_store_scope(workspace, "docs", scope_docs));
         ASSERT(zd_index_store_scope(workspace, "src/widget.c", scope_child));
         ASSERT(zd_index_store_scope(workspace, "src-old", scope_old));
@@ -6205,6 +6243,8 @@ static int test_zd_task_index(void)
             workspace, &candidate, candidate_root));
         char root_live_hex[65];
         zcl_hex_encode(root_live, 32, root_live_hex);
+        char scope_src_hex[65];
+        zcl_hex_encode(scope_src, 32, scope_src_hex);
         char candidate_root_hex[65], candidate_source_hex[65];
         char patch_hex[65], receipt_action_hex[65], work_receipt_hex[65];
         zcl_hex_encode(candidate_root, 32, candidate_root_hex);
@@ -6249,6 +6289,9 @@ static int test_zd_task_index(void)
         char work_id[32];
         (void)snprintf(work_id, sizeof(work_id), "work-%.12s", root_a_hex);
         ASSERT_STR_EQ(json_get_str(json_get(task_a_row, "work_id")), work_id);
+        ASSERT_STR_EQ(json_get_str(json_get(
+                          task_a_row, "write_scope_root")), scope_src_hex);
+        ASSERT(json_get(task_a_row, "claimed_write_paths") == NULL);
         ASSERT_STR_EQ(json_get_str(json_get(
                           task_a_row, "latest_candidate_source_root")),
                       candidate_source_hex);
@@ -6367,6 +6410,35 @@ static int test_zd_task_index(void)
             detail_row, "agent_context_ambiguous")));
         ASSERT_STR_EQ(json_get_str(json_get(
                           detail_row, "agent_context_root")), "");
+        const struct json_value *claimed_paths =
+            json_get(detail_row, "claimed_write_paths");
+        ASSERT(claimed_paths != NULL);
+        size_t first_scope_page = json_size(claimed_paths);
+        ASSERT(first_scope_page > 1u);
+        ASSERT(first_scope_page <= 16u);
+        ASSERT_STR_EQ(json_get_str(json_at(claimed_paths, 0)), "src");
+        ASSERT_EQ(json_get_int(json_get(
+                      detail_row, "claimed_write_paths_total")), 64);
+        ASSERT_EQ(json_get_int(json_get(
+                      detail_row, "claimed_write_paths_rendered")),
+                  (int64_t)first_scope_page);
+        ASSERT_EQ(json_get_int(json_get(
+                      detail_row, "claimed_write_paths_offset")), 0);
+        ASSERT_EQ(json_get_int(json_get(
+                      detail_row, "claimed_write_paths_next_offset")),
+                  (int64_t)first_scope_page);
+        ASSERT(json_get_bool(json_get(
+            detail_row, "claimed_write_paths_truncated")));
+        const struct json_value *scope_next =
+            json_get(detail_row, "claimed_write_paths_next");
+        ASSERT(scope_next != NULL);
+        ASSERT_STR_EQ(json_get_str(json_get(scope_next, "command")),
+                      "zcode.tasks");
+        const struct json_value *scope_next_input =
+            json_get(scope_next, "input");
+        ASSERT(scope_next_input != NULL);
+        ASSERT_EQ(json_get_int(json_get(scope_next_input, "scope_offset")),
+                  (int64_t)first_scope_page);
         const struct json_value *detail_candidates =
             json_get(detail_row, "candidates");
         ASSERT(detail_candidates != NULL);
@@ -6374,6 +6446,101 @@ static int test_zd_task_index(void)
         ASSERT_STR_EQ(json_get_str(json_get(
                           json_at(detail_candidates, 0), "candidate_root")),
                       candidate_root_hex);
+
+        /* The maximum canonical scope remains inside the real command budget,
+         * and its typed next page starts at the next exact sorted prefix. */
+        enum zcl_command_exit detail_exit = ZCL_COMMAND_EXIT_INTERNAL;
+        size_t detail_len = zcl_command_registry_execute_json(
+            registry, tasks_spec, &tasks_context, &detail_input, true,
+            "zcode.tasks", "normal", 0, 0, NULL,
+            serialized, sizeof(serialized), &detail_exit);
+        ASSERT(detail_len > 0);
+        ASSERT(detail_len <= ZCL_COMMAND_LIST_BUDGET);
+        ASSERT_EQ(detail_exit, ZCL_COMMAND_EXIT_OK);
+
+        size_t scope_seen = 0;
+        while (scope_seen < VCS_ZCODE_WRITE_SCOPE_MAX_PATHS) {
+            struct json_value page_input;
+            json_init(&page_input); json_set_object(&page_input);
+            (void)json_push_kv_str(&page_input, "workspace", workspace);
+            (void)json_push_kv_str(&page_input, "task_root", root_a_hex);
+            (void)json_push_kv_bool(&page_input, "details", true);
+            (void)json_push_kv_int(&page_input, "scope_offset",
+                                   (int64_t)scope_seen);
+            struct zcl_command_request page_request = { .input = &page_input };
+            struct zcl_command_reply page_reply;
+            zcl_command_reply_init(&page_reply, "zcl.zcode_tasks.v1");
+            zcl_native_handle_zcode_tasks(&page_request, &page_reply);
+            ASSERT_EQ(page_reply.exit_code, ZCL_COMMAND_EXIT_OK);
+            const struct json_value *page_row = json_at(
+                json_get(&page_reply.data, "tasks"), 0);
+            const struct json_value *page_paths =
+                page_row ? json_get(page_row, "claimed_write_paths") : NULL;
+            size_t page_count = page_paths ? json_size(page_paths) : 0;
+            ASSERT(page_count > 0);
+            for (size_t i = 0; i < page_count; i++) {
+                char expected[256];
+                zd_index_max_scope_path(scope_seen + i, expected);
+                ASSERT_STR_EQ(json_get_str(json_at(page_paths, i)), expected);
+            }
+            scope_seen += page_count;
+            ASSERT_EQ(json_get_int(json_get(
+                          page_row, "claimed_write_paths_next_offset")),
+                      scope_seen < VCS_ZCODE_WRITE_SCOPE_MAX_PATHS
+                          ? (int64_t)scope_seen : -1);
+            zcl_command_reply_free(&page_reply);
+            json_free(&page_input);
+        }
+        ASSERT_EQ(scope_seen, VCS_ZCODE_WRITE_SCOPE_MAX_PATHS);
+
+        (void)json_push_kv_int(&detail_input, "scope_offset",
+                               (int64_t)first_scope_page);
+        struct zcl_command_reply next_scope_reply;
+        zcl_command_reply_init(&next_scope_reply, "zcl.zcode_tasks.v1");
+        zcl_native_handle_zcode_tasks(&detail_request, &next_scope_reply);
+        ASSERT_EQ(next_scope_reply.exit_code, ZCL_COMMAND_EXIT_OK);
+        const struct json_value *next_scope_row = json_at(
+            json_get(&next_scope_reply.data, "tasks"), 0);
+        ASSERT(next_scope_row != NULL);
+        ASSERT_EQ(json_get_int(json_get(
+                      next_scope_row, "claimed_write_paths_offset")),
+                  (int64_t)first_scope_page);
+        char expected_scope_path[256];
+        zd_index_max_scope_path(first_scope_page, expected_scope_path);
+        ASSERT_STR_EQ(json_get_str(json_at(json_get(
+                          next_scope_row, "claimed_write_paths"), 0)),
+                      expected_scope_path);
+        zcl_command_reply_free(&next_scope_reply);
+
+        json_set_int((struct json_value *)json_get(
+                         &detail_input, "scope_offset"),
+                     VCS_ZCODE_WRITE_SCOPE_MAX_PATHS);
+        struct zcl_command_reply bad_scope_offset_reply;
+        zcl_command_reply_init(&bad_scope_offset_reply,
+                               "zcl.zcode_tasks.v1");
+        zcl_native_handle_zcode_tasks(&detail_request,
+                                      &bad_scope_offset_reply);
+        ASSERT_EQ(bad_scope_offset_reply.exit_code,
+                  ZCL_COMMAND_EXIT_INVALID);
+        ASSERT_STR_EQ(bad_scope_offset_reply.error.code,
+                      "BAD_SCOPE_OFFSET");
+        zcl_command_reply_free(&bad_scope_offset_reply);
+
+        struct json_value wrong_mode_input;
+        json_init(&wrong_mode_input); json_set_object(&wrong_mode_input);
+        (void)json_push_kv_str(&wrong_mode_input, "workspace", workspace);
+        (void)json_push_kv_int(&wrong_mode_input, "scope_offset", 0);
+        struct zcl_command_request wrong_mode_request = {
+            .input = &wrong_mode_input,
+        };
+        struct zcl_command_reply wrong_mode_reply;
+        zcl_command_reply_init(&wrong_mode_reply, "zcl.zcode_tasks.v1");
+        zcl_native_handle_zcode_tasks(&wrong_mode_request,
+                                      &wrong_mode_reply);
+        ASSERT_EQ(wrong_mode_reply.exit_code, ZCL_COMMAND_EXIT_INVALID);
+        ASSERT_STR_EQ(wrong_mode_reply.error.code, "BAD_SCOPE_OFFSET");
+        zcl_command_reply_free(&wrong_mode_reply);
+        json_free(&wrong_mode_input);
         zcl_command_reply_free(&detail_reply);
         json_free(&detail_input);
         zcl_command_reply_free(&tasks_reply);
@@ -6424,6 +6591,43 @@ static int test_zd_task_index(void)
         ASSERT_STR_EQ(empty_reply.next[0].input_json,
                       "{\"path\":\"zcode.work.start\"}");
         zcl_command_reply_free(&empty_reply);
+
+        /* A task root without its exact scope bytes cannot answer what paths
+         * it claims. The detailed coordination view refuses instead of
+         * presenting an empty or implicitly clear scope. */
+        ASSERT(zd_index_drop_object(workspace, scope_src));
+        struct json_value missing_scope_input;
+        json_init(&missing_scope_input);
+        json_set_object(&missing_scope_input);
+        (void)json_push_kv_str(&missing_scope_input, "workspace", workspace);
+        (void)json_push_kv_str(&missing_scope_input, "task_root", root_a_hex);
+        (void)json_push_kv_bool(&missing_scope_input, "details", true);
+        struct zcl_command_request missing_scope_request = {
+            .input = &missing_scope_input,
+        };
+        struct zcl_command_reply missing_scope_reply;
+        zcl_command_reply_init(&missing_scope_reply, "zcl.zcode_tasks.v1");
+        zcl_native_handle_zcode_tasks(&missing_scope_request,
+                                      &missing_scope_reply);
+        ASSERT_EQ(missing_scope_reply.exit_code, ZCL_COMMAND_EXIT_BLOCKED);
+        ASSERT_STR_EQ(missing_scope_reply.error.code,
+                      "TASK_SCOPE_INCOMPLETE");
+        ASSERT_STR_EQ(missing_scope_reply.error.evidence, scope_src_hex);
+        zcl_command_reply_free(&missing_scope_reply);
+        json_set_bool((struct json_value *)json_get(
+                          &missing_scope_input, "details"), false);
+        struct zcl_command_reply compact_missing_scope_reply;
+        zcl_command_reply_init(&compact_missing_scope_reply,
+                               "zcl.zcode_tasks.v1");
+        zcl_native_handle_zcode_tasks(&missing_scope_request,
+                                      &compact_missing_scope_reply);
+        ASSERT_EQ(compact_missing_scope_reply.exit_code, ZCL_COMMAND_EXIT_OK);
+        const struct json_value *compact_missing_row = json_at(
+            json_get(&compact_missing_scope_reply.data, "tasks"), 0);
+        ASSERT(compact_missing_row != NULL);
+        ASSERT(json_get(compact_missing_row, "claimed_write_paths") == NULL);
+        zcl_command_reply_free(&compact_missing_scope_reply);
+        json_free(&missing_scope_input);
         json_free(&tasks_input);
         test_rm_rf(dir);
         PASS();
