@@ -539,12 +539,17 @@ ZCL_COMMAND_READY_READ(
 ZCL_COMMAND_READY_COMMAND(
     "zcode.work.start", "zcode.work", "", "Start reuse-first C23 work",
     "Searches installed packages and the rebuildable local package index first, "
-    "then composes the existing package, task, scope, context, toolchain and "
+    "optionally filtering that local projection by one exact allowlisted SPDX "
+    "license identifier. The filter applies only to the selected top-level "
+    "release: it is not a transitive dependency policy and does not constrain "
+    "the license of newly created source. "
+    "It then composes the existing package, task, scope, context, toolchain and "
     "proof-policy owners only for behavior still missing. Exact reuse creates no "
     "task. A selected installed partial match enters the exact task dependency "
     "lock, but changes no source or authoritative project metadata. Its typed "
-    "next action carries the selected name or work ID without requiring a root "
-    "copy. A locally known match without a verified install is shown separately "
+    "next action carries the selected exact root or work ID without requiring a "
+    "manual root copy. A locally known match without a verified install is "
+    "shown separately "
     "and handed to the existing explicit zcode use lifecycle before work starts, "
     "so unavailable code is never reported as reused. "
     "The default is root-free; details=true exposes "
@@ -553,7 +558,7 @@ ZCL_COMMAND_READY_COMMAND(
     ZCL_COMMAND_RESULT_BUDGET,
     "zcode,work,start,goal,reuse,package,api,profile,context,c23",
     "zcl.zcode_work_start.input.v1", "zcl.zcode_work_start.v1",
-    "workspace,goal,profile,context_symbol,max_cpu_seconds,datadir,details", "workspace,goal",
+    "workspace,goal,profile,context_symbol,max_cpu_seconds,datadir,license,details", "workspace,goal",
     "z23-dev zcode work start --input='{\"workspace\":\".\",\"goal\":\"Make the parser reject overflowing lengths\",\"profile\":\"standard\"}'",
     ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
     ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_LOCAL,

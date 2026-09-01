@@ -984,7 +984,7 @@ static int t_e2e(void)
         reuse_next_input.type == JSON_OBJ &&
         reuse_next_input.num_children == 2 &&
         strcmp(json_get_str(json_get(&reuse_next_input, "name_or_root")),
-               "alice/ringbuffer@1.0.0") == 0 &&
+               root_hex) == 0 &&
         strcmp(json_get_str(json_get(&reuse_next_input, "datadir")),
                base) == 0;
     const struct zcl_command_spec *reuse_next_spec =
@@ -1007,7 +1007,7 @@ static int t_e2e(void)
                  saw_ring_symbol && !za_exists(workspace_path) &&
                  reuse_next_ok &&
                  strcmp(work_reply.next[0].command, "zcode.use") == 0 &&
-                 strstr(work_reply.next[0].input_json, root_hex) == NULL);
+                 strstr(work_reply.next[0].input_json, root_hex) != NULL);
     json_free(&reuse_next_input);
     zcl_command_reply_free(&work_reply);
     json_free(&work_input);
@@ -1067,8 +1067,8 @@ static int t_e2e(void)
                  strcmp(work_reply.next[0].command, "zcode.use") == 0 &&
                  strcmp(json_get_str(json_get(
                             &prepare_next_input, "name_or_root")),
-                        "alice/stack@1.0.0") == 0 &&
-                 strstr(work_reply.next[0].input_json, stack_root_hex) == NULL &&
+                        stack_root_hex) == 0 &&
+                 strstr(work_reply.next[0].input_json, stack_root_hex) != NULL &&
                  !za_exists(workspace_path));
     struct zcl_command_request prepare_use_request = {
         .input = &prepare_next_input,

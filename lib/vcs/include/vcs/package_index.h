@@ -58,6 +58,10 @@ struct vcs_package_index *vcs_package_index_build(const char *zcode_dir);
 void vcs_package_index_free(struct vcs_package_index *index);
 
 size_t vcs_package_index_count(const struct vcs_package_index *index);
+/* Releases skipped while building the projection because the bounded loader
+ * was full or a stored envelope could not be parsed/read. A nonzero value
+ * means callers cannot claim a complete filtered view. */
+size_t vcs_package_index_skipped_count(const struct vcs_package_index *index);
 const struct vcs_package_index_entry *vcs_package_index_at(
     const struct vcs_package_index *index, size_t i);
 
