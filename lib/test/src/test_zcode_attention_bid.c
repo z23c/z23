@@ -663,5 +663,131 @@ int test_zcode_attention_bid(void)
     }
     AB_CHECK("all-nine-pareto-axis-directions", all_axis_directions);
 
+    struct vcs_zcode_heuristic_v1 auto_heuristics[4];
+    struct vcs_zcode_attention_bid_v1 auto_bids[4];
+    for (size_t i = 0; i < 4; i++) {
+        ab_valid_heuristic(&auto_heuristics[i], (uint8_t)(110 + i));
+        ab_valid_bid(&auto_bids[i], &auto_heuristics[i]);
+        auto_bids[i].priority_class =
+            (uint8_t)(VCS_ZCODE_ATTENTION_P0_SECURITY + i);
+    }
+    /* A lower-priority bid may look better on every metric and still cannot
+     * displace P0. Hard class ordering runs before optimization. */
+    auto_bids[0].expected_user_value_bp = 0;
+    auto_bids[0].information_gain_bp = 0;
+    auto_bids[0].blocker_relief_bp = 0;
+    auto_bids[0].reuse_potential_bp = 0;
+    auto_bids[0].evidence_strength_bp = 0;
+    auto_bids[0].risk_bp = VCS_ZCODE_ATTENTION_BASIS_POINTS_MAX;
+    auto_bids[0].overlap_bp = VCS_ZCODE_ATTENTION_BASIS_POINTS_MAX;
+    auto_bids[0].expected_latency_us = UINT64_MAX;
+    auto_bids[0].expected_cost_milliunits = UINT64_MAX;
+    auto_bids[3].expected_user_value_bp =
+        VCS_ZCODE_ATTENTION_BASIS_POINTS_MAX;
+    auto_bids[3].information_gain_bp =
+        VCS_ZCODE_ATTENTION_BASIS_POINTS_MAX;
+    auto_bids[3].blocker_relief_bp =
+        VCS_ZCODE_ATTENTION_BASIS_POINTS_MAX;
+    auto_bids[3].reuse_potential_bp =
+        VCS_ZCODE_ATTENTION_BASIS_POINTS_MAX;
+    auto_bids[3].evidence_strength_bp =
+        VCS_ZCODE_ATTENTION_BASIS_POINTS_MAX;
+    auto_bids[3].risk_bp = 0;
+    auto_bids[3].overlap_bp = 0;
+    auto_bids[3].expected_latency_us = 0;
+    auto_bids[3].expected_cost_milliunits = 0;
+
+    struct vcs_zcode_attention_frontier_query auto_query;
+    ab_query(&auto_query, VCS_ZCODE_ATTENTION_PRIORITY_AUTO);
+    size_t auto_selected[4] = {0};
+    struct vcs_zcode_attention_choice_report choice_report;
+    AB_CHECK("automatic-choice-enforces-hard-priority",
+             vcs_zcode_attention_frontier_choose(
+                 auto_bids, 4, auto_heuristics, &auto_query,
+                 auto_selected, 4, &choice_report) ==
+                 VCS_ZCODE_ATTENTION_OK &&
+             choice_report.selected_priority_class ==
+                 VCS_ZCODE_ATTENTION_P0_SECURITY &&
+             choice_report.frontier.class_candidate_count == 1 &&
+             choice_report.frontier.frontier_count == 1 &&
+             auto_selected[0] == 0);
+
+    auto_bids[0].priority_class = VCS_ZCODE_ATTENTION_P3_RESEARCH;
+    AB_CHECK("removing-last-p0-reveals-p1",
+             vcs_zcode_attention_frontier_choose(
+                 auto_bids, 4, auto_heuristics, &auto_query,
+                 auto_selected, 4, &choice_report) ==
+                 VCS_ZCODE_ATTENTION_OK &&
+             choice_report.selected_priority_class ==
+                 VCS_ZCODE_ATTENTION_P1_USER_JOURNEY &&
+             choice_report.frontier.class_candidate_count == 1 &&
+             auto_selected[0] == 1);
+    uint8_t selected_before_lower[32], selected_after_lower[32];
+    (void)vcs_zcode_attention_bid_root(
+        &auto_bids[auto_selected[0]], selected_before_lower);
+    auto_bids[3].expected_user_value_bp--;
+    bool lower_unchanged = vcs_zcode_attention_frontier_choose(
+        auto_bids, 4, auto_heuristics, &auto_query,
+        auto_selected, 4, &choice_report) == VCS_ZCODE_ATTENTION_OK;
+    if (lower_unchanged)
+        (void)vcs_zcode_attention_bid_root(
+            &auto_bids[auto_selected[0]], selected_after_lower);
+    AB_CHECK("lower-class-change-cannot-move-frontier",
+             lower_unchanged && memcmp(selected_before_lower,
+                                        selected_after_lower, 32) == 0);
+    struct vcs_zcode_attention_bid_v1 auto_permuted[4] = {
+        auto_bids[3], auto_bids[2], auto_bids[1], auto_bids[0]
+    };
+    struct vcs_zcode_heuristic_v1 auto_permuted_heuristics[4] = {
+        auto_heuristics[3], auto_heuristics[2], auto_heuristics[1],
+        auto_heuristics[0]
+    };
+    bool auto_permutation = vcs_zcode_attention_frontier_choose(
+        auto_permuted, 4, auto_permuted_heuristics, &auto_query,
+        auto_selected, 4, &choice_report) == VCS_ZCODE_ATTENTION_OK;
+    if (auto_permutation)
+        (void)vcs_zcode_attention_bid_root(
+            &auto_permuted[auto_selected[0]], selected_after_lower);
+    AB_CHECK("automatic-choice-input-permutation",
+             auto_permutation && choice_report.selected_priority_class ==
+                 VCS_ZCODE_ATTENTION_P1_USER_JOURNEY &&
+             memcmp(selected_before_lower, selected_after_lower, 32) == 0);
+
+    size_t auto_untouched = 777;
+    AB_CHECK("automatic-choice-capacity-is-atomic",
+             vcs_zcode_attention_frontier_choose(
+                 auto_bids, 4, auto_heuristics, &auto_query,
+                 &auto_untouched, 0, &choice_report) ==
+                 VCS_ZCODE_ATTENTION_CAPACITY &&
+             choice_report.selected_priority_class ==
+                 VCS_ZCODE_ATTENTION_P1_USER_JOURNEY &&
+             choice_report.frontier.returned_count == 0 &&
+             auto_untouched == 777);
+    auto_query.priority_class = VCS_ZCODE_ATTENTION_P1_USER_JOURNEY;
+    AB_CHECK("automatic-choice-refuses-caller-selected-class",
+             vcs_zcode_attention_frontier_choose(
+                 auto_bids, 4, auto_heuristics, &auto_query,
+                 auto_selected, 4, &choice_report) ==
+                 VCS_ZCODE_ATTENTION_PRIORITY);
+    auto_query.priority_class = VCS_ZCODE_ATTENTION_PRIORITY_AUTO;
+    union {
+        struct vcs_zcode_attention_frontier_query query;
+        struct vcs_zcode_attention_choice_report report;
+    } auto_alias;
+    auto_alias.query = auto_query;
+    AB_CHECK("automatic-choice-query-output-alias-refusal",
+             vcs_zcode_attention_frontier_choose(
+                 auto_bids, 4, auto_heuristics, &auto_alias.query,
+                 auto_selected, 4, &auto_alias.report) ==
+                 VCS_ZCODE_ATTENTION_ALIAS);
+    struct vcs_zcode_attention_choice_report auto_empty = {0};
+    AB_CHECK("automatic-empty-choice-has-no-selected-class",
+             vcs_zcode_attention_frontier_choose(
+                 NULL, 0, NULL, &auto_query, NULL, 0, &auto_empty) ==
+                 VCS_ZCODE_ATTENTION_OK &&
+             auto_empty.frontier.input_count == 0 &&
+             auto_empty.selected_priority_class ==
+                 VCS_ZCODE_ATTENTION_PRIORITY_AUTO);
+
     return failures;
 }

@@ -46,6 +46,7 @@
      VCS_ZCODE_ATTENTION_METRIC_LATENCY | \
      VCS_ZCODE_ATTENTION_METRIC_COST)
 #define VCS_ZCODE_ATTENTION_FRONTIER_MAX_BIDS 64u
+#define VCS_ZCODE_ATTENTION_PRIORITY_AUTO 0u
 
 enum vcs_zcode_heuristic_derivation {
     VCS_ZCODE_HEURISTIC_SEED = 1,
@@ -82,6 +83,7 @@ enum vcs_zcode_attention_error {
     VCS_ZCODE_ATTENTION_DUPLICATE,
     VCS_ZCODE_ATTENTION_CAPACITY,
     VCS_ZCODE_ATTENTION_CAS,
+    VCS_ZCODE_ATTENTION_EVIDENCE,
 };
 
 struct vcs_zcode_heuristic_v1 {
@@ -154,6 +156,12 @@ struct vcs_zcode_attention_frontier_report {
     size_t returned_count;
 };
 
+struct vcs_zcode_attention_choice_report {
+    struct vcs_zcode_attention_frontier_report frontier;
+    /* Zero only for an empty automatic choice. */
+    uint8_t selected_priority_class;
+};
+
 const char *vcs_zcode_attention_error_string(
     enum vcs_zcode_attention_error error);
 
@@ -221,5 +229,17 @@ enum vcs_zcode_attention_error vcs_zcode_attention_frontier_project(
     const struct vcs_zcode_attention_frontier_query *query,
     size_t *out_indices, size_t out_capacity,
     struct vcs_zcode_attention_frontier_report *report);
+
+/* Choose the highest-priority nonempty class (P0 before P1 before P2 before
+ * P3), then preserve its complete Pareto frontier. The query must use
+ * VCS_ZCODE_ATTENTION_PRIORITY_AUTO; callers that need a diagnostic view of
+ * one exact class use frontier_project instead. This is still a proposal view:
+ * it grants no task, action, execution, or acceptance authority. */
+enum vcs_zcode_attention_error vcs_zcode_attention_frontier_choose(
+    const struct vcs_zcode_attention_bid_v1 *bids, size_t bid_count,
+    const struct vcs_zcode_heuristic_v1 *heuristics,
+    const struct vcs_zcode_attention_frontier_query *query,
+    size_t *out_indices, size_t out_capacity,
+    struct vcs_zcode_attention_choice_report *report);
 
 #endif /* ZCL_VCS_ZCODE_ATTENTION_BID_H */
