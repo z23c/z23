@@ -13,6 +13,18 @@
 
 #define ZCL_NATIVE_DEV_RETRIEVAL_SNAPSHOT_PATH_MAX 256u
 
+#if defined(ZCL_TESTING)
+enum zcl_native_dev_retrieval_test_phase {
+    ZCL_NATIVE_DEV_RETRIEVAL_TEST_BEFORE_CODEINDEX_OPEN = 1,
+    ZCL_NATIVE_DEV_RETRIEVAL_TEST_BEFORE_POST_CAPTURE = 2,
+};
+
+typedef bool (*zcl_native_dev_retrieval_test_hook)(
+    enum zcl_native_dev_retrieval_test_phase phase, void *opaque);
+void zcl_native_dev_retrieval_test_set_hook(
+    zcl_native_dev_retrieval_test_hook hook, void *opaque);
+#endif
+
 struct zcl_native_dev_retrieval_snapshot_rank {
     struct zcl_retrieval_ranked_file rows[ZCL_RETRIEVAL_EVAL_RANK_MAX];
     char paths[ZCL_RETRIEVAL_EVAL_RANK_MAX]

@@ -72,6 +72,23 @@ struct rb_computation {
     char graph_fallback_reason[64];
 };
 
+#if defined(ZCL_TESTING)
+static zcl_native_dev_retrieval_test_hook rb_test_hook;
+static void *rb_test_hook_opaque;
+
+void zcl_native_dev_retrieval_test_set_hook(
+    zcl_native_dev_retrieval_test_hook hook, void *opaque)
+{
+    rb_test_hook = hook;
+    rb_test_hook_opaque = opaque;
+}
+
+static bool rb_test_phase(enum zcl_native_dev_retrieval_test_phase phase)
+{
+    return !rb_test_hook || rb_test_hook(phase, rb_test_hook_opaque);
+}
+#endif
+
 static void rb_fail(struct zcl_command_reply *reply, const char *code,
                     const char *phase, const char *message,
                     const char *evidence)
@@ -909,6 +926,16 @@ static bool rb_compute(const struct json_value *input, const char *workspace,
         return false;
     }
 
+#if defined(ZCL_TESTING)
+    if (!rb_test_phase(ZCL_NATIVE_DEV_RETRIEVAL_TEST_BEFORE_CODEINDEX_OPEN)) {
+        vcs_manifest_free(&pre);
+        vcs_index_close(index);
+        rb_fail(reply, "TEST_PHASE_HOOK_FAILED", "test",
+                "retrieval test phase hook refused before code-index open",
+                workspace);
+        return false;
+    }
+#endif
     struct codeindex *ci = codeindex_open_source_view(workspace);
     uint8_t codeindex_root[32];
     bool ranked = ci && codeindex_source_root_sha3(ci, codeindex_root) &&
@@ -920,8 +947,8 @@ static bool rb_compute(const struct json_value *input, const char *workspace,
             &computed->identifier_graph, &computed->identifier_seed_symbols,
             &computed->graph_files, &computed->query_lookup_saturated,
             computed->graph_fallback_reason);
-    codeindex_close(ci);
     if (!ranked) {
+        codeindex_close(ci);
         vcs_manifest_free(&pre);
         vcs_index_close(index);
         rb_fail(reply, "RANKING_FAILED", "rank",
@@ -930,10 +957,22 @@ static bool rb_compute(const struct json_value *input, const char *workspace,
         return false;
     }
 
+#if defined(ZCL_TESTING)
+    if (!rb_test_phase(ZCL_NATIVE_DEV_RETRIEVAL_TEST_BEFORE_POST_CAPTURE)) {
+        codeindex_close(ci);
+        vcs_manifest_free(&pre);
+        vcs_index_close(index);
+        rb_fail(reply, "TEST_PHASE_HOOK_FAILED", "test",
+                "retrieval test phase hook refused before post capture",
+                workspace);
+        return false;
+    }
+#endif
     struct vcs_manifest post = {0};
     uint8_t post_root[32];
     if (!rb_manifest_capture(workspace, index, &post, post_root) ||
         memcmp(pre_root, post_root, sizeof(pre_root)) != 0) {
+        codeindex_close(ci);
         vcs_manifest_free(&pre);
         vcs_manifest_free(&post);
         vcs_index_close(index);
@@ -942,6 +981,21 @@ static bool rb_compute(const struct json_value *input, const char *workspace,
                 workspace);
         return false;
     }
+    bool codeindex_current = false;
+    if (!codeindex_source_view_is_current(ci, &codeindex_current) ||
+        !codeindex_current) {
+        codeindex_close(ci);
+        vcs_manifest_free(&pre);
+        vcs_manifest_free(&post);
+        vcs_index_close(index);
+        rb_fail(reply, "CODEINDEX_GENERATION_CHANGED_DURING_BENCHMARK",
+                "bind",
+                "the queried code index no longer matches the checkout "
+                "generation after ranking",
+                "codeindex_source_view_is_current");
+        return false;
+    }
+    codeindex_close(ci);
     vcs_manifest_free(&post);
     vcs_manifest_free(&pre);
     vcs_index_close(index);

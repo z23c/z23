@@ -65,3 +65,14 @@ bool ci_codeindex_source_view_is_stale(struct codeindex *ci, bool *stale)
         LOG_FAIL("codeindex", "null arg to source_view_is_stale");
     return store_is_stale_profile(ci->root, ci->store, false, stale);
 }
+
+bool codeindex_source_view_is_current(struct codeindex *ci, bool *current)
+{
+    if (current) *current = false;
+    if (!ci || !current)
+        LOG_FAIL("codeindex", "null arg to source_view_is_current");
+    bool stale = true;
+    if (!ci_codeindex_source_view_is_stale(ci, &stale)) return false;
+    *current = !stale;
+    return true;
+}

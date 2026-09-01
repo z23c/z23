@@ -699,6 +699,9 @@ ZCL_TEST_GROUP(retrieval)
  * It can change only a 0..5 prefix scalar and must preserve candidate set and
  * context ceiling without seeing reviewed gold or scope labels. */
 ZCL_TEST_GROUP(retrieval_experiment)
+/* Deterministic composition schedule for the dev retrieval ranker's VCS /
+ * code-index generation join. */
+ZCL_TEST_GROUP(retrieval_generation)
 /* A proof receipt: one node's claim that a named group reached a named
  * verdict over an exactly identified tree, and the rule a receiver applies.
  * The group exists for the refusals: only a PASS carrying a measured vector

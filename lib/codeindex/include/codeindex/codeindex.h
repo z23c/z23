@@ -154,6 +154,13 @@ void codeindex_close(struct codeindex *ci);
  * malformed; it never fabricates an all-zero generation. */
 bool codeindex_source_root_sha3(struct codeindex *ci, uint8_t out[32]);
 
+/* Recheck that a source-only reader still describes the checkout generation
+ * now present at its root. This never rebuilds or advances the handle. A
+ * successful false result is an observed generation change, including an
+ * A->B->A byte schedule whose source metadata changed; a failed observation
+ * returns false and leaves *current=false. */
+bool codeindex_source_view_is_current(struct codeindex *ci, bool *current);
+
 /* ── Queries ── */
 
 /* Exact-name lookup. On a hit fills *out and sets *found=true; verify-on-read
