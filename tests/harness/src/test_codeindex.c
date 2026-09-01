@@ -1158,7 +1158,7 @@ static int test_codeindex_platform_arm(void)
             "core/consensus/src/pow.c",           /* -> "consensus_parity" */
             "core/math/src/arith_uint256.c",      /* sealed core -> consensus_parity */
             "engine/services/src/node_health_service.c", /* -> "node_health_service" */
-            "engine/composition/source_roots.def", /* -> "codeindex" */
+            "cognition/modules/codeindex/include/codeindex/source_roots.def", /* -> "codeindex" */
             "core/modules/net/src/msg_blocks.c",           /* -> "msg_handlers" */
             "core/modules/bloom/src/zzz_unmapped_xyz.c",   /* no rule -> "make_lint_gates" */
         };

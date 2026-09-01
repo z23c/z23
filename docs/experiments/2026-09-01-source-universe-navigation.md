@@ -24,8 +24,9 @@ An exact path-set comparison explained the whole disagreement:
 
 ## Change
 
-`engine/composition/source_roots.def` and `engine/composition/source_prune_dirs.def` now declare the
-root and pruning policy consumed by the POSIX and Windows code-index builders,
+`cognition/modules/codeindex/include/codeindex/source_roots.def` and
+`cognition/modules/codeindex/include/codeindex/source_prune_dirs.def` declare
+the root and pruning policy consumed by the POSIX and Windows code-index builders,
 the capability inventory, and the science corpus walk. The index scans each
 declared root, prunes fixtures, and exposes `src`, `packages`, and `examples`
 as direct navigation groups. `code map` reports maintained C23 files separately

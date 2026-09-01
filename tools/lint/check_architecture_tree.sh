@@ -14,6 +14,7 @@ fail=0
 tracked="$(mktemp "${TMPDIR:-/tmp}/z23-architecture-tracked.XXXXXX")"
 actual="$(mktemp "${TMPDIR:-/tmp}/z23-architecture-actual.XXXXXX")"
 expected="$(mktemp "${TMPDIR:-/tmp}/z23-architecture-expected.XXXXXX")"
+readonly tracked actual expected
 trap 'rm -f "$tracked" "$actual" "$expected"' EXIT
 git ls-files > "$tracked"
 
@@ -33,6 +34,19 @@ obsolete=(app lib config adapters ports domain application packages src examples
 for old in "${obsolete[@]}"; do
     if grep -q "^$old/" "$tracked"; then
         echo "check-architecture-tree: obsolete root still tracked: $old/" >&2
+        fail=1
+    fi
+done
+
+# Repository-wide source enumeration is code-index policy.  Keep its two
+# X-macro facts at one public seam instead of letting scanners grow private
+# root/prune lists under whichever layer happens to consume them.
+for registry in source_roots.def source_prune_dirs.def; do
+    registry_expected="cognition/modules/codeindex/include/codeindex/$registry"
+    matches="$(awk -F/ -v leaf="$registry" '$NF == leaf { print }' "$tracked")"
+    if [[ "$matches" != "$registry_expected" ]]; then
+        echo "check-architecture-tree: $registry must have one codeindex owner: $registry_expected" >&2
+        [[ -n "$matches" ]] && printf '%s\n' "$matches" >&2
         fail=1
     fi
 done

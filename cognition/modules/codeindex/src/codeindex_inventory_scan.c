@@ -137,7 +137,7 @@ static bool inv_source_name(const char *name)
 static bool inv_prune_dir(const char *name)
 {
 #define SOURCE_PRUNE_DIR(name_) if (strcmp(name, name_) == 0) return true;
-#include "../../../../engine/composition/source_prune_dirs.def"
+#include "codeindex/source_prune_dirs.def"
 #undef SOURCE_PRUNE_DIR
     return strncmp(name, "test-tmp", 8) == 0;
 }
@@ -289,7 +289,7 @@ bool inv_collect_paths(struct inv_scan *s)
     if (!s || !s->root || !s->root[0]) return false;
     static const char *const roots[] = {
 #define SOURCE_ROOT(name_) name_,
-#include "../../../../engine/composition/source_roots.def"
+#include "codeindex/source_roots.def"
 #undef SOURCE_ROOT
     };
     for (size_t i = 0; i < sizeof(roots) / sizeof(roots[0]); i++)

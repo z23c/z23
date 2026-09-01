@@ -1082,7 +1082,7 @@ void zcl_native_handle_code_map(const struct zcl_command_request *request,
      * count is aggregate so lib/ and app/ include their child groups. */
     static const char *const source_roots[] = {
 #define SOURCE_ROOT(name_) name_,
-#include "../../engine/composition/source_roots.def"
+#include "codeindex/source_roots.def"
 #undef SOURCE_ROOT
     };
     int total = 0, nroot = 0;

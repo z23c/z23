@@ -185,7 +185,7 @@ bool ci_store_ensure_schema(sqlite3 *db);
 
 /* ── source enumeration ───────────────────────────────────────────────
  * Deterministic, sorted, repo-relative .c/.h and .def paths across the
- * maintained roots declared in engine/composition/source_roots.def. cb returns false to
+ * maintained roots declared in codeindex/source_roots.def. cb returns false to
  * abort. */
 typedef bool (*ci_enum_cb)(const char *relpath, const struct stat *st,
                            void *user);

@@ -93,7 +93,7 @@ static bool is_source_name(const char *name)
 static bool prune_dir(const char *name)
 {
 #define SOURCE_PRUNE_DIR(name_) if (strcmp(name, name_) == 0) return true;
-#include "../../../../engine/composition/source_prune_dirs.def"
+#include "codeindex/source_prune_dirs.def"
 #undef SOURCE_PRUNE_DIR
     return strncmp(name, "test-tmp", 8) == 0;
 }
@@ -159,7 +159,7 @@ bool ci_enumerate_sources(const char *root, ci_enum_cb cb, void *user)
 
     static const char *const roots[] = {
 #define SOURCE_ROOT(name_) name_,
-#include "../../../../engine/composition/source_roots.def"
+#include "codeindex/source_roots.def"
 #undef SOURCE_ROOT
     };
     for (size_t i = 0; i < sizeof(roots) / sizeof(roots[0]); i++)
