@@ -459,6 +459,7 @@ ZCL_MODULE_CAPABILITY("contexts/wallet/services/src/wallet_restore_service.c", C
 ZCL_MODULE_CAPABILITY("contexts/wallet/services/src/wallet_scan_service.c", CAP_FS_READ|CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("contexts/wallet/services/src/yardsale_wallet_service.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("contexts/wallet/services/src/yardsale_wallet_service_buy.c", CAP_FS_WRITE, "")
+ZCL_MODULE_CAPABILITY("cognition/services/src/experience_compilation_service.c", CAP_FS_READ|CAP_FS_WRITE, "reads and writes only canonical immutable episode wires in the existing workspace CAS; local acceptance remains caller-owned")
 ZCL_MODULE_CAPABILITY("cognition/services/src/zcode_agent_context_service.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("contexts/commons/services/src/zcode_benchmark_executor.c", CAP_PROCESS|CAP_FS_WRITE|CAP_CLOCK|CAP_FS_READ, "runs the closed S4 benchmark/reproduction executor, which forks a sandboxed child process and reads/writes its scratch workspace")
 ZCL_MODULE_CAPABILITY("contexts/commons/services/src/zcode_benchmark_sandbox_selfcheck.c", CAP_PROCESS|CAP_FS_READ|CAP_FS_WRITE|CAP_NETWORK, "spawns and probes the benchmark sandbox canary, including a network-isolation self-check, to prove the sandbox actually confines its child")
