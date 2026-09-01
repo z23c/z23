@@ -511,21 +511,28 @@ static char *run_load_goal(const char *workspace,
 
 static bool run_load_context(
     const char *workspace, const struct vcs_zcode_task_context_entry *entry,
-    const struct vcs_zcode_task_v1 *task,
-    struct vcs_zcode_agent_context_v1 *context)
+    const struct vcs_zcode_task_v1 *task, const char *task_root_hex,
+    struct vcs_zcode_agent_context_v1 *context,
+    enum vcs_zcode_agent_context_result *admission)
 {
-    uint8_t root[32], check[32], *wire = NULL;
+    if (!admission) return false;
+    *admission = VCS_ZCODE_AGENT_CONTEXT_NULL;
+    uint8_t root[32], task_root[32], *wire = NULL;
     size_t len = 0;
     bool ok = zcl_hex_decode_lower(entry->context_root_hex, root, 32) &&
+        zcl_hex_decode_lower(task_root_hex, task_root, 32) &&
         vcs_object_load_raw_bounded(workspace, root, task->max_context_bytes,
                                     &wire, &len) == 0 &&
         vcs_zcode_agent_context_parse(wire, len, task->max_context_bytes,
                                       context) ==
-            VCS_ZCODE_AGENT_CONTEXT_OK &&
-        vcs_zcode_agent_context_root(context, task->max_context_bytes, check) ==
-            VCS_ZCODE_AGENT_CONTEXT_OK && memcmp(check, root, 32) == 0;
+            VCS_ZCODE_AGENT_CONTEXT_OK;
+    if (ok)
+        *admission = vcs_zcode_agent_context_validate_for_task(
+            context, task, task_root, root, true);
     free(wire);
-    return ok;
+    return ok && (*admission == VCS_ZCODE_AGENT_CONTEXT_OK ||
+                  *admission == VCS_ZCODE_AGENT_CONTEXT_BINDING ||
+                  *admission == VCS_ZCODE_AGENT_CONTEXT_INCOMPLETE);
 }
 
 static bool run_load_scope(const char *workspace,
@@ -1996,12 +2003,17 @@ static bool run_preflight_packet(
     vcs_zcode_agent_context_init(&context);
     struct vcs_zcode_write_scope_v1 scope;
     vcs_zcode_write_scope_init(&scope);
+    enum vcs_zcode_agent_context_result context_admission =
+        VCS_ZCODE_AGENT_CONTEXT_NULL;
     char *goal = NULL;
     bool loaded = entry && context_entry && !ambiguous &&
         !context_ambiguous && !entry->expired &&
         run_load_task(workspace, entry->task_root_hex, &task) &&
         (goal = run_load_goal(workspace, &task)) != NULL &&
-        run_load_context(workspace, context_entry, &task, &context) &&
+        run_load_context(workspace, context_entry, &task,
+                         entry->task_root_hex, &context,
+                         &context_admission) &&
+        context_admission == VCS_ZCODE_AGENT_CONTEXT_OK &&
         run_load_scope(workspace, &task, &scope);
     struct json_value packet;
     json_init(&packet);
@@ -2196,11 +2208,15 @@ void zcl_native_handle_zcode_work_run(
     vcs_zcode_agent_context_init(&context);
     struct vcs_zcode_write_scope_v1 scope;
     vcs_zcode_write_scope_init(&scope);
+    enum vcs_zcode_agent_context_result context_admission =
+        VCS_ZCODE_AGENT_CONTEXT_NULL;
     char *goal = NULL;
     bool loaded = entry && context_entry && !context_ambiguous &&
         run_load_task(workspace, entry->task_root_hex, &task) &&
         (goal = run_load_goal(workspace, &task)) != NULL &&
-        run_load_context(workspace, context_entry, &task, &context) &&
+        run_load_context(workspace, context_entry, &task,
+                         entry->task_root_hex, &context,
+                         &context_admission) &&
         run_load_scope(workspace, &task, &scope) && !entry->expired;
     if (!loaded) {
         run_fail(reply, context_ambiguous ? "AMBIGUOUS_CONTEXT" :
@@ -2215,11 +2231,6 @@ void zcl_native_handle_zcode_work_run(
         free(goal); vcs_zcode_agent_context_free(&context);
         vcs_zcode_task_index_free(index); return;
     }
-    uint8_t task_root[32];
-    bool bindings = zcl_hex_decode_lower(entry->task_root_hex, task_root, 32) &&
-        memcmp(context.task_root, task_root, 32) == 0 &&
-        memcmp(context.source_root, task.source_root, 32) == 0 &&
-        memcmp(context.goal_root, task.goal_root, 32) == 0;
     /* Terminal-for-run states: the candidate's evidence is complete (or the
      * work is already accepted).  Repeating run is an idempotent observation
      * of that fact — never a fresh candidate attempt.  This is the same
@@ -2318,13 +2329,17 @@ void zcl_native_handle_zcode_work_run(
         memcpy(materialize_root, task.source_root, sizeof(materialize_root));
     char candidate_workspace[ZWORK_RUN_PATH_MAX];
     bool created = false;
-    if (!bindings || !materialize_root_ok || !run_candidate_workspace(
+    if (context_admission != VCS_ZCODE_AGENT_CONTEXT_OK ||
+        !materialize_root_ok || !run_candidate_workspace(
             workspace, &task, entry->task_root_hex,
             (uint32_t)candidate_sequence, materialize_root,
             candidate_workspace, &created)) {
         run_fail(reply, "HANDOFF_REFUSED", "materialize",
-                 bindings ? "isolated candidate workspace could not be created"
-                          : "task and context bindings disagree",
+                 context_admission == VCS_ZCODE_AGENT_CONTEXT_INCOMPLETE
+                    ? "complete context is required before model execution"
+                    : context_admission == VCS_ZCODE_AGENT_CONTEXT_BINDING
+                    ? "task and context bindings disagree"
+                    : "isolated candidate workspace could not be created",
                  true, false);
         free(goal); vcs_zcode_agent_context_free(&context);
         vcs_zcode_task_index_free(index); return;

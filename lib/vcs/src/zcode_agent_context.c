@@ -26,6 +26,8 @@ const char *vcs_zcode_agent_context_result_string(
     case VCS_ZCODE_AGENT_CONTEXT_SHAPE: return "noncanonical-context";
     case VCS_ZCODE_AGENT_CONTEXT_LIMIT: return "context-limit";
     case VCS_ZCODE_AGENT_CONTEXT_ROOT: return "context-root-mismatch";
+    case VCS_ZCODE_AGENT_CONTEXT_BINDING: return "context-binding-mismatch";
+    case VCS_ZCODE_AGENT_CONTEXT_INCOMPLETE: return "context-incomplete";
     case VCS_ZCODE_AGENT_CONTEXT_ALLOC: return "allocation-failed";
     }
     return "unknown";
@@ -236,4 +238,34 @@ enum vcs_zcode_agent_context_result vcs_zcode_agent_context_root(
     sha3_256_finalize(&sha, out);
     free(wire);
     return VCS_ZCODE_AGENT_CONTEXT_OK;
+}
+
+enum vcs_zcode_agent_context_result vcs_zcode_agent_context_validate_for_task(
+    const struct vcs_zcode_agent_context_v1 *context,
+    const struct vcs_zcode_task_v1 *task,
+    const uint8_t expected_task_root[32],
+    const uint8_t expected_context_root[32], bool require_complete)
+{
+    if (!context || !task || !expected_task_root || !expected_context_root)
+        return VCS_ZCODE_AGENT_CONTEXT_NULL;
+    enum vcs_zcode_agent_context_result result =
+        vcs_zcode_agent_context_validate(context, task->max_context_bytes);
+    if (result != VCS_ZCODE_AGENT_CONTEXT_OK) return result;
+    uint8_t task_root[32], context_root[32];
+    if (vcs_zcode_task_validate(task) != VCS_ZCODE_DEV_OK ||
+        vcs_zcode_task_root(task, task_root) != VCS_ZCODE_DEV_OK ||
+        vcs_zcode_agent_context_root(
+            context, task->max_context_bytes, context_root) !=
+            VCS_ZCODE_AGENT_CONTEXT_OK)
+        return VCS_ZCODE_AGENT_CONTEXT_BINDING;
+    if (memcmp(task_root, expected_task_root, 32) != 0 ||
+        memcmp(context_root, expected_context_root, 32) != 0 ||
+        memcmp(context->task_root, task_root, 32) != 0 ||
+        memcmp(context->source_root, task->source_root, 32) != 0 ||
+        memcmp(context->goal_root, task->goal_root, 32) != 0)
+        return VCS_ZCODE_AGENT_CONTEXT_BINDING;
+    return require_complete &&
+           (context->flags & VCS_ZCODE_AGENT_CONTEXT_TRUNCATED) != 0
+        ? VCS_ZCODE_AGENT_CONTEXT_INCOMPLETE
+        : VCS_ZCODE_AGENT_CONTEXT_OK;
 }

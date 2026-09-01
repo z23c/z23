@@ -164,6 +164,7 @@ enum vcs_zcode_focus_error vcs_zcode_focus_handoff_validate_chain(
 enum vcs_zcode_focus_error vcs_zcode_focus_handoff_validate_for_work(
     const struct vcs_zcode_focus_v1 *focus,
     const struct vcs_zcode_task_v1 *task,
+    const struct vcs_zcode_agent_context_v1 *context,
     const struct vcs_zcode_write_scope_v1 *task_scope,
     const struct vcs_zcode_focus_claim_v1 *claims,
     const struct vcs_zcode_write_scope_v1 *scopes,
@@ -177,7 +178,7 @@ enum vcs_zcode_focus_error vcs_zcode_focus_handoff_validate_for_work(
     const struct vcs_zcode_focus_handoff_v1 *handoff,
     int64_t now_unix)
 {
-    if (!focus || !task || !task_scope || !claims || !scopes ||
+    if (!focus || !task || !context || !task_scope || !claims || !scopes ||
         !from_request || !from_admission || !next_request ||
         !next_admission || !from_receipt || !report || !handoff)
         return VCS_ZCODE_FOCUS_NULL;
@@ -185,6 +186,15 @@ enum vcs_zcode_focus_error vcs_zcode_focus_handoff_validate_for_work(
         from_index >= claim_count || next_index >= claim_count ||
         from_index == next_index)
         return VCS_ZCODE_FOCUS_LIMIT;
+    uint8_t claim_roots[VCS_ZCODE_FOCUS_MAX_CLAIMS][32];
+    for (size_t i = 0; i < claim_count; i++)
+        if (vcs_zcode_focus_claim_root(&claims[i], claim_roots[i]) !=
+            VCS_ZCODE_FOCUS_OK)
+            return VCS_ZCODE_FOCUS_SHAPE;
+    enum vcs_zcode_focus_error context_error =
+        vcs_zcode_focus_validate_for_context(
+            focus, task, context, claim_roots, claim_count, true);
+    if (context_error != VCS_ZCODE_FOCUS_OK) return context_error;
     if (vcs_zcode_focus_claim_set_status(
             focus, claims, scopes, claim_count, now_unix) !=
             ZCL_ONTOLOGY_PROVED)
@@ -196,11 +206,6 @@ enum vcs_zcode_focus_error vcs_zcode_focus_handoff_validate_for_work(
                 now_unix) != ZCL_ONTOLOGY_PROVED)
             return VCS_ZCODE_FOCUS_BINDING;
 
-    uint8_t claim_roots[VCS_ZCODE_FOCUS_MAX_CLAIMS][32];
-    for (size_t i = 0; i < claim_count; i++)
-        if (vcs_zcode_focus_claim_root(&claims[i], claim_roots[i]) !=
-            VCS_ZCODE_FOCUS_OK)
-            return VCS_ZCODE_FOCUS_SHAPE;
     if (vcs_zcode_focus_claim_work_status(
             focus, task, task_scope, &claims[from_index],
             &scopes[from_index], claim_roots, claim_count,
