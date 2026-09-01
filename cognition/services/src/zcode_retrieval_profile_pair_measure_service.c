@@ -2,6 +2,8 @@
  * Purpose: derive and compare one exact retrieval-profile evaluation pair. */
 #include "services/zcode_retrieval_profile_pair_measure_service.h"
 
+#include "vcs/zcode_science.h"
+
 #include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
@@ -62,6 +64,8 @@ static bool measure_fixed_output_aliases(
                sizeof(*request->child_heuristic)) ||
         measure_output_contains(
                report, request->policy, sizeof(*request->policy)) ||
+        measure_output_contains(
+               report, request->study, sizeof(*request->study)) ||
         measure_output_contains(report, request->task_id, 1u) ||
         measure_output_contains(report, request->query, 1u) ||
         measure_output_contains(report, request->relevant_paths, 1u) ||
@@ -178,8 +182,8 @@ zcode_retrieval_profile_pair_measure(
     if (!request->parent_profile ||
         !request->child_profile || !request->feature_snapshot ||
         !request->feature_rows || !request->parent_heuristic ||
-        !request->child_heuristic || !request->policy || !request->task_id ||
-        !request->query || !request->relevant_paths)
+        !request->child_heuristic || !request->policy || !request->study ||
+        !request->task_id || !request->query || !request->relevant_paths)
         return ZCODE_RETRIEVAL_PROFILE_PAIR_MEASURE_NULL;
     if (measure_fixed_output_aliases(request, report))
         return ZCODE_RETRIEVAL_PROFILE_PAIR_MEASURE_ALIAS;
@@ -259,6 +263,14 @@ zcode_retrieval_profile_pair_measure(
             return ZCODE_RETRIEVAL_PROFILE_PAIR_MEASURE_ROOT;
 
     struct zcode_retrieval_profile_pair_measure_report result = {0};
+    uint8_t study_root[32];
+    if (vcs_zcode_study_spec_root(request->study, study_root) !=
+            VCS_ZCODE_SCIENCE_OK ||
+        memcmp(study_root, request->expected_study_root, 32u) != 0 ||
+        memcmp(request->study->source_root,
+               request->expected_source_root, 32u) != 0)
+        return ZCODE_RETRIEVAL_PROFILE_PAIR_MEASURE_BINDING;
+
     uint8_t parent_profile_root[32], child_profile_root[32], query_root[32];
     if (zcl_retrieval_profile_root(
             request->parent_profile, parent_profile_root) !=
@@ -383,7 +395,10 @@ zcode_retrieval_profile_pair_measure(
             request->expected_retrieval_projection_root,
             workload_root) != ZCL_RETRIEVAL_EXPERIMENT_OK)
         return ZCODE_RETRIEVAL_PROFILE_PAIR_MEASURE_WORKLOAD;
-    if (memcmp(workload_root, request->policy->workload_root, 32u) != 0)
+    if (memcmp(workload_root, request->policy->workload_root, 32u) != 0 ||
+        memcmp(request->study->workloads_root, workload_root, 32u) != 0 ||
+        memcmp(request->study->preregistration_policy_root,
+               request->expected_policy_root, 32u) != 0)
         return ZCODE_RETRIEVAL_PROFILE_PAIR_MEASURE_BINDING;
 
     struct zcl_retrieval_ranked_file

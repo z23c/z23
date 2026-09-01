@@ -9,6 +9,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+struct vcs_zcode_study_spec_v1;
+
 enum zcode_retrieval_profile_pair_measure_error {
     ZCODE_RETRIEVAL_PROFILE_PAIR_MEASURE_OK = 0,
     ZCODE_RETRIEVAL_PROFILE_PAIR_MEASURE_NULL,
@@ -38,6 +40,7 @@ struct zcode_retrieval_profile_pair_measure_request {
     const struct vcs_zcode_heuristic_v1 *parent_heuristic;
     const struct vcs_zcode_heuristic_v1 *child_heuristic;
     const struct zcl_retrieval_comparison_policy_v2 *policy;
+    const struct vcs_zcode_study_spec_v1 *study;
     const char *task_id;
     const char *query;
     const char *const *relevant_paths;
@@ -65,13 +68,14 @@ struct zcode_retrieval_profile_pair_measure_report {
     uint8_t child_result_root[32];
 };
 
-/* Derive both ordered arms from one exact feature snapshot, measure them with
- * the maintained paired evaluator, construct both immutable results locally,
- * and apply the exact v2 workload policy. This pure read-only observation does
- * not establish source provenance, chronology, hidden-gold or holdout
- * independence, evaluator correctness, reproduction, signer independence,
- * acceptance, attention, lifecycle, work, execution, or authority. The report
- * is unchanged on every error and may not overlap any reachable input. */
+/* Derive both ordered arms from one exact feature snapshot, bind the canonical
+ * study to that workload and preregistered policy, measure them with the
+ * maintained paired evaluator, construct both immutable results locally, and
+ * apply the exact v2 workload policy. This pure read-only observation does not
+ * establish source provenance, chronology, hidden-gold or holdout independence,
+ * evaluator correctness, reproduction, signer independence, acceptance,
+ * attention, lifecycle, work, execution, or authority. The report is unchanged
+ * on every error and may not overlap any reachable input. */
 enum zcode_retrieval_profile_pair_measure_error
 zcode_retrieval_profile_pair_measure(
     const struct zcode_retrieval_profile_pair_measure_request *request,

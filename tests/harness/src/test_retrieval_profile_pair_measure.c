@@ -3,6 +3,7 @@
 #include "services/zcode_retrieval_profile_pair_measure_service.h"
 
 #include "test/test_core.h"
+#include "vcs/zcode_science.h"
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -24,6 +25,7 @@ struct rpm_fixture {
     struct zcl_retrieval_feature_row_v1 rows[5];
     struct vcs_zcode_heuristic_v1 parent_heuristic, child_heuristic;
     struct zcl_retrieval_comparison_policy_v2 policy;
+    struct vcs_zcode_study_spec_v1 study;
     const char *relevant[1];
     uint8_t task_root[32], source_root[32], snapshot_source_root[32];
     uint8_t projection_root[32], study_root[32], evaluator_root[32];
@@ -83,6 +85,61 @@ static bool rpm_proposal_root(
         fixture->policy_root, fixture->evaluator_root, out);
 }
 
+static bool rpm_refresh_study_lineage(struct rpm_fixture *fixture)
+{
+    struct zcl_retrieval_profile_report parent_projection, child_projection;
+    uint8_t parent_profile_root[32], child_profile_root[32], snapshot_root[32];
+    if (vcs_zcode_study_spec_root(
+            &fixture->study, fixture->study_root) != VCS_ZCODE_SCIENCE_OK ||
+        !rpm_profile_projection(
+            &fixture->parent_profile, fixture, &parent_projection) ||
+        !rpm_profile_projection(
+            &fixture->child_profile, fixture, &child_projection) ||
+        zcl_retrieval_profile_root(
+            &fixture->parent_profile, parent_profile_root) !=
+            ZCL_RETRIEVAL_EXPERIMENT_OK ||
+        zcl_retrieval_profile_root(
+            &fixture->child_profile, child_profile_root) !=
+            ZCL_RETRIEVAL_EXPERIMENT_OK ||
+        zcl_retrieval_feature_snapshot_root(
+            &fixture->snapshot, fixture->rows, snapshot_root) !=
+            ZCL_RETRIEVAL_EXPERIMENT_OK)
+        return false;
+
+    rpm_heuristic_common(&fixture->parent_heuristic, fixture, snapshot_root);
+    memcpy(fixture->parent_heuristic.proposed_rule_root,
+           parent_profile_root, 32u);
+    memcpy(fixture->parent_heuristic.expected_effect_root,
+           parent_projection.candidate_ranking_root, 32u);
+    if (!rpm_proposal_root(
+            fixture, parent_profile_root, snapshot_root,
+            parent_projection.candidate_ranking_root,
+            fixture->parent_heuristic.proposal_input_root) ||
+        vcs_zcode_heuristic_root(
+            &fixture->parent_heuristic,
+            fixture->parent_heuristic_root) != VCS_ZCODE_ATTENTION_OK)
+        return false;
+
+    fixture->child_heuristic = fixture->parent_heuristic;
+    fixture->child_heuristic.derivation = VCS_ZCODE_HEURISTIC_SPECIALIZE;
+    fixture->child_heuristic.parent_count = 1u;
+    memcpy(fixture->child_heuristic.parent_roots[0],
+           fixture->parent_heuristic_root, 32u);
+    memcpy(fixture->child_heuristic.proposed_rule_root,
+           child_profile_root, 32u);
+    memcpy(fixture->child_heuristic.expected_effect_root,
+           child_projection.candidate_ranking_root, 32u);
+    rpm_root(fixture->child_heuristic.provenance_root, 0x35u);
+    if (!rpm_proposal_root(
+            fixture, child_profile_root, snapshot_root,
+            child_projection.candidate_ranking_root,
+            fixture->child_heuristic.proposal_input_root))
+        return false;
+    return vcs_zcode_heuristic_validate_derivation(
+        &fixture->child_heuristic, &fixture->parent_heuristic, 1u) ==
+        VCS_ZCODE_ATTENTION_OK;
+}
+
 static bool rpm_fixture_init(struct rpm_fixture *fixture, uint8_t metric)
 {
     memset(fixture, 0, sizeof(*fixture));
@@ -90,7 +147,6 @@ static bool rpm_fixture_init(struct rpm_fixture *fixture, uint8_t metric)
     rpm_root(fixture->source_root, 0x12u);
     rpm_root(fixture->snapshot_source_root, 0x13u);
     rpm_root(fixture->projection_root, 0x14u);
-    rpm_root(fixture->study_root, 0x15u);
     rpm_root(fixture->evaluator_root, 0x16u);
     fixture->relevant[0] = "src/target.c";
 
@@ -173,55 +229,26 @@ static bool rpm_fixture_init(struct rpm_fixture *fixture, uint8_t metric)
             ZCL_RETRIEVAL_COMPARISON_OK)
         return false;
 
-    struct zcl_retrieval_profile_report parent_projection, child_projection;
-    uint8_t parent_profile_root[32], child_profile_root[32], snapshot_root[32];
-    if (!rpm_profile_projection(
-            &fixture->parent_profile, fixture, &parent_projection) ||
-        !rpm_profile_projection(
-            &fixture->child_profile, fixture, &child_projection) ||
-        zcl_retrieval_profile_root(
-            &fixture->parent_profile, parent_profile_root) !=
-            ZCL_RETRIEVAL_EXPERIMENT_OK ||
-        zcl_retrieval_profile_root(
-            &fixture->child_profile, child_profile_root) !=
-            ZCL_RETRIEVAL_EXPERIMENT_OK ||
-        zcl_retrieval_feature_snapshot_root(
-            &fixture->snapshot, fixture->rows, snapshot_root) !=
-            ZCL_RETRIEVAL_EXPERIMENT_OK)
-        return false;
-
-    rpm_heuristic_common(&fixture->parent_heuristic, fixture, snapshot_root);
-    memcpy(fixture->parent_heuristic.proposed_rule_root,
-           parent_profile_root, 32u);
-    memcpy(fixture->parent_heuristic.expected_effect_root,
-           parent_projection.candidate_ranking_root, 32u);
-    if (!rpm_proposal_root(
-            fixture, parent_profile_root, snapshot_root,
-            parent_projection.candidate_ranking_root,
-            fixture->parent_heuristic.proposal_input_root) ||
-        vcs_zcode_heuristic_root(
-            &fixture->parent_heuristic,
-            fixture->parent_heuristic_root) != VCS_ZCODE_ATTENTION_OK)
-        return false;
-
-    fixture->child_heuristic = fixture->parent_heuristic;
-    fixture->child_heuristic.derivation = VCS_ZCODE_HEURISTIC_SPECIALIZE;
-    fixture->child_heuristic.parent_count = 1u;
-    memcpy(fixture->child_heuristic.parent_roots[0],
-           fixture->parent_heuristic_root, 32u);
-    memcpy(fixture->child_heuristic.proposed_rule_root,
-           child_profile_root, 32u);
-    memcpy(fixture->child_heuristic.expected_effect_root,
-           child_projection.candidate_ranking_root, 32u);
-    rpm_root(fixture->child_heuristic.provenance_root, 0x35u);
-    if (!rpm_proposal_root(
-            fixture, child_profile_root, snapshot_root,
-            child_projection.candidate_ranking_root,
-            fixture->child_heuristic.proposal_input_root))
-        return false;
-    return vcs_zcode_heuristic_validate_derivation(
-        &fixture->child_heuristic, &fixture->parent_heuristic, 1u) ==
-        VCS_ZCODE_ATTENTION_OK;
+    fixture->study.schema_version = VCS_ZCODE_SCIENCE_VERSION;
+    rpm_root(fixture->study.hypothesis_root, 0x41u);
+    rpm_root(fixture->study.null_hypothesis_root, 0x42u);
+    memcpy(fixture->study.source_root, fixture->source_root, 32u);
+    rpm_root(fixture->study.dependency_lock_root, 0x43u);
+    rpm_root(fixture->study.toolchain_capsule_root, 0x44u);
+    rpm_root(fixture->study.protocol_root, 0x45u);
+    memcpy(fixture->study.workloads_root, workload_root, 32u);
+    rpm_root(fixture->study.metrics_root, 0x46u);
+    rpm_root(fixture->study.estimator_tolerance_root, 0x47u);
+    rpm_root(fixture->study.environment_policy_root, 0x48u);
+    rpm_root(fixture->study.citations_root, 0x49u);
+    memcpy(fixture->study.preregistration_policy_root,
+           fixture->policy_root, 32u);
+    fixture->study.required_reproductions = 1u;
+    fixture->study.required_reviews = 1u;
+    fixture->study.sequence = 1u;
+    fixture->study.created_unix = 1000;
+    fixture->study.expires_unix = 2000;
+    return rpm_refresh_study_lineage(fixture);
 }
 
 static struct zcode_retrieval_profile_pair_measure_request rpm_request(
@@ -235,6 +262,7 @@ static struct zcode_retrieval_profile_pair_measure_request rpm_request(
         .parent_heuristic = &fixture->parent_heuristic,
         .child_heuristic = &fixture->child_heuristic,
         .policy = &fixture->policy,
+        .study = &fixture->study,
         .task_id = "pair_measure",
         .query = "find the exact target",
         .relevant_paths = fixture->relevant,
@@ -317,6 +345,49 @@ static int case_exact_refusals(void)
     bool ready = rpm_fixture_init(
         &fixture, ZCL_RETRIEVAL_COMPARISON_MRR_BP);
     struct zcode_retrieval_profile_pair_measure_request request;
+
+    request = rpm_request(&fixture);
+    request.study = NULL;
+    RPM_CHECK("missing canonical study refuses atomically",
+              ready && rpm_refused_unchanged(
+                  &request, ZCODE_RETRIEVAL_PROFILE_PAIR_MEASURE_NULL));
+
+    request = rpm_request(&fixture);
+    request.expected_study_root[0] ^= 1u;
+    RPM_CHECK("substituted expected study root refuses atomically",
+              rpm_refused_unchanged(
+                  &request, ZCODE_RETRIEVAL_PROFILE_PAIR_MEASURE_BINDING));
+
+    changed = fixture;
+    changed.study.metrics_root[0] ^= 1u;
+    request = rpm_request(&changed);
+    RPM_CHECK("mutated canonical study refuses atomically",
+              rpm_refused_unchanged(
+                  &request, ZCODE_RETRIEVAL_PROFILE_PAIR_MEASURE_BINDING));
+
+    changed = fixture;
+    changed.study.workloads_root[0] ^= 1u;
+    bool rerooted = rpm_refresh_study_lineage(&changed);
+    request = rpm_request(&changed);
+    RPM_CHECK("rerooted study cannot replace frozen workload",
+              rerooted && rpm_refused_unchanged(
+                  &request, ZCODE_RETRIEVAL_PROFILE_PAIR_MEASURE_BINDING));
+
+    changed = fixture;
+    changed.study.preregistration_policy_root[0] ^= 1u;
+    rerooted = rpm_refresh_study_lineage(&changed);
+    request = rpm_request(&changed);
+    RPM_CHECK("rerooted study cannot replace preregistered policy",
+              rerooted && rpm_refused_unchanged(
+                  &request, ZCODE_RETRIEVAL_PROFILE_PAIR_MEASURE_BINDING));
+
+    changed = fixture;
+    changed.study.source_root[0] ^= 1u;
+    rerooted = rpm_refresh_study_lineage(&changed);
+    request = rpm_request(&changed);
+    RPM_CHECK("rerooted study cannot replace exact source",
+              rerooted && rpm_refused_unchanged(
+                  &request, ZCODE_RETRIEVAL_PROFILE_PAIR_MEASURE_BINDING));
 
     request = rpm_request(&fixture);
     request.expected_source_root[0] ^= 1u;
@@ -412,6 +483,21 @@ static int case_incomplete_and_aliases(void)
                   &request, &direct.report) ==
                   ZCODE_RETRIEVAL_PROFILE_PAIR_MEASURE_ALIAS &&
               memcmp(&direct, &before, sizeof(direct)) == 0);
+
+    union rpm_study_alias {
+        struct zcode_retrieval_profile_pair_measure_report report;
+        struct vcs_zcode_study_spec_v1 study;
+    } study_alias, study_alias_before;
+    memset(&study_alias, 0xa5, sizeof(study_alias));
+    request = rpm_request(&fixture);
+    request.study = &study_alias.study;
+    study_alias_before = study_alias;
+    RPM_CHECK("study alias refuses before canonical study dereference",
+              zcode_retrieval_profile_pair_measure(
+                  &request, &study_alias.report) ==
+                  ZCODE_RETRIEVAL_PROFILE_PAIR_MEASURE_ALIAS &&
+              memcmp(&study_alias, &study_alias_before,
+                     sizeof(study_alias)) == 0);
 
     union rpm_reachable_alias {
         struct zcode_retrieval_profile_pair_measure_report report;
