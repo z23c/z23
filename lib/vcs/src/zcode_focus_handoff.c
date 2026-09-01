@@ -160,3 +160,63 @@ enum vcs_zcode_focus_error vcs_zcode_focus_handoff_validate_chain(
         handoff->status == report->status;
     return bound ? VCS_ZCODE_FOCUS_OK : VCS_ZCODE_FOCUS_BINDING;
 }
+
+enum vcs_zcode_focus_error vcs_zcode_focus_handoff_validate_for_work(
+    const struct vcs_zcode_focus_v1 *focus,
+    const struct vcs_zcode_task_v1 *task,
+    const struct vcs_zcode_write_scope_v1 *task_scope,
+    const struct vcs_zcode_focus_claim_v1 *claims,
+    const struct vcs_zcode_write_scope_v1 *scopes,
+    size_t claim_count, size_t from_index, size_t next_index,
+    const struct vcs_zcode_work_request_v1 *from_request,
+    const struct vcs_zcode_work_admission_v1 *from_admission,
+    const struct vcs_zcode_work_request_v1 *next_request,
+    const struct vcs_zcode_work_admission_v1 *next_admission,
+    const struct vcs_zcode_work_receipt_v1 *from_receipt,
+    const struct vcs_zcode_specialist_report_v1 *report,
+    const struct vcs_zcode_focus_handoff_v1 *handoff,
+    int64_t now_unix)
+{
+    if (!focus || !task || !task_scope || !claims || !scopes ||
+        !from_request || !from_admission || !next_request ||
+        !next_admission || !from_receipt || !report || !handoff)
+        return VCS_ZCODE_FOCUS_NULL;
+    if (claim_count == 0 || claim_count > VCS_ZCODE_FOCUS_MAX_CLAIMS ||
+        from_index >= claim_count || next_index >= claim_count ||
+        from_index == next_index)
+        return VCS_ZCODE_FOCUS_LIMIT;
+    if (vcs_zcode_focus_claim_set_status(
+            focus, claims, scopes, claim_count, now_unix) !=
+            ZCL_ONTOLOGY_PROVED)
+        return VCS_ZCODE_FOCUS_BINDING;
+
+    for (size_t i = 0; i < claim_count; i++)
+        if (vcs_zcode_focus_claim_authority_status(
+                focus, task, task_scope, &claims[i], &scopes[i],
+                now_unix) != ZCL_ONTOLOGY_PROVED)
+            return VCS_ZCODE_FOCUS_BINDING;
+
+    uint8_t claim_roots[VCS_ZCODE_FOCUS_MAX_CLAIMS][32];
+    for (size_t i = 0; i < claim_count; i++)
+        if (vcs_zcode_focus_claim_root(&claims[i], claim_roots[i]) !=
+            VCS_ZCODE_FOCUS_OK)
+            return VCS_ZCODE_FOCUS_SHAPE;
+    if (vcs_zcode_focus_claim_work_status(
+            focus, task, task_scope, &claims[from_index],
+            &scopes[from_index], claim_roots, claim_count,
+            from_request, from_admission, now_unix) !=
+            ZCL_ONTOLOGY_PROVED ||
+        vcs_zcode_focus_claim_work_status(
+            focus, task, task_scope, &claims[next_index],
+            &scopes[next_index], claim_roots, claim_count,
+            next_request, next_admission, now_unix) !=
+            ZCL_ONTOLOGY_PROVED)
+        return VCS_ZCODE_FOCUS_BINDING;
+    if (vcs_zcode_specialist_report_validate_for_work(
+            focus, &claims[from_index], claim_roots, claim_count,
+            task, from_request, from_receipt, report) !=
+            VCS_ZCODE_FOCUS_OK)
+        return VCS_ZCODE_FOCUS_BINDING;
+    return vcs_zcode_focus_handoff_validate_chain(
+        focus, &claims[from_index], report, handoff, &claims[next_index]);
+}

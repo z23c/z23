@@ -234,4 +234,25 @@ enum vcs_zcode_focus_error vcs_zcode_focus_handoff_validate_chain(
     const struct vcs_zcode_focus_handoff_v1 *handoff,
     const struct vcs_zcode_focus_claim_v1 *next_claim);
 
+/* Receiver-side resume gate for admitted work. Unlike the structural chain
+ * check above, this requires the complete canonical claim snapshot, proves
+ * every active scope is disjoint and within task authority, proves both named
+ * claims are backed by signed admissions, and binds the source report to its
+ * signed work receipt. No object is accepted, executed, or deployed. */
+enum vcs_zcode_focus_error vcs_zcode_focus_handoff_validate_for_work(
+    const struct vcs_zcode_focus_v1 *focus,
+    const struct vcs_zcode_task_v1 *task,
+    const struct vcs_zcode_write_scope_v1 *task_scope,
+    const struct vcs_zcode_focus_claim_v1 *claims,
+    const struct vcs_zcode_write_scope_v1 *scopes,
+    size_t claim_count, size_t from_index, size_t next_index,
+    const struct vcs_zcode_work_request_v1 *from_request,
+    const struct vcs_zcode_work_admission_v1 *from_admission,
+    const struct vcs_zcode_work_request_v1 *next_request,
+    const struct vcs_zcode_work_admission_v1 *next_admission,
+    const struct vcs_zcode_work_receipt_v1 *from_receipt,
+    const struct vcs_zcode_specialist_report_v1 *report,
+    const struct vcs_zcode_focus_handoff_v1 *handoff,
+    int64_t now_unix);
+
 #endif /* ZCL_VCS_ZCODE_FOCUS_H */

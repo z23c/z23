@@ -61,8 +61,12 @@ grants no authority.
 `focus_handoff.v1` binds the final focus, source claim, specialist report,
 successor identity, successor claim, required evidence, continuation root, and
 ontology status. A receiver resumes only after re-rooting every supplied wire
-and validating the complete chain. A handoff does not accept results or permit
-execution.
+and validating the complete chain. The structural root-chain check is not a
+resume gate by itself. The admitted-work gate additionally requires the full
+canonical claim snapshot and scopes, proves every claim remains active and
+disjoint and within task authority, proves both named claims have current
+signed admissions, and binds the source report to its signed request and work
+receipt. A handoff does not accept results or permit execution.
 
 `attention_bid.v1` binds one final `focus_root`, so changing the active claim
 snapshot changes the bid's identity even when a reusable heuristic is
@@ -78,6 +82,14 @@ CAS. Addressed writes must be followed by bounded reads, parse, root
 rederivation, and exact address comparison. Existing `content.v2` transport
 may carry the same bytes between peers. SQLite indexes, if added, are
 rebuildable projections only.
+
+The registered `zcode_swarm_net` integration fixture carries canonical task,
+write-scope, focus, claim-set, claim, signed request/admission/receipt, report,
+and handoff wires between two independent node stores and swarm engines through
+the unchanged `zpkgswm` framing and dispatch seam. The receiver re-parses and
+re-roots each semantic wire after the content carrier verifies its bytes. This
+is an in-process wire proof, not physical-host or independent-agent evidence.
+No focus-specific network message or mutable transport state exists.
 
 The existing ZCODE task index remains the duplicate-work authority. Focus
 claims add a bounded disjoint-scope observation for workers already examining
