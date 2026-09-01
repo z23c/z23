@@ -74,8 +74,8 @@ The registered 12-task, three-project benchmark produced:
 | Full project source bytes in fixtures | 816 | 816 | unchanged |
 | Accepted feasible tasks | 10/10 | 10/10 | unchanged |
 | Correctly refused out-of-scope tasks | 2/2 | 2/2 | unchanged |
-| Upstream commits integrated during the slice | — | 8 | observed |
-| Merge conflicts during integration | — | 4 | observed |
+| Upstream commits integrated during the slice | — | 9 | observed |
+| Merge conflicts during integration | — | 5 | observed |
 | Wrong next commands caught before publication | — | 1 | removed |
 | Concurrent `make` verification collisions | — | 1 | invalidated and rerun serially |
 | Exact-receipt bootstrap failures before admission | — | 4 | observed |
@@ -99,7 +99,9 @@ loader and projection. Five more reviewed commits arrived during exact proof;
 their integration produced only one generated-inventory conflict. One final
 task-coordination commit arrived during the combined proof and produced one
 more generated-inventory conflict. Its fail-closed write-scope collision
-predicate complements the task board and focus packet. The new
+predicate complements the task board and focus packet. A final reviewed fix
+made malformed or capacity-truncated task evidence fail closed and produced
+one generated-inventory conflict. The new
 bounded task-board projection and this single-work focus packet expose
 different scopes, so neither leaf was discarded as duplicate. The combined
 focused suites then passed. Duplicate work across unobserved sessions, exact

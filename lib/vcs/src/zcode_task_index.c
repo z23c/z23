@@ -89,9 +89,11 @@ static void index_consider_object(const char *repo_root, const char *hex64,
             vcs_zcode_task_root(&task, root) == VCS_ZCODE_DEV_OK &&
             memcmp(root, address, 32) == 0;
         if (!ok) {
+            index->complete = false;
             LOG_ERROR(INDEX_LOG, "skipping task-magic object %.8s: "
                       "parse, validation, or root agreement failed", hex64);
         } else if (index->task_count >= VCS_ZCODE_TASK_INDEX_MAX_TASKS) {
+            index->complete = false;
             if (!*cap_logged) {
                 LOG_ERROR(INDEX_LOG, "task index cap %u reached",
                           VCS_ZCODE_TASK_INDEX_MAX_TASKS);
@@ -124,10 +126,12 @@ static void index_consider_object(const char *repo_root, const char *hex64,
             vcs_zcode_candidate_root(&candidate, root) == VCS_ZCODE_DEV_OK &&
             memcmp(root, address, 32) == 0;
         if (!ok) {
+            index->complete = false;
             LOG_ERROR(INDEX_LOG, "skipping candidate-magic object %.8s: "
                       "parse, validation, or root agreement failed", hex64);
         } else if (index->candidate_count >=
                    VCS_ZCODE_TASK_INDEX_MAX_CANDIDATES) {
+            index->complete = false;
             if (!*cap_logged) {
                 LOG_ERROR(INDEX_LOG, "candidate index cap %u reached",
                           VCS_ZCODE_TASK_INDEX_MAX_CANDIDATES);
@@ -157,9 +161,11 @@ static void index_consider_object(const char *repo_root, const char *hex64,
                 &context, VCS_ZCODE_TASK_MAX_CONTEXT_BYTES, root) ==
                 VCS_ZCODE_AGENT_CONTEXT_OK && memcmp(root, address, 32) == 0;
         if (!ok) {
+            index->complete = false;
             LOG_ERROR(INDEX_LOG, "skipping context-magic object %.8s: "
                       "parse, validation, or root agreement failed", hex64);
         } else if (index->context_count >= VCS_ZCODE_TASK_INDEX_MAX_CONTEXTS) {
+            index->complete = false;
             if (!*cap_logged) {
                 LOG_ERROR(INDEX_LOG, "context index cap %u reached",
                           VCS_ZCODE_TASK_INDEX_MAX_CONTEXTS);
@@ -189,9 +195,11 @@ static void index_consider_object(const char *repo_root, const char *hex64,
             vcs_zcode_work_receipt_verify(
                 &receipt, receipt.signer_pubkey) == VCS_ZCODE_DEV_OK;
         if (!ok) {
+            index->complete = false;
             LOG_ERROR(INDEX_LOG, "skipping receipt-magic object %.8s: "
                       "parse, signature, or root agreement failed", hex64);
         } else if (index->receipt_count >= VCS_ZCODE_TASK_INDEX_MAX_RECEIPTS) {
+            index->complete = false;
             if (!*cap_logged) {
                 LOG_ERROR(INDEX_LOG, "receipt index cap %u reached",
                           VCS_ZCODE_TASK_INDEX_MAX_RECEIPTS);
@@ -235,9 +243,11 @@ static void index_consider_object(const char *repo_root, const char *hex64,
             vcs_zcode_lane_receipt_verify(&lane, lane.signer_pubkey) ==
                 VCS_ZCODE_DEV_OK;
         if (!ok) {
+            index->complete = false;
             LOG_ERROR(INDEX_LOG, "skipping lane-magic object %.8s: "
                       "parse, signature, or root agreement failed", hex64);
         } else if (index->lane_count >= VCS_ZCODE_TASK_INDEX_MAX_LANES) {
+            index->complete = false;
             if (!*cap_logged) {
                 LOG_ERROR(INDEX_LOG, "lane index cap %u reached",
                           VCS_ZCODE_TASK_INDEX_MAX_LANES);
