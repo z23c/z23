@@ -2457,9 +2457,8 @@ bool msg_send_messages(void *ctx, struct p2p_node *node, bool send_trickle)
          * unspoofable (the co-located zclassicd lifeline) and the
          * whitelist is explicit operator intent; same predicate as the
          * misbehavior ban exemption (is_trusted_peer, net.c). Remote
-         * default peers keep full stall discipline.
-         *
-         * P2 (rule B below): skip eviction at frontier parity — when
+         * default peers keep full stall discipline. P2 (rule B below): skip
+         * eviction at frontier parity — when
          * our header frontier has reached the peer's claimed tip, no
          * peer can be "useful" by construction (new headers arrive at
          * ~150s block cadence), so evicting the worst peer is pure
@@ -2471,18 +2470,15 @@ bool msg_send_messages(void *ctx, struct p2p_node *node, bool send_trickle)
          * and the peer-floor conditions. */
         bool stall_peer_trusted = net_addr_is_local(&node->addr.svc.addr) ||
                                   node->whitelisted;
-        bool header_frontier_at_peer_tip =
-            node->starting_height > 0 &&
-            best_header_height >= node->starting_height - 144;
+        bool header_frontier_at_peer_tip = node->starting_height > 0 &&
+                                           best_header_height >= node->starting_height - 144;
         int64_t last_body_time = 0;
-        dl_peer_body_staleness(get_download_mgr(), (uint32_t)node->id,
-                               NULL, NULL, &last_body_time);
-
+        dl_peer_body_staleness(get_download_mgr(), (uint32_t)node->id, NULL,
+                               NULL, &last_body_time);
         /* ── Rule A: per-peer stale header disconnect (IBD only) ── */
         if (!mp_swarm_is_active() && !stall_peer_trusted &&
             syncsvc_should_disconnect_stale_header_peer(node, our_height,
-                                                        best_header_height,
-                                                        last_body_time,
+                                                        best_header_height, last_body_time,
                                                         now_send)) {
             int64_t last_useful = atomic_load_explicit(
                 &node->last_useful_headers_time, memory_order_relaxed);
