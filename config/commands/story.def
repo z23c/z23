@@ -8,11 +8,13 @@ ZCL_COMMAND_BRANCH("story", "", "Rooted causal views of development work",
 ZCL_COMMAND_READY_READ(
     "story.focus", "story", "",
     "Resume one work item from a bounded ontology focus packet",
-    "Reverifies the canonical ZCODE work projection and exact agent_context.v1 "
-    "CAS bytes, then returns the goal, selected source locations, StoryGraph "
-    "relation states, largest missing relation, and one next action. It owns "
-    "no memory store or lifecycle authority; missing, ambiguous, or changed "
-    "context remains explicitly UNKNOWN or INCOMPLETE.",
+    "Reverifies the canonical ZCODE work projection, exact agent_context.v1 "
+    "CAS bytes, and current workspace source root, then uses the context's "
+    "exact identifier to include one bounded code change plan. It also returns "
+    "the goal, selected source locations, StoryGraph relation states, largest "
+    "missing relation, and one next action. It owns no memory store or "
+    "lifecycle authority; missing, ambiguous, or changed context remains "
+    "explicitly UNKNOWN or INCOMPLETE.",
     ZCL_COMMAND_LIST_BUDGET,
     "story,focus,resume,memory,context,agent,ontology,zcode",
     "zcl.story_focus.input.v1", "zcl.story_focus.v1",

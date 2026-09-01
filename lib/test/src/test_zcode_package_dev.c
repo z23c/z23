@@ -945,9 +945,59 @@ static __attribute__((unused)) int zpd_test_twelve_task_benchmark(void)
                                       &reply.data,
                                       "authority_limits_root"))) == 64);
                     ASSERT(json_get(&reply.data, "next_action") != NULL);
+                    ASSERT(strcmp(json_get_str(json_get(
+                                      &reply.data, "orientation_status")),
+                                  "PROVED") == 0);
+                    ASSERT(strcmp(json_get_str(json_get(
+                                      &reply.data, "orientation_reason")),
+                                  "task_source_and_context_identifier_reverified") == 0);
+                    ASSERT(strlen(json_get_str(json_get(
+                                      &reply.data,
+                                      "orientation_source_root"))) == 64);
+                    const struct json_value *change_plan =
+                        json_get(&reply.data, "change_plan");
+                    ASSERT(change_plan && change_plan->type == JSON_OBJ);
+                    ASSERT(strcmp(json_get_str(json_get(
+                                      change_plan, "resolution")),
+                                  "exact_stable_id") == 0);
+                    ASSERT(json_get_bool(json_get(
+                               change_plan, "symbol_found")));
+                    ASSERT(json_size(json_get(change_plan, "edit")) > 0);
+                    const struct json_value *plan_groups =
+                        json_get(change_plan, "test_groups");
+                    bool has_package_dev = false;
+                    for (size_t g = 0; g < json_size(plan_groups); g++)
+                        if (strcmp(json_get_str(&plan_groups->children[g]),
+                                   "zcode_package_dev") == 0)
+                            has_package_dev = true;
+                    ASSERT(has_package_dev);
                     story_focus_bytes = json_write(&reply.data, NULL, 0);
                     ASSERT(story_focus_bytes < ZCL_COMMAND_LIST_BUDGET);
                     zcl_command_reply_free(&reply); json_free(&input);
+
+                    char stale_path[512];
+                    (void)snprintf(stale_path, sizeof(stale_path),
+                                   "%s/src/x.c", roots[0]);
+                    ASSERT(zpd_write(stale_path,
+                                     "int x(void) { return 99; }\n"));
+                    json_init(&input); json_set_object(&input);
+                    ASSERT(json_push_kv_str(&input, "workspace", roots[0]));
+                    ASSERT(json_push_kv_str(&input, "work", work_id));
+                    request.input = &input;
+                    zcl_command_reply_init(&reply,
+                                           "zcl.story_focus_stale_test.v1");
+                    zcl_native_handle_story_focus(&request, &reply);
+                    ASSERT(reply.status == ZCL_COMMAND_STATUS_PASSED);
+                    ASSERT(strcmp(json_get_str(json_get(
+                                      &reply.data, "orientation_status")),
+                                  "INCOMPLETE") == 0);
+                    ASSERT(strcmp(json_get_str(json_get(
+                                      &reply.data, "orientation_reason")),
+                                  "workspace_source_root_mismatch") == 0);
+                    ASSERT(json_get(&reply.data, "change_plan") == NULL);
+                    zcl_command_reply_free(&reply); json_free(&input);
+                    ASSERT(zpd_write(stale_path,
+                                     "int x(void) { return 1; }\n"));
 
                     json_init(&input); json_set_object(&input);
                     ASSERT(json_push_kv_str(&input, "workspace",

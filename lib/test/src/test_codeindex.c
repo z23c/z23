@@ -201,6 +201,12 @@ static const char *PACKAGE_TEST_C =
     " */\n"
     "int package_cli_test(void) { return 0; }\n";
 
+static const char *NESTED_PACKAGE_APP_C =
+    "/* Copyright 2026 Rhett Creighton - Apache License 2.0\n"
+    " * nested_package_parse_options — fixture repository package parser.\n"
+    " */\n"
+    "static int nested_package_parse_options(void) { return 0; }\n";
+
 static const char *PORT_H =
     "/* SPDX-License-Identifier: Apache-2.0\n"
     " * Copyright 2026 Rhett Creighton\n"
@@ -396,6 +402,8 @@ static bool write_fixture(void)
            mk_write(FIX, "include/package/api.h", PACKAGE_HEADER_H) &&
            mk_write(FIX, "src/main.c", ROOT_MAIN_C) &&
            mk_write(FIX, "tests/test_package.c", PACKAGE_TEST_C) &&
+           mk_write(FIX, "packages/widget/app/main.c",
+                    NESTED_PACKAGE_APP_C) &&
            mk_write(FIX, "ports/include/ports/fixture_port.h", PORT_H) &&
            mk_write(FIX, "lib/test/src/test_fixture_indexed.c", TEST_SOURCE_C) &&
            mk_write(FIX, "lib/net/src/saturation.c", SATURATION_C) &&
@@ -944,6 +952,10 @@ static int test_codeindex_platform_arm(void)
     codeindex_symbol(ci, "package_cli_test", &s, &found);
     CI_CHECK("package test symbol is searchable", found && s.kind == 'T' &&
              strcmp(s.def_path, "tests/test_package.c") == 0);
+    codeindex_symbol(ci, "nested_package_parse_options", &s, &found);
+    CI_CHECK("repository package app symbol is searchable",
+             found && s.kind == 't' &&
+             strcmp(s.def_path, "packages/widget/app/main.c") == 0);
 
     codeindex_file(ci, "ports/include/ports/fixture_port.h", &cf, &found);
     CI_CHECK("ports header is indexed in ports", found &&

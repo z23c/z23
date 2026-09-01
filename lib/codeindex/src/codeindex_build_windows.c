@@ -206,7 +206,8 @@ bool ci_enumerate_sources(const char *root, ci_enum_cb callback, void *user)
     }
     static const char *const roots[] = {
         "core", "config/src", "config/include", "tools", "domain",
-        "adapters", "ports", "app", "include", "src", "lib/test", "tests"
+        "adapters", "ports", "packages", "app", "include", "src",
+        "lib/test", "tests"
     };
     for (size_t i = 0; i < sizeof(roots) / sizeof(roots[0]); i++)
         if (!collect_directory(root, roots[i], &paths)) goto collect_failed;

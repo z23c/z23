@@ -186,6 +186,7 @@ bool ci_enumerate_sources(const char *root, ci_enum_cb cb, void *user)
         !collect_dir(root, "domain", &vec) ||
         !collect_dir(root, "adapters", &vec) ||
         !collect_dir(root, "ports", &vec) ||
+        !collect_dir(root, "packages", &vec) ||
         !collect_dir(root, "app", &vec) ||
         !collect_dir(root, "include", &vec) ||
         !collect_dir(root, "src", &vec))

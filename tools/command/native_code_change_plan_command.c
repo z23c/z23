@@ -89,6 +89,31 @@ static bool plan_has_test(char tests[][64], size_t count, const char *group)
     return false;
 }
 
+static void plan_add_test(char tests[][64], size_t *count,
+                          const char *group)
+{
+    if (*count >= PLAN_TEST_CAP || plan_has_test(tests, *count, group)) return;
+    (void)snprintf(tests[(*count)++], 64, "%s", group);
+}
+
+static bool plan_is_package_workspace(const char *root)
+{
+    char path[4096];
+    int n = snprintf(path, sizeof(path), "%s/zcode-package.json", root);
+    if (n <= 0 || (size_t)n >= sizeof(path)) return false;
+    FILE *file = fopen(path, "rb");
+    if (!file) return false;
+    return fclose(file) == 0;
+}
+
+static bool plan_is_package_source(const char *path)
+{
+    static const char *const roots[] = {"app/", "include/", "src/", "tests/"};
+    for (size_t i = 0; i < sizeof(roots) / sizeof(roots[0]); i++)
+        if (strncmp(path, roots[i], strlen(roots[i])) == 0) return true;
+    return false;
+}
+
 static void plan_add_tests_for_path(const char *path, char tests[][64],
                                     size_t *count, bool *consensus_risk)
 {
@@ -235,6 +260,15 @@ void zcl_native_handle_code_change_plan(
     for (size_t i = 0; i < edit.len; i++)
         plan_add_tests_for_path(edit.path[i], tests, &test_count,
                                 &consensus_risk);
+    if (plan_is_package_workspace(plan_source_root(request))) {
+        for (size_t i = 0; i < edit.len; i++) {
+            if (!plan_is_package_source(edit.path[i])) continue;
+            plan_add_test(tests, &test_count, "zcode_package_registry");
+            plan_add_test(tests, &test_count, "zcode_package_dev");
+            plan_add_test(tests, &test_count, "make_lint_gates");
+            break;
+        }
+    }
 
     (void)json_push_kv_str(&reply->data, "input_kind", input_kind);
     (void)json_push_kv_str(&reply->data, "resolution", resolution);

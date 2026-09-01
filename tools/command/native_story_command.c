@@ -6,6 +6,7 @@
 #include "command/native_command.h"
 #include "command/native_story_internal.h"
 #include "json/json.h"
+#include "vcs/vcs_manifest.h"
 #include "vcs/zcode_focus.h"
 
 #include <stdint.h>
@@ -227,6 +228,67 @@ static bool story_push_context_sources(
     return ok;
 }
 
+static bool story_workspace_source_root(const char *workspace,
+                                        uint8_t out[32])
+{
+    struct vcs_manifest first, second;
+    uint8_t first_root[32], second_root[32];
+    if (!vcs_manifest_build(workspace, NULL, &first)) return false;
+    bool ok = vcs_manifest_tree_hash(&first, first_root);
+    vcs_manifest_free(&first);
+    if (!ok || !vcs_manifest_build(workspace, NULL, &second)) return false;
+    ok = vcs_manifest_tree_hash(&second, second_root);
+    vcs_manifest_free(&second);
+    if (!ok || memcmp(first_root, second_root, 32) != 0) return false;
+    memcpy(out, first_root, 32);
+    return true;
+}
+
+static bool story_compose_change_plan(
+    const struct zcl_command_request *request, const char *workspace,
+    const struct story_loaded_work *loaded,
+    const struct vcs_zcode_agent_context_v1 *context,
+    struct zcl_command_reply *plan, const char **status, const char **reason,
+    uint8_t workspace_root[32])
+{
+    uint8_t task_source_root[32];
+    *status = "INCOMPLETE";
+    *reason = "workspace_source_root_unavailable";
+    if (!zcl_hex_decode_lower(loaded->source_root, task_source_root, 32) ||
+        !story_workspace_source_root(workspace, workspace_root))
+        return false;
+    if (memcmp(task_source_root, workspace_root, 32) != 0) {
+        *reason = "workspace_source_root_mismatch";
+        return false;
+    }
+
+    struct json_value input;
+    json_init(&input); json_set_object(&input);
+    if (!json_push_kv_str(&input, "symbol", context->query)) {
+        json_free(&input);
+        *reason = "change_plan_input_unavailable";
+        return false;
+    }
+    struct zcl_command_context command_context = request->context
+        ? *request->context : (struct zcl_command_context){0};
+    command_context.source_root = workspace;
+    struct zcl_command_request nested_request = {
+        .context = &command_context,
+        .input = &input,
+    };
+    zcl_native_handle_code_change_plan(&nested_request, plan);
+    json_free(&input);
+    const struct json_value *found = json_get(&plan->data, "symbol_found");
+    if (plan->status != ZCL_COMMAND_STATUS_PASSED || !found ||
+        found->type != JSON_BOOL || !json_get_bool(found)) {
+        *reason = "context_identifier_not_indexed";
+        return false;
+    }
+    *status = "PROVED";
+    *reason = "task_source_and_context_identifier_reverified";
+    return true;
+}
+
 static bool story_compose_focus(
     const char *workspace, const struct story_loaded_work *loaded,
     const struct vcs_zcode_agent_context_v1 *context,
@@ -306,6 +368,16 @@ void zcl_native_handle_story_focus(const struct zcl_command_request *request,
                    "reverified task, context, and StoryGraph could not be bound into focus.v1");
         return;
     }
+    struct zcl_command_reply plan;
+    zcl_command_reply_init(&plan, "zcl.code_change_plan.v1");
+    const char *orientation_status = story_context_status_name(context_status);
+    const char *orientation_reason = story_context_reason(context_status);
+    uint8_t workspace_source_root[32] = {0};
+    bool plan_ready = context_status == STORY_CONTEXT_PROVED &&
+        story_compose_change_plan(request, workspace, &loaded, &context,
+                                  &plan, &orientation_status,
+                                  &orientation_reason,
+                                  workspace_source_root);
     size_t excerpt_bytes = 0;
     bool context_ok = story_push_context_sources(
         &reply->data, &context, &excerpt_bytes);
@@ -357,6 +429,17 @@ void zcl_native_handle_story_focus(const struct zcl_command_request *request,
                           context_status == STORY_CONTEXT_PROVED &&
                           (context.flags &
                            VCS_ZCODE_AGENT_CONTEXT_TRUNCATED) != 0) &&
+        json_push_kv_str(&reply->data, "orientation_status",
+                         orientation_status) &&
+        json_push_kv_str(&reply->data, "orientation_reason",
+                         orientation_reason) &&
+        json_push_kv_str(&reply->data, "orientation_query",
+                         context_status == STORY_CONTEXT_PROVED
+                             ? context.query : "") &&
+        (!plan_ready ||
+         (story_push_root(&reply->data, "orientation_source_root",
+                          workspace_source_root) &&
+          json_push_kv(&reply->data, "change_plan", &plan.data))) &&
         story_push_relation_names(&reply->data, "proved_relations",
                                   &loaded.graph, ZCL_ONTOLOGY_PROVED) &&
         story_push_relation_names(&reply->data, "unknown_relations",
@@ -374,6 +457,7 @@ void zcl_native_handle_story_focus(const struct zcl_command_request *request,
         json_push_kv_bool(&reply->data, "stored", false) &&
         json_push_kv_str(&reply->data, "truth_system",
                          "zcl.ontology.status");
+    zcl_command_reply_free(&plan);
     vcs_zcode_agent_context_free(&context);
     if (!ok)
         story_fail(reply, "STORY_FOCUS_OUTPUT_FAILED", "render",

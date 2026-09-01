@@ -307,3 +307,100 @@ make check-macos-acceptance
 The Linux C23 compile and Windows cross-syntax seam passed. The macOS capability
 matrix passed, but native macOS execution was unobserved on this Linux host and
 is not claimed.
+
+## Exact orientation-to-change-plan rerun
+
+The next rerun resumed the same real `zdemo` goal from work
+`work-2365dd01e142`. The first `story focus` response correctly selected
+`fn:static:app/main.c:zdemo_parse_options`, one 10,570-byte source file, and
+exact task source root
+`b16fe46f77995f0b088088e0a66f1f0085cee13a55c74b14b9df571e21c4a080`.
+Five subsequent code commands did not share that bounded source universe.
+`code capsule` and `code find` could not resolve the identifier, while a broad
+intent change plan selected a consensus macro. The global code index omitted
+tracked `packages/` sources even though package-local work indexing already
+supported `app`, `include`, `src`, and `tests`.
+
+The intervention adds tracked packages to the POSIX and Windows repository
+index and makes package application paths select the existing package proof
+groups. `story focus` now performs the remaining joins itself:
+
+1. reverify the task, context, focus, and StoryGraph roots;
+2. build and hash the workspace manifest twice without writing source history;
+3. require that hash to equal the task source root;
+4. resolve the context's exact stable identifier in that same workspace; and
+5. return its bounded read path, likely edit path, impact-selected tests,
+   unknowns, and consensus-risk result in the focus packet.
+
+The suggested edit remains labelled `heuristic_change_site`. The file location
+is an exact index fact. A changed workspace returns orientation status
+`INCOMPLETE`, reason `workspace_source_root_mismatch`, and no change plan. The
+registered package benchmark mutates a source file after task capture and
+proves this refusal before restoring the fixture.
+
+### Measured journey
+
+The baseline timestamps were recorded during the interactive run. The first
+exact focus result arrived at `2026-09-01T04:42:15Z`; the first correct package
+index edit began at `2026-09-01T04:43:52Z`. The first focused diagnostic
+completed at `2026-09-01T04:49:49Z`, after two resident proof workers each
+started an unnecessary full fast-CI build and contended on the checkout lock.
+The first rebuilt command behavior was visible at approximately
+`2026-09-01T04:54:02Z`.
+
+| Measurement | Fragmented baseline | Rooted focus packet |
+|---|---:|---:|
+| Read-only command responses before edit | 11 | 1 |
+| Explicit selected source files | 1 | 1 |
+| Explicit selected source bytes | 10,570 | 10,570 |
+| Exact identifier Recall@5 | 0/1 | 1/1 at rank 1 |
+| Evaluated wrong-scope plans | 1/1 | 0/1 |
+| Consensus risk for selected plan | true | false |
+| Duplicate full proof builds observed | 2 | 0 |
+| Time from first focus to first correct edit | 97 s | not rerun with an edit |
+| Edit to first focused diagnostic | 357 s | not rerun with an edit |
+| Edit to first visible command behavior | approximately 610 s | not rerun with an edit |
+| Rooted focus process elapsed | 13.742 ms | 92.657 ms |
+| Rooted focus handler elapsed | unavailable | 10.057 ms |
+| Rooted focus response bytes | unavailable | 3,579 |
+
+The later process elapsed includes process startup and a lightweight database
+reopen; it remains below the command's 750 ms budget. The frozen 12-task
+benchmark focus response is 3,053 bytes and stays below the 8,192-byte command
+budget. Its full application build, run, reproduction, and acceptance behavior
+remains unchanged.
+
+The exact identifier resolves the owning parser and therefore finds reusable
+code before generation. Separately, the broad `code have` query
+`parse frame count seconds` placed the desired `zdemo` capability at rank 2;
+adding the `zdemo` namespace placed it at rank 1. The original full natural
+language query did not retrieve it. Broad intent planning also remained a
+wrong-scope counterexample after package indexing. The focus path therefore
+uses the exact context identifier as authority and does not promote fuzzy
+intent ranking into proof.
+
+Internal index file reads and exact model-token consumption were not
+instrumented, so only explicit response count, selected files, and selected
+bytes are reported. Time to first correct edit after the intervention is also
+UNKNOWN because the comparison rerun stopped after producing the correct
+orientation packet and did not perform a second source edit.
+
+Measured at `2026-09-01T01:09:23-04:00`
+(`2026-09-01T05:09:23+00:00`) from source
+`2c17b98f6e37e2ee02b415f33ef53b51c6f4d45a` plus this change.
+
+- Compiler: `cc (GCC) 16.1.1 20260430`
+- CPU: `AMD Ryzen 7 PRO 8840U w/ Radeon 780M Graphics`
+- Host: Linux x86_64
+
+```bash
+make -j"$(getconf _NPROCESSORS_ONLN)" t-fast ONLY=codeindex
+make -j"$(getconf _NPROCESSORS_ONLN)" t-fast ONLY=code_impact
+make -j"$(getconf _NPROCESSORS_ONLN)" t-fast ONLY=code_capsule
+make -j"$(getconf _NPROCESSORS_ONLN)" t-fast ONLY=zcode_package_dev
+make -j"$(getconf _NPROCESSORS_ONLN)" z23
+```
+
+Native Windows and macOS execution remain unobserved in this rerun. The
+repository index has the same package enumeration on both POSIX and Windows;
+the cross-syntax and platform contract gates remain required before release.
