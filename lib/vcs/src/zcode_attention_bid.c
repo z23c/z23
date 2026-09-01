@@ -326,7 +326,7 @@ enum vcs_zcode_attention_error vcs_zcode_attention_bid_validate(
     if (!priority_valid(bid->priority_class))
         return VCS_ZCODE_ATTENTION_PRIORITY;
     const uint8_t *const required_roots[] = {
-        bid->task_root, bid->source_root, bid->heuristic_root,
+        bid->focus_root, bid->task_root, bid->source_root, bid->heuristic_root,
         bid->priority_policy_root, bid->bid_evaluator_root,
         bid->evidence_root,
     };
@@ -372,6 +372,31 @@ enum vcs_zcode_attention_error vcs_zcode_attention_bid_validate_for_heuristic(
     return VCS_ZCODE_ATTENTION_BINDING;
 }
 
+enum vcs_zcode_attention_error vcs_zcode_attention_bid_validate_for_focus(
+    const struct vcs_zcode_attention_bid_v1 *bid,
+    const struct vcs_zcode_heuristic_v1 *heuristic,
+    const struct vcs_zcode_focus_v1 *focus)
+{
+    enum vcs_zcode_attention_error error =
+        vcs_zcode_attention_bid_validate_for_heuristic(bid, heuristic);
+    if (error != VCS_ZCODE_ATTENTION_OK) return error;
+    uint8_t focus_root[32];
+    if (vcs_zcode_focus_root(focus, focus_root) != VCS_ZCODE_FOCUS_OK)
+        return VCS_ZCODE_ATTENTION_BINDING;
+    if (memcmp(bid->focus_root, focus_root, 32) != 0 ||
+        memcmp(focus->task_root, heuristic->task_root, 32) != 0 ||
+        memcmp(focus->source_universe_root, heuristic->source_root, 32) != 0 ||
+        memcmp(focus->context_root, heuristic->agent_context_root, 32) != 0 ||
+        memcmp(focus->story_graph_root,
+               heuristic->ontology_context_root, 32) != 0 ||
+        heuristic->requested_cpu_seconds > focus->max_cpu_seconds ||
+        heuristic->requested_memory_bytes > focus->max_memory_bytes ||
+        heuristic->requested_context_bytes > focus->max_context_bytes ||
+        heuristic->requested_output_bytes > focus->max_output_bytes)
+        return VCS_ZCODE_ATTENTION_BINDING;
+    return VCS_ZCODE_ATTENTION_OK;
+}
+
 enum vcs_zcode_attention_error vcs_zcode_attention_bid_serialize(
     const struct vcs_zcode_attention_bid_v1 *bid,
     uint8_t out[VCS_ZCODE_ATTENTION_BID_WIRE_BYTES])
@@ -396,6 +421,7 @@ enum vcs_zcode_attention_error vcs_zcode_attention_bid_serialize(
         zcl_codec_write_bytes(&writer, (const uint8_t[5]){0}, 5);
 #define WRITE_ROOT(field_) \
     do { ok = ok && zcl_codec_write_bytes(&writer, bid->field_, 32); } while (0)
+    WRITE_ROOT(focus_root);
     WRITE_ROOT(task_root);
     WRITE_ROOT(source_root);
     WRITE_ROOT(heuristic_root);
@@ -446,6 +472,7 @@ enum vcs_zcode_attention_error vcs_zcode_attention_bid_parse(
         zcl_codec_read_bytes(&reader, reserved, 5);
 #define READ_ROOT(field_) \
     do { ok = ok && zcl_codec_read_bytes(&reader, out->field_, 32); } while (0)
+    READ_ROOT(focus_root);
     READ_ROOT(task_root);
     READ_ROOT(source_root);
     READ_ROOT(heuristic_root);
@@ -537,7 +564,8 @@ static bool bid_subject_equal(
     const struct vcs_zcode_attention_bid_v1 *left,
     const struct vcs_zcode_attention_bid_v1 *right)
 {
-    return memcmp(left->task_root, right->task_root, 32) == 0 &&
+    return memcmp(left->focus_root, right->focus_root, 32) == 0 &&
+        memcmp(left->task_root, right->task_root, 32) == 0 &&
         memcmp(left->source_root, right->source_root, 32) == 0 &&
         memcmp(left->heuristic_root, right->heuristic_root, 32) == 0 &&
         memcmp(left->priority_policy_root,
@@ -584,7 +612,8 @@ enum vcs_zcode_attention_error vcs_zcode_attention_frontier_project(
         .input_count = bid_count,
     };
     const uint8_t *const query_roots[] = {
-        query->task_root, query->source_root, query->priority_policy_root,
+        query->focus_root, query->task_root, query->source_root,
+        query->priority_policy_root,
         query->bid_evaluator_root,
     };
     if (!priority_valid(query->priority_class))
@@ -602,7 +631,8 @@ enum vcs_zcode_attention_error vcs_zcode_attention_frontier_project(
             vcs_zcode_attention_bid_validate_for_heuristic(
                 &bids[i], &heuristics[i]);
         if (error != VCS_ZCODE_ATTENTION_OK) return error;
-        if (memcmp(bids[i].task_root, query->task_root, 32) != 0 ||
+        if (memcmp(bids[i].focus_root, query->focus_root, 32) != 0 ||
+            memcmp(bids[i].task_root, query->task_root, 32) != 0 ||
             memcmp(bids[i].source_root, query->source_root, 32) != 0 ||
             memcmp(bids[i].priority_policy_root,
                    query->priority_policy_root, 32) != 0 ||

@@ -64,6 +64,13 @@ ontology status. A receiver resumes only after re-rooting every supplied wire
 and validating the complete chain. A handoff does not accept results or permit
 execution.
 
+`attention_bid.v1` binds one final `focus_root`, so changing the active claim
+snapshot changes the bid's identity even when a reusable heuristic is
+unchanged. Cross-object validation re-roots the focus and heuristic, requires
+their task, source, context, and StoryGraph identities to agree, and refuses a
+heuristic whose requested CPU, memory, context, or output budget exceeds the
+focus. Priority classes and Pareto projection remain non-authoritative.
+
 ## Storage and transport
 
 All protocol wires are inert content-addressed objects in the existing ZVCS

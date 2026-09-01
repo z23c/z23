@@ -6,6 +6,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "vcs/zcode_focus.h"
+
 #define VCS_ZCODE_HEURISTIC_DOMAIN "zcl.zcode.heuristic.v1"
 #define VCS_ZCODE_HEURISTIC_VERSION 1u
 #define VCS_ZCODE_HEURISTIC_WIRE_BYTES 688u
@@ -22,7 +24,7 @@
 
 #define VCS_ZCODE_ATTENTION_BID_DOMAIN "zcl.attention_bid.v1"
 #define VCS_ZCODE_ATTENTION_BID_VERSION 1u
-#define VCS_ZCODE_ATTENTION_BID_WIRE_BYTES 240u
+#define VCS_ZCODE_ATTENTION_BID_WIRE_BYTES 272u
 #define VCS_ZCODE_ATTENTION_BASIS_POINTS_MAX 10000u
 #define VCS_ZCODE_ATTENTION_METRIC_EXPECTED_USER_VALUE (1u << 0)
 #define VCS_ZCODE_ATTENTION_METRIC_INFORMATION_GAIN (1u << 1)
@@ -114,6 +116,7 @@ struct vcs_zcode_heuristic_v1 {
 struct vcs_zcode_attention_bid_v1 {
     uint16_t schema_version;
     uint8_t priority_class;
+    uint8_t focus_root[32];
     uint8_t task_root[32];
     uint8_t source_root[32];
     uint8_t heuristic_root[32];
@@ -135,6 +138,7 @@ struct vcs_zcode_attention_bid_v1 {
 };
 
 struct vcs_zcode_attention_frontier_query {
+    uint8_t focus_root[32];
     uint8_t task_root[32];
     uint8_t source_root[32];
     uint8_t priority_policy_root[32];
@@ -174,6 +178,13 @@ enum vcs_zcode_attention_error vcs_zcode_attention_bid_validate(
 enum vcs_zcode_attention_error vcs_zcode_attention_bid_validate_for_heuristic(
     const struct vcs_zcode_attention_bid_v1 *bid,
     const struct vcs_zcode_heuristic_v1 *heuristic);
+/* Re-roots the immutable focus and proves that the situation-specific bid,
+ * reusable heuristic, exact task/source/context/StoryGraph, and budgets all
+ * describe the same bounded observation. */
+enum vcs_zcode_attention_error vcs_zcode_attention_bid_validate_for_focus(
+    const struct vcs_zcode_attention_bid_v1 *bid,
+    const struct vcs_zcode_heuristic_v1 *heuristic,
+    const struct vcs_zcode_focus_v1 *focus);
 enum vcs_zcode_attention_error vcs_zcode_attention_bid_serialize(
     const struct vcs_zcode_attention_bid_v1 *bid,
     uint8_t out[VCS_ZCODE_ATTENTION_BID_WIRE_BYTES]);
@@ -186,8 +197,9 @@ enum vcs_zcode_attention_error vcs_zcode_attention_bid_root(
 /* This is a pure, class-isolated projection of untrusted proposals. It does
  * not perform task-conflict admission, admit work, or change ownership. A
  * caller must use vcs_zcode_task_index_conflict() and exclude every result
- * other than CLEAR before presenting a bid as safely takeable. Output indices
- * are sorted by bid root for display only.
+ * other than CLEAR, and validate each candidate with
+ * vcs_zcode_attention_bid_validate_for_focus(), before presenting a bid as
+ * safely takeable. Output indices are sorted by bid root for display only.
  * If capacity is too small, no indices are returned and frontier_count still
  * reports the required size. */
 enum vcs_zcode_attention_error vcs_zcode_attention_frontier_project(

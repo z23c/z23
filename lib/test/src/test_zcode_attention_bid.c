@@ -46,11 +46,37 @@ static void ab_valid_heuristic(struct vcs_zcode_heuristic_v1 *heuristic,
     heuristic->requested_output_bytes = 1024u * 1024u;
 }
 
+static void ab_valid_focus(struct vcs_zcode_focus_v1 *focus)
+{
+    memset(focus, 0, sizeof(*focus));
+    focus->schema_version = VCS_ZCODE_FOCUS_VERSION;
+    focus->status = ZCL_ONTOLOGY_PROVED;
+    focus->capabilities = VCS_ZCODE_TASK_CAP_SOURCE_READ |
+                          VCS_ZCODE_TASK_CAP_CANDIDATE_WRITE;
+    focus->max_changed_files = 8;
+    focus->max_patch_bytes = 65536;
+    focus->max_context_bytes = 128u * 1024u;
+    focus->max_cpu_seconds = 120;
+    focus->max_memory_bytes = 32u * 1024u * 1024u;
+    focus->max_output_bytes = 2u * 1024u * 1024u;
+    ab_root(focus->task_root, 1);
+    ab_root(focus->goal_root, 20);
+    ab_root(focus->source_universe_root, 2);
+    ab_root(focus->context_root, 3);
+    ab_root(focus->story_graph_root, 4);
+    (void)vcs_zcode_focus_claim_set_root(NULL, 0, focus->claim_set_root);
+    ab_root(focus->required_evidence_root, 21);
+    ab_root(focus->authority_limits_root, 22);
+}
+
 static void ab_valid_bid(struct vcs_zcode_attention_bid_v1 *bid,
                          const struct vcs_zcode_heuristic_v1 *heuristic)
 {
     vcs_zcode_attention_bid_init(bid);
     bid->priority_class = VCS_ZCODE_ATTENTION_P2_PRODUCTIVITY;
+    struct vcs_zcode_focus_v1 focus;
+    ab_valid_focus(&focus);
+    (void)vcs_zcode_focus_root(&focus, bid->focus_root);
     ab_root(bid->task_root, 1);
     ab_root(bid->source_root, 2);
     (void)vcs_zcode_heuristic_root(heuristic, bid->heuristic_root);
@@ -73,6 +99,9 @@ static void ab_query(struct vcs_zcode_attention_frontier_query *query,
                      uint8_t priority_class)
 {
     memset(query, 0, sizeof(*query));
+    struct vcs_zcode_focus_v1 focus;
+    ab_valid_focus(&focus);
+    (void)vcs_zcode_focus_root(&focus, query->focus_root);
     ab_root(query->task_root, 1);
     ab_root(query->source_root, 2);
     ab_root(query->priority_policy_root, 4);
@@ -258,6 +287,11 @@ int test_zcode_attention_bid(void)
     AB_CHECK("attention-bid-heuristic-binding",
              vcs_zcode_attention_bid_validate_for_heuristic(
                  &bid, &heuristic) == VCS_ZCODE_ATTENTION_OK);
+    struct vcs_zcode_focus_v1 focus;
+    ab_valid_focus(&focus);
+    AB_CHECK("attention-bid-focus-binding",
+             vcs_zcode_attention_bid_validate_for_focus(
+                 &bid, &heuristic, &focus) == VCS_ZCODE_ATTENTION_OK);
     AB_CHECK("attention-bid-exact-wire",
              vcs_zcode_attention_bid_serialize(&bid, bid_wire) ==
                  VCS_ZCODE_ATTENTION_OK &&
@@ -276,10 +310,10 @@ int test_zcode_attention_bid(void)
         0x7a, 0xe5, 0x16, 0x6a, 0xe9, 0x76, 0xa0, 0x9a,
     };
     static const uint8_t expected_bid_root[32] = {
-        0xad, 0xd6, 0xc3, 0x41, 0x8f, 0x47, 0x91, 0xa3,
-        0x27, 0x11, 0xf1, 0xe4, 0xe8, 0xa6, 0x66, 0x53,
-        0x75, 0x2f, 0x94, 0xd9, 0x76, 0x35, 0x32, 0xb5,
-        0x47, 0xcc, 0xf2, 0x11, 0x0e, 0xe7, 0x15, 0x3a,
+        0x74, 0xed, 0x73, 0x3a, 0x3f, 0x0f, 0x00, 0x8c,
+        0x8f, 0xbd, 0x9b, 0x87, 0x7a, 0x34, 0x6e, 0xd6,
+        0x20, 0x53, 0x04, 0x90, 0x87, 0x90, 0x57, 0xce,
+        0x95, 0xfd, 0xec, 0x11, 0x5e, 0x1b, 0x88, 0x20,
     };
     AB_CHECK("frozen-wire-root-kats",
              memcmp(heuristic_root, expected_heuristic_root, 32) == 0 &&
@@ -313,6 +347,19 @@ int test_zcode_attention_bid(void)
     AB_CHECK("heuristic-source-mismatch-refusal",
              vcs_zcode_attention_bid_validate_for_heuristic(
                  &bid, &mismatched) == VCS_ZCODE_ATTENTION_BINDING);
+    ab_valid_bid(&bid, &heuristic);
+    focus.claim_set_root[0]++;
+    AB_CHECK("changed-focus-claim-set-refusal",
+             vcs_zcode_attention_bid_validate_for_focus(
+                 &bid, &heuristic, &focus) ==
+                 VCS_ZCODE_ATTENTION_BINDING);
+    ab_valid_focus(&focus);
+    focus.max_context_bytes = heuristic.requested_context_bytes - 1u;
+    (void)vcs_zcode_focus_root(&focus, bid.focus_root);
+    AB_CHECK("focus-budget-refusal",
+             vcs_zcode_attention_bid_validate_for_focus(
+                 &bid, &heuristic, &focus) ==
+                 VCS_ZCODE_ATTENTION_BINDING);
     ab_valid_bid(&bid, &heuristic);
     ab_root(bid.bid_evaluator_root, 10);
     AB_CHECK("unauthorized-evaluator-refusal",
