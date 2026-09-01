@@ -81,6 +81,7 @@ enum vcs_zcode_attention_error {
     VCS_ZCODE_ATTENTION_BINDING,
     VCS_ZCODE_ATTENTION_DUPLICATE,
     VCS_ZCODE_ATTENTION_CAPACITY,
+    VCS_ZCODE_ATTENTION_CAS,
 };
 
 struct vcs_zcode_heuristic_v1 {
@@ -193,6 +194,18 @@ enum vcs_zcode_attention_error vcs_zcode_attention_bid_parse(
     struct vcs_zcode_attention_bid_v1 *out);
 enum vcs_zcode_attention_error vcs_zcode_attention_bid_root(
     const struct vcs_zcode_attention_bid_v1 *bid, uint8_t out[32]);
+
+/* Store one structurally bound heuristic/bid pair under its canonical roots
+ * in the existing workspace CAS. Both fixed wires are reloaded, parsed,
+ * re-rooted, address-checked, and cross-bound before success is returned.
+ * Admission is atomic and idempotent per object but grants no task,
+ * assignment, action, execution, evidence, or acceptance authority. The
+ * output roots are zero on every ordinary failure. */
+enum vcs_zcode_attention_error vcs_zcode_attention_store_pair(
+    const char *workspace,
+    const struct vcs_zcode_heuristic_v1 *heuristic,
+    const struct vcs_zcode_attention_bid_v1 *bid,
+    uint8_t heuristic_root_out[32], uint8_t bid_root_out[32]);
 
 /* This is a pure, class-isolated projection of untrusted proposals. It does
  * not perform task-conflict admission, admit work, or change ownership. A

@@ -2,8 +2,12 @@
  * Purpose: immutable heuristic and Pareto attention-bid contracts. */
 #include "vcs/zcode_attention_bid.h"
 
+#include "test/test_core.h"
+#include "vcs/vcs_object.h"
+
 #include <stdbool.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #define AB_CHECK(name_, expression_) do {                                  \
@@ -416,6 +420,99 @@ int test_zcode_attention_bid(void)
              vcs_zcode_attention_bid_parse(
                  bid_wire, VCS_ZCODE_ATTENTION_BID_WIRE_BYTES + 1,
                  &parsed_bid) == VCS_ZCODE_ATTENTION_WIRE_SIZE);
+
+    char store_workspace[512];
+    test_make_tmpdir(store_workspace, sizeof(store_workspace),
+                     "zcode_attention", "store_pair");
+    uint8_t stored_heuristic_root[32], stored_bid_root[32];
+    ab_valid_heuristic(&heuristic, 7);
+    ab_valid_bid(&bid, &heuristic);
+    bool stored_once = vcs_zcode_attention_store_pair(
+        store_workspace, &heuristic, &bid,
+        stored_heuristic_root, stored_bid_root) == VCS_ZCODE_ATTENTION_OK;
+    uint8_t first_heuristic_root[32], first_bid_root[32];
+    memcpy(first_heuristic_root, stored_heuristic_root, 32);
+    memcpy(first_bid_root, stored_bid_root, 32);
+    uint8_t *stored_heuristic_wire = NULL, *stored_bid_wire = NULL;
+    size_t stored_heuristic_len = 0, stored_bid_len = 0;
+    bool stored_exact = stored_once &&
+        vcs_object_load_raw_bounded(
+            store_workspace, stored_heuristic_root,
+            VCS_ZCODE_HEURISTIC_WIRE_BYTES, &stored_heuristic_wire,
+            &stored_heuristic_len) == 0 &&
+        vcs_object_load_raw_bounded(
+            store_workspace, stored_bid_root,
+            VCS_ZCODE_ATTENTION_BID_WIRE_BYTES, &stored_bid_wire,
+            &stored_bid_len) == 0 &&
+        stored_heuristic_len == VCS_ZCODE_HEURISTIC_WIRE_BYTES &&
+        stored_bid_len == VCS_ZCODE_ATTENTION_BID_WIRE_BYTES;
+    AB_CHECK("store-pair-canonical-cas-readback", stored_exact);
+    free(stored_bid_wire);
+    free(stored_heuristic_wire);
+
+    memset(stored_heuristic_root, 0xa5, sizeof(stored_heuristic_root));
+    memset(stored_bid_root, 0xa5, sizeof(stored_bid_root));
+    AB_CHECK("store-pair-idempotent",
+             vcs_zcode_attention_store_pair(
+                 store_workspace, &heuristic, &bid,
+                 stored_heuristic_root, stored_bid_root) ==
+                     VCS_ZCODE_ATTENTION_OK &&
+             memcmp(stored_heuristic_root, first_heuristic_root, 32) == 0 &&
+             memcmp(stored_bid_root, first_bid_root, 32) == 0);
+
+    struct vcs_zcode_attention_bid_v1 mismatched_store_bid = bid;
+    mismatched_store_bid.source_root[0]++;
+    memset(stored_heuristic_root, 0xa5, sizeof(stored_heuristic_root));
+    memset(stored_bid_root, 0xa5, sizeof(stored_bid_root));
+    AB_CHECK("store-pair-binding-failure-zeroes-roots",
+             vcs_zcode_attention_store_pair(
+                 store_workspace, &heuristic, &mismatched_store_bid,
+                 stored_heuristic_root, stored_bid_root) ==
+                     VCS_ZCODE_ATTENTION_BINDING &&
+             ab_all_zero(stored_heuristic_root,
+                         sizeof(stored_heuristic_root)) &&
+             ab_all_zero(stored_bid_root, sizeof(stored_bid_root)));
+    uint8_t heuristic_before_alias[32];
+    memcpy(heuristic_before_alias, heuristic.task_root, 32);
+    AB_CHECK("store-pair-output-alias-refusal-is-nondestructive",
+             vcs_zcode_attention_store_pair(
+                 store_workspace, &heuristic, &bid, heuristic.task_root,
+                 stored_bid_root) == VCS_ZCODE_ATTENTION_ALIAS &&
+             memcmp(heuristic.task_root, heuristic_before_alias, 32) == 0);
+    AB_CHECK("store-pair-null-output-cannot-mask-input-alias",
+             vcs_zcode_attention_store_pair(
+                 store_workspace, &heuristic, &bid, heuristic.task_root,
+                 NULL) == VCS_ZCODE_ATTENTION_ALIAS &&
+             memcmp(heuristic.task_root, heuristic_before_alias, 32) == 0);
+    AB_CHECK("store-pair-null-workspace-cannot-mask-input-alias",
+             vcs_zcode_attention_store_pair(
+                 NULL, &heuristic, &bid, heuristic.task_root,
+                 stored_bid_root) == VCS_ZCODE_ATTENTION_ALIAS &&
+             memcmp(heuristic.task_root, heuristic_before_alias, 32) == 0);
+    (void)test_rm_rf_recursive(store_workspace);
+
+    char corrupt_workspace[512];
+    test_make_tmpdir(corrupt_workspace, sizeof(corrupt_workspace),
+                     "zcode_attention", "corrupt_pair");
+    uint8_t corrupt_wire[VCS_ZCODE_HEURISTIC_WIRE_BYTES];
+    (void)vcs_zcode_heuristic_serialize(&heuristic, corrupt_wire);
+    corrupt_wire[16] ^= 1u;
+    (void)vcs_zcode_heuristic_root(&heuristic, first_heuristic_root);
+    bool corrupt_filed = vcs_object_store_init(corrupt_workspace) &&
+        vcs_object_put_addressed(
+            corrupt_workspace, first_heuristic_root, corrupt_wire,
+            sizeof(corrupt_wire));
+    memset(stored_heuristic_root, 0xa5, sizeof(stored_heuristic_root));
+    memset(stored_bid_root, 0xa5, sizeof(stored_bid_root));
+    AB_CHECK("store-pair-corrupt-preexisting-refusal",
+             corrupt_filed && vcs_zcode_attention_store_pair(
+                 corrupt_workspace, &heuristic, &bid,
+                 stored_heuristic_root, stored_bid_root) ==
+                     VCS_ZCODE_ATTENTION_CAS &&
+             ab_all_zero(stored_heuristic_root,
+                         sizeof(stored_heuristic_root)) &&
+             ab_all_zero(stored_bid_root, sizeof(stored_bid_root)));
+    (void)test_rm_rf_recursive(corrupt_workspace);
 
     struct vcs_zcode_heuristic_v1 heuristics[6];
     struct vcs_zcode_attention_bid_v1 bids[6];

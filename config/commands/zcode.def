@@ -552,8 +552,10 @@ ZCL_COMMAND_READY_COMMAND(
     "shown separately "
     "and handed to the existing explicit zcode use lifecycle before work starts, "
     "so unavailable code is never reported as reused. "
-    "The default is root-free; details=true exposes "
-    "exact identities. "
+    "The default success response is root-free; details=true exposes exact "
+    "identities. A fail-closed active-task collision is the coordination "
+    "exception: it returns the already-existing exact task evidence and one "
+    "typed inspection action so another worker does not duplicate it. "
     "This command changes no source file and launches no model or build.",
     ZCL_COMMAND_RESULT_BUDGET,
     "zcode,work,start,goal,reuse,package,api,profile,context,c23",

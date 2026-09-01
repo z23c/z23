@@ -245,7 +245,7 @@ static void zdev_coordination_refuse(
         reply, ZCL_COMMAND_STATUS_BLOCKED, ZCL_COMMAND_EXIT_BLOCKED,
         conflict && conflict->kind != VCS_ZCODE_TASK_CONFLICT_INCOMPLETE
             ? "ACTIVE_TASK_CONFLICT" : "TASK_CONFLICT_SCAN_INCOMPLETE",
-        "coordinate", false, false, detail, task_root);
+        "coordinate", false, true, detail, task_root);
     (void)json_push_kv_str(&reply->data, "conflict_kind", kind);
     (void)json_push_kv_str(
         &reply->data, "assignment_status", "UNOBSERVED");

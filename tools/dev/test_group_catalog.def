@@ -692,6 +692,10 @@ ZCL_TEST_GROUP(territory)
  * common one; and an index that failed an insertion answers nothing at all
  * rather than answering from a corpus with holes in it. */
 ZCL_TEST_GROUP(retrieval)
+/* One relevance-free retrieval experiment over a sealed BM25/graph parent.
+ * It can change only a 0..5 prefix scalar and must preserve candidate set and
+ * context ceiling without seeing reviewed gold or scope labels. */
+ZCL_TEST_GROUP(retrieval_experiment)
 /* A proof receipt: one node's claim that a named group reached a named
  * verdict over an exactly identified tree, and the rule a receiver applies.
  * The group exists for the refusals: only a PASS carrying a measured vector
