@@ -246,6 +246,27 @@ static void zdev_coordination_refuse(
         conflict && conflict->kind != VCS_ZCODE_TASK_CONFLICT_INCOMPLETE
             ? "ACTIVE_TASK_CONFLICT" : "TASK_CONFLICT_SCAN_INCOMPLETE",
         "coordinate", false, false, detail, task_root);
+    (void)json_push_kv_str(&reply->data, "conflict_kind", kind);
+    (void)json_push_kv_str(
+        &reply->data, "assignment_status", "UNOBSERVED");
+    (void)json_push_kv_str(
+        &reply->data, "active_execution", "UNOBSERVED");
+    if (conflict) {
+        (void)json_push_kv_str(&reply->data, "task_root",
+                               conflict->task_root_hex);
+        (void)json_push_kv_str(&reply->data, "source_root",
+                               conflict->source_root_hex);
+        (void)json_push_kv_str(&reply->data, "goal_root",
+                               conflict->goal_root_hex);
+        (void)json_push_kv_str(&reply->data, "write_scope_root",
+                               conflict->write_scope_root_hex);
+        (void)json_push_kv_str(&reply->data, "agent_context_root",
+                               conflict->context_root_hex);
+        (void)json_push_kv_str(&reply->data, "action_root",
+                               conflict->action_root_hex);
+        (void)json_push_kv_str(&reply->data, "work_receipt_root",
+                               conflict->work_receipt_root_hex);
+    }
     if (workspace && conflict && conflict->task_root_hex[0]) {
         struct json_value input_value;
         json_init(&input_value);

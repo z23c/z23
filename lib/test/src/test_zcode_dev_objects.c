@@ -2575,15 +2575,62 @@ static int test_zd_improve_command(void)
         ASSERT_STR_EQ(json_get_str(json_get(&plan_reply.data, "source_root")),
                       roots[0]);
         char planned_task_saved[65], planned_context_saved[65];
-        char planned_scope_saved[65];
+        char planned_scope_saved[65], planned_goal_saved[65];
+        uint8_t planned_goal_root[32];
         (void)snprintf(planned_task_saved, sizeof(planned_task_saved), "%s",
                        planned_task);
         (void)snprintf(planned_context_saved,
                        sizeof(planned_context_saved), "%s", planned_context);
         (void)snprintf(planned_scope_saved, sizeof(planned_scope_saved), "%s",
                        planned_scope);
+        sha3_256((const uint8_t *)"fix deterministic fixture",
+                 strlen("fix deterministic fixture"), planned_goal_root);
+        zcl_hex_encode(planned_goal_root, 32, planned_goal_saved);
         ASSERT(json_get(&plan_reply.data, "candidate_root") == NULL);
         ASSERT(json_get(&plan_reply.data, "action_id") == NULL);
+
+        /* A distinct task wire for the same exact source and goal is refused
+         * before task/context persistence. The handoff is structured and
+         * rooted; assignment and execution are deliberately not inferred. */
+        json_set_str((struct json_value *)json_get(
+                         &plan_input, "model_policy_root"), roots[5]);
+        struct zcl_command_reply conflict_reply;
+        zcl_command_reply_init(&conflict_reply, "zcl.zcode_improve.v1");
+        zcl_native_handle_zcode_improve(&plan_request, &conflict_reply);
+        ASSERT_EQ(conflict_reply.exit_code, ZCL_COMMAND_EXIT_BLOCKED);
+        ASSERT_STR_EQ(conflict_reply.error.code, "ACTIVE_TASK_CONFLICT");
+        ASSERT(!conflict_reply.error.mutated);
+        ASSERT_STR_EQ(json_get_str(json_get(
+                          &conflict_reply.data, "conflict_kind")),
+                      "DUPLICATE_ACTIVE_WORK");
+        ASSERT_STR_EQ(json_get_str(json_get(
+                          &conflict_reply.data, "task_root")),
+                      planned_task_saved);
+        ASSERT_STR_EQ(json_get_str(json_get(
+                          &conflict_reply.data, "source_root")), roots[0]);
+        ASSERT_STR_EQ(json_get_str(json_get(
+                          &conflict_reply.data, "goal_root")),
+                      planned_goal_saved);
+        ASSERT_STR_EQ(json_get_str(json_get(
+                          &conflict_reply.data, "write_scope_root")),
+                      planned_scope_saved);
+        ASSERT_STR_EQ(json_get_str(json_get(
+                          &conflict_reply.data, "agent_context_root")),
+                      planned_context_saved);
+        ASSERT_STR_EQ(json_get_str(json_get(
+                          &conflict_reply.data, "assignment_status")),
+                      "UNOBSERVED");
+        ASSERT_STR_EQ(json_get_str(json_get(
+                          &conflict_reply.data, "active_execution")),
+                      "UNOBSERVED");
+        ASSERT_EQ(conflict_reply.next_count, 1u);
+        ASSERT_STR_EQ(conflict_reply.next[0].command, "zcode.tasks");
+        ASSERT(strstr(conflict_reply.next[0].input_json,
+                      planned_task_saved) != NULL);
+        zcl_command_reply_free(&conflict_reply);
+        json_set_str((struct json_value *)json_get(
+                         &plan_input, "model_policy_root"), roots[4]);
+
         char recipe_magic = task_recipe_hex[0];
         task_recipe_hex[0] = recipe_magic == '0' ? '1' : '0';
         json_set_str((struct json_value *)json_get(
@@ -5851,9 +5898,20 @@ static int test_zd_task_index(void)
         ASSERT(entry_expired->expired);
         ASSERT_STR_EQ(entry_expired->state, "EXPIRED");
 
+        /* Recognized but invalid coordination evidence makes the whole scan
+         * incomplete. Silently skipping it could hide an active conflicting
+         * task and produce a false CLEAR verdict. */
+        struct vcs_zcode_task_conflict conflict;
+        ASSERT_EQ(vcs_zcode_task_index_conflict(
+                      index, workspace, &task_a, &conflict),
+                  VCS_ZCODE_TASK_CONFLICT_INCOMPLETE);
+        ASSERT(zd_index_drop_object(workspace, false_address));
+        vcs_zcode_task_index_free(index);
+        index = vcs_zcode_task_index_build(workspace, now);
+        ASSERT(index != NULL);
+
         /* Coordination is a deterministic observation over exact task and
          * scope roots. It neither assigns an owner nor claims execution. */
-        struct vcs_zcode_task_conflict conflict;
         ASSERT_EQ(vcs_zcode_task_index_conflict(
                       index, workspace, &task_a, &conflict),
                   VCS_ZCODE_TASK_CONFLICT_DUPLICATE_ACTIVE_WORK);
