@@ -68,13 +68,12 @@ const char *yardsale_error_string(int error);
 /* ── Ports (composition root wires; tests inject) ────────────────── */
 
 /* Broadcast port: receives the completed, fully-signed swap transaction.
- * The default runs the same accept_to_mempool + connman relay flow as
- * sendrawtransaction through the rawtx context; an unwired mempool makes
- * it a named, logged no-op (never a silent drop). */
+ * Boot wires the same accept_to_mempool + connman relay flow used by
+ * sendrawtransaction. Unwired, the controller refuses before buyer signing;
+ * transaction-controller private state is never a fallback. */
 typedef bool (*yardsale_broadcast_fn)(const struct transaction *tx,
                                       void *ctx);
 void yardsale_ceremony_set_broadcast(yardsale_broadcast_fn fn, void *ctx);
-bool yardsale_broadcast_default(const struct transaction *tx, void *ctx);
 
 /* Chain-content port: fetch a CONFIRMED transaction body by txid (internal
  * byte order) so the buyer can re-classify the seller's claimed token
@@ -102,8 +101,8 @@ typedef void (*yardsale_flood_fn)(const char *command,
 void yardsale_ceremony_set_flood(yardsale_flood_fn fn, void *ctx);
 
 /* The consensus branch id the ceremony signs under (both parties must
- * agree). The default derives (active tip + 1) from the rawtx context
- * exactly like signrawtransaction; tests pin the fixture branch. */
+ * agree). Boot derives (active tip + 1) at the composition root; tests pin
+ * the fixture branch. Unwired, signing refuses. */
 typedef uint32_t (*yardsale_branch_id_fn)(void *ctx);
 void yardsale_ceremony_set_branch_id_source(yardsale_branch_id_fn fn,
                                             void *ctx);

@@ -2340,6 +2340,7 @@ $(filter-out $(ZCL_VENDOR_LIB)/libsecp256k1.a,$(VENDOR_LIBS)):
         check-model-sql-literals \
         check-persona-resolves check-cookbook \
         check-long-functions check-rpc-registrar check-lag-slo-observable \
+        check-controller-private-headers \
         check-file-size-ceiling check-framework-filename-suffix \
         check-stopwatch-skip-detector \
         check-proof-server-pin \
@@ -10816,6 +10817,14 @@ check-shape-include-direction:
 	@./tools/scripts/check_shape_include_direction.sh --selftest
 	@./tools/scripts/check_shape_include_direction.sh
 
+# Controller private headers belong to their dynamically-derived source
+# family. Existing external production edges are exact shrink-only debt;
+# tests and private-to-private composition are allowed.
+check-controller-private-headers:
+	@echo "══ LINT: controller private-header ownership ══"
+	@./tools/lint/check_controller_private_headers.sh --selftest
+	@./tools/lint/check_controller_private_headers.sh
+
 # domain/ source purity: the innermost layer may only #include its own
 # domain headers, C/system headers, bare domain-local siblings, and the 12
 # allowed lib subsystems (bloom chain coins consensus core crypto keys
@@ -12244,6 +12253,7 @@ LINT_GATES := \
     check-lib-layering \
     check-lib-module-order \
     check-shape-include-direction \
+    check-controller-private-headers \
     check-domain-purity \
     check-core-include-boundary \
     check-core-seal \

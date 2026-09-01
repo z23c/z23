@@ -156,6 +156,7 @@ gate_command() {
         check-lib-layering)                echo './tools/scripts/check_lib_layering.sh' ;;
         check-lib-module-order)            echo './tools/scripts/check_lib_module_order.sh' ;;
         check-shape-include-direction)     echo './tools/scripts/check_shape_include_direction.sh' ;;
+        check-controller-private-headers) echo './tools/lint/check_controller_private_headers.sh --selftest && ./tools/lint/check_controller_private_headers.sh' ;;
         check-domain-purity)               echo './tools/scripts/check_domain_purity.sh' ;;
         check-core-include-boundary)       echo './tools/scripts/check_core_include_boundary.sh' ;;
         check-core-seal)                   echo '__core_seal__' ;;

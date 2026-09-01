@@ -491,6 +491,13 @@ assert green).
   Override `// shape-layer-ok:<tag>`. Impl:
   `tools/scripts/check_shape_include_direction.sh`.
 
+- **Gate #55: `check-controller-private-headers`** (RATCHET) — derives the
+  owner of each `controllers/*_internal.h` and `*_private.h` include from its
+  suffix. Owner-family sources, tests, and private-to-private headers pass;
+  every other production edge must remain in the exact shrink-only baseline.
+  New edges, stale rows, and missing or empty scan roots fail closed. Impl:
+  `tools/lint/check_controller_private_headers.sh`.
+
 - **Gate #45: `check-domain-purity`** (HARD) — `domain/` is the innermost
   layer. A `domain/**/*.c|.h` file (outside `*/test/*`) may only `#include` its
   own `"domain/…"` headers, C/system `<…>` headers, bare domain-local sibling
@@ -1181,6 +1188,7 @@ add/remove a gate.
 - `check-coins-lookup-nullcheck`
 - `check-condition-cooldown`
 - `check-consensus-parity`
+- `check-controller-private-headers`
 - `check-core-include-boundary`
 - `check-core-seal`
 - `check-core-seal-root-mirror`

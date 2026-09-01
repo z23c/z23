@@ -97,7 +97,7 @@ check-log-macro-return-type check-no-runtime-abort check-wallet-raw-prepare-log
 check-before-save-hooks check-pthread-create check-model-validation
 check-model-ar-lifecycle check-model-sql-literals check-persona-resolves
 check-long-functions check-rpc-registrar
-check-lag-slo-observable check-lib-layering check-shape-include-direction
+check-lag-slo-observable check-lib-layering check-shape-include-direction check-controller-private-headers
 check-accel-oracle-pinned check-domain-purity check-core-include-boundary check-supervisor-registration
 check-test-registration check-typed-blocker check-blocker-escape-registered
 check-blocker-remedy check-blocker-handoff-declared

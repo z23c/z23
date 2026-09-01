@@ -7,15 +7,9 @@
 
 #include "controllers/yardsale_controller.h"
 
-#include "chain/chainparams.h"
-#include "consensus/upgrades.h"
-#include "controllers/transaction_controller_internal.h"
 #include "crypto/sha3.h"
-#include "net/connman.h"
 #include "support/cleanse.h"
 #include "util/log_macros.h"
-#include "validation/accept_to_mempool.h"
-#include "validation/chainstate.h"
 #include "zslp/slp.h"
 #include "zswap/zswap_yardsale.h"
 
@@ -80,49 +74,20 @@ void yardsale_ceremony_set_branch_id_source(yardsale_branch_id_fn fn,
     g_branch_id_ctx = ctx;
 }
 
-/* The default branch id: the consensus branch at (active tip + 1), read
- * through the same rawtx context signrawtransaction uses. */
-static uint32_t yardsale_branch_id_now(void)
+/* Consensus state belongs to the composition root. An unwired controller
+ * must refuse before signing, never guess a branch id from another
+ * controller's private state. */
+static bool yardsale_branch_id_now(uint32_t *branch_id_out)
 {
-    if (g_branch_id)
-        return g_branch_id(g_branch_id_ctx);
-    struct rawtx_context *ctx = rawtx_ctx();
-    int tip = ctx->main_state
-        ? active_chain_height(&ctx->main_state->chain_active) : 0;
-    return consensus_current_epoch_branch_id(
-        tip + 1, &chain_params_get()->consensus);
-}
-
-bool yardsale_broadcast_default(const struct transaction *tx, void *ctx_)
-{
-    (void)ctx_;
-    if (!tx)
-        LOG_FAIL("yardsale", "broadcast_default: NULL tx");
-    struct rawtx_context *ctx = rawtx_ctx();
-    if (!ctx->mempool) {
-        /* A named, logged no-op — the completed swap is dropped HERE, on
-         * the record, never silently. */
-        LOG_WARN("yardsale", "broadcast: mempool context unwired — the "
-                 "signed swap transaction was not submitted");
+    if (!branch_id_out)
+        LOG_FAIL("yardsale", "branch_id_now: NULL out");
+    *branch_id_out = 0;
+    if (!g_branch_id) {
+        LOG_WARN("yardsale", "branch-id port unwired — refusing ceremony "
+                 "signing");
         return false;
     }
-    struct transaction copy;
-    if (!transaction_copy(&copy, tx))
-        LOG_FAIL("yardsale", "broadcast_default: transaction copy failed");
-    transaction_compute_hash(&copy);
-    struct uint256 hash = copy.hash;
-    enum mempool_accept_result r = accept_to_mempool(
-        ctx->mempool, ctx->coins_tip, ctx->main_state,
-        chain_params_get(), &copy);
-    if (r != MEMPOOL_ACCEPT_OK && r != MEMPOOL_ACCEPT_DUPLICATE) {
-        LOG_WARN("yardsale", "broadcast: mempool rejected the completed "
-                 "swap (result %d) — settlement did not happen", (int)r);
-        transaction_free(&copy);
-        return false;
-    }
-    if (ctx->connman)
-        connman_relay_transaction(ctx->connman, &hash);
-    transaction_free(&copy);
+    *branch_id_out = g_branch_id(g_branch_id_ctx);
     return true;
 }
 
@@ -334,9 +299,14 @@ enum yardsale_error yardsale_seller_handle_accept_wire(
     /* The one function that can never shortchange us: it re-assembles the
      * transaction, verifies it pays the exact ad terms, and only then
      * signs — all inside the Stage-3 core. */
+    uint32_t branch_id;
+    if (!yardsale_branch_id_now(&branch_id)) {
+        memory_cleanse(&key, sizeof(key));
+        return YARDSALE_ERR_NOT_CONFIGURED;
+    }
     struct zswap_partial_v1 partial;
     e = zswap_ceremony_seller_build_partial(
-        &ad_entry.quote, &accept, &terms, &key, yardsale_branch_id_now(),
+        &ad_entry.quote, &accept, &terms, &key, branch_id,
         now_unix, &partial, NULL);
     memory_cleanse(&key, sizeof(key));
     if (e != ZSWAP_CEREMONY_OK)
@@ -534,10 +504,16 @@ int yardsale_ceremony_partial_ingest(const uint8_t *wire, size_t wire_len,
     if (!found)
         return ZSWAP_CEREMONY_WIRE_RELAY; /* someone else's ceremony */
 
+    uint32_t branch_id;
+    if (!yardsale_branch_id_now(&branch_id)) {
+        memory_cleanse(buy.input_keys, sizeof(buy.input_keys));
+        return ZSWAP_CEREMONY_WIRE_DROP;
+    }
+
     struct transaction tx;
     memset(&tx, 0, sizeof(tx));
     enum zswap_ceremony_error e = zswap_ceremony_buyer_verify_partial(
-        &buy.ad, &buy.accept, &partial, yardsale_branch_id_now(),
+        &buy.ad, &buy.accept, &partial, branch_id,
         now_unix, &tx);
     if (e != ZSWAP_CEREMONY_OK) {
         LOG_WARN("yardsale", "zswappartial rejected (%s) — the buy is off; "
@@ -597,6 +573,14 @@ int yardsale_ceremony_partial_ingest(const uint8_t *wire, size_t wire_len,
         return ZSWAP_CEREMONY_WIRE_DROP;
     }
 
+    if (!g_broadcast) {
+        LOG_WARN("yardsale", "broadcast port unwired — refusing to sign a "
+                 "completed swap the node cannot submit");
+        memory_cleanse(buy.input_keys, sizeof(buy.input_keys));
+        transaction_free(&tx);
+        return ZSWAP_CEREMONY_WIRE_DROP;
+    }
+
     /* Sign every buyer input: the vin holds seller inputs first, then the
      * buyer's in canonical sorted order — map each vin back to its accept
      * entry (and its key) by outpoint, never by position. */
@@ -611,7 +595,7 @@ int yardsale_ceremony_partial_ingest(const uint8_t *wire, size_t wire_len,
             e = zswap_ceremony_sign_input_p2pkh(
                 &tx, vi, ba->inputs[j].script_pub_key,
                 ba->inputs[j].script_len, ba->inputs[j].value_sats,
-                yardsale_branch_id_now(), &buy.input_keys[j]);
+                branch_id, &buy.input_keys[j]);
             if (e != ZSWAP_CEREMONY_OK) {
                 LOG_WARN("yardsale", "buyer input %zu signing failed: %s",
                          vi, zswap_ceremony_error_string(e));
@@ -630,9 +614,7 @@ int yardsale_ceremony_partial_ingest(const uint8_t *wire, size_t wire_len,
         return ZSWAP_CEREMONY_WIRE_DROP;
     }
 
-    yardsale_broadcast_fn broadcast =
-        g_broadcast ? g_broadcast : yardsale_broadcast_default;
-    if (!broadcast(&tx, g_broadcast_ctx))
+    if (!g_broadcast(&tx, g_broadcast_ctx))
         LOG_WARN("yardsale", "completed swap was not broadcast (named "
                  "above) — the ceremony produced a transaction the "
                  "network never saw");

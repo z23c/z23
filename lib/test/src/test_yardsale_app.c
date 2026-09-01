@@ -597,6 +597,18 @@ static uint32_t ysa_branch_id(void *ctx)
     return YSA_BRANCH_ID;
 }
 
+struct ysa_branch_capture {
+    int calls;
+};
+
+static uint32_t ysa_changing_branch_id(void *ctx)
+{
+    struct ysa_branch_capture *cap = ctx;
+    uint32_t branch_id = YSA_BRANCH_ID + (uint32_t)cap->calls;
+    cap->calls++;
+    return branch_id;
+}
+
 struct ysa_flood_capture {
     int count;
     char last_command[16];
@@ -798,6 +810,9 @@ static int t_ceremony_roundtrip(void)
      * golden broadcast may only fire after it passes. */
     struct ysa_broadcast_capture broadcast = {0};
     yardsale_ceremony_set_broadcast(ysa_broadcast_capture_fn, &broadcast);
+    struct ysa_branch_capture buyer_branch = {0};
+    yardsale_ceremony_set_branch_id_source(ysa_changing_branch_id,
+                                           &buyer_branch);
     YSA_CHECK("ceremony: prevout fixture armed",
               ysa_prevout_arm(&ad, &seller));
     yardsale_ceremony_set_prevout_fetch(ysa_prevout_fetch_fn, NULL);
@@ -807,6 +822,9 @@ static int t_ceremony_roundtrip(void)
               verdict == ZSWAP_CEREMONY_WIRE_DROP);
     YSA_CHECK("ceremony: completed swap reached the broadcast port",
               broadcast.count == 1);
+    YSA_CHECK("ceremony: buyer operation samples branch id once",
+              buyer_branch.calls == 1);
+    yardsale_ceremony_set_branch_id_source(ysa_branch_id, NULL);
     ysa_hex(broadcast.tx_bytes, broadcast.tx_len, hex);
     YSA_CHECK("ceremony: broadcast tx is the Stage-3 golden final tx",
               strcmp(hex, YSA_KAT_FINAL_TX_HEX) == 0);
@@ -1107,10 +1125,22 @@ static int t_ingress_negatives(void)
     ysa_key(&seller_key, 0x31);
     yardsale_seller_profile_configure(&seller, &seller_key);
     size_t partial_len = 0;
+    yardsale_ceremony_set_branch_id_source(NULL, NULL);
+    YSA_CHECK("neg: unwired branch port refuses before producing a partial",
+              yardsale_seller_handle_accept_wire(
+                  accept_wire, accept_len, YSA_NOW,
+                  respond, sizeof(respond), &partial_len) ==
+                  YARDSALE_ERR_NOT_CONFIGURED && partial_len == 0);
+    struct ysa_branch_capture seller_branch = {0};
+    yardsale_ceremony_set_branch_id_source(ysa_changing_branch_id,
+                                           &seller_branch);
     YSA_CHECK("neg: seller answers the real accept (handler path)",
               yardsale_seller_handle_accept_wire(
                   accept_wire, accept_len, YSA_NOW,
                   respond, sizeof(respond), &partial_len) == YARDSALE_OK);
+    YSA_CHECK("neg: seller operation samples branch id once",
+              seller_branch.calls == 1);
+    yardsale_ceremony_set_branch_id_source(ysa_branch_id, NULL);
     yardsale_ceremony_reset();
     YSA_CHECK("neg: partial with no pending buy relays",
               yardsale_ceremony_partial_ingest(respond, partial_len,
@@ -1194,7 +1224,9 @@ static int t_prevout_guard(void)
     int failures = 0;
     enum {
         PV_SERVE = 0,   /* honest body: the positive control */
-        PV_UNWIRED,     /* port left NULL */
+        PV_UNWIRED,     /* prevout port left NULL */
+        PV_NO_BRANCH,   /* branch-id port left NULL */
+        PV_NO_BROADCAST,/* broadcast port left NULL */
         PV_MISS,        /* fetcher finds nothing confirmed */
         PV_WRONG_TOKEN, /* body holds a different token id */
         PV_WRONG_AMT,   /* body holds less than the ad's amount */
@@ -1205,6 +1237,8 @@ static int t_prevout_guard(void)
     static const char *const names[PV_CASES] = {
         "guard: trusted port matching body signs and broadcasts",
         "guard: unwired port refuses to sign",
+        "guard: unwired branch port refuses before broadcast",
+        "guard: unwired broadcast port refuses before buyer signing",
         "guard: unconfirmed token input refuses",
         "guard: wrong token id refuses",
         "guard: short token amount refuses",
@@ -1235,6 +1269,10 @@ static int t_prevout_guard(void)
                 armed = ysa_prevout_arm(&ad, &seller);
                 break;
             case PV_UNWIRED:
+                armed = ysa_prevout_arm(&ad, &seller);
+                break;
+            case PV_NO_BRANCH:
+            case PV_NO_BROADCAST:
                 armed = ysa_prevout_arm(&ad, &seller);
                 break;
             case PV_MISS:
@@ -1289,8 +1327,11 @@ static int t_prevout_guard(void)
             if (c != PV_UNWIRED)
                 yardsale_ceremony_set_prevout_fetch(
                     ysa_prevout_fetch_fn, NULL);
-            yardsale_ceremony_set_broadcast(ysa_broadcast_capture_fn,
-                                            &broadcast);
+            if (c == PV_NO_BRANCH)
+                yardsale_ceremony_set_branch_id_source(NULL, NULL);
+            if (c != PV_NO_BROADCAST)
+                yardsale_ceremony_set_broadcast(ysa_broadcast_capture_fn,
+                                                &broadcast);
         }
         int verdict = armed
             ? yardsale_ceremony_partial_ingest(partial_wire, partial_len,

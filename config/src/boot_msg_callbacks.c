@@ -12,6 +12,7 @@
 #include "config/boot_file_market_delivery.h"
 #include "config/boot_internal.h"
 #include "config/db_service.h"
+#include "consensus/upgrades.h"
 #include "services/chain_activation_service.h"
 #include "services/reducer_ingest_service.h"
 #include "services/block_index_integrity.h"
@@ -38,6 +39,8 @@
 #include "storage/peers_projection.h"
 #include "sync/sync_state.h"
 #include "validation/process_block.h"
+#include "validation/accept_to_mempool.h"
+#include "validation/chainstate.h"
 #include "wallet/wallet.h"
 #include "platform/time_compat.h"
 #include "util/log_macros.h"
@@ -523,6 +526,50 @@ static void boot_zswap_ceremony_flood(const char *command,
                                 wire, wire_len);
 }
 
+/* Yardsale reaches node state only through its public ports. The composition
+ * root owns the concrete adapters; no controller may borrow another
+ * controller's private raw-transaction context. */
+static uint32_t boot_yardsale_branch_id(void *ctx)
+{
+    const struct boot_svc_ctx *svc = ctx;
+    if (!svc || !svc->state || !svc->params) {
+        LOG_WARN("boot", "yardsale branch-id adapter lost node context");
+        return 0;
+    }
+    int tip = active_chain_height(&svc->state->chain_active);
+    return consensus_current_epoch_branch_id(tip + 1,
+                                             &svc->params->consensus);
+}
+
+static bool boot_yardsale_broadcast(const struct transaction *tx, void *ctx)
+{
+    struct boot_svc_ctx *svc = ctx;
+    if (!tx || !svc || !svc->mempool || !svc->coins_tip || !svc->state ||
+        !svc->params) {
+        LOG_WARN("boot", "yardsale broadcast adapter missing node context");
+        return false;
+    }
+
+    struct transaction copy;
+    if (!transaction_copy(&copy, tx))
+        LOG_FAIL("boot", "yardsale broadcast transaction copy failed");
+    transaction_compute_hash(&copy);
+    struct uint256 hash = copy.hash;
+    enum mempool_accept_result accepted = accept_to_mempool(
+        svc->mempool, svc->coins_tip, svc->state, svc->params, &copy);
+    if (accepted != MEMPOOL_ACCEPT_OK &&
+        accepted != MEMPOOL_ACCEPT_DUPLICATE) {
+        LOG_WARN("boot", "yardsale broadcast rejected by mempool (result %d)",
+                 (int)accepted);
+        transaction_free(&copy);
+        return false;
+    }
+    if (svc->connman)
+        connman_relay_transaction(svc->connman, &hash);
+    transaction_free(&copy);
+    return true;
+}
+
 void boot_wire_zswap_ceremony(struct msg_processor *mp,
                               struct boot_svc_ctx *svc)
 {
@@ -531,6 +578,16 @@ void boot_wire_zswap_ceremony(struct msg_processor *mp,
     msg_processor_set_zswap_partial_ingest(mp, boot_zswap_partial_ingest,
                                            NULL);
     yardsale_ceremony_set_flood(boot_zswap_ceremony_flood, mp);
+
+    if (svc && svc->state && svc->mempool && svc->coins_tip && svc->params) {
+        yardsale_ceremony_set_branch_id_source(boot_yardsale_branch_id, svc);
+        yardsale_ceremony_set_broadcast(boot_yardsale_broadcast, svc);
+    } else {
+        LOG_WARN("boot", "yardsale settlement ports left unwired: node "
+                 "context incomplete");
+        yardsale_ceremony_set_branch_id_source(NULL, NULL);
+        yardsale_ceremony_set_broadcast(NULL, NULL);
+    }
 
     /* The buyer's chain-content port: a live view over this node's own
      * confirmed chain + canonical locator DB. Static: the composition
