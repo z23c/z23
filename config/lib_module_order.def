@@ -68,13 +68,13 @@ LIB_MODULE("base")
  * that has to be honest in that context too. Ranked above base only so base
  * keeps its documented place as the sink. */
 LIB_MODULE("install")
-/* BM25 ranked retrieval over an in-memory corpus. Depends on base and the C
- * math library and nothing else, so it takes the lowest rank the order rule
- * allows. Nothing below it (base, install) references it. */
-LIB_MODULE("retrieval")
 /* Scalar FIPS-202 primitives depend only on base.  Crypto owns optional
  * batched acceleration and reaches down through sha3/sha3.h. */
 LIB_MODULE("sha3")
+/* BM25 ranked retrieval and its immutable experiment roots. Depends on base,
+ * sha3, and the C math library, so directly above sha3 is its lowest legal
+ * rank. Nothing below it (base, install, sha3) references retrieval. */
+LIB_MODULE("retrieval")
 /* Canonical source-universe and contextual ontology objects plus the bounded
  * IO-free evaluator. Depends only on base and sha3; application services own
  * extraction, CAS, projections, clocks and policy. */

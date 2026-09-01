@@ -48,7 +48,6 @@ zcode.package.source.reproduce maximum_bytes # reproduce injects the fixed sourc
 zcode.package.source.reproduce name # nested package fetch reads this only from the private fetch object; reproduce copies root, not a local library name, into that object.
 zcode.package.fetch board # the records board arm lives in the nested handler; fetch builds its own private records selector and request->input never reaches that arm.
 zcode.package.source.reproduce board # the records board arm lives in the nested handler; reproduce builds its own private records selector and request->input never reaches that arm.
-zcode.package.dev.tasks work # tasks injects the selected task root as work into a private next-action object; request->input never reaches that object.
 metaverse.space.plan delegation_wire # delegation authorization serializes a private RPC object; request->input never reaches that helper.
 metaverse.space.commit delegation_wire # delegation authorization serializes a private RPC object; request->input never reaches that helper.
 metaverse.space.show delegation_wire # delegation authorization serializes a private RPC object; request->input never reaches that helper.
