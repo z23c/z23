@@ -48,6 +48,10 @@ static bfmhd_select_idle_height_fn g_select_idle_height_fn =
 static bfmhd_select_idle_is_read_failure_fn g_select_idle_is_read_failure_fn =
     utxo_apply_stage_select_idle_is_read_failure;
 
+#ifdef ZCL_TESTING
+static void (*g_before_remedy_recheck_fn)(void);
+#endif
+
 static struct block_index *active_target_index_locked(struct main_state *ms,
                                                       int target)
 {
@@ -260,6 +264,26 @@ static enum condition_remedy_result remedy_body_fetch_missing_have_data(void)
     if (!still_exact)
         return COND_REMEDY_SKIP;
 
+    /* Body receipt and this Condition run concurrently. Close the
+     * detect-to-remedy race before entering sync_monitor's deliberately
+     * forceful recovery path (peer wakeups, sync kick, and recovery
+     * accounting). The exact durable body row witnesses only the canonical
+     * best-header route; an active-frontier disk-failure note must still
+     * ignore a stale height-keyed row and require readable bytes. */
+#ifdef ZCL_TESTING
+    if (g_before_remedy_recheck_fn)
+        g_before_remedy_recheck_fn();
+#endif
+    sqlite3 *db = progress_store_db();
+    bool already_converged =
+        (route == BFMHD_TARGET_BEST_HEADER && db &&
+         stage_repair_body_fetch_observed_hash(
+             db, target, &g_target_hash)) ||
+        target_has_readable_data(
+            db, ms, target, route, &g_target_hash);
+    if (already_converged)
+        return COND_REMEDY_SKIP;
+
     atomic_fetch_add(&g_remedy_calls, 1);
     struct zcl_result r = route == BFMHD_TARGET_BEST_HEADER
         ? sync_monitor_queue_best_header_body(
@@ -339,6 +363,7 @@ void body_fetch_missing_have_data_test_reset(void)
     memset(&g_target_hash, 0, sizeof(g_target_hash));
     g_select_idle_height_fn = bfmhd_test_no_select_idle_height;
     g_select_idle_is_read_failure_fn = bfmhd_test_no_select_idle_read_failure;
+    g_before_remedy_recheck_fn = NULL;
     condition_reset_state(&c_body_fetch_missing_have_data);
 }
 
@@ -362,5 +387,11 @@ void body_fetch_missing_have_data_test_set_select_idle_stubs(
     g_select_idle_is_read_failure_fn =
         is_read_failure_fn ? is_read_failure_fn
                            : bfmhd_test_no_select_idle_read_failure;
+}
+
+void body_fetch_missing_have_data_test_set_before_remedy_recheck(
+    void (*fn)(void))
+{
+    g_before_remedy_recheck_fn = fn;
 }
 #endif

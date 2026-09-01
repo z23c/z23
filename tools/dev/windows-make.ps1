@@ -126,7 +126,7 @@ if ($DryRun) {
 $Runner = Join-Path $CheckoutRoot 'build\bin\z23-headless-run.exe'
 $RunnerSources = @(
     (Join-Path $CheckoutRoot 'tools\dev\windows_headless_run.c'),
-    (Join-Path $CheckoutRoot 'lib\base\src\safe_alloc.c')
+    (Join-Path $CheckoutRoot 'platform\modules\base\src\safe_alloc.c')
 )
 $NeedsBootstrap = -not (Test-Path -LiteralPath $Runner)
 if (-not $NeedsBootstrap) {

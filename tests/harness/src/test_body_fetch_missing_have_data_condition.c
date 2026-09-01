@@ -136,6 +136,17 @@ static bool seed_body_row(sqlite3 *db, int height,
     return ok;
 }
 
+static int g_bfmhd_arrival_height = -1;
+static struct uint256 g_bfmhd_arrival_hash;
+static bool g_bfmhd_arrival_seeded;
+
+static void bfmhd_seed_arrival_before_remedy_recheck(void)
+{
+    g_bfmhd_arrival_seeded = seed_body_row(
+        progress_store_db(), g_bfmhd_arrival_height,
+        &g_bfmhd_arrival_hash);
+}
+
 static bool seed_trusted_parent_bfmhd(sqlite3 *db, int height,
                                       const struct uint256 *hash)
 {
@@ -371,6 +382,40 @@ int test_body_fetch_missing_have_data_condition(void)
         ok = ok && condition_engine_get_active_count() == 0;
         ok = ok && queued == 0;
         BFMHD_CHECK("existing body_fetch row suppresses repair", ok);
+        teardown_fixture(&fx);
+    }
+
+    {
+        struct bfmhd_fixture fx;
+        bool ok = setup_fixture(&fx, "arrival_before_remedy");
+        g_bfmhd_arrival_height = fx.target;
+        g_bfmhd_arrival_hash = *fx.child->phashBlock;
+        g_bfmhd_arrival_seeded = false;
+        body_fetch_missing_have_data_test_set_before_remedy_recheck(
+            bfmhd_seed_arrival_before_remedy_recheck);
+
+        struct watchdog_stats before;
+        struct watchdog_stats after;
+        struct condition_runtime_snapshot snap_before;
+        ok = ok && condition_engine_get_registered_snapshot(
+            "body_fetch_missing_have_data", &snap_before);
+        sync_monitor_get_stats(&before);
+        condition_engine_tick();
+        sync_monitor_get_stats(&after);
+
+        uint64_t queued = 0;
+        dl_get_stats(&fx.dm, NULL, NULL, NULL, NULL, &queued);
+        struct condition_runtime_snapshot snap;
+        ok = ok && g_bfmhd_arrival_seeded;
+        ok = ok && body_fetch_missing_have_data_test_remedy_calls() == 0;
+        ok = ok && condition_engine_get_active_count() == 0;
+        ok = ok && queued == 0 && fx.dm.queue_len == 0;
+        ok = ok && after.recoveries_total == before.recoveries_total;
+        ok = ok && condition_engine_get_registered_snapshot(
+            "body_fetch_missing_have_data", &snap);
+        ok = ok && snap.cleared_count == snap_before.cleared_count + 1;
+        BFMHD_CHECK("body arrival between detect and remedy clears without "
+                    "queue or recovery", ok);
         teardown_fixture(&fx);
     }
 

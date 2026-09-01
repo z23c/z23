@@ -18,8 +18,10 @@
  * Candidate (a) is bound to the durable validate hash, best-header ancestry,
  * and the exact visible or durable finalized parent identity, then queues through
  * sync_monitor_queue_best_header_body(target, exact_hash). Candidate (b)
- * retains the active-frontier queue path. A failed queue returns
- * COND_REMEDY_FAILED.
+ * retains the active-frontier queue path. Immediately before queueing, the
+ * remedy rechecks the exact body witness so a concurrent body arrival does
+ * not trigger peer wakeups or a false watchdog recovery. A failed queue
+ * returns COND_REMEDY_FAILED.
  * WITNESSED: an exact-hash body row is observed, OR that exact captured
  *   target's block data is readable on disk.
  * COND_CRITICAL; poll_secs=5 (backoff 30s, max_attempts 5). Continue-with-
@@ -37,6 +39,10 @@ const char *body_fetch_missing_have_data_test_last_skip_reason(void);
  * jobs/utxo_apply_stage.h accessors. */
 void body_fetch_missing_have_data_test_set_select_idle_stubs(
     int64_t (*height_fn)(void), bool (*is_read_failure_fn)(void));
+/* Runs after identity is re-proved and immediately before the final body
+ * witness recheck, allowing a test to model a concurrent body arrival. */
+void body_fetch_missing_have_data_test_set_before_remedy_recheck(
+    void (*fn)(void));
 #endif
 
 #endif /* ZCL_CONDITIONS_BODY_FETCH_MISSING_HAVE_DATA_H */
