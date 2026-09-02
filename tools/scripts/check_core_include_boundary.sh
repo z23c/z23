@@ -1,13 +1,17 @@
 #!/usr/bin/env bash
-# Lint gate — sealed consensus-core include boundary (Wave 1.1 / W0).
+# Lint gate — pure consensus-context include boundary (Wave 1.1 / W0).
 #
-# The sealed core (top-level core/) holds ONLY "what makes a block/tx valid":
-# pure predicates + static height-keyed parameter tables + consensus math. It
-# is the innermost layer of the layered build and must NOT depend upward or
-# sideways on the orchestration surface (drive/persist/fetch/reorg). In
-# particular it must not include from core/modules/validation — validation SEQUENCES
-# consensus, it is not consensus, and letting core reach into it would recreate
-# the very coupling the physical split exists to break.
+# The four CORE_CONTEXTS in the Makefile hold the pure predicates, static
+# height-keyed parameter tables, and consensus math. They are the innermost
+# layer and must NOT depend upward or sideways on the orchestration surface
+# (drive/persist/fetch/reorg). In particular they must not include from
+# core/modules/validation — validation sequences consensus, it is not one of
+# these pure contexts.
+#
+# EVIDENCE CEILING. The byte seal is broader: CORE_SEAL_PATHS includes every
+# tracked path below core/, including core/modules. This gate deliberately scans
+# only core/{consensus,params,chainparams,math}; it proves no include property
+# for core/modules and must never be cited as if it did.
 #
 # This gate is a parameterized clone of check_domain_purity.sh, scanning the
 # core/ subdirs instead of domain/. A core/ file may ONLY #include:
@@ -133,7 +137,7 @@ if [ "$fail" = "0" ]; then
     if [ "$scanned_any" = "0" ]; then
         echo "check_core_include_boundary: clean — no core/ subdirs present yet (W0 posture)"
     else
-        echo "check_core_include_boundary: clean — sealed core has no forbidden includes"
+        echo "check_core_include_boundary: clean — four pure consensus contexts have no forbidden includes; core/modules UNMEASURED"
     fi
     exit 0
 fi
@@ -145,7 +149,7 @@ for v in "${violations[@]}"; do
     echo "FAIL: $v"
 done
 echo ""
-echo "The sealed core (core/) is the innermost consensus layer. It may only"
+echo "The four pure consensus contexts are the innermost layer. They may only"
 echo "include its own headers, C/system headers, bare siblings, and pure leaf"
 echo "lib subsystems — NEVER core/modules/validation (validation drives consensus, it is"
 echo "not consensus) or any app/ shape."

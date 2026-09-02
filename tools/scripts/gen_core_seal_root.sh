@@ -71,7 +71,8 @@ cat <<EOF
  * (tools/scripts/gen_core_seal_root.sh). Do not edit by hand.
  *
  * WHY THIS FILE IS NOT UNDER core/. It mirrors the ROOT line of
- * core/MANIFEST.sha3, and the manifest digests every tracked file under core/.
+ * core/MANIFEST.sha3, and the manifest digests every selected tracked file
+ * under core/ except the manifest itself.
  * A mirror living inside the sealed set would be part of its own input: writing
  * it would change the ROOT it had just recorded, forever. So it lives beside
  * the consumer instead, and tools/lint/check_core_seal_root_mirror.sh proves

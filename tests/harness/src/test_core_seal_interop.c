@@ -35,8 +35,10 @@
  *
  * ── WHY THIS IS NOT A ONE-LINE COMPARISON: THE TWO FILE SETS DIFFER ──
  *
- * The sealer's input is the Makefile's CORE_SEAL_PATHS as tracked by git — 70
- * files: everything under core/ plus four named files in core/modules/validation.
+ * The sealer's input is the Makefile's CORE_SEAL_PATHS as tracked by git:
+ * everything under core/. Four validation pathspecs are repeated explicitly
+ * but already fall under that glob. Derive the live count from the input; it
+ * is not part of the Merkle contract.
  * codeindex's input is ci_enumerate_sources()' policy: .c, .h and .def under a
  * fixed set of roots. Those sets are NOT the same set, so the two WHOLE-TREE
  * roots differ by construction and comparing them directly would be a bug, not
@@ -112,15 +114,12 @@
 #define CSI_SYNTH  CSI_WORK "/synthetic"
 #define CSI_LIST   CSI_WORK "/paths.nul"
 
-/* The number of the 23 sealed sections that are expected to be comparable at
- * all — i.e. whose sealed file set survives ci_enumerate_sources()' .c/.h/.def
- * policy intact. Three sealed files are not indexable source (core/UNSEAL.md,
- * core/consensus/src/oversize_grandfather_table.inc, core/params/module.cfg),
- * and they make exactly four sections incomparable: core, core/consensus,
- * core/consensus/src and core/params. This is a FLOOR, not an equality: if a
- * future extension-policy change makes MORE sections comparable that is fine,
- * but silently comparing fewer must go red. */
-#define CSI_MIN_COMPARABLE 19
+/* At least 90% of the manifest's derived sections must remain comparable with
+ * codeindex. The live fraction is derived from the manifest, so adding module
+ * subtrees raises the floor instead of leaving an obsolete fixed count behind.
+ * A small non-source tail is expected and named below; losing more than 10% of
+ * section comparisons is a refusal, not silently weaker evidence. */
+#define CSI_MIN_COMPARABLE_PERCENT 90U
 
 static int csi_failures;
 
@@ -473,11 +472,11 @@ static void csi_explain(const struct ci_merkle *m,
     }
 }
 
-/* ── 1: the 23 real sealed sections ──────────────────────────────────── */
+/* ── 1: the real sealed sections, count derived from the manifest ───── */
 
 static void csi_real_sections(void)
 {
-    printf("\n  -- the 23 real sealed sections, over a mirror of the sealed "
+    printf("\n  -- the real sealed sections, over a mirror of the sealed "
            "file set --\n");
 
     char cwd[PATH_MAX];
@@ -633,13 +632,15 @@ static void csi_real_sections(void)
            comparable, mv.nsec, agreed, disagreed, skipped);
 
     CSI_CHECK("every comparable section agrees", disagreed == 0);
-    CSI_CHECK("enough sections were genuinely comparable",
-              comparable >= CSI_MIN_COMPARABLE);
+    CSI_CHECK("at least 90% of sections were genuinely comparable",
+              mv.nsec > 0 &&
+              comparable * 100U >=
+                  mv.nsec * CSI_MIN_COMPARABLE_PERCENT);
 
-    /* The whole-tree roots are expected NOT to be comparable: three sealed
-     * files are not indexable source. Asserting that they differ is a positive
-     * statement about WHY, not a shrug — if they ever became equal the input
-     * sets would have converged and CSI_MIN_COMPARABLE should be 23. */
+    /* The whole-tree roots are expected NOT to be comparable because some
+     * sealed files are not indexable source. Asserting that they differ is a
+     * positive statement about WHY, not a shrug — if they ever became equal
+     * the input sets would have converged and every section should compare. */
     struct csi_verdict rootv = csi_classify(m, &seal, "");
     struct ci_merkle_node croot;
     bool rootfound = false;
