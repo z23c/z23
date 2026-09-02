@@ -4,6 +4,8 @@
  */
 #include "zdogview/zdogview.h"
 
+#include <stdbool.h>
+#include <stddef.h>
 #include <string.h>
 
 static uint32_t zv_u32(const uint8_t *p)
@@ -119,23 +121,32 @@ int zdogview_seek(const uint8_t *buf, size_t len, const zdogview_verified *v,
     return ZDOGVIEW_OK;
 }
 
-static void zv_put(zdogview_frame *f, int x, int y, uint8_t r, uint8_t g,
-                   uint8_t b)
+typedef struct {
+    uint8_t *rgb;
+    unsigned width;
+    unsigned height;
+} zv_fb;
+
+static void zv_put(zv_fb *f, int x, int y, uint8_t r, uint8_t g, uint8_t b)
 {
-    if (x < 0 || y < 0 || x >= (int)ZDOGVIEW_WIDTH ||
-        y >= (int)ZDOGVIEW_HEIGHT)
+    if (!f || !f->rgb || x < 0 || y < 0 || x >= (int)f->width ||
+        y >= (int)f->height)
         return;
-    uint8_t *p = &f->rgb[((size_t)y * ZDOGVIEW_WIDTH + (size_t)x) * 3u];
+    uint8_t *p = &f->rgb[((size_t)y * (size_t)f->width + (size_t)x) * 3u];
     p[0] = r;
     p[1] = g;
     p[2] = b;
 }
 
-static void zv_project(int32_t x, int32_t y, int32_t z, int *sx, int *sy)
+/* 320x180 identity: (x-z)/8000, (x+z)/16000, y/8000. */
+static void zv_project(const zv_fb *f, int32_t x, int32_t y, int32_t z,
+                       int *sx, int *sy)
 {
-    *sx = (int)((int)ZDOGVIEW_WIDTH / 2 + ((int64_t)x - (int64_t)z) / 8000);
-    *sy = (int)((int)ZDOGVIEW_HEIGHT / 2 + ((int64_t)x + (int64_t)z) / 16000 -
-                (int64_t)y / 8000);
+    *sx = (int)((int64_t)f->width / 2 +
+                ((int64_t)x - (int64_t)z) * (int64_t)f->width / 2560000);
+    *sy = (int)((int64_t)f->height / 2 +
+                ((int64_t)x + (int64_t)z) * (int64_t)f->height / 2880000 -
+                (int64_t)y * (int64_t)f->height / 1440000);
 }
 
 static int64_t zv_edge(int x0, int y0, int x1, int y1, int x, int y)
@@ -143,8 +154,8 @@ static int64_t zv_edge(int x0, int y0, int x1, int y1, int x, int y)
     return (int64_t)(x - x0) * (y1 - y0) - (int64_t)(y - y0) * (x1 - x0);
 }
 
-static void zv_tri(zdogview_frame *f, int x0, int y0, int x1, int y1, int x2,
-                   int y2, uint8_t r, uint8_t g, uint8_t b)
+static void zv_tri(zv_fb *f, int x0, int y0, int x1, int y1, int x2, int y2,
+                   uint8_t r, uint8_t g, uint8_t b)
 {
     int minx = x0, maxx = x0, miny = y0, maxy = y0;
     if (x1 < minx)
@@ -167,10 +178,10 @@ static void zv_tri(zdogview_frame *f, int x0, int y0, int x1, int y1, int x2,
         minx = 0;
     if (miny < 0)
         miny = 0;
-    if (maxx >= (int)ZDOGVIEW_WIDTH)
-        maxx = (int)ZDOGVIEW_WIDTH - 1;
-    if (maxy >= (int)ZDOGVIEW_HEIGHT)
-        maxy = (int)ZDOGVIEW_HEIGHT - 1;
+    if (maxx >= (int)f->width)
+        maxx = (int)f->width - 1;
+    if (maxy >= (int)f->height)
+        maxy = (int)f->height - 1;
     const int64_t a01 = zv_edge(x0, y0, x1, y1, x2, y2);
     if (a01 == 0)
         return;
@@ -189,8 +200,8 @@ static void zv_tri(zdogview_frame *f, int x0, int y0, int x1, int y1, int x2,
     }
 }
 
-static void zv_line(zdogview_frame *f, int x0, int y0, int x1, int y1,
-                    uint8_t r, uint8_t g, uint8_t b)
+static void zv_line(zv_fb *f, int x0, int y0, int x1, int y1, uint8_t r,
+                    uint8_t g, uint8_t b)
 {
     int dx = x1 - x0;
     int dy = y1 - y0;
@@ -228,22 +239,22 @@ typedef struct {
     uint8_t wr, wg, wb;
 } zv_bldg;
 
-static void zv_quad(zdogview_frame *f, int x0, int y0, int x1, int y1, int x2,
-                    int y2, int x3, int y3, uint8_t r, uint8_t g, uint8_t b)
+static void zv_quad(zv_fb *f, int x0, int y0, int x1, int y1, int x2, int y2,
+                    int x3, int y3, uint8_t r, uint8_t g, uint8_t b)
 {
     zv_tri(f, x0, y0, x1, y1, x2, y2, r, g, b);
     zv_tri(f, x0, y0, x2, y2, x3, y3, r, g, b);
 }
 
-static void zv_box(zdogview_frame *f, const zv_bldg *b)
+static void zv_box(zv_fb *f, const zv_bldg *b)
 {
     const int32_t hx = b->w / 2, hz = b->d / 2;
     int t[4][2], gnd[4][2];
     const int32_t cx[4] = { b->x - hx, b->x + hx, b->x + hx, b->x - hx };
     const int32_t cz[4] = { b->z - hz, b->z - hz, b->z + hz, b->z + hz };
     for (int i = 0; i < 4; i++) {
-        zv_project(cx[i], b->h, cz[i], &t[i][0], &t[i][1]);
-        zv_project(cx[i], 0, cz[i], &gnd[i][0], &gnd[i][1]);
+        zv_project(f, cx[i], b->h, cz[i], &t[i][0], &t[i][1]);
+        zv_project(f, cx[i], 0, cz[i], &gnd[i][0], &gnd[i][1]);
     }
     /* Far sides then roof so nearer faces paint over. */
     zv_quad(f, t[3][0], t[3][1], t[2][0], t[2][1], gnd[2][0], gnd[2][1],
@@ -314,14 +325,14 @@ static void zv_city_sort(zv_bldg *b, unsigned n)
     }
 }
 
-static void zv_draw_ground(zdogview_frame *out)
+static void zv_draw_ground(zv_fb *out)
 {
     int gx[4], gy[4];
     const int32_t h = ZDOG_WORLD_HALF;
-    zv_project(-h, 0, -h, &gx[0], &gy[0]);
-    zv_project(h, 0, -h, &gx[1], &gy[1]);
-    zv_project(h, 0, h, &gx[2], &gy[2]);
-    zv_project(-h, 0, h, &gx[3], &gy[3]);
+    zv_project(out, -h, 0, -h, &gx[0], &gy[0]);
+    zv_project(out, h, 0, -h, &gx[1], &gy[1]);
+    zv_project(out, h, 0, h, &gx[2], &gy[2]);
+    zv_project(out, -h, 0, h, &gx[3], &gy[3]);
     zv_tri(out, gx[0], gy[0], gx[1], gy[1], gx[2], gy[2], 13, 17, 26);
     zv_tri(out, gx[0], gy[0], gx[2], gy[2], gx[3], gy[3], 13, 17, 26);
     zv_line(out, gx[0], gy[0], gx[1], gy[1], 36, 48, 68);
@@ -331,16 +342,16 @@ static void zv_draw_ground(zdogview_frame *out)
     for (int i = -2; i <= 2; i++) {
         int ax0, ay0, ax1, ay1, bx0, by0, bx1, by1;
         const int32_t g = (int32_t)i * (h / 2);
-        zv_project(-h, 0, g, &ax0, &ay0);
-        zv_project(h, 0, g, &ax1, &ay1);
-        zv_project(g, 0, -h, &bx0, &by0);
-        zv_project(g, 0, h, &bx1, &by1);
+        zv_project(out, -h, 0, g, &ax0, &ay0);
+        zv_project(out, h, 0, g, &ax1, &ay1);
+        zv_project(out, g, 0, -h, &bx0, &by0);
+        zv_project(out, g, 0, h, &bx1, &by1);
         zv_line(out, ax0, ay0, ax1, ay1, 26, 36, 50);
         zv_line(out, bx0, by0, bx1, by1, 26, 36, 50);
     }
 }
 
-static void zv_draw_plane(zdogview_frame *out, const zdog_plane *p)
+static void zv_draw_plane(zv_fb *out, const zdog_plane *p)
 {
     const int16_t sy = zdog_sin16(p->yaw);
     const int16_t cy = zdog_cos16(p->yaw);
@@ -359,12 +370,12 @@ static void zv_draw_plane(zdogview_frame *out, const zdog_plane *p)
     const int32_t ry = p->y;
     const int32_t rz = p->z + sy * 5000 / 32768 - fz * 4000 / 32768;
     int x0, y0, x1, y1, x2, y2, sx, sy2;
-    zv_project(p->x, 0, p->z, &sx, &sy2);
+    zv_project(out, p->x, 0, p->z, &sx, &sy2);
     zv_put(out, sx, sy2, 0, 0, 0);
     zv_put(out, sx + 1, sy2, 0, 0, 0);
-    zv_project(nx, ny, nz, &x0, &y0);
-    zv_project(lx, ly, lz, &x1, &y1);
-    zv_project(rx, ry, rz, &x2, &y2);
+    zv_project(out, nx, ny, nz, &x0, &y0);
+    zv_project(out, lx, ly, lz, &x1, &y1);
+    zv_project(out, rx, ry, rz, &x2, &y2);
     if (!p->alive)
         zv_tri(out, x0, y0, x1, y1, x2, y2, 61, 74, 92);
     else if (p->team == 0)
@@ -373,15 +384,15 @@ static void zv_draw_plane(zdogview_frame *out, const zdog_plane *p)
         zv_tri(out, x0, y0, x1, y1, x2, y2, 87, 166, 255);
 }
 
-static void zv_draw_shots(zdogview_frame *out, const zdog_match *m)
+static void zv_draw_shots(zv_fb *out, const zdog_match *m)
 {
     for (unsigned i = 0; i < ZDOG_MAX_SHOTS; i++) {
         const zdog_shot *s = &m->shots[i];
         if (!s->active)
             continue;
         int hx, hy, tx, ty;
-        zv_project(s->x, s->y, s->z, &hx, &hy);
-        zv_project(s->x - s->vx / 60, s->y - s->vy / 60, s->z - s->vz / 60,
+        zv_project(out, s->x, s->y, s->z, &hx, &hy);
+        zv_project(out, s->x - s->vx / 60, s->y - s->vy / 60, s->z - s->vz / 60,
                    &tx, &ty);
         if (s->team == 0)
             zv_line(out, tx, ty, hx, hy, 255, 200, 120);
@@ -392,7 +403,7 @@ static void zv_draw_shots(zdogview_frame *out, const zdog_match *m)
     }
 }
 
-static void zv_draw_bursts(zdogview_frame *out, uint64_t tick,
+static void zv_draw_bursts(zv_fb *out, uint64_t tick,
                            const zdogview_kill *kills, unsigned n)
 {
     if (!kills)
@@ -402,9 +413,9 @@ static void zv_draw_bursts(zdogview_frame *out, uint64_t tick,
         if (tick < k->tick || tick >= k->tick + ZV_BURST_TICKS)
             continue;
         const unsigned age = (unsigned)(tick - k->tick);
-        const int rad = 1 + (int)(age / 6u);
+        const int rad = (1 + (int)(age / 6u)) * (int)out->height / 180;
         int sx, sy;
-        zv_project(k->x, k->y, k->z, &sx, &sy);
+        zv_project(out, k->x, k->y, k->z, &sx, &sy);
         const uint8_t r = 255, g = (uint8_t)(150u + (45u - age) * 2u), b = 60;
         for (int dy = -rad; dy <= rad; dy++) {
             for (int dx = -rad; dx <= rad; dx++) {
@@ -424,7 +435,7 @@ static const uint8_t zv_font[10][5] = {
     { 0x7, 0x5, 0x7, 0x5, 0x7 }, { 0x7, 0x5, 0x7, 0x1, 0x7 }
 };
 
-static void zv_glyph(zdogview_frame *out, int x, int y, unsigned d, uint8_t r,
+static void zv_glyph(zv_fb *out, int x, int y, unsigned d, uint8_t r,
                      uint8_t g, uint8_t b)
 {
     if (d > 9)
@@ -439,27 +450,36 @@ static void zv_glyph(zdogview_frame *out, int x, int y, unsigned d, uint8_t r,
     }
 }
 
-static void zv_num(zdogview_frame *out, int x, int y, unsigned v, uint8_t r,
-                   uint8_t g, uint8_t b)
+static void zv_num(zv_fb *out, int x, int y, unsigned v, uint8_t r, uint8_t g,
+                   uint8_t b)
 {
     unsigned d0 = (v / 10u) % 10u, d1 = v % 10u;
     zv_glyph(out, x, y, d0, r, g, b);
     zv_glyph(out, x + 5, y, d1, r, g, b);
 }
 
-static void zv_draw_hud(zdogview_frame *out, const zdog_match *m)
+static void zv_draw_hud(zv_fb *out, const zdog_match *m)
 {
     zv_num(out, 4, 4, m->score[0] % 100u, 255, 107, 94);
-    zv_num(out, (int)ZDOGVIEW_WIDTH - 14, 4, m->score[1] % 100u, 87, 166,
-           255);
+    zv_num(out, (int)out->width - 14, 4, m->score[1] % 100u, 87, 166, 255);
     const unsigned secs = (unsigned)(m->tick / 60u);
-    zv_num(out, (int)ZDOGVIEW_WIDTH / 2 - 12, 4, (secs / 60u) % 100u, 110,
-           231, 160);
-    zv_put(out, (int)ZDOGVIEW_WIDTH / 2 - 2, 8, 110, 231, 160);
-    zv_num(out, (int)ZDOGVIEW_WIDTH / 2 + 2, 4, secs % 60u, 110, 231, 160);
+    zv_num(out, (int)out->width / 2 - 12, 4, (secs / 60u) % 100u, 110, 231,
+           160);
+    zv_put(out, (int)out->width / 2 - 2, 8, 110, 231, 160);
+    zv_num(out, (int)out->width / 2 + 2, 4, secs % 60u, 110, 231, 160);
 }
 
-static void zv_draw_match(const zdog_match *m, zdogview_frame *out)
+static void zv_clear(zv_fb *out)
+{
+    const size_t n = (size_t)out->width * (size_t)out->height * 3u;
+    for (size_t i = 0; i < n; i += 3u) {
+        out->rgb[i] = 8;
+        out->rgb[i + 1u] = 11;
+        out->rgb[i + 2u] = 18;
+    }
+}
+
+static void zv_draw_match(zv_fb *out, const zdog_match *m)
 {
     zv_draw_ground(out);
     for (unsigned i = 0; i < m->num_planes; i++)
@@ -467,26 +487,12 @@ static void zv_draw_match(const zdog_match *m, zdogview_frame *out)
     zv_draw_shots(out, m);
 }
 
-void zdogview_render(const zdog_match *m, zdogview_frame *out)
+static void zv_draw_city_scene(zv_fb *out, const zdog_match *m, uint64_t seed,
+                               const zdogview_kill *kills, unsigned num_kills,
+                               bool hud)
 {
-    if (!m || !out)
-        return;
-    memset(out->rgb, 0, sizeof(out->rgb));
-    for (unsigned i = 0; i < sizeof(out->rgb); i += 3u) {
-        out->rgb[i] = 8;
-        out->rgb[i + 1u] = 11;
-        out->rgb[i + 2u] = 18;
-    }
-    zv_draw_match(m, out);
-}
-
-void zdogview_render_scene(const zdog_match *m, uint64_t seed,
-                           const zdogview_kill *kills, unsigned num_kills,
-                           zdogview_frame *out)
-{
-    if (!m || !out)
-        return;
-    zdogview_render(m, out);
+    zv_clear(out);
+    zv_draw_match(out, m);
     zv_bldg city[ZV_CITY_MAX];
     unsigned n = zv_city_fill(seed, city, ZV_CITY_MAX);
     zv_city_sort(city, n);
@@ -497,5 +503,39 @@ void zdogview_render_scene(const zdog_match *m, uint64_t seed,
         zv_draw_plane(out, &m->planes[i]);
     zv_draw_shots(out, m);
     zv_draw_bursts(out, m->tick, kills, num_kills);
-    zv_draw_hud(out, m);
+    if (hud)
+        zv_draw_hud(out, m);
+}
+
+void zdogview_render(const zdog_match *m, zdogview_frame *out)
+{
+    if (!m || !out)
+        return;
+    zv_fb fb = { out->rgb, ZDOGVIEW_WIDTH, ZDOGVIEW_HEIGHT };
+    zv_clear(&fb);
+    zv_draw_match(&fb, m);
+}
+
+void zdogview_render_scene(const zdog_match *m, uint64_t seed,
+                           const zdogview_kill *kills, unsigned num_kills,
+                           zdogview_frame *out)
+{
+    if (!m || !out)
+        return;
+    zv_fb fb = { out->rgb, ZDOGVIEW_WIDTH, ZDOGVIEW_HEIGHT };
+    zv_draw_city_scene(&fb, m, seed, kills, num_kills, true);
+}
+
+int zdogview_render_rgb(const zdog_match *m, uint64_t seed,
+                        const zdogview_kill *kills, unsigned num_kills,
+                        uint8_t *rgb, unsigned width, unsigned height)
+{
+    if (!m || !rgb)
+        return ZDOGVIEW_BAD_ARG;
+    if (width < ZDOGVIEW_RGB_MIN || height < ZDOGVIEW_RGB_MIN ||
+        width > ZDOGVIEW_RGB_MAX || height > ZDOGVIEW_RGB_MAX)
+        return ZDOGVIEW_BAD_ARG;
+    zv_fb fb = { rgb, width, height };
+    zv_draw_city_scene(&fb, m, seed, kills, num_kills, false);
+    return ZDOGVIEW_OK;
 }

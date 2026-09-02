@@ -21,13 +21,19 @@ void zdogview_render(const zdog_match *m, zdogview_frame *out);
 void zdogview_render_scene(const zdog_match *m, uint64_t seed,
                            const zdogview_kill *kills, unsigned num_kills,
                            zdogview_frame *out);
+int zdogview_render_rgb(const zdog_match *m, uint64_t seed,
+                        const zdogview_kill *kills, unsigned num_kills,
+                        uint8_t *rgb, unsigned width, unsigned height);
 ```
 
 `zdogview verify <replay>` prints the outcome and the package FNV-1a/64
 state checksum. `zdogview render <replay> --out frame.ppm` writes one
-320×180 P6 PPM of the full scene. A local raylib window is not part of
-this package; it is an optional display of the same verified match, and
-it composites this framebuffer as the hosted C23 view.
+320×180 P6 PPM of the full scene. `zdogview_render_rgb` fills a
+caller-owned RGB8 buffer (16×16 through 4096×4096) with the same integer
+scene and no 3×5 HUD, so a host can composite Inter typography at
+1280×720. A local raylib window is not part of this package; it is an
+optional display of the same verified match, and it composites this
+framebuffer as the hosted C23 view.
 
 Depends on `zdogfight/zdogfight` and `zprng/zprng`.
 Copyright 2026 Rhett Creighton. Apache-2.0.

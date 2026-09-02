@@ -1,6 +1,6 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
- * arena_view: interactive 3D replay viewer for the ZCODE Arena (raylib).
+ * arena_view: interactive 3D replay viewer for the Z23 Arena (raylib).
  *
  * Re-simulates one canonical zdogfight replay (the format written by
  * tools/arena_runner.c) with no pilots. A window opens only after the
@@ -42,9 +42,16 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifdef ARENA_VIEW_RAYLIB_STUB
+#include "arena_view_raylib_stub.h"
+#else
 #include <raylib.h>
 #include <raymath.h>
 #include <rlgl.h>
+#endif
+
+#include "../vendor/typography/inter_medium_ascii.inc"
+#include "../vendor/typography/inter_semibold_ascii.inc"
 
 #include "base/hex.h"
 #include "base/safe_alloc.h"
@@ -693,6 +700,54 @@ static const char *av_winner_name(uint8_t winner)
     }
 }
 
+static Font av_font_md;
+static Font av_font_bd;
+static bool av_font_ok;
+
+static void av_fonts_load(void)
+{
+    av_font_md = LoadFontFromMemory(
+        ".ttf", g_zcl_inter_medium_ascii, (int)g_zcl_inter_medium_ascii_len, 32,
+        NULL, 0);
+    av_font_bd = LoadFontFromMemory(
+        ".ttf", g_zcl_inter_semibold_ascii,
+        (int)g_zcl_inter_semibold_ascii_len, 48, NULL, 0);
+    av_font_ok = IsFontValid(av_font_md) && IsFontValid(av_font_bd);
+    if (!av_font_ok)
+        fprintf(stderr,
+                "arena_view: Inter faces unavailable; falling back to "
+                "raylib DrawText\n");
+}
+
+static void av_fonts_unload(void)
+{
+    if (IsFontValid(av_font_md))
+        UnloadFont(av_font_md);
+    if (IsFontValid(av_font_bd))
+        UnloadFont(av_font_bd);
+    av_font_ok = false;
+}
+
+static int av_measure(const char *s, int size, bool strong)
+{
+    if (av_font_ok) {
+        Font f = strong ? av_font_bd : av_font_md;
+        Vector2 m = MeasureTextEx(f, s, (float)size, 0.0f);
+        return (int)m.x;
+    }
+    return MeasureText(s, size);
+}
+
+static void av_text(const char *s, int x, int y, int size, Color c, bool strong)
+{
+    if (av_font_ok) {
+        Font f = strong ? av_font_bd : av_font_md;
+        DrawTextEx(f, s, (Vector2){ (float)x, (float)y }, (float)size, 0.0f, c);
+        return;
+    }
+    DrawText(s, x, y, size, c);
+}
+
 static void av_draw_hud(const av_view *vw)
 {
     const av_verified *v = vw->v;
@@ -701,36 +756,38 @@ static void av_draw_hud(const av_view *vw)
     const Color red_col = { 255, 107, 94, 255 };
     const Color blue_col = { 87, 166, 255, 255 };
 
+    DrawRectangle(0, 0, GetScreenWidth(), 92, (Color){ 11, 15, 22, 220 });
+    DrawRectangle(0, 90, GetScreenWidth(), 2, (Color){ 36, 48, 68, 255 });
     /* Team scores. */
-    DrawText(TextFormat("%u", vw->m.score[0]), 28, 22, 44, red_col);
-    DrawText(vw->red_label, 30, 72, 20, red_col);
-    const int bw = MeasureText(TextFormat("%u", vw->m.score[1]), 44);
-    DrawText(TextFormat("%u", vw->m.score[1]), GetScreenWidth() - bw - 28,
-             22, 44, blue_col);
-    const int blw = MeasureText(vw->blue_label, 20);
-    DrawText(vw->blue_label, GetScreenWidth() - blw - 30, 72, 20,
-             blue_col);
+    av_text(TextFormat("%u", vw->m.score[0]), 28, 10, 48, red_col, true);
+    av_text(vw->red_label, 28, 62, 16, red_col, false);
+    const char *blue_score = TextFormat("%u", vw->m.score[1]);
+    const int bw = av_measure(blue_score, 48, true);
+    av_text(blue_score, GetScreenWidth() - bw - 28, 10, 48, blue_col, true);
+    const int blw = av_measure(vw->blue_label, 16, false);
+    av_text(vw->blue_label, GetScreenWidth() - blw - 28, 62, 16, blue_col,
+            false);
     /* Clock / phase. */
     const unsigned secs = (unsigned)(vw->tick / 60u);
     const char *speed_tag =
         vw->playing ? TextFormat("x%g", (double)vw->speed) : "PAUSED";
     const char *clock = TextFormat("T+%02u:%02u  %s", secs / 60u, secs % 60u,
                                    speed_tag);
-    DrawText(clock, GetScreenWidth() / 2 - MeasureText(clock, 24) / 2, 24,
-             24, hud_green);
+    av_text(clock, GetScreenWidth() / 2 - av_measure(clock, 22, true) / 2, 14,
+            22, hud_green, true);
 
     if (vw->m.phase == ZDOG_PHASE_DONE) {
         const char *banner = TextFormat(
             "%s %u-%u", av_winner_name(v->final_m.winner),
             vw->m.score[0], vw->m.score[1]);
-        const int fs = 64;
-        const int bwide = MeasureText(banner, fs);
+        const int fs = 48;
+        const int bwide = av_measure(banner, fs, true);
         const Color banner_col =
             v->final_m.winner == ZDOG_WINNER_BLUE ? blue_col
             : v->final_m.winner == ZDOG_WINNER_RED ? red_col
                                                    : hud_dim;
-        DrawText(banner, GetScreenWidth() / 2 - bwide / 2,
-                 GetScreenHeight() / 3, fs, banner_col);
+        av_text(banner, GetScreenWidth() / 2 - bwide / 2,
+                GetScreenHeight() / 3, fs, banner_col, true);
     }
 
     if (vw->cam == AV_CAM_COCKPIT) {
@@ -746,23 +803,21 @@ static void av_draw_hud(const av_view *vw)
     /* Followed-plane panel. */
     const zdog_plane *pl = &vw->m.planes[vw->follow];
     const int px = 28, py = GetScreenHeight() - 118;
-    DrawText(TextFormat("PLANE %u/%u  %s", vw->follow + 1u,
-                        v->num_planes,
-                        pl->team == 0 ? vw->red_label : vw->blue_label),
-             px, py, 20, hud_dim);
-    DrawText(TextFormat("ALT %5dm   SPD %3dm/s   HDG %3ddeg",
-                        (int)(pl->y * AV_MM_TO_M),
-                        pl->speed / 1000,
-                        (int)((float)pl->yaw / 65536.0f * 360.0f)),
-             px, py + 26, 22, hud_green);
+    av_text(TextFormat("PLANE %u/%u  %s", vw->follow + 1u, v->num_planes,
+                       pl->team == 0 ? vw->red_label : vw->blue_label),
+            px, py, 16, hud_dim, false);
+    av_text(TextFormat("ALT %5dm   SPD %3dm/s   HDG %3ddeg",
+                       (int)(pl->y * AV_MM_TO_M), pl->speed / 1000,
+                       (int)((float)pl->yaw / 65536.0f * 360.0f)),
+            px, py + 22, 16, hud_green, false);
     /* Health bar. */
     DrawRectangle(px, py + 56, 220, 14, (Color){ 30, 38, 50, 255 });
     const float hf = (float)pl->health / 100.0f;
     const Color hc = pl->team == 0 ? red_col : blue_col;
     DrawRectangle(px + 2, py + 58, (int)(216.0f * hf), 10, hc);
-    DrawText(pl->alive ? TextFormat("HULL %d", pl->health) : "DESTROYED",
-             px + 232, py + 54, 18,
-             pl->alive ? hud_dim : (Color){ 255, 120, 90, 255 });
+    av_text(pl->alive ? TextFormat("HULL %d", pl->health) : "DESTROYED",
+            px + 232, py + 54, 14,
+            pl->alive ? hud_dim : (Color){ 255, 120, 90, 255 }, true);
 
     /* Camera + help, bottom-right. */
     static const char *cam_names[] = { "CHASE", "COCKPIT", "ORBIT",
@@ -774,14 +829,17 @@ static void av_draw_hud(const av_view *vw)
             : "TAB plane  C cam  SPACE pause  F step";
     const char *seek =
         "LEFT/RIGHT seek 1s   PGUP/PGDN seek 10s   HOME/END ends";
-    DrawText(TextFormat("[%s]", cam_names[vw->cam]), GetScreenWidth() - 150,
-             py, 20, hud_green);
-    DrawText(help1, GetScreenWidth() - MeasureText(help1, 18) - 28,
-             py + 26, 18, hud_dim);
-    DrawText(seek, GetScreenWidth() - MeasureText(seek, 18) - 28,
-             py + 48, 18, hud_dim);
-    DrawText(help2, GetScreenWidth() - MeasureText(help2, 18) - 28,
-             py + 70, 18, hud_dim);
+    const char *cam_line = TextFormat("CAMERA  %s", cam_names[vw->cam]);
+    av_text(cam_line, GetScreenWidth() / 2 - av_measure(cam_line, 16, true) / 2,
+            44, 16, hud_green, true);
+    av_text("Z23 ARENA", GetScreenWidth() / 2 - av_measure("Z23 ARENA", 18, true) / 2,
+            66, 18, hud_green, true);
+    av_text(help1, GetScreenWidth() - av_measure(help1, 14, false) - 28, py + 26,
+            14, hud_dim, false);
+    av_text(seek, GetScreenWidth() - av_measure(seek, 14, false) - 28, py + 48,
+            14, hud_dim, false);
+    av_text(help2, GetScreenWidth() - av_measure(help2, 14, false) - 28, py + 70,
+            14, hud_dim, false);
 
     /* Verified tag: the recomputed roots are the point of the picture. */
     char rr[SHA3_256_OUTPUT_SIZE * 2u + 1u];
@@ -795,6 +853,7 @@ static void av_draw_hud(const av_view *vw)
     DrawRectangleLinesEx((Rectangle){ (float)mx, (float)my, (float)map_s,
                                       (float)map_s },
                          2, (Color){ 36, 48, 68, 255 });
+    av_text("MINIMAP", mx, my - 22, 14, hud_green, true);
     for (int g = 1; g < 5; g++) {
         const int d = map_s * g / 5;
         DrawLine(mx + d, my, mx + d, my + map_s,
@@ -851,8 +910,8 @@ static void av_draw_hud(const av_view *vw)
         "VERIFIED  replay %.16s..  state %.16s..  tick %llu/%llu", rr, sr,
         (unsigned long long)vw->tick,
         (unsigned long long)v->recorded_ticks);
-    DrawText(line, GetScreenWidth() / 2 - MeasureText(line, 16) / 2,
-             GetScreenHeight() - 26, 16, hud_green);
+    av_text(line, GetScreenWidth() / 2 - av_measure(line, 14, false) / 2,
+            GetScreenHeight() - 26, 14, hud_green, false);
 }
 
 /* Composite the hosted C23 integer view (zdogview) into the local window.
@@ -874,7 +933,8 @@ static void av_draw_hosted(Texture2D *tex, const av_view *vw)
     const int y = GetScreenHeight() - (int)ZDOGVIEW_HEIGHT - 36;
     DrawRectangle(x - 2, y - 18, (int)ZDOGVIEW_WIDTH + 4,
                   (int)ZDOGVIEW_HEIGHT + 22, (Color){ 11, 15, 22, 205 });
-    DrawText("C23 HOSTED VIEW", x, y - 16, 12, (Color){ 110, 231, 160, 255 });
+    av_text("C23 HOSTED VIEW", x, y - 16, 14, (Color){ 110, 231, 160, 255 },
+            true);
     DrawTexture(*tex, x, y, WHITE);
     DrawRectangleLines(x - 1, y - 1, (int)ZDOGVIEW_WIDTH + 2,
                        (int)ZDOGVIEW_HEIGHT + 2, (Color){ 36, 48, 68, 255 });
@@ -1143,7 +1203,7 @@ int main(int argc, char **argv)
     SetConfigFlags(FLAG_MSAA_4X_HINT);
     if (!show_window)
         SetConfigFlags(FLAG_WINDOW_HIDDEN);
-    InitWindow(1280, 720, "ZCODE Arena — verified replay viewer");
+    InitWindow(1280, 720, "Z23 Arena");
     if (!IsWindowReady()) {
         av_err("display/GL context failed",
                show_window ? "visible window" : "hidden window");
@@ -1153,6 +1213,7 @@ int main(int argc, char **argv)
         return 4;
     }
     SetTargetFPS(60);
+    av_fonts_load();
     Image hosted_blank =
         GenImageColor((int)ZDOGVIEW_WIDTH, (int)ZDOGVIEW_HEIGHT, BLACK);
     Texture2D hosted_tex = LoadTextureFromImage(hosted_blank);
@@ -1214,6 +1275,7 @@ int main(int argc, char **argv)
     }
     if (IsTextureValid(hosted_tex))
         UnloadTexture(hosted_tex);
+    av_fonts_unload();
     CloseWindow();
 
     free(ver);

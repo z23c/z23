@@ -28,6 +28,8 @@ extern "C" {
 
 #define ZDOGVIEW_WIDTH 320u
 #define ZDOGVIEW_HEIGHT 180u
+#define ZDOGVIEW_RGB_MIN 16u
+#define ZDOGVIEW_RGB_MAX 4096u
 #define ZDOGVIEW_MAX_KILLS 1024u
 
 #define ZDOGVIEW_OK 0
@@ -75,6 +77,15 @@ void zdogview_render(const zdog_match *m, zdogview_frame *out);
 void zdogview_render_scene(const zdog_match *m, uint64_t seed,
                            const zdogview_kill *kills, unsigned num_kills,
                            zdogview_frame *out);
+
+/* Integer isometric scene into a caller-owned RGB8 buffer of `width` by
+ * `height` (16..4096). Same city, planes, tracers and bursts as
+ * zdogview_render_scene; the 3x5 score HUD is omitted so a host can
+ * composite typography. Returns ZDOGVIEW_OK, or ZDOGVIEW_BAD_ARG when
+ * rgb is NULL or the size is outside the bound. */
+int zdogview_render_rgb(const zdog_match *m, uint64_t seed,
+                        const zdogview_kill *kills, unsigned num_kills,
+                        uint8_t *rgb, unsigned width, unsigned height);
 
 #ifdef __cplusplus
 }

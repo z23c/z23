@@ -3,10 +3,10 @@
 #
 # Driver for `make arena-view` and `make arena-view-check`.
 #
-# Plays the pinned seed-7 3v3 demo (or views REPLAY=<file>) through
-# tools/arena_view.c. Interactive mode always passes --show. CHECK=1 never
-# opens a window: it refuses incomplete argv and requires --check-only to
-# re-derive the pinned demo roots.
+# Plays the pinned seed-7 3v3 demo (or views REPLAY=<file>). CHECK=1 never
+# opens a window: it re-derives the pinned demo roots and writes a
+# deterministic 1280x720 PNG from the hosted C23 framebuffer + Inter HUD.
+# The optional raylib window is opened only when that binary is present.
 
 set -euo pipefail
 
@@ -17,13 +17,16 @@ cd "$REPO_ROOT"
 BIN="${ZCL_BIN_DIR:-$REPO_ROOT/build/bin}"
 RUNNER="$BIN/arena_runner"
 VIEW="$BIN/arena_view"
+FRAME="$BIN/arena_frame"
 ZDOGVIEW="$BIN/zdogview"
 PILOT_RED="$BIN/pilot_zdogace"
 PILOT_BLUE="$BIN/pilot_zdogdrone"
 REPLAY_OUT="$BIN/arena-view-demo.replay"
+PNG_OUT="$BIN/arena-view.png"
+PNG_OUT_B="$BIN/arena-view.b.png"
 
-RED_LABEL="Red Ace — zdogace 0.1.1"
-BLUE_LABEL="Blue Drone — zdogdrone 0.1.0"
+RED_LABEL="Red Ace - zdogace 0.1.1"
+BLUE_LABEL="Blue Drone - zdogdrone 0.1.0"
 REF_REPLAY_ROOT=05ed352dbb2213aad289cdf403d424d18d9ae075db57252a52c4e745a25e8396
 REF_STATE_ROOT=e4b37a9b94547cead91a7d4ae2a63b0385b29a99bb603bd0ac3519cebd270ebd
 
@@ -62,15 +65,27 @@ av_play_demo()
     [ -f "$REPLAY_OUT" ] || av_die "no replay written"
 }
 
-[ -x "$VIEW" ] || av_die "missing $VIEW (build tools/arena-view first)"
+av_png_magic()
+{
+    local path="$1"
+    [ -s "$path" ] || av_die "PNG was empty: $path"
+    local sig
+    sig="$(dd if="$path" bs=8 count=1 2>/dev/null | od -An -tx1)"
+    # PNG signature 89 50 4e 47 0d 0a 1a 0a
+    case "$sig" in
+        *"89 50 4e 47 0d 0a 1a 0a"*) ;;
+        *) av_die "not a PNG signature: $path ($sig)" ;;
+    esac
+}
+
+[ -x "$FRAME" ] || av_die "missing $FRAME (build tools/arena-frame first)"
 [ -x "$RUNNER" ] || av_die "missing $RUNNER"
 
 if [ "${CHECK:-}" = 1 ]; then
-    av_expect_exit 0 "$VIEW" --help
-    av_expect_exit 2 "$VIEW"
-    av_expect_exit 2 "$VIEW" --frames
-    av_expect_exit 2 "$VIEW" --seek
-    av_expect_exit 2 "$VIEW" --cam
+    av_expect_exit 0 "$FRAME" --help
+    av_expect_exit 2 "$FRAME"
+    av_expect_exit 2 "$FRAME" --tick
+    av_expect_exit 2 "$FRAME" --png
     av_play_demo
     if [ -x "$ZDOGVIEW" ]; then
         "$ZDOGVIEW" verify "$REPLAY_OUT" >/dev/null || av_die "zdogview verify failed"
@@ -79,8 +94,9 @@ if [ "${CHECK:-}" = 1 ]; then
         [ -s "$ppm" ] || av_die "hosted PPM was empty"
         [ "$(head -1 "$ppm")" = "P6" ] || av_die "hosted view is not a P6 PPM"
     fi
-    report="$("$VIEW" --replay "$REPLAY_OUT" --check-only --red-label "$RED_LABEL" \
-        --blue-label "$BLUE_LABEL")"
+    rm -f "$PNG_OUT" "$PNG_OUT_B"
+    report="$("$FRAME" --replay "$REPLAY_OUT" --check-only --png "$PNG_OUT" \
+        --red-label "$RED_LABEL" --blue-label "$BLUE_LABEL")"
     printf '%s\n' "$report"
     case "$report" in
         *"replay_root=$REF_REPLAY_ROOT"*) ;;
@@ -90,14 +106,44 @@ if [ "${CHECK:-}" = 1 ]; then
         *"state_root=$REF_STATE_ROOT"*) ;;
         *) av_die "state root mismatch: $report" ;;
     esac
-    printf 'arena-view-check: ok\n'
+    case "$report" in
+        *"png=1280x720"*) ;;
+        *) av_die "PNG size missing from report: $report" ;;
+    esac
+    case "$report" in
+        *"fonts=inter"*) ;;
+        *) av_die "Inter HUD missing from report: $report" ;;
+    esac
+    av_png_magic "$PNG_OUT"
+    "$FRAME" --replay "$REPLAY_OUT" --png "$PNG_OUT_B" \
+        --red-label "$RED_LABEL" --blue-label "$BLUE_LABEL" >/dev/null
+    av_png_magic "$PNG_OUT_B"
+    cmp -s "$PNG_OUT" "$PNG_OUT_B" || av_die "1280x720 PNG was not byte-identical across two renders"
+    rm -f "$PNG_OUT_B"
+    printf 'arena-view-check: ok png=%s\n' "$PNG_OUT"
     exit 0
 fi
 
 if [ -n "${REPLAY:-}" ]; then
-    exec "$VIEW" --show --replay "$REPLAY"
+    [ -f "$REPLAY" ] || av_die "replay not found: $REPLAY"
+    "$FRAME" --replay "$REPLAY" --png "$PNG_OUT" \
+        --red-label "$RED_LABEL" --blue-label "$BLUE_LABEL"
+    if [ -x "$VIEW" ]; then
+        exec "$VIEW" --show --replay "$REPLAY"
+    fi
+    printf 'arena-view: wrote %s (1280x720 hosted C23 framebuffer + Inter HUD)\n' "$PNG_OUT"
+    printf 'arena-view: optional raylib window was not built (pkg-config raylib missing).\n'
+    exit 0
 fi
 
 av_play_demo
-exec "$VIEW" --show --replay "$REPLAY_OUT" \
+"$FRAME" --replay "$REPLAY_OUT" --png "$PNG_OUT" \
     --red-label "$RED_LABEL" --blue-label "$BLUE_LABEL"
+if [ -x "$VIEW" ]; then
+    exec "$VIEW" --show --replay "$REPLAY_OUT" \
+        --red-label "$RED_LABEL" --blue-label "$BLUE_LABEL"
+fi
+printf 'arena-view: wrote %s (1280x720 hosted C23 framebuffer + Inter HUD)\n' "$PNG_OUT"
+printf 'arena-view: optional raylib window was not built (pkg-config raylib missing).\n'
+printf 'arena-view: the measured picture is that PNG; Linux software path only on this host.\n'
+exit 0

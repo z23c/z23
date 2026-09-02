@@ -50,45 +50,50 @@ State-root chain:          657cbc598e8cfff4e3a67e0b11de17a6b576be686ae924149614e
 Those three roots are the acceptance. If your machine prints them, your machine
 ran the same match — not a similar one.
 
-## Watch it in 3D
+## Watch it
 
 ```bash
-make arena-view                    # play the demo match, then fly it
+make arena-view                    # play the demo match, then show it
 make arena-view REPLAY=/tmp/my.replay
-make arena-view-check              # argv refusals + --check-only vs pinned roots
+make arena-view-check              # roots + deterministic 1280x720 PNG
 ```
 
-`tools/arena_view.c` is an interactive raylib viewer over verified replays.
-It re-simulates the whole replay first and refuses — before any window opens —
-anything whose final state does not re-derive exactly; the HUD's VERIFIED line
-shows roots it recomputed itself, never copies from the file. Pixels never
-feed back into match state: rendering reads the integer core's output and
-nothing else.
+`make arena-view` is the one command. It plays the pinned demo, re-derives
+the match, and writes a 1280×720 PNG from the hosted C23 software
+framebuffer with Inter HUD (score, clock, camera, minimap, controls, roots,
+and the 320×180 hosted inset). When `pkg-config` finds raylib 6.0, it also
+opens the optional native window (`tools/arena_view.c`) with `--show`.
 
-Four cameras — CHASE (smoothed pursuit), COCKPIT (banked horizon with a
-reticle), ORBIT (drag/wheel), OVERVIEW (whole arena). TAB cycles planes, C
-cycles cameras, SPACE pauses, arrows seek, +/- sets speed. A live tactical
-minimap carries the contact sheet's overhead view into the corner; kill
-bursts are placed from the alive->dead transitions observed during
-verification; and the city skyline is generated from the replay's own seed
-through the arena PRNG, so the same replay shows the same city on every
-machine.
+The picture is a verified replay, not a diagnostic. HUD typography uses the
+bundled SIL-OFL Inter Medium and SemiBold Basic Latin subsets through the
+existing software canvas. If those faces cannot rasterize, the PNG path
+refuses instead of inventing glyphs. Roots on the footer are recomputed here
+from the replay bytes; pixels never write match state.
 
-`make arena-view` passes `--show` so the window is visible. The binary itself
-stays hidden unless you ask: automated runs use `--check-only` or
-`--frames N --screenshot f.png` and never grab the desktop. Requires raylib
-(`pkg-config raylib`); without it, every other arena target is unaffected.
-The lower-left inset is the hosted C23 `zdogview` framebuffer — city, tracers,
-bursts and score HUD from integer isometric math over the same verified
-replay — so a node that only fetched the package still has a picture.
+The optional raylib window adds chase/cockpit/orbit/overview cameras, TAB to
+cycle planes, C for camera, SPACE to pause, arrows to seek, +/- for speed.
+A live tactical minimap and the same hosted C23 inset sit on that window.
+Automated runs never need it: `make arena-view-check` uses `arena_frame`
+(no window) and compares two PNG renders for byte identity.
+
+Linux is the measured host for the software PNG path. The interactive raylib
+window is optional and was not measured on this host (raylib is not required
+and is not installed by the check). macOS can build the public node natively
+and should compile this software path; the raylib window is still optional
+there, and Linux Landlock/seccomp pilot confinement is unavailable — the
+demo already retries unconfined and the roots stay identical. Windows was
+not measured; the software compositor is portable C23, and the raylib
+window remains optional. Descriptor-bound A/B execution is a separate
+Linux-only node feature and is not part of this demo.
 
 Related targets:
 
 | Command | What it does |
 |---|---|
 | `make arena-demo` | play, verify, check the pinned roots, refuse a tampered replay |
-| `make arena-view` | play the demo match and open it in the 3D viewer (`REPLAY=` to view a file) |
-| `make arena-view-check` | refuse incomplete argv; re-derive the pinned demo roots with no window |
+| `make arena-view` | play the demo, write the 1280×720 Inter HUD PNG, and open the optional raylib window when present (`REPLAY=` to view a file) |
+| `make arena-view-check` | refuse incomplete argv; re-derive the pinned demo roots; write and byte-compare a 1280×720 PNG (no raylib, no window) |
+| `make tools/arena-frame` | hosted C23 1280×720 PNG compositor (`arena_frame --replay f --png out.png`) |
 | `make tools/zdogview` | C23 integer 3D CLI: `zdogview verify` / `zdogview render --out f.ppm` |
 | `make arena-svg` | regenerate `docs/assets/zcode-arena.svg` from a freshly verified match |
 | `make arena-svg-check` | fail if the committed artwork is stale |
@@ -106,7 +111,8 @@ Related targets:
 | [`contexts/commons/packages/zdogview`](../contexts/commons/packages/zdogview) | integer 3D view of a verified replay (C23, Apache-2.0; no raylib) |
 | [`tools/arena_runner.c`](../tools/arena_runner.c) | plays a match between two confined pilot processes; also verifies a replay |
 | [`tools/arena_svg.c`](../tools/arena_svg.c) | renders a verified replay to a deterministic SVG |
-| [`tools/arena_view.c`](../tools/arena_view.c) | local raylib window over `zdogview` (`make arena-view` passes `--show`) |
+| [`tools/arena_frame.c`](../tools/arena_frame.c) / [`tools/arena_hud.c`](../tools/arena_hud.c) | hosted C23 1280×720 PNG + Inter HUD (the measured picture; no raylib) |
+| [`tools/arena_view.c`](../tools/arena_view.c) | optional local raylib 6.0 window over `zdogview` (`make arena-view` passes `--show` when the binary exists) |
 
 Every Arena package is ordinary C23 under Apache-2.0 (Copyright 2026 Rhett
 Creighton). Any node can publish, discover, fetch, confined-build,
@@ -290,10 +296,11 @@ These are named because they are real, not because they are about to be fixed.
   envelopes over the same out-of-band channel.
 - **The artwork is a contact sheet, not an animation.** Six deterministic
   overhead snapshots, chosen by fixed rules over the re-simulation. The
-  interactive 3D view is [`tools/arena_view.c`](../tools/arena_view.c) —
-  local, optional, and not part of `make test` or the two-node swarm proof:
-  `make arena-view-check` re-derives the pinned roots without a window and
-  needs raylib installed; the committed artwork stays a byte-deterministic
+  interactive 3D window is [`tools/arena_view.c`](../tools/arena_view.c) —
+  local, optional raylib 6.0, and not part of `make test` or the two-node
+  swarm proof. `make arena-view-check` re-derives the pinned roots and a
+  deterministic 1280×720 PNG from the hosted C23 framebuffer with Inter HUD;
+  it does not need raylib. The committed artwork stays a byte-deterministic
   SVG so `arena-svg-check` remains a real staleness gate, and no browser or
   renderer is required by any default acceptance.
 

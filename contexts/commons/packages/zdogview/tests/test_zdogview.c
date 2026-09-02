@@ -142,6 +142,25 @@ int main(void)
     }
     CHECK(scene_city > 10);
 
+    CHECK(zdogview_render_rgb(&m, v.seed, v.kills, v.num_kills, NULL, 1280u,
+                              720u) == ZDOGVIEW_BAD_ARG);
+    CHECK(zdogview_render_rgb(&m, v.seed, v.kills, v.num_kills, s1.rgb, 8u,
+                              720u) == ZDOGVIEW_BAD_ARG);
+    static uint8_t hd1[1280u * 720u * 3u];
+    static uint8_t hd2[1280u * 720u * 3u];
+    CHECK(zdogview_render_rgb(&m, v.seed, v.kills, v.num_kills, hd1, 1280u,
+                              720u) == ZDOGVIEW_OK);
+    CHECK(zdogview_render_rgb(&m, v.seed, v.kills, v.num_kills, hd2, 1280u,
+                              720u) == ZDOGVIEW_OK);
+    CHECK(memcmp(hd1, hd2, sizeof(hd1)) == 0);
+    CHECK(zdog_state_checksum(&m) == checksum);
+    unsigned hd_painted = 0;
+    for (unsigned i = 0; i < sizeof(hd1); i += 3u) {
+        if (hd1[i] != 8 || hd1[i + 1u] != 11 || hd1[i + 2u] != 18)
+            hd_painted++;
+    }
+    CHECK(hd_painted > 1000);
+
     if (fails) {
         fprintf(stderr, "zdogview: %d failure(s)\n", fails);
         return 1;

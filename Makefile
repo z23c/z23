@@ -789,6 +789,17 @@ ADAPTERS_SRCS = $(call zcl_filter_ephemeral_sources,\
 # tools/ header root (the "command/" prefix for the native command adapter,
 # plus any other tools headers).
 TOOLS_INCLUDES = -Itools
+# Hosted arena packages + Inter canvas, used by arena_frame and the
+# arena_view harness group. Namespaced headers only (zdogview/, zdogfight/,
+# zprng/).
+ARENA_VIEW_INCLUDES = -Itools \
+	-Icontexts/commons/packages/zdogview/include \
+	-Icontexts/commons/packages/zdogfight/include \
+	-Icontexts/commons/packages/zprng/include \
+	-Icontexts/explorer/modules/presentation/include \
+	-Iplatform/modules/base/include -Iplatform/modules/util/include \
+	-Iplatform/modules/sha3/include -Iplatform/modules/support/include \
+	-Ivendor/include
 
 # ZCL_ALL_INCLUDES — the one place the header roots are named as a set, so an
 # ad-hoc compile (a cross-compiler syntax sweep, a one-off -fsyntax-only check,
@@ -2828,7 +2839,7 @@ $$(BIN_DIR)/$(1): $$(VIEW_GEN_HEADERS) $$(BUILD_IDENTITY_STAMP) \
 	trap - EXIT HUP INT TERM
 endef
 
-$(eval $(call BUILD_NODE_TOOL,test_zcl,$(TEST_SRCS_NO_MAIN) tests/harness/src/test.c $(SPEC_SRCS) $(CHAOS_SIM_SRCS),,-DZCL_TESTING $(DEV_SOURCE_RECEIPT_CPPFLAGS)))
+$(eval $(call BUILD_NODE_TOOL,test_zcl,$(TEST_SRCS_NO_MAIN) tests/harness/src/test.c $(SPEC_SRCS) $(CHAOS_SIM_SRCS),,-DZCL_TESTING $(DEV_SOURCE_RECEIPT_CPPFLAGS) $(ARENA_VIEW_INCLUDES)))
 # Whole-program LTO test_parallel, kept for debugging any per-TU-vs-LTO
 # divergence. `make t`/`make test` no longer build this — they use the cached
 # per-TU $(TEST_PARALLEL_BIN) rule below — but `make test_parallel_wpo` still
@@ -6047,11 +6058,14 @@ $(BIN_DIR)/arena_svg: tools/arena_svg.c \
 # arena_view: interactive raylib 3D replay viewer (see the file header).
 # Re-simulates a replay, refuses anything it cannot re-derive, then opens
 # a window: chase/cockpit/orbit/overview cameras over a seed-deterministic
-# city. Optional tool — requires raylib; not wired into any default path.
-.PHONY: tools/arena-view
+# city. Optional tool — requires raylib; the measured screenshot path is
+# arena_frame (hosted C23 framebuffer + Inter HUD + PNG, no raylib).
+.PHONY: tools/arena-view tools/arena-frame arena-view-syntax
 tools/arena-view: $(BIN_DIR)/arena_view
+tools/arena-frame: $(BIN_DIR)/arena_frame
 RAYLIB_CFLAGS := $(shell pkg-config --cflags raylib 2>/dev/null)
 RAYLIB_LIBS := $(shell pkg-config --libs raylib 2>/dev/null)
+RAYLIB_PRESENT := $(shell pkg-config --exists raylib && echo yes)
 $(BIN_DIR)/arena_view: tools/arena_view.c \
 		contexts/commons/packages/zdogview/src/zdogview.c \
 		contexts/commons/packages/zdogfight/src/zdogfight.c contexts/commons/packages/zdogfight/src/zdogfix.c \
@@ -6062,16 +6076,39 @@ $(BIN_DIR)/arena_view: tools/arena_view.c \
 	@if ! pkg-config --exists raylib; then \
 	    echo "arena_view: raylib not found via pkg-config."; \
 	    echo "  install it first (e.g. apt install libraylib-dev)"; \
+	    echo "  the measured 1280x720 PNG path is: make tools/arena-frame"; \
 	    exit 1; fi
 	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 	    $(ZCL_WARN_STRINGOP_OVERFLOW) \
 	    -D_POSIX_C_SOURCE=200809L $(RAYLIB_CFLAGS) \
 	    -ffunction-sections -fdata-sections $(ZCL_GC_SECTIONS_LDFLAG) \
-	    -Icontexts/commons/packages/zdogview/include -Icontexts/commons/packages/zdogfight/include \
-	    -Icontexts/commons/packages/zprng/include \
-	    -Iplatform/modules/base/include -Iplatform/modules/util/include \
-	    -Iplatform/modules/sha3/include -Iplatform/modules/support/include -Ivendor/include \
+	    $(ARENA_VIEW_INCLUDES) \
 	    -o $@ $^ $(RAYLIB_LIBS) -lm
+arena-view-syntax:
+	@if pkg-config --exists raylib; then \
+	    echo "arena_view: raylib present; window binary is the compile check"; \
+	else \
+	    $(CC) -std=c23 -fsyntax-only -Wall -Wextra -Werror -pedantic \
+	        $(ZCL_WARN_STRINGOP_OVERFLOW) \
+	        -D_POSIX_C_SOURCE=200809L -DARENA_VIEW_RAYLIB_STUB \
+	        $(ARENA_VIEW_INCLUDES) tools/arena_view.c && \
+	    echo "arena_view: raylib 6.0 stub syntax-only OK"; \
+	fi
+$(BIN_DIR)/arena_frame: tools/arena_frame.c tools/arena_hud.c \
+		contexts/commons/packages/zdogview/src/zdogview.c \
+		contexts/commons/packages/zdogfight/src/zdogfight.c contexts/commons/packages/zdogfight/src/zdogfix.c \
+		contexts/commons/packages/zprng/src/zprng.c \
+		contexts/explorer/modules/presentation/src/canvas.c \
+		platform/modules/util/src/png_writer.c \
+		platform/modules/base/src/safe_alloc.c \
+		platform/modules/sha3/src/sha3.c
+	@mkdir -p $(dir $@)
+	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
+	    $(ZCL_WARN_STRINGOP_OVERFLOW) \
+	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) \
+	    -ffunction-sections -fdata-sections $(ZCL_GC_SECTIONS_LDFLAG) \
+	    $(ARENA_VIEW_INCLUDES) \
+	    -o $@ $^ -lm
 
 ARENA_DEMO_BINS = $(BIN_DIR)/arena_runner $(BIN_DIR)/arena_svg \
 	$(BIN_DIR)/pilot_zdogace $(BIN_DIR)/pilot_zdogdrone
@@ -6090,16 +6127,23 @@ arena-svg: $(ARENA_DEMO_BINS)
 arena-svg-check: $(ARENA_DEMO_BINS)
 	@ARENA_SVG_CHECK=1 tools/dev/arena_demo.sh
 
-# arena-view: play the demo match (or view REPLAY=<file>) in the 3D viewer.
-# Passes --show so the window is visible. arena-view-check is the headless
-# gate: argv refusals plus --check-only against the pinned demo roots.
+# arena-view: play the demo match (or view REPLAY=<file>) as a native
+# 1280x720 picture. The measured path is the hosted C23 framebuffer +
+# Inter HUD PNG (arena_frame). When pkg-config finds raylib, the optional
+# window is also built and opened with --show.
 .PHONY: arena-view arena-view-check
-arena-view: $(BIN_DIR)/arena_view $(BIN_DIR)/arena_runner \
+ifeq ($(RAYLIB_PRESENT),yes)
+arena-view: $(BIN_DIR)/arena_view $(BIN_DIR)/arena_frame $(BIN_DIR)/arena_runner \
 		$(BIN_DIR)/pilot_zdogace $(BIN_DIR)/pilot_zdogdrone
+else
+arena-view: $(BIN_DIR)/arena_frame $(BIN_DIR)/arena_runner \
+		$(BIN_DIR)/pilot_zdogace $(BIN_DIR)/pilot_zdogdrone
+endif
 	@ZCL_BIN_DIR=$(BIN_DIR) REPLAY="$(REPLAY)" tools/dev/arena_view.sh
-arena-view-check: $(BIN_DIR)/arena_view $(BIN_DIR)/zdogview \
+arena-view-check: $(BIN_DIR)/arena_frame $(BIN_DIR)/zdogview \
 		$(BIN_DIR)/arena_runner \
-		$(BIN_DIR)/pilot_zdogace $(BIN_DIR)/pilot_zdogdrone
+		$(BIN_DIR)/pilot_zdogace $(BIN_DIR)/pilot_zdogdrone \
+		arena-view-syntax
 	@ZCL_BIN_DIR=$(BIN_DIR) CHECK=1 tools/dev/arena_view.sh
 
 # Determinism is a property of the simulation, not of the compiler flags:
@@ -8868,6 +8912,8 @@ $(TEST_FAST_OBJ_DIR)/tests/harness/src/test_parallel.o: TEST_FAST_OBJECT_CFLAGS 
 $(TEST_FAST_OBJ_DIR)/platform/modules/util/src/clientversion.o: TEST_FAST_OBJECT_CFLAGS += $(BUILD_IDENTITY_CPPFLAGS) $(DEV_SOURCE_RECEIPT_CPPFLAGS)
 $(TEST_FAST_OBJ_DIR)/tests/harness/src/testcache.o: TEST_FAST_OBJECT_CFLAGS += \
   $(call TESTCACHE_TOOLKEY_CPPFLAGS,$(TEST_FAST_PROFILE),TEST_FAST_EPOCH_COMPILE_FLAGS)
+$(TEST_FAST_OBJ_DIR)/tests/harness/src/test_arena_view.o: TEST_FAST_OBJECT_CFLAGS += \
+  $(ARENA_VIEW_INCLUDES)
 $(TEST_FAST_OBJ_DIR)/%.o: %.c $(VIEW_GEN_HEADERS) $(BUILD_FAST_EPOCH_OBJECT_PREREQ) | $(TEST_FAST_LEASE)
 	@$(BUILD_FAST_EPOCH_OBJECT_COMMAND) dep "$@" "$<" \
 	  "$(BUILD_SOURCE_ID)" "$(BUILD_CLEAN)" "$(BUILD_MUTATION)" \
@@ -8887,6 +8933,8 @@ $(TEST_REL_OBJ_DIR)/$(HOTSWAP_TEST_LOADER_REL): TEST_REL_OBJECT_CFLAGS += -DZCL_
 $(TEST_REL_OBJ_DIR)/tests/harness/src/test_parallel.o: TEST_REL_OBJECT_CFLAGS += \
   -DZCL_TEST_COMPILE_EPOCH=\"$(TEST_REL_COMPILE_EPOCH)\"
 $(TEST_REL_OBJ_DIR)/platform/modules/util/src/clientversion.o: TEST_REL_OBJECT_CFLAGS += $(BUILD_IDENTITY_CPPFLAGS) $(DEV_SOURCE_RECEIPT_CPPFLAGS)
+$(TEST_REL_OBJ_DIR)/tests/harness/src/test_arena_view.o: TEST_REL_OBJECT_CFLAGS += \
+  $(ARENA_VIEW_INCLUDES)
 $(TEST_REL_OBJ_DIR)/tests/harness/src/testcache.o: TEST_REL_OBJECT_CFLAGS += \
   $(call TESTCACHE_TOOLKEY_CPPFLAGS,$(TEST_REL_PROFILE),TEST_REL_EPOCH_COMPILE_FLAGS)
 $(TEST_REL_OBJ_DIR)/%.o: %.c $(VIEW_GEN_HEADERS) $(BUILD_EPOCH_OBJECT_TOOL) | $(TEST_REL_LEASE)
@@ -8910,6 +8958,8 @@ $(TEST_ASAN_OBJ_DIR)/platform/modules/util/src/clientversion.o: TEST_ASAN_OBJECT
 # __VERSION__, which pins the compiler but not the sanitizer flags.
 $(TEST_ASAN_OBJ_DIR)/tests/harness/src/testcache.o: TEST_ASAN_OBJECT_CFLAGS += \
   $(call TESTCACHE_TOOLKEY_CPPFLAGS,$(TEST_ASAN_PROFILE),TEST_ASAN_EPOCH_COMPILE_FLAGS)
+$(TEST_ASAN_OBJ_DIR)/tests/harness/src/test_arena_view.o: TEST_ASAN_OBJECT_CFLAGS += \
+  $(ARENA_VIEW_INCLUDES)
 $(TEST_ASAN_OBJ_DIR)/%.o: %.c $(VIEW_GEN_HEADERS) $(BUILD_EPOCH_OBJECT_TOOL) | $(TEST_ASAN_LEASE)
 	@$(BUILD_EPOCH_OBJECT_TOOL) dep "$@" "$<" \
 	  "$(BUILD_SOURCE_ID)" "$(BUILD_CLEAN)" "$(BUILD_MUTATION)" \
@@ -8939,6 +8989,8 @@ $(DEV_ASAN_OBJ_DIR)/platform/modules/util/src/clientversion.o: $(BUILD_IDENTITY_
 # closure inside the exact epoch; compiler search roots bind the rest.
 TEST_TSAN_OBJECT_CFLAGS = $(TEST_TSAN_CFLAGS)
 $(TEST_TSAN_OBJ_DIR)/platform/modules/util/src/clientversion.o: TEST_TSAN_OBJECT_CFLAGS += $(BUILD_IDENTITY_CPPFLAGS) $(DEV_SOURCE_RECEIPT_CPPFLAGS)
+$(TEST_TSAN_OBJ_DIR)/tests/harness/src/test_arena_view.o: TEST_TSAN_OBJECT_CFLAGS += \
+  $(ARENA_VIEW_INCLUDES)
 $(TEST_TSAN_OBJ_DIR)/%.o: %.c $(VIEW_GEN_HEADERS) $(BUILD_EPOCH_OBJECT_TOOL) | $(TEST_TSAN_LEASE)
 	@$(BUILD_EPOCH_OBJECT_TOOL) dep "$@" "$<" \
 	  "$(BUILD_SOURCE_ID)" "$(BUILD_CLEAN)" "$(BUILD_MUTATION)" \
