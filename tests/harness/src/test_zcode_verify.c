@@ -3713,13 +3713,14 @@ static int t_verifier_e2e(void)
         bool socket_contract = f4 && src == 0 && have_satt &&
             vcs_package_attest_verify(&satt) == VCS_PACKAGE_ATTEST_OK;
 #if defined(__APPLE__)
-        /* Candidate mode may run with its truthful degraded-isolation tag on
-         * Darwin.  It must never be mistaken for the Linux seccomp claim. */
+        /* Seatbelt denies socket creation.  The test treats that denial as
+         * success, while the receipt records the qualified full-isolation
+         * backend without borrowing Linux's seccomp signal claim. */
         socket_contract = socket_contract &&
-            satt.isolation == VCS_PACKAGE_ATTEST_ISOLATION_DEGRADED &&
+            satt.isolation == VCS_PACKAGE_ATTEST_ISOLATION_FULL &&
             satt.result_class == VCS_PACKAGE_ATTEST_RESULT_TEST_PASS &&
             satt.detail_code == VCS_PACKAGE_ATTEST_DETAIL_NONE;
-        ZV_CHECK("e2e: socket() test records degraded Darwin isolation",
+        ZV_CHECK("e2e: socket() test records full Seatbelt isolation",
                  socket_contract);
 #else
         socket_contract = socket_contract &&

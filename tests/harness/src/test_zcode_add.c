@@ -138,7 +138,6 @@ static bool za_exists(const char *path)
 /* Non-dot entry count of one directory (0 when it cannot be opened). The
  * fastobj cache's object+sidecar pairs are the only thing that lands there,
  * so a positive count proves the confined worker actually used the cache. */
-#if !defined(__APPLE__)
 static size_t za_dir_entries(const char *path)
 {
     DIR *d = opendir(path);
@@ -153,7 +152,6 @@ static size_t za_dir_entries(const char *path)
     closedir(d);
     return n;
 }
-#endif
 
 static bool za_read_json_file(const char *path, struct json_value *out)
 {
@@ -1329,32 +1327,9 @@ static int t_e2e(void)
      * byte-identical outputs, hash to a DISTINCT receipt id, and file it —
      * which is exactly what the receipts scan needs to report reproduced.
      *
-     * macOS has no qualified full-isolation package worker yet. The product
-     * boundary requires this second build to pass --require-full-isolation,
-     * so the native Mac assertion is the named refusal and absence of a
-     * second receipt. The complete reproduction/cache transcript remains
-     * mandatory on Linux; this does not relax the worker invocation. */
-#if defined(__APPLE__)
-    struct package_lifecycle_reproduce_report repro;
-    struct zcl_result repr =
-        package_lifecycle_reproduce(base, "alice/ringbuffer", NULL, &repro);
-    if (!repr.ok)
-        printf("  zcode_add: reproduce refused rule=%s detail=%s msg=%s\n",
-               repro.rule, repro.detail, repr.message);
-    ZA_CHECK("macOS reproduction refuses without qualified full isolation",
-             !repr.ok && !repro.matched && !repro.filed &&
-                 strcmp(repro.rule, "full-isolation-unavailable") == 0 &&
-                 strstr(repro.detail, "full package-build isolation") !=
-                     NULL);
-    char receipts_dir[4400];
-    snprintf(receipts_dir, sizeof(receipts_dir), "%s/receipts", zcode);
-    struct vcs_reproduce_report scan;
-    bool scanned = vcs_package_reproduce_scan(receipts_dir, ring_root,
-                                              inspected_receipt.recipe_root,
-                                              &scan);
-    ZA_CHECK("the isolation refusal files no reproduction receipt",
-             scanned && !scan.reproduced && scan.matching == 1);
-#else
+     * Both Linux seccomp/Landlock and macOS Seatbelt qualify as full package
+     * isolation, so the complete reproduction/cache transcript is mandatory
+     * on both native paths. */
     struct package_lifecycle_reproduce_report repro;
     struct zcl_result repr =
         package_lifecycle_reproduce(base, "alice/ringbuffer", NULL, &repro);
@@ -1483,8 +1458,6 @@ static int t_e2e(void)
              blankr.ok && blank_repro.matched && blank_repro.filed &&
                  !blank_repro.fast_cache_used &&
                  memcmp(blank_repro.receipt_id, repro.receipt_id, 32) == 0);
-#endif
-
     /* --- a second version, then rollback -------------------------------- */
     struct za_file ring2_files[] = {
         { "LICENSE", ZA_LICENSE },
