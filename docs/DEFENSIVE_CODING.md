@@ -1219,6 +1219,7 @@ add/remove a gate.
 - `check-model-sql-literals`
 - `check-model-validation`
 - `check-persona-resolves`
+- `check-specialists`
 - `check-cookbook`
 - `check-no-raw-clock-outside-platform`
 - `check-sysinit-ordering`

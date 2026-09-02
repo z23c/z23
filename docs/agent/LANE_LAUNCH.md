@@ -9,6 +9,12 @@ and the development procedure remains
 
 ## Dispatch
 
+0. Before editing, a specialist lane runs `build/bin/z23 code focus <specialist>`
+   (or `code focus --list` to see the catalog). The answer is a ranked file
+   list scored only from recorded evidence — failed routed test groups, git
+   churn, open lessons, missing impact-rule routing, and checked-in issue
+   bodies. It is the first command that tells the lane where to work.
+
 1. Fetch `origin/main` once in a clean manager checkout and record its full
    commit ID. A worker baseline is the recorded commit, not a path or branch
    name.
