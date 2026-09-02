@@ -33,13 +33,13 @@ int test_code_growth(void)
                  parsed && history.day_count == 2u &&
                  strcmp(history.days[0].date, "1970-01-01") == 0 &&
                  strcmp(history.days[1].date, "1970-01-02") == 0);
-    GROWTH_CHECK("current maintained roots exclude docs and binary rows",
-                 parsed && history.days[0].non_test_added == 5u &&
+    GROWTH_CHECK("maintained documentation source is counted; binary rows are not",
+                 parsed && history.days[0].non_test_added == 15u &&
                  history.days[0].test_added == 5u);
     GROWTH_CHECK("non-test and test totals remain separate",
-                 parsed && history.non_test_lines == 7u &&
+                 parsed && history.non_test_lines == 17u &&
                  history.test_lines == 8u &&
-                 history.days[1].non_test_lines == 7u &&
+                 history.days[1].non_test_lines == 17u &&
                  history.days[1].test_lines == 8u);
     GROWTH_CHECK("the day's exact last commit is retained for evidence",
                  parsed && strcmp(history.days[1].head_commit,

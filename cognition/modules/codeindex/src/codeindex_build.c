@@ -94,7 +94,9 @@ static bool is_source_name(const char *name)
 static bool prune_dir(const char *name)
 {
 #define SOURCE_PRUNE_DIR(name_) if (strcmp(name, name_) == 0) return true;
+#define SOURCE_INVENTORY_PRUNE_DIR(name_)
 #include "codeindex/source_prune_dirs.def"
+#undef SOURCE_INVENTORY_PRUNE_DIR
 #undef SOURCE_PRUNE_DIR
     return strncmp(name, "test-tmp", 8) == 0;
 }

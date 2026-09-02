@@ -46,7 +46,10 @@ static bool growth_has_segment(const char *path, const char *segment)
 static bool growth_pruned(const char *path)
 {
 #define SOURCE_PRUNE_DIR(name_) if (growth_has_segment(path, name_)) return true;
+#define SOURCE_INVENTORY_PRUNE_DIR(name_) \
+    if (growth_has_segment(path, name_)) return true;
 #include "codeindex/source_prune_dirs.def"
+#undef SOURCE_INVENTORY_PRUNE_DIR
 #undef SOURCE_PRUNE_DIR
     return growth_has_segment(path, "test-tmp");
 }

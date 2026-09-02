@@ -12205,6 +12205,11 @@ check-outparam-init-before-return:
 	@bash tools/lint/check_outparam_init_before_return.sh --selftest
 	@bash tools/lint/check_outparam_init_before_return.sh
 
+check-codeindex-coverage: $(ZCLASSIC23_DEV_BIN)
+	@echo "══ LINT: every tracked maintained source node is indexed ══"
+	@./tools/lint/check_codeindex_coverage.sh --selftest
+	@./tools/lint/check_codeindex_coverage.sh
+
 # Adding a lint gate is a TWO-FILE operation and nothing enforced the second
 # file: the Makefile gets a `check-*:` target plus a LINT_GATES line, and
 # tools/lint/run_lint.sh's gate_command() case table gets the invocation,
@@ -12262,6 +12267,7 @@ LINT_GATES := \
     check-build-epoch-integrity \
     check-checkout-lock \
     check-no-stray-untracked-source \
+    check-codeindex-coverage \
     check-no-stray-root-files \
     check-scanner-immunity \
     check-git-hooks-installed \

@@ -1246,6 +1246,7 @@ add/remove a gate.
 - `check-no-orphan-placement`
 - `check-no-silent-ready`
 - `check-no-stray-untracked-source`
+- `check-codeindex-coverage`
 - `check-no-stray-root-files`
 - `check-observability-pairing`
 - `check-hex-codec-single`

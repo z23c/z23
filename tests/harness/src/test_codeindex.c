@@ -428,6 +428,7 @@ static bool write_fixture(void)
            mk_write(FIX, "platform/ports/include/ports/fixture_port.h", PORT_H) &&
            mk_write(FIX, "tests/harness/src/test_fixture_indexed.c", TEST_SOURCE_C) &&
            mk_write(FIX, "examples/example_fixture.c", EXAMPLE_SOURCE_C) &&
+           mk_write(FIX, "docs/examples/documented_fixture.c", EXAMPLE_SOURCE_C) &&
            mk_write(FIX, "core/modules/net/examples/module_example_fixture.c",
                     MODULE_EXAMPLE_C) &&
            mk_write(FIX, "core/modules/net/tests/module_test_fixture.c",
@@ -1068,6 +1069,9 @@ static int test_codeindex_platform_arm(void)
     codeindex_file(ci, "examples/example_fixture.c", &cf, &found);
     CI_CHECK("top-level example is indexed in examples", found &&
              strcmp(cf.group, "examples") == 0);
+    codeindex_file(ci, "docs/examples/documented_fixture.c", &cf, &found);
+    CI_CHECK("documentation C23 example is indexed", found &&
+             strcmp(cf.group, "docs") == 0);
     codeindex_file(ci, "core/modules/net/examples/module_example_fixture.c",
                    &cf, &found);
     CI_CHECK("module-local example is indexed with its module", found &&
@@ -1076,7 +1080,8 @@ static int test_codeindex_platform_arm(void)
     CI_CHECK("module-local test is indexed with its module", found &&
              strcmp(cf.group, "core/modules/net") == 0);
     codeindex_file(ci, "core/modules/net/fixtures/hidden_fixture.c", &cf, &found);
-    CI_CHECK("fixture source stays outside the maintained universe", !found);
+    CI_CHECK("fixture source remains indexed proof input", found &&
+             strcmp(cf.group, "core/modules/net") == 0);
     codeindex_file(ci, "engine/composition/fixture_registry.def", &cf, &found);
     CI_CHECK("registry node is indexed for impact without C symbols", found &&
              strcmp(cf.group, "engine/composition") == 0);
@@ -1084,7 +1089,7 @@ static int test_codeindex_platform_arm(void)
     struct ci_source_file_counts source_counts;
     CI_CHECK("C23 and registry-node counts are exact and separate",
              codeindex_source_file_counts(ci, &source_counts) &&
-             source_counts.c23_files == 19 &&
+             source_counts.c23_files == 21 &&
              source_counts.registry_nodes == 1);
 
     codeindex_symbol(ci, "fixture_root_main", &s, &found);

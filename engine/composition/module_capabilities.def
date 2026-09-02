@@ -1078,6 +1078,7 @@ ZCL_MODULE_CAPABILITY("tools/command/cli_render.c", CAP_PRIVILEGE, "the native c
 ZCL_MODULE_CAPABILITY("tools/command/native_build_command.c", CAP_FS_READ, "")
 ZCL_MODULE_CAPABILITY("tools/command/native_code_change_plan_command.c", CAP_FS_READ, "")
 ZCL_MODULE_CAPABILITY("tools/command/native_code_context_command.c", CAP_FS_WRITE, "rebuilds the local source index before rendering the bounded-context map")
+ZCL_MODULE_CAPABILITY("tools/command/native_code_coverage_command.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("tools/command/native_code_emitter_command.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("tools/command/native_command.c", CAP_FS_READ|CAP_FS_WRITE|CAP_CLOCK, "")
 ZCL_MODULE_CAPABILITY("tools/command/native_dev_activation_command.c", CAP_FS_READ, "")

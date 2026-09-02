@@ -74,11 +74,11 @@ z23 discover schema <path> --side=input|output
 
 | Catalog fact | Count |
 |---|---|
-| Registry entries (branches + leaves) | 780 |
+| Registry entries (branches + leaves) | 781 |
 | Top-level roots | 13 |
 | Branches | 179 |
-| Leaves (dispatchable command paths) | 601 |
-| … `ready` (live handler in this build) | 540 |
+| Leaves (dispatchable command paths) | 602 |
+| … `ready` (live handler in this build) | 541 |
 | … `compat` (metadata only, names a fallback) | 30 |
 | … `planned` (fail-closed BLOCKED, exit 3) | 31 |
 | … dev-gated 🔧 (`ready` only in `z23-dev`) | 29 |
@@ -97,7 +97,7 @@ Per source file:
 | `engine/composition/commands/store.def` | 18 | 0 | 18 |
 | `engine/composition/commands/ops.def` | 56 | 10 | 46 |
 | `engine/composition/commands/dev.def` | 67 | 16 | 51 |
-| `engine/composition/commands/code.def` | 24 | 2 | 22 |
+| `engine/composition/commands/code.def` | 25 | 2 | 23 |
 | `engine/composition/commands/accounts.def` | 11 | 2 | 9 |
 | `engine/composition/commands/vault.def` | 24 | 4 | 20 |
 | `engine/composition/commands/zcode.def` | 248 | 59 | 189 |
@@ -976,6 +976,7 @@ represented by its children's sections.
 | `code guide` | ready | read / read / public · instant/tiny | none | `zcl.code_guide.v1` | `z23 code guide` | Edit and prove a checkout change |
 | `code group` | ready | read / read / public · foreground/tiny | **`group`** | `zcl.code_group.v1` | `z23 code group app/services` | Browse source groups and files |
 | `code map` | ready | read / read / public · foreground/tiny | none | `zcl.code_map.v1` | `z23 code map` | Count root groups and app shapes |
+| `code coverage` | ready | read / read / public · foreground/low | none | `zcl.code_coverage.v1` | `z23 code coverage` | Reconcile tracked source with the code index |
 | `code tests` | ready | read / read / public · fast/tiny | **`path`** | `zcl.code_tests.v1` | `z23 code tests core/modules/net/src/download.c` | Route a file to focused tests |
 | `code room` | ready | read / read / public · fast/tiny | **`path`** | `zcl.code_room.v1` | `z23 code room app.messaging` | Open a file or command feature room |
 | `code context-map` | ready | read / read / public · foreground/low | none | `zcl.code_context_map.v1` | `z23 code context-map` | Map contexts, shapes, and coupling |

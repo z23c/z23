@@ -9,4 +9,7 @@ SOURCE_PRUNE_DIR("build")
 SOURCE_PRUNE_DIR("bin")
 SOURCE_PRUNE_DIR("obj")
 SOURCE_PRUNE_DIR("vendor")
-SOURCE_PRUNE_DIR("fixtures")
+/* Tracked fixture source is executable proof input and belongs in coverage.
+ * The public-capability projection excludes fixture APIs, but the source index
+ * does not: coverage still binds their exact source bytes. */
+SOURCE_INVENTORY_PRUNE_DIR("fixtures")

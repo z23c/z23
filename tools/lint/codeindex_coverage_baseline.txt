@@ -1,0 +1,3 @@
+# Maximum Git-tracked maintained .c/.h/.def nodes absent from the code index.
+# Shrink-only: this is zero, so any omission is a regression.
+0

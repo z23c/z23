@@ -61,6 +61,25 @@ ZCL_COMMAND_READY_READ(
     ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_code_map)
 
 ZCL_COMMAND_READY_READ(
+    "code.coverage", "code", "",
+    "Reconcile tracked source with the code index",
+    "Compares Git's exact tracked manifest for every maintained .c, .h, and "
+    ".def node with the current verified code-index generation. Reports the "
+    "indexed/tracked ratio and names bounded missing paths; GREEN is earned "
+    "only at 100%. Vendored source is outside the maintained source roots.",
+    ZCL_COMMAND_LIST_BUDGET,
+    "code,coverage,index,tracked,git,complete,missing",
+    "zcl.command.empty_input.v1", "zcl.code_coverage.v1", "", "",
+    "z23 code coverage",
+    ZCL_COMMAND_LAYER_CODE, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_PUBLIC, ZCL_COMMAND_LATENCY_FOREGROUND,
+    ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE,
+    ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_code_coverage)
+
+ZCL_COMMAND_READY_READ(
     "code.tests", "code", "",
     "Route a file to focused tests",
     "The focused test group(s) a change to one file routes to, derived from the "

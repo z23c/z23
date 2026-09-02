@@ -326,6 +326,11 @@ void zcl_native_handle_code_have(
 void zcl_native_handle_code_map(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
+/* code.coverage — reconcile the exact Git-tracked maintained C23/registry
+ * manifest with the current verified index generation. */
+void zcl_native_handle_code_coverage(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
 /* code.tests — the routing link: which focused test group a change to one file
  * routes to, mirroring `dev test plan` (tools/dev/devloop_plan.c). */
 void zcl_native_handle_code_tests(

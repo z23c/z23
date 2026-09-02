@@ -8,6 +8,9 @@ SOURCE_ROOT("cognition")
 SOURCE_ROOT("platform")
 SOURCE_ROOT("tools")
 SOURCE_ROOT("tests")
+/* Executable documentation examples are maintained C23 source too. The
+ * prose corpus used by `code why` is a separate derived projection. */
+SOURCE_ROOT("docs")
 /* Conventional roots remain available when the index is opened on an
  * external C23 package workspace rather than on Z23 itself. */
 SOURCE_ROOT("app")

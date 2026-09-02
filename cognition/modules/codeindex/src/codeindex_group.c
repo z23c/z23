@@ -112,6 +112,10 @@ void ci_group_for_path(const char *relpath, char out[64])
         (void)snprintf(out, 64, "tests");
         return;
     }
+    if (starts_seg(relpath, "docs")) {
+        (void)snprintf(out, 64, "docs");
+        return;
+    }
     /* External C23 workspaces retain their conventional package layout. */
     if (starts_seg(relpath, "lib")) {
         leading_components(relpath, 2, out);
@@ -169,6 +173,7 @@ const char *ci_group_purpose(const char *group)
     if (strcmp(group, "platform") == 0) return "ports and operating-system or infrastructure adapters";
     if (strcmp(group, "tools") == 0) return "dev/ops tooling and native command surfaces";
     if (strcmp(group, "tests") == 0) return "the canonical test runner, groups, fixtures, and specifications";
+    if (strcmp(group, "docs") == 0) return "executable C23 examples embedded in maintained documentation";
     if (strcmp(group, "app") == 0) return "external C23 package application sources";
     if (strcmp(group, "include") == 0) return "external C23 package public headers";
     if (strcmp(group, "src") == 0) return "external C23 package implementation sources";
@@ -284,7 +289,7 @@ bool ci_group_emit_all(struct ci_store *s)
 
     static const char *const authorities[] = {
         "core", "engine", "contexts", "cognition", "platform",
-        "tools", "tests",
+        "tools", "tests", "docs",
     };
     static const char *const external_roots[] = {
         "app", "include", "src", "lib", "packages", "examples",
