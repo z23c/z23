@@ -443,7 +443,9 @@ ZCL_COMMAND_READY_READ(
     "recorded evidence: routed test groups that failed in "
     ".cache/test-timing/last-run.json, git-log churn, open lessons in "
     "docs/agent/LESSONS.md, files no impact rule routes, and paths named in "
-    "checked-in docs/ issue bodies. Every reason cites its source. Ties break "
+    "checked-in docs/ issue bodies. A missing last-run.json is `no run "
+    "recorded`, never a clean failed-group score; unreadable or corrupt "
+    "artifacts fail FOCUS_EVIDENCE. Every reason cites its source. Ties break "
     "by path. `--list` or no specialist lists the rows in "
     "engine/composition/specialists.def. An unknown name is UNKNOWN_SPECIALIST. "
     "The answer grants no authority and never decides what to merge.",

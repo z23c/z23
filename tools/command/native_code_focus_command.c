@@ -212,11 +212,34 @@ void zcl_native_handle_code_focus(const struct zcl_command_request *request,
     (void)json_push_kv(&reply->data, "lines", &lines);
     (void)json_push_kv_int(&reply->data, "count", n);
     (void)json_push_kv_bool(&reply->data, "truncated", truncated);
-    char summary[200];
-    (void)snprintf(summary, sizeof summary,
-                   "%s: %d file%s ranked from recorded evidence%s",
-                   spec->name, n, n == 1 ? "" : "s",
-                   truncated ? " (truncated)" : "");
+
+    struct json_value tests;
+    json_init(&tests);
+    json_set_object(&tests);
+    (void)json_push_kv_str(&tests, "source",
+                           ".cache/test-timing/last-run.json");
+    if (ev.tests_run == SPECIALIST_FOCUS_ARTIFACT_MISSING) {
+        (void)json_push_kv_str(&tests, "status", "no run recorded");
+    } else {
+        (void)json_push_kv_str(&tests, "status", "recorded");
+        (void)json_push_kv_int(&tests, "failed_count",
+                               (int64_t)ev.failed_count);
+    }
+    (void)json_push_kv(&reply->data, "tests", &tests);
+    json_free(&tests);
+
+    char summary[240];
+    if (ev.tests_run == SPECIALIST_FOCUS_ARTIFACT_MISSING) {
+        (void)snprintf(summary, sizeof summary,
+                       "%s: %d file%s ranked; tests: no run recorded%s",
+                       spec->name, n, n == 1 ? "" : "s",
+                       truncated ? " (truncated)" : "");
+    } else {
+        (void)snprintf(summary, sizeof summary,
+                       "%s: %d file%s ranked from recorded evidence%s",
+                       spec->name, n, n == 1 ? "" : "s",
+                       truncated ? " (truncated)" : "");
+    }
     (void)json_push_kv_str(&reply->data, "summary", summary);
     json_free(&files);
     json_free(&lines);

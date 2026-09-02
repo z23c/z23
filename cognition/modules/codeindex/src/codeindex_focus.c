@@ -12,6 +12,7 @@
 #include "util/spawn.h"
 
 #include <ctype.h>
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -30,6 +31,13 @@
 #define FOCUS_GIT_CAP (256u * 1024u)
 #define FOCUS_PAGE 64
 #define FOCUS_ROUTE_CAP 12
+#define FOCUS_TEST_LAST_RUN ".cache/test-timing/last-run.json"
+
+enum focus_read {
+    FOCUS_READ_OK = 0,
+    FOCUS_READ_MISSING,
+    FOCUS_READ_ERR
+};
 
 static const struct specialist k_specialists[] = {
 #define SPECIALIST(name_, terr_, gates_, groups_, facts_) \
@@ -125,29 +133,40 @@ static bool focus_join(char *dst, size_t cap, const char *root,
     return true;
 }
 
-static char *focus_read_file(const char *path, size_t cap, size_t *len_out)
+static int focus_read_file(const char *path, size_t cap, char **buf_out,
+                           size_t *len_out)
 {
+    if (buf_out)
+        *buf_out = NULL;
     if (len_out)
         *len_out = 0;
     FILE *f = fopen(path, "rb");
-    if (!f)
-        return NULL;
+    if (!f) {
+        if (errno == ENOENT)
+            return FOCUS_READ_MISSING;
+        LOG_ERROR(FOCUS_TAG, "open %s: %s", path, strerror(errno));
+        return FOCUS_READ_ERR;
+    }
     char *buf = zcl_calloc(1, cap + 1u, "codeindex.focus.file");
     if (!buf) {
         fclose(f);
-        LOG_NULL(FOCUS_TAG, "allocate %zu bytes for %s", cap, path);
+        LOG_ERROR(FOCUS_TAG, "allocate %zu bytes for %s", cap, path);
+        return FOCUS_READ_ERR;
     }
     size_t n = fread(buf, 1, cap, f);
     int err = ferror(f);
     fclose(f);
     if (err) {
         free(buf);
-        LOG_NULL(FOCUS_TAG, "read %s", path);
+        LOG_ERROR(FOCUS_TAG, "read %s", path);
+        return FOCUS_READ_ERR;
     }
     buf[n] = '\0';
+    if (buf_out)
+        *buf_out = buf;
     if (len_out)
         *len_out = n;
-    return buf;
+    return FOCUS_READ_OK;
 }
 
 static bool focus_add_failed(struct specialist_focus_evidence *ev,
@@ -176,14 +195,17 @@ bool specialist_focus_load_failed_groups(const char *root,
 {
     if (!ev)
         LOG_FAIL(FOCUS_TAG, "evidence is NULL");
+    ev->tests_run = SPECIALIST_FOCUS_ARTIFACT_MISSING;
     char path[4096];
-    if (!focus_join(path, sizeof(path), root,
-                    ".cache/test-timing/last-run.json"))
+    if (!focus_join(path, sizeof(path), root, FOCUS_TEST_LAST_RUN))
         LOG_FAIL(FOCUS_TAG, "last-run path");
+    char *raw = NULL;
     size_t len = 0;
-    char *raw = focus_read_file(path, FOCUS_FILE_CAP, &len);
-    if (!raw)
+    int st = focus_read_file(path, FOCUS_FILE_CAP, &raw, &len);
+    if (st == FOCUS_READ_MISSING)
         return true;
+    if (st != FOCUS_READ_OK)
+        LOG_FAIL(FOCUS_TAG, "unreadable last-run.json at %s", path);
     struct json_value doc;
     json_init(&doc);
     if (!json_read(&doc, raw, len) || doc.type != JSON_OBJ) {
@@ -192,6 +214,7 @@ bool specialist_focus_load_failed_groups(const char *root,
         LOG_FAIL(FOCUS_TAG, "corrupt last-run.json at %s", path);
     }
     free(raw);
+    ev->tests_run = SPECIALIST_FOCUS_ARTIFACT_RECORDED;
     const struct json_value *groups = json_get(&doc, "groups");
     if (!groups || groups->type != JSON_ARR) {
         json_free(&doc);
@@ -319,10 +342,13 @@ bool specialist_focus_load_notes(const char *root,
     char path[4096];
     if (!focus_join(path, sizeof(path), root, "docs/agent/LESSONS.md"))
         LOG_FAIL(FOCUS_TAG, "lessons path");
+    char *raw = NULL;
     size_t len = 0;
-    char *raw = focus_read_file(path, FOCUS_FILE_CAP, &len);
-    if (!raw)
+    int st = focus_read_file(path, FOCUS_FILE_CAP, &raw, &len);
+    if (st == FOCUS_READ_MISSING)
         return true;
+    if (st != FOCUS_READ_OK)
+        LOG_FAIL(FOCUS_TAG, "unreadable lessons at %s", path);
     bool ok = focus_scan_paths(raw, true, ev->notes, &ev->notes_count,
                                SPECIALIST_FOCUS_NOTE_CAP,
                                "docs/agent/LESSONS.md");
@@ -372,8 +398,13 @@ bool specialist_focus_load_issues(const char *root,
                 ok = false;
                 break;
             }
+            char *raw = NULL;
             size_t len = 0;
-            char *raw = focus_read_file(full, FOCUS_FILE_CAP, &len);
+            int st = focus_read_file(full, FOCUS_FILE_CAP, &raw, &len);
+            if (st == FOCUS_READ_ERR) {
+                ok = false;
+                break;
+            }
             if (raw) {
                 ok = focus_scan_paths(raw, true, ev->issues,
                                       &ev->issues_count,
@@ -387,7 +418,7 @@ bool specialist_focus_load_issues(const char *root,
     }
     free(buf);
     if (!ok)
-        LOG_FAIL(FOCUS_TAG, "issue body path token overflowed");
+        LOG_FAIL(FOCUS_TAG, "issue body load failed");
     return true;
 }
 

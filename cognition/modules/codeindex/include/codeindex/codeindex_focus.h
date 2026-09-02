@@ -6,7 +6,8 @@
  * groups in the latest recorded run, git-log churn, open lessons/notes,
  * missing impact-rule routing, and checked-in issue bodies under docs/.
  * The specialist table is engine/composition/specialists.def. Scoring is
- * integer and deterministic; ties break by path. */
+ * integer and deterministic; ties break by path. An absent last-run.json
+ * is not a clean suite. */
 
 #ifndef ZCL_CODEINDEX_FOCUS_H
 #define ZCL_CODEINDEX_FOCUS_H
@@ -49,9 +50,17 @@ struct specialist_focus_binding {
     char source[SPECIALIST_SOURCE_MAX];
 };
 
+/* A gitignored last-run.json is either missing (no run recorded) or was
+ * actually read. Zero failed names with MISSING is not a clean suite. */
+enum specialist_focus_artifact {
+    SPECIALIST_FOCUS_ARTIFACT_MISSING = 0,
+    SPECIALIST_FOCUS_ARTIFACT_RECORDED = 1
+};
+
 struct specialist_focus_evidence {
     char failed[SPECIALIST_FOCUS_FAILED_CAP][SPECIALIST_GROUP_MAX];
     size_t failed_count;
+    enum specialist_focus_artifact tests_run;
     struct specialist_focus_churn churn[SPECIALIST_FOCUS_CHURN_CAP];
     size_t churn_count;
     struct specialist_focus_binding notes[SPECIALIST_FOCUS_NOTE_CAP];
@@ -80,8 +89,9 @@ bool specialist_path_in_territory(const struct specialist *spec,
 
 void specialist_focus_evidence_clear(struct specialist_focus_evidence *ev);
 
-/* Missing artifacts are an honest empty set (true). Unreadable/corrupt
- * recorded runs return false after logging. */
+/* ENOENT → true with tests_run MISSING (not a clean suite). Unreadable,
+ * OOM-after-open, or corrupt JSON → false after logging. A present file
+ * sets tests_run RECORDED even when every rc is 0. */
 bool specialist_focus_load_failed_groups(const char *root,
                                          struct specialist_focus_evidence *ev);
 bool specialist_focus_load_notes(const char *root,

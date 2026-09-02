@@ -156,6 +156,35 @@ static int test_focus_unknown(void)
     return failures;
 }
 
+static int test_focus_missing_run(void)
+{
+    int failures = 0;
+    TEST("code_focus: missing last-run.json is no run recorded, not clean") {
+        system("rm -rf " FOCUS_FIX);
+        ASSERT(write_focus_fixture());
+        struct specialist_focus_evidence ev;
+        specialist_focus_evidence_clear(&ev);
+        ASSERT(specialist_focus_load_failed_groups(FOCUS_FIX, &ev));
+        ASSERT(ev.tests_run == SPECIALIST_FOCUS_ARTIFACT_MISSING);
+        ASSERT(ev.failed_count == 0);
+
+        struct zcl_command_reply reply;
+        focus_call_name("net", FOCUS_FIX, &reply);
+        ASSERT(reply.exit_code == ZCL_COMMAND_EXIT_OK);
+        char buf[ZCL_COMMAND_RESULT_BUDGET + 1];
+        size_t n = json_write(&reply.data, buf, sizeof(buf));
+        ASSERT(n > 0 && n < sizeof(buf));
+        ASSERT(strstr(buf, "no run recorded") != NULL);
+        ASSERT(strstr(buf, "\"status\":\"no run recorded\"") != NULL);
+        ASSERT(strstr(buf, "\"source\":\".cache/test-timing/last-run.json\"")
+               != NULL);
+        zcl_command_reply_free(&reply);
+        system("rm -rf " FOCUS_FIX);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_focus_rank(void)
 {
     int failures = 0;
@@ -227,6 +256,7 @@ int test_code_focus(void)
     int failures = 0;
     failures += test_focus_list();
     failures += test_focus_unknown();
+    failures += test_focus_missing_run();
     failures += test_focus_rank();
     return failures;
 }
