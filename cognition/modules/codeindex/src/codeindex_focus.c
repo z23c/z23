@@ -588,6 +588,16 @@ static int focus_hit_cmp(const void *a, const void *b)
     return strcmp(ha->path, hb->path);
 }
 
+/* True when a ranks strictly below b in the emitted order (score desc,
+ * path asc): the entry to evict first when the bounded work set is full. */
+static bool focus_hit_ranks_below(const struct specialist_focus_hit *a,
+                                  const struct specialist_focus_hit *b)
+{
+    if (a->score != b->score)
+        return a->score < b->score;
+    return strcmp(a->path, b->path) > 0;
+}
+
 static bool focus_add_reason(char parts[][FOCUS_REASON_PART_MAX], int *n,
                              const char *text)
 {
@@ -712,10 +722,6 @@ int specialist_focus_rank(struct codeindex *ci,
             if (failed == 0 && gate_fails == 0 && recency == 0 && !note_src &&
                 !issue_src && !unrouted)
                 continue;
-            if (nwork >= SPECIALIST_FOCUS_WORK_CAP) {
-                overflow = true;
-                break;
-            }
             char parts[FOCUS_REASON_PART][FOCUS_REASON_PART_MAX];
             int nparts = 0;
             if (failed > 0) {
@@ -770,7 +776,8 @@ int specialist_focus_rank(struct codeindex *ci,
                     return -1;
                 }
             }
-            struct specialist_focus_hit *h = &work[nwork];
+            struct specialist_focus_hit cand;
+            struct specialist_focus_hit *h = &cand;
             int w = snprintf(h->path, sizeof h->path, "%s", path);
             if (w < 0 || (size_t)w >= sizeof h->path) {
                 free(work);
@@ -787,10 +794,24 @@ int specialist_focus_rank(struct codeindex *ci,
                        (note_src ? FOCUS_W_LESSON : 0) +
                        (unrouted ? FOCUS_W_UNROUTED : 0) +
                        (int)recency * FOCUS_W_CHURN;
-            nwork++;
+            /* Bounded top-K by the emitted order: keep filling until the
+             * work set is full, then keep the exact worst slot and let a
+             * strictly better candidate evict it. Index order (path ASC)
+             * cannot hide a later failed-group or issue file behind a full
+             * set of low-score unrouted paths. */
+            if (nwork < SPECIALIST_FOCUS_WORK_CAP) {
+                work[nwork++] = cand;
+            } else {
+                overflow = true;
+                int worst = 0;
+                for (int i = 1; i < nwork; i++) {
+                    if (focus_hit_ranks_below(&work[i], &work[worst]))
+                        worst = i;
+                }
+                if (focus_hit_ranks_below(&work[worst], &cand))
+                    work[worst] = cand;
+            }
         }
-        if (overflow)
-            break;
         if (got < FOCUS_PAGE)
             break;
     }

@@ -261,6 +261,73 @@ static int test_focus_lint_gates(void)
     return failures;
 }
 
+static size_t focus_flood_route(const char *path,
+                                char (*out)[SPECIALIST_GROUP_MAX],
+                                size_t cap, void *user)
+{
+    (void)user;
+    if (!path || cap == 0)
+        return 0;
+    if (strstr(path, "/zz_failed.c")) {
+        (void)snprintf(out[0], SPECIALIST_GROUP_MAX, "%s", "net");
+        return 1;
+    }
+    return 0;
+}
+
+static int test_focus_work_cap(void)
+{
+    int failures = 0;
+    TEST("code_focus: late failed-group file survives a full work set") {
+        system("rm -rf " FOCUS_FIX);
+        char rel[512];
+        bool ok = true;
+        /* WORK_CAP + 1 in-territory candidates: the unrouted fillers fill
+         * any index-order cap first, and the failed-group file sorts last
+         * (the codeindex pages files ORDER BY path ASC). */
+        for (int i = 0; i < SPECIALIST_FOCUS_WORK_CAP && ok; i++) {
+            snprintf(rel, sizeof rel, "core/modules/net/src/g%03d.c", i);
+            ok = focus_mk_write(FOCUS_FIX, rel,
+                "/* purpose: focus fixture unrouted filler. */\nint g(void);\n");
+        }
+        ok = ok && focus_mk_write(FOCUS_FIX, "core/modules/net/src/zz_failed.c",
+            "/* purpose: focus fixture failed-group file sorting last. */\n"
+            "int zz(void);\n");
+        ASSERT(ok);
+
+        struct codeindex *ci = codeindex_open_source_view(FOCUS_FIX);
+        ASSERT(ci != NULL);
+        static const struct specialist spec = {
+            "alpha", "core/modules/net", "check-malloc", "net", "p2p"
+        };
+        struct specialist_focus_evidence ev;
+        specialist_focus_evidence_clear(&ev);
+        (void)snprintf(ev.failed[0], sizeof ev.failed[0], "%s", "net");
+        ev.failed_count = 1;
+
+        struct specialist_focus_hit hits[8];
+        bool truncated = false;
+        int n = specialist_focus_rank(ci, &spec, &ev, focus_flood_route,
+                                      NULL, hits, 8, &truncated);
+        ASSERT(n == 8);
+        ASSERT(truncated);
+        ASSERT(strcmp(hits[0].path, "core/modules/net/src/zz_failed.c") == 0);
+        ASSERT(hits[0].score > hits[1].score);
+        ASSERT(strstr(hits[0].reason,
+                      "failed-group:net (.cache/test-timing/last-run.json)")
+               != NULL);
+        for (int i = 1; i < n; i++)
+            ASSERT(strstr(hits[i].reason, "unrouted:agent_impact_rules")
+                   != NULL);
+        ASSERT(strcmp(hits[1].path, "core/modules/net/src/g000.c") == 0);
+        ASSERT(strcmp(hits[2].path, "core/modules/net/src/g001.c") == 0);
+        codeindex_close(ci);
+        system("rm -rf " FOCUS_FIX);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_focus_rank(void)
 {
     int failures = 0;
@@ -334,6 +401,7 @@ int test_code_focus(void)
     failures += test_focus_unknown();
     failures += test_focus_missing_run();
     failures += test_focus_lint_gates();
+    failures += test_focus_work_cap();
     failures += test_focus_rank();
     return failures;
 }

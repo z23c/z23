@@ -120,7 +120,10 @@ bool specialist_focus_load_churn(const char *root,
 
 /* Rank files in spec->territory that have at least one cited reason.
  * Output is score-desc, path-asc. Returns the filled count (>=0), or -1
- * on hard error. *truncated is true when the working set overflowed cap. */
+ * on hard error. The working set is a bounded top-K by the same order:
+ * a late high-score file displaces the current worst entry, so candidate
+ * order in the index cannot hide evidence. *truncated is true when
+ * candidates exceeded the working-set cap or the out cap. */
 int specialist_focus_rank(struct codeindex *ci,
                           const struct specialist *spec,
                           const struct specialist_focus_evidence *ev,
