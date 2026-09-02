@@ -103,10 +103,10 @@ done <<< "$raw_hits"
 # Was: one awk fork PER FILE (~4,173 candidate files under PRODUCTION_ROOTS)
 # to find multi-line sqlite3_exec(ndb->db, "INSERT/DELETE/UPDATE/REPLACE
 # ...") calls. Batched into ONE awk invocation over every candidate file:
-# gawk's BEGINFILE/ENDFILE (already used elsewhere in this tree, see
-# check_model_ar_lifecycle.sh) resets the per-file line buffer exactly the
-# way a fresh process did, and FILENAME/FNR stand in for the old $path/NR.
-# Logic inside ENDFILE is untouched from the old per-file END block.
+# A portable FILENAME transition resets the per-file line buffer exactly the
+# way a fresh process did. This deliberately avoids gawk-only BEGINFILE and
+# ENDFILE: the macOS native lane uses stock /usr/bin/awk. Logic inside
+# scan_file() is untouched from the old per-file END block.
 mapfile -t exec_candidates < <(find "${PRODUCTION_ROOTS[@]}" \
     \( -path '*/vendor/*' -o -path '*/build/*' -o -path '*/test/*' \) -prune \
     -o \( \( -name '*.c' -o -name '*.h' \) \
@@ -119,21 +119,15 @@ done
 
 if [ "${#exec_files[@]}" -gt 0 ]; then
     exec_scan=$(awk '
-        BEGINFILE {
-            delete lines
-        }
-        {
-            lines[FNR] = $0
-        }
-        ENDFILE {
+        function scan_file(    i, j, chunk, tail, sql, upper, parts, key) {
             call_re = "sqlite3_exec[[:space:]]*\\([[:space:]]*(&[[:space:]]*)?ndb(->|\\.)db[[:space:]]*,"
-            for (i = 1; i <= FNR; i++) {
+            for (i = 1; i <= line_count; i++) {
                 if (lines[i] !~ /sqlite3_exec[[:space:]]*\(/)
                     continue
                 if (lines[i] ~ /\/\/[[:space:]]*raw-sql-ok:[A-Za-z][A-Za-z0-9_-]+/)
                     continue
                 chunk = lines[i]
-                for (j = i + 1; j <= FNR && length(chunk) < 900; j++)
+                for (j = i + 1; j <= line_count && length(chunk) < 900; j++)
                     chunk = chunk "\n" lines[j]
                 if (chunk !~ call_re)
                     continue
@@ -149,9 +143,21 @@ if [ "${#exec_files[@]}" -gt 0 ]; then
                 if (upper ~ /^(INSERT|DELETE|UPDATE|REPLACE) /) {
                     split(upper, parts, " ")
                     printf "%s:%d: raw node.db sqlite3_exec %s; use ar_exec_write_sql()/AR_STEP_WRITE or a reviewed helper\n",
-                           FILENAME, i, parts[1]
+                           current_file, i, parts[1]
                 }
             }
+        }
+        {
+            if (FILENAME != current_file) {
+                if (current_file != "") scan_file()
+                for (key in lines) delete lines[key]
+                current_file = FILENAME
+                line_count = 0
+            }
+            lines[++line_count] = $0
+        }
+        END {
+            if (current_file != "") scan_file()
         }
     ' "${exec_files[@]}")
     exec_scan_rc=$?
@@ -185,14 +191,15 @@ gate_require_scanned "$context_count" 2 "check_raw_sqlite.wallet_owner" \
 
 # Was: per file (~924 controller/service sources), fork strip_c_comments.awk
 # + two `tr` processes (~2,772 forks) just to get one normalized, flattened
-# string. Batched into ONE awk invocation across every context file: the
+# string. Batched into ONE portable awk invocation across every context file: the
 # comment-stripping char scan below is copied verbatim from
 # tools/lint/strip_c_comments.awk's default (strings=0, keep literal
 # content) mode — this file does not touch that shared script, since other
 # gates depend on it — with a BEGINFILE reset so per-file state (block-
 # comment tracking, the flattened accumulator) can never bleed across a
 # file boundary, then lower-cases and strips '"'/whitespace in the same
-# pass (gawk tolower()+gsub standing in for `tr`). One "path\tnormalized"
+# pass (awk tolower()+gsub standing in for `tr`). A FILENAME transition keeps
+# this compatible with stock macOS awk. One "path\tnormalized"
 # line per file; the loop below reads it into an array with the bash `read`
 # builtin (no forks) and every table/controller check is untouched.
 declare -A NORMALIZED=()
@@ -202,9 +209,18 @@ while IFS= read -r ctx_path; do
 done <<< "$context_files"
 if [ "${#ctx_norm_files[@]}" -gt 0 ]; then
     ctx_tsv=$(awk '
+        function emit_file() {
+            if (current_file != "")
+                printf "%s\t%s\n", current_file, acc
+        }
         BEGIN { dq = "\""; sq = sprintf("%c", 39) }
-        BEGINFILE { inblk = 0; acc = "" }
         {
+            if (FILENAME != current_file) {
+                emit_file()
+                current_file = FILENAME
+                inblk = 0
+                acc = ""
+            }
             line = $0; out = ""; i = 1; n = length(line)
             while (i <= n) {
                 c = substr(line, i, 1)
@@ -236,7 +252,7 @@ if [ "${#ctx_norm_files[@]}" -gt 0 ]; then
             gsub(/["\t\n\r\f\v ]/, "", s)
             acc = acc s
         }
-        ENDFILE { printf "%s\t%s\n", FILENAME, acc }
+        END { emit_file() }
     ' "${ctx_norm_files[@]}")
     ctx_tsv_rc=$?
     if [[ $ctx_tsv_rc -ne 0 ]]; then
