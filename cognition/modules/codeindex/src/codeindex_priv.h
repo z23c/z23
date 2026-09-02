@@ -221,7 +221,8 @@ bool ci_source_roots_sha3(const char *root, uint8_t exact_out[32],
 void ci_source_root_init(struct sha3_256_ctx *sha);
 void ci_source_root_add(struct sha3_256_ctx *sha, const char *relpath,
                         const uint8_t content_sha3[32]);
-bool ci_build_store_memory(const char *root, struct ci_store **out_store,
+bool ci_build_store_memory(const char *root, int64_t build_start_ms,
+                           struct ci_store **out_store,
                            uint8_t source_stat_out[32],
                            uint8_t dep_stat_out[32]);
 bool ci_build_store_incremental(const char *root, struct ci_store *store,

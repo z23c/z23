@@ -602,6 +602,10 @@ static bool codeindex_rebuild_internal(struct codeindex *ci,
     if (!rebuild_lock_open(ci->root, dir, &dirfd, &lockfd))
         return false;
 
+    /* Whole-rebuild wall clock for the cold-build self-receipt; only the
+     * full-build branch seals it (ci_build_store_memory). */
+    const int64_t build_start_ms = platform_time_monotonic_ms();
+
     const char *failure = "unknown rebuild failure";
     bool success = false;
     char stage_name[128] = "";
@@ -740,7 +744,8 @@ static bool codeindex_rebuild_internal(struct codeindex *ci,
         ci_store_close(st);
         st = NULL;
     } else {
-        if (!ci_build_store_memory(ci->root, &st, built_source_stat_root,
+        if (!ci_build_store_memory(ci->root, build_start_ms, &st,
+                                   built_source_stat_root,
                                    built_dep_stat_root)) {
             failure = "source scan or staging write failed";
             goto out;

@@ -12,6 +12,7 @@
 #include "util/safe_alloc.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 static struct codeindex *codeindex_alloc(const char *root)
@@ -126,6 +127,39 @@ bool codeindex_source_root_sha3(struct codeindex *ci, uint8_t out[32])
         LOG_FAIL("codeindex", "read source_root_sha3");
     if (!found || len != 32)
         LOG_FAIL("codeindex", "invalid source_root_sha3 metadata");
+    return true;
+}
+
+bool codeindex_build_cold_ms(struct codeindex *ci, long long *ms_out,
+                             long long *files_out)
+{
+    if (ms_out) *ms_out = 0;
+    if (files_out) *files_out = 0;
+    if (!ci || !ci->store || !ms_out || !files_out)
+        LOG_FAIL("codeindex", "null arg to build_cold_ms");
+    char ms_text[24], files_text[24];
+    size_t ms_len = 0, files_len = 0;
+    bool ms_found = false, files_found = false;
+    if (!ci_store_meta_get(ci->store, "build_cold_ms", ms_text,
+                           sizeof(ms_text) - 1, &ms_len, &ms_found) ||
+        !ci_store_meta_get(ci->store, "build_cold_files", files_text,
+                           sizeof(files_text) - 1, &files_len, &files_found))
+        LOG_FAIL("codeindex", "read cold-build receipt failed");
+    /* Stores built before the self-receipt existed simply lack the keys;
+     * that absence is a valid observation of an older generation, not a
+     * hard failure. */
+    if (!ms_found || !files_found || ms_len == 0 || files_len == 0)
+        return false;
+    ms_text[ms_len] = '\0';
+    files_text[files_len] = '\0';
+    char *ms_end = NULL, *files_end = NULL;
+    long long ms = strtoll(ms_text, &ms_end, 10);
+    long long files = strtoll(files_text, &files_end, 10);
+    if (!ms_end || *ms_end != '\0' || !files_end || *files_end != '\0' ||
+        ms < 0 || files < 0)
+        return false;
+    *ms_out = ms;
+    *files_out = files;
     return true;
 }
 

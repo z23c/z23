@@ -528,6 +528,10 @@ static bool codeindex_rebuild_internal(struct codeindex *ci,
     char directory_path[CI_PATH_MAX];
     if (!rebuild_lock_open(ci->root, directory_path, &rebuild)) return false;
 
+    /* Whole-rebuild wall clock for the cold-build self-receipt, sealed only
+     * on the full-build path (ci_build_store_memory). */
+    const int64_t build_start_ms = platform_time_monotonic_ms();
+
     const char *failure = "unknown Windows rebuild failure";
     bool success = false, stage_named = false;
     char stage_name[128] = "";
@@ -569,8 +573,8 @@ static bool codeindex_rebuild_internal(struct codeindex *ci,
     }
 
     uint8_t built_source_stat[32], built_dep_stat[32];
-    if (!ci_build_store_memory(ci->root, &store, built_source_stat,
-                               built_dep_stat) ||
+    if (!ci_build_store_memory(ci->root, build_start_ms, &store,
+                               built_source_stat, built_dep_stat) ||
         !ci_store_write_image_child(store, &stage)) {
         failure = "build or serialize Windows staging store failed";
         goto out;

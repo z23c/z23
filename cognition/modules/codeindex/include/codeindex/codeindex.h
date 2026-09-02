@@ -159,6 +159,15 @@ void codeindex_close(struct codeindex *ci);
  * malformed; it never fabricates an all-zero generation. */
 bool codeindex_source_root_sha3(struct codeindex *ci, uint8_t out[32]);
 
+/* The cold-build self-receipt: wall-clock milliseconds and indexed file count
+ * of the last FULL deterministic build, sealed by the store itself
+ * (meta.build_cold_ms / meta.build_cold_files). Incremental refreshes never
+ * rewrite them. Returns false WITHOUT logging when the keys are absent (a
+ * store built before the receipt existed) or malformed; both outputs are
+ * zeroed in that case. */
+bool codeindex_build_cold_ms(struct codeindex *ci, long long *ms_out,
+                             long long *files_out);
+
 /* Exact logical root of the groups/files/symbols/refs projection consumed by
  * retrieval. Unlike source_root_sha3, this binds scanner output as well as
  * source identity. A retrieval view verifies it before adoption; snapshot

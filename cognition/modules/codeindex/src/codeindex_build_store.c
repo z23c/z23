@@ -4,6 +4,7 @@
 
 #include "codeindex_priv.h"
 
+#include "platform/time_compat.h"
 #include "util/log_macros.h"
 #include "util/safe_alloc.h"
 
@@ -152,13 +153,19 @@ static void on_dep_cb(const char *source, const char *dependency, void *user)
         b->err = true;
 }
 
-bool ci_build_store_memory(const char *root, struct ci_store **out_store,
+bool ci_build_store_memory(const char *root, int64_t build_start_ms,
+                           struct ci_store **out_store,
                            uint8_t source_stat_out[32],
                            uint8_t dep_stat_out[32])
 {
     if (!root || !out_store || !source_stat_out || !dep_stat_out)
         LOG_FAIL("codeindex", "null argument to memory store build");
     *out_store = NULL;
+    /* The caller stamps the rebuild start when it takes the lock so the
+     * self-receipt covers the whole cold build (freshness passes included),
+     * not only this assembly phase. A nonpositive stamp means "unknown". */
+    if (build_start_ms <= 0)
+        build_start_ms = platform_time_monotonic_ms();
 
     struct ci_store *store = ci_store_open_path(":memory:");
     if (!store) LOG_FAIL("codeindex", "open in-memory staging store failed");
@@ -209,6 +216,28 @@ bool ci_build_store_memory(const char *root, struct ci_store **out_store,
              ci_store_meta_set(store, CI_RETRIEVAL_PROJECTION_META,
                                retrieval_projection_root,
                                sizeof(retrieval_projection_root));
+
+    /* The cold build's self-receipt: the whole-rebuild wall time (from the
+     * rebuild-lock stamp the caller passed in) and how many files the exact
+     * generation holds. Recorded only on this full-build path — the
+     * incremental path clones a prior generation and never rewrites these
+     * keys, so they always describe the last cold build. Additive meta keys
+     * with a presence check: no store-format change. */
+    char cold_ms_text[24], cold_files_text[24];
+    if (ok) {
+        int64_t cold_ms = platform_time_monotonic_ms() - build_start_ms;
+        if (cold_ms < 0) cold_ms = 0;
+        int ms_n = snprintf(cold_ms_text, sizeof(cold_ms_text), "%lld",
+                            (long long)cold_ms);
+        int files_n = snprintf(cold_files_text, sizeof(cold_files_text),
+                               "%llu", (unsigned long long)build.nids);
+        ok = ms_n > 0 && (size_t)ms_n < sizeof(cold_ms_text) &&
+             files_n > 0 && (size_t)files_n < sizeof(cold_files_text) &&
+             ci_store_meta_set(store, "build_cold_ms", cold_ms_text,
+                               (size_t)ms_n) &&
+             ci_store_meta_set(store, "build_cold_files", cold_files_text,
+                               (size_t)files_n);
+    }
 
     if (!ok) {
         if (tx_open) (void)ci_store_rollback(store);

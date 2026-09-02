@@ -29,6 +29,14 @@ rehashed) — a repeat call over an untouched tree reads no file bytes at all.
 The digests are a derived cache (`.codeindex/source_tree.merkle`, gitignored);
 deleting it is always safe and costs one full pass.
 
+The index also carries its own scale evidence. Every cold build seals its wall
+time and file count into the store meta (`build_cold_ms`/`build_cold_files`;
+incremental refreshes never rewrite them), and the registered `codeindex_scale`
+group proves the cost stays linear: it generates 50k- and 500k-file trees under
+`test-tmp/`, cold-builds both, asserts warm queries answer within 50 ms, and
+checks the 500k build stays within 30x of the 50k build. Run it with
+`make t-fast ONLY=codeindex_scale`.
+
 ---
 
 ## 1. Where things live
@@ -262,7 +270,7 @@ page changing with it.
 <!--   app_shape_folders    = directories directly under app/                        -->
 <!-- Fix a mismatch with `tools/scripts/check_doc_counts.sh --fix`, never by hand.  -->
 
-test_groups: 1081
+test_groups: 1082
 port_interfaces: 13
 persistence_adapters: 14
 condition_registrations: 52

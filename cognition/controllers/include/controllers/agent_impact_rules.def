@@ -800,6 +800,11 @@ AGENT_IMPACT_RULE("contexts/commons/modules/vcs/*|tests/harness/src/test_vcs_cor
 /* Code navigator: in-binary source index (cognition/modules/codeindex/). */
 AGENT_IMPACT_RULE("cognition/modules/codeindex/*|tests/harness/src/test_codeindex.c", "codeindex code_capsule make_lint_gates")
 
+/* Cheap-at-scale evidence (M2): the cold-build self-receipt is written by the
+ * shared full-build path, and the scale group proves linear cold-build cost
+ * on generated 50k/500k-file trees plus sub-50 ms warm questions. */
+AGENT_IMPACT_RULE("cognition/modules/codeindex/*|tests/harness/src/test_codeindex_scale.c", "codeindex codeindex_scale make_lint_gates")
+
 /* Code navigator command surface: the `code` branch backed by cognition/modules/codeindex. */
 AGENT_IMPACT_RULE("cognition/modules/codeindex/*|engine/composition/commands/code.def|tools/command/native_code_command.c|tools/command/native_code_context_command.c|tools/command/native_code_guide_command.c|tools/command/native_code_relations_command.c|tests/harness/src/test_code_impact.c", "codeindex code_capsule code_impact command_registry_catalog make_lint_gates")
 
