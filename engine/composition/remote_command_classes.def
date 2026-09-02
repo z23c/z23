@@ -684,7 +684,7 @@ REMOTE_COMMAND_CLASS("ops.telemetry.zcode.summary", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("ops.telemetry.zcode.swarm", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("ops.telemetry.zcode.installs", REMOTE_CLASS_NEVER, "")
 
-/* CODE — 25 never_remote leaves.
+/* CODE — 26 never_remote leaves.
  *
  * The whole `code` branch is a source-content read surface: it returns file
  * bytes, symbol bodies, room and capsule excerpts, and provenance facts from
@@ -706,6 +706,9 @@ REMOTE_COMMAND_CLASS("code.coverage", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("code.owner", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("code.cost", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("code.recent", REMOTE_CLASS_NEVER, "")
+/* code.fetch additionally MUTATES the local checkout's derived state; a leaf
+ * that writes <root>/.codeindex must never be drivable from a wire. */
+REMOTE_COMMAND_CLASS("code.fetch", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("code.context-map", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("code.tests", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("code.room", REMOTE_CLASS_NEVER, "")

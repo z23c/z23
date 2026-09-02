@@ -340,11 +340,6 @@ bool ci_source_stat_root_sha3(const char *root, uint8_t out[32])
 
 static _Atomic uint64_t g_stage_sequence = 1;
 
-struct stage_identity {
-    dev_t dev;
-    ino_t ino;
-};
-
 #ifdef ZCL_TESTING
 static _Atomic int g_test_crash_point = CODEINDEX_TEST_CRASH_NONE;
 static _Atomic int g_test_stage_tamper = CODEINDEX_TEST_STAGE_TAMPER_NONE;
@@ -429,8 +424,8 @@ static void codeindex_test_maybe_crash(enum codeindex_test_crash_point point)
 #define codeindex_test_maybe_remove_lock_directory(...) ((void)0)
 #endif
 
-static bool rebuild_lock_open(const char *root, char dir[CI_PATH_MAX],
-                              int *out_dirfd, int *out_lockfd)
+bool ci_rebuild_lock_open(const char *root, char dir[CI_PATH_MAX],
+                          int *out_dirfd, int *out_lockfd)
 {
     *out_dirfd = -1;
     *out_lockfd = -1;
@@ -494,7 +489,7 @@ static bool rebuild_lock_open(const char *root, char dir[CI_PATH_MAX],
              "index directory changed repeatedly during lock acquisition");
 }
 
-static bool cleanup_orphan_stages(int dirfd)
+bool ci_cleanup_orphan_stages(int dirfd)
 {
     int scanfd = dup(dirfd);
     if (scanfd < 0)
@@ -526,9 +521,8 @@ static bool cleanup_orphan_stages(int dirfd)
     return true;
 }
 
-static bool create_unique_stage(int dirfd, char name[128],
-                                struct stage_identity *identity,
-                                int *out_fd)
+bool ci_create_unique_stage(int dirfd, char name[128],
+                            struct ci_stage_identity *identity, int *out_fd)
 {
     if (!identity || !out_fd)
         LOG_FAIL("codeindex", "null staging identity/fd");
@@ -569,7 +563,7 @@ static bool create_unique_stage(int dirfd, char name[128],
     LOG_FAIL("codeindex", "could not allocate unique staging name");
 }
 
-static void rebuild_lock_close(int dirfd, int lockfd)
+void ci_rebuild_lock_close(int dirfd, int lockfd)
 {
     if (lockfd >= 0) {
         (void)flock(lockfd, LOCK_UN);
@@ -578,7 +572,7 @@ static void rebuild_lock_close(int dirfd, int lockfd)
     if (dirfd >= 0) close(dirfd);
 }
 
-static bool remove_legacy_sidecars(int dirfd)
+bool ci_remove_legacy_sidecars(int dirfd)
 {
     static const char *const names[] = { "index.kv-wal", "index.kv-shm" };
     for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
@@ -599,7 +593,7 @@ static bool codeindex_rebuild_internal(struct codeindex *ci,
 
     char dir[CI_PATH_MAX];
     int dirfd = -1, lockfd = -1;
-    if (!rebuild_lock_open(ci->root, dir, &dirfd, &lockfd))
+    if (!ci_rebuild_lock_open(ci->root, dir, &dirfd, &lockfd))
         return false;
 
     /* Whole-rebuild wall clock for the cold-build self-receipt; only the
@@ -609,7 +603,7 @@ static bool codeindex_rebuild_internal(struct codeindex *ci,
     const char *failure = "unknown rebuild failure";
     bool success = false;
     char stage_name[128] = "";
-    struct stage_identity stage_identity = {0};
+    struct ci_stage_identity stage_identity = {0};
     int stagefd = -1;
     struct ci_store *st = NULL;
     struct ci_merkle *merkle = NULL;
@@ -619,7 +613,7 @@ static bool codeindex_rebuild_internal(struct codeindex *ci,
     bool incremental = false;
     uint8_t current_dep_stat[32] = {0};
 
-    if (!cleanup_orphan_stages(dirfd)) {
+    if (!ci_cleanup_orphan_stages(dirfd)) {
         failure = "orphan staging cleanup failed";
         goto out;
     }
@@ -717,7 +711,7 @@ static bool codeindex_rebuild_internal(struct codeindex *ci,
         incremental = inventory_same;
     }
 
-    if (!create_unique_stage(dirfd, stage_name, &stage_identity, &stagefd)) {
+    if (!ci_create_unique_stage(dirfd, stage_name, &stage_identity, &stagefd)) {
         failure = "unique staging allocation failed";
         goto out;
     }
@@ -833,7 +827,7 @@ static bool codeindex_rebuild_internal(struct codeindex *ci,
         goto out;
     }
     codeindex_test_maybe_crash(CODEINDEX_TEST_CRASH_AFTER_RENAME);
-    if (!remove_legacy_sidecars(dirfd)) {
+    if (!ci_remove_legacy_sidecars(dirfd)) {
         failure = "legacy sidecar cleanup failed";
         goto out;
     }
@@ -863,7 +857,7 @@ out:
     if (stage_name[0]) {
         (void)unlinkat(dirfd, stage_name, 0);
     }
-    rebuild_lock_close(dirfd, lockfd);
+    ci_rebuild_lock_close(dirfd, lockfd);
     if (!success)
         LOG_FAIL("codeindex", "rebuild failed: %s", failure);
     return true;

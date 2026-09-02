@@ -81,12 +81,13 @@ ZCL_COMMAND_READY_READ(
 
 /* First-hour sub-branch. The parent `code` menu is at its
  * ZCL_COMMAND_BRANCH_BUDGET byte cap (the reason code.provenance exists), so
- * the three M3 leaves hang off this one-child branch instead of `code`
- * directly. Their PATHS stay flat — code.owner / code.cost / code.recent —
- * because word resolution is by dotted path, not by parent: `z23 code owner
- * <path>` spells the same either way, and the menu pays for one child. */
+ * the M3/M4 leaves hang off this one-child branch instead of `code`
+ * directly. Their PATHS stay flat — code.owner / code.cost / code.recent /
+ * code.fetch — because word resolution is by dotted path, not by parent:
+ * `z23 code owner <path>` spells the same either way, and the menu pays for
+ * one child. */
 ZCL_COMMAND_BRANCH("code.firsthour", "code",
-                   "First-hour questions: owner, cost, recent",
+                   "First-hour questions: owner, cost, recent, fetch",
                    ZCL_COMMAND_LAYER_CODE)
 
 ZCL_COMMAND_READY_READ(
@@ -151,6 +152,45 @@ ZCL_COMMAND_READY_READ(
     ZCL_COMMAND_CAP_NONE,
     ZCL_COMMAND_TRAIT_IDEMPOTENT,
     ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_code_recent)
+
+/* `code.fetch` is the second code.* leaf that WRITES (after code.kpi), and it
+ * is classed MUTATE for that reason rather than dressed as a read: it
+ * installs a verified generation at <root>/.codeindex/index.kv through the
+ * rebuild path's own publication ritual. The risk class is DEV_MUTATION and
+ * the scope LOCAL because the only thing it can touch is developer-local
+ * derived state in a gitignored directory — it reaches no node, no datadir,
+ * no wallet and no consensus surface, and what it writes is adopted only
+ * after the fetched image's sealed source roots equal a fresh local
+ * computation (VERIFY, DON'T TRUST: fetched bytes are inert until locally
+ * verified). */
+ZCL_COMMAND_READY_COMMAND(
+    "code.fetch", "code.firsthour", "",
+    "Install another checkout's verified code index",
+    "Adopts the published codeindex generation named by `from` (a checkout "
+    "root, a .codeindex directory, or an index.kv file) so this checkout "
+    "skips the cold index build. The image must pass the canonical open's "
+    "ownership/mode/nlink checks, its store_format and ci_schema_version must "
+    "equal this binary's constants, and its sealed source_root_sha3 AND "
+    "source_merkle_root_sha3 must equal freshly computed values for THIS "
+    "checkout — any mismatch is a refusal naming the key and both digests. "
+    "An existing FRESH local store is never overwritten; a missing or stale "
+    "one is replaced. After content verification the stat-bound depfile "
+    "freshness keys are re-stamped to this checkout's observation so the "
+    "first open here does not rebuild; the sealed source roots and the "
+    "cold-build receipt are carried verbatim. `adopted` reports that a "
+    "post-install open sees the store as fresh.", 0,
+    "code,fetch,index,codeindex,install,verify,warm,checkout,worktree",
+    "zcl.code_fetch_input.v1",
+    "zcl.code_fetch.v1", "from", "",
+    "z23 code fetch --from=/path/to/other-checkout",
+    ZCL_COMMAND_LAYER_CODE, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_DEV_MUTATION, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_PUBLIC, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_BACKGROUND, ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_CONFIRM_NONE,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_NONE,
+    zcl_native_handle_code_fetch)
 
 ZCL_COMMAND_READY_READ(
     "code.tests", "code", "",

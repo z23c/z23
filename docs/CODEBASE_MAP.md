@@ -46,6 +46,15 @@ last suite run measured each group to cost. `z23 code recent <path> --since
 <commit>` lists what changed under a path lately, newest first. All three are
 hermetically covered by `make t-fast ONLY=code_firsthour`.
 
+`z23 code fetch --from=<checkout>` gives a fresh worktree a warm start: it
+takes another checkout's published `.codeindex` generation, verifies it
+against THIS checkout's sealed source roots (`source_root_sha3` and
+`source_merkle_root_sha3`, recomputed live — fetched bytes are inert until
+locally verified), and installs it through the rebuild path's own publication
+ritual. A source mismatch, a format/schema drift, or an already-fresh local
+store is a fail-closed refusal naming the key and both digests. Hermetically
+covered by `make t-fast ONLY=code_fetch`.
+
 ---
 
 ## 1. Where things live
@@ -279,7 +288,7 @@ page changing with it.
 <!--   app_shape_folders    = directories directly under app/                        -->
 <!-- Fix a mismatch with `tools/scripts/check_doc_counts.sh --fix`, never by hand.  -->
 
-test_groups: 1083
+test_groups: 1084
 port_interfaces: 13
 persistence_adapters: 14
 condition_registrations: 52

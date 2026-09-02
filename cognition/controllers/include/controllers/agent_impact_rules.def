@@ -814,6 +814,13 @@ AGENT_IMPACT_RULE("cognition/modules/codeindex/*|engine/composition/commands/cod
  * already routes there). */
 AGENT_IMPACT_RULE("tools/command/native_code_owner_command.c|tools/command/native_code_cost_command.c|tools/command/native_code_recent_command.c|tests/harness/src/test_code_firsthour.c", "code_firsthour codeindex command_registry_catalog native_api_contract command_handler_snapshot hotswap_module dev_platform make_lint_gates")
 
+/* Verified index fetch (M4): the code.fetch leaf, its module-side
+ * verify-and-install path, and the publication-ritual helpers it shares with
+ * the rebuild path. The codeindex glob rules above also cover the module
+ * files; this row exists so the new leaf and its hermetic group route
+ * directly. */
+AGENT_IMPACT_RULE("cognition/modules/codeindex/src/codeindex_fetch.c|cognition/modules/codeindex/include/codeindex/codeindex_fetch.h|cognition/modules/codeindex/src/codeindex_build.c|cognition/modules/codeindex/src/codeindex_store.c|tools/command/native_code_fetch_command.c|tests/harness/src/test_code_fetch.c", "code_fetch codeindex code_firsthour command_registry_catalog native_api_contract command_handler_snapshot hotswap_module dev_platform make_lint_gates")
+
 /* Source-tree SHA3 Merkle identity: the leaf/node hashing rule, its snapshot
  * cache, and the code.merkle surface that projects it. */
 AGENT_IMPACT_RULE("cognition/modules/codeindex/src/codeindex_merkle.c|cognition/modules/codeindex/src/codeindex_merkle_decode.c|cognition/modules/codeindex/include/codeindex/codeindex_merkle.h|tests/harness/src/test_code_merkle.c|tests/harness/src/test_code_merkle_proof.c", "code_merkle code_merkle_proof codeindex command_registry_catalog make_lint_gates")

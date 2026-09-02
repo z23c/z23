@@ -349,6 +349,13 @@ void zcl_native_handle_code_cost(
 void zcl_native_handle_code_recent(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
+/* code.fetch — the warm-start leaf: verify a published codeindex generation
+ * from another checkout against this checkout's sealed source roots and
+ * install it, so a fresh worktree skips the cold index build. MUTATE-classed:
+ * it writes <root>/.codeindex. Fails closed naming the key and both digests. */
+void zcl_native_handle_code_fetch(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
 /* code.tests — the routing link: which focused test group a change to one file
  * routes to, mirroring `dev test plan` (tools/dev/devloop_plan.c). */
 void zcl_native_handle_code_tests(

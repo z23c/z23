@@ -697,6 +697,10 @@ ZCL_TEST_GROUP(codeindex_projection_integrity)
 /* M3 first-hour questions: the code.owner / code.cost / code.recent leaves a
  * fresh agent asks to find where to focus in seconds. */
 ZCL_TEST_GROUP(code_firsthour)
+/* M4 verified index fetch: code.fetch verifies a published generation from
+ * another checkout against this checkout's sealed source roots and installs
+ * it, so a fresh worktree skips the cold build. */
+ZCL_TEST_GROUP(code_fetch)
 ZCL_TEST_GROUP(fingerprint)
 ZCL_TEST_GROUP(territory)
 /* BM25 ranked retrieval. The group exists for the properties a ranking has

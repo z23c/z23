@@ -117,6 +117,11 @@ bool ci_store_write_image_fd(struct ci_store *s, int fd);
  * callers retain and publish the descriptor. */
 bool ci_store_copy_image_fd(struct ci_store *s, int fd);
 struct ci_store *ci_store_open_rw_fd(int fd);
+/* Bind an already-validated private store descriptor (ownership/mode/nlink
+ * checked by the caller) into a read-only immutable handle — the exact
+ * binding discipline ci_store_open applies after its own checks. Takes
+ * ownership of the descriptor. POSIX only. */
+struct ci_store *ci_store_open_readonly_fd(int fd);
 /* Serialize a committed in-memory store through one retained child file.
  * Used by the native Windows publisher, where an integer CRT descriptor is
  * not the directory-relative authority. */
@@ -235,6 +240,24 @@ int ci_store_diff_merkle_leaves(struct ci_store *store,
                                 int current_count,
                                 struct ci_merkle_leaf *changed, int cap,
                                 bool *inventory_same);
+
+/* ── the publication ritual (codeindex_build.c, POSIX) ────────────────
+ * The one cross-process discipline for placing a generation at
+ * <root>/.codeindex/index.kv: owner-controlled directory capability,
+ * exclusive rebuild.lock flock, unique private staging inode, atomic renameat,
+ * fsync of file and directory. codeindex_fetch.c installs a verified fetched
+ * image through the SAME ritual — a second copy would drift. */
+struct ci_stage_identity {
+    dev_t dev;
+    ino_t ino;
+};
+bool ci_rebuild_lock_open(const char *root, char dir[CI_PATH_MAX],
+                          int *out_dirfd, int *out_lockfd);
+void ci_rebuild_lock_close(int dirfd, int lockfd);
+bool ci_cleanup_orphan_stages(int dirfd);
+bool ci_create_unique_stage(int dirfd, char name[128],
+                            struct ci_stage_identity *identity, int *out_fd);
+bool ci_remove_legacy_sidecars(int dirfd);
 
 /* ── the C scanner (codeindex_scan.c) ─────────────────────────────────
  * Scan one in-tree file's text. Emits symbols and refs through callbacks.

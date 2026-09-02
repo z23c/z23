@@ -206,6 +206,15 @@ struct ci_store *ci_store_open(const char *root)
         LOG_NULL("codeindex",
                  "canonical index is not a private owner-controlled inode");
     }
+    return ci_store_open_readonly_fd(fd);
+#endif
+}
+
+#if !defined(_WIN32)
+struct ci_store *ci_store_open_readonly_fd(int fd)
+{
+    if (fd < 0)
+        LOG_NULL("codeindex", "invalid readonly store fd");
 
     struct ci_store *s = zcl_calloc(1, sizeof(*s), "ci_store_readonly");
     if (!s) {
@@ -251,8 +260,8 @@ struct ci_store *ci_store_open(const char *root)
     }
     (void)sqlite3_busy_timeout(s->db, 5000);
     return s;
-#endif
 }
+#endif
 
 bool ci_store_write_image_fd(struct ci_store *s, int fd)
 {
