@@ -60,10 +60,11 @@
 
 /* Darwin gives secondary pthreads only 512 KiB by default. Registered node
  * workers execute bounded fixed-action code whose checked automatic state can
- * exceed that in development builds, so the platform seam supplies explicit
- * headroom instead of letting a valid worker die at function entry. */
+ * exceed that, including the depth-bounded ZSLP ancestry walk. Match the
+ * normal Linux pthread stack baseline instead of letting valid work exhaust a
+ * Darwin-only undersized stack. */
 #if defined(__APPLE__)
-#define ZCL_DARWIN_THREAD_STACK_BYTES (2u * 1024u * 1024u)
+#define ZCL_DARWIN_THREAD_STACK_BYTES (8u * 1024u * 1024u)
 #endif
 
 /* Spawn a thread via pthread_create and record it in the registry.
