@@ -111,6 +111,23 @@ Other allowlisted permissive licenses stay valid when that is the existing
 text. Declare every dependency by its exact `package_root`. Discover any
 input spelling with `z23 discover schema <leaf>`.
 
+A package may also ship the program a person runs, not only the library
+other code links. Put each program in one translation unit `app/<stem>.c`
+that holds `main()`, list it in `files`, and declare it in the manifest:
+
+```json
+"programs": ["app/main.c"]
+```
+
+Nothing under `app/` is built unless it is declared there — fetched C stays
+inert, and the author says what ships. A declared program is compiled with
+the package's own flags, linked against the package archive, its locked
+dependencies and the declared system libraries, and emitted as the install
+output `bin/<stem>` (`bin/<package short name>` for `app/main.c`) under the
+same build receipt as the library, so reproduction covers the executable
+too. `z23 zcode project init plan` proposes the key when it finds
+`app/<stem>.c`; the plan is the reviewed step.
+
 1. Create a package-only key. It is not a wallet or node identity:
 
    ```bash
@@ -270,9 +287,13 @@ do not trust the announcer.
    z23 zcode use --input='{"plan_id":"<plan_id>","datadir":"/tmp/z23-commons"}'
    ```
 
-The installed result is public headers plus a static archive. Z23 does
-not load it into the node. Linking an application against it remains an
-explicit local action.
+The installed result is public headers plus a static archive and, for a
+package that declares `programs`, the executables under
+`<datadir>/zcode/installed/<package_root>/bin/`. The commit reply lists them
+as `programs` and, when there is one, its `next_action` is the exact
+`run <path>` to type. Z23 does not load or run any of it inside the node;
+running the program, or linking your own application against the archive,
+remains an explicit local action.
 
 ## Reproducer
 

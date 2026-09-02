@@ -29,7 +29,10 @@
 #      identities stay bound to each other.
 #   7. Node B reconstructs the inputs and reproduces byte-identical output.
 #   8. Altered source, dependency, receipt or artifact is refused BY NAME.
-#   9. Acceptance is explicit, and `zcode use` then runs the application.
+#   9. Acceptance is explicit; the accepted tree publishes as an ordinary
+#      package whose manifest declares the program it ships, and `zcode use`
+#      then builds, installs and names that program (bin/wordcount) under
+#      the same build receipt as the library — this proof runs no compiler.
 #
 # The fixture is deliberately small and real: tools/dev/fixtures/commons_journey
 # holds z23/textstat (a finished, dependency-free counter package) and
@@ -131,6 +134,7 @@ cj_write_package_json() {
   "include_dir": "include",
   "source_dir": "src",
   "dependencies": $deps,
+  "programs": ["app/main.c"],
   "files": [
     "LICENSE",
     "app/main.c",
@@ -652,18 +656,32 @@ cj_checkout_accepted() {
         --input="{\"datadir\":\"$dd\",\"package_root\":\"$pkg\",\"source_root\":\"$src\",\"accepted_work_root\":\"$work\",\"workspace\":\"$cas\",\"destination\":\"$dest\"}"
 }
 
-# Build the accepted application out of a checked-out source tree, against
-# the dependency this node admitted for itself. Nothing here reaches into the
-# other node's datadir: each node links only what it holds, and the compile
-# runs where the node lives.
-cj_build_wordcount() {
-    local node="$1" src="$2" dd="$3" out="$4"
-    cj_on "$node" cc -std=c23 -O1 -D_POSIX_C_SOURCE=200809L \
-        -I"$src/include" \
-        -I"$dd/zcode/installed/$CJ_TEXTSTAT_ROOT/include" \
-        "$src/app/main.c" "$src/src/wordcount.c" \
-        "$dd/zcode/installed/$CJ_TEXTSTAT_ROOT/lib/libtextstat.a" \
-        -o "$out"
+# The executable `zcode use` installed for a package whose manifest declares
+# a program. The reply names it (data.programs[i].path) and hands the person
+# the next action ("run <path>"); nothing here guesses an install path, and
+# nothing here compiles: the program is a build-receipt output, built by the
+# node's own confined worker from the recipe, exactly like the library.
+# Prints the path; an empty result is the caller's failure to check.
+cj_program_path() {
+    local commit="$1" want="$2" i=0 output path next
+    while :; do
+        output="$(cj_field "data.programs.$i.output" "$commit" '')"
+        [ -n "$output" ] || break
+        if [ "$output" = "bin/$want" ]; then
+            path="$(cj_field "data.programs.$i.path" "$commit" '')"
+            [ -n "$path" ] ||
+                cj_die "zcode use named program $output without a path: $commit"
+            next="$(cj_field data.next_action "$commit" '')"
+            case "$next" in
+                "run $path"*) ;;
+                *) cj_die "zcode use installed $output but did not hand the person 'run $path' as the next action: $commit" ;;
+            esac
+            printf '%s' "$path"
+            return 0
+        fi
+        i=$((i + 1))
+    done
+    cj_die "zcode use installed no program bin/$want: $commit"
 }
 
 # The one file in a node's content store that holds the largest source shard
@@ -946,6 +964,13 @@ cj_journey_admit_reuse() {
     [ -f "$installed/include/textstat/textstat.h" ] ||
         cj_die "admission produced no public header for z23/textstat"
     CJ_TEXTSTAT_ARTIFACT="$installed/lib/libtextstat.a"
+
+    # Now that the person has admitted it, the application declares the
+    # dependency by its exact root — the same manifest an author writes by
+    # hand. The declaration travels inside the accepted source, so the tree
+    # that leaves this workshop as an ordinary package (step 9) names what
+    # it needs, and any node that admits it resolves the same exact bytes.
+    cj_write_package_json "$CJ_WS" "$CJ_TEXTSTAT_ROOT"
 
     local start plan
     start="$(cj_a zcode work start \
@@ -1489,8 +1514,52 @@ cj_journey_use_app() {
     cj_on b grep -q wordcount_longest_line "$src_b/src/wordcount.c" ||
         cj_die "the accepted source does not contain the behavior this journey created"
 
-    # The visible result: the application, built on node B out of source node
-    # B reconstructed itself, linked against the artifact node B built itself.
+    # The visible result — produced by the product, not by this script. The
+    # accepted tree's own manifest declares the program it ships
+    # ("programs": ["app/main.c"]), so publishing it as an ordinary package
+    # gives it a recipe whose build receipt covers the executable as well as
+    # the library. `zcode use` then builds and installs bin/wordcount on each
+    # node, from bytes that node verified itself, in that node's confined
+    # worker. This proof spawns no compiler: every program it runs below is
+    # a receipt-bound install output, and each node's reply hands the person
+    # the exact next action.
+    src_a="$(cj_node_dir a)/checkout-a"
+    cj_require_ok "node A accepted-source checkout" \
+        "$(cj_checkout_accepted a "$src_a")"
+    # Its own publisher identity, like every package here (publish
+    # frequency is a real rule, and a new-user key gets one publish per
+    # ISO week).
+    CJ_APP_PKG_PUBLISHER="$("$CJ_SIGNER" --generate "$DHT_WORK/app-package-publisher.key")"
+    [ -n "$CJ_APP_PKG_PUBLISHER" ] ||
+        cj_die "could not create the application package publisher identity"
+    cj_publish_package a "$src_a" 1 "$CJ_APP_PKG_PUBLISHER" \
+        "$DHT_WORK/app-package-publisher.key"
+    CJ_APP_PKG_ROOT="$CJ_PKG_ROOT"
+    CJ_APP_PKG_TRANSPORT="$CJ_PKG_TRANSPORT"
+    cj_note "you/wordcount published as an ordinary package on node A: ${CJ_APP_PKG_ROOT:0:16}…"
+    # The pointer gate binds A here exactly as it bound A for z23/textstat:
+    # admit (first receipt — and the install that carries bin/wordcount),
+    # rebuild (distinct second receipt), then announce.
+    cj_use_package a "$CJ_APP_PKG_ROOT"
+    bin_a="$(cj_program_path "$CJ_USE_COMMIT" wordcount)"
+    [ -n "$bin_a" ] && cj_on a test -x "$bin_a" ||
+        cj_die "node A admitted you/wordcount but installed no executable program"
+    cj_reproduce_package a "$CJ_APP_PKG_ROOT"
+    cj_announce_package a "$CJ_APP_PKG_ROOT" "$CJ_APP_PKG_TRANSPORT" 1
+
+    # Node B: fetch the exact root, admit it explicitly, and the program is
+    # there — built by node B, on node B, from source node B verified.
+    cj_fetch_package b "$CJ_APP_PKG_ROOT" "$CJ_APP_PKG_TRANSPORT"
+    cj_use_package b "$CJ_APP_PKG_ROOT"
+    bin_b="$(cj_program_path "$CJ_USE_COMMIT" wordcount)"
+    [ -n "$bin_b" ] && cj_on b test -x "$bin_b" ||
+        cj_die "node B admitted you/wordcount but installed no executable program"
+    case "$bin_b" in
+        "$DHT_DD_B/zcode/installed/$CJ_APP_PKG_ROOT/bin/wordcount") ;;
+        *) cj_die "node B installed the program somewhere other than its own package tree: $bin_b" ;;
+    esac
+    CJ_APP_BIN_B="$bin_b"
+
     sample="$DHT_WORK/sample.txt"
     printf '%s\n' \
         'the commons is not a registry' \
@@ -1499,9 +1568,6 @@ cj_journey_use_app() {
     sample_b="$(cj_node_dir b)/sample-b.txt"
     dht_node_put "$B_RPC" "$sample" "$sample_b" ||
         cj_die "sample input never reached node B"
-    bin_b="$(cj_node_dir b)/wordcount-b"
-    cj_build_wordcount b "$src_b" "$DHT_DD_B" "$bin_b" ||
-        cj_die "the accepted application did not build on node B"
     out="$(cj_on b "$bin_b" "$sample_b")"
     # The oracle is deliberately not this project: coreutils wc and awk count
     # the same file independently, so the assertion cannot drift into "what
@@ -1511,20 +1577,15 @@ cj_journey_use_app() {
         cj_die "the application ran but answered '$out' instead of '$want'"
     CJ_APP_OUTPUT="$out"
 
-    # And it is the same program on both nodes: node A builds it from the
-    # source it accepted, node B from the source it fetched and re-derived,
-    # and the two executables are the same bytes.
-    src_a="$(cj_node_dir a)/checkout-a"
-    cj_require_ok "node A accepted-source checkout" \
-        "$(cj_checkout_accepted a "$src_a")"
-    bin_a="$(cj_node_dir a)/wordcount-a"
-    cj_build_wordcount a "$src_a" "$DHT_DD_A" "$bin_a" ||
-        cj_die "the accepted application did not build on node A"
+    # And it is the same program on both nodes: node A built it from the
+    # source it accepted, node B from the source it fetched and verified,
+    # each in its own confined worker, and the two receipt-bound executables
+    # are the same bytes.
     [ "$(cj_sha3_on a "$bin_a")" = "$(cj_sha3_on b "$bin_b")" ] ||
         cj_die "the two nodes built different programs from the same accepted source"
     CJ_APP_BINARY_BYTES="$(cj_bytes_on b "$bin_b")"
     cj_note "wordcount sample.txt -> $CJ_APP_OUTPUT"
-    cj_note "identical $CJ_APP_BINARY_BYTES-byte program on both nodes"
+    cj_note "identical $CJ_APP_BINARY_BYTES-byte program on both nodes, installed by zcode use as bin/wordcount"
     cj_note "the longest_line number is the behavior this journey created"
 }
 
@@ -2138,9 +2199,13 @@ cj_journey_publisher_disappears() {
     # application and the changed aircraft) announce provider + source —
     # the pointer is not a claim a transport can evidence.
     cj_reproduce_package b "$CJ_TEXTSTAT_ROOT"
+    cj_reproduce_package b "$CJ_APP_PKG_ROOT"
     cj_reproduce_package b "$CJ_ZPRNG_ROOT"
     cj_announce_package b "$CJ_TEXTSTAT_ROOT" "$CJ_TEXTSTAT_TRANSPORT" 2
     cj_announce_transport b "$CJ_APP_ROOT" "$CJ_APP_TRANSPORT" 2
+    # The ordinary package carrying the program is testable, so it earns a
+    # pointer from B like the library does.
+    cj_announce_package b "$CJ_APP_PKG_ROOT" "$CJ_APP_PKG_TRANSPORT" 2
     # Step 10's two packages travel the same way, from the same surviving
     # holder: the dependency (testable, so it earns a pointer), and the
     # changed version of the aircraft (a transport, so provider + source).
@@ -2249,9 +2314,14 @@ cj_journey_publisher_disappears() {
     sample_c="$(cj_node_dir c)/sample-c.txt"
     dht_node_put "$C_RPC" "$DHT_WORK/sample.txt" "$sample_c" ||
         cj_die "sample input never reached node C"
-    bin_c="$(cj_node_dir c)/wordcount-c"
-    cj_build_wordcount c "$src_c" "$DHT_DD_C" "$bin_c" ||
-        cj_die "the accepted application did not build on node C"
+    # The program arrives the same way it did on B: the ordinary package,
+    # fetched from the only node that still holds it, admitted explicitly,
+    # built and installed by C's own worker from C's own verified bytes.
+    cj_fetch_package c "$CJ_APP_PKG_ROOT" "$CJ_APP_PKG_TRANSPORT"
+    cj_use_package c "$CJ_APP_PKG_ROOT"
+    bin_c="$(cj_program_path "$CJ_USE_COMMIT" wordcount)"
+    [ -n "$bin_c" ] && cj_on c test -x "$bin_c" ||
+        cj_die "node C admitted you/wordcount but installed no executable program"
     out_c="$(cj_on c "$bin_c" "$sample_c")"
     [ "$out_c" = "$CJ_APP_OUTPUT" ] ||
         cj_die "node C ran the application but answered '$out_c' instead of '$CJ_APP_OUTPUT'"
@@ -2262,7 +2332,7 @@ cj_journey_publisher_disappears() {
     cc_b="$(cj_on b sh -c 'cc --version | head -1')"
     cc_c="$(cj_on c sh -c 'cc --version | head -1')"
     if [ "$cc_b" = "$cc_c" ]; then
-        [ "$(cj_sha3_on b "$(cj_node_dir b)/wordcount-b")" = \
+        [ "$(cj_sha3_on b "$CJ_APP_BIN_B")" = \
           "$(cj_sha3_on c "$bin_c")" ] ||
             cj_die "B and C built different programs from the same accepted source"
         ts_c="$DHT_DD_C/zcode/installed/$CJ_TEXTSTAT_ROOT/lib/libtextstat.a"
@@ -2346,6 +2416,7 @@ cj_strip() {
     cj_strip_row "ACCEPTED" \
         "one exact version, by hand — PROVEN, published as you/wordcount"
     cj_strip_row "USED" "wordcount sample.txt → $CJ_APP_OUTPUT"
+    cj_strip_cont "bin/wordcount installed by zcode use — no compiler run by this proof"
     # The tenth stage moves the work, not the source: the compile cache left
     # node B as one ordinary package, and a node that never compiled the
     # application rebuilt it without running a single compiler.
@@ -2392,9 +2463,12 @@ cj_topology() {
    3 DISCOVER   zcode.network.find               node B asks the overlay who holds that root
    4 FETCH      zcode.package.fetch              bytes arrive from node A — and stay inert
    5 REPRODUCE  zcode.package.source.reproduce   node B re-derives the exact source tree
-   6 USE        zcode.package.dev.use            node B admits it — an explicit local decision
-   7 BUILD      zcode.workspace.source.package.checkout
-                                                 carrier → accepted source → the program runs
+   6 USE        zcode.package.dev.use            node B admits it — an explicit local decision;
+                                                 its worker builds the library AND bin/wordcount,
+                                                 both under one build receipt, and hands back
+                                                 "run <path>"
+   7 CHECKOUT   zcode.workspace.source.package.checkout
+                                                 carrier → the accepted source, byte for byte
    8 SERVE      node B answers for the same roots, so the next peer need not ask node A
 
    9 EXPORT     zcode.package.fastobj.export     node B's compile cache leaves as one ordinary package
@@ -2448,7 +2522,9 @@ cj_write_facts() {
         printf 'bytes_over_the_wire   = %s (reused package) + %s (accepted application)\n' \
             "$CJ_TEXTSTAT_BYTES" "$CJ_APP_BYTES"
         printf 'reused_package_match  = byte-identical on both nodes (%s bytes)\n' "$CJ_LIB_BYTES"
+        printf 'accepted_package_root = %s\n' "$CJ_APP_PKG_ROOT"
         printf 'application_match     = byte-identical program on both nodes (%s bytes)\n' "$CJ_APP_BINARY_BYTES"
+        printf 'program_installed_by  = zcode use — recipe program app/main.c -> bin/wordcount, receipt-bound; this proof ran no compiler\n'
         printf 'tamper_refused        = 4 of 4, each by name\n'
         printf 'carrier_root          = %s\n' "$CJ_CARRIER_ROOT"
         printf 'carrier_entries       = %s objects, node-B cache exported as one content.v2 package\n' "$CJ_CARRIER_ENTRIES"
