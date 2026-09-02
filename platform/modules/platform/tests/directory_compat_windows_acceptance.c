@@ -137,6 +137,25 @@ int main(void)
         return fail("sorted regular-file filtering");
     platform_directory_list_free(&list);
 
+    struct platform_directory_list combined_directories = {0};
+    struct platform_directory_list combined_files = {0};
+    if (!platform_directory_list_children_sorted(
+            root, &combined_directories, &combined_files))
+        return fail("single-pass child enumeration");
+    if (combined_directories.count != 2 ||
+        strcmp(combined_directories.entries[0].name, "20260101_000000") ||
+        strcmp(combined_directories.entries[1].name,
+               "20260101_000002-\xE9\x9B\xAA") ||
+        combined_files.count != 1 ||
+        strcmp(combined_files.entries[0].name, "plain-file") ||
+        !combined_files.entries[0].snapshot_valid ||
+        combined_files.entries[0].size != 3 ||
+        combined_files.entries[0].volume != info.dwVolumeSerialNumber ||
+        combined_files.entries[0].file_low != file_id)
+        return fail("single-pass sorted child filtering");
+    platform_directory_list_free(&combined_directories);
+    platform_directory_list_free(&combined_files);
+
     if (made_link) RemoveDirectoryW(link_wide);
     DeleteFileW(plain_wide);
     wchar_t unicode_wide[4 * MAX_PATH];

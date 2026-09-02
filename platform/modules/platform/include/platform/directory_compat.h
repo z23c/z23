@@ -62,6 +62,16 @@ bool platform_directory_list_real_sorted(const char *path,
  * points are omitted. */
 bool platform_directory_list_regular_sorted(
     const char *path, struct platform_directory_list *out);
+
+/* Return real immediate directories and regular files from one retained
+ * directory enumeration.  This is the freshness-scan path: opening and
+ * walking a large tree twice on Windows is observable latency, while one
+ * handle-bound FILE_ID_BOTH_DIR_INFORMATION stream already carries both the
+ * child kind and the exact regular-file metadata.  Both lists are sorted
+ * independently and own their entries. */
+bool platform_directory_list_children_sorted(
+    const char *path, struct platform_directory_list *directories,
+    struct platform_directory_list *files);
 void platform_directory_list_free(struct platform_directory_list *list);
 
 #endif

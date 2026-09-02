@@ -350,11 +350,13 @@ bool platform_directory_list_real_sorted(const char *path,
     return true;
 }
 
-bool platform_directory_list_regular_sorted(
-    const char *path, struct platform_directory_list *out)
+static bool platform_directory_list_children_sorted_impl(
+    const char *path, struct platform_directory_list *directories,
+    struct platform_directory_list *files)
 {
-    if (!out) return false;
-    *out = (struct platform_directory_list){0};
+    if (!directories && !files) return false;
+    if (directories) *directories = (struct platform_directory_list){0};
+    if (files) *files = (struct platform_directory_list){0};
     wchar_t *root = utf8_to_wide(path);
     if (!root) return false;
     HANDLE root_handle = CreateFileW(
@@ -419,8 +421,19 @@ bool platform_directory_list_regular_sorted(
                 break;
             }
             DWORD attrs = entry->FileAttributes;
-            if ((attrs & (FILE_ATTRIBUTE_DIRECTORY |
-                          FILE_ATTRIBUTE_REPARSE_POINT)) == 0) {
+            bool is_directory =
+                (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0;
+            bool is_reparse =
+                (attrs & FILE_ATTRIBUTE_REPARSE_POINT) != 0;
+            bool is_dot = is_directory &&
+                ((name_bytes == sizeof(wchar_t) &&
+                  entry->FileName[0] == L'.') ||
+                 (name_bytes == 2u * sizeof(wchar_t) &&
+                  entry->FileName[0] == L'.' &&
+                  entry->FileName[1] == L'.'));
+            struct platform_directory_list *selected = is_directory
+                ? directories : files;
+            if (!is_reparse && !is_dot && selected) {
                 char *name = wide_span_to_utf8(
                     entry->FileName, name_bytes / sizeof(wchar_t));
                 struct platform_directory_entry snapshot = {
@@ -434,9 +447,11 @@ bool platform_directory_list_regular_sorted(
                                     &snapshot.modified_seconds,
                                     &snapshot.modified_nanoseconds);
                 windows_ticks_split(entry->ChangeTime.QuadPart,
-                                    &snapshot.changed_seconds,
-                                    &snapshot.changed_nanoseconds);
-                if (!name || !append_entry(out, name, &snapshot)) {
+                                     &snapshot.changed_seconds,
+                                     &snapshot.changed_nanoseconds);
+                if (!name || !append_entry(selected, name,
+                                             is_directory ? NULL
+                                                          : &snapshot)) {
                     ok = false;
                     failure = "append directory record";
                     failure_information = status.Information;
@@ -459,16 +474,38 @@ bool platform_directory_list_regular_sorted(
     CloseHandle(root_handle);
     if (!ok) {
         fprintf(stderr, /* obs-ok:directory-compat-list-refusal */
-                "[directory_compat] regular listing failed path=%s "
+                "[directory_compat] child listing failed path=%s "
                 "reason=%s ntstatus=0x%08lx information=%zu offset=%zu\n",
                 path, failure ? failure : "unknown",
                 (unsigned long)failure_status, failure_information,
                 failure_offset);
-        platform_directory_list_free(out);
+        if (directories) platform_directory_list_free(directories);
+        if (files) platform_directory_list_free(files);
         return false;
     }
-    qsort(out->entries, out->count, sizeof(*out->entries), entry_compare);
+    if (directories)
+        qsort(directories->entries, directories->count,
+              sizeof(*directories->entries), entry_compare);
+    if (files)
+        qsort(files->entries, files->count, sizeof(*files->entries),
+              entry_compare);
     return true;
+}
+
+bool platform_directory_list_regular_sorted(
+    const char *path, struct platform_directory_list *out)
+{
+    if (!out) return false;
+    return platform_directory_list_children_sorted_impl(path, NULL, out);
+}
+
+bool platform_directory_list_children_sorted(
+    const char *path, struct platform_directory_list *directories,
+    struct platform_directory_list *files)
+{
+    if (!directories || !files) return false;
+    return platform_directory_list_children_sorted_impl(path, directories,
+                                                         files);
 }
 
 #else
@@ -476,6 +513,28 @@ bool platform_directory_list_regular_sorted(
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
+
+static struct platform_directory_entry directory_entry_snapshot(
+    const struct stat *st)
+{
+    struct platform_directory_entry snapshot = {
+        .snapshot_valid = true,
+        .size = (uint64_t)st->st_size,
+        .modified_seconds = (int64_t)st->st_mtime,
+        .changed_seconds = (int64_t)st->st_ctime,
+        .volume = (uint64_t)st->st_dev,
+        .file_low = (uint64_t)st->st_ino,
+        .file_high = 0,
+    };
+#if defined(__APPLE__)
+    snapshot.modified_nanoseconds = (uint32_t)st->st_mtimespec.tv_nsec;
+    snapshot.changed_nanoseconds = (uint32_t)st->st_ctimespec.tv_nsec;
+#else
+    snapshot.modified_nanoseconds = (uint32_t)st->st_mtim.tv_nsec;
+    snapshot.changed_nanoseconds = (uint32_t)st->st_ctim.tv_nsec;
+#endif
+    return snapshot;
+}
 
 int platform_directory_create(const char *path, int mode)
 {
@@ -572,22 +631,8 @@ bool platform_directory_list_regular_sorted(
             break;
         }
         if (!S_ISREG(st.st_mode) || S_ISLNK(st.st_mode)) continue;
-        struct platform_directory_entry snapshot = {
-            .snapshot_valid = true,
-            .size = (uint64_t)st.st_size,
-            .modified_seconds = (int64_t)st.st_mtime,
-            .changed_seconds = (int64_t)st.st_ctime,
-            .volume = (uint64_t)st.st_dev,
-            .file_low = (uint64_t)st.st_ino,
-            .file_high = 0,
-        };
-#if defined(__APPLE__)
-        snapshot.modified_nanoseconds = (uint32_t)st.st_mtimespec.tv_nsec;
-        snapshot.changed_nanoseconds = (uint32_t)st.st_ctimespec.tv_nsec;
-#else
-        snapshot.modified_nanoseconds = (uint32_t)st.st_mtim.tv_nsec;
-        snapshot.changed_nanoseconds = (uint32_t)st.st_ctim.tv_nsec;
-#endif
+        struct platform_directory_entry snapshot =
+            directory_entry_snapshot(&st);
         if (!append_entry(out, entry->d_name, &snapshot)) {
             ok = false;
             break;
@@ -596,6 +641,53 @@ bool platform_directory_list_regular_sorted(
     if (closedir(dir) != 0) ok = false;
     if (!ok) { platform_directory_list_free(out); return false; }
     qsort(out->entries, out->count, sizeof(*out->entries), entry_compare);
+    return true;
+}
+
+bool platform_directory_list_children_sorted(
+    const char *path, struct platform_directory_list *directories,
+    struct platform_directory_list *files)
+{
+    if (!directories || !files) return false;
+    *directories = (struct platform_directory_list){0};
+    *files = (struct platform_directory_list){0};
+    struct stat root_st;
+    if (lstat(path, &root_st) != 0 || !S_ISDIR(root_st.st_mode) ||
+        S_ISLNK(root_st.st_mode))
+        return false;
+    DIR *dir = opendir(path);
+    if (!dir) return false;
+    bool ok = true;
+    int fd = dirfd(dir);
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != NULL) {
+        if (strcmp(entry->d_name, ".") == 0 ||
+            strcmp(entry->d_name, "..") == 0)
+            continue;
+        struct stat st;
+        if (fstatat(fd, entry->d_name, &st, AT_SYMLINK_NOFOLLOW) != 0) {
+            ok = false;
+            break;
+        }
+        if (S_ISLNK(st.st_mode)) continue;
+        if (S_ISDIR(st.st_mode)) {
+            ok = append_entry(directories, entry->d_name, NULL);
+        } else if (S_ISREG(st.st_mode)) {
+            struct platform_directory_entry snapshot =
+                directory_entry_snapshot(&st);
+            ok = append_entry(files, entry->d_name, &snapshot);
+        }
+    }
+    if (closedir(dir) != 0) ok = false;
+    if (!ok) {
+        platform_directory_list_free(directories);
+        platform_directory_list_free(files);
+        return false;
+    }
+    qsort(directories->entries, directories->count,
+          sizeof(*directories->entries), entry_compare);
+    qsort(files->entries, files->count, sizeof(*files->entries),
+          entry_compare);
     return true;
 }
 #endif

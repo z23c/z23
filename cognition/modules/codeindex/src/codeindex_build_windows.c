@@ -98,7 +98,7 @@ static bool pruned_directory(const char *name)
 }
 
 static bool collect_directory(const char *root, const char *relative,
-                              struct strvec *paths)
+                              struct strvec *paths, bool optional)
 {
     char full[CI_PATH_MAX];
     int length = relative[0]
@@ -108,21 +108,19 @@ static bool collect_directory(const char *root, const char *relative,
         errno = ENAMETOOLONG;
         return false;
     }
-    enum platform_directory_probe_result probe =
-        platform_directory_probe_real(full);
-    if (probe == PLATFORM_DIRECTORY_PROBE_MISSING) return true;
-    if (probe != PLATFORM_DIRECTORY_PROBE_OK) return false;
+    if (optional) {
+        enum platform_directory_probe_result probe =
+            platform_directory_probe_real(full);
+        if (probe == PLATFORM_DIRECTORY_PROBE_MISSING) return true;
+        if (probe != PLATFORM_DIRECTORY_PROBE_OK) return false;
+    }
 
     struct platform_directory_list directories = {0}, files = {0};
-    if (!platform_directory_list_real_sorted(full, &directories)) {
+    if (!platform_directory_list_children_sorted(full, &directories,
+                                                  &files)) {
         platform_directory_list_free(&directories);
         platform_directory_list_free(&files);
-        LOG_FAIL("codeindex", "list Windows source directories: %s", full);
-    }
-    if (!platform_directory_list_regular_sorted(full, &files)) {
-        platform_directory_list_free(&directories);
-        platform_directory_list_free(&files);
-        LOG_FAIL("codeindex", "list Windows source files: %s", full);
+        LOG_FAIL("codeindex", "list Windows source children: %s", full);
     }
 
     bool ok = true;
@@ -134,7 +132,7 @@ static bool collect_directory(const char *root, const char *relative,
             ? snprintf(child, sizeof(child), "%s/%s", relative, name)
             : snprintf(child, sizeof(child), "%s", name);
         ok = n > 0 && (size_t)n < sizeof(child) &&
-             collect_directory(root, child, paths);
+             collect_directory(root, child, paths, false);
     }
     for (size_t i = 0; ok && i < files.count; i++) {
         const char *name = files.entries[i].name;
@@ -191,7 +189,8 @@ bool ci_enumerate_sources(const char *root, ci_enum_cb callback, void *user)
 #undef SOURCE_ROOT
     };
     for (size_t i = 0; i < sizeof(roots) / sizeof(roots[0]); i++)
-        if (!collect_directory(root, roots[i], &paths)) goto collect_failed;
+        if (!collect_directory(root, roots[i], &paths, true))
+            goto collect_failed;
 
     qsort(paths.items, paths.count, sizeof(paths.items[0]), path_compare);
     bool ok = true;
