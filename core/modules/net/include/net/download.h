@@ -56,6 +56,9 @@
                                           * to tip-advancing forward work */
 #define DL_MAX_HISTORY_PER_PEER 2         /* keep any one peer from becoming a
                                           * history-only bottleneck */
+#define DL_DIAGNOSTIC_PEER_CAP 32         /* bounded live per-peer rows exposed
+                                          * by downloadstats; truncation is
+                                          * named when more peers are active */
 
 /* Work classes are part of the download manager's scheduling contract.
  * Forward work always wins assignment; history uses its own bounded lane. */
@@ -118,6 +121,22 @@ struct dl_peer_stats {
     int      zero_assign_result;
 };
 
+/* Bounded read-only peer row carried by dl_diagnostics. This is operator
+ * evidence only; scheduling continues to use dl_peer_stats under dm->cs. */
+struct dl_peer_diagnostic {
+    uint32_t peer_id;
+    uint64_t requested;
+    uint64_t received;
+    uint64_t timed_out;
+    uint64_t in_flight;
+    int64_t  avg_delivery_us;
+    int64_t  last_body_age_seconds;       /* -1 until a body is received */
+    int64_t  oldest_in_flight_age_seconds;/* -1 when this peer has no request */
+    int32_t  oldest_in_flight_height;     /* -1 when this peer has no request */
+    uint32_t bandwidth_score;
+    bool     is_loopback;
+};
+
 /* Cheap operator/AI diagnostics over the current in-flight set. Sentinel
  * values when no request is in flight:
  *   oldest_in_flight_age_seconds = -1
@@ -150,6 +169,13 @@ struct dl_diagnostics {
     uint64_t last_assign_peer_limit;
     uint64_t last_assign_global_limit;
     int      last_assign_result;
+
+    /* Live peer-attribution for urgent-height stall diagnosis. Rows are
+     * stable in manager slot order and include active peers only. */
+    uint64_t peer_download_total;
+    size_t   peer_download_count;
+    bool     peer_download_truncated;
+    struct dl_peer_diagnostic peer_downloads[DL_DIAGNOSTIC_PEER_CAP];
 
     /* Reason-specific dependency generations for zero-result parking. */
     uint64_t queue_generation;

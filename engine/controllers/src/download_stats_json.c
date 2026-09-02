@@ -135,6 +135,39 @@ void download_stats_push_json(struct json_value *obj,
                          (int64_t)diag->last_assign_global_limit);
         json_push_kv_str(obj, "last_assign_result",
                          dl_assign_result_name(diag->last_assign_result));
+
+        json_push_kv_int(obj, "peer_download_total",
+                         (int64_t)diag->peer_download_total);
+        json_push_kv_bool(obj, "peer_download_truncated",
+                          diag->peer_download_truncated);
+        struct json_value peers = {0};
+        json_set_array(&peers);
+        for (size_t i = 0; i < diag->peer_download_count; i++) {
+            const struct dl_peer_diagnostic *pd =
+                &diag->peer_downloads[i];
+            struct json_value peer = {0};
+            json_set_object(&peer);
+            json_push_kv_int(&peer, "peer_id", (int64_t)pd->peer_id);
+            json_push_kv_int(&peer, "requested", (int64_t)pd->requested);
+            json_push_kv_int(&peer, "received", (int64_t)pd->received);
+            json_push_kv_int(&peer, "timed_out", (int64_t)pd->timed_out);
+            json_push_kv_int(&peer, "in_flight", (int64_t)pd->in_flight);
+            json_push_kv_int(&peer, "avg_delivery_us",
+                             pd->avg_delivery_us);
+            json_push_kv_int(&peer, "last_body_age_seconds",
+                             pd->last_body_age_seconds);
+            json_push_kv_int(&peer, "oldest_in_flight_age_seconds",
+                             pd->oldest_in_flight_age_seconds);
+            json_push_kv_int(&peer, "oldest_in_flight_height",
+                             (int64_t)pd->oldest_in_flight_height);
+            json_push_kv_int(&peer, "bandwidth_score",
+                             (int64_t)pd->bandwidth_score);
+            json_push_kv_bool(&peer, "is_loopback", pd->is_loopback);
+            json_push_back(&peers, &peer);
+            json_free(&peer);
+        }
+        json_push_kv(obj, "peer_downloads", &peers);
+        json_free(&peers);
     }
 
     json_push_kv_int(obj, "bytes_downloaded", (int64_t)s->bytes_downloaded);

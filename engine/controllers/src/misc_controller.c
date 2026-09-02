@@ -219,6 +219,7 @@ static bool rpc_downloadstats(const struct json_value *params, bool help,
         "\"dispatch_wakes\", "
         "\"message_send_calls\", \"message_process_calls\", "
         "\"last_assign_result\", "
+        "\"peer_downloads\", "
         "\"sync_state\" }\n");
 
     struct download_stats_snapshot dl_snap;

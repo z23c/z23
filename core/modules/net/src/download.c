@@ -1707,6 +1707,37 @@ void dl_get_diagnostics(struct download_manager *dm,
                             (int64_t)dm->total_timed_out -
                             (int64_t)dm->total_orphaned -
                             (int64_t)dm->num_active;
+
+    /* Snapshot active peer ownership while the same manager lock is already
+     * held. Without these rows, a full queue plus low H* could name the oldest
+     * peer only; operators could not distinguish one slow peer holding the
+     * urgent window from balanced network variance. */
+    for (size_t i = 0; i < dm->num_peers; i++) {
+        const struct dl_peer_stats *ps = &dm->peers[i];
+        if (!ps->active)
+            continue;
+        out->peer_download_total++;
+        if (out->peer_download_count >= DL_DIAGNOSTIC_PEER_CAP) {
+            out->peer_download_truncated = true;
+            continue;
+        }
+        struct dl_peer_diagnostic *pd =
+            &out->peer_downloads[out->peer_download_count++];
+        pd->peer_id = ps->peer_id;
+        pd->requested = ps->blocks_requested;
+        pd->received = ps->blocks_received;
+        pd->timed_out = ps->blocks_timed_out;
+        pd->avg_delivery_us = ps->avg_delivery_us;
+        pd->last_body_age_seconds =
+            ps->last_body_received_time > 0 &&
+            now >= ps->last_body_received_time
+                ? now - ps->last_body_received_time
+                : -1;
+        pd->oldest_in_flight_age_seconds = -1;
+        pd->oldest_in_flight_height = -1;
+        pd->bandwidth_score = ps->bandwidth_score;
+        pd->is_loopback = ps->is_loopback;
+    }
     for (size_t i = 0; i < dm->queue_len; i++) {
         if (dm->queue_classes[i] == DL_WORK_HISTORY)
             out->queued_history++;
@@ -1738,6 +1769,19 @@ void dl_get_diagnostics(struct download_manager *dm,
         }
         if (age >= timeout)
             out->overdue_in_flight++;
+
+        for (size_t p = 0; p < out->peer_download_count; p++) {
+            struct dl_peer_diagnostic *pd = &out->peer_downloads[p];
+            if (pd->peer_id != s->peer_id)
+                continue;
+            pd->in_flight++;
+            if (pd->oldest_in_flight_age_seconds < 0 ||
+                age > pd->oldest_in_flight_age_seconds) {
+                pd->oldest_in_flight_age_seconds = age;
+                pd->oldest_in_flight_height = s->height;
+            }
+            break;
+        }
 
         bool seen_peer = false;
         for (size_t p = 0; p < peer_count; p++) {

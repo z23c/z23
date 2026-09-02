@@ -899,6 +899,26 @@ static int test_dl_diagnostics(void)
         ASSERT(diag.oldest_in_flight_peer_id == 7);
         ASSERT(diag.overdue_in_flight == 1);
         ASSERT(diag.in_flight_peer_count == 2);
+        ASSERT(diag.peer_download_total == 2);
+        ASSERT(diag.peer_download_count == 2);
+        ASSERT(!diag.peer_download_truncated);
+        const struct dl_peer_diagnostic *p7 = NULL;
+        const struct dl_peer_diagnostic *p8 = NULL;
+        for (size_t i = 0; i < diag.peer_download_count; i++) {
+            if (diag.peer_downloads[i].peer_id == 7)
+                p7 = &diag.peer_downloads[i];
+            if (diag.peer_downloads[i].peer_id == 8)
+                p8 = &diag.peer_downloads[i];
+        }
+        ASSERT(p7 != NULL && p8 != NULL);
+        ASSERT(p7->requested == 1 && p7->received == 0 &&
+               p7->timed_out == 0 && p7->in_flight == 1);
+        ASSERT(p7->oldest_in_flight_height == 200);
+        ASSERT(p7->oldest_in_flight_age_seconds >= timeout + 5);
+        ASSERT(p7->last_body_age_seconds == -1);
+        ASSERT(p8->requested == 1 && p8->in_flight == 1);
+        ASSERT(p8->oldest_in_flight_height == 201);
+        ASSERT(p8->oldest_in_flight_age_seconds >= 1);
 
         dl_free(&dm);
         PASS();

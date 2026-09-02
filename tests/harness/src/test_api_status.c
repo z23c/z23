@@ -156,6 +156,12 @@ int api_status_focused_tests(void)
         ok = ok && json_get(&root, "orphaned") != NULL;
         ok = ok && json_get(&root, "accounting_drift") != NULL;
         ok = ok && json_get(&root, "last_assign_result") != NULL;
+        ok = ok && json_get(&root, "peer_download_total") != NULL;
+        ok = ok && json_get(&root, "peer_download_truncated") != NULL;
+        const struct json_value *peer_downloads =
+            json_get(&root, "peer_downloads");
+        ok = ok && peer_downloads &&
+             peer_downloads->type == JSON_ARR;
         /* Throughput fields it was MISSING before the consolidation. */
         ok = ok && json_get(&root, "bytes_downloaded") != NULL;
         ok = ok && json_get(&root, "mbps_avg") != NULL;
