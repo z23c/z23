@@ -406,15 +406,13 @@ void zcl_native_handle_general(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
 
-/* code.provenance.facts — the mutation-surface census: each durable named slot
- * (a key in progress_meta / stage_cursor / node_state) resolved by the declared
- * derivations, with the count of distinct FILES carrying resolved mutation
- * sites, ranked multi-surface first; with a `key`, each resolved site as
- * file:line via its write function or SQL verb. Completeness, runtime
- * reachability, ownership role, and duplicate fact homes remain UNPROVEN.
- * Re-derived for each exact source generation and memoized in-process by the
- * code index's sealed content root. See engine/controllers/src/fact_writers.c
- * for the derivations and controllers/fact_store_writers.def for the manifest. */
+/* code.provenance.facts — the writer census: every durable named slot (a key in
+ * progress_meta / stage_cursor / node_state) with the count of distinct FILES
+ * that write it, ranked multi-writer first; with a `key`, each writer as
+ * file:line via its write function or SQL verb. Re-derived for each exact
+ * source generation and memoized in-process by the code index's sealed content
+ * root. See engine/controllers/src/fact_writers.c for the two derivations and
+ * controllers/fact_store_writers.def for the manifest that states them. */
 void zcl_native_handle_code_facts(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
