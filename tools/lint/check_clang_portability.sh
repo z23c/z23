@@ -508,6 +508,15 @@ printf '%s\0' "${WARN_FLAGS[@]}" "${BUILD_ENV_FLAGS[@]}" "${DEFINES[@]}" "${INC_
 xargs -a "$SRC_LIST" -P "$JOBS" -n 1 -I '{}' \
     env ZCL_GATE_FLAGS="$WORK/flags.nul" ZCL_GATE_CC="$CC_BIN" ZCL_GATE_OUT="$OUT_DIR" \
     bash -c 'mapfile -t -d "" f < "$ZCL_GATE_FLAGS"
+             # This standalone helper is intentionally unbuildable without
+             # the input identity injected by its bootstrap script.  The
+             # portability pass is syntax-only and has no source snapshot to
+             # bind, so give only this TU a correctly shaped inert identity;
+             # never weaken the source-level #error or leak the stand-in into
+             # another translation unit.
+             if [ "$1" = tools/dev/source_identity_batch.c ]; then
+                 f+=("-DZCL_SOURCE_IDENTITY_BATCH_INPUT_ID=\"0000000000000000000000000000000000000000000000000000000000000000\"")
+             fi
              k="$(printf "%s" "$1" | tr -c "[:alnum:]" "_")"
              o="$ZCL_GATE_OUT/$k.log"
              r="$ZCL_GATE_OUT/$k.rc"
