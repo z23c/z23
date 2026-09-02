@@ -9863,6 +9863,13 @@ check-git-hooks-installed:
 	@./tools/scripts/check_git_hooks_installed.sh --self-test
 	@./tools/scripts/check_git_hooks_installed.sh
 
+# Read-only: whether this checkout's Git hooks are armed and what the armed
+# pre-push hook actually runs. Never installs — that writes this checkout's
+# shared Git config, so it stays an explicit `make install-hooks` decision.
+.PHONY: hooks-status
+hooks-status:
+	@tools/scripts/hooks_status.sh
+
 # One-shot bootstrap for a freshly created `.claude/worktrees/*` lane: copies
 # vendor/lib/*.a in from the canonical checkout (idempotent), re-asserts the
 # shared core.hooksPath, and sanity-checks the link prerequisites so a
@@ -12467,6 +12474,17 @@ lint:
 	@tools/lint/run_lint.sh --jobs "$(ZCL_LINT_JOBS)" --bin-dir "$(BIN_DIR)" $(LINT_GATES)
 	@echo "══ LINT: all checks passed ══"
 endif
+
+# One screen of truth from the LAST recorded lint and test runs — reads only
+# .cache/lint-timing/last-run.json and .cache/test-timing/last-run.json (plus
+# the per-gate logs run_lint.sh drops alongside its own), runs no gate itself,
+# and prints at most 40 lines: tree identity, both receipts' verdicts and
+# staleness, every failed gate/group by name, and one closing VERDICT line.
+# Exit 0 green / 1 red / 2 a receipt is missing. See tools/scripts/verdict.sh
+# (its own --self-test is not wired to a Make target; run it directly).
+.PHONY: verdict
+verdict:
+	@tools/scripts/verdict.sh
 
 # ── Result-cached lint (inner loop only) ─────────────────────────────────
 # `make lint` above stays COLD, always, so the canonical gate and the

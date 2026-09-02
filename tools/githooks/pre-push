@@ -8,13 +8,28 @@
 # gate; full-suite, fuzz, and coverage proof work runs through linger timers so
 # pushes are blocked by focused regressions, not by background evidence jobs.
 #
-# Activate:  make install-hooks   (sets core.hooksPath=tools/githooks)
+# Activate:  make install-hooks   (writes core.hooksPath, checkout-local;
+#            `make hooks-status` reports whether it is armed on THIS worktree
+#            and what the armed hook actually runs — never install from here)
 # Fast local edit-loop before commit:  make fast-ci
 # The default pre-push is make pre-push-ci: strict focused tests for exactly
 # the files being pushed to origin/main.
 # Background proof lanes:  make install-quality-linger
 # Bypass once:  git push --no-verify     OR     ZCL_SKIP_PREPUSH=1 git push
 # Override the command (e.g. a faster subset):  ZCL_PREPUSH_CMD='make lint'
+#
+# MEASURED WALL (never re-typed from another host — re-measure with
+# `time make pre-push-ci` in a clean worktree if this goes stale):
+#   2026-09-02, lane worktree, MinGW cross available, hooks installed.
+#   Floor (a range that maps to no test group): real 1m36s (96 s) —
+#   windows-portability-acceptance plus agent_fast_ci.sh's strict compile
+#   + lint-fast. The same day, a range touching Makefile, tools/scripts/*
+#   or tools/githooks/* (agent_impact_rules.def maps those straight to the
+#   make_lint_gates family, 13 groups) cost real 10m49s (649 s), and it
+#   FAILS in any worktree without `make install-hooks` (the realroot group
+#   checks the hooks). Under load the same run took 11m40s. The 240 s
+#   budget therefore holds for ordinary code pushes and is exceeded, by
+#   design, for pushes that change the gate machinery itself.
 #
 # Full `make ci` remains available for release-grade manual runs. The default
 # push path keeps long-running full-suite/fuzz/coverage evidence off the
