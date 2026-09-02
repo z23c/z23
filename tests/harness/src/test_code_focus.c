@@ -185,6 +185,82 @@ static int test_focus_missing_run(void)
     return failures;
 }
 
+static int test_focus_lint_gates(void)
+{
+    int failures = 0;
+    TEST("code_focus: failed owned lint gate scores territory with a cited reason") {
+        system("rm -rf " FOCUS_FIX);
+        ASSERT(write_focus_fixture());
+        ASSERT(focus_mk_write(FOCUS_FIX, ".cache/lint-timing/last-run.json",
+            "{\"schema\":\"zcl.lint_timing.v1\",\"gates\":["
+            "{\"name\":\"check-malloc\",\"ms\":43,\"rc\":0},"
+            "{\"name\":\"check-raw-sqlite\",\"ms\":5467,\"rc\":2}]}"));
+
+        struct specialist_focus_evidence ev;
+        specialist_focus_evidence_clear(&ev);
+        ASSERT(ev.gates_run == SPECIALIST_FOCUS_ARTIFACT_MISSING);
+        ASSERT(specialist_focus_load_failed_gates(FOCUS_FIX, &ev));
+        ASSERT(ev.gates_run == SPECIALIST_FOCUS_ARTIFACT_RECORDED);
+        ASSERT(ev.failed_gate_count == 1);
+        ASSERT(strcmp(ev.failed_gates[0], "check-raw-sqlite") == 0);
+
+        struct codeindex *ci = codeindex_open_source_view(FOCUS_FIX);
+        ASSERT(ci != NULL);
+        static const struct specialist spec = {
+            "alpha", "core/modules/net", "check-raw-sqlite", "net", "p2p"
+        };
+        struct specialist_focus_hit hits[8];
+        bool truncated = false;
+        int n = specialist_focus_rank(ci, &spec, &ev, focus_test_route,
+                                      NULL, hits, 8, &truncated);
+        ASSERT(n == 3);
+        ASSERT(!truncated);
+        /* unrouted stacks on the lane-level gate weight, then path order */
+        ASSERT(strcmp(hits[0].path, "core/modules/net/src/c.c") == 0);
+        ASSERT(strcmp(hits[1].path, "core/modules/net/src/a.c") == 0);
+        ASSERT(strcmp(hits[2].path, "core/modules/net/src/b.c") == 0);
+        ASSERT(hits[0].score > hits[1].score);
+        ASSERT(hits[1].score == hits[2].score);
+        for (int i = 0; i < n; i++) {
+            ASSERT(strstr(hits[i].reason,
+                          "failed-gate:check-raw-sqlite "
+                          "(.cache/lint-timing/last-run.json)") != NULL);
+        }
+        codeindex_close(ci);
+
+        /* Reply honesty with no test artifact but a recorded lint run: the
+         * storage lane owns check-raw-sqlite, so its gates block reports the
+         * failure while tests still say no run recorded. */
+        struct zcl_command_reply reply;
+        focus_call_name("storage", FOCUS_FIX, &reply);
+        ASSERT(reply.exit_code == ZCL_COMMAND_EXIT_OK);
+        char buf[ZCL_COMMAND_RESULT_BUDGET + 1];
+        size_t bn = json_write(&reply.data, buf, sizeof(buf));
+        ASSERT(bn > 0 && bn < sizeof(buf));
+        ASSERT(strstr(buf, "\"tests\":{\"source\":"
+                       "\".cache/test-timing/last-run.json\","
+                       "\"status\":\"no run recorded\"}") != NULL);
+        ASSERT(strstr(buf, "\"gates\":{\"source\":"
+                       "\".cache/lint-timing/last-run.json\","
+                       "\"status\":\"recorded\",\"failed_count\":1,"
+                       "\"failed\":[\"check-raw-sqlite\"]}") != NULL);
+        const char *sum = json_get_str(json_get(&reply.data, "summary"));
+        ASSERT(sum && strstr(sum, "tests: no run recorded") != NULL);
+        ASSERT(strstr(sum, "gates: no run recorded") == NULL);
+        zcl_command_reply_free(&reply);
+
+        /* A corrupt lint artifact fails closed, never a clean score. */
+        ASSERT(focus_mk_write(FOCUS_FIX, ".cache/lint-timing/last-run.json",
+                              "{oops"));
+        struct specialist_focus_evidence bad;
+        specialist_focus_evidence_clear(&bad);
+        ASSERT(!specialist_focus_load_failed_gates(FOCUS_FIX, &bad));
+        system("rm -rf " FOCUS_FIX);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_focus_rank(void)
 {
     int failures = 0;
@@ -257,6 +333,7 @@ int test_code_focus(void)
     failures += test_focus_list();
     failures += test_focus_unknown();
     failures += test_focus_missing_run();
+    failures += test_focus_lint_gates();
     failures += test_focus_rank();
     return failures;
 }

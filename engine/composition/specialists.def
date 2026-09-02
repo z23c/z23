@@ -9,7 +9,9 @@
  *   name          durable lane id (`code focus <name>`)
  *   territories   `|`-separated prefixes or globs; a token without glob
  *                 chars matches that path and every path beneath it
- *   gates         `|`-separated `check-*` names the lane owns
+ *   gates         `|`-separated `check-*` names the lane owns; a recorded
+ *                 failure in .cache/lint-timing/last-run.json scores every
+ *                 territory file with a reason citing that artifact
  *   test_groups   `|`-separated registered group ids the lane owns
  *   fact_kinds    comma-separated fact kinds the lane cares about
  *

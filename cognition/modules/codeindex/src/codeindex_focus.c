@@ -20,6 +20,7 @@
 #define FOCUS_TAG "codeindex.focus"
 
 #define FOCUS_W_FAILED 100000
+#define FOCUS_W_GATE 50000
 #define FOCUS_W_ISSUE 10000
 #define FOCUS_W_LESSON 1000
 #define FOCUS_W_UNROUTED 100
@@ -31,7 +32,9 @@
 #define FOCUS_GIT_CAP (256u * 1024u)
 #define FOCUS_PAGE 64
 #define FOCUS_ROUTE_CAP 12
+#define FOCUS_OWNED_GATE_CAP 4
 #define FOCUS_TEST_LAST_RUN ".cache/test-timing/last-run.json"
+#define FOCUS_LINT_LAST_RUN ".cache/lint-timing/last-run.json"
 
 enum focus_read {
     FOCUS_READ_OK = 0,
@@ -114,6 +117,49 @@ bool specialist_path_in_territory(const struct specialist *spec,
     return false;
 }
 
+static bool focus_gate_owned(const struct specialist *spec, const char *gate)
+{
+    if (!spec || !spec->gates || !gate || !gate[0])
+        return false;
+    size_t glen = strlen(gate);
+    const char *start = spec->gates;
+    while (*start) {
+        const char *bar = strchr(start, '|');
+        size_t len = bar ? (size_t)(bar - start) : strlen(start);
+        if (len == glen && strncmp(start, gate, len) == 0)
+            return true;
+        if (!bar)
+            break;
+        start = bar + 1;
+    }
+    return false;
+}
+
+size_t specialist_focus_owned_failed_gates(
+    const struct specialist *spec,
+    const struct specialist_focus_evidence *ev,
+    char (*out)[SPECIALIST_GROUP_MAX], size_t cap)
+{
+    if (!spec || !ev)
+        return 0;
+    size_t n = 0;
+    for (size_t i = 0; i < ev->failed_gate_count; i++) {
+        if (!focus_gate_owned(spec, ev->failed_gates[i]))
+            continue;
+        if (out && n < cap) {
+            int w = snprintf(out[n], SPECIALIST_GROUP_MAX, "%s",
+                             ev->failed_gates[i]);
+            if (w < 0 || (size_t)w >= SPECIALIST_GROUP_MAX) {
+                LOG_ERROR(FOCUS_TAG, "owned gate name too long: %s",
+                          ev->failed_gates[i]);
+                return n;
+            }
+        }
+        n++;
+    }
+    return n;
+}
+
 void specialist_focus_evidence_clear(struct specialist_focus_evidence *ev)
 {
     if (!ev)
@@ -169,69 +215,93 @@ static int focus_read_file(const char *path, size_t cap, char **buf_out,
     return FOCUS_READ_OK;
 }
 
-static bool focus_add_failed(struct specialist_focus_evidence *ev,
-                             const char *name)
+static bool focus_add_name(char (*table)[SPECIALIST_GROUP_MAX], size_t cap,
+                           size_t *count, const char *name)
 {
     if (!name || !name[0])
         return true;
-    for (size_t i = 0; i < ev->failed_count; i++) {
-        if (strcmp(ev->failed[i], name) == 0)
+    for (size_t i = 0; i < *count; i++) {
+        if (strcmp(table[i], name) == 0)
             return true;
     }
-    if (ev->failed_count >= SPECIALIST_FOCUS_FAILED_CAP)
+    if (*count >= cap)
         return true;
-    int n = snprintf(ev->failed[ev->failed_count], SPECIALIST_GROUP_MAX,
-                     "%s", name);
+    int n = snprintf(table[*count], SPECIALIST_GROUP_MAX, "%s", name);
     if (n < 0 || (size_t)n >= SPECIALIST_GROUP_MAX) {
-        LOG_ERROR(FOCUS_TAG, "failed-group name too long: %s", name);
+        LOG_ERROR(FOCUS_TAG, "recorded name too long: %s", name);
         return false;
     }
-    ev->failed_count++;
+    (*count)++;
     return true;
 }
 
-bool specialist_focus_load_failed_groups(const char *root,
-                                         struct specialist_focus_evidence *ev)
+/* One honesty contract over both timing artifacts: ENOENT is a missing run
+ * (true, *run set MISSING, names untouched — never a clean score), while a
+ * present file is RECORDED even when every rc is 0. Unreadable, OOM after
+ * open, or corrupt JSON fails closed. */
+static bool focus_load_failed_artifact(
+    const char *root, const char *rel, const char *array_key,
+    char (*table)[SPECIALIST_GROUP_MAX], size_t cap, size_t *count,
+    enum specialist_focus_artifact *run)
 {
-    if (!ev)
-        LOG_FAIL(FOCUS_TAG, "evidence is NULL");
-    ev->tests_run = SPECIALIST_FOCUS_ARTIFACT_MISSING;
+    *run = SPECIALIST_FOCUS_ARTIFACT_MISSING;
     char path[4096];
-    if (!focus_join(path, sizeof(path), root, FOCUS_TEST_LAST_RUN))
-        LOG_FAIL(FOCUS_TAG, "last-run path");
+    if (!focus_join(path, sizeof(path), root, rel))
+        LOG_FAIL(FOCUS_TAG, "evidence path");
     char *raw = NULL;
     size_t len = 0;
     int st = focus_read_file(path, FOCUS_FILE_CAP, &raw, &len);
     if (st == FOCUS_READ_MISSING)
         return true;
     if (st != FOCUS_READ_OK)
-        LOG_FAIL(FOCUS_TAG, "unreadable last-run.json at %s", path);
+        LOG_FAIL(FOCUS_TAG, "unreadable %s at %s", rel, path);
     struct json_value doc;
     json_init(&doc);
     if (!json_read(&doc, raw, len) || doc.type != JSON_OBJ) {
         json_free(&doc);
         free(raw);
-        LOG_FAIL(FOCUS_TAG, "corrupt last-run.json at %s", path);
+        LOG_FAIL(FOCUS_TAG, "corrupt %s at %s", rel, path);
     }
     free(raw);
-    ev->tests_run = SPECIALIST_FOCUS_ARTIFACT_RECORDED;
-    const struct json_value *groups = json_get(&doc, "groups");
-    if (!groups || groups->type != JSON_ARR) {
+    *run = SPECIALIST_FOCUS_ARTIFACT_RECORDED;
+    const struct json_value *rows = json_get(&doc, array_key);
+    if (!rows || rows->type != JSON_ARR) {
         json_free(&doc);
         return true;
     }
     bool ok = true;
-    for (size_t i = 0; i < groups->num_children && ok; i++) {
-        const struct json_value *row = &groups->children[i];
+    for (size_t i = 0; i < rows->num_children && ok; i++) {
+        const struct json_value *row = &rows->children[i];
         const char *name = json_get_str(json_get(row, "name"));
         int64_t rc = json_get_int(json_get(row, "rc"));
         if (rc != 0)
-            ok = focus_add_failed(ev, name);
+            ok = focus_add_name(table, cap, count, name);
     }
     json_free(&doc);
     if (!ok)
-        LOG_FAIL(FOCUS_TAG, "failed-group table overflowed a name");
+        LOG_FAIL(FOCUS_TAG, "%s table overflowed a name", rel);
     return true;
+}
+
+bool specialist_focus_load_failed_groups(const char *root,
+                                          struct specialist_focus_evidence *ev)
+{
+    if (!ev)
+        LOG_FAIL(FOCUS_TAG, "evidence is NULL");
+    return focus_load_failed_artifact(root, FOCUS_TEST_LAST_RUN, "groups",
+                                      ev->failed, SPECIALIST_FOCUS_FAILED_CAP,
+                                      &ev->failed_count, &ev->tests_run);
+}
+
+bool specialist_focus_load_failed_gates(const char *root,
+                                         struct specialist_focus_evidence *ev)
+{
+    if (!ev)
+        LOG_FAIL(FOCUS_TAG, "evidence is NULL");
+    return focus_load_failed_artifact(root, FOCUS_LINT_LAST_RUN, "gates",
+                                      ev->failed_gates,
+                                      SPECIALIST_FOCUS_GATE_CAP,
+                                      &ev->failed_gate_count, &ev->gates_run);
 }
 
 static bool focus_is_path_char(unsigned char c)
@@ -578,6 +648,13 @@ int specialist_focus_rank(struct codeindex *ci,
 
     int nwork = 0;
     bool overflow = false;
+    /* A failed gate the lane owns is lane-level evidence: the artifact names
+     * the lane, not a file, so every territory file gains the same weight
+     * and a reason citing the artifact. File-level signals still stack on
+     * top and keep their relative order. */
+    char owned_gates[FOCUS_OWNED_GATE_CAP][SPECIALIST_GROUP_MAX];
+    size_t gate_fails = specialist_focus_owned_failed_gates(
+        spec, ev, owned_gates, FOCUS_OWNED_GATE_CAP);
     int total = codeindex_file_count(ci);
     if (total < 0) {
         free(work);
@@ -632,8 +709,8 @@ int specialist_focus_rank(struct codeindex *ci,
                 }
             }
             bool unrouted = ng == 0;
-            if (failed == 0 && recency == 0 && !note_src && !issue_src &&
-                !unrouted)
+            if (failed == 0 && gate_fails == 0 && recency == 0 && !note_src &&
+                !issue_src && !unrouted)
                 continue;
             if (nwork >= SPECIALIST_FOCUS_WORK_CAP) {
                 overflow = true;
@@ -644,8 +721,18 @@ int specialist_focus_rank(struct codeindex *ci,
             if (failed > 0) {
                 char line[FOCUS_REASON_PART_MAX];
                 (void)snprintf(line, sizeof line,
-                               "failed-group:%s (.cache/test-timing/last-run.json)",
-                               fail_name);
+                                "failed-group:%s (.cache/test-timing/last-run.json)",
+                                fail_name);
+                if (!focus_add_reason(parts, &nparts, line)) {
+                    free(work);
+                    return -1;
+                }
+            }
+            if (gate_fails > 0) {
+                char line[FOCUS_REASON_PART_MAX];
+                (void)snprintf(line, sizeof line,
+                                "failed-gate:%s (.cache/lint-timing/last-run.json)",
+                                owned_gates[0]);
                 if (!focus_add_reason(parts, &nparts, line)) {
                     free(work);
                     return -1;
@@ -695,6 +782,7 @@ int specialist_focus_rank(struct codeindex *ci,
                 return -1;
             }
             h->score = failed * FOCUS_W_FAILED +
+                       (int)gate_fails * FOCUS_W_GATE +
                        (issue_src ? FOCUS_W_ISSUE : 0) +
                        (note_src ? FOCUS_W_LESSON : 0) +
                        (unrouted ? FOCUS_W_UNROUTED : 0) +

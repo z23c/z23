@@ -3,11 +3,12 @@
  * purpose: Rank files a specialist should work next from recorded evidence.
  *
  * `code focus <specialist>` answers from evidence only: failed routed test
- * groups in the latest recorded run, git-log churn, open lessons/notes,
- * missing impact-rule routing, and checked-in issue bodies under docs/.
+ * groups in the latest recorded run, the lane's own lint gates in the latest
+ * recorded lint run, git-log churn, open lessons/notes, missing impact-rule
+ * routing, and checked-in issue bodies under docs/.
  * The specialist table is engine/composition/specialists.def. Scoring is
  * integer and deterministic; ties break by path. An absent last-run.json
- * is not a clean suite. */
+ * is not a clean suite, and neither is an absent lint last-run.json. */
 
 #ifndef ZCL_CODEINDEX_FOCUS_H
 #define ZCL_CODEINDEX_FOCUS_H
@@ -20,6 +21,7 @@ struct codeindex;
 
 enum {
     SPECIALIST_FOCUS_FAILED_CAP = 64,
+    SPECIALIST_FOCUS_GATE_CAP = 32,
     SPECIALIST_FOCUS_CHURN_CAP = 256,
     SPECIALIST_FOCUS_NOTE_CAP = 64,
     SPECIALIST_FOCUS_ISSUE_CAP = 64,
@@ -61,6 +63,9 @@ struct specialist_focus_evidence {
     char failed[SPECIALIST_FOCUS_FAILED_CAP][SPECIALIST_GROUP_MAX];
     size_t failed_count;
     enum specialist_focus_artifact tests_run;
+    char failed_gates[SPECIALIST_FOCUS_GATE_CAP][SPECIALIST_GROUP_MAX];
+    size_t failed_gate_count;
+    enum specialist_focus_artifact gates_run;
     struct specialist_focus_churn churn[SPECIALIST_FOCUS_CHURN_CAP];
     size_t churn_count;
     struct specialist_focus_binding notes[SPECIALIST_FOCUS_NOTE_CAP];
@@ -93,7 +98,19 @@ void specialist_focus_evidence_clear(struct specialist_focus_evidence *ev);
  * OOM-after-open, or corrupt JSON → false after logging. A present file
  * sets tests_run RECORDED even when every rc is 0. */
 bool specialist_focus_load_failed_groups(const char *root,
+                                          struct specialist_focus_evidence *ev);
+/* Same honesty contract, over .cache/lint-timing/last-run.json `gates[]`:
+ * ENOENT → gates_run MISSING; corrupt or unreadable → false. */
+bool specialist_focus_load_failed_gates(const char *root,
                                          struct specialist_focus_evidence *ev);
+/* The subset of the artifact's failed gates that `spec` owns (its `gates`
+ * column names them). Fills `out` up to `cap` and returns the owned-failed
+ * count. Scoring treats these as lane-level evidence: every file in the
+ * specialist's territory gains weight and a reason citing the artifact. */
+size_t specialist_focus_owned_failed_gates(
+    const struct specialist *spec,
+    const struct specialist_focus_evidence *ev,
+    char (*out)[SPECIALIST_GROUP_MAX], size_t cap);
 bool specialist_focus_load_notes(const char *root,
                                  struct specialist_focus_evidence *ev);
 bool specialist_focus_load_issues(const char *root,
