@@ -42,17 +42,21 @@ enum vcs_zcode_app_run_flag {
     (VCS_ZCODE_APP_RUN_ATTEMPTED | VCS_ZCODE_APP_RUN_LAUNCHED | \
      VCS_ZCODE_APP_RUN_EXITED | VCS_ZCODE_APP_RUN_OUTPUT_COMPLETE)
 
+/* Every refusal names a frozen public spelling via
+ * vcs_zcode_app_run_observation_error_string. Required roots are checked
+ * across all 32 bytes; a root whose only nonzero byte is index 31 is still
+ * present. Out-of-range codes spell "unknown". */
 enum vcs_zcode_app_run_observation_error {
-    VCS_ZCODE_APP_RUN_OK = 0,
-    VCS_ZCODE_APP_RUN_ERR_NULL,
-    VCS_ZCODE_APP_RUN_ERR_VERSION,
-    VCS_ZCODE_APP_RUN_ERR_WIRE_SIZE,
-    VCS_ZCODE_APP_RUN_ERR_WIRE_MAGIC,
-    VCS_ZCODE_APP_RUN_ERR_ROOT_ZERO,
-    VCS_ZCODE_APP_RUN_ERR_FLAGS,
-    VCS_ZCODE_APP_RUN_ERR_EXIT_STATUS,
-    VCS_ZCODE_APP_RUN_ERR_TIME_ORDER,
-    VCS_ZCODE_APP_RUN_ERR_RESERVED,
+    VCS_ZCODE_APP_RUN_OK = 0,            /* "ok" */
+    VCS_ZCODE_APP_RUN_ERR_NULL,          /* "null-argument" */
+    VCS_ZCODE_APP_RUN_ERR_VERSION,       /* "schema-version" */
+    VCS_ZCODE_APP_RUN_ERR_WIRE_SIZE,     /* "wire-size" */
+    VCS_ZCODE_APP_RUN_ERR_WIRE_MAGIC,    /* "wire-magic" */
+    VCS_ZCODE_APP_RUN_ERR_ROOT_ZERO,     /* "root-zero" */
+    VCS_ZCODE_APP_RUN_ERR_FLAGS,         /* "flags-invalid" */
+    VCS_ZCODE_APP_RUN_ERR_EXIT_STATUS,   /* "exit-status-invalid" */
+    VCS_ZCODE_APP_RUN_ERR_TIME_ORDER,    /* "time-order-invalid" */
+    VCS_ZCODE_APP_RUN_ERR_RESERVED,      /* "reserved-nonzero" */
 };
 
 struct vcs_zcode_app_run_observation_v1 {

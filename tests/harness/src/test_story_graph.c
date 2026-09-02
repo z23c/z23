@@ -346,25 +346,44 @@ static int sg_canonical_work_projection(void)
     return failures;
 }
 
+static void sg_app_run_fill(struct vcs_zcode_app_run_observation_v1 *observation)
+{
+    memset(observation, 0, sizeof(*observation));
+    observation->schema_version = VCS_ZCODE_APP_RUN_OBSERVATION_VERSION;
+    observation->flags = VCS_ZCODE_APP_RUN_PROVED_FLAGS;
+    observation->exit_status = 0;
+    observation->started_unix = 1000;
+    observation->finished_unix = 1001;
+    sg_root(observation->task_root, 1);
+    sg_root(observation->candidate_root, 2);
+    sg_root(observation->build_receipt_root, 3);
+    sg_root(observation->artifact_root, 4);
+    sg_root(observation->invocation_root, 5);
+    sg_root(observation->stdout_root, 6);
+    sg_root(observation->stderr_root, 7);
+    sg_root(observation->confinement_root, 8);
+}
+
+static size_t sg_app_run_root_ptrs(
+    struct vcs_zcode_app_run_observation_v1 *observation, uint8_t *out[8])
+{
+    out[0] = observation->task_root;
+    out[1] = observation->candidate_root;
+    out[2] = observation->build_receipt_root;
+    out[3] = observation->artifact_root;
+    out[4] = observation->invocation_root;
+    out[5] = observation->stdout_root;
+    out[6] = observation->stderr_root;
+    out[7] = observation->confinement_root;
+    return 8;
+}
+
 static int sg_app_run_observation_codec(void)
 {
     int failures = 0;
     TEST("story graph: app-run observation is exact evidence, not authority") {
-        struct vcs_zcode_app_run_observation_v1 observation = {
-            .schema_version = VCS_ZCODE_APP_RUN_OBSERVATION_VERSION,
-            .flags = VCS_ZCODE_APP_RUN_PROVED_FLAGS,
-            .exit_status = 0,
-            .started_unix = 1000,
-            .finished_unix = 1001,
-        };
-        sg_root(observation.task_root, 1);
-        sg_root(observation.candidate_root, 2);
-        sg_root(observation.build_receipt_root, 3);
-        sg_root(observation.artifact_root, 4);
-        sg_root(observation.invocation_root, 5);
-        sg_root(observation.stdout_root, 6);
-        sg_root(observation.stderr_root, 7);
-        sg_root(observation.confinement_root, 8);
+        struct vcs_zcode_app_run_observation_v1 observation;
+        sg_app_run_fill(&observation);
         uint8_t wire[VCS_ZCODE_APP_RUN_OBSERVATION_WIRE_BYTES];
         uint8_t root_a[32], root_b[32];
         struct vcs_zcode_app_run_observation_v1 parsed;
@@ -395,6 +414,119 @@ static int sg_app_run_observation_codec(void)
                sizeof(observation.artifact_root));
         ASSERT_EQ(vcs_zcode_app_run_observation_v1_validate(&observation),
                   VCS_ZCODE_APP_RUN_ERR_ROOT_ZERO);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int sg_app_run_observation_refusals(void)
+{
+    int failures = 0;
+    TEST("story graph: app-run validation names every public refusal") {
+        static const struct {
+            enum vcs_zcode_app_run_observation_error code;
+            const char *spelling;
+        } spellings[] = {
+            { VCS_ZCODE_APP_RUN_OK, "ok" },
+            { VCS_ZCODE_APP_RUN_ERR_NULL, "null-argument" },
+            { VCS_ZCODE_APP_RUN_ERR_VERSION, "schema-version" },
+            { VCS_ZCODE_APP_RUN_ERR_WIRE_SIZE, "wire-size" },
+            { VCS_ZCODE_APP_RUN_ERR_WIRE_MAGIC, "wire-magic" },
+            { VCS_ZCODE_APP_RUN_ERR_ROOT_ZERO, "root-zero" },
+            { VCS_ZCODE_APP_RUN_ERR_FLAGS, "flags-invalid" },
+            { VCS_ZCODE_APP_RUN_ERR_EXIT_STATUS, "exit-status-invalid" },
+            { VCS_ZCODE_APP_RUN_ERR_TIME_ORDER, "time-order-invalid" },
+            { VCS_ZCODE_APP_RUN_ERR_RESERVED, "reserved-nonzero" },
+        };
+        for (size_t i = 0; i < sizeof(spellings) / sizeof(spellings[0]); i++) {
+            const char *got = vcs_zcode_app_run_observation_error_string(
+                spellings[i].code);
+            ASSERT(got != NULL);
+            ASSERT_STR_EQ(got, spellings[i].spelling);
+        }
+        {
+            const char *unknown = vcs_zcode_app_run_observation_error_string(
+                (enum vcs_zcode_app_run_observation_error)255);
+            ASSERT(unknown != NULL);
+            ASSERT_STR_EQ(unknown, "unknown");
+        }
+
+        struct vcs_zcode_app_run_observation_v1 valid;
+        sg_app_run_fill(&valid);
+        ASSERT_EQ(vcs_zcode_app_run_observation_v1_validate(NULL),
+                  VCS_ZCODE_APP_RUN_ERR_NULL);
+        ASSERT_STR_EQ(vcs_zcode_app_run_observation_error_string(
+                          vcs_zcode_app_run_observation_v1_validate(NULL)),
+                      "null-argument");
+        ASSERT_EQ(vcs_zcode_app_run_observation_v1_serialize(NULL, NULL),
+                  VCS_ZCODE_APP_RUN_ERR_NULL);
+        ASSERT_EQ(vcs_zcode_app_run_observation_v1_parse(NULL, 0, NULL),
+                  VCS_ZCODE_APP_RUN_ERR_NULL);
+
+        struct vcs_zcode_app_run_observation_v1 version = valid;
+        version.schema_version = 0;
+        ASSERT_EQ(vcs_zcode_app_run_observation_v1_validate(&version),
+                  VCS_ZCODE_APP_RUN_ERR_VERSION);
+        version.schema_version = VCS_ZCODE_APP_RUN_OBSERVATION_VERSION + 1u;
+        ASSERT_EQ(vcs_zcode_app_run_observation_v1_validate(&version),
+                  VCS_ZCODE_APP_RUN_ERR_VERSION);
+        ASSERT_STR_EQ(vcs_zcode_app_run_observation_error_string(
+                          vcs_zcode_app_run_observation_v1_validate(&version)),
+                      "schema-version");
+
+        struct vcs_zcode_app_run_observation_v1 first = valid;
+        memset(first.task_root, 0, sizeof(first.task_root));
+        ASSERT_EQ(vcs_zcode_app_run_observation_v1_validate(&first),
+                  VCS_ZCODE_APP_RUN_ERR_ROOT_ZERO);
+        uint8_t *roots[8];
+        for (size_t i = 0; i < 8; i++) {
+            struct vcs_zcode_app_run_observation_v1 zeroed = valid;
+            ASSERT_EQ(sg_app_run_root_ptrs(&zeroed, roots), (size_t)8);
+            memset(roots[i], 0, 32);
+            ASSERT_EQ(vcs_zcode_app_run_observation_v1_validate(&zeroed),
+                      VCS_ZCODE_APP_RUN_ERR_ROOT_ZERO);
+        }
+
+        struct vcs_zcode_app_run_observation_v1 last_byte = valid;
+        ASSERT_EQ(sg_app_run_root_ptrs(&last_byte, roots), (size_t)8);
+        for (size_t i = 0; i < 8; i++) {
+            memset(roots[i], 0, 32);
+            roots[i][31] = (uint8_t)(0xa0u + i);
+            ASSERT_EQ(vcs_zcode_app_run_observation_v1_validate(&last_byte),
+                      VCS_ZCODE_APP_RUN_OK);
+        }
+
+        struct vcs_zcode_app_run_observation_v1 timed = valid;
+        timed.started_unix = 0;
+        ASSERT_EQ(vcs_zcode_app_run_observation_v1_validate(&timed),
+                  VCS_ZCODE_APP_RUN_ERR_TIME_ORDER);
+        timed = valid;
+        timed.finished_unix = timed.started_unix - 1;
+        ASSERT_EQ(vcs_zcode_app_run_observation_v1_validate(&timed),
+                  VCS_ZCODE_APP_RUN_ERR_TIME_ORDER);
+
+        struct vcs_zcode_app_run_observation_v1 exited = valid;
+        exited.exit_status = 256;
+        ASSERT_EQ(vcs_zcode_app_run_observation_v1_validate(&exited),
+                  VCS_ZCODE_APP_RUN_ERR_EXIT_STATUS);
+        exited.flags = VCS_ZCODE_APP_RUN_ATTEMPTED;
+        exited.exit_status = 0;
+        ASSERT_EQ(vcs_zcode_app_run_observation_v1_validate(&exited),
+                  VCS_ZCODE_APP_RUN_ERR_EXIT_STATUS);
+
+        struct vcs_zcode_app_run_observation_v1 reserved = valid;
+        reserved.reserved[0] = 1;
+        ASSERT_EQ(vcs_zcode_app_run_observation_v1_validate(&reserved),
+                  VCS_ZCODE_APP_RUN_ERR_RESERVED);
+
+        uint8_t wire[VCS_ZCODE_APP_RUN_OBSERVATION_WIRE_BYTES];
+        struct vcs_zcode_app_run_observation_v1 parsed;
+        ASSERT_EQ(vcs_zcode_app_run_observation_v1_serialize(&valid, wire),
+                  VCS_ZCODE_APP_RUN_OK);
+        wire[0] ^= 1u;
+        ASSERT_EQ(vcs_zcode_app_run_observation_v1_parse(
+                      wire, sizeof(wire), &parsed),
+                  VCS_ZCODE_APP_RUN_ERR_WIRE_MAGIC);
         PASS();
     } _test_next:;
     return failures;
@@ -483,6 +615,7 @@ int test_story_graph(void)
     failures += sg_context_load_states();
     failures += sg_canonical_work_projection();
     failures += sg_app_run_observation_codec();
+    failures += sg_app_run_observation_refusals();
     failures += sg_app_run_projection();
     return failures;
 }
