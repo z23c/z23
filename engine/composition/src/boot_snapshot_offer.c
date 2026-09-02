@@ -223,9 +223,9 @@ static bool snapshot_offer_payload_authority_is_bound(char *reason,
     return false;
 }
 
-static bool snapshot_offer_state_is_sovereign_at(int32_t *out_hstar,
-                                                  char *reason,
-                                                  size_t reason_size)
+static bool snapshot_offer_state_has_replayed_history_at(int32_t *out_hstar,
+                                                          char *reason,
+                                                          size_t reason_size)
 {
 #ifdef ZCL_TESTING
     int override = atomic_load(&g_snapshot_offer_trust_override);
@@ -236,11 +236,6 @@ static bool snapshot_offer_state_is_sovereign_at(int32_t *out_hstar,
             if (reason && reason_size)
                 (void)snprintf(reason, reason_size,
                                "test_override_not_sovereign");
-            return false;
-        }
-        if (!snapshot_offer_payload_authority_is_bound(reason, reason_size)) {
-            if (out_hstar)
-                *out_hstar = -1;
             return false;
         }
         if (out_hstar)
@@ -300,10 +295,7 @@ static bool snapshot_offer_state_is_sovereign_at(int32_t *out_hstar,
         hstar_known, transparent_self_derived,
         sprout_found, sprout_cursor, sapling_found, sapling_cursor,
         nullifier_found, nullifier_cursor);
-    if (allowed && !snapshot_offer_payload_authority_is_bound(reason,
-                                                               reason_size))
-        allowed = false;
-    else if (!allowed && reason && reason_size) {
+    if (!allowed && reason && reason_size) {
         if (!hstar_known)
             (void)snprintf(reason, reason_size, "hstar_unavailable");
         else if (!transparent_self_derived)
@@ -322,6 +314,33 @@ static bool snapshot_offer_state_is_sovereign_at(int32_t *out_hstar,
     if (out_hstar)
         *out_hstar = allowed ? hstar : -1;
     return allowed;
+}
+
+bool boot_block_swarm_state_can_serve(char *reason, size_t reason_size)
+{
+    return snapshot_offer_state_has_replayed_history_at(NULL, reason,
+                                                         reason_size);
+}
+
+static bool snapshot_offer_state_is_sovereign_at(int32_t *out_hstar,
+                                                  char *reason,
+                                                  size_t reason_size)
+{
+    int32_t hstar = -1;
+    if (!snapshot_offer_state_has_replayed_history_at(&hstar, reason,
+                                                       reason_size)) {
+        if (out_hstar)
+            *out_hstar = -1;
+        return false;
+    }
+    if (!snapshot_offer_payload_authority_is_bound(reason, reason_size)) {
+        if (out_hstar)
+            *out_hstar = -1;
+        return false;
+    }
+    if (out_hstar)
+        *out_hstar = hstar;
+    return true;
 }
 
 bool boot_snapshot_offer_state_is_sovereign(char *reason,

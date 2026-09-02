@@ -79,10 +79,13 @@ static int test_snapshot_offer_trust_policy(void)
         char reason[96] = {0};
         boot_snapshot_offer_test_set_trust_override(1);
         boot_snapshot_offer_test_set_publication_override(-1);
+        ASSERT(boot_block_swarm_state_can_serve(reason, sizeof(reason)));
         ASSERT(!boot_snapshot_offer_state_is_sovereign(reason,
                                                         sizeof(reason)));
         ASSERT(strcmp(reason,
                       "snapshot_payload_authority_binding_incomplete") == 0);
+        boot_snapshot_offer_test_set_trust_override(0);
+        ASSERT(!boot_block_swarm_state_can_serve(reason, sizeof(reason)));
         boot_snapshot_offer_test_set_trust_override(-1);
         PASS();
     } _test_next:;

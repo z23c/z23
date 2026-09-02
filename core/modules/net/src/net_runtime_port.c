@@ -57,6 +57,16 @@ struct snapshot_sync_service *net_runtime_snapshot_sync(
     return p->snapshot_sync(runtime);
 }
 
+bool net_runtime_block_state_can_serve(char *reason, size_t reason_size)
+{
+    const struct net_runtime_port *p = port_get();
+    if (!p || !p->block_state_can_serve) {
+        port_absent_reason(reason, reason_size);
+        return false;
+    }
+    return p->block_state_can_serve(reason, reason_size);
+}
+
 bool net_runtime_snapshot_state_is_sovereign(char *reason, size_t reason_size)
 {
     const struct net_runtime_port *p = port_get();

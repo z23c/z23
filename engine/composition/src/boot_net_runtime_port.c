@@ -40,6 +40,7 @@ static struct snapshot_sync_service *net_port_snapshot_sync(
 static const struct net_runtime_port g_net_runtime_port = {
     .node_db = net_port_node_db,
     .snapshot_sync = net_port_snapshot_sync,
+    .block_state_can_serve = boot_block_swarm_state_can_serve,
     .snapshot_state_is_sovereign = boot_snapshot_offer_state_is_sovereign,
     .snapshot_artifact_is_eligible = boot_snapshot_offer_artifact_is_eligible,
 };

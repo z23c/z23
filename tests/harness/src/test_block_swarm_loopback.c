@@ -1082,20 +1082,18 @@ static int test_block_swarm_manifest_anchor(void)
 extern void mp_serve_block_req(struct msg_processor *mp,
                                struct p2p_node *node, struct byte_stream *s);
 
-/* The snapshot family refuses to advertise or serve while the node is not
- * snapshot-sovereign (msg_snapshot_serving_allowed()). The block-piece
- * family — push_block_manifest and mp_serve_block_req — slipped past that
- * boundary: an assisted node still advertised MSG_BLOCK_MANIFEST and
- * served MSG_BLOCK_DATA out of its cached manifest. Both doors now sit
- * behind the same gate, and this test drives them through the real wire
- * path: the sovereign controls prove the fixture serves, the non-sovereign
- * refusals leave the queue AND the sticky sent-flag untouched, and the
- * recovered serves prove the only thing that changed was the trust state. */
+/* The block-piece family has a dedicated locally-validated-history gate;
+ * unlike snapshot serving it does not require authority over an exported UTXO
+ * payload. This test drives both block doors through the real wire path: the
+ * trusted controls prove the fixture serves, the untrusted refusals leave the
+ * queue AND sticky sent-flag untouched, and recovery proves the only thing
+ * that changed was the block-serving trust state. */
 static int test_block_swarm_sovereignty_gate(void)
 {
     int failures = 0;
 
-    TEST("block swarm loopback: a non-sovereign node neither advertises "
+    TEST("block swarm loopback: a node without validated-history authority "
+         "neither advertises "
          "nor serves block pieces, and both recover with the trust state") {
         const int32_t end_height = 128;             /* 2 pieces of 64 */
         struct bs_seeder seed;

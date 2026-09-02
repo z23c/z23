@@ -47,6 +47,11 @@ bool boot_snapshot_offer_trust_policy(
 bool boot_publish_block_swarm(int32_t body_height, int32_t header_height,
                               int32_t blocks_per_piece);
 
+/* Live block-serving check. It requires self-derived transparent state at H*
+ * and complete shielded-history provenance, but not UTXO snapshot payload
+ * authority: every served block is independently header/hash bound. */
+bool boot_block_swarm_state_can_serve(char *reason, size_t reason_size);
+
 /* Live composite serving check. It requires both sovereign state and an exact
  * authoritative payload binding. The latter is deliberately unavailable
  * until export streams from coins_kv and binds root/count/supply/active hash,

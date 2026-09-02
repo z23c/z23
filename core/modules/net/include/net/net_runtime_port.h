@@ -39,6 +39,10 @@ struct net_runtime_port {
     /* Snapshot-sync service owned by the runtime, or NULL. */
     struct snapshot_sync_service *(*snapshot_sync)(
         const struct app_runtime_context *runtime);
+    /* Trust policy for serving locally validated block bodies. This is
+     * deliberately separate from snapshot export authority: a block remains
+     * independently bound to the requester's admitted header chain. */
+    bool (*block_state_can_serve)(char *reason, size_t reason_size);
     /* Trust policy behind snapshot re-serving; see
      * config/boot_snapshot_offer.h for the fail-closed contract. */
     bool (*snapshot_state_is_sovereign)(char *reason, size_t reason_size);
@@ -56,6 +60,7 @@ struct node_db *net_runtime_node_db(
     const struct app_runtime_context *runtime);
 struct snapshot_sync_service *net_runtime_snapshot_sync(
     const struct app_runtime_context *runtime);
+bool net_runtime_block_state_can_serve(char *reason, size_t reason_size);
 bool net_runtime_snapshot_state_is_sovereign(char *reason,
                                              size_t reason_size);
 bool net_runtime_snapshot_artifact_is_eligible(const char *datadir,
