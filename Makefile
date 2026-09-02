@@ -409,8 +409,17 @@ ZCL_EPOCH_PROFILES := $(ZCL_EPOCH_ALL_PROFILES)
 # fingerprinted nine toolchain/flag combinations that the default recipe can
 # never consume.  Keep unknown explicit goals conservative, while making the
 # documented first build pay for exactly its node-c23 authority.
+ifeq ($(ZCL_PROFILE),dev)
+ifneq ($(filter z23 zclassic23 ship deploy,$(MAKECMDGOALS)),)
+$(error ZCL_PROFILE=dev refuses to write or ship the production binary; use `make dev`)
+endif
+endif
 ifeq ($(strip $(MAKECMDGOALS)),)
+ifeq ($(ZCL_PROFILE),dev)
+ZCL_EPOCH_PROFILES := dev
+else
 ZCL_EPOCH_PROFILES := node-c23
+endif
 else ifeq ($(BUILD_EPOCH_CLEAN_ONLY),1)
 ZCL_EPOCH_PROFILES :=
 else ifeq ($(ZCL_WORKTREE_PRIME_ONLY),1)
@@ -421,8 +430,10 @@ ifneq ($(filter build-only,$(ZCL_EPOCH_SINGLE_GOAL)),)
 ZCL_EPOCH_PROFILES := build-only
 else ifneq ($(filter zclassic23 z23 zclassic23-package-verify,$(ZCL_EPOCH_SINGLE_GOAL)),)
 ZCL_EPOCH_PROFILES := node-c23
-else ifneq ($(filter fast-compile dev-build-only,$(ZCL_EPOCH_SINGLE_GOAL)),)
+else ifneq ($(filter fast-compile dev-build-only dev,$(ZCL_EPOCH_SINGLE_GOAL)),)
 ZCL_EPOCH_PROFILES := dev
+else ifneq ($(filter print-CFLAGS print-DEV-CFLAGS print-LDFLAGS print-DEV-LDFLAGS print-build-flags,$(ZCL_EPOCH_SINGLE_GOAL)),)
+ZCL_EPOCH_PROFILES :=
 else ifneq ($(filter dev-bin z23-dev zclassic23-dev dev-proof-bundle,$(ZCL_EPOCH_SINGLE_GOAL)),)
 ZCL_EPOCH_PROFILES := dev test-fast
 else ifneq ($(filter dev-package-verifier,$(ZCL_EPOCH_SINGLE_GOAL)),)
@@ -593,6 +604,9 @@ $(BUILD_IDENTITY_STAMP): $(BUILD_MUTATION_STAMP) tools/dev/source-identity.sh
 ZCL_HOST_EXEEXT = $(if $(ZCL_HOST_WINDOWS),.exe,)
 ZCLASSIC23_BIN = $(BIN_DIR)/z23$(ZCL_HOST_EXEEXT)
 ZCLASSIC23_DEV_BIN = $(BIN_DIR)/z23-dev$(ZCL_HOST_EXEEXT)
+# Unshippable compiler-speed artifact. `make ship` / `make deploy` refuse it.
+# The hyphenated z23-dev name remains the sibling watch-loop alias.
+Z23_DEV_UNSHIPPABLE_BIN = $(BIN_DIR)/z23.dev$(ZCL_HOST_EXEEXT)
 ZCLASSIC23_BIN_ALIAS = $(BIN_DIR)/zclassic23$(ZCL_HOST_EXEEXT)
 ZCLASSIC23_DEV_BIN_ALIAS = $(BIN_DIR)/zclassic23-dev$(ZCL_HOST_EXEEXT)
 DEV_RESTART_PLAN = $(BUILD_DIR)/dev-loop/restart.env
@@ -637,7 +651,12 @@ CHAOS_SWEEP_SCENARIO ?= tools/sim/scenarios/seeded_peer_churn.scenario
 # obvious first-run command pay for artifacts it did not ask for. `make all`
 # retains that complete bundle; test and tool targets remain explicit. The
 # auto-vendor prerequisite machinery still supplies missing pinned archives.
+# ZCL_PROFILE=dev never writes the shippable name: it selects `make dev`.
+ifeq ($(ZCL_PROFILE),dev)
+.DEFAULT_GOAL := dev
+else
 .DEFAULT_GOAL := z23
+endif
 
 # Product rooms and architectural shapes.  A source path now states both its
 # owning authority and its role: contexts/wallet/services/... is wallet service
@@ -1150,7 +1169,14 @@ ZCL_RELOC_LINKER = $(ZCL_DEV_LINKER)
 ifneq ($(ZCL_HOST_WINDOWS),)
 ZCL_RELOC_LINKER =
 endif
-DEV_CFLAGS = $(filter-out -O3 $(ZCL_LTO_FLAG) -Werror,$(CACHED_CFLAGS)) $(ZCL_DEV_OPT) -g3 -DZCL_DEV_BUILD \
+# Compiler-speed development profile. Same warning set as release (including
+# -Werror). No LTO: the release LTO link was measured at ~45 s wall here for a
+# one-file edit. -g1 instead of -g3: macro debug info is the expensive part of
+# -g3, and -gsplit-dwarf would need .dwo publication through the epoch stager.
+# -pipe and -fno-omit-frame-pointer are compile-side; they do not change the
+# release flag set. Objects live under build/dev-obj/epochs/<dev epoch>/.
+DEV_CFLAGS = $(filter-out -O3 -g $(ZCL_LTO_FLAG),$(CACHED_CFLAGS)) \
+	$(ZCL_DEV_OPT) -g1 -pipe -fno-omit-frame-pointer -DZCL_DEV_BUILD \
 	-Wno-deprecated-declarations $(ZCL_WARN_FORMAT_TRUNCATION) $(ZCL_WARN_MAYBE_UNINITIALIZED)
 DEV_HOT_CFLAGS = $(filter-out $(ZCL_DEV_OPT),$(DEV_CFLAGS)) $(ZCL_DEV_HOT_OPT)
 DEV_LDFLAGS = $(filter-out $(ZCL_LTO_FLAG),$(LDFLAGS)) $(ZCL_DEV_LINKER)
@@ -3077,7 +3103,7 @@ prove-cold-join: $(TEST_PARALLEL_REL_CANDIDATE)
 # the default `all`), so running build/bin/test_parallel directly after editing a test
 # can false-green an old binary or report "matched no groups" for a new test.
 # `make t ONLY=<group>` always rebuilds the harness first, closing that trap.
-.PHONY: t t-fast t-fast-exact t-asan asan-ci t-tsan tsan-ci t-changed ff verify-change watcher-safety-gates syntax-check build-only fast-compile fast-changed-compile dev-build-only dev-bin dev-asan z23-dev-asan zclassic23-dev-asan dev-tsan z23-dev-tsan zclassic23-dev-tsan z23-dev zclassic23-dev fast-rebuild rebuild-fast dev-rebuild hot-rebuild super-rebuild lint-fast fast-ci agent-fast-ci dev-ci agent-plan agent-loop agent-dev-loop dev-watch dev-watch-once dev-watch-selftest dev-activation-selftest dev-loop-selftest native-dev-loop-wait-selftest native-dev-failure-selftest agent-index compdb dev-loop-bench dev-loop-bench-selftest hotswap-sim immutable-history-canaries historical-canaries agent-dev-status agent-dev-recover dev-recovery-selftest agent-clear-stale-dev-reindex agent-doctor doctor-build stage-dev-bin agent-stage-dev deploy-dev-fast agent-deploy-fast
+.PHONY: t t-fast t-fast-exact t-asan asan-ci t-tsan tsan-ci t-changed ff verify-change watcher-safety-gates syntax-check build-only fast-compile fast-changed-compile dev-build-only dev-bin dev-asan z23-dev-asan zclassic23-dev-asan dev-tsan z23-dev-tsan zclassic23-dev-tsan z23-dev zclassic23-dev dev print-CFLAGS print-DEV-CFLAGS print-LDFLAGS print-DEV-LDFLAGS print-build-flags fast-rebuild rebuild-fast dev-rebuild hot-rebuild super-rebuild lint-fast fast-ci agent-fast-ci dev-ci agent-plan agent-loop agent-dev-loop dev-watch dev-watch-once dev-watch-selftest dev-activation-selftest dev-loop-selftest native-dev-loop-wait-selftest native-dev-failure-selftest agent-index compdb dev-loop-bench dev-loop-bench-selftest hotswap-sim immutable-history-canaries historical-canaries agent-dev-status agent-dev-recover dev-recovery-selftest agent-clear-stale-dev-reindex agent-doctor doctor-build stage-dev-bin agent-stage-dev deploy-dev-fast agent-deploy-fast
 
 # ── ONLY= is validated BEFORE anything compiles ──────────────────────────
 # Every focused target below carried its ONLY= check in the RECIPE. Make builds
@@ -3898,6 +3924,20 @@ dev-loop-profile-flags:
 	@printf 'INTEGRATION\t%s\t%s\n' '$(INTEGRATION_CFLAGS)' '$(INTEGRATION_LDFLAGS)'
 	@printf 'RELEASE\t%s\t%s\n' '$(RELEASE_CFLAGS)' '$(RELEASE_LDFLAGS)'
 
+print-CFLAGS:
+	@printf '%s\n' '$(CFLAGS)'
+print-DEV-CFLAGS:
+	@printf '%s\n' '$(DEV_CFLAGS)'
+print-LDFLAGS:
+	@printf '%s\n' '$(LDFLAGS)'
+print-DEV-LDFLAGS:
+	@printf '%s\n' '$(DEV_LDFLAGS)'
+print-build-flags:
+	@printf 'CFLAGS=%s\n' '$(CFLAGS)'
+	@printf 'DEV_CFLAGS=%s\n' '$(DEV_CFLAGS)'
+	@printf 'LDFLAGS=%s\n' '$(LDFLAGS)'
+	@printf 'DEV_LDFLAGS=%s\n' '$(DEV_LDFLAGS)'
+
 check-dev-loop-profiles:
 	@tools/dev/dev-loop-profile-selftest.sh
 
@@ -4036,6 +4076,10 @@ dev-bin z23-dev zclassic23-dev: $(ZCLASSIC23_DEV_BIN) $(ZCLASSIC23_DEV_BIN_ALIAS
 	$(HOTSWAP_ACTION_PLAN) $(DEV_PACKAGE_VERIFIER_TARGET) \
 	$(ZCL_ADAPTER_RUNNER_TARGET)
 
+# Compiler-speed front door: non-LTO, -Og/-g1, separate epoch, unsippable name.
+# Does not replace z23-dev's watch-loop extras (package verifier, restart plan).
+dev: $(Z23_DEV_UNSHIPPABLE_BIN)
+
 # Temporary migration alias: build/bin/zclassic23-dev keeps resolving to
 # z23-dev while bots/scripts migrate.
 $(ZCLASSIC23_DEV_BIN_ALIAS): $(ZCLASSIC23_DEV_BIN)
@@ -4049,12 +4093,16 @@ fast-rebuild rebuild-fast dev-rebuild hot-rebuild super-rebuild:
 	  env ZCL_FAST_BUILD_SOURCE_RECORD="$(BUILD_SOURCE_RECORD)" \
 	  ZCL_FAST_CC="$${ZCL_FAST_CC:-$(CC)}" tools/agent_fast_ci.sh rebuild-dev
 
-$(ZCLASSIC23_DEV_BIN): $(DEV_CANDIDATE_BIN) FORCE
+$(Z23_DEV_UNSHIPPABLE_BIN): $(DEV_CANDIDATE_BIN) FORCE
 	@$(BUILD_EPOCH_PUBLISH_TOOL) "$(DEV_CANDIDATE_BIN)" "$@" "$(DEV_SESSION)" \
 	  "$(BUILD_SOURCE_ID)" "$(BUILD_CLEAN)" "$(BUILD_MUTATION)" \
 	  "$(DEV_COMPILE_EPOCH)" "$(BUILD_COMPILER_ID)" "$(DEV_PROFILE)" \
 	  "$(DEV_EPOCH_COMPILE_FLAGS)" "$(DEV_EPOCH_LINK_FLAGS)" "$(CC)" "$(CXX)"
-	@echo "dev-bin: $@ <= $(DEV_CANDIDATE_BIN) (non-LTO, unstripped; not for release/deploy)"
+	@echo "dev: $@ <= $(DEV_CANDIDATE_BIN) (non-LTO, -g1, unstripped; not for release/deploy)"
+
+$(ZCLASSIC23_DEV_BIN): $(Z23_DEV_UNSHIPPABLE_BIN)
+	@$(if $(ZCL_HOST_WINDOWS),cp -f "$<" "$@",ln -sfn z23.dev "$@")
+	@echo "dev-bin: $@ <= $< (watch-loop alias of unsippable z23.dev)"
 
 $(DEV_CANDIDATE_BIN): $(VIEW_GEN_HEADERS) $(BUILD_IDENTITY_STAMP) $(DEV_OBJ_COMPLETE) | $(VENDOR_LIBS)
 	@mkdir -p $(dir $@)
@@ -8757,8 +8805,8 @@ $(DEV_OBJ_DIR)/core/modules/script/src/%.o: DEV_COMPILE_CFLAGS = $(DEV_HOT_CFLAG
 $(DEV_OBJ_DIR)/core/modules/validation/src/%.o: DEV_COMPILE_CFLAGS = $(DEV_HOT_CFLAGS)
 
 $(DEV_OBJ_DIR)/platform/modules/util/src/clientversion.o: DEV_COMPILE_CFLAGS += $(BUILD_IDENTITY_CPPFLAGS) $(DEV_SOURCE_RECEIPT_CPPFLAGS)
-$(DEV_OBJ_DIR)/%.o: %.c $(VIEW_GEN_HEADERS) $(BUILD_EPOCH_OBJECT_TOOL) $(BUILD_EPOCH_OBJECT_FORCE) | $(DEV_LEASE)
-	@$(BUILD_EPOCH_OBJECT_TOOL) dep "$@" "$<" \
+$(DEV_OBJ_DIR)/%.o: %.c $(VIEW_GEN_HEADERS) $(BUILD_FAST_EPOCH_OBJECT_PREREQ) $(BUILD_EPOCH_OBJECT_FORCE) | $(DEV_LEASE)
+	@$(BUILD_FAST_EPOCH_OBJECT_COMMAND) dep "$@" "$<" \
 	  "$(BUILD_SOURCE_ID)" "$(BUILD_CLEAN)" "$(BUILD_MUTATION)" \
 	  "$(DEV_COMPILE_EPOCH)" "$(BUILD_COMPILER_ID)" "$(DEV_SESSION)" -- \
 	  $(CC) $(DEV_COMPILE_CFLAGS) $(ZCL_TU_RANDOM_SEED)
@@ -9084,6 +9132,13 @@ c23-portable-install: c23-portable-release
 	@$(INSTALL_C23_PRODUCTS)
 
 deploy: vendor-ready lint zclassic-cli zcl-nodectl tools/wal_checkpoint
+	@if [ "$(ZCL_PROFILE)" = "dev" ]; then \
+	    echo "deploy: REFUSE: ZCL_PROFILE=dev produces the unsippable $(Z23_DEV_UNSHIPPABLE_BIN)" >&2; \
+	    exit 2; \
+	fi
+	@case "$(ZCLASSIC23_BIN)" in \
+	    *.dev) echo "deploy: REFUSE: $(ZCLASSIC23_BIN) is not a shippable name" >&2; exit 2;; \
+	esac
 	@./tools/deploy_guard.sh canonical-deploy
 	@case "$(DEPLOY_VERIFY_STAGE)" in stable|challenger) ;; *) \
 	    echo "deploy: DEPLOY_VERIFY_STAGE must be stable or challenger" >&2; exit 2;; esac
@@ -9117,8 +9172,11 @@ deploy: vendor-ready lint zclassic-cli zcl-nodectl tools/wal_checkpoint
 	@# local activation uses the same bytes as every remote. deploy_verify.sh
 	@# below confirms the running source id and executable bytes in either case.
 	@if [ -n "$${ZCL_DEPLOY_FROZEN_CANDIDATE:-}" ]; then \
-	    case "$$ZCL_DEPLOY_FROZEN_CANDIDATE" in /*) ;; *) \
-	        echo "deploy: frozen candidate path must be absolute" >&2; exit 1;; esac; \
+	    case "$$ZCL_DEPLOY_FROZEN_CANDIDATE" in \
+	        *.dev) echo "deploy: REFUSE: frozen candidate is the unsippable .dev binary" >&2; exit 2;; \
+	        /*) ;; \
+	        *) echo "deploy: frozen candidate path must be absolute" >&2; exit 1;; \
+	    esac; \
 	    test -x "$$ZCL_DEPLOY_FROZEN_CANDIDATE" || { \
 	        echo "deploy: frozen candidate is not executable" >&2; exit 1; }; \
 	    if [ "$$ZCL_DEPLOY_FROZEN_CANDIDATE" -ef "$(ZCLASSIC23_BIN)" ]; then \
@@ -9390,6 +9448,13 @@ deploy: vendor-ready lint zclassic-cli zcl-nodectl tools/wal_checkpoint
 #   make ship SHIP_ARGS=--targets=remote
 .PHONY: ship
 ship:
+	@if [ "$(ZCL_PROFILE)" = "dev" ]; then \
+	    echo "ship: REFUSE: ZCL_PROFILE=dev produces the unsippable $(Z23_DEV_UNSHIPPABLE_BIN)" >&2; \
+	    exit 2; \
+	fi
+	@case "$(ZCLASSIC23_BIN)" in \
+	    *.dev) echo "ship: REFUSE: $(ZCLASSIC23_BIN) is not a shippable name" >&2; exit 2;; \
+	esac
 	@set +e; ./tools/ship.sh $(SHIP_ARGS); ship_rc=$$?; set -e; \
 	case "$$ship_rc" in \
 	    0) ;; \

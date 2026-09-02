@@ -70,6 +70,14 @@ git -C "$ROOT" grep -q -- '-Wl,--allow-multiple-definition' -- \
     fail 'overlay objects are not ordered ahead of the frozen base'
 git -C "$ROOT" grep -q 'dev-bin z23-dev zclassic23-dev:.*\$(ZCLASSIC23_DEV_BIN)' -- Makefile ||
     fail 'dev-bin target is missing'
+git -C "$ROOT" grep -q 'Z23_DEV_UNSHIPPABLE_BIN = \$(BIN_DIR)/z23.dev' -- Makefile ||
+    fail 'unsippable compiler-speed binary name z23.dev is missing'
+git -C "$ROOT" grep -q '^dev: \$(Z23_DEV_UNSHIPPABLE_BIN)' -- Makefile ||
+    fail 'make dev does not produce the unsippable z23.dev artifact'
+git -C "$ROOT" grep -q 'ship: REFUSE: ZCL_PROFILE=dev' -- Makefile ||
+    fail 'make ship does not refuse the dev profile'
+git -C "$ROOT" grep -q 'deploy: REFUSE: ZCL_PROFILE=dev' -- Makefile ||
+    fail 'make deploy does not refuse the dev profile'
 git -C "$ROOT" grep -q '\$(HOTSWAP_ACTION_PLAN) \$(DEV_PACKAGE_VERIFIER_TARGET)' -- Makefile ||
     fail 'dev-bin does not use the platform-qualified package verifier prerequisite'
 git -C "$ROOT" grep -q '^dev-proof-bundle:.*dev-bin' -- Makefile ||
@@ -132,8 +140,12 @@ git -C "$ROOT" grep -q 'resident action plan contains release-only LTO flags' --
 git -C "$ROOT" grep -q '^ifeq ($(strip $(MAKECMDGOALS)),)' -- Makefile ||
     fail 'default build does not have an explicit epoch-profile selection'
 awk '$0 == "ifeq ($(strip $(MAKECMDGOALS)),)" {
-         if (getline > 0 && $0 == "ZCL_EPOCH_PROFILES := node-c23")
-             found = 1
+         n = 0
+         while (getline > 0 && n < 8) {
+             n++
+             if ($0 == "ZCL_EPOCH_PROFILES := node-c23") { found = 1; break }
+             if ($0 ~ /^else ifeq/) break
+         }
      }
      END { exit found ? 0 : 1 }' "$ROOT/Makefile" ||
     fail 'default z23 build fingerprints profiles it cannot consume'
