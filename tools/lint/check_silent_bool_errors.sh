@@ -49,27 +49,43 @@ DIRS="${ZCL_SILENT_BOOL_SCAN_DIRS_FOR_TEST:-$(repo_shape_dirs app src | tr '\n' 
 MODE="${ZCL_LINT_MODE:-FAIL}"
 
 scan() {
+  # One awk pass per scanned directory replaces a `while read` body that
+  # forked cut/sed/grep/head/tr/printf/grep -q PER HIT (~3,900 hits x ~7
+  # forks = ~27,000 forks on this tree). The grep pipeline above (one `grep
+  # -r` + two filter greps per directory) is unchanged — only the per-hit
+  # lookback into the previous line moves from per-hit shell forks into one
+  # awk process that loads each hit file once and indexes it by line
+  # number. Same stable key: "<relpath>::<guarded_call_name>".
   for d in $DIRS; do
     [ -d "$d" ] || continue
     grep -rn 'return false;' "$d" --include='*.c' "${LINT_GREP_EXCLUDE_ARGS[@]}" 2>/dev/null \
       | grep -vE 'LOG_ERR|LOG_FAIL|LOG_RETURN|LOG_WARN|LOG_NULL|log_json' \
       | grep -vE '(//|/\*) raw-return-ok:' \
-      | while IFS= read -r hit; do
-          file=$(printf '%s' "$hit" | cut -d: -f1)
-          lnum=$(printf '%s' "$hit" | cut -d: -f2)
-          [ -n "$file" ] && [ -n "$lnum" ] || continue
-          prev=$((lnum - 1))
-          pl=$(sed -n "${prev}p" "$file")
-          # A fallible call-guard on the previous line: if (!ident(  ...
-          call=$(printf '%s' "$pl" \
-            | grep -oE 'if \(![a-zA-Z_][a-zA-Z0-9_]*\(' \
-            | grep -oE '[a-zA-Z_][a-zA-Z0-9_]*\(' | head -1 | tr -d '(')
-          [ -n "$call" ] || continue
-          # prev line must not itself log or be marked
-          printf '%s' "$pl" | grep -qE 'LOG_|log_json|raw-return-ok:' && continue
-          rel=${file#./}
-          printf '%s::%s\n' "$rel" "$call"
-        done
+      | awk -F: '
+          {
+            file = $1; lnum = $2 + 0
+            if (!(file in loaded)) {
+              n = 0
+              while ((getline line < file) > 0) { n++; linearr[file SUBSEP n] = line }
+              close(file)
+              loaded[file] = 1
+            }
+            prevln = lnum - 1
+            if (prevln < 1) next
+            pl = linearr[file SUBSEP prevln]
+            if (pl == "") next
+            # prev line must not itself log or be marked
+            if (pl ~ /LOG_|log_json|raw-return-ok:/) next
+            # A fallible call-guard on the previous line: if (!ident(  ...
+            if (!match(pl, /if \(![A-Za-z_][A-Za-z0-9_]*\(/)) next
+            call = substr(pl, RSTART, RLENGTH)
+            sub(/^if \(!/, "", call)
+            sub(/\($/, "", call)
+            rel = file
+            sub(/^\.\//, "", rel)
+            print rel "::" call
+          }
+        '
   done | sort -u
 }
 
