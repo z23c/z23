@@ -242,12 +242,31 @@ int test_ecosystem(void)
                   !strstr(text, "source_root_sha3: unavailable"));
 
     science_ecosystem_bind_index(&snap, true, sha3, 9u, 1u, true, 12, roots,
-                                 1u);
+                                  1u);
     text_len = 0;
     ECO_CHECK("dependency totals are the live include-edge count",
               science_ecosystem_format_text(&snap, text, sizeof(text),
                                             &text_len) &&
                   strstr(text, "include_edges: 12"));
+
+    struct science_ecosystem_named_count
+        many[SCIENCE_ECOSYSTEM_ROOTS_MAX + 4u];
+    memset(many, 0, sizeof(many));
+    for (uint32_t i = 0; i < SCIENCE_ECOSYSTEM_ROOTS_MAX + 4u; i++) {
+        (void)snprintf(many[i].name, sizeof(many[i].name), "root%" PRIu32, i);
+        many[i].count = 1u;
+    }
+    science_ecosystem_bind_index(&snap, true, sha3, 9u, 1u, true, 5, many,
+                                 SCIENCE_ECOSYSTEM_ROOTS_MAX + 4u);
+    text_len = 0;
+    ECO_CHECK("more live roots than the cap are counted and named truncated",
+              snap.indexed_root_count == SCIENCE_ECOSYSTEM_ROOTS_MAX + 4u &&
+                  snap.indexed_root_listed == SCIENCE_ECOSYSTEM_ROOTS_MAX &&
+                  snap.indexed_roots_truncated &&
+                  science_ecosystem_format_text(&snap, text, sizeof(text),
+                                                &text_len) &&
+                  strstr(text, "indexed_source_roots: 20") &&
+                  strstr(text, "truncated: true"));
 
     static const char stream[] =
         "@@0000000000000000000000000000000000000001\t0\n"

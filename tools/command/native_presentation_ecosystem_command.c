@@ -570,6 +570,8 @@ static bool npe_reply_snapshot(struct zcl_command_reply *reply,
                              (int64_t)snap->indexed_registry_nodes) &&
             json_push_kv_int(&reply->data, "indexed_source_roots",
                              (int64_t)snap->indexed_root_count) &&
+            json_push_kv_bool(&reply->data, "indexed_roots_truncated",
+                              snap->indexed_roots_truncated) &&
             npe_push_list(&reply->data, "indexed_root_list",
                           snap->indexed_roots, snap->indexed_root_listed);
         if (ok && snap->include_edges_available) {
@@ -695,12 +697,14 @@ static bool npe_bind_codeindex(const char *root,
     struct science_ecosystem_named_count roots[SCIENCE_ECOSYSTEM_ROOTS_MAX];
     memset(roots, 0, sizeof(roots));
     uint32_t nroot = 0;
-    for (size_t i = 0;
-         i < sizeof(source_roots) / sizeof(source_roots[0]) &&
-         nroot < SCIENCE_ECOSYSTEM_ROOTS_MAX;
+    uint32_t live_roots = 0;
+    for (size_t i = 0; i < sizeof(source_roots) / sizeof(source_roots[0]);
          i++) {
         int fc = codeindex_count_files_in_group(ci, source_roots[i], true);
         if (fc <= 0)
+            continue;
+        live_roots++;
+        if (nroot >= SCIENCE_ECOSYSTEM_ROOTS_MAX)
             continue;
         const char *purpose = "";
         for (int g = 0; g < ng; g++)
@@ -720,7 +724,7 @@ static bool npe_bind_codeindex(const char *root,
         snap, have_counts, sha3,
         have_counts ? (uint32_t)counts.c23_files : 0,
         have_counts ? (uint32_t)counts.registry_nodes : 0,
-        include_available, include_available ? edges : 0, roots, nroot);
+        include_available, include_available ? edges : 0, roots, live_roots);
     codeindex_close(ci);
     return true;
 }
