@@ -117,14 +117,14 @@ const char *engine_prompt_kind_at(size_t i);
 const char *engine_prompt_template_body(const char *kind,
                                         const char *section_id);
 
-/* True when `kind` is declared AND supplies a body for every section
- * prompt_sections.def marks ENGINE_PROMPT_NEED_ALWAYS.
+/* True when `kind` is declared AND supplies a non-empty body for every
+ * section prompt_sections.def marks ENGINE_PROMPT_NEED_ALWAYS.
  *
- * This is what "selectable" means. A kind missing a required body would
- * compose a prompt whose section is a bare header, which the audit cannot
- * catch — the marker is present, the guidance is not — so the refusal
- * happens here, before dispatch, and the lint gate refuses the same row at
- * build time so nobody meets it at run time. */
+ * This is what "selectable" means. A kind missing a required body, or
+ * supplying `""`, would compose a prompt whose section is a bare header,
+ * which the audit cannot catch — the marker is present, the guidance is
+ * not — so the refusal happens here, before dispatch, and the lint gate
+ * refuses the same row at build time so nobody meets it at run time. */
 bool engine_prompt_kind_is_complete(const char *kind);
 
 /* SHA3-256 over one kind's ordered (section, body) rows. The version
