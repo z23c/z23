@@ -60,6 +60,8 @@ bool vcs_package_recipe_files_in_vcs_manifest(
         !recipe_list_in_vcs(&recipe->sources, "sources", manifest,
                             detail_out, detail_cap) ||
         !recipe_list_in_vcs(&recipe->test_sources, "test_sources", manifest,
+                            detail_out, detail_cap) ||
+        !recipe_list_in_vcs(&recipe->programs, "programs", manifest,
                             detail_out, detail_cap))
         return false;
     for (size_t i = 0; i < recipe->include_dirs.count; i++) {

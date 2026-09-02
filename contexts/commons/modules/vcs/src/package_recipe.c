@@ -44,6 +44,7 @@ const char *vcs_package_recipe_error_string(
     case VCS_PACKAGE_RECIPE_ERR_SOURCES_EMPTY: return "sources-empty";
     case VCS_PACKAGE_RECIPE_ERR_TEST_SECONDS: return "test-seconds-bound";
     case VCS_PACKAGE_RECIPE_ERR_MEMORY_BYTES: return "memory-bytes-bound";
+    case VCS_PACKAGE_RECIPE_ERR_PROGRAM: return "programs-schema-mismatch";
     }
     return "unknown-error";
 }
@@ -100,6 +101,7 @@ void vcs_package_recipe_free(struct vcs_package_recipe *recipe)
     recipe_strings_free(&recipe->test_sources);
     recipe_strings_free(&recipe->include_dirs);
     recipe_strings_free(&recipe->defines);
+    recipe_strings_free(&recipe->programs);
     recipe->library_count = 0;
 }
 
@@ -110,6 +112,48 @@ static bool recipe_suffix(const char *path, const char *suffix)
     size_t plen = strlen(path);
     size_t slen = strlen(suffix);
     return plen > slen && strcmp(path + plen - slen, suffix) == 0;
+}
+
+/* `app/<stem>.c`: the manifest path grammar, exactly two segments, the
+ * first the literal program directory, the second a C source. */
+bool vcs_package_recipe_program_path_valid(const char *path)
+{
+    static const char dir[] = VCS_PACKAGE_RECIPE_PROGRAM_DIR "/";
+    if (!path || !vcs_package_path_valid(path) ||
+        !recipe_suffix(path, ".c"))
+        return false;
+    if (strncmp(path, dir, sizeof(dir) - 1u) != 0)
+        return false;
+    const char *stem = path + sizeof(dir) - 1u;
+    return strchr(stem, '/') == NULL && strlen(stem) > 2u;
+}
+
+bool vcs_package_recipe_program_output(const char *program_path,
+                                       const char *package_short_name,
+                                       char *out, size_t out_cap)
+{
+    if (out && out_cap > 0)
+        out[0] = '\0';
+    if (!out || out_cap == 0 || !package_short_name ||
+        !package_short_name[0] ||
+        !vcs_package_recipe_program_path_valid(program_path))
+        return false;
+    const char *stem = strrchr(program_path, '/') + 1;
+    size_t stem_len = strlen(stem) - 2u; /* drop ".c" */
+    int n;
+    if (stem_len == 4u && strncmp(stem, "main", 4u) == 0)
+        n = snprintf(out, out_cap, "%s/%s",
+                     VCS_PACKAGE_RECIPE_PROGRAM_OUTPUT_DIR,
+                     package_short_name);
+    else
+        n = snprintf(out, out_cap, "%s/%.*s",
+                     VCS_PACKAGE_RECIPE_PROGRAM_OUTPUT_DIR, (int)stem_len,
+                     stem);
+    if (n <= 0 || (size_t)n >= out_cap || !vcs_package_path_valid(out)) {
+        out[0] = '\0';
+        return false;
+    }
+    return true;
 }
 
 static bool recipe_define_valid(const char *define)
@@ -322,6 +366,28 @@ bool vcs_package_recipe_add_library(struct vcs_package_recipe *r,
     return true;
 }
 
+bool vcs_package_recipe_add_program(struct vcs_package_recipe *r,
+                                    const char *path,
+                                    enum vcs_package_recipe_error *err_out)
+{
+    enum vcs_package_recipe_error err;
+    if (!err_out)
+        err_out = &err;
+    if (!r) {
+        *err_out = VCS_PACKAGE_RECIPE_ERR_NULL;
+        return false;
+    }
+    if (!vcs_package_recipe_program_path_valid(path)) {
+        *err_out = VCS_PACKAGE_RECIPE_ERR_PATH;
+        return false;
+    }
+    if (!recipe_strings_insert(&r->programs, path,
+                               VCS_PACKAGE_RECIPE_MAX_PROGRAMS, err_out))
+        return false;
+    r->schema_version = VCS_PACKAGE_RECIPE_VERSION_PROGRAMS;
+    return true;
+}
+
 void vcs_package_recipe_set_test_limits(struct vcs_package_recipe *r,
                                         uint8_t expected_exit_code,
                                         uint32_t maximum_seconds,
@@ -341,8 +407,25 @@ enum vcs_package_recipe_error vcs_package_recipe_validate(
 {
     if (!recipe)
         return VCS_PACKAGE_RECIPE_ERR_NULL;
-    if (recipe->schema_version != VCS_PACKAGE_RECIPE_VERSION)
+    if (recipe->schema_version != VCS_PACKAGE_RECIPE_VERSION &&
+        recipe->schema_version != VCS_PACKAGE_RECIPE_VERSION_PROGRAMS)
         return VCS_PACKAGE_RECIPE_ERR_SCHEMA_VERSION;
+    /* One legal encoding per recipe: the program list exists exactly on
+     * schema 2, and schema 2 exists exactly for recipes with a program. */
+    if ((recipe->schema_version == VCS_PACKAGE_RECIPE_VERSION_PROGRAMS) !=
+        (recipe->programs.count > 0))
+        return VCS_PACKAGE_RECIPE_ERR_PROGRAM;
+    if (recipe->programs.count > VCS_PACKAGE_RECIPE_MAX_PROGRAMS)
+        return VCS_PACKAGE_RECIPE_ERR_COUNT_BOUND;
+    for (size_t i = 0; i < recipe->programs.count; i++) {
+        const char *entry = recipe->programs.items[i];
+        if (!entry)
+            return VCS_PACKAGE_RECIPE_ERR_NULL;
+        if (!vcs_package_recipe_program_path_valid(entry))
+            return VCS_PACKAGE_RECIPE_ERR_PATH;
+        if (i > 0 && strcmp(recipe->programs.items[i - 1], entry) >= 0)
+            return VCS_PACKAGE_RECIPE_ERR_LIST_ORDER;
+    }
     if (recipe->sources.count == 0)
         return VCS_PACKAGE_RECIPE_ERR_SOURCES_EMPTY;
     if (recipe->maximum_test_seconds == 0 ||
@@ -420,7 +503,9 @@ static size_t recipe_wire_bytes(const struct vcs_package_recipe *r)
            recipe_strings_wire_bytes(&r->test_sources) +
            recipe_strings_wire_bytes(&r->include_dirs) +
            recipe_strings_wire_bytes(&r->defines) +
-           2u + r->library_count + 1u + 4u + 8u;
+           2u + r->library_count + 1u + 4u + 8u +
+           (r->schema_version == VCS_PACKAGE_RECIPE_VERSION_PROGRAMS
+                ? recipe_strings_wire_bytes(&r->programs) : 0u);
 }
 
 static bool recipe_strings_write(
@@ -470,6 +555,8 @@ enum vcs_package_recipe_error vcs_package_recipe_serialize(
         zcl_codec_write_u8(&writer, recipe->expected_test_exit_code) &&
         zcl_codec_write_u32le(&writer, recipe->maximum_test_seconds) &&
         zcl_codec_write_u64le(&writer, recipe->maximum_memory_bytes);
+    if (ok && recipe->schema_version == VCS_PACKAGE_RECIPE_VERSION_PROGRAMS)
+        ok = recipe_strings_write(&writer, &recipe->programs);
     size_t written = 0;
     ok = ok && zcl_codec_writer_finish(&writer, &written) && written == len;
     if (!ok) {
@@ -557,7 +644,8 @@ enum vcs_package_recipe_error vcs_package_recipe_parse(
     uint16_t version = 0;
     if (!zcl_codec_read_u16le(&reader, &version))
         return VCS_PACKAGE_RECIPE_ERR_WIRE_TRUNCATED;
-    if (version != VCS_PACKAGE_RECIPE_VERSION)
+    if (version != VCS_PACKAGE_RECIPE_VERSION &&
+        version != VCS_PACKAGE_RECIPE_VERSION_PROGRAMS)
         return VCS_PACKAGE_RECIPE_ERR_SCHEMA_VERSION;
     out->schema_version = version;
 
@@ -624,6 +712,17 @@ enum vcs_package_recipe_error vcs_package_recipe_parse(
     }
     out->maximum_test_seconds = seconds;
     out->maximum_memory_bytes = memory;
+
+    /* Schema 2 carries its program list last; the entry grammar is checked
+     * again by validate() below (the `app/` prefix rule is stricter than
+     * the generic ".c" path rule the list reader applies). */
+    if (version == VCS_PACKAGE_RECIPE_VERSION_PROGRAMS) {
+        err = recipe_parse_strings(&reader, &out->programs,
+                                   VCS_PACKAGE_RECIPE_MAX_PROGRAMS, ".c",
+                                   false);
+        if (err != VCS_PACKAGE_RECIPE_OK)
+            goto reject;
+    }
 
     if (!zcl_codec_reader_finish(&reader)) {
         err = VCS_PACKAGE_RECIPE_ERR_WIRE_TRAILING;
@@ -714,7 +813,9 @@ bool vcs_package_recipe_files_in_manifest(
         !recipe_list_in_manifest(&recipe->sources, "sources", manifest,
                                  detail_out, detail_cap) ||
         !recipe_list_in_manifest(&recipe->test_sources, "test_sources",
-                                 manifest, detail_out, detail_cap))
+                                 manifest, detail_out, detail_cap) ||
+        !recipe_list_in_manifest(&recipe->programs, "programs", manifest,
+                                 detail_out, detail_cap))
         return false;
     for (size_t i = 0; i < recipe->include_dirs.count; i++) {
         if (!recipe_manifest_has_dir(manifest,

@@ -31,6 +31,28 @@
  *   [1  expected_test_exit_code]
  *   [4  maximum_test_seconds]
  *   [8  maximum_memory_bytes]
+ *   [2  program_count]        count x ([2 len][path bytes])   schema 2 only
+ *
+ * Schema 2 — PROGRAMS. A package may ship the application a person actually
+ * runs, not only the library other code links. Each program is ONE
+ * translation unit `app/<stem>.c` holding main(); the verifier compiles it
+ * with the package's own flags and links it against the package archive,
+ * the locked dependency closure and the declared system libraries, and
+ * emits the executable as the install output `bin/<stem>` (or
+ * `bin/<package short name>` when the stem is `main`) — see
+ * vcs_package_recipe_program_output. Test sources are never programs:
+ * tests are executed by the verifier and never installed; programs are
+ * installed and never executed by the verifier.
+ *
+ * The schema version is DERIVED from the content so every recipe still has
+ * exactly one legal encoding: a recipe without programs is schema 1 and its
+ * wire — and therefore its root — is byte-identical to what it was before
+ * schema 2 existed; a recipe with one or more programs is schema 2 and
+ * carries the trailing program list. A schema-1 wire followed by a program
+ * list, or a schema-2 wire with an empty one, is not a legal encoding
+ * (VCS_PACKAGE_RECIPE_ERR_PROGRAM). The root domain string is unchanged;
+ * the version inside the wire distinguishes the grammar, exactly as the
+ * build receipt ladder (vcs/package_build.h) does.
  *
  * Canonical-order rule: every string list is in strictly ascending byte
  * order (so it is also duplicate-free) and the library ids are strictly
@@ -39,7 +61,11 @@
  * unknown library id, and every bound overflow are rejections — there is
  * no field a future extension could smuggle through a v1 parser.
  *
- * Field grammars (frozen for v1):
+ * Field grammars (frozen for v1; programs added by v2):
+ *   programs — exactly `app/<stem>.c`: two path segments, the first is
+ *             the literal `app`, the second ends in ".c" and is otherwise
+ *             the manifest segment grammar. Nested paths under app/ are
+ *             ordinary package files, not programs.
  *   paths   — vcs_package_path_valid (the manifest grammar: package-
  *             relative, no absolute/traversal/dot segments/backslash/
  *             drive bytes). public_headers end in ".h"; sources and
@@ -63,12 +89,18 @@
 #include <stddef.h>
 #include <stdint.h>
 
+/* Schema 1 is the library-only recipe and the version init() starts at;
+ * adding a program raises a recipe to schema 2. The parser accepts both. */
 #define VCS_PACKAGE_RECIPE_VERSION 1u
+#define VCS_PACKAGE_RECIPE_VERSION_PROGRAMS 2u
 #define VCS_PACKAGE_RECIPE_ROOT_DOMAIN "zcl.zcode_recipe.v1"
 #define VCS_PACKAGE_RECIPE_WIRE_MAGIC_BYTES 8u
 #define VCS_PACKAGE_RECIPE_MAX_PATHS_PER_LIST 256u
 #define VCS_PACKAGE_RECIPE_MAX_DEFINES 64u
 #define VCS_PACKAGE_RECIPE_MAX_LIBRARIES 8u
+#define VCS_PACKAGE_RECIPE_MAX_PROGRAMS 64u
+#define VCS_PACKAGE_RECIPE_PROGRAM_DIR "app"
+#define VCS_PACKAGE_RECIPE_PROGRAM_OUTPUT_DIR "bin"
 #define VCS_PACKAGE_RECIPE_DEFINE_MAX 64u
 #define VCS_PACKAGE_RECIPE_MAX_TEST_SECONDS 3600u
 #define VCS_PACKAGE_RECIPE_MIN_MEMORY_BYTES (UINT64_C(1024) * 1024u)
@@ -101,6 +133,9 @@ enum vcs_package_recipe_error {
     VCS_PACKAGE_RECIPE_ERR_SOURCES_EMPTY,  /* sources[] must not be empty */
     VCS_PACKAGE_RECIPE_ERR_TEST_SECONDS,   /* outside 1..3600 */
     VCS_PACKAGE_RECIPE_ERR_MEMORY_BYTES,   /* outside 1 MiB..16 GiB */
+    VCS_PACKAGE_RECIPE_ERR_PROGRAM,        /* programs disagree with the
+                                              schema version (v1 with a
+                                              program, v2 with none) */
 };
 
 /* One bounded, canonically-ordered string list. */
@@ -122,6 +157,9 @@ struct vcs_package_recipe {
     uint8_t expected_test_exit_code;
     uint32_t maximum_test_seconds;
     uint64_t maximum_memory_bytes;
+    /* Schema 2: the `app/<stem>.c` translation units that become installed
+     * executables. Empty on every schema-1 recipe. */
+    struct vcs_package_recipe_strings programs;
 };
 
 void vcs_package_recipe_init(struct vcs_package_recipe *recipe);
@@ -156,6 +194,26 @@ bool vcs_package_recipe_add_define(struct vcs_package_recipe *r,
 bool vcs_package_recipe_add_library(struct vcs_package_recipe *r,
                                     uint8_t library_id,
                                     enum vcs_package_recipe_error *err_out);
+/* Add one program (`app/<stem>.c`, see the grammar above). Raises the
+ * recipe to schema 2; a recipe with a program has no schema-1 encoding. */
+bool vcs_package_recipe_add_program(struct vcs_package_recipe *r,
+                                    const char *path,
+                                    enum vcs_package_recipe_error *err_out);
+
+/* True iff `path` has the program grammar (`app/<stem>.c`). Pure. */
+bool vcs_package_recipe_program_path_valid(const char *path);
+
+/* The install-relative output of one program: `bin/<stem>`, or
+ * `bin/<package_short_name>` when the stem is `main` (a single-program
+ * package is normally app/main.c and its executable should carry the
+ * package's name, not "main"). package_short_name is the part after the
+ * publisher's slash. False when the path is not a program, the short name
+ * is empty, or the result does not fit / is not a canonical package path.
+ * Pure; the verifier emits to this path and the install lifecycle reads it
+ * back from the build receipt. */
+bool vcs_package_recipe_program_output(const char *program_path,
+                                       const char *package_short_name,
+                                       char *out, size_t out_cap);
 
 /* Plain scalar setter; the ranges are enforced by validate(). */
 void vcs_package_recipe_set_test_limits(struct vcs_package_recipe *r,
