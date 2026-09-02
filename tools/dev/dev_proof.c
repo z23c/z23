@@ -1277,6 +1277,11 @@ static bool generation_prepare(const struct proof_paths *paths,
         "vendor/tor/src/ext/ed25519/ref10/libed25519_ref10.a",
         "vendor/tor/src/ext/keccak-tiny/libkeccak-tiny.a",
         "build/githooks", "build/bin/z23-git-hook",
+        /* Order-only test-binary prerequisites that no admitted executable
+         * links against: the rollback group dlopens these fixture images by
+         * name, so an exact generation without them cannot run the group. */
+        "build/hotswap/zcl_rollback_fixture_a.so",
+        "build/hotswap/zcl_rollback_fixture_b.so",
     };
     char build_dir[PATH_MAX], bin_dir[PATH_MAX];
     if (snprintf(build_dir, sizeof(build_dir), "%s/build", generation) >=
@@ -1302,11 +1307,15 @@ static bool generation_prepare(const struct proof_paths *paths,
             !dependency_parent_ensure(target) ||
             !dependency_materialize(source, target)) {
             /* vendor/ entries come from the vendored-archive build; the
-             * git-hook pair comes from arming the clone. Naming the target
-             * turns a class into one command the reader can run. */
+             * git-hook pair comes from arming the clone; the hotswap
+             * fixture images come from any test-binary build. Naming the
+             * target turns a class into one command the reader can run. */
             const char *fix = strncmp(dependencies[i], "vendor/", 7) == 0
                                   ? "make vendor"
-                                  : "make install-hooks";
+                                  : strncmp(dependencies[i], "build/hotswap/",
+                                            14) == 0
+                                        ? "make test_parallel"
+                                        : "make install-hooks";
             proof_whyf(why, why_len,
                        "proof_generation_dependency_unavailable:%s (%s)",
                        dependencies[i], fix);
