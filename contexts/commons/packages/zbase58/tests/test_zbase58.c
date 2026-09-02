@@ -1,3 +1,5 @@
+/* Copyright 2026 Rhett Creighton - Apache License 2.0 */
+
 #include "zbase58/zbase58.h"
 
 #include <stdio.h>
@@ -76,6 +78,7 @@ static void test_known_vectors(void)
     CHECK(zbase58_char_value('O') == -1);
     CHECK(zbase58_char_value('I') == -1);
     CHECK(zbase58_char_value('l') == -1);
+    CHECK(zbase58_char_value('\0') == -1);
 }
 
 static void test_errors(void)

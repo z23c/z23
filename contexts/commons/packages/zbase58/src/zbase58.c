@@ -1,8 +1,10 @@
+/* Copyright 2026 Rhett Creighton - Apache License 2.0 */
+
 #include "zbase58/zbase58.h"
 
 #include <string.h>
 
-static const char ALPHABET[58] =
+static const char ALPHABET[] =
     "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
 
 size_t zbase58_encoded_max(size_t bin_len)
@@ -19,7 +21,7 @@ size_t zbase58_decoded_max(size_t b58_len)
 
 int zbase58_char_value(char c)
 {
-    const char *p = memchr(ALPHABET, c, sizeof ALPHABET);
+    const char *p = memchr(ALPHABET, c, sizeof ALPHABET - 1);
     return p ? (int)(p - ALPHABET) : -1;
 }
 
