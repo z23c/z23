@@ -830,12 +830,43 @@ cj_pin_root() {
     cj_die "node $node pin commit $root failed: $commit"
 }
 
+# Publishing returns when the author stored and began replicating its signed
+# provider record, not when a different node can already route it. Observe the
+# exact precondition from the consumer before its one bounded fetch lookup.
+# Requiring the expected provider matters after A disappears: an unexpired A
+# record must not stand in for B's independently published survival record.
+cj_wait_provider_record() {
+    local node="$1" transport="$2" expected_provider="$3"
+    local deadline out count i provider conflicted superseded
+    deadline=$(( $(date +%s) + DHT_WAIT ))
+    while [ "$(date +%s)" -lt "$deadline" ]; do
+        out="$("cj_$node" zcode network records \
+            --input="{\"kind\":\"provider\",\"namespace\":\"zclassic23.package\",\"transport_root\":\"$transport\"}" || true)"
+        if [ "$(cj_field ok "$out" False)" = True ]; then
+            count="$(cj_field data.count "$out" 0)"
+            i=0
+            while [ "$i" -lt "$count" ]; do
+                provider="$(cj_field "data.records.$i.provider_node_id" "$out" '')"
+                conflicted="$(cj_field "data.records.$i.conflicted" "$out" False)"
+                superseded="$(cj_field "data.records.$i.superseded" "$out" False)"
+                if [ "$provider" = "$expected_provider" ] &&
+                   [ "$conflicted" = False ] && [ "$superseded" = False ]; then
+                    return 0
+                fi
+                i=$((i + 1))
+            done
+        fi
+        sleep 1
+    done
+    cj_die "node $node never discovered provider $expected_provider for $transport: $out"
+}
+
 # Fetch one package over the overlay and reconstruct it locally. Returns only
 # when this node itself reports the exact package tracked and complete.
 # Sets CJ_FETCH_BYTES from the local store's own accounting.
 cj_fetch_package() {
     local node="$1" root="$2" transport="$3"
-    local out deadline complete=False plan next_resume
+    local out deadline complete=False plan next_resume expected_provider
     # Admitting the exact carrier root is the whole request. The first call
     # must be accepted and routed by the live daemon — that is the fact worth
     # asserting about the network. Everything after it is answered by this
@@ -843,6 +874,12 @@ cj_fetch_package() {
     # bytes are here and whole. Provider discovery is explicitly retryable,
     # so re-admitting the same root resumes the same durable download slot;
     # a refused re-admission is never allowed to stand in for completion.
+    case "$node" in
+        b) expected_provider="$CJ_NODE_A" ;;
+        c) expected_provider="$CJ_NODE_B" ;;
+        *) cj_die "fetch consumer '$node' has no expected provider" ;;
+    esac
+    cj_wait_provider_record "$node" "$transport" "$expected_provider"
     out="$("cj_$node" zcode package fetch \
         --input="{\"root\":\"$transport\",\"namespace\":\"zclassic23.package\",\"maximum_bytes\":67108864}")"
     cj_require_ok "node $node fetch $transport" "$out"
