@@ -9,6 +9,14 @@
 #include <string.h>
 #include "util/safe_alloc.h"
 
+#define EH_CANCEL_INTERVAL 1024u
+
+static inline bool cancel_requested(eh_solver_cancel_fn should_cancel,
+                                    void *cancel_ctx)
+{
+    return should_cancel && should_cancel(cancel_ctx);
+}
+
 /* Slot layout: word[0] = tree attr, word[1..] = hash data.
  * Tree packing: (bucket_id << 12) | (slot0 << 6) | slot1 */
 
@@ -226,7 +234,8 @@ static void candidate(struct eh_solver *s, uint32_t t)
 }
 
 /* Round 0: generate initial hashes and distribute to buckets */
-static void digit0(struct eh_solver *s)
+static bool digit0(struct eh_solver *s, eh_solver_cancel_fn should_cancel,
+                   void *cancel_ctx)
 {
     uint8_t hash[EH_HASHOUT];
     struct blake2b_ctx state;
@@ -234,6 +243,9 @@ static void digit0(struct eh_solver *s)
     uint32_t nextbo = round_info[0].byte_off;
 
     for (uint32_t block = 0; block < EH_NBLOCKS; block++) {
+        if ((block % EH_CANCEL_INTERVAL) == 0 &&
+            cancel_requested(should_cancel, cancel_ctx))
+            return false;
         state = s->blake_ctx;
         uint32_t leb = block;
         blake2b_update(&state, &leb, sizeof(uint32_t));
@@ -253,10 +265,12 @@ static void digit0(struct eh_solver *s)
                    ph + EH_N / 8 - hashbytes, hashbytes);
         }
     }
+    return true;
 }
 
 /* Odd round: read from slot0 (even), write to slot1 (odd) */
-static void digitodd(struct eh_solver *s, uint32_t r)
+static bool digitodd(struct eh_solver *s, uint32_t r,
+                     eh_solver_cancel_fn should_cancel, void *cancel_ctx)
 {
     uint32_t prevhashunits = round_info[r - 1].hashwords;
     uint32_t nexthashunits = round_info[r].hashwords;
@@ -267,6 +281,9 @@ static void digitodd(struct eh_solver *s, uint32_t r)
 
     struct collisiondata cd;
     for (uint32_t bucketid = 0; bucketid < EH_NBUCKETS; bucketid++) {
+        if ((bucketid % EH_CANCEL_INTERVAL) == 0 &&
+            cancel_requested(should_cancel, cancel_ctx))
+            return false;
         cd_clear(&cd);
         uint32_t bsize = getnslots(s, r - 1, bucketid);
         for (uint32_t s1 = 0; s1 < bsize; s1++) {
@@ -304,10 +321,12 @@ static void digitodd(struct eh_solver *s, uint32_t r)
             }
         }
     }
+    return true;
 }
 
 /* Even round: read from slot1 (odd), write to slot0 (even) */
-static void digiteven(struct eh_solver *s, uint32_t r)
+static bool digiteven(struct eh_solver *s, uint32_t r,
+                      eh_solver_cancel_fn should_cancel, void *cancel_ctx)
 {
     uint32_t prevhashunits = round_info[r - 1].hashwords;
     uint32_t nexthashunits = round_info[r].hashwords;
@@ -318,6 +337,9 @@ static void digiteven(struct eh_solver *s, uint32_t r)
 
     struct collisiondata cd;
     for (uint32_t bucketid = 0; bucketid < EH_NBUCKETS; bucketid++) {
+        if ((bucketid % EH_CANCEL_INTERVAL) == 0 &&
+            cancel_requested(should_cancel, cancel_ctx))
+            return false;
         cd_clear(&cd);
         uint32_t bsize = getnslots(s, r - 1, bucketid);
         for (uint32_t s1 = 0; s1 < bsize; s1++) {
@@ -354,10 +376,12 @@ static void digiteven(struct eh_solver *s, uint32_t r)
             }
         }
     }
+    return true;
 }
 
 /* Final round K: find complete collisions */
-static void digitK(struct eh_solver *s)
+static bool digitK(struct eh_solver *s, eh_solver_cancel_fn should_cancel,
+                   void *cancel_ctx)
 {
     uint32_t prevhashunits = round_info[EH_K - 1].hashwords;
     uint32_t prevbo = round_info[EH_K - 1].byte_off;
@@ -365,6 +389,9 @@ static void digitK(struct eh_solver *s)
 
     struct collisiondata cd;
     for (uint32_t bucketid = 0; bucketid < EH_NBUCKETS; bucketid++) {
+        if ((bucketid % EH_CANCEL_INTERVAL) == 0 &&
+            cancel_requested(should_cancel, cancel_ctx))
+            return false;
         cd_clear(&cd);
         uint32_t bsize = getnslots(s, EH_K - 1, bucketid);
         for (uint32_t s1 = 0; s1 < bsize; s1++) {
@@ -382,6 +409,7 @@ static void digitK(struct eh_solver *s)
             }
         }
     }
+    return true;
 }
 
 struct eh_solver *eh_solver_new(void)
@@ -418,26 +446,44 @@ void eh_solver_free(struct eh_solver *s)
 void eh_solver_set_state(struct eh_solver *s, const struct blake2b_ctx *ctx)
 {
     s->blake_ctx = *ctx;
-    memset(s->nslot_counts, 0, (size_t)EH_NBUCKETS * sizeof(uint32_t));
+    memset(s->nslot_counts, 0,
+           2 * (size_t)EH_NBUCKETS * sizeof(uint32_t));
     s->nsols = 0;
+    s->cancelled = false;
 }
 
 uint32_t eh_solver_run(struct eh_solver *s)
 {
-    s->xfull = s->bfull = s->hfull = 0;
+    return eh_solver_run_cancelable(s, NULL, NULL);
+}
 
-    digit0(s);
+uint32_t eh_solver_run_cancelable(struct eh_solver *s,
+                                  eh_solver_cancel_fn should_cancel,
+                                  void *cancel_ctx)
+{
+    s->xfull = s->bfull = s->hfull = 0;
+    s->cancelled = false;
+
+    if (!digit0(s, should_cancel, cancel_ctx))
+        goto cancelled;
 
     s->xfull = s->bfull = s->hfull = 0;
     for (uint32_t r = 1; r < EH_K; r++) {
-        if (r & 1)
-            digitodd(s, r);
-        else
-            digiteven(s, r);
+        bool completed = (r & 1)
+            ? digitodd(s, r, should_cancel, cancel_ctx)
+            : digiteven(s, r, should_cancel, cancel_ctx);
+        if (!completed)
+            goto cancelled;
         s->xfull = s->bfull = s->hfull = 0;
     }
 
-    digitK(s);
+    if (!digitK(s, should_cancel, cancel_ctx))
+        goto cancelled;
 
     return eh_min(s->nsols, EH_MAXSOLS);
+
+cancelled:
+    s->cancelled = true;
+    s->nsols = 0;
+    return 0;
 }

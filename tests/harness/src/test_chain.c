@@ -30,6 +30,11 @@ static struct block_index *test_block_index_insert(void *ctx,
     return chainstate_insert_block_index((struct chainstate *)ctx, hash);
 }
 
+static bool test_eh_cancel(void *ctx)
+{
+    return *(const bool *)ctx;
+}
+
 int test_chain(void)
 {
     int failures = 0;
@@ -919,6 +924,21 @@ int test_chain(void)
         }
     }
     } /* end EQUIHASH_TEST guard */
+
+    printf("equihash solver cancellation is immediate... ");
+    {
+        struct eh_solver solver = {0};
+        bool cancel = true;
+        uint32_t nsols = eh_solver_run_cancelable(
+            &solver, test_eh_cancel, &cancel);
+        if (nsols == 0 && solver.cancelled)
+            printf("OK\n");
+        else {
+            printf("FAIL (nsols=%u cancelled=%d)\n",
+                   nsols, solver.cancelled);
+            failures++;
+        }
+    }
 
     printf("check_block_header version too low... ");
     {

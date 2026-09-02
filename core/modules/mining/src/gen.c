@@ -38,9 +38,15 @@ static int g_num_miner_threads = 0;
 static struct thread_liveness_child g_miner_liveness = { .id = SUPERVISOR_INVALID_ID };
 static _Atomic uint64_t g_miner_batch_count = 0;
 
+static bool mining_cancelled(void *arg)
+{
+    const _Atomic bool *running = arg;
+    return !atomic_load_explicit(running, memory_order_relaxed);
+}
+
 static bool try_solve_equihash(struct block *blk,
                                 const struct chain_params *params,
-                                int height)
+                                int height, _Atomic bool *running)
 {
     /* Regtest (fMineBlocksOnDemand) delegates to the ONE real solver,
      * mine_block_pow(), which calls equihash_basic_solve() and actually SETS
@@ -82,8 +88,7 @@ static bool try_solve_equihash(struct block *blk,
     blake2b_update(&base_state, s.data, s.size);
     stream_free(&s);
 
-    /* Tromp solver path is for (192,7); ZClassic is (200,9) on mainnet/testnet
-     * and (48,5) on regtest, so the brute-force else-branch is the live path. */
+    /* Tromp solver path is for post-Bubbles mainnet (192,7). */
     if (n == 192 && k == 7) {
         struct eh_solver *solver = eh_solver_new();
         if (!solver)
@@ -98,8 +103,11 @@ static bool try_solve_equihash(struct block *blk,
             blake2b_update(&curr, blk->header.nNonce.data, 32);
 
             eh_solver_set_state(solver, &curr);
-            uint32_t nsols = eh_solver_run(solver);
+            uint32_t nsols = eh_solver_run_cancelable(
+                solver, mining_cancelled, running);
             metrics_increment_eh_solver_runs();
+            if (solver->cancelled)
+                break;
 
             for (uint32_t i = 0; i < nsols; i++) {
                 /* Convert indices to minimal/compressed solution */
@@ -179,7 +187,7 @@ static void *miner_thread(void *arg)
         increment_extra_nonce(&tmpl->block, tip, &extra_nonce);
 
         if (try_solve_equihash(&tmpl->block, ctx->params,
-                               tip->nHeight + 1)) {
+                               tip->nHeight + 1, &ctx->running)) {
             LogPrintf("Found block!\n");
             if (ctx->block_found &&
                 ctx->block_found(&tmpl->block, ctx->block_found_ctx)) {

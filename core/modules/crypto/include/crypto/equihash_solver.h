@@ -35,6 +35,8 @@
 #define EH_XFULL        16
 #define EH_SOL_BYTES    400
 
+typedef bool (*eh_solver_cancel_fn)(void *ctx);
+
 struct eh_solver {
     uint32_t *heap0;
     uint32_t *heap1;
@@ -44,6 +46,7 @@ struct eh_solver {
     uint32_t xfull;
     uint32_t hfull;
     uint32_t bfull;
+    bool cancelled;
     struct blake2b_ctx blake_ctx;
 };
 
@@ -51,5 +54,8 @@ struct eh_solver *eh_solver_new(void);
 void eh_solver_free(struct eh_solver *s);
 void eh_solver_set_state(struct eh_solver *s, const struct blake2b_ctx *ctx);
 uint32_t eh_solver_run(struct eh_solver *s);
+uint32_t eh_solver_run_cancelable(struct eh_solver *s,
+                                  eh_solver_cancel_fn should_cancel,
+                                  void *cancel_ctx);
 
 #endif
