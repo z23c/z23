@@ -5327,7 +5327,8 @@ ZCL_TOOL_SANDBOX_SRC = platform/modules/platform/src/os_sandbox_stub.c
 endif
 ZCODE_ADAPTER_RUNNER_SRCS = tools/zcode_adapter_runner.c \
 	$(ZCL_TOOL_SANDBOX_SRC) platform/modules/base/src/cleanse.c \
-	platform/modules/base/src/log_level.c platform/modules/base/src/result.c platform/modules/sha3/src/sha3.c
+	platform/modules/base/src/log_level.c platform/modules/base/src/result.c \
+	platform/modules/base/src/safe_alloc.c platform/modules/sha3/src/sha3.c
 .PHONY: zclassic23-zcode-adapter-runner
 zclassic23-zcode-adapter-runner: $(BIN_DIR)/zclassic23-zcode-adapter-runner
 $(BIN_DIR)/zclassic23-zcode-adapter-runner: $(BUILD_IDENTITY_STAMP) \
