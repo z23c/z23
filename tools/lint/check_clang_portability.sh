@@ -535,12 +535,27 @@ tu_cache_setup check-clang-portability \
     "$PWD/tools/lint/check_clang_portability.sh" "$CC_BIN" \
     "$WORK/flags.nul" "$WORK"
 
-# One clang per TU, N at a time, each writing to its OWN file. Concurrent
-# writers sharing one fd tear their output once a diagnostic block exceeds
-# PIPE_BUF, which made an earlier draft of this gate report a different
-# finding set on every run. Per-TU files make the scan bit-deterministic.
+# Where this gate's worker puts a TU's two artifacts. tu_cache_plan replays
+# a hit into exactly these paths, which is why nothing below changed.
+tu_cache_paths_for() {
+    local k="${1//[^[:alnum:]]/_}"
+    TU_LOG="$OUT_DIR/$k.log"
+    TU_RC="$OUT_DIR/$k.rc"
+}
+
+# One parent pass replays every cached TU and leaves only the ones that
+# still need a compiler. Forking 2108 workers to discover 2108 hits cost
+# more than the compiles it saved; this costs one sha256sum pass.
+MISS_LIST="$WORK/misses.txt"
+tu_cache_plan "$SRC_LIST" "$MISS_LIST"
+
+# One clang per REMAINING TU, N at a time, each writing to its OWN file.
+# Concurrent writers sharing one fd tear their output once a diagnostic
+# block exceeds PIPE_BUF, which made an earlier draft of this gate report a
+# different finding set on every run. Per-TU files make the scan
+# bit-deterministic.
 #
-xargs -a "$SRC_LIST" -P "$JOBS" -n 1 -I '{}' \
+xargs -a "$MISS_LIST" -r -P "$JOBS" -n 1 -I '{}' \
     env ZCL_GATE_FLAGS="$WORK/flags.nul" ZCL_GATE_CC="$CC_BIN" ZCL_GATE_OUT="$OUT_DIR" \
     bash -c '. "$ZCL_TU_CACHE_LIB"
              mapfile -t -d "" f < "$ZCL_GATE_FLAGS"
@@ -553,9 +568,8 @@ xargs -a "$SRC_LIST" -P "$JOBS" -n 1 -I '{}' \
              if [ "$1" = tools/dev/source_identity_batch.c ]; then
                  f+=("-DZCL_SOURCE_IDENTITY_BATCH_INPUT_ID=\"0000000000000000000000000000000000000000000000000000000000000000\"")
              fi
-             # Same mapping the reader below uses, spelled as a bash
-             # expansion instead of `printf | tr`: two forks per TU that a
-             # 2104-file sweep pays 4208 times for nothing.
+             # Same mapping tu_cache_paths_for and the reader below use,
+             # spelled as a bash expansion instead of `printf | tr`.
              k="${1//[^[:alnum:]]/_}"
              o="$ZCL_GATE_OUT/$k.log"
              r="$ZCL_GATE_OUT/$k.rc"

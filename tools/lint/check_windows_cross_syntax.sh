@@ -472,6 +472,22 @@ mkdir -p "$OUT_DIR"
 tu_cache_setup "$GATE" "$SCRIPT_DIR/check_windows_cross_syntax.sh" \
     "$CC_BIN" "$WORK/flags.nul" "$WORK"
 
+
+# Where this gate's worker puts a TU's two artifacts. tu_cache_plan replays
+# a hit into exactly these paths, which is why nothing below changed. The
+# out-dir mirrors the source tree, so its directories are created once here
+# rather than by a `mkdir` fork inside every replay.
+tu_cache_paths_for() {
+    TU_LOG="$OUT_DIR/$1.log"
+    TU_RC="$OUT_DIR/$1.rc"
+}
+sed 's|/[^/]*$||' "$SRC_LIST" | LC_ALL=C sort -u | sed "s|^|$OUT_DIR/|" |
+    tr '\n' '\0' | xargs -0 -r mkdir -p
+
+# One parent pass replays every cached TU and leaves only the ones that
+# still need a compiler, so a fully warm run forks no workers at all.
+MISS_LIST="$WORK/misses.txt"
+tu_cache_plan "$SRC_LIST" "$MISS_LIST"
 cat > "$WORK/compile_one.sh" <<'END_WORKER'
 #!/usr/bin/env bash
 set -uo pipefail
@@ -502,7 +518,7 @@ chmod +x "$WORK/compile_one.sh"
 
 # Always exit 0 from the worker so a failing compile cannot short-circuit
 # xargs into a hollow pass over the remaining files.
-tr '\n' '\0' < "$SRC_LIST" |
+tr '\n' '\0' < "$MISS_LIST" |
     env ZCL_GATE_FLAGS="$WORK/flags.nul" ZCL_GATE_CC="$CC_BIN" ZCL_GATE_OUT="$OUT_DIR" \
         ZCL_GATE_TEST_COMPAT_HEADER="$TEST_COMPAT_HEADER" \
         xargs -0 -r -P "$JOBS" -n 1 "$WORK/compile_one.sh" || true

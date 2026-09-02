@@ -2,7 +2,7 @@
 # Copyright 2026 Rhett Creighton - Apache License 2.0
 #
 # tu_result_cache.sh — a per-TRANSLATION-UNIT result cache shared by the two
-# compile-sweep lint gates, check_clang_portability.sh (2104 TUs) and
+# compile-sweep lint gates, check_clang_portability.sh (2108 TUs) and
 # check_windows_cross_syntax.sh (233 TUs).
 #
 # WHY THIS EXISTS
@@ -13,7 +13,7 @@
 #
 # tools/lint/lint_cache.sh already caches at GATE granularity, but its key is
 # the WHOLE tree: edit one .c and every gate's stored PASS is void, so the
-# 2104-TU sweep is paid again in full to re-check 2103 unchanged files. That
+# 2108-TU sweep is paid again in full to re-check 2107 unchanged files. That
 # key was chosen when the whole umbrella cost 25 s (see that file's header);
 # at 170 s it no longer holds. This file adds the finer grain UNDERNEATH it,
 # without touching lint_cache.sh, run_lint.sh, or the Makefile.
@@ -30,20 +30,48 @@
 # that is indistinguishable from a fresh compile, because it is the same
 # bytes. No grading logic changes, so no grading logic can be weakened.
 #
+# WHERE THE WORK HAPPENS, AND WHY IT IS NOT IN THE WORKERS
+# The first draft looked the cache up inside each xargs worker. That made a
+# fully warm run cost 17 s for the clang gate: every one of 2108 workers
+# forked a bash, sourced this file, and ran three sha256sums to discover it
+# had nothing to do. Process creation had become the entire wall.
+#
+# So the lookup is a single PARENT pass, tu_cache_plan:
+#   * ONE sha256sum invocation hashes every source in the scan set;
+#   * each entry's identity is its (salt, source path, content sha), which
+#     is also its FILE NAME — <cache>/<gate>/<salt>/<src path>.<content sha>
+#     — so a lookup is a path test, with no per-TU hashing at all;
+#   * a hit is replayed with shell builtins: the status is one `printf` and
+#     the overwhelmingly common empty log is one `: >` truncation. Only a TU
+#     that actually produced diagnostics costs a fork (`tail -n +2`), and in
+#     this tree that is 8 of 2108;
+#   * only the MISSES are written to the list xargs then forks over.
+# A fully warm run therefore forks a handful of processes in total instead
+# of 2108, and the gates keep their existing worker loops unchanged apart
+# from the list they iterate.
+#
 # WHY THE KEY IS SOUND
 # clang/gcc -fsyntax-only over one TU is a pure function of
 #
 #   (1) the compiler                 -> "$CC --version" first line
-#   (2) the exact argv               -> sha256 of the NUL-joined final argv,
-#                                       which includes every flag, every -I,
-#                                       every -D, the per-TU extras the gate
-#                                       workers append, and the source path
-#   (3) the TU's own bytes           -> sha256 of the source file
-#   (4) every file it can textually  -> the INCLUDE-SET DIGEST below
+#   (2) the flag list                -> sha256 of the gate's flags.nul
+#   (3) the rules that turn a path   -> sha256 of the gate script and of
+#       into the final argv             this helper. Both gates append per-TU
+#                                       flags (an inert identity define for
+#                                       one bootstrap TU; -DZCL_TESTING and a
+#                                       force-included compat header for test
+#                                       sources) as a pure function of the
+#                                       source path, so hashing the path plus
+#                                       the script that derives those extras
+#                                       pins the exact argv without having to
+#                                       rebuild it.
+#   (4) the TU's own bytes           -> sha256 of the source file
+#   (5) every file it can textually  -> the INCLUDE-SET DIGEST below
 #       include
-#   (5) the rules that derive 1-4    -> sha256 of the gate script and of this
-#                                       helper, so any edit to either voids
-#                                       every entry
+#
+# (1), (2), (3) and (5) fold into one per-run SALT, which names the cache
+# generation directory. (3)'s path component and (4) name the entry inside
+# it. Nothing a TU can see is outside that set.
 #
 # The include-set digest is the sha256 of the sorted "<path>\t<sha256>" list
 # of every file in the tree a scanned TU could textually include. That is
@@ -77,7 +105,8 @@
 # ever stored, and a stored FAIL replays as a FAIL (a compile-sweep gate's
 # failures are per-TU diagnostics, not flakes — the whole point of the
 # ratchet is that the same source under the same compiler yields the same
-# diagnostics).
+# diagnostics). A store is one rename of a fully written temp file, so a
+# concurrent reader sees an entry either complete or not at all.
 #
 # ENV
 #   ZCL_LINT_TU_CACHE=0        disable (default: on)
@@ -90,26 +119,35 @@
 # PARENT-SIDE API (the gate, once, before it forks workers)
 #   tu_cache_setup <gate> <gate-script> <cc> <flags-nul> <scratch> \
 #                  [scan-root] [cache-root]
-#       Derive the salt, open the cache dir, export the worker contract.
-#       Never fails the gate: on any problem it disables and records why.
+#       Derive the salt, open the cache generation, export the worker
+#       contract. Never fails the gate: on any problem it disables and
+#       records why.
+#   tu_cache_paths_for <src>          — DEFINED BY THE GATE, not here.
+#       Must set TU_LOG and TU_RC to the two artifact paths that gate's
+#       worker would have written for <src>. tu_cache_plan replays hits into
+#       exactly those paths, which is the whole reason the gate's grading
+#       code needs no change.
+#   tu_cache_plan <src-list> <miss-list>
+#       Replay every hit; write the paths that still need compiling to
+#       <miss-list>, which is what the gate hands to xargs.
 #   tu_cache_summary
 #       Print "  tu-cache: N hit, M miss, K stored" (or the disabled form).
 #   tu_cache_selftest <gate> <gate-script> <cc> <flags-nul> <scratch> <src>
-#       The six soundness proofs; exits 1 naming the one that failed.
+#       The eight soundness proofs; exits 1 naming the one that failed.
 #
 # WORKER-SIDE API (each xargs worker, after sourcing this file)
 #   tu_cache_run <log> <rc-file> <cc> <arg>...
 #       Behaves exactly like
 #           "$cc" "$@" > "$log" 2>&1; printf '%s\n' "$?" > "$rc-file"
-#       serving from / storing into the cache when it is on. Always 0.
+#       and then stores the result. The parent has already established that
+#       this TU is a miss, so there is no lookup here. Always returns 0.
 #
 # Sourcing contract: source AFTER the gate's `cd` to the repo root. Safe
 # under `set -euo pipefail` (check_windows_cross_syntax.sh) and under
 # `set -uo pipefail` (check_clang_portability.sh).
 
-# Absolute path to this file, so a forked worker can source it by name. Every
-# worker sources this file, so resolving the path costs one subshell per
-# translation unit unless the already-exported answer is reused.
+# Absolute path to this file, so a forked worker can source it by name.
+# Resolving it costs a subshell, so a worker reuses the exported answer.
 if [ -n "${ZCL_TU_CACHE_LIB:-}" ]; then
     TU_CACHE_LIB_PATH="$ZCL_TU_CACHE_LIB"
 else
@@ -117,12 +155,11 @@ else
 fi
 TU_CACHE_OFF_REASON=""
 
-# Entries unused for this many days are swept at setup, and the whole gate
-# dir is dropped once it passes the cap. One header edit writes a fresh
-# generation of every entry, so an unbounded dir would grow by ~2300 files
-# per header touch and never shrink.
-TU_CACHE_MAX_AGE_DAYS="${ZCL_LINT_TU_CACHE_MAX_AGE_DAYS:-7}"
-TU_CACHE_MAX_ENTRIES="${ZCL_LINT_TU_CACHE_MAX_ENTRIES:-120000}"
+# How many cache GENERATIONS to keep. One generation is one salt: one
+# compiler, one flag set, one include-set state. A header edit starts a new
+# one, and the old one is what makes `git stash`/rebase round trips free, so
+# a few are worth keeping — but only a few, since each holds an entry per TU.
+TU_CACHE_KEEP_GENERATIONS="${ZCL_LINT_TU_CACHE_GENERATIONS:-6}"
 
 tu_cache__sha_stdin() { sha256sum | cut -c1-64; }
 
@@ -208,29 +245,35 @@ tu_cache_include_digest() {
         LC_ALL=C sort | tu_cache__sha_stdin
 }
 
-tu_cache__prune() {
-    local dir="$1" n
-    find "$dir" -maxdepth 1 -type f -mtime "+$TU_CACHE_MAX_AGE_DAYS" -delete 2>/dev/null || true
-    n="$(find "$dir" -maxdepth 1 -type f 2>/dev/null | wc -l)"
-    [ -n "$n" ] || n=0
-    if [ "$n" -gt "$TU_CACHE_MAX_ENTRIES" ]; then
-        find "$dir" -maxdepth 1 -type f -delete 2>/dev/null || true
-    fi
+# Keep the newest N generations under <gate-root>, drop the rest whole. A
+# generation is a directory named by its salt, so this is the only pruning
+# the cache needs: an obsolete compiler, flag set or header state takes its
+# entire population with it instead of ageing out file by file.
+tu_cache__prune_generations() {
+    local gate_root="$1" keep="$2" d
+    [ -d "$gate_root" ] || return 0
+    case "$keep" in ''|*[!0-9]*) keep=6 ;; esac
+    [ "$keep" -ge 1 ] || keep=1
+    while IFS= read -r d; do
+        [ -n "$d" ] || continue
+        case "$d" in "$gate_root"/*) rm -rf "$d" 2>/dev/null || true ;; esac
+    done < <(ls -1dt "$gate_root"/*/ 2>/dev/null | tail -n "+$((keep + 1))" | sed 's|/$||')
     return 0
 }
 
 tu_cache_setup() {
     local gate="$1" gate_script="$2" cc="$3" flags_nul="$4" scratch="$5"
     local root="${6:-.}" cachedir="${7:-}"
-    local cc_id lib_sha gate_sha flags_sha digest salt dir
+    local cc_id lib_sha gate_sha flags_sha digest salt gate_root dir
 
     TU_CACHE_OFF_REASON=""
     ZCL_TU_CACHE_ON=0
     ZCL_TU_CACHE_DIR=""
-    ZCL_TU_CACHE_SALT=""
     ZCL_TU_CACHE_STATS=""
+    ZCL_TU_CACHE_SCRATCH="$scratch"
     ZCL_TU_CACHE_LIB="$TU_CACHE_LIB_PATH"
-    export ZCL_TU_CACHE_ON ZCL_TU_CACHE_DIR ZCL_TU_CACHE_SALT ZCL_TU_CACHE_STATS ZCL_TU_CACHE_LIB
+    export ZCL_TU_CACHE_ON ZCL_TU_CACHE_DIR ZCL_TU_CACHE_STATS \
+           ZCL_TU_CACHE_SCRATCH ZCL_TU_CACHE_LIB
 
     if [ "${ZCL_LINT_TU_CACHE:-1}" = "0" ]; then
         tu_cache__disable "ZCL_LINT_TU_CACHE=0"; return 0
@@ -253,7 +296,7 @@ tu_cache_setup() {
     lib_sha="$(tu_cache__sha_file "$TU_CACHE_LIB_PATH")"
     gate_sha="$(tu_cache__sha_file "$gate_script")"
     flags_sha="$(tu_cache__sha_file "$flags_nul")"
-    salt="$(printf 'tu-result-cache/v1\n%s\n%s\n%s\n%s\n%s\n%s\n' \
+    salt="$(printf 'tu-result-cache/v2\n%s\n%s\n%s\n%s\n%s\n%s\n' \
         "$gate" "$lib_sha" "$gate_sha" "$cc_id" "$flags_sha" "$digest" |
         tu_cache__sha_stdin)"
     if [ "${#salt}" -ne 64 ]; then
@@ -261,43 +304,122 @@ tu_cache_setup() {
     fi
 
     if [ -n "$cachedir" ]; then
-        dir="$cachedir/$gate"
+        gate_root="$cachedir/$gate"
     else
-        dir="${ZCL_LINT_TU_CACHE_DIR:-$PWD/.cache/lint-tu}/$gate"
+        gate_root="${ZCL_LINT_TU_CACHE_DIR:-$PWD/.cache/lint-tu}/$gate"
     fi
+    dir="$gate_root/$salt"
     if ! mkdir -p "$dir" 2>/dev/null; then
         tu_cache__disable "cannot create '$dir'"; return 0
     fi
-    tu_cache__prune "$dir"
+    # Touch the generation so the newest-first prune below keeps the one this
+    # run is about to use, whatever order the others were written in.
+    touch -- "$dir" 2>/dev/null || true
+    tu_cache__prune_generations "$gate_root" "$TU_CACHE_KEEP_GENERATIONS"
+    rm -f "$dir"/.tmp.* 2>/dev/null || true
 
     ZCL_TU_CACHE_DIR="$dir"
-    ZCL_TU_CACHE_SALT="$salt"
     ZCL_TU_CACHE_STATS="$scratch/tu-cache.events"
     : > "$ZCL_TU_CACHE_STATS" 2>/dev/null || {
         tu_cache__disable "cannot write '$ZCL_TU_CACHE_STATS'"; return 0; }
     ZCL_TU_CACHE_ON=1
-    export ZCL_TU_CACHE_ON ZCL_TU_CACHE_DIR ZCL_TU_CACHE_SALT ZCL_TU_CACHE_STATS ZCL_TU_CACHE_LIB
+    export ZCL_TU_CACHE_ON ZCL_TU_CACHE_DIR ZCL_TU_CACHE_STATS \
+           ZCL_TU_CACHE_SCRATCH ZCL_TU_CACHE_LIB
+    return 0
+}
+
+# ── The parent pass ───────────────────────────────────────────────────────
+
+tu_cache_plan() {
+    local src_list="$1" miss_list="$2"
+    local sha_list count_src count_sha sha path ent erc elen
+    local hits=0 misses=0
+    local -a miss=()
+
+    : > "$miss_list"
+    if [ "${ZCL_TU_CACHE_ON:-0}" != "1" ]; then
+        cat -- "$src_list" > "$miss_list"
+        return 0
+    fi
+    if ! declare -F tu_cache_paths_for >/dev/null 2>&1; then
+        tu_cache__disable "the gate defined no tu_cache_paths_for callback"
+        cat -- "$src_list" > "$miss_list"
+        return 0
+    fi
+
+    # ONE hashing pass over the whole scan set. This is the only per-TU
+    # cryptography a warm run performs.
+    sha_list="$ZCL_TU_CACHE_SCRATCH/tu-cache-src-sha.txt"
+    : > "$sha_list"
+    tr '\n' '\0' < "$src_list" | xargs -0 -r sha256sum > "$sha_list" 2>/dev/null || true
+    count_src="$(grep -c . "$src_list" || true)"; [ -n "$count_src" ] || count_src=0
+    count_sha="$(grep -c . "$sha_list" || true)"; [ -n "$count_sha" ] || count_sha=0
+    if [ "$count_sha" -ne "$count_src" ]; then
+        # Hashing is the cache's whole basis. If it did not cover the scan
+        # set, serve nothing rather than serve part of it.
+        tu_cache__disable "hashed $count_sha of $count_src source(s)"
+        cat -- "$src_list" > "$miss_list"
+        return 0
+    fi
+
+    while read -r sha path; do
+        [ -n "$path" ] || continue
+        if [ "${#sha}" -eq 64 ]; then
+            ent="$ZCL_TU_CACHE_DIR/$path.$sha"
+            erc=""
+            elen=""
+            if [ -f "$ent" ]; then
+                read -r erc elen < "$ent" || { erc=""; elen=""; }
+            fi
+            if [ -n "$erc" ] && [ -z "${erc//[0-9]/}" ] &&
+               { [ "$elen" = 0 ] || [ "$elen" = 1 ]; }; then
+                tu_cache_paths_for "$path"
+                printf '%s\n' "$erc" > "$TU_RC"
+                if [ "$elen" = 0 ]; then
+                    : > "$TU_LOG"
+                else
+                    tail -n +2 -- "$ent" > "$TU_LOG"
+                fi
+                hits=$((hits + 1))
+                continue
+            fi
+        fi
+        miss+=("$path")
+        misses=$((misses + 1))
+    done < "$sha_list"
+
+    if [ "$misses" -gt 0 ]; then
+        printf '%s\n' "${miss[@]}" > "$miss_list"
+        # Pre-create the entry directories once here so the workers, which
+        # run 32-wide, do not each fork a mkdir.
+        sed 's|/[^/]*$||' "$miss_list" | LC_ALL=C sort -u |
+            sed "s|^|$ZCL_TU_CACHE_DIR/|" | tr '\n' '\0' |
+            xargs -0 -r mkdir -p 2>/dev/null || true
+    fi
+    printf 'H %s\nM %s\n' "$hits" "$misses" >> "$ZCL_TU_CACHE_STATS"
     return 0
 }
 
 tu_cache_counts() {
-    local h=0 m=0 s=0
-    if [ -n "${ZCL_TU_CACHE_STATS:-}" ] && [ -f "$ZCL_TU_CACHE_STATS" ]; then
-        h="$(grep -c '^h$' "$ZCL_TU_CACHE_STATS" 2>/dev/null || true)"
-        m="$(grep -c '^m$' "$ZCL_TU_CACHE_STATS" 2>/dev/null || true)"
-        s="$(grep -c '^s$' "$ZCL_TU_CACHE_STATS" 2>/dev/null || true)"
+    local out
+    if [ -z "${ZCL_TU_CACHE_STATS:-}" ] || [ ! -f "$ZCL_TU_CACHE_STATS" ]; then
+        printf '0 0 0'
+        return 0
     fi
-    printf '%s %s %s' "${h:-0}" "${m:-0}" "${s:-0}"
+    out="$(awk '$1 == "H" { h += $2 } $1 == "M" { m += $2 } $0 == "s" { s++ }
+                END { printf "%d %d %d", h + 0, m + 0, s + 0 }' \
+          "$ZCL_TU_CACHE_STATS" 2>/dev/null)"
+    [ -n "$out" ] || out="0 0 0"
+    printf '%s' "$out"
 }
 
 tu_cache_summary() {
-    local counts h m s
+    local h m s
     if [ "${ZCL_TU_CACHE_ON:-0}" != "1" ]; then
         echo "  tu-cache: 0 hit, 0 miss, 0 stored (off: ${TU_CACHE_OFF_REASON:-not enabled})"
         return 0
     fi
-    counts="$(tu_cache_counts)"
-    read -r h m s <<<"$counts"
+    read -r h m s <<<"$(tu_cache_counts)"
     echo "  tu-cache: $h hit, $m miss, $s stored"
     return 0
 }
@@ -312,135 +434,130 @@ tu_cache__event() {
     return 0
 }
 
-# ONE key, ONE pipeline. The naive spelling (hash the argv, hash the source,
-# hash the two hashes) costs six forks per translation unit; on a fully warm
-# 2104-TU sweep that is more process creation than the work it replaces.
-# Streaming salt + argc + argv + source bytes through a single sha256sum
-# costs two, and the explicit argc makes the framing unambiguous: nothing
-# the source contains can forge a different argv split, because the number
-# of NUL-delimited fields is fixed before the content starts.
-tu_cache__key() {
-    local src digest
-    [ "$#" -ge 2 ] || return 1
-    src="${!#}"
-    [ -f "$src" ] || return 1
-    digest="$( { printf '%s\0' "$ZCL_TU_CACHE_SALT" "$#" "$@"
-                 cat -- "$src"; } 2>/dev/null | sha256sum 2>/dev/null )"
-    digest="${digest%% *}"
-    [ "${#digest}" -eq 64 ] || return 1
-    printf '%s' "$digest"
-}
-
-# One file per entry: the compiler's exit status on line 1, its combined
-# stdout/stderr verbatim after it. One file means the store is a SINGLE
-# rename, so a reader can never catch an entry half-written, and the replay
-# is one read plus one copy instead of four file operations.
+# One file per entry, named <src path>.<content sha> inside the generation
+# directory. The name carries the whole identity, so the reader in
+# tu_cache_plan needs no hashing of its own. Line 1 is "<rc> <has-log>"; the
+# log bytes, when there are any, follow verbatim. Written to a temp file and
+# renamed, so an entry is complete or absent, never partial.
 tu_cache__store() {
-    local key="$1" rc="$2" log="$3" ent tmp
-    ent="$ZCL_TU_CACHE_DIR/$key"
-    tmp="$ZCL_TU_CACHE_DIR/.tmp.$$.${RANDOM}"
-    if ! { printf '%s\n' "$rc"; cat -- "$log"; } > "$tmp" 2>/dev/null; then
-        rm -f "$tmp"
-        return 1
+    local src="$1" rc="$2" log="$3" sha ent tmp haslog=0
+    sha="$(sha256sum -- "$src" 2>/dev/null)"
+    sha="${sha%% *}"
+    [ "${#sha}" -eq 64 ] || return 1
+    ent="$ZCL_TU_CACHE_DIR/$src.$sha"
+    if [ ! -d "${ent%/*}" ]; then
+        mkdir -p "${ent%/*}" 2>/dev/null || return 1
     fi
-    if ! mv -f "$tmp" "$ent" 2>/dev/null; then
-        rm -f "$tmp"
-        return 1
+    if [ -s "$log" ]; then haslog=1; fi
+    tmp="$ZCL_TU_CACHE_DIR/.tmp.$$.${RANDOM}${RANDOM}"
+    if [ "$haslog" = 1 ]; then
+        { printf '%s %s\n' "$rc" "$haslog"; cat -- "$log"; } > "$tmp" 2>/dev/null || {
+            rm -f "$tmp"; return 1; }
+    else
+        printf '%s %s\n' "$rc" "$haslog" > "$tmp" 2>/dev/null || {
+            rm -f "$tmp"; return 1; }
     fi
+    mv -f "$tmp" "$ent" 2>/dev/null || { rm -f "$tmp"; return 1; }
     return 0
 }
 
 tu_cache_run() {
     local log="$1" rcf="$2" cc="$3"
     shift 3
-    local key="" ent rc=0 cached_rc=""
-
-    if [ "${ZCL_TU_CACHE_ON:-0}" = "1" ]; then
-        key="$(tu_cache__key "$cc" "$@" 2>/dev/null)" || key=""
-    fi
-    if [ -n "$key" ]; then
-        ent="$ZCL_TU_CACHE_DIR/$key"
-        if [ -f "$ent" ] &&
-           { IFS= read -r cached_rc && cat; } < "$ent" > "$log" 2>/dev/null &&
-           [ -n "$cached_rc" ] && [ -z "${cached_rc//[0-9]/}" ]; then
-            printf '%s\n' "$cached_rc" > "$rcf"
-            # Keep a served entry young: the age sweep must drop only what the
-            # tree has genuinely stopped compiling, not what it keeps using.
-            touch -- "$ent" 2>/dev/null || true
-            tu_cache__event h
-            return 0
-        fi
-        tu_cache__event m
-    fi
+    local src rc=0 had_errexit=0
+    src="${!#}"
 
     # Save and restore errexit rather than assuming it: the two callers
     # differ (check_windows_cross_syntax.sh runs under `set -e`, the
     # check_clang_portability.sh worker does not), and a helper that turned
     # errexit ON in a worker that never asked for it would abort that worker
     # mid-sweep on the first nonzero status.
-    local had_errexit=0
     case "$-" in *e*) had_errexit=1 ;; esac
     set +e
     "$cc" "$@" > "$log" 2>&1
     rc=$?
     [ "$had_errexit" = 1 ] && set -e
     printf '%s\n' "$rc" > "$rcf"
-    if [ -n "$key" ] && tu_cache__store "$key" "$rc" "$log"; then
+    if [ "${ZCL_TU_CACHE_ON:-0}" = "1" ] && tu_cache__store "$src" "$rc" "$log"; then
         tu_cache__event s
     fi
     return 0
 }
+
 # ── Soundness selftest ────────────────────────────────────────────────────
-# Six proofs, run from each gate's own --self-test so `make lint` exercises
-# them on every run. Five run against a SYNTHETIC root and a stub compiler:
-# the properties under test are properties of the KEY, and proving them
-# against the real tree would mean editing a real header mid-lint and paying
-# for a whole extra 2104-TU sweep. The sixth runs the gate's REAL compiler
-# and REAL flag set over one REAL source, which is what proves the wiring
-# between the two.
+# Eight proofs, run from each gate's own --self-test so `make lint` grades
+# them on every run. Seven drive a SYNTHETIC 200-TU tree through the SAME
+# plan-then-fork-the-misses loop the gates use, with a stub compiler in
+# place of clang: the properties under test are properties of the key and of
+# the store, and proving them against the real tree would mean editing a
+# real header mid-lint and paying for a whole extra 2108-TU sweep. 200 units
+# and 16 concurrent workers are there on purpose — a single store that is
+# not durable under concurrency is exactly the defect a two-file fixture
+# cannot see. The eighth proof runs the gate's REAL compiler and REAL flag
+# set over one REAL source, which is what ties the synthetic loop to the
+# gate it is standing in for.
 
 tu_cache__self_fail() {
     echo "FAIL: --self-test — tu-cache: $1" >&2
     exit 1
 }
 
-# One pass of the stub compiler over the synthetic sources; echoes
-# "<hit> <miss> <stored>". Runs inside a command substitution, so the
-# exports tu_cache_setup makes are confined to that subshell while the cache
-# entries it writes land on the real filesystem — exactly the shape a real
-# gate has, where the parent derives the salt and forked workers do the I/O.
-tu_cache__self_pass_over() {
-    local base="$1" stub="$2" flags="$3" root="$4"
-    shift 4
-    local src
+# The gate callback, for the synthetic sweep.
+tu_cache__self_paths_for() {
+    local k="${1//[^[:alnum:]]/_}"
+    TU_LOG="$TU_SELF_OUT/$k.log"
+    TU_RC="$TU_SELF_OUT/$k.rc"
+}
+
+# One synthetic sweep: plan in the parent, fork workers for the misses only,
+# exactly as check_clang_portability.sh does. Echoes "<hit> <miss> <stored>".
+tu_cache__self_sweep() {
+    local base="$1" stub="$2" root="$3" flags="$4" srclist="$5"
     tu_cache_setup tu-cache-selftest "$stub" "$stub" "$flags" "$base" \
         "$root" "$base/cachedir"
     [ "${ZCL_TU_CACHE_ON:-0}" = "1" ] || tu_cache__self_fail \
         "the cache refused to enable on a synthetic root (${TU_CACHE_OFF_REASON:-?})"
-    for src in "$@"; do
-        tu_cache_run "$base/out/$(basename "$src").log" \
-                     "$base/out/$(basename "$src").rc" "$stub" -c "$src"
-    done
+    TU_SELF_OUT="$base/out"
+    tu_cache_paths_for() { tu_cache__self_paths_for "$@"; }
+    tu_cache_plan "$srclist" "$base/miss.txt"
+    xargs -a "$base/miss.txt" -r -P 16 -n 1 -I '{}' \
+        env ZCL_TU_SELF_OUT="$TU_SELF_OUT" ZCL_TU_SELF_CC="$stub" \
+        bash -c '. "$ZCL_TU_CACHE_LIB"
+                 k="${1//[^[:alnum:]]/_}"
+                 tu_cache_run "$ZCL_TU_SELF_OUT/$k.log" \
+                              "$ZCL_TU_SELF_OUT/$k.rc" \
+                              "$ZCL_TU_SELF_CC" -c "$1"
+                 exit 0' _ '{}' >/dev/null 2>&1
     tu_cache_counts
 }
 
 tu_cache_selftest() {
     local gate="$1" gate_script="$2" real_cc="$3" real_flags="$4"
     local scratch="$5" real_src="$6"
-    local base root stub flags h m s runs_before runs_after rdir
+    local base root stub flags srclist h m s runs_before runs_after rdir i n
+
     [ -f "$real_src" ] || tu_cache__self_fail \
         "no real source was handed to the wiring proof (got '$real_src'); the gate's scan set is empty or moved"
+
+    n=200
     base="$scratch/tu-cache-selftest"
     root="$base/root"
     rm -rf "$base"
-    mkdir -p "$root" "$base/out" "$base/cachedir"
+    mkdir -p "$root/src" "$base/out" "$base/cachedir"
 
-    printf '#define TU_SELFTEST_SHARED 1\n' > "$root/shared.h"
-    printf '#include "shared.h"\nint a(void);\n' > "$root/a.c"
-    printf '#include "shared.h"\nint b(void);\n' > "$root/b.c"
+    printf '#define TU_SELFTEST_SHARED 1\n' > "$root/src/shared.h"
+    srclist="$base/srcs.txt"
+    : > "$srclist"
+    i=0
+    while [ "$i" -lt "$n" ]; do
+        printf '#include "shared.h"\nint unit_%s(void);\n' "$i" \
+            > "$root/src/u$i.c"
+        printf '%s\n' "$root/src/u$i.c" >> "$srclist"
+        i=$((i + 1))
+    done
 
     # Stub compiler: counts its own invocations, prints a body derived from
-    # the source it was handed, and FAILS on b.c. A replay is therefore
+    # the source it was handed, and FAILS on one unit. A replay is therefore
     # distinguishable from a re-run by the invocation counter, and the
     # replayed bytes and status are checkable against the cold ones.
     stub="$base/stub_cc.sh"
@@ -449,10 +566,13 @@ tu_cache_selftest() {
 set -uo pipefail
 if [ "${1:-}" = "--version" ]; then echo "tu-cache stub compiler 1.0"; exit 0; fi
 src="${!#}"
-printf '%s\n' "$src: stub diagnostic" >&2
-printf 'runs so far: %s\n' "$(wc -l < "$ZCL_TU_STUB_RUNS")"
 echo x >> "$ZCL_TU_STUB_RUNS"
-case "$src" in *b.c) exit 1 ;; esac
+case "$src" in
+    *u7.c)
+        printf '%s\n' "$src:1:1: error: stub planted rejection" >&2
+        exit 1
+        ;;
+esac
 exit 0
 END_STUB
     chmod +x "$stub"
@@ -463,69 +583,77 @@ END_STUB
     flags="$base/flags.nul"
     printf '%s\0' -c > "$flags"
 
-    # (1) COLD: nothing cached, both TUs compiled and stored.
-    read -r h m s <<<"$(tu_cache__self_pass_over "$base" "$stub" "$flags" \
-        "$root" "$root/a.c" "$root/b.c")"
-    { [ "$h" = 0 ] && [ "$m" = 2 ] && [ "$s" = 2 ]; } || tu_cache__self_fail \
-        "a cold run over 2 synthetic TUs reported '$h' hit / '$m' miss / '$s' stored, wanted 0/2/2"
-    cp "$base/out/a.c.log" "$base/cold-a.log"
-    cp "$base/out/b.c.log" "$base/cold-b.log"
-    cp "$base/out/b.c.rc"  "$base/cold-b.rc"
+    # (1) COLD: nothing cached, every unit compiled and stored.
+    read -r h m s <<<"$(tu_cache__self_sweep "$base" "$stub" "$root" "$flags" "$srclist")"
+    { [ "$h" = 0 ] && [ "$m" = "$n" ] && [ "$s" = "$n" ]; } || tu_cache__self_fail \
+        "a cold run over $n synthetic TUs reported '$h' hit / '$m' miss / '$s' stored, wanted 0/$n/$n"
+    cp -r "$base/out" "$base/cold-out"
+    [ "$(cat "$base/out/${root//[^[:alnum:]]/_}_src_u7_c.rc")" = 1 ] ||
+        tu_cache__self_fail "the planted failing unit did not fail on the cold run"
 
-    # (2) A HIT REPLAYS THE COLD VERDICT: byte-identical log, same status,
-    #     and the compiler was not invoked again.
+    # (2) TWICE ON AN UNCHANGED TREE IS 100% HIT, and every stored entry is
+    #     durable under 16 concurrent writers: nothing recompiles, and the
+    #     replayed artifacts are byte-identical to the cold ones — including
+    #     the stored FAIL, which replays as a FAIL.
     runs_before="$(wc -l < "$ZCL_TU_STUB_RUNS")"
-    read -r h m s <<<"$(tu_cache__self_pass_over "$base" "$stub" "$flags" \
-        "$root" "$root/a.c" "$root/b.c")"
+    read -r h m s <<<"$(tu_cache__self_sweep "$base" "$stub" "$root" "$flags" "$srclist")"
     runs_after="$(wc -l < "$ZCL_TU_STUB_RUNS")"
-    { [ "$h" = 2 ] && [ "$m" = 0 ]; } || tu_cache__self_fail \
-        "a warm run reported '$h' hit / '$m' miss, wanted 2/0"
+    { [ "$h" = "$n" ] && [ "$m" = 0 ] && [ "$s" = 0 ]; } || tu_cache__self_fail \
+        "a second run over an UNCHANGED tree reported '$h' hit / '$m' miss / '$s' stored, wanted $n/0/0 — a store did not survive the run that made it"
     [ "$runs_before" = "$runs_after" ] || tu_cache__self_fail \
         "a warm run still invoked the compiler ($runs_before -> $runs_after)"
-    cmp -s "$base/out/a.c.log" "$base/cold-a.log" || tu_cache__self_fail \
-        "a replayed log differs from the cold log"
+    diff -r "$base/cold-out" "$base/out" >/dev/null 2>&1 || tu_cache__self_fail \
+        "a replayed artifact differs from the cold artifact"
 
-    # (3) A STORED FAIL REPLAYS AS A FAIL, never as a pass.
-    cmp -s "$base/out/b.c.rc" "$base/cold-b.rc" || tu_cache__self_fail \
-        "a replayed exit status differs from the cold one"
-    [ "$(cat "$base/out/b.c.rc")" = 1 ] || tu_cache__self_fail \
-        "a stored FAIL (rc=1) did not replay as a FAIL"
-    cmp -s "$base/out/b.c.log" "$base/cold-b.log" || tu_cache__self_fail \
-        "a replayed FAIL log differs from the cold FAIL log"
+    # (3) A THIRD identical run is still 100% hit: serving an entry must not
+    #     consume it.
+    read -r h m s <<<"$(tu_cache__self_sweep "$base" "$stub" "$root" "$flags" "$srclist")"
+    { [ "$h" = "$n" ] && [ "$m" = 0 ]; } || tu_cache__self_fail \
+        "a third run over an UNCHANGED tree reported '$h' hit / '$m' miss, wanted $n/0"
 
     # (4) EDITING A HEADER BUSTS EVERY TU.
-    printf '#define TU_SELFTEST_SHARED 2\n' > "$root/shared.h"
-    read -r h m s <<<"$(tu_cache__self_pass_over "$base" "$stub" "$flags" \
-        "$root" "$root/a.c" "$root/b.c")"
-    { [ "$h" = 0 ] && [ "$m" = 2 ]; } || tu_cache__self_fail \
-        "editing a header left '$h' of 2 TUs on a stale cache entry"
+    printf '#define TU_SELFTEST_SHARED 2\n' > "$root/src/shared.h"
+    read -r h m s <<<"$(tu_cache__self_sweep "$base" "$stub" "$root" "$flags" "$srclist")"
+    { [ "$h" = 0 ] && [ "$m" = "$n" ]; } || tu_cache__self_fail \
+        "editing a header left '$h' of $n TUs on a stale cache entry"
 
     # (5) EDITING ONE TU BUSTS ONLY THAT TU.
-    printf '#include "shared.h"\nint a(int);\n' > "$root/a.c"
-    read -r h m s <<<"$(tu_cache__self_pass_over "$base" "$stub" "$flags" \
-        "$root" "$root/a.c" "$root/b.c")"
-    { [ "$h" = 1 ] && [ "$m" = 1 ]; } || tu_cache__self_fail \
-        "editing one of 2 TUs produced '$h' hit / '$m' miss, wanted 1/1"
+    printf '#include "shared.h"\nint unit_3(int);\n' > "$root/src/u3.c"
+    read -r h m s <<<"$(tu_cache__self_sweep "$base" "$stub" "$root" "$flags" "$srclist")"
+    { [ "$h" = "$((n - 1))" ] && [ "$m" = 1 ]; } || tu_cache__self_fail \
+        "editing one of $n TUs produced '$h' hit / '$m' miss, wanted $((n - 1))/1"
 
-    # (5b) ZCL_LINT_TU_CACHE=0 neither serves nor stores, and still compiles.
+    # (6) REVERTING THAT TU IS A HIT AGAIN: a generation keeps one entry per
+    #     content, so a stash/rebase round trip is free.
+    printf '#include "shared.h"\nint unit_3(void);\n' > "$root/src/u3.c"
+    read -r h m s <<<"$(tu_cache__self_sweep "$base" "$stub" "$root" "$flags" "$srclist")"
+    { [ "$h" = "$n" ] && [ "$m" = 0 ]; } || tu_cache__self_fail \
+        "reverting one TU produced '$h' hit / '$m' miss, wanted $n/0"
+
+    # (7) ZCL_LINT_TU_CACHE=0 neither serves nor stores, and still compiles.
     runs_before="$(wc -l < "$ZCL_TU_STUB_RUNS")"
     ZCL_LINT_TU_CACHE=0 \
         tu_cache_setup tu-cache-selftest "$stub" "$stub" "$flags" "$base" \
         "$root" "$base/cachedir-off"
     [ "${ZCL_TU_CACHE_ON:-0}" = "1" ] && tu_cache__self_fail \
         "ZCL_LINT_TU_CACHE=0 did not disable the cache"
-    tu_cache_run "$base/out/off.log" "$base/out/off.rc" "$stub" -c "$root/a.c"
+    TU_SELF_OUT="$base/out"
+    tu_cache_paths_for() { tu_cache__self_paths_for "$@"; }
+    tu_cache_plan "$srclist" "$base/miss-off.txt"
+    [ "$(grep -c . "$base/miss-off.txt" || true)" = "$n" ] || tu_cache__self_fail \
+        "a disabled cache did not send every TU to the compiler"
+    tu_cache_run "$base/out/off.log" "$base/out/off.rc" "$stub" -c "$root/src/u0.c"
     runs_after="$(wc -l < "$ZCL_TU_STUB_RUNS")"
     [ "$runs_before" != "$runs_after" ] || tu_cache__self_fail \
         "a disabled cache did not invoke the compiler"
     [ -d "$base/cachedir-off" ] && tu_cache__self_fail \
         "a disabled cache still opened a cache directory"
 
-    # (6) THE REAL WIRING: the gate's own compiler, its own flag set, one
+    # (8) THE REAL WIRING: the gate's own compiler, its own flag set, one
     #     real source of this gate's, in a private cache dir. Cold, then
     #     warm; the warm pass must be a hit and byte-identical.
     rdir="$base/real"
-    mkdir -p "$rdir"
+    mkdir -p "$rdir/out"
     tu_cache_setup "$gate" "$gate_script" "$real_cc" "$real_flags" "$rdir" \
         "." "$rdir/cachedir"
     [ "${ZCL_TU_CACHE_ON:-0}" = "1" ] || tu_cache__self_fail \
@@ -536,21 +664,33 @@ END_STUB
        [ -z "${rflags[$(( ${#rflags[@]} - 1 ))]}" ]; then
         unset "rflags[$(( ${#rflags[@]} - 1 ))]"
     fi
-    tu_cache_run "$rdir/cold.log" "$rdir/cold.rc" "$real_cc" "${rflags[@]}" "$real_src"
-    tu_cache_run "$rdir/warm.log" "$rdir/warm.rc" "$real_cc" "${rflags[@]}" "$real_src"
-    read -r h m s <<<"$(tu_cache_counts)"
-    { [ "$h" = 1 ] && [ "$m" = 1 ] && [ "$s" = 1 ]; } || tu_cache__self_fail \
-        "the real compiler cold+warm pair over $real_src reported '$h' hit / '$m' miss / '$s' stored, wanted 1/1/1"
-    cmp -s "$rdir/cold.log" "$rdir/warm.log" || tu_cache__self_fail \
+    printf '%s\n' "$real_src" > "$rdir/srcs.txt"
+    TU_SELF_OUT="$rdir/out"
+    tu_cache_paths_for() { tu_cache__self_paths_for "$@"; }
+    tu_cache_plan "$rdir/srcs.txt" "$rdir/miss.txt"
+    [ "$(grep -c . "$rdir/miss.txt" || true)" = 1 ] || tu_cache__self_fail \
+        "a fresh generation served $real_src without ever compiling it"
+    tu_cache__self_paths_for "$real_src"
+    tu_cache_run "$TU_LOG" "$TU_RC" "$real_cc" "${rflags[@]}" "$real_src"
+    cp -- "$TU_LOG" "$rdir/cold.log"
+    cp -- "$TU_RC" "$rdir/cold.rc"
+    rm -f -- "$TU_LOG" "$TU_RC"
+    tu_cache_plan "$rdir/srcs.txt" "$rdir/miss2.txt"
+    [ "$(grep -c . "$rdir/miss2.txt" || true)" = 0 ] || tu_cache__self_fail \
+        "$real_cc's stored result for $real_src did not replay"
+    cmp -s "$rdir/cold.log" "$TU_LOG" || tu_cache__self_fail \
         "the real compiler's replayed log differs from its cold log"
-    cmp -s "$rdir/cold.rc" "$rdir/warm.rc" || tu_cache__self_fail \
+    cmp -s "$rdir/cold.rc" "$TU_RC" || tu_cache__self_fail \
         "the real compiler's replayed status differs from its cold status"
 
     unset ZCL_TU_STUB_RUNS
+    unset -f tu_cache_paths_for
     rm -rf "$base"
-    echo "  OK: --self-test — tu-cache: a hit replays the cold verdict"
-    echo "      byte-for-byte (stub compiler AND $real_cc on a real TU), a"
-    echo "      header edit busts every TU, a .c edit busts only that TU, a"
-    echo "      stored FAIL replays as FAIL, ZCL_LINT_TU_CACHE=0 stores none"
+    echo "  OK: --self-test — tu-cache over $n synthetic TUs at 16 workers:"
+    echo "      two consecutive runs on an unchanged tree are 100% hit and"
+    echo "      byte-identical (a third too), a header edit busts all $n, a"
+    echo "      .c edit busts exactly 1 and reverting it hits again, a stored"
+    echo "      FAIL replays as FAIL, ZCL_LINT_TU_CACHE=0 stores none, and"
+    echo "      $real_cc replays a real TU byte-for-byte"
     return 0
 }
