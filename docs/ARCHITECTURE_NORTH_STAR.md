@@ -6,9 +6,9 @@
 > incident needs its old narrative.
 >
 > **Read this before touching sync, boot, import, install, or any `*frontier`
-> / `*cursor` / `pindex_*` code.** It is the standing decision that governs
-> how this node acquires and tracks state: the one recurring bug shape
-> (below) is cloned ledgers, and this doc is the cure and the guardrail.
+> / `*cursor` / `pindex_*` code.** It is the standing target for how this node
+> acquires and tracks state. The target is broader than the present machine
+> proof; the exact proved and unproved surfaces are stated below.
 
 ## Verdict: RESCUE, not rewrite
 
@@ -109,9 +109,37 @@ gap C→tip.**
 
 ## Regression evidence
 
-The rescue program is complete. The single-writer ceiling is enforced by
-`check_frontier_single_writer.sh`, and end-to-end state acquisition remains
-observable through the named MVP stopwatch gates. Select any new work from
-[`work/FORWARD_PLAN.md`](work/FORWARD_PLAN.md), then use these invariants as
-constraints and focused evidence. The completed score game and quest board
-were deleted; their dated results remain in Git history.
+The architecture decision is settled; whole-tree conformance is not yet
+proved. `check_frontier_single_writer.sh` reads
+`arch_frontier_owners.tsv` and, for each declared row, requires exactly one
+file with the owner basename under its configured scan roots. It refuses a
+matched `.c` or `.h` file outside that owner unless the path is in its reviewed
+baseline, but skips test-shaped paths and every `*/include/*` path. The gate
+rejects stale baseline rows; repository policy requires review before adding a
+new row, but the script cannot prove that history property. This is useful
+source-shape evidence only for the declared regular expressions and non-skipped
+paths. It cannot establish runtime reachability, serialization through the
+owner, target database identity, dynamic-key writes, production headers under
+an include directory, or that every durable chain fact has a manifest row.
+
+<!-- claim: gate-passes check-frontier-single-writer # declared frontier patterns have no unbaselined match on the gate's non-skipped paths -->
+<!-- claim: file-present tools/scripts/arch_frontier_owners.tsv # the gate's complete declared frontier set -->
+
+`code provenance facts` complements that narrow gate by deriving resolved
+named-literal mutation sites for `progress_meta`, `stage_cursor`, and
+`node_state`. It deliberately reports completeness, runtime reachability,
+authority roles, database identity, serialization, and duplicate fact homes as
+`UNPROVEN`; multiple source files are audit leads, not proof of multiple owners.
+
+Therefore the current evidence supports these narrower statements:
+
+| Question | Current evidence |
+|---|---|
+| Does a declared frontier pattern gain an unbaselined match on a non-skipped path outside its named owner? | Gate; clean only when `check-frontier-single-writer` passes. |
+| Which named-literal durable-slot mutation sites can the declared derivations resolve? | Native source census, with unresolved sites counted. |
+| Is there exactly one live chain-truth writer and one owner for every durable fact? | **UNPROVEN across the whole tree.** Requires typed ownership and runtime/fault evidence, not another path allowlist. |
+
+Do not call the rescue complete from either source scan. Select new work from
+[`work/FORWARD_PLAN.md`](work/FORWARD_PLAN.md), use the invariants above as the
+design constraint, and attach evidence only to the exact surface each gate or
+test observes.
