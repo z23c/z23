@@ -653,7 +653,10 @@ static bool npe_reply_snapshot(struct zcl_command_reply *reply,
 static bool npe_bind_codeindex(const char *root,
                                struct science_ecosystem_snapshot *snap)
 {
-    struct codeindex *ci = codeindex_open_source_view(root);
+    /* Display-only authority: read the store that already exists and never
+     * rebuild or refresh it. A missing store leaves index facts unbound so
+     * every form names them unavailable. */
+    struct codeindex *ci = codeindex_open_existing(root);
     if (!ci)
         return true;
 

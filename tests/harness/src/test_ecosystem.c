@@ -3,6 +3,7 @@
 
 #include "test/test_core.h"
 
+#include "codeindex/codeindex.h"
 #include "command/native_command.h"
 #include "json/json.h"
 #include "kernel/command_registry.h"
@@ -15,6 +16,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 #define ECO_CHECK(name_, expression_) do {                              \
     bool eco_ok_ = (expression_);                                       \
@@ -363,6 +365,46 @@ int test_ecosystem(void)
     }
     zcl_command_reply_free(&reply);
 
+    char dir_idx[512];
+    test_make_tmpdir(dir_idx, sizeof(dir_idx), "ecosystem", "idx");
+    ECO_CHECK("an index-fixture tree builds", build_fixture(dir_idx, false));
+    struct codeindex *built = codeindex_open(dir_idx);
+    ECO_CHECK("the test itself builds a real index store", built != NULL);
+    if (built)
+        codeindex_close(built);
+    char store_path[1024];
+    (void)snprintf(store_path, sizeof(store_path), "%s/.codeindex/index.kv",
+                   dir_idx);
+    struct stat store_before;
+    memset(&store_before, 0, sizeof(store_before));
+    ECO_CHECK("the built index store exists on disk",
+              stat(store_path, &store_before) == 0);
+    char node_path[1024];
+    (void)snprintf(node_path, sizeof(node_path), "%s/engine/src/node.c",
+                   dir_idx);
+    ECO_CHECK("a source edit makes the store stale",
+              spill(node_path, "a\nb\nc\nint stale_marker;\n"));
+    struct zcl_command_context ctx_idx = { .source_root = dir_idx };
+    struct zcl_command_request request_idx = {
+        .input = &input,
+        .context = &ctx_idx,
+    };
+    zcl_command_reply_init(&reply, "zcl.app_presentation_ecosystem.v1");
+    zcl_native_handle_presentation_ecosystem(&request_idx, &reply);
+    struct stat store_after;
+    memset(&store_after, 0, sizeof(store_after));
+    ECO_CHECK("the display leaf reads a stale store instead of rebuilding",
+              reply.status == ZCL_COMMAND_STATUS_PASSED &&
+                  json_get_bool(json_get(&reply.data, "index_present")) &&
+                  json_get_int(json_get(&reply.data, "indexed_c23_files")) >=
+                      1 &&
+                  stat(store_path, &store_after) == 0 &&
+                  store_after.st_mtim.tv_sec ==
+                      store_before.st_mtim.tv_sec &&
+                  store_after.st_mtim.tv_nsec ==
+                      store_before.st_mtim.tv_nsec);
+    zcl_command_reply_free(&reply);
+
     json_free(&input);
     json_init(&input);
     json_set_object(&input);
@@ -378,5 +420,6 @@ int test_ecosystem(void)
     (void)test_rm_rf_recursive(dir_one);
     (void)test_rm_rf_recursive(dir_bare);
     (void)test_rm_rf_recursive(dir_repo);
+    (void)test_rm_rf_recursive(dir_idx);
     return failures;
 }
