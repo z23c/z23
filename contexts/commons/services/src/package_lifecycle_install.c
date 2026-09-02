@@ -11,6 +11,16 @@
  * is re-hashed here against the worker's own receipt before it is installed.
  * There is no dlopen anywhere in this file by design. */
 
+/* realpath() reaches this TU only through the glibc fortify inline that
+ * -D_FORTIFY_SOURCE=2 pulls in at -O1 and above; the build's
+ * -D_POSIX_C_SOURCE=200809L declares it nowhere. Without this the file
+ * compiles by accident of optimisation and breaks at -O0, under
+ * -U_FORTIFY_SOURCE, and on any non-glibc libc. It must precede every
+ * include: after them it does nothing. */
+#if !defined(_WIN32) && !defined(_DEFAULT_SOURCE)
+#define _DEFAULT_SOURCE
+#endif
+
 #include "package_lifecycle_internal.h"
 
 #include "base/hex.h"
@@ -138,6 +148,30 @@ static struct zcl_result pkgl_copy_hashed(const char *src, const char *dst,
                        strerror(errno));
     sha3_256_finalize(&ctx, out32);
     *bytes_out = total;
+    return ZCL_OK;
+}
+
+/* An output whose receipt path is under bin/ is the PROGRAM a person runs,
+ * so it is staged — and therefore installed, the stage is renamed into
+ * place — with the executable bit set. Everything else (the static archive,
+ * the public headers) is data and stays 0644. The mode is deliberately NOT
+ * a receipt field: the receipt commits BYTES, and two verifiers under
+ * different umasks must still agree on every hash, so the permission is
+ * decided here, by the layer that owns the install layout, from the path
+ * the receipt already commits. On Windows there is no executable bit — the
+ * file extension decides — so there is nothing to set. */
+static struct zcl_result pkgl_apply_output_mode(const char *path,
+                                                const char *rel)
+{
+#ifdef _WIN32
+    (void)path;
+    (void)rel;
+#else
+    mode_t mode = strncmp(rel, "bin/", 4) == 0 ? (mode_t)0755 : (mode_t)0644;
+    if (chmod(path, mode) != 0)
+        return ZCL_ERR(-1, "chmod %o %s: %s", (unsigned)mode, path,
+                       strerror(errno));
+#endif
     return ZCL_OK;
 }
 
@@ -486,6 +520,13 @@ struct zcl_result pkgl_build_and_install(
                            "%s does not match the hash the build receipt "
                            "commits — refusing to install it", o->path);
         }
+        struct zcl_result moded = pkgl_apply_output_mode(dst, o->path);
+        if (!moded.ok) {
+            pkgl_step_fail(step, "output-mode", moded.message);
+            ZCL_IGNORE_RESULT(pkgl_rm_rf(p.stage), "aborted install removed");
+            ZCL_IGNORE_RESULT(pkgl_rm_rf(p.emit), "aborted build removed");
+            return moded;
+        }
     }
 
     /* The receipt travels with the install and is also filed by its id, so
@@ -744,5 +785,86 @@ struct zcl_result pkgl_pin(const struct pkgl_ctx *ctx, const uint8_t root[32])
     if (r != VCS_PACKAGE_STORE_OK)
         return ZCL_ERR(-1, "pin refused: %s",
                        vcs_package_store_result_string(r));
+    return ZCL_OK;
+}
+
+/* ── the programs an install hands a person ─────────────────────────── */
+
+struct zcl_result package_lifecycle_installed_programs(
+    const char *datadir, const uint8_t root[32],
+    struct package_lifecycle_programs *out)
+{
+    if (!out)
+        return ZCL_ERR(-1, "null installed-programs report");
+    memset(out, 0, sizeof(*out));
+    if (!root)
+        return ZCL_ERR(-1, "null package root");
+    struct pkgl_ctx ctx;
+    ZCL_CHECK(pkgl_ctx_open(&ctx, datadir));
+    char installed[PKGL_PATH_MAX];
+    struct zcl_result r =
+        pkgl_installed_dir(&ctx, root, installed, sizeof(installed));
+    bool present = false;
+    if (r.ok)
+        r = pkgl_exists(installed, &present);
+    if (r.ok && !present)
+        r = ZCL_ERR(-1, "this package root is not installed under %s",
+                    ctx.datadir);
+    /* An operator is handed a path to RUN, so report the resolved absolute
+     * one: a relative datadir would otherwise produce a command that only
+     * works from whichever directory the node happened to be started in. */
+    if (r.ok) {
+#ifdef _WIN32
+        int n = snprintf(out->install_dir, sizeof(out->install_dir), "%s",
+                         installed);
+        if (n <= 0 || (size_t)n >= sizeof(out->install_dir))
+            r = ZCL_ERR(-1, "installed directory path is too long");
+#else
+        char resolved[PKGL_PATH_MAX];
+        if (!realpath(installed, resolved))
+            r = ZCL_ERR(-1, "cannot resolve %s: %s", installed,
+                        strerror(errno));
+        else {
+            int n = snprintf(out->install_dir, sizeof(out->install_dir),
+                             "%s", resolved);
+            if (n <= 0 || (size_t)n >= sizeof(out->install_dir))
+                r = ZCL_ERR(-1, "installed directory path is too long");
+        }
+#endif
+    }
+    char report[PKGL_PATH_MAX];
+    if (r.ok) {
+        int n = snprintf(report, sizeof(report), "%s/build-report", installed);
+        if (n <= 0 || (size_t)n >= sizeof(report))
+            r = ZCL_ERR(-1, "installed receipt path is too long");
+    }
+    uint8_t *wire = NULL;
+    size_t wire_len = 0;
+    if (r.ok)
+        r = pkgl_read_file(report, VCS_PACKAGE_BUILD_MAX_WIRE_BYTES, &wire,
+                           &wire_len);
+    if (!r.ok) {
+        pkgl_ctx_close(&ctx);
+        return r;
+    }
+    struct vcs_package_build_receipt receipt;
+    enum vcs_package_build_error parsed =
+        vcs_package_build_parse(wire, wire_len, &receipt);
+    free(wire);
+    pkgl_ctx_close(&ctx);
+    if (parsed != VCS_PACKAGE_BUILD_OK)
+        return ZCL_ERR(-1, "installed receipt: %s",
+                       vcs_package_build_error_string(parsed));
+    for (size_t i = 0; i < receipt.output_count; i++) {
+        const char *path = receipt.outputs[i].path;
+        if (strncmp(path, "bin/", 4) != 0)
+            continue;
+        if (out->count >= PACKAGE_LIFECYCLE_MAX_PROGRAMS)
+            return ZCL_ERR(-1, "receipt names more than %u programs",
+                           (unsigned)PACKAGE_LIFECYCLE_MAX_PROGRAMS);
+        (void)snprintf(out->output[out->count],
+                       sizeof(out->output[out->count]), "%s", path);
+        out->count++;
+    }
     return ZCL_OK;
 }

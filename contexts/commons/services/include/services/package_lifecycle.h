@@ -141,6 +141,30 @@ struct package_lifecycle_reproduce_report {
     char detail[PACKAGE_LIFECYCLE_DETAIL_MAX + 1u];
 };
 
+/* The PROGRAMS an installed package hands a person: every build-receipt
+ * output whose install-relative path is under `bin/`. A package that ships
+ * only a library has none, which is an ordinary empty answer, not a
+ * failure. `install_dir` is the absolute directory the outputs live in, so
+ * an operator-facing path is install_dir + "/" + output. */
+#define PACKAGE_LIFECYCLE_MAX_PROGRAMS VCS_PACKAGE_BUILD_MAX_OUTPUTS
+#define PACKAGE_LIFECYCLE_INSTALL_DIR_MAX 4399u
+
+struct package_lifecycle_programs {
+    char install_dir[PACKAGE_LIFECYCLE_INSTALL_DIR_MAX + 1u];
+    size_t count;
+    char output[PACKAGE_LIFECYCLE_MAX_PROGRAMS]
+               [VCS_PACKAGE_BUILD_PATH_MAX + 1u];
+};
+
+/* Read-only projection of ONE installed root's receipt: the bin/ outputs it
+ * committed, in the receipt's own canonical order. Nothing is built,
+ * installed, activated or executed, and no package byte is loaded into this
+ * process — the receipt is parsed, and its paths are reported. A root that
+ * is not installed, or whose receipt does not parse, is a named failure. */
+struct zcl_result package_lifecycle_installed_programs(
+    const char *datadir, const uint8_t root[32],
+    struct package_lifecycle_programs *out);
+
 /* `name_or_root` is either a 64-hex package root (identity) or a
  * "publisher/package" name, which SELECTS the highest-semver release under
  * that name. `now_unix` stamps the plan and its expiry (the caller passes

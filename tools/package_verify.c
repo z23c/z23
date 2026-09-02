@@ -52,9 +52,14 @@
  *     when it matters).
  *   - the recipe is the ONLY build input: package Makefiles, configure
  *     scripts, and every other downloaded file are never executed. Only
- *     recipe.sources / recipe.test_sources are compiled, with exactly the
- *     recipe's include dirs, defines, and allowed libraries (v1:
- *     libc/libm/pthread).
+ *     recipe.sources, recipe.test_sources and recipe.programs are
+ *     compiled, with exactly the recipe's include dirs, defines, and
+ *     allowed libraries (v1: libc/libm/pthread). A program (`app/<stem>.c`,
+ *     recipe schema 2) is compiled with a source's exact flags and linked
+ *     against the package's own non-test objects, the locked dependency
+ *     closure and the declared system libraries; it is EMITTED as the
+ *     install output `bin/<stem>` and is never executed here — the
+ *     verifier runs tests, and installs programs.
  *   - the materialized source tree is read-only (files 0444, dirs 0555);
  *     builds write only to the separate build dir; every produced binary
  *     and object is DELETED with the temp tree after the attestation is
@@ -259,8 +264,9 @@ static void pv_usage(FILE *out)
         "--emit is INSTALL-BUILD mode (the ZCODE add lifecycle): the same\n"
         "confined build+test runs, but instead of signing an attestation the\n"
         "run archives the recipe's non-test objects into <dir>/lib/lib<pkg>.a,\n"
-        "copies the recipe's public headers under <dir>/include/, and writes\n"
-        "the canonical build receipt (vcs/package_build.h) to\n"
+        "copies the recipe's public headers under <dir>/include/, links each\n"
+        "declared program (app/<stem>.c) into <dir>/bin/<stem> (0755), and\n"
+        "writes the canonical build receipt (vcs/package_build.h) to\n"
         "<dir>/build-report. NOTHING is signed in this mode and --key is\n"
         "refused: the caller is the node's own lifecycle service, which\n"
         "independently RE-HASHES every emitted file against the receipt\n"
@@ -338,8 +344,11 @@ static bool pv_recipe_files_in_source(
 {
     const struct vcs_package_recipe_strings *files[] = {
         &recipe->public_headers, &recipe->sources, &recipe->test_sources,
+        &recipe->programs,
     };
-    const char *labels[] = { "public_header", "source", "test_source" };
+    const char *labels[] = {
+        "public_header", "source", "test_source", "program",
+    };
     for (size_t k = 0; k < sizeof(files) / sizeof(files[0]); k++)
         for (size_t i = 0; i < files[k]->count; i++)
             if (!pv_source_path_is(root, files[k]->items[i], false)) {
@@ -4071,6 +4080,143 @@ int main(int argc, char **argv)
                                           sizeof(build_fail_detail));
                 }
             }
+            /* Programs (recipe schema 2): the executables a PERSON runs,
+             * not the library other code links. Each `app/<stem>.c` is one
+             * translation unit holding main(), compiled with exactly the
+             * flags a recipe source gets — warning-fatal under the standard
+             * profile — and linked against the package's own NON-TEST
+             * objects, the transitive dependency archives in the same
+             * linker-group form the test link uses, and the same declared
+             * system libraries.
+             *
+             * VARIANT CHOICE: the PLAIN variant of every available compiler
+             * only. The sanitizer variant exists to EXECUTE a binary under
+             * ASan/UBSan, and the verifier never executes a program (it
+             * runs tests, and installs programs); a sanitized copy nothing
+             * runs would prove nothing and cost a second full link.
+             *
+             * A program that fails to compile or link fails this compiler's
+             * build exactly as a source does — the receipt is then
+             * BUILD_FAIL and the package is not installable. */
+            for (size_t pi = 0;
+                 cc_ok && !sanitize && pi < recipe.programs.count; pi++) {
+                const char *prel = recipe.programs.items[pi];
+                char src_file[4200];
+                char obj_file[4200];
+                snprintf(src_file, sizeof(src_file), "%s/%s", src_root,
+                         prel);
+                snprintf(obj_file, sizeof(obj_file), "%s/%s_%d_prog_%zu.o",
+                         build_root, cc_id, variant, pi);
+                struct pv_compile_args pargs;
+                memset(&pargs, 0, sizeof(pargs));
+                pv_compile_argv(&pargs, cc, false, standard_profile,
+                                &recipe, src_root, emit_deps, emit_dep_count,
+                                src_file, obj_file);
+                struct pv_run pr = pv_run_child(
+                    pargs.argv, build_root, &compile_limits, landlock, rules,
+                    n_rules, compile_env, PV_COMPILE_TIMEOUT_MS);
+                if (!pr.launched || pr.sandbox_fail) {
+                    fprintf(stderr,
+                            "%s: internal: program compile child failed to "
+                            "launch or arm its sandbox (%s)\n", PV_LOG,
+                            pr.stderr_buf);
+                    pv_rm_rf(work);
+                    vcs_package_recipe_free(&recipe);
+                    vcs_package_manifest_free(&manifest);
+                    return 5;
+                }
+                if (pr.timed_out) {
+                    cc_ok = false;
+                    build_fail_code =
+                        VCS_PACKAGE_ATTEST_DETAIL_COMPILE_TIMEOUT;
+                    snprintf(build_fail_detail, sizeof(build_fail_detail),
+                             "%s: program compile timed out: %s",
+                             fail_prefix, prel);
+                    break;
+                }
+                if (!pr.exited || pr.exit_code != 0) {
+                    cc_ok = false;
+                    build_fail_code =
+                        VCS_PACKAGE_ATTEST_DETAIL_COMPILE_ERROR;
+                    pv_detail_from_stderr(fail_prefix, pr.stderr_buf,
+                                          build_fail_detail,
+                                          sizeof(build_fail_detail));
+                    break;
+                }
+                /* cwd is build_root, so every object and the executable are
+                 * named by BASENAME: an absolute work-root path on the link
+                 * line can otherwise reach the produced bytes and two
+                 * verifiers building the same source would disagree. */
+                const char *largv[560];
+                char lobjs[512][96];
+                char prog_obj[96];
+                char prog_bin[96];
+                size_t ln = 0;
+                snprintf(prog_obj, sizeof(prog_obj), "%s_%d_prog_%zu.o",
+                         cc_id, variant, pi);
+                snprintf(prog_bin, sizeof(prog_bin), "%s_%d_prog_%zu.bin",
+                         cc_id, variant, pi);
+                largv[ln++] = cc;
+                largv[ln++] = prog_obj;
+                for (size_t o = 0; o < recipe.sources.count &&
+                                   o < sizeof(lobjs) / sizeof(lobjs[0]);
+                     o++) {
+                    snprintf(lobjs[o], sizeof(lobjs[o]), "%s_%d_%zu.o",
+                             cc_id, variant, o);
+                    largv[ln++] = lobjs[o];
+                }
+                largv[ln++] = "-o";
+                largv[ln++] = prog_bin;
+                const char *pgroup_start =
+                    platform_toolchain_linker_group_start();
+                const char *pgroup_end =
+                    platform_toolchain_linker_group_end();
+                if (pgroup_start && dep_archives.count &&
+                    ln + 4u < sizeof(largv) / sizeof(largv[0]))
+                    largv[ln++] = pgroup_start;
+                for (size_t da = 0; da < dep_archives.count &&
+                                    ln + 8u < sizeof(largv) / sizeof(largv[0]);
+                     da++)
+                    largv[ln++] = dep_archives.path[da];
+                if (pgroup_end && dep_archives.count &&
+                    ln + 4u < sizeof(largv) / sizeof(largv[0]))
+                    largv[ln++] = pgroup_end;
+                for (size_t li = 0; li < recipe.library_count; li++) {
+                    if (recipe.libraries[li] == VCS_PACKAGE_RECIPE_LIB_LIBM)
+                        largv[ln++] = "-lm";
+                    else if (recipe.libraries[li] ==
+                             VCS_PACKAGE_RECIPE_LIB_PTHREAD)
+                        largv[ln++] = "-lpthread";
+                }
+                largv[ln] = NULL;
+                pr = pv_run_child(largv, build_root, &compile_limits,
+                                  landlock, rules, n_rules, compile_env,
+                                  PV_LINK_TIMEOUT_MS);
+                if (!pr.launched || pr.sandbox_fail) {
+                    fprintf(stderr,
+                            "%s: internal: program link child failed to "
+                            "launch or arm its sandbox (%s)\n", PV_LOG,
+                            pr.stderr_buf);
+                    pv_rm_rf(work);
+                    vcs_package_recipe_free(&recipe);
+                    vcs_package_manifest_free(&manifest);
+                    return 5;
+                }
+                if (pr.timed_out) {
+                    cc_ok = false;
+                    build_fail_code =
+                        VCS_PACKAGE_ATTEST_DETAIL_COMPILE_TIMEOUT;
+                    snprintf(build_fail_detail, sizeof(build_fail_detail),
+                             "%s: program link timed out: %s", fail_prefix,
+                             prel);
+                } else if (!pr.exited || pr.exit_code != 0) {
+                    cc_ok = false;
+                    build_fail_code = VCS_PACKAGE_ATTEST_DETAIL_LINK_ERROR;
+                    pv_detail_from_stderr(fail_prefix, pr.stderr_buf,
+                                          build_fail_detail,
+                                          sizeof(build_fail_detail));
+                }
+            }
             if (!cc_ok) {
                 compilers[ci].outcome = VCS_PACKAGE_ATTEST_OUTCOME_FAIL;
                 build_ok = false;
@@ -4566,6 +4712,42 @@ int main(int argc, char **argv)
                     vcs_package_build_add_output(&rec, rel, hh, hb) !=
                         VCS_PACKAGE_BUILD_OK) {
                     fprintf(stderr, "%s: cannot emit %s\n", PV_LOG, dst_hdr);
+                    emitted = false;
+                }
+            }
+            /* Programs: the executable a PERSON runs. It lands at the
+             * install-relative output vcs_package_recipe_program_output
+             * names (`bin/<stem>`, or `bin/<package short name>` when the
+             * stem is `main`) with the executable bit set, and is committed
+             * to the receipt like every other output — the installer
+             * independently re-hashes it before anything is installed. A
+             * program the build produced but the receipt cannot name is an
+             * INTERNAL emit failure, never a silently dropped output. */
+            for (size_t i = 0; emitted && i < recipe.programs.count; i++) {
+                const char *prog = recipe.programs.items[i];
+                char rel[VCS_PACKAGE_BUILD_PATH_MAX + 1u];
+                if (!vcs_package_recipe_program_output(prog, pkg_short, rel,
+                                                       sizeof(rel))) {
+                    fprintf(stderr,
+                            "%s: program %s has no install output under "
+                            "%s\n", PV_LOG, prog, pkg_short);
+                    emitted = false;
+                    break;
+                }
+                char src_prog[4300];
+                char dst_prog[4400];
+                snprintf(src_prog, sizeof(src_prog), "%s/%s_0_prog_%zu.bin",
+                         build_root, compilers[pick].id, i);
+                snprintf(dst_prog, sizeof(dst_prog), "%s/%s", emit_dir, rel);
+                uint8_t ph[32];
+                uint64_t pb = 0;
+                if (!pv_copy_file(src_prog, dst_prog, 0755) ||
+                    chmod(dst_prog, 0755) != 0 ||
+                    !pv_sha3_file(dst_prog, ph, &pb) ||
+                    vcs_package_build_add_output(&rec, rel, ph, pb) !=
+                        VCS_PACKAGE_BUILD_OK) {
+                    fprintf(stderr, "%s: cannot emit %s\n", PV_LOG,
+                            dst_prog);
                     emitted = false;
                 }
             }

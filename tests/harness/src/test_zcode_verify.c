@@ -906,12 +906,17 @@ static void zv_cmd_free(struct zv_cmd *c)
 }
 
 /* Publish one tiny fixture package into <store>: manifest + chunks +
- * recipe + a signed release by publisher key 0x11. Fills the roots. */
-static bool zv_publish_fixture(const char *store, const char *src_content,
-                               const char *test_content,
-                               uint8_t package_root_out[32],
-                               uint8_t release_id_out[32],
-                               uint8_t recipe_root_out[32])
+ * recipe + a signed release by publisher key 0x11. Fills the roots.
+ * `program_content` (nullable) adds `app/main.c` as a recipe PROGRAM, which
+ * raises the recipe to schema 2 and makes the verifier link and emit
+ * bin/<package short name>; NULL keeps the historical library-only,
+ * schema-1 fixture byte-for-byte. */
+static bool zv_publish_fixture_ex(const char *store, const char *src_content,
+                                  const char *test_content,
+                                  const char *program_content,
+                                  uint8_t package_root_out[32],
+                                  uint8_t release_id_out[32],
+                                  uint8_t recipe_root_out[32])
 {
     char dir[4400];
     snprintf(dir, sizeof(dir), "%s/manifests", store);
@@ -937,11 +942,13 @@ static bool zv_publish_fixture(const char *store, const char *src_content,
         { "src/add.h", "#pragma once\nint add(int a, int b);\n" },
         { "src/add.c", src_content },
         { "test/test_add.c", test_content },
+        { "app/main.c", program_content },
     };
+    const size_t file_count = program_content ? 4u : 3u;
     struct vcs_package_manifest m;
     vcs_package_manifest_init(&m);
     bool ok = true;
-    for (size_t i = 0; i < sizeof(files) / sizeof(files[0]) && ok; i++) {
+    for (size_t i = 0; i < file_count && ok; i++) {
         size_t len = strlen(files[i].content);
         uint8_t hash[32];
         struct sha3_256_ctx c;
@@ -988,7 +995,9 @@ static bool zv_publish_fixture(const char *store, const char *src_content,
          vcs_package_recipe_add_test_source(&r, "test/test_add.c", NULL) &&
          vcs_package_recipe_add_include_dir(&r, "src", NULL) &&
          vcs_package_recipe_add_library(&r, VCS_PACKAGE_RECIPE_LIB_LIBC,
-                                        NULL);
+                                        NULL) &&
+         (!program_content ||
+          vcs_package_recipe_add_program(&r, "app/main.c", NULL));
     vcs_package_recipe_set_test_limits(&r, 0, 60,
                                        UINT64_C(64) * 1024u * 1024u);
     uint8_t *rwire = NULL;
@@ -1048,6 +1057,18 @@ static bool zv_publish_fixture(const char *store, const char *src_content,
     ok = zv_write_file(path, relwire, relwire_len, 0600);
     free(relwire);
     return ok;
+}
+
+/* The historical library-only fixture: no program, recipe schema 1. */
+static bool zv_publish_fixture(const char *store, const char *src_content,
+                               const char *test_content,
+                               uint8_t package_root_out[32],
+                               uint8_t release_id_out[32],
+                               uint8_t recipe_root_out[32])
+{
+    return zv_publish_fixture_ex(store, src_content, test_content, NULL,
+                                 package_root_out, release_id_out,
+                                 recipe_root_out);
 }
 
 /* Persist one signed attestation into <store>/attestations. */
@@ -3783,6 +3804,227 @@ static int t_verifier_e2e(void)
     return failures;
 }
 
+/* ── programs: the executable a person actually runs ─────────────────── */
+
+static bool zv_sha3_file(const char *path, uint8_t out[32], uint64_t *bytes)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f)
+        return false;
+    struct sha3_256_ctx c;
+    sha3_256_init(&c);
+    uint8_t buf[8192];
+    uint64_t total = 0;
+    size_t got;
+    while ((got = fread(buf, 1, sizeof(buf), f)) > 0) {
+        sha3_256_write(&c, buf, got);
+        total += got;
+    }
+    bool ok = ferror(f) == 0;
+    fclose(f);
+    if (!ok)
+        return false;
+    sha3_256_finalize(&c, out);
+    *bytes = total;
+    return true;
+}
+
+static bool zv_read_receipt(const char *emit_dir,
+                            struct vcs_package_build_receipt *out)
+{
+    char path[4400];
+    snprintf(path, sizeof(path), "%s/build-report", emit_dir);
+    uint8_t wire[VCS_PACKAGE_BUILD_MAX_WIRE_BYTES];
+    size_t wire_len = 0;
+    if (!zv_read_file(path, wire, sizeof(wire), &wire_len))
+        return false;
+    return vcs_package_build_parse(wire, wire_len, out) ==
+           VCS_PACKAGE_BUILD_OK;
+}
+
+/* The receipt output whose install-relative path is exactly `want`. */
+static const struct vcs_package_build_output *zv_output_named(
+    const struct vcs_package_build_receipt *r, const char *want)
+{
+    for (size_t i = 0; i < r->output_count; i++)
+        if (strcmp(r->outputs[i].path, want) == 0)
+            return &r->outputs[i];
+    return NULL;
+}
+
+/* A package that declares `app/main.c` is not only a library. The verifier
+ * must compile that translation unit with the package's own flags, link it
+ * against the package's own objects, the locked dependency closure and the
+ * declared system libraries, and emit the EXECUTABLE as the install output
+ * bin/<package short name> — reproducibly, and as a BUILD FAILURE when the
+ * program does not compile. */
+static int t_verifier_programs(void)
+{
+    int failures = 0;
+    struct stat st;
+    if (stat(ZV_VERIFIER_BIN, &st) != 0) {
+        printf("  zcode_verify: programs... FAIL (%s missing — run `make "
+               "dev-bin` first)\n", ZV_VERIFIER_BIN);
+        return 1;
+    }
+    char base[4400];
+    snprintf(base, sizeof(base), "test-tmp/zv_prog_%ld", (long)getpid());
+    zv_rm_rf(base);
+    if (!zv_mkdir_p(base)) {
+        ZV_CHECK("programs: fixture dir", false);
+        return 1;
+    }
+
+    static const char k_src[] =
+        "#include \"add.h\"\nint add(int a, int b) { return a + b; }\n";
+    static const char k_test[] =
+        "#include \"add.h\"\n"
+        "int main(void) { return add(2, 3) == 5 ? 0 : 1; }\n";
+    /* Deterministic output, and it CALLS the library the package ships, so
+     * a program that was never linked against the package's own objects
+     * cannot pass this. */
+    static const char k_program[] =
+        "#include \"add.h\"\n#include <stdio.h>\n"
+        "int main(void) {\n"
+        "    printf(\"addpkg sum=%d\\n\", add(20, 22));\n"
+        "    return 0;\n"
+        "}\n";
+
+    char store[4400];
+    snprintf(store, sizeof(store), "%s/store", base);
+    uint8_t package_root[32], release_id[32], recipe_root[32];
+    bool fixture = zv_publish_fixture_ex(store, k_src, k_test, k_program,
+                                         package_root, release_id,
+                                         recipe_root);
+    ZV_CHECK("programs: a fixture declaring app/main.c publishes", fixture);
+    if (!fixture) {
+        zv_rm_rf(base);
+        return failures;
+    }
+    char root_hex[65];
+    zv_hex_enc(package_root, 32, root_hex);
+    uint8_t lock_root[32];
+    zv_pattern_root(0x77, lock_root);
+    char lock_hex[65];
+    zv_hex_enc(lock_root, 32, lock_hex);
+
+    /* Two emits from two DIFFERENT work roots. The work root is the only
+     * input that differs, so an absolute build path that reached the
+     * executable's bytes shows up below as a hash divergence. */
+    char work1[4400], work2[4400], emit1[4400], emit2[4400];
+    snprintf(work1, sizeof(work1), "%s/work-a", base);
+    snprintf(work2, sizeof(work2), "%s/work-bbbbbbbbbbbbbbbbbbbb", base);
+    snprintf(emit1, sizeof(emit1), "%s/emit1", base);
+    snprintf(emit2, sizeof(emit2), "%s/emit2", base);
+    ZV_CHECK("programs: work dirs", zv_mkdir_p(work1) && zv_mkdir_p(work2));
+
+    char out[2048];
+    int e1 = zv_run_emit(root_hex, store, emit1, lock_hex, NULL, work1, out,
+                         sizeof(out));
+    if (e1 != 0)
+        printf("  zcode_verify: programs emit rc=%d out=%s\n", e1, out);
+    struct vcs_package_build_receipt rec1;
+    bool read1 = e1 == 0 && zv_read_receipt(emit1, &rec1);
+    const struct vcs_package_build_output *prog_out =
+        read1 ? zv_output_named(&rec1, "bin/addpkg") : NULL;
+    ZV_CHECK("programs: the receipt commits bin/<package short name>",
+             read1 && prog_out != NULL &&
+                 rec1.result_class == VCS_PACKAGE_BUILD_RESULT_TEST_PASS &&
+                 vcs_package_build_installable(&rec1));
+    ZV_CHECK("programs: the archive and the public header still emit",
+             read1 && zv_output_named(&rec1, "lib/libaddpkg.a") != NULL &&
+                 zv_output_named(&rec1, "include/add.h") != NULL);
+
+    char prog_path[4500];
+    snprintf(prog_path, sizeof(prog_path), "%s/bin/addpkg", emit1);
+    struct stat pst;
+    bool emitted_exec = stat(prog_path, &pst) == 0 && S_ISREG(pst.st_mode) &&
+                        (pst.st_mode & 0111) != 0;
+    ZV_CHECK("programs: the emitted program is a regular executable file",
+             emitted_exec);
+    uint8_t emitted_hash[32];
+    uint64_t emitted_bytes = 0;
+    bool hashed = emitted_exec &&
+                  zv_sha3_file(prog_path, emitted_hash, &emitted_bytes);
+    ZV_CHECK("programs: the emitted bytes are exactly what the receipt says",
+             hashed && prog_out && emitted_bytes == prog_out->bytes &&
+                 memcmp(emitted_hash, prog_out->sha3, 32) == 0);
+
+    /* Run it. The verifier never executes a program — this is the test
+     * doing what the person who installed the package would do. */
+    char ran[512];
+    ran[0] = '\0';
+    const char *run_argv[] = { prog_path, NULL };
+    int prc = emitted_exec
+        ? zcl_spawn_capture(run_argv, ran, sizeof(ran), 30000)
+        : -1;
+    ZV_CHECK("programs: running it prints the linked library's answer",
+             prc == 0 && strstr(ran, "addpkg sum=42") != NULL);
+    if (prc != 0)
+        printf("  zcode_verify: programs run rc=%d out=%s\n", prc, ran);
+
+    int e2 = zv_run_emit(root_hex, store, emit2, lock_hex, NULL, work2, out,
+                         sizeof(out));
+    struct vcs_package_build_receipt rec2;
+    bool read2 = e2 == 0 && zv_read_receipt(emit2, &rec2);
+    const struct vcs_package_build_output *prog_out2 =
+        read2 ? zv_output_named(&rec2, "bin/addpkg") : NULL;
+    ZV_CHECK("programs: two work roots produce byte-identical program bytes",
+             prog_out && prog_out2 && prog_out2->bytes == prog_out->bytes &&
+                 memcmp(prog_out2->sha3, prog_out->sha3, 32) == 0);
+    if (e2 != 0)
+        printf("  zcode_verify: programs second emit rc=%d out=%s\n", e2,
+               out);
+
+    /* And the whole receipt still reproduces — the acceptance signal the
+     * install lifecycle's reproduce track depends on. */
+    char report1[4500];
+    snprintf(report1, sizeof(report1), "%s/build-report", emit1);
+    char emit3[4400];
+    snprintf(emit3, sizeof(emit3), "%s/emit3", base);
+    int e3 = zv_run_emit(root_hex, store, emit3, lock_hex, report1, work2,
+                         out, sizeof(out));
+    ZV_CHECK("programs: a build carrying a program still reproduces (MATCH)",
+             e3 == 0 && strstr(out, "reproduction=MATCH") != NULL);
+    if (e3 != 0)
+        printf("  zcode_verify: programs reproduce rc=%d out=%s\n", e3, out);
+
+    /* A broken program is a BUILD FAILURE, never a quietly missing output:
+     * an application that does not compile must not be installable. */
+    {
+        char store_bad[4400];
+        char emit_bad[4400];
+        snprintf(store_bad, sizeof(store_bad), "%s/store_progfail", base);
+        snprintf(emit_bad, sizeof(emit_bad), "%s/emit_progfail", base);
+        uint8_t br[32], bi[32], brr[32];
+        bool bf = zv_publish_fixture_ex(
+            store_bad, k_src, k_test,
+            "#include \"add.h\"\nint main(void) { return add(1, ; }\n",
+            br, bi, brr);
+        char br_hex[65];
+        zv_hex_enc(br, 32, br_hex);
+        int erc = zv_run_emit(br_hex, store_bad, emit_bad, lock_hex, NULL,
+                              work1, out, sizeof(out));
+        struct vcs_package_build_receipt bad;
+        bool bad_read = erc == 0 && zv_read_receipt(emit_bad, &bad);
+        char bad_prog[4500];
+        snprintf(bad_prog, sizeof(bad_prog), "%s/bin/addpkg", emit_bad);
+        ZV_CHECK("programs: a program that fails to compile fails the build",
+                 bf && bad_read &&
+                     bad.result_class ==
+                         VCS_PACKAGE_BUILD_RESULT_BUILD_FAIL &&
+                     !vcs_package_build_installable(&bad) &&
+                     bad.output_count == 0 &&
+                     stat(bad_prog, &pst) != 0);
+        if (!bad_read)
+            printf("  zcode_verify: programs build-fail rc=%d out=%s\n", erc,
+                   out);
+    }
+
+    zv_rm_rf(base);
+    return failures;
+}
+
 int test_zcode_verify(void)
 {
     printf("\n=== zcode_verify: external verifier attestations ===\n");
@@ -3801,6 +4043,7 @@ int test_zcode_verify(void)
     failures += t_work_publish_gate();
     failures += t_task_publish_gate();
     failures += t_verifier_e2e();
+    failures += t_verifier_programs();
     printf("=== zcode_verify complete: %d failure(s) ===\n", failures);
     return failures;
 }

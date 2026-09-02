@@ -36,6 +36,7 @@
 #include "keys/key.h"
 #include "keys/pubkey.h"
 #include "services/package_lifecycle.h"
+#include "util/spawn.h"
 #include "vcs/package_build.h"
 #include "vcs/package_deps.h"
 #include "vcs/package_install.h"
@@ -573,12 +574,15 @@ struct za_file {
 /* Publish one package (manifest + CAS chunks + recipe + signed release)
  * into <datadir>/zcode. `deps_json` is the package's own
  * zcode-package.json, or NULL for a package with no dependencies. */
-static bool za_publish(const char *zcode, const char *name,
-                       const char *semver, uint64_t sequence,
-                       const struct za_file *files, size_t file_count,
-                       const char *header_path, const char *source_path,
-                       const char *test_path, const char *include_dir,
-                       uint8_t root_out[32])
+/* `program_path` (nullable) declares one `app/<stem>.c` recipe PROGRAM, the
+ * translation unit the verifier links into the install output bin/<stem>.
+ * NULL keeps the library-only, recipe-schema-1 fixture unchanged. */
+static bool za_publish_ex(const char *zcode, const char *name,
+                          const char *semver, uint64_t sequence,
+                          const struct za_file *files, size_t file_count,
+                          const char *header_path, const char *source_path,
+                          const char *test_path, const char *include_dir,
+                          const char *program_path, uint8_t root_out[32])
 {
     char dir[4400];
     const char *subs[] = { "manifests", "releases", "recipes", "cas/sha3" };
@@ -643,7 +647,9 @@ static bool za_publish(const char *zcode, const char *name,
          vcs_package_recipe_add_test_source(&r, test_path, NULL) &&
          vcs_package_recipe_add_include_dir(&r, include_dir, NULL) &&
          vcs_package_recipe_add_library(&r, VCS_PACKAGE_RECIPE_LIB_LIBC,
-                                        NULL);
+                                        NULL) &&
+         (!program_path ||
+          vcs_package_recipe_add_program(&r, program_path, NULL));
     vcs_package_recipe_set_test_limits(&r, 0, 60,
                                        UINT64_C(64) * 1024u * 1024u);
     uint8_t recipe_root[32];
@@ -704,6 +710,19 @@ static bool za_publish(const char *zcode, const char *name,
     ok = za_write_file(path, relwire, rellen, 0600);
     free(relwire);
     return ok;
+}
+
+/* The library-only fixture: no program, recipe schema 1. */
+static bool za_publish(const char *zcode, const char *name,
+                       const char *semver, uint64_t sequence,
+                       const struct za_file *files, size_t file_count,
+                       const char *header_path, const char *source_path,
+                       const char *test_path, const char *include_dir,
+                       uint8_t root_out[32])
+{
+    return za_publish_ex(zcode, name, semver, sequence, files, file_count,
+                         header_path, source_path, test_path, include_dir,
+                         NULL, root_out);
 }
 
 /* A minimal, real, permissively-licensed C library: a fixed-capacity ring
@@ -1711,6 +1730,209 @@ static int t_e2e(void)
     return failures;
 }
 
+/* ── the program a person runs after `zcode use` ─────────────────────── */
+
+/* Plan through the service, then COMMIT through the native leaf `zcode use`
+ * dispatches to, so the reply under test is the one an operator reads. The
+ * caller owns `commit_reply`. */
+static bool za_use_commit(const char *datadir, const char *target,
+                          int64_t now,
+                          struct zcl_command_reply *commit_reply)
+{
+    struct package_lifecycle_plan_report plan;
+    struct zcl_result r = package_lifecycle_plan(datadir, target, now, &plan);
+    if (!r.ok) {
+        printf("  zcode_add: plan for %s failed rule=%s msg=%s\n", target,
+               plan.rule, r.message);
+        return false;
+    }
+    char plan_hex[65];
+    za_hex(plan.plan_id, 32, plan_hex);
+    struct json_value input;
+    json_init(&input);
+    json_set_object(&input);
+    bool ok = json_push_kv_str(&input, "plan_id", plan_hex) &&
+              json_push_kv_str(&input, "datadir", datadir) &&
+              json_push_kv_int(&input, "now_unix", now + 1);
+    struct zcl_command_request request = { .input = &input };
+    if (ok)
+        zcl_native_handle_zcode_package_add_commit(&request, commit_reply);
+    json_free(&input);
+    return ok;
+}
+
+#define ZA_CLI_H \
+    "#pragma once\n" \
+    "int cli_total(void);\n"
+
+#define ZA_CLI_C \
+    "#include \"cli.h\"\n#include \"ring.h\"\n" \
+    "int cli_total(void){ struct ring r; ring_init(&r);\n" \
+    "  if(!ring_push(&r, 7)) return -1;\n" \
+    "  int v = 0; return ring_pop(&r, &v) ? v : -1; }\n"
+
+#define ZA_CLI_TEST \
+    "#include \"cli.h\"\n" \
+    "int main(void){ return cli_total() == 7 ? 0 : 1; }\n"
+
+/* The program calls ring_* DIRECTLY, so it can only link if the locked
+ * dependency's archive reached the PROGRAM's link line — not merely the
+ * package's own objects. */
+#define ZA_CLI_MAIN \
+    "#include \"cli.h\"\n#include \"ring.h\"\n#include <stdio.h>\n" \
+    "int main(void){ struct ring r; ring_init(&r);\n" \
+    "  if(!ring_push(&r, cli_total())) return 1;\n" \
+    "  int v = 0; if(!ring_pop(&r, &v)) return 1;\n" \
+    "  printf(\"ringcli total=%d\\n\", v); return 0; }\n"
+
+static int t_programs(void)
+{
+    int failures = 0;
+    char base[4096];
+    snprintf(base, sizeof(base), "test-tmp/za_prog_%ld", (long)getpid());
+    za_rm_rf(base);
+    char zcode[4200];
+    snprintf(zcode, sizeof(zcode), "%s/zcode", base);
+    if (!za_mkdir_p(zcode)) {
+        printf("  zcode_add: cannot create the program fixture datadir... "
+               "FAIL\n");
+        return 1;
+    }
+    if (!za_exists("build/bin/zclassic23-package-verify-dev")) {
+        printf("  zcode_add: build/bin/zclassic23-package-verify-dev missing "
+               "(make dev-bin)... FAIL\n");
+        za_rm_rf(base);
+        return 1;
+    }
+    const int64_t t0 = 1700000000;
+
+    /* A library-only package: `programs` must be present and EMPTY, which
+     * is a different fact from "we never looked". */
+    struct za_file lib_files[] = {
+        { "LICENSE", ZA_LICENSE },
+        { "src/ring.h", ZA_RING_H },
+        { "src/ring.c", ZA_RING_C },
+        { "test/test_ring.c", ZA_RING_TEST },
+    };
+    uint8_t lib_root[32];
+    bool lib_published = za_publish(zcode, "alice/ringlib", "1.0.0", 1,
+                                    lib_files, 4, "src/ring.h", "src/ring.c",
+                                    "test/test_ring.c", "src", lib_root);
+    ZA_CHECK("a library-only fixture publishes", lib_published);
+    if (!lib_published) {
+        za_rm_rf(base);
+        return failures;
+    }
+    struct zcl_command_reply lib_reply;
+    zcl_command_reply_init(&lib_reply, "zcl.zcode_add_commit.v1");
+    bool lib_used = za_use_commit(base, "alice/ringlib", t0, &lib_reply);
+    const struct json_value *lib_programs =
+        json_get(&lib_reply.data, "programs");
+    ZA_CHECK("a library-only package reports zero programs, not silence",
+             lib_used && lib_reply.status == ZCL_COMMAND_STATUS_PASSED &&
+                 lib_programs && lib_programs->type == JSON_ARR &&
+                 lib_programs->num_children == 0 &&
+                 json_get_int(json_get(&lib_reply.data, "program_count")) ==
+                     0 &&
+                 json_get(&lib_reply.data, "next_action") == NULL);
+    zcl_command_reply_free(&lib_reply);
+
+    /* A package that ships an application, locked to that library. */
+    char deps_json[256];
+    char lib_hex[65];
+    za_hex(lib_root, 32, lib_hex);
+    snprintf(deps_json, sizeof(deps_json),
+             "{\"schema\":1,\"dependencies\":[{\"root\":\"%s\","
+             "\"name\":\"alice/ringlib\",\"semver\":\"1.0.0\"}]}", lib_hex);
+    struct za_file cli_files[] = {
+        { "LICENSE", ZA_LICENSE },
+        { "src/cli.h", ZA_CLI_H },
+        { "src/cli.c", ZA_CLI_C },
+        { "test/test_cli.c", ZA_CLI_TEST },
+        { "app/main.c", ZA_CLI_MAIN },
+        { VCS_PACKAGE_DEPS_META_PATH, deps_json },
+    };
+    uint8_t cli_root[32];
+    bool cli_published = za_publish_ex(
+        zcode, "alice/ringcli", "1.0.0", 2, cli_files, 6, "src/cli.h",
+        "src/cli.c", "test/test_cli.c", "src", "app/main.c", cli_root);
+    ZA_CHECK("a fixture declaring app/main.c publishes", cli_published);
+
+    struct zcl_command_reply cli_reply;
+    zcl_command_reply_init(&cli_reply, "zcl.zcode_add_commit.v1");
+    bool cli_used = cli_published &&
+                    za_use_commit(base, "alice/ringcli", t0 + 2, &cli_reply);
+    if (cli_used && cli_reply.status != ZCL_COMMAND_STATUS_PASSED)
+        printf("  zcode_add: ringcli commit failed code=%s message=%s\n",
+               cli_reply.error.code, cli_reply.error.message);
+
+    char cli_hex[65];
+    za_hex(cli_root, 32, cli_hex);
+    char installed_bin[4600];
+    snprintf(installed_bin, sizeof(installed_bin),
+             "%s/installed/%s/bin/ringcli", zcode, cli_hex);
+    struct stat pst;
+    bool installed_exec = stat(installed_bin, &pst) == 0 &&
+                          S_ISREG(pst.st_mode) && (pst.st_mode & 0111) != 0;
+    ZA_CHECK("the program installs under installed/<root>/bin/ with the "
+             "executable bit set",
+             cli_used && cli_reply.status == ZCL_COMMAND_STATUS_PASSED &&
+                 installed_exec);
+
+    const struct json_value *cli_programs =
+        json_get(&cli_reply.data, "programs");
+    const struct json_value *first =
+        cli_programs ? json_at(cli_programs, 0) : NULL;
+    const char *first_output = first ? json_get_str(json_get(first, "output"))
+                                     : NULL;
+    const char *first_path =
+        first ? json_get_str(json_get(first, "path")) : NULL;
+    const char *next_action =
+        json_get_str(json_get(&cli_reply.data, "next_action"));
+    struct stat rst;
+    ZA_CHECK("the reply names the exact program and where to run it",
+             cli_programs && cli_programs->num_children == 1 &&
+                 json_get_int(json_get(&cli_reply.data, "program_count")) ==
+                     1 &&
+                 first_output && strcmp(first_output, "bin/ringcli") == 0 &&
+                 first_path && first_path[0] == '/' &&
+                 stat(first_path, &rst) == 0 && S_ISREG(rst.st_mode) &&
+                 (rst.st_mode & 0111) != 0 &&
+                 next_action && strncmp(next_action, "run ", 4) == 0 &&
+                 strcmp(next_action + 4, first_path) == 0);
+
+    /* The program links its locked dependency's archive, so running it
+     * exercises code that only reached it through the dependency closure. */
+    char ran[512];
+    ran[0] = '\0';
+    const char *run_argv[] = { first_path, NULL };
+    int prc = (first_path && installed_exec)
+        ? zcl_spawn_capture(run_argv, ran, sizeof(ran), 30000)
+        : -1;
+    ZA_CHECK("running the installed program exercises the locked dependency",
+             prc == 0 && strstr(ran, "ringcli total=7") != NULL);
+    if (prc != 0)
+        printf("  zcode_add: program run rc=%d out=%s\n", prc, ran);
+    zcl_command_reply_free(&cli_reply);
+
+    /* macOS has no qualified full-isolation package worker, so the
+     * standard-profile second build is a named refusal there; the
+     * byte-identity claim for programs is asserted on Linux. */
+#if !defined(__APPLE__)
+    struct package_lifecycle_reproduce_report repro;
+    struct zcl_result rr =
+        package_lifecycle_reproduce(base, "alice/ringcli", NULL, &repro);
+    if (!rr.ok)
+        printf("  zcode_add: program reproduce failed rule=%s detail=%s "
+               "msg=%s\n", repro.rule, repro.detail, rr.message);
+    ZA_CHECK("a package shipping a program still reproduces byte-for-byte",
+             rr.ok && repro.matched && repro.filed);
+#endif
+
+    za_rm_rf(base);
+    return failures;
+}
+
 int test_zcode_add(void)
 {
     printf("\n=== zcode_add: package install lifecycle ===\n");
@@ -1718,6 +1940,7 @@ int test_zcode_add(void)
     failures += t_deps_rules();
     failures += t_generations();
     failures += t_e2e();
+    failures += t_programs();
     printf("=== zcode_add complete: %d failure(s) ===\n", failures);
     return failures;
 }
