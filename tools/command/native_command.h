@@ -543,6 +543,8 @@ void zcl_native_handle_presentation_corpus(
     const struct zcl_command_request *request, struct zcl_command_reply *reply);
 void zcl_native_handle_presentation_code_growth(
     const struct zcl_command_request *request, struct zcl_command_reply *reply);
+void zcl_native_handle_presentation_ecosystem(
+    const struct zcl_command_request *request, struct zcl_command_reply *reply);
 void zcl_native_handle_presentation_code_change(
     const struct zcl_command_request *request, struct zcl_command_reply *reply);
 void zcl_native_handle_presentation_development(

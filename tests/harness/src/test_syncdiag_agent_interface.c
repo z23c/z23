@@ -111,6 +111,8 @@ int syncdiag_cases_agent_interface(void)
                                  "corpus_status");
         const struct json_value *visual_growth =
             find_object_with_str(visual_instruments, "name", "code_growth");
+        const struct json_value *visual_ecosystem =
+            find_object_with_str(visual_instruments, "name", "ecosystem");
         const struct json_value *visual_publication =
             find_object_with_str(visual_instruments, "name",
                                  "publication_status");
@@ -233,7 +235,7 @@ int syncdiag_cases_agent_interface(void)
             strcmp(json_get_str(json_get(development_loop, "database")),
                    "z23 dbquery <SELECT>") == 0;
         ok = ok && visual_instruments &&
-            json_size(visual_instruments) == 10;
+            json_size(visual_instruments) == 11;
         ok = ok && visual_qr &&
             strcmp(json_get_str(json_get(visual_qr, "native")),
                    "z23 app qr show 'zclassic:t1...?amount=0.01'") == 0;
@@ -267,6 +269,12 @@ int syncdiag_cases_agent_interface(void)
         ok = ok && visual_growth &&
             strcmp(json_get_str(json_get(visual_growth, "input_schema")),
                    "zcl.app_presentation_code_growth.input.v1") == 0;
+        ok = ok && visual_ecosystem &&
+            strcmp(json_get_str(json_get(visual_ecosystem, "path")),
+                   "app.presentation.ecosystem") == 0;
+        ok = ok && visual_ecosystem &&
+            strcmp(json_get_str(json_get(visual_ecosystem, "native")),
+                   "z23 app presentation ecosystem") == 0;
         ok = ok && visual_publication &&
             strstr(json_get_str(json_get(visual_publication, "native")),
                    "app presentation publication-status") != NULL;

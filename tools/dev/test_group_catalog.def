@@ -776,6 +776,10 @@ ZCL_TEST_GROUP(kpi)
 /* Exact daily maintained C23 history. Git numstat is only accepted when the
  * reconstructed final totals agree with a fresh source-tree census. */
 ZCL_TEST_GROUP(code_growth)
+/* Exact live Z23 C23 ecosystem snapshot. Every displayed package, source,
+ * context, capability, dependency, reuse, test, and growth fact is derived
+ * at call time; missing evidence is named unavailable rather than zero. */
+ZCL_TEST_GROUP(ecosystem)
 /* The claim register. The group exists for one refusal and one derivation:
  * a claim that does not say how it could be shown wrong is refused by the
  * field that is missing, and a claim's status is COMPUTED from its trials

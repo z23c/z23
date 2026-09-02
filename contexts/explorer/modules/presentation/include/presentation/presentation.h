@@ -173,6 +173,14 @@ bool zcl_present_window_run_pages_hover_v1(
     const struct zcl_present_window_hover_v1 *hovers,
     uint32_t initial_page, char *error, size_t error_cap);
 
+/* Multi-page hover window. Hover columns apply only to page 0; PgUp/PgDn
+ * select already-bounded drill-down bitmaps. Page selection is local display
+ * state and returns no software authority. */
+bool zcl_present_window_run_pages_first_hover_v1(
+    const struct zcl_present_window_pages_v1 *pages,
+    const struct zcl_present_window_hover_v1 *hover,
+    char *error, size_t error_cap);
+
 /* Interactive host variant. Tab/Shift-Tab move one visibly outlined action;
  * Enter/Space activate it, and number keys 1..action_count activate the exact
  * numbered action directly. Escape/Q/window-close return DISMISSED. Labels

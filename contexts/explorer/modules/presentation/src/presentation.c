@@ -425,6 +425,7 @@ static bool present_run_pages_actions(
     struct zcl_present_window_form_v1 *form,
     struct zcl_present_window_canvas_v1 *canvas,
     const struct zcl_present_window_hover_v1 *hovers,
+    bool hovers_first_page_only,
     uint32_t initial_page,
     zcl_present_window_ready_fn ready,
     void *ready_context,
@@ -469,7 +470,12 @@ static bool present_run_pages_actions(
             return present_error(
                 error, error_cap,
                 "presentation hover geometry/actions are invalid");
-        for (uint32_t i = 0; i < pages->page_count; i++)
+        if (hovers_first_page_only && initial_page != 0u)
+            return present_error(error, error_cap,
+                                 "presentation initial page is invalid");
+        uint32_t hover_page_count =
+            hovers_first_page_only ? 1u : pages->page_count;
+        for (uint32_t i = 0; i < hover_page_count; i++)
             if (pages->pages[i].pixel_format != ZCL_PRESENT_RGB8 ||
                 !present_hover_validate(
                     &pages->pages[i], &hovers[i], error, error_cap))
@@ -520,7 +526,8 @@ static bool present_run_pages_actions(
     RGFW_surface *surface = NULL;
     uint8_t *scaled_pixels = NULL;
     uint32_t focused_control = 0;
-    uint32_t hover_index = hover ? hover->item_count - 1u : UINT32_MAX;
+    uint32_t hover_index = (hover && !hovers_first_page_only)
+        ? hover->item_count - 1u : UINT32_MAX;
     bool required_invalid = false;
     if (form) {
         while (focused_control < form->field_count &&
@@ -558,13 +565,19 @@ static bool present_run_pages_actions(
                 (void)present_replace_surface(
                     window, request, resized_width, resized_height,
                     &surface, &scaled_pixels, action_count,
-                    focused_control, form, canvas, hover, hover_index,
+                    focused_control, form, canvas,
+                    (hover && (!hovers_first_page_only ||
+                               current_page == 0u)) ? hover : NULL,
+                    (hover && (!hovers_first_page_only ||
+                               current_page == 0u)) ? hover_index
+                                                         : UINT32_MAX,
                     required_invalid);
                 RGFW_window_blitSurface(window, surface);
             } else if (event.type == RGFW_windowRefresh) {
                 RGFW_window_blitSurface(window, surface);
             }
-            if (hover && event.type == RGFW_mousePosChanged) {
+            if (hover && (!hovers_first_page_only || current_page == 0u) &&
+                event.type == RGFW_mousePosChanged) {
                 i32 window_width = 0, window_height = 0;
                 i32 mouse_x = 0, mouse_y = 0;
                 uint32_t next_hover = UINT32_MAX;
@@ -582,8 +595,9 @@ static bool present_run_pages_actions(
                         hover, next_hover, required_invalid))
                     hover_index = next_hover;
             }
-            if (hover && (event.type == RGFW_mouseScroll ||
-                          event.type == RGFW_keyPressed)) {
+            if (hover && !hovers_first_page_only &&
+                (event.type == RGFW_mouseScroll ||
+                 event.type == RGFW_keyPressed)) {
                 int32_t step = 0;
                 bool absolute = false;
                 uint32_t next_hover = hover_index;
@@ -675,21 +689,25 @@ static bool present_run_pages_actions(
             }
             uint32_t next_page = current_page;
             int32_t render_delta = 0;
-            if (hovers && event.type == RGFW_keyPressed &&
+            if (hovers && !hovers_first_page_only &&
+                event.type == RGFW_keyPressed &&
                 zcl_present_window_hover_render_delta_v1(
                     event.key.sym, &render_delta))
                 (void)zcl_present_window_page_step_v1(
                     current_page, pages->page_count,
                     render_delta, &next_page);
-            else if (!hovers && event.type == RGFW_mouseScroll &&
+            else if ((!hovers || hovers_first_page_only) &&
+                     event.type == RGFW_mouseScroll &&
                      event.scroll.y < 0)
                 (void)zcl_present_window_page_step_v1(
                     current_page, pages->page_count, 1, &next_page);
-            else if (!hovers && event.type == RGFW_mouseScroll &&
+            else if ((!hovers || hovers_first_page_only) &&
+                     event.type == RGFW_mouseScroll &&
                      event.scroll.y > 0)
                 (void)zcl_present_window_page_step_v1(
                     current_page, pages->page_count, -1, &next_page);
-            else if (!hovers && event.type == RGFW_keyPressed) {
+            else if ((!hovers || hovers_first_page_only) &&
+                     event.type == RGFW_keyPressed) {
                 if (event.key.value == RGFW_pageDown ||
                     event.key.value == RGFW_down ||
                     event.key.value == RGFW_right)
@@ -711,11 +729,14 @@ static bool present_run_pages_actions(
                                           &window_height);
                 const struct zcl_present_window_v1 *next =
                     &pages->pages[next_page];
-                const struct zcl_present_window_hover_v1 *next_hover = hovers
-                    ? &hovers[next_page] : NULL;
+                const struct zcl_present_window_hover_v1 *next_hover =
+                    hovers ? ((hovers_first_page_only && next_page != 0u)
+                                  ? NULL : &hovers[next_page]) : NULL;
                 uint32_t next_hover_index = hover_index;
                 if (next_hover && next_hover_index >= next_hover->item_count)
                     next_hover_index = next_hover->item_count - 1u;
+                if (!next_hover)
+                    next_hover_index = UINT32_MAX;
                 if (present_replace_surface(
                         window, next, window_width, window_height,
                         &surface, &scaled_pixels, action_count,
@@ -881,7 +902,7 @@ bool zcl_present_window_run_pages_actions_v1(
     char *error, size_t error_cap)
 {
     return present_run_pages_actions(
-        pages, action_count, NULL, NULL, NULL, 0u, ready, ready_context,
+        pages, action_count, NULL, NULL, NULL, false, 0u, ready, ready_context,
         result, error, error_cap);
 }
 
@@ -895,7 +916,7 @@ bool zcl_present_window_run_pages_form_actions_v1(
     char *error, size_t error_cap)
 {
     return present_run_pages_actions(
-        pages, action_count, form, NULL, NULL, 0u, ready, ready_context,
+        pages, action_count, form, NULL, NULL, false, 0u, ready, ready_context,
         result, error, error_cap);
 }
 
@@ -909,8 +930,8 @@ bool zcl_present_window_run_pages_canvas_actions_v1(
     char *error, size_t error_cap)
 {
     return present_run_pages_actions(
-        pages, action_count, NULL, canvas, NULL, 0u, ready, ready_context,
-        result, error, error_cap);
+        pages, action_count, NULL, canvas, NULL, false, 0u, ready,
+        ready_context, result, error, error_cap);
 }
 
 bool zcl_present_window_run_actions_v1(
@@ -954,7 +975,18 @@ bool zcl_present_window_run_hover_v1(
     };
     struct zcl_present_window_event_v1 event;
     return present_run_pages_actions(
-        &pages, 0, NULL, NULL, hover, 0u, NULL, NULL,
+        &pages, 0, NULL, NULL, hover, false, 0u, NULL, NULL,
+        &event, error, error_cap);
+}
+
+bool zcl_present_window_run_pages_first_hover_v1(
+    const struct zcl_present_window_pages_v1 *pages,
+    const struct zcl_present_window_hover_v1 *hover,
+    char *error, size_t error_cap)
+{
+    struct zcl_present_window_event_v1 event;
+    return present_run_pages_actions(
+        pages, 0, NULL, NULL, hover, true, 0u, NULL, NULL,
         &event, error, error_cap);
 }
 
@@ -965,6 +997,6 @@ bool zcl_present_window_run_pages_hover_v1(
 {
     struct zcl_present_window_event_v1 event;
     return present_run_pages_actions(
-        pages, 0, NULL, NULL, hovers, initial_page, NULL, NULL,
+        pages, 0, NULL, NULL, hovers, false, initial_page, NULL, NULL,
         &event, error, error_cap);
 }

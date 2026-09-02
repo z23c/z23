@@ -227,6 +227,29 @@ ZCL_COMMAND_READY_COMMAND(
     zcl_native_handle_presentation_code_growth)
 
 ZCL_COMMAND_READY_COMMAND(
+    "app.presentation.ecosystem", "app.presentation", "",
+    "Show the exact Z23 C23 ecosystem in one native window",
+    "Derives package, source, context, capability, dependency, reuse, test, "
+    "and growth facts from the checked-out tree, package manifests, and native "
+    "index/evidence authorities at call time. No displayed count is hardcoded. "
+    "The overview chart is hoverable; PgDn selects bounded drill-down pages. "
+    "The display host receives only inert pixels and returns no software "
+    "authority. Set output=text for the same snapshot as deterministic plain "
+    "text without opening a window. Incomplete evidence is named unavailable "
+    "or unanswered rather than shown as zero.", 65536,
+    "presentation,native,ecosystem,c23,packages,index,growth,exact,agent",
+    "zcl.app_presentation_ecosystem.input.v1",
+    "zcl.app_presentation_ecosystem.v1", "output", "",
+    "z23 app presentation ecosystem",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_DISPLAY_ONLY,
+    zcl_native_handle_presentation_ecosystem)
+
+ZCL_COMMAND_READY_COMMAND(
     "app.presentation.code-change", "app.presentation", "",
     "Show an exact ZVCS-backed C code change in a native window",
     "Loads and rederives two immutable ZVCS source manifests, verifies the "

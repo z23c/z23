@@ -603,7 +603,16 @@ build/bin/z23 app presentation show \
 "output":"text"}'
 build/bin/z23 app presentation corpus \
   --input='{"output":"text"}'
+build/bin/z23 app presentation ecosystem \
+  --input='{"output":"text"}'
 ```
+
+`app presentation ecosystem` is the overview of the live C23 ecosystem: package
+manifests, production and test lines, architectural contexts, capability and
+dependency totals, reuse/test evidence, and current growth. Every number is
+derived at call time. Incomplete evidence is named `unavailable` or
+`unanswered` instead of zero. The native window is hoverable and paged; the
+text form is the same snapshot.
 
 QR payloads are split only at the model's existing exact 256-byte chunk
 boundaries. Structured instruments use one complete item per page and repeat

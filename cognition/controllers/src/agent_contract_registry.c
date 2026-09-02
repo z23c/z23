@@ -137,6 +137,9 @@ static const struct agent_contract_command_surface g_agent_command_surfaces[] = 
       "release_confirmation",
       "app.presentation.release-confirm",
       "ask for one exact proven-candidate decision after canonical proof; the visual command cannot accept or publish"),
+    CATALOG_COMMAND("agentinterface.visual_instruments", 11, "ecosystem",
+      "app.presentation.ecosystem",
+      "show the exact live C23 ecosystem; hover the growth chart and page through bounded drill-downs with no display authority"),
 
     DIRECT_COMMAND("agentmap.telemetry", 1, "compact_status",
       "z23 status",
