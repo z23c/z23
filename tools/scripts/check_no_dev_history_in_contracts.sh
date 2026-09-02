@@ -190,17 +190,49 @@ PHRASES=(
     '-F|future slice'
 )
 
-violations=()
+# One grep invocation PER PHRASE over the whole file list, instead of one
+# grep per (file, phrase) pair (was 1,514 files x 5 phrases = ~7,570 forks).
+# Multi-file grep -n already prefixes each hit with "<path>:<lnum>:<text>",
+# byte-identical to the "$f:$hitline" this loop used to build by hand, so
+# each batched hit line is used as-is. Results are bucketed by (phrase
+# index, file) with no extra forks (associative-array/bash-builtin lookups
+# only), then replayed in the ORIGINAL file-major, phrase-minor, line order
+# so violation text and order are unchanged.
+exist_files=()
 for f in "${files[@]}"; do
-    [[ -f "$f" ]] || continue
+    [[ -f "$f" ]] && exist_files+=("$f")
+done
+
+declare -A HITS=()
+if [ "${#exist_files[@]}" -gt 0 ]; then
+    p=0
     for spec in "${PHRASES[@]}"; do
         flag="${spec%%|*}"
         pattern="${spec#*|}"
-        hit=$(gate_grep -n -I "$flag" "$pattern" "$f") && {
-            while IFS= read -r hitline; do
-                [ -n "$hitline" ] && violations+=("$f:$hitline  [/$pattern/]")
-            done <<< "$hit"
+        out=$(gate_grep -n -I "$flag" "$pattern" "${exist_files[@]}") && {
+            while IFS= read -r line; do
+                [ -n "$line" ] || continue
+                hf="${line%%:*}"
+                HITS["$p|$hf"]+="$line"$'\n'
+            done <<< "$out"
         }
+        p=$((p + 1))
+    done
+fi
+
+violations=()
+for f in "${files[@]}"; do
+    [[ -f "$f" ]] || continue
+    p=0
+    for spec in "${PHRASES[@]}"; do
+        pattern="${spec#*|}"
+        entry="${HITS["$p|$f"]-}"
+        if [ -n "$entry" ]; then
+            while IFS= read -r hitline; do
+                [ -n "$hitline" ] && violations+=("$hitline  [/$pattern/]")
+            done <<< "$entry"
+        fi
+        p=$((p + 1))
     done
 done
 
