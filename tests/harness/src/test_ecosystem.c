@@ -9,7 +9,9 @@
 #include "platform/directory_compat.h"
 #include "science/code_growth.h"
 #include "science/ecosystem.h"
+#include "util/spawn.h"
 
+#include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -102,6 +104,50 @@ static bool build_fixture(const char *dir, bool with_inventory)
                  "{\"test_evidence\":\"none_UNPROVEN\"}]}\n"
                  "{\"record\":\"duplicate\",\"symbol_a\":\"x\"}\n"
                  "{\"record\":\"untested_invariant\",\"symbol\":\"z\"}\n");
+}
+
+static bool eco_json_str_is(const struct json_value *obj, const char *key,
+                            const char *value)
+{
+    const struct json_value *field = json_get(obj, key);
+    return field && field->type == JSON_STR && json_get_str(field) &&
+           strcmp(json_get_str(field), value) == 0;
+}
+
+static bool eco_git(const char *dir, const char *const extra[], size_t extra_n)
+{
+    if (extra_n > 8u)
+        return false;
+    const char *argv[12];
+    argv[0] = "git";
+    argv[1] = "-C";
+    argv[2] = dir;
+    for (size_t i = 0; i < extra_n; i++)
+        argv[3u + i] = extra[i];
+    argv[3u + extra_n] = NULL;
+    char out[512];
+    return zcl_spawn_capture(argv, out, sizeof(out), 60000) == 0;
+}
+
+static bool build_growth_repo(const char *dir)
+{
+    static const char *const init[] = {"init", "-q"};
+    static const char *const add[] = {"add", "-A"};
+    static const char *const commit[] = {
+        "-c", "user.name=z23 fixture", "-c", "user.email=fixture@z23.invalid",
+        "commit", "-m", "growth fixture",
+    };
+    char src[1024], test[1024];
+    (void)snprintf(src, sizeof(src), "%s/engine/src/a.c", dir);
+    (void)snprintf(test, sizeof(test), "%s/tests/harness/src/t.c", dir);
+    if (!mkdir_p(dir, "engine/src") || !mkdir_p(dir, "tests/harness/src") ||
+        !mkdir_p(dir, "docs"))
+        return false;
+    return spill(src, "a\nb\n") && spill(test, "x\ny\n") &&
+        eco_git(dir, init,
+                sizeof(init) / sizeof(init[0])) &&
+        eco_git(dir, add, sizeof(add) / sizeof(add[0])) &&
+        eco_git(dir, commit, sizeof(commit) / sizeof(commit[0]));
 }
 
 int test_ecosystem(void)
@@ -252,6 +298,31 @@ int test_ecosystem(void)
                   !strstr(text, "capabilities: 0") &&
                   !strstr(text, "duplicates: 0"));
 
+    char dir_repo[512];
+    test_make_tmpdir(dir_repo, sizeof(dir_repo), "ecosystem", "growrepo");
+    ECO_CHECK("an isolated real Git repo builds",
+              build_growth_repo(dir_repo));
+    struct science_ecosystem_collect_options with_growth = {
+        .collect_growth = true,
+    };
+    struct science_ecosystem_snapshot repo;
+    ECO_CHECK("growth collects from a real Git toplevel",
+              science_ecosystem_collect(dir_repo, &with_growth, &repo, error,
+                                        sizeof(error)) &&
+                  repo.growth_present &&
+                  repo.growth.day_count == 1u &&
+                  repo.growth.non_test_lines == 2u &&
+                  repo.growth.test_lines == 2u);
+    char nested[640];
+    (void)snprintf(nested, sizeof(nested), "%s/nested", dir_repo);
+    struct science_code_growth_history refused;
+    ECO_CHECK("a nested root exists for the refusal check",
+              mkdir_p(dir_repo, "nested/docs"));
+    ECO_CHECK("growth from a non-toplevel root refuses without walking Git",
+              !science_code_growth_collect(nested, &refused, error,
+                                           sizeof(error)) &&
+                  strstr(error, "toplevel") != NULL);
+
     struct json_value input;
     json_init(&input);
     json_set_object(&input);
@@ -282,6 +353,14 @@ int test_ecosystem(void)
                   plain && strstr(plain, "packages: 2") &&
                   strstr(plain, dir) &&
                   strstr(plain, "authority: display-only"));
+    {
+        const char *growth_error =
+            json_get_str(json_get(&reply.data, "growth_error"));
+        ECO_CHECK("growth from a nested root is named unavailable",
+                  !json_get_bool(json_get(&reply.data, "growth_present")) &&
+                      eco_json_str_is(&reply.data, "growth", "unavailable") &&
+                      growth_error && strstr(growth_error, "toplevel"));
+    }
     zcl_command_reply_free(&reply);
 
     json_free(&input);
@@ -298,5 +377,6 @@ int test_ecosystem(void)
     (void)test_rm_rf_recursive(dir);
     (void)test_rm_rf_recursive(dir_one);
     (void)test_rm_rf_recursive(dir_bare);
+    (void)test_rm_rf_recursive(dir_repo);
     return failures;
 }

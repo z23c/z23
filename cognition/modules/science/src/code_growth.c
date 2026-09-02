@@ -255,14 +255,37 @@ bool science_code_growth_parse(const char *stream, size_t stream_len,
     return true;
 }
 
+static bool growth_require_git_toplevel(const char *root, char *error,
+                                        size_t error_cap)
+{
+    char prefix[256];
+    const char *argv[] = {
+        "git", "-C", root, "rev-parse", "--show-prefix", NULL,
+    };
+    int rc = zcl_spawn_capture(argv, prefix, sizeof(prefix), 30000);
+    if (rc != 0)
+        return growth_error(
+            error, error_cap,
+            "growth is unavailable: the source root is not a Git work tree");
+    for (const char *p = prefix; *p; p++)
+        if (*p != '\n' && *p != '\r')
+            return growth_error(
+                error, error_cap,
+                "growth is unavailable: the source root is not the Git "
+                "toplevel");
+    return true;
+}
+
 bool science_code_growth_collect(const char *root,
                                  struct science_code_growth_history *out,
                                  char *error, size_t error_cap)
 {
     if (!root || !root[0] || !out)
         return growth_error(error, error_cap, "source root/history output is missing");
+    if (!growth_require_git_toplevel(root, error, error_cap))
+        return false;
     char *stream = zcl_malloc(SCIENCE_CODE_GROWTH_GIT_BYTES_MAX,
-                              "science.code_growth.git");
+                               "science.code_growth.git");
     if (!stream)
         return growth_error(error, error_cap,
                             "Git history buffer allocation failed");

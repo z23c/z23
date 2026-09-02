@@ -42,7 +42,9 @@ bool science_code_growth_parse(const char *stream, size_t stream_len,
 
 /* Run Git directly through an argv-only spawn (never a shell), reconstruct
  * first-parent history with merge commits diffed against their first parent,
- * and require the final totals to equal a fresh maintained-tree walk. */
+ * and require the final totals to equal a fresh maintained-tree walk. The
+ * root must be the Git toplevel; any nested root refuses instead of
+ * reconstructing an unrelated parent repository's history. */
 bool science_code_growth_collect(const char *root,
                                  struct science_code_growth_history *out,
                                  char *error, size_t error_cap);
