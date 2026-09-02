@@ -79,6 +79,79 @@ ZCL_COMMAND_READY_READ(
     ZCL_COMMAND_TRAIT_IDEMPOTENT,
     ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_code_coverage)
 
+/* First-hour sub-branch. The parent `code` menu is at its
+ * ZCL_COMMAND_BRANCH_BUDGET byte cap (the reason code.provenance exists), so
+ * the three M3 leaves hang off this one-child branch instead of `code`
+ * directly. Their PATHS stay flat — code.owner / code.cost / code.recent —
+ * because word resolution is by dotted path, not by parent: `z23 code owner
+ * <path>` spells the same either way, and the menu pays for one child. */
+ZCL_COMMAND_BRANCH("code.firsthour", "code",
+                   "First-hour questions: owner, cost, recent",
+                   ZCL_COMMAND_LAYER_CODE)
+
+ZCL_COMMAND_READY_READ(
+    "code.owner", "code.firsthour", "",
+    "Name the room that owns a path",
+    "The physical authority that owns one repo-relative path: the first path "
+    "component, whether it sits under the consensus-sealed core/ (edits need "
+    "the unseal ritual), the bounded context/shape/basis classification, the "
+    "code index's group and its purpose, and the nearest owning module "
+    "directory. `exists` is tracked-or-on-disk (index row or lstat); a path "
+    "the index does not know is UNOWNED, never an error. The tree carries no "
+    "per-file human-owner metadata — the room IS the owner.", 0,
+    "code,owner,authority,room,sealed,context,module,focus",
+    "zcl.code_path_input.v1",
+    "zcl.code_owner.v1", "path", "path",
+    "z23 code owner contexts/wallet/modules/wallet/src/wallet.c",
+    ZCL_COMMAND_LAYER_CODE, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_PUBLIC, ZCL_COMMAND_LATENCY_FAST,
+    ZCL_COMMAND_COST_TINY,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE,
+    ZCL_COMMAND_TRAIT_DETERMINISTIC | ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_code_owner)
+
+ZCL_COMMAND_READY_READ(
+    "code.cost", "code.firsthour", "",
+    "Price the proof of a change",
+    "What proving a change to one path costs: the focused test route and full "
+    "group list `code tests` derives, joined with the last suite run's timing "
+    "artifact (.cache/test-timing/last-run.json, schema zcl.test_timing.v1) "
+    "into per-group ms/rc/cached rows. A group missing from the artifact is "
+    "measured=false — never a fabricated number. Reflects the LAST run, so "
+    "idempotent but not deterministic.", 0,
+    "code,cost,tests,timing,proof,price,ms",
+    "zcl.code_path_input.v1",
+    "zcl.code_cost.v1", "path", "path",
+    "z23 code cost cognition/modules/codeindex/src/codeindex_build.c",
+    ZCL_COMMAND_LAYER_CODE, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_PUBLIC, ZCL_COMMAND_LATENCY_FAST,
+    ZCL_COMMAND_COST_TINY,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE,
+    ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_code_cost)
+
+ZCL_COMMAND_READY_READ(
+    "code.recent", "code.firsthour", "",
+    "List what changed under a path lately",
+    "The commits touching one path since a commit-ish, newest first, from "
+    "`git log --format=%H%x1f%ad%x1f%s <since>..HEAD -- <path>` run in the "
+    "source root; bounded to 32 rows with `truncated`/`total` when more "
+    "exist. A bad ref or a non-repo root fails closed naming the range and "
+    "git's exit status.", ZCL_COMMAND_LIST_BUDGET,
+    "code,recent,history,git,log,changed,churn",
+    "zcl.code_recent_input.v1",
+    "zcl.code_recent.v1", "path,since", "path,since",
+    "z23 code recent cognition/modules/codeindex HEAD~5",
+    ZCL_COMMAND_LAYER_CODE, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_PUBLIC, ZCL_COMMAND_LATENCY_FAST,
+    ZCL_COMMAND_COST_TINY,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE,
+    ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_code_recent)
+
 ZCL_COMMAND_READY_READ(
     "code.tests", "code", "",
     "Route a file to focused tests",

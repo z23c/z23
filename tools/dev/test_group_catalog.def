@@ -694,6 +694,9 @@ ZCL_TEST_GROUP(vcs_devloop)
 ZCL_TEST_GROUP(codeindex)
 ZCL_TEST_GROUP(codeindex_scale)
 ZCL_TEST_GROUP(codeindex_projection_integrity)
+/* M3 first-hour questions: the code.owner / code.cost / code.recent leaves a
+ * fresh agent asks to find where to focus in seconds. */
+ZCL_TEST_GROUP(code_firsthour)
 ZCL_TEST_GROUP(fingerprint)
 ZCL_TEST_GROUP(territory)
 /* BM25 ranked retrieval. The group exists for the properties a ranking has

@@ -74,11 +74,11 @@ z23 discover schema <path> --side=input|output
 
 | Catalog fact | Count |
 |---|---|
-| Registry entries (branches + leaves) | 781 |
+| Registry entries (branches + leaves) | 785 |
 | Top-level roots | 13 |
-| Branches | 179 |
-| Leaves (dispatchable command paths) | 602 |
-| … `ready` (live handler in this build) | 541 |
+| Branches | 180 |
+| Leaves (dispatchable command paths) | 605 |
+| … `ready` (live handler in this build) | 544 |
 | … `compat` (metadata only, names a fallback) | 30 |
 | … `planned` (fail-closed BLOCKED, exit 3) | 31 |
 | … dev-gated 🔧 (`ready` only in `z23-dev`) | 29 |
@@ -97,7 +97,7 @@ Per source file:
 | `engine/composition/commands/store.def` | 18 | 0 | 18 |
 | `engine/composition/commands/ops.def` | 56 | 10 | 46 |
 | `engine/composition/commands/dev.def` | 67 | 16 | 51 |
-| `engine/composition/commands/code.def` | 25 | 2 | 23 |
+| `engine/composition/commands/code.def` | 29 | 3 | 26 |
 | `engine/composition/commands/accounts.def` | 11 | 2 | 9 |
 | `engine/composition/commands/vault.def` | 24 | 4 | 20 |
 | `engine/composition/commands/zcode.def` | 248 | 59 | 189 |
@@ -992,6 +992,14 @@ represented by its children's sections.
 | `code kpi` | ready | mutate / dev-mutation / public · background/moderate | none | `zcl.code_kpi.v1` | `z23 code kpi` | Track measured build outcomes |
 | `code corpus` | ready | read / read / public · background/moderate | none | `zcl.code_corpus.v1` | `z23 code corpus` | Measure the proven reusable C23 corpus |
 | `code general` (aliases: `general`) | ready | read / read / public · background/moderate | **`name`** | `zcl.general_brief.v1` | `z23 general core/modules/net` | Brief one territory or rank evidence gaps |
+
+#### `code.firsthour` — First-hour questions: owner, cost, recent
+
+| Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
+|---|---|---|---|---|---|---|
+| `code owner` | ready | read / read / public · fast/tiny | **`path`** | `zcl.code_owner.v1` | `z23 code owner contexts/wallet/modules/wallet/src/wallet.c` | Name the room that owns a path |
+| `code cost` | ready | read / read / public · fast/tiny | **`path`** | `zcl.code_cost.v1` | `z23 code cost cognition/modules/codeindex/src/codeindex_build.c` | Price the proof of a change |
+| `code recent` | ready | read / read / public · fast/tiny | **`path`**, **`since`** | `zcl.code_recent.v1` | `z23 code recent cognition/modules/codeindex HEAD~5` | List what changed under a path lately |
 
 #### `code.provenance` — Attribute output back to the code that produced it
 

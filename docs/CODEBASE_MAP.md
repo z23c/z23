@@ -37,6 +37,15 @@ group proves the cost stays linear: it generates 50k- and 500k-file trees under
 checks the 500k build stays within 30x of the 50k build. Run it with
 `make t-fast ONLY=codeindex_scale`.
 
+Three first-hour leaves answer the questions a fresh agent asks before touching
+anything. `z23 code owner <path>` names the owning room: the authority root, the
+sealed-core flag, the context/shape classification, the index group, and the
+nearest owning module directory (unindexed paths are UNOWNED, never an error).
+`z23 code cost <path>` prices the proof: the focused test route plus what the
+last suite run measured each group to cost. `z23 code recent <path> --since
+<commit>` lists what changed under a path lately, newest first. All three are
+hermetically covered by `make t-fast ONLY=code_firsthour`.
+
 ---
 
 ## 1. Where things live
@@ -270,7 +279,7 @@ page changing with it.
 <!--   app_shape_folders    = directories directly under app/                        -->
 <!-- Fix a mismatch with `tools/scripts/check_doc_counts.sh --fix`, never by hand.  -->
 
-test_groups: 1082
+test_groups: 1083
 port_interfaces: 13
 persistence_adapters: 14
 condition_registrations: 52

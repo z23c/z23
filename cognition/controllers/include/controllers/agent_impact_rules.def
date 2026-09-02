@@ -808,6 +808,12 @@ AGENT_IMPACT_RULE("cognition/modules/codeindex/*|tests/harness/src/test_codeinde
 /* Code navigator command surface: the `code` branch backed by cognition/modules/codeindex. */
 AGENT_IMPACT_RULE("cognition/modules/codeindex/*|engine/composition/commands/code.def|tools/command/native_code_command.c|tools/command/native_code_context_command.c|tools/command/native_code_guide_command.c|tools/command/native_code_relations_command.c|tests/harness/src/test_code_impact.c", "codeindex code_capsule code_impact command_registry_catalog make_lint_gates")
 
+/* First-hour questions (M3): the code.owner / code.cost / code.recent leaves
+ * and their hermetic fixture group. The registry groups stay in the union
+ * because the handlers are native command leaves (the tools/command glob
+ * already routes there). */
+AGENT_IMPACT_RULE("tools/command/native_code_owner_command.c|tools/command/native_code_cost_command.c|tools/command/native_code_recent_command.c|tests/harness/src/test_code_firsthour.c", "code_firsthour codeindex command_registry_catalog native_api_contract command_handler_snapshot hotswap_module dev_platform make_lint_gates")
+
 /* Source-tree SHA3 Merkle identity: the leaf/node hashing rule, its snapshot
  * cache, and the code.merkle surface that projects it. */
 AGENT_IMPACT_RULE("cognition/modules/codeindex/src/codeindex_merkle.c|cognition/modules/codeindex/src/codeindex_merkle_decode.c|cognition/modules/codeindex/include/codeindex/codeindex_merkle.h|tests/harness/src/test_code_merkle.c|tests/harness/src/test_code_merkle_proof.c", "code_merkle code_merkle_proof codeindex command_registry_catalog make_lint_gates")

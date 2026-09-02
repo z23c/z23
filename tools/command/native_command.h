@@ -331,6 +331,24 @@ void zcl_native_handle_code_map(
 void zcl_native_handle_code_coverage(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
+/* code.owner — the first-hour "whose room is this?" leaf: physical authority,
+ * sealed-core flag, context/shape classification, index group, and nearest
+ * owning module directory for one repo-relative path. Unindexed paths are
+ * UNOWNED, never an error. */
+void zcl_native_handle_code_owner(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
+/* code.cost — the proof-price leaf: the focused test route plus the last
+ * suite run's measured per-group cost (.cache/test-timing/last-run.json);
+ * unmeasured groups say so rather than inventing a number. */
+void zcl_native_handle_code_cost(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
+/* code.recent — the churn leaf: bounded newest-first git log for one path
+ * since a commit-ish, fail-closed on a bad ref. */
+void zcl_native_handle_code_recent(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
 /* code.tests — the routing link: which focused test group a change to one file
  * routes to, mirroring `dev test plan` (tools/dev/devloop_plan.c). */
 void zcl_native_handle_code_tests(
