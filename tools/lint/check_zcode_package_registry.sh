@@ -50,12 +50,13 @@ platform_alternative_groups=(
 # Linux binary, and once the Makefile stopped doing it the pair became a
 # straightforward platform alternative like the sandbox pair above.
 #
-# The terminal-worker sandbox extension is genuinely Linux-only in addition
-# to the linux-or-stub base sandbox alternative.  It therefore belongs in the
-# host-optional set: exactly once in the Linux monolith and absent from native
-# Windows/macOS builds, whose worker implementation refuses before sandbox
-# entry.
+# The package and terminal-worker sandbox extensions are genuinely Linux-only
+# in addition to the linux-or-stub base sandbox alternative.  They therefore
+# belong in the host-optional set: exactly once in the Linux monolith and
+# absent from native Windows/macOS builds, whose implementations either use
+# Seatbelt in the stub translation unit or refuse before sandbox entry.
 host_optional_sources=(
+    platform/modules/platform/src/os_sandbox_package_linux.c
     platform/modules/platform/src/os_sandbox_terminal_worker.c
 )
 
