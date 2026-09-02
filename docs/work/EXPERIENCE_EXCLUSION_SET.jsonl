@@ -1,0 +1,73 @@
+{"record":"exclusion_set","schema":"zcl.experience_exclusion.v1","set_id":"z23-experience-holdout-exclusion-v1","lineage_commit":"19ee6ceafab3765aa3cb0eef9f55694c1c0360f6","applies_to":"zcl.experience_holdout_task.v1","rule_kinds":["commit","path_glob","test_group","query_literal"],"semantics":"a candidate task is refused when its landed or parent commit matches a commit rule, when any landed-changed path matches a path_glob rule, when its gate group matches a test_group rule, or when its query equals a query_literal rule","rule_count":72}
+{"record":"rule","kind":"commit","value":"ac2709e190e9d9734cc88e1b6c649e1aa0280588","reason":"gold_corpus_landed","source":"docs/work/RETRIEVAL_GOLD_CORPUS.jsonl","task_id":"zcode_embedded_nul"}
+{"record":"rule","kind":"commit","value":"3f60fe3014c77c0d73bdbf51ee63d258b82e11eb","reason":"gold_corpus_parent","source":"docs/work/RETRIEVAL_GOLD_CORPUS.jsonl","task_id":"zcode_embedded_nul"}
+{"record":"rule","kind":"commit","value":"63cf3fd5831fa292ab8b2814599e16896ec6de7b","reason":"gold_corpus_landed","source":"docs/work/RETRIEVAL_GOLD_CORPUS.jsonl","task_id":"api_cache_cooperative_shutdown"}
+{"record":"rule","kind":"commit","value":"e5d3744212448a1c308954a688f3e7ab49455e35","reason":"gold_corpus_parent","source":"docs/work/RETRIEVAL_GOLD_CORPUS.jsonl","task_id":"api_cache_cooperative_shutdown"}
+{"record":"rule","kind":"commit","value":"4295fc4bb158e0d28bc5965fbb7400b76fe8ffd9","reason":"gold_corpus_landed","source":"docs/work/RETRIEVAL_GOLD_CORPUS.jsonl","task_id":"package_verifier_object_reuse"}
+{"record":"rule","kind":"commit","value":"07aefda3252e69253a937984bf0438bc787d2697","reason":"gold_corpus_parent","source":"docs/work/RETRIEVAL_GOLD_CORPUS.jsonl","task_id":"package_verifier_object_reuse"}
+{"record":"rule","kind":"commit","value":"ebd4c85cb1bb8e37afb44e97d7409ee94a917e26","reason":"gold_corpus_landed","source":"docs/work/RETRIEVAL_GOLD_CORPUS.jsonl","task_id":"connected_peer_manifest_refresh"}
+{"record":"rule","kind":"commit","value":"25d291c97803905e4a144a56c1016efbb0388d1c","reason":"gold_corpus_parent","source":"docs/work/RETRIEVAL_GOLD_CORPUS.jsonl","task_id":"connected_peer_manifest_refresh"}
+{"record":"rule","kind":"commit","value":"5743e7a75fcdfe77b04a57a1d82e9ca96b56812d","reason":"gold_corpus_landed","source":"docs/work/RETRIEVAL_GOLD_CORPUS.jsonl","task_id":"private_object_grant_encryption_order"}
+{"record":"rule","kind":"commit","value":"ee2d958bb116f073804f71998dad06ac60d12ea6","reason":"gold_corpus_parent","source":"docs/work/RETRIEVAL_GOLD_CORPUS.jsonl","task_id":"private_object_grant_encryption_order"}
+{"record":"rule","kind":"commit","value":"134c2862d4b1bd5444cca8b6d037645b7d5250a2","reason":"gold_corpus_landed","source":"docs/work/RETRIEVAL_GOLD_CORPUS.jsonl","task_id":"sync_discovery_liveness"}
+{"record":"rule","kind":"commit","value":"051e7bb31984820dffe0281f1217899b2ff30576","reason":"gold_corpus_parent","source":"docs/work/RETRIEVAL_GOLD_CORPUS.jsonl","task_id":"sync_discovery_liveness"}
+{"record":"rule","kind":"commit","value":"faed9950007ecc9b280ff9cb675136c5ea52b1df","reason":"gold_corpus_landed","source":"docs/work/RETRIEVAL_GOLD_CORPUS.jsonl","task_id":"windows_verified_checkout"}
+{"record":"rule","kind":"commit","value":"e237d660837f873502aadec9d0e5b28002ab0b93","reason":"gold_corpus_parent","source":"docs/work/RETRIEVAL_GOLD_CORPUS.jsonl","task_id":"windows_verified_checkout"}
+{"record":"rule","kind":"commit","value":"0b2ade7eba3ba003d1757b9446c0026dd45523f4","reason":"gold_corpus_landed","source":"docs/work/RETRIEVAL_GOLD_CORPUS.jsonl","task_id":"vault_holdings_exact_units"}
+{"record":"rule","kind":"commit","value":"c11dce87600afcbef9368ce8c0de4779e6221410","reason":"gold_corpus_parent","source":"docs/work/RETRIEVAL_GOLD_CORPUS.jsonl","task_id":"vault_holdings_exact_units"}
+{"record":"rule","kind":"commit","value":"0d28856cc5a31d160531282da6b0998d2d7d00ad","reason":"gold_corpus_landed","source":"docs/work/RETRIEVAL_GOLD_CORPUS.jsonl","task_id":"mesh_capability_cancel_restart"}
+{"record":"rule","kind":"commit","value":"faaf5ce446e8a7044284be79392867f79c52d3ee","reason":"gold_corpus_parent","source":"docs/work/RETRIEVAL_GOLD_CORPUS.jsonl","task_id":"mesh_capability_cancel_restart"}
+{"record":"rule","kind":"commit","value":"ea05f87b1b14479e29b8faa9f6007186eb2c0f8c","reason":"gold_corpus_landed","source":"docs/work/RETRIEVAL_GOLD_CORPUS.jsonl","task_id":"onion_discovery_catchup_contention"}
+{"record":"rule","kind":"commit","value":"81465f7ae1ddfcad2fe0fd7d6614b511da89d461","reason":"gold_corpus_parent","source":"docs/work/RETRIEVAL_GOLD_CORPUS.jsonl","task_id":"onion_discovery_catchup_contention"}
+{"record":"rule","kind":"commit","value":"48fbe027ae48e22b193392dc97a895ef5b749264","reason":"demonstration_episode_landed","source":"tests/harness/src/test_zcode_heuristic_lifecycle.c"}
+{"record":"rule","kind":"commit","value":"d1f096075d0b1e28c64a334e081449c39fd17c01","reason":"demonstration_episode_base","source":"tests/harness/src/test_zcode_heuristic_lifecycle.c"}
+{"record":"rule","kind":"test_group","value":"engine","reason":"demonstration_episode_group","source":"tests/harness/src/test_zcode_heuristic_lifecycle.c"}
+{"record":"rule","kind":"path_glob","value":"tests/harness/src/test_zcode_package_dev*.c","reason":"synthetic_twelve_task_benchmark","source":"docs/work/ZCODE_ADAPTER_BENCHMARK.md"}
+{"record":"rule","kind":"path_glob","value":"lib/test/src/test_zcode_package_dev*.c","reason":"synthetic_twelve_task_benchmark","source":"docs/work/ZCODE_ADAPTER_BENCHMARK.md"}
+{"record":"rule","kind":"path_glob","value":"contexts/commons/packages/zdemo/**","reason":"zdemo_agent_journey","source":"docs/experiments/2026-08-31-agent-journey-ontology-focus.md"}
+{"record":"rule","kind":"path_glob","value":"lib/zcode/packages/zdemo/**","reason":"zdemo_agent_journey","source":"docs/experiments/2026-08-31-agent-journey-ontology-focus.md"}
+{"record":"rule","kind":"commit","value":"0d90a2c05aeb5a9e2cc2d405599702fb360ec07e","reason":"cited_in_experiment_record","source":"docs/experiments/*.md"}
+{"record":"rule","kind":"commit","value":"1db9879fb3c003887592cd9f667c9a6affa0db4a","reason":"cited_in_experiment_record","source":"docs/experiments/*.md"}
+{"record":"rule","kind":"commit","value":"2c17b98f6e37e2ee02b415f33ef53b51c6f4d45a","reason":"cited_in_experiment_record","source":"docs/experiments/*.md"}
+{"record":"rule","kind":"commit","value":"330461e0bd7a2c85c80b2073c5dcc39029afb9d4","reason":"cited_in_experiment_record","source":"docs/experiments/*.md"}
+{"record":"rule","kind":"commit","value":"58fd7084eb337911118902df69cd6800df64b1da","reason":"cited_in_experiment_record","source":"docs/experiments/*.md"}
+{"record":"rule","kind":"commit","value":"705d16ccab6b9732c81f95159627eef18fb05a08","reason":"cited_in_experiment_record","source":"docs/experiments/*.md"}
+{"record":"rule","kind":"commit","value":"8d291c3c60432c7993b4007dd0aea9f139d325ad","reason":"cited_in_experiment_record","source":"docs/experiments/*.md"}
+{"record":"rule","kind":"commit","value":"8f35c9b66e1a6d6981a91b81d314827e92d1de56","reason":"cited_in_experiment_record","source":"docs/experiments/*.md"}
+{"record":"rule","kind":"commit","value":"c2931cac2973d1791b52fb9f313681a0fc3d250f","reason":"cited_in_experiment_record","source":"docs/experiments/*.md"}
+{"record":"rule","kind":"commit","value":"d8868852556eb40d8e6c8caba8df2346456709d6","reason":"cited_in_experiment_record","source":"docs/experiments/*.md"}
+{"record":"rule","kind":"commit","value":"dbbfd61bf7b060d12f1a81e5365f65b0c7925d2c","reason":"cited_in_experiment_record","source":"docs/experiments/*.md"}
+{"record":"rule","kind":"commit","value":"00fd7a14aacacd487634b82fc6203e695da2de0d","reason":"cited_in_experiment_record","source":"docs/experiments/*.md"}
+{"record":"rule","kind":"commit","value":"4eec2986763ad2b70b31c9363946471b7a60c842","reason":"cited_in_experiment_record","source":"docs/experiments/*.md"}
+{"record":"rule","kind":"commit","value":"dec4be78fe8e9f52fb5c7ce5628f71d9f8962a32","reason":"cited_in_experiment_record","source":"docs/experiments/*.md"}
+{"record":"rule","kind":"path_glob","value":"engine/modules/engine/**","reason":"demonstration_session_read_path","source":"tests/harness/src/test_zcode_heuristic_lifecycle.c:565-608"}
+{"record":"rule","kind":"path_glob","value":"lib/engine/**","reason":"demonstration_session_read_path","source":"tests/harness/src/test_zcode_heuristic_lifecycle.c:565-608"}
+{"record":"rule","kind":"path_glob","value":"platform/modules/util/include/util/spawn.h","reason":"demonstration_session_read_path","source":"tests/harness/src/test_zcode_heuristic_lifecycle.c:565-608"}
+{"record":"rule","kind":"path_glob","value":"platform/modules/util/src/spawn.c","reason":"demonstration_session_read_path","source":"tests/harness/src/test_zcode_heuristic_lifecycle.c:565-608"}
+{"record":"rule","kind":"path_glob","value":"lib/util/include/util/spawn.h","reason":"demonstration_session_read_path","source":"tests/harness/src/test_zcode_heuristic_lifecycle.c:565-608"}
+{"record":"rule","kind":"path_glob","value":"lib/util/src/spawn.c","reason":"demonstration_session_read_path","source":"tests/harness/src/test_zcode_heuristic_lifecycle.c:565-608"}
+{"record":"rule","kind":"path_glob","value":"platform/modules/json/**","reason":"demonstration_session_read_path","source":"tests/harness/src/test_zcode_heuristic_lifecycle.c:565-608"}
+{"record":"rule","kind":"path_glob","value":"lib/json/**","reason":"demonstration_session_read_path","source":"tests/harness/src/test_zcode_heuristic_lifecycle.c:565-608"}
+{"record":"rule","kind":"path_glob","value":"tools/engine_unit.c","reason":"demonstration_session_read_path","source":"tests/harness/src/test_zcode_heuristic_lifecycle.c:565-608"}
+{"record":"rule","kind":"path_glob","value":"tests/harness/src/test_engine.c","reason":"demonstration_session_read_path","source":"tests/harness/src/test_zcode_heuristic_lifecycle.c:565-608"}
+{"record":"rule","kind":"path_glob","value":"lib/test/src/test_engine.c","reason":"demonstration_session_read_path","source":"tests/harness/src/test_zcode_heuristic_lifecycle.c:565-608"}
+{"record":"rule","kind":"path_glob","value":"tools/file_size_policy.c","reason":"demonstration_session_read_path","source":"tests/harness/src/test_zcode_heuristic_lifecycle.c:565-608"}
+{"record":"rule","kind":"path_glob","value":"cognition/modules/science/include/science/science_claim.h","reason":"demonstration_session_read_path","source":"tests/harness/src/test_zcode_heuristic_lifecycle.c:565-608"}
+{"record":"rule","kind":"path_glob","value":"lib/science/include/science/science_claim.h","reason":"demonstration_session_read_path","source":"tests/harness/src/test_zcode_heuristic_lifecycle.c:565-608"}
+{"record":"rule","kind":"query_literal","value":"Repair seeded parser branch A","reason":"synthetic_goal_literal","source":"tests/harness/src/test_zcode_package_dev.c"}
+{"record":"rule","kind":"query_literal","value":"Repair seeded parser branch B","reason":"synthetic_goal_literal","source":"tests/harness/src/test_zcode_package_dev.c"}
+{"record":"rule","kind":"query_literal","value":"Repair seeded parser branch C","reason":"synthetic_goal_literal","source":"tests/harness/src/test_zcode_package_dev.c"}
+{"record":"rule","kind":"query_literal","value":"Repair seeded return regression","reason":"synthetic_goal_literal","source":"tests/harness/src/test_zcode_package_dev.c"}
+{"record":"rule","kind":"query_literal","value":"Add bounded API behavior A","reason":"synthetic_goal_literal","source":"tests/harness/src/test_zcode_package_dev.c"}
+{"record":"rule","kind":"query_literal","value":"Add bounded API behavior B","reason":"synthetic_goal_literal","source":"tests/harness/src/test_zcode_package_dev.c"}
+{"record":"rule","kind":"query_literal","value":"Add bounded API behavior C","reason":"synthetic_goal_literal","source":"tests/harness/src/test_zcode_package_dev.c"}
+{"record":"rule","kind":"query_literal","value":"Repair malformed input handling","reason":"synthetic_goal_literal","source":"tests/harness/src/test_zcode_package_dev.c"}
+{"record":"rule","kind":"query_literal","value":"Repair portability boundary","reason":"synthetic_goal_literal","source":"tests/harness/src/test_zcode_package_dev.c"}
+{"record":"rule","kind":"query_literal","value":"Repair undefined behavior guard","reason":"synthetic_goal_literal","source":"tests/harness/src/test_zcode_package_dev.c"}
+{"record":"rule","kind":"query_literal","value":"Modify LICENSE outside the write scope","reason":"synthetic_goal_literal","source":"tests/harness/src/test_zcode_package_dev.c"}
+{"record":"rule","kind":"query_literal","value":"Replace package identity outside scope","reason":"synthetic_goal_literal","source":"tests/harness/src/test_zcode_package_dev.c"}
+{"record":"rule","kind":"query_literal","value":"Fix x","reason":"synthetic_goal_literal","source":"tests/harness/src/test_zcode_package_dev.c"}
+{"record":"rule","kind":"query_literal","value":"Change x","reason":"synthetic_goal_literal","source":"tests/harness/src/test_zcode_package_dev.c"}
+{"record":"rule","kind":"query_literal","value":"Refactor x","reason":"synthetic_goal_literal","source":"tests/harness/src/test_zcode_package_dev.c"}
+{"record":"rule","kind":"query_literal","value":"Make x return two","reason":"synthetic_goal_literal","source":"tests/harness/src/test_zcode_package_dev.c"}
+{"record":"rule","kind":"query_literal","value":"fix deterministic fixture","reason":"synthetic_goal_literal","source":"tests/harness/src/test_zcode_package_dev.c"}
