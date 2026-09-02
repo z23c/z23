@@ -39,8 +39,11 @@
  *
  * ── WHAT THIS MODULE IS ──────────────────────────────────────────────────
  *
- * Pure logic only. No sockets, no processes, no files. Everything here is a
- * function of its arguments, which is what makes the hostile-input tests in
+ * Pure logic only. No sockets, no processes, no files — with one named
+ * exception: engine_receipt.c appends one caller-named JSONL ledger (and its
+ * sibling head pin) under an exclusive lock. It resolves no path of its own
+ * and writes nowhere else. Everything else here is a function of its
+ * arguments, which is what makes the hostile-input tests in
  * tests/harness/src/test_engine.c able to say something. The transport (TLS), the
  * isolated worktree, and the gate run live in tools/engine_unit.c, which is
  * compiled straight from source into its own program — deliberately, so that

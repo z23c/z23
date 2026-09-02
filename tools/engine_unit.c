@@ -58,9 +58,10 @@
  *     inside the resident process is what blocks the seccomp execve deny-list.
  *     Standalone tools under tools/ are out of its scope by design, and this
  *     is one: a human invokes it, the node never wraps it.
- *   - engine/modules/engine, which IS linked into the node, launches nothing at all. It
- *     has no spawn, no socket, and no file-system side effect. Every process
- *     this harness starts is started from this file.
+ *   - engine/modules/engine, which IS linked into the node, launches nothing
+ *     at all. It has no spawn and no socket. Its one filesystem side effect
+ *     is engine_receipt.c, which appends one caller-named JSONL ledger; every
+ *     process this harness starts is still started from this file.
  *   - and it is not a shell-out in the first place. It goes through
  *     platform/modules/util zcl_spawn_capture, which execvp()s an argv directly. No
  *     /bin/sh, so no metacharacter ever expands, and nothing a model wrote
