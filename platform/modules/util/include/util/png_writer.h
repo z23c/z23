@@ -13,4 +13,8 @@
 bool png_write_rgb(const char *path, const uint8_t *pixels,
                    uint32_t width, uint32_t height);
 
+/* Write row-major RGBA bytes without dropping or re-packing alpha. */
+bool png_write_rgba(const char *path, const uint8_t *pixels,
+                    uint32_t width, uint32_t height);
+
 #endif

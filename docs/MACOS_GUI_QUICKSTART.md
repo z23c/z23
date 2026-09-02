@@ -106,6 +106,8 @@ directory and moved into place only when complete.
 make myapp              # build, open a window, animate until Esc or close
 make myapp MYAPP_ARGS=--seconds=2   # same, and exit by itself
 make myapp-selftest     # headless: renders 120 frames, no window, exits 0
+build/bin/myapp --frames=60 --quiet --screenshot=/tmp/myapp.png
+                        # headless: save pixels without touching the desktop
 ```
 
 The windowed run's first log line is the number that matters — the moment your
@@ -121,6 +123,12 @@ each into a digest, and fails if the image stops moving or the canvas is not
 opaque. That is the CI path, and it is what `make myapp-selftest` runs — a
 machine with no WindowServer still proves the frame code runs.
 
+Add `--screenshot=FILE.png` to that headless command and the final deterministic
+RGBA frame is written through Z23's tested pure-C PNG encoder. This is the SSH
+review path: the agent can inspect or return that exact file without opening a
+window, requesting Screen Recording permission, or capturing anything else on
+the user's desktop.
+
 ## Edit and see
 
 The loop is one command. Open `contexts/commons/packages/<name>/src/<name>.c` — the painter,
@@ -134,10 +142,11 @@ make myapp              # see it on screen
 
 Because a GUI app's parse is deliberately tiny (see
 [Measured on one host](#measured-on-one-host)), the rebuild you wait for is the
-recompile of one file, not a scan of a tree. The whole program is two
-translation units: the painter, and the driver under `contexts/commons/packages/<name>/app/`,
+recompile of one file, not a scan of a tree. The app itself is two translation
+units: the painter, and the driver under `contexts/commons/packages/<name>/app/`,
 which owns the window and the selftest and is the only file that mentions the
-windowing layer. Its shape is
+windowing layer. The shared PNG and checked-allocation objects compile once
+and are reused across GUI packages. Its shape is
 [`contexts/commons/packages/zhello/app/main.c`](../contexts/commons/packages/zhello/app/main.c).
 
 ## Ship it
@@ -205,8 +214,8 @@ Two numbers explain why the loop feels the way it does, both measured with
 | Full authoritative parse (the node, the tests) | `make -n dev-bin` | 11 s |
 
 The lean set exists for goals that build and stamp nothing whole-tree, and the
-generated GUI targets are in it on purpose: an app that is two compiles and a
-link should not pay for a scan it cannot consume. A goal that is *not* in the
+generated GUI targets are in it on purpose: a one-file app edit and relink
+should not pay for a scan it cannot consume. A goal that is *not* in the
 set — or a first run on a cold checkout, which also bootstraps the in-tree
 compile cache and generated view headers — costs seconds more; that is the
 tree being thorough, not the scaffold being slow.

@@ -2139,8 +2139,9 @@ windows-service-remove:
 # presented its first frame; `make <app>-selftest` replays the same painter
 # headless (no window, no RGFW call) so a machine without a WindowServer can
 # still prove the frame code runs; `make <app>-app` wraps the built binary in
-# the reproducible .app bundle. One package, two C23 TUs, no node objects:
-# the whole build is two zcc-cached compiles and one link.
+# the reproducible .app bundle. One package, two app C23 TUs, no node objects;
+# the shared PNG/checked-allocation objects compile once and are reused by all
+# GUI packages.
 #
 # Every GUI package has exactly zhello's shape — contexts/commons/packages/zhello is the
 # template of record and `make new-app NAME=…` stamps new ones out of it — so
@@ -2169,7 +2170,18 @@ GUI_APP_HOST_LIBS := -static-libgcc -Wl,-Bstatic -l:libwinpthread.a \
 endif
 GUI_APP_CFLAGS := -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 	$(ZCL_WARN_STRINGOP_OVERFLOW) $(GUI_APP_HOST_CPPFLAGS) \
-	$(ZCL_PLATFORM_CPPFLAGS) -Ivendor/rgfw
+	$(ZCL_PLATFORM_CPPFLAGS) -Ivendor/rgfw \
+	-Iplatform/modules/util/include -Iplatform/modules/base/include
+GUI_APP_COMMON_OBJS := $(BUILD_DIR)/gui-common/png_writer.o \
+	$(BUILD_DIR)/gui-common/safe_alloc.o
+$(BUILD_DIR)/gui-common/png_writer.o: platform/modules/util/src/png_writer.c \
+		platform/modules/util/include/util/png_writer.h
+	@mkdir -p $(dir $@)
+	$(CC) $(GUI_APP_CFLAGS) -c $< -o $@
+$(BUILD_DIR)/gui-common/safe_alloc.o: platform/modules/base/src/safe_alloc.c \
+		platform/modules/base/include/base/safe_alloc.h
+	@mkdir -p $(dir $@)
+	$(CC) $(GUI_APP_CFLAGS) -c $< -o $@
 # Output dir for <app>-app. This is the same knob `make app-bundle` uses; the
 # definition lives here rather than there because the template below is
 # EXPANDED at the stamp line, so anything its recipes name must already be
@@ -2192,7 +2204,8 @@ $(BUILD_DIR)/$(1)/main.o: contexts/commons/packages/$(1)/app/main.c \
 	@mkdir -p $$(dir $$@)
 	$$(CC) $(GUI_APP_CFLAGS) -Icontexts/commons/packages/$(1)/include -c $$< -o $$@
 
-$(BIN_DIR)/$(1): $(BUILD_DIR)/$(1)/$(1).o $(BUILD_DIR)/$(1)/main.o
+$(BIN_DIR)/$(1): $(BUILD_DIR)/$(1)/$(1).o $(BUILD_DIR)/$(1)/main.o \
+		$(GUI_APP_COMMON_OBJS)
 	@mkdir -p $$(dir $$@)
 	$$(CC) $(GUI_APP_CFLAGS) -Icontexts/commons/packages/$(1)/include $$^ \
 		$(GUI_APP_HOST_LIBS) -o $$@

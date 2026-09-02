@@ -24,6 +24,13 @@ GUI_APP_HOST_CPPFLAGS := -D_POSIX_C_SOURCE=200809L
 GUI_APP_HOST_LIBS := -ldl -lm
 
 ifeq ($(ZCL_HOST_OS),Darwin)
+CC = clang
+ZCL_MACOS_DEPLOYMENT_TARGET := 14.0
+export MACOSX_DEPLOYMENT_TARGET := $(ZCL_MACOS_DEPLOYMENT_TARGET)
+ZCL_PLATFORM_CPPFLAGS := -mmacosx-version-min=$(ZCL_MACOS_DEPLOYMENT_TARGET) \
+	-DZCL_MACOS_DEPLOYMENT_TARGET=\"$(ZCL_MACOS_DEPLOYMENT_TARGET)\" \
+	-D_DARWIN_C_SOURCE -Dst_atim=st_atimespec -Dst_mtim=st_mtimespec \
+	-Dst_ctim=st_ctimespec -fblocks
 GUI_APP_HOST_LIBS := -framework Cocoa -framework CoreGraphics \
 	-framework QuartzCore -framework CoreVideo
 else ifneq ($(filter MINGW% MSYS% CYGWIN%,$(ZCL_HOST_OS)),)
@@ -32,14 +39,27 @@ GUI_APP_HOST_LIBS := -static-libgcc -Wl,-Bstatic -l:libwinpthread.a \
 endif
 
 GUI_APP_CFLAGS := -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
-	$(GUI_APP_HOST_CPPFLAGS) \
+	$(GUI_APP_HOST_CPPFLAGS) $(ZCL_PLATFORM_CPPFLAGS) \
 	$(if $(ZCL_HOST_WINDOWS),$(ZCL_WINDOWS_API_FLOOR) -DWIN32_LEAN_AND_MEAN \
-		-D__USE_MINGW_ANSI_STDIO=1,-DSECP256K1_STATIC) \
-	-Ivendor/rgfw
+		-D__USE_MINGW_ANSI_STDIO=1,) \
+	-Ivendor/rgfw -Iplatform/modules/util/include \
+	-Iplatform/modules/base/include
 
 BUILD_DIR := build
 BIN_DIR := $(BUILD_DIR)/bin
 APP_BUNDLE_OUT ?= $(BUILD_DIR)/app-bundle
+GUI_APP_COMMON_OBJS := $(BUILD_DIR)/gui-common/png_writer.o \
+	$(BUILD_DIR)/gui-common/safe_alloc.o
+
+$(BUILD_DIR)/gui-common/png_writer.o: platform/modules/util/src/png_writer.c \
+		platform/modules/util/include/util/png_writer.h
+	@mkdir -p $(dir $@)
+	$(CC) $(GUI_APP_CFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/gui-common/safe_alloc.o: platform/modules/base/src/safe_alloc.c \
+		platform/modules/base/include/base/safe_alloc.h
+	@mkdir -p $(dir $@)
+	$(CC) $(GUI_APP_CFLAGS) -c $< -o $@
 
 # Tracked reference apps.  Scaffolded apps are appended via contexts/commons/apps/local_gui_apps.mk.
 GUI_APPS := zhello ball
@@ -56,7 +76,8 @@ $(BUILD_DIR)/$(1)/main.o: contexts/commons/packages/$(1)/app/main.c \
 	@mkdir -p $$(dir $$@)
 	$$(CC) $(GUI_APP_CFLAGS) -Icontexts/commons/packages/$(1)/include -c $$< -o $$@
 
-$(BIN_DIR)/$(1): $(BUILD_DIR)/$(1)/$(1).o $(BUILD_DIR)/$(1)/main.o
+$(BIN_DIR)/$(1): $(BUILD_DIR)/$(1)/$(1).o $(BUILD_DIR)/$(1)/main.o \
+		$(GUI_APP_COMMON_OBJS)
 	@mkdir -p $$(dir $$@)
 	$$(CC) $(GUI_APP_CFLAGS) -Icontexts/commons/packages/$(1)/include $$^ \
 		$(GUI_APP_HOST_LIBS) -o $$@

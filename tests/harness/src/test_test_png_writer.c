@@ -16,7 +16,8 @@
  *   - CRC32/Adler32 known-answer vectors were cross-checked against a
  *     from-scratch reference implementation (not png_writer.c's own
  *     tables) computed offline; the constants below are the result.
- *   - build_idat / png_write_rgb round trips are verified with a
+ *   - build_idat_channels / png_write_rgb / png_write_rgba round trips are verified
+ *     with a
  *     from-scratch stored-DEFLATE-in-zlib decoder written in this file
  *     (pngw_inflate_stored) rather than by re-deriving expectations from
  *     the same production code path.
@@ -48,8 +49,10 @@
  * by the preprocessor before either the declaration (in png_writer.h) or
  * the definition (in png_writer.c) is compiled. */
 #define png_write_rgb pngw_under_test_write_rgb
+#define png_write_rgba pngw_under_test_write_rgba
 #include "../../util/src/png_writer.c"
 #undef png_write_rgb
+#undef png_write_rgba
 
 #define PNGW_CHECK(name, expr) do {                                  \
     printf("test_png_writer: %s... ", (name));                      \
@@ -327,7 +330,7 @@ int test_test_png_writer(void)
         pngw_build_expected_filtered(pixels, w, h, expected);
 
         size_t idat_len = 0;
-        uint8_t *idat = build_idat(pixels, w, h, &idat_len);
+        uint8_t *idat = build_idat_channels(pixels, w, h, 3u, &idat_len);
         PNGW_CHECK("build_idat: single-block returns non-NULL", idat != NULL);
         if (idat) {
             PNGW_CHECK("build_idat: single-block idat_len == 2+5+39+4 == 50",
@@ -374,7 +377,8 @@ int test_test_png_writer(void)
             pngw_build_expected_filtered(bpixels, bw, bh, bexpected);
 
             size_t bidat_len = 0;
-            uint8_t *bidat = build_idat(bpixels, bw, bh, &bidat_len);
+            uint8_t *bidat = build_idat_channels(bpixels, bw, bh, 3u,
+                                                 &bidat_len);
             PNGW_CHECK("build_idat: multi-block returns non-NULL", bidat != NULL);
             if (bidat) {
                 size_t expect_idat_len = 2 + 5 * 5 + bfiltered_len + 4;
@@ -432,7 +436,7 @@ int test_test_png_writer(void)
         /* (C) Degenerate 0x0 image: filtered_len == 0 forces the
          * "num_blocks == 0 -> forced to 1" fallback in build_idat. */
         size_t zlen = 0;
-        uint8_t *zidat = build_idat(NULL, 0, 0, &zlen);
+        uint8_t *zidat = build_idat_channels(NULL, 0, 0, 3u, &zlen);
         PNGW_CHECK("build_idat: 0x0 image still returns non-NULL", zidat != NULL);
         if (zidat) {
             PNGW_CHECK("build_idat: 0x0 image idat_len == 2+5+0+4 == 11", zlen == 11);
@@ -450,7 +454,7 @@ int test_test_png_writer(void)
         /* (D) OOM path 1: the filtered-scanline allocation fails. */
         zcl_alloc_fault_fail_next("png_filtered");
         size_t oom1_len = 0xdeadbeef; /* poisoned: must stay untouched on NULL */
-        uint8_t *oom1 = build_idat(pixels, w, h, &oom1_len);
+        uint8_t *oom1 = build_idat_channels(pixels, w, h, 3u, &oom1_len);
         PNGW_CHECK("build_idat: png_filtered alloc failure returns NULL",
                    oom1 == NULL);
         PNGW_CHECK("build_idat: png_filtered alloc failure leaves *out_len untouched",
@@ -464,7 +468,7 @@ int test_test_png_writer(void)
          * fault rather than crashing/asserting). */
         zcl_alloc_fault_fail_next("png_idat");
         size_t oom2_len = 0xdeadbeef; /* poisoned: must stay untouched on NULL */
-        uint8_t *oom2 = build_idat(pixels, w, h, &oom2_len);
+        uint8_t *oom2 = build_idat_channels(pixels, w, h, 3u, &oom2_len);
         PNGW_CHECK("build_idat: png_idat alloc failure returns NULL", oom2 == NULL);
         PNGW_CHECK("build_idat: png_idat alloc failure leaves *out_len untouched",
                    oom2_len == 0xdeadbeef);
@@ -573,6 +577,55 @@ int test_test_png_writer(void)
                 }
                 unlink(path);
             }
+        }
+    }
+
+    /* RGBA is the headless GUI screenshot path. Prove that alpha survives
+     * byte-for-byte and that the IHDR advertises PNG color type 6. */
+    {
+        static const uint8_t pixels[8] = {
+            0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0
+        };
+        static const uint8_t expected[9] = {
+            0x00, 0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0
+        };
+        char path[128];
+        strcpy(path, "/tmp/zcl_png_writer_rgba_XXXXXX");
+        int fd = mkstemp(path);
+        PNGW_CHECK("png_write_rgba round-trip: fixture mkstemp ok", fd >= 0);
+        if (fd >= 0) {
+            close(fd);
+            PNGW_CHECK("png_write_rgba round-trip: write succeeds",
+                       pngw_under_test_write_rgba(path, pixels, 2, 1));
+            FILE *f = fopen(path, "rb");
+            PNGW_CHECK("png_write_rgba round-trip: file reopens", f != NULL);
+            if (f) {
+                uint8_t sig[8];
+                char type[5];
+                uint8_t *data = NULL;
+                uint32_t len = 0;
+                bool signature_ok = fread(sig, 1, sizeof(sig), f) ==
+                                    sizeof(sig);
+                bool ihdr_ok = signature_ok &&
+                    pngw_read_chunk(f, type, &data, &len);
+                PNGW_CHECK("png_write_rgba round-trip: IHDR uses color type 6",
+                           ihdr_ok && len == 13 && data[8] == 8 &&
+                               data[9] == 6);
+                free(data);
+                data = NULL;
+                bool idat_ok = pngw_read_chunk(f, type, &data, &len);
+                uint8_t decoded[16];
+                size_t decoded_len = idat_ok ?
+                    pngw_inflate_stored(data, len, decoded,
+                                        sizeof(decoded)) : SIZE_MAX;
+                PNGW_CHECK("png_write_rgba round-trip: alpha bytes survive",
+                           decoded_len == sizeof(expected) &&
+                               memcmp(decoded, expected,
+                                      sizeof(expected)) == 0);
+                free(data);
+                fclose(f);
+            }
+            unlink(path);
         }
     }
 

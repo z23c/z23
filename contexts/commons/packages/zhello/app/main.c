@@ -18,6 +18,7 @@
  */
 
 #include "zhello/zhello.h"
+#include "util/png_writer.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -105,6 +106,7 @@ static void zhello_sleep_until(double deadline_ms)
 struct zhello_options {
 	unsigned frames;   /* 0 = run the window until told to stop */
 	double seconds;	   /* windowed auto-exit; 0 = none */
+	const char *screenshot_path; /* final headless frame, as RGBA PNG */
 	int print_every_frame;
 	int show_help;
 };
@@ -118,6 +120,9 @@ static void zhello_parse_options(int argc, char **argv,
 		const char *arg = argv[i];
 		if (strncmp(arg, "--frames=", 9) == 0) {
 			opts->frames = (unsigned)strtoul(arg + 9, NULL, 10);
+		} else if (strncmp(arg, "--screenshot=", 13) == 0 &&
+			   arg[13] != '\0') {
+			opts->screenshot_path = arg + 13;
 		} else if (strncmp(arg, "--seconds=", 10) == 0) {
 			opts->seconds = strtod(arg + 10, NULL);
 		} else if (strcmp(arg, "--quiet") == 0) {
@@ -202,12 +207,24 @@ static int zhello_selftest(const struct zhello_options *opts)
 			      "zhello selftest: FAIL canvas is not opaque\n");
 		return 1;
 	}
+	if (opts->screenshot_path != NULL &&
+	    !png_write_rgba(opts->screenshot_path, canvas.pixels,
+	                    canvas.width, canvas.height)) {
+		(void)fprintf(stderr,
+		              "zhello selftest: FAIL could not write screenshot %s\n",
+		              opts->screenshot_path);
+		return 1;
+	}
 
 	(void)printf("zhello selftest: OK frames=%u first_present_ms=%.2f "
 		     "total_ms=%.2f digest_first=%llu digest_mid=%llu\n",
 		     frames, first_present_ms, total_ms,
 		     (unsigned long long)digest_first,
 		     (unsigned long long)digest_mid);
+	if (opts->screenshot_path != NULL)
+		(void)printf("zhello screenshot: %s frame=%u size=%ux%u\n",
+		             opts->screenshot_path, frames, canvas.width,
+		             canvas.height);
 	return 0;
 }
 
@@ -313,9 +330,12 @@ presented:;
 static void zhello_print_usage(void)
 {
 	(void)printf("zhello — the prompt-to-pixel demo\n"
-		     "usage: zhello [--frames=N] [--seconds=S] [--quiet]\n"
+		     "usage: zhello [--frames=N] [--screenshot=FILE.png] "
+		     "[--seconds=S] [--quiet]\n"
 		     "  --frames=N   headless self-test: render N logical "
 		     "frames, no window, exit 0\n"
+		     "  --screenshot=FILE.png  save the final headless frame; "
+		     "requires --frames=N\n"
 		     "  --seconds=S  windowed run that exits by itself\n"
 		     "  --quiet      self-test: skip the per-frame lines\n");
 }
@@ -326,6 +346,12 @@ int main(int argc, char **argv)
 	zhello_parse_options(argc, argv, &opts);
 	if (opts.show_help) {
 		zhello_print_usage();
+		return 2;
+	}
+	if (opts.screenshot_path != NULL && opts.frames == 0) {
+		(void)fprintf(stderr,
+		              "zhello: --screenshot requires --frames=N so no "
+		              "window is opened\n");
 		return 2;
 	}
 	return opts.frames ? zhello_selftest(&opts) : zhello_window(&opts);

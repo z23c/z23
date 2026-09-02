@@ -84,11 +84,12 @@ static bool write_chunk(FILE *f, const char type[4],
  * Stored block: [BFINAL|BTYPE=00] [LEN_LE16] [NLEN_LE16] [data...]
  * Max stored block payload: 65535 bytes. */
 
-static uint8_t *build_idat(const uint8_t *pixels, uint32_t w, uint32_t h,
-                            size_t *out_len)
+static uint8_t *build_idat_channels(const uint8_t *pixels, uint32_t w,
+                                    uint32_t h, size_t channels,
+                                    size_t *out_len)
 {
-    /* Filtered data: each row = 1 filter byte (0x00) + w*3 pixel bytes */
-    size_t row_bytes = (size_t)w * 3;
+    /* Filtered data: each row = filter byte (None) + packed pixel bytes. */
+    size_t row_bytes = (size_t)w * channels;
     size_t filtered_len = (size_t)h * (1 + row_bytes);
 
     uint8_t *filtered = zcl_malloc(filtered_len, "png_filtered");
@@ -150,8 +151,9 @@ static uint8_t *build_idat(const uint8_t *pixels, uint32_t w, uint32_t h,
 
 /* ── Public API ─────────────────────────────────────────────── */
 
-bool png_write_rgb(const char *path, const uint8_t *pixels,
-                   uint32_t width, uint32_t height)
+static bool png_write_channels(const char *path, const uint8_t *pixels,
+                               uint32_t width, uint32_t height,
+                               size_t channels, uint8_t color_type)
 {
     if (!path || !pixels || width == 0 || height == 0)
         return false;
@@ -163,13 +165,12 @@ bool png_write_rgb(const char *path, const uint8_t *pixels,
     static const uint8_t sig[8] = {137,80,78,71,13,10,26,10};
     if (fwrite(sig, 1, 8, f) != 8) { fclose(f); return false; }
 
-    /* IHDR: width, height, bit_depth=8, color_type=2 (RGB),
-     * compression=0, filter=0, interlace=0 */
+    /* IHDR: 8-bit packed RGB/RGBA, no interlace. */
     uint8_t ihdr[13];
     zcl_write_u32_be(&ihdr[0], width);
     zcl_write_u32_be(&ihdr[4], height);
     ihdr[8] = 8;   /* bit depth */
-    ihdr[9] = 2;   /* color type: RGB */
+    ihdr[9] = color_type;
     ihdr[10] = 0;  /* compression */
     ihdr[11] = 0;  /* filter */
     ihdr[12] = 0;  /* interlace */
@@ -177,7 +178,8 @@ bool png_write_rgb(const char *path, const uint8_t *pixels,
 
     /* IDAT: compressed image data */
     size_t idat_len = 0;
-    uint8_t *idat = build_idat(pixels, width, height, &idat_len);
+    uint8_t *idat = build_idat_channels(pixels, width, height, channels,
+                                        &idat_len);
     if (!idat) { fclose(f); return false; }
     bool ok = write_chunk(f, "IDAT", idat, (uint32_t)idat_len);
     free(idat);
@@ -188,4 +190,16 @@ bool png_write_rgb(const char *path, const uint8_t *pixels,
 
     fclose(f);
     return true;
+}
+
+bool png_write_rgb(const char *path, const uint8_t *pixels,
+                   uint32_t width, uint32_t height)
+{
+    return png_write_channels(path, pixels, width, height, 3u, 2u);
+}
+
+bool png_write_rgba(const char *path, const uint8_t *pixels,
+                    uint32_t width, uint32_t height)
+{
+    return png_write_channels(path, pixels, width, height, 4u, 6u);
 }

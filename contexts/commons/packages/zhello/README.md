@@ -4,8 +4,9 @@ The smallest prompt-to-pixel loop in the Commons: one `make zhello`
 opens a native window on this host and prints the wall-clock timestamp
 of the first frame it presented.
 
-Strict C23, two translation units, no node objects, no third-party
-library beyond the vendored single-header RGFW windowing layer
+Strict C23, two application translation units, no node objects, no third-party
+library beyond the vendored single-header RGFW windowing layer and Z23's
+shared pure-C PNG writer
 (Cocoa on macOS, X11 loaded at runtime on Linux, Win32 on Windows).
 Rendering is software RGBA — no OpenGL, no Metal, no GPU API — so the
 same painter runs in a window on a desk and in a headless CI step.
@@ -16,6 +17,8 @@ same painter runs in a window on a desk and in a headless CI step.
 make zhello                          # build, open the window, animate
 make zhello ZHELLO_ARGS=--seconds=2  # same, but exits by itself
 make zhello-selftest                 # headless: no window, exits 0
+build/bin/zhello --frames=60 --quiet \
+    --screenshot=/tmp/zhello.png     # headless PNG; desktop stays untouched
 ```
 
 Windowed mode draws an animated gradient with a square bouncing inside
@@ -35,6 +38,10 @@ the per-frame present time, and exits 0 — so a machine without a
 WindowServer still proves the frame code runs. The run fails if the
 animation does not move (identical digests) or the canvas is not
 opaque.
+
+Add `--screenshot=FILE.png` to save the final headless frame. The PNG comes
+straight from the deterministic RGBA canvas through Z23's shared pure-C PNG
+writer; it does not create a window or capture the desktop.
 
 ## Layout
 
@@ -56,7 +63,9 @@ On a macOS host nothing but the Apple command-line tools is needed:
 ```sh
 cc -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
     -Icontexts/commons/packages/zhello/include -Ivendor/rgfw \
+    -Iplatform/modules/util/include -Iplatform/modules/base/include \
     contexts/commons/packages/zhello/src/zhello.c contexts/commons/packages/zhello/app/main.c \
+    platform/modules/util/src/png_writer.c platform/modules/base/src/safe_alloc.c \
     -framework Cocoa -framework CoreGraphics \
     -framework QuartzCore -framework CoreVideo -o zhello
 ```

@@ -6,7 +6,8 @@
 #   usage: tools/scripts/new_app.sh <name>          (also: make new-app NAME=<name>)
 #
 # contexts/commons/packages/zhello is the template of record: window + animated canvas + a
-# headless `--frames=N` selftest, two C23 translation units, no node objects.
+# headless `--frames=N` selftest, two application C23 translation units, no
+# node objects. Shared PNG/support objects are reused by every GUI package.
 # A new app is that same program under a different name, so this script does
 # ONLY what a copy cannot do for itself:
 #
@@ -238,7 +239,8 @@ while IFS= read -r -d '' p; do
 done < <(find "$STAGE/$NAME" -depth -name '*zhello*' -print0)
 
 # The build contract of a GUI package, checked before anything is registered:
-# two translation units and one namespaced public header, spelled <name>.
+# two application translation units and one namespaced public header, spelled
+# <name>. Shared utility objects stay outside the package.
 for required in "src/$NAME.c" "app/main.c" "include/$NAME/$NAME.h" "README.md"; do
     [ -f "$STAGE/$NAME/$required" ] ||
         die "scaffold is incomplete: $STAGE/$NAME/$required is missing"
