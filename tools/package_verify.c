@@ -4182,8 +4182,8 @@ static int pv_main_posix(int argc, char **argv)
                                 &recipe, src_root, emit_deps, emit_dep_count,
                                 src_file, obj_file);
                 struct pv_run pr = pv_run_child(
-                    pargs.argv, build_root, &compile_limits, landlock, rules,
-                    n_rules, compile_env, PV_COMPILE_TIMEOUT_MS);
+                    pargs.argv, build_root, &compile_limits, full_isolation,
+                    rules, n_rules, compile_env, PV_COMPILE_TIMEOUT_MS);
                 if (!pr.launched || pr.sandbox_fail) {
                     fprintf(stderr,
                             "%s: internal: program compile child failed to "
@@ -4259,7 +4259,7 @@ static int pv_main_posix(int argc, char **argv)
                 }
                 largv[ln] = NULL;
                 pr = pv_run_child(largv, build_root, &compile_limits,
-                                  landlock, rules, n_rules, compile_env,
+                                  full_isolation, rules, n_rules, compile_env,
                                   PV_LINK_TIMEOUT_MS);
                 if (!pr.launched || pr.sandbox_fail) {
                     fprintf(stderr,
