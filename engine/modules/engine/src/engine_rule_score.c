@@ -818,6 +818,29 @@ static size_t line_len_at(const char *t, size_t len, size_t start)
     return e - start;
 }
 
+/* One def line with the SHADOW token spelled OBEYED — the + side of the
+ * promotion hunk. Everything else on the line is kept byte for byte, so a
+ * reviewer of the applied patch sees one word change and nothing else. */
+static bool promoted_line(const char *line, size_t ll, char *out, size_t cap)
+{
+    static const char kShadow[] = "ZCL_RULE_SHADOW";
+    static const char kObeyed[] = "ZCL_RULE_OBEYED";
+    const char *hit = NULL;
+    for (size_t k = 0; k + sizeof kShadow - 1 <= ll; k++)
+        if (memcmp(line + k, kShadow, sizeof kShadow - 1) == 0)
+            { hit = line + k; break; }
+    if (!hit) return false;
+    size_t head = (size_t)(hit - line);
+    size_t tail = ll - head - (sizeof kShadow - 1);
+    if (head + sizeof kObeyed - 1 + tail >= cap) return false;
+    memcpy(out, line, head);
+    memcpy(out + head, kObeyed, sizeof kObeyed - 1);
+    memcpy(out + head + sizeof kObeyed - 1,
+           line + head + sizeof kShadow - 1, tail);
+    out[head + sizeof kObeyed - 1 + tail] = '\0';
+    return true;
+}
+
 size_t zcl_rule_promotion_patch(const char *def_text, size_t def_len,
                                const char *def_path,
                                const struct zcl_rule_row *row,
@@ -856,41 +879,25 @@ size_t zcl_rule_promotion_patch(const char *def_text, size_t def_len,
              first, count, first, count))
         return 0;
 
+    /* A unified diff's + line sits IMMEDIATELY after its - line, ahead of
+     * the trailing context. Emitted after the context instead, `git apply`
+     * deletes the row in place and inserts the obeyed line below it — a
+     * move of the row, not the one-token rewrite the hunk counts. */
     for (uint32_t ln = first; ln <= last; ln++) {
         size_t st = line_start_of(def_text, def_len, ln);
         size_t ll = line_len_at(def_text, def_len, st);
         if (ln != row->line) {
             if (!app(buf, cap, &at, " %.*s\n", (int)ll, def_text + st))
                 return 0;
-        } else {
-            if (!app(buf, cap, &at, "-%.*s\n", (int)ll, def_text + st))
-                return 0;
+            continue;
         }
-    }
-    for (uint32_t ln = first; ln <= last; ln++) {
-        if (ln != row->line) continue;
-        size_t st = line_start_of(def_text, def_len, ln);
-        size_t ll = line_len_at(def_text, def_len, st);
-        /* Rewrite only the state token, exactly as the retirement path does,
-         * so a reviewer sees one word change and nothing else. */
+        if (!app(buf, cap, &at, "-%.*s\n", (int)ll, def_text + st))
+            return 0;
         char newline[ZCL_RULE_LINE_MAX];
-        size_t w = 0;
-        static const char kShadow[] = "ZCL_RULE_SHADOW";
-        const char *hit = NULL;
-        for (size_t k = 0; k + sizeof kShadow - 1 <= ll; k++)
-            if (memcmp(def_text + st + k, kShadow, sizeof kShadow - 1) == 0)
-                { hit = def_text + st + k; break; }
-        if (!hit) return 0;
-        size_t head = (size_t)(hit - (def_text + st));
-        size_t tail = ll - head - (sizeof kShadow - 1);
-        if (head + strlen("ZCL_RULE_OBEYED") + tail >= sizeof newline) return 0;
-        memcpy(newline, def_text + st, head); w = head;
-        memcpy(newline + w, "ZCL_RULE_OBEYED", strlen("ZCL_RULE_OBEYED"));
-        w += strlen("ZCL_RULE_OBEYED");
-        memcpy(newline + w, def_text + st + head + sizeof kShadow - 1, tail);
-        w += tail;
-        newline[w] = '\0';
-        if (!app(buf, cap, &at, "+%s\n", newline)) return 0;
+        if (!promoted_line(def_text + st, ll, newline, sizeof newline))
+            return 0;
+        if (!app(buf, cap, &at, "+%s\n", newline))
+            return 0;
     }
     return at;
 }

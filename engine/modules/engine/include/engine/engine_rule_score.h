@@ -294,7 +294,9 @@ size_t zcl_rule_vocab_apply_retirements(const char *def_text, size_t def_len,
                                         char *buf, size_t cap);
 
 /* Produce a unified diff that would promote one shadow row to obeyed, with
- * three lines of context so `git apply` and `patch` both take it. Pure. This
+ * three lines of context so `git apply` and `patch` both take it. The +
+ * line sits immediately after the - line, ahead of the trailing context —
+ * a one-token rewrite of the row in place, never a move of it. Pure. This
  * is the ONLY thing promotion ever produces; nothing applies it. */
 size_t zcl_rule_promotion_patch(const char *def_text, size_t def_len,
                                  const char *def_path,

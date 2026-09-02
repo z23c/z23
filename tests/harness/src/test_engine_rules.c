@@ -280,6 +280,26 @@ static int case_wilson(void)
 
 /* ── 4. scoring, retiring, and the promotion asymmetry ───────────────── */
 
+/* A promotion hunk reads -, then +, then trailing context. A + emitted
+ * after the trailing context is a row `git apply` would MOVE — delete in
+ * place, insert below — not the one-token rewrite the patch promises. */
+static bool patch_rewrites_in_place(const char *patch, const char *id)
+{
+    char minus[96], plus[96];
+    int mn = snprintf(minus, sizeof minus, "-ZCL_RULE(\"%s", id);
+    int pn = snprintf(plus, sizeof plus, "+ZCL_RULE(\"%s", id);
+    if (mn <= 0 || pn <= 0) return false;
+    const char *m = strstr(patch, minus);
+    if (!m) return false;
+    const char *m_end = strchr(m, '\n');
+    if (!m_end) return false;
+    /* the very next hunk line is the + side of the same row */
+    if (strncmp(m_end + 1, plus, (size_t)pn) != 0) return false;
+    /* and trailing context still follows it, proving the + came first */
+    const char *p_end = strchr(m_end + 1, '\n');
+    return p_end && p_end[1] == ' ';
+}
+
 static int case_decisions(void)
 {
     int failures = 0;
@@ -419,6 +439,10 @@ static int case_decisions(void)
                  strstr(patch, "+ZCL_RULE(\"grok:cand\"") != NULL &&
                  strstr(patch, "-ZCL_RULE(\"grok:cand\"") != NULL &&
                  strstr(patch, "ZCL_RULE_OBEYED") != NULL);
+        /* `grok:cand` sits at line 6 of 9 with ctx=3, so this hunk HAS
+         * trailing context: the assertion is not vacuous for this row. */
+        ER_CHECK("the hunk is a rewrite in place: + immediately after -",
+                 patch_rewrites_in_place(patch, "grok:cand"));
         ER_CHECK("and it says why it is not applied for you",
                  strstr(patch, "NOT applied automatically") != NULL);
         free(patch);
