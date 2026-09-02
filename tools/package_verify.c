@@ -106,7 +106,7 @@ volatile sig_atomic_t g_shutdown_requested = 0;
  * actionable capability answer instead of a compile failure or an accidental
  * unsandboxed execution path. Exit 4 is the documented "full isolation is
  * unavailable" result. */
-int main(void)
+static int pv_main_windows(void)
 {
     fprintf(stderr,
             "zclassic23-package-verify: native Windows package execution "
@@ -3113,7 +3113,7 @@ static int pv_zbuild_fuzz_mode(int argc, char **argv)
 
 /* ── main flow ──────────────────────────────────────────────────────── */
 
-int main(int argc, char **argv)
+static int pv_main_posix(int argc, char **argv)
 {
     if (argc == 2 && strcmp(argv[1], "--source-record") == 0) {
         printf("%s 1 %s\n", zcl_build_source_id_sha256(),
@@ -4975,3 +4975,18 @@ int main(int argc, char **argv)
 }
 
 #endif /* _WIN32 */
+
+/* One definition of main across both arms: the gate that keeps a
+ * non-static function to a single body per translation unit applies to
+ * main too, and the Windows refusal is the same program answering the
+ * same question with the only capability it has. */
+int main(int argc, char **argv)
+{
+#if defined(_WIN32)
+    (void)argc;
+    (void)argv;
+    return pv_main_windows();
+#else
+    return pv_main_posix(argc, argv);
+#endif
+}

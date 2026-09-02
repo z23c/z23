@@ -2439,7 +2439,7 @@ static int t_commit_routes_to_resident(void)
     ZP_CHECK("resident: recipe fixture builds", zp_use_recipe(&p.manifest));
     struct vcs_package_release r;
     ZP_CHECK("resident: release signs",
-             zp_release(&r, 0x2a, 1u, "rhett/resident-route", "MIT", p.root));
+             zp_release(&r, 0x2a, 1u, "alice/resident-route", "MIT", p.root));
     char *release_hex = zp_release_hex(&r, NULL, NULL);
     char *manifest_hex = zp_hex(p.wire, p.wire_len);
 
@@ -2519,7 +2519,7 @@ static int t_commit_routes_to_resident(void)
     free(release_hex);
     free(manifest_hex);
     ZP_CHECK("resident: stale-cookie release signs",
-             zp_release(&r, 0x2b, 1u, "rhett/stale-cookie", "MIT", p.root));
+             zp_release(&r, 0x2b, 1u, "alice/stale-cookie", "MIT", p.root));
     release_hex = zp_release_hex(&r, NULL, NULL);
     manifest_hex = zp_hex(p.wire, p.wire_len);
     zp_rpc_reset(false);
