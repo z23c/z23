@@ -727,6 +727,10 @@ ZCL_TEST_GROUP(retrieval_comparison_v2)
  * result, or verdict: it projects both arms from one exact snapshot, evaluates
  * them, and joins the result to the preregistered workload policy. */
 ZCL_TEST_GROUP(retrieval_profile_pair_measure)
+/* The retrieval-science seam reruns one exact workload-v2 pair, derives its
+ * fixed action, typed observation, result status, and reproduction verdict,
+ * and refuses stale generations or caller-controlled evidence. */
+ZCL_TEST_GROUP(retrieval_science_adapter)
 /* The profile-comparison service joins that arithmetic to one exact immediate
  * SPECIALIZE edge, frozen task/source/study/preregistration/evaluator roots,
  * and each heuristic's exact proposal and observation roots. */

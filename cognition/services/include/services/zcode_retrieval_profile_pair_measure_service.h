@@ -45,6 +45,9 @@ struct zcode_retrieval_profile_pair_measure_request {
     const char *query;
     const char *const *relevant_paths;
     size_t relevant_count;
+    /* Explicit: v1 binds the task root into the workload; v2 relies on the
+     * acyclic task -> study -> workload join used by science evidence. */
+    uint16_t workload_version;
     uint8_t expected_task_root[32];
     uint8_t expected_source_root[32];
     uint8_t expected_snapshot_source_root[32];

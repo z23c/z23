@@ -15,6 +15,10 @@
 #define ZCL_RETRIEVAL_PAIRED_EVALUATION_PATH_MAX 255u
 #define ZCL_RETRIEVAL_EVALUATION_WORKLOAD_DOMAIN \
     "zcl.retrieval_evaluation_workload.v1"
+#define ZCL_RETRIEVAL_EVALUATION_WORKLOAD_V2_DOMAIN \
+    "zcl.retrieval_evaluation_workload.v2"
+#define ZCL_RETRIEVAL_EVALUATION_WORKLOAD_VERSION_V1 1u
+#define ZCL_RETRIEVAL_EVALUATION_WORKLOAD_VERSION_V2 2u
 #define ZCL_RETRIEVAL_EVALUATION_ARM_DOMAIN \
     "zcl.retrieval_evaluation_arm.v1"
 #define ZCL_RETRIEVAL_PAIRED_EVALUATION_INPUT_DOMAIN \
@@ -41,6 +45,20 @@ enum zcl_retrieval_experiment_error zcl_retrieval_evaluation_workload_root(
     const struct zcl_retrieval_evaluation_workload_task_v1 *tasks,
     size_t task_count,
     const uint8_t expected_task_root[32],
+    const uint8_t source_root[32],
+    const uint8_t retrieval_projection_root[32],
+    uint8_t out[32]);
+
+/* Science task identity is already bound transitively: task.goal_root names
+ * the study, and study.workloads_root names this value. V2 therefore omits
+ * the canonical task root from the workload hash, avoiding the impossible
+ * cycle task -> study -> workload -> task while retaining exact source,
+ * projection, and ordered workload bytes. It authenticates no provenance or
+ * authority. out is unchanged on error and may not overlap reachable input. */
+enum zcl_retrieval_experiment_error
+zcl_retrieval_evaluation_workload_v2_root(
+    const struct zcl_retrieval_evaluation_workload_task_v1 *tasks,
+    size_t task_count,
     const uint8_t source_root[32],
     const uint8_t retrieval_projection_root[32],
     uint8_t out[32]);
@@ -111,6 +129,17 @@ struct zcl_retrieval_paired_evaluation_report_v1 {
  * attention, lifecycle, or authority.
  * On every error, out is unchanged. out may not overlap any reachable input. */
 enum zcl_retrieval_experiment_error zcl_retrieval_paired_evaluate(
+    const struct zcl_retrieval_paired_evaluation_task_v1 *tasks,
+    size_t task_count,
+    const uint8_t expected_task_root[32],
+    const uint8_t source_root[32],
+    const uint8_t retrieval_projection_root[32],
+    struct zcl_retrieval_paired_evaluation_report_v1 *out);
+
+/* The paired report still binds expected_task_root, but its workload identity
+ * uses workload.v2 so a canonical science task can point to the study that
+ * preregistered it. Arm and evaluation-input identities are unchanged. */
+enum zcl_retrieval_experiment_error zcl_retrieval_paired_evaluate_v2(
     const struct zcl_retrieval_paired_evaluation_task_v1 *tasks,
     size_t task_count,
     const uint8_t expected_task_root[32],

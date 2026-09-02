@@ -261,6 +261,11 @@ zcode_retrieval_profile_pair_measure(
     for (size_t i = 0; i < sizeof(roots) / sizeof(roots[0]); i++)
         if (!measure_root_any(roots[i]))
             return ZCODE_RETRIEVAL_PROFILE_PAIR_MEASURE_ROOT;
+    if (request->workload_version !=
+            ZCL_RETRIEVAL_EVALUATION_WORKLOAD_VERSION_V1 &&
+        request->workload_version !=
+            ZCL_RETRIEVAL_EVALUATION_WORKLOAD_VERSION_V2)
+        return ZCODE_RETRIEVAL_PROFILE_PAIR_MEASURE_PARAMETER;
 
     struct zcode_retrieval_profile_pair_measure_report result = {0};
     uint8_t study_root[32];
@@ -389,11 +394,18 @@ zcode_retrieval_profile_pair_measure(
         .relevant_count = request->relevant_count,
     };
     uint8_t workload_root[32];
-    if (zcl_retrieval_evaluation_workload_root(
+    enum zcl_retrieval_experiment_error workload_error;
+    if (request->workload_version ==
+            ZCL_RETRIEVAL_EVALUATION_WORKLOAD_VERSION_V1)
+        workload_error = zcl_retrieval_evaluation_workload_root(
             &workload, 1u, request->expected_task_root,
             request->expected_source_root,
-            request->expected_retrieval_projection_root,
-            workload_root) != ZCL_RETRIEVAL_EXPERIMENT_OK)
+            request->expected_retrieval_projection_root, workload_root);
+    else
+        workload_error = zcl_retrieval_evaluation_workload_v2_root(
+            &workload, 1u, request->expected_source_root,
+            request->expected_retrieval_projection_root, workload_root);
+    if (workload_error != ZCL_RETRIEVAL_EXPERIMENT_OK)
         return ZCODE_RETRIEVAL_PROFILE_PAIR_MEASURE_WORKLOAD;
     if (memcmp(workload_root, request->policy->workload_root, 32u) != 0 ||
         memcmp(request->study->workloads_root, workload_root, 32u) != 0 ||
@@ -435,11 +447,21 @@ zcode_retrieval_profile_pair_measure(
         .child_count = row_count,
         .child_complete = request->feature_snapshot->ranking_complete,
     };
-    if (zcl_retrieval_paired_evaluate(
+    enum zcl_retrieval_experiment_error paired_error;
+    if (request->workload_version ==
+            ZCL_RETRIEVAL_EVALUATION_WORKLOAD_VERSION_V1)
+        paired_error = zcl_retrieval_paired_evaluate(
             &paired_task, 1u, request->expected_task_root,
             request->expected_source_root,
             request->expected_retrieval_projection_root,
-            &result.paired_evaluation) != ZCL_RETRIEVAL_EXPERIMENT_OK)
+            &result.paired_evaluation);
+    else
+        paired_error = zcl_retrieval_paired_evaluate_v2(
+            &paired_task, 1u, request->expected_task_root,
+            request->expected_source_root,
+            request->expected_retrieval_projection_root,
+            &result.paired_evaluation);
+    if (paired_error != ZCL_RETRIEVAL_EXPERIMENT_OK)
         return ZCODE_RETRIEVAL_PROFILE_PAIR_MEASURE_EVALUATION;
     if (memcmp(result.paired_evaluation.workload_root,
                workload_root, 32u) != 0)

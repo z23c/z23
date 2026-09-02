@@ -267,6 +267,8 @@ static struct zcode_retrieval_profile_pair_measure_request rpm_request(
         .query = "find the exact target",
         .relevant_paths = fixture->relevant,
         .relevant_count = 1u,
+        .workload_version =
+            ZCL_RETRIEVAL_EVALUATION_WORKLOAD_VERSION_V1,
     };
     memcpy(request.expected_task_root, fixture->task_root, 32u);
     memcpy(request.expected_source_root, fixture->source_root, 32u);
