@@ -73,13 +73,16 @@
 #include "engine/engine_err.h"
 #include "engine/engine_patch.h"
 #include "engine/engine_prompt.h"
+#include "engine/engine_receipt.h"
 #include "engine/engine_secret.h"
 #include "engine/engine_verdict.h"
 #include "engine/engine_wire.h"
 
+#include "base/hex.h"
 #include "base/log_macros.h"
 #include "base/safe_alloc.h"
 #include "platform/clock.h"
+#include "sha3/sha3.h"
 #include "tls_client.h"
 #include "json/json.h"
 #include "util/spawn.h"
@@ -119,6 +122,7 @@ struct unit_opts {
     const char *task_path;
     const char *group;
     const char *territory;
+    const char *kind;
     const char *model;
     const char *worktree;
     const char *fixture_reply;
@@ -157,6 +161,11 @@ static void usage(void)
 "  --group NAME      the test group that must run and pass afterwards\n"
 "  --no-group        for a unit that genuinely cannot have one; the verdict\n"
 "                    is then UNVERIFIED, which is not a pass\n"
+"  --kind KIND       which prompt template fills the sections (see --list).\n"
+"                    Defaults to a `kind:` line in the task file's header.\n"
+"                    A named kind that supplies no body for a required\n"
+"                    section is refused; a unit with no kind at all carries\n"
+"                    no template bodies and says so on the run\n"
 "  --territory NAME  a territory the tree declares (see `z23 code territory`).\n"
 "                    Its generated brief — owns, routes, reaches, the gates\n"
 "                    that bind it, where its evidence is weakest — is put in\n"
@@ -194,6 +203,14 @@ static void list_engines(void)
                v->costs_money ? "SPENDS" : "free",
                v->is_default ? "  (default)" : "");
     }
+    /* The kinds come from the same table --kind selects from, so a kind
+     * printed here is a kind that can be chosen and a kind that can be
+     * chosen is printed here. Two lists would eventually disagree. */
+    printf("prompt template kinds (--kind):\n");
+    for (size_t i = 0; i < engine_prompt_kind_count(); i++) {
+        const char *k = engine_prompt_kind_at(i);
+        printf("  %s\n", k ? k : "?");
+    }
 }
 
 /* ── argument parsing ────────────────────────────────────────────────── */
@@ -222,6 +239,7 @@ static bool parse_args(int argc, char **argv, struct unit_opts *o)
         TAKE("--task", task_path)
         TAKE("--group", group)
         TAKE("--territory", territory)
+        TAKE("--kind", kind)
         TAKE("--model", model)
         TAKE("--worktree", worktree)
         TAKE("--fixture-reply", fixture_reply)
@@ -536,6 +554,18 @@ static const char *persona_stance(const char *territory)
     return NULL;
 }
 
+/* Append one template body under a heading that is NOT a section marker.
+ * Deliberately not a marker: the audit checks that the declared sections are
+ * present and in order, and a template body inventing a second copy of a
+ * marker would make that check pass for the wrong reason. */
+static int append_body(char *p, size_t room, const char *heading,
+                       const char *body)
+{
+    if (!body || !body[0])
+        return 0;
+    return snprintf(p, room, "%s\n\n%s\n\n", heading, body);
+}
+
 static char *compose_prompt(const struct unit_opts *o,
                             const struct engine_vendor *v, const char *task,
                             const char *brief, const char *repair_note)
@@ -544,10 +574,45 @@ static char *compose_prompt(const struct unit_opts *o,
     char *p = zcl_malloc(cap, "engine_unit_prompt");
     if (!p)
         LOG_NULL("engine_unit", "cannot allocate the prompt buffer");
-    int n;
+    int n = 0;
+    /* The kind's own constraints lead, because they are the frame the task
+     * is read in. A unit that must not edit anything should learn that
+     * before it reads a job description full of file names. */
+    if (o->kind && o->kind[0]) {
+        char heading[128];
+        (void)snprintf(heading, sizeof(heading),
+                       "# This is a %s unit", o->kind);
+        const int kn = append_body(p, cap, heading,
+                                   engine_prompt_template_body(o->kind,
+                                                               "rules"));
+        if (kn < 0 || (size_t)kn >= cap) {
+            free(p);
+            LOG_NULL("engine_unit", "the composed prompt does not fit its cap");
+        }
+        n = kn;
+    }
+    /* Each section is emitted, then its template body, so a body always
+     * lands under the section it belongs to. Composing the whole prompt in
+     * one format string is what made that impossible before. */
+#define EMIT(expr)                                                            \
+    do {                                                                      \
+        const int emitted_ = (expr);                                          \
+        if (emitted_ < 0 || (size_t)emitted_ >= cap - (size_t)n) {            \
+            free(p);                                                          \
+            LOG_NULL("engine_unit",                                           \
+                     "the composed prompt does not fit its cap");             \
+        }                                                                     \
+        n += emitted_;                                                        \
+    } while (0)
+
+    EMIT(snprintf(p + n, cap - (size_t)n, "# Your unit of work\n\n%s\n\n",
+                  task));
+    EMIT(append_body(p + n, cap - (size_t)n, "## How to approach it",
+                     engine_prompt_template_body(o->kind, "task")));
+
+    int head;
     if (brief)
-        n = snprintf(p, cap,
-            "# Your unit of work\n\n%s\n\n"
+        head = snprintf(p + n, cap - (size_t)n,
             "# Territory %s\n\n"
             "What follows is the tree's own answer about this territory,\n"
             "regenerated from the code index on this run. It is not a written\n"
@@ -559,21 +624,16 @@ static char *compose_prompt(const struct unit_opts *o,
             "calls that public function. They are never added together, and\n"
             "`unknown` is the call graph refusing to answer — not a quiet\n"
             "vote for either neighbour.\n"
-            "\n%s\n\n"
-            "# %s\n\n"
-            "# How this unit will be judged\n\n",
-            task, o->territory, brief, delivery_text(v));
+            "\n%s\n\n",
+            o->territory, brief);
     else
-        n = snprintf(p, cap,
-            "# Your unit of work\n\n%s\n\n"
-            "Territory: none declared.\n\n"
-            "# %s\n\n"
-            "# How this unit will be judged\n\n",
-            task, delivery_text(v));
-    if (n < 0 || (size_t)n >= cap) {
+        head = snprintf(p + n, cap - (size_t)n,
+            "Territory: none declared.\n\n");
+    if (head < 0 || (size_t)head >= cap - (size_t)n) {
         free(p);
         LOG_NULL("engine_unit", "the composed prompt does not fit its cap");
     }
+    n += head;
 
     /* The authored half. The brief above is measured and regenerates itself;
      * this does not, and is the only thing in the prompt that somebody wrote
@@ -596,6 +656,15 @@ static char *compose_prompt(const struct unit_opts *o,
         }
         n += sn;
     }
+
+    EMIT(snprintf(p + n, cap - (size_t)n, "# %s\n\n", delivery_text(v)));
+    EMIT(append_body(p + n, cap - (size_t)n, "## For this kind of unit",
+                     engine_prompt_template_body(o->kind, "protocol")));
+    EMIT(snprintf(p + n, cap - (size_t)n,
+                  "# How this unit will be judged\n\n"));
+    EMIT(append_body(p + n, cap - (size_t)n, "## The bar for this kind",
+                     engine_prompt_template_body(o->kind, "judging")));
+#undef EMIT
 
     int m;
     if (o->no_group) {
@@ -1217,6 +1286,64 @@ static void write_receipt(const struct unit_opts *o,
     }
 }
 
+/* The sequence, not the one-run snapshot above. One JSON line appended to
+ * <state-dir>/engine_receipts.chainlog; see engine/engine_receipt.h. */
+static void append_unit_receipt(const struct unit_opts *o,
+                                const struct engine_vendor *v,
+                                const struct engine_usage *usage,
+                                const struct engine_gate_reading *g,
+                                size_t files_changed, int attempts,
+                                int64_t dispatch_latency_ms,
+                                int64_t proof_latency_ms,
+                                int http_status,
+                                enum engine_verdict verdict,
+                                const char *task_sha3)
+{
+    if (!o->state_dir || !o->state_dir[0])
+        return;
+    char path[1024];
+    if ((size_t)snprintf(path, sizeof(path), "%s/%s",
+                         o->state_dir, ENGINE_RECEIPT_FILENAME) >= sizeof(path))
+        return;
+
+    char template_hex[65] = {0};
+    if (o->kind && o->kind[0]) {
+        uint8_t digest[32];
+        engine_prompt_template_sha3(o->kind, digest);
+        zcl_hex_encode(digest, 32, template_hex);
+    }
+
+    struct engine_receipt r = {
+        .ts = clock_now_wall_ms() / 1000,
+        .engine = v->id,
+        .model = o->model ? o->model
+                          : (v->default_model ? v->default_model : ""),
+        .kind = o->kind,
+        .template_sha3 = template_hex[0] ? template_hex : NULL,
+        .rules_shown = NULL,
+        .rules_count = 0,
+        .task_sha3 = task_sha3,
+        .group = o->group,
+        .prompt_tokens = usage->tokens_known ? usage->prompt_tokens
+                                             : ENGINE_RECEIPT_UNREPORTED,
+        .completion_tokens = usage->tokens_known ? usage->completion_tokens
+                                                 : ENGINE_RECEIPT_UNREPORTED,
+        .wall_ms = dispatch_latency_ms + proof_latency_ms,
+        .http_status = http_status,
+        .worktree_head = NULL,
+        .outcome = {
+            .applied = files_changed > 0,
+            .groups_ran = g->groups_ran,
+            .groups_failed = g->groups_failed,
+            .gate_pass = engine_verdict_is_pass(verdict),
+            .retries = attempts > 0 ? attempts - 1 : 0,
+            .lines_changed = (int64_t)files_changed,
+            .lint_rc = ENGINE_RECEIPT_UNREPORTED,
+        },
+    };
+    (void)engine_receipt_append(path, &r, NULL);
+}
+
 /* ── the lifecycle ───────────────────────────────────────────────────── */
 
 /* Dispatch, with the per-vendor retry budget and the breaker in front of it.
@@ -1321,6 +1448,32 @@ int main(int argc, char **argv)
     char *task = read_file(o.task_path, UNIT_MAX_TASK_BYTES, &task_len);
     if (!task)
         return 2;
+    char task_sha3_hex[65];
+    {
+        uint8_t digest[32];
+        zcl_sha3_256((const unsigned char *)task, task_len, digest);
+        zcl_hex_encode(digest, 32, task_sha3_hex);
+    }
+
+    /* --kind wins over the task file's own header; see
+     * engine_prompt_kind_from_header(). A kind that names no complete
+     * template is refused HERE, before a prompt is composed and long before
+     * money is spent, because the defect it produces — a section heading
+     * with nothing under it — is invisible to the shape audit. */
+    if (!o.kind || !o.kind[0])
+        o.kind = engine_prompt_kind_from_header(task);
+    if (o.kind && o.kind[0]) {
+        if (!engine_prompt_kind_is_complete(o.kind)) {
+            free(task);
+            return fail_setup("that --kind has no usable prompt template; "
+                              "run --list for the kinds this build declares");
+        }
+        engine_emit(stdout, "  kind:       %s\n", o.kind);
+    } else {
+        engine_emit(stdout,
+                    "  kind:       none declared (no template bodies; pass "
+                    "--kind or add a `kind:` header to the task file)\n");
+    }
 
     /* Fail-closed: a named territory must resolve, or the unit does not go
      * out. Dispatching with an unresolvable label is what this replaces. */
@@ -1557,6 +1710,9 @@ int main(int argc, char **argv)
     write_receipt(&o, v, &dr.reply.usage, &dr.cli_observation, &gate, changed,
                   dr.attempts, dr.dispatch_latency_ms, proof_latency_ms,
                   verdict);
+    append_unit_receipt(&o, v, &dr.reply.usage, &gate, changed, dr.attempts,
+                        dr.dispatch_latency_ms, proof_latency_ms,
+                        dr.http_status, verdict, task_sha3_hex);
     engine_emit(stdout, "engine_unit: %s\n", engine_verdict_name(verdict));
     engine_emit(stdout, "  review the diff before anything else: git -C %s diff\n",
                 workdir);

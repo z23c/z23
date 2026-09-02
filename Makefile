@@ -10660,6 +10660,7 @@ ENGINE_UNIT_SRCS = tools/engine_unit.c \
 	engine/modules/engine/src/engine_err.c \
 	engine/modules/engine/src/engine_patch.c \
 	engine/modules/engine/src/engine_prompt.c \
+	engine/modules/engine/src/engine_receipt.c \
 	engine/modules/engine/src/engine_secret.c \
 	engine/modules/engine/src/engine_verdict.c \
 	engine/modules/engine/src/engine_wire_request.c \
