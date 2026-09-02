@@ -34,6 +34,10 @@
 #      and `zcode use` then builds, installs and names that program
 #      (bin/wordcount) under the same build receipt as the library — this
 #      proof runs no compiler.
+#  10. Ask-to-running-program time and the exact C23 source-closure reuse
+#      ratio are measured across the roots held by at least two nodes.
+#  11. Independently learned source facts publish as signed reproduction
+#      receipts: A consumes B's receipt, then B consumes C's.
 #
 # The fixture is deliberately small and real: tools/dev/fixtures/commons_journey
 # holds z23/textstat (a finished, dependency-free counter package) and
@@ -297,6 +301,13 @@ cj_node_dir() {
 }
 cj_sha3_on() { cj_on "$1" openssl dgst -sha3-256 "$2" | awk '{print $NF}'; }
 cj_bytes_on() { cj_on "$1" wc -c "$2" | awk '{print $1}'; }
+
+# Exact C23 source bytes in one rooted tree.  One wc invocation per path keeps
+# this portable to macOS (no GNU find/sort extensions) and safe for spaces.
+cj_c23_source_bytes() {
+    find "$1" -type f \( -name '*.c' -o -name '*.h' \) \
+        -exec wc -c {} \; | awk '{ total += $1 } END { print total + 0 }'
+}
 # The C23 acceptance helper as the node sees it (shipped in multi-host mode).
 cj_helper_on() {
     local rpc; rpc="$(cj_node_rpc "$1")"
@@ -734,6 +745,42 @@ cj_publish_record() {
     cj_require_ok "node $node $ns $kind commit $root" "$commit"
 }
 
+# Consume one other node's signed SOURCE_REPRODUCTION_ACK through ordinary
+# DHT discovery.  The canonical wire is required: a displayed root alone is
+# not evidence another worker can independently verify and bind later.
+CJ_SIGNED_RECEIPTS_CONSUMED=0
+cj_consume_source_receipt() {
+    local consumer="$1" producer_node_id="$2" package_root="$3"
+    local source_root="$4" attempt=0 out count i provider semantic wire
+    while [ "$attempt" -lt 6 ]; do
+        out="$("cj_$consumer" zcode network records \
+            --input="{\"kind\":\"source_reproduction_ack\",\"namespace\":\"zclassic23.source\",\"transport_root\":\"$package_root\",\"include_evidence_wires\":true}" || true)"
+        if [ "$(cj_field ok "$out" False)" = True ]; then
+            count="$(cj_field data.count "$out" 0)"
+            i=0
+            while [ "$i" -lt "$count" ]; do
+                provider="$(cj_field "data.records.$i.provider_node_id" "$out" '')"
+                semantic="$(cj_field "data.records.$i.semantic_root" "$out" '')"
+                wire="$(cj_field "data.records.$i.record_wire" "$out" '')"
+                if [ "$provider" = "$producer_node_id" ] &&
+                   [ "$semantic" = "$source_root" ] &&
+                   [ -n "$wire" ] &&
+                   [ "$(cj_field "data.records.$i.conflicted" "$out" False)" = False ] &&
+                   [ "$(cj_field "data.records.$i.superseded" "$out" False)" = False ]; then
+                    CJ_SIGNED_RECEIPTS_CONSUMED=$((CJ_SIGNED_RECEIPTS_CONSUMED + 1))
+                    printf '%s\n' "$out" >"$DHT_WORK/source-receipt-$consumer-${producer_node_id:0:16}.json"
+                    cj_note "node ${consumer^^} consumed node ${producer_node_id:0:12}…'s signed source receipt"
+                    return 0
+                fi
+                i=$((i + 1))
+            done
+        fi
+        attempt=$((attempt + 1))
+        sleep 2
+    done
+    cj_die "node $consumer did not consume the signed source receipt from $producer_node_id: $out"
+}
+
 cj_announce_package() {
     local node="$1" root="$2" transport="$3" seq="$4"
     cj_publish_record "$node" zclassic23.package pointer  "$root" "$transport" "$seq"
@@ -1095,6 +1142,14 @@ cj_journey_create_missing() {
       "$CJ_TEXTSTAT_ROOT" ] ||
         cj_die "the candidate packet bound a different dependency root"
     cj_write_missing_behavior "$candidate"
+    CJ_REUSED_C23_BYTES="$(cj_c23_source_bytes "$CJ_TEXTSTAT_SRC")"
+    CJ_APPLICATION_C23_BYTES="$(cj_c23_source_bytes "$candidate")"
+    CJ_C23_CLOSURE_BYTES=$((CJ_REUSED_C23_BYTES + CJ_APPLICATION_C23_BYTES))
+    [ "$CJ_REUSED_C23_BYTES" -gt 0 ] &&
+    [ "$CJ_APPLICATION_C23_BYTES" -gt 0 ] &&
+    [ "$CJ_C23_CLOSURE_BYTES" -gt "$CJ_REUSED_C23_BYTES" ] ||
+        cj_die "the C23 source closure could not be measured"
+    CJ_REUSE_RATIO_BPS=$((CJ_REUSED_C23_BYTES * 10000 / CJ_C23_CLOSURE_BYTES))
     # `datadir` is what turns this from a local-only projection into a real
     # submission by the live node: the requester binds the immutable action
     # and asks the overlay for an independent prover. A node never proves its
@@ -1437,6 +1492,8 @@ cj_journey_remote_reproduction() {
     CJ_APP_BYTES="$CJ_FETCH_BYTES"
     cj_note "node B fetched the accepted application: $CJ_APP_BYTES bytes"
     cj_reproduce_accepted_source b "$DHT_DD_B"
+    cj_consume_source_receipt a "$CJ_NODE_B" "$CJ_APP_ROOT" \
+        "$CJ_ACCEPTED_SOURCE"
 }
 
 # Four ways to hand a node something that is not what it claims to be. Each
@@ -2269,6 +2326,8 @@ cj_journey_publisher_disappears() {
     cj_fetch_package c "$CJ_APP_ROOT" "$CJ_APP_TRANSPORT"
     cj_note "node C fetched the accepted application from B ($CJ_FETCH_BYTES bytes) — with A gone"
     cj_reproduce_accepted_source c "$DHT_DD_C"
+    cj_consume_source_receipt b "$CJ_NODE_C" "$CJ_APP_ROOT" \
+        "$CJ_ACCEPTED_SOURCE"
     cj_use_package c "$CJ_APP_ROOT"
     cj_on c test -d "$DHT_DD_C/zcode/installed/$CJ_APP_ROOT" ||
         cj_die "node C admitted the accepted application but installed nothing"
@@ -2524,7 +2583,13 @@ cj_write_facts() {
         printf 'accepted_source_root  = %s\n' "$CJ_ACCEPTED_SOURCE"
         printf 'accepted_app_root     = %s\n' "$CJ_APP_ROOT"
         printf 'ask_to_visible_result = %s s\n' "$CJ_SECS_RESULT"
+        printf 'ask_to_running_program = %s s\n' "$CJ_SECS_RUNNING"
         printf 'remote_reproduction   = %s s\n' "$CJ_SECS_REPRO"
+        printf 'reuse_ratio           = %s/%s C23 source bytes (%s.%02d%%), exact-root closure on 2 nodes\n' \
+            "$CJ_REUSED_C23_BYTES" "$CJ_C23_CLOSURE_BYTES" \
+            "$((CJ_REUSE_RATIO_BPS / 100))" "$((CJ_REUSE_RATIO_BPS % 100))"
+        printf 'signed_receipts_used  = %s source-reproduction receipts (B -> A, C -> B)\n' \
+            "$CJ_SIGNED_RECEIPTS_CONSUMED"
         printf 'bytes_over_the_wire   = %s (reused package) + %s (accepted application)\n' \
             "$CJ_TEXTSTAT_BYTES" "$CJ_APP_BYTES"
         printf 'reused_package_match  = byte-identical on both nodes (%s bytes)\n' "$CJ_LIB_BYTES"
@@ -2606,6 +2671,7 @@ cj_journey_remote_reproduction
 CJ_SECS_REPRO=$(( $(date +%s) - CJ_T_REPRO ))
 cj_journey_tamper_refusals
 cj_journey_use_app
+CJ_SECS_RUNNING=$(( $(date +%s) - CJ_T0 ))
 # The tenth step moves the work, not the source: the compile cache itself
 # leaves node B as one ordinary package, and node C — which never compiled
 # this application — rebuilds it with zero compilers and the same receipt.
@@ -2635,7 +2701,9 @@ CJ_VERDICT_SCHEMA=zcl.commons_journey_acceptance.v1
 CJ_VERDICT_TOKEN=PASS
 CJ_STEPS_PROVEN=12
 CJ_STEPS_TOTAL=12
-CJ_VERDICT="{\"schema\":\"$CJ_VERDICT_SCHEMA\",\"verdict\":\"$CJ_VERDICT_TOKEN\",\"steps_proven\":$CJ_STEPS_PROVEN,\"steps_total\":$CJ_STEPS_TOTAL,\"complete\":true,\"reuse_before_creation\":true,\"no_false_reuse_claim\":true,\"peer_to_peer_fetch\":true,\"fetched_source_inert\":true,\"explicit_local_admission\":true,\"independent_remote_build\":true,\"approved_signer_required\":true,\"explicit_human_acceptance\":true,\"accepted_work_published\":true,\"remote_source_reproduced\":true,\"byte_identical_artifacts\":true,\"tamper_refused_by_name\":[\"source\",\"dependency\",\"receipt\",\"artifact\"],\"application_ran\":true,\"compile_cache_carried_as_package\":true,\"zero_compiler_rebuild\":true,\"carrier_receipt_identical\":true,\"existing_package_changed\":true,\"behavior_change_measured_before_and_after\":true,\"changed_version_is_its_own_root\":true,\"central_services_contacted\":0,\"human_first_terminal_output\":true}"
+[ "$CJ_SIGNED_RECEIPTS_CONSUMED" -ge 2 ] ||
+    cj_die "fewer than two cross-node signed source receipts were consumed"
+CJ_VERDICT="{\"schema\":\"$CJ_VERDICT_SCHEMA\",\"verdict\":\"$CJ_VERDICT_TOKEN\",\"steps_proven\":$CJ_STEPS_PROVEN,\"steps_total\":$CJ_STEPS_TOTAL,\"complete\":true,\"reuse_before_creation\":true,\"no_false_reuse_claim\":true,\"peer_to_peer_fetch\":true,\"fetched_source_inert\":true,\"explicit_local_admission\":true,\"independent_remote_build\":true,\"approved_signer_required\":true,\"explicit_human_acceptance\":true,\"accepted_work_published\":true,\"remote_source_reproduced\":true,\"signed_source_reproduction_receipts_consumed\":$CJ_SIGNED_RECEIPTS_CONSUMED,\"ask_to_running_program_seconds\":$CJ_SECS_RUNNING,\"reuse_ratio\":{\"basis\":\"exact_c23_source_closure_bytes\",\"reused_bytes\":$CJ_REUSED_C23_BYTES,\"closure_bytes\":$CJ_C23_CLOSURE_BYTES,\"basis_points\":$CJ_REUSE_RATIO_BPS,\"nodes\":2},\"byte_identical_artifacts\":true,\"tamper_refused_by_name\":[\"source\",\"dependency\",\"receipt\",\"artifact\"],\"application_ran\":true,\"compile_cache_carried_as_package\":true,\"zero_compiler_rebuild\":true,\"carrier_receipt_identical\":true,\"existing_package_changed\":true,\"behavior_change_measured_before_and_after\":true,\"changed_version_is_its_own_root\":true,\"central_services_contacted\":0,\"human_first_terminal_output\":true}"
 # The multi-host leg adds its fact only when it actually ran: the publisher
 # disappeared and node C still reproduced and ran the exact accepted bytes.
 if [ "$CJ_PUBLISHER_SURVIVAL" = 1 ]; then
