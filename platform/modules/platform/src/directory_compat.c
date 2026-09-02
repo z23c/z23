@@ -499,15 +499,6 @@ bool platform_directory_list_regular_sorted(
     return platform_directory_list_children_sorted_impl(path, NULL, out);
 }
 
-bool platform_directory_list_children_sorted(
-    const char *path, struct platform_directory_list *directories,
-    struct platform_directory_list *files)
-{
-    if (!directories || !files) return false;
-    return platform_directory_list_children_sorted_impl(path, directories,
-                                                         files);
-}
-
 #else
 #include <dirent.h>
 #include <fcntl.h>
@@ -644,11 +635,10 @@ bool platform_directory_list_regular_sorted(
     return true;
 }
 
-bool platform_directory_list_children_sorted(
+static bool platform_directory_list_children_sorted_impl(
     const char *path, struct platform_directory_list *directories,
     struct platform_directory_list *files)
 {
-    if (!directories || !files) return false;
     *directories = (struct platform_directory_list){0};
     *files = (struct platform_directory_list){0};
     struct stat root_st;
@@ -691,3 +681,12 @@ bool platform_directory_list_children_sorted(
     return true;
 }
 #endif
+
+bool platform_directory_list_children_sorted(
+    const char *path, struct platform_directory_list *directories,
+    struct platform_directory_list *files)
+{
+    if (!directories || !files) return false;
+    return platform_directory_list_children_sorted_impl(path, directories,
+                                                         files);
+}
