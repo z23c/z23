@@ -100,49 +100,65 @@ while IFS= read -r hit; do
     violations="${violations}${hit}"$'\n'
 done <<< "$raw_hits"
 
-exec_scan=$(
-    find "${PRODUCTION_ROOTS[@]}" \
-        \( -path '*/vendor/*' -o -path '*/build/*' -o -path '*/test/*' \) -prune \
-        -o \( \( -name '*.c' -o -name '*.h' \) \
-              "${LINT_FIND_PRUNE_ARGS[@]}" \) -type f -print |
-    while IFS= read -r path; do
-        [[ "$path" == "engine/models/include/models/activerecord.h" ]] && continue
-        awk -v path="$path" '
-            {
-                lines[NR] = $0
-            }
-            END {
-                call_re = "sqlite3_exec[[:space:]]*\\([[:space:]]*(&[[:space:]]*)?ndb(->|\\.)db[[:space:]]*,"
-                for (i = 1; i <= NR; i++) {
-                    if (lines[i] !~ /sqlite3_exec[[:space:]]*\(/)
-                        continue
-                    if (lines[i] ~ /\/\/[[:space:]]*raw-sql-ok:[A-Za-z][A-Za-z0-9_-]+/)
-                        continue
-                    chunk = lines[i]
-                    for (j = i + 1; j <= NR && length(chunk) < 900; j++)
-                        chunk = chunk "\n" lines[j]
-                    if (chunk !~ call_re)
-                        continue
+# Was: one awk fork PER FILE (~4,173 candidate files under PRODUCTION_ROOTS)
+# to find multi-line sqlite3_exec(ndb->db, "INSERT/DELETE/UPDATE/REPLACE
+# ...") calls. Batched into ONE awk invocation over every candidate file:
+# gawk's BEGINFILE/ENDFILE (already used elsewhere in this tree, see
+# check_model_ar_lifecycle.sh) resets the per-file line buffer exactly the
+# way a fresh process did, and FILENAME/FNR stand in for the old $path/NR.
+# Logic inside ENDFILE is untouched from the old per-file END block.
+mapfile -t exec_candidates < <(find "${PRODUCTION_ROOTS[@]}" \
+    \( -path '*/vendor/*' -o -path '*/build/*' -o -path '*/test/*' \) -prune \
+    -o \( \( -name '*.c' -o -name '*.h' \) \
+          "${LINT_FIND_PRUNE_ARGS[@]}" \) -type f -print)
+exec_files=()
+for exec_path in "${exec_candidates[@]}"; do
+    [[ "$exec_path" == "engine/models/include/models/activerecord.h" ]] && continue
+    exec_files+=("$exec_path")
+done
 
-                    tail = chunk
-                    sub(".*" call_re, "", tail)
-                    if (!match(tail, /"([^"\\]|\\.)*"/))
-                        continue
-                    sql = substr(tail, RSTART + 1, RLENGTH - 2)
-                    sub(/^[[:space:]]+/, "", sql)
-                    upper = toupper(sql)
-                    gsub(/[[:space:]]+/, " ", upper)
-                    if (upper ~ /^(INSERT|DELETE|UPDATE|REPLACE) /) {
-                        split(upper, parts, " ")
-                        printf "%s:%d: raw node.db sqlite3_exec %s; use ar_exec_write_sql()/AR_STEP_WRITE or a reviewed helper\n",
-                               path, i, parts[1]
-                    }
+if [ "${#exec_files[@]}" -gt 0 ]; then
+    exec_scan=$(awk '
+        BEGINFILE {
+            delete lines
+        }
+        {
+            lines[FNR] = $0
+        }
+        ENDFILE {
+            call_re = "sqlite3_exec[[:space:]]*\\([[:space:]]*(&[[:space:]]*)?ndb(->|\\.)db[[:space:]]*,"
+            for (i = 1; i <= FNR; i++) {
+                if (lines[i] !~ /sqlite3_exec[[:space:]]*\(/)
+                    continue
+                if (lines[i] ~ /\/\/[[:space:]]*raw-sql-ok:[A-Za-z][A-Za-z0-9_-]+/)
+                    continue
+                chunk = lines[i]
+                for (j = i + 1; j <= FNR && length(chunk) < 900; j++)
+                    chunk = chunk "\n" lines[j]
+                if (chunk !~ call_re)
+                    continue
+
+                tail = chunk
+                sub(".*" call_re, "", tail)
+                if (!match(tail, /"([^"\\]|\\.)*"/))
+                    continue
+                sql = substr(tail, RSTART + 1, RLENGTH - 2)
+                sub(/^[[:space:]]+/, "", sql)
+                upper = toupper(sql)
+                gsub(/[[:space:]]+/, " ", upper)
+                if (upper ~ /^(INSERT|DELETE|UPDATE|REPLACE) /) {
+                    split(upper, parts, " ")
+                    printf "%s:%d: raw node.db sqlite3_exec %s; use ar_exec_write_sql()/AR_STEP_WRITE or a reviewed helper\n",
+                           FILENAME, i, parts[1]
                 }
             }
-        ' "$path" || exit 2
-    done
-)
-exec_scan_rc=$?
+        }
+    ' "${exec_files[@]}")
+    exec_scan_rc=$?
+else
+    exec_scan=""
+    exec_scan_rc=0
+fi
 if [[ $exec_scan_rc -ge 2 ]]; then
     exit "$exec_scan_rc"
 fi
@@ -167,15 +183,75 @@ context_count=$(awk 'NF { count++ } END { print count + 0 }' <<< "$context_files
 gate_require_scanned "$context_count" 2 "check_raw_sqlite.wallet_owner" \
     "expected controller and service C/header sources"
 
-while IFS= read -r path; do
-    [[ -z "$path" ]] && continue
-    normalized=$(awk -f tools/lint/strip_c_comments.awk "$path" | \
-        LC_ALL=C tr '[:upper:]' '[:lower:]' | tr -d '"[:space:]')
-    normalize_rc=$?
-    if [[ $normalize_rc -ne 0 ]]; then
-        echo "check_raw_sqlite: FATAL — wallet-owner normalization failed for $path" >&2
+# Was: per file (~924 controller/service sources), fork strip_c_comments.awk
+# + two `tr` processes (~2,772 forks) just to get one normalized, flattened
+# string. Batched into ONE awk invocation across every context file: the
+# comment-stripping char scan below is copied verbatim from
+# tools/lint/strip_c_comments.awk's default (strings=0, keep literal
+# content) mode — this file does not touch that shared script, since other
+# gates depend on it — with a BEGINFILE reset so per-file state (block-
+# comment tracking, the flattened accumulator) can never bleed across a
+# file boundary, then lower-cases and strips '"'/whitespace in the same
+# pass (gawk tolower()+gsub standing in for `tr`). One "path\tnormalized"
+# line per file; the loop below reads it into an array with the bash `read`
+# builtin (no forks) and every table/controller check is untouched.
+declare -A NORMALIZED=()
+ctx_norm_files=()
+while IFS= read -r ctx_path; do
+    [[ -n "$ctx_path" ]] && ctx_norm_files+=("$ctx_path")
+done <<< "$context_files"
+if [ "${#ctx_norm_files[@]}" -gt 0 ]; then
+    ctx_tsv=$(awk '
+        BEGIN { dq = "\""; sq = sprintf("%c", 39) }
+        BEGINFILE { inblk = 0; acc = "" }
+        {
+            line = $0; out = ""; i = 1; n = length(line)
+            while (i <= n) {
+                c = substr(line, i, 1)
+                d = substr(line, i, 2)
+                if (inblk) {
+                    if (d == "*/") { inblk = 0; i += 2 } else { i++ }
+                    continue
+                }
+                if (d == "/*") { out = out " "; inblk = 1; i += 2; continue }
+                if (d == "//") { out = out " "; break }
+                if (c == dq || c == sq) {
+                    q = c
+                    lit = c
+                    i++
+                    while (i <= n) {
+                        e = substr(line, i, 1)
+                        if (e == "\\") { lit = lit substr(line, i, 2); i += 2; continue }
+                        lit = lit e
+                        i++
+                        if (e == q) break
+                    }
+                    out = out lit
+                    continue
+                }
+                out = out c
+                i++
+            }
+            s = tolower(out)
+            gsub(/["\t\n\r\f\v ]/, "", s)
+            acc = acc s
+        }
+        ENDFILE { printf "%s\t%s\n", FILENAME, acc }
+    ' "${ctx_norm_files[@]}")
+    ctx_tsv_rc=$?
+    if [[ $ctx_tsv_rc -ne 0 ]]; then
+        echo "check_raw_sqlite: FATAL — wallet-owner normalization failed (awk rc=$ctx_tsv_rc)" >&2
         exit 2
     fi
+    while IFS=$'\t' read -r ctx_norm_path ctx_norm_val; do
+        [[ -n "$ctx_norm_path" ]] || continue
+        NORMALIZED["$ctx_norm_path"]="$ctx_norm_val"
+    done <<< "$ctx_tsv"
+fi
+
+while IFS= read -r path; do
+    [[ -z "$path" ]] && continue
+    normalized="${NORMALIZED[$path]-}"
     for table in wallet_utxos wallet_transactions wallet_sapling_notes; do
         if [[ "$normalized" == *deletefrom"$table"* ||
               "$normalized" == *deletefrommain."$table"* ||
