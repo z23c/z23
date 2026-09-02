@@ -7,6 +7,7 @@
   "include_dir": "include",
   "source_dir": "src",
   "dependencies": [],
+  "programs": ["app/main.c"],
   "files": [
     "LICENSE",
     "README.md",
