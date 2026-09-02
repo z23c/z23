@@ -6,8 +6,7 @@
  * ----------------------------------------
  * The reducer kernel folds chain state under progress_store_tx_lock() +
  * BEGIN IMMEDIATE on the progress_store connection. Projection co-writers
- * (the -addressindex / -txindex folds, the created_outputs retention prune,
- * the created_outputs replay backfill) historically shared that ONE handle
+ * (the -addressindex / -txindex folds) historically shared that ONE handle
  * and ONE tx lock, so a projection batch's BEGIN IMMEDIATE serialised on the
  * exact mutex the reducer drive needs — projection work could stall H*.
  *
@@ -25,10 +24,14 @@
  * Do not take progress_store_tx_lock while holding projection_store_tx_lock
  * either; the two lock domains are strictly non-overlapping.
  *
- * Only PROJECTION tables (address_index, txindex, created_outputs, and their
- * kin) are ever written through this handle. Consensus/kernel tables
- * (coins_kv, anchor_kv, nullifier_kv, stage_cursor, every *_log) STAY on the
- * progress_store handle — the kernel remains their single writer.
+ * Only the projection STAY set (address_index, address_index_state, txindex,
+ * txindex_state) is written through this handle. Consensus/kernel tables
+ * (coins_kv, anchor_kv, nullifier_kv, stage_cursor, and every *_log) stay on
+ * the progress_store handle. The replayable created_outputs resolver cache is
+ * also co-located in the kernel file because reducer stages write/read it; it
+ * is not consensus truth. See consensus_db.h for the executable migration
+ * boundary. This handle separation proves physical isolation, not one
+ * code-level writer for each kernel fact.
  *
  * Threading
  * ---------
@@ -45,8 +48,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
-/* Max length of the projection.kv path (sizing buffers). Matches
- * progress_store's ceiling — it is the same physical file. */
+/* Max length of the progress.kv path (sizing buffers). It deliberately uses
+ * the same bound as the separate consensus.db path. */
 #define PROJECTION_STORE_PATH_MAX 1024
 
 /* Open the <datadir>/progress.kv projection file in WAL mode, creating it if
@@ -80,10 +83,9 @@ void projection_store_tx_lock(void);
 bool projection_store_tx_trylock(void);
 void projection_store_tx_unlock(void);
 
-/* Graceful close: sqlite3_close of the projection handle. Safe to call
- * repeatedly and from shutdown paths. Close the projection store BEFORE
- * progress_store (the kernel connection owns the file's WAL checkpoint on its
- * own close). */
+/* Graceful close: checkpoint+close of this projection handle and its own WAL.
+ * Safe to call repeatedly and from shutdown paths. The kernel store has a
+ * separate file, handle, and WAL lifecycle. */
 void projection_store_close(void);
 
 /* For `z23 dumpstate projection_store` (dump-state convention). `out` is

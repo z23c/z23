@@ -45,8 +45,10 @@
  * progress_meta + the stage *_log journals it commits with) lives in its OWN
  * SQLite file so its fsync-bearing batch commit stops sharing a WAL journal with
  * the projection co-writers. progress.kv survives only as the projection file
- * (projection_store's handle) holding the Class C address_index / txindex /
- * created_outputs tables. progress_store_open() migrates a legacy progress.kv
+ * (projection_store's handle) holding the Class C address_index / txindex
+ * tables and their state rows. created_outputs stays in the kernel because
+ * reducer stages use it inside the kernel transaction domain.
+ * progress_store_open() migrates a legacy progress.kv
  * kernel into consensus.db in place before opening it, so the public API is
  * unchanged. */
 #define PROGRESS_STORE_FILENAME  CONSENSUS_DB_FILENAME
@@ -118,7 +120,7 @@ static bool progress_store_candidate_state(sqlite3 *db, bool *contained)
     return ok;
 }
 
-/* progress.kv's page cache + mmap window scale with measured RAM (via
+/* consensus.db's page cache + mmap window scale with measured RAM (via
  * hw_profile), capped at this file's historical ceilings (1 GiB cache, 2
  * GiB mmap — a pure read-path/memory-residency control, unrelated to WAL
  * journaling or on-disk format). Same fixed values on any >=32 GiB-RAM box;
@@ -169,7 +171,7 @@ static bool apply_pragmas(sqlite3 *db)
 }
 
 /* Integrity gate on open. Mirrors node.db's db_quick_check_ok
- * (engine/models/src/database.c). progress.kv hosts every stage cursor AND the
+ * (engine/models/src/database.c). consensus.db hosts every stage cursor AND the
  * coins_kv UTXO table; if SQLite reports a malformed file, a mid-fold
  * SQLITE_CORRUPT turns into a permanent JOB_FATAL that pins H* forever with no
  * named blocker. Detecting it here lets the open path quarantine + re-derive
@@ -182,7 +184,7 @@ static bool progress_store_quick_check_ok(sqlite3 *db)
 }
 
 /* Move the corrupt consensus.db (+ -wal/-shm) aside so the reopen creates a
- * FRESH, empty store. progress.kv/consensus.db is a DERIVED store: the
+ * FRESH, empty store. consensus.db is a DERIVED store: the
  * coins_kv UTXO set it holds is re-seeded at boot from consensus_snapshot.db
  * (or the anchor), and the stage cursors re-fold from there. An empty store
  * therefore triggers the normal re-derivation rather than serving torn state.
@@ -344,13 +346,14 @@ bool progress_store_open(const char *datadir)
     }
 #endif
 
-    /* Integrity gate. progress.kv is the authority store for the stage cursors
+    /* Integrity gate. consensus.db is the authority store for the stage cursors
      * and the coins_kv UTXO table; a corrupt file otherwise surfaces as a
      * mid-fold SQLITE_CORRUPT → JOB_FATAL that pins H* permanently with no
      * named blocker. On a non-"ok" quick_check, quarantine the file and reopen
      * a FRESH one — boot re-seeds coins_kv from consensus_snapshot.db / the
-     * anchor and re-folds the stages from there (progress.kv is a derived
-     * projection, not the source of truth). AUTO-TERMINATING + idempotent: a
+     * anchor and re-folds the stages from there (the kernel is derived chain
+     * state, not an independently trusted source). AUTO-TERMINATING +
+     * idempotent: a
      * fresh, just-created store that ALSO fails quick_check is a disk/fs fault,
      * not corrupt derived state — log a terminal blocker and fail the open
      * instead of quarantine-looping. */

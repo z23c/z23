@@ -5,25 +5,30 @@ you can reason about the whole node.
 
 ## 1. The node in four lines
 
-1. There is one durable record on disk: an append-only log of facts (in
-   `consensus.db`, a SQLite kernel store). It is the only authority for
-   consensus state. `progress.kv` is a separate, secondary SQLite file that
-   holds only rebuildable projections (`address_index`, `txindex`) — never
-   consensus state.
+1. There is one physical transaction domain for reducer chain state:
+   `consensus.db`. It holds the mutable coin/shielded state, stage cursors,
+   verdict journals, inverse deltas, and kernel metadata that must recover
+   coherently. `progress.kv` is a separate SQLite file whose declared STAY set
+   contains only the rebuildable address and transaction indexes.
 2. There is one kind of worker — a **reducer stage**. Each stage reads the height
    its upstream stage has finished, then either **advances its own cursor by one
-   height** (writing one log row) **or names a typed blocker** saying exactly why
-   it cannot. There are eight of these stages in a fixed line.
-3. Everything else — the wallet, the block explorer, the peer list, the
-   block-index view — is a **projection**: a read-only summary rebuilt by re-reading
-   the log. Projections never decide anything; delete one and it rebuilds.
+   height** (normally committing its cursor, verdict, and state changes
+   together) **or names a typed blocker** saying exactly why it cannot. There
+   are eight of these stages in a fixed line. The opt-in bulk-fold RAM overlay
+   is the explicit exception: coin bytes flush later and boot rewinds to its
+   durable watermark after a crash.
+3. Address/transaction indexes and explorer summaries are projections. The
+   wallet, peers, Commons, and other product domains are not all projections of
+   the chain kernel; they retain separately scoped persistent authorities.
 4. Health is **one number**: `network_tip − log_head`. `network_tip` is the best
    block height the network has told us about; `log_head` is the highest height the
    eighth stage (`tip_finalize`) has finalized. If that number is shrinking, the
    node is making progress. If it is stuck, some stage has named a blocker — there
    is no silent stop.
 
-That is the entire mental model. The eight stages are below.
+That is the compact runtime model. The exact proof boundary and the presently
+unproven single-writer claim are in
+[`CHAIN_AUTHORITY.md`](CHAIN_AUTHORITY.md). The eight stages are below.
 
 ## 2. The state machine — eight stages
 
@@ -35,9 +40,14 @@ comparing stages (`reducer_frontier.c:149` `frontier_next_cursor` — served tip
 treated as next-height C+1). A stage may
 only run at heights its upstream stage has already finished (the upstream cursor is
 its floor). It does one of two
-things at that height: advance the cursor by one and write one authoritative log
-row keyed by height, or stop and name a blocker. Cursor + log row are written in
-the same database transaction, so a crash resumes cleanly at the stored cursor.
+things at that height: advance the cursor by one and write its authoritative
+verdict row (plus any stage-owned state changes), or stop and name a blocker.
+In the normal SQLite path those changes share a database transaction, so a
+crash resumes at a coherent stored boundary. In opt-in bulk-fold mode, the
+stage cursor/verdict can commit while coin changes remain in RAM; a later
+`coins_ram_flush` transaction persists the overlay, watermark, applied height,
+and cursor, and boot purges/rewinds an unflushed tail. Supervised recovery also
+writes the kernel under a narrower contract. Neither is another forward stage.
 
 | # | Stage | What it proves | Cursor at height N means | What "stuck" looks like |
 |---|-------|----------------|--------------------------|-------------------------|
@@ -110,7 +120,7 @@ no new command route or schema.
 ## 4. What is real vs what is being deleted
 
 **Real (load-bearing, stays):**
-- The append-only fact log + per-stage success rows (ok=1). `H*` = the longest
+- The kernel state + per-stage verdict rows (ok=1). `H*` = the longest
   contiguous ok=1 prefix from the anchor. This is what makes a silent halt
   impossible to represent.
 - The eight-stage reducer pipeline (advance-cursor-or-name-blocker).
@@ -171,5 +181,6 @@ and `z23 dumpstate reducer_frontier`.
    one `step_*` function that does exactly the advance-or-name-a-blocker contract
    described in section 2.
 
-One log, one kind of worker, one health number. Everything else is a view over the
-log or a stage in the line.
+One kernel transaction domain, one ordered reducer pipeline, and a named reason
+when progress stops. Physical centralization is real; code-level single-writer
+ownership still needs the capability proof described in `CHAIN_AUTHORITY.md`.

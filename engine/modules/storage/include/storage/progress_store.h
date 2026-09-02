@@ -1,6 +1,6 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
- * progress_store — singleton owner of the `progress.kv` SQLite file.
+ * progress_store — singleton process handle for the `consensus.db` kernel.
  *
  * Why this exists
  * ----------------
@@ -11,14 +11,18 @@
  * top of any sqlite3 handle, via the `stage_cursor` table; what was
  * missing was a *home* for that table.
  *
- * `progress.kv` is that home: a small dedicated SQLite file alongside
- * `node.db`, opened once at boot, shared by every stage. Keeping it
- * separate from `node.db` matters because:
+ * `consensus.db` is that home: a dedicated SQLite file alongside `node.db`,
+ * opened once at boot and shared by every stage. On supported non-Windows
+ * hosts a legacy `progress.kv` kernel is integrity-checked and migrated before
+ * this handle opens; Windows refuses a legacy datadir without mutation. After
+ * the flip, `progress.kv` is owned separately by projection_store. Keeping the
+ * kernel separate from `node.db` matters because:
  *
  *   - Cursor commits are tiny and on the hot path; a dedicated WAL keeps
  *     them out of the way of the much larger node.db txns.
- *   - `progress.kv` is a distinct storage engine (the durable cursor store;
- *     see docs/FRAMEWORK.md). One file == one writer-actor.
+ *   - `consensus.db` is a distinct transaction domain for reducer state (see
+ *     docs/CHAIN_AUTHORITY.md). One file and one process mutex serialize
+ *     transactions; they do not by themselves prove one code-level writer.
  *   - Future stages may want to use blob columns, FTS, or LMDB without
  *     dragging node.db's schema along.
  *
@@ -37,8 +41,10 @@
 #include <stddef.h>
 #include <stdint.h>
 
-/* Open <datadir>/progress.kv in WAL mode and ensure the stage_cursor
- * table exists. Idempotent — a second call with the same datadir is a
+/* Open <datadir>/consensus.db in WAL mode and ensure the stage_cursor table
+ * exists. A populated legacy progress.kv kernel is migrated first on
+ * supported non-Windows hosts; Windows refuses that legacy layout without
+ * mutation. Idempotent — a second call with the same datadir is a
  * no-op and returns true. A second call with a *different* datadir
  * returns false (one process, one progress store). */
 bool progress_store_open(const char *datadir);
@@ -53,10 +59,10 @@ sqlite3 *progress_store_db(void);
  * a COUNT(*) on every schema-ensure call. */
 uint64_t progress_store_epoch(void);
 
-/* Max length of the progress.kv path (sizing buffers for progress_store_path). */
+/* Max length of the consensus.db path (for progress_store_path buffers). */
 #define PROGRESS_STORE_PATH_MAX 1024
 
-/* Snapshot the open progress.kv file path into out[cap] (false + out[0]='\0'
+/* Snapshot the open consensus.db file path into out[cap] (false + out[0]='\0'
  * when not open or it would not fit). For a reader that needs its OWN
  * connection — e.g. a bulk scan that must NOT hold progress_store_tx_lock for
  * its whole duration (which would stall the reducer drive on that lock). */
@@ -75,7 +81,7 @@ sqlite3 *progress_store_open_reader(void);
  * never by a path spelling that may have been swapped after boot. */
 bool progress_store_directory_matches_fd(sqlite3 *db, int dir_fd);
 
-/* Serialize operations on the singleton progress.kv handle. SQLite
+/* Serialize operations on the singleton consensus.db handle. SQLite
  * connections cannot run more than one statement/transaction safely across
  * threads unless the caller serializes them. This lock is recursive so a
  * stage step can call read helpers while its outer transaction is active. */
@@ -85,7 +91,7 @@ void progress_store_tx_lock(void);
 bool progress_store_tx_trylock(void);
 void progress_store_tx_unlock(void);
 
-/* Switch the durability PRAGMA on the open progress.kv handle.
+/* Switch the durability PRAGMA on the open consensus.db handle.
  *
  * Pure I/O performance control — changes ONLY when bytes are flushed to
  * disk, never WHAT is computed, written, or accepted:
@@ -102,7 +108,7 @@ void progress_store_tx_unlock(void);
  * not open. Takes progress_store_tx_lock internally. */
 bool progress_store_set_sync_mode(bool ibd);
 
-/* Checkpoint+truncate the WAL on the open progress.kv handle NOW, returning
+/* Checkpoint+truncate the WAL on the open consensus.db handle NOW, returning
  * the WAL file's high-water bytes to the filesystem WITHOUT closing the
  * connection. The disk_full reclaim path calls this so a near-full disk can
  * free derived bytes (the 3.1M-row cursor log's WAL) and clear. Takes
@@ -123,7 +129,7 @@ bool progress_store_dump_state_json(struct json_value *out, const char *key);
 /* ── progress_meta — small key/value table on the same store ──
  *
  * A general-purpose blob k/v table colocated with stage_cursor in
- * progress.kv. The schema is `(key TEXT PRIMARY KEY, value BLOB)`.
+ * consensus.db. The schema is `(key TEXT PRIMARY KEY, value BLOB)`.
  *
  * This table hosts:
  *   - `import_in_progress` sentinel (1-byte blob {0x01})

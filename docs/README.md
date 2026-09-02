@@ -123,8 +123,10 @@ from a hash, signature, test, or reproduction receipt.
 
 ## Understand the system
 
-- [`HOW_THE_NODE_WORKS.md`](HOW_THE_NODE_WORKS.md) — append-only fact log,
-  reducers, projections, and health.
+- [`HOW_THE_NODE_WORKS.md`](HOW_THE_NODE_WORKS.md) — reducer kernel, stages,
+  projections, and health.
+- [`CHAIN_AUTHORITY.md`](CHAIN_AUTHORITY.md) — current chain-mutation paths,
+  proof limits, and the target typed ownership boundary.
 - [`ARCHITECTURE_DIAGRAMS.md`](ARCHITECTURE_DIAGRAMS.md) — current subsystem
   and boot topology.
 - [`ROM.md`](ROM.md) — compiled checkpoint and verification layers.
