@@ -40,6 +40,11 @@
 #include <unistd.h>
 #endif
 
+#if defined(__linux__)
+extern ssize_t copy_file_range(int, off_t *, int, off_t *, size_t,
+                               unsigned int);
+#endif
+
 /* The handle layout now lives in codeindex_store_internal.h, shared with the
  * read half in codeindex_store_read.c. */
 
@@ -299,6 +304,106 @@ bool ci_store_write_image_fd(struct ci_store *s, int fd)
 #endif
 }
 
+bool ci_store_copy_image_fd(struct ci_store *s, int fd)
+{
+#if defined(_WIN32)
+    (void)s;
+    (void)fd;
+    return false;
+#else
+    if (!s || s->bound_fd < 0 || fd < 0)
+        LOG_FAIL("codeindex", "invalid source/staging fd for clone");
+    struct stat st;
+    if (fstat(s->bound_fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size <= 0)
+        LOG_FAIL("codeindex", "inspect source generation for clone");
+#if defined(__linux__)
+    off_t input_offset = 0, output_offset = 0;
+    bool kernel_copy = true;
+    while (output_offset < st.st_size) {
+        size_t want = st.st_size - output_offset < (off_t)(16 * 1024 * 1024)
+            ? (size_t)(st.st_size - output_offset) : (size_t)(16 * 1024 * 1024);
+        ssize_t copied = copy_file_range(s->bound_fd, &input_offset, fd,
+                                         &output_offset, want, 0);
+        if (copied < 0 && errno == EINTR) continue;
+        if (copied <= 0) {
+            kernel_copy = false;
+            break;
+        }
+    }
+    if (kernel_copy && output_offset == st.st_size) {
+        if (ftruncate(fd, st.st_size) != 0)
+            LOG_FAIL("codeindex", "truncate kernel-cloned generation");
+        return true;
+    }
+    if (output_offset != 0)
+        LOG_FAIL("codeindex", "partial kernel generation clone");
+#endif
+    unsigned char buf[1024 * 1024];
+    off_t offset = 0;
+    while (offset < st.st_size) {
+        size_t want = (st.st_size - offset) < (off_t)sizeof(buf)
+            ? (size_t)(st.st_size - offset) : sizeof(buf);
+        ssize_t got = pread(s->bound_fd, buf, want, offset);
+        if (got < 0 && errno == EINTR) continue;
+        if (got <= 0)
+            LOG_FAIL("codeindex", "read source generation for clone");
+        size_t done = 0;
+        while (done < (size_t)got) {
+            ssize_t put = pwrite(fd, buf + done, (size_t)got - done,
+                                 offset + (off_t)done);
+            if (put < 0 && errno == EINTR) continue;
+            if (put <= 0)
+                LOG_FAIL("codeindex", "write staging generation clone");
+            done += (size_t)put;
+        }
+        offset += got;
+    }
+    if (ftruncate(fd, st.st_size) != 0)
+        LOG_FAIL("codeindex", "truncate staging generation clone");
+    return true;
+#endif
+}
+
+struct ci_store *ci_store_open_rw_fd(int fd)
+{
+#if defined(_WIN32)
+    (void)fd;
+    return NULL;
+#else
+    if (fd < 0) LOG_NULL("codeindex", "invalid staging fd");
+    char fd_name[64], uri[128];
+    if (!platform_fd_path(fd_name, sizeof(fd_name), fd, NULL) ||
+        snprintf(uri, sizeof(uri), "file:%s?mode=rw", fd_name) <= 0)
+        LOG_NULL("codeindex", "staging fd cannot be named");
+    struct ci_store *s = zcl_calloc(1, sizeof(*s), "ci_store_staging");
+    if (!s) LOG_NULL("codeindex", "allocate staging store");
+    s->bound_fd = -1;
+    platform_positioned_file_init(&s->bound_file);
+    platform_read_mapping_init(&s->mapping);
+    pthread_mutexattr_t attr;
+    pthread_mutexattr_init(&attr);
+    pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
+    pthread_mutex_init(&s->lock, &attr);
+    pthread_mutexattr_destroy(&attr);
+    int flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX | SQLITE_OPEN_URI;
+    if (sqlite3_open_v2(uri, &s->db, flags, NULL) != SQLITE_OK) {
+        if (s->db) sqlite3_close(s->db);
+        pthread_mutex_destroy(&s->lock);
+        free(s);
+        return NULL;
+    }
+    char *err = NULL;
+    if (sqlite3_exec(s->db,
+                     "PRAGMA journal_mode=OFF; PRAGMA synchronous=OFF;",
+                     NULL, NULL, &err) != SQLITE_OK) {
+        if (err) sqlite3_free(err);
+        ci_store_close(s);
+        return NULL;
+    }
+    return s;
+#endif
+}
+
 bool ci_store_write_image_child(struct ci_store *s,
                                 struct platform_directory_child *child)
 {
@@ -392,7 +497,8 @@ bool ci_store_clear(struct ci_store *s)
     char *err = NULL;
     if (sqlite3_exec(s->db,
         "DELETE FROM files; DELETE FROM symbols; DELETE FROM includes;"
-        " DELETE FROM refs; DELETE FROM groups; DELETE FROM meta;",
+        " DELETE FROM refs; DELETE FROM groups; DELETE FROM scan_shards;"
+        " DELETE FROM meta;",
         NULL, NULL, &err) != SQLITE_OK) {
         if (err) sqlite3_free(err);
         LOG_FAIL("codeindex", "clear tables");

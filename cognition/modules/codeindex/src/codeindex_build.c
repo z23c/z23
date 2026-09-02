@@ -11,6 +11,7 @@
 
 #include "codeindex_priv.h"
 #include "codeindex/codeindex_build.h"
+#include "codeindex/codeindex_merkle.h"
 
 #include "platform/time_compat.h"
 #include "util/log_macros.h"
@@ -605,6 +606,12 @@ static bool codeindex_rebuild_internal(struct codeindex *ci,
     struct stage_identity stage_identity = {0};
     int stagefd = -1;
     struct ci_store *st = NULL;
+    struct ci_merkle *merkle = NULL;
+    struct ci_merkle_leaf *changed = NULL;
+    struct ci_merkle_leaf *current_leaves = NULL;
+    int changed_count = 0;
+    bool incremental = false;
+    uint8_t current_dep_stat[32] = {0};
 
     if (!cleanup_orphan_stages(dirfd)) {
         failure = "orphan staging cleanup failed";
@@ -615,7 +622,7 @@ static bool codeindex_rebuild_internal(struct codeindex *ci,
      * Reopen the pathname under the lock and adopt that exact fresh store
      * instead of redundantly rebuilding it. Explicit codeindex_rebuild()
      * passes false and remains a forced deterministic recompute. */
-    if (coalesce_if_fresh) {
+    if (coalesce_if_fresh && !ci->store) {
         struct ci_store *fresh = ci_store_open(ci->root);
         if (fresh) {
             bool stale = true;
@@ -633,7 +640,75 @@ static bool codeindex_rebuild_internal(struct codeindex *ci,
             /* Missing/corrupt/stale derived state is rebuilt from source.
              * It is never repaired or accepted as partial authority. */
             ci_store_close(fresh);
+            ci_merkle_free(fresh_view.pending_merkle);
         }
+    }
+
+    /* The Merkle snapshot is the changed-file oracle. It reads bytes only for
+     * cache keys that moved. Inventory drift, an absent snapshot, depfile
+     * churn, or a snapshot advanced independently of this store all take the
+     * existing deterministic cold path. */
+    struct ci_merkle_cost merkle_cost = {0};
+    if (ci->pending_merkle) {
+        merkle = ci->pending_merkle;
+        merkle_cost.snapshot_used = ci->pending_merkle_snapshot_used;
+        merkle_cost.full_rescan = ci->pending_merkle_full_rescan;
+        merkle_cost.inventory_changed = ci->pending_merkle_inventory_changed;
+        ci->pending_merkle = NULL;
+        ci->pending_merkle_snapshot_used = false;
+        ci->pending_merkle_full_rescan = false;
+        ci->pending_merkle_inventory_changed = false;
+    } else {
+        merkle = ci_merkle_refresh_reconciled(ci->root, &merkle_cost);
+    }
+    struct ci_merkle_node merkle_root;
+    if (!merkle || !ci_merkle_root(merkle, &merkle_root) ||
+        !ci_deps_stat_root_sha3(ci->root, current_dep_stat)) {
+        failure = "incremental inventory refresh failed";
+        goto out;
+    }
+    size_t dep_len = 0;
+    bool dep_found = false;
+    uint8_t stored_dep_stat[32];
+    bool dep_unchanged = ci->store &&
+        ci_store_meta_get(ci->store, "dep_stat_root_sha3", stored_dep_stat,
+                          sizeof(stored_dep_stat), &dep_len, &dep_found) &&
+        dep_found && dep_len == sizeof(stored_dep_stat) &&
+        memcmp(stored_dep_stat, current_dep_stat, 32) == 0;
+    char stored_format[64], stored_schema[64];
+    size_t format_len = 0, schema_len = 0;
+    bool format_found = false, schema_found = false;
+    bool generation_current = ci->store &&
+        ci_store_meta_get(ci->store, "store_format", stored_format,
+                          sizeof(stored_format), &format_len, &format_found) &&
+        ci_store_meta_get(ci->store, "ci_schema_version", stored_schema,
+                          sizeof(stored_schema), &schema_len, &schema_found) &&
+        format_found && format_len == sizeof(CI_STORE_FORMAT) - 1 &&
+        memcmp(stored_format, CI_STORE_FORMAT, sizeof(CI_STORE_FORMAT) - 1) == 0 &&
+        schema_found && schema_len == sizeof(CI_SCHEMA_VERSION) - 1 &&
+        memcmp(stored_schema, CI_SCHEMA_VERSION,
+               sizeof(CI_SCHEMA_VERSION) - 1) == 0;
+    int current_count = ci_merkle_leaves(merkle, NULL, 0);
+    bool inventory_same = false;
+    if (coalesce_if_fresh && current_count > 0 && generation_current &&
+        merkle_cost.snapshot_used &&
+        !merkle_cost.full_rescan && !merkle_cost.inventory_changed &&
+        dep_unchanged) {
+        current_leaves = zcl_calloc((size_t)current_count,
+                                    sizeof(*current_leaves),
+                                    "ci_incremental_current");
+        changed = zcl_calloc((size_t)current_count, sizeof(*changed),
+                             "ci_incremental_changed");
+        if (!current_leaves || !changed ||
+            ci_merkle_leaves(merkle, current_leaves, current_count) !=
+                current_count) {
+            failure = "collect changed Merkle leaves failed";
+            goto out;
+        }
+        changed_count = ci_store_diff_merkle_leaves(
+            ci->store, current_leaves, current_count, changed, current_count,
+            &inventory_same);
+        incremental = inventory_same;
     }
 
     if (!create_unique_stage(dirfd, stage_name, &stage_identity, &stagefd)) {
@@ -647,28 +722,56 @@ static bool codeindex_rebuild_internal(struct codeindex *ci,
 
     uint8_t built_source_stat_root[32];
     uint8_t built_dep_stat_root[32];
-    if (!ci_build_store_memory(ci->root, &st, built_source_stat_root,
-                               built_dep_stat_root)) {
-        failure = "source scan or staging write failed";
-        goto out;
+    if (incremental) {
+        memcpy(built_dep_stat_root, current_dep_stat, 32);
+        if (!ci_store_copy_image_fd(ci->store, stagefd)) {
+            failure = "clone prior generation failed";
+            goto out;
+        }
+        st = ci_store_open_rw_fd(stagefd);
+        if (!st || !ci_build_store_incremental(
+                       ci->root, st, changed, changed_count,
+                       built_dep_stat_root, merkle_root.digest.bytes)) {
+            failure = "incremental scan or staging update failed";
+            goto out;
+        }
+        ci_store_close(st);
+        st = NULL;
+    } else {
+        if (!ci_build_store_memory(ci->root, &st, built_source_stat_root,
+                                   built_dep_stat_root)) {
+            failure = "source scan or staging write failed";
+            goto out;
+        }
+        if (!ci_store_meta_set(st, "source_merkle_root_sha3",
+                               merkle_root.digest.bytes, 32)) {
+            failure = "seal source Merkle root failed";
+            goto out;
+        }
+        if (!ci_store_write_image_fd(st, stagefd)) {
+            failure = "serialize staging store failed";
+            goto out;
+        }
+        ci_store_close(st);
+        st = NULL;
     }
-
-    if (!ci_store_write_image_fd(st, stagefd)) {
-        failure = "serialize staging store failed";
-        goto out;
-    }
-    ci_store_close(st);
-    st = NULL;
 
     /* Serialization can be non-trivial for a large index. Recheck only the
      * cached metadata keys at the last boundary before fsync/publication; any
      * byte change also changes inode/size/mtime/ctime on the supported local
      * filesystems and forces a clean retry. */
-    uint8_t final_source_stat_root[32], final_dep_stat_root[32];
-    if (!ci_source_stat_root_sha3(ci->root, final_source_stat_root) ||
-        memcmp(built_source_stat_root, final_source_stat_root, 32) != 0 ||
-        !ci_deps_stat_root_sha3(ci->root, final_dep_stat_root) ||
-        memcmp(built_dep_stat_root, final_dep_stat_root, 32) != 0) {
+    struct ci_merkle_cost final_merkle_cost = {0};
+    struct ci_merkle *final_merkle = ci_merkle_refresh(
+        ci->root, &final_merkle_cost);
+    struct ci_merkle_node final_merkle_root;
+    uint8_t final_dep_stat_root[32];
+    bool final_ok = final_merkle &&
+        ci_merkle_root(final_merkle, &final_merkle_root) &&
+        memcmp(merkle_root.digest.bytes, final_merkle_root.digest.bytes, 32) == 0 &&
+        ci_deps_stat_root_sha3(ci->root, final_dep_stat_root) &&
+        memcmp(built_dep_stat_root, final_dep_stat_root, 32) == 0;
+    ci_merkle_free(final_merkle);
+    if (!final_ok) {
         failure = "source or depfile metadata changed during rebuild";
         goto out;
     }
@@ -746,6 +849,9 @@ static bool codeindex_rebuild_internal(struct codeindex *ci,
 
 out:
     if (st) ci_store_close(st);
+    ci_merkle_free(merkle);
+    free(changed);
+    free(current_leaves);
     if (stagefd >= 0) close(stagefd);
     if (stage_name[0]) {
         (void)unlinkat(dirfd, stage_name, 0);

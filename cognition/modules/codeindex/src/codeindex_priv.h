@@ -43,17 +43,25 @@
  * than a lazy repair — a capability search ranks on that text, and a stale
  * generation would rank on the cut version without any signal that it had.
  * "ret1" = the retrieval-integrity generation: every consumer-visible group,
- * file, symbol, and reference row is sealed by one canonical logical root. */
-#define CI_SCHEMA_VERSION "ret1"
-#define CI_STORE_FORMAT "zcl.codeindex.store.v4"
+ * file, symbol, and reference row is sealed by one canonical logical root.
+ * "ret2" adds content-addressed per-file scan shards so a changed source can
+ * replace only its own derived rows without weakening that logical seal. */
+#define CI_SCHEMA_VERSION "ret2"
+#define CI_STORE_FORMAT "zcl.codeindex.store.v5"
 #define CI_RETRIEVAL_PROJECTION_META "retrieval_projection_root_sha3"
 
 /* ── the public handle (defined here so every TU can reach the store) ── */
 typedef struct sqlite3 sqlite3;
 typedef struct sqlite3_stmt sqlite3_stmt;
 struct ci_store;
+struct ci_merkle;
+struct ci_merkle_leaf;
 struct codeindex {
     struct ci_store *store;
+    struct ci_merkle *pending_merkle;
+    bool              pending_merkle_snapshot_used;
+    bool              pending_merkle_full_rescan;
+    bool              pending_merkle_inventory_changed;
     char             root[CI_PATH_MAX];
 };
 
@@ -104,6 +112,11 @@ bool ci_store_meta_set(struct ci_store *s, const char *k, const void *v,
 /* Serialize a committed in-memory store directly into an already-open private
  * regular-file capability. No pathname is opened or followed. */
 bool ci_store_write_image_fd(struct ci_store *s, int fd);
+/* Clone a validated immutable generation into a private staging descriptor,
+ * then open that exact descriptor for derived-row replacement. POSIX only;
+ * callers retain and publish the descriptor. */
+bool ci_store_copy_image_fd(struct ci_store *s, int fd);
+struct ci_store *ci_store_open_rw_fd(int fd);
 /* Serialize a committed in-memory store through one retained child file.
  * Used by the native Windows publisher, where an integer CRT descriptor is
  * not the directory-relative authority. */
@@ -180,6 +193,8 @@ bool ci_store_retrieval_projection_root(struct ci_store *s, uint8_t out[32]);
 /* Compare the recomputed logical root with the sealed meta record. Missing or
  * malformed records are valid observations of an invalid generation. */
 bool ci_store_retrieval_projection_is_valid(struct ci_store *s, bool *valid);
+bool ci_store_scan_shard_refresh(struct ci_store *s, const char *path);
+bool ci_store_scan_shards_are_valid(struct ci_store *s, bool *valid);
 bool ci_store_apply_pragmas(sqlite3 *db);
 bool ci_store_ensure_schema(sqlite3 *db);
 
@@ -209,6 +224,16 @@ void ci_source_root_add(struct sha3_256_ctx *sha, const char *relpath,
 bool ci_build_store_memory(const char *root, struct ci_store **out_store,
                            uint8_t source_stat_out[32],
                            uint8_t dep_stat_out[32]);
+bool ci_build_store_incremental(const char *root, struct ci_store *store,
+                                const struct ci_merkle_leaf *changed,
+                                int changed_count,
+                                const uint8_t dep_stat[32],
+                                const uint8_t merkle_root[32]);
+int ci_store_diff_merkle_leaves(struct ci_store *store,
+                                const struct ci_merkle_leaf *current,
+                                int current_count,
+                                struct ci_merkle_leaf *changed, int cap,
+                                bool *inventory_same);
 
 /* ── the C scanner (codeindex_scan.c) ─────────────────────────────────
  * Scan one in-tree file's text. Emits symbols and refs through callbacks.

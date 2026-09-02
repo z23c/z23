@@ -1212,12 +1212,28 @@ static int test_codeindex_platform_arm(void)
                  FOO_C);
         mk_write(FIX, "core/modules/net/src/foo.c", appended);
     }
+    uint64_t incremental_start_us = monotonic_us();
     ci = codeindex_open(FIX);
+    uint64_t incremental_elapsed_us = monotonic_us() - incremental_start_us;
     CI_CHECK("reopen after edit", ci != NULL);
     found = false;
     if (ci) codeindex_symbol(ci, "foo_added", &s, &found);
     CI_CHECK("staleness auto-rebuild reflects the edit",
              found && s.kind == 'T');
+    uint8_t incremental_root[32], full_root[32];
+    bool incremental_root_ok = ci &&
+        codeindex_retrieval_projection_root_sha3(ci, incremental_root);
+    bool full_rebuild_ok = ci && codeindex_rebuild(ci);
+    bool full_root_ok = full_rebuild_ok &&
+        codeindex_retrieval_projection_root_sha3(ci, full_root);
+    printf("INCREMENTAL_REOPEN_VERDICT=%s elapsed_us=%llu budget_us=300000\n",
+           ci && incremental_elapsed_us <= UINT64_C(300000) ? "PASS" : "FAIL",
+           (unsigned long long)incremental_elapsed_us);
+    CI_CHECK("one-file incremental reopen stays below 300 ms",
+             ci && incremental_elapsed_us <= UINT64_C(300000));
+    CI_CHECK("incremental and forced-full stores have identical logical roots",
+             incremental_root_ok && full_root_ok &&
+             memcmp(incremental_root, full_root, 32) == 0);
 
     /* Depfiles are consumed index inputs too. A same-size edit with the exact
      * previous mtime must invalidate include edges even when every C/H byte is

@@ -135,7 +135,8 @@ static bool build_file_cb(const char *relpath, const struct stat *file_st,
 #endif
     int64_t id = -1;
     if (!ci_store_put_file(b->store, &file, sha, mtime_ns, &id) ||
-        !idmap_push(b, relpath, id)) {
+        !idmap_push(b, relpath, id) ||
+        !ci_store_scan_shard_refresh(b->store, relpath)) {
         b->err = true;
         return false;
     }

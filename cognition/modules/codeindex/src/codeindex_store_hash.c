@@ -222,30 +222,9 @@ static bool projection_root_locked(struct ci_store *store, uint8_t out[32])
         {CI_PROJECTION_TEXT, sizeof(((struct ci_group *)0)->parent)},
         {CI_PROJECTION_TEXT, sizeof(((struct ci_group *)0)->purpose)},
     };
-    static const struct ci_projection_column file_columns[] = {
+    static const struct ci_projection_column shard_columns[] = {
         {CI_PROJECTION_TEXT, sizeof(((struct ci_file *)0)->path)},
-        {CI_PROJECTION_TEXT, sizeof(((struct ci_file *)0)->group)},
-        {CI_PROJECTION_TEXT, sizeof(((struct ci_file *)0)->purpose)},
-    };
-    static const struct ci_projection_column symbol_columns[] = {
-        {CI_PROJECTION_TEXT, sizeof(((struct ci_symbol *)0)->name)},
-        {CI_PROJECTION_TEXT, 2},
-        {CI_PROJECTION_TEXT, sizeof(((struct ci_symbol *)0)->def_path)},
-        {CI_PROJECTION_I32, 0},
-        {CI_PROJECTION_TEXT, sizeof(((struct ci_symbol *)0)->decl_path)},
-        {CI_PROJECTION_I32, 0},
-        {CI_PROJECTION_TEXT, sizeof(((struct ci_symbol *)0)->signature)},
-        {CI_PROJECTION_TEXT, sizeof(((struct ci_symbol *)0)->doc)},
-        {CI_PROJECTION_TEXT, sizeof(((struct ci_symbol *)0)->guard)},
-        {CI_PROJECTION_TEXT, sizeof(((struct ci_symbol *)0)->group)},
-        {CI_PROJECTION_BOOL, 0},
         {CI_PROJECTION_BLOB32, 0},
-    };
-    static const struct ci_projection_column ref_columns[] = {
-        {CI_PROJECTION_TEXT, sizeof(((struct ci_ref *)0)->callee)},
-        {CI_PROJECTION_TEXT, sizeof(((struct ci_ref *)0)->ref_file)},
-        {CI_PROJECTION_I32, 0},
-        {CI_PROJECTION_TEXT, sizeof(((struct ci_ref *)0)->enclosing)},
     };
     static const struct ci_projection_table tables[] = {
         {0x10,
@@ -255,24 +234,9 @@ static bool projection_root_locked(struct ci_store *store, uint8_t out[32])
          group_columns, sizeof(group_columns) / sizeof(group_columns[0]),
          UINT64_C(4096)},
         {0x20,
-         "SELECT path,\"group\",purpose FROM files ORDER BY "
-         "path COLLATE BINARY,\"group\" COLLATE BINARY,purpose COLLATE BINARY",
-         file_columns, sizeof(file_columns) / sizeof(file_columns[0]),
+         "SELECT path,digest FROM scan_shards ORDER BY path COLLATE BINARY",
+         shard_columns, sizeof(shard_columns) / sizeof(shard_columns[0]),
          UINT64_C(1048576)},
-        {0x30,
-         "SELECT " CI_SYM_COLS " FROM symbols ORDER BY "
-         "name COLLATE BINARY,kind COLLATE BINARY,def_path COLLATE BINARY,"
-         "def_line,decl_path COLLATE BINARY,decl_line,signature COLLATE BINARY,"
-         "doc COLLATE BINARY,guard COLLATE BINARY,\"group\" COLLATE BINARY,"
-         "partial,row_sha3",
-         symbol_columns, sizeof(symbol_columns) / sizeof(symbol_columns[0]),
-         UINT64_C(2097152)},
-        {0x40,
-         "SELECT callee_name,ref_file,ref_line,enclosing FROM refs ORDER BY "
-         "callee_name COLLATE BINARY,ref_file COLLATE BINARY,ref_line,"
-         "enclosing COLLATE BINARY",
-         ref_columns, sizeof(ref_columns) / sizeof(ref_columns[0]),
-         UINT64_C(4194304)},
     };
 
     struct ci_projection_hash hash = {0};
@@ -312,6 +276,10 @@ bool ci_store_retrieval_projection_is_valid(struct ci_store *store,
     if (valid) *valid = false;
     if (!store || !valid)
         LOG_FAIL("codeindex", "null retrieval projection verifier argument");
+    bool shards_valid = false;
+    if (!ci_store_scan_shards_are_valid(store, &shards_valid))
+        return false;
+    if (!shards_valid) return true;
     uint8_t sealed[32], actual[32];
     size_t length = 0;
     bool found = false;

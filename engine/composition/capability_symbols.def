@@ -269,6 +269,9 @@ ZCL_CAPABILITY_SYMBOL("chdir", CAP_FS_WRITE,
     "process later creates, renames or unlinks. Classed with the writes "
     "because that is the failure that re-running does not repair.")
 ZCL_CAPABILITY_SYMBOL("chmod", CAP_FS_WRITE, "")
+ZCL_CAPABILITY_SYMBOL("copy_file_range", CAP_FS_WRITE,
+    "Copies bytes into an output descriptor; the destination mutation is the "
+    "restrictive half of the read/write operation.")
 ZCL_CAPABILITY_SYMBOL("dup", CAP_FS_WRITE,
     "Grants no new object, only another name for a descriptor already "
     "held. Kept on the write side because dup2 is the primitive that "

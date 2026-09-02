@@ -2,6 +2,7 @@
  * purpose: Retained-handle Windows publication for sealed Merkle cache bytes. */
 
 #include "codeindex_priv.h"
+#include "codeindex/codeindex_merkle.h"
 
 #if defined(_WIN32)
 

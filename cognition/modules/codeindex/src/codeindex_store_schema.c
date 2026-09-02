@@ -49,11 +49,14 @@ bool ci_store_ensure_schema(sqlite3 *db)
         "CREATE TABLE IF NOT EXISTS groups ("
         "path TEXT PRIMARY KEY,kind TEXT NOT NULL,parent TEXT NOT NULL,"
         "purpose TEXT NOT NULL);"
+        "CREATE TABLE IF NOT EXISTS scan_shards ("
+        "path TEXT PRIMARY KEY,digest BLOB NOT NULL);"
         "CREATE TABLE IF NOT EXISTS meta ("
         "k TEXT PRIMARY KEY,v BLOB NOT NULL);"
         "CREATE INDEX IF NOT EXISTS idx_symbols_name ON symbols(name);"
         "CREATE INDEX IF NOT EXISTS idx_refs_callee ON refs(callee_name);"
         "CREATE INDEX IF NOT EXISTS idx_refs_enclosing ON refs(enclosing);"
+        "CREATE INDEX IF NOT EXISTS idx_refs_file ON refs(ref_file);"
         "CREATE INDEX IF NOT EXISTS idx_files_group ON files(\"group\");"
         /* The capability query asks "which symbols does this FILE own" once
          * per ranked candidate. Without these two it is a full 69k-row scan

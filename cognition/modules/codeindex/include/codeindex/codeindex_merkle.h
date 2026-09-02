@@ -126,12 +126,25 @@ struct ci_merkle_node {
     uint64_t               total_bytes;     /* sum of indexed file sizes below */
 };
 
+/* An immutable in-memory Merkle tree. */
+struct ci_merkle;
+
 /* One indexed source file. */
 struct ci_merkle_leaf {
     char                   path[256];
     struct zcl_sha3_digest digest;
+    struct zcl_sha3_digest content_digest; /* scanner-compatible tag-0x02 hash */
     uint64_t               size;
 };
+
+/* Content-changed leaves from the snapshot used by the last refresh, in
+ * canonical path order. A metadata-only touch is not a content change. The
+ * return value is the complete count and may exceed `cap`; callers that cannot
+ * hold the whole set must fall back to a cold rebuild. */
+int ci_merkle_changed_leaves(const struct ci_merkle *m,
+                             struct ci_merkle_leaf *out, int cap);
+int ci_merkle_leaves(const struct ci_merkle *m,
+                     struct ci_merkle_leaf *out, int cap);
 
 /* What the last refresh actually cost. Derived per call, never persisted —
  * these are the numbers that make the incrementality claim checkable instead
@@ -150,9 +163,6 @@ struct ci_merkle_cost {
     bool     inventory_changed; /* sorted live paths differ from snapshot */
     bool     full_rescan;     /* no snapshot, invalid/policy, or inventory drift */
 };
-
-/* An immutable in-memory Merkle tree. */
-struct ci_merkle;
 
 /* Build the tree for the checkout at `root`, reusing <root>/.codeindex/
  * source_tree.merkle for every file whose (dev,ino,size,mtime,ctime) cache key

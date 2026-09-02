@@ -120,7 +120,7 @@ struct legacy_ceiling {
 static const struct legacy_ceiling LEGACY_CEILINGS[] = {
     { "engine/composition/src/boot.c", 4001 },
     { "engine/composition/src/boot_refold_staged.c", 1810 },
-    { "cognition/modules/codeindex/src/codeindex_merkle.c", 1776 },
+    { "cognition/modules/codeindex/src/codeindex_merkle.c", 1724 },
     { "engine/modules/hotswap/src/hotswap_activate.c", 2325 },
     { "engine/modules/kernel/src/command_registry.c", 2403 },
     { "core/modules/net/src/connman.c", 3432 },

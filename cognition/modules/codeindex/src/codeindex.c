@@ -5,6 +5,7 @@
  * rebuild/staleness machinery in codeindex_build.c. */
 
 #include "codeindex_priv.h"
+#include "codeindex/codeindex_merkle.h"
 #include "codeindex/codeindex_build.h"
 
 #include "util/log_macros.h"
@@ -110,6 +111,7 @@ void codeindex_close(struct codeindex *ci)
 {
     if (!ci) return;
     if (ci->store) ci_store_close(ci->store);
+    ci_merkle_free(ci->pending_merkle);
     free(ci);
 }
 
