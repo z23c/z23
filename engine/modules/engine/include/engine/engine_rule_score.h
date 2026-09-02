@@ -9,7 +9,9 @@
  *
  *   RETIREMENT IS AUTOMATIC. A rule that has had its declared minimum number
  *   of runs and whose Wilson lower bound sits under its declared floor is
- *   turned off by rewriting engine/composition/rule_vocab.def in place. The
+ *   turned off by rewriting engine/composition/rule_vocab.def — atomically:
+ *   the new bytes land whole in a temp file and one rename publishes them, so
+ *   a crash can cost a stray .tmp but never a truncated vocabulary. The
  *   unit_ids of the receipts that killed it are written into the row, so the
  *   decision is auditable by a person reading a diff and revertible by
  *   deleting one line. The worst case of a wrong retirement is that an
@@ -324,6 +326,16 @@ struct zcl_rule_run {
 bool zcl_rule_score_run(const char *vocab_path, const char *chainlog_path,
                         const char *state_dir, bool apply,
                         struct zcl_rule_run *out);
+
+/* Rewrite the def at `path` ATOMICALLY. The new bytes are written to
+ * `<path>.tmp` in the same directory, flushed and fsynced, and ONE rename
+ * publishes them over the original. The live def is never opened for writing
+ * and never truncated: a crash, an ENOSPC or a kill at any point before the
+ * rename leaves the original bytes standing and at worst a stray temp file,
+ * which is unlinked on every detected failure. Returns false only when the
+ * temp write, the fsync or the rename itself failed. */
+bool zcl_rule_def_rewrite(const char *path, const char *new_text,
+                          size_t new_len);
 
 /* The default chainlog under a state directory, and the promotions directory.
  * One spelling of each, so a reader and a writer cannot disagree. */

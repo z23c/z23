@@ -34,6 +34,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <unistd.h>
 
 /* ── labels ──────────────────────────────────────────────────────────── */
 
@@ -924,6 +925,33 @@ static bool write_whole(const char *path, const char *data, size_t len)
     return n == len;
 }
 
+/* The one writer of the live def. Nothing here ever opens `path` for
+ * writing: the new bytes go whole into `<path>.tmp` in the same directory,
+ * are flushed and fsynced, and a single rename publishes them. A crash, an
+ * ENOSPC or a kill before the rename leaves the original standing — the
+ * failure this exists to prevent is a truncated rule_vocab.def, and a
+ * truncate-in-place `fopen(path, "wb")` produces exactly that. */
+bool zcl_rule_def_rewrite(const char *path, const char *new_text,
+                          size_t new_len)
+{
+    if (!path || !new_text) return false;
+
+    char tmp[1024];
+    int tn = snprintf(tmp, sizeof tmp, "%s.tmp", path);
+    if (tn < 0 || (size_t)tn >= sizeof tmp) return false;
+
+    FILE *f = fopen(tmp, "wb");
+    if (!f) return false;
+    bool ok = fwrite(new_text, 1, new_len, f) == new_len &&
+              fflush(f) == 0 && fsync(fileno(f)) == 0;
+    if (fclose(f) != 0) ok = false;
+    if (!ok || rename(tmp, path) != 0) {
+        (void)unlink(tmp);
+        return false;
+    }
+    return true;
+}
+
 /* One promotion patch file per promotable rule. The id carries '/' and ':',
  * neither of which may reach a path component. */
 static void safe_basename(const char *id, char *out, size_t cap)
@@ -997,8 +1025,15 @@ bool zcl_rule_score_run(const char *vocab_path, const char *chainlog_path,
             size_t n = zcl_rule_vocab_apply_retirements(def_text, def_len,
                                                         &out->scoring,
                                                         nbuf, cap);
-            if (n > 0 && write_whole(vocab_path, nbuf, n))
-                out->retired_written = out->scoring.retire_count;
+            if (n > 0) {
+                if (zcl_rule_def_rewrite(vocab_path, nbuf, n))
+                    out->retired_written = out->scoring.retire_count;
+                else if (!out->note[0])
+                    (void)snprintf(out->note, sizeof out->note,
+                                   "refused to rewrite %s: the temp write, "
+                                   "the fsync or the rename failed; the "
+                                   "original def is untouched", vocab_path);
+            }
             free(nbuf);
         }
     }

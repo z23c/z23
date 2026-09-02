@@ -38,6 +38,13 @@
  *  6. THE MINER FINDS THE ONE FAIL->PASS PAIR AND NAMES THE FILE THAT FIXED
  *     IT. Exactly one candidate, with exactly the text the template says.
  *
+ *  7. THE DEF IS REWRITTEN ATOMICALLY OR NOT AT ALL. The new bytes go whole
+ *     into a temp file and one rename publishes them, so a write that dies
+ *     before the rename — an ENOSPC, a kill, a full disk — leaves the
+ *     original vocabulary standing byte for byte. And a rewrite with the
+ *     file's own bytes is a no-op in content: an idle pass of the loop can
+ *     never cost a comma.
+ *
  * The 50-receipt chainlog is generated here, deterministically, so this gate
  * needs no sibling lane to have run and no engine to have been dispatched.
  * Everything lives under this test's own temp directory; the developer's real
@@ -359,6 +366,15 @@ static int case_decisions(void)
     (void)zcl_rule_score_run(vpath, lpath, dir, true, &wet);
     ER_CHECK("one rule was retired on disk", wet.retired_written == 1u);
     ER_CHECK("one promotion was proposed", wet.patches_written == 1u);
+    {
+        /* The published rewrite is one rename: nothing named .tmp survives
+         * a successful apply. */
+        char tpath[540];
+        (void)snprintf(tpath, sizeof tpath, "%s.tmp", vpath);
+        struct stat sb;
+        ER_CHECK("a successful apply leaves no temp file behind",
+                 stat(tpath, &sb) != 0);
+    }
 
     size_t vlen = 0;
     char *after = fx_read(vpath, &vlen);
@@ -527,7 +543,56 @@ static int case_miner(void)
     return failures;
 }
 
-/* ── 6. the vocabulary this binary was compiled with ─────────────────── */
+/* ── 6. the atomic rewrite of the live def ───────────────────────────── */
+
+static int case_rewrite(void)
+{
+    int failures = 0;
+    char tmpl[] = "/tmp/zcl_engine_rewriteXXXXXX";
+    char *dir = mkdtemp(tmpl);
+    ER_CHECK("a temp directory for the rewrite cases", dir != NULL);
+    if (!dir) return failures;
+
+    char vpath[512], tpath[540];
+    (void)snprintf(vpath, sizeof vpath, "%s/rule_vocab.def", dir);
+    (void)snprintf(tpath, sizeof tpath, "%s.tmp", vpath);
+    size_t klen = sizeof k_fixture_vocab - 1;
+    ER_CHECK("the fixture def is planted on disk",
+             fx_write(vpath, k_fixture_vocab, klen));
+
+    /* ---- idempotent: a rewrite carrying the file's own bytes ---- */
+    ER_CHECK("rewriting the def with its own bytes succeeds",
+             zcl_rule_def_rewrite(vpath, k_fixture_vocab, klen));
+    size_t alen = 0;
+    char *after = fx_read(vpath, &alen);
+    ER_CHECK("and the file is byte-identical afterwards",
+             after && alen == klen &&
+             memcmp(after, k_fixture_vocab, alen) == 0);
+    free(after);
+    struct stat sb;
+    ER_CHECK("and no temp file was left behind", stat(tpath, &sb) != 0);
+
+    /* ---- crash safety: a write that dies BEFORE the rename. A directory
+     * pre-empting the temp name makes the temp write itself fail — the same
+     * observable state an ENOSPC or a kill mid-write leaves behind — and the
+     * assertion is the one that matters: the ORIGINAL is intact. */
+    ER_CHECK("the temp name is pre-empted so the write aborts",
+             mkdir(tpath, 0755) == 0);
+    static const char k_replacement[] = "/* replacement bytes */\n";
+    ER_CHECK("the aborted rewrite is refused",
+             !zcl_rule_def_rewrite(vpath, k_replacement,
+                                   sizeof k_replacement - 1));
+    size_t blen = 0;
+    char *orig = fx_read(vpath, &blen);
+    ER_CHECK("and the original def still stands, byte for byte",
+             orig && blen == klen &&
+             memcmp(orig, k_fixture_vocab, klen) == 0);
+    free(orig);
+    ER_CHECK("the pre-empted temp name is cleaned up", remove(tpath) == 0);
+    return failures;
+}
+
+/* ── 7. the vocabulary this binary was compiled with ─────────────────── */
 
 static int case_builtin(void)
 {
@@ -578,6 +643,7 @@ int test_engine_rules(void)
     failures += case_wilson();
     failures += case_decisions();
     failures += case_miner();
+    failures += case_rewrite();
     failures += case_builtin();
     printf("engine_rules: %d failure(s)\n", failures);
     return failures;
