@@ -537,23 +537,6 @@ static int test_fastobj_carrier_platform_arm(void)
     if (prc != VCS_PACKAGE_PREPARE_OK)
         goto done;
 
-#ifdef __APPLE__
-    /* Carrier production starts by executing fetched package source. Darwin
-     * has no Landlock/seccomp equivalent, so the public contract is the
-     * named fail-closed refusal, not a degraded cache artifact. */
-    struct fcw_build_result refusal;
-    fcw_candidate_build(worker, root_hex, pkg, recipe_path, emit1, lock_hex,
-                        cacheA, false, &refusal);
-    FC_CHECK("Darwin refuses carrier production without full isolation",
-             !refusal.ok && refusal.exit_code == 4 &&
-                 strstr(refusal.first_line, "offers no Landlock") != NULL);
-    if (refusal.ok || refusal.exit_code != 4 ||
-        strstr(refusal.first_line, "offers no Landlock") == NULL)
-        printf("    refusal exit %d: %.200s\n", refusal.exit_code,
-               refusal.first_line);
-    goto done;
-#endif
-
     /* 2. candidate build #1 on a COLD cacheA: the compile really runs. */
     struct fcw_build_result run1, run2;
     memset(&run1, 0, sizeof(run1));
@@ -561,9 +544,11 @@ static int test_fastobj_carrier_platform_arm(void)
     fcw_candidate_build(worker, root_hex, pkg, recipe_path, emit1, lock_hex,
                         cacheA, false, &run1);
     FC_CHECK("candidate build #1 (cold cacheA) succeeded", run1.ok);
-    if (!run1.ok)
+    if (!run1.ok) {
         printf("    build #1 exit %d: %.200s\n", run1.exit_code,
                run1.first_line);
+        printf("    build #1 final: %.240s\n", run1.last_line);
+    }
     FC_CHECK("build #1 really compiled (misses >= 1, hits == 0)",
              run1.ok && run1.misses >= 1u && run1.hits == 0u);
     printf("    build #1: hits=%llu misses=%llu\n", run1.hits, run1.misses);

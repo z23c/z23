@@ -237,9 +237,15 @@ const char *platform_toolchain_commons_flags_standard_base(void)
 const char *platform_toolchain_commons_flags_standard(void)
 {
     static _Thread_local char buf[320];
+#if defined(__APPLE__)
+    (void)snprintf(buf, sizeof(buf),
+                   "%s;asan,ubsan=clean;sanitizer_pie=off;sanitizer_aslr=on",
+                   platform_toolchain_commons_flags_standard_base());
+#else
     (void)snprintf(buf, sizeof(buf),
                    "%s;asan,ubsan=clean;sanitizer_pie=off;sanitizer_aslr=off",
                    platform_toolchain_commons_flags_standard_base());
+#endif
     return buf;
 }
 
@@ -311,7 +317,10 @@ bool platform_toolchain_normalize_archive(const char *path)
         close(fd);
         return false;
     }
-    /* Zero the 12-byte modification-time field in every member header.
+    /* Zero the 12-byte modification-time field and normalize the 8-byte
+     * mode field in every member header. Apple ar otherwise copies the mode
+     * from its input object, so a read-only cached object and an identical
+     * freshly compiled object produce different archive bytes.
      * Header layout: name[16] date[12] uid[6] gid[6] mode[8] size[10] `\n[2]. */
     off_t off = 8;
     while (off + 60 <= total) {
@@ -321,6 +330,7 @@ bool platform_toolchain_normalize_archive(const char *path)
         /* date field starts at offset 16 and is 12 bytes. */
         memset(hdr + 16, ' ', 12);
         hdr[16] = '0';
+        memcpy(hdr + 40, "100644  ", 8);
         char size_field[11];
         memcpy(size_field, hdr + 48, 10);
         size_field[10] = '\0';

@@ -3823,7 +3823,8 @@ static int pv_main_posix(int argc, char **argv)
      * incompatible with the sandbox, so ASan runs its memory-error detector
      * only. UBSan is unaffected. */
     snprintf(san_asan, sizeof(san_asan),
-             "ASAN_OPTIONS=exitcode=%d:detect_leaks=0", PV_ASAN_EXIT);
+             "ASAN_OPTIONS=halt_on_error=1:exitcode=%d:detect_leaks=0",
+             PV_ASAN_EXIT);
     snprintf(san_ubsan, sizeof(san_ubsan),
              "UBSAN_OPTIONS=halt_on_error=1:exitcode=%d:print_stacktrace=1",
              PV_UBSAN_EXIT);
@@ -4387,9 +4388,16 @@ static int pv_main_posix(int argc, char **argv)
             char san_bin[4200];
             snprintf(san_bin, sizeof(san_bin), "%s/%s_1_test", build_root,
                      cc);
+#if defined(__APPLE__)
+            /* macOS has no setarch(8). Execute the exact sanitizer binary
+             * directly under Seatbelt; ASLR remains enabled and the receipt
+             * below names that observed platform contract honestly. */
+            const char *const sanitizer_argv[] = {san_bin, NULL};
+#else
             const char *const sanitizer_argv[] = {
                 "setarch", "x86_64", "-R", san_bin, NULL,
             };
+#endif
             struct pv_run sr = pv_run_child(
                 sanitizer_argv, build_root,
                 &san_test_limits, full_isolation, rules, n_rules, san_env,
@@ -4425,21 +4433,42 @@ static int pv_main_posix(int argc, char **argv)
                  * requires the report text itself (ASan "SUMMARY:" / UBSan
                  * "runtime error:"); anything else is environmental and
                  * makes the diagnostic UNAVAILABLE, never dirty. */
-                bool reported =
-                    strstr(sr.stderr_buf, "SUMMARY:") != NULL ||
-                    strstr(sr.stderr_buf, "runtime error:") != NULL;
                 bool finding = false;
                 char sprefix[40];
                 snprintf(sprefix, sizeof(sprefix), "%s+san", cc);
-                if (test_ok && reported && sr.exited &&
-                    sr.exit_code == PV_ASAN_EXIT) {
+                bool asan_runtime_report =
+                    strstr(sr.stderr_buf, "SUMMARY: AddressSanitizer:") !=
+                    NULL;
+                bool ubsan_runtime_report =
+                    strstr(sr.stderr_buf, "runtime error:") != NULL;
+#if defined(__APPLE__)
+                /* Apple Clang's ASan terminates by signal after a genuine
+                 * runtime report even when exitcode= is set. Bind the Darwin
+                 * verdict to the sanitizer's exact report grammar plus an
+                 * abnormal run; a clean exit can never become a finding. */
+                bool asan_finding_exit =
+                    asan_runtime_report && !sr.timed_out &&
+                    (!sr.exited || sr.exit_code !=
+                                       recipe.expected_test_exit_code);
+                bool ubsan_finding_exit =
+                    ubsan_runtime_report && !sr.timed_out &&
+                    (!sr.exited || sr.exit_code !=
+                                       recipe.expected_test_exit_code);
+#else
+                bool asan_finding_exit =
+                    asan_runtime_report && sr.exited &&
+                    sr.exit_code == PV_ASAN_EXIT;
+                bool ubsan_finding_exit =
+                    ubsan_runtime_report && sr.exited &&
+                    sr.exit_code == PV_UBSAN_EXIT;
+#endif
+                if (test_ok && asan_finding_exit) {
                     att.sanitizers[0].outcome =
                         VCS_PACKAGE_ATTEST_OUTCOME_FAIL;
                     sanitizer_fail_code =
                         VCS_PACKAGE_ATTEST_DETAIL_ASAN_FINDINGS;
                     finding = true;
-                } else if (test_ok && reported && sr.exited &&
-                           sr.exit_code == PV_UBSAN_EXIT) {
+                } else if (test_ok && ubsan_finding_exit) {
                     att.sanitizers[1].outcome =
                         VCS_PACKAGE_ATTEST_OUTCOME_FAIL;
                     sanitizer_fail_code =
@@ -4464,6 +4493,13 @@ static int pv_main_posix(int argc, char **argv)
                     pv_san_detail_from_stderr(
                         sprefix, sr.stderr_buf, sanitizer_fail_detail,
                         sizeof(sanitizer_fail_detail));
+                    fprintf(stderr,
+                            "%s: sanitizer diagnostic unavailable: "
+                            "exited=%u exit=%d signal=%d asan-marker=%d "
+                            "ubsan-marker=%d %s\n",
+                            PV_LOG, sr.exited ? 1u : 0u, sr.exit_code,
+                            sr.term_signal, PV_ASAN_EXIT, PV_UBSAN_EXIT,
+                            sanitizer_fail_detail);
                 }
                 continue;   /* an unavailable diagnostic decides nothing */
             }
@@ -4625,9 +4661,15 @@ static int pv_main_posix(int argc, char **argv)
                      att.sanitizers[1].outcome ==
                          VCS_PACKAGE_ATTEST_OUTCOME_PASS)
                 san_seg = "clean";
+#if defined(__APPLE__)
+            snprintf(rec.flags, sizeof(rec.flags),
+                     "%s;asan,ubsan=%s;sanitizer_pie=off;sanitizer_aslr=on",
+                     ZCL_C23_COMMONS_BUILD_FLAGS_STANDARD_BASE_V2, san_seg);
+#else
             snprintf(rec.flags, sizeof(rec.flags),
                      "%s;asan,ubsan=%s;sanitizer_pie=off;sanitizer_aslr=off",
                      ZCL_C23_COMMONS_BUILD_FLAGS_STANDARD_BASE_V2, san_seg);
+#endif
         } else {
             snprintf(rec.flags, sizeof(rec.flags), "%s",
                      ZCL_C23_COMMONS_BUILD_FLAGS_QUICK_V2);

@@ -73,7 +73,7 @@ bool platform_toolchain_prepare_archive_objects(const char *const paths[],
 
 /* Post-process a static archive to make it byte-deterministic.  On GNU ar this
  * is a no-op because the archive flags handle determinism; on Apple ar it
- * zeroes the modification-time field of every archive member header. */
+ * normalizes the modification-time and mode fields of every member header. */
 bool platform_toolchain_normalize_archive(const char *path);
 
 /* Return the linker "start group" token, or NULL when the platform linker does
