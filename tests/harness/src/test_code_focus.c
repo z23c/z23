@@ -328,6 +328,76 @@ static int test_focus_work_cap(void)
     return failures;
 }
 
+static int test_focus_recorded_run(void)
+{
+    int failures = 0;
+    TEST("code_focus: a real mini last-run.json records failures it names") {
+        system("rm -rf " FOCUS_FIX);
+        ASSERT(write_focus_fixture());
+        /* Byte-shape of tests/harness/src/test_parallel.c output, trimmed
+         * to the rows the loader reads. test_net failed; download passed;
+         * the specialist routes a.c/b.c to the `net` group. */
+        ASSERT(focus_mk_write(FOCUS_FIX, ".cache/test-timing/last-run.json",
+            "{\"schema\":\"zcl.test_timing.v1\","
+            "\"generated_at_utc\":\"2026-09-02T00:00:00Z\","
+            "\"wall_ms\":17,\"failed_count\":1,\"groups\":["
+            "{\"name\":\"test_net\",\"ms\":12,\"rc\":1,\"signaled\":false,"
+            "\"cached\":false},"
+            "{\"name\":\"download\",\"ms\":5,\"rc\":0,\"signaled\":false,"
+            "\"cached\":false}]}"));
+
+        struct specialist_focus_evidence ev;
+        specialist_focus_evidence_clear(&ev);
+        ASSERT(specialist_focus_load_failed_groups(FOCUS_FIX, &ev));
+        ASSERT(ev.tests_run == SPECIALIST_FOCUS_ARTIFACT_RECORDED);
+        ASSERT(ev.failed_count == 1);
+        ASSERT(strcmp(ev.failed[0], "test_net") == 0);
+
+        struct codeindex *ci = codeindex_open_source_view(FOCUS_FIX);
+        ASSERT(ci != NULL);
+        static const struct specialist spec = {
+            "alpha", "core/modules/net", "check-malloc", "net", "p2p"
+        };
+        struct specialist_focus_hit hits[8];
+        bool truncated = false;
+        int n = specialist_focus_rank(ci, &spec, &ev, focus_test_route,
+                                      NULL, hits, 8, &truncated);
+        ASSERT(n == 3);
+        ASSERT(!truncated);
+        ASSERT(strcmp(hits[0].path, "core/modules/net/src/a.c") == 0);
+        ASSERT(strcmp(hits[1].path, "core/modules/net/src/b.c") == 0);
+        ASSERT(hits[0].score == hits[1].score);
+        ASSERT(hits[0].score > hits[2].score);
+        ASSERT(strstr(hits[0].reason,
+                      "failed-group:test_net "
+                      "(.cache/test-timing/last-run.json)") != NULL);
+        ASSERT(strstr(hits[2].reason, "unrouted:agent_impact_rules") != NULL);
+        codeindex_close(ci);
+
+        /* End to end with a recorded test run and no lint run: each source
+         * reports its own truth — recorded with the failed count, and no
+         * run recorded — in the same reply. */
+        struct zcl_command_reply reply;
+        focus_call_name("net", FOCUS_FIX, &reply);
+        ASSERT(reply.exit_code == ZCL_COMMAND_EXIT_OK);
+        char buf[ZCL_COMMAND_RESULT_BUDGET + 1];
+        size_t bn = json_write(&reply.data, buf, sizeof(buf));
+        ASSERT(bn > 0 && bn < sizeof(buf));
+        ASSERT(strstr(buf, "\"tests\":{\"source\":"
+                       "\".cache/test-timing/last-run.json\","
+                       "\"status\":\"recorded\",\"failed_count\":1}")
+               != NULL);
+        ASSERT(strstr(buf, "\"status\":\"no run recorded\"}") != NULL);
+        const char *sum = json_get_str(json_get(&reply.data, "summary"));
+        ASSERT(sum && strstr(sum, "gates: no run recorded") != NULL);
+        ASSERT(strstr(sum, "tests: no run recorded") == NULL);
+        zcl_command_reply_free(&reply);
+        system("rm -rf " FOCUS_FIX);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_focus_rank(void)
 {
     int failures = 0;
@@ -400,6 +470,7 @@ int test_code_focus(void)
     failures += test_focus_list();
     failures += test_focus_unknown();
     failures += test_focus_missing_run();
+    failures += test_focus_recorded_run();
     failures += test_focus_lint_gates();
     failures += test_focus_work_cap();
     failures += test_focus_rank();
