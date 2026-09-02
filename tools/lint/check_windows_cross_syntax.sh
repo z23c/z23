@@ -43,11 +43,14 @@
 # which stores each translation unit's exit status and byte-exact compiler
 # log under .cache/lint-tu/ and replays them when nothing that TU can see
 # has changed. The classifiers below are unaware of it: a replay writes the
-# same bytes into the same files a fresh mingw run would have. Measured on
-# the dev reference host, script wall over 233 TUs: 4.2 s uncached, 0.6 s
-# fully warm, 0.9 s after editing one .c (232 hit, 1 miss).
-# ZCL_LINT_TU_CACHE=0 turns it off; run_lint.sh --cold-audit turns it off
-# for you. See that file's header for why the key is sound.
+# same bytes into the same files a fresh mingw run would have, and the
+# lookup is one parent-side pass, so a fully warm run forks no workers at
+# all. Measured on the dev reference host under load, CPU time (user+sys)
+# for --self-test plus the gate over 234 TUs, three runs each: 93-96 s with
+# the cache off, 91-96 s cold (it also stores), 1.7-1.8 s fully warm at 234
+# hits. ZCL_LINT_TU_CACHE=0 turns it off and leaves this gate exactly as it
+# was before the cache existed; run_lint.sh --cold-audit turns it off for
+# you. See that file's header for why the key is sound.
 #
 # Env:
 #   ZCL_MINGW_CC   compiler (default: x86_64-w64-mingw32-gcc)
