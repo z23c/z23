@@ -573,6 +573,10 @@ fi
 # expensive step and the reason the result is shared across the fleet.
 step "Build"
 
+if [ "${ZCL_PROFILE:-}" = "dev" ]; then
+    die "ship: REFUSE: ZCL_PROFILE=dev produces the unsippable build/bin/z23.dev"
+fi
+
 if [ "$DRY_RUN" -eq 1 ]; then
     say "build      (dry run — would rebuild and freeze one candidate + both workers)"
     CANDIDATE=""; ARTIFACT_SHA=""; CAND_SOURCE_ID="$SOURCE_ID"
@@ -585,6 +589,16 @@ else
     CANDIDATE="$(mktemp "${TMPDIR:-/tmp}/zclassic23.ship.XXXXXX")"
     WORKER_FILES=(); WORKER_SHAS=()
     trap 'rm -f "$CANDIDATE" "${WORKER_FILES[@]}"' EXIT HUP INT TERM
+    if [ -e build/bin/z23.dev ] && [ build/bin/z23.dev -ef build/bin/z23 ]; then
+        die "ship: REFUSE: build/bin/z23 is the unsippable z23.dev artifact"
+    fi
+    if [ -L build/bin/z23 ]; then
+        case "$(readlink build/bin/z23)" in
+            z23.dev|*.dev)
+                die "ship: REFUSE: build/bin/z23 is a symlink to the unsippable dev binary"
+                ;;
+        esac
+    fi
     install -m 755 build/bin/zclassic23 "$CANDIDATE"
     ARTIFACT_SHA="$(sha256sum < "$CANDIDATE" | awk '{print $1}')"
     zcl_is_sha256 "$ARTIFACT_SHA" || die "could not hash the frozen candidate"
