@@ -1,6 +1,5 @@
 # check-shell-host-assumptions shrink-only baseline
 # Format: <kind> TAB <tracked path> TAB <count>. Counts may only shrink.
-nproc	tools/dev/commons_journey_acceptance.sh	1
 nproc	tools/dev/deploy-dev-lane.sh	1
 nproc	tools/dev/doctor-build.sh	1
 nproc	tools/dev/module-linkgraph.sh	2

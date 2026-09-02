@@ -706,11 +706,13 @@ LIB_SRCS := $(filter-out platform/modules/platform/src/os_sandbox_stub.c \
 	contexts/commons/modules/vcs/src/vcs_devloop_windows.c,$(LIB_SRCS))
 else ifeq ($(ZCL_HOST_WINDOWS),1)
 LIB_SRCS := $(filter-out platform/modules/platform/src/os_sandbox_linux.c \
+	platform/modules/platform/src/os_sandbox_package_linux.c \
 	platform/modules/platform/src/os_sandbox_terminal_worker.c \
 	platform/modules/util/src/self_backtrace_stub.c \
 	contexts/commons/modules/vcs/src/vcs_devloop.c,$(LIB_SRCS))
 else
 LIB_SRCS := $(filter-out platform/modules/platform/src/os_sandbox_linux.c \
+	platform/modules/platform/src/os_sandbox_package_linux.c \
 	platform/modules/platform/src/os_sandbox_terminal_worker.c \
 	platform/modules/util/src/self_backtrace.c \
 	contexts/commons/modules/vcs/src/vcs_devloop_windows.c,$(LIB_SRCS))
@@ -5318,11 +5320,12 @@ $(BIN_DIR)/zclassic23-package-verify: $(VIEW_GEN_HEADERS) \
 # Opt-in C23 development adapter. This small front process enters Landlock and
 # scrubs credentials before it invokes the fixed Codex CLI; the node handler
 # never executes a caller-supplied command.
-ZCL_TOOL_SANDBOX_SRC = platform/modules/platform/src/os_sandbox_linux.c
+ZCL_TOOL_SANDBOX_SRC = platform/modules/platform/src/os_sandbox_linux.c \
+	platform/modules/platform/src/os_sandbox_package_linux.c
 ifneq ($(filter-out Linux,$(ZCL_HOST_OS)),)
-# The confinement entry points exist per host; on Darwin the backend stub
-# refuses them at runtime, which is the honest degradation of an adapter
-# whose sandbox primitive is Linux Landlock.
+# The confinement entry points exist per host: Darwin supplies its qualified
+# Seatbelt backend, while Windows continues to refuse until its native package
+# confinement acceptance exists.
 ZCL_TOOL_SANDBOX_SRC = platform/modules/platform/src/os_sandbox_stub.c
 endif
 ZCODE_ADAPTER_RUNNER_SRCS = tools/zcode_adapter_runner.c \

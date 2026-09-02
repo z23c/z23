@@ -179,8 +179,10 @@ cap_closure_coverage_applicable() {
     case "$CAP_CLOSURE_HOST_OS:$path" in
         Linux:platform/modules/platform/src/os_sandbox_stub.c|\
         Darwin:platform/modules/platform/src/os_sandbox_linux.c|\
+        Darwin:platform/modules/platform/src/os_sandbox_package_linux.c|\
         Darwin:platform/modules/util/src/self_backtrace.c|\
         Windows:platform/modules/platform/src/os_sandbox_linux.c|\
+        Windows:platform/modules/platform/src/os_sandbox_package_linux.c|\
         Windows:contexts/commons/modules/vcs/src/vcs_devloop.c|\
         Windows:tools/package_verify.c)
             return 1
@@ -1130,6 +1132,8 @@ EOF
         if cap_closure_coverage_applicable \
                "platform/modules/platform/src/os_sandbox_linux.c" ||
            cap_closure_coverage_applicable \
+               "platform/modules/platform/src/os_sandbox_package_linux.c" ||
+           cap_closure_coverage_applicable \
                "platform/modules/util/src/self_backtrace.c"; then
             echo "SELFTEST FAIL: L: Darwin host-source selection drifted"
             rc=1
@@ -1137,6 +1141,8 @@ EOF
             CAP_CLOSURE_HOST_OS=Windows
             if cap_closure_coverage_applicable \
                    "platform/modules/platform/src/os_sandbox_linux.c" ||
+               cap_closure_coverage_applicable \
+                   "platform/modules/platform/src/os_sandbox_package_linux.c" ||
                cap_closure_coverage_applicable \
                    "contexts/commons/modules/vcs/src/vcs_devloop.c" ||
                cap_closure_coverage_applicable "tools/package_verify.c"; then
