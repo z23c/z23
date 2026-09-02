@@ -82,7 +82,7 @@ z23 discover schema <path> --side=input|output
 | … `compat` (metadata only, names a fallback) | 30 |
 | … `planned` (fail-closed BLOCKED, exit 3) | 31 |
 | … dev-gated 🔧 (`ready` only in `z23-dev`) | 29 |
-| Leaves with `effect=mutate` | 213 |
+| Leaves with `effect=mutate` | 214 |
 | Leaves with `effect=destructive` | 4 |
 | Leaves requiring **owner** authority | 119 |
 
@@ -93,7 +93,7 @@ Per source file:
 | `engine/composition/commands/root.def` | 10 | 5 | 5 |
 | `engine/composition/commands/core.def` | 121 | 29 | 92 |
 | `engine/composition/commands/apps.def` | 16 | 3 | 13 |
-| `engine/composition/commands/app_features.def` | 74 | 20 | 54 |
+| `engine/composition/commands/app_features.def` | 75 | 20 | 55 |
 | `engine/composition/commands/store.def` | 18 | 0 | 18 |
 | `engine/composition/commands/ops.def` | 56 | 10 | 46 |
 | `engine/composition/commands/dev.def` | 67 | 16 | 51 |
@@ -604,6 +604,7 @@ represented by its children's sections.
 | `app presentation status` | ready | mutate / app-write / operator, display-only · fast/low | `output`, `page` | `zcl.app_presentation_status.v1` | `z23 app presentation status` | Show canonical node facts in a native C23 status card |
 | `app presentation corpus` | ready | mutate / app-write / operator, display-only · fast/low | `output`, `page` | `zcl.app_presentation_corpus.v1` | `z23 app presentation corpus` | Show the canonical C23 corpus lower bound in a native status card |
 | `app presentation code-growth` | ready | mutate / app-write / operator, display-only · foreground/moderate | `output` | `zcl.app_presentation_code_growth.v1` | `z23 app presentation code-growth` | Chart exact daily maintained C23 line growth in a native window |
+| `app presentation ecosystem` | ready | mutate / app-write / operator, display-only · foreground/moderate | `output` | `zcl.app_presentation_ecosystem.v1` | `z23 app presentation ecosystem` | Show the exact Z23 C23 ecosystem in one native window |
 | `app presentation code-change` | ready | mutate / app-write / operator, display-only · fast/low | **`workspace`**, **`before_root`**, **`candidate_root`**, **`path`**, **`requested_behavior`**, **`before_behavior`**, **`after_behavior`**, `output`, `page` | `zcl.app_presentation_code_change.v1` | `z23 app presentation code-change --input='<exact-roots-and-summaries>'` | Show an exact ZVCS-backed C code change in a native window |
 | `app presentation development` | ready | mutate / app-write / operator, display-only · fast/low | `workspace`, `receipt_id`, `output`, `page` | `zcl.app_presentation_development.v1` | `z23 app presentation development` | Show the latest exact local development consequence in native C23 |
 | `app presentation reproduction` | ready | mutate / app-write / operator, display-only · fast/low | **`action_id`**, `output`, `page` | `zcl.app_presentation_reproduction.v1` | `z23 app presentation reproduction --input='{"action_id":"<64hex>"}'` | Show live independent-reproduction progress in one native window |
