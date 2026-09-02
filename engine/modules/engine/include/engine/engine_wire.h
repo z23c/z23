@@ -111,6 +111,30 @@ bool engine_cli_observation_parse(const struct engine_vendor *vendor,
                                   const char *body, size_t len,
                                   struct engine_cli_observation *out);
 
+/* How much of a refused body is quoted back to the operator. Enough to see
+ * the shape of the document — the top-level keys, an unexpected wrapper, a
+ * proxy's HTML error page — and far too little to be a transcript. */
+#define ENGINE_RESPONSE_EXCERPT_BYTES 300u
+
+/* Copy a printable, single-line excerpt of an untrusted body into `out`,
+ * NUL-terminated, and return its length.
+ *
+ * WHY QUOTING THE BODY IS SAFE HERE, AND ONLY HERE. Nothing secret ever
+ * travels in a response: the credential is an Authorization HEADER built by
+ * the transport (engine/engine_secret.h) and the request body carries no key
+ * either (engine_wire_request.c). So a response body holds vendor output and
+ * vendor error text, and that is exactly what an operator needs to see.
+ *
+ * Every byte is filtered: anything outside printable ASCII, including a
+ * newline, becomes a single space, and runs of space collapse. A refusal
+ * message must not be a place a vendor can plant control characters in an
+ * operator's terminal, and a body that is 4MB of one line must not become
+ * 4MB of log. Truncation is marked with a trailing "…" written as "...".
+ *
+ * Returns 0 and writes "" when `out` is NULL or `cap` is 0. */
+size_t engine_response_excerpt(const char *body, size_t len,
+                               char *out, size_t cap);
+
 /* Some vendors answer a bad request with 200 and an `error` object, others
  * with 4xx and the same shape. Extract a bounded, printable description of
  * that error when one is present. Returns false when the body carries no

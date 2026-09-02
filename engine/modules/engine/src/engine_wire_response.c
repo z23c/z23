@@ -305,8 +305,32 @@ static bool read_text(const struct json_value *root, struct engine_reply *out)
     if (!text)
         LOG_FAIL("engine", "refusing a message with unreadable content");
     const size_t n = strlen(text);
-    if (n == 0)
+    if (n == 0) {
+        /* An empty `content` has two very different causes and they were
+         * reported identically until 2026-09-02.
+         *
+         * A REASONING model writes its chain of thought into a sibling
+         * field (`reasoning_content` at Z.ai, `reasoning` elsewhere) and
+         * only then writes the answer. Give it a small max_tokens and the
+         * whole budget goes to the thought: content is "", finish_reason is
+         * "length", and the leg is working perfectly. Reporting that as an
+         * empty message points an operator at the vendor when the answer is
+         * the token budget, so it is named. It is still a refusal — there is
+         * no answer to act on — but a refusal with the repair in it. */
+        const struct json_value *fr = json_get(choice, "finish_reason");
+        const char *fs = (fr && fr->type == JSON_STR) ? json_get_str(fr) : NULL;
+        const struct json_value *rc = json_get(msg, "reasoning_content");
+        if (!rc)
+            rc = json_get(msg, "reasoning");
+        if (rc && rc->type == JSON_STR && json_get_str(rc)
+            && json_get_str(rc)[0])
+            LOG_FAIL("engine",
+                     "refusing an empty assistant message: this model wrote "
+                     "%zu bytes of reasoning and no answer (finish_reason=%s) "
+                     "— raise the output-token budget",
+                     strlen(json_get_str(rc)), fs ? fs : "absent");
         LOG_FAIL("engine", "refusing an empty assistant message");
+    }
     if (n > ENGINE_MAX_TEXT_BYTES)
         LOG_FAIL("engine", "refusing %zu bytes of assistant text: over the cap",
                  n);
@@ -321,6 +345,62 @@ static bool read_text(const struct json_value *root, struct engine_reply *out)
     memcpy(out->text, text, n + 1);
     out->text_len = n;
     return true;
+}
+
+size_t engine_response_excerpt(const char *body, size_t len,
+                               char *out, size_t cap)
+{
+    if (!out || cap == 0)
+        return 0;
+    out[0] = '\0';
+    if (!body || len == 0)
+        return 0;
+    /* Room for the three-dot marker when the body is longer than the room. */
+    const size_t room = cap - 1u;
+    size_t n = 0;
+    bool last_was_space = true;   /* true so a leading run is dropped */
+    size_t consumed = 0;
+    for (; consumed < len && n < room; consumed++) {
+        unsigned char c = (unsigned char)body[consumed];
+        const bool printable = (c >= 0x20u && c <= 0x7eu);
+        if (!printable || c == ' ') {
+            if (last_was_space)
+                continue;
+            out[n++] = ' ';
+            last_was_space = true;
+            continue;
+        }
+        out[n++] = (char)c;
+        last_was_space = false;
+    }
+    while (n > 0 && out[n - 1] == ' ')
+        n--;
+    out[n] = '\0';
+    if (consumed < len && n + 3u < cap) {
+        out[n++] = '.'; out[n++] = '.'; out[n++] = '.';
+        out[n] = '\0';
+    }
+    return n;
+}
+
+/* Say what came back when a body is refused.
+ *
+ * Before this existed a refusal named the RULE that fired — "no `choices`
+ * array" — and nothing about the document, so the next question ("then what
+ * did the vendor send?") cost a packet capture. Measured on 2026-09-02: a
+ * Z.ai coding-plan key against the general-plan endpoint answers HTTP 200
+ * with a body that has neither `choices` nor `error`, and the refusal read
+ * as a broken decoder for as long as the body was invisible. */
+static void log_refused_body(const struct engine_vendor *vendor,
+                             const char *body, size_t len, const char *why)
+{
+    char excerpt[ENGINE_RESPONSE_EXCERPT_BYTES + 4u];
+    (void)engine_response_excerpt(body, len, excerpt, sizeof(excerpt));
+    LOG_WARN("engine",
+             "%s refused a %zu-byte body (%s); first %u bytes: %s",
+             vendor && vendor->id ? vendor->id : "?", len, why,
+             (unsigned)ENGINE_RESPONSE_EXCERPT_BYTES,
+             excerpt[0] ? excerpt : "(nothing printable)");
 }
 
 bool engine_response_parse(const struct engine_vendor *vendor,
@@ -339,6 +419,7 @@ bool engine_response_parse(const struct engine_vendor *vendor,
     json_init(&root);
     if (!json_read(&root, body, len)) {
         json_free(&root);
+        log_refused_body(vendor, body, len, "not well-formed JSON");
         LOG_FAIL("engine",
                  "refusing a response that is not well-formed JSON (truncated, "
                  "over-nested, or not JSON at all)");
@@ -353,8 +434,10 @@ bool engine_response_parse(const struct engine_vendor *vendor,
         ok = true;
     }
     json_free(&root);
-    if (!ok)
+    if (!ok) {
         engine_reply_free(out);
+        log_refused_body(vendor, body, len, "no usable assistant message");
+    }
     return ok;
 }
 

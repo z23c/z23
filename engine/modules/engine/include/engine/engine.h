@@ -156,6 +156,23 @@ struct engine_vendor {
     const char      *id;             /* stable selector, e.g. "glm" */
     const char      *display;        /* human name for a transcript line */
     const char      *url;            /* absolute https:// endpoint, or NULL */
+    /* Environment variable holding a COMPLETE https:// endpoint that
+     * replaces `url` for this row, or NULL when the row admits no override.
+     *
+     * This exists because one vendor sells the same models behind two
+     * endpoints and the key decides which one answers. A Z.ai coding-plan
+     * key reaches /api/coding/paas/v4 and gets an EMPTY 200 from
+     * /api/paas/v4 — no `choices`, no `error`, HTTP 200 — which reads as a
+     * broken decoder rather than as the wrong door. A second registry row
+     * per plan would be worse: the two rows would differ only in a URL,
+     * share a key, and force a caller to know which plan they bought before
+     * they can name an engine.
+     *
+     * A COMPLETE url, never a base: see the header comment in
+     * engine_registry.c for why this table stores no bases. The override is
+     * refused unless it begins with "https://", so an environment variable
+     * can never downgrade a dispatch to cleartext. */
+    const char      *url_env;
     const char      *default_model;
     const char      *key_env;        /* environment variable holding the key */
     const char      *key_file_rel;   /* $HOME-relative 0600 file, or NULL */
@@ -190,6 +207,19 @@ struct engine_vendor {
 const struct engine_vendor *engine_by_id(const char *id);
 const struct engine_vendor *engine_at(size_t index);
 size_t engine_count(void);
+
+/* The endpoint a dispatch of this vendor must actually POST to.
+ *
+ * It is `url`, unless the row names a `url_env` and that variable holds a
+ * value beginning with "https://", in which case it is that value. An
+ * override that is empty, unset, or not https is IGNORED and the row's own
+ * url is returned — silently taking a cleartext endpoint out of the
+ * environment is the failure this refuses, and a caller that wants to know
+ * which one it got prints the result.
+ *
+ * Returns NULL for a row with no url (a CLI or fixture vendor). The pointer
+ * borrows from the row or from the environment and is not freed. */
+const char *engine_endpoint(const struct engine_vendor *v);
 
 /* True when this vendor can be dispatched without a network and without
  * spending money. Exactly one such vendor exists, and it is how the whole

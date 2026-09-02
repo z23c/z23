@@ -100,6 +100,15 @@
  * a minute the interesting fact is that it did not, not what it eventually
  * says. */
 #define UNIT_PROBE_TIMEOUT_MS 30000
+/* What a probe allows the model to emit. It is NOT the smallest number a
+ * vendor will bill, and the difference was measured on 2026-09-02: with 16
+ * tokens GLM-5.3 spent the whole budget on reasoning_content, returned an
+ * empty `content` with finish_reason "length", and the probe reported the
+ * leg as broken when it was working. A reasoning model must be allowed to
+ * finish thinking before it can say "ok". A thousand tokens of a flash model
+ * is still a fraction of a cent, and a probe nobody believes is worth
+ * nothing at any price. */
+#define UNIT_PROBE_OUTPUT_TOKENS 1024
 /* A CLI starts a runtime, reads a config and opens its own session before it
  * says anything, so it gets more room than one HTTPS round trip. */
 #define UNIT_PROBE_CLI_TIMEOUT_MS 120000
@@ -653,8 +662,8 @@ static bool dispatch_https(const struct engine_vendor *v, const char *body,
     };
     const struct tls_client_request req = {
         .method       = "POST",
-        .url          = v->url,
-        .content_type = "engine/application/json",
+        .url          = engine_endpoint(v),
+        .content_type = "application/json",
         .body         = body,
         .body_len     = body_len,
         .user_agent   = "zclassic23-engine-unit",
@@ -839,7 +848,7 @@ static int probe_one(const struct engine_vendor *v, const char *model_override)
         .model             = model,
         .system_prompt     = NULL,
         .user_prompt       = "Reply with the word: ok",
-        .max_output_tokens = 16,
+        .max_output_tokens = UNIT_PROBE_OUTPUT_TOKENS,
     };
     char *body = engine_request_alloc(&call, &body_len);
     if (!body) {
@@ -864,9 +873,19 @@ static int probe_one(const struct engine_vendor *v, const char *model_override)
         for (const char *p = dr.reply.text; *p && n < sizeof(one_line) - 1; p++)
             one_line[n++] = (*p == '\n' || *p == '\r') ? ' ' : *p;
         one_line[n] = '\0';
-        printf("HTTP %d in %lldms  model=%s  \"%s\"\n", dr.http_status,
+        /* The token counts are printed because they are the unit of cost and
+         * the probe is the cheapest place to see whether a vendor reports
+         * them at all. "unreported" is a fact about the vendor, not a zero. */
+        char spend[64];
+        if (dr.reply.usage.tokens_known)
+            (void)snprintf(spend, sizeof(spend), "in=%lld out=%lld",
+                           (long long)dr.reply.usage.prompt_tokens,
+                           (long long)dr.reply.usage.completion_tokens);
+        else
+            (void)snprintf(spend, sizeof(spend), "tokens unreported");
+        printf("HTTP %d in %lldms  model=%s  %s  \"%s\"\n", dr.http_status,
                (long long)elapsed,
-               dr.reply.model[0] ? dr.reply.model : model, one_line);
+               dr.reply.model[0] ? dr.reply.model : model, spend, one_line);
         engine_reply_free(&dr.reply);
         return 0;
     }

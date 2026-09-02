@@ -22,6 +22,7 @@
 
 #include "engine/engine.h"
 
+#include <stdlib.h>
 #include <string.h>
 
 /* ── CLI argument templates ───────────────────────────────────────────────
@@ -63,6 +64,7 @@ static const struct engine_vendor k_engine_vendors[] = {
         .id            = "grok",
         .display       = "xAI Grok (HTTPS API)",
         .url           = "https://api.x.ai/v1/chat/completions",
+        .url_env       = "XAI_CHAT_URL",
         .default_model = "grok-4-fast",
         .key_env       = "XAI_API_KEY",
         .key_file_rel  = ".config/zclassic23/engine/xai.key",
@@ -74,11 +76,26 @@ static const struct engine_vendor k_engine_vendors[] = {
     },
     {
         /* Z.ai's GLM. Its chat surface is OpenAI-compatible, which is why it
-         * shares a wire dialect with grok rather than getting its own. */
+         * shares a wire dialect with grok rather than getting its own.
+         *
+         * The url is the CODING-PLAN endpoint, and that is a measurement,
+         * not a preference. Probed on 2026-09-02 with this host's key:
+         * /api/paas/v4/chat/completions answered HTTP 200 in 506ms with a
+         * body carrying neither `choices` nor `error`, so the decoder
+         * refused it and the operator was told the decoder was wrong. The
+         * same call to /api/coding/paas/v4/chat/completions answers with a
+         * normal completion. A coding-plan key is what a subscription buys
+         * on this machine, so it is the default; a general-plan key points
+         * ZAI_CHAT_URL at https://api.z.ai/api/paas/v4/chat/completions and
+         * changes nothing else.
+         *
+         * glm-5.3 rather than glm-4.6: it is what the plan covers and what
+         * the same subscription's own CLI configuration names. */
         .id            = "glm",
-        .display       = "Z.ai GLM (HTTPS API)",
-        .url           = "https://api.z.ai/api/paas/v4/chat/completions",
-        .default_model = "glm-4.6",
+        .display       = "Z.ai GLM (HTTPS API, coding plan)",
+        .url           = "https://api.z.ai/api/coding/paas/v4/chat/completions",
+        .url_env       = "ZAI_CHAT_URL",
+        .default_model = "glm-5.3",
         .key_env       = "ZAI_API_KEY",
         .key_file_rel  = ".config/zclassic23/engine/zai.key",
         .program       = NULL,
@@ -96,6 +113,7 @@ static const struct engine_vendor k_engine_vendors[] = {
         .id            = "openai",
         .display       = "OpenAI (HTTPS API)",
         .url           = "https://api.openai.com/v1/chat/completions",
+        .url_env       = "OPENAI_CHAT_URL",
         .default_model = "gpt-4.1-mini",
         .key_env       = "OPENAI_API_KEY",
         .key_file_rel  = ".config/zclassic23/engine/openai.key",
@@ -206,6 +224,22 @@ const struct engine_vendor *engine_by_id(const char *id)
             return &k_engine_vendors[i];
     }
     return NULL;
+}
+
+const char *engine_endpoint(const struct engine_vendor *v)
+{
+    if (!v)
+        return NULL;
+    if (v->url_env && v->url_env[0]) {
+        const char *over = getenv(v->url_env);
+        /* Only an https override is honoured. An operator who exports an
+         * http:// endpoint has made a mistake this table will not carry out
+         * for them, and silently sending a prompt in cleartext is a worse
+         * outcome than ignoring the variable. */
+        if (over && strncmp(over, "https://", 8) == 0 && over[8] != '\0')
+            return over;
+    }
+    return v->url;
 }
 
 bool engine_is_fixture(const struct engine_vendor *v)
