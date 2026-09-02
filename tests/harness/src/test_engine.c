@@ -31,6 +31,7 @@
 #include "engine/engine_err.h"
 #include "engine/engine_patch.h"
 #include "engine/engine_prompt.h"
+#include "engine/engine_receipt.h"
 #include "base/safe_alloc.h"
 #include "engine/engine_secret.h"
 #include "engine/engine_verdict.h"
@@ -1495,6 +1496,165 @@ static int case_default_engine(void)
     return failures;
 }
 
+
+/* ── prompt templates, keyed by task kind ───────────────────────────────
+ * A kind missing a required section would compose a bare header the shape
+ * audit cannot tell from a filled one, so it is refused before dispatch.
+ * --kind wins over a `kind:` header so an operator can re-run a task as a
+ * different job without editing the file. */
+
+static const char *select_kind(const char *flag, const char *task)
+{
+    if (flag && flag[0])
+        return flag;
+    return engine_prompt_kind_from_header(task);
+}
+
+static int case_prompt_templates(void)
+{
+    int failures = 0;
+
+    EN_CHECK("at least one prompt kind is declared",
+             engine_prompt_kind_count() > 0);
+    EN_CHECK("an index past the last kind has no name",
+             engine_prompt_kind_at(engine_prompt_kind_count()) == NULL);
+
+    bool every_kind_complete = true;
+    bool every_always_filled = true;
+    size_t always = 0;
+    for (size_t i = 0; i < engine_prompt_kind_count(); i++) {
+        const char *kind = engine_prompt_kind_at(i);
+        if (!kind || !engine_prompt_kind_is_complete(kind))
+            every_kind_complete = false;
+        for (size_t s = 0; s < engine_prompt_section_count(); s++) {
+            const struct engine_prompt_section *sec = engine_prompt_section_at(s);
+            if (!sec || sec->need != ENGINE_PROMPT_NEED_ALWAYS)
+                continue;
+            always++;
+            if (!engine_prompt_template_body(kind, sec->id))
+                every_always_filled = false;
+        }
+    }
+    EN_CHECK("every declared kind is selectable", every_kind_complete);
+    EN_CHECK("and supplies a body for every always-required section",
+             every_always_filled && always > 0);
+
+    EN_CHECK("a kind missing a required section is refused",
+             !engine_prompt_kind_is_complete("half-done"));
+    EN_CHECK("an unknown kind is not a silent fallback to another kind's words",
+             engine_prompt_template_body("half-done", "task") == NULL);
+    EN_CHECK("a real kind supplies no body for a section it did not declare",
+             engine_prompt_template_body("review", "territory") == NULL);
+    EN_CHECK("fix-gate and add-test do not share a task body",
+             engine_prompt_template_body("fix-gate", "task") != NULL
+             && engine_prompt_template_body("add-test", "task") != NULL
+             && strcmp(engine_prompt_template_body("fix-gate", "task"),
+                       engine_prompt_template_body("add-test", "task")) != 0);
+
+    const char *headed =
+        "kind: add-test\n"
+        "\n"
+        "write a test that fails first\n";
+    const char *from_header = engine_prompt_kind_from_header(headed);
+    EN_CHECK("a kind: header line selects that kind",
+             from_header && strcmp(from_header, "add-test") == 0);
+    EN_CHECK("--kind wins over the task file's header",
+             strcmp(select_kind("review", headed), "review") == 0);
+    EN_CHECK("without --kind the header kind is used",
+             strcmp(select_kind(NULL, headed), "add-test") == 0);
+    EN_CHECK("a kind after a blank line is not a header",
+             engine_prompt_kind_from_header("task prose\n\nkind: review\n")
+             == NULL);
+    EN_CHECK("an empty --kind still reads the header",
+             strcmp(select_kind("", headed), "add-test") == 0);
+    return failures;
+}
+
+
+/* ── hash-chained engine-unit receipts ─────────────────────────────────
+ * Signal, not judgement: the chain says only that nothing was altered
+ * after the fact. A tampered earlier line makes every later prev_sha3
+ * stop matching. */
+
+static struct engine_receipt receipt_fixture(const char *engine, int64_t ts)
+{
+    struct engine_receipt r;
+    memset(&r, 0, sizeof(r));
+    r.ts = ts;
+    r.engine = engine;
+    r.model = "m";
+    r.kind = "fix-gate";
+    r.prompt_tokens = ENGINE_RECEIPT_UNREPORTED;
+    r.completion_tokens = ENGINE_RECEIPT_UNREPORTED;
+    r.wall_ms = 10;
+    r.http_status = 0;
+    r.outcome.lint_rc = ENGINE_RECEIPT_UNREPORTED;
+    return r;
+}
+
+static bool tamper_first_line(const char *path)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f)
+        return false;
+    char buf[ENGINE_RECEIPT_LINE_MAX + 2u];
+    size_t n = fread(buf, 1, sizeof(buf) - 1u, f);
+    (void)fclose(f);
+    if (n == 0)
+        return false;
+    for (size_t i = 1; i < n; i++) {
+        if (buf[i] >= 'a' && buf[i] <= 'z') {
+            buf[i] = (char)(buf[i] == 'a' ? 'b' : 'a');
+            break;
+        }
+    }
+    f = fopen(path, "wb");
+    if (!f)
+        return false;
+    const size_t w = fwrite(buf, 1, n, f);
+    (void)fclose(f);
+    return w == n;
+}
+
+static int case_receipt_chain(void)
+{
+    int failures = 0;
+    char path[512];
+    (void)snprintf(path, sizeof(path), "/tmp/zcl_engine_receipt_%d.chainlog",
+                   (int)getpid());
+    (void)unlink(path);
+
+    struct engine_receipt_chain_report report;
+    EN_CHECK("a missing file is an empty chain, not a broken one",
+             engine_receipt_verify_chain(path, &report)
+             && report.records == 0 && report.first_bad_line == 0);
+
+    struct engine_receipt a = receipt_fixture("fixture", 1000);
+    struct engine_receipt b = receipt_fixture("glm", 1001);
+    struct engine_receipt c = receipt_fixture("grok", 1002);
+    EN_CHECK("the first record appends", engine_receipt_append(path, &a, NULL));
+    EN_CHECK("the second record appends", engine_receipt_append(path, &b, NULL));
+    EN_CHECK("the third record appends", engine_receipt_append(path, &c, NULL));
+    EN_CHECK("the chain verifies end to end",
+             engine_receipt_verify_chain(path, &report)
+             && report.records == 3 && report.first_bad_line == 0);
+
+    struct engine_receipt bad = receipt_fixture("", 1003);
+    bad.engine = "";
+    EN_CHECK("a receipt with no engine id is refused",
+             !engine_receipt_append(path, &bad, NULL));
+    EN_CHECK("refusing an append leaves the chain intact",
+             engine_receipt_verify_chain(path, &report) && report.records == 3);
+
+    EN_CHECK("tampering an earlier line is detected", tamper_first_line(path));
+    EN_CHECK("and verification names a bad line",
+             !engine_receipt_verify_chain(path, &report)
+             && report.first_bad_line != 0);
+
+    (void)unlink(path);
+    return failures;
+}
+
 int test_engine(void)
 {
     int failures = 0;
@@ -1509,9 +1669,11 @@ int test_engine(void)
     failures += case_key_gate();
     failures += case_prompt();
     failures += case_prompt_shape();
+    failures += case_prompt_templates();
     failures += case_cli_argv();
     failures += case_cli_observation();
     failures += case_default_engine();
+    failures += case_receipt_chain();
     printf("engine: %d failure(s)\n", failures);
     return failures;
 }
