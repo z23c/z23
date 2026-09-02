@@ -1,14 +1,18 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
- * fact_writers — the writer census: for every durable NAMED SLOT in the node,
- * enumerate every place that writes it, and name the slots with more than one.
+ * fact_writers — the mutation-surface census: for each durable NAMED SLOT the
+ * declared derivations can resolve, enumerate its resolved source mutation
+ * sites and name the slots reached from more than one file.
  *
  * ── Why ──
  * The recurring defect in this codebase is not duplicated text (measured: 0.65%
  * of production lines). It is one FACT with two independently writable homes
- * that then drift. A clone detector cannot see that and neither can a diff. The
- * doctrine's cure is "delete a copy, never add a reconciliation guard", but
- * until now nothing could tell you which facts have a second copy. This does.
+ * that then drift. A clone detector cannot see that and neither can a diff.
+ * This census finds the mutation sites that must be audited for that defect.
+ * It does NOT prove that two sites are two fact homes or two authorities: the
+ * sites may serialize through one owner, perform an atomic recovery transition,
+ * or target a detached candidate database. Ownership remains UNPROVEN until
+ * those roles and targets are established by a stronger contract.
  *
  * ── Ground truth ──
  * Nothing is authored. The slot names come from the tree's own key literals and
@@ -66,9 +70,10 @@ struct fact_writer_site {
     enum fact_write_via via;
 };
 
-/* One durable named slot and its writers. `writer_files` is the census's
- * headline: distinct FILES that write this slot. Two sites in one file are one
- * writer surface; two files are two independently writable homes. */
+/* One durable named slot and its mutation sites. `writer_files` is retained as
+ * the public schema name: it counts distinct FILES that can write this slot.
+ * Two sites in one file are one mutation surface; two files are two mutation
+ * surfaces, not proof of two independently writable homes. */
 struct fact_row {
     char store[FACT_STORE_NAME_MAX];
     char key[FACT_KEY_MAX];

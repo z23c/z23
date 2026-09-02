@@ -996,7 +996,7 @@ represented by its children's sections.
 | Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
 |---|---|---|---|---|---|---|
 | `code provenance merkle` | ready | read / read / public · fast/tiny | **`path`** | `zcl.code_merkle.v1` | `z23 code provenance merkle core/modules/net` | Give the SHA3 Merkle root of the tree or a subtree |
-| `code provenance facts` | ready | read / read / public · background/moderate | **`key`**, `store` | `zcl.code_facts.v1` | `z23 code provenance facts coins_applied_height` | Census the durable named slots and name the ones with several writers |
+| `code provenance facts` | ready | read / read / public · background/moderate | **`key`**, `store` | `zcl.code_facts.v1` | `z23 code provenance facts coins_applied_height` | Census durable named-slot mutation surfaces without claiming ownership |
 | `code provenance relations` | ready | read / read / public · fast/tiny | **`name`** | `zcl.code_relations.v1` | `z23 code provenance relations zcl_native_handle_code_sym` | Expose typed source, command-locus, and proof-requirement relations |
 | `code provenance emitter` | ready | read / read / public · foreground/moderate | **`text`** | `zcl.code_emitter.v1` | `z23 code provenance emitter 'address_index.below_snapshot_seed'` | Resolve emitted text to its emitting code |
 

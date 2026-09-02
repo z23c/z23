@@ -1,7 +1,8 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
- * The writer census engine: re-derives, per durable named slot, every place in
- * the tree that writes it. Three derivations, all mechanical, all stated in
+ * The mutation-surface census engine: re-derives, per durable named slot,
+ * each source mutation site the declared derivations can resolve. The three
+ * derivations are mechanical and stated in
  * controllers/fact_store_writers.def and nowhere else:
  *
  *   API writers    — call sites of the store's declared write entry points
@@ -10,15 +11,17 @@
  *   RAW writers    — a SQL mutation statement naming the store's table, keyed by
  *                    the literal in its `<key_column>=` / `IN (...)` predicate or
  *                    its `VALUES('<key>',…)` clause. These are the paths that
- *                    BYPASS the declared API, which is where a second writer
- *                    hides.
+ *                    BYPASS the declared API, which is where an unreviewed
+ *                    mutation surface hides.
  *   LOCAL wrappers — a mutation whose key was BOUND carries no name, so the
  *                    function enclosing it is read out of the file and treated
  *                    as that file's own write entry point; its same-file call
  *                    sites then resolve normally.
  *
- * Nothing is remembered between runs: no store, no baseline, no recorded set of
- * known findings. The answer is a pure function of the tree.
+ * Nothing is remembered between runs: no store, no baseline, no recorded set
+ * of known findings. The answer is a pure function of the tree. The answer is
+ * reachability evidence, not an ownership verdict: target database, execution
+ * role, serialization, and capability transfer are outside this analyzer.
  */
 
 #define _GNU_SOURCE

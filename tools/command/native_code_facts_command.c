@@ -1,11 +1,14 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
- * Native handler for `code provenance facts` — the writer census on the agent surface.
+ * Native handler for `code provenance facts` — the durable-slot mutation
+ * census on the agent surface.
  *
- * Answers the one question no other command could: which durable named slot in
- * this node has more than one place that writes it. With no argument it renders
- * the ranked multi-writer slots plus the per-store honesty counters; with a
- * `key` it renders every writer of that one slot as file:line via <fn|SQL verb>.
+ * Answers which RESOLVED durable named slots have source mutations in more
+ * than one file. With no argument it renders the ranked multi-surface slots
+ * plus the per-store honesty counters; with a `key` it renders each resolved
+ * mutation site as file:line via <fn|SQL verb>. It deliberately does not infer
+ * completeness, runtime reachability, authority roles, serialized ownership,
+ * target database identity, or duplicate fact homes.
  *
  * Local, read-only, deterministic. The answer is recomputed for each exact
  * source generation. A process-local memo is keyed by the code index's sealed
@@ -184,6 +187,15 @@ void zcl_native_handle_code_facts(const struct zcl_command_request *request,
             facts_push_line(&lines, l);
         }
         (void)json_push_kv_str(&reply->data, "scope", "slot");
+        (void)json_push_kv_bool(&reply->data, "authority_proven", false);
+        (void)json_push_kv_bool(&reply->data, "source_coverage_complete", false);
+        (void)json_push_kv_bool(&reply->data, "runtime_reachability_proven", false);
+        (void)json_push_kv_str(
+            &reply->data, "evidence_ceiling",
+            "resolved named-literal source mutation sites under the declared "
+            "derivations only; completeness, runtime reachability, ownership "
+            "role, target database, serialization, and duplicate fact homes "
+            "are UNPROVEN");
         (void)json_push_kv_str(&reply->data, "store", row->store);
         (void)json_push_kv_str(&reply->data, "key", row->key);
         (void)json_push_kv_int(&reply->data, "writer_files", row->writer_files);
@@ -191,15 +203,16 @@ void zcl_native_handle_code_facts(const struct zcl_command_request *request,
         (void)json_push_kv(&reply->data, "writers", &arr);
         (void)json_push_kv(&reply->data, "lines", &lines);
         (void)json_push_kv_bool(&reply->data, "truncated", row->sites_truncated);
-        char summary[224];
+        char summary[512];
         (void)snprintf(summary, sizeof(summary),
                        "%s/%s: %d writer file(s), %d site(s)%s",
                        row->store, row->key, row->writer_files,
                        row->writer_sites,
                        row->writer_files > 1
-                           ? " — MULTI-WRITER: the cure is to delete a copy, "
-                             "never to reconcile them"
-                           : " — single writer surface");
+                           ? " — MULTI-SURFACE: authority and duplicate-home "
+                             "claims remain UNPROVEN"
+                           : " — single resolved mutation surface; authority "
+                             "still UNPROVEN");
         (void)json_push_kv_str(&reply->data, "summary", summary);
         json_free(&arr);
         json_free(&lines);
@@ -241,6 +254,14 @@ void zcl_native_handle_code_facts(const struct zcl_command_request *request,
     }
 
     (void)json_push_kv_str(&reply->data, "scope", "census");
+    (void)json_push_kv_bool(&reply->data, "authority_proven", false);
+    (void)json_push_kv_bool(&reply->data, "source_coverage_complete", false);
+    (void)json_push_kv_bool(&reply->data, "runtime_reachability_proven", false);
+    (void)json_push_kv_str(
+        &reply->data, "evidence_ceiling",
+        "resolved named-literal source mutation sites under the declared "
+        "derivations only; completeness, runtime reachability, ownership role, "
+        "target database, serialization, and duplicate fact homes are UNPROVEN");
     (void)json_push_kv_int(&reply->data, "files_scanned", rep->files_scanned);
     (void)json_push_kv_int(&reply->data, "facts_total", rep->facts_total);
     (void)json_push_kv_int(&reply->data, "facts_multi_writer",
@@ -254,12 +275,14 @@ void zcl_native_handle_code_facts(const struct zcl_command_request *request,
     (void)json_push_kv(&reply->data, "lines", &lines);
     (void)json_push_kv_bool(&reply->data, "truncated",
                             shown < rep->facts_multi_writer);
-    char summary[288];
+    char summary[512];
     (void)snprintf(summary, sizeof(summary),
-                   "%d durable named slot(s) across %d store(s); %d have MORE "
-                   "THAN ONE writer file (%d shown); %d write site(s) had a "
-                   "non-literal key and are unattributed. "
-                   "`code provenance facts <key>` names each writer.",
+                   "%d resolved named-literal slot(s) across %d store(s); "
+                   "%d have "
+                   "mutation sites in MORE THAN ONE file (%d shown); %d write "
+                   "site(s) had a non-literal key and are unattributed. "
+                   "Authority roles and duplicate fact homes are UNPROVEN. "
+                   "`code provenance facts <key>` names each resolved site.",
                    rep->facts_total, rep->n_stores, rep->facts_multi_writer,
                    shown, rep->sites_unresolved);
     (void)json_push_kv_str(&reply->data, "summary", summary);

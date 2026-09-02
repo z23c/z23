@@ -1,7 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * Tests for the writer census (engine/controllers/src/fact_writers.c) — the
- * instrument that names durable slots with more than one writer.
+ * instrument that names durable slots with more than one mutation surface.
  *
  * Two halves, deliberately different in kind:
  *
@@ -26,7 +26,10 @@
 #include "test/test_core.h"
 
 #include "codeindex/codeindex.h"
+#include "command/native_command.h"
 #include "controllers/fact_writers.h"
+#include "json/json.h"
+#include "kernel/command_registry.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -204,9 +207,10 @@ static int fw_case_three_writers(void)
         const struct fact_row *shared =
             fact_writers_find(g_fw_rep, "progress_meta", "fw_shared_slot");
         ASSERT(shared != NULL);
-        /* Three independently writable homes: two through the API (one set, one
-         * multi-line delete) and one raw-SQL bypass. The commented mention in
-         * fw_fix_a.c is NOT a fourth. */
+        /* Five mutation surfaces: API set/delete, a raw-SQL bypass, a recovered
+         * local wrapper, and an INSERT-form raw writer. They are source sites,
+         * not evidence that five durable copies or authorities exist. The
+         * commented mention in fw_fix_a.c is NOT another surface. */
         ASSERT_EQ(shared->writer_files, 5);
         ASSERT_EQ(shared->writer_sites, 5);
         ASSERT(fw_row_has_file(shared, "fw_fix_a.c"));
@@ -297,6 +301,73 @@ static int fw_case_unresolved(void)
     return failures;
 }
 
+static int fw_case_command_evidence_ceiling(void)
+{
+    int failures = 0;
+    TEST_CASE("code provenance facts refuses to infer authority from mutation sites") {
+        ASSERT(fw_setup());
+        struct json_value input;
+        json_init(&input);
+        json_set_object(&input);
+        (void)json_push_kv_str(&input, "key", "fw_shared_slot");
+        struct zcl_command_context context = { .source_root = FW_FIX };
+        struct zcl_command_request request = {
+            .input = &input,
+            .view = "normal",
+            .invoked_name = "code.provenance.facts",
+            .context = &context,
+        };
+        struct zcl_command_reply reply;
+        zcl_command_reply_init(&reply, "zcl.code_facts.v1");
+        zcl_native_handle_code_facts(&request, &reply);
+
+        const struct json_value *authority =
+            json_get(&reply.data, "authority_proven");
+        const struct json_value *coverage =
+            json_get(&reply.data, "source_coverage_complete");
+        const struct json_value *reachability =
+            json_get(&reply.data, "runtime_reachability_proven");
+        ASSERT(authority && authority->type == JSON_BOOL && !authority->val.b);
+        ASSERT(coverage && coverage->type == JSON_BOOL && !coverage->val.b);
+        ASSERT(reachability && reachability->type == JSON_BOOL &&
+               !reachability->val.b);
+        const char *ceiling =
+            json_get_str(json_get(&reply.data, "evidence_ceiling"));
+        const char *summary = json_get_str(json_get(&reply.data, "summary"));
+        ASSERT(ceiling && strstr(ceiling, "UNPROVEN"));
+        ASSERT(summary && strstr(summary, "MULTI-SURFACE"));
+        ASSERT(summary && strstr(summary, "UNPROVEN"));
+        ASSERT(summary && strstr(summary, "delete a copy") == NULL);
+
+        zcl_command_reply_free(&reply);
+        json_free(&input);
+
+        json_init(&input);
+        json_set_object(&input);
+        zcl_command_reply_init(&reply, "zcl.code_facts.v1");
+        zcl_native_handle_code_facts(&request, &reply);
+
+        authority = json_get(&reply.data, "authority_proven");
+        coverage = json_get(&reply.data, "source_coverage_complete");
+        reachability = json_get(&reply.data, "runtime_reachability_proven");
+        ASSERT(authority && authority->type == JSON_BOOL && !authority->val.b);
+        ASSERT(coverage && coverage->type == JSON_BOOL && !coverage->val.b);
+        ASSERT(reachability && reachability->type == JSON_BOOL &&
+               !reachability->val.b);
+        ceiling = json_get_str(json_get(&reply.data, "evidence_ceiling"));
+        summary = json_get_str(json_get(&reply.data, "summary"));
+        const char *scope = json_get_str(json_get(&reply.data, "scope"));
+        ASSERT(ceiling && strstr(ceiling, "UNPROVEN"));
+        ASSERT(scope && strcmp(scope, "census") == 0);
+        ASSERT(summary && strstr(summary, "each resolved site"));
+        ASSERT(summary && strstr(summary, "UNPROVEN"));
+
+        zcl_command_reply_free(&reply);
+        json_free(&input);
+    } TEST_END;
+    return failures;
+}
+
 static int fw_case_deterministic(void)
 {
     int failures = 0;
@@ -347,6 +418,7 @@ int test_fact_writers(void)
     failures += fw_case_local_wrapper();
     failures += fw_case_solo();
     failures += fw_case_unresolved();
+    failures += fw_case_command_evidence_ceiling();
     failures += fw_case_deterministic();
     failures += fw_case_defensive();
 

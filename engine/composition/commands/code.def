@@ -481,14 +481,17 @@ ZCL_COMMAND_READY_READ(
 
 ZCL_COMMAND_READY_READ(
     "code.provenance.facts", "code.provenance", "",
-    "Census the durable named slots and name the ones with several writers",
-    "Every durable named slot (a key in progress_meta / stage_cursor / "
-    "node_state) with the count of distinct FILES that write it, ranked so the "
-    "multi-writer slots come first; with a `key`, every writer of that slot as "
-    "file:line via the write function or SQL verb. Derived from the tree — "
+    "Census durable named-slot mutation surfaces without claiming ownership",
+    "Each durable named slot (a key in progress_meta / stage_cursor / "
+    "node_state) resolved by the declared derivations, with the count of "
+    "distinct FILES carrying resolved mutation sites, ranked so multi-surface "
+    "slots come first; with a `key`, each resolved site as file:line via the "
+    "write function or SQL verb. Derived from the tree — "
     "there is no recorded finding set. `sites_unresolved` is the "
     "census's own blind spot: writes whose key argument is not a literal, "
-    "counted rather than dropped. Re-derived when the code index's exact "
+    "counted rather than dropped. Completeness, runtime reachability, "
+    "authority roles, target database identity, serialization, and duplicate "
+    "fact homes remain UNPROVEN. Re-derived when the code index's exact "
     "source root changes; repeated reads memoize that immutable generation.",
     ZCL_COMMAND_LIST_BUDGET,
     "code,facts,writers,duplication,drift,ledger,slots",
