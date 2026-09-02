@@ -18,8 +18,18 @@
 #include "json/json.h"
 #include "sha3/sha3.h"
 
+#include <errno.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+/* The Windows CRT does not expose O_CLOEXEC. Same zero fallback as
+ * engine_secret.c: descriptors wrap non-inheritable handles there. */
+#ifndef O_CLOEXEC
+#define O_CLOEXEC 0
+#endif
 
 static const char *or_empty(const char *s)
 {
@@ -34,44 +44,129 @@ static void sha3_hex(const char *data, size_t len, char out[65])
     out[64] = '\0';
 }
 
-/* Read the last complete line of `path` into `line`, without its newline.
+/* Exclusive lock covering the tail-read and the single append write, so two
+ * units cannot both hash the same last line. F_SETLKW is a record lock on
+ * this fd; close() also drops it. */
+static int ledger_lock(int fd, short type)
+{
+    struct flock fl;
+    memset(&fl, 0, sizeof(fl));
+    fl.l_type = type;
+    fl.l_whence = SEEK_SET;
+    fl.l_start = 0;
+    fl.l_len = 0;
+    int rc;
+    do {
+        rc = fcntl(fd, F_SETLKW, &fl);
+    } while (rc != 0 && errno == EINTR);
+    return rc;
+}
+
+static int ledger_unlock(int fd)
+{
+    struct flock fl;
+    memset(&fl, 0, sizeof(fl));
+    fl.l_type = F_UNLCK;
+    fl.l_whence = SEEK_SET;
+    fl.l_start = 0;
+    fl.l_len = 0;
+    return fcntl(fd, F_SETLK, &fl);
+}
+
+static bool head_path_of(const char *path, char *out, size_t cap)
+{
+    const size_t n = strlen(path);
+    const size_t suffix = sizeof(ENGINE_RECEIPT_HEAD_SUFFIX) - 1u;
+    if (n + suffix + 1u > cap)
+        return false;
+    memcpy(out, path, n);
+    memcpy(out + n, ENGINE_RECEIPT_HEAD_SUFFIX, suffix + 1u);
+    return true;
+}
+
+/* Write `path`.head as one 64-hex line. Called while the ledger fd is held
+ * exclusive, so a concurrent append cannot publish a different pin first. */
+static bool write_head_pin(const char *path, const char *sha3_hex)
+{
+    char hpath[4096];
+    if (!head_path_of(path, hpath, sizeof(hpath)))
+        LOG_FAIL("engine_receipt", "head path for %s is too long", path);
+    const int fd = open(hpath, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+    if (fd < 0)
+        LOG_FAIL("engine_receipt", "cannot write the head pin for %s", path);
+    char buf[65];
+    memcpy(buf, sha3_hex, 64);
+    buf[64] = '\n';
+    const ssize_t wrote = write(fd, buf, 65);
+    const int closed = close(fd);
+    if (wrote != 65 || closed != 0)
+        LOG_FAIL("engine_receipt", "short write of the head pin for %s", path);
+    return true;
+}
+
+/* 1 = pin read, 0 = no such file, -1 = unreadable or malformed. */
+static int read_head_pin(const char *path, char out[65])
+{
+    out[0] = '\0';
+    char hpath[4096];
+    if (!head_path_of(path, hpath, sizeof(hpath)))
+        LOG_ERR("engine_receipt", "head path for %s is too long", path);
+    const int fd = open(hpath, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) {
+        if (errno == ENOENT)
+            return 0;
+        LOG_ERR("engine_receipt", "cannot read the head pin for %s", path);
+    }
+    char buf[66];
+    const ssize_t n = read(fd, buf, sizeof(buf));
+    (void)close(fd);
+    if (n != 65 || buf[64] != '\n')
+        LOG_ERR("engine_receipt",
+                "the head pin for %s is not a 64-hex line", path);
+    for (int i = 0; i < 64; i++) {
+        const char c = buf[i];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')))
+            LOG_ERR("engine_receipt",
+                    "the head pin for %s is not lowercase hex", path);
+    }
+    memcpy(out, buf, 64);
+    out[64] = '\0';
+    return 1;
+}
+
+static void close_locked(int fd)
+{
+    (void)ledger_unlock(fd);
+    (void)close(fd);
+}
+
+/* Read the last complete line of the already-open, already-locked ledger
+ * into `line`, without its newline.
  *
  * A file whose final byte is not a newline has a torn tail: some earlier
  * append did not finish. That is refused rather than repaired, because the
  * two available repairs — hashing the partial line, or dropping it — both
  * produce a chain that verifies over a history that is not what happened.
  *
- * Returns 1 with `line` filled, 0 when the file does not exist or is empty
- * (a genesis append), and -1 on a refusal. */
-static int read_last_line(const char *path, char *line, size_t cap)
+ * Returns 1 with `line` filled, 0 when the file is empty (a genesis append),
+ * and -1 on a refusal. */
+static int read_last_line_fd(int fd, const char *path, char *line, size_t cap)
 {
     line[0] = '\0';
-    FILE *f = fopen(path, "rb");
-    if (!f)
-        return 0;             /* absent is an empty chain, not an error */
-    if (fseek(f, 0, SEEK_END) != 0) {
-        (void)fclose(f);
-        LOG_ERR("engine_receipt", "cannot seek %s", path);
-    }
-    const long size = ftell(f);
-    if (size < 0) {
-        (void)fclose(f);
+    struct stat st;
+    if (fstat(fd, &st) != 0)
         LOG_ERR("engine_receipt", "cannot size %s", path);
-    }
-    if (size == 0) {
-        (void)fclose(f);
+    if (st.st_size < 0)
+        LOG_ERR("engine_receipt", "cannot size %s", path);
+    if (st.st_size == 0)
         return 0;
-    }
     /* One line is bounded, so the tail we must look at is bounded too. */
-    const size_t window = (size_t)size < cap ? (size_t)size : cap;
-    if (fseek(f, size - (long)window, SEEK_SET) != 0) {
-        (void)fclose(f);
+    const size_t window = (size_t)st.st_size < cap ? (size_t)st.st_size : cap;
+    if (lseek(fd, st.st_size - (off_t)window, SEEK_SET) == (off_t)-1)
         LOG_ERR("engine_receipt", "cannot seek the tail of %s", path);
-    }
     char *buf = line;
-    const size_t got = fread(buf, 1, window, f);
-    (void)fclose(f);
-    if (got != window)
+    const ssize_t got = read(fd, buf, window);
+    if (got < 0 || (size_t)got != window)
         LOG_ERR("engine_receipt", "short read of the tail of %s", path);
     if (buf[got - 1] != '\n')
         LOG_ERR("engine_receipt",
@@ -79,7 +174,7 @@ static int read_last_line(const char *path, char *line, size_t cap)
                 "previous append did not finish and the chain cannot be "
                 "continued honestly", path);
     /* Drop the trailing newline, then find the start of that final line. */
-    size_t end = got - 1;
+    size_t end = (size_t)got - 1;
     size_t start = 0;
     for (size_t i = end; i > 0; i--) {
         if (buf[i - 1] == '\n') {
@@ -87,7 +182,7 @@ static int read_last_line(const char *path, char *line, size_t cap)
             break;
         }
     }
-    if (start == 0 && (size_t)size > window)
+    if (start == 0 && (size_t)st.st_size > window)
         LOG_ERR("engine_receipt",
                 "refusing %s: its last line is longer than the %zu-byte cap",
                 path, cap);
@@ -203,10 +298,24 @@ bool engine_receipt_append(const char *path, const struct engine_receipt *r,
                  "refusing %zu rule ids: over the cap of %u", r->rules_count,
                  (unsigned)ENGINE_RECEIPT_RULES_MAX);
 
+    /* O_RDWR because this same fd must read the tail; O_APPEND so the one
+     * write(2) cannot overwrite earlier records even if the lock is lost.
+     * The lock then makes the tail-read and that write one critical section. */
+    const int fd = open(path, O_RDWR | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
+    if (fd < 0)
+        LOG_FAIL("engine_receipt", "cannot open %s for append", path);
+    if (ledger_lock(fd, F_WRLCK) != 0) {
+        (void)close(fd);
+        LOG_FAIL("engine_receipt", "cannot lock %s for append", path);
+    }
+
     char last[ENGINE_RECEIPT_LINE_MAX + 2u];
-    const int have = read_last_line(path, last, ENGINE_RECEIPT_LINE_MAX + 1u);
-    if (have < 0)
+    const int have = read_last_line_fd(fd, path, last,
+                                       ENGINE_RECEIPT_LINE_MAX + 1u);
+    if (have < 0) {
+        close_locked(fd);
         return false;
+    }
 
     char prev[65];
     if (have == 1) {
@@ -221,20 +330,27 @@ bool engine_receipt_append(const char *path, const struct engine_receipt *r,
 
     char line[ENGINE_RECEIPT_LINE_MAX + 2u];
     size_t len = 0;
-    if (!build_line(r, prev, line, ENGINE_RECEIPT_LINE_MAX, &len))
+    if (!build_line(r, prev, line, ENGINE_RECEIPT_LINE_MAX, &len)) {
+        close_locked(fd);
         return false;
+    }
 
-    FILE *f = fopen(path, "ab");
-    if (!f)
-        LOG_FAIL("engine_receipt", "cannot open %s for append", path);
     line[len] = '\n';
-    const size_t wrote = fwrite(line, 1, len + 1u, f);
-    const bool flushed = (fflush(f) == 0);
-    const bool closed = (fclose(f) == 0);
-    if (wrote != len + 1u || !flushed || !closed)
+    const ssize_t wrote = write(fd, line, len + 1u);
+    if (wrote != (ssize_t)(len + 1u)) {
+        close_locked(fd);
         LOG_FAIL("engine_receipt", "short write appending to %s", path);
+    }
+
+    char hex[65];
+    sha3_hex(line, len, hex);
+    if (!write_head_pin(path, hex)) {
+        close_locked(fd);
+        return false;
+    }
+    close_locked(fd);
     if (out_line_sha3)
-        sha3_hex(line, len, out_line_sha3);
+        memcpy(out_line_sha3, hex, 65);
     return true;
 }
 
@@ -249,9 +365,32 @@ bool engine_receipt_verify_chain(const char *path,
     if (!path || !path[0])
         LOG_FAIL("engine_receipt", "verify needs a path");
 
-    FILE *f = fopen(path, "rb");
-    if (!f)
+    const int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) {
+        if (errno != ENOENT)
+            LOG_FAIL("engine_receipt", "cannot open %s to verify", path);
+        /* No chainlog. A leftover head pin means the records were deleted. */
+        char pinned[65];
+        const int have_pin = read_head_pin(path, pinned);
+        if (have_pin != 0) {
+            report->first_bad_line = 1;
+            (void)snprintf(report->why, sizeof(report->why),
+                           have_pin < 0
+                               ? "the head pin for a missing chainlog is unreadable"
+                               : "the chainlog is gone but its head pin remains");
+            return false;
+        }
         return true;          /* no file is an empty chain, not a broken one */
+    }
+    if (ledger_lock(fd, F_RDLCK) != 0) {
+        (void)close(fd);
+        LOG_FAIL("engine_receipt", "cannot lock %s to verify", path);
+    }
+    FILE *f = fdopen(fd, "rb");
+    if (!f) {
+        close_locked(fd);
+        LOG_FAIL("engine_receipt", "cannot read %s to verify", path);
+    }
 
     char expect[65];
     memset(expect, '0', 64);
@@ -302,6 +441,46 @@ bool engine_receipt_verify_chain(const char *path,
                        expect);
         report->records++;
     }
+    if (ok && ferror(f)) {
+        report->first_bad_line = lineno + 1u;
+        (void)snprintf(report->why, sizeof(report->why),
+                       "a read of %s failed after line %llu", path,
+                       (unsigned long long)lineno);
+        ok = false;
+    }
+
+    if (ok) {
+        char pinned[65];
+        const int have_pin = read_head_pin(path, pinned);
+        if (have_pin < 0) {
+            report->first_bad_line = report->records ? report->records : 1;
+            (void)snprintf(report->why, sizeof(report->why),
+                           "the head pin for %s is unreadable", path);
+            ok = false;
+        } else if (report->records == 0) {
+            if (have_pin == 1) {
+                report->first_bad_line = 1;
+                (void)snprintf(report->why, sizeof(report->why),
+                               "an empty chain still has a head pin: the "
+                               "records were removed");
+                ok = false;
+            }
+        } else if (have_pin == 0) {
+            report->first_bad_line = report->records;
+            (void)snprintf(report->why, sizeof(report->why),
+                           "the chain has no pinned head, so a rewritten last "
+                           "line would not be visible");
+            ok = false;
+        } else if (strcmp(pinned, report->head_sha3) != 0) {
+            report->first_bad_line = report->records;
+            (void)snprintf(report->why, sizeof(report->why),
+                           "the last line does not match the pinned head: "
+                           "the tail was rewritten");
+            ok = false;
+        }
+    }
+
+    (void)ledger_unlock(fd);
     (void)fclose(f);
     return ok;
 }

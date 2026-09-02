@@ -64,8 +64,11 @@
  * times out of 10" — and a plain log cannot tell an edit from an append. A
  * chain can: change any earlier line and every prev_sha3 after it stops
  * matching, and engine_receipt_verify_chain() names the first line that
- * does. It does not SIGN, so it says nothing about who wrote a record; it
- * says only that nothing was altered after the fact.
+ * does. A rewrite of the LAST line would still carry a valid prev_sha3, so
+ * each append also writes `path` plus ENGINE_RECEIPT_HEAD_SUFFIX holding
+ * that line's SHA3; verify refuses a tail that does not hash to the pin.
+ * It does not SIGN, so it says nothing about who wrote a record; it says
+ * only that nothing was altered after the fact.
  *
  * It is deliberately NOT engine/modules/chainlog. That module is a binary
  * frame format with two fsyncs per append, and it is the right thing for
@@ -82,9 +85,11 @@
 #include <stddef.h>
 #include <stdint.h>
 
-/* The file name this module appends to, under a caller's state directory. */
-#define ENGINE_RECEIPT_FILENAME "engine_receipts.chainlog"
-#define ENGINE_RECEIPT_SCHEMA   "zcl.engine_unit_receipt.v1"
+/* The file name this module appends to, under a caller's state directory.
+ * The head pin is that path with ENGINE_RECEIPT_HEAD_SUFFIX appended. */
+#define ENGINE_RECEIPT_FILENAME     "engine_receipts.chainlog"
+#define ENGINE_RECEIPT_HEAD_SUFFIX  ".head"
+#define ENGINE_RECEIPT_SCHEMA       "zcl.engine_unit_receipt.v1"
 
 /* Longest line this writer will produce. A record over it is REFUSED rather
  * than truncated: half a JSON object appended to a chain would break every
@@ -129,11 +134,15 @@ struct engine_receipt {
 
 /* Append one record to `path`, creating the file when absent.
  *
- * The previous line is read back from the file to seed prev_sha3, so a
- * caller holds no chain state between runs and two processes appending to
- * the same file cannot both believe they are first. Returns false and writes
- * nothing on any refusal — an unreadable tail, a record that would exceed
- * ENGINE_RECEIPT_LINE_MAX, too many rule ids, a missing engine id.
+ * One fd is opened O_RDWR|O_CREAT|O_APPEND|O_CLOEXEC. An fcntl exclusive
+ * lock then covers the tail-read and a single write(2) of the whole record
+ * (JSON + '\n'), so two processes cannot both hash the same last line and
+ * a record cannot tear into two write(2)s that another unit interleaves.
+ * The SHA3 of the line just written is stored in `path` plus
+ * ENGINE_RECEIPT_HEAD_SUFFIX. Returns false on any refusal — an unreadable
+ * path (anything but a missing or empty file), a torn tail, a record that
+ * would exceed ENGINE_RECEIPT_LINE_MAX, too many rule ids, a missing
+ * engine id.
  *
  * `out_line_sha3`, when non-NULL, receives the 64-hex SHA3-256 of the line
  * just written (the value the NEXT record will carry as prev_sha3) and must
@@ -150,8 +159,11 @@ struct engine_receipt_chain_report {
 
 /* Walk `path` without writing to it and check every link. Returns true when
  * the file verifies end to end — including when it does not exist, which is
- * an empty chain and not a broken one. `report` is filled either way and is
- * required: "it refused" without naming the line is not a diagnosis. */
+ * an empty chain and not a broken one. Any open failure other than ENOENT
+ * is a refusal, not an empty chain. A last line that does not hash to the
+ * head pin is a refusal, as is a trailing line with no newline. `report`
+ * is filled either way and is required: "it refused" without naming the
+ * line is not a diagnosis. */
 bool engine_receipt_verify_chain(const char *path,
                                  struct engine_receipt_chain_report *report);
 
