@@ -168,6 +168,12 @@ AGENT_IMPACT_RULE("engine/modules/rpc/src/async_rpc_queue.c|engine/modules/rpc/i
 AGENT_IMPACT_RULE("engine/modules/rpc/src/legacy_rpc_client.c|engine/modules/rpc/include/rpc/legacy_rpc_client.h", "rpc header_probe utxo_parity_service zclassicd_oracle make_lint_gates")
 AGENT_IMPACT_RULE("engine/services/src/legacy_balance_observer.c|engine/services/include/services/legacy_balance_observer.h", "rpc vault_dispatch header_probe code_inventory make_lint_gates")
 AGENT_IMPACT_RULE("engine/modules/rpc/src/httpserver.c|engine/modules/rpc/include/rpc/httpserver.h|tests/harness/src/test_rpc_frontdoor_slots.c", "rpc rpc_frontdoor_slots make_lint_gates")
+/* Private owners split from the HTTP lifecycle. Keep their changed-set routes
+ * explicit: a file move must not make credential, fd, or dispatch regressions
+ * fall back to lint-only evidence. */
+AGENT_IMPACT_RULE("engine/modules/rpc/src/httpserver_auth.c|engine/modules/rpc/src/httpserver_auth.h", "cookie_rotation rpc_auth_hardening cli_auth_robust rpc rpc_service_restart make_lint_gates")
+AGENT_IMPACT_RULE("engine/modules/rpc/src/httpserver_queue.c|engine/modules/rpc/src/httpserver_queue.h", "rpc_frontdoor_slots rpc rpc_service_restart make_lint_gates")
+AGENT_IMPACT_RULE("engine/modules/rpc/src/httpserver_request.c|engine/modules/rpc/src/httpserver_request.h", "rpc rpc_auth_hardening cookie_rotation rpc_error_envelope ws_events rpc_timeout make_lint_gates")
 /* JSON-RPC reply shaping + two-pass serialization, split out of
  * httpserver.c. rpc_error_envelope is the group that drives both functions
  * directly (test_rpc_error_envelope.c calls each by name, including the

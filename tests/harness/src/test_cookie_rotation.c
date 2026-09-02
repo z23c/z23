@@ -322,6 +322,58 @@ int test_cookie_rotation(void)
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
 
+    printf("cookie_rotation: background owner rotates during auth and restarts cleanly... ");
+    {
+        setenv("ZCL_RPC_COOKIE_ROTATE_SEC", "1", 1);
+        uint16_t port = reserve_test_port();
+        bool ok = (port != 0);
+        if (ok)
+            ok = rpc_http_start(&empty_table, port, NULL, NULL, tmpdir);
+
+        char initial[128] = {0};
+        char current[128] = {0};
+        bool rotated = false;
+        if (ok) {
+            wait_rpc_ready(port);
+            ok = read_cookie_password(tmpdir, initial, sizeof(initial));
+        }
+
+        /* Authenticate continuously while the one-second owner thread
+         * rotates. The old cookie must remain valid across the handoff, and
+         * the new durable cookie must become usable before the bound ends. */
+        for (int attempt = 0; ok && !rotated && attempt < 200; attempt++) {
+            ok = rpc_with_auth(port, "__cookie__", initial) == 200;
+            if (read_cookie_password(tmpdir, current, sizeof(current)) &&
+                strcmp(current, initial) != 0) {
+                rotated = true;
+                break;
+            }
+            usleep(20000);
+        }
+        ok = ok && rotated;
+        if (ok) {
+            ok = rpc_with_auth(port, "__cookie__", initial) == 200;
+            ok = ok && rpc_with_auth(port, "__cookie__", current) == 200;
+        }
+        rpc_http_stop();
+
+        /* A stopped rotation owner must leave no thread or liveness identity
+         * behind that can collide with a fresh server instance. */
+        uint16_t restart_port = reserve_test_port();
+        ok = ok && restart_port != 0;
+        if (ok)
+            ok = rpc_http_start(&empty_table, restart_port, NULL, NULL,
+                                tmpdir);
+        if (ok) {
+            wait_rpc_ready(restart_port);
+            ok = read_cookie_password(tmpdir, current, sizeof(current));
+            ok = ok && rpc_with_auth(restart_port, "__cookie__", current) == 200;
+        }
+        rpc_http_stop();
+        setenv("ZCL_RPC_COOKIE_ROTATE_SEC", "0", 1);
+        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
+    }
+
     printf("cookie_rotation: env configures interval... ");
     {
         setenv("ZCL_RPC_COOKIE_ROTATE_SEC", "3600", 1);

@@ -67,6 +67,8 @@ static long car_file_mtime(const char *path)
 static const char *const car_stale_witnesses[] = {
     "engine/entry/main.c",
     "engine/modules/rpc/src/httpserver.c",
+    "engine/modules/rpc/src/httpserver_auth.c",
+    "engine/modules/rpc/src/httpserver_request.c",
     NULL,
 };
 

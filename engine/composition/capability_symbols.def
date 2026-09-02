@@ -565,6 +565,9 @@ ZCL_CAPABILITY_SYMBOL("EVP_PKEY_Q_keygen", CAP_RANDOM,
     "Draws a fresh private key from the generator. Classed here rather "
     "than CAP_WALLET because the failure that matters is a predictable "
     "key, not a leaked one.")
+ZCL_CAPABILITY_SYMBOL("GetRand", CAP_RANDOM,
+    "The core bounded random-number entry point; callers rely on fresh "
+    "entropy even when the result selects a nonce, peer, or queue slot.")
 ZCL_CAPABILITY_SYMBOL("getrandom", CAP_RANDOM, "")
 ZCL_CAPABILITY_SYMBOL("RAND_bytes", CAP_RANDOM, "")
 ZCL_CAPABILITY_SYMBOL("secp256k1_context_randomize", CAP_RANDOM,

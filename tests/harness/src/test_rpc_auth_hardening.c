@@ -186,7 +186,7 @@ static int test_multiple_attacker_ips(void)
 /* ── Test: constant-time comparison property ──────────────────── */
 /* We can't directly measure timing in a unit test (too noisy), but we
  * CAN verify the implementation property: the comparison function in
- * httpserver.c processes all bytes regardless of mismatch position.
+ * httpserver_auth.c processes all bytes regardless of mismatch position.
  *
  * We test the constant-time comparison pattern indirectly by verifying it
  * gives correct results for various inputs (the timing
