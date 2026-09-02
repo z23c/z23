@@ -5,6 +5,7 @@
 #include "codeindex_priv.h"
 #include "codeindex/codeindex_merkle.h"
 
+#include "platform/file_metadata.h"
 #include "util/log_macros.h"
 
 #include <sqlite3.h>
@@ -62,6 +63,25 @@ static bool incremental_delete_path(sqlite3 *db, const char *sql,
     return ok;
 }
 
+static bool incremental_regular_mtime_ns(const char *path, int64_t *out)
+{
+    if (!path || !out) return false;
+#if defined(_WIN32)
+    struct platform_file_metadata metadata;
+    if (platform_file_metadata_read(path, &metadata) !=
+        PLATFORM_FILE_METADATA_OK)
+        return false;
+    *out = metadata.modified_seconds * INT64_C(1000000000);
+#else
+    struct stat metadata;
+    if (lstat(path, &metadata) != 0 || !S_ISREG(metadata.st_mode))
+        return false;
+    *out = (int64_t)metadata.st_mtim.tv_sec * INT64_C(1000000000) +
+           (int64_t)metadata.st_mtim.tv_nsec;
+#endif
+    return true;
+}
+
 static bool incremental_replace_file(const char *root, struct ci_store *store,
                                      const char *path)
 {
@@ -81,11 +101,11 @@ static bool incremental_replace_file(const char *root, struct ci_store *store,
                       &scan, content_sha3, purpose) || scan.failed)
         return false;
 
-    struct stat file_stat;
     char absolute[CI_PATH_MAX];
     int length = snprintf(absolute, sizeof(absolute), "%s/%s", root, path);
+    int64_t mtime_ns = 0;
     if (length <= 0 || (size_t)length >= sizeof(absolute) ||
-        lstat(absolute, &file_stat) != 0 || !S_ISREG(file_stat.st_mode))
+        !incremental_regular_mtime_ns(absolute, &mtime_ns))
         return false;
 
     struct ci_file file;
@@ -93,12 +113,6 @@ static bool incremental_replace_file(const char *root, struct ci_store *store,
     ci_cpy(file.path, sizeof(file.path), path);
     ci_group_for_path(path, file.group);
     ci_cpy(file.purpose, sizeof(file.purpose), purpose);
-#if defined(_WIN32)
-    int64_t mtime_ns = (int64_t)file_stat.st_mtime * INT64_C(1000000000);
-#else
-    int64_t mtime_ns = (int64_t)file_stat.st_mtim.tv_sec * INT64_C(1000000000) +
-                       (int64_t)file_stat.st_mtim.tv_nsec;
-#endif
     sqlite3_stmt *statement = NULL;
     static const char update_sql[] =
         "UPDATE files SET \"group\"=?,purpose=?,content_sha3=?,mtime=? WHERE path=?";
