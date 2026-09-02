@@ -185,7 +185,37 @@ SRC
 [ "$("$WORK/rspprog")" = 2 ] ||
     fail "the relinked program still runs the object bytes it was built from before"
 
-# 8. Nothing may take the unkeyable path
+# 8. THE FOURTH REGRESSION: the epoch object publisher passes -MT with the
+#    final object path, which contains the compile-epoch hash. A Makefile
+#    comment re-keys every epoch even when flags are unchanged, so hashing
+#    -MT verbatim made a new epoch a 100% miss of otherwise identical
+#    objects. Different -MT, same source, must HIT; the restored depfile
+#    must name the CURRENT target, not the one from the first compile.
+epoch_build()
+{
+    local tag="$1" dir mt
+    dir="$WORK/epoch.$tag"
+    mt="$WORK/epochs/$tag/main.o"
+    mkdir -p "$dir" "$(dirname "$mt")"
+    "$ZCC" cc -std=c23 -O1 -Wall -DZCL_GATE_EPOCH_MT=1 -I"$WORK" \
+        -MD -MP -MF "$dir/main.d" -MT "$mt" \
+        -c "$WORK/main.c" -o "$dir/main.o" 2>/dev/null || return 1
+    sha256sum < "$dir/main.o" | awk '{print $1}'
+}
+e1="$(epoch_build aaaa)" || fail "epoch-a compile failed"
+[ "$(last_disposition)" = MISS ] || fail "the first epoch-shaped -MT compile was not a MISS"
+e2="$(epoch_build bbbb)" || fail "epoch-b compile failed"
+[ "$(last_disposition)" = HIT ] ||
+    fail "a rebuild whose only change was the -MT epoch path missed the cache"
+[ "$e1" = "$e2" ] || fail "an epoch-path cache hit produced different object bytes"
+[ -s "$WORK/epoch.bbbb/main.d" ] || fail "the epoch-path hit did not restore a depfile"
+grep -q "epochs/bbbb/main.o" "$WORK/epoch.bbbb/main.d" ||
+    fail "the restored depfile does not name the current -MT target"
+if grep -q "epochs/aaaa/main.o" "$WORK/epoch.bbbb/main.d"; then
+    fail "the restored depfile still names the previous epoch's -MT target"
+fi
+
+# 9. Nothing may take the unkeyable path
 : it means the -E probe failed and
 #    the compile ran uncached. Bug 1 above sat there, silent, until this
 #    counter existed.

@@ -70,6 +70,17 @@
  * cannot hand back a depfile the compile asked for is therefore not a hit at
  * all — see serve().
  *
+ * `-MT`/`-MQ` name the make target written INSIDE that depfile. The node's
+ * per-object publisher passes the final object path, which contains the
+ * compile-epoch hash (`build/<profile>-obj/epochs/<64 hex>/...`). Hashing
+ * that path verbatim made a new epoch a 100% miss of otherwise identical
+ * objects — measured on this host: `make -j8 t-fast ONLY=hex_codec` cold
+ * compiled 3239 objects at a 0.0% zcc hit rate after a fresh epoch, while
+ * the same non-LTO flags with -ffile-prefix-map should have been shared.
+ * The key now treats the -MT value like `-o` (a placeholder). The stored
+ * depfile rewrites the target to a placeholder and serve() rewrites it
+ * back to the CURRENT -MT, so make still sees the right object path.
+ *
  * THE BOUND. This cache enforces its own size ceiling; nothing outside it has
  * to remember to. Left unbounded it reached 196 GB on the maintainer host and
  * 60 GB on the second one, because `make cc-cache-trim` was the only thing
@@ -114,6 +125,9 @@
 
 #define ZCC_MAGIC "zcc.cache.v1"
 #define HEXLEN (SHA3_256_OUTPUT_SIZE * 2u)
+/* Stored in cached depfiles in place of the -MT path so two epochs of the
+ * same flags share one entry. Must not appear in a real object path. */
+#define ZCC_MT_PLACEHOLDER "__ZCC_DEP_TARGET__"
 
 /* ── tiny growable buffer ────────────────────────────────────────────── */
 
@@ -321,6 +335,76 @@ static bool copy_out(const char *cached, const char *dest)
     return ok;
 }
 
+static bool buf_replace_prefix(struct buf *b, const char *from, const char *to)
+{
+    size_t flen, tlen;
+
+    if (!b || !from || !to || !from[0])
+        return false;
+    flen = strlen(from);
+    tlen = strlen(to);
+    if (b->len < flen || memcmp(b->p, from, flen) != 0)
+        return false;
+    if (tlen > flen) {
+        size_t extra = tlen - flen;
+        if (!buf_reserve(b, extra))
+            return false;
+        memmove(b->p + tlen, b->p + flen, b->len - flen);
+        b->len += extra;
+    } else if (tlen < flen) {
+        memmove(b->p + tlen, b->p + flen, b->len - flen);
+        b->len -= flen - tlen;
+    }
+    memcpy(b->p, to, tlen);
+    return true;
+}
+
+static bool write_buf_dest(struct buf *b, const char *dest, mode_t mode)
+{
+#if defined(__APPLE__)
+    if (strncmp(dest, "/dev/fd/", 8u) == 0) {
+        int fd = open(dest, O_WRONLY | O_TRUNC);
+        bool ok = fd >= 0 && lseek(fd, 0, SEEK_SET) >= 0 &&
+                  write_all(fd, b->p, b->len) &&
+                  fchmod(fd, mode) == 0;
+        if (fd >= 0 && close(fd) != 0)
+            ok = false;
+        return ok;
+    }
+#endif
+    char dir[PATH_MAX];
+    snprintf(dir, sizeof dir, "%s", dest);
+    char *slash = strrchr(dir, '/');
+    if (slash)
+        *slash = '\0';
+    else
+        snprintf(dir, sizeof dir, ".");
+    return store_atomic(dir, dest, b->p, b->len, mode);
+}
+
+/* Restore a depfile, rewriting a placeholder target to the current -MT path
+ * so two compile epochs share one cache entry. An entry stored before this
+ * rewrite (no placeholder) is copied through unchanged: those keys still
+ * included the -MT path, so they cannot match a different epoch. */
+static bool copy_out_dep(const char *cached, const char *dest,
+                         const char *mt_path)
+{
+    struct buf b = { 0 };
+    struct stat st;
+    bool ok;
+
+    if (!mt_path || !mt_path[0])
+        return copy_out(cached, dest);
+    if (stat(cached, &st) != 0 || !read_file(cached, &b)) {
+        buf_free(&b);
+        return false;
+    }
+    (void)buf_replace_prefix(&b, ZCC_MT_PLACEHOLDER, mt_path);
+    ok = write_buf_dest(&b, dest, st.st_mode & 07777u);
+    buf_free(&b);
+    return ok;
+}
+
 /* ── process launch (no shell, ever) ─────────────────────────────────── */
 
 static int run_argv(char *const argv[], const char *stdout_path,
@@ -370,6 +454,9 @@ struct plan {
     bool want_dep;
     int dep_idx;          /* index of the -MF VALUE, or -1 */
     int dep_inline_idx;   /* index of a joined -MFvalue, or -1 */
+    int mt_idx;           /* index of the -MT/-MQ VALUE, or -1 */
+    int mt_inline_idx;    /* index of a joined -MTvalue/-MQvalue, or -1 */
+    const char *mt_path;
     char dep_buf[PATH_MAX];
     int *src;         /* indexes of .c inputs */
     int src_n;
@@ -487,6 +574,9 @@ static void plan_build(struct plan *pl, int argc, char **argv)
     pl->out_idx = -1;
     pl->dep_idx = -1;
     pl->dep_inline_idx = -1;
+    pl->mt_idx = -1;
+    pl->mt_inline_idx = -1;
+    pl->mt_path = NULL;
     pl->src = zcl_calloc((size_t)argc, sizeof *pl->src, "zcc sources");
     pl->blob = zcl_calloc((size_t)argc, sizeof *pl->blob, "zcc blob inputs");
     pl->libdir = zcl_calloc((size_t)argc, sizeof *pl->libdir, "zcc -L dirs");
@@ -525,8 +615,15 @@ static void plan_build(struct plan *pl, int argc, char **argv)
             /* -MT/-MQ NAME the make target in the depfile. Their value is an
              * object path, not an input. Leaving it unconsumed made it look
              * like a positional input, which broke the -E probe and silently
-             * bypassed EVERY node object in this repository. */
-            i++;
+             * bypassed EVERY node object in this repository. The value is
+             * recorded so the key can placeholder it and serve() can rewrite
+             * the restored depfile onto the current target. */
+            pl->mt_idx = ++i;
+            pl->mt_path = argv[i];
+        } else if ((strncmp(a, "-MT", 3) == 0 || strncmp(a, "-MQ", 3) == 0) &&
+                   a[3]) {
+            pl->mt_inline_idx = i;
+            pl->mt_path = a + 3;
         } else if (strcmp(a, "-L") == 0 && i + 1 < argc) {
             pl->libdir[pl->libdir_n++] = argv[++i];
         } else if (strncmp(a, "-L", 2) == 0 && a[2]) {
@@ -711,9 +808,13 @@ static bool recorded_cwd(const struct plan *pl, const char *cwd,
  * them verbatim gave this cache a 0% hit rate on 1733 objects while looking
  * perfectly healthy.
  *
- * `-MT`/`-MQ` are different and stay in the key: they set the target name
- * written INSIDE the depfile, so two invocations differing only there produce
- * different depfile bytes, and this cache restores depfiles.
+ * `-MT`/`-MQ` used to stay in the key because they appear inside the
+ * depfile. That was correct for the depfile bytes and wrong for the object
+ * bytes: the epoch publisher's -MT value is the epoch-qualified object path,
+ * so a new compile epoch — including a Makefile comment that only changes
+ * BUILD_SYSTEM_ID — missed every TU. The key now placeholders the value the
+ * same way it placeholders `-o`. store()/serve() rewrite the depfile target
+ * so make still receives the current path.
  *
  * A prefix map that covers `cwd` gets the same treatment for the same reason:
  * the flag spells out the very build directory the compiler is being told to
@@ -730,10 +831,12 @@ static void hash_argv(struct sha3_256_ctx *h, const struct plan *pl,
         size_t opt = cwd ? prefix_map_opt(pl->argv[i]) : 0u;
         size_t old_len;
         const char *repl;
-        if (i == pl->out_idx || i == pl->dep_idx)
+        if (i == pl->out_idx || i == pl->dep_idx || i == pl->mt_idx)
             hstr(h, "<output>");
         else if (i == pl->dep_inline_idx)
             hstr(h, "-MF<output>");
+        else if (i == pl->mt_inline_idx)
+            hstr(h, pl->argv[i][2] == 'Q' ? "-MQ<output>" : "-MT<output>");
         else if (opt && prefix_map_covers(pl->argv[i] + opt, cwd, &old_len,
                                           &repl)) {
             hstr(h, "zcc:cwd-prefix-map");
@@ -1730,9 +1833,10 @@ static bool serve(const struct cache *c, const char *ckey,
              * depfile BEFORE the object matters too: a .dep that disappears
              * under a concurrent eviction fails here, and the object is
              * never written. */
-            if (!copy_out(dep, pl->dep_path))
+            if (!copy_out_dep(dep, pl->dep_path, pl->mt_path))
                 return false;
-        } else if (is_regular(dep) && !copy_out(dep, pl->dep_path)) {
+        } else if (is_regular(dep) &&
+                   !copy_out_dep(dep, pl->dep_path, pl->mt_path)) {
             return false;
         }
     }
@@ -1773,11 +1877,21 @@ static void store(const struct cache *c, const char *ckey,
     if (pl->dep_path && is_regular(pl->dep_path)) {
         struct buf d = { 0 };
         if (read_file(pl->dep_path, &d)) {
-            entry_path(c, "obj", ckey, ".dep", dst);
-            if (store_atomic(dir, dst, d.p, d.len, 0600))
-                added += (long long)d.len;
+            if (pl->mt_path && pl->mt_path[0] &&
+                !buf_replace_prefix(&d, pl->mt_path, ZCC_MT_PLACEHOLDER)) {
+                /* A depfile that does not start with -MT is not the shape
+                 * this rewrite models. Refuse to store it rather than serve
+                 * a target that belongs to another epoch. */
+                buf_free(&d);
+            } else {
+                entry_path(c, "obj", ckey, ".dep", dst);
+                if (store_atomic(dir, dst, d.p, d.len, 0600))
+                    added += (long long)d.len;
+                buf_free(&d);
+            }
+        } else {
+            buf_free(&d);
         }
-        buf_free(&d);
     }
     struct buf e = { 0 };
     if (errfile && read_file(errfile, &e)) {

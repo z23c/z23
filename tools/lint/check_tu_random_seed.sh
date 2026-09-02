@@ -60,7 +60,7 @@ esac
 # Every object recipe routed through compile-epoch-object.sh, with its mode
 # and the compiler line that follows it.
 recipes="$(awk -v var="$SEED_VAR" '
-    /BUILD_EPOCH_OBJECT_TOOL\)[[:space:]]+(dep|coverage)[[:space:]]/ {
+    /BUILD_(EPOCH_OBJECT_TOOL|FAST_EPOCH_OBJECT_COMMAND)\)[[:space:]]+(dep|coverage)[[:space:]]/ {
         mode = ($0 ~ /[[:space:]]coverage[[:space:]]/) ? "coverage" : "dep"
         start = NR
         line = ""
