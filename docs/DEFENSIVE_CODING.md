@@ -1346,6 +1346,7 @@ add/remove a gate.
 - `check-live-datadir-isolation`
 - `check-installed-acceptance-tools`
 - `check-standalone-tools-link`
+- `check-arena-view-stub`
 - `check-app-bundle-reproducible`
 - `check-no-operator-paths`
 - `check-no-unattended-publish`

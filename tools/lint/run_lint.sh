@@ -195,6 +195,7 @@ gate_command() {
         check-no-shellouts)                echo './tools/lint/check_no_shellouts.sh' ;;
         check-no-api-keys)                 echo './tools/lint/check_no_api_keys.sh' ;;
         check-standalone-tools-link)       echo './tools/lint/check_standalone_tools_link.sh' ;;
+        check-arena-view-stub)             echo './tools/lint/check_arena_view_stub.sh --selftest && ./tools/lint/check_arena_view_stub.sh' ;;
         check-app-bundle-reproducible)     echo './tools/lint/check_app_bundle_reproducible.sh --selftest && ./tools/lint/check_app_bundle_reproducible.sh' ;;
         check-live-datadir-isolation)      echo './tools/lint/check_live_datadir_isolation.sh --selftest && ./tools/lint/check_live_datadir_isolation.sh' ;;
         check-no-operator-paths)           echo './tools/lint/check_no_operator_paths.sh --selftest && ./tools/lint/check_no_operator_paths.sh' ;;

@@ -4819,7 +4819,8 @@ LINT_FAST_GATES := \
     check-vendor-provenance \
     check-windows-platform-seam \
     check-pipefail-status-pipe \
-    check-doc-counts
+    check-doc-counts \
+    check-arena-view-stub
 
 ifeq ($(ZCL_LINT_SERIAL),1)
 lint-fast: $(LINT_FAST_GATES)
@@ -6084,16 +6085,22 @@ $(BIN_DIR)/arena_view: tools/arena_view.c \
 	    -ffunction-sections -fdata-sections $(ZCL_GC_SECTIONS_LDFLAG) \
 	    $(ARENA_VIEW_INCLUDES) \
 	    -o $@ $^ $(RAYLIB_LIBS) -lm
+# The raylib 6.0 stub must keep compiling against the window TU on every
+# host, raylib installed or not: hosts WITH raylib build the linked window
+# against the real headers and never see stub drift, so skipping the stub
+# compile there (the old behavior) left the stub unobservable exactly where
+# most window development happens. The lint gate owns that compile now;
+# this target is its manual alias and runs the same script unconditionally.
 arena-view-syntax:
-	@if pkg-config --exists raylib; then \
-	    echo "arena_view: raylib present; window binary is the compile check"; \
-	else \
-	    $(CC) -std=c23 -fsyntax-only -Wall -Wextra -Werror -pedantic \
-	        $(ZCL_WARN_STRINGOP_OVERFLOW) \
-	        -D_POSIX_C_SOURCE=200809L -DARENA_VIEW_RAYLIB_STUB \
-	        $(ARENA_VIEW_INCLUDES) tools/arena_view.c && \
-	    echo "arena_view: raylib 6.0 stub syntax-only OK"; \
-	fi
+	@./tools/lint/check_arena_view_stub.sh
+
+# Lint-lane wiring for the stub compile above (also in LINT_FAST_GATES and
+# the gate_command() table in tools/lint/run_lint.sh — a gate is a two-file
+# operation; check-lint-gate-wiring asserts both halves stay in step).
+check-arena-view-stub:
+	@echo "══ LINT: arena_view compiles against the raylib stub ══"
+	@./tools/lint/check_arena_view_stub.sh --selftest
+	@./tools/lint/check_arena_view_stub.sh
 $(BIN_DIR)/arena_frame: tools/arena_frame.c tools/arena_hud.c \
 		contexts/commons/packages/zdogview/src/zdogview.c \
 		contexts/commons/packages/zdogfight/src/zdogfight.c contexts/commons/packages/zdogfight/src/zdogfix.c \
@@ -12619,6 +12626,7 @@ LINT_GATES := \
     check-live-datadir-isolation \
     check-installed-acceptance-tools \
     check-standalone-tools-link \
+    check-arena-view-stub \
     check-app-bundle-reproducible \
     check-no-operator-paths \
     check-no-unattended-publish \

@@ -144,6 +144,8 @@ lint_cache_never_reason() {
     case "$1" in
         check-standalone-tools-link)
             echo "runs 'make' and links 18 tool binaries — depends on build/ state and the toolchain" ;;
+        check-arena-view-stub)
+            echo "invokes the host C compiler -fsyntax-only over tools/arena_view.c — like check-toolchain, the verdict depends on the installed toolchain" ;;
         check-build-epoch-integrity)
             echo "keys on the installed compiler id and 'make --version', and runs cc probes on a miss" ;;
         check-clang-portability)
