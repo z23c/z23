@@ -635,6 +635,7 @@ ZCL_MODULE_CAPABILITY("cognition/modules/codeindex/src/codeindex_build.c", CAP_F
 ZCL_MODULE_CAPABILITY("cognition/modules/codeindex/src/codeindex_build_store.c", CAP_FS_READ|CAP_FS_WRITE, "assembles the deterministic in-memory generation from stable source and depfile reads")
 ZCL_MODULE_CAPABILITY("cognition/modules/codeindex/src/codeindex_capability.c", CAP_FS_WRITE|CAP_FS_READ, "")
 ZCL_MODULE_CAPABILITY("cognition/modules/codeindex/src/codeindex_deps.c", CAP_FS_WRITE, "")
+ZCL_MODULE_CAPABILITY("cognition/modules/codeindex/src/codeindex_focus.c", CAP_FS_READ, "")
 ZCL_MODULE_CAPABILITY("cognition/modules/codeindex/src/codeindex_emitter.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("cognition/modules/codeindex/src/codeindex_fetch.c", CAP_FS_READ|CAP_FS_WRITE, "copies a verified fetched image into <root>/.codeindex through the rebuild lock, a private staging inode, and the atomic rename; reads this checkout's source bytes for the sealed-root comparison")
 ZCL_MODULE_CAPABILITY("cognition/modules/codeindex/src/codeindex_impact.c", CAP_FS_WRITE, "")

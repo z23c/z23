@@ -400,6 +400,12 @@ void zcl_native_handle_code_merkle(
 void zcl_native_handle_code_territory(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
+/* code.focus — ranked files a named specialist should work next, from
+ * recorded evidence only. `--list` / no specialist lists the X-macro
+ * catalog in engine/composition/specialists.def. */
+void zcl_native_handle_code_focus(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
 /* code.corpus — honest distance to 100M lines of proven, non-duplicated C23.
  * Two readings kept apart: a live walk of the maintained C23 roots for lines,
  * and the generated capability inventory for what a registered test actually

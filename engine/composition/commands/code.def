@@ -436,6 +436,30 @@ ZCL_COMMAND_READY_READ(
     ZCL_COMMAND_TRAIT_DETERMINISTIC | ZCL_COMMAND_TRAIT_IDEMPOTENT,
     ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_code_territory)
 
+ZCL_COMMAND_READY_READ(
+    "code.focus", "code", "",
+    "Rank where a specialist should work next",
+    "A ranked list of files in one specialist's territory, scored only from "
+    "recorded evidence: routed test groups that failed in "
+    ".cache/test-timing/last-run.json, git-log churn, open lessons in "
+    "docs/agent/LESSONS.md, files no impact rule routes, and paths named in "
+    "checked-in docs/ issue bodies. Every reason cites its source. Ties break "
+    "by path. `--list` or no specialist lists the rows in "
+    "engine/composition/specialists.def. An unknown name is UNKNOWN_SPECIALIST. "
+    "The answer grants no authority and never decides what to merge.",
+    ZCL_COMMAND_LIST_BUDGET,
+    "code,focus,specialist,lane,rank,evidence,next",
+    "zcl.code_focus_input.v1",
+    "zcl.code_focus.v1", "specialist,list", "specialist",
+    "z23 code focus net",
+    ZCL_COMMAND_LAYER_CODE, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_PUBLIC, ZCL_COMMAND_LATENCY_BACKGROUND,
+    ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE,
+    ZCL_COMMAND_TRAIT_DETERMINISTIC | ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_code_focus)
+
 /* `code.kpi` is the one code.* leaf that WRITES, and it is classed MUTATE for
  * that reason rather than dressed as a read. Every run appends one frame to
  * <root>/.codeindex/kpi.chainlog, which is exactly the point: a ledger that

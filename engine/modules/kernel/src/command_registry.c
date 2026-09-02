@@ -1017,7 +1017,8 @@ bool zcl_command_registry_input_validate(const struct zcl_command_spec *spec,
                    strcmp(key, "all") == 0 ||
                    strcmp(key, "allow_high_fees") == 0 ||
                    strcmp(key, "exact") == 0 || strcmp(key, "restore") == 0 ||
-                   strcmp(key, "include_evidence_wires") == 0) {
+                   strcmp(key, "include_evidence_wires") == 0 ||
+                   strcmp(key, "list") == 0) {
             /* Each is a bool in its own declared schema, and the default
              * STRING branch made it unpassable from a shell while raw RPC
              * accepted it fine — `all`, `include_evidence_wires`, and the

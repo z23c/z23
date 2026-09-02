@@ -1,0 +1,73 @@
+/* Copyright 2026 Rhett Creighton. Licensed under Apache-2.0. */
+/*
+ * specialists.def — the ONE declaration of which specialist lanes this tree
+ * implies. `code focus <name>` ranks files in that specialist's territory
+ * from recorded evidence; `code focus --list` renders these rows.
+ *
+ * SPECIALIST(name, territories, gates, test_groups, fact_kinds)
+ *
+ *   name          durable lane id (`code focus <name>`)
+ *   territories   `|`-separated prefixes or globs; a token without glob
+ *                 chars matches that path and every path beneath it
+ *   gates         `|`-separated `check-*` names the lane owns
+ *   test_groups   `|`-separated registered group ids the lane owns
+ *   fact_kinds    comma-separated fact kinds the lane cares about
+ *
+ * tools/lint/check_specialists.sh is the price of writing this table: every
+ * territory token must match a tracked file, every gate and test group must
+ * exist, and the row count may not fall below the floor. Adding a row here
+ * without a matching file, gate, or group is a false statement.
+ *
+ * This file is an X-macro. Define SPECIALIST before including it.
+ */
+
+SPECIALIST("consensus",
+           "core/consensus|core/params|engine/reducer|core/modules/validation",
+           "check-consensus-parity|check-core-seal",
+           "consensus|consensus_parity|validation",
+           "consensus,validation")
+SPECIALIST("net",
+           "core/modules/net",
+           "check-peer-floor-single-source|check-no-writer-below-sealed-frontier",
+           "net|download|peer_lifecycle",
+           "p2p,network")
+SPECIALIST("storage",
+           "engine/modules/storage",
+           "check-raw-sqlite|check-no-raw-sqlite-in-controllers",
+           "sqlite|coins|store",
+           "storage,sqlite")
+SPECIALIST("wallet",
+           "contexts/wallet",
+           "check-wallet-raw-prepare-log|check-before-save-hooks|check-model-ar-lifecycle",
+           "wallet|wallet_view|wallet_metadata_encryption",
+           "wallet,keys")
+SPECIALIST("explorer",
+           "contexts/explorer",
+           "check-framework-shape",
+           "explorer|explorer_index|explorer_rpc_call",
+           "views,presentation")
+SPECIALIST("codeindex",
+           "cognition/modules/codeindex|tools/command/native_code_*",
+           "check-codeindex-coverage",
+           "codeindex|code_have|code_impact|code_capsule",
+           "index,navigation")
+SPECIALIST("lint",
+           "tools/lint",
+           "check-lint-gate-wiring",
+           "make_lint_gates",
+           "lint,gates")
+SPECIALIST("docs",
+           "docs",
+           "check-doc-counts|check-doc-accuracy|check-markdown-links|check-doc-claims",
+           "make_lint_gates",
+           "documentation")
+SPECIALIST("platform",
+           "platform/ports|platform/adapters|platform/modules/platform",
+           "check-windows-platform-seam|check-sandbox-wired",
+           "confine|os_sandbox",
+           "platform,ports")
+SPECIALIST("packages",
+           "contexts/commons",
+           "check-zcode-package-registry|check-package-capabilities",
+           "zcode_package_registry|zcode_package_dev",
+           "packages,commons")
