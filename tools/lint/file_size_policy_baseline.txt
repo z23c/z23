@@ -24,7 +24,7 @@ cognition/modules/codeindex/src/codeindex_merkle.c 1776
 engine/modules/hotswap/src/hotswap_activate.c 2314
 engine/modules/kernel/src/command_registry.c 2403
 core/modules/net/src/connman.c 3081
-core/modules/net/src/download.c 1793
+core/modules/net/src/download.c 1672
 core/modules/net/src/fast_sync.c 1684
 core/modules/net/src/file_service.c 2517
 core/modules/net/src/msg_headers.c 2370
