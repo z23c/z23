@@ -55,6 +55,9 @@ int test_experience_compilation(void)
                         ZCL_EXPERIENCE_COMPILATION_ALIAS),
                     "input-output-alias") == 0 &&
              strcmp(zcl_experience_compilation_error_string(
+                        ZCL_EXPERIENCE_COMPILATION_REPLICATION),
+                    "replication-acceptance-invalid") == 0 &&
+             strcmp(zcl_experience_compilation_error_string(
                         (enum zcl_experience_compilation_error)255),
                     "unknown") == 0);
     return failures;

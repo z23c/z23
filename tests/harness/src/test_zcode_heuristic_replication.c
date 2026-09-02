@@ -3,6 +3,8 @@
 #include "test/test_core.h"
 
 #include "crypto/ed25519.h"
+#include "crypto/sha3.h"
+#include "services/experience_compilation_service.h"
 #include "vcs/vcs_object.h"
 #include "vcs/zcode_attention_verified.h"
 #include "vcs/zcode_heuristic_replication.h"
@@ -42,6 +44,29 @@ struct hr_fixture {
     uint8_t original_root[32], anchor_root[32];
     uint8_t reproduced_root[4][32], reproduction_root[4][32];
     uint8_t statement_root[4][32];
+};
+
+struct hr_experience_fixture {
+    struct vcs_zcode_agent_context_v1 context;
+    struct zcl_story_event_v1 story_event;
+    struct zcl_story_graph_v1 story;
+    struct zcl_ontology_predicate_v1 predicate;
+    uint8_t claim_roots[1][32];
+    struct vcs_zcode_focus_v1 focus;
+    struct vcs_zcode_work_receipt_v1 receipt;
+    struct vcs_zcode_specialist_report_v1 report;
+    struct vcs_zcode_heuristic_v1 heuristic;
+    struct vcs_zcode_attention_bid_v1 bid;
+    struct vcs_zcode_science_relation_set_v1 anchor_relations;
+    struct vcs_zcode_science_statement_v1 anchor;
+    struct vcs_zcode_heuristic_lifecycle_snapshot_v1 lifecycle;
+    struct vcs_zcode_heuristic_replication_snapshot_v1 replication;
+    struct zcl_experience_episode_v1 episode;
+    uint8_t focus_root[32];
+    uint8_t receipt_root[32];
+    uint8_t heuristic_root[32];
+    uint8_t anchor_root[32];
+    uint8_t replication_statement_roots[4][32];
 };
 
 static void hr_root(uint8_t out[32], uint8_t tag)
@@ -532,6 +557,218 @@ static void hr_lifecycle_snapshot(
     memcpy(snapshot->heuristic_root, f->heuristic_root, 32);
     memcpy(snapshot->anchor_statement_root, f->anchor_root, 32);
     memcpy(snapshot->statement_roots[0], f->anchor_root, 32);
+}
+
+static bool hr_experience_build(
+    const char *workspace, const struct hr_fixture *f,
+    struct hr_experience_fixture *x)
+{
+#define HR_EXPERIENCE_FAIL(stage_) do {                                 \
+    printf("  zcode_heuristic_replication: experience fixture %s failed\n", \
+           (stage_));                                                    \
+    return false;                                                        \
+} while (0)
+    static uint8_t source_excerpt[] =
+        "experience compiler replication-qualified source excerpt";
+    memset(x, 0, sizeof(*x));
+
+    x->predicate.schema_version = ZCL_ONTOLOGY_OBJECT_VERSION;
+    x->predicate.arity = 1;
+    x->predicate.world = ZCL_ONTOLOGY_OPEN_WORLD;
+    x->predicate.execution_tier = ZCL_ONTOLOGY_TIER_EXACT;
+    x->predicate.explicit_negation = 1;
+    hr_root(x->predicate.term_root, 210);
+    hr_root(x->predicate.argument_type_roots[0], 211);
+    if (!zcl_ontology_predicate_v1_root(
+            &x->predicate, x->claim_roots[0]))
+        HR_EXPERIENCE_FAIL("predicate");
+
+    vcs_zcode_agent_context_init(&x->context);
+    memcpy(x->context.task_root, f->task_root, 32);
+    memcpy(x->context.source_root, f->task.source_root, 32);
+    memcpy(x->context.goal_root, f->task.goal_root, 32);
+    memcpy(x->context.source_tree_root, f->task.source_root, 32);
+    (void)snprintf(x->context.query, sizeof(x->context.query),
+                   "compile one independently reproduced experience");
+    x->context.file_count = 1;
+    (void)snprintf(x->context.files[0].path,
+                   sizeof(x->context.files[0].path),
+                   "cognition/services/src/experience_compilation_service.c");
+    x->context.files[0].start_line = 1;
+    x->context.files[0].full_file_bytes = sizeof(source_excerpt) - 1u;
+    x->context.files[0].content = source_excerpt;
+    x->context.files[0].content_len = sizeof(source_excerpt) - 1u;
+    sha3_256(source_excerpt, sizeof(source_excerpt) - 1u,
+             x->context.files[0].content_root);
+    uint8_t context_root[32];
+    if (vcs_zcode_agent_context_root(
+            &x->context, f->task.max_context_bytes, context_root) !=
+            VCS_ZCODE_AGENT_CONTEXT_OK)
+        HR_EXPERIENCE_FAIL("context");
+
+    x->story_event.schema_version = ZCL_STORY_GRAPH_VERSION;
+    x->story_event.kind = ZCL_STORY_EVENT_USER_ASKS;
+    x->story_event.status = ZCL_ONTOLOGY_PROVED;
+    memcpy(x->story_event.universe_root, f->task.source_root, 32);
+    memcpy(x->story_event.context_root, context_root, 32);
+    memcpy(x->story_event.scene_root, f->task_root, 32);
+    memcpy(x->story_event.entity_root, f->evaluator_pubkey, 32);
+    (void)vcs_build_action_v1_root_for_kind(
+        VCS_BUILD_ACTION_KIND_BENCHMARK_V1, &f->action,
+        x->story_event.action_root);
+    hr_root(x->story_event.event_root, 212);
+    memcpy(x->story_event.evidence_root, f->original_root, 32);
+    x->story = (struct zcl_story_graph_v1) {
+        .schema_version = ZCL_STORY_GRAPH_VERSION,
+        .event_count = 1,
+        .events = &x->story_event,
+    };
+    uint8_t story_root[32];
+    if (!zcl_story_graph_v1_root(&x->story, story_root) ||
+        vcs_zcode_focus_compose(
+            &f->task, f->task_root, context_root, story_root,
+            ZCL_ONTOLOGY_PROVED, 0, x->claim_roots, 1, &x->focus) !=
+            VCS_ZCODE_FOCUS_OK ||
+        vcs_zcode_focus_root(&x->focus, x->focus_root) !=
+            VCS_ZCODE_FOCUS_OK)
+        HR_EXPERIENCE_FAIL("story-focus");
+
+    x->receipt.schema_version = VCS_ZCODE_DEV_VERSION;
+    memcpy(x->receipt.task_root, f->task_root, 32);
+    memcpy(x->receipt.candidate_root, f->candidate_root, 32);
+    memcpy(x->receipt.action_root, x->story_event.action_root, 32);
+    memcpy(x->receipt.input_root, x->focus_root, 32);
+    memcpy(x->receipt.output_root, f->original_root, 32);
+    memcpy(x->receipt.proof_policy_root, f->task.proof_policy_root, 32);
+    memcpy(x->receipt.toolchain_capsule_root,
+           f->task.toolchain_capsule_root, 32);
+    hr_root(x->receipt.lease_id, 213);
+    memcpy(x->receipt.evidence_root, f->original.evidence_root, 32);
+    memcpy(x->receipt.confinement_root, x->focus.authority_limits_root, 32);
+    x->receipt.work_kind = VCS_ZCODE_WORK_TEST;
+    x->receipt.status = VCS_ZCODE_WORK_PASS;
+    x->receipt.started_unix = 1200;
+    x->receipt.finished_unix = 1300;
+    if (vcs_zcode_work_receipt_seal(
+            &x->receipt, f->evaluator_secret, f->evaluator_pubkey) !=
+            VCS_ZCODE_DEV_OK ||
+        vcs_zcode_work_receipt_id(&x->receipt, x->receipt_root) !=
+            VCS_ZCODE_DEV_OK)
+        HR_EXPERIENCE_FAIL("receipt");
+
+    x->report.schema_version = VCS_ZCODE_FOCUS_VERSION;
+    x->report.role = VCS_ZCODE_SPECIALIST_CODE;
+    x->report.status = ZCL_ONTOLOGY_PROVED;
+    x->report.context_bytes = sizeof(source_excerpt) - 1u;
+    x->report.latency_us = 1000;
+    x->report.files_opened = 1;
+    x->report.tool_calls = 1;
+    x->report.proof_reuse_count = 1;
+    memcpy(x->report.focus_root, x->focus_root, 32);
+    memcpy(x->report.claim_root, x->claim_roots[0], 32);
+    memcpy(x->report.specialist_root, f->evaluator_pubkey, 32);
+    memcpy(x->report.evidence_root, x->receipt_root, 32);
+    memcpy(x->report.result_root, f->original_root, 32);
+    memcpy(x->report.next_experiment_root, f->study_root, 32);
+    memcpy(x->report.evaluator_root, f->bid.bid_evaluator_root, 32);
+
+    x->heuristic = f->heuristic;
+    memcpy(x->heuristic.agent_context_root, context_root, 32);
+    memcpy(x->heuristic.ontology_context_root, story_root, 32);
+    memcpy(x->heuristic.applicability_root, x->claim_roots[0], 32);
+    memcpy(x->heuristic.provenance_root, x->receipt_root, 32);
+    if (vcs_zcode_heuristic_root(
+            &x->heuristic, x->heuristic_root) != VCS_ZCODE_ATTENTION_OK)
+        HR_EXPERIENCE_FAIL("heuristic");
+
+    x->bid = f->bid;
+    memcpy(x->bid.focus_root, x->focus_root, 32);
+    memcpy(x->bid.heuristic_root, x->heuristic_root, 32);
+    memcpy(x->bid.evidence_root, f->original_root, 32);
+    if (vcs_zcode_attention_bid_validate_for_focus(
+            &x->bid, &x->heuristic, &x->focus) != VCS_ZCODE_ATTENTION_OK)
+        HR_EXPERIENCE_FAIL("attention-bid");
+
+    x->anchor_relations.schema_version =
+        VCS_ZCODE_SCIENCE_RELATION_SET_VERSION;
+    x->anchor = f->anchor;
+    memcpy(x->anchor.subject_root, x->heuristic_root, 32);
+    (void)vcs_zcode_attention_bid_root(
+        &x->bid, x->anchor.predicate_body_root);
+    memcpy(x->anchor.input_root, x->focus_root, 32);
+    memset(x->anchor.signature, 0, sizeof(x->anchor.signature));
+    if (vcs_zcode_science_statement_seal(
+            &x->anchor, f->evaluator_secret, f->evaluator_pubkey) !=
+            VCS_ZCODE_SCIENCE_OK ||
+        !hr_store_statement(workspace, &x->anchor, &x->anchor_relations,
+                            x->anchor_root))
+        HR_EXPERIENCE_FAIL("anchor");
+
+    for (size_t i = 0; i < 4; i++) {
+        struct vcs_zcode_science_relation_set_v1 support = {
+            .schema_version = VCS_ZCODE_SCIENCE_RELATION_SET_VERSION,
+            .row_count = 1,
+            .rows = {{.type = VCS_ZCODE_SCIENCE_RELATION_SUPPORT}},
+        };
+        memcpy(support.rows[0].statement_root, x->anchor_root, 32);
+        struct vcs_zcode_science_statement_v1 statement = f->statement[i];
+        memcpy(statement.subject_root, x->heuristic_root, 32);
+        statement.relation_count = 1;
+        statement.relation_types = VCS_ZCODE_SCIENCE_RELATION_MASK(
+            VCS_ZCODE_SCIENCE_RELATION_SUPPORT);
+        (void)vcs_zcode_science_relation_set_root(
+            &support, statement.relations_root);
+        memset(statement.signature, 0, sizeof(statement.signature));
+        if (vcs_zcode_science_statement_seal(
+                &statement, f->secret[i], f->pubkey[i]) !=
+                VCS_ZCODE_SCIENCE_OK ||
+            !hr_store_statement(workspace, &statement, &support,
+                                x->replication_statement_roots[i]))
+            HR_EXPERIENCE_FAIL("replication-statement");
+    }
+
+    x->lifecycle.schema_version =
+        VCS_ZCODE_HEURISTIC_LIFECYCLE_SNAPSHOT_VERSION;
+    x->lifecycle.statement_count = 1;
+    hr_root(x->lifecycle.local_policy_root, 201);
+    memcpy(x->lifecycle.expected_signer, f->evaluator_pubkey, 32);
+    memcpy(x->lifecycle.heuristic_root, x->heuristic_root, 32);
+    memcpy(x->lifecycle.anchor_statement_root, x->anchor_root, 32);
+    memcpy(x->lifecycle.statement_roots[0], x->anchor_root, 32);
+    x->replication.schema_version =
+        VCS_ZCODE_HEURISTIC_REPLICATION_SNAPSHOT_VERSION;
+    x->replication.statement_count = 2;
+    hr_root(x->replication.local_policy_root, 200);
+    memcpy(x->replication.expected_evaluator_signer,
+           f->evaluator_pubkey, 32);
+    memcpy(x->replication.heuristic_root, x->heuristic_root, 32);
+    memcpy(x->replication.anchor_statement_root, x->anchor_root, 32);
+    memcpy(x->replication.statement_roots,
+           x->replication_statement_roots, 2u * 32u);
+    hr_sort(x->replication.statement_roots, 2);
+
+    x->episode = (struct zcl_experience_episode_v1) {
+        .workspace = workspace,
+        .story = &x->story,
+        .task = &f->task,
+        .agent_context = &x->context,
+        .focus = &x->focus,
+        .claim_roots = x->claim_roots,
+        .claim_count = 1,
+        .work_receipt = &x->receipt,
+        .specialist_report = &x->report,
+        .heuristic = &x->heuristic,
+        .attention_bid = &x->bid,
+        .relations = &x->anchor_relations,
+        .statement = &x->anchor,
+        .local_acceptance = &x->lifecycle,
+        .outcome_predicate = &x->predicate,
+        .benchmark_action = &f->action,
+        .replication_acceptance = &x->replication,
+        .observed_at_unix = 6000,
+    };
+    return true;
+#undef HR_EXPERIENCE_FAIL
 }
 
 static enum vcs_zcode_attention_error hr_select(
@@ -1065,6 +1302,196 @@ int test_zcode_heuristic_replication(void)
                   &qualified) == VCS_ZCODE_ATTENTION_EVIDENCE &&
         selected == SIZE_MAX &&
         memcmp(&qualified, &qualified_before, sizeof(qualified)) == 0);
+
+    struct hr_experience_fixture experience;
+    struct zcl_experience_compilation_v1 compiled;
+    bool experience_built = hr_experience_build(
+        workspace, &f, &experience);
+    struct vcs_zcode_heuristic_replication_report experience_replication;
+    HR_CHECK("experience-compiler-returns-only-replicated-predicate-lesson",
+        experience_built && vcs_zcode_heuristic_replication_fold(
+            workspace, &experience.heuristic, &f.action,
+            &experience.replication, 6000, &experience_replication) ==
+                VCS_ZCODE_ATTENTION_OK &&
+        zcl_experience_compile(
+            &experience.episode, &compiled) ==
+                ZCL_EXPERIENCE_COMPILATION_OK &&
+        compiled.captured && compiled.lesson_relevant &&
+        compiled.replication_qualified &&
+        compiled.replication_reason ==
+            VCS_ZCODE_HEURISTIC_REPLICATION_REASON_NONE &&
+        compiled.replicated_count == 2 &&
+        compiled.required_reproductions == 2 &&
+        memcmp(compiled.outcome_predicate_root,
+               experience.claim_roots[0], 32) == 0 &&
+        memcmp(compiled.benchmark_action_root,
+               experience.story_event.action_root, 32) == 0 &&
+        memcmp(compiled.study_root, f.study_root, 32) == 0 &&
+        memcmp(compiled.original_result_root, f.original_root, 32) == 0 &&
+        memcmp(compiled.replication_snapshot_root,
+               experience_replication.snapshot_root, 32) == 0);
+
+    struct zcl_experience_compilation_v1 zero_compilation = {0};
+    struct vcs_zcode_heuristic_replication_snapshot_v1 below =
+        experience.replication;
+    below.statement_count = 1;
+    memset(below.statement_roots[1], 0, 32);
+    struct zcl_experience_episode_v1 below_episode = experience.episode;
+    below_episode.replication_acceptance = &below;
+    struct zcl_experience_compilation_v1 below_compilation;
+    HR_CHECK("experience-below-replication-threshold-captures-no-lesson",
+        zcl_experience_compile(&below_episode, &below_compilation) ==
+            ZCL_EXPERIENCE_COMPILATION_OK &&
+        below_compilation.captured && !below_compilation.lesson_relevant &&
+        !below_compilation.replication_qualified &&
+        below_compilation.replication_reason ==
+            VCS_ZCODE_HEURISTIC_REPLICATION_REASON_BELOW_THRESHOLD &&
+        below_compilation.replicated_count == 1 &&
+        below_compilation.required_reproductions == 2 &&
+        memcmp(below_compilation.derived_rule_root,
+               zero_compilation.derived_rule_root, 32) == 0);
+
+    struct vcs_zcode_heuristic_replication_snapshot_v1
+        contradicted_experience =
+        experience.replication;
+    memcpy(contradicted_experience.statement_roots[0],
+           experience.replication_statement_roots[0], 32);
+    memcpy(contradicted_experience.statement_roots[1],
+           experience.replication_statement_roots[3], 32);
+    hr_sort(contradicted_experience.statement_roots, 2);
+    struct zcl_experience_episode_v1 contradicted_episode =
+        experience.episode;
+    contradicted_episode.replication_acceptance =
+        &contradicted_experience;
+    struct zcl_experience_compilation_v1 contradicted_compilation;
+    HR_CHECK("experience-contradiction-captures-but-never-grants-lesson",
+        zcl_experience_compile(
+            &contradicted_episode, &contradicted_compilation) ==
+                ZCL_EXPERIENCE_COMPILATION_OK &&
+        contradicted_compilation.captured &&
+        !contradicted_compilation.lesson_relevant &&
+        !contradicted_compilation.replication_qualified &&
+        contradicted_compilation.replication_reason ==
+            VCS_ZCODE_HEURISTIC_REPLICATION_REASON_CONTRADICTED &&
+        contradicted_compilation.replicated_count == 1);
+
+    bool predicate_mutations_refused = true;
+    for (size_t i = 0; i < 32; i++) {
+        struct zcl_ontology_predicate_v1 predicate = experience.predicate;
+        predicate.term_root[i] ^= (uint8_t)(i + 1u);
+        struct zcl_experience_episode_v1 episode = experience.episode;
+        episode.outcome_predicate = &predicate;
+        struct zcl_experience_compilation_v1 refused;
+        memset(&refused, 0x5a, sizeof(refused));
+        predicate_mutations_refused = predicate_mutations_refused &&
+            zcl_experience_compile(&episode, &refused) ==
+                ZCL_EXPERIENCE_COMPILATION_REPORT &&
+            memcmp(&refused, &zero_compilation, sizeof(refused)) == 0;
+    }
+    HR_CHECK("experience-predicate-byte-mutation-property-refuses-all",
+             predicate_mutations_refused);
+
+    struct vcs_build_action_v1 wrong_action = f.action;
+    wrong_action.source_sha256[0] ^= 1u;
+    struct zcl_experience_episode_v1 wrong_action_episode =
+        experience.episode;
+    wrong_action_episode.benchmark_action = &wrong_action;
+    struct zcl_experience_compilation_v1 refused_compilation;
+    memset(&refused_compilation, 0x5a, sizeof(refused_compilation));
+    HR_CHECK("experience-wrong-benchmark-generation-refuses-atomically",
+        zcl_experience_compile(
+            &wrong_action_episode, &refused_compilation) ==
+                ZCL_EXPERIENCE_COMPILATION_REPLICATION &&
+        memcmp(&refused_compilation, &zero_compilation,
+               sizeof(refused_compilation)) == 0);
+
+    struct vcs_zcode_attention_bid_v1 wrong_evidence_bid = experience.bid;
+    wrong_evidence_bid.evidence_root[0] ^= 1u;
+    struct zcl_experience_episode_v1 wrong_evidence_episode =
+        experience.episode;
+    wrong_evidence_episode.attention_bid = &wrong_evidence_bid;
+    memset(&refused_compilation, 0x5a, sizeof(refused_compilation));
+    HR_CHECK("experience-stale-original-result-bid-refuses-atomically",
+        zcl_experience_compile(
+            &wrong_evidence_episode, &refused_compilation) ==
+                ZCL_EXPERIENCE_COMPILATION_REPLICATION &&
+        memcmp(&refused_compilation, &zero_compilation,
+               sizeof(refused_compilation)) == 0);
+
+    struct zcl_experience_episode_v1 stale_cutoff_episode =
+        experience.episode;
+    stale_cutoff_episode.observed_at_unix = 1400;
+    memset(&refused_compilation, 0x5a, sizeof(refused_compilation));
+    HR_CHECK("experience-future-reproduction-at-stale-cutoff-refuses",
+        zcl_experience_compile(
+            &stale_cutoff_episode, &refused_compilation) ==
+                ZCL_EXPERIENCE_COMPILATION_REPLICATION &&
+        memcmp(&refused_compilation, &zero_compilation,
+               sizeof(refused_compilation)) == 0);
+
+    struct vcs_zcode_heuristic_replication_snapshot_v1 wrong_replication =
+        experience.replication;
+    wrong_replication.statement_roots[0][0] ^= 1u;
+    struct zcl_experience_episode_v1 wrong_replication_episode =
+        experience.episode;
+    wrong_replication_episode.replication_acceptance = &wrong_replication;
+    memset(&refused_compilation, 0x5a, sizeof(refused_compilation));
+    HR_CHECK("experience-missing-accepted-reproduction-refuses-atomically",
+        zcl_experience_compile(
+            &wrong_replication_episode, &refused_compilation) ==
+                ZCL_EXPERIENCE_COMPILATION_REPLICATION &&
+        memcmp(&refused_compilation, &zero_compilation,
+               sizeof(refused_compilation)) == 0);
+
+    struct zcl_experience_episode_v1 incomplete_episode = experience.episode;
+    incomplete_episode.outcome_predicate = NULL;
+    memset(&refused_compilation, 0x5a, sizeof(refused_compilation));
+    HR_CHECK("experience-partial-scientific-bundle-fails-closed",
+        zcl_experience_compile(&incomplete_episode, &refused_compilation) ==
+            ZCL_EXPERIENCE_COMPILATION_NULL &&
+        memcmp(&refused_compilation, &zero_compilation,
+               sizeof(refused_compilation)) == 0);
+
+    union {
+        struct zcl_ontology_predicate_v1 predicate;
+        struct zcl_experience_compilation_v1 output;
+    } optional_alias;
+    optional_alias.predicate = experience.predicate;
+    struct zcl_ontology_predicate_v1 optional_alias_before =
+        optional_alias.predicate;
+    struct zcl_experience_episode_v1 optional_alias_episode =
+        experience.episode;
+    optional_alias_episode.outcome_predicate = &optional_alias.predicate;
+    HR_CHECK("experience-optional-evidence-alias-refuses-without-write",
+        zcl_experience_compile(
+            &optional_alias_episode, &optional_alias.output) ==
+                ZCL_EXPERIENCE_COMPILATION_ALIAS &&
+        memcmp(&optional_alias.predicate, &optional_alias_before,
+               sizeof(optional_alias_before)) == 0);
+
+    char experience_replica[192];
+    int experience_replica_n = snprintf(
+        experience_replica, sizeof(experience_replica), "%s.experience",
+        workspace);
+    test_cleanup_tmpdir(experience_replica);
+    struct hr_fixture replica_fixture;
+    struct hr_experience_fixture replica_experience;
+    struct zcl_experience_compilation_v1 replica_compiled;
+    bool experience_reproduced = experience_replica_n > 0 &&
+        (size_t)experience_replica_n < sizeof(experience_replica) &&
+        mkdir(experience_replica, 0700) == 0 &&
+        vcs_object_store_init(experience_replica) &&
+        hr_fixture_build(experience_replica, &replica_fixture) &&
+        hr_experience_build(
+            experience_replica, &replica_fixture, &replica_experience) &&
+        zcl_experience_compile(&replica_experience.episode,
+                               &replica_compiled) ==
+            ZCL_EXPERIENCE_COMPILATION_OK &&
+        replica_compiled.lesson_relevant &&
+        memcmp(&replica_compiled, &compiled, sizeof(compiled)) == 0;
+    HR_CHECK("experience-independent-workspace-reproduces-exact-view",
+             experience_reproduced);
+    test_cleanup_tmpdir(experience_replica);
 
     memset(&qualified, 0x7b, sizeof(qualified));
     HR_CHECK("empty-scientific-frontier-has-exact-zero-counts",

@@ -23,6 +23,7 @@ enum zcl_experience_compilation_error {
     ZCL_EXPERIENCE_COMPILATION_HEURISTIC,
     ZCL_EXPERIENCE_COMPILATION_SCIENCE,
     ZCL_EXPERIENCE_COMPILATION_ACCEPTANCE,
+    ZCL_EXPERIENCE_COMPILATION_REPLICATION,
     ZCL_EXPERIENCE_COMPILATION_CAS,
 };
 
@@ -47,6 +48,14 @@ struct zcl_experience_episode_v1 {
     const struct vcs_zcode_science_relation_set_v1 *relations;
     const struct vcs_zcode_science_statement_v1 *statement;
     const struct vcs_zcode_heuristic_lifecycle_snapshot_v1 *local_acceptance;
+    /* Scientific qualification is one all-or-none bundle. Older captured
+     * episodes may omit it, but an omitted or incomplete bundle can never
+     * make a lesson relevant. */
+    const struct zcl_ontology_predicate_v1 *outcome_predicate;
+    const struct vcs_build_action_v1 *benchmark_action;
+    const struct vcs_zcode_heuristic_replication_snapshot_v1
+        *replication_acceptance;
+    int64_t observed_at_unix;
 };
 
 /* This is a derived view over canonical evidence. captured=true means the
@@ -57,9 +66,13 @@ struct zcl_experience_episode_v1 {
 struct zcl_experience_compilation_v1 {
     bool captured;
     bool lesson_relevant;
+    bool replication_qualified;
     uint8_t outcome;
     uint8_t lifecycle_status;
     uint8_t lifecycle_reason;
+    uint8_t replication_reason;
+    uint16_t replicated_count;
+    uint16_t required_reproductions;
     uint8_t story_root[32];
     uint8_t focus_root[32];
     uint8_t receipt_root[32];
@@ -69,6 +82,11 @@ struct zcl_experience_compilation_v1 {
     uint8_t relations_root[32];
     uint8_t statement_root[32];
     uint8_t acceptance_snapshot_root[32];
+    uint8_t outcome_predicate_root[32];
+    uint8_t benchmark_action_root[32];
+    uint8_t study_root[32];
+    uint8_t original_result_root[32];
+    uint8_t replication_snapshot_root[32];
     uint8_t derived_rule_root[32];
     uint8_t expected_effect_root[32];
 };
@@ -78,7 +96,8 @@ const char *zcl_experience_compilation_error_string(
 
 /* Validate every caller-supplied binding possible before writing, then
  * store/reload/parse/reroot the existing canonical wires and apply the
- * existing CAS-dependent lifecycle-aware attention selector. Output is zero
+ * existing CAS-dependent lifecycle-and-replication-qualified attention
+ * selector. Output is zero
  * on every non-alias failure. Aliasing output with any input is rejected
  * without modifying either region. A late CAS or accepted-lifecycle failure
  * can leave already verified addressed objects inert in CAS; no projection,

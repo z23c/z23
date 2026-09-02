@@ -2,12 +2,13 @@
  *
  * fuzz_zcode_science — libFuzzer harness for the ZCODE science object wire
  * parsers (study_spec.v1, benchmark_result.v1, reproduction.v1,
- * science_findings.v1, curation_vote.v1). These bytes may arrive from the
+ * science_findings.v1, curation_vote.v1, science_statement.v1, and its
+ * relation set). These bytes may arrive from the
  * public ZCODE CAS before their signatures, roots, or cross-object
  * authorities are trusted, so parsing must be total and bounded for every
  * possible input.
  *
- * Byte 0 selects one of five parsers. The remainder is passed at its exact
+ * Byte 0 selects one of seven parsers. The remainder is passed at its exact
  * length. No arm allocates. ASan+UBSan are supplied by FUZZ_CFLAGS.
  */
 
@@ -19,8 +20,9 @@
 
 volatile sig_atomic_t g_shutdown_requested = 0;
 
-#define FUZZ_ZCODE_SCIENCE_ARMS 5u
-#define FUZZ_ZCODE_SCIENCE_MAX_INPUT (VCS_ZCODE_STUDY_SPEC_WIRE_BYTES + 1u)
+#define FUZZ_ZCODE_SCIENCE_ARMS 7u
+#define FUZZ_ZCODE_SCIENCE_MAX_INPUT \
+    (VCS_ZCODE_SCIENCE_RELATION_SET_MAX_WIRE_BYTES + 1u)
 
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size);
 
@@ -57,6 +59,17 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
     case 4: {
         struct vcs_zcode_curation_vote_v1 out;
         (void)vcs_zcode_curation_vote_parse(wire, wire_len, &out);
+        break;
+    }
+    case 5: {
+        struct vcs_zcode_science_statement_v1 out;
+        (void)vcs_zcode_science_statement_parse(wire, wire_len, &out);
+        break;
+    }
+    case 6: {
+        struct vcs_zcode_science_relation_set_v1 out;
+        (void)vcs_zcode_science_relation_set_parse(
+            wire, wire_len, &out);
         break;
     }
     }

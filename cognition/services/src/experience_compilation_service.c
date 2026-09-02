@@ -48,6 +48,9 @@ static bool experience_output_aliases(
     const struct zcl_experience_episode_v1 *episode,
     const struct zcl_experience_compilation_v1 *out, size_t workspace_bytes)
 {
+#define EXPERIENCE_ARRAY_BYTES(count_, item_size_)                       \
+    ((count_) > SIZE_MAX / (item_size_) ? SIZE_MAX :                    \
+     (count_) * (item_size_))
 #define EXPERIENCE_INPUT_OVERLAPS(pointer, count) \
     experience_memory_overlaps(out, sizeof(*out), (pointer), (count))
     bool aliases =
@@ -56,13 +59,15 @@ static bool experience_output_aliases(
         EXPERIENCE_INPUT_OVERLAPS(episode->story, sizeof(*episode->story)) ||
         EXPERIENCE_INPUT_OVERLAPS(
             episode->story->events,
-            episode->story->event_count * sizeof(*episode->story->events)) ||
+            EXPERIENCE_ARRAY_BYTES(episode->story->event_count,
+                sizeof(*episode->story->events))) ||
         EXPERIENCE_INPUT_OVERLAPS(episode->task, sizeof(*episode->task)) ||
         EXPERIENCE_INPUT_OVERLAPS(episode->agent_context,
                                   sizeof(*episode->agent_context)) ||
         EXPERIENCE_INPUT_OVERLAPS(episode->focus, sizeof(*episode->focus)) ||
         (episode->claim_count != 0 && EXPERIENCE_INPUT_OVERLAPS(
-            episode->claim_roots, episode->claim_count * 32u)) ||
+            episode->claim_roots,
+            EXPERIENCE_ARRAY_BYTES(episode->claim_count, 32u))) ||
         EXPERIENCE_INPUT_OVERLAPS(episode->work_receipt,
                                   sizeof(*episode->work_receipt)) ||
         EXPERIENCE_INPUT_OVERLAPS(episode->specialist_report,
@@ -71,7 +76,8 @@ static bool experience_output_aliases(
                                   sizeof(*episode->heuristic)) ||
         (episode->parent_count != 0 && EXPERIENCE_INPUT_OVERLAPS(
             episode->parents,
-            episode->parent_count * sizeof(*episode->parents))) ||
+            EXPERIENCE_ARRAY_BYTES(episode->parent_count,
+                sizeof(*episode->parents)))) ||
         EXPERIENCE_INPUT_OVERLAPS(episode->attention_bid,
                                   sizeof(*episode->attention_bid)) ||
         EXPERIENCE_INPUT_OVERLAPS(episode->relations,
@@ -79,8 +85,18 @@ static bool experience_output_aliases(
         EXPERIENCE_INPUT_OVERLAPS(episode->statement,
                                   sizeof(*episode->statement)) ||
         EXPERIENCE_INPUT_OVERLAPS(episode->local_acceptance,
-                                  sizeof(*episode->local_acceptance));
+                                  sizeof(*episode->local_acceptance)) ||
+        (episode->outcome_predicate && EXPERIENCE_INPUT_OVERLAPS(
+            episode->outcome_predicate,
+            sizeof(*episode->outcome_predicate))) ||
+        (episode->benchmark_action && EXPERIENCE_INPUT_OVERLAPS(
+            episode->benchmark_action,
+            sizeof(*episode->benchmark_action))) ||
+        (episode->replication_acceptance && EXPERIENCE_INPUT_OVERLAPS(
+            episode->replication_acceptance,
+            sizeof(*episode->replication_acceptance)));
 #undef EXPERIENCE_INPUT_OVERLAPS
+#undef EXPERIENCE_ARRAY_BYTES
     return aliases;
 }
 
@@ -283,6 +299,11 @@ static enum zcl_experience_compilation_error experience_validate_lesson(
     const struct zcl_experience_episode_v1 *episode,
     struct zcl_experience_compilation_v1 *result)
 {
+    if (episode->outcome_predicate &&
+        !experience_root_equal(episode->attention_bid->evidence_root,
+                               episode->statement->provenance_root))
+        return experience_fail(ZCL_EXPERIENCE_COMPILATION_REPLICATION,
+                               "attention bid moved from original result");
     if (episode->parent_count != episode->heuristic->parent_count ||
         vcs_zcode_attention_bid_verify_statement_with_lineage(
             episode->attention_bid, episode->heuristic, episode->parents,
@@ -296,8 +317,6 @@ static enum zcl_experience_compilation_error experience_validate_lesson(
             episode->attention_bid, result->bid_root) !=
                 VCS_ZCODE_ATTENTION_OK ||
         !experience_root_equal(episode->heuristic->provenance_root,
-                               result->receipt_root) ||
-        !experience_root_equal(episode->attention_bid->evidence_root,
                                result->receipt_root))
         return experience_fail(ZCL_EXPERIENCE_COMPILATION_HEURISTIC,
                                "proposal, lineage, focus, or receipt moved");
@@ -319,6 +338,32 @@ static enum zcl_experience_compilation_error experience_validate_lesson(
             result->statement_root))
         return experience_fail(ZCL_EXPERIENCE_COMPILATION_SCIENCE,
                                "statement, relations, or anchor moved");
+    return ZCL_EXPERIENCE_COMPILATION_OK;
+}
+
+static enum zcl_experience_compilation_error experience_validate_predicate(
+    const struct zcl_experience_episode_v1 *episode,
+    struct zcl_experience_compilation_v1 *result)
+{
+    if (!episode->outcome_predicate)
+        return ZCL_EXPERIENCE_COMPILATION_OK;
+    if (episode->outcome_predicate->world != ZCL_ONTOLOGY_OPEN_WORLD ||
+        episode->outcome_predicate->execution_tier !=
+            ZCL_ONTOLOGY_TIER_EXACT ||
+        !zcl_ontology_predicate_v1_root(
+            episode->outcome_predicate, result->outcome_predicate_root) ||
+        !experience_root_equal(episode->specialist_report->claim_root,
+                               result->outcome_predicate_root))
+        return experience_fail(ZCL_EXPERIENCE_COMPILATION_REPORT,
+                               "report does not evaluate the predicate");
+    bool focused = false;
+    for (size_t i = 0; i < episode->claim_count; i++)
+        if (experience_root_equal(episode->claim_roots[i],
+                                  result->outcome_predicate_root))
+            focused = true;
+    if (!focused)
+        return experience_fail(ZCL_EXPERIENCE_COMPILATION_FOCUS,
+                               "outcome predicate is outside focus");
     return ZCL_EXPERIENCE_COMPILATION_OK;
 }
 
@@ -353,21 +398,6 @@ static enum zcl_experience_compilation_error experience_select(
     const struct zcl_experience_episode_v1 *episode, uint8_t expected_outcome,
     struct zcl_experience_compilation_v1 *result)
 {
-    size_t selected = SIZE_MAX;
-    struct vcs_zcode_attention_verified_report verified;
-    enum vcs_zcode_attention_error attention_error =
-        vcs_zcode_attention_frontier_next_verified_with_lineage_and_lifecycle(
-            episode->workspace, episode->attention_bid, 1u,
-            episode->heuristic, episode->parents, episode->parent_count,
-            episode->statement, episode->local_acceptance, episode->focus,
-            episode->attention_bid->priority_policy_root,
-            episode->local_acceptance->local_policy_root,
-            episode->attention_bid->bid_evaluator_root,
-            episode->local_acceptance->expected_signer,
-            &selected, 1u, &verified);
-    if (attention_error != VCS_ZCODE_ATTENTION_OK)
-        return experience_fail(ZCL_EXPERIENCE_COMPILATION_ACCEPTANCE,
-            vcs_zcode_attention_error_string(attention_error));
     struct vcs_zcode_heuristic_lifecycle_report lifecycle;
     if (vcs_zcode_heuristic_lifecycle_fold(
             episode->workspace, episode->local_acceptance, &lifecycle) !=
@@ -379,10 +409,53 @@ static enum zcl_experience_compilation_error experience_select(
     result->lifecycle_status = lifecycle.status;
     result->lifecycle_reason = lifecycle.reason;
     memcpy(result->acceptance_snapshot_root, lifecycle.snapshot_root, 32);
-    result->lesson_relevant =
-        verified.choice.frontier.input_count == 1u &&
-        verified.choice.frontier.frontier_count == 1u &&
-        verified.choice.frontier.returned_count == 1u && selected == 0u;
+    if (!episode->outcome_predicate)
+        return ZCL_EXPERIENCE_COMPILATION_OK;
+
+    if (!vcs_build_action_v1_root_for_kind(
+            VCS_BUILD_ACTION_KIND_BENCHMARK_V1,
+            episode->benchmark_action, result->benchmark_action_root))
+        return experience_fail(ZCL_EXPERIENCE_COMPILATION_REPLICATION,
+                               "benchmark action is not canonical");
+    struct vcs_zcode_heuristic_replication_report replication;
+    enum vcs_zcode_attention_error attention_error =
+        vcs_zcode_heuristic_replication_fold(
+            episode->workspace, episode->heuristic,
+            episode->benchmark_action, episode->replication_acceptance,
+            episode->observed_at_unix, &replication);
+    if (attention_error != VCS_ZCODE_ATTENTION_OK || !replication.complete)
+        return experience_fail(ZCL_EXPERIENCE_COMPILATION_REPLICATION,
+            vcs_zcode_attention_error_string(attention_error));
+    result->replication_qualified = replication.qualified;
+    result->replication_reason = replication.reason;
+    result->replicated_count = replication.replicated_count;
+    result->required_reproductions = replication.required_reproductions;
+    memcpy(result->study_root, replication.study_root, 32);
+    memcpy(result->original_result_root,
+           replication.original_result_root, 32);
+    memcpy(result->replication_snapshot_root, replication.snapshot_root, 32);
+
+    size_t selected = SIZE_MAX;
+    struct vcs_zcode_attention_qualified_report qualified;
+    attention_error =
+        vcs_zcode_attention_frontier_next_verified_with_lifecycle_and_replication(
+            episode->workspace, episode->attention_bid, 1u,
+            episode->heuristic, episode->parents, episode->parent_count,
+            episode->statement, episode->local_acceptance,
+            episode->benchmark_action, episode->replication_acceptance,
+            episode->focus, episode->attention_bid->priority_policy_root,
+            episode->local_acceptance->local_policy_root,
+            episode->replication_acceptance->local_policy_root,
+            episode->attention_bid->bid_evaluator_root,
+            episode->local_acceptance->expected_signer,
+            episode->observed_at_unix, &selected, 1u, &qualified);
+    if (attention_error != VCS_ZCODE_ATTENTION_OK)
+        return experience_fail(ZCL_EXPERIENCE_COMPILATION_ACCEPTANCE,
+            vcs_zcode_attention_error_string(attention_error));
+    result->lesson_relevant = replication.qualified &&
+        qualified.choice.frontier.input_count == 1u &&
+        qualified.choice.frontier.frontier_count == 1u &&
+        qualified.choice.frontier.returned_count == 1u && selected == 0u;
     if (result->lesson_relevant) {
         memcpy(result->derived_rule_root,
                episode->heuristic->proposed_rule_root, 32);
@@ -409,6 +482,8 @@ const char *zcl_experience_compilation_error_string(
         return "science-evidence-invalid";
     case ZCL_EXPERIENCE_COMPILATION_ACCEPTANCE:
         return "local-acceptance-invalid";
+    case ZCL_EXPERIENCE_COMPILATION_REPLICATION:
+        return "replication-acceptance-invalid";
     case ZCL_EXPERIENCE_COMPILATION_CAS: return "cas-revalidation-failed";
     default: return "unknown";
     }
@@ -453,6 +528,17 @@ static enum zcl_experience_compilation_error experience_compile_checked(
         return experience_fail(ZCL_EXPERIENCE_COMPILATION_NULL,
                                "required episode field absent");
     }
+    bool scientific_any = episode->outcome_predicate ||
+        episode->benchmark_action || episode->replication_acceptance ||
+        episode->observed_at_unix != 0;
+    bool scientific_all = episode->outcome_predicate &&
+        episode->benchmark_action && episode->replication_acceptance &&
+        episode->observed_at_unix > 0;
+    if (scientific_any != scientific_all) {
+        memset(out, 0, sizeof(*out));
+        return experience_fail(ZCL_EXPERIENCE_COMPILATION_NULL,
+                               "scientific qualification bundle incomplete");
+    }
     if (episode->claim_count > VCS_ZCODE_FOCUS_MAX_CLAIMS ||
         episode->parent_count > VCS_ZCODE_HEURISTIC_MAX_PARENTS ||
         episode->story->event_count > ZCL_STORY_MAX_EVENTS) {
@@ -474,6 +560,8 @@ static enum zcl_experience_compilation_error experience_compile_checked(
             episode, &result, &expected_outcome);
     if (error == ZCL_EXPERIENCE_COMPILATION_OK)
         error = experience_validate_lesson(episode, &result);
+    if (error == ZCL_EXPERIENCE_COMPILATION_OK)
+        error = experience_validate_predicate(episode, &result);
     if (error == ZCL_EXPERIENCE_COMPILATION_OK)
         error = experience_capture(episode, &result);
     if (error == ZCL_EXPERIENCE_COMPILATION_OK)

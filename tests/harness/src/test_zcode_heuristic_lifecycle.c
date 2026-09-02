@@ -964,7 +964,7 @@ static int hlt_experience_episode(const char *workspace)
     struct zcl_experience_compilation_v1 compiled;
     bool compiled_ok = retained_ok && zcl_experience_compile(
             &episode, &compiled) == ZCL_EXPERIENCE_COMPILATION_OK &&
-        compiled.captured && compiled.lesson_relevant &&
+        compiled.captured && !compiled.lesson_relevant &&
         compiled.outcome == ZCL_ONTOLOGY_PROVED &&
         compiled.lifecycle_status ==
             VCS_ZCODE_HEURISTIC_LIFECYCLE_RETAINED &&
@@ -973,8 +973,8 @@ static int hlt_experience_episode(const char *workspace)
         memcmp(compiled.heuristic_root, heuristic_roots[2], 32) == 0 &&
         memcmp(compiled.statement_root, lesson_statement_roots[0], 32) == 0 &&
         memcmp(compiled.derived_rule_root,
-               heuristics[2].proposed_rule_root, 32) == 0;
-    HL_CHECK("episode-production-service-captures-and-retrieves-one-lesson",
+               (const uint8_t[32]){0}, 32) == 0;
+    HL_CHECK("episode-capture-without-replication-returns-no-lesson",
              compiled_ok);
 
     union {
@@ -1034,11 +1034,11 @@ static int hlt_experience_episode(const char *workspace)
     failed_episode.statement = &failed_statement;
     failed_episode.local_acceptance = &failed_snapshot;
     struct zcl_experience_compilation_v1 failed_compiled;
-    HL_CHECK("episode-failure-is-immutable-relevant-evidence-too",
+    HL_CHECK("episode-failure-is-immutable-but-unqualified-evidence",
              failed_shapes_ok && zcl_experience_compile(
                  &failed_episode, &failed_compiled) ==
                      ZCL_EXPERIENCE_COMPILATION_OK &&
-             failed_compiled.captured && failed_compiled.lesson_relevant &&
+             failed_compiled.captured && !failed_compiled.lesson_relevant &&
              failed_compiled.outcome == ZCL_ONTOLOGY_DISPROVED);
 
     struct vcs_zcode_work_receipt_v1 cancelled_receipt = work_receipt;
@@ -1129,7 +1129,7 @@ static int hlt_experience_episode(const char *workspace)
     replica_ok = replica_ok && zcl_experience_compile(
             &replica_episode, &reproduced) ==
                 ZCL_EXPERIENCE_COMPILATION_OK &&
-        reproduced.captured && reproduced.lesson_relevant &&
+        reproduced.captured && !reproduced.lesson_relevant &&
         memcmp(reproduced.receipt_root, compiled.receipt_root, 32) == 0 &&
         memcmp(reproduced.report_root, compiled.report_root, 32) == 0 &&
         memcmp(reproduced.heuristic_root, compiled.heuristic_root, 32) == 0 &&
