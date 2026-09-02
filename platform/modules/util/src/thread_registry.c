@@ -65,9 +65,32 @@ int thread_registry_spawn(const char *name,
 {
     if (!entry) return EINVAL;
 
+#if defined(__APPLE__)
+    pthread_attr_t attr;
+    int attr_rc = pthread_attr_init(&attr);
+    if (attr_rc != 0) return attr_rc;
+    attr_rc = pthread_attr_setstacksize(
+        &attr, (size_t)ZCL_DARWIN_THREAD_STACK_BYTES);
+    if (attr_rc != 0) {
+        int destroy_rc = pthread_attr_destroy(&attr);
+        if (destroy_rc != 0)
+            fprintf(stderr, "[thread_registry] pthread_attr_destroy: %s\n",
+                    strerror(destroy_rc));
+        return attr_rc;
+    }
+#endif
+
     struct trampoline_args *ta = zcl_malloc(sizeof(*ta),
                                              "thread_registry_trampoline");
-    if (!ta) return ENOMEM;
+    if (!ta) {
+#if defined(__APPLE__)
+        int destroy_rc = pthread_attr_destroy(&attr);
+        if (destroy_rc != 0)
+            fprintf(stderr, "[thread_registry] pthread_attr_destroy: %s\n",
+                    strerror(destroy_rc));
+#endif
+        return ENOMEM;
+    }
     ta->entry = entry;
     ta->arg   = arg;
 
@@ -81,6 +104,12 @@ int thread_registry_spawn(const char *name,
     if (slot < 0) {
         pthread_mutex_unlock(&g_mu);
         free(ta);
+#if defined(__APPLE__)
+        int destroy_rc = pthread_attr_destroy(&attr);
+        if (destroy_rc != 0)
+            fprintf(stderr, "[thread_registry] pthread_attr_destroy: %s\n",
+                    strerror(destroy_rc));
+#endif
         fprintf(stderr, "[thread_registry] capacity %d exceeded — "
                 "cannot spawn '%s'\n",
                 ZCL_THREAD_REGISTRY_CAP, name ? name : "?");
@@ -99,7 +128,19 @@ int thread_registry_spawn(const char *name,
      * registry entry forever. The child merely blocks on g_mu until its tid is
      * fully published. */
     pthread_t tid;
-    int rc = pthread_create(&tid, NULL, thread_registry_trampoline, ta);
+    int rc = pthread_create(&tid,
+#if defined(__APPLE__)
+                            &attr,
+#else
+                            NULL,
+#endif
+                            thread_registry_trampoline, ta);
+#if defined(__APPLE__)
+    int destroy_rc = pthread_attr_destroy(&attr);
+    if (destroy_rc != 0)
+        fprintf(stderr, "[thread_registry] pthread_attr_destroy: %s\n",
+                strerror(destroy_rc));
+#endif
     if (rc != 0) {
         memset(&g_entries[slot], 0, sizeof(g_entries[slot]));
         pthread_mutex_unlock(&g_mu);

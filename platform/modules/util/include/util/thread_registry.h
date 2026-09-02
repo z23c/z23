@@ -58,6 +58,14 @@
  * workers. */
 #define ZCL_THREAD_REGISTRY_CAP 256
 
+/* Darwin gives secondary pthreads only 512 KiB by default. Registered node
+ * workers execute bounded fixed-action code whose checked automatic state can
+ * exceed that in development builds, so the platform seam supplies explicit
+ * headroom instead of letting a valid worker die at function entry. */
+#if defined(__APPLE__)
+#define ZCL_DARWIN_THREAD_STACK_BYTES (2u * 1024u * 1024u)
+#endif
+
 /* Spawn a thread via pthread_create and record it in the registry.
  * `name` is copied; pass NULL for "unnamed". When `out_tid` is
  * non-NULL, writes the spawned thread's pthread_t into *out_tid so the

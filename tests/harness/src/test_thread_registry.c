@@ -15,6 +15,36 @@ struct worker_ctx {
     _Atomic int exited;
 };
 
+#if defined(__APPLE__)
+struct darwin_stack_ctx {
+    size_t observed;
+};
+
+static void *tr_observe_stack(void *arg)
+{
+    struct darwin_stack_ctx *ctx = arg;
+    ctx->observed = pthread_get_stacksize_np(pthread_self());
+    return NULL;
+}
+
+static int t_registry_darwin_stack_headroom(void)
+{
+    int failures = 0;
+    thread_registry_reset_for_test();
+
+    TEST("thread_registry: Darwin workers receive explicit stack headroom") {
+        struct darwin_stack_ctx ctx = {0};
+        pthread_t tid;
+        ASSERT_EQ(thread_registry_spawn("tr-stack", tr_observe_stack,
+                                        &ctx, &tid), 0);
+        ASSERT_EQ(pthread_join(tid, NULL), 0);
+        ASSERT(ctx.observed >= ZCL_DARWIN_THREAD_STACK_BYTES);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+#endif
+
 /* Worker polls the registry's shutdown flag every ~10 ms and exits
  * cleanly when it flips. This is the contract every long-running
  * zclassic23 thread must follow. */
@@ -217,6 +247,9 @@ int test_thread_registry(void)
 {
     printf("\n=== thread_registry tests ===\n");
     int failures = 0;
+#if defined(__APPLE__)
+    failures += t_registry_darwin_stack_headroom();
+#endif
     failures += t_registry_rejects_null_entry();
     failures += t_registry_stress_50_threads();
     failures += t_registry_reports_straggler();
