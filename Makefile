@@ -4899,6 +4899,38 @@ $(eval $(call BUILD_NODE_TOOL,spec_zcl,tests/harness/spec_main.c $(SPEC_SRCS) te
 $(eval $(call BUILD_NODE_TOOL,wallet_dump,tools/wallet_dump.c))
 $(eval $(call BUILD_NODE_TOOL,snapshot_from_coinskv,tools/snapshot_from_coinskv.c))
 $(eval $(call BUILD_NODE_TOOL,mint_v2_snapshot,tools/mint_v2_snapshot.c))
+GPU_MINER_SRCS = tools/z23_gpu_miner.c tools/miner/gpu_equihash.c \
+	core/modules/crypto/src/equihash.c \
+	core/modules/crypto/src/blake2b.c core/modules/crypto/src/blake2b_avx2.c \
+	core/modules/crypto/src/simd_dispatch.c core/modules/crypto/src/sha256.c \
+	platform/modules/base/src/safe_alloc.c platform/modules/base/src/log_level.c
+
+.PHONY: gpu-miner z23-gpu-miner gpu-miner-acceptance
+gpu-miner z23-gpu-miner: $(BIN_DIR)/z23-gpu-miner$(ZCL_HOST_EXEEXT)
+
+$(BIN_DIR)/z23-gpu-miner$(ZCL_HOST_EXEEXT): $(GPU_MINER_SRCS) $(BUILD_IDENTITY_STAMP)
+	@mkdir -p $(dir $@)
+	@set -eu; \
+	tmp="$$(mktemp "$@.link.XXXXXX")"; \
+	trap 'rm -f "$$tmp"' EXIT HUP INT TERM; \
+	$(CC) $(CFLAGS) $(LDFLAGS) -o "$$tmp" $(GPU_MINER_SRCS); \
+	tools/dev/source-identity.sh verify-record "$(BUILD_SOURCE_ID)" "$(BUILD_CLEAN)" "$(BUILD_MUTATION)" >/dev/null; \
+	mv -f -- "$$tmp" "$@"; \
+	trap - EXIT HUP INT TERM
+
+ifeq ($(ZCL_HOST_WINDOWS),1)
+gpu-miner-acceptance: $(BIN_DIR)/z23-gpu-miner.exe $(WINDOWS_HEADLESS_RUN_BIN)
+	@root="$$(cygpath -aw .)"; \
+	runner="$$(cygpath -aw $(WINDOWS_HEADLESS_RUN_BIN))"; \
+	miner="$$(cygpath -aw $(BIN_DIR)/z23-gpu-miner.exe)"; \
+	log="$$root\\build\\gpu-miner-acceptance.log"; \
+	"$$runner" --cwd "$$root" --log "$$log" -- "$$miner" probe && \
+	"$$runner" --cwd "$$root" --log "$$log" -- "$$miner" benchmark 1 && \
+	cat "$(BUILD_DIR)/gpu-miner-acceptance.log"
+else
+gpu-miner-acceptance:
+	@echo "gpu-miner-acceptance requires native Windows with an OpenCL GPU" >&2; false
+endif
 
 # ── Bootstrap starter-pack: produce + COPY-PROVE a local candidate bundle ─
 # Turns the one-command bundle producer (mint_v2_snapshot) into a body-digest-

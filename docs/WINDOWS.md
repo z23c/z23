@@ -184,6 +184,41 @@ make -j"$(getconf _NPROCESSORS_ONLN)" CC=clang CXX=clang++ z23
 Never reuse `vendor/lib` or `build` across UCRT64 and WSL. Each archive and
 compile epoch is bound to its producing toolchain.
 
+## Native NVIDIA Equihash accelerator
+
+The optional native miner accelerates the mainnet Equihash (192,7) solver on
+the Windows GPU while retaining the portable C23 verifier as the final
+authority. It dynamically loads the system `OpenCL.dll`; no CUDA SDK, OpenCL
+SDK, compiler installation, PATH change, or redistributable DLL is required.
+The NVIDIA driver compiles the bounded OpenCL C kernels to the selected GPU's
+native assembly. Kernel dispatches are deliberately short to stay below the
+Windows display-driver timeout, and the acceptance path runs under the same
+no-window, kill-on-close Job Object launcher as the node gates.
+
+Build and measure it from PowerShell without opening an MSYS2 window:
+
+```powershell
+.\tools\dev\windows-make.ps1 gpu-miner
+.\tools\dev\windows-make.ps1 gpu-miner-acceptance
+```
+
+The acceptance target probes the real adapter, solves one full nonce, and
+requires the existing C23 Equihash verifier to accept the 400-byte solution.
+For direct use from UCRT64:
+
+```bash
+build/bin/z23-gpu-miner.exe probe
+build/bin/z23-gpu-miner.exe benchmark 4
+build/bin/z23-gpu-miner.exe mine PRE_SOLUTION_HEADER_HEX 256
+```
+
+`mine` accepts the exact 108 serialized bytes preceding the nonce (216 hex
+characters), searches little-endian 256-bit nonces, verifies each candidate,
+and reports a solution only when the complete header double-SHA256 meets its
+encoded `bits` target. It is a solver boundary, not yet a wallet or pool
+client: constructing a block template, choosing a payout, and submitting the
+completed block remain explicit caller responsibilities.
+
 ## Complete node lane in WSL2
 
 Use an Ubuntu 24.04 or newer WSL2 distribution with GCC 14+ (or a Clang that
