@@ -250,7 +250,13 @@ for row in "${cases[@]}"; do
     ((case_index += 1))
     ((case_index > task_limit)) && break
     IFS=$'\t' read -r project refused goal <<<"$row"
-    workspace="$bench_root/project-$project"
+    # Each frozen request owns one exact workspace.  Reusing the three source
+    # templates directly made later cases collide with the still-active task
+    # admitted by the first case for that template.  The product is right to
+    # refuse overlapping active work; the adapter harness must isolate its
+    # independent requests instead of weakening that coordination rail.
+    workspace="$bench_root/project-$project-case-$case_index"
+    cp -a "$bench_root/project-$project" "$workspace"
     start_input=$(jq -cn --arg workspace "$workspace" --arg goal "$goal" \
         '{workspace:$workspace,goal:$goal,profile:"quick"}')
     start_output=$(

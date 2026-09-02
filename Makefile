@@ -5295,6 +5295,7 @@ $(BIN_DIR)/zclassic23-zcode-adapter-runner: $(BUILD_IDENTITY_STAMP) \
 		$(BUILD_IDENTITY_CPPFLAGS) \
 		$(DEV_RESTART_LDFLAGS) -o "$$tmp" \
 		$(ZCODE_ADAPTER_RUNNER_SRCS); \
+	chmod 0755 "$$tmp"; \
 	tools/dev/source-identity.sh verify-record "$(BUILD_SOURCE_ID)" "$(BUILD_CLEAN)" "$(BUILD_MUTATION)" >/dev/null; \
 	mv -f -- "$$tmp" "$@"; \
 	trap - EXIT HUP INT TERM
