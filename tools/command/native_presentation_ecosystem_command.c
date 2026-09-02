@@ -558,8 +558,6 @@ static bool npe_reply_snapshot(struct zcl_command_reply *reply,
         json_push_kv_bool(&reply->data, "index_present", snap->index_present) &&
         json_push_kv_bool(&reply->data, "inventory_present",
                           snap->corpus.inventory_present) &&
-        json_push_kv_bool(&reply->data, "scope_agrees",
-                          snap->corpus.scope_agrees) &&
         json_push_kv_bool(&reply->data, "growth_present",
                           snap->growth_present);
     if (!ok)
@@ -588,6 +586,12 @@ static bool npe_reply_snapshot(struct zcl_command_reply *reply,
     } else {
         ok = json_push_kv_str(&reply->data, "indexed_c23_files",
                               "unavailable") &&
+            json_push_kv_str(&reply->data, "indexed_registry_nodes",
+                             "unavailable") &&
+            json_push_kv_str(&reply->data, "indexed_source_roots",
+                             "unavailable") &&
+            json_push_kv_str(&reply->data, "indexed_root_list",
+                             "unavailable") &&
             json_push_kv_str(&reply->data, "include_edges", "unavailable");
     }
 
@@ -601,12 +605,18 @@ static bool npe_reply_snapshot(struct zcl_command_reply *reply,
             json_push_kv_int(&reply->data, "duplicates",
                              (int64_t)snap->corpus.duplicates) &&
             json_push_kv_int(&reply->data, "untested_invariants",
-                             (int64_t)snap->corpus.untested_invariants);
+                             (int64_t)snap->corpus.untested_invariants) &&
+            json_push_kv_bool(&reply->data, "scope_agrees",
+                              snap->corpus.scope_agrees);
     } else if (ok) {
         ok = json_push_kv_str(&reply->data, "capabilities", "unavailable") &&
-            json_push_kv_str(&reply->data, "duplicates", "unavailable") &&
+            json_push_kv_str(&reply->data, "symbols_exposed", "unavailable") &&
             json_push_kv_str(&reply->data, "symbols_test_reached",
-                             "unavailable");
+                             "unavailable") &&
+            json_push_kv_str(&reply->data, "duplicates", "unavailable") &&
+            json_push_kv_str(&reply->data, "untested_invariants",
+                             "unavailable") &&
+            json_push_kv_str(&reply->data, "scope_agrees", "n/a");
     }
 
     if (ok && snap->growth_present) {

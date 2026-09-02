@@ -363,6 +363,41 @@ int test_ecosystem(void)
                       eco_json_str_is(&reply.data, "growth", "unavailable") &&
                       growth_error && strstr(growth_error, "toplevel"));
     }
+    ECO_CHECK("missing index facts are unavailable JSON strings, not zeros",
+              !json_get_bool(json_get(&reply.data, "index_present")) &&
+                  eco_json_str_is(&reply.data, "indexed_c23_files",
+                                  "unavailable") &&
+                  eco_json_str_is(&reply.data, "indexed_registry_nodes",
+                                  "unavailable") &&
+                  eco_json_str_is(&reply.data, "indexed_source_roots",
+                                  "unavailable") &&
+                  eco_json_str_is(&reply.data, "indexed_root_list",
+                                  "unavailable") &&
+                  eco_json_str_is(&reply.data, "include_edges",
+                                  "unavailable"));
+    zcl_command_reply_free(&reply);
+
+    struct zcl_command_context ctx_bare = { .source_root = dir_bare };
+    struct zcl_command_request request_bare = {
+        .input = &input,
+        .context = &ctx_bare,
+    };
+    zcl_command_reply_init(&reply, "zcl.app_presentation_ecosystem.v1");
+    zcl_native_handle_presentation_ecosystem(&request_bare, &reply);
+    ECO_CHECK("missing inventory facts are unavailable JSON strings, not zeros",
+              reply.status == ZCL_COMMAND_STATUS_PASSED &&
+                  !json_get_bool(json_get(&reply.data,
+                                          "inventory_present")) &&
+                  eco_json_str_is(&reply.data, "capabilities",
+                                  "unavailable") &&
+                  eco_json_str_is(&reply.data, "symbols_exposed",
+                                  "unavailable") &&
+                  eco_json_str_is(&reply.data, "symbols_test_reached",
+                                  "unavailable") &&
+                  eco_json_str_is(&reply.data, "duplicates", "unavailable") &&
+                  eco_json_str_is(&reply.data, "untested_invariants",
+                                  "unavailable") &&
+                  eco_json_str_is(&reply.data, "scope_agrees", "n/a"));
     zcl_command_reply_free(&reply);
 
     char dir_idx[512];
