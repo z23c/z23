@@ -9,7 +9,7 @@
   "dependencies": [
     {
       "name": "zarg/zarg",
-      "root": "e7e93f2b69f082a121e16bc593b210d4f71cefbb04f69925e67d80caa3cb190d",
+      "root": "7d6383545064935c399b7d29c84bb904e54d1fcd2601ef77428fe26b1c3e6c8a",
       "semver": "0.1.0"
     },
     {

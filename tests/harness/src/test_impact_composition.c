@@ -871,6 +871,22 @@ static int test_ic_dimension_applicability_and_exact_execution(void)
                    != NULL);
         }
 
+        const char *package_manifest[] = {
+            "contexts/commons/packages/zarg/zcode-package.json",
+        };
+        struct zcl_devloop_plan package_plan;
+        ASSERT(zcl_devloop_plan_files(package_manifest, 1, &package_plan));
+        ASSERT(ic_planned(&package_plan, "zcode_package_dev"));
+        ASSERT(ic_planned(&package_plan, "zcode_verify"));
+        ASSERT(ic_planned(&package_plan, "zcode_package_registry"));
+        ASSERT(ic_planned(&package_plan, "make_lint_gates"));
+        ASSERT(zcl_devloop_plan_add_closure("test-tmp/no-such-impact-index",
+                                            package_manifest, 1,
+                                            &package_plan));
+        why = "unset";
+        ASSERT(zcl_devloop_plan_proof_admissible(&package_plan, &why));
+        ASSERT(strcmp(why, "") == 0);
+
         struct agent_impact_acc executor = {0};
         (void)agent_impact_apply_shared_rules(
             "contexts/commons/services/src/build_fabric_package_executor.c", &executor);
