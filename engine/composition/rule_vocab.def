@@ -12,7 +12,7 @@
  * retire, and never be shown to have cost anything.
  *
  * So the set is CLOSED and it is DERIVED FROM ITS SOURCES. Every id here must
- * resolve to a heading in .grok/rules/*.md or a PERSONA row in
+ * resolve to a heading in a .grok rules markdown file or a PERSONA row in
  * engine/modules/engine/include/engine/personas.def, and every heading and
  * every persona must have a row. tools/lint/check_rule_vocabulary.sh refuses
  * both directions. Neither half alone is enough: checking only that rows

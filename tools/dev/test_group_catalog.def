@@ -53,6 +53,7 @@ ZCL_TEST_GROUP(netbase_split_host_port)
  * live twice in shell and PowerShell and so was proved by neither runner. */
 ZCL_TEST_GROUP(z23_front_door)
 ZCL_TEST_GROUP(engine)
+ZCL_TEST_GROUP(engine_rules)
 ZCL_TEST_GROUP(acme_b64url)
 ZCL_TEST_GROUP(acme_challenge)
 ZCL_TEST_GROUP(acme_renewal)

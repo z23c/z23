@@ -2945,7 +2945,13 @@ AGENT_IMPACT_RULE("cognition/modules/territory/include/territory/territory.h|cog
  * self-test lives inside the engine group, and cold_join_sovereign rides along
  * because P2 asserts that nothing in a Z23 object file reaches a TLS client —
  * which is the exact reason this module has no transport in it. */
-AGENT_IMPACT_RULE("engine/modules/engine/src/*.c|engine/modules/engine/include/engine/*.h|tests/harness/src/test_engine.c|tools/engine_unit.c|tools/lint/check_no_api_keys.sh", "engine cold_join_sovereign make_lint_gates")
+AGENT_IMPACT_RULE("engine/modules/engine/src/*.c|engine/modules/engine/include/engine/*.h|tests/harness/src/test_engine.c|tools/engine_unit.c|tools/lint/check_no_api_keys.sh", "engine engine_rules cold_join_sovereign make_lint_gates")
+/* The heuristic half: the rule vocabulary, the scorer that retires a rule off
+ * gate outcomes, the miner that proposes one, and the read leaf that shows the
+ * table. A change to the vocabulary is a change to what every executor is
+ * shown, so it runs the group that proves the scoring AND the gate that keeps
+ * the vocabulary closed. */
+AGENT_IMPACT_RULE("engine/composition/rule_vocab.def|engine/modules/engine/src/engine_rule_*.c|engine/modules/engine/include/engine/engine_rule_*.h|tests/harness/src/test_engine_rules.c|tools/lint/check_rule_vocabulary.sh", "engine_rules engine command_registry_catalog native_api_contract make_lint_gates")
 
 /* Tier-1 macOS capability truth and its derived runner. Every declared row
  * changes which availability/refusal evidence the public aggregate claims,

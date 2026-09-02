@@ -671,6 +671,8 @@ ZCL_MODULE_CAPABILITY("engine/modules/determinism/src/verdict.c", CAP_FS_READ, "
 ZCL_MODULE_CAPABILITY("platform/modules/encoding/src/qr.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("platform/modules/encoding/src/utilstrencodings.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("engine/modules/engine/src/engine_patch.c", CAP_FS_WRITE, "")
+ZCL_MODULE_CAPABILITY("engine/modules/engine/src/engine_rule_score.c", CAP_FS_READ|CAP_FS_WRITE, "reads the unit-receipt chainlog and rewrites rule_vocab.def when a rule retires; developer-local state only, and it reaches no node, datadir or wallet")
+ZCL_MODULE_CAPABILITY("engine/modules/engine/src/engine_rule_mine.c", CAP_FS_READ|CAP_FS_WRITE, "appends mined shadow candidates to the developer-local candidates.def")
 ZCL_MODULE_CAPABILITY("engine/modules/engine/src/engine_prompt.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("engine/modules/engine/src/engine_receipt.c", CAP_FS_READ|CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("engine/modules/engine/src/engine_secret.c", CAP_FS_READ|CAP_FS_WRITE, "")
