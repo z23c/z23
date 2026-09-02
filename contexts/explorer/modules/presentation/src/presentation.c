@@ -598,6 +598,12 @@ static bool present_run_pages_actions(
                          event.key.value == RGFW_left)
                     step = -1;
                 else if (event.type == RGFW_keyPressed &&
+                         event.key.value == RGFW_down)
+                    step = 1;
+                else if (event.type == RGFW_keyPressed &&
+                         event.key.value == RGFW_up)
+                    step = -1;
+                else if (event.type == RGFW_keyPressed &&
                          event.key.value == RGFW_pageDown)
                     step = 7;
                 else if (event.type == RGFW_keyPressed &&

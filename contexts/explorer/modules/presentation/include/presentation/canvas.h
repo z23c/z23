@@ -57,6 +57,15 @@ void zcl_present_canvas_blit_rgba(struct zcl_present_canvas *canvas,
  * The result is never below value and cannot overflow. */
 uint64_t zcl_present_canvas_chart_scale_maximum(uint64_t value);
 
+/* Pure time-axis label cadence over uniformly spaced columns: returns the
+ * smallest exact-day stride from one week through one year whose consecutive
+ * labels of label_width pixels plus label_gap stay clear of each other across
+ * plot_width. Weekly labels remain preferred whenever they fit; a single
+ * column or an unfittable request falls back to the widest cadence. */
+uint32_t zcl_present_canvas_axis_label_stride_v1(
+    uint32_t column_count, uint32_t plot_width,
+    uint32_t label_width, uint32_t label_gap);
+
 /* Basic Latin text uses embedded Inter Medium and SemiBold subsets with
  * antialiased software rasterization. pixel_height is an integer from 8
  * through 96. Unsupported bytes render as '?'. */

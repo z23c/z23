@@ -176,6 +176,20 @@ uint64_t zcl_present_canvas_chart_scale_maximum(uint64_t value)
     return step <= UINT64_MAX / 4u ? step * 4u : value;
 }
 
+uint32_t zcl_present_canvas_axis_label_stride_v1(
+    uint32_t column_count, uint32_t plot_width,
+    uint32_t label_width, uint32_t label_gap)
+{
+    static const uint32_t cadences[] = {7u, 14u, 30u, 60u, 90u, 180u, 365u};
+    if (column_count <= 1u) return cadences[0];
+    uint64_t denominator = column_count - 1u;
+    uint64_t clear = (uint64_t)label_width + label_gap;
+    for (size_t i = 0; i < sizeof(cadences) / sizeof(cadences[0]); i++)
+        if ((uint64_t)plot_width * cadences[i] / denominator >= clear)
+            return cadences[i];
+    return cadences[sizeof(cadences) / sizeof(cadences[0]) - 1u];
+}
+
 static bool canvas_font(stbtt_fontinfo *font, bool strong)
 {
     if (!font || g_zcl_inter_medium_ascii_len == 0 ||

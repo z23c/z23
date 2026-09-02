@@ -410,6 +410,19 @@ int test_qr(void)
                  '-', &render_delta) && render_delta == -1 &&
              !zcl_present_window_hover_render_delta_v1(
                  'x', &render_delta));
+    QR_CHECK("chart axis cadence prefers weekly labels when they fit",
+             zcl_present_canvas_axis_label_stride_v1(
+                 85u, 944u, 40u, 12u) == 7u &&
+             zcl_present_canvas_axis_label_stride_v1(
+                 1u, 944u, 40u, 12u) == 7u);
+    QR_CHECK("chart axis cadence widens before weekly labels collide",
+             zcl_present_canvas_axis_label_stride_v1(
+                 200u, 944u, 40u, 12u) == 14u &&
+             zcl_present_canvas_axis_label_stride_v1(
+                 512u, 944u, 40u, 12u) == 30u);
+    QR_CHECK("chart axis cadence falls back to a yearly bound",
+             zcl_present_canvas_axis_label_stride_v1(
+                 512u, 80u, 40u, 12u) == 365u);
     const struct zcl_present_window_pages_v1 hover_pages = {
         .struct_size = sizeof(hover_pages),
         .abi_version = ZCL_PRESENT_ABI_V1,

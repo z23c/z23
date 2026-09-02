@@ -153,6 +153,19 @@ static void npg_short_date(const char date[11], char out[6])
     out[5] = '\0';
 }
 
+static const char *npg_month_name(const char date[11])
+{
+    static const char *const months[] = {
+        "JAN", "FEB", "MAR", "APR", "MAY", "JUN",
+        "JUL", "AUG", "SEP", "OCT", "NOV", "DEC",
+    };
+    if (date[5] < '0' || date[5] > '9' || date[6] < '0' || date[6] > '9')
+        return NULL;
+    unsigned month = (unsigned)(date[5] - '0') * 10u +
+                     (unsigned)(date[6] - '0');
+    return month >= 1u && month <= 12u ? months[month - 1u] : NULL;
+}
+
 static void npg_draw_header(
     struct zcl_present_canvas *canvas,
     const struct science_code_growth_history *history, uint32_t text_scale)
@@ -203,6 +216,7 @@ static void npg_draw_grid(
     const struct zcl_present_color grid = {35, 54, 76};
     const struct zcl_present_color major = {57, 78, 103};
     const struct zcl_present_color secondary = {153, 174, 201};
+    const struct zcl_present_color month_text = {208, 222, 238};
     zcl_present_canvas_fill_rect(
         canvas, NPG_PLOT_LEFT, NPG_PLOT_TOP,
         NPG_PLOT_RIGHT - NPG_PLOT_LEFT + 1u,
@@ -229,12 +243,19 @@ static void npg_draw_grid(
             canvas, (int32_t)NPG_PLOT_LEFT - (int32_t)width - 11,
             y - (int32_t)(font / 2u), label, font, secondary);
     }
+    const uint32_t axis_font = npg_font(16u, text_scale);
+    char probe[6];
+    npg_short_date(history->days[history->day_count - 1u].date, probe);
+    uint32_t stride = zcl_present_canvas_axis_label_stride_v1(
+        (uint32_t)history->day_count, NPG_PLOT_RIGHT - NPG_PLOT_LEFT,
+        zcl_present_canvas_text_width_strong(probe, 5u, axis_font), 12u);
     const size_t last = history->day_count - 1u;
+    int32_t month_right = INT32_MIN;
     for (size_t i = 0; i < history->day_count; i++) {
         int32_t x = (int32_t)npg_x(i, history->day_count);
         bool month = i == 0 || strncmp(history->days[i - 1u].date,
                                        history->days[i].date, 7u) != 0;
-        bool week = (last - i) % 7u == 0;
+        bool week = (last - i) % stride == 0;
         zcl_present_canvas_line(canvas, x, NPG_PLOT_BOTTOM,
                                 x, NPG_PLOT_BOTTOM + 4, grid);
         if (month || week)
@@ -244,12 +265,34 @@ static void npg_draw_grid(
         if (week) {
             char date[6];
             npg_short_date(history->days[i].date, date);
-            uint32_t font = npg_font(16u, text_scale);
             uint32_t width = zcl_present_canvas_text_width_strong(
-                date, 5u, font);
-            npg_text_strong(canvas, x - (int32_t)(width / 2u),
-                            NPG_PLOT_BOTTOM + 12,
-                            date, font, secondary);
+                date, 5u, axis_font);
+            int32_t left = x - (int32_t)(width / 2u);
+            if (left < (int32_t)NPG_PLOT_LEFT) left = NPG_PLOT_LEFT;
+            if (left + (int32_t)width > (int32_t)NPG_PLOT_RIGHT)
+                left = (int32_t)NPG_PLOT_RIGHT - (int32_t)width;
+            npg_text_strong(canvas, left, NPG_PLOT_BOTTOM + 12,
+                            date, axis_font, secondary);
+        }
+        if (month) {
+            const char *name = npg_month_name(history->days[i].date);
+            if (name) {
+                char label[12];
+                (void)snprintf(label, sizeof(label), "%.3s %.4s",
+                               name, history->days[i].date);
+                uint32_t font = npg_font(14u, text_scale);
+                uint32_t width = zcl_present_canvas_text_width_strong(
+                    label, strlen(label), font);
+                int32_t left = x - (int32_t)(width / 2u);
+                if (left < (int32_t)NPG_PLOT_LEFT) left = NPG_PLOT_LEFT;
+                if (left + (int32_t)width > (int32_t)NPG_PLOT_RIGHT)
+                    left = (int32_t)NPG_PLOT_RIGHT - (int32_t)width;
+                if (left > month_right + 12) {
+                    npg_text_strong(canvas, left, NPG_PLOT_BOTTOM + 36,
+                                    label, font, month_text);
+                    month_right = left + (int32_t)width;
+                }
+            }
         }
     }
 }
@@ -321,7 +364,7 @@ static void npg_draw_controls(
     npg_text_strong(canvas, 48, 623, labels[text_scale],
                     npg_font(16u, text_scale), primary);
     npg_text_strong(canvas, 157, 623,
-             "- / +: TEXT  |  HOVER  |  WHEEL / LEFT RIGHT: DAY  |  "
+             "- / +: TEXT  |  HOVER  |  WHEEL / ARROWS: DAY  |  "
              "PGUP PGDN: WEEK  |  HOME END: RANGE",
              npg_font(16u, text_scale), secondary);
 }

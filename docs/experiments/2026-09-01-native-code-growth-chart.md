@@ -144,3 +144,29 @@ make -j"$(getconf _NPROCESSORS_ONLN)" z23
 build/bin/z23 app presentation code-growth --input='{"output":"text"}'
 build/bin/z23 app presentation code-growth
 ```
+
+## Dense-history label completion
+
+Date: 2026-09-02T17:55:00-04:00 / 2026-09-02T21:55:00Z
+
+The observed 85-day history keeps weekly `MM-DD` labels about 79 pixels
+apart, but the bounded 512-day capacity compresses a fixed weekly cadence to
+roughly 13-pixel spacing and smears the axis into unreadable overstrike. The
+time axis now derives its cadence from the pure
+`zcl_present_canvas_axis_label_stride_v1` reducer: weekly labels stay
+preferred, and the cadence widens through two-week, monthly, two-month,
+quarterly, half-year, and yearly strides before any consecutive pair of
+labels can collide. The reducer's cadence choices are pinned by three
+registered assertions in the `qr` group covering the weekly, widened, and
+yearly-fallback regimes.
+
+Each month boundary additionally carries a bright `MMM YYYY` label on its own
+row below the weekly dates, so monthly identity no longer depends on reading
+adjacent weekly dates. Month labels are clamped inside the plot and skipped
+deterministically when the previously drawn month label leaves less than a
+12-pixel gap; their boundary lines remain even when a dense history skips the
+text. Day stepping now answers Up and Down in addition to Left and Right,
+matching the wheel, and the footer control strip names all arrows.
+
+The Git-derived evidence path, its fresh-tree cross-check refusal, and the
+selection semantics proven above are unchanged.
