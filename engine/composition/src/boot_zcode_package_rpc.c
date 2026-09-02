@@ -1,5 +1,6 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
- * purpose: Route package pin plan/commit through the resident store owner. */
+ * purpose: Route package store writes (publish commit, pin, carrier export)
+ * through the resident store owner, and read its swarm state. */
 
 #include "config/boot_zcode_dht.h"
 
@@ -20,12 +21,37 @@
 #define SWARM_STATUS_MAX_ROOTS 32u
 #define SWARM_STATUS_MAX_PEERS 32u
 
+/* Same ceiling the package store gives its own root path. */
+#define PACKAGE_RPC_DATADIR_MAX 4400u
+
 static const struct json_value *package_rpc_input(
     const struct json_value *params)
 {
     const struct json_value *first =
         params && json_size(params) ? json_at(params, 0) : NULL;
     return first && first->type == JSON_OBJ ? first : NULL;
+}
+
+/* This node's own datadir, derived from the store root the resident handle
+ * was opened with ("<datadir>/zcode"). Derived rather than re-read from the
+ * configuration on purpose: a handler decides "resident or one-shot" by
+ * comparing its computed <datadir>/zcode against that same store root, so a
+ * datadir spelled any other way would silently pick the one-shot path this
+ * routing exists to avoid. False when no store is open. */
+static bool package_resident_datadir(char *out, size_t out_size)
+{
+    static const char suffix[] = "/zcode";
+    const size_t suffix_len = sizeof(suffix) - 1u;
+    const char *root = vcs_package_store_root_dir(vcs_package_store_global());
+    size_t len = root ? strlen(root) : 0;
+    if (len <= suffix_len || strcmp(root + len - suffix_len, suffix) != 0)
+        return false;
+    size_t keep = len - suffix_len;
+    if (keep >= out_size)
+        return false;
+    memcpy(out, root, keep);
+    out[keep] = '\0';
+    return true;
 }
 
 /* Recovery includes orphan GC, so one-shot clients must not open the live
@@ -139,6 +165,87 @@ static bool package_fastobj_export(const struct json_value *params,
         json_push_kv_str(result, "message", reply.error.message[0]
                                                ? reply.error.message
                                                : "resident export failed");
+        json_push_kv_bool(result, "retryable", reply.error.retryable);
+        json_push_kv_bool(result, "mutated", reply.error.mutated);
+    }
+    zcl_command_reply_free(&reply);
+    return true;
+}
+
+/* Publishing writes the manifest, chunks, signed transport carrier and
+ * release into the store, and both the package swarm and the DHT publish
+ * gate judge roots from the in-memory table of the resident's store object
+ * rather than from the bytes on disk. A one-shot CLI commit opens a second
+ * handle: the bytes land correctly and the daemon never hears of them, so
+ * it refuses as "not-tracked" the very carrier its own pointer record would
+ * advertise, until it is restarted. The commit executes here, on the store
+ * object the engine serves from. */
+static bool package_publish_commit(const struct json_value *params, bool help,
+                                   struct json_value *result)
+{
+    if (help) {
+        json_set_str(result,
+                     "zcode_package_publish_commit "
+                     "{release_hex,manifest_hex,recipe_hex,dir,day?}");
+        return true;
+    }
+    const struct json_value *input = package_rpc_input(params);
+    if (!input || json_get(input, "datadir")) {
+        json_set_object(result);
+        json_push_kv_bool(result, "ok", false);
+        json_push_kv_str(result, "code", "INVALID_INPUT");
+        json_push_kv_str(result, "phase", "validate");
+        json_push_kv_str(result, "message",
+                         "one input object without datadir is required "
+                         "(the resident datadir is implicit)");
+        return true;
+    }
+    char datadir[PACKAGE_RPC_DATADIR_MAX];
+    if (!package_resident_datadir(datadir, sizeof(datadir))) {
+        json_set_object(result);
+        json_push_kv_bool(result, "ok", false);
+        json_push_kv_str(result, "code", "NO_PACKAGE_STORE");
+        json_push_kv_str(result, "phase", "validate");
+        json_push_kv_str(result, "message",
+                         "package hosting is disabled on this node; publish "
+                         "against the datadir directly");
+        return true;
+    }
+
+    /* The caller's whole input plus the one key only this process can
+     * supply. Copying instead of rebuilding a key list keeps a future
+     * publish input from needing a second place to be updated. */
+    struct json_value forwarded;
+    json_init(&forwarded);
+    json_copy(&forwarded, input);
+    json_push_kv_str(&forwarded, "datadir", datadir);
+
+    struct zcl_command_request request = { .input = &forwarded };
+    struct zcl_command_reply reply;
+    zcl_command_reply_init(&reply, "zcl.zcode_publish_commit.v1");
+    zcl_native_handle_zcode_package_publish_commit(&request, &reply);
+    json_free(&forwarded);
+
+    bool passed = reply.status == ZCL_COMMAND_STATUS_PASSED &&
+                  reply.exit_code == ZCL_COMMAND_EXIT_OK;
+    json_set_object(result);
+    json_push_kv_bool(result, "ok", passed);
+    if (passed) {
+        json_push_kv(result, "data", &reply.data);
+        /* A redelivered release commits nothing new; the caller's own reply
+         * must say so exactly as a local commit would. */
+        json_push_kv_bool(result, "mutated", reply.error.mutated);
+    } else {
+        json_push_kv_str(result, "code",
+                         reply.error.code[0] ? reply.error.code
+                                             : "PUBLISH_COMMIT_REFUSED");
+        json_push_kv_str(result, "phase",
+                         reply.error.phase[0] ? reply.error.phase : "execute");
+        json_push_kv_str(result, "message",
+                         reply.error.message[0]
+                             ? reply.error.message
+                             : "resident publish commit failed");
+        json_push_kv_str(result, "evidence", reply.error.evidence);
         json_push_kv_bool(result, "retryable", reply.error.retryable);
         json_push_kv_bool(result, "mutated", reply.error.mutated);
     }
@@ -297,6 +404,7 @@ void boot_zcode_package_register_rpc(struct rpc_table *table)
         { "zcode", "zcode_package_pin", package_pin, true },
         { "zcode", "zcode_package_unpin", package_unpin, true },
         { "zcode", "zcode_package_fastobj_export", package_fastobj_export, true },
+        { "zcode", "zcode_package_publish_commit", package_publish_commit, true },
         { "zcode", "zcode_package_status", package_status, true },
         { "zcode", "zcode_swarm_status", swarm_status, true },
     };

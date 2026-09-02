@@ -61,12 +61,13 @@
  * classification, so a one-shot CLI process agrees with the node's own
  * store. No second package database exists.
  *
- * Commit opens a fresh store on the target datadir for the duration of the
- * command. The store's temp/fsync/atomic-rename discipline makes a crash
- * mid-commit resumable, never partially visible; running commit
- * CONCURRENTLY with a hosting node mid-put on the same datadir is an
- * operator-discipline boundary for v1 (the open-time recovery sweep is not
- * cross-process coordinated).
+ * Commit against a datadir NO node is hosting opens a fresh store for the
+ * duration of the command. The store's temp/fsync/atomic-rename discipline
+ * makes a crash mid-commit resumable, never partially visible. When a node
+ * IS hosting that datadir the commit is executed by the node instead
+ * (zc_commit_via_resident): one store owner, so the open-time recovery
+ * sweep never races the daemon mid-put, and the package the operator just
+ * published is immediately serveable and announceable without a restart.
  *
  * Acceptance is node-bound (chain id, t1/t3 reward address), so plan and
  * commit select CHAIN_MAIN when nothing selected a chain — the same
@@ -81,8 +82,11 @@
 #include "base/safe_alloc.h"
 #include "chain/chainparams.h"
 #include "config/runtime.h"
+#include "controllers/rpc_client.h"
+#include "controllers/rpc_params.h"
 #include "hotswap/hotswap_service.h"
 #include "json/json.h"
+#include "platform/path_compat.h"
 #include "services/zcode_package_view_service.h"
 #include "platform/time_compat.h"
 #include "vcs/package_attest.h"
@@ -102,8 +106,10 @@
 #include <dirent.h>
 #include <errno.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 #define ZC_LOG "zcode.command"
 
@@ -544,6 +550,117 @@ static void zc_store_release(struct vcs_package_store *store, bool owned)
         vcs_package_store_close(store);
 }
 
+/* A one-shot CLI commit opens a SECOND store handle over a live node's
+ * datadir. Every byte lands correctly and the daemon's in-memory package
+ * table never hears about it, so the node refuses its own freshly published
+ * carrier as "not-tracked" — the pointer publish gate's shape check — until
+ * it is restarted. Route the commit to the resident, by the same rule as
+ * `zcode package pin` and `zcode package fastobj export`: no store in this
+ * process, an implicit datadir (an explicit input datadir stays the
+ * deliberate offline/copy path), and a live cookie at that datadir. The
+ * resident contributes the datadir; `dir` is made absolute first, because
+ * the resident's working directory is not this process's and a relative
+ * chunk source would name a different tree there. The forwarded keys are
+ * exactly the leaf's declared input_keys minus datadir. A resident that
+ * answers nothing at all (a stale cookie left by a killed node) falls
+ * through to the one-shot path, which is the only path that can serve an
+ * offline datadir. */
+static bool zc_commit_via_resident(const struct zcl_command_request *request,
+                                   struct zcl_command_reply *reply)
+{
+    if (zc_input_str(request->input, "datadir") || vcs_package_store_global())
+        return false;
+    const char *dir = zc_input_str(request->input, "dir");
+    if (!dir || !dir[0])
+        return false;
+    const char *datadir = zcl_native_command_datadir();
+    if (!datadir || !datadir[0])
+        return false;
+    char cookie[4400];
+    int n = snprintf(cookie, sizeof(cookie), "%s/.cookie", datadir);
+    if (n <= 0 || (size_t)n >= sizeof(cookie) || access(cookie, F_OK) != 0)
+        return false;
+    char absolute[4400];
+    if (platform_path_is_absolute(dir)) {
+        n = snprintf(absolute, sizeof(absolute), "%s", dir);
+    } else {
+        char cwd[2048];
+        if (!getcwd(cwd, sizeof(cwd)))
+            return false;
+        n = snprintf(absolute, sizeof(absolute), "%s/%s", cwd, dir);
+    }
+    if (n <= 0 || (size_t)n >= sizeof(absolute))
+        return false;
+
+    struct json_value forwarded;
+    json_init(&forwarded);
+    json_set_object(&forwarded);
+    (void)json_push_kv_str(&forwarded, "dir", absolute);
+    static const char *const carried[] = { "release_hex", "manifest_hex",
+                                           "recipe_hex" };
+    for (size_t i = 0; i < sizeof(carried) / sizeof(carried[0]); i++) {
+        const char *value = zc_input_str(request->input, carried[i]);
+        if (value)
+            (void)json_push_kv_str(&forwarded, carried[i], value);
+    }
+    const struct json_value *day = json_get(request->input, "day");
+    if (day)
+        (void)json_push_kv_int(&forwarded, "day", json_get_int(day));
+
+    struct rpc_arg_builder args;
+    rpc_arg_builder_init(&args);
+    rpc_arg_builder_push_value(&args, &forwarded);
+    char *params = rpc_arg_builder_to_json(&args);
+    json_free(&forwarded);
+    zcl_native_bridge_ensure_rpc();
+    char *raw = params
+        ? node_rpc_call("zcode_package_publish_commit", params) : NULL;
+    free(params);
+    if (!raw)
+        return false;
+
+    struct json_value body;
+    json_init(&body);
+    bool parsed = json_read(&body, raw, strlen(raw)) && body.type == JSON_OBJ;
+    free(raw);
+    if (!parsed) {
+        json_free(&body);
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INTERNAL, "BAD_RPC_BODY",
+                               "serialize", false, false,
+                               "resident returned an unreadable publish "
+                               "commit response",
+                               "zcode.package.publish.commit");
+        return true;
+    }
+    const struct json_value *data = json_get(&body, "data");
+    if (json_get_bool_or(&body, "ok", false) && data &&
+        data->type == JSON_OBJ) {
+        json_free(&reply->data);
+        json_init(&reply->data);
+        json_copy(&reply->data, data);
+        reply->error.mutated = json_get_bool_or(&body, "mutated", true);
+        json_free(&body);
+        return true;
+    }
+    const char *code = json_get_str(json_get(&body, "code"));
+    const char *phase = json_get_str(json_get(&body, "phase"));
+    const char *message = json_get_str(json_get(&body, "message"));
+    const char *evidence = json_get_str(json_get(&body, "evidence"));
+    zcl_command_reply_fail(
+        reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
+        code && code[0] ? code : "PUBLISH_COMMIT_REFUSED",
+        phase && phase[0] ? phase : "execute",
+        json_get_bool_or(&body, "retryable", false),
+        json_get_bool_or(&body, "mutated", false),
+        message && message[0] ? message
+                              : "resident refused the publish commit",
+        evidence && evidence[0] ? evidence
+                                : "zcode.package.publish.commit");
+    json_free(&body);
+    return true;
+}
+
 void zcl_native_handle_zcode_package_publish_commit(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply)
@@ -568,6 +685,8 @@ void zcl_native_handle_zcode_package_publish_commit(
                                "zcode.package.publish.commit");
         return;
     }
+    if (zc_commit_via_resident(request, reply))
+        return;
     struct zc_candidate cand;
     struct vcs_package_publish_report report;
     vcs_package_publish_report_init(&report);

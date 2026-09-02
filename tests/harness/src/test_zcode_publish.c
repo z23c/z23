@@ -44,6 +44,17 @@
  *      INVALID_INPUT and omitting it was RECIPE_MISSING and the command was
  *      uncallable in every build. Direct-handler coverage cannot see that,
  *      by construction: this case exists to cross the layer that rejected it.
+ *  12. RESIDENT ROUTING: a commit whose datadir is implicit and carries a
+ *      live cookie is executed by the hosting node, not by a second store
+ *      handle in this process — the daemon's in-memory package table is
+ *      what its swarm serves from and what its pointer publish gate
+ *      classifies, so a locally-opened commit made the node refuse its own
+ *      carrier as "not-tracked" until restart. Pins that the resident is
+ *      asked, that its reply is the caller's reply, that the forwarded
+ *      chunk source is absolute (the resident's cwd is not ours) and names
+ *      no datadir, that an EXPLICIT datadir stays the one-shot offline
+ *      path, and that a cookie no node answers falls back rather than
+ *      failing the publish.
  *
  * Handlers run in-process on ./test-tmp datadirs; CHAIN_MAIN is pinned so
  * the chain-id and reward rules are deterministic. */
@@ -54,6 +65,7 @@
 
 #include "chain/chainparams.h"
 #include "config/command_catalog.h"
+#include "controllers/rpc_client.h"
 #include "core/uint256.h"
 #include "json/json.h"
 #include "kernel/command_registry.h"
@@ -2375,6 +2387,166 @@ static int t_registry_path(void)
     return failures;
 }
 
+/* ── 12. commit against a LIVE datadir is executed by the resident ─────
+ *
+ * A one-shot CLI commit that opens its own store handle writes every byte
+ * correctly and leaves the hosting daemon's in-memory package table with no
+ * record of the package: the node then refuses its own freshly published
+ * carrier as "not-tracked" when its pointer publish gate classifies it, and
+ * only a restart clears that. So the commit is routed to the resident
+ * whenever the datadir is implicit and carries a live cookie. Every
+ * decision that routing rests on is pinned here. */
+static char g_zp_rpc_method[128];
+static char *g_zp_rpc_params;
+static int g_zp_rpc_calls;
+static bool g_zp_rpc_answers;
+
+static char *zp_rpc_stub(const char *method, const char *params_json)
+{
+    g_zp_rpc_calls++;
+    snprintf(g_zp_rpc_method, sizeof(g_zp_rpc_method), "%s",
+             method ? method : "");
+    free(g_zp_rpc_params);
+    g_zp_rpc_params = params_json ? strdup(params_json) : NULL;
+    if (!g_zp_rpc_answers)
+        return NULL; /* a stale cookie: no resident answers at all */
+    /* Exactly the envelope boot_zcode_package_rpc.c returns, with a marker
+     * root no local commit could produce. */
+    return strdup(
+        "{\"ok\":true,\"mutated\":true,\"data\":{\"stage\":\"commit\","
+        "\"result\":\"committed\",\"package_root\":\"resident-answered\"}}");
+}
+
+static void zp_rpc_reset(bool answers)
+{
+    g_zp_rpc_calls = 0;
+    g_zp_rpc_method[0] = '\0';
+    free(g_zp_rpc_params);
+    g_zp_rpc_params = NULL;
+    g_zp_rpc_answers = answers;
+}
+
+static int t_commit_routes_to_resident(void)
+{
+    int failures = 0;
+    chain_params_select(CHAIN_MAIN);
+    char dd[256];
+    test_make_tmpdir(dd, sizeof(dd), "zcode_publish", "resident");
+    char pkgdir[512];
+    snprintf(pkgdir, sizeof(pkgdir), "%s/pkg", dd);
+    struct zp_pkg p;
+    ZP_CHECK("resident: package fixture builds", zp_make_package(&p, pkgdir));
+    ZP_CHECK("resident: recipe fixture builds", zp_use_recipe(&p.manifest));
+    struct vcs_package_release r;
+    ZP_CHECK("resident: release signs",
+             zp_release(&r, 0x2a, 1u, "rhett/resident-route", "MIT", p.root));
+    char *release_hex = zp_release_hex(&r, NULL, NULL);
+    char *manifest_hex = zp_hex(p.wire, p.wire_len);
+
+    /* A hosting node leaves a cookie in its datadir; that plus an implicit
+     * datadir is the whole "someone else owns this store" test. */
+    char cookie[512];
+    snprintf(cookie, sizeof(cookie), "%s/.cookie", dd);
+    FILE *cf = fopen(cookie, "w");
+    if (cf) {
+        fputs("__cookie__:test\n", cf);
+        fclose(cf);
+    }
+    char manifest_path[512];
+    snprintf(manifest_path, sizeof(manifest_path), "%s/zcode/manifests/%s",
+             dd, p.root_hex);
+    struct stat st;
+    struct zp_cmd c;
+
+    /* (a) implicit datadir + live cookie: the resident executes it. Its
+     *     reply is the caller's reply, and this process wrote no store. */
+    zp_rpc_reset(true);
+    node_rpc_client_set_test_hook(zp_rpc_stub);
+    zcl_native_bridge_bind_rpc(dd, 0);
+    zp_cmd_init(&c);
+    (void)json_push_kv_str(&c.input, "release_hex", release_hex);
+    (void)json_push_kv_str(&c.input, "manifest_hex", manifest_hex);
+    if (g_zp_recipe_hex)
+        (void)json_push_kv_str(&c.input, "recipe_hex", g_zp_recipe_hex);
+    (void)json_push_kv_str(&c.input, "dir", pkgdir);
+    zcl_native_handle_zcode_package_publish_commit(&c.request, &c.reply);
+    ZP_CHECK("resident: the resident is asked to commit",
+             g_zp_rpc_calls == 1 &&
+             strcmp(g_zp_rpc_method, "zcode_package_publish_commit") == 0);
+    ZP_CHECK("resident: its reply is the caller's reply",
+             c.reply.status == ZCL_COMMAND_STATUS_PASSED &&
+             json_get_str(json_get(&c.reply.data, "package_root")) &&
+             strcmp(json_get_str(json_get(&c.reply.data, "package_root")),
+                    "resident-answered") == 0 &&
+             c.reply.error.mutated);
+    ZP_CHECK("resident: this process opened no second store",
+             stat(manifest_path, &st) != 0);
+    /* The resident's working directory is not this process's, so the chunk
+     * source must travel absolute; datadir is the resident's to supply. */
+    ZP_CHECK("resident: the forwarded chunk source is absolute",
+             g_zp_rpc_params && strstr(g_zp_rpc_params, "\"dir\":\"/"));
+    ZP_CHECK("resident: the forwarded input names no datadir",
+             g_zp_rpc_params && !strstr(g_zp_rpc_params, "datadir"));
+    zp_cmd_free(&c);
+
+    /* (b) an EXPLICIT datadir is the deliberate offline/copy path and is
+     *     never routed, cookie or no cookie. */
+    zp_rpc_reset(true);
+    zp_publish_input(&c, dd, release_hex, manifest_hex, pkgdir);
+    zcl_native_handle_zcode_package_publish_commit(&c.request, &c.reply);
+    ZP_CHECK("resident: an explicit datadir stays the one-shot path",
+             g_zp_rpc_calls == 0 &&
+             c.reply.status == ZCL_COMMAND_STATUS_PASSED &&
+             stat(manifest_path, &st) == 0);
+    zp_cmd_free(&c);
+
+    /* (c) a cookie a killed node left behind: nothing answers, and the
+     *     publish still lands locally rather than failing the operator. */
+    test_rm_rf_recursive(dd);
+    test_make_tmpdir(dd, sizeof(dd), "zcode_publish", "resident");
+    snprintf(pkgdir, sizeof(pkgdir), "%s/pkg", dd);
+    zp_pkg_free(&p);
+    ZP_CHECK("resident: fixture rebuilds for the stale-cookie case",
+             zp_make_package(&p, pkgdir) && zp_use_recipe(&p.manifest));
+    snprintf(cookie, sizeof(cookie), "%s/.cookie", dd);
+    cf = fopen(cookie, "w");
+    if (cf) {
+        fputs("__cookie__:test\n", cf);
+        fclose(cf);
+    }
+    snprintf(manifest_path, sizeof(manifest_path), "%s/zcode/manifests/%s",
+             dd, p.root_hex);
+    free(release_hex);
+    free(manifest_hex);
+    ZP_CHECK("resident: stale-cookie release signs",
+             zp_release(&r, 0x2b, 1u, "rhett/stale-cookie", "MIT", p.root));
+    release_hex = zp_release_hex(&r, NULL, NULL);
+    manifest_hex = zp_hex(p.wire, p.wire_len);
+    zp_rpc_reset(false);
+    zcl_native_bridge_bind_rpc(dd, 0);
+    zp_cmd_init(&c);
+    (void)json_push_kv_str(&c.input, "release_hex", release_hex);
+    (void)json_push_kv_str(&c.input, "manifest_hex", manifest_hex);
+    if (g_zp_recipe_hex)
+        (void)json_push_kv_str(&c.input, "recipe_hex", g_zp_recipe_hex);
+    (void)json_push_kv_str(&c.input, "dir", pkgdir);
+    zcl_native_handle_zcode_package_publish_commit(&c.request, &c.reply);
+    ZP_CHECK("resident: a silent resident falls back to the one-shot commit",
+             g_zp_rpc_calls == 1 &&
+             c.reply.status == ZCL_COMMAND_STATUS_PASSED &&
+             stat(manifest_path, &st) == 0);
+    zp_cmd_free(&c);
+
+    node_rpc_client_set_test_hook(NULL);
+    zcl_native_bridge_bind_rpc("", 0);
+    zp_rpc_reset(false);
+    free(release_hex);
+    free(manifest_hex);
+    zp_pkg_free(&p);
+    test_rm_rf_recursive(dd);
+    return failures;
+}
+
 int test_zcode_publish(void)
 {
     printf("\n=== zcode_publish: publication + local search ===\n");
@@ -2391,6 +2563,7 @@ int test_zcode_publish(void)
     failures += t_show();
     failures += t_index_rebuild();
     failures += t_registry_path();
+    failures += t_commit_routes_to_resident();
     printf("=== zcode_publish complete: %d failure(s) ===\n", failures);
     return failures;
 }

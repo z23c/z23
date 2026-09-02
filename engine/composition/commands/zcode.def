@@ -2450,10 +2450,11 @@ ZCL_COMMAND_READY_COMMAND(
     "naming the exact rule (publish-frequency-limit), and a successful "
     "fresh publish records the publication event in the local service "
     "book (the optional `day` input pins the window for deterministic "
-    "testing; host clock when omitted). v1 operator boundary: "
-    "do not run concurrently with a hosting node's own puts on the same "
-    "datadir (the open-time recovery sweep is not cross-process "
-    "coordinated).", 0,
+    "testing; host clock when omitted). When a node is hosting the "
+    "implicit datadir, that node executes the commit, so one process owns "
+    "the store and the published package is serveable and announceable "
+    "without a restart; an explicit datadir always stays the offline "
+    "one-shot path and must not name a hosting node's datadir.", 0,
     "zcode,package,publish,commit,persist,release,recipe,store",
     "zcl.zcode_publish_commit.input.v1", "zcl.zcode_publish_commit.v1",
     "release_hex,manifest_hex,recipe_hex,dir,day,datadir", "",
