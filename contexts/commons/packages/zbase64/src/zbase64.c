@@ -2,9 +2,9 @@
  * Purpose: RFC 4648 Base64 (see the header for the strictness contract). */
 #include "zbase64/zbase64.h"
 
-static const char k_std[64] =
+static const char k_std[] =
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-static const char k_url[64] =
+static const char k_url[] =
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 
 size_t zbase64_encode_len(size_t len) {

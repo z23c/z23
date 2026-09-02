@@ -9,7 +9,7 @@
   "dependencies": [
     {
       "name": "zbase64/zbase64",
-      "root": "f8a4f3b486580a261634b2d9ad94475a13af5885c7454fa4ad26be31b24279eb",
+      "root": "ed5e9c0d6a9a32f80610254c61b29d0852c4f69e07aeaff6dfee6ef7e6bc2429",
       "semver": "0.1.0"
     }
   ],
