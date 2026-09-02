@@ -12,6 +12,7 @@
 #include "codeindex/codeindex_merkle.h"
 
 #include "base/hex.h"
+#include "base/safe_alloc.h"
 #include "util/log_macros.h"
 
 #include <stdbool.h>
@@ -196,33 +197,46 @@ static bool fetch_local_is_fresh(const char *root, bool *fresh)
 static bool fetch_copy_image(int image_fd, int stage_fd,
                              struct codeindex_fetch_report *report)
 {
+    enum { COPY_CHUNK_BYTES = 1024 * 1024 };
     struct stat before;
     if (fstat(image_fd, &before) != 0 || !S_ISREG(before.st_mode) ||
         before.st_size <= 0)
         return fetch_refuse(report, "FETCH_STAGE",
                             "could not inspect the image for copying", "");
-    unsigned char buf[1024 * 1024];
+    unsigned char *buf = zcl_malloc(COPY_CHUNK_BYTES,
+                                    "codeindex_fetch_copy");
+    if (!buf)
+        return fetch_refuse(report, "FETCH_STAGE",
+                            "could not allocate the image copy buffer", "");
+    bool ok = true;
     off_t offset = 0;
     while (offset < before.st_size) {
-        size_t want = (before.st_size - offset) < (off_t)sizeof(buf)
-            ? (size_t)(before.st_size - offset) : sizeof(buf);
+        size_t want = (before.st_size - offset) < (off_t)COPY_CHUNK_BYTES
+            ? (size_t)(before.st_size - offset) : COPY_CHUNK_BYTES;
         ssize_t got = pread(image_fd, buf, want, offset);
         if (got < 0 && errno == EINTR) continue;
-        if (got <= 0)
-            return fetch_refuse(report, "FETCH_STAGE",
-                                "could not read the image for copying", "");
+        if (got <= 0) {
+            ok = fetch_refuse(report, "FETCH_STAGE",
+                              "could not read the image for copying", "");
+            break;
+        }
         size_t done = 0;
         while (done < (size_t)got) {
             ssize_t put = pwrite(stage_fd, buf + done, (size_t)got - done,
                                  offset + (off_t)done);
             if (put < 0 && errno == EINTR) continue;
-            if (put <= 0)
-                return fetch_refuse(report, "FETCH_STAGE",
-                                    "could not write the staging store", "");
+            if (put <= 0) {
+                ok = fetch_refuse(report, "FETCH_STAGE",
+                                  "could not write the staging store", "");
+                break;
+            }
             done += (size_t)put;
         }
+        if (!ok) break;
         offset += got;
     }
+    free(buf);
+    if (!ok) return false;
     if (ftruncate(stage_fd, before.st_size) != 0)
         return fetch_refuse(report, "FETCH_STAGE",
                             "could not size the staging store", "");

@@ -18,6 +18,10 @@
  *      FETCH_FRESH and the store is not overwritten.
  *   4. bogus from — a missing path, an empty directory, and a non-store file
  *      all fail closed.
+ *   5. bounded-stack execution — both the fetch copy and first incremental
+ *      clone after adoption complete on a 768 KiB pthread stack.
+ *   6. copy-buffer OOM — fetch installs nothing; on the non-Linux buffered
+ *      clone path the previous canonical generation remains unchanged.
  *
  * All scratch work happens under ./test-tmp/ (project no-/tmp convention). */
 
@@ -26,14 +30,17 @@
 #include "command/native_command.h"
 #include "kernel/command_registry.h"
 #include "codeindex/codeindex.h"
+#include "base/safe_alloc.h"
 #include "json/json.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
 
 #if !defined(_WIN32)
+
+#include <pthread.h>
+#include <sys/stat.h>
 
 #define FETCH_FIX "test-tmp/ci_fetch"
 #define FETCH_A   FETCH_FIX "/tree_a"
@@ -116,6 +123,62 @@ static bool fetch_store_identity(const char *root, dev_t *dev, ino_t *ino)
     return true;
 }
 
+enum {
+    /* Deliberately below either one-MiB copy frame this test guards against.
+     * Code-index work runs from bounded command/worker threads on macOS, so
+     * copying a generation must not require a caller with a large stack. */
+    FETCH_TEST_STACK_BYTES = 768u * 1024u,
+};
+
+struct fetch_thread_result {
+    bool installed;
+    bool adopted;
+    bool opened;
+};
+
+static void *fetch_on_bounded_stack(void *arg)
+{
+    struct fetch_thread_result *result = arg;
+    struct zcl_command_reply reply;
+    fetch_call(FETCH_B, FETCH_A, &reply);
+    result->installed = reply.status != ZCL_COMMAND_STATUS_FAILED &&
+        json_get_bool(json_get(&reply.data, "installed"));
+    result->adopted = reply.status != ZCL_COMMAND_STATUS_FAILED &&
+        json_get_bool(json_get(&reply.data, "adopted"));
+    zcl_command_reply_free(&reply);
+    return NULL;
+}
+
+static void *open_on_bounded_stack(void *arg)
+{
+    struct fetch_thread_result *result = arg;
+    struct codeindex *index = codeindex_open(FETCH_B);
+    if (!index) return NULL;
+    struct ci_symbol symbol;
+    bool found = false;
+    result->opened = codeindex_symbol(index, "fetch_alpha", &symbol, &found) &&
+        found;
+    codeindex_close(index);
+    return NULL;
+}
+
+static bool fetch_run_bounded(void *(*entry)(void *),
+                              struct fetch_thread_result *result)
+{
+    pthread_attr_t attr;
+    pthread_t thread;
+    if (pthread_attr_init(&attr) != 0) return false;
+    if (pthread_attr_setstacksize(&attr, FETCH_TEST_STACK_BYTES) != 0) {
+        (void)pthread_attr_destroy(&attr);
+        return false;
+    }
+    int create_rc = pthread_create(&thread, &attr, entry, result);
+    int destroy_rc = pthread_attr_destroy(&attr);
+    if (create_rc != 0) return false;
+    int join_rc = pthread_join(thread, NULL);
+    return destroy_rc == 0 && join_rc == 0;
+}
+
 /* ── 1: the happy path, all three from-spellings ── */
 static int test_fetch_adopts(void)
 {
@@ -196,6 +259,83 @@ static int test_fetch_from_spellings(void)
     } _test_next:;
     return failures;
 }
+
+static int test_fetch_copy_allocation_failure(void)
+{
+    int failures = 0;
+    TEST("code_fetch: copy-buffer allocation failure installs nothing") {
+        char store[4096];
+        (void)snprintf(store, sizeof(store), "%s/.codeindex", FETCH_B);
+        ASSERT(test_rm_rf_recursive(store) == 0);
+
+        zcl_alloc_fault_fail_next("codeindex_fetch_copy");
+        struct zcl_command_reply reply;
+        fetch_call(FETCH_B, FETCH_A, &reply);
+        zcl_alloc_fault_clear();
+        ASSERT(reply.status == ZCL_COMMAND_STATUS_FAILED);
+        ASSERT_STR_EQ(reply.error.code, "FETCH_STAGE");
+        zcl_command_reply_free(&reply);
+        ASSERT(!fetch_store_identity(FETCH_B, &(dev_t){0}, &(ino_t){0}));
+        PASS();
+    } _test_next:;
+    zcl_alloc_fault_clear();
+    return failures;
+}
+
+static int test_fetch_bounded_worker_stack(void)
+{
+    int failures = 0;
+    TEST("code_fetch: fetch and incremental adoption fit a bounded worker stack") {
+        char store[4096];
+        (void)snprintf(store, sizeof(store), "%s/.codeindex", FETCH_B);
+        ASSERT(test_rm_rf_recursive(store) == 0);
+
+        struct fetch_thread_result result = {0};
+        ASSERT(fetch_run_bounded(fetch_on_bounded_stack, &result));
+        ASSERT(result.installed && result.adopted);
+
+        /* The first edit after adoption takes the incremental clone path,
+         * which must obey the same stack-headroom contract. */
+        ASSERT(fetch_mk_write(FETCH_B, "src/fetch_alpha.c",
+            "/* src/fetch_alpha.c — bounded-stack edit. */\n"
+            "int fetch_alpha(void)\n{\n    return 2;\n}\n"));
+        memset(&result, 0, sizeof(result));
+        ASSERT(fetch_run_bounded(open_on_bounded_stack, &result));
+        ASSERT(result.opened);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+#if !defined(__linux__)
+static int test_incremental_copy_allocation_failure(void)
+{
+    int failures = 0;
+    TEST("code_fetch: incremental copy-buffer OOM preserves the generation") {
+        dev_t dev_before = 0, dev_after = 0;
+        ino_t ino_before = 0, ino_after = 0;
+        ASSERT(fetch_store_identity(FETCH_B, &dev_before, &ino_before));
+        ASSERT(fetch_mk_write(FETCH_B, "src/fetch_alpha.c",
+            "/* src/fetch_alpha.c — allocation-failure edit. */\n"
+            "int fetch_alpha(void)\n{\n    return 3;\n}\n"));
+
+        zcl_alloc_fault_fail_next("codeindex_store_copy");
+        struct codeindex *index = codeindex_open(FETCH_B);
+        zcl_alloc_fault_clear();
+        ASSERT(index == NULL);
+        ASSERT(fetch_store_identity(FETCH_B, &dev_after, &ino_after));
+        ASSERT(dev_before == dev_after && ino_before == ino_after);
+
+        /* The failed stage is disposable; an ordinary retry must rebuild. */
+        index = codeindex_open(FETCH_B);
+        ASSERT(index != NULL);
+        codeindex_close(index);
+        PASS();
+    } _test_next:;
+    zcl_alloc_fault_clear();
+    return failures;
+}
+#endif
 
 /* ── 3: a fresh local store is never overwritten ── */
 static int test_fetch_refuses_fresh(void)
@@ -293,6 +433,11 @@ int test_code_fetch(void)
     }
     failures += test_fetch_adopts();
     failures += test_fetch_from_spellings();
+    failures += test_fetch_copy_allocation_failure();
+    failures += test_fetch_bounded_worker_stack();
+#if !defined(__linux__)
+    failures += test_incremental_copy_allocation_failure();
+#endif
     failures += test_fetch_refuses_fresh();
     failures += test_fetch_refuses_tampered();
     failures += test_fetch_refuses_bogus_from();

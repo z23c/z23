@@ -347,28 +347,46 @@ bool ci_store_copy_image_fd(struct ci_store *s, int fd)
     if (output_offset != 0)
         LOG_FAIL("codeindex", "partial kernel generation clone");
 #endif
-    unsigned char buf[1024 * 1024];
+    enum { COPY_CHUNK_BYTES = 1024 * 1024 };
+    unsigned char *buf = zcl_malloc(COPY_CHUNK_BYTES,
+                                    "codeindex_store_copy");
+    if (!buf)
+        LOG_FAIL("codeindex", "allocate generation clone buffer");
+    const char *failure = NULL;
+    int saved = 0;
     off_t offset = 0;
     while (offset < st.st_size) {
-        size_t want = (st.st_size - offset) < (off_t)sizeof(buf)
-            ? (size_t)(st.st_size - offset) : sizeof(buf);
+        size_t want = (st.st_size - offset) < (off_t)COPY_CHUNK_BYTES
+            ? (size_t)(st.st_size - offset) : COPY_CHUNK_BYTES;
         ssize_t got = pread(s->bound_fd, buf, want, offset);
         if (got < 0 && errno == EINTR) continue;
-        if (got <= 0)
-            LOG_FAIL("codeindex", "read source generation for clone");
+        if (got <= 0) {
+            failure = "read source generation for clone";
+            saved = got < 0 ? errno : EIO;
+            break;
+        }
         size_t done = 0;
         while (done < (size_t)got) {
             ssize_t put = pwrite(fd, buf + done, (size_t)got - done,
                                  offset + (off_t)done);
             if (put < 0 && errno == EINTR) continue;
-            if (put <= 0)
-                LOG_FAIL("codeindex", "write staging generation clone");
+            if (put <= 0) {
+                failure = "write staging generation clone";
+                saved = put < 0 ? errno : EIO;
+                break;
+            }
             done += (size_t)put;
         }
+        if (failure) break;
         offset += got;
     }
-    if (ftruncate(fd, st.st_size) != 0)
-        LOG_FAIL("codeindex", "truncate staging generation clone");
+    if (!failure && ftruncate(fd, st.st_size) != 0) {
+        failure = "truncate staging generation clone";
+        saved = errno;
+    }
+    free(buf);
+    if (failure)
+        LOG_FAIL("codeindex", "%s: %s", failure, strerror(saved));
     return true;
 #endif
 }
