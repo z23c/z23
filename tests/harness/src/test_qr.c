@@ -393,6 +393,33 @@ int test_qr(void)
              !zcl_present_window_hover_at_v1(
                  &hover, 720, 720, 1000, 720, 100, 300,
                  &hover_index));
+    QR_CHECK("chart keys step and clamp exact day selection",
+             zcl_present_window_hover_step_v1(
+                 1u, 3u, -7, &hover_index) && hover_index == 0u &&
+             zcl_present_window_hover_step_v1(
+                 hover_index, 3u, 7, &hover_index) && hover_index == 2u &&
+             zcl_present_window_hover_step_v1(
+                 hover_index, 3u, 1, &hover_index) && hover_index == 2u);
+    int32_t render_delta = 0;
+    QR_CHECK("chart text-size keys map to bounded rendering steps",
+             zcl_present_window_hover_render_delta_v1(
+                 '+', &render_delta) && render_delta == 1 &&
+             zcl_present_window_hover_render_delta_v1(
+                 '=', &render_delta) && render_delta == 1 &&
+             zcl_present_window_hover_render_delta_v1(
+                 '-', &render_delta) && render_delta == -1 &&
+             !zcl_present_window_hover_render_delta_v1(
+                 'x', &render_delta));
+    const struct zcl_present_window_pages_v1 hover_pages = {
+        .struct_size = sizeof(hover_pages),
+        .abi_version = ZCL_PRESENT_ABI_V1,
+        .pages = &present,
+        .page_count = 1u,
+    };
+    QR_CHECK("chart rendering page starts inside its exact bound",
+             !zcl_present_window_run_pages_hover_v1(
+                 &hover_pages, &hover, 1u, why, sizeof(why)) &&
+             strstr(why, "initial page") != NULL);
     struct zcl_present_model_v1 rejected_qr;
     QR_CHECK("shared QR model rejects an empty payload",
              !zcl_present_model_qr_from_payload_v1(

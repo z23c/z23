@@ -103,3 +103,44 @@ uncommitted source made its exact receipt unavailable. Its status was already
 identity. Terminating that exact obsolete process group released the lock, and
 the queued focused presentation group then passed. Cooperative cancellation
 of obsolete proof work remains a measured orientation/build-loop improvement.
+
+## Readability and navigation acceptance
+
+Date: 2026-09-02T12:40:58-04:00 / 2026-09-02T16:40:58Z
+
+Live review on the 1280 by 800 laptop display rejected the original three-date
+axis and 14 to 17 pixel supporting text as insufficiently legible. The revised
+1120 by 680 instrument makes total C23 lines the primary series, retains
+non-test and test lines as directly labeled supporting series, and adds daily
+ticks, weekly grid lines and labels, stronger month boundaries, alternating
+horizontal reading bands, and a pinned exact-day inspector above the plot.
+The inspector no longer moves over the data.
+
+The time axis now contains every UTC day in the observed range. A day without
+a maintained-source commit carries the prior exact totals with zero commits,
+additions, and deletions. The parser fixture proves that behavior across a
+two-day commit gap; this prevents equal x spacing from implying that an
+inactive calendar day did not exist.
+
+The chart opens on the latest day. Pointer hover selects the nearest exact day;
+the wheel and Left/Right step one day; Page Up/Down step seven days; and
+Home/End select the bounds. Axis values, weekly dates, series labels, metrics,
+and the navigation strip use the embedded Inter SemiBold face. The selected-day
+inspector uses 24-pixel and 19-pixel SemiBold text.
+
+Three complete native renderings provide bounded text-size adjustment without
+recollecting evidence or reopening the command. The default is Medium; Minus
+and Plus select Small, Medium, or Large while preserving the selected
+day. The active scale and controls remain visible in the footer. The renderings
+are fixed RGB8 bitmaps under the same display-only authority as the original
+chart.
+
+Focused acceptance remains:
+
+```bash
+make -j"$(getconf _NPROCESSORS_ONLN)" t-fast ONLY=code_growth
+make -j"$(getconf _NPROCESSORS_ONLN)" t-fast ONLY=qr
+make -j"$(getconf _NPROCESSORS_ONLN)" z23
+build/bin/z23 app presentation code-growth --input='{"output":"text"}'
+build/bin/z23 app presentation code-growth
+```

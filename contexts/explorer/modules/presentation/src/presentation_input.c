@@ -104,6 +104,36 @@ bool zcl_present_window_hover_at_v1(
     return true;
 }
 
+bool zcl_present_window_hover_step_v1(
+    uint32_t current_item, uint32_t item_count, int32_t delta,
+    uint32_t *next_item)
+{
+    if (!next_item || item_count == 0 ||
+        item_count > ZCL_PRESENT_WINDOW_HOVER_ITEMS_MAX ||
+        current_item >= item_count)
+        return false;
+    int64_t wanted = (int64_t)current_item + delta;
+    if (wanted < 0) wanted = 0;
+    if (wanted >= (int64_t)item_count) wanted = (int64_t)item_count - 1;
+    *next_item = (uint32_t)wanted;
+    return true;
+}
+
+bool zcl_present_window_hover_render_delta_v1(
+    uint32_t key_symbol, int32_t *delta)
+{
+    if (!delta) return false;
+    if (key_symbol == '+' || key_symbol == '=') {
+        *delta = 1;
+        return true;
+    }
+    if (key_symbol == '-' || key_symbol == '_') {
+        *delta = -1;
+        return true;
+    }
+    return false;
+}
+
 bool zcl_present_window_page_step_v1(
     uint32_t current_page, uint32_t page_count, int32_t delta,
     uint32_t *next_page)

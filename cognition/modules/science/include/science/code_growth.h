@@ -13,6 +13,7 @@
 struct science_code_growth_day {
     char date[11];
     char head_commit[41];
+    uint64_t epoch_day;
     uint32_t commits;
     uint64_t non_test_added;
     uint64_t non_test_deleted;
@@ -31,9 +32,10 @@ struct science_code_growth_history {
 
 /* Parse the machine-only stream emitted by science_code_growth_collect().
  * Commit headers are `@@<40-hex-sha>\t<unix-seconds>` and following numstat
- * rows are `<added>\t<deleted>\t<path>`. Days are UTC. Current maintained
- * source-root and prune rules decide scope; test paths use the capability
- * inventory's classification contract. */
+ * rows are `<added>\t<deleted>\t<path>`. Days are UTC, including explicit
+ * zero-change days between commits. Current maintained source-root and prune
+ * rules decide scope; test paths use the capability inventory's
+ * classification contract. */
 bool science_code_growth_parse(const char *stream, size_t stream_len,
                                struct science_code_growth_history *out,
                                char *error, size_t error_cap);

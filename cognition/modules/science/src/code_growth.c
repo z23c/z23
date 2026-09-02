@@ -104,10 +104,8 @@ static struct science_code_growth_day *growth_day(
     struct science_code_growth_history *history, uint64_t epoch_day,
     const char sha[40])
 {
-    char date[11];
-    if (!growth_day_text(epoch_day, date)) return NULL;
     for (size_t i = 0; i < history->day_count; i++) {
-        if (strcmp(history->days[i].date, date) != 0) continue;
+        if (history->days[i].epoch_day != epoch_day) continue;
         memcpy(history->days[i].head_commit, sha, 40u);
         history->days[i].head_commit[40] = '\0';
         history->days[i].commits++;
@@ -115,17 +113,48 @@ static struct science_code_growth_day *growth_day(
     }
     if (history->day_count >= SCIENCE_CODE_GROWTH_MAX_DAYS) return NULL;
     struct science_code_growth_day *day = &history->days[history->day_count++];
-    (void)snprintf(day->date, sizeof(day->date), "%s", date);
+    if (!growth_day_text(epoch_day, day->date)) return NULL;
     memcpy(day->head_commit, sha, 40u);
     day->head_commit[40] = '\0';
+    day->epoch_day = epoch_day;
     day->commits = 1u;
     return day;
 }
 
 static int growth_day_compare(const void *left, const void *right)
 {
-    return strcmp(((const struct science_code_growth_day *)left)->date,
-                  ((const struct science_code_growth_day *)right)->date);
+    const struct science_code_growth_day *a = left;
+    const struct science_code_growth_day *b = right;
+    return a->epoch_day < b->epoch_day ? -1 : a->epoch_day > b->epoch_day;
+}
+
+static bool growth_fill_inactive_days(
+    struct science_code_growth_history *history)
+{
+    for (size_t i = 1; i < history->day_count; i++) {
+        const uint64_t previous = history->days[i - 1u].epoch_day;
+        const uint64_t current = history->days[i].epoch_day;
+        if (current <= previous) return false;
+        const uint64_t gap = current - previous - 1u;
+        if (gap == 0) continue;
+        if (gap > SCIENCE_CODE_GROWTH_MAX_DAYS - history->day_count)
+            return false;
+        char prior_commit[41];
+        memcpy(prior_commit, history->days[i - 1u].head_commit,
+               sizeof(prior_commit));
+        memmove(&history->days[i + (size_t)gap], &history->days[i],
+                (history->day_count - i) * sizeof(history->days[0]));
+        for (size_t offset = 0; offset < (size_t)gap; offset++) {
+            struct science_code_growth_day *day = &history->days[i + offset];
+            memset(day, 0, sizeof(*day));
+            day->epoch_day = previous + 1u + offset;
+            if (!growth_day_text(day->epoch_day, day->date)) return false;
+            memcpy(day->head_commit, prior_commit, sizeof(day->head_commit));
+        }
+        history->day_count += (size_t)gap;
+        i += (size_t)gap;
+    }
+    return true;
 }
 
 bool science_code_growth_parse(const char *stream, size_t stream_len,
@@ -198,6 +227,9 @@ bool science_code_growth_parse(const char *stream, size_t stream_len,
         return growth_error(error, error_cap,
                             "Git history contains no maintained C23 changes");
     qsort(out->days, out->day_count, sizeof(out->days[0]), growth_day_compare);
+    if (!growth_fill_inactive_days(out))
+        return growth_error(error, error_cap,
+                            "daily history gaps exceed bounded capacity");
     uint64_t non_test = 0, test = 0;
     for (size_t i = 0; i < out->day_count; i++) {
         struct science_code_growth_day *day = &out->days[i];

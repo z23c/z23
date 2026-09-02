@@ -124,9 +124,11 @@ struct zcl_present_window_hover_item_v1 {
     const char *text;
 };
 
-/* Display-only hover columns over a source-space plot rectangle. Items must
- * be ordered by x. The backend selects the nearest day column, draws a local
- * crosshair and tooltip, and returns no authority-bearing event. */
+/* Display-only navigation columns over a source-space plot rectangle. Items
+ * must be ordered by x. The backend selects the nearest pointer column;
+ * wheel/arrows step one item, Page Up/Down step seven, and Home/End select the
+ * bounds. The crosshair and inspector stay visible without returning an
+ * authority-bearing event. */
 struct zcl_present_window_hover_v1 {
     uint32_t struct_size;
     uint32_t abi_version;
@@ -156,12 +158,20 @@ bool zcl_present_window_run_v1(
     const struct zcl_present_window_v1 *request,
     char *error, size_t error_cap);
 
-/* Native bitmap window with exact source-space hover columns. Escape/Q and
- * window-close dismiss it; moving outside the plot clears the tooltip. */
+/* Native bitmap window with exact source-space navigation columns. Escape/Q
+ * and window-close dismiss it. */
 bool zcl_present_window_run_hover_v1(
     const struct zcl_present_window_v1 *request,
     const struct zcl_present_window_hover_v1 *hover,
     char *error, size_t error_cap);
+
+/* Same display-only navigation over a bounded set of alternate renderings.
+ * Plus/Equals selects the next rendering and Minus selects the previous one;
+ * the exact selected item remains stable across rendering changes. */
+bool zcl_present_window_run_pages_hover_v1(
+    const struct zcl_present_window_pages_v1 *pages,
+    const struct zcl_present_window_hover_v1 *hovers,
+    uint32_t initial_page, char *error, size_t error_cap);
 
 /* Interactive host variant. Tab/Shift-Tab move one visibly outlined action;
  * Enter/Space activate it, and number keys 1..action_count activate the exact
@@ -275,6 +285,15 @@ bool zcl_present_window_hover_at_v1(
     uint32_t source_width, uint32_t source_height,
     int32_t target_width, int32_t target_height,
     int32_t mouse_x, int32_t mouse_y, uint32_t *item_index);
+
+/* Pure clamped navigation reducer shared by the backend and input tests. */
+bool zcl_present_window_hover_step_v1(
+    uint32_t current_item, uint32_t item_count, int32_t delta,
+    uint32_t *next_item);
+
+/* Pure Basic-Latin mapping for alternate hover-rendering controls. */
+bool zcl_present_window_hover_render_delta_v1(
+    uint32_t key_symbol, int32_t *delta);
 
 /* Stable diagnostic labels; neither string implies graphics acceleration. */
 const char *zcl_present_backend_name(void);
