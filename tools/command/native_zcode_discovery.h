@@ -27,8 +27,10 @@ bool zcl_native_zcode_records_discover(
 /* Read-only local projections used by composed readiness/status leaves. The
  * status document is intentionally internal: callers must select only fields
  * appropriate for their public surface. Neither helper starts a lookup or
- * creates identity/store state. */
+ * creates identity/store state. The swarm read is the existing dumpstate
+ * projection of the running daemon, never a second inventory. */
 bool zcl_native_zcode_dht_status_read(struct json_value *result);
+bool zcl_native_zcode_swarm_status_read(struct json_value *result);
 bool zcl_native_zcode_records_local(
     struct json_value *selector, struct json_value *result);
 bool zcl_native_zcode_publication_snapshot_read(

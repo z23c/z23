@@ -8,6 +8,7 @@
 
 #ifndef ZCL_HOTFORK_ZWORK_INPUT_CORE
 #include "command/native_command.h"
+#include "command/native_zcode_discovery.h"
 
 #include "base/cleanse.h"
 #include "base/hex.h"
@@ -122,7 +123,10 @@ struct zwork_reuse_candidate {
 struct zwork_peer_inventory {
     bool live;
     bool truncated;
+    bool pointer_board_available;
+    bool pointer_board_truncated;
     size_t roots_seen;
+    size_t pointer_records_seen;
     size_t roots_matched;
 };
 #endif
@@ -895,28 +899,85 @@ static void zwork_peer_inventory_apply(
 {
     memset(inventory, 0, sizeof(*inventory));
     struct vcs_swarm_engine *engine = vcs_swarm_engine_global();
-    if (!engine) return;
-    inventory->live = true;
     struct vcs_swarm_advertised rows[VCS_SWARM_MAX_LOCAL_ANNOUNCES + 1u];
-    size_t count = vcs_swarm_engine_advertised(
-        engine, rows, VCS_SWARM_MAX_LOCAL_ANNOUNCES + 1u);
+    size_t count = 0;
+    if (engine) {
+        inventory->live = true;
+        count = vcs_swarm_engine_advertised(
+            engine, rows, VCS_SWARM_MAX_LOCAL_ANNOUNCES + 1u);
+    } else {
+        struct json_value status;
+        if (!zcl_native_zcode_swarm_status_read(&status)) return;
+        inventory->live = json_get_bool_or(&status, "enabled", false) &&
+            json_get_bool_or(&status, "present", false);
+        const struct json_value *advertised = json_get(&status, "advertised");
+        size_t seen = advertised && advertised->type == JSON_ARR
+            ? json_size(advertised) : 0;
+        inventory->truncated =
+            seen > VCS_SWARM_MAX_LOCAL_ANNOUNCES;
+        if (seen > VCS_SWARM_MAX_LOCAL_ANNOUNCES)
+            seen = VCS_SWARM_MAX_LOCAL_ANNOUNCES;
+        for (size_t i = 0; i < seen; i++) {
+            const struct json_value *row = json_at(advertised, i);
+            const char *root = row
+                ? json_get_str(json_get(row, "root")) : NULL;
+            int64_t advertisers = row
+                ? json_get_int(json_get(row, "advertisers")) : 0;
+            if (!root || strlen(root) != 64u || advertisers <= 0 ||
+                advertisers > UINT32_MAX ||
+                !zcl_hex_decode_lower(root, rows[count].root,
+                                      sizeof(rows[count].root)))
+                continue;
+            rows[count++].advertisers = (uint32_t)advertisers;
+        }
+        json_free(&status);
+        if (!inventory->live) return;
+    }
     if (count > VCS_SWARM_MAX_LOCAL_ANNOUNCES) {
         inventory->truncated = true;
         count = VCS_SWARM_MAX_LOCAL_ANNOUNCES;
     }
     inventory->roots_seen = count;
-    for (size_t i = 0; i < count; i++) {
-        char root[65];
-        zcl_hex_encode(rows[i].root, sizeof(rows[i].root), root);
-        for (size_t c = 0; c < candidate_count; c++) {
-            if (strcmp(root,
-                       candidates[c].input.package->package_root_hex) != 0)
+    struct json_value selector, board;
+    json_init(&selector); json_set_object(&selector);
+    json_push_kv_str(&selector, "kind", "pointer");
+    json_push_kv_str(&selector, "namespace", "zclassic23.package");
+    json_push_kv_bool(&selector, "board", true);
+    inventory->pointer_board_available =
+        zcl_native_zcode_records_local(&selector, &board);
+    json_free(&selector);
+    if (!inventory->pointer_board_available) return;
+    inventory->pointer_board_truncated =
+        json_get_bool_or(&board, "truncated", false);
+    const struct json_value *records = json_get(&board, "records");
+    inventory->pointer_records_seen =
+        records && records->type == JSON_ARR ? json_size(records) : 0;
+    for (size_t c = 0; c < candidate_count; c++) {
+        uint32_t advertisers = 0;
+        for (size_t p = 0; p < inventory->pointer_records_seen; p++) {
+            const struct json_value *record = json_at(records, p);
+            const char *semantic = record
+                ? json_get_str(json_get(record, "semantic_root")) : NULL;
+            const char *transport = record
+                ? json_get_str(json_get(record, "transport_root")) : NULL;
+            uint8_t transport_root[32];
+            if (!semantic || strcmp(
+                    semantic,
+                    candidates[c].input.package->package_root_hex) != 0 ||
+                !transport || strlen(transport) != 64u ||
+                !zcl_hex_decode_lower(
+                    transport, transport_root, sizeof(transport_root)))
                 continue;
-            candidates[c].input.peer_advertisers = rows[i].advertisers;
-            inventory->roots_matched++;
-            break;
+            for (size_t i = 0; i < count; i++)
+                if (memcmp(transport_root, rows[i].root,
+                           sizeof(transport_root)) == 0 &&
+                    rows[i].advertisers > advertisers)
+                    advertisers = rows[i].advertisers;
         }
+        candidates[c].input.peer_advertisers = advertisers;
+        inventory->roots_matched += advertisers > 0;
     }
+    json_free(&board);
 }
 
 static bool zwork_reuse_render(
@@ -1059,8 +1120,6 @@ static bool zwork_reuse_render(
             json_push_kv_str(&root, "package_root",
                              input->package->package_root_hex) &&
             json_push_kv_bool(&root, "already_locked", input->locked) &&
-            json_push_kv_int(&root, "peer_advertisers",
-                             (int64_t)input->peer_advertisers) &&
             json_push_kv_int(&root, "score", reuse.selected[i].score) &&
             json_push_back(&roots, &root);
         if (ok && usable_now) ready_count++;
@@ -1089,8 +1148,10 @@ static bool zwork_reuse_render(
                 skipped ? "bounded_projection_incomplete" : "complete") &&
             json_push_kv_str(
                 plan_json, "network_discovery",
-                peer_inventory.live ? "peer_inventory_consulted"
-                                    : "unavailable_no_live_swarm") &&
+                !peer_inventory.live ? "unavailable_no_live_swarm"
+                : !peer_inventory.pointer_board_available
+                    ? "signed_pointer_board_unavailable"
+                    : "signed_pointer_peer_inventory_consulted") &&
             json_push_kv_str(plan_json, "license_filter",
                              license ? license : "") &&
             json_push_kv_bool(plan_json, "license_filter_applied",
@@ -1113,10 +1174,7 @@ static bool zwork_reuse_render(
                     ? "explicitly use the selected package before creating code"
                     : reuse.new_code_required ? goal : "none") &&
             json_push_kv_str(expert_json, "search_order",
-                             "semantic_then_locked_then_installed_then_peer_inventory_then_identity") &&
-            json_push_kv_str(
-                expert_json, "peer_inventory_authority",
-                "availability_only_never_package_metadata") &&
+                             "semantic_locality_peer_identity") &&
             json_push_kv_int(expert_json, "peer_roots_seen",
                              (int64_t)peer_inventory.roots_seen) &&
             json_push_kv_int(expert_json, "peer_roots_matched",

@@ -66,11 +66,25 @@ bool zcl_native_zcode_dht_status_read(struct json_value *result)
   return ok;
 }
 
+bool zcl_native_zcode_swarm_status_read(struct json_value *result)
+{
+  return result &&
+         zcl_native_presentation_dumpstate("zcode_swarm", NULL, result);
+}
+
 bool zcl_native_zcode_records_local(
     struct json_value *selector, struct json_value *result)
 {
-  return selector && result &&
-         zcode_read_rpc("zcode_dht_status", "records", selector, result);
+  if (!selector || !result)
+    return false;
+#ifdef ZCL_TESTING
+  if (g_test_discover)
+    return g_test_discover(selector, result);
+#endif
+  bool board = json_get_bool_or(selector, "board", false);
+  return zcode_read_rpc(board ? "zcode_dht_record_board"
+                              : "zcode_dht_status",
+                        board ? NULL : "records", selector, result);
 }
 
 bool zcl_native_zcode_publication_snapshot_read(

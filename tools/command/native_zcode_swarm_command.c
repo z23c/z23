@@ -22,10 +22,12 @@
  *                          live:false with an empty peer list and still
  *                          report store facts, fail closed.
  *   zcode package offered  the live union of roots peers have ANNOUNCEd
- *                          this session (advertisers from the engine,
+ *                          this session (advertisers from the in-process
+ *                          engine or its read-only daemon dumpstate,
  *                          have_local from the observed store). Engine-
  *                          down replies are live:false with an empty
- *                          list — a successful read, never a faked
+ *                          list when no daemon answers — a successful read,
+ *                          never a faked
  *                          catalog. Replica counts are never invented.
  *   zcode package pin      operator-pin a tracked package (PINS pool,
  *                          never evicted, never tier-gated)
@@ -811,11 +813,22 @@ void zcl_native_handle_zcode_package_offered(
     }
 
     struct vcs_swarm_engine *engine = vcs_swarm_engine_global();
-    bool live = engine != NULL;
+    struct json_value remote_status;
+    bool remote_status_read = false;
+    if (!engine)
+        remote_status_read =
+            zcl_native_zcode_swarm_status_read(&remote_status);
+    bool live = engine != NULL ||
+        (remote_status_read &&
+         json_get_bool_or(&remote_status, "enabled", false) &&
+         json_get_bool_or(&remote_status, "present", false));
     uint64_t peer_ids[VCS_SWARM_MAX_PEERS];
-    size_t peer_count = live ? vcs_swarm_engine_peer_ids(
+    size_t peer_count = engine ? vcs_swarm_engine_peer_ids(
                                    engine, peer_ids, VCS_SWARM_MAX_PEERS)
-                             : 0;
+                             : remote_status_read
+                                 ? (size_t)json_get_int(json_get(
+                                       &remote_status, "peer_count"))
+                                 : 0;
     (void)json_push_kv_bool(&reply->data, "live", live);
     (void)json_push_kv_int(&reply->data, "peer_count",
                            (int64_t)peer_count);
@@ -843,8 +856,32 @@ void zcl_native_handle_zcode_package_offered(
 
     if (live) {
         struct vcs_swarm_advertised rows[VCS_SWARM_MAX_LOCAL_ANNOUNCES + 1u];
-        size_t n = vcs_swarm_engine_advertised(
-            engine, rows, VCS_SWARM_MAX_LOCAL_ANNOUNCES + 1u);
+        size_t n = 0;
+        if (engine) {
+            n = vcs_swarm_engine_advertised(
+                engine, rows, VCS_SWARM_MAX_LOCAL_ANNOUNCES + 1u);
+        } else {
+            const struct json_value *advertised =
+                json_get(&remote_status, "advertised");
+            size_t seen = advertised && advertised->type == JSON_ARR
+                ? json_size(advertised) : 0;
+            truncated = seen > VCS_SWARM_MAX_LOCAL_ANNOUNCES;
+            if (seen > VCS_SWARM_MAX_LOCAL_ANNOUNCES)
+                seen = VCS_SWARM_MAX_LOCAL_ANNOUNCES;
+            for (size_t i = 0; i < seen; i++) {
+                const struct json_value *item = json_at(advertised, i);
+                const char *root = item
+                    ? json_get_str(json_get(item, "root")) : NULL;
+                int64_t advertisers = item
+                    ? json_get_int(json_get(item, "advertisers")) : 0;
+                if (!root || strlen(root) != 64u || advertisers <= 0 ||
+                    advertisers > UINT32_MAX ||
+                    !zcl_hex_decode_lower(root, rows[n].root,
+                                          sizeof(rows[n].root)))
+                    continue;
+                rows[n++].advertisers = (uint32_t)advertisers;
+            }
+        }
         if (n > VCS_SWARM_MAX_LOCAL_ANNOUNCES) {
             truncated = true;
             n = VCS_SWARM_MAX_LOCAL_ANNOUNCES;
@@ -883,6 +920,8 @@ void zcl_native_handle_zcode_package_offered(
             vcs_package_store_close(store);
         offered = n;
     }
+    if (remote_status_read)
+        json_free(&remote_status);
 
     (void)json_push_kv_int(&reply->data, "offered_count", (int64_t)offered);
     (void)json_push_kv(&reply->data, "items", &items);

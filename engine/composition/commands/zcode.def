@@ -594,6 +594,9 @@ ZCL_COMMAND_READY_READ(
 ZCL_COMMAND_READY_COMMAND(
     "zcode.work.start", "zcode.work", "", "Start reuse-first C23 work",
     "Searches installed packages and the rebuildable local package index first, "
+    "then correlates signed package pointers with the running node's bounded "
+    "peer carrier inventory. Peer availability only breaks an otherwise-equal "
+    "verified semantic/locality tie; it never supplies package metadata. "
     "optionally filtering that local projection by one exact allowlisted SPDX "
     "license identifier. The filter applies only to the selected top-level "
     "release: it is not a transitive dependency policy and does not constrain "

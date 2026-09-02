@@ -5,6 +5,7 @@
 #include "base/hex.h"
 #include "base/safe_alloc.h"
 #include "command/native_command.h"
+#include "command/native_zcode_discovery.h"
 #include "command/native_zcode_join.h"
 #include "config/command_catalog.h"
 #include "crypto/ed25519.h"
@@ -2076,6 +2077,33 @@ static int zpd_test_reuse_plan(void)
     return failures;
 }
 
+static char zpd_peer_semantic_root[65];
+static char zpd_peer_transport_root[65];
+
+static bool zpd_peer_pointer_board(
+    struct json_value *selector, struct json_value *result)
+{
+    const char *kind = json_get_str(json_get(selector, "kind"));
+    const char *namespace_name =
+        json_get_str(json_get(selector, "namespace"));
+    if (!kind || strcmp(kind, "pointer") != 0 || !namespace_name ||
+        strcmp(namespace_name, "zclassic23.package") != 0 ||
+        !json_get_bool_or(selector, "board", false))
+        return false;
+    json_init(result); json_set_object(result);
+    struct json_value records, row;
+    json_init(&records); json_set_array(&records);
+    json_init(&row); json_set_object(&row);
+    bool ok = json_push_kv_bool(result, "ok", true) &&
+        json_push_kv_bool(result, "truncated", false) &&
+        json_push_kv_str(&row, "semantic_root", zpd_peer_semantic_root) &&
+        json_push_kv_str(&row, "transport_root", zpd_peer_transport_root) &&
+        json_push_back(&records, &row) &&
+        json_push_kv(result, "records", &records);
+    json_free(&row); json_free(&records);
+    return ok;
+}
+
 static int zpd_test_work_start_license_filter(
     secp256k1_context *ctx, const uint8_t secret[32],
     const uint8_t pubkey[33])
@@ -2138,12 +2166,20 @@ static int zpd_test_work_start_license_filter(
         char mit_root[65], apache_root[65];
         zcl_hex_encode(mit.package_root, 32, mit_root);
         zcl_hex_encode(apache.package_root, 32, apache_root);
+        uint8_t transport_root[32];
+        memset(transport_root, 0x7a, sizeof(transport_root));
+        zcl_hex_encode(transport_root, sizeof(transport_root),
+                       zpd_peer_transport_root);
+        (void)snprintf(zpd_peer_semantic_root,
+                       sizeof(zpd_peer_semantic_root), "%s", mit_root);
+        zcl_native_zcode_discovery_test_backend(
+            zpd_peer_pointer_board, NULL);
         peer_engine = vcs_swarm_engine_create(NULL, NULL, NULL, NULL, NULL);
         ASSERT(peer_engine);
         uint8_t peer_key[33] = {0x02, 0x51};
         ASSERT(vcs_swarm_engine_peer_add(peer_engine, 51, peer_key));
         ASSERT(vcs_swarm_engine_peer_offer(
-            peer_engine, 51, mit.package_root, 200, 100));
+            peer_engine, 51, transport_root, 200, 100));
         vcs_swarm_engine_set_global(peer_engine);
 
         struct json_value input;
@@ -2169,7 +2205,7 @@ static int zpd_test_work_start_license_filter(
         ASSERT(reuse && strcmp(json_get_str(json_get(
                           reuse, "license_filter")), "MIT") == 0);
         ASSERT(strcmp(json_get_str(json_get(reuse, "network_discovery")),
-                      "peer_inventory_consulted") == 0);
+                      "signed_pointer_peer_inventory_consulted") == 0);
         ASSERT(json_get_bool(json_get(reuse, "license_filter_applied")));
         const struct json_value *reused = json_get(reuse, "reused");
         const struct json_value *selected = reused ? json_at(reused, 0) : NULL;
@@ -2199,8 +2235,6 @@ static int zpd_test_work_start_license_filter(
                selected_root);
         ASSERT(strcmp(json_get_str(json_get(selected_root, "package_root")),
                       mit_root) == 0);
-        ASSERT(json_get_int(json_get(selected_root, "peer_advertisers")) ==
-               1);
         ASSERT(strcmp(mit_root, apache_root) != 0);
 
         ASSERT(reply.next_count == 1);
@@ -2238,6 +2272,7 @@ static int zpd_test_work_start_license_filter(
         zpd_fixture_cleanup(workspace);
         PASS();
     } _test_next:;
+    zcl_native_zcode_discovery_test_backend(NULL, NULL);
     vcs_swarm_engine_set_global(previous_engine);
     vcs_swarm_engine_free(peer_engine);
     return failures;

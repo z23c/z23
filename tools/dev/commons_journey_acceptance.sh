@@ -1020,6 +1020,32 @@ cj_journey_admit_reuse() {
     # it needs, and any node that admits it resolves the same exact bytes.
     cj_write_package_json "$CJ_WS" "$CJ_TEXTSTAT_ROOT"
 
+    # Wait until A's live swarm has actually learned B's carrier inventory.
+    # The signed package POINTER already held by A maps this transport root
+    # back to the semantic package root work-start ranks.
+    local offered deadline i offered_root advertisers peer_seen=0
+    deadline=$(( $(date +%s) + 60 ))
+    while [ "$(date +%s)" -lt "$deadline" ]; do
+        offered="$(cj_a zcode package offered)"
+        cj_require_ok "peer inventory before work start" "$offered"
+        i=0
+        while :; do
+            offered_root="$(cj_field "data.items.$i.root" "$offered" '')"
+            [ -n "$offered_root" ] || break
+            advertisers="$(cj_field "data.items.$i.advertisers" "$offered" 0)"
+            if [ "$offered_root" = "$CJ_TEXTSTAT_TRANSPORT" ] &&
+               [ "$advertisers" -ge 1 ] 2>/dev/null; then
+                peer_seen=1
+                break
+            fi
+            i=$((i + 1))
+        done
+        [ "$peer_seen" -eq 1 ] && break
+        sleep 1
+    done
+    [ "$peer_seen" -eq 1 ] ||
+        cj_die "node A never learned node B's reusable carrier inventory: $offered"
+
     local start plan
     start="$(cj_a zcode work start \
         --input="{\"workspace\":\"$CJ_WS\",\"goal\":\"$CJ_GOAL\",\"profile\":\"$CJ_PROFILE\",\"details\":true}")"
@@ -1031,6 +1057,11 @@ cj_journey_admit_reuse() {
         cj_die "the admitted package was not selected for reuse: $plan"
     [ "$(printf '%s' "$plan" | cj_jget reused.0.installed False)" = True ] ||
         cj_die "reuse claimed a package that is not installed: $plan"
+    [ "$(printf '%s' "$plan" | cj_jget network_discovery '')" = \
+      "signed_pointer_peer_inventory_consulted" ] ||
+        cj_die "work start did not consult the signed peer inventory: $plan"
+    [ "$(printf '%s' "$plan" | cj_jget reused.0.peer_advertisers 0)" -ge 1 ] ||
+        cj_die "work start did not bind the selected reuse to a peer carrier: $plan"
     [ "$(printf '%s' "$plan" | cj_jget available_after_use.0.name '')" = "" ] ||
         cj_die "an admitted package is still pending admission: $plan"
     # Its API is known by symbol, not guessed from the name.
