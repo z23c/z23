@@ -59,17 +59,29 @@ parse_always_sections() {
     }' "$1"
 }
 
-# Every template row as "kind<TAB>section". The body is not parsed: this gate
-# has nothing to say about prose, and a parser that reached into the strings
-# would break on the first apostrophe or embedded comma.
+# Every template row as "kind<TAB>section". Prose inside a non-empty string
+# is not parsed — a parser that reached into the sentences would break on
+# the first apostrophe or embedded comma — but an empty third argument is
+# treated as missing: ENGINE_PROMPT_TEMPLATE(kind, section, "") would
+# otherwise count as filling the section, and the composed prompt would be
+# a bare header the shape audit cannot tell from a filled one.
 parse_templates() {
     awk '/^ENGINE_PROMPT_TEMPLATE\(/ {
         line = $0
         sub(/^ENGINE_PROMPT_TEMPLATE\(/, "", line)
-        split(line, f, ",")
-        gsub(/[ \t]/, "", f[1])
-        gsub(/[ \t]/, "", f[2])
-        if (f[1] != "" && f[2] != "") printf "%s\t%s\n", f[1], f[2]
+        comma1 = index(line, ",")
+        if (comma1 == 0) next
+        kind = substr(line, 1, comma1 - 1)
+        rest = substr(line, comma1 + 1)
+        comma2 = index(rest, ",")
+        if (comma2 == 0) next
+        section = substr(rest, 1, comma2 - 1)
+        body = substr(rest, comma2 + 1)
+        gsub(/[ \t]/, "", kind)
+        gsub(/[ \t]/, "", section)
+        gsub(/[ \t]/, "", body)
+        if (body == "\"\")") next
+        if (kind != "" && section != "") printf "%s\t%s\n", kind, section
     }' "$1"
 }
 
@@ -155,6 +167,12 @@ ENGINE_PROMPT_TEMPLATE(half-done, task, "only half")
 PARTIAL
     expect dirty "a kind missing an always-required section"
 
+    cat > "$tmp/templates.def" <<'EMPTYBODY'
+ENGINE_PROMPT_TEMPLATE(fix-gate, task, "")
+ENGINE_PROMPT_TEMPLATE(fix-gate, protocol, "write files")
+EMPTYBODY
+    expect dirty "a kind whose required body is an empty string"
+
     # A hollow scan must be LOUD, never a quiet pass.
     : > "$tmp/empty.def"
     rc=0
@@ -168,7 +186,7 @@ PARTIAL
     fi
 
     [ "$fails" -eq 0 ] || exit 1
-    echo "[$GATE] SELFTEST PASS (an undeclared section and a kind missing a required body both fail; a complete kind passes; an empty .def exits 2)"
+    echo "[$GATE] SELFTEST PASS (an undeclared section, a kind missing a required body, and an empty-string body all fail; a complete kind passes; an empty .def exits 2)"
     exit 0
 fi
 
