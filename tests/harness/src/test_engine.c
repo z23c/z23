@@ -40,6 +40,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#ifndef _WIN32
+#include <sys/wait.h>
+#endif
 #include <unistd.h>
 
 #define EN_CHECK(name, expr) do {                    \
@@ -1531,7 +1535,8 @@ static int case_prompt_templates(void)
             if (!sec || sec->need != ENGINE_PROMPT_NEED_ALWAYS)
                 continue;
             always++;
-            if (!engine_prompt_template_body(kind, sec->id))
+            const char *body = engine_prompt_template_body(kind, sec->id);
+            if (!body || !body[0])
                 every_always_filled = false;
         }
     }
@@ -1592,15 +1597,86 @@ static struct engine_receipt receipt_fixture(const char *engine, int64_t ts)
     return r;
 }
 
-static bool tamper_first_line(const char *path)
+static void receipt_head_path(const char *path, char *out, size_t cap)
+{
+    (void)snprintf(out, cap, "%s%s", path, ENGINE_RECEIPT_HEAD_SUFFIX);
+}
+
+static void receipt_unlink(const char *path)
+{
+    char head[600];
+    receipt_head_path(path, head, sizeof(head));
+    (void)unlink(path);
+    (void)unlink(head);
+}
+
+static bool receipt_read_whole(const char *path, char *buf, size_t cap,
+                               size_t *out_n)
 {
     FILE *f = fopen(path, "rb");
     if (!f)
         return false;
-    char buf[ENGINE_RECEIPT_LINE_MAX + 2u];
-    size_t n = fread(buf, 1, sizeof(buf) - 1u, f);
+    size_t n = fread(buf, 1, cap - 1u, f);
+    int err = ferror(f);
     (void)fclose(f);
-    if (n == 0)
+    buf[n] = '\0';
+    if (out_n)
+        *out_n = n;
+    return err == 0;
+}
+
+static bool receipt_write_whole(const char *path, const char *buf, size_t n)
+{
+    FILE *f = fopen(path, "wb");
+    if (!f)
+        return false;
+    size_t w = fwrite(buf, 1, n, f);
+    return fclose(f) == 0 && w == n;
+}
+
+static bool receipt_copy(const char *src, const char *dst)
+{
+    char buf[65536];
+    size_t n = 0;
+    if (!receipt_read_whole(src, buf, sizeof(buf), &n))
+        return false;
+    if (!receipt_write_whole(dst, buf, n))
+        return false;
+    char shead[600], dhead[600];
+    receipt_head_path(src, shead, sizeof(shead));
+    receipt_head_path(dst, dhead, sizeof(dhead));
+    if (!receipt_read_whole(shead, buf, sizeof(buf), &n))
+        return false;
+    return receipt_write_whole(dhead, buf, n);
+}
+
+static bool receipt_nth_line(const char *buf, size_t n, int which,
+                             const char **start, size_t *len)
+{
+    size_t i = 0;
+    int line = 0;
+    while (i < n) {
+        size_t s = i;
+        while (i < n && buf[i] != '\n')
+            i++;
+        line++;
+        size_t L = i - s;
+        if (i < n)
+            i++;
+        if (line == which) {
+            *start = buf + s;
+            *len = L;
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool tamper_first_line(const char *path)
+{
+    char buf[65536];
+    size_t n = 0;
+    if (!receipt_read_whole(path, buf, sizeof(buf), &n) || n == 0)
         return false;
     for (size_t i = 1; i < n; i++) {
         if (buf[i] >= 'a' && buf[i] <= 'z') {
@@ -1608,12 +1684,129 @@ static bool tamper_first_line(const char *path)
             break;
         }
     }
-    f = fopen(path, "wb");
-    if (!f)
+    return receipt_write_whole(path, buf, n);
+}
+
+static bool mutate_first_prev_sha3(const char *src, const char *dst)
+{
+    if (!receipt_copy(src, dst))
         return false;
-    const size_t w = fwrite(buf, 1, n, f);
-    (void)fclose(f);
-    return w == n;
+    char buf[65536];
+    size_t n = 0;
+    if (!receipt_read_whole(dst, buf, sizeof(buf), &n))
+        return false;
+    char *p = strstr(buf, "\"prev_sha3\":\"");
+    if (!p)
+        return false;
+    p += strlen("\"prev_sha3\":\"");
+    if (p + 64 > buf + n)
+        return false;
+    memset(p, 'f', 64);
+    return receipt_write_whole(dst, buf, n);
+}
+
+static bool mutate_swap_first_two(const char *src, const char *dst)
+{
+    if (!receipt_copy(src, dst))
+        return false;
+    char buf[65536];
+    size_t n = 0;
+    if (!receipt_read_whole(dst, buf, sizeof(buf), &n))
+        return false;
+    const char *l1, *l2, *l3;
+    size_t n1, n2, n3;
+    if (!receipt_nth_line(buf, n, 1, &l1, &n1)
+        || !receipt_nth_line(buf, n, 2, &l2, &n2)
+        || !receipt_nth_line(buf, n, 3, &l3, &n3))
+        return false;
+    char out[65536];
+    if (n2 + 1u + n1 + 1u + n3 + 1u >= sizeof(out))
+        return false;
+    size_t o = 0;
+    memcpy(out + o, l2, n2); o += n2; out[o++] = '\n';
+    memcpy(out + o, l1, n1); o += n1; out[o++] = '\n';
+    memcpy(out + o, l3, n3); o += n3; out[o++] = '\n';
+    return receipt_write_whole(dst, out, o);
+}
+
+static bool mutate_drop_line_two(const char *src, const char *dst)
+{
+    if (!receipt_copy(src, dst))
+        return false;
+    char buf[65536];
+    size_t n = 0;
+    if (!receipt_read_whole(dst, buf, sizeof(buf), &n))
+        return false;
+    const char *l1, *l3;
+    size_t n1, n3;
+    if (!receipt_nth_line(buf, n, 1, &l1, &n1)
+        || !receipt_nth_line(buf, n, 3, &l3, &n3))
+        return false;
+    char out[65536];
+    if (n1 + 1u + n3 + 1u >= sizeof(out))
+        return false;
+    size_t o = 0;
+    memcpy(out + o, l1, n1); o += n1; out[o++] = '\n';
+    memcpy(out + o, l3, n3); o += n3; out[o++] = '\n';
+    return receipt_write_whole(dst, out, o);
+}
+
+static bool mutate_drop_last_newline(const char *src, const char *dst)
+{
+    if (!receipt_copy(src, dst))
+        return false;
+    char buf[65536];
+    size_t n = 0;
+    if (!receipt_read_whole(dst, buf, sizeof(buf), &n) || n == 0)
+        return false;
+    if (buf[n - 1] != '\n')
+        return false;
+    return receipt_write_whole(dst, buf, n - 1u);
+}
+
+static bool mutate_last_groups_ran(const char *src, const char *dst)
+{
+    if (!receipt_copy(src, dst))
+        return false;
+    char buf[65536];
+    size_t n = 0;
+    if (!receipt_read_whole(dst, buf, sizeof(buf), &n))
+        return false;
+    const char *last;
+    size_t last_n;
+    if (!receipt_nth_line(buf, n, 3, &last, &last_n))
+        return false;
+    char line[ENGINE_RECEIPT_LINE_MAX + 8u];
+    if (last_n + 8u >= sizeof(line))
+        return false;
+    memcpy(line, last, last_n);
+    line[last_n] = '\0';
+    char *p = strstr(line, "\"groups_ran\":0");
+    if (!p)
+        return false;
+    /* "groups_ran":0 -> "groups_ran":99, one extra byte. */
+    size_t prefix = (size_t)(p - line) + strlen("\"groups_ran\":");
+    char rebuilt[ENGINE_RECEIPT_LINE_MAX + 8u];
+    size_t r = 0;
+    memcpy(rebuilt + r, buf, (size_t)(last - buf));
+    r += (size_t)(last - buf);
+    memcpy(rebuilt + r, line, prefix);
+    r += prefix;
+    rebuilt[r++] = '9';
+    rebuilt[r++] = '9';
+    const char *rest = p + strlen("\"groups_ran\":0");
+    size_t rest_n = last_n - (size_t)(rest - line);
+    memcpy(rebuilt + r, rest, rest_n);
+    r += rest_n;
+    rebuilt[r++] = '\n';
+    return receipt_write_whole(dst, rebuilt, r);
+}
+
+static bool verify_refuses(const char *path)
+{
+    struct engine_receipt_chain_report report;
+    return !engine_receipt_verify_chain(path, &report)
+        && report.first_bad_line != 0;
 }
 
 static int case_receipt_chain(void)
@@ -1622,7 +1815,7 @@ static int case_receipt_chain(void)
     char path[512];
     (void)snprintf(path, sizeof(path), "/tmp/zcl_engine_receipt_%d.chainlog",
                    (int)getpid());
-    (void)unlink(path);
+    receipt_unlink(path);
 
     struct engine_receipt_chain_report report;
     EN_CHECK("a missing file is an empty chain, not a broken one",
@@ -1639,6 +1832,44 @@ static int case_receipt_chain(void)
              engine_receipt_verify_chain(path, &report)
              && report.records == 3 && report.first_bad_line == 0);
 
+    char whole[65536];
+    size_t whole_n = 0;
+    const char *line1 = NULL;
+    size_t line1_n = 0;
+    EN_CHECK("the three-record file is readable",
+             receipt_read_whole(path, whole, sizeof(whole), &whole_n)
+             && receipt_nth_line(whole, whole_n, 1, &line1, &line1_n));
+    static const char k_genesis[] =
+        "\"prev_sha3\":\"0000000000000000000000000000000000000000000000000000000000000000\"";
+    char first[ENGINE_RECEIPT_LINE_MAX + 2u];
+    if (line1 && line1_n < sizeof(first)) {
+        memcpy(first, line1, line1_n);
+        first[line1_n] = '\0';
+    } else {
+        first[0] = '\0';
+    }
+    EN_CHECK("the first record's prev_sha3 is 64 zeros",
+             strstr(first, k_genesis) != NULL);
+    EN_CHECK("groups_ran is a JSON integer, not a float",
+             strstr(first, "\"groups_ran\":0") != NULL
+             && strstr(first, "\"groups_ran\":0.") == NULL);
+    EN_CHECK("ts is a JSON integer, not a float",
+             strstr(first, "\"ts\":1000") != NULL
+             && strstr(first, "\"ts\":1000.") == NULL);
+
+    struct engine_receipt knull = receipt_fixture("fixture", 1003);
+    knull.kind = NULL;
+    char kpath[512];
+    (void)snprintf(kpath, sizeof(kpath), "%s.kind", path);
+    receipt_unlink(kpath);
+    EN_CHECK("a NULL kind appends", engine_receipt_append(kpath, &knull, NULL));
+    char kbuf[65536];
+    size_t kn = 0;
+    EN_CHECK("and is written as an empty kind string",
+             receipt_read_whole(kpath, kbuf, sizeof(kbuf), &kn)
+             && strstr(kbuf, "\"kind\":\"\"") != NULL);
+    receipt_unlink(kpath);
+
     struct engine_receipt bad = receipt_fixture("", 1003);
     bad.engine = "";
     EN_CHECK("a receipt with no engine id is refused",
@@ -1646,12 +1877,90 @@ static int case_receipt_chain(void)
     EN_CHECK("refusing an append leaves the chain intact",
              engine_receipt_verify_chain(path, &report) && report.records == 3);
 
-    EN_CHECK("tampering an earlier line is detected", tamper_first_line(path));
-    EN_CHECK("and verification names a bad line",
-             !engine_receipt_verify_chain(path, &report)
-             && report.first_bad_line != 0);
+    char mut[512];
+    (void)snprintf(mut, sizeof(mut), "%s.mut", path);
 
-    (void)unlink(path);
+    EN_CHECK("copied the honest chain for mutation", receipt_copy(path, mut));
+    EN_CHECK("tampering an earlier line is detected", tamper_first_line(mut));
+    EN_CHECK("and verification names a bad line", verify_refuses(mut));
+    receipt_unlink(mut);
+
+    EN_CHECK("a first line whose prev_sha3 is not genesis is refused",
+             mutate_first_prev_sha3(path, mut) && verify_refuses(mut));
+    receipt_unlink(mut);
+    EN_CHECK("swapping lines 1 and 2 is refused",
+             mutate_swap_first_two(path, mut) && verify_refuses(mut));
+    receipt_unlink(mut);
+    EN_CHECK("dropping the middle line is refused",
+             mutate_drop_line_two(path, mut) && verify_refuses(mut));
+    receipt_unlink(mut);
+    EN_CHECK("a last line with no newline is refused",
+             mutate_drop_last_newline(path, mut) && verify_refuses(mut));
+    receipt_unlink(mut);
+    EN_CHECK("rewriting the last line's groups_ran is refused",
+             mutate_last_groups_ran(path, mut) && verify_refuses(mut));
+    receipt_unlink(mut);
+
+    {
+        char nested[600];
+        (void)snprintf(nested, sizeof(nested), "%s/not-a-dir", path);
+        EN_CHECK("an unreadable path is not an empty chain",
+                 !engine_receipt_verify_chain(nested, &report));
+        EN_CHECK("and an append to it is refused",
+                 !engine_receipt_append(nested, &a, NULL));
+    }
+
+#ifndef _WIN32
+    if (geteuid() != 0) {
+        char locked[512];
+        (void)snprintf(locked, sizeof(locked), "%s.locked", path);
+        EN_CHECK("copied the chain to chmod 000", receipt_copy(path, locked));
+        EN_CHECK("chmod 000 of the chainlog", chmod(locked, 0) == 0);
+        bool unreadable_empty = engine_receipt_verify_chain(locked, &report)
+                                && report.records == 0;
+        bool append_genesis = engine_receipt_append(locked, &a, NULL);
+        (void)chmod(locked, 0644);
+        EN_CHECK("chmod 000 does not verify as an empty chain",
+                 !unreadable_empty);
+        EN_CHECK("and does not append a genesis record over unread bytes",
+                 !append_genesis);
+        receipt_unlink(locked);
+    }
+#endif
+
+#ifndef _WIN32
+    {
+        char cpath[512];
+        (void)snprintf(cpath, sizeof(cpath), "%s.conc", path);
+        receipt_unlink(cpath);
+        pid_t pids[8];
+        int started = 0;
+        for (int i = 0; i < 8; i++) {
+            pid_t pid = fork();
+            if (pid < 0)
+                break;
+            if (pid == 0) {
+                struct engine_receipt r = receipt_fixture("fixture", 2000 + i);
+                _exit(engine_receipt_append(cpath, &r, NULL) ? 0 : 1);
+            }
+            pids[started++] = pid;
+        }
+        int kids_ok = started == 8;
+        for (int i = 0; i < started; i++) {
+            int st = 0;
+            if (waitpid(pids[i], &st, 0) != pids[i] || !WIFEXITED(st)
+                || WEXITSTATUS(st) != 0)
+                kids_ok = 0;
+        }
+        EN_CHECK("eight concurrent appends all finish", kids_ok);
+        EN_CHECK("and the chain verifies with eight records",
+                 engine_receipt_verify_chain(cpath, &report)
+                 && report.records == 8 && report.first_bad_line == 0);
+        receipt_unlink(cpath);
+    }
+#endif
+
+    receipt_unlink(path);
     return failures;
 }
 
