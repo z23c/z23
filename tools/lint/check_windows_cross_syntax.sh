@@ -39,9 +39,20 @@
 #   tools/lint/check_windows_cross_syntax.sh             # the gate
 #   tools/lint/check_windows_cross_syntax.sh --self-test # prove it can go red
 #
+# PER-TU RESULT CACHE: the sweep runs through tools/lint/tu_result_cache.sh,
+# which stores each translation unit's exit status and byte-exact compiler
+# log under .cache/lint-tu/ and replays them when nothing that TU can see
+# has changed. The classifiers below are unaware of it: a replay writes the
+# same bytes into the same files a fresh mingw run would have. Measured on
+# the dev reference host, script wall over 233 TUs: 4.2 s uncached, 0.6 s
+# fully warm, 0.9 s after editing one .c (232 hit, 1 miss).
+# ZCL_LINT_TU_CACHE=0 turns it off; run_lint.sh --cold-audit turns it off
+# for you. See that file's header for why the key is sound.
+#
 # Env:
 #   ZCL_MINGW_CC   compiler (default: x86_64-w64-mingw32-gcc)
 #   ZCL_CC_JOBS    parallel workers (default: nproc, capped at 32)
+#   ZCL_LINT_TU_CACHE=0  bypass the per-TU result cache (default: on)
 #   ZCL_REQUIRE_MINGW=1  missing compiler is a hard acceptance failure
 #
 # Exit: 0 clean or SKIP; 1 on a new (non-baselined, non-skippable) failure
@@ -54,6 +65,8 @@ ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 cd "$ROOT"
 # shellcheck source=tools/lint/gate_lib.sh
 . tools/lint/gate_lib.sh
+# shellcheck source=tools/lint/tu_result_cache.sh
+. tools/lint/tu_result_cache.sh
 
 GATE="check-windows-cross-syntax"
 CC_BIN="${ZCL_MINGW_CC:-x86_64-w64-mingw32-gcc}"
@@ -401,6 +414,23 @@ PROBE
     echo "  OK: --self-test — flag set trips on a Windows-only undeclared" \
          "identifier, passes clean and test-compat code, rejects a crashed" \
          "compiler backend"
+
+    # The per-TU result cache, proven against this gate's real compiler and
+    # real flag set. Everything above is hollow if a stale cached verdict
+    # can be replayed, so the two are graded together.
+    selftest_srcs="$WORK/selftest-srcs.txt"
+    selftest_roots=()
+    for d in "${SCAN_ROOTS[@]}"; do
+        [ -d "$d" ] && selftest_roots+=("$d")
+    done
+    : > "$selftest_srcs"
+    if [ "${#selftest_roots[@]}" -gt 0 ]; then
+        find "${selftest_roots[@]}" -name '*.c' -type f -print0 2>/dev/null |
+            xargs -0 -r grep -l '_WIN32' 2>/dev/null |
+            LC_ALL=C sort > "$selftest_srcs" || true
+    fi
+    tu_cache_selftest "$GATE" "$SCRIPT_DIR/check_windows_cross_syntax.sh" \
+        "$CC_BIN" "$WORK/flags.nul" "$WORK" "$(head -1 "$selftest_srcs")"
     exit 0
 fi
 
@@ -435,13 +465,21 @@ esac
 OUT_DIR="$WORK/out"
 mkdir -p "$OUT_DIR"
 
+# Per-TU result cache. Its key covers this script, the helper, the compiler
+# identity, the flag list, the whole include set and the TU's own bytes, so
+# a hit replays the exact rc and log a fresh mingw run would have written
+# and every classifier below this line is unaware it happened.
+tu_cache_setup "$GATE" "$SCRIPT_DIR/check_windows_cross_syntax.sh" \
+    "$CC_BIN" "$WORK/flags.nul" "$WORK"
+
 cat > "$WORK/compile_one.sh" <<'END_WORKER'
 #!/usr/bin/env bash
 set -uo pipefail
+. "$ZCL_TU_CACHE_LIB"
 src=$1
 log=$ZCL_GATE_OUT/${src}.log
 rcf=$ZCL_GATE_OUT/${src}.rc
-mkdir -p "$(dirname "$log")"
+mkdir -p "${log%/*}"
 mapfile -t -d '' flags < "$ZCL_GATE_FLAGS"
 if [ ${#flags[@]} -gt 0 ]; then
     last=$((${#flags[@]} - 1))
@@ -457,11 +495,7 @@ case "$src" in
     tests/harness/include/test/*) flags+=(-DZCL_TESTING -include "$ZCL_GATE_TEST_COMPAT_HEADER") ;;
     */tests/*.c) flags+=(-DZCL_TESTING) ;;
 esac
-set +e
-"$ZCL_GATE_CC" "${flags[@]}" "$src" >"$log" 2>&1
-rc=$?
-set -e
-printf '%s\n' "$rc" > "$rcf"
+tu_cache_run "$log" "$rcf" "$ZCL_GATE_CC" "${flags[@]}" "$src"
 exit 0
 END_WORKER
 chmod +x "$WORK/compile_one.sh"
@@ -472,6 +506,8 @@ tr '\n' '\0' < "$SRC_LIST" |
     env ZCL_GATE_FLAGS="$WORK/flags.nul" ZCL_GATE_CC="$CC_BIN" ZCL_GATE_OUT="$OUT_DIR" \
         ZCL_GATE_TEST_COMPAT_HEADER="$TEST_COMPAT_HEADER" \
         xargs -0 -r -P "$JOBS" -n 1 "$WORK/compile_one.sh" || true
+
+tu_cache_summary
 
 LOG_COUNT="$(find "$OUT_DIR" -name '*.log' -type f | grep -c . || true)"
 [ -n "$LOG_COUNT" ] || LOG_COUNT=0
@@ -506,11 +542,24 @@ INFRA_LIST="$WORK/infra.txt"
 : > "$CLEAN_LIST"
 : > "$INFRA_LIST"
 
+# One iteration per translation unit, so every fork here is paid 233 times
+# in sequence. The status is read with `read` rather than `cat`, and the
+# common case — the compiler exited 0 having written NOTHING — is answered
+# without forking awk: classify.awk over a zero-byte log counts no errors
+# and no driver failures, so it prints CLEAN, and compile_result_kind maps
+# (rc 0, CLEAN) to CLEAN. Any log with content at all still goes through the
+# real classifier.
 while IFS= read -r src; do
     [ -n "$src" ] || continue
     log="$OUT_DIR/${src}.log"
     rcf="$OUT_DIR/${src}.rc"
-    rc="$(cat "$rcf" 2>/dev/null || echo missing)"
+    rc=missing
+    read -r rc < "$rcf" 2>/dev/null || rc=missing
+    [ -n "$rc" ] || rc=missing
+    if [ "$rc" = 0 ] && [ ! -s "$log" ]; then
+        echo "$src" >> "$CLEAN_LIST"
+        continue
+    fi
     kind="$(compile_result_kind "$log" "$rc")"
     case "$kind" in
         CLEAN)

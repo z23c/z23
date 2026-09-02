@@ -92,9 +92,20 @@
 #   --sites                print every diagnostic the tree currently produces
 #                          (the to-do list the baseline summarizes).
 #
+# PER-TU RESULT CACHE: the sweep runs through tools/lint/tu_result_cache.sh,
+# which stores each translation unit's exit status and byte-exact compiler
+# log under .cache/lint-tu/ and replays them when nothing that TU can see
+# has changed. The grading below is unaware of it: a replay writes the same
+# bytes into the same files a fresh compile would have. Measured on the dev
+# reference host, script wall over 2104 TUs: 7.3 s uncached, 1.9 s fully
+# warm, 1.9 s after editing one .c (2103 hit, 1 miss). ZCL_LINT_TU_CACHE=0
+# turns it off; run_lint.sh --cold-audit turns it off for you. See that
+# file's header for why the key is sound.
+#
 # Env:
 #   ZCL_CC             compiler to run (default: clang; gcc also supported)
 #   ZCL_CC_JOBS        parallel workers (default: nproc, capped at 32)
+#   ZCL_LINT_TU_CACHE=0  bypass the per-TU result cache (default: on)
 #   ZCL_PORTABILITY_SCOPE
 #       Path to a file of repo-relative paths (one per line) — normally the
 #       set of files a pull request touched. When set:
@@ -117,6 +128,8 @@ cd "$ROOT"
 . tools/lint/gate_lib.sh
 # shellcheck source=tools/lint/repo_shape.sh
 . tools/lint/repo_shape.sh
+# shellcheck source=tools/lint/tu_result_cache.sh
+. tools/lint/tu_result_cache.sh
 
 CC_BIN="${ZCL_CC:-clang}"
 # Overridable so --self-test can aim the parse at a deliberately truncated
@@ -390,6 +403,13 @@ if [ "${ZCL_CLANG_PORTABILITY_COVERAGE:-1}" = "1" ]; then
         "A named file is a compiled source this gate never reached. Check that its layer still appears in APP_DIRS/LIB_MODULES/CORE_CONTEXTS/DOMAIN_CONTEXTS/APPLICATION_CONTEXTS as $MAKEFILE and engine/composition/lib_module_order.def define them — a layer that drops out of those lists drops out of this gate silently."
 fi
 
+# ── The exact per-TU flag list ───────────────────────────────────────────
+# Written here rather than beside the xargs loop below because it is also
+# the flag identity the per-TU result cache keys on, and --self-test proves
+# that cache against this gate's REAL flag set before the sweep runs.
+printf '%s\0' "${WARN_FLAGS[@]}" "${BUILD_ENV_FLAGS[@]}" "${DEFINES[@]}" \
+    "${INC_FLAGS[@]}" > "$WORK/flags.nul"
+
 # ── Self-test: prove the flag set actually rejects a violation ────────────
 if [ "${1:-}" = "--self-test" ]; then
     probe="$WORK/probe.c"
@@ -487,6 +507,14 @@ PROBE
     echo "  OK: --self-test — flag set trips on a violation, passes clean code;"
     echo "      a layer emptied from the Makefile parse is UNPROVEN exit 2 (not"
     echo "      clean, and invisible to SRC_FLOOR), a stale allowance is exit 1"
+
+    # The per-TU result cache, proven against this gate's real compiler and
+    # real flag set. A cache that served a stale verdict would make every
+    # sentence above hollow, so it is graded in the same breath.
+    tu_cache_selftest check-clang-portability \
+        "$PWD/tools/lint/check_clang_portability.sh" "$CC_BIN" \
+        "$WORK/flags.nul" "$WORK" \
+        "$(grep -v '^tools/dev/source_identity_batch\.c$' "$SRC_LIST" | head -1)"
     exit 0
 fi
 
@@ -498,7 +526,14 @@ JOBS="${ZCL_CC_JOBS:-$(nproc 2>/dev/null || echo 4)}"
 LOG="$WORK/clang.log"
 OUT_DIR="$WORK/out"
 mkdir -p "$OUT_DIR"
-printf '%s\0' "${WARN_FLAGS[@]}" "${BUILD_ENV_FLAGS[@]}" "${DEFINES[@]}" "${INC_FLAGS[@]}" > "$WORK/flags.nul"
+
+# Per-TU result cache. Its key covers this script, the helper, the compiler
+# identity, the flag list above, the whole include set and the TU's own
+# bytes, so a hit replays the exact rc and log a fresh compile would have
+# written and every stage below this line is unaware it happened.
+tu_cache_setup check-clang-portability \
+    "$PWD/tools/lint/check_clang_portability.sh" "$CC_BIN" \
+    "$WORK/flags.nul" "$WORK"
 
 # One clang per TU, N at a time, each writing to its OWN file. Concurrent
 # writers sharing one fd tear their output once a diagnostic block exceeds
@@ -507,7 +542,8 @@ printf '%s\0' "${WARN_FLAGS[@]}" "${BUILD_ENV_FLAGS[@]}" "${DEFINES[@]}" "${INC_
 #
 xargs -a "$SRC_LIST" -P "$JOBS" -n 1 -I '{}' \
     env ZCL_GATE_FLAGS="$WORK/flags.nul" ZCL_GATE_CC="$CC_BIN" ZCL_GATE_OUT="$OUT_DIR" \
-    bash -c 'mapfile -t -d "" f < "$ZCL_GATE_FLAGS"
+    bash -c '. "$ZCL_TU_CACHE_LIB"
+             mapfile -t -d "" f < "$ZCL_GATE_FLAGS"
              # This standalone helper is intentionally unbuildable without
              # the input identity injected by its bootstrap script.  The
              # portability pass is syntax-only and has no source snapshot to
@@ -517,17 +553,17 @@ xargs -a "$SRC_LIST" -P "$JOBS" -n 1 -I '{}' \
              if [ "$1" = tools/dev/source_identity_batch.c ]; then
                  f+=("-DZCL_SOURCE_IDENTITY_BATCH_INPUT_ID=\"0000000000000000000000000000000000000000000000000000000000000000\"")
              fi
-             k="$(printf "%s" "$1" | tr -c "[:alnum:]" "_")"
+             # Same mapping the reader below uses, spelled as a bash
+             # expansion instead of `printf | tr`: two forks per TU that a
+             # 2104-file sweep pays 4208 times for nothing.
+             k="${1//[^[:alnum:]]/_}"
              o="$ZCL_GATE_OUT/$k.log"
              r="$ZCL_GATE_OUT/$k.rc"
-             set +e
-             "$ZCL_GATE_CC" "${f[@]}" "$1" > "$o" 2>&1
-             rc=$?
-             set -e
-             printf "%s\n" "$rc" > "$r"
+             tu_cache_run "$o" "$r" "$ZCL_GATE_CC" "${f[@]}" "$1"
              exit 0' _ '{}' \
     >/dev/null 2>&1
 cat "$OUT_DIR"/*.log > "$LOG" 2>/dev/null
+tu_cache_summary
 
 # Every TU must have produced a log file. A missing one means its worker
 # never ran (fork failure, ENOSPC) and its diagnostics would be invisible.
@@ -540,13 +576,31 @@ gate_require_scanned "$RC_COUNT" "$SRC_COUNT" check-clang-portability \
 
 INFRA="$WORK/compiler-infrastructure.txt"
 : > "$INFRA"
+# This loop runs once per translation unit, so every fork inside it is paid
+# 2104 times in sequence: `cat`+`tr`+`printf` plus the two greps inside
+# compiler_result_proven measured 11.2 s of the gate's wall, more than the
+# entire parallel compile once the per-TU cache is warm. The bodies below
+# are the SAME decisions expressed as bash builtins:
+#   * "$src" mapped through the same non-alnum-to-underscore rule the worker
+#     uses, as a parameter expansion instead of `printf | tr`;
+#   * the status read with `read`, not `cat`;
+#   * the overwhelmingly common case — the compiler exited 0 and wrote
+#     NOTHING — short-circuited before compiler_result_proven, which on an
+#     empty log can only take that same path: neither of its greps can match
+#     a zero-byte file, and rc=0 with no error line is exactly its "proven"
+#     answer. A log with any content at all still goes through the full
+#     classifier.
 while IFS= read -r src; do
     [ -n "$src" ] || continue
-    key="$(printf '%s' "$src" | tr -c '[:alnum:]' '_')"
+    key="${src//[^[:alnum:]]/_}"
     log="$OUT_DIR/$key.log"
     status="$OUT_DIR/$key.rc"
-    rc="$(cat "$status" 2>/dev/null || true)"
+    rc=""
+    read -r rc < "$status" 2>/dev/null || rc=""
     case "$rc" in ''|*[!0-9]*) proven=false ;; *) proven=true ;; esac
+    if [ "$proven" = true ] && [ "$rc" = 0 ] && [ ! -s "$log" ]; then
+        continue
+    fi
     if [ "$proven" = true ] && compiler_result_proven "$log" "$rc"; then
         continue
     fi
