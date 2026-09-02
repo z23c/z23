@@ -46,7 +46,7 @@ Darwin)
     observed_pid="${record#${record%%[![:space:]]*}}"
     observed_pid="${observed_pid%%[[:space:]]*}"
     [ "$observed_pid" = "$pid" ] || exit 1
-    printf '%s' "$record" | sha256sum | awk '{print $1}'
+    printf '%s' "$record" | shasum -a 256 | awk '{print $1}'
     ;;
 *)
     exit 2
