@@ -980,17 +980,6 @@ static int test_bf_confined_worker(void)
             &ndb, dir, dir, action_id, id_d, secret, pubkey, &receipt, NULL);
         if (!executed.ok)
             printf("worker detail: %s\n", executed.message);
-#if defined(__APPLE__)
-        /* The worker requires Linux's full Landlock confinement.  Darwin may
-         * capture and identify Apple Clang, but that does not grant an
-         * equivalent execution sandbox; refusal is the honest contract. */
-        ASSERT(!executed.ok);
-        ASSERT(strstr(executed.message, "LOCAL_FALLBACK") != NULL);
-        node_db_close(&ndb);
-        test_rm_rf(dir);
-        PASS();
-        goto _test_next;
-#endif
         ASSERT(executed.ok);
         ASSERT(db_build_action_find(&ndb, action_id, &action));
         ASSERT_STR_EQ(action.state, "VERIFYING");
@@ -1054,8 +1043,15 @@ static int test_bf_confined_worker(void)
                                       &object_len), 0);
         ASSERT(vcs_build_artifact_manifest_v1_verify_chunk(
             &manifest, 0, object, object_len));
+#if defined(__APPLE__)
+        ASSERT(object_len >= 16 && object[0] == 0xcf && object[1] == 0xfa &&
+               object[2] == 0xed && object[3] == 0xfe &&
+               object[4] == 0x0c && object[7] == 0x01 &&
+               object[12] == 0x01 && object[13] == 0x00);
+#else
         ASSERT(object_len >= 20 && object[0] == 0x7f && object[1] == 'E' &&
                object[16] == 1 && object[18] == 62);
+#endif
         free(object);
 
         /* A clean shadow is a second signed receipt for this SAME action,
@@ -1524,14 +1520,6 @@ static int test_bf_confined_test_worker(void)
         struct zcl_result executed = build_fabric_worker_execute(
             &ndb, dir, dir, action_id, id_d, secret, pubkey, &receipt, NULL);
         if (!executed.ok) printf("test worker detail: %s\n", executed.message);
-#if defined(__APPLE__)
-        ASSERT(!executed.ok);
-        ASSERT(strstr(executed.message, "LOCAL_FALLBACK") != NULL);
-        node_db_close(&ndb);
-        test_rm_rf(dir);
-        PASS();
-        goto _test_next;
-#endif
         ASSERT(executed.ok);
         ASSERT_EQ(receipt.exit_status, 0);
         ASSERT(receipt.work_receipt_sha3[0] == '\0');
