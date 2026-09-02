@@ -94,7 +94,7 @@ Related targets:
 |---|---|
 | `make arena-demo` | play, verify, check the pinned roots, refuse a tampered replay |
 | `make arena-view` | play the demo, write the 1280×720 Inter HUD PNG, and open the optional raylib window when present (`REPLAY=` to view a file) |
-| `make arena-view-check` | refuse incomplete argv; re-derive the pinned demo roots; write and byte-compare a 1280×720 PNG (no raylib, no window) |
+| `make arena-view-check` | refuse incomplete argv; re-derive the pinned demo roots; prove `--check-only` writes no file; write and byte-compare a 1280×720 PNG (no raylib, no window) |
 | `make tools/arena-frame` | hosted C23 1280×720 PNG compositor (`arena_frame --replay f --png out.png`) |
 | `make tools/zdogview` | C23 integer 3D CLI: `zdogview verify` / `zdogview render --out f.ppm` |
 | `make arena-svg` | regenerate `docs/assets/zcode-arena.svg` from a freshly verified match |

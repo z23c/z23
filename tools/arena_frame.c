@@ -7,6 +7,8 @@
  *   arena_frame --replay <file> [--png <out.png>] [--check-only]
  *               [--red-label <text>] [--blue-label <text>] [--tick <n>]
  *
+ *   --check-only    verify and print roots; write no PNG
+ *
  * Exit: 0 ok; 1 replay mismatch; 2 usage; 4 runtime failure.
  */
 #include <errno.h>
@@ -233,6 +235,16 @@ int main(int argc, char **argv)
     zcl_hex_encode(replay_root, SHA3_256_OUTPUT_SIZE, rr);
     zcl_hex_encode(state_root, SHA3_256_OUTPUT_SIZE, sr);
 
+    if (check_only) {
+        printf("verified replay=%s ticks=%llu events=%u score=%u-%u "
+               "winner=%s replay_root=%s state_root=%s\n",
+               replay, (unsigned long long)v.recorded_ticks, v.num_kills,
+               v.final_m.score[0], v.final_m.score[1],
+               af_winner(v.final_m.winner), rr, sr);
+        free(buf);
+        return 0;
+    }
+
     zdog_match match;
     const uint64_t at = have_tick ? tick : v.recorded_ticks;
     const int src = zdogview_seek(buf, len, &v, at, &match);
@@ -291,7 +303,6 @@ int main(int argc, char **argv)
            replay, (unsigned long long)v.recorded_ticks, v.num_kills,
            v.final_m.score[0], v.final_m.score[1], af_winner(v.final_m.winner),
            rr, sr, ARENA_HUD_WIDTH, ARENA_HUD_HEIGHT);
-    (void)check_only;
     free(rgb);
     free(buf);
     return 0;

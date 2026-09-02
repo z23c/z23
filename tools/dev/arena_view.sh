@@ -95,9 +95,26 @@ if [ "${CHECK:-}" = 1 ]; then
         [ "$(head -1 "$ppm")" = "P6" ] || av_die "hosted view is not a P6 PPM"
     fi
     rm -f "$PNG_OUT" "$PNG_OUT_B"
+    # --check-only must verify and print roots while writing nothing, even
+    # with --png on the command line (it was once parsed and discarded, so
+    # the name promised a check the tool never performed).
     report="$("$FRAME" --replay "$REPLAY_OUT" --check-only --png "$PNG_OUT" \
         --red-label "$RED_LABEL" --blue-label "$BLUE_LABEL")"
     printf '%s\n' "$report"
+    case "$report" in
+        *"replay_root=$REF_REPLAY_ROOT"*) ;;
+        *) av_die "check-only replay root mismatch: $report" ;;
+    esac
+    case "$report" in
+        *"state_root=$REF_STATE_ROOT"*) ;;
+        *) av_die "check-only state root mismatch: $report" ;;
+    esac
+    case "$report" in
+        *"png="*) av_die "--check-only report claims a PNG it must not write: $report" ;;
+    esac
+    [ ! -e "$PNG_OUT" ] || av_die "--check-only wrote $PNG_OUT anyway"
+    report="$("$FRAME" --replay "$REPLAY_OUT" --png "$PNG_OUT" \
+        --red-label "$RED_LABEL" --blue-label "$BLUE_LABEL")"
     case "$report" in
         *"replay_root=$REF_REPLAY_ROOT"*) ;;
         *) av_die "replay root mismatch: $report" ;;
