@@ -3404,19 +3404,6 @@ static int test_zd_improve_command(void)
         struct zcl_result executed_compile = build_fabric_worker_execute(
             &ndb, workspace, workspace, action_id, lease_hex, worker_secret,
             worker_key, &receipt, NULL);
-#ifdef __APPLE__
-        ASSERT(!executed_compile.ok);
-        ASSERT(strstr(executed_compile.message, "landlock-unavailable") !=
-                   NULL);
-        ASSERT(db_build_action_find(&ndb, action_id, &action));
-        ASSERT_STR_EQ(action.state, "LOCAL_FALLBACK");
-        node_db_close(&ndb);
-        zcl_command_reply_free(&reply);
-        json_free(&input);
-        test_rm_rf(dir);
-        PASS();
-        goto _test_next;
-#endif
         ASSERT_RESULT_OK(executed_compile);
         ASSERT(build_fabric_receipt_admit(
             &ndb, workspace, receipt.receipt_id, now + 1).ok);
@@ -3848,7 +3835,14 @@ static int test_zd_improve_command(void)
             &ndb, workspace, workspace, fuzz_fail_action_id, fail_lease_hex,
             worker_secret, worker_key, &fuzz_fail_receipt, NULL);
         ASSERT_RESULT_OK(executed_fuzz_fail);
+#if defined(__APPLE__)
+        /* Relocated Apple platform utilities that return failure are killed
+         * by the kernel under Seatbelt; the closed receipt represents a
+         * signaled target as 255.  The durable outcome below remains FAIL. */
+        ASSERT_EQ(fuzz_fail_receipt.exit_status, 255);
+#else
         ASSERT_EQ(fuzz_fail_receipt.exit_status, 1);
+#endif
         ASSERT(db_build_action_find(&ndb, fuzz_fail_action_id,
                                     &fuzz_fail_action));
         ASSERT_STR_EQ(fuzz_fail_action.state, "VERIFYING");

@@ -221,12 +221,35 @@ static uint8_t *bfw_read_output(const char *path, size_t *len_out)
     *len_out = len;
     return bytes;
 }
+#if !defined(__APPLE__)
 static bool bfw_elf_relocatable_x86_64(const uint8_t *bytes, size_t len)
 {
     return bytes && len >= 64 && bytes[0] == 0x7f && bytes[1] == 'E' &&
            bytes[2] == 'L' && bytes[3] == 'F' && bytes[4] == 2 &&
            bytes[5] == 1 && bytes[6] == 1 && bytes[16] == 1 &&
            bytes[17] == 0 && bytes[18] == 62 && bytes[19] == 0;
+}
+#else
+static bool bfw_macho_relocatable_arm64(const uint8_t *bytes, size_t len)
+{
+    /* Thin, little-endian Mach-O 64: MH_MAGIC_64, CPU_TYPE_ARM64,
+     * MH_OBJECT.  The fixed compiler action emits a native relocatable, not
+     * the Linux ELF object checked by the other host path. */
+    return bytes && len >= 32 && bytes[0] == 0xcf && bytes[1] == 0xfa &&
+           bytes[2] == 0xed && bytes[3] == 0xfe && bytes[4] == 0x0c &&
+           bytes[5] == 0x00 && bytes[6] == 0x00 && bytes[7] == 0x01 &&
+           bytes[12] == 0x01 && bytes[13] == 0x00 && bytes[14] == 0x00 &&
+           bytes[15] == 0x00;
+}
+#endif
+
+static bool bfw_native_relocatable(const uint8_t *bytes, size_t len)
+{
+#if defined(__APPLE__)
+    return bfw_macho_relocatable_arm64(bytes, len);
+#else
+    return bfw_elf_relocatable_x86_64(bytes, len);
+#endif
 }
 struct bfw_cancel_context {
     struct node_db *ndb;
@@ -544,14 +567,18 @@ struct zcl_result build_fabric_worker_execute(
         output_valid = build_fabric_test_evidence_parse(
             output, output_len, &work_status, &work_exit_status).ok;
     else
-        output_valid = bfw_elf_relocatable_x86_64(output, output_len);
+        output_valid = bfw_native_relocatable(output, output_len);
     if (!output || !output_valid) {
         free(output); bfw_paths_cleanup(&paths);
         return bfw_fail(ndb, action_id, lease_id,
                         package_action ? "package-build-report-invalid"
                         : fuzz_action ? "fuzz-evidence-invalid"
                         : test_action ? "test-evidence-invalid"
+#if defined(__APPLE__)
+                                      : "output-macho-invalid");
+#else
                                       : "output-elf-invalid");
+#endif
     }
     int64_t output_verify_us =
         platform_time_monotonic_us() - output_verify_started_us;

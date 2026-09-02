@@ -153,6 +153,11 @@ static int pv_main_windows(void)
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#if defined(__APPLE__)
+#include <libkern/OSByteOrder.h>
+#include <mach-o/fat.h>
+#include <mach-o/loader.h>
+#endif
 #if defined(__linux__)
 #include <sys/syscall.h>
 #endif
@@ -2810,8 +2815,61 @@ static int pv_zbuild_compile_mode(int argc, char **argv)
     return 0;
 }
 
-static bool pv_zbuild_test_elf(const char *path)
+static bool pv_zbuild_test_native_executable(const char *path)
 {
+#if defined(__APPLE__)
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return false;
+    struct stat st;
+    uint32_t magic = 0;
+    bool ok = fstat(fd, &st) == 0 && S_ISREG(st.st_mode) &&
+              st.st_size >= (off_t)sizeof(struct mach_header_64) &&
+              pread(fd, &magic, sizeof(magic), 0) == sizeof(magic);
+    off_t header_offset = 0;
+    if (ok && (magic == FAT_MAGIC || magic == FAT_CIGAM)) {
+        struct fat_header fat;
+        ok = pread(fd, &fat, sizeof(fat), 0) == sizeof(fat);
+        bool swap = magic == FAT_CIGAM;
+        uint32_t count = swap ? OSSwapInt32(fat.nfat_arch) : fat.nfat_arch;
+        ok = ok && count > 0 && count <= 64;
+        bool found = false;
+        for (uint32_t i = 0; ok && i < count; i++) {
+            struct fat_arch arch;
+            off_t at = (off_t)sizeof(fat) +
+                       (off_t)i * (off_t)sizeof(arch);
+            if (pread(fd, &arch, sizeof(arch), at) != sizeof(arch)) {
+                ok = false;
+                break;
+            }
+            cpu_type_t cpu = swap
+                ? (cpu_type_t)OSSwapInt32((uint32_t)arch.cputype)
+                : arch.cputype;
+            if (cpu != CPU_TYPE_ARM64) continue;
+            uint32_t offset = swap ? OSSwapInt32(arch.offset) : arch.offset;
+            uint32_t size = swap ? OSSwapInt32(arch.size) : arch.size;
+            if ((uint64_t)offset > (uint64_t)st.st_size ||
+                (uint64_t)size > (uint64_t)st.st_size - offset ||
+                size < sizeof(struct mach_header_64)) {
+                ok = false;
+                break;
+            }
+            header_offset = (off_t)offset;
+            found = true;
+            break;
+        }
+        ok = ok && found;
+    }
+    struct mach_header_64 header;
+    if (ok)
+        ok = pread(fd, &header, sizeof(header), header_offset) ==
+             sizeof(header) && header.magic == MH_MAGIC_64 &&
+             header.cputype == CPU_TYPE_ARM64 &&
+             header.filetype == MH_EXECUTE &&
+             (uint64_t)header_offset + sizeof(header) + header.sizeofcmds <=
+                 (uint64_t)st.st_size;
+    bool close_ok = close(fd) == 0;
+    return ok && close_ok;
+#else
     uint8_t header[20];
     FILE *f = fopen(path, "rb");
     if (!f) return false;
@@ -2824,6 +2882,7 @@ static bool pv_zbuild_test_elf(const char *path)
         (header[16] == 2 || header[16] == 3) && header[17] == 0 &&
         header[18] == 62 && header[19] == 0;
     return ok;
+#endif
 }
 
 static bool pv_zbuild_test_write_evidence(
@@ -2891,7 +2950,8 @@ static int pv_zbuild_test_mode(int argc, char **argv)
         !output_base || strcmp(output_base + 1, "test.evidence.v1") != 0)
         return 2;
     char input[4096];
-    if (!realpath(input_arg, input) || !pv_zbuild_test_elf(input))
+    if (!realpath(input_arg, input) ||
+        !pv_zbuild_test_native_executable(input))
         return 3;
     char build_arg[4096];
     size_t build_len = (size_t)(output_base - output_arg);
@@ -2961,7 +3021,8 @@ static int pv_zbuild_test_mode(int argc, char **argv)
     return 0;
 }
 
-/* Fixed deterministic fuzz ABI: execute one exact ELF for seeds [0,N), with
+/* Fixed deterministic fuzz ABI: execute one exact native binary for seeds
+ * [0,N), with
  * the sole argv "--seed=<u32>" and matching ZCODE_FUZZ_SEED. The environment
  * is otherwise scrubbed by pv_run_child. A target failure is evidence; a
  * confinement/launch failure is not. */
@@ -3026,7 +3087,8 @@ static int pv_zbuild_fuzz_mode(int argc, char **argv)
         !output_base || strcmp(output_base + 1, VCS_BUILD_FUZZ_OUTPUT_V1) != 0)
         return 2;
     char input[4096];
-    if (!realpath(input_arg, input) || !pv_zbuild_test_elf(input)) return 3;
+    if (!realpath(input_arg, input) ||
+        !pv_zbuild_test_native_executable(input)) return 3;
     char build_arg[4096];
     size_t build_len = (size_t)(output_base - output_arg);
     if (build_len == 0 || build_len >= sizeof(build_arg)) return 2;
