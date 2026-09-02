@@ -459,8 +459,18 @@ main() {
     # outer worker to auto-detect the full CPU count multiplies into dozens
     # of cc1/clang children (and OOM/backend crashes) on large Windows hosts.
     # Explicit operator overrides remain available for standalone profiling;
-    # the umbrella's safe default is one nested worker per running gate.
-    export ZCL_CC_JOBS="${ZCL_CC_JOBS:-1}"
+    # the umbrella's safe default is one nested worker per running gate —
+    # EXCEPT the two compiler-sweep gates (check-clang-portability,
+    # check-windows-cross-syntax), which are the ONLY readers of
+    # ZCL_CC_JOBS anywhere in the tree (nothing else greps for it), so
+    # raising their default here is already scoped to them without
+    # touching how any other gate is dispatched: every other gate simply
+    # never looks at this variable, at any value.
+    case " ${gates[*]} " in
+        *' check-clang-portability '*|*' check-windows-cross-syntax '*)
+            export ZCL_CC_JOBS="${ZCL_CC_JOBS:-6}" ;;
+        *) export ZCL_CC_JOBS="${ZCL_CC_JOBS:-1}" ;;
+    esac
     export ZCL_TOOLS_LINK_JOBS="${ZCL_TOOLS_LINK_JOBS:-1}"
     export ZCL_FUZZ_REPLAY_JOBS="${ZCL_FUZZ_REPLAY_JOBS:-1}"
 
