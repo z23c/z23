@@ -564,6 +564,33 @@ static int case_miner(void)
         ER_CHECK("a diff naming no file yields no candidate",
                  !zcl_rule_mine_candidate(&pairs[0], "no files here\n", 14,
                                           &empty));
+
+        /* Three receipts, ONE task, pass then fail then pass. The earlier
+         * PASS is not an earlier failure: the header's rule — first failure
+         * paired with the first later pass — still has exactly one pair to
+         * emit, and dropping it would throw away the only lesson the task
+         * taught. */
+        struct zcl_rule_receipt_log *trio = calloc(1, sizeof *trio);
+        ER_CHECK("the pass-fail-pass trio log allocates", trio != NULL);
+        if (trio) {
+            char task[65];
+            fx_hex(task, 't', 777u);
+            for (int i = 0; i < 3; i++) {
+                struct zcl_rule_receipt *r = &trio->r[i];
+                (void)snprintf(r->unit_id, sizeof r->unit_id, "u50%d", i);
+                memcpy(r->task_sha3, task, sizeof task);
+                r->gate_pass = (i != 1);
+                r->seq = (uint32_t)(i + 1);
+            }
+            trio->count = 3;
+            struct zcl_rule_mine_pair tp[4];
+            uint32_t tn = zcl_rule_mine_pairs(trio, tp, 4);
+            ER_CHECK("a pass before the fail does not eat the pair", tn == 1u);
+            ER_CHECK("the pair is the first fail with the first later pass",
+                     tn == 1u && strcmp(tp[0].fail_unit, "u501") == 0 &&
+                     strcmp(tp[0].pass_unit, "u502") == 0);
+            free(trio);
+        }
     }
     free(parsed);
     free(log);

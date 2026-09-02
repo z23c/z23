@@ -34,10 +34,14 @@ uint32_t zcl_rule_mine_pairs(const struct zcl_rule_receipt_log *log,
 
         /* The FIRST failure of this task only. A task that failed three times
          * before passing is one lesson, not three, and emitting it three times
-         * would weight the candidate by how stubborn the task was. */
+         * would weight the candidate by how stubborn the task was. Only an
+         * earlier FAILURE counts: an earlier PASS of the same task is not a
+         * lesson this failure would duplicate — the triple pass, fail, pass
+         * still yields its one pair. */
         bool earlier_fail = false;
         for (uint32_t k = 0; k < i; k++)
-            if (strcmp(log->r[k].task_sha3, f->task_sha3) == 0)
+            if (!log->r[k].gate_pass &&
+                strcmp(log->r[k].task_sha3, f->task_sha3) == 0)
                 { earlier_fail = true; break; }
         if (earlier_fail) continue;
 
