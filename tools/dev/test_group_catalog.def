@@ -5,6 +5,7 @@
  * is transcript order and therefore stable evidence. */
 
 ZCL_TEST_GROUP(hex_codec)
+ZCL_TEST_GROUP(build_profile)
 ZCL_TEST_GROUP(code_inventory)
 ZCL_TEST_GROUP(code_ontology)
 ZCL_TEST_GROUP(code_semantic_candidate)

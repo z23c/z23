@@ -281,6 +281,58 @@ records bind exact bytes, toolchain, flags, and mutation state. Never fabricate
 or pass `BUILD_SOURCE_RECORD` or `ZCL_FAST_BUILD_SOURCE_RECORD`; the owning
 build process captures and verifies them.
 
+### Fast dev builds
+
+The compiler-speed loop is `make dev` or `ZCL_PROFILE=dev make`. It writes
+`build/bin/z23.dev` — a name `make ship` and `make deploy` refuse — into its
+own epoch under `build/dev-obj/`. Release objects stay in `build/node-obj/`
+with `-flto` unchanged. The hyphenated `build/bin/z23-dev` remains a
+watch-loop alias of that unsippable file.
+
+On this host (32 cores, GCC 14.2, existing `~/.cache/zcc`, `make -j8`):
+
+| Target | Kind | Wall | CPU (user+sys) | Compile | Link | zcc keyed hit rate |
+|---|---|---:|---:|---:|---:|---:|
+| `z23` (release, LTO) | cold objects | 66.4 s | 582 s | ~40 s | ~20–49 s | 10.2% (216/2123) |
+| `z23` | warm, one `.c` touch | 44.6 s | 362 s | cache hit | ~45 s LTO | 2 hits / 2 misses (link miss) |
+| `z23` | link only | 48.7 s | 371 s | none | ~49 s LTO | 0% (link is uncached LTO) |
+| `dev` (non-LTO, gold) | warm, one `.c` touch | 21–38 s | ~23 s | 1 TU | ~22 s non-LTO + publish | n/a (1 keyed compile) |
+| `dev` | fresh epoch after `-MT` fix | 20.9 s | ~22 s | cache copies | non-LTO link | shares the 99.8% below |
+| `t-fast ONLY=hex_codec` | cold harness, before `-MT` fix | 167.2 s | 980 s | ~164 s | ~3 s | **0.0%** (2/5385) |
+| `t-fast ONLY=hex_codec` | warm, one test-file touch | 39.9–42.3 s | 49–51 s | 1 TU + identity | full harness | 12.5% (1/8) |
+| `t-fast ONLY=build_profile` | new epoch after `-MT` fix | 77.4 s | 95 s | cache copy | ~3 s + identity | **99.8%** (5372/5383) |
+
+What the numbers say:
+
+- The release one-file edit is an LTO link, not a compile. `-g` vs `-g3` is
+  not that link. The 78 MiB `.debug` sidecar is split off the 30 MiB
+  stripped `z23`; debug info is not the warm path.
+- The test-fast profile is already non-LTO, so its cold 167 s was 3239 TUs
+  missing the compile cache. The top miss cause was `-MT` carrying the
+  compile-epoch hash: a new epoch (Makefile/toolchain/flag change) invalidated
+  every object even though `-ffile-prefix-map` already normalised cwd for
+  non-LTO compiles. After the cache rewrites the depfile target, a comment-only
+  Makefile epoch is a 99.8% hit. Remaining misses are identity (`clientversion.o`),
+  the epoch-stamped `test_parallel.o`, links, and toolchain probes. Generated
+  headers that rewrite identical bytes are already guarded by
+  `templates-no-touch-selftest`.
+- `make t-fast ONLY=<group>` still links the full harness (node sources plus
+  121 `tools/command/*.c` objects). A per-group link set is not cheap: the
+  runner includes the command registry. Module mode (`make t-hotswap`) is the
+  existing skip-the-relink path; this lane does not own that loop.
+- The dev link is selected by `tools/dev/dev-linker-select.sh`, which
+  re-probes `cc -fuse-ld=<name>` with a tiny link on every parse (mold, lld,
+  gold order). A cached selection once outlived an uninstalled mold and broke
+  every dev link with `collect2: cannot find 'ld'`; the probe cannot go
+  stale. On this host only gold is present. The one-file dev wall time
+  includes epoch publish/verify machinery outside this lane; the visible
+  compile+link+publish completes in ~7 s, the quiet epoch bookkeeping the
+  rest.
+
+Use `make -s print-CFLAGS` / `print-DEV-CFLAGS` / `print-build-flags` to
+inspect the two flag sets. `make t-fast ONLY=build_profile` pins that release
+still has `-flto` and that the dev artifact cannot be shipped.
+
 Ask the node for this loop; do not remember it:
 
 ```bash
@@ -292,6 +344,7 @@ z23 code tests <file.c>
 Use the narrowest honest loop:
 
 ```bash
+make -j"$(nproc)" dev
 make -j"$(nproc)" t-fast ONLY=<substring from code tests>
 make lint-fast
 ```
