@@ -28,6 +28,8 @@
 #include "json/json.h"
 #include "sha3/sha3.h"
 
+#include <errno.h>
+#include <fcntl.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -930,26 +932,101 @@ static bool write_whole(const char *path, const char *data, size_t len)
  * are flushed and fsynced, and a single rename publishes them. A crash, an
  * ENOSPC or a kill before the rename leaves the original standing — the
  * failure this exists to prevent is a truncated rule_vocab.def, and a
- * truncate-in-place `fopen(path, "wb")` produces exactly that. */
-bool zcl_rule_def_rewrite(const char *path, const char *new_text,
-                          size_t new_len)
+ * truncate-in-place `fopen(path, "wb")` produces exactly that.
+ *
+ * The rewrite was DECIDED from `old_text`, the bytes the caller read. If
+ * the live def is not still exactly those bytes, publishing would clobber
+ * an edit nobody scored. So before the rename the live def is re-read under
+ * an exclusive fcntl lock and its SHA3-256 compared against `old_text`'s;
+ * a mismatch refuses the whole write as STALE and leaves the file alone.
+ * The lock spans the compare AND the rename, so two writers following this
+ * same protocol cannot slip between each other's check and publish. */
+enum zcl_rule_rewrite_status
+zcl_rule_def_rewrite(const char *path, const char *old_text, size_t old_len,
+                     const char *new_text, size_t new_len)
 {
-    if (!path || !new_text) return false;
+    if (!path || !old_text || !new_text) return ZCL_RULE_REWRITE_ERR_ARGS;
 
     char tmp[1024];
     int tn = snprintf(tmp, sizeof tmp, "%s.tmp", path);
-    if (tn < 0 || (size_t)tn >= sizeof tmp) return false;
+    if (tn < 0 || (size_t)tn >= sizeof tmp) return ZCL_RULE_REWRITE_ERR_ARGS;
 
-    FILE *f = fopen(tmp, "wb");
-    if (!f) return false;
-    bool ok = fwrite(new_text, 1, new_len, f) == new_len &&
-              fflush(f) == 0 && fsync(fileno(f)) == 0;
-    if (fclose(f) != 0) ok = false;
-    if (!ok || rename(tmp, path) != 0) {
-        (void)unlink(tmp);
-        return false;
+    char *fresh = zcl_calloc(1, old_len + 1u, "rule_score");
+    if (!fresh) return ZCL_RULE_REWRITE_ERR_IO;
+
+    /* O_RDWR, never O_TRUNC: the fd is only a handle for the write LOCK
+     * (an exclusive fcntl lock requires a write-mode descriptor). */
+    int live = open(path, O_RDWR);
+    if (live < 0) { free(fresh); return ZCL_RULE_REWRITE_ERR_IO; }
+
+    struct flock fl = {
+        .l_type = F_WRLCK, .l_whence = SEEK_SET, .l_start = 0, .l_len = 0
+    };
+    enum zcl_rule_rewrite_status st = ZCL_RULE_REWRITE_ERR_IO;
+    if (fcntl(live, F_SETLKW, &fl) == 0) {
+        /* Fresh read under the lock, bounded by what the caller read: a
+         * file of a different length is already not the bytes the caller
+         * read, whatever they are. */
+        size_t got = 0;
+        bool read_err = false;
+        while (got < old_len) {
+            ssize_t r = read(live, fresh + got, old_len - got);
+            if (r < 0 && errno == EINTR) continue;
+            if (r < 0) { read_err = true; break; }
+            if (r == 0) break;
+            got += (size_t)r;
+        }
+        bool same_len = false;
+        if (!read_err && got == old_len) {
+            ssize_t one = read(live, fresh + got, 1);
+            if (one < 0 && errno == EINTR) one = read(live, fresh + got, 1);
+            if (one < 0) read_err = true;
+            else same_len = (one == 0);
+        }
+
+        if (read_err) {
+            st = ZCL_RULE_REWRITE_ERR_IO;
+        } else if (!same_len) {
+            st = ZCL_RULE_REWRITE_ERR_STALE;
+        } else {
+            unsigned char want[32], have[32];
+            zcl_sha3_256((const unsigned char *)old_text, old_len, want);
+            zcl_sha3_256((const unsigned char *)fresh, old_len, have);
+            if (memcmp(want, have, sizeof want) != 0) {
+                st = ZCL_RULE_REWRITE_ERR_STALE;
+            } else {
+                FILE *f = fopen(tmp, "wb");
+                bool ok = f != NULL;
+                if (ok) {
+                    ok = fwrite(new_text, 1, new_len, f) == new_len &&
+                         fflush(f) == 0 && fsync(fileno(f)) == 0;
+                    if (fclose(f) != 0) ok = false;
+                }
+                if (!ok || rename(tmp, path) != 0) {
+                    (void)unlink(tmp);
+                    st = ZCL_RULE_REWRITE_ERR_IO;
+                } else {
+                    st = ZCL_RULE_REWRITE_OK;
+                }
+            }
+        }
+        fl.l_type = F_UNLCK;
+        (void)fcntl(live, F_SETLK, &fl);
     }
-    return true;
+    (void)close(live);
+    free(fresh);
+    return st;
+}
+
+const char *zcl_rule_rewrite_status_label(enum zcl_rule_rewrite_status s)
+{
+    switch (s) {
+    case ZCL_RULE_REWRITE_OK:         return "published";
+    case ZCL_RULE_REWRITE_ERR_ARGS:   return "bad arguments";
+    case ZCL_RULE_REWRITE_ERR_IO:     return "write failed";
+    case ZCL_RULE_REWRITE_ERR_STALE:  return "stale read";
+    }
+    return "unknown";
 }
 
 /* One promotion patch file per promotable rule. The id carries '/' and ':',
@@ -1026,13 +1103,21 @@ bool zcl_rule_score_run(const char *vocab_path, const char *chainlog_path,
                                                         &out->scoring,
                                                         nbuf, cap);
             if (n > 0) {
-                if (zcl_rule_def_rewrite(vocab_path, nbuf, n))
+                enum zcl_rule_rewrite_status rw = zcl_rule_def_rewrite(
+                    vocab_path, def_text, def_len, nbuf, n);
+                if (rw == ZCL_RULE_REWRITE_OK)
                     out->retired_written = out->scoring.retire_count;
                 else if (!out->note[0])
                     (void)snprintf(out->note, sizeof out->note,
-                                   "refused to rewrite %s: the temp write, "
-                                   "the fsync or the rename failed; the "
-                                   "original def is untouched", vocab_path);
+                                   rw == ZCL_RULE_REWRITE_ERR_STALE
+                                       ? "refused to rewrite %s: the def "
+                                         "changed on disk since it was read; "
+                                         "the original stands"
+                                       : "refused to rewrite %s: the temp "
+                                         "write, the fsync or the rename "
+                                         "failed; the original def is "
+                                         "untouched",
+                                   vocab_path);
             }
             free(nbuf);
         }

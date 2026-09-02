@@ -38,12 +38,15 @@
  *  6. THE MINER FINDS THE ONE FAIL->PASS PAIR AND NAMES THE FILE THAT FIXED
  *     IT. Exactly one candidate, with exactly the text the template says.
  *
- *  7. THE DEF IS REWRITTEN ATOMICALLY OR NOT AT ALL. The new bytes go whole
- *     into a temp file and one rename publishes them, so a write that dies
- *     before the rename — an ENOSPC, a kill, a full disk — leaves the
- *     original vocabulary standing byte for byte. And a rewrite with the
- *     file's own bytes is a no-op in content: an idle pass of the loop can
- *     never cost a comma.
+ *  7. THE DEF IS REWRITTEN ATOMICALLY, OR NOT AT ALL. The new bytes go
+ *     whole into a temp file and one rename publishes them, so a write
+ *     that dies before the rename — an ENOSPC, a kill, a full disk —
+ *     leaves the original vocabulary standing byte for byte. A rewrite
+ *     with the file's own bytes is a no-op in content: an idle pass of
+ *     the loop can never cost a comma. And a rewrite decided from bytes
+ *     that are no longer on disk is refused WHOLE — the editor that
+ *     changed the file keeps its edit, typed as a stale read so nobody
+ *     goes hunting a broken temp file for a failure that was a refusal.
  *
  * The 50-receipt chainlog is generated here, deterministically, so this gate
  * needs no sibling lane to have run and no engine to have been dispatched.
@@ -562,7 +565,9 @@ static int case_rewrite(void)
 
     /* ---- idempotent: a rewrite carrying the file's own bytes ---- */
     ER_CHECK("rewriting the def with its own bytes succeeds",
-             zcl_rule_def_rewrite(vpath, k_fixture_vocab, klen));
+             zcl_rule_def_rewrite(vpath, k_fixture_vocab, klen,
+                                  k_fixture_vocab, klen) ==
+             ZCL_RULE_REWRITE_OK);
     size_t alen = 0;
     char *after = fx_read(vpath, &alen);
     ER_CHECK("and the file is byte-identical afterwards",
@@ -572,16 +577,39 @@ static int case_rewrite(void)
     struct stat sb;
     ER_CHECK("and no temp file was left behind", stat(tpath, &sb) != 0);
 
+    static const char k_replacement[] = "/* replacement bytes */\n";
+    size_t rlen = sizeof k_replacement - 1;
+
+    /* ---- stale read: the def changed after the caller read it. The
+     * rewrite was decided from OTHER bytes; publishing it here would
+     * clobber the edit that is standing on disk. The refusal must be the
+     * TYPED stale one, not a generic write failure, and must leave both
+     * the file and the temp name exactly as they were. */
+    static const char k_stale_old[] = "/* bytes nobody ever planted */\n";
+    ER_CHECK("a rewrite from bytes that are not on disk is refused",
+             zcl_rule_def_rewrite(vpath, k_stale_old, sizeof k_stale_old - 1,
+                                  k_replacement, rlen) ==
+             ZCL_RULE_REWRITE_ERR_STALE);
+    size_t slen = 0;
+    char *stood = fx_read(vpath, &slen);
+    ER_CHECK("and the editor's bytes still stand, untouched",
+             stood && slen == klen &&
+             memcmp(stood, k_fixture_vocab, klen) == 0);
+    free(stood);
+    ER_CHECK("and the refusal left no temp file behind",
+             stat(tpath, &sb) != 0);
+
     /* ---- crash safety: a write that dies BEFORE the rename. A directory
      * pre-empting the temp name makes the temp write itself fail — the same
      * observable state an ENOSPC or a kill mid-write leaves behind — and the
-     * assertion is the one that matters: the ORIGINAL is intact. */
+     * assertion is the one that matters: the ORIGINAL is intact. The
+     * refusal is the IO one: the bytes matched, the write failed. */
     ER_CHECK("the temp name is pre-empted so the write aborts",
              mkdir(tpath, 0755) == 0);
-    static const char k_replacement[] = "/* replacement bytes */\n";
-    ER_CHECK("the aborted rewrite is refused",
-             !zcl_rule_def_rewrite(vpath, k_replacement,
-                                   sizeof k_replacement - 1));
+    ER_CHECK("the aborted rewrite is refused as a write failure",
+             zcl_rule_def_rewrite(vpath, k_fixture_vocab, klen,
+                                  k_replacement, rlen) ==
+             ZCL_RULE_REWRITE_ERR_IO);
     size_t blen = 0;
     char *orig = fx_read(vpath, &blen);
     ER_CHECK("and the original def still stands, byte for byte",
@@ -589,6 +617,18 @@ static int case_rewrite(void)
              memcmp(orig, k_fixture_vocab, klen) == 0);
     free(orig);
     ER_CHECK("the pre-empted temp name is cleaned up", remove(tpath) == 0);
+
+    /* ---- and a matching stale window that PUBLISHES: same bytes read,
+     * same bytes on disk, different new text — the rename must land. */
+    ER_CHECK("a fresh rewrite publishes",
+             zcl_rule_def_rewrite(vpath, k_fixture_vocab, klen,
+                                  k_replacement, rlen) == ZCL_RULE_REWRITE_OK);
+    size_t plen2 = 0;
+    char *pub = fx_read(vpath, &plen2);
+    ER_CHECK("and the published bytes are the new ones",
+             pub && plen2 == rlen &&
+             memcmp(pub, k_replacement, rlen) == 0);
+    free(pub);
     return failures;
 }
 

@@ -11,7 +11,9 @@
  *   of runs and whose Wilson lower bound sits under its declared floor is
  *   turned off by rewriting engine/composition/rule_vocab.def — atomically:
  *   the new bytes land whole in a temp file and one rename publishes them, so
- *   a crash can cost a stray .tmp but never a truncated vocabulary. The
+ *   a crash can cost a stray .tmp but never a truncated vocabulary. And a
+ *   def that changed on disk after it was read is not rewritten at all: the
+ *   retirement was decided from bytes that are no longer the file's. The
  *   unit_ids of the receipts that killed it are written into the row, so the
  *   decision is auditable by a person reading a diff and revertible by
  *   deleting one line. The worst case of a wrong retirement is that an
@@ -327,15 +329,31 @@ bool zcl_rule_score_run(const char *vocab_path, const char *chainlog_path,
                         const char *state_dir, bool apply,
                         struct zcl_rule_run *out);
 
-/* Rewrite the def at `path` ATOMICALLY. The new bytes are written to
- * `<path>.tmp` in the same directory, flushed and fsynced, and ONE rename
- * publishes them over the original. The live def is never opened for writing
- * and never truncated: a crash, an ENOSPC or a kill at any point before the
- * rename leaves the original bytes standing and at worst a stray temp file,
- * which is unlinked on every detected failure. Returns false only when the
- * temp write, the fsync or the rename itself failed. */
-bool zcl_rule_def_rewrite(const char *path, const char *new_text,
-                          size_t new_len);
+/* Why a def rewrite was refused. A caller that collapsed these would tell
+ * an operator to fix a temp file when the real fault was that somebody else
+ * edited the vocabulary first. */
+enum zcl_rule_rewrite_status {
+    ZCL_RULE_REWRITE_OK = 0,
+    ZCL_RULE_REWRITE_ERR_ARGS,   /* NULL argument, or a path too long */
+    ZCL_RULE_REWRITE_ERR_IO,     /* the temp write, fsync or rename failed */
+    ZCL_RULE_REWRITE_ERR_STALE   /* the def changed on disk since it was read */
+};
+
+const char *zcl_rule_rewrite_status_label(enum zcl_rule_rewrite_status s);
+
+/* Rewrite the def at `path` ATOMICALLY, and only if it is still the bytes
+ * the caller READ. The new bytes are written to `<path>.tmp` in the same
+ * directory, flushed and fsynced, and ONE rename publishes them. Before
+ * that rename the live def is re-read under an exclusive fcntl lock and
+ * its SHA3-256 is compared against `old_text`'s: bytes that changed on disk
+ * between the caller's read and this write — a human edit, a second apply —
+ * make the whole rewrite refuse as STALE, leaving the new editor's file
+ * exactly as it stands. A crash, an ENOSPC or a kill at any point before
+ * the rename leaves the original bytes standing and at worst a stray temp
+ * file, which is unlinked on every detected failure. */
+enum zcl_rule_rewrite_status
+zcl_rule_def_rewrite(const char *path, const char *old_text, size_t old_len,
+                     const char *new_text, size_t new_len);
 
 /* The default chainlog under a state directory, and the promotions directory.
  * One spelling of each, so a reader and a writer cannot disagree. */
