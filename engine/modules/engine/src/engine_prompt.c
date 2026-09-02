@@ -225,3 +225,159 @@ void engine_prompt_shape_sha3(uint8_t out[32])
     }
     sha3_256_finalize(&ctx, out);
 }
+
+/* ── prompt templates, keyed by task kind ──────────────────────────────────
+ *
+ * The rows live in engine/composition/prompt_templates.def and its header
+ * carries the vocabulary rule. This is the lookup, and it is deliberately
+ * exact-match only: falling back to another kind's words when a body is
+ * missing would compose a prompt for a job nobody asked about, which is the
+ * defect templates exist to end. */
+
+struct engine_prompt_template_row {
+    const char *kind;
+    const char *section;
+    const char *body;
+};
+
+static const struct engine_prompt_template_row k_templates[] = {
+#define ENGINE_PROMPT_TEMPLATE(kind_, section_, body_) \
+    { #kind_, #section_, body_ },
+#include "../../../composition/prompt_templates.def"
+#undef ENGINE_PROMPT_TEMPLATE
+};
+
+static size_t template_row_count(void)
+{
+    return sizeof(k_templates) / sizeof(k_templates[0]);
+}
+
+size_t engine_prompt_kind_count(void)
+{
+    size_t kinds = 0;
+    for (size_t i = 0; i < template_row_count(); i++) {
+        bool seen = false;
+        for (size_t j = 0; j < i && !seen; j++)
+            seen = strcmp(k_templates[i].kind, k_templates[j].kind) == 0;
+        if (!seen)
+            kinds++;
+    }
+    return kinds;
+}
+
+const char *engine_prompt_kind_at(size_t index)
+{
+    size_t kinds = 0;
+    for (size_t i = 0; i < template_row_count(); i++) {
+        bool seen = false;
+        for (size_t j = 0; j < i && !seen; j++)
+            seen = strcmp(k_templates[i].kind, k_templates[j].kind) == 0;
+        if (seen)
+            continue;
+        if (kinds == index)
+            return k_templates[i].kind;
+        kinds++;
+    }
+    return NULL;
+}
+
+const char *engine_prompt_template_body(const char *kind,
+                                        const char *section_id)
+{
+    if (!kind || !kind[0] || !section_id || !section_id[0])
+        return NULL;
+    for (size_t i = 0; i < template_row_count(); i++) {
+        if (strcmp(k_templates[i].kind, kind) == 0
+            && strcmp(k_templates[i].section, section_id) == 0)
+            return k_templates[i].body;
+    }
+    return NULL;
+}
+
+bool engine_prompt_kind_is_complete(const char *kind)
+{
+    if (!kind || !kind[0])
+        return false;
+    bool declared = false;
+    for (size_t i = 0; i < template_row_count() && !declared; i++)
+        declared = strcmp(k_templates[i].kind, kind) == 0;
+    if (!declared)
+        LOG_FAIL("engine", "no prompt template declares the kind '%s'", kind);
+    for (size_t i = 0; i < engine_prompt_section_count(); i++) {
+        const struct engine_prompt_section *s = &k_sections[i];
+        if (s->need != ENGINE_PROMPT_NEED_ALWAYS)
+            continue;
+        if (!engine_prompt_template_body(kind, s->id))
+            LOG_FAIL("engine",
+                     "the '%s' template supplies no body for the required "
+                     "'%s' section, so the section would be a bare header the "
+                     "audit cannot tell from a filled one", kind, s->id);
+    }
+    return true;
+}
+
+void engine_prompt_template_sha3(const char *kind, uint8_t out[32])
+{
+    if (!out)
+        return;
+    memset(out, 0, 32);
+    if (!kind || !kind[0])
+        return;
+    size_t rows = 0;
+    for (size_t i = 0; i < template_row_count(); i++)
+        if (strcmp(k_templates[i].kind, kind) == 0)
+            rows++;
+    if (rows == 0)
+        return;
+    struct sha3_256_ctx ctx;
+    sha3_256_init(&ctx);
+    /* Same length-prefixed framing as the shape hash: two adjacent fields
+     * must not be re-cuttable into one byte stream by a rename. */
+    uint8_t hdr[4];
+    zcl_write_u32_be(hdr, (uint32_t)rows);
+    sha3_256_write(&ctx, hdr, sizeof(hdr));
+    for (size_t i = 0; i < template_row_count(); i++) {
+        if (strcmp(k_templates[i].kind, kind) != 0)
+            continue;
+        const size_t sn = strlen(k_templates[i].section);
+        const size_t bn = strlen(k_templates[i].body);
+        uint8_t lens[8];
+        zcl_write_u32_be(lens, (uint32_t)sn);
+        zcl_write_u32_be(lens + 4, (uint32_t)bn);
+        sha3_256_write(&ctx, lens, sizeof(lens));
+        sha3_256_write(&ctx, (const uint8_t *)k_templates[i].section, sn);
+        sha3_256_write(&ctx, (const uint8_t *)k_templates[i].body, bn);
+    }
+    sha3_256_finalize(&ctx, out);
+}
+
+const char *engine_prompt_kind_from_header(const char *task)
+{
+    static char kind[64];
+    kind[0] = '\0';
+    if (!task)
+        return NULL;
+    const char *p = task;
+    for (int line = 0; line < 8 && *p; line++) {
+        const char *eol = strchr(p, '\n');
+        const size_t n = eol ? (size_t)(eol - p) : strlen(p);
+        if (n == 0)
+            break;                    /* the header ends at the first blank */
+        if (strncmp(p, "kind:", 5) == 0) {
+            const char *q = p + 5;
+            while (*q == ' ' || *q == '\t')
+                q++;
+            size_t k = 0;
+            while (q < p + n && k + 1 < sizeof(kind)
+                   && ((*q >= 'a' && *q <= 'z') || (*q >= 'A' && *q <= 'Z')
+                       || (*q >= '0' && *q <= '9') || *q == '-' || *q == '_'))
+                kind[k++] = *q++;
+            kind[k] = '\0';
+            return kind[0] ? kind : NULL;
+        }
+        if (!eol)
+            break;
+        p = eol + 1;
+    }
+    return NULL;
+}

@@ -1,0 +1,136 @@
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ *
+ * prompt_templates — the per-KIND bodies that fill the sections
+ * engine/modules/engine/include/engine/prompt_sections.def declares.
+ *
+ * ── WHY THIS IS A SECOND FILE AND NOT MORE OF prompt_sections.def ────────
+ * prompt_sections.def says what SHAPE a prompt must have: which sections
+ * exist, when each is required, and the exact marker that proves one is
+ * present. It says nothing about what a section should CONTAIN, and it must
+ * not: the shape is a contract every dispatch is audited against, and a
+ * contract that changes whenever somebody improves a sentence is not a
+ * contract.
+ *
+ * This file is the sentences. A unit to fix a red gate and a unit to write a
+ * missing test want the same five sections and very different words in them,
+ * and until this existed they got the same words — one hard-coded paragraph
+ * in tools/engine_unit.c, written for whichever job came first. A model told
+ * "make the group pass" when the job is "write a test that FAILS first"
+ * has been handed the wrong instruction by the harness, and the diff that
+ * comes back is evidence about a question nobody asked.
+ *
+ *   ENGINE_PROMPT_TEMPLATE(kind, section, body)
+ *
+ *   kind     the task kind, selected by `--kind` or by a `kind:` line in the
+ *            task file's header. A short hyphenated noun phrase.
+ *   section  an id declared in prompt_sections.def. Nothing else is
+ *            admissible, and tools/lint/check_prompt_templates.sh fails on a
+ *            section this file names that that file does not declare.
+ *   body     the prose inserted under that section's marker. It is text a
+ *            model reads, never a command the harness runs.
+ *
+ * ── CLOSED IN BOTH DIRECTIONS ────────────────────────────────────────────
+ * A denylist over a growing vocabulary is a default-permit, so this is a
+ * membership rule instead. The gate requires:
+ *
+ *   - every `section` here is declared in prompt_sections.def; and
+ *   - every `kind` here supplies a body for every section that file marks
+ *     ENGINE_PROMPT_NEED_ALWAYS. A kind missing one is a kind nobody can
+ *     select — engine_prompt_kind_is_complete() refuses it at dispatch — so
+ *     it would sit in this file reading as an option that does not exist.
+ *
+ * A row is prose, not authority. Nothing here grants a capability, widens a
+ * gate, or changes a verdict. The gate still decides.
+ *
+ * Keep the bodies SHORT. Every byte is dispatched on every run, the cost is
+ * per token, and a model that is told the same thing three ways learns that
+ * being told things does not mean much.
+ */
+
+/* clang-format off */
+
+/* ── fix-gate ────────────────────────────────────────────────────────────
+ * A registered group is red and must go green without the assertion moving. */
+ENGINE_PROMPT_TEMPLATE(fix-gate, rules,
+    "This unit repairs a failing gate. The assertion is the specification: "
+    "if it is right and the code is wrong, change the code. If you conclude "
+    "the assertion itself is wrong, say so and change nothing — an honest "
+    "red is a result, and weakening a threshold to obtain green is the one "
+    "outcome this harness treats as worse than failure.")
+ENGINE_PROMPT_TEMPLATE(fix-gate, task,
+    "Read the failing output first and name the smallest cause that "
+    "explains all of it. Do not repair symptoms one at a time.")
+ENGINE_PROMPT_TEMPLATE(fix-gate, protocol,
+    "Change only the files the cause is in. A diff that touches unrelated "
+    "files cannot be reviewed as a fix.")
+ENGINE_PROMPT_TEMPLATE(fix-gate, judging,
+    "Green with the assertion untouched is a pass. Green obtained by "
+    "editing, relaxing, or deleting the assertion is a failure even though "
+    "the exit code agrees with you.")
+
+/* ── add-test ────────────────────────────────────────────────────────────
+ * Coverage that would NOTICE. Born red, then green. */
+ENGINE_PROMPT_TEMPLATE(add-test, rules,
+    "This unit adds coverage. A test file that exists proves nothing: the "
+    "test must live in a REGISTERED group and that group must actually run. "
+    "groups_ran of zero is a failure whatever the exit code says.")
+ENGINE_PROMPT_TEMPLATE(add-test, task,
+    "Write the assertion so it FAILS against the code as it stands today, "
+    "and say in your reply what it caught. A test that was green the moment "
+    "it was written has not been shown to notice anything.")
+ENGINE_PROMPT_TEMPLATE(add-test, protocol,
+    "Add cases to an existing registered group where one covers this file. "
+    "Create a new group only when none does, and register it.")
+ENGINE_PROMPT_TEMPLATE(add-test, judging,
+    "The group must run and pass. A group that passes without executing "
+    "your new case is not evidence about your work.")
+
+/* ── port-arm ────────────────────────────────────────────────────────────
+ * Portability work, where the compiler in front of you is not the one that
+ * will find the defect. */
+ENGINE_PROMPT_TEMPLATE(port-arm, rules,
+    "This unit is portability work. gcc and clang on this host will not "
+    "reproduce the failure you are fixing, so a clean local build is not "
+    "evidence. Do not add a platform ifdef outside the platform seam.")
+ENGINE_PROMPT_TEMPLATE(port-arm, task,
+    "State which platform each change is for and why the portable path "
+    "cannot serve it. Prefer widening the portable path to adding a branch.")
+ENGINE_PROMPT_TEMPLATE(port-arm, protocol,
+    "Keep the change inside the files named. Writing a platform token into "
+    "a new file can pull that file into a cross-compilation gate.")
+ENGINE_PROMPT_TEMPLATE(port-arm, judging,
+    "The named group must pass here. That is necessary and not sufficient, "
+    "and the receipt records it as exactly that much.")
+
+/* ── doc-claim ───────────────────────────────────────────────────────────
+ * A document says something about the tree. Make it true or delete it. */
+ENGINE_PROMPT_TEMPLATE(doc-claim, rules,
+    "This unit repairs a documented claim. A number in a document is a claim "
+    "about this checkout, and a stale one reads as true for as long as "
+    "nobody re-derives it. Either make the claim true or remove it; never "
+    "soften it into something unfalsifiable.")
+ENGINE_PROMPT_TEMPLATE(doc-claim, task,
+    "Re-derive every count you touch from the tree itself and say which "
+    "command produced it.")
+ENGINE_PROMPT_TEMPLATE(doc-claim, protocol,
+    "Edit the document. Do not change code to make a document true unless "
+    "the document is right and the code is wrong, and say so if it is.")
+ENGINE_PROMPT_TEMPLATE(doc-claim, judging,
+    "The generated-document checks must pass. A claim nothing re-derives is "
+    "not repaired by rewording it.")
+
+/* ── review ──────────────────────────────────────────────────────────────
+ * Read a diff and report. This kind writes nothing. */
+ENGINE_PROMPT_TEMPLATE(review, rules,
+    "This unit reviews and does not edit. Report what you found; propose no "
+    "patch. A reviewer who starts writing stops reading.")
+ENGINE_PROMPT_TEMPLATE(review, task,
+    "Name each finding with a file and a line, say what breaks, and say how "
+    "you know. A finding you cannot point at is an impression.")
+ENGINE_PROMPT_TEMPLATE(review, protocol,
+    "Write no files. Your reply is the product.")
+ENGINE_PROMPT_TEMPLATE(review, judging,
+    "This kind is dispatched with --no-group and is recorded UNVERIFIED, "
+    "which is not a pass. A person reads it and decides.")
+
+/* clang-format on */

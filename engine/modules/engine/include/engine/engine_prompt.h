@@ -95,4 +95,53 @@ bool engine_prompt_audit_text(enum engine_wire wire, const char *composed,
  * not receive comparably shaped prompts, whatever else matched. */
 void engine_prompt_shape_sha3(uint8_t out[32]);
 
+/* ── prompt templates, keyed by task kind ───────────────────────────────
+ *
+ * The sections above say what shape a prompt has. A template says what goes
+ * IN those sections for one kind of job, and the rows are in
+ * engine/composition/prompt_templates.def — read its header for the
+ * vocabulary rule this API enforces.
+ *
+ * The distinction that earned this: "make the group pass" and "write a test
+ * that fails first" are contradictory instructions, and before templates
+ * existed every dispatch got whichever one was hard-coded in the tool. */
+
+/* The kinds, in declaration order. Iteration exists so `--kind ?`, the lint
+ * gate and the tests all enumerate one table rather than three copies. */
+size_t engine_prompt_kind_count(void);
+const char *engine_prompt_kind_at(size_t i);
+
+/* The body this kind supplies for this section, or NULL when it supplies
+ * none. Both arguments are matched exactly; an unknown kind or section is
+ * NULL, never a fallback to another kind's words. */
+const char *engine_prompt_template_body(const char *kind,
+                                        const char *section_id);
+
+/* True when `kind` is declared AND supplies a body for every section
+ * prompt_sections.def marks ENGINE_PROMPT_NEED_ALWAYS.
+ *
+ * This is what "selectable" means. A kind missing a required body would
+ * compose a prompt whose section is a bare header, which the audit cannot
+ * catch — the marker is present, the guidance is not — so the refusal
+ * happens here, before dispatch, and the lint gate refuses the same row at
+ * build time so nobody meets it at run time. */
+bool engine_prompt_kind_is_complete(const char *kind);
+
+/* SHA3-256 over one kind's ordered (section, body) rows. The version
+ * identity of a template: two runs whose template hashes differ were given
+ * different instructions for the same named kind, and comparing their
+ * outcomes as if they were the same experiment is how a heuristic learns
+ * something that is not true. Writes 32 zero bytes for an unknown kind. */
+void engine_prompt_template_sha3(const char *kind, uint8_t out[32]);
+
+/* The kind a task file declares for itself.
+ *
+ * A `kind:` line in the first few lines of `task`, before any blank line —
+ * a header, not a word found anywhere in the prose. Returns a pointer into
+ * a static buffer, or NULL when the file declares none.
+ *
+ * --kind still wins at the caller: an operator re-running a task as a
+ * review must be able to say so without editing the task. */
+const char *engine_prompt_kind_from_header(const char *task);
+
 #endif /* ZCL_ENGINE_PROMPT_H */

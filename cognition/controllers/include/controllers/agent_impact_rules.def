@@ -2969,6 +2969,10 @@ AGENT_IMPACT_RULE("engine/modules/engine/include/engine/personas.def|tools/lint/
  * actually be checked against a composed prompt rather than against
  * another document. */
 AGENT_IMPACT_RULE("engine/modules/engine/include/engine/prompt_sections.def", "engine make_lint_gates")
+/* Per-kind prompt bodies. The lint gate is the membership rule (every
+ * section is declared, every kind fills each always-required section);
+ * the engine group compiles the X-macro and asserts the runtime lookup. */
+AGENT_IMPACT_RULE("engine/composition/prompt_templates.def|tools/lint/check_prompt_templates.sh", "engine make_lint_gates")
 /* The proof receipt: the canonical form a claim travels in, its id, and the
  * rule a receiver applies to it. Rides its own group and nothing else — the
  * module depends only on base and sha3, deliberately, so that a receipt can
