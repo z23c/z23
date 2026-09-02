@@ -10,9 +10,8 @@
 #include "core/serialize.h"
 #include "models/vault_intent.h"
 #include "primitives/block.h"
+#include "services/chain_nullifier_evidence_service.h"
 #include "storage/disk_block_io.h"
-#include "storage/nullifier_kv.h"
-#include "storage/progress_store.h"
 #include "util/log_macros.h"
 #include "util/safe_alloc.h"
 #include "validation/contextual_check_tx.h"
@@ -75,39 +74,31 @@ static enum vi_shielded_chain_result vi_shielded_chain_evidence(
         return VI_SHIELDED_CHAIN_NONE;
     }
 
-    sqlite3 *db = progress_store_db();
-    bool any_found = false;
-    bool lookup_ok = db != NULL;
-    int64_t candidate_height = -1;
-    progress_store_tx_lock();
-    for (size_t i = 0; i < decoded_out->tx.num_shielded_spend; i++) {
-        bool found = false;
-        int64_t height = -1;
-        if (!lookup_ok || !nullifier_kv_get(db,
-                decoded_out->tx.v_shielded_spend[i].nullifier.data,
-                NULLIFIER_POOL_SAPLING, &found, &height)) {
-            lookup_ok = false;
-            break;
-        }
-        if (!found)
-            continue;
-        any_found = true;
-        if (candidate_height < 0)
-            candidate_height = height;
-        else if (candidate_height != height) {
-            lookup_ok = false;
-            break;
-        }
-    }
-    progress_store_tx_unlock();
-    if (!lookup_ok) {
+    struct chain_nullifier_query *queries = zcl_calloc(
+        decoded_out->tx.num_shielded_spend, sizeof(*queries),
+        "intent_reconcile_nullifier_queries");
+    if (!queries) {
         transaction_free(&decoded_out->tx);
         return VI_SHIELDED_CHAIN_UNAVAILABLE;
     }
-    if (!any_found) {
+    for (size_t i = 0; i < decoded_out->tx.num_shielded_spend; i++) {
+        queries[i].bytes =
+            decoded_out->tx.v_shielded_spend[i].nullifier.data;
+    }
+    struct chain_nullifier_set_evidence observed;
+    struct zcl_result read = chain_nullifier_evidence_lookup_set(
+        queries, decoded_out->tx.num_shielded_spend,
+        CHAIN_NULLIFIER_POOL_SAPLING, &observed);
+    free(queries);
+    if (!read.ok || !observed.heights_consistent) {
+        transaction_free(&decoded_out->tx);
+        return VI_SHIELDED_CHAIN_UNAVAILABLE;
+    }
+    if (!observed.any_found) {
         transaction_free(&decoded_out->tx);
         return VI_SHIELDED_CHAIN_NONE;
     }
+    int64_t candidate_height = observed.height;
     if (candidate_height < 0 || candidate_height > INT32_MAX) {
         transaction_free(&decoded_out->tx);
         return VI_SHIELDED_CHAIN_UNAVAILABLE;

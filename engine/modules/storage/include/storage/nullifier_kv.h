@@ -1,7 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * nullifier_kv — the reducer's consensus shielded-nullifier set as a
- * `nullifiers` table IN progress.kv (C-3).
+ * `nullifiers` table in the consensus.db kernel store (C-3).
  *
  * WHY: zclassicd's ConnectBlock rejects any transaction whose Sprout or
  * Sapling nullifier was already revealed (HaveShieldedRequirements,
@@ -48,7 +48,7 @@
  * closed; an absent marker is unknown, never implicit cursor zero. First
  * adoption creates the table and explicit marker in one transaction.
  *
- * Every function operates on the passed progress.kv handle and therefore
+ * Every function operates on the passed consensus-kernel handle and therefore
  * participates in whatever transaction the caller already holds open. Raw
  * sqlite3_step calls carry // raw-sql-ok:progress-kv-kernel-store, the
  * sanctioned hatch for the kernel store (same convention as coins_kv.c). */

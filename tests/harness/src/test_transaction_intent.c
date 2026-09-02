@@ -19,6 +19,7 @@
 #include "models/wallet_metadata_crypto.h"
 #include "platform/time_compat.h"
 #include "primitives/block.h"
+#include "services/chain_nullifier_evidence_service.h"
 #include "services/overlay_transaction_intent_service.h"
 #include "services/vault_intent_async_service.h"
 #include "services/vault_intent_decision_service.h"
@@ -497,6 +498,18 @@ int test_transaction_intent(void)
         ASSERT(pdb != NULL);
         ASSERT(nullifier_kv_initialize_history(pdb, 0));
 
+        uint8_t absent_nullifier[32] = { 0x4a };
+        struct chain_nullifier_query absent_query = {
+            .bytes = absent_nullifier,
+        };
+        struct chain_nullifier_set_evidence set_evidence;
+        struct zcl_result absent_read = chain_nullifier_evidence_lookup_set(
+            &absent_query, 1, CHAIN_NULLIFIER_POOL_SAPLING, &set_evidence);
+        ASSERT(absent_read.ok);
+        ASSERT(!set_evidence.any_found);
+        ASSERT(set_evidence.heights_consistent);
+        ASSERT_EQ(set_evidence.height, -1);
+
         struct transaction shielded;
         transaction_init(&shielded);
         shielded.overwintered = true;
@@ -517,6 +530,27 @@ int test_transaction_intent(void)
         ASSERT(nullifier_kv_add(pdb,
             shielded.v_shielded_spend[0].nullifier.data,
             NULLIFIER_POOL_SAPLING, 2));
+        struct chain_nullifier_query spend_query = {
+            .bytes = shielded.v_shielded_spend[0].nullifier.data,
+        };
+        struct zcl_result set_read = chain_nullifier_evidence_lookup_set(
+            &spend_query, 1, CHAIN_NULLIFIER_POOL_SAPLING, &set_evidence);
+        ASSERT(set_read.ok);
+        ASSERT(set_evidence.any_found);
+        ASSERT(set_evidence.heights_consistent);
+        ASSERT_EQ(set_evidence.height, 2);
+        uint8_t other_nullifier[32] = { 0x6b };
+        ASSERT(nullifier_kv_add(pdb, other_nullifier,
+                                NULLIFIER_POOL_SAPLING, 3));
+        struct chain_nullifier_query split_queries[2] = {
+            { .bytes = shielded.v_shielded_spend[0].nullifier.data },
+            { .bytes = other_nullifier },
+        };
+        struct zcl_result split_read = chain_nullifier_evidence_lookup_set(
+            split_queries, 2, CHAIN_NULLIFIER_POOL_SAPLING, &set_evidence);
+        ASSERT(split_read.ok);
+        ASSERT(set_evidence.any_found);
+        ASSERT(!set_evidence.heights_consistent);
 
         struct block body;
         block_init(&body);
@@ -617,6 +651,15 @@ int test_transaction_intent(void)
         transaction_free(&shielded);
         stream_free(&raw);
         progress_store_close();
+        set_evidence.any_found = true;
+        set_evidence.heights_consistent = true;
+        set_evidence.height = 99;
+        struct zcl_result closed_read = chain_nullifier_evidence_lookup_set(
+            &absent_query, 1, CHAIN_NULLIFIER_POOL_SAPLING, &set_evidence);
+        ASSERT(!closed_read.ok);
+        ASSERT(!set_evidence.any_found);
+        ASSERT(!set_evidence.heights_consistent);
+        ASSERT_EQ(set_evidence.height, -1);
         (void)test_rm_rf_recursive(dir);
         PASS();
     }

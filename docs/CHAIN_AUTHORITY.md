@@ -97,6 +97,12 @@ crash evidence, the defensible statement is:
 > serialized. Exactly one live code writer and one owner for every durable
 > chain fact remain **UNPROVEN**.
 
+The first enforced edge is narrower: product contexts obtain typed evidence
+reads rather than the mutable `progress_store_db()` handle. This is direct
+symbol evidence only, not proof against an indirect alias.
+
+<!-- claim: symbol-absent progress_store_db contexts # product contexts have no direct mutable kernel-handle call -->
+
 ## Owner-gated decision
 
 The next irreversible architectural choice is whether the full `core/` byte
