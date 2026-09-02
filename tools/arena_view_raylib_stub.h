@@ -123,10 +123,8 @@ void DrawCubeWires(Vector3 position, float width, float height, float length,
 void DrawCylinder(Vector3 position, float radiusTop, float radiusBottom,
                   float height, int slices, Color color);
 void DrawLine3D(Vector3 startPos, Vector3 endPos, Color color);
-void DrawText(const char *text, int posX, int posY, int fontSize, Color color);
 void DrawTextEx(Font font, const char *text, Vector2 position, float fontSize,
                 float spacing, Color tint);
-int MeasureText(const char *text, int fontSize);
 Vector2 MeasureTextEx(Font font, const char *text, float fontSize,
                       float spacing);
 const char *TextFormat(const char *text, ...);

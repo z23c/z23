@@ -66,9 +66,11 @@ opens the optional native window (`tools/arena_view.c`) with `--show`.
 
 The picture is a verified replay, not a diagnostic. HUD typography uses the
 bundled SIL-OFL Inter Medium and SemiBold Basic Latin subsets through the
-existing software canvas. If those faces cannot rasterize, the PNG path
-refuses instead of inventing glyphs. Roots on the footer are recomputed here
-from the replay bytes; pixels never write match state.
+existing software canvas. If those faces cannot rasterize, the PNG path and
+the optional window both refuse instead of inventing glyphs or substituting
+another font. Non-ASCII HUD labels are refused rather than drawn as '?'.
+Roots on the footer are recomputed here from the replay bytes; pixels never
+write match state.
 
 The optional raylib window adds chase/cockpit/orbit/overview cameras, TAB to
 cycle planes, C for camera, SPACE to pause, arrows to seek, +/- for speed.

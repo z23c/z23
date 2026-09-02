@@ -42,6 +42,14 @@ static const char *ah_str(const char *s, const char *fallback)
     return s && s[0] ? s : fallback;
 }
 
+static int ah_require_label(const char *name, const char *s)
+{
+    if (arena_hud_label_ok(s))
+        return ARENA_HUD_OK;
+    ah_err("HUD label is not Basic Latin; glyphs are not invented", name);
+    return ARENA_HUD_FAIL;
+}
+
 static void ah_text(struct zcl_present_canvas *c, int32_t x, int32_t y,
                     const char *s, uint32_t px, struct zcl_present_color col,
                     bool strong)
@@ -178,6 +186,18 @@ int arena_hud_compose(const arena_hud_in *in, uint8_t *rgb)
                "HUD text is not drawn without those faces");
         return ARENA_HUD_FAIL;
     }
+    int lrc = ah_require_label("red_label", in->red_label);
+    if (lrc != ARENA_HUD_OK)
+        return lrc;
+    lrc = ah_require_label("blue_label", in->blue_label);
+    if (lrc != ARENA_HUD_OK)
+        return lrc;
+    lrc = ah_require_label("cam_name", in->cam_name);
+    if (lrc != ARENA_HUD_OK)
+        return lrc;
+    lrc = ah_require_label("speed_tag", in->speed_tag);
+    if (lrc != ARENA_HUD_OK)
+        return lrc;
 
     const int rc =
         zdogview_render_rgb(in->m, in->seed, in->kills, in->num_kills, rgb,

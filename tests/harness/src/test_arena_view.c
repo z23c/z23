@@ -1,7 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * Hosted 1280x720 arena picture: Inter HUD, PNG export, font refusal,
- * and unchanged match roots. No raylib.
+ * non-ASCII label refusal, and unchanged match roots. No raylib.
  */
 #include "test/test_core.h"
 
@@ -106,6 +106,40 @@ int test_arena_view(void)
         arena_hud_in in = { .m = &m, .cam_name = "ISOMETRIC" };
         ASSERT_EQ(arena_hud_compose(&in, NULL), ARENA_HUD_BAD_ARG);
         ASSERT_EQ(arena_hud_compose(NULL, (uint8_t *)1), ARENA_HUD_BAD_ARG);
+        PASS();
+    }
+
+    TEST("compose refuses a non-ASCII HUD label instead of drawing '?'") {
+        zdog_match m;
+        zdog_match_init(&m, 7, 1);
+        uint8_t *rgb = malloc(ARENA_HUD_RGB_BYTES);
+        ASSERT(rgb);
+        arena_hud_in in = {
+            .m = &m,
+            .red_label = "Red",
+            .blue_label = "Blue",
+            .cam_name = "ISOMETRIC",
+            .speed_tag = "x1",
+        };
+        in.red_label = "Red \xE2\x80\x94 Ace";
+        ASSERT_EQ(arena_hud_compose(&in, rgb), ARENA_HUD_FAIL);
+        in.red_label = "Red";
+        in.blue_label = "Blue\nDrone";
+        ASSERT_EQ(arena_hud_compose(&in, rgb), ARENA_HUD_FAIL);
+        in.blue_label = "Blue";
+        in.cam_name = "ISO\x80METRIC";
+        ASSERT_EQ(arena_hud_compose(&in, rgb), ARENA_HUD_FAIL);
+        in.cam_name = "ISOMETRIC";
+        in.speed_tag = "x1\t";
+        ASSERT_EQ(arena_hud_compose(&in, rgb), ARENA_HUD_FAIL);
+        in.speed_tag = "x1";
+        in.red_label = "Red Ace - zdogace 0.1.1";
+        ASSERT(arena_hud_label_ok(in.red_label));
+        ASSERT(arena_hud_label_ok(NULL));
+        ASSERT(arena_hud_label_ok(""));
+        ASSERT(!arena_hud_label_ok("Red \xE2\x80\x94 Ace"));
+        ASSERT_EQ(arena_hud_compose(&in, rgb), ARENA_HUD_OK);
+        free(rgb);
         PASS();
     }
 

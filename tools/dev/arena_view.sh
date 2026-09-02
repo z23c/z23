@@ -119,6 +119,15 @@ if [ "${CHECK:-}" = 1 ]; then
         --red-label "$RED_LABEL" --blue-label "$BLUE_LABEL" >/dev/null
     av_png_magic "$PNG_OUT_B"
     cmp -s "$PNG_OUT" "$PNG_OUT_B" || av_die "1280x720 PNG was not byte-identical across two renders"
+    bad_label="$(printf 'Red\200Ace')"
+    rc=0
+    refuse="$("$FRAME" --replay "$REPLAY_OUT" --png "$PNG_OUT_B" \
+        --red-label "$bad_label" --blue-label "$BLUE_LABEL" 2>&1)" || rc=$?
+    [ "$rc" -eq 4 ] || av_die "non-ASCII red label: exit $rc, expected 4"
+    case "$refuse" in
+        *"HUD label is not Basic Latin"*) ;;
+        *) av_die "non-ASCII red label missing typed refusal: $refuse" ;;
+    esac
     rm -f "$PNG_OUT_B"
     printf 'arena-view-check: ok png=%s\n' "$PNG_OUT"
     exit 0

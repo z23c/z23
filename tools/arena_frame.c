@@ -193,6 +193,16 @@ int main(int argc, char **argv)
         af_usage(stderr);
         return 2;
     }
+    if (!arena_hud_label_ok(red_label)) {
+        af_err("HUD label is not Basic Latin; glyphs are not invented",
+               "--red-label");
+        return ARENA_HUD_FAIL;
+    }
+    if (!arena_hud_label_ok(blue_label)) {
+        af_err("HUD label is not Basic Latin; glyphs are not invented",
+               "--blue-label");
+        return ARENA_HUD_FAIL;
+    }
 
     size_t len = 0;
     uint8_t *buf = af_read_file(replay, &len);

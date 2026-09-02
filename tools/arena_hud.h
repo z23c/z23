@@ -3,6 +3,7 @@
  * Polished 1280x720 HUD over a verified zdogview integer scene.
  * Inter Medium / SemiBold subsets rasterize through the existing
  * presentation canvas. Missing fonts refuse; they do not invent glyphs.
+ * Non-ASCII labels refuse; they are not drawn as '?'.
  */
 #ifndef ARENA_HUD_H
 #define ARENA_HUD_H
@@ -44,6 +45,18 @@ typedef struct {
 
 /* True when both bundled Inter subsets rasterize Basic Latin. */
 bool arena_hud_fonts_ready(void);
+
+/* True when s is NULL, empty, or only Basic Latin printable (32-126). */
+static inline bool arena_hud_label_ok(const char *s)
+{
+    if (!s)
+        return true;
+    for (const unsigned char *p = (const unsigned char *)s; *p != 0u; p++) {
+        if (*p < 32u || *p > 126u)
+            return false;
+    }
+    return true;
+}
 
 /* Fill rgb[ARENA_HUD_RGB_BYTES] with the integer scene plus Inter HUD.
  * Returns ARENA_HUD_OK, ARENA_HUD_BAD_ARG, or ARENA_HUD_FAIL (logged). */

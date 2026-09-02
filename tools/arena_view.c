@@ -32,7 +32,9 @@
  *   ORBIT: drag rotate, wheel zoom
  *
  * Exit codes: 0 ok; 1 replay mismatch; 2 usage;
- * 4 runtime failure (read/allocation/video, logged to stderr).
+ * 4 runtime failure (ARENA_HUD_FAIL: fonts, labels, read, allocation,
+ * video; logged to stderr). Missing Inter faces and non-ASCII HUD
+ * labels refuse; they are never substituted.
  */
 
 #include <math.h>
@@ -53,6 +55,7 @@
 #include "../vendor/typography/inter_medium_ascii.inc"
 #include "../vendor/typography/inter_semibold_ascii.inc"
 
+#include "arena_hud.h"
 #include "base/hex.h"
 #include "base/safe_alloc.h"
 #include "base/serialize_le.h"
@@ -702,9 +705,16 @@ static const char *av_winner_name(uint8_t winner)
 
 static Font av_font_md;
 static Font av_font_bd;
-static bool av_font_ok;
 
-static void av_fonts_load(void)
+static int av_require_label(const char *name, const char *s)
+{
+    if (arena_hud_label_ok(s))
+        return ARENA_HUD_OK;
+    av_err("HUD label is not Basic Latin; glyphs are not invented", name);
+    return ARENA_HUD_FAIL;
+}
+
+static int av_fonts_load(void)
 {
     av_font_md = LoadFontFromMemory(
         ".ttf", g_zcl_inter_medium_ascii, (int)g_zcl_inter_medium_ascii_len, 32,
@@ -712,11 +722,11 @@ static void av_fonts_load(void)
     av_font_bd = LoadFontFromMemory(
         ".ttf", g_zcl_inter_semibold_ascii,
         (int)g_zcl_inter_semibold_ascii_len, 48, NULL, 0);
-    av_font_ok = IsFontValid(av_font_md) && IsFontValid(av_font_bd);
-    if (!av_font_ok)
-        fprintf(stderr,
-                "arena_view: Inter faces unavailable; falling back to "
-                "raylib DrawText\n");
+    if (IsFontValid(av_font_md) && IsFontValid(av_font_bd))
+        return ARENA_HUD_OK;
+    av_err("bundled Inter Medium/SemiBold subsets refused to rasterize",
+           "HUD text is not drawn without those faces");
+    return ARENA_HUD_FAIL;
 }
 
 static void av_fonts_unload(void)
@@ -725,27 +735,19 @@ static void av_fonts_unload(void)
         UnloadFont(av_font_md);
     if (IsFontValid(av_font_bd))
         UnloadFont(av_font_bd);
-    av_font_ok = false;
 }
 
 static int av_measure(const char *s, int size, bool strong)
 {
-    if (av_font_ok) {
-        Font f = strong ? av_font_bd : av_font_md;
-        Vector2 m = MeasureTextEx(f, s, (float)size, 0.0f);
-        return (int)m.x;
-    }
-    return MeasureText(s, size);
+    Font f = strong ? av_font_bd : av_font_md;
+    Vector2 m = MeasureTextEx(f, s, (float)size, 0.0f);
+    return (int)m.x;
 }
 
 static void av_text(const char *s, int x, int y, int size, Color c, bool strong)
 {
-    if (av_font_ok) {
-        Font f = strong ? av_font_bd : av_font_md;
-        DrawTextEx(f, s, (Vector2){ (float)x, (float)y }, (float)size, 0.0f, c);
-        return;
-    }
-    DrawText(s, x, y, size, c);
+    Font f = strong ? av_font_bd : av_font_md;
+    DrawTextEx(f, s, (Vector2){ (float)x, (float)y }, (float)size, 0.0f, c);
 }
 
 static void av_draw_hud(const av_view *vw)
@@ -1148,6 +1150,12 @@ int main(int argc, char **argv)
         av_err("--screenshot-dir needs a directory path", shot_dir);
         return 2;
     }
+    int lrc = av_require_label("--red-label", o.red_label);
+    if (lrc != ARENA_HUD_OK)
+        return lrc;
+    lrc = av_require_label("--blue-label", o.blue_label);
+    if (lrc != ARENA_HUD_OK)
+        return lrc;
 
     size_t len = 0;
     uint8_t *buf = av_read_file(o.replay_path, &len);
@@ -1213,7 +1221,13 @@ int main(int argc, char **argv)
         return 4;
     }
     SetTargetFPS(60);
-    av_fonts_load();
+    if (av_fonts_load() != ARENA_HUD_OK) {
+        av_fonts_unload();
+        CloseWindow();
+        free(ver);
+        free(buf);
+        return ARENA_HUD_FAIL;
+    }
     Image hosted_blank =
         GenImageColor((int)ZDOGVIEW_WIDTH, (int)ZDOGVIEW_HEIGHT, BLACK);
     Texture2D hosted_tex = LoadTextureFromImage(hosted_blank);
