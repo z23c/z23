@@ -3,6 +3,8 @@
  * installed GPU runtime; OpenCL kernels are JITed to device assembly. */
 
 #include "miner/gpu_equihash.h"
+#include "base/hex.h"
+#include "base/serialize_le.h"
 #include "crypto/sha256.h"
 #include <errno.h>
 #include <inttypes.h>
@@ -22,35 +24,13 @@ static void usage(FILE *out)
         "400-byte Equihash solution when the complete header hash meets bits.\n");
 }
 
-static int hex_value(char c)
-{
-    if (c >= '0' && c <= '9') return c - '0';
-    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
-    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
-    return -1;
-}
-
-static bool decode_hex_exact(const char *hex, unsigned char *out, size_t bytes)
-{
-    if (!hex || strlen(hex) != bytes * 2u)
-        return false;
-    for (size_t i = 0; i < bytes; ++i) {
-        int hi = hex_value(hex[2u * i]);
-        int lo = hex_value(hex[2u * i + 1u]);
-        if (hi < 0 || lo < 0)
-            return false;
-        out[i] = (unsigned char)((hi << 4) | lo);
-    }
-    return true;
-}
-
 static void print_hex(const unsigned char *data, size_t bytes)
 {
-    static const char digits[] = "0123456789abcdef";
-    for (size_t i = 0; i < bytes; ++i) {
-        putchar(digits[data[i] >> 4]);
-        putchar(digits[data[i] & 15]);
-    }
+    char encoded[2u * Z23_GPU_EQUIHASH_SOLUTION_BYTES + 1u];
+    if (bytes > Z23_GPU_EQUIHASH_SOLUTION_BYTES)
+        return;
+    zcl_hex_encode(data, bytes, encoded);
+    fputs(encoded, stdout);
 }
 
 static void print_json_string(const char *s)
@@ -90,12 +70,6 @@ static void increment_nonce(unsigned char nonce[32])
             break;
 }
 
-static uint32_t read_u32_le(const unsigned char *p)
-{
-    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
-           ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
-}
-
 static void miner_hash256(const unsigned char *data, size_t len,
                           unsigned char hash[32])
 {
@@ -113,7 +87,7 @@ static bool hash_meets_target(const unsigned char prefix[108],
                               const unsigned char nonce[32],
                               const unsigned char solution[400])
 {
-    uint32_t compact = read_u32_le(prefix + 104);
+    uint32_t compact = zcl_read_u32_le(prefix + 104);
     uint32_t size = compact >> 24;
     uint32_t word = compact & 0x007fffffu;
     bool overflow = word != 0 &&
@@ -213,7 +187,7 @@ int main(int argc, char **argv)
         prefix[107] = 0x20;
     } else if (strcmp(argv[1], "mine") == 0) {
         if (argc < 3 || argc > 4 ||
-            !decode_hex_exact(argv[2], prefix, sizeof(prefix)) ||
+            !zcl_hex_decode(argv[2], prefix, sizeof(prefix)) ||
             !parse_count(argc == 4 ? argv[3] : NULL, 256, &max_nonces)) {
             fprintf(stderr, "mine requires 216 hex characters and optional max_nonces [1,1000000]\n");
             z23_gpu_equihash_close(gpu);

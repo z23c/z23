@@ -1,4 +1,5 @@
-/* Copyright 2026 Rhett Creighton. Licensed under Apache-2.0. */
+/* Copyright 2026 Rhett Creighton. Licensed under Apache-2.0.
+ * Provides the bounded native GPU implementation of the Equihash solver. */
 
 #include "miner/gpu_equihash.h"
 #include "util/safe_alloc.h"
@@ -110,6 +111,8 @@ struct z23_gpu_equihash {
     uint64_t max_allocation;
     bool buffers_ready;
 };
+
+static void gpu_equihash_close_native(struct z23_gpu_equihash *gpu);
 
 static void set_error(char *dst, size_t cap, const char *fmt, ...)
 {
@@ -304,7 +307,7 @@ static bool build_kernels(struct z23_gpu_equihash *g, char *error, size_t cap)
     return true;
 }
 
-struct z23_gpu_equihash *z23_gpu_equihash_open(
+static struct z23_gpu_equihash *gpu_equihash_open_native(
     struct z23_gpu_equihash_device *device, char *error, size_t error_cap)
 {
     if (error && error_cap)
@@ -317,7 +320,7 @@ struct z23_gpu_equihash *z23_gpu_equihash_open(
     if (!load_opencl(g, error, error_cap) ||
         !choose_device(g, device, error, error_cap) ||
         !build_kernels(g, error, error_cap)) {
-        z23_gpu_equihash_close(g);
+        gpu_equihash_close_native(g);
         return NULL;
     }
     return g;
@@ -458,7 +461,7 @@ static bool proof_indices_distinct(const uint32_t proof[128])
     return true;
 }
 
-bool z23_gpu_equihash_solve(
+static bool gpu_equihash_solve_native(
     struct z23_gpu_equihash *g, const struct equihash_params *params,
     const struct blake2b_ctx *base,
     unsigned char solution[Z23_GPU_EQUIHASH_SOLUTION_BYTES],
@@ -599,7 +602,7 @@ bool z23_gpu_equihash_solve(
     return true;
 }
 
-void z23_gpu_equihash_close(struct z23_gpu_equihash *g)
+static void gpu_equihash_close_native(struct z23_gpu_equihash *g)
 {
     if (!g)
         return;
@@ -629,7 +632,7 @@ void z23_gpu_equihash_close(struct z23_gpu_equihash *g)
 
 struct z23_gpu_equihash { int unavailable; };
 
-struct z23_gpu_equihash *z23_gpu_equihash_open(
+static struct z23_gpu_equihash *gpu_equihash_open_native(
     struct z23_gpu_equihash_device *device, char *error, size_t error_cap)
 {
     (void)device;
@@ -639,7 +642,7 @@ struct z23_gpu_equihash *z23_gpu_equihash_open(
     return NULL;
 }
 
-bool z23_gpu_equihash_solve(
+static bool gpu_equihash_solve_native(
     struct z23_gpu_equihash *gpu, const struct equihash_params *params,
     const struct blake2b_ctx *base_state,
     unsigned char solution[Z23_GPU_EQUIHASH_SOLUTION_BYTES],
@@ -652,9 +655,30 @@ bool z23_gpu_equihash_solve(
     return false;
 }
 
-void z23_gpu_equihash_close(struct z23_gpu_equihash *gpu)
+static void gpu_equihash_close_native(struct z23_gpu_equihash *gpu)
 {
     (void)gpu;
 }
 
 #endif
+
+struct z23_gpu_equihash *z23_gpu_equihash_open(
+    struct z23_gpu_equihash_device *device, char *error, size_t error_cap)
+{
+    return gpu_equihash_open_native(device, error, error_cap);
+}
+
+bool z23_gpu_equihash_solve(
+    struct z23_gpu_equihash *gpu, const struct equihash_params *params,
+    const struct blake2b_ctx *base_state,
+    unsigned char solution[Z23_GPU_EQUIHASH_SOLUTION_BYTES],
+    struct z23_gpu_equihash_stats *stats, char *error, size_t error_cap)
+{
+    return gpu_equihash_solve_native(gpu, params, base_state, solution, stats,
+                                     error, error_cap);
+}
+
+void z23_gpu_equihash_close(struct z23_gpu_equihash *gpu)
+{
+    gpu_equihash_close_native(gpu);
+}

@@ -1,4 +1,5 @@
-/* Copyright 2026 Rhett Creighton. Licensed under Apache-2.0. */
+/* Copyright 2026 Rhett Creighton. Licensed under Apache-2.0.
+ * Declares the bounded native GPU interface for Equihash solving. */
 #ifndef Z23_TOOLS_GPU_EQUIHASH_H
 #define Z23_TOOLS_GPU_EQUIHASH_H
 
