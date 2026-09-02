@@ -2419,7 +2419,7 @@ $(filter-out $(ZCL_VENDOR_LIB)/libsecp256k1.a,$(VENDOR_LIBS)):
         check-outparam-init-before-return \
         check-before-save-hooks check-pthread-create check-model-validation \
         check-model-sql-literals \
-        check-persona-resolves check-specialists check-prompt-templates check-cookbook \
+        check-persona-resolves check-specialists check-prompt-templates check-rule-vocabulary check-cookbook \
         check-long-functions check-rpc-registrar check-lag-slo-observable \
         check-controller-private-headers \
         check-file-size-ceiling check-framework-filename-suffix \
@@ -10989,6 +10989,17 @@ check-prompt-templates:
 	@./tools/lint/check_prompt_templates.sh --selftest
 	@./tools/lint/check_prompt_templates.sh
 
+# engine/composition/rule_vocab.def is the CLOSED vocabulary of rules an
+# executor may be shown, and the only place a rule id exists. The harness keys
+# every trial, score, retirement and promotion proposal on that id, so an id
+# naming nothing is a score attached to no rule, and a heading or persona with
+# no row is guidance nobody is measuring. This gate refuses BOTH directions;
+# checking one way is default-permit, which this tree has already paid for.
+check-rule-vocabulary:
+	@echo "══ LINT: the executor rule vocabulary is closed ══"
+	@./tools/lint/check_rule_vocabulary.sh --selftest
+	@./tools/lint/check_rule_vocabulary.sh
+
 # Keep top-level functions in app/controllers + app/services under 500
 # lines. Single state-machines that truly belong as one function can carry
 # a `// long-function-ok:<tag>` override marker explaining WHY.
@@ -12526,6 +12537,7 @@ LINT_GATES := \
     check-persona-resolves \
     check-specialists \
     check-prompt-templates \
+    check-rule-vocabulary \
     check-cookbook \
     check-long-functions \
     check-rpc-registrar \

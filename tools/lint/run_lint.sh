@@ -133,6 +133,7 @@ gate_command() {
         check-persona-resolves)            echo './tools/lint/check_persona_resolves.sh --selftest && ./tools/lint/check_persona_resolves.sh' ;;
         check-specialists)                 echo './tools/lint/check_specialists.sh --selftest && ./tools/lint/check_specialists.sh' ;;
         check-prompt-templates)            echo './tools/lint/check_prompt_templates.sh --selftest && ./tools/lint/check_prompt_templates.sh' ;;
+        check-rule-vocabulary)             echo './tools/lint/check_rule_vocabulary.sh --selftest && ./tools/lint/check_rule_vocabulary.sh' ;;
         check-cookbook)                    echo './tools/lint/check_cookbook.sh --selftest && ./tools/lint/check_cookbook.sh' ;;
         check-zcode-package-registry)      echo './tools/lint/check_zcode_package_registry.sh' ;;
         check-zcode-package-standalone)    echo './tools/lint/check_zcode_package_standalone.sh' ;;

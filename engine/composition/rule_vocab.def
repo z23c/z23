@@ -1,0 +1,75 @@
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ *
+ * rule_vocab — the CLOSED vocabulary of rules an executor may be shown, and
+ * the standing each one currently has.
+ *
+ * ── why a closed vocabulary ──────────────────────────────────────────────
+ * A hardcoded denylist over a growing vocabulary is default-permit: five
+ * forbidden names in front of nine declared classes lets the tenth through by
+ * omission. The same trap applies to guidance. If rules were merely a pile of
+ * prose that anyone could add to, "which rules is this executor under" would
+ * have no answer, and a rule nobody registered could never be scored, never
+ * retire, and never be shown to have cost anything.
+ *
+ * So the set is CLOSED and it is DERIVED FROM ITS SOURCES. Every id here must
+ * resolve to a heading in .grok/rules/*.md or a PERSONA row in
+ * engine/modules/engine/include/engine/personas.def, and every heading and
+ * every persona must have a row. tools/lint/check_rule_vocabulary.sh refuses
+ * both directions. Neither half alone is enough: checking only that rows
+ * resolve lets a new persona arrive unscored, and checking only that sources
+ * are covered lets a row outlive the text it claims to quote.
+ *
+ * ── the one signal ───────────────────────────────────────────────────────
+ * A row's standing is decided by GATE OUTCOMES and nothing else. Not by a
+ * model's opinion of the rule, not by how sensible it reads, not by who wrote
+ * it. engine/modules/engine/src/engine_rule_score.c reads the unit receipts,
+ * counts the runs in which the rule was SHOWN, counts how many of those runs
+ * the gate passed, and computes a Wilson lower bound. A rule whose lower
+ * bound falls under its declared floor once it has had min_trials runs is
+ * retired automatically, and the receipts that killed it are written into the
+ * row so the decision is auditable and reversible.
+ *
+ * A ROW GRANTS NO AUTHORITY. It is pasted into a prompt and nowhere else.
+ * Nothing branches on it, no verdict consults it, and a retired row changes
+ * what an executor is TOLD, never what it is ALLOWED to do.
+ *
+ * ── the shape of a row ───────────────────────────────────────────────────
+ *
+ *   ZCL_RULE(id, source, state, floor_permille, min_trials, text)
+ *
+ *   id      "grok:<slug of the heading>" or "persona:<territory path>".
+ *           The slug is the heading text lowercased with every run of
+ *           non-alphanumerics turned into one '-', trimmed at both ends.
+ *   source  ZCL_RULE_SRC_GROK or ZCL_RULE_SRC_PERSONA — which file the gate
+ *           resolves the id against.
+ *   state   shadow  — shown to nobody yet; being measured before it is trusted
+ *           obeyed  — currently pasted into executor prompts
+ *           retired — measured, found wanting, and turned off
+ *   floor   the minimum pass rate IN PER-MILLE below which the row retires
+ *           itself once it has had min_trials runs. 500 means "a rule that
+ *           does not beat a coin flip is not guidance".
+ *   min_trials  how many runs must have SHOWN the rule before its number is
+ *           allowed to decide anything. Default 30.
+ *   text    one line a reader can act on.
+ *
+ * ONE ROW IS ONE LINE, deliberately. The scorer rewrites this file in place
+ * when a rule retires, and a line-oriented rewrite of a line-oriented file is
+ * something a person can read in a diff and revert by hand.
+ *
+ * Consumers: engine/modules/engine/src/engine_rule_score.c (scores and
+ * rewrites), tools/command/native_code_command.c (`z23 code rules`), and
+ * tools/lint/check_rule_vocabulary.sh.
+ */
+
+/* clang-format off */
+
+ZCL_RULE("grok:c23-is-the-only-compiled-language-in-this-tree", ZCL_RULE_SRC_GROK, ZCL_RULE_OBEYED, 500, 30, "New program code is C23; no Python anywhere, not as a fallback and not as a legacy exception.")
+
+ZCL_RULE("persona:core/modules/net", ZCL_RULE_SRC_PERSONA, ZCL_RULE_OBEYED, 500, 30, "Never merge two different dead ends into one 'not found'; reachability and speed are different properties.")
+ZCL_RULE("persona:core/modules/validation", ZCL_RULE_SRC_PERSONA, ZCL_RULE_OBEYED, 500, 30, "The block-connection ordering layer is sealed; refuse any change that reaches it by a route skipping the unseal ritual.")
+ZCL_RULE("persona:engine/models", ZCL_RULE_SRC_PERSONA, ZCL_RULE_OBEYED, 500, 30, "Build the statement, do not write it; a hand-written SQL literal in a model is a baseline row, not a fix.")
+ZCL_RULE("persona:tests/harness", ZCL_RULE_SRC_PERSONA, ZCL_RULE_OBEYED, 500, 30, "A test file that exists proves nothing; groups_ran of zero is a failure whatever the exit code says.")
+ZCL_RULE("persona:platform/modules/base", ZCL_RULE_SRC_PERSONA, ZCL_RULE_OBEYED, 500, 30, "LOG_FAIL, LOG_ERR and LOG_NULL RETURN; calling one and discarding its value changes control flow silently.")
+ZCL_RULE("persona:core/modules/crypto", ZCL_RULE_SRC_PERSONA, ZCL_RULE_OBEYED, 500, 30, "An acceleration tier is a measurement, never a claim; pin the oracle, measure, and let the number decide.")
+
+/* clang-format on */
