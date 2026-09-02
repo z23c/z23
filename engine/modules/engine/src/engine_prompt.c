@@ -307,7 +307,8 @@ bool engine_prompt_kind_is_complete(const char *kind)
         const struct engine_prompt_section *s = &k_sections[i];
         if (s->need != ENGINE_PROMPT_NEED_ALWAYS)
             continue;
-        if (!engine_prompt_template_body(kind, s->id))
+        const char *body = engine_prompt_template_body(kind, s->id);
+        if (!body || !body[0])
             LOG_FAIL("engine",
                      "the '%s' template supplies no body for the required "
                      "'%s' section, so the section would be a bare header the "
