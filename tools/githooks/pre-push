@@ -149,7 +149,19 @@ fi
 # the full pre-push-ci gate. ZCL_PREPUSH_CMD still overrides either default.
 default_cmd="make pre-push-ci"
 case "$(uname -s 2>/dev/null || true)" in
-    MINGW*|MSYS*) default_cmd="make windows-acceptance" ;;
+    MINGW*|MSYS*)
+        # Git for Windows can drop one-shot MAKEFLAGS/ZCL_PREPUSH_CMD values
+        # while re-entering the canonical UCRT64 shell.  Keep the native gate
+        # bounded but parallel by default: a cold node epoch otherwise pins
+        # one core long enough for the already-open SSH transport to expire.
+        windows_jobs="$(getconf _NPROCESSORS_ONLN 2>/dev/null || printf '4\n')"
+        case "$windows_jobs" in
+            ''|*[!0-9]*) windows_jobs=4 ;;
+        esac
+        [ "$windows_jobs" -ge 1 ] || windows_jobs=1
+        [ "$windows_jobs" -le 8 ] || windows_jobs=8
+        default_cmd="make -j$windows_jobs windows-acceptance"
+        ;;
 esac
 CMD="${ZCL_PREPUSH_CMD:-$default_cmd}"
 LOG_FILE="$REPO_ROOT/build/pre-push-ci.log"
