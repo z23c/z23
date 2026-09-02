@@ -3410,10 +3410,18 @@ check-package-capabilities:
 check-package-anatomy: $(BIN_DIR)/z23_bounded_run
 	@./tools/lint/check_package_anatomy.sh --selftest
 	@./tools/lint/check_package_anatomy.sh
-$(BIN_DIR)/z23_bounded_run: tools/dev/z23_bounded_run.c
+ifeq ($(ZCL_HOST_WINDOWS),1)
+Z23_BOUNDED_RUN_PLATFORM_FLAGS = -D_WIN32_WINNT=0x0A00 \
+	-DWIN32_LEAN_AND_MEAN -municode
+else
+Z23_BOUNDED_RUN_PLATFORM_FLAGS = -D_POSIX_C_SOURCE=200809L
+endif
+$(BIN_DIR)/z23_bounded_run: tools/dev/z23_bounded_run.c \
+		platform/modules/base/src/safe_alloc.c
 	@mkdir -p $(dir $@)
 	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
-	    -D_POSIX_C_SOURCE=200809L -o $@ $<
+	    -Iplatform/modules/base/include \
+	    $(Z23_BOUNDED_RUN_PLATFORM_FLAGS) -o $@ $^
 .PHONY: check-capability-closure
 check-capability-closure:
 	@./tools/lint/check_capability_closure.sh --selftest

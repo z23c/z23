@@ -91,6 +91,33 @@
  * with strict -D_POSIX_C_SOURCE=200809L, so opt in like lib/test does). */
 #define _DEFAULT_SOURCE
 
+#if defined(_WIN32)
+
+#include <signal.h>
+#include <stdio.h>
+
+/* The external verifier is a separate executable, so it must provide the
+ * shutdown symbol referenced by the common node object graph it links. */
+volatile sig_atomic_t g_shutdown_requested = 0;
+
+/* Downloaded package source stays inert on Windows until the execution rail
+ * can provide the same fail-closed guarantees as the Linux implementation.
+ * Building a native refusal binary is deliberate: callers receive a stable,
+ * actionable capability answer instead of a compile failure or an accidental
+ * unsandboxed execution path. Exit 4 is the documented "full isolation is
+ * unavailable" result. */
+int main(void)
+{
+    fprintf(stderr,
+            "zclassic23-package-verify: native Windows package execution "
+            "is unavailable: the restricted-token, handle-allowlist, and "
+            "kill-on-close Job Object sandbox is not implemented yet; "
+            "fetched source remains inert\n");
+    return 4;
+}
+
+#else
+
 #include "vcs/package_attest.h"
 #include "vcs/build_action.h"
 #include "vcs/build_artifact_manifest.h"
@@ -4946,3 +4973,5 @@ int main(int argc, char **argv)
     secp256k1_context_destroy(sign_ctx);
     return 0;
 }
+
+#endif /* _WIN32 */

@@ -20,6 +20,7 @@
 #include "chain/chain.h"
 #include "chain/chainparams.h"
 #include "core/uint256.h"
+#include "jobs/catchup_cadence.h"
 #include "jobs/proof_validate_stage.h"
 #include "jobs/pv_lookahead.h"
 #include "platform/time_compat.h"
@@ -33,12 +34,10 @@
 #include "validation/chainstate.h"
 #include "validation/main_state.h"
 
-#include <errno.h>
 #include <sqlite3.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
 
 #define PVLA_CHECK(name, expr) do { \
     printf("pv_lookahead: %s... ", (name)); \
@@ -57,13 +56,6 @@ struct la_chain {
     bool                fail_internal;
     bool                plain_first;         /* h=0 carries no shielded proofs */
 };
-
-static int la_mkdir_p(const char *p)
-{
-    if (mkdir(p, 0700) == 0) return 0;
-    if (errno == EEXIST) return 0;
-    return -1;
-}
 
 static bool la_make_shielded_tx(struct transaction *tx, int h)
 {
@@ -396,9 +388,7 @@ static void la_fold_from(struct la_result *out, const char *tag, int n,
     char dir[256];
     struct main_state ms;
     struct la_chain sc;
-    test_fmt_tmpdir(dir, sizeof(dir), "pv_lookahead", tag);
-    la_mkdir_p("./test-tmp");
-    la_mkdir_p(dir);
+    test_make_tmpdir(dir, sizeof(dir), "pv_lookahead", tag);
     if (!progress_store_open(dir))
         return;
     memset(&ms, 0, sizeof(ms));
@@ -526,6 +516,9 @@ int test_pv_lookahead(void)
     blocker_module_init();
     chain_params_select(CHAIN_MAIN);
 
+    PVLA_CHECK("capacity: one default catch-up drain fits in the exact-key ring",
+               PV_LOOKAHEAD_WINDOW >= CATCHUP_CADENCE_DEFAULT_DRAIN_BATCH);
+
     /* 1) Full-window differential: 64 heights, one poisoned proof at h=40 —
      * every consume is a HIT, all rows + counters identical to serial. */
     {
@@ -585,9 +578,7 @@ int test_pv_lookahead(void)
         char dir[256];
         struct main_state ms;
         struct la_chain sc;
-        test_fmt_tmpdir(dir, sizeof(dir), "pv_lookahead", "keying");
-        la_mkdir_p("./test-tmp");
-        la_mkdir_p(dir);
+        test_make_tmpdir(dir, sizeof(dir), "pv_lookahead", "keying");
         bool setup = progress_store_open(dir);
         memset(&ms, 0, sizeof(ms));
         active_chain_init(&ms.chain_active);

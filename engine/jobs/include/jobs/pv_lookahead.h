@@ -28,7 +28,7 @@
  * proof_validate_lookahead_start (proof_validate_stage.h). Its production
  * callers are engine/composition/src/boot_mint_anchor.c (the offline -mint-anchor fold,
  * always) and engine/composition/src/boot_pv_lookahead.c (the live/replay reducer path,
- * only under -pv-lookahead, default off). When the pool is not running
+ * enabled by default; -pv-lookahead=0 disables it). When the pool is not running
  * pv_lookahead_take is a single relaxed atomic load. */
 
 #ifndef ZCL_JOBS_PV_LOOKAHEAD_H
@@ -62,8 +62,14 @@ struct pv_lookahead_verdict {
 };
 
 /* Fixed lookahead window (heights ahead of the drive cursor workers may
- * verify); also the verdict ring capacity. Workers stall when full. */
-#define PV_LOOKAHEAD_WINDOW 256
+ * verify); also the verdict ring capacity. Workers stall when full.
+ *
+ * Keep one complete default catch-up drain warm. The old 256-entry ring was
+ * nearly exhausted by an observed 239-block Windows reducer pass: the final
+ * 31 blocks missed and repeated expensive shielded-proof verification inline.
+ * 2048 covers CATCHUP_CADENCE_DEFAULT_DRAIN_BATCH (2000) while keeping the
+ * exact-key cache bounded to only a few hundred KiB. */
+#define PV_LOOKAHEAD_WINDOW 2048
 
 /* Start the pool: min(cores-2, 8) workers (>=1), env ZCL_PV_WORKERS override
  * (clamped 1..16). `reader`/`reader_user` NULL selects the production pread

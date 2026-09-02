@@ -20,13 +20,10 @@
 #include "validation/chainstate.h"
 #include "validation/main_state.h"
 
-#include <errno.h>
 #include <sqlite3.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
-#include <unistd.h>
 
 #define PV_CHECK(name, expr) do { \
     printf("proof_validate: %s... ", (name)); \
@@ -52,13 +49,6 @@ struct synth_chain_pv {
     int                 fail_height;
     enum pv_fail_kind   fail_kind;
 };
-
-static int mkdir_p_pv(const char *p)
-{
-    if (mkdir(p, 0700) == 0) return 0;
-    if (errno == EEXIST) return 0;
-    return -1;
-}
 
 static bool make_shielded_tx(struct transaction *tx, int h)
 {
@@ -348,9 +338,7 @@ static int pv_setup(const char *tag, int n, int upstream_fail_height,
                     char *dir_out, size_t dir_out_size,
                     struct main_state *ms, struct synth_chain_pv *sc)
 {
-    test_fmt_tmpdir(dir_out, dir_out_size, "proof_validate", tag);
-    mkdir_p_pv("./test-tmp");
-    mkdir_p_pv(dir_out);
+    test_make_tmpdir(dir_out, dir_out_size, "proof_validate", tag);
     if (!progress_store_open(dir_out)) return 1;
 
     memset(ms, 0, sizeof(*ms));

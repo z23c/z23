@@ -25,8 +25,8 @@
  * (height, 32-byte block hash, verifier pair) match, so a reorg, a verifier
  * swap or a stale slot all fall through to the inline verify.
  *
- * Default OFF: only started when -pv-lookahead was passed (the -prefetch-blocks
- * posture).
+ * Default ON: app_context_defaults enables the pool for live/replay reducers;
+ * -pv-lookahead=0 restores inline-only verification.
  *
  * ORDERING: boot_services.c calls the start beside boot_block_prefetch_start,
  * which is after staged_sync_supervisor_register ran proof_validate_stage_init.
@@ -49,7 +49,7 @@ void boot_pv_lookahead_start(const struct app_context *ctx,
                              struct main_state *ms)
 {
     if (!ctx || !ctx->pv_lookahead)
-        return; /* lever OFF (default) — proof_validate verifies inline as today */
+        return; /* explicitly disabled — proof_validate verifies inline */
     if (!ms) {
         LOG_WARN("pv_lookahead",
                  "[pv_lookahead] -pv-lookahead set but no main_state; skipping "

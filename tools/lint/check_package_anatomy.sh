@@ -236,6 +236,7 @@ scan_packages() {
 # these KATs exercise the deterministic reusable painter component only.
 run_required_package_kats() {
     local work rc=0 pkg bin status runner=build/bin/z23_bounded_run
+    local exe_suffix=""
     local kat_timeout_ms=10000
     local -a cc_argv=()
     read -r -a cc_argv <<< "${CC:-cc}"
@@ -263,8 +264,13 @@ run_required_package_kats() {
         echo "check_package_anatomy: FATAL — cannot create KAT work directory" >&2
         return 2
     }
+    # Native Windows GCC appends .exe when -o names a suffixless output. The
+    # MSYS shell finds that implicit suffix when executing a command itself,
+    # but the W-API bounded runner receives and opens an exact path. Name the
+    # artifact exactly so CreateProcessW gets the file that GCC produced.
+    if [ "${OS:-}" = "Windows_NT" ]; then exe_suffix=".exe"; fi
     for pkg in ball zdemo zhello; do
-        bin="$work/test_$pkg"
+        bin="$work/test_$pkg$exe_suffix"
         if ! "${cc_argv[@]}" -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
                 -I"contexts/commons/packages/$pkg/include" "contexts/commons/packages/$pkg/src/$pkg.c" \
                 "contexts/commons/packages/$pkg/tests/test_$pkg.c" -o "$bin"; then
