@@ -263,13 +263,15 @@ void *test_spawn_self_with_role(const char *group, const char *role,
     STARTUPINFOA si;
     memset(&si, 0, sizeof(si));
     si.cb = sizeof(si);
-    si.dwFlags = STARTF_USESTDHANDLES;
+    si.dwFlags = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
+    si.wShowWindow = SW_HIDE;
     si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
     si.hStdOutput = log;
     si.hStdError = log;
     PROCESS_INFORMATION pi;
     memset(&pi, 0, sizeof(pi));
-    if (!CreateProcessA(NULL, cmd, NULL, NULL, TRUE, 0, NULL, NULL,
+    if (!CreateProcessA(NULL, cmd, NULL, NULL, TRUE, CREATE_NO_WINDOW,
+                        NULL, NULL,
                         &si, &pi)) {
         fprintf(stderr, "test_spawn_self_with_role: CreateProcess failed "
                 "(%lu)\n", (unsigned long)GetLastError());
@@ -348,9 +350,15 @@ int test_spawn_argv_wait(const char *const argv[])
     STARTUPINFOA si;
     memset(&si, 0, sizeof(si));
     si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
+    si.wShowWindow = SW_HIDE;
+    si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+    si.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
+    si.hStdError = GetStdHandle(STD_ERROR_HANDLE);
     PROCESS_INFORMATION pi;
     memset(&pi, 0, sizeof(pi));
-    if (!CreateProcessA(NULL, cmd, NULL, NULL, FALSE, 0, NULL, NULL,
+    if (!CreateProcessA(NULL, cmd, NULL, NULL, TRUE, CREATE_NO_WINDOW,
+                        NULL, NULL,
                         &si, &pi)) {
         fprintf(stderr, "test_spawn_argv_wait: CreateProcess(%s) failed "
                 "(%lu)\n", argv[0], (unsigned long)GetLastError());
@@ -434,13 +442,15 @@ int test_spawn_capture_env(const char *const argv[],
     STARTUPINFOA si;
     memset(&si, 0, sizeof(si));
     si.cb = sizeof(si);
-    si.dwFlags = STARTF_USESTDHANDLES;
+    si.dwFlags = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
+    si.wShowWindow = SW_HIDE;
     si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
     si.hStdOutput = wr;
     si.hStdError = wr;
     PROCESS_INFORMATION pi;
     memset(&pi, 0, sizeof(pi));
-    if (!CreateProcessA(NULL, cmd, NULL, NULL, TRUE, 0, env_arg, NULL,
+    if (!CreateProcessA(NULL, cmd, NULL, NULL, TRUE, CREATE_NO_WINDOW,
+                        env_arg, NULL,
                         &si, &pi)) {
         fprintf(stderr, "test_spawn_capture_env: CreateProcess(%s) failed "
                 "(%lu)\n", argv[0], (unsigned long)GetLastError());
@@ -541,13 +551,15 @@ bool test_spawn_capture_kill(const char *const argv[],
     STARTUPINFOA si;
     memset(&si, 0, sizeof(si));
     si.cb = sizeof(si);
-    si.dwFlags = STARTF_USESTDHANDLES;
+    si.dwFlags = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
+    si.wShowWindow = SW_HIDE;
     si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
     si.hStdOutput = wr;
     si.hStdError = wr;
     PROCESS_INFORMATION pi;
     memset(&pi, 0, sizeof(pi));
-    if (!CreateProcessA(NULL, cmd, NULL, NULL, TRUE, 0, env_arg, NULL,
+    if (!CreateProcessA(NULL, cmd, NULL, NULL, TRUE, CREATE_NO_WINDOW,
+                        env_arg, NULL,
                         &si, &pi)) {
         fprintf(stderr, "test_spawn_capture_kill: CreateProcess(%s) failed "
                 "(%lu)\n", argv[0], (unsigned long)GetLastError());

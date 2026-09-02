@@ -976,7 +976,7 @@ static int test_swarm_utxo_sha3_verify_mismatch_is_not_silent(void)
         blocker_reset_for_testing();
 
         struct net_manager nm;
-        memset(&nm, 0, sizeof(nm));
+        net_manager_init(&nm);
         struct msg_processor mp;
         memset(&mp, 0, sizeof(mp));
         mp.net_mgr = &nm;
@@ -991,6 +991,7 @@ static int test_swarm_utxo_sha3_verify_mismatch_is_not_silent(void)
 
         bool ok = msgprocessor_test_swarm_utxo_sha3_verify(
             &mp, &node, local_root, expected_root, 999);
+        net_manager_free(&nm);
 
         /* Sync must NOT be reported complete on a mismatch. */
         ASSERT(!ok);

@@ -57,7 +57,10 @@ int main(int argc, char **argv)
     memset(&startup, 0, sizeof(startup));
     memset(&process, 0, sizeof(process));
     startup.cb = sizeof(startup);
-    if (!CreateProcessA(image, command, NULL, NULL, FALSE, 0, NULL, NULL,
+    startup.dwFlags = STARTF_USESHOWWINDOW;
+    startup.wShowWindow = SW_HIDE;
+    if (!CreateProcessA(image, command, NULL, NULL, FALSE, CREATE_NO_WINDOW,
+                        NULL, NULL,
                         &startup, &process))
         return 1;
     DWORD waited = WaitForSingleObject(process.hProcess, 60000);

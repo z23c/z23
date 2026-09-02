@@ -200,13 +200,15 @@ int zcl_mut_spawn(const char *dir, char *const argv[], int timeout_ms,
     STARTUPINFOA si;
     memset(&si, 0, sizeof(si));
     si.cb = sizeof(si);
-    si.dwFlags = STARTF_USESTDHANDLES;
+    si.dwFlags = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
+    si.wShowWindow = SW_HIDE;
     si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
     si.hStdOutput = wr;
     si.hStdError = wr;
     PROCESS_INFORMATION pi;
     memset(&pi, 0, sizeof(pi));
-    if (!CreateProcessA(NULL, cmd, NULL, NULL, TRUE, 0, NULL, dir,
+    if (!CreateProcessA(NULL, cmd, NULL, NULL, TRUE, CREATE_NO_WINDOW,
+                        NULL, dir,
                         &si, &pi)) {
         fprintf(stderr, "mutation: CreateProcess(%s) failed (%lu)\n",
                 argv[0], (unsigned long)GetLastError());

@@ -26,8 +26,9 @@ int main(void)
 {
     wchar_t temp[MAX_PATH], root[MAX_PATH], spoof[MAX_PATH], link[MAX_PATH];
     if (!GetTempPathW(MAX_PATH, temp) ||
-        swprintf(root, MAX_PATH, L"%lsz23-watcher-store-%lu", temp,
-                 (unsigned long)GetCurrentProcessId()) <= 0 ||
+        swprintf(root, MAX_PATH, L"%lsz23-watcher-store-%lu-%llu", temp,
+                 (unsigned long)GetCurrentProcessId(),
+                 (unsigned long long)GetTickCount64()) <= 0 ||
         swprintf(spoof, MAX_PATH, L"%ls\\spoof.record", root) <= 0 ||
         swprintf(link, MAX_PATH, L"%ls\\link.record", root) <= 0)
         return fail("fixture path failed");

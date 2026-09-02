@@ -375,9 +375,12 @@ static int child_spawn(size_t idx, const char *out_path,
     STARTUPINFOA si;
     memset(&si, 0, sizeof(si));
     si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESHOWWINDOW;
+    si.wShowWindow = SW_HIDE;
     PROCESS_INFORMATION pi;
     memset(&pi, 0, sizeof(pi));
-    if (!CreateProcessA(NULL, cmd, NULL, NULL, FALSE, 0, NULL, NULL,
+    if (!CreateProcessA(NULL, cmd, NULL, NULL, FALSE, CREATE_NO_WINDOW,
+                        NULL, NULL,
                         &si, &pi)) {
         fprintf(stderr, "test_parallel: CreateProcess failed (%lu) for %s\n",
                 (unsigned long)GetLastError(), g_groups[idx].name);
