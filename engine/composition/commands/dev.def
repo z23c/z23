@@ -936,6 +936,31 @@ ZCL_COMMAND_DEV_READ(
     "durable failure artifacts are available through the dev binary",
     "z23-dev dev diagnose show <failure-id>")
 
+/* ── dev.fleet ─────────────────────────────────────────────────────────────
+ * One local, node-free answer for every remote integration lane. Git owns
+ * membership and source identity; self-sealed gate receipts own lint claims. */
+ZCL_COMMAND_READY_READ(
+    "dev.fleet", "dev", "dev.fleet.truth",
+    "Show the Git and lint-receipt truth for every origin lane",
+    "Enumerates refs/remotes/origin/main and every refs/remotes/origin/agent/* "
+    "already present in this checkout, then reports each exact head, the "
+    "union of its remote delta, unpublished commits, staged, unstaged, and "
+    "untracked files, and current red lint gates with the first failing "
+    "commit in each uninterrupted failure run. check-core-seal and "
+    "check-git-hooks-installed are labeled owner_only. Receipt chains, logs, "
+    "HEAD, status, and diff fingerprints are independently checked; missing "
+    "or mismatched evidence is unobserved or stale, never green. It does not "
+    "fetch and never reads a node, RPC endpoint, or datadir.", 65536,
+    "fleet,git,branches,worktrees,lint,receipts,owner",
+    "zcl.command.empty_input.v1", "zcl.dev_fleet.v1", "", "",
+    "z23 dev fleet",
+    ZCL_COMMAND_LAYER_DEV, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_LATENCY_FAST,
+    ZCL_COMMAND_COST_LOW, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_DEV_STATE_READ,
+    ZCL_COMMAND_TRAIT_IDEMPOTENT | ZCL_COMMAND_TRAIT_DEV_ONLY,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_dev_fleet)
+
 /* ── dev.agent ─────────────────────────────────────────────────────────────
  * The checkout questions an agent asks most often, each of which was until
  * now a shell recipe an agent had to remember and repeatedly got wrong:

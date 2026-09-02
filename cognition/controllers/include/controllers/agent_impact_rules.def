@@ -2787,6 +2787,9 @@ AGENT_IMPACT_RULE("tests/harness/src/test_zendp.c", "zendp zendp_records make_li
  * change here must also re-prove the catalog and native-API contracts that
  * decide what the release binary advertises. */
 AGENT_IMPACT_RULE("tools/command/native_devagent.c|tools/command/native_devagent.h|tools/command/native_devagent_command.c|tools/command/native_devagent_mutate_command.c|tests/harness/src/test_devagent_surface.c", "devagent_surface command_registry_catalog native_api_contract command_input_bounds make_lint_gates")
+/* Fleet truth is a release-visible native command. Its three-worktree
+ * acceptance exercises Git ref/worktree discovery plus receipt freshness. */
+AGENT_IMPACT_RULE("tools/command/native_dev_fleet.c|tools/command/native_dev_fleet.h|tools/command/native_dev_fleet_internal.h|tools/command/native_dev_fleet_command.c|tools/command/native_dev_fleet_process.c|tools/command/native_dev_fleet_receipts.c|tools/scripts/dev_fleet_selftest.sh|tests/harness/src/test_dev_fleet.c", "dev_fleet command_registry_catalog native_api_contract command_handler_snapshot command_input_bounds make_lint_gates")
 /* The install front door. platform/modules/install is pure judgement with no in-tree
  * dependencies, so the only things that can observe a change to it are its
  * own group and check-z23-release-install, which drives the real

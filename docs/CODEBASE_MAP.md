@@ -262,7 +262,7 @@ page changing with it.
 <!--   app_shape_folders    = directories directly under app/                        -->
 <!-- Fix a mismatch with `tools/scripts/check_doc_counts.sh --fix`, never by hand.  -->
 
-test_groups: 1080
+test_groups: 1081
 port_interfaces: 13
 persistence_adapters: 14
 condition_registrations: 52
@@ -314,6 +314,13 @@ public surface is currently verify/check only. `MODE=auto`/`apply`, direct
 relinking all fail closed during Phase-0 containment. The live hot-swap loop
 is the swappable-leaf module path (`make hotswap-try` / `make hotswap-apply`,
 see §4), not a watcher mode.
+Fleet-wide checkout truth is `z23 dev fleet`, implemented by
+`tools/command/native_dev_fleet*.c`. It enumerates only `origin/main` and
+`origin/agent/*`, joins matching attached worktrees, and admits lint claims
+only from locally validated `.cache/agent-receipts` chains. Its isolated
+three-worktree acceptance is `tools/scripts/dev_fleet_selftest.sh`; neither
+path reads a live node or datadir.
+
 `tools/dev/deploy-dev-lane.sh` contains the intended immutable
 content-addressed generation transaction (activation lock,
 `current`/`last-good` links, bounded probes, rollback, and rejection

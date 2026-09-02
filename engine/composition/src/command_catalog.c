@@ -18,6 +18,7 @@
 #include "config/command_handler_index.h"
 
 #include "command/native_command.h"
+#include "command/native_dev_fleet.h"
 #include "kernel/command_registry.h"
 
 #include <stddef.h>

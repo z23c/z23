@@ -3299,7 +3299,7 @@ worktree-gc:
 # command, HEAD, dirty state, exit status, wall/child-CPU time, and a SHA3 of
 # the captured output, which is stored alongside. See the forgery model in
 # tools/agent/gate-receipt.sh — this is EVIDENCE, not proof.
-.PHONY: gate-receipt check-claims agent-velocity agent-sha3
+.PHONY: gate-receipt check-claims agent-velocity agent-sha3 dev-fleet-selftest
 
 AGENT_SHA3_SRCS := tools/agent/agent_sha3.c platform/modules/sha3/src/sha3.c
 agent-sha3: $(BIN_DIR)/agent_sha3
@@ -3308,6 +3308,12 @@ $(BIN_DIR)/agent_sha3: $(AGENT_SHA3_SRCS)
 	$(CC) -std=c23 -O2 -Wall -Wextra -Werror \
 	    -Iplatform/modules/sha3/include -Icore/modules/crypto/include -Iplatform/modules/support/include -Iplatform/modules/base/include \
 	    -o $@ $(AGENT_SHA3_SRCS)
+
+# Permanent node-free acceptance for `z23 dev fleet`: one isolated origin,
+# three attached worktrees, exact remote heads, dirty/unpublished source, and
+# current self-sealed lint receipts. The fixture never reads a node datadir.
+dev-fleet-selftest: dev-bin agent-sha3
+	@tools/scripts/dev_fleet_selftest.sh
 
 # Independent package gates compile only the authoritative package trees and
 # their declared direct dependencies.  They never open a node datadir.

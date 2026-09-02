@@ -1084,6 +1084,8 @@ ZCL_MODULE_CAPABILITY("tools/command/native_dev_retrieval_command.c", CAP_FS_REA
 ZCL_MODULE_CAPABILITY("tools/command/native_devagent.c", CAP_FS_READ|CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("tools/command/native_devagent_command.c", CAP_FS_READ|CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("tools/command/native_devagent_mutate_command.c", CAP_FS_READ|CAP_FS_WRITE, "")
+ZCL_MODULE_CAPABILITY("tools/command/native_dev_fleet.c", CAP_FS_WRITE, "")
+ZCL_MODULE_CAPABILITY("tools/command/native_dev_fleet_receipts.c", CAP_FS_READ|CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("tools/command/native_mesh_command.c", CAP_CLOCK, "")
 ZCL_MODULE_CAPABILITY("tools/command/native_metaverse_space_command.c", CAP_CLOCK, "")
 ZCL_MODULE_CAPABILITY("tools/command/native_metaverse_space_scout_command.c", CAP_FS_WRITE, "")

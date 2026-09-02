@@ -390,6 +390,22 @@ build/bin/mutation-campaign --file=contexts/commons/modules/metaverse/src/node_c
 build/bin/mutation-campaign --file=<any .c> --list   # enumerate only; no build
 ```
 
+### Reading fleet truth
+
+Run `z23 dev fleet` from any checkout to see `origin/main` and every locally
+known `origin/agent/*` lane in one result. It reports exact remote heads,
+attached worktrees, each lane's remote/unpublished/dirty file union, and red
+lint checks from current `.cache/agent-receipts` evidence. A missing receipt is
+`unobserved`; a valid receipt for another HEAD or tree fingerprint is `stale`.
+Neither is green. Core-seal and repository-hook failures are marked
+`owner_only` so a worker does not waste a cycle attempting an owner ritual.
+
+This command intentionally does not fetch. Run `git fetch origin` first when
+you need newer remote-tracking refs. It reads Git metadata and self-sealed lint
+receipt/log pairs only; it never opens a node datadir or contacts a live node.
+The permanent acceptance is `make dev-fleet-selftest`, which constructs an
+isolated origin with three worktrees and no node.
+
 `z23 code tests <file.c>` names the group that covers a file, which is the
 `--group=` argument. `--limit=N` takes a sample instead of the whole file, and
 `--target=` points the plan at a build other than `test_parallel`.
