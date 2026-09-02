@@ -2582,6 +2582,27 @@ cj_sha3() {
     openssl dgst -sha3-256 "$1" | awk '{print $NF}'
 }
 
+cj_host_cpu() {
+    case "$(uname -s)" in
+        Darwin)
+            sysctl -n machdep.cpu.brand_string 2>/dev/null ||
+                sysctl -n hw.model 2>/dev/null ||
+                printf '%s\n' "unknown CPU"
+            ;;
+        Linux)
+            awk -F ': ' '/^model name[[:space:]]*:/ { print $2; exit }' \
+                /proc/cpuinfo 2>/dev/null || printf '%s\n' "unknown CPU"
+            ;;
+        *) printf '%s\n' "unknown CPU" ;;
+    esac
+}
+
+cj_host_threads() {
+    getconf _NPROCESSORS_ONLN 2>/dev/null ||
+        sysctl -n hw.logicalcpu 2>/dev/null ||
+        printf '%s\n' "unknown"
+}
+
 # What this run measured, as plain key = value text. The README's proof figure
 # is rendered from this file, so those numbers are a recording of one real run
 # on stated hardware — never a claim typed onto a page.
@@ -2595,7 +2616,7 @@ cj_sha3() {
 cj_write_facts() {
     local out="$1" strip="$2"
     local cpu commit dirty
-    cpu="$(sed -n 's/^model name[[:space:]]*: //p' /proc/cpuinfo | head -1)"
+    cpu="$(cj_host_cpu)"
     [ -n "$cpu" ] || cpu="unknown CPU"
     commit="$(git -C "$REPO_ROOT" rev-parse HEAD)"
     if [ -n "$(git -C "$REPO_ROOT" status --porcelain)" ]; then dirty=yes; else dirty=no; fi
@@ -2603,7 +2624,7 @@ cj_write_facts() {
         printf '# Recorded by `make commons-demo`. Every value was measured by that\n'
         printf '# run on the machine named below; nothing here is typed in by hand.\n'
         printf 'recorded_utc          = %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-        printf 'host_cpu              = %s (%s threads)\n' "$cpu" "$(nproc)"
+        printf 'host_cpu              = %s (%s threads)\n' "$cpu" "$(cj_host_threads)"
         printf 'host_os               = %s %s\n' "$(uname -sr)" "$(uname -m)"
         printf 'compiler              = %s\n' "$(${CC:-cc} --version | head -1)"
         printf 'source_git_commit     = %s (dirty: %s)\n' "$commit" "$dirty"
