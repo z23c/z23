@@ -1223,6 +1223,8 @@ int main(int argc, char **argv)
       failures += test_keystone_utxo_binding(); }
     { extern int test_self_folded_anchor(void);
       failures += test_self_folded_anchor(); }
+    { extern int test_self_folded_anchor_heavy(void);
+      failures += test_self_folded_anchor_heavy(); }
     { extern int test_sha3_windows(void);
       failures += test_sha3_windows(); }
     { extern int test_sha3_stream(void);

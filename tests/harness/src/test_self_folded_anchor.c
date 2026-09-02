@@ -22,7 +22,7 @@
  *       and assert the re-derived root EQUALS the original (bodies are the
  *       authority, not the binary).
  *
- * TWO REAL LAYERS (no skeletons):
+ * TWO REAL GROUPS (no skeletons):
  * --------------------------------
  *   (A) ALWAYS-ON light fold-and-compare (section 2). A small in-process
  *       coins_kv set ("the bodies") is committed with the SAME canonical SHA3
@@ -32,7 +32,8 @@
  *       coin must break the match. This proves "re-derive == baked" at fixture
  *       scale on every run — the assertion the old skeleton never made.
  *
- *   (B) HEAVY genesis->3,056,758 fold-and-compare (section 3, opt-in). The full
+ *   (B) HEAVY genesis->3,056,758 fold-and-compare
+ *       (`test_self_folded_anchor_heavy`, opt-in). The full
  *       ~3.1M-block fold needs a real datadir + the whole boot pipeline
  *       (`boot_mint_anchor_run`, engine/composition/src/boot_mint_anchor.c:52), so the
  *       bodies-from-genesis fold is run by the BINARY (`-mint-anchor`, which
@@ -41,8 +42,9 @@
  *       that artifact, `uss_open(verify_full_sha3=true,
  *       expected_sha3=cp->sha3_hash)` RE-HASHES the whole body from the records
  *       (not the header) and binds it to the compiled checkpoint. A real
- *       fold-derived-root vs baked-checkpoint comparison; SKIP only when no
- *       artifact is provided.
+ *       fold-derived-root vs baked-checkpoint comparison. It is a separate
+ *       integration group so an absent external artifact cannot make the
+ *       hermetic group only partly observed.
  *
  * Wave-1 Lane E of docs/work/self-verified-tip-plan.md. Authored as Act-3 prep.
  */
@@ -76,15 +78,11 @@ int test_self_folded_anchor(void);
 int test_self_folded_anchor(void)
 {
     int failures = 0;
-    /* Opt-in for the heavy genesis->checkpoint replay. Off by default so the
-     * unit run stays fast; a future heavy-fixture lane sets it. */
-    const char *heavy = getenv("ZCL_SELF_FOLD_ANCHOR_FIXTURE");
-    bool run_heavy = heavy && heavy[0] && strcmp(heavy, "0") != 0;
 
     printf("\n=== test_self_folded_anchor ===\n");
 
     /* NOTE: the TEST_CASE/TEST_END macros allow exactly one per function (each
-     * TEST_END emits the shared `_test_next:` label). This test has three
+     * TEST_END emits the shared `_test_next:` label). This test has two
      * sections, so it uses one explicit `_test_next:` label and per-section
      * printf markers — the same single-label pattern as
      * test_keystone_utxo_binding.c. */
@@ -173,7 +171,30 @@ int test_self_folded_anchor(void)
         printf("OK\n");
     }
 
-    /* (3) HEAVY genesis->3,056,758 fold-and-compare — REAL when opted in.
+    goto _done;
+_test_next:
+    /* An ASSERT failed (it jumped here after failures++). */
+    printf("(section aborted)\n");
+_done:
+    if (failures == 0)
+        printf("=== test_self_folded_anchor: all cases passed ===\n");
+    else
+        printf("=== test_self_folded_anchor: %d failure(s) ===\n", failures);
+    return failures;
+}
+
+/* The heavyweight external-artifact ceremony is deliberately a distinct
+ * registered group. The exact push-proof runner may then claim complete
+ * observation of test_self_folded_anchor without silently treating this
+ * independently provisioned multi-gigabyte fixture as though it ran. */
+int test_self_folded_anchor_heavy(void);
+int test_self_folded_anchor_heavy(void)
+{
+    int failures = 0;
+
+    printf("\n=== test_self_folded_anchor_heavy ===\n");
+
+    /* HEAVY genesis->3,056,758 fold-and-compare — REAL when opted in.
      * The full ~3.1M-block fold needs a real datadir and the whole boot
      * pipeline (boot_mint_anchor_run drives the eight stages under app_init),
      * so the bodies-from-genesis fold is run by the BINARY, not in-process:
@@ -192,11 +213,12 @@ int test_self_folded_anchor(void)
      * binds it to the compiled checkpoint — i.e. the bodies reproduce the
      * anchor root. We also assert the header height/count == the baked
      * checkpoint. This is a genuine fold-derived-root vs baked-checkpoint
-     * comparison, NOT a skeleton. SKIP only when no artifact is provided. */
+     * comparison, NOT a skeleton. */
     printf("self_folded_anchor: heavy fold artifact re-derives baked root (opt-in)... ");
     {
         const char *artifact = getenv("ZCL_SELF_FOLD_ANCHOR_FIXTURE");
-        if (!run_heavy || !artifact || !artifact[0] || !strcmp(artifact, "1")) {
+        if (!artifact || !artifact[0] || !strcmp(artifact, "0") ||
+            !strcmp(artifact, "1")) {
             printf("SKIP (set ZCL_SELF_FOLD_ANCHOR_FIXTURE=<path to a "
                    "-mint-anchor artifact> to run the genesis->checkpoint "
                    "fold-and-compare)\n");
@@ -234,8 +256,8 @@ _test_next:
     printf("(section aborted)\n");
 _done:
     if (failures == 0)
-        printf("=== test_self_folded_anchor: all cases passed ===\n");
+        printf("=== test_self_folded_anchor_heavy: all cases passed ===\n");
     else
-        printf("=== test_self_folded_anchor: %d failure(s) ===\n", failures);
+        printf("=== test_self_folded_anchor_heavy: %d failure(s) ===\n", failures);
     return failures;
 }

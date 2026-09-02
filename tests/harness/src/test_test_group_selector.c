@@ -614,6 +614,8 @@ static int test_native_catalog_resolution(void)
         ASSERT(zcl_test_group_is_integration_only("test_store_e2e_gate"));
         ASSERT(zcl_test_group_is_integration_only(
             "test_store_e2e_shielded"));
+        ASSERT(zcl_test_group_is_integration_only(
+            "test_self_folded_anchor_heavy"));
         ASSERT(!zcl_test_group_is_integration_only("test_event_log"));
         ASSERT(zcl_test_group_proof_contracts_valid());
         ASSERT(zcl_test_group_proof_contract(
@@ -633,6 +635,8 @@ static int test_native_catalog_resolution(void)
         ASSERT(zcl_test_group_proof_contract(
                    "test_reducer_forward_progress_gate") ==
                ZCL_TEST_PROOF_STRESS);
+        ASSERT(zcl_test_group_proof_contract(
+                   "test_parity_slice") == ZCL_TEST_PROOF_STRESS);
         ASSERT(zcl_test_group_proof_contract(
                    "test_store_e2e_gate") == ZCL_TEST_PROOF_STRESS);
         ASSERT(zcl_test_group_proof_contract(
