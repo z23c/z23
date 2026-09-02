@@ -296,8 +296,8 @@ On this host (32 cores, GCC 14.2, existing `~/.cache/zcc`, `make -j8`):
 | `z23` (release, LTO) | cold objects | 66.4 s | 582 s | ~40 s | ~20–49 s | 10.2% (216/2123) |
 | `z23` | warm, one `.c` touch | 44.6 s | 362 s | cache hit | ~45 s LTO | 2 hits / 2 misses (link miss) |
 | `z23` | link only | 48.7 s | 371 s | none | ~49 s LTO | 0% (link is uncached LTO) |
-| `dev` (non-LTO, gold) | warm, one `.c` touch | 21–38 s | ~23 s | 1 TU | ~22 s non-LTO + publish | n/a (1 keyed compile) |
-| `dev` | fresh epoch after `-MT` fix | 20.9 s | ~22 s | cache copies | non-LTO link | shares the 99.8% below |
+| `dev` (non-LTO, gold) | warm, one real `.c` edit | 30–38 s | ~23 s | 1 TU (~18 s is identity, see below) | ~11 s incl. publish | 1 keyed miss (the edit) |
+| `dev` | republish only (alias deleted) | 22.3 s | 21 s | none | none (candidate reused) | 0 |
 | `t-fast ONLY=hex_codec` | cold harness, before `-MT` fix | 167.2 s | 980 s | ~164 s | ~3 s | **0.0%** (2/5385) |
 | `t-fast ONLY=hex_codec` | warm, one test-file touch | 39.9–42.3 s | 49–51 s | 1 TU + identity | full harness | 12.5% (1/8) |
 | `t-fast ONLY=build_profile` | new epoch after `-MT` fix | 77.4 s | 95 s | cache copy | ~3 s + identity | **99.8%** (5372/5383) |
@@ -324,10 +324,15 @@ What the numbers say:
   re-probes `cc -fuse-ld=<name>` with a tiny link on every parse (mold, lld,
   gold order). A cached selection once outlived an uninstalled mold and broke
   every dev link with `collect2: cannot find 'ld'`; the probe cannot go
-  stale. On this host only gold is present. The one-file dev wall time
-  includes epoch publish/verify machinery outside this lane; the visible
-  compile+link+publish completes in ~7 s, the quiet epoch bookkeeping the
-  rest.
+  stale. On this host only gold is present.
+- The remaining dev-loop wall time is not the compiler: a measured real
+  one-`.c` edit spends ~18 s in three full-tree source hashes
+  (`source-identity.sh capture-record` once at Makefile parse plus
+  `verify-record` in the mutation and identity stamps, ~6 s each) before
+  the epoch session even opens; compile + non-LTO link + publish is
+  ~11 s. Collapsing the triple hash is the next compiler-side win, but it
+  is identity-machinery surgery (this lane extends, never bypasses, the
+  epoch identity contract) and is left open.
 
 Use `make -s print-CFLAGS` / `print-DEV-CFLAGS` / `print-build-flags` to
 inspect the two flag sets. `make t-fast ONLY=build_profile` pins that release
