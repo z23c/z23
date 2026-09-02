@@ -23,6 +23,10 @@ struct vcs_package_reuse_input {
     bool locked;
     bool installed;
     bool compatible;
+    /* Live peer inventory is availability evidence only.  It may break an
+     * otherwise-equal semantic/locality tie, but cannot make an unknown or
+     * incompatible package reusable. */
+    uint32_t peer_advertisers;
 };
 
 struct vcs_package_reuse_selection {

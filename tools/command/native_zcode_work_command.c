@@ -38,6 +38,7 @@
 #include "vcs/package_publish.h"
 #include "vcs/package_release.h"
 #include "vcs/package_reuse.h"
+#include "vcs/package_swarm_node.h"
 #include "vcs/build_action.h"
 #include "vcs/vcs.h"
 #include "vcs/vcs_devloop.h"
@@ -116,6 +117,13 @@ struct zwork_reuse_candidate {
     struct vcs_package_build_receipt receipt;
     bool receipt_verified;
     bool installed_invalid;
+};
+
+struct zwork_peer_inventory {
+    bool live;
+    bool truncated;
+    size_t roots_seen;
+    size_t roots_matched;
 };
 #endif
 
@@ -877,6 +885,40 @@ static bool zwork_reuse_is_lifecycle_release(
                           candidate->release_id_hex) == 0;
 }
 
+/* Correlate transient peer availability only with release rows whose signed
+ * package facts are already verified by the local index.  An ANNOUNCE is not
+ * package metadata and therefore never creates a candidate or changes
+ * compatibility; it only orders otherwise-equal verified candidates. */
+static void zwork_peer_inventory_apply(
+    struct zwork_reuse_candidate *candidates, size_t candidate_count,
+    struct zwork_peer_inventory *inventory)
+{
+    memset(inventory, 0, sizeof(*inventory));
+    struct vcs_swarm_engine *engine = vcs_swarm_engine_global();
+    if (!engine) return;
+    inventory->live = true;
+    struct vcs_swarm_advertised rows[VCS_SWARM_MAX_LOCAL_ANNOUNCES + 1u];
+    size_t count = vcs_swarm_engine_advertised(
+        engine, rows, VCS_SWARM_MAX_LOCAL_ANNOUNCES + 1u);
+    if (count > VCS_SWARM_MAX_LOCAL_ANNOUNCES) {
+        inventory->truncated = true;
+        count = VCS_SWARM_MAX_LOCAL_ANNOUNCES;
+    }
+    inventory->roots_seen = count;
+    for (size_t i = 0; i < count; i++) {
+        char root[65];
+        zcl_hex_encode(rows[i].root, sizeof(rows[i].root), root);
+        for (size_t c = 0; c < candidate_count; c++) {
+            if (strcmp(root,
+                       candidates[c].input.package->package_root_hex) != 0)
+                continue;
+            candidates[c].input.peer_advertisers = rows[i].advertisers;
+            inventory->roots_matched++;
+            break;
+        }
+    }
+}
+
 static bool zwork_reuse_render(
     const struct zcl_command_request *request, const char *goal,
     const char *license,
@@ -967,8 +1009,10 @@ static bool zwork_reuse_render(
             zwork_reuse_installed(datadir, zcode_dir, entry, &candidates[i]);
         }
         if (candidates[i].installed_invalid) invalid_installs++;
-        inputs[i] = candidates[i].input;
     }
+    struct zwork_peer_inventory peer_inventory;
+    zwork_peer_inventory_apply(candidates, count, &peer_inventory);
+    for (size_t i = 0; i < count; i++) inputs[i] = candidates[i].input;
     struct vcs_package_reuse_plan reuse;
     bool ok = vcs_package_reuse_plan_build(goal, inputs, count, &reuse);
     size_t composed_packages = 0;
@@ -992,6 +1036,8 @@ static bool zwork_reuse_render(
             json_push_kv_str(&row, "semver", input->package->semver) &&
             json_push_kv_str(&row, "license", input->package->license) &&
             json_push_kv_bool(&row, "installed", input->installed) &&
+            json_push_kv_int(&row, "peer_advertisers",
+                             (int64_t)input->peer_advertisers) &&
             json_push_kv_str(
                 &row, "composition",
                 input->locked ? "already_declared" :
@@ -1013,6 +1059,8 @@ static bool zwork_reuse_render(
             json_push_kv_str(&root, "package_root",
                              input->package->package_root_hex) &&
             json_push_kv_bool(&root, "already_locked", input->locked) &&
+            json_push_kv_int(&root, "peer_advertisers",
+                             (int64_t)input->peer_advertisers) &&
             json_push_kv_int(&root, "score", reuse.selected[i].score) &&
             json_push_back(&roots, &root);
         if (ok && usable_now) ready_count++;
@@ -1039,7 +1087,10 @@ static bool zwork_reuse_render(
             json_push_kv_str(
                 plan_json, "search_status",
                 skipped ? "bounded_projection_incomplete" : "complete") &&
-            json_push_kv_str(plan_json, "network_discovery", "not_requested") &&
+            json_push_kv_str(
+                plan_json, "network_discovery",
+                peer_inventory.live ? "peer_inventory_consulted"
+                                    : "unavailable_no_live_swarm") &&
             json_push_kv_str(plan_json, "license_filter",
                              license ? license : "") &&
             json_push_kv_bool(plan_json, "license_filter_applied",
@@ -1062,7 +1113,16 @@ static bool zwork_reuse_render(
                     ? "explicitly use the selected package before creating code"
                     : reuse.new_code_required ? goal : "none") &&
             json_push_kv_str(expert_json, "search_order",
-                             "installed_then_local_metadata") &&
+                             "semantic_then_locked_then_installed_then_peer_inventory_then_identity") &&
+            json_push_kv_str(
+                expert_json, "peer_inventory_authority",
+                "availability_only_never_package_metadata") &&
+            json_push_kv_int(expert_json, "peer_roots_seen",
+                             (int64_t)peer_inventory.roots_seen) &&
+            json_push_kv_int(expert_json, "peer_roots_matched",
+                             (int64_t)peer_inventory.roots_matched) &&
+            json_push_kv_bool(expert_json, "peer_inventory_truncated",
+                              peer_inventory.truncated) &&
             json_push_kv_str(expert_json, "license_filter",
                              license ? license : "") &&
             json_push_kv_str(expert_json, "license_filter_basis",

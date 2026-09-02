@@ -127,6 +127,8 @@ static int selection_cmp(const struct vcs_package_reuse_selection *a,
     const struct vcs_package_reuse_input *ib = &inputs[b->input_index];
     if (ia->locked != ib->locked) return ia->locked ? -1 : 1;
     if (ia->installed != ib->installed) return ia->installed ? -1 : 1;
+    if (ia->peer_advertisers != ib->peer_advertisers)
+        return ia->peer_advertisers > ib->peer_advertisers ? -1 : 1;
     int c = strcmp(ia->package->name, ib->package->name);
     if (c != 0) return c;
     c = strcmp(ia->package->semver, ib->package->semver);

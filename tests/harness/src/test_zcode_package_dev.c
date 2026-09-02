@@ -25,6 +25,7 @@
 #include "vcs/package_prepare.h"
 #include "vcs/package_mapping.h"
 #include "vcs/package_reuse.h"
+#include "vcs/package_swarm_node.h"
 #include "vcs/vcs.h"
 #include "vcs/vcs_devloop.h"
 #include "vcs/vcs_object.h"
@@ -2052,6 +2053,24 @@ static int zpd_test_reuse_plan(void)
         ASSERT(plan.disposition == VCS_PACKAGE_REUSE_AMBIGUOUS);
         ASSERT(plan.new_code_required);
         ASSERT(plan.selected_count == 2);
+
+        struct vcs_package_reuse_input peer_tie[2] = {
+            {.package = &entries[0], .compatible = true,
+             .peer_advertisers = 1},
+            {.package = &entries[2], .compatible = true,
+             .peer_advertisers = 3},
+        };
+        ASSERT(vcs_package_reuse_plan_build(
+            "Render json", peer_tie, 2, &plan));
+        ASSERT(plan.disposition == VCS_PACKAGE_REUSE_PARTIAL);
+        ASSERT(plan.selected_count == 2);
+        ASSERT(plan.selected[0].input_index == 1);
+
+        inputs[1].peer_advertisers = UINT32_MAX;
+        ASSERT(vcs_package_reuse_plan_build(
+            "Render a deterministic flight replay", inputs, 2, &plan));
+        ASSERT(plan.disposition == VCS_PACKAGE_REUSE_NONE);
+        ASSERT(plan.selected_count == 0);
         PASS();
     } _test_next:;
     return failures;
@@ -2062,6 +2081,8 @@ static int zpd_test_work_start_license_filter(
     const uint8_t pubkey[33])
 {
     int failures = 0;
+    struct vcs_swarm_engine *previous_engine = vcs_swarm_engine_global();
+    struct vcs_swarm_engine *peer_engine = NULL;
     TEST("zcode work start: exact SPDX filter selects one root-bound reuse") {
         char base[256], zcode_dir[320], path[512];
         char workspace[256], mit_dir[256], apache_dir[256];
@@ -2117,6 +2138,13 @@ static int zpd_test_work_start_license_filter(
         char mit_root[65], apache_root[65];
         zcl_hex_encode(mit.package_root, 32, mit_root);
         zcl_hex_encode(apache.package_root, 32, apache_root);
+        peer_engine = vcs_swarm_engine_create(NULL, NULL, NULL, NULL, NULL);
+        ASSERT(peer_engine);
+        uint8_t peer_key[33] = {0x02, 0x51};
+        ASSERT(vcs_swarm_engine_peer_add(peer_engine, 51, peer_key));
+        ASSERT(vcs_swarm_engine_peer_offer(
+            peer_engine, 51, mit.package_root, 200, 100));
+        vcs_swarm_engine_set_global(peer_engine);
 
         struct json_value input;
         json_init(&input); json_set_object(&input);
@@ -2140,6 +2168,8 @@ static int zpd_test_work_start_license_filter(
         const struct json_value *reuse = json_get(&reply.data, "reuse_plan");
         ASSERT(reuse && strcmp(json_get_str(json_get(
                           reuse, "license_filter")), "MIT") == 0);
+        ASSERT(strcmp(json_get_str(json_get(reuse, "network_discovery")),
+                      "peer_inventory_consulted") == 0);
         ASSERT(json_get_bool(json_get(reuse, "license_filter_applied")));
         const struct json_value *reused = json_get(reuse, "reused");
         const struct json_value *selected = reused ? json_at(reused, 0) : NULL;
@@ -2150,12 +2180,16 @@ static int zpd_test_work_start_license_filter(
                       "1.0.0") == 0);
         ASSERT(strcmp(json_get_str(json_get(selected, "license")), "MIT") ==
                0);
+        ASSERT(json_get_int(json_get(selected, "peer_advertisers")) == 1);
         const struct json_value *expert = json_get(&reply.data, "expert");
         ASSERT(expert);
         ASSERT(json_get_int(json_get(expert, "packages_indexed")) == 2);
         ASSERT(json_get_int(json_get(
                    expert, "packages_filter_matched")) == 1);
         ASSERT(json_get_int(json_get(expert, "packages_scanned")) == 1);
+        ASSERT(json_get_int(json_get(expert, "peer_roots_seen")) == 1);
+        ASSERT(json_get_int(json_get(expert, "peer_roots_matched")) == 1);
+        ASSERT(!json_get_bool(json_get(expert, "peer_inventory_truncated")));
         ASSERT(!json_get_bool(json_get(expert, "packages_truncated")));
         const struct json_value *selected_roots =
             json_get(expert, "selected_roots");
@@ -2165,6 +2199,8 @@ static int zpd_test_work_start_license_filter(
                selected_root);
         ASSERT(strcmp(json_get_str(json_get(selected_root, "package_root")),
                       mit_root) == 0);
+        ASSERT(json_get_int(json_get(selected_root, "peer_advertisers")) ==
+               1);
         ASSERT(strcmp(mit_root, apache_root) != 0);
 
         ASSERT(reply.next_count == 1);
@@ -2202,6 +2238,8 @@ static int zpd_test_work_start_license_filter(
         zpd_fixture_cleanup(workspace);
         PASS();
     } _test_next:;
+    vcs_swarm_engine_set_global(previous_engine);
+    vcs_swarm_engine_free(peer_engine);
     return failures;
 }
 
