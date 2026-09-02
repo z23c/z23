@@ -118,7 +118,7 @@ $(grep -oE '^check-[a-z0-9-]+:' "$MAKEFILE" | sed 's/:$//' | sort -u || true)"
         done
         for tok in $gates; do
             [ -n "$tok" ] || continue
-            if ! printf '%s\n' "$makefile_gates" | grep -qx "$tok"; then
+            if ! grep -qx "$tok" <<<"$makefile_gates"; then
                 echo "  $name: gate '$tok' is not a Makefile lint gate"
             fi
         done

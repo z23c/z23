@@ -813,6 +813,8 @@ AGENT_IMPACT_RULE("cognition/modules/codeindex/*|engine/composition/commands/cod
  * because the handlers are native command leaves (the tools/command glob
  * already routes there). */
 AGENT_IMPACT_RULE("tools/command/native_code_owner_command.c|tools/command/native_code_cost_command.c|tools/command/native_code_recent_command.c|tests/harness/src/test_code_firsthour.c", "code_firsthour codeindex command_registry_catalog native_api_contract command_handler_snapshot hotswap_module dev_platform make_lint_gates")
+/* Specialist focus: the X-macro catalog, ranking engine, native leaf, and gate. */
+AGENT_IMPACT_RULE("engine/composition/specialists.def|cognition/modules/codeindex/include/codeindex/codeindex_focus.h|cognition/modules/codeindex/src/codeindex_focus.c|tools/command/native_code_focus_command.c|tests/harness/src/test_code_focus.c|tools/lint/check_specialists.sh", "code_focus command_registry_catalog make_lint_gates")
 
 /* Verified index fetch (M4): the code.fetch leaf, its module-side
  * verify-and-install path, and the publication-ritual helpers it shares with

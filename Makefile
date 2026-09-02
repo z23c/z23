@@ -2380,7 +2380,7 @@ $(filter-out $(ZCL_VENDOR_LIB)/libsecp256k1.a,$(VENDOR_LIBS)):
         check-outparam-init-before-return \
         check-before-save-hooks check-pthread-create check-model-validation \
         check-model-sql-literals \
-        check-persona-resolves check-cookbook \
+        check-persona-resolves check-specialists check-cookbook \
         check-long-functions check-rpc-registrar check-lag-slo-observable \
         check-controller-private-headers \
         check-file-size-ceiling check-framework-filename-suffix \
@@ -10851,6 +10851,11 @@ check-persona-resolves:
 	@./tools/lint/check_persona_resolves.sh --selftest
 	@./tools/lint/check_persona_resolves.sh
 
+check-specialists:
+	@echo "══ LINT: every specialist territory, gate and test group resolves ══"
+	@./tools/lint/check_specialists.sh --selftest
+	@./tools/lint/check_specialists.sh
+
 # Keep top-level functions in app/controllers + app/services under 500
 # lines. Single state-machines that truly belong as one function can carry
 # a `// long-function-ok:<tag>` override marker explaining WHY.
@@ -12369,6 +12374,7 @@ LINT_GATES := \
     check-model-ar-lifecycle \
     check-model-sql-literals \
     check-persona-resolves \
+    check-specialists \
     check-cookbook \
     check-long-functions \
     check-rpc-registrar \
