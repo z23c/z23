@@ -23,8 +23,7 @@ dht_probe_read_report() {
     local path="$1" pid_name="$2" port_name="$3" start_name="$4"
     local probe_pid probe_port probe_start extra
     read -r probe_pid probe_port extra <"$path"
-    probe_start="$(awk '{print $22}' "/proc/$probe_pid/stat" \
-        2>/dev/null || true)"
+    probe_start="$(dht_start_token "$probe_pid" || true)"
     [ -n "$probe_pid" ] && [ -n "$probe_port" ] &&
         [ -n "$probe_start" ] && [ -z "${extra:-}" ] ||
         dht_die "invalid lifecycle probe report $path"
@@ -37,7 +36,7 @@ dht_lifecycle_probe_child() {
     local report="${DHT_PROBE_REPORT:?}" release="${DHT_PROBE_RELEASE:?}"
     local outcome="${DHT_PROBE_OUTCOME:?}" listener="" listener_port
     dht_make_work zcl23-dhtprobe
-    setsid "$DHT_ACCEPTANCE_C23" listen-report "$report" \
+    dht_process_group_exec "$DHT_ACCEPTANCE_C23" listen-report "$report" \
         >>"$DHT_WORK/listener.log" 2>&1 &
     listener="$!"
     dht_register_owned_group "$listener"
@@ -143,7 +142,8 @@ esac
 
 dht_build_helper() {
     cc -std=c23 -O1 -w -D_GNU_SOURCE -ffunction-sections -fdata-sections \
-        -Wl,--gc-sections -I"$REPO_ROOT/platform/modules/base/include" \
+        "${DHT_GC_SECTIONS_LDFLAGS[@]}" \
+        -I"$REPO_ROOT/platform/modules/base/include" \
         -I"$REPO_ROOT/platform/modules/sha3/include" -I"$REPO_ROOT/core/modules/crypto/include" \
         -I"$REPO_ROOT/platform/modules/support/include" \
         -I"$REPO_ROOT/platform/modules/util/include" -I"$REPO_ROOT/platform/modules/platform/include" \

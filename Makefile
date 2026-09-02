@@ -3585,7 +3585,7 @@ secure-release-regressions-locked: $(TEST_PARALLEL_REL_CANDIDATE) dev-package-ve
 # daemons, mines a regtest chain and runs confined package builds.
 .PHONY: commons-demo commons-journey-acceptance \
 	commons-no-coin-onboarding-acceptance
-commons-demo: zclassic23 zcl-rpc zclassic23-package-sign zclassic23-package-verify tools/arena-product-journey-c23
+commons-demo: zclassic23 zcl-rpc zclassic23-package-sign zclassic23-package-verify tools/arena-product-journey-c23 process-group-exec
 	@bash tools/dev/commons_journey_acceptance.sh
 
 # The same proof under its acceptance name, for scripts and release notes.
@@ -3607,7 +3607,7 @@ commons-no-coin-onboarding-acceptance: zclassic23 zcl-rpc tools/arena-runner
 # Fails closed without them. Deliberately not part of `make ci` and not the
 # front door: `make commons-demo` stays the fast same-host proof.
 .PHONY: commons-multihost-acceptance
-commons-multihost-acceptance: zclassic23 zcl-rpc zclassic23-package-sign zclassic23-package-verify tools/arena-product-journey-c23
+commons-multihost-acceptance: zclassic23 zcl-rpc zclassic23-package-sign zclassic23-package-verify tools/arena-product-journey-c23 process-group-exec
 	@ZCL_COMMONS_MULTIHOST=1 bash tools/dev/commons_journey_acceptance.sh
 
 .PHONY: zcode-development-acceptance zcode-adapter-readiness-acceptance zcode-c23-commons-alpha zcode-dht-harness-selftest zcode-async-proof-acceptance zcode-async-proof-scaling public-node-coin-generation-matrix sovereign-source-roundtrip native-agent-ui-alpha native-agent-ui-physical-acceptance arena-product-journey
@@ -3640,7 +3640,7 @@ zcode-c23-commons-alpha:
 # Runs the real DHT fixture's central lifecycle boundary without booting full
 # nodes: concurrent owners, a forced middle failure, signal cleanup, immediate
 # port reuse, and an uncontaminated rerun are all fail-closed assertions.
-zcode-dht-harness-selftest: tools/arena-product-journey-c23
+zcode-dht-harness-selftest: tools/arena-product-journey-c23 process-group-exec
 	@DHT_LIFECYCLE_MODE=selftest bash tools/dev/zcode_dht_acceptance.sh
 
 # Zero-wait development protocol acceptance. The exact groups jointly prove

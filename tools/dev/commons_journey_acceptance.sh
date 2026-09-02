@@ -473,7 +473,7 @@ cj_identities() {
 # helper the DHT acceptance uses rather than inventing a second derivation.
 cj_build_peer_helper() {
     cc -std=c23 -O1 -w -D_GNU_SOURCE -ffunction-sections -fdata-sections \
-        -Wl,--gc-sections \
+        "${DHT_GC_SECTIONS_LDFLAGS[@]}" \
         -I"$REPO_ROOT/platform/modules/base/include" -I"$REPO_ROOT/platform/modules/sha3/include" \
         -I"$REPO_ROOT/core/modules/crypto/include" -I"$REPO_ROOT/platform/modules/support/include" \
         -I"$REPO_ROOT/platform/modules/util/include" -I"$REPO_ROOT/platform/modules/platform/include" \

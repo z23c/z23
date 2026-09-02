@@ -27,6 +27,8 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 NODE_BIN="${ZCL_NODE_BIN:-$REPO_ROOT/build/bin/zclassic23}"
 RPC_BIN="${ZCL_RPC_BIN:-$REPO_ROOT/build/bin/zcl-rpc}"
 DHT_ACCEPTANCE_C23="${DHT_ACCEPTANCE_C23:-$REPO_ROOT/build/bin/arena_product_journey_c23}"
+PROCESS_GROUP_EXEC="${ZCL_PROCESS_GROUP_EXEC:-$REPO_ROOT/build/bin/process-group-exec}"
+PROCESS_START_TOKEN="${ZCL_PROCESS_START_TOKEN:-$REPO_ROOT/tools/dev/process-start-token.sh}"
 
 DHT_LIVE_PORTS="8023 8033 8034 8035 8043 8044 8045 8046 8232 8443 \
 18034 18232 18234 18243 18244 18245 18246"
@@ -49,6 +51,10 @@ declare -A DHT_OWNED_START=()
 DHT_OWNED_PORTS=()
 DHT_CLEANED=0
 DHT_KEEP="${DHT_KEEP:-0}"
+case "$(uname -s 2>/dev/null)" in
+    Darwin) DHT_GC_SECTIONS_LDFLAGS=(-Wl,-dead_strip) ;;
+    *) DHT_GC_SECTIONS_LDFLAGS=(-Wl,--gc-sections) ;;
+esac
 # ── remote node operation (multi-host acceptances) ───────────────────────
 # Default: every node is a local process, these maps stay empty, and every
 # function below takes exactly its historical local path. A multi-host
@@ -107,6 +113,20 @@ dht_die() {
     exit 2
 }
 dht_note() { echo "zcode-dht-acceptance: $*"; }
+
+dht_start_token() {
+    "$PROCESS_START_TOKEN" "$1" 2>/dev/null
+}
+
+dht_process_group_exec() {
+    if [ -x "$PROCESS_GROUP_EXEC" ]; then
+        exec "$PROCESS_GROUP_EXEC" "$@"
+    elif command -v setsid >/dev/null 2>&1; then
+        exec setsid "$@"
+    else
+        dht_die "no process-group launcher; run make process-group-exec"
+    fi
+}
 
 dht_make_work() {
     local prefix="$1" parent
@@ -172,8 +192,9 @@ dht_kill_group() {
             unset "DHT_OWNED_PGIDS[$pgid]"
             return 0
         fi
-        state="$(awk '{print $3}' "/proc/$pgid/stat" 2>/dev/null || true)"
-        [ "$state" = Z ] && break
+        state="$(LC_ALL=C ps -p "$pgid" -o stat= 2>/dev/null |
+            awk 'NR == 1 { print $1 }' || true)"
+        case "$state" in Z*) break ;; esac
         sleep 0.2
     done
     kill -KILL "-$pgid" 2>/dev/null || true
@@ -184,7 +205,7 @@ dht_kill_group() {
 
 dht_register_owned_group() {
     local pid="$1" start
-    start="$(awk '{print $22}' "/proc/$pid/stat" 2>/dev/null || true)"
+    start="$(dht_start_token "$pid" || true)"
     if [ -z "$start" ]; then
         wait "$pid" 2>/dev/null || true
         dht_die "spawned process group $pid exited before ownership registration"
@@ -199,7 +220,7 @@ dht_assert_no_owned_processes() {
         rpc="${DHT_PGID_RPC[$pid]:-}"
         [ -n "$rpc" ] && [ -n "${DHT_REMOTE_HOST[$rpc]:-}" ] && continue
         expected="${DHT_OWNED_START[$pid]}"
-        current="$(awk '{print $22}' "/proc/$pid/stat" 2>/dev/null || true)"
+        current="$(dht_start_token "$pid" || true)"
         [ -z "$current" ] || [ "$current" != "$expected" ] ||
             dht_die "owned process $pid remained after cleanup"
     done
@@ -341,7 +362,7 @@ dht_spawn() {
         printf -v "$out_name" '%s' "$pid"
         return 0
     fi
-    setsid "$NODE_BIN" -datadir="$dd" -regtest -port="$p2p" \
+    dht_process_group_exec "$NODE_BIN" -datadir="$dd" -regtest -port="$p2p" \
         -rpcport="$rpc" -fsport="$fs" -httpsport="$https" \
         "${args[@]}" -packagehost="$DHT_PACKAGEHOST" -noisetransport \
         "${worker_args[@]}" "${params_args[@]}" \
@@ -356,7 +377,7 @@ dht_spawn() {
 dht_spawn_owned_command() {
     local out_name="$1" log="$2" pid
     shift 2
-    setsid "$@" >>"$log" 2>&1 &
+    dht_process_group_exec "$@" >>"$log" 2>&1 &
     pid="$!"
     dht_register_owned_group "$pid"
     printf -v "$out_name" '%s' "$pid"
@@ -383,7 +404,7 @@ dht_wait_file() {
 
 dht_process_identity_alive() {
     local pid="$1" expected="$2" current
-    current="$(awk '{print $22}' "/proc/$pid/stat" 2>/dev/null || true)"
+    current="$(dht_start_token "$pid" || true)"
     [ -n "$current" ] && [ "$current" = "$expected" ]
 }
 

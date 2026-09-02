@@ -7,6 +7,7 @@
 #include "core/hash.h"
 #include "crypto/ed25519.h"
 #include "net/noise_transport.h"
+#include "platform/socket_compat.h"
 #include "platform/time_compat.h"
 #include "support/cleanse.h"
 #include "vcs/zcode_dht_identity.h"
@@ -278,7 +279,7 @@ static bool make_nodes(const struct vcs_zcode_dht_delegation *delegation,
 
 static int connect_ipv4(const char *host, uint16_t port)
 {
-    int fd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    int fd = platform_socket_open(AF_INET, SOCK_STREAM, 0, true, false);
     if (fd < 0)
         return -1;
     struct sockaddr_in sa = {.sin_family = AF_INET, .sin_port = htons(port)};
