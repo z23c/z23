@@ -9,6 +9,11 @@
  *   1. Codec roundtrip + root stability: build -> validate -> serialize ->
  *      parse -> identical fields and identical root; a frozen KAT root hex
  *      guards the canonical encoding against drift.
+ *   1b. Schema 2, the declared program list: roundtrip and its own frozen
+ *      KAT root (the schema-1 KAT must never move when schema 2 changes),
+ *      the `app/<stem>.c` grammar, install-output naming, and the four
+ *      illegal encodings — version 2 with no list, version 1 with one,
+ *      version 2 with an empty one, and a non-program entry on the wire.
  *   2. Every bound enforced: oversized lists/strings, unsorted/duplicate
  *      entries, wrong extensions, bad define grammar, a library outside
  *      {libc, libm, pthread}, empty sources, out-of-range seconds/memory,
@@ -367,6 +372,247 @@ static int t_codec(void)
     return failures;
 }
 
+#define ZR_SCHEMA2_KAT \
+    "3c6d7e680ed247c482b6d35f11feefbc2db4bcacc2a590c47d45daf3afb9c7c2"
+
+/* ── 1b: schema 2 — the declared programs list ──────────────────────── */
+
+/* A hand-made wire: the canonical schema-1 encoding with the version field
+ * (the two bytes after the 8-byte magic) overwritten and arbitrary bytes
+ * appended. Nothing else about the encoding is assumed. */
+static uint8_t *zr_wire_variant(const uint8_t *base, size_t base_len,
+                                uint16_t version, const uint8_t *extra,
+                                size_t extra_len, size_t *out_len)
+{
+    uint8_t *w = malloc(base_len + extra_len + 1u);
+    if (!w)
+        return NULL;
+    memcpy(w, base, base_len);
+    w[VCS_PACKAGE_RECIPE_WIRE_MAGIC_BYTES] = (uint8_t)(version & 0xffu);
+    w[VCS_PACKAGE_RECIPE_WIRE_MAGIC_BYTES + 1u] = (uint8_t)(version >> 8);
+    if (extra_len > 0)
+        memcpy(w + base_len, extra, extra_len);
+    *out_len = base_len + extra_len;
+    return w;
+}
+
+/* [2 count][2 len][path] — one program list holding exactly one entry. */
+static size_t zr_program_list(uint8_t *out, const char *path)
+{
+    size_t len = strlen(path);
+    out[0] = 1; out[1] = 0;
+    out[2] = (uint8_t)(len & 0xffu);
+    out[3] = (uint8_t)(len >> 8);
+    memcpy(out + 4, path, len);
+    return 4u + len;
+}
+
+/* The fixture recipe plus the four files zr_recipe names, so the programs
+ * list is the only thing membership can fail on. */
+static bool zr_manifest_without_app(struct vcs_package_manifest *m)
+{
+    static const char *const paths[] = {
+        "include/ring.h", "src/ring.c", "tests/ring_test.c",
+    };
+    vcs_package_manifest_init(m);
+    for (size_t i = 0; i < sizeof(paths) / sizeof(paths[0]); i++) {
+        uint8_t hash[32];
+        const char *body = "x\n";
+        if (!vcs_package_chunk_hash((const uint8_t *)body, strlen(body),
+                                    hash) ||
+            !vcs_package_manifest_add(m, paths[i], VCS_PACKAGE_MODE_FILE,
+                                      strlen(body), hash, 1))
+            return false;
+    }
+    return true;
+}
+
+static int t_programs(void)
+{
+    int failures = 0;
+    enum vcs_package_recipe_error err = VCS_PACKAGE_RECIPE_OK;
+
+    /* Roundtrip: the fixture recipe plus two programs. */
+    struct vcs_package_recipe r;
+    ZR_CHECK("programs: schema-2 fixture builds",
+             zr_recipe(&r) &&
+             vcs_package_recipe_add_program(&r, "app/main.c", NULL) &&
+             vcs_package_recipe_add_program(&r, "app/tool.c", NULL));
+    ZR_CHECK("programs: a program raises the recipe to schema 2",
+             r.schema_version == VCS_PACKAGE_RECIPE_VERSION_PROGRAMS);
+    ZR_CHECK("programs: schema-2 fixture validates",
+             vcs_package_recipe_validate(&r) == VCS_PACKAGE_RECIPE_OK);
+
+    uint8_t *wire2 = NULL;
+    size_t wire2_len = 0;
+    ZR_CHECK("programs: schema-2 recipe serializes",
+             vcs_package_recipe_serialize(&r, &wire2, &wire2_len) ==
+                 VCS_PACKAGE_RECIPE_OK && wire2 && wire2_len > 0);
+    struct vcs_package_recipe back;
+    ZR_CHECK("programs: schema-2 wire parses back",
+             vcs_package_recipe_parse(wire2, wire2_len, &back) ==
+                 VCS_PACKAGE_RECIPE_OK);
+    ZR_CHECK("programs: roundtrip field for field",
+             back.schema_version == VCS_PACKAGE_RECIPE_VERSION_PROGRAMS &&
+             back.programs.count == 2 &&
+             strcmp(back.programs.items[0], "app/main.c") == 0 &&
+             strcmp(back.programs.items[1], "app/tool.c") == 0 &&
+             back.public_headers.count == 1 && back.sources.count == 1 &&
+             back.test_sources.count == 1 && back.include_dirs.count == 1 &&
+             back.defines.count == 1 && back.library_count == 3);
+    uint8_t root_a[32], root_b[32];
+    ZR_CHECK("programs: schema-2 roots compute",
+             vcs_package_recipe_root(&r, root_a) == VCS_PACKAGE_RECIPE_OK &&
+             vcs_package_recipe_root(&back, root_b) ==
+                 VCS_PACKAGE_RECIPE_OK);
+    ZR_CHECK("programs: schema-2 root stable across the roundtrip",
+             memcmp(root_a, root_b, 32) == 0);
+
+    /* Frozen KAT: this pins the schema-2 encoding — the trailing program
+     * list's position, count width, entry framing and order — exactly as
+     * the schema-1 KAT in t_codec pins the encoding a recipe without
+     * programs still has. The two KATs are independent on purpose: the
+     * schema-1 value must never move when schema 2 changes. */
+    char root_hex[65];
+    zr_hex32(root_a, root_hex);
+    ZR_CHECK("programs: schema-2 KAT root pins the encoding",
+             strcmp(root_hex, ZR_SCHEMA2_KAT) == 0);
+    vcs_package_recipe_free(&back);
+
+    /* Builder rejections: the program grammar is exactly `app/<stem>.c`. */
+    static const char *const not_programs[] = {
+        "src/x.c", "app/a/b.c", "app/x.h", "app/.c", "tests/t.c",
+    };
+    for (size_t i = 0; i < sizeof(not_programs) / sizeof(not_programs[0]);
+         i++) {
+        struct vcs_package_recipe bad;
+        vcs_package_recipe_init(&bad);
+        err = VCS_PACKAGE_RECIPE_OK;
+        bool rejected =
+            !vcs_package_recipe_add_program(&bad, not_programs[i], &err) &&
+            err == VCS_PACKAGE_RECIPE_ERR_PATH &&
+            bad.schema_version == VCS_PACKAGE_RECIPE_VERSION;
+        char name[96];
+        snprintf(name, sizeof(name), "programs: %s is not a program",
+                 not_programs[i]);
+        ZR_CHECK(name, rejected);
+        vcs_package_recipe_free(&bad);
+    }
+    err = VCS_PACKAGE_RECIPE_OK;
+    ZR_CHECK("programs: a repeated program names the order rule",
+             !vcs_package_recipe_add_program(&r, "app/main.c", &err) &&
+             err == VCS_PACKAGE_RECIPE_ERR_LIST_ORDER);
+
+    /* A schema-1 struct carrying a program has no legal encoding. */
+    struct vcs_package_recipe forged;
+    ZR_CHECK("programs: schema-1 struct with a program builds",
+             zr_recipe(&forged) &&
+             vcs_package_recipe_add_program(&forged, "app/main.c", NULL));
+    forged.schema_version = VCS_PACKAGE_RECIPE_VERSION;
+    ZR_CHECK("programs: schema 1 with a program is a PROGRAM rejection",
+             vcs_package_recipe_validate(&forged) ==
+                 VCS_PACKAGE_RECIPE_ERR_PROGRAM);
+    vcs_package_recipe_free(&forged);
+
+    /* Hand-built wires. The schema-1 encoding of the same recipe is the
+     * base; every variant below differs from it only in the version field
+     * and the trailing bytes. */
+    struct vcs_package_recipe plain;
+    (void)zr_recipe(&plain);
+    uint8_t *wire1 = NULL;
+    size_t wire1_len = 0;
+    ZR_CHECK("programs: schema-1 base wire serializes",
+             vcs_package_recipe_serialize(&plain, &wire1, &wire1_len) ==
+                 VCS_PACKAGE_RECIPE_OK);
+
+    struct vcs_package_recipe out;
+    size_t forged_len = 0;
+    uint8_t *forged_wire = zr_wire_variant(
+        wire1, wire1_len, VCS_PACKAGE_RECIPE_VERSION_PROGRAMS, NULL, 0,
+        &forged_len);
+    /* Version 2 with no trailing list: the parser reaches the program
+     * count and runs off the end, so the codec returns WIRE_TRUNCATED — it
+     * never gets far enough to call the mismatch a PROGRAM rejection. */
+    ZR_CHECK("programs: version 2 without a list is truncated",
+             forged_wire &&
+             vcs_package_recipe_parse(forged_wire, forged_len, &out) ==
+                 VCS_PACKAGE_RECIPE_ERR_WIRE_TRUNCATED);
+    free(forged_wire);
+
+    uint8_t list[64];
+    size_t list_len = zr_program_list(list, "app/main.c");
+    forged_wire = zr_wire_variant(wire1, wire1_len,
+                                  VCS_PACKAGE_RECIPE_VERSION, list, list_len,
+                                  &forged_len);
+    ZR_CHECK("programs: version 1 with a list is trailing bytes",
+             forged_wire &&
+             vcs_package_recipe_parse(forged_wire, forged_len, &out) ==
+                 VCS_PACKAGE_RECIPE_ERR_WIRE_TRAILING);
+    free(forged_wire);
+
+    uint8_t empty_list[2] = { 0, 0 };
+    forged_wire = zr_wire_variant(wire1, wire1_len,
+                                  VCS_PACKAGE_RECIPE_VERSION_PROGRAMS,
+                                  empty_list, sizeof(empty_list),
+                                  &forged_len);
+    ZR_CHECK("programs: version 2 with an empty list names the rule",
+             forged_wire &&
+             vcs_package_recipe_parse(forged_wire, forged_len, &out) ==
+                 VCS_PACKAGE_RECIPE_ERR_PROGRAM);
+    free(forged_wire);
+
+    list_len = zr_program_list(list, "src/x.c");
+    forged_wire = zr_wire_variant(wire1, wire1_len,
+                                  VCS_PACKAGE_RECIPE_VERSION_PROGRAMS, list,
+                                  list_len, &forged_len);
+    ZR_CHECK("programs: a non-program entry on the wire names the path rule",
+             forged_wire &&
+             vcs_package_recipe_parse(forged_wire, forged_len, &out) ==
+                 VCS_PACKAGE_RECIPE_ERR_PATH);
+    free(forged_wire);
+    free(wire1);
+    vcs_package_recipe_free(&plain);
+
+    /* Install outputs: app/main.c carries the package's name, every other
+     * stem carries its own. */
+    char output[VCS_PACKAGE_PATH_MAX];
+    ZR_CHECK("programs: app/main.c installs under the package short name",
+             vcs_package_recipe_program_output("app/main.c", "wordcount",
+                                               output, sizeof(output)) &&
+             strcmp(output, "bin/wordcount") == 0);
+    ZR_CHECK("programs: app/tool.c installs under its own stem",
+             vcs_package_recipe_program_output("app/tool.c", "wordcount",
+                                               output, sizeof(output)) &&
+             strcmp(output, "bin/tool") == 0);
+    ZR_CHECK("programs: an empty short name has no output",
+             !vcs_package_recipe_program_output("app/main.c", "", output,
+                                                sizeof(output)) &&
+             output[0] == '\0');
+    ZR_CHECK("programs: a non-program has no output",
+             !vcs_package_recipe_program_output("src/main.c", "x", output,
+                                                sizeof(output)) &&
+             output[0] == '\0');
+    ZR_CHECK("programs: an output that does not fit is refused empty",
+             !vcs_package_recipe_program_output("app/main.c", "wordcount",
+                                                output, 8u) &&
+             output[0] == '\0');
+
+    /* Publication membership: a declared program must be a package file. */
+    struct vcs_package_manifest m;
+    char detail[160] = {0};
+    ZR_CHECK("programs: membership manifest builds",
+             zr_manifest_without_app(&m));
+    ZR_CHECK("programs: a program absent from the manifest is named",
+             !vcs_package_recipe_files_in_manifest(&r, &m, detail,
+                                                   sizeof(detail)) &&
+             strncmp(detail, "programs: app/main.c",
+                     strlen("programs: app/main.c")) == 0);
+    vcs_package_manifest_free(&m);
+
+    vcs_package_recipe_free(&r);
+    free(wire2);
+    return failures;
+}
 /* ── 2: bounds + closed grammar ─────────────────────────────────────── */
 static int t_bounds(void)
 {
@@ -899,6 +1145,7 @@ int test_zcode_recipe(void)
     printf("\n=== zcode_recipe: declarative C23 build recipe ===\n");
     int failures = 0;
     failures += t_codec();
+    failures += t_programs();
     failures += t_bounds();
     failures += t_publish();
     failures += t_command();

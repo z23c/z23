@@ -37,13 +37,22 @@ struct zproject_init_plan {
     char name[VCS_PACKAGE_RELEASE_NAME_MAX + 1u];
     char semver[VCS_PACKAGE_RELEASE_SEMVER_MAX + 1u];
     char license[VCS_PACKAGE_RELEASE_LICENSE_MAX + 1u];
-    char configuration[1024];
+    char configuration[2048];
     uint8_t source_root[32];
     uint8_t plan_id[32];
 };
 
 static bool zproject_render_layout(
-    struct json_value *out, const struct vcs_package_prepared *prepared);
+    struct json_value *out, const struct vcs_package_prepared *prepared,
+    const char *package_name);
+
+/* The part of a package name after the publisher's slash — the name the
+ * recipe's program outputs and the verifier's lib<short>.a are built from. */
+static const char *zproject_short_name(const char *package_name)
+{
+    const char *slash = package_name ? strchr(package_name, '/') : NULL;
+    return slash ? slash + 1 : package_name;
+}
 
 static const char *zproject_str(const struct json_value *input,
                                 const char *key)
@@ -283,6 +292,73 @@ static bool zproject_plan_derive(const struct json_value *input,
                            "name, semver or license violates the existing package schema");
         return false;
     }
+    /* Programs are declared, never inferred by prepare — so the one place
+     * that may propose them is this plan, whose whole contract is that a
+     * person reads it before anything is written. Every `app/<stem>.c` in
+     * the scanned tree becomes a proposed program; the reader deletes the
+     * line for anything that is not meant to install. A nested app/x/y.c is
+     * not a program and is left alone. */
+    char programs_json[1024];
+    size_t programs_used = 0;
+    programs_json[0] = '\0';
+    for (size_t i = 0; i < scan->manifest.count; i++) {
+        const char *path = scan->manifest.files[i].path;
+        if (!vcs_package_recipe_program_path_valid(path))
+            continue;
+        enum vcs_package_recipe_error rerr = VCS_PACKAGE_RECIPE_OK;
+        if (!vcs_package_recipe_add_program(&scan->recipe, path, &rerr)) {
+            if (detail && detail_cap)
+                (void)snprintf(detail, detail_cap, "program %s: %s", path,
+                               vcs_package_recipe_error_string(rerr));
+            return false;
+        }
+        int used = snprintf(programs_json + programs_used,
+                            sizeof(programs_json) - programs_used, "%s\"%s\"",
+                            programs_used ? ", " : "", path);
+        if (used <= 0 ||
+            (size_t)used >= sizeof(programs_json) - programs_used) {
+            if (detail && detail_cap)
+                (void)snprintf(detail, detail_cap,
+                               "too many programs to name in a bounded plan");
+            return false;
+        }
+        programs_used += (size_t)used;
+    }
+    /* app/main.c installs as the package's own short name, so it collides
+     * with app/<short name>.c. Naming it here keeps it correctable in the
+     * plan instead of surfacing as a rejected prepare after init commit. */
+    const char *short_name = zproject_short_name(plan->name);
+    for (size_t i = 0; i < scan->recipe.programs.count; i++) {
+        char output[VCS_PACKAGE_PATH_MAX];
+        if (!vcs_package_recipe_program_output(scan->recipe.programs.items[i],
+                                               short_name, output,
+                                               sizeof(output))) {
+            if (detail && detail_cap)
+                (void)snprintf(detail, detail_cap,
+                               "program output undefined: %s",
+                               scan->recipe.programs.items[i]);
+            return false;
+        }
+        for (size_t j = i + 1u; j < scan->recipe.programs.count; j++) {
+            char other[VCS_PACKAGE_PATH_MAX];
+            if (vcs_package_recipe_program_output(
+                    scan->recipe.programs.items[j], short_name, other,
+                    sizeof(other)) && strcmp(output, other) == 0) {
+                if (detail && detail_cap)
+                    (void)snprintf(detail, detail_cap,
+                                   "program output collision: %s and %s both "
+                                   "emit %s",
+                                   scan->recipe.programs.items[i],
+                                   scan->recipe.programs.items[j], output);
+                return false;
+            }
+        }
+    }
+    char programs_field[sizeof(programs_json) + 32u];
+    programs_field[0] = '\0';
+    if (programs_used > 0)
+        (void)snprintf(programs_field, sizeof(programs_field),
+                       ",\n  \"programs\": [%s]", programs_json);
     int n = snprintf(plan->configuration, sizeof(plan->configuration),
         "{\n"
         "  \"schema\": 1,\n"
@@ -292,8 +368,8 @@ static bool zproject_plan_derive(const struct json_value *input,
         "  \"license\": \"%s\",\n"
         "  \"include_dir\": \"include\",\n"
         "  \"source_dir\": \"src\",\n"
-        "  \"dependencies\": []\n"
-        "}\n", plan->name, plan->semver, plan->license);
+        "  \"dependencies\": []%s\n"
+        "}\n", plan->name, plan->semver, plan->license, programs_field);
     if (n <= 0 || (size_t)n >= sizeof(plan->configuration) ||
         !vcs_package_manifest_root(&scan->manifest, plan->source_root)) {
         if (detail && detail_cap)
@@ -317,7 +393,7 @@ static bool zproject_render_plan(struct json_value *out,
                                  const struct vcs_package_prepared *scan)
 {
     struct json_value layout;
-    if (!zproject_render_layout(&layout, scan))
+    if (!zproject_render_layout(&layout, scan, plan->name))
         return false;
     char plan_hex[65], source_hex[65];
     zcl_hex_encode(plan->plan_id, 32, plan_hex);
@@ -394,8 +470,41 @@ static bool zproject_push_root(struct json_value *out, const char *key,
     return json_push_kv_str(out, key, hex);
 }
 
+/* The executables this package installs, next to the translation units they
+ * are built from. A reader who sees `programs` but not `program_outputs`
+ * still cannot answer "what command will I be able to run", because
+ * app/main.c is installed under the package's own short name, not "main" —
+ * so both lists are rendered, in the same order. */
+static bool zproject_push_program_outputs(
+    struct json_value *out, const struct vcs_package_recipe *recipe,
+    const char *package_name)
+{
+    struct json_value values;
+    json_init(&values);
+    json_set_array(&values);
+    bool ok = true;
+    for (size_t i = 0; ok && i < recipe->programs.count; i++) {
+        char path[VCS_PACKAGE_PATH_MAX];
+        struct json_value value;
+        json_init(&value);
+        if (!vcs_package_recipe_program_output(recipe->programs.items[i],
+                                               zproject_short_name(package_name),
+                                               path, sizeof(path))) {
+            ok = false;
+        } else {
+            json_set_str(&value, path);
+            ok = json_push_back(&values, &value);
+        }
+        json_free(&value);
+    }
+    if (ok) ok = json_push_kv(out, "program_outputs", &values);
+    json_free(&values);
+    return ok;
+}
+
 static bool zproject_render_layout(struct json_value *out,
-                                   const struct vcs_package_prepared *prepared)
+                                   const struct vcs_package_prepared *prepared,
+                                   const char *package_name)
 {
     json_init(out);
     json_set_object(out);
@@ -405,6 +514,10 @@ static bool zproject_render_layout(struct json_value *out,
                                  &prepared->recipe.sources) &&
            zproject_push_strings(out, "tests",
                                  &prepared->recipe.test_sources) &&
+           zproject_push_strings(out, "programs",
+                                 &prepared->recipe.programs) &&
+           zproject_push_program_outputs(out, &prepared->recipe,
+                                         package_name) &&
            zproject_push_strings(out, "include_directories",
                                  &prepared->recipe.include_dirs) &&
            zproject_push_libraries(out, &prepared->recipe);
@@ -549,7 +662,7 @@ void zcl_native_handle_zcode_project_inspect(
     json_init(&expert);
     json_init(&profile);
     bool ok = zproject_total_bytes(&prepared.manifest, &total_bytes) &&
-              zproject_render_layout(&layout, &prepared) &&
+              zproject_render_layout(&layout, &prepared, prepared.release.name) &&
               zproject_render_expert(&expert, &prepared) &&
               zproject_render_profile(&profile);
     json_init(&limits); json_set_object(&limits);
@@ -564,13 +677,18 @@ void zcl_native_handle_zcode_project_inspect(
             ok = json_push_back(&scopes, &value);
             json_free(&value);
         }
-        struct json_value src, tests;
+        struct json_value src, tests, app;
         json_init(&src); json_set_str(&src, "src");
         json_init(&tests); json_set_str(&tests, "tests");
+        json_init(&app); json_set_str(&app, "app");
         if (ok) ok = json_push_back(&scopes, &src);
         if (ok && prepared.recipe.test_sources.count != 0)
             ok = json_push_back(&scopes, &tests);
-        json_free(&src); json_free(&tests);
+        /* A package that declares a program is edited in app/ too — the same
+         * reasoning that puts tests/ on this list only when tests exist. */
+        if (ok && prepared.recipe.programs.count != 0)
+            ok = json_push_back(&scopes, &app);
+        json_free(&src); json_free(&tests); json_free(&app);
     }
     if (ok) {
         ok = json_push_kv_int(&limits, "maximum_test_seconds",

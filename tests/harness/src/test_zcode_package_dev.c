@@ -297,7 +297,8 @@ static void zpd_fixture_cleanup(const char *root)
 {
     static const char *const files[] = {
         "link", "special", "LICENSE", "zcode-package.json", "src/x.c",
-        "src/unused.c", "app/main.c", "include/x.h", "tests/test.c",
+        "src/unused.c", "app/main.c", "app/fixture.c", "app/util/helper.c",
+        "include/x.h", "tests/test.c",
         ".zvcs/control", ".codeindex/control", "build/obj.o",
     };
     char path[512];
@@ -306,7 +307,8 @@ static void zpd_fixture_cleanup(const char *root)
         (void)unlink(path);
     }
     static const char *const dirs[] = {
-        "src", "app", "include", "tests", ".zvcs", ".codeindex", "build",
+        "src", "app/util", "app", "include", "tests", ".zvcs", ".codeindex",
+        "build",
     };
     for (size_t i = 0; i < sizeof(dirs) / sizeof(dirs[0]); i++) {
         (void)snprintf(path, sizeof(path), "%s/%s", root, dirs[i]);
@@ -341,6 +343,26 @@ static bool zpd_fixture(const char *root, bool unknown_key)
     return zpd_write(path, unknown_key
         ? "{\"schema\":1,\"name\":\"zclassic23/fixture\",\"semver\":\"0.1.0-dev.1\",\"language\":\"c23\",\"license\":\"MIT\",\"include_dir\":\"include\",\"source_dir\":\"src\",\"dependencies\":[],\"smuggled\":true}\n"
         : "{\"schema\":1,\"name\":\"zclassic23/fixture\",\"semver\":\"0.1.0-dev.1\",\"language\":\"c23\",\"license\":\"MIT\",\"include_dir\":\"include\",\"source_dir\":\"src\",\"dependencies\":[]}\n");
+}
+
+/* Rewrite the fixture's zcode-package.json with an optional "programs"
+ * array. `programs` is the array body, e.g. "\"app/main.c\"", or NULL for a
+ * configuration that declares no program at all — the two cases this
+ * fixture exists to tell apart. */
+static bool zpd_meta_programs(const char *root, const char *programs)
+{
+    char path[512], meta[1024];
+    int n = snprintf(meta, sizeof(meta),
+        "{\"schema\":1,\"name\":\"zclassic23/fixture\","
+        "\"semver\":\"0.1.0-dev.1\",\"language\":\"c23\",\"license\":\"MIT\","
+        "\"include_dir\":\"include\",\"source_dir\":\"src\","
+        "\"dependencies\":[]%s%s%s}\n",
+        programs ? ",\"programs\":[" : "", programs ? programs : "",
+        programs ? "]" : "");
+    if (n <= 0 || (size_t)n >= sizeof(meta))
+        return false;
+    (void)snprintf(path, sizeof(path), "%s/zcode-package.json", root);
+    return zpd_write(path, meta);
 }
 
 static bool zpd_reuse_package_fixture(const char *root, const char *license,
@@ -1553,6 +1575,133 @@ static int zpd_test_fail_closed(const uint8_t pubkey[33])
     return failures;
 }
 
+
+/* The recipe root of the fixture as a LIBRARY — no program declared, even
+ * though app/main.c is on disk. This is the regression that matters: adding
+ * schema 2 must not move the encoding of a package that ships no program,
+ * and inferring programs from the tree would move this value for every
+ * package that merely carries an app/ directory. */
+#define ZPD_LIBRARY_RECIPE_ROOT \
+    "11f72f390a50a4e3b8016ce0558721633d30691c97f2f15e5ab50de7b9642495"
+
+static bool zpd_manifest_has(const struct vcs_package_manifest *manifest,
+                             const char *path)
+{
+    for (size_t i = 0; i < manifest->count; i++)
+        if (strcmp(manifest->files[i].path, path) == 0)
+            return true;
+    return false;
+}
+
+static bool zpd_array_has(const struct json_value *array, const char *text)
+{
+    if (!array || array->type != JSON_ARR)
+        return false;
+    for (size_t i = 0; i < array->num_children; i++) {
+        const char *entry = json_get_str(json_at(array, i));
+        if (entry && strcmp(entry, text) == 0)
+            return true;
+    }
+    return false;
+}
+
+static int zpd_test_prepare_programs(const uint8_t pubkey[33])
+{
+    int failures = 0;
+    TEST("zcode package dev prepare: programs are declared, never inferred") {
+        char root[256], path[320], hex[65], output[VCS_PACKAGE_PATH_MAX];
+        (void)snprintf(root, sizeof(root),
+                       "test-tmp/zcode-package-programs-%ld", (long)getpid());
+        ASSERT(zpd_fixture(root, false));
+        struct vcs_package_prepare_options options = {
+            .dir = root, .publisher_sequence = 1,
+            .reward_address = "", .chain_id = "zclassic-main",
+        };
+        memcpy(options.publisher_pubkey, pubkey, 33);
+        char detail[256];
+
+        /* The fixture carries app/main.c on disk and declares nothing. */
+        struct vcs_package_prepared plain;
+        ASSERT(vcs_package_prepare(&options, &plain, detail,
+                                   sizeof(detail)) == VCS_PACKAGE_PREPARE_OK);
+        ASSERT(plain.recipe.schema_version == VCS_PACKAGE_RECIPE_VERSION);
+        ASSERT(plain.recipe.programs.count == 0);
+        ASSERT(zpd_manifest_has(&plain.manifest, "app/main.c"));
+        zcl_hex_encode(plain.recipe_root, 32, hex);
+        ASSERT(strcmp(hex, ZPD_LIBRARY_RECIPE_ROOT) == 0);
+
+        /* Declaring it is what installs an executable — and only then does
+         * the recipe root move. */
+        ASSERT(zpd_meta_programs(root, "\"app/main.c\""));
+        struct vcs_package_prepared declared;
+        ASSERT(vcs_package_prepare(&options, &declared, detail,
+                                   sizeof(detail)) == VCS_PACKAGE_PREPARE_OK);
+        ASSERT(declared.recipe.schema_version ==
+               VCS_PACKAGE_RECIPE_VERSION_PROGRAMS);
+        ASSERT(declared.recipe.programs.count == 1 &&
+               strcmp(declared.recipe.programs.items[0], "app/main.c") == 0);
+        ASSERT(memcmp(declared.recipe_root, plain.recipe_root, 32) != 0);
+        ASSERT(vcs_package_recipe_program_output("app/main.c", "fixture",
+                                                 output, sizeof(output)) &&
+               strcmp(output, "bin/fixture") == 0);
+        vcs_package_prepared_free(&declared);
+
+        /* A nested app/util/helper.c is not a program: undeclared it stays
+         * an ordinary package file and the recipe stays schema 1. */
+        (void)snprintf(path, sizeof(path), "%s/app/util", root);
+        ASSERT(platform_directory_create(path, 0700) == 0);
+        (void)snprintf(path, sizeof(path), "%s/app/util/helper.c", root);
+        ASSERT(zpd_write(path, "int helper(void) { return 0; }\n"));
+        ASSERT(zpd_meta_programs(root, NULL));
+        struct vcs_package_prepared nested;
+        ASSERT(vcs_package_prepare(&options, &nested, detail,
+                                   sizeof(detail)) == VCS_PACKAGE_PREPARE_OK);
+        ASSERT(nested.recipe.schema_version == VCS_PACKAGE_RECIPE_VERSION &&
+               nested.recipe.programs.count == 0 &&
+               zpd_manifest_has(&nested.manifest, "app/util/helper.c"));
+        vcs_package_prepared_free(&nested);
+
+        /* Every refusal names the entry and the rule it broke, so the
+         * publisher can fix it without reading this code. */
+        (void)snprintf(path, sizeof(path), "%s/app/fixture.c", root);
+        ASSERT(zpd_write(path, "int main(void) { return 0; }\n"));
+        static const struct {
+            const char *programs;
+            const char *detail;
+        } refusals[] = {
+            { "\"app/util/helper.c\"",
+              "programs[0] is not app/<stem>.c: app/util/helper.c" },
+            { "\"app/absent.c\"",
+              "programs[0] is not in files: app/absent.c" },
+            { "\"app/main.c\", \"app/main.c\"",
+              "programs[1] repeats: app/main.c" },
+            /* app/main.c installs under the package's own short name, so
+             * app/fixture.c in package zclassic23/fixture emits the same
+             * bin/fixture — a duplicate the verifier could only discover
+             * after a full compile. */
+            { "\"app/fixture.c\", \"app/main.c\"",
+              "program output collision: app/fixture.c and app/main.c both "
+              "emit bin/fixture" },
+        };
+        for (size_t i = 0; i < sizeof(refusals) / sizeof(refusals[0]); i++) {
+            ASSERT(zpd_meta_programs(root, refusals[i].programs));
+            struct vcs_package_prepared refused;
+            detail[0] = '\0';
+            ASSERT(vcs_package_prepare(&options, &refused, detail,
+                                       sizeof(detail)) ==
+                   VCS_PACKAGE_PREPARE_ERR_RECIPE);
+            if (strcmp(detail, refusals[i].detail) != 0)
+                printf("programs refusal %zu detail: %s\n", i, detail);
+            ASSERT(strcmp(detail, refusals[i].detail) == 0);
+            vcs_package_prepared_free(&refused);
+        }
+
+        vcs_package_prepared_free(&plain);
+        zpd_fixture_cleanup(root);
+        PASS();
+    } _test_next:;
+    return failures;
+}
 static int zpd_test_project_inspect(void)
 {
     int failures = 0;
@@ -1612,6 +1761,44 @@ static int zpd_test_project_inspect(void)
         ASSERT(json_get(expert, "package_root") != NULL);
         ASSERT(json_get(&reply.data, "read_only") &&
                json_get_bool(json_get(&reply.data, "read_only")));
+        /* app/main.c is on disk but undeclared, so this package installs no
+         * executable: both program lists are empty and app/ is not a write
+         * scope. */
+        const struct json_value *programs =
+            layout ? json_get(layout, "programs") : NULL;
+        const struct json_value *outputs =
+            layout ? json_get(layout, "program_outputs") : NULL;
+        const struct json_value *scopes =
+            json_get(&reply.data, "likely_write_scopes");
+        ASSERT(programs && programs->type == JSON_ARR &&
+               programs->num_children == 0);
+        ASSERT(outputs && outputs->type == JSON_ARR &&
+               outputs->num_children == 0);
+        ASSERT(scopes && !zpd_array_has(scopes, "app"));
+        zcl_command_reply_free(&reply);
+        json_free(&input);
+
+        /* Declared: inspect names the translation unit AND the command a
+         * person will actually be able to run — app/main.c installs under
+         * the package's own short name, so "programs" alone would not
+         * answer that. app/ joins the write scopes the way tests/ does. */
+        ASSERT(zpd_meta_programs(root, "\"app/main.c\""));
+        json_init(&input); json_set_object(&input);
+        ASSERT(json_push_kv_str(&input, "workspace", root));
+        request.input = &input;
+        zcl_command_reply_init(&reply, "zcl.zcode_project_inspect_test.v1");
+        zcl_native_handle_zcode_project_inspect(&request, &reply);
+        ASSERT(reply.status == ZCL_COMMAND_STATUS_PASSED);
+        layout = json_get(&reply.data, "layout");
+        programs = layout ? json_get(layout, "programs") : NULL;
+        outputs = layout ? json_get(layout, "program_outputs") : NULL;
+        scopes = json_get(&reply.data, "likely_write_scopes");
+        ASSERT(programs && programs->num_children == 1 &&
+               strcmp(json_get_str(json_at(programs, 0)), "app/main.c") == 0);
+        ASSERT(outputs && outputs->num_children == 1 &&
+               strcmp(json_get_str(json_at(outputs, 0)), "bin/fixture") == 0);
+        ASSERT(zpd_array_has(scopes, "app"));
+        ASSERT(zpd_array_has(scopes, "src") && zpd_array_has(scopes, "tests"));
         zcl_command_reply_free(&reply);
         json_free(&input);
         zpd_fixture_cleanup(root);
@@ -1667,6 +1854,10 @@ static int zpd_test_project_init(void)
             json_get_str(json_get(&reply.data, "configuration_text"));
         ASSERT(plan_id && strlen(plan_id) == 64);
         ASSERT(config && strstr(config, "\"name\": \"local/zcode-project-init-") != NULL);
+        /* prepare never infers a program from the tree, so the plan — the
+         * one step a person reads before anything is written — is where
+         * app/main.c is proposed as the package's executable. */
+        ASSERT(strstr(config, "\"programs\": [\"app/main.c\"]") != NULL);
         ASSERT(access(meta, F_OK) != 0);
         char saved_plan[65];
         (void)snprintf(saved_plan, sizeof(saved_plan), "%s", plan_id);
@@ -1704,6 +1895,25 @@ static int zpd_test_project_init(void)
         ASSERT(access(meta, F_OK) == 0);
         ASSERT(json_get(&reply.data, "created") &&
                json_get_bool(json_get(&reply.data, "created")));
+        zcl_command_reply_free(&reply);
+
+        /* Commit wrote the proposed key: the initialized project prepares
+         * to a schema-2 recipe whose one program installs as bin/parser,
+         * the package's own short name. */
+        zcl_command_reply_init(&reply, "zcl.zcode_project_inspect_test.v1");
+        zcl_native_handle_zcode_project_inspect(&request, &reply);
+        ASSERT(reply.status == ZCL_COMMAND_STATUS_PASSED);
+        const struct json_value *committed = json_get(&reply.data, "layout");
+        const struct json_value *committed_programs =
+            committed ? json_get(committed, "programs") : NULL;
+        const struct json_value *committed_outputs =
+            committed ? json_get(committed, "program_outputs") : NULL;
+        ASSERT(committed_programs && committed_programs->num_children == 1 &&
+               strcmp(json_get_str(json_at(committed_programs, 0)),
+                      "app/main.c") == 0);
+        ASSERT(committed_outputs && committed_outputs->num_children == 1 &&
+               strcmp(json_get_str(json_at(committed_outputs, 0)),
+                      "bin/parser") == 0);
         zcl_command_reply_free(&reply);
 
         zcl_command_reply_init(&reply, "zcl.zcode_project_status_test.v1");
@@ -4097,6 +4307,7 @@ int test_zcode_package_dev(void)
                    zpd_test_default_chain_id(pubkey) +
                    zpd_test_exact_file_selection(pubkey) +
                    zpd_test_fail_closed(pubkey) +
+                   zpd_test_prepare_programs(pubkey) +
                    zpd_test_project_inspect() +
                    zpd_test_project_init() +
                    zpd_test_reuse_plan() +

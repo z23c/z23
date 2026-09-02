@@ -28,7 +28,7 @@ bool prepare_meta_closed(const struct json_value *meta,
     static const char *const top_keys[] = {
         "schema", "name", "semver", "language", "license",
         "include_dir", "source_dir", "dependencies", "files",
-        "capabilities",
+        "capabilities", "programs",
     };
     static const char *const dep_keys[] = { "root", "name", "semver" };
     for (size_t i = 0; i < meta->num_children; i++) {
@@ -106,6 +106,23 @@ bool prepare_meta_closed(const struct json_value *meta,
     if (files) {
         for (size_t i = 0; i < files->num_children; i++)
             if (files->children[i].type != JSON_STR)
+                return false;
+    }
+    /* "programs": the `app/<stem>.c` translation units this package ships as
+     * executables. OPTIONAL, and absent means the package installs a library
+     * only — which is why the key can never be inferred from the tree: a
+     * package that merely carries an app/ directory keeps encoding its
+     * recipe as schema 1 and keeps its root. What is checked HERE is the
+     * shape a receiving node can check on its own; the path grammar,
+     * membership in the package's own files and the install-output
+     * uniqueness rule are enforced by prepare, which has the manifest and
+     * the package name this shape check does not. */
+    const struct json_value *programs = json_get(meta, "programs");
+    if (programs) {
+        if (programs->type != JSON_ARR)
+            return false;
+        for (size_t i = 0; i < programs->num_children; i++)
+            if (programs->children[i].type != JSON_STR)
                 return false;
     }
     return true;

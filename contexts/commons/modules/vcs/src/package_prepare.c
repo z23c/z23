@@ -104,6 +104,12 @@ static bool prepare_recipe_file(struct prepare_walk *walk, const char *path)
 {
     enum vcs_package_recipe_error err = VCS_PACKAGE_RECIPE_OK;
     size_t len = strlen(path);
+    /* A file under app/ is NEVER classified here. Programs are DECLARED by
+     * the author in zcode-package.json (see prepare_apply_programs) and
+     * inferring them from the tree would silently move the root of every
+     * package that happens to carry an app/ directory, and would declare a
+     * program the recipe's libc/libm/pthread allowlist may not be able to
+     * link. Fetched C is inert until its author says what it ships. */
     if (strncmp(path, "include/", 8) == 0 && len > 2u &&
         strcmp(path + len - 2u, ".h") == 0)
         return vcs_package_recipe_add_header(&walk->out->recipe, path, &err);
@@ -224,6 +230,89 @@ static bool prepare_apply_file_selection(struct prepare_walk *walk,
     return true;
 }
 
+/* The optional "programs" key is how an author says which of the package's
+ * own translation units are the applications a person runs, as opposed to
+ * the library everything else links. It is DECLARED, never inferred: a
+ * package may carry an app/ directory whose mains this recipe's system
+ * library allowlist could never link, and a package that ships no program
+ * must keep encoding as schema 1 so its recipe root does not move. An
+ * absent key and an empty array are the same statement — this package
+ * installs no executable.
+ *
+ * Each entry must be exactly `app/<stem>.c`, must be one of the package's
+ * own files, must not repeat, and must not share an install output with
+ * another entry. That last rule is real: `app/main.c` emits
+ * bin/<package short name>, so a package that also declares
+ * `app/<short name>.c` has two translation units claiming one path, and the
+ * build receipt the external verifier writes could only carry it as a
+ * duplicate output — a rejection at the end of a full compile instead of
+ * here, where the publisher can still rename the file. The short name is
+ * the part of `name` after the publisher's slash, exactly as the verifier
+ * derives lib<short name>.a. */
+static bool prepare_apply_programs(struct prepare_walk *walk,
+                                   const struct json_value *meta,
+                                   const char *name)
+{
+    const struct json_value *programs = json_get(meta, "programs");
+    if (!programs)
+        return true;
+    if (programs->type != JSON_ARR) {
+        prepare_detail(walk, "programs must be an array of app/<stem>.c paths");
+        return false;
+    }
+    if (programs->num_children > VCS_PACKAGE_RECIPE_MAX_PROGRAMS) {
+        prepare_detail(walk, "programs must contain at most %u paths",
+                       VCS_PACKAGE_RECIPE_MAX_PROGRAMS);
+        return false;
+    }
+    for (size_t i = 0; i < programs->num_children; i++) {
+        const char *path = json_get_str(&programs->children[i]);
+        if (!path || !vcs_package_recipe_program_path_valid(path)) {
+            prepare_detail(walk, "programs[%zu] is not app/<stem>.c: %s", i,
+                           path ? path : "(not a string)");
+            return false;
+        }
+        if (!prepare_manifest_find(&walk->out->manifest, path)) {
+            prepare_detail(walk, "programs[%zu] is not in files: %s", i, path);
+            return false;
+        }
+        enum vcs_package_recipe_error rerr = VCS_PACKAGE_RECIPE_OK;
+        if (!vcs_package_recipe_add_program(&walk->out->recipe, path, &rerr)) {
+            prepare_detail(walk, "programs[%zu] %s: %s", i,
+                           rerr == VCS_PACKAGE_RECIPE_ERR_LIST_ORDER
+                               ? "repeats" : "rejected",
+                           path);
+            return false;
+        }
+    }
+    const char *slash = strchr(name, '/');
+    const char *short_name = slash ? slash + 1 : name;
+    const struct vcs_package_recipe_strings *list = &walk->out->recipe.programs;
+    for (size_t i = 0; i < list->count; i++) {
+        char output[VCS_PACKAGE_PATH_MAX];
+        if (!vcs_package_recipe_program_output(list->items[i], short_name,
+                                               output, sizeof(output))) {
+            prepare_detail(walk, "program output undefined: %s",
+                           list->items[i]);
+            return false;
+        }
+        for (size_t j = i + 1u; j < list->count; j++) {
+            char other[VCS_PACKAGE_PATH_MAX];
+            if (!vcs_package_recipe_program_output(list->items[j], short_name,
+                                                   other, sizeof(other)))
+                continue; /* named on its own pass */
+            if (strcmp(output, other) == 0) {
+                prepare_detail(walk,
+                               "program output collision: %s and %s both "
+                               "emit %s", list->items[i], list->items[j],
+                               output);
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
 static enum vcs_package_prepare_error prepare_finish(
     const struct vcs_package_prepare_options *options,
     struct prepare_walk *walk)
@@ -271,6 +360,10 @@ static enum vcs_package_prepare_error prepare_finish(
         prepare_detail(walk, "dependencies: %s (%s)",
                        vcs_package_deps_error_string(derr), dep_detail);
         return VCS_PACKAGE_PREPARE_ERR_LOCK;
+    }
+    if (!prepare_apply_programs(walk, &meta, name)) {
+        json_free(&meta);
+        return VCS_PACKAGE_PREPARE_ERR_RECIPE;
     }
     enum vcs_package_recipe_error rerr = VCS_PACKAGE_RECIPE_OK;
     if (out->recipe.public_headers.count > 0 &&
