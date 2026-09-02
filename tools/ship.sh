@@ -223,7 +223,65 @@ ship_checkout_has_real_tor_archives() {
     return 0
 }
 
-if [ "${1:-}" = "--selftest" ]; then
+# ── The unsippable dev artifact, under every name it can be reached by ──────
+# The compiler-speed profile publishes build/bin/z23.dev from an epoch
+# candidate under build/bin/dev/epochs/<epoch>/zclassic23-dev, and three
+# alias names can hold those bytes beside it: z23.dev itself, the z23-dev
+# watch-loop alias, and the zclassic23-dev migration alias. The stale
+# dev-linker incident on this host was the wrong artifact sitting under a
+# shipping name, and those bytes differ from release in exactly the ways
+# nothing downstream compares (non-LTO, -Og, -g1, -DZCL_DEV_BUILD) while
+# every hash still matches itself happily — so reach is proven per artifact,
+# not inferred from a name:
+#   same inode   a symlink to any alias, or a hardlink of it
+#   same sha256  a byte-for-byte copy under any shippable name
+# Epoch candidates are enumerated too, so a STALE epoch — bytes no live
+# alias holds — is still refused.
+ship_dev_artifact_paths() {
+    printf '%s\n' \
+        "${1:-.}/build/bin/z23.dev" \
+        "${1:-.}/build/bin/z23-dev" \
+        "${1:-.}/build/bin/zclassic23-dev"
+    ls -1 "${1:-.}"/build/bin/dev/epochs/*/zclassic23-dev 2>/dev/null || true
+}
+
+# Echo the reach and return 0 when $1 IS the dev artifact under any of those
+# names; return 1 when it is not (including when it does not exist, which is
+# nothing to refuse). $2 is the checkout root that owns build/ (default: cwd).
+ship_dev_artifact_reach() {
+    local probe="$1" root="${2:-.}" artifact sha_probe artifact_sha
+    [ -e "$probe" ] || return 1
+    sha_probe=""
+    while IFS= read -r artifact; do
+        [ -n "$artifact" ] || continue
+        [ -e "$artifact" ] || continue
+        if [ "$probe" -ef "$artifact" ]; then
+            printf 'same inode as %s (symlink or hardlink)\n' "$artifact"
+            return 0
+        fi
+        if [ -z "$sha_probe" ]; then
+            sha_probe="$(sha256sum < "$probe" | awk '{print $1}')"
+        fi
+        artifact_sha="$(sha256sum < "$artifact" | awk '{print $1}')"
+        if [ "$sha_probe" = "$artifact_sha" ]; then
+            printf 'byte copy of %s\n' "$artifact"
+            return 0
+        fi
+    done < <(ship_dev_artifact_paths "$root")
+    return 1
+}
+
+# Hard exit (typed `ship: REFUSE:` line, exit 1) whenever a shipping name
+# reaches the dev artifact. Called in preflight — seconds, before the gate
+# and the 200-second build — and again on the names the build just
+# relinked, before any byte is frozen.
+ship_refuse_dev_artifact() {
+    local probe="$1" reach
+    reach="$(ship_dev_artifact_reach "$probe" "${2:-.}")" || return 0
+    die "$probe is the unsippable z23.dev dev artifact — $reach — dev-profile bytes must never ship: remove the dev output and rebuild the release names"
+}
+
+if [ "${1:-}" = "--selftest" ] || [ "${1:-}" = "--selftest-dev-guard" ]; then
     # Everything below is a chain of bare boolean assertions under `set -e`,
     # which prints exactly one line — and only on success. Any assertion that
     # failed used to exit 1 having written zero bytes to stdout AND stderr, in
@@ -275,6 +333,61 @@ if [ "${1:-}" = "--selftest" ]; then
             exit 1
         fi
     }
+
+    # ── the unsippable dev artifact refuses under EVERY reach ─────────────
+    # Hermetic: one fixture tree stands in for the checkout, so this needs
+    # no jsonq, no build, and no fleet. The registered build_profile test
+    # group invokes it directly (--selftest-dev-guard); the full selftest
+    # runs the same function on a subdirectory of its own sandbox. The
+    # caller owns the fixture directory's lifetime.
+    ship_selftest_dev_guard() {
+        local g="$1" bin
+        bin="$g/build/bin"
+        mkdir -p "$bin/dev/epochs/e1" "$bin/dev/epochs/e2"
+        printf 'canonical dev bytes\n' > "$bin/z23.dev"
+        printf 'epoch-one dev bytes\n' > "$bin/dev/epochs/e1/zclassic23-dev"
+        printf 'epoch-two dev bytes\n' > "$bin/dev/epochs/e2/zclassic23-dev"
+        ln -s z23.dev "$bin/z23-dev"
+        ln -s z23-dev "$bin/zclassic23-dev"
+        printf 'release lto bytes\n' > "$bin/z23.release"
+        # shipping name symlinked to the canonical unsippable name
+        ln -s z23.dev "$bin/z23"
+        ship_dev_artifact_reach "$bin/z23" "$g" >/dev/null
+        # through the watch-loop alias
+        ln -sfn z23-dev "$bin/z23"
+        ship_dev_artifact_reach "$bin/z23" "$g" >/dev/null
+        # through the migration alias
+        ln -sfn zclassic23-dev "$bin/z23"
+        ship_dev_artifact_reach "$bin/z23" "$g" >/dev/null
+        # straight into the epoch dir, relative target
+        ln -sfn dev/epochs/e1/zclassic23-dev "$bin/z23"
+        ship_dev_artifact_reach "$bin/z23" "$g" >/dev/null
+        # straight into the epoch dir, absolute target
+        ln -sfn "$bin/dev/epochs/e2/zclassic23-dev" "$bin/z23"
+        ship_dev_artifact_reach "$bin/z23" "$g" >/dev/null
+        # hardlink: same inode, no symlink for -ef to follow
+        ln -f "$bin/z23.dev" "$bin/z23"
+        ship_dev_artifact_reach "$bin/z23" "$g" >/dev/null
+        # copied name: canonical dev bytes under the frozen-candidate name
+        cp "$bin/z23.dev" "$bin/zclassic23"
+        ship_dev_artifact_reach "$bin/zclassic23" "$g" >/dev/null
+        # copied name: a STALE epoch candidate whose bytes no live alias holds
+        cp "$bin/dev/epochs/e1/zclassic23-dev" "$bin/z23"
+        ship_dev_artifact_reach "$bin/z23" "$g" >/dev/null
+        # genuine release bytes are NOT refused, by name...
+        refute ship_dev_artifact_reach "$bin/z23.release" "$g"
+        # ...nor through a symlink, nor as an absent name
+        ln -sfn z23.release "$bin/z23"
+        refute ship_dev_artifact_reach "$bin/z23" "$g"
+        refute ship_dev_artifact_reach "$bin/absent" "$g"
+    }
+    if [ "${1:-}" = "--selftest-dev-guard" ]; then
+        devguard_root="$(mktemp -d "${TMPDIR:-/tmp}/z23-ship-selftest.XXXXXX")"
+        trap 'rm -rf "$devguard_root"' EXIT HUP INT TERM
+        ship_selftest_dev_guard "$devguard_root"
+        printf 'ship: dev-artifact guard selftest PASS — refused every reach (symlink to z23.dev, z23-dev alias, zclassic23-dev alias, epoch-dir path relative and absolute, hardlink, copied name, stale epoch copy); accepted genuine release bytes, release symlink, absent name\n'
+        exit 0
+    fi
     # Stated as a prerequisite rather than discovered as a mystery failure.
     # The real-Tor candidate gate below reads the candidate's JSON with
     # build/bin/jsonq, and the parallel `make lint` driver execs gate scripts
@@ -365,8 +478,9 @@ if [ "${1:-}" = "--selftest" ]; then
         printf 'ship: selftest FAILED — ship_stage_all accepted ZCL_SHIP_STAGE_JOBS=0\n' >&2
         exit 1
     fi
+    ship_selftest_dev_guard "$test_tmp/dev-guard"
     find "$test_tmp" -depth -delete; trap - EXIT HUP INT TERM
-    printf 'ship: selftest PASS (four-host order; bounded stage barrier; validation; GLIBC inequality; explicit proof host; real-Tor gate; Tor-archive preflight both directions)\n'
+    printf 'ship: selftest PASS (four-host order; bounded stage barrier; validation; GLIBC inequality; explicit proof host; real-Tor gate; Tor-archive preflight both directions; dev-artifact guard refused every reach)\n'
     exit 0
 fi
 
@@ -466,6 +580,20 @@ say "source     $(git rev-parse --short HEAD)  $(git log -1 --format=%s | cut -c
 ship_checkout_has_real_tor_archives "$REPO_ROOT" ||
     die "this checkout would link the Tor stub (one or more of the four TOR_FULL archives is missing from vendor/tor), so the candidate would be refused after the gate; run make worktree-prime — git worktree add does not populate the vendor/tor submodule"
 say "tor        four TOR_FULL archives present"
+
+# Refuse in seconds, not after the gate and the 200-second build. Every name
+# ship freezes bytes from — the deployed build/bin/z23 and the frozen
+# candidate build/bin/zclassic23 — must already be free of the dev artifact
+# under EVERY reach: symlink to an alias, hardlink, byte copy, or a copy of
+# a stale epoch candidate. The checks this replaces sat AFTER
+# `rm -f build/bin/z23 build/bin/zclassic23`, examining aliases that line
+# had just deleted, so they could never fire.
+if [ "${ZCL_PROFILE:-}" = "dev" ]; then
+    die "ZCL_PROFILE=dev produces the unsippable build/bin/z23.dev"
+fi
+ship_refuse_dev_artifact build/bin/z23 "$REPO_ROOT"
+ship_refuse_dev_artifact build/bin/zclassic23 "$REPO_ROOT"
+say "names      build/bin/z23 and build/bin/zclassic23 reach no dev artifact"
 
 # A remote host that cannot run these bytes must be found now, not after the
 # binary is already installed and the service restarted. The production build
@@ -573,10 +701,6 @@ fi
 # expensive step and the reason the result is shared across the fleet.
 step "Build"
 
-if [ "${ZCL_PROFILE:-}" = "dev" ]; then
-    die "ship: REFUSE: ZCL_PROFILE=dev produces the unsippable build/bin/z23.dev"
-fi
-
 if [ "$DRY_RUN" -eq 1 ]; then
     say "build      (dry run — would rebuild and freeze one candidate + both workers)"
     CANDIDATE=""; ARTIFACT_SHA=""; CAND_SOURCE_ID="$SOURCE_ID"
@@ -589,16 +713,10 @@ else
     CANDIDATE="$(mktemp "${TMPDIR:-/tmp}/zclassic23.ship.XXXXXX")"
     WORKER_FILES=(); WORKER_SHAS=()
     trap 'rm -f "$CANDIDATE" "${WORKER_FILES[@]}"' EXIT HUP INT TERM
-    if [ -e build/bin/z23.dev ] && [ build/bin/z23.dev -ef build/bin/z23 ]; then
-        die "ship: REFUSE: build/bin/z23 is the unsippable z23.dev artifact"
-    fi
-    if [ -L build/bin/z23 ]; then
-        case "$(readlink build/bin/z23)" in
-            z23.dev|*.dev)
-                die "ship: REFUSE: build/bin/z23 is a symlink to the unsippable dev binary"
-                ;;
-        esac
-    fi
+    # The rebuild just relinked both shipping names; prove the bytes now
+    # sitting under them reach no dev artifact before one byte is frozen.
+    ship_refuse_dev_artifact build/bin/z23 "$REPO_ROOT"
+    ship_refuse_dev_artifact build/bin/zclassic23 "$REPO_ROOT"
     install -m 755 build/bin/zclassic23 "$CANDIDATE"
     ARTIFACT_SHA="$(sha256sum < "$CANDIDATE" | awk '{print $1}')"
     zcl_is_sha256 "$ARTIFACT_SHA" || die "could not hash the frozen candidate"

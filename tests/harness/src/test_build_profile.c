@@ -71,6 +71,7 @@ int test_build_profile(void)
 {
     int failures = 0;
     char flags[196608];
+    char guard[8192];
     const char *cflags;
     const char *dev_cflags;
     const char *ldflags;
@@ -92,8 +93,24 @@ int test_build_profile(void)
                              "frozen candidate is the unsippable .dev binary"));
         ASSERT(file_contains("tools/ship.sh",
                              "ZCL_PROFILE=dev produces the unsippable"));
+        PASS();
+    }
+
+    TEST("ship.sh refuses the dev artifact under every alias and reach") {
         ASSERT(file_contains("tools/ship.sh",
-                             "build/bin/z23 is the unsippable z23.dev artifact"));
+                             "unsippable z23.dev dev artifact"));
+        ASSERT(file_contains("tools/ship.sh",
+                             "ship_refuse_dev_artifact build/bin/z23"));
+        ASSERT(file_contains("tools/ship.sh",
+                             "ship_refuse_dev_artifact build/bin/zclassic23"));
+        ASSERT(file_contains("tools/ship.sh",
+                             "dev/epochs/*/zclassic23-dev"));
+        ASSERT(slurp_cmd("tools/ship.sh --selftest-dev-guard",
+                         guard, sizeof guard));
+        ASSERT(strstr(guard, "dev-artifact guard selftest PASS") != NULL);
+        ASSERT(strstr(guard, "hardlink") != NULL);
+        ASSERT(strstr(guard, "copied name") != NULL);
+        ASSERT(strstr(guard, "stale epoch copy") != NULL);
         PASS();
     }
 
