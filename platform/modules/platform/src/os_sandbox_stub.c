@@ -3,8 +3,11 @@
 
 #include "platform/os_sandbox.h"
 
+#include "base/safe_alloc.h"
 #include "util/log_macros.h"
 
+#include <errno.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -18,6 +21,7 @@
 #endif
 
 #if defined(__APPLE__)
+#include <dlfcn.h>
 #include <libproc.h> /* proc_pidinfo: per-process BSD identity and task size */
 #include <sys/sysctl.h>
 #endif
@@ -61,6 +65,196 @@ int os_sandbox_landlock_abi_cached(void) { return -1; }
 int os_sandbox_landlock_restricted_count(void) { return 0; }
 bool os_sandbox_retrofit_join_permitted(void) { return false; }
 size_t os_sandbox_fs_grant_count(void) { return 0; }
+
+const char *os_sandbox_package_confinement_name(
+    enum os_sandbox_package_confinement confinement)
+{
+    switch (confinement) {
+    case OS_SANDBOX_PACKAGE_CONFINEMENT_LANDLOCK_SECCOMP:
+        return "landlock+seccomp";
+    case OS_SANDBOX_PACKAGE_CONFINEMENT_SEATBELT:
+        return "seatbelt";
+    case OS_SANDBOX_PACKAGE_CONFINEMENT_NONE:
+    default:
+        return "none";
+    }
+}
+
+enum os_sandbox_package_confinement
+os_sandbox_package_confinement(void)
+{
+#if defined(__APPLE__)
+    return OS_SANDBOX_PACKAGE_CONFINEMENT_SEATBELT;
+#else
+    return OS_SANDBOX_PACKAGE_CONFINEMENT_NONE;
+#endif
+}
+
+#if defined(__APPLE__)
+struct seatbelt_profile_builder {
+    char *text;
+    size_t length;
+    size_t capacity;
+};
+
+static bool seatbelt_append(struct seatbelt_profile_builder *builder,
+                            const char *text)
+{
+    size_t add = strlen(text);
+    if (add > builder->capacity - builder->length - 1u)
+        return false;
+    memcpy(builder->text + builder->length, text, add);
+    builder->length += add;
+    builder->text[builder->length] = '\0';
+    return true;
+}
+
+static bool seatbelt_append_path(struct seatbelt_profile_builder *builder,
+                                 const char *path)
+{
+    if (!seatbelt_append(builder, " (subpath \"")) return false;
+    for (const unsigned char *p = (const unsigned char *)path; *p; ++p) {
+        if (*p < 0x20u || *p == 0x7fu) return false;
+        if ((*p == '\\' || *p == '"') && !seatbelt_append(builder, "\\"))
+            return false;
+        char byte[2] = { (char)*p, '\0' };
+        if (!seatbelt_append(builder, byte)) return false;
+    }
+    return seatbelt_append(builder, "\")");
+}
+
+static bool seatbelt_add_rule(struct seatbelt_profile_builder *builder,
+                              const struct os_sandbox_path_rule *rule)
+{
+    if (!rule->path || rule->path[0] != '/') return false;
+    if (rule->allow_read) {
+        if (!seatbelt_append(builder, "(allow file-read*" ) ||
+            !seatbelt_append_path(builder, rule->path) ||
+            !seatbelt_append(builder, ")"))
+            return false;
+    }
+    if (rule->allow_write) {
+        if (!seatbelt_append(builder, "(allow file-write*" ) ||
+            !seatbelt_append_path(builder, rule->path) ||
+            !seatbelt_append(builder, ")"))
+            return false;
+    }
+    if (rule->allow_execute) {
+        if (!seatbelt_append(builder,
+                "(allow process-exec file-map-executable") ||
+            !seatbelt_append_path(builder, rule->path) ||
+            !seatbelt_append(builder, ")"))
+            return false;
+    }
+    return true;
+}
+#endif
+
+struct zcl_result os_sandbox_package_restrict(
+    const struct os_sandbox_path_rule *rules, size_t n_rules)
+{
+#if defined(__APPLE__)
+    static const char prefix[] =
+        "(version 1)(deny default)"
+        "(deny file-map-executable process-info* nvram* "
+        "dynamic-code-generation mach-priv-host-port)"
+        "(import \"system.sb\")"
+        "(allow process-info* (target self))"
+        "(allow file-read-metadata)"
+        "(allow process-fork)(allow signal (target self))"
+        "(allow sysctl-read)"
+        "(allow file-read* (literal \"/\"))";
+    /* system.sb admits three narrow networking conveniences. A generic deny
+     * loses to those more-specific filters, so revoke each at equal-or-higher
+     * specificity as well as denying the remaining network operation set. */
+    static const char suffix[] =
+        "(deny network*)"
+        "(deny network-outbound"
+        " (literal \"/private/var/run/syslog\")"
+        " (control-name \"com.apple.netsrc\")"
+        " (control-name \"com.apple.network.statistics\"))"
+        "(deny system-socket"
+        " (require-all (socket-domain AF_SYSTEM) (socket-protocol 2))"
+        " (socket-domain AF_ROUTE))";
+    if (!rules || n_rules == 0 || n_rules > 128u)
+        return ZCL_ERR(OS_SANDBOX_ERR_INVALID_ARG,
+                       "Seatbelt wants 1..128 path rules");
+    size_t capacity = sizeof(prefix) + sizeof(suffix) + 1u;
+    for (size_t i = 0; i < n_rules; ++i) {
+        if (!rules[i].path || rules[i].path[0] != '/')
+            return ZCL_ERR(OS_SANDBOX_ERR_INVALID_ARG,
+                           "Seatbelt rule %zu is not absolute", i);
+        size_t path_length = strlen(rules[i].path);
+        if (path_length > 4095u || path_length > (SIZE_MAX - capacity) / 6u)
+            return ZCL_ERR(OS_SANDBOX_ERR_TOO_MANY_RULES,
+                           "Seatbelt profile size overflow");
+        capacity += path_length * 6u + 192u;
+    }
+    char *profile = zcl_malloc(capacity, "seatbelt-package-profile");
+    if (!profile)
+        return ZCL_ERR(OS_SANDBOX_ERR_SEATBELT,
+                       "Seatbelt profile allocation failed");
+    struct seatbelt_profile_builder builder = {
+        .text = profile, .length = 0, .capacity = capacity,
+    };
+    profile[0] = '\0';
+    bool built = seatbelt_append(&builder, prefix);
+    for (size_t i = 0; built && i < n_rules; ++i)
+        built = seatbelt_add_rule(&builder, &rules[i]);
+    built = built && seatbelt_append(&builder, suffix);
+    if (!built) {
+        free(profile);
+        return ZCL_ERR(OS_SANDBOX_ERR_SEATBELT,
+                       "Seatbelt profile construction failed");
+    }
+    /* Vendored Tor also exports a function named sandbox_init. A direct link
+     * would therefore bind by executable symbol order, not by authority, and
+     * can call Tor's logger-dependent initializer in this freshly forked
+     * child. Resolve both Apple functions from the exact system dylib handle
+     * so this path can only enter Seatbelt. */
+    typedef int (*seatbelt_init_fn)(const char *, uint64_t, char **);
+    typedef void (*seatbelt_free_error_fn)(char *);
+    void *library = dlopen("/usr/lib/libsandbox.1.dylib", RTLD_NOW | RTLD_LOCAL);
+    if (!library) {
+        free(profile);
+        return ZCL_ERR(OS_SANDBOX_ERR_SEATBELT,
+                       "cannot load system Seatbelt library: %s", dlerror());
+    }
+    void *init_symbol = dlsym(library, "sandbox_init");
+    void *free_symbol = dlsym(library, "sandbox_free_error");
+    seatbelt_init_fn seatbelt_init = NULL;
+    seatbelt_free_error_fn seatbelt_free_error = NULL;
+    if (!init_symbol || !free_symbol || sizeof(init_symbol) != sizeof(seatbelt_init) ||
+        sizeof(free_symbol) != sizeof(seatbelt_free_error)) {
+        free(profile);
+        (void)dlclose(library);
+        return ZCL_ERR(OS_SANDBOX_ERR_SEATBELT,
+                       "system Seatbelt entry points are unavailable");
+    }
+    memcpy(&seatbelt_init, &init_symbol, sizeof(seatbelt_init));
+    memcpy(&seatbelt_free_error, &free_symbol, sizeof(seatbelt_free_error));
+    char *error = NULL;
+    int applied = seatbelt_init(profile, 0, &error);
+    free(profile);
+    if (applied != 0) {
+        char detail[192];
+        (void)snprintf(detail, sizeof(detail), "%s",
+                       error ? error : "unknown Seatbelt error");
+        seatbelt_free_error(error);
+        (void)dlclose(library);
+        return ZCL_ERR(OS_SANDBOX_ERR_SEATBELT,
+                       "sandbox_init failed: %s", detail);
+    }
+    seatbelt_free_error(error);
+    (void)dlclose(library);
+    return ZCL_OK;
+#else
+    (void)rules;
+    (void)n_rules;
+    return ZCL_ERR(OS_SANDBOX_ERR_CONFINEMENT_UNAVAILABLE,
+                   "package confinement is unavailable");
+#endif
+}
 
 const char *os_sandbox_fs_grant_at(size_t i, bool *readable, bool *writable)
 {
@@ -198,15 +392,32 @@ struct os_sandbox_rlimits os_sandbox_session_rlimits(void)
 
 struct zcl_result os_sandbox_set_rlimits(const struct os_sandbox_rlimits *limits)
 {
-    (void)limits;
 #if defined(_WIN32)
+    (void)limits;
     return unavailable("sandbox resource-limit profile");
 #else
-    /* POSIX setrlimit is available on macOS/BSD, but the node's resource-limit
-     * policy is currently qualified only on Linux. On non-Linux POSIX report
-     * success so confined workers can still launch under degraded isolation.
-     * The attestation carries isolation=degraded, not a false claim of
-     * enforcement. */
+    if (!limits)
+        return ZCL_ERR(OS_SANDBOX_ERR_INVALID_ARG, "limits==NULL");
+#define SET_LIMIT(field, resource) do { \
+    if (limits->field != OS_SANDBOX_RLIMIT_KEEP) { \
+        struct rlimit rl = { \
+            .rlim_cur = (rlim_t)limits->field, \
+            .rlim_max = (rlim_t)limits->field, \
+        }; \
+        if (setrlimit((resource), &rl) != 0) \
+            return ZCL_ERR(OS_SANDBOX_ERR_RLIMIT, \
+                "setrlimit(%s, %llu) failed errno=%d (%s)", \
+                #resource, (unsigned long long)limits->field, errno, \
+                strerror(errno)); \
+    } \
+} while (0)
+    SET_LIMIT(as_bytes, RLIMIT_AS);
+    SET_LIMIT(cpu_seconds, RLIMIT_CPU);
+    SET_LIMIT(nproc, RLIMIT_NPROC);
+    SET_LIMIT(fsize_bytes, RLIMIT_FSIZE);
+    SET_LIMIT(nofile, RLIMIT_NOFILE);
+    SET_LIMIT(core_bytes, RLIMIT_CORE);
+#undef SET_LIMIT
     return ZCL_OK;
 #endif
 }

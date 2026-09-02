@@ -1,6 +1,6 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
- * os_sandbox — composable process-confinement builders (Linux).
+ * os_sandbox — composable process-confinement builders.
  *
  * Why:
  *   The multi-user-server program needs to run an untrusted per-session
@@ -72,6 +72,8 @@ enum os_sandbox_err {
     OS_SANDBOX_ERR_USERNS_MAP           = -7,  /* uid/gid map write failed */
     OS_SANDBOX_ERR_INVALID_ARG          = -8,
     OS_SANDBOX_ERR_TOO_MANY_RULES       = -9,  /* filter would overflow bound */
+    OS_SANDBOX_ERR_CONFINEMENT_UNAVAILABLE = -10,
+    OS_SANDBOX_ERR_SEATBELT              = -11,
 };
 
 /* A single path grant for the Landlock builder: everything BENEATH `path`
@@ -91,6 +93,30 @@ struct os_sandbox_path_rule {
     bool        allow_execute;
     bool        allow_create;
 };
+
+/* Package-build children need the same policy on every qualified host:
+ * scoped filesystem data/write/execute access, no network, and resource
+ * caps. The kernel mechanism is intentionally NOT part of a build receipt:
+ * Linux uses Landlock+seccomp and macOS uses Seatbelt. NONE means the host
+ * must report degraded isolation or fail a full-isolation request closed. */
+enum os_sandbox_package_confinement {
+    OS_SANDBOX_PACKAGE_CONFINEMENT_NONE = 0,
+    OS_SANDBOX_PACKAGE_CONFINEMENT_LANDLOCK_SECCOMP = 1,
+    OS_SANDBOX_PACKAGE_CONFINEMENT_SEATBELT = 2,
+};
+
+enum os_sandbox_package_confinement
+os_sandbox_package_confinement(void);
+
+const char *os_sandbox_package_confinement_name(
+    enum os_sandbox_package_confinement confinement);
+
+/* Apply the host's package-child filesystem/network confinement to the
+ * calling process. ONE-WAY and intended only for a freshly forked child.
+ * Linux installs the filesystem half here and retains its existing seccomp
+ * install immediately afterward; Seatbelt installs both halves atomically. */
+struct zcl_result os_sandbox_package_restrict(
+    const struct os_sandbox_path_rule *rules, size_t n_rules);
 
 /* The metrics thread's steady-state RSS-sample path, named here (not as a
  * bare string literal in engine/composition/src/boot.c or any other non-platform/modules/platform

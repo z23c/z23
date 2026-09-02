@@ -48,13 +48,195 @@
 #include <string.h>
 #include <unistd.h>
 #if !defined(_WIN32)
+#include <netinet/in.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
+#include <sys/un.h>
 #include <sys/wait.h>
 #endif
 
-#if !defined(__linux__)
+#if defined(__APPLE__)
+
+#define SB_CHECK(name, expr) do { \
+    printf("os_sandbox: %s... ", (name)); \
+    if ((expr)) printf("OK\n"); \
+    else { printf("FAIL\n"); failures++; } \
+} while (0)
+
+static char g_macos_allowed[256];
+static char g_macos_denied[256];
+
+static int sb_run_child(int (*fn)(void))
+{
+    pid_t pid = fork();
+    if (pid < 0) return -1000;
+    if (pid == 0) _exit(fn());
+    int status = 0;
+    if (waitpid(pid, &status, 0) != pid) return -1001;
+    if (WIFSIGNALED(status)) return -WTERMSIG(status);
+    return WEXITSTATUS(status);
+}
+
+static size_t macos_rules(struct os_sandbox_path_rule rules[6])
+{
+    size_t n = 0;
+    rules[n++] = (struct os_sandbox_path_rule){
+        .path = g_macos_allowed, .allow_read = true, .allow_write = true,
+        .allow_execute = true, .allow_create = true };
+    rules[n++] = (struct os_sandbox_path_rule){
+        .path = "/usr", .allow_read = true, .allow_execute = true };
+    rules[n++] = (struct os_sandbox_path_rule){
+        .path = "/System", .allow_read = true, .allow_execute = true };
+    rules[n++] = (struct os_sandbox_path_rule){
+        .path = "/Library", .allow_read = true, .allow_execute = true };
+    rules[n++] = (struct os_sandbox_path_rule){
+        .path = "/dev", .allow_read = true, .allow_write = true };
+    return n;
+}
+
+static int c_macos_seatbelt_scope(void)
+{
+    struct os_sandbox_path_rule rules[6];
+    size_t count = macos_rules(rules);
+    struct zcl_result result = os_sandbox_package_restrict(rules, count);
+    if (!result.ok) return 70;
+    char allowed_file[320];
+    int n = snprintf(allowed_file, sizeof(allowed_file), "%s/output",
+                     g_macos_allowed);
+    if (n <= 0 || (size_t)n >= sizeof(allowed_file)) return 71;
+    int fd = open(allowed_file, O_CREAT | O_WRONLY | O_TRUNC, 0600);
+    if (fd < 0) return 72;
+    if (write(fd, "ok", 2) != 2 || close(fd) != 0) return 73;
+    fd = open(g_macos_denied, O_RDONLY);
+    if (fd >= 0) { close(fd); return 74; }
+    if (errno != EPERM && errno != EACCES) return 75;
+    int sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (sock < 0) {
+        if (errno != EPERM && errno != EACCES) return 76;
+    } else {
+        struct sockaddr_in address;
+        memset(&address, 0, sizeof(address));
+        address.sin_family = AF_INET;
+        address.sin_port = htons(9);
+        address.sin_addr.s_addr = htonl(UINT32_C(0x7f000001));
+        errno = 0;
+        int connected = connect(sock, (const struct sockaddr *)&address,
+                                sizeof(address));
+        int connect_errno = errno;
+        close(sock);
+        if (connected == 0 ||
+            (connect_errno != EPERM && connect_errno != EACCES))
+            return 77;
+    }
+    sock = socket(AF_UNIX, SOCK_DGRAM, 0);
+    if (sock < 0) {
+        if (errno != EPERM && errno != EACCES) return 78;
+    } else {
+        struct sockaddr_un address;
+        memset(&address, 0, sizeof(address));
+        address.sun_family = AF_UNIX;
+        (void)snprintf(address.sun_path, sizeof(address.sun_path), "%s",
+                       "/private/var/run/syslog");
+        errno = 0;
+        int connected = connect(sock, (const struct sockaddr *)&address,
+                                sizeof(address));
+        int connect_errno = errno;
+        close(sock);
+        if (connected == 0 ||
+            (connect_errno != EPERM && connect_errno != EACCES))
+            return 79;
+    }
+    return 0;
+}
+
+static int c_macos_seatbelt_exec(void)
+{
+    struct os_sandbox_path_rule rules[6];
+    size_t count = macos_rules(rules);
+    struct zcl_result result = os_sandbox_package_restrict(rules, count);
+    if (!result.ok) return 70;
+    execl("/usr/bin/true", "true", (char *)NULL);
+    return 71;
+}
+
+static int c_macos_rlimit_fsize(void)
+{
+    struct os_sandbox_rlimits limits = {
+        .as_bytes = OS_SANDBOX_RLIMIT_KEEP,
+        .cpu_seconds = OS_SANDBOX_RLIMIT_KEEP,
+        .nproc = OS_SANDBOX_RLIMIT_KEEP,
+        .fsize_bytes = 4096,
+        .nofile = OS_SANDBOX_RLIMIT_KEEP,
+        .core_bytes = 0,
+    };
+    if (!os_sandbox_set_rlimits(&limits).ok) return 70;
+    char output[320];
+    int n = snprintf(output, sizeof(output), "%s/oversize",
+                     g_macos_allowed);
+    if (n <= 0 || (size_t)n >= sizeof(output)) return 71;
+    int fd = open(output, O_CREAT | O_WRONLY | O_TRUNC, 0600);
+    if (fd < 0) return 72;
+    char bytes[8192];
+    memset(bytes, 'x', sizeof(bytes));
+    errno = 0;
+    ssize_t wrote = write(fd, bytes, sizeof(bytes));
+    int write_errno = errno;
+    if (close(fd) != 0) return 73;
+    struct stat st;
+    if (stat(output, &st) != 0) return 74;
+    return wrote < (ssize_t)sizeof(bytes) && st.st_size <= 4096 &&
+           (write_errno == EFBIG || wrote == 4096) ? 0 : 75;
+}
+
+int test_os_sandbox(void)
+{
+    int failures = 0;
+    char root[] = "/private/tmp/z23-seatbelt-test.XXXXXX";
+    if (!mkdtemp(root)) return 1;
+    int n1 = snprintf(g_macos_allowed, sizeof(g_macos_allowed),
+                      "%s/allowed", root);
+    int n2 = snprintf(g_macos_denied, sizeof(g_macos_denied),
+                      "%s/denied", root);
+    if (n1 <= 0 || (size_t)n1 >= sizeof(g_macos_allowed) ||
+        n2 <= 0 || (size_t)n2 >= sizeof(g_macos_denied) ||
+        mkdir(g_macos_allowed, 0700) != 0) {
+        (void)rmdir(root);
+        return 1;
+    }
+    int denied = open(g_macos_denied, O_CREAT | O_WRONLY | O_TRUNC, 0600);
+    if (denied < 0) return 1;
+    (void)write(denied, "secret", 6);
+    (void)close(denied);
+
+    printf("\n=== os_sandbox macOS package confinement ===\n");
+    SB_CHECK("mechanism reports Seatbelt",
+             os_sandbox_package_confinement() ==
+                 OS_SANDBOX_PACKAGE_CONFINEMENT_SEATBELT &&
+             strcmp(os_sandbox_package_confinement_name(
+                        OS_SANDBOX_PACKAGE_CONFINEMENT_SEATBELT),
+                    "seatbelt") == 0);
+    SB_CHECK("Seatbelt scopes files and denies network",
+             sb_run_child(c_macos_seatbelt_scope) == 0);
+    SB_CHECK("Seatbelt permits explicitly granted execution",
+             sb_run_child(c_macos_seatbelt_exec) == 0);
+    SB_CHECK("POSIX resource limits are enforced",
+             sb_run_child(c_macos_rlimit_fsize) == 0);
+
+    char generated[320];
+    (void)snprintf(generated, sizeof(generated), "%s/output",
+                   g_macos_allowed);
+    (void)unlink(generated);
+    (void)snprintf(generated, sizeof(generated), "%s/oversize",
+                   g_macos_allowed);
+    (void)unlink(generated);
+    (void)unlink(g_macos_denied);
+    (void)rmdir(g_macos_allowed);
+    (void)rmdir(root);
+    return failures ? 1 : 0;
+}
+
+#elif !defined(__linux__)
 
 int test_os_sandbox(void)
 {

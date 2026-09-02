@@ -641,6 +641,12 @@ static struct pv_perf_metrics g_pv_perf;
 static uint64_t g_pv_cpu_budget_us;
 static uint64_t g_pv_cpu_used_us;
 
+#if defined(__APPLE__)
+#define PV_CHILD_GRANT_BASE_CAP 12u
+#else
+#define PV_CHILD_GRANT_BASE_CAP 10u
+#endif
+
 static uint64_t pv_rusage_cpu_us(const struct rusage *usage)
 {
     return usage
@@ -669,7 +675,7 @@ static void pv_perf_record(const char *program, uint64_t elapsed_us)
     }
 }
 
-/* Landlock grant set for every verifier child: the materialized source
+/* Filesystem grant set for every verifier child: the materialized source
  * (read), the build dir (full), the host toolchain (read+execute), and
  * the two harmless /dev nodes. Anything else — wallet, datadir, SSH — is
  * denied by default. */
@@ -679,7 +685,7 @@ static size_t pv_child_grants(const char *src_dir, const char *build_dir,
                               size_t cap)
 {
     size_t n = 0;
-    if (cap < 10u + dep_count)
+    if (cap < PV_CHILD_GRANT_BASE_CAP + dep_count)
         return 0;
     rules[n++] = (struct os_sandbox_path_rule){
         .path = src_dir, .allow_read = true };
@@ -688,6 +694,15 @@ static size_t pv_child_grants(const char *src_dir, const char *build_dir,
         .allow_execute = true, .allow_create = true };
     rules[n++] = (struct os_sandbox_path_rule){
         .path = "/usr", .allow_read = true, .allow_execute = true };
+#if defined(__APPLE__)
+    /* /usr/bin/clang is an xcrun shim. Its selected compiler, linker,
+     * runtimes, and SDK are system-owned inputs beneath these two roots. */
+    rules[n++] = (struct os_sandbox_path_rule){
+        .path = "/Library/Developer", .allow_read = true,
+        .allow_execute = true };
+    rules[n++] = (struct os_sandbox_path_rule){
+        .path = "/System", .allow_read = true, .allow_execute = true };
+#endif
     rules[n++] = (struct os_sandbox_path_rule){
         .path = "/lib", .allow_read = true, .allow_execute = true };
     struct stat st;
@@ -734,14 +749,14 @@ static uint64_t pv_process_vsize_bytes(void)
 
 
 /* Fork and run argv[0] confined. The child: stderr/stdout captured,
- * optional chdir, rlimits, no_new_privs, Landlock (when landlock=true),
- * the seccomp deny-set, then execvp. The parent enforces the wall-clock
+ * optional chdir, rlimits, no_new_privs, host confinement (when confined),
+ * the Linux seccomp deny-set, then execvp. The parent enforces the wall-clock
  * deadline with SIGKILL. env_pairs is a NULL-terminated flat array of
  * "NAME=value" strings applied in the child (or NULL). */
 static struct pv_run pv_run_child(const char *const argv[],
                                   const char *cwd,
                                   const struct os_sandbox_rlimits *limits,
-                                  bool landlock,
+                                  bool confined,
                                   const struct os_sandbox_path_rule *rules,
                                   size_t n_rules,
                                   const char *const env_pairs[],
@@ -875,11 +890,11 @@ static struct pv_run pv_run_child(const char *const argv[],
         }
         if (!os_sandbox_no_new_privs())
             _exit(PV_CHILD_SANDBOX_FAIL);
-        if (landlock) {
+        if (confined) {
             struct zcl_result lr =
-                os_sandbox_landlock_restrict(rules, n_rules);
+                os_sandbox_package_restrict(rules, n_rules);
             if (!zcl_result_is_ok(lr)) {
-                fprintf(stderr, "landlock: %s\n", lr.message);
+                fprintf(stderr, "confinement: %s\n", lr.message);
                 _exit(PV_CHILD_SANDBOX_FAIL);
             }
         }
@@ -1611,7 +1626,7 @@ struct pv_plan_ctx {
     size_t dep_count;
     const struct os_sandbox_path_rule *rules;
     size_t n_rules;
-    bool landlock;
+    bool confined;
     const char *const *env;
     const struct os_sandbox_rlimits *limits;
     bool warning_fatal;
@@ -1971,7 +1986,7 @@ static bool pv_emit_dep_plan(const char *plan_path, const char *package_name,
             break;
         }
         struct pv_run pr = pv_run_child(pargv, ctx->build_root, ctx->limits,
-                                        ctx->landlock, ctx->rules,
+                                        ctx->confined, ctx->rules,
                                         ctx->n_rules, ctx->env,
                                         PV_COMPILE_TIMEOUT_MS);
         if (!pr.launched || pr.sandbox_fail) {
@@ -2029,7 +2044,7 @@ static bool pv_emit_dep_plan(const char *plan_path, const char *package_name,
         if (pv_plan_probe_argv(margv, sizeof(margv) / sizeof(margv[0]),
                                &store, true, NULL, src_file, mpath)) {
             struct pv_run mr = pv_run_child(
-                margv, ctx->build_root, ctx->limits, ctx->landlock,
+                margv, ctx->build_root, ctx->limits, ctx->confined,
                 ctx->rules, ctx->n_rules, ctx->env, PV_COMPILE_TIMEOUT_MS);
             if (mr.launched && !mr.sandbox_fail && !mr.timed_out &&
                 mr.exited && mr.exit_code == 0 &&
@@ -2256,7 +2271,7 @@ static bool pv_fast_preproc_sha3(struct pv_plan_ctx *ctx,
         pargv[k + 1] = pargv[k];
     pargv[pe + 1] = "-P";
     struct pv_run pr = pv_run_child(pargv, ctx->build_root, ctx->limits,
-                                    ctx->landlock, ctx->rules, ctx->n_rules,
+                                    ctx->confined, ctx->rules, ctx->n_rules,
                                     ctx->env, PV_COMPILE_TIMEOUT_MS);
     if (!pr.launched || pr.sandbox_fail || pr.timed_out || !pr.exited ||
         pr.exit_code != 0) {
@@ -2667,8 +2682,13 @@ static int pv_zbuild_compile_mode(int argc, char **argv)
         fprintf(stdout, "zbuild-error=output-must-not-exist\n");
         return 3;
     }
-    if (os_sandbox_landlock_abi() < 1) {
+    if (os_sandbox_package_confinement() ==
+        OS_SANDBOX_PACKAGE_CONFINEMENT_NONE) {
+#if defined(__APPLE__)
+        fprintf(stdout, "zbuild-error=seatbelt-unavailable\n");
+#else
         fprintf(stdout, "zbuild-error=landlock-unavailable\n");
+#endif
         return 4;
     }
 
@@ -2680,7 +2700,7 @@ static int pv_zbuild_compile_mode(int argc, char **argv)
         return 5;
     }
 
-    struct os_sandbox_path_rule rules[10];
+    struct os_sandbox_path_rule rules[PV_CHILD_GRANT_BASE_CAP];
     size_t n_rules = pv_child_grants(src_dir, build_dir, NULL, 0, rules,
                                      sizeof(rules) / sizeof(rules[0]));
     if (n_rules == 0) {
@@ -2778,7 +2798,11 @@ static int pv_zbuild_compile_mode(int argc, char **argv)
     char input_sha3_hex[65];
     zcl_hex_encode(input_after, 32, input_sha3_hex);
     fprintf(stdout,
+#if defined(__APPLE__)
+            "zbuild-ok=1 seatbelt=1 rlimits=1 network=0 "
+#else
             "zbuild-ok=1 landlock=1 seccomp=1 rlimits=1 network=0 "
+#endif
             "compiler=%s bytes=%lld input_sha3=%s observed_reads=2 "
             "observed_writes=1\n",
             VCS_BUILD_COMPILER_V1, (long long)output_st.st_size,
@@ -2887,8 +2911,9 @@ static int pv_zbuild_test_mode(int argc, char **argv)
     if (!input_slash || input_slash == input_dir) return 3;
     *input_slash = '\0';
     if (strcmp(input_dir, build_dir) != 0) return 3;
-    if (os_sandbox_landlock_abi() < 1) return 4;
-    struct os_sandbox_path_rule rules[10];
+    if (os_sandbox_package_confinement() ==
+        OS_SANDBOX_PACKAGE_CONFINEMENT_NONE) return 4;
+    struct os_sandbox_path_rule rules[PV_CHILD_GRANT_BASE_CAP];
     size_t n_rules = pv_child_grants(build_dir, build_dir, NULL, 0, rules,
                                      sizeof(rules) / sizeof(rules[0]));
     if (n_rules == 0) return 5;
@@ -2924,7 +2949,11 @@ static int pv_zbuild_test_mode(int argc, char **argv)
     }
     fprintf(stdout,
             "zbuild-test-ok=1 verdict=%s exit=%d signal=%d timeout=%d "
+#if defined(__APPLE__)
+            "seatbelt=1 rlimits=1 network=0\n",
+#else
             "landlock=1 seccomp=1 rlimits=1 network=0\n",
+#endif
             run.exited && run.exit_code == 0 && !run.timed_out &&
                     run.term_signal == 0
                 ? "pass" : "fail",
@@ -3014,9 +3043,11 @@ static int pv_zbuild_fuzz_mode(int argc, char **argv)
     char *slash = strrchr(input_dir, '/');
     if (!slash || slash == input_dir) return 3;
     *slash = '\0';
-    if (strcmp(input_dir, build_dir) != 0 || os_sandbox_landlock_abi() < 1)
+    if (strcmp(input_dir, build_dir) != 0 ||
+        os_sandbox_package_confinement() ==
+            OS_SANDBOX_PACKAGE_CONFINEMENT_NONE)
         return 4;
-    struct os_sandbox_path_rule rules[10];
+    struct os_sandbox_path_rule rules[PV_CHILD_GRANT_BASE_CAP];
     size_t n_rules = pv_child_grants(build_dir, build_dir, NULL, 0, rules,
                                      sizeof(rules) / sizeof(rules[0]));
     if (n_rules == 0) return 5;
@@ -3106,7 +3137,11 @@ static int pv_zbuild_fuzz_mode(int argc, char **argv)
     if (!wrote) { (void)unlink(output); return 5; }
     fprintf(stdout,
             "zbuild-fuzz-ok=1 verdict=%s seeds=%u completed=%u "
+#if defined(__APPLE__)
+            "seatbelt=1 rlimits=1 network=0\n",
+#else
             "landlock=1 seccomp=1 rlimits=1 network=0\n",
+#endif
             status == 1 ? "pass" : "fail", seeds, completed);
     return 0;
 }
@@ -3307,20 +3342,26 @@ static int pv_main_posix(int argc, char **argv)
     }
 
     /* Isolation probe FIRST: it decides full vs degraded before any work. */
-    const bool landlock = os_sandbox_landlock_abi() >= 1;
-    if (!landlock) {
+    const enum os_sandbox_package_confinement confinement =
+        os_sandbox_package_confinement();
+    const bool full_isolation =
+        confinement != OS_SANDBOX_PACKAGE_CONFINEMENT_NONE;
+    if (!full_isolation) {
         if (require_full_isolation) {
             fprintf(stderr,
-                    "%s: FATAL: --require-full-isolation and this kernel "
-                    "offers no Landlock — failing closed, nothing signed\n",
-                    PV_LOG);
+                    "%s: FATAL: --require-full-isolation and this host "
+                    "offers no qualified package confinement — failing "
+                    "closed, nothing signed\n", PV_LOG);
             return 4;
         }
         fprintf(stderr,
-                "%s: WARNING: Landlock unavailable on this kernel — running "
-                "DEGRADED (no filesystem scoping; seccomp + rlimits still "
-                "deny network and bound resources). The attestation will "
-                "carry isolation=degraded.\n", PV_LOG);
+                "%s: WARNING: qualified package confinement unavailable — "
+                "running DEGRADED. The attestation will carry "
+                "isolation=degraded.\n", PV_LOG);
+    } else {
+        fprintf(stderr, "%s: package confinement=%s filesystem=scoped "
+                        "network=denied rlimits=enforced\n", PV_LOG,
+                os_sandbox_package_confinement_name(confinement));
     }
 
     /* Store layout sanity. Candidate mode has no release store: the parent
@@ -3692,7 +3733,8 @@ static int pv_main_posix(int argc, char **argv)
         return 5;
     }
 
-    struct os_sandbox_path_rule rules[10u + PV_EMIT_MAX_DEPS];
+    struct os_sandbox_path_rule
+        rules[PV_CHILD_GRANT_BASE_CAP + PV_EMIT_MAX_DEPS];
     size_t n_rules = pv_child_grants(src_root, build_root, link_deps,
                                      link_dep_count, rules,
                                      sizeof(rules) / sizeof(rules[0]));
@@ -3710,7 +3752,7 @@ static int pv_main_posix(int argc, char **argv)
             compilers[i].path, "-std=c23", "-fsyntax-only", "-x", "c",
             "/dev/null", NULL,
         };
-        struct pv_run pr = pv_run_child(vargv, NULL, NULL, landlock, rules,
+        struct pv_run pr = pv_run_child(vargv, NULL, NULL, full_isolation, rules,
                                         n_rules, NULL, 10000);
         struct pv_run capability = pv_run_child(
             cargv, NULL, NULL, false, NULL, 0, NULL, 10000);
@@ -3755,8 +3797,8 @@ static int pv_main_posix(int argc, char **argv)
     memcpy(att.package_root, package_root, 32);
     memcpy(att.release_id, release_id, 32);
     memcpy(att.recipe_root, recipe_root, 32);
-    att.isolation = landlock ? VCS_PACKAGE_ATTEST_ISOLATION_FULL
-                             : VCS_PACKAGE_ATTEST_ISOLATION_DEGRADED;
+    att.isolation = full_isolation ? VCS_PACKAGE_ATTEST_ISOLATION_FULL
+                                   : VCS_PACKAGE_ATTEST_ISOLATION_DEGRADED;
     memcpy(att.verifier_pubkey, verifier_pubkey, 33);
 
     const bool have_tests = recipe.test_sources.count > 0;
@@ -3842,7 +3884,7 @@ static int pv_main_posix(int argc, char **argv)
         pctx.dep_count = emit_dep_count;
         pctx.rules = rules;
         pctx.n_rules = n_rules;
-        pctx.landlock = landlock;
+        pctx.confined = full_isolation;
         pctx.env = compile_env;
         pctx.limits = &compile_limits;
         pctx.warning_fatal = standard_profile;
@@ -3991,7 +4033,7 @@ static int pv_main_posix(int argc, char **argv)
                     pr.exit_code = 0;
                 } else {
                     pr = pv_run_child(
-                        args.argv, build_root, &compile_limits, landlock,
+                        args.argv, build_root, &compile_limits, full_isolation,
                         rules, n_rules, compile_env, PV_COMPILE_TIMEOUT_MS);
                 }
                 if (!pr.launched || pr.sandbox_fail) {
@@ -4082,7 +4124,7 @@ static int pv_main_posix(int argc, char **argv)
                 }
                 largv[ln] = NULL;
                 struct pv_run pr = pv_run_child(
-                    largv, build_root, &compile_limits, landlock, rules,
+                    largv, build_root, &compile_limits, full_isolation, rules,
                     n_rules, compile_env, PV_LINK_TIMEOUT_MS);
                 if (!pr.launched || pr.sandbox_fail) {
                     fprintf(stderr,
@@ -4277,7 +4319,7 @@ static int pv_main_posix(int argc, char **argv)
                      cc);
             struct pv_run pr = pv_run_child(
                 (const char *const[]){ bin_file, NULL }, build_root,
-                &test_limits, landlock, rules, n_rules, compile_env,
+                &test_limits, full_isolation, rules, n_rules, compile_env,
                 (int)recipe.maximum_test_seconds * 1000 + 5000);
             if (!pr.launched || pr.sandbox_fail) {
                 fprintf(stderr,
@@ -4350,7 +4392,7 @@ static int pv_main_posix(int argc, char **argv)
             };
             struct pv_run sr = pv_run_child(
                 sanitizer_argv, build_root,
-                &san_test_limits, landlock, rules, n_rules, san_env,
+                &san_test_limits, full_isolation, rules, n_rules, san_env,
                 (int)recipe.maximum_test_seconds * 1000 + 5000);
             if (!sr.launched || sr.sandbox_fail) {
                 fprintf(stderr,
@@ -4614,7 +4656,7 @@ static int pv_main_posix(int argc, char **argv)
                 return 5;
             }
         }
-        rec.isolation = landlock
+        rec.isolation = full_isolation
                             ? (uint8_t)VCS_PACKAGE_BUILD_ISOLATION_FULL
                             : (uint8_t)VCS_PACKAGE_BUILD_ISOLATION_DEGRADED;
         rec.test_ran = have_tests && test_ran;
@@ -4684,7 +4726,7 @@ static int pv_main_posix(int argc, char **argv)
                 emitted = false;
             }
             struct pv_run ar = pv_run_child(aargv, build_root, &compile_limits,
-                                            landlock, rules, n_rules,
+                                            full_isolation, rules, n_rules,
                                             compile_env, PV_LINK_TIMEOUT_MS);
             if (!ar.launched || ar.sandbox_fail || ar.timed_out ||
                 !ar.exited || ar.exit_code != 0) {

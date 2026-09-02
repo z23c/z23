@@ -134,8 +134,8 @@ enum vcs_package_attest_outcome {
 };
 
 enum vcs_package_attest_isolation {
-    VCS_PACKAGE_ATTEST_ISOLATION_FULL = 1,     /* Landlock+seccomp+rlimits */
-    VCS_PACKAGE_ATTEST_ISOLATION_DEGRADED = 2, /* seccomp+rlimits only */
+    VCS_PACKAGE_ATTEST_ISOLATION_FULL = 1,     /* scoped fs+no net+rlimits */
+    VCS_PACKAGE_ATTEST_ISOLATION_DEGRADED = 2, /* one or more absent */
 };
 
 /* Every rejection names the failed rule. The enum order is frozen. */
