@@ -2935,9 +2935,11 @@ static void dev_loop_ensure(
         (unsigned long long)platform_watcher_launch_inherited(&launch));
     worker_argv[0] = image;
     uintptr_t inherited[] = {platform_watcher_launch_inherited(&launch)};
+    static const char *const watcher_environment[] = {NULL};
     struct platform_process_options options = {
         .image = image, .argv = worker_argv, .cwd = root,
-        .env = NULL, .inherited = inherited, .inherited_count = 1};
+        .env = watcher_environment, .inherited = inherited,
+        .inherited_count = 1};
     if (!platform_process_start_hidden(&child, &options) ||
         !platform_watcher_launch_publish(&launch)) {
         platform_watcher_launch_close(&launch);
@@ -2976,7 +2978,15 @@ static void dev_loop_ensure(
 #endif
     if (!wait_ready) {
 #if defined(_WIN32)
-        platform_process_close(&child);
+        if (!platform_process_detach(&child)) {
+            (void)platform_process_terminate(&child, 1);
+            platform_process_close(&child);
+            zcl_command_reply_fail(
+                reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INTERNAL,
+                "WATCH_DETACH_FAILED", "start", false, false,
+                "could not transfer native watcher containment", "DuplicateHandle");
+            return;
+        }
 #endif
         (void)json_push_kv_str(&reply->data, "schema",
                                "zcl.dev_loop_start.v1");
@@ -3002,7 +3012,15 @@ static void dev_loop_ensure(
         return;
     }
 #if defined(_WIN32)
-    platform_process_close(&child);
+    if (!platform_process_detach(&child)) {
+        (void)platform_process_terminate(&child, 1);
+        platform_process_close(&child);
+        zcl_command_reply_fail(
+            reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INTERNAL,
+            "WATCH_DETACH_FAILED", "start", false, false,
+            "could not transfer native watcher containment", "DuplicateHandle");
+        return;
+    }
 #endif
     dev_emit_loop_status(root, reply);
     (void)json_push_kv_bool(&reply->data, "created", true);

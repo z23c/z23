@@ -7,7 +7,11 @@
 #include <stddef.h>
 #include <stdint.h>
 
-struct platform_process { uintptr_t native; uint64_t pid; };
+struct platform_process {
+    uintptr_t native;
+    uintptr_t containment; /* Windows kill-on-close Job Object, else unused. */
+    uint64_t pid;
+};
 
 struct platform_process_options {
     const char *image;          /* UTF-8 absolute executable path. */
@@ -36,6 +40,12 @@ enum platform_process_wait_result platform_process_wait(
     struct platform_process *process, uint32_t timeout_ms, uint32_t *exit_code);
 bool platform_process_terminate(struct platform_process *process,
                                 uint32_t exit_code);
+/* Transfer containment to a persistent child and release the caller's handles.
+ * On Windows the child retains the Job Object, so its descendants are reaped
+ * when the persistent child exits. */
+bool platform_process_detach(struct platform_process *process);
+/* Closing an owned Windows process also closes its kill-on-close Job Object,
+ * so descendants cannot outlive the bounded caller. */
 void platform_process_close(struct platform_process *process);
 
 #endif

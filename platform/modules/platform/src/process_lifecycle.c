@@ -14,7 +14,8 @@
 
 void platform_process_init(struct platform_process *process)
 {
-    if (process) *process = (struct platform_process){UINTPTR_MAX, 0};
+    if (process)
+        *process = (struct platform_process){UINTPTR_MAX, UINTPTR_MAX, 0};
 }
 
 #if defined(_WIN32)
@@ -195,25 +196,43 @@ bool platform_process_start_hidden(struct platform_process *process,
         free(startup.lpAttributeList); free(handles); CloseHandle(null_handle);
         goto done;
     }
+    HANDLE job = CreateJobObjectW(NULL, NULL);
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits = {0};
+    limits.BasicLimitInformation.LimitFlags =
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_PRIORITY_CLASS;
+    limits.BasicLimitInformation.PriorityClass = BELOW_NORMAL_PRIORITY_CLASS;
+    bool job_ok = job && SetInformationJobObject(
+        job, JobObjectExtendedLimitInformation, &limits, sizeof(limits));
     PROCESS_INFORMATION information = {0};
-    platform_process_child_prepare_headless();
-    DWORD previous_thread_mode = 0;
-    bool thread_mode = SetThreadErrorMode(
+    UINT previous_mode = SetErrorMode(
         SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX |
-        SEM_NOOPENFILEERRORBOX, &previous_thread_mode) != 0;
-    DWORD flags = CREATE_NO_WINDOW |
-                  CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT;
-    bool ok = thread_mode &&
-        CreateProcessW(image, line, NULL, NULL, TRUE, flags, environment, cwd,
-                       &startup.StartupInfo, &information) != 0;
-    if (thread_mode)
-        (void)SetThreadErrorMode(previous_thread_mode, NULL);
+        SEM_NOOPENFILEERRORBOX);
+    DWORD flags = CREATE_NO_WINDOW | CREATE_SUSPENDED |
+                  BELOW_NORMAL_PRIORITY_CLASS | CREATE_UNICODE_ENVIRONMENT |
+                  EXTENDED_STARTUPINFO_PRESENT;
+    bool started = job_ok && CreateProcessW(
+        image, line, NULL, NULL, TRUE, flags, environment, cwd,
+        &startup.StartupInfo, &information) != 0;
+    bool assigned = started &&
+        AssignProcessToJobObject(job, information.hProcess) != 0;
+    bool resumed = assigned &&
+        ResumeThread(information.hThread) != (DWORD)-1;
+    (void)SetErrorMode(previous_mode);
+    if (started && !resumed)
+        (void)TerminateProcess(information.hProcess, 125u);
     DeleteProcThreadAttributeList(startup.lpAttributeList);
     free(startup.lpAttributeList); free(handles); CloseHandle(null_handle);
-    if (ok) {
+    if (resumed) {
         CloseHandle(information.hThread);
         process->native = (uintptr_t)information.hProcess;
+        process->containment = (uintptr_t)job;
         process->pid = information.dwProcessId;
+    } else {
+        if (started) {
+            CloseHandle(information.hThread);
+            CloseHandle(information.hProcess);
+        }
+        if (job) CloseHandle(job);
     }
 done:
     free(image); free(cwd); free(line); free(environment);
@@ -255,14 +274,36 @@ enum platform_process_wait_result platform_process_wait(
 bool platform_process_terminate(struct platform_process *process,
                                 uint32_t exit_code)
 {
-    return process && process->native != UINTPTR_MAX &&
-           TerminateProcess((HANDLE)process->native, exit_code) != 0;
+    if (!process || process->native == UINTPTR_MAX) return false;
+    if (process->containment != UINTPTR_MAX)
+        return TerminateJobObject((HANDLE)process->containment, exit_code) != 0;
+    return TerminateProcess((HANDLE)process->native, exit_code) != 0;
+}
+
+bool platform_process_detach(struct platform_process *process)
+{
+    if (!process || process->native == UINTPTR_MAX) return false;
+    if (process->containment != UINTPTR_MAX) {
+        HANDLE remote_job = NULL;
+        if (!DuplicateHandle(GetCurrentProcess(), (HANDLE)process->containment,
+                             (HANDLE)process->native, &remote_job, 0, FALSE,
+                             DUPLICATE_SAME_ACCESS))
+            return false;
+    }
+    CloseHandle((HANDLE)process->native);
+    if (process->containment != UINTPTR_MAX)
+        CloseHandle((HANDLE)process->containment);
+    platform_process_init(process);
+    return true;
 }
 
 void platform_process_close(struct platform_process *process)
 {
     if (!process || process->native == UINTPTR_MAX) return;
-    CloseHandle((HANDLE)process->native); platform_process_init(process);
+    CloseHandle((HANDLE)process->native);
+    if (process->containment != UINTPTR_MAX)
+        CloseHandle((HANDLE)process->containment);
+    platform_process_init(process);
 }
 
 #else
@@ -362,6 +403,13 @@ bool platform_process_terminate(struct platform_process *process,
     (void)exit_code;
     return process && process->native != UINTPTR_MAX &&
            kill((pid_t)process->native, SIGTERM) == 0;
+}
+
+bool platform_process_detach(struct platform_process *process)
+{
+    if (!process || process->native == UINTPTR_MAX) return false;
+    platform_process_init(process);
+    return true;
 }
 
 void platform_process_close(struct platform_process *process)
