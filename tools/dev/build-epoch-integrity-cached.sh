@@ -63,25 +63,39 @@ hash_key_inputs()
     done | sha256sum | awk '{print $1}'
 }
 
+# Probe-stream logs live in globals (not run_probes locals) so the EXIT trap
+# below can remove them if this driver is killed while a probe is running.
+BUILD_PROBE_LOG=""
+DEPFILE_PROBE_LOG=""
+cleanup_probe_logs()
+{
+    [ -n "$BUILD_PROBE_LOG" ] && rm -f -- "$BUILD_PROBE_LOG"
+    [ -n "$DEPFILE_PROBE_LOG" ] && rm -f -- "$DEPFILE_PROBE_LOG"
+}
+trap cleanup_probe_logs EXIT
+
 # Run both probes concurrently -- they are independent (separate mktemp
 # work dirs, no shared mutable state) -- and stream both logs through on
-# completion so a failure still points straight at its FAIL line.
+# completion so a failure still points straight at its FAIL line. Both
+# probes bound their own waits internally, so these waits always return.
 run_probes()
 {
-    local build_log depfile_log build_pid depfile_pid build_rc depfile_rc
-    build_log="$(mktemp "${TMPDIR:-/tmp}/build-epoch-probe.XXXXXX")"
-    depfile_log="$(mktemp "${TMPDIR:-/tmp}/depfile-scope-probe.XXXXXX")"
-    "$BUILD_EPOCH_SELFTEST" > "$build_log" 2>&1 &
+    local build_pid depfile_pid build_rc depfile_rc
+    BUILD_PROBE_LOG="$(mktemp "${TMPDIR:-/tmp}/build-epoch-probe.XXXXXX")"
+    DEPFILE_PROBE_LOG="$(mktemp "${TMPDIR:-/tmp}/depfile-scope-probe.XXXXXX")"
+    "$BUILD_EPOCH_SELFTEST" > "$BUILD_PROBE_LOG" 2>&1 &
     build_pid=$!
-    "$DEPFILE_SCOPE_SELFTEST" > "$depfile_log" 2>&1 &
+    "$DEPFILE_SCOPE_SELFTEST" > "$DEPFILE_PROBE_LOG" 2>&1 &
     depfile_pid=$!
     wait "$build_pid"
     build_rc=$?
     wait "$depfile_pid"
     depfile_rc=$?
-    cat -- "$build_log"
-    cat -- "$depfile_log"
-    rm -f -- "$build_log" "$depfile_log"
+    cat -- "$BUILD_PROBE_LOG"
+    cat -- "$DEPFILE_PROBE_LOG"
+    rm -f -- "$BUILD_PROBE_LOG" "$DEPFILE_PROBE_LOG"
+    BUILD_PROBE_LOG=""
+    DEPFILE_PROBE_LOG=""
     [ "$build_rc" -eq 0 ] && [ "$depfile_rc" -eq 0 ]
 }
 

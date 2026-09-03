@@ -25,10 +25,16 @@ WORK="$(mktemp -d "${TMPDIR:-/tmp}/zcl-build-epoch-selftest.XXXXXX")"
 # the production no-symlink path contract through the physical temp path.
 WORK="$(cd "$WORK" && pwd -P)"
 CHILD_PIDS=()
+SELFTEST_WATCHDOG_PID=""
 
 cleanup()
 {
     local pid
+    # The outer wall-clock watchdog must die with a normal exit, or its
+    # pending kill could land on a recycled pid long after this run.
+    if [ -n "$SELFTEST_WATCHDOG_PID" ]; then
+        kill "$SELFTEST_WATCHDOG_PID" 2>/dev/null || true
+    fi
     for pid in "${CHILD_PIDS[@]}"; do
         kill "$pid" 2>/dev/null || true
     done
@@ -49,6 +55,25 @@ fail()
     printf 'build-epoch-selftest: FAIL: %s\n' "$*" >&2
     exit 1
 }
+
+SELFTEST_TIMEOUT="${ZCL_BUILD_EPOCH_SELFTEST_TIMEOUT:-600}"
+[[ "$SELFTEST_TIMEOUT" =~ ^[1-9][0-9]*$ ]] ||
+    fail "invalid ZCL_BUILD_EPOCH_SELFTEST_TIMEOUT=$SELFTEST_TIMEOUT (must be a positive integer)"
+SELFTEST_STEP_TIMEOUT="${ZCL_BUILD_EPOCH_SELFTEST_STEP_TIMEOUT:-120}"
+[[ "$SELFTEST_STEP_TIMEOUT" =~ ^[1-9][0-9]*$ ]] ||
+    fail "invalid ZCL_BUILD_EPOCH_SELFTEST_STEP_TIMEOUT=$SELFTEST_STEP_TIMEOUT (must be a positive integer)"
+
+# Outer wall-clock budget, enforced from inside this script: the lint driver
+# imposes no per-gate timeout, so a stuck rendezvous below used to hold the
+# whole lint run (and the shared lint lock every other lane waits on)
+# forever. On expiry the watchdog reports the reason and terminates the
+# script; the EXIT trap still removes the work directory and reaps children,
+# and the driver sees a FAIL. A hung gate turns red, never waits.
+( trap - EXIT HUP INT TERM
+  sleep "$SELFTEST_TIMEOUT"
+  printf 'build-epoch-selftest: FAIL: outer wall-clock budget %ss exceeded; failing closed instead of holding the lint gate\n' \
+      "$SELFTEST_TIMEOUT" >&2
+  kill -TERM "$$" ) & SELFTEST_WATCHDOG_PID=$!
 
 sha_label()
 {
@@ -257,7 +282,19 @@ if [ -n "${BLOCK_SOURCE:-}" ] && [ "$2" = "$BLOCK_SOURCE" ] &&
    [ "$4" = "${BLOCK_MUTATION:-}" ] && [ ! -e "${BLOCK_ONCE:-}" ]; then
     : > "$BLOCK_ONCE"
     : > "$BLOCK_MARKER"
-    while [ ! -e "$BLOCK_RELEASE" ]; do sleep 0.01; done
+    # Bounded rendezvous: the driver releases BLOCK_RELEASE once the next
+    # publisher advances the source record. If it never does, fail closed
+    # naming the file instead of sleeping inside the alias lock forever.
+    block_start=$SECONDS
+    block_timeout="${BLOCK_TIMEOUT_S:-120}"
+    while [ ! -e "$BLOCK_RELEASE" ]; do
+        [ $((SECONDS - block_start)) -lt "$block_timeout" ] || {
+            printf 'verify-record: FAIL: rendezvous %s was never released within %ss\n' \
+                "$BLOCK_RELEASE" "$block_timeout" >&2
+            exit 1
+        }
+        sleep 0.01
+    done
 fi
 read -r actual_source actual_complete actual_mutation < "$STATE_FILE"
 [ "$2" = "$actual_source" ] && [ "$3" = "$actual_complete" ] &&
@@ -376,7 +413,17 @@ cat > "$COMPILER_WRAPPER" <<'COMPILER_EOF'
 set -euo pipefail
 if mkdir "$COMPILER_BLOCK_ONCE" 2>/dev/null; then
     : > "$COMPILER_BLOCK_MARKER"
-    while [ ! -e "$COMPILER_BLOCK_RELEASE" ]; do sleep 0.01; done
+    # Bounded rendezvous, same contract as the verify-record BLOCK loop.
+    compiler_start=$SECONDS
+    compiler_timeout="${COMPILER_BLOCK_TIMEOUT_S:-120}"
+    while [ ! -e "$COMPILER_BLOCK_RELEASE" ]; do
+        [ $((SECONDS - compiler_start)) -lt "$compiler_timeout" ] || {
+            printf 'compiler-wrapper: FAIL: rendezvous %s was never released within %ss\n' \
+                "$COMPILER_BLOCK_RELEASE" "$compiler_timeout" >&2
+            exit 1
+        }
+        sleep 0.01
+    done
 fi
 read -r -a real_cc <<< "$REAL_CC_COMMAND"
 exec "${real_cc[@]}" "$@"
@@ -390,6 +437,7 @@ start_session "$SOURCE_A" "$MUTATION_A2" >/dev/null
     COMPILER_BLOCK_ONCE="$COMPILER_BLOCK_ONCE" \
     COMPILER_BLOCK_MARKER="$COMPILER_BLOCK_MARKER" \
     COMPILER_BLOCK_RELEASE="$COMPILER_BLOCK_RELEASE" \
+    COMPILER_BLOCK_TIMEOUT_S="$SELFTEST_STEP_TIMEOUT" \
     "$OBJECT_TOOL" dep "$CONCURRENT_OBJECT" "$CONCURRENT_SOURCE" \
         "$SOURCE_A" 1 "$MUTATION_A2" "$EPOCH_MAIN" "$COMPILER_ID" \
         "$SESSION_MAIN" -- \
@@ -401,14 +449,18 @@ CHILD_PIDS+=("$OBJECT_PID_1")
 # a just-forked compiler wrapper 5 wall-clock seconds to get scheduled and
 # create a file; on a loaded or slow-disk box that budget expires while the
 # child is perfectly healthy and still starting, and the assertion below
-# then reports a code defect that does not exist. Exhaustion is no longer a
-# possible outcome: this loop ends when the marker appears (success) or when
-# the child dies without it (a real defect, and load-independent). A child
-# that neither writes nor dies is a genuine hang, and is caught by the
-# runner-level progress watchdog in test_parallel.c, which reports it AS a
-# hang instead of disguising it as a failed assertion.
+# then reports a code defect that does not exist. This loop ends when the
+# marker appears (success), when the child dies without it (a real defect,
+# and load-independent), or when the step deadline expires: a child that
+# neither writes nor dies within the bound is a genuine hang, and the
+# self-test fails naming its pid instead of hanging the lint gate. (The
+# runner-level progress watchdog in test_parallel.c additionally reports
+# such hangs AS hangs when this script runs under the test harness.)
+COMPILER_MARK_START=$SECONDS
 while [ ! -e "$COMPILER_BLOCK_MARKER" ]; do
     kill -0 "$OBJECT_PID_1" 2>/dev/null || break
+    [ $((SECONDS - COMPILER_MARK_START)) -lt "$SELFTEST_STEP_TIMEOUT" ] ||
+        fail "first object compiler (pid $OBJECT_PID_1) did not reach its rendezvous within ${SELFTEST_STEP_TIMEOUT}s"
     sleep 0.01
 done
 [ -e "$COMPILER_BLOCK_MARKER" ] || fail 'first object compiler did not block'
@@ -416,6 +468,7 @@ REAL_CC_COMMAND="$CC_COMMAND" \
     COMPILER_BLOCK_ONCE="$COMPILER_BLOCK_ONCE" \
     COMPILER_BLOCK_MARKER="$COMPILER_BLOCK_MARKER" \
     COMPILER_BLOCK_RELEASE="$COMPILER_BLOCK_RELEASE" \
+    COMPILER_BLOCK_TIMEOUT_S="$SELFTEST_STEP_TIMEOUT" \
     "$OBJECT_TOOL" dep "$CONCURRENT_OBJECT" "$CONCURRENT_SOURCE" \
         "$SOURCE_A" 1 "$MUTATION_A2" "$EPOCH_MAIN" "$COMPILER_ID" \
         "$SESSION_MAIN" -- \
@@ -848,6 +901,7 @@ STALE_LOG="$WORK/stale-a-publisher.log"
 STATE_FILE="$STATE" BLOCK_SOURCE="$SOURCE_A" \
     BLOCK_MUTATION="$MUTATION_A2" BLOCK_MARKER="$BLOCK_MARKER" \
     BLOCK_RELEASE="$BLOCK_RELEASE" BLOCK_ONCE="$BLOCK_ONCE" \
+    BLOCK_TIMEOUT_S="$SELFTEST_STEP_TIMEOUT" \
     "$PUBLISH_TOOL" "$CANDIDATE_A2" "$STABLE" "$SESSION_MAIN" "$SOURCE_A" 1 \
         "$MUTATION_A2" "$EPOCH_MAIN" "$COMPILER_ID" "$PROFILE" \
         "$COMPILE_FLAGS" "$LINK_FLAGS" "$CC_COMMAND" "$CC_COMMAND" \
@@ -855,10 +909,14 @@ STATE_FILE="$STATE" BLOCK_SOURCE="$SOURCE_A" \
 STALE_PID=$!
 CHILD_PIDS+=("$STALE_PID")
 
-# Same liveness-guarded wait as the compiler rendezvous above: ends on the
-# marker or on the child dying, never on a wall-clock budget.
+# Same liveness-guarded wait as the compiler rendezvous above, plus the
+# same step deadline: ends on the marker, on the child dying, or on a FAIL
+# naming the stuck pid — never on an unbounded wait.
+STALE_MARK_START=$SECONDS
 while [ ! -e "$BLOCK_MARKER" ]; do
     kill -0 "$STALE_PID" 2>/dev/null || break
+    [ $((SECONDS - STALE_MARK_START)) -lt "$SELFTEST_STEP_TIMEOUT" ] ||
+        fail "stale publisher (pid $STALE_PID) did not enter the locked verifier within ${SELFTEST_STEP_TIMEOUT}s"
     sleep 0.01
 done
 if [ ! -e "$BLOCK_MARKER" ]; then
@@ -878,12 +936,17 @@ CURRENT_PID=$!
 CHILD_PIDS+=("$CURRENT_PID")
 # The new source state is written before B waits on A's admission lock. Wait
 # for that transition so releasing A deterministically makes its exact source
-# verification fail rather than racing the background scheduler.
+# verification fail rather than racing the background scheduler. Bounded: if
+# B is alive but never advances the state, fail naming it instead of holding
+# the gate while A sleeps on the unreleased rendezvous forever.
+STATE_ADVANCE_START=$SECONDS
 while :; do
     read -r state_source _ < "$STATE"
     [ "$state_source" = "$SOURCE_B" ] && break
     kill -0 "$CURRENT_PID" 2>/dev/null ||
         fail 'current B publisher died before advancing source state'
+    [ $((SECONDS - STATE_ADVANCE_START)) -lt "$SELFTEST_STEP_TIMEOUT" ] ||
+        fail "current B publisher (pid $CURRENT_PID) did not advance source state within ${SELFTEST_STEP_TIMEOUT}s"
     sleep 0.01
 done
 : > "$BLOCK_RELEASE"
@@ -894,6 +957,14 @@ STALE_RC=$?
 wait "$CURRENT_PID"
 CURRENT_RC=$?
 set -e
+# The scenario's verdict requires A to fail the SOURCE check after B goes
+# current. If A instead failed its rendezvous wait (timeout), the intended
+# race was never observed: fail loudly with A's log rather than mistaking a
+# harness malfunction for the expected stale refusal.
+if grep -Fq 'was never released' "$STALE_LOG"; then
+    sed 's/^/build-epoch-selftest: stale publisher: /' "$STALE_LOG" >&2
+    fail 'stale A publisher failed via rendezvous timeout instead of the intended source-mismatch refusal'
+fi
 [ "$STALE_RC" -ne 0 ] || fail 'stale A publisher succeeded after B became current'
 [ "$CURRENT_RC" -eq 0 ] || fail 'current B publisher failed behind stale A'
 [ "$($STABLE)" = B ] || fail 'stale A overwrote the current B alias'
