@@ -43,6 +43,7 @@ KEY_INPUT_FILES=(
     "$BUILD_EPOCH_SELFTEST"
     "$KEY_TOOL"
     "$SELF_DIR/publish-build-alias.sh"
+    "$SELF_DIR/build-epoch-lock-wait.sh"
     "$SELF_DIR/compile-epoch-object.sh"
     "$SELF_DIR/build-epoch-session.sh"
     "$SELF_DIR/build-epoch-open-file-identity.sh"

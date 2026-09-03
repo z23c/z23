@@ -47,6 +47,7 @@ CXX_COMMAND="${13}"
 VERIFY_TOOL="${14:-tools/dev/source-identity.sh}"
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SESSION_TOOL="$SELF_DIR/build-epoch-session.sh"
+source "$SELF_DIR/build-epoch-lock-wait.sh"
 
 is_sha256 "$SOURCE_ID" || fail 'source id is not lowercase SHA-256'
 [ "$COMPLETE" = 1 ] || fail 'source capture is incomplete'
@@ -72,7 +73,10 @@ ALIAS_DIR="$(dirname -- "$ALIAS")"
 mkdir -p "$ALIAS_DIR"
 LOCK="$ALIAS.lock"
 exec 9> "$LOCK"
-flock -x 9
+# Bounded: a stuck publisher must turn this caller red (naming the lock and
+# the holder) instead of hanging the lint gate behind an unbounded flock.
+z23_build_epoch_flock_bounded 'publish-build-alias' 9 "$LOCK" 'alias' ||
+    fail "could not acquire alias lock $LOCK"
 
 OBJECT_ROOT="${SESSION%%/epochs/$EPOCH/*}"
 [ "$OBJECT_ROOT" != "$SESSION" ] || fail 'could not derive object root from session path'

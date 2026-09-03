@@ -6,6 +6,7 @@ set -euo pipefail
 export LC_ALL=C
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SELF_DIR/build-epoch-open-file-identity.sh"
+source "$SELF_DIR/build-epoch-lock-wait.sh"
 
 fail()
 {
@@ -332,7 +333,11 @@ compile_one()
                     "$ADMISSION_LOCK_FILE" 6 \
                     "$(uname -s 2>/dev/null || printf unknown)" ||
                 fail 'epoch admission lock is not the opened regular file'
-            flock -x 6
+            z23_build_epoch_flock_bounded 'compile-epoch-object' 6 \
+                "$ADMISSION_LOCK_FILE" 'epoch admission' || {
+                exec 6>&-
+                fail "could not acquire epoch admission lock $ADMISSION_LOCK_FILE"
+            }
             [ -f "$ADMISSION_LOCK_FILE" ] &&
                 [ ! -L "$ADMISSION_LOCK_FILE" ] &&
                 z23_build_epoch_open_fd_matches_path \
@@ -390,7 +395,9 @@ compile_one()
 if [ "$MODE" = coverage ]; then
     command -v flock >/dev/null 2>&1 || fail 'flock is required for coverage objects'
     exec 9> "$OUTPUT.lock"
-    flock -x 9
+    z23_build_epoch_flock_bounded 'compile-epoch-object' 9 \
+        "$OUTPUT.lock" 'coverage object' ||
+        fail "could not acquire coverage object lock $OUTPUT.lock"
 fi
 
 compile_one "$@"
