@@ -3286,6 +3286,68 @@ static int test_native_source_cas_shadow(void)
     return failures;
 }
 
+static int test_source_identity_failure_tokens(void)
+{
+    int failures = 0;
+    TEST("dev platform: source-identity failures classify to a specific "
+         "evidence token and only load-shaped ones retry") {
+        struct zcl_devloop_process_result result;
+        char why[160];
+
+        memset(&result, 0, sizeof(result));
+        result.timed_out = true;
+        ASSERT(zcl_dev_source_identity_classify_failure(&result, why,
+                                                         sizeof(why)));
+        ASSERT(strcmp(why, "source_identity_timeout") == 0);
+        ASSERT(zcl_dev_source_identity_failure_retryable(why));
+
+        memset(&result, 0, sizeof(result));
+        result.term_signal = 9;
+        ASSERT(zcl_dev_source_identity_classify_failure(&result, why,
+                                                         sizeof(why)));
+        ASSERT(strcmp(why, "source_identity_signal_9") == 0);
+        ASSERT(zcl_dev_source_identity_failure_retryable(why));
+
+        memset(&result, 0, sizeof(result));
+        result.exit_code = 7;
+        ASSERT(zcl_dev_source_identity_classify_failure(&result, why,
+                                                         sizeof(why)));
+        ASSERT(strcmp(why, "source_identity_exit_7") == 0);
+        ASSERT(!zcl_dev_source_identity_failure_retryable(why));
+
+        memset(&result, 0, sizeof(result));
+        result.output_truncated = true;
+        ASSERT(zcl_dev_source_identity_classify_failure(&result, why,
+                                                         sizeof(why)));
+        ASSERT(strcmp(why, "source_identity_output_truncated") == 0);
+        ASSERT(zcl_dev_source_identity_failure_retryable(why));
+
+        /* A clean process (no timeout/signal/exit/truncation) never reaches
+         * this classifier in practice -- parse_source_record only calls it
+         * when process_ok() failed or output was truncated -- but the
+         * fallback token must still be the pre-existing undifferentiated one
+         * and must never be treated as retryable. */
+        memset(&result, 0, sizeof(result));
+        ASSERT(zcl_dev_source_identity_classify_failure(&result, why,
+                                                         sizeof(why)));
+        ASSERT(strcmp(why, "source_identity_command_failed") == 0);
+        ASSERT(!zcl_dev_source_identity_failure_retryable(why));
+
+        ASSERT(zcl_dev_source_identity_classify_failure(NULL, why,
+                                                         sizeof(why)));
+        ASSERT(strcmp(why, "source_identity_command_failed") == 0);
+        ASSERT(!zcl_dev_source_identity_failure_retryable(why));
+
+        /* A content-level defect is a deterministic tool/output bug, not a
+         * load symptom, so it must not be retried either. */
+        ASSERT(!zcl_dev_source_identity_failure_retryable(
+            "source_identity_output_invalid"));
+        ASSERT(!zcl_dev_source_identity_failure_retryable(NULL));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_cycle_proof_reuse_contract(void)
 {
     int failures = 0;
@@ -3600,6 +3662,7 @@ static int test_dev_platform_platform_arm(void)
     failures += test_resident_process_cancellation();
     failures += test_resident_process_supersession();
     failures += test_native_source_cas_shadow();
+    failures += test_source_identity_failure_tokens();
     failures += test_cycle_proof_reuse_contract();
     failures += test_progressive_event_vocabulary();
     failures += test_reflex_policy_boundary();
