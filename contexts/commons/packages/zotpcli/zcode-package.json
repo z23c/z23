@@ -24,12 +24,12 @@
     },
     {
       "name": "zbuf/zbuf",
-      "root": "f6e7a62b9ba5f5690a685375759500d63a024dafcac8d8fe5e252bbd9aba667d",
+      "root": "d5645d9803bd1c1931a2c4eae7a7910c5d18437789315b093598df4d3ff1553a",
       "semver": "0.1.0"
     },
     {
       "name": "zfmt/zfmt",
-      "root": "3ccefc279bfda012a6e24b7e7274fbc57577bf02105ae1ee1db93001fab1f4b1",
+      "root": "0ee9d7603c2f14719fd90c1e8115cd96dd5c02c1fe4444a2fa71cb718bb590dd",
       "semver": "0.1.0"
     },
     {

@@ -1,4 +1,4 @@
-/* Copyright 2026 Rhett Creighton - Apache License 2.0
+/* Copyright 2026 Rhett Creighton. Licensed under Apache-2.0.
  * Purpose: rederive and verify the checked-in ZCODE package root projection. */
 
 #include "base/hex.h"
@@ -88,7 +88,7 @@ static bool derive_fixture_public(uint8_t out[33])
     return ok;
 }
 
-static bool print_derived_row(const struct registry_row *row,
+static bool print_derived_row(const char *name,
                               const struct vcs_package_prepared *prepared)
 {
     char content[65], release[65], recipe[65], lock[65], capsule[65];
@@ -102,20 +102,54 @@ static bool print_derived_row(const struct registry_row *row,
     if (!derive_fixture_signature(prepared->signing_digest, signature))
         return false;
     printf("%s content=%s release=%s recipe=%s lock=%s capsule=%s "
-           "publisher=%s signature=%s\n", row->name, content, release,
+           "publisher=%s signature=%s\n", name, content, release,
            recipe, lock, capsule, publisher, signature);
     return true;
+}
+
+static int derive_directory(const char *dir)
+{
+    uint8_t pubkey[33];
+    if (!derive_fixture_public(pubkey))
+        return 1;
+    struct vcs_package_prepare_options options = {
+        .dir = dir, .publisher_sequence = 1,
+        .reward_address = "", .chain_id = "zclassic-main",
+    };
+    memcpy(options.publisher_pubkey, pubkey, sizeof(pubkey));
+    struct vcs_package_prepared prepared;
+    char detail[256] = {0};
+    enum vcs_package_prepare_error err = vcs_package_prepare(
+        &options, &prepared, detail, sizeof(detail));
+    if (err != VCS_PACKAGE_PREPARE_OK) {
+        fprintf(stderr, "zcode package derive failed: %s (%s: %s)\n", dir,
+                vcs_package_prepare_error_string(err), detail);
+        return 1;
+    }
+    bool ok = print_derived_row(prepared.release.name, &prepared);
+    for (size_t i = 0; ok && i + 1u < prepared.lock.count; i++) {
+        char root[65];
+        zcl_hex_encode(prepared.lock.nodes[i].root, 32, root);
+        printf("dependency name=%s root=%s\n",
+               prepared.lock.nodes[i].name, root);
+    }
+    vcs_package_prepared_free(&prepared);
+    return ok ? 0 : 1;
 }
 
 int main(int argc, char **argv)
 {
     bool derive = argc == 3 && strcmp(argv[1], "--derive") == 0;
+    bool derive_dir = argc == 3 && strcmp(argv[1], "--derive-dir") == 0;
     const char *derive_name = derive ? argv[2] : NULL;
-    if (argc != 1 && !derive) {
+    if (argc != 1 && !derive && !derive_dir) {
         fprintf(stderr,
-                "usage: zcode-package-registry-check [--derive NAME]\n");
+                "usage: zcode-package-registry-check "
+                "[--derive NAME|--derive-dir DIR]\n");
         return 2;
     }
+    if (derive_dir)
+        return derive_directory(argv[2]);
     if (sizeof(rows) / sizeof(rows[0]) < 8)
         return 1;
     bool derived = false;
@@ -163,7 +197,7 @@ int main(int argc, char **argv)
             }
         }
         if (derive && err == VCS_PACKAGE_PREPARE_OK) {
-            derived = print_derived_row(&rows[i], &prepared);
+            derived = print_derived_row(rows[i].name, &prepared);
         }
         if (!ok && !derive) {
             fprintf(stderr, "zcode registry mismatch: %s (%s: %s)\n",

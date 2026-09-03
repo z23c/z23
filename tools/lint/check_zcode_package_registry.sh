@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
-# Copyright 2026 Rhett Creighton - Apache License 2.0
+# Copyright 2026 Rhett Creighton. Licensed under Apache-2.0.
 # Purpose: verify package roots and exact-once monolith source ownership.
 set -euo pipefail
+
+tools/scripts/zcode_registry_rederive.sh --selftest
 
 checker="build/bin/zcode-package-registry-check"
 # The registry .def files are pulled into this checker at COMPILE time by an
@@ -21,7 +23,7 @@ if [[ ! -x "$checker" ]]; then
     echo "check-zcode-package-registry: FAIL — missing $checker" >&2
     exit 1
 fi
-"$checker"
+tools/scripts/zcode_registry_rederive.sh --check
 
 mapfile -t package_dirs < <(
     sed -n 's/^ZCODE_PACKAGE("[^"]*", "\([^"]*\)".*/\1/p' \
