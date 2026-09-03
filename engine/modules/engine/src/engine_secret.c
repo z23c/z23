@@ -13,6 +13,7 @@
 #include "engine/engine_secret.h"
 
 #include "base/log_macros.h"
+#include "platform/positioned_file.h"
 
 #include <ctype.h>
 #include <fcntl.h>
@@ -77,38 +78,39 @@ static bool adopt(const char *raw)
     return true;
 }
 
-/* Read a key file. Mode must be exactly 0600 and it must be a regular file.
- * Both are refusals, not warnings. */
+/* Read a key from one handle-bound regular file. POSIX requires exact mode
+ * 0600; Windows requires an owner+SYSTEM-only DACL. Both are refusals, not
+ * warnings, and metadata plus content are checked on the same open object. */
 static bool load_from_file(const char *path, char *where, size_t where_len)
 {
-    struct stat st;
-    if (stat(path, &st) != 0)
+    struct platform_positioned_file file;
+    platform_positioned_file_init(&file);
+    if (!platform_positioned_file_open(&file, path))
         LOG_FAIL("engine", "no key file at the configured path");
-    if (!S_ISREG(st.st_mode))
-        LOG_FAIL("engine", "the configured key path is not a regular file");
-    if ((st.st_mode & 0777) != 0600)
-        LOG_FAIL("engine",
-                 "refusing a key file whose mode is %03o: it must be 0600",
-                 (unsigned)(st.st_mode & 0777));
-    if (st.st_size <= 0 || (size_t)st.st_size >= sizeof(g_secret))
+    if (!platform_positioned_file_is_private(&file)) {
+        platform_positioned_file_close(&file);
+        LOG_FAIL("engine", "refusing a key file that is not private to the current user");
+    }
+    uint64_t size = 0;
+    if (!platform_positioned_file_size(&file, &size) || size == 0 ||
+        size >= sizeof(g_secret)) {
+        platform_positioned_file_close(&file);
         LOG_FAIL("engine", "refusing a key file of %lld bytes",
-                 (long long)st.st_size);
+                 (long long)size);
+    }
 
-    const int fd = open(path, O_RDONLY | O_CLOEXEC);
-    if (fd < 0)
-        LOG_FAIL("engine", "cannot open the configured key file");
     char buf[ENGINE_SECRET_MAX] = {0};
-    const ssize_t got = read(fd, buf, sizeof(buf) - 1);
-    (void)close(fd);
-    if (got <= 0)
-        LOG_FAIL("engine", "the configured key file is empty");
+    const int64_t got = platform_positioned_file_read(&file, buf, (size_t)size, 0);
+    platform_positioned_file_close(&file);
+    if (got != (int64_t)size)
+        LOG_FAIL("engine", "cannot read the complete configured key file");
     buf[got] = '\0';
     const bool ok = adopt(buf);
     volatile char *wipe = buf;
     for (size_t i = 0; i < sizeof(buf); i++)
         wipe[i] = 0;
     if (ok)
-        (void)snprintf(where, where_len, "a 0600 key file outside the repo");
+        (void)snprintf(where, where_len, "a private key file outside the repo");
     return ok;
 }
 
@@ -151,7 +153,7 @@ bool engine_secret_load(const struct engine_vendor *v, const char *explicit_path
             return load_from_file(path, where, where_len);
     }
     LOG_FAIL("engine",
-             "no API key for %s: set %s, or place one in ~/%s with mode 0600",
+             "no API key for %s: set %s, or place one in ~/%s with private permissions",
              v->id, v->key_env ? v->key_env : "(none)",
              v->key_file_rel ? v->key_file_rel : "(none)");
 }

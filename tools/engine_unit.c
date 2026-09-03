@@ -95,6 +95,45 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#if defined(_WIN32)
+#include <direct.h>
+#endif
+
+static int unit_mkdir(const char *path, int mode)
+{
+#if defined(_WIN32)
+    (void)mode;
+    return _mkdir(path);
+#else
+    return mkdir(path, (mode_t)mode);
+#endif
+}
+
+static int unit_environment_set(const char *name, const char *value)
+{
+#if defined(_WIN32)
+    return _putenv_s(name, value) == 0 ? 0 : -1;
+#else
+    return setenv(name, value, 1);
+#endif
+}
+
+static bool unit_path_is_absolute(const char *path)
+{
+    if (!path || !path[0])
+        return false;
+#if defined(_WIN32)
+    bool drive = ((path[0] >= 'A' && path[0] <= 'Z') ||
+                  (path[0] >= 'a' && path[0] <= 'z')) &&
+                 path[1] == ':' && (path[2] == '/' || path[2] == '\\');
+    bool unc = (path[0] == '/' || path[0] == '\\') &&
+               (path[1] == '/' || path[1] == '\\');
+    return drive || unc || path[0] == '/';
+#else
+    return path[0] == '/';
+#endif
+}
+
 #define UNIT_MAX_TASK_BYTES   (128u * 1024u)
 #define UNIT_GATE_LOG_BYTES   (2u * 1024u * 1024u)
 #define UNIT_DEFAULT_TURNS    3
@@ -182,7 +221,7 @@ static void usage(void)
 "                    of honest work that says nothing about the model\n"
 "  --state-dir DIR   0700 directory for the prompt, gate log, and receipt\n"
 "  --max-cost-usd X  refuse to continue past this reported spend\n"
-"  --key-file PATH   a 0600 key file outside the repo\n"
+"  --key-file PATH   a private key file outside the repo\n"
 "  --fixture-reply F for --engine fixture: a canned response body\n"
 "  --dry-run         print the composed prompt and exit without dispatching\n"
 "  --probe           one minimal real call per HTTPS vendor; prints the\n"
@@ -345,10 +384,10 @@ static bool state_dir_prepare(const struct unit_opts *o)
 {
     if (!o->state_dir || !o->state_dir[0])
         return true;
-    if (o->state_dir[0] != '/')
+    if (!unit_path_is_absolute(o->state_dir))
         LOG_FAIL("engine_unit",
                  "refusing a relative --state-dir; pass an absolute path");
-    if (mkdir(o->state_dir, 0700) != 0 && errno != EEXIST)
+    if (unit_mkdir(o->state_dir, 0700) != 0 && errno != EEXIST)
         LOG_FAIL("engine_unit", "cannot create the state directory %s",
                  o->state_dir);
     struct stat st;
@@ -1109,7 +1148,7 @@ static bool ensure_parent_dirs(const char *root, const char *rel)
         if (*p != '/')
             continue;
         *p = '\0';
-        if (mkdir(path, 0755) != 0 && errno != EEXIST) {
+        if (unit_mkdir(path, 0755) != 0 && errno != EEXIST) {
             *p = '/';
             LOG_FAIL("engine_unit", "cannot create a directory under the worktree");
         }
@@ -1176,7 +1215,10 @@ static bool run_gate(const struct unit_opts *o, const char *workdir,
     char *log = zcl_malloc(UNIT_GATE_LOG_BYTES, "engine_unit_gate_log");
     if (!log)
         LOG_FAIL("engine_unit", "cannot allocate the gate log buffer");
-    (void)setenv("ZCL_TEST_CACHE", "0", 1);
+    if (unit_environment_set("ZCL_TEST_CACHE", "0") != 0) {
+        free(log);
+        LOG_FAIL("engine_unit", "cannot disable the test cache for the gate");
+    }
     const int gate_s = o->gate_timeout_s > 0 ? o->gate_timeout_s : o->timeout_s;
     const int64_t started = clock_now_monotonic_ns();
     const int rc = run(argv, log, UNIT_GATE_LOG_BYTES, gate_s * 1000);

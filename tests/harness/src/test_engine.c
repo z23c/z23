@@ -36,13 +36,19 @@
 #include "engine/engine_secret.h"
 #include "engine/engine_verdict.h"
 #include "engine/engine_wire.h"
+#include "platform/private_file.h"
+#if defined(_WIN32)
+#include "platform/windows_path.h"
+#endif
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #if defined(_WIN32)
+#include <aclapi.h>
 #include <direct.h>
+#include <windows.h>
 #else
 #include <sys/wait.h>
 #endif
@@ -481,6 +487,60 @@ static int case_patch(void)
 
 /* ── 5. secrets ──────────────────────────────────────────────────────── */
 
+static bool secret_fixture_make_insecure(const char *path)
+{
+#if defined(_WIN32)
+    wchar_t wide[32768];
+    PSECURITY_DESCRIPTOR descriptor = NULL;
+    PACL old_dacl = NULL;
+    PACL new_dacl = NULL;
+    PSID everyone = NULL;
+    SID_IDENTIFIER_AUTHORITY world = SECURITY_WORLD_SID_AUTHORITY;
+    bool ok = platform_windows_wide_path(path, wide) &&
+              GetNamedSecurityInfoW(wide, SE_FILE_OBJECT,
+                                    DACL_SECURITY_INFORMATION, NULL, NULL,
+                                    &old_dacl, NULL, &descriptor) == ERROR_SUCCESS &&
+              AllocateAndInitializeSid(&world, 1, SECURITY_WORLD_RID,
+                                       0, 0, 0, 0, 0, 0, 0, &everyone);
+    EXPLICIT_ACCESSW access = {0};
+    if (ok) {
+        access.grfAccessPermissions = GENERIC_READ;
+        access.grfAccessMode = GRANT_ACCESS;
+        access.grfInheritance = NO_INHERITANCE;
+        access.Trustee.TrusteeForm = TRUSTEE_IS_SID;
+        access.Trustee.TrusteeType = TRUSTEE_IS_WELL_KNOWN_GROUP;
+        access.Trustee.ptstrName = (LPWSTR)everyone;
+        ok = SetEntriesInAclW(1, &access, old_dacl, &new_dacl) == ERROR_SUCCESS &&
+             SetNamedSecurityInfoW(wide, SE_FILE_OBJECT,
+                                   DACL_SECURITY_INFORMATION, NULL, NULL,
+                                   new_dacl, NULL) == ERROR_SUCCESS;
+    }
+    if (new_dacl)
+        LocalFree(new_dacl);
+    if (everyone)
+        FreeSid(everyone);
+    if (descriptor)
+        LocalFree(descriptor);
+    return ok;
+#else
+    return chmod(path, 0644) == 0;
+#endif
+}
+
+static bool secret_fixture_write_private(const char *path,
+                                         const char *text)
+{
+    struct platform_private_file file;
+    platform_private_file_init(&file);
+    (void)platform_private_file_unlink_missing_ok(path);
+    const size_t length = strlen(text);
+    bool ok = platform_private_file_create(path, &file) &&
+              platform_private_file_write_at(&file, text, length, 0) &&
+              platform_private_file_flush(&file);
+    platform_private_file_close(&file);
+    return ok;
+}
+
 static int case_secret(void)
 {
     int failures = 0;
@@ -491,21 +551,21 @@ static int case_secret(void)
     EN_CHECK("the fixture engine needs no key",
              engine_secret_load(fixture, NULL, where, sizeof(where)));
 
-    /* A key file must be 0600. A world-readable key on a shared box is
-     * already spent, so this is a refusal and not a warning. */
+    /* A key file must be private: exact 0600 on POSIX, owner+SYSTEM-only on
+     * Windows. A shared key is already spent, so this is a refusal. */
     char path[512];
     (void)snprintf(path, sizeof(path), "/tmp/zcl_engine_key_%d", (int)getpid());
-    FILE *f = fopen(path, "wb");
-    if (f) {
-        (void)fputs(k_planted_key, f);
-        (void)fputc('\n', f);
-        (void)fclose(f);
-    }
-    (void)chmod(path, 0644);
-    EN_CHECK("a key file that is not 0600 is REFUSED, not warned about",
+    char key_text[ENGINE_SECRET_MAX];
+    (void)snprintf(key_text, sizeof(key_text), "%s\n", k_planted_key);
+    EN_CHECK("the private key fixture is created",
+             secret_fixture_write_private(path, key_text));
+    EN_CHECK("the key fixture can be made non-private",
+             secret_fixture_make_insecure(path));
+    EN_CHECK("a non-private key file is REFUSED, not warned about",
              !engine_secret_load(glm, path, where, sizeof(where)));
-    (void)chmod(path, 0600);
-    EN_CHECK("a 0600 key file loads",
+    EN_CHECK("the private key fixture is recreated",
+             secret_fixture_write_private(path, key_text));
+    EN_CHECK("a private key file loads",
              engine_secret_load(glm, path, where, sizeof(where))
              && engine_secret_loaded());
     EN_CHECK("the source is named without any part of the value",
@@ -579,15 +639,11 @@ static int case_secret(void)
 
     /* A too-short or whitespace-bearing value is a misconfiguration; sending
      * it would put a fragment of a real credential in a vendor's logs. */
-    f = fopen(path, "wb");
-    if (f) {
-        (void)fputs("short\n", f);
-        (void)fclose(f);
-    }
-    (void)chmod(path, 0600);
+    EN_CHECK("the short private key fixture is created",
+             secret_fixture_write_private(path, "short\n"));
     EN_CHECK("an implausibly short key is refused",
              !engine_secret_load(glm, path, where, sizeof(where)));
-    (void)unlink(path);
+    (void)platform_private_file_unlink_missing_ok(path);
     engine_secret_clear();
     return failures;
 }
@@ -860,39 +916,50 @@ static int case_key_gate(void)
 {
     int failures = 0;
     char dir[512];
-    (void)snprintf(dir, sizeof(dir), "/tmp/zcl_engine_gate_%d", (int)getpid());
-    char cmd[2048];
+    (void)snprintf(dir, sizeof(dir), "zcl_engine_gate_%d", (int)getpid());
 
-    (void)snprintf(cmd, sizeof(cmd), "mkdir -p '%s'", dir);
-    if (system(cmd) != 0) {                             /* shellout-ok: test */
+    if (mkdir(dir, 0700) != 0) {
         printf("engine: could not create the gate fixture... FAIL\n");
         return 1;
     }
     /* A clean file first: the gate must pass on it, so a later failure is
      * attributable to the planted key and not to the fixture. */
-    (void)snprintf(cmd, sizeof(cmd),
-                   "printf 'int main(void){return 0;}\\n' > '%s/clean.c'", dir);
-    (void)system(cmd);                                  /* shellout-ok: test */
-    (void)snprintf(cmd, sizeof(cmd),
-                   "ZCL_API_KEY_SCAN_FILES='%s/clean.c' "
-                   "./tools/lint/check_no_api_keys.sh >/dev/null 2>&1", dir);
+    char clean[600];
+    (void)snprintf(clean, sizeof(clean), "%s/clean.c", dir);
+    FILE *f = fopen(clean, "wb");
+    bool clean_written = f && fputs("int main(void){return 0;}\n", f) >= 0;
+    if (f)
+        clean_written = fclose(f) == 0 && clean_written;
+    EN_CHECK("the clean gate fixture was written", clean_written);
+    (void)setenv("ZCL_API_KEY_SCAN_FILES", clean, 1);
     EN_CHECK("the key gate passes on a clean tree",
-             system(cmd) == 0);                         /* shellout-ok: test */
+             system("bash -lc \"./tools/lint/check_no_api_keys.sh "
+                    ">/dev/null 2>&1\"") == 0); /* shellout-ok: test */
 
     /* Now plant one. Assembled at run time so this source file does not
      * itself contain a key-shaped literal for the gate to find. */
-    (void)snprintf(cmd, sizeof(cmd),
-                   "printf 'static const char *k = \"%s%s\";\\n' > '%s/leak.c'",
-                   "sk-", "abcdefghijklmnopqrstuvwxyz0123456789", dir);
-    (void)system(cmd);                                  /* shellout-ok: test */
-    (void)snprintf(cmd, sizeof(cmd),
-                   "ZCL_API_KEY_SCAN_FILES='%s/leak.c' "
-                   "./tools/lint/check_no_api_keys.sh >/dev/null 2>&1", dir);
+    char leak[600];
+    (void)snprintf(leak, sizeof(leak), "%s/leak.c", dir);
+    f = fopen(leak, "wb");
+    bool leak_written = f &&
+        fprintf(f, "static const char *k = \"%s%s\";\n", "sk-",
+                "abcdefghijklmnopqrstuvwxyz0123456789") > 0;
+    if (f)
+        leak_written = fclose(f) == 0 && leak_written;
+    EN_CHECK("the planted-key fixture was written", leak_written);
+    (void)setenv("ZCL_API_KEY_SCAN_FILES", leak, 1);
     EN_CHECK("the key gate FAILS on a planted key",
-             system(cmd) != 0);                         /* shellout-ok: test */
+             system("bash -lc \"./tools/lint/check_no_api_keys.sh "
+                    ">/dev/null 2>&1\"") != 0); /* shellout-ok: test */
 
-    (void)snprintf(cmd, sizeof(cmd), "rm -rf '%s'", dir);
-    (void)system(cmd);                                  /* shellout-ok: test */
+    (void)unsetenv("ZCL_API_KEY_SCAN_FILES");
+    (void)remove(clean);
+    (void)remove(leak);
+#if defined(_WIN32)
+    (void)_rmdir(dir);
+#else
+    (void)rmdir(dir);
+#endif
     return failures;
 }
 
@@ -1608,8 +1675,8 @@ static void receipt_unlink(const char *path)
 {
     char head[600];
     receipt_head_path(path, head, sizeof(head));
-    (void)unlink(path);
-    (void)unlink(head);
+    (void)platform_private_file_unlink_missing_ok(path);
+    (void)platform_private_file_unlink_missing_ok(head);
 }
 
 static bool receipt_read_whole(const char *path, char *buf, size_t cap,
@@ -1833,6 +1900,21 @@ static int case_receipt_chain(void)
     EN_CHECK("the chain verifies end to end",
              engine_receipt_verify_chain(path, &report)
              && report.records == 3 && report.first_bad_line == 0);
+
+    /* Exercise the public UTF-8 boundary with both spaces and a non-ASCII
+     * filename. This catches accidental regressions to narrow Win32 file
+     * APIs without making the ordinary fixture depend on a source-code
+     * locale. */
+    char unicode_path[512];
+    (void)snprintf(unicode_path, sizeof(unicode_path),
+                   "/tmp/zcl engine \xC5\xBE receipt %d.chainlog", (int)getpid());
+    receipt_unlink(unicode_path);
+    EN_CHECK("a receipt appends through a UTF-8 path containing spaces",
+             engine_receipt_append(unicode_path, &a, NULL));
+    EN_CHECK("the UTF-8 receipt chain verifies byte-exactly",
+             engine_receipt_verify_chain(unicode_path, &report)
+             && report.records == 1 && report.first_bad_line == 0);
+    receipt_unlink(unicode_path);
 
     char whole[65536];
     size_t whole_n = 0;

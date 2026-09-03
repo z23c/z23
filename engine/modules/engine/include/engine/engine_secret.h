@@ -24,10 +24,10 @@
  *      vendor, or one in a file the unit was asked to read.
  *
  * ── WHERE A KEY MAY LIVE ────────────────────────────────────────────────
- * An environment variable, or a file outside the repository with mode 0600.
- * A file with any other mode is REFUSED, not warned about: a world-readable
- * key on a shared box is already spent. There is no in-repo key path and no
- * flag that creates one.
+ * An environment variable, or a private file outside the repository: exact
+ * mode 0600 on POSIX, owner+SYSTEM-only DACL on Windows. Any broader access is
+ * REFUSED, not warned about: a shared key is already spent. There is no
+ * in-repo key path and no flag that creates one.
  */
 
 #ifndef ZCL_ENGINE_SECRET_H
@@ -46,7 +46,7 @@
  * no key and loading one for it succeeds trivially.
  *
  * Returns false when no key could be found or when the file that holds it is
- * not mode 0600. `where` receives a description of the SOURCE — "the
+ * not private to the current user. `where` receives a description of the SOURCE — "the
  * ZAI_API_KEY environment variable", never any part of the value. */
 bool engine_secret_load(const struct engine_vendor *v, const char *explicit_path,
                         char *where, size_t where_len);

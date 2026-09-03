@@ -178,7 +178,7 @@ struct engine_vendor {
     const char      *url_env;
     const char      *default_model;
     const char      *key_env;        /* environment variable holding the key */
-    const char      *key_file_rel;   /* $HOME-relative 0600 file, or NULL */
+    const char      *key_file_rel;   /* $HOME-relative private file, or NULL */
     const char      *program;        /* argv[0] for a CLI dialect, else NULL */
     /* CLI dialect only. NULL-terminated argument template, argv[0] excluded
      * because it is always `program`. NULL for a non-CLI vendor. */

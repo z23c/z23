@@ -10672,7 +10672,8 @@ ENGINE_UNIT_SRCS = tools/engine_unit.c \
 	platform/modules/base/src/log_level.c \
 	platform/modules/base/src/result.c \
 	platform/modules/base/src/safe_alloc.c \
-	platform/modules/platform/src/clock.c
+	platform/modules/platform/src/clock.c \
+	platform/modules/platform/src/positioned_file.c
 ENGINE_UNIT_INCLUDES = -Iplatform/modules/base/include -Iengine/modules/engine/include -Iplatform/modules/json/include \
 	-Iplatform/modules/sha3/include \
 	-Iplatform/modules/platform/include -Iplatform/modules/util/include -Itools/acme -Ivendor/include
@@ -10683,7 +10684,8 @@ $(ENGINE_UNIT_BIN): $(ENGINE_UNIT_SRCS) $(NODE_VENDOR_LIBS)
 	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 	    -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE $(ENGINE_UNIT_INCLUDES) \
 	    -o $@ $(ENGINE_UNIT_SRCS) \
-	    vendor/lib/libssl.a vendor/lib/libcrypto.a -lpthread -lm
+	    vendor/lib/libssl.a vendor/lib/libcrypto.a -lpthread -lm \
+	    $(if $(ZCL_HOST_WINDOWS),-lws2_32 -lbcrypt -lcrypt32 -ladvapi32 -luserenv,)
 
 # ── Sealed consensus core (Wave 1.1 / W0) ───────────────────────────────────
 # core_seal is a tiny build-time C tool (no external deps: it links the in-tree

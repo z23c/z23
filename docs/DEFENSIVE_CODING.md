@@ -805,7 +805,7 @@ assert green).
   tree. `tools/engine_unit.c` dispatches work to a paid API, so this tree now
   has a reason to hold a key near it, and a key that lands in a tracked file is
   spent: it is in the history, on every clone, and on every mirror. The rule
-  that a key lives in the environment or in a 0600 file **outside** the
+  that a key lives in the environment or in a private file **outside** the
   repository is enforced in code (`engine/modules/engine/include/engine/engine_secret.h`);
   this gate is the half that notices when somebody pastes one in anyway. It
   matches credential *shapes* — vendor-prefixed tokens, a `Bearer` header with
