@@ -12,7 +12,10 @@
  * blocked or signal-masked thread cannot hang the dump.
  *
  * The handler is strictly async-signal-safe (write(2)/backtrace only); it
- * reuses the audited crash-handler emit path via util/async_safe_write.h. */
+ * reuses the audited crash-handler emit path via util/async_safe_write.h.
+ * Platforms built with the unavailable adapter keep boot compatible but
+ * report that boundary: install succeeds, dump fails with ENOTSUP, and
+ * dump-state publishes installed:false plus an unavailable reason. */
 
 #ifndef ZCL_SELF_BACKTRACE_H
 #define ZCL_SELF_BACKTRACE_H
@@ -20,17 +23,20 @@
 #include <stdbool.h>
 #include <stddef.h>
 
-/* Install the SIGRTMIN+2 self-backtrace handler process-wide. Call once at
- * boot before worker threads spawn so every thread inherits it. Idempotent.
- * Returns true on success. */
+/* Install the platform self-backtrace facility process-wide. On Linux this
+ * arms SIGRTMIN+2 before worker threads spawn so every thread inherits it.
+ * The unavailable adapter performs an idempotent, boot-safe no-op;
+ * availability remains observable through dump_all and dump_state_json. */
 bool self_backtrace_install(void);
 
 /* Dump a backtrace for every registered thread into a freshly created
  * <datadir>/backtrace-<unixts>.log (O_CREAT|O_EXCL|O_APPEND). On success
  * writes the chosen path into `path_out` (bounded by `cap`) and returns the
  * number of threads dumped (>=1: the caller always dumps itself). Returns -1
- * on error (handler not installed, datadir unresolved, or file-open failure).
- * Safe to call from any ordinary (non-signal) thread. */
+ * on error (handler not installed, datadir unresolved, or file-open failure),
+ * or -1 with errno=ENOTSUP where the facility is unavailable. A failing call
+ * clears path_out when both path_out and cap are nonzero. Safe to call from
+ * any ordinary (non-signal) thread. */
 int self_backtrace_dump_all(char *path_out, size_t cap);
 
 /* See CLAUDE.md "Adding state introspection". Reentrant-safe. Exposes the last

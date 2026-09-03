@@ -7,6 +7,7 @@
 #define _GNU_SOURCE
 
 #include "test/test_core.h"
+#include "json/json.h"
 #include "util/self_backtrace.h"
 #include "util/thread_registry.h"
 #include "util/util.h"          /* SetDataDir */
@@ -24,16 +25,70 @@
 
 #if !defined(__linux__)
 
-int test_self_backtrace(void)
+static int t_unavailable_install(void)
 {
-    char path[32] = {0};
-    errno = 0;
-    bool install_ok = self_backtrace_install();
-    int dumped = self_backtrace_dump_all(path, sizeof(path));
-    printf("\n=== self_backtrace platform availability ===\n");
-    printf("self_backtrace: signal-driven dump unavailable on this host\n");
-    return install_ok && dumped == -1 && errno == ENOTSUP && path[0] == 0
-        ? 0 : 1;
+    int failures = 0;
+    TEST("self_backtrace: unavailable install remains boot-safe and idempotent") {
+        ASSERT(self_backtrace_install());
+        ASSERT(self_backtrace_install());
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int t_unavailable_dump(void)
+{
+    int failures = 0;
+    TEST("self_backtrace: unavailable dump fails closed and clears output") {
+        char path[32] = "stale-path";
+        errno = 0;
+        ASSERT_EQ(self_backtrace_dump_all(path, sizeof(path)), -1);
+        ASSERT_EQ(errno, ENOTSUP);
+        ASSERT_EQ(path[0], '\0');
+
+        char zero_cap[] = "unchanged";
+        errno = 0;
+        ASSERT_EQ(self_backtrace_dump_all(zero_cap, 0), -1);
+        ASSERT_EQ(errno, ENOTSUP);
+        ASSERT(strcmp(zero_cap, "unchanged") == 0);
+
+        errno = 0;
+        ASSERT_EQ(self_backtrace_dump_all(NULL, sizeof(path)), -1);
+        ASSERT_EQ(errno, ENOTSUP);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int t_unavailable_introspection(void)
+{
+    int failures = 0;
+    TEST("self_backtrace: introspection reports exact unavailable boundary") {
+        struct json_value state;
+        json_init(&state);
+        ASSERT(!self_backtrace_dump_state_json(NULL, NULL));
+        ASSERT(self_backtrace_dump_state_json(&state, "ignored"));
+        const struct json_value *installed = json_get(&state, "installed");
+        const struct json_value *reason =
+            json_get(&state, "unavailable_reason");
+        ASSERT(installed && !json_get_bool(installed));
+        ASSERT(reason && strcmp(json_get_str(reason),
+                                "cross-thread signal backtraces are "
+                                "unavailable on this platform") == 0);
+        json_free(&state);
+        PASS();
+    } _test_next:;
+
+    return failures;
+}
+
+static int t_platform_unavailable(void)
+{
+    int failures = 0;
+    failures += t_unavailable_install();
+    failures += t_unavailable_dump();
+    failures += t_unavailable_introspection();
+    return failures;
 }
 
 #else
@@ -209,11 +264,8 @@ static int t_blocked_thread_bounded(void)
     return failures;
 }
 
-int test_self_backtrace(void);
-
-int test_self_backtrace(void)
+static int t_platform_available(void)
 {
-    printf("\n=== self_backtrace tests ===\n");
     int failures = 0;
     failures += t_install_and_dump();
     failures += t_two_dumps_distinct_files();
@@ -222,3 +274,14 @@ int test_self_backtrace(void)
 }
 
 #endif
+
+int test_self_backtrace(void)
+{
+    printf("\n=== self_backtrace tests ===\n");
+#if defined(__linux__)
+    return t_platform_available();
+#else
+    printf("self_backtrace: signal-driven dump unavailable on this host\n");
+    return t_platform_unavailable();
+#endif
+}
