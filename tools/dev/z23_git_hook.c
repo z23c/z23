@@ -8,10 +8,14 @@
 
 #include "dev_proof_receipt.h"
 #include "base/hex.h"
+#include "base/safe_alloc.h"
+#include "platform/positioned_file.h"
+#if defined(_WIN32)
+#include "platform/private_file.h"
+#endif
 
 #include <errno.h>
 #include <fcntl.h>
-#include <signal.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -19,9 +23,20 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/types.h>
-#include <sys/wait.h>
 #include <time.h>
+#include <wchar.h>
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#include <tlhelp32.h>
+#include <io.h>
+#else
+#include <signal.h>
+#include <sys/wait.h>
 #include <unistd.h>
+#endif
 
 #ifndef PATH_MAX
 #define PATH_MAX 4096
@@ -38,12 +53,20 @@ static void clear_git_local_environment(void)
         "GIT_QUARANTINE_PATH", "GIT_WORK_TREE",
     };
     for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++)
+#if defined(_WIN32)
+        (void)_putenv_s(names[i], "");
+#else
         (void)unsetenv(names[i]);
+#endif
 }
 
 static const char *program_basename(const char *path)
 {
     const char *slash = path ? strrchr(path, '/') : NULL;
+#if defined(_WIN32)
+    const char *backslash = path ? strrchr(path, '\\') : NULL;
+    if (!slash || (backslash && backslash > slash)) slash = backslash;
+#endif
     return slash ? slash + 1 : (path ? path : "");
 }
 
@@ -61,30 +84,319 @@ static bool oid_zero(const char *text)
     return true;
 }
 
-static bool read_exact(const char *path, uint8_t *out, size_t size)
+static bool read_exact_at(const char *root, const char *path,
+                          uint8_t *out, size_t size)
 {
-    struct stat st;
-    if (!path || !out || lstat(path, &st) != 0 || !S_ISREG(st.st_mode) ||
-        S_ISLNK(st.st_mode) || (st.st_mode & (S_IWGRP | S_IWOTH)) != 0 ||
-        st.st_size != (off_t)size)
-        return false;
-    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
-    if (fd < 0) return false;
-    size_t offset = 0;
-    while (offset < size) {
-        ssize_t n = read(fd, out + offset, size - offset);
-        if (n < 0 && errno == EINTR) continue;
-        if (n <= 0) {
-            (void)close(fd);
-            return false;
-        }
-        offset += (size_t)n;
-    }
-    uint8_t extra;
-    ssize_t tail = read(fd, &extra, 1);
-    return close(fd) == 0 && tail == 0;
+    struct platform_positioned_file file;
+    struct platform_positioned_file_snapshot before, after;
+    uint64_t actual = 0;
+    platform_positioned_file_init(&file);
+    bool opened = path && (root
+        ? platform_positioned_file_open_beneath(&file, root, path)
+        : platform_positioned_file_open(&file, path));
+    bool ok = path && out && opened &&
+              platform_positioned_file_is_current_user_only(&file) &&
+              platform_positioned_file_snapshot(&file, &before) &&
+              platform_positioned_file_size(&file, &actual) && actual == size &&
+              platform_positioned_file_read(&file, out, size, 0) ==
+                  (int64_t)size &&
+              platform_positioned_file_snapshot(&file, &after) &&
+              platform_positioned_file_snapshot_equal(&before, &after);
+    platform_positioned_file_close(&file);
+    return ok;
 }
 
+static bool read_exact(const char *path, uint8_t *out, size_t size)
+{
+    return read_exact_at(NULL, path, out, size);
+}
+
+#if defined(_WIN32)
+static wchar_t *hook_utf16(const char *text)
+{
+    if (!text) return NULL;
+    int count = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, text, -1,
+                                    NULL, 0);
+    wchar_t *wide = count > 0
+        ? zcl_malloc((size_t)count * sizeof(*wide), "git-hook-utf16") : NULL;
+    if (!wide || MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, text, -1,
+                                     wide, count) != count) {
+        free(wide);
+        return NULL;
+    }
+    return wide;
+}
+
+static bool hook_append_char(wchar_t **buffer, size_t *used, size_t *capacity,
+                             wchar_t value)
+{
+    if (*used == *capacity) {
+        size_t next = *capacity ? *capacity * 2u : 256u;
+        if (next < *capacity || next > 32768u) return false;
+        wchar_t *grown = zcl_realloc(
+            *buffer, next * sizeof(**buffer), "git-hook-command-line");
+        if (!grown) return false;
+        *buffer = grown;
+        *capacity = next;
+    }
+    (*buffer)[(*used)++] = value;
+    return true;
+}
+
+/* CommandLineToArgvW-compatible quoting: backslashes are doubled only when
+ * they precede a quote or the closing quote. */
+static bool hook_append_arg(wchar_t **line, size_t *used, size_t *capacity,
+                            const wchar_t *arg)
+{
+    if (*used && !hook_append_char(line, used, capacity, L' ')) return false;
+    bool quote = !arg[0] || wcspbrk(arg, L" \t\n\v\"") != NULL;
+    if (quote && !hook_append_char(line, used, capacity, L'\"')) return false;
+    size_t slashes = 0;
+    for (const wchar_t *p = arg;; p++) {
+        if (*p == L'\\') { slashes++; continue; }
+        if (*p == L'\"') {
+            for (size_t i = 0; i < slashes * 2u + 1u; i++)
+                if (!hook_append_char(line, used, capacity, L'\\')) return false;
+            if (!hook_append_char(line, used, capacity, L'\"')) return false;
+        } else {
+            if (*p == 0 && quote) slashes *= 2u;
+            for (size_t i = 0; i < slashes; i++)
+                if (!hook_append_char(line, used, capacity, L'\\')) return false;
+            if (*p == 0) break;
+            if (!hook_append_char(line, used, capacity, *p)) return false;
+        }
+        slashes = 0;
+    }
+    return (!quote || hook_append_char(line, used, capacity, L'\"')) &&
+           hook_append_char(line, used, capacity, 0);
+}
+
+static wchar_t *hook_command_line(const char *const argv[])
+{
+    if (!argv || !argv[0]) return NULL;
+    wchar_t *line = NULL;
+    size_t used = 0, capacity = 0;
+    for (size_t i = 0; argv[i]; i++) {
+        wchar_t *arg = hook_utf16(argv[i]);
+        if (!arg) { free(line); return NULL; }
+        if (used) used--;
+        bool ok = hook_append_arg(&line, &used, &capacity, arg);
+        free(arg);
+        if (!ok) { free(line); return NULL; }
+    }
+    return line;
+}
+
+static bool hook_absolute_path(const char *path)
+{
+    if (!path || !path[0]) return false;
+    return (path[0] == '/' || path[0] == '\\' ||
+            (((path[0] >= 'A' && path[0] <= 'Z') ||
+              (path[0] >= 'a' && path[0] <= 'z')) && path[1] == ':' &&
+             (path[2] == '/' || path[2] == '\\')));
+}
+
+/* Find Git for Windows in the hook's bounded process ancestry and reuse that
+ * exact image; searching CWD or PATH would let a checked-out git.exe acquire
+ * admission. */
+static DWORD hook_parent_pid(DWORD process_id)
+{
+    DWORD parent = 0;
+    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    PROCESSENTRY32W entry = {.dwSize = sizeof(entry)};
+    if (snapshot == INVALID_HANDLE_VALUE) return 0;
+    for (BOOL more = Process32FirstW(snapshot, &entry); more;
+         more = Process32NextW(snapshot, &entry))
+        if (entry.th32ProcessID == process_id) {
+            parent = entry.th32ParentProcessID;
+            break;
+        }
+    CloseHandle(snapshot);
+    return parent;
+}
+
+static wchar_t *hook_parent_git(void)
+{
+    DWORD candidate = GetCurrentProcessId();
+    for (unsigned depth = 0; depth < 8 && candidate; depth++) {
+        candidate = hook_parent_pid(candidate);
+        HANDLE process = candidate ? OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION, FALSE, candidate) : NULL;
+        wchar_t image[32768];
+        DWORD count = 32768;
+        bool queried = process && QueryFullProcessImageNameW(
+            process, 0, image, &count) != 0;
+        if (process) CloseHandle(process);
+        if (!queried) continue;
+        const wchar_t *leaf = wcsrchr(image, L'\\');
+        leaf = leaf ? leaf + 1 : image;
+        if (_wcsicmp(leaf, L"git.exe") == 0) {
+            wchar_t *result = zcl_malloc(
+                ((size_t)count + 1u) * sizeof(*result),
+                "git-hook-parent-image");
+            if (result) wmemcpy(result, image, (size_t)count + 1u);
+            return result;
+        }
+    }
+    return NULL;
+}
+
+static int child_capture(const char *const argv[], char *out, size_t out_size)
+{
+    if (!argv || !argv[0] || !out || out_size == 0) return -1;
+    out[0] = 0;
+    clear_git_local_environment();
+    wchar_t *line = hook_command_line(argv);
+    wchar_t *application = hook_absolute_path(argv[0])
+        ? hook_utf16(argv[0]) : hook_parent_git();
+    if (!line || !application) { free(line); free(application); return -1; }
+    SECURITY_ATTRIBUTES security = {
+        .nLength = sizeof(security), .bInheritHandle = TRUE};
+    HANDLE read_pipe = NULL, write_pipe = NULL;
+    HANDLE null_handle = INVALID_HANDLE_VALUE;
+    HANDLE job = NULL;
+    LPPROC_THREAD_ATTRIBUTE_LIST attributes = NULL;
+    bool attributes_initialized = false;
+    PROCESS_INFORMATION process = {0};
+    bool started = false;
+    const char *failure_reason = "setup";
+    if (!CreatePipe(&read_pipe, &write_pipe, &security, 0) ||
+        !SetHandleInformation(read_pipe, HANDLE_FLAG_INHERIT, 0))
+        goto done;
+    null_handle = CreateFileW(L"NUL", GENERIC_READ | GENERIC_WRITE,
+        FILE_SHARE_READ | FILE_SHARE_WRITE, &security, OPEN_EXISTING, 0, NULL);
+    if (null_handle == INVALID_HANDLE_VALUE) goto done;
+    job = CreateJobObjectW(NULL, NULL);
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits = {0};
+    limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    if (!job || !SetInformationJobObject(job, JobObjectExtendedLimitInformation,
+                                         &limits, sizeof(limits)))
+        goto done;
+    SIZE_T attribute_size = 0;
+    (void)InitializeProcThreadAttributeList(NULL, 1, 0, &attribute_size);
+    attributes = zcl_malloc(attribute_size, "git-hook-attributes");
+    HANDLE inherited[] = {write_pipe, null_handle};
+    if (!attributes ||
+        !(attributes_initialized = InitializeProcThreadAttributeList(
+              attributes, 1, 0, &attribute_size) != 0) ||
+        !UpdateProcThreadAttribute(attributes, 0,
+            PROC_THREAD_ATTRIBUTE_HANDLE_LIST, inherited, sizeof(inherited),
+            NULL, NULL))
+        goto done;
+    STARTUPINFOEXW startup = {0};
+    startup.StartupInfo.cb = sizeof(startup);
+    startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
+    startup.StartupInfo.wShowWindow = SW_HIDE;
+    startup.StartupInfo.hStdInput = null_handle;
+    startup.StartupInfo.hStdOutput = write_pipe;
+    startup.StartupInfo.hStdError = write_pipe;
+    startup.lpAttributeList = attributes;
+    UINT prior_mode = SetErrorMode(
+        SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX);
+    DWORD flags = CREATE_NO_WINDOW | CREATE_SUSPENDED |
+                  EXTENDED_STARTUPINFO_PRESENT;
+    started = CreateProcessW(application, line, NULL, NULL, TRUE, flags,
+                                         NULL, NULL, &startup.StartupInfo,
+                                         &process) &&
+              AssignProcessToJobObject(job, process.hProcess) &&
+              ResumeThread(process.hThread) != (DWORD)-1;
+    (void)SetErrorMode(prior_mode);
+    if (!started) { failure_reason = "spawn"; goto done; }
+    CloseHandle(process.hThread);
+    process.hThread = NULL;
+    CloseHandle(write_pipe);
+    write_pipe = NULL;
+    size_t used = 0;
+    bool truncated = false, failed = false, finished = false;
+    ULONGLONG deadline = GetTickCount64() + 1000u;
+    for (;;) {
+        if (GetTickCount64() >= deadline) { failed = true; break; }
+        DWORD available = 0;
+        if (!PeekNamedPipe(read_pipe, NULL, 0, NULL, &available, NULL)) {
+            DWORD pipe_error = GetLastError();
+            if (pipe_error == ERROR_BROKEN_PIPE) {
+                ULONGLONG now = GetTickCount64();
+                DWORD remaining = now < deadline
+                    ? (DWORD)(deadline - now) : 0;
+                if (WaitForSingleObject(process.hProcess, remaining) ==
+                    WAIT_OBJECT_0) {
+                    finished = true;
+                    break;
+                }
+            }
+            SetLastError(pipe_error);
+            failed = true;
+            break;
+        }
+        if (available) {
+            char discard[1024];
+            char *target = used + 1u < out_size ? out + used : discard;
+            DWORD capacity = target == discard ? sizeof(discard) :
+                (DWORD)(out_size - used - 1u);
+            DWORD amount = 0;
+            if (!ReadFile(read_pipe, target,
+                          available < capacity ? available : capacity,
+                          &amount, NULL) || amount == 0) {
+                failed = true;
+                break;
+            }
+            if (target == discard) truncated = true;
+            else used += amount;
+            continue;
+        }
+        DWORD waited = WaitForSingleObject(process.hProcess, 10);
+        if (waited == WAIT_OBJECT_0) finished = true;
+        else if (waited != WAIT_TIMEOUT) { failed = true; break; }
+        if (finished) {
+            DWORD final_available = 0;
+            if (!PeekNamedPipe(read_pipe, NULL, 0, NULL, &final_available,
+                               NULL)) {
+                if (GetLastError() == ERROR_BROKEN_PIPE) break;
+                failed = true;
+            }
+            if (failed || final_available == 0) break;
+        }
+    }
+    out[used] = 0;
+    if (failed || truncated) { failure_reason = "capture"; goto done; }
+    DWORD exit_code = 0;
+    if (!GetExitCodeProcess(process.hProcess, &exit_code) || exit_code > 255u)
+        { failure_reason = "exit-code"; goto done; }
+    CloseHandle(process.hProcess);
+    process.hProcess = NULL;
+    CloseHandle(job);
+    job = NULL;
+    if (read_pipe) CloseHandle(read_pipe);
+    if (null_handle != INVALID_HANDLE_VALUE) CloseHandle(null_handle);
+    DeleteProcThreadAttributeList(attributes);
+    free(attributes);
+    free(line);
+    free(application);
+    return (int)exit_code;
+done:
+    DWORD failure = GetLastError();
+    if (process.hThread) CloseHandle(process.hThread);
+    if (process.hProcess) {
+        (void)TerminateProcess(process.hProcess, 127);
+        CloseHandle(process.hProcess);
+    }
+    if (job) CloseHandle(job);
+    if (read_pipe) CloseHandle(read_pipe);
+    if (write_pipe) CloseHandle(write_pipe);
+    if (null_handle != INVALID_HANDLE_VALUE) CloseHandle(null_handle);
+    if (attributes) {
+        if (attributes_initialized)
+            DeleteProcThreadAttributeList(attributes);
+        free(attributes);
+    }
+    free(line);
+    free(application);
+    (void)fprintf(stderr,
+                  "z23-git-hook: child query failed stage=%s win32=%lu\n",
+                  failure_reason, (unsigned long)failure);
+    return -1;
+}
+#else
 static int child_capture(const char *const argv[], char *out, size_t out_size)
 {
     int pipefd[2];
@@ -129,6 +441,7 @@ static int child_capture(const char *const argv[], char *out, size_t out_size)
     if (truncated || !WIFEXITED(status)) return -1;
     return WEXITSTATUS(status);
 }
+#endif
 
 static bool repo_root(char out[PATH_MAX])
 {
@@ -137,14 +450,24 @@ static bool repo_root(char out[PATH_MAX])
     size_t len = strlen(out);
     while (len && (out[len - 1] == '\n' || out[len - 1] == '\r'))
         out[--len] = 0;
+#if defined(_WIN32)
+    return hook_absolute_path(out);
+#else
     return len > 0 && out[0] == '/';
+#endif
 }
 
 static bool ancestor(const char *base, const char *local)
 {
     char output[HOOK_OUTPUT_MAX];
-    const char *argv[] = {"git", "merge-base", "--is-ancestor", base,
+    const char *argv[] = {"git", "--no-replace-objects", "merge-base",
+                          "--is-ancestor", base,
                           local, NULL};
+#if defined(_WIN32)
+    (void)_putenv_s("GIT_NO_LAZY_FETCH", "1");
+#else
+    (void)setenv("GIT_NO_LAZY_FETCH", "1", 1);
+#endif
     return child_capture(argv, output, sizeof(output)) == 0;
 }
 
@@ -167,6 +490,28 @@ static int64_t running_eta(const char *root, const char *local,
                      "%s/.cache/zcl-dev-proof/%s-%s.running",
                      root, local, base);
     if (n <= 0 || (size_t)n >= sizeof(path)) return -1;
+#if defined(_WIN32)
+    uint8_t marker[128] = {0};
+    struct platform_positioned_file file;
+    uint64_t marker_size = 0;
+    platform_positioned_file_init(&file);
+    bool opened = platform_positioned_file_open(&file, path) &&
+                  platform_positioned_file_is_current_user_only(&file) &&
+                  platform_positioned_file_size(&file, &marker_size) &&
+                  marker_size > 0 && marker_size < sizeof(marker) &&
+                  platform_positioned_file_read(&file, marker,
+                      (size_t)marker_size, 0) == (int64_t)marker_size;
+    platform_positioned_file_close(&file);
+    long long pid = 0, started = 0;
+    if (!opened || sscanf((const char *)marker, "%lld %lld", &pid,
+                          &started) != 2 || pid <= 1 || started <= 0 ||
+        (unsigned long long)pid > UINT32_MAX)
+        return -1;
+    HANDLE process = OpenProcess(SYNCHRONIZE, FALSE, (DWORD)pid);
+    bool alive = process && WaitForSingleObject(process, 0) == WAIT_TIMEOUT;
+    if (process) CloseHandle(process);
+    if (!alive) return -1;
+#else
     struct stat st;
     if (lstat(path, &st) != 0 || !S_ISREG(st.st_mode) ||
         S_ISLNK(st.st_mode) || (st.st_mode & (S_IWGRP | S_IWOTH)) != 0)
@@ -178,6 +523,7 @@ static int64_t running_eta(const char *root, const char *local,
     (void)fclose(file);
     if (!parsed || pid <= 1 || started <= 0 || kill((pid_t)pid, 0) != 0)
         return -1;
+#endif
     struct timespec now = {0};
     if (timespec_get(&now, TIME_UTC) != TIME_UTC) return -1;
     int64_t elapsed = (int64_t)now.tv_sec - (int64_t)started;
@@ -191,14 +537,14 @@ static int admit_pair(const char *root, const char *local, const char *base)
                                                 local, base, 0);
     char path[PATH_MAX];
     int n = snprintf(path, sizeof(path),
-                     "%s/.cache/zcl-dev-proof/receipts/%s-%s.receipt",
-                     root, local, base);
+                     ".cache/zcl-dev-proof/receipts/%s-%s.receipt",
+                     local, base);
     if (n <= 0 || (size_t)n >= sizeof(path))
         return refusal("receipt-path-invalid", local, base, 0);
     uint8_t wire[ZCL_DEV_PROOF_WIRE_BYTES];
     struct zcl_dev_acceptance_receipt_v1 receipt;
     char why[128] = {0};
-    if (!read_exact(path, wire, sizeof(wire))) {
+    if (!read_exact_at(root, path, wire, sizeof(wire))) {
         int64_t eta = running_eta(root, local, base);
         return refusal(eta >= 0 ? "running" : "receipt-missing",
                        local, base, eta >= 0 ? eta : 0);
@@ -215,11 +561,10 @@ static int admit_pair(const char *root, const char *local, const char *base)
         zcl_hex_encode(dimension->receipt_root, ZCL_DEV_PROOF_ROOT_BYTES,
                        root_hex);
         n = snprintf(child_path, sizeof(child_path),
-                     "%s/.cache/zcl-dev-proof/children/%s.child",
-                     root, root_hex);
+                     ".cache/zcl-dev-proof/children/%s.child", root_hex);
         uint8_t child[ZCL_DEV_PROOF_CHILD_WIRE_BYTES];
         if (n <= 0 || (size_t)n >= sizeof(child_path) ||
-            !read_exact(child_path, child, sizeof(child)) ||
+            !read_exact_at(root, child_path, child, sizeof(child)) ||
             !zcl_dev_proof_child_receipt_validate(
                 child, sizeof(child), (enum zcl_dev_proof_dimension_id)i,
                 dimension))
@@ -259,6 +604,11 @@ static int pre_push(void)
             return refusal("main-deletion-forbidden", local, base, 0);
         if (oid_zero(base))
             return refusal("advertised-base-missing", local, base, 0);
+        if (saw_update) {
+            (void)fprintf(stderr,
+                          "pre-push: REFUSED status=multiple-updates\n");
+            return 1;
+        }
         saw_update = true;
         if (admit_pair(root, local, base) != 0) return 1;
     }
@@ -275,9 +625,74 @@ static int notify_proof(void)
 {
     char root[PATH_MAX], binary[PATH_MAX];
     if (!repo_root(root)) return 0;
+#if defined(_WIN32)
+    int n = snprintf(binary, sizeof(binary), "%s/build/bin/z23-dev.exe", root);
+#else
     int n = snprintf(binary, sizeof(binary), "%s/build/bin/z23-dev", root);
-    if (n <= 0 || (size_t)n >= sizeof(binary) || access(binary, X_OK) != 0)
+#endif
+    if (n <= 0 || (size_t)n >= sizeof(binary))
         return 0;
+#if defined(_WIN32)
+    struct platform_positioned_file image;
+    platform_positioned_file_init(&image);
+    bool executable = platform_positioned_file_open(&image, binary) &&
+                      platform_positioned_file_is_executable(&image);
+    platform_positioned_file_close(&image);
+    if (!executable) return 0;
+    const char *argv[] = {binary, "dev", "proof", "ensure", NULL};
+    wchar_t *line = hook_command_line(argv);
+    wchar_t *application = hook_utf16(binary);
+    wchar_t *directory = hook_utf16(root);
+    SECURITY_ATTRIBUTES security = {
+        .nLength = sizeof(security), .bInheritHandle = TRUE};
+    HANDLE null_handle = CreateFileW(L"NUL", GENERIC_READ | GENERIC_WRITE,
+        FILE_SHARE_READ | FILE_SHARE_WRITE, &security, OPEN_EXISTING, 0, NULL);
+    if (!line || !application || !directory ||
+        null_handle == INVALID_HANDLE_VALUE) {
+        free(line); free(application); free(directory);
+        if (null_handle != INVALID_HANDLE_VALUE) CloseHandle(null_handle);
+        return 0;
+    }
+    SIZE_T attribute_size = 0;
+    (void)InitializeProcThreadAttributeList(NULL, 1, 0, &attribute_size);
+    LPPROC_THREAD_ATTRIBUTE_LIST attributes = zcl_malloc(
+        attribute_size, "git-hook-notify-attributes");
+    bool attributes_initialized = attributes &&
+        InitializeProcThreadAttributeList(attributes, 1, 0,
+                                          &attribute_size) != 0;
+    HANDLE inherited[] = {null_handle};
+    bool attributes_ready = attributes_initialized &&
+        UpdateProcThreadAttribute(attributes, 0,
+            PROC_THREAD_ATTRIBUTE_HANDLE_LIST, inherited, sizeof(inherited),
+            NULL, NULL) != 0;
+    STARTUPINFOEXW startup = {0};
+    PROCESS_INFORMATION process = {0};
+    startup.StartupInfo.cb = sizeof(startup);
+    startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
+    startup.StartupInfo.wShowWindow = SW_HIDE;
+    startup.StartupInfo.hStdInput = null_handle;
+    startup.StartupInfo.hStdOutput = null_handle;
+    startup.StartupInfo.hStdError = null_handle;
+    startup.lpAttributeList = attributes;
+    clear_git_local_environment();
+    UINT prior_mode = SetErrorMode(
+        SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX);
+    bool launched = attributes_ready && CreateProcessW(
+        application, line, NULL, NULL, TRUE,
+        CREATE_NO_WINDOW | DETACHED_PROCESS | EXTENDED_STARTUPINFO_PRESENT,
+        NULL, directory, &startup.StartupInfo, &process);
+    (void)SetErrorMode(prior_mode);
+    if (launched) {
+        CloseHandle(process.hThread);
+        CloseHandle(process.hProcess);
+    }
+    CloseHandle(null_handle);
+    if (attributes_initialized) DeleteProcThreadAttributeList(attributes);
+    free(attributes);
+    free(line); free(application); free(directory);
+    return 0;
+#else
+    if (access(binary, X_OK) != 0) return 0;
     pid_t child = fork();
     if (child != 0) return 0;
     if (setsid() < 0) _exit(0);
@@ -292,6 +707,7 @@ static int notify_proof(void)
     clear_git_local_environment();
     execl(binary, binary, "dev", "proof", "ensure", (char *)NULL);
     _exit(0);
+#endif
 }
 
 static int compare_u64(const void *a, const void *b)
@@ -306,6 +722,35 @@ static uint64_t sample_clock_ns(void)
     if (timespec_get(&now, TIME_UTC) != TIME_UTC) return 0;
     return (uint64_t)now.tv_sec * 1000000000u + (uint64_t)now.tv_nsec;
 }
+
+#if defined(_WIN32)
+static bool selftest_fixture_create(char path[PATH_MAX],
+                                    struct platform_private_file *file)
+{
+    wchar_t temp[32768];
+    DWORD len = GetTempPathW(32768, temp);
+    if (!len || len >= 32768) return false;
+    for (unsigned attempt = 0; attempt < 32; attempt++) {
+        wchar_t wide[32768];
+        int n = swprintf(wide, 32768, L"%lsz23-git-hook-%lu-%llu-%u.receipt",
+                         temp, (unsigned long)GetCurrentProcessId(),
+                         (unsigned long long)GetTickCount64(), attempt);
+        if (n <= 0 || n >= 32768) return false;
+        int bytes = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, wide, -1,
+                                        path, PATH_MAX, NULL, NULL);
+        if (bytes > 0 && platform_private_file_create(path, file)) return true;
+    }
+    return false;
+}
+
+static bool selftest_fixture_remove(const char *path)
+{
+    wchar_t *wide = hook_utf16(path);
+    bool removed = wide && DeleteFileW(wide) != 0;
+    free(wide);
+    return removed;
+}
+#endif
 
 static int selftest(void)
 {
@@ -354,7 +799,20 @@ static int selftest(void)
         return 1;
     uint8_t wire[ZCL_DEV_PROOF_WIRE_BYTES];
     if (!zcl_dev_proof_receipt_serialize(&receipt, wire)) return 1;
-    char fixture[] = "/tmp/z23-git-hook-receipt.XXXXXX";
+    char fixture[PATH_MAX];
+#if defined(_WIN32)
+    struct platform_private_file fixture_file;
+    platform_private_file_init(&fixture_file);
+    if (!selftest_fixture_create(fixture, &fixture_file) ||
+        !platform_private_file_write_at(&fixture_file, wire, sizeof(wire), 0) ||
+        !platform_private_file_flush(&fixture_file)) {
+        platform_private_file_close(&fixture_file);
+        return 1;
+    }
+    platform_private_file_close(&fixture_file);
+#else
+    memcpy(fixture, "/tmp/z23-git-hook-receipt.XXXXXX",
+           sizeof("/tmp/z23-git-hook-receipt.XXXXXX"));
     int fixture_fd = mkstemp(fixture);
     if (fixture_fd < 0) return 1;
     size_t written = 0;
@@ -372,6 +830,7 @@ static int selftest(void)
         (void)unlink(fixture);
         return 1;
     }
+#endif
     uint64_t samples[1000];
     char why[128];
     for (size_t i = 0; i < 1000; i++) {
@@ -382,12 +841,20 @@ static int selftest(void)
             !zcl_dev_proof_receipt_parse(admitted, sizeof(admitted), &parsed) ||
             !zcl_dev_proof_receipt_validate(&parsed, local, base,
                                             why, sizeof(why))) {
+#if defined(_WIN32)
+            (void)selftest_fixture_remove(fixture);
+#else
             (void)unlink(fixture);
+#endif
             return 1;
         }
         samples[i] = sample_clock_ns() - start;
     }
+#if defined(_WIN32)
+    if (!selftest_fixture_remove(fixture)) return 1;
+#else
     if (unlink(fixture) != 0) return 1;
+#endif
     qsort(samples, 1000, sizeof(samples[0]), compare_u64);
     struct zcl_dev_acceptance_receipt_v1 tampered = receipt;
     tampered.dimensions[ZCL_DEV_PROOF_TEST].skipped = 1;
@@ -430,7 +897,15 @@ static int selftest(void)
 
 int main(int argc, char **argv)
 {
+    char mode_buffer[64];
     const char *mode = program_basename(argv[0]);
+    size_t mode_len = strlen(mode);
+    if (mode_len > 4 && mode_len < sizeof(mode_buffer) &&
+        strcmp(mode + mode_len - 4, ".exe") == 0) {
+        memcpy(mode_buffer, mode, mode_len - 4);
+        mode_buffer[mode_len - 4] = 0;
+        mode = mode_buffer;
+    }
     if (argc == 2 && strcmp(argv[1], "--selftest") == 0) return selftest();
     if (argc >= 2 && strncmp(argv[1], "--hook=", 7) == 0)
         mode = argv[1] + 7;

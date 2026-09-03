@@ -11,26 +11,31 @@ CHECKER="$SCRIPT_DIR/check_git_hooks_installed.sh"
 INSTALLER="$SCRIPT_DIR/install_git_hooks.sh"
 
 run_selftest() {
-    local fixture hooks native output rc failures=0 tests=0
+    local fixture hooks native source_native output rc failures=0 tests=0
     fixture="$(mktemp -d "${TMPDIR:-/tmp}/z23-git-hooks.XXXXXX")"
     HOOK_SELFTEST_FIXTURE="$fixture"
     trap 'rm -rf -- "$HOOK_SELFTEST_FIXTURE"' EXIT
     hooks="$fixture/build/githooks"
     native="$fixture/build/bin/z23-git-hook"
+    source_native="${ZCL_GIT_HOOK_NATIVE_BIN_FOR_TEST:-$SOURCE_ROOT/build/bin/z23-git-hook.exe}"
+    [[ -x "$source_native" ]] || {
+        echo "check_git_hooks_installed: self-test needs $source_native" >&2
+        return 1
+    }
     git init -q "$fixture"
 
     install_windows() {
         env ZCL_GIT_HOOK_ROOT="$fixture" \
             ZCL_GIT_HOOK_SOURCE_ROOT="$SOURCE_ROOT" \
             ZCL_GIT_HOOK_DIR="$hooks" ZCL_GIT_HOOK_HOST=windows \
-            ZCL_GIT_HOOK_NATIVE_BIN="$fixture/does-not-exist" \
-            Z23_MSYS2_ROOT_MSYS=/d/msys64 "$INSTALLER" >/dev/null
+            ZCL_GIT_HOOK_NATIVE_BIN="$source_native" \
+            "$INSTALLER" >/dev/null
     }
     check_windows() {
         env ZCL_GIT_HOOK_ROOT="$fixture" \
             ZCL_GIT_HOOK_SOURCE_ROOT="$SOURCE_ROOT" \
             ZCL_GIT_HOOK_HOST_FOR_TEST=windows \
-            ZCL_GIT_HOOK_EXPECTED_MSYS2_ROOT_FOR_TEST=/d/msys64 \
+            ZCL_GIT_HOOK_NATIVE_BIN_FOR_TEST="$source_native" \
             "$CHECKER"
     }
     expect_green() {
@@ -62,24 +67,21 @@ run_selftest() {
         fi
     }
 
-    expect_green "Windows install does not require the POSIX receipt binary" \
+    expect_green "Windows native receipt-hook generation installs" \
         install_windows
-    expect_green "Windows exact shell-hook set and custom root reconcile" \
+    expect_green "Windows native receipt-hook generation reconciles" \
         check_windows
 
-    unlink "$hooks/pre-push"
+    windows_active="$(git -C "$fixture" config --worktree --get core.hooksPath)"
+    unlink "$windows_active/pre-push.exe"
     expect_red "missing Windows pre-push is rejected" \
-        "tracked shell hook" check_windows
+        "is not the installed native hook" check_windows
 
     install_windows
-    printf '%s\n' '# stale receipt hook' > "$hooks/post-commit"
-    expect_red "stale Windows receipt hook is rejected" \
-        "unsupported receipt hook post-commit" check_windows
-
-    install_windows
-    git -C "$fixture" config --worktree z23.windowsMsys2Root /c/wrong
-    expect_red "wrong persisted custom root is rejected" \
-        "expected '/d/msys64'" check_windows
+    windows_active="$(git -C "$fixture" config --worktree --get core.hooksPath)"
+    printf '%s\n' 'tampered' > "$windows_active/post-commit.exe"
+    expect_red "tampered Windows receipt hook is rejected" \
+        "is not the installed native hook" check_windows
 
     install_windows
     mkdir -p "$(dirname "$native")"
@@ -147,7 +149,16 @@ actual="${ZCL_GIT_HOOKS_PATH_FOR_TEST:-$(git -C "$ROOT" config --worktree --get 
 case "$actual" in
     build/githooks) actual="$expected" ;;
 esac
-if [[ "$actual" != "$expected" ]]; then
+if [[ "$host_kind" == windows ]] && command -v cygpath >/dev/null 2>&1; then
+    expected="$(cygpath -m "$expected")"
+    [[ -z "$actual" ]] || actual="$(cygpath -m "$actual")"
+fi
+if [[ "$host_kind" == windows ]]; then
+    case "$actual" in
+        "$expected"/native-v2-[0-9a-f][0-9a-f]*) ;;
+        *) fail "checkout-local core.hooksPath is '${actual:-<unset>}'"; exit 1 ;;
+    esac
+elif [[ "$actual" != "$expected" ]]; then
     fail "checkout-local core.hooksPath is '${actual:-<unset>}'"; exit 1
 fi
 
@@ -157,43 +168,15 @@ if [[ ! -x "$precommit" ]] ||
     fail "pre-commit lane guard differs from the tracked hook"; exit 1
 fi
 
-if [[ "$host_kind" == windows ]]; then
-    prepush="$actual/pre-push"
-    if [[ ! -x "$prepush" ]] ||
-       ! cmp -s "$SOURCE_ROOT/tools/githooks/pre-push" "$prepush"; then
-        fail "Windows pre-push gate differs from the tracked shell hook"; exit 1
-    fi
-    for stale in z23-git-hook post-commit post-merge post-checkout; do
-        if [[ -e "$actual/$stale" || -L "$actual/$stale" ]]; then
-            fail "Windows hook set retains unsupported receipt hook $stale"; exit 1
-        fi
-    done
-    msys2_root="$(git -C "$ROOT" config --worktree --get \
-        z23.windowsMsys2Root 2>/dev/null || true)"
-    case "$msys2_root" in
-        /*) ;;
-        *) fail "Windows MSYS2 root is missing or not an absolute MSYS path"; exit 1 ;;
-    esac
-    expected_msys2="${ZCL_GIT_HOOK_EXPECTED_MSYS2_ROOT_FOR_TEST:-}"
-    if [[ -n "$expected_msys2" && "$msys2_root" != "$expected_msys2" ]]; then
-        fail "Windows MSYS2 root is '$msys2_root', expected '$expected_msys2'"; exit 1
-    fi
-    grep -Fq 'z23.windowsMsys2Root' \
-        "$SOURCE_ROOT/tools/githooks/pre-push" || {
-        fail "tracked Windows pre-push hook does not read the persisted MSYS2 root"
-        exit 1
-    }
-    printf '%s\n' \
-        "check_git_hooks_installed: clean — Windows synchronous shell hooks armed; asynchronous receipt hooks UNAVAILABLE"
-    exit 0
-fi
-
-binary="${ZCL_GIT_HOOK_NATIVE_BIN_FOR_TEST:-$ROOT/build/bin/z23-git-hook}"
+binary_suffix=""
+[[ "$host_kind" == windows ]] && binary_suffix=".exe"
+binary="${ZCL_GIT_HOOK_NATIVE_BIN_FOR_TEST:-$ROOT/build/bin/z23-git-hook$binary_suffix}"
 if [[ ! -x "$binary" ]]; then
     fail "native hook binary is missing"; exit 1
 fi
 for hook in pre-push post-commit post-merge post-checkout; do
     installed="$actual/$hook"
+    [[ "$host_kind" == windows ]] && installed="$installed.exe"
     if [[ ! -x "$installed" ]] || ! cmp -s "$binary" "$installed"; then
         fail "$installed is not the installed native hook"; exit 1
     fi
@@ -212,5 +195,5 @@ fi
 "$SOURCE_ROOT/tools/lint/check_dev_proof_native_fast_path.sh" >/dev/null
 "$binary" --selftest >/dev/null
 printf '%s\n' \
-    "check_git_hooks_installed: clean — checkout-local native receipt hooks armed"
+    "check_git_hooks_installed: clean — checkout-local native receipt hooks armed ($host_kind)"
 exit 0
