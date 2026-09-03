@@ -8,6 +8,7 @@
 #include "presentation_canvas_internal.h"
 #include "presentation_focus_internal.h"
 #include "presentation_form_internal.h"
+#include "util/png_writer.h"
 
 #if defined(__linux__)
 static int present_x11_clipboard_append_targets(
@@ -61,7 +62,7 @@ static int present_x11_clipboard_write_target(
 #define XDL_NO_GLX
 #define XDL_NO_XRANDR
 #endif
-#include "../../../vendor/rgfw/RGFW.h"
+#include "../../../../../vendor/rgfw/RGFW.h"
 #if defined(__APPLE__) && defined(__clang__)
 #pragma clang diagnostic pop
 #elif defined(ZCL_PRESENT_UNDEF_MSC_VER)
@@ -150,14 +151,18 @@ static bool present_bmp_encode(
 #if defined(__linux__)
 static uint8_t *present_x11_clipboard_bmp;
 static size_t present_x11_clipboard_bmp_len;
+static uint8_t *present_x11_clipboard_png;
+static size_t present_x11_clipboard_png_len;
 
 static int present_x11_clipboard_append_targets(
     void *display_ptr, unsigned long *targets, int count, int capacity)
 {
     Display *display = display_ptr;
     if (!display || !targets || count < 0 || count >= capacity ||
-        !present_x11_clipboard_bmp)
+        (!present_x11_clipboard_bmp || !present_x11_clipboard_png))
         return count;
+    targets[count++] = XInternAtom(display, "image/png", False);
+    if (count >= capacity) return count;
     targets[count++] = XInternAtom(display, "image/bmp", False);
     return count;
 }
@@ -168,28 +173,67 @@ static int present_x11_clipboard_write_target(
 {
     Display *display = display_ptr;
     Atom target = (Atom)target_value;
+    Atom image_png = display
+        ? XInternAtom(display, "image/png", False) : None;
     Atom image_bmp = display
         ? XInternAtom(display, "image/bmp", False) : None;
-    if (!display || !present_x11_clipboard_bmp || target != image_bmp ||
-        present_x11_clipboard_bmp_len > INT_MAX)
+    const uint8_t *data = target == image_png
+        ? present_x11_clipboard_png
+        : (target == image_bmp ? present_x11_clipboard_bmp : NULL);
+    size_t data_len = target == image_png
+        ? present_x11_clipboard_png_len : present_x11_clipboard_bmp_len;
+    if (!display || !data || data_len > INT_MAX)
         return 0;
     (void)XChangeProperty(
         display, (Window)requestor_value, (Atom)property_value,
-        image_bmp, 8, PropModeReplace, present_x11_clipboard_bmp,
-        (int)present_x11_clipboard_bmp_len);
+        target, 8, PropModeReplace, data, (int)data_len);
     return 1;
 }
 #endif
 
+static bool present_png_encode(
+    const struct zcl_present_window_v1 *page,
+    uint8_t **encoded, size_t *encoded_len)
+{
+    size_t required = 0;
+    bool sized = page && encoded && encoded_len &&
+        (page->pixel_format == ZCL_PRESENT_RGB8
+            ? png_encode_rgb(page->pixels, page->width, page->height,
+                             NULL, 0u, &required)
+            : png_encode_rgba(page->pixels, page->width, page->height,
+                              NULL, 0u, &required));
+    if (!sized) return false;
+    uint8_t *png = malloc(required); // raw-alloc-ok:standalone-presentation-package
+    if (!png) return false;
+    bool ok = page->pixel_format == ZCL_PRESENT_RGB8
+        ? png_encode_rgb(page->pixels, page->width, page->height,
+                         png, required, encoded_len)
+        : png_encode_rgba(page->pixels, page->width, page->height,
+                          png, required, encoded_len);
+    if (!ok) {
+        free(png);
+        return false;
+    }
+    *encoded = png;
+    return true;
+}
+
 static bool present_clipboard_write_image(
     const struct zcl_present_window_v1 *page)
 {
+    uint8_t *png = NULL;
+    size_t png_len = 0;
+    if (!present_png_encode(page, &png, &png_len)) return false;
+#if defined(_WIN32)
     uint8_t *bmp = NULL;
     size_t bmp_len = 0;
-    if (!present_bmp_encode(page, &bmp, &bmp_len)) return false;
-#if defined(_WIN32)
+    if (!present_bmp_encode(page, &bmp, &bmp_len)) {
+        free(png);
+        return false;
+    }
     if (bmp_len <= 14u || !OpenClipboard(_RGFW->root->src.window)) {
         free(bmp);
+        free(png);
         return false;
     }
     HGLOBAL storage = GlobalAlloc(GMEM_MOVEABLE, bmp_len - 14u);
@@ -198,44 +242,67 @@ static bool present_clipboard_write_image(
         if (storage) GlobalFree(storage);
         CloseClipboard();
         free(bmp);
+        free(png);
         return false;
     }
     memcpy(destination, bmp + 14u, bmp_len - 14u);
     GlobalUnlock(storage);
     EmptyClipboard();
-    bool ok = SetClipboardData(CF_DIB, storage) != NULL;
-    if (!ok) GlobalFree(storage);
+    bool dib_ok = SetClipboardData(CF_DIB, storage) != NULL;
+    if (!dib_ok) GlobalFree(storage);
+    HGLOBAL png_storage = GlobalAlloc(GMEM_MOVEABLE, png_len);
+    void *png_destination = png_storage ? GlobalLock(png_storage) : NULL;
+    bool png_ok = false;
+    if (png_destination) {
+        memcpy(png_destination, png, png_len);
+        GlobalUnlock(png_storage);
+        UINT png_format = RegisterClipboardFormatA("PNG");
+        png_ok = png_format != 0u &&
+                 SetClipboardData(png_format, png_storage) != NULL;
+    }
+    if (!png_ok && png_storage) GlobalFree(png_storage);
     CloseClipboard();
     free(bmp);
-    return ok;
+    free(png);
+    return dib_ok || png_ok;
 #elif defined(__APPLE__)
     id pasteboard = NSPasteboard_generalPasteboard();
-    NSPasteboardType types[] = {"com.microsoft.bmp", NULL};
+    NSPasteboardType types[] = {"public.png", NULL};
     NSPasteBoard_declareTypes(pasteboard, types, 1u, NULL);
     id data = ((id (*)(id, SEL, const void *, NSUInteger))objc_msgSend)(
         (id)objc_getClass("NSData"),
-        sel_registerName("dataWithBytes:length:"), bmp,
-        (NSUInteger)bmp_len);
+        sel_registerName("dataWithBytes:length:"), png,
+        (NSUInteger)png_len);
     bool ok = data && ((bool (*)(id, SEL, id, id))objc_msgSend)(
         pasteboard, sel_registerName("setData:forType:"), data,
-        NSString_stringWithUTF8String("com.microsoft.bmp"));
-    free(bmp);
+        NSString_stringWithUTF8String("public.png"));
+    free(png);
     return ok;
 #elif defined(__linux__)
+    uint8_t *bmp = NULL;
+    size_t bmp_len = 0;
+    if (!present_bmp_encode(page, &bmp, &bmp_len)) {
+        free(png);
+        return false;
+    }
     Display *display = (Display *)RGFW_getDisplay_X11();
     if (!display || !_RGFW || !_RGFW->helperWindow) {
         free(bmp);
+        free(png);
         return false;
     }
     free(present_x11_clipboard_bmp);
     present_x11_clipboard_bmp = bmp;
     present_x11_clipboard_bmp_len = bmp_len;
+    free(present_x11_clipboard_png);
+    present_x11_clipboard_png = png;
+    present_x11_clipboard_png_len = png_len;
     Atom clipboard = XInternAtom(display, "CLIPBOARD", False);
     XSetSelectionOwner(display, clipboard, _RGFW->helperWindow, CurrentTime);
     XFlush(display);
     return XGetSelectionOwner(display, clipboard) == _RGFW->helperWindow;
 #else
-    free(bmp);
+    free(png);
     return false;
 #endif
 }

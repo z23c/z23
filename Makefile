@@ -1730,10 +1730,11 @@ check-vendor-provenance:
 	@sha256sum --check vendor/freebsd-sh/SHA256SUMS
 
 # Reusable native presentation package. This deliberately has a tiny source
-# closure: twelve project TUs plus pinned RGFW headers, with no node/app objects.
+# closure: fourteen project TUs plus pinned RGFW headers, with no node/app objects.
 PRESENTATION_BUILD_DIR := build/presentation
 PRESENTATION_PACKAGE_CFLAGS := -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
-	-Icontexts/explorer/modules/presentation/include -Iplatform/modules/base/include -Ivendor/x11/include
+	-Icontexts/explorer/modules/presentation/include -Iplatform/modules/base/include \
+	-Iplatform/modules/util/include -Ivendor/x11/include
 PRESENTATION_PACKAGE_SRCS := \
 	contexts/explorer/modules/presentation/src/presentation.c \
 	contexts/explorer/modules/presentation/src/presentation_canvas_model.c \
@@ -1746,7 +1747,9 @@ PRESENTATION_PACKAGE_SRCS := \
 	contexts/explorer/modules/presentation/src/model.c \
 	contexts/explorer/modules/presentation/src/model_text.c \
 	contexts/explorer/modules/presentation/src/model_render.c \
-	contexts/explorer/modules/presentation/src/zclassic_brand.c
+	contexts/explorer/modules/presentation/src/zclassic_brand.c \
+	platform/modules/util/src/png_writer.c \
+	platform/modules/base/src/safe_alloc.c
 PRESENTATION_PACKAGE_OBJS := \
 	$(PRESENTATION_BUILD_DIR)/presentation.o \
 	$(PRESENTATION_BUILD_DIR)/presentation_canvas_model.o \
@@ -1759,7 +1762,9 @@ PRESENTATION_PACKAGE_OBJS := \
 	$(PRESENTATION_BUILD_DIR)/model.o \
 	$(PRESENTATION_BUILD_DIR)/model_text.o \
 	$(PRESENTATION_BUILD_DIR)/model_render.o \
-	$(PRESENTATION_BUILD_DIR)/zclassic_brand.o
+	$(PRESENTATION_BUILD_DIR)/zclassic_brand.o \
+	$(PRESENTATION_BUILD_DIR)/png_writer.o \
+	$(PRESENTATION_BUILD_DIR)/safe_alloc.o
 PRESENTATION_PACKAGE_ARCHIVE := build/lib/libzclpresentation.a
 PRESENTATION_DEMO_BIN := $(PRESENTATION_BUILD_DIR)/bitmap-demo
 PRESENTATION_PROVENANCE_STAMP := \
@@ -1810,6 +1815,7 @@ $(PRESENTATION_BUILD_DIR)/presentation.o: \
 	contexts/explorer/modules/presentation/src/presentation_form_internal.h \
 	contexts/explorer/modules/presentation/include/presentation/presentation.h \
 	contexts/explorer/modules/presentation/include/presentation/model_render.h \
+	platform/modules/util/include/util/png_writer.h \
 	vendor/rgfw/RGFW.h vendor/rgfw/XDL.h \
 	$(PRESENTATION_PROVENANCE_STAMP)
 	@mkdir -p $(PRESENTATION_BUILD_DIR)
@@ -1927,6 +1933,18 @@ $(PRESENTATION_BUILD_DIR)/model_text.o: \
 		contexts/explorer/modules/presentation/src/model_text.c \
 		-o $(PRESENTATION_BUILD_DIR)/model_text.o
 
+$(PRESENTATION_BUILD_DIR)/png_writer.o: \
+	platform/modules/util/src/png_writer.c \
+	platform/modules/util/include/util/png_writer.h
+	@mkdir -p $(PRESENTATION_BUILD_DIR)
+	$(CC) $(PRESENTATION_PACKAGE_CFLAGS) -c $< -o $@
+
+$(PRESENTATION_BUILD_DIR)/safe_alloc.o: \
+	platform/modules/base/src/safe_alloc.c \
+	platform/modules/base/include/base/safe_alloc.h
+	@mkdir -p $(PRESENTATION_BUILD_DIR)
+	$(CC) $(PRESENTATION_PACKAGE_CFLAGS) -c $< -o $@
+
 $(PRESENTATION_PACKAGE_ARCHIVE): $(PRESENTATION_PACKAGE_OBJS) \
 	$(PRESENTATION_PROVENANCE_STAMP)
 	@mkdir -p build/lib
@@ -1973,10 +1991,11 @@ presentation-desktop-install:
 # Current maintainer host carries MinGW, so this is a real Windows compile+link
 # proof, not a preprocessor simulation. macOS is linked by the hosted matrix.
 presentation-portability: presentation-demo
-	@if command -v x86_64-w64-mingw32-gcc >/dev/null 2>&1; then \
+	@set -e; if command -v x86_64-w64-mingw32-gcc >/dev/null 2>&1; then \
 		mkdir -p $(PRESENTATION_BUILD_DIR)/windows; \
 		x86_64-w64-mingw32-gcc -std=c2x -O2 -Wall -Wextra -Werror \
-			-pedantic -Icontexts/explorer/modules/presentation/include -Iplatform/modules/base/include \
+			-pedantic -Icontexts/explorer/modules/presentation/include \
+			-Iplatform/modules/base/include -Iplatform/modules/util/include \
 			contexts/explorer/modules/presentation/src/presentation.c \
 			contexts/explorer/modules/presentation/src/presentation_canvas_model.c \
 			contexts/explorer/modules/presentation/src/presentation_canvas_select.c \
@@ -1989,6 +2008,8 @@ presentation-portability: presentation-demo
 			contexts/explorer/modules/presentation/src/model_text.c \
 			contexts/explorer/modules/presentation/src/model_render.c \
 			contexts/explorer/modules/presentation/src/zclassic_brand.c \
+			platform/modules/util/src/png_writer.c \
+			platform/modules/base/src/safe_alloc.c \
 			contexts/explorer/modules/presentation/examples/bitmap_demo.c \
 			-luser32 -lgdi32 -lshell32 -lole32 \
 			-o $(PRESENTATION_BUILD_DIR)/windows/bitmap-demo.exe; \

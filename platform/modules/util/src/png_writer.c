@@ -75,6 +75,23 @@ static bool write_chunk(FILE *f, const char type[4],
     return true;
 }
 
+static void encode_chunk(uint8_t **cursor, const char type[4],
+                         const uint8_t *data, uint32_t len)
+{
+    zcl_write_u32_be(*cursor, len);
+    *cursor += 4;
+    memcpy(*cursor, type, 4u);
+    uint32_t crc = crc32_update(0, (const uint8_t *)type, 4u);
+    *cursor += 4;
+    if (len > 0) {
+        memcpy(*cursor, data, len);
+        crc = crc32_update(crc, data, len);
+        *cursor += len;
+    }
+    zcl_write_u32_be(*cursor, crc);
+    *cursor += 4;
+}
+
 /* ── DEFLATE stored blocks inside zlib wrapper ──────────────── */
 
 /* Build the raw filtered scanline data (filter byte 0 = None per row),
@@ -149,6 +166,66 @@ static uint8_t *build_idat_channels(const uint8_t *pixels, uint32_t w,
     return idat;
 }
 
+static bool png_encoded_layout(uint32_t width, uint32_t height,
+                               size_t channels, size_t *idat_len,
+                               size_t *png_len)
+{
+    if (!idat_len || !png_len || width == 0 || height == 0 ||
+        channels == 0 || width > SIZE_MAX / channels)
+        return false;
+    size_t row_bytes = (size_t)width * channels;
+    if (row_bytes == SIZE_MAX || height > SIZE_MAX / (row_bytes + 1u))
+        return false;
+    size_t filtered_len = (size_t)height * (row_bytes + 1u);
+    size_t blocks = filtered_len / 65535u +
+                    (filtered_len % 65535u != 0 ? 1u : 0u);
+    if (blocks == 0) blocks = 1u;
+    if (blocks > (SIZE_MAX - filtered_len - 6u) / 5u)
+        return false;
+    size_t idat = 2u + blocks * 5u + filtered_len + 4u;
+    if (idat > UINT32_MAX || idat > SIZE_MAX - 57u)
+        return false;
+    *idat_len = idat;
+    *png_len = 57u + idat;
+    return true;
+}
+
+static bool png_encode_channels(
+    const uint8_t *pixels, uint32_t width, uint32_t height,
+    size_t channels, uint8_t color_type,
+    uint8_t *output, size_t output_cap, size_t *written)
+{
+    size_t expected_idat = 0, required = 0;
+    if (!pixels || !written ||
+        !png_encoded_layout(width, height, channels,
+                            &expected_idat, &required))
+        return false;
+    *written = required;
+    if (!output) return true;
+    if (output_cap < required) return false;
+    size_t idat_len = 0;
+    uint8_t *idat = build_idat_channels(
+        pixels, width, height, channels, &idat_len);
+    if (!idat || idat_len != expected_idat) {
+        free(idat);
+        return false;
+    }
+    static const uint8_t signature[8] = {137,80,78,71,13,10,26,10};
+    uint8_t *cursor = output;
+    memcpy(cursor, signature, sizeof(signature));
+    cursor += sizeof(signature);
+    uint8_t ihdr[13] = {0};
+    zcl_write_u32_be(ihdr, width);
+    zcl_write_u32_be(ihdr + 4u, height);
+    ihdr[8] = 8u;
+    ihdr[9] = color_type;
+    encode_chunk(&cursor, "IHDR", ihdr, sizeof(ihdr));
+    encode_chunk(&cursor, "IDAT", idat, (uint32_t)idat_len);
+    encode_chunk(&cursor, "IEND", NULL, 0u);
+    free(idat);
+    return (size_t)(cursor - output) == required;
+}
+
 /* ── Public API ─────────────────────────────────────────────── */
 
 static bool png_write_channels(const char *path, const uint8_t *pixels,
@@ -202,4 +279,18 @@ bool png_write_rgba(const char *path, const uint8_t *pixels,
                     uint32_t width, uint32_t height)
 {
     return png_write_channels(path, pixels, width, height, 4u, 6u);
+}
+
+bool png_encode_rgb(const uint8_t *pixels, uint32_t width, uint32_t height,
+                    uint8_t *output, size_t output_cap, size_t *written)
+{
+    return png_encode_channels(
+        pixels, width, height, 3u, 2u, output, output_cap, written);
+}
+
+bool png_encode_rgba(const uint8_t *pixels, uint32_t width, uint32_t height,
+                     uint8_t *output, size_t output_cap, size_t *written)
+{
+    return png_encode_channels(
+        pixels, width, height, 4u, 6u, output, output_cap, written);
 }

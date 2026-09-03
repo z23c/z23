@@ -50,9 +50,13 @@
  * the definition (in png_writer.c) is compiled. */
 #define png_write_rgb pngw_under_test_write_rgb
 #define png_write_rgba pngw_under_test_write_rgba
+#define png_encode_rgb pngw_under_test_encode_rgb
+#define png_encode_rgba pngw_under_test_encode_rgba
 #include "../../util/src/png_writer.c"
 #undef png_write_rgb
 #undef png_write_rgba
+#undef png_encode_rgb
+#undef png_encode_rgba
 
 #define PNGW_CHECK(name, expr) do {                                  \
     printf("test_png_writer: %s... ", (name));                      \
@@ -491,6 +495,27 @@ int test_test_png_writer(void)
         PNGW_CHECK("png_write_rgb: unopenable path (missing directory) returns false",
                    !pngw_under_test_write_rgb("/nonexistent_dir_zzz_png_writer_test/out.png",
                                   one_px, 1, 1));
+
+        size_t encoded_len = 0;
+        uint8_t encoded[72] = {0};
+        PNGW_CHECK("png_encode_rgb: query reports exact one-pixel size",
+                   pngw_under_test_encode_rgb(
+                       one_px, 1u, 1u, NULL, 0u, &encoded_len) &&
+                   encoded_len == sizeof(encoded));
+        PNGW_CHECK("png_encode_rgb: caller buffer receives complete PNG",
+                   pngw_under_test_encode_rgb(
+                       one_px, 1u, 1u, encoded, sizeof(encoded),
+                       &encoded_len) &&
+                   memcmp(encoded, "\x89PNG\r\n\x1a\n", 8u) == 0 &&
+                   memcmp(encoded + 12u, "IHDR", 4u) == 0 &&
+                   pngw_rd_be32(encoded + 16u) == 1u &&
+                   pngw_rd_be32(encoded + 20u) == 1u &&
+                   encoded[24] == 8u && encoded[25] == 2u &&
+                   memcmp(encoded + 64u, "IEND", 4u) == 0);
+        PNGW_CHECK("png_encode_rgb: short caller buffer fails closed",
+                   !pngw_under_test_encode_rgb(
+                       one_px, 1u, 1u, encoded, sizeof(encoded) - 1u,
+                       &encoded_len) && encoded_len == sizeof(encoded));
 
         /* Full round trip: small (single-block IDAT) image. */
         {

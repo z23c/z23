@@ -20,12 +20,12 @@ browser, script runtime, or intermediate file.
 
 The native window copied its current medium-text chart through the `C` input
 path. An independent X11 clipboard client requested `TARGETS`, then requested
-the advertised `image/bmp` payload. The byte count and first 54 bytes were
-observed without writing a screenshot file.
+the advertised image payloads. Byte counts and headers were observed without
+writing a screenshot file.
 
 ## Result
 
-- Advertised target: `image/bmp`
+- Advertised compatibility target: `image/bmp`
 - Clipboard payload: `2,284,854` bytes
 - Expected payload: `54 + (1120 × 3 × 680) = 2,284,854` bytes
 - Signature: `42 4d` (`BM`)
@@ -38,3 +38,9 @@ observed without writing a screenshot file.
 The exact size, header, dimensions, format, and independent clipboard readback
 matched. The copy control also uses a pure resize-aware hit test, and successful
 copy changes the control to `COPIED! PASTE NOW` while keeping the window open.
+
+The first live test exposed only BMP. Although the bytes were exact, common
+Linux paste targets did not accept that clipboard flavor. The corrected path
+advertises `image/png` first and retains BMP as fallback. The in-memory PNG
+encoder has independent signature, chunk, CRC, stored-DEFLATE, short-buffer,
+and RGB/RGBA round-trip coverage; `test_test_png_writer` passed 1/1 group.
