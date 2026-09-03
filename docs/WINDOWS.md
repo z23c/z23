@@ -144,15 +144,15 @@ make -j"$(getconf _NPROCESSORS_ONLN)" z23
 make windows-acceptance
 ```
 
-On Windows, `make setup` installs the tracked shell `pre-commit` and `pre-push`
-hooks. The pre-push hook re-enters the recorded UCRT64 shell once when Git
-launches it from a minimal MINGW/MSYS environment, then runs
-`make windows-acceptance` by default. It is a synchronous fixed-catalog gate,
-not exact-receipt admission. The POSIX `z23-git-hook` uses `fork`, `execvp`, and
-`waitpid`; it is not built or installed on Windows, so asynchronous
-post-commit/post-merge/post-checkout receipt scheduling remains unavailable
-there. Linux and macOS retain those native receipt hooks. An explicit
-`ZCL_PREPUSH_CMD` override still receives the exact semantic changed-file list.
+On Windows, `make setup` installs the tracked shell `pre-commit` lane guard and
+native PE receipt hooks. The pre-push executable reads only an immutable
+exact commit/base receipt; it never opens a shell, runs Make, compiles, tests,
+waits, or fetches. Its two bounded Git queries reuse the exact parent Git image,
+run without a console window, and are contained by a kill-on-close Job Object.
+Post-commit/post-merge/post-checkout make a best-effort hidden notification and
+return immediately. Native hook generations are content-addressed and
+`core.hooksPath` switches atomically, so a locked running executable cannot
+block an update. `make windows-acceptance` remains an explicit parity gate.
 
 Install the audited canonical binary as a supervised per-user Task Scheduler
 job with one command:

@@ -39,6 +39,9 @@ fi
 echo "core.hooksPath: $hooks_path"
 
 pre_push="$hooks_path/pre-push"
+if [ ! -e "$pre_push" ] && [ -e "$pre_push.exe" ]; then
+    pre_push="$pre_push.exe"
+fi
 if [ ! -e "$pre_push" ] && [ ! -L "$pre_push" ]; then
     echo "pre-push:       MISSING at $pre_push despite hooksPath being set"
     echo "                re-arm: make install-hooks"
@@ -59,10 +62,17 @@ if [ -L "$pre_push" ]; then
             ;;
     esac
 else
-    echo "pre-push:       $pre_push (regular file — the Windows shell-hook lane)"
-    echo "runs:           make pre-push-ci — windows-portability-acceptance, then"
-    echo "                tools/agent_fast_ci.sh pre-push (strict compile + lint-fast"
-    echo "                + mapped focused tests for the pushed range)"
+    case "$pre_push" in
+        *.exe)
+            echo "pre-push:       $pre_push (native Windows receipt hook)"
+            echo "runs:           immutable exact commit/base receipt admission;"
+            echo "                no shell, Make, compile, test, wait, or fetch"
+            ;;
+        *)
+            echo "pre-push:       $pre_push (unrecognized regular hook)"
+            echo "runs:           inspect this file; re-arm with make install-hooks"
+            ;;
+    esac
 fi
 
 echo "last measured wall: see the header of tools/githooks/pre-push (never"

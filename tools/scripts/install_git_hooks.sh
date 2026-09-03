@@ -8,7 +8,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SOURCE_ROOT="${ZCL_GIT_HOOK_SOURCE_ROOT:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
 ROOT="${ZCL_GIT_HOOK_ROOT:-$SOURCE_ROOT}"
 HOOK_DIR="${ZCL_GIT_HOOK_DIR:-$ROOT/build/githooks}"
-NATIVE_BIN="${ZCL_GIT_HOOK_NATIVE_BIN:-$ROOT/build/bin/z23-git-hook}"
 
 fail() {
     printf '%s\n' "install_git_hooks: REFUSE: $*" >&2
@@ -26,6 +25,9 @@ case "$host_kind" in
     posix|windows) ;;
     *) fail "unknown host selection '$host_kind'" ;;
 esac
+native_suffix=""
+[[ "$host_kind" == windows ]] && native_suffix=".exe"
+NATIVE_BIN="${ZCL_GIT_HOOK_NATIVE_BIN:-$ROOT/build/bin/z23-git-hook$native_suffix}"
 
 [[ -d "$ROOT" ]] || fail "checkout root is not a directory: $ROOT"
 git -C "$ROOT" rev-parse --git-dir >/dev/null 2>&1 ||
@@ -38,26 +40,7 @@ esac
 [[ -x "$SOURCE_ROOT/tools/githooks/pre-commit" ]] ||
     fail "tracked pre-commit hook is missing or not executable"
 
-windows_msys2_root=""
-if [[ "$host_kind" == windows ]]; then
-    [[ -x "$SOURCE_ROOT/tools/githooks/pre-push" ]] ||
-        fail "tracked pre-push hook is missing or not executable"
-    windows_msys2_root="${Z23_WINDOWS_MSYS2_ROOT:-${Z23_MSYS2_ROOT_MSYS:-}}"
-    if [[ -z "$windows_msys2_root" ]]; then
-        windows_msys2_root="$(git -C "$ROOT" config --worktree --get \
-            z23.windowsMsys2Root 2>/dev/null || true)"
-    fi
-    windows_msys2_root="${windows_msys2_root:-/c/msys64}"
-    case "$windows_msys2_root" in
-        /*) ;;
-        *) fail "MSYS2 root must be an absolute MSYS path: $windows_msys2_root" ;;
-    esac
-    [[ "$windows_msys2_root" != *$'\n'* &&
-       "$windows_msys2_root" != *$'\r'* ]] ||
-        fail "MSYS2 root contains a line break"
-else
-    [[ -x "$NATIVE_BIN" ]] || fail "native receipt hook is missing: $NATIVE_BIN"
-fi
+[[ -x "$NATIVE_BIN" ]] || fail "native receipt hook is missing: $NATIVE_BIN"
 
 unlink_if_present() {
     local path="$1"
@@ -66,17 +49,29 @@ unlink_if_present() {
     fi
 }
 
-mkdir -p "$HOOK_DIR"
-install -m 0755 "$SOURCE_ROOT/tools/githooks/pre-commit" \
-    "$HOOK_DIR/pre-commit"
-
 if [[ "$host_kind" == windows ]]; then
-    install -m 0755 "$SOURCE_ROOT/tools/githooks/pre-push" \
-        "$HOOK_DIR/pre-push"
-    for stale in z23-git-hook post-commit post-merge post-checkout; do
-        unlink_if_present "$HOOK_DIR/$stale"
-    done
+    mkdir -p "$HOOK_DIR"
+    digest="$(sha256sum "$NATIVE_BIN" | awk '{print $1}')"
+    [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || fail "cannot hash native hook"
+    generation="${HOOK_DIR%/}/native-v2-$digest"
+    if [[ ! -d "$generation" ]]; then
+        staging="${HOOK_DIR%/}/.native-v2-$digest-$$"
+        mkdir -p "$staging"
+        install -m 0755 "$SOURCE_ROOT/tools/githooks/pre-commit" \
+            "$staging/pre-commit"
+        for hook in pre-push post-commit post-merge post-checkout; do
+            install -m 0755 "$NATIVE_BIN" "$staging/$hook.exe"
+        done
+        if ! mv "$staging" "$generation" 2>/dev/null; then
+            rm -rf -- "$staging"
+            [[ -d "$generation" ]] || fail "cannot publish hook generation"
+        fi
+    fi
+    HOOK_DIR="$generation"
 else
+    mkdir -p "$HOOK_DIR"
+    install -m 0755 "$SOURCE_ROOT/tools/githooks/pre-commit" \
+        "$HOOK_DIR/pre-commit"
     install -m 0755 "$NATIVE_BIN" "$HOOK_DIR/z23-git-hook"
     for hook in pre-push post-commit post-merge post-checkout; do
         unlink_if_present "$HOOK_DIR/$hook"
@@ -86,15 +81,17 @@ fi
 
 git -C "$ROOT" config extensions.worktreeConfig true
 git -C "$ROOT" config --unset-all core.hooksPath 2>/dev/null || true
-git -C "$ROOT" config --worktree core.hooksPath "$HOOK_DIR"
+configured_hook_dir="$HOOK_DIR"
+if [[ "$host_kind" == windows ]] && command -v cygpath >/dev/null 2>&1; then
+    configured_hook_dir="$(cygpath -m "$HOOK_DIR")"
+fi
+git -C "$ROOT" config --worktree core.hooksPath "$configured_hook_dir"
 
 if [[ "$host_kind" == windows ]]; then
-    git -C "$ROOT" config --worktree z23.windowsMsys2Root \
-        "$windows_msys2_root"
-    printf '%s\n' "Installed Windows shell hooks: core.hooksPath=$HOOK_DIR"
-    printf '%s\n' "  pre-push -> synchronous native Windows acceptance"
-    printf '%s\n' "  MSYS2 root -> $windows_msys2_root"
-    printf '%s\n' "  asynchronous exact-receipt hooks -> UNAVAILABLE on Windows"
+    git -C "$ROOT" config --worktree --unset-all z23.windowsMsys2Root \
+        2>/dev/null || true
+    printf '%s\n' "Installed native Windows git hooks: core.hooksPath=$configured_hook_dir"
+    printf '%s\n' "  locked executables -> immutable content-addressed generation"
 else
     printf '%s\n' "Installed native git hooks: core.hooksPath=$HOOK_DIR"
     printf '%s\n' "  pre-push -> admits one immutable exact commit/base receipt"

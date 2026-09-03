@@ -10001,37 +10001,40 @@ release:
 # The installed hook directory is checkout-local. Each worktree therefore
 # admits receipts produced by its own exact source and build state while the
 # repository-common config continues to share objects and refs safely.
-GIT_HOOK_BIN = $(BIN_DIR)/z23-git-hook
+GIT_HOOK_BIN = $(BIN_DIR)/z23-git-hook$(ZCL_HOST_EXEEXT)
 GIT_HOOK_DIR = $(abspath $(BUILD_DIR)/githooks)
 GIT_HOOK_SRCS = tools/dev/z23_git_hook.c tools/dev/dev_proof_receipt.c \
-	platform/modules/sha3/src/sha3.c
+	platform/modules/sha3/src/sha3.c \
+	platform/modules/base/src/safe_alloc.c \
+	platform/modules/platform/src/positioned_file.c
+GIT_HOOK_LIBS =
+ifeq ($(ZCL_HOST_WINDOWS),1)
+GIT_HOOK_SRCS += platform/modules/platform/src/private_file.c
+GIT_HOOK_LIBS += -ladvapi32
+GIT_HOOK_HOST = windows
+else
+GIT_HOOK_HOST = posix
+endif
 GIT_HOOK_CFLAGS = -std=$(ZCL_C_STD) -O2 -Wall -Wextra -Werror -pedantic \
 	$(ZCL_WARN_EXTRA_GATES) $(HARDEN_CFLAGS) -D_POSIX_C_SOURCE=200809L \
-	-Itools/dev -Iplatform/modules/base/include -Iplatform/modules/sha3/include
+	$(ZCL_PLATFORM_CPPFLAGS) \
+	-Itools/dev -Iplatform/modules/base/include -Iplatform/modules/sha3/include \
+	-Iplatform/modules/platform/include
 
 .PHONY: git-hook git-hook-selftest install-hooks
-ifeq ($(ZCL_HOST_WINDOWS),1)
-git-hook git-hook-selftest:
-	@echo "native exact-receipt Git hook is unavailable on Windows; make setup installs the synchronous shell pre-push gate" >&2
-	@false
-
-install-hooks:
-	@ZCL_GIT_HOOK_HOST=windows \
-	  tools/scripts/install_git_hooks.sh
-else
 git-hook: $(GIT_HOOK_BIN)
 
 $(GIT_HOOK_BIN): $(GIT_HOOK_SRCS)
 	@mkdir -p $(dir $@)
-	$(CC) $(GIT_HOOK_CFLAGS) -o $@ $(GIT_HOOK_SRCS) $(HARDEN_LDFLAGS)
+	$(CC) $(GIT_HOOK_CFLAGS) -o $@ $(GIT_HOOK_SRCS) \
+		$(HARDEN_LDFLAGS) $(GIT_HOOK_LIBS)
 
 git-hook-selftest: $(GIT_HOOK_BIN)
 	@$(GIT_HOOK_BIN) --selftest
 
 install-hooks: $(GIT_HOOK_BIN)
-	@ZCL_GIT_HOOK_HOST=posix \
+	@ZCL_GIT_HOOK_HOST=$(GIT_HOOK_HOST) \
 	  tools/scripts/install_git_hooks.sh
-endif
 
 .PHONY: check-git-hooks-installed
 check-git-hooks-installed:

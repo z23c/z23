@@ -558,6 +558,12 @@ compile, lint, and test accounting. A missing, stale, incomplete, skipped, or
 tampered dimension cannot be admitted. `make pre-push-ci` remains an explicit
 legacy parity oracle; it is not called by the installed push hook.
 
+Windows installs the same receipt policy as native PE hooks in an
+immutable content-addressed generation. Admission launches no console window;
+its bounded Git children use the parent Git-for-Windows image and a
+kill-on-close Job Object. Updating `core.hooksPath` publishes a new generation
+without replacing a possibly locked executable.
+
 Current limitation: proof requests, running markers, leases, failures, and
 receipts remain under each checkout's `.cache/zcl-dev-proof`. The resident
 watcher still forks one worker per claimed commit/base pair, and that worker

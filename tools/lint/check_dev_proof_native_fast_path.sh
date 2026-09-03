@@ -30,6 +30,11 @@ fi
 grep -Fq 'execvp(argv[0]' tools/dev/z23_git_hook.c
 grep -Fq 'execl(binary, binary, "dev", "proof", "ensure"' \
     tools/dev/z23_git_hook.c
+grep -Fq 'CreateProcessW(application' tools/dev/z23_git_hook.c
+grep -Fq 'CREATE_NO_WINDOW' tools/dev/z23_git_hook.c
+grep -Fq 'JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE' tools/dev/z23_git_hook.c
+grep -Fq 'GIT_NO_LAZY_FETCH' tools/dev/z23_git_hook.c
+grep -Fq 'platform_positioned_file_open_beneath' tools/dev/z23_git_hook.c
 grep -Fq 'ZCL_DEV_PROOF_WIRE_BYTES' tools/dev/z23_git_hook.c
 
 echo "native proof fast path: PASS (sealed receipt admission, no shell authority)"
