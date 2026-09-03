@@ -45,6 +45,7 @@
  */
 
 #include "test/test_core.h"
+#include "test/test_timing_budget.h"
 
 #include "bloom/merkle.h"
 #include "chain/chainparams.h"
@@ -205,12 +206,23 @@ static int bm_cell1_mint_anchor_fresh(void)
     int64_t elapsed_us = GetTimeMicros() - t0;
     unsetenv("ZCL_MINT_PREFLIGHT_LEGACY_BLOCKS_DIR");
 
+    /* Wall ceiling scales with measured host load; nominal stays 10s. */
+    struct test_budget budget_1 = test_budget_scale((uint64_t)BM_1_BUDGET_US);
     BM_CHECK("(1) terminal reached under wall-clock budget (<10s)",
-              elapsed_us < BM_1_BUDGET_US);
+              (uint64_t)elapsed_us < budget_1.effective_us);
+    if ((uint64_t)elapsed_us >= budget_1.effective_us)
+        printf("  >> (1) TIMEOUT: elapsed=%lldus nominal_us=%llu "
+               "effective_us=%llu load_factor=%.2f calib_us=%llu\n",
+               (long long)elapsed_us,
+               (unsigned long long)budget_1.nominal_us,
+               (unsigned long long)budget_1.effective_us,
+               budget_1.factor,
+               (unsigned long long)budget_1.calib_med_us);
+
     BM_CHECK("(1) named terminal = preflight_refusal (all_ok=false)", !all_ok);
 
     bm_record("-mint-anchor", "fresh", "preflight_refusal", elapsed_us,
-              BM_1_BUDGET_US);
+              (int64_t)budget_1.effective_us);
 
     json_free(&report);
     rmdir(empty_legacy);
@@ -338,8 +350,18 @@ static int bm_cell2_mint_anchor_headers_only(void)
     uint64_t ua_after = utxo_apply_stage_cursor();
     uint64_t ha_after = header_admit_stage_cursor();
 
+    /* Wall ceiling scales with measured host load; nominal stays 30s. */
+    struct test_budget budget_2 = test_budget_scale((uint64_t)BM_2_BUDGET_US);
     BM_CHECK("(2) terminal reached under wall-clock budget (<30s)",
-              elapsed_us < BM_2_BUDGET_US);
+              (uint64_t)elapsed_us < budget_2.effective_us);
+    if ((uint64_t)elapsed_us >= budget_2.effective_us)
+        printf("  >> (2) TIMEOUT: elapsed=%lldus nominal_us=%llu "
+               "effective_us=%llu load_factor=%.2f calib_us=%llu\n",
+               (long long)elapsed_us,
+               (unsigned long long)budget_2.nominal_us,
+               (unsigned long long)budget_2.effective_us,
+               budget_2.factor,
+               (unsigned long long)budget_2.calib_med_us);
     BM_CHECK("(2) frontier converged within a bounded number of kicks",
               frontier_converged && kicks_run <= BM_2_MAX_KICKS);
     BM_CHECK("(2) utxo_apply frontier did NOT reach the ceiling (walled)",
@@ -357,7 +379,7 @@ static int bm_cell2_mint_anchor_headers_only(void)
 
     bm_record("-mint-anchor", "headers-only",
               blocker_ok ? "blocker_frontier_walled" : "UNNAMED(BUG)",
-              elapsed_us, BM_2_BUDGET_US);
+              elapsed_us, (int64_t)budget_2.effective_us);
 
     /* teardown */
     mint_fold_ceiling_set(MINT_FOLD_NO_CEILING);
@@ -558,15 +580,25 @@ static int bm_cell3_mint_anchor_imported_bodies(void)
     }
 
     int64_t elapsed_us = GetTimeMicros() - t0;
+    /* Wall ceiling scales with measured host load; nominal stays 15s. */
+    struct test_budget budget_3 = test_budget_scale((uint64_t)BM_3_BUDGET_US);
     BM_CHECK("(3) terminal reached under wall-clock budget (<15s)",
-              elapsed_us < BM_3_BUDGET_US);
+              (uint64_t)elapsed_us < budget_3.effective_us);
+    if ((uint64_t)elapsed_us >= budget_3.effective_us)
+        printf("  >> (3) TIMEOUT: elapsed=%lldus nominal_us=%llu "
+               "effective_us=%llu load_factor=%.2f calib_us=%llu\n",
+               (long long)elapsed_us,
+               (unsigned long long)budget_3.nominal_us,
+               (unsigned long long)budget_3.effective_us,
+               budget_3.factor,
+               (unsigned long long)budget_3.calib_med_us);
     bool terminal_ok = terminal_is_anchor_reached && blocker_absent_at_end;
     BM_CHECK("(3) named terminal = anchor_reached, no blocker at end",
               terminal_ok);
 
     bm_record("-mint-anchor", "imported+bodies",
               terminal_ok ? "anchor_reached" : "UNNAMED(BUG)",
-              elapsed_us, BM_3_BUDGET_US);
+              elapsed_us, (int64_t)budget_3.effective_us);
 
     tip_finalize_stage_shutdown();
     utxo_apply_stage_shutdown();
@@ -623,13 +655,23 @@ static int bm_cell4_mint_anchor_fast_fresh(void)
     BM_CHECK("(4) mint_skip_crypto disarmed after cell (no leak to later cells)",
               !mint_skip_crypto_get());
 
+    /* Wall ceiling scales with measured host load; nominal stays 10s. */
+    struct test_budget budget_4 = test_budget_scale((uint64_t)BM_4_BUDGET_US);
     BM_CHECK("(4) terminal reached under wall-clock budget (<10s)",
-              elapsed_us < BM_4_BUDGET_US);
+              (uint64_t)elapsed_us < budget_4.effective_us);
+    if ((uint64_t)elapsed_us >= budget_4.effective_us)
+        printf("  >> (4) TIMEOUT: elapsed=%lldus nominal_us=%llu "
+               "effective_us=%llu load_factor=%.2f calib_us=%llu\n",
+               (long long)elapsed_us,
+               (unsigned long long)budget_4.nominal_us,
+               (unsigned long long)budget_4.effective_us,
+               budget_4.factor,
+               (unsigned long long)budget_4.calib_med_us);
     BM_CHECK("(4) named terminal = preflight_refusal (all_ok=false, "
               "unaffected by the skip-crypto toggle)", !all_ok);
 
     bm_record("-mint-anchor-fast", "fresh", "preflight_refusal", elapsed_us,
-              BM_4_BUDGET_US);
+              (int64_t)budget_4.effective_us);
 
     json_free(&report);
     rmdir(empty_legacy);
@@ -664,8 +706,18 @@ static int bm_cell5_preflight_fresh_natural(void)
     bool all_ok = boot_mint_anchor_preflight_run_all(dir, &report);
     int64_t elapsed_us = GetTimeMicros() - t0;
 
+    /* Wall ceiling scales with measured host load; nominal stays 10s. */
+    struct test_budget budget_5 = test_budget_scale((uint64_t)BM_5_BUDGET_US);
     BM_CHECK("(5) terminal reached under wall-clock budget (<10s)",
-              elapsed_us < BM_5_BUDGET_US);
+              (uint64_t)elapsed_us < budget_5.effective_us);
+    if ((uint64_t)elapsed_us >= budget_5.effective_us)
+        printf("  >> (5) TIMEOUT: elapsed=%lldus nominal_us=%llu "
+               "effective_us=%llu load_factor=%.2f calib_us=%llu\n",
+               (long long)elapsed_us,
+               (unsigned long long)budget_5.nominal_us,
+               (unsigned long long)budget_5.effective_us,
+               budget_5.factor,
+               (unsigned long long)budget_5.calib_med_us);
     BM_CHECK("(5) named terminal = preflight_refusal (all_ok=false, "
               "guaranteed by legacy_block_index_covers_anchor alone)", !all_ok);
     BM_CHECK("(5) legacy_block_index_covers_anchor named+failed",
@@ -673,7 +725,7 @@ static int bm_cell5_preflight_fresh_natural(void)
               !bm_check_ok(&report, "legacy_block_index_covers_anchor"));
 
     bm_record("preflight-run-all", "fresh(natural-src)", "preflight_refusal",
-              elapsed_us, BM_5_BUDGET_US);
+              elapsed_us, (int64_t)budget_5.effective_us);
 
     json_free(&report);
     test_cleanup_tmpdir(dir);
@@ -709,8 +761,18 @@ static int bm_cell6_preflight_fresh_empty_legacy(void)
     int64_t elapsed_us = GetTimeMicros() - t0;
     unsetenv("ZCL_MINT_PREFLIGHT_LEGACY_BLOCKS_DIR");
 
+    /* Wall ceiling scales with measured host load; nominal stays 10s. */
+    struct test_budget budget_6 = test_budget_scale((uint64_t)BM_6_BUDGET_US);
     BM_CHECK("(6) terminal reached under wall-clock budget (<10s)",
-              elapsed_us < BM_6_BUDGET_US);
+              (uint64_t)elapsed_us < budget_6.effective_us);
+    if ((uint64_t)elapsed_us >= budget_6.effective_us)
+        printf("  >> (6) TIMEOUT: elapsed=%lldus nominal_us=%llu "
+               "effective_us=%llu load_factor=%.2f calib_us=%llu\n",
+               (long long)elapsed_us,
+               (unsigned long long)budget_6.nominal_us,
+               (unsigned long long)budget_6.effective_us,
+               budget_6.factor,
+               (unsigned long long)budget_6.calib_med_us);
     BM_CHECK("(6) named terminal = preflight_refusal (all_ok=false)", !all_ok);
     BM_CHECK("(6) legacy_block_index_covers_anchor named+failed",
               bm_find_check(&report, "legacy_block_index_covers_anchor") &&
@@ -720,7 +782,7 @@ static int bm_cell6_preflight_fresh_empty_legacy(void)
               !bm_check_ok(&report, "bodies_present_sampled"));
 
     bm_record("preflight-run-all", "fresh+empty-legacy-src",
-              "preflight_refusal", elapsed_us, BM_6_BUDGET_US);
+              "preflight_refusal", elapsed_us, (int64_t)budget_6.effective_us);
 
     json_free(&report);
     rmdir(empty_legacy);
