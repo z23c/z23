@@ -450,7 +450,11 @@ static bool npg_reply_points(
             "current maintained roots; .c+.h; non-test and test separated") &&
         json_push_kv_str(&reply->data, "history",
             "first-parent; merge diff against first parent; UTC commit day") &&
-        json_push_kv_bool(&reply->data, "fresh_tree_crosscheck", true) &&
+        json_push_kv_bool(&reply->data, "cache_hit", history->cache_hit) &&
+        json_push_kv_bool(&reply->data, "fresh_tree_crosscheck",
+                          !history->cache_hit) &&
+        json_push_kv_bool(&reply->data, "sealed_tree_crosscheck",
+                          history->cache_hit) &&
         json_push_kv_int(&reply->data, "day_count",
                          (int64_t)history->day_count) &&
         json_push_kv_int(&reply->data, "non_test_lines",

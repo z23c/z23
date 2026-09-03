@@ -1,8 +1,11 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  * Purpose: exact daily C23 Git-history parser and refusal tests. */
 #include "science/code_growth.h"
+#include "util/file_tree_ops.h"
+#include "util/spawn.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #define GROWTH_CHECK(name_, expression_) do {                         \
@@ -11,6 +14,123 @@
            growth_ok_ ? "OK" : "FAIL");                             \
     if (!growth_ok_) failures++;                                      \
 } while (0)
+
+static bool growth_test_run(const char *const argv[])
+{
+    char output[512];
+    return zcl_spawn_capture(argv, output, sizeof(output), 30000) == 0;
+}
+
+static bool growth_test_write(const char *path, const char *text)
+{
+    FILE *file = fopen(path, "wb");
+    if (!file) return false;
+    size_t length = strlen(text);
+    bool ok = fwrite(text, 1, length, file) == length;
+    return fclose(file) == 0 && ok;
+}
+
+static bool growth_test_path(char *out, size_t cap, const char *root,
+                             const char *relative)
+{
+    int n = snprintf(out, cap, "%s/%s", root, relative);
+    return n > 0 && (size_t)n < cap;
+}
+
+static bool growth_history_equal(
+    const struct science_code_growth_history *left,
+    const struct science_code_growth_history *right)
+{
+    if (left->day_count != right->day_count ||
+        left->non_test_lines != right->non_test_lines ||
+        left->test_lines != right->test_lines)
+        return false;
+    for (size_t i = 0; i < left->day_count; i++) {
+        const struct science_code_growth_day *a = &left->days[i];
+        const struct science_code_growth_day *b = &right->days[i];
+        if (strcmp(a->date, b->date) != 0 ||
+            strcmp(a->head_commit, b->head_commit) != 0 ||
+            a->epoch_day != b->epoch_day || a->commits != b->commits ||
+            a->non_test_added != b->non_test_added ||
+            a->non_test_deleted != b->non_test_deleted ||
+            a->non_test_lines != b->non_test_lines ||
+            a->test_added != b->test_added ||
+            a->test_deleted != b->test_deleted ||
+            a->test_lines != b->test_lines)
+            return false;
+    }
+    return true;
+}
+
+static bool growth_test_commit(const char *root, const char *message)
+{
+    const char *add[] = {
+        "git", "-C", root, "add", "--", "lib/demo/src/a.c", NULL,
+    };
+    const char *commit[] = {
+        "git", "-C", root, "-c", "user.name=Z23 Test",
+        "-c", "user.email=z23-test@example.invalid",
+        "-c", "commit.gpgsign=false", "commit", "-q", "-m", message, NULL,
+    };
+    return growth_test_run(add) && growth_test_run(commit);
+}
+
+static int growth_cache_tests(void)
+{
+    int failures = 0;
+    char root[] = "/tmp/z23-code-growth-XXXXXX";
+    char source[512] = "", cache[512] = "", error[192];
+    bool made = mkdtemp(root) != NULL;
+    bool ready = made && growth_test_path(
+        source, sizeof(source), root, "lib/demo/src/a.c") &&
+        growth_test_path(cache, sizeof(cache), root,
+                         ".cache/z23-code-growth/git-numstat.v1");
+    const char *init[] = {"git", "-C", root, "init", "-q", NULL};
+    char directory[512] = "";
+    ready = ready && growth_test_path(
+        directory, sizeof(directory), root, "lib/demo/src") &&
+        zcl_mkdir_p(directory, 0700).ok && growth_test_run(init) &&
+        growth_test_write(source, "int answer(void) { return 42; }\n") &&
+        growth_test_commit(root, "initial");
+    struct science_code_growth_history cold = {0}, warm = {0}, rebuilt = {0};
+    bool cold_ok = ready && science_code_growth_collect(
+        root, &cold, error, sizeof(error));
+    bool warm_ok = cold_ok && science_code_growth_collect(
+        root, &warm, error, sizeof(error));
+    GROWTH_CHECK("clean exact HEAD reuses its verified Git stream",
+                 warm_ok && !cold.cache_hit && warm.cache_hit &&
+                 growth_history_equal(&cold, &warm));
+
+    bool corrupted = warm_ok &&
+        growth_test_write(cache, "not a growth cache\n");
+    bool rebuilt_ok = corrupted && science_code_growth_collect(
+        root, &rebuilt, error, sizeof(error));
+    GROWTH_CHECK("corrupt cache falls back to exact cold reconstruction",
+                 rebuilt_ok && !rebuilt.cache_hit &&
+                 growth_history_equal(&cold, &rebuilt));
+
+    bool dirtied = growth_test_write(
+        source, "int answer(void) { return 42; }\nint more(void) { return 1; }\n");
+    struct science_code_growth_history dirty = {0};
+    GROWTH_CHECK("dirty maintained source cannot reuse stale evidence",
+                 dirtied && !science_code_growth_collect(
+                     root, &dirty, error, sizeof(error)) &&
+                 strstr(error, "disagrees") != NULL);
+
+    bool committed = dirtied && growth_test_commit(root, "grow");
+    struct science_code_growth_history advanced = {0}, advanced_warm = {0};
+    bool advanced_ok = committed && science_code_growth_collect(
+        root, &advanced, error, sizeof(error));
+    bool advanced_warm_ok = advanced_ok && science_code_growth_collect(
+        root, &advanced_warm, error, sizeof(error));
+    GROWTH_CHECK("new first-parent HEAD extends then seals the exact result",
+                 advanced_warm_ok && advanced.cache_hit &&
+                 advanced_warm.cache_hit &&
+                 advanced.non_test_lines == cold.non_test_lines + 1u &&
+                 growth_history_equal(&advanced, &advanced_warm));
+    if (made) (void)zcl_tree_remove(root);
+    return failures;
+}
 
 int test_code_growth(void)
 {
@@ -70,5 +190,6 @@ int test_code_growth(void)
                  !science_code_growth_parse(
                      malformed, sizeof(malformed) - 1u, &history,
                      error, sizeof(error)));
+    failures += growth_cache_tests();
     return failures;
 }

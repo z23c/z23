@@ -28,6 +28,7 @@ struct science_code_growth_history {
     size_t day_count;
     uint64_t non_test_lines;
     uint64_t test_lines;
+    bool cache_hit;
 };
 
 /* Parse the machine-only stream emitted by science_code_growth_collect().
@@ -40,11 +41,12 @@ bool science_code_growth_parse(const char *stream, size_t stream_len,
                                struct science_code_growth_history *out,
                                char *error, size_t error_cap);
 
-/* Run Git directly through an argv-only spawn (never a shell), reconstruct
- * first-parent history with merge commits diffed against their first parent,
- * and require the final totals to equal a fresh maintained-tree walk. The
- * root must be the Git toplevel; any nested root refuses instead of
- * reconstructing an unrelated parent repository's history. */
+/* Run Git directly through argv-only spawns (never a shell). A cold call
+ * reconstructs first-parent history, requires the final totals to equal a
+ * fresh maintained-tree walk, then may seal the raw Git stream in a local
+ * cache. A warm call re-parses a digest-verified stream only while the exact
+ * HEAD and maintained-root worktree remain unchanged. The root must be the
+ * Git toplevel; nested roots refuse instead of reading a parent repository. */
 bool science_code_growth_collect(const char *root,
                                  struct science_code_growth_history *out,
                                  char *error, size_t error_cap);
