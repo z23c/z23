@@ -428,6 +428,8 @@ struct block_swarm {
     uint32_t pieces_complete;
     uint32_t pieces_inflight;
     uint32_t pieces_failed;
+    uint32_t next_assign_hint;       /* lowest possibly assignable piece */
+    uint32_t first_incomplete_hint;  /* lowest possibly incomplete piece */
     int64_t  last_complete_unix;        /* last piece-completion stamp; the
                                          * stall watchdog (msgprocessor_snapshot.c)
                                          * abandons the swarm when this goes quiet */
@@ -467,6 +469,16 @@ bool block_swarm_receive_piece(struct block_swarm *bs,
 
 /* Mark a piece as failed (bad hash). Will be re-requested. */
 void block_swarm_fail_piece(struct block_swarm *bs, uint32_t piece_index);
+
+/* Requeue an in-flight piece without recording an integrity failure.  Returns
+ * true only when the piece changed back to CHUNK_NEEDED. */
+bool block_swarm_requeue_piece(struct block_swarm *bs,
+                               uint32_t piece_index);
+
+/* Lowest piece not yet complete, or num_pieces when complete.  The monotonic
+ * cursor makes contiguous-window calculation O(total pieces), not O(pipeline
+ * fills * chain length). */
+uint32_t block_swarm_first_incomplete_piece(struct block_swarm *bs);
 
 /* Check if block swarm is complete */
 bool block_swarm_is_complete(const struct block_swarm *bs);

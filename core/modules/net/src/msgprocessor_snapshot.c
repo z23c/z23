@@ -91,7 +91,7 @@ static int64_t g_swarm_last_progress_time = 0;
 /* Minimum legacy-getdata ownership window before a reaped swarm may be
  * re-armed by a fresh manifest (anti-flap). */
 #define BLOCK_SWARM_RESTART_COOLDOWN_SECS 300
-/* Keep one full per-peer request pipeline contiguous: a bounded 1,024-block
+/* Keep one full per-peer request pipeline contiguous: a bounded 16,384-block
  * ahead window. Every piece remains manifest-hash checked before any block
  * reaches the reducer. */
 #define BLOCK_PIECE_CONTIGUOUS_WINDOW PIECE_PIPELINE_DEPTH
@@ -127,19 +127,13 @@ static int32_t block_swarm_local_header_cap(const struct msg_processor *mp)
 }
 
 static int32_t block_swarm_contiguous_window_cap(
-    const struct block_swarm *bs,
+    struct block_swarm *bs,
     int32_t header_cap)
 {
     if (!bs || !bs->piece_states || bs->manifest.num_pieces == 0)
         return header_cap;
 
-    uint32_t first_open = bs->manifest.num_pieces;
-    for (uint32_t i = 0; i < bs->manifest.num_pieces; i++) {
-        if (bs->piece_states[i] != CHUNK_COMPLETE) {
-            first_open = i;
-            break;
-        }
-    }
+    uint32_t first_open = block_swarm_first_incomplete_piece(bs);
     if (first_open >= bs->manifest.num_pieces)
         return header_cap;
 
@@ -483,13 +477,8 @@ size_t mp_block_swarm_peer_disconnected(uint32_t peer_id)
         for (uint32_t i = 0; i < bs->manifest.num_pieces; i++) {
             if (bs->piece_states[i] == CHUNK_INFLIGHT &&
                 bs->piece_peer[i] == (int)peer_id) {
-                bs->piece_states[i] = CHUNK_NEEDED;
-                bs->piece_peer[i] = -1;
-                if (bs->piece_request_time)
-                    bs->piece_request_time[i] = 0;
-                if (bs->pieces_inflight > 0)
-                    bs->pieces_inflight--;
-                requeued++;
+                if (block_swarm_requeue_piece(bs, i))
+                    requeued++;
             }
         }
     }
@@ -1757,10 +1746,8 @@ void mp_snapshot_send_tick(struct msg_processor *mp,
                     BLOCK_PIECE_TIMEOUT_SECS) {
                 if ((uint32_t)pidx < g_block_swarm.manifest.num_pieces &&
                     g_block_swarm.piece_states[pidx] == CHUNK_INFLIGHT) {
-                    g_block_swarm.piece_states[pidx] = CHUNK_NEEDED;
-                    g_block_swarm.piece_peer[pidx] = -1;
-                    if (g_block_swarm.pieces_inflight > 0)
-                        g_block_swarm.pieces_inflight--;
+                    (void)block_swarm_requeue_piece(
+                        &g_block_swarm, (uint32_t)pidx);
                 }
                 node->blk_pipeline[pi].piece_index = -1;
             }

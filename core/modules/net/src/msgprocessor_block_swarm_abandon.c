@@ -36,6 +36,10 @@ void mp_block_swarm_mark_complete_through_height(
         swarm->piece_request_time[i] = 0;
         swarm->pieces_complete++;
     }
+    if (swarm->next_assign_hint < full_pieces)
+        swarm->next_assign_hint = full_pieces;
+    if (swarm->first_incomplete_hint < full_pieces)
+        swarm->first_incomplete_hint = full_pieces;
     if (full_pieces > 0)
         swarm->last_complete_unix = (int64_t)platform_time_wall_time_t();
 }

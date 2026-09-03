@@ -14,6 +14,26 @@
 #include "util/safe_alloc.h"
 #include "util/log_macros.h"
 
+static bool block_swarm_piece_assignable(enum chunk_state state)
+{
+    return state == CHUNK_NEEDED || state == CHUNK_FAILED;
+}
+
+static void block_swarm_advance_assign_hint(struct block_swarm *bs)
+{
+    while (bs->next_assign_hint < bs->manifest.num_pieces &&
+           !block_swarm_piece_assignable(
+               bs->piece_states[bs->next_assign_hint]))
+        bs->next_assign_hint++;
+}
+
+static void block_swarm_advance_incomplete_hint(struct block_swarm *bs)
+{
+    while (bs->first_incomplete_hint < bs->manifest.num_pieces &&
+           bs->piece_states[bs->first_incomplete_hint] == CHUNK_COMPLETE)
+        bs->first_incomplete_hint++;
+}
+
 bool block_swarm_init(struct block_swarm *bs,
                       const struct block_piece_manifest *manifest,
                       const char *datadir)
@@ -62,6 +82,8 @@ void block_swarm_free(struct block_swarm *bs)
     bs->piece_request_time = NULL;
     free(bs->piece_availability);
     bs->piece_availability = NULL;
+    bs->next_assign_hint = 0;
+    bs->first_incomplete_hint = 0;
 }
 
 static int32_t block_swarm_assign_piece_capped(struct block_swarm *bs,
@@ -78,6 +100,14 @@ static int32_t block_swarm_assign_piece_capped(struct block_swarm *bs,
     if (max_piece_index >= bs->manifest.num_pieces)
         max_piece_index = bs->manifest.num_pieces - 1;
 
+    /* Assignment normally walks a full seeder's manifest in order.  Starting
+     * every request at piece zero made a 3M-block manifest quadratic.  This
+     * cursor is the lowest piece that can still be NEEDED/FAILED; timeout,
+     * disconnect and integrity retries rewind it explicitly. */
+    block_swarm_advance_assign_hint(bs);
+    if (bs->next_assign_hint > max_piece_index)
+        return -1;
+
     /* Endgame mode: if few pieces remain, use broadcast strategy.
      * Caller should request all remaining from all peers. */
     uint32_t remaining = bs->manifest.num_pieces - bs->pieces_complete;
@@ -87,9 +117,8 @@ static int32_t block_swarm_assign_piece_capped(struct block_swarm *bs,
     int32_t best = -1;
     uint32_t best_avail = UINT32_MAX;
 
-    for (uint32_t i = 0; i <= max_piece_index; i++) {
-        if (bs->piece_states[i] != CHUNK_NEEDED &&
-            bs->piece_states[i] != CHUNK_FAILED)
+    for (uint32_t i = bs->next_assign_hint; i <= max_piece_index; i++) {
+        if (!block_swarm_piece_assignable(bs->piece_states[i]))
             continue;
 
         /* In endgame, also consider INFLIGHT pieces for duplicate requests */
@@ -113,6 +142,12 @@ static int32_t block_swarm_assign_piece_capped(struct block_swarm *bs,
         if (avail < best_avail || (avail == best_avail && best < 0)) {
             best_avail = avail;
             best = (int32_t)i;
+            /* Availability cannot be lower than zero.  Because the scan is
+             * ascending, this is also the required lowest-index tie winner.
+             * Full seeders currently advertise no bitmap, so their common
+             * path stays linear across a multi-million-block manifest. */
+            if (avail == 0)
+                break;
         }
     }
 
@@ -121,6 +156,8 @@ static int32_t block_swarm_assign_piece_capped(struct block_swarm *bs,
         bs->piece_peer[best] = peer_id;
         bs->piece_request_time[best] = (int64_t)platform_time_wall_time_t();
         bs->pieces_inflight++;
+        if ((uint32_t)best == bs->next_assign_hint)
+            block_swarm_advance_assign_hint(bs);
     }
     return best;
 }
@@ -174,9 +211,20 @@ bool block_swarm_receive_piece(struct block_swarm *bs,
     GUARD(bs && piece_index < bs->manifest.num_pieces, "sync", "receive_piece: invalid args (bs=%p piece=%u)", (void *)bs, piece_index);
     (void)peer_id;
 
+    if (bs->piece_states[piece_index] == CHUNK_COMPLETE)
+        return true;
+
+    if (bs->piece_states[piece_index] == CHUNK_INFLIGHT &&
+        bs->pieces_inflight > 0)
+        bs->pieces_inflight--;
     bs->piece_states[piece_index] = CHUNK_COMPLETE;
-    if (bs->pieces_inflight > 0) bs->pieces_inflight--;
+    bs->piece_peer[piece_index] = -1;
+    bs->piece_request_time[piece_index] = 0;
     bs->pieces_complete++;
+    if (piece_index == bs->next_assign_hint)
+        block_swarm_advance_assign_hint(bs);
+    if (piece_index == bs->first_incomplete_hint)
+        block_swarm_advance_incomplete_hint(bs);
 
     /* Check endgame exit */
     uint32_t remaining = bs->manifest.num_pieces - bs->pieces_complete;
@@ -187,11 +235,35 @@ bool block_swarm_receive_piece(struct block_swarm *bs,
 
 void block_swarm_fail_piece(struct block_swarm *bs, uint32_t piece_index)
 {
-    if (!bs || piece_index >= bs->manifest.num_pieces) return;
+    if (block_swarm_requeue_piece(bs, piece_index))
+        bs->pieces_failed++;
+}
+
+bool block_swarm_requeue_piece(struct block_swarm *bs, uint32_t piece_index)
+{
+    if (!bs || !bs->piece_states ||
+        piece_index >= bs->manifest.num_pieces ||
+        bs->piece_states[piece_index] == CHUNK_COMPLETE ||
+        bs->piece_states[piece_index] == CHUNK_NEEDED)
+        return false;
+
+    if (bs->piece_states[piece_index] == CHUNK_INFLIGHT &&
+        bs->pieces_inflight > 0)
+        bs->pieces_inflight--;
     bs->piece_states[piece_index] = CHUNK_NEEDED;
     bs->piece_peer[piece_index] = -1;
-    if (bs->pieces_inflight > 0) bs->pieces_inflight--;
-    bs->pieces_failed++;
+    bs->piece_request_time[piece_index] = 0;
+    if (piece_index < bs->next_assign_hint)
+        bs->next_assign_hint = piece_index;
+    return true;
+}
+
+uint32_t block_swarm_first_incomplete_piece(struct block_swarm *bs)
+{
+    if (!bs || !bs->piece_states)
+        return 0;
+    block_swarm_advance_incomplete_hint(bs);
+    return bs->first_incomplete_hint;
 }
 
 bool block_swarm_is_complete(const struct block_swarm *bs)
@@ -214,11 +286,7 @@ void block_swarm_handle_timeouts(struct block_swarm *bs, int timeout_secs)
     for (uint32_t i = 0; i < bs->manifest.num_pieces; i++) {
         if (bs->piece_states[i] == CHUNK_INFLIGHT &&
             now - bs->piece_request_time[i] > timeout_secs) {
-            bs->piece_states[i] = CHUNK_NEEDED;
-            bs->piece_peer[i] = -1;
-            bs->piece_request_time[i] = 0;
-            if (bs->pieces_inflight > 0)
-                bs->pieces_inflight--;
+            (void)block_swarm_requeue_piece(bs, i);
         }
     }
 }

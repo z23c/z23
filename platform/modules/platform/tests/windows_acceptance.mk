@@ -7,6 +7,7 @@
 ZCL_WINDOWS_ACCEPTANCE_PTHREAD_LIB := -l:libwinpthread.a
 
 ZCL_WINDOWS_ACCEPTANCE_TESTS := \
+	block_swarm_scale \
 	boot_auto_install_bundle_refusal \
 	boot_export_refusal \
 	build_fabric_worker_refusal \
@@ -72,6 +73,13 @@ ZCL_WINDOWS_ACCEPTANCE_TESTS := \
 	watcher_store \
 	workpool \
 	zcode_benchmark_executor_refusal
+
+ZCL_WINDOWS_ACCEPTANCE_block_swarm_scale_SOURCES := \
+	tests/harness/src/block_swarm_scale_windows_acceptance.c \
+	core/modules/net/src/fast_sync_block_swarm.c \
+	platform/modules/platform/src/clock.c \
+	platform/modules/base/src/log_level.c \
+	platform/modules/base/src/safe_alloc.c
 
 ZCL_WINDOWS_ACCEPTANCE_boot_auto_install_bundle_refusal_SOURCES := \
 	tests/harness/src/boot_auto_install_bundle_windows_refusal_acceptance.c \
