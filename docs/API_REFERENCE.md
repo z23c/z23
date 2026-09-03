@@ -166,7 +166,7 @@ The root order below is a wire contract, not a presentation choice.
 | `dev` | `dev` | branch | ready | Native edit, proof, and publication loop |
 | `ops` | `ops` | branch | ready | Node diagnostics |
 | `discover` | `discover` | branch | ready | Search and describe the command registry |
-| `code` | `code` | branch | ready | Hierarchical source-code navigator |
+| `code` | `code` | branch | ready | Source-code navigator |
 | `vault` | `vault` | branch | ready | What this node owns, and what may act on it |
 | `zcode` | `zcode` | branch | ready | Create, verify and preserve public C23 work |
 | `metaverse` | `metaverse` | branch | ready | Sovereign digital property: catalog, rights, receipts |
@@ -969,16 +969,16 @@ represented by its children's sections.
 | `discover describe` | ready | read / read / public · instant/tiny | **`path`** | `zcl.command_spec.v1` | `z23 discover describe dev.app.simulate` | Describe one leaf's schemas, safety, authority, and availability |
 | `discover schema` | ready | read / read / public · instant/tiny | **`path`**, `side` | `zcl.command_schema.v1` | `z23 discover schema dev.app.simulate --side=input` | Return the compact input or output schema contract for one leaf |
 
-### `code` — Hierarchical source-code navigator
+### `code` — Source-code navigator
 
 | Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
 |---|---|---|---|---|---|---|
 | `code guide` | ready | read / read / public · instant/tiny | none | `zcl.code_guide.v1` | `z23 code guide` | Edit and prove a checkout change |
 | `code group` | ready | read / read / public · foreground/tiny | **`group`** | `zcl.code_group.v1` | `z23 code group app/services` | Browse source groups and files |
 | `code map` | ready | read / read / public · foreground/tiny | none | `zcl.code_map.v1` | `z23 code map` | Count root groups and app shapes |
-| `code coverage` | ready | read / read / public · foreground/low | none | `zcl.code_coverage.v1` | `z23 code coverage` | Reconcile tracked source with the code index |
+| `code coverage` | ready | read / read / public · foreground/low | none | `zcl.code_coverage.v1` | `z23 code coverage` | Reconcile source with the code index |
 | `code tests` | ready | read / read / public · fast/tiny | **`path`** | `zcl.code_tests.v1` | `z23 code tests core/modules/net/src/download.c` | Route a file to focused tests |
-| `code room` | ready | read / read / public · fast/tiny | **`path`** | `zcl.code_room.v1` | `z23 code room app.messaging` | Open a file or command feature room |
+| `code room` | ready | read / read / public · fast/tiny | **`path`** | `zcl.code_room.v1` | `z23 code room app.messaging` | Open a file or command room |
 | `code context-map` | ready | read / read / public · foreground/low | none | `zcl.code_context_map.v1` | `z23 code context-map` | Map contexts, shapes, and coupling |
 | `code file` | ready | read / read / public · fast/tiny | **`path`** | `zcl.code_file.v1` | `z23 code file contexts/commons/modules/vcs/src/vcs_index.c` | Show a file's symbols and includes |
 | `code sym` | ready | read / read / public · fast/tiny | **`name`** | `zcl.code_symbol.v1` | `z23 code sym codeindex_open` | Show one symbol's definition and contract |
@@ -989,12 +989,12 @@ represented by its children's sections.
 | `code find` | ready | read / read / public · fast/tiny | **`text`**, `limit` | `zcl.code_find.v1` | `z23 code find hotswap` | Rank symbols by name |
 | `code have` | ready | read / read / public · fast/tiny | **`text`**, `limit` | `zcl.code_have.v1` | `z23 code have validation` | Find existing capabilities first |
 | `code territory` | ready | read / read / public · background/moderate | **`name`** | `zcl.code_territory.v1` | `z23 code territory core/modules/net` | Score one module's evidence surface |
-| `code focus` | ready | read / read / public · background/moderate | **`specialist`**, `list` | `zcl.code_focus.v1` | `z23 code focus net` | Rank where a specialist should work next |
+| `code focus` | ready | read / read / public · background/moderate | **`specialist`**, `list` | `zcl.code_focus.v1` | `z23 code focus net` | Rank a specialist's next work |
 | `code kpi` | ready | mutate / dev-mutation / public · background/moderate | none | `zcl.code_kpi.v1` | `z23 code kpi` | Track measured build outcomes |
-| `code corpus` | ready | read / read / public · background/moderate | none | `zcl.code_corpus.v1` | `z23 code corpus` | Measure the proven reusable C23 corpus |
+| `code corpus` | ready | read / read / public · background/moderate | none | `zcl.code_corpus.v1` | `z23 code corpus` | Measure the reusable C23 corpus |
 | `code general` (aliases: `general`) | ready | read / read / public · background/moderate | **`name`** | `zcl.general_brief.v1` | `z23 general core/modules/net` | Brief one territory or rank evidence gaps |
 
-#### `code.firsthour` — First-hour questions: owner, cost, recent, fetch
+#### `code.firsthour` — First-hour: owner, cost, recent, fetch
 
 | Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
 |---|---|---|---|---|---|---|
@@ -1003,7 +1003,7 @@ represented by its children's sections.
 | `code recent` | ready | read / read / public · fast/tiny | **`path`**, **`since`** | `zcl.code_recent.v1` | `z23 code recent cognition/modules/codeindex HEAD~5` | List what changed under a path lately |
 | `code fetch` | ready | mutate / dev-mutation / public · background/moderate | `from` | `zcl.code_fetch.v1` | `z23 code fetch --from=/path/to/other-checkout` | Install another checkout's verified code index |
 
-#### `code.provenance` — Attribute output back to the code that produced it
+#### `code.provenance` — Attribute output to its producing code
 
 | Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
 |---|---|---|---|---|---|---|

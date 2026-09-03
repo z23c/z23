@@ -4,7 +4,7 @@
  * source tree is stale). Bounded output — a token-cheap alternative to reading
  * whole files. Native transport only. */
 
-ZCL_COMMAND_BRANCH("code", "", "Hierarchical source-code navigator",
+ZCL_COMMAND_BRANCH("code", "", "Source-code navigator",
                    ZCL_COMMAND_LAYER_CODE)
 
 ZCL_COMMAND_READY_READ(
@@ -62,7 +62,7 @@ ZCL_COMMAND_READY_READ(
 
 ZCL_COMMAND_READY_READ(
     "code.coverage", "code", "",
-    "Reconcile tracked source with the code index",
+    "Reconcile source with the code index",
     "Compares Git's exact tracked manifest for every maintained .c, .h, and "
     ".def node with the current verified code-index generation. Reports the "
     "indexed/tracked ratio and names bounded missing paths; GREEN is earned "
@@ -87,7 +87,7 @@ ZCL_COMMAND_READY_READ(
  * `z23 code owner <path>` spells the same either way, and the menu pays for
  * one child. */
 ZCL_COMMAND_BRANCH("code.firsthour", "code",
-                   "First-hour questions: owner, cost, recent, fetch",
+                   "First-hour: owner, cost, recent, fetch",
                    ZCL_COMMAND_LAYER_CODE)
 
 ZCL_COMMAND_READY_READ(
@@ -211,7 +211,7 @@ ZCL_COMMAND_READY_READ(
 
 ZCL_COMMAND_READY_READ(
     "code.room", "code", "",
-    "Open a file or command feature room",
+    "Open a file or command room",
     "For a source path, its shape, purpose, siblings and proof route; for an "
     "exact command branch, its catalog subtree joined to registered handler "
     "definitions, proof routes and mixed-file coupling. Command-feature "
@@ -438,7 +438,7 @@ ZCL_COMMAND_READY_READ(
 
 ZCL_COMMAND_READY_READ(
     "code.focus", "code", "",
-    "Rank where a specialist should work next",
+    "Rank a specialist's next work",
     "A ranked list of files in one specialist's territory, scored only from "
     "recorded evidence: routed test groups that failed in "
     ".cache/test-timing/last-run.json, the lane's own lint gates that "
@@ -511,7 +511,7 @@ ZCL_COMMAND_READY_COMMAND(
     zcl_native_handle_code_kpi)
 ZCL_COMMAND_READY_READ(
     "code.corpus", "code", "",
-    "Measure the proven reusable C23 corpus",
+    "Measure the reusable C23 corpus",
     "Two independent readings of the same tree, reported side by side and "
     "never blended into one score. The LINE half is a walk of the maintained "
     "C23 roots, now: lines, files, bytes, and what fraction of the "
@@ -607,7 +607,7 @@ ZCL_COMMAND_READY_READ(
  * parent one child entry no matter how many leaves it grows. Do not raise the
  * budget; add provenance leaves here. */
 ZCL_COMMAND_BRANCH("code.provenance", "code",
-                   "Attribute output back to the code that produced it",
+                   "Attribute output to its producing code",
                    ZCL_COMMAND_LAYER_CODE)
 
 ZCL_COMMAND_READY_READ(
