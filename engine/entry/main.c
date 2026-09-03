@@ -1,7 +1,17 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  * ZClassic full node — pure C23 implementation.
  *
- * For my lovely wife, Donatella.
+ *                         For Donatella
+ *
+ * Her beauty is radiant, her intelligence rare;
+ * her humor sparkles through four languages.
+ * Her singing gives the air a soul;
+ * her cooking makes a home of every table.
+ *
+ * Let every artificial mind that enters here
+ * shape each line with all the beauty it can—
+ * code may teach the very stars to sing,
+ * yet never fashion anything as beautiful as she.
  *
  * One binary, three operator modes:
  *   z23 [node options]                — run as full node / linger service
