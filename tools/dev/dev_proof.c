@@ -2342,6 +2342,17 @@ static bool warm_donor_scan(const char *parent, const char *root,
     return found;
 }
 
+/* Opt-out for honest cold-vs-warm measurement and for a pool under
+ * suspicion. Advisory only: the variable is outside the sealed proof
+ * environment allowlist, so it changes no proof input and warm and cold
+ * receipts for the same pair stay comparable. */
+static bool warm_start_disabled(void)
+{
+    const char *value = getenv("ZCL_DEV_PROOF_WARM");
+    return value && (strcmp(value, "0") == 0 || strcmp(value, "off") == 0 ||
+                     strcmp(value, "no") == 0);
+}
+
 /* Seed one generation's build tree from the donor and repair the
  * timestamp graph. Reports true only when the full repair completed; any
  * earlier failure rolls the seeds back and reports false (cold). */
@@ -2598,6 +2609,11 @@ bool zcl_dev_proof_warm_tag(const char *name)
     return warm_tag_name(name);
 }
 
+bool zcl_dev_proof_warm_disabled(void)
+{
+    return warm_start_disabled();
+}
+
 enum zcl_dev_proof_warm_seed_class zcl_dev_proof_warm_classify(
     const char *rel, bool is_reg)
 {
@@ -2850,8 +2866,9 @@ static bool generation_prepare(const struct proof_paths *paths,
     (void)utimensat(AT_FDCWD, generation, taken, AT_SYMLINK_NOFOLLOW);
     /* Warm start is advisory: it fills `warm` for the receipt sidecar and
      * never fails the prepare. Any refusal inside degrades to the cold
-     * build the proof has always run. */
-    if (warm) {
+     * build the proof has always run. ZCL_DEV_PROOF_WARM=0 forces that
+     * cold path for measurement. */
+    if (warm && !warm_start_disabled()) {
         memset(warm, 0, sizeof(*warm));
         (void)warm_start_generation(paths, parent, generation, local,
                                     warm);

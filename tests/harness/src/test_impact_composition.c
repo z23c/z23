@@ -2765,6 +2765,43 @@ static int test_pw_marker_round_trip_and_refusals(void)
     return failures;
 }
 
+/* The opt-out switch the production prepare gates on. Proves each
+ * spelling forces cold and that anything else (including unset) leaves
+ * warm start armed. Restores the prior value: the variable is
+ * process-global. */
+static int test_pw_disable_switch_forces_cold(void)
+{
+    int failures = 0;
+    TEST("proof warm start: opt-out switch forces cold") {
+#if defined(_WIN32)
+        ASSERT(true);
+#else
+        const char *prior = getenv("ZCL_DEV_PROOF_WARM");
+        char saved[256] = {0};
+        bool had = prior != NULL;
+        if (had) (void)snprintf(saved, sizeof(saved), "%s", prior);
+        unsetenv("ZCL_DEV_PROOF_WARM");
+        ASSERT(!zcl_dev_proof_warm_disabled());
+        ASSERT(setenv("ZCL_DEV_PROOF_WARM", "0", 1) == 0);
+        ASSERT(zcl_dev_proof_warm_disabled());
+        ASSERT(setenv("ZCL_DEV_PROOF_WARM", "off", 1) == 0);
+        ASSERT(zcl_dev_proof_warm_disabled());
+        ASSERT(setenv("ZCL_DEV_PROOF_WARM", "no", 1) == 0);
+        ASSERT(zcl_dev_proof_warm_disabled());
+        ASSERT(setenv("ZCL_DEV_PROOF_WARM", "1", 1) == 0);
+        ASSERT(!zcl_dev_proof_warm_disabled());
+        ASSERT(setenv("ZCL_DEV_PROOF_WARM", "", 1) == 0);
+        ASSERT(!zcl_dev_proof_warm_disabled());
+        if (had)
+            ASSERT(setenv("ZCL_DEV_PROOF_WARM", saved, 1) == 0);
+        else
+            ASSERT(unsetenv("ZCL_DEV_PROOF_WARM") == 0);
+#endif
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 /* The link/copy decision, proven against inodes. Linked outputs share the
  * donor's inode; the test rebuilds one through staging plus rename (the
  * epoch publisher's exact semantics) and proves the donor keeps its bytes
@@ -2962,6 +2999,7 @@ int test_impact_composition(void)
     failures += test_pw_marker_round_trip_and_refusals();
     failures += test_pw_seed_links_replaces_and_copies();
     failures += test_pw_seed_cold_without_seedables();
+    failures += test_pw_disable_switch_forces_cold();
     failures += test_ic_fast_sync_splits_keep_proof_lane();
     failures += test_ic_merkle_verifier_selects_proof_lane();
     failures += test_ic_proof_budget_grows_with_groups();

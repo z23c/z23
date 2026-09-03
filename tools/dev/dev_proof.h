@@ -152,6 +152,8 @@ struct zcl_dev_proof_warm_candidate {
     bool live;
 };
 
+/* files_linked counts every seeded file: hard-linked outputs plus the
+ * copied wrapper. The sidecar reports the same number. */
 struct zcl_dev_proof_warm_stats {
     uint64_t files_linked;
     uint64_t bytes_linked;
@@ -163,6 +165,9 @@ struct zcl_dev_proof_warm_stats {
  * same seam. A release build sees none of it. POSIX-only, like the
  * warm-start machinery itself. */
 bool zcl_dev_proof_warm_tag(const char *name);
+/* The ZCL_DEV_PROOF_WARM=0/"off"/"no" opt-out, exposed so the harness
+ * proves the cold-forcing switch it gates on. */
+bool zcl_dev_proof_warm_disabled(void);
 enum zcl_dev_proof_warm_seed_class zcl_dev_proof_warm_classify(
     const char *rel, bool is_reg);
 int zcl_dev_proof_warm_pick(const struct zcl_dev_proof_warm_candidate *c,
