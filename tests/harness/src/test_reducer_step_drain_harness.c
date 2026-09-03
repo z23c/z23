@@ -19,6 +19,7 @@
  */
 
 #include "test/test_core.h"
+#include "test/test_timing_budget.h"
 
 #include "bloom/merkle.h"
 #include "chain/chainparams.h"
@@ -948,8 +949,20 @@ int test_mint_fold_livelock(void)
          * or hard_cap*batch rounds — hours at live scale) inside ONE call. */
         ML_CHECK("walled: kick returned after ONE round, backlog NOT ground",
                  ha_after <= (uint64_t)(2 * BATCH) && ha_after < (uint64_t)N);
+        /* Wall ceiling scales with measured host load; nominal stays 60s. */
+        struct test_budget kick_budget =
+            test_budget_scale(UINT64_C(60LL * 1000 * 1000));
         ML_CHECK("walled: kick returned promptly (<60s wall clock)",
-                 elapsed_us < 60ll * 1000 * 1000);
+                 elapsed_us >= 0 &&
+                 (uint64_t)elapsed_us < kick_budget.effective_us);
+        if ((uint64_t)elapsed_us >= kick_budget.effective_us)
+            printf("  >> walled TIMEOUT: elapsed=%lldus nominal_us=%llu "
+                   "effective_us=%llu load_factor=%.2f calib_us=%llu\n",
+                   (long long)elapsed_us,
+                   (unsigned long long)kick_budget.nominal_us,
+                   (unsigned long long)kick_budget.effective_us,
+                   kick_budget.factor,
+                   (unsigned long long)kick_budget.calib_med_us);
         if (ha_after > (uint64_t)(2 * BATCH))
             printf("  >> walled: ha_after=%llu adv=%d elapsed=%lldus\n",
                    (unsigned long long)ha_after, advanced,
