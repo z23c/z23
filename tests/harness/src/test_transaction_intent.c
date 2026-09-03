@@ -782,6 +782,7 @@ int test_transaction_intent(void)
             &async_db, &row, plan_hex, true, ti_async_execute,
             &duplicate).ok);
         ASSERT(!duplicate);
+        ASSERT(vault_intent_async_plan_active(row.plan_id));
         ASSERT(vault_intent_async_start(
             &async_db, &row, plan_hex, true, ti_async_execute,
             &duplicate).ok);
@@ -801,7 +802,10 @@ int test_transaction_intent(void)
         ASSERT_EQ(atomic_load(&g_ti_async_calls), 1);
         ASSERT_EQ(queued.state, VAULT_INTENT_MEMPOOL_ACCEPTED);
         ASSERT(vault_intent_async_recover(&async_db, ti_async_execute).ok);
-        platform_sleep_ms(10);
+        for (int i = 0; i < 100 &&
+             vault_intent_async_plan_active(row.plan_id); i++)
+            platform_sleep_ms(5);
+        ASSERT(!vault_intent_async_plan_active(row.plan_id));
         ASSERT_EQ(atomic_load(&g_ti_async_calls), 1);
         g_ti_async_ndb = NULL;
         memset(g_ti_async_plan_id, 0, sizeof(g_ti_async_plan_id));
@@ -842,6 +846,10 @@ int test_transaction_intent(void)
         }
         ASSERT_EQ(atomic_load(&g_ti_async_calls), 2);
         ASSERT_EQ(got.state, VAULT_INTENT_MEMPOOL_ACCEPTED);
+        for (int i = 0; i < 100 &&
+             vault_intent_async_plan_active(row.plan_id); i++)
+            platform_sleep_ms(5);
+        ASSERT(!vault_intent_async_plan_active(row.plan_id));
         atomic_store(&g_ti_async_transient_once, 0);
         g_ti_async_ndb = NULL;
         memset(g_ti_async_plan_id, 0, sizeof(g_ti_async_plan_id));

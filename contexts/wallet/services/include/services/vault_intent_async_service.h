@@ -6,6 +6,7 @@
 #include "base/result.h"
 
 #include <stdbool.h>
+#include <stdint.h>
 
 struct json_value;
 struct node_db;
@@ -24,5 +25,10 @@ struct zcl_result vault_intent_async_start(
 /* Requeue restart-surviving PLANNED rows carrying ASYNC_QUEUED. */
 struct zcl_result vault_intent_async_recover(
     struct node_db *ndb, vault_intent_async_execute_fn execute);
+
+/* True until the process-local worker has completed all database work and
+ * released its slot. Callers that own the database may use this as a bounded
+ * lifetime barrier before closing it. */
+bool vault_intent_async_plan_active(const uint8_t plan_id[32]);
 
 #endif

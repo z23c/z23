@@ -119,6 +119,22 @@ static void via_slot_release(const uint8_t plan_id[32])
     (void)pthread_mutex_unlock(&g_via_lock);
 }
 
+bool vault_intent_async_plan_active(const uint8_t plan_id[32])
+{
+    if (!plan_id)
+        return false;
+    bool active = false;
+    (void)pthread_mutex_lock(&g_via_lock);
+    for (int i = 0; i < VIA_MAX; i++) {
+        if (g_via_used[i] && memcmp(g_via_ids[i], plan_id, 32) == 0) {
+            active = true;
+            break;
+        }
+    }
+    (void)pthread_mutex_unlock(&g_via_lock);
+    return active;
+}
+
 static bool via_error_retryable(const char *code)
 {
     if (!code || !code[0])
