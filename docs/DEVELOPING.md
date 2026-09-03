@@ -630,7 +630,9 @@ Before committing:
    proof producer is not implemented yet, so a missing receipt refuses
    immediately; run the explicit `make windows-acceptance` parity gate while
    developing, but do not mistake that gate for an admissible receipt.
-8. Verify local HEAD, `origin/main`, and the remote branch SHA agree.
+8. Push the proof-green commit to `origin/main`; do not create a GitHub Issue
+   or pull request for coordination.
+9. Verify local HEAD, `origin/main`, and the remote branch SHA agree.
 
 Every changed C path must map to focused proof through the repository's impact
 rules. Unmapped or incomplete closure refuses receipt publication. On POSIX,

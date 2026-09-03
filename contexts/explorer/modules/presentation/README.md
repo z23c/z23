@@ -92,6 +92,13 @@ Win32 on Windows, Cocoa on macOS, and dynamically loaded X11 on Linux. Those are
 OS/desktop APIs, not application dependencies. Rendering is software-only and
 does not require OpenGL, GTK, Qt, libqrencode, Python, or a browser.
 
+An opt-in caller-rendered copy control maps through the same aspect-fit
+geometry as chart hover input. Clicking it or pressing `C` encodes the current
+source bitmap as a 24-bit BMP entirely in memory, writes the native image
+clipboard, and leaves the window open. Success changes both the button pixels
+and title immediately. The bounded encoder can also report or fill the exact
+BMP byte count in a caller-owned buffer without touching a file or clipboard.
+
 The full binary's resident boundary is
 `contexts/explorer/views/src/ui_present_host.c`. On Linux it binds a mode-0600 filesystem
 AF_UNIX endpoint inside a validated mode-0700 per-user runtime directory,

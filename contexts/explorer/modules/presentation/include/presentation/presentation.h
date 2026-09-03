@@ -140,6 +140,17 @@ struct zcl_present_window_hover_v1 {
     uint32_t item_count;
 };
 
+/* Local source-space control that copies the currently selected bitmap as an
+ * image. It returns no software-authority event and never writes a file. */
+struct zcl_present_window_copy_v1 {
+    uint32_t struct_size;
+    uint32_t abi_version;
+    uint32_t left;
+    uint32_t top;
+    uint32_t right;
+    uint32_t bottom;
+};
+
 /* Called after the native window and software surface exist and the first
  * bitmap has been blitted. The callback belongs to the reviewed host, never
  * to the inert visual document or fetched code. */
@@ -150,6 +161,13 @@ typedef void (*zcl_present_window_ready_fn)(void *context);
 bool zcl_present_window_validate_v1(
     const struct zcl_present_window_v1 *request,
     char *error, size_t error_cap);
+
+/* Encode one bounded RGB/RGBA source bitmap as a portable 24-bit BMP in a
+ * caller-owned buffer. Querying with output=NULL returns the exact required
+ * byte count through written without touching the clipboard or filesystem. */
+bool zcl_present_bitmap_encode_bmp_v1(
+    const struct zcl_present_window_v1 *request,
+    uint8_t *output, size_t output_cap, size_t *written);
 
 /* Open one native, resizable software-rendered window and block until the user
  * closes it. Resizing preserves aspect ratio; Escape/Q close and C copies
@@ -171,6 +189,15 @@ bool zcl_present_window_run_hover_v1(
 bool zcl_present_window_run_pages_hover_v1(
     const struct zcl_present_window_pages_v1 *pages,
     const struct zcl_present_window_hover_v1 *hovers,
+    uint32_t initial_page, char *error, size_t error_cap);
+
+/* Hover navigation plus a visible caller-rendered image-copy control. Clicking
+ * inside copy or pressing C writes the current source bitmap to the native
+ * image clipboard without closing the window. */
+bool zcl_present_window_run_pages_hover_copy_v1(
+    const struct zcl_present_window_pages_v1 *pages,
+    const struct zcl_present_window_hover_v1 *hovers,
+    const struct zcl_present_window_copy_v1 *copy,
     uint32_t initial_page, char *error, size_t error_cap);
 
 /* Multi-page hover window. Hover columns apply only to page 0; PgUp/PgDn
@@ -293,6 +320,13 @@ bool zcl_present_window_hover_at_v1(
     uint32_t source_width, uint32_t source_height,
     int32_t target_width, int32_t target_height,
     int32_t mouse_x, int32_t mouse_y, uint32_t *item_index);
+
+/* Pure aspect-fit hit test for a caller-rendered image-copy control. */
+bool zcl_present_window_copy_at_v1(
+    const struct zcl_present_window_copy_v1 *copy,
+    uint32_t source_width, uint32_t source_height,
+    int32_t target_width, int32_t target_height,
+    int32_t mouse_x, int32_t mouse_y);
 
 /* Pure clamped navigation reducer shared by the backend and input tests. */
 bool zcl_present_window_hover_step_v1(

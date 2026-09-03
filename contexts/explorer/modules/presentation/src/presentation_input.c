@@ -104,6 +104,25 @@ bool zcl_present_window_hover_at_v1(
     return true;
 }
 
+bool zcl_present_window_copy_at_v1(
+    const struct zcl_present_window_copy_v1 *copy,
+    uint32_t source_width, uint32_t source_height,
+    int32_t target_width, int32_t target_height,
+    int32_t mouse_x, int32_t mouse_y)
+{
+    if (!copy || copy->struct_size != sizeof(*copy) ||
+        copy->abi_version != ZCL_PRESENT_ABI_V1 ||
+        copy->left >= copy->right || copy->top >= copy->bottom ||
+        copy->right > source_width || copy->bottom > source_height)
+        return false;
+    uint32_t source_x = 0, source_y = 0;
+    return present_source_point(
+               source_width, source_height, target_width, target_height,
+               mouse_x, mouse_y, &source_x, &source_y) &&
+           source_x >= copy->left && source_x < copy->right &&
+           source_y >= copy->top && source_y < copy->bottom;
+}
+
 bool zcl_present_window_hover_step_v1(
     uint32_t current_item, uint32_t item_count, int32_t delta,
     uint32_t *next_item)

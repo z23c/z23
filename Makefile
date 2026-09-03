@@ -1771,8 +1771,9 @@ PRESENTATION_VENDOR_INPUTS := \
 	vendor/qrcodegen/LICENSE vendor/qrcodegen/SOURCE \
 	vendor/qrcodegen/SHA256SUMS \
 	vendor/typography/stb_truetype.h \
-	vendor/typography/noto_sans_ascii.inc \
-	vendor/typography/LICENSE.stb vendor/typography/LICENSE.noto \
+	vendor/typography/inter_medium_ascii.inc \
+	vendor/typography/inter_semibold_ascii.inc \
+	vendor/typography/LICENSE.stb vendor/typography/LICENSE.inter \
 	vendor/typography/SOURCE vendor/typography/SHA256SUMS \
 	vendor/x11/LICENSE vendor/x11/SOURCE vendor/x11/SHA256SUMS \
 	$(wildcard vendor/x11/include/X11/*.h) \
@@ -1889,7 +1890,8 @@ $(PRESENTATION_BUILD_DIR)/canvas.o: \
 	contexts/explorer/modules/presentation/src/canvas.c \
 	contexts/explorer/modules/presentation/include/presentation/canvas.h \
 	vendor/typography/stb_truetype.h \
-	vendor/typography/noto_sans_ascii.inc \
+	vendor/typography/inter_medium_ascii.inc \
+	vendor/typography/inter_semibold_ascii.inc \
 	$(PRESENTATION_PROVENANCE_STAMP)
 	@mkdir -p $(PRESENTATION_BUILD_DIR)
 	$(CC) $(PRESENTATION_PACKAGE_CFLAGS) -c \

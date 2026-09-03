@@ -5494,14 +5494,20 @@ void RGFW_XHandleClipboardSelection(XEvent* event) { RGFW_UNUSED(event);
     const int formatCount = sizeof(formats) / sizeof(formats[0]);
 
     if (request->target == TARGETS) {
-        Atom targets[4] = {0};
+        Atom targets[8] = {0};
         targets[0] = TARGETS;
         targets[1] = MULTIPLE;
         targets[2] = UTF8_STRING;
         targets[3] = XA_STRING;
+        int targetCount = 4;
+#ifdef RGFW_X11_CLIPBOARD_APPEND_TARGETS
+        targetCount = RGFW_X11_CLIPBOARD_APPEND_TARGETS(
+            _RGFW->display, targets, targetCount,
+            (int)(sizeof(targets) / sizeof(targets[0])));
+#endif
 
         XChangeProperty(_RGFW->display, request->requestor, request->property,
-                        XA_ATOM, 32, PropModeReplace, (u8*) targets, sizeof(targets) / sizeof(Atom));
+                        XA_ATOM, 32, PropModeReplace, (u8*) targets, targetCount);
     }  else if (request->target == MULTIPLE) {
 		Atom* targets = NULL;
 
@@ -5517,6 +5523,11 @@ void RGFW_XHandleClipboardSelection(XEvent* event) { RGFW_UNUSED(event);
 			if (targets[i] == UTF8_STRING || targets[i] == XA_STRING)
 				XChangeProperty(_RGFW->display, request->requestor, targets[i + 1], targets[i],
 					8, PropModeReplace, (const unsigned char *)_RGFW->clipboard, (i32)_RGFW->clipboard_len);
+			#ifdef RGFW_X11_CLIPBOARD_WRITE_TARGET
+			else if (RGFW_X11_CLIPBOARD_WRITE_TARGET(
+					 _RGFW->display, request->requestor,
+					 targets[i], targets[i + 1])) { }
+			#endif
 			else
 				targets[i + 1] = None;
 		}
@@ -5530,8 +5541,15 @@ void RGFW_XHandleClipboardSelection(XEvent* event) { RGFW_UNUSED(event);
 	} else if (request->target == SAVE_TARGETS)
         XChangeProperty(_RGFW->display, request->requestor, request->property, 0, 32, PropModeReplace, NULL, 0);
     else {
+#ifdef RGFW_X11_CLIPBOARD_WRITE_TARGET
+        int wroteCustomTarget = RGFW_X11_CLIPBOARD_WRITE_TARGET(
+            _RGFW->display, request->requestor,
+            request->target, request->property);
+#else
+        int wroteCustomTarget = 0;
+#endif
         int i;
-        for (i = 0;  i < formatCount;  i++) {
+		for (i = 0; !wroteCustomTarget && i < formatCount; i++) {
 			if (request->target != formats[i])
 				continue;
 			XChangeProperty(_RGFW->display, request->requestor, request->property, request->target,

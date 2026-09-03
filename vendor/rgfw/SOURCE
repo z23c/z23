@@ -5,4 +5,4 @@ revision=d96684e6877d3ef11c731b122b8949942ed071c9
 license=Zlib
 files=RGFW.h,XDL.h,LICENSE
 integration=private software-window backend behind lib/presentation
-local_patch=RGFW_NO_XINPUT2 guard; unused optional XRandR/XInput2 compile closure disabled by lib/presentation
+local_patch=RGFW_NO_XINPUT2 guard; unused optional XRandR/XInput2 compile closure disabled by lib/presentation; bounded X11 custom clipboard target hook for native bitmap copy

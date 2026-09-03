@@ -292,8 +292,10 @@ mission.
   "legacy" exception.
 - Preserve unrelated dirty work. Never reset, overwrite, or fold it into your
   commit.
-- Maintain one primary writer per component. Coordinate through committed
-  source identity; `origin/main` is the shared integration blackboard.
+- Maintain one primary writer per component. GitHub Issues and pull requests
+  are not coordination authorities and must not be created. Coordinate through
+  Z23 task, candidate, action, and receipt objects; committed `origin/main`
+  identity is the shared integration blackboard.
 - Fetch current `origin/main` before work and before each push. Integrate it
   safely, then rerun affected gates.
 - Use typed native commands to inspect and operate a running node. Git,

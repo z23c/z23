@@ -18,7 +18,7 @@
 #define NPG_WIDTH 1120u
 #define NPG_HEIGHT 680u
 #define NPG_TEXT_SCALES 3u
-#define NPG_TEXT_SCALE_DEFAULT 0u
+#define NPG_TEXT_SCALE_DEFAULT 1u
 #define NPG_PLOT_LEFT 104u
 #define NPG_PLOT_TOP 230u
 #define NPG_PLOT_RIGHT 1048u
@@ -349,6 +349,8 @@ static void npg_draw_controls(
     const struct zcl_present_color panel_bottom = {11, 21, 38};
     const struct zcl_present_color primary = {241, 246, 255};
     const struct zcl_present_color secondary = {153, 174, 201};
+    const struct zcl_present_color button_top = {42, 211, 186};
+    const struct zcl_present_color button_bottom = {25, 151, 145};
     zcl_present_canvas_fill_rect(canvas, 34, 617, 1058u, 39u, shadow);
     zcl_present_canvas_fill_vertical_gradient(
         canvas, 28, 610, 1064u, 46u, panel_top, panel_bottom);
@@ -357,9 +359,15 @@ static void npg_draw_controls(
     };
     npg_text_strong(canvas, 48, 623, labels[text_scale],
                     npg_font(16u, text_scale), primary);
-    npg_text_strong(canvas, 157, 623,
+    zcl_present_canvas_fill_vertical_gradient(
+        canvas, 870, 615, 202u, 36u, button_top, button_bottom);
+    zcl_present_canvas_stroke_rect(
+        canvas, 870, 615, 202u, 36u, 1u, primary);
+    npg_text_strong(canvas, 892, 622, "COPY IMAGE  [C]",
+                    npg_font(16u, text_scale), primary);
+    npg_text_strong(canvas, 180, 623,
              "- / +: TEXT  |  HOVER  |  WHEEL / ARROWS: DAY  |  "
-             "PGUP PGDN: WEEK  |  HOME END: RANGE",
+             "PGUP PGDN: WEEK",
              npg_font(16u, text_scale), secondary);
 }
 
@@ -461,7 +469,9 @@ static bool npg_reply_points(
         json_push_kv_str(&reply->data, "navigation",
             "hover; wheel/arrows day; page keys week; home/end range") &&
         json_push_kv_str(&reply->data, "text_size",
-            "minus/plus; small, medium, large; default small");
+            "minus/plus; small, medium, large; default medium") &&
+        json_push_kv_str(&reply->data, "clipboard",
+            "button or C; current chart copied as a native image");
     static const char *const fields[] = {
         "date_utc", "head_commit", "commits",
         "non_test_lines", "non_test_added", "non_test_deleted",
@@ -565,8 +575,17 @@ void zcl_native_handle_presentation_code_growth(
         .pages = windows,
         .page_count = NPG_TEXT_SCALES,
     };
-    bool shown = zcl_present_window_run_pages_hover_v1(
-        &pages, hovers, NPG_TEXT_SCALE_DEFAULT, error, sizeof(error));
+    const struct zcl_present_window_copy_v1 copy = {
+        .struct_size = sizeof(copy),
+        .abi_version = ZCL_PRESENT_ABI_V1,
+        .left = 870u,
+        .top = 615u,
+        .right = 1072u,
+        .bottom = 651u,
+    };
+    bool shown = zcl_present_window_run_pages_hover_copy_v1(
+        &pages, hovers, &copy, NPG_TEXT_SCALE_DEFAULT,
+        error, sizeof(error));
     npg_visuals_free(visuals);
     if (!shown) {
         npg_fail(reply, "NATIVE_CHART_FAILED", error);

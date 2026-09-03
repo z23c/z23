@@ -363,6 +363,24 @@ int test_qr(void)
     };
     QR_CHECK("portable presentation request validates",
              zcl_present_window_validate_v1(&present, why, sizeof(why)));
+    size_t bmp_size = 0;
+    uint8_t bmp[70] = {0};
+    QR_CHECK("native clipboard BMP size is exact without allocation",
+             zcl_present_bitmap_encode_bmp_v1(
+                 &present, NULL, 0u, &bmp_size) && bmp_size == sizeof(bmp));
+    QR_CHECK("native clipboard BMP preserves dimensions and BGR row order",
+             zcl_present_bitmap_encode_bmp_v1(
+                 &present, bmp, sizeof(bmp), &bmp_size) &&
+             bmp[0] == 'B' && bmp[1] == 'M' &&
+             bmp[18] == 2u && bmp[22] == 2u && bmp[28] == 24u &&
+             bmp[54] == 0x00u && bmp[55] == 0x00u && bmp[56] == 0x00u &&
+             bmp[57] == 0xffu && bmp[58] == 0xffu && bmp[59] == 0xffu &&
+             bmp[62] == 0xffu && bmp[63] == 0xffu && bmp[64] == 0xffu &&
+             bmp[65] == 0x00u && bmp[66] == 0x00u && bmp[67] == 0x00u);
+    QR_CHECK("native clipboard BMP refuses a short destination",
+             !zcl_present_bitmap_encode_bmp_v1(
+                 &present, bmp, sizeof(bmp) - 1u, &bmp_size) &&
+             bmp_size == sizeof(bmp));
     present.abi_version++;
     QR_CHECK("presentation ABI mismatch fails closed",
              !zcl_present_window_validate_v1(&present, why, sizeof(why)));
@@ -419,6 +437,24 @@ int test_qr(void)
              !zcl_present_window_hover_at_v1(
                  &hover, 720, 720, 1000, 720, 100, 300,
                  &hover_index));
+    const struct zcl_present_window_copy_v1 copy = {
+        .struct_size = sizeof(copy),
+        .abi_version = ZCL_PRESENT_ABI_V1,
+        .left = 500u,
+        .top = 620u,
+        .right = 700u,
+        .bottom = 680u,
+    };
+    QR_CHECK("native image-copy control preserves resized hit geometry",
+             zcl_present_window_copy_at_v1(
+                 &copy, 720, 720, 720, 720, 600, 650) &&
+             zcl_present_window_copy_at_v1(
+                 &copy, 720, 720, 1440, 1440, 1200, 1300));
+    QR_CHECK("native image-copy control rejects edges and letterboxing",
+             !zcl_present_window_copy_at_v1(
+                 &copy, 720, 720, 720, 720, 700, 650) &&
+             !zcl_present_window_copy_at_v1(
+                 &copy, 720, 720, 1000, 720, 120, 650));
     QR_CHECK("chart keys step and clamp exact day selection",
              zcl_present_window_hover_step_v1(
                  1u, 3u, -7, &hover_index) && hover_index == 0u &&

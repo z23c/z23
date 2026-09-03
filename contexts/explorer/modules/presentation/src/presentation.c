@@ -9,9 +9,25 @@
 #include "presentation_focus_internal.h"
 #include "presentation_form_internal.h"
 
+#if defined(__linux__)
+static int present_x11_clipboard_append_targets(
+    void *display, unsigned long *targets, int count, int capacity);
+static int present_x11_clipboard_write_target(
+    void *display, unsigned long requestor, unsigned long target,
+    unsigned long property);
+#define RGFW_X11_CLIPBOARD_APPEND_TARGETS(display, targets, count, capacity) \
+    present_x11_clipboard_append_targets( \
+        (display), (unsigned long *)(targets), (count), (capacity))
+#define RGFW_X11_CLIPBOARD_WRITE_TARGET(display, requestor, target, property) \
+    present_x11_clipboard_write_target( \
+        (display), (unsigned long)(requestor), (unsigned long)(target), \
+        (unsigned long)(property))
+#endif
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <limits.h>
 
 /* RGFW is private implementation detail. These switches keep graphics on the
  * CPU, avoid OpenGL, and on Linux dynamically load the system X11 API instead
@@ -52,6 +68,177 @@
 #undef _MSC_VER
 #undef ZCL_PRESENT_UNDEF_MSC_VER
 #endif
+
+static void present_write_u16_le(uint8_t *out, uint16_t value)
+{
+    out[0] = (uint8_t)value;
+    out[1] = (uint8_t)(value >> 8);
+}
+
+static void present_write_u32_le(uint8_t *out, uint32_t value)
+{
+    out[0] = (uint8_t)value;
+    out[1] = (uint8_t)(value >> 8);
+    out[2] = (uint8_t)(value >> 16);
+    out[3] = (uint8_t)(value >> 24);
+}
+
+bool zcl_present_bitmap_encode_bmp_v1(
+    const struct zcl_present_window_v1 *page,
+    uint8_t *output, size_t output_cap, size_t *written)
+{
+    if (!page || !written || !page->pixels || page->width == 0 ||
+        page->height == 0 ||
+        (page->pixel_format != ZCL_PRESENT_RGB8 &&
+         page->pixel_format != ZCL_PRESENT_RGBA8))
+        return false;
+    uint64_t row_bytes = ((uint64_t)page->width * 3u + 3u) & ~UINT64_C(3);
+    uint64_t pixel_bytes = row_bytes * page->height;
+    uint64_t total = 54u + pixel_bytes;
+    if (row_bytes > SIZE_MAX || total > SIZE_MAX || total > UINT32_MAX)
+        return false;
+    *written = (size_t)total;
+    if (!output) return true;
+    if (output_cap < (size_t)total) return false;
+    uint8_t *bmp = output;
+    memset(bmp, 0, (size_t)total);
+    bmp[0] = 'B';
+    bmp[1] = 'M';
+    present_write_u32_le(bmp + 2, (uint32_t)total);
+    present_write_u32_le(bmp + 10, 54u);
+    present_write_u32_le(bmp + 14, 40u);
+    present_write_u32_le(bmp + 18, page->width);
+    present_write_u32_le(bmp + 22, page->height);
+    present_write_u16_le(bmp + 26, 1u);
+    present_write_u16_le(bmp + 28, 24u);
+    present_write_u32_le(bmp + 34, (uint32_t)pixel_bytes);
+    uint32_t channels = (uint32_t)page->pixel_format;
+    for (uint32_t y = 0; y < page->height; y++) {
+        uint32_t source_y = page->height - 1u - y;
+        const uint8_t *source = page->pixels +
+            (size_t)source_y * page->width * channels;
+        uint8_t *target = bmp + 54u + (size_t)y * (size_t)row_bytes;
+        for (uint32_t x = 0; x < page->width; x++) {
+            target[x * 3u] = source[x * channels + 2u];
+            target[x * 3u + 1u] = source[x * channels + 1u];
+            target[x * 3u + 2u] = source[x * channels];
+        }
+    }
+    return true;
+}
+
+static bool present_bmp_encode(
+    const struct zcl_present_window_v1 *page,
+    uint8_t **encoded, size_t *encoded_len)
+{
+    size_t required = 0;
+    if (!encoded || !encoded_len ||
+        !zcl_present_bitmap_encode_bmp_v1(
+            page, NULL, 0u, &required))
+        return false;
+    uint8_t *bmp = malloc(required); // raw-alloc-ok:standalone-presentation-package
+    if (!bmp) return false;
+    if (!zcl_present_bitmap_encode_bmp_v1(
+            page, bmp, required, encoded_len)) {
+        free(bmp);
+        return false;
+    }
+    *encoded = bmp;
+    return true;
+}
+
+#if defined(__linux__)
+static uint8_t *present_x11_clipboard_bmp;
+static size_t present_x11_clipboard_bmp_len;
+
+static int present_x11_clipboard_append_targets(
+    void *display_ptr, unsigned long *targets, int count, int capacity)
+{
+    Display *display = display_ptr;
+    if (!display || !targets || count < 0 || count >= capacity ||
+        !present_x11_clipboard_bmp)
+        return count;
+    targets[count++] = XInternAtom(display, "image/bmp", False);
+    return count;
+}
+
+static int present_x11_clipboard_write_target(
+    void *display_ptr, unsigned long requestor_value,
+    unsigned long target_value, unsigned long property_value)
+{
+    Display *display = display_ptr;
+    Atom target = (Atom)target_value;
+    Atom image_bmp = display
+        ? XInternAtom(display, "image/bmp", False) : None;
+    if (!display || !present_x11_clipboard_bmp || target != image_bmp ||
+        present_x11_clipboard_bmp_len > INT_MAX)
+        return 0;
+    (void)XChangeProperty(
+        display, (Window)requestor_value, (Atom)property_value,
+        image_bmp, 8, PropModeReplace, present_x11_clipboard_bmp,
+        (int)present_x11_clipboard_bmp_len);
+    return 1;
+}
+#endif
+
+static bool present_clipboard_write_image(
+    const struct zcl_present_window_v1 *page)
+{
+    uint8_t *bmp = NULL;
+    size_t bmp_len = 0;
+    if (!present_bmp_encode(page, &bmp, &bmp_len)) return false;
+#if defined(_WIN32)
+    if (bmp_len <= 14u || !OpenClipboard(_RGFW->root->src.window)) {
+        free(bmp);
+        return false;
+    }
+    HGLOBAL storage = GlobalAlloc(GMEM_MOVEABLE, bmp_len - 14u);
+    void *destination = storage ? GlobalLock(storage) : NULL;
+    if (!destination) {
+        if (storage) GlobalFree(storage);
+        CloseClipboard();
+        free(bmp);
+        return false;
+    }
+    memcpy(destination, bmp + 14u, bmp_len - 14u);
+    GlobalUnlock(storage);
+    EmptyClipboard();
+    bool ok = SetClipboardData(CF_DIB, storage) != NULL;
+    if (!ok) GlobalFree(storage);
+    CloseClipboard();
+    free(bmp);
+    return ok;
+#elif defined(__APPLE__)
+    id pasteboard = NSPasteboard_generalPasteboard();
+    NSPasteboardType types[] = {"com.microsoft.bmp", NULL};
+    NSPasteBoard_declareTypes(pasteboard, types, 1u, NULL);
+    id data = ((id (*)(id, SEL, const void *, NSUInteger))objc_msgSend)(
+        (id)objc_getClass("NSData"),
+        sel_registerName("dataWithBytes:length:"), bmp,
+        (NSUInteger)bmp_len);
+    bool ok = data && ((bool (*)(id, SEL, id, id))objc_msgSend)(
+        pasteboard, sel_registerName("setData:forType:"), data,
+        NSString_stringWithUTF8String("com.microsoft.bmp"));
+    free(bmp);
+    return ok;
+#elif defined(__linux__)
+    Display *display = (Display *)RGFW_getDisplay_X11();
+    if (!display || !_RGFW || !_RGFW->helperWindow) {
+        free(bmp);
+        return false;
+    }
+    free(present_x11_clipboard_bmp);
+    present_x11_clipboard_bmp = bmp;
+    present_x11_clipboard_bmp_len = bmp_len;
+    Atom clipboard = XInternAtom(display, "CLIPBOARD", False);
+    XSetSelectionOwner(display, clipboard, _RGFW->helperWindow, CurrentTime);
+    XFlush(display);
+    return XGetSelectionOwner(display, clipboard) == _RGFW->helperWindow;
+#else
+    free(bmp);
+    return false;
+#endif
+}
 
 static bool present_error(char *error, size_t cap, const char *message)
 {
@@ -419,6 +606,68 @@ static bool present_redraw(
     return true;
 }
 
+static bool present_show_copy_feedback(
+    RGFW_window *window, const struct zcl_present_window_v1 *page,
+    const struct zcl_present_window_copy_v1 *copy,
+    RGFW_surface **surface, uint8_t *scaled_pixels)
+{
+    if (!window || !page || !copy || !surface || !*surface ||
+        !scaled_pixels || page->pixel_format != ZCL_PRESENT_RGB8)
+        return false;
+    i32 width = 0, height = 0;
+    (void)RGFW_window_getSize(window, &width, &height);
+    if (width <= 0 || height <= 0) return false;
+    uint32_t draw_width = (uint32_t)width;
+    uint32_t draw_height = (uint32_t)((uint64_t)draw_width * page->height /
+                                      page->width);
+    if (draw_height > (uint32_t)height) {
+        draw_height = (uint32_t)height;
+        draw_width = (uint32_t)((uint64_t)draw_height * page->width /
+                                page->height);
+    }
+    uint32_t x0 = ((uint32_t)width - draw_width) / 2u;
+    uint32_t y0 = ((uint32_t)height - draw_height) / 2u;
+    uint32_t left = x0 + (uint32_t)((uint64_t)copy->left * draw_width /
+                                    page->width);
+    uint32_t top = y0 + (uint32_t)((uint64_t)copy->top * draw_height /
+                                   page->height);
+    uint32_t right = x0 + (uint32_t)((uint64_t)copy->right * draw_width /
+                                     page->width);
+    uint32_t bottom = y0 + (uint32_t)((uint64_t)copy->bottom * draw_height /
+                                      page->height);
+    if (right <= left || bottom <= top) return false;
+    struct zcl_present_canvas canvas;
+    if (!zcl_present_canvas_init(
+            &canvas, scaled_pixels, (size_t)(uint32_t)width *
+                                      (uint32_t)height * 3u,
+            (uint32_t)width, (uint32_t)height))
+        return false;
+    const struct zcl_present_color bright = {72, 240, 197};
+    const struct zcl_present_color deep = {8, 66, 63};
+    const struct zcl_present_color white = {255, 255, 255};
+    zcl_present_canvas_fill_vertical_gradient(
+        &canvas, (int32_t)left, (int32_t)top,
+        right - left, bottom - top, bright, deep);
+    zcl_present_canvas_stroke_rect(
+        &canvas, (int32_t)left, (int32_t)top,
+        right - left, bottom - top, 2u, white);
+    uint32_t font_size = (uint32_t)((uint64_t)17u * draw_height /
+                                    page->height);
+    if (font_size < 12u) font_size = 12u;
+    if (font_size > 24u) font_size = 24u;
+    zcl_present_canvas_text_strong(
+        &canvas, (int32_t)left + (int32_t)((right - left) / 8u),
+        (int32_t)top + (int32_t)((bottom - top) / 5u),
+        "COPIED!  PASTE NOW", 18u, font_size, white);
+    RGFW_surface *replacement = RGFW_window_createSurface(
+        window, scaled_pixels, width, height, RGFW_formatRGB8);
+    if (!replacement) return false;
+    RGFW_surface_free(*surface);
+    *surface = replacement;
+    RGFW_window_blitSurface(window, *surface);
+    return true;
+}
+
 static bool present_run_pages_actions(
     const struct zcl_present_window_pages_v1 *pages,
     uint32_t action_count,
@@ -427,6 +676,7 @@ static bool present_run_pages_actions(
     const struct zcl_present_window_hover_v1 *hovers,
     bool hovers_first_page_only,
     uint32_t initial_page,
+    const struct zcl_present_window_copy_v1 *copy,
     zcl_present_window_ready_fn ready,
     void *ready_context,
     struct zcl_present_window_event_v1 *result,
@@ -446,6 +696,13 @@ static bool present_run_pages_actions(
     if (initial_page >= pages->page_count)
         return present_error(error, error_cap,
                              "presentation initial page is invalid");
+    if (copy && (copy->struct_size != sizeof(*copy) ||
+                 copy->abi_version != ZCL_PRESENT_ABI_V1 ||
+                 copy->left >= copy->right || copy->top >= copy->bottom ||
+                 copy->right > pages->pages[0].width ||
+                 copy->bottom > pages->pages[0].height))
+        return present_error(error, error_cap,
+                             "presentation image-copy bounds are invalid");
     if ((form && canvas) || ((form || canvas) && hovers))
         return present_error(error, error_cap,
                              "presentation controls are mutually exclusive");
@@ -649,7 +906,19 @@ static bool present_run_pages_actions(
                 uint32_t action = UINT32_MAX;
                 (void)RGFW_window_getSize(window, &window_width,
                                           &window_height);
-                if (RGFW_window_getMouse(window, &mouse_x, &mouse_y) &&
+                bool has_mouse = RGFW_window_getMouse(
+                    window, &mouse_x, &mouse_y);
+                if (has_mouse && copy && zcl_present_window_copy_at_v1(
+                        copy, request->width, request->height,
+                        window_width, window_height, mouse_x, mouse_y)) {
+                    bool copied = present_clipboard_write_image(request);
+                    RGFW_window_setName(
+                        window, copied ? "Z23 C23 Growth — Image copied"
+                                       : "Z23 C23 Growth — Copy unavailable");
+                    if (copied)
+                        (void)present_show_copy_feedback(
+                            window, request, copy, &surface, scaled_pixels);
+                } else if (has_mouse &&
                     zcl_present_window_action_at_v1(
                         request->width, request->height,
                         window_width, window_height, mouse_x, mouse_y,
@@ -864,9 +1133,19 @@ static bool present_run_pages_actions(
             if (form || canvas) continue;
             if (event.key.value == RGFW_q)
                 RGFW_window_setShouldClose(window, RGFW_TRUE);
-            if (event.key.value == RGFW_c && request->copy_text) {
-                size_t copy_len = strlen(request->copy_text);
-                RGFW_writeClipboard(request->copy_text, (u32)copy_len);
+            if (event.key.value == RGFW_c) {
+                if (copy) {
+                    bool copied = present_clipboard_write_image(request);
+                    RGFW_window_setName(
+                        window, copied ? "Z23 C23 Growth — Image copied"
+                                       : "Z23 C23 Growth — Copy unavailable");
+                    if (copied)
+                        (void)present_show_copy_feedback(
+                            window, request, copy, &surface, scaled_pixels);
+                } else if (request->copy_text) {
+                    size_t copy_len = strlen(request->copy_text);
+                    RGFW_writeClipboard(request->copy_text, (u32)copy_len);
+                }
             }
             static const RGFW_key action_keys[] = {
                 RGFW_1, RGFW_2, RGFW_3, RGFW_4,
@@ -902,7 +1181,8 @@ bool zcl_present_window_run_pages_actions_v1(
     char *error, size_t error_cap)
 {
     return present_run_pages_actions(
-        pages, action_count, NULL, NULL, NULL, false, 0u, ready, ready_context,
+        pages, action_count, NULL, NULL, NULL, false, 0u, NULL,
+        ready, ready_context,
         result, error, error_cap);
 }
 
@@ -916,7 +1196,8 @@ bool zcl_present_window_run_pages_form_actions_v1(
     char *error, size_t error_cap)
 {
     return present_run_pages_actions(
-        pages, action_count, form, NULL, NULL, false, 0u, ready, ready_context,
+        pages, action_count, form, NULL, NULL, false, 0u, NULL,
+        ready, ready_context,
         result, error, error_cap);
 }
 
@@ -930,7 +1211,7 @@ bool zcl_present_window_run_pages_canvas_actions_v1(
     char *error, size_t error_cap)
 {
     return present_run_pages_actions(
-        pages, action_count, NULL, canvas, NULL, false, 0u, ready,
+        pages, action_count, NULL, canvas, NULL, false, 0u, NULL, ready,
         ready_context, result, error, error_cap);
 }
 
@@ -975,7 +1256,7 @@ bool zcl_present_window_run_hover_v1(
     };
     struct zcl_present_window_event_v1 event;
     return present_run_pages_actions(
-        &pages, 0, NULL, NULL, hover, false, 0u, NULL, NULL,
+        &pages, 0, NULL, NULL, hover, false, 0u, NULL, NULL, NULL,
         &event, error, error_cap);
 }
 
@@ -986,7 +1267,7 @@ bool zcl_present_window_run_pages_first_hover_v1(
 {
     struct zcl_present_window_event_v1 event;
     return present_run_pages_actions(
-        pages, 0, NULL, NULL, hover, true, 0u, NULL, NULL,
+        pages, 0, NULL, NULL, hover, true, 0u, NULL, NULL, NULL,
         &event, error, error_cap);
 }
 
@@ -997,6 +1278,19 @@ bool zcl_present_window_run_pages_hover_v1(
 {
     struct zcl_present_window_event_v1 event;
     return present_run_pages_actions(
-        pages, 0, NULL, NULL, hovers, false, initial_page, NULL, NULL,
+        pages, 0, NULL, NULL, hovers, false, initial_page, NULL,
+        NULL, NULL,
         &event, error, error_cap);
+}
+
+bool zcl_present_window_run_pages_hover_copy_v1(
+    const struct zcl_present_window_pages_v1 *pages,
+    const struct zcl_present_window_hover_v1 *hovers,
+    const struct zcl_present_window_copy_v1 *copy,
+    uint32_t initial_page, char *error, size_t error_cap)
+{
+    struct zcl_present_window_event_v1 event;
+    return present_run_pages_actions(
+        pages, 0, NULL, NULL, hovers, false, initial_page, copy,
+        NULL, NULL, &event, error, error_cap);
 }
