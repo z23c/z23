@@ -60,8 +60,9 @@ uint64_t zcl_present_canvas_chart_scale_maximum(uint64_t value);
 /* Pure time-axis label cadence over uniformly spaced columns: returns the
  * smallest exact-day stride from one week through one year whose consecutive
  * labels of label_width pixels plus label_gap stay clear of each other across
- * plot_width. Weekly labels remain preferred whenever they fit; a single
- * column or an unfittable request falls back to the widest cadence. */
+ * plot_width. Weekly labels remain preferred whenever they fit; a request
+ * with at most one column has no neighbor pair and keeps the weekly cadence,
+ * while an unfittable request falls back to the widest cadence. */
 uint32_t zcl_present_canvas_axis_label_stride_v1(
     uint32_t column_count, uint32_t plot_width,
     uint32_t label_width, uint32_t label_gap);

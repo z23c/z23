@@ -423,6 +423,13 @@ int test_qr(void)
     QR_CHECK("chart axis cadence falls back to a yearly bound",
              zcl_present_canvas_axis_label_stride_v1(
                  512u, 80u, 40u, 12u) == 365u);
+    QR_CHECK("chart axis cadence lone column keeps weekly, only unfittable widens",
+             zcl_present_canvas_axis_label_stride_v1(
+                 0u, 944u, 40u, 12u) == 7u &&
+             zcl_present_canvas_axis_label_stride_v1(
+                 1u, 944u, 40u, 12u) == 7u &&
+             zcl_present_canvas_axis_label_stride_v1(
+                 512u, 40u, 40u, 12u) == 365u);
     const struct zcl_present_window_pages_v1 hover_pages = {
         .struct_size = sizeof(hover_pages),
         .abi_version = ZCL_PRESENT_ABI_V1,
