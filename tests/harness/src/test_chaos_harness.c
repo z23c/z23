@@ -5,6 +5,8 @@
 
 #include "test/test_core.h"
 
+#include "base/safe_alloc.h"
+
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -90,10 +92,110 @@ static bool file_contains_text(const char *path, const char *needle)
     return strstr(buf, needle) != NULL;
 }
 
+/* ── checked allocator impls (base/safe_alloc.h) ──────────────────────
+ *
+ * The impl functions are called directly (not through the zcl_malloc
+ * convenience macros) so the inventory can see a path-bound call to the
+ * exact definition. Pinned: success returns usable memory, an armed
+ * fault returns NULL exactly once and then disarms, realloc failure
+ * leaves the original block intact, and strdup refuses NULL input
+ * silently. The fault hooks are process-global, so every armed fault is
+ * cleared before returning. One function per TEST, as the harness's
+ * hardcoded `goto _test_next` requires. */
+static int t_sa_malloc_success(void)
+{
+    int failures = 0;
+    TEST("zcl_malloc_impl: returns usable memory on success") {
+        unsigned char *p = zcl_malloc_impl(16, "sa_impl", __FILE__, __LINE__);
+        ASSERT(p != NULL);
+        memset(p, 0x5a, 16);          /* writable */
+        ASSERT_EQ(p[7], 0x5a);
+        free(p);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int t_sa_malloc_fault(void)
+{
+    int failures = 0;
+    TEST("zcl_malloc_impl: armed fault returns NULL once, then disarms") {
+        zcl_alloc_fault_fail_next("sa_impl");
+        void *failed = zcl_malloc_impl(16, "sa_impl", __FILE__, __LINE__);
+        void *after = zcl_malloc_impl(16, "sa_impl", __FILE__, __LINE__);
+        ASSERT(failed == NULL);
+        ASSERT(after != NULL);
+        ASSERT(zcl_alloc_fault_armed_label() == NULL);   /* hook self-clears */
+        free(after);
+        zcl_alloc_fault_clear();
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int t_sa_realloc_grow(void)
+{
+    int failures = 0;
+    TEST("zcl_realloc_impl: growing preserves the original bytes") {
+        char *p = zcl_malloc_impl(8, "sa_impl", __FILE__, __LINE__);
+        ASSERT(p != NULL);
+        memcpy(p, "abcdefgh", 8);
+        char *q = zcl_realloc_impl(p, 64, "sa_impl", __FILE__, __LINE__);
+        ASSERT(q != NULL);
+        ASSERT(memcmp(q, "abcdefgh", 8) == 0);
+        free(q);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int t_sa_realloc_fault(void)
+{
+    int failures = 0;
+    TEST("zcl_realloc_impl: armed fault returns NULL and keeps the block valid") {
+        char *p = zcl_malloc_impl(8, "sa_impl", __FILE__, __LINE__);
+        ASSERT(p != NULL);
+        memcpy(p, "abcdefgh", 8);
+        zcl_alloc_fault_fail_next("sa_impl");
+        char *q = zcl_realloc_impl(p, 64, "sa_impl", __FILE__, __LINE__);
+        ASSERT(q == NULL);
+        ASSERT(memcmp(p, "abcdefgh", 8) == 0);  /* original NOT freed/clobbered */
+        free(p);                                /* caller still owns it */
+        zcl_alloc_fault_clear();
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int t_sa_strdup(void)
+{
+    int failures = 0;
+    TEST("zcl_strdup_impl: duplicates exactly and refuses NULL input") {
+        char *dup = zcl_strdup_impl("invariant", "sa_impl", __FILE__, __LINE__);
+        ASSERT(dup != NULL);
+        ASSERT_STR_EQ(dup, "invariant");
+        free(dup);
+        ASSERT(zcl_strdup_impl(NULL, "sa_impl", __FILE__, __LINE__) == NULL);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int t_safe_alloc_impl(void)
+{
+    int failures = 0;
+    failures += t_sa_malloc_success();
+    failures += t_sa_malloc_fault();
+    failures += t_sa_realloc_grow();
+    failures += t_sa_realloc_fault();
+    failures += t_sa_strdup();
+    return failures;
+}
+
 int test_chaos_harness(void)
 {
     printf("\n=== chaos_harness tests ===\n");
-    int failures = 0;
+    int failures = t_safe_alloc_impl();
 
     struct chaos_ctx ctx;
     int rc = run_temp_scenario(
