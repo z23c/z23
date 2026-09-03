@@ -279,6 +279,51 @@ int test_db_maintenance(void)
         DBM_CHECK("dbm: node_db_wal_checkpoint(NULL) returns false", ok);
     }
 
+    /* ── 9. Boot schedule start reports started (typed status) ──
+     * Boot starts this service by default (see "Boot policy" in
+     * services/db_maintenance.h); the status snapshot is the typed
+     * surface that proves it is alive. */
+    {
+        struct dbm_fixture f;
+        dbm_fixture_init(&f, "bootstart");
+
+        struct db_maintenance_schedule sched;
+        db_maintenance_schedule_wal_cap_only(&sched);
+        bool started = db_maintenance_start(&f.ndb, &sched).ok;
+        DBM_CHECK("dbm: boot schedule start() succeeds", started);
+
+        struct db_maintenance_status st;
+        memset(&st, 0, sizeof(st));
+        db_maintenance_status_snapshot(&st);
+        DBM_CHECK("dbm: boot schedule reports started via typed status",
+                  st.running);
+
+        db_maintenance_stop();
+        memset(&st, 0, sizeof(st));
+        db_maintenance_status_snapshot(&st);
+        DBM_CHECK("dbm: status.running false after stop()", !st.running);
+
+        dbm_fixture_destroy(&f);
+    }
+
+    /* ── 10. Boot env gate: on by default, DISABLE only opts out ── */
+    {
+        const char *env = "ZCL_DISABLE_BOOT_DB_MAINT";
+        unsetenv(env);
+        DBM_CHECK("dbm: boot maintenance starts by default (env unset)",
+                  !db_maintenance_boot_opted_out());
+        setenv(env, "1", 1);
+        DBM_CHECK("dbm: ZCL_DISABLE_BOOT_DB_MAINT=1 opts out",
+                  db_maintenance_boot_opted_out());
+        setenv(env, "0", 1);
+        DBM_CHECK("dbm: =0 does not opt out (only exact \"1\" disables)",
+                  !db_maintenance_boot_opted_out());
+        setenv(env, "yes", 1);
+        DBM_CHECK("dbm: non-\"1\" value does not opt out",
+                  !db_maintenance_boot_opted_out());
+        unsetenv(env);
+    }
+
     event_clear_observers(EV_DB_MAINTENANCE_START);
     event_clear_observers(EV_DB_MAINTENANCE_DONE);
     event_clear_observers(EV_DB_MAINTENANCE_FAILED);

@@ -2758,5 +2758,104 @@ int test_sqlite(void) {
         else { printf("FAIL\n"); failures++; }
     }
 
+    /* ── Turbo mid-run WAL bound ────────────────────────────────────
+     *
+     * A 50k+ block catchup enters turbo and only leaves it at the end of
+     * the run. The bulk autocheckpoint folds frames rarely and the bulk
+     * journal_size_limit only caps the file after a checkpoint — without
+     * a size trigger inside the run, the WAL grows until the end-of-run
+     * checkpoint, which is how single runs reached tens of GB. This block
+     * simulates that run: bulk writes past a small ceiling must trigger a
+     * checkpoint mid-run, and the error-path restore must return every
+     * bound (not just the autocheckpoint). */
+    {
+        printf("SQLite turbo run checkpoints mid-run past the byte ceiling"
+               "... ");
+        char dir[256];
+        char dbpath[512];
+        test_make_tmpdir(dir, sizeof(dir), "sqlite", "turbo_midrun");
+        snprintf(dbpath, sizeof(dbpath), "%s/node.db", dir);
+
+        struct node_db ndb;
+        memset(&ndb, 0, sizeof(ndb));
+        app_runtime_set_current(NULL);
+        wal_ckpt_stats_reset();
+        bool ok = node_db_open(&ndb, dbpath);
+
+        /* Simulated catchup entry: bulk mode loosens the bound but keeps
+         * one (autocheckpoint is never zero in turbo). */
+        ok = ok && node_db_ibd_turbo_mode(&ndb);
+        ok = ok && ndb.turbo_mode;
+
+        /* Simulated catchup writes: push the WAL past a small ceiling. */
+        const int64_t ceiling = 256 * 1024;
+        char walpath[576];
+        snprintf(walpath, sizeof(walpath), "%s-wal", dbpath);
+        bool past_ceiling = false;
+        for (int i = 0; ok && i < 2000; i++) {
+            char key[32];
+            uint8_t val[4096];
+            snprintf(key, sizeof(key), "turbo_midrun_%d", i);
+            memset(val, (uint8_t)(i & 0xff), sizeof(val));
+            ok = node_db_state_set(&ndb, key, val, sizeof(val));
+            struct stat fst;
+            if (ok && stat(walpath, &fst) == 0 &&
+                (int64_t)fst.st_size > ceiling) {
+                past_ceiling = true;
+                break;
+            }
+        }
+        ok = ok && past_ceiling;
+
+        /* Over the ceiling the helper must checkpoint mid-run: the
+         * ledger advances and the file is back under the ceiling
+         * (a missing -wal after TRUNCATE is bounded trivially). */
+        struct wal_ckpt_stats before;
+        struct wal_ckpt_stats after;
+        memset(&before, 0, sizeof(before));
+        memset(&after, 0, sizeof(after));
+        wal_ckpt_stats_snapshot(&before);
+        ok = ok && node_db_turbo_maybe_checkpoint(&ndb, ceiling);
+        wal_ckpt_stats_snapshot(&after);
+        ok = ok && after.attempts_total > before.attempts_total;
+        {
+            struct stat fst;
+            ok = ok && (stat(walpath, &fst) != 0 ||
+                        (int64_t)fst.st_size <= ceiling);
+        }
+
+        /* Under the ceiling it must leave turbo alone: no checkpoint. */
+        wal_ckpt_stats_snapshot(&before);
+        ok = ok && !node_db_turbo_maybe_checkpoint(&ndb, ceiling);
+        wal_ckpt_stats_snapshot(&after);
+        ok = ok && after.attempts_total == before.attempts_total;
+
+        /* No bound configured means no checkpoint, however large. */
+        wal_ckpt_stats_snapshot(&before);
+        ok = ok && !node_db_turbo_maybe_checkpoint(&ndb, 0);
+        wal_ckpt_stats_snapshot(&after);
+        ok = ok && after.attempts_total == before.attempts_total;
+
+        /* Error-path exit: the restore every catchup failure path ends
+         * in must return ALL the bounds — synchronous, autocheckpoint,
+         * and file-size cap — and clear the turbo flag. */
+        ok = ok && node_db_normal_mode(&ndb);
+        ok = ok && sqlite_test_pragma_i64(ndb.db, "PRAGMA wal_autocheckpoint")
+                       == ZCL_NODE_DB_WAL_AUTOCKPT_PAGES;
+        ok = ok && sqlite_test_pragma_i64(ndb.db, "PRAGMA journal_size_limit")
+                       == ZCL_NODE_DB_JOURNAL_SIZE_LIMIT;
+        ok = ok && sqlite_test_pragma_i64(ndb.db, "PRAGMA synchronous") == 1;
+        ok = ok && !ndb.turbo_mode;
+
+        /* Null handles refuse instead of crashing. */
+        ok = ok && !node_db_turbo_maybe_checkpoint(NULL, ceiling);
+
+        node_db_close(&ndb);
+        wal_ckpt_stats_reset();
+        test_rm_rf_recursive(dir);
+        if (ok) printf("OK\n");
+        else { printf("FAIL\n"); failures++; }
+    }
+
     return failures;
 }
