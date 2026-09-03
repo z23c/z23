@@ -1109,6 +1109,7 @@ int main(int argc, char **argv)
     failures += test_rpc();
     failures += test_sqlite();
     failures += test_activerecord();
+    { extern int test_engine_rules(void); failures += test_engine_rules(); }
     failures += test_validation();
     { extern int test_consensus_parity(void); failures += test_consensus_parity(); }
     { extern int test_rom_state_checkpoint(void); failures += test_rom_state_checkpoint(); }
