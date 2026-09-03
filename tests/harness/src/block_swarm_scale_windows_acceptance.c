@@ -5,6 +5,8 @@
  * validation throughput: the real-wire loopback group owns those boundaries.
  * A 3.2M-block chain maps to 50,000 independently verified 64-block pieces. */
 
+#if defined(_WIN32)
+
 #include "net/fast_sync.h"
 #include "platform/time_compat.h"
 #include "util/safe_alloc.h"
@@ -115,3 +117,7 @@ int main(void)
     block_swarm_free(&swarm);
     return 0;
 }
+
+#else
+typedef int block_swarm_scale_windows_acceptance_not_built;
+#endif
