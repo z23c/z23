@@ -38,6 +38,7 @@
  */
 
 #include "test/test_core.h"
+#include "test/test_timing_budget.h"
 
 #include "bloom/merkle.h"
 #include "chain/chainparams.h"
@@ -157,11 +158,18 @@ static int test_mfd_scenario_a_fresh_empty_preflight_refuses(void)
     int64_t elapsed_us = GetTimeMicros() - t0;
     unsetenv("ZCL_MINT_PREFLIGHT_LEGACY_BLOCKS_DIR");
 
+    /* Wall ceiling scales with measured host load; nominal stays 10s. */
+    struct test_budget budget_a = test_budget_scale((uint64_t)MFD_A_BUDGET_US);
     MFD_CHECK("(a) terminal reached under wall-clock budget (<10s)",
-              elapsed_us < MFD_A_BUDGET_US);
-    if (elapsed_us >= MFD_A_BUDGET_US)
-        printf("  >> (a) TIMEOUT: elapsed=%lldus budget=%lldus\n",
-               (long long)elapsed_us, MFD_A_BUDGET_US);
+              (uint64_t)elapsed_us < budget_a.effective_us);
+    if ((uint64_t)elapsed_us >= budget_a.effective_us)
+        printf("  >> (a) TIMEOUT: elapsed=%lldus nominal_us=%llu "
+               "effective_us=%llu load_factor=%.2f calib_us=%llu\n",
+               (long long)elapsed_us,
+               (unsigned long long)budget_a.nominal_us,
+               (unsigned long long)budget_a.effective_us,
+               budget_a.factor,
+               (unsigned long long)budget_a.calib_med_us);
 
     MFD_CHECK("(a) named terminal = preflight_refusal (all_ok=false)", !all_ok);
     MFD_CHECK("(a) report.all_ok field agrees (false)",
@@ -307,11 +315,18 @@ static int test_mfd_scenario_b_headers_no_bodies_walls_frontier(void)
     uint64_t ua_after = utxo_apply_stage_cursor();
     uint64_t ha_after = header_admit_stage_cursor();
 
+    /* Wall ceiling scales with measured host load; nominal stays 30s. */
+    struct test_budget budget_b = test_budget_scale((uint64_t)MFD_B_BUDGET_US);
     MFD_CHECK("(b) terminal reached under wall-clock budget (<30s)",
-              elapsed_us < MFD_B_BUDGET_US);
-    if (elapsed_us >= MFD_B_BUDGET_US)
-        printf("  >> (b) TIMEOUT: elapsed=%lldus budget=%lldus kicks=%d\n",
-               (long long)elapsed_us, MFD_B_BUDGET_US, kicks_run);
+              (uint64_t)elapsed_us < budget_b.effective_us);
+    if ((uint64_t)elapsed_us >= budget_b.effective_us)
+        printf("  >> (b) TIMEOUT: elapsed=%lldus nominal_us=%llu "
+               "effective_us=%llu load_factor=%.2f calib_us=%llu kicks=%d\n",
+               (long long)elapsed_us,
+               (unsigned long long)budget_b.nominal_us,
+               (unsigned long long)budget_b.effective_us,
+               budget_b.factor,
+               (unsigned long long)budget_b.calib_med_us, kicks_run);
     MFD_CHECK("(b) frontier converged within a bounded number of kicks",
               frontier_converged && kicks_run <= MFD_B_MAX_KICKS);
     MFD_CHECK("(b) utxo_apply frontier did NOT reach the ceiling (walled)",
@@ -558,11 +573,18 @@ static int test_mfd_scenario_c_headers_and_bodies_reaches_ceiling(void)
     }
 
     int64_t elapsed_us = GetTimeMicros() - t0;
+    /* Wall ceiling scales with measured host load; nominal stays 15s. */
+    struct test_budget budget_c = test_budget_scale((uint64_t)MFD_C_BUDGET_US);
     MFD_CHECK("(c) terminal reached under wall-clock budget (<15s)",
-              elapsed_us < MFD_C_BUDGET_US);
-    if (elapsed_us >= MFD_C_BUDGET_US)
-        printf("  >> (c) TIMEOUT: elapsed=%lldus budget=%lldus\n",
-               (long long)elapsed_us, MFD_C_BUDGET_US);
+              (uint64_t)elapsed_us < budget_c.effective_us);
+    if ((uint64_t)elapsed_us >= budget_c.effective_us)
+        printf("  >> (c) TIMEOUT: elapsed=%lldus nominal_us=%llu "
+               "effective_us=%llu load_factor=%.2f calib_us=%llu\n",
+               (long long)elapsed_us,
+               (unsigned long long)budget_c.nominal_us,
+               (unsigned long long)budget_c.effective_us,
+               budget_c.factor,
+               (unsigned long long)budget_c.calib_med_us);
     MFD_CHECK("(c) named terminal = anchor_reached, no blocker at end",
               terminal_is_anchor_reached && blocker_absent_at_end);
 
