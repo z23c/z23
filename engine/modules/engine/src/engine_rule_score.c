@@ -726,7 +726,6 @@ size_t zcl_rule_vocab_apply_retirements(const char *def_text, size_t def_len,
 {
     if (!def_text || !s || !buf || cap == 0) return 0;
     size_t at = 0;
-    uint32_t line_no = 0;
     size_t i = 0;
 
     while (i < def_len) {
@@ -734,7 +733,6 @@ size_t zcl_rule_vocab_apply_retirements(const char *def_text, size_t def_len,
         while (eol < def_len && def_text[eol] != '\n') eol++;
         size_t llen = eol - i;
         const char *line = def_text + i;
-        line_no++;
 
         const struct zcl_rule_score *kill = NULL;
         static const char kPrefix[] = "ZCL_RULE(";
