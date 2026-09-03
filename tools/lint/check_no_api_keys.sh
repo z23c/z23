@@ -97,8 +97,8 @@ fi
 # `grep -a` because a tracked file can carry a NUL and a binary-mode grep would
 # report a FALSE clean on it (see the tree's log-grep note). -I would do the
 # same thing, and is why it is not used.
-matches="$(printf '%s\n' "${files[@]}" \
-    | xargs -r -d '\n' grep -a -n -E -H "$ALTERNATION" -- 2>/dev/null \
+matches="$(printf '%s\0' "${files[@]}" \
+    | xargs -0 grep -a -n -E -H "$ALTERNATION" -- 2>/dev/null \
     | grep -a -v "api-key-example-ok" \
     | tr -d '\000' \
     || true)"
