@@ -109,7 +109,12 @@ ZCL_PLATFORM_NODE_LIBS = \
 	$(if $(ZCL_CROSS_TRIPLE),,-l:libregex.a -l:libtre.a -l:libintl.a -l:libiconv.a) \
 	-lws2_32 -liphlpapi -lbcrypt -lshlwapi \
 	-luserenv -lcrypt32 -lshell32 -lole32 -luuid -lpsapi -lgdi32
-ZCL_CXX_RUNTIME_LIB = -lstdc++
+# LevelDB remains a static C++ archive behind its C API in development and
+# test builds.  Select the matching runtime archive explicitly: a plain
+# -lstdc++ prefers libstdc++-6.dll.a on UCRT64, producing a PE that waits in
+# Windows' missing-DLL hard-error path before main when MSYS2 is (correctly)
+# absent from PATH.  The shipped C23 node does not link this runtime at all.
+ZCL_CXX_RUNTIME_LIB = -l:libstdc++.a
 ZCL_WARN_MAYBE_UNINITIALIZED = -Wno-maybe-uninitialized
 ZCL_TEST_STACK_SETUP = :
 else ifeq ($(ZCL_HOST_OS),Darwin)
@@ -4138,6 +4143,7 @@ $(Z23_DEV_UNSHIPPABLE_BIN): $(DEV_CANDIDATE_BIN) FORCE
 
 $(ZCLASSIC23_DEV_BIN): $(Z23_DEV_UNSHIPPABLE_BIN)
 	@$(if $(ZCL_HOST_WINDOWS),cp -f "$<" "$@",ln -f "$<" "$@")
+	$(if $(ZCL_HOST_WINDOWS),@tools/scripts/check_c23_node_binary.sh "$@")
 	@echo "dev-bin: $@ <= $< (hard-link watch-loop alias of unsippable z23.dev; regular file for O_NOFOLLOW proof open)"
 
 $(DEV_CANDIDATE_BIN): $(VIEW_GEN_HEADERS) $(BUILD_IDENTITY_STAMP) $(DEV_OBJ_COMPLETE) | $(VENDOR_LIBS)
