@@ -4473,16 +4473,17 @@ static int pv_main_posix(int argc, char **argv)
                 vcs_package_manifest_free(&manifest);
                 return 5;
             }
-            /* A sanitizer run failure is a FINDING only when the run died
-             * by the sanitizer's own marker exit code (a real report — the
-             * text is captured into the detail). Any other death — killed
+            /* A sanitizer run failure is a FINDING only when the run
+             * produced the sanitizer's own report text (captured into
+             * the detail) and died abnormally. Any other death — killed
              * by the seccomp deny-set, the wall-clock deadline, a wrong
-             * exit code — mirrors the (identically confined) plain run or
-             * host load and says nothing about UB: the diagnostic is then
-             * UNAVAILABLE, never a finding. Findings are recorded only
-             * when every plain run passed: the closed grammar allows a
-             * findings outcome only in the sanitizer-fail class. Precedence
-             * across compilers: findings > unavailable > pass. */
+             * exit code with no report — mirrors the (identically
+             * confined) plain run or host load and says nothing about
+             * UB: the diagnostic is then UNAVAILABLE, never a finding.
+             * Findings are recorded only when every plain run passed:
+             * the closed grammar allows a findings outcome only in the
+             * sanitizer-fail class. Precedence across compilers:
+             * findings > unavailable > pass. */
             bool san_failed =
                 sr.timed_out || !sr.exited ||
                 sr.exit_code != recipe.expected_test_exit_code;
@@ -4492,9 +4493,10 @@ static int pv_main_posix(int argc, char **argv)
                  * cannot INITIALIZE (a fixed-shadow collision under host
                  * memory pressure prints "Shadow memory range interleaves
                  * ... ASan cannot proceed correctly. ABORTING."). A finding
-                 * requires the report text itself (ASan "SUMMARY:" / UBSan
-                 * "runtime error:"); anything else is environmental and
-                 * makes the diagnostic UNAVAILABLE, never dirty. */
+                 * requires the report text itself (ASan "SUMMARY:
+                 * AddressSanitizer:" / UBSan "runtime error:"); anything
+                 * else is environmental and makes the diagnostic
+                 * UNAVAILABLE, never dirty. */
                 bool finding = false;
                 char sprefix[40];
                 snprintf(sprefix, sizeof(sprefix), "%s+san", cc);
@@ -4503,11 +4505,16 @@ static int pv_main_posix(int argc, char **argv)
                     NULL;
                 bool ubsan_runtime_report =
                     strstr(sr.stderr_buf, "runtime error:") != NULL;
-#if defined(__APPLE__)
-                /* Apple Clang's ASan terminates by signal after a genuine
-                 * runtime report even when exitcode= is set. Bind the Darwin
-                 * verdict to the sanitizer's exact report grammar plus an
-                 * abnormal run; a clean exit can never become a finding. */
+/* A finding is the sanitizer's exact report grammar plus an
+                 * abnormal run — never the marker exit code alone. In a
+                 * combined -fsanitize=address,undefined binary the exit
+                 * code does not discriminate which runtime reported:
+                 * Clang's ASan report exits with the UBSan marker, and
+                 * Apple Clang's ASan dies by signal even when exitcode=
+                 * is set. Demanding the exact marker turns real reports
+                 * into "unavailable" and lets a receipt claim a
+                 * cleanliness it did not earn. A clean exit can never
+                 * become a finding. */
                 bool asan_finding_exit =
                     asan_runtime_report && !sr.timed_out &&
                     (!sr.exited || sr.exit_code !=
@@ -4516,14 +4523,6 @@ static int pv_main_posix(int argc, char **argv)
                     ubsan_runtime_report && !sr.timed_out &&
                     (!sr.exited || sr.exit_code !=
                                        recipe.expected_test_exit_code);
-#else
-                bool asan_finding_exit =
-                    asan_runtime_report && sr.exited &&
-                    sr.exit_code == PV_ASAN_EXIT;
-                bool ubsan_finding_exit =
-                    ubsan_runtime_report && sr.exited &&
-                    sr.exit_code == PV_UBSAN_EXIT;
-#endif
                 if (test_ok && asan_finding_exit) {
                     att.sanitizers[0].outcome =
                         VCS_PACKAGE_ATTEST_OUTCOME_FAIL;
