@@ -281,6 +281,24 @@ bool node_db_wal_checkpoint(struct node_db *ndb);
 bool node_db_wal_checkpoint_result(struct node_db *ndb,
                                    struct wal_ckpt_record *out);
 
+/* Size-triggered passive checkpoint for bulk/turbo runs.
+ *
+ * Stats the `<db>-wal` file and, only when it exceeds `wal_max_bytes`,
+ * runs node_db_wal_checkpoint() (PASSIVE fold + TRUNCATE file reset).
+ * This is the in-turbo half of the WAL bound: the bulk wal_autocheckpoint
+ * folds frames rarely and journal_size_limit caps the file after a
+ * checkpoint, but neither truncates a runaway file mid-run — the caller
+ * (node.db catchup) invokes this at batch-commit boundaries, where no
+ * write transaction is open and a checkpoint can actually move frames.
+ *
+ * `wal_max_bytes <= 0` means "no bound configured": returns false without
+ * touching the database. Returns true only when a checkpoint was run AND
+ * completed; false when under the ceiling, when no WAL file exists (e.g.
+ * :memory:), on a null/closed db, or when the checkpoint itself failed.
+ * Best-effort by design: a false return never aborts the caller. */
+bool node_db_turbo_maybe_checkpoint(struct node_db *ndb,
+                                    int64_t wal_max_bytes);
+
 /* Drop secondary indexes for bulk load throughput. */
 bool node_db_drop_indexes(struct node_db *ndb);
 

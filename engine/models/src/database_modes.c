@@ -19,6 +19,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 /* ── UTXO Lifecycle ────────────────────────────────────────────── */
 
@@ -230,6 +231,41 @@ bool node_db_normal_mode(struct node_db *ndb)
     node_db_wal_checkpoint(ndb);
     node_db_note_turbo_mode(ndb, false, "normal_mode", SQLITE_OK);
     printf("db: normal mode (synchronous=NORMAL, indexes rebuilt)\n");
+    return true;
+}
+
+/* Size-triggered passive checkpoint for bulk/turbo runs — see database.h.
+ * Called at batch-commit boundaries where no write transaction is open, so
+ * the PASSIVE fold inside node_db_wal_checkpoint() can move frames instead
+ * of reporting BUSY against our own open transaction. */
+bool node_db_turbo_maybe_checkpoint(struct node_db *ndb,
+                                    int64_t wal_max_bytes)
+{
+    if (!ndb || !ndb->open || !ndb->db)
+        LOG_FAIL("db", "turbo_maybe_checkpoint: null or closed db");
+    if (wal_max_bytes <= 0)
+        return false;
+    const char *main_path = sqlite3_db_filename(ndb->db, "main");
+    if (!main_path || !main_path[0] || strcmp(main_path, ":memory:") == 0)
+        return false;
+    char wal_path[1088];
+    int n = snprintf(wal_path, sizeof(wal_path), "%s-wal", main_path);
+    if (n < 0 || (size_t)n >= sizeof(wal_path))
+        LOG_FAIL("db", "turbo_maybe_checkpoint: db path too long");
+    struct stat fst;
+    if (stat(wal_path, &fst) != 0)
+        return false;
+    if ((int64_t)fst.st_size <= wal_max_bytes)
+        return false;
+    LOG_INFO("db", "turbo_maybe_checkpoint: WAL %lld bytes over ceiling "
+             "%lld — checkpointing mid-run",
+             (long long)fst.st_size, (long long)wal_max_bytes);
+    if (!node_db_wal_checkpoint(ndb)) {
+        LOG_WARN("db", "turbo_maybe_checkpoint: mid-run checkpoint failed "
+                 "(WAL %lld bytes, ceiling %lld)",
+                 (long long)fst.st_size, (long long)wal_max_bytes);
+        return false;
+    }
     return true;
 }
 
