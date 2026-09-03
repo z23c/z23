@@ -149,8 +149,8 @@ mutation_receipt_confined()
             'DEV_SOURCE_RECEIPT_CPPFLAGS = -DZCL_BUILD_SOURCE_MUTATION=\"$(BUILD_MUTATION)\"')
                 seen=$((seen + 1))
                 ;;
-            *'$(eval $(call BUILD_NODE_TOOL,test_zcl,'*'$(DEV_SOURCE_RECEIPT_CPPFLAGS))'*|\
-            *'$(eval $(call BUILD_NODE_TOOL,test_parallel_wpo,'*'$(DEV_SOURCE_RECEIPT_CPPFLAGS))'*|\
+            *'$(eval $(call BUILD_NODE_TOOL,test_zcl,'*'$(DEV_SOURCE_RECEIPT_CPPFLAGS)'*'))'|\
+            *'$(eval $(call BUILD_NODE_TOOL,test_parallel_wpo,'*'$(DEV_SOURCE_RECEIPT_CPPFLAGS)'*'))'|\
             '$(TEST_FAST_OBJ_DIR)/platform/modules/util/src/clientversion.o: TEST_FAST_OBJECT_CFLAGS += $(BUILD_IDENTITY_CPPFLAGS) $(DEV_SOURCE_RECEIPT_CPPFLAGS)'|\
             '$(TEST_REL_OBJ_DIR)/platform/modules/util/src/clientversion.o: TEST_REL_OBJECT_CFLAGS += $(BUILD_IDENTITY_CPPFLAGS) $(DEV_SOURCE_RECEIPT_CPPFLAGS)'|\
             '$(TEST_ASAN_OBJ_DIR)/platform/modules/util/src/clientversion.o: TEST_ASAN_OBJECT_CFLAGS += $(BUILD_IDENTITY_CPPFLAGS) $(DEV_SOURCE_RECEIPT_CPPFLAGS)'|\
@@ -353,6 +353,8 @@ self_test()
         'BUILD_CLEAN := $(word 2,$(BUILD_SOURCE_RECORD))' \
         'BUILD_MUTATION := $(word 3,$(BUILD_SOURCE_RECORD))' \
         'DEV_SOURCE_RECEIPT_CPPFLAGS = -DZCL_BUILD_SOURCE_MUTATION=\"$(BUILD_MUTATION)\"' \
+        '$(eval $(call BUILD_NODE_TOOL,test_zcl,test.c,,-DZCL_TESTING $(DEV_SOURCE_RECEIPT_CPPFLAGS) $(EXTRA_TEST_FLAGS)))' \
+        '$(eval $(call BUILD_NODE_TOOL,test_parallel_wpo,test.c,,-DZCL_TESTING $(DEV_SOURCE_RECEIPT_CPPFLAGS)))' \
         '$(DEV_OBJ_DIR)/platform/modules/util/src/clientversion.o: DEV_COMPILE_CFLAGS += $(BUILD_IDENTITY_CPPFLAGS) $(DEV_SOURCE_RECEIPT_CPPFLAGS)' \
         'artifact: $(BUILD_IDENTITY_STAMP)' \
         '	@set -eu; \
@@ -364,6 +366,14 @@ self_test()
         > "$sandbox/Makefile"
 
     scan_tree "$sandbox" >/dev/null || fatal 'known-good fixture failed'
+    printf '%s\n' \
+        '$(eval $(call BUILD_NODE_TOOL,z23,node.c,,-DZCL_TESTING $(DEV_SOURCE_RECEIPT_CPPFLAGS) $(EXTRA_TEST_FLAGS)))' \
+        >> "$sandbox/Makefile"
+    if scan_tree "$sandbox" >/dev/null 2>&1; then
+        fatal 'host-local mutation receipt escaped into a non-test target'
+    fi
+    sed '$d' "$sandbox/Makefile" > "$sandbox/Makefile.test-only" \
+        && mv "$sandbox/Makefile.test-only" "$sandbox/Makefile"
     printf '%s\n' 'BUILD_IDENTITY_CPPFLAGS += $(DEV_SOURCE_RECEIPT_CPPFLAGS)' \
         >> "$sandbox/Makefile"
     if scan_tree "$sandbox" >/dev/null 2>&1; then

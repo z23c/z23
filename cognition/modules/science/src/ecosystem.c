@@ -3,6 +3,7 @@
 
 #include "science/ecosystem.h"
 
+#include "base/hex.h"
 #include "base/log_macros.h"
 #include "json/json.h"
 #include "platform/directory_compat.h"
@@ -331,13 +332,7 @@ bool science_ecosystem_format_text(
     if (ok) {
         if (snap->source_root_sha3_present) {
             char hex[65];
-            static const char digits[] = "0123456789abcdef";
-            for (size_t i = 0; i < 32u; i++) {
-                hex[2u * i] = digits[(snap->source_root_sha3[i] >> 4) & 0xf];
-                hex[2u * i + 1u] =
-                    digits[snap->source_root_sha3[i] & 0xf];
-            }
-            hex[64] = '\0';
+            zcl_hex_encode(snap->source_root_sha3, 32u, hex);
             ok = text_str(out, cap, &used, "source_root_sha3", hex);
         } else {
             ok = text_str(out, cap, &used, "source_root_sha3", "unavailable");

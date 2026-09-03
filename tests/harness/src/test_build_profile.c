@@ -72,9 +72,9 @@ int test_build_profile(void)
     int failures = 0;
     char flags[196608];
     char guard[8192];
-    const char *cflags;
-    const char *dev_cflags;
-    const char *ldflags;
+    char *cflags;
+    char *dev_cflags;
+    char *ldflags;
 
     TEST("Makefile names the unsippable compiler-speed binary z23.dev") {
         ASSERT(file_has_line_prefix("Makefile",

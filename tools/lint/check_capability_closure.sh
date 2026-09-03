@@ -518,14 +518,17 @@ check_root() {
     fi
 
     # Every source file that actually has an object IN THIS SCAN (regardless
-    # of whether it referenced anything dangerous) — the evidence set for
-    # symmetry (item 3, below) and for the coverage floor immediately after.
+    # of whether the object has any symbols) — the evidence set for symmetry
+    # (item 3, below) and for the coverage floor immediately after. Derive
+    # this from the frozen object list, not nm output: an inactive platform
+    # arm can compile to a valid symbol-free object that nm prints no row for.
     # A source with no object here is either a standalone tool/test binary
     # this epoch legitimately never links, or a file a PARTIAL rebuild
     # silently dropped — the coverage floor below is what tells those apart.
-    awk -F'\t' -v epoch="$epoch_nm/" '
-        { obj = $1; src = obj; sub("^" epoch, "", src); sub(/\.o$/, ".c", src); print src }
-    ' "$work/undef.tsv" "$work/defined.tsv" | LC_ALL=C sort -u > "$work/compiled_sources.txt"
+    while IFS= read -r -d '' obj; do
+        src="${obj#"$epoch"/}"
+        printf '%s\n' "${src%.o}.c"
+    done < "$work/objs.z" | LC_ALL=C sort -u > "$work/compiled_sources.txt"
 
     # ── coverage floor ───────────────────────────────────────────────────
     # Refuse to grade a scan whose coverage it cannot vouch for. See
@@ -1156,8 +1159,30 @@ EOF
     CAP_CLOSURE_HOST_OS="$host_os_saved"
     CAP_CLOSURE_HOST_WINDOWS="$host_windows_saved"
 
+    # M. A valid object with no symbols is still compiled evidence. Platform
+    # guards routinely leave an inactive host arm in exactly this shape; nm
+    # emits no row for it, so coverage must use the frozen object list itself.
+    d="$FIXTURE_ROOT/m"; mkdir -p "$d/fixture_src"
+    make_epoch "$d"
+    fixture_symbols "$d"
+    cat > "$d/fixture_src/empty_user.c" <<'EOF'
+typedef int empty_user_not_on_this_platform;
+EOF
+    mkdir -p "$d/build/dev-obj/epochs/fx0/fixture_src"
+    cc -std=c23 -c "$d/fixture_src/empty_user.c" \
+        -o "$d/build/dev-obj/epochs/fx0/fixture_src/empty_user.o" 2>/dev/null \
+      || cc -c "$d/fixture_src/empty_user.c" \
+        -o "$d/build/dev-obj/epochs/fx0/fixture_src/empty_user.o"
+    fixture_module_rows "$d" \
+        'ZCL_MODULE_CAPABILITY("fixture_src/empty_user.c", CAP_NONE, "inactive platform arm")'
+    CAP_CLOSURE_HOST_OS=Linux
+    CAP_CLOSURE_HOST_WINDOWS=false
+    expect_accept "M: a symbol-free object is present coverage evidence" "$d" || rc=1
+    CAP_CLOSURE_HOST_OS="$host_os_saved"
+    CAP_CLOSURE_HOST_WINDOWS="$host_windows_saved"
+
     if [ "$rc" -eq 0 ]; then
-        echo "== selftest: PASS (12/12) =="
+        echo "== selftest: PASS (13/13) =="
     else
         echo "== selftest: FAIL =="
     fi

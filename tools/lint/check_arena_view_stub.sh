@@ -27,6 +27,7 @@
 # Env:
 #   CC  compiler (default: cc). The compile is a fresh syntax observation,
 #       not a cached build. -fsyntax-only runs no optimizer pass, so the
+#       suppression-ok: documents the linked-build-only GCC false-positive exception
 #       -Wno-stringop-overflow the linked arena builds carry for a GCC
 #       stringop false positive is not needed here (verified with GCC 14:
 #       clean at -Wall -Wextra -Werror -pedantic).

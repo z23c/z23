@@ -1220,6 +1220,7 @@ add/remove a gate.
 - `check-model-validation`
 - `check-persona-resolves`
 - `check-specialists`
+- `check-prompt-templates`
 - `check-cookbook`
 - `check-no-raw-clock-outside-platform`
 - `check-sysinit-ordering`

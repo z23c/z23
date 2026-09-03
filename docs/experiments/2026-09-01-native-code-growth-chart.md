@@ -156,7 +156,7 @@ time axis now derives its cadence from the pure
 `zcl_present_canvas_axis_label_stride_v1` reducer: weekly labels stay
 preferred, and the cadence widens through two-week, monthly, two-month,
 quarterly, half-year, and yearly strides before any consecutive pair of
-labels can collide. The reducer's cadence choices are pinned by three
+labels can collide. The reducer's cadence choices are pinned by four
 registered assertions in the `qr` group covering the weekly, widened, and
 yearly-fallback regimes.
 
