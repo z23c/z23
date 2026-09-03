@@ -18,7 +18,7 @@
 #define NPG_WIDTH 1120u
 #define NPG_HEIGHT 680u
 #define NPG_TEXT_SCALES 3u
-#define NPG_TEXT_SCALE_DEFAULT 1u
+#define NPG_TEXT_SCALE_DEFAULT 0u
 #define NPG_PLOT_LEFT 104u
 #define NPG_PLOT_TOP 230u
 #define NPG_PLOT_RIGHT 1048u
@@ -129,7 +129,8 @@ static void npg_series(
     struct zcl_present_canvas *canvas,
     const struct science_code_growth_history *history,
     enum npg_series_kind kind, uint64_t maximum,
-    struct zcl_present_color color, uint32_t thickness)
+    struct zcl_present_color color, uint32_t thickness,
+    int32_t offset_x, int32_t offset_y)
 {
     for (size_t i = 0; i < history->day_count; i++) {
         uint64_t value = npg_value(&history->days[i], kind);
@@ -139,38 +140,20 @@ static void npg_series(
             uint64_t prior = npg_value(&history->days[i - 1u], kind);
             int32_t prior_x = (int32_t)npg_x(i - 1u, history->day_count);
             int32_t prior_y = npg_y(prior, maximum);
-            for (uint32_t line = 0; line < thickness; line++)
-                zcl_present_canvas_line(
-                    canvas, prior_x, prior_y + (int32_t)line,
-                    x, y + (int32_t)line, color);
+            zcl_present_canvas_line_thick(
+                canvas, prior_x + offset_x, prior_y + offset_y,
+                x + offset_x, y + offset_y, thickness, color);
         }
     }
-}
-
-static void npg_short_date(const char date[11], char out[6])
-{
-    memcpy(out, date + 5, 5u);
-    out[5] = '\0';
-}
-
-static const char *npg_month_name(const char date[11])
-{
-    static const char *const months[] = {
-        "JAN", "FEB", "MAR", "APR", "MAY", "JUN",
-        "JUL", "AUG", "SEP", "OCT", "NOV", "DEC",
-    };
-    if (date[5] < '0' || date[5] > '9' || date[6] < '0' || date[6] > '9')
-        return NULL;
-    unsigned month = (unsigned)(date[5] - '0') * 10u +
-                     (unsigned)(date[6] - '0');
-    return month >= 1u && month <= 12u ? months[month - 1u] : NULL;
 }
 
 static void npg_draw_header(
     struct zcl_present_canvas *canvas,
     const struct science_code_growth_history *history, uint32_t text_scale)
 {
-    const struct zcl_present_color panel = {14, 24, 40};
+    const struct zcl_present_color shadow = {3, 7, 16};
+    const struct zcl_present_color panel_top = {18, 31, 52};
+    const struct zcl_present_color panel_bottom = {11, 21, 38};
     const struct zcl_present_color primary = {241, 246, 255};
     const struct zcl_present_color secondary = {153, 174, 201};
     const struct zcl_present_color cyan = {68, 224, 202};
@@ -182,8 +165,10 @@ static void npg_draw_header(
         history->test_lines ? UINT64_MAX
                             : history->non_test_lines + history->test_lines;
     npg_u64(total, combined);
-    zcl_present_canvas_fill_rect(canvas, 28, 24, 1064u, 182u, panel);
-    npg_text_strong(canvas, 52, 38, "C23 growth by day",
+    zcl_present_canvas_fill_rect(canvas, 35, 33, 1057u, 173u, shadow);
+    zcl_present_canvas_fill_vertical_gradient(
+        canvas, 28, 24, 1064u, 182u, panel_top, panel_bottom);
+    npg_text_strong(canvas, 52, 38, "C23 GROWTH",
                     npg_font(34u, text_scale), primary);
     npg_text(canvas, 52, 82,
              "Exact first-parent Git history | live tree verified",
@@ -206,34 +191,30 @@ static void npg_draw_header(
                     npg_font(18u, text_scale), violet);
 }
 
-static void npg_draw_grid(
+static void npg_draw_axes(
     struct zcl_present_canvas *canvas,
     const struct science_code_growth_history *history, uint64_t maximum,
     uint32_t text_scale)
 {
-    const struct zcl_present_color plot = {10, 19, 32};
-    const struct zcl_present_color band = {12, 22, 37};
+    const struct zcl_present_color shadow = {2, 6, 14};
+    const struct zcl_present_color plot_top = {12, 24, 45};
+    const struct zcl_present_color plot_bottom = {7, 14, 28};
     const struct zcl_present_color grid = {35, 54, 76};
-    const struct zcl_present_color major = {57, 78, 103};
     const struct zcl_present_color secondary = {153, 174, 201};
-    const struct zcl_present_color month_text = {208, 222, 238};
     zcl_present_canvas_fill_rect(
+        canvas, NPG_PLOT_LEFT + 9, NPG_PLOT_TOP + 11,
+        NPG_PLOT_RIGHT - NPG_PLOT_LEFT + 1u,
+        NPG_PLOT_BOTTOM - NPG_PLOT_TOP + 1u, shadow);
+    zcl_present_canvas_fill_vertical_gradient(
         canvas, NPG_PLOT_LEFT, NPG_PLOT_TOP,
         NPG_PLOT_RIGHT - NPG_PLOT_LEFT + 1u,
-        NPG_PLOT_BOTTOM - NPG_PLOT_TOP + 1u, plot);
-    for (uint32_t row = 0; row < 4u; row += 2u) {
-        int32_t y = (int32_t)NPG_PLOT_TOP +
-            (int32_t)((NPG_PLOT_BOTTOM - NPG_PLOT_TOP) * row / 4u);
-        uint32_t height = (NPG_PLOT_BOTTOM - NPG_PLOT_TOP) / 4u;
-        zcl_present_canvas_fill_rect(
-            canvas, NPG_PLOT_LEFT, y,
-            NPG_PLOT_RIGHT - NPG_PLOT_LEFT + 1u, height, band);
-    }
+        NPG_PLOT_BOTTOM - NPG_PLOT_TOP + 1u,
+        plot_top, plot_bottom);
     for (uint32_t row = 0; row <= 4u; row++) {
         int32_t y = (int32_t)NPG_PLOT_TOP +
             (int32_t)((NPG_PLOT_BOTTOM - NPG_PLOT_TOP) * row / 4u);
         zcl_present_canvas_line(
-            canvas, NPG_PLOT_LEFT, y, NPG_PLOT_RIGHT, y, grid);
+            canvas, NPG_PLOT_LEFT - 5, y, NPG_PLOT_LEFT, y, grid);
         char label[32];
         npg_u64(label, npg_fraction(maximum, 4u - row, 4u));
         uint32_t font = npg_font(16u, text_scale);
@@ -243,56 +224,48 @@ static void npg_draw_grid(
             canvas, (int32_t)NPG_PLOT_LEFT - (int32_t)width - 11,
             y - (int32_t)(font / 2u), label, font, secondary);
     }
-    const uint32_t axis_font = npg_font(16u, text_scale);
-    char probe[6];
-    npg_short_date(history->days[history->day_count - 1u].date, probe);
-    uint32_t stride = zcl_present_canvas_axis_label_stride_v1(
-        (uint32_t)history->day_count, NPG_PLOT_RIGHT - NPG_PLOT_LEFT,
-        zcl_present_canvas_text_width_strong(probe, 5u, axis_font), 12u);
-    const size_t last = history->day_count - 1u;
-    int32_t month_right = INT32_MIN;
-    for (size_t i = 0; i < history->day_count; i++) {
-        int32_t x = (int32_t)npg_x(i, history->day_count);
-        bool month = i == 0 || strncmp(history->days[i - 1u].date,
-                                       history->days[i].date, 7u) != 0;
-        bool week = (last - i) % stride == 0;
+    const size_t labels[] = {
+        0u, history->day_count / 2u, history->day_count - 1u,
+    };
+    const uint32_t axis_font = npg_font(14u, text_scale);
+    for (size_t i = 0; i < sizeof(labels) / sizeof(labels[0]); i++) {
+        if (i > 0 && labels[i] == labels[i - 1u]) continue;
+        size_t day = labels[i];
+        int32_t x = (int32_t)npg_x(day, history->day_count);
+        uint32_t width = zcl_present_canvas_text_width_strong(
+            history->days[day].date, 10u, axis_font);
+        int32_t left = x - (int32_t)(width / 2u);
+        if (left < (int32_t)NPG_PLOT_LEFT) left = NPG_PLOT_LEFT;
+        if (left + (int32_t)width > (int32_t)NPG_PLOT_RIGHT)
+            left = (int32_t)NPG_PLOT_RIGHT - (int32_t)width;
         zcl_present_canvas_line(canvas, x, NPG_PLOT_BOTTOM,
-                                x, NPG_PLOT_BOTTOM + 4, grid);
-        if (month || week)
-            zcl_present_canvas_line(canvas, x, NPG_PLOT_TOP,
-                                    x, NPG_PLOT_BOTTOM,
-                                    month ? major : grid);
-        if (week) {
-            char date[6];
-            npg_short_date(history->days[i].date, date);
-            uint32_t width = zcl_present_canvas_text_width_strong(
-                date, 5u, axis_font);
-            int32_t left = x - (int32_t)(width / 2u);
-            if (left < (int32_t)NPG_PLOT_LEFT) left = NPG_PLOT_LEFT;
-            if (left + (int32_t)width > (int32_t)NPG_PLOT_RIGHT)
-                left = (int32_t)NPG_PLOT_RIGHT - (int32_t)width;
-            npg_text_strong(canvas, left, NPG_PLOT_BOTTOM + 12,
-                            date, axis_font, secondary);
-        }
-        if (month) {
-            const char *name = npg_month_name(history->days[i].date);
-            if (name) {
-                char label[12];
-                (void)snprintf(label, sizeof(label), "%.3s %.4s",
-                               name, history->days[i].date);
-                uint32_t font = npg_font(14u, text_scale);
-                uint32_t width = zcl_present_canvas_text_width_strong(
-                    label, strlen(label), font);
-                int32_t left = x - (int32_t)(width / 2u);
-                if (left < (int32_t)NPG_PLOT_LEFT) left = NPG_PLOT_LEFT;
-                if (left + (int32_t)width > (int32_t)NPG_PLOT_RIGHT)
-                    left = (int32_t)NPG_PLOT_RIGHT - (int32_t)width;
-                if (left > month_right + 12) {
-                    npg_text_strong(canvas, left, NPG_PLOT_BOTTOM + 36,
-                                    label, font, month_text);
-                    month_right = left + (int32_t)width;
-                }
-            }
+                                x, NPG_PLOT_BOTTOM + 5, grid);
+        npg_text_strong(canvas, left, NPG_PLOT_BOTTOM + 12,
+                        history->days[day].date, axis_font, secondary);
+    }
+}
+
+static void npg_draw_total_area(
+    struct zcl_present_canvas *canvas,
+    const struct science_code_growth_history *history, uint64_t maximum)
+{
+    const struct zcl_present_color glow = {49, 209, 193};
+    for (size_t i = 1; i < history->day_count; i++) {
+        uint32_t first_x = npg_x(i - 1u, history->day_count);
+        uint32_t last_x = npg_x(i, history->day_count);
+        uint64_t first = npg_value(
+            &history->days[i - 1u], NPG_SERIES_TOTAL);
+        uint64_t last = npg_value(&history->days[i], NPG_SERIES_TOTAL);
+        uint32_t span = last_x - first_x;
+        for (uint32_t step = i == 1u ? 0u : 1u; step <= span; step++) {
+            long double ratio = span == 0 ? 0.0L :
+                (long double)step / (long double)span;
+            uint64_t value = (uint64_t)((long double)first +
+                ((long double)last - (long double)first) * ratio);
+            int32_t y = npg_y(value, maximum);
+            zcl_present_canvas_fill_rect_alpha(
+                canvas, (int32_t)first_x + (int32_t)step, y, 1u,
+                NPG_PLOT_BOTTOM - (uint32_t)y + 1u, glow, 22u);
         }
     }
 }
@@ -302,17 +275,34 @@ static void npg_draw_series(
     const struct science_code_growth_history *history, uint64_t maximum,
     uint32_t text_scale)
 {
+    const struct zcl_present_color shadow = {2, 7, 15};
     const struct zcl_present_color primary = {241, 246, 255};
     const struct zcl_present_color cyan = {68, 224, 202};
     const struct zcl_present_color violet = {174, 125, 255};
+    npg_draw_total_area(canvas, history, maximum);
     npg_series(canvas, history, NPG_SERIES_NON_TEST,
-               maximum, cyan, 2u);
+               maximum, shadow, 7u, 0, 5);
     npg_series(canvas, history, NPG_SERIES_TEST,
-               maximum, violet, 2u);
+               maximum, shadow, 7u, 0, 5);
     npg_series(canvas, history, NPG_SERIES_TOTAL,
-               maximum, primary, 3u);
+               maximum, shadow, 9u, 0, 6);
+    npg_series(canvas, history, NPG_SERIES_NON_TEST,
+               maximum, cyan, 3u, 0, 0);
+    npg_series(canvas, history, NPG_SERIES_TEST,
+               maximum, violet, 3u, 0, 0);
+    npg_series(canvas, history, NPG_SERIES_TOTAL,
+               maximum, primary, 4u, 0, 0);
     const struct science_code_growth_day *last =
         &history->days[history->day_count - 1u];
+    zcl_present_canvas_fill_circle(
+        canvas, NPG_PLOT_RIGHT,
+        npg_y(npg_value(last, NPG_SERIES_TOTAL), maximum), 5u, primary);
+    zcl_present_canvas_fill_circle(
+        canvas, NPG_PLOT_RIGHT, npg_y(last->non_test_lines, maximum),
+        4u, cyan);
+    zcl_present_canvas_fill_circle(
+        canvas, NPG_PLOT_RIGHT, npg_y(last->test_lines, maximum),
+        4u, violet);
     npg_text_strong(canvas, NPG_PLOT_RIGHT + 9,
                     npg_y(npg_value(last, NPG_SERIES_TOTAL), maximum) - 8,
                     "total", npg_font(16u, text_scale), primary);
@@ -354,10 +344,14 @@ static void npg_prepare_hover(
 static void npg_draw_controls(
     struct zcl_present_canvas *canvas, uint32_t text_scale)
 {
-    const struct zcl_present_color panel = {14, 24, 40};
+    const struct zcl_present_color shadow = {3, 7, 16};
+    const struct zcl_present_color panel_top = {18, 31, 52};
+    const struct zcl_present_color panel_bottom = {11, 21, 38};
     const struct zcl_present_color primary = {241, 246, 255};
     const struct zcl_present_color secondary = {153, 174, 201};
-    zcl_present_canvas_fill_rect(canvas, 28, 610, 1064u, 46u, panel);
+    zcl_present_canvas_fill_rect(canvas, 34, 617, 1058u, 39u, shadow);
+    zcl_present_canvas_fill_vertical_gradient(
+        canvas, 28, 610, 1064u, 46u, panel_top, panel_bottom);
     static const char *const labels[NPG_TEXT_SCALES] = {
         "TEXT SMALL", "TEXT MEDIUM", "TEXT LARGE",
     };
@@ -391,14 +385,17 @@ static bool npg_visual_build(
     if (!zcl_present_canvas_init(&canvas, visual->pixels, pixel_bytes,
                                  NPG_WIDTH, NPG_HEIGHT))
         return false;
-    const struct zcl_present_color background = {8, 14, 26};
-    zcl_present_canvas_clear(&canvas, background);
+    const struct zcl_present_color background_top = {5, 9, 20};
+    const struct zcl_present_color background_bottom = {8, 17, 33};
+    zcl_present_canvas_fill_vertical_gradient(
+        &canvas, 0, 0, NPG_WIDTH, NPG_HEIGHT,
+        background_top, background_bottom);
     npg_draw_header(&canvas, history, text_scale);
     uint64_t maximum = UINT64_MAX - history->non_test_lines <
         history->test_lines ? UINT64_MAX
                             : history->non_test_lines + history->test_lines;
     maximum = zcl_present_canvas_chart_scale_maximum(maximum);
-    npg_draw_grid(&canvas, history, maximum, text_scale);
+    npg_draw_axes(&canvas, history, maximum, text_scale);
     npg_draw_series(&canvas, history, maximum, text_scale);
     npg_prepare_hover(history, visual);
     npg_draw_controls(&canvas, text_scale);
@@ -464,7 +461,7 @@ static bool npg_reply_points(
         json_push_kv_str(&reply->data, "navigation",
             "hover; wheel/arrows day; page keys week; home/end range") &&
         json_push_kv_str(&reply->data, "text_size",
-            "minus/plus; small, medium, large; default medium");
+            "minus/plus; small, medium, large; default small");
     static const char *const fields[] = {
         "date_utc", "head_commit", "commits",
         "non_test_lines", "non_test_added", "non_test_deleted",

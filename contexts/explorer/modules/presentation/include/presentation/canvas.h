@@ -39,6 +39,14 @@ void zcl_present_canvas_fill_rect(struct zcl_present_canvas *canvas,
                                   int32_t x, int32_t y,
                                   uint32_t width, uint32_t height,
                                   struct zcl_present_color color);
+void zcl_present_canvas_fill_rect_alpha(
+    struct zcl_present_canvas *canvas, int32_t x, int32_t y,
+    uint32_t width, uint32_t height,
+    struct zcl_present_color color, uint8_t alpha);
+void zcl_present_canvas_fill_vertical_gradient(
+    struct zcl_present_canvas *canvas, int32_t x, int32_t y,
+    uint32_t width, uint32_t height,
+    struct zcl_present_color top, struct zcl_present_color bottom);
 void zcl_present_canvas_stroke_rect(struct zcl_present_canvas *canvas,
                                     int32_t x, int32_t y,
                                     uint32_t width, uint32_t height,
@@ -48,6 +56,13 @@ void zcl_present_canvas_line(struct zcl_present_canvas *canvas,
                              int32_t x0, int32_t y0,
                              int32_t x1, int32_t y1,
                              struct zcl_present_color color);
+void zcl_present_canvas_line_thick(
+    struct zcl_present_canvas *canvas, int32_t x0, int32_t y0,
+    int32_t x1, int32_t y1, uint32_t thickness,
+    struct zcl_present_color color);
+void zcl_present_canvas_fill_circle(
+    struct zcl_present_canvas *canvas, int32_t center_x, int32_t center_y,
+    uint32_t radius, struct zcl_present_color color);
 void zcl_present_canvas_blit_rgba(struct zcl_present_canvas *canvas,
                                   int32_t x, int32_t y,
                                   const uint8_t *rgba,

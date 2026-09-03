@@ -219,12 +219,38 @@ int test_qr(void)
              canvas_pixels[0] == 0xc8 && canvas_pixels[1] == 0x70 &&
              canvas_pixels[2] == 0x35 &&
              canvas_pixels[((size_t)5u * 32u + 5u) * 3u] == 0xff);
+    const struct zcl_present_color canvas_black = {0, 0, 0};
+    zcl_present_canvas_clear(&canvas, canvas_black);
+    zcl_present_canvas_fill_rect_alpha(
+        &canvas, 0, 0, 1u, 1u, canvas_white, 128u);
+    QR_CHECK("canvas alpha blend is exact in every RGB channel",
+             canvas_pixels[0] == 128u && canvas_pixels[1] == 128u &&
+             canvas_pixels[2] == 128u);
+    zcl_present_canvas_fill_vertical_gradient(
+        &canvas, 2, 0, 2u, 3u, canvas_white, canvas_orange);
+    size_t gradient_top = 2u * 3u;
+    size_t gradient_bottom = ((size_t)2u * 32u + 2u) * 3u;
+    QR_CHECK("canvas vertical gradient preserves exact endpoint colors",
+             canvas_pixels[gradient_top] == 0xff &&
+             canvas_pixels[gradient_top + 1u] == 0xff &&
+             canvas_pixels[gradient_top + 2u] == 0xff &&
+             canvas_pixels[gradient_bottom] == 0xc8 &&
+             canvas_pixels[gradient_bottom + 1u] == 0x70 &&
+             canvas_pixels[gradient_bottom + 2u] == 0x35);
+    zcl_present_canvas_line_thick(
+        &canvas, 4, 20, 12, 20, 3u, canvas_orange);
+    zcl_present_canvas_fill_circle(&canvas, 20, 20, 3u, canvas_orange);
+    QR_CHECK("canvas thick paths and circles stay exact and bounded",
+             canvas_pixels[((size_t)19u * 32u + 8u) * 3u] == 0xc8 &&
+             canvas_pixels[((size_t)20u * 32u + 20u) * 3u] == 0xc8 &&
+             canvas_pixels[((size_t)16u * 32u + 20u) * 3u] == 0);
     QR_CHECK("chart scale chooses readable overflow-safe decimal intervals",
              zcl_present_canvas_chart_scale_maximum(0u) == 1u &&
              zcl_present_canvas_chart_scale_maximum(1123394u) == 1200000u &&
              zcl_present_canvas_chart_scale_maximum(100u) == 120u &&
              zcl_present_canvas_chart_scale_maximum(UINT64_MAX) ==
                  UINT64_MAX);
+    zcl_present_canvas_clear(&canvas, canvas_white);
     zcl_present_canvas_text(&canvas, 8, 8, "Aa", 2u, 16u, canvas_orange);
     bool saw_antialias = false;
     for (size_t i = 0; i < sizeof(canvas_pixels); i++) {

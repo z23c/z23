@@ -94,6 +94,59 @@ void zcl_present_canvas_fill_rect(struct zcl_present_canvas *canvas,
     }
 }
 
+void zcl_present_canvas_fill_rect_alpha(
+    struct zcl_present_canvas *canvas, int32_t x, int32_t y,
+    uint32_t width, uint32_t height,
+    struct zcl_present_color color, uint8_t alpha)
+{
+    if (!canvas || !canvas->pixels || width == 0 || height == 0 || alpha == 0)
+        return;
+    int64_t left = x < 0 ? 0 : x;
+    int64_t top = y < 0 ? 0 : y;
+    int64_t right = (int64_t)x + width;
+    int64_t bottom = (int64_t)y + height;
+    if (right > canvas->width) right = canvas->width;
+    if (bottom > canvas->height) bottom = canvas->height;
+    if (left >= right || top >= bottom) return;
+    const uint8_t source[3] = {color.r, color.g, color.b};
+    for (int64_t py = top; py < bottom; py++) {
+        size_t at = (size_t)py * canvas->stride + (size_t)left * 3u;
+        for (int64_t px = left; px < right; px++, at += 3u) {
+            for (size_t channel = 0; channel < 3u; channel++) {
+                uint32_t mixed = (uint32_t)source[channel] * alpha +
+                    (uint32_t)canvas->pixels[at + channel] * (255u - alpha);
+                canvas->pixels[at + channel] = (uint8_t)((mixed + 127u) / 255u);
+            }
+        }
+    }
+}
+
+static uint8_t canvas_lerp_channel(
+    uint8_t first, uint8_t last, uint32_t position, uint32_t denominator)
+{
+    uint32_t left = (uint32_t)first * (denominator - position);
+    uint32_t right = (uint32_t)last * position;
+    return (uint8_t)((left + right + denominator / 2u) / denominator);
+}
+
+void zcl_present_canvas_fill_vertical_gradient(
+    struct zcl_present_canvas *canvas, int32_t x, int32_t y,
+    uint32_t width, uint32_t height,
+    struct zcl_present_color top, struct zcl_present_color bottom)
+{
+    if (!canvas || height == 0) return;
+    uint32_t denominator = height > 1u ? height - 1u : 1u;
+    for (uint32_t row = 0; row < height; row++) {
+        struct zcl_present_color color = {
+            canvas_lerp_channel(top.r, bottom.r, row, denominator),
+            canvas_lerp_channel(top.g, bottom.g, row, denominator),
+            canvas_lerp_channel(top.b, bottom.b, row, denominator),
+        };
+        zcl_present_canvas_fill_rect(canvas, x, y + (int32_t)row,
+                                     width, 1u, color);
+    }
+}
+
 void zcl_present_canvas_stroke_rect(struct zcl_present_canvas *canvas,
                                     int32_t x, int32_t y,
                                     uint32_t width, uint32_t height,
@@ -131,6 +184,37 @@ void zcl_present_canvas_line(struct zcl_present_canvas *canvas,
         int64_t twice = error * 2;
         if (twice >= dy) { error += dy; x += sx; }
         if (twice <= dx) { error += dx; y += sy; }
+    }
+}
+
+void zcl_present_canvas_line_thick(
+    struct zcl_present_canvas *canvas, int32_t x0, int32_t y0,
+    int32_t x1, int32_t y1, uint32_t thickness,
+    struct zcl_present_color color)
+{
+    if (thickness == 0) return;
+    int32_t offset = (int32_t)(thickness / 2u);
+    for (uint32_t line = 0; line < thickness; line++)
+        zcl_present_canvas_line(canvas, x0, y0 + (int32_t)line - offset,
+                                x1, y1 + (int32_t)line - offset, color);
+}
+
+void zcl_present_canvas_fill_circle(
+    struct zcl_present_canvas *canvas, int32_t center_x, int32_t center_y,
+    uint32_t radius, struct zcl_present_color color)
+{
+    if (!canvas || radius > ZCL_PRESENT_CANVAS_DIMENSION_MAX) return;
+    int64_t squared_radius = (int64_t)radius * radius;
+    int32_t extent = radius > (uint32_t)INT32_MAX
+        ? INT32_MAX : (int32_t)radius;
+    for (int32_t row = -extent; row <= extent; row++) {
+        int64_t remaining = squared_radius - (int64_t)row * row;
+        int32_t half_width = remaining > 0
+            ? (int32_t)canvas_sqrt_compat((double)remaining) : 0;
+        zcl_present_canvas_fill_rect(canvas, center_x - half_width,
+                                     center_y + row,
+                                     (uint32_t)(half_width * 2 + 1), 1u,
+                                     color);
     }
 }
 
