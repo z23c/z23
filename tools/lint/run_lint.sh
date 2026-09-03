@@ -279,6 +279,7 @@ gate_command() {
         check-clang-portability)           echo './tools/lint/check_clang_portability.sh --self-test && ./tools/lint/check_clang_portability.sh' ;;
         check-windows-platform-seam)       echo './tools/lint/check_windows_platform_seam.sh --self-test && ./tools/lint/check_windows_platform_seam.sh' ;;
         check-windows-acceptance)          echo './tools/lint/check_windows_acceptance.sh --self-test && ./tools/lint/check_windows_acceptance.sh' ;;
+        check-windows-acceptance-guard)    echo './tools/lint/check_windows_acceptance_guard.sh --self-test && ./tools/lint/check_windows_acceptance_guard.sh' ;;
         check-windows-cross-syntax)        echo './tools/lint/check_windows_cross_syntax.sh --self-test && ./tools/lint/check_windows_cross_syntax.sh' ;;
         check-platform-header-guards)      echo './tools/lint/check_platform_header_guards.sh --self-test && ./tools/lint/check_platform_header_guards.sh' ;;
         check-macos-acceptance)            echo './tools/lint/check_macos_acceptance.sh --self-test && ./tools/lint/check_macos_acceptance.sh' ;;

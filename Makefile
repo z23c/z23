@@ -4818,6 +4818,7 @@ LINT_FAST_GATES := \
     check-supervisor-registration \
     check-vendor-provenance \
     check-windows-platform-seam \
+    check-windows-acceptance-guard \
     check-pipefail-status-pipe \
     check-doc-counts \
     check-arena-view-stub
@@ -11435,6 +11436,23 @@ check-windows-platform-seam:
 .PHONY: check-windows-acceptance
 check-windows-acceptance:
 	@./tools/lint/check_windows_acceptance.sh --self-test && ./tools/lint/check_windows_acceptance.sh
+
+# The off-Windows guard-shape half of the lane above: a tests/-rooted Windows
+# acceptance TU that defines main() must open with `#if defined(_WIN32)` and
+# close with `#else` + `typedef int <name>_not_built;` + `#endif`, or it is
+# not an empty TU off Windows and collides with main() in every Linux test
+# binary that links the harness sources. Commit b562857bc shipped exactly
+# that shape and NO test group could link until the file was healed, while
+# every existing gate stayed green (the cross-compile gates open the guard on
+# Windows; the reconcile gate checks membership, not shape). No compiler
+# needed — it is a lexical fact. Scan floor + missing-row refusal keep a
+# partial scan from passing. In lint-fast because that is what the push hook
+# runs; the regression must be caught before it lands, not at the next full
+# lint.
+.PHONY: check-windows-acceptance-guard
+check-windows-acceptance-guard:
+	@echo "══ LINT: Windows acceptance TU off-Windows guard ══"
+	@./tools/lint/check_windows_acceptance_guard.sh --self-test && ./tools/lint/check_windows_acceptance_guard.sh
 # END windows-acceptance lane
 # ─────────────────────────────────────────────────────────────────────────
 
@@ -12621,6 +12639,7 @@ LINT_GATES := \
     check-clang-portability \
     check-windows-platform-seam \
     check-windows-acceptance \
+    check-windows-acceptance-guard \
     check-windows-cross-syntax \
     check-platform-header-guards \
     check-macos-acceptance \
