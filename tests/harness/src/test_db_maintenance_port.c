@@ -92,6 +92,52 @@ static int64_t wal_file_size(const char *db_path)
     return (int64_t)st.st_size;
 }
 
+/* ── wal_ckpt_classify ─────────────────────────────────────────────────
+ *
+ * The outcome ranking is the invariant: busy beats completed (SQLite
+ * reports contention as a successful call whose row says busy), a failed
+ * call is an error, unknown frame counts refuse to claim success, and
+ * only then do drained/noop/partial split on the counts. The 0/0 empty
+ * WAL is a drain, not a no-op. Pure — called directly. One function per
+ * TEST, as the harness's hardcoded `goto _test_next` requires. */
+static int t_wal_ckpt_classify_ranking(void)
+{
+    int failures = 0;
+    TEST("wal_ckpt_classify: busy beats completed, error otherwise") {
+        ASSERT_EQ(wal_ckpt_classify(true, true, 0, 0), WAL_CKPT_BUSY);
+        ASSERT_EQ(wal_ckpt_classify(false, true, -1, -1), WAL_CKPT_BUSY);
+        ASSERT_EQ(wal_ckpt_classify(false, false, 5, 0), WAL_CKPT_ERROR);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int t_wal_ckpt_classify_unknown(void)
+{
+    int failures = 0;
+    TEST("wal_ckpt_classify: unknown frame counts classify UNKNOWN, not success") {
+        ASSERT_EQ(wal_ckpt_classify(true, false, -1, 0), WAL_CKPT_UNKNOWN);
+        ASSERT_EQ(wal_ckpt_classify(true, false, 0, -1), WAL_CKPT_UNKNOWN);
+        ASSERT_EQ(wal_ckpt_classify(true, false, -1, -1), WAL_CKPT_UNKNOWN);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int t_wal_ckpt_classify_counts(void)
+{
+    int failures = 0;
+    TEST("wal_ckpt_classify: drained/noop/partial split on exact counts") {
+        ASSERT_EQ(wal_ckpt_classify(true, false, 0, 0), WAL_CKPT_DRAINED);
+        ASSERT_EQ(wal_ckpt_classify(true, false, 5, 5), WAL_CKPT_DRAINED);
+        ASSERT_EQ(wal_ckpt_classify(true, false, 5, 7), WAL_CKPT_DRAINED);
+        ASSERT_EQ(wal_ckpt_classify(true, false, 5, 0), WAL_CKPT_NOOP);
+        ASSERT_EQ(wal_ckpt_classify(true, false, 5, 3), WAL_CKPT_PARTIAL);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_db_maintenance_port(void)
 {
     int failures = 0;
@@ -266,6 +312,10 @@ int test_db_maintenance_port(void)
         DBMP_CHECK("wal_size NULL out false",
                    !port2.wal_size_bytes(port2.self, NULL));
     }
+
+    failures += t_wal_ckpt_classify_ranking();
+    failures += t_wal_ckpt_classify_unknown();
+    failures += t_wal_ckpt_classify_counts();
 
     return failures;
 }
