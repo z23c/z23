@@ -80,6 +80,8 @@ ZCL_WINDOWS_ACCEPTANCE_block_swarm_scale_SOURCES := \
 	platform/modules/platform/src/clock.c \
 	platform/modules/base/src/log_level.c \
 	platform/modules/base/src/safe_alloc.c
+ZCL_WINDOWS_ACCEPTANCE_block_swarm_scale_LIBS := \
+	$(ZCL_WINDOWS_ACCEPTANCE_PTHREAD_LIB)
 
 ZCL_WINDOWS_ACCEPTANCE_boot_auto_install_bundle_refusal_SOURCES := \
 	tests/harness/src/boot_auto_install_bundle_windows_refusal_acceptance.c \
