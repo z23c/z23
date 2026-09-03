@@ -100,10 +100,21 @@ static void proof_status(
         "proof receipt status requires the dev binary", "make dev-bin");
 #else
     struct zcl_dev_proof_status status = {0};
-    if (!zcl_dev_proof_status_read(
+    bool read = zcl_dev_proof_status_read(
             proof_source_root(request),
             proof_optional_text(request->input, "local_commit"),
-            proof_optional_text(request->input, "remote_base"), &status)) {
+            proof_optional_text(request->input, "remote_base"), &status);
+    if (status.state == ZCL_DEV_PROOF_STATE_INVALID &&
+        strcmp(status.detail, "windows_native_proof_worker_unavailable") == 0) {
+        proof_emit_status(reply, &status, false);
+        zcl_command_reply_fail(
+            reply, ZCL_COMMAND_STATUS_BLOCKED, ZCL_COMMAND_EXIT_BLOCKED,
+            "PROOF_WORKER_UNAVAILABLE", "preflight", false, false,
+            "exact background verification is unavailable on this platform",
+            status.detail);
+        return;
+    }
+    if (!read || status.state == ZCL_DEV_PROOF_STATE_INVALID) {
         proof_emit_status(reply, &status, true);
         zcl_command_reply_fail(
             reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
@@ -205,14 +216,8 @@ static void proof_wait(
     const struct json_value *timeout = json_get(request->input, "timeout_ms");
     if (timeout && timeout->type == JSON_INT)
         timeout_ms = json_get_int(timeout);
-    struct zcl_dev_proof_status status;
-    if (timeout_ms < 1 || timeout_ms > 300000 ||
-        !zcl_dev_proof_wait(
-            proof_source_root(request),
-            proof_optional_text(request->input, "local_commit"),
-            proof_optional_text(request->input, "remote_base"),
-            (int)timeout_ms, &status)) {
-        memset(&status, 0, sizeof(status));
+    struct zcl_dev_proof_status status = {0};
+    if (timeout_ms < 1 || timeout_ms > 300000) {
         status.state = ZCL_DEV_PROOF_STATE_INVALID;
         (void)snprintf(status.detail, sizeof(status.detail), "%s",
                        "timeout_ms_must_be_1_through_300000");
@@ -221,6 +226,29 @@ static void proof_wait(
             reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
             "PROOF_WAIT_INVALID", "normalize", false, false,
             "proof wait input is invalid", status.detail);
+        return;
+    }
+    if (!zcl_dev_proof_wait(
+            proof_source_root(request),
+            proof_optional_text(request->input, "local_commit"),
+            proof_optional_text(request->input, "remote_base"),
+            (int)timeout_ms, &status)) {
+        proof_emit_status(reply, &status, false);
+        if (status.state == ZCL_DEV_PROOF_STATE_INVALID &&
+            strcmp(status.detail,
+                   "windows_native_proof_worker_unavailable") == 0) {
+            zcl_command_reply_fail(
+                reply, ZCL_COMMAND_STATUS_BLOCKED, ZCL_COMMAND_EXIT_BLOCKED,
+                "PROOF_WORKER_UNAVAILABLE", "preflight", false, false,
+                "exact background verification is unavailable on this platform",
+                status.detail);
+        } else {
+            zcl_command_reply_fail(
+                reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
+                "PROOF_WAIT_INVALID", "resolve", false, false,
+                "proof wait could not resolve its exact receipt request",
+                status.detail[0] ? status.detail : "proof_wait_unavailable");
+        }
         return;
     }
     if (status.state != ZCL_DEV_PROOF_STATE_PASSED) {

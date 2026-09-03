@@ -190,8 +190,10 @@ Canonical operator APIs, in priority order:
 `make agent-loop` is the normal AI/operator edit gate. On Linux and macOS,
 obtain the exact commit/base receipt and push normally; the installed native
 hook rejects other remote refs, missing ancestry, or invalid evidence without
-running a gate. Windows uses the synchronous fixed-catalog
-`make windows-acceptance` shell hook and does not claim exact-receipt admission.
+running a gate. Windows uses the same receipt-only native hook, but has no
+native proof producer yet, so missing evidence refuses immediately. Run
+`make windows-acceptance` explicitly for parity evidence; it is not invoked by
+the hook and does not claim exact-receipt admission.
 `make pre-push-ci` remains available for deliberate legacy parity, and
 `ZCL_FAST_STRICT_TESTS=1` selects its strict focused mode. Full `make ci` still
 exists for release-grade manual runs, but the

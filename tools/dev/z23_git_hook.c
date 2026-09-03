@@ -623,75 +623,19 @@ static int pre_push(void)
 
 static int notify_proof(void)
 {
-    char root[PATH_MAX], binary[PATH_MAX];
-    if (!repo_root(root)) return 0;
 #if defined(_WIN32)
-    int n = snprintf(binary, sizeof(binary), "%s/build/bin/z23-dev.exe", root);
-#else
-    int n = snprintf(binary, sizeof(binary), "%s/build/bin/z23-dev", root);
-#endif
-    if (n <= 0 || (size_t)n >= sizeof(binary))
-        return 0;
-#if defined(_WIN32)
-    struct platform_positioned_file image;
-    platform_positioned_file_init(&image);
-    bool executable = platform_positioned_file_open(&image, binary) &&
-                      platform_positioned_file_is_executable(&image);
-    platform_positioned_file_close(&image);
-    if (!executable) return 0;
-    const char *argv[] = {binary, "dev", "proof", "ensure", NULL};
-    wchar_t *line = hook_command_line(argv);
-    wchar_t *application = hook_utf16(binary);
-    wchar_t *directory = hook_utf16(root);
-    SECURITY_ATTRIBUTES security = {
-        .nLength = sizeof(security), .bInheritHandle = TRUE};
-    HANDLE null_handle = CreateFileW(L"NUL", GENERIC_READ | GENERIC_WRITE,
-        FILE_SHARE_READ | FILE_SHARE_WRITE, &security, OPEN_EXISTING, 0, NULL);
-    if (!line || !application || !directory ||
-        null_handle == INVALID_HANDLE_VALUE) {
-        free(line); free(application); free(directory);
-        if (null_handle != INVALID_HANDLE_VALUE) CloseHandle(null_handle);
-        return 0;
-    }
-    SIZE_T attribute_size = 0;
-    (void)InitializeProcThreadAttributeList(NULL, 1, 0, &attribute_size);
-    LPPROC_THREAD_ATTRIBUTE_LIST attributes = zcl_malloc(
-        attribute_size, "git-hook-notify-attributes");
-    bool attributes_initialized = attributes &&
-        InitializeProcThreadAttributeList(attributes, 1, 0,
-                                          &attribute_size) != 0;
-    HANDLE inherited[] = {null_handle};
-    bool attributes_ready = attributes_initialized &&
-        UpdateProcThreadAttribute(attributes, 0,
-            PROC_THREAD_ATTRIBUTE_HANDLE_LIST, inherited, sizeof(inherited),
-            NULL, NULL) != 0;
-    STARTUPINFOEXW startup = {0};
-    PROCESS_INFORMATION process = {0};
-    startup.StartupInfo.cb = sizeof(startup);
-    startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
-    startup.StartupInfo.wShowWindow = SW_HIDE;
-    startup.StartupInfo.hStdInput = null_handle;
-    startup.StartupInfo.hStdOutput = null_handle;
-    startup.StartupInfo.hStdError = null_handle;
-    startup.lpAttributeList = attributes;
-    clear_git_local_environment();
-    UINT prior_mode = SetErrorMode(
-        SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX);
-    bool launched = attributes_ready && CreateProcessW(
-        application, line, NULL, NULL, TRUE,
-        CREATE_NO_WINDOW | DETACHED_PROCESS | EXTENDED_STARTUPINFO_PRESENT,
-        NULL, directory, &startup.StartupInfo, &process);
-    (void)SetErrorMode(prior_mode);
-    if (launched) {
-        CloseHandle(process.hThread);
-        CloseHandle(process.hProcess);
-    }
-    CloseHandle(null_handle);
-    if (attributes_initialized) DeleteProcThreadAttributeList(attributes);
-    free(attributes);
-    free(line); free(application); free(directory);
+    /* The native Windows proof producer is deliberately unavailable until it
+     * can retain directories and contain the entire compiler/test tree in a
+     * kill-on-close Job Object.  A post-* hook must therefore remain a tiny,
+     * synchronous no-op: launching the full dev PE here cannot create an
+     * admissible receipt and can strand image-validation processes. */
     return 0;
 #else
+    char root[PATH_MAX], binary[PATH_MAX];
+    if (!repo_root(root)) return 0;
+    int n = snprintf(binary, sizeof(binary), "%s/build/bin/z23-dev", root);
+    if (n <= 0 || (size_t)n >= sizeof(binary))
+        return 0;
     if (access(binary, X_OK) != 0) return 0;
     pid_t child = fork();
     if (child != 0) return 0;

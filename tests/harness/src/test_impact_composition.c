@@ -1239,7 +1239,21 @@ static int test_ic_resident_proof_queue(void)
     int failures = 0;
     TEST("impact composition: resident proof queue preserves unknown ancestry") {
 #if defined(_WIN32)
+        static const char local[] =
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        static const char base[] =
+            "1111111111111111111111111111111111111111";
+        struct zcl_dev_proof_status status = {0};
         ASSERT(!zcl_dev_proof_queue_has_pending(IC_FIX_ROOT));
+        ASSERT(zcl_dev_proof_status_read(IC_FIX_ROOT, local, base, &status));
+        ASSERT(status.state == ZCL_DEV_PROOF_STATE_INVALID);
+        ASSERT(strcmp(status.detail,
+                      "windows_native_proof_worker_unavailable") == 0);
+        memset(&status, 0, sizeof(status));
+        ASSERT(!zcl_dev_proof_wait(IC_FIX_ROOT, local, base, 300000, &status));
+        ASSERT(status.state == ZCL_DEV_PROOF_STATE_INVALID);
+        ASSERT(strcmp(status.detail,
+                      "windows_native_proof_worker_unavailable") == 0);
 #else
         char root[4096];
         static const char local_a[] =

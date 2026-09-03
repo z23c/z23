@@ -149,8 +149,10 @@ native PE receipt hooks. The pre-push executable reads only an immutable
 exact commit/base receipt; it never opens a shell, runs Make, compiles, tests,
 waits, or fetches. Its two bounded Git queries reuse the exact parent Git image,
 run without a console window, and are contained by a kill-on-close Job Object.
-Post-commit/post-merge/post-checkout make a best-effort hidden notification and
-return immediately. Native hook generations are content-addressed and
+Until a Job-contained native proof producer exists,
+post-commit/post-merge/post-checkout return immediately without launching the
+full development binary; missing proof remains an honest pre-push refusal.
+Native hook generations are content-addressed and
 `core.hooksPath` switches atomically, so a locked running executable cannot
 block an update. `make windows-acceptance` remains an explicit parity gate.
 

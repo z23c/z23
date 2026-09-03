@@ -1294,11 +1294,13 @@ Post-commit, post-merge, and post-checkout hooks make a best-effort asynchronous
 proof request. Inspect it with `build/bin/z23-dev dev proof status` or wait
 explicitly with `build/bin/z23-dev dev proof wait`.
 
-Windows currently installs the tracked shell pre-push hook and runs the fixed
-`make windows-acceptance` catalog described in [`WINDOWS.md`](WINDOWS.md); it
-does not claim exact-receipt admission. `make pre-push-ci` remains a manually
-invoked legacy parity oracle on other hosts. Full-suite, fuzz, and coverage
-evidence belongs to the background quality lanes: install them with
+Windows installs the same receipt-only native hook, but its native proof
+producer is not implemented yet. Missing evidence therefore refuses promptly;
+the hook does not substitute a synchronous build. Run the fixed
+`make windows-acceptance` catalog described in [`WINDOWS.md`](WINDOWS.md) as an
+explicit parity gate, not as exact-receipt admission. `make pre-push-ci` remains
+a manually invoked legacy parity oracle on other hosts. Full-suite, fuzz, and
+coverage evidence belongs to the background quality lanes: install them with
 `make install-quality-linger` and inspect them with
 `make quality-linger-status`.
 Status JSON is written under `~/.local/state/zclassic23-quality`. The native

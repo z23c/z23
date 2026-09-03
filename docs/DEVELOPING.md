@@ -626,8 +626,10 @@ Before committing:
 6. Commit one coherent change with an evidence-backed message.
 7. On Linux and macOS, wait for `dev proof status` to report `passed`, then
    push normally; the native pre-push hook reads only the exact sealed receipt.
-   Windows currently uses the synchronous `make windows-acceptance` shell hook
-   documented in [`WINDOWS.md`](WINDOWS.md), not receipt admission.
+   Windows installs the same receipt-only native admission hook. Its native
+   proof producer is not implemented yet, so a missing receipt refuses
+   immediately; run the explicit `make windows-acceptance` parity gate while
+   developing, but do not mistake that gate for an admissible receipt.
 8. Verify local HEAD, `origin/main`, and the remote branch SHA agree.
 
 Every changed C path must map to focused proof through the repository's impact
