@@ -632,6 +632,25 @@ running receipt refuses within the bounded read path and prints the exact
 `z23-dev dev proof wait` command for that commit/base pair. A normal
 non-fast-forward race also refuses without deleting reusable child evidence.
 
+The source-identity capture that seals a proof's evidence (`zcl_dev_source_cas_capture`
+/ `zcl_dev_source_identity_capture` in `tools/dev/dev_source_identity.c`) runs
+under real host load and can legitimately take longer than one fixed budget.
+Its evidence tokens name the exact failure rather than folding every case into
+one undifferentiated string: `source_identity_timeout` (the capture exceeded
+its budget), `source_identity_signal_<n>` (the capture child was killed by
+signal `n`), `source_identity_exit_<n>` (the capture tool exited nonzero),
+`source_identity_output_truncated` (the captured record was cut short), and
+`source_identity_output_invalid` (the tool completed and produced output, but
+that output did not parse as a source record). Only the first three are
+retried automatically: `zcl_dev_source_identity_capture` re-attempts the
+capture up to three times with a growing timeout (30s / 90s / 180s) before
+giving up, since those are the failure shapes host load can plausibly cause.
+A nonzero exit or an unparsable record is a deterministic tool or content
+defect a retry cannot fix, so those fail immediately with their specific
+token. This retry lives inside the capture itself, so both the pre-test
+identity seal and the mid-proof checkpoint capture benefit from it without
+ever re-running the tests those captures gate.
+
 Canonical deployment remains owner-gated. Development generation activation is
 an explicit plan/commit transaction with source, resident-CAS, process, probe,
 and rollback verification. A source identity or environment variable alone
