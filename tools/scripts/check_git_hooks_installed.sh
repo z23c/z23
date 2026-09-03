@@ -17,7 +17,11 @@ run_selftest() {
     trap 'rm -rf -- "$HOOK_SELFTEST_FIXTURE"' EXIT
     hooks="$fixture/build/githooks"
     native="$fixture/build/bin/z23-git-hook"
+    # The fixture simulates a Windows host through the environment, so the
+    # self-test copies whatever native hook this build produced: the .exe on
+    # a Windows build, the plain binary everywhere else.
     source_native="${ZCL_GIT_HOOK_NATIVE_BIN_FOR_TEST:-$SOURCE_ROOT/build/bin/z23-git-hook.exe}"
+    [[ -x "$source_native" ]] || source_native="$SOURCE_ROOT/build/bin/z23-git-hook"
     [[ -x "$source_native" ]] || {
         echo "check_git_hooks_installed: self-test needs $source_native" >&2
         return 1
