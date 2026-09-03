@@ -1222,6 +1222,7 @@ add/remove a gate.
 - `check-persona-resolves`
 - `check-specialists`
 - `check-prompt-templates`
+- `check-rule-vocabulary`
 - `check-cookbook`
 - `check-no-raw-clock-outside-platform`
 - `check-sysinit-ordering`

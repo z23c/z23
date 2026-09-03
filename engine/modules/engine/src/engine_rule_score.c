@@ -25,6 +25,7 @@
 #include "engine/engine_rule_score.h"
 
 #include "base/safe_alloc.h"
+#include "base/hex.h"
 #include "json/json.h"
 #include "sha3/sha3.h"
 
@@ -266,14 +267,9 @@ const struct zcl_rule_row *zcl_rule_vocab_find(const struct zcl_rule_vocab *v,
 void zcl_rule_chain_link(const char *line, size_t len,
                          char out[ZCL_RULE_HEX_MAX])
 {
-    static const char hexd[] = "0123456789abcdef";
     unsigned char d[32];
     zcl_sha3_256((const unsigned char *)line, len, d);
-    for (int i = 0; i < 32; i++) {
-        out[i * 2] = hexd[d[i] >> 4];
-        out[i * 2 + 1] = hexd[d[i] & 0x0f];
-    }
-    out[64] = '\0';
+    zcl_hex_encode(d, sizeof(d), out);
 }
 
 static const char *jstr(const struct json_value *o, const char *k)
