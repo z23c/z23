@@ -667,7 +667,12 @@ static int case_rewrite(void)
              orig && blen == klen &&
              memcmp(orig, k_fixture_vocab, klen) == 0);
     free(orig);
-    ER_CHECK("the pre-empted temp name is cleaned up", remove(tpath) == 0);
+#if defined(_WIN32)
+    int temp_removed = rmdir(tpath);
+#else
+    int temp_removed = remove(tpath);
+#endif
+    ER_CHECK("the pre-empted temp name is cleaned up", temp_removed == 0);
 
     /* ---- and a matching stale window that PUBLISHES: same bytes read,
      * same bytes on disk, different new text — the rename must land. */

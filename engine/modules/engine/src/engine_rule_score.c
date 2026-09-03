@@ -37,6 +37,14 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <direct.h>
+#include <io.h>
+#include <windows.h>
+#endif
 #include <unistd.h>
 
 /* ── labels ──────────────────────────────────────────────────────────── */
@@ -928,6 +936,134 @@ static bool write_whole(const char *path, const char *data, size_t len)
     return n == len;
 }
 
+static int rule_def_open(const char *path)
+{
+#if defined(_WIN32)
+    wchar_t wide[32768];
+    int count = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1,
+                                    wide, 32768);
+    if (count <= 0) return -1;
+    HANDLE handle = CreateFileW(
+        wide, GENERIC_READ | GENERIC_WRITE | DELETE,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+        OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
+        NULL);
+    if (handle == INVALID_HANDLE_VALUE) return -1;
+    BY_HANDLE_FILE_INFORMATION info = {0};
+    if (!GetFileInformationByHandle(handle, &info) ||
+        (info.dwFileAttributes &
+         (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) != 0) {
+        CloseHandle(handle);
+        return -1;
+    }
+    int fd = _open_osfhandle((intptr_t)handle, _O_RDWR | _O_BINARY);
+    if (fd < 0) CloseHandle(handle);
+    return fd;
+#else
+    return open(path, O_RDWR);
+#endif
+}
+
+static int rule_def_replace(const char *staging, const char *destination)
+{
+#if defined(_WIN32)
+    wchar_t staging_wide[32768], destination_wide[32768];
+    if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, staging, -1,
+                            staging_wide, 32768) <= 0 ||
+        MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, destination, -1,
+                            destination_wide, 32768) <= 0)
+        return -1;
+    return MoveFileExW(staging_wide, destination_wide,
+                       MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)
+        ? 0 : -1;
+#else
+    return rename(staging, destination);
+#endif
+}
+
+#if defined(_WIN32)
+static HANDLE rule_def_mutex_acquire(const char *path)
+{
+    wchar_t path_wide[32768], absolute[32768], folded[32768];
+    if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1,
+                            path_wide, 32768) <= 0)
+        return NULL;
+    DWORD absolute_count = GetFullPathNameW(path_wide, 32768, absolute, NULL);
+    if (absolute_count == 0 || absolute_count >= 32768)
+        return NULL;
+    int folded_count = LCMapStringEx(
+        LOCALE_NAME_INVARIANT, LCMAP_UPPERCASE, absolute, -1, folded, 32768,
+        NULL, NULL, 0);
+    if (folded_count <= 0) return NULL;
+    unsigned char digest[32];
+    zcl_sha3_256((const unsigned char *)folded,
+                 (size_t)folded_count * sizeof(*folded), digest);
+    wchar_t name[96] = L"Local\\Z23-rule-def-";
+    size_t offset = wcslen(name);
+    for (size_t i = 0; i < sizeof(digest); i++) {
+        if (swprintf(name + offset, 96u - offset, L"%02x", digest[i]) != 2)
+            return NULL;
+        offset += 2u;
+    }
+    HANDLE mutex = CreateMutexW(NULL, FALSE, name);
+    if (!mutex) return NULL;
+    DWORD waited = WaitForSingleObject(mutex, INFINITE);
+    if (waited != WAIT_OBJECT_0 && waited != WAIT_ABANDONED) {
+        CloseHandle(mutex);
+        return NULL;
+    }
+    return mutex;
+}
+
+static void rule_def_mutex_release(HANDLE mutex)
+{
+    if (!mutex) return;
+    (void)ReleaseMutex(mutex);
+    CloseHandle(mutex);
+}
+#endif
+
+static bool rule_def_lock(int fd)
+{
+#if defined(_WIN32)
+    intptr_t raw = _get_osfhandle(fd);
+    if (raw == -1) return false;
+    OVERLAPPED overlap = {0};
+    for (;;) {
+        if (LockFileEx((HANDLE)raw,
+                       LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
+                       0, MAXDWORD, MAXDWORD, &overlap))
+            return true;
+        if (GetLastError() != ERROR_LOCK_VIOLATION) return false;
+        Sleep(10);
+    }
+#else
+    struct flock lock = {
+        .l_type = F_WRLCK, .l_whence = SEEK_SET, .l_start = 0, .l_len = 0
+    };
+    int rc;
+    do {
+        rc = fcntl(fd, F_SETLKW, &lock);
+    } while (rc != 0 && errno == EINTR);
+    return rc == 0;
+#endif
+}
+
+static void rule_def_unlock(int fd)
+{
+#if defined(_WIN32)
+    intptr_t raw = _get_osfhandle(fd);
+    OVERLAPPED overlap = {0};
+    if (raw != -1)
+        (void)UnlockFileEx((HANDLE)raw, 0, MAXDWORD, MAXDWORD, &overlap);
+#else
+    struct flock lock = {
+        .l_type = F_UNLCK, .l_whence = SEEK_SET, .l_start = 0, .l_len = 0
+    };
+    (void)fcntl(fd, F_SETLK, &lock);
+#endif
+}
+
 /* The one writer of the live def. Nothing here ever opens `path` for
  * writing: the new bytes go whole into `<path>.tmp` in the same directory,
  * are flushed and fsynced, and a single rename publishes them. A crash, an
@@ -938,7 +1074,7 @@ static bool write_whole(const char *path, const char *data, size_t len)
  * The rewrite was DECIDED from `old_text`, the bytes the caller read. If
  * the live def is not still exactly those bytes, publishing would clobber
  * an edit nobody scored. So before the rename the live def is re-read under
- * an exclusive fcntl lock and its SHA3-256 compared against `old_text`'s;
+ * an exclusive native file lock and its SHA3-256 compared against `old_text`'s;
  * a mismatch refuses the whole write as STALE and leaves the file alone.
  * The lock spans the compare AND the rename, so two writers following this
  * same protocol cannot slip between each other's check and publish. */
@@ -957,14 +1093,21 @@ zcl_rule_def_rewrite(const char *path, const char *old_text, size_t old_len,
 
     /* O_RDWR, never O_TRUNC: the fd is only a handle for the write LOCK
      * (an exclusive fcntl lock requires a write-mode descriptor). */
-    int live = open(path, O_RDWR);
-    if (live < 0) { free(fresh); return ZCL_RULE_REWRITE_ERR_IO; }
+#if defined(_WIN32)
+    HANDLE rewrite_mutex = rule_def_mutex_acquire(path);
+    if (!rewrite_mutex) { free(fresh); return ZCL_RULE_REWRITE_ERR_IO; }
+#endif
+    int live = rule_def_open(path);
+    if (live < 0) {
+#if defined(_WIN32)
+        rule_def_mutex_release(rewrite_mutex);
+#endif
+        free(fresh);
+        return ZCL_RULE_REWRITE_ERR_IO;
+    }
 
-    struct flock fl = {
-        .l_type = F_WRLCK, .l_whence = SEEK_SET, .l_start = 0, .l_len = 0
-    };
     enum zcl_rule_rewrite_status st = ZCL_RULE_REWRITE_ERR_IO;
-    if (fcntl(live, F_SETLKW, &fl) == 0) {
+    if (rule_def_lock(live)) {
         /* Fresh read under the lock, bounded by what the caller read: a
          * file of a different length is already not the bytes the caller
          * read, whatever they are. */
@@ -1000,10 +1143,20 @@ zcl_rule_def_rewrite(const char *path, const char *old_text, size_t old_len,
                 bool ok = f != NULL;
                 if (ok) {
                     ok = fwrite(new_text, 1, new_len, f) == new_len &&
-                         fflush(f) == 0 && fsync(fileno(f)) == 0;
+                         fflush(f) == 0 &&
+#if defined(_WIN32)
+                         _commit(fileno(f)) == 0;
+#else
+                         fsync(fileno(f)) == 0;
+#endif
                     if (fclose(f) != 0) ok = false;
                 }
-                if (!ok || rename(tmp, path) != 0) {
+#if defined(_WIN32)
+                rule_def_unlock(live);
+                (void)close(live);
+                live = -1;
+#endif
+                if (!ok || rule_def_replace(tmp, path) != 0) {
                     (void)unlink(tmp);
                     st = ZCL_RULE_REWRITE_ERR_IO;
                 } else {
@@ -1011,10 +1164,12 @@ zcl_rule_def_rewrite(const char *path, const char *old_text, size_t old_len,
                 }
             }
         }
-        fl.l_type = F_UNLCK;
-        (void)fcntl(live, F_SETLK, &fl);
+        if (live >= 0) rule_def_unlock(live);
     }
-    (void)close(live);
+    if (live >= 0) (void)close(live);
+#if defined(_WIN32)
+    rule_def_mutex_release(rewrite_mutex);
+#endif
     free(fresh);
     return st;
 }
@@ -1129,7 +1284,13 @@ bool zcl_rule_score_run(const char *vocab_path, const char *chainlog_path,
                           ZCL_RULE_PROMOTIONS_DIR);
         /* An existing directory is not an error; a missing one would silently
          * drop every proposal this run made. */
-        if (dn > 0 && (size_t)dn < sizeof pdir) (void)mkdir(pdir, 0755);
+        if (dn > 0 && (size_t)dn < sizeof pdir) {
+#if defined(_WIN32)
+            (void)_mkdir(pdir);
+#else
+            (void)mkdir(pdir, 0755);
+#endif
+        }
         for (uint32_t i = 0; i < out->scoring.rule_count; i++) {
             const struct zcl_rule_score *sc = &out->scoring.rule[i];
             if (sc->verdict != ZCL_RULE_VERDICT_PROMOTABLE) continue;
