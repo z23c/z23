@@ -108,6 +108,31 @@ compiler-id)
         esac
     done < <(compgen -e | LC_ALL=C sort -u)
 
+    # Opt-in memoization: everything hashed above (argv strings + the full
+    # admitted-environment preimage) is cheap. Everything below is not — it
+    # spawns the compiler driver a dozen-plus times and walks every header
+    # search root's metadata with `find`. Those are a pure function of the
+    # cheap prefix for the life of one process tree (a toolchain swap mid-run
+    # changes CC_COMMAND, an admitted env var, or a resolved-tool identity,
+    # which all live in the prefix or get re-hashed as part of it before any
+    # cache lookup happens), so a caller that repeats this exact prefix many
+    # times in one run (e.g. build-epoch-session.sh re-verifying on every
+    # acquire) may set ZCL_BUILD_EPOCH_KEY_CACHE_DIR to skip the redundant
+    # work. Unset by default: every caller that does not opt in gets the
+    # unchanged, always-fresh computation below.
+    CACHE_DIR="${ZCL_BUILD_EPOCH_KEY_CACHE_DIR:-}"
+    CACHE_FILE=""
+    if [ -n "$CACHE_DIR" ]; then
+        mkdir -p "$CACHE_DIR" 2>/dev/null || true
+        if [ -d "$CACHE_DIR" ]; then
+            CACHE_FILE="$CACHE_DIR/compiler-id.$(sha256_file "$PREIMAGE")"
+            if [ -s "$CACHE_FILE" ]; then
+                cat -- "$CACHE_FILE"
+                exit 0
+            fi
+        fi
+    fi
+
     declare -A SEEN_TOOL=()
     fingerprint_tool()
     {
@@ -313,7 +338,13 @@ compiler-id)
         printf '\0search-root-end\0' >> "$PREIMAGE"
     done < "$WORK/search-roots"
 
-    sha256_file "$PREIMAGE"
+    COMPILER_DIGEST="$(sha256_file "$PREIMAGE")"
+    if [ -n "$CACHE_FILE" ]; then
+        printf '%s\n' "$COMPILER_DIGEST" > "$CACHE_FILE.$$" &&
+            mv -f -- "$CACHE_FILE.$$" "$CACHE_FILE" ||
+            rm -f -- "$CACHE_FILE.$$"
+    fi
+    printf '%s\n' "$COMPILER_DIGEST"
     ;;
 
 key)

@@ -63,6 +63,27 @@ SELFTEST_STEP_TIMEOUT="${ZCL_BUILD_EPOCH_SELFTEST_STEP_TIMEOUT:-120}"
 [[ "$SELFTEST_STEP_TIMEOUT" =~ ^[1-9][0-9]*$ ]] ||
     fail "invalid ZCL_BUILD_EPOCH_SELFTEST_STEP_TIMEOUT=$SELFTEST_STEP_TIMEOUT (must be a positive integer)"
 
+# A prior watchdog death reported nothing but a bare rc=2: the lint driver's
+# captured-output block only fires when this script exits with output
+# already flushed, but "budget exceeded" alone does not say WHERE the time
+# went, so a rerun under the same load looked identical to a rerun under a
+# real regression. PHASE_FILE names the section this run is currently in;
+# every phase() call below updates it, and the watchdog message reads it
+# back so a hung run says what it was doing, not just how long it ran.
+PHASE_FILE="$WORK/current-phase"
+printf 'startup\n' > "$PHASE_FILE"
+phase()
+{
+    printf '%s\n' "$1" > "$PHASE_FILE" 2>/dev/null || true
+}
+load_average()
+{
+    if [ -r /proc/loadavg ]; then
+        awk '{print $1, $2, $3}' /proc/loadavg 2>/dev/null && return 0
+    fi
+    uptime 2>/dev/null | sed -n 's/.*load average[s]*: *//p'
+}
+
 # Outer wall-clock budget, enforced from inside this script: the lint driver
 # imposes no per-gate timeout, so a stuck rendezvous below used to hold the
 # whole lint run (and the shared lint lock every other lane waits on)
@@ -71,8 +92,10 @@ SELFTEST_STEP_TIMEOUT="${ZCL_BUILD_EPOCH_SELFTEST_STEP_TIMEOUT:-120}"
 # and the driver sees a FAIL. A hung gate turns red, never waits.
 ( trap - EXIT HUP INT TERM
   sleep "$SELFTEST_TIMEOUT"
-  printf 'build-epoch-selftest: FAIL: outer wall-clock budget %ss exceeded; failing closed instead of holding the lint gate\n' \
-      "$SELFTEST_TIMEOUT" >&2
+  printf 'build-epoch-selftest: FAIL: %s exceeded outer wall-clock budget of %ss (phase=%s, load average=%s); failing closed instead of holding the lint gate\n' \
+      "tools/dev/build-epoch-selftest.sh" "$SELFTEST_TIMEOUT" \
+      "$(cat "$PHASE_FILE" 2>/dev/null || printf unknown)" \
+      "$(load_average || printf unavailable)" >&2
   kill -TERM "$$" ) & SELFTEST_WATCHDOG_PID=$!
 
 sha_label()
@@ -139,6 +162,7 @@ if z23_build_epoch_open_fd_matches_path "$IDENTITY_PATH" 9 "$HOST_SYSTEM"; then
 fi
 exec 9<&-
 
+phase compiler-id-and-env-sensitivity
 COMPILER_ID="$($KEY_TOOL compiler-id "$CC_COMMAND" "$CC_COMMAND")" ||
     fail 'compiler fingerprint failed'
 [[ "$COMPILER_ID" =~ ^[0-9a-f]{64}$ ]] || fail 'invalid compiler fingerprint'
@@ -189,9 +213,28 @@ if "$KEY_TOOL" compiler-id 'cc; printf unsafe' "$CC_COMMAND" \
     fail 'shell-active CC string was accepted'
 fi
 
+# From here on CC_COMMAND/CXX_COMMAND and the admitted environment never
+# change again for the rest of this script, so compiler-id's expensive part
+# (a dozen-plus compiler-driver spawns plus a `find` metadata walk of every
+# header search root, measured ~1.5-2.5s/call unloaded) recomputes an
+# answer this run already proved dozens of times over: directly below, and
+# on every build-epoch-session.sh acquire/verify from here on (it
+# re-invokes compiler-id itself). That redundant recomputation, multiplied
+# by process-spawn contention under a loaded parallel test suite, is what
+# pushes this script past its wall-clock budget. Opt the remainder of this
+# run into build-epoch-key.sh's ZCL_BUILD_EPOCH_KEY_CACHE_DIR memoization
+# (see its comment there for why the cache key is safe). This must stay
+# unset above: the block just proven exercises compiler-id's env/ctime
+# sensitivity by calling it twice with an identical cheap prefix (CC_COMMAND
+# + CPATH/C_INCLUDE_PATH string) over a mutated search-root file, and a
+# cache keyed on that cheap prefix must not paper over the difference.
+# Production `make` never sets this variable, so it always recomputes fresh.
+export ZCL_BUILD_EPOCH_KEY_CACHE_DIR="$WORK/.compiler-id-cache"
+
 # Compile-only search roots and indirect tool loaders are not inputs to
 # compiler-id's probes. Every joined and separate spelling must refuse before
 # an epoch can be minted; ordinary project flags remain admitted.
+phase forbidden-compile-flags
 FORBIDDEN_COMPILE_FLAGS=(
     '-isystem /tmp/include' '-isystem/tmp/include'
     '-idirafter /tmp/include' '-idirafter/tmp/include'
@@ -226,6 +269,7 @@ done
 
 # The build-system fingerprint is real (the checkout's own Makefile + epoch
 # scripts); synthetic labels below prove it is bound into the key.
+phase build-system-id
 BSYS_REAL="$("$KEY_TOOL" build-system-id)" || fail 'build-system-id failed'
 [[ "$BSYS_REAL" =~ ^[0-9a-f]{64}$ ]] || fail 'invalid build-system fingerprint'
 [ "$BSYS_REAL" = "$("$KEY_TOOL" build-system-id)" ] ||
@@ -233,6 +277,7 @@ BSYS_REAL="$("$KEY_TOOL" build-system-id)" || fail 'build-system-id failed'
 
 # Source/mutation labels remain the session/publish authority states. They
 # deliberately play NO role in epoch selection anymore.
+phase key-derivation
 SOURCE_A="$(sha_label source-A)"
 SOURCE_B="$(sha_label source-B)"
 MUTATION_A1="$(sha_label mutation-A-session-1)"
@@ -307,6 +352,7 @@ set_state()
     printf '%s %s %s\n' "$1" 1 "$2" > "$STATE"
 }
 
+phase session-lifecycle
 # Every Make invocation re-acquires its session (the lease is an order-only
 # FORCE prerequisite), so the shared stable-epoch session stamp always names
 # the CURRENT source record before any compile or publish under it.
@@ -367,6 +413,7 @@ compile_graph_object()
     printf '%s\n' "$object"
 }
 
+phase incremental-rebuild-namespace
 # The stable-epoch contract: sequential source states A -> B -> A all reuse
 # ONE object namespace, and each recompile atomically replaces the object.
 # This is the incremental-rebuild path the re-keying exists to enable.
@@ -399,6 +446,7 @@ if "$OBJECT_TOOL" dep "$SESSION_EPOCH_ROOT/nul-session/nul.o" \
     fail 'object compile accepted a session stamp containing a NUL byte'
 fi
 
+phase concurrent-publish-race
 # Two Make-like processes may schedule the same missing object before either
 # publishes it.  Force one compiler to pause, let the other publish, then let
 # the first finish.  Both .d and .o must remain complete atomic files.
@@ -530,6 +578,7 @@ read -r COVERAGE_NOTE_REPAIRED < "${COVERAGE_OBJECT%.o}.gcno-path"
     fail 'coverage cache did not repair its missing .gcno'
 finish_session "$SOURCE_A" "$MUTATION_A2"
 
+phase gc-and-quarantine
 # Bounded GC removes dead epochs/candidates while preserving an epoch leased
 # by a live Make-like owner, even when it lies outside the retention count.
 GC_ROOT="$WORK/gc-objects"
@@ -604,6 +653,7 @@ cmp -s "$QUARANTINE_SESSION" "$SESSION_MAIN" ||
 [ -z "$(find "$QUARANTINE_ROOT/.failed-epochs" -mindepth 1 -print -quit)" ] ||
     fail 'dead unverified epoch quarantine was not removed after recovery'
 
+phase make-recovery-integration
 # Exercise the Make integration, not only the session helper.  The stale object
 # is newer than its source, so Make initially classifies it as current.  The
 # included recovery witness must acquire and quarantine before ordinary target
@@ -635,6 +685,7 @@ MAKE_SOURCE_MUTATION="$MUTATION_A2"
 MAKE_SOURCE_RECORD="$MAKE_SOURCE_ID $MAKE_SOURCE_COMPLETE $MAKE_SOURCE_MUTATION"
 set_state "$MAKE_SOURCE_ID" "$MAKE_SOURCE_MUTATION"
 
+phase late-marker-refusal
 # This fixture grades a precise late-marker state transition.  Route only its
 # session calls through the deterministic verifier already used above, so an
 # unrelated checkout generation change cannot preempt the marker refusal that
