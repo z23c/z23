@@ -11,7 +11,8 @@
 # fires when the holder is stuck or dead without releasing. A hung gate
 # must turn red, never wait.
 #
-# Bash only. No new processes on the success path; stat/readlink under
+# Bash only. No new processes on the success path; readlink plus the
+# -ef builtin (dev:inode comparison, portable across GNU/BSD) under
 # /proc on the failure path only.
 
 # Print nothing; set the timeout via the caller's environment. Validation
@@ -19,11 +20,8 @@
 z23_build_epoch_lock_holders()
 {
     local lock_file="$1"
-    local want="" key="" candidate="" target="" holders=""
+    local candidate="" target="" holders=""
     if [ -n "$lock_file" ] && [ -e "$lock_file" ]; then
-        want="$(stat -Lc '%d:%i' "$lock_file" 2>/dev/null)" || want=""
-    fi
-    if [ -n "$want" ]; then
         for pid_fd in /proc/[0-9]*/fd/[0-9]*; do
             target="$(readlink "$pid_fd" 2>/dev/null)" || continue
             case "$target" in
@@ -33,8 +31,7 @@ z23_build_epoch_lock_holders()
             candidate="${pid_fd#/proc/}"
             candidate="${candidate%%/*}"
             [ "$candidate" != "$$" ] || continue
-            key="$(stat -Lc '%d:%i' "$pid_fd" 2>/dev/null)" || continue
-            [ "$key" = "$want" ] || continue
+            [ "$lock_file" -ef "$pid_fd" ] 2>/dev/null || continue
             case " $holders " in
                 *" $candidate "*) ;;
                 *) holders="${holders:+$holders }$candidate" ;;
