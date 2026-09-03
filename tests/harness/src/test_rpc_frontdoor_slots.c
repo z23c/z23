@@ -35,9 +35,12 @@
 
 #include "test/test_core.h"
 #include "rpc/httpserver.h"
+#include "rpc/server.h"
+#include "platform/socket_compat.h"
 
 #include <errno.h>
 #include <fcntl.h>
+#include <time.h>
 #if !defined(_WIN32)
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -198,6 +201,60 @@ static bool fd_is_closed(int fd)
 #else
     return fcntl(fd, F_GETFD) == -1 && errno == EBADF;
 #endif
+}
+
+/* Half-close: FIN without closing our own end. The server end sits in
+ * CLOSE-WAIT until the server closes it — exactly the leaked state from
+ * the incident. Full close() would also reclaim the fd number and hide a
+ * leak; shutdown(SHUT_WR) keeps our end open so a leaked server fd stays
+ * visible as a non-zero queue depth. */
+static void rfs_half_close(platform_socket_t fd)
+{
+    if (fd == PLATFORM_SOCKET_INVALID)
+        return;
+#if defined(_WIN32)
+    (void)shutdown(fd, SD_SEND);
+#else
+    (void)shutdown(fd, SHUT_WR);
+#endif
+}
+
+static void rfs_sleep_ms(int ms)
+{
+#if defined(_WIN32)
+    Sleep(ms);
+#else
+    struct timespec ts;
+    ts.tv_sec = ms / 1000;
+    ts.tv_nsec = (long)(ms % 1000) * 1000000L;
+    (void)nanosleep(&ts, NULL);
+#endif
+}
+
+/* Ask the kernel for a free loopback port, then release it. Same
+ * find-then-bind race every loopback test in this tree takes (see
+ * test_rpc.c); a collision just fails this case, never another run. */
+static uint16_t rfs_free_port(void)
+{
+    platform_socket_t fd = platform_socket_open(AF_INET, SOCK_STREAM, 0,
+                                                true, false);
+    if (fd == PLATFORM_SOCKET_INVALID)
+        return 0;
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port = htons(0);
+    uint16_t port = 0;
+    if (platform_socket_bind(fd, (struct sockaddr *)&addr,
+                             sizeof(addr)) == 0) {
+        size_t len = sizeof(addr);
+        if (platform_socket_local_address(fd, (struct sockaddr *)&addr,
+                                          &len) == 0)
+            port = ntohs(addr.sin_port);
+    }
+    platform_socket_close(fd);
+    return port;
 }
 
 int test_rpc_frontdoor_slots(void)
@@ -561,8 +618,135 @@ int test_rpc_frontdoor_slots(void)
 #endif
     }
 
+    /* ── THE WIRE TRUTH: half-closed loopback clients drain ────
+     *
+     * The cases above drive the admission queue over socketpairs with
+     * full close(). This one runs the REAL server on 127.0.0.1, opens N
+     * TCP connections, and half-closes every one of them — FIN sent,
+     * our end still open — which is the exact CLOSE-WAIT shape from the
+     * incident. Half the clients die mid-request (partial bytes, then
+     * FIN); half go silent after connect (then FIN). The server's
+     * connection count must return to zero inside the idle budget with
+     * no further admission to trigger it, and the door must still
+     * answer a fresh client afterwards. Scratch datadir only (repo
+     * test-tmp convention, like test_rpc.c); no live node, no live
+     * datadir, no /tmp. */
+    printf("frontdoor drains half-closed loopback connections... ");
+    {
+#define RFS_HALFCLOSE_N 16
+        bool ok = true;
+        char rpcdir[512];
+        test_make_tmpdir(rpcdir, sizeof(rpcdir), "rpc_frontdoor",
+                         "halfclose");
+        uint16_t port = rfs_free_port();
+        struct rpc_table tbl;
+        rpc_table_init(&tbl);
+        bool started = port != 0 &&
+            rpc_http_start(&tbl, port, NULL, NULL, rpcdir);
+        ok = ok && started;
+        if (started) {
+            platform_socket_t cli[RFS_HALFCLOSE_N];
+            for (size_t i = 0; i < RFS_HALFCLOSE_N; i++)
+                cli[i] = PLATFORM_SOCKET_INVALID;
+            struct sockaddr_in srv;
+            memset(&srv, 0, sizeof(srv));
+            srv.sin_family = AF_INET;
+            srv.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+            srv.sin_port = htons(port);
+            static const char partial[] =
+                "POST / HTTP/1.1\r\nHost: 127.0.0.1\r\n";
+            for (size_t i = 0; i < RFS_HALFCLOSE_N && ok; i++) {
+                cli[i] = platform_socket_open(AF_INET, SOCK_STREAM, 0,
+                                              true, false);
+                ok = ok && cli[i] != PLATFORM_SOCKET_INVALID;
+                if (!ok)
+                    break;
+                ok = ok && platform_socket_connect(
+                    cli[i], (struct sockaddr *)&srv,
+                    sizeof(srv)) == 0;
+                if (!ok)
+                    break;
+                if (i < RFS_HALFCLOSE_N / 2) {
+                    /* Mid-request half-close: partial bytes, then FIN. */
+                    ok = ok && platform_socket_send(cli[i], partial,
+                        sizeof(partial) - 1) > 0;
+                }
+                /* else: silent after connect, then FIN. */
+                rfs_half_close(cli[i]);
+            }
+            /* The listener must actually ADMIT all N first: without
+             * this wait a slow accept loop could leave every
+             * connection in the listen backlog, depth would read 0
+             * without proving anything, and the case would be
+             * vacuous. */
+            struct rpc_http_queue_stats hst;
+            memset(&hst, 0, sizeof(hst));
+            int waited_ms = 0;
+            while (waited_ms < 5000) {
+                rpc_http_test_queue_stats(&hst);
+                if (hst.admitted >= RFS_HALFCLOSE_N)
+                    break;
+                rfs_sleep_ms(25);
+                waited_ms += 25;
+            }
+            rpc_http_test_queue_stats(&hst);
+            ok = ok && hst.admitted >= RFS_HALFCLOSE_N;
+            /* Workers must pick up and close every one: the 5 s socket
+             * deadlines plus the peer-gone pre-check bound each
+             * connection, and the 10 s queue residency budget bounds
+             * the stragglers. Poll a little past that budget. */
+            waited_ms = 0;
+            while (waited_ms < 12000) {
+                rpc_http_test_queue_stats(&hst);
+                if (hst.depth == 0)
+                    break;
+                rfs_sleep_ms(25);
+                waited_ms += 25;
+            }
+            rpc_http_test_queue_stats(&hst);
+            ok = ok && hst.depth == 0;
+
+            /* The door is still alive: a fresh client gets an answer
+             * (401 without credentials), not a hang-up or a 503. */
+            if (ok) {
+                platform_socket_t probe = platform_socket_open(
+                    AF_INET, SOCK_STREAM, 0, true, false);
+                ok = ok && probe != PLATFORM_SOCKET_INVALID;
+                if (ok && platform_socket_connect(probe,
+                        (struct sockaddr *)&srv, sizeof(srv)) == 0) {
+                    static const char req[] =
+                        "POST / HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+                        "Content-Length: 2\r\n\r\n{}";
+                    ok = ok && platform_socket_send(probe, req,
+                        sizeof(req) - 1) > 0;
+                    char rbuf[4096];
+                    int n = platform_socket_receive(probe, rbuf,
+                                                    sizeof(rbuf) - 1);
+                    ok = ok && n > 0;
+                    if (ok) {
+                        rbuf[n] = '\0';
+                        ok = ok && strstr(rbuf, "401") != NULL;
+                    }
+                } else {
+                    ok = false;
+                }
+                if (probe != PLATFORM_SOCKET_INVALID)
+                    platform_socket_close(probe);
+            }
+
+            for (size_t i = 0; i < RFS_HALFCLOSE_N; i++) {
+                if (cli[i] != PLATFORM_SOCKET_INVALID)
+                    platform_socket_close(cli[i]);
+            }
+            rpc_http_stop();
+        }
+        test_rm_rf(rpcdir);
+        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
+#undef RFS_HALFCLOSE_N
+    }
+
     rpc_http_test_queue_reset(-1);
 
-    printf("\n%d rpc front-door slot tests, %d failed\n", 7, failures);
+    printf("\n%d rpc front-door slot tests, %d failed\n", 8, failures);
     return failures;
 }
