@@ -1,13 +1,12 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
- * thread_qos: prove zcl_thread_qos_background() actually changes the
- * calling thread's CPU scheduling policy (SCHED_BATCH) and I/O priority
- * class (IOPRIO_CLASS_IDLE) — not just that it runs without crashing.
- * Both knobs are per-thread kernel attributes, so the assertions run
- * INSIDE a freshly spawned worker thread that calls the helper on itself,
- * then reads back sched_getscheduler() and the ioprio_get(2) syscall
- * (hand-rolled the same way the production code hand-rolls ioprio_set)
- * before reporting results to the parent via a shared struct.
+ * thread_qos: prove zcl_thread_qos_background() changes the calling thread's
+ * native scheduling class — QOS_CLASS_BACKGROUND on macOS,
+ * THREAD_PRIORITY_BELOW_NORMAL on Windows, and SCHED_BATCH plus best-effort
+ * IOPRIO_CLASS_IDLE on Linux. Callback-mediated worker tests prove creation
+ * and idempotency; a direct registered-root case keeps both public APIs in the
+ * capability inventory's exact test-call graph and distinguishes native
+ * success from fail-soft denial instead of merely surviving a call.
  */
 
 #define _GNU_SOURCE  /* SCHED_BATCH, syscall() */
@@ -15,17 +14,22 @@
 #include "test/test_core.h"
 #include "util/thread_qos.h"
 
-#if defined(__APPLE__)
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#elif defined(__APPLE__)
 #include <sys/qos.h>
 #else
 #include <sched.h>
-#if !defined(_WIN32)
 #include <sys/syscall.h>
 #endif
-#endif
+#if !defined(_WIN32)
 #include <unistd.h>
-#include <pthread.h>
 #include <errno.h>
+#endif
+#include <pthread.h>
 #if !defined(_WIN32)
 
 #ifndef IOPRIO_WHO_PROCESS
@@ -68,9 +72,20 @@ static int t_thread_qos_applies_sched_batch_and_ioprio_idle(void)
 {
     int failures = 0;
     TEST("thread_qos: background QoS lands QOS_CLASS_BACKGROUND on macOS") {
+        struct tq_apple_result baseline = {0};
         struct tq_apple_result applied = {0};
+        pthread_attr_t attr;
         pthread_t thread;
-        ASSERT_EQ(pthread_create(&thread, NULL, tq_apple_worker, &applied), 0);
+        ASSERT_EQ(pthread_attr_init(&attr), 0);
+        ASSERT_EQ(pthread_attr_set_qos_class_np(&attr, QOS_CLASS_UTILITY, 0),
+                  0);
+        ASSERT_EQ(pthread_create(&thread, &attr, tq_apple_observe_worker,
+                                 &baseline), 0);
+        ASSERT_EQ(pthread_join(thread, NULL), 0);
+        ASSERT_EQ(baseline.qos_class, QOS_CLASS_UTILITY);
+        ASSERT_EQ(pthread_create(&thread, &attr, tq_apple_worker, &applied),
+                  0);
+        ASSERT_EQ(pthread_attr_destroy(&attr), 0);
         ASSERT_EQ(pthread_join(thread, NULL), 0);
         ASSERT(applied.call_ok);
         ASSERT_EQ(applied.qos_class, QOS_CLASS_BACKGROUND);
@@ -247,15 +262,63 @@ static int test_thread_qos_platform_arm(void)
     return failures;
 }
 #else  /* _WIN32 */
-/* Thread-QoS proof reads ioprio_get(2)/sched_getscheduler via raw Linux syscalls (sys/syscall.h); no Windows analogue. Skipped loudly rather than faked. */
 static int test_thread_qos_platform_arm(void)
 {
-    printf("thread_qos: SKIP (Windows): thread-qos proof reads ioprio_get(2)/sched_getscheduler via raw linux syscalls (sys/syscall.h); no windows analogue.\n");
+    printf("thread_qos: Windows native priority proof follows in the "
+           "registered-root contract.\n");
     return 0;
 }
 #endif
 
+static int t_thread_qos_registered_root_contract(void)
+{
+    int failures = 0;
+
+    TEST("thread_qos: registered root proves direct API and native priority") {
+        pthread_attr_t attr;
+        ASSERT(!zcl_thread_qos_background_attr(NULL));
+        ASSERT_EQ(pthread_attr_init(&attr), 0);
+        ASSERT(zcl_thread_qos_background_attr(&attr));
+        ASSERT_EQ(pthread_attr_destroy(&attr), 0);
+
+#if defined(_WIN32)
+        ASSERT(SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_NORMAL));
+        ASSERT_EQ(GetThreadPriority(GetCurrentThread()),
+                  THREAD_PRIORITY_NORMAL);
+        ASSERT(zcl_thread_qos_background());
+        ASSERT_EQ(GetThreadPriority(GetCurrentThread()),
+                  THREAD_PRIORITY_BELOW_NORMAL);
+#elif defined(__APPLE__)
+        qos_class_t before = QOS_CLASS_UNSPECIFIED;
+        qos_class_t after = QOS_CLASS_UNSPECIFIED;
+        int before_relative = 0;
+        int after_relative = 0;
+        ASSERT_EQ(pthread_get_qos_class_np(pthread_self(), &before,
+                                           &before_relative), 0);
+        bool applied = zcl_thread_qos_background();
+        ASSERT_EQ(pthread_get_qos_class_np(pthread_self(), &after,
+                                           &after_relative), 0);
+        if (applied)
+            ASSERT_EQ(after, QOS_CLASS_BACKGROUND);
+        else
+            ASSERT_EQ(after, before);
+#else
+        struct sched_param normal = {0};
+        ASSERT_EQ(sched_setscheduler(0, SCHED_OTHER, &normal), 0);
+        ASSERT_EQ(sched_getscheduler(0), SCHED_OTHER);
+        (void)zcl_thread_qos_background();
+        ASSERT_EQ(sched_getscheduler(0), SCHED_BATCH);
+#endif
+
+        PASS();
+    } _test_next:;
+
+    return failures;
+}
+
 int test_thread_qos(void)
 {
-    return test_thread_qos_platform_arm();
+    int failures = test_thread_qos_platform_arm();
+    failures += t_thread_qos_registered_root_contract();
+    return failures;
 }
