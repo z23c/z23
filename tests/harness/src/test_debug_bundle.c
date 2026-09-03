@@ -28,6 +28,7 @@
  * no extra per-subsystem setup is paid here. */
 
 #include "test/test_core.h"
+#include "config/boot_internal.h"
 #include "controllers/diagnostics_controller.h"
 #include "controllers/diagnostics_internal.h"
 #include "json/json.h"
@@ -314,6 +315,71 @@ int test_debug_bundle(void)
                   diagnostics_controller_shutdown());
 
         debug_bundle_set_drain_budget_ms_for_test(0);   /* restore default */
+    }
+
+    /* ── (e) the abandoned drain is TYPED ────────────────────────
+     *
+     * Same live-lease failure mode as (d), but through the report form:
+     * WHAT was abandoned (exactly one capture lease), WHY (the 200 ms
+     * budget expired with the worker already out), and a clean verdict
+     * once the lease is gone. */
+    {
+        diagnostics_controller_set_state(NULL, dir);   /* worker live again */
+        DBB_CHECK("typed: a capture lease can be taken before shutdown",
+                  debug_bundle_capture_lease_acquire_for_test());
+        debug_bundle_set_drain_budget_ms_for_test(200);
+
+        struct debug_bundle_drain_report rep;
+        memset(&rep, 0, sizeof(rep));
+        bool abandoned = debug_bundle_shutdown_report(&rep);
+        DBB_CHECK("typed: abandoned drain still returns false", !abandoned);
+        DBB_CHECK("typed: report says not drained", !rep.drained);
+        DBB_CHECK("typed: verdict names live captures",
+                  rep.verdict == DEBUG_BUNDLE_DRAIN_CAPTURES_LIVE);
+        DBB_CHECK("typed: verdict name is captures-live",
+                  strcmp(debug_bundle_drain_verdict_name(rep.verdict),
+                         "captures-live") == 0);
+        DBB_CHECK("typed: exactly one capture abandoned",
+                  rep.captures_abandoned == 1);
+        DBB_CHECK("typed: report carries the budget it waited",
+                  rep.budget_ms == 200);
+
+        debug_bundle_capture_lease_release_for_test();
+        memset(&rep, 0, sizeof(rep));
+        bool released = debug_bundle_shutdown_report(&rep);
+        DBB_CHECK("typed: released drain reports true", released);
+        DBB_CHECK("typed: released drain verdict is clean",
+                  rep.drained &&
+                  rep.verdict == DEBUG_BUNDLE_DRAIN_CLEAN);
+        DBB_CHECK("typed: nothing abandoned after release",
+                  rep.captures_abandoned == 0);
+
+        debug_bundle_set_drain_budget_ms_for_test(0); /* restore default */
+        diagnostics_controller_set_state(NULL, dir);  /* worker live again */
+        memset(&rep, 0, sizeof(rep));
+        DBB_CHECK("typed: default budget restored and drain clean",
+                  debug_bundle_shutdown_report(&rep) &&
+                  rep.drained && rep.budget_ms > 1000);
+        DBB_CHECK("typed: shutdown stays idempotent",
+                  diagnostics_controller_shutdown());
+    }
+
+    /* ── (f) abandoned diagnostics never blocks the clean marker ─
+     *
+     * The shutdown flow writes its verified-clean marker iff the durability
+     * barrier held. This pins shutdown_clean_marker_permitted, the pure gate
+     * app_shutdown_svc consults: abandoning ONLY diagnostics (abandoned=true
+     * above, durability_ok=true) must still permit the marker, or the next
+     * boot pays the ~180 s quick_check for a best-effort postmortem. */
+    {
+        DBB_CHECK("marker: durability alone permits",
+                  shutdown_clean_marker_permitted(true, true));
+        DBB_CHECK("marker: abandoned diagnostics still permits",
+                  shutdown_clean_marker_permitted(true, false));
+        DBB_CHECK("marker: failed durability forbids despite clean drain",
+                  !shutdown_clean_marker_permitted(false, true));
+        DBB_CHECK("marker: failed durability forbids with abandoned drain",
+                  !shutdown_clean_marker_permitted(false, false));
     }
 
     rmdir(dir);

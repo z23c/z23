@@ -573,6 +573,16 @@ struct block_index_projection *boot_ensure_block_index_projection(
  */
 void app_shutdown_svc(struct boot_svc_ctx *svc);
 
+/* Clean-marker gate (pure; unit-tested in test_debug_bundle). The
+ * verified-clean marker is written iff the durability barrier held (coins
+ * flushed, WAL checkpointed). An abandoned diagnostics capture retains owned
+ * readers but never blocks the marker: durability_ok=true still permits the
+ * write when diagnostics_drained=false, so abandoning only diagnostics can
+ * never cost the next boot its ~180 s quick_check. durability_ok=false
+ * always forbids it, even when the drain was clean. */
+bool shutdown_clean_marker_permitted(bool durability_ok,
+                                     bool diagnostics_drained);
+
 /* ── engine/composition/src/boot_services_shutdown.c ──────────────────────────────────── *
  * Drain background workers before app_shutdown_offline's destructive frees;
  * dependencies remain owned until every worker has actually exited. */

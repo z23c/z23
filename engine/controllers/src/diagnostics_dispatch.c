@@ -48,9 +48,19 @@ void diagnostics_controller_set_state(struct main_state *ms,
 
 bool diagnostics_controller_shutdown(void)
 {
-    if (!debug_bundle_shutdown()) {
+    /* Typed drain: the report says WHAT drained, WHAT was abandoned (live
+     * capture leases, the worker itself, or nothing) and WHY (which budget
+     * expired), so the shutdown stage log names the exact abandonment the
+     * downstream retain-and-continue branches must honor. */
+    struct debug_bundle_drain_report rep;
+    if (!debug_bundle_shutdown_report(&rep)) {
         LOG_ERROR("diagnostics",
-                  "capture ownership remains live; controller state retained");
+                  "drain %s after %dms budget (worker_exited=%d "
+                  "captures_abandoned=%zu); capture ownership remains live, "
+                  "controller state retained",
+                  debug_bundle_drain_verdict_name(rep.verdict),
+                  rep.budget_ms, rep.worker_exited ? 1 : 0,
+                  rep.captures_abandoned);
         return false;
     }
     g_diag.main_state = NULL;

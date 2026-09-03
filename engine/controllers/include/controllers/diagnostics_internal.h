@@ -241,6 +241,30 @@ void debug_bundle_register_stall_observer(void);
  * true return here. */
 bool debug_bundle_shutdown(void);
 
+/* Typed outcome of the bounded shutdown drain above: WHAT drained, WHAT was
+ * abandoned, and WHY. `drained` is the release verdict (true: worker exited
+ * and zero leases live, dumper dependencies may be released); when false,
+ * `captures_abandoned` counts the capture leases still live past the budget
+ * and `verdict` names the primary reason. `budget_ms` is the budget the wait
+ * was actually given, so a test can prove the wait honored its deadline.
+ * debug_bundle_shutdown() keeps its bool contract and returns drained. */
+enum debug_bundle_drain_verdict {
+    DEBUG_BUNDLE_DRAIN_CLEAN = 0, /* worker exited, zero leases live */
+    DEBUG_BUNDLE_DRAIN_CAPTURES_LIVE, /* >=1 capture lease held past budget */
+    DEBUG_BUNDLE_DRAIN_WORKER_LIVE, /* auto-capture worker never exited */
+};
+struct debug_bundle_drain_report {
+    bool drained;
+    enum debug_bundle_drain_verdict verdict;
+    bool worker_exited;
+    size_t captures_abandoned;
+    int budget_ms;
+};
+/* Static name for a verdict (for shutdown-stage logging). Never NULL. */
+const char *debug_bundle_drain_verdict_name(
+    enum debug_bundle_drain_verdict verdict);
+bool debug_bundle_shutdown_report(struct debug_bundle_drain_report *out);
+
 /* Test seam for the bounded drain above: override the drain budget in
  * milliseconds (<= 0 restores the production default). */
 void debug_bundle_set_drain_budget_ms_for_test(int ms);

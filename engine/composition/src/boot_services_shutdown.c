@@ -381,6 +381,16 @@ static void shutdown_release_owned_resources(struct boot_svc_ctx *svc,
     printf("[shutdown] owned resources released\n");
 }
 
+/* Pure clean-marker gate: only the durability barrier decides. See
+ * boot_internal.h — abandoning a diagnostics capture retains owned readers
+ * but must never cost the next boot its quick_check. */
+bool shutdown_clean_marker_permitted(bool durability_ok,
+                                     bool diagnostics_drained)
+{
+    (void)diagnostics_drained;
+    return durability_ok;
+}
+
 void app_shutdown_svc(struct boot_svc_ctx *svc)
 {
     extern volatile sig_atomic_t g_shutdown_requested;
@@ -476,7 +486,12 @@ void app_shutdown_svc(struct boot_svc_ctx *svc)
     if (!shutdown_persist_runtime_state(svc, diagnostics_drained))
         durability_ok = false;
 
-    if (!durability_ok) {
+    /* The gate is durability-only by construction: an abandoned diagnostics
+     * capture (diagnostics_drained=false) retains owned readers downstream
+     * but never refuses the marker. shutdown_clean_marker_permitted pins
+     * that decision where the shutdown harness can test it. */
+    if (!shutdown_clean_marker_permitted(durability_ok,
+                                         diagnostics_drained)) {
         fprintf(stderr,
                 "[shutdown] durability barrier failed; refusing clean marker\n");
         (void)boot_shutdown_marker_remove_clean(svc->datadir);

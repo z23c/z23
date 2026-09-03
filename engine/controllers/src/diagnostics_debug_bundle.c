@@ -541,7 +541,21 @@ static bool debug_bundle_drain_wait_locked(bool need_worker_exit,
     return !((need_worker_exit && !g_auto_exited) || g_active_captures > 0);
 }
 
-bool debug_bundle_shutdown(void)
+const char *debug_bundle_drain_verdict_name(
+    enum debug_bundle_drain_verdict verdict)
+{
+    switch (verdict) {
+    case DEBUG_BUNDLE_DRAIN_CLEAN:
+        return "clean";
+    case DEBUG_BUNDLE_DRAIN_CAPTURES_LIVE:
+        return "captures-live";
+    case DEBUG_BUNDLE_DRAIN_WORKER_LIVE:
+        return "worker-live";
+    }
+    return "unknown";
+}
+
+bool debug_bundle_shutdown_report(struct debug_bundle_drain_report *out)
 {
     /* Revoke every capture entrypoint first: after this point neither the
      * observer nor a late RPC can begin walking dumpers, and a capture that
@@ -567,16 +581,31 @@ bool debug_bundle_shutdown(void)
     size_t in_flight = g_active_captures;
     pthread_mutex_unlock(&g_bundle_lock);
 
+    struct debug_bundle_drain_report rep = {
+        .drained = drained,
+        .verdict = DEBUG_BUNDLE_DRAIN_CLEAN,
+        .worker_exited = worker_exited,
+        .captures_abandoned = 0,
+        .budget_ms = budget_ms,
+    };
     if (!drained) {
-        /* Never detached, never freed: the caller keeps ownership of every
-         * dumper dependency. Loud and truthful — and bounded, so shutdown
-         * still reaches its durability stages instead of being force-killed
-         * before them. */
+        /* WHAT was abandoned and WHY: live leases first (a capture stuck
+         * inside a dumper past the budget), otherwise the worker itself.
+         * Never detached, never freed either way: the caller keeps
+         * ownership of every dumper dependency. Loud and truthful — and
+         * bounded, so shutdown still reaches its durability stages instead
+         * of being force-killed before them. */
+        rep.captures_abandoned = in_flight;
+        rep.verdict = in_flight > 0 ? DEBUG_BUNDLE_DRAIN_CAPTURES_LIVE
+                                    : DEBUG_BUNDLE_DRAIN_WORKER_LIVE;
         LOG_ERROR(DBB_SUBSYS,
-                  "capture still live after %dms drain budget "
-                  "(worker_exited=%d in_flight=%zu); dumper dependencies "
-                  "retained, not released",
+                  "drain %s after %dms budget "
+                  "(worker_exited=%d captures_abandoned=%zu); dumper "
+                  "dependencies retained, not released",
+                  debug_bundle_drain_verdict_name(rep.verdict),
                   budget_ms, worker_exited ? 1 : 0, in_flight);
+        if (out)
+            *out = rep;
         return false;
     }
 
@@ -588,6 +617,10 @@ bool debug_bundle_shutdown(void)
             LOG_ERROR(DBB_SUBSYS,
                       "auto-capture worker join failed: %s; refusing to "
                       "release dumper dependencies", strerror(rc));
+            rep.drained = false;
+            rep.verdict = DEBUG_BUNDLE_DRAIN_WORKER_LIVE;
+            if (out)
+                *out = rep;
             return false;
         }
     }
@@ -599,6 +632,15 @@ bool debug_bundle_shutdown(void)
     g_auto_exited = false;
     pthread_mutex_unlock(&g_bundle_lock);
     LOG_INFO(DBB_SUBSYS,
-             "auto-capture worker stopped; dumper dependencies may be released");
+             "drain clean after %dms budget (worker_exited=%d); dumper "
+             "dependencies may be released",
+             budget_ms, worker_exited ? 1 : 0);
+    if (out)
+        *out = rep;
     return true;
+}
+
+bool debug_bundle_shutdown(void)
+{
+    return debug_bundle_shutdown_report(NULL);
 }
