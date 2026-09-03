@@ -1789,7 +1789,7 @@ static void warm_seed_file(const char *donor_file, const char *gen_file,
 }
 
 static void warm_seed_walk(const char *donor_dir, const char *gen_dir,
-                           const char *rel_prefix,
+                           const char *rel_prefix, bool copy_wrapper,
                            struct warm_seed_accum *accum)
 {
     /* The walk creates its own target directory chain: readdir order is
@@ -1850,12 +1850,16 @@ static void warm_seed_walk(const char *donor_dir, const char *gen_dir,
                        S_ISLNK(gen_st.st_mode)) {
                 continue;
             }
-            warm_seed_walk(donor_child, gen_child, rel, accum);
+            warm_seed_walk(donor_child, gen_child, rel, copy_wrapper,
+                           accum);
             continue;
         }
         if (!S_ISREG(donor_st.st_mode)) continue;
         enum warm_seed_class class = warm_classify_rel(rel, true);
         if (class == WARM_SEED_SKIP) continue;
+        /* The wrapper copy is caller-gated (bootstrap inputs must be
+         * unchanged); link-class outputs need no gate beyond the epoch. */
+        if (class == WARM_SEED_COPY && !copy_wrapper) continue;
         if (!dependency_parent_ensure(gen_child)) continue;
         warm_seed_file(donor_child, gen_child, rel, class, &donor_st,
                        accum);
@@ -2364,26 +2368,13 @@ static bool warm_start_generation(const struct proof_paths *paths,
      * objects publish through the same staging-plus-rename publishers.
      * The classifier admits only object and depfile outputs plus the
      * wrapper copy; binaries, archives, stamps, leases, and locks stay
-     * skipped, so the wider root adds reuse without adding risk. */
-    warm_seed_walk(donor_build, gen_build, "", &accum);
-    /* The wrapper binary keeps make's prerequisite graph honest only when
+     * skipped, so the wider root adds reuse without adding risk. The
+     * wrapper binary keeps make's prerequisite graph honest only when
      * its inputs are unchanged; otherwise the bootstrap rebuilds it and
      * its new mtime correctly invalidates every object. */
-    if (!accum.failed &&
-        warm_wrapper_inputs_unchanged(paths->root, donor.local, local)) {
-        char donor_zcc[PATH_MAX], gen_zcc[PATH_MAX];
-        struct stat donor_zcc_st;
-        if (snprintf(donor_zcc, sizeof(donor_zcc), "%s/bin/zcc",
-                     donor_build) < (int)sizeof(donor_zcc) &&
-            snprintf(gen_zcc, sizeof(gen_zcc), "%s/bin/zcc", gen_build) <
-                (int)sizeof(gen_zcc) &&
-            lstat(donor_zcc, &donor_zcc_st) == 0 &&
-            S_ISREG(donor_zcc_st.st_mode) &&
-            !S_ISLNK(donor_zcc_st.st_mode) &&
-            dependency_parent_ensure(gen_zcc))
-            warm_seed_file(donor_zcc, gen_zcc, "bin/zcc", WARM_SEED_COPY,
-                           &donor_zcc_st, &accum);
-    }
+    bool copy_wrapper =
+        warm_wrapper_inputs_unchanged(paths->root, donor.local, local);
+    warm_seed_walk(donor_build, gen_build, "", copy_wrapper, &accum);
     struct timespec seed_stamp = {0};
     bool armed = !accum.failed && accum.files > 0 &&
                  warm_retime_outputs(gen_build, &accum, &seed_stamp) &&
@@ -2648,23 +2639,9 @@ bool zcl_dev_proof_warm_seed_and_retime(const char *donor_build,
     if (!donor_build || !gen_build || !gen_src || !stats) return false;
     memset(stats, 0, sizeof(*stats));
     struct warm_seed_accum accum = {0};
-    warm_seed_walk(donor_build, gen_build, "", &accum);
-    /* Unconditional at seam level; production gates this copy on the
-     * bootstrap-inputs diff in warm_start_generation. */
-    if (!accum.failed) {
-        char donor_zcc[PATH_MAX], gen_zcc[PATH_MAX];
-        struct stat donor_zcc_st;
-        if (snprintf(donor_zcc, sizeof(donor_zcc), "%s/bin/zcc",
-                     donor_build) < (int)sizeof(donor_zcc) &&
-            snprintf(gen_zcc, sizeof(gen_zcc), "%s/bin/zcc", gen_build) <
-                (int)sizeof(gen_zcc) &&
-            lstat(donor_zcc, &donor_zcc_st) == 0 &&
-            S_ISREG(donor_zcc_st.st_mode) &&
-            !S_ISLNK(donor_zcc_st.st_mode) &&
-            dependency_parent_ensure(gen_zcc))
-            warm_seed_file(donor_zcc, gen_zcc, "bin/zcc", WARM_SEED_COPY,
-                           &donor_zcc_st, &accum);
-    }
+    /* Unconditional wrapper copy at seam level; production gates it on
+     * the bootstrap-inputs diff. */
+    warm_seed_walk(donor_build, gen_build, "", true, &accum);
     struct timespec seed_stamp = {0}, source_stamp = {0};
     bool ok = !accum.failed && accum.files > 0 &&
               warm_retime_outputs(gen_build, &accum, &seed_stamp) &&
