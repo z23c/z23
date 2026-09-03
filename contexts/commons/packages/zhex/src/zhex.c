@@ -1,9 +1,11 @@
+/* Copyright 2026 Rhett Creighton. Licensed under Apache-2.0. */
+
 #include "zhex/zhex.h"
 
 #include <string.h>
 
-static const char LOWER_DIGITS[16] = "0123456789abcdef";
-static const char UPPER_DIGITS[16] = "0123456789ABCDEF";
+static const char LOWER_DIGITS[] = "0123456789abcdef";
+static const char UPPER_DIGITS[] = "0123456789ABCDEF";
 
 size_t zhex_encoded_len(size_t bin_len)
 {

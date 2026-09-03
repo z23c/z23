@@ -4,6 +4,7 @@
   "semver": "0.1.0",
   "language": "c23",
   "license": "Apache-2.0",
+  "programs": ["app/main.c"],
   "include_dir": "include",
   "source_dir": "src",
   "dependencies": [],
