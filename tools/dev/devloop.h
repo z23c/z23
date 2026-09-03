@@ -463,6 +463,17 @@ bool zcl_dev_source_cas_capture(const char *repo_root,
 bool zcl_dev_source_identity_capture(const char *repo_root,
                                      struct dev_source_record *out,
                                      char *why, size_t why_len);
+/* Classify a failed source-identity child process into one specific evidence
+ * token (timeout, signal, nonzero exit, truncated output) rather than the
+ * single undifferentiated source_identity_command_failed. Exposed so tests
+ * can drive the mapping directly without paying for a real 30s+ capture. */
+bool zcl_dev_source_identity_classify_failure(
+    const struct zcl_devloop_process_result *result, char *why,
+    size_t why_len);
+/* Whether a source-identity failure token names a transient, load-shaped
+ * condition (timeout/signal/truncation) worth retrying the capture for, as
+ * opposed to a deterministic content or tool-path defect. */
+bool zcl_dev_source_identity_failure_retryable(const char *why);
 bool zcl_dev_source_identity_verify(const char *repo_root,
                                     const struct dev_source_record *expected,
                                     char *why, size_t why_len);

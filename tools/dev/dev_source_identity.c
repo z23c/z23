@@ -23,6 +23,51 @@ static bool process_ok(const struct zcl_devloop_process_result *result)
            result->exit_code == 0;
 }
 
+bool zcl_dev_source_identity_classify_failure(
+    const struct zcl_devloop_process_result *result, char *why,
+    size_t why_len)
+{
+    if (!why || why_len == 0)
+        return false;
+    if (!result) {
+        (void)snprintf(why, why_len, "source_identity_command_failed");
+        return true;
+    }
+    if (result->timed_out) {
+        (void)snprintf(why, why_len, "source_identity_timeout");
+        return true;
+    }
+    if (result->term_signal != 0) {
+        (void)snprintf(why, why_len, "source_identity_signal_%d",
+                       result->term_signal);
+        return true;
+    }
+    if (result->exit_code != 0) {
+        (void)snprintf(why, why_len, "source_identity_exit_%d",
+                       result->exit_code);
+        return true;
+    }
+    if (result->output_truncated) {
+        (void)snprintf(why, why_len, "source_identity_output_truncated");
+        return true;
+    }
+    (void)snprintf(why, why_len, "source_identity_command_failed");
+    return true;
+}
+
+bool zcl_dev_source_identity_failure_retryable(const char *why)
+{
+    if (!why)
+        return false;
+    /* Retry only conditions load can plausibly cause: the capture ran too
+     * long, was interrupted by a signal, or its output was cut short. A
+     * nonzero exit or an invalid/malformed record is a deterministic tool
+     * or content defect that a retry cannot fix. */
+    return strncmp(why, "source_identity_timeout", 23) == 0 ||
+           strncmp(why, "source_identity_signal_", 23) == 0 ||
+           strncmp(why, "source_identity_output_truncated", 33) == 0;
+}
+
 static bool lower_hex64(const char *input, char out[65])
 {
     if (!input || strlen(input) != 64)
@@ -57,7 +102,7 @@ static bool parse_source_record(const struct zcl_devloop_process_result *result,
         return false;
     memset(out, 0, sizeof(*out));
     if (!result || !process_ok(result) || result->output_truncated) {
-        (void)snprintf(why, why_len, "source_identity_command_failed");
+        (void)zcl_dev_source_identity_classify_failure(result, why, why_len);
         return false;
     }
     size_t len = result->output_len;
@@ -142,20 +187,16 @@ bool zcl_dev_source_cas_capture(const char *repo_root,
     return ok;
 }
 
-bool zcl_dev_source_identity_capture(const char *repo_root,
-                                     struct dev_source_record *out,
-                                     char *why, size_t why_len)
+/* One capture-record attempt at a given timeout. Isolated from the retry
+ * loop so each attempt gets a fresh process result and a growing budget. */
+static bool source_identity_capture_attempt(const char *repo_root,
+                                            const char *tool, int timeout_ms,
+                                            struct dev_source_record *out,
+                                            char *why, size_t why_len)
 {
-    char tool[PATH_MAX];
-    int n = snprintf(tool, sizeof(tool), "%s/tools/dev/source-identity.sh",
-                     repo_root ? repo_root : "");
-    if (n <= 0 || (size_t)n >= sizeof(tool)) {
-        (void)snprintf(why, why_len, "source_identity_tool_path_invalid");
-        return false;
-    }
     struct zcl_devloop_process_result result = {0};
     const char *argv[] = { tool, "capture-record", NULL };
-    if (!zcl_devloop_process_run(repo_root, argv, 30000, &result)) {
+    if (!zcl_devloop_process_run(repo_root, argv, timeout_ms, &result)) {
         (void)snprintf(why, why_len, "source_identity_capture_failed");
         return false;
     }
@@ -180,11 +221,46 @@ bool zcl_dev_source_identity_capture(const char *repo_root,
                sizeof(out->mutation_id));
         return true;
     }
-    if (result.output_len > 0 && why && why_len > 0) {
+    /* Only fold in raw tool output when the failure is a content-level
+     * defect (source_identity_output_invalid): the command itself completed,
+     * so its stdout is a useful diagnostic. A timeout/signal/exit/truncation
+     * token already names exactly what happened and must not be overwritten
+     * by whatever partial bytes a killed child managed to emit. */
+    if (process_ok(&result) && result.output_len > 0 && why && why_len > 0) {
         size_t copy = result.output_len < why_len - 1 ? result.output_len
                                                        : why_len - 1;
         memcpy(why, result.output, copy);
         why[copy] = '\0';
+    }
+    return false;
+}
+
+bool zcl_dev_source_identity_capture(const char *repo_root,
+                                     struct dev_source_record *out,
+                                     char *why, size_t why_len)
+{
+    char tool[PATH_MAX];
+    int n = snprintf(tool, sizeof(tool), "%s/tools/dev/source-identity.sh",
+                     repo_root ? repo_root : "");
+    if (n <= 0 || (size_t)n >= sizeof(tool)) {
+        (void)snprintf(why, why_len, "source_identity_tool_path_invalid");
+        return false;
+    }
+    /* A whole-tree hash can legitimately take longer than 30s once host load
+     * climbs; a single fixed budget turned a slow box into a discarded proof
+     * every time. Retry a bounded number of times with a growing timeout
+     * before giving up, but only for failures a retry can plausibly fix. */
+    static const int timeouts_ms[] = { 30000, 90000, 180000 };
+    for (size_t attempt = 0; attempt < sizeof(timeouts_ms) /
+                                            sizeof(timeouts_ms[0]);
+         attempt++) {
+        if (source_identity_capture_attempt(repo_root, tool,
+                                            timeouts_ms[attempt], out, why,
+                                            why_len))
+            return true;
+        if (attempt + 1 == sizeof(timeouts_ms) / sizeof(timeouts_ms[0]) ||
+            !zcl_dev_source_identity_failure_retryable(why))
+            return false;
     }
     return false;
 }
