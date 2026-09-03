@@ -9,6 +9,7 @@
 #include "test_group_catalog.h"
 
 #include "base/hex.h"
+#include "base/safe_alloc.h"
 #include "base/serialize_le.h"
 #include "json/json.h"
 #include "platform/directory_compat.h"
@@ -28,6 +29,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #if !defined(_WIN32)
 #include <stdarg.h>
 #include <sys/stat.h>
@@ -69,6 +71,18 @@ struct proof_paths {
     char attempt_token[192];
     char phases[PATH_MAX];
     int64_t attempt_worker;
+    char warmstart[PATH_MAX];
+};
+
+/* Warm-start outcome for one generation, carried from generation_prepare()
+ * to the proof worker so the receipt sidecar can say what the build reused.
+ * Cold is always correct; every field here is advisory. */
+struct proof_warmstart {
+    char donor[33];
+    char donor_local[65];
+    uint64_t files_linked;
+    uint64_t bytes_linked;
+    bool armed;
 };
 
 static void proof_why(char *why, size_t why_len, const char *message)
@@ -444,7 +458,9 @@ static bool proof_paths_fill(const char *repo_root, const char *local,
         snprintf(out->helper_log, sizeof(out->helper_log), "%s/%s.helper.log",
                  out->logs, out->key) >= (int)sizeof(out->helper_log) ||
         snprintf(out->phases, sizeof(out->phases), "%s/%s.phases.txt",
-                 out->state, out->key) >= (int)sizeof(out->phases))
+                 out->state, out->key) >= (int)sizeof(out->phases) ||
+        snprintf(out->warmstart, sizeof(out->warmstart), "%s/%s.warmstart",
+                 out->state, out->key) >= (int)sizeof(out->warmstart))
         return false;
     return true;
 }
@@ -467,12 +483,12 @@ static bool process_ok(const struct zcl_devloop_process_result *result)
            result->term_signal == 0 && result->exit_code == 0;
 }
 
-static bool git_capture(const char *root, const char *const argv[],
-                        char *out, size_t out_size)
+static bool git_capture_within(const char *root, const char *const argv[],
+                                 int timeout_ms, char *out, size_t out_size)
 {
     struct zcl_devloop_process_result result = {0};
     if (!root || !argv || !out || out_size == 0 ||
-        !zcl_devloop_process_run(root, argv, 30000, &result) ||
+        !zcl_devloop_process_run(root, argv, timeout_ms, &result) ||
         !process_ok(&result) || result.output_len >= out_size)
         return false;
     size_t len = result.output_len;
@@ -482,6 +498,15 @@ static bool git_capture(const char *root, const char *const argv[],
     memcpy(out, result.output, len);
     out[len] = 0;
     return true;
+}
+
+/* Every git query in this file answers within seconds or is not worth
+ * waiting on. Only the generation reaper's recursive delete needs a budget
+ * of its own, so it names one and everything else keeps the shared bound. */
+static bool git_capture(const char *root, const char *const argv[],
+                        char *out, size_t out_size)
+{
+    return git_capture_within(root, argv, 30000, out, out_size);
 }
 
 static bool proof_resolve_pair_platform(const char *repo_root,
@@ -1459,6 +1484,129 @@ static bool depfile_tree_copy(const char *source, const char *target,
     return closedir(dir) == 0 && ok;
 }
 
+/* ── Warm-start proof generations ────────────────────────────────────────
+ *
+ * A generation is a detached worktree plus its build tree, one per
+ * (checkout, local commit) pair. A fresh generation compiles every
+ * translation unit because git stamps every source with the checkout time,
+ * even when the commit changed one line. The shared zcc cache cannot cover
+ * the gap: its key folds the working directory, which is unique per
+ * generation. So a new generation hard-links the previous complete
+ * generation's immutable compiler outputs and repairs make's timestamp
+ * graph around the exact changed set. Make then recompiles exactly the
+ * changed translation units and relinks; everything else is reused byte
+ * for byte.
+ *
+ * Safety rests on four properties, each checked where it is used rather
+ * than asserted here:
+ *
+ * 1. Seeded files are never rewritten in place. Objects and depfiles are
+ *    published by staging plus rename (tools/dev/compile-epoch-object.sh,
+ *    tools/zcc.c epoch-object publish), so a rebuild replaces the new
+ *    generation's link and the donor keeps its bytes. The classifier below
+ *    links only object and depfile outputs; everything else is skipped,
+ *    except the small compiler-wrapper binary which is copied, never
+ *    linked, because it is executed and must not share an inode across
+ *    generations.
+ * 2. Seeded objects are byte-valid in the new generation. Depfiles carry
+ *    relative paths, -ffile-prefix-map removes the absolute build root
+ *    from objects (Makefile REPRO_CFLAGS), and -frandom-seed takes the
+ *    relative TU path, so identical sources compile to identical bytes.
+ *    The epoch key already refuses reuse across toolchain, flag, or
+ *    build-system moves: seeded objects under a stale epoch name are dead
+ *    weight make never addresses.
+ * 3. Freshness is content-derived, not trusted. Seeded outputs are stamped
+ *    at seed time; then every path git names as changed between the donor
+ *    commit and the new commit is stamped strictly later. Unchanged
+ *    sources stay older than the seeds (reuse), changed sources and
+ *    headers are newer (rebuild, with header dependents found through the
+ *    seeded depfiles). Any failure before the repair completes unlinks the
+ *    seeds, which degrades to the cold build, never to a stale reuse.
+ * 4. The donor is stable. Only a generation carrying a build-complete
+ *    marker for the checkout's own root, still checked out at the marked
+ *    commit, with no live proof lease, may donate. Its build tree cannot
+ *    change under the reader: the proof never rebuilds a completed
+ *    build-only tree, and epoch publishers replace rather than mutate.
+ *
+ * Cold is always correct; warm start is only an optimisation. Every step
+ * below refuses rather than guesses. */
+
+#define PROOF_WARM_MARKER_REL "build/.proof-build-complete"
+#define PROOF_WARM_MARKER_SCHEMA "zcl.proof_build_complete.v1"
+#define PROOF_WARM_SIDECAR_SCHEMA "zcl.dev_proof_warmstart.v1"
+#define PROOF_WARM_TAG_LEN 32
+/* `git worktree remove` is a recursive delete of a multi-gigabyte tree.
+ * The 30 s budget the short git queries share would abandon it half-done,
+ * and a half-deleted generation is one the reapability check can never
+ * approve again. */
+#define PROOF_WARM_REMOVE_TIMEOUT_MS 600000
+#define PROOF_WARM_REAP_MAX 8
+/* An active proof stamps its generation when it takes it and builds for up
+ * to an hour on a loaded host, so anything touched within the hour may
+ * still be working. Marker-less generations get a full day: without a
+ * marker there is no pair lease to consult, and age is the only signal. */
+#define PROOF_WARM_IDLE_ACTIVE_SECONDS (60 * 60)
+#define PROOF_WARM_IDLE_UNMARKED_SECONDS (24 * 60 * 60)
+
+static bool warm_tag_name(const char *name)
+{
+    /* The pool holds exactly one shape of entry: the 32-character
+     * lowercase hex tag generation_prepare() derives. Anything else under
+     * .z23p was put there by something that is not this code, and is
+     * therefore not this code's to seed from or delete. */
+    size_t len = name ? strlen(name) : 0;
+    if (len != PROOF_WARM_TAG_LEN) return false;
+    for (size_t i = 0; i < len; i++) {
+        char c = name[i];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')))
+            return false;
+    }
+    return true;
+}
+
+enum warm_seed_class {
+    WARM_SEED_SKIP,
+    WARM_SEED_LINK,
+    WARM_SEED_COPY,
+};
+
+static bool warm_path_hidden(const char *rel)
+{
+    /* Any hidden component (lease, session, lock, admission, staging, or
+     * marker state) is live build machinery, never a reusable output. */
+    if (!rel || !rel[0]) return true;
+    if (rel[0] == '.') return true;
+    for (const char *p = rel; *p; p++) {
+        if (p[0] == '/' && p[1] == '.') return true;
+    }
+    return false;
+}
+
+static bool warm_has_suffix(const char *rel, const char *suffix)
+{
+    size_t rel_len = rel ? strlen(rel) : 0;
+    size_t suffix_len = suffix ? strlen(suffix) : 0;
+    return suffix_len > 0 && rel_len > suffix_len &&
+           strcmp(rel + rel_len - suffix_len, suffix) == 0;
+}
+
+/* LINK: immutable compiler outputs, replaced rather than rewritten by the
+ * epoch publishers, so sharing an inode with the donor is safe. COPY: the
+ * small executed wrapper binary, which must not share an inode across
+ * generations. SKIP: everything else, including anything rewritten in
+ * place (archives, linked binaries, session stamps, locks). `rel` is
+ * relative to the generation's build/ directory. */
+static enum warm_seed_class warm_classify_rel(const char *rel, bool is_reg)
+{
+    if (!rel || !rel[0] || !is_reg || warm_path_hidden(rel))
+        return WARM_SEED_SKIP;
+    if (strcmp(rel, "bin/zcc") == 0)
+        return WARM_SEED_COPY;
+    if (warm_has_suffix(rel, ".o") || warm_has_suffix(rel, ".d"))
+        return WARM_SEED_LINK;
+    return WARM_SEED_SKIP;
+}
+
 static bool generation_gitlink_prepare(const struct proof_paths *paths,
                                        const char *generation,
                                        char *why, size_t why_len)
@@ -1506,9 +1654,1041 @@ static uint64_t proof_ram_reserve_bytes(void)
     return (uint64_t)value;
 }
 
+
+static bool warm_touch_one(const char *path, const struct timespec *stamp)
+{
+    /* Preserve atime; the timestamp graph only reads mtime. utimensat
+     * follows the final component, but every caller stats first and only
+     * ever names regular files, never symlinks. */
+    const struct timespec times[2] = {
+        {.tv_nsec = UTIME_OMIT},
+        {.tv_sec = stamp->tv_sec, .tv_nsec = stamp->tv_nsec},
+    };
+    return path && stamp && utimensat(AT_FDCWD, path, times, 0) == 0;
+}
+
+static bool warm_timespec_after(const struct timespec *a,
+                                const struct timespec *b)
+{
+    return a->tv_sec > b->tv_sec ||
+           (a->tv_sec == b->tv_sec && a->tv_nsec > b->tv_nsec);
+}
+
+/* Byte copy through a temp file plus rename: the target is replaced, never
+ * truncated in place, so a concurrent reader keeps coherent bytes. Mode
+ * 0700, not 0600: this carries the compiler wrapper, and the bootstrap
+ * declines a binary it cannot execute. Private directory already bars
+ * group and other. */
+static bool warm_copy_file(const char *source, const char *target)
+{
+    int input = open(source, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (input < 0) return false;
+    struct stat st;
+    char temporary[PATH_MAX];
+    int temporary_len = snprintf(temporary, sizeof(temporary),
+                                 "%s.tmp.XXXXXX", target);
+    bool ok = fstat(input, &st) == 0 && S_ISREG(st.st_mode) &&
+        temporary_len > 0 && temporary_len < (int)sizeof(temporary);
+    int output = ok ? mkstemp(temporary) : -1;
+    if (output < 0) ok = false;
+    unsigned char buffer[65536];
+    while (ok) {
+        ssize_t got = read(input, buffer, sizeof(buffer));
+        if (got < 0 && errno == EINTR) continue;
+        if (got < 0) ok = false;
+        if (got <= 0) break;
+        ok = write_all(output, buffer, (size_t)got);
+    }
+    if (close(input) != 0) ok = false;
+    if (output >= 0) {
+        if (fchmod(output, 0700) != 0) ok = false;
+        if (close(output) != 0) ok = false;
+    }
+    if (ok && rename(temporary, target) != 0) ok = false;
+    if (!ok && output >= 0) (void)unlink(temporary);
+    return ok;
+}
+
+struct warm_seed_accum {
+    char **rels;
+    size_t count;
+    size_t capacity;
+    uint64_t files;
+    uint64_t bytes;
+    bool failed;
+};
+
+static void warm_seed_accum_free(struct warm_seed_accum *accum)
+{
+    if (!accum) return;
+    for (size_t i = 0; i < accum->count; i++) free(accum->rels[i]);
+    free(accum->rels);
+    memset(accum, 0, sizeof(*accum));
+}
+
+static bool warm_seed_remember(struct warm_seed_accum *accum, const char *rel)
+{
+    if (accum->failed || !rel) {
+        accum->failed = true;
+        return false;
+    }
+    if (accum->count == accum->capacity) {
+        size_t next = accum->capacity ? accum->capacity * 2 : 256;
+        char **rels =
+            zcl_realloc(accum->rels, next * sizeof(*rels), "proof_warm_seed");
+        if (!rels) {
+            accum->failed = true;
+            return false;
+        }
+        accum->rels = rels;
+        accum->capacity = next;
+    }
+    size_t len = strlen(rel);
+    char *copy = zcl_malloc(len + 1, "proof_warm_seed");
+    if (!copy) {
+        accum->failed = true;
+        return false;
+    }
+    memcpy(copy, rel, len + 1);
+    accum->rels[accum->count++] = copy;
+    return true;
+}
+
+/* One regular donor file: link it (immutable output) or copy it (small
+ * executed wrapper). The target is unlinked first so link() never follows
+ * a stale symlink and never fails with EEXIST. Any single-file failure
+ * skips that file and moves on: a missing seed only costs a recompile. */
+static void warm_seed_file(const char *donor_file, const char *gen_file,
+                           const char *rel, enum warm_seed_class class,
+                           const struct stat *donor_st,
+                           struct warm_seed_accum *accum)
+{
+    struct stat gen_st;
+    bool gen_exists = lstat(gen_file, &gen_st) == 0;
+    if (gen_exists && S_ISLNK(gen_st.st_mode)) {
+        if (unlink(gen_file) != 0) return;
+        gen_exists = false;
+    }
+    if (class == WARM_SEED_LINK) {
+        if (gen_exists && unlink(gen_file) != 0) return;
+        if (link(donor_file, gen_file) != 0) return;
+    } else if (class == WARM_SEED_COPY) {
+        if (!warm_copy_file(donor_file, gen_file)) return;
+    } else {
+        return;
+    }
+    if (!warm_seed_remember(accum, rel)) {
+        /* The file is seeded but untracked, so a later repair failure
+         * could not roll it back; unlink it now instead of risking a
+         * half-repaired tree. */
+        (void)unlink(gen_file);
+        return;
+    }
+    accum->files++;
+    accum->bytes += (uint64_t)donor_st->st_size;
+}
+
+static void warm_seed_walk(const char *donor_dir, const char *gen_dir,
+                           const char *rel_prefix,
+                           struct warm_seed_accum *accum)
+{
+    /* The walk creates its own target directory: readdir order is
+     * unspecified, so a file may precede its directory and parent-ensure
+     * only covers file targets, not the directory entries below. */
+    struct stat gen_dir_st;
+    if (!accum || accum->failed) return;
+    if (lstat(gen_dir, &gen_dir_st) != 0) {
+        if (errno != ENOENT || mkdir(gen_dir, 0700) != 0) {
+            accum->failed = true;
+            return;
+        }
+    } else if (!S_ISDIR(gen_dir_st.st_mode) ||
+               S_ISLNK(gen_dir_st.st_mode)) {
+        accum->failed = true;
+        return;
+    }
+    DIR *dir = opendir(donor_dir);
+    if (!dir) return;
+    for (struct dirent *entry = readdir(dir); entry;
+         entry = readdir(dir)) {
+        char rel[PATH_MAX], donor_child[PATH_MAX], gen_child[PATH_MAX];
+        if (accum->failed) break;
+        if (strcmp(entry->d_name, ".") == 0 ||
+            strcmp(entry->d_name, "..") == 0)
+            continue;
+        int rel_len = rel_prefix && rel_prefix[0]
+            ? snprintf(rel, sizeof(rel), "%s/%s", rel_prefix, entry->d_name)
+            : snprintf(rel, sizeof(rel), "%s", entry->d_name);
+        if (rel_len <= 0 || rel_len >= (int)sizeof(rel) ||
+            snprintf(donor_child, sizeof(donor_child), "%s/%s", donor_dir,
+                     entry->d_name) >= (int)sizeof(donor_child) ||
+            snprintf(gen_child, sizeof(gen_child), "%s/%s", gen_dir,
+                     entry->d_name) >= (int)sizeof(gen_child)) {
+            accum->failed = true;
+            break;
+        }
+        struct stat donor_st;
+        if (lstat(donor_child, &donor_st) != 0) continue;
+        if (S_ISLNK(donor_st.st_mode)) continue;
+        if (S_ISDIR(donor_st.st_mode)) {
+            /* Hidden directories (.leases, staging, admission) are live
+             * machinery: do not recreate them, do not descend. */
+            if (warm_path_hidden(rel)) continue;
+            struct stat gen_st;
+            if (lstat(gen_child, &gen_st) != 0) {
+                if (errno != ENOENT || mkdir(gen_child, 0700) != 0)
+                    continue;
+            } else if (!S_ISDIR(gen_st.st_mode) ||
+                       S_ISLNK(gen_st.st_mode)) {
+                continue;
+            }
+            warm_seed_walk(donor_child, gen_child, rel, accum);
+            continue;
+        }
+        if (!S_ISREG(donor_st.st_mode)) continue;
+        enum warm_seed_class class = warm_classify_rel(rel, true);
+        if (class == WARM_SEED_SKIP) continue;
+        if (!dependency_parent_ensure(gen_child)) continue;
+        warm_seed_file(donor_child, gen_child, rel, class, &donor_st,
+                       accum);
+    }
+    (void)closedir(dir);
+}
+
+/* Undo a seed: unlink every tracked file. Best effort; a leftover seed
+ * with untouched mtimes only costs a recompile, but a leftover seed after
+ * a partial repair could mislead make, so the repair calls this before it
+ * reports cold. */
+static void warm_seed_rollback(const char *gen_build,
+                               struct warm_seed_accum *accum)
+{
+    for (size_t i = 0; i < accum->count; i++) {
+        char path[PATH_MAX];
+        if (snprintf(path, sizeof(path), "%s/%s", gen_build,
+                     accum->rels[i]) < (int)sizeof(path))
+            (void)unlink(path);
+    }
+}
+
+/* The build-complete marker is the donor gate: it says a full `make
+ * build-only` finished in this generation for the marked commit. Written
+ * best effort after the compile dimension; a missing marker only costs a
+ * cold build. */
+static bool warm_marker_write_at(const char *generation, const char *root,
+                                   const char *local, const char *base,
+                                   int64_t completed)
+{
+    char path[PATH_MAX], body[PATH_MAX + 256];
+    int path_len = generation ? snprintf(path, sizeof(path), "%s/%s",
+                                         generation, PROOF_WARM_MARKER_REL)
+                              : -1;
+    int body_len = path_len > 0 && root && local && base && completed > 0
+        ? snprintf(body, sizeof(body), "%s\nroot=%s\nlocal=%s\nbase=%s\n"
+                   "completed=%lld\n", PROOF_WARM_MARKER_SCHEMA, root,
+                   local, base, (long long)completed)
+        : -1;
+    return path_len > 0 && path_len < (int)sizeof(path) && body_len > 0 &&
+           body_len < (int)sizeof(body) &&
+           write_atomic(path, body, (size_t)body_len, 0600);
+}
+
+static bool warm_marker_write(const char *generation, const char *root,
+                              const char *local, const char *base)
+{
+    return warm_marker_write_at(generation, root, local, base,
+                                platform_time_wall_unix());
+}
+
+static bool warm_marker_line(const char *line, const char *key,
+                             char *out, size_t out_size)
+{
+    size_t key_len = strlen(key);
+    if (!line || strncmp(line, key, key_len) != 0 || line[key_len] != '=')
+        return false;
+    const char *value = line + key_len + 1;
+    size_t len = strlen(value);
+    return len > 0 && len < out_size &&
+           snprintf(out, out_size, "%s", value) > 0;
+}
+
+static bool warm_marker_read(const char *generation, char root[PATH_MAX],
+                             char local[65], char base[65],
+                             int64_t *completed_out)
+{
+    char path[PATH_MAX], body[2048];
+    if (!generation ||
+        snprintf(path, sizeof(path), "%s/%s", generation,
+                 PROOF_WARM_MARKER_REL) >= (int)sizeof(path))
+        return false;
+    FILE *f = fopen(path, "r");
+    if (!f) return false;
+    size_t n = fread(body, 1, sizeof(body) - 1, f);
+    bool ok = !ferror(f);
+    fclose(f);
+    if (!ok || n == 0 || n == sizeof(body) - 1) return false;
+    body[n] = 0;
+    char *save = NULL, *line = strtok_r(body, "\n", &save);
+    if (!line || strcmp(line, PROOF_WARM_MARKER_SCHEMA) != 0) return false;
+    char completed_text[32] = {0};
+    char got_root[PATH_MAX] = {0}, got_local[65] = {0}, got_base[65] = {0};
+    int fields = 0;
+    while ((line = strtok_r(NULL, "\n", &save))) {
+        if (warm_marker_line(line, "root", got_root, sizeof(got_root)) ||
+            warm_marker_line(line, "local", got_local, sizeof(got_local)) ||
+            warm_marker_line(line, "base", got_base, sizeof(got_base)) ||
+            warm_marker_line(line, "completed", completed_text,
+                             sizeof(completed_text)))
+            fields++;
+        else
+            return false;
+    }
+    /* proof_oid_text rejects anything that is not a lowercase hex object
+     * id; the root check below bars escapes. Any shortfall refuses. */
+    if (fields != 4 || !proof_oid_text(got_local) ||
+        !proof_oid_text(got_base))
+        return false;
+    if (got_root[0] != '/' || strstr(got_root, "..") ||
+        strchr(got_root, '\\'))
+        return false;
+    char *end = NULL;
+    errno = 0;
+    long long completed = strtoll(completed_text, &end, 10);
+    if (errno != 0 || !end || *end != 0 || completed <= 0) return false;
+    if (root) (void)snprintf(root, PATH_MAX, "%s", got_root);
+    if (local) (void)snprintf(local, 65, "%s", got_local);
+    if (base) (void)snprintf(base, 65, "%s", got_base);
+    if (completed_out) *completed_out = (int64_t)completed;
+    return true;
+}
+
+/* Same path hygiene as the proof's own changed-set capture: a diff line
+ * must be a relative tracked path, never an escape. */
+static bool warm_changed_path_ok(const char *line)
+{
+    size_t len = line ? strlen(line) : 0;
+    return len > 0 && len < 256 && line[0] != '/' &&
+           !strstr(line, "..") && !strchr(line, '\\');
+}
+
+/* Stamp one changed path: a regular file gets the source stamp, a
+ * directory (a moved submodule pointer) stamps every regular file under
+ * it, and anything else is skipped. Symlinks are never followed. */
+static void warm_touch_changed(const char *generation, const char *rel,
+                               const struct timespec *stamp, bool *ok)
+{
+    char path[PATH_MAX];
+    struct stat st;
+    if (!ok || !*ok || !warm_changed_path_ok(rel) ||
+        snprintf(path, sizeof(path), "%s/%s", generation, rel) >=
+            (int)sizeof(path) ||
+        lstat(path, &st) != 0) {
+        return;
+    }
+    if (S_ISREG(st.st_mode)) {
+        if (!warm_touch_one(path, stamp)) *ok = false;
+        return;
+    }
+    if (!S_ISDIR(st.st_mode) || S_ISLNK(st.st_mode)) return;
+    /* Submodule pointer move: conservatively restamp the whole subtree so
+     * no translation unit including those headers is missed. Over-broad
+     * only costs recompiles, never a stale reuse. */
+    char *stack[64];
+    size_t depth = 0;
+    char top[PATH_MAX];
+    if (snprintf(top, sizeof(top), "%s", path) >= (int)sizeof(top)) {
+        *ok = false;
+        return;
+    }
+    stack[depth++] = top;
+    while (depth > 0 && *ok) {
+        char *dir_path = stack[--depth];
+        DIR *dir = opendir(dir_path);
+        if (!dir) {
+            *ok = false;
+            break;
+        }
+        for (struct dirent *entry = readdir(dir); entry && *ok;
+             entry = readdir(dir)) {
+            char child[PATH_MAX];
+            struct stat child_st;
+            if (strcmp(entry->d_name, ".") == 0 ||
+                strcmp(entry->d_name, "..") == 0 ||
+                snprintf(child, sizeof(child), "%s/%s", dir_path,
+                         entry->d_name) >= (int)sizeof(child) ||
+                lstat(child, &child_st) != 0)
+                continue;
+            if (S_ISLNK(child_st.st_mode)) continue;
+            if (S_ISDIR(child_st.st_mode)) {
+                if (depth < sizeof(stack) / sizeof(stack[0])) {
+                    char *held =
+                        zcl_malloc(strlen(child) + 1, "proof_warm_touch");
+                    if (!held) {
+                        *ok = false;
+                        break;
+                    }
+                    (void)snprintf(held, strlen(child) + 1, "%s", child);
+                    stack[depth++] = held;
+                }
+                continue;
+            }
+            if (S_ISREG(child_st.st_mode) && !warm_touch_one(child, stamp))
+                *ok = false;
+        }
+        (void)closedir(dir);
+        if (dir_path != top) free(dir_path);
+    }
+    while (depth > 0) free(stack[--depth]);
+}
+
+/* Donor survey record: the public seam type from dev_proof.h, so the
+ * harness proves the pick policy against the exact struct production
+ * surveys. The pick reads only the policy fields (completed, touched,
+ * head_ok, live); path and local ride along for the caller. */
+
+/* Newest completed, verifiable, idle generation wins; ties keep the
+ * earlier candidate, which keeps repeated scans stable. */
+static int warm_pick_donor(const struct zcl_dev_proof_warm_candidate
+                               *candidates,
+                           size_t count)
+{
+    int best = -1;
+    for (size_t i = 0; i < count; i++) {
+        if (!candidates || !candidates[i].head_ok || candidates[i].live)
+            continue;
+        if (best < 0 ||
+            candidates[i].completed > candidates[best].completed ||
+            (candidates[i].completed == candidates[best].completed &&
+             candidates[i].touched > candidates[best].touched))
+            best = (int)i;
+    }
+    return best;
+}
+
+static bool warm_generation_touched(const char *generation, int64_t *touched)
+{
+    struct stat st;
+    if (!generation || lstat(generation, &st) != 0 ||
+        !S_ISDIR(st.st_mode))
+        return false;
+    if (touched) *touched = (int64_t)st.st_mtime;
+    return true;
+}
+
+/* A donor counts as in use while its proof lease or running lock is live.
+ * The marker names the pair, so the checkout's own lease directory
+ * answers exactly; anything lease-less falls back to the idle rule in the
+ * caller. */
+static bool warm_donor_live(const char *root, const char *local,
+                            const char *base)
+{
+    char lease[PATH_MAX], lock[PATH_MAX];
+    if (!root || !local || !base ||
+        snprintf(lease, sizeof(lease),
+                 "%s/.cache/zcl-dev-proof/leases/%s-%s.lease", root, local,
+                 base) >= (int)sizeof(lease) ||
+        snprintf(lock, sizeof(lock), "%s/.cache/zcl-dev-proof/%s-%s.running",
+                 root, local, base) >= (int)sizeof(lock))
+        return true;
+    return proof_lease_running(lease, NULL, NULL) ||
+           proof_running(lock, NULL, NULL);
+}
+
+/* Stamp every seeded output to the seed instant. Unchanged sources keep
+ * their checkout mtime (older: reuse); changed sources are stamped later
+ * by warm_retime_sources (newer: rebuild). */
+/* Advance the wall clock past the seed stamp without inventing a
+ * future time: spins a bounded number of reads until the clock moves.
+ * Nanosecond clocks exit on the first read; a stuck clock refuses, which
+ * the caller turns into a cold build. */
+static bool warm_stamp_after(const struct timespec *seed_stamp,
+                             struct timespec *source_stamp)
+{
+    if (!seed_stamp || !source_stamp) return false;
+    for (int spins = 0; spins < 1000000; spins++) {
+        if (clock_gettime(CLOCK_REALTIME, source_stamp) != 0)
+            return false;
+        if (warm_timespec_after(source_stamp, seed_stamp)) return true;
+    }
+    return warm_timespec_after(source_stamp, seed_stamp);
+}
+
+/* Stamp every seeded output to the seed instant. Unchanged sources keep
+ * their checkout mtime (older: reuse); changed sources are stamped later
+ * by warm_retime_sources (newer: rebuild). */
+static bool warm_retime_outputs(const char *gen_build,
+                                struct warm_seed_accum *accum,
+                                struct timespec *seed_stamp)
+{
+    if (clock_gettime(CLOCK_REALTIME, seed_stamp) != 0) return false;
+    for (size_t i = 0; i < accum->count; i++) {
+        char path[PATH_MAX];
+        if (snprintf(path, sizeof(path), "%s/%s", gen_build,
+                     accum->rels[i]) >= (int)sizeof(path) ||
+            !warm_touch_one(path, seed_stamp))
+            return false;
+    }
+    return true;
+}
+
+/* Stamp the exact changed set strictly after the seeds. Spins the wall
+ * clock forward rather than inventing a future time: both stamps stay at
+ * or below the real now, so no later make ever sees a file from the
+ * future. A changed path that is gone (deleted) or unstatable is skipped;
+ * its absence already forces make to rebuild whatever named it. */
+static bool warm_retime_sources(const char *generation,
+                                const char *donor_local, const char *local,
+                                const struct timespec *seed_stamp)
+{
+    const char *argv[] = {"git", "diff", "--name-only", "--no-renames",
+                          donor_local, local, "--", NULL};
+    char output[ZCL_DEVLOOP_OUTPUT_MAX];
+    if (!generation || !donor_local || !local || !seed_stamp ||
+        !git_capture(generation, argv, output, sizeof(output)))
+        return false;
+    struct timespec source_stamp = *seed_stamp;
+    if (!warm_stamp_after(seed_stamp, &source_stamp)) return false;
+    bool ok = true;
+    char *save = NULL;
+    for (char *line = strtok_r(output, "\n", &save); line && ok;
+         line = strtok_r(NULL, "\n", &save)) {
+        if (line[0] == 0) continue;
+        warm_touch_changed(generation, line, &source_stamp, &ok);
+    }
+    return ok;
+}
+
+/* The seeded wrapper binary is trusted only when its build inputs are
+ * byte-identical between the donor commit and the new commit. The epoch
+ * key moves when the toolchain or flags move, which already strands
+ * seeded objects; the wrapper has no epoch of its own, so this diff is
+ * its freshness. The catalog and its reader script are inputs too: a
+ * changed catalog could silently narrow the checked set. --quiet turns
+ * the diff into a boolean; any failure (including "different") refuses. */
+static bool warm_wrapper_inputs_unchanged(const char *root,
+                                          const char *donor_local,
+                                          const char *local)
+{
+    char catalog[PATH_MAX];
+    if (!root || !donor_local || !local ||
+        snprintf(catalog, sizeof(catalog), "%s/tools/dev/"
+                 "zcc-bootstrap-inputs.list", root) >= (int)sizeof(catalog))
+        return false;
+    FILE *f = fopen(catalog, "r");
+    if (!f) return false;
+    const char *fixed[] = {
+        "tools/dev/zcc-bootstrap-inputs.list",
+        "tools/dev/zcc_bootstrap.sh",
+    };
+    size_t fixed_count = sizeof(fixed) / sizeof(fixed[0]);
+    char inputs[12][128];
+    size_t input_count = 0;
+    char line[256];
+    bool ok = true;
+    while (fgets(line, sizeof(line), f)) {
+        size_t len = strlen(line);
+        while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r'))
+            line[--len] = 0;
+        if (len == 0 || strncmp(line, "license=", 8) == 0) continue;
+        if (len >= sizeof(inputs[0])) {
+            ok = false;
+            break;
+        }
+        bool clean = true;
+        for (size_t i = 0; i < len; i++) {
+            char c = line[i];
+            bool word = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                        (c >= '0' && c <= '9') || c == '_' || c == '.' ||
+                        c == '/' || c == '-';
+            if (!word) {
+                clean = false;
+                break;
+            }
+        }
+        if (!clean || strstr(line, "..") || input_count >=
+                sizeof(inputs) / sizeof(inputs[0])) {
+            ok = false;
+            break;
+        }
+        (void)snprintf(inputs[input_count], sizeof(inputs[0]), "%s", line);
+        input_count++;
+    }
+    bool complete = !ferror(f);
+    fclose(f);
+    if (!ok || !complete || input_count == 0) return false;
+    const char *argv[6 + 12 + 2 + 1];
+    size_t argc = 0;
+    argv[argc++] = "git";
+    argv[argc++] = "diff";
+    argv[argc++] = "--quiet";
+    argv[argc++] = "--no-renames";
+    argv[argc++] = donor_local;
+    argv[argc++] = local;
+    argv[argc++] = "--";
+    for (size_t i = 0; i < fixed_count; i++) argv[argc++] = fixed[i];
+    for (size_t i = 0; i < input_count; i++) argv[argc++] = inputs[i];
+    argv[argc] = NULL;
+    char ignored[8];
+    return git_capture(root, argv, ignored, sizeof(ignored));
+}
+
+struct warm_donor {
+    char path[PATH_MAX];
+    char local[65];
+    char base[65];
+};
+
+/* Newest verifiable idle generation for this root, skipping the caller's
+ * own. Fills nothing and reports false when there is no donor: cold is
+ * the ordinary path, not an error. */
+static bool warm_donor_scan(const char *parent, const char *root,
+                            const char *in_use, struct warm_donor *donor)
+{
+    DIR *dir = opendir(parent);
+    if (!dir || !parent || !root || !in_use || !donor) {
+        if (dir) (void)closedir(dir);
+        return false;
+    }
+    struct zcl_dev_proof_warm_candidate *candidates = NULL;
+    size_t count = 0, capacity = 0;
+    for (struct dirent *entry = readdir(dir); entry;
+         entry = readdir(dir)) {
+        char candidate_path[PATH_MAX];
+        if (!warm_tag_name(entry->d_name) ||
+            snprintf(candidate_path, sizeof(candidate_path), "%s/%s",
+                     parent, entry->d_name) >= (int)sizeof(candidate_path) ||
+            strcmp(candidate_path, in_use) == 0)
+            continue;
+        char marker_root[PATH_MAX], marker_local[65], marker_base[65];
+        int64_t completed = 0;
+        if (!warm_marker_read(candidate_path, marker_root, marker_local,
+                              marker_base, &completed) ||
+            strcmp(marker_root, root) != 0)
+            continue;
+        char head[65];
+        const char *head_argv[] = {"git", "-C", candidate_path, "rev-parse",
+                                  "--verify", "HEAD", NULL};
+        bool head_ok = git_capture(root, head_argv, head, sizeof(head)) &&
+                       strcmp(head, marker_local) == 0;
+        char obj[PATH_MAX];
+        int64_t touched = 0;
+        if (snprintf(obj, sizeof(obj), "%s/build/obj", candidate_path) >=
+                (int)sizeof(obj) ||
+            !warm_generation_touched(obj, NULL) ||
+            !warm_generation_touched(candidate_path, &touched))
+            continue;
+        if (count == capacity) {
+            size_t next = capacity ? capacity * 2 : 16;
+            struct zcl_dev_proof_warm_candidate *grown = zcl_realloc(
+                candidates, next * sizeof(*grown), "proof_warm_donor");
+            if (!grown) {
+                free(candidates);
+                candidates = NULL;
+                count = capacity = 0;
+                break;
+            }
+            candidates = grown;
+            capacity = next;
+        }
+        struct zcl_dev_proof_warm_candidate *slot = &candidates[count];
+        memset(slot, 0, sizeof(*slot));
+        (void)snprintf(slot->tag, sizeof(slot->tag), "%s", entry->d_name);
+        (void)snprintf(slot->path, sizeof(slot->path), "%s",
+                       candidate_path);
+        (void)snprintf(slot->local, sizeof(slot->local), "%s",
+                       marker_local);
+        slot->completed = completed;
+        slot->touched = touched;
+        slot->head_ok = head_ok;
+        /* A generation whose checkout moved since its build finished, or
+         * whose proof is still leased, cannot donate: the first may hold
+         * objects for another commit, the second is still writing. */
+        slot->live = !head_ok ||
+                     warm_donor_live(root, marker_local, marker_base);
+        count++;
+    }
+    (void)closedir(dir);
+    int best = warm_pick_donor(candidates, count);
+    bool found = candidates && best >= 0;
+    if (found) {
+        /* Re-read the marker now the survey is done. A sibling lane can
+         * finish a build in this generation while the scan runs; if the
+         * marker moved, the surveyed choice is stale and cold is safe. */
+        char marker_root[PATH_MAX], marker_local[65], marker_base[65];
+        int64_t completed = 0;
+        if (!warm_marker_read(candidates[best].path, marker_root,
+                              marker_local, marker_base, &completed) ||
+            strcmp(marker_local, candidates[best].local) != 0 ||
+            snprintf(donor->path, sizeof(donor->path), "%s",
+                     candidates[best].path) >= (int)sizeof(donor->path) ||
+            snprintf(donor->local, sizeof(donor->local), "%s",
+                     candidates[best].local) >= (int)sizeof(donor->local) ||
+            snprintf(donor->base, sizeof(donor->base), "%s",
+                     marker_base) >= (int)sizeof(donor->base))
+            found = false;
+    }
+    free(candidates);
+    return found;
+}
+
+/* Seed one generation's build tree from the donor and repair the
+ * timestamp graph. Reports true only when the full repair completed; any
+ * earlier failure rolls the seeds back and reports false (cold). */
+static bool warm_start_generation(const struct proof_paths *paths,
+                                  const char *parent,
+                                  const char *generation, const char *local,
+                                  struct proof_warmstart *warm)
+{
+    struct warm_donor donor;
+    if (!paths || !parent || !generation || !local || !warm) return false;
+    memset(&donor, 0, sizeof(donor));
+    memset(warm, 0, sizeof(*warm));
+    if (!warm_donor_scan(parent, paths->root, generation, &donor))
+        return false;
+    char donor_build[PATH_MAX], gen_build[PATH_MAX];
+    char donor_obj[PATH_MAX], gen_obj[PATH_MAX];
+    if (snprintf(donor_build, sizeof(donor_build), "%s/build", donor.path) >=
+            (int)sizeof(donor_build) ||
+        snprintf(gen_build, sizeof(gen_build), "%s/build", generation) >=
+            (int)sizeof(gen_build) ||
+        snprintf(donor_obj, sizeof(donor_obj), "%s/obj", donor_build) >=
+            (int)sizeof(donor_obj) ||
+        snprintf(gen_obj, sizeof(gen_obj), "%s/obj", gen_build) >=
+            (int)sizeof(gen_obj))
+        return false;
+    struct warm_seed_accum accum = {0};
+    warm_seed_walk(donor_obj, gen_obj, "obj", &accum);
+    /* The wrapper binary keeps make's prerequisite graph honest only when
+     * its inputs are unchanged; otherwise the bootstrap rebuilds it and
+     * its new mtime correctly invalidates every object. */
+    if (!accum.failed &&
+        warm_wrapper_inputs_unchanged(paths->root, donor.local, local)) {
+        char donor_zcc[PATH_MAX], gen_zcc[PATH_MAX];
+        struct stat donor_zcc_st;
+        if (snprintf(donor_zcc, sizeof(donor_zcc), "%s/bin/zcc",
+                     donor_build) < (int)sizeof(donor_zcc) &&
+            snprintf(gen_zcc, sizeof(gen_zcc), "%s/bin/zcc", gen_build) <
+                (int)sizeof(gen_zcc) &&
+            lstat(donor_zcc, &donor_zcc_st) == 0 &&
+            S_ISREG(donor_zcc_st.st_mode) &&
+            !S_ISLNK(donor_zcc_st.st_mode) &&
+            dependency_parent_ensure(gen_zcc))
+            warm_seed_file(donor_zcc, gen_zcc, "bin/zcc", WARM_SEED_COPY,
+                           &donor_zcc_st, &accum);
+    }
+    struct timespec seed_stamp = {0};
+    bool armed = !accum.failed && accum.files > 0 &&
+                 warm_retime_outputs(gen_build, &accum, &seed_stamp) &&
+                 warm_retime_sources(generation, donor.local, local,
+                                     &seed_stamp);
+    if (!armed) {
+        warm_seed_rollback(gen_build, &accum);
+        warm_seed_accum_free(&accum);
+        return false;
+    }
+    const char *tag = strrchr(donor.path, '/');
+    tag = tag ? tag + 1 : donor.path;
+    (void)snprintf(warm->donor, sizeof(warm->donor), "%s", tag);
+    (void)snprintf(warm->donor_local, sizeof(warm->donor_local), "%s",
+                   donor.local);
+    warm->files_linked = accum.files;
+    warm->bytes_linked = accum.bytes;
+    warm->armed = true;
+    warm_seed_accum_free(&accum);
+    return true;
+}
+
+/* Only git's own answer counts a generation as disposable. Detached HEAD
+ * proves nobody parked a branch here to work in, and an empty tracked
+ * status proves no edit would be lost. Untracked files are excluded on
+ * purpose: a generation is full of build output by construction, and that
+ * output is both what makes the tree large and what nobody would miss. */
+static bool warm_reapable(const char *generation)
+{
+    char head[256], status[4];
+    const char *head_argv[] = {"git", "rev-parse", "--symbolic-full-name",
+                               "HEAD", NULL};
+    const char *status_argv[] = {"git", "status", "--porcelain=v1",
+                                 "--untracked-files=no", NULL};
+    if (!git_capture(generation, head_argv, head, sizeof(head)) ||
+        strcmp(head, "HEAD") != 0)
+        return false;
+    /* A clean tree prints nothing. The shortest porcelain v1 line is
+     * longer than this buffer, so a dirty tree overflows the capture
+     * instead of fitting it: both spellings of "not clean" refuse, and a
+     * git that cannot answer at all refuses too. */
+    return git_capture(generation, status_argv, status, sizeof(status)) &&
+           status[0] == 0;
+}
+
+struct warm_reap_entry {
+    char tag[PROOF_WARM_TAG_LEN + 1];
+    char path[PATH_MAX];
+    char root[PATH_MAX];
+    int64_t completed;
+    int64_t touched;
+    bool complete;
+};
+
+/* With warm start, old generations are valuable donors, so the reaper
+ * keeps the newest complete generation per root and may reap the rest.
+ * Hygiene, never correctness: this returns nothing and the caller ignores
+ * it, because a pool that fails to shrink costs disk while a proof that
+ * failed over a delete would cost every lane on this host its push.
+ *
+ * A donor being seeded from while it is reaped degrades gracefully: the
+ * seed walk skips files that vanish, and hard links already created keep
+ * their inodes after the donor names are unlinked. */
+static void generation_pool_reap(const struct proof_paths *paths,
+                                 const char *parent, const char *in_use)
+{
+    DIR *dir = opendir(parent);
+    if (!dir || !paths || !parent || !in_use) {
+        if (dir) (void)closedir(dir);
+        return;
+    }
+    int64_t now = platform_time_wall_unix();
+    struct warm_reap_entry *entries = NULL;
+    size_t count = 0, capacity = 0;
+    bool collect_ok = true;
+    for (struct dirent *entry = readdir(dir); entry;
+         entry = readdir(dir)) {
+        char candidate[PATH_MAX];
+        int64_t touched = 0;
+        if (!warm_tag_name(entry->d_name) ||
+            snprintf(candidate, sizeof(candidate), "%s/%s", parent,
+                     entry->d_name) >= (int)sizeof(candidate) ||
+            strcmp(candidate, in_use) == 0 ||
+            !warm_generation_touched(candidate, &touched))
+            continue;
+        char marker_root[PATH_MAX] = {0}, marker_local[65] = {0};
+        char marker_base[65] = {0};
+        int64_t completed = 0;
+        /* Cross-root generations stay in the pool under their own root's
+         * newest-complete rule below; the grouping, not this read,
+         * decides whose donor survives. */
+        bool complete = warm_marker_read(candidate, marker_root,
+                                         marker_local, marker_base,
+                                         &completed);
+        bool live;
+        if (complete) {
+            /* The lease lives under the marked root, which may be a
+             * sibling checkout sharing this pool; the marker root is
+             * validated absolute and escape-free on read. */
+            live = warm_donor_live(marker_root, marker_local,
+                                   marker_base) ||
+                   now - touched <= PROOF_WARM_IDLE_ACTIVE_SECONDS;
+        } else {
+            live = now - touched <= PROOF_WARM_IDLE_UNMARKED_SECONDS;
+        }
+        if (live) continue;
+        if (count == capacity) {
+            size_t next = capacity ? capacity * 2 : 16;
+            struct warm_reap_entry *grown = zcl_realloc(
+                entries, next * sizeof(*grown), "proof_warm_reap");
+            if (!grown) {
+                free(entries);
+                entries = NULL;
+                count = capacity = 0;
+                collect_ok = false;
+                break;
+            }
+            entries = grown;
+            capacity = next;
+        }
+        struct warm_reap_entry *slot = &entries[count++];
+        memset(slot, 0, sizeof(*slot));
+        (void)snprintf(slot->tag, sizeof(slot->tag), "%s", entry->d_name);
+        (void)snprintf(slot->path, sizeof(slot->path), "%s", candidate);
+        (void)snprintf(slot->root, sizeof(slot->root), "%s",
+                       complete ? marker_root : "");
+        slot->completed = completed;
+        slot->touched = touched;
+        slot->complete = complete;
+    }
+    (void)closedir(dir);
+    size_t attempts = 0;
+    for (size_t i = 0; collect_ok && entries && i < count &&
+             attempts < PROOF_WARM_REAP_MAX;
+         i++) {
+        bool reap = false;
+        if (!entries[i].complete) {
+            reap = true;
+        } else {
+            /* Keep the newest complete generation per root: reap this
+             * one when a same-root sibling wins the donor pick. The pick
+             * is the tested policy; the reaper only groups by root. */
+            struct zcl_dev_proof_warm_candidate *group = NULL;
+            size_t group_count = 0, group_cap = 0;
+            size_t self = 0;
+            bool group_ok = true;
+            for (size_t j = 0; j < count; j++) {
+                if (!entries[j].complete ||
+                    strcmp(entries[j].root, entries[i].root) != 0)
+                    continue;
+                if (group_count == group_cap) {
+                    size_t next = group_cap ? group_cap * 2 : 8;
+                    struct zcl_dev_proof_warm_candidate *grown =
+                        zcl_realloc(group, next * sizeof(*grown),
+                                    "proof_warm_reap");
+                    if (!grown) {
+                        group_ok = false;
+                        break;
+                    }
+                    group = grown;
+                    group_cap = next;
+                }
+                struct zcl_dev_proof_warm_candidate *slot =
+                    &group[group_count];
+                memset(slot, 0, sizeof(*slot));
+                (void)snprintf(slot->tag, sizeof(slot->tag), "%s",
+                               entries[j].tag);
+                slot->completed = entries[j].completed;
+                slot->touched = entries[j].touched;
+                slot->head_ok = true;
+                slot->live = false;
+                if (j == i) self = group_count;
+                group_count++;
+            }
+            if (group_ok && group_count > 0) {
+                int best = warm_pick_donor(group, group_count);
+                reap = best >= 0 && (size_t)best != self;
+            }
+            free(group);
+        }
+        if (!reap) continue;
+        /* The cap counts candidates that reach git, not directory
+         * entries: the queries plus the delete are the only expensive
+         * part, and bounding them is what keeps a fast proof fast. */
+        attempts++;
+        if (!warm_reapable(entries[i].path)) continue;
+        /* Re-read the stamp now the git queries are done. The pool is
+         * shared by every checkout under this parent, so a sibling lane
+         * can claim this generation while it is examined; if it did, it
+         * moved the mtime out of range. */
+        int64_t touched_again = 0;
+        if (!warm_generation_touched(entries[i].path, &touched_again) ||
+            touched_again != entries[i].touched)
+            continue;
+        /* --force is safe only because detached and clean were just
+         * proven. What it overrides is git's refusal to delete a tree
+         * that still holds untracked files, and a generation's untracked
+         * files are its build scratch. */
+        const char *argv[] = {"git", "worktree", "remove", "--force",
+                              entries[i].path, NULL};
+        char output[1024];
+        (void)git_capture_within(paths->root, argv,
+                                 PROOF_WARM_REMOVE_TIMEOUT_MS, output,
+                                 sizeof(output));
+    }
+    free(entries);
+}
+
+/* Testable wrappers over the warm-start predicates. The ZCL_TESTING
+ * harness proves the donor policy and the link/copy decision against
+ * fixture trees — the refusals (unmarked generation, moved checkout,
+ * live lease) and the publisher semantics (replace, never rewrite in
+ * place) are the safety property, and neither is proven by reading it.
+ * Guarded so the harness (ZCL_TESTING) and the dev binary
+ * (ZCL_DEV_BUILD) compile the same seam; a release build sees none of
+ * it. POSIX-only because the warm start itself lives in the POSIX arm
+ * above. */
+#if defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)
+bool zcl_dev_proof_warm_tag(const char *name)
+{
+    return warm_tag_name(name);
+}
+
+enum zcl_dev_proof_warm_seed_class zcl_dev_proof_warm_classify(
+    const char *rel, bool is_reg)
+{
+    switch (warm_classify_rel(rel, is_reg)) {
+    case WARM_SEED_LINK: return ZCL_DEV_PROOF_WARM_LINK;
+    case WARM_SEED_COPY: return ZCL_DEV_PROOF_WARM_COPY;
+    default: break;
+    }
+    return ZCL_DEV_PROOF_WARM_SKIP;
+}
+
+int zcl_dev_proof_warm_pick(const struct zcl_dev_proof_warm_candidate *c,
+                            size_t n)
+{
+    return warm_pick_donor(c, n);
+}
+
+bool zcl_dev_proof_warm_marker_write(const char *generation,
+                                     const char *root, const char *local,
+                                     const char *base, int64_t completed)
+{
+    return warm_marker_write_at(generation, root, local, base, completed);
+}
+
+bool zcl_dev_proof_warm_marker_read(const char *generation,
+                                    char root[PATH_MAX], char local[65],
+                                    char base[65], int64_t *completed)
+{
+    return warm_marker_read(generation, root, local, base, completed);
+}
+
+bool zcl_dev_proof_warm_seed_and_retime(const char *donor_build,
+                                        const char *gen_build,
+                                        const char *gen_src,
+                                        const char *const *changed,
+                                        size_t nchanged,
+                                        struct zcl_dev_proof_warm_stats *stats)
+{
+    char donor_obj[PATH_MAX], gen_obj[PATH_MAX];
+    if (!donor_build || !gen_build || !gen_src || !stats) return false;
+    memset(stats, 0, sizeof(*stats));
+    if (snprintf(donor_obj, sizeof(donor_obj), "%s/obj", donor_build) >=
+            (int)sizeof(donor_obj) ||
+        snprintf(gen_obj, sizeof(gen_obj), "%s/obj", gen_build) >=
+            (int)sizeof(gen_obj))
+        return false;
+    struct warm_seed_accum accum = {0};
+    warm_seed_walk(donor_obj, gen_obj, "obj", &accum);
+    /* Unconditional at seam level; production gates this copy on the
+     * bootstrap-inputs diff in warm_start_generation. */
+    if (!accum.failed) {
+        char donor_zcc[PATH_MAX], gen_zcc[PATH_MAX];
+        struct stat donor_zcc_st;
+        if (snprintf(donor_zcc, sizeof(donor_zcc), "%s/bin/zcc",
+                     donor_build) < (int)sizeof(donor_zcc) &&
+            snprintf(gen_zcc, sizeof(gen_zcc), "%s/bin/zcc", gen_build) <
+                (int)sizeof(gen_zcc) &&
+            lstat(donor_zcc, &donor_zcc_st) == 0 &&
+            S_ISREG(donor_zcc_st.st_mode) &&
+            !S_ISLNK(donor_zcc_st.st_mode) &&
+            dependency_parent_ensure(gen_zcc))
+            warm_seed_file(donor_zcc, gen_zcc, "bin/zcc", WARM_SEED_COPY,
+                           &donor_zcc_st, &accum);
+    }
+    struct timespec seed_stamp = {0}, source_stamp = {0};
+    bool ok = !accum.failed && accum.files > 0 &&
+              warm_retime_outputs(gen_build, &accum, &seed_stamp) &&
+              warm_stamp_after(&seed_stamp, &source_stamp);
+    for (size_t i = 0; ok && changed && i < nchanged; i++) {
+        if (!changed[i]) {
+            ok = false;
+            break;
+        }
+        warm_touch_changed(gen_src, changed[i], &source_stamp, &ok);
+    }
+    if (ok) {
+        stats->files_linked = accum.files;
+        stats->bytes_linked = accum.bytes;
+    } else {
+        warm_seed_rollback(gen_build, &accum);
+    }
+    warm_seed_accum_free(&accum);
+    return ok;
+}
+#endif /* ZCL_DEV_BUILD || ZCL_TESTING */
+
+
 static bool generation_prepare(const struct proof_paths *paths,
                                const char *local,
                                struct platform_ram_scratch_lease *ram_lease,
+                               struct proof_warmstart *warm,
                                char generation[PATH_MAX],
                                char *why, size_t why_len)
 {
@@ -1674,6 +2854,33 @@ static bool generation_prepare(const struct proof_paths *paths,
         proof_why(why, why_len, "proof_generation_not_exact");
         return false;
     }
+    /* Stamp the generation as taken before the slow preparation below.
+     * The .z23p pool is shared by every checkout under this parent, so a
+     * sibling lane's reaper may look at this directory at any moment;
+     * this stamp, not a lock, is what tells it the generation is a
+     * working set rather than abandoned scratch. Reusing a generation
+     * touches only files deep inside it, so without this the directory's
+     * own mtime would keep aging as if idle. Failure is ignored: a missed
+     * stamp costs at worst one premature reap and one recheckout, and
+     * nothing in the reaping path may fail a proof. */
+    const struct timespec taken[2] = {
+        {.tv_nsec = UTIME_OMIT},
+        {.tv_nsec = UTIME_NOW},
+    };
+    (void)utimensat(AT_FDCWD, generation, taken, AT_SYMLINK_NOFOLLOW);
+    /* Warm start is advisory: it fills `warm` for the receipt sidecar and
+     * never fails the prepare. Any refusal inside degrades to the cold
+     * build the proof has always run. */
+    if (warm) {
+        memset(warm, 0, sizeof(*warm));
+        (void)warm_start_generation(paths, parent, generation, local,
+                                    warm);
+    }
+    /* Last, so it can only ever run against a generation that is stamped
+     * and therefore cannot be the thing reclaimed, and so it sits after
+     * every statement that can set `why`. Placed here it has no reachable
+     * way to change what this function returns or reports. */
+    generation_pool_reap(paths, parent, generation);
     return true;
 }
 
@@ -2459,16 +3666,43 @@ static void proof_phase_mark(struct proof_phase_clock *clock, const char *name)
     (void)fclose(out);
 }
 
+/* The warm-start sidecar: what the build reused, in flat grep-able
+ * lines beside the fixed-width receipt. The receipt wire schema is
+ * untouched — additive by a new artifact, not by repurposed fields: the
+ * seal still covers exactly the dimension roots, and old readers ignore
+ * the file. compile_mode is one of built, reused, skipped, failed. */
+static void warm_sidecar_write(const struct proof_paths *paths,
+                               const struct proof_warmstart *warm,
+                               const char *compile_mode,
+                               uint64_t compile_ms)
+{
+    char body[1024];
+    int len = paths && warm && compile_mode
+        ? snprintf(body, sizeof(body),
+                   "%s\nwarm=%d\ndonor=%s\ndonor_local=%s\nfiles_linked=%llu\n"
+                   "bytes_linked=%llu\ncompile_mode=%s\ncompile_ms=%llu\n",
+                   PROOF_WARM_SIDECAR_SCHEMA, warm->armed ? 1 : 0,
+                   warm->armed ? warm->donor : "-",
+                   warm->armed ? warm->donor_local : "-",
+                   (unsigned long long)warm->files_linked,
+                   (unsigned long long)warm->bytes_linked, compile_mode,
+                   (unsigned long long)compile_ms)
+        : -1;
+    if (len > 0 && len < (int)sizeof(body))
+        (void)write_atomic(paths->warmstart, body, (size_t)len, 0400);
+}
 
 /* The remainder of one proof worker, after the immutable generation and the
  * changed set exist. Split out so the heap-resident changed set has exactly
  * one owner and one release point across every refusal below. Takes the
  * phase clock the outer worker already opened so build/capture and the rest
- * of the proof share one cumulative timer. */
+ * of the proof share one cumulative timer, and the warm-start survey filled
+ * by generation_prepare() so the compile dimension can publish it. */
 static bool proof_worker_body(const struct proof_paths *paths,
                               const char *local, const char *base,
                               const char *generation, int64_t started_us,
                               struct proof_phase_clock *phases,
+                              const struct proof_warmstart *warm,
                               const char *const *files, size_t file_count,
                               char *why, size_t why_len)
 {
@@ -2618,20 +3852,39 @@ static bool proof_worker_body(const struct proof_paths *paths,
         proof_phase_mark(phases, "dimension_generated");
         if (compile->selected) {
             char artifact[PATH_MAX];
+            const char *compile_mode = "reused";
+            uint64_t compile_ms = 0;
             int artifact_len = snprintf(artifact, sizeof(artifact),
                                         "%s/build/bin/z23-dev", paths->root);
             if (artifact_len <= 0 || (size_t)artifact_len >= sizeof(artifact) ||
                 !executable_reuse(paths, artifact,
                                   &source_before, compile, NULL, 0)) {
+                compile_mode = "built";
+                int64_t build_us0 = platform_time_monotonic_us();
                 const char *argv[] = {"make", "--no-print-directory", make_jobs,
                                       "build-only", NULL};
                 struct zcl_dev_proof_budget budget = proof_step_budget(
                     paths, "compile", PROOF_COMPILE_DEFAULT_MS);
-                if (!run_dimension(&execution, ZCL_DEV_PROOF_COMPILE, argv,
-                                   compile, false, &budget, why, why_len))
+                bool built = run_dimension(&execution, ZCL_DEV_PROOF_COMPILE,
+                                           argv, compile, false, &budget, why,
+                                           why_len);
+                compile_ms = (uint64_t)((platform_time_monotonic_us() -
+                                         build_us0) / 1000);
+                if (!built) {
+                    warm_sidecar_write(paths, warm, "failed", compile_ms);
                     return false;
+                }
+                /* The build finished for this commit: publish the donor
+                 * marker for the next generation. Best effort: a missing
+                 * marker only costs the next proof a cold build. */
+                (void)warm_marker_write(generation, paths->root, local,
+                                        base);
             }
-        } else unused_dimension(ZCL_DEV_PROOF_COMPILE, compile);
+            warm_sidecar_write(paths, warm, compile_mode, compile_ms);
+        } else {
+            unused_dimension(ZCL_DEV_PROOF_COMPILE, compile);
+            warm_sidecar_write(paths, warm, "skipped", 0);
+        }
         proof_phase_mark(phases, "dimension_compile");
         /* Lint proves the source; the test dimension proves the built
          * runner. Neither feeds the other, so both children are launched
@@ -2807,7 +4060,9 @@ static bool proof_worker(const struct proof_paths *paths,
     if (!worktree_exact(paths->root, local, true, why, why_len)) return false;
     proof_phase_mark(&phases, "worktree_exact_root");
     char generation[PATH_MAX];
-    if (!generation_prepare(paths, local, ram_lease, generation, why, why_len))
+    struct proof_warmstart warm = {0};
+    if (!generation_prepare(paths, local, ram_lease, &warm, generation, why,
+                            why_len))
         return false;
     proof_phase_mark(&phases, "generation_prepare");
     char scratch[PATH_MAX];
@@ -2823,8 +4078,8 @@ static bool proof_worker(const struct proof_paths *paths,
         return false;
     proof_phase_mark(&phases, "changed_files_capture");
     bool ok = proof_worker_body(paths, local, base, generation, started_us,
-                                &phases, changed.files, changed.count, why,
-                                why_len);
+                                &phases, &warm, changed.files, changed.count,
+                                why, why_len);
     zcl_dev_proof_changed_set_release(&changed);
     return ok;
 }

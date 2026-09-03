@@ -1800,6 +1800,7 @@ static int test_ic_merkle_verifier_selects_proof_lane(void)
 }
 
 
+
 static int test_ic_proof_budget_grows_with_groups(void)
 {
     int failures = 0;
@@ -2521,6 +2522,395 @@ static int test_ic_watch_overlay_keeps_its_own_ceiling(void)
     } _test_next:;
     return failures;
 }
+
+/* ── proof generation warm start ──────────────────────────────────────
+ *
+ * Fresh proof generations compile every translation unit because git
+ * stamps every source with the checkout time. The warm start seeds the
+ * new generation's build tree from the newest complete generation for
+ * the same root (hard links for immutable *.o/*.d, a copy for the small
+ * executed wrapper, nothing else) and repairs make's timestamp graph so
+ * exactly the changed set rebuilds. Every fixture below is a
+ * self-contained tree under test-tmp/; nothing here runs a real build. */
+
+static bool pw_read_all(const char *path, char *out, size_t out_size,
+                        size_t *len_out)
+{
+    FILE *f = fopen(path, "rb");
+    size_t n = 0;
+    int c;
+    if (!f || !out || out_size == 0) {
+        if (f) fclose(f);
+        return false;
+    }
+    while ((c = fgetc(f)) != EOF) {
+        if (n + 1 >= out_size) {
+            fclose(f);
+            return false;
+        }
+        out[n++] = (char)c;
+    }
+    if (ferror(f)) {
+        fclose(f);
+        return false;
+    }
+    fclose(f);
+    out[n] = 0;
+    if (len_out) *len_out = n;
+    return true;
+}
+
+static bool pw_stat_ino(const char *path, unsigned long long *ino_out)
+{
+    struct stat st;
+    if (!path || stat(path, &st) != 0) return false;
+    if (ino_out) *ino_out = (unsigned long long)st.st_ino;
+    return true;
+}
+
+static long long pw_mtime_ns(const char *path, bool *ok_out)
+{
+    struct stat st;
+    long long ns = 0;
+    bool ok = path && stat(path, &st) == 0;
+    if (ok) {
+#if defined(__APPLE__)
+        ns = (long long)st.st_mtimespec.tv_sec * 1000000000LL +
+             (long long)st.st_mtimespec.tv_nsec;
+#else
+        ns = (long long)st.st_mtim.tv_sec * 1000000000LL +
+             (long long)st.st_mtim.tv_nsec;
+#endif
+    }
+    if (ok_out) *ok_out = ok;
+    return ns;
+}
+
+static int test_pw_tag_names_pool_entries(void)
+{
+    int failures = 0;
+    TEST("proof warm start: tag predicate admits only generation tags") {
+#if defined(_WIN32)
+        ASSERT(true);
+#else
+        ASSERT(zcl_dev_proof_warm_tag("0b1953e6da8f5d4cbfd25564f3c02f7e"));
+        ASSERT(zcl_dev_proof_warm_tag("00000000000000000000000000000000"));
+        ASSERT(!zcl_dev_proof_warm_tag(NULL));
+        ASSERT(!zcl_dev_proof_warm_tag(""));
+        ASSERT(!zcl_dev_proof_warm_tag("0b1953e6da8f5d4cbfd25564f3c02f7"));
+        ASSERT(!zcl_dev_proof_warm_tag(
+            "0b1953e6da8f5d4cbfd25564f3c02f7e00"));
+        ASSERT(!zcl_dev_proof_warm_tag("0B1953E6DA8F5DCBFD25564F3C02F7E"));
+        ASSERT(!zcl_dev_proof_warm_tag("0b1953e6da8f5d4cbfd25564f3c02f7g"));
+        ASSERT(!zcl_dev_proof_warm_tag("requests"));
+        ASSERT(!zcl_dev_proof_warm_tag("../escape"));
+#endif
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_pw_classify_link_copy_skip(void)
+{
+    int failures = 0;
+    TEST("proof warm start: classifier links outputs, copies wrapper") {
+#if defined(_WIN32)
+        ASSERT(true);
+#else
+        ASSERT(zcl_dev_proof_warm_classify("obj/epochs/e/a.o", true) ==
+               ZCL_DEV_PROOF_WARM_LINK);
+        ASSERT(zcl_dev_proof_warm_classify("obj/epochs/e/a.d", true) ==
+               ZCL_DEV_PROOF_WARM_LINK);
+        ASSERT(zcl_dev_proof_warm_classify("bin/zcc", true) ==
+               ZCL_DEV_PROOF_WARM_COPY);
+        /* Rewritten in place or live: never shared across generations. */
+        ASSERT(zcl_dev_proof_warm_classify("bin/z23-dev", true) ==
+               ZCL_DEV_PROOF_WARM_SKIP);
+        ASSERT(zcl_dev_proof_warm_classify("obj/epochs/e/a.a", true) ==
+               ZCL_DEV_PROOF_WARM_SKIP);
+        ASSERT(zcl_dev_proof_warm_classify("obj/epochs/e/.build-session",
+                                           true) ==
+               ZCL_DEV_PROOF_WARM_SKIP);
+        ASSERT(zcl_dev_proof_warm_classify("obj/epochs/e/.leases/x", true) ==
+               ZCL_DEV_PROOF_WARM_SKIP);
+        ASSERT(zcl_dev_proof_warm_classify("obj/.hidden/x.o", true) ==
+               ZCL_DEV_PROOF_WARM_SKIP);
+        ASSERT(zcl_dev_proof_warm_classify(
+                   "obj/epochs/e/.stale.compile.9/p.o", true) ==
+               ZCL_DEV_PROOF_WARM_SKIP);
+        ASSERT(zcl_dev_proof_warm_classify(".proof-build-complete", true) ==
+               ZCL_DEV_PROOF_WARM_SKIP);
+        ASSERT(zcl_dev_proof_warm_classify("obj/epochs/e/a.o", false) ==
+               ZCL_DEV_PROOF_WARM_SKIP);
+        ASSERT(zcl_dev_proof_warm_classify(NULL, true) ==
+               ZCL_DEV_PROOF_WARM_SKIP);
+        ASSERT(zcl_dev_proof_warm_classify("", true) ==
+               ZCL_DEV_PROOF_WARM_SKIP);
+#endif
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_pw_pick_newest_complete_idle(void)
+{
+    int failures = 0;
+    TEST("proof warm start: donor pick is newest verifiable idle") {
+#if defined(_WIN32)
+        ASSERT(true);
+#else
+        struct zcl_dev_proof_warm_candidate none[1];
+        memset(none, 0, sizeof(none));
+        ASSERT(zcl_dev_proof_warm_pick(NULL, 0) < 0);
+        ASSERT(zcl_dev_proof_warm_pick(none, 0) < 0);
+        struct zcl_dev_proof_warm_candidate two[2];
+        memset(two, 0, sizeof(two));
+        two[0].completed = 100;
+        two[0].touched = 100;
+        two[0].head_ok = true;
+        two[1].completed = 200;
+        two[1].touched = 50;
+        two[1].head_ok = true;
+        ASSERT(zcl_dev_proof_warm_pick(two, 2) == 1);
+        /* A live newest loses to an older idle generation. */
+        two[1].live = true;
+        ASSERT(zcl_dev_proof_warm_pick(two, 2) == 0);
+        two[1].live = false;
+        /* A moved checkout cannot donate even when newest. */
+        two[1].head_ok = false;
+        ASSERT(zcl_dev_proof_warm_pick(two, 2) == 0);
+        two[1].head_ok = true;
+        two[0].live = true;
+        two[1].live = true;
+        ASSERT(zcl_dev_proof_warm_pick(two, 2) < 0);
+        two[0].live = false;
+        two[1].live = false;
+        /* Completion beats recency; recency breaks completion ties;
+         * full ties keep the earlier candidate. */
+        two[0].completed = 200;
+        two[0].touched = 300;
+        two[1].completed = 200;
+        two[1].touched = 50;
+        ASSERT(zcl_dev_proof_warm_pick(two, 2) == 0);
+        two[0].touched = 50;
+        ASSERT(zcl_dev_proof_warm_pick(two, 2) == 0);
+#endif
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_pw_marker_round_trip_and_refusals(void)
+{
+    int failures = 0;
+    TEST("proof warm start: build-complete marker round-trips") {
+#if defined(_WIN32)
+        ASSERT(true);
+#else
+        char root[4096];
+        static const char local[] =
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        static const char base[] =
+            "1111111111111111111111111111111111111111";
+        test_make_tmpdir(root, sizeof(root), "proof_warm", "marker");
+        char gen[4096];
+        ASSERT(snprintf(gen, sizeof(gen), "%s/gen", root) > 0);
+        ASSERT(ic_write(root, "gen/build/.keep", "marker parent\n"));
+        ASSERT(zcl_dev_proof_warm_marker_write(gen, "/fixtures/proof-warm",
+                                               local, base, 1700000000LL));
+        char got_root[4096] = {0}, got_local[65] = {0}, got_base[65] = {0};
+        int64_t completed = 0;
+        ASSERT(zcl_dev_proof_warm_marker_read(gen, got_root, got_local,
+                                              got_base, &completed));
+        ASSERT(strcmp(got_root, "/fixtures/proof-warm") == 0);
+        ASSERT(strcmp(got_local, local) == 0);
+        ASSERT(strcmp(got_base, base) == 0);
+        ASSERT(completed == 1700000000LL);
+        /* Refusals: wrong schema, forged commit, missing file. */
+        ASSERT(ic_write(root, "gen/build/.proof-build-complete",
+                        "bogus-schema\nroot=/x\nlocal=aa\n"));
+        ASSERT(!zcl_dev_proof_warm_marker_read(gen, got_root, got_local,
+                                               got_base, &completed));
+        ASSERT(ic_write(root, "gen/build/.proof-build-complete",
+                        "zcl.proof_build_complete.v1\nroot=/fixtures/"
+                        "proof-warm\nlocal=zzzz\nbase=111111111111111111111"
+                        "11111111111111111111\ncompleted=1700000000\n"));
+        ASSERT(!zcl_dev_proof_warm_marker_read(gen, got_root, got_local,
+                                               got_base, &completed));
+        ASSERT(!zcl_dev_proof_warm_marker_read(NULL, got_root, got_local,
+                                               got_base, &completed));
+        ASSERT(test_rm_rf_recursive(root) == 0);
+#endif
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* The link/copy decision, proven against inodes. Linked outputs share the
+ * donor's inode; the test rebuilds one through staging plus rename (the
+ * epoch publisher's exact semantics) and proves the donor keeps its bytes
+ * and inode. The copied wrapper owns its inode; the test rewrites it in
+ * place and proves the donor is untouched. */
+static int test_pw_seed_links_replaces_and_copies(void)
+{
+    int failures = 0;
+    TEST("proof warm start: seed links, replace and rewrite spare donor") {
+#if defined(_WIN32)
+        ASSERT(true);
+#else
+        char root[4096], donor[4096], gen[4096], gen_src[4096];
+        test_make_tmpdir(root, sizeof(root), "proof_warm", "seed");
+        ASSERT(snprintf(donor, sizeof(donor), "%s/donor/build", root) > 0);
+        ASSERT(snprintf(gen, sizeof(gen), "%s/gen/build", root) > 0);
+        ASSERT(snprintf(gen_src, sizeof(gen_src), "%s/gen", root) > 0);
+        ASSERT(ic_write(root, "donor/build/obj/epochs/E/mod/a.o",
+                        "OBJECT-A-V1"));
+        ASSERT(ic_write(root, "donor/build/obj/epochs/E/mod/a.d", "DEP-A"));
+        ASSERT(ic_write(root, "donor/build/obj/epochs/E/sub/b.o",
+                        "OBJECT-B-V1!"));
+        ASSERT(ic_write(root, "donor/build/bin/zcc", "WRAPPER-V1"));
+        /* Decoys the seed must never touch: live state, crash staging,
+         * in-place outputs, and the product binary. */
+        ASSERT(ic_write(root, "donor/build/obj/epochs/E/.build-session",
+                        "SESSION"));
+        ASSERT(ic_write(root, "donor/build/obj/epochs/E/.leases/L1",
+                        "LEASE"));
+        ASSERT(ic_write(root,
+                        "donor/build/obj/epochs/E/.stale.compile.9/p.o",
+                        "PARTIAL"));
+        ASSERT(ic_write(root, "donor/build/obj/epochs/E/mod/tool",
+                        "BINARY"));
+        ASSERT(ic_write(root, "donor/build/obj/epochs/E/mod/lib.a",
+                        "ARCHIVE"));
+        ASSERT(ic_write(root, "donor/build/obj/.hidden/x.o", "HIDDEN"));
+        ASSERT(ic_write(root, "donor/build/bin/z23-dev", "PRODUCT"));
+        ASSERT(ic_write(root, "gen/src/changed.c",
+                        "int changed(void){return 1;}\n"));
+        ASSERT(ic_write(root, "gen/src/same.c", "int same(void){return 0;}\n"));
+        static const char *const changed[] = {"src/changed.c"};
+        struct zcl_dev_proof_warm_stats stats = {0};
+        ASSERT(zcl_dev_proof_warm_seed_and_retime(donor, gen, gen_src,
+                                                  changed, 1, &stats));
+        ASSERT(stats.files_linked == 4);
+        ASSERT(stats.bytes_linked == strlen("OBJECT-A-V1") +
+               strlen("DEP-A") + strlen("OBJECT-B-V1!") +
+               strlen("WRAPPER-V1"));
+        char gen_a_o[4096], donor_a_o[4096], gen_zcc[4096], donor_zcc[4096];
+        ASSERT(snprintf(gen_a_o, sizeof(gen_a_o),
+                        "%s/obj/epochs/E/mod/a.o", gen) > 0);
+        ASSERT(snprintf(donor_a_o, sizeof(donor_a_o),
+                        "%s/obj/epochs/E/mod/a.o", donor) > 0);
+        ASSERT(snprintf(gen_zcc, sizeof(gen_zcc), "%s/bin/zcc", gen) > 0);
+        ASSERT(snprintf(donor_zcc, sizeof(donor_zcc), "%s/bin/zcc",
+                        donor) > 0);
+        unsigned long long gen_a_ino = 0, donor_a_ino = 0;
+        unsigned long long gen_zcc_ino = 0, donor_zcc_ino = 0;
+        ASSERT(pw_stat_ino(gen_a_o, &gen_a_ino));
+        ASSERT(pw_stat_ino(donor_a_o, &donor_a_ino));
+        ASSERT(gen_a_ino == donor_a_ino);
+        ASSERT(pw_stat_ino(gen_zcc, &gen_zcc_ino));
+        ASSERT(pw_stat_ino(donor_zcc, &donor_zcc_ino));
+        ASSERT(gen_zcc_ino != donor_zcc_ino);
+        char buf[64];
+        ASSERT(pw_read_all(gen_zcc, buf, sizeof(buf), NULL));
+        ASSERT(strcmp(buf, "WRAPPER-V1") == 0);
+        /* Decoys never arrive. */
+        char probe[4096];
+        static const char *const absent[] = {
+            "obj/epochs/E/.build-session",
+            "obj/epochs/E/.leases/L1",
+            "obj/epochs/E/.stale.compile.9/p.o",
+            "obj/epochs/E/mod/tool",
+            "obj/epochs/E/mod/lib.a",
+            "obj/.hidden/x.o",
+            "bin/z23-dev",
+        };
+        for (size_t i = 0; i < sizeof(absent) / sizeof(absent[0]); i++) {
+            ASSERT(snprintf(probe, sizeof(probe), "%s/%s", gen,
+                            absent[i]) > 0);
+            ASSERT(access(probe, F_OK) != 0);
+        }
+        /* Timestamp graph: changed is newer than the seeds, untouched
+         * sources are older. */
+        bool ok = false;
+        char changed_c[4096], same_c[4096];
+        ASSERT(snprintf(changed_c, sizeof(changed_c), "%s/src/changed.c",
+                        gen_src) > 0);
+        ASSERT(snprintf(same_c, sizeof(same_c), "%s/src/same.c",
+                        gen_src) > 0);
+        long long seed_ns = pw_mtime_ns(gen_a_o, &ok);
+        ASSERT(ok);
+        long long changed_ns = pw_mtime_ns(changed_c, &ok);
+        ASSERT(ok);
+        long long same_ns = pw_mtime_ns(same_c, &ok);
+        ASSERT(ok);
+        ASSERT(changed_ns > seed_ns);
+        ASSERT(seed_ns > same_ns);
+        /* Publisher semantics: rebuild through staging plus rename. The
+         * donor keeps its bytes and its inode; the new object diverges. */
+        ASSERT(ic_write(root, "gen/build/obj/epochs/E/mod/a.o.new",
+                        "OBJECT-A-V2"));
+        char gen_a_new[4096];
+        ASSERT(snprintf(gen_a_new, sizeof(gen_a_new),
+                        "%s/obj/epochs/E/mod/a.o.new", gen) > 0);
+        ASSERT(rename(gen_a_new, gen_a_o) == 0);
+        ASSERT(pw_read_all(donor_a_o, buf, sizeof(buf), NULL));
+        ASSERT(strcmp(buf, "OBJECT-A-V1") == 0);
+        ASSERT(pw_stat_ino(donor_a_o, &donor_a_ino));
+        ASSERT(pw_stat_ino(gen_a_o, &gen_a_ino));
+        ASSERT(gen_a_ino != donor_a_ino);
+        ASSERT(pw_read_all(gen_a_o, buf, sizeof(buf), NULL));
+        ASSERT(strcmp(buf, "OBJECT-A-V2") == 0);
+        /* Copy semantics: rewrite the new wrapper in place. The donor
+         * keeps its bytes on its own inode. */
+        FILE *rewrite = fopen(gen_zcc, "r+b");
+        ASSERT(rewrite != NULL);
+        ASSERT(fwrite("MUTATED!!!", 1, strlen("MUTATED!!!"), rewrite) ==
+               strlen("MUTATED!!!"));
+        ASSERT(fclose(rewrite) == 0);
+        ASSERT(pw_read_all(donor_zcc, buf, sizeof(buf), NULL));
+        ASSERT(strcmp(buf, "WRAPPER-V1") == 0);
+        ASSERT(pw_stat_ino(donor_zcc, &donor_zcc_ino));
+        ASSERT(pw_stat_ino(gen_zcc, &gen_zcc_ino));
+        ASSERT(gen_zcc_ino != donor_zcc_ino);
+        ASSERT(test_rm_rf_recursive(root) == 0);
+#endif
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_pw_seed_cold_without_seedables(void)
+{
+    int failures = 0;
+    TEST("proof warm start: seed refuses empty donors") {
+#if defined(_WIN32)
+        ASSERT(true);
+#else
+        char root[4096], donor[4096], gen[4096], gen_src[4096];
+        test_make_tmpdir(root, sizeof(root), "proof_warm", "cold");
+        ASSERT(snprintf(donor, sizeof(donor), "%s/donor/build", root) > 0);
+        ASSERT(snprintf(gen, sizeof(gen), "%s/gen/build", root) > 0);
+        ASSERT(snprintf(gen_src, sizeof(gen_src), "%s/gen", root) > 0);
+        ASSERT(ic_write(root, "donor/build/obj/epochs/E/tool", "BINARY"));
+        ASSERT(ic_write(root, "gen/src/same.c", "int same(void){return 0;}\n"));
+        struct zcl_dev_proof_warm_stats stats = {0};
+        ASSERT(!zcl_dev_proof_warm_seed_and_retime(donor, gen, gen_src,
+                                                   NULL, 0, &stats));
+        ASSERT(stats.files_linked == 0);
+        char probe[4096];
+        ASSERT(snprintf(probe, sizeof(probe), "%s/obj/epochs/E/tool",
+                        gen) > 0);
+        ASSERT(access(probe, F_OK) != 0);
+        ASSERT(!zcl_dev_proof_warm_seed_and_retime(NULL, gen, gen_src, NULL,
+                                                   0, &stats));
+        ASSERT(test_rm_rf_recursive(root) == 0);
+#endif
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_impact_composition(void)
 {
     int failures = 0;
@@ -2547,6 +2937,12 @@ int test_impact_composition(void)
     failures += test_ic_proof_wait_reports_settled_failure();
     failures += test_ic_cycle_reuse_requires_exact_proof_inputs();
     failures += test_ic_native_compositor_selects_physical_proof();
+    failures += test_pw_tag_names_pool_entries();
+    failures += test_pw_classify_link_copy_skip();
+    failures += test_pw_pick_newest_complete_idle();
+    failures += test_pw_marker_round_trip_and_refusals();
+    failures += test_pw_seed_links_replaces_and_copies();
+    failures += test_pw_seed_cold_without_seedables();
     failures += test_ic_fast_sync_splits_keep_proof_lane();
     failures += test_ic_merkle_verifier_selects_proof_lane();
     failures += test_ic_proof_budget_grows_with_groups();

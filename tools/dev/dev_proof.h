@@ -7,9 +7,14 @@
 #include "dev_proof_receipt.h"
 #include "vcs/build_action.h"
 
+#include <limits.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+
+#ifndef PATH_MAX
+#define PATH_MAX 4096
+#endif
 
 enum zcl_dev_proof_state {
     ZCL_DEV_PROOF_STATE_INVALID = -1,
@@ -127,5 +132,57 @@ bool zcl_dev_proof_test_build_test_selector(
  * every execvp()'d test child) without driving a full proof cycle. */
 bool zcl_dev_proof_test_stress_env_prepare(char *why, size_t why_len);
 #endif
+
+/* Warm-start survey types. Inert data, declared unconditionally so every
+ * compilation of dev_proof.c sees the same layout; only the seam
+ * functions below are macro-gated. */
+enum zcl_dev_proof_warm_seed_class {
+    ZCL_DEV_PROOF_WARM_SKIP = 0,
+    ZCL_DEV_PROOF_WARM_LINK,
+    ZCL_DEV_PROOF_WARM_COPY,
+};
+
+struct zcl_dev_proof_warm_candidate {
+    char tag[33];
+    char path[PATH_MAX];
+    char local[65];
+    int64_t completed;
+    int64_t touched;
+    bool head_ok;
+    bool live;
+};
+
+struct zcl_dev_proof_warm_stats {
+    uint64_t files_linked;
+    uint64_t bytes_linked;
+};
+
+#if defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)
+/* Warm-start test seam. The harness proves the donor policy and the
+ * link/copy decision against fixture trees; the dev binary compiles the
+ * same seam. A release build sees none of it. POSIX-only, like the
+ * warm-start machinery itself. */
+bool zcl_dev_proof_warm_tag(const char *name);
+enum zcl_dev_proof_warm_seed_class zcl_dev_proof_warm_classify(
+    const char *rel, bool is_reg);
+int zcl_dev_proof_warm_pick(const struct zcl_dev_proof_warm_candidate *c,
+                            size_t n);
+bool zcl_dev_proof_warm_marker_write(const char *generation,
+                                     const char *root, const char *local,
+                                     const char *base, int64_t completed);
+bool zcl_dev_proof_warm_marker_read(const char *generation,
+                                    char root[PATH_MAX], char local[65],
+                                    char base[65], int64_t *completed);
+/* Seed donor_build/{obj,bin/zcc} into gen_build and repair the timestamp
+ * graph so exactly `changed` (relative to gen_src) reads newer than the
+ * seeds. The wrapper copy is unconditional here; production gates it on
+ * the bootstrap-inputs diff. */
+bool zcl_dev_proof_warm_seed_and_retime(const char *donor_build,
+                                        const char *gen_build,
+                                        const char *gen_src,
+                                        const char *const *changed,
+                                        size_t nchanged,
+                                        struct zcl_dev_proof_warm_stats *stats);
+#endif /* ZCL_DEV_BUILD || ZCL_TESTING */
 
 #endif
