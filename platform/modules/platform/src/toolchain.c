@@ -176,6 +176,20 @@ bool platform_toolchain_commons_architecture_flag(char *out, size_t cap)
 #endif
 }
 
+bool platform_toolchain_commons_deployment_flag(char *out, size_t cap)
+{
+    if (!out || cap == 0)
+        return false;
+    out[0] = '\0';
+#if defined(__APPLE__)
+    int n = snprintf(out, cap, "-mmacosx-version-min=%s",
+                     ZCL_MACOS_DEPLOYMENT_TARGET);
+    return n > 0 && (size_t)n < cap;
+#else
+    return true;
+#endif
+}
+
 const char *platform_toolchain_commons_feature_macros(void)
 {
 #if defined(__APPLE__)
@@ -189,8 +203,12 @@ const char *platform_toolchain_commons_flags_quick(void)
 {
     static _Thread_local char buf[256];
     char arch[128];
+    char deployment[64];
     if (!platform_toolchain_commons_architecture_flag(arch, sizeof(arch)))
         arch[0] = '\0';
+    if (!platform_toolchain_commons_deployment_flag(
+            deployment, sizeof(deployment)))
+        deployment[0] = '\0';
 #if defined(__linux__)
     /* Preserve the historical Linux V2 flags string byte-for-byte so existing
      * receipts and gates keep the same identity. */
@@ -200,11 +218,11 @@ const char *platform_toolchain_commons_flags_quick(void)
                    "-ffile-prefix-map=SOURCE=. -c");
 #elif defined(__APPLE__)
     (void)snprintf(buf, sizeof(buf),
-                   "-std=c23 -O1 %s -mmacosx-version-min=%s "
+                   "-std=c23 -O1 %s %s "
                    "-fno-omit-frame-pointer "
                    "-D_POSIX_C_SOURCE=200809L -D_DARWIN_C_SOURCE "
                    "-ffile-prefix-map=SOURCE=. -c",
-                   arch[0] ? arch : "", ZCL_MACOS_DEPLOYMENT_TARGET);
+                   arch[0] ? arch : "", deployment);
 #else
     buf[0] = '\0';
 #endif
@@ -215,8 +233,12 @@ const char *platform_toolchain_commons_flags_standard_base(void)
 {
     static _Thread_local char buf[256];
     char arch[128];
+    char deployment[64];
     if (!platform_toolchain_commons_architecture_flag(arch, sizeof(arch)))
         arch[0] = '\0';
+    if (!platform_toolchain_commons_deployment_flag(
+            deployment, sizeof(deployment)))
+        deployment[0] = '\0';
 #if defined(__linux__)
     (void)snprintf(buf, sizeof(buf),
                    "-std=c23 -O1 -march=x86-64 -mtune=generic "
@@ -224,11 +246,11 @@ const char *platform_toolchain_commons_flags_standard_base(void)
                    "-ffile-prefix-map=SOURCE=. -Wall -Wextra -Werror");
 #elif defined(__APPLE__)
     (void)snprintf(buf, sizeof(buf),
-                   "-std=c23 -O1 %s -mmacosx-version-min=%s "
+                   "-std=c23 -O1 %s %s "
                    "-fno-omit-frame-pointer "
                    "-D_POSIX_C_SOURCE=200809L -D_DARWIN_C_SOURCE "
                    "-ffile-prefix-map=SOURCE=. -Wall -Wextra -Werror",
-                   arch[0] ? arch : "", ZCL_MACOS_DEPLOYMENT_TARGET);
+                   arch[0] ? arch : "", deployment);
 #else
     buf[0] = '\0';
 #endif

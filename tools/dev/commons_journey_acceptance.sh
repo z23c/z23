@@ -1932,13 +1932,22 @@ cj_zdog_turn_faster_edit() {
 # another node's datadir.
 cj_build_zdog_probe() {
     local node="$1" src="$2" dd="$3" out="$4"
+    local fatal_link_warning=""
     cj_on "$node" test -f "$dd/zcode/installed/$CJ_ZPRNG_ROOT/lib/libzprng.a" ||
         cj_die "node $node has no admitted zprng artifact to link the probe against"
+    # A Darwin package object whose LC_BUILD_VERSION exceeds the declared
+    # deployment floor still links, but Apple ld warns. Make that warning a
+    # real acceptance failure: the build receipt's flags must describe the
+    # bytes a downstream application actually consumes.
+    if [ "$(cj_on "$node" uname -s)" = Darwin ]; then
+        fatal_link_warning="-Wl,-fatal_warnings"
+    fi
     cj_on "$node" cc -std=c23 -O1 \
         -I"$src/include" \
         -I"$dd/zcode/installed/$CJ_ZPRNG_ROOT/include" \
         "$src/app/turnrate.c" "$src/src/zdogfight.c" "$src/src/zdogfix.c" \
         "$dd/zcode/installed/$CJ_ZPRNG_ROOT/lib/libzprng.a" \
+        ${fatal_link_warning:+"$fatal_link_warning"} \
         -o "$out"
 }
 

@@ -109,6 +109,9 @@ int test_platform_toolchain(void)
     PT_CHECK("Commons architecture flag rejects NULL output",
              !platform_toolchain_commons_architecture_flag(
                  NULL, sizeof(arch)));
+    PT_CHECK("Commons deployment flag rejects NULL output",
+             !platform_toolchain_commons_deployment_flag(
+                 NULL, sizeof(arch)));
 
 #if defined(__APPLE__) && (defined(__arm64__) || defined(__aarch64__))
     PT_CHECK("Darwin arm64 target is receipt-stable",
@@ -121,6 +124,10 @@ int test_platform_toolchain(void)
     PT_CHECK("Darwin Commons architecture floor is exact",
              platform_toolchain_commons_architecture_flag(
                  arch, sizeof(arch)) && strcmp(arch, "-march=armv8-a") == 0);
+    PT_CHECK("Darwin Commons deployment floor is an executable flag",
+             platform_toolchain_commons_deployment_flag(
+                 arch, sizeof(arch)) &&
+             strcmp(arch, "-mmacosx-version-min=14.0") == 0);
     PT_CHECK("Darwin Commons feature macro is exact",
              strcmp(platform_toolchain_commons_feature_macros(),
                     "-D_DARWIN_C_SOURCE") == 0);
@@ -161,6 +168,9 @@ int test_platform_toolchain(void)
              platform_toolchain_commons_architecture_flag(
                  arch, sizeof(arch)) &&
              strcmp(arch, "-march=x86-64 -mtune=generic") == 0);
+    PT_CHECK("Linux Commons has no separate deployment flag",
+             platform_toolchain_commons_deployment_flag(
+                 arch, sizeof(arch)) && arch[0] == '\0');
     PT_CHECK("Linux Commons feature macro set is empty",
              platform_toolchain_commons_feature_macros()[0] == '\0');
     PT_CHECK("Linux quick flags preserve their receipt identity",

@@ -1226,6 +1226,7 @@ struct pv_compile_args {
     const char *argv[192];
     char source_prefix_map[4300];
     char arch_flag[128]; /* platform-specific architecture flag(s) */
+    char deployment_flag[64]; /* platform release floor, when required */
     char inc[8][4200];   /* -I args */
     char dep[PV_EMIT_MAX_DEPS][2100]; /* -I args for locked dependencies */
     char def[64][80];    /* -D args */
@@ -1263,6 +1264,11 @@ static size_t pv_compile_argv(struct pv_compile_args *store,
             p = end;
         }
     }
+    if (!platform_toolchain_commons_deployment_flag(
+            store->deployment_flag, sizeof(store->deployment_flag)))
+        store->deployment_flag[0] = '\0';
+    if (store->deployment_flag[0])
+        store->argv[n++] = store->deployment_flag;
     store->argv[n++] = "-fno-omit-frame-pointer";
     /* The frozen package API surface is Linux POSIX.1-2008. Keep standalone
      * builds on that declared surface rather than accidentally compiling only

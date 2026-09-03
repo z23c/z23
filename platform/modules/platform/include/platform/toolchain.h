@@ -59,6 +59,11 @@ bool platform_toolchain_architecture_flag(char *out, size_t cap);
  * the native architecture baseline. */
 bool platform_toolchain_commons_architecture_flag(char *out, size_t cap);
 
+/* Return the platform release flag that every Commons package compile must
+ * actually receive. Empty where the target has no separate release floor;
+ * Darwin returns the same macOS minimum encoded in build receipts. */
+bool platform_toolchain_commons_deployment_flag(char *out, size_t cap);
+
 /* Return the archive creation flags for this platform.  GNU ar supports the
  * deterministic "D" flag; Apple ar does not, so macOS uses plain "rcs" and
  * relies on the caller to handle determinism if needed. */
