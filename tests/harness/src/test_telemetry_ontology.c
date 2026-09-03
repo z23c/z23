@@ -295,6 +295,42 @@ static int check_json_surface(void)
     return failures;
 }
 
+/* The public wrapper telemetry_ontology_dump_state_json delegates to
+ * telemetry_ontology_json; pinned here directly so the wrapper — the
+ * documented entry point for "adding state introspection" — cannot drift
+ * from the internal it fronts. One function per TEST, as the harness's
+ * hardcoded `goto _test_next` requires. */
+static int check_dump_state_json_wrapper_subsystem(void)
+{
+    int failures = 0;
+    TEST("ontology: dump_state_json mirrors the internal by subsystem key") {
+        struct json_value out = {0};
+        json_init(&out);
+        ASSERT(telemetry_ontology_dump_state_json(&out, "peer_lifecycle"));
+        const char *schema = json_get_str(json_get(&out, "schema"));
+        ASSERT(schema && strcmp(schema, "zcl.telemetry_ontology.v1") == 0);
+        const struct json_value *fields = json_get(&out, "fields");
+        ASSERT(fields && json_size(fields) >= 1);
+        json_free(&out);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int check_dump_state_json_wrapper_full(void)
+{
+    int failures = 0;
+    TEST("ontology: dump_state_json with no key dumps the whole table") {
+        struct json_value out = {0};
+        json_init(&out);
+        ASSERT(telemetry_ontology_dump_state_json(&out, NULL));
+        ASSERT(json_get_int(json_get(&out, "field_rows_total")) >= 1);
+        json_free(&out);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_telemetry_ontology(void)
 {
     int failures = 0;
@@ -303,5 +339,7 @@ int test_telemetry_ontology(void)
     failures += check_evaluator();
     failures += check_discovery_index();
     failures += check_json_surface();
+    failures += check_dump_state_json_wrapper_subsystem();
+    failures += check_dump_state_json_wrapper_full();
     return failures;
 }
