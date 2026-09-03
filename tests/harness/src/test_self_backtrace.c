@@ -9,10 +9,13 @@
 #include "test/test_core.h"
 #include "json/json.h"
 #include "util/self_backtrace.h"
+#include "util/async_safe_write.h"
 #include "util/thread_registry.h"
 #include "util/util.h"          /* SetDataDir */
 
 #include <errno.h>
+#include <fcntl.h>
+#include <limits.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stdatomic.h>
@@ -275,13 +278,127 @@ static int t_platform_available(void)
 
 #endif
 
+/* ── asw_* fd codecs (util/async_safe_write.c) ────────────────────────
+ *
+ * These are the bytes the crash handler puts on the terminal, so their
+ * exact output is the contract: lowercase hex with no 0x prefix, plain
+ * unsigned decimal, and verbatim strings. Each writer returns the number
+ * of bytes it handed to write(2). Each case reads back what actually
+ * landed in a pipe, so a wrong byte count and wrong bytes cannot cancel
+ * out. One function per TEST, as the harness's hardcoded
+ * `goto _test_next` requires. Pure and hermetic: no clock, no RNG,
+ * no filesystem. */
+static int t_asw_hex_vector(void)
+{
+    int failures = 0;
+    TEST("asw_write_hex: known vector is lowercase, unprefixed, byte-counted") {
+        int fds[2];
+        ASSERT_EQ(pipe(fds), 0);
+        ASSERT_EQ(asw_write_hex(fds[1], 0xdeadbeefUL), 8);
+        char buf[32] = {0};
+        ASSERT_EQ(read(fds[0], buf, sizeof(buf) - 1), 8);
+        ASSERT_STR_EQ(buf, "deadbeef");
+        close(fds[0]);
+        close(fds[1]);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int t_asw_hex_boundary(void)
+{
+    int failures = 0;
+    TEST("asw_write_hex: 0 and the full-width maximum are exact") {
+        int fds[2];
+        ASSERT_EQ(pipe(fds), 0);
+        ASSERT_EQ(asw_write_hex(fds[1], 0UL), 1);
+        ASSERT_EQ(asw_write_hex(fds[1], ULONG_MAX), 16);
+        char buf[32] = {0};
+        ASSERT_EQ(read(fds[0], buf, 1 + 16), 17);
+        ASSERT_STR_EQ(buf, "0ffffffffffffffff");
+        close(fds[0]);
+        close(fds[1]);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int t_asw_uint(void)
+{
+    int failures = 0;
+    TEST("asw_write_uint: 0, a mid value, and ULONG_MAX are exact decimal") {
+        int fds[2];
+        ASSERT_EQ(pipe(fds), 0);
+        ASSERT_EQ(asw_write_uint(fds[1], 0UL), 1);
+        ASSERT_EQ(asw_write_uint(fds[1], 12345UL), 5);
+        ASSERT_EQ(asw_write_uint(fds[1], ULONG_MAX), 20);
+        char buf[40] = {0};
+        ASSERT_EQ(read(fds[0], buf, 1 + 5 + 20), 26);
+        ASSERT_STR_EQ(buf, "01234518446744073709551615");
+        close(fds[0]);
+        close(fds[1]);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int t_asw_str(void)
+{
+    int failures = 0;
+    TEST("asw_write_str: writes the string verbatim and counts its bytes") {
+        int fds[2];
+        ASSERT_EQ(pipe(fds), 0);
+        ASSERT_EQ(asw_write_str(fds[1], "segfault"), 8);
+        char buf[32] = {0};
+        ASSERT_EQ(read(fds[0], buf, sizeof(buf) - 1), 8);
+        ASSERT_STR_EQ(buf, "segfault");
+        close(fds[0]);
+        close(fds[1]);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int t_asw_str_empty(void)
+{
+    int failures = 0;
+    TEST("asw_write_str: empty and NULL write nothing, return 0, no failure") {
+        int fds[2];
+        ASSERT_EQ(pipe(fds), 0);
+        ASSERT_EQ(fcntl(fds[0], F_SETFL, O_NONBLOCK), 0);
+        ASSERT_EQ(asw_write_str(fds[1], ""), 0);
+        ASSERT_EQ(asw_write_str(fds[1], NULL), 0);
+        char buf[8] = {0};
+        errno = 0;
+        ASSERT_EQ(read(fds[0], buf, sizeof(buf) - 1), -1);  /* pipe stayed empty */
+        ASSERT_EQ(errno, EAGAIN);
+        close(fds[0]);
+        close(fds[1]);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int t_asw_codecs(void)
+{
+    int failures = 0;
+    failures += t_asw_hex_vector();
+    failures += t_asw_hex_boundary();
+    failures += t_asw_uint();
+    failures += t_asw_str();
+    failures += t_asw_str_empty();
+    return failures;
+}
+
 int test_self_backtrace(void)
 {
     printf("\n=== self_backtrace tests ===\n");
+    int failures = t_asw_codecs();
 #if defined(__linux__)
-    return t_platform_available();
+    failures += t_platform_available();
 #else
     printf("self_backtrace: signal-driven dump unavailable on this host\n");
-    return t_platform_unavailable();
+    failures += t_platform_unavailable();
 #endif
+    return failures;
 }
