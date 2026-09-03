@@ -60,6 +60,34 @@ static bool cvf_source_id_shape_valid(const char *source_id)
     return true;
 }
 
+/* One function per TEST, as the harness's hardcoded `goto _test_next`
+ * requires. */
+static int t_commit_getter_exact(void)
+{
+    int failures = 0;
+    TEST("zcl_build_commit_full: returns exactly \"external\", NUL-terminated") {
+        const char *full = zcl_build_commit_full();
+        ASSERT(full != NULL);
+        ASSERT_STR_EQ(full, "external");
+        ASSERT_EQ(strlen(full), 8);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int t_commit_getter_stable(void)
+{
+    int failures = 0;
+    TEST("zcl_build_commit_full: answer is stable across calls") {
+        const char *a = zcl_build_commit_full();
+        const char *b = zcl_build_commit_full();
+        ASSERT(a != NULL && b != NULL);
+        ASSERT_STR_EQ(a, b);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_clientversion_format(void)
 {
     int failures = 0;
@@ -316,6 +344,15 @@ int test_clientversion_format(void)
         CVF_CHECK("out_size=1 does not clobber adjacent canary byte",
                   guarded.canary == 0xCD);
     }
+
+    /* ── zcl_build_commit_full ──────────────────────────────────────────
+     *
+     * The sovereign executable deliberately carries no baked Git commit:
+     * its exact bytes are the receipt authority, so the display getter
+     * answers "external" — and must keep answering exactly that, since
+     * version reporters compare it verbatim. */
+    failures += t_commit_getter_exact();
+    failures += t_commit_getter_stable();
 
     return failures;
 }
