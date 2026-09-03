@@ -605,7 +605,9 @@ ZCL_HOST_EXEEXT = $(if $(ZCL_HOST_WINDOWS),.exe,)
 ZCLASSIC23_BIN = $(BIN_DIR)/z23$(ZCL_HOST_EXEEXT)
 ZCLASSIC23_DEV_BIN = $(BIN_DIR)/z23-dev$(ZCL_HOST_EXEEXT)
 # Unshippable compiler-speed artifact. `make ship` / `make deploy` refuse it.
-# The hyphenated z23-dev name remains the sibling watch-loop alias.
+# The hyphenated z23-dev name remains the sibling watch-loop alias, installed
+# as a regular hard link: dev proof opens z23-dev with O_NOFOLLOW, which
+# refuses a symlink with ELOOP.
 Z23_DEV_UNSHIPPABLE_BIN = $(BIN_DIR)/z23.dev$(ZCL_HOST_EXEEXT)
 ZCLASSIC23_BIN_ALIAS = $(BIN_DIR)/zclassic23$(ZCL_HOST_EXEEXT)
 ZCLASSIC23_DEV_BIN_ALIAS = $(BIN_DIR)/zclassic23-dev$(ZCL_HOST_EXEEXT)
@@ -4101,8 +4103,8 @@ $(Z23_DEV_UNSHIPPABLE_BIN): $(DEV_CANDIDATE_BIN) FORCE
 	@echo "dev: $@ <= $(DEV_CANDIDATE_BIN) (non-LTO, -g1, unstripped; not for release/deploy)"
 
 $(ZCLASSIC23_DEV_BIN): $(Z23_DEV_UNSHIPPABLE_BIN)
-	@$(if $(ZCL_HOST_WINDOWS),cp -f "$<" "$@",ln -sfn z23.dev "$@")
-	@echo "dev-bin: $@ <= $< (watch-loop alias of unsippable z23.dev)"
+	@$(if $(ZCL_HOST_WINDOWS),cp -f "$<" "$@",ln -f "$<" "$@")
+	@echo "dev-bin: $@ <= $< (hard-link watch-loop alias of unsippable z23.dev; regular file for O_NOFOLLOW proof open)"
 
 $(DEV_CANDIDATE_BIN): $(VIEW_GEN_HEADERS) $(BUILD_IDENTITY_STAMP) $(DEV_OBJ_COMPLETE) | $(VENDOR_LIBS)
 	@mkdir -p $(dir $@)

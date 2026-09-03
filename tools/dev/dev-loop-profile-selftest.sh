@@ -74,6 +74,11 @@ git -C "$ROOT" grep -q 'Z23_DEV_UNSHIPPABLE_BIN = \$(BIN_DIR)/z23.dev' -- Makefi
     fail 'unsippable compiler-speed binary name z23.dev is missing'
 git -C "$ROOT" grep -q '^dev: \$(Z23_DEV_UNSHIPPABLE_BIN)' -- Makefile ||
     fail 'make dev does not produce the unsippable z23.dev artifact'
+git -C "$ROOT" grep -qF 'ln -f "$<" "$@"' -- Makefile ||
+    fail 'z23-dev is not installed as a regular hard link of z23.dev'
+if git -C "$ROOT" grep -qF 'ln -sfn z23.dev' -- Makefile; then
+    fail 'z23-dev is a symlink: dev proof opens it with O_NOFOLLOW (ELOOP)'
+fi
 git -C "$ROOT" grep -q 'ship: REFUSE: ZCL_PROFILE=dev' -- Makefile ||
     fail 'make ship does not refuse the dev profile'
 git -C "$ROOT" grep -q 'deploy: REFUSE: ZCL_PROFILE=dev' -- Makefile ||

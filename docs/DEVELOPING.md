@@ -287,7 +287,9 @@ The compiler-speed loop is `make dev` or `ZCL_PROFILE=dev make`. It writes
 `build/bin/z23.dev` — a name `make ship` and `make deploy` refuse — into its
 own epoch under `build/dev-obj/`. Release objects stay in `build/node-obj/`
 with `-flto` unchanged. The hyphenated `build/bin/z23-dev` remains a
-watch-loop alias of that unsippable file.
+watch-loop alias of that unsippable file, installed as a regular hard link —
+never a symlink: the dev proof executor opens `z23-dev` with `O_NOFOLLOW`,
+which refuses a symlinked proof executable with `ELOOP`.
 
 On this host (32 cores, GCC 14.2, existing `~/.cache/zcc`, `make -j8`):
 
