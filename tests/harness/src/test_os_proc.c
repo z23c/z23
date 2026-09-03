@@ -92,6 +92,27 @@ int test_os_proc(void)
                      age < (int64_t)10 * 365 * 24 * 3600);
     }
 
+    /* ── stable process-birth identity ───────────────────────────── */
+    {
+        uint64_t first = 0, second = 0;
+        uint64_t self = os_proc_current_pid();
+        OSPROC_CHECK("current pid is nonzero", self != 0);
+        OSPROC_CHECK("current process start token resolves",
+                     os_proc_pid_start_token(self, &first));
+        OSPROC_CHECK("current process start token is nonzero", first != 0);
+        OSPROC_CHECK("start token is stable across repeated reads",
+                     os_proc_pid_start_token(self, &second) &&
+                     second == first);
+        OSPROC_CHECK("start token refuses pid zero",
+                     !os_proc_pid_start_token(0, &second));
+        OSPROC_CHECK("start token refuses a NULL output",
+                     !os_proc_pid_start_token(self, NULL));
+#if defined(__APPLE__)
+        OSPROC_CHECK("Darwin start token refuses a non-pid_t value",
+                     !os_proc_pid_start_token(UINT32_MAX, &second));
+#endif
+    }
+
     /* ── exe path ─────────────────────────────────────────────────── */
     {
         char path[4096];

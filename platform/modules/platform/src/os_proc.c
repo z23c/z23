@@ -184,6 +184,19 @@ bool os_proc_pid_start_token(uint64_t pid, uint64_t *token)
     char *end = NULL; unsigned long long value = strtoull(p, &end, 10);
     if (!end || (end == p)) return false;
     *token = (uint64_t)value; return true;
+#elif defined(__APPLE__)
+    if (pid > INT_MAX) return false;
+    struct proc_bsdinfo info = {0};
+    int bytes = proc_pidinfo((int)pid, PROC_PIDTBSDINFO, 0, &info,
+                             (int)sizeof(info));
+    if (bytes != (int)sizeof(info) || info.pbi_pid != (uint32_t)pid ||
+        info.pbi_start_tvusec >= UINT64_C(1000000) ||
+        info.pbi_start_tvsec >
+            (UINT64_MAX - info.pbi_start_tvusec) / UINT64_C(1000000))
+        return false;
+    *token = info.pbi_start_tvsec * UINT64_C(1000000) +
+             info.pbi_start_tvusec;
+    return *token != 0;
 #else
     (void)pid; return false;
 #endif

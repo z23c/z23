@@ -74,9 +74,9 @@ ACCEPT="tools/scripts/macos_acceptance.sh"
 MATRIX="engine/composition/platform/macos_capabilities.def"
 CATALOG="tools/dev/test_group_catalog.def"
 RELEASE_CUTTER="platform/packaging/release/build_release.sh"
-# The union is a closed acceptance contract: 32 capability-evidence groups
+# The union is a closed acceptance contract: 33 capability-evidence groups
 # plus eight required platform-baseline groups.  A floor would miss deletions.
-EXPECTED_GROUPS=40
+EXPECTED_GROUPS=41
 
 macos_make_target_reachable() {
     local makefile="${1:-Makefile}"

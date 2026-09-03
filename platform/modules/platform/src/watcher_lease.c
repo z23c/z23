@@ -165,6 +165,9 @@ static bool make_stop(const char nonce[65], char out[320], HANDLE *event)
 #include <poll.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#if defined(__APPLE__)
+#include <libproc.h>
+#endif
 
 static bool root_identity(const char *path, uint64_t *volume, uint64_t *low,
                           uint64_t *high)
@@ -178,13 +181,30 @@ static bool root_identity(const char *path, uint64_t *volume, uint64_t *low,
 static uint64_t parent_pid(void) { return (uint64_t)getppid(); }
 static bool parent_matches(const struct watcher_record *record)
 {
-    char image[WL_PATH], proc[64]; struct stat st;
+    char image[WL_PATH];
+#if defined(__APPLE__)
+    if (record->creator_pid > INT_MAX) return false;
+    struct proc_bsdinfo info = {0};
+    int bytes = proc_pidinfo((int)record->creator_pid, PROC_PIDTBSDINFO, 0,
+                             &info, (int)sizeof(info));
+    return parent_pid() == record->creator_pid &&
+           bytes == (int)sizeof(info) &&
+           info.pbi_pid == (uint32_t)record->creator_pid &&
+           info.pbi_uid == geteuid() &&
+           os_proc_pid_exe_path(record->creator_pid, image, sizeof(image)) &&
+           strcmp(image, record->parent_image) == 0;
+#elif defined(__linux__)
+    char proc[64]; struct stat st;
     int n = snprintf(proc, sizeof(proc), "/proc/%llu",
                      (unsigned long long)record->creator_pid);
     return parent_pid() == record->creator_pid && n > 0 && n < (int)sizeof(proc) &&
            stat(proc, &st) == 0 && st.st_uid == geteuid() &&
            os_proc_pid_exe_path(record->creator_pid, image, sizeof(image)) &&
            strcmp(image, record->parent_image) == 0;
+#else
+    (void)record; (void)image;
+    return false;
+#endif
 }
 static bool io_exact(int fd, void *data, size_t size, bool writing)
 {
@@ -226,6 +246,7 @@ bool platform_watcher_launch_prepare(struct platform_watcher_launch *launch,
 {
     uint8_t hash_bytes[32];
     if (!launch || launch->inherited_read != UINTPTR_MAX ||
+        !root || !image || !hash ||
         !zcl_hex_decode_lower(hash, hash_bytes, sizeof(hash_bytes)))
         return false;
     struct watcher_record record = {0};
@@ -259,10 +280,21 @@ bool platform_watcher_launch_prepare(struct platform_watcher_launch *launch,
     launch->inherited_read = (uintptr_t)read_handle;
     launch->private_write = (uintptr_t)write_handle; launch->stop_native = (uintptr_t)event;
 #else
-    int pipefd[2]; int stop = -1;
-    if (pipe(pipefd) != 0 || fcntl(pipefd[0], F_SETFD, 0) != 0 ||
-        fcntl(pipefd[1], F_SETFD, FD_CLOEXEC) != 0 ||
-        !make_stop(record.nonce, launch->stop_locator, &stop)) return false;
+    int pipefd[2] = {-1, -1}; int stop = -1;
+    bool ready = pipe(pipefd) == 0 &&
+                 fcntl(pipefd[0], F_SETFD, 0) == 0 &&
+                 fcntl(pipefd[1], F_SETFD, FD_CLOEXEC) == 0 &&
+                 make_stop(record.nonce, launch->stop_locator, &stop);
+    if (!ready) {
+        if (pipefd[0] >= 0) close(pipefd[0]);
+        if (pipefd[1] >= 0) close(pipefd[1]);
+        if (stop >= 0) close(stop);
+        if (launch->stop_locator[0]) {
+            (void)unlink(launch->stop_locator);
+            launch->stop_locator[0] = 0;
+        }
+        return false;
+    }
     launch->inherited_read = (uintptr_t)pipefd[0];
     launch->private_write = (uintptr_t)pipefd[1]; launch->stop_native = (uintptr_t)stop;
 #endif
@@ -290,6 +322,10 @@ bool platform_watcher_launch_publish(struct platform_watcher_launch *launch)
     bool ok = io_exact((int)launch->private_write, record,
                        sizeof(*record), true);
     close((int)launch->private_write);
+    if (!ok && launch->stop_locator[0]) {
+        (void)unlink(launch->stop_locator);
+        launch->stop_locator[0] = 0;
+    }
 #endif
     launch->private_write = UINTPTR_MAX; memset(record, 0, sizeof(*record));
     free(record); launch->record_native = UINTPTR_MAX; return ok;
@@ -306,6 +342,8 @@ void platform_watcher_launch_close(struct platform_watcher_launch *launch)
     if (launch->inherited_read != UINTPTR_MAX) close((int)launch->inherited_read);
     if (launch->private_write != UINTPTR_MAX) close((int)launch->private_write);
     if (launch->stop_native != UINTPTR_MAX) close((int)launch->stop_native);
+    if (launch->record_native != UINTPTR_MAX && launch->stop_locator[0])
+        (void)unlink(launch->stop_locator);
 #endif
     if (launch->record_native != UINTPTR_MAX) {
         struct watcher_record *record = (struct watcher_record *)launch->record_native;

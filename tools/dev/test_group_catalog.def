@@ -1182,15 +1182,14 @@ ZCL_TEST_GROUP(file_ops_copy)
 ZCL_TEST_GROUP(boot_refusal_identity)
 ZCL_TEST_GROUP(boot_shutdown_marker_persistence)
 ZCL_TEST_GROUP(replay_receipt_root)
-/* dev-loop watcher lane: the two probe programs that arrived under
- * platform/modules/platform/tests with NO reader at all -- no windows_acceptance.mk row,
- * no Makefile rule, not in platform/modules/platform/zcode-package.json. Both have real
- * POSIX arms, so unlike the Windows-refusal set they execute here. These are
- * the only groups that drive platform/modules/platform/src/directory_watcher.c (inotify
- * arm) and platform/modules/platform/src/watcher_record.c at all: every production caller
- * of the watcher family sits behind #if defined(_WIN32). */
+/* Dev-loop watcher lane: directory_watcher and watcher_record rehome the two
+ * native probe programs that arrived with no reader. watcher_lease adds the
+ * parent/child launch-capability path that previously ran only in the Windows
+ * acceptance program. Together they directly drive the directory watcher,
+ * watcher-record codec, and authenticated launch lifecycle on native hosts. */
 ZCL_TEST_GROUP(directory_watcher)
 ZCL_TEST_GROUP(watcher_record)
+ZCL_TEST_GROUP(watcher_lease)
 /* astro lane: platform/modules/astro's exact fixed-grid arithmetic and the birth chart
  * built on it. The determinism cases are the point — a chart another node
  * recomputes must match bit for bit, so the group asserts that property by

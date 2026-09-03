@@ -1653,6 +1653,8 @@ int main(int argc, char **argv)
     failures += test_hw_profile();
     { extern int test_platform_toolchain(void);
       failures += test_platform_toolchain(); }
+    { extern int test_watcher_lease(void);
+      failures += test_watcher_lease(); }
     failures += test_hw_bench();
     failures += test_log_level();
     failures += test_operator_ux();
