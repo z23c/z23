@@ -102,6 +102,8 @@ static int selftest_child(int argc, wchar_t **argv)
               wcscmp(argv[3], L"trailing\\") == 0 &&
               GetConsoleWindow() == NULL &&
               private_desktop &&
+              GetPriorityClass(GetCurrentProcess()) ==
+                  BELOW_NORMAL_PRIORITY_CLASS &&
               (mode & Z23_HEADLESS_ERROR_MODE) == Z23_HEADLESS_ERROR_MODE &&
               IsProcessInJob(GetCurrentProcess(), NULL, &in_job) && in_job;
     fwprintf(stdout, L"headless-selftest:%ls\n", ok ? L"ok" : L"failed");
@@ -178,11 +180,14 @@ int wmain(int argc, wchar_t **argv)
             NULL, NULL);
     HANDLE job = CreateJobObjectW(NULL, NULL);
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits = {0};
-    limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    limits.BasicLimitInformation.LimitFlags =
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_PRIORITY_CLASS;
+    limits.BasicLimitInformation.PriorityClass = BELOW_NORMAL_PRIORITY_CLASS;
     bool job_ok = job && SetInformationJobObject(
         job, JobObjectExtendedLimitInformation, &limits, sizeof(limits));
     PROCESS_INFORMATION process = {0};
     DWORD flags = CREATE_NO_WINDOW | CREATE_SUSPENDED |
+                  BELOW_NORMAL_PRIORITY_CLASS |
                   CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT;
     bool started = attributes_ok && job_ok && desktop && CreateProcessW(
         argv[6], line, NULL, NULL, TRUE, flags, NULL, argv[2],

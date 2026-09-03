@@ -41,7 +41,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
-#ifndef _WIN32
+#if defined(_WIN32)
+#include <direct.h>
+#else
 #include <sys/wait.h>
 #endif
 #include <unistd.h>
@@ -1902,12 +1904,24 @@ static int case_receipt_chain(void)
     receipt_unlink(mut);
 
     {
-        char nested[600];
-        (void)snprintf(nested, sizeof(nested), "%s/not-a-dir", path);
+        char directory[600];
+        (void)snprintf(directory, sizeof(directory), "%s.directory", path);
+        receipt_unlink(directory);
+#if defined(_WIN32)
+        const int made_directory = _mkdir(directory);
+#else
+        const int made_directory = mkdir(directory, 0700);
+#endif
+        EN_CHECK("created the unreadable chain fixture", made_directory == 0);
         EN_CHECK("an unreadable path is not an empty chain",
-                 !engine_receipt_verify_chain(nested, &report));
+                 !engine_receipt_verify_chain(directory, &report));
         EN_CHECK("and an append to it is refused",
-                 !engine_receipt_append(nested, &a, NULL));
+                 !engine_receipt_append(directory, &a, NULL));
+#if defined(_WIN32)
+        (void)_rmdir(directory);
+#else
+        (void)rmdir(directory);
+#endif
     }
 
 #ifndef _WIN32

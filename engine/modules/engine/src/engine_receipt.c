@@ -17,6 +17,9 @@
 #include "base/log_macros.h"
 #include "json/json.h"
 #include "sha3/sha3.h"
+#if defined(_WIN32)
+#include "platform/windows_path.h"
+#endif
 
 #include <errno.h>
 #include <fcntl.h>
@@ -25,11 +28,33 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-/* The Windows CRT does not expose O_CLOEXEC. Same zero fallback as
- * engine_secret.c: descriptors wrap non-inheritable handles there. */
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <io.h>
+#include <windows.h>
+#endif
+
+/* POSIX descriptors use close-on-exec. Windows uses _O_NOINHERIT and binary
+ * mode in receipt_open(), because text translation would change hashed bytes. */
 #ifndef O_CLOEXEC
 #define O_CLOEXEC 0
 #endif
+
+static int receipt_open(const char *path, int flags, int mode)
+{
+#if defined(_WIN32)
+    wchar_t wide[32768];
+    if (!platform_windows_wide_path(path, wide)) {
+        errno = EINVAL;
+        return -1;
+    }
+    return _wopen(wide, flags | _O_BINARY | _O_NOINHERIT, mode);
+#else
+    return open(path, flags | O_CLOEXEC, mode);
+#endif
+}
 
 static const char *or_empty(const char *s)
 {
@@ -44,14 +69,57 @@ static void sha3_hex(const char *data, size_t len, char out[65])
     out[64] = '\0';
 }
 
-/* Exclusive lock covering the tail-read and the single append write, so two
- * units cannot both hash the same last line. F_SETLKW is a record lock on
- * this fd; close() also drops it. */
-static int ledger_lock(int fd, short type)
+/* A whole-file lock covers the tail-read and single append write, so two units
+ * cannot both hash the same last line. Closing the descriptor also drops it. */
+#if defined(_WIN32)
+static int ledger_lock(int fd, bool exclusive)
+{
+    intptr_t raw = _get_osfhandle(fd);
+    if (raw == -1) {
+        errno = EBADF;
+        return -1;
+    }
+    OVERLAPPED overlap;
+    memset(&overlap, 0, sizeof(overlap));
+    DWORD flags = LOCKFILE_FAIL_IMMEDIATELY |
+                  (exclusive ? LOCKFILE_EXCLUSIVE_LOCK : 0);
+    for (;;) {
+        if (LockFileEx((HANDLE)raw, flags, 0, MAXDWORD, MAXDWORD, &overlap))
+            return 0;
+        DWORD error = GetLastError();
+        if (error == ERROR_LOCK_VIOLATION) {
+            Sleep(10);
+            continue;
+        }
+        errno = error == ERROR_INVALID_HANDLE ? EBADF
+              : error == ERROR_ACCESS_DENIED ? EACCES : EIO;
+        return -1;
+    }
+}
+
+static int ledger_unlock(int fd)
+{
+    intptr_t raw = _get_osfhandle(fd);
+    if (raw == -1) {
+        errno = EBADF;
+        return -1;
+    }
+    OVERLAPPED overlap;
+    memset(&overlap, 0, sizeof(overlap));
+    if (!UnlockFileEx((HANDLE)raw, 0, MAXDWORD, MAXDWORD, &overlap)) {
+        DWORD error = GetLastError();
+        errno = error == ERROR_INVALID_HANDLE ? EBADF
+              : error == ERROR_ACCESS_DENIED ? EACCES : EIO;
+        return -1;
+    }
+    return 0;
+}
+#else
+static int ledger_lock(int fd, bool exclusive)
 {
     struct flock fl;
     memset(&fl, 0, sizeof(fl));
-    fl.l_type = type;
+    fl.l_type = exclusive ? F_WRLCK : F_RDLCK;
     fl.l_whence = SEEK_SET;
     fl.l_start = 0;
     fl.l_len = 0;
@@ -72,6 +140,7 @@ static int ledger_unlock(int fd)
     fl.l_len = 0;
     return fcntl(fd, F_SETLK, &fl);
 }
+#endif
 
 static bool head_path_of(const char *path, char *out, size_t cap)
 {
@@ -91,7 +160,7 @@ static bool write_head_pin(const char *path, const char *sha3_hex)
     char hpath[4096];
     if (!head_path_of(path, hpath, sizeof(hpath)))
         LOG_FAIL("engine_receipt", "head path for %s is too long", path);
-    const int fd = open(hpath, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+    const int fd = receipt_open(hpath, O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (fd < 0)
         LOG_FAIL("engine_receipt", "cannot write the head pin for %s", path);
     char buf[65];
@@ -111,7 +180,7 @@ static int read_head_pin(const char *path, char out[65])
     char hpath[4096];
     if (!head_path_of(path, hpath, sizeof(hpath)))
         LOG_ERR("engine_receipt", "head path for %s is too long", path);
-    const int fd = open(hpath, O_RDONLY | O_CLOEXEC);
+    const int fd = receipt_open(hpath, O_RDONLY, 0);
     if (fd < 0) {
         if (errno == ENOENT)
             return 0;
@@ -134,10 +203,14 @@ static int read_head_pin(const char *path, char out[65])
     return 1;
 }
 
-static void close_locked(int fd)
+static void close_locked(int fd, const char *path)
 {
-    (void)ledger_unlock(fd);
-    (void)close(fd);
+    if (ledger_unlock(fd) != 0)
+        LOG_WARN("engine_receipt", "cannot unlock %s: %s", path,
+                 strerror(errno));
+    if (close(fd) != 0)
+        LOG_WARN("engine_receipt", "cannot close %s: %s", path,
+                 strerror(errno));
 }
 
 /* Read the last complete line of the already-open, already-locked ledger
@@ -301,10 +374,10 @@ bool engine_receipt_append(const char *path, const struct engine_receipt *r,
     /* O_RDWR because this same fd must read the tail; O_APPEND so the one
      * write(2) cannot overwrite earlier records even if the lock is lost.
      * The lock then makes the tail-read and that write one critical section. */
-    const int fd = open(path, O_RDWR | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
+    const int fd = receipt_open(path, O_RDWR | O_CREAT | O_APPEND, 0644);
     if (fd < 0)
         LOG_FAIL("engine_receipt", "cannot open %s for append", path);
-    if (ledger_lock(fd, F_WRLCK) != 0) {
+    if (ledger_lock(fd, true) != 0) {
         (void)close(fd);
         LOG_FAIL("engine_receipt", "cannot lock %s for append", path);
     }
@@ -313,7 +386,7 @@ bool engine_receipt_append(const char *path, const struct engine_receipt *r,
     const int have = read_last_line_fd(fd, path, last,
                                        ENGINE_RECEIPT_LINE_MAX + 1u);
     if (have < 0) {
-        close_locked(fd);
+        close_locked(fd, path);
         return false;
     }
 
@@ -331,24 +404,24 @@ bool engine_receipt_append(const char *path, const struct engine_receipt *r,
     char line[ENGINE_RECEIPT_LINE_MAX + 2u];
     size_t len = 0;
     if (!build_line(r, prev, line, ENGINE_RECEIPT_LINE_MAX, &len)) {
-        close_locked(fd);
+        close_locked(fd, path);
         return false;
     }
 
     line[len] = '\n';
     const ssize_t wrote = write(fd, line, len + 1u);
     if (wrote != (ssize_t)(len + 1u)) {
-        close_locked(fd);
+        close_locked(fd, path);
         LOG_FAIL("engine_receipt", "short write appending to %s", path);
     }
 
     char hex[65];
     sha3_hex(line, len, hex);
     if (!write_head_pin(path, hex)) {
-        close_locked(fd);
+        close_locked(fd, path);
         return false;
     }
-    close_locked(fd);
+    close_locked(fd, path);
     if (out_line_sha3)
         memcpy(out_line_sha3, hex, 65);
     return true;
@@ -365,7 +438,7 @@ bool engine_receipt_verify_chain(const char *path,
     if (!path || !path[0])
         LOG_FAIL("engine_receipt", "verify needs a path");
 
-    const int fd = open(path, O_RDONLY | O_CLOEXEC);
+    const int fd = receipt_open(path, O_RDONLY, 0);
     if (fd < 0) {
         if (errno != ENOENT)
             LOG_FAIL("engine_receipt", "cannot open %s to verify", path);
@@ -382,13 +455,13 @@ bool engine_receipt_verify_chain(const char *path,
         }
         return true;          /* no file is an empty chain, not a broken one */
     }
-    if (ledger_lock(fd, F_RDLCK) != 0) {
+    if (ledger_lock(fd, false) != 0) {
         (void)close(fd);
         LOG_FAIL("engine_receipt", "cannot lock %s to verify", path);
     }
     FILE *f = fdopen(fd, "rb");
     if (!f) {
-        close_locked(fd);
+        close_locked(fd, path);
         LOG_FAIL("engine_receipt", "cannot read %s to verify", path);
     }
 
@@ -480,7 +553,11 @@ bool engine_receipt_verify_chain(const char *path,
         }
     }
 
-    (void)ledger_unlock(fd);
-    (void)fclose(f);
+    if (ledger_unlock(fd) != 0)
+        LOG_WARN("engine_receipt", "cannot unlock %s after verify: %s", path,
+                 strerror(errno));
+    if (fclose(f) != 0)
+        LOG_WARN("engine_receipt", "cannot close %s after verify: %s", path,
+                 strerror(errno));
     return ok;
 }

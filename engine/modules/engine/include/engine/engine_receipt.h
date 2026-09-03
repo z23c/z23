@@ -134,10 +134,11 @@ struct engine_receipt {
 
 /* Append one record to `path`, creating the file when absent.
  *
- * One fd is opened O_RDWR|O_CREAT|O_APPEND|O_CLOEXEC. An fcntl exclusive
- * lock then covers the tail-read and a single write(2) of the whole record
- * (JSON + '\n'), so two processes cannot both hash the same last line and
- * a record cannot tear into two write(2)s that another unit interleaves.
+ * One fd is opened O_RDWR|O_CREAT|O_APPEND|O_CLOEXEC. An OS whole-file
+ * exclusive lock (fcntl on POSIX, LockFileEx on Windows) then covers the
+ * tail-read and a single write of the whole record (JSON + '\n'), so two
+ * processes cannot both hash the same last line and a record cannot tear into
+ * two writes that another unit interleaves.
  * The SHA3 of the line just written is stored in `path` plus
  * ENGINE_RECEIPT_HEAD_SUFFIX. Returns false on any refusal — an unreadable
  * path (anything but a missing or empty file), a torn tail, a record that

@@ -118,8 +118,10 @@ if ($DryRun) {
     exit 0
 }
 
-# Keep every ordinary build/test process in the native kill-on-close Job
-# Object and error-dialog suppression boundary. A fresh checkout bootstraps
+# Keep every ordinary build/test process at below-normal CPU priority in the
+# native kill-on-close Job Object and error-dialog suppression boundary. This
+# lets browsers and interactive work preempt vibe-coding builds while builds
+# still use otherwise-idle CPU. A fresh checkout bootstraps
 # the tiny C23 launcher directly once; subsequent invocations rebuild it only
 # when one of its two sources is newer. This prevents Ctrl-C or a backend
 # crash from leaving orphaned make/cc1 processes and WER popups behind.
