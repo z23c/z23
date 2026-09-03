@@ -204,6 +204,47 @@ int test_supervisor(void)
         supervisor_unregister(idb);
     }
 
+    /* ── unregister keeps every surviving id valid ──────────────────
+     * The file-service restart pattern (register wkr, server, manifest;
+     * retire server, manifest, wkr; start again) used to orphan the
+     * manifest entry: unregister moved the last child into the freed
+     * slot, so the moved owner's cached id went stale, its retire
+     * missed, and the next start failed with a duplicate-name FAIL.
+     * Retire a MIDDLE child, retire the moved one by its (unchanged)
+     * id, then re-register the same name: it must succeed, and the
+     * survivor must still answer on its original id. */
+    supervisor_reset_for_testing();
+    {
+        static struct liveness_contract ra, rb, rc;
+        liveness_contract_init(&ra, "re.a");
+        liveness_contract_init(&rb, "re.b");
+        liveness_contract_init(&rc, "re.c");
+
+        supervisor_child_id ida = supervisor_register(&ra);
+        supervisor_child_id idb = supervisor_register(&rb);
+        supervisor_child_id idc = supervisor_register(&rc);
+        SUP_CHECK("re-register pattern: three registered",
+            ida >= 0 && idb >= 0 && idc >= 0);
+
+        supervisor_unregister(idb);
+        supervisor_unregister(idc);
+        /* The survivor answers on its original id (no silent move). */
+        supervisor_tick(ida);
+        SUP_CHECK("survivor keeps its id after a middle unregister",
+            atomic_load(&ra.ticks_run) == 1u);
+
+        static struct liveness_contract rc2;
+        liveness_contract_init(&rc2, "re.c");
+        supervisor_child_id idc2 = supervisor_register(&rc2);
+        SUP_CHECK("retired name re-registers cleanly (no duplicate FAIL)",
+            idc2 >= 0);
+
+        supervisor_unregister(ida);
+        supervisor_unregister(idc2);
+        SUP_CHECK("registry drains back to empty",
+            supervisor_child_headroom() == SUPERVISOR_CAP);
+    }
+
     /* ── registry capacity ───────────────────────────────────────── */
     supervisor_reset_for_testing();
     {

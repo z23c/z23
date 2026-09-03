@@ -197,21 +197,41 @@ static supervisor_child_id supervisor_register_locked(
     supervisor_domain_t *domain, struct liveness_contract *c)
 {
     if (!c) return SUPERVISOR_INVALID_ID;
-    if (g_contract_count >= SUPERVISOR_CAP) {
-        fprintf(stderr,  // obs-ok:pre-existing-diagnostic
-            "[supervisor] FAIL register '%s': registry full (cap=%d)\n",
-            c->name, SUPERVISOR_CAP);
-        return SUPERVISOR_INVALID_ID;
-    }
-    /* Reject duplicate name (helps tests + catches double-registers). */
+    /* Single pass: reject a live duplicate name (helps tests + catches
+     * double-registers) while remembering the first retired slot.
+     * Retired (NULL) slots are skipped, never matched. */
+    int free_slot = -1;
     for (int i = 0; i < g_contract_count; i++) {
+        if (g_contracts[i] == NULL) {
+            if (free_slot < 0)
+                free_slot = i;
+            continue;
+        }
         if (strncmp(g_contracts[i]->name, c->name, SUPERVISOR_NAME_MAX) == 0) {
             fprintf(stderr,  // obs-ok:pre-existing-diagnostic
                 "[supervisor] FAIL register '%s': duplicate name\n", c->name);
             return SUPERVISOR_INVALID_ID;
         }
     }
-    int id = g_contract_count++;
+    /* Reuse the first retired slot so restart cycles never grow the
+     * table. Ids of live children never move: the old swap-remove
+     * relocated the last child into the freed slot, invalidating the
+     * id cached in that child's owner (thread_liveness_child.id) — the
+     * moved entry could never be retired again (orphaned registration
+     * printing duplicate-name FAILs on every restart) and a stale id
+     * could retire the wrong slot. */
+    int id;
+    if (free_slot >= 0) {
+        id = free_slot;
+    } else {
+        if (g_contract_count >= SUPERVISOR_CAP) {
+            fprintf(stderr,  // obs-ok:pre-existing-diagnostic
+                "[supervisor] FAIL register '%s': registry full (cap=%d)\n",
+                c->name, SUPERVISOR_CAP);
+            return SUPERVISOR_INVALID_ID;
+        }
+        id = g_contract_count++;
+    }
     g_contracts[id] = c;
     g_contract_domains[id] = domain;
     return id;
@@ -268,15 +288,14 @@ void supervisor_unregister(supervisor_child_id id)
         pthread_mutex_unlock(&g_lock);
         return;
     }
-    /* Compact: move last into the freed slot. Note: this changes the
-     * effective id of the last child. Unregister is rare (test teardown
-     * + shutdown), so we accept the rename rather than holding zombie
-     * slots. */
-    g_contracts[id] = g_contracts[g_contract_count - 1];
-    g_contract_domains[id] = g_contract_domains[g_contract_count - 1];
-    g_contracts[g_contract_count - 1] = NULL;
-    g_contract_domains[g_contract_count - 1] = NULL;
-    g_contract_count--;
+    /* Tombstone: clear this slot in place and leave every other id
+     * untouched. Ids are cached in child owners
+     * (thread_liveness_child.id) and MUST never move — see register
+     * above for what swap-remove broke. Retired slots are reused by
+     * register, so restart cycles are allocation-stable; the count is
+     * a high-water mark, and live-entry queries count non-NULL slots. */
+    g_contracts[id] = NULL;
+    g_contract_domains[id] = NULL;
     pthread_mutex_unlock(&g_lock);
 }
 
@@ -466,10 +485,22 @@ int supervisor_progress_undeclared_count(void)
     return n;
 }
 
+/* Live-entry count under the registry lock. g_contract_count is a
+ * high-water mark (retired slots tombstone to NULL and are reused),
+ * so every "how many children" query counts non-NULL slots. */
+static int supervisor_live_count_locked(void)
+{
+    int n = 0;
+    for (int i = 0; i < g_contract_count; i++)
+        if (g_contracts[i] != NULL)
+            n++;
+    return n;
+}
+
 int supervisor_child_headroom(void)
 {
     pthread_mutex_lock(&g_lock);
-    int used = g_contract_count;
+    int used = supervisor_live_count_locked();
     pthread_mutex_unlock(&g_lock);
     int left = SUPERVISOR_CAP - used;
     return left > 0 ? left : 0;
@@ -1066,7 +1097,7 @@ const char *supervisor_active_callback_name(void)
 int supervisor_child_count_total(void)
 {
     pthread_mutex_lock(&g_lock);
-    int n = g_contract_count;
+    int n = supervisor_live_count_locked();
     pthread_mutex_unlock(&g_lock);
     return n;
 }
@@ -1086,33 +1117,38 @@ int supervisor_snapshot_all(struct supervisor_snapshot *out, int max)
     if (!out || max <= 0) return 0;
     int64_t now = platform_time_monotonic_us();
     pthread_mutex_lock(&g_lock);
-    int n = g_contract_count;
-    if (n > max) n = max;
-    for (int i = 0; i < n; i++) {
+    /* Dense live-only snapshot: retired (NULL) slots are skipped, so a
+     * recently restarted subsystem never appears twice and never faults
+     * the dereference below. */
+    int n = 0;
+    for (int i = 0; i < g_contract_count && n < max; i++) {
         const struct liveness_contract *c = g_contracts[i];
-        memset(&out[i], 0, sizeof(out[i]));
-        memcpy(out[i].name, c->name, sizeof(out[i].name));
-        out[i].parent           = c->parent;
+        if (!c)
+            continue;
+        memset(&out[n], 0, sizeof(out[n]));
+        memcpy(out[n].name, c->name, sizeof(out[n].name));
+        out[n].parent           = c->parent;
         int64_t lt              = atomic_load(&c->last_tick_us);
-        out[i].last_tick_age_us = now - lt;
-        out[i].progress_marker  = atomic_load(&c->progress_marker);
-        out[i].period_secs      = atomic_load(&c->period_secs);
-        out[i].period_us        = atomic_load(&c->period_us);
-        out[i].deadline_secs    = atomic_load(&c->deadline_secs);
-        out[i].completed        = atomic_load(&c->completed);
-        out[i].stall_reason     = atomic_load(&c->stall_reason);
-        out[i].progress_policy  = (int)effective_progress_policy(c);
-        out[i].progress_max_quiet_us =
+        out[n].last_tick_age_us = now - lt;
+        out[n].progress_marker  = atomic_load(&c->progress_marker);
+        out[n].period_secs      = atomic_load(&c->period_secs);
+        out[n].period_us        = atomic_load(&c->period_us);
+        out[n].deadline_secs    = atomic_load(&c->deadline_secs);
+        out[n].completed        = atomic_load(&c->completed);
+        out[n].stall_reason     = atomic_load(&c->stall_reason);
+        out[n].progress_policy  = (int)effective_progress_policy(c);
+        out[n].progress_max_quiet_us =
                                   atomic_load(&c->progress_max_quiet_us);
-        memcpy(out[i].progress_exempt_reason, c->progress_exempt_reason,
-               sizeof(out[i].progress_exempt_reason));
-        out[i].ticks_run        = atomic_load(&c->ticks_run);
-        out[i].idle_ticks       = atomic_load(&c->idle_ticks);
-        out[i].stall_fires      = atomic_load(&c->stall_fires);
-        out[i].restart_count    = atomic_load(&c->restart_count);
-        out[i].restart_policy   = atomic_load(&c->restart_policy);
-        out[i].worker_state     = atomic_load(&c->worker_state);
-        out[i].restarts_in_window = atomic_load(&c->restarts_in_window);
+        memcpy(out[n].progress_exempt_reason, c->progress_exempt_reason,
+               sizeof(out[n].progress_exempt_reason));
+        out[n].ticks_run        = atomic_load(&c->ticks_run);
+        out[n].idle_ticks       = atomic_load(&c->idle_ticks);
+        out[n].stall_fires      = atomic_load(&c->stall_fires);
+        out[n].restart_count    = atomic_load(&c->restart_count);
+        out[n].restart_policy   = atomic_load(&c->restart_policy);
+        out[n].worker_state     = atomic_load(&c->worker_state);
+        out[n].restarts_in_window = atomic_load(&c->restarts_in_window);
+        n++;
     }
     pthread_mutex_unlock(&g_lock);
     return n;
@@ -1270,6 +1306,8 @@ bool supervisor_domain_dump_state_json(supervisor_domain_t *domain,
     int n = 0;
     pthread_mutex_lock(&g_lock);
     for (int i = 0; i < g_contract_count && n < SUPERVISOR_CAP; i++) {
+        if (g_contracts[i] == NULL)
+            continue; /* retired slot: never counted, never dumped */
         bool match = root ? (g_contract_domains[i] == NULL)
                           : (g_contract_domains[i] == domain);
         if (match) snap[n++] = g_contracts[i];
