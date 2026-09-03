@@ -44,3 +44,8 @@ Linux paste targets did not accept that clipboard flavor. The corrected path
 advertises `image/png` first and retains BMP as fallback. The in-memory PNG
 encoder has independent signature, chunk, CRC, stored-DEFLATE, short-buffer,
 and RGB/RGBA round-trip coverage; `test_test_png_writer` passed 1/1 group.
+
+The corrected live readback advertised both `image/png` and `image/bmp`. An
+independent request for `image/png` returned `2,285,718` bytes beginning with
+the exact PNG signature and an IHDR declaring width `1120`, height `680`,
+8-bit samples, and RGB color type `2`.
