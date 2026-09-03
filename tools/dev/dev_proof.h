@@ -173,10 +173,11 @@ bool zcl_dev_proof_warm_marker_write(const char *generation,
 bool zcl_dev_proof_warm_marker_read(const char *generation,
                                     char root[PATH_MAX], char local[65],
                                     char base[65], int64_t *completed);
-/* Seed donor_build/{obj,bin/zcc} into gen_build and repair the timestamp
- * graph so exactly `changed` (relative to gen_src) reads newer than the
- * seeds. The wrapper copy is unconditional here; production gates it on
- * the bootstrap-inputs diff. */
+/* Seed donor_build into gen_build (object and depfile outputs linked,
+ * wrapper copied, everything else skipped) and repair the timestamp graph
+ * so exactly `changed` (relative to gen_src) reads newer than the seeds.
+ * The wrapper copy is unconditional here; production gates it on the
+ * bootstrap-inputs diff. */
 bool zcl_dev_proof_warm_seed_and_retime(const char *donor_build,
                                         const char *gen_build,
                                         const char *gen_src,

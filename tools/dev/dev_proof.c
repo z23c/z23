@@ -2353,18 +2353,19 @@ static bool warm_start_generation(const struct proof_paths *paths,
     if (!warm_donor_scan(parent, paths->root, generation, &donor))
         return false;
     char donor_build[PATH_MAX], gen_build[PATH_MAX];
-    char donor_obj[PATH_MAX], gen_obj[PATH_MAX];
     if (snprintf(donor_build, sizeof(donor_build), "%s/build", donor.path) >=
             (int)sizeof(donor_build) ||
         snprintf(gen_build, sizeof(gen_build), "%s/build", generation) >=
-            (int)sizeof(gen_build) ||
-        snprintf(donor_obj, sizeof(donor_obj), "%s/obj", donor_build) >=
-            (int)sizeof(donor_obj) ||
-        snprintf(gen_obj, sizeof(gen_obj), "%s/obj", gen_build) >=
-            (int)sizeof(gen_obj))
+            (int)sizeof(gen_build))
         return false;
     struct warm_seed_accum accum = {0};
-    warm_seed_walk(donor_obj, gen_obj, "obj", &accum);
+    /* Every build profile's epoch tree, not just build-only's: the test
+     * phase's dev-proof-bundle compiles the full harness, and its
+     * objects publish through the same staging-plus-rename publishers.
+     * The classifier admits only object and depfile outputs plus the
+     * wrapper copy; binaries, archives, stamps, leases, and locks stay
+     * skipped, so the wider root adds reuse without adding risk. */
+    warm_seed_walk(donor_build, gen_build, "", &accum);
     /* The wrapper binary keeps make's prerequisite graph honest only when
      * its inputs are unchanged; otherwise the bootstrap rebuilds it and
      * its new mtime correctly invalidates every object. */
@@ -2644,16 +2645,10 @@ bool zcl_dev_proof_warm_seed_and_retime(const char *donor_build,
                                         size_t nchanged,
                                         struct zcl_dev_proof_warm_stats *stats)
 {
-    char donor_obj[PATH_MAX], gen_obj[PATH_MAX];
     if (!donor_build || !gen_build || !gen_src || !stats) return false;
     memset(stats, 0, sizeof(*stats));
-    if (snprintf(donor_obj, sizeof(donor_obj), "%s/obj", donor_build) >=
-            (int)sizeof(donor_obj) ||
-        snprintf(gen_obj, sizeof(gen_obj), "%s/obj", gen_build) >=
-            (int)sizeof(gen_obj))
-        return false;
     struct warm_seed_accum accum = {0};
-    warm_seed_walk(donor_obj, gen_obj, "obj", &accum);
+    warm_seed_walk(donor_build, gen_build, "", &accum);
     /* Unconditional at seam level; production gates this copy on the
      * bootstrap-inputs diff in warm_start_generation. */
     if (!accum.failed) {
@@ -3682,19 +3677,21 @@ static void proof_phase_mark(struct proof_phase_clock *clock, const char *name)
 static void warm_sidecar_write(const struct proof_paths *paths,
                                const struct proof_warmstart *warm,
                                const char *compile_mode,
-                               uint64_t compile_ms)
+                               uint64_t compile_ms, uint64_t bundle_ms)
 {
     char body[1024];
     int len = paths && warm && compile_mode
         ? snprintf(body, sizeof(body),
                    "%s\nwarm=%d\ndonor=%s\ndonor_local=%s\nfiles_linked=%llu\n"
-                   "bytes_linked=%llu\ncompile_mode=%s\ncompile_ms=%llu\n",
+                   "bytes_linked=%llu\ncompile_mode=%s\ncompile_ms=%llu\n"
+                   "bundle_ms=%llu\n",
                    PROOF_WARM_SIDECAR_SCHEMA, warm->armed ? 1 : 0,
                    warm->armed ? warm->donor : "-",
                    warm->armed ? warm->donor_local : "-",
                    (unsigned long long)warm->files_linked,
                    (unsigned long long)warm->bytes_linked, compile_mode,
-                   (unsigned long long)compile_ms)
+                   (unsigned long long)compile_ms,
+                   (unsigned long long)bundle_ms)
         : -1;
     if (len > 0 && len < (int)sizeof(body))
         (void)write_atomic(paths->warmstart, body, (size_t)len, 0400);
@@ -3816,6 +3813,10 @@ static bool proof_worker_body(const struct proof_paths *paths,
         &receipt.dimensions[ZCL_DEV_PROOF_LINT];
     struct zcl_dev_proof_dimension *test =
         &receipt.dimensions[ZCL_DEV_PROOF_TEST];
+    /* Warm-start sidecar inputs, hoisted so the bundle block can rewrite
+     * the sidecar with both build phases timed. */
+    const char *warm_compile_mode = "skipped";
+    uint64_t warm_compile_ms = 0;
 
     char make_jobs[16];
     if (!proof_make_jobs_arg(make_jobs)) {
@@ -3860,14 +3861,13 @@ static bool proof_worker_body(const struct proof_paths *paths,
         proof_phase_mark(phases, "dimension_generated");
         if (compile->selected) {
             char artifact[PATH_MAX];
-            const char *compile_mode = "reused";
-            uint64_t compile_ms = 0;
+            warm_compile_mode = "reused";
             int artifact_len = snprintf(artifact, sizeof(artifact),
                                         "%s/build/bin/z23-dev", paths->root);
             if (artifact_len <= 0 || (size_t)artifact_len >= sizeof(artifact) ||
                 !executable_reuse(paths, artifact,
                                   &source_before, compile, NULL, 0)) {
-                compile_mode = "built";
+                warm_compile_mode = "built";
                 int64_t build_us0 = platform_time_monotonic_us();
                 const char *argv[] = {"make", "--no-print-directory", make_jobs,
                                       "build-only", NULL};
@@ -3876,10 +3876,11 @@ static bool proof_worker_body(const struct proof_paths *paths,
                 bool built = run_dimension(&execution, ZCL_DEV_PROOF_COMPILE,
                                            argv, compile, false, &budget, why,
                                            why_len);
-                compile_ms = (uint64_t)((platform_time_monotonic_us() -
-                                         build_us0) / 1000);
+                warm_compile_ms = (uint64_t)((platform_time_monotonic_us() -
+                                              build_us0) / 1000);
                 if (!built) {
-                    warm_sidecar_write(paths, warm, "failed", compile_ms);
+                    warm_sidecar_write(paths, warm, "failed",
+                                       warm_compile_ms, 0);
                     return false;
                 }
                 /* The build finished for this commit: publish the donor
@@ -3888,10 +3889,11 @@ static bool proof_worker_body(const struct proof_paths *paths,
                 (void)warm_marker_write(generation, paths->root, local,
                                         base);
             }
-            warm_sidecar_write(paths, warm, compile_mode, compile_ms);
+            warm_sidecar_write(paths, warm, warm_compile_mode,
+                               warm_compile_ms, 0);
         } else {
             unused_dimension(ZCL_DEV_PROOF_COMPILE, compile);
-            warm_sidecar_write(paths, warm, "skipped", 0);
+            warm_sidecar_write(paths, warm, "skipped", 0, 0);
         }
         proof_phase_mark(phases, "dimension_compile");
         /* Lint proves the source; the test dimension proves the built
@@ -3954,6 +3956,7 @@ static bool proof_worker_body(const struct proof_paths *paths,
                 test_helpers_prepare(
                     paths, generation, binary, &source_before,
                     make_jobs, generation_binary, helper_root, why, why_len);
+            uint64_t bundle_ms = 0;
             if (!runner_ready) {
                 if (why && why_len > 0) why[0] = 0;
                 const char *bundle_argv[] = {
@@ -3962,9 +3965,14 @@ static bool proof_worker_body(const struct proof_paths *paths,
                 struct zcl_dev_proof_budget bundle_budget =
                     proof_step_budget(paths, "bundle",
                                       PROOF_BUNDLE_DEFAULT_MS);
+                int64_t bundle_us0 = platform_time_monotonic_us();
                 int bundle_rc = run_step(paths, generation, paths->bundle_log,
                                          bundle_argv, "bundle",
                                          &bundle_budget, NULL);
+                /* First attempt only; a recovery rerun is rare and stays
+                 * visible in the retry log. */
+                bundle_ms = (uint64_t)((platform_time_monotonic_us() -
+                                        bundle_us0) / 1000);
                 if (bundle_rc != 0 && proof_log_contains(
                         paths->bundle_log,
                         "unverified compile epoch appeared after recovery "
@@ -3996,6 +4004,10 @@ static bool proof_worker_body(const struct proof_paths *paths,
                                   "proof_bundle_admission_failed");
                     return false;
                 }
+                /* Both build phases are timed now: refresh the sidecar so
+                 * the receipt directory carries the full compile story. */
+                warm_sidecar_write(paths, warm, warm_compile_mode,
+                                   warm_compile_ms, bundle_ms);
             }
         }
         const char *test_argv[] = {generation_binary, only, "--cache",
