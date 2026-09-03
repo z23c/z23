@@ -293,6 +293,68 @@ static int test_argv_datadir_absent_and_degenerate(void)
     return failures;
 }
 
+/* ── LogAcceptCategory ─────────────────────────────────────────────────
+ *
+ * Pinned against the production argument table (seeded through
+ * ParseParameters, never by poking internals): NULL category is always
+ * accepted, a named category is refused without -debug, and the three
+ * spellings of "all categories" (-debug, -debug=1, exact category name)
+ * are accepted while an unrelated category stays refused. One function
+ * per TEST, as the harness's hardcoded `goto _test_next` requires. */
+static int test_log_accept_null_category(void)
+{
+    int failures = 0;
+    TEST("log category: NULL (uncategorized) is always accepted") {
+        const char *argv[] = { "z23" };
+        ncf_set_argv(argv, 1);
+        ASSERT(LogAcceptCategory(NULL));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_log_accept_named_category(void)
+{
+    int failures = 0;
+    TEST("log category: named category refused without -debug") {
+        const char *argv[] = { "z23", "-datadir=/tmp/x" };
+        ncf_set_argv(argv, 2);
+        ASSERT(!LogAcceptCategory("net"));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_log_accept_debug_spellings(void)
+{
+    int failures = 0;
+    TEST("log category: bare -debug and -debug=1 accept every category") {
+        const char *bare[] = { "z23", "-debug" };
+        ncf_set_argv(bare, 2);
+        ASSERT(LogAcceptCategory("net"));
+        ASSERT(LogAcceptCategory("mempoolrepl"));
+        const char *one[] = { "z23", "-debug=1" };
+        ncf_set_argv(one, 2);
+        ASSERT(LogAcceptCategory("net"));
+        ASSERT(LogAcceptCategory("mempoolrepl"));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_log_accept_exact_category(void)
+{
+    int failures = 0;
+    TEST("log category: -debug=<category> is exact, unrelated stays refused") {
+        const char *argv[] = { "z23", "-debug=net" };
+        ncf_set_argv(argv, 2);
+        ASSERT(LogAcceptCategory("net"));
+        ASSERT(!LogAcceptCategory("mempoolrepl"));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_node_config_file(void)
 {
     int failures = 0;
@@ -308,6 +370,10 @@ int test_node_config_file(void)
     failures += test_path_falls_back_to_the_argument_table();
     failures += test_argv_datadir_scans_past_a_subcommand();
     failures += test_argv_datadir_absent_and_degenerate();
+    failures += test_log_accept_null_category();
+    failures += test_log_accept_named_category();
+    failures += test_log_accept_debug_spellings();
+    failures += test_log_accept_exact_category();
 
     /* Leave the table as the suite found it: these cases rewrote it several
      * times and a later group must not inherit a fixture's -datadir. */
