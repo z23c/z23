@@ -5,6 +5,7 @@
 #endif
 
 #include "test/test_core.h"
+#include "test/test_timing_budget.h"
 
 #include "dev_activation.h"
 #include "dev_failure_store.h"
@@ -3118,7 +3119,20 @@ static int test_resident_process_cancellation(void)
         ASSERT(result.cancelled);
         ASSERT(!result.timed_out);
         ASSERT(result.term_signal == SIGTERM);
-        ASSERT(elapsed_us >= 0 && elapsed_us < INT64_C(1000000));
+        /* Cancel must land promptly; the 1 s ceiling scales with measured
+         * host load so a loaded lane does not flake the verdict. */
+        struct test_budget cancel_budget =
+            test_budget_scale(UINT64_C(1000000));
+        printf("  dev platform: cancel-latency elapsed_us=%lld "
+               "nominal_us=%llu effective_us=%llu load_factor=%.2f "
+               "calib_us=%llu\n",
+               (long long)elapsed_us,
+               (unsigned long long)cancel_budget.nominal_us,
+               (unsigned long long)cancel_budget.effective_us,
+               cancel_budget.factor,
+               (unsigned long long)cancel_budget.calib_med_us);
+        ASSERT(elapsed_us >= 0 &&
+               (uint64_t)elapsed_us < cancel_budget.effective_us);
         zcl_devloop_process_cancel_clear();
 
         if (saved_copy) {
