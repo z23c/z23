@@ -941,7 +941,10 @@ static int case_key_gate(void)
 {
     int failures = 0;
     char dir[512];
-    (void)snprintf(dir, sizeof(dir), "zcl_engine_gate_%d", (int)getpid());
+    (void)mkdir("build", 0700);
+    (void)mkdir("build/scratch", 0700);
+    (void)snprintf(dir, sizeof(dir), "build/scratch/zcl_engine_gate_%d",
+                   (int)getpid());
 
     if (mkdir(dir, 0700) != 0) {
         printf("engine: could not create the gate fixture... FAIL\n");
