@@ -146,8 +146,9 @@ fail:
     free(items); return NULL;
 }
 
-bool platform_process_start_hidden(struct platform_process *process,
-                                   const struct platform_process_options *options)
+static bool process_start_hidden_with_stdout(
+    struct platform_process *process,
+    const struct platform_process_options *options, HANDLE stdout_handle)
 {
     if (!process || process->native != UINTPTR_MAX || !options ||
         !options->image || !options->argv || !options->argv[0] || !options->env ||
@@ -157,24 +158,39 @@ bool platform_process_start_hidden(struct platform_process *process,
     wchar_t *line = command_line(options->argv);
     wchar_t *environment = environment_block(options->env);
     if (!utf16(options->image, &image) || !absolute_image(image) || !line ||
-        (options->cwd && !utf16(options->cwd, &cwd)) ||
+        (options->cwd &&
+         (!utf16(options->cwd, &cwd) || !absolute_image(cwd))) ||
         !environment) goto done;
     SECURITY_ATTRIBUTES security = {
         .nLength = sizeof(security), .bInheritHandle = TRUE};
     HANDLE null_handle = CreateFileW(L"NUL", GENERIC_READ | GENERIC_WRITE,
         FILE_SHARE_READ | FILE_SHARE_WRITE, &security, OPEN_EXISTING, 0, NULL);
     if (null_handle == INVALID_HANDLE_VALUE) goto done;
-    size_t handle_count = options->inherited_count + 1u;
+    bool capture_stdout = stdout_handle && stdout_handle != INVALID_HANDLE_VALUE;
+    size_t handle_count = options->inherited_count + 1u +
+                          (capture_stdout ? 1u : 0u);
     HANDLE *handles = zcl_calloc(handle_count, sizeof(*handles),
                                  "process-inherited-handles");
     if (!handles) { CloseHandle(null_handle); goto done; }
     handles[0] = null_handle;
     bool handles_ok = true;
+    if (capture_stdout) {
+        DWORD flags = 0;
+        handles[1] = stdout_handle;
+        if (!GetHandleInformation(stdout_handle, &flags) ||
+            !(flags & HANDLE_FLAG_INHERIT))
+            handles_ok = false;
+    }
     for (size_t i = 0; i < options->inherited_count; i++) {
         DWORD flags = 0;
-        handles[i + 1u] = (HANDLE)options->inherited[i];
-        if (!GetHandleInformation(handles[i + 1u], &flags) ||
+        size_t at = i + 1u + (capture_stdout ? 1u : 0u);
+        handles[at] = (HANDLE)options->inherited[i];
+        if (handles[at] == stdout_handle ||
+            !GetHandleInformation(handles[at], &flags) ||
             !(flags & HANDLE_FLAG_INHERIT)) handles_ok = false;
+        for (size_t j = 0; j < i; j++)
+            if (options->inherited[i] == options->inherited[j])
+                handles_ok = false;
     }
     SIZE_T attribute_size = 0;
     (void)InitializeProcThreadAttributeList(NULL, 1, 0, &attribute_size);
@@ -183,7 +199,7 @@ bool platform_process_start_hidden(struct platform_process *process,
     startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
     startup.StartupInfo.wShowWindow = SW_HIDE;
     startup.StartupInfo.hStdInput = null_handle;
-    startup.StartupInfo.hStdOutput = null_handle;
+    startup.StartupInfo.hStdOutput = capture_stdout ? stdout_handle : null_handle;
     startup.StartupInfo.hStdError = null_handle;
     startup.lpAttributeList = zcl_malloc(attribute_size,
                                          "process-attribute-list");
@@ -237,6 +253,152 @@ bool platform_process_start_hidden(struct platform_process *process,
 done:
     free(image); free(cwd); free(line); free(environment);
     return process->native != UINTPTR_MAX;
+}
+
+bool platform_process_start_hidden(struct platform_process *process,
+                                   const struct platform_process_options *options)
+{
+    return process_start_hidden_with_stdout(process, options, NULL);
+}
+
+bool platform_process_capture_stdout(
+    const struct platform_process_options *options, char *out, size_t out_size,
+    uint32_t timeout_ms, struct platform_process_capture_result *result)
+{
+    if (out && out_size) out[0] = 0;
+    if (result)
+        *result = (struct platform_process_capture_result){0};
+    if (!options || !out || out_size == 0 || timeout_ms == 0 || !result)
+        return false;
+
+    SECURITY_ATTRIBUTES security = {
+        .nLength = sizeof(security), .bInheritHandle = TRUE};
+    HANDLE read_handle = NULL, write_handle = NULL;
+    if (!CreatePipe(&read_handle, &write_handle, &security, 0) ||
+        !SetHandleInformation(read_handle, HANDLE_FLAG_INHERIT, 0)) {
+        if (read_handle) CloseHandle(read_handle);
+        if (write_handle) CloseHandle(write_handle);
+        return false;
+    }
+
+    struct platform_process process;
+    platform_process_init(&process);
+    bool started = process_start_hidden_with_stdout(
+        &process, options, write_handle);
+    CloseHandle(write_handle);
+    write_handle = NULL;
+    if (!started) {
+        CloseHandle(read_handle);
+        return false;
+    }
+
+    ULONGLONG began = GetTickCount64();
+    size_t used = 0;
+    bool ok = true, exited = false, containment_stopped = false;
+    bool pipe_closed = false;
+    for (;;) {
+        DWORD available = 0;
+        if (!pipe_closed &&
+            !PeekNamedPipe(read_handle, NULL, 0, NULL, &available, NULL)) {
+            DWORD error = GetLastError();
+            if (error == ERROR_BROKEN_PIPE)
+                pipe_closed = true;
+            else {
+                ok = false;
+                break;
+            }
+        }
+        while (available > 0) {
+            char discard[4096];
+            size_t room = used + 1u < out_size ? out_size - used - 1u : 0u;
+            char *destination = room ? out + used : discard;
+            DWORD capacity = room
+                ? (room > UINT32_MAX ? UINT32_MAX : (DWORD)room)
+                : (DWORD)sizeof(discard);
+            DWORD wanted = available < capacity ? available : capacity;
+            DWORD received = 0;
+            if (!ReadFile(read_handle, destination, wanted, &received, NULL) ||
+                received == 0) {
+                ok = false;
+                break;
+            }
+            if (room)
+                used += received;
+            else
+                result->output_truncated = true;
+            available -= received;
+        }
+        if (!ok) break;
+
+        uint32_t exit_code = 0;
+        enum platform_process_wait_result waited =
+            platform_process_wait(&process, 0, &exit_code);
+        if (waited == PLATFORM_PROCESS_WAIT_FAILED) {
+            ok = false;
+            break;
+        }
+        if (waited == PLATFORM_PROCESS_WAIT_EXITED) {
+            exited = true;
+            result->exit_code = exit_code;
+            /* A trusted query has no authority to leave helpers behind. Stop
+             * any process that retained the pipe, then drain bytes already
+             * committed by the primary process. */
+            if (!containment_stopped && process.containment != UINTPTR_MAX) {
+                (void)TerminateJobObject((HANDLE)process.containment,
+                                         exit_code);
+                containment_stopped = true;
+            }
+            if (available == 0 && pipe_closed)
+                break;
+        }
+
+        ULONGLONG now = GetTickCount64();
+        if (now - began >= timeout_ms) {
+            result->timed_out = true;
+            result->exit_code = 124u;
+            if (!platform_process_terminate(&process, 124u)) ok = false;
+            if (platform_process_wait(&process, 5000u, NULL) !=
+                PLATFORM_PROCESS_WAIT_EXITED)
+                ok = false;
+            exited = true;
+            break;
+        }
+        if (available == 0) Sleep(1u);
+    }
+    out[used] = 0;
+
+    /* Closing containment is the final fail-closed cleanup even after a pipe
+     * or wait failure. Bytes already in the pipe are drained once more so a
+     * short-lived child cannot lose its final write between signal and poll. */
+    if (!exited) (void)platform_process_terminate(&process, 125u);
+    (void)platform_process_wait(&process, 5000u, NULL);
+    platform_process_close(&process);
+    for (;;) {
+        DWORD available = 0;
+        if (!PeekNamedPipe(read_handle, NULL, 0, NULL, &available, NULL) ||
+            available == 0)
+            break;
+        char discard[4096];
+        size_t room = used + 1u < out_size ? out_size - used - 1u : 0u;
+        char *destination = room ? out + used : discard;
+        DWORD capacity = room
+            ? (room > UINT32_MAX ? UINT32_MAX : (DWORD)room)
+            : (DWORD)sizeof(discard);
+        DWORD wanted = available < capacity ? available : capacity;
+        DWORD received = 0;
+        if (!ReadFile(read_handle, destination, wanted, &received, NULL) ||
+            received == 0) {
+            ok = false;
+            break;
+        }
+        if (room)
+            used += received;
+        else
+            result->output_truncated = true;
+    }
+    out[used] = 0;
+    CloseHandle(read_handle);
+    return ok;
 }
 
 bool platform_process_open_existing(struct platform_process *process,
@@ -366,6 +528,17 @@ bool platform_process_start_hidden(struct platform_process *process,
         _exit(127);
     }
     process->native = (uintptr_t)pid; process->pid = (uint64_t)pid; return true;
+}
+
+bool platform_process_capture_stdout(
+    const struct platform_process_options *options, char *out, size_t out_size,
+    uint32_t timeout_ms, struct platform_process_capture_result *result)
+{
+    (void)options; (void)timeout_ms;
+    if (out && out_size) out[0] = 0;
+    if (result)
+        *result = (struct platform_process_capture_result){0};
+    return false;
 }
 
 bool platform_process_open_existing(struct platform_process *process,

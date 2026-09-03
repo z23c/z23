@@ -7,6 +7,9 @@
 #include "platform/clock.h"
 #include "platform/directory_compat.h"
 #include "platform/directory_transaction.h"
+#if defined(_WIN32)
+#include "platform/process_lifecycle.h"
+#endif
 #include "platform/time_compat.h"
 #include "science/science_corpus.h"
 #include "sha3/sha3.h"
@@ -136,13 +139,61 @@ static void growth_contract_digest(uint8_t out[32])
     sha3_256_finalize(&digest, out);
 }
 
+/* Windows intentionally has no generic package/agent spawn implementation.
+ * These read-only developer measurements instead use one explicit host-tool
+ * capability supplied by the Windows setup courier. */
+static int growth_git_capture(const char *const argv[], char *out,
+                              size_t out_size, uint32_t timeout_ms)
+{
+#if defined(_WIN32)
+    const char *image = getenv("ZCL_DEV_GIT_EXE");
+    bool absolute = image &&
+        ((((image[0] >= 'A' && image[0] <= 'Z') ||
+           (image[0] >= 'a' && image[0] <= 'z')) && image[1] == ':' &&
+          (image[2] == '/' || image[2] == '\\')) ||
+         ((image[0] == '/' || image[0] == '\\') &&
+          (image[1] == '/' || image[1] == '\\')));
+    if (!absolute || !argv || !argv[0] || strcmp(argv[0], "git") != 0 ||
+        !out || out_size == 0 || timeout_ms == 0) {
+        if (out && out_size) out[0] = '\0';
+        return -1;
+    }
+    const char *native_argv[GROWTH_ARGV_CAP];
+    size_t argc = 0;
+    while (argv[argc] && argc + 1u < GROWTH_ARGV_CAP) {
+        native_argv[argc] = argc == 0 ? image : argv[argc];
+        argc++;
+    }
+    if (argv[argc]) {
+        out[0] = '\0';
+        return -1;
+    }
+    native_argv[argc] = NULL;
+    static const char *const environment[] = {
+        "GIT_CONFIG_NOSYSTEM=1", "GIT_OPTIONAL_LOCKS=0", "GIT_PAGER=",
+        "GIT_TERMINAL_PROMPT=0", "LANG=C", "LC_ALL=C", NULL,
+    };
+    struct platform_process_options options = {
+        .image = image, .argv = native_argv, .env = environment,
+    };
+    struct platform_process_capture_result result;
+    if (!platform_process_capture_stdout(&options, out, out_size, timeout_ms,
+                                         &result) || result.timed_out ||
+        result.exit_code > INT_MAX)
+        return -1;
+    return (int)result.exit_code;
+#else
+    return zcl_spawn_capture(argv, out, out_size, (int)timeout_ms);
+#endif
+}
+
 static bool growth_git_identity(const char *root, char head[41], bool *clean)
 {
     char head_text[48];
     const char *head_argv[] = {
         "git", "-C", root, "rev-parse", "--verify", "HEAD", NULL,
     };
-    if (zcl_spawn_capture(head_argv, head_text, sizeof(head_text), 30000) != 0 ||
+    if (growth_git_capture(head_argv, head_text, sizeof(head_text), 30000) != 0 ||
         !growth_head_text(head_text, head))
         return false;
     const char *status_argv[GROWTH_ARGV_CAP] = {
@@ -154,7 +205,7 @@ static bool growth_git_identity(const char *root, char head[41], bool *clean)
         status_argv[argc++] = growth_roots[i];
     status_argv[argc] = NULL;
     char status[2];
-    int rc = zcl_spawn_capture(status_argv, status, sizeof(status), 30000);
+    int rc = growth_git_capture(status_argv, status, sizeof(status), 30000);
     if (rc != 0) return false;
     *clean = status[0] == '\0';
     return true;
@@ -185,8 +236,8 @@ static bool growth_first_parent_contains(const char *root,
     const char *argv[] = {
         "git", "-C", root, "rev-list", "--first-parent", head, NULL,
     };
-    int rc = zcl_spawn_capture(argv, commits,
-                               SCIENCE_CODE_GROWTH_GIT_BYTES_MAX, 30000);
+    int rc = growth_git_capture(argv, commits,
+                                SCIENCE_CODE_GROWTH_GIT_BYTES_MAX, 30000);
     bool found = false;
     if (rc == 0) {
         for (const char *line = commits; line && *line;) {
@@ -222,8 +273,8 @@ static bool growth_append_delta(const char *root, const char cached_head[41],
     for (size_t i = 0; i < sizeof(growth_roots) / sizeof(growth_roots[0]); i++)
         argv[argc++] = growth_roots[i];
     argv[argc] = NULL;
-    int rc = zcl_spawn_capture(argv, delta,
-                               SCIENCE_CODE_GROWTH_GIT_BYTES_MAX, 30000);
+    int rc = growth_git_capture(argv, delta,
+                                SCIENCE_CODE_GROWTH_GIT_BYTES_MAX, 30000);
     size_t delta_length = strnlen(delta, SCIENCE_CODE_GROWTH_GIT_BYTES_MAX);
     bool ok = rc == 0 &&
         delta_length + 1u < SCIENCE_CODE_GROWTH_GIT_BYTES_MAX &&
@@ -539,7 +590,7 @@ static bool growth_require_git_toplevel(const char *root, char *error,
     const char *argv[] = {
         "git", "-C", root, "rev-parse", "--show-prefix", NULL,
     };
-    int rc = zcl_spawn_capture(argv, prefix, sizeof(prefix), 30000);
+    int rc = growth_git_capture(argv, prefix, sizeof(prefix), 30000);
     if (rc != 0)
         return growth_error(
             error, error_cap,
@@ -587,8 +638,8 @@ bool science_code_growth_collect(const char *root,
     for (size_t i = 0; i < sizeof(growth_roots) / sizeof(growth_roots[0]); i++)
         argv[argc++] = growth_roots[i];
     argv[argc] = NULL;
-    int rc = zcl_spawn_capture(argv, stream, SCIENCE_CODE_GROWTH_GIT_BYTES_MAX,
-                               120000);
+    int rc = growth_git_capture(argv, stream,
+                                SCIENCE_CODE_GROWTH_GIT_BYTES_MAX, 120000);
     size_t length = strnlen(stream, SCIENCE_CODE_GROWTH_GIT_BYTES_MAX);
     bool ok = rc == 0 && length + 1u < SCIENCE_CODE_GROWTH_GIT_BYTES_MAX &&
         science_code_growth_parse(stream, length, out, error, error_cap);

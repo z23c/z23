@@ -74,7 +74,8 @@ if (-not (Test-Path -LiteralPath $Bash)) {
 }
 $SelectedMake = Join-Path $Msys2Root 'usr\bin\make.exe'
 $SelectedGcc = Join-Path $Msys2Root 'ucrt64\bin\gcc.exe'
-foreach ($RequiredTool in @($SelectedMake, $SelectedGcc)) {
+$SelectedGit = Join-Path $Msys2Root 'usr\bin\git.exe'
+foreach ($RequiredTool in @($SelectedMake, $SelectedGcc, $SelectedGit)) {
     if (-not (Test-Path -LiteralPath $RequiredTool -PathType Leaf)) {
         Write-Error -Message "z23-make: REFUSE: selected MSYS2 root is missing $RequiredTool; run tools\dev\windows-setup.ps1 -Msys2Root $Msys2Root" -ErrorAction Continue
         exit 1
@@ -100,6 +101,10 @@ $NativeUsrBin = Join-Path $Msys2Root 'usr\bin'
 $env:Path = "$NativeUcrtBin;$NativeUsrBin;$env:Path"
 $env:Z23_CHECKOUT_ROOT_MSYS = $repoRoot
 $env:Z23_MSYS2_ROOT_MSYS = $msysRoot
+# Native developer instruments never search PATH for a host executable. Pass
+# the exact Git image owned by this already-validated toolchain into the
+# contained C23 host-tool boundary instead.
+$env:ZCL_DEV_GIT_EXE = $SelectedGit
 
 # Keep make's arguments as argv entries. Joining them into shell source loses
 # spaces and lets shell metacharacters in a variable assignment or path run as
@@ -110,6 +115,7 @@ $bashArgs = @('-lc', $bashCommand, 'z23-windows-make', $repoRoot, $msysRoot) + $
 if ($DryRun) {
     Write-Output "Z23_CHECKOUT_ROOT_MSYS=$repoRoot"
     Write-Output "Z23_MSYS2_ROOT_MSYS=$msysRoot"
+    Write-Output "ZCL_DEV_GIT_EXE=$SelectedGit"
     Write-Output "NATIVE_PATH_PREFIX=$NativeUcrtBin;$NativeUsrBin"
     Write-Output 'BASH_ARGV:'
     foreach ($BashArgument in $bashArgs) {

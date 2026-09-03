@@ -22,6 +22,12 @@ struct platform_process_options {
     size_t inherited_count;
 };
 
+struct platform_process_capture_result {
+    uint32_t exit_code;
+    bool timed_out;
+    bool output_truncated;
+};
+
 enum platform_process_wait_result {
     PLATFORM_PROCESS_WAIT_EXITED = 0,
     PLATFORM_PROCESS_WAIT_RUNNING,
@@ -33,6 +39,18 @@ void platform_process_init(struct platform_process *process);
 void platform_process_child_prepare_headless(void);
 bool platform_process_start_hidden(struct platform_process *process,
                                    const struct platform_process_options *options);
+/* Run one operator-approved host tool and capture stdout only. The executable
+ * must be an absolute, trusted host path supplied in options->image; this is
+ * not a package-execution sandbox and must never run fetched source or an
+ * executable selected by package input. Windows uses the same hidden,
+ * explicit-environment, explicit-handle-list and kill-on-close Job Object
+ * boundary as platform_process_start_hidden(). timeout_ms must be nonzero.
+ * `out` is NUL-terminated on every return when out_size is nonzero. A timeout
+ * is a successful observation reported in result->timed_out; launch, wait, or
+ * pipe failures return false. Native capture is currently Windows-only. */
+bool platform_process_capture_stdout(
+    const struct platform_process_options *options, char *out, size_t out_size,
+    uint32_t timeout_ms, struct platform_process_capture_result *result);
 bool platform_process_open_existing(struct platform_process *process,
                                     uint64_t pid,
                                     const char *expected_image);

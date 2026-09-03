@@ -54,6 +54,47 @@ static int tree_parent_mode(const char *handle_text)
     return reported ? 0 : 32;
 }
 
+static int capture_child_mode(int argc, char **argv)
+{
+    BOOL in_job = FALSE;
+    if (argc != 4 || !getenv("Z23_PROCESS_TEST") ||
+        strcmp(getenv("Z23_PROCESS_TEST"), "controlled") != 0 ||
+        getenv("Z23_PROCESS_UNEXPECTED") != NULL || GetConsoleWindow() != NULL ||
+        !IsProcessInJob(GetCurrentProcess(), NULL, &in_job) || !in_job ||
+        GetPriorityClass(GetCurrentProcess()) != BELOW_NORMAL_PRIORITY_CLASS)
+        return 40;
+    if (fputs(argv[2], stdout) < 0 || fflush(stdout) != 0) return 41;
+    if (fputs(argv[3], stderr) < 0 || fflush(stderr) != 0) return 42;
+    return 7;
+}
+
+static int capture_large_mode(void)
+{
+    for (size_t i = 0; i < 128u * 1024u; i++)
+        if (fputc((int)('a' + (i % 26u)), stdout) == EOF) return 43;
+    return fflush(stdout) == 0 ? 0 : 44;
+}
+
+static int capture_tree_mode(void)
+{
+    wchar_t image[32768], line[32768];
+    if (!GetModuleFileNameW(NULL, image, 32768) ||
+        swprintf(line, 32768, L"\"%ls\" --tree-child", image) <= 0)
+        return 45;
+    STARTUPINFOW startup = {.cb = sizeof(startup)};
+    PROCESS_INFORMATION child = {0};
+    if (!CreateProcessW(image, line, NULL, NULL, FALSE, CREATE_NO_WINDOW,
+                        NULL, NULL, &startup, &child))
+        return 46;
+    DWORD child_pid = child.dwProcessId;
+    CloseHandle(child.hThread);
+    CloseHandle(child.hProcess);
+    if (printf("%lu\n", (unsigned long)child_pid) < 0 || fflush(stdout) != 0)
+        return 47;
+    Sleep(INFINITE);
+    return 48;
+}
+
 static int child_mode(int argc, char **argv)
 {
     DWORD inherited_error_mode = GetErrorMode();
@@ -106,6 +147,12 @@ int main(int argc, char **argv)
         return tree_child_mode();
     if (argc == 3 && strcmp(argv[1], "--tree-parent") == 0)
         return tree_parent_mode(argv[2]);
+    if (argc > 1 && strcmp(argv[1], "--capture-child") == 0)
+        return capture_child_mode(argc, argv);
+    if (argc == 2 && strcmp(argv[1], "--capture-large") == 0)
+        return capture_large_mode();
+    if (argc == 2 && strcmp(argv[1], "--capture-tree") == 0)
+        return capture_tree_mode();
     if (argc > 1 && strcmp(argv[1], "--child") == 0)
         return child_mode(argc, argv);
     wchar_t image_w[32768], temp_w[32768];
@@ -158,6 +205,89 @@ int main(int argc, char **argv)
     DWORD attributes = GetFileAttributesW(proof);
     bool ok = waited == PLATFORM_PROCESS_WAIT_EXITED && code == 0 &&
               attributes != INVALID_FILE_ATTRIBUTES;
+
+    char captured[128];
+    struct platform_process_capture_result capture = {0};
+    const char *const capture_argv[] = {
+        image, "--capture-child", "space \"value\" trailing\\",
+        "stderr-must-not-be-captured", NULL};
+    struct platform_process_options capture_options = {
+        .image = image, .argv = capture_argv, .cwd = cwd, .env = child_env};
+    bool captured_ok = platform_process_capture_stdout(
+        &capture_options, captured, sizeof(captured), 10000u, &capture) &&
+        capture.exit_code == 7u && !capture.timed_out &&
+        !capture.output_truncated &&
+        strcmp(captured, "space \"value\" trailing\\") == 0 &&
+        strstr(captured, "stderr") == NULL;
+
+    const char *const empty_argv[] = {
+        image, "--capture-child", "", "ignored", NULL};
+    capture_options.argv = empty_argv;
+    bool empty_ok = true;
+    for (size_t i = 0; i < 64u && empty_ok; i++) {
+        struct platform_process_capture_result empty = {0};
+        empty_ok = platform_process_capture_stdout(
+            &capture_options, captured, sizeof(captured), 10000u, &empty) &&
+            empty.exit_code == 7u && !empty.timed_out &&
+            !empty.output_truncated && captured[0] == '\0';
+    }
+
+    char boundary[8];
+    struct platform_process_capture_result exact = {0}, truncated = {0};
+    const char *const exact_argv[] = {
+        image, "--capture-child", "1234567", "ignored", NULL};
+    capture_options.argv = exact_argv;
+    bool boundary_ok = platform_process_capture_stdout(
+        &capture_options, boundary, sizeof(boundary), 10000u, &exact) &&
+        exact.exit_code == 7u && !exact.output_truncated &&
+        strcmp(boundary, "1234567") == 0;
+    const char *const truncated_argv[] = {
+        image, "--capture-child", "12345678", "ignored", NULL};
+    capture_options.argv = truncated_argv;
+    boundary_ok = boundary_ok && platform_process_capture_stdout(
+        &capture_options, boundary, sizeof(boundary), 10000u, &truncated) &&
+        truncated.exit_code == 7u && truncated.output_truncated &&
+        strcmp(boundary, "1234567") == 0;
+
+    char large[64];
+    struct platform_process_capture_result large_result = {0};
+    const char *const large_argv[] = {image, "--capture-large", NULL};
+    capture_options.argv = large_argv;
+    bool large_ok = platform_process_capture_stdout(
+        &capture_options, large, sizeof(large), 10000u, &large_result) &&
+        large_result.exit_code == 0u && !large_result.timed_out &&
+        large_result.output_truncated && strlen(large) == sizeof(large) - 1u;
+
+    char timed_output[64];
+    struct platform_process_capture_result timed = {0};
+    const char *const timed_argv[] = {image, "--capture-tree", NULL};
+    capture_options.argv = timed_argv;
+    bool timed_ok = platform_process_capture_stdout(
+        &capture_options, timed_output, sizeof(timed_output), 100u, &timed) &&
+        timed.timed_out && timed.exit_code == 124u;
+    char *pid_end = NULL;
+    unsigned long timed_pid = strtoul(timed_output, &pid_end, 10);
+    HANDLE timed_child = timed_pid && timed_pid <= UINT32_MAX
+        ? OpenProcess(SYNCHRONIZE, FALSE, (DWORD)timed_pid) : NULL;
+    bool timed_tree_reaped = timed_ok && pid_end &&
+        (*pid_end == '\n' || *pid_end == '\r') &&
+        (!timed_child || WaitForSingleObject(timed_child, 2000) == WAIT_OBJECT_0);
+    if (timed_child) CloseHandle(timed_child);
+
+    char refused[8] = "dirty";
+    struct platform_process_capture_result refused_result = {0};
+    struct platform_process_options refused_options = capture_options;
+    refused_options.image = "relative.exe";
+    bool relative_refused = !platform_process_capture_stdout(
+        &refused_options, refused, sizeof(refused), 100u, &refused_result) &&
+        refused[0] == 0;
+    refused_options.image = image;
+    refused_options.cwd = ".";
+    bool relative_cwd_refused = !platform_process_capture_stdout(
+        &refused_options, refused, sizeof(refused), 100u, &refused_result) &&
+        refused[0] == 0;
+    ok = ok && captured_ok && empty_ok && boundary_ok && large_ok &&
+         timed_tree_reaped && relative_refused && relative_cwd_refused;
 
     SECURITY_ATTRIBUTES tree_security = {
         .nLength = sizeof(tree_security), .bInheritHandle = TRUE};
@@ -249,11 +379,15 @@ int main(int argc, char **argv)
                 "process lifecycle failed: started=%d wait=%d exit=%lu "
                 "tree_started=%d tree_wait=%d tree_exit=%lu tree_reaped=%d "
                 "detached_started=%d detached_released=%d "
-                "detached_parent_exited=%d detached_tree_reaped=%d\n",
+                "detached_parent_exited=%d detached_tree_reaped=%d "
+                "capture=%d empty=%d boundary=%d large=%d timed_tree=%d "
+                "relative=%d relative_cwd=%d\n",
                 started, (int)waited, (unsigned long)code, tree_started,
                 (int)tree_waited, (unsigned long)tree_code, tree_reaped,
                 detached_started, detached_released, detached_parent_exited,
-                detached_tree_reaped);
+                detached_tree_reaped, captured_ok, empty_ok, boundary_ok,
+                large_ok, timed_tree_reaped, relative_refused,
+                relative_cwd_refused);
         return 4;
     }
     puts("process-lifecycle-acceptance: ok");
