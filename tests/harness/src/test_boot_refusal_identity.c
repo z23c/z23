@@ -16,6 +16,35 @@
 #include <errno.h>
 #include <string.h>
 
+static int current_identity_boundary_probe(void)
+{
+    char untouched = 'x';
+    if (platform_current_identity(NULL, 16))
+        return 1;
+    if (platform_current_identity(&untouched, 0) || untouched != 'x')
+        return 2;
+
+    char identity[192];
+    if (!platform_current_identity(identity, sizeof(identity)))
+        return 3;
+    size_t required = strlen(identity) + 1;
+    if (required <= 1 || required > sizeof(identity))
+        return 4;
+
+    char exact[192];
+    memset(exact, 'x', sizeof(exact));
+    if (!platform_current_identity(exact, required) ||
+        strcmp(exact, identity) != 0)
+        return 5;
+
+    char short_out[192];
+    memset(short_out, 'x', sizeof(short_out));
+    if (platform_current_identity(short_out, required - 1) ||
+        short_out[0] != '\0')
+        return 6;
+    return 0;
+}
+
 static int boot_refusal_identity_probe(void)
 {
     char identity[192];
@@ -35,7 +64,16 @@ static int boot_refusal_identity_probe(void)
 int test_boot_refusal_identity(void)
 {
     int failures = 0;
-    int rc = boot_refusal_identity_probe();
+    int rc = current_identity_boundary_probe();
+    printf("current_identity: size boundaries fail closed with empty output... ");
+    if (rc == 0) {
+        printf("OK\n");
+    } else {
+        printf("FAIL (step %d)\n", rc);
+        failures++;
+    }
+
+    rc = boot_refusal_identity_probe();
     printf("boot_refusal_identity: refusal report names the acting OS "
            "identity... ");
     if (rc == 0) {

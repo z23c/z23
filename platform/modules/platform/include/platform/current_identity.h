@@ -9,7 +9,8 @@
 #include <stddef.h>
 
 /* Stable, diagnostic-only identity for the account running this process.
- * Windows returns its SID; POSIX returns its numeric effective UID. */
+ * Windows returns its SID; POSIX returns its numeric effective UID. Invalid
+ * or insufficient output returns false and leaves a non-empty buffer empty. */
 bool platform_current_identity(char *out, size_t out_size);
 
 #endif

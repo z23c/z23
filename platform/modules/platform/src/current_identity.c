@@ -1,7 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
- * Purpose: the two implementations behind platform/current_identity.h --
- * Windows token SID lookup and the POSIX getuid form. Diagnostic only;
- * never an authorization input. */
+ * Purpose: the two native helpers behind platform/current_identity.h --
+ * Windows token SID lookup and the POSIX getuid form -- plus the single
+ * public fail-closed wrapper. Diagnostic only; never an authorization input. */
 #include "platform/current_identity.h"
 
 #include <stdint.h>
@@ -13,7 +13,7 @@
 #endif
 #include <windows.h>
 
-bool platform_current_identity(char *out, size_t out_size)
+static bool platform_current_identity_native(char *out, size_t out_size)
 {
     if (!out || out_size == 0)
         return false;
@@ -59,7 +59,7 @@ bool platform_current_identity(char *out, size_t out_size)
 #else
 #include <unistd.h>
 
-bool platform_current_identity(char *out, size_t out_size)
+static bool platform_current_identity_native(char *out, size_t out_size)
 {
     if (!out || out_size == 0)
         return false;
@@ -68,3 +68,15 @@ bool platform_current_identity(char *out, size_t out_size)
     return written > 0 && (size_t)written < out_size;
 }
 #endif
+
+bool platform_current_identity(char *out, size_t out_size)
+{
+    if (!out || out_size == 0)
+        return false;
+    out[0] = '\0';
+    if (!platform_current_identity_native(out, out_size)) {
+        out[0] = '\0';
+        return false;
+    }
+    return true;
+}
