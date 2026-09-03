@@ -408,6 +408,8 @@ bool ci_store_source_file_counts(struct ci_store *s,
     const char *sql =
         "SELECT "
         "SUM(CASE WHEN path LIKE '%.c' OR path LIKE '%.h' THEN 1 ELSE 0 END),"
+        "SUM(CASE WHEN (path LIKE '%.c' OR path LIKE '%.h') AND "
+        "path LIKE '%/fixtures/%' THEN 1 ELSE 0 END),"
         "SUM(CASE WHEN path LIKE '%.def' THEN 1 ELSE 0 END) FROM files";
     bool ok = sqlite3_prepare_v2(s->db, sql, -1, &stmt, NULL) == SQLITE_OK;
     if (ok) {
@@ -415,7 +417,12 @@ bool ci_store_source_file_counts(struct ci_store *s,
         ok = rc == SQLITE_ROW;
         if (ok) {
             out->c23_files = sqlite3_column_int(stmt, 0);
-            out->registry_nodes = sqlite3_column_int(stmt, 1);
+            out->fixture_c23_files = sqlite3_column_int(stmt, 1);
+            out->governed_c23_files =
+                out->c23_files - out->fixture_c23_files;
+            out->registry_nodes = sqlite3_column_int(stmt, 2);
+            ok = out->fixture_c23_files >= 0 &&
+                 out->governed_c23_files >= 0;
         }
     }
     if (stmt) sqlite3_finalize(stmt);

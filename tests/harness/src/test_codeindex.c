@@ -1099,6 +1099,8 @@ static int test_codeindex_platform_arm(void)
     CI_CHECK("C23 and registry-node counts are exact and separate",
              codeindex_source_file_counts(ci, &source_counts) &&
              source_counts.c23_files == 21 &&
+             source_counts.governed_c23_files == 20 &&
+             source_counts.fixture_c23_files == 1 &&
              source_counts.registry_nodes == 1);
 
     codeindex_symbol(ci, "fixture_root_main", &s, &found);

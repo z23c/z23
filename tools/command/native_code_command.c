@@ -1171,19 +1171,41 @@ void zcl_native_handle_code_map(const struct zcl_command_request *request,
                                "code map source-kind totals disagree with roots", "");
         return;
     }
+    if (counts.governed_c23_files + counts.fixture_c23_files !=
+        counts.c23_files) {
+        json_free(&roots); json_free(&shapes);
+        codeindex_close(ci);
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INTERNAL,
+                               "GOVERNED_COUNT_DISAGREEMENT", "verify",
+                               false, false,
+                               "code map governed and fixture counts disagree",
+                               "");
+        return;
+    }
 
     (void)json_push_kv_str(&reply->data, "scope", "map");
     (void)json_push_kv(&reply->data, "roots", &roots);
     (void)json_push_kv(&reply->data, "shapes", &shapes);
     (void)json_push_kv_int(&reply->data, "total_files", total);
+    (void)json_push_kv_int(&reply->data, "governed_c23_files",
+                           counts.governed_c23_files);
+    (void)json_push_kv_int(&reply->data, "indexed_fixture_c23_files",
+                           counts.fixture_c23_files);
+    (void)json_push_kv_int(&reply->data, "indexed_c23_files",
+                           counts.c23_files);
+    /* Compatibility field for zcl.code_map.v1 consumers. It has always meant
+     * every indexed .c/.h file, including tracked fixture proof inputs. */
     (void)json_push_kv_int(&reply->data, "c23_files", counts.c23_files);
     (void)json_push_kv_int(&reply->data, "registry_nodes",
                            counts.registry_nodes);
-    char summary[176];
+    char summary[224];
     (void)snprintf(summary, sizeof(summary),
-                   "%d C23 files + %d registry nodes across %d physical roots "
-                   "+ %d product shapes; run `code group <path>` to descend",
-                   counts.c23_files, counts.registry_nodes, nroot, nshape);
+                   "%d governed C23 files + %d indexed fixture C23 files + "
+                   "%d registry nodes across %d physical roots + %d product "
+                   "shapes; run `code group <path>` to descend",
+                   counts.governed_c23_files, counts.fixture_c23_files,
+                   counts.registry_nodes, nroot, nshape);
     (void)json_push_kv_str(&reply->data, "summary", summary);
 
     json_free(&roots); json_free(&shapes);

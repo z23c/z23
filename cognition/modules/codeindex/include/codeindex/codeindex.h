@@ -92,11 +92,16 @@ struct ci_group {
     char purpose[160];
 };
 
-/* Exact file-kind totals in one verified index generation. C23 files are the
- * maintained .c/.h corpus; registry nodes are behavior-bearing .def files
- * retained for source stamps and include impact, never counted as C23. */
+/* Exact file-kind totals in one verified index generation. c23_files includes
+ * tracked fixture inputs because the index must retain their symbols and
+ * impact edges. governed_c23_files excludes exact `fixtures` path segments,
+ * matching the capability inventory and science corpus; fixture_c23_files
+ * makes that projection difference explicit. Registry nodes are
+ * behavior-bearing .def files, never counted as C23. */
 struct ci_source_file_counts {
     int c23_files;
+    int governed_c23_files;
+    int fixture_c23_files;
     int registry_nodes;
 };
 

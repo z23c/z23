@@ -91,6 +91,48 @@ static int test_code_corpus_roots_follow_registry(void)
     return failures;
 }
 
+static int test_code_map_governed_count_matches_corpus(void)
+{
+    int failures = 0;
+    const struct zcl_command_registry *reg = zcl_command_catalog();
+    TEST("code.map separates indexed fixtures from the governed C23 corpus") {
+        const struct zcl_command_spec *corpus = find_spec(reg, "code.corpus");
+        const struct zcl_command_spec *map = find_spec(reg, "code.map");
+        char corpus_out[ZCL_COMMAND_RESULT_BUDGET + 1];
+        char map_out[ZCL_COMMAND_RESULT_BUDGET + 1];
+        enum zcl_command_exit corpus_code = ZCL_COMMAND_EXIT_INTERNAL;
+        enum zcl_command_exit map_code = ZCL_COMMAND_EXIT_INTERNAL;
+        ASSERT(corpus != NULL && map != NULL);
+        ASSERT(exec_leaf(reg, corpus, corpus_out, sizeof(corpus_out),
+                         &corpus_code));
+        ASSERT(exec_leaf(reg, map, map_out, sizeof(map_out), &map_code));
+        ASSERT_EQ(corpus_code, ZCL_COMMAND_EXIT_OK);
+        ASSERT_EQ(map_code, ZCL_COMMAND_EXIT_OK);
+
+        struct json_value corpus_envelope, map_envelope;
+        ASSERT(json_read(&corpus_envelope, corpus_out, strlen(corpus_out)));
+        ASSERT(json_read(&map_envelope, map_out, strlen(map_out)));
+        const struct json_value *corpus_data =
+            json_get(&corpus_envelope, "data");
+        const struct json_value *map_data = json_get(&map_envelope, "data");
+        ASSERT(corpus_data != NULL && map_data != NULL);
+        const int64_t governed = json_get_int(
+            json_get(map_data, "governed_c23_files"));
+        const int64_t fixtures = json_get_int(
+            json_get(map_data, "indexed_fixture_c23_files"));
+        const int64_t indexed = json_get_int(
+            json_get(map_data, "indexed_c23_files"));
+        ASSERT(governed > 0);
+        ASSERT_EQ(governed, json_get_int(json_get(corpus_data, "files")));
+        ASSERT(fixtures > 0);
+        ASSERT_EQ(governed + fixtures, indexed);
+        json_free(&map_envelope);
+        json_free(&corpus_envelope);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_catalog_wellformed(void)
 {
     int failures = 0;
@@ -4246,6 +4288,7 @@ int test_command_registry_catalog(void)
     int failures = 0;
     failures += test_catalog_wellformed();
     failures += test_code_corpus_roots_follow_registry();
+    failures += test_code_map_governed_count_matches_corpus();
     failures += test_network_records_leaf_input();
     failures += test_producer_session_retire_rpc_port_input();
     failures += test_retrieval_experiment_profile_input();
