@@ -636,5 +636,19 @@ int args_parse_node_options(int argc, char **argv, struct app_context *ctx,
             }
         }
     }
+    /* The -v2transport spelling is a deprecated alias for
+     * -noisetransport (kept so existing Noise operators keep booting;
+     * connman_init() honors it and repeats this notice where the flag
+     * takes effect). Say so HERE, at parse time, instead of ~30 s deep
+     * in P2P init: an operator typo or stale runbook deserves its
+     * answer in milliseconds, and waiting for connman couples the
+     * diagnostic to full boot latency. GetArg-based: every spelling
+     * (-v2transport, -v2transport=0/1) is one check, printed once. */
+    if (GetArg("-v2transport", NULL) != NULL) {
+        const bool noise_new_set = GetArg("-noisetransport", NULL) != NULL;
+        fprintf(stderr,
+                "-v2transport is deprecated; use -noisetransport%s\n",
+                noise_new_set ? " (new spelling takes precedence)" : "");
+    }
     return -1; /* parsed OK — caller continues booting */
 }
