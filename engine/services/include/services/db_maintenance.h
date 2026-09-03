@@ -181,6 +181,12 @@ struct zcl_result db_maintenance_run_now(struct node_db *db, const char *op);
  * started (no db registered) or the checkpoint failed. */
 struct zcl_result db_maintenance_checkpoint_now(void);
 
+/* Boot opt-out gate: true only when ZCL_DISABLE_BOOT_DB_MAINT=1 opts the
+ * node out of the default-started WAL size-cap scheduler. Any other value
+ * (including unset) means boot starts the service. Factored out of the boot
+ * service start so the policy is unit-testable without booting a node. */
+bool db_maintenance_boot_opted_out(void);
+
 /* ── Vacuum gate ────────────────────────────────────────────── */
 
 /* Caller-supplied predicate that decides whether the scheduler

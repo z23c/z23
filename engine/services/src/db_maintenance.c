@@ -299,6 +299,14 @@ void db_maintenance_set_vacuum_gate(db_maintenance_vacuum_gate_fn fn)
     pthread_mutex_unlock(&g_dbm.lock);
 }
 
+/* Boot opt-out gate — see the declaration in db_maintenance.h. Kept next
+ * to the scheduler (not in boot.c) so the legacy boot TU does not grow. */
+bool db_maintenance_boot_opted_out(void)
+{
+    const char *off = getenv("ZCL_DISABLE_BOOT_DB_MAINT");
+    return off && strcmp(off, "1") == 0;
+}
+
 /* ── Helpers ────────────────────────────────────────────────── */
 
 /* Returns true if `op` is one of the three recognised maintenance ops.

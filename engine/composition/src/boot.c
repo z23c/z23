@@ -760,8 +760,7 @@ static bool boot_db_maintenance_service_start(void *ctx)
     struct node_db *db = ctx;
     if (!db || !db->open)
         return true;
-    const char *off = getenv("ZCL_DISABLE_BOOT_DB_MAINT");
-    if (off && strcmp(off, "1") == 0) {
+    if (db_maintenance_boot_opted_out()) {
         fprintf(stderr, "[boot] DB maintenance DISABLED: the node.db WAL"
                 " now has no size-triggered checkpoint\n");
         return true;
