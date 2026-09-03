@@ -128,6 +128,7 @@ bool zcl_present_bitmap_encode_bmp_v1(
     return true;
 }
 
+#if defined(_WIN32) || defined(__linux__)
 static bool present_bmp_encode(
     const struct zcl_present_window_v1 *page,
     uint8_t **encoded, size_t *encoded_len)
@@ -147,6 +148,7 @@ static bool present_bmp_encode(
     *encoded = bmp;
     return true;
 }
+#endif
 
 #if defined(__linux__)
 static uint8_t *present_x11_clipboard_bmp;
