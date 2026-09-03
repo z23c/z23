@@ -2546,10 +2546,11 @@ static int test_ic_watch_overlay_keeps_its_own_ceiling(void)
  * Fresh proof generations compile every translation unit because git
  * stamps every source with the checkout time. The warm start seeds the
  * new generation's build tree from the newest complete generation for
- * the same root (hard links for immutable *.o/*.d, a copy for the small
- * executed wrapper, nothing else) and repairs make's timestamp graph so
- * exactly the changed set rebuilds. Every fixture below is a
- * self-contained tree under test-tmp/; nothing here runs a real build. */
+ * the same root (hard links for immutable object and depfile outputs, a
+ * copy for the small executed wrapper, nothing else) and repairs make's
+ * timestamp graph so exactly the changed set rebuilds. Every fixture
+ * below is a self-contained tree under test-tmp/; nothing here runs a
+ * real build. */
 
 static bool pw_read_all(const char *path, char *out, size_t out_size,
                         size_t *len_out)

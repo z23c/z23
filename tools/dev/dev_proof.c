@@ -1792,18 +1792,26 @@ static void warm_seed_walk(const char *donor_dir, const char *gen_dir,
                            const char *rel_prefix,
                            struct warm_seed_accum *accum)
 {
-    /* The walk creates its own target directory: readdir order is
-     * unspecified, so a file may precede its directory and parent-ensure
-     * only covers file targets, not the directory entries below. */
+    /* The walk creates its own target directory chain: readdir order is
+     * unspecified, so a file may precede its directory, and the caller
+     * may hand down a root whose own parents do not exist yet (the seam
+     * test seeds into a bare fixture). dependency_parent_ensure builds
+     * the ancestors; the mkdir takes the directory itself. */
     struct stat gen_dir_st;
     if (!accum || accum->failed) return;
     if (lstat(gen_dir, &gen_dir_st) != 0) {
-        if (errno != ENOENT || mkdir(gen_dir, 0700) != 0) {
+        char probe[PATH_MAX];
+        if (errno != ENOENT ||
+            snprintf(probe, sizeof(probe), "%s/_", gen_dir) >=
+                (int)sizeof(probe) ||
+            !dependency_parent_ensure(probe) ||
+            (mkdir(gen_dir, 0700) != 0 && errno != EEXIST) ||
+            lstat(gen_dir, &gen_dir_st) != 0) {
             accum->failed = true;
             return;
         }
-    } else if (!S_ISDIR(gen_dir_st.st_mode) ||
-               S_ISLNK(gen_dir_st.st_mode)) {
+    }
+    if (!S_ISDIR(gen_dir_st.st_mode) || S_ISLNK(gen_dir_st.st_mode)) {
         accum->failed = true;
         return;
     }
