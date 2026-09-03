@@ -34,6 +34,7 @@
 #include "controllers/sync_controller.h"
 #include "services/node_db_catchup_service.h"
 #include "services/node_db_catchup_lock_guard.h"
+#include "services/db_maintenance.h"
 #include "node_db_catchup_internal.h"
 #include "util/boot_progress.h"
 #include "models/db_txn.h"
@@ -639,6 +640,17 @@ int node_db_catchup_service_run(struct node_db *ndb,
             tx_open = false;
             t_batch_start = t_now;
             last_committed_height = h;
+            /* Turbo WAL bound: the bulk wal_autocheckpoint folds frames
+             * rarely and the bulk journal_size_limit only caps the file
+             * after a checkpoint — neither truncates a runaway WAL
+             * mid-run, which is how single runs reached tens of GB.
+             * The transaction just committed, so no write transaction
+             * is open and the size-triggered checkpoint below can
+             * actually move frames. Best-effort: a false return never
+             * aborts the catchup. */
+            if (bulk_mode)
+                node_db_turbo_maybe_checkpoint(
+                    ndb, DB_MAINT_DEFAULT_WAL_MAX_BYTES);
             /* Persist the Sapling note-commitment frontier to the flat-file
              * checkpoint (rate-limited to every
              * SAPLING_CHECKPOINT_BLOCK_INTERVAL blocks). {h, block hash,
