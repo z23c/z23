@@ -6,8 +6,11 @@
  * Coverage:
  *   1. owner — a contexts/<feature>/ file reports its context and shape; a
  *      core/ path reports sealed=true; a modules/ path reports its nearest
- *      owning module directory; an unindexed, absent path is UNOWNED without
- *      an error status; a missing path input is a MISSING_PATH error body.
+ *      owning module directory; a docs/ example is OWNED by the "docs"
+ *      source root; a path outside every maintained root but present on
+ *      disk (vendor/) is UNOWNED with exists=true; an absent path is
+ *      UNOWNED without an error status; a missing path input is a
+ *      MISSING_PATH error body.
  *   2. cost  — route/test_groups match `code tests` for the same path; with
  *      no timing artifact every group is measured=false; with a synthetic
  *      last-run.json the measured path reports real numbers.
@@ -60,7 +63,10 @@ static bool write_fh_fixture(void)
         "int firsthour_probe(void)\n{\n    return 3;\n}\n") &&
         fh_mk_write(FH_FIX, "docs/examples/firsthour_documented.c",
         "/* docs/examples/firsthour_documented.c — documented fixture. */\n"
-        "int firsthour_documented(void)\n{\n    return 4;\n}\n");
+        "int firsthour_documented(void)\n{\n    return 4;\n}\n") &&
+        fh_mk_write(FH_FIX, "vendor/firsthour_vendored.c",
+        "/* vendor/firsthour_vendored.c — unindexed on-disk fixture. */\n"
+        "int firsthour_vendored(void)\n{\n    return 5;\n}\n");
 }
 
 static void fh_call(void (*handler)(const struct zcl_command_request *,
@@ -167,14 +173,34 @@ static int test_fh_owner_unowned(void)
     return failures;
 }
 
-static int test_fh_owner_unindexed_on_disk(void)
+static int test_fh_owner_docs_example(void)
 {
     int failures = 0;
-    TEST("code_firsthour: an unindexed on-disk path is reported present") {
+    TEST("code_firsthour: a docs/ example is OWNED by the docs source "
+         "root") {
         struct zcl_command_reply reply;
         fh_call(zcl_native_handle_code_owner, "zcl.code_owner.v1",
                 "code.owner", "docs/examples/firsthour_documented.c", NULL,
                 &reply);
+        ASSERT(reply.status != ZCL_COMMAND_STATUS_FAILED);
+        ASSERT(json_get_bool(json_get(&reply.data, "exists")));
+        ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "verdict")),
+                      "OWNED");
+        ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "group")), "docs");
+        zcl_command_reply_free(&reply);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_fh_owner_unindexed_on_disk(void)
+{
+    int failures = 0;
+    TEST("code_firsthour: a path outside every maintained source root but "
+         "present on disk is UNOWNED with exists=true") {
+        struct zcl_command_reply reply;
+        fh_call(zcl_native_handle_code_owner, "zcl.code_owner.v1",
+                "code.owner", "vendor/firsthour_vendored.c", NULL, &reply);
         ASSERT(reply.status != ZCL_COMMAND_STATUS_FAILED);
         ASSERT(json_get_bool(json_get(&reply.data, "exists")));
         ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "verdict")),
@@ -397,6 +423,7 @@ int test_code_firsthour(void)
     failures += test_fh_owner_sealed();
     failures += test_fh_owner_module();
     failures += test_fh_owner_unowned();
+    failures += test_fh_owner_docs_example();
     failures += test_fh_owner_unindexed_on_disk();
     failures += test_fh_owner_missing_path();
     failures += test_fh_cost_unmeasured();
