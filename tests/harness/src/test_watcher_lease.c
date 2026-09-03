@@ -28,6 +28,7 @@
 
 static const char watcher_hash[] =
     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+static const char malformed_token[65] = "bad";
 
 #if !defined(_WIN32)
 static bool wl_io_exact(int fd, void *data, size_t size, bool writing)
@@ -165,7 +166,8 @@ int test_watcher_lease(void)
                  &launch, "/no/such/root", "/no/such/image", NULL));
     WL_CHECK("prepare refuses a malformed digest",
              !platform_watcher_launch_prepare(
-                 &launch, "/no/such/root", "/no/such/image", "bad"));
+                 &launch, "/no/such/root", "/no/such/image",
+                 malformed_token));
     platform_watcher_launch_close(NULL);
 
     struct platform_watcher_lease lease;
@@ -176,7 +178,7 @@ int test_watcher_lease(void)
     WL_CHECK("unaccepted lease cannot wait for stop",
              !platform_watcher_lease_wait_stop(&lease, 0));
     WL_CHECK("malformed stop nonce is refused",
-             !platform_watcher_lease_signal_stop("bad"));
+             !platform_watcher_lease_signal_stop(malformed_token));
     platform_watcher_lease_close(&lease);
     platform_watcher_lease_close(NULL);
 
