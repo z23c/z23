@@ -1651,6 +1651,8 @@ int main(int argc, char **argv)
     failures += test_blocker();
     failures += test_cpu_topology();
     failures += test_hw_profile();
+    { extern int test_platform_toolchain(void);
+      failures += test_platform_toolchain(); }
     failures += test_hw_bench();
     failures += test_log_level();
     failures += test_operator_ux();

@@ -18,6 +18,7 @@
 
 #include "util/safe_alloc.h"
 
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -291,7 +292,8 @@ bool platform_toolchain_normalize_archive(const char *path)
         close(fd);
         return false;
     }
-    if (st.st_size < 8) {
+    static const char magic[] = "!<arch>\n";
+    if (st.st_size < (off_t)(sizeof(magic) - 1)) {
         close(fd);
         return false;
     }
@@ -310,8 +312,7 @@ bool platform_toolchain_normalize_archive(const char *path)
         }
         total += got;
     }
-    static const char magic[] = "!<arch>\n";
-    if ((size_t)total < sizeof(magic) ||
+    if ((size_t)total < sizeof(magic) - 1 ||
         memcmp(buf, magic, sizeof(magic) - 1) != 0) {
         free(buf);
         close(fd);
@@ -322,24 +323,61 @@ bool platform_toolchain_normalize_archive(const char *path)
      * from its input object, so a read-only cached object and an identical
      * freshly compiled object produce different archive bytes.
      * Header layout: name[16] date[12] uid[6] gid[6] mode[8] size[10] `\n[2]. */
-    off_t off = 8;
-    while (off + 60 <= total) {
+    off_t off = (off_t)(sizeof(magic) - 1);
+    while (off < total) {
+        if (total - off < 60) {
+            free(buf);
+            close(fd);
+            return false;
+        }
         char *hdr = buf + off;
-        if (hdr[58] != '`' || hdr[59] != '\n')
-            break;
+        if (hdr[58] != '`' || hdr[59] != '\n') {
+            free(buf);
+            close(fd);
+            return false;
+        }
+        unsigned long long member_size = 0;
+        bool saw_digit = false;
+        bool saw_padding = false;
+        for (size_t i = 0; i < 10; i++) {
+            unsigned char ch = (unsigned char)hdr[48 + i];
+            if (ch >= '0' && ch <= '9' && !saw_padding) {
+                unsigned digit = (unsigned)(ch - '0');
+                if (member_size > (ULLONG_MAX - digit) / 10) {
+                    free(buf);
+                    close(fd);
+                    return false;
+                }
+                member_size = member_size * 10 + digit;
+                saw_digit = true;
+            } else if (ch == ' ' && saw_digit) {
+                saw_padding = true;
+            } else {
+                free(buf);
+                close(fd);
+                return false;
+            }
+        }
+        off += 60;
+        if (member_size > (unsigned long long)(total - off)) {
+            free(buf);
+            close(fd);
+            return false;
+        }
         /* date field starts at offset 16 and is 12 bytes. */
         memset(hdr + 16, ' ', 12);
         hdr[16] = '0';
         memcpy(hdr + 40, "100644  ", 8);
-        char size_field[11];
-        memcpy(size_field, hdr + 48, 10);
-        size_field[10] = '\0';
-        unsigned long long member_size = strtoull(size_field, NULL, 10);
-        off_t header_size = 60;
         off_t payload_size = (off_t)member_size;
-        if (payload_size % 2 != 0)
-            payload_size++;
-        off += header_size + payload_size;
+        off += payload_size;
+        if (payload_size % 2 != 0) {
+            if (off >= total) {
+                free(buf);
+                close(fd);
+                return false;
+            }
+            off++;
+        }
     }
     if (lseek(fd, 0, SEEK_SET) != 0) {
         free(buf);
