@@ -8,6 +8,8 @@
  *   - dump_state_json: well-formed, every documented key present
  *   - derived tunables are monotone (non-decreasing) as their input grows,
  *     and respect floor/ceiling clamps
+ *   - device-number extraction reports the host's availability honestly and
+ *     preserves Darwin's 8-bit major / 24-bit minor encoding
  *   - asymmetric-L3 detection parses a SYNTHETIC sysfs fixture (two L3
  *     domains of different sizes) correctly, independent of whatever the
  *     real test host's topology happens to be
@@ -204,6 +206,23 @@ int test_hw_profile(void)
     HWP_CHECK("Darwin AES fact matches the independent OS report",
               isa && isa->arm_aes ==
                          hwp_sysctl_feature("hw.optional.arm.FEAT_AES"));
+#endif
+
+#if defined(_WIN32)
+    HWP_CHECK("Windows does not claim Unix major/minor semantics",
+              !platform_device_major_minor_available());
+#else
+    HWP_CHECK("POSIX device major/minor semantics are available",
+              platform_device_major_minor_available());
+#endif
+#if defined(__APPLE__)
+    {
+        dev_t encoded = (dev_t)UINT32_C(0xab12cdef);
+        HWP_CHECK("Darwin device major preserves the high 8 bits",
+                  platform_device_major(encoded) == 0xabu);
+        HWP_CHECK("Darwin device minor preserves the low 24 bits",
+                  platform_device_minor(encoded) == 0x12cdefu);
+    }
 #endif
 
     bool known = true;
