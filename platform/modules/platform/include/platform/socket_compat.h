@@ -22,6 +22,15 @@ typedef WSAPOLLFD platform_socket_pollfd;
 #define PLATFORM_SOCKET_POLL_WRITE POLLWRNORM
 #define PLATFORM_SOCKET_POLL_HANGUP POLLHUP
 #define PLATFORM_SOCKET_POLL_ERROR POLLERR
+/* Peer finished writing while unread data remains (FIN before the last byte
+ * was read). Where the OS reports it, hang-up probes treat it exactly like
+ * POLLHUP; where it is unavailable the macro is 0 and probes keep their old
+ * behavior (0 is a no-op inside poll events/revents masks). */
+#ifdef POLLRDHUP
+#define PLATFORM_SOCKET_POLL_PEER_HALF_CLOSE POLLRDHUP
+#else
+#define PLATFORM_SOCKET_POLL_PEER_HALF_CLOSE 0
+#endif
 
 static INIT_ONCE platform_winsock_once = INIT_ONCE_STATIC_INIT;
 static BOOL CALLBACK platform_winsock_start(PINIT_ONCE once, PVOID parameter,
@@ -59,6 +68,21 @@ typedef struct pollfd platform_socket_pollfd;
 #define PLATFORM_SOCKET_POLL_WRITE POLLOUT
 #define PLATFORM_SOCKET_POLL_HANGUP POLLHUP
 #define PLATFORM_SOCKET_POLL_ERROR POLLERR
+/* glibc only names POLLRDHUP under _GNU_SOURCE, which this tree does not set
+ * globally; the value itself is stable Linux kernel ABI (asm-generic/poll.h),
+ * so pin it directly when the headers hide it. It must be REQUESTED in events
+ * (the kernel does not report it otherwise) and then read from revents. */
+#if !defined(POLLRDHUP) && defined(__linux__)
+#define POLLRDHUP 0x2000
+#endif
+#ifdef POLLRDHUP
+#define PLATFORM_SOCKET_POLL_PEER_HALF_CLOSE POLLRDHUP
+#else
+/* macOS/BSD poll has no read-hangup signal: a FIN behind unread data looks
+ * like plain POLLIN until the bytes are drained. Probes there keep the old
+ * behavior (0 is a no-op inside poll events/revents masks). */
+#define PLATFORM_SOCKET_POLL_PEER_HALF_CLOSE 0
+#endif
 
 static inline bool platform_socket_runtime_init(void)
 {

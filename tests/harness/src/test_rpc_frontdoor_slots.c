@@ -39,6 +39,8 @@
 #include <errno.h>
 #include <fcntl.h>
 #if !defined(_WIN32)
+#include <arpa/inet.h>
+#include <netinet/in.h>
 #include <poll.h>
 #endif
 #include <stdio.h>
@@ -127,6 +129,60 @@ static void sim_close(struct sim_client *c)
         c->server = -1;
     }
 }
+
+#if !defined(_WIN32)
+/* One real TCP loopback pair: [client] sends and closes, [server] is the end
+ * the listener accepted. Unlike socketpair(2), a TCP close with unread bytes
+ * pending reports POLLIN alone — no POLLHUP until the data is drained — so
+ * only this helper reproduces the CLOSE-WAIT-with-unread-bytes sockets from
+ * the live incident. (On Windows these cases SKIP: WSAPoll's RDHUP
+ * signaling is unverified there.) */
+static bool tcp_pair_open(int *client_fd, int *server_fd)
+{
+    int ls = socket(AF_INET, SOCK_STREAM, 0);
+    if (ls < 0)
+        return false;
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port = 0;
+    bool ok = bind(ls, (struct sockaddr *)&addr, sizeof(addr)) == 0 &&
+              listen(ls, 1) == 0;
+    socklen_t addr_len = sizeof(addr);
+    if (ok && getsockname(ls, (struct sockaddr *)&addr, &addr_len) != 0)
+        ok = false;
+    int client = -1;
+    if (ok) {
+        client = socket(AF_INET, SOCK_STREAM, 0);
+        if (client < 0)
+            ok = false;
+        else if (connect(client, (struct sockaddr *)&addr,
+                         sizeof(addr)) != 0) {
+            close(client);
+            client = -1;
+            ok = false;
+        }
+    }
+    int server = -1;
+    if (ok) {
+        server = accept(ls, NULL, NULL);
+        if (server < 0)
+            ok = false;
+    }
+    close(ls);
+    if (!ok) {
+        if (client >= 0)
+            close(client);
+        if (server >= 0)
+            close(server);
+        return false;
+    }
+    *client_fd = client;
+    *server_fd = server;
+    return true;
+}
+#endif
 
 /* An fd the queue has closed is gone from this process. Only meaningful
  * while nothing else is opening fds, which each case guarantees by
@@ -381,8 +437,132 @@ int test_rpc_frontdoor_slots(void)
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
 
+    /* ── A partial request followed by close must not hold a slot ──
+     *
+     * The live brick: dozens of TCP sockets in CLOSE-WAIT each holding
+     * ~250 unread bytes. A close() with unread data pending reports
+     * POLLIN alone (no POLLHUP until the bytes are drained), and the old
+     * hang-up probe treated "peek returns data" as "peer is alive" — so a
+     * queue full of such entries never shed one and every later client got
+     * an instant 503 while workers idled. socketpair(2) cannot reproduce
+     * this (it reports POLLHUP); only real TCP can. */
+
+    printf("frontdoor reclaims a partial request followed by close... ");
+    {
+#if defined(_WIN32)
+        printf("SKIP (Windows: WSAPoll RDHUP signaling unverified)\n");
+#else
+        struct sim_client dead = { .client = -1, .server = -1 };
+        struct sim_client sim[SIM_MAX];
+        int held[SIM_MAX];
+        int held_dead = -1;
+        bool ok = true;
+
+        rpc_http_test_queue_reset(-1);
+        for (size_t i = 0; i < cap; i++) {
+            sim[i].client = sim[i].server = -1;
+            held[i] = -1;
+        }
+
+        /* One TCP client sends a partial request and closes. The server
+         * end now holds unread bytes plus FIN. */
+        ok = ok && tcp_pair_open(&dead.client, &dead.server);
+        sim_send_request(&dead);
+        held_dead = dead.server;
+        ok = ok && rpc_http_test_queue_admit(dead.server);
+        dead.server = -1;   /* the queue owns it now */
+        sim_hangup(&dead);  /* FIN joins the unread bytes */
+        /* Let the FIN arrive before the reclaim below runs; TCP order
+         * already guarantees data-before-FIN, this only waits out
+         * loopback delivery so the probe sees the steady state. */
+        (void)poll(NULL, 0, 100);
+
+        /* Fill the rest of the queue with live clients. */
+        for (size_t i = 0; i + 1 < cap && ok; i++) {
+            if (!sim_open(&sim[i])) { ok = false; break; }
+            sim_send_request(&sim[i]);
+            held[i] = sim[i].server;
+            ok = rpc_http_test_queue_admit(sim[i].server);
+            sim[i].server = -1;
+        }
+
+        /* One more live client must still be admitted: the dead partial
+         * is reclaimable, so the door is not full. Before the fix this
+         * refused with rejected_busy (the count never self-corrected). */
+        ok = ok && sim_open(&sim[cap - 1]);
+        sim_send_request(&sim[cap - 1]);
+        held[cap - 1] = sim[cap - 1].server;
+        bool admitted = rpc_http_test_queue_admit(sim[cap - 1].server);
+        if (admitted)
+            sim[cap - 1].server = -1;
+        ok = ok && admitted;
+
+        rpc_http_test_queue_stats(&st);
+        ok = ok && st.reclaimed_hangup == 1;
+        ok = ok && st.depth == cap;
+        ok = ok && st.rejected_busy == 0;
+
+        /* Reclaimed means CLOSED: the dead fd has exactly one closer. */
+        ok = ok && fd_is_closed(held_dead);
+
+        /* Arrival order survives: the next entry out is the oldest client
+         * that is still connected. */
+        int taken = rpc_http_test_queue_take();
+        ok = ok && taken == held[0];
+        if (taken >= 0)
+            close(taken);
+
+        rpc_http_test_queue_reset(-1);
+        sim_close(&dead);
+        for (size_t i = 0; i < cap; i++)
+            sim_close(&sim[i]);
+        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
+#endif
+    }
+
+    /* ── N partial-then-close clients never trip busy ──────────── */
+
+    printf("frontdoor survives a run of partial-then-close TCP clients... ");
+    {
+#if defined(_WIN32)
+        printf("SKIP (Windows: WSAPoll RDHUP signaling unverified)\n");
+#else
+        size_t rounds = cap * 2;
+        bool ok = true;
+
+        rpc_http_test_queue_reset(-1);
+        for (size_t i = 0; i < rounds; i++) {
+            struct sim_client c = { .client = -1, .server = -1 };
+            if (!tcp_pair_open(&c.client, &c.server)) { ok = false; break; }
+            sim_send_request(&c);
+            sim_hangup(&c);   /* unread bytes plus FIN on the server end */
+            if (i + 1 == cap)
+                (void)poll(NULL, 0, 100); /* FINs arrive before first reclaim */
+            if (!rpc_http_test_queue_admit(c.server)) {
+                /* Every queued peer already hung up: refusing here is the
+                 * one-way ratchet the incident bricked on. */
+                ok = false;
+                sim_close(&c);
+                break;
+            }
+            c.server = -1;  /* the queue owns it now */
+        }
+
+        rpc_http_test_queue_stats(&st);
+        ok = ok && st.admitted == (uint64_t)rounds;
+        ok = ok && st.rejected_busy == 0;
+        ok = ok && st.depth <= cap;
+        ok = ok && st.reclaimed_hangup > 0;
+
+        rpc_http_test_queue_reset(-1);
+        rpc_http_test_queue_stats(&st);
+        ok = ok && st.depth == 0;
+        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
+#endif
+    }
+
     rpc_http_test_queue_reset(-1);
 
-    printf("\n%d rpc front-door slot tests, %d failed\n", 5, failures);
+    printf("\n%d rpc front-door slot tests, %d failed\n", 7, failures);
     return failures;
 }

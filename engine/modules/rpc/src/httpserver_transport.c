@@ -107,15 +107,26 @@ bool rpc_conn_peer_gone(const struct rpc_conn *conn)
     if (conn->fd == PLATFORM_SOCKET_INVALID)
         return true;
 
-    platform_socket_pollfd pfd = { .fd = conn->fd, .events = POLLIN,
-                                   .revents = 0 };
+    /* Request the read-hangup signal explicitly: on Linux a peer close()
+     * with unread bytes still pending reports POLLIN alone (no POLLHUP
+     * until the bytes are drained), so without POLLRDHUP in the event
+     * mask such an entry looks alive forever — the CLOSE-WAIT-with-unread-
+     * bytes sockets that bricked the front door. Where the OS has no such
+     * signal PLATFORM_SOCKET_POLL_PEER_HALF_CLOSE is 0 (a no-op here) and
+     * the peek below keeps the old behavior. */
+    platform_socket_pollfd pfd = {
+        .fd = conn->fd,
+        .events = POLLIN | PLATFORM_SOCKET_POLL_PEER_HALF_CLOSE,
+        .revents = 0,
+    };
     int result = platform_socket_poll(&pfd, 1, 0);
     if (result < 0)
         return !platform_socket_error_interrupted(
             platform_socket_last_error());
     if (result == 0)
         return false;
-    if (pfd.revents & (POLLHUP | POLLERR | POLLNVAL))
+    if (pfd.revents & (POLLHUP | POLLERR | POLLNVAL |
+                        PLATFORM_SOCKET_POLL_PEER_HALF_CLOSE))
         return true;
     if (pfd.revents & POLLIN) {
         char probe;
