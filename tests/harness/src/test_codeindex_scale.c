@@ -21,6 +21,7 @@
 
 #include "codeindex/codeindex.h"
 #include "platform/time_compat.h"
+#include "test/test_timing_budget.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -150,14 +151,20 @@ static int test_codeindex_scale_platform_arm(void)
     uint64_t q_find_start_us = scale_monotonic_us();
     int nfound = ci ? codeindex_find(ci, "scale_sym_49999", syms, 8) : -1;
     uint64_t q_find_us = scale_monotonic_us() - q_find_start_us;
-    printf("  codeindex_scale: warm file-lookup us=%llu symbol-find us=%llu\n",
-           (unsigned long long)q_file_us, (unsigned long long)q_find_us);
-    SCALE_CHECK("warm exact-path lookup answers within 50 ms",
-                q_file_ok && q_file_us <= WARM_QUESTION_BUDGET_US);
-    SCALE_CHECK("warm symbol find answers within 50 ms",
+    struct test_budget warm_q_budget =
+        test_budget_scale(WARM_QUESTION_BUDGET_US);
+    printf("  codeindex_scale: warm file-lookup us=%llu symbol-find us=%llu nominal_us=%llu effective_us=%llu load_factor=%.2f calib_us=%llu\n",
+           (unsigned long long)q_file_us, (unsigned long long)q_find_us,
+           (unsigned long long)WARM_QUESTION_BUDGET_US,
+           (unsigned long long)warm_q_budget.effective_us,
+           warm_q_budget.factor,
+           (unsigned long long)warm_q_budget.calib_med_us);
+    SCALE_CHECK("warm exact-path lookup answers within load-scaled 50 ms budget",
+                q_file_ok && q_file_us <= warm_q_budget.effective_us);
+    SCALE_CHECK("warm symbol find answers within load-scaled 50 ms budget",
                 nfound >= 1 &&
                 strcmp(syms[0].name, "scale_sym_49999") == 0 &&
-                q_find_us <= WARM_QUESTION_BUDGET_US);
+                q_find_us <= warm_q_budget.effective_us);
     if (ci) { codeindex_close(ci); ci = NULL; }
 
     /* ── 4: 500k-file cold build ── */

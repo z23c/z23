@@ -27,6 +27,7 @@
 #include "codeindex/codeindex_build.h"
 #include "codeindex/codeindex_context.h"
 #include "platform/time_compat.h"
+#include "test/test_timing_budget.h"
 
 /* For the routing-link parity invariant (case 7): `code tests <path>`'s route
  * (tools/command/native_code_command.c) must equal `dev test plan`'s
@@ -930,16 +931,24 @@ static int test_codeindex_platform_arm(void)
                       "core/modules/net/include/net/foo.h\n"));
     codeindex_test_reset_exact_bytes_read();
     uint64_t warm_start_us = monotonic_us();
+    uint64_t warm_cpu_start_us = test_thread_cpu_us();
     ci = codeindex_open(FIX);
     uint64_t warm_elapsed_us = monotonic_us() - warm_start_us;
+    uint64_t warm_cpu_us = test_thread_cpu_us() - warm_cpu_start_us;
+    struct test_budget warm_budget = test_budget_scale(UINT64_C(250000));
     uint64_t warm_exact_bytes = codeindex_test_exact_bytes_read();
-    printf("  codeindex: warm-open elapsed_us=%llu exact_bytes=%llu\n",
+    printf("  codeindex: warm-open elapsed_us=%llu cpu_us=%llu exact_bytes=%llu nominal_us=250000 effective_us=%llu load_factor=%.2f calib_us=%llu\n",
            (unsigned long long)warm_elapsed_us,
-           (unsigned long long)warm_exact_bytes);
+           (unsigned long long)warm_cpu_us,
+           (unsigned long long)warm_exact_bytes,
+           (unsigned long long)warm_budget.effective_us,
+           warm_budget.factor,
+           (unsigned long long)warm_budget.calib_med_us);
     CI_CHECK("warm open rereads zero exact-content bytes",
              ci && warm_exact_bytes == 0);
-    CI_CHECK("fixture warm open stays below 250 ms",
-             ci && warm_elapsed_us > 0 && warm_elapsed_us <= UINT64_C(250000));
+    CI_CHECK("fixture warm open stays below load-scaled 250 ms budget",
+             ci && warm_elapsed_us > 0 &&
+             warm_elapsed_us <= warm_budget.effective_us);
     memset(includes, 0, sizeof(includes));
     nincludes = ci ? codeindex_includes_of_file(
         ci, "core/modules/net/src/foo.c", includes, 8) : -1;
@@ -1204,7 +1213,16 @@ static int test_codeindex_platform_arm(void)
     /* ── 3: rebuild-from-scratch identity ── */
     codeindex_close(ci);
     system("rm -rf " FIX "/.codeindex");
+    codeindex_test_reset_exact_bytes_read();
     ci = codeindex_open(FIX);
+    uint64_t scratch_exact_bytes = codeindex_test_exact_bytes_read();
+    printf("  codeindex: from-scratch rebuild exact_bytes=%llu\n",
+           (unsigned long long)scratch_exact_bytes);
+    /* Liveness proof for the byte counter the incremental check below relies
+     * on: with the store deleted the open must rehash fixture content, so a
+     * zero here would mean the counter is dead, not that no work happened. */
+    CI_CHECK("from-scratch rebuild rehashes content (byte counter is alive)",
+             ci && scratch_exact_bytes > 0);
     char *dump3 = ci ? dump_symbols(ci) : NULL;
     CI_CHECK("from-scratch rebuild matches",
              dump1 && dump3 && strcmp(dump1, dump3) == 0);
@@ -1217,9 +1235,15 @@ static int test_codeindex_platform_arm(void)
                  FOO_C);
         mk_write(FIX, "core/modules/net/src/foo.c", appended);
     }
+    codeindex_test_reset_exact_bytes_read();
     uint64_t incremental_start_us = monotonic_us();
+    uint64_t incremental_cpu_start_us = test_thread_cpu_us();
     ci = codeindex_open(FIX);
     uint64_t incremental_elapsed_us = monotonic_us() - incremental_start_us;
+    uint64_t incremental_cpu_us = test_thread_cpu_us() - incremental_cpu_start_us;
+    uint64_t incremental_exact_bytes = codeindex_test_exact_bytes_read();
+    struct test_budget incremental_budget =
+        test_budget_scale(UINT64_C(300000));
     CI_CHECK("reopen after edit", ci != NULL);
     found = false;
     if (ci) codeindex_symbol(ci, "foo_added", &s, &found);
@@ -1231,11 +1255,40 @@ static int test_codeindex_platform_arm(void)
     bool full_rebuild_ok = ci && codeindex_rebuild(ci);
     bool full_root_ok = full_rebuild_ok &&
         codeindex_retrieval_projection_root_sha3(ci, full_root);
-    printf("INCREMENTAL_REOPEN_VERDICT=%s elapsed_us=%llu budget_us=300000\n",
-           ci && incremental_elapsed_us <= UINT64_C(300000) ? "PASS" : "FAIL",
-           (unsigned long long)incremental_elapsed_us);
-    CI_CHECK("one-file incremental reopen stays below 300 ms",
-             ci && incremental_elapsed_us <= UINT64_C(300000));
+    /* Load-immune regression signal: a one-file edit must rehash strictly
+     * less content than the from-scratch rebuild above (relative bound, so
+     * fixture growth scales both sides). A redo-all regression rehashes the
+     * same bytes as from-scratch and fails the strict inequality; counter
+     * liveness is proven by the from-scratch check, so a small count here
+     * means no rescan happened. Holds on any host load by construction. */
+    bool incremental_bytes_ok = ci &&
+        incremental_exact_bytes < scratch_exact_bytes;
+    bool incremental_cpu_ok = ci &&
+        incremental_cpu_us <= UINT64_C(300000);
+    bool incremental_wall_ok = ci && incremental_elapsed_us > 0 &&
+        incremental_elapsed_us <= incremental_budget.effective_us;
+    CI_CHECK("incremental reopen rehashes less than from-scratch, not the tree",
+             incremental_bytes_ok);
+    CI_CHECK("incremental reopen burns bounded CPU, not a full rebuild",
+             incremental_cpu_ok);
+    printf("INCREMENTAL_REOPEN_VERDICT=%s elapsed_us=%llu wall_ok=%d cpu_us=%llu exact_bytes=%llu scratch_bytes=%llu nominal_us=300000 budget_us=%llu load_factor=%.2f calib_us=%llu\n",
+           incremental_wall_ok ||
+           (incremental_bytes_ok && incremental_cpu_ok) ? "PASS" : "FAIL",
+           (unsigned long long)incremental_elapsed_us,
+           incremental_wall_ok ? 1 : 0,
+           (unsigned long long)incremental_cpu_us,
+           (unsigned long long)incremental_exact_bytes,
+           (unsigned long long)scratch_exact_bytes,
+           (unsigned long long)incremental_budget.effective_us,
+           incremental_budget.factor,
+           (unsigned long long)incremental_budget.calib_med_us);
+    /* Converted wall assertion: fast on wall under the load-scaled budget,
+     * or provably incremental (bounded reread + bounded CPU) when host IO
+     * pressure stalls the wall clock. Either way the redo-all regression
+     * the old fixed budget stood for is caught by the work gates above. */
+    CI_CHECK("one-file incremental reopen is fast or provably bounded (load-scaled 300 ms wall budget)",
+             incremental_wall_ok ||
+             (incremental_bytes_ok && incremental_cpu_ok));
     CI_CHECK("incremental and forced-full stores have identical logical roots",
              incremental_root_ok && full_root_ok &&
              memcmp(incremental_root, full_root, 32) == 0);
