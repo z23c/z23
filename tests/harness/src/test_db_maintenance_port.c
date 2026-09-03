@@ -313,6 +313,18 @@ int test_db_maintenance_port(void)
                    !port2.wal_size_bytes(port2.self, NULL));
     }
 
+    /* Root-body direct calls to the pure classifier (registered-root
+     * reachability binds these to the exact definition). */
+    TEST("wal_ckpt_classify: direct ranking against the exact definition") {
+        ASSERT_EQ(wal_ckpt_classify(true, true, 3, 3), WAL_CKPT_BUSY);
+        ASSERT_EQ(wal_ckpt_classify(false, false, 3, 3), WAL_CKPT_ERROR);
+        ASSERT_EQ(wal_ckpt_classify(true, false, -1, -1), WAL_CKPT_UNKNOWN);
+        ASSERT_EQ(wal_ckpt_classify(true, false, 0, 0), WAL_CKPT_DRAINED);
+        ASSERT_EQ(wal_ckpt_classify(true, false, 5, 0), WAL_CKPT_NOOP);
+        ASSERT_EQ(wal_ckpt_classify(true, false, 5, 3), WAL_CKPT_PARTIAL);
+        PASS();
+    } _test_next:;
+
     failures += t_wal_ckpt_classify_ranking();
     failures += t_wal_ckpt_classify_unknown();
     failures += t_wal_ckpt_classify_counts();
