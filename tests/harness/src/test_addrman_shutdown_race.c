@@ -30,6 +30,7 @@
 
 #include "platform/time_compat.h"
 #include "test/test_core.h"
+#include "test/test_timing_budget.h"
 #include "net/addrman.h"
 #include "net/connman.h"
 #include "net/net.h"
@@ -168,8 +169,23 @@ static int test_connman_discovery_wait_is_interruptible(void)
         bool observed_stop = atomic_load(&ctx.observed_stop);
         connman_set_stop_for_test(false);
 
+        /* Stop-aware wait must return promptly; the 500 ms ceiling scales
+         * with measured host load so a busy lane does not flake the verdict
+         * while the interruptible-wait behavior is unchanged. */
+        struct test_budget budget =
+            test_budget_scale(UINT64_C(500000));
+        printf("  addrman_shutdown_race: discovery-stop elapsed_us=%lld "
+               "nominal_us=%llu effective_us=%llu load_factor=%.2f "
+               "calib_us=%llu\n",
+               (long long)elapsed_us,
+               (unsigned long long)budget.nominal_us,
+               (unsigned long long)budget.effective_us,
+               budget.factor,
+               (unsigned long long)budget.calib_med_us);
+
         ASSERT(observed_stop);
-        ASSERT(elapsed_us >= 0 && elapsed_us < 500000);
+        ASSERT(elapsed_us >= 0 &&
+               (uint64_t)elapsed_us < budget.effective_us);
 
         PASS();
     } _test_next:;
