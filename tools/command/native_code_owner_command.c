@@ -6,18 +6,19 @@
 #include "codeindex/codeindex.h"
 #include "codeindex/codeindex_context.h"
 #include "json/json.h"
+#include "platform/file_metadata.h"
 
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
 
 /* `exists` means tracked-or-on-disk: the path appears in the current verified
- * code-index generation OR a lstat() of <root>/<path> succeeds. The index is
- * the authority for indexed source; the lstat covers paths outside the
- * maintained source roots (docs prose, fixtures, generated files). */
+ * code-index generation OR the platform metadata boundary finds an object at
+ * <root>/<path>. The index is the authority for indexed source; the metadata
+ * check covers paths outside the maintained source roots (docs prose,
+ * fixtures, generated files) without exposing POSIX path APIs on Windows. */
 static const char *owner_source_root(
     const struct zcl_command_request *request)
 {
@@ -41,8 +42,9 @@ static bool owner_on_disk(const char *root, const char *path)
     int n = snprintf(full, sizeof(full), "%s/%s", root, path);
     if (n <= 0 || (size_t)n >= sizeof(full))
         return false;
-    struct stat st;
-    return lstat(full, &st) == 0;
+    enum platform_file_shape shape = platform_file_shape_read(full);
+    return shape != PLATFORM_FILE_SHAPE_MISSING &&
+           shape != PLATFORM_FILE_SHAPE_UNREADABLE;
 }
 
 /* The first path component is the physical authority room (core/, engine/,

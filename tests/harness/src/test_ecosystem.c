@@ -35,6 +35,21 @@ static bool spill(const char *path, const char *text)
     return fclose(f) == 0 && ok;
 }
 
+static bool ecosystem_mtime_equal(const struct stat *left,
+                                  const struct stat *right)
+{
+#if defined(_WIN32)
+    /* UCRT exposes only the second-resolution compatibility member. */
+    return left->st_mtime == right->st_mtime;
+#elif defined(__APPLE__)
+    return left->st_mtimespec.tv_sec == right->st_mtimespec.tv_sec &&
+           left->st_mtimespec.tv_nsec == right->st_mtimespec.tv_nsec;
+#else
+    return left->st_mtim.tv_sec == right->st_mtim.tv_sec &&
+           left->st_mtim.tv_nsec == right->st_mtim.tv_nsec;
+#endif
+}
+
 static bool mkdir_p(const char *dir, const char *rel)
 {
     char path[1024];
@@ -453,10 +468,7 @@ int test_ecosystem(void)
                   json_get_int(json_get(&reply.data, "indexed_c23_files")) >=
                       1 &&
                   stat(store_path, &store_after) == 0 &&
-                  store_after.st_mtim.tv_sec ==
-                      store_before.st_mtim.tv_sec &&
-                  store_after.st_mtim.tv_nsec ==
-                      store_before.st_mtim.tv_nsec);
+                  ecosystem_mtime_equal(&store_after, &store_before));
     zcl_command_reply_free(&reply);
 
     json_free(&input);

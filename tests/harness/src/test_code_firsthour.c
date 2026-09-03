@@ -167,6 +167,26 @@ static int test_fh_owner_unowned(void)
     return failures;
 }
 
+static int test_fh_owner_unindexed_on_disk(void)
+{
+    int failures = 0;
+    TEST("code_firsthour: an unindexed on-disk path is reported present") {
+        struct zcl_command_reply reply;
+        fh_call(zcl_native_handle_code_owner, "zcl.code_owner.v1",
+                "code.owner", "docs/examples/firsthour_documented.c", NULL,
+                &reply);
+        ASSERT(reply.status != ZCL_COMMAND_STATUS_FAILED);
+        ASSERT(json_get_bool(json_get(&reply.data, "exists")));
+        ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "verdict")),
+                      "UNOWNED");
+        ASSERT(strstr(json_get_str(json_get(&reply.data, "summary")),
+                      "present on disk") != NULL);
+        zcl_command_reply_free(&reply);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_fh_owner_missing_path(void)
 {
     int failures = 0;
@@ -377,6 +397,7 @@ int test_code_firsthour(void)
     failures += test_fh_owner_sealed();
     failures += test_fh_owner_module();
     failures += test_fh_owner_unowned();
+    failures += test_fh_owner_unindexed_on_disk();
     failures += test_fh_owner_missing_path();
     failures += test_fh_cost_unmeasured();
     failures += test_fh_cost_measured();
