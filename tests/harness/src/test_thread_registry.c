@@ -7,6 +7,7 @@
 
 #include <pthread.h>
 #include <stdatomic.h>
+#include <string.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -241,6 +242,62 @@ static int t_registry_rejects_null_entry(void)
     return failures;
 }
 
+/* ── thread_registry_snapshot ──────────────────────────────────────────
+ *
+ * Pinned against live registered workers: the snapshot returns exactly
+ * the live entries with their exact registered names, honours the `cap`
+ * truncation, and reports 0 for a zero cap. The registry mutex is held
+ * only briefly inside the call, so the snapshot is consistent without
+ * the callers freezing the world. One function per TEST, as the
+ * harness's hardcoded `goto _test_next` requires. */
+static int t_registry_snapshot(void)
+{
+    int failures = 0;
+    thread_registry_reset_for_test();
+
+    TEST("thread_registry: snapshot lists exact live names and honours cap") {
+        struct worker_ctx ctx = {0};
+        const int N = 3;
+        for (int i = 0; i < N; i++) {
+            char name[32];
+            snprintf(name, sizeof(name), "tr-snap-%d", i);
+            ASSERT_EQ(thread_registry_spawn(name, tr_worker, &ctx, NULL), 0);
+        }
+        int waited_ms = 0;
+        while (atomic_load_explicit(&ctx.started, memory_order_relaxed) < N
+               && waited_ms < 5000) {
+            struct timespec ts = {.tv_sec = 0, .tv_nsec = 10 * 1000 * 1000};
+            nanosleep(&ts, NULL);
+            waited_ms += 10;
+        }
+        ASSERT_EQ(atomic_load_explicit(&ctx.started, memory_order_relaxed),
+                  N);
+
+        struct thread_registry_view out[8];
+        int n = thread_registry_snapshot(out, 8);
+        ASSERT_EQ(n, N);
+        for (int i = 0; i < N; i++) {
+            char want[32];
+            snprintf(want, sizeof(want), "tr-snap-%d", i);
+            ASSERT(strncmp(out[i].name, want, sizeof(out[i].name)) == 0);
+        }
+
+        /* cap=2 truncates to exactly 2, preserving registry order. */
+        struct thread_registry_view few[2];
+        ASSERT_EQ(thread_registry_snapshot(few, 2), 2);
+        ASSERT(strncmp(few[0].name, "tr-snap-0", sizeof(few[0].name)) == 0);
+        ASSERT(strncmp(few[1].name, "tr-snap-1", sizeof(few[1].name)) == 0);
+
+        /* Zero cap writes nothing and reports 0. */
+        ASSERT_EQ(thread_registry_snapshot(out, 0), 0);
+
+        thread_registry_request_shutdown();
+        ASSERT_EQ(thread_registry_join_all(10), 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_thread_registry(void);
 
 int test_thread_registry(void)
@@ -251,6 +308,7 @@ int test_thread_registry(void)
     failures += t_registry_darwin_stack_headroom();
 #endif
     failures += t_registry_rejects_null_entry();
+    failures += t_registry_snapshot();
     failures += t_registry_stress_50_threads();
     failures += t_registry_reports_straggler();
     failures += t_registry_owned_join_waits_for_straggler();
