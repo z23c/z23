@@ -761,7 +761,7 @@ int test_sticky_escalator(void)
         sticky_escalator_set_datadir(dir);
 
         SE_CHECK("T4: plant a pending (non-terminal) reindex request",
-                 boot_auto_reindex_request(dir, 900) == 1 &&
+                 boot_auto_reindex_request(dir, 900, BOOT_AUTO_REINDEX_REASON_UNSPECIFIED) == 1 &&
                  boot_auto_reindex_pending(dir));
 
         sticky_escalator_note_stall("test_t4_withdraw");
@@ -796,7 +796,7 @@ int test_sticky_escalator(void)
         sticky_escalator_set_datadir(dir);
 
         SE_CHECK("T5: plant a pending reindex request ABOVE the clearing tip",
-                 boot_auto_reindex_request(dir, 1500) == 1 &&
+                 boot_auto_reindex_request(dir, 1500, BOOT_AUTO_REINDEX_REASON_UNSPECIFIED) == 1 &&
                  boot_auto_reindex_pending(dir));
 
         sticky_escalator_note_stall("test_t5_keep");

@@ -878,7 +878,9 @@ int syncdiag_cases_agent_interface(void)
                                                 "safe_default_action")),
                           "deploy_dev_lane") == 0;
 
-        ok = ok && boot_auto_reindex_request(guard_devdir, 3172354) == 1;
+        ok = ok && boot_auto_reindex_request(
+                      guard_devdir, 3172354,
+                      BOOT_AUTO_REINDEX_REASON_UNSPECIFIED) == 1;
         struct json_value pending_guard;
         json_init(&pending_guard);
         ok = ok && rpc_table_execute(&tbl, "agentdeployguard",

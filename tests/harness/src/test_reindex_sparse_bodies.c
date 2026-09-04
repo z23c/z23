@@ -193,7 +193,7 @@ int test_reindex_sparse_bodies(void)
     RSB_CHECK("coins-best marker seeded at H (hash-verified)",
              rsb_write_coins_best(dir, H, true));
 
-    int n1 = boot_auto_reindex_request(dir, H);
+    int n1 = boot_auto_reindex_request(dir, H, BOOT_AUTO_REINDEX_REASON_UNSPECIFIED);
     RSB_CHECK("auto_reindex_request sentinel armed on pass 1", n1 == 1);
     RSB_CHECK("sentinel PENDS after arming (pass 1)",
              boot_auto_reindex_pending(dir));
@@ -230,7 +230,7 @@ int test_reindex_sparse_bodies(void)
      * refuse AGAIN (deterministic on unchanged inputs, not a one-shot
      * fluke) and the sentinel must NOT be left pending once the pass
      * completes: no re-arm, no unbounded reindex-then-clear loop. */
-    int n2 = boot_auto_reindex_request(dir, H);
+    int n2 = boot_auto_reindex_request(dir, H, BOOT_AUTO_REINDEX_REASON_UNSPECIFIED);
     RSB_CHECK("sentinel re-arms via the boot pass's OWN detection (pass 2, "
              "not a leftover from pass 1)", n2 >= 1);
     bool refuses2 = boot_reindex_coverage_would_refuse(scan_reindex_best,

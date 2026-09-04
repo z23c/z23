@@ -128,9 +128,14 @@ json_first_string_field() {
         | sed -n "s/^\"${key}\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\"$/\1/p"
 }
 auto_reindex_status() {
-    local anchor="" count=""
+    # The marker is "<anchor> <count> <reason>". The reason field is OPTIONAL:
+    # a marker written before the reason class existed has only two fields.
+    # Reading two names out of a three-field line would leave count="1 1",
+    # fail the digit check, and report a genuinely PENDING rebuild as
+    # malformed - a deploy guard that fails OPEN over a formatting detail.
+    local anchor="" count="" reason=""
     [ -r "$AUTO_REINDEX_SENTINEL" ] || return 1
-    read -r anchor count < "$AUTO_REINDEX_SENTINEL" || return 1
+    read -r anchor count reason < "$AUTO_REINDEX_SENTINEL" || return 1
     [[ "$anchor" =~ ^-?[0-9]+$ ]] || return 1
     [[ "$count" =~ ^-?[0-9]+$ ]] || return 1
     printf '%s %s\n' "$anchor" "$count"

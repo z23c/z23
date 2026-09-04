@@ -80,7 +80,8 @@ stage_db_fault_note(struct stage_db_fault *f, int rc, const char *datadir,
      * repeated runtime fault episodes must not burn boot attempts that never
      * ran (the sticky-escalator reindex rung applies the same gate). */
     if (datadir && datadir[0] && !boot_auto_reindex_pending(datadir)) {
-        int req = boot_auto_reindex_request(datadir, anchor);
+        int req = boot_auto_reindex_request(
+            datadir, anchor, BOOT_AUTO_REINDEX_REASON_UNSPECIFIED);
         if (req == 0)
             LOG_WARN("stage_db_fault",
                      "[stage_db_fault] auto-reindex request write failed ctx=%s "

@@ -109,7 +109,8 @@ bool boot_crashonly_handle_unrecoverable(const char *datadir, int tip_h,
      * bounded self-rebuild; the caller exits and the restart re-enters with the
      * reindex. */
     if (zero_nbits == 0) {
-        int n = boot_auto_reindex_request(datadir, tip_h);
+        int n = boot_auto_reindex_request(
+            datadir, tip_h, BOOT_AUTO_REINDEX_REASON_UNSPECIFIED);
         if (n >= 1 && n <= BOOT_AUTO_REINDEX_MAX) {
             fprintf(stderr,
                 "[boot] crash-only recovery: post-restore tip-above-extent at "
@@ -200,7 +201,8 @@ enum boot_gate_action boot_crashonly_storage_gate(const char *datadir,
         return BOOT_GATE_PARK_DEGRADED;
     }
 
-    int n = boot_auto_reindex_request(datadir, BOOT_STORAGE_EPISODE_ANCHOR);
+    int n = boot_auto_reindex_request(datadir, BOOT_STORAGE_EPISODE_ANCHOR,
+                                      BOOT_AUTO_REINDEX_REASON_UNSPECIFIED);
     if (n >= 1 && n <= BOOT_AUTO_REINDEX_MAX) {
         fprintf(stderr,
             "[boot] crash-only recovery: boot-storage gate '%s' failed "

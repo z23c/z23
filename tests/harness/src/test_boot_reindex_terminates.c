@@ -23,6 +23,10 @@
  *       pend as reindex requests (a datadir that recovers on attempt 2 still
  *       recovers); the budget is keyed on a STABLE identity so a moving tip
  *       cannot re-arm the cap.
+ *
+ * Section (I) guards the on-disk format of the request itself: the marker now
+ * carries the REASON the rebuild was armed, and a marker written before that
+ * field existed must still parse and keep its budget.
  */
 
 #include "test/test_core.h"
@@ -72,7 +76,7 @@ int test_boot_reindex_terminates(void)
         bool climb_ok = true;
         bool pend_ok = true;
         for (int i = 1; i <= BOOT_AUTO_REINDEX_MAX; i++) {
-            int n = boot_auto_reindex_request(dir, ANCHOR);
+            int n = boot_auto_reindex_request(dir, ANCHOR, BOOT_AUTO_REINDEX_REASON_UNSPECIFIED);
             climb_ok &= (n == i);
             pend_ok &= boot_auto_reindex_pending(dir);
         }
@@ -104,7 +108,7 @@ int test_boot_reindex_terminates(void)
         /* And a fresh request at the SAME anchor must NOT re-arm a count=1 — it
          * stays terminal (this is exactly the unbounded-loop re-arm the fix
          * kills). The sentinel is NOT deleted across this call. */
-        int after = boot_auto_reindex_request(dir, ANCHOR);
+        int after = boot_auto_reindex_request(dir, ANCHOR, BOOT_AUTO_REINDEX_REASON_UNSPECIFIED);
         BR_CHECK("terminal: request does NOT re-arm (returns TERMINAL)",
                  after == BOOT_AUTO_REINDEX_TERMINAL);
         BR_CHECK("terminal: still terminal after a re-request attempt",
@@ -128,7 +132,7 @@ int test_boot_reindex_terminates(void)
 
         const int32_t ANCHOR = 7654321;
 
-        int n1 = boot_auto_reindex_request(dir, ANCHOR);
+        int n1 = boot_auto_reindex_request(dir, ANCHOR, BOOT_AUTO_REINDEX_REASON_UNSPECIFIED);
         BR_CHECK("recoverable: attempt 1 -> count 1, pends, not terminal",
                  n1 == 1 && boot_auto_reindex_pending(dir) &&
                  !boot_auto_reindex_is_terminal(dir));
@@ -139,7 +143,7 @@ int test_boot_reindex_terminates(void)
          * still the success path — only EXHAUSTION must not clear). */
         BR_CHECK("recoverable: attempt 1 consume requests reindex (true)",
                  boot_crashonly_consume_reindex_request(dir));
-        int n2 = boot_auto_reindex_request(dir, ANCHOR);
+        int n2 = boot_auto_reindex_request(dir, ANCHOR, BOOT_AUTO_REINDEX_REASON_UNSPECIFIED);
         BR_CHECK("recoverable: attempt 2 -> count 2 (NOT falsely exhausted)",
                  n2 == 2 && boot_auto_reindex_pending(dir) &&
                  !boot_auto_reindex_is_terminal(dir));
@@ -151,7 +155,7 @@ int test_boot_reindex_terminates(void)
                  !boot_auto_reindex_is_terminal(dir));
 
         /* A genuinely-new wedge starts a fresh count=1. */
-        int n3 = boot_auto_reindex_request(dir, ANCHOR + 50);
+        int n3 = boot_auto_reindex_request(dir, ANCHOR + 50, BOOT_AUTO_REINDEX_REASON_UNSPECIFIED);
         BR_CHECK("recoverable: post-clear new wedge starts fresh at count 1",
                  n3 == 1);
 
@@ -170,9 +174,9 @@ int test_boot_reindex_terminates(void)
         mkdir_p_br(dir);
 
         /* A different (lower) tip on each boot of the SAME corrupt episode. */
-        int n_a = boot_auto_reindex_request(dir, 5000);
-        int n_b = boot_auto_reindex_request(dir, 4990);
-        int n_c = boot_auto_reindex_request(dir, 4980);
+        int n_a = boot_auto_reindex_request(dir, 5000, BOOT_AUTO_REINDEX_REASON_UNSPECIFIED);
+        int n_b = boot_auto_reindex_request(dir, 4990, BOOT_AUTO_REINDEX_REASON_UNSPECIFIED);
+        int n_c = boot_auto_reindex_request(dir, 4980, BOOT_AUTO_REINDEX_REASON_UNSPECIFIED);
         BR_CHECK("moving tip: count climbs 1,2,3 despite a moving anchor",
                  n_a == 1 && n_b == 2 && n_c == 3);
         BR_CHECK("moving tip: budget reaches the cap (== MAX)",
@@ -208,7 +212,7 @@ int test_boot_reindex_terminates(void)
         mkdir_p_br(dir);
 
         const int32_t ANCHOR = 4321;
-        int n1 = boot_auto_reindex_request(dir, ANCHOR);
+        int n1 = boot_auto_reindex_request(dir, ANCHOR, BOOT_AUTO_REINDEX_REASON_UNSPECIFIED);
         BR_CHECK("covered: request starts pending",
                  n1 == 1 && boot_auto_reindex_pending(dir));
         BR_CHECK("covered: below-anchor coins-best does not clear (even verified)",
@@ -227,13 +231,13 @@ int test_boot_reindex_terminates(void)
 
         /* Re-arm to check the above-anchor path (reducer moved on) clears
          * regardless of hash verification. */
-        (void)boot_auto_reindex_request(dir, ANCHOR);
+        (void)boot_auto_reindex_request(dir, ANCHOR, BOOT_AUTO_REINDEX_REASON_UNSPECIFIED);
         BR_CHECK("covered: above-anchor clears stale request (reducer moved on)",
                  boot_crashonly_clear_reindex_request_if_covered(
                      dir, ANCHOR + 1, false) &&
                  !boot_auto_reindex_pending(dir));
 
-        int n2 = boot_auto_reindex_request(dir, 0);
+        int n2 = boot_auto_reindex_request(dir, 0, BOOT_AUTO_REINDEX_REASON_UNSPECIFIED);
         BR_CHECK("covered: boot-storage anchor 0 starts pending",
                  n2 == 1 && boot_auto_reindex_pending(dir));
         BR_CHECK("covered: boot-storage anchor 0 is never stale-cleared",
@@ -273,7 +277,7 @@ int test_boot_reindex_terminates(void)
                  !boot_auto_reindex_is_terminal(dir));
 
         /* A stale sentinel from a prior boot is cleared by the refusal. */
-        (void)boot_auto_reindex_request(dir, 0);
+        (void)boot_auto_reindex_request(dir, 0, BOOT_AUTO_REINDEX_REASON_UNSPECIFIED);
         BR_CHECK("storage gate: stale sentinel present before refusal",
                  boot_auto_reindex_pending(dir));
         a = boot_crashonly_storage_gate(dir, "coins_view_integrity",
@@ -314,7 +318,9 @@ int test_boot_reindex_terminates(void)
         test_fmt_tmpdir(dir, sizeof(dir), "boot_reindex_term", "coverage");
         mkdir_p_br(dir);
 
-        (void)boot_auto_reindex_request(dir, 0);   /* a pending sentinel */
+        /* a pending sentinel */
+        (void)boot_auto_reindex_request(
+            dir, 0, BOOT_AUTO_REINDEX_REASON_UNSPECIFIED);
         bool ok = boot_crashonly_reindex_coverage_ok(dir, 3000000, 0, 1,
                                                      /*coins_seeded=*/true);
         BR_CHECK("coverage decision: seeded+sparse refuses reindex", !ok);
@@ -324,7 +330,7 @@ int test_boot_reindex_terminates(void)
 
         /* A simulated SECOND boot re-derives the same sparse coverage: it must
          * again refuse+clear (idempotent), never leaving a reindex armed. */
-        (void)boot_auto_reindex_request(dir, 0);
+        (void)boot_auto_reindex_request(dir, 0, BOOT_AUTO_REINDEX_REASON_UNSPECIFIED);
         ok = boot_crashonly_reindex_coverage_ok(dir, 3000000, 0, 1, true);
         BR_CHECK("coverage decision: second boot still refuses + stays cleared",
                  !ok && !boot_auto_reindex_pending(dir));
@@ -335,6 +341,56 @@ int test_boot_reindex_terminates(void)
         BR_CHECK("coverage decision: seeded+dense proceeds (true)",
                  boot_crashonly_reindex_coverage_ok(dir, 100000, 100000, 100001,
                                                     /*coins_seeded=*/true));
+
+        test_cleanup_tmpdir(dir);
+    }
+
+
+    /* ──────────────────────────────────────────────────────────────────
+     * (I) On-disk format compatibility. A request written by an older binary
+     * has two fields and no reason; it must still parse, keep its budget, and
+     * read back as UNSPECIFIED — the class that preserves the historical
+     * clear. Dropping it would silently re-arm the loop across an upgrade.
+     * ────────────────────────────────────────────────────────────────── */
+    {
+        char dir[256];
+        test_fmt_tmpdir(dir, sizeof(dir), "boot_reindex_term", "legacy");
+        mkdir_p_br(dir);
+
+        char path[512];
+        (void)snprintf(path, sizeof(path), "%s/auto_reindex_request", dir);
+        FILE *f = fopen(path, "w");
+        bool wrote = f && fprintf(f, "4321 2\n") > 0;
+        if (f) fclose(f);
+
+        int32_t anchor = 0;
+        int count = 0;
+        BR_CHECK("legacy: a 2-field request still parses with its budget",
+                 wrote && boot_auto_reindex_status(dir, &anchor, &count) &&
+                 anchor == 4321 && count == 2);
+        BR_CHECK("legacy: it reads back as UNSPECIFIED (historical clear)",
+                 boot_auto_reindex_reason_of(dir) ==
+                     BOOT_AUTO_REINDEX_REASON_UNSPECIFIED);
+        BR_CHECK("legacy: the next arming continues the budget at 3",
+                 boot_auto_reindex_request(
+                     dir, 4321, BOOT_AUTO_REINDEX_REASON_UNSPECIFIED) == 3);
+
+        /* And escalating a legacy request to INDEX_INTEGRITY sticks, so an
+         * upgrade mid-episode still protects the remaining attempts. */
+        boot_auto_reindex_clear(dir);
+        f = fopen(path, "w");
+        if (f) { (void)fprintf(f, "4321 1\n"); fclose(f); }
+        (void)boot_auto_reindex_request(
+            dir, 4321, BOOT_AUTO_REINDEX_REASON_INDEX_INTEGRITY);
+        BR_CHECK("legacy: escalation to INDEX_INTEGRITY sticks",
+                 boot_auto_reindex_reason_of(dir) ==
+                     BOOT_AUTO_REINDEX_REASON_INDEX_INTEGRITY);
+        /* ...and never demotes when a later boot re-arms with a weaker class. */
+        (void)boot_auto_reindex_request(
+            dir, 4321, BOOT_AUTO_REINDEX_REASON_UNSPECIFIED);
+        BR_CHECK("legacy: a weaker later arming does NOT demote the class",
+                 boot_auto_reindex_reason_of(dir) ==
+                     BOOT_AUTO_REINDEX_REASON_INDEX_INTEGRITY);
 
         test_cleanup_tmpdir(dir);
     }

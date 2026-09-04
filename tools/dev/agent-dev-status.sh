@@ -233,9 +233,13 @@ boot_status_json() {
 }
 
 auto_reindex_json() {
-    local anchor="" count="" pending="false" malformed="false"
+    # "<anchor> <count> <reason>", where the reason field is OPTIONAL (a marker
+    # written before the reason class existed has only two fields). Reading two
+    # names out of a three-field line leaves count="1 1", which fails the digit
+    # check below and reports a genuinely PENDING rebuild as malformed.
+    local anchor="" count="" reason="" pending="false" malformed="false"
     if [ -r "$AUTO_REINDEX_SENTINEL" ]; then
-        read -r anchor count < "$AUTO_REINDEX_SENTINEL" || malformed="true"
+        read -r anchor count reason < "$AUTO_REINDEX_SENTINEL" || malformed="true"
         if ! [[ "$anchor" =~ ^-?[0-9]+$ ]] ||
            ! [[ "$count" =~ ^-?[0-9]+$ ]]; then
             malformed="true"

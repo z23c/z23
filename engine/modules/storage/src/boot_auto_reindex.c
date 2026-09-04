@@ -5,9 +5,15 @@
  * Crash-only recovery primitive: a bounded, fsync-durable on-disk request that
  * the next boot consumes to rebuild derived state via -reindex-chainstate
  * (rewind to the consistent reindex target + replay from blocks/). Top-level
- * file <datadir>/auto_reindex_request holding "<anchor_height> <count>",
- * NEVER part of any derived-state wipe set so the attempt budget survives
- * every rebuild tier and a crash mid-rebuild.
+ * file <datadir>/auto_reindex_request holding
+ * "<anchor_height> <count> <reason>", NEVER part of any derived-state wipe set
+ * so the attempt budget survives every rebuild tier and a crash mid-rebuild.
+ *
+ * FORMAT COMPATIBILITY: a request written before the reason class existed has
+ * only two fields. It still parses, and reads back as
+ * BOOT_AUTO_REINDEX_REASON_UNSPECIFIED — the class that keeps the historical
+ * coins-best stale-clear behaviour. An upgrade therefore never turns an
+ * in-flight request into an unclearable one.
  */
 
 #include "storage/boot_auto_reindex.h"
@@ -26,12 +32,36 @@ static void ar_path(const char *datadir, char *out, size_t n)
     snprintf(out, n, "%s/auto_reindex_request", datadir);
 }
 
-/* Read the on-disk (anchor, count). Returns true iff a well-formed request was
- * read. On any read/parse miss, *anchor=0 and *count=0. */
-static bool ar_read(const char *path, int32_t *anchor, int *count)
+static bool reason_is_known(int reason)
+{
+    return reason == BOOT_AUTO_REINDEX_REASON_UNSPECIFIED ||
+           reason == BOOT_AUTO_REINDEX_REASON_INDEX_INTEGRITY;
+}
+
+const char *boot_auto_reindex_reason_name(int reason)
+{
+    switch (reason) {
+    case BOOT_AUTO_REINDEX_REASON_INDEX_INTEGRITY:
+        return "index_integrity";
+    case BOOT_AUTO_REINDEX_REASON_UNSPECIFIED:
+        return "unspecified";
+    default:
+        /* An unknown class from a NEWER binary that wrote this datadir. Name it
+         * rather than silently rendering it as "unspecified", which would tell
+         * the reader the opposite of the truth. */
+        return "unrecognised";
+    }
+}
+
+/* Read the on-disk (anchor, count, reason). Returns true iff a well-formed
+ * request was read. A legacy 2-field request reads back with
+ * *reason = BOOT_AUTO_REINDEX_REASON_UNSPECIFIED. On any read/parse miss,
+ * *anchor=0, *count=0 and *reason=UNSPECIFIED. */
+static bool ar_read(const char *path, int32_t *anchor, int *count, int *reason)
 {
     *anchor = 0;
     *count = 0;
+    *reason = BOOT_AUTO_REINDEX_REASON_UNSPECIFIED;
     struct platform_positioned_file file;
     struct platform_positioned_file_snapshot before, after;
     platform_positioned_file_init(&file);
@@ -53,21 +83,31 @@ static bool ar_read(const char *path, int32_t *anchor, int *count)
     platform_positioned_file_close(&file);
     if (ok) {
         buf[before.size] = '\0';
-        ok = sscanf(buf, "%d %d", anchor, count) == 2;
+        /* Two fields is the legacy request; three carries the reason class.
+         * Accept both — refusing the legacy shape would silently drop an
+         * in-flight budget across the upgrade and re-arm the loop this module
+         * exists to bound. */
+        int fields = sscanf(buf, "%d %d %d", anchor, count, reason);
+        if (fields == 2)
+            *reason = BOOT_AUTO_REINDEX_REASON_UNSPECIFIED;
+        ok = fields >= 2;
     }
     if (!ok) {
         *anchor = 0;
         *count = 0;
+        *reason = BOOT_AUTO_REINDEX_REASON_UNSPECIFIED;
     }
     return ok;
 }
 
-/* fsync-durable write of "<anchor> <count>\n". Returns true on success. */
+/* fsync-durable write of "<anchor> <count> <reason>\n". Returns true on
+ * success. */
 static bool ar_write(const char *datadir, const char *path,
-                     int32_t anchor, int count)
+                     int32_t anchor, int count, int reason)
 {
     char buf[64];
-    int len = snprintf(buf, sizeof(buf), "%d %d\n", (int)anchor, count);
+    int len = snprintf(buf, sizeof(buf), "%d %d %d\n", (int)anchor, count,
+                       reason);
     if (len < 0 || len >= (int)sizeof(buf))
         return false;
 
@@ -103,17 +143,20 @@ static bool ar_write(const char *datadir, const char *path,
     return true;
 }
 
-int boot_auto_reindex_request(const char *datadir, int32_t anchor)
+int boot_auto_reindex_request(const char *datadir, int32_t anchor, int reason)
 {
     if (!datadir)
         return 0;
+    if (!reason_is_known(reason))
+        reason = BOOT_AUTO_REINDEX_REASON_UNSPECIFIED;
 
     char path[512];
     ar_path(datadir, path, sizeof(path));
 
     int32_t cur_anchor = 0;
     int cur_count = 0;
-    ar_read(path, &cur_anchor, &cur_count);
+    int cur_reason = BOOT_AUTO_REINDEX_REASON_UNSPECIFIED;
+    ar_read(path, &cur_anchor, &cur_count, &cur_reason);
 
     /* TERMINAL already written: the budget was exhausted at a stable anchor and
      * the operator was paged. Do NOT re-arm a fresh count — that is exactly the
@@ -129,15 +172,22 @@ int boot_auto_reindex_request(const char *datadir, int32_t anchor)
      * old episode cleared, a genuinely new wedge) starts a fresh episode at 1. */
     int32_t new_anchor;
     int new_count;
+    int new_reason;
     if (cur_count > 0) {
         new_anchor = (anchor < cur_anchor) ? anchor : cur_anchor;
         new_count = cur_count + 1;
+        /* Reason escalates and never demotes within an episode: one boot that
+         * saw block-index mismatches is enough to keep the whole episode out of
+         * the coins-best stale-clear, even if a later boot re-arms with a
+         * weaker class. Demotion would hand the clear path back its veto. */
+        new_reason = (reason > cur_reason) ? reason : cur_reason;
     } else {
         new_anchor = anchor;
         new_count = 1;
+        new_reason = reason;
     }
 
-    if (!ar_write(datadir, path, new_anchor, new_count))
+    if (!ar_write(datadir, path, new_anchor, new_count, new_reason))
         return 0;
     return new_count;
 }
@@ -148,7 +198,14 @@ bool boot_auto_reindex_mark_terminal(const char *datadir, int32_t anchor)
         return false;
     char path[512];
     ar_path(datadir, path, sizeof(path));
-    return ar_write(datadir, path, anchor, BOOT_AUTO_REINDEX_TERMINAL);
+    /* The terminal marker preserves the recorded reason class so an operator
+     * (and `boot_auto_reindex_reason_of`) can still see WHY the budget was
+     * spent after the node parks. */
+    int32_t a = 0;
+    int c = 0;
+    int r = BOOT_AUTO_REINDEX_REASON_UNSPECIFIED;
+    ar_read(path, &a, &c, &r);
+    return ar_write(datadir, path, anchor, BOOT_AUTO_REINDEX_TERMINAL, r);
 }
 
 bool boot_auto_reindex_is_terminal(const char *datadir)
@@ -159,7 +216,8 @@ bool boot_auto_reindex_is_terminal(const char *datadir)
     ar_path(datadir, path, sizeof(path));
     int32_t a = 0;
     int c = 0;
-    if (!ar_read(path, &a, &c))
+    int r = BOOT_AUTO_REINDEX_REASON_UNSPECIFIED;
+    if (!ar_read(path, &a, &c, &r))
         return false;
     return c == BOOT_AUTO_REINDEX_TERMINAL;
 }
@@ -176,7 +234,8 @@ bool boot_auto_reindex_pending(const char *datadir)
      * next boot must NOT consume it as a reindex request. */
     int32_t a = 0;
     int c = 0;
-    if (ar_read(path, &a, &c) && c == BOOT_AUTO_REINDEX_TERMINAL)
+    int r = BOOT_AUTO_REINDEX_REASON_UNSPECIFIED;
+    if (ar_read(path, &a, &c, &r) && c == BOOT_AUTO_REINDEX_TERMINAL)
         return false;
     return true;
 }
@@ -195,13 +254,28 @@ bool boot_auto_reindex_status(const char *datadir, int32_t *anchor,
     ar_path(datadir, path, sizeof(path));
     int32_t a = 0;
     int c = 0;
-    if (!ar_read(path, &a, &c))
+    int r = BOOT_AUTO_REINDEX_REASON_UNSPECIFIED;
+    if (!ar_read(path, &a, &c, &r))
         return false;
     if (anchor)
         *anchor = a;
     if (count)
         *count = c;
     return true;
+}
+
+int boot_auto_reindex_reason_of(const char *datadir)
+{
+    if (!datadir)
+        return BOOT_AUTO_REINDEX_REASON_UNSPECIFIED;
+    char path[512];
+    ar_path(datadir, path, sizeof(path));
+    int32_t a = 0;
+    int c = 0;
+    int r = BOOT_AUTO_REINDEX_REASON_UNSPECIFIED;
+    if (!ar_read(path, &a, &c, &r))
+        return BOOT_AUTO_REINDEX_REASON_UNSPECIFIED;
+    return r;
 }
 
 void boot_auto_reindex_clear(const char *datadir)

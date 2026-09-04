@@ -488,8 +488,9 @@ static enum sticky_rung_result rung_reindex_default(void)
         return STICKY_RUNG_PROGRESSING;
     }
     int64_t tip = observe_tip();
-    int rc = boot_auto_reindex_request(g_datadir,
-                                       (int32_t)(tip > 0 ? tip : 0));
+    int rc = boot_auto_reindex_request(
+        g_datadir, (int32_t)(tip > 0 ? tip : 0),
+        BOOT_AUTO_REINDEX_REASON_UNSPECIFIED);
     event_emitf(EV_RECOVERY_ACTION, 0,
                 "action=sticky-reindex-request anchor=%lld rc=%d",
                 (long long)tip, rc);

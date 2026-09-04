@@ -988,7 +988,9 @@ static int handle_auto_reindex_request(struct chaos_ctx *ctx, int argc,
     if (parse_anchor_arg(argc, argv, "anchor", &anchor, line_no) != 0)
         return -EINVAL;
 
-    int count = boot_auto_reindex_request(ctx->auto_reindex_datadir, anchor);
+    int count = boot_auto_reindex_request(
+        ctx->auto_reindex_datadir, anchor,
+        BOOT_AUTO_REINDEX_REASON_UNSPECIFIED);
     if (count == 0)
         return fail_line(line_no, "auto_reindex_request write failed");
     ctx->auto_reindex_requests++;
