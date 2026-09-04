@@ -2172,6 +2172,22 @@ int main(int argc, char **argv)
             (void)run_gate(&o, workdir, &gate, &timed_out,
                           gate_log[0] ? gate_log : NULL, gate_tail,
                           sizeof(gate_tail));
+            /* A concurrent worktree rewrote the build-epoch lease out from
+             * under this run (see env_epoch_race in engine/engine_verdict.h):
+             * the harness raced itself, not a fault in the model's reply.
+             * Retry the SAME gate once, on the SAME diff, before this is
+             * ever turned into a verdict — a race that clears on retry must
+             * never cost the unit a REFUSED that reads as the model's
+             * fault. */
+            if (gate.env_epoch_race) {
+                engine_emit(stdout,
+                            "  gate:       build-epoch race detected "
+                            "(environment, not the model); retrying the "
+                            "gate once\n");
+                (void)run_gate(&o, workdir, &gate, &timed_out,
+                              gate_log[0] ? gate_log : NULL, gate_tail,
+                              sizeof(gate_tail));
+            }
             proof_latency_ms =
                 (clock_now_monotonic_ns() - proof_started_ns) / 1000000;
             have_gate_tail = gate_tail[0] != '\0';

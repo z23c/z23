@@ -937,6 +937,34 @@ static int case_gate_read(void)
     }
     EN_CHECK("an empty log does not crash", engine_gate_read("", 0, &g));
     EN_CHECK("a null log is refused", !engine_gate_read(NULL, 10, &g));
+    {
+        /* tools/dev/build-epoch-session.sh's exact failure text: a
+         * concurrent worktree rewrote the epoch lease mid-build. This is
+         * the harness racing itself, not the model's work, and the reading
+         * must say so so the caller can retry instead of REFUSING the
+         * unit. */
+        static const char log[] =
+            "make: Entering directory '/x'\n"
+            "build-epoch-session: acquired profile=dev-v2 epoch=aaa "
+            "lease=build/dev-obj/epochs/aaa/.leases/1\n"
+            "build-epoch-session: compiler/toolchain changed during build "
+            "expected=aaa actual=bbb\n"
+            "make: *** [Makefile:3936: build/dev-obj/epochs/aaa/.complete] "
+            "Error 2\n"
+            "make: Leaving directory '/x'\n";
+        EN_CHECK("a build-epoch race is flagged as an environment race",
+                 engine_gate_read(log, sizeof(log) - 1, &g)
+                 && g.env_epoch_race && !g.saw_verdict_line);
+    }
+    {
+        static const char log[] =
+            "SUITE VERDICT mode=cold groups_total=1 groups_ran=1 "
+            "groups_failed=0 toolkey=a\n"
+            "ALL TESTS PASSED — 0/1 groups failed\n";
+        EN_CHECK("an ordinary passing log is not flagged as a race",
+                 engine_gate_read(log, sizeof(log) - 1, &g)
+                 && !g.env_epoch_race);
+    }
     return failures;
 }
 

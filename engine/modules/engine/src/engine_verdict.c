@@ -114,6 +114,8 @@ bool engine_gate_read(const char *log, size_t len,
     }
     out->saw_pass_token = has_cold_pass_token(log, len);
     out->saw_fail_token = contains(log, len, "SOME TESTS FAILED");
+    out->env_epoch_race =
+        contains(log, len, "compiler/toolchain changed during build");
     return true;
 }
 

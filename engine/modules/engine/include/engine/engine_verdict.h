@@ -84,6 +84,12 @@ struct engine_gate_reading {
     long   env_unobserved;
     bool   saw_pass_token;      /* the bare token, NOT the (CACHED) form */
     bool   saw_fail_token;
+    /* tools/dev/build-epoch-session.sh printed "compiler/toolchain changed
+     * during build": a concurrent worktree rewrote the epoch lease out from
+     * under this gate run. This is the harness racing itself, not the
+     * model's work — the caller retries the gate once and this reading is
+     * discarded, never turned into a verdict against the unit. */
+    bool   env_epoch_race;
 };
 
 /* Parse a captured gate log. Returns false only when the log is unreadable as
