@@ -76,6 +76,7 @@
 #include "engine/engine_prompt.h"
 #include "engine/engine_receipt.h"
 #include "engine/engine_secret.h"
+#include "engine/engine_state.h"
 #include "engine/engine_verdict.h"
 #include "engine/engine_wire.h"
 
@@ -608,28 +609,41 @@ static int append_body(char *p, size_t room, const char *heading,
 
 static char *compose_prompt(const struct unit_opts *o,
                             const struct engine_vendor *v, const char *task,
-                            const char *brief, const char *repair_note)
+                            const char *brief, const char *carried_preamble,
+                            const char *repair_note)
 {
     const size_t cap = ENGINE_MAX_PROMPT_BYTES;
     char *p = zcl_malloc(cap, "engine_unit_prompt");
     if (!p)
         LOG_NULL("engine_unit", "cannot allocate the prompt buffer");
     int n = 0;
-    /* The kind's own constraints lead, because they are the frame the task
-     * is read in. A unit that must not edit anything should learn that
-     * before it reads a job description full of file names. */
+    /* Carried state leads everything else, including the kind's own
+     * constraints: it is what THIS run already knows about itself, from an
+     * earlier turn or an earlier attempt, and reading it after the task
+     * would frame it as background instead of as the model's own memory. */
+    if (carried_preamble && carried_preamble[0]) {
+        const int pn = snprintf(p, cap, "%s", carried_preamble);
+        if (pn < 0 || (size_t)pn >= cap) {
+            free(p);
+            LOG_NULL("engine_unit", "the composed prompt does not fit its cap");
+        }
+        n = pn;
+    }
+    /* The kind's own constraints lead the rest, because they are the frame
+     * the task is read in. A unit that must not edit anything should learn
+     * that before it reads a job description full of file names. */
     if (o->kind && o->kind[0]) {
         char heading[128];
         (void)snprintf(heading, sizeof(heading),
                        "# This is a %s unit", o->kind);
-        const int kn = append_body(p, cap, heading,
+        const int kn = append_body(p + n, cap - (size_t)n, heading,
                                    engine_prompt_template_body(o->kind,
                                                                "rules"));
-        if (kn < 0 || (size_t)kn >= cap) {
+        if (kn < 0 || (size_t)kn >= cap - (size_t)n) {
             free(p);
             LOG_NULL("engine_unit", "the composed prompt does not fit its cap");
         }
-        n = kn;
+        n += kn;
     }
     /* Each section is emitted, then its template body, so a body always
      * lands under the section it belongs to. Composing the whole prompt in
@@ -698,6 +712,10 @@ static char *compose_prompt(const struct unit_opts *o,
     }
 
     EMIT(snprintf(p + n, cap - (size_t)n, "# %s\n\n", delivery_text(v)));
+    /* Model-neutral: the same instruction for glm, glm-cli and the fixture
+     * engine, regardless of which of the two OUTPUT PROTOCOLs above applies.
+     * See engine/engine_state.h for why this exists and what reads it. */
+    EMIT(snprintf(p + n, cap - (size_t)n, "%s\n", engine_state_protocol_text()));
     EMIT(append_body(p + n, cap - (size_t)n, "## For this kind of unit",
                      engine_prompt_template_body(o->kind, "protocol")));
     EMIT(snprintf(p + n, cap - (size_t)n,
@@ -1194,9 +1212,86 @@ static bool apply_patch(const char *root, const struct engine_patch *p)
  * itself, so this must not be wrapped in another one. The cache is disabled
  * for the child: a group served from cache did not execute the new code, and
  * a run that proves nothing must not be given the chance to look green. */
+/* The gate log's first actionable line, and its last 40 lines, formatted for
+ * the next turn's prompt. "Actionable" matches the convention
+ * zcl_devloop_distill_first_error() (tools/dev/devloop.h) already uses for a
+ * dev-loop capsule: a compiler diagnostic (`: error:`) or a test failure
+ * (`FAIL`, `Assertion`, `EXPECT`) — reimplemented here rather than linked,
+ * because engine_unit is compiled straight from source with a small, fixed
+ * source list (see ENGINE_UNIT_SRCS) for the TLS-client isolation reason
+ * explained at the top of this file, and devloop.c is not on it. */
+static void gate_feedback_from_log(const char *log, size_t log_len, char *out,
+                                   size_t out_cap)
+{
+    if (!out || out_cap == 0)
+        return;
+    out[0] = '\0';
+    if (!log || log_len == 0)
+        return;
+
+    static const char *const needles[] = { ": error:", "FAIL", "Assertion",
+                                           "EXPECT" };
+    char first[240] = {0};
+    size_t i = 0;
+    while (i < log_len && !first[0]) {
+        size_t line_start = i;
+        while (i < log_len && log[i] != '\n')
+            i++;
+        const size_t line_len = i - line_start;
+        for (size_t k = 0; k < sizeof(needles) / sizeof(needles[0]); k++) {
+            const size_t nl = strlen(needles[k]);
+            if (line_len < nl)
+                continue;
+            for (size_t s = 0; s + nl <= line_len; s++) {
+                if (memcmp(log + line_start + s, needles[k], nl) == 0) {
+                    const size_t n = line_len < sizeof(first) - 1
+                                         ? line_len : sizeof(first) - 1;
+                    memcpy(first, log + line_start, n);
+                    first[n] = '\0';
+                    break;
+                }
+            }
+            if (first[0])
+                break;
+        }
+        if (i < log_len)
+            i++;
+    }
+
+    /* The last 40 lines, trailing newline(s) stripped first so an empty
+     * final line does not count as one of the 40. */
+    size_t end = log_len;
+    while (end > 0 && (log[end - 1] == '\n' || log[end - 1] == '\r'))
+        end--;
+    size_t start = end;
+    int lines_seen = 0;
+    while (start > 0 && lines_seen < 40) {
+        start--;
+        if (log[start] == '\n')
+            lines_seen++;
+    }
+    if (start > 0 && log[start] == '\n')
+        start++;
+
+    const int hn = snprintf(out, out_cap,
+        "First actionable line: %s\n\nLast lines of the gate log:\n",
+        first[0] ? first : "(none found)");
+    size_t used = (hn > 0 && (size_t)hn < out_cap) ? (size_t)hn : out_cap - 1;
+    if (used < out_cap - 1 && end > start) {
+        size_t room = out_cap - 1 - used;
+        size_t tail_len = end - start;
+        if (tail_len > room)
+            tail_len = room;
+        memcpy(out + used, log + start, tail_len);
+        used += tail_len;
+    }
+    out[used] = '\0';
+}
+
 static bool run_gate(const struct unit_opts *o, const char *workdir,
                      struct engine_gate_reading *reading, bool *timed_out,
-                     const char *log_path)
+                     const char *log_path, char *feedback_out,
+                     size_t feedback_cap)
 {
     memset(reading, 0, sizeof(*reading));
     *timed_out = false;
@@ -1237,6 +1332,8 @@ static bool run_gate(const struct unit_opts *o, const char *workdir,
     if (log_path)
         (void)engine_emit_file(log_path, log, strlen(log));
     const bool read_ok = engine_gate_read(log, strlen(log), reading);
+    if (feedback_out)
+        gate_feedback_from_log(log, strlen(log), feedback_out, feedback_cap);
     free(log);
 
     /* A child killed by the deadline is a TIMEOUT, and saying so is the whole
@@ -1272,7 +1369,9 @@ static void write_receipt(const struct unit_opts *o,
                           size_t files_changed, int attempts,
                           int64_t dispatch_latency_ms,
                           int64_t proof_latency_ms,
-                          enum engine_verdict verdict)
+                          enum engine_verdict verdict,
+                          size_t state_bytes, bool state_updated,
+                          int compactions)
 {
     char text[4096];
     struct json_value doc;
@@ -1297,7 +1396,10 @@ static void write_receipt(const struct unit_opts *o,
                          attempts > 0 ? attempts - 1 : 0) &&
         json_push_kv_int(&doc, "dispatch_latency_ms", dispatch_latency_ms) &&
         json_push_kv_int(&doc, "proof_latency_ms", proof_latency_ms) &&
-        json_push_kv_str(&doc, "verdict", engine_verdict_name(verdict));
+        json_push_kv_str(&doc, "verdict", engine_verdict_name(verdict)) &&
+        json_push_kv_int(&doc, "state_bytes", (int64_t)state_bytes) &&
+        json_push_kv_bool(&doc, "state_updated", state_updated) &&
+        json_push_kv_int(&doc, "compactions", (int64_t)compactions);
     if (ok && observation && observation->known) {
         ok = json_push_kv_str(&doc, "resolved_model",
                               observation->resolved_model) &&
@@ -1397,6 +1499,81 @@ static void append_unit_receipt(const struct unit_opts *o,
         },
     };
     (void)engine_receipt_append(path, &r, NULL);
+}
+
+/* ── carried state across attempts ───────────────────────────────────────
+ *
+ * A caller who repeats a unit that did not land runs this program again with
+ * a FRESH --state-dir, and the harness that drives that (not this program)
+ * is free to name it however it likes. But when it follows the shape this
+ * comment assumes — .../a<N>, one directory per attempt, N counting up from
+ * 1 — a sibling a<N-1>/state.txt is the one thing that should survive the
+ * boundary: the model's own account of what it tried and why, not the
+ * transcript, not the gate log, not the diff. Any other directory shape
+ * (a custom name, attempt "a1" with nothing before it, a missing sibling)
+ * is not an error. It just means there is nothing to carry forward, and a
+ * unit dispatched standalone — no repeated attempts at all — is the common
+ * case that looks exactly like that. */
+static bool load_attempt_state(const char *state_dir, char *out,
+                               size_t out_cap, char *label, size_t label_cap)
+{
+    if (!state_dir || !state_dir[0])
+        return false;
+    const char *base = strrchr(state_dir, '/');
+    base = base ? base + 1 : state_dir;
+    if (base[0] != 'a' || base[1] < '1' || base[1] > '9')
+        return false;
+    long n = 0;
+    const char *p = base + 1;
+    while (*p >= '0' && *p <= '9') {
+        n = n * 10 + (*p - '0');
+        p++;
+    }
+    if (*p != '\0' || n <= 1)
+        return false;
+
+    char sibling[1024];
+    const int sn = snprintf(sibling, sizeof(sibling), "%.*sa%ld/state.txt",
+                            (int)(base - state_dir), state_dir, n - 1);
+    if (sn < 0 || (size_t)sn >= sizeof(sibling))
+        return false;
+
+    FILE *f = fopen(sibling, "rb");
+    if (!f)
+        return false;
+    const size_t rd = fread(out, 1, out_cap - 1, f);
+    (void)fclose(f);
+    out[rd] = '\0';
+    size_t len = rd;
+    while (len > 0 && (out[len - 1] == '\n' || out[len - 1] == '\r'))
+        out[--len] = '\0';
+    if (len == 0)
+        return false; /* the sibling ran but left nothing behind */
+    char digits[32];
+    (void)snprintf(digits, sizeof(digits), "%ld", n - 1);
+    (void)snprintf(label, label_cap, "%s", digits);
+    return true;
+}
+
+/* Combine the attempt-carried and turn-carried state into the one preamble
+ * compose_prompt() prepends, in that order — a previous ATTEMPT's account
+ * came first chronologically and stays first here, with this run's own
+ * latest turn immediately after it, closest to the task it is about to
+ * re-read. Returns the number of bytes written, snprintf semantics. */
+static size_t build_carried_preamble(char *buf, size_t cap,
+                                     bool have_attempt_state,
+                                     const char *attempt_state,
+                                     const char *attempt_label,
+                                     bool have_turn_state,
+                                     const char *turn_state)
+{
+    size_t n = 0;
+    if (have_attempt_state && n < cap)
+        n += engine_state_format_preamble(buf + n, cap - n, attempt_state,
+                                          attempt_label);
+    if (have_turn_state && n < cap)
+        n += engine_state_format_preamble(buf + n, cap - n, turn_state, NULL);
+    return n;
 }
 
 /* ── the lifecycle ───────────────────────────────────────────────────── */
@@ -1549,11 +1726,30 @@ int main(int argc, char **argv)
                     stance ? "authored" : "none");
     }
 
-    char *prompt = compose_prompt(&o, v, task, brief, NULL);
-    free(task);
-    free(brief);
-    if (!prompt)
+    /* Cross-attempt carry: see load_attempt_state() above main(). Loaded
+     * before the very first prompt (including the --dry-run preview) so a
+     * preview shows exactly what would be dispatched. */
+    char attempt_state[ENGINE_STATE_MAX_BYTES] = {0};
+    char attempt_label[32] = {0};
+    const bool have_attempt_state =
+        load_attempt_state(o.state_dir, attempt_state, sizeof(attempt_state),
+                           attempt_label, sizeof(attempt_label));
+    if (have_attempt_state)
+        engine_emit(stdout,
+                    "  state:      carrying %zu byte(s) from attempt %s\n",
+                    strlen(attempt_state), attempt_label);
+
+    char carried_preamble[2u * ENGINE_STATE_MAX_BYTES + 512u];
+    (void)build_carried_preamble(carried_preamble, sizeof(carried_preamble),
+                                 have_attempt_state, attempt_state,
+                                 attempt_label, false, NULL);
+
+    char *prompt = compose_prompt(&o, v, task, brief, carried_preamble, NULL);
+    if (!prompt) {
+        free(task);
+        free(brief);
         return 2;
+    }
 
     if (o.dry_run) {
         /* Print exactly what this vendor would be handed, not what an
@@ -1581,12 +1777,16 @@ int main(int argc, char **argv)
                            : "WOULD BE REFUSED");
         free(shown);
         free(prompt);
+        free(task);
+        free(brief);
         return 0;
     }
     /* The opt-in. Deliberately checked AFTER --dry-run so composing a prompt
      * is free, and BEFORE anything that costs money or writes a file. */
     if (!o.yes_dispatch) {
         free(prompt);
+        free(task);
+        free(brief);
         return fail_setup(
             "refusing to dispatch without --yes-dispatch. This spends money "
             "and writes code; it is opted into per run, never defaulted on");
@@ -1595,6 +1795,8 @@ int main(int argc, char **argv)
     char where[128] = {0};
     if (!engine_secret_load(v, o.key_file, where, sizeof(where))) {
         free(prompt);
+        free(task);
+        free(brief);
         return fail_setup("no usable API key; see --help");
     }
     engine_emit(stdout, "engine_unit: %s\n", v->display);
@@ -1603,221 +1805,436 @@ int main(int argc, char **argv)
     char workdir[1024];
     if (!state_dir_prepare(&o)) {
         free(prompt);
+        free(task);
+        free(brief);
         engine_secret_clear();
         return 2;
     }
     if (!worktree_prepare(&o, workdir, sizeof(workdir))) {
         free(prompt);
+        free(task);
+        free(brief);
         engine_secret_clear();
         return 2;
     }
 
-    /* A CLI vendor reads this file and nothing else, so for a wire with no
-     * system channel of its own the rules have to be IN it. This is also the
-     * archived record of the dispatch, so it must be exactly what was
-     * delivered — an archive that differs from the delivery is an archive
-     * nobody can check a run against.
+    /* ── the turn loop ────────────────────────────────────────────────────
      *
-     * A refusal here refuses the DISPATCH. Falling back to writing the
-     * prompt without the rules would be the original defect restored on an
-     * error path, which is where defects prefer to live. */
-    size_t delivered_len = 0;
-    char *delivered = engine_prompt_compose(v->wire, prompt, &delivered_len);
-    if (!delivered) {
-        free(prompt);
-        engine_secret_clear();
-        return fail_setup("the composed prompt could not be prepared for this "
-                          "engine; refusing to dispatch a partial one");
-    }
-
-    /* The prompt is checked against the declared shape before it is
-     * delivered. A prompt whose rules block, task, output protocol or
-     * judging section is missing is not a weaker prompt — it is a
-     * different job, and the work that comes back is evidence about
-     * something nobody asked for. Refusing costs one run; dispatching
-     * costs money and produces a receipt that means nothing. */
-    struct engine_prompt_audit audit;
-    if (!engine_prompt_audit_text(v->wire, delivered, &audit)) {
-        char why[256];
-        if (audit.missing)
-            snprintf(why, sizeof(why),
-                     "the composed prompt has no '%s' section",
-                     audit.missing);
-        else if (audit.misplaced)
-            snprintf(why, sizeof(why),
-                     "the composed prompt carries '%s' out of order",
-                     audit.misplaced);
-        else
-            snprintf(why, sizeof(why),
-                     "the composed prompt repeats '%s', which this "
-                     "engine already receives on its own channel",
-                     audit.repeated ? audit.repeated : "a section");
-        free(delivered);
-        free(prompt);
-        engine_secret_clear();
-        return fail_setup(why);
-    }
-
-    char prompt_path[1024] = {0};
-    if (o.state_dir && o.state_dir[0]
-        && (size_t)snprintf(prompt_path, sizeof(prompt_path), "%s/prompt.txt",
-                            o.state_dir) < sizeof(prompt_path))
-        (void)engine_emit_file(prompt_path, delivered, delivered_len);
-    /* NOT freed here: a CLI vendor whose row takes the prompt as an ARGUMENT
-     * hands these exact bytes to exec, so they have to outlive the dispatch.
-     * The file above stays the archived record either way. */
-
-    /* Only an HTTP dialect has a request document. A CLI engine reads the
-     * prompt from the file written above and a fixture reads a canned reply,
-     * so building a body for either would produce a document nothing sends —
-     * and, for a vendor row with no default model, a body with a null model
-     * field in it. Build it where it is used and nowhere else. */
-    size_t body_len = 0;
-    char *body = NULL;
-    if (v->wire == ENGINE_WIRE_OPENAI_CHAT) {
-        const struct engine_call call = {
-            .vendor            = v,
-            .model             = o.model,
-            .system_prompt     = engine_system_rules(),
-            .user_prompt       = prompt,
-            .max_output_tokens = 65536,
-        };
-        body = engine_request_alloc(&call, &body_len);
-        if (!body) {
-            free(prompt);
-            engine_secret_clear();
-            return fail_setup("could not build the request body");
-        }
-    }
-    free(prompt);
+     * A unit gets up to --turns tries at the SAME worktree: turn 2 sees
+     * whatever turn 1 already wrote, because a repair is a continuation of
+     * one piece of work, not a fresh one. What used to start each of those
+     * turns blind is fixed here: every turn after the first carries forward
+     * the model's own <state> block (engine/engine_state.h) plus the
+     * previous gate's feedback, instead of nothing at all. The loop stops
+     * the moment a turn's verdict is a pass, or after the last turn either
+     * way — a unit that never passes still gets judged and receipted on
+     * its final turn.
+     */
+    char turn_state[ENGINE_STATE_MAX_BYTES] = {0};
+    bool have_turn_state = false;
+    bool state_updated_last = false;
+    int compactions = 0;
+    char gate_tail[4096] = {0};
+    bool have_gate_tail = false;
 
     struct dispatch_result dr = {0};
-    const bool got = dispatch_with_retries(v, &o, body, body_len, prompt_path,
-                                           delivered, workdir, &dr);
-    free(body);
-    free(delivered);
-    engine_secret_clear();
-    if (!got)
-        return 1;
-
-    /* Archive the raw completion before any envelope parsing touches it. A
-     * FAIL(NO-CHANGE) verdict alone cannot say whether the model proposed
-     * nothing, proposed something the envelope parser refused, or never
-     * came back with the shape this harness expects — reply.txt lets a
-     * human read exactly what the model said and answer that by hand. */
-    if (o.state_dir && o.state_dir[0]) {
-        char reply_path[1024];
-        if ((size_t)snprintf(reply_path, sizeof(reply_path), "%s/reply.txt",
-                             o.state_dir) < sizeof(reply_path))
-            (void)engine_emit_file(reply_path, dr.reply.text ? dr.reply.text : "",
-                                   dr.reply.text_len);
-    }
-
-    if (dr.reply.usage.tokens_known || dr.reply.usage.cost_known)
-        engine_emit(stdout,
-                    "  spend:      prompt=%lld completion=%lld cost_usd=%s%.6f\n",
-                    (long long)dr.reply.usage.prompt_tokens,
-                    (long long)dr.reply.usage.completion_tokens,
-                    dr.reply.usage.cost_known ? "" : "unreported:",
-                    dr.reply.usage.cost_usd);
-    else
-        engine_emit(stdout, "  spend:      not reported by %s\n", v->id);
-
-    if (o.max_cost_usd > 0.0 && dr.reply.usage.cost_known
-        && dr.reply.usage.cost_usd > o.max_cost_usd) {
-        engine_reply_free(&dr.reply);
-        return fail_setup("the reported spend exceeded --max-cost-usd");
-    }
-
-    /* Apply. A CLI engine has already edited the worktree; an API engine's
-     * reply carries file bodies. Either way the NEXT step measures the diff. */
-    if (v->delivery == ENGINE_DELIVERS_ENVELOPE) {
-        struct engine_patch patch;
-        char applied_path[1024] = {0};
-        if (o.state_dir && o.state_dir[0])
-            (void)snprintf(applied_path, sizeof(applied_path), "%s/applied.txt",
-                           o.state_dir);
-
-        if (!engine_patch_parse(dr.reply.text, dr.reply.text_len, &patch)) {
-            if (applied_path[0])
-                (void)engine_emit_file(applied_path,
-                    "PARSE_REFUSED\nthe envelope parser rejected this reply "
-                    "(a marker rule was violated or an envelope was left "
-                    "open); see reply.txt for the exact text and stderr of "
-                    "this run for which check fired.\n",
-                    strlen("PARSE_REFUSED\nthe envelope parser rejected this "
-                           "reply (a marker rule was violated or an envelope "
-                           "was left open); see reply.txt for the exact text "
-                           "and stderr of this run for which check "
-                           "fired.\n"));
-            engine_reply_free(&dr.reply);
-            engine_emit(stderr, "engine_unit: the reply was refused by the "
-                                "envelope parser; nothing was applied\n");
-            return 1;
-        }
-        engine_emit(stdout, "  reply:      %zu file(s) proposed\n", patch.count);
-        if (applied_path[0]) {
-            char desc[4096];
-            const size_t n = engine_patch_describe(&patch, desc, sizeof(desc));
-            char header[128];
-            const int hn = snprintf(header, sizeof(header),
-                                     "PARSED %zu file(s)\n", patch.count);
-            char buf[4096 + 128];
-            size_t used = 0;
-            if (hn > 0 && (size_t)hn < sizeof(buf)) {
-                memcpy(buf, header, (size_t)hn);
-                used = (size_t)hn;
-            }
-            if (n > 0 && used + n < sizeof(buf)) {
-                memcpy(buf + used, desc, n);
-                used += n;
-            } else if (patch.count == 0) {
-                static const char none[] = "(the reply proposed no changes)\n";
-                if (used + sizeof(none) - 1 < sizeof(buf)) {
-                    memcpy(buf + used, none, sizeof(none) - 1);
-                    used += sizeof(none) - 1;
-                }
-            }
-            (void)engine_emit_file(applied_path, buf, used);
-        }
-        const bool applied = apply_patch(workdir, &patch);
-        engine_patch_free(&patch);
-        if (!applied) {
-            engine_reply_free(&dr.reply);
-            return 1;
-        }
-    }
-
-    const size_t changed = worktree_changed_files(workdir);
-    engine_emit(stdout, "  diff:       %zu changed path(s) in the worktree\n",
-                changed);
-
     struct engine_gate_reading gate = {0};
     bool timed_out = false;
+    size_t changed = 0;
+    enum engine_verdict verdict = ENGINE_VERDICT_REFUSED;
     int64_t proof_latency_ms = 0;
-    if (!o.no_group && changed > 0) {
-        char gate_log[1024] = {0};
-        if (o.state_dir && o.state_dir[0])
-            (void)snprintf(gate_log, sizeof(gate_log), "%s/gate.log",
-                           o.state_dir);
-        const int64_t proof_started_ns = clock_now_monotonic_ns();
-        (void)run_gate(&o, workdir, &gate, &timed_out,
-                       gate_log[0] ? gate_log : NULL);
-        proof_latency_ms =
-            (clock_now_monotonic_ns() - proof_started_ns) / 1000000;
+    char *delivered = NULL;
+    char prompt_path[1024] = {0};
+
+    for (int turn = 1; turn <= o.turns; turn++) {
+        if (turn > 1) {
+            engine_reply_free(&dr.reply);
+            memset(&dr, 0, sizeof(dr));
+            gate = (struct engine_gate_reading){0};
+            timed_out = false;
+
+            /* This turn's prompt: fold the compaction check into what it
+             * would carry BEFORE composing it, since compose_prompt() itself
+             * only knows how to refuse an over-long result, not shrink it. */
+            (void)build_carried_preamble(carried_preamble,
+                                         sizeof(carried_preamble),
+                                         have_attempt_state, attempt_state,
+                                         attempt_label, have_turn_state,
+                                         turn_state);
+            const size_t carried_len = strlen(carried_preamble);
+            const size_t gate_tail_len = have_gate_tail ? strlen(gate_tail)
+                                                        : 0;
+            /* Rough but conservative: task and the territory brief are the
+             * two unbounded inputs left once carried state and gate
+             * feedback are accounted for; the fixed margin in
+             * engine_state_needs_compaction() covers the template bodies,
+             * headings and protocol text this estimate does not itemise. */
+            const size_t base_len = task_len + (brief ? strlen(brief) : 0);
+            if (v->wire != ENGINE_WIRE_LOCAL_CLI
+                && engine_state_needs_compaction(carried_len, gate_tail_len,
+                                                 base_len,
+                                                 ENGINE_MAX_PROMPT_BYTES)) {
+                char comp_prompt[2u * ENGINE_STATE_MAX_BYTES + 8192u];
+                (void)engine_state_compaction_prompt(
+                    comp_prompt, sizeof(comp_prompt),
+                    have_turn_state ? turn_state
+                                    : (have_attempt_state ? attempt_state
+                                                          : NULL),
+                    have_gate_tail ? gate_tail : NULL);
+                struct dispatch_result cdr = {0};
+                bool compacted = false;
+                if (v->wire == ENGINE_WIRE_OPENAI_CHAT) {
+                    const struct engine_call ccall = {
+                        .vendor            = v,
+                        .model             = o.model,
+                        .system_prompt     = NULL,
+                        .user_prompt       = comp_prompt,
+                        .max_output_tokens = 2048,
+                    };
+                    size_t cbody_len = 0;
+                    char *cbody = engine_request_alloc(&ccall, &cbody_len);
+                    if (cbody) {
+                        compacted = dispatch_https(v, cbody, cbody_len,
+                                                   o.timeout_s * 1000, &cdr);
+                        free(cbody);
+                    }
+                } else if (v->wire == ENGINE_WIRE_LOCAL_FIXTURE) {
+                    compacted = dispatch_fixture(v, o.fixture_reply, &cdr);
+                }
+                if (compacted) {
+                    size_t extracted_len = 0;
+                    if (engine_state_extract(cdr.reply.text,
+                                             cdr.reply.text_len, turn_state,
+                                             sizeof(turn_state),
+                                             &extracted_len))
+                        have_turn_state = true;
+                    compactions++;
+                    engine_emit(stdout,
+                                "  compaction: turn %d's prompt would have "
+                                "exceeded the budget; compacted to %zu "
+                                "byte(s) of state\n",
+                                turn, extracted_len);
+                    (void)build_carried_preamble(
+                        carried_preamble, sizeof(carried_preamble),
+                        have_attempt_state, attempt_state, attempt_label,
+                        have_turn_state, turn_state);
+                } else {
+                    engine_emit(stderr,
+                                "engine_unit: turn %d needed compaction and "
+                                "the compaction dispatch itself failed; "
+                                "continuing with the uncompacted state\n",
+                                turn);
+                }
+                engine_reply_free(&cdr.reply);
+            }
+
+            free(prompt);
+            prompt = compose_prompt(&o, v, task, brief, carried_preamble,
+                                    have_gate_tail ? gate_tail : NULL);
+            if (!prompt) {
+                free(task);
+                free(brief);
+                engine_secret_clear();
+                return 2;
+            }
+        }
+
+        /* A CLI vendor reads this file and nothing else, so for a wire with
+         * no system channel of its own the rules have to be IN it. This is
+         * also the archived record of the dispatch, so it must be exactly
+         * what was delivered — an archive that differs from the delivery is
+         * an archive nobody can check a run against.
+         *
+         * A refusal here refuses the DISPATCH. Falling back to writing the
+         * prompt without the rules would be the original defect restored on
+         * an error path, which is where defects prefer to live. */
+        size_t delivered_len = 0;
+        delivered = engine_prompt_compose(v->wire, prompt, &delivered_len);
+        if (!delivered) {
+            free(prompt);
+            free(task);
+            free(brief);
+            engine_secret_clear();
+            return fail_setup("the composed prompt could not be prepared for "
+                              "this engine; refusing to dispatch a partial "
+                              "one");
+        }
+
+        /* The prompt is checked against the declared shape before it is
+         * delivered. A prompt whose rules block, task, output protocol or
+         * judging section is missing is not a weaker prompt — it is a
+         * different job, and the work that comes back is evidence about
+         * something nobody asked for. Refusing costs one run; dispatching
+         * costs money and produces a receipt that means nothing. */
+        struct engine_prompt_audit audit;
+        if (!engine_prompt_audit_text(v->wire, delivered, &audit)) {
+            char why[256];
+            if (audit.missing)
+                snprintf(why, sizeof(why),
+                         "the composed prompt has no '%s' section",
+                         audit.missing);
+            else if (audit.misplaced)
+                snprintf(why, sizeof(why),
+                         "the composed prompt carries '%s' out of order",
+                         audit.misplaced);
+            else
+                snprintf(why, sizeof(why),
+                         "the composed prompt repeats '%s', which this "
+                         "engine already receives on its own channel",
+                         audit.repeated ? audit.repeated : "a section");
+            free(delivered);
+            free(prompt);
+            free(task);
+            free(brief);
+            engine_secret_clear();
+            return fail_setup(why);
+        }
+
+        memset(prompt_path, 0, sizeof(prompt_path));
+        if (o.state_dir && o.state_dir[0]
+            && (size_t)snprintf(prompt_path, sizeof(prompt_path),
+                                "%s/prompt.txt", o.state_dir)
+                   < sizeof(prompt_path))
+            (void)engine_emit_file(prompt_path, delivered, delivered_len);
+        /* NOT freed here: a CLI vendor whose row takes the prompt as an
+         * ARGUMENT hands these exact bytes to exec, so they have to outlive
+         * the dispatch. The file above stays the archived record either
+         * way. */
+
+        /* Only an HTTP dialect has a request document. A CLI engine reads
+         * the prompt from the file written above and a fixture reads a
+         * canned reply, so building a body for either would produce a
+         * document nothing sends — and, for a vendor row with no default
+         * model, a body with a null model field in it. Build it where it is
+         * used and nowhere else. */
+        size_t body_len = 0;
+        char *body = NULL;
+        if (v->wire == ENGINE_WIRE_OPENAI_CHAT) {
+            const struct engine_call call = {
+                .vendor            = v,
+                .model             = o.model,
+                .system_prompt     = engine_system_rules(),
+                .user_prompt       = prompt,
+                .max_output_tokens = 65536,
+            };
+            body = engine_request_alloc(&call, &body_len);
+            if (!body) {
+                free(delivered);
+                free(prompt);
+                free(task);
+                free(brief);
+                engine_secret_clear();
+                return fail_setup("could not build the request body");
+            }
+        }
+        free(prompt);
+        prompt = NULL;
+
+        const bool got = dispatch_with_retries(v, &o, body, body_len,
+                                               prompt_path, delivered,
+                                               workdir, &dr);
+        free(body);
+        free(delivered);
+        delivered = NULL;
+        if (!got) {
+            free(task);
+            free(brief);
+            engine_secret_clear();
+            return 1;
+        }
+
+        /* Archive the raw completion before any envelope parsing touches
+         * it. A FAIL(NO-CHANGE) verdict alone cannot say whether the model
+         * proposed nothing, proposed something the envelope parser refused,
+         * or never came back with the shape this harness expects —
+         * reply.txt lets a human read exactly what the model said and
+         * answer that by hand. */
+        if (o.state_dir && o.state_dir[0]) {
+            char reply_path[1024];
+            if ((size_t)snprintf(reply_path, sizeof(reply_path),
+                                 "%s/reply.txt", o.state_dir)
+                       < sizeof(reply_path))
+                (void)engine_emit_file(reply_path,
+                                       dr.reply.text ? dr.reply.text : "",
+                                       dr.reply.text_len);
+        }
+
+        if (dr.reply.usage.tokens_known || dr.reply.usage.cost_known)
+            engine_emit(stdout,
+                        "  spend:      prompt=%lld completion=%lld "
+                        "cost_usd=%s%.6f\n",
+                        (long long)dr.reply.usage.prompt_tokens,
+                        (long long)dr.reply.usage.completion_tokens,
+                        dr.reply.usage.cost_known ? "" : "unreported:",
+                        dr.reply.usage.cost_usd);
+        else
+            engine_emit(stdout, "  spend:      not reported by %s\n", v->id);
+
+        if (o.max_cost_usd > 0.0 && dr.reply.usage.cost_known
+            && dr.reply.usage.cost_usd > o.max_cost_usd) {
+            engine_reply_free(&dr.reply);
+            free(task);
+            free(brief);
+            engine_secret_clear();
+            return fail_setup("the reported spend exceeded --max-cost-usd");
+        }
+
+        /* Apply. A CLI engine has already edited the worktree; an API
+         * engine's reply carries file bodies. Either way the NEXT step
+         * measures the diff. */
+        bool refused = false;
+        if (v->delivery == ENGINE_DELIVERS_ENVELOPE) {
+            struct engine_patch patch;
+            char applied_path[1024] = {0};
+            if (o.state_dir && o.state_dir[0])
+                (void)snprintf(applied_path, sizeof(applied_path),
+                              "%s/applied.txt", o.state_dir);
+
+            if (!engine_patch_parse(dr.reply.text, dr.reply.text_len,
+                                    &patch)) {
+                if (applied_path[0])
+                    (void)engine_emit_file(applied_path,
+                        "PARSE_REFUSED\nthe envelope parser rejected this "
+                        "reply (a marker rule was violated or an envelope "
+                        "was left open); see reply.txt for the exact text "
+                        "and stderr of this run for which check fired.\n",
+                        strlen("PARSE_REFUSED\nthe envelope parser rejected "
+                               "this reply (a marker rule was violated or an "
+                               "envelope was left open); see reply.txt for "
+                               "the exact text and stderr of this run for "
+                               "which check fired.\n"));
+                engine_emit(stderr,
+                            "engine_unit: turn %d's reply was refused by the "
+                            "envelope parser; nothing was applied\n", turn);
+                (void)snprintf(gate_tail, sizeof(gate_tail),
+                              "Your last reply was refused by the envelope "
+                              "parser (a marker rule was violated or an "
+                              "envelope was left open); nothing from it was "
+                              "applied. See the output protocol again and "
+                              "send the whole reply, corrected.");
+                have_gate_tail = true;
+                refused = true;
+            } else {
+                engine_emit(stdout, "  reply:      %zu file(s) proposed\n",
+                           patch.count);
+                if (applied_path[0]) {
+                    char desc[4096];
+                    const size_t n =
+                        engine_patch_describe(&patch, desc, sizeof(desc));
+                    char header[128];
+                    const int hn = snprintf(header, sizeof(header),
+                                            "PARSED %zu file(s)\n",
+                                            patch.count);
+                    char buf[4096 + 128];
+                    size_t used = 0;
+                    if (hn > 0 && (size_t)hn < sizeof(buf)) {
+                        memcpy(buf, header, (size_t)hn);
+                        used = (size_t)hn;
+                    }
+                    if (n > 0 && used + n < sizeof(buf)) {
+                        memcpy(buf + used, desc, n);
+                        used += n;
+                    } else if (patch.count == 0) {
+                        static const char none[] =
+                            "(the reply proposed no changes)\n";
+                        if (used + sizeof(none) - 1 < sizeof(buf)) {
+                            memcpy(buf + used, none, sizeof(none) - 1);
+                            used += sizeof(none) - 1;
+                        }
+                    }
+                    (void)engine_emit_file(applied_path, buf, used);
+                }
+                if (!apply_patch(workdir, &patch)) {
+                    engine_patch_free(&patch);
+                    engine_reply_free(&dr.reply);
+                    free(task);
+                    free(brief);
+                    engine_secret_clear();
+                    return 1;
+                }
+                engine_patch_free(&patch);
+            }
+        }
+
+        changed = worktree_changed_files(workdir);
         engine_emit(stdout,
-                    "  gate:       verdict_line=%s mode=%s groups_ran=%ld "
-                    "groups_failed=%ld\n",
-                    gate.saw_verdict_line ? "yes" : "NO",
-                    gate.cached_mode ? "cached" : "cold", gate.groups_ran,
-                    gate.groups_failed);
+                    "  diff:       %zu changed path(s) in the worktree\n",
+                    changed);
+
+        proof_latency_ms = 0;
+        if (!refused && !o.no_group && changed > 0) {
+            char gate_log[1024] = {0};
+            if (o.state_dir && o.state_dir[0])
+                (void)snprintf(gate_log, sizeof(gate_log), "%s/gate.log",
+                              o.state_dir);
+            gate_tail[0] = '\0';
+            const int64_t proof_started_ns = clock_now_monotonic_ns();
+            (void)run_gate(&o, workdir, &gate, &timed_out,
+                          gate_log[0] ? gate_log : NULL, gate_tail,
+                          sizeof(gate_tail));
+            proof_latency_ms =
+                (clock_now_monotonic_ns() - proof_started_ns) / 1000000;
+            have_gate_tail = gate_tail[0] != '\0';
+            engine_emit(stdout,
+                        "  gate:       verdict_line=%s mode=%s groups_ran=%ld "
+                        "groups_failed=%ld\n",
+                        gate.saw_verdict_line ? "yes" : "NO",
+                        gate.cached_mode ? "cached" : "cold", gate.groups_ran,
+                        gate.groups_failed);
+        } else if (!refused && changed == 0) {
+            (void)snprintf(gate_tail, sizeof(gate_tail),
+                          "Your last reply reported success but the diff was "
+                          "empty: nothing changed in the worktree, so the "
+                          "gate was not run. That is recorded as a FAILURE "
+                          "regardless of what the gate would have said.");
+            have_gate_tail = true;
+        }
+
+        verdict = engine_verdict_of(&gate, changed, timed_out, !o.no_group);
+
+        /* Extract this turn's state independent of the envelope, per
+         * engine/engine_state.h. A CLI wire never decodes reply text, so
+         * there is nothing to extract from it — the model's own state, if
+         * it left one anywhere the CLI printed, is not read here; that is a
+         * scoping call, not an oversight: see the CLI OUTPUT PROTOCOL text,
+         * which tells it to edit the worktree and print nothing. */
+        size_t extracted_len = 0;
+        if (dr.reply.text
+            && engine_state_extract(dr.reply.text, dr.reply.text_len,
+                                    turn_state, sizeof(turn_state),
+                                    &extracted_len)) {
+            have_turn_state = true;
+            state_updated_last = true;
+        } else {
+            state_updated_last = false;
+            /* Carried forward unchanged: turn_state/have_turn_state are
+             * simply left as they were. */
+        }
+        if (o.state_dir && o.state_dir[0]) {
+            char state_path[1024];
+            if ((size_t)snprintf(state_path, sizeof(state_path),
+                                 "%s/state.txt", o.state_dir)
+                       < sizeof(state_path))
+                (void)engine_emit_file(state_path,
+                                       have_turn_state ? turn_state : "",
+                                       have_turn_state ? strlen(turn_state)
+                                                       : 0);
+        }
+        engine_emit(stdout, "  state:      %zu byte(s), %s\n",
+                   have_turn_state ? strlen(turn_state) : 0,
+                   state_updated_last ? "updated by the model"
+                                      : "not updated by the model");
+        engine_emit(stdout, "  turn %d/%d:   %s\n", turn, o.turns,
+                   engine_verdict_name(verdict));
+
+        if (engine_verdict_is_pass(verdict) || turn == o.turns)
+            break;
     }
 
-    const enum engine_verdict verdict =
-        engine_verdict_of(&gate, changed, timed_out, !o.no_group);
     write_receipt(&o, v, &dr.reply.usage, &dr.cli_observation, &gate, changed,
                   dr.attempts, dr.dispatch_latency_ms, proof_latency_ms,
-                  verdict);
+                  verdict, have_turn_state ? strlen(turn_state) : 0,
+                  state_updated_last, compactions);
     append_unit_receipt(&o, v, &dr.reply.usage, &gate, changed, dr.attempts,
                         dr.dispatch_latency_ms, proof_latency_ms,
                         dr.http_status, verdict, task_sha3_hex);
@@ -1825,5 +2242,8 @@ int main(int argc, char **argv)
     engine_emit(stdout, "  review the diff before anything else: git -C %s diff\n",
                 workdir);
     engine_reply_free(&dr.reply);
+    engine_secret_clear();
+    free(task);
+    free(brief);
     return engine_verdict_is_pass(verdict) ? 0 : 1;
 }
