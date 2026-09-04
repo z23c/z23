@@ -916,7 +916,8 @@ bool zcl_command_registry_input_validate(const struct zcl_command_spec *spec,
                    strcmp(key, "exact") == 0 || strcmp(key, "restore") == 0 ||
                    strcmp(key, "include_evidence_wires") == 0 ||
                    strcmp(key, "list") == 0 ||
-                   strcmp(key, "release") == 0) {
+                   strcmp(key, "release") == 0 ||
+                   strcmp(key, "json") == 0) {
             /* Each is a bool in its own declared schema, and the default
              * STRING branch made it unpassable from a shell while raw RPC
              * accepted it fine — `all`, `include_evidence_wires`, and the
@@ -1322,6 +1323,14 @@ bool zcl_command_registry_input_validate(const struct zcl_command_spec *spec,
                                                           &type_ok)) {
             /* Handled by the dev.agent-leaf rules in
              * command_registry_devagent_input.c. */
+        } else if (strcmp(key, "seq") == 0) {
+            /* dev.land cancel names one request by its sequence number, and
+             * `--seq=3` types as an integer: without this rule the default
+             * string branch makes the verb uninvokable from a shell while
+             * raw JSON works. The handler owns the semantics; the transport
+             * only admits the positive integer shape. */
+            type_ok = value->type == JSON_INT && json_get_int(value) >= 1 &&
+                      json_get_int(value) <= 1000000000;
         } else if (strcmp(key, "rpc_port") == 0) {
             /* core.consensus.producer-session.retire's optional liveness
              * probe target: the RPC port of the node that owns this
