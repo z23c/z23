@@ -9,6 +9,7 @@
 #include "presentation_focus_internal.h"
 #include "presentation_form_internal.h"
 #include "util/png_writer.h"
+#include "base/serialize_le.h"
 
 #if defined(__linux__)
 static int present_x11_clipboard_append_targets(
@@ -70,20 +71,6 @@ static int present_x11_clipboard_write_target(
 #undef ZCL_PRESENT_UNDEF_MSC_VER
 #endif
 
-static void present_write_u16_le(uint8_t *out, uint16_t value)
-{
-    out[0] = (uint8_t)value;
-    out[1] = (uint8_t)(value >> 8);
-}
-
-static void present_write_u32_le(uint8_t *out, uint32_t value)
-{
-    out[0] = (uint8_t)value;
-    out[1] = (uint8_t)(value >> 8);
-    out[2] = (uint8_t)(value >> 16);
-    out[3] = (uint8_t)(value >> 24);
-}
-
 bool zcl_present_bitmap_encode_bmp_v1(
     const struct zcl_present_window_v1 *page,
     uint8_t *output, size_t output_cap, size_t *written)
@@ -105,14 +92,14 @@ bool zcl_present_bitmap_encode_bmp_v1(
     memset(bmp, 0, (size_t)total);
     bmp[0] = 'B';
     bmp[1] = 'M';
-    present_write_u32_le(bmp + 2, (uint32_t)total);
-    present_write_u32_le(bmp + 10, 54u);
-    present_write_u32_le(bmp + 14, 40u);
-    present_write_u32_le(bmp + 18, page->width);
-    present_write_u32_le(bmp + 22, page->height);
-    present_write_u16_le(bmp + 26, 1u);
-    present_write_u16_le(bmp + 28, 24u);
-    present_write_u32_le(bmp + 34, (uint32_t)pixel_bytes);
+    zcl_write_u32_le(bmp + 2, (uint32_t)total);
+    zcl_write_u32_le(bmp + 10, 54u);
+    zcl_write_u32_le(bmp + 14, 40u);
+    zcl_write_u32_le(bmp + 18, page->width);
+    zcl_write_u32_le(bmp + 22, page->height);
+    zcl_write_u16_le(bmp + 26, 1u);
+    zcl_write_u16_le(bmp + 28, 24u);
+    zcl_write_u32_le(bmp + 34, (uint32_t)pixel_bytes);
     uint32_t channels = (uint32_t)page->pixel_format;
     for (uint32_t y = 0; y < page->height; y++) {
         uint32_t source_y = page->height - 1u - y;
