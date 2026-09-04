@@ -24,6 +24,7 @@ struct zcl_dev_proof_status {
     char local_commit[65];
     char remote_base[65];
     char receipt_path[4096];
+    char log_dir[4096];
     char detail[256];
     int64_t started_unix;
     int64_t eta_ms;

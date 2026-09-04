@@ -701,6 +701,52 @@ static bool proof_request_matches_pair(const char *path, const char *local,
         strcmp(request_local, local) == 0 && strcmp(request_base, base) == 0;
 }
 
+/* Each proof attempt gets its own throwaway directory
+ * (`.cache/zcl-dev-proof/attempts/<local>-<base>.XXXXXX`, see
+ * proof_attempt_paths_prepare) holding that attempt's real logs
+ * (lint.log/test.log/bundle.log/helpers.log under its own `logs/`
+ * subdirectory) — the flat `.cache/zcl-dev-proof/logs` directory is never
+ * written to. A settled `.failed` marker names only the failing reason
+ * string, not where the evidence lives, so a caller diagnosing a failure
+ * needs the newest attempt directory for this exact pair. mkdtemp's
+ * suffix is random, not time-ordered, so "newest" means highest mtime,
+ * not lexicographic order. */
+static bool proof_attempt_dir_newest(const struct proof_paths *paths,
+                                     char *out, size_t out_len)
+{
+    if (!paths || !out || out_len == 0) return false;
+    char prefix[160];
+    int prefix_len = snprintf(prefix, sizeof(prefix), "%s.", paths->key);
+    if (prefix_len <= 0 || prefix_len >= (int)sizeof(prefix)) return false;
+    DIR *dir = opendir(paths->attempts);
+    if (!dir) return false;
+    bool found = false;
+    time_t newest_mtime = 0;
+    char newest[PATH_MAX] = {0};
+    for (struct dirent *entry = readdir(dir); entry; entry = readdir(dir)) {
+        if (strncmp(entry->d_name, prefix, (size_t)prefix_len) != 0)
+            continue;
+        char candidate[PATH_MAX];
+        if (snprintf(candidate, sizeof(candidate), "%s/%s", paths->attempts,
+                    entry->d_name) >= (int)sizeof(candidate))
+            continue;
+        struct stat st;
+        if (stat(candidate, &st) != 0 || !S_ISDIR(st.st_mode)) continue;
+        if (!found || st.st_mtime > newest_mtime) {
+            found = true;
+            newest_mtime = st.st_mtime;
+            (void)snprintf(newest, sizeof(newest), "%s", candidate);
+        }
+    }
+    (void)closedir(dir);
+    if (!found) return false;
+    char logs[PATH_MAX];
+    if (snprintf(logs, sizeof(logs), "%s/logs", newest) >= (int)sizeof(logs))
+        return false;
+    (void)snprintf(out, out_len, "%s", logs);
+    return true;
+}
+
 static bool proof_status_read_platform(const char *repo_root,
                                        const char *local_commit,
                                        const char *remote_base,
@@ -726,6 +772,7 @@ static bool proof_status_read_platform(const char *repo_root,
     }
     (void)snprintf(out->receipt_path, sizeof(out->receipt_path), "%s",
                    paths.receipt);
+    (void)snprintf(out->log_dir, sizeof(out->log_dir), "%s", paths.logs);
     struct zcl_dev_acceptance_receipt_v1 receipt;
     if (receipt_load(&paths, local, base, &receipt, why, sizeof(why))) {
         out->state = ZCL_DEV_PROOF_STATE_PASSED;
@@ -762,6 +809,8 @@ static bool proof_status_read_platform(const char *repo_root,
     }
     if (proof_read_text(paths.failure, out->detail, sizeof(out->detail))) {
         out->state = ZCL_DEV_PROOF_STATE_FAILED;
+        (void)proof_attempt_dir_newest(&paths, out->log_dir,
+                                       sizeof(out->log_dir));
         return true;
     }
     out->state = ZCL_DEV_PROOF_STATE_MISSING;
@@ -2397,6 +2446,12 @@ static bool proof_ensure_platform(const char *repo_root,
         return true;
     }
     if (out->state == ZCL_DEV_PROOF_STATE_RUNNING) return true;
+    /* An exact commit/base pair is immutable: a `.failed` marker already
+     * settles this pair's outcome. Re-enqueueing here would spend a worker
+     * slot re-deriving the identical, deterministic failure and would leave
+     * a caller that only checks for MISSING/RUNNING believing work is
+     * still in flight. Exit with the settled status instead of lingering. */
+    if (out->state == ZCL_DEV_PROOF_STATE_FAILED) return true;
     struct proof_paths paths;
     if (!proof_paths_fill(repo_root, local, base, &paths) ||
         !proof_state_prepare(&paths)) {

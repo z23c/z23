@@ -33,7 +33,10 @@
 
 #include "test/test_core.h"
 
+#include <utime.h>
+
 #include "codeindex/codeindex.h"
+#include "command/native_dev_proof_command.h"
 #include "config/command_catalog.h"
 #include "controllers/agent_impact_rules.h"
 #include "dev_proof.h"
@@ -1249,6 +1252,134 @@ static int test_ic_dev_proof_child_action_identity(void)
     return failures;
 }
 
+/* T7 pins the landing-machine defect found 2026-09-04: a `.failed` marker
+ * for the exact commit/base pair settled its outcome, yet `dev.proof.wait`
+ * reported the SAME status/BLOCKED exit 3 as "still proving" — a landing
+ * loop that treats exit 3 as "keep polling" then spins forever on a proof
+ * that already finished failing (observed: 44 rounds, 40 minutes of dead
+ * push-slot time against an idle child). The fix gives a settled failure
+ * its own terminal result (FAILED status, non-3 exit) so a caller can tell
+ * "still running" from "already lost" without parsing prose. It also pins
+ * that `dev.proof.ensure` does not re-queue a pair whose failure is
+ * already settled — an immutable commit/base identity would just re-derive
+ * the identical deterministic failure. */
+static int test_ic_proof_wait_reports_settled_failure(void)
+{
+    int failures = 0;
+    TEST("impact composition: proof wait reports a settled failure, not blocked") {
+#if !defined(_WIN32)
+        char root[4096];
+        static const char local[] =
+            "cccccccccccccccccccccccccccccccccccccccc";
+        static const char base[] =
+            "2222222222222222222222222222222222222222";
+        ASSERT(snprintf(root, sizeof(root),
+                        IC_FIX_ROOT "/proof_wait_failed_%ld",
+                        (long)getpid()) > 0);
+        ASSERT(ic_write(root, "fixture", "proof wait fixture\n"));
+        char state_dir[4096], failure_rel[4096];
+        ASSERT(snprintf(state_dir, sizeof(state_dir),
+                        "%s/.cache/zcl-dev-proof", root) > 0);
+        ASSERT(snprintf(failure_rel, sizeof(failure_rel),
+                        ".cache/zcl-dev-proof/%s-%s.failed", local,
+                        base) > 0);
+        ASSERT(ic_write(root, failure_rel, "child_proof_failed_exit_1"));
+
+        /* Two throwaway attempt directories for this exact pair, as a real
+         * failed proof leaves under attempts/<local>-<base>.XXXXXX/logs/
+         * (see proof_attempt_paths_prepare in tools/dev/dev_proof.c) — the
+         * flat .cache/zcl-dev-proof/logs/ directory is never written to.
+         * mkdtemp's suffix is random, not time-ordered, so pin distinct
+         * mtimes explicitly rather than relying on creation order. */
+        char older_marker[4096], newer_marker[4096];
+        char older_dir[4096], newer_dir[4096];
+        ASSERT(snprintf(older_marker, sizeof(older_marker),
+                        ".cache/zcl-dev-proof/attempts/%s-%s.older/logs/x",
+                        local, base) > 0);
+        ASSERT(snprintf(newer_marker, sizeof(newer_marker),
+                        ".cache/zcl-dev-proof/attempts/%s-%s.newer/logs/x",
+                        local, base) > 0);
+        ASSERT(ic_write(root, older_marker, "stale attempt\n"));
+        ASSERT(ic_write(root, newer_marker, "settled attempt\n"));
+        ASSERT(snprintf(older_dir, sizeof(older_dir),
+                        "%s/.cache/zcl-dev-proof/attempts/%s-%s.older",
+                        root, local, base) > 0);
+        ASSERT(snprintf(newer_dir, sizeof(newer_dir),
+                        "%s/.cache/zcl-dev-proof/attempts/%s-%s.newer",
+                        root, local, base) > 0);
+        struct utimbuf older_times = { .actime = 1700000000,
+                                       .modtime = 1700000000 };
+        struct utimbuf newer_times = { .actime = 1800000000,
+                                       .modtime = 1800000000 };
+        ASSERT(utime(older_dir, &older_times) == 0);
+        ASSERT(utime(newer_dir, &newer_times) == 0);
+        /* dev_proof.c canonicalizes repo_root to an absolute, symlink-
+         * resolved path (platform_directory_canonical_real) before it
+         * derives any state path, so the expected log dir must be built
+         * from that same canonical root, not the relative fixture path. */
+        char canonical_newer_dir[4096];
+        ASSERT(realpath(newer_dir, canonical_newer_dir) != NULL);
+        char expected_log_dir[4096];
+        ASSERT(snprintf(expected_log_dir, sizeof(expected_log_dir),
+                        "%s/logs", canonical_newer_dir) > 0);
+
+        /* Library layer: the settled pair reports FAILED immediately, no
+         * further wait or re-request. */
+        struct zcl_dev_proof_status status = {0};
+        ASSERT(zcl_dev_proof_wait(root, local, base, 50, &status));
+        ASSERT(status.state == ZCL_DEV_PROOF_STATE_FAILED);
+        ASSERT(strcmp(status.detail, "child_proof_failed_exit_1") == 0);
+        ASSERT(strcmp(status.log_dir, expected_log_dir) == 0);
+
+        /* Command-dispatch layer (tools/command/native_dev_proof_command.c):
+         * this is where the bug lived — proof_fail() hard-coded BLOCKED/
+         * exit 3 for every non-PASSED state, including a settled FAILED.
+         * zcl_dev_proof_wait_conclude() is the exact status/exit-code
+         * mapping `dev.proof.wait` applies to an already-resolved status;
+         * it is unconditional (no ZCL_DEV_BUILD dependency) precisely so
+         * this contract is directly testable here without a dev build. */
+        struct zcl_command_reply reply;
+        zcl_command_reply_init(&reply, "zcl.dev_proof_status.v1");
+        zcl_dev_proof_wait_conclude(&reply, &status);
+        ASSERT(reply.status == ZCL_COMMAND_STATUS_FAILED);
+        ASSERT(reply.exit_code == ZCL_COMMAND_EXIT_FAILED);
+        ASSERT(reply.exit_code != ZCL_COMMAND_EXIT_BLOCKED);
+        ASSERT(strcmp(reply.error.code, "PROOF_FAILED") == 0);
+        ASSERT(strcmp(reply.error.evidence, "child_proof_failed_exit_1") == 0);
+        const struct json_value *log_dir = json_get(&reply.data, "log_dir");
+        ASSERT(log_dir && log_dir->type == JSON_STR &&
+              json_get_str(log_dir)[0]);
+        ASSERT(strcmp(json_get_str(log_dir), expected_log_dir) == 0);
+        zcl_command_reply_free(&reply);
+
+        /* Regression guard on the other side of the same contract: a
+         * genuinely still-running proof stays BLOCKED/exit 3 — only a
+         * SETTLED failure gets the new terminal FAILED/exit-1 treatment. */
+        struct zcl_dev_proof_status running_status = {0};
+        running_status.state = ZCL_DEV_PROOF_STATE_RUNNING;
+        struct zcl_command_reply pending_reply;
+        zcl_command_reply_init(&pending_reply, "zcl.dev_proof_status.v1");
+        zcl_dev_proof_wait_conclude(&pending_reply, &running_status);
+        ASSERT(pending_reply.status == ZCL_COMMAND_STATUS_BLOCKED);
+        ASSERT(pending_reply.exit_code == ZCL_COMMAND_EXIT_BLOCKED);
+        zcl_command_reply_free(&pending_reply);
+
+        /* `dev.proof.ensure` must not re-queue a settled failure: no new
+         * request file should appear for this exact pair. */
+        struct zcl_dev_proof_status ensure_status = {0};
+        ASSERT(zcl_dev_proof_ensure(root, local, base, &ensure_status));
+        ASSERT(ensure_status.state == ZCL_DEV_PROOF_STATE_FAILED);
+        char request_path[4096];
+        ASSERT(snprintf(request_path, sizeof(request_path),
+                        "%s/requests/%s-%s.request", state_dir, local,
+                        base) > 0);
+        ASSERT(access(request_path, F_OK) != 0);
+#endif
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_ic_resident_proof_queue(void)
 {
     int failures = 0;
@@ -1539,6 +1670,7 @@ int test_impact_composition(void)
     failures += test_ic_dev_proof_receipt_admission();
     failures += test_ic_dev_proof_child_action_identity();
     failures += test_ic_resident_proof_queue();
+    failures += test_ic_proof_wait_reports_settled_failure();
     failures += test_ic_cycle_reuse_requires_exact_proof_inputs();
     failures += test_ic_native_compositor_selects_physical_proof();
     failures += test_ic_fast_sync_splits_keep_proof_lane();

@@ -12,29 +12,19 @@
 #include <stdlib.h>
 #include <string.h>
 
-#ifdef ZCL_DEV_BUILD
-static const char *proof_source_root(const struct zcl_command_request *request)
-{
-    const struct json_value *root = request && request->input
-        ? json_get(request->input, "root") : NULL;
-    if (root && root->type == JSON_STR && json_get_str(root)[0])
-        return json_get_str(root);
-    if (request && request->context && request->context->source_root &&
-        request->context->source_root[0])
-        return request->context->source_root;
-    const char *environment = getenv("ZCL_DEV_SOURCE_ROOT");
-    return environment && environment[0] ? environment : ".";
-}
-
-static const char *proof_optional_text(const struct json_value *input,
-                                       const char *key)
-{
-    if (!input || !key) return NULL;
-    const struct json_value *value = json_get(input, key);
-    return value && value->type == JSON_STR && json_get_str(value)[0]
-        ? json_get_str(value) : NULL;
-}
-
+/* The functions below map an already-resolved `zcl_dev_proof_status` onto a
+ * `zcl_command_reply` (JSON fields, status, exit code). They read no files,
+ * spawn no process, and touch no dev-only capability — the dev-only surface
+ * is entirely in HOW a status gets resolved (proof_status/proof_ensure/
+ * proof_wait below, each gated on `#ifdef ZCL_DEV_BUILD`), never in how a
+ * resolved status is reported. Keeping them unconditional lets a
+ * release-shaped test binary exercise the exact status/exit-code contract
+ * directly (see zcl_dev_proof_wait_conclude and
+ * test_impact_composition.c: test_ic_proof_wait_reports_settled_failure)
+ * without flipping ZCL_DEV_BUILD for this translation unit — which would
+ * also compile proof_ensure()'s real body and pull in the resident
+ * dev-loop watcher from native_dev_command.c, an unrelated dependency this
+ * mapping logic does not need. */
 static void proof_emit_status(struct zcl_command_reply *reply,
                               const struct zcl_dev_proof_status *status,
                               bool add_wait_next)
@@ -52,6 +42,8 @@ static void proof_emit_status(struct zcl_command_reply *reply,
     if (status->receipt_path[0])
         (void)json_push_kv_str(&reply->data, "receipt_path",
                                status->receipt_path);
+    if (status->log_dir[0])
+        (void)json_push_kv_str(&reply->data, "log_dir", status->log_dir);
     if (status->detail[0])
         (void)json_push_kv_str(&reply->data, "detail", status->detail);
     if (status->worker_id > 1)
@@ -76,9 +68,11 @@ static void proof_emit_status(struct zcl_command_reply *reply,
             "wait for the exact commit/base receipt without running push-time work");
 }
 
-static void proof_fail(struct zcl_command_reply *reply,
-                       const struct zcl_dev_proof_status *status,
-                       const char *code, const char *phase)
+/* Genuinely still in flight (RUNNING) or not yet requested (MISSING): the
+ * caller should poll again, so this stays BLOCKED with exit 3. */
+static void proof_wait_pending(struct zcl_command_reply *reply,
+                               const struct zcl_dev_proof_status *status,
+                               const char *code, const char *phase)
 {
     proof_emit_status(reply, status, false);
     zcl_command_reply_fail(
@@ -86,6 +80,65 @@ static void proof_fail(struct zcl_command_reply *reply,
         code, phase, status->state == ZCL_DEV_PROOF_STATE_RUNNING, false,
         "the exact local commit and remote base do not have an admitted receipt",
         status->detail[0] ? status->detail : "exact_receipt_missing");
+}
+
+/* The pair's `.failed` marker already settled this exact commit/base
+ * identity: proving will not run again for it. This is a terminal outcome,
+ * not "still proving" — it must never share BLOCKED/exit 3 with the
+ * still-in-flight case above, or a caller that treats exit 3 as "keep
+ * polling" will spin forever on a proof that already finished failing. */
+static void proof_wait_failed(struct zcl_command_reply *reply,
+                              const struct zcl_dev_proof_status *status)
+{
+    proof_emit_status(reply, status, false);
+    zcl_command_reply_fail(
+        reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_FAILED,
+        "PROOF_FAILED", "prove", false, false,
+        "the exact local commit and remote base proof failed",
+        status->detail[0] ? status->detail : "child_proof_failed");
+}
+
+/* The exact status/exit-code contract for `dev.proof.wait`, given an
+ * already-resolved status: a settled `.failed` marker (FAILED) is a
+ * terminal, non-BLOCKED outcome distinct from still-in-flight (RUNNING) or
+ * not-yet-requested (MISSING); PASSED emits the receipt with no error.
+ * Exposed (non-static, unconditional) so this mapping is directly
+ * regression-testable without a dev build. */
+void zcl_dev_proof_wait_conclude(struct zcl_command_reply *reply,
+                                 const struct zcl_dev_proof_status *status)
+{
+    if (status->state == ZCL_DEV_PROOF_STATE_FAILED) {
+        proof_wait_failed(reply, status);
+        return;
+    }
+    if (status->state != ZCL_DEV_PROOF_STATE_PASSED) {
+        proof_wait_pending(reply, status, "PROOF_WAIT_TIMEOUT", "wait");
+        return;
+    }
+    proof_emit_status(reply, status, false);
+}
+
+#ifdef ZCL_DEV_BUILD
+static const char *proof_source_root(const struct zcl_command_request *request)
+{
+    const struct json_value *root = request && request->input
+        ? json_get(request->input, "root") : NULL;
+    if (root && root->type == JSON_STR && json_get_str(root)[0])
+        return json_get_str(root);
+    if (request && request->context && request->context->source_root &&
+        request->context->source_root[0])
+        return request->context->source_root;
+    const char *environment = getenv("ZCL_DEV_SOURCE_ROOT");
+    return environment && environment[0] ? environment : ".";
+}
+
+static const char *proof_optional_text(const struct json_value *input,
+                                       const char *key)
+{
+    if (!input || !key) return NULL;
+    const struct json_value *value = json_get(input, key);
+    return value && value->type == JSON_STR && json_get_str(value)[0]
+        ? json_get_str(value) : NULL;
 }
 #endif
 
@@ -251,14 +304,7 @@ static void proof_wait(
         }
         return;
     }
-    if (status.state != ZCL_DEV_PROOF_STATE_PASSED) {
-        proof_fail(reply, &status,
-                   status.state == ZCL_DEV_PROOF_STATE_FAILED
-                       ? "PROOF_FAILED" : "PROOF_WAIT_TIMEOUT",
-                   status.state == ZCL_DEV_PROOF_STATE_FAILED ? "prove" : "wait");
-        return;
-    }
-    proof_emit_status(reply, &status, false);
+    zcl_dev_proof_wait_conclude(reply, &status);
 #endif
 }
 
