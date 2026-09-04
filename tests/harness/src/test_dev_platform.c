@@ -3132,6 +3132,16 @@ static int test_resident_process_cancellation(void)
     return failures;
 }
 
+static int test_exact_commit_preempts_edit_proof(void)
+{
+    int failures = 0;
+    TEST("dev platform: runnable exact commit retires edit proof without cancelling commit or dirty feedback") {
+        ASSERT(zcl_devloop_watch_commit_preemption_selftest());
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 struct process_poll_fixture {
     unsigned calls;
     unsigned cancel_after;
@@ -3660,6 +3670,7 @@ static int test_dev_platform_platform_arm(void)
     failures += test_darwin_attested_descriptor_process();
 #endif
     failures += test_resident_process_cancellation();
+    failures += test_exact_commit_preempts_edit_proof();
     failures += test_resident_process_supersession();
     failures += test_native_source_cas_shadow();
     failures += test_source_identity_failure_tokens();

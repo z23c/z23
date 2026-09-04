@@ -49,7 +49,7 @@
 #endif
 
 #if defined(ZCL_HOTFORK_DEVLOOP_WATCH_CORE) || \
-    (defined(ZCL_DEV_BUILD) && !defined(_WIN32))
+    ((defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)) && !defined(_WIN32))
 static bool watch_c_source(const char *path)
 {
     size_t n = path ? strlen(path) : 0;
@@ -91,7 +91,7 @@ static void watch_component_for_files(const char *const *files, size_t count,
 
 #ifndef ZCL_HOTFORK_DEVLOOP_WATCH_CORE
 
-#ifdef ZCL_DEV_BUILD
+#if defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)
 
 #if defined(_WIN32)
 
@@ -418,6 +418,118 @@ static void watch_proof_join(struct watch_context *ctx)
     }
 }
 
+static bool watch_commit_request_current_clean(struct watch_context *ctx)
+{
+    if (!ctx || !zcl_dev_proof_queue_has_pending(ctx->root))
+        return false;
+    char local[65], base[65], why[160] = {0};
+    struct zcl_dev_proof_status status = {0};
+    if (!zcl_dev_proof_resolve_pair(ctx->root, NULL, NULL, local, base,
+                                    why, sizeof(why)) ||
+        !zcl_dev_proof_status_read(ctx->root, local, base, &status) ||
+        status.state != ZCL_DEV_PROOF_STATE_RUNNING ||
+        strcmp(status.detail, "resident_proof_request_queued") != 0)
+        return false;
+
+    const char *argv[] = {
+        "git", "status", "--porcelain=v1", "--untracked-files=normal", NULL};
+    struct zcl_devloop_process_result result = {0};
+    return zcl_devloop_process_run(ctx->root, argv, 30000, &result) &&
+        !result.timed_out && !result.output_truncated &&
+        result.term_signal == 0 && result.exit_code == 0 &&
+        result.output_len == 0;
+}
+
+/* An exact commit receipt subsumes the edit proof that led to the commit, but
+ * only after the request names current HEAD and the submitting worktree is
+ * clean enough for proof_worker() to admit it.  Drop an unstarted edit proof
+ * or signal its bounded worker; never disturb an already-running commit proof
+ * and never trade away feedback for newer dirty edits. */
+static void watch_commit_priority_apply(struct watch_context *ctx,
+                                        bool request_current_clean)
+{
+    if (!ctx || !request_current_clean)
+        return;
+    ctx->proof_pending_count = 0;
+    watch_proof_reap(ctx);
+    if (ctx->proof_worker_pid > 1 &&
+        ctx->proof_worker_kind == WATCH_PROOF_WORKER_EDIT) {
+        (void)kill(ctx->proof_worker_pid, SIGTERM);
+        watch_proof_join(ctx);
+    }
+}
+
+static bool watch_commit_proof_claimable(const struct watch_context *ctx)
+{
+    return ctx && ctx->proof_worker_pid <= 1 &&
+        ctx->proof_pending_count == 0;
+}
+
+static bool watch_commit_proof_prioritize(struct watch_context *ctx)
+{
+    bool request_current_clean = watch_commit_request_current_clean(ctx);
+    watch_commit_priority_apply(ctx, request_current_clean);
+    return request_current_clean;
+}
+
+#if defined(ZCL_TESTING)
+bool zcl_devloop_watch_commit_preemption_selftest(void)
+{
+    struct watch_context ctx = {0};
+    ctx.proof_pending_count = 1;
+    pid_t edit = fork();
+    if (edit < 0)
+        return false;
+    if (edit == 0) {
+        signal(SIGTERM, SIG_DFL);
+        for (;;) pause();
+    }
+    ctx.proof_worker_pid = edit;
+    ctx.proof_worker_kind = WATCH_PROOF_WORKER_EDIT;
+    watch_commit_priority_apply(&ctx, true);
+    bool edit_retired = ctx.proof_pending_count == 0 &&
+        ctx.proof_worker_pid == 0 &&
+        ctx.proof_worker_kind == WATCH_PROOF_WORKER_NONE &&
+        watch_commit_proof_claimable(&ctx);
+
+    ctx.proof_pending_count = 1;
+    pid_t commit = fork();
+    if (commit < 0)
+        return false;
+    if (commit == 0) {
+        signal(SIGTERM, SIG_DFL);
+        for (;;) pause();
+    }
+    ctx.proof_worker_pid = commit;
+    ctx.proof_worker_kind = WATCH_PROOF_WORKER_COMMIT;
+    watch_commit_priority_apply(&ctx, true);
+    bool commit_preserved = kill(commit, 0) == 0 &&
+        ctx.proof_worker_pid == commit &&
+        ctx.proof_worker_kind == WATCH_PROOF_WORKER_COMMIT;
+    (void)kill(commit, SIGTERM);
+    watch_proof_join(&ctx);
+
+    ctx.proof_pending_count = 1;
+    pid_t dirty_edit = fork();
+    if (dirty_edit < 0)
+        return false;
+    if (dirty_edit == 0) {
+        signal(SIGTERM, SIG_DFL);
+        for (;;) pause();
+    }
+    ctx.proof_worker_pid = dirty_edit;
+    ctx.proof_worker_kind = WATCH_PROOF_WORKER_EDIT;
+    watch_commit_priority_apply(&ctx, false);
+    bool dirty_preserved = kill(dirty_edit, 0) == 0 &&
+        ctx.proof_pending_count == 1 &&
+        ctx.proof_worker_pid == dirty_edit &&
+        ctx.proof_worker_kind == WATCH_PROOF_WORKER_EDIT;
+    (void)kill(dirty_edit, SIGTERM);
+    watch_proof_join(&ctx);
+    return edit_retired && commit_preserved && dirty_preserved;
+}
+#endif
+
 static bool watch_proof_start(struct watch_context *ctx, int watcher_lock_fd)
 {
     if (!ctx)
@@ -458,7 +570,7 @@ static bool watch_commit_proof_start(struct watch_context *ctx,
 {
     if (!ctx) return false;
     watch_proof_reap(ctx);
-    if (ctx->proof_worker_pid > 1 || ctx->proof_pending_count > 0 ||
+    if (!watch_commit_proof_claimable(ctx) ||
         !zcl_dev_proof_queue_has_pending(ctx->root))
         return true;
     pid_t child = fork();
@@ -1566,6 +1678,7 @@ int zcl_devloop_watch_mode_until(const char *repo_root,
     fflush(stdout);
 
     while (!g_watch_stop && !(stop && stop(stop_opaque))) {
+        watch_commit_proof_prioritize(&ctx);
         if (!watch_proof_start(&ctx, lock_fd)) {
             fprintf(stderr, "[devloop] complete proof worker start failed\n");
             break;
@@ -1618,17 +1731,31 @@ int zcl_devloop_watch_mode_until(const char *repo_root,
                 else if (drc < 0)
                     break;
             }
+            /* A commit can arrive while the Darwin vnode burst is being
+             * coalesced.  Do not enter the synchronous conservative EDIT
+             * cycle after that exact clean request becomes claimable: the
+             * top of the next loop iteration will start its stronger bound
+             * proof. */
+            if (watch_commit_proof_prioritize(&ctx)) {
+                ctx.changed_count = 0;
+                ctx.first_mutation_us = 0;
+                ctx.force_full_source_rescan = false;
+                ctx.edit_seen_emitted = false;
+                continue;
+            }
             ctx.changed_count = 0;
             ctx.first_mutation_us = 0;
             ctx.force_full_source_rescan = false;
             ctx.edit_seen_emitted = false;
             const char *files[] = {"Makefile"};
-            int cycle_rc = zcl_devloop_run_cycle_mode(
-                ctx.root, files, 1, ZCL_DEVLOOP_PUBLISH_VERIFY_ONLY);
-            if (cycle_rc != 0)
+            if (!watch_proof_schedule(
+                    &ctx, files, 1, ZCL_DEVLOOP_PUBLISH_VERIFY_ONLY,
+                    lock_fd)) {
                 fprintf(stderr,
-                        "[devloop] watch: conservative macOS cycle reported "
-                        "red; watcher remains available\n");
+                        "[devloop] watch: conservative macOS cycle could not "
+                        "be scheduled\n");
+                break;
+            }
             continue;
         }
 #endif

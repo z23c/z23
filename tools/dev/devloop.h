@@ -625,6 +625,10 @@ typedef bool (*zcl_devloop_process_cancel_poll_fn)(void *opaque);
 void zcl_devloop_process_cancel_poll_set(
     zcl_devloop_process_cancel_poll_fn poll_fn, void *opaque);
 void zcl_devloop_process_cancel_poll_clear(void);
+#if defined(ZCL_TESTING) && !defined(_WIN32)
+/* Deterministic process-backed KAT for exact-commit scheduling priority. */
+bool zcl_devloop_watch_commit_preemption_selftest(void);
+#endif
 #if defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)
 bool zcl_devloop_deterministic_compile_failure(
     const struct zcl_devloop_process_result *result,
