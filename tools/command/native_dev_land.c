@@ -813,17 +813,31 @@ static void dl_outbox(const struct dl_dirs *d, const struct dl_row *r,
 
 /* ── outcomes ──────────────────────────────────────────────────────────── */
 
+/* Encode and append in one call so the encoded length never has to live
+ * past a single, self-contained function: dl_record_outcome is a common
+ * inline target (dl_cancel calls it too), and a `size_t len` whose address
+ * is taken in the caller and used after dl_encode_row returns is exactly
+ * the shape GCC's -Wdangling-pointer flags once two inlined copies of that
+ * caller share the analysis (false positive here — len is never read past
+ * its owning statement). Keeping both the address-of and the use inside
+ * one small function removes the ambiguity instead of arguing with it. */
+static bool dl_write_row(const char *path, const struct dl_row *r)
+{
+    char line[DL_LINE_CAP];
+    size_t len = 0;
+    return dl_encode_row(r, line, sizeof(line), &len) &&
+           dl_append_row(path, line, len);
+}
+
 static void dl_record_outcome(const struct dl_dirs *d, struct dl_row *r)
 {
-    char path[4096 + 32], line[DL_LINE_CAP];
-    size_t len = 0;
+    char path[4096 + 32];
     if (!d || !r)
         return;
     if (snprintf(path, sizeof(path), "%s/outcomes.jsonl", d->land) >=
         (int)sizeof(path))
         return;
-    if (dl_encode_row(r, line, sizeof(line), &len))
-        (void)dl_append_row(path, line, len);
+    (void)dl_write_row(path, r);
     dl_outbox(d, r, "outcome");
 }
 
