@@ -88,21 +88,20 @@ static void shi_sprout_tree(size_t n, struct incremental_merkle_tree *out,
     incremental_tree_root(out, root_out);
 }
 
-/* Write one (key -> value) row into the LevelDB at `dir`. Opens/closes per
- * call: LevelDB is single-writer, so no write may overlap the reader's LOCK. */
-static bool shi_put(const char *dir, const char *key, size_t klen,
+/* Write one (key -> value) row into an ALREADY-OPEN fixture handle. The
+ * fixture is disposable (built fresh, read back once by the importer under
+ * test, then torn down) and single-threaded end to end, so it needs neither
+ * a fresh LevelDB open per key nor a durability fsync per write: opening
+ * once per chainstate and writing with sync=false turns what used to be
+ * ~12-14 full open+fsync+close round-trips per scenario into one open, one
+ * unsynced write burst, and one close. */
+static bool shi_put(struct db_wrapper *db, const char *key, size_t klen,
                     const void *val, size_t vlen)
 {
-    struct db_wrapper db;
-    memset(&db, 0, sizeof(db));
-    if (!db_wrapper_open(&db, dir, 1u << 20, false, false))
-        return false;
-    bool ok = db_write(&db, key, klen, (const char *)val, vlen, true);
-    db_wrapper_close(&db);
-    return ok;
+    return db_write(db, key, klen, (const char *)val, vlen, false);
 }
 
-static bool shi_put_anchor(const char *dir, char prefix,
+static bool shi_put_anchor(struct db_wrapper *db, char prefix,
                            const struct incremental_merkle_tree *tree,
                            const struct uint256 *root)
 {
@@ -112,25 +111,52 @@ static bool shi_put_anchor(const char *dir, char prefix,
     char key[33];
     key[0] = prefix;
     memcpy(key + 1, root->data, 32);
-    ok = ok && shi_put(dir, key, sizeof(key), s.data, s.size);
+    ok = ok && shi_put(db, key, sizeof(key), s.data, s.size);
     stream_free(&s);
     return ok;
 }
 
-static bool shi_put_nullifier(const char *dir, char prefix,
+static bool shi_put_nullifier(struct db_wrapper *db, char prefix,
                               const struct uint256 *nf)
 {
     char key[33];
     key[0] = prefix;
     memcpy(key + 1, nf->data, 32);
     const uint8_t present = 0x01;   /* serialized C++ `bool true` */
-    return shi_put(dir, key, sizeof(key), &present, 1);
+    return shi_put(db, key, sizeof(key), &present, 1);
 }
 
-static bool shi_put_pointer(const char *dir, char key_byte,
+static bool shi_put_pointer(struct db_wrapper *db, char key_byte,
                             const struct uint256 *root)
 {
-    return shi_put(dir, &key_byte, 1, root->data, 32);
+    return shi_put(db, &key_byte, 1, root->data, 32);
+}
+
+/* Open `dir` once for a single ad-hoc write (the post-build perturbations
+ * below each do exactly one), write it unsynced, and close. */
+static bool shi_put_anchor_solo(const char *dir, char prefix,
+                                const struct incremental_merkle_tree *tree,
+                                const struct uint256 *root)
+{
+    struct db_wrapper db;
+    memset(&db, 0, sizeof(db));
+    if (!db_wrapper_open(&db, dir, 1u << 20, false, false))
+        return false;
+    bool ok = shi_put_anchor(&db, prefix, tree, root);
+    db_wrapper_close(&db);
+    return ok;
+}
+
+static bool shi_put_pointer_solo(const char *dir, char key_byte,
+                                 const struct uint256 *root)
+{
+    struct db_wrapper db;
+    memset(&db, 0, sizeof(db));
+    if (!db_wrapper_open(&db, dir, 1u << 20, false, false))
+        return false;
+    bool ok = shi_put_pointer(&db, key_byte, root);
+    db_wrapper_close(&db);
+    return ok;
 }
 
 static int64_t shi_count(sqlite3 *db, const char *table)
@@ -194,37 +220,38 @@ static bool shi_build_chainstate(const char *cs_dir, bool omit_tip_sapling,
     shi_sprout_tree(2, &spr_a, &pr_a);
     shi_sprout_tree(5, &spr_best, &pr_best);
 
-    if (!shi_put_anchor(cs_dir, 'Z', &sap_a, &sr_a) ||
-        !shi_put_anchor(cs_dir, 'Z', &sap_b, &sr_b))
+    struct db_wrapper db;
+    memset(&db, 0, sizeof(db));
+    if (!db_wrapper_open(&db, cs_dir, 1u << 20, false, false))
         return false;
-    if (!omit_tip_sapling &&
-        !shi_put_anchor(cs_dir, 'Z', &sap_tip, &sr_tip))
-        return false;
-    if (!shi_put_anchor(cs_dir, 'A', &spr_a, &pr_a) ||
-        !shi_put_anchor(cs_dir, 'A', &spr_best, &pr_best))
-        return false;
+
+    bool ok = shi_put_anchor(&db, 'Z', &sap_a, &sr_a) &&
+              shi_put_anchor(&db, 'Z', &sap_b, &sr_b);
+    if (ok && !omit_tip_sapling)
+        ok = shi_put_anchor(&db, 'Z', &sap_tip, &sr_tip);
+    ok = ok && shi_put_anchor(&db, 'A', &spr_a, &pr_a) &&
+               shi_put_anchor(&db, 'A', &spr_best, &pr_best);
 
     /* nullifiers: 3 Sapling, 2 Sprout */
     struct uint256 nf;
-    for (int i = 0; i < 3; i++) {
+    for (int i = 0; ok && i < 3; i++) {
         shi_fill(&nf, 0x51, (size_t)i + 100);
-        if (!shi_put_nullifier(cs_dir, 'S', &nf))
-            return false;
+        ok = shi_put_nullifier(&db, 'S', &nf);
     }
-    for (int i = 0; i < 2; i++) {
+    for (int i = 0; ok && i < 2; i++) {
         shi_fill(&nf, 0x53, (size_t)i + 200);
-        if (!shi_put_nullifier(cs_dir, 's', &nf))
-            return false;
+        ok = shi_put_nullifier(&db, 's', &nf);
     }
 
     /* best pointers + best block */
     struct uint256 best_block;
     shi_best_block(&best_block);
-    if (!shi_put_pointer(cs_dir, 'z', &sr_tip) ||   /* always names the tip */
-        !shi_put_pointer(cs_dir, 'a', &pr_best) ||
-        !shi_put_pointer(cs_dir, 'B', &best_block))
-        return false;
-    return true;
+    ok = ok && shi_put_pointer(&db, 'z', &sr_tip) &&  /* always names the tip */
+               shi_put_pointer(&db, 'a', &pr_best) &&
+               shi_put_pointer(&db, 'B', &best_block);
+
+    db_wrapper_close(&db);
+    return ok;
 }
 
 static bool shi_import_fixture(sqlite3 *db, const char *cs_dir,
@@ -643,7 +670,7 @@ int test_shielded_history_import(void)
         shi_sapling_tree(4, &corrupt_tip, &corrupt_root);
         SHI_CHECK("corrupt tip tree hashes to a root != the committed tip root",
                   !uint256_eq(&corrupt_root, &tip_root) &&
-                  shi_put_anchor(cs_dir, 'Z', &corrupt_tip, &tip_root));
+                  shi_put_anchor_solo(cs_dir, 'Z', &corrupt_tip, &tip_root));
 
         SHI_CHECK("progress.kv opens (mid-scan)", progress_store_open(pg_dir));
         sqlite3 *db = progress_store_db();
@@ -713,7 +740,7 @@ int test_shielded_history_import(void)
         shi_sapling_tree(3, &stale_tree, &stale_root);
         SHI_CHECK("stale-pointer fixture: 'z' re-pointed at an older root",
                   !uint256_eq(&stale_root, &tip_root) &&
-                  shi_put_pointer(cs_dir, 'z', &stale_root));
+                  shi_put_pointer_solo(cs_dir, 'z', &stale_root));
 
         SHI_CHECK("progress.kv opens (stale-pointer)", progress_store_open(pg_dir));
         sqlite3 *db = progress_store_db();
