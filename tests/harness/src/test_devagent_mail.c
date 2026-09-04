@@ -400,7 +400,7 @@ int test_devagent_mail(void)
         dvx_isolate("apikey");
         /* 32 hex chars, a dot, 16 alnum: the Z.ai key shape, bare. */
         dvx_post(&c, "alice", "*", "note",
-                 "token 0123456789abcdef0123456789abcdef.ABCDEFGHIJKLMNOP "
+                 "token 0123456789abcdef0123456789abcdef.ABCDEFGHIJKLMNOP " /* api-key-example-ok */
                  "leaked");
         ASSERT(dvx_run(&c));
         ASSERT(!dvx_ok(&c));

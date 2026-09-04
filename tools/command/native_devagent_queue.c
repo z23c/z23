@@ -61,12 +61,21 @@
  * not be edited.
  */
 
+/* realpath() is declared by glibc only through the fortify inline unless a
+ * feature-test macro asks for it; without this the file compiles today by
+ * accident of -O2 and is a hard C23 error at -O0 or on another libc. Must
+ * precede the first #include, which is where <features.h> is read. */
+#if !defined(_WIN32) && !defined(_DEFAULT_SOURCE)
+#define _DEFAULT_SOURCE
+#endif
+
 #include "command/native_command.h"
 #include "command/native_devagent.h"
 
 #include "base/safe_alloc.h"
 #include "json/json.h"
 #include "platform/state_root.h"
+#include "platform/time_compat.h"
 #include "util/spawn.h"
 
 #include <ctype.h>
@@ -84,6 +93,13 @@
 #include <io.h>
 #else
 #include <sys/file.h>
+#endif
+
+/* mingw's <fcntl.h> has no O_CLOEXEC: descriptors on Windows are not
+ * inherited unless the handle is explicitly marked inheritable, so the
+ * flag is a no-op there rather than a missing guarantee. */
+#ifndef O_CLOEXEC
+#define O_CLOEXEC 0
 #endif
 
 #define DVQ_LEAF "dev.agent.queue"
@@ -280,7 +296,7 @@ static bool dvq_dirs_make(struct dvq_dirs *d)
 
 static void dvq_now_iso(char out[64])
 {
-    time_t now = time(NULL);
+    time_t now = platform_time_wall_time_t();
     struct tm tm_utc;
     memset(&tm_utc, 0, sizeof(tm_utc));
 #if defined(_WIN32)
@@ -1407,7 +1423,7 @@ static void dvq_next(const struct zcl_command_request *req,
         gtmo = NULL;
     }
     (void)snprintf(pick.worktree, sizeof(pick.worktree), "%s", wt);
-    pick.started = (long long)time(NULL);
+    pick.started = (long long)platform_time_wall_unix();
     if (dvq_have_systemd()) {
         char frag[96];
         dvq_unit_frag(pick.name, frag, sizeof(frag));
@@ -1835,7 +1851,7 @@ static void dvq_reap(const struct zcl_command_request *req,
         {
             char now[32];
             (void)snprintf(now, sizeof(now), "%lld",
-                           (long long)time(NULL));
+                           (long long)platform_time_wall_unix());
             (void)dvq_write_file(seen, now, strlen(now));
         }
         if (runlen > 0 && dvq_rate_limited(runtext) &&
@@ -1915,7 +1931,7 @@ static void dvq_reap(const struct zcl_command_request *req,
     }
     {
         char now[32];
-        (void)snprintf(now, sizeof(now), "%lld", (long long)time(NULL));
+        (void)snprintf(now, sizeof(now), "%lld", (long long)platform_time_wall_unix());
         (void)dvq_write_file(stampp, now, strlen(now));
     }
     free(rows);
@@ -2034,7 +2050,7 @@ static void dvq_status(const struct zcl_command_request *req,
     char qpath[4096 + 32], opath[4096 + 32], poolpath[4096 + 32];
     struct json_value queued, running, outcomes, pool;
     long long total = 0, warm = 0, freew = 0;
-    long long now = (long long)time(NULL);
+    long long now = (long long)platform_time_wall_unix();
     bool want_json = false;
     const struct json_value *jv;
     char screen[16384];

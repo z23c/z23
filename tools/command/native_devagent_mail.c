@@ -81,10 +81,12 @@
 
 #include "command/native_command.h"
 
+#include "base/hex.h"
 #include "base/safe_alloc.h"
 #include "command/native_devagent.h"
 #include "json/json.h"
 #include "platform/state_root.h"
+#include "platform/time_compat.h"
 
 #include <ctype.h>
 #include <dirent.h>
@@ -183,17 +185,6 @@ static bool dvm_has_ipv4(const char *s)
     return false;
 }
 
-static int dvm_hexval(unsigned char c)
-{
-    if (c >= '0' && c <= '9')
-        return c - '0';
-    if (c >= 'a' && c <= 'f')
-        return c - 'a' + 10;
-    if (c >= 'A' && c <= 'F')
-        return c - 'A' + 10;
-    return -1;
-}
-
 /* A Z.ai-style API key: 32 hex chars, a dot, 16 alphanumerics, bounded by
  * non-token characters on both sides so a longer word never matches. */
 static bool dvm_has_api_key(const char *s)
@@ -206,7 +197,7 @@ static bool dvm_has_api_key(const char *s)
         if (s[i + 32] != '.')
             continue;
         for (size_t j = 0; j < 32; j++) {
-            if (dvm_hexval((unsigned char)s[i + j]) < 0) {
+            if (zcl_hex_nibble(s[i + j], true) < 0) {
                 ok = false;
                 break;
             }
@@ -731,7 +722,7 @@ static void dvm_post(const struct zcl_command_request *req,
         seq = 1;
     }
 
-    now = time(NULL);
+    now = platform_time_wall_time_t();
     (void)gmtime_r(&now, &tm_utc);
     (void)strftime(ts, sizeof(ts), "%Y-%m-%dT%H:%M:%SZ", &tm_utc);
 
