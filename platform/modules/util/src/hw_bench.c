@@ -92,10 +92,20 @@ int hw_bench_probe_run_count_for_testing(void)
 
 /* FNV-1a over the hw_profile signature this measurement was taken under.
  * Local (not the shared file_tree_ops one) — one small pure function, no
- * cross-module dependency for a single hash. */
-static void compute_fingerprint(char out[17])
+ * cross-module dependency for a single hash.
+ *
+ * `datadir` MUST be the resolved datadir, never NULL/empty when one is
+ * known: hw_profile_init() is a one-shot latch (first caller wins for the
+ * life of the process), and hw_bench_init() is called very early in boot —
+ * often before anything else has ever touched hw_profile. Passing NULL here
+ * used to win that race and permanently pin hw_profile's sysfs rotational
+ * probe to "unknown" (probe_datadir_rotational() refuses a NULL/empty
+ * datadir), so storage_pacing's later hw_profile_init(datadir) call became a
+ * silent no-op and every box — including a real spinning disk — fell
+ * through to the bench/probe fallbacks instead of the direct sysfs answer. */
+static void compute_fingerprint(const char *datadir, char out[17])
 {
-    hw_profile_init(NULL);
+    hw_profile_init(datadir);
     int online = hw_profile_online_cores();
     int physical = hw_profile_physical_cores();
     int64_t ram = hw_profile_ram_bytes();
@@ -359,7 +369,7 @@ bool hw_bench_init(const char *datadir)
     st.pread_us = -1;
 
     char fp_now[17];
-    compute_fingerprint(fp_now);
+    compute_fingerprint(resolved, fp_now);
 
     char cpath[HW_BENCH_PATH_MAX];
     bool have_cache_path = cache_path(resolved, cpath, sizeof(cpath));

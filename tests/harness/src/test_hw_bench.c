@@ -19,7 +19,9 @@
 #include "util/hw_bench.h"
 #include "util/hw_profile.h"
 #include "json/json.h"
+#include "platform/device_compat.h"
 
+#include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <string.h>
@@ -72,6 +74,48 @@ static bool hwb_corrupt_cache_fingerprint(const char *cache_path)
     }
     fclose(out);
     return true;
+}
+
+/* ── fixture helpers for the hw_profile-poisoning regression below ──── */
+
+static bool hwb_mkdir_p(const char *path)
+{
+    char buf[512];
+    snprintf(buf, sizeof(buf), "%s", path);
+    for (char *p = buf + 1; *p; p++) {
+        if (*p == '/') {
+            *p = '\0';
+            mkdir(buf, 0700);
+            *p = '/';
+        }
+    }
+    return mkdir(buf, 0700) == 0 || errno == EEXIST;
+}
+
+static bool hwb_write_file(const char *path, const char *contents)
+{
+    FILE *f = fopen(path, "w");
+    if (!f) return false;
+    bool ok = fputs(contents, f) >= 0;
+    fclose(f);
+    return ok;
+}
+
+/* Plants root/devices/fakehdd/block/sdfake/queue/rotational=1 (HDD-shaped:
+ * no partition indirection), then symlinks root/dev/block/<maj>:<min> at it.
+ * Mirrors hwp_plant_hdd_wholedisk() in test_hw_profile.c (duplicated rather
+ * than shared: one small fixture, no cross-test-file dependency). */
+static void hwb_plant_hdd_wholedisk(const char *root, unsigned maj,
+                                    unsigned min)
+{
+    char dir[512], path[600], link[600];
+    snprintf(dir, sizeof(dir), "%s/devices/fakehdd/block/sdfake/queue", root);
+    hwb_mkdir_p(dir);
+    snprintf(path, sizeof(path), "%s/rotational", dir);
+    hwb_write_file(path, "1\n");
+    snprintf(link, sizeof(link), "%s/dev/block/%u:%u", root, maj, min);
+    unlink(link);
+    symlink("../../devices/fakehdd/block/sdfake", link);
 }
 
 int test_hw_bench(void)
@@ -293,6 +337,75 @@ int test_hw_bench(void)
                   json_get(&v2, "fsync_source") &&
                   strcmp(json_get_str(json_get(&v2, "fsync_source")), "fallback") == 0);
         json_free(&v2);
+    }
+
+    /* ── regression: hw_bench_init() must not starve hw_profile's sysfs
+     * rotational probe of the real datadir ──────────────────────────
+     *
+     * hw_profile_init() is a one-shot latch: whichever caller reaches it
+     * FIRST decides rotational_known for the rest of the process. Before
+     * this fix, hw_bench_init()'s internal fingerprint computation called
+     * hw_profile_init(NULL) — and since hw_bench_init() runs very early in
+     * boot (boot_datadir_lock_acquire, right before storage_pacing_init),
+     * it always won that race. storage_pacing's own later
+     * hw_profile_init(datadir) call became a silent no-op, so the sysfs
+     * "queue/rotational" answer was permanently unknown and every box —
+     * spinning disk included — fell through to the bench/probe fallback
+     * classification instead of the direct, cheap sysfs one. Prove the
+     * fix: hw_bench_init(datadir) must leave hw_profile with the REAL
+     * datadir's rotational verdict, not NULL's. */
+    {
+        hw_bench_reset_for_testing();
+        hw_profile_reset_for_testing();
+
+        char tmpl[] = "/tmp/zcl_hwb_block_fixtureXXXXXX";
+        char *root = mkdtemp(tmpl);
+        HWB_CHECK("hw_profile-poisoning fixture mkdtemp succeeds",
+                  root != NULL);
+        if (root) {
+            char datadir[600];
+            snprintf(datadir, sizeof(datadir), "%s/test_datadir", root);
+            hwb_mkdir_p(datadir);
+            HWB_CHECK("hw_profile-poisoning fixture has a sample file",
+                      hwb_plant_sample_file(datadir));
+
+            struct stat st;
+            bool have_stat = stat(datadir, &st) == 0;
+            HWB_CHECK("hw_profile-poisoning fixture datadir stat() OK",
+                      have_stat);
+            if (have_stat) {
+                unsigned maj = platform_device_major(st.st_dev);
+                unsigned min = platform_device_minor(st.st_dev);
+                char block_root[600];
+                snprintf(block_root, sizeof(block_root), "%s/blockroot", root);
+                char dev_block_dir[700];
+                snprintf(dev_block_dir, sizeof(dev_block_dir), "%s/dev/block",
+                         block_root);
+                hwb_mkdir_p(dev_block_dir);
+                hw_profile_set_block_root_for_testing(dev_block_dir);
+                hwb_plant_hdd_wholedisk(block_root, maj, min);
+
+                /* This is the exact call order boot_datadir_lock_acquire()
+                 * uses: hw_bench_init(datadir) first, nothing having
+                 * touched hw_profile before it. */
+                hw_bench_init(datadir);
+
+                bool known = false;
+                bool rotational = hw_profile_datadir_rotational(&known);
+                HWB_CHECK(
+                    "hw_bench_init(datadir) leaves the sysfs verdict known",
+                    known);
+                HWB_CHECK(
+                    "hw_bench_init(datadir) reports the FIXTURE's class "
+                    "(rotational), not NULL's",
+                    known && rotational);
+            }
+            hw_profile_set_block_root_for_testing(NULL);
+        }
+
+        hw_bench_reset_for_testing();
+        hw_profile_reset_for_testing();
+        hw_profile_init(NULL);
     }
 
     /* Leave a clean slate for any test running after this one. */

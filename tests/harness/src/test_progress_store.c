@@ -99,6 +99,29 @@ static void *lo_projection_writer(void *p)
     return NULL;
 }
 
+/* ── compaction-vs-held-lock fixture ─────────────────────────────────
+ * A background thread that takes the projection tx lock, marks itself
+ * "started", sleeps to simulate a slow writer, marks itself "released" and
+ * unlocks. The main thread's compact_if_needed() call must not observe the
+ * lock as free (and so must not start its VACUUM) until `released` is
+ * already true. */
+struct pc_lock_holder_arg {
+    _Atomic bool started;
+    _Atomic bool released;
+    int hold_ms;
+};
+
+static void *pc_lock_holder(void *p)
+{
+    struct pc_lock_holder_arg *a = p;
+    projection_store_tx_lock();
+    atomic_store(&a->started, true);
+    lo_sleep_ms(a->hold_ms);
+    atomic_store(&a->released, true);
+    projection_store_tx_unlock();
+    return NULL;
+}
+
 /* Count quarantine sidecar files (consensus.db*.corrupt.*) in dir. Used to
  * assert the quick_check quarantine fired exactly when expected. */
 static int ps_count_corrupt(const char *dir)
@@ -1019,6 +1042,93 @@ int test_progress_store(void)
         PS_CHECK("compact: a compacted store is not compacted again",
                  !projection_store_compact_if_needed(1024 * 1024, 250, NULL,
                                                      NULL));
+
+        projection_store_close();
+        progress_store_close();
+        test_cleanup_tmpdir(dir);
+    }
+
+    /* ── compaction never runs a VACUUM while a writer holds the tx lock ──
+     *
+     * A flash reviewer flagged that projection_store_compact_if_needed()
+     * might ignore projection_store_tx_trylock()'s busy return and VACUUM
+     * anyway. It does not: the compaction path calls the BLOCKING
+     * projection_store_tx_lock(), the same recursive mutex every writer
+     * (address_index_service, txindex_projection_service) takes via
+     * projection_store_tx_trylock() before touching the handle. So a
+     * compaction attempted while another writer holds the lock cannot run
+     * concurrently with it — it can only block until the writer releases,
+     * then proceed. Prove the ordering directly: a background thread holds
+     * the lock across a sleep, and the compaction call in this thread must
+     * not observe the lock as free (and therefore must not start its
+     * VACUUM) until that thread has actually released it. */
+    {
+        char dir[256];
+        test_make_tmpdir(dir, sizeof(dir), "progress_store", "compact_lock");
+        PS_CHECK("lock: kernel open", progress_store_open(dir));
+        PS_CHECK("lock: projection open", projection_store_open(dir));
+
+        /* Make the store over-bound so compact_if_needed actually attempts
+         * a VACUUM rather than returning early on the bound check. */
+        sqlite3 *pdb = projection_store_db();
+        if (pdb) {
+            projection_store_tx_lock();
+            (void)sqlite3_exec(pdb,
+                "CREATE TABLE IF NOT EXISTS lock_churn(k INTEGER PRIMARY KEY, v BLOB)",
+                NULL, NULL, NULL);  // raw-sql-ok:test-fixture-seeding
+            (void)sqlite3_exec(pdb, "BEGIN", NULL, NULL, NULL);  // raw-sql-ok:test-fixture-seeding
+            sqlite3_stmt *ins = NULL;
+            if (sqlite3_prepare_v2(pdb,
+                    "INSERT INTO lock_churn(k, v) VALUES(?, ?)", -1, &ins,
+                    NULL) == SQLITE_OK) {
+                static uint8_t payload[2048];
+                memset(payload, 0x5a, sizeof(payload));
+                for (int i = 0; i < 4000; i++) {
+                    sqlite3_reset(ins);
+                    sqlite3_bind_int(ins, 1, i);
+                    sqlite3_bind_blob(ins, 2, payload, sizeof(payload),
+                                      SQLITE_STATIC);
+                    (void)sqlite3_step(ins);  // raw-sql-ok:test-fixture-seeding
+                }
+                sqlite3_finalize(ins);
+            }
+            (void)sqlite3_exec(pdb, "COMMIT", NULL, NULL, NULL);  // raw-sql-ok:test-fixture-seeding
+            (void)sqlite3_exec(pdb, "DELETE FROM lock_churn WHERE k >= 40",
+                               NULL, NULL, NULL);  // raw-sql-ok:test-fixture-seeding
+            projection_store_tx_unlock();
+        }
+
+        struct pc_lock_holder_arg holder = { false, false, 300 };
+        pthread_t thread;
+        int spawn_rc = pthread_create(&thread, NULL, pc_lock_holder, &holder);
+        PS_CHECK("lock: holder thread spawned", spawn_rc == 0);
+
+        if (spawn_rc == 0) {
+            /* Wait for the holder to actually own the lock before racing
+             * compact_if_needed against it. */
+            for (int spins = 0; spins < 2000 && !atomic_load(&holder.started);
+                 spins++)
+                lo_sleep_ms(1);
+            PS_CHECK("lock: holder confirmed it holds the tx lock",
+                     atomic_load(&holder.started));
+
+            struct projection_store_usage before, after;
+            bool compacted = projection_store_compact_if_needed(
+                1024 * 1024, 250, &before, &after);
+
+            /* The call above only returns after it acquired the (blocking)
+             * tx lock, which the holder does not release until `released`
+             * flips true. If compact_if_needed ran its VACUUM concurrently
+             * with the held lock, this would be observed as `released`
+             * still false right after the call returns — it never is. */
+            PS_CHECK("compact: never observed as running before the holder "
+                     "released the lock",
+                     atomic_load(&holder.released));
+            PS_CHECK("compact: still compacted correctly after the wait",
+                     compacted && after.file_bytes <= before.file_bytes);
+
+            pthread_join(thread, NULL);
+        }
 
         projection_store_close();
         progress_store_close();
