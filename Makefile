@@ -2994,6 +2994,15 @@ $(TEST_PARALLEL_REL_CANDIDATE): | $(HOTSWAP_ROLLBACK_FIXTURE_SOS)
 $(TEST_PARALLEL_FAST_CANDIDATE): | $(HOTSWAP_ROLLBACK_FIXTURE_SOS)
 endif
 
+# test_engine's end-to-end case runs $(ENGINE_UNIT_BIN) as a subprocess (same
+# reason test_acme_worker runs zclassic23-acme instead of linking it: the
+# binary carries a TLS client, and test_cold_join_sovereign P2 asserts no
+# such object appears in a Z23 object file). Order-only, same as
+# zclassic23-acme above, so the test build guarantees it exists without
+# making every unrelated test recompile when engine_unit.c changes.
+$(TEST_PARALLEL_REL_CANDIDATE): | $(ENGINE_UNIT_BIN)
+$(TEST_PARALLEL_FAST_CANDIDATE): | $(ENGINE_UNIT_BIN)
+
 # Expanding the complete object list inside a recipe makes the recipe itself
 # one oversized `/bin/sh -c` argument on Linux.  GNU Make writes the exact,
 # epoch-scoped prerequisite order directly; the compiler consumes it through a
@@ -10732,6 +10741,7 @@ ENGINE_UNIT_SRCS = tools/engine_unit.c \
 	engine/modules/engine/src/engine_prompt.c \
 	engine/modules/engine/src/engine_receipt.c \
 	engine/modules/engine/src/engine_secret.c \
+	engine/modules/engine/src/engine_state.c \
 	engine/modules/engine/src/engine_verdict.c \
 	engine/modules/engine/src/engine_wire_request.c \
 	engine/modules/engine/src/engine_wire_response.c \
