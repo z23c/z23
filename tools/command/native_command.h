@@ -2382,6 +2382,38 @@ void zcl_native_handle_dev_agent_mutate(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
 
+/* dev.agent.* lane discipline — situation, rules, start, done, triage,
+ * ceiling, pace, claim. One handler per file under tools/command
+ * (native_devagent_<leaf>.c) so each can be implemented and reviewed on its
+ * own. They run Git only through platform/modules/util spawn and read only
+ * the checkout. dev.agent.claim binds in the catalog only under a dev build
+ * (it writes a ledger), but it is DECLARED and compiled unconditionally so
+ * its registered test group can call it in the ordinary test binary. */
+void zcl_native_handle_dev_agent_situation(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
+void zcl_native_handle_dev_agent_rules(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
+void zcl_native_handle_dev_agent_start(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
+void zcl_native_handle_dev_agent_claim(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
+void zcl_native_handle_dev_agent_done(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
+void zcl_native_handle_dev_agent_triage(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
+void zcl_native_handle_dev_agent_ceiling(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
+void zcl_native_handle_dev_agent_pace(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
+
 /* Dev-build-only executors.  The catalog binds these only when
  * ZCL_DEV_BUILD is set; release objects neither reference nor link them. */
 #if defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)

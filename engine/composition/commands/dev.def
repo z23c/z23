@@ -1048,3 +1048,176 @@ ZCL_COMMAND_READY_COMMAND(
     ZCL_COMMAND_CAP_DEV_STATE_WRITE,
     ZCL_COMMAND_TRAIT_DEV_ONLY,
     zcl_native_handle_dev_agent_mutate)
+
+/* ── dev.agent.* lane discipline ───────────────────────────────────────────
+ * Eight more checkout questions, all of which an agent currently answers by
+ * remembering a paragraph. Every one of them has a DIFFERENT right answer in
+ * a standalone clone than in a linked worktree, which is why the situation is
+ * computed rather than assumed and why the rules are a table
+ * (engine/composition/agent_rules.def) rather than prose. Each leaf takes an
+ * optional `cwd` so a fixture repository can be inspected instead of the
+ * process working directory, and every reply names its own `leaf`. */
+
+ZCL_COMMAND_READY_READ(
+    "dev.agent.situation", "dev.agent", "",
+    "Name this checkout's situation and how it was decided",
+    "Whether this directory is a standalone clone or one linked worktree "
+    "among several, decided by comparing the Git directory with the Git "
+    "common directory at call time. Reports both paths as Git prints them, "
+    "the worktree top level, the branch (empty when HEAD is detached), the "
+    "head commit, and the exact shell test that produced the verdict. It "
+    "reads Git only; it fetches nothing, writes nothing, and contacts no "
+    "node.", 4096,
+    "agent,situation,worktree,checkout,branch,head",
+    "zcl.agent_situation_input.v1", "zcl.agent_situation.v1", "cwd", "",
+    "z23 dev agent situation",
+    ZCL_COMMAND_LAYER_DEV, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_LATENCY_FAST,
+    ZCL_COMMAND_COST_LOW, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_DEV_STATE_READ,
+    ZCL_COMMAND_TRAIT_IDEMPOTENT | ZCL_COMMAND_TRAIT_DEV_ONLY,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_dev_agent_situation)
+
+ZCL_COMMAND_READY_READ(
+    "dev.agent.rules", "dev.agent", "",
+    "The rules that apply in one checkout situation",
+    "The compiled rule table in engine/composition/agent_rules.def, rendered "
+    "whole or filtered to one situation. Each row carries its topic, the "
+    "situation it applies in, a space-free machine value, and the whole "
+    "reason in the words the agent should read. An unknown situation is "
+    "refused by name rather than answered with an empty set. The table is "
+    "compiled in; nothing is read from disk.", 16384,
+    "agent,rules,situation,push,gate,history",
+    "zcl.agent_rules_input.v1", "zcl.agent_rules.v1", "cwd,situation", "",
+    "z23 dev agent rules --situation=standalone",
+    ZCL_COMMAND_LAYER_DEV, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_LATENCY_INSTANT,
+    ZCL_COMMAND_COST_LOW, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_DEV_STATE_READ,
+    ZCL_COMMAND_TRAIT_IDEMPOTENT | ZCL_COMMAND_TRAIT_DEV_ONLY,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_dev_agent_rules)
+
+ZCL_COMMAND_READY_READ(
+    "dev.agent.start", "dev.agent", "",
+    "One opening answer: situation, rules, base, worktree",
+    "The whole opening read for a lane in one call: the situation, the rules "
+    "that apply in it, the base ref and its head (base_known=false when the "
+    "ref does not exist here), how many tracked files are dirty, how many are "
+    "untracked, whether a hooks path is configured and armed, whether each "
+    "named file exists, and the ordered next actions. It runs no test group, "
+    "builds nothing, and changes nothing.", 16384,
+    "agent,start,orient,base,hooks,next",
+    "zcl.agent_start_input.v1", "zcl.agent_start.v1", "cwd,files,base", "",
+    "z23 dev agent start",
+    ZCL_COMMAND_LAYER_DEV, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_LATENCY_FAST,
+    ZCL_COMMAND_COST_LOW, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_DEV_STATE_READ,
+    ZCL_COMMAND_TRAIT_IDEMPOTENT | ZCL_COMMAND_TRAIT_DEV_ONLY,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_dev_agent_start)
+
+ZCL_COMMAND_READY_READ(
+    "dev.agent.done", "dev.agent", "",
+    "Whether this lane is ready to hand back",
+    "A freshly read hand-back verdict for the current branch: whether the "
+    "tree is clean, how many commits it carries over the base, which of them "
+    "Git reports as unsigned, and whether the branch is main. ready is true "
+    "only when every one of those holds, and every false condition is named "
+    "in reasons instead of collapsing into one word. It pushes nothing and "
+    "gates nothing.", 8192,
+    "agent,done,handback,signed,ahead,clean",
+    "zcl.agent_done_input.v1", "zcl.agent_done.v1", "cwd,base", "",
+    "z23 dev agent done",
+    ZCL_COMMAND_LAYER_DEV, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_LATENCY_FAST,
+    ZCL_COMMAND_COST_LOW, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_DEV_STATE_READ,
+    ZCL_COMMAND_TRAIT_IDEMPOTENT | ZCL_COMMAND_TRAIT_DEV_ONLY,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_dev_agent_done)
+
+ZCL_COMMAND_READY_READ(
+    "dev.agent.triage", "dev.agent", "",
+    "Bin every local branch as land, rebase, or delete",
+    "One bin per local branch except main, decided from Git alone: commits "
+    "ahead and behind the base, the age of the last commit, and whether "
+    "merge-tree can merge it into the base without conflict. A branch with "
+    "nothing ahead, or an old branch far behind, is delete; a cleanly "
+    "merging branch is land; everything else is rebase. It merges nothing, "
+    "deletes nothing, and writes no ref.", 65536,
+    "agent,triage,branches,merge,stale,land",
+    "zcl.agent_triage_input.v1", "zcl.agent_triage.v1",
+    "cwd,base,max_age_days,limit", "",
+    "z23 dev agent triage --base=origin/main",
+    ZCL_COMMAND_LAYER_DEV, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_LATENCY_FAST,
+    ZCL_COMMAND_COST_LOW, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_DEV_STATE_READ,
+    ZCL_COMMAND_TRAIT_IDEMPOTENT | ZCL_COMMAND_TRAIT_DEV_ONLY,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_dev_agent_triage)
+
+ZCL_COMMAND_READY_READ(
+    "dev.agent.ceiling", "dev.agent", "",
+    "Refuse a diff that outgrew what was requested",
+    "Whether the working tree's whole change against a base stays inside the "
+    "scope it was given: every changed file measured in added and deleted "
+    "lines, marked as requested or not, as a new file or not, as a rewrite "
+    "when it deleted more than half of what the base held, and as over the "
+    "per-file line ceiling. The verdict is WITHIN_CEILING only when no file "
+    "violates any of those; otherwise every violation is named with its "
+    "reason.", 65536,
+    "agent,ceiling,diff,scope,rewrite,requested",
+    "zcl.agent_ceiling_input.v1", "zcl.agent_ceiling.v1",
+    "cwd,base,requested,ceiling_lines", "base",
+    "z23 dev agent ceiling --base=origin/main",
+    ZCL_COMMAND_LAYER_DEV, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_LATENCY_FAST,
+    ZCL_COMMAND_COST_LOW, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_DEV_STATE_READ,
+    ZCL_COMMAND_TRAIT_IDEMPOTENT | ZCL_COMMAND_TRAIT_DEV_ONLY,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_dev_agent_ceiling)
+
+ZCL_COMMAND_READY_READ(
+    "dev.agent.pace", "dev.agent", "",
+    "Read an executor run log and grade its pace",
+    "What a headless executor run actually DID, counted from its own log: "
+    "how many tool calls it made, how many of them came before its first "
+    "edit, how many edits it made and to which files, how many commits it "
+    "ran, and the exit code the log recorded. The verdict is WROTE_NOTHING "
+    "when no edit ever happened, SLOW_START when the first edit came after "
+    "the tenth tool call, and PACED otherwise. Terminal escape sequences are "
+    "stripped before anything is matched.", 32768,
+    "agent,pace,log,executor,edits,verdict",
+    "zcl.agent_pace_input.v1", "zcl.agent_pace.v1", "cwd,log", "log",
+    "z23 dev agent pace --log=build/scratch/run.out",
+    ZCL_COMMAND_LAYER_DEV, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_LATENCY_FAST,
+    ZCL_COMMAND_COST_LOW, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_DEV_STATE_READ,
+    ZCL_COMMAND_TRAIT_IDEMPOTENT | ZCL_COMMAND_TRAIT_DEV_ONLY,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_dev_agent_pace)
+
+/* claim WRITES a ledger line into the Git common directory, so it takes the
+ * same command shape dev.begin takes rather than the read shape above. */
+ZCL_COMMAND_DEV_COMMAND(
+    "dev.agent.claim", "dev.agent", "",
+    "Claim files for one story so lanes do not collide",
+    "Records this worktree's exclusive interest in a set of files as one "
+    "line in a ledger beside the shared object store, and refuses when any "
+    "of them is already live in another worktree's claim, naming the file, "
+    "that worktree, and its story. A second claim from the same worktree "
+    "replaces its own line rather than stacking, and release removes every "
+    "line this worktree owns. It writes only that ledger; it touches no "
+    "source file, ref, datadir, or wallet.", 16384,
+    "agent,claim,ledger,files,lane,conflict",
+    "zcl.agent_claim_input.v1", "zcl.agent_claim.v1",
+    "cwd,story,files,release", "story",
+    "z23-dev dev agent claim hex-codec",
+    ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_DEV_MUTATION,
+    ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_MODE_SYNC, ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_DEV_STATE_WRITE,
+    ZCL_COMMAND_TRAIT_DEV_ONLY | ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    zcl_native_handle_dev_agent_claim,
+    "the file-claim ledger is a development-lane coordination surface",
+    "z23-dev dev agent claim")

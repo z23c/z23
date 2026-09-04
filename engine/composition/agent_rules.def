@@ -1,0 +1,101 @@
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ *
+ * purpose: The rules a coding agent must follow in THIS checkout, as DATA.
+ *
+ * Every rule below was, until now, a paragraph an agent had to remember and
+ * repeatedly got wrong — and the right answer is not the same in the two
+ * shapes a Z23 checkout comes in. A standalone clone pushes to origin/main
+ * and gates its own commit; a linked worktree shares one object store with
+ * several sibling lanes, must never push, and must never `git stash`. The
+ * SAME sentence is wrong in the other shape, so the situation is part of
+ * every row rather than a caveat in the prose.
+ *
+ * Include with both macros defined; either may be a no-op:
+ *
+ *   ZCL_AGENT_SITUATION(id, test_prose)
+ *       id         — the situation name a rule row selects on.
+ *       test_prose — the exact shell test that decides it, with the sentence
+ *                    that says what a TRUE result means.
+ *
+ *   ZCL_AGENT_RULE(id, situation, value, say)
+ *       id        — the topic (push_target, commit_scope, gate_command,
+ *                   gate_skip, force_push, history). Every topic carries one
+ *                   row per situation; a topic present for only one of them
+ *                   is a hole an agent falls through.
+ *       situation — one ZCL_AGENT_SITUATION id.
+ *       value     — the machine answer. Never contains a space, so a caller
+ *                   can compare it without parsing prose.
+ *       say       — the whole reason, in the words the agent should read.
+ *
+ * Row order is the order dev.agent.rules reports and is therefore stable
+ * evidence. Consumed by tools/command/native_devagent_rules.c and by
+ * tools/command/native_devagent_start.c; neither owns a second copy. */
+
+ZCL_AGENT_SITUATION(
+    standalone,
+    "[ \"$(git rev-parse --git-dir)\" = \"$(git rev-parse --git-common-dir)\" ]"
+    " — you own this checkout.")
+ZCL_AGENT_SITUATION(
+    shared_checkout_lane,
+    "the same comparison is FALSE — one linked worktree among several; an "
+    "orchestrator merges for you.")
+
+ZCL_AGENT_RULE(
+    push_target, standalone, "origin/main",
+    "origin/main is the shared integration blackboard. Fetch it before work "
+    "and before each push, integrate, rerun affected gates, push. A push is a "
+    "checkpoint, not completion. Do not open a long-lived side branch; "
+    "several agents land on main continuously and a branch that never merges "
+    "is work nobody gets.")
+ZCL_AGENT_RULE(
+    push_target, shared_checkout_lane, "lane_branch_no_push",
+    "Commit on your lane branch and do not push. All worktrees share one "
+    "object store, so handing off is a branch name plus a head SHA and the "
+    "orchestrator merges.")
+
+ZCL_AGENT_RULE(
+    commit_scope, standalone, "own_changes_only",
+    "Commit only your own changes. Never fold another agent's dirty work into "
+    "your commit, and never reset or overwrite it.")
+ZCL_AGENT_RULE(
+    commit_scope, shared_checkout_lane, "own_changes_only",
+    "Commit only your own changes. Never git stash: the stash stack is shared "
+    "across every worktree on this checkout.")
+
+ZCL_AGENT_RULE(
+    gate_command, standalone, "make_pre_push_ci",
+    "Gate ONCE on your own commit, then git pull --rebase and push within "
+    "seconds. If the push is rejected, rebase and push again; do NOT re-run "
+    "the gate, you already gated your commit. Re-gating after every rejection "
+    "is a race you cannot win.")
+ZCL_AGENT_RULE(
+    gate_command, shared_checkout_lane, "lint_fast_plus_impact",
+    "Inner loop is make lint-fast. It is NOT the whole gate set: full make "
+    "lint also runs check-doc-claims, check-doc-accuracy and "
+    "check-markdown-links, so a docs or skills change must run the doc gates "
+    "lint-fast skips. Full make lint belongs at a push or sub-wave boundary. "
+    "The orchestrator runs the push gate.")
+
+ZCL_AGENT_RULE(
+    gate_skip, standalone, "never",
+    "Never set ZCL_SKIP_PREPUSH=1. A refusing gate is right; fix the code. "
+    "Skipping it once put six red gates on main.")
+ZCL_AGENT_RULE(
+    gate_skip, shared_checkout_lane, "never",
+    "Never set ZCL_SKIP_PREPUSH=1, and never git commit --no-verify.")
+
+ZCL_AGENT_RULE(
+    force_push, standalone, "never",
+    "Never force-push. main is a shared blackboard and a force-push destroys "
+    "another agent's landed work.")
+ZCL_AGENT_RULE(
+    force_push, shared_checkout_lane, "never",
+    "Never force-push, and never --amend a commit the orchestrator has "
+    "already merged.")
+
+ZCL_AGENT_RULE(
+    history, standalone, "never_flatten",
+    "Never flatten history or publish a squashed mirror. Fast-forward only.")
+ZCL_AGENT_RULE(
+    history, shared_checkout_lane, "never_flatten",
+    "Never flatten history or publish a squashed mirror. Fast-forward only.")

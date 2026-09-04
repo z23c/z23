@@ -933,7 +933,8 @@ size_t zcl_command_registry_input_str_max(const char *key)
 static size_t input_member_budget(const char *key, size_t key_len)
 {
     size_t value_max;
-    if (key_len == 5 && memcmp(key, "files", 5) == 0)
+    if ((key_len == 5 && memcmp(key, "files", 5) == 0) ||
+        (key_len == 9 && memcmp(key, "requested", 9) == 0))
         value_max = 2u + ZCL_COMMAND_INPUT_FILES_MAX_ITEMS *
                              (ZCL_COMMAND_INPUT_FILES_PATH_MAX + 3u);
     else if ((key_len == 7 && memcmp(key, "effects", 7) == 0) ||
@@ -1018,7 +1019,8 @@ bool zcl_command_registry_input_validate(const struct zcl_command_spec *spec,
                    strcmp(key, "allow_high_fees") == 0 ||
                    strcmp(key, "exact") == 0 || strcmp(key, "restore") == 0 ||
                    strcmp(key, "include_evidence_wires") == 0 ||
-                   strcmp(key, "list") == 0) {
+                   strcmp(key, "list") == 0 ||
+                   strcmp(key, "release") == 0) {
             /* Each is a bool in its own declared schema, and the default
              * STRING branch made it unpassable from a shell while raw RPC
              * accepted it fine — `all`, `include_evidence_wires`, and the
@@ -1420,6 +1422,29 @@ bool zcl_command_registry_input_validate(const struct zcl_command_spec *spec,
         } else if (strcmp(key, "limit") == 0 || strcmp(key, "depth") == 0) {
             type_ok = value->type == JSON_INT && json_get_int(value) >= 1 &&
                       json_get_int(value) <= 1000000;
+        } else if (strcmp(key, "max_age_days") == 0 ||
+                   strcmp(key, "ceiling_lines") == 0) {
+            /* dev.agent.triage staleness window and dev.agent.ceiling
+             * per-file line ceiling. Both are typed as integers by the CLI
+             * (`--max_age_days=14`), so the default string branch would make
+             * the leaves uninvokable from a shell while raw JSON worked. Each
+             * handler owns its own default; the transport only admits the
+             * positive integer shape. */
+            type_ok = value->type == JSON_INT && json_get_int(value) >= 1 &&
+                      json_get_int(value) <= 1000000;
+        } else if (strcmp(key, "requested") == 0) {
+            /* dev.agent.ceiling's declared scope: the paths the change was
+             * allowed to touch. Same bounded array-of-paths shape as `files`,
+             * and sized by the same two constants so the read frame and the
+             * validator cannot drift apart. */
+            type_ok = value->type == JSON_ARR &&
+                      value->num_children <= ZCL_COMMAND_INPUT_FILES_MAX_ITEMS;
+            for (size_t j = 0; type_ok && j < value->num_children; j++) {
+                const struct json_value *item = &value->children[j];
+                const char *text = json_get_str(item);
+                type_ok = item->type == JSON_STR && text && text[0] &&
+                          strlen(text) <= ZCL_COMMAND_INPUT_FILES_PATH_MAX;
+            }
         } else if (strcmp(key, "rpc_port") == 0) {
             /* core.consensus.producer-session.retire's optional liveness
              * probe target: the RPC port of the node that owns this
