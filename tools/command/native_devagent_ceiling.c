@@ -34,16 +34,19 @@
  *                  (`git show <base>:<path>`). Always false for a new file.
  *   over_ceiling   bool: added + deleted > ceiling_lines
  *
- * VERDICT
- *   ok=true, status "WITHIN_CEILING" only when EVERY changed file is
+ * VERDICT. The verdict word is reported as the data field `status` on BOTH
+ * outcomes, so one reader gets it the same way either way.
+ *   ok=true and status "WITHIN_CEILING" only when EVERY changed file is
  *   requested, no file is a rewrite, and no file is over_ceiling.
- *   Otherwise ok=false, status "CEILING_EXCEEDED", with
+ *   Otherwise ok=false with the error code "CEILING_EXCEEDED", the same word
+ *   in the data field `status`, and
  *   violations:[{path, reason}] where reason is exactly one of
  *   "unrequested", "rewrite", "over_ceiling". A file that breaks more than
  *   one rule contributes one violation per broken rule, in that order.
  *
  * OUTPUT (zcl.agent_ceiling.v1), on success AND on CEILING_EXCEEDED
  *   leaf     "dev.agent.ceiling"
+ *   status   "WITHIN_CEILING" or "CEILING_EXCEEDED"
  *   files    array of the per-file objects above
  *   summary  {changed, unrequested, rewrites, over_ceiling} — counts of files
  *   base     the base ref used

@@ -68,6 +68,16 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* The rule table is REACHABLE from here -- the include below is the exact
+ * line the implementation expands with real macros. Expanded with both
+ * X-macros empty it emits no tokens, so the stub proves the path compiles
+ * without yet answering anything. */
+#define ZCL_AGENT_SITUATION(id_, test_prose_)
+#define ZCL_AGENT_RULE(id_, situation_, value_, say_)
+#include "../../engine/composition/agent_rules.def"
+#undef ZCL_AGENT_RULE
+#undef ZCL_AGENT_SITUATION
+
 #define DVT_LEAF "dev.agent.start"
 
 void zcl_native_handle_dev_agent_start(

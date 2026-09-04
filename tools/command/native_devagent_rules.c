@@ -8,7 +8,7 @@
  * so no agent has to remember them and no second copy can drift. This leaf
  * is the only renderer of that table.
  *
- * SOURCE. Include engine/composition/agent_rules.def from this file with
+ * SOURCE. Include "../../engine/composition/agent_rules.def" from this file with
  * ZCL_AGENT_SITUATION(id, test_prose) and ZCL_AGENT_RULE(id, situation,
  * value, say) defined locally, twice if convenient. Nothing is read from
  * disk; the table is compiled in and its row order is the report order.
@@ -52,6 +52,16 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+/* The rule table is REACHABLE from here -- the include below is the exact
+ * line the implementation expands with real macros. Expanded with both
+ * X-macros empty it emits no tokens, so the stub proves the path compiles
+ * without yet answering anything. */
+#define ZCL_AGENT_SITUATION(id_, test_prose_)
+#define ZCL_AGENT_RULE(id_, situation_, value_, say_)
+#include "../../engine/composition/agent_rules.def"
+#undef ZCL_AGENT_RULE
+#undef ZCL_AGENT_SITUATION
 
 #define DVR_LEAF "dev.agent.rules"
 
