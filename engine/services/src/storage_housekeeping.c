@@ -16,6 +16,7 @@
 #include "services/storage_housekeeping.h"
 
 #include "json/json.h"
+#include "kernel/service_kernel.h"
 #include "net/tor_integration.h"
 #include "storage/projection_store.h"
 #include "storage/topology_store.h"
@@ -303,4 +304,42 @@ bool storage_housekeeping_dump_state_json(struct json_value *out,
     json_push_kv_int(out, "tick_seconds", STORAGE_HOUSEKEEPING_TICK_SECONDS);
     diag_push_health(out, true, "");
     return true;
+}
+
+/* ── Boot service registration ──────────────────────────────────── */
+/* Datadir size bounds: progress.kv compaction, topology.db WAL truncation,
+ * and Tor log rotation, all paced by the measured storage class. Optional
+ * like its maintenance siblings — a node that cannot start the sweeper still
+ * runs, it just stops bounding its own datadir, and the failure is named. */
+static bool sh_service_start(void *ctx)
+{
+    const char *datadir = ctx;
+    struct zcl_result r = storage_housekeeping_start(datadir);
+    if (r.ok) {
+        printf("Storage housekeeping started (%ds tick; storage=%s)\n",
+               STORAGE_HOUSEKEEPING_TICK_SECONDS,
+               platform_storage_class_name(storage_pacing_class()));
+        return true;
+    }
+    fprintf(stderr, "storage_housekeeping_start failed: %s\n", r.message);
+    return false;
+}
+
+static void sh_service_stop(void *ctx)
+{
+    (void)ctx;
+    storage_housekeeping_stop();
+}
+
+bool storage_housekeeping_register_service(struct zcl_service_kernel *kernel,
+                                           const char *datadir)
+{
+    const struct zcl_service_spec spec = {
+        .name = "storage_housekeeping",
+        .start = sh_service_start,
+        .stop = sh_service_stop,
+        .ctx = (void *)datadir,
+        .flags = ZCL_SERVICE_OPTIONAL,
+    };
+    return zcl_service_kernel_register(kernel, &spec);
 }

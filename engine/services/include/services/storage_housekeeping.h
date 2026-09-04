@@ -69,4 +69,12 @@ void storage_housekeeping_stats(struct storage_housekeeping_stats *out);
 bool storage_housekeeping_dump_state_json(struct json_value *out,
                                           const char *key);
 
+/* Register storage housekeeping as an optional maintenance service on
+ * `kernel` (ctx = the DATADIR string, like disk_monitor and bundle_exporter).
+ * Fail-safe: a node that cannot start the sweeper still boots, it just stops
+ * bounding its own datadir, and the failure is named on stderr. */
+struct zcl_service_kernel;
+bool storage_housekeeping_register_service(struct zcl_service_kernel *kernel,
+                                           const char *datadir);
+
 #endif
