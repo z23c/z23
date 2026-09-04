@@ -1272,3 +1272,30 @@ ZCL_COMMAND_READY_READ(
     ZCL_COMMAND_CAP_DEV_STATE_READ,
     ZCL_COMMAND_TRAIT_DEV_ONLY,
     ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_dev_agent_hot)
+
+/* ticketkey answers the commuting-ticket question from
+ * docs/agent/COMMUTING_TICKETS.md: the SHA3-256 key of one group's input
+ * closure (its test file, every source the shared-rule router assigns to
+ * it, their transitive headers, the toolchain epoch, the harness version)
+ * at one tip. A push that leaves the closure alone keeps the key, so only
+ * groups whose closure intersects the diff need re-proof. */
+ZCL_COMMAND_READY_READ(
+    "dev.agent.ticketkey", "dev.agent", "",
+    "Commuting-ticket key of one test group at one tip",
+    "The SHA3-256 ticket key of a test group's input closure at a tip: the "
+    "group's test file, every source file the shared-rule router assigns "
+    "to the group, the headers those files include transitively (vendor "
+    "headers by path only, system headers out), the toolchain epoch, and "
+    "the harness version. Reports the sorted closure paths, the resolved "
+    "tip, the epoch, and the key, plus the wall time. Reads Git only; it "
+    "fetches nothing, writes nothing, and contacts no node.", 65536,
+    "agent,ticketkey,commuting,closure,group,proof",
+    "zcl.agent_ticketkey_input.v1", "zcl.agent_ticketkey.v1",
+    "group,cwd,tip", "",
+    "z23 dev agent ticketkey --group=devagent_situation",
+    ZCL_COMMAND_LAYER_DEV, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_LATENCY_FAST,
+    ZCL_COMMAND_COST_LOW, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_DEV_STATE_READ,
+    ZCL_COMMAND_TRAIT_IDEMPOTENT | ZCL_COMMAND_TRAIT_DEV_ONLY,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_dev_agent_ticketkey)

@@ -2861,6 +2861,9 @@ AGENT_IMPACT_RULE("tools/command/native_devagent_done.c|tests/harness/src/test_d
 AGENT_IMPACT_RULE("tools/command/native_devagent_triage.c|tests/harness/src/test_devagent_triage.c", "devagent_triage command_registry_catalog native_api_contract command_input_bounds")
 AGENT_IMPACT_RULE("tools/command/native_devagent_ceiling.c|tests/harness/src/test_devagent_ceiling.c", "devagent_ceiling command_registry_catalog native_api_contract command_input_bounds")
 AGENT_IMPACT_RULE("tools/command/native_devagent_pace.c|tests/harness/src/test_devagent_pace.c", "devagent_pace command_registry_catalog native_api_contract command_input_bounds")
+/* The commuting-ticket key leaf: one handler file with one registered group,
+ * like the lane-discipline leaves above. */
+AGENT_IMPACT_RULE("tools/command/native_devagent_ticketkey.c|tests/harness/src/test_devagent_ticketkey.c", "devagent_ticketkey command_registry_catalog native_api_contract command_input_bounds")
 /* The rule table every one of them reads, and the catalog rows they declare. */
 AGENT_IMPACT_RULE("engine/composition/agent_rules.def", "devagent_rules devagent_start devagent_situation command_registry_catalog make_lint_gates")
 /* Fleet truth is a release-visible native command. Its three-worktree
