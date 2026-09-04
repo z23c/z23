@@ -42,6 +42,22 @@
 #define PROOF_MAX_FILES ZCL_DEVLOOP_MAX_FILES
 #define PROOF_MAX_JOBS 16u
 #define PROOF_TIMEOUT_MS 3600000
+#define PROOF_TIMEOUT_MAX_MS 7200000
+
+/* Per-child ceiling. ZCL_PROOF_TIMEOUT_MS may only raise it (a loaded host
+ * needs more wall time, never less); anything unparsable or below the
+ * default keeps the default. */
+static int proof_timeout_ms(void)
+{
+    const char *raw = getenv("ZCL_PROOF_TIMEOUT_MS");
+    if (!raw || !*raw) return PROOF_TIMEOUT_MS;
+    char *end = NULL;
+    long v = strtol(raw, &end, 10);
+    if (!end || *end != 0) return PROOF_TIMEOUT_MS;
+    if (v < PROOF_TIMEOUT_MS) return PROOF_TIMEOUT_MS;
+    if (v > PROOF_TIMEOUT_MAX_MS) return PROOF_TIMEOUT_MAX_MS;
+    return (int)v;
+}
 #define PROOF_ENV_DOMAIN "zcl.dev_proof_environment.v1"
 
 struct proof_paths {
@@ -788,15 +804,15 @@ static bool proof_status_read_platform(const char *repo_root,
         out->state = ZCL_DEV_PROOF_STATE_RUNNING;
         out->worker_id = pid;
         out->started_unix = started;
-        out->eta_ms = elapsed_ms < PROOF_TIMEOUT_MS
-            ? PROOF_TIMEOUT_MS - elapsed_ms : 0;
+        out->eta_ms = elapsed_ms < proof_timeout_ms()
+            ? proof_timeout_ms() - elapsed_ms : 0;
         (void)snprintf(out->detail, sizeof(out->detail), "%s",
                        "background_verification_running");
         return true;
     }
     if (proof_request_matches_pair(paths.request, local, base)) {
         out->state = ZCL_DEV_PROOF_STATE_RUNNING;
-        out->eta_ms = PROOF_TIMEOUT_MS;
+        out->eta_ms = proof_timeout_ms();
         (void)snprintf(out->detail, sizeof(out->detail), "%s",
                        "resident_proof_request_queued");
         return true;
@@ -1524,7 +1540,7 @@ static bool run_dimension(const struct proof_paths *paths,
     if (snprintf(log, sizeof(log), "%s/%s.%s.log", paths->logs, paths->key,
                  zcl_dev_proof_dimension_name(id)) >= (int)sizeof(log))
         return false;
-    int rc = run_logged(paths->root, log, argv, PROOF_TIMEOUT_MS);
+    int rc = run_logged(paths->root, log, argv, proof_timeout_ms());
     if (!hash_file(zcl_dev_proof_dimension_name(id), log, dim->receipt_root)) {
         proof_why(why, why_len, "child_receipt_hash_failed");
         return false;
@@ -2159,7 +2175,7 @@ static bool proof_worker(const struct proof_paths *paths,
                     "dev-proof-bundle", NULL};
                 int bundle_rc = run_logged(
                     generation, paths->bundle_log, bundle_argv,
-                    PROOF_TIMEOUT_MS);
+                    proof_timeout_ms());
                 if (bundle_rc != 0 && proof_log_contains(
                         paths->bundle_log,
                         "unverified compile epoch appeared after recovery "
@@ -2172,7 +2188,7 @@ static bool proof_worker(const struct proof_paths *paths,
                         return false;
                     }
                     bundle_rc = run_logged(generation, retry_log, bundle_argv,
-                                           PROOF_TIMEOUT_MS);
+                                           proof_timeout_ms());
                 }
                 if (bundle_rc != 0) {
                     proof_why(why, why_len,
