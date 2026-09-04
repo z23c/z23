@@ -437,15 +437,84 @@ printf '%s\n' '#!/usr/bin/env bash' \
     'fi' \
     'exec "$REAL_SHA256SUM" "$@"' > inventory-race-bin/sha256sum
 chmod +x inventory-race-bin/sha256sum
+# The injector's own bookkeeping must live OUTSIDE the repository. A flag file
+# written beside the fixture is itself a new untracked source, so an in-tree
+# flag would arm the inventory guard on its own and every case below would pass
+# for the wrong reason -- including the ephemeral-fixture case, whose whole
+# point is that nothing arms it.
+race_state="$(mktemp -d "${TMPDIR:-/tmp}/zcl-source-identity-race.XXXXXX")"
+race_flag="$race_state/fired"
+
+# A single attempt hashed a path set that no longer describes the tree, so it
+# must refuse rather than publish a record with the new source missing.
+rm -f late-inventory-source.c
+rm -f "$race_flag"
 if PATH="$PWD/inventory-race-bin:$PATH" \
         REAL_SHA256SUM="$real_sha256sum" \
-        INVENTORY_RACE_FLAG="$PWD/inventory-race-fired" \
+        INVENTORY_RACE_FLAG="$race_flag" \
         INVENTORY_RACE_SOURCE="$PWD/late-inventory-source.c" \
+        ZCL_SOURCE_IDENTITY_CAPTURE_ATTEMPTS=1 \
         ZCL_SOURCE_IDENTITY_FORCE_PORTABLE=1 \
         "$SCRIPT" capture-record > /dev/null 2>&1; then
     fail 'new source created during capture escaped the inventory guard'
 fi
-rm -rf inventory-race-bin inventory-race-fired late-inventory-source.c
+
+# Retrying that refusal must RE-DERIVE the record, never launder the omission.
+# The injector fires once, so a later attempt sees a settled tree -- and the
+# record it returns has to be the record of the tree that now CONTAINS the late
+# source. A converged capture that still omitted it would be the same defect
+# wearing a zero exit status.
+rm -f late-inventory-source.c
+rm -f "$race_flag"
+race_record="$(PATH="$PWD/inventory-race-bin:$PATH" \
+        REAL_SHA256SUM="$real_sha256sum" \
+        INVENTORY_RACE_FLAG="$race_flag" \
+        INVENTORY_RACE_SOURCE="$PWD/late-inventory-source.c" \
+        ZCL_SOURCE_IDENTITY_FORCE_PORTABLE=1 \
+        "$SCRIPT" capture-record 2>/dev/null)" ||
+    fail 'capture-record never converged on a settled tree'
+[ -f late-inventory-source.c ] ||
+    fail 'inventory race fixture never planted its late source'
+settled_record="$("$SCRIPT" capture-record)" ||
+    fail 'settled capture-record failed'
+[ "$race_record" = "$settled_record" ] ||
+    fail 'converged record omitted the source created during capture'
+rm -f late-inventory-source.c
+
+# The one path class that must NOT arm that guard: an ephemeral lint fixture.
+# Make's own source globs refuse to compile a "/_" path, so a fixture planted
+# beneath a compiler root during a capture is not a build input appearing -- it
+# is a file the compiler will never open. It must leave the record alone rather
+# than stop every build in the checkout, and it must still be there afterwards
+# for the gate that planted it.
+ephemeral_baseline="$("$SCRIPT" capture-record)" ||
+    fail 'ephemeral fixture baseline capture failed'
+ephemeral_fixture="engine/controllers/src/_late_fixture_tmp.c"
+rm -f "$race_flag"
+ephemeral_record="$(PATH="$PWD/inventory-race-bin:$PATH" \
+        REAL_SHA256SUM="$real_sha256sum" \
+        INVENTORY_RACE_FLAG="$race_flag" \
+        INVENTORY_RACE_SOURCE="$PWD/$ephemeral_fixture" \
+        ZCL_SOURCE_IDENTITY_CAPTURE_ATTEMPTS=1 \
+        ZCL_SOURCE_IDENTITY_FORCE_PORTABLE=1 \
+        "$SCRIPT" capture-record 2>"$race_state/ephemeral.err")" || {
+    cat "$race_state/ephemeral.err" >&2
+    fail 'an ephemeral lint fixture stopped a source identity capture'
+}
+[ -f "$ephemeral_fixture" ] ||
+    fail 'ephemeral fixture race never planted its file'
+[ "$ephemeral_record" = "$ephemeral_baseline" ] ||
+    fail 'ephemeral lint fixture entered the build source inventory'
+[ "$("$SCRIPT" capture-record)" = "$ephemeral_baseline" ] ||
+    fail 'a settled ephemeral lint fixture entered the build source inventory'
+ephemeral_status="$(git status --porcelain -- "$ephemeral_fixture")"
+case "$ephemeral_status" in
+    '??'*) ;;
+    *) fail 'ephemeral fixture stopped being visible to Git' ;;
+esac
+rm -f "$ephemeral_fixture"
+
+rm -rf inventory-race-bin "$race_state" late-inventory-source.c
 
 printf 'superseding edit\n' >> fixture-161.c
 if "$SCRIPT" verify "$fast" > /dev/null 2>&1; then
