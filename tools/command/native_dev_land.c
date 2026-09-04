@@ -77,6 +77,7 @@
 #include "base/safe_alloc.h"
 #include "json/json.h"
 #include "platform/state_root.h"
+#include "platform/time_compat.h"
 #include "util/spawn.h"
 
 #ifdef ZCL_DEV_BUILD
@@ -98,6 +99,13 @@
 #include <io.h>
 #else
 #include <sys/file.h>
+#endif
+
+/* mingw's <fcntl.h> has no O_CLOEXEC: descriptors on Windows are not
+ * inherited unless the handle is explicitly marked inheritable, so the
+ * flag is a no-op there rather than a missing guarantee. */
+#ifndef O_CLOEXEC
+#define O_CLOEXEC 0
 #endif
 
 #define DL_LEAF "dev.land"
@@ -227,7 +235,7 @@ static bool dl_dirs_make(struct dl_dirs *d)
 
 static void dl_now_iso(char out[64])
 {
-    time_t now = time(NULL);
+    time_t now = platform_time_wall_time_t();
     struct tm tm_utc;
     memset(&tm_utc, 0, sizeof(tm_utc));
 #if defined(_WIN32)
@@ -1504,7 +1512,7 @@ static void dl_status(const struct zcl_command_request *req,
     size_t nrows = 0, nlast = 0;
     char qpath[4096 + 32], opath[4096 + 32], screen[16384];
     struct json_value queued, inflight, outcomes;
-    long long now = (long long)time(NULL);
+    long long now = (long long)platform_time_wall_unix();
     bool want_json = false, have_inflight = false;
     size_t used = 0;
     int w;
@@ -1907,7 +1915,7 @@ static void dl_step_start(const struct dl_dirs *d, struct dl_row *row,
 
     (void)snprintf(row->state, sizeof(row->state), "inflight");
     (void)snprintf(row->phase, sizeof(row->phase), "rebase");
-    row->started = (long long)time(NULL);
+    row->started = (long long)platform_time_wall_unix();
     dl_log_path(d, row);
     if (!dl_commit_row(d, row, false)) {
         dl_fail(reply, "QUEUE_WRITE_FAILED", "start",
