@@ -549,6 +549,24 @@ static bool delivery_legacy_frame_send_honors_socket_timeout(void)
     bool started = false, finished = false;
     struct fs_session sender;
     struct delivery_frame_send_call call = {.session = &sender};
+    struct delivery_handshake_clock clock = {0};
+    /* The bound this proves is "the deadline arithmetic in send_all_until /
+     * wait_for_socket rejects rather than blocking forever" -- not "a real
+     * 50ms kernel socket timeout elapses within some real wall-clock
+     * polling window". The transport reads its notion of "now" through the
+     * injectable platform clock (wait_for_socket -> platform_time_monotonic_ms
+     * -> clock_now_monotonic_ns), same as the neighbouring absolute-deadline
+     * cases below. Installing the immediate-deadline fake here means the
+     * bound fires on the very first wait_for_socket check, with no
+     * dependency on the host actually scheduling the sender thread inside
+     * the real 50ms window -- which host load (CPU contention, scheduler
+     * noise) can blow past even though the transport is behaving
+     * correctly. */
+    struct platform_clock_source source = {
+        .monotonic_us = delivery_immediate_deadline_monotonic_us,
+        .wall_unix = delivery_handshake_wall_unix,
+        .user = &clock,
+    };
     uint8_t fill[4096] = {0};
     int small_buffer = 4096;
     struct timeval send_timeout = {.tv_sec = 0, .tv_usec = 50000};
@@ -568,6 +586,7 @@ static bool delivery_legacy_frame_send_honors_socket_timeout(void)
         return false;
     }
     while (send(sockets[0], fill, sizeof(fill), MSG_DONTWAIT) > 0) {}
+    platform_clock_set_source(&source);
     started = pthread_create(&thread, NULL,
                              delivery_frame_send_call_main, &call) == 0;
     for (unsigned i = 0; started && i < 250; i++) {
@@ -583,6 +602,7 @@ static bool delivery_legacy_frame_send_honors_socket_timeout(void)
     sockets[1] = -1;
     if (started)
         pthread_join(thread, NULL);
+    platform_clock_clear_source();
     bool bounded = started && finished && !call.ok;
     fs_session_cleanup(&sender);
     close(sockets[0]);
