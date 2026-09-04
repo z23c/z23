@@ -4,10 +4,23 @@
 
 #include "net/tor_integration.h"
 #include "util/log_macros.h"
+#include "util/log_rotate.h"
 
 #include <stdio.h>
 #include <string.h>
 
+/* The [rend] info stream lives in its OWN file. Tor publishes the one line
+ * that proves this node's onion descriptor reached an HSDir —
+ * "Uploaded hidden service descriptor (status 200 ..." from
+ * dirclient.c — at log_info(LD_REND), so the readiness check in
+ * tor_integration.c genuinely needs info level for that one domain. Sending
+ * it to tor.log along with everything else is what made a field box carry a
+ * 1,319 MB tor.log full of "[info]" lines under a torrc whose first line
+ * says "Log notice file": the SECOND Log line silently raised the level of
+ * the same destination. Splitting the destinations keeps tor.log at notice
+ * — an operator's log, small enough to read — and confines the chatty
+ * bootstrap evidence to a file whose only reader is this node's own
+ * readiness poll. Both are size-bounded by tor_logs_rotate() below. */
 bool tor_write_torrc(const char *datadir, uint16_t p2p_port)
 {
     char torrc_path[1024];
@@ -24,13 +37,47 @@ bool tor_write_torrc(const char *datadir, uint16_t p2p_port)
     fprintf(f,
         "SocksPort 127.0.0.1:%u\n"
         "DataDirectory %s/tor_data\n"
-        "Log notice file %s/tor.log\n"
-        "Log info [rend] file %s/tor.log\n",
+        "Log notice file %s/" TOR_LOG_BASENAME "\n"
+        "Log info [rend] file %s/" TOR_REND_LOG_BASENAME "\n",
         bootstrap_port, datadir, datadir, datadir);
 
     fclose(f);
     return true;
 }
+
+bool tor_log_path(const char *datadir, char *out, size_t out_size)
+{
+    if (!datadir || !datadir[0] || !out || out_size == 0)
+        return false;
+    int n = snprintf(out, out_size, "%s/" TOR_LOG_BASENAME, datadir);
+    return n > 0 && (size_t)n < out_size;
+}
+
+bool tor_rend_log_path(const char *datadir, char *out, size_t out_size)
+{
+    if (!datadir || !datadir[0] || !out || out_size == 0)
+        return false;
+    int n = snprintf(out, out_size, "%s/" TOR_REND_LOG_BASENAME, datadir);
+    return n > 0 && (size_t)n < out_size;
+}
+
+/* Bound both Tor logs. Tor holds each file open O_APPEND for the life of the
+ * process and an embedded Tor has no SIGHUP path that would make it reopen
+ * one, so log_rotate_if_over copies and truncates in place rather than
+ * renaming — see util/log_rotate.h. Returns the number of files rotated. */
+int tor_logs_rotate(const char *datadir, int64_t max_bytes)
+{
+    char path[1024];
+    int rotated = 0;
+    if (tor_log_path(datadir, path, sizeof(path)) &&
+        log_rotate_if_over(path, max_bytes, NULL))
+        rotated++;
+    if (tor_rend_log_path(datadir, path, sizeof(path)) &&
+        log_rotate_if_over(path, max_bytes, NULL))
+        rotated++;
+    return rotated;
+}
+
 
 bool tor_log_last_ephemeral_address(const char *log_path, long scan_from,
                                     char *out, size_t out_size)

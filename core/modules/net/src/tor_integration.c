@@ -64,6 +64,11 @@ static _Atomic uint16_t g_tor_p2p_port = 0;
  * every start, so any address line below this offset names a dead
  * service. */
 static long g_tor_log_scan_from = 0;
+/* Same, for the info-level [rend] destination that carries the descriptor
+ * publication line. It is a SEPARATE file with a separate size, so it needs
+ * its own offset: reusing tor.log's would either skip real evidence or
+ * re-read a previous boot's. */
+static long g_tor_rend_log_scan_from = 0;
 
 /* Persistent identity (-onion-persist / -onion-rotate). Set once by
  * tor_integration_configure_identity() before tor_integration_start();
@@ -461,7 +466,24 @@ static bool read_onion_from_hostname_file(const char *datadir)
     return true;
 }
 
+/* Size of one Tor log at this Tor start, used as the scan floor so a poll
+ * cannot mistake a previous boot's evidence for this one's. Zero when the
+ * file is absent, unmeasurable, or larger than a long can carry. */
+static long tor_log_scan_offset(const char *datadir,
+                                bool (*compose)(const char *, char *, size_t))
+{
+    char path[1024];
+    if (!compose(datadir, path, sizeof(path)))
+        return 0;
+    struct platform_file_metadata md;
+    if (platform_file_metadata_read(path, &md) != PLATFORM_FILE_METADATA_OK ||
+        md.size > (uint64_t)LONG_MAX)
+        return 0;
+    return (long)md.size;
+}
+
 /* Wait for the .onion address AND onion DESCRIPTOR PUBLICATION.
+
  * Default (ephemeral) mode: parse the dynhost log for THIS start's
  * ephemeral service. -onion-persist mode: install our persisted identity
  * into dynhost, then read the hostname file it (re)wrote.
@@ -481,7 +503,10 @@ static bool read_onion_from_hostname_file(const char *datadir)
 static bool read_onion_address(const char *datadir)
 {
     char log_path[1024];
-    snprintf(log_path, sizeof(log_path), "%s/tor.log", datadir);
+    char rend_log_path[1024];
+    if (!tor_log_path(datadir, log_path, sizeof(log_path)) ||
+        !tor_rend_log_path(datadir, rend_log_path, sizeof(rend_log_path)))
+        return false;
 
     int waited = 0;
     bool have_addr = false;
@@ -538,8 +563,11 @@ static bool read_onion_address(const char *datadir)
             }
         }
 
+        /* The publication line is info-level [rend], which now has its OWN
+         * destination so tor.log can stay at notice — see tor_config_log.c. */
         if (have_addr &&
-            tor_log_has_descriptor_publication(log_path, g_tor_log_scan_from))
+            tor_log_has_descriptor_publication(rend_log_path,
+                                               g_tor_rend_log_scan_from))
             return true;
 
         /* Slow bootstrap is a named state, not a silent hang. */
@@ -698,17 +726,15 @@ bool tor_integration_start(const char *datadir, uint16_t p2p_port)
     if (!platform_private_file_unlink_missing_ok(path))
         LOG_FAIL("tor", "failed to retire stale Tor lock");
 
-    /* Record tor.log's current size BEFORE the tor thread can append: the
-     * address scan in read_onion_address starts here, so it can only see
-     * the service THIS start creates (see tor_log_last_ephemeral_address). */
-    snprintf(path, sizeof(path), "%s/tor.log", datadir);
-    struct platform_file_metadata log_metadata;
-    enum platform_file_metadata_result metadata_result =
-        platform_file_metadata_read(path, &log_metadata);
-    g_tor_log_scan_from =
-        metadata_result == PLATFORM_FILE_METADATA_OK &&
-                log_metadata.size <= LONG_MAX
-            ? (long)log_metadata.size : 0;
+    /* Record each Tor log's current size BEFORE the tor thread can append:
+     * the address scan in read_onion_address starts here, so it can only see
+     * the service THIS start creates (see tor_log_last_ephemeral_address).
+     * Both logs are ALSO size-bounded by the periodic housekeeping, which
+     * can truncate one between boots; a recorded offset past the end of a
+     * rotated file would hide every line of this boot, so an offset larger
+     * than the file is discarded rather than trusted. */
+    g_tor_log_scan_from = tor_log_scan_offset(datadir, tor_log_path);
+    g_tor_rend_log_scan_from = tor_log_scan_offset(datadir, tor_rend_log_path);
 
     if (!tor_write_torrc(datadir, p2p_port))
         LOG_FAIL("tor", "failed to write torrc to %s", datadir);

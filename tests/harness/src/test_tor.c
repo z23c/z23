@@ -7,6 +7,7 @@
 #include "test/test_core.h"
 #include "net/tor_integration.h"
 #include "net/onion_service.h"
+#include "util/log_rotate.h"
 #include "config/boot_internal.h"
 #include <sys/stat.h>
 #include <unistd.h>
@@ -716,7 +717,133 @@ static int test_dynhost_reassembly_cap(void)
     return failures;
 }
 
+/* ── log level and log rotation ──────────────────────────────────────
+ *
+ * A field box carried a 1,319 MB tor.log FULL of "[info]" lines under a
+ * torrc whose first Log line says "Log notice file". The cause was the
+ * SECOND Log line: "Log info [rend] file <same file>" silently raised the
+ * level of the same destination. The [rend] info stream is genuinely needed
+ * (Tor reports a successful HSDir descriptor upload at info level), so the
+ * fix is a separate destination — which is exactly what this pins. */
+static int test_tor_torrc_log_levels(void)
+{
+    int failures = 0;
+    printf("test_tor_torrc_log_levels: ");
+
+    char tmpdir[512];
+    test_make_tmpdir(tmpdir, sizeof(tmpdir), "torrc", "loglevels");
+    char td[600];
+    snprintf(td, sizeof(td), "%s/tor_data", tmpdir);
+    mkdir(td, 0700);
+
+    if (!tor_write_torrc(tmpdir, 8033)) {
+        printf("FAIL (tor_write_torrc returned false)\n");
+        remove_tree(tmpdir);
+        return 1;
+    }
+
+    char torrc_path[600];
+    snprintf(torrc_path, sizeof(torrc_path), "%s/torrc", tmpdir);
+    FILE *f = fopen(torrc_path, "r");
+    if (!f) {
+        printf("FAIL (torrc not written)\n");
+        remove_tree(tmpdir);
+        return 1;
+    }
+    char buf[4096];
+    size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+    buf[n] = '\0';
+    fclose(f);
+
+    char notice_line[900], info_line[900];
+    snprintf(notice_line, sizeof(notice_line), "Log notice file %s/%s\n",
+             tmpdir, TOR_LOG_BASENAME);
+    snprintf(info_line, sizeof(info_line), "Log info [rend] file %s/%s\n",
+             tmpdir, TOR_REND_LOG_BASENAME);
+
+    bool notice_to_tor_log = strstr(buf, notice_line) != NULL;
+    bool info_to_its_own_file = strstr(buf, info_line) != NULL;
+    /* THE regression: no info-level line may name tor.log. */
+    char info_to_tor_log_str[900];
+    snprintf(info_to_tor_log_str, sizeof(info_to_tor_log_str),
+             "Log info [rend] file %s/%s\n", tmpdir, TOR_LOG_BASENAME);
+    bool info_leaks_into_tor_log = strstr(buf, info_to_tor_log_str) != NULL;
+
+    if (notice_to_tor_log && info_to_its_own_file && !info_leaks_into_tor_log) {
+        printf("OK\n");
+    } else {
+        printf("FAIL (notice=%d rend_own_file=%d info_leak=%d)\n",
+               notice_to_tor_log, info_to_its_own_file,
+               info_leaks_into_tor_log);
+        failures++;
+    }
+
+    remove_tree(tmpdir);
+    return failures;
+}
+
+/* Both Tor logs are size-bounded. Driven with a fake file rather than a real
+ * Tor: the rotation must be provable without a network. */
+static int test_tor_log_rotation(void)
+{
+    int failures = 0;
+    printf("test_tor_log_rotation: ");
+
+    char tmpdir[512];
+    test_make_tmpdir(tmpdir, sizeof(tmpdir), "torlog", "rotate");
+
+    char tor_log[700], rend_log[700], tor_prev[740];
+    if (!tor_log_path(tmpdir, tor_log, sizeof(tor_log)) ||
+        !tor_rend_log_path(tmpdir, rend_log, sizeof(rend_log))) {
+        printf("FAIL (log paths did not compose)\n");
+        remove_tree(tmpdir);
+        return 1;
+    }
+    snprintf(tor_prev, sizeof(tor_prev), "%s.1", tor_log);
+
+    /* Nothing on disk: nothing to rotate, and no invented files. */
+    bool none_when_absent = tor_logs_rotate(tmpdir, 64 * 1024) == 0;
+
+    /* One log over the bound, one under. Only the over-bound one moves. */
+    bool wrote = true;
+    FILE *f = fopen(tor_log, "wb");
+    if (f) {
+        char block[4096];
+        memset(block, 'n', sizeof(block));
+        for (int i = 0; i < 40 && wrote; i++)
+            wrote = fwrite(block, 1, sizeof(block), f) == sizeof(block);
+        fclose(f);
+    } else {
+        wrote = false;
+    }
+    f = fopen(rend_log, "wb");
+    if (f) {
+        fputs("one short line\n", f);
+        fclose(f);
+    }
+
+    int rotated = tor_logs_rotate(tmpdir, 64 * 1024);
+    bool only_the_big_one = rotated == 1;
+    bool tor_log_emptied = log_rotate_file_size(tor_log) == 0;
+    bool history_kept = log_rotate_file_size(tor_prev) == 40 * 4096;
+    bool rend_untouched = log_rotate_file_size(rend_log) > 0;
+
+    if (wrote && none_when_absent && only_the_big_one && tor_log_emptied &&
+        history_kept && rend_untouched) {
+        printf("OK\n");
+    } else {
+        printf("FAIL (wrote=%d absent=%d rotated=%d emptied=%d kept=%d "
+               "rend=%d)\n", wrote, none_when_absent, rotated,
+               tor_log_emptied, history_kept, rend_untouched);
+        failures++;
+    }
+
+    remove_tree(tmpdir);
+    return failures;
+}
+
 int test_tor(void)
+
 {
     int failures = 0;
     printf("\n=== Tor Integration Tests ===\n");
@@ -731,6 +858,8 @@ int test_tor(void)
     failures += test_tor_write_torrc_no_collision();
     failures += test_tor_write_torrc_datadir();
     failures += test_tor_write_torrc_idempotent();
+    failures += test_tor_torrc_log_levels();
+    failures += test_tor_log_rotation();
 
     /* .onion address persistence */
     failures += test_tor_persistent_hostname_read();

@@ -130,6 +130,31 @@ bool tor_log_last_ephemeral_address(const char *log_path, long scan_from,
 bool tor_log_has_descriptor_publication(const char *log_path,
                                         long scan_from);
 
+/* The two Tor log destinations, relative to the datadir.
+ *
+ * tor.log carries the NOTICE stream — the operator's log, including the
+ * dynhost "ephemeral service created with address:" line that names this
+ * boot's onion.
+ *
+ * tor-rend.log carries the info-level [rend] stream, which exists solely
+ * because Tor reports a successful HSDir descriptor upload at info level.
+ * Keeping it out of tor.log is what stops one info domain from turning the
+ * operator's log into a gigabyte of bootstrap chatter. */
+#define TOR_LOG_BASENAME       "tor.log"
+#define TOR_REND_LOG_BASENAME  "tor-rend.log"
+
+/* Compose either log's path under `datadir`. False when the path would not
+ * fit, so a caller never reads or rotates a truncated pathname. */
+bool tor_log_path(const char *datadir, char *out, size_t out_size);
+bool tor_rend_log_path(const char *datadir, char *out, size_t out_size);
+
+/* Bound BOTH Tor logs at `max_bytes`, keeping one previous generation each
+ * ("<name>.1"). Returns how many files were rotated. Driven from the node's
+ * periodic storage housekeeping; safe to call at any time, including while
+ * Tor is writing, because the rotation copies and truncates in place rather
+ * than renaming a file Tor holds open. */
+int tor_logs_rotate(const char *datadir, int64_t max_bytes);
+
 /* ── Persistent onion identity (-onion-persist / -onion-rotate) ──
  *
  * Default stays ephemeral: dynhost mints a throwaway service every boot.
