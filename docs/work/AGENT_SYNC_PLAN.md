@@ -99,8 +99,8 @@ Written in parallel with this plan:
 
 | Document | Content |
 |---|---|
-| `docs/agent/FLASH_UNIT.md` | The contract for one-file flash units. |
+| `docs/agent/FLASH_UNIT.md` | The contract for one-file flash units, including how a unit is dispatched and judged through the tree's own harness. |
 | `docs/agent/EXECUTOR_HEURISTICS.md` | The measured executor routing table. |
 | `docs/agent/NATIVE_CHANNEL.md` | How agents on different nodes find each other. |
 | `docs/agent/TRAIN_PROTOCOL.md` | The landing state machine. |
-| `docs/agent/UNIT_DISPATCH.md` | The operator runbook for the harness. |
+| `docs/agent/README.md` | The `dev agent` leaves an operator runs to check a checkout's situation and readiness. |
