@@ -167,6 +167,19 @@ EOF
     st_run 1 "a native leaf under tools/dev/ that pushes via spawn" \
         "$tmp/tools/dev/native_push.c"
 
+    # 7b. "origin" is not required: a leaf naming the remote by URL still
+    #     publishes, and used to slip past this gate for lack of the
+    #     literal "origin" anywhere in the file.
+    cat > "$tmp/tools/command/native_push_url.c" <<'EOF'
+static void go(void) {
+    const char *argv[] = { "git", "push", "https://host/r.git",
+                           "HEAD:main", NULL };
+    zcl_spawn(argv);
+}
+EOF
+    st_run 1 "a native leaf that pushes to a URL remote, not \"origin\"" \
+        "$tmp/tools/command/native_push_url.c"
+
     # 8. "push" and "origin" appearing together is not enough on its own —
     #    without a spawn call reaching git, the file cannot actually
     #    publish anything, and flagging it would train authors to strip the
@@ -237,12 +250,15 @@ for f in "${FILES[@]}"; do
         # continuing the scan. Every call below goes through "$(...)" for
         # exactly that reason, matching the idiom the shell branch already
         # uses.
+        # "origin" is NOT required: a leaf that names the remote by URL
+        # (`{"git","push","https://host/r.git","HEAD:main",NULL}`) still
+        # publishes, and requiring both literals let that shape through
+        # clean. The "push" literal plus a spawn call reaching git is
+        # already sufficient — nothing else in this argv shape needs a
+        # verb named "push" next to a spawn call.
         out="$(gate_grep -qE '"push"' "$f")"; has_push=$?
         [ "$has_push" -ge 2 ] && exit 2
         [ "$has_push" -ne 0 ] && continue
-        out="$(gate_grep -qE '"origin"' "$f")"; has_origin=$?
-        [ "$has_origin" -ge 2 ] && exit 2
-        [ "$has_origin" -ne 0 ] && continue
         out="$(gate_grep -qE "$NATIVE_SPAWN_RE" "$f")"; has_spawn=$?
         [ "$has_spawn" -ge 2 ] && exit 2
         [ "$has_spawn" -ne 0 ] && continue
