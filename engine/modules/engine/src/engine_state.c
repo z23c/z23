@@ -147,3 +147,33 @@ bool engine_state_needs_compaction(size_t carried_len, size_t gate_tail_len,
     const size_t needed = carried_len + gate_tail_len + base_len + margin;
     return needed > cap;
 }
+
+bool engine_state_next_is_operator(const char *state, size_t len)
+{
+    if (!state || len == 0)
+        return false;
+    static const char key[] = "next:";
+    static const size_t key_len = sizeof(key) - 1;
+    static const char tag[] = "Operator";
+    static const size_t tag_len = sizeof(tag) - 1;
+
+    const char *cur = state;
+    const char *end = state + len;
+    while (cur < end) {
+        const char *nl = memchr(cur, '\n', (size_t)(end - cur));
+        const char *line_end = nl ? nl : end;
+        size_t start = (size_t)(cur - state);
+        size_t stop = (size_t)(line_end - state);
+        trim_span(state, &start, &stop);
+        const size_t n = stop - start;
+        if (n >= key_len && memcmp(state + start, key, key_len) == 0) {
+            size_t vs = start + key_len;
+            size_t ve = stop;
+            trim_span(state, &vs, &ve);
+            if (ve - vs >= tag_len && memcmp(state + vs, tag, tag_len) == 0)
+                return true;
+        }
+        cur = nl ? nl + 1 : end;
+    }
+    return false;
+}

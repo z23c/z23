@@ -107,4 +107,13 @@ size_t engine_state_compaction_prompt(char *buf, size_t cap,
 bool engine_state_needs_compaction(size_t carried_len, size_t gate_tail_len,
                                    size_t base_len, size_t cap);
 
+/* Does the state block's `next:` line hand the work to a human? A unit that
+ * writes "next: Operator: <ask>" has correctly refused to guess — the
+ * receipt must surface that at the top rather than bury it in a 2 KB blob
+ * nobody re-reads, so the fleet board can route it to a person instead of
+ * respawning the same model on the same wall it already reported hitting.
+ * `state` is the raw extracted block (engine_state_extract()'s `out`), not
+ * the whole reply. */
+bool engine_state_next_is_operator(const char *state, size_t len);
+
 #endif /* ZCL_ENGINE_STATE_H */

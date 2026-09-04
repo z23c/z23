@@ -1447,13 +1447,14 @@ static void write_receipt(const struct unit_opts *o,
                           int64_t proof_latency_ms,
                           enum engine_verdict verdict,
                           size_t state_bytes, bool state_updated,
-                          int compactions)
+                          int compactions, bool needs_operator)
 {
     char text[4096];
     struct json_value doc;
     json_init(&doc);
     json_set_object(&doc);
     bool ok = json_push_kv_str(&doc, "schema", "zcl.engine_unit.v1") &&
+        json_push_kv_bool(&doc, "needs_operator", needs_operator) &&
         json_push_kv_str(&doc, "engine", v->id) &&
         json_push_kv_str(&doc, "model", o->model ? o->model :
                          (v->default_model ? v->default_model : "")) &&
@@ -2343,10 +2344,18 @@ int main(int argc, char **argv)
             break;
     }
 
+    const bool needs_operator =
+        have_turn_state
+        && engine_state_next_is_operator(turn_state, strlen(turn_state));
+    if (needs_operator)
+        engine_emit(stdout,
+                    "engine_unit: needs_operator=true — the unit's state "
+                    "block names its next step as an operator action; see "
+                    "state.txt\n");
     write_receipt(&o, v, &dr.reply.usage, &dr.cli_observation, &gate, changed,
                   dr.attempts, dr.dispatch_latency_ms, proof_latency_ms,
                   verdict, have_turn_state ? strlen(turn_state) : 0,
-                  state_updated_last, compactions);
+                  state_updated_last, compactions, needs_operator);
     append_unit_receipt(&o, v, &dr.reply.usage, &gate, changed, dr.attempts,
                         dr.dispatch_latency_ms, proof_latency_ms,
                         dr.http_status, verdict, task_sha3_hex);

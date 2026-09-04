@@ -1957,6 +1957,42 @@ static int case_state(void)
                  attempt_at && turn_at && attempt_at < turn_at);
     }
 
+    /* ── does `next:` hand off to a human? ── */
+    {
+        static const char op[] =
+            "tried: two file rewrites\n"
+            "gate: still red\n"
+            "hypothesis: leftovers from an earlier overwrite\n"
+            "next: Operator: restore tests/harness/src/test_impact_composition.c "
+            "from the pre-overwrite revision\n";
+        EN_CHECK("a next: line naming Operator: is surfaced",
+                 engine_state_next_is_operator(op, sizeof(op) - 1));
+    }
+    {
+        static const char no_op[] =
+            "tried: fixed the header\n"
+            "gate: none yet\n"
+            "hypothesis: should compile now\n"
+            "next: run the gate\n";
+        EN_CHECK("an ordinary next: line is not surfaced as an operator ask",
+                 !engine_state_next_is_operator(no_op, sizeof(no_op) - 1));
+    }
+    {
+        /* "Operator" appearing in some OTHER field must not trip this —
+         * only the next: line's own value counts. */
+        static const char mentions_elsewhere[] =
+            "tried: asked whether an Operator override was set\n"
+            "gate: none yet\n"
+            "hypothesis: none\n"
+            "next: keep going\n";
+        EN_CHECK("a mention of Operator outside next: does not count",
+                 !engine_state_next_is_operator(mentions_elsewhere,
+                                                sizeof(mentions_elsewhere) - 1));
+    }
+    EN_CHECK("an empty state is never an operator ask",
+             !engine_state_next_is_operator("", 0)
+             && !engine_state_next_is_operator(NULL, 0));
+
     /* ── compaction ── */
     EN_CHECK("a small prompt does not need compaction",
              !engine_state_needs_compaction(200, 200, 4096, ENGINE_MAX_PROMPT_BYTES));
