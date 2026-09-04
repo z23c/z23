@@ -2413,6 +2413,9 @@ void zcl_native_handle_dev_agent_ceiling(
 void zcl_native_handle_dev_agent_pace(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
+void zcl_native_handle_dev_agent_hot(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
 
 /* Dev-build-only executors.  The catalog binds these only when
  * ZCL_DEV_BUILD is set; release objects neither reference nor link them. */

@@ -1221,3 +1221,33 @@ ZCL_COMMAND_DEV_COMMAND(
     zcl_native_handle_dev_agent_claim,
     "the file-claim ledger is a development-lane coordination surface",
     "z23-dev dev agent claim")
+
+/* ── dev.agent.hot ─────────────────────────────────────────────────────────
+ * Rung 1 of the evidence ladder: the cheapest check that can refute a
+ * change runs first. One saved file maps to the verdict of its owning test
+ * group — the same file-to-proof route code.tests reports — without the
+ * agent composing shell. When a resident dev loop owns this checkout it
+ * already built the changed module and hot-swapped it, so the group runs
+ * against that swap (mode hotswap); otherwise the runner is rebuilt first
+ * (mode rebuild). A file no rule owns is UNRESOLVED, never a silent pass. */
+ZCL_COMMAND_READY_READ(
+    "dev.agent.hot", "dev.agent", "",
+    "Run one saved file's owning test group, hot or rebuilt",
+    "A freshly executed verdict for the one group that owns the saved file: "
+    "the owning group resolved by the same file-to-proof route code.tests "
+    "reports (or the explicit override), the SUITE VERDICT counts from "
+    "build/bin/test_parallel --no-cache, whether the run executed a "
+    "hot-swapped module, and the whole-leaf wall clock. ok is true for a "
+    "verdict in every case — PASS, FAIL, NOSHA and UNRESOLVED alike — and "
+    "false only when no verdict exists: a missing path, a file outside the "
+    "inspected directory, or a runner that could not start.", 8192,
+    "agent,hot,evidence,ladder,proof,hotswap,rebuild,verdict",
+    "zcl.agent_hot_input.v1", "zcl.agent_hot.v1",
+    "path,group,cwd", "path",
+    "z23 dev agent hot --path=tools/command/native_devagent_hot.c",
+    ZCL_COMMAND_LAYER_DEV, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_LATENCY_BACKGROUND,
+    ZCL_COMMAND_COST_HIGH, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_DEV_STATE_READ,
+    ZCL_COMMAND_TRAIT_DEV_ONLY,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_dev_agent_hot)

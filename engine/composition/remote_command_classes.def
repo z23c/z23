@@ -594,6 +594,7 @@ REMOTE_COMMAND_CLASS("dev.fleet", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("dev.agent.ready", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("dev.agent.test", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("dev.agent.mutate", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("dev.agent.hot", REMOTE_CLASS_NEVER, "")
 
 /* OPS — 36 never_remote leaves.
  *
