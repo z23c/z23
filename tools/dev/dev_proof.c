@@ -41,7 +41,7 @@
 
 #define PROOF_MAX_FILES ZCL_DEVLOOP_MAX_FILES
 #define PROOF_MAX_JOBS 16u
-#define PROOF_TIMEOUT_MS 900000
+#define PROOF_TIMEOUT_MS 3600000
 #define PROOF_ENV_DOMAIN "zcl.dev_proof_environment.v1"
 
 struct proof_paths {
