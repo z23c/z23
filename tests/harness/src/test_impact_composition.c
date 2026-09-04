@@ -31,6 +31,14 @@
  * files, real compiler-style depfiles, a real index build. Nothing here reads
  * the live repository index or the live datadir. */
 
+/* realpath() is declared by glibc only through the fortify inline unless a
+ * feature-test macro asks for it; without this the file compiles today by
+ * accident of -O2 and is a hard C23 error at -O0 or on another libc. Must
+ * precede the first #include, which is where <features.h> is read. */
+#if !defined(_WIN32) && !defined(_DEFAULT_SOURCE)
+#define _DEFAULT_SOURCE
+#endif
+
 #include "test/test_core.h"
 
 #include <utime.h>
