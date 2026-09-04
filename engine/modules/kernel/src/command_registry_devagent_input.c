@@ -1,6 +1,6 @@
-/* Copyright 2026 Rhett Creighton - Apache License 2.0 */
-
-/* Per-key transport type rules for the dev.agent leaves, split out of
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ *
+ * Per-key transport type rules for the dev.agent leaves, split out of
  * command_registry.c's zcl_command_registry_input_validate() so that file
  * stays under its recorded file-size-ceiling baseline. Behaviour is
  * unchanged: this is the same else-if chain in its own translation unit.

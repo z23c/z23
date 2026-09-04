@@ -47,6 +47,8 @@ LEAF_FLOOR=200
 # object is a compile error here rather than a silently skipped gate.
 LINK_SRCS=(
     engine/modules/kernel/src/command_registry.c
+    engine/modules/kernel/src/command_registry_devagent_input.c
+    engine/modules/kernel/src/command_registry_input_budget.c
     platform/modules/json/src/json.c
     core/modules/crypto/src/sha256.c
     platform/modules/base/src/safe_alloc.c

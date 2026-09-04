@@ -1,6 +1,6 @@
-/* Copyright 2026 Rhett Creighton - Apache License 2.0 */
-
-/* Per-key input value bounds, split out of command_registry.c so that file
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ *
+ * Per-key input value bounds, split out of command_registry.c so that file
  * stays under its recorded file-size-ceiling baseline. Behaviour is
  * unchanged: same functions, same constants (now shared via
  * kernel/command_registry.h so this file and command_registry.c's
