@@ -85,8 +85,16 @@ git -C "$ROOT" grep -q 'deploy: REFUSE: ZCL_PROFILE=dev' -- Makefile ||
     fail 'make deploy does not refuse the dev profile'
 git -C "$ROOT" grep -q '\$(HOTSWAP_ACTION_PLAN) \$(DEV_PACKAGE_VERIFIER_TARGET)' -- Makefile ||
     fail 'dev-bin does not use the platform-qualified package verifier prerequisite'
+git -C "$ROOT" grep -q '\$(DEV_RESTART_PLAN_TARGET)' -- Makefile ||
+    fail 'dev-bin does not use the platform-qualified restart-plan prerequisite'
+git -C "$ROOT" grep -q '^DEV_RESTART_PLAN_TARGET = \$(DEV_RESTART_PLAN)' -- Makefile ||
+    fail 'non-Windows dev-bin does not bootstrap its restart plan'
+git -C "$ROOT" grep -q '^DEV_RESTART_PLAN_TARGET =$' -- Makefile ||
+    fail 'Windows dev-bin does not omit the unavailable proof restart plan'
 git -C "$ROOT" grep -q '^dev-proof-bundle:.*dev-bin' -- Makefile ||
     fail 'proof bundle does not serialize its development prerequisites through dev-bin'
+git -C "$ROOT" grep -q '^dev-proof-bundle:.*\$(DEV_RESTART_PLAN)' -- Makefile ||
+    fail 'explicit proof bundle does not bootstrap the complete restart plan'
 if git -C "$ROOT" grep -q '^dev-proof-bundle:.*dev-package-verifier-ensure' -- Makefile; then
     fail 'proof bundle races dev-bin through a duplicate package-verifier bootstrap'
 fi
