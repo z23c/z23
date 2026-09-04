@@ -842,9 +842,17 @@ static int test_runner_exact_selection(void)
         ASSERT(strstr(out, "groups_ran=2") != NULL);
         ASSERT(strstr(out, "groups_failed=0") != NULL);
 
+        /* Exercise the runner's proof-contract/cache boundary with the
+         * smallest real STRESS-contract group.  The contract dispatch is the
+         * behavior under test here; recursively running the roughly
+         * 100-second reducer forward-progress acceptance twice only tested
+         * that unrelated product behavior twice and dominated every exact
+         * selector proof. */
+        ASSERT(zcl_test_group_proof_contract("test_store_e2e_gate") ==
+               ZCL_TEST_PROOF_STRESS);
         n = snprintf(command, sizeof(command),
                      "\"%s\" --jobs=1 "
-                     "--exact=test_reducer_forward_progress_gate "
+                     "--exact=test_store_e2e_gate "
                      "--activate-proof-contracts --cache 2>&1", exe);
         ASSERT(n > 0 && (size_t)n < sizeof(command));
         for (int proof_run = 0; proof_run < 2; proof_run++) {
@@ -853,7 +861,7 @@ static int test_runner_exact_selection(void)
             ASSERT(rc == 0);
             ASSERT(strstr(out,
                           "proof contract "
-                          "group=test_reducer_forward_progress_gate "
+                          "group=test_store_e2e_gate "
                           "env=ZCL_STRESS_TESTS") != NULL);
             ASSERT(strstr(out, "active-proof-contract") != NULL);
             ASSERT(strstr(out, "cache PLAN — 0 cacheable, 0 cache HIT") !=
