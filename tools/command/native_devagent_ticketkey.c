@@ -71,6 +71,7 @@
 
 #include "command/native_command.h"
 
+#include "base/hex.h"
 #include "base/safe_alloc.h"
 #include "controllers/agent_impact_rules.h"
 #include "json/json.h"
@@ -662,17 +663,6 @@ static int64_t dvt_elapsed_ms(int64_t t0_ns)
     return ms < 0 ? 0 : ms;
 }
 
-static void dvt_hex(const unsigned char *bytes, size_t n, char *out)
-{
-    static const char digits[] = "0123456789abcdef";
-    size_t i;
-    for (i = 0; i < n; i++) {
-        out[2 * i] = digits[(bytes[i] >> 4) & 0xf];
-        out[2 * i + 1] = digits[bytes[i] & 0xf];
-    }
-    out[2 * n] = '\0';
-}
-
 /* Toolchain epoch: SHA3-256 over "cc:<first `cc --version` line>\n" plus
  * the CFLAGS logical line from the checkout Makefile. See the EPOCH block
  * in the file contract for why this is re-derived here. */
@@ -763,7 +753,7 @@ static bool dvt_epoch(const char *top, char epoch_hex[65])
     sha3_256_write(&ctx, (const unsigned char *)cflags_src,
                    strlen(cflags_src));
     sha3_256_finalize(&ctx, digest);
-    dvt_hex(digest, sizeof(digest), epoch_hex);
+    zcl_hex_encode(digest, sizeof(digest), epoch_hex);
     return true;
 }
 
@@ -1043,7 +1033,7 @@ void zcl_native_handle_dev_agent_ticketkey(
         sha3_256_write(&kctx, (const unsigned char *)tail, strlen(tail));
     }
     sha3_256_finalize(&kctx, kdigest);
-    dvt_hex(kdigest, sizeof(kdigest), key_hex);
+    zcl_hex_encode(kdigest, sizeof(kdigest), key_hex);
 
     /* Output. */
     {
