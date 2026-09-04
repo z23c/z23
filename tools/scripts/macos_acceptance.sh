@@ -84,6 +84,20 @@ validate() {
         case "$state" in available|degraded|unavailable) ;; *) die "$id has invalid state '$state'" ;; esac
         [ -n "$reason" ] || die "$id has no typed reason"
         [ -n "$groups" ] || die "$id has no refusal/availability evidence group"
+        # Package verification and resident-node confinement are deliberately
+        # different capabilities on Darwin.  Pin both sides so a stale
+        # Linux-only description cannot silently downgrade qualified
+        # Seatbelt, and Seatbelt cannot be overclaimed as resident policy.
+        case "$id:$state:$reason:$groups" in
+            package_execution:available:seatbelt_scopes_filesystem_denies_network_and_enforces_rlimits:test_os_sandbox,test_platform_toolchain,test_sandbox_process_budget,test_zcode_verify) ;;
+            package_execution:*)
+                die "package_execution contract drift: expected available/seatbelt_scopes_filesystem_denies_network_and_enforces_rlimits with its exact four evidence groups; observed $state/$reason/$groups"
+                ;;
+            resident_confinement:unavailable:landlock_and_seccomp_are_linux_only:test_os_sandbox,test_confine) ;;
+            resident_confinement:*)
+                die "resident_confinement contract drift: expected unavailable/landlock_and_seccomp_are_linux_only with its exact two evidence groups; observed $state/$reason/$groups"
+                ;;
+        esac
         while IFS= read -r group; do
             grep -Fqx "$group" <<< "$registered" || die "$id names unregistered group '$group'"
         # printf '%s' emits no trailing newline, so `tr ',' '\n'` leaves the

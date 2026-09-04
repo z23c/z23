@@ -44,9 +44,11 @@
  *   [1  test_ran (0|1)]
  *   [4  test_exit_code]        meaningful when test_ran=1; MUST be 0 when
  *                              test_ran=0 (closed grammar: one encoding)
- *   [1  isolation]             1=full (Landlock+seccomp+rlimits)
- *                              2=degraded (seccomp+rlimits only, named
- *                              loudly — see the verifier's usage text)
+ *   [1  isolation]             1=full (a qualified platform filesystem +
+ *                              network sandbox, plus enforced rlimits;
+ *                              Linux uses Landlock+seccomp, macOS Seatbelt)
+ *                              2=degraded (no qualified platform filesystem
+ *                              sandbox, named loudly in verifier output)
  *   [33 verifier_pubkey]       compressed secp256k1
  *   [64 signature]             secp256k1 ECDSA compact r||s, low-S, over
  *                              the attestation id

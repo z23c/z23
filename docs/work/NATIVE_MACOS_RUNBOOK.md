@@ -76,7 +76,7 @@ a stripped PATH you silently get 8 workers. Prefer
 | Release split-debug via `objcopy --add-gnu-debuglink` | `Makefile:4228` takes the Darwin branch instead (`cp` sidecar + `strip -S -x`) | Mach-O has no `.gnu_debuglink`; there is no back-reference, so symbolize against `build/bin/z23.debug` explicitly |
 | `ci-symbol-floor` | `Makefile:10131` | designed SKIP (exit 2 → 0) when `objdump`/`ldd` are absent; both are absent here, so the gate passes by skipping, not by proving |
 | Standalone tool links | `ZCL_GC_SECTIONS_LDFLAG` and `ZCL_TOOL_SANDBOX_SRC` in `Makefile` | host-specific linker and sandbox selections are centralized; a red gate is a regression |
-| Landlock/seccomp package confinement, inotify dev watcher, signal-context self-backtrace, `O_TMPFILE` snapshot export | `docs/GETTING_STARTED.md` §"Platform capability boundary" | refuse or report unavailable; the macOS `self_backtrace` test proves this boundary rather than unsupported signal-context behavior |
+| Linux Landlock/seccomp resident confinement, signal-context self-backtrace, `O_TMPFILE` snapshot export | `docs/GETTING_STARTED.md` §"Platform capability boundary" | refuse or report unavailable; the separate package verifier instead qualifies Seatbelt filesystem/network confinement plus rlimits, and the macOS `self_backtrace` test proves its own refusal boundary |
 
 ---
 
@@ -106,10 +106,13 @@ keeps the `_stub` variants).
 | `allocator_compat.h` | glibc malloc tuning | both functions compile empty (keyed on `__GLIBC__`, not on OS) | `mallopt(M_MMAP_THRESHOLD, …)`, `malloc_trim(0)` |
 | `clock.h` (+ `platform/modules/platform/src/clock.c`) | injectable clock | same `clock_gettime(CLOCK_MONOTONIC/_REALTIME)` calls; feature-tested fallbacks for `_RAW` and per-thread CPU clocks, no Mach timebase | identical shape |
 | `os_proc.h` (+ `platform/modules/platform/src/os_proc.c`) | process/host introspection | `proc_pid_rusage(RUSAGE_INFO_V2)`, `task_info(MACH_TASK_BASIC_INFO)`, `proc_pidinfo(PROC_PIDTBSDINFO)`, `sysctlbyname("hw.memsize")`, `_NSGetExecutablePath`, `_NSGetArgc/_NSGetArgv`; cgroup and available-memory stay `-1` | `/proc/self/status`, `/proc/meminfo`, `/proc/uptime` + field 22, `readlink("/proc/self/exe")`, cgroup v2 |
-| `os_sandbox.h` (+ `platform/modules/platform/src/os_sandbox_stub.c`) | confinement builders | stub returns typed unavailability ("… is unavailable on this operating system"); `os_sandbox_active()` false; but uid/pgid census answers from `sysctl(KERN_PROC_ALL)` + `proc_pidinfo` | `prctl(PR_SET_NO_NEW_PRIVS)`, Landlock, seccomp-BPF, namespace clone, rlimits |
+| `os_sandbox.h` (+ `platform/modules/platform/src/os_sandbox_stub.c`) | confinement builders | resident confinement returns typed unavailability and `os_sandbox_active()` stays false; the separate package rail builds a deny-by-default Seatbelt profile with scoped paths and network denial, plus POSIX rlimits; uid/pgid census uses `sysctl(KERN_PROC_ALL)` + `proc_pidinfo` | `prctl(PR_SET_NO_NEW_PRIVS)`, Landlock, seccomp-BPF, namespace clone, rlimits |
 
-Read `platform/modules/platform/src/os_sandbox_stub.c:2` as the governing sentence:
-*"Non-Linux confinement backend. Linux-only guarantees fail closed."*
+Read `platform/modules/platform/src/os_sandbox_stub.c:2` as the governing
+sentence: *"Non-Linux confinement backend. Linux-only guarantees fail
+closed."* That boundary does not erase a separately qualified native
+mechanism: package children use Seatbelt and report `confinement=seatbelt`,
+while resident-node confinement remains unavailable.
 
 Two behavioral notes worth memorizing:
 

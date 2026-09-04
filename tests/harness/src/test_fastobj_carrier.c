@@ -1106,13 +1106,13 @@ done:
 #else /* _WIN32 */
 
 /* Every candidate build here runs the confined package verifier with
- * --require-full-isolation, which refuses off Linux (no Landlock/seccomp;
- * the Windows sandbox is unqualified). The fork+pipe drain plumbing has no
- * Windows analogue either, so no case in this group can run. */
+ * --require-full-isolation. Windows has no qualified package sandbox yet,
+ * and the fork+pipe drain plumbing has no Windows analogue, so no case in
+ * this group can run. Linux and macOS use different qualified backends. */
 static int test_fastobj_carrier_platform_arm(void)
 {
     printf("test_fastobj_carrier: SKIP (Windows): confined package builds "
-           "require Linux full isolation\n");
+           "require a qualified full-isolation backend\n");
     return 0;
 }
 

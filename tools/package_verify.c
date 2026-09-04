@@ -15,18 +15,20 @@
  *
  * Isolation contract (per spawned child — every compile, link, and test
  * run):
- *   - no network: a seccomp deny-list kills the whole socket family
- *     (socket/connect/bind/listen/accept, send, recv, socketpair and
- *     their variants), plus ptrace/process_vm_*, mount/namespace escape,
- *     kernel modules, keyrings, bpf, perf, and open_by_handle_at. execve
- *     and fork/clone stay allowed:
- *     gcc is a driver that must exec cc1/as/ld, and pthread tests need
- *     clone — every exec'd image inherits no_new_privs + seccomp +
- *     Landlock + rlimits, so this is not an escape.
- *   - filesystem scoping: a Landlock domain grants ONLY the materialized
- *     source tree (read), the temp build dir (read/write/create/execute),
- *     the host toolchain (/usr, /lib, /lib64, /etc read+execute),
- *     /dev/null + /dev/urandom, and the child's OWN /proc/self (read —
+ *   - no network: the qualified platform sandbox denies the socket family.
+ *     Linux uses a seccomp deny-list (also denying ptrace/process_vm_*,
+ *     mount/namespace escape, kernel modules, keyrings, bpf, perf, and
+ *     open_by_handle_at); macOS uses a deny-by-default Seatbelt profile.
+ *     execve and fork/clone stay allowed because compiler drivers must exec
+ *     cc1/as/ld and pthread tests need children. The platform sandbox and
+ *     rlimits remain inherited, so that is not an escape.
+ *   - filesystem scoping: a Landlock domain on Linux or Seatbelt profile on
+ *     macOS grants ONLY the materialized source tree (read), the temp build
+ *     dir (read/write/create/execute), locked dependency install trees
+ *     (read), and host toolchain roots. Common roots are /usr, /lib and /etc;
+ *     /lib64 is included when present, while Darwin also needs
+ *     /Library/Developer and /System. /dev/null + /dev/urandom are granted,
+ *     as is the child's own /proc/self where the host provides it (read —
  *     compiler-rt re-reads /proc/self/environ for its runtime flags; deny
  *     it and ASan falls back to DEFAULT flags, resurrecting LeakSanitizer,
  *     which then dies stop-the-world). Wallet paths, node datadirs, SSH
@@ -65,13 +67,13 @@
  *     and object is DELETED with the temp tree after the attestation is
  *     written (success or failure).
  *
- * Degraded mode: where the kernel offers no Landlock, children still run
- * under no_new_privs + seccomp + rlimits (network and resources stay
- * bound) but the filesystem is NOT scoped — the attestation then carries
- * isolation=degraded and this program prints a loud warning. Operators who
- * refuse degraded attestations pass --require-full-isolation, which fails
- * closed (no attestation is written). The quorum policy and the `zcode
- * package verify` report surface the isolation level of every attestation.
+ * Degraded mode: where the host offers no qualified package-confinement
+ * backend, any remaining platform protections do not count as full: the
+ * attestation carries isolation=degraded and this program prints a loud
+ * warning. Operators who refuse degraded attestations pass
+ * --require-full-isolation, which fails closed (no attestation is written).
+ * The quorum policy and the `zcode package verify` report surface the
+ * isolation level of every attestation.
  *
  * Key file: 64 lowercase/uppercase hex chars (one secp256k1 secret), in a
  * regular file with no group/other permission bits. The key NEVER leaves
@@ -81,9 +83,9 @@
  * Exit codes: 0 attestation written (whatever its verdict — a build-fail
  * attestation is still a successful verification run); 2 usage; 3 the
  * store/release/manifest/recipe/chunks could not be loaded or the package
- * is incomplete; 4 --require-full-isolation on a no-Landlock kernel; 5 an
- * internal/sandbox failure (nothing is signed); 6 emit mode with
- * --reproduce-against: the build does NOT reproduce the reference
+ * is incomplete; 4 --require-full-isolation without a qualified package-
+ * confinement backend; 5 an internal/sandbox failure (nothing is signed);
+ * 6 emit mode with --reproduce-against: the build does NOT reproduce the reference
  * build-report byte-for-byte (a verdict, not an internal failure — the
  * mismatch rule and detail are on stderr). */
 
@@ -341,17 +343,18 @@ static void pv_usage(FILE *out)
         "local_candidate only — never an attestation or admission input.\n");
     fprintf(out,
         "\n"
-        "Builds and tests one ZCODE package under confinement (seccomp +\n"
-        "rlimits + Landlock where the kernel offers it) following ONLY the\n"
+        "Builds and tests one ZCODE package under qualified platform\n"
+        "confinement (Landlock+seccomp on Linux; Seatbelt on macOS) plus\n"
+        "enforced rlimits, following ONLY the\n"
         "slice-5 declarative recipe, then writes one secp256k1-signed\n"
         "attestation into <store>/attestations/<attestation-id-hex>.\n"
         "The node never compiles downloaded code; this separate program is\n"
         "the only place compilation happens. Produced binaries are deleted\n"
         "after the attestation is written. --key names a 0600/0400 file\n"
         "holding one 64-hex secp256k1 secret. --work chooses the parent of\n"
-        "the temp build tree (default: $TMPDIR or /tmp). On a kernel\n"
-        "without Landlock the run is DEGRADED (no filesystem scoping; the\n"
-        "attestation says isolation=degraded) unless\n"
+        "the temp build tree (default: $TMPDIR or /tmp). Without a qualified\n"
+        "platform package sandbox the run is DEGRADED (the attestation says\n"
+        "isolation=degraded) unless\n"
         "--require-full-isolation is given, which fails closed.\n");
 }
 

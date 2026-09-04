@@ -152,14 +152,16 @@ The arm64 macOS build includes the node, wallet, P2P and RPC services,
 databases, and native cryptography. The authenticated Noise transport works
 natively and is armed with `-noisetransport`; private-machine mesh pairing then
 needs only a provisioned on-chain DHT identity (`zcode network delegate`), the
-same cross-platform prerequisite as Linux. The following Linux-specific
-facilities currently report unavailable or refuse safely on macOS:
-Landlock/seccomp package confinement, signal-context self-backtraces, native
-hot-swap activation, and consensus snapshot export that requires `O_TMPFILE`.
-The directory watcher now uses kqueue on macOS. `make macos-acceptance`
+same cross-platform prerequisite as Linux. The separate package verifier uses
+qualified Seatbelt confinement: its filesystem is scoped, network access is
+denied, rlimits are enforced, and `--require-full-isolation` succeeds. This is
+not resident-node confinement. Linux Landlock/seccomp resident confinement,
+signal-context self-backtraces, native hot-swap activation, and consensus
+snapshot export that requires `O_TMPFILE` still report unavailable or refuse
+safely on macOS. The directory watcher now uses kqueue on macOS. `make macos-acceptance`
 validates the closed matrix in `engine/composition/platform/macos_capabilities.def`, unions
 its capability evidence with the eight declarative required baseline groups,
-and executes the resulting 39 exact registered groups. It refuses any
+and executes the resulting 41 exact registered groups. It refuses any
 self-skip or unobserved eligible environment. After that verdict it uses the
 canonical release cutter to create a temporary four-member `darwin-arm64`
 runtime, verifies the macOS 14 floor, Mach-O dependency boundary and closed

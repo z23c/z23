@@ -336,29 +336,54 @@ run_selftest() {
     expect_reject "J: same-size registered capability evidence drift is caught" \
                   "exact evidence set drift" "$FIXTURE_ROOT/capability_exact_set.def" || rc=1
 
-    # K/L. A comment mentioning the script must not keep the reachability
+    # K/L. Legal state words and nonempty reason codes are not sufficient for
+    # the two confinement rows: the public matrix must preserve qualified
+    # Seatbelt package execution without promoting resident-node confinement.
+    sed 's/^ZCL_MACOS_CAPABILITY(package_execution, available,/ZCL_MACOS_CAPABILITY(package_execution, degraded,/' \
+        "$MATRIX" > "$FIXTURE_ROOT/package_state.def"
+    expect_reject "K: a legal Seatbelt package downgrade is caught" \
+                  "package_execution contract drift" "$FIXTURE_ROOT/package_state.def" || rc=1
+    sed 's/^ZCL_MACOS_CAPABILITY(resident_confinement, unavailable,/ZCL_MACOS_CAPABILITY(resident_confinement, available,/' \
+        "$MATRIX" > "$FIXTURE_ROOT/resident_state.def"
+    expect_reject "L: Seatbelt cannot promote resident confinement" \
+                  "resident_confinement contract drift" "$FIXTURE_ROOT/resident_state.def" || rc=1
+
+    # M/N. Reassigning registered evidence while preserving the global union
+    # must not sever a claim from the tests that actually prove it.
+    sed -e 's/test_boot_shutdown_marker_persistence,test_net,test_rpc/test_boot_shutdown_marker_persistence,test_platform_toolchain,test_rpc/' \
+        -e 's/test_os_sandbox,test_platform_toolchain,test_sandbox_process_budget,test_zcode_verify/test_os_sandbox,test_net,test_sandbox_process_budget,test_zcode_verify/' \
+        "$MATRIX" > "$FIXTURE_ROOT/package_groups.def"
+    expect_reject "M: package evidence reassignment is caught" \
+                  "package_execution contract drift" "$FIXTURE_ROOT/package_groups.def" || rc=1
+    sed -e 's/test_boot_shutdown_marker_persistence,test_net,test_rpc/test_boot_shutdown_marker_persistence,test_net,test_confine/' \
+        -e 's/test_os_sandbox,test_confine)/test_os_sandbox,test_rpc)/' \
+        "$MATRIX" > "$FIXTURE_ROOT/resident_groups.def"
+    expect_reject "N: resident evidence reassignment is caught" \
+                  "resident_confinement contract drift" "$FIXTURE_ROOT/resident_groups.def" || rc=1
+
+    # O/P. A comment mentioning the script must not keep the reachability
     # check green after either the real recipe or its public-binary dependency
     # disappears.
     sed '\#^[[:space:]]*@\./tools/scripts/macos_acceptance\.sh --run[[:space:]]*$#d' \
         Makefile > "$FIXTURE_ROOT/make_no_recipe"
-    expect_make_reject "K: deleting the native recipe is caught" \
+    expect_make_reject "O: deleting the native recipe is caught" \
                        "$FIXTURE_ROOT/make_no_recipe" || rc=1
     sed 's/^macos-acceptance: z23 zclassic23-package-verify zclassic23-acme$/macos-acceptance: z23/' \
         Makefile > "$FIXTURE_ROOT/make_no_z23"
-    expect_make_reject "L: deleting release-member prerequisites is caught" \
+    expect_make_reject "P: deleting release-member prerequisites is caught" \
                        "$FIXTURE_ROOT/make_no_z23" || rc=1
 
-    # M/N. Passing source tests is insufficient when either the canonical
+    # Q/R. Passing source tests is insufficient when either the canonical
     # runtime cut or execution of its stripped node can silently disappear.
     grep -Fv 'build_release.sh" --bin' "$ACCEPT" > "$FIXTURE_ROOT/no_package_cut.sh"
-    expect_package_reject "M: deleting the canonical runtime cut is caught" \
+    expect_package_reject "Q: deleting the canonical runtime cut is caught" \
                           "$FIXTURE_ROOT/no_package_cut.sh" || rc=1
     grep -Fv 'runtime/z23" code guide' "$ACCEPT" > "$FIXTURE_ROOT/no_package_exec.sh"
-    expect_package_reject "N: deleting packaged-node execution is caught" \
+    expect_package_reject "R: deleting packaged-node execution is caught" \
                           "$FIXTURE_ROOT/no_package_exec.sh" || rc=1
 
     if [ "$rc" -eq 0 ]; then
-        echo "══ selftest: PASS (16/16) ══"
+        echo "══ selftest: PASS (20/20) ══"
     else
         echo "══ selftest: FAIL ══"
     fi

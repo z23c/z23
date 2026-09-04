@@ -203,16 +203,19 @@ a roughly 1 MiB automatic array.
 The exact 10-package C23 Commons root and dependency-DAG projection, including
 all 217 monolith-owned package sources, also passed on macOS. Mach-O fixture
 builds use a fixed nonzero UUID and fixed-identifier ad-hoc signature; publisher
-and independent-checkout binaries execute and hash identically. Package builds
-that require Linux full isolation continue to refuse on macOS.
+and independent-checkout binaries execute and hash identically. The separate
+package verifier qualifies native Seatbelt filesystem scoping, network denial,
+and enforced rlimits as full package isolation; this does not claim Linux
+Landlock/seccomp mechanisms or resident-node confinement on macOS.
 
 The macOS capability boundary is explicit: the public node, wallet, P2P, RPC,
 database, cryptography, embedded Tor, and a native kqueue directory watcher build
-natively; Linux Landlock and seccomp confinement, signal-context
+natively; qualified Seatbelt confinement is available only to the separate
+package verifier. Linux Landlock/seccomp resident confinement, signal-context
 self-backtraces, native hot-swap activation, and `O_TMPFILE` consensus snapshot
-export are currently unavailable. Those paths refuse or report unavailable
-instead of claiming Linux guarantees. Only arm64 macOS is measured; Intel macOS
-remains unverified.
+export remain unavailable. Those paths refuse or report unavailable instead of
+claiming Linux guarantees. Only arm64 macOS is measured; Intel macOS remains
+unverified.
 
 Embedded full Tor has been observed to complete on the arm64 Mac host
 (`make tor-full`, ~110 s, producing `vendor/tor/libtor.a` from vendored
