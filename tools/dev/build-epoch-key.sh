@@ -133,10 +133,27 @@ compiler-id)
         fi
     fi
 
+    # Content-hash ONLY: a tool is identified by its bytes, never by its
+    # filesystem metadata. build/bin/zcc (this repo's in-tree compile cache,
+    # itself an admitted CC_ARGV token on every native build) is legitimately
+    # rebuilt byte-for-byte-identical mid-session -- a nested `make` re-runs
+    # tools/dev/zcc_bootstrap.sh's own freshness check on every reparse, and
+    # that check's second-granularity `-nt` comparison can call an unchanged
+    # source tree "stale" and recompile it. Binding mtime/ctime/inode/device
+    # here (as an earlier revision did, via `stat -Lc ...`) turned that
+    # harmless, content-preserving rebuild into a false "compiler/toolchain
+    # changed during build" failure: the epoch's BUILD_COMPILER_ID is snapshot
+    # once at Make parse time, verified again later against a re-fingerprint
+    # of the SAME bytes -- but with a new mtime/inode -- and the two stopped
+    # matching even though nothing about the produced object code did.
+    # Reproduced directly: rebuild build/bin/zcc from unmodified sources
+    # (identical sha256) and the OLD stat-based fingerprint changed; this
+    # digest-only one does not. A real toolchain swap is still caught in
+    # full: any byte difference changes the digest.
     declare -A SEEN_TOOL=()
     fingerprint_tool()
     {
-        local label="$1" requested="$2" resolved digest metadata
+        local label="$1" requested="$2" resolved digest
         [ -n "$requested" ] || return 0
         if [[ "$requested" == */* ]]; then
             resolved="$(readlink -f -- "$requested" 2>/dev/null || true)"
@@ -150,10 +167,8 @@ compiler-id)
         SEEN_TOOL["$resolved"]=1
         digest="$(sha256_file "$resolved")" ||
             fail "could not hash compiler tool: $resolved"
-        metadata="$(stat -Lc '%d:%i:%s:%Y:%Z:%y:%z' "$resolved" 2>/dev/null)" ||
-            fail "could not stat compiler tool: $resolved"
-        printf 'tool\0%s\0%s\0%s\0%s\0' \
-            "$label" "$resolved" "$digest" "$metadata" \
+        printf 'tool\0%s\0%s\0%s\0' \
+            "$label" "$resolved" "$digest" \
             >> "$PREIMAGE"
     }
 
