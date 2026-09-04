@@ -507,6 +507,51 @@ static int case_patch(void)
                  && strstr(proto, ENGINE_PATCH_END) != NULL
                  && strstr(proto, ENGINE_PATCH_DELETE) != NULL);
     }
+
+    /* engine_unit archives what a parsed patch would apply into
+     * <state-dir>/applied.txt via this describe function, so a FAIL(NO-
+     * CHANGE) verdict can be told apart from "the parser accepted N files"
+     * without re-running the dispatch. */
+    {
+        static const char reply[] =
+            "Z23-BEGIN-FILE lib/foo/src/bar.c\n"
+            "int main(void) { return 0; }\n"
+            "Z23-END-FILE\n"
+            "Z23-DELETE-FILE lib/foo/src/old.c\n";
+        const bool ok = engine_patch_parse(reply, sizeof(reply) - 1, &p);
+        char desc[256];
+        const size_t n = ok ? engine_patch_describe(&p, desc, sizeof(desc)) : 0;
+        EN_CHECK("describe lists a written file with its byte count",
+                 ok && n > 0
+                 && strstr(desc, "lib/foo/src/bar.c: 29 bytes\n") != NULL);
+        EN_CHECK("describe marks a deletion distinctly from a write",
+                 ok && n > 0
+                 && strstr(desc, "lib/foo/src/old.c: DELETE\n") != NULL);
+        if (ok)
+            engine_patch_free(&p);
+    }
+    {
+        struct engine_patch empty;
+        memset(&empty, 0, sizeof(empty));
+        char desc[64] = "unwritten";
+        const size_t n = engine_patch_describe(&empty, desc, sizeof(desc));
+        EN_CHECK("describing an empty patch writes nothing",
+                 n == 0 && desc[0] == '\0');
+    }
+    {
+        /* A buffer too small for even one full line truncates safely rather
+         * than overflowing or leaving the string unterminated. */
+        static const char reply[] =
+            "Z23-BEGIN-FILE lib/foo/src/a_very_long_file_name_here.c\n"
+            "x\nZ23-END-FILE\n";
+        const bool ok = engine_patch_parse(reply, sizeof(reply) - 1, &p);
+        char tiny[8];
+        const size_t n = ok ? engine_patch_describe(&p, tiny, sizeof(tiny)) : 0;
+        EN_CHECK("a too-small buffer stays NUL-terminated",
+                 ok && n < sizeof(tiny) && tiny[n] == '\0');
+        if (ok)
+            engine_patch_free(&p);
+    }
     return failures;
 }
 

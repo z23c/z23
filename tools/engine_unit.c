@@ -1700,6 +1700,19 @@ int main(int argc, char **argv)
     if (!got)
         return 1;
 
+    /* Archive the raw completion before any envelope parsing touches it. A
+     * FAIL(NO-CHANGE) verdict alone cannot say whether the model proposed
+     * nothing, proposed something the envelope parser refused, or never
+     * came back with the shape this harness expects — reply.txt lets a
+     * human read exactly what the model said and answer that by hand. */
+    if (o.state_dir && o.state_dir[0]) {
+        char reply_path[1024];
+        if ((size_t)snprintf(reply_path, sizeof(reply_path), "%s/reply.txt",
+                             o.state_dir) < sizeof(reply_path))
+            (void)engine_emit_file(reply_path, dr.reply.text ? dr.reply.text : "",
+                                   dr.reply.text_len);
+    }
+
     if (dr.reply.usage.tokens_known || dr.reply.usage.cost_known)
         engine_emit(stdout,
                     "  spend:      prompt=%lld completion=%lld cost_usd=%s%.6f\n",
@@ -1720,13 +1733,53 @@ int main(int argc, char **argv)
      * reply carries file bodies. Either way the NEXT step measures the diff. */
     if (v->delivery == ENGINE_DELIVERS_ENVELOPE) {
         struct engine_patch patch;
+        char applied_path[1024] = {0};
+        if (o.state_dir && o.state_dir[0])
+            (void)snprintf(applied_path, sizeof(applied_path), "%s/applied.txt",
+                           o.state_dir);
+
         if (!engine_patch_parse(dr.reply.text, dr.reply.text_len, &patch)) {
+            if (applied_path[0])
+                (void)engine_emit_file(applied_path,
+                    "PARSE_REFUSED\nthe envelope parser rejected this reply "
+                    "(a marker rule was violated or an envelope was left "
+                    "open); see reply.txt for the exact text and stderr of "
+                    "this run for which check fired.\n",
+                    strlen("PARSE_REFUSED\nthe envelope parser rejected this "
+                           "reply (a marker rule was violated or an envelope "
+                           "was left open); see reply.txt for the exact text "
+                           "and stderr of this run for which check "
+                           "fired.\n"));
             engine_reply_free(&dr.reply);
             engine_emit(stderr, "engine_unit: the reply was refused by the "
                                 "envelope parser; nothing was applied\n");
             return 1;
         }
         engine_emit(stdout, "  reply:      %zu file(s) proposed\n", patch.count);
+        if (applied_path[0]) {
+            char desc[4096];
+            const size_t n = engine_patch_describe(&patch, desc, sizeof(desc));
+            char header[128];
+            const int hn = snprintf(header, sizeof(header),
+                                     "PARSED %zu file(s)\n", patch.count);
+            char buf[4096 + 128];
+            size_t used = 0;
+            if (hn > 0 && (size_t)hn < sizeof(buf)) {
+                memcpy(buf, header, (size_t)hn);
+                used = (size_t)hn;
+            }
+            if (n > 0 && used + n < sizeof(buf)) {
+                memcpy(buf + used, desc, n);
+                used += n;
+            } else if (patch.count == 0) {
+                static const char none[] = "(the reply proposed no changes)\n";
+                if (used + sizeof(none) - 1 < sizeof(buf)) {
+                    memcpy(buf + used, none, sizeof(none) - 1);
+                    used += sizeof(none) - 1;
+                }
+            }
+            (void)engine_emit_file(applied_path, buf, used);
+        }
         const bool applied = apply_patch(workdir, &patch);
         engine_patch_free(&patch);
         if (!applied) {

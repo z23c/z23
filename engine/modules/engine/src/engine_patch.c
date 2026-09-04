@@ -14,6 +14,7 @@
 #include "base/log_macros.h"
 #include "base/safe_alloc.h"
 
+#include <stdio.h>
 #include <string.h>
 
 void engine_patch_free(struct engine_patch *p)
@@ -296,4 +297,33 @@ const char *engine_patch_protocol_text(void)
 "  - no partial files. `// ... rest unchanged ...` destroys the file;\n"
 "  - an unclosed envelope is treated as a truncated reply and discarded,\n"
 "    so if you are running out of room, finish fewer files completely.\n";
+}
+
+size_t engine_patch_describe(const struct engine_patch *p, char *buf,
+                              size_t buf_len)
+{
+    if (!p || !buf || buf_len == 0)
+        return 0;
+    buf[0] = '\0';
+    size_t used = 0;
+    for (size_t i = 0; i < p->count && used < buf_len; i++) {
+        const struct engine_patch_entry *e = &p->entries[i];
+        int n;
+        if (e->remove)
+            n = snprintf(buf + used, buf_len - used, "%s: DELETE\n", e->path);
+        else
+            n = snprintf(buf + used, buf_len - used, "%s: %zu bytes\n",
+                         e->path, e->content_len);
+        if (n < 0)
+            break;
+        /* A truncated last line is still a well-formed, shorter file: leave
+         * what fit and stop, rather than corrupting the buffer. */
+        if ((size_t)n >= buf_len - used) {
+            used = buf_len - 1;
+            break;
+        }
+        used += (size_t)n;
+    }
+    buf[used] = '\0';
+    return used;
 }

@@ -95,4 +95,14 @@ bool engine_patch_path_ok(const char *path);
  * and the parser can never drift into describing different envelopes. */
 const char *engine_patch_protocol_text(void);
 
+/* Render one line per entry ("path: N bytes" or "path: DELETE") describing
+ * what a successfully parsed patch would apply. Used to archive what the
+ * envelope parser extracted from a reply, separately from whether the
+ * apply step itself later succeeds. Writes at most buf_len - 1 bytes plus a
+ * NUL into buf (truncating the last line safely if it would overflow) and
+ * returns the number of bytes written excluding the NUL. p->count == 0
+ * writes nothing and returns 0. */
+size_t engine_patch_describe(const struct engine_patch *p, char *buf,
+                              size_t buf_len);
+
 #endif /* ZCL_ENGINE_PATCH_H */
