@@ -318,6 +318,15 @@ static int test_ring_replacement(const char *datadir)
         struct fixture *fxs = calloc((size_t)N, sizeof(*fxs)); // raw-alloc-ok:test
         if (!fxs) { printf("FAIL (alloc)\n"); failures++; goto done; }
 
+        /* Deferred fdatasync: N inline fdatasync() barriers (one per fixture)
+         * dominate wall time under load, since every write lands in the same
+         * blk file and each barrier serializes behind the last — this test's
+         * disk bytes are gone the moment the tmp datadir is removed below, so
+         * durability mid-loop buys nothing. Batch to a single sync_pending()
+         * after the loop; restore whatever mode was in effect before this
+         * test ran so other tests in the group are unaffected. */
+        bool prior_deferred = disk_block_io_deferred_sync_enabled();
+        disk_block_io_set_deferred_sync(true);
         bool setup_ok = true;
         for (int i = 0; i < N; i++) {
             struct block src;
@@ -326,7 +335,13 @@ static int test_ring_replacement(const char *datadir)
                 setup_ok = false; block_free(&src); break;
             }
             block_free(&src);
+            /* Heartbeat: keep the no-output watchdog quiet on a loaded box
+             * even if per-fixture cost regresses again later. */
+            if (i > 0 && i % 512 == 0)
+                printf("... fixtures %d/%d\n", i, N);
         }
+        disk_block_io_sync_pending();
+        disk_block_io_set_deferred_sync(prior_deferred);
         if (!setup_ok) {
             printf("FAIL (fixtures)\n"); failures++;
             for (int i = 0; i < N; i++) free(fxs[i].bytes);
