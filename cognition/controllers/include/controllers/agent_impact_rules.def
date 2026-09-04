@@ -1858,9 +1858,43 @@ AGENT_IMPACT_RULE("tests/harness/src/test_sprout_phgr13_kat.c", "sprout_phgr13_k
  * back in. tools/ship.sh had no selftest of any kind before this lane. */
 AGENT_IMPACT_RULE("tools/ship.sh|tools/ship_selftest.sh|tools/scripts/ship_progress_lib.sh|tools/lint/check_ship_remote_transaction.sh", "make_lint_gates")
 
-/* Native macOS compatibility surfaces share the platform contract groups.
- * The rules stay exact so unrelated future platform files fail closed. */
-AGENT_IMPACT_RULE("platform/modules/base/include/base/compiler.h|core/modules/crypto/src/blake2b_avx2.c|platform/modules/platform/include/platform/allocator_compat.h|platform/modules/platform/include/platform/barrier.h|platform/modules/platform/include/platform/device_compat.h|platform/modules/platform/include/platform/fd_path.h|platform/modules/platform/include/platform/file_advice.h|platform/modules/platform/include/platform/file_sync.h|platform/modules/platform/include/platform/file_watch_compat.h|platform/modules/platform/include/platform/path_compat.h|platform/modules/platform/include/platform/pipe_compat.h|platform/modules/platform/include/platform/process_compat.h|platform/modules/platform/include/platform/rename_compat.h|platform/modules/platform/include/platform/socket_compat.h|platform/modules/platform/include/platform/system_memory.h|platform/modules/platform/include/platform/thread_compat.h|platform/modules/platform/src/os_sandbox_stub.c|platform/modules/platform/src/rng.c|platform/modules/util/src/self_backtrace_stub.c|platform/modules/util/include/util/thread_qos.h|platform/modules/util/src/thread_qos.c", "dev_platform os_proc os_sandbox self_backtrace thread_qos hw_profile crypto crypto_perf_selftest socket_resolve wallet_backup make_lint_gates")
+/* Native macOS compatibility surfaces used to share one catch-all group list
+ * (dev_platform os_proc os_sandbox self_backtrace thread_qos hw_profile
+ * crypto crypto_perf_selftest socket_resolve wallet_backup) across all ~21
+ * paths below, so touching any one of them ran every group regardless of
+ * whether that group's own test transitively includes the changed path. Each
+ * path now names only the groups whose registered test file's compiled
+ * translation unit actually reaches it — derived from the codeindex
+ * includes/refs tables (transitive #include closure for headers, direct
+ * reverse-callers for the two .c primitives), not by directory convention.
+ * make_lint_gates stays on every line: it is the cheap whole-build safety net
+ * for a class of files that, by construction, changes rarely and is easy to
+ * break silently. Several of these paths already carry a separate, more
+ * precise rule elsewhere in this file (thread_compat.h, rng.c/rng.h,
+ * blake2b.h) — that rule is untouched and keeps doing its job; dropping a
+ * group here only removes a group this specific header's own line was never
+ * shown to require. */
+AGENT_IMPACT_RULE("platform/modules/base/include/base/compiler.h", "make_lint_gates")
+AGENT_IMPACT_RULE("core/modules/crypto/src/blake2b_avx2.c", "crypto crypto_perf_selftest make_lint_gates")
+AGENT_IMPACT_RULE("platform/modules/platform/include/platform/allocator_compat.h", "make_lint_gates")
+AGENT_IMPACT_RULE("platform/modules/platform/include/platform/barrier.h", "make_lint_gates")
+AGENT_IMPACT_RULE("platform/modules/platform/include/platform/device_compat.h", "hw_profile make_lint_gates")
+AGENT_IMPACT_RULE("platform/modules/platform/include/platform/fd_path.h", "make_lint_gates")
+AGENT_IMPACT_RULE("platform/modules/platform/include/platform/file_advice.h", "make_lint_gates")
+AGENT_IMPACT_RULE("platform/modules/platform/include/platform/file_sync.h", "wallet_backup make_lint_gates")
+AGENT_IMPACT_RULE("platform/modules/platform/include/platform/file_watch_compat.h", "dev_platform make_lint_gates")
+AGENT_IMPACT_RULE("platform/modules/platform/include/platform/path_compat.h", "make_lint_gates")
+AGENT_IMPACT_RULE("platform/modules/platform/include/platform/pipe_compat.h", "make_lint_gates")
+AGENT_IMPACT_RULE("platform/modules/platform/include/platform/process_compat.h", "make_lint_gates")
+AGENT_IMPACT_RULE("platform/modules/platform/include/platform/rename_compat.h", "make_lint_gates")
+AGENT_IMPACT_RULE("platform/modules/platform/include/platform/socket_compat.h", "socket_resolve make_lint_gates")
+AGENT_IMPACT_RULE("platform/modules/platform/include/platform/system_memory.h", "make_lint_gates")
+AGENT_IMPACT_RULE("platform/modules/platform/include/platform/thread_compat.h", "make_lint_gates")
+AGENT_IMPACT_RULE("platform/modules/platform/src/os_sandbox_stub.c", "os_sandbox make_lint_gates")
+AGENT_IMPACT_RULE("platform/modules/platform/src/rng.c", "make_lint_gates")
+AGENT_IMPACT_RULE("platform/modules/util/src/self_backtrace_stub.c", "self_backtrace make_lint_gates")
+AGENT_IMPACT_RULE("platform/modules/util/include/util/thread_qos.h", "thread_qos make_lint_gates")
+AGENT_IMPACT_RULE("platform/modules/util/src/thread_qos.c", "thread_qos make_lint_gates")
 /* The timed-join seam is shared by shutdown owners across config, net,
  * services, and util. Route every directly affected lifecycle family so a
  * platform-only edit cannot green on its primitive test while a caller's
