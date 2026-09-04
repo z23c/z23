@@ -12,6 +12,23 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* The enum-to-name mapping the reply below needs. It lives here, not in
+ * tools/dev/dev_proof.c, because that file is DEV_ONLY_SRCS: it is not
+ * linked into the release binary or the fuzz targets, while this
+ * translation unit is. A pure switch over the enum has no dev-only
+ * reach, so the release side can own it outright. */
+const char *zcl_dev_proof_state_name(enum zcl_dev_proof_state state)
+{
+    switch (state) {
+    case ZCL_DEV_PROOF_STATE_MISSING: return "missing";
+    case ZCL_DEV_PROOF_STATE_RUNNING: return "running";
+    case ZCL_DEV_PROOF_STATE_PASSED: return "passed";
+    case ZCL_DEV_PROOF_STATE_FAILED: return "failed";
+    case ZCL_DEV_PROOF_STATE_INVALID: return "invalid";
+    }
+    return "invalid";
+}
+
 /* The functions below map an already-resolved `zcl_dev_proof_status` onto a
  * `zcl_command_reply` (JSON fields, status, exit code). They read no files,
  * spawn no process, and touch no dev-only capability — the dev-only surface

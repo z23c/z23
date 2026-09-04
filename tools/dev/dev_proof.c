@@ -204,18 +204,6 @@ static void proof_whyf(char *why, size_t why_len, const char *fmt, ...)
 }
 #endif
 
-const char *zcl_dev_proof_state_name(enum zcl_dev_proof_state state)
-{
-    switch (state) {
-    case ZCL_DEV_PROOF_STATE_MISSING: return "missing";
-    case ZCL_DEV_PROOF_STATE_RUNNING: return "running";
-    case ZCL_DEV_PROOF_STATE_PASSED: return "passed";
-    case ZCL_DEV_PROOF_STATE_FAILED: return "failed";
-    case ZCL_DEV_PROOF_STATE_INVALID: return "invalid";
-    }
-    return "invalid";
-}
-
 static size_t cycle_key_count(const struct json_value *cycle, const char *key,
                               const struct json_value **value)
 {
