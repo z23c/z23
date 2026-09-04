@@ -446,7 +446,10 @@ race_state="$(mktemp -d "${TMPDIR:-/tmp}/zcl-source-identity-race.XXXXXX")"
 race_flag="$race_state/fired"
 
 # A single attempt hashed a path set that no longer describes the tree, so it
-# must refuse rather than publish a record with the new source missing.
+# must refuse rather than publish a record with the new source missing. The
+# refusal message alone used to name no path: nothing in the tree could say
+# which one appeared. Assert the diagnostic names it, so a small model or a
+# human reading the gate log can act on it instead of re-running blind.
 rm -f late-inventory-source.c
 rm -f "$race_flag"
 if PATH="$PWD/inventory-race-bin:$PATH" \
@@ -455,9 +458,12 @@ if PATH="$PWD/inventory-race-bin:$PATH" \
         INVENTORY_RACE_SOURCE="$PWD/late-inventory-source.c" \
         ZCL_SOURCE_IDENTITY_CAPTURE_ATTEMPTS=1 \
         ZCL_SOURCE_IDENTITY_FORCE_PORTABLE=1 \
-        "$SCRIPT" capture-record > /dev/null 2>&1; then
+        "$SCRIPT" capture-record > /dev/null 2> "$race_state/added.err"; then
     fail 'new source created during capture escaped the inventory guard'
 fi
+grep -aFq 'source-identity:   added late-inventory-source.c' \
+        "$race_state/added.err" ||
+    fail 'inventory-changed refusal did not name the added path'
 
 # Retrying that refusal must RE-DERIVE the record, never launder the omission.
 # The injector fires once, so a later attempt sees a settled tree -- and the
@@ -480,6 +486,49 @@ settled_record="$("$SCRIPT" capture-record)" ||
 [ "$race_record" = "$settled_record" ] ||
     fail 'converged record omitted the source created during capture'
 rm -f late-inventory-source.c
+
+# The mirror image of the added-path case above: a build-input-root path that
+# EXISTED when this attempt's inventory was opened (so the pre-operation scan
+# already holds it) vanishes during the same capture, under a forked writer
+# racing a whole-tree scan the way the two real push-proof failures this
+# guards against did. The refusal must name it "removed", not just recite the
+# generic one-line message.
+mkdir -p engine/controllers/src
+printf 'vanishing build input\n' > engine/controllers/src/late-remove-source.c
+mkdir vanish-race-bin
+printf '%s\n' '#!/usr/bin/env bash' \
+    'if [ "$#" -eq 0 ]; then' \
+    '  input="$(mktemp)" || exit 98' \
+    '  trap '\''rm -f "$input"'\'' EXIT HUP INT TERM' \
+    '  cat > "$input" || exit 98' \
+    '  if grep -aFq zcl.dev_source_identity.v2 "$input" &&' \
+    '     [ ! -e "$VANISH_RACE_FLAG" ]; then' \
+    '    : > "$VANISH_RACE_FLAG"' \
+    '    rm -f "$VANISH_RACE_SOURCE"' \
+    '  fi' \
+    '  "$REAL_SHA256SUM" < "$input"' \
+    '  exit $?' \
+    'fi' \
+    'exec "$REAL_SHA256SUM" "$@"' > vanish-race-bin/sha256sum
+chmod +x vanish-race-bin/sha256sum
+vanish_flag="$race_state/vanish-fired"
+rm -f "$vanish_flag"
+if PATH="$PWD/vanish-race-bin:$PATH" \
+        REAL_SHA256SUM="$real_sha256sum" \
+        VANISH_RACE_FLAG="$vanish_flag" \
+        VANISH_RACE_SOURCE="$PWD/engine/controllers/src/late-remove-source.c" \
+        ZCL_SOURCE_IDENTITY_CAPTURE_ATTEMPTS=1 \
+        ZCL_SOURCE_IDENTITY_FORCE_PORTABLE=1 \
+        "$SCRIPT" capture-record > /dev/null 2> "$race_state/removed.err"; then
+    fail 'a build input removed during capture escaped the inventory guard'
+fi
+[ -e engine/controllers/src/late-remove-source.c ] &&
+    fail 'the vanish injector never fired'
+grep -aFq \
+        'source-identity:   removed engine/controllers/src/late-remove-source.c' \
+        "$race_state/removed.err" ||
+    fail 'inventory-changed refusal did not name the removed path'
+rm -rf vanish-race-bin
 
 # The one path class that must NOT arm that guard: an ephemeral lint fixture.
 # Make's own source globs refuse to compile a "/_" path, so a fixture planted

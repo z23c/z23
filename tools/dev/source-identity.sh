@@ -824,25 +824,44 @@ mutation_token()
     [ "${#metadata[@]}" -eq "${#existing_paths[@]}" ] ||
         fail_racy "mutation metadata batch was incomplete"
 
+    # rec_meta pairs 1:1 with paths/types so a mismatch between two calls in
+    # the same process (same fixed $WORK/source-paths) can be diffed
+    # positionally afterward by report_mutation_diff() -- see mutation-record
+    # below, snapshotted by capture_record() before the second call
+    # overwrites it.
+    local -a rec_meta=()
     {
         printf 'zcl.dev_source_mutation.v1\0'
         for ((path_i = 0; path_i < ${#paths[@]}; path_i++)); do
             path="${paths[$path_i]}"
             printf 'P\0%s\0' "$path"
             case "${types[$path_i]}" in
-                G) printf 'G\0%s\0' "${GITLINK_STATE[$path]}" ;;
+                G)
+                    printf 'G\0%s\0' "${GITLINK_STATE[$path]}"
+                    rec_meta+=("${GITLINK_STATE[$path]}")
+                    ;;
                 E)
                     record="${metadata[$existing_i]}"
                     existing_i=$((existing_i + 1))
                     printf 'E\0%s\0' "$record"
+                    rec_meta+=("$record")
                     ;;
-                D) printf 'D\0' ;;
+                D)
+                    printf 'D\0'
+                    rec_meta+=("")
+                    ;;
                 *) fail "internal mutation-token classification failure" ;;
             esac
         done
     } > "$WORK/mutation-preimage"
     [ "$existing_i" -eq "${#metadata[@]}" ] ||
         fail_racy "mutation metadata consumption was incomplete"
+    {
+        for ((path_i = 0; path_i < ${#paths[@]}; path_i++)); do
+            printf '%s\0%s\0%s\0' "${paths[$path_i]}" "${types[$path_i]}" \
+                "${rec_meta[$path_i]}"
+        done
+    } > "$WORK/mutation-record"
     sha256_file "$WORK/mutation-preimage"
 }
 
@@ -1003,19 +1022,121 @@ selector_policy_token()
     sha256_file "$WORK/selector-policy-preimage"
 }
 
+# Print the one-line failure `msg` exactly as fail_racy() would (so existing
+# callers that grep the first line keep working), then run the given diagnostic
+# report command before exiting with the same racy exit code. Isolated from
+# fail_racy() itself because a plain call site (e.g. mutation_token()'s own
+# internal batch checks) has no before/after snapshot to diff yet.
+fail_racy_diag()
+{
+    local msg="$1"
+    shift
+    echo "source-identity: $msg" >&2
+    "$@" || true
+    exit $RACY_EXIT
+}
+
+# Diff two "path\0type\0meta\0" mutation-record snapshots that were both
+# derived from the SAME unchanged $WORK/source-paths (so they list identical
+# paths in identical order) and report up to 20 differing entries, naming
+# each as added (absent -> extant), removed (extant -> absent), or changed
+# (extant in both, metadata differs). `meta` for an extant path is the
+# `stat --printf='%d:%i:%s:%f:%y:%z'` record; fields 3 and 5 are size and
+# mtime.
+report_mutation_diff()
+{
+    local before="$1" after="$2"
+    local -a before_flat=() after_flat=()
+    mapfile -d '' -t before_flat < "$before"
+    mapfile -d '' -t after_flat < "$after"
+    local n=$(( ${#before_flat[@]} / 3 ))
+    local i path bt bm at am differ=0 shown=0
+    for ((i = 0; i < n; i++)); do
+        path="${before_flat[$((i * 3))]}"
+        bt="${before_flat[$((i * 3 + 1))]}"
+        bm="${before_flat[$((i * 3 + 2))]}"
+        at="${after_flat[$((i * 3 + 1))]}"
+        am="${after_flat[$((i * 3 + 2))]}"
+        [ "$bt" = "$at" ] && [ "$bm" = "$am" ] && continue
+        differ=$((differ + 1))
+        [ "$shown" -ge 20 ] && continue
+        shown=$((shown + 1))
+        if [ "$bt" != E ] && [ "$at" = E ]; then
+            echo "source-identity:   added $path" >&2
+        elif [ "$bt" = E ] && [ "$at" != E ]; then
+            echo "source-identity:   removed $path" >&2
+        else
+            # The stat record is "dev:inode:size:mode:mtime:ctime", but the
+            # mtime/ctime fields are themselves "YYYY-MM-DD HH:MM:SS.N +ZZZZ"
+            # -- two more embedded colons apiece -- so mtime is fields 5-7,
+            # not field 5 alone.
+            local old_size old_mtime new_size new_mtime
+            old_size="$(cut -d: -f3 <<< "$bm")"
+            old_mtime="$(cut -d: -f5-7 <<< "$bm")"
+            new_size="$(cut -d: -f3 <<< "$am")"
+            new_mtime="$(cut -d: -f5-7 <<< "$am")"
+            echo "source-identity:   changed $path ($old_size:$old_mtime -> $new_size:$new_mtime)" >&2
+        fi
+    done
+    [ "$differ" -gt "$shown" ] &&
+        echo "source-identity:   $differ entries differ" >&2
+    return 0
+}
+
+# Diff two NUL-delimited path lists (the "before" enumeration this process
+# already opened, and an "after" re-enumeration from a fresh process) and
+# report up to 20 added/removed paths, plus a trailing count when more
+# differ. Unlike report_mutation_diff(), the two lists need not share length
+# or order -- a genuinely new/vanished path is exactly what inventory
+# mismatch means -- so this pairs them by content via comm() instead of
+# position.
+report_inventory_diff()
+{
+    local before="$1" after="$2"
+    local -a lines=()
+    local line
+    while IFS= read -r line; do
+        [ -n "$line" ] && lines+=("added $line")
+    done < <(LC_ALL=C comm -13 \
+        <(LC_ALL=C sort -z -- "$before" | LC_ALL=C tr '\0' '\n') \
+        <(LC_ALL=C sort -z -- "$after" | LC_ALL=C tr '\0' '\n'))
+    while IFS= read -r line; do
+        [ -n "$line" ] && lines+=("removed $line")
+    done < <(LC_ALL=C comm -23 \
+        <(LC_ALL=C sort -z -- "$before" | LC_ALL=C tr '\0' '\n') \
+        <(LC_ALL=C sort -z -- "$after" | LC_ALL=C tr '\0' '\n'))
+    local n=${#lines[@]} i shown=0
+    for ((i = 0; i < n && i < 20; i++)); do
+        echo "source-identity:   ${lines[$i]}" >&2
+        shown=$((shown + 1))
+    done
+    [ "$n" -gt "$shown" ] &&
+        echo "source-identity:   $n entries differ" >&2
+    return 0
+}
+
 capture_record()
 {
     local identity clean inventory_before inventory_after
     local mutation_before mutation_after
     inventory_before="$(inventory_token)" || exit $?
     mutation_before="$(mutation_token)" || exit $?
+    cp -- "$WORK/mutation-record" "$WORK/mutation-record.before" ||
+        fail "could not snapshot mutation record"
     identity="$(capture)" || exit $?
     mutation_after="$(mutation_token)" || exit $?
     [ "$mutation_before" = "$mutation_after" ] ||
-        fail_racy "source mutated during identity capture"
+        fail_racy_diag "source mutated during identity capture" \
+            report_mutation_diff "$WORK/mutation-record.before" \
+                "$WORK/mutation-record"
     inventory_after="$("$SELF" inventory-token)" || exit $?
-    [ "$inventory_before" = "$inventory_after" ] ||
-        fail_racy "source inventory changed during identity capture"
+    if [ "$inventory_before" != "$inventory_after" ]; then
+        "$SELF" list-source-paths > "$WORK/inventory-paths-after" \
+            2>/dev/null || : > "$WORK/inventory-paths-after"
+        fail_racy_diag "source inventory changed during identity capture" \
+            report_inventory_diff "$WORK/source-paths" \
+                "$WORK/inventory-paths-after"
+    fi
     # The legacy-named `clean` slot is a v2 capture-completeness bit, not a Git
     # cleanliness claim. Exact current bytes already identify dirty worktrees;
     # deriving authority from Git HEAD/gitlink object ids would reintroduce the
@@ -1194,6 +1315,13 @@ case "$MODE" in
         ;;
     inventory-token)
         inventory_token
+        ;;
+    list-source-paths)
+        # Internal: used only by capture_record()'s inventory-mismatch
+        # diagnostic to name which path was added or removed. Emits the same
+        # NUL-delimited enumeration as $WORK/source-paths from a fresh
+        # process; never a stable public interface.
+        cat -- "$WORK/source-paths"
         ;;
     verify)
         [[ "$EXPECTED" =~ ^[0-9a-fA-F]{64}$ ]] ||
