@@ -2795,9 +2795,11 @@ SITE_CSS_GEN = contexts/explorer/views/include/views/site_css.h
 SITE_CSS_SRC = contexts/explorer/views/src/site.css
 VIEW_GEN_HEADERS = $(VIEW_GEN_HEADERS_EARLY)
 
-$(TMPL_TOOL): tools/gen_templates.c platform/modules/base/src/safe_alloc.c
-	@mkdir -p $(dir $@)
-	$(CC) -std=c23 -O2 -Wall -Wextra -Iplatform/modules/base/include -Iplatform/modules/util/include -o $@ $^
+$(TMPL_TOOL): tools/gen_templates.c platform/modules/base/src/safe_alloc.c \
+		platform/modules/platform/src/path_replace.c
+	@mkdir -p $(dir $@) build/identity
+	$(CC) -std=c23 -O2 -Wall -Wextra -Iplatform/modules/base/include \
+		-Iplatform/modules/util/include -Iplatform/modules/platform/include -o $@ $^
 
 $(BIN_DIR)/inspect_html: tools/inspect_html.c platform/modules/base/src/safe_alloc.c
 	@mkdir -p $(dir $@)
@@ -2843,8 +2845,23 @@ templates: $(VIEW_GEN_HEADERS)
 templates-no-touch-selftest: $(VIEW_GEN_HEADERS)
 	@set -eu; \
 	before="$$(tools/dev/source-identity.sh capture-record)"; \
-	$(TMPL_TOOL) contexts/explorer/views/templates $(TMPL_GEN) contexts/explorer/views/css >/dev/null; \
-	$(TMPL_TOOL) --single-css $(SITE_CSS_SRC) $(SITE_CSS_GEN) site_css SITE_CSS_H >/dev/null; \
+	$(TMPL_TOOL) --selftest-staging >/dev/null; \
+	pids=""; \
+	for ignored in 1 2 3 4 5 6 7 8; do \
+	  $(TMPL_TOOL) $(TMPL_DIR) $(TMPL_GEN) $(TMPL_CSS_DIR) >/dev/null 2>&1 & pids="$$pids $$!"; \
+	  $(TMPL_TOOL) --single-css $(SITE_CSS_SRC) $(SITE_CSS_GEN) site_css SITE_CSS_H >/dev/null 2>&1 & pids="$$pids $$!"; \
+	done; \
+	for pid in $$pids; do wait "$$pid"; done; \
+	for pid in $$pids; do \
+	  [ -z "$$(find build/identity -name ".gen_templates-stage.$$pid.*" -print -quit)" ] || { \
+	    echo "templates-no-touch-selftest: owned stage leaked for pid=$$pid" >&2; \
+	    exit 1; \
+	  }; \
+	done; \
+	[ ! -e "$(TMPL_GEN).tmp" ] && [ ! -e "$(SITE_CSS_GEN).tmp" ] || { \
+	    echo "templates-no-touch-selftest: source-root stage leaked" >&2; \
+	    exit 1; \
+	}; \
 	after="$$(tools/dev/source-identity.sh capture-record)"; \
 	[ "$$before" = "$$after" ] || { \
 	    echo "templates-no-touch-selftest: source metadata changed on no-op regeneration" >&2; \

@@ -3659,6 +3659,26 @@ static int test_hotfork_descriptor_boundary(void)
     return failures;
 }
 
+static int test_template_generator_concurrency(void)
+{
+    int failures = 0;
+    TEST("dev platform: concurrent template generators preserve source identity") {
+        pid_t child = fork();
+        ASSERT(child >= 0);
+        if (child == 0) {
+            execlp("make", "make", "-s", "templates-no-touch-selftest",
+                   (char *)NULL);
+            _exit(127);
+        }
+        int status = 0;
+        ASSERT(waitpid(child, &status, 0) == child);
+        ASSERT(WIFEXITED(status));
+        ASSERT(WEXITSTATUS(status) == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_dev_platform_platform_arm(void)
 {
     int failures = 0;
@@ -3678,6 +3698,7 @@ static int test_dev_platform_platform_arm(void)
     failures += test_progressive_event_vocabulary();
     failures += test_reflex_policy_boundary();
     failures += test_hotfork_descriptor_boundary();
+    failures += test_template_generator_concurrency();
     failures += test_menu_and_search();
     failures += test_change_classification();
     failures += test_change_plan_closure();

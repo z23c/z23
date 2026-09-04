@@ -14,8 +14,18 @@
 #include <stdbool.h>
 #include <dirent.h>
 #include <ctype.h>
+#include <errno.h>
+
+#if defined(_WIN32)
+#include <direct.h>
+#include <process.h>
+#else
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
 
 #include "util/safe_alloc.h"
+#include "platform/path_replace.h"
 
 #define MAX_KEY_LEN 64
 #define MAX_FILE_SIZE (256 * 1024)
@@ -188,13 +198,44 @@ static bool valid_c_identifier(const char *s) {
  *
  * That is a fresh clone failing its first `make`, on every machine. Emitting
  * to a temporary and replacing the target only when the BYTES differ makes a
- * no-op regeneration leave no trace. Sorted output (see process_dir) is what
- * makes "no-op" actually reachable across machines; the two go together. */
+ * no-op regeneration leave no trace. The stage must not live beside the
+ * tracked header: source identity inventories every transient beneath source
+ * roots, and independent Make processes otherwise race on the same `.tmp`.
+ * Each invocation therefore exclusively owns one unique stage beneath the
+ * ignored, same-filesystem build/identity directory. Sorted output (see
+ * process_dir) is what makes "no-op" actually reachable across machines; the
+ * three properties go together. */
 static FILE *open_staged(const char *out_path, char *tmp_path, size_t tmp_cap)
 {
-    int n = snprintf(tmp_path, tmp_cap, "%s.tmp", out_path);
-    if (n < 0 || (size_t)n >= tmp_cap) return NULL;
-    return fopen(tmp_path, "w");
+    static unsigned int sequence;
+    if (!out_path || !out_path[0] || !tmp_path || tmp_cap == 0)
+        return NULL;
+#if defined(_WIN32)
+    if (_mkdir("build/identity") != 0 && errno != EEXIST)
+        return NULL;
+#else
+    if (mkdir("build/identity", 0700) != 0 && errno != EEXIST)
+        return NULL;
+#endif
+#if defined(_WIN32)
+    const long process_id = (long)_getpid();
+#else
+    const long process_id = (long)getpid();
+#endif
+    for (unsigned int attempt = 0; attempt < 256u; ++attempt) {
+        unsigned int serial = ++sequence;
+        int n = snprintf(tmp_path, tmp_cap,
+                         "build/identity/.gen_templates-stage.%ld.%u",
+                         process_id, serial);
+        if (n < 0 || (size_t)n >= tmp_cap)
+            return NULL;
+        FILE *stage = fopen(tmp_path, "wx");
+        if (stage)
+            return stage;
+        if (errno != EEXIST)
+            return NULL;
+    }
+    return NULL;
 }
 
 /* Close the staged file and move it over out_path only if the contents
@@ -219,9 +260,69 @@ static int commit_staged(FILE *out, const char *tmp_path, const char *out_path,
         remove(tmp_path);
         return 0;
     }
-    if (rename(tmp_path, out_path) != 0) { remove(tmp_path); return 1; }
+    if (platform_path_replace(tmp_path, out_path) != 0) {
+        remove(tmp_path);
+        return 1;
+    }
     *out_changed = true;
     return 0;
+}
+
+/* Deterministic KAT for the race that a timing-only parallel test can miss:
+ * two stages for one destination must coexist and commit independent bytes.
+ * The old `<output>.tmp` implementation fails before either close because the
+ * two returned pathnames are identical. */
+static int staging_selftest(void)
+{
+    char destination[256], stage_a[256], stage_b[256];
+#if defined(_WIN32)
+    const long process_id = (long)_getpid();
+#else
+    const long process_id = (long)getpid();
+#endif
+    int n = snprintf(destination, sizeof(destination),
+                     "build/identity/.gen_templates-selftest.%ld", process_id);
+    if (n < 0 || (size_t)n >= sizeof(destination))
+        return 1;
+    (void)remove(destination);
+
+    FILE *a = open_staged(destination, stage_a, sizeof(stage_a));
+    FILE *b = open_staged(destination, stage_b, sizeof(stage_b));
+    if (!a || !b || strcmp(stage_a, stage_b) == 0) {
+        if (a) (void)fclose(a);
+        if (b) (void)fclose(b);
+        if (a) (void)remove(stage_a);
+        if (b && (!a || strcmp(stage_a, stage_b) != 0))
+            (void)remove(stage_b);
+        fprintf(stderr, "gen_templates: staging selftest lacks distinct exclusive stages\n");
+        return 1;
+    }
+    if (fputs("first\n", a) < 0 || fputs("second\n", b) < 0) {
+        (void)fclose(a);
+        (void)fclose(b);
+        (void)remove(stage_a);
+        (void)remove(stage_b);
+        return 1;
+    }
+    bool changed_a = false, changed_b = false;
+    int commit_a = commit_staged(a, stage_a, destination, &changed_a);
+    int commit_b = commit_staged(b, stage_b, destination, &changed_b);
+    if (commit_a != 0 || commit_b != 0) {
+        (void)remove(stage_a);
+        (void)remove(stage_b);
+        (void)remove(destination);
+        return 1;
+    }
+    size_t length = 0;
+    char *bytes = read_file(destination, &length);
+    bool ok = changed_a && changed_b && bytes && length == 7u &&
+              memcmp(bytes, "second\n", 7u) == 0;
+    free(bytes);
+    ok = ok && read_file(stage_a, &length) == NULL &&
+         read_file(stage_b, &length) == NULL;
+    (void)remove(destination);
+    fprintf(stderr, "gen_templates: staging selftest %s\n", ok ? "PASS" : "FAIL");
+    return ok ? 0 : 1;
 }
 
 static int write_single_css_header(const char *src_path, const char *out_path,
@@ -459,6 +560,8 @@ static int process_dir(const char *dir, const char *ext, const char *prefix,
 }
 
 int main(int argc, char **argv) {
+    if (argc == 2 && strcmp(argv[1], "--selftest-staging") == 0)
+        return staging_selftest();
     if (argc >= 2 && strcmp(argv[1], "--single-css") == 0) {
         if (argc != 6) {
             fprintf(stderr,
