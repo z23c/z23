@@ -104,6 +104,11 @@ static void sweep_logs(const char *datadir, const struct storage_pacing *pacing)
     }
 }
 
+/* Completed sweeps. Separate from g_stats.sweeps, which is bumped on entry
+ * for the operator-visible counter; the supervisor needs one that only
+ * advances when the work finished. */
+static _Atomic uint64_t g_sweeps_done = 0;
+
 void storage_housekeeping_sweep(const char *datadir)
 {
     const struct storage_pacing *pacing = storage_pacing();
@@ -115,6 +120,10 @@ void storage_housekeeping_sweep(const char *datadir)
     sweep_topology(pacing);
     sweep_projection(pacing);
     sweep_logs(datadir, pacing);
+
+    /* Bumped only here, after the three bounds have actually been applied:
+     * this is the counter the supervisor watches for forward progress. */
+    atomic_fetch_add(&g_sweeps_done, 1);
 }
 
 /* ── supervisor liveness ───────────────────────────────────────────── */
@@ -130,6 +139,18 @@ void storage_housekeeping_sweep(const char *datadir)
  * the same margin db_maintenance uses for the same reason. */
 #define SH_SUPERVISOR_DEADLINE_SEC 600
 
+/* The progress marker is the COMPLETED-SWEEP count, not the 200 ms loop
+ * counter: the loop counter advances whether or not the service ever
+ * bounds anything again, so arming a detector on it would prove only that
+ * a thread is spinning. A sweep runs every STORAGE_HOUSEKEEPING_TICK_SECONDS
+ * and always does the work (measure, then rotate or vacuum whatever is over
+ * its bound), so a stalled count is a real wedge. The window is one tick
+ * plus the full stall deadline, so the longest legitimate sweep — a VACUUM
+ * of a multi-gigabyte progress.kv on a 7200 rpm disk — never trips it. */
+#define SH_PROGRESS_MAX_QUIET_US \
+    ((uint64_t)(STORAGE_HOUSEKEEPING_TICK_SECONDS + SH_SUPERVISOR_DEADLINE_SEC) * \
+     1000000ULL)
+
 static _Atomic supervisor_child_id g_supervisor_id = SUPERVISOR_INVALID_ID;
 static _Atomic uint64_t g_loop_ticks = 0;
 static struct liveness_contract g_contract;
@@ -140,7 +161,7 @@ static void sh_supervisor_heartbeat(void)
     if (id == SUPERVISOR_INVALID_ID)
         return;
     supervisor_tick(id);
-    supervisor_progress(id, atomic_load(&g_loop_ticks));
+    supervisor_progress(id, atomic_load(&g_sweeps_done));
 }
 
 static void sh_on_stall(struct liveness_contract *c)
@@ -160,8 +181,9 @@ static struct zcl_result sh_register_supervisor(void)
 
     supervisor_child_id id = atomic_load(&g_supervisor_id);
     if (id != SUPERVISOR_INVALID_ID) {
+        supervisor_set_progress_max_quiet(id, SH_PROGRESS_MAX_QUIET_US);
         supervisor_set_deadline(id, SH_SUPERVISOR_DEADLINE_SEC);
-        supervisor_progress(id, atomic_load(&g_loop_ticks));
+        supervisor_progress(id, atomic_load(&g_sweeps_done));
         supervisor_tick(id);
         return ZCL_OK;
     }
@@ -169,7 +191,7 @@ static struct zcl_result sh_register_supervisor(void)
     liveness_contract_init(&g_contract, "op.storage_housekeeping");
     atomic_store(&g_contract.period_secs, 0);
     atomic_store(&g_contract.deadline_secs, SH_SUPERVISOR_DEADLINE_SEC);
-    atomic_store(&g_contract.progress_max_quiet_us, 0);
+    atomic_store(&g_contract.progress_max_quiet_us, SH_PROGRESS_MAX_QUIET_US);
     g_contract.on_stall = sh_on_stall;
 
     supervisor_domains_init();
@@ -177,7 +199,8 @@ static struct zcl_result sh_register_supervisor(void)
     if (id == SUPERVISOR_INVALID_ID)
         return ZCL_ERR(-4, "storage_housekeeping: supervisor_register failed");
     atomic_store(&g_supervisor_id, id);
-    supervisor_progress(id, atomic_load(&g_loop_ticks));
+    supervisor_set_progress_max_quiet(id, SH_PROGRESS_MAX_QUIET_US);
+    supervisor_progress(id, atomic_load(&g_sweeps_done));
     supervisor_tick(id);
     return ZCL_OK;
 }
