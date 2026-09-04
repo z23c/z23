@@ -75,6 +75,16 @@ static int spawn_capture_observed_platform(
                                         NULL, NULL, NULL);
 }
 
+static int spawn_capture_merged_observed_platform(
+    const char *const argv[], char *buf, size_t cap, int timeout_ms,
+    bool *timed_out)
+{
+    (void)argv; (void)timeout_ms;
+    if (buf && cap > 0) buf[0] = '\0';
+    if (timed_out) *timed_out = false;
+    return -1;
+}
+
 static int spawn_pty_capture_observed_platform(
     const char *const argv[], char *buf, size_t cap, int timeout_ms,
     bool *timed_out)
@@ -362,7 +372,7 @@ static int spawn_capture_drain(
 static int spawn_capture_impl(
     const char *const argv[], char *buf, size_t cap, int timeout_ms,
     zcl_spawn_cancel_fn should_cancel, void *cancel_ctx, bool *cancelled,
-    bool *timed_out_out)
+    bool *timed_out_out, bool merge_stderr)
 {
     if (cancelled) *cancelled = false;
     if (timed_out_out) *timed_out_out = false;
@@ -393,10 +403,14 @@ static int spawn_capture_impl(
             dup2(devnull_in, STDIN_FILENO);
             if (devnull_in > STDERR_FILENO) close(devnull_in);
         }
-        int devnull_err = open("/dev/null", O_WRONLY);
-        if (devnull_err >= 0) {
-            dup2(devnull_err, STDERR_FILENO);
-            if (devnull_err > STDERR_FILENO) close(devnull_err);
+        if (merge_stderr) {
+            dup2(STDOUT_FILENO, STDERR_FILENO);
+        } else {
+            int devnull_err = open("/dev/null", O_WRONLY);
+            if (devnull_err >= 0) {
+                dup2(devnull_err, STDERR_FILENO);
+                if (devnull_err > STDERR_FILENO) close(devnull_err);
+            }
         }
 
         execvp(argv[0], (char *const *)argv);
@@ -417,7 +431,7 @@ int zcl_spawn_capture_cancelable(
     zcl_spawn_cancel_fn should_cancel, void *cancel_ctx, bool *cancelled)
 {
     return spawn_capture_impl(argv, buf, cap, timeout_ms, should_cancel,
-                              cancel_ctx, cancelled, NULL);
+                              cancel_ctx, cancelled, NULL, false);
 }
 
 static int spawn_capture_observed_platform(
@@ -425,7 +439,15 @@ static int spawn_capture_observed_platform(
     bool *timed_out)
 {
     return spawn_capture_impl(argv, buf, cap, timeout_ms, NULL, NULL, NULL,
-                              timed_out);
+                              timed_out, false);
+}
+
+static int spawn_capture_merged_observed_platform(
+    const char *const argv[], char *buf, size_t cap, int timeout_ms,
+    bool *timed_out)
+{
+    return spawn_capture_impl(argv, buf, cap, timeout_ms, NULL, NULL, NULL,
+                              timed_out, true);
 }
 
 /* PTY capture is deliberately a transport sibling of pipe capture, not a
@@ -517,6 +539,14 @@ int zcl_spawn_capture_observed(const char *const argv[], char *buf, size_t cap,
                                int timeout_ms, bool *timed_out)
 {
     return spawn_capture_observed_platform(
+        argv, buf, cap, timeout_ms, timed_out);
+}
+
+int zcl_spawn_capture_merged_observed(const char *const argv[], char *buf,
+                                      size_t cap, int timeout_ms,
+                                      bool *timed_out)
+{
+    return spawn_capture_merged_observed_platform(
         argv, buf, cap, timeout_ms, timed_out);
 }
 

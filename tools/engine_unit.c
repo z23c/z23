@@ -1221,7 +1221,17 @@ static bool run_gate(const struct unit_opts *o, const char *workdir,
     }
     const int gate_s = o->gate_timeout_s > 0 ? o->gate_timeout_s : o->timeout_s;
     const int64_t started = clock_now_monotonic_ns();
-    const int rc = run(argv, log, UNIT_GATE_LOG_BYTES, gate_s * 1000);
+    /* Merged stderr, not zcl_spawn_capture()/run(): the gate's SUITE VERDICT
+     * line is on stdout, but a build that never reaches test_parallel writes
+     * its only diagnostics — the compiler's errors and make's own
+     * "*** [target] Error N" — to stderr. A stdout-only capture of a failing
+     * build silently returns a log that stops at the last successful line
+     * (typically "build-epoch-session: acquired ..."), with no error text
+     * and no verdict, so a compile failure looked identical to an unlaunched
+     * child. Merging stderr into the same log is what lets a model's next
+     * repair turn see what actually broke. */
+    const int rc = zcl_spawn_capture_merged_observed(
+        argv, log, UNIT_GATE_LOG_BYTES, gate_s * 1000, timed_out);
     const int64_t elapsed_ms = (clock_now_monotonic_ns() - started) / 1000000;
 
     if (log_path)
@@ -1231,10 +1241,12 @@ static bool run_gate(const struct unit_opts *o, const char *workdir,
 
     /* A child killed by the deadline is a TIMEOUT, and saying so is the whole
      * point: an operator who sees FAIL raises nothing, and an operator who
-     * sees TIMEOUT raises the clock. zcl_spawn_capture SIGKILLs at the
-     * deadline, so a run that consumed the whole budget and produced no
-     * verdict line is that case. */
-    if (elapsed_ms >= (int64_t)gate_s * 1000 && !reading->saw_verdict_line)
+     * sees TIMEOUT raises the clock. zcl_spawn_capture_merged_observed()
+     * reports that directly via *timed_out; the elapsed-time fallback stays
+     * as a second signal for a child that exited exactly at the deadline
+     * without a verdict. */
+    if (!*timed_out && elapsed_ms >= (int64_t)gate_s * 1000
+        && !reading->saw_verdict_line)
         *timed_out = true;
     (void)rc;   /* never a verdict input; see engine/engine_verdict.h */
     return read_ok;

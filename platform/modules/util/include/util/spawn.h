@@ -123,6 +123,20 @@ int zcl_spawn_capture(const char *const argv[], char *buf, size_t cap,
 int zcl_spawn_capture_observed(const char *const argv[], char *buf, size_t cap,
                                int timeout_ms, bool *timed_out);
 
+/* The same bounded, no-shell capture, except the child's stderr is
+ * interleaved into the SAME pipe as stdout instead of being discarded to
+ * /dev/null. Use this — not zcl_spawn_capture()/zcl_spawn_capture_observed()
+ * — for any caller whose diagnostics matter on failure: a compiler writes
+ * its errors to stderr, and `make`'s own "*** [target] Error N" lines go to
+ * stderr too, so a stdout-only capture of a failing build silently returns
+ * a log that stops at the last successful line with no indication anything
+ * went wrong. `timed_out` has the same contract as
+ * zcl_spawn_capture_observed(). Windows returns -1 (unimplemented, matching
+ * every other capture primitive in this header on that platform). */
+int zcl_spawn_capture_merged_observed(const char *const argv[], char *buf,
+                                      size_t cap, int timeout_ms,
+                                      bool *timed_out);
+
 /* The same bounded, no-shell capture with stdin/stdout/stderr attached to a
  * fresh controlling PTY. This is for installed local CLIs that explicitly
  * require terminal-backed stdio even in their single-turn mode. It inherits
