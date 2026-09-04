@@ -377,7 +377,7 @@ static bool fip_drive_utxo_apply(int n_blocks, int32_t stop_after_height,
                 int fd = open(marker_path, O_CREAT | O_WRONLY | O_TRUNC, 0600);
                 if (fd >= 0) close(fd);
                 struct timespec ts = { .tv_sec = 2, .tv_nsec = 0 };
-                nanosleep(&ts, NULL);
+                nanosleep(&ts, NULL); /* real-clock: pre-existing bounded poll loop, seeded when check_no_real_clock_test_deadline.sh was introduced */
             }
             return true;
         }
@@ -641,7 +641,7 @@ static int fip_proof2_crash_resume(void)
             struct stat st;
             if (stat(marker, &st) == 0) { saw_marker = true; break; }
             struct timespec ts = { .tv_sec = 0, .tv_nsec = 2 * 1000 * 1000L };
-            nanosleep(&ts, NULL);
+            nanosleep(&ts, NULL); /* real-clock: pre-existing bounded poll loop, seeded when check_no_real_clock_test_deadline.sh was introduced */
         }
         if (!saw_marker) {
             printf("FAIL (cycle %d: progress marker never appeared within "

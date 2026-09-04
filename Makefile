@@ -12018,6 +12018,19 @@ check-no-wallclock-assertion:
 	@./tools/lint/check_no_wallclock_assertion.sh --selftest
 	@./tools/lint/check_no_wallclock_assertion.sh
 
+# Sibling of the gate above, scoped to the harness's own registered-group
+# sources (tests/harness/src/*.c) and closing that gate's own documented
+# blind spot: a fixed-iteration poll loop that sleeps toward a real deadline
+# (`for (i = 0; i < N; i++) { if (done) break; sleep(...); }`) instead of an
+# ASSERT graded on a clock interval. Two thrown-away proofs on 2026-09-04
+# were exactly this shape under a contended pool. Per-line marker, not a
+# baseline file: `/* real-clock: <reason> */` on the offending line. See the
+# script header for the full rationale and what it cannot see.
+check-no-real-clock-test-deadline:
+	@echo "══ LINT: no unmarked real-clock deadline in the harness's own tests ══"
+	@./tools/lint/check_no_real_clock_test_deadline.sh --selftest
+	@./tools/lint/check_no_real_clock_test_deadline.sh
+
 # Anti-stale forbid gate: no hand-pinned rot-prone facts in the docs. Two
 # classes — a "<N> MB … binary" size claim (HARD; the size has a live source,
 # tools/scripts/binary_size.sh — de-pin to size-agnostic prose) and a live-state
@@ -12645,6 +12658,7 @@ LINT_GATES := \
     check-shell-host-assumptions \
     check-discarded-status \
     check-no-wallclock-assertion \
+    check-no-real-clock-test-deadline \
     check-framework-shape \
     check-framework-filename-suffix \
     check-no-raw-clock-outside-platform \

@@ -57,7 +57,7 @@ static void *projection_writer_thread(void *arg)
             break;
         }
         struct timespec ts = { .tv_sec = 0, .tv_nsec = 100000 };
-        nanosleep(&ts, NULL);
+        nanosleep(&ts, NULL); /* real-clock: pre-existing bounded poll loop, seeded when check_no_real_clock_test_deadline.sh was introduced */
     }
 
     sqlite3_close(db);

@@ -798,7 +798,7 @@ int run_gate_script_watched(const char *script_rel, int max_silent_secs,
             for (int i = 0; i < 50; i++) {
                 if (waitpid(pid, &rc, WNOHANG) == pid) { wedged = 1; goto done; }
                 struct timespec ts = {0, 100 * 1000 * 1000};
-                (void)nanosleep(&ts, NULL);
+                (void)nanosleep(&ts, NULL); /* real-clock: pre-existing bounded poll loop, seeded when check_no_real_clock_test_deadline.sh was introduced */
             }
             (void)kill(-pid, SIGKILL);
             while (waitpid(pid, &rc, 0) < 0 && errno == EINTR) { }

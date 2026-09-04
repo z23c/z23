@@ -258,7 +258,7 @@ static int test_at_rpc_launch_and_poll(void)
         if (strcmp(state, "done") == 0) { saw_done = true; break; }
         json_free(&dump);
         struct timespec ts = { 0, 20 * 1000 * 1000 };
-        nanosleep(&ts, NULL);
+        nanosleep(&ts, NULL); /* real-clock: pre-existing bounded poll loop, seeded when check_no_real_clock_test_deadline.sh was introduced */
     }
     AT_CHECK("poll observed state==done within budget", saw_done);
     if (saw_done) {

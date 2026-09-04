@@ -500,7 +500,7 @@ static bool delivery_handshake_rejects_partial_record_on_deadline(void)
             finished = true;
             break;
         }
-        platform_sleep_ms(1);
+        platform_sleep_ms(1); /* real-clock: pre-existing bounded poll loop, seeded when check_no_real_clock_test_deadline.sh was introduced */
     }
     if (!finished)
         finished = atomic_load_explicit(&initiator.done, memory_order_acquire);
@@ -575,7 +575,7 @@ static bool delivery_legacy_frame_send_honors_socket_timeout(void)
             finished = true;
             break;
         }
-        platform_sleep_ms(1);
+        platform_sleep_ms(1); /* real-clock: pre-existing bounded poll loop, seeded when check_no_real_clock_test_deadline.sh was introduced */
     }
     if (!finished)
         finished = atomic_load_explicit(&call.done, memory_order_acquire);
@@ -660,7 +660,7 @@ static bool delivery_frame_rejects_partial_record_on_deadline(void)
             finished = true;
             break;
         }
-        platform_sleep_ms(1);
+        platform_sleep_ms(1); /* real-clock: pre-existing bounded poll loop, seeded when check_no_real_clock_test_deadline.sh was introduced */
     }
     if (!finished)
         finished = atomic_load_explicit(&call.done, memory_order_acquire);
@@ -727,7 +727,7 @@ static bool delivery_private_chunk_rejects_partial_record_on_deadline(void)
             finished = true;
             break;
         }
-        platform_sleep_ms(1);
+        platform_sleep_ms(1); /* real-clock: pre-existing bounded poll loop, seeded when check_no_real_clock_test_deadline.sh was introduced */
     }
     if (!finished)
         finished = atomic_load_explicit(&call.done, memory_order_acquire);
@@ -863,7 +863,7 @@ static bool delivery_fast_chunk_recv_uses_one_deadline(void)
             finished = true;
             break;
         }
-        platform_sleep_ms(1);
+        platform_sleep_ms(1); /* real-clock: pre-existing bounded poll loop, seeded when check_no_real_clock_test_deadline.sh was introduced */
     }
     if (!finished)
         finished = atomic_load_explicit(&call.done, memory_order_acquire);

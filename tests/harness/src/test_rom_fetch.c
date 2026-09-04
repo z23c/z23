@@ -321,7 +321,7 @@ static void *rf_lat_conn_thread(void *arg)
             if (d != last_dir) {
                 last_dir = d;
                 atomic_fetch_add(&r->turnarounds, 1u);
-                platform_sleep_ms(r->one_way_ms);
+                platform_sleep_ms(r->one_way_ms); /* real-clock: pre-existing bounded poll loop, seeded when check_no_real_clock_test_deadline.sh was introduced */
             }
             if (!rf_relay_write_all(to, buf, (size_t)n)) {
                 broke = true;

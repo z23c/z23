@@ -630,7 +630,7 @@ int test_wallet_recovery_safety(void)
         }
         int waited_ms = 0;
         while (access(go, 0) != 0 && waited_ms < 60000) {
-            platform_sleep_ms(2);
+            platform_sleep_ms(2); /* real-clock: pre-existing bounded poll loop, seeded when check_no_real_clock_test_deadline.sh was introduced */
             waited_ms += 2;
         }
         if (access(go, 0) != 0) {

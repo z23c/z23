@@ -214,7 +214,7 @@ static int64_t seed_chunks_served_wait_at_least(int64_t expected)
 {
     int64_t observed = seed_chunks_served();
     for (int i = 0; observed < expected && i < 2000; i++) {
-        platform_sleep_ms(1);
+        platform_sleep_ms(1); /* real-clock: pre-existing bounded poll loop, seeded when check_no_real_clock_test_deadline.sh was introduced */
         observed = seed_chunks_served();
     }
     return observed;

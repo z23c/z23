@@ -89,7 +89,7 @@ static void *locker_thread(void *arg)
      * the suite forever). */
     for (int i = 0; i < 500000 && !atomic_load(&lk->release); i++) {
         struct timespec ts = { 0, 200000 }; /* 0.2ms */
-        nanosleep(&ts, NULL);
+        nanosleep(&ts, NULL); /* real-clock: pre-existing bounded poll loop, seeded when check_no_real_clock_test_deadline.sh was introduced */
     }
     progress_store_tx_unlock();
     return NULL;
@@ -147,7 +147,7 @@ static int case_dumpers_busy_path(void)
     /* Wait until the holder actually owns the lock. */
     for (int i = 0; i < 500000 && !atomic_load(&lk.locked); i++) {
         struct timespec ts = { 0, 200000 };
-        nanosleep(&ts, NULL);
+        nanosleep(&ts, NULL); /* real-clock: pre-existing bounded poll loop, seeded when check_no_real_clock_test_deadline.sh was introduced */
     }
     SD_CHECK("busy: locker holds the progress lock", atomic_load(&lk.locked));
 
@@ -291,7 +291,7 @@ static int case_diag_dumps_busy_path(void)
     }
     for (int i = 0; i < 500000 && !atomic_load(&lk.locked); i++) {
         struct timespec ts = { 0, 200000 };
-        nanosleep(&ts, NULL);
+        nanosleep(&ts, NULL); /* real-clock: pre-existing bounded poll loop, seeded when check_no_real_clock_test_deadline.sh was introduced */
     }
     SD_CHECK("diag: locker holds the progress lock", atomic_load(&lk.locked));
 
@@ -409,7 +409,7 @@ static int case_sovereignty_dump_busy_path(void)
     }
     for (int i = 0; i < 500000 && !atomic_load(&lk.locked); i++) {
         struct timespec ts = { 0, 200000 };
-        nanosleep(&ts, NULL);
+        nanosleep(&ts, NULL); /* real-clock: pre-existing bounded poll loop, seeded when check_no_real_clock_test_deadline.sh was introduced */
     }
     SD_CHECK("sov: locker holds the progress lock", atomic_load(&lk.locked));
 
@@ -448,7 +448,7 @@ static int case_sovereignty_dump_busy_path(void)
     if (rc == 0) {
         for (int i = 0; i < 500000 && !atomic_load(&lk2.locked); i++) {
             struct timespec ts = { 0, 200000 };
-            nanosleep(&ts, NULL);
+            nanosleep(&ts, NULL); /* real-clock: pre-existing bounded poll loop, seeded when check_no_real_clock_test_deadline.sh was introduced */
         }
         SD_CHECK("sov: 2nd locker holds the progress lock",
                  atomic_load(&lk2.locked));

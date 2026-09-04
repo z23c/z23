@@ -572,7 +572,7 @@ static int t_force_now_repeatable(void)
      * instead of guessing how long that takes under contention. */
     int baseline = atomic_load(&g_wb_ok);
     for (long i = 0; i < 1000L * wb_timeout_scale() && baseline == 0; i++) {
-        struct timespec ts = { 0, 10000000L }; nanosleep(&ts, NULL);
+        struct timespec ts = { 0, 10000000L }; nanosleep(&ts, NULL); /* real-clock: pre-existing bounded poll loop, seeded when check_no_real_clock_test_deadline.sh was introduced */
         baseline = atomic_load(&g_wb_ok);
     }
 

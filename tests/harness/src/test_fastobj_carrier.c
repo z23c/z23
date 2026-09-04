@@ -339,7 +339,7 @@ static void fcw_candidate_build(const char *worker, const char *root_hex,
             reaped = true;
             break;
         }
-        sleep(1);
+        sleep(1); /* real-clock: pre-existing bounded poll loop, seeded when check_no_real_clock_test_deadline.sh was introduced */
     }
     if (!reaped) {
         kill(pid, SIGKILL);

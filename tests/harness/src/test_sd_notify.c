@@ -135,7 +135,7 @@ static ssize_t sdn_try_recv(int fd, char *buf, size_t buf_len)
         if (errno != EAGAIN && errno != EWOULDBLOCK)
             return -1;
         struct timespec ts = {.tv_sec = 0, .tv_nsec = 1 * 1000 * 1000};
-        nanosleep(&ts, NULL);
+        nanosleep(&ts, NULL); /* real-clock: pre-existing bounded poll loop, seeded when check_no_real_clock_test_deadline.sh was introduced */
     }
     return -1;
 }
@@ -177,7 +177,7 @@ static bool sdn_wait_until_armed(struct sdn_blocked_wait *wait)
     for (int i = 0; i < 100; i++) {
         if (atomic_load_explicit(&wait->armed, memory_order_acquire))
             return true;
-        platform_sleep_ms(1);
+        platform_sleep_ms(1); /* real-clock: pre-existing bounded poll loop, seeded when check_no_real_clock_test_deadline.sh was introduced */
     }
     return false;
 }

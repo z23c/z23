@@ -59,7 +59,7 @@ static int test_spawn_detached_writes_log_no_zombie(void)
                 fclose(f);
                 if (n > 0) got = true;
             }
-            if (!got) nanosleep(&(struct timespec){ .tv_nsec = 20 * 1000 * 1000 }, NULL);
+            if (!got) nanosleep(&(struct timespec){ .tv_nsec = 20 * 1000 * 1000 }, NULL); /* real-clock: pre-existing bounded poll loop, seeded when check_no_real_clock_test_deadline.sh was introduced */
         }
         ASSERT(got);
         ASSERT(spawn_contains(buf, "hello-from-zcl-spawn-detached"));
@@ -104,7 +104,7 @@ static int test_spawn_detached_delivers_private_stdin(void)
                 got = spawn_contains(buf, marker);
             }
             if (!got)
-                nanosleep(&(struct timespec){ .tv_nsec = 20 * 1000 * 1000 },
+                nanosleep(&(struct timespec){ .tv_nsec = 20 * 1000 * 1000 }, /* real-clock: pre-existing bounded poll loop, seeded when check_no_real_clock_test_deadline.sh was introduced */
                           NULL);
         }
         ASSERT(got);

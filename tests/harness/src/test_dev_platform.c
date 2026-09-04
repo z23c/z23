@@ -3221,7 +3221,7 @@ static int test_resident_process_supersession(void)
                 gone = true;
                 break;
             }
-            (void)nanosleep(&retry_delay, NULL);
+            (void)nanosleep(&retry_delay, NULL); /* real-clock: pre-existing bounded poll loop, seeded when check_no_real_clock_test_deadline.sh was introduced */
         }
         ASSERT(gone);
         ASSERT(unlink(pid_path) == 0);

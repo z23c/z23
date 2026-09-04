@@ -65,7 +65,7 @@ static enum condition_remedy_result shs_slow_remedy(void)
      * This is the "deliberately-slow remedy" the sweep must survive. */
     for (int i = 0; i < 30 && !atomic_load(&g_slow_stop); i++) {
         struct timespec req = { 0, 50L * 1000000L };
-        nanosleep(&req, NULL);
+        nanosleep(&req, NULL); /* real-clock: pre-existing bounded poll loop, seeded when check_no_real_clock_test_deadline.sh was introduced */
     }
     return COND_REMEDY_FAILED;         /* never clears; keeps re-running */
 }
@@ -174,7 +174,7 @@ int test_self_heal_supervisor(void)
         for (int i = 0; i < 300; i++) {
             if (atomic_load(&g_slow_entered)) { entered = true; break; }
             struct timespec req = { 0, 10L * 1000000L };
-            nanosleep(&req, NULL);
+            nanosleep(&req, NULL); /* real-clock: pre-existing bounded poll loop, seeded when check_no_real_clock_test_deadline.sh was introduced */
         }
         SHS_CHECK("slow remedy ran on the runner thread (not the sweep)",
                   entered);

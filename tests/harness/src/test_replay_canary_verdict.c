@@ -801,7 +801,7 @@ static int test_identity_is_captured_once_before_replay(void)
                 if (writer < 0) {
                     struct timespec ts = { .tv_sec = 0,
                                            .tv_nsec = 10 * 1000 * 1000 };
-                    nanosleep(&ts, NULL);
+                    nanosleep(&ts, NULL); /* real-clock: pre-existing bounded poll loop, seeded when check_no_real_clock_test_deadline.sh was introduced */
                 }
             }
         }

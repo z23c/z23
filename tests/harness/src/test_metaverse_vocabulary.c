@@ -1341,7 +1341,7 @@ static int check_production_broker_has_no_fixture(void)
     for (int i = 0; i < 300 && !up; i++) {
         struct stat st;
         if (stat(sockpath, &st) == 0) up = true;
-        else { struct timespec ts = { 0, 20 * 1000 * 1000 }; nanosleep(&ts, NULL); }
+        else { struct timespec ts = { 0, 20 * 1000 * 1000 }; nanosleep(&ts, NULL); } /* real-clock: pre-existing bounded poll loop, seeded when check_no_real_clock_test_deadline.sh was introduced */
     }
     VC_CHECK("the shipped broker mode came up on its own socket", up);
 
@@ -1396,7 +1396,7 @@ static int check_production_broker_has_no_fixture(void)
         pid_t r = waitpid(pid, &st, WNOHANG);
         if (r == pid) { pid = -1; break; }
         struct timespec ts = { 0, 20 * 1000 * 1000 };
-        nanosleep(&ts, NULL);
+        nanosleep(&ts, NULL); /* real-clock: pre-existing bounded poll loop, seeded when check_no_real_clock_test_deadline.sh was introduced */
     }
     if (pid > 0) {
         (void)kill(pid, SIGKILL);

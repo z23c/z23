@@ -797,7 +797,7 @@ int test_transaction_intent(void)
             ASSERT(vault_intent_find(&async_db, row.plan_id, &queued));
             if (queued.state == VAULT_INTENT_MEMPOOL_ACCEPTED)
                 break;
-            platform_sleep_ms(5);
+            platform_sleep_ms(5); /* real-clock: pre-existing bounded poll loop, seeded when check_no_real_clock_test_deadline.sh was introduced */
         }
         ASSERT_EQ(atomic_load(&g_ti_async_calls), 1);
         ASSERT_EQ(queued.state, VAULT_INTENT_MEMPOOL_ACCEPTED);
@@ -842,7 +842,7 @@ int test_transaction_intent(void)
             ASSERT(vault_intent_find(&retry_db, row.plan_id, &got));
             if (got.state == VAULT_INTENT_MEMPOOL_ACCEPTED)
                 break;
-            platform_sleep_ms(5);
+            platform_sleep_ms(5); /* real-clock: pre-existing bounded poll loop, seeded when check_no_real_clock_test_deadline.sh was introduced */
         }
         ASSERT_EQ(atomic_load(&g_ti_async_calls), 2);
         ASSERT_EQ(got.state, VAULT_INTENT_MEMPOOL_ACCEPTED);

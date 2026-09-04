@@ -233,7 +233,7 @@ static int test_legacy_mirror_backs_off_when_rpc_is_absent(void)
                 .tv_sec = 0,
                 .tv_nsec = 20 * 1000 * 1000,
             };
-            nanosleep(&pause, NULL);
+            nanosleep(&pause, NULL); /* real-clock: pre-existing bounded poll loop, seeded when check_no_real_clock_test_deadline.sh was introduced */
         }
 
         struct legacy_mirror_sync_stats stats = {0};

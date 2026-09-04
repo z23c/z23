@@ -286,7 +286,7 @@ static int t_bounded_memory(void)
         for (int i = 0; i < 30; i++) {
             ASSERT(block_prefetch_lru_bytes() <= budget);
             struct timespec ts = { .tv_sec = 0, .tv_nsec = 1 * 1000000L };
-            nanosleep(&ts, NULL);
+            nanosleep(&ts, NULL); /* real-clock: pre-existing bounded poll loop, seeded when check_no_real_clock_test_deadline.sh was introduced */
         }
         ASSERT(block_prefetch_lru_count() >= 1); /* at least one body retained */
         ASSERT(block_prefetch_lru_bytes() <= budget);

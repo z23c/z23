@@ -98,7 +98,7 @@ int test_catchup_lifecycle_service(void)
             if (atomic_load(&job.finished))
                 reaped = catchup_lifecycle_reap(&job);
             else
-                platform_sleep_ms(5);
+                platform_sleep_ms(5); /* real-clock: pre-existing bounded poll loop, seeded when check_no_real_clock_test_deadline.sh was introduced */
         }
 
         bool ok = started && reaped && !job.started;

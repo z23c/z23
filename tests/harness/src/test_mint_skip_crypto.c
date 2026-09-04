@@ -393,7 +393,7 @@ static bool msc_make_killed_wal(const char *dir, bool producer)
     for (int i = 0; i < 1200 && !ready; i++) {
         struct stat st;
         ready = stat(ready_path, &st) == 0;
-        if (!ready) platform_sleep_ms(50);
+        if (!ready) platform_sleep_ms(50); /* real-clock: pre-existing bounded poll loop, seeded when check_no_real_clock_test_deadline.sh was introduced */
     }
     if (ready)
         test_self_child_kill(child);

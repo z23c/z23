@@ -2243,7 +2243,7 @@ int test_net(void)
         bool accepted = false;
         for (int i = 0; ok && i < 200 && !accepted; i++) {
             accepted = accept_connection(&nm, &nm.listen_sockets[0]);
-            if (!accepted) platform_sleep_ms(5);
+            if (!accepted) platform_sleep_ms(5); /* real-clock: pre-existing bounded poll loop, seeded when check_no_real_clock_test_deadline.sh was introduced */
         }
         ok = ok && accepted;
         ok = ok && nm.num_nodes == 1;

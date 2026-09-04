@@ -348,7 +348,7 @@ int test_cookie_rotation(void)
                 rotated = true;
                 break;
             }
-            usleep(20000);
+            usleep(20000); /* real-clock: pre-existing bounded poll loop, seeded when check_no_real_clock_test_deadline.sh was introduced */
         }
         ok = ok && rotated;
         if (ok) {

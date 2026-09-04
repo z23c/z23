@@ -954,7 +954,7 @@ int test_zclassicd_oracle(void)
             zclassicd_oracle_stats_snapshot(&st);
             if (st.probes_total >= 1) { saw_tick = true; break; }
             struct timespec ts = { .tv_sec = 0, .tv_nsec = 50 * 1000 * 1000 };
-            nanosleep(&ts, NULL);
+            nanosleep(&ts, NULL); /* real-clock: pre-existing bounded poll loop, seeded when check_no_real_clock_test_deadline.sh was introduced */
         }
         ZO_CHECK("periodic tick fired", saw_tick);
 
@@ -997,7 +997,7 @@ int test_zclassicd_oracle(void)
             struct timespec ts = {
                 .tv_sec = 0, .tv_nsec = 50 * 1000 * 1000,
             };
-            nanosleep(&ts, NULL);
+            nanosleep(&ts, NULL); /* real-clock: pre-existing bounded poll loop, seeded when check_no_real_clock_test_deadline.sh was introduced */
         }
         ZO_CHECK("absent optional oracle records the dependency error",
                  saw_error);

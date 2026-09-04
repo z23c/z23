@@ -79,7 +79,7 @@ static void *ap_locker_thread(void *arg)
      * wedge the suite forever). */
     for (int i = 0; i < 500000 && !atomic_load(&lk->release); i++) {
         struct timespec ts = { 0, 200000 }; /* 0.2ms */
-        nanosleep(&ts, NULL);
+        nanosleep(&ts, NULL); /* real-clock: pre-existing bounded poll loop, seeded when check_no_real_clock_test_deadline.sh was introduced */
     }
     sqlite3_mutex_leave(m);
     return NULL;
@@ -95,7 +95,7 @@ static bool ap_lock_connection(struct ap_locker *lk, sqlite3 *db,
         return false;
     for (int i = 0; i < 500000 && !atomic_load(&lk->locked); i++) {
         struct timespec ts = { 0, 200000 };
-        nanosleep(&ts, NULL);
+        nanosleep(&ts, NULL); /* real-clock: pre-existing bounded poll loop, seeded when check_no_real_clock_test_deadline.sh was introduced */
     }
     return atomic_load(&lk->locked) != 0;
 }

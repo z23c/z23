@@ -189,6 +189,7 @@ gate_command() {
         check-shell-host-assumptions)      echo './tools/lint/check_shell_host_assumptions.sh --selftest && ./tools/scripts/port_probe.sh --selftest && ./tools/lint/check_shell_host_assumptions.sh' ;;
         check-discarded-status)            echo './tools/lint/check_discarded_status.sh --selftest && ./tools/lint/check_discarded_status.sh' ;;
         check-no-wallclock-assertion)      echo './tools/lint/check_no_wallclock_assertion.sh --selftest && ./tools/lint/check_no_wallclock_assertion.sh' ;;
+        check-no-real-clock-test-deadline) echo './tools/lint/check_no_real_clock_test_deadline.sh --selftest && ./tools/lint/check_no_real_clock_test_deadline.sh' ;;
         check-framework-shape)             echo 'ZCL_LINT_MODE=RATCHET ./tools/lint/framework_shape_check.sh' ;;
         check-framework-filename-suffix)   echo './tools/lint/check_framework_filename_suffix.sh' ;;
         check-no-raw-clock-outside-platform) echo './tools/lint/check_no_raw_clock_outside_platform.sh' ;;

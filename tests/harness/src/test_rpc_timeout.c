@@ -547,7 +547,7 @@ static int test_watchdog_thread_kills(void)
                                      memory_order_acquire) >= 1)
                 break;
             struct timespec req = { .tv_sec = 0, .tv_nsec = 10 * 1000000L };
-            nanosleep(&req, NULL);
+            nanosleep(&req, NULL); /* real-clock: pre-existing bounded poll loop, seeded when check_no_real_clock_test_deadline.sh was introduced */
         }
         ASSERT(rpc_timeout_was_killed(&mgr, s));
         ASSERT(atomic_load_explicit(&g_tmo_observed,
