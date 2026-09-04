@@ -835,8 +835,15 @@ static void trc_store_pass_ex(struct testcache *tc, const uint8_t key[32],
     uint64_t gen = (uint64_t)platform_time_wall_time_t();
     for (int i = 0; i < 8; i++)
         r.generation_le[i] = (uint8_t)(gen >> (8 * i));
-    if (!vcs_object_put_addressed(tc->store_root, key,
-                                  (const uint8_t *)&r, sizeof(r)))
+    /* A later store at the SAME key legitimately differs from an earlier one
+     * (the flaky bit, the generation stamp) — this is not corruption, it is
+     * the flaky-vs-ordinary PASS distinction being recorded. Plain
+     * vcs_object_put_addressed is no-clobber (first writer wins), so it would
+     * silently keep a stale flaky record forever. The _repair variant
+     * replaces an existing object at this address when the bytes differ,
+     * which is exactly the update semantics a verdict record needs. */
+    if (!vcs_object_put_addressed_repair(tc->store_root, key,
+                                        (const uint8_t *)&r, sizeof(r), NULL))
         ZCL_LOG_EMIT_AT(ZCL_LOG_WARN,
                         "[testcache] store_pass put_addressed failed\n");
 }
