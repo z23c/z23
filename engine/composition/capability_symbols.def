@@ -1250,6 +1250,10 @@ ZCL_CAPABILITY_SYMBOL("__snprintf_chk", CAP_HARMLESS,
 ZCL_CAPABILITY_SYMBOL("__sprintf_chk", CAP_HARMLESS,
     "Formats into a caller supplied buffer and touches no descriptor.")
 ZCL_CAPABILITY_SYMBOL("__stack_chk_fail", CAP_HARMLESS, "")
+ZCL_CAPABILITY_SYMBOL("__strcat_chk", CAP_HARMLESS,
+    "The fortified form of strcat: appends within a caller supplied "
+    "buffer whose size the compiler passes in, and touches no "
+    "descriptor, clock or process. Same class as __strncat_chk.")
 ZCL_CAPABILITY_SYMBOL("__strncat_chk", CAP_HARMLESS, "")
 ZCL_CAPABILITY_SYMBOL("__sysv_signal", CAP_HARMLESS,
     "The System V flavoured alias of signal, and a real entry point "
