@@ -151,7 +151,7 @@ int test_devagent_pace(void)
     /* A run that read a great deal and wrote nothing — exits 0 and delivers
      * no work, the single most common way a lane reports a false success. */
     static const char *const log_nothing =
-        "cwd=/home/rhett/github/z23-lane-x\n"
+        "cwd=/work/z23-lane-x\n"
         READ "Read AGENTS.md\n"
         READ "Read docs/DEVELOPING.md\n"
         SEARCH "Grep zcl_native_handle\n"
