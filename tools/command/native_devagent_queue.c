@@ -36,6 +36,16 @@
  * model, a build, or another process; a long-lived loop is the caller's
  * business.
  *
+ * LAUNCH. next runs the harness detached with the interim shell's argv
+ * (systemd-run with a unit-local flock when available, else double-fork
+ * plus setsid with the worktree lock fd inherited). The harness's stdout
+ * lands in the run's run.out in both branches (a truncated unit stream
+ * under systemd, the spawn log otherwise). The dev binary the harness
+ * gates through arrives as ZCL_Z23_BIN: an operator override wins,
+ * otherwise the primed build/bin/z23-dev inside the running worktree;
+ * unset means inherit. The harness binary itself is ZCL_ENGINE_UNIT_BIN
+ * or zclassic23-engine-unit on PATH.
+ *
  * OUTPUT (zcl.agent_queue.v1) on ok=true: leaf is always "dev.agent.queue",
  * plus per action: post {seq, name, state:"queued"}; next {seq, name,
  * worktree, pid_or_unit, state:"running"} or {state:"no_free_worktree"} or
@@ -1178,6 +1188,42 @@ static void dvq_pool_stats(const char *poolpath, long long *total,
     free(text);
 }
 
+/* Resolve the dev binary the harness gates through, the way the interim
+ * dispatch scripts always set ZCL_Z23_BIN: an operator override wins,
+ * otherwise the primed binary inside the worktree that will run the unit.
+ * Unset means inherit and let the harness fall back on its own rules. */
+static bool dvq_z23_bin(const char *wt, char *out, size_t cap)
+{
+    const char *env = getenv("ZCL_Z23_BIN");
+    char cand[4096 + 32];
+    if (env && env[0]) {
+        if (strlen(env) >= cap)
+            return false;
+        memcpy(out, env, strlen(env) + 1);
+        return true;
+    }
+    if (!wt || !wt[0])
+        return false;
+    if (snprintf(cand, sizeof(cand), "%s/build/bin/z23-dev", wt) >=
+        (int)sizeof(cand))
+        return false;
+#if defined(_WIN32)
+    {
+        FILE *probe = fopen(cand, "rb");
+        if (!probe)
+            return false;
+        (void)fclose(probe);
+    }
+#else
+    if (access(cand, X_OK) != 0)
+        return false;
+#endif
+    if (strlen(cand) >= cap)
+        return false;
+    memcpy(out, cand, strlen(cand) + 1);
+    return true;
+}
+
 /* Sanitize a queue name into a systemd unit fragment. */
 static void dvq_unit_frag(const char *in, char *out, size_t cap)
 {
@@ -1234,11 +1280,14 @@ static void dvq_next(const struct zcl_command_request *req,
     char runout[4096 + 64], lockpath[4096 + 16];
     char harness[4096], model[160], group[96], unit[160], unitarg[192];
     char wdirarg[4096 + 32];
+    char zbind[4096 + 64], zbenv[4096 + 64], zsetenv[4096 + 64];
+    char outarg[4096 + 64], errarg[4096 + 64];
     char *task = NULL;
     size_t task_used = 0;
     const char *tmo = "1200", *gtmo = "2400";
     const char *hargv[26];
-    const char *sargv[48];
+    const char *sargv[56];
+    bool have_zbin;
     int lock = -1, wtfd = -1;
     long long total = 0, warm = 0;
     struct zcl_result zr;
@@ -1473,11 +1522,21 @@ static void dvq_next(const struct zcl_command_request *req,
         hargv[n++] = "3";
         hargv[n++] = "--yes-dispatch";
         hargv[n++] = NULL;
+        have_zbin = dvq_z23_bin(wt, zbind, sizeof(zbind));
+        if (have_zbin) {
+            if (snprintf(zbenv, sizeof(zbenv), "ZCL_Z23_BIN=%s", zbind) >=
+                (int)sizeof(zbenv))
+                have_zbin = false;
+        }
         if (dvq_have_systemd()) {
             int m = 0;
             (void)snprintf(unitarg, sizeof(unitarg), "--unit=%s", unit);
             (void)snprintf(wdirarg, sizeof(wdirarg),
                            "--working-directory=%s", wt);
+            (void)snprintf(outarg, sizeof(outarg),
+                           "StandardOutput=truncate:%s", runout);
+            (void)snprintf(errarg, sizeof(errarg),
+                           "StandardError=truncate:%s", runout);
             sargv[m++] = "systemd-run";
             sargv[m++] = "--user";
             sargv[m++] = "--quiet";
@@ -1486,8 +1545,17 @@ static void dvq_next(const struct zcl_command_request *req,
             sargv[m++] = "CPUQuota=600%";
             sargv[m++] = "-p";
             sargv[m++] = "Nice=12";
+            sargv[m++] = "-p";
+            sargv[m++] = outarg;
+            sargv[m++] = "-p";
+            sargv[m++] = errarg;
             sargv[m++] = unitarg;
             sargv[m++] = wdirarg;
+            if (have_zbin) {
+                (void)snprintf(zsetenv, sizeof(zsetenv), "--setenv=%s",
+                               zbenv);
+                sargv[m++] = zsetenv;
+            }
             sargv[m++] = "flock";
             sargv[m++] = "-n";
             sargv[m++] = lockpath;
@@ -1500,6 +1568,21 @@ static void dvq_next(const struct zcl_command_request *req,
             dvq_close_wt(wtfd);
             wtfd = -1;
             zr = zcl_spawn_detached(sargv, runout);
+        } else if (have_zbin) {
+            /* No shell anywhere: env(1) carries the one variable and
+             * execs the harness with the same argv. */
+            int m = 0;
+            sargv[m++] = "env";
+            sargv[m++] = zbenv;
+            for (int i = 0; hargv[i] && m < (int)(sizeof(sargv) /
+                                                 sizeof(sargv[0])) - 1;
+                 i++)
+                sargv[m++] = hargv[i];
+            sargv[m] = NULL;
+            zr = zcl_spawn_detached(sargv, runout);
+            /* The child inherited the worktree lock; ours can close. */
+            dvq_close_wt(wtfd);
+            wtfd = -1;
         } else {
             zr = zcl_spawn_detached(hargv, runout);
             /* The child inherited the worktree lock; ours can close. */
@@ -1680,7 +1763,11 @@ static void dvq_reap(const struct zcl_command_request *req,
             (void)fclose(probe);
             continue;
         }
-        if (stat(receipt, &st) == 0 && (stamp == 0 || st.st_mtime > stamp))
+        /* >=, not >: a receipt written in the same second as the stamp
+         * is still new. Already-recorded receipts are excluded by the
+         * .seen check above, so widening the comparison cannot
+         * double-record. */
+        if (stat(receipt, &st) == 0 && (stamp == 0 || st.st_mtime >= stamp))
             have_receipt = true;
         runtext = (char *)zcl_malloc(DVQ_FILE_CAP, "devagent.queue.runout");
         if (!runtext)

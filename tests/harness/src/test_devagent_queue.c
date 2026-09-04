@@ -32,6 +32,8 @@
 #include <time.h>
 #if !defined(_WIN32)
 #include <errno.h>
+#include <fcntl.h>
+#include <sys/file.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
@@ -274,6 +276,7 @@ static const char k_dvx_fake[] =
     "  esac\n"
     "done\n"
     "[ -n \"$st\" ] || exit 2\n"
+    "printf '%s\\n' \"$@\" > \"$st/argv.log\"\n"
     "if [ \"${RATELIMIT:-0}\" = \"1\" ]; then\n"
     "  printf '{\"verdict\":\"FAIL\",\"reason\":\"refused\"}\\n' "
     "> \"$st/receipt.json\"\n"
@@ -530,6 +533,35 @@ int test_devagent_queue(void)
                                                  "receipt.json",
                        qd);
         ASSERT(dvx_poll(receipt, 150));
+        /* The dispatch pins the shell's argv: group, territory, consent,
+         * and a composed task file the run can read. */
+        {
+            char argvlog[1300], taskfile[1300], argv[4096], task[256];
+            FILE *f;
+            (void)snprintf(argvlog, sizeof(argvlog),
+                           "%s/../engine/launched/a1/argv.log", qd);
+            (void)snprintf(taskfile, sizeof(taskfile),
+                           "%s/../engine/launched/a1/task.txt", qd);
+            f = fopen(argvlog, "r");
+            ASSERT(f != NULL);
+            if (f) {
+                size_t n = fread(argv, 1, sizeof(argv) - 1, f);
+                argv[n] = '\0';
+                (void)fclose(f);
+                ASSERT(strstr(argv, "--yes-dispatch") != NULL);
+                ASSERT(strstr(argv, "--group") != NULL);
+                ASSERT(strstr(argv, "devagent_launched") != NULL);
+                ASSERT(strstr(argv, "--territory") != NULL);
+            }
+            f = fopen(taskfile, "r");
+            ASSERT(f != NULL);
+            if (f) {
+                size_t n = fread(task, 1, sizeof(task) - 1, f);
+                task[n] = '\0';
+                (void)fclose(f);
+                ASSERT(strstr(task, "kind: fix-gate") != NULL);
+            }
+        }
         dvx_verb(&r, "reap", false);
         ASSERT(dvx_run(&r));
         ASSERT(dvx_ok(&r));
@@ -595,6 +627,74 @@ int test_devagent_queue(void)
         /* The refusal is back in line as attempt 2. */
         ASSERT_EQ(dvx_queued_count("throttled"), 1);
         ASSERT_EQ(dvx_queued_attempt("throttled"), 2);
+        dvx_restore();
+        PASS();
+    }
+
+    TEST("queue: the oldest queued row launches first") {
+        struct dvx_call c;
+        char bindir[512], wt[512];
+        char path[9000];
+        dvx_isolate("fifo");
+        ASSERT(dvx_fake_on_path("fifobin", bindir, sizeof(bindir)));
+        ASSERT(dvx_pool("fifowt", wt, sizeof(wt)));
+        (void)snprintf(path, sizeof(path), "%s:%s", bindir,
+                       g_dvx_saved_path);
+        setenv("PATH", path, 1);
+        dvx_post(&c, "leaf", "first-a", NULL, NULL, NULL, NULL, -1);
+        ASSERT(dvx_run(&c));
+        ASSERT(dvx_ok(&c));
+        dvx_end(&c);
+        dvx_post(&c, "leaf", "first-b", NULL, NULL, NULL, NULL, -1);
+        ASSERT(dvx_run(&c));
+        ASSERT(dvx_ok(&c));
+        dvx_end(&c);
+        dvx_verb(&c, "next", false);
+        ASSERT(dvx_run(&c));
+        ASSERT(dvx_ok(&c));
+        ASSERT_STR_EQ(dvx_str(&c, "state"), "running");
+        ASSERT_STR_EQ(dvx_str(&c, "name"), "first-a");
+        dvx_end(&c);
+        ASSERT_EQ(dvx_queued_count("first-a"), 0);
+        ASSERT_EQ(dvx_queued_count("first-b"), 1);
+        dvx_restore();
+        PASS();
+    }
+
+    TEST("queue: a busy worktree reads busy, then free") {
+        struct dvx_call c;
+        char bindir[512], wt[512];
+        char path[9000], lockp[1024];
+        int held = -1;
+        dvx_isolate("busy");
+        ASSERT(dvx_fake_on_path("busybin", bindir, sizeof(bindir)));
+        ASSERT(dvx_pool("busywty", wt, sizeof(wt)));
+        (void)snprintf(path, sizeof(path), "%s:%s", bindir,
+                       g_dvx_saved_path);
+        setenv("PATH", path, 1);
+        /* Hold the worktree lock the way a running unit would. */
+        (void)snprintf(lockp, sizeof(lockp), "%s/.eu-lock", wt);
+        held = open(lockp, O_RDWR | O_CREAT, 0600);
+        ASSERT(held >= 0);
+        ASSERT(flock(held, LOCK_EX) == 0);
+        dvx_post(&c, "leaf", "waits", NULL, NULL, NULL, NULL, -1);
+        ASSERT(dvx_run(&c));
+        ASSERT(dvx_ok(&c));
+        dvx_end(&c);
+        dvx_verb(&c, "next", false);
+        ASSERT(dvx_run(&c));
+        ASSERT(dvx_ok(&c));
+        ASSERT_STR_EQ(dvx_str(&c, "state"), "no_free_worktree");
+        dvx_end(&c);
+        ASSERT_EQ(dvx_queued_count("waits"), 1);
+        (void)flock(held, LOCK_UN);
+        (void)close(held);
+        dvx_verb(&c, "next", false);
+        ASSERT(dvx_run(&c));
+        ASSERT(dvx_ok(&c));
+        ASSERT_STR_EQ(dvx_str(&c, "state"), "running");
+        ASSERT_STR_EQ(dvx_str(&c, "name"), "waits");
+        dvx_end(&c);
         dvx_restore();
         PASS();
     }
