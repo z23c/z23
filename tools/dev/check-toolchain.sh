@@ -72,17 +72,51 @@ compiler_id() {
     printf '%s' "$CC"
 }
 
+# Where the probe's translation unit lives. This used to be a file inside a
+# fresh mktemp directory, and that cost every build two compile-cache misses
+# forever: $CC is the in-tree zcc wrapper, whose key covers the working
+# directory and the source path, and a path with XXXXXX in it never repeats.
+# The TU is empty, so one stable path under build/ serves every caller, and the
+# probe runs from the repository root so the recorded directory is the same one
+# the rest of the build records. A tree that cannot be written to (a read-only
+# checkout, a stranger inspecting a release) falls back to the old temporary
+# directory rather than failing the capability check it exists to answer.
+PROBE_DIR_REL="build/toolchain"
+PROBE_SRC_REL="$PROBE_DIR_REL/probe-empty.c"
+PROBE_ROOT=""
+PROBE_SRC=""
+probe_prepare() {
+    [ -n "$PROBE_ROOT" ] && return 0
+    # Left alone once it exists and is already empty: the cache's cheap key
+    # covers the input's stat triple, and re-truncating the file on every
+    # probe would move its mtime and force the expensive preprocess-and-hash
+    # path for a translation unit that is, and stays, zero bytes.
+    if mkdir -p "$REPO_ROOT/$PROBE_DIR_REL" 2>/dev/null &&
+       { [ -f "$REPO_ROOT/$PROBE_SRC_REL" ] && [ ! -s "$REPO_ROOT/$PROBE_SRC_REL" ] ||
+         : 2>/dev/null > "$REPO_ROOT/$PROBE_SRC_REL"; }; then
+        PROBE_ROOT="$REPO_ROOT"
+        PROBE_SRC="$PROBE_SRC_REL"
+        return 0
+    fi
+    : > "$WORK/probe-empty.c"
+    PROBE_ROOT="$WORK"
+    PROBE_SRC="probe-empty.c"
+}
+
 # Compile an empty translation unit with -std=<flag>. 0 = accepted.
 # Captures the compiler's stderr/stdout in PROBE_ERR for the failure report.
 PROBE_ERR=""
 probe_std() {
-    local std="$1" src obj rc
-    src="$WORK/empty.c"
+    local std="$1" root src obj rc
+    probe_prepare
+    root="$PROBE_ROOT"
+    src="$PROBE_SRC"
     obj="$WORK/empty-$std.o"
-    : > "$src"
     rm -f "$obj"
     set +e
-    PROBE_ERR="$(run_cc -std="$std" -c "$src" -o "$obj" 2>&1)"
+    # The -o path stays unique per process: two builds may probe at once, and
+    # the cache keys the artifact's destination as a placeholder anyway.
+    PROBE_ERR="$(cd "$root" && run_cc -std="$std" -c "$src" -o "$obj" 2>&1)"
     rc=$?
     set -e
     return "$rc"
@@ -256,6 +290,49 @@ EOF
     if str_lacks "$out" "accepts -std=c23"; then
         printf 'check-toolchain --selftest: FAIL — usable compiler produced no success line\n' >&2
         printf '%s\n' "$out" >&2
+        exit 1
+    fi
+
+    # The probe must be the SAME compile every time. It is wrapped in the
+    # in-tree compile cache, whose key covers the working directory and the
+    # source path, so a probe compiled out of a fresh mktemp directory could
+    # never be served from cache and cost every build a miss. Record what the
+    # compiler is actually asked to do, twice, and require the two to match.
+    # The recorded argv drops the -o VALUE: where the object is written is a
+    # placeholder in the cache key (two builds may probe at once, so it has to
+    # stay unique), while the working directory and the source path are not.
+    cat > "$work/record-cc" <<EOF
+#!/bin/sh
+args=""
+skip=0
+for a in "\$@"; do
+    if [ "\$skip" = 1 ]; then skip=0; continue; fi
+    if [ "\$a" = "-o" ]; then skip=1; continue; fi
+    args="\$args \$a"
+done
+printf '%s|%s\n' "\$PWD" "\$args" >> "$work/record"
+exit 0
+EOF
+    chmod +x "$work/record-cc"
+    : > "$work/record"
+    CC="$work/record-cc" "$SCRIPT" >/dev/null 2>&1
+    CC="$work/record-cc" "$SCRIPT" >/dev/null 2>&1
+    local first second
+    first="$(grep -- "-std=c23" "$work/record" | sed -n 1p)"
+    second="$(grep -- "-std=c23" "$work/record" | sed -n 2p)"
+    if [ -z "$first" ] || [ "$first" != "$second" ]; then
+        printf 'check-toolchain --selftest: FAIL — the probe compile is not identical between runs, so it can never be cached\n' >&2
+        cat "$work/record" >&2
+        exit 1
+    fi
+    if str_lacks "$first" "$PROBE_SRC_REL"; then
+        printf 'check-toolchain --selftest: FAIL — the probe did not compile the stable in-tree TU %s\n' "$PROBE_SRC_REL" >&2
+        printf '%s\n' "$first" >&2
+        exit 1
+    fi
+    if str_contains "$first" "zcl-check-toolchain."; then
+        printf 'check-toolchain --selftest: FAIL — the probe compiled a throwaway temporary path\n' >&2
+        printf '%s\n' "$first" >&2
         exit 1
     fi
 
