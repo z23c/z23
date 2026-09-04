@@ -288,13 +288,13 @@ page changing with it.
 <!--   app_shape_folders    = directories directly under app/                        -->
 <!-- Fix a mismatch with `tools/scripts/check_doc_counts.sh --fix`, never by hand.  -->
 
-test_groups: 1104
+test_groups: 1105
 port_interfaces: 13
 persistence_adapters: 14
 condition_registrations: 52
 command_bundles: 26
 command_roots: 12
-dumpstate_subsystems: 164
+dumpstate_subsystems: 166
 app_shape_folders: 7
 <!-- DOC-COUNTS-END -->
 
