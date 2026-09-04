@@ -74,15 +74,15 @@ z23 discover schema <path> --side=input|output
 
 | Catalog fact | Count |
 |---|---|
-| Registry entries (branches + leaves) | 788 |
+| Registry entries (branches + leaves) | 796 |
 | Top-level roots | 13 |
 | Branches | 180 |
-| Leaves (dispatchable command paths) | 608 |
-| … `ready` (live handler in this build) | 547 |
-| … `compat` (metadata only, names a fallback) | 30 |
+| Leaves (dispatchable command paths) | 616 |
+| … `ready` (live handler in this build) | 554 |
+| … `compat` (metadata only, names a fallback) | 31 |
 | … `planned` (fail-closed BLOCKED, exit 3) | 31 |
-| … dev-gated 🔧 (`ready` only in `z23-dev`) | 29 |
-| Leaves with `effect=mutate` | 214 |
+| … dev-gated 🔧 (`ready` only in `z23-dev`) | 30 |
+| Leaves with `effect=mutate` | 215 |
 | Leaves with `effect=destructive` | 4 |
 | Leaves requiring **owner** authority | 119 |
 
@@ -96,7 +96,7 @@ Per source file:
 | `engine/composition/commands/app_features.def` | 75 | 20 | 55 |
 | `engine/composition/commands/store.def` | 18 | 0 | 18 |
 | `engine/composition/commands/ops.def` | 56 | 10 | 46 |
-| `engine/composition/commands/dev.def` | 67 | 16 | 51 |
+| `engine/composition/commands/dev.def` | 75 | 16 | 59 |
 | `engine/composition/commands/code.def` | 31 | 3 | 28 |
 | `engine/composition/commands/accounts.def` | 11 | 2 | 9 |
 | `engine/composition/commands/vault.def` | 24 | 4 | 20 |
@@ -779,6 +779,14 @@ represented by its children's sections.
 | `dev agent ready` (aliases: `dev.agent.shippable`) | ready | read / read / operator · fast/low | none | `zcl.agent_ready.v1` | `z23 dev agent ready` | Can this checkout link real Tor and produce a shippable candidate |
 | `dev agent test` (aliases: `dev.agent.group`) | ready | read / read / operator · background/high | **`group`**, `exact`, `timeout_ms` | `zcl.agent_test_run.v1` | `z23 dev agent test --group=hex_codec` | Run one registered test group and report what actually RAN |
 | `dev agent mutate` (aliases: `dev.agent.mutation`) | ready | mutate / dev-mutation / **owner** · persistent/high | **`file`**, `line`, `group`, `restore` | `zcl.agent_mutation_check.v1` | `z23 dev agent mutate --file=platform/modules/base/src/hex.c --line=42 --group=hex_codec` | Break one source line and prove a test group notices |
+| `dev agent situation` | ready | read / read / operator · fast/low | `cwd` | `zcl.agent_situation.v1` | `z23 dev agent situation` | Name this checkout's situation and how it was decided |
+| `dev agent rules` | ready | read / read / operator · instant/low | `cwd`, `situation` | `zcl.agent_rules.v1` | `z23 dev agent rules --situation=standalone` | The rules that apply in one checkout situation |
+| `dev agent start` | ready | read / read / operator · fast/low | `cwd`, `files`, `base` | `zcl.agent_start.v1` | `z23 dev agent start` | One opening answer: situation, rules, base, worktree |
+| `dev agent done` | ready | read / read / operator · fast/low | `cwd`, `base` | `zcl.agent_done.v1` | `z23 dev agent done` | Whether this lane is ready to hand back |
+| `dev agent triage` | ready | read / read / operator · fast/low | `cwd`, `base`, `max_age_days`, `limit` | `zcl.agent_triage.v1` | `z23 dev agent triage --base=origin/main` | Bin every local branch as land, rebase, or delete |
+| `dev agent ceiling` | ready | read / read / operator · fast/low | `cwd`, **`base`**, `requested`, `ceiling_lines` | `zcl.agent_ceiling.v1` | `z23 dev agent ceiling --base=origin/main` | Refuse a diff that outgrew what was requested |
+| `dev agent pace` | ready | read / read / operator · fast/low | `cwd`, **`log`** | `zcl.agent_pace.v1` | `z23 dev agent pace --log=build/scratch/run.out` | Read an executor run log and grade its pace |
+| `dev agent claim` | compat 🔧 → `z23-dev dev agent claim` | mutate / dev-mutation / operator · fast/low | `cwd`, **`story`**, `files`, `release` | `zcl.agent_claim.v1` | `z23-dev dev agent claim hex-codec` | Claim files for one story so lanes do not collide — *the file-claim ledger is a development-lane coordination surface* |
 
 ### `ops` — Node diagnostics
 
