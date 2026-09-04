@@ -31,6 +31,7 @@
 #include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/stat.h>
 
 #define SH_SUBSYS "storage_housekeeping"
 
@@ -222,6 +223,16 @@ static void *sh_thread_fn(void *arg)
 
 struct zcl_result storage_housekeeping_start(const char *datadir)
 {
+    /* A sweeper with no datadir is a misconfiguration, not a degraded mode:
+     * the log bound would silently never run. Refuse it by name so the
+     * optional-service wrapper can report it instead of swallowing it. */
+    if (!datadir || !datadir[0])
+        return ZCL_ERR(-5, "storage_housekeeping_start: datadir required");
+    struct stat st;
+    if (stat(datadir, &st) != 0 || !S_ISDIR(st.st_mode))
+        return ZCL_ERR(-6, "storage_housekeeping_start: datadir does not "
+                       "exist: %s", datadir);
+
     pthread_mutex_lock(&g_lock);
     if (g_thread_running) {
         pthread_mutex_unlock(&g_lock);

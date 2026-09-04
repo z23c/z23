@@ -61,7 +61,9 @@ struct storage_housekeeping_stats {
  * Never fatal: a bound that cannot be applied this tick is applied the next. */
 void storage_housekeeping_sweep(const char *datadir);
 
-/* Launch/stop the periodic thread. Idempotent. */
+/* Launch/stop the periodic thread. Idempotent. start() refuses, with a named
+ * zcl_result, a NULL/empty datadir or one that does not exist: a sweeper
+ * with nothing to bound is a misconfiguration, not a degraded mode. */
 struct zcl_result storage_housekeeping_start(const char *datadir);
 void storage_housekeeping_stop(void);
 
