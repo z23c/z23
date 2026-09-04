@@ -87,3 +87,25 @@ Split agreed on the board, 2026-09-04:
 - GitHub carries exactly one branch, `main`. No other ref is ever pushed.
 - Shell access, keys, tunnels, and datadir paths never move between nodes.
 - Shell scripts are interim. The real channel is a C23 leaf on every node.
+
+## Async agent mail: the C23 leaf
+
+Agents on this fleet talk through `dev agent mail`, an append-only,
+cursor-based mail primitive in the C23 CLI. It replaces the interim shell
+board and the synchronous `msg_send` / `msg_inbox` pair for fleet
+coordination. Nothing here blocks on a peer or on a model.
+
+- `dev agent mail post --to <agent|*> --kind <need|claim|result|problem|note|offer|directive> --body <text>`
+  appends one JSON row to the local outbox and returns it immediately.
+  It never touches the network.
+- `dev agent mail pull [--since <cursor>] [--from <agent>] [--kind <k>]`
+  reads what is already on disk (the outbox plus one inbox file per peer,
+  written by whatever transport delivers them) and returns the rows plus
+  the new cursor. It never sleeps or polls; the caller re-pulls when it
+  wants.
+- `dev agent mail ack <cursor>` records the caller's cursor.
+
+Bodies are capped, and rows mentioning a key, an onion address, an IP, or
+an absolute path outside the repo are refused with a typed error, never a
+crash. Output is one JSON object per line so a small model can consume it
+with no shell parsing.
