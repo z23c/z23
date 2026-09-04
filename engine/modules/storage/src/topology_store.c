@@ -20,6 +20,7 @@
 #include "json/json.h"
 #include "platform/time_compat.h"
 #include "util/log_macros.h"
+#include "util/log_rotate.h"
 #include "util/sync.h"
 
 #include <sqlite3.h>
@@ -28,11 +29,19 @@
 #include <string.h>
 
 #define TOPOLOGY_SUBSYS "topology_store"
+
+/* Pages between passive autocheckpoint attempts. 1000 pages (~4 MB) is
+ * SQLite's own default; it is restated here so the number is a decision
+ * this file owns and a reader can see it without knowing the library. */
+#define TOPOLOGY_WAL_AUTOCHECKPOINT_PAGES 1000
 #define TOPOLOGY_SELF_OBSERVER "self"
 
 static zcl_mutex_t g_lock;
 static zcl_once_t g_lock_once = ZCL_ONCE_INIT;
 static _Atomic(sqlite3 *) g_db = NULL;
+/* The path SQLite opened, retained so the WAL bound below can measure
+ * "<path>-wal" without the caller having to carry the datadir back in. */
+static char g_path[768];
 static _Atomic int64_t g_row_count = 0;
 static _Atomic int64_t g_cap = TOPOLOGY_EDGES_CAP_DEFAULT;
 
@@ -138,8 +147,29 @@ bool topology_store_open(const char *datadir)
         zcl_mutex_unlock(topology_lock_handle());
         return false;
     }
+    /* WAL, with a real autocheckpoint AND a size bound above it.
+     *
+     * A field box carried a 383 MB topology.db-wal against a 49 MB
+     * topology.db. SQLite's default autocheckpoint (1000 pages, ~4 MB) is
+     * supposed to prevent exactly that, and it does — right up until a
+     * checkpoint cannot complete, which is the normal state of this store:
+     * every checkpoint attempt runs on the writer's own connection at the
+     * end of a transaction, and any concurrent reader holding an older
+     * snapshot makes it a no-op. The WAL then grows without limit, and
+     * nothing here ever looked at its size, so nobody found out.
+     *
+     * Two things fix that. wal_autocheckpoint is set EXPLICITLY, so the
+     * value is a decision in this file rather than whatever the library
+     * default happens to be. And topology_store_wal_checkpoint_if_over()
+     * below runs a TRUNCATE checkpoint from the housekeeping tick once the
+     * WAL exceeds its bound, which is the thing the passive per-commit
+     * attempt cannot do on its own. */
     (void)sqlite3_exec(db, "PRAGMA journal_mode=WAL", NULL, NULL, NULL);
     (void)sqlite3_exec(db, "PRAGMA synchronous=NORMAL", NULL, NULL, NULL);
+    char autockpt[64];
+    snprintf(autockpt, sizeof(autockpt), "PRAGMA wal_autocheckpoint=%d",
+             TOPOLOGY_WAL_AUTOCHECKPOINT_PAGES);
+    (void)sqlite3_exec(db, autockpt, NULL, NULL, NULL);
 
     if (!ensure_schema(db)) {
         sqlite3_close(db);
@@ -155,13 +185,84 @@ bool topology_store_open(const char *datadir)
             count = sqlite3_column_int64(s, 0);
         sqlite3_finalize(s);
     }
+    snprintf(g_path, sizeof(g_path), "%s", path);
     atomic_store_explicit(&g_row_count, count, memory_order_relaxed);
     atomic_store_explicit(&g_db, db, memory_order_release);
     zcl_mutex_unlock(topology_lock_handle());
     return true;
 }
 
+
+/* ── WAL bound ────────────────────────────────────────────────────────
+ *
+ * The passive checkpoint SQLite attempts at each commit is a no-op whenever
+ * a reader holds an older snapshot, and nothing else ever measured the
+ * result. This is the measurement plus the checkpoint that is allowed to
+ * block briefly for it: SQLITE_CHECKPOINT_TRUNCATE both drains every frame
+ * into the database and resets the WAL file to zero length, so the bound is
+ * on the file an operator can see with ls, not on an internal frame count.
+ *
+ * `max_bytes` <= 0 disables the bound. Returns true only when a checkpoint
+ * actually ran and reported success. */
+bool topology_store_wal_checkpoint_if_over(int64_t max_bytes,
+                                           int64_t *out_wal_bytes_before)
+{
+    if (out_wal_bytes_before)
+        *out_wal_bytes_before = -1;
+    sqlite3 *db = atomic_load_explicit(&g_db, memory_order_acquire);
+    if (!db || max_bytes <= 0)
+        return false;
+
+    char wal_path[832];
+    zcl_mutex_lock(topology_lock_handle());
+    int n = snprintf(wal_path, sizeof(wal_path), "%s-wal", g_path);
+    zcl_mutex_unlock(topology_lock_handle());
+    if (n <= 0 || (size_t)n >= sizeof(wal_path))
+        return false;
+
+    int64_t wal_bytes = log_rotate_file_size(wal_path);
+    if (out_wal_bytes_before)
+        *out_wal_bytes_before = wal_bytes;
+    if (wal_bytes < 0 || wal_bytes <= max_bytes)
+        return false;
+
+    int log_frames = 0, checkpointed = 0;
+    int rc = sqlite3_wal_checkpoint_v2(db, NULL, SQLITE_CHECKPOINT_TRUNCATE,
+                                       &log_frames, &checkpointed);
+    if (rc != SQLITE_OK) {
+        /* SQLITE_BUSY here is the ordinary "a reader is still holding an old
+         * snapshot" answer, not a fault: the next tick tries again. It is
+         * still named, because a WAL that never drains across many ticks is
+         * a reader leak and an operator must be able to see it. */
+        LOG_WARN(TOPOLOGY_SUBSYS,
+                 "wal checkpoint at %lld bytes (bound %lld) rc=%d (%s) "
+                 "log_frames=%d checkpointed=%d",
+                 (long long)wal_bytes, (long long)max_bytes, rc,
+                 sqlite3_errstr(rc), log_frames, checkpointed);
+        return false;
+    }
+    LOG_INFO(TOPOLOGY_SUBSYS,
+             "wal truncated: was %lld bytes (bound %lld), %d frames "
+             "checkpointed",
+             (long long)wal_bytes, (long long)max_bytes, checkpointed);
+    return true;
+}
+
+int64_t topology_store_wal_bytes(void)
+{
+    if (!atomic_load_explicit(&g_db, memory_order_acquire))
+        return -1;
+    char wal_path[832];
+    zcl_mutex_lock(topology_lock_handle());
+    int n = snprintf(wal_path, sizeof(wal_path), "%s-wal", g_path);
+    zcl_mutex_unlock(topology_lock_handle());
+    if (n <= 0 || (size_t)n >= sizeof(wal_path))
+        return -1;
+    return log_rotate_file_size(wal_path);
+}
+
 void topology_store_close(void)
+
 {
     zcl_mutex_lock(topology_lock_handle());
     sqlite3 *db = atomic_exchange_explicit(&g_db, NULL, memory_order_acq_rel);

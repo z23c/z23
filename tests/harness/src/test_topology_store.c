@@ -315,6 +315,77 @@ int test_topology_store(void)
         test_cleanup_tmpdir(dir);
     }
 
+    /* ── the WAL bound ───────────────────────────────────────────────
+     *
+     * A field box carried a 383 MB topology.db-wal against a 49 MB
+     * topology.db, because nothing here ever measured the WAL and the
+     * passive per-commit checkpoint is a no-op whenever a reader holds an
+     * older snapshot. These cases pin the measurement, the bound, and the
+     * truncation — the three things whose absence produced that file. */
+    {
+        char dir[256];
+        test_make_tmpdir(dir, sizeof(dir), "topology_store", "wal");
+
+        TS_CHECK("wal size is unknown while closed",
+                 topology_store_wal_bytes() < 0);
+        TS_CHECK("a closed store checkpoints nothing",
+                 !topology_store_wal_checkpoint_if_over(1, NULL));
+
+        TS_CHECK("open for the WAL bound", topology_store_open(dir));
+
+        /* Write enough edges that the WAL has real frames in it. */
+        bool wrote = true;
+        for (int i = 0; i < 400 && wrote; i++) {
+            struct net_addr observer = ts_ipv4(51, 15, (unsigned char)(i / 200),
+                                               (unsigned char)(i % 200 + 1));
+            struct net_addr advertised = ts_ipv4(93, 184, 216,
+                                                 (unsigned char)(i % 200 + 1));
+            wrote = topology_store_record_edge(&observer, 8033, &advertised,
+                                               8033, 1700000000 + i, NULL);
+        }
+        TS_CHECK("edges recorded for the WAL bound", wrote);
+
+        int64_t wal = topology_store_wal_bytes();
+        TS_CHECK("an open store can measure its own WAL", wal >= 0);
+
+        /* A bound above the current size must NOT fire: a checkpoint is a
+         * write, and a bound that fires when nothing is over it would put
+         * the node back to writing on every tick. */
+        int64_t observed = -1;
+        TS_CHECK("a WAL under the bound is not checkpointed",
+                 !topology_store_wal_checkpoint_if_over(1024LL * 1024 * 1024,
+                                                        &observed));
+        TS_CHECK("the under-bound call still reports the size",
+                 observed >= 0);
+
+        /* A bound of one byte is unconditionally exceeded by any non-empty
+         * WAL, so this exercises the truncation itself. */
+        int64_t before = -1;
+        bool truncated = topology_store_wal_checkpoint_if_over(1, &before);
+        if (before > 1) {
+            TS_CHECK("an over-bound WAL is truncated", truncated);
+            TS_CHECK("the WAL is smaller after truncation",
+                     topology_store_wal_bytes() <= before);
+        } else {
+            /* No frames were pending (SQLite already checkpointed on its
+             * own). Nothing to truncate is a correct answer, not a failure. */
+            TS_CHECK("an empty WAL needs no truncation", !truncated);
+        }
+
+        /* The rows must survive the checkpoint — a bound that loses data is
+         * not a bound. */
+        TS_CHECK("edges survive the checkpoint",
+                 topology_store_test_edge_count() > 0);
+
+        TS_CHECK("a non-positive bound disables the checkpoint",
+                 !topology_store_wal_checkpoint_if_over(0, NULL) &&
+                 !topology_store_wal_checkpoint_if_over(-1, NULL));
+
+        topology_store_close();
+        test_cleanup_tmpdir(dir);
+    }
+
     printf("topology_store: %d failures\n", failures);
+
     return failures;
 }

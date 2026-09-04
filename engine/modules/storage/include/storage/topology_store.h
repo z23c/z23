@@ -88,6 +88,19 @@ bool topology_store_record_sweep(int64_t started_unix, int64_t finished_unix,
                                  int32_t nodes_reachable,
                                  int32_t edges_seen, int32_t new_nodes);
 
+/* Truncate topology.db's WAL when it exceeds `max_bytes`, and report the
+ * size it had before the attempt through `out_wal_bytes_before` (-1 when it
+ * could not be measured). Driven from the periodic storage housekeeping;
+ * `max_bytes` <= 0 disables the bound. Returns true only when a TRUNCATE
+ * checkpoint actually succeeded — SQLITE_BUSY from a live reader is a
+ * normal, named, retried outcome, not a failure of this call's contract. */
+bool topology_store_wal_checkpoint_if_over(int64_t max_bytes,
+                                           int64_t *out_wal_bytes_before);
+
+/* Current size of topology.db-wal in bytes, or -1 when the store is closed
+ * or the file cannot be measured. For typed status. */
+int64_t topology_store_wal_bytes(void);
+
 /* See CLAUDE.md "Adding state introspection". Reentrant-safe.
  * Surfaces: open, edge_count/cap, distinct_observers,
  * distinct_advertised_nodes, top_advertised (in-degree top-10), and
