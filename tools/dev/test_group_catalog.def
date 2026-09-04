@@ -716,6 +716,7 @@ ZCL_TEST_GROUP(vcs_devloop)
 ZCL_TEST_GROUP(codeindex)
 ZCL_TEST_GROUP(codeindex_scale)
 ZCL_TEST_GROUP(codeindex_projection_integrity)
+ZCL_TEST_GROUP(codeindex_incremental)
 /* M3 first-hour questions: the code.owner / code.cost / code.recent leaves a
  * fresh agent asks to find where to focus in seconds. */
 ZCL_TEST_GROUP(code_firsthour)
