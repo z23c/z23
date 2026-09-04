@@ -11,7 +11,21 @@ Do not copy live heights, process state, or dated benchmark anecdotes here.
 Derive them from the named commands and evidence ledgers. Earlier detailed
 plans and incident narratives remain available through Git history.
 
-## 0. Current mission: one clear agent route
+## Current mission: one canonical landing lifecycle
+
+New fleet features are frozen. The current mission is to converge Z23 onto one
+lifecycle — `NEED -> JOB -> CANDIDATE -> PROOF_SET -> PUBLICATION ->
+REMOTE_RECEIPT` — with every durable object immutable, signed, content-addressed
+and rooted, local databases reduced to rebuildable projections, and exactly one
+rule for publication. The design, the object fields, the removal table for the
+competing landing machines, the acceptance harness, and the ordered lanes are in
+[`CANONICAL_LIFECYCLE.md`](./CANONICAL_LIFECYCLE.md).
+<!-- claim: file-present docs/work/CANONICAL_LIFECYCLE.md -->
+
+Read that document before starting any landing, proof, board, train, or lane
+work. The ordered product program below resumes once its lanes are done.
+
+## 0. Earlier mission: one clear agent route
 
 Before selecting another product or operations project, remove inherited
 context that sends fresh agents toward completed work. Work in this order:
