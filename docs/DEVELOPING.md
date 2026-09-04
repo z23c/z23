@@ -560,6 +560,15 @@ compile, lint, and test accounting. A missing, stale, incomplete, skipped, or
 tampered dimension cannot be admitted. `make pre-push-ci` remains an explicit
 legacy parity oracle; it is not called by the installed push hook.
 
+The impact plan behind that policy can hit a capacity bound: a change whose
+reverse-caller closure or reverse-include set reaches more test groups than the
+plan can enumerate. That is not missing evidence, so it is not a refusal — the
+plan reports `"closure_universal":true`, the bounded dimension is `complete`
+with reason `closure-universal`, and the proof runs the entire test group
+catalog instead of a group list. Only a dimension the index could not answer at
+all — no code index, no include graph, a query error — stays `unavailable` and
+still makes `proof_admissible` false.
+
 Windows installs the same receipt policy as native PE hooks in an
 immutable content-addressed generation. Admission launches no console window;
 its bounded Git children use the parent Git-for-Windows image and a
