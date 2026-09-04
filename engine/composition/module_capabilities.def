@@ -1087,7 +1087,7 @@ ZCL_MODULE_CAPABILITY("tools/command/native_code_change_plan_command.c", CAP_FS_
 ZCL_MODULE_CAPABILITY("tools/command/native_code_context_command.c", CAP_FS_WRITE, "rebuilds the local source index before rendering the bounded-context map")
 ZCL_MODULE_CAPABILITY("tools/command/native_code_coverage_command.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("tools/command/native_code_cost_command.c", CAP_FS_READ|CAP_FS_WRITE, "reads the last suite run's per-group timing artifact; the checked-allocation failure print is this unit's write reach")
-ZCL_MODULE_CAPABILITY("tools/command/native_code_owner_command.c", CAP_FS_READ, "lstat answers exists for paths outside the maintained roots; the index rebuild's write reach is owned by the codeindex module's own rows")
+ZCL_MODULE_CAPABILITY("tools/command/native_code_owner_command.c", CAP_NONE, "the on-disk existence check now goes through platform_file_shape_read(), an internal helper whose own translation unit owns the FS_READ reach")
 ZCL_MODULE_CAPABILITY("tools/command/native_code_recent_command.c", CAP_FS_WRITE, "spawns git log through the bounded capture seam, whose own module owns the process reach; the checked-allocation failure print is this unit's direct reach")
 ZCL_MODULE_CAPABILITY("tools/command/native_code_fetch_command.c", CAP_NONE, "thin adapter: all filesystem reach lives in the codeindex module's own codeindex_fetch.c row, and the monotonic clock reads are static-inline with no object-level symbol reach")
 ZCL_MODULE_CAPABILITY("tools/command/native_code_emitter_command.c", CAP_FS_WRITE, "")

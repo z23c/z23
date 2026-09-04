@@ -1094,6 +1094,8 @@ ZCL_CAPABILITY_SYMBOL("sqlite3_errcode", CAP_HARMLESS, "")
 ZCL_CAPABILITY_SYMBOL("sqlite3_errmsg", CAP_HARMLESS, "")
 ZCL_CAPABILITY_SYMBOL("sqlite3_errstr", CAP_HARMLESS, "")
 ZCL_CAPABILITY_SYMBOL("sqlite3_extended_errcode", CAP_HARMLESS, "")
+ZCL_CAPABILITY_SYMBOL("sqlite3_system_errno", CAP_HARMLESS,
+    "Returns the OS errno of the last I/O error on a file handle; does not itself perform I/O.")
 ZCL_CAPABILITY_SYMBOL("sqlite3_finalize", CAP_HARMLESS, "")
 ZCL_CAPABILITY_SYMBOL("sqlite3_free", CAP_HARMLESS, "")
 ZCL_CAPABILITY_SYMBOL("sqlite3_get_autocommit", CAP_HARMLESS, "")
