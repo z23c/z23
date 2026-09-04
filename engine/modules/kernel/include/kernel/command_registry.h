@@ -62,6 +62,17 @@ extern "C" {
  * previously-accepted document would start being refused. Never compare an
  * input length against this directly — ask the budget function. */
 #define ZCL_COMMAND_MAX_INPUT 16384U
+/* Per-key input value bounds, shared by command_registry.c's validator,
+ * command_registry_input_budget.c's read-frame sizing, and
+ * command_registry_devagent_input.c's dev.agent-leaf rules — one constant
+ * per bound so no two of those translation units can drift apart.
+ * ZCL_COMMAND_INPUT_STR_MAX is the DEFAULT string bound for any key the
+ * chain does not name (see zcl_command_registry_input_str_max()); `files`
+ * (and `requested`, which shares its shape) is an ARRAY key, so its bound
+ * is the two numbers below instead of one. */
+#define ZCL_COMMAND_INPUT_STR_MAX 4096u
+#define ZCL_COMMAND_INPUT_FILES_MAX_ITEMS 256u
+#define ZCL_COMMAND_INPUT_FILES_PATH_MAX 1024u
 
 enum zcl_command_layer {
     ZCL_COMMAND_LAYER_ROOT = 0,
