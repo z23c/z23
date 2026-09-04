@@ -235,12 +235,32 @@ static int64_t profile_cumulative_field(const char *name)
     return value;
 }
 
+/* Nine subtests each open/close a real progress_store (sqlite WAL) over
+ * this fixture directory. On a disk shared with concurrent lanes, the
+ * durable writes that come with a WAL checkpoint can queue behind other
+ * processes' journal commits; nothing under test cares where the fixture
+ * lives, only that it's a real directory with real files. Prefer tmpfs
+ * (/dev/shm) where it's writable, falling back to the normal ./test-tmp
+ * path (test_fmt_tmpdir) otherwise (e.g. macOS, which has no /dev/shm). */
+static void bp_fmt_tmpdir(char *dir_out, size_t dir_out_size,
+                          const char *tag)
+{
+    if (access("/dev/shm", W_OK) == 0) {
+        int wrote = snprintf(dir_out, dir_out_size,
+                             "/dev/shm/body_persist_%d_%s",
+                             (int)getpid(), tag);
+        if (wrote > 0 && (size_t)wrote < dir_out_size)
+            return;
+    }
+    test_fmt_tmpdir(dir_out, dir_out_size, "body_persist", tag);
+}
+
 static int bp_setup(const char *tag, int n, int upstream_fail_height,
                     int missing_row_height, char *dir_out,
                     size_t dir_out_size, struct main_state *ms,
                     struct synth_chain_bp *sc)
 {
-    test_fmt_tmpdir(dir_out, dir_out_size, "body_persist", tag);
+    bp_fmt_tmpdir(dir_out, dir_out_size, tag);
     mkdir_p_bp("./test-tmp");
     mkdir_p_bp(dir_out);
     if (!progress_store_open(dir_out)) return 1;
