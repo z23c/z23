@@ -132,6 +132,25 @@ git -C "$ROOT" grep -q 'rm -f .*\$(NODE_C23_PACKAGE_VERIFY_LINK_RSP)' -- Makefil
 git -C "$ROOT" grep -q '\$(BUILD_EPOCH_SESSION_TOOL) verify "\$(NODE_C23_SESSION)" "\$(NODE_C23_LEASE)"' -- \
     Makefile ||
     fail 'release object-graph links do not verify their build epoch before publication'
+# The restart plan is the only thing in an ordinary `make z23-dev` that builds
+# the fast-test object tree — TEST_PARALLEL_FAST_LINK_RSP and
+# TEST_RESTART_BASE_RELOC are made from all of those objects — and that goal
+# links no test binary, so nothing else in it reaches the aggregate verify.
+# Publishing an object into a shared epoch writes `<epoch>/.unverified` first
+# and only that verify clears it, so a plan that skips it leaves the marker
+# behind on a build that finished perfectly well. The next make invocation
+# reads the marker as a dead writer's leftovers and quarantines and deletes
+# the entire epoch directory. MEASURED on this host with a warm compile cache:
+# a no-op `make -j8 z23-dev` cost 27 s and recompiled 3 263 objects with the
+# marker present, and 13 s with zero recompiles without it. Assert the verify
+# is inside this recipe, not merely somewhere in the Makefile.
+awk '/^\$\(DEV_RESTART_PLAN\):/ { inrule = 1; next }
+     inrule && /^[^\t]/ { inrule = 0 }
+     inrule && /BUILD_EPOCH_SESSION_TOOL\) verify "\$\(TEST_FAST_SESSION\)"/ {
+         found = 1
+     }
+     END { exit found ? 0 : 1 }' "$ROOT/Makefile" ||
+    fail 'the dev restart plan builds fast-test objects without verifying their epoch, so every later make deletes and rebuilds that whole object tree'
 if git -C "$ROOT" grep -Fq '$(BUILD_IDENTITY_STAMP) tools/package_verify.c $(ALL_SRCS)' -- \
         Makefile; then
     fail 'release package verifier recompiles the complete source tree'

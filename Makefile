@@ -1,6 +1,25 @@
 # ZClassic C23 Full Node
 # Copyright 2026 Rhett Creighton - Apache License 2.0
 
+# ── No built-in rules ─────────────────────────────────────────────────────
+# GNU Make ships ~90 suffix rules for languages this repository does not use
+# (RCS, SCCS, Modula-2, Ratfor, Fortran, Pascal). Every prerequisite Make
+# cannot find on disk is run through all of them before it gives up, and this
+# build asks about tens of thousands of files that legitimately do not exist:
+# one `.d` depfile per object per profile, across the build-only, dev,
+# fast-test, strict-test and coverage object trees.
+#
+# MEASURED here with `make -d` on a no-op `make -j8 z23-dev`: a single missing
+# depfile drew ~20 "Trying implicit prerequisite ...,v / SCCS/s. / RCS/" probes.
+# Cancelling the built-ins took Make's own user time from 16.6 s to 13.1 s and
+# the no-op wall clock from 27.0 s to 21.0 s. Nothing in this tree relies on a
+# built-in rule; every object, binary and generated header has an explicit rule
+# below. `.SUFFIXES:` is what actually cancels the suffix rules for the current
+# parse; MAKEFLAGS carries -r into recursive invocations so a sub-make gets the
+# same saving.
+.SUFFIXES:
+MAKEFLAGS += -r
+
 # Reproduction is an execution phase, never an acquisition phase.  Force the
 # vendor builder into its checksum-verified offline mode and disable host
 # compiler caches before Make selects CC or evaluates the early vendor-input
@@ -4281,6 +4300,23 @@ $(DEV_PACKAGE_VERIFY_LINK_RSP): $(DEV_PACKAGE_VERIFY_OBJ) \
 		$(DEV_PACKAGE_VERIFY_NODE_OBJS)
 	@$(if $(ZCL_MAKE_NO_EXEC),,$(file >$@,$(DEV_PACKAGE_VERIFY_OBJ) $(DEV_PACKAGE_VERIFY_NODE_OBJS))) test -s "$@"
 
+# This plan is the ONLY consumer that pulls the fast-test object tree into an
+# ordinary `make z23-dev`: TEST_PARALLEL_FAST_LINK_RSP and
+# TEST_RESTART_BASE_RELOC are built from all 3 263 of those objects. Writing
+# an object into a shared epoch publishes `<epoch>/.unverified` first
+# (tools/dev/compile-epoch-object.sh), and ONLY the aggregate verify below
+# clears it. `make z23-dev` used to write those objects and never verify them,
+# so the marker survived the build; the NEXT make invocation read it as a dead
+# writer's leftovers and took the recovery path, which quarantines and
+# `rm -rf`s the whole epoch directory (tools/dev/build-epoch-session.sh).
+#
+# MEASURED on this host, warm zcc cache, `make -j8 z23-dev`: every invocation
+# after an edit deleted and recompiled all 3 263 fast-test objects. A no-op
+# rebuild cost 27 s with the stale marker present and 13 s with it absent, and
+# the second number came with ZERO compile invocations instead of 3 263. The
+# marker is a real safety mechanism for a writer that DIED; it must not be
+# left behind by one that finished. So the invocation that published it
+# verifies it, exactly as the test_parallel_fast link does.
 $(DEV_RESTART_PLAN): $(DEV_OBJ_COMPLETE) $(DEV_LINK_RSP) \
 		$(DEV_RESTART_BASE_RELOC) $(TEST_PARALLEL_FAST_LINK_RSP) \
 		$(TEST_RESTART_BASE_RELOC) Makefile FORCE
@@ -4305,6 +4341,11 @@ $(DEV_RESTART_PLAN): $(DEV_OBJ_COMPLETE) $(DEV_LINK_RSP) \
 	  printf 'TEST_LINK_RSP=%s\n' '$(TEST_PARALLEL_FAST_LINK_RSP)'; \
 	  printf 'TEST_BASE_RELOC=%s\n' '$(TEST_RESTART_BASE_RELOC)'; \
 	} >"$$tmp"; \
+	$(BUILD_EPOCH_SESSION_TOOL) verify "$(TEST_FAST_SESSION)" "$(TEST_FAST_LEASE)" \
+	  "$(TEST_FAST_OBJ_ROOT)" "$(BIN_DIR)/test-fast" "$(BUILD_EPOCH_KEEP)" \
+	  "$(BUILD_SOURCE_ID)" "$(BUILD_CLEAN)" "$(BUILD_MUTATION)" "$(BUILD_COMPILER_ID)" \
+	  "$(TEST_FAST_COMPILE_EPOCH)" "$(TEST_FAST_PROFILE)" "$(TEST_FAST_EPOCH_COMPILE_FLAGS)" \
+	  "$(TEST_FAST_EPOCH_LINK_FLAGS)" "$(CC)" "$(CXX)" "$$PPID" >/dev/null; \
 	mv -f -- "$$tmp" "$@"; \
 	trap - EXIT HUP INT TERM
 
