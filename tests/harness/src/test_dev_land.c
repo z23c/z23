@@ -1105,6 +1105,94 @@ int test_dev_land(void)
         PASS();
     }
 
+    TEST("land: a worktree that looks like a git option is refused at "
+        "parse, never reaches git") {
+        struct dlx_rig rig;
+        struct dlx_call c;
+        char before[64], mid[64], after[64], landdir[1200], qpath[1400];
+        char line[8192], second[64];
+        FILE *f;
+        dlx_isolate("wtinj");
+        ASSERT(dlx_rig_make(&rig, "wtinj_rig"));
+        ASSERT(dlx_origin_main(&rig, before));
+        setenv("ZCL_LAND_PROOF_STUB", "running", 1);
+        setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
+        /* Land a first row all the way through: this creates the landing
+         * worktree, so the crafted row below hits the SAME "fetch the tip
+         * from row->worktree" fallback a normal cross-worktree row would
+         * (dl_wt_ensure short-circuits on an already-ready d->wt without
+         * ever touching row->worktree again), rather than failing earlier
+         * for an unrelated reason. */
+        dlx_submit(&c, &rig, rig.tip);
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        dlx_end(&c);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        ASSERT(strcmp(dlx_str(&c, "state"), "started") == 0);
+        dlx_end(&c);
+        setenv("ZCL_LAND_PROOF_STUB", "pass", 1);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        ASSERT(strcmp(dlx_str(&c, "state"), "landed") == 0);
+        dlx_end(&c);
+        ASSERT(dlx_origin_main(&rig, mid));
+        ASSERT(strcmp(mid, before) != 0);
+        /* A hand-written row — the shape a foreign write to queue.jsonl
+         * can take, never anything dl_submit itself produces — names a git
+         * OPTION instead of a path, and a tip nothing here has ever seen.
+         * Before the fix this string reached dl_already_landed()'s and
+         * dl_rebase()'s fetch calls as a bare positional argument. */
+        dlx_landdir(landdir, sizeof(landdir));
+        (void)snprintf(qpath, sizeof(qpath), "%s/queue.jsonl", landdir);
+        (void)snprintf(
+            line, sizeof(line),
+            "{\"seq\":99,\"ts\":\"2026-01-01T00:00:00Z\","
+            "\"tip\":\"deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\","
+            "\"worktree\":\"--upload-pack=/bin/false\",\"note\":\"\","
+            "\"state\":\"queued\",\"phase\":\"\",\"attempt\":1,"
+            "\"started\":0,\"base\":\"\",\"local\":\"\","
+            "\"tip_pushed\":\"\",\"dimension\":\"\",\"log_path\":\"\","
+            "\"detail\":\"\"}\n");
+        f = fopen(qpath, "a");
+        ASSERT(f != NULL);
+        if (f) {
+            size_t len = strlen(line);
+            ASSERT(fwrite(line, 1, len, f) == len);
+            ASSERT(fclose(f) == 0);
+        }
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        ASSERT(strcmp(dlx_str(&c, "state"), "empty") == 0);
+        dlx_end(&c);
+        /* A normal, valid absolute worktree still lands: the parser
+         * refuses only the shape it must, not every row that follows it. */
+        ASSERT(dlx_commit(rig.clone, "second.txt", "two\n", second));
+        setenv("ZCL_LAND_PROOF_STUB", "running", 1);
+        dlx_submit(&c, &rig, second);
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        dlx_end(&c);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        ASSERT(strcmp(dlx_str(&c, "state"), "started") == 0);
+        dlx_end(&c);
+        setenv("ZCL_LAND_PROOF_STUB", "pass", 1);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        ASSERT(strcmp(dlx_str(&c, "state"), "landed") == 0);
+        dlx_end(&c);
+        ASSERT(dlx_origin_main(&rig, after));
+        ASSERT(strcmp(after, mid) != 0);
+        dlx_restore();
+        PASS();
+    }
+
 #endif /* !defined(_WIN32) */
 
 _test_next:;

@@ -424,6 +424,48 @@ static bool dl_append_text(const char *path, const char *text)
 
 /* ── rows ──────────────────────────────────────────────────────────────── */
 
+/* dl_rebase() and dl_already_landed() hand row->worktree to `git fetch` as
+ * the repository argument, a POSITIONAL slot git itself parses for leading
+ * "-" options ("--upload-pack=..." reaches arbitrary exec). dl_load_rows's
+ * own doc comment says the queue "survives a foreign write" — queue.jsonl
+ * is exactly the kind of file a crafted row can appear in without ever
+ * going through dl_submit's own checkout-root resolution — so the row
+ * parser, not the caller, is the trust boundary. Refuse anything that
+ * isn't a real, existing directory named by an absolute path with no "-"
+ * segment, sitting somewhere a landing worktree could legitimately live:
+ * under the user's home, or beside the checkout doing the landing. */
+static bool dl_worktree_ok(const char *wt)
+{
+    struct stat st;
+    const char *home;
+    char checkout[4096], *slash;
+    if (!wt || !wt[0])
+        return true; /* absent: dl_rebase falls back to origin only */
+    if (wt[0] != '/')
+        return false;
+    for (const char *p = wt; *p; p++) {
+        if (*p == '/' && p[1] == '-')
+            return false;
+    }
+    if (stat(wt, &st) != 0 || !S_ISDIR(st.st_mode))
+        return false;
+    home = getenv("HOME");
+    if (home && home[0]) {
+        size_t hlen = strlen(home);
+        if (strncmp(wt, home, hlen) == 0 &&
+            (wt[hlen] == '/' || wt[hlen] == '\0'))
+            return true;
+    }
+    if (zcl_devagent_checkout_root(".", checkout, sizeof(checkout)) &&
+        (slash = strrchr(checkout, '/')) != NULL && slash != checkout) {
+        size_t plen = (size_t)(slash - checkout);
+        if (strncmp(wt, checkout, plen) == 0 &&
+            (wt[plen] == '/' || wt[plen] == '\0'))
+            return true;
+    }
+    return false;
+}
+
 /* state:   queued | inflight | landed | failed | conflict | cancelled
  * phase:   "" | rebase | prebuild | prove | push  (meaningful when inflight) */
 struct dl_row {
@@ -458,6 +500,8 @@ static bool dl_parse_row(const char *line, struct dl_row *r)
         return false;
     (void)dl_line_str(line, "ts", r->ts, sizeof(r->ts));
     (void)dl_line_str(line, "worktree", r->worktree, sizeof(r->worktree));
+    if (!dl_worktree_ok(r->worktree))
+        return false;
     (void)dl_line_str(line, "note", r->note, sizeof(r->note));
     (void)dl_line_str(line, "phase", r->phase, sizeof(r->phase));
     if (!dl_line_int(line, "attempt", &r->attempt) || r->attempt < 1)
@@ -1725,8 +1769,12 @@ static int dl_rebase(const struct dl_dirs *d, struct dl_row *row,
     (void)dl_git(d->wt, fetch_args, buf, sizeof(buf), DL_GIT_TIMEOUT_MS);
     if (!dl_rev_parse(d->wt, row->tip, row->local)) {
         /* The tip lives in another checkout: fetch that ONE object rather
-         * than every ref the other checkout happens to hold. */
-        const char *pull_args[] = { "fetch", "--quiet", "--no-tags",
+         * than every ref the other checkout happens to hold. dl_parse_row
+         * already refused a worktree it could not validate, but "--" still
+         * goes in front of it: a positional git argument is git's own to
+         * parse, and nothing downstream of this call should have to keep
+         * proving that guarantee held all the way here. */
+        const char *pull_args[] = { "fetch", "--quiet", "--no-tags", "--",
                                     row->worktree, row->tip, NULL };
         (void)dl_git(d->wt, pull_args, buf, sizeof(buf), DL_GIT_TIMEOUT_MS);
         if (!dl_rev_parse(d->wt, row->tip, row->local)) {
@@ -1812,8 +1860,11 @@ static bool dl_already_landed(const struct dl_dirs *d, struct dl_row *row)
         if (!row->worktree[0])
             return false;
         {
+            /* Same "--" before the row-supplied path as dl_rebase(): see
+             * that call site's comment. */
             const char *pull_args[] = { "fetch", "--quiet", "--no-tags",
-                                        row->worktree, row->tip, NULL };
+                                        "--", row->worktree, row->tip,
+                                        NULL };
             (void)dl_git(d->wt, pull_args, buf, sizeof(buf),
                          DL_GIT_TIMEOUT_MS);
         }
