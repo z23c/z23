@@ -638,7 +638,157 @@ void projection_store_close(void)
     pthread_mutex_unlock(&g_lock);
 }
 
+
+/* ── size bound ───────────────────────────────────────────────────────
+ *
+ * progress.kv reached 2,874 MB on a field box while a sibling box at the
+ * same chain height held 1 MB, and nothing in this file ever looked at
+ * either number. The store had no compaction of any kind: no auto_vacuum,
+ * no incremental_vacuum, no VACUUM, and no measurement. The Class C
+ * projections it holds (address_index, txindex and their state rows) are
+ * rewritten and deleted from constantly — every rollback, every reorg, every
+ * re-derivation — and in an ordinary SQLite database a deleted page is
+ * returned to the FREELIST inside the file, never to the filesystem. So the
+ * file only ever tracked the high-water mark of everything the node had ever
+ * indexed, and on a spinning disk that is 2.9 GB of seek surface under every
+ * projection read for the rest of the node's life.
+ *
+ * The measurement is exact and costs two pragmas: page_count is the whole
+ * file in pages, freelist_count is the part of it that holds nothing.
+ *
+ * The bound is a floor AND a ratio, and both are needed. A ratio alone would
+ * compact a 4 MB store forever, because a small store is nearly always some
+ * multiple of its live set. A floor alone would compact a store that is
+ * legitimately large and dense, paying a full rewrite for nothing. Together
+ * they say the only thing worth acting on: this file is big, and most of it
+ * is empty.
+ */
+
+/* One pragma that returns a single integer. -1 when it cannot be read, so a
+ * failed measurement can never be mistaken for "zero free pages". */
+static int64_t projection_pragma_i64(sqlite3 *db, const char *pragma)
+{
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(db, pragma, -1, &stmt, NULL) != SQLITE_OK)
+        return -1;
+    int64_t value = -1;
+    if (sqlite3_step(stmt) == SQLITE_ROW)  // raw-sql-ok:projection-store-primitive
+        value = sqlite3_column_int64(stmt, 0);
+    sqlite3_finalize(stmt);
+    return value;
+}
+
+bool projection_store_usage(struct projection_store_usage *out)
+{
+    if (!out)
+        return false;
+    memset(out, 0, sizeof(*out));
+    out->file_bytes = -1;
+    out->live_bytes = -1;
+    out->free_bytes = -1;
+
+    sqlite3 *db = projection_store_db();
+    if (!db)
+        return false;
+
+    projection_store_tx_lock();
+    int64_t page_size = projection_pragma_i64(db, "PRAGMA page_size");
+    int64_t page_count = projection_pragma_i64(db, "PRAGMA page_count");
+    int64_t freelist = projection_pragma_i64(db, "PRAGMA freelist_count");
+    projection_store_tx_unlock();
+
+    if (page_size <= 0 || page_count < 0 || freelist < 0)
+        return false;
+    if (freelist > page_count)
+        freelist = page_count;  /* defensive: never report negative live bytes */
+
+    out->page_size = page_size;
+    out->page_count = page_count;
+    out->free_pages = freelist;
+    out->file_bytes = page_count * page_size;
+    out->free_bytes = freelist * page_size;
+    out->live_bytes = out->file_bytes - out->free_bytes;
+    return true;
+}
+
+bool projection_store_over_bound(const struct projection_store_usage *usage,
+                                 int64_t floor_bytes, int ratio_pct)
+{
+    if (!usage || usage->file_bytes < 0 || usage->live_bytes < 0)
+        return false;
+    if (floor_bytes <= 0 || ratio_pct <= 100)
+        return false;
+    if (usage->file_bytes <= floor_bytes)
+        return false;
+    /* A store whose live set is genuinely zero (a fresh datadir with no
+     * projections enabled) is over ANY ratio, so the floor above is what
+     * keeps this from firing on a 4 MB file. Above the floor, an empty live
+     * set is exactly the case worth compacting. */
+    if (usage->live_bytes == 0)
+        return true;
+    /* Integer arithmetic, in bytes, with the ratio applied to the live side:
+     * file * 100 > live * ratio. Both sides fit comfortably in int64 for any
+     * file a filesystem can hold. */
+    return usage->file_bytes * 100 > usage->live_bytes * (int64_t)ratio_pct;
+}
+
+bool projection_store_compact_if_needed(int64_t floor_bytes, int ratio_pct,
+                                        struct projection_store_usage *before,
+                                        struct projection_store_usage *after)
+{
+    struct projection_store_usage usage;
+    if (!projection_store_usage(&usage))
+        return false;
+    if (before)
+        *before = usage;
+    if (after)
+        *after = usage;
+    if (!projection_store_over_bound(&usage, floor_bytes, ratio_pct))
+        return false;
+
+    sqlite3 *db = projection_store_db();
+    if (!db)
+        return false;
+
+    int64_t started = platform_time_monotonic_ms();
+    projection_store_tx_lock();
+    char *err = NULL;
+    /* VACUUM, not incremental_vacuum: this store was created without
+     * auto_vacuum, so it has no pointer-map pages and incremental_vacuum is
+     * a documented no-op on it. VACUUM rebuilds the file, which is why it
+     * only ever runs behind the floor+ratio gate above and behind the
+     * storage-pacing maintenance token — never on every tick, and never
+     * beside another maintenance writer on a spinning disk. */
+    int rc = sqlite3_exec(db, "VACUUM", NULL, NULL, &err);  // raw-sql-ok:projection-store-primitive
+    projection_store_tx_unlock();
+
+    if (rc != SQLITE_OK) {
+        fprintf(stderr,  // obs-ok:projection-store-lifecycle
+                "[projection_store] compaction failed rc=%d (%s)\n", rc,
+                err ? err : sqlite3_errstr(rc));
+        if (err)
+            sqlite3_free(err);
+        return false;
+    }
+    if (err)
+        sqlite3_free(err);
+
+    struct projection_store_usage post;
+    if (projection_store_usage(&post) && after)
+        *after = post;
+
+    fprintf(stderr,  // obs-ok:projection-store-lifecycle
+            "[projection_store] compacted %s: %lld -> %lld bytes "
+            "(live %lld, bound %lld/%d%%) in %lld ms\n",
+            g_display_path, (long long)usage.file_bytes,
+            (long long)(after ? after->file_bytes : post.file_bytes),
+            (long long)usage.live_bytes, (long long)floor_bytes, ratio_pct,
+            (long long)(platform_time_monotonic_ms() - started));
+    return true;
+}
+
 bool projection_store_dump_state_json(struct json_value *out, const char *key)
+
 {
     (void)key;
     if (!out) return false;

@@ -92,6 +92,47 @@ void projection_store_close(void);
  * json_set_object'd by the caller; this also calls json_set_object(out)
  * defensively. `key` is unused. */
 struct json_value;
+/* ── size bound ───────────────────────────────────────────────────────
+ *
+ * What progress.kv actually occupies, measured from the file itself rather
+ * than from a row count. `file_bytes` is what `ls` shows; `free_bytes` is
+ * the part of it that holds nothing because SQLite returned those pages to
+ * the freelist instead of to the filesystem; `live_bytes` is the difference.
+ * Every field is -1 when the store is closed or the measurement failed, so a
+ * failed measurement can never read as "nothing is free". */
+struct projection_store_usage {
+    int64_t page_size;
+    int64_t page_count;
+    int64_t free_pages;
+    int64_t file_bytes;
+    int64_t live_bytes;
+    int64_t free_bytes;
+};
+
+bool projection_store_usage(struct projection_store_usage *out);
+
+/* PURE predicate: is this store both bigger than `floor_bytes` AND more than
+ * `ratio_pct` percent of its own live set? Both conditions are required — see
+ * the implementation comment for why either alone is the wrong bound. A
+ * ratio at or below 100, a non-positive floor, and an unmeasured usage all
+ * answer false. Exposed so the bound can be tested without a disk. */
+bool projection_store_over_bound(const struct projection_store_usage *usage,
+                                 int64_t floor_bytes, int ratio_pct);
+
+/* Compact progress.kv when it is over that bound, and report the usage
+ * before and (on success) after. Returns true only when a compaction
+ * actually ran and succeeded.
+ *
+ * COSTS A FULL REWRITE when it fires. The caller owns the decision to run it
+ * at all: the periodic housekeeping runs it behind the storage-pacing
+ * maintenance token so it never overlaps another maintenance writer, and
+ * boot runs it once before the node starts serving. `before` and `after` may
+ * be NULL. */
+bool projection_store_compact_if_needed(int64_t floor_bytes, int ratio_pct,
+                                        struct projection_store_usage *before,
+                                        struct projection_store_usage *after);
+
 bool projection_store_dump_state_json(struct json_value *out, const char *key);
+
 
 #endif /* ZCL_STORAGE_PROJECTION_STORE_H */

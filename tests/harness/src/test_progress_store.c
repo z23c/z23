@@ -911,6 +911,121 @@ int test_progress_store(void)
         test_cleanup_tmpdir(dir);
     }
 
+    /* ── progress.kv stays inside its size bound under churn ─────────
+     *
+     * A field box carried a 2,874 MB progress.kv while a sibling at the same
+     * chain height carried 1 MB. Nothing here compacted, so the file tracked
+     * the high-water mark of everything the node had ever indexed and never
+     * gave a page back. This case reproduces the mechanism at small scale:
+     * fill a projection table, delete almost all of it, and prove the FILE
+     * shrinks rather than just the row count. */
+    {
+        char dir[256];
+        test_make_tmpdir(dir, sizeof(dir), "progress_store", "compact");
+        PS_CHECK("compact: kernel open", progress_store_open(dir));
+        PS_CHECK("compact: projection open", projection_store_open(dir));
+
+        sqlite3 *pdb = projection_store_db();
+        PS_CHECK("compact: projection handle live", pdb != NULL);
+
+        struct projection_store_usage empty;
+        PS_CHECK("compact: a fresh store measures itself",
+                 projection_store_usage(&empty) && empty.file_bytes > 0 &&
+                 empty.live_bytes >= 0);
+
+        if (pdb) {
+            projection_store_tx_lock();
+            (void)sqlite3_exec(pdb,
+                "CREATE TABLE IF NOT EXISTS compact_churn("
+                "k INTEGER PRIMARY KEY, v BLOB)",
+                NULL, NULL, NULL);  // raw-sql-ok:test-fixture-seeding
+            (void)sqlite3_exec(pdb, "BEGIN", NULL, NULL, NULL);  // raw-sql-ok:test-fixture-seeding
+            sqlite3_stmt *ins = NULL;
+            if (sqlite3_prepare_v2(pdb,
+                    "INSERT INTO compact_churn(k, v) VALUES(?, ?)", -1, &ins,
+                    NULL) == SQLITE_OK) {
+                static uint8_t payload[2048];
+                memset(payload, 0x5a, sizeof(payload));
+                for (int i = 0; i < 4000; i++) {
+                    sqlite3_reset(ins);
+                    sqlite3_bind_int(ins, 1, i);
+                    sqlite3_bind_blob(ins, 2, payload, sizeof(payload),
+                                      SQLITE_STATIC);
+                    (void)sqlite3_step(ins);  // raw-sql-ok:test-fixture-seeding
+                }
+                sqlite3_finalize(ins);
+            }
+            (void)sqlite3_exec(pdb, "COMMIT", NULL, NULL, NULL);  // raw-sql-ok:test-fixture-seeding
+            projection_store_tx_unlock();
+        }
+
+        struct projection_store_usage grown;
+        PS_CHECK("compact: the store grew", projection_store_usage(&grown) &&
+                 grown.file_bytes > 4 * 1024 * 1024);
+
+        /* Delete nearly everything. In plain SQLite those pages go to the
+         * FREELIST inside the file — the file does not shrink by itself,
+         * which is precisely the defect. */
+        if (pdb) {
+            projection_store_tx_lock();
+            (void)sqlite3_exec(pdb, "DELETE FROM compact_churn WHERE k >= 40",
+                               NULL, NULL, NULL);  // raw-sql-ok:test-fixture-seeding
+            projection_store_tx_unlock();
+        }
+
+        struct projection_store_usage wasted;
+        bool measured_waste = projection_store_usage(&wasted);
+        PS_CHECK("compact: deleting rows does NOT shrink the file",
+                 measured_waste && wasted.file_bytes >= grown.file_bytes * 9 / 10);
+        PS_CHECK("compact: the freed space is visible as free bytes",
+                 measured_waste && wasted.free_bytes > wasted.live_bytes);
+
+        /* A bound the store is inside must not trigger a rewrite. */
+        PS_CHECK("compact: an in-bound store is left alone",
+                 !projection_store_compact_if_needed(1024LL * 1024 * 1024, 250,
+                                                     NULL, NULL));
+
+        /* The real bound: 1 MB floor, 250% ratio. The store is now several
+         * megabytes of file over a few tens of kilobytes of live data. */
+        struct projection_store_usage before, after;
+        bool compacted = projection_store_compact_if_needed(
+            1024 * 1024, 250, &before, &after);
+        PS_CHECK("compact: an over-bound store is compacted", compacted);
+        PS_CHECK("compact: the FILE shrank, not just the row count",
+                 compacted && after.file_bytes < before.file_bytes);
+        PS_CHECK("compact: the file is now within the bound",
+                 compacted &&
+                 !projection_store_over_bound(&after, 1024 * 1024, 250));
+        PS_CHECK("compact: almost no free space is left",
+                 compacted && after.free_bytes <= after.file_bytes / 10);
+
+        /* The surviving rows must still be there — a bound that loses data
+         * is not a bound. */
+        if (pdb) {
+            projection_store_tx_lock();
+            sqlite3_stmt *q = NULL;
+            int64_t rows = -1;
+            if (sqlite3_prepare_v2(pdb, "SELECT COUNT(*) FROM compact_churn",
+                                   -1, &q, NULL) == SQLITE_OK &&
+                sqlite3_step(q) == SQLITE_ROW)  // raw-sql-ok:test-fixture-seeding
+                rows = sqlite3_column_int64(q, 0);
+            sqlite3_finalize(q);
+            projection_store_tx_unlock();
+            PS_CHECK("compact: the surviving rows survived", rows == 40);
+        }
+
+        /* Running it again is a no-op: the store is already dense, so the
+         * bound must not put the node into a rewrite loop. */
+        PS_CHECK("compact: a compacted store is not compacted again",
+                 !projection_store_compact_if_needed(1024 * 1024, 250, NULL,
+                                                     NULL));
+
+        projection_store_close();
+        progress_store_close();
+        test_cleanup_tmpdir(dir);
+    }
+
     printf("progress_store: %d failures\n", failures);
+
     return failures;
 }
