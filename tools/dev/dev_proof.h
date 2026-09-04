@@ -43,6 +43,30 @@ struct zcl_dev_proof_child_action_inputs_v1 {
     uint32_t selected;
 };
 
+/* One captured base..local changed set. Heap-resident: the row ceiling is a
+ * landing-batch ceiling (thousands of paths), which must never sit in a stack
+ * frame. `files` holds `count` pointers into `bytes`; release both together. */
+struct zcl_dev_proof_changed_set {
+    char *bytes;
+    const char **files;
+    size_t count;
+};
+
+/* Capture the exact base..local changed set the proof worker plans against.
+ *
+ * The list is written to `scratch_path` by git and read whole, so no fixed
+ * capture buffer can silently shorten it; over-ceiling and unreadable captures
+ * refuse with a typed reason naming the observed count. `persist_path` (may be
+ * NULL) receives the newline-separated record. On success the caller owns
+ * `*out` until zcl_dev_proof_changed_set_release(). */
+bool zcl_dev_proof_changed_set_capture(const char *repo_root, const char *base,
+                                       const char *local,
+                                       const char *scratch_path,
+                                       const char *persist_path,
+                                       struct zcl_dev_proof_changed_set *out,
+                                       char *why, size_t why_len);
+void zcl_dev_proof_changed_set_release(struct zcl_dev_proof_changed_set *set);
+
 const char *zcl_dev_proof_state_name(enum zcl_dev_proof_state state);
 /* Admit a completed cycle only when its schema, canonical action inputs, and
  * one independently derived fixed-width root per selected proof dimension

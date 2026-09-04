@@ -256,7 +256,7 @@ struct watch_context {
     struct watched_dir *dirs;
     size_t dir_count;
     size_t dir_capacity;
-    char changed[ZCL_DEVLOOP_MAX_FILES][ZCL_DEVLOOP_PATH_MAX];
+    char changed[ZCL_DEVLOOP_WATCH_MAX_FILES][ZCL_DEVLOOP_PATH_MAX];
     size_t changed_count;
     struct zcl_devloop_restart_source_set restart_sources;
     bool force_full_source_rescan;
@@ -271,7 +271,7 @@ struct watch_context {
     uint64_t edit_epoch_sequence;
     bool snapshot_raced;
     bool snapshot_exact;
-    struct watch_blob_state overlay[ZCL_DEVLOOP_MAX_FILES];
+    struct watch_blob_state overlay[ZCL_DEVLOOP_WATCH_MAX_FILES];
     size_t overlay_count;
     struct watch_pending_event pending[4];
     size_t pending_count;
@@ -748,7 +748,7 @@ static bool watch_build_edit_epoch(struct watch_context *ctx,
         if (!watch_overlay_find(ctx, files[i]))
             new_overlay_slots++;
     }
-    if (new_overlay_slots > ZCL_DEVLOOP_MAX_FILES - ctx->overlay_count)
+    if (new_overlay_slots > ZCL_DEVLOOP_WATCH_MAX_FILES - ctx->overlay_count)
         return false;
 
     struct sha3_256_ctx sha;
@@ -1185,7 +1185,7 @@ static void add_changed(struct watch_context *ctx, const char *path)
         if (strcmp(ctx->changed[i], path) == 0)
             return;
     }
-    if (ctx->changed_count >= ZCL_DEVLOOP_MAX_FILES) {
+    if (ctx->changed_count >= ZCL_DEVLOOP_WATCH_MAX_FILES) {
         /* A broad/overflowing edit must fail toward reload, never silently
          * drop paths and accidentally qualify for hot-swap. */
         ctx->changed_count = 1;
@@ -1479,7 +1479,7 @@ static bool watch_cancel_poll(void *opaque)
         return true;
     }
     if (changed && !ctx->prepared_epoch_ready) {
-        const char *files[ZCL_DEVLOOP_MAX_FILES];
+        const char *files[ZCL_DEVLOOP_WATCH_MAX_FILES];
         size_t count = ctx->changed_count;
         int64_t seen_us = ctx->first_mutation_us > 0
             ? ctx->first_mutation_us : platform_time_monotonic_us();
@@ -1760,8 +1760,8 @@ int zcl_devloop_watch_mode_until(const char *repo_root,
         }
 #endif
 
-        char epoch_changed[ZCL_DEVLOOP_MAX_FILES][ZCL_DEVLOOP_PATH_MAX];
-        const char *files[ZCL_DEVLOOP_MAX_FILES];
+        char epoch_changed[ZCL_DEVLOOP_WATCH_MAX_FILES][ZCL_DEVLOOP_PATH_MAX];
+        const char *files[ZCL_DEVLOOP_WATCH_MAX_FILES];
         struct watch_edit_epoch edit_epoch;
         bool impact_already_emitted = ctx.prepared_epoch_ready;
         bool full_rescan = false;

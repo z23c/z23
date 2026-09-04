@@ -11,7 +11,18 @@
 extern "C" {
 #endif
 
-#define ZCL_DEVLOOP_MAX_FILES 256
+/* Changed-set ceiling for the PROOF and PLAN path. A landing batch is now ten
+ * or more lanes at once, so one proof legitimately covers thousands of paths.
+ * Every table that scales with this number is heap-allocated, so raising it
+ * grows no stack frame; anything above it is refused with a typed reason that
+ * names the observed count.
+ */
+#define ZCL_DEVLOOP_MAX_FILES 4096
+/* Separate, deliberately smaller ceiling for the file-watcher overlay, whose
+ * coalescing tables stay resident in the watcher frame. Overflow there is not
+ * an error: the watcher collapses the edit to a full rebuild rather than
+ * silently dropping paths, so the small table stays correct. */
+#define ZCL_DEVLOOP_WATCH_MAX_FILES 256
 #define ZCL_DEVLOOP_PATH_MAX 1024
 #define ZCL_DEVLOOP_OUTPUT_MAX 65536
 #define ZCL_DEVLOOP_RESTART_SOURCE_MAX 32

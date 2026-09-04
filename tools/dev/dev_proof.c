@@ -16,6 +16,7 @@
 #include "platform/private_directory.h"
 #include "platform/ram_scratch.h"
 #include "platform/time_compat.h"
+#include "base/safe_alloc.h"
 #include "sha3/sha3.h"
 #include "vcs/build_action.h"
 
@@ -41,7 +42,6 @@
 #define PATH_MAX 4096
 #endif
 
-#define PROOF_MAX_FILES ZCL_DEVLOOP_MAX_FILES
 #define PROOF_MAX_JOBS 16u
 #define PROOF_ENV_DOMAIN "zcl.dev_proof_environment.v1"
 
@@ -995,62 +995,203 @@ static void proof_lease_release(const struct proof_paths *paths)
     proof_queue_lock_release(fd);
 }
 
-static bool changed_files_capture(const struct proof_paths *paths,
-                                  const char *local, const char *base,
-                                  char files[PROOF_MAX_FILES][256],
-                                  const char *refs[PROOF_MAX_FILES],
-                                  size_t *count_out, char *why, size_t why_len)
+/* Longest repo-relative path a changed-set row may carry. Unchanged from the
+ * fixed-table era; only the NUMBER of rows became heap-resident. */
+#define PROOF_CHANGED_PATH_MAX 256
+/* Byte ceiling on the captured list itself: the row ceiling times the row
+ * length. Exceeding it is refused with the observed size, never truncated. */
+#define PROOF_CHANGED_BYTES_MAX \
+    ((size_t)ZCL_DEVLOOP_MAX_FILES * (size_t)PROOF_CHANGED_PATH_MAX)
+
+void zcl_dev_proof_changed_set_release(struct zcl_dev_proof_changed_set *set)
 {
+    if (!set)
+        return;
+    free(set->bytes);
+    free((void *)set->files);
+    set->bytes = NULL;
+    set->files = NULL;
+    set->count = 0;
+}
+
+/* Read a captured list whole. Refuses with the observed byte count rather than
+ * returning a shorter, still-plausible list. */
+static char *changed_set_read(const char *path, size_t *len_out,
+                              char *why, size_t why_len)
+{
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) {
+        proof_why(why, why_len, "changed_set_unavailable_or_truncated");
+        return NULL;
+    }
+    struct stat st;
+    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode)) {
+        (void)close(fd);
+        proof_why(why, why_len, "changed_set_unavailable_or_truncated");
+        return NULL;
+    }
+    if ((uint64_t)st.st_size > (uint64_t)PROOF_CHANGED_BYTES_MAX) {
+        (void)close(fd);
+        proof_whyf(why, why_len,
+                   "changed_set_unavailable_or_truncated bytes=%llu max=%zu",
+                   (unsigned long long)st.st_size, PROOF_CHANGED_BYTES_MAX);
+        return NULL;
+    }
+    size_t size = (size_t)st.st_size;
+    char *bytes = zcl_calloc(size + 1, 1, "proof changed-set capture");
+    if (!bytes) {
+        (void)close(fd);
+        proof_why(why, why_len, "changed_set_allocation_failed");
+        return NULL;
+    }
+    size_t used = 0;
+    while (used < size) {
+        ssize_t n = read(fd, bytes + used, size - used);
+        if (n < 0 && errno == EINTR)
+            continue;
+        if (n <= 0)
+            break;
+        used += (size_t)n;
+    }
+    (void)close(fd);
+    if (used != size) {
+        free(bytes);
+        proof_whyf(why, why_len,
+                   "changed_set_unavailable_or_truncated read=%zu of %zu",
+                   used, size);
+        return NULL;
+    }
+    bytes[size] = 0;
+    *len_out = size;
+    return bytes;
+}
+
+bool zcl_dev_proof_changed_set_capture(const char *repo_root, const char *base,
+                                       const char *local,
+                                       const char *scratch_path,
+                                       const char *persist_path,
+                                       struct zcl_dev_proof_changed_set *out,
+                                       char *why, size_t why_len)
+{
+    if (!out)
+        return false;
+    memset(out, 0, sizeof(*out));
+    if (!repo_root || !base || !local || !scratch_path || !scratch_path[0]) {
+        proof_why(why, why_len, "changed_set_request_invalid");
+        return false;
+    }
     const char *ancestor[] = {"git", "merge-base", "--is-ancestor", base,
                               local, NULL};
     char ignored[2];
-    if (!git_capture(paths->root, ancestor, ignored, sizeof(ignored))) {
+    if (!git_capture(repo_root, ancestor, ignored, sizeof(ignored))) {
         proof_why(why, why_len, "remote_base_not_ancestor");
         return false;
     }
+    /* `--output` sends the list to a file instead of the fixed-size process
+     * capture buffer, so a batch of thousands of paths cannot arrive as a
+     * shorter list that still parses. */
+    char output_arg[PATH_MAX + 16];
+    if (snprintf(output_arg, sizeof(output_arg), "--output=%s", scratch_path) >=
+        (int)sizeof(output_arg)) {
+        proof_why(why, why_len, "changed_set_request_invalid");
+        return false;
+    }
+    (void)unlink(scratch_path);
     const char *argv[] = {"git", "diff", "--name-only", "--diff-filter=ACMRD",
-                          base, local, "--", NULL};
-    char output[ZCL_DEVLOOP_OUTPUT_MAX];
-    if (!git_capture(paths->root, argv, output, sizeof(output))) {
+                          output_arg, base, local, "--", NULL};
+    if (!git_capture(repo_root, argv, ignored, sizeof(ignored))) {
+        (void)unlink(scratch_path);
         proof_why(why, why_len, "changed_set_unavailable_or_truncated");
         return false;
     }
+    size_t len = 0;
+    char *bytes = changed_set_read(scratch_path, &len, why, why_len);
+    (void)unlink(scratch_path);
+    if (!bytes)
+        return false;
+
+    /* Count first, so an over-ceiling batch is refused with its real size. */
     size_t count = 0;
-    char *save = NULL;
-    for (char *line = strtok_r(output, "\n", &save); line;
-         line = strtok_r(NULL, "\n", &save)) {
-        size_t len = strlen(line);
-        if (len == 0) continue;
-        if (count >= PROOF_MAX_FILES || len >= sizeof(files[0]) ||
-            line[0] == '/' || strstr(line, "..") || strchr(line, '\\')) {
-            proof_why(why, why_len, "changed_set_invalid_or_truncated");
-            return false;
-        }
-        (void)snprintf(files[count], sizeof(files[count]), "%s", line);
-        refs[count] = files[count];
+    for (size_t i = 0; i < len; i++) {
+        if (bytes[i] == '\n')
+            continue;
         count++;
+        while (i < len && bytes[i] != '\n')
+            i++;
     }
     if (count == 0) {
+        free(bytes);
         proof_why(why, why_len, "changed_set_empty");
         return false;
     }
-    char persisted[ZCL_DEVLOOP_OUTPUT_MAX];
-    size_t used = 0;
-    for (size_t i = 0; i < count; i++) {
-        size_t len = strlen(refs[i]);
-        if (len + 1 >= sizeof(persisted) - used) {
-            proof_why(why, why_len, "changed_set_persist_truncated");
-            return false;
-        }
-        memcpy(persisted + used, refs[i], len);
-        used += len;
-        persisted[used++] = '\n';
-    }
-    if (!write_atomic(paths->changed, persisted, used, 0400)) {
-        proof_why(why, why_len, "changed_set_persist_failed");
+    if (count > (size_t)ZCL_DEVLOOP_MAX_FILES) {
+        free(bytes);
+        proof_whyf(why, why_len,
+                   "changed_set_invalid_or_truncated files=%zu max=%d",
+                   count, ZCL_DEVLOOP_MAX_FILES);
         return false;
     }
-    *count_out = count;
+    const char **refs = zcl_calloc(count, sizeof(*refs),
+                                   "proof changed-set rows");
+    if (!refs) {
+        free(bytes);
+        proof_why(why, why_len, "changed_set_allocation_failed");
+        return false;
+    }
+    size_t stored = 0, persist_len = 0;
+    char *save = NULL;
+    for (char *line = strtok_r(bytes, "\n", &save); line;
+         line = strtok_r(NULL, "\n", &save)) {
+        size_t path_len = strlen(line);
+        if (path_len == 0)
+            continue;
+        if (stored >= count || path_len >= PROOF_CHANGED_PATH_MAX ||
+            line[0] == '/' || strstr(line, "..") || strchr(line, '\\')) {
+            free((void *)refs);
+            free(bytes);
+            proof_whyf(why, why_len,
+                       "changed_set_invalid_or_truncated row=%zu", stored + 1);
+            return false;
+        }
+        refs[stored++] = line;
+        persist_len += path_len + 1;
+    }
+    if (stored != count) {
+        free((void *)refs);
+        free(bytes);
+        proof_whyf(why, why_len,
+                   "changed_set_invalid_or_truncated rows=%zu of %zu", stored,
+                   count);
+        return false;
+    }
+    if (persist_path && persist_path[0]) {
+        char *persisted = zcl_calloc(persist_len, 1,
+                                     "proof changed-set record");
+        if (!persisted) {
+            free((void *)refs);
+            free(bytes);
+            proof_why(why, why_len, "changed_set_allocation_failed");
+            return false;
+        }
+        size_t used = 0;
+        for (size_t i = 0; i < count; i++) {
+            size_t path_len = strlen(refs[i]);
+            memcpy(persisted + used, refs[i], path_len);
+            used += path_len;
+            persisted[used++] = '\n';
+        }
+        bool written = write_atomic(persist_path, persisted, used, 0400);
+        free(persisted);
+        if (!written) {
+            free((void *)refs);
+            free(bytes);
+            proof_why(why, why_len, "changed_set_persist_failed");
+            return false;
+        }
+    }
+    out->bytes = bytes;
+    out->files = refs;
+    out->count = count;
     return true;
 }
 
@@ -2319,30 +2460,20 @@ static void proof_phase_mark(struct proof_phase_clock *clock, const char *name)
 }
 
 
-static bool proof_worker(const struct proof_paths *paths,
-                         const char *local, const char *base,
-                         struct platform_ram_scratch_lease *ram_lease,
-                         char *why, size_t why_len)
+/* The remainder of one proof worker, after the immutable generation and the
+ * changed set exist. Split out so the heap-resident changed set has exactly
+ * one owner and one release point across every refusal below. Takes the
+ * phase clock the outer worker already opened so build/capture and the rest
+ * of the proof share one cumulative timer. */
+static bool proof_worker_body(const struct proof_paths *paths,
+                              const char *local, const char *base,
+                              const char *generation, int64_t started_us,
+                              struct proof_phase_clock *phases,
+                              const char *const *files, size_t file_count,
+                              char *why, size_t why_len)
 {
-    int64_t started_us = platform_time_monotonic_us();
-    struct proof_phase_clock phases;
-    proof_phase_begin(&phases, paths);
-    if (paths->phases[0]) (void)remove(paths->phases);
-    if (!worktree_exact(paths->root, local, true, why, why_len)) return false;
-    proof_phase_mark(&phases, "worktree_exact_root");
-    char generation[PATH_MAX];
-    if (!generation_prepare(paths, local, ram_lease, generation, why, why_len))
-        return false;
-    proof_phase_mark(&phases, "generation_prepare");
     struct proof_paths execution = *paths;
     (void)snprintf(execution.root, sizeof(execution.root), "%s", generation);
-    char files_storage[PROOF_MAX_FILES][256];
-    const char *files[PROOF_MAX_FILES];
-    size_t file_count = 0;
-    if (!changed_files_capture(paths, local, base, files_storage, files,
-                               &file_count, why, why_len))
-        return false;
-    proof_phase_mark(&phases, "changed_files_capture");
 
     bool inventory_only = inventory_output_only(files, file_count);
     struct zcl_devloop_plan plan;
@@ -2358,7 +2489,7 @@ static bool proof_worker(const struct proof_paths *paths,
                       ? admission_reason : "impact_plan_incomplete");
         return false;
     }
-    proof_phase_mark(&phases, "impact_plan_closure");
+    proof_phase_mark(phases, "impact_plan_closure");
     char plan_json[ZCL_DEVLOOP_PLAN_WIRE_MAX];
     /* Render the plan we just closed. The _closure spelling would open the
      * code index and re-walk the whole reverse-caller graph to rebuild the
@@ -2370,9 +2501,9 @@ static bool proof_worker(const struct proof_paths *paths,
         proof_why(why, why_len, "impact_plan_render_failed");
         return false;
     }
-    proof_phase_mark(&phases, "impact_plan_render");
+    proof_phase_mark(phases, "impact_plan_render");
     if (!worktree_exact(paths->root, local, true, why, why_len)) return false;
-    proof_phase_mark(&phases, "worktree_exact_recheck");
+    proof_phase_mark(phases, "worktree_exact_recheck");
 
     struct dev_source_record source_before = {0}, source_after = {0};
     char sealed_source_id[65], sealed_mutation_id[65];
@@ -2386,7 +2517,7 @@ static bool proof_worker(const struct proof_paths *paths,
         proof_why(why, why_len, "source_cas_capture_failed");
         return false;
     }
-    proof_phase_mark(&phases, "source_identity_capture");
+    proof_phase_mark(phases, "source_identity_capture");
     memcpy(sealed_source_id, source_before.source_id,
            sizeof(sealed_source_id));
     memcpy(sealed_mutation_id, source_before.mutation_id,
@@ -2484,7 +2615,7 @@ static bool proof_worker(const struct proof_paths *paths,
                                generated, false, &budget, why, why_len))
                 return false;
         } else unused_dimension(ZCL_DEV_PROOF_GENERATED, generated);
-        proof_phase_mark(&phases, "dimension_generated");
+        proof_phase_mark(phases, "dimension_generated");
         if (compile->selected) {
             char artifact[PATH_MAX];
             int artifact_len = snprintf(artifact, sizeof(artifact),
@@ -2501,7 +2632,7 @@ static bool proof_worker(const struct proof_paths *paths,
                     return false;
             }
         } else unused_dimension(ZCL_DEV_PROOF_COMPILE, compile);
-        proof_phase_mark(&phases, "dimension_compile");
+        proof_phase_mark(phases, "dimension_compile");
         /* Lint proves the source; the test dimension proves the built
          * runner. Neither feeds the other, so both children are launched
          * before either is waited on and the proof pays for the longer of the
@@ -2641,7 +2772,7 @@ static bool proof_worker(const struct proof_paths *paths,
         }
         if (!dimensions_ok) return false;
         if (test->selected) test_receipt_bind_helpers(test, helper_root);
-        proof_phase_mark(&phases, "dimension_lint_and_test");
+        proof_phase_mark(phases, "dimension_lint_and_test");
     }
 
     if (!worktree_exact(generation, local, false, why, why_len) ||
@@ -2662,6 +2793,40 @@ static bool proof_worker(const struct proof_paths *paths,
     }
     proof_unlink_if_current(paths, paths->failure);
     return true;
+}
+
+static bool proof_worker(const struct proof_paths *paths,
+                         const char *local, const char *base,
+                         struct platform_ram_scratch_lease *ram_lease,
+                         char *why, size_t why_len)
+{
+    int64_t started_us = platform_time_monotonic_us();
+    struct proof_phase_clock phases;
+    proof_phase_begin(&phases, paths);
+    if (paths->phases[0]) (void)remove(paths->phases);
+    if (!worktree_exact(paths->root, local, true, why, why_len)) return false;
+    proof_phase_mark(&phases, "worktree_exact_root");
+    char generation[PATH_MAX];
+    if (!generation_prepare(paths, local, ram_lease, generation, why, why_len))
+        return false;
+    proof_phase_mark(&phases, "generation_prepare");
+    char scratch[PATH_MAX];
+    if (snprintf(scratch, sizeof(scratch), "%s.capture", paths->changed) >=
+        (int)sizeof(scratch)) {
+        proof_why(why, why_len, "changed_set_request_invalid");
+        return false;
+    }
+    struct zcl_dev_proof_changed_set changed = {0};
+    if (!zcl_dev_proof_changed_set_capture(paths->root, base, local, scratch,
+                                           paths->changed, &changed, why,
+                                           why_len))
+        return false;
+    proof_phase_mark(&phases, "changed_files_capture");
+    bool ok = proof_worker_body(paths, local, base, generation, started_us,
+                                &phases, changed.files, changed.count, why,
+                                why_len);
+    zcl_dev_proof_changed_set_release(&changed);
+    return ok;
 }
 
 static bool proof_worker_run(const struct proof_paths *paths,

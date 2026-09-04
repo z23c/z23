@@ -3243,7 +3243,7 @@ static int hs_hotfork_unity_source(
             " if (!out) { return false; } memset(out,0,sizeof(*out));"
             " out->magic=ZCL_HOTFORK_OBSERVATION_MAGIC;\n"
             " #define HF_CHECK(x) do { out->checks_run++; if (x) out->checks_passed++; } while(0)\n"
-            " const char *files[ZCL_DEVLOOP_MAX_FILES]; size_t count=0; char why[160]={0};"
+            " const char *files[4]; size_t count=0; char why[160]={0};"
             " struct json_value doc; json_init(&doc);\n"
             " const char valid_files[]=\"{\\\"files\\\":[\\\"tools/dev/devloop.c\\\"]}\";"
             " bool parsed=json_read(&doc,valid_files,strlen(valid_files));"
@@ -4488,7 +4488,7 @@ int zcl_devloop_hotswap_batch_event(
     enum zcl_devloop_publish_mode publish_mode)
 {
     if (!repo_root || !paths || path_count == 0 ||
-        path_count > ZCL_DEVLOOP_MAX_FILES)
+        path_count > ZCL_DEVLOOP_WATCH_MAX_FILES)
         return 0;
     const char *owner = hs_owner_for_path(paths[0]);
     if (!owner) return 0;

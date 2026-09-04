@@ -1759,11 +1759,24 @@ void zcl_native_handle_dev_app_simulate(
 void zcl_native_handle_dev_change_plan(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
 {
-    const char *file_ptrs[ZCL_DEVLOOP_MAX_FILES];
+    /* The changed set is heap-resident: ZCL_DEVLOOP_MAX_FILES is a landing-batch
+     * ceiling, and a table that large has no business in a request frame. */
+    const char **file_ptrs = zcl_calloc(ZCL_DEVLOOP_MAX_FILES,
+                                        sizeof(*file_ptrs),
+                                        "dev.change.plan file set");
+    if (!file_ptrs) {
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INTERNAL,
+                               "FILE_SET_ALLOCATION_FAILED", "normalize",
+                               false, true,
+                               "could not allocate the changed-file table", "");
+        return;
+    }
     size_t count = 0;
     char why[160];
     if (!dev_request_files(request->input, true, file_ptrs, &count,
                            why, sizeof(why))) {
+        free(file_ptrs);
         zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
                                ZCL_COMMAND_EXIT_INVALID, "INVALID_FILE_SET",
                                "normalize", false, false, why, "files");
@@ -1775,6 +1788,7 @@ void zcl_native_handle_dev_change_plan(
      * the reply is always a valid plan. repo_root is the process cwd. */
     size_t n = zcl_devloop_plan_json_closure(".", file_ptrs, count, body,
                                              sizeof(body));
+    free(file_ptrs);
     if (n == 0) {
         zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
                                ZCL_COMMAND_EXIT_INVALID, "INVALID_FILE_SET",
@@ -2246,11 +2260,23 @@ void zcl_native_handle_dev_change_apply(
 
     /* Future transaction body. The unconditional authority gate above reaches
      * no build, loader, service-control, or generation-activation side effect. */
-    const char *files[ZCL_DEVLOOP_MAX_FILES];
+    /* Heap-resident for the same reason as dev.change.plan: the landing-batch
+     * ceiling is thousands of paths, which never belongs in a request frame. */
+    const char **files = zcl_calloc(ZCL_DEVLOOP_MAX_FILES, sizeof(*files),
+                                    "dev.change.apply file set");
+    if (!files) {
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INTERNAL,
+                               "FILE_SET_ALLOCATION_FAILED", "normalize",
+                               false, true,
+                               "could not allocate the changed-file table", "");
+        return;
+    }
     size_t count = 0;
     char why[160];
     if (!dev_request_files(request->input, false, files, &count,
                            why, sizeof(why))) {
+        free(files);
         zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
                                ZCL_COMMAND_EXIT_INVALID, "INVALID_FILE_SET",
                                "normalize", false, false, why, "files");
@@ -2261,7 +2287,10 @@ void zcl_native_handle_dev_change_apply(
     };
     char body[16384];
     int rc = ZCL_COMMAND_EXIT_INTERNAL;
-    if (!dev_capture_stdout(dev_call_cycle, &call, body, sizeof(body), &rc)) {
+    bool captured = dev_capture_stdout(dev_call_cycle, &call, body,
+                                       sizeof(body), &rc);
+    free(files);
+    if (!captured) {
         zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
                                ZCL_COMMAND_EXIT_INTERNAL, "CYCLE_CAPTURE_FAILED",
                                "execute", false, true,
