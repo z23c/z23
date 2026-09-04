@@ -44,6 +44,18 @@
  * empty | busy | started | proving | landed | failed | conflict | rebased;
  * cancel {seq, state:"cancelled"}.
  *
+ * step ALSO carries persist:"failed" (plus persist_reason) alongside the
+ * `state` it names when the row's own commit to queue.jsonl/outcomes.jsonl
+ * did not durably land — queue lock contention or an I/O error rewriting
+ * the file. `state` still names what step just did (rebase, proof request,
+ * push...) so the transcript reads right, but persist:"failed" is the
+ * signal that it was NOT recorded: the row stays at its last-persisted
+ * phase and a later step re-drives it. A caller must treat state:"landed"
+ * with persist:"failed" as NOT landed from the queue's point of view even
+ * though the push already happened — a subsequent step detects that case
+ * (the tip is already an ancestor of origin/main) and records it as landed
+ * without re-proving, rather than pushing it a second time.
+ *
  * PROCESS RULE. `git` and `make` (lint-fast, install-hooks) are the only
  * programs this leaf runs, always through util/spawn.h's
  * zcl_spawn_capture(); popen(), system(), and a shell command string are
@@ -327,25 +339,37 @@ static bool dl_line_str(const char *line, const char *key, char *out,
 
 /* ── bounded file IO ───────────────────────────────────────────────────── */
 
+/* Callers (dl_load_rows) read errno right after a false return to tell
+ * "the file does not exist yet" (ENOENT: an empty queue, nothing wrong)
+ * from every other failure (a real read error, or the file simply being
+ * over budget), which must NOT be treated as empty — treating an oversize
+ * queue as empty would let the next rewrite erase every row it holds. So
+ * every failure path here sets its own distinct errno rather than leaving
+ * whatever a prior, unrelated syscall happened to set. */
 static bool dl_read_file(const char *path, char *out, size_t cap,
                          size_t *len_out)
 {
     FILE *f;
     size_t n;
-    if (!path || !out || cap == 0)
+    if (!path || !out || cap == 0) {
+        errno = EINVAL;
         return false;
+    }
     f = fopen(path, "rb");
     if (!f)
-        return false;
+        return false; /* errno is fopen's own: ENOENT means "no file yet" */
     n = fread(out, 1, cap - 1, f);
     if (ferror(f)) {
+        int saved = errno;
         (void)fclose(f);
+        errno = saved ? saved : EIO;
         return false;
     }
     /* A file over the budget is refused, never truncated: half a row is not
      * a smaller row, it is a different one. */
     if (!feof(f)) {
         (void)fclose(f);
+        errno = EFBIG;
         return false;
     }
     out[n] = '\0';
@@ -355,20 +379,38 @@ static bool dl_read_file(const char *path, char *out, size_t cap,
     return true;
 }
 
-/* One write() per row: with O_APPEND each row lands atomically, so two
- * concurrent submitters never interleave bytes. */
+/* With O_APPEND, concurrent submitters never interleave bytes as long as
+ * each row is completed by the writer that started it. A single write()
+ * is not that guarantee on its own: it can return early (EINTR, or a
+ * short write under memory pressure) after only some of the row landed,
+ * and the next line written — by this row or another submitter's row —
+ * would fuse onto those leftover bytes into one unparseable line. Loop
+ * until every byte is written or a real error (not EINTR) stops us. */
 static bool dl_append_row(const char *path, const char *line, size_t len)
 {
     int fd;
-    ssize_t w;
+    size_t off = 0;
     if (!path || !line || len == 0)
         return false;
     fd = open(path, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0600);
     if (fd < 0)
         return false;
-    w = write(fd, line, len);
+    while (off < len) {
+        ssize_t w = write(fd, line + off, len - off);
+        if (w < 0) {
+            if (errno == EINTR)
+                continue;
+            (void)close(fd);
+            return false;
+        }
+        if (w == 0) {
+            (void)close(fd);
+            return false;
+        }
+        off += (size_t)w;
+    }
     (void)close(fd);
-    return w == (ssize_t)len;
+    return true;
 }
 
 static bool dl_append_text(const char *path, const char *text)
@@ -435,7 +477,16 @@ static bool dl_encode_row(const struct dl_row *r, char *out, size_t cap,
 {
     char e_ts[128], e_tip[160], e_wt[8192], e_note[2048], e_state[64];
     char e_phase[64], e_base[160], e_local[160], e_pushed[160];
-    char e_dim[128], e_log[8192], e_detail[1024];
+    /* r->detail is char[256]; dl_escape() can expand a raw control byte
+     * (anything but \n/\r/\t) into a 6-byte "\u00XX" sequence, so an
+     * ALL-control-byte detail needs up to 255*6=1530 bytes to escape
+     * cleanly. dl_first_actionable() already sanitises what it copies into
+     * detail, but detail has other writers too (the proof stub's raw
+     * value among them in tests) — sized here for the true worst case of
+     * its source field rather than for the sanitised common case, so a
+     * source this leaf does not control can never make dl_escape refuse
+     * and the whole row un-persistable. */
+    char e_dim[128], e_log[8192], e_detail[256 * 6 + 16];
     int w;
     if (!r || !out || cap == 0)
         return false;
@@ -543,13 +594,26 @@ static bool dl_rewrite_rows(const char *landdir, const char *qpath,
             (len > 0 && fwrite(line, 1, len, f) != len)) {
             (void)fclose(f);
             free(line);
+            (void)unlink(tmp);
             return false;
         }
     }
     free(line);
-    if (fclose(f) != 0)
+    if (fclose(f) != 0) {
+        (void)unlink(tmp);
         return false;
-    return rename(tmp, qpath) == 0;
+    }
+    /* dl_rewrite_rows always runs under dl_rows_lock, so queue.jsonl.tmp
+     * has exactly one writer at a time: a failed rename leaves a stale
+     * temp file behind for the next rewrite to overwrite, but leaving it
+     * after a failure that stops here (rather than at rename) is pure
+     * litter — clean it up rather than leaving proof of a failed rewrite
+     * on disk indefinitely. */
+    if (rename(tmp, qpath) != 0) {
+        (void)unlink(tmp);
+        return false;
+    }
+    return true;
 }
 
 /* ── locks ─────────────────────────────────────────────────────────────── */
@@ -672,7 +736,8 @@ static void dl_outbox(const struct dl_dirs *d, const struct dl_row *r,
                       const char *event)
 {
     char dir[4096 + 16], path[4096 + 32], line[DL_LINE_CAP];
-    char e_note[2048], e_detail[1024], ts[64];
+    /* Same worst-case sizing as dl_encode_row's e_detail: see its comment. */
+    char e_note[2048], e_detail[256 * 6 + 16], ts[64];
     struct stat st;
     int w;
     if (!d || !r || !event)
@@ -759,16 +824,38 @@ static bool dl_wt_ready(const char *wt)
  * hook set. Worktree config (`git config --worktree`) is per-worktree, not
  * shared with the checkout that spawned it, so `git worktree add` alone
  * leaves a brand-new worktree naked even when the source checkout has hooks
- * armed — the landing loop must arm this one itself. */
+ * armed — the landing loop must arm this one itself.
+ *
+ * A nonempty core.hooksPath is not proof of anything: it can point at a
+ * directory that was never populated (a stale config, a test rig, an
+ * operator typo), and git silently treats a missing or non-executable
+ * pre-push as "no hook" rather than an error — the exact failure mode this
+ * leaf's whole contract forbids ("no --no-verify: it goes through the
+ * installed pre-push hook like any other push"). So this checks the actual
+ * file, not just the setting that names it. */
 static bool dl_wt_hooks_ready(const char *wt)
 {
-    char out[DL_GIT_CAP];
+    char out[DL_GIT_CAP], hook[4096 + 16];
     const char *args[] = { "config", "--worktree", "--get",
                            "core.hooksPath", NULL };
+    struct stat st;
     if (dl_git(wt, args, out, sizeof(out), DL_GIT_TIMEOUT_MS) != 0)
         return false;
     dl_trim(out);
-    return out[0] != '\0';
+    if (out[0] == '\0')
+        return false;
+    if (out[0] == '/') {
+        if (snprintf(hook, sizeof(hook), "%s/pre-push", out) >=
+            (int)sizeof(hook))
+            return false;
+    } else {
+        if (!wt ||
+            snprintf(hook, sizeof(hook), "%s/%s/pre-push", wt, out) >=
+                (int)sizeof(hook))
+            return false;
+    }
+    return stat(hook, &st) == 0 && S_ISREG(st.st_mode) &&
+          access(hook, X_OK) == 0;
 }
 
 /* Test-only escape hatch: a throwaway git rig (bare origin + clone, no
@@ -779,8 +866,14 @@ static bool dl_wt_hooks_ready(const char *wt)
  * set and clear it the same way they do ZCL_LAND_PROOF_STUB. */
 static const char *dl_hooks_stub_dir(void)
 {
+#if defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)
     const char *s = getenv("ZCL_LAND_HOOKS_STUB_DIR");
     return s && s[0] ? s : NULL;
+#else
+    /* A leaked test env var must never turn an operator's production
+     * binary's push into a fixture hook that admits anything. */
+    return NULL;
+#endif
 }
 
 /* Arm this worktree's own pre-push hook so the push below is admitted, or
@@ -880,6 +973,29 @@ static bool dl_host_load_failure(const char *text)
     return false;
 }
 
+/* Copy `line` into `out` (cap bytes, NUL-terminated), replacing every
+ * control byte (and DEL) with a space and truncating rather than growing.
+ * dl_escape() expands a raw control byte other than \n/\r/\t into a 6-byte
+ * "\u00XX" sequence, so a `detail` field dense with control bytes can grow
+ * past e_detail's cap in dl_encode_row and make the whole row unpersistable.
+ * Replacing them here — before they ever reach row->detail — keeps the
+ * worst-case expansion in dl_escape to the 2x of a quote or backslash,
+ * which always fits. */
+static void dl_sanitize_copy(const char *line, char *out, size_t cap)
+{
+    size_t used = 0;
+    if (!out || cap == 0)
+        return;
+    if (!line) {
+        out[0] = '\0';
+        return;
+    }
+    for (const unsigned char *p = (const unsigned char *)line;
+         *p && used + 1 < cap; p++)
+        out[used++] = (*p < 0x20 || *p == 0x7f) ? ' ' : (char)*p;
+    out[used] = '\0';
+}
+
 /* The first line a person can act on: the earliest line naming an error, a
  * failure, or a refusal. A tail is not an answer; this is. */
 static void dl_first_actionable(const char *text, char *out, size_t cap)
@@ -903,7 +1019,7 @@ static void dl_first_actionable(const char *text, char *out, size_t cap)
          line = strtok_r(NULL, "\n", &save)) {
         for (size_t i = 0; i < sizeof(needles) / sizeof(needles[0]); i++) {
             if (strstr(line, needles[i])) {
-                (void)snprintf(out, cap, "%s", line);
+                dl_sanitize_copy(line, out, cap);
                 free(copy);
                 return;
             }
@@ -926,8 +1042,14 @@ enum dl_proof {
  * every rebase, push, row and lock below is the production path. */
 static const char *dl_stub(void)
 {
+#if defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)
     const char *s = getenv("ZCL_LAND_PROOF_STUB");
     return s && s[0] ? s : NULL;
+#else
+    /* A leaked test env var must never turn an operator's production
+     * binary's step into an evidence-free "pass" pushed to main. */
+    return NULL;
+#endif
 }
 
 static enum dl_proof dl_proof_request(const char *wt, const char *local,
@@ -952,8 +1074,11 @@ static enum dl_proof dl_proof_request(const char *wt, const char *local,
         }
         (void)snprintf(detail, cap, "%s",
                        status.detail[0] ? status.detail : "proof requested");
-        return status.state == ZCL_DEV_PROOF_STATE_PASSED ? DL_PROOF_PASSED
-                                                          : DL_PROOF_PENDING;
+        if (status.state == ZCL_DEV_PROOF_STATE_PASSED)
+            return DL_PROOF_PASSED;
+        if (status.state == ZCL_DEV_PROOF_STATE_FAILED)
+            return DL_PROOF_FAILED;
+        return DL_PROOF_PENDING;
     }
 #else
     (void)wt;
@@ -1023,6 +1148,19 @@ static enum dl_proof dl_proof_read(const char *wt, const char *local,
 #endif
 }
 
+/* Test-only escape hatch for the signature check below: a fixture repo may
+ * carry no signing key. Same build-mode guard as dl_stub() and
+ * dl_hooks_stub_dir() — a leaked env var must never let a production
+ * binary queue an unsigned tip for push. */
+static const char *dl_allow_unsigned(void)
+{
+#if defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)
+    return getenv("ZCL_LAND_ALLOW_UNSIGNED");
+#else
+    return NULL;
+#endif
+}
+
 /* ── submit ────────────────────────────────────────────────────────────── */
 
 static void dl_submit(const struct zcl_command_request *req,
@@ -1035,7 +1173,7 @@ static void dl_submit(const struct zcl_command_request *req,
     char qpath[4096 + 32], line[DL_LINE_CAP];
     char root[4096], sig[64], full[80], ts[64];
     const char *tip, *worktree, *note;
-    const char *allow_unsigned = getenv("ZCL_LAND_ALLOW_UNSIGNED");
+    const char *allow_unsigned = dl_allow_unsigned();
     size_t len = 0;
     int lock = -1;
     long long seq = 1;
@@ -1461,7 +1599,7 @@ static bool dl_commit_row(const struct dl_dirs *d, struct dl_row *row,
     struct dl_row *rows = NULL;
     size_t nrows = 0, kept = 0;
     char qpath[4096 + 32];
-    bool ok;
+    bool ok, found = false;
     int lock;
     if (snprintf(qpath, sizeof(qpath), "%s/queue.jsonl", d->land) >=
         (int)sizeof(qpath))
@@ -1475,12 +1613,24 @@ static bool dl_commit_row(const struct dl_dirs *d, struct dl_row *row,
     }
     for (size_t i = 0; i < nrows; i++) {
         if (rows[i].seq == row->seq) {
+            found = true;
             if (terminal)
                 continue;
             rows[kept++] = *row;
             continue;
         }
         rows[kept++] = rows[i];
+    }
+    /* The row was picked (under the slot lock) before this commit takes
+     * the row lock. If `cancel` removed it from queue.jsonl in between,
+     * `row->seq` is no longer present here: there is nothing left to keep
+     * "inflight" and no cancelled row should ever get a second, later
+     * outcome appended on top of cancel's own. Refuse instead of silently
+     * treating an unmatched rewrite as success. */
+    if (!found) {
+        free(rows);
+        dl_unlock(lock);
+        return false;
     }
     ok = dl_rewrite_rows(d->land, qpath, rows, kept);
     free(rows);
@@ -1514,6 +1664,36 @@ static void dl_step_reply(struct zcl_command_reply *reply,
     }
     reply->status = ZCL_COMMAND_STATUS_PASSED;
     reply->exit_code = 0;
+}
+
+/* Commit the row and say so honestly either way. A commit failure here
+ * (queue lock contention, an I/O error rewriting queue.jsonl) means the
+ * state `intended_state` names was NEVER durably recorded: a terminal
+ * commit leaves the row inflight and off outcomes.jsonl and mail/outbox,
+ * a phase commit leaves the row at its last-persisted phase. Either way
+ * the caller must not claim `intended_state` happened — it reports
+ * persist:"failed" plus the reason instead, so an agent pulling status
+ * sees the truth and a later step re-drives the row rather than treating
+ * it as done. Returns true when the commit landed (caller proceeds to
+ * build its normal reply via dl_step_reply); false when it already wrote
+ * the persist-failure reply itself. */
+static bool dl_commit_or_report(const struct dl_dirs *d, struct dl_row *row,
+                                bool terminal,
+                                struct zcl_command_reply *reply,
+                                const char *intended_state)
+{
+    if (dl_commit_row(d, row, terminal))
+        return true;
+    dl_step_reply(reply, row, intended_state);
+    (void)json_push_kv_str(&reply->data, "persist", "failed");
+    (void)json_push_kv_str(
+        &reply->data, "persist_reason",
+        terminal ? "outcome not recorded in queue.jsonl/outcomes.jsonl; "
+                   "the row remains inflight and will be re-driven"
+                 : "phase update not recorded in queue.jsonl; the row "
+                   "remains at its last-persisted phase and will be "
+                   "re-driven");
+    return false;
 }
 
 static void dl_log_path(const struct dl_dirs *d, struct dl_row *row)
@@ -1612,6 +1792,47 @@ static int dl_lint_fast(const struct dl_dirs *d, struct dl_row *row)
 
 /* Take the oldest queued request and drive it to the point where the proof
  * has been ASKED FOR. Then return: the answer arrives on a later step. */
+/* A row can be re-driven from "inflight" after a step that already pushed
+ * successfully but then failed to persist the "landed" outcome (queue lock
+ * contention, an I/O error on the rewrite). Re-proving that tip would waste
+ * the proof and, worse, a second push attempt races a commit that is
+ * already the tip of origin/main. Before spending a rebase/lint/proof
+ * cycle, check whether the tip is already an ancestor of origin/main and,
+ * if so, record it as landed directly. */
+static bool dl_already_landed(const struct dl_dirs *d, struct dl_row *row)
+{
+    char buf[DL_GIT_CAP], commit[80];
+    const char *fetch_args[] = { "fetch", "--quiet", "origin", NULL };
+    const char *ancestor_args[] = { "merge-base", "--is-ancestor", commit,
+                                    "origin/main", NULL };
+    (void)dl_git(d->wt, fetch_args, buf, sizeof(buf), DL_GIT_TIMEOUT_MS);
+    if (row->local[0] && dl_sha_ok(row->local)) {
+        (void)snprintf(commit, sizeof(commit), "%s", row->local);
+    } else if (!dl_rev_parse(d->wt, row->tip, commit)) {
+        if (!row->worktree[0])
+            return false;
+        {
+            const char *pull_args[] = { "fetch", "--quiet", "--no-tags",
+                                        row->worktree, row->tip, NULL };
+            (void)dl_git(d->wt, pull_args, buf, sizeof(buf),
+                         DL_GIT_TIMEOUT_MS);
+        }
+        if (!dl_rev_parse(d->wt, row->tip, commit))
+            return false;
+    }
+    if (dl_git(d->wt, ancestor_args, buf, sizeof(buf), DL_GIT_TIMEOUT_MS) !=
+        0)
+        return false;
+    (void)snprintf(row->local, sizeof(row->local), "%s", commit);
+    (void)snprintf(row->pushed, sizeof(row->pushed), "%s", commit);
+    (void)snprintf(row->state, sizeof(row->state), "landed");
+    row->phase[0] = '\0';
+    (void)snprintf(row->detail, sizeof(row->detail), "%s",
+                   "already an ancestor of origin/main; recorded as landed "
+                   "without re-proving");
+    return true;
+}
+
 static void dl_step_start(const struct dl_dirs *d, struct dl_row *row,
                           struct zcl_command_reply *reply)
 {
@@ -1635,8 +1856,13 @@ static void dl_step_start(const struct dl_dirs *d, struct dl_row *row,
         (void)snprintf(row->detail, sizeof(row->detail), "%s", why);
         dl_log(row, why);
         dl_log(row, "\n");
-        (void)dl_commit_row(d, row, true);
-        dl_step_reply(reply, row, "failed");
+        if (dl_commit_or_report(d, row, true, reply, "failed"))
+            dl_step_reply(reply, row, "failed");
+        return;
+    }
+    if (dl_already_landed(d, row)) {
+        if (dl_commit_or_report(d, row, true, reply, "landed"))
+            dl_step_reply(reply, row, "landed");
         return;
     }
     rebased = dl_rebase(d, row, why, sizeof(why));
@@ -1647,8 +1873,8 @@ static void dl_step_start(const struct dl_dirs *d, struct dl_row *row,
         dl_log(row, "rebase conflict: ");
         dl_log(row, why);
         dl_log(row, "\n");
-        (void)dl_commit_row(d, row, true);
-        dl_step_reply(reply, row, "conflict");
+        if (dl_commit_or_report(d, row, true, reply, "conflict"))
+            dl_step_reply(reply, row, "conflict");
         return;
     }
     if (rebased < 0) {
@@ -1657,8 +1883,8 @@ static void dl_step_start(const struct dl_dirs *d, struct dl_row *row,
         (void)snprintf(row->detail, sizeof(row->detail), "%s", why);
         dl_log(row, why);
         dl_log(row, "\n");
-        (void)dl_commit_row(d, row, true);
-        dl_step_reply(reply, row, "failed");
+        if (dl_commit_or_report(d, row, true, reply, "failed"))
+            dl_step_reply(reply, row, "failed");
         return;
     }
     /* The lint pass is what the proof would discover last and cheapest to
@@ -1672,13 +1898,13 @@ static void dl_step_start(const struct dl_dirs *d, struct dl_row *row,
             row->attempt++;
             (void)snprintf(row->phase, sizeof(row->phase), "rebase");
             (void)snprintf(row->state, sizeof(row->state), "queued");
-            (void)dl_commit_row(d, row, false);
-            dl_step_reply(reply, row, "rebased");
+            if (dl_commit_or_report(d, row, false, reply, "rebased"))
+                dl_step_reply(reply, row, "rebased");
             return;
         }
         (void)snprintf(row->state, sizeof(row->state), "failed");
-        (void)dl_commit_row(d, row, true);
-        dl_step_reply(reply, row, "failed");
+        if (dl_commit_or_report(d, row, true, reply, "failed"))
+            dl_step_reply(reply, row, "failed");
         return;
     }
     /* Where node2's commuting tickets plug in: with a ticket set installed,
@@ -1694,13 +1920,13 @@ static void dl_step_start(const struct dl_dirs *d, struct dl_row *row,
     if (p == DL_PROOF_UNAVAILABLE || p == DL_PROOF_FAILED) {
         (void)snprintf(row->state, sizeof(row->state), "failed");
         (void)snprintf(row->dimension, sizeof(row->dimension), "proof");
-        (void)dl_commit_row(d, row, true);
-        dl_step_reply(reply, row, "failed");
+        if (dl_commit_or_report(d, row, true, reply, "failed"))
+            dl_step_reply(reply, row, "failed");
         return;
     }
     /* Asked for. Nothing here waits on the answer. */
-    (void)dl_commit_row(d, row, false);
-    dl_step_reply(reply, row, "started");
+    if (dl_commit_or_report(d, row, false, reply, "started"))
+        dl_step_reply(reply, row, "started");
 }
 
 /* Read the proof's own state for the in-flight request and act once. */
@@ -1710,6 +1936,19 @@ static void dl_step_resume(const struct dl_dirs *d, struct dl_row *row,
     char detail[512], dimension[48], buf[DL_GIT_CAP];
     enum dl_proof p;
 
+    /* A prior step can have pushed for real and then failed to persist
+     * "landed" (a queue-commit failure after the fact — see
+     * dl_commit_or_report). That leaves the row inflight with a STALE
+     * phase="prove" pointing at a (local, base) pair that already landed:
+     * dl_proof_read would report PASSED again, and the "base moved" check
+     * below would misread the row's own successful push as a stranger's
+     * commit and spend a whole extra rebase/proof cycle on it. Check
+     * first, the same way dl_step_start does before ever starting one. */
+    if (dl_already_landed(d, row)) {
+        if (dl_commit_or_report(d, row, true, reply, "landed"))
+            dl_step_reply(reply, row, "landed");
+        return;
+    }
     if (strcmp(row->phase, "prove") != 0) {
         /* A step died between phases. Re-drive from the rebase rather than
          * guessing what the dead step had already done. */
@@ -1721,8 +1960,8 @@ static void dl_step_resume(const struct dl_dirs *d, struct dl_row *row,
                       sizeof(dimension), detail, sizeof(detail));
     (void)snprintf(row->detail, sizeof(row->detail), "%s", detail);
     if (p == DL_PROOF_PENDING) {
-        (void)dl_commit_row(d, row, false);
-        dl_step_reply(reply, row, "proving");
+        if (dl_commit_or_report(d, row, false, reply, "proving"))
+            dl_step_reply(reply, row, "proving");
         return;
     }
     if (p != DL_PROOF_PASSED) {
@@ -1735,8 +1974,8 @@ static void dl_step_resume(const struct dl_dirs *d, struct dl_row *row,
             (void)snprintf(row->dimension, sizeof(row->dimension),
                            "host_load");
             dl_log_path(d, row);
-            (void)dl_commit_row(d, row, false);
-            dl_step_reply(reply, row, "rebased");
+            if (dl_commit_or_report(d, row, false, reply, "rebased"))
+                dl_step_reply(reply, row, "rebased");
             return;
         }
         (void)snprintf(row->state, sizeof(row->state), "failed");
@@ -1753,8 +1992,8 @@ static void dl_step_resume(const struct dl_dirs *d, struct dl_row *row,
         }
         if (!row->detail[0])
             (void)snprintf(row->detail, sizeof(row->detail), "%s", detail);
-        (void)dl_commit_row(d, row, true);
-        dl_step_reply(reply, row, "failed");
+        if (dl_commit_or_report(d, row, true, reply, "failed"))
+            dl_step_reply(reply, row, "failed");
         return;
     }
     /* The proof passed for THIS (local, base) pair. If main moved while it
@@ -1767,15 +2006,30 @@ static void dl_step_resume(const struct dl_dirs *d, struct dl_row *row,
         if (dl_rev_parse(d->wt, "origin/main", base_now) &&
             strcmp(base_now, row->base) != 0) {
             row->attempt++;
-            (void)snprintf(row->phase, sizeof(row->phase), "rebase");
             (void)snprintf(row->detail, sizeof(row->detail),
                            "origin/main moved to %.12s while proving",
                            base_now);
             dl_log_path(d, row);
             dl_log(row, row->detail);
             dl_log(row, "\n");
-            (void)dl_commit_row(d, row, false);
-            dl_step_reply(reply, row, "rebased");
+            /* A base that keeps moving under a legitimately-passing proof
+             * is not this row's fault, but it is still bounded: an
+             * inflight row is always preferred over a queued one (dl_step
+             * picks it first), so an uncapped retry here would starve
+             * every other request behind a repo where main advances every
+             * cycle. Fail it like any other exhausted attempt budget
+             * rather than loop forever. */
+            if (row->attempt > DL_ATTEMPT_MAX) {
+                (void)snprintf(row->state, sizeof(row->state), "failed");
+                (void)snprintf(row->dimension, sizeof(row->dimension),
+                               "rebase");
+                if (dl_commit_or_report(d, row, true, reply, "failed"))
+                    dl_step_reply(reply, row, "failed");
+                return;
+            }
+            (void)snprintf(row->phase, sizeof(row->phase), "rebase");
+            if (dl_commit_or_report(d, row, false, reply, "rebased"))
+                dl_step_reply(reply, row, "rebased");
             return;
         }
     }
@@ -1802,12 +2056,12 @@ static void dl_step_resume(const struct dl_dirs *d, struct dl_row *row,
                 (void)snprintf(row->state, sizeof(row->state), "failed");
                 (void)snprintf(row->dimension, sizeof(row->dimension),
                                "push");
-                (void)dl_commit_row(d, row, true);
-                dl_step_reply(reply, row, "failed");
+                if (dl_commit_or_report(d, row, true, reply, "failed"))
+                    dl_step_reply(reply, row, "failed");
                 return;
             }
-            (void)dl_commit_row(d, row, false);
-            dl_step_reply(reply, row, "rebased");
+            if (dl_commit_or_report(d, row, false, reply, "rebased"))
+                dl_step_reply(reply, row, "rebased");
             return;
         }
     }
@@ -1816,8 +2070,8 @@ static void dl_step_resume(const struct dl_dirs *d, struct dl_row *row,
     row->phase[0] = '\0';
     (void)snprintf(row->detail, sizeof(row->detail), "%s",
                    "fast-forwarded origin/main");
-    (void)dl_commit_row(d, row, true);
-    dl_step_reply(reply, row, "landed");
+    if (dl_commit_or_report(d, row, true, reply, "landed"))
+        dl_step_reply(reply, row, "landed");
 }
 
 static void dl_step(const struct zcl_command_request *req,
@@ -1886,6 +2140,25 @@ static void dl_step(const struct zcl_command_request *req,
         dl_step_reply(reply, NULL, "empty");
         return;
     }
+#if defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)
+    /* Test-only: a fixed, tiny window between picking a row here and
+     * driving it below, so a test can race a concurrent cancel (which
+     * takes the row lock, not this slot lock) against this exact gap
+     * deterministically instead of depending on process-scheduling luck.
+     * Never read outside a test process. */
+    {
+        const char *ms = getenv("ZCL_LAND_TEST_PICK_DELAY_MS");
+        if (ms && ms[0]) {
+            long v = strtol(ms, NULL, 10);
+            if (v > 0 && v < 5000) {
+                struct timespec ts;
+                ts.tv_sec = v / 1000;
+                ts.tv_nsec = (v % 1000) * 1000000L;
+                (void)nanosleep(&ts, NULL);
+            }
+        }
+    }
+#endif
     if (have_inflight)
         dl_step_resume(&d, &pick, reply);
     else

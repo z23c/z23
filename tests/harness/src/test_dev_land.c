@@ -77,6 +77,7 @@ static void dlx_isolate(const char *tag)
     unsetenv("ZCL_LAND_PROOF_STUB");
     unsetenv("ZCL_LAND_ALLOW_UNSIGNED");
     unsetenv("ZCL_LAND_HOOKS_STUB_DIR");
+    unsetenv("ZCL_LAND_TEST_PICK_DELAY_MS");
 #if !defined(_WIN32)
     if (dlx_hooks_dir(g_dlx_hooks_ok, sizeof(g_dlx_hooks_ok), tag, 0))
         setenv("ZCL_LAND_HOOKS_STUB_DIR", g_dlx_hooks_ok, 1);
@@ -92,6 +93,7 @@ static void dlx_restore(void)
     unsetenv("ZCL_LAND_PROOF_STUB");
     unsetenv("ZCL_LAND_ALLOW_UNSIGNED");
     unsetenv("ZCL_LAND_HOOKS_STUB_DIR");
+    unsetenv("ZCL_LAND_TEST_PICK_DELAY_MS");
 }
 
 static void dlx_landdir(char *out, size_t cap)
@@ -771,6 +773,334 @@ int test_dev_land(void)
             (void)fclose(f);
         }
         ASSERT_EQ((long long)nlines, 2);
+        dlx_restore();
+        PASS();
+    }
+
+    TEST("land: a control-byte-dense detail persists instead of "
+        "un-committing the row") {
+        struct dlx_rig rig;
+        struct dlx_call c;
+        char stub[300], detail[300];
+        size_t i;
+        dlx_isolate("ctrlbytes");
+        ASSERT(dlx_rig_make(&rig, "ctrlbytes_rig"));
+        /* Dense control bytes, no NUL: dl_escape() would need to expand
+         * every one of these into a 6-byte "\u00XX" sequence. Before
+         * e_detail was sized for detail's true worst case, a value this
+         * dense made dl_encode_row refuse and the "started" commit never
+         * reached queue.jsonl at all — the reply would still have to
+         * report something, but the row would never be durably marked
+         * in flight. */
+        for (i = 0; i < sizeof(stub) - 1; i++)
+            stub[i] = (char)(1 + (i % 30)); /* 0x01..0x1e, never '\0' */
+        stub[sizeof(stub) - 1] = '\0';
+        setenv("ZCL_LAND_PROOF_STUB", stub, 1);
+        setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
+        dlx_submit(&c, &rig, rig.tip);
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        dlx_end(&c);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        /* Committed for real, not silently dropped: the reply is the
+         * normal "started" with no persist failure. */
+        ASSERT(strcmp(dlx_str(&c, "state"), "started") == 0);
+        ASSERT(dlx_str(&c, "persist")[0] == '\0');
+        (void)snprintf(detail, sizeof(detail), "%s", dlx_str(&c, "detail"));
+        dlx_end(&c);
+        /* A second step reads the row back from queue.jsonl: the round
+         * trip through dl_encode_row/dl_escape and back through
+         * dl_parse_row survived. */
+        dlx_begin(&c, "status");
+        (void)json_push_kv_bool(&c.input, "json", true);
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        ASSERT(json_get(&c.reply.data, "in_flight") != NULL);
+        dlx_end(&c);
+        dlx_restore();
+        PASS();
+    }
+
+    TEST("land: a queue-commit failure after a real push is reported, "
+        "not silently claimed, and the row self-heals") {
+        struct dlx_rig rig;
+        struct dlx_call c;
+        char landdir[1200], before[64], after[64];
+        dlx_isolate("persistfail");
+        ASSERT(dlx_rig_make(&rig, "persistfail_rig"));
+        ASSERT(dlx_origin_main(&rig, before));
+        setenv("ZCL_LAND_PROOF_STUB", "running", 1);
+        setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
+        dlx_submit(&c, &rig, rig.tip);
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        dlx_end(&c);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        ASSERT(strcmp(dlx_str(&c, "state"), "started") == 0);
+        dlx_end(&c);
+        setenv("ZCL_LAND_PROOF_STUB", "pass", 1);
+        dlx_landdir(landdir, sizeof(landdir));
+        /* No write permission on the land dir itself: dl_rewrite_rows can
+         * no longer create queue.jsonl.tmp, but logs/ and wt/ underneath
+         * already exist and are untouched, so the rebase and the real
+         * push still go through. */
+        ASSERT(chmod(landdir, 0500) == 0);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        ASSERT(strcmp(dlx_str(&c, "state"), "landed") == 0);
+        ASSERT(strcmp(dlx_str(&c, "persist"), "failed") == 0);
+        dlx_end(&c);
+        /* The push already happened for real: origin/main moved even
+         * though the queue could not record it. */
+        ASSERT(dlx_origin_main(&rig, after));
+        ASSERT(strcmp(after, before) != 0);
+        ASSERT(chmod(landdir, 0700) == 0);
+        /* Recoverable: a later step finds the tip is already an ancestor
+         * of origin/main and records it landed without pushing again. */
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        ASSERT(strcmp(dlx_str(&c, "state"), "landed") == 0);
+        ASSERT(dlx_str(&c, "persist")[0] == '\0');
+        dlx_end(&c);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        ASSERT(strcmp(dlx_str(&c, "state"), "empty") == 0);
+        dlx_end(&c);
+        dlx_restore();
+        PASS();
+    }
+
+    TEST("land: a hooksPath naming no real pre-push cannot skip admission") {
+        struct dlx_rig rig;
+        struct dlx_call c;
+        char before[64], mid[64], after[64], landdir[1200], wt[1400];
+        char badhooks[1200], second[64];
+        const char *cfg[4];
+        dlx_isolate("hookslie");
+        ASSERT(dlx_rig_make(&rig, "hookslie_rig"));
+        ASSERT(dlx_origin_main(&rig, before));
+        setenv("ZCL_LAND_PROOF_STUB", "running", 1);
+        setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
+        /* Land a first row all the way through: this creates the landing
+         * worktree and arms it with the (test-only) good hook stub, and
+         * frees dl_step's picker — it always prefers an inflight row, so
+         * the second row below is only ever picked once nothing is
+         * inflight any more. */
+        dlx_submit(&c, &rig, rig.tip);
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        dlx_end(&c);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        ASSERT(strcmp(dlx_str(&c, "state"), "started") == 0);
+        dlx_end(&c);
+        setenv("ZCL_LAND_PROOF_STUB", "pass", 1);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        ASSERT(strcmp(dlx_str(&c, "state"), "landed") == 0);
+        dlx_end(&c);
+        ASSERT(dlx_origin_main(&rig, mid));
+        ASSERT(strcmp(mid, before) != 0);
+        /* Corrupt the landing worktree's own hooksPath to a directory
+         * that carries no real, executable pre-push. Before this fix,
+         * dl_wt_hooks_ready() treated any NONEMPTY core.hooksPath as
+         * proof enough and never looked at the file it named. */
+        dlx_landdir(landdir, sizeof(landdir));
+        (void)snprintf(wt, sizeof(wt), "%s/wt", landdir);
+        test_make_tmpdir(badhooks, sizeof(badhooks), "dev_land_badhooks",
+                         "hookslie_bad");
+        cfg[0] = "config"; cfg[1] = "--worktree"; cfg[2] = "core.hooksPath";
+        cfg[3] = badhooks;
+        {
+            const char *args[] = { cfg[0], cfg[1], cfg[2], cfg[3], NULL };
+            ASSERT(dlx_git(wt, args) == 0);
+        }
+        /* A second, independent tip. No test hook stub this time: a real
+         * worktree with no Makefile to run `make install-hooks` in must
+         * refuse the request rather than accept the broken config as
+         * already armed and push straight through it. */
+        ASSERT(dlx_commit(rig.clone, "second.txt", "two\n", second));
+        unsetenv("ZCL_LAND_HOOKS_STUB_DIR");
+        dlx_submit(&c, &rig, second);
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        dlx_end(&c);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        ASSERT(strcmp(dlx_str(&c, "state"), "failed") == 0);
+        ASSERT(strcmp(dlx_str(&c, "dimension"), "worktree") == 0);
+        dlx_end(&c);
+        /* No second push happened: the broken hook config never got a
+         * chance to wave one through. */
+        ASSERT(dlx_origin_main(&rig, after));
+        ASSERT(strcmp(after, mid) == 0);
+        dlx_restore();
+        PASS();
+    }
+
+    TEST("land: a cancel that beats a landing records exactly one outcome") {
+        struct dlx_rig rig;
+        struct dlx_call c, cancelc;
+        char landdir[1200], opath[1400], line[8192];
+        pid_t child;
+        int st = 0;
+        long long ntotal = 0, nlanded = 0, ncancelled = 0;
+        FILE *f;
+        dlx_isolate("racecancel");
+        ASSERT(dlx_rig_make(&rig, "racecancel_rig"));
+        setenv("ZCL_LAND_PROOF_STUB", "running", 1);
+        setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
+        dlx_submit(&c, &rig, rig.tip);
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        dlx_end(&c);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        ASSERT(strcmp(dlx_str(&c, "state"), "started") == 0);
+        dlx_end(&c);
+        setenv("ZCL_LAND_PROOF_STUB", "pass", 1);
+        /* ZCL_LAND_TEST_PICK_DELAY_MS makes the race deterministic: the
+         * child pauses right after dl_step() picks this row (under the
+         * slot lock only) and before it drives the pushing/committing
+         * work below — exactly the published race window ("step loads
+         * rows under only the slot lock, cancel deletes under the row
+         * lock"). The parent's cancel (one flock and one small rewrite)
+         * easily finishes inside that window. Whichever side had won
+         * without the delay, exactly one outcome for this seq may ever
+         * land in outcomes.jsonl — a cancelled row must never ALSO get a
+         * second, later outcome appended on top of cancel's own. */
+        setenv("ZCL_LAND_TEST_PICK_DELAY_MS", "200", 1);
+        child = fork();
+        ASSERT(child >= 0);
+        if (child == 0) {
+            struct dlx_call cc;
+            dlx_begin(&cc, "step");
+            (void)dlx_run(&cc);
+            _exit(0);
+        }
+        /* Give the child time to run its own picker (dl_step reads the
+         * queue under only the slot lock) before this cancel takes the
+         * row lock and deletes — the published race window. Without this
+         * the fork/schedule overhead alone lets cancel finish before the
+         * child is even scheduled, which would race nothing. 30ms is
+         * comfortably inside the child's own 200ms post-pick delay
+         * (ZCL_LAND_TEST_PICK_DELAY_MS) below. */
+        {
+            struct timespec ts = { 0, 30 * 1000 * 1000L };
+            (void)nanosleep(&ts, NULL);
+        }
+        dlx_begin(&cancelc, "cancel");
+        (void)json_push_kv_int(&cancelc.input, "seq", 1);
+        ASSERT(dlx_run(&cancelc));
+        ASSERT(dlx_ok(&cancelc));
+        ASSERT(strcmp(dlx_str(&cancelc, "state"), "cancelled") == 0);
+        dlx_end(&cancelc);
+        while (waitpid(child, &st, 0) < 0)
+            ;
+        ASSERT(WIFEXITED(st));
+        dlx_landdir(landdir, sizeof(landdir));
+        (void)snprintf(opath, sizeof(opath), "%s/outcomes.jsonl", landdir);
+        f = fopen(opath, "r");
+        if (f) {
+            while (fgets(line, sizeof(line), f)) {
+                struct json_value v;
+                size_t len = strlen(line);
+                const struct json_value *seqv, *statev;
+                while (len > 0 &&
+                       (line[len - 1] == '\n' || line[len - 1] == '\r'))
+                    line[--len] = '\0';
+                if (len == 0)
+                    continue;
+                json_init(&v);
+                ASSERT(json_read(&v, line, len) && v.type == JSON_OBJ);
+                seqv = json_get(&v, "seq");
+                statev = json_get(&v, "state");
+                if (seqv && seqv->type == JSON_INT && json_get_int(seqv) == 1) {
+                    ntotal++;
+                    if (statev && statev->type == JSON_STR) {
+                        if (strcmp(json_get_str(statev), "landed") == 0)
+                            nlanded++;
+                        if (strcmp(json_get_str(statev), "cancelled") == 0)
+                            ncancelled++;
+                    }
+                }
+                json_free(&v);
+            }
+            (void)fclose(f);
+        }
+        /* Cancel won (guaranteed by the delay): exactly its own outcome,
+         * never a second "landed" row appended after the fact. */
+        ASSERT_EQ(ncancelled, 1);
+        ASSERT_EQ(nlanded, 0);
+        ASSERT_EQ(ntotal, 1);
+        dlx_restore();
+        PASS();
+    }
+
+    TEST("land: a base that keeps moving is bounded, not infinite") {
+        struct dlx_rig rig;
+        struct dlx_call c;
+        const char *push[] = { "push", "--quiet", "origin", "HEAD:main",
+                               NULL };
+        const char *fetch[] = { "fetch", "--quiet", "origin", NULL };
+        const char *branch[] = { "checkout", "--quiet", "-B", "side",
+                                 "origin/main", NULL };
+        const char *back[] = { "checkout", "--quiet", "-B", "main", NULL };
+        char side[600], stranger[64];
+        bool done = false;
+        int i;
+        dlx_isolate("moveforever");
+        ASSERT(dlx_rig_make(&rig, "moveforever_rig"));
+        setenv("ZCL_LAND_PROOF_STUB", "pass", 1);
+        setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
+        dlx_submit(&c, &rig, rig.tip);
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        dlx_end(&c);
+        (void)snprintf(side, sizeof(side), "%s", rig.clone);
+        /* Every cycle: rebase onto the current tip and ask for the proof
+         * ("started"), then a stranger lands on main again before the
+         * next step reads the answer, so the receipt is always about a
+         * base nobody is on. Before DL_ATTEMPT_MAX capped this specific
+         * retry, this loop would run forever and starve every other
+         * queued row (this one is always picked first: dl_step prefers
+         * "inflight" over "queued"). */
+        for (i = 0; i < 8 && !done; i++) {
+            char tag[32];
+            dlx_begin(&c, "step");
+            ASSERT(dlx_run(&c));
+            ASSERT(dlx_ok(&c));
+            ASSERT(strcmp(dlx_str(&c, "state"), "started") == 0);
+            dlx_end(&c);
+            (void)snprintf(tag, sizeof(tag), "s%d.txt", i);
+            ASSERT(dlx_git(side, branch) == 0);
+            ASSERT(dlx_commit(side, tag, "elsewhere\n", stranger));
+            ASSERT(dlx_git(side, push) == 0);
+            ASSERT(dlx_git(side, back) == 0);
+            ASSERT(dlx_git(side, fetch) == 0);
+            dlx_begin(&c, "step");
+            ASSERT(dlx_run(&c));
+            ASSERT(dlx_ok(&c));
+            if (strcmp(dlx_str(&c, "state"), "failed") == 0) {
+                ASSERT(strcmp(dlx_str(&c, "dimension"), "rebase") == 0);
+                done = true;
+            } else {
+                ASSERT(strcmp(dlx_str(&c, "state"), "rebased") == 0);
+            }
+            dlx_end(&c);
+        }
+        ASSERT(done);
         dlx_restore();
         PASS();
     }
