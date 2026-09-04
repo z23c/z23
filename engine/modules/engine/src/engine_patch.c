@@ -416,3 +416,12 @@ bool engine_patch_is_drastic_shrink(size_t old_lines, size_t new_lines)
         return false;
     return new_lines * 2 < old_lines;
 }
+
+bool engine_patch_looks_like_a_path(const char *path)
+{
+    if (!engine_patch_path_ok(path))
+        return false;
+    const char *slash = strrchr(path, '/');
+    const char *base = slash ? slash + 1 : path;
+    return strchr(base, '.') != NULL;
+}

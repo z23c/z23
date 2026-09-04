@@ -103,6 +103,16 @@ size_t engine_patch_count_lines(const char *text, size_t len);
  * new file (old_lines == 0) is never a shrink, whatever its size. */
 bool engine_patch_is_drastic_shrink(size_t old_lines, size_t new_lines);
 
+/* Does `path` look like a real relative source path worth checking for on
+ * disk, as opposed to an ordinary English word a task brief's prose happens
+ * to contain? Two conditions, both required: engine_patch_path_ok() (the
+ * containment rule — relative, contained, narrow charset), AND the final
+ * path segment (after the last '/', or the whole string if there is none)
+ * contains a '.' — a bare word or a directory name never does, a source
+ * file almost always does. `path` must be NUL-terminated. This is a filter,
+ * not proof the file exists; the caller still has to check that. */
+bool engine_patch_looks_like_a_path(const char *path);
+
 /* The exact protocol text handed to a model. One definition, so the prompt
  * and the parser can never drift into describing different envelopes. */
 const char *engine_patch_protocol_text(void);

@@ -1282,6 +1282,132 @@ static bool apply_patch(const char *root, const struct engine_patch *p)
     return true;
 }
 
+/* ── giving the model what it needs to see ──────────────────────────────
+ *
+ * A brief that names a file by path and quotes a few lines of it is not the
+ * same as giving the model the file: the confirmed cmp-capability_closure-
+ * glm53/a1 unit was asked to edit two ~1,090-line registries, was shown five
+ * quoted lines total, had no shell of its own, and correctly refused to
+ * fabricate a ~1,090-line whole-file envelope from memory rather than
+ * destroy ~1,090 hand-maintained rows. The task text is opaque to
+ * engine_unit — it does not know which of the words in it are meant as file
+ * paths — so this scans for tokens that already exist as real files in the
+ * worktree and hands their current content back, unasked. */
+#define TASK_FILE_CONTEXT_MAX_FILES        6u
+#define TASK_FILE_CONTEXT_MAX_TOTAL_BYTES  (32u * 1024u)
+#define TASK_FILE_CONTEXT_PER_FILE_BYTES   (12u * 1024u)
+
+static bool byte_is_space(char c)
+{
+    return c == ' ' || c == '\t' || c == '\n' || c == '\r';
+}
+
+/* Appends, after `text`, a "current contents" section for every distinct
+ * path-shaped token in `text` that both looks like a real path
+ * (engine_patch_looks_like_a_path()) and exists under `workdir` — up to
+ * TASK_FILE_CONTEXT_MAX_FILES files and TASK_FILE_CONTEXT_MAX_TOTAL_BYTES
+ * total. Returns a new heap buffer (the caller frees); returns a copy of
+ * `text` unchanged (still heap-owned) if nothing matched or allocation
+ * failed partway, so a scan that finds nothing never costs the caller its
+ * task text. */
+static char *build_task_with_file_contents(const char *text, size_t text_len,
+                                           const char *workdir)
+{
+    const size_t cap = text_len + TASK_FILE_CONTEXT_MAX_TOTAL_BYTES + 4096u;
+    char *out = zcl_malloc(cap, "engine_unit_task_context");
+    if (!out)
+        return NULL;
+    memcpy(out, text, text_len);
+    size_t used = text_len;
+
+    char seen[TASK_FILE_CONTEXT_MAX_FILES][ENGINE_PATCH_MAX_PATH];
+    size_t seen_n = 0;
+    size_t files_included = 0;
+    size_t bytes_included = 0;
+    bool header_written = false;
+
+    const char *p = text;
+    const char *end = text + text_len;
+    while (p < end && files_included < TASK_FILE_CONTEXT_MAX_FILES
+          && bytes_included < TASK_FILE_CONTEXT_MAX_TOTAL_BYTES) {
+        while (p < end && byte_is_space(*p))
+            p++;
+        const char *tok_start = p;
+        while (p < end && !byte_is_space(*p))
+            p++;
+        size_t tok_len = (size_t)(p - tok_start);
+        if (tok_len == 0 || tok_len >= ENGINE_PATCH_MAX_PATH)
+            continue;
+        char tok[ENGINE_PATCH_MAX_PATH];
+        memcpy(tok, tok_start, tok_len);
+        tok[tok_len] = '\0';
+        /* Trailing prose punctuation a real path never ends in. */
+        while (tok_len > 0 && strchr(",.;:)]\"'!?", tok[tok_len - 1])) {
+            tok_len--;
+            tok[tok_len] = '\0';
+        }
+        if (tok_len == 0 || !engine_patch_looks_like_a_path(tok))
+            continue;
+        bool dup = false;
+        for (size_t i = 0; i < seen_n; i++) {
+            if (strcmp(seen[i], tok) == 0) {
+                dup = true;
+                break;
+            }
+        }
+        if (dup)
+            continue;
+        char path[1024];
+        if ((size_t)snprintf(path, sizeof(path), "%s/%s", workdir, tok)
+            >= sizeof(path))
+            continue;
+        size_t clen = 0;
+        char *content = read_whole_file_alloc(path, &clen);
+        if (!content)
+            continue;                      /* not a file that exists here */
+        if (seen_n < TASK_FILE_CONTEXT_MAX_FILES) {
+            memcpy(seen[seen_n], tok, tok_len + 1);
+            seen_n++;
+        }
+        size_t take = clen;
+        bool truncated = false;
+        if (take > TASK_FILE_CONTEXT_PER_FILE_BYTES) {
+            take = TASK_FILE_CONTEXT_PER_FILE_BYTES;
+            truncated = true;
+        }
+        if (bytes_included + take > TASK_FILE_CONTEXT_MAX_TOTAL_BYTES) {
+            take = TASK_FILE_CONTEXT_MAX_TOTAL_BYTES - bytes_included;
+            truncated = true;
+        }
+        if (!header_written) {
+            const int hn = snprintf(out + used, cap - used,
+                "\n\n# Current contents of files this task names\n\n"
+                "Every file below exists in your worktree right now, "
+                "exactly as shown. Do not guess, reconstruct from memory, "
+                "or ask for it again.\n");
+            if (hn > 0)
+                used += (size_t)hn < cap - used ? (size_t)hn : cap - used;
+            header_written = true;
+        }
+        const int hn = snprintf(out + used, cap - used,
+                                "\n## %s (%zu byte(s)%s)\n", tok, clen,
+                                truncated ? "; truncated below" : "");
+        if (hn > 0)
+            used += (size_t)hn < cap - used ? (size_t)hn : cap - used;
+        if (take > 0 && used < cap) {
+            const size_t room = cap - used;
+            const size_t copy_n = take < room ? take : room;
+            memcpy(out + used, content, copy_n);
+            used += copy_n;
+        }
+        free(content);
+        files_included++;
+        bytes_included += take;
+    }
+    out[used] = '\0';
+    return out;
+}
+
 /* ── the gate ────────────────────────────────────────────────────────── */
 
 /* Run the unit's group and READ THE NUMBERS. `t-fast` takes the checkout lock
@@ -1893,6 +2019,20 @@ int main(int argc, char **argv)
         free(brief);
         engine_secret_clear();
         return 2;
+    }
+
+    /* task_sha3_hex above is the operator-authored task's own identity and
+     * is deliberately computed BEFORE this: augmenting the task with file
+     * contents that exist only in this worktree must never change what a
+     * unit's task hashes as. */
+    {
+        char *augmented =
+            build_task_with_file_contents(task, task_len, workdir);
+        if (augmented) {
+            free(task);
+            task = augmented;
+            task_len = strlen(task);
+        }
     }
 
     /* ── the turn loop ────────────────────────────────────────────────────

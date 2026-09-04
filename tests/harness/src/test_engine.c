@@ -566,6 +566,24 @@ static int case_patch(void)
     EN_CHECK("growing or holding steady is never a shrink",
              !engine_patch_is_drastic_shrink(100, 100)
              && !engine_patch_is_drastic_shrink(100, 500));
+
+    /* engine_patch_looks_like_a_path(): the filter a task-brief file-context
+     * scanner uses to tell a real path apart from ordinary prose — the
+     * cmp-capability_closure-glm53/a1 unit was handed a brief that quoted 5
+     * lines out of two ~1090-line registries and never their contents; it
+     * had no shell and correctly refused to fabricate ~1090-line whole-file
+     * bodies from memory. */
+    EN_CHECK("a real relative source path looks like a path",
+             engine_patch_looks_like_a_path(
+                 "engine/composition/capability_symbols.def"));
+    EN_CHECK("a bare filename with an extension looks like a path",
+             engine_patch_looks_like_a_path("wallet_gui.c"));
+    EN_CHECK("an ordinary word is not a path",
+             !engine_patch_looks_like_a_path("dispatcher"));
+    EN_CHECK("a directory-shaped token with no extension is not a path",
+             !engine_patch_looks_like_a_path("engine/composition"));
+    EN_CHECK("a containment violation is not a path even with a dot",
+             !engine_patch_looks_like_a_path("../../etc/passwd.conf"));
     EN_CHECK("an empty path is refused",
              !engine_patch_path_ok("") && !engine_patch_path_ok(NULL));
     {
