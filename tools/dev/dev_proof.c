@@ -4,6 +4,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "dev_proof.h"
+#include "dev_proof_budget.h"
 #include "devloop.h"
 #include "test_group_catalog.h"
 
@@ -41,23 +42,6 @@
 
 #define PROOF_MAX_FILES ZCL_DEVLOOP_MAX_FILES
 #define PROOF_MAX_JOBS 16u
-#define PROOF_TIMEOUT_MS 3600000
-#define PROOF_TIMEOUT_MAX_MS 7200000
-
-/* Per-child ceiling. ZCL_PROOF_TIMEOUT_MS may only raise it (a loaded host
- * needs more wall time, never less); anything unparsable or below the
- * default keeps the default. */
-static int proof_timeout_ms(void)
-{
-    const char *raw = getenv("ZCL_PROOF_TIMEOUT_MS");
-    if (!raw || !*raw) return PROOF_TIMEOUT_MS;
-    char *end = NULL;
-    long v = strtol(raw, &end, 10);
-    if (!end || *end != 0) return PROOF_TIMEOUT_MS;
-    if (v < PROOF_TIMEOUT_MS) return PROOF_TIMEOUT_MS;
-    if (v > PROOF_TIMEOUT_MAX_MS) return PROOF_TIMEOUT_MAX_MS;
-    return (int)v;
-}
 #define PROOF_ENV_DOMAIN "zcl.dev_proof_environment.v1"
 
 struct proof_paths {
@@ -82,6 +66,7 @@ struct proof_paths {
     char helper_log[PATH_MAX];
     char attempt[PATH_MAX];
     char attempt_token[192];
+    char phases[PATH_MAX];
     int64_t attempt_worker;
 };
 
@@ -456,7 +441,9 @@ static bool proof_paths_fill(const char *repo_root, const char *local,
                  "%s/%s.bundle.log", out->logs, out->key) >=
             (int)sizeof(out->bundle_log) ||
         snprintf(out->helper_log, sizeof(out->helper_log), "%s/%s.helper.log",
-                 out->logs, out->key) >= (int)sizeof(out->helper_log))
+                 out->logs, out->key) >= (int)sizeof(out->helper_log) ||
+        snprintf(out->phases, sizeof(out->phases), "%s/%s.phases.txt",
+                 out->state, out->key) >= (int)sizeof(out->phases))
         return false;
     return true;
 }
@@ -792,15 +779,15 @@ static bool proof_status_read_platform(const char *repo_root,
         out->state = ZCL_DEV_PROOF_STATE_RUNNING;
         out->worker_id = pid;
         out->started_unix = started;
-        out->eta_ms = elapsed_ms < proof_timeout_ms()
-            ? proof_timeout_ms() - elapsed_ms : 0;
+        int64_t ceiling_ms = zcl_dev_proof_ceiling_ms();
+        out->eta_ms = elapsed_ms < ceiling_ms ? ceiling_ms - elapsed_ms : 0;
         (void)snprintf(out->detail, sizeof(out->detail), "%s",
                        "background_verification_running");
         return true;
     }
     if (proof_request_matches_pair(paths.request, local, base)) {
         out->state = ZCL_DEV_PROOF_STATE_RUNNING;
-        out->eta_ms = proof_timeout_ms();
+        out->eta_ms = zcl_dev_proof_ceiling_ms();
         (void)snprintf(out->detail, sizeof(out->detail), "%s",
                        "resident_proof_request_queued");
         return true;
@@ -931,6 +918,8 @@ static bool proof_attempt_paths_prepare(const struct proof_paths *pair,
         snprintf(attempt->helper_log, sizeof(attempt->helper_log),
                  "%s/logs/helpers.log", attempt->attempt) >=
             (int)sizeof(attempt->helper_log) ||
+        snprintf(attempt->phases, sizeof(attempt->phases), "%s/phases.txt",
+                 attempt->attempt) >= (int)sizeof(attempt->phases) ||
         !platform_private_directory_ensure(attempt->logs))
         return false;
     return true;
@@ -1382,42 +1371,63 @@ static bool generation_prepare(const struct proof_paths *paths,
     return true;
 }
 
-static int run_logged(const char *root, const char *log_path,
-                      const char *const argv[], int timeout_ms)
+/* Every proof step runs under a budget it earned, watched by its own log.
+ * `step` names the row written to phases.txt and the key its wall time is
+ * remembered under, so the next proof on this checkout plans from what this
+ * one actually took. */
+static int run_step(const struct proof_paths *paths, const char *root,
+                    const char *log_path, const char *const argv[],
+                    const char *step,
+                    const struct zcl_dev_proof_budget *budget,
+                    struct zcl_dev_proof_step_report *report)
 {
-    pid_t child = fork();
-    if (child < 0) return -1;
-    if (child == 0) {
-        if (setsid() < 0 || chdir(root) != 0) _exit(127);
-        struct rlimit stack = {.rlim_cur = RLIM_INFINITY,
-                               .rlim_max = RLIM_INFINITY};
-        (void)setrlimit(RLIMIT_STACK, &stack);
-        int fd = open(log_path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
-        if (fd < 0 || dup2(fd, STDOUT_FILENO) < 0 ||
-            dup2(fd, STDERR_FILENO) < 0)
-            _exit(127);
-        if (fd > STDERR_FILENO) close(fd);
-        execvp(argv[0], (char *const *)argv);
-        _exit(127);
-    }
-    int64_t deadline = platform_time_monotonic_us() + (int64_t)timeout_ms * 1000;
-    int status = 0;
-    for (;;) {
-        pid_t got = waitpid(child, &status, WNOHANG);
-        if (got == child) break;
-        if (got < 0 && errno != EINTR) return -1;
-        if (platform_time_monotonic_us() >= deadline) {
-            (void)kill(-child, SIGTERM);
-            platform_sleep_ms(100);
-            (void)kill(-child, SIGKILL);
-            (void)waitpid(child, &status, 0);
-            return 124;
-        }
-        platform_sleep_ms(20);
-    }
-    if (WIFEXITED(status)) return WEXITSTATUS(status);
-    return WIFSIGNALED(status) ? 128 + WTERMSIG(status) : -1;
+    struct zcl_dev_proof_step_report local = {0};
+    if (!report) report = &local;
+    int rc = zcl_dev_proof_run_watched(root, log_path, argv, budget, report);
+    if (paths && paths->phases[0])
+        (void)zcl_dev_proof_phase_record(paths->phases, step, report);
+    char key[PROOF_TIMING_KEY_MAX];
+    if (rc == 0 && paths && step &&
+        snprintf(key, sizeof(key), "step.%s", step) < (int)sizeof(key))
+        (void)zcl_dev_proof_timing_note(paths->state, key, report->elapsed_ms);
+    return rc;
 }
+
+/* Say why a step was killed in the same sentence that says it was killed, so
+ * `z23 dev proof status` can explain the verdict without a log dive. */
+static void run_step_why(char *why, size_t why_len, const char *step,
+                         const struct zcl_dev_proof_step_report *report)
+{
+    if (!why || !why_len || !report) return;
+    if (report->cause == ZCL_DEV_PROOF_KILL_NONE) {
+        (void)snprintf(why, why_len, "child_proof_failed_exit_%d", report->rc);
+        return;
+    }
+    (void)snprintf(why, why_len,
+                   "child_proof_%s_%s_budget_ms_%lld_elapsed_ms_%lld_idle_ms_%lld",
+                   zcl_dev_proof_kill_cause_name(report->cause), step,
+                   (long long)report->budget_ms,
+                   (long long)report->elapsed_ms,
+                   (long long)report->last_progress_age_ms);
+}
+
+/* A step's budget is what this checkout has measured it needing, and the
+ * compiled-in figure only until it has. */
+static struct zcl_dev_proof_budget proof_step_budget(
+    const struct proof_paths *paths, const char *step, int64_t fallback_ms)
+{
+    char key[PROOF_TIMING_KEY_MAX];
+    if (!paths || !step ||
+        snprintf(key, sizeof(key), "step.%s", step) >= (int)sizeof(key))
+        return zcl_dev_proof_budget_make(fallback_ms, PROOF_STEP_FLOOR_MS);
+    return zcl_dev_proof_step_budget(paths->state, key, fallback_ms);
+}
+
+#define PROOF_GENERATED_DEFAULT_MS 300000
+#define PROOF_COMPILE_DEFAULT_MS 900000
+#define PROOF_LINT_DEFAULT_MS 600000
+#define PROOF_BUNDLE_DEFAULT_MS 1800000
+#define PROOF_HELPERS_DEFAULT_MS 120000
 
 static bool inventory_output_only(const char *const *files, size_t count)
 {
@@ -1567,24 +1577,31 @@ static bool run_dimension(const struct proof_paths *paths,
                           enum zcl_dev_proof_dimension_id id,
                           const char *const argv[],
                           struct zcl_dev_proof_dimension *dim,
-                          bool parse_test, char *why, size_t why_len)
+                          bool parse_test,
+                          const struct zcl_dev_proof_budget *budget,
+                          char *why, size_t why_len)
 {
+    const char *name = zcl_dev_proof_dimension_name(id);
     char log[PATH_MAX];
     if (snprintf(log, sizeof(log), "%s/%s.%s.log", paths->logs, paths->key,
-                 zcl_dev_proof_dimension_name(id)) >= (int)sizeof(log))
+                 name) >= (int)sizeof(log))
         return false;
-    int rc = run_logged(paths->root, log, argv, proof_timeout_ms());
-    if (!hash_file(zcl_dev_proof_dimension_name(id), log, dim->receipt_root)) {
+    struct zcl_dev_proof_step_report report = {0};
+    int rc = run_step(paths, paths->root, log, argv, name, budget, &report);
+    if (!hash_file(name, log, dim->receipt_root)) {
         proof_why(why, why_len, "child_receipt_hash_failed");
         return false;
     }
     if (rc != 0) {
         dim->failed = 1;
-        if (why && why_len)
-            (void)snprintf(why, why_len, "child_proof_failed_exit_%d", rc);
+        run_step_why(why, why_len, name, &report);
         return false;
     }
     if (parse_test) {
+        /* Fold this run's per-group wall times back into the table before
+         * accounting, so the next proof plans from what just happened even
+         * when the accounting then refuses the run. */
+        (void)zcl_dev_proof_timing_ingest_test_log(paths->state, log);
         if (!test_log_account(log, dim)) {
             proof_why(why, why_len, "test_accounting_incomplete");
             return false;
@@ -1916,8 +1933,10 @@ static bool test_helpers_prepare(
     const char *prerequisite_argv[] = {
         "make", "--no-print-directory", make_jobs, "zcl-nodectl",
         "zclassic23-acme", "fbsh", "engine-unit", NULL};
-    if (run_logged(generation, paths->helper_log, prerequisite_argv,
-                   120000) != 0) {
+    struct zcl_dev_proof_budget helper_budget =
+        proof_step_budget(paths, "helpers", PROOF_HELPERS_DEFAULT_MS);
+    if (run_step(paths, generation, paths->helper_log, prerequisite_argv,
+                 "helpers", &helper_budget, NULL) != 0) {
         proof_why(why, why_len, "proof_test_helper_build_failed");
         return false;
     }
@@ -2196,8 +2215,10 @@ static bool proof_worker(const struct proof_paths *paths,
         if (generated->selected) {
             const char *argv[] = {"make", "--no-print-directory", make_jobs,
                                   "check-capability-inventory-generated", NULL};
+            struct zcl_dev_proof_budget budget = proof_step_budget(
+                paths, "generated", PROOF_GENERATED_DEFAULT_MS);
             if (!run_dimension(&execution, ZCL_DEV_PROOF_GENERATED, argv,
-                               generated, false, why, why_len))
+                               generated, false, &budget, why, why_len))
                 return false;
         } else unused_dimension(ZCL_DEV_PROOF_GENERATED, generated);
         proof_phase_mark(&phases, "dimension_generated");
@@ -2210,8 +2231,10 @@ static bool proof_worker(const struct proof_paths *paths,
                                   &source_before, compile, NULL, 0)) {
                 const char *argv[] = {"make", "--no-print-directory", make_jobs,
                                       "build-only", NULL};
+                struct zcl_dev_proof_budget budget = proof_step_budget(
+                    paths, "compile", PROOF_COMPILE_DEFAULT_MS);
                 if (!run_dimension(&execution, ZCL_DEV_PROOF_COMPILE, argv,
-                                   compile, false, why, why_len))
+                                   compile, false, &budget, why, why_len))
                     return false;
             }
         } else unused_dimension(ZCL_DEV_PROOF_COMPILE, compile);
@@ -2219,8 +2242,10 @@ static bool proof_worker(const struct proof_paths *paths,
         if (lint->selected) {
             const char *argv[] = {"make", "--no-print-directory", make_jobs,
                                   "lint-fast", NULL};
+            struct zcl_dev_proof_budget budget = proof_step_budget(
+                paths, "lint", PROOF_LINT_DEFAULT_MS);
             if (!run_dimension(&execution, ZCL_DEV_PROOF_LINT, argv, lint,
-                               false, why, why_len))
+                               false, &budget, why, why_len))
                 return false;
         } else unused_dimension(ZCL_DEV_PROOF_LINT, lint);
         proof_phase_mark(&phases, "dimension_lint");
@@ -2272,9 +2297,12 @@ static bool proof_worker(const struct proof_paths *paths,
                 const char *bundle_argv[] = {
                     "make", "--no-print-directory", make_jobs,
                     "dev-proof-bundle", NULL};
-                int bundle_rc = run_logged(
-                    generation, paths->bundle_log, bundle_argv,
-                    proof_timeout_ms());
+                struct zcl_dev_proof_budget bundle_budget =
+                    proof_step_budget(paths, "bundle",
+                                      PROOF_BUNDLE_DEFAULT_MS);
+                int bundle_rc = run_step(paths, generation, paths->bundle_log,
+                                         bundle_argv, "bundle",
+                                         &bundle_budget, NULL);
                 if (bundle_rc != 0 && proof_log_contains(
                         paths->bundle_log,
                         "unverified compile epoch appeared after recovery "
@@ -2286,8 +2314,9 @@ static bool proof_worker(const struct proof_paths *paths,
                                   "proof_bundle_retry_log_invalid");
                         return false;
                     }
-                    bundle_rc = run_logged(generation, retry_log, bundle_argv,
-                                           proof_timeout_ms());
+                    bundle_rc = run_step(paths, generation, retry_log,
+                                         bundle_argv, "bundle",
+                                         &bundle_budget, NULL);
                 }
                 if (bundle_rc != 0) {
                     proof_why(why, why_len,
@@ -2308,8 +2337,11 @@ static bool proof_worker(const struct proof_paths *paths,
             }
             const char *argv[] = {generation_binary, only, "--cache",
                                   "--activate-proof-contracts", NULL};
+            struct zcl_dev_proof_budget test_budget =
+                zcl_dev_proof_test_budget(paths->state, groups,
+                                          test->selected);
             if (!run_dimension(&execution, ZCL_DEV_PROOF_TEST, argv,
-                               test, true, why, why_len))
+                               test, true, &test_budget, why, why_len))
                 return false;
             test_receipt_bind_helpers(test, helper_root);
         } else unused_dimension(ZCL_DEV_PROOF_TEST, test);

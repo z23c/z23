@@ -48,6 +48,7 @@
 #include "config/command_catalog.h"
 #include "controllers/agent_impact_rules.h"
 #include "dev_proof.h"
+#include "dev_proof_budget.h"
 #include "dev_proof_receipt.h"
 #include "devloop.h"
 #include "json/json.h"
@@ -1791,6 +1792,260 @@ static int test_ic_merkle_verifier_selects_proof_lane(void)
     return failures;
 }
 
+
+/* ── Proof step budgets ───────────────────────────────────────────────────
+ *
+ * The wall these replace was one constant for every step. Under load the test
+ * dimension took 19 minutes against a 15-minute cap, the proof reported
+ * `child_proof_failed_exit_124`, and the run it had just killed finished green
+ * four minutes later. Every host hit it. These pin the replacement: a budget
+ * sized from the plan, a kill decided by whether the step is still writing,
+ * and a ceiling the environment may raise but never lower. */
+
+#define IC_FIX_BUDGET IC_FIX_ROOT "/budget"
+
+static void ic_budget_fixture(const char *sub, char out[4096])
+{
+    snprintf(out, 4096, "%s/%s", IC_FIX_BUDGET, sub);
+    (void)ic_write(out, ".keep", "");
+    char table[4096];
+    snprintf(table, sizeof(table), "%s/timing/table.tsv", out);
+    (void)remove(table);
+}
+
+static int test_ic_proof_budget_grows_with_groups(void)
+{
+    int failures = 0;
+    TEST("proof budget: the test dimension is sized by the groups it will run") {
+        char state[4096];
+        ic_budget_fixture("grows", state);
+        struct zcl_dev_proof_budget one =
+            zcl_dev_proof_test_budget(state, "alpha", 1);
+        struct zcl_dev_proof_budget three =
+            zcl_dev_proof_test_budget(state, "alpha,beta,gamma", 3);
+        struct zcl_dev_proof_budget ten = zcl_dev_proof_test_budget(
+            state, "a,b,c,d,e,f,g,h,i,j", 10);
+        ASSERT(one.budget_ms >= PROOF_TEST_FLOOR_MS);
+        ASSERT(three.budget_ms > one.budget_ms);
+        ASSERT(ten.budget_ms > three.budget_ms);
+        /* Never past the ceiling, however many groups the plan names. */
+        struct zcl_dev_proof_budget huge =
+            zcl_dev_proof_test_budget(state, "", 100000);
+        ASSERT(huge.budget_ms == huge.ceiling_ms);
+        ASSERT(huge.ceiling_ms == PROOF_TIMEOUT_MS);
+        /* A step with no history still gets the compiled-in allowance for
+         * every group the plan named, even when the selector is unreadable. */
+        ASSERT(one.budget_ms ==
+               PROOF_TEST_FLOOR_MS + PROOF_TEST_GROUP_DEFAULT_MS);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_ic_proof_budget_learns_from_this_checkout(void)
+{
+    int failures = 0;
+    TEST("proof budget: measured wall times lower and raise the allowance") {
+        char state[4096];
+        ic_budget_fixture("learns", state);
+        struct zcl_dev_proof_budget cold =
+            zcl_dev_proof_test_budget(state, "swift", 1);
+        /* A group this checkout measures in two seconds needs far less than
+         * the compiled default. */
+        for (int i = 0; i < 3; i++)
+            ASSERT(zcl_dev_proof_timing_note(state, "swift", 2000));
+        struct zcl_dev_proof_budget quick =
+            zcl_dev_proof_test_budget(state, "swift", 1);
+        ASSERT(quick.budget_ms < cold.budget_ms);
+        /* And a group measured at eight minutes needs far more. */
+        ASSERT(zcl_dev_proof_timing_note(state, "slow", 480000));
+        struct zcl_dev_proof_budget patient =
+            zcl_dev_proof_test_budget(state, "slow", 1);
+        ASSERT(patient.budget_ms > cold.budget_ms);
+        ASSERT(zcl_dev_proof_timing_allowance_ms(state, "slow", 1) > 480000);
+        /* An unknown key falls back to what the caller compiled in. */
+        ASSERT(zcl_dev_proof_timing_allowance_ms(state, "never_seen", 4242) ==
+               4242);
+        /* The table remembers a bounded window, not every run ever. */
+        for (int i = 0; i < (int)PROOF_HISTORY_MAX + 4; i++)
+            ASSERT(zcl_dev_proof_timing_note(state, "swift", 1000));
+        ASSERT(zcl_dev_proof_timing_allowance_ms(state, "swift", 1) ==
+               1000 * 2 + 60000);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_ic_proof_ceiling_env_raises_only(void)
+{
+    int failures = 0;
+    TEST("proof budget: the environment may raise the ceiling, never lower it") {
+        ASSERT(zcl_dev_proof_ceiling_ms() == PROOF_TIMEOUT_MS);
+        setenv("ZCL_PROOF_TIMEOUT_MS", "60000", 1);
+        ASSERT(zcl_dev_proof_ceiling_ms() == PROOF_TIMEOUT_MS);
+        setenv("ZCL_PROOF_TIMEOUT_MS", "5400000", 1);
+        ASSERT(zcl_dev_proof_ceiling_ms() == 5400000);
+        setenv("ZCL_PROOF_TIMEOUT_MS", "999999999", 1);
+        ASSERT(zcl_dev_proof_ceiling_ms() == PROOF_TIMEOUT_MAX_MS);
+        setenv("ZCL_PROOF_TIMEOUT_MS", "not-a-number", 1);
+        ASSERT(zcl_dev_proof_ceiling_ms() == PROOF_TIMEOUT_MS);
+        unsetenv("ZCL_PROOF_TIMEOUT_MS");
+        ASSERT(zcl_dev_proof_ceiling_ms() == PROOF_TIMEOUT_MS);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_ic_proof_verdict_watches_progress_not_the_clock(void)
+{
+    int failures = 0;
+    TEST("proof budget: a step still writing outlives the old fifteen-minute wall") {
+        struct zcl_dev_proof_budget budget = {
+            .budget_ms = 900000,
+            .ceiling_ms = PROOF_TIMEOUT_MS,
+            .no_progress_ms = PROOF_NO_PROGRESS_MS,
+        };
+        /* The exact run that was murdered: nineteen minutes in, still
+         * printing, budget long spent. It lives. */
+        ASSERT(zcl_dev_proof_budget_verdict(&budget, 19 * 60000, 1000) ==
+               ZCL_DEV_PROOF_KILL_NONE);
+        /* Silent for longer than the window, but inside its budget: also
+         * alive — the harness's own 300 s per-group watchdog speaks first. */
+        ASSERT(zcl_dev_proof_budget_verdict(&budget, 600000, 601000) ==
+               ZCL_DEV_PROOF_KILL_NONE);
+        /* Silent past the window with the budget spent: dead, and named. */
+        ASSERT(zcl_dev_proof_budget_verdict(&budget, 1500000, 601000) ==
+               ZCL_DEV_PROOF_KILL_NO_PROGRESS);
+        /* A chatty runaway still hits the ceiling. */
+        ASSERT(zcl_dev_proof_budget_verdict(&budget, PROOF_TIMEOUT_MS, 0) ==
+               ZCL_DEV_PROOF_KILL_HARD_CEILING);
+        ASSERT(strcmp(zcl_dev_proof_kill_cause_name(
+                          ZCL_DEV_PROOF_KILL_NO_PROGRESS), "no_progress") == 0);
+        ASSERT(strcmp(zcl_dev_proof_kill_cause_name(
+                          ZCL_DEV_PROOF_KILL_HARD_CEILING),
+                      "hard_ceiling") == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_ic_proof_reads_the_harness_banners(void)
+{
+    int failures = 0;
+    TEST("proof budget: per-group wall times come from the harness's own log") {
+        char group[PROOF_TIMING_KEY_MAX];
+        int64_t ms = 0;
+        ASSERT(zcl_dev_proof_timing_parse_group_line(
+            "==================== core_net (PASS, 12s) ====================\n",
+            group, sizeof(group), &ms));
+        ASSERT(strcmp(group, "core_net") == 0 && ms == 12000);
+        /* A skip note sits between the status and the time. */
+        ASSERT(zcl_dev_proof_timing_parse_group_line(
+            "==================== wallet (PASS, 3 SKIP, 7s) ====================\n",
+            group, sizeof(group), &ms));
+        ASSERT(strcmp(group, "wallet") == 0 && ms == 7000);
+        /* Only a pass says how long the work takes. */
+        ASSERT(!zcl_dev_proof_timing_parse_group_line(
+            "==================== core_net (FAIL, 12s) ====================\n",
+            group, sizeof(group), &ms));
+        ASSERT(!zcl_dev_proof_timing_parse_group_line(
+            "==================== core_net (WEDGED-NO-OUTPUT, 12s) ====================\n",
+            group, sizeof(group), &ms));
+        ASSERT(!zcl_dev_proof_timing_parse_group_line(
+            "SUITE VERDICT groups_ran=4\n", group, sizeof(group), &ms));
+
+        char state[4096], log[4096];
+        ic_budget_fixture("ingest", state);
+        snprintf(log, sizeof(log), "%s/test.log", state);
+        ASSERT(ic_write(
+            state, "test.log",
+            "noise before\n"
+            "==================== alpha (PASS, 40s) ====================\n"
+            "==================== beta (FAIL, 9s) ====================\n"
+            "==================== gamma (PASS, 2 SKIP, 5s) ====================\n"
+            "SUITE VERDICT groups_ran=3\n"));
+        ASSERT(zcl_dev_proof_timing_ingest_test_log(state, log) == 2);
+        ASSERT(zcl_dev_proof_timing_allowance_ms(state, "alpha", 1) ==
+               40000 * 2 + 60000);
+        ASSERT(zcl_dev_proof_timing_allowance_ms(state, "gamma", 1) ==
+               5000 * 2 + 60000);
+        ASSERT(zcl_dev_proof_timing_allowance_ms(state, "beta", 77) == 77);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+#if !defined(_WIN32)
+static int test_ic_proof_run_watched_kills_only_the_silent(void)
+{
+    int failures = 0;
+    TEST("proof budget: silence is killed, output is not, the ceiling is final") {
+        char state[4096], log[4096];
+        ic_budget_fixture("watched", state);
+        snprintf(log, sizeof(log), "%s/step.log", state);
+
+        /* A child that says nothing for longer than the window, with its
+         * budget spent, is killed and the cause is named. */
+        struct zcl_dev_proof_budget silent_budget = {
+            .budget_ms = 200, .ceiling_ms = 20000, .no_progress_ms = 400};
+        const char *quiet_argv[] = {"/bin/sh", "-c", "sleep 20", NULL};
+        struct zcl_dev_proof_step_report quiet = {0};
+        ASSERT(zcl_dev_proof_run_watched(".", log, quiet_argv, &silent_budget,
+                                         &quiet) == 124);
+        ASSERT(quiet.cause == ZCL_DEV_PROOF_KILL_NO_PROGRESS);
+        ASSERT(quiet.elapsed_ms < 5000);
+        ASSERT(quiet.budget_ms == 200);
+
+        /* A child that keeps writing runs past its budget untouched — the
+         * case the flat cap used to kill. */
+        struct zcl_dev_proof_budget chatty_budget = {
+            .budget_ms = 200, .ceiling_ms = 30000, .no_progress_ms = 3000};
+        const char *chatty_argv[] = {
+            "/bin/sh", "-c",
+            "i=0; while [ $i -lt 12 ]; do echo tick; sleep 0.1; "
+            "i=$((i+1)); done; exit 0", NULL};
+        struct zcl_dev_proof_step_report chatty = {0};
+        ASSERT(zcl_dev_proof_run_watched(".", log, chatty_argv, &chatty_budget,
+                                         &chatty) == 0);
+        ASSERT(chatty.cause == ZCL_DEV_PROOF_KILL_NONE);
+        ASSERT(chatty.elapsed_ms > chatty.budget_ms);
+
+        /* A chatty runaway still dies, at the ceiling, for that reason. */
+        struct zcl_dev_proof_budget capped = {
+            .budget_ms = 300, .ceiling_ms = 900, .no_progress_ms = 600000};
+        const char *runaway_argv[] = {
+            "/bin/sh", "-c", "while true; do echo tick; sleep 0.05; done",
+            NULL};
+        struct zcl_dev_proof_step_report runaway = {0};
+        ASSERT(zcl_dev_proof_run_watched(".", log, runaway_argv, &capped,
+                                         &runaway) == 124);
+        ASSERT(runaway.cause == ZCL_DEV_PROOF_KILL_HARD_CEILING);
+
+        /* Every step it ran is explained in phases.txt. */
+        char phases[4096];
+        snprintf(phases, sizeof(phases), "%s/phases.txt", state);
+        (void)remove(phases);
+        ASSERT(zcl_dev_proof_phase_record(phases, "test", &quiet));
+        ASSERT(zcl_dev_proof_phase_record(phases, "lint", &chatty));
+        char body[2048] = {0};
+        FILE *f = fopen(phases, "r");
+        ASSERT(f != NULL);
+        size_t read = fread(body, 1, sizeof(body) - 1, f);
+        fclose(f);
+        body[read] = '\0';
+        ASSERT(strstr(body, "step=test") != NULL);
+        ASSERT(strstr(body, "budget_ms=200") != NULL);
+        ASSERT(strstr(body, "elapsed_ms=") != NULL);
+        ASSERT(strstr(body, "last_progress_age_ms=") != NULL);
+        ASSERT(strstr(body, "cause=no_progress") != NULL);
+        ASSERT(strstr(body, "step=lint") != NULL);
+        ASSERT(strstr(body, "cause=none") != NULL);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+#endif
+
 int test_impact_composition(void)
 {
     int failures = 0;
@@ -1818,5 +2073,13 @@ int test_impact_composition(void)
     failures += test_ic_native_compositor_selects_physical_proof();
     failures += test_ic_fast_sync_splits_keep_proof_lane();
     failures += test_ic_merkle_verifier_selects_proof_lane();
+    failures += test_ic_proof_budget_grows_with_groups();
+    failures += test_ic_proof_budget_learns_from_this_checkout();
+    failures += test_ic_proof_ceiling_env_raises_only();
+    failures += test_ic_proof_verdict_watches_progress_not_the_clock();
+    failures += test_ic_proof_reads_the_harness_banners();
+#if !defined(_WIN32)
+    failures += test_ic_proof_run_watched_kills_only_the_silent();
+#endif
     return failures;
 }
