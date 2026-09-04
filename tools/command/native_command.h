@@ -2383,7 +2383,7 @@ void zcl_native_handle_dev_agent_mutate(
     struct zcl_command_reply *reply);
 
 /* dev.agent.* lane discipline — situation, rules, start, done, triage,
- * ceiling, pace, claim. One handler per file under tools/command
+ * ceiling, pace, claim, outcomes. One handler per file under tools/command
  * (native_devagent_<leaf>.c) so each can be implemented and reviewed on its
  * own. They run Git only through platform/modules/util spawn and read only
  * the checkout. dev.agent.claim binds in the catalog only under a dev build
@@ -2414,6 +2414,9 @@ void zcl_native_handle_dev_agent_pace(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
 void zcl_native_handle_dev_agent_hot(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
+void zcl_native_handle_dev_agent_outcomes(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
 

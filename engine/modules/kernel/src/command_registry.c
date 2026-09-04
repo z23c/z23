@@ -1445,6 +1445,15 @@ bool zcl_command_registry_input_validate(const struct zcl_command_spec *spec,
                 type_ok = item->type == JSON_STR && text && text[0] &&
                           strlen(text) <= ZCL_COMMAND_INPUT_FILES_PATH_MAX;
             }
+        } else if (strcmp(key, "ledger") == 0 || strcmp(key, "model") == 0) {
+            /* dev.agent.outcomes' ledger path and model filter are nonempty
+             * bounded strings. The handler owns existence and content rules
+             * (BAD_INPUT / LEDGER_NOT_FOUND / LEDGER_UNREADABLE); the
+             * transport only admits the string shape so the documented
+             * `--ledger=<path>` CLI form reaches it. */
+            const char *text = json_get_str(value);
+            type_ok = value->type == JSON_STR && text && text[0] &&
+                      strlen(text) <= zcl_command_registry_input_str_max(key);
         } else if (strcmp(key, "rpc_port") == 0) {
             /* core.consensus.producer-session.retire's optional liveness
              * probe target: the RPC port of the node that owns this

@@ -1196,6 +1196,27 @@ ZCL_COMMAND_READY_READ(
     ZCL_COMMAND_TRAIT_IDEMPOTENT | ZCL_COMMAND_TRAIT_DEV_ONLY,
     ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_dev_agent_pace)
 
+ZCL_COMMAND_READY_READ(
+    "dev.agent.outcomes", "dev.agent", "",
+    "Route units to models from the unit-outcome ledger",
+    "Per-model executor evidence read at call time from a unit-outcome "
+    "JSONL ledger: attempts, pass and failure buckets, pass rate, total "
+    "completion tokens, and the failure-class histogram per model, plus one "
+    "routing recommendation per model with enough attempts and a constant "
+    "closing line stating verdicts come from receipts. A malformed ledger "
+    "line is counted and skipped, never fatal. It reads only the named "
+    "file and writes nothing.", 32768,
+    "agent,outcomes,ledger,model,route,executor,receipt",
+    "zcl.agent_outcomes_input.v1", "zcl.agent_outcomes.v1",
+    "ledger,model,since", "ledger",
+    "z23 dev agent outcomes --ledger=build/scratch/outcomes.jsonl",
+    ZCL_COMMAND_LAYER_DEV, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_LATENCY_FAST,
+    ZCL_COMMAND_COST_LOW, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_DEV_STATE_READ,
+    ZCL_COMMAND_TRAIT_IDEMPOTENT | ZCL_COMMAND_TRAIT_DEV_ONLY,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_dev_agent_outcomes)
+
 /* claim WRITES a ledger line into the Git common directory, so it takes the
  * same command shape dev.begin takes rather than the read shape above. */
 ZCL_COMMAND_DEV_COMMAND(
