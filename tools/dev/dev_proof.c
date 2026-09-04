@@ -1882,7 +1882,7 @@ static bool test_helpers_prepare(
     }
     const char *prerequisite_argv[] = {
         "make", "--no-print-directory", make_jobs, "zcl-nodectl",
-        "zclassic23-acme", "fbsh", NULL};
+        "zclassic23-acme", "fbsh", "engine-unit", NULL};
     if (run_logged(generation, paths->helper_log, prerequisite_argv,
                    120000) != 0) {
         proof_why(why, why_len, "proof_test_helper_build_failed");

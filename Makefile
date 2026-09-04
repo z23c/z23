@@ -3662,7 +3662,7 @@ t-fast-exact-locked: $(TEST_PARALLEL_FAST_CANDIDATE) dev-package-verifier-ensure
 # and invokes that admitted runner once; no fallback target may both build and
 # execute a suite.
 dev-proof-bundle: $(TEST_PARALLEL_FAST_CANDIDATE) dev-bin $(DEV_RESTART_PLAN) zcl-nodectl \
-	zclassic23-acme fbsh
+	zclassic23-acme fbsh engine-unit
 
 # Closed historical-failure corpus required by build_release_confirmation.v2.
 # This focused physical gate is uncached and exact; release qualification also
