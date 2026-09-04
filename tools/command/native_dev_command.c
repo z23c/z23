@@ -466,12 +466,12 @@ void zcl_native_handle_dev_publication_status(
 {
     const char *job_hex = json_get_str(json_get(request->input, "job_root"));
     uint8_t job_root[32];
-    if (!job_hex || strlen(job_hex) != 64 ||
-        !zcl_hex_decode_lower(job_hex, job_root, sizeof(job_root))) {
+    char job_root_err[128];
+    if (!zcl_native_require_hex64("job_root", job_hex, job_root, job_root_err,
+                                  sizeof(job_root_err))) {
         zcl_command_reply_fail(
             reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
-            "INVALID_JOB_ROOT", "normalize", false, false,
-            "job_root must be exactly 64 lowercase hexadecimal characters",
+            "INVALID_JOB_ROOT", "normalize", false, false, job_root_err,
             job_hex ? job_hex : "missing job_root");
         return;
     }
@@ -903,12 +903,12 @@ void zcl_native_handle_dev_publication_advance(
     const char *job_hex = json_get_str(json_get(request->input, "job_root"));
     bool details = json_get_bool(json_get(request->input, "details"));
     uint8_t job_root[32];
-    if (!job_hex || strlen(job_hex) != 64 ||
-        !zcl_hex_decode_lower(job_hex, job_root, sizeof(job_root))) {
+    char job_root_err[128];
+    if (!zcl_native_require_hex64("job_root", job_hex, job_root, job_root_err,
+                                  sizeof(job_root_err))) {
         zcl_command_reply_fail(
             reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
-            "INVALID_JOB_ROOT", "normalize", false, false,
-            "job_root must be exactly 64 lowercase hexadecimal characters",
+            "INVALID_JOB_ROOT", "normalize", false, false, job_root_err,
             job_hex ? job_hex : "missing job_root");
         return;
     }
@@ -1357,12 +1357,12 @@ void zcl_native_handle_dev_publication_collect(
 {
     const char *job_hex = json_get_str(json_get(request->input, "job_root"));
     uint8_t job_root[32];
-    if (!job_hex || strlen(job_hex) != 64 ||
-        !zcl_hex_decode_lower(job_hex, job_root, sizeof(job_root))) {
+    char job_root_err[128];
+    if (!zcl_native_require_hex64("job_root", job_hex, job_root, job_root_err,
+                                  sizeof(job_root_err))) {
         zcl_command_reply_fail(
             reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
-            "INVALID_JOB_ROOT", "normalize", false, false,
-            "job_root must be exactly 64 lowercase hexadecimal characters",
+            "INVALID_JOB_ROOT", "normalize", false, false, job_root_err,
             job_hex ? job_hex : "missing job_root");
         return;
     }
@@ -4022,7 +4022,9 @@ void zcl_native_handle_dev_diagnose_show(
         zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
                                ZCL_COMMAND_EXIT_INVALID, "INVALID_FAILURE_ID",
                                "normalize", false, false,
-                               "failure_id must be 64 lowercase hex characters",
+                               "failure_id must be 64 lowercase hex "
+                               "characters, e.g. 3f9a... (32 bytes "
+                               "hex-encoded)",
                                "failure_id");
         return;
     }

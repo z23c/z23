@@ -890,9 +890,10 @@ static bool rb_compute(const struct json_value *input, const char *workspace,
         return false;
     }
     uint8_t expected[32];
-    if (!zcl_hex_decode_lower(expected_hex, expected, sizeof(expected))) {
-        rb_fail(reply, "INVALID_VCS_ROOT", "bind",
-                "expected_vcs_root must be exactly 64 lowercase hex characters",
+    char expected_err[128];
+    if (!zcl_native_require_hex64("expected_vcs_root", expected_hex, expected,
+                                  expected_err, sizeof(expected_err))) {
+        rb_fail(reply, "INVALID_VCS_ROOT", "bind", expected_err,
                 "expected_vcs_root");
         return false;
     }

@@ -61,17 +61,26 @@ static bool ztl_zcode_dir(const struct zcl_command_request *request,
     return true;
 }
 
-/* One required canonical 64-hex root input. False with the error body set. */
+/* One required canonical 64-hex root input. Message is the shared
+ * zcl_native_require_hex64() sentence naming `key`, plus `context` (may be
+ * NULL) as a parenthetical saying which root/id this one is. False with
+ * the error body set. */
 static bool ztl_hex32(const struct zcl_command_request *request,
                       struct zcl_command_reply *reply, const char *command,
-                      const char *key, const char *code, const char *what,
+                      const char *key, const char *code, const char *context,
                       uint8_t out[32])
 {
     const char *hex = ztl_input_str(request->input, key);
-    if (!hex || strlen(hex) != 64 || !zcl_hex_decode_lower(hex, out, 32)) {
+    char err[128];
+    if (!zcl_native_require_hex64(key, hex, out, err, sizeof(err))) {
+        char full[224];
+        if (context && context[0])
+            (void)snprintf(full, sizeof(full), "%s (%s)", err, context);
+        else
+            (void)snprintf(full, sizeof(full), "%s", err);
         zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
                                ZCL_COMMAND_EXIT_INVALID, code, "normalize",
-                               false, false, what,
+                               false, false, full,
                                hex && hex[0] ? hex : command);
         return false;
     }

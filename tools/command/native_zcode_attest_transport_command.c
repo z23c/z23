@@ -156,8 +156,7 @@ void zcl_native_handle_zcode_package_attest_offer(
     uint8_t id[VCS_PACKAGE_ATTEST_ID_BYTES];
     if (!ztl_hex32(request, reply, "zcode.package.attest.offer",
                    "attestation_id", "BAD_ATTESTATION_ID",
-                   "attestation_id must be 64 lowercase hex chars (the "
-                   "attestations/ filename, not the transport root)", id))
+                   "the attestations/ filename, not the transport root", id))
         return;
 
     bool own_store = false;
@@ -306,8 +305,7 @@ void zcl_native_handle_zcode_package_attest_pull(
     uint8_t package_root[32];
     if (!ztl_hex32(request, reply, "zcode.package.attest.pull",
                    "package_root", "BAD_PACKAGE_ROOT",
-                   "package_root must be 64 lowercase hex chars (the "
-                   "attested package root)", package_root))
+                   "the attested package root", package_root))
         return;
     char package_hex[65];
     zcl_hex_encode(package_root, 32, package_hex);
@@ -594,9 +592,8 @@ void zcl_native_handle_zcode_package_attest_admit(
     uint8_t transport_root[32];
     if (!ztl_hex32(request, reply, "zcode.package.attest.admit",
                    "transport_root", "BAD_TRANSPORT_ROOT",
-                   "transport_root must be 64 lowercase hex chars (the "
-                   "attestation BLOB root returned by zcode package attest "
-                   "offer, not the attestation id)", transport_root))
+                   "the attestation BLOB root returned by zcode package "
+                   "attest offer, not the attestation id", transport_root))
         return;
 
     /* OPTIONAL — and the asymmetry above is why. Present means "this
@@ -610,10 +607,8 @@ void zcl_native_handle_zcode_package_attest_admit(
     if (want_hex && want_hex[0]) {
         if (!ztl_hex32(request, reply, "zcode.package.attest.admit",
                        "package_root", "BAD_PACKAGE_ROOT",
-                       "package_root is optional, but when given it must be "
-                       "64 lowercase hex chars (the package root this "
-                       "attestation must be about); it is never silently "
-                       "ignored", package_root))
+                       "the package root this attestation must be about",
+                       package_root))
             return;
         expect_package_root = package_root;
     }

@@ -18,6 +18,7 @@
 
 #define _GNU_SOURCE
 #include "command/native_command.h"
+#include "base/hex.h"
 
 #include "config/command_catalog.h"
 #include "framework/app_definition.h"
@@ -3547,6 +3548,25 @@ bool zcl_native_render_field_selection(const struct json_value *obj,
         len += (size_t)n;
     }
     return true;
+}
+
+/* ── shared field validators ──────────────────────────────────────────
+ * One place for the "exactly 64 lowercase hex characters" contract that
+ * every DHT root, receipt id, and other 32-byte content-addressed key in
+ * this tree shares, so every command names the field and states the same
+ * shape instead of a dozen near-identical hand-rolled sentences. */
+bool zcl_native_require_hex64(const char *field, const char *value,
+                              uint8_t out[32], char *err, size_t err_size)
+{
+    uint8_t scratch[32];
+    if (value && zcl_hex_decode_lower(value, out ? out : scratch, 32))
+        return true;
+    if (err && err_size)
+        snprintf(err, err_size,
+                "%s must be 64 lowercase hex characters, e.g. 3f9a... "
+                "(32 bytes hex-encoded)",
+                field && field[0] ? field : "value");
+    return false;
 }
 
 /* ── CLI UX contract: unrecognized-command diagnostic ────────────────

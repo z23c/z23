@@ -46,9 +46,8 @@ static bool npd_package_facts(const char *receipt_hex,
                               char *why, size_t why_cap)
 {
     uint8_t receipt_id[32];
-    if (!receipt_hex || !zcl_hex_decode_lower(receipt_hex, receipt_id, 32)) {
-        (void)snprintf(why, why_cap,
-                       "receipt_id must be exactly 64 lowercase hexadecimal characters");
+    if (!zcl_native_require_hex64("receipt_id", receipt_hex, receipt_id, why,
+                                  why_cap)) {
         return false;
     }
     struct vcs_package_build_receipt receipt;

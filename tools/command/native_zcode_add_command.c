@@ -112,11 +112,12 @@ void zcl_native_handle_zcode_package_checkout(
     const char *root_hex = za_input_str(request->input, "root");
     const char *destination = za_input_str(request->input, "destination");
     uint8_t root[32];
-    if (!root_hex || !zcl_hex_decode_lower(root_hex, root, sizeof(root))) {
+    char root_err[128];
+    if (!zcl_native_require_hex64("root", root_hex, root, root_err,
+                                  sizeof(root_err))) {
         zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
                                ZCL_COMMAND_EXIT_INVALID, "BAD_ROOT",
-                               "normalize", false, false,
-                               "root must be 64 lowercase hex chars",
+                               "normalize", false, false, root_err,
                                root_hex ? root_hex : "(missing)");
         return;
     }

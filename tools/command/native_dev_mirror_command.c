@@ -27,12 +27,12 @@ void zcl_native_handle_dev_publication_mirror_record(
     const char *git_hex = json_get_str(json_get(request->input, "git_oid"));
     uint8_t job_root[32], git_oid[VCS_DEVLOOP_MIRROR_OID_MAX_BYTES] = {0};
     size_t git_oid_len = git_hex ? strlen(git_hex) / 2u : 0;
-    if (!job_hex || strlen(job_hex) != 64 ||
-        !zcl_hex_decode_lower(job_hex, job_root, sizeof(job_root))) {
+    char job_root_err[128];
+    if (!zcl_native_require_hex64("job_root", job_hex, job_root, job_root_err,
+                                  sizeof(job_root_err))) {
         zcl_command_reply_fail(
             reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
-            "INVALID_JOB_ROOT", "normalize", false, false,
-            "job_root must be exactly 64 lowercase hexadecimal characters",
+            "INVALID_JOB_ROOT", "normalize", false, false, job_root_err,
             job_hex ? job_hex : "missing job_root");
         return;
     }

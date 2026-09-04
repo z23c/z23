@@ -126,9 +126,11 @@ void zcl_native_handle_zcode_science_work_execute(
     };
     for (size_t i = 0; i < sizeof(root_keys) / sizeof(root_keys[0]); i++) {
         const char *value = zsx_str(input, root_keys[i]);
-        if (value && value[0] && !zsx_root_ok(value)) {
-            zsx_fail(reply, "BAD_ROOT",
-                     "root fields must be 64 lowercase hex");
+        char root_err[128];
+        if (value && value[0] &&
+            !zcl_native_require_hex64(root_keys[i], value, NULL, root_err,
+                                      sizeof(root_err))) {
+            zsx_fail(reply, "BAD_ROOT", root_err);
             return;
         }
     }
@@ -171,10 +173,12 @@ void zcl_native_handle_zcode_science_work_execute(
         return;
     }
     const char *reproducer = zsx_str(input, "reproducer_pubkey");
+    char reproducer_err[128];
     if (reproducer &&
-        !zsx_hex32(reproducer, req.reproducer_pubkey)) {
-        zsx_fail(reply, "BAD_REPRODUCER",
-                 "reproducer_pubkey must be 64 lowercase hex");
+        !zcl_native_require_hex64("reproducer_pubkey", reproducer,
+                                  req.reproducer_pubkey, reproducer_err,
+                                  sizeof(reproducer_err))) {
+        zsx_fail(reply, "BAD_REPRODUCER", reproducer_err);
         return;
     }
     if (is_repro && !reproducer) {

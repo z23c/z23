@@ -189,8 +189,7 @@ void zcl_native_handle_zcode_task_offer(
     uint8_t task_root[32];
     if (!ztl_hex32(request, reply, "zcode.task.offer", "task_root",
                    "BAD_TASK_ROOT",
-                   "task_root must be 64 lowercase hex chars (the posted "
-                   "task's own root)", task_root))
+                   "the posted task's own root", task_root))
         return;
     char task_hex[65];
     zcl_hex_encode(task_root, 32, task_hex);
@@ -317,8 +316,7 @@ void zcl_native_handle_zcode_task_pull(
     uint8_t task_root[32];
     if (!ztl_hex32(request, reply, "zcode.task.pull", "task_root",
                    "BAD_TASK_ROOT",
-                   "task_root must be 64 lowercase hex chars (the task the "
-                   "contexts must prove they post)", task_root))
+                   "the task the contexts must prove they post", task_root))
         return;
     char task_hex[65];
     zcl_hex_encode(task_root, 32, task_hex);

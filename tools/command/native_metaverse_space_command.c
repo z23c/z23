@@ -275,7 +275,8 @@ static bool mvspace_manifest(
   if (admission) {
     if (!mvspace_root(admission, manifest->admission_root)) {
       mvspace_fail(reply, "BAD_ADMISSION_ROOT",
-                   "admission_root must be 64 lowercase hex", leaf);
+                   "admission_root must be 64 lowercase hex characters, "
+                   "e.g. 3f9a... (32 bytes hex-encoded)", leaf);
       return false;
     }
     manifest->has_admission = true;

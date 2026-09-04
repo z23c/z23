@@ -289,10 +289,9 @@ static bool zdev_root(const struct json_value *input, const char *key,
                       uint8_t out[32], struct zcl_command_reply *reply)
 {
     const char *value = zdev_str(input, key);
-    if (value && zcl_hex_decode_lower(value, out, 32)) return true;
     char detail[128];
-    (void)snprintf(detail, sizeof(detail), "%s must be 64 lowercase hex",
-                   key);
+    if (zcl_native_require_hex64(key, value, out, detail, sizeof(detail)))
+        return true;
     zdev_fail(reply, "BAD_ROOT", detail);
     return false;
 }
@@ -1744,10 +1743,12 @@ void zcl_native_handle_zcode_improve(
 
     const char *source_sha256 = explicit_admit ? source_sha_hex :
         zdev_str(request->input, "candidate_source_sha256");
-    if (!explicit_admit && (!source_sha256 ||
-        !zcl_hex_decode_lower(source_sha256, source_sha_check, 32))) {
-        zdev_fail(reply, "BAD_SOURCE_SHA256",
-                  "candidate_source_sha256 must be 64 lowercase hex");
+    char source_sha_err[128];
+    if (!explicit_admit &&
+        !zcl_native_require_hex64("candidate_source_sha256", source_sha256,
+                                  source_sha_check, source_sha_err,
+                                  sizeof(source_sha_err))) {
+        zdev_fail(reply, "BAD_SOURCE_SHA256", source_sha_err);
         return;
     }
     struct db_build_job job = {0};

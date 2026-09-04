@@ -124,8 +124,7 @@ void zcl_native_handle_zcode_work_offer(
     uint8_t package_root[32];
     if (!ztl_hex32(request, reply, "zcode.work.offer", "package_root",
                    "BAD_PACKAGE_ROOT",
-                   "package_root must be 64 lowercase hex chars (the "
-                   "accepted source package root)", package_root))
+                   "the accepted source package root", package_root))
         return;
 
     bool own_store = false;
@@ -239,8 +238,7 @@ void zcl_native_handle_zcode_work_pull(
     uint8_t task_root[32];
     if (!ztl_hex32(request, reply, "zcode.work.pull", "task_root",
                    "BAD_TASK_ROOT",
-                   "task_root must be 64 lowercase hex chars (the task the "
-                   "packages must prove they solve)", task_root))
+                   "the task the packages must prove they solve", task_root))
         return;
     char task_hex[65];
     zcl_hex_encode(task_root, 32, task_hex);

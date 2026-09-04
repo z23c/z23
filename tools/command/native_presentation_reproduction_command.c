@@ -154,7 +154,8 @@ void zcl_native_handle_presentation_reproduction(
     const char *action = npr_str(request ? request->input : NULL, "action_id");
     if (!npr_root(action, false)) {
         npr_fail(reply, "INVALID_REPRODUCTION_ACTION",
-                 "action_id must be exactly 64 lowercase hexadecimal characters");
+                 "action_id must be 64 lowercase hex characters, e.g. "
+                 "3f9a... (32 bytes hex-encoded)");
         return;
     }
     zcl_native_bridge_ensure_rpc();

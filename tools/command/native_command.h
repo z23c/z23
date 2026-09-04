@@ -1821,6 +1821,19 @@ bool zcl_native_render_field_selection(const struct json_value *obj,
                                        char *out, size_t out_cap,
                                        char *err, size_t err_cap);
 
+/* The one "exactly 64 lowercase hex characters" contract shared by every
+ * DHT root, receipt id, and other 32-byte content-addressed key across the
+ * native commands: `value` must decode as canonical (lowercase-only) hex
+ * to exactly 32 bytes. On success writes the 32 decoded bytes to `out`
+ * (skip the decode by passing NULL) and returns true, `err` untouched. On
+ * failure fills `err` (when non-NULL and `err_size` > 0) with one
+ * canonical, field-named refusal sentence naming `field`, and returns
+ * false. Never allocates. Not for a different length/alphabet contract
+ * (40, 66, 68, 112, 128, or 396-byte hex, or a decode that accepts
+ * uppercase) — those are different contracts with their own messages. */
+bool zcl_native_require_hex64(const char *field, const char *value,
+                              uint8_t out[32], char *err, size_t err_size);
+
 /* Build the CLI UX contract's unrecognized-command diagnostic (see
  * docs/NATIVE_COMMAND_INTERFACE.md "CLI UX contract"): one typed
  * `error=UNKNOWN_COMMAND detail=... try=...` line, plus (when the existing

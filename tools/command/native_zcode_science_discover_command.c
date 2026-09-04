@@ -236,7 +236,9 @@ void zcl_native_handle_zcode_science_discover(
     if (genesis_hex && genesis_hex[0]) {
         if (!zdsc_hex32(genesis_hex, genesis)) {
             zdsc_fail(reply, "BAD_IDENTITY",
-                      "network_genesis_root must be 64 lowercase hex", leaf);
+                      "network_genesis_root must be 64 lowercase hex "
+                      "characters, e.g. 3f9a... (32 bytes hex-encoded)",
+                      leaf);
             return;
         }
         genesis_p = genesis;
@@ -476,7 +478,9 @@ void zcl_native_handle_zcode_science_rank_snapshot(
     if (genesis_hex && genesis_hex[0]) {
         if (!zdsc_hex32(genesis_hex, genesis)) {
             zdsc_fail(reply, "BAD_IDENTITY",
-                      "network_genesis_root must be 64 lowercase hex", leaf);
+                      "network_genesis_root must be 64 lowercase hex "
+                      "characters, e.g. 3f9a... (32 bytes hex-encoded)",
+                      leaf);
             return;
         }
         genesis_p = genesis;

@@ -83,25 +83,26 @@ static bool zsci_policy_allows(
 {
     struct vcs_zcode_sovereignty_subject subject;
     memset(&subject, 0, sizeof(subject));
+    char root_err[128];
     if (semantic_hex &&
-        (strlen(semantic_hex) != 64 ||
-         !zcl_hex_decode_lower(semantic_hex, subject.semantic_root, 32))) {
-        zsci_fail(reply, "BAD_ROOT", "semantic root must be 64 lowercase hex",
-                  leaf);
+        !zcl_native_require_hex64("semantic_root", semantic_hex,
+                                  subject.semantic_root, root_err,
+                                  sizeof(root_err))) {
+        zsci_fail(reply, "BAD_ROOT", root_err, leaf);
         return false;
     }
     if (transport_hex &&
-        (strlen(transport_hex) != 64 ||
-         !zcl_hex_decode_lower(transport_hex, subject.transport_root, 32))) {
-        zsci_fail(reply, "BAD_BLOB_ROOT",
-                  "transport root must be 64 lowercase hex", leaf);
+        !zcl_native_require_hex64("transport_root", transport_hex,
+                                  subject.transport_root, root_err,
+                                  sizeof(root_err))) {
+        zsci_fail(reply, "BAD_BLOB_ROOT", root_err, leaf);
         return false;
     }
     if (publisher_hex &&
-        (strlen(publisher_hex) != 64 ||
-         !zcl_hex_decode_lower(publisher_hex, subject.publisher_zid, 32))) {
-        zsci_fail(reply, "BAD_PUBLISHER_ZID",
-                  "publisher ZID must be 64 lowercase hex", leaf);
+        !zcl_native_require_hex64("publisher_zid", publisher_hex,
+                                  subject.publisher_zid, root_err,
+                                  sizeof(root_err))) {
+        zsci_fail(reply, "BAD_PUBLISHER_ZID", root_err, leaf);
         return false;
     }
     (void)snprintf(subject.service_type, sizeof(subject.service_type),
@@ -1263,11 +1264,10 @@ void zcl_native_handle_zcode_science_fetch(
         return;
     }
     if (!root_only) {
-        uint8_t decoded[32];
-        if (strlen(explicit_blob) != 64 ||
-            !zcl_hex_decode_lower(explicit_blob, decoded, 32)) {
-            zsci_fail(reply, "BAD_BLOB_ROOT",
-                      "blob_root must be 64 lowercase hex",
+        char blob_root_err[128];
+        if (!zcl_native_require_hex64("blob_root", explicit_blob, NULL,
+                                      blob_root_err, sizeof(blob_root_err))) {
+            zsci_fail(reply, "BAD_BLOB_ROOT", blob_root_err,
                       "zcode.science.fetch");
             return;
         }
