@@ -74,16 +74,16 @@ z23 discover schema <path> --side=input|output
 
 | Catalog fact | Count |
 |---|---|
-| Registry entries (branches + leaves) | 799 |
+| Registry entries (branches + leaves) | 805 |
 | Top-level roots | 13 |
-| Branches | 180 |
-| Leaves (dispatchable command paths) | 619 |
+| Branches | 181 |
+| Leaves (dispatchable command paths) | 624 |
 | … `ready` (live handler in this build) | 557 |
-| … `compat` (metadata only, names a fallback) | 31 |
+| … `compat` (metadata only, names a fallback) | 36 |
 | … `planned` (fail-closed BLOCKED, exit 3) | 31 |
-| … dev-gated 🔧 (`ready` only in `z23-dev`) | 30 |
-| Leaves with `effect=mutate` | 215 |
-| Leaves with `effect=destructive` | 4 |
+| … dev-gated 🔧 (`ready` only in `z23-dev`) | 35 |
+| Leaves with `effect=mutate` | 217 |
+| Leaves with `effect=destructive` | 5 |
 | Leaves requiring **owner** authority | 119 |
 
 Per source file:
@@ -96,7 +96,7 @@ Per source file:
 | `engine/composition/commands/app_features.def` | 75 | 20 | 55 |
 | `engine/composition/commands/store.def` | 18 | 0 | 18 |
 | `engine/composition/commands/ops.def` | 56 | 10 | 46 |
-| `engine/composition/commands/dev.def` | 78 | 16 | 62 |
+| `engine/composition/commands/dev.def` | 84 | 17 | 67 |
 | `engine/composition/commands/code.def` | 31 | 3 | 28 |
 | `engine/composition/commands/accounts.def` | 11 | 2 | 9 |
 | `engine/composition/commands/vault.def` | 24 | 4 | 20 |
@@ -654,6 +654,7 @@ represented by its children's sections.
 | `dev ff` | ready | read / read / operator · instant/low | none | `zcl.dev_ff.v1` | `z23 dev ff` | Fail-fast ladder: compile, test, lint |
 | `dev verify-change` | compat 🔧 → `make dev-bin, then z23-dev dev verify-change` | read / read / **owner** · background/high | none | `zcl.dev_verify_change.v1` | `z23-dev dev verify-change` | Compile affected code and run mapped focused proofs with compact output — *changed-scope verification requires the dev-only process executor* |
 | `dev fleet` (aliases: `dev.fleet.truth`) | ready | read / read / operator · fast/low | none | `zcl.dev_fleet.v1` | `z23 dev fleet` | Show the Git and lint-receipt truth for every origin lane |
+| `dev land` | compat 🔧 → `z23-dev dev land` | mutate / dev-mutation / operator · fast/low | **`action`**, `tip`, `worktree`, `note`, `seq`, `json` | `zcl.land.v1` | `z23-dev dev land submit --tip=9afd46726` | Queue a tip for proof and push without waiting for either — *the landing queue is a development-lane coordination surface* |
 
 #### `dev.retrieval` — Observe retrieval quality on an exact source generation
 
@@ -771,6 +772,15 @@ represented by its children's sections.
 | Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
 |---|---|---|---|---|---|---|
 | `dev test background status` | planned | read / read / operator · instant/low | none | `zcl.dev_background_quality.v1` | `z23 dev test background status` | Read lint, sanitizer, replay, and reproducibility freshness — *native background-quality projection is not implemented* |
+
+#### `dev.train` — Stack lanes onto main without waiting on lint
+
+| Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
+|---|---|---|---|---|---|---|
+| `dev train build` | compat 🔧 → `z23-dev dev train build --name <n> --source <dir-or-ref>` | mutate / dev-mutation / operator · fast/moderate | `name`, `sources` | `zcl.train_build.v1` | `z23 dev train build --name q --source ~/github/z23-stackq2` | Stack one or more lanes' commits onto origin/main — *stacked-lane construction requires the dev binary* |
+| `dev train check` | compat 🔧 → `z23-dev dev train check --name <n>` | read / read / operator · foreground/high | `name`, `timeout_ms` | `zcl.train_check.v1` | `z23 dev train check --name q` | Run lint-fast on a stack worktree and report the gates that failed — *stack lint verification requires the dev binary* |
+| `dev train status` | compat 🔧 → `z23-dev dev train status` | read / read / operator · fast/low | `name` | `zcl.train_status.v1` | `z23 dev train status` | List stack worktrees, their base, and last check verdict — *stack status requires the dev binary* |
+| `dev train drop` | compat 🔧 → `z23-dev dev train drop --name <n>` | destructive / dev-mutation / operator · fast/low | `name`, `force` | `zcl.train_drop.v1` | `z23 dev train drop --name q` | Remove a stack worktree — *stack removal requires the dev binary* |
 
 #### `dev.agent` — Checkout questions answered without composing shell
 
