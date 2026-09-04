@@ -388,6 +388,17 @@ struct zcl_dev_proof_budget zcl_dev_proof_step_budget(const char *state_dir,
 
 /* ── The record a person reads afterwards ──────────────────────────────── */
 
+bool zcl_dev_proof_phase_note(const char *phases_path, const char *field,
+                              const char *value)
+{
+    if (!phases_path || !field || !value) return false;
+    FILE *f = fopen(phases_path, "a");
+    if (!f) return false;
+    int written = fprintf(f, "%s=%s\n", field, value);
+    bool ok = written > 0 && fflush(f) == 0;
+    return fclose(f) == 0 && ok;
+}
+
 bool zcl_dev_proof_phase_record(const char *phases_path, const char *step,
                                 const struct zcl_dev_proof_step_report *report)
 {
@@ -420,23 +431,24 @@ static bool log_progress_mark(const char *path, int64_t *size, int64_t *mtime)
     return moved;
 }
 
-int zcl_dev_proof_run_watched(const char *root, const char *log_path,
-                              const char *const argv[],
-                              const struct zcl_dev_proof_budget *budget,
-                              struct zcl_dev_proof_step_report *report)
+bool zcl_dev_proof_step_start(struct zcl_dev_proof_step *step, const char *root,
+                              const char *log_path, const char *const argv[],
+                              const struct zcl_dev_proof_budget *budget)
 {
-    struct zcl_dev_proof_step_report local = {0};
-    if (!report) report = &local;
-    memset(report, 0, sizeof(*report));
-    if (!root || !log_path || !argv || !budget) {
-        report->rc = -1;
-        return -1;
-    }
-    report->budget_ms = budget->budget_ms;
+    if (!step || !root || !log_path || !argv || !budget) return false;
+    memset(step, 0, sizeof(*step));
+    if (snprintf(step->log_path, sizeof(step->log_path), "%s", log_path) >=
+        (int)sizeof(step->log_path))
+        return false;
+    step->budget = *budget;
+    step->report.budget_ms = budget->budget_ms;
+    step->seen_size = -1;
+    step->seen_mtime = -1;
     pid_t child = fork();
     if (child < 0) {
-        report->rc = -1;
-        return -1;
+        step->report.rc = -1;
+        step->finished = true;
+        return false;
     }
     if (child == 0) {
         if (setsid() < 0 || chdir(root) != 0) _exit(127);
@@ -451,42 +463,95 @@ int zcl_dev_proof_run_watched(const char *root, const char *log_path,
         execvp(argv[0], (char *const *)argv);
         _exit(127);
     }
-    int64_t started_us = platform_time_monotonic_us();
-    int64_t last_progress_us = started_us;
-    int64_t seen_size = -1, seen_mtime = -1;
+    step->child = (int64_t)child;
+    step->started = true;
+    step->started_us = platform_time_monotonic_us();
+    step->last_progress_us = step->started_us;
+    return true;
+}
+
+bool zcl_dev_proof_step_poll(struct zcl_dev_proof_step *step)
+{
+    if (!step || !step->started) return true;
+    if (step->finished) return true;
     int status = 0;
-    for (;;) {
-        pid_t got = waitpid(child, &status, WNOHANG);
-        if (got == child) break;
-        if (got < 0 && errno != EINTR) {
-            report->rc = -1;
-            return -1;
-        }
+    pid_t child = (pid_t)step->child;
+    pid_t got = waitpid(child, &status, WNOHANG);
+    if (got == child) {
         int64_t now_us = platform_time_monotonic_us();
-        if (log_progress_mark(log_path, &seen_size, &seen_mtime))
-            last_progress_us = now_us;
-        report->elapsed_ms = (now_us - started_us) / 1000;
-        report->last_progress_age_ms = (now_us - last_progress_us) / 1000;
-        enum zcl_dev_proof_kill_cause cause = zcl_dev_proof_budget_verdict(
-            budget, report->elapsed_ms, report->last_progress_age_ms);
-        if (cause != ZCL_DEV_PROOF_KILL_NONE) {
-            report->cause = cause;
-            (void)kill(-child, SIGTERM);
-            platform_sleep_ms(100);
-            (void)kill(-child, SIGKILL);
-            (void)waitpid(child, &status, 0);
-            report->rc = 124;
-            return 124;
-        }
-        platform_sleep_ms(20);
+        (void)log_progress_mark(step->log_path, &step->seen_size,
+                                &step->seen_mtime);
+        step->report.elapsed_ms = (now_us - step->started_us) / 1000;
+        step->report.last_progress_age_ms = 0;
+        if (WIFEXITED(status)) step->report.rc = WEXITSTATUS(status);
+        else
+            step->report.rc =
+                WIFSIGNALED(status) ? 128 + WTERMSIG(status) : -1;
+        step->finished = true;
+        return true;
+    }
+    if (got < 0 && errno != EINTR) {
+        step->report.rc = -1;
+        step->finished = true;
+        return true;
     }
     int64_t now_us = platform_time_monotonic_us();
-    (void)log_progress_mark(log_path, &seen_size, &seen_mtime);
-    report->elapsed_ms = (now_us - started_us) / 1000;
-    report->last_progress_age_ms = 0;
-    if (WIFEXITED(status)) report->rc = WEXITSTATUS(status);
-    else report->rc = WIFSIGNALED(status) ? 128 + WTERMSIG(status) : -1;
-    return report->rc;
+    if (log_progress_mark(step->log_path, &step->seen_size, &step->seen_mtime))
+        step->last_progress_us = now_us;
+    step->report.elapsed_ms = (now_us - step->started_us) / 1000;
+    step->report.last_progress_age_ms =
+        (now_us - step->last_progress_us) / 1000;
+    enum zcl_dev_proof_kill_cause cause = zcl_dev_proof_budget_verdict(
+        &step->budget, step->report.elapsed_ms,
+        step->report.last_progress_age_ms);
+    if (cause == ZCL_DEV_PROOF_KILL_NONE) return false;
+    step->report.cause = cause;
+    (void)kill(-child, SIGTERM);
+    platform_sleep_ms(100);
+    (void)kill(-child, SIGKILL);
+    (void)waitpid(child, &status, 0);
+    step->report.rc = 124;
+    step->finished = true;
+    return true;
+}
+
+size_t zcl_dev_proof_steps_wait(struct zcl_dev_proof_step *steps, size_t count)
+{
+    if (!steps) return 0;
+    for (;;) {
+        bool pending = false;
+        for (size_t i = 0; i < count; i++) {
+            if (!steps[i].started || steps[i].finished) continue;
+            if (!zcl_dev_proof_step_poll(&steps[i])) pending = true;
+        }
+        if (!pending) break;
+        platform_sleep_ms(20);
+    }
+    /* Fail closed on the first step that did not succeed, in the order the
+     * caller listed them, so a concurrent proof reports the same failure a
+     * sequential one would have. */
+    for (size_t i = 0; i < count; i++)
+        if (steps[i].started && steps[i].report.rc != 0) return i;
+    return count;
+}
+
+int zcl_dev_proof_run_watched(const char *root, const char *log_path,
+                              const char *const argv[],
+                              const struct zcl_dev_proof_budget *budget,
+                              struct zcl_dev_proof_step_report *report)
+{
+    struct zcl_dev_proof_step step;
+    if (!zcl_dev_proof_step_start(&step, root, log_path, argv, budget)) {
+        if (report) {
+            memset(report, 0, sizeof(*report));
+            report->budget_ms = budget ? budget->budget_ms : 0;
+            report->rc = -1;
+        }
+        return -1;
+    }
+    (void)zcl_dev_proof_steps_wait(&step, 1);
+    if (report) *report = step.report;
+    return step.report.rc;
 }
 
 #endif /* !_WIN32 */

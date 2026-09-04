@@ -52,6 +52,8 @@
 #include "dev_proof_receipt.h"
 #include "devloop.h"
 #include "json/json.h"
+#include "platform/ram_scratch.h"
+#include "platform/time_compat.h"
 #include "kernel/command_registry.h"
 #include "test/testcache.h"
 #include "test_group_catalog.h"
@@ -2045,6 +2047,117 @@ static int test_ic_proof_run_watched_kills_only_the_silent(void)
     return failures;
 }
 #endif
+#if !defined(_WIN32)
+static int test_ic_proof_steps_run_concurrently(void)
+{
+    int failures = 0;
+    TEST("proof budget: independent steps run at once and still fail closed") {
+        char state[4096], a[4096], b[4096];
+        ic_budget_fixture("concurrent", state);
+        snprintf(a, sizeof(a), "%s/a.log", state);
+        snprintf(b, sizeof(b), "%s/b.log", state);
+        struct zcl_dev_proof_budget budget = {
+            .budget_ms = 60000, .ceiling_ms = 60000, .no_progress_ms = 30000};
+        const char *busy_argv[] = {
+            "/bin/sh", "-c",
+            "i=0; while [ $i -lt 8 ]; do echo tick; sleep 0.1; "
+            "i=$((i+1)); done; exit 0", NULL};
+        struct zcl_dev_proof_step steps[2];
+        int64_t began = platform_time_monotonic_ms();
+        ASSERT(zcl_dev_proof_step_start(&steps[0], ".", a, busy_argv,
+                                        &budget));
+        ASSERT(zcl_dev_proof_step_start(&steps[1], ".", b, busy_argv,
+                                        &budget));
+        ASSERT(zcl_dev_proof_steps_wait(steps, 2) == 2);
+        int64_t wall = platform_time_monotonic_ms() - began;
+        /* Both took about 800 ms of their own; run together they cost about
+         * one of them, not both. */
+        ASSERT(steps[0].report.elapsed_ms >= 700);
+        ASSERT(steps[1].report.elapsed_ms >= 700);
+        ASSERT(wall < steps[0].report.elapsed_ms +
+                          steps[1].report.elapsed_ms);
+        /* Each keeps its own log. */
+        ASSERT(steps[0].report.rc == 0 && steps[1].report.rc == 0);
+        FILE *fa = fopen(a, "r");
+        ASSERT(fa != NULL);
+        char first[64] = {0};
+        ASSERT(fgets(first, sizeof(first), fa) != NULL);
+        fclose(fa);
+        ASSERT(strncmp(first, "tick", 4) == 0);
+
+        /* One failure in the set is the set's verdict, named by position. */
+        const char *bad_argv[] = {"/bin/sh", "-c", "echo boom; exit 3", NULL};
+        ASSERT(zcl_dev_proof_step_start(&steps[0], ".", a, busy_argv,
+                                        &budget));
+        ASSERT(zcl_dev_proof_step_start(&steps[1], ".", b, bad_argv, &budget));
+        ASSERT(zcl_dev_proof_steps_wait(steps, 2) == 1);
+        ASSERT(steps[1].report.rc == 3);
+        ASSERT(steps[0].report.rc == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+#endif
+
+static int test_ic_proof_generation_prefers_ram_when_it_fits(void)
+{
+    int failures = 0;
+    TEST("proof budget: RAM-backed scratch is used only when it really fits") {
+        char relative[2048], root[4096], probe[4096], cwd[2048];
+        ic_budget_fixture("ramscratch", relative);
+        ASSERT(getcwd(cwd, sizeof(cwd)) != NULL);
+        snprintf(root, sizeof(root), "%s/%s", cwd, relative);
+        /* Injected availability: the test pins the answer instead of asking
+         * whatever filesystem this machine happens to mount. */
+        setenv("ZCL_RAM_SCRATCH_ROOT", root, 1);
+        ASSERT(platform_ram_scratch_root(probe, sizeof(probe), 1));
+        ASSERT(strcmp(probe, root) == 0);
+        /* Not enough headroom is a refusal, not a squeeze. */
+        probe[0] = 'x';
+        ASSERT(!platform_ram_scratch_root(probe, sizeof(probe), UINT64_MAX));
+        ASSERT(probe[0] == '\0');
+        /* A buffer too small to hold the answer is a refusal too. */
+        char tiny[4];
+        ASSERT(!platform_ram_scratch_root(tiny, sizeof(tiny), 1));
+        ASSERT(tiny[0] == '\0');
+        /* A path that is not a directory, and one that does not exist. */
+        char file[4096];
+        snprintf(file, sizeof(file), "%s/notadir", root);
+        ASSERT(ic_write(relative, "notadir", "x"));
+        setenv("ZCL_RAM_SCRATCH_ROOT", file, 1);
+        ASSERT(!platform_ram_scratch_root(probe, sizeof(probe), 1));
+        setenv("ZCL_RAM_SCRATCH_ROOT", "/no/such/ram/root", 1);
+        ASSERT(!platform_ram_scratch_root(probe, sizeof(probe), 1));
+        /* An override that is empty, or relative, refuses RAM backing rather
+         * than quietly answering about /dev/shm instead. */
+        setenv("ZCL_RAM_SCRATCH_ROOT", "", 1);
+        ASSERT(!platform_ram_scratch_root(probe, sizeof(probe), 1));
+        setenv("ZCL_RAM_SCRATCH_ROOT", relative, 1);
+        ASSERT(!platform_ram_scratch_root(probe, sizeof(probe), 1));
+        unsetenv("ZCL_RAM_SCRATCH_ROOT");
+
+        /* The choice is a phases.txt fact, never a receipt field: two proofs
+         * of the same source must admit each other whatever storage they
+         * used. */
+        char phases[4096];
+        snprintf(phases, sizeof(phases), "%s/phases.txt", root);
+        (void)remove(phases);
+        ASSERT(zcl_dev_proof_phase_note(phases, "generation_storage", "ram"));
+        ASSERT(zcl_dev_proof_phase_note(phases, "generation_root", root));
+        char body[4096] = {0};
+        FILE *f = fopen(phases, "r");
+        ASSERT(f != NULL);
+        size_t read = fread(body, 1, sizeof(body) - 1, f);
+        fclose(f);
+        body[read] = '\0';
+        ASSERT(strstr(body, "generation_storage=ram") != NULL);
+        ASSERT(strstr(body, "generation_root=") != NULL);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 
 int test_impact_composition(void)
 {
@@ -2080,6 +2193,8 @@ int test_impact_composition(void)
     failures += test_ic_proof_reads_the_harness_banners();
 #if !defined(_WIN32)
     failures += test_ic_proof_run_watched_kills_only_the_silent();
+    failures += test_ic_proof_steps_run_concurrently();
 #endif
+    failures += test_ic_proof_generation_prefers_ram_when_it_fits();
     return failures;
 }

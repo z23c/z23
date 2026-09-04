@@ -87,14 +87,51 @@ struct zcl_dev_proof_budget zcl_dev_proof_step_budget(const char *state_dir,
                                                       const char *key,
                                                       int64_t fallback_ms);
 
+/* Append one `field=value` fact to phases.txt. */
+bool zcl_dev_proof_phase_note(const char *phases_path, const char *field,
+                              const char *value);
+
 /* Append one accounted step to phases.txt. */
 bool zcl_dev_proof_phase_record(const char *phases_path, const char *step,
                                 const struct zcl_dev_proof_step_report *report);
 
 #if !defined(_WIN32)
-/* Run argv in its own session with stdout+stderr on log_path, watching the log
- * for growth. Returns the child's exit status, 124 when the watch killed it,
- * or -1 when the step could not be started or reaped. */
+
+#ifndef PROOF_LOG_PATH_MAX
+#define PROOF_LOG_PATH_MAX 4096u
+#endif
+
+/* One running step. Steps that do not depend on each other can be started
+ * together and waited on as a set; each keeps its own log, budget and
+ * accounting exactly as if it had run alone. */
+struct zcl_dev_proof_step {
+    int64_t child;
+    char log_path[PROOF_LOG_PATH_MAX];
+    struct zcl_dev_proof_budget budget;
+    struct zcl_dev_proof_step_report report;
+    int64_t started_us;
+    int64_t last_progress_us;
+    int64_t seen_size;
+    int64_t seen_mtime;
+    bool started;
+    bool finished;
+};
+
+/* Start argv in its own session with stdout+stderr on log_path. */
+bool zcl_dev_proof_step_start(struct zcl_dev_proof_step *step, const char *root,
+                              const char *log_path, const char *const argv[],
+                              const struct zcl_dev_proof_budget *budget);
+/* Advance one step's watch without blocking. Returns true once it has
+ * finished (exited, or been killed by its own budget). */
+bool zcl_dev_proof_step_poll(struct zcl_dev_proof_step *step);
+/* Wait for every started step in the set. Returns the index of the first one
+ * that did not exit 0, or count when all of them succeeded. */
+size_t zcl_dev_proof_steps_wait(struct zcl_dev_proof_step *steps,
+                                size_t count);
+
+/* Run argv to completion, watching the log for growth. Returns the child's
+ * exit status, 124 when the watch killed it, or -1 when the step could not be
+ * started or reaped. */
 int zcl_dev_proof_run_watched(const char *root, const char *log_path,
                               const char *const argv[],
                               const struct zcl_dev_proof_budget *budget,

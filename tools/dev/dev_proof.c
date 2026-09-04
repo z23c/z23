@@ -14,6 +14,7 @@
 #include "platform/directory_compat.h"
 #include "platform/logical_cpu.h"
 #include "platform/private_directory.h"
+#include "platform/ram_scratch.h"
 #include "platform/time_compat.h"
 #include "sha3/sha3.h"
 #include "vcs/build_action.h"
@@ -1282,13 +1283,30 @@ static bool generation_prepare(const struct proof_paths *paths,
                    strlen(local) + 1);
     sha3_256_finalize(&generation_identity, generation_hash);
     zcl_hex_encode(generation_hash, 16, generation_tag);
-    if (snprintf(parent, sizeof(parent), "%s/.z23p", root_parent) >=
-            (int)sizeof(parent) ||
+    /* Build and test work here is dominated by fsync, and on a RAM-backed
+     * filesystem fsync costs nothing. When the machine offers one with room to
+     * spare the whole generation — checkout, build tree and test scratch —
+     * lives there; otherwise it stays exactly where it was. The choice is
+     * written to phases.txt so a slow proof can be read against where it ran.
+     * It is deliberately NOT sealed into the receipt: two proofs of the same
+     * source must admit each other whatever storage they happened to use. */
+    char ram_root[PATH_MAX];
+    bool ram_backed = platform_ram_scratch_root(ram_root, sizeof(ram_root), 0);
+    int parent_len = ram_backed
+        ? snprintf(parent, sizeof(parent), "%s/z23p", ram_root)
+        : snprintf(parent, sizeof(parent), "%s/.z23p", root_parent);
+    if (parent_len <= 0 || (size_t)parent_len >= sizeof(parent) ||
         snprintf(generation, PATH_MAX, "%s/%s", parent, generation_tag) >=
             PATH_MAX ||
         !platform_private_directory_ensure(parent)) {
         proof_why(why, why_len, "proof_generation_path_invalid");
         return false;
+    }
+    if (paths->phases[0]) {
+        (void)zcl_dev_proof_phase_note(paths->phases, "generation_storage",
+                                       ram_backed ? "ram" : "disk");
+        (void)zcl_dev_proof_phase_note(paths->phases, "generation_root",
+                                       generation);
     }
     struct stat st;
     if (lstat(generation, &st) != 0) {
@@ -1296,6 +1314,12 @@ static bool generation_prepare(const struct proof_paths *paths,
             proof_why(why, why_len, "proof_generation_inspection_failed");
             return false;
         }
+        /* A RAM-backed generation does not survive a reboot, and git still
+         * holds its registration. Drop registrations whose directory is gone
+         * before adding, or the add fails on a name the tmpfs already lost. */
+        const char *prune_argv[] = {"git", "worktree", "prune", NULL};
+        char pruned[ZCL_DEVLOOP_OUTPUT_MAX];
+        (void)git_capture(paths->root, prune_argv, pruned, sizeof(pruned));
         const char *argv[] = {"git", "worktree", "add", "--detach",
                               generation, local, NULL};
         char output[ZCL_DEVLOOP_OUTPUT_MAX];
@@ -1573,6 +1597,95 @@ static bool test_log_account(const char *path,
            skipped == 0 && unobserved == 0;
 }
 
+/* One dimension in flight. Dimensions that do not feed each other are started
+ * together and finished together; each keeps its own log, budget, receipt root
+ * and accounting exactly as when they ran one after another. */
+struct proof_dimension_run {
+    enum zcl_dev_proof_dimension_id id;
+    const char *name;
+    struct zcl_dev_proof_dimension *dim;
+    bool parse_test;
+    char log[PATH_MAX];
+    struct zcl_dev_proof_step step;
+};
+
+static bool dimension_start(const struct proof_paths *paths,
+                            const char *root,
+                            struct proof_dimension_run *run,
+                            enum zcl_dev_proof_dimension_id id,
+                            const char *const argv[],
+                            struct zcl_dev_proof_dimension *dim,
+                            bool parse_test,
+                            const struct zcl_dev_proof_budget *budget,
+                            char *why, size_t why_len)
+{
+    memset(run, 0, sizeof(*run));
+    run->id = id;
+    run->name = zcl_dev_proof_dimension_name(id);
+    run->dim = dim;
+    run->parse_test = parse_test;
+    if (snprintf(run->log, sizeof(run->log), "%s/%s.%s.log", paths->logs,
+                 paths->key, run->name) >= (int)sizeof(run->log)) {
+        proof_why(why, why_len, "child_log_path_invalid");
+        return false;
+    }
+    if (!zcl_dev_proof_step_start(&run->step, root, run->log, argv, budget)) {
+        proof_whyf(why, why_len, "child_proof_%s_could_not_start", run->name);
+        return false;
+    }
+    return true;
+}
+
+static bool dimension_finish(const struct proof_paths *paths,
+                             struct proof_dimension_run *run,
+                             char *why, size_t why_len)
+{
+    const struct zcl_dev_proof_step_report *report = &run->step.report;
+    if (paths->phases[0])
+        (void)zcl_dev_proof_phase_record(paths->phases, run->name, report);
+    char key[PROOF_TIMING_KEY_MAX];
+    if (report->rc == 0 &&
+        snprintf(key, sizeof(key), "step.%s", run->name) < (int)sizeof(key))
+        (void)zcl_dev_proof_timing_note(paths->state, key, report->elapsed_ms);
+    if (!hash_file(run->name, run->log, run->dim->receipt_root)) {
+        proof_why(why, why_len, "child_receipt_hash_failed");
+        return false;
+    }
+    if (report->rc != 0) {
+        run->dim->failed = 1;
+        run_step_why(why, why_len, run->name, report);
+        return false;
+    }
+    if (run->parse_test) {
+        /* Fold this run's per-group wall times back into the table before
+         * accounting, so the next proof plans from what just happened even
+         * when the accounting then refuses the run. */
+        (void)zcl_dev_proof_timing_ingest_test_log(paths->state, run->log);
+        if (!test_log_account(run->log, run->dim)) {
+            proof_why(why, why_len, "test_accounting_incomplete");
+            return false;
+        }
+    } else {
+        run->dim->ran = run->dim->selected;
+    }
+    return true;
+}
+
+/* Wait for every dimension in flight. Each keeps its own watch, so a
+ * concurrent set is killed by exactly the rules a lone step would have met. */
+static void dimension_runs_wait(struct proof_dimension_run *runs, size_t count)
+{
+    for (;;) {
+        bool pending = false;
+        for (size_t i = 0; i < count; i++) {
+            if (!runs[i].step.started || runs[i].step.finished) continue;
+            if (!zcl_dev_proof_step_poll(&runs[i].step)) pending = true;
+        }
+        if (!pending) break;
+        platform_sleep_ms(20);
+    }
+}
+
 static bool run_dimension(const struct proof_paths *paths,
                           enum zcl_dev_proof_dimension_id id,
                           const char *const argv[],
@@ -1581,35 +1694,12 @@ static bool run_dimension(const struct proof_paths *paths,
                           const struct zcl_dev_proof_budget *budget,
                           char *why, size_t why_len)
 {
-    const char *name = zcl_dev_proof_dimension_name(id);
-    char log[PATH_MAX];
-    if (snprintf(log, sizeof(log), "%s/%s.%s.log", paths->logs, paths->key,
-                 name) >= (int)sizeof(log))
+    struct proof_dimension_run run;
+    if (!dimension_start(paths, paths->root, &run, id, argv, dim, parse_test,
+                         budget, why, why_len))
         return false;
-    struct zcl_dev_proof_step_report report = {0};
-    int rc = run_step(paths, paths->root, log, argv, name, budget, &report);
-    if (!hash_file(name, log, dim->receipt_root)) {
-        proof_why(why, why_len, "child_receipt_hash_failed");
-        return false;
-    }
-    if (rc != 0) {
-        dim->failed = 1;
-        run_step_why(why, why_len, name, &report);
-        return false;
-    }
-    if (parse_test) {
-        /* Fold this run's per-group wall times back into the table before
-         * accounting, so the next proof plans from what just happened even
-         * when the accounting then refuses the run. */
-        (void)zcl_dev_proof_timing_ingest_test_log(paths->state, log);
-        if (!test_log_account(log, dim)) {
-            proof_why(why, why_len, "test_accounting_incomplete");
-            return false;
-        }
-    } else {
-        dim->ran = dim->selected;
-    }
-    return true;
+    (void)zcl_dev_proof_steps_wait(&run.step, 1);
+    return dimension_finish(paths, &run, why, why_len);
 }
 
 static void unused_dimension(enum zcl_dev_proof_dimension_id id,
@@ -2065,6 +2155,7 @@ static bool proof_worker(const struct proof_paths *paths,
     int64_t started_us = platform_time_monotonic_us();
     struct proof_phase_clock phases;
     proof_phase_begin(&phases, paths);
+    if (paths->phases[0]) (void)remove(paths->phases);
     if (!worktree_exact(paths->root, local, true, why, why_len)) return false;
     proof_phase_mark(&phases, "worktree_exact_root");
     char generation[PATH_MAX];
@@ -2239,16 +2330,24 @@ static bool proof_worker(const struct proof_paths *paths,
             }
         } else unused_dimension(ZCL_DEV_PROOF_COMPILE, compile);
         proof_phase_mark(&phases, "dimension_compile");
-        if (lint->selected) {
-            const char *argv[] = {"make", "--no-print-directory", make_jobs,
-                                  "lint-fast", NULL};
-            struct zcl_dev_proof_budget budget = proof_step_budget(
-                paths, "lint", PROOF_LINT_DEFAULT_MS);
-            if (!run_dimension(&execution, ZCL_DEV_PROOF_LINT, argv, lint,
-                               false, &budget, why, why_len))
-                return false;
-        } else unused_dimension(ZCL_DEV_PROOF_LINT, lint);
-        proof_phase_mark(&phases, "dimension_lint");
+        /* Lint proves the source; the test dimension proves the built
+         * runner. Neither feeds the other, so both children are launched
+         * before either is waited on and the proof pays for the longer of the
+         * two rather than their sum. Everything above stays strictly
+         * sequential on purpose: those steps are all `make` in the one
+         * generation worktree, and two makes there race each other's build
+         * epochs. */
+        struct proof_dimension_run runs[2];
+        size_t run_count = 0;
+        char binary[PATH_MAX] = {0}, generation_binary[PATH_MAX] = {0};
+        uint8_t helper_root[32] = {0};
+        const char *lint_argv[] = {"make", "--no-print-directory", make_jobs,
+                                   "lint-fast", NULL};
+        struct zcl_dev_proof_budget lint_budget =
+            proof_step_budget(paths, "lint", PROOF_LINT_DEFAULT_MS);
+        if (!lint->selected) unused_dimension(ZCL_DEV_PROOF_LINT, lint);
+        if (!test->selected) unused_dimension(ZCL_DEV_PROOF_TEST, test);
+        only[0] = 0;
         if (test->selected) {
             if (strcmp(source_before.source_id, sealed_source_id) != 0 ||
                 strcmp(source_before.mutation_id, sealed_mutation_id) != 0) {
@@ -2286,8 +2385,6 @@ static bool proof_worker(const struct proof_paths *paths,
                 proof_why(why, why_len, "test_selection_invalid_or_truncated");
                 return false;
             }
-            char binary[PATH_MAX], generation_binary[PATH_MAX];
-            uint8_t helper_root[32];
             bool runner_ready = test_binary_path(paths, binary) &&
                 test_helpers_prepare(
                     paths, generation, binary, &source_before,
@@ -2335,17 +2432,43 @@ static bool proof_worker(const struct proof_paths *paths,
                     return false;
                 }
             }
-            const char *argv[] = {generation_binary, only, "--cache",
-                                  "--activate-proof-contracts", NULL};
-            struct zcl_dev_proof_budget test_budget =
-                zcl_dev_proof_test_budget(paths->state, groups,
-                                          test->selected);
-            if (!run_dimension(&execution, ZCL_DEV_PROOF_TEST, argv,
-                               test, true, &test_budget, why, why_len))
-                return false;
-            test_receipt_bind_helpers(test, helper_root);
-        } else unused_dimension(ZCL_DEV_PROOF_TEST, test);
-        proof_phase_mark(&phases, "dimension_test");
+        }
+        const char *test_argv[] = {generation_binary, only, "--cache",
+                                   "--activate-proof-contracts", NULL};
+        struct zcl_dev_proof_budget test_budget =
+            zcl_dev_proof_test_budget(paths->state, groups, test->selected);
+        if (lint->selected &&
+            !dimension_start(&execution, execution.root, &runs[run_count],
+                             ZCL_DEV_PROOF_LINT, lint_argv, lint, false,
+                             &lint_budget, why, why_len))
+            return false;
+        if (lint->selected) run_count++;
+        if (test->selected &&
+            !dimension_start(&execution, execution.root, &runs[run_count],
+                             ZCL_DEV_PROOF_TEST, test_argv, test, true,
+                             &test_budget, why, why_len)) {
+            dimension_runs_wait(runs, run_count);
+            for (size_t i = 0; i < run_count; i++)
+                (void)dimension_finish(&execution, &runs[i], NULL, 0);
+            return false;
+        }
+        if (test->selected) run_count++;
+        dimension_runs_wait(runs, run_count);
+        /* Fail closed on the first dimension that failed, in the order they
+         * would have run sequentially, and always finish every child so each
+         * one's log, receipt root and phases row survive the failure. */
+        bool dimensions_ok = true;
+        for (size_t i = 0; i < run_count; i++) {
+            char step_why[160] = {0};
+            if (dimension_finish(&execution, &runs[i], step_why,
+                                 sizeof(step_why)))
+                continue;
+            if (dimensions_ok) proof_why(why, why_len, step_why);
+            dimensions_ok = false;
+        }
+        if (!dimensions_ok) return false;
+        if (test->selected) test_receipt_bind_helpers(test, helper_root);
+        proof_phase_mark(&phases, "dimension_lint_and_test");
     }
 
     if (!worktree_exact(generation, local, false, why, why_len) ||
