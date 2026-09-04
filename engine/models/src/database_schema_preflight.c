@@ -14,6 +14,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <inttypes.h>
 #include <limits.h>
 #include <sqlite3.h>
 #include <stdbool.h>
@@ -154,6 +155,52 @@ static int open_quiet_wal_immutable(int fd, sqlite3 **db_out)
                            SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX |
                            SQLITE_OPEN_URI,
                            NULL);
+}
+
+static int open_preflight_database(const char *path, int fd, bool wal_mode,
+                                   const struct preflight_sidecars *sidecars,
+                                   sqlite3 **db_out, const char **branch_out)
+{
+    *db_out = NULL;
+    errno = 0;
+    if (wal_mode && !sidecars->shm &&
+        (!sidecars->wal || sidecars->wal_size == 0)) {
+        *branch_out = "clean-wal-immutable";
+        return open_quiet_wal_immutable(fd, db_out);
+    }
+    *branch_out = wal_mode ? "live-wal-readonly" : "delete-readonly";
+    return sqlite3_open_v2(path, db_out,
+        SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX, NULL);
+}
+
+static void log_preflight_open_failure(const char *path, int fd,
+                                       const char *branch, int rc,
+                                       int open_errno, sqlite3 *db,
+                                       const struct preflight_sidecars *sidecars)
+{
+    struct stat opened = { 0 };
+    struct stat named = { 0 };
+    bool opened_ok = fstat(fd, &opened) == 0;
+    bool named_ok = stat(path, &named) == 0;
+    const char *identity = !opened_ok || !named_ok ? "unavailable" :
+        opened.st_dev == named.st_dev && opened.st_ino == named.st_ino
+            ? "match" : "mismatch";
+    int extended_rc = db ? sqlite3_extended_errcode(db) : rc;
+    int system_errno = db ? sqlite3_system_errno(db) : open_errno;
+    const char *message = db ? sqlite3_errmsg(db) : sqlite3_errstr(rc);
+    LOG_WARN("db.schema_preflight",
+             "read-only SQLite open failed branch=%s rc=%d primary_rc=%d "
+             "extended_rc=%d errno=%d system_errno=%d detail=%s fd=%d "
+             "identity=%s fd_stat=%d fd_dev=%" PRIuMAX " fd_ino=%" PRIuMAX
+             " path_stat=%d path_dev=%" PRIuMAX " path_ino=%" PRIuMAX
+             " wal=%d shm=%d wal_size=%" PRIdMAX,
+             branch ? branch : "(unknown)", rc, rc & 0xff, extended_rc,
+             open_errno, system_errno, message ? message : "(none)", fd,
+             identity, opened_ok ? 0 : -1, (uintmax_t)opened.st_dev,
+             (uintmax_t)opened.st_ino, named_ok ? 0 : -1,
+             (uintmax_t)named.st_dev, (uintmax_t)named.st_ino,
+             sidecars->wal ? 1 : 0, sidecars->shm ? 1 : 0,
+             (intmax_t)sidecars->wal_size);
 }
 
 static int count_tables(sqlite3 *db, int *count_out)
@@ -374,26 +421,24 @@ struct node_db_schema_preflight node_db_schema_preflight_existing(
     }
 
     sqlite3 *db = NULL;
-    int rc;
-    if (wal_mode && !sidecars.shm &&
-        (!sidecars.wal || sidecars.wal_size == 0)) {
-        rc = open_quiet_wal_immutable(fd, &db);
-    } else if (wal_mode && sidecars.wal && sidecars.shm) {
-        rc = sqlite3_open_v2(path, &db,
-            SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX, NULL);
-    } else if (wal_mode) {
+    if (wal_mode && !(sidecars.wal && sidecars.shm) &&
+        !(!sidecars.shm && (!sidecars.wal || sidecars.wal_size == 0))) {
         close(fd);
         return preflight_result(NODE_DB_SCHEMA_PREFLIGHT_UNKNOWN, 0,
             sidecars.wal && sidecars.wal_size > 0
                 ? "SCHEMA_VERSION_UNKNOWN: unrecovered WAL has no wal-index"
                 : "SCHEMA_VERSION_UNKNOWN: contradictory WAL sidecars");
-    } else {
-        rc = sqlite3_open_v2(path, &db,
-            SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX, NULL);
     }
+
+    const char *open_branch = NULL;
+    int rc = open_preflight_database(path, fd, wal_mode, &sidecars, &db,
+                                     &open_branch);
+    int open_errno = errno;
 
     struct node_db_schema_preflight out;
     if (rc != SQLITE_OK || !db) {
+        log_preflight_open_failure(path, fd, open_branch, rc, open_errno, db,
+                                   &sidecars);
         out = preflight_result(NODE_DB_SCHEMA_PREFLIGHT_UNKNOWN, 0,
             "SCHEMA_VERSION_UNKNOWN: read-only SQLite open failed");
     } else if (sqlite3_busy_timeout(db, 10000) != SQLITE_OK) {

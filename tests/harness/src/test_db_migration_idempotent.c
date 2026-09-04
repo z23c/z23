@@ -930,10 +930,14 @@ static int t_supported_current_schema_reopens_normally(void)
         ASSERT(node_db_open(&first, dbpath));
         ASSERT_EQ(node_db_schema_version(&first), NODE_DB_SCHEMA_LATEST);
         node_db_close(&first);
-        struct node_db reopened;
-        ASSERT(node_db_open(&reopened, dbpath));
-        ASSERT(node_db_state_set(&reopened, "preflight_supported", "yes", 3));
-        node_db_close(&reopened);
+        for (int i = 0; i < 32; i++) {
+            struct node_db reopened;
+            ASSERT(node_db_open_runtime(&reopened, dbpath,
+                                        "schema_preflight.reopen_stress"));
+            ASSERT(node_db_state_set(&reopened, "preflight_supported",
+                                     "yes", 3));
+            node_db_close(&reopened);
+        }
         PASS();
     } _test_next:;
     test_cleanup_tmpdir(dir);
