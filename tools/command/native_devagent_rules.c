@@ -39,7 +39,7 @@
  * zcl_spawn_capture() from util/spawn.h; popen(), system() and a shell
  * command string are forbidden and gated.
  *
- * Implement this file only; the test tests/harness/src/test_devagent_rules.c
+ * Implement this file only; the test tools/harness/src/test_devagent_rules.c
  * is the acceptance bar and must not be edited.
  */
 
@@ -53,31 +53,126 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* The rule table is REACHABLE from here -- the include below is the exact
- * line the implementation expands with real macros. Expanded with both
- * X-macros empty it emits no tokens, so the stub proves the path compiles
- * without yet answering anything. */
-#define ZCL_AGENT_SITUATION(id_, test_prose_)
+#define DVR_LEAF "dev.agent.rules"
+
+/* All topics, in the exact order the contract requires. */
+static const char *const dvr_topics[] = {
+    "push_target", "commit_scope", "gate_command",
+    "gate_skip",   "force_push",   "history",
+};
+#define DVR_TOPIC_COUNT (sizeof(dvr_topics) / sizeof(dvr_topics[0]))
+
+/* Every ZCL_AGENT_SITUATION id, so an unknown filter can be refused by name
+ * and so its message can name what IS declared. */
+static const char *const dvr_situations[] = {
+#define ZCL_AGENT_SITUATION(id_, test_prose_) #id_,
 #define ZCL_AGENT_RULE(id_, situation_, value_, say_)
 #include "../../engine/composition/agent_rules.def"
 #undef ZCL_AGENT_RULE
 #undef ZCL_AGENT_SITUATION
+};
+#define DVR_SITUATION_COUNT (sizeof(dvr_situations) / sizeof(dvr_situations[0]))
 
-#define DVR_LEAF "dev.agent.rules"
+static bool dvr_known_situation(const char *situation)
+{
+    for (size_t i = 0; i < DVR_SITUATION_COUNT; i++) {
+        if (strcmp(dvr_situations[i], situation) == 0)
+            return true;
+    }
+    return false;
+}
 
 void zcl_native_handle_dev_agent_rules(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
 {
-    (void)request;
+    const char *filter = NULL;
+    struct json_value situations, rules, topics, row;
+
     if (!reply)
         return;
+
     (void)json_push_kv_str(&reply->data, "leaf", DVR_LEAF);
-    zcl_command_reply_fail(
-        reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_FAILED,
-        "NOT_IMPLEMENTED", "resolve", false, false,
-        "dev.agent.rules is a scaffold stub with no behavior yet",
-        "tools/command/native_devagent_rules.c carries the contract");
-    (void)snprintf(reply->error.next_action, sizeof(reply->error.next_action),
-                   "implement tools/command/native_devagent_rules.c");
-    reply->error.human_action_required = true;
+
+    if (request && request->input) {
+        const struct json_value *v = json_get(request->input, "situation");
+        if (v && v->type == JSON_STR && json_get_str(v) && json_get_str(v)[0])
+            filter = json_get_str(v);
+    }
+
+    if (filter && !dvr_known_situation(filter)) {
+        char msg[256];
+        char known[192];
+        size_t used = 0;
+
+        known[0] = '\0';
+        for (size_t i = 0; i < DVR_SITUATION_COUNT; i++) {
+            int w = snprintf(known + used, sizeof(known) - used, "%s%s",
+                             used == 0 ? "" : ", ", dvr_situations[i]);
+            if (w < 0 || (size_t)w >= sizeof(known) - used)
+                break;
+            used += (size_t)w;
+        }
+        (void)snprintf(msg, sizeof(msg),
+                       "unknown situation \"%s\"; declared situations: %s",
+                       filter, known);
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_FAILED, "UNKNOWN_SITUATION",
+                               "resolve", false, false, msg,
+                               "tools/command/native_devagent_rules.c");
+        return;
+    }
+
+    json_init(&situations);
+    json_set_array(&situations);
+    json_init(&rules);
+    json_set_array(&rules);
+    json_init(&topics);
+    json_set_array(&topics);
+    json_init(&row);
+
+#define ZCL_AGENT_SITUATION(id_, test_prose_)                                \
+    do {                                                                     \
+        json_set_object(&row);                                              \
+        (void)json_push_kv_str(&row, "id", #id_);                           \
+        (void)json_push_kv_str(&row, "test", test_prose_);                  \
+        (void)json_push_back(&situations, &row);                            \
+    } while (0);
+#define ZCL_AGENT_RULE(id_, situation_, value_, say_)                        \
+    do {                                                                     \
+        if (!filter || strcmp(filter, #situation_) == 0) {                  \
+            json_set_object(&row);                                          \
+            (void)json_push_kv_str(&row, "id", #id_);                       \
+            (void)json_push_kv_str(&row, "when", #situation_);              \
+            (void)json_push_kv_str(&row, "value", value_);                  \
+            (void)json_push_kv_str(&row, "say", say_);                      \
+            (void)json_push_back(&rules, &row);                             \
+        }                                                                    \
+    } while (0);
+#include "../../engine/composition/agent_rules.def"
+#undef ZCL_AGENT_RULE
+#undef ZCL_AGENT_SITUATION
+
+    json_free(&row);
+
+    /* topics is a plain array of strings. */
+    for (size_t i = 0; i < DVR_TOPIC_COUNT; i++) {
+        struct json_value s;
+        json_init(&s);
+        json_set_str(&s, dvr_topics[i]);
+        (void)json_push_back(&topics, &s);
+        json_free(&s);
+    }
+
+    (void)json_push_kv(&reply->data, "situations", &situations);
+    (void)json_push_kv(&reply->data, "rules", &rules);
+    (void)json_push_kv_int(&reply->data, "count", (int64_t)rules.num_children);
+    (void)json_push_kv_str(&reply->data, "source",
+                           "engine/composition/agent_rules.def");
+    (void)json_push_kv(&reply->data, "topics", &topics);
+
+    json_free(&situations);
+    json_free(&rules);
+    json_free(&topics);
+
+    reply->status = ZCL_COMMAND_STATUS_PASSED;
 }
