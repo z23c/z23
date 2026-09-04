@@ -58,6 +58,11 @@ bool zcl_dev_proof_child_action_v1(
     const struct zcl_dev_proof_child_action_inputs_v1 *inputs,
     enum zcl_dev_proof_dimension_id dimension,
     struct vcs_build_action_v1 *action, uint8_t action_root[32]);
+/* Testing seam: materialize one generation dependency the way the proof does
+ * — link() inside one filesystem, a faithful mode-preserving copy across
+ * one. No proof, lease, or admission authority. */
+bool zcl_dev_proof_dependency_materialize(const char *source,
+                                          const char *target);
 bool zcl_dev_proof_resolve_pair(const char *repo_root,
                                 const char *requested_local,
                                 const char *requested_base,

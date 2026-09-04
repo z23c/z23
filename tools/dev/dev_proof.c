@@ -1097,6 +1097,69 @@ static bool dependency_parent_ensure(const char *path)
     }
 }
 
+/* A refusal a reader can act on names the failure, not a number. */
+static const char *proof_errno_name(int value)
+{
+    switch (value) {
+    case 0: return "no errno";
+    case EACCES: return "EACCES";
+    case EDQUOT: return "EDQUOT";
+    case EEXIST: return "EEXIST";
+    case EINVAL: return "EINVAL";
+    case EIO: return "EIO";
+    case EISDIR: return "EISDIR";
+    case ELOOP: return "ELOOP";
+    case EMLINK: return "EMLINK";
+    case ENAMETOOLONG: return "ENAMETOOLONG";
+    case ENOENT: return "ENOENT";
+    case ENOMEM: return "ENOMEM";
+    case ENOSPC: return "ENOSPC";
+    case ENOTDIR: return "ENOTDIR";
+    case EPERM: return "EPERM";
+    case EROFS: return "EROFS";
+    case EXDEV: return "EXDEV";
+    default: return "unrecognised errno";
+    }
+}
+
+/* link() is the fast path but only works inside one filesystem. A RAM-backed
+ * generation root (/dev/shm) is a different filesystem from the checkout, so
+ * link() answers EXDEV there and the dependency has to be copied byte for
+ * byte. The mode carries: a hook or a .so that arrived without its executable
+ * bit fails far away from here, where the cause is no longer visible. */
+static bool dependency_copy_mode(const char *source, const char *target,
+                                 mode_t mode)
+{
+    int input = open(source, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (input < 0) return false;
+    char temporary[PATH_MAX];
+    int temporary_len = snprintf(temporary, sizeof(temporary),
+                                 "%s.tmp.XXXXXX", target);
+    bool ok = temporary_len > 0 && temporary_len < (int)sizeof(temporary);
+    int output = ok ? mkstemp(temporary) : -1;
+    if (output < 0) ok = false;
+    unsigned char buffer[65536];
+    while (ok) {
+        ssize_t got = read(input, buffer, sizeof(buffer));
+        if (got < 0 && errno == EINTR) continue;
+        if (got < 0) ok = false;
+        if (got <= 0) break;
+        ok = write_all(output, buffer, (size_t)got);
+    }
+    int saved = errno;
+    if (close(input) != 0) ok = false;
+    if (output >= 0) {
+        if (fchmod(output, mode & 07777) != 0) ok = false;
+        if (close(output) != 0) ok = false;
+    }
+    if (ok && rename(temporary, target) != 0) ok = false;
+    if (!ok) {
+        if (output >= 0) (void)unlink(temporary);
+        if (errno == 0) errno = saved;
+    }
+    return ok;
+}
+
 static bool dependency_materialize(const char *source, const char *target)
 {
     struct stat source_st, target_st;
@@ -1112,7 +1175,11 @@ static bool dependency_materialize(const char *source, const char *target)
             source_st.st_ino == target_st.st_ino)
             return true;
         if (target_exists && unlink(target) != 0) return false;
-        return link(source, target) == 0;
+        if (link(source, target) == 0) return true;
+        /* Same filesystem is the fast path; a cross-device generation root is
+         * not a missing dependency, so copy rather than refuse. */
+        if (errno != EXDEV && errno != EPERM && errno != EMLINK) return false;
+        return dependency_copy_mode(source, target, source_st.st_mode);
     }
     if (S_ISLNK(source_st.st_mode)) {
         char link_target[PATH_MAX];
@@ -1146,6 +1213,16 @@ static bool dependency_materialize(const char *source, const char *target)
             ok = false;
     }
     return closedir(dir) == 0 && ok;
+}
+
+/* Testing seam: one generation dependency materialized exactly the way the
+ * proof does it. No proof, lease, or admission authority — it exists so the
+ * cross-filesystem path can be pinned by a test instead of only by a live
+ * RAM-backed proof run. */
+bool zcl_dev_proof_dependency_materialize(const char *source,
+                                          const char *target)
+{
+    return dependency_materialize(source, target);
 }
 
 static bool dependency_copy_fresh(const char *source, const char *target)
@@ -1405,9 +1482,14 @@ static bool generation_prepare(const struct proof_paths *paths,
         if (snprintf(source, sizeof(source), "%s/%s", paths->root,
                      dependencies[i]) >= (int)sizeof(source) ||
             snprintf(target, sizeof(target), "%s/%s", generation,
-                     dependencies[i]) >= (int)sizeof(target) ||
-            !dependency_parent_ensure(target) ||
-            !dependency_materialize(source, target)) {
+                     dependencies[i]) >= (int)sizeof(target)) {
+            proof_whyf(why, why_len,
+                       "proof_generation_dependency_path_too_long:%s",
+                       dependencies[i]);
+            return false;
+        }
+        struct stat source_st;
+        if (lstat(source, &source_st) != 0) {
             /* vendor/ entries come from the vendored-archive build; the
              * git-hook pair comes from arming the clone; the hotswap
              * fixture images come from any test-binary build. Naming the
@@ -1421,6 +1503,17 @@ static bool generation_prepare(const struct proof_paths *paths,
             proof_whyf(why, why_len,
                        "proof_generation_dependency_unavailable:%s (%s)",
                        dependencies[i], fix);
+            return false;
+        }
+        /* The source is right there. Telling the reader to rebuild it sent
+         * ten proof attempts hunting a vendored archive that was present all
+         * along; say what actually failed and why. */
+        errno = 0;
+        if (!dependency_parent_ensure(target) ||
+            !dependency_materialize(source, target)) {
+            proof_whyf(why, why_len,
+                       "proof_generation_dependency_copy_failed:%s (%s)",
+                       dependencies[i], proof_errno_name(errno));
             return false;
         }
     }

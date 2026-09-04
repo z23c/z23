@@ -41,6 +41,7 @@
 
 #include "test/test_core.h"
 
+#include <errno.h>
 #include <utime.h>
 
 #include "codeindex/codeindex.h"
@@ -2224,6 +2225,93 @@ static int test_ic_ram_scratch_reservations_hold_under_concurrency(void)
 #endif
 
 
+#if !defined(_WIN32)
+/* The generation root moved to tmpfs, and link() does not cross filesystems.
+ * For ten straight attempts the proof read EXDEV as "vendor/lib is missing"
+ * and told the reader to run `make vendor` on a tree where vendor/lib was
+ * present. This pins both halves of the cure: the copy happens, and it is
+ * faithful. */
+static int test_ic_proof_dependency_crosses_filesystems(void)
+{
+    int failures = 0;
+    TEST("proof generation: a dependency crosses a filesystem boundary intact") {
+        char relative[4096], cwd[2048], source[4096], same[4096];
+        ic_budget_fixture("depcopy", relative);
+        ASSERT(getcwd(cwd, sizeof(cwd)) != NULL);
+        static const char body[] = "#!/bin/sh\nexec true\n";
+        ASSERT(ic_write(relative, "payload.sh", body));
+        snprintf(source, sizeof(source), "%s/%s/payload.sh", cwd, relative);
+        ASSERT(chmod(source, 0755) == 0);
+        struct stat source_st;
+        ASSERT(stat(source, &source_st) == 0);
+
+        /* Same filesystem keeps the link fast path: one inode, not two. */
+        snprintf(same, sizeof(same), "%s/%s/linked.sh", cwd, relative);
+        ASSERT(zcl_dev_proof_dependency_materialize(source, same));
+        struct stat same_st;
+        ASSERT(stat(same, &same_st) == 0);
+        ASSERT(same_st.st_dev == source_st.st_dev);
+        ASSERT(same_st.st_ino == source_st.st_ino);
+
+        /* /dev/shm is the RAM-backed generation root in production. A box
+         * without a writable one cannot observe the cross-device path at all,
+         * so say so out loud rather than passing as if it had. */
+        char ram_dir[4096], ram_target[4096];
+        snprintf(ram_dir, sizeof(ram_dir), "/dev/shm/z23-ic-depcopy-%ld",
+                 (long)getpid());
+        if (mkdir(ram_dir, 0700) != 0 && errno != EEXIST) {
+            printf("impact_composition: SKIP cross-filesystem dependency copy "
+                   "(no writable /dev/shm on this host)\n");
+            PASS();
+            goto _test_next;
+        }
+        snprintf(ram_target, sizeof(ram_target), "%s/payload.sh", ram_dir);
+        (void)unlink(ram_target);
+        struct stat ram_st;
+        if (stat(ram_dir, &ram_st) != 0 || ram_st.st_dev == source_st.st_dev) {
+            (void)rmdir(ram_dir);
+            printf("impact_composition: SKIP cross-filesystem dependency copy "
+                   "(/dev/shm shares the filesystem of this checkout)\n");
+            PASS();
+            goto _test_next;
+        }
+        ASSERT(zcl_dev_proof_dependency_materialize(source, ram_target));
+        struct stat copied_st;
+        ASSERT(stat(ram_target, &copied_st) == 0);
+        /* A copy, not a link: different filesystem, and the executable bit
+         * that a hook or a .so depends on survived. */
+        ASSERT(copied_st.st_dev != source_st.st_dev);
+        ASSERT((copied_st.st_mode & 07777) == (source_st.st_mode & 07777));
+        ASSERT((copied_st.st_mode & 0111) != 0);
+        ASSERT((size_t)copied_st.st_size == sizeof(body) - 1);
+        char read_back[128] = {0};
+        FILE *fh = fopen(ram_target, "rb");
+        ASSERT(fh != NULL);
+        size_t got = fread(read_back, 1, sizeof(read_back) - 1, fh);
+        ASSERT(fclose(fh) == 0);
+        ASSERT(got == sizeof(body) - 1);
+        ASSERT(memcmp(read_back, body, sizeof(body) - 1) == 0);
+        /* A directory recurses across the same boundary. */
+        char dir_source[4096], dir_target[4096], nested[4096];
+        snprintf(dir_source, sizeof(dir_source), "%s/%s/tree", cwd, relative);
+        ASSERT(ic_write(relative, "tree/inner.txt", "inner\n"));
+        snprintf(dir_target, sizeof(dir_target), "%s/tree", ram_dir);
+        ASSERT(zcl_dev_proof_dependency_materialize(dir_source, dir_target));
+        snprintf(nested, sizeof(nested), "%s/tree/inner.txt", ram_dir);
+        struct stat nested_st;
+        ASSERT(stat(nested, &nested_st) == 0);
+        ASSERT(nested_st.st_size == 6);
+        (void)unlink(nested);
+        (void)rmdir(dir_target);
+        (void)unlink(ram_target);
+        (void)rmdir(ram_dir);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+#endif
+
 int test_impact_composition(void)
 {
     int failures = 0;
@@ -2262,6 +2350,7 @@ int test_impact_composition(void)
 #endif
     failures += test_ic_proof_generation_prefers_ram_when_it_fits();
 #if !defined(_WIN32)
+    failures += test_ic_proof_dependency_crosses_filesystems();
     failures += test_ic_ram_scratch_reservations_hold_under_concurrency();
 #endif
     return failures;
