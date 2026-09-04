@@ -2429,6 +2429,36 @@ void zcl_native_handle_dev_agent_ticketkey(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
 
+/* dev.train.* — stacked-lane construction (tools/command/native_dev_train_command.c).
+ * One file for all four verbs: build, check, status, drop. Compiled
+ * unconditionally (the release build never references these symbols from
+ * dev.def, since ZCL_DEV_HANDLER() resolves to NULL there), so the dev.def
+ * row and this prototype are unconditional too, matching the dev.agent
+ * family above. */
+void zcl_native_handle_dev_train_build(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
+void zcl_native_handle_dev_train_check(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
+void zcl_native_handle_dev_train_status(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
+void zcl_native_handle_dev_train_drop(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
+
+/* CLI-only: parses `z23 dev train <verb> --name=... --source=... [...]`
+ * directly (repeated --source is not representable by the generic
+ * --key=value flag parser), invokes the handler in-process, and prints one
+ * JSON object plus (with --human) a human summary. Returns true iff it
+ * handled the whole command line, setting *out_rc to the process exit code
+ * that should be returned. Defined in native_dev_train_command.c, called
+ * from zcl_native_command_main() before the generic flag parser runs. */
+bool zcl_native_dev_train_cli(const struct zcl_command_spec *spec,
+                              const char *const *words, size_t word_count,
+                              size_t consumed, int *out_rc);
+
 /* Dev-build-only executors.  The catalog binds these only when
  * ZCL_DEV_BUILD is set; release objects neither reference nor link them. */
 #if defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)

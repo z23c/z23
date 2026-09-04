@@ -524,6 +524,14 @@ const char *zcl_command_cost_name(enum zcl_command_cost value);
 const char *zcl_command_confirmation_name(enum zcl_command_confirmation value);
 const char *zcl_command_status_name(enum zcl_command_status value);
 
+/* Internal split of zcl_command_registry_input_validate()'s per-key type
+ * rules: not part of the module's public surface, declared here only so
+ * command_registry.c and command_registry_devagent_input.c can share them
+ * without command_registry.c growing past its recorded ceiling in
+ * tools/lint/file_size_policy_baseline.txt. */
+bool command_registry_devagent_input_extra_bool_key(const char *key);
+bool command_registry_devagent_input_seq_ok(const struct json_value *value);
+
 #ifdef __cplusplus
 }
 #endif

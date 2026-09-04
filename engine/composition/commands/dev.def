@@ -961,6 +961,100 @@ ZCL_COMMAND_READY_READ(
     ZCL_COMMAND_TRAIT_IDEMPOTENT | ZCL_COMMAND_TRAIT_DEV_ONLY,
     ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_dev_fleet)
 
+/* ── dev.train ─────────────────────────────────────────────────────────────
+ * Stacks lanes onto origin/main without waiting on lint. `build` fetches
+ * origin, opens a detached worktree at <checkout-parent>/z23-stack<name>,
+ * cherry-picks each source's origin/main..HEAD commits oldest-first
+ * (skipping doc-regen-only commits by subject), regenerates the generated
+ * docs once, and returns immediately — it never runs lint-fast itself.
+ * `check` is the one deliberate synchronous wait: `make lint-fast` under the
+ * checkout lock, bounded by --timeout. `status` reads every z23-stack*
+ * worktree without mutating anything. `drop` removes a stack worktree, and
+ * refuses one with commits origin/main does not have unless --force. */
+ZCL_COMMAND_BRANCH("dev.train", "dev",
+                   "Stack lanes onto main without waiting on lint",
+                   ZCL_COMMAND_LAYER_DEV)
+
+ZCL_COMMAND_DEV_COMMAND(
+    "dev.train.build", "dev.train", "",
+    "Stack one or more lanes' commits onto origin/main",
+    "Builds <checkout-parent>/z23-stack<name> detached at a freshly fetched "
+    "origin/main, cherry-picks each source's origin/main..HEAD commits "
+    "oldest-first (a source is a worktree directory or a branch resolved in "
+    "this checkout), skips commits whose subject is doc-regen-only, and "
+    "regenerates the generated docs once. Never runs lint-fast itself: on "
+    "success `next` names `dev train check`. A real cherry-pick conflict "
+    "returns state=conflict naming the source and sha and leaves the stack "
+    "worktree exactly as Git left it, mid-cherry-pick, for a human or agent "
+    "to resolve.", 65536,
+    "train,stack,lane,cherry-pick,worktree,land",
+    "zcl.train_build_input.v1", "zcl.train_build.v1", "name,sources", "",
+    "z23 dev train build --name q --source ~/github/z23-stackq2",
+    ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_DEV_MUTATION,
+    ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_MODE_SYNC, ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_DEV_STATE_WRITE, ZCL_COMMAND_TRAIT_DEV_ONLY,
+    zcl_native_handle_dev_train_build,
+    "stacked-lane construction requires the dev binary",
+    "z23-dev dev train build --name <n> --source <dir-or-ref>")
+
+ZCL_COMMAND_DEV_READ(
+    "dev.train.check", "dev.train", "",
+    "Run lint-fast on a stack worktree and report the gates that failed",
+    "Runs `make lint-fast` synchronously in <checkout-parent>/z23-stack<name> "
+    "under the checkout-wide build lock, bounded by --timeout (default "
+    "900000 ms). Reports ok, the exact FAIL gate names from the run, and the "
+    "full log path. This is the caller's one deliberate wait; `dev train "
+    "build` never runs it inline.", 16384,
+    "train,stack,lint,gate,check",
+    "zcl.train_check_input.v1", "zcl.train_check.v1", "name,timeout_ms", "",
+    "z23 dev train check --name q",
+    ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_HIGH,
+    ZCL_COMMAND_LANE_LOCAL, ZCL_COMMAND_CAP_DEV_STATE_READ,
+    ZCL_COMMAND_TRAIT_DEV_ONLY, zcl_native_handle_dev_train_check,
+    "stack lint verification requires the dev binary",
+    "z23-dev dev train check --name <n>")
+
+ZCL_COMMAND_DEV_READ(
+    "dev.train.status", "dev.train", "",
+    "List stack worktrees, their base, and last check verdict",
+    "Every z23-stack* worktree beside this checkout (or just --name), each "
+    "with its base commit, commit count ahead of that base, the last `dev "
+    "train check` verdict recorded on disk (unavailable if check has not "
+    "run), and the landing-queue state read from "
+    "~/.local/state/zclassic23/land/queue.jsonl when that file exists. Reads "
+    "only; nothing here is fetched or mutated.", 65536,
+    "train,stack,status,land,queue",
+    "zcl.train_status_input.v1", "zcl.train_status.v1", "name", "",
+    "z23 dev train status",
+    ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL, ZCL_COMMAND_CAP_DEV_STATE_READ,
+    ZCL_COMMAND_TRAIT_IDEMPOTENT | ZCL_COMMAND_TRAIT_DEV_ONLY,
+    zcl_native_handle_dev_train_status,
+    "stack status requires the dev binary", "z23-dev dev train status")
+
+ZCL_COMMAND_DEV_COMMAND(
+    "dev.train.drop", "dev.train", "",
+    "Remove a stack worktree",
+    "Removes <checkout-parent>/z23-stack<name> with `git worktree remove`. "
+    "Refuses when the stack carries commits origin/main does not have "
+    "unless --force is given, so a built-but-unlanded stack is never lost "
+    "silently.", 4096,
+    "train,stack,drop,cleanup,worktree",
+    "zcl.train_drop_input.v1", "zcl.train_drop.v1", "name,force", "",
+    "z23 dev train drop --name q",
+    ZCL_COMMAND_EFFECT_DESTRUCTIVE, ZCL_COMMAND_RISK_DEV_MUTATION,
+    ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_MODE_SYNC, ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_DEV_STATE_WRITE, ZCL_COMMAND_TRAIT_DEV_ONLY,
+    zcl_native_handle_dev_train_drop,
+    "stack removal requires the dev binary",
+    "z23-dev dev train drop --name <n>")
+
 /* ── dev.agent ─────────────────────────────────────────────────────────────
  * The checkout questions an agent asks most often, each of which was until
  * now a shell recipe an agent had to remember and repeatedly got wrong:

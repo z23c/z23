@@ -6,7 +6,17 @@
  * unchanged: this is the same else-if chain in its own translation unit.
  *
  * `key` has already been confirmed present in the leaf's declared
- * `input_keys` CSV before either the caller or this function runs. */
+ * `input_keys` CSV before either the caller or this function runs.
+ *
+ * The three functions below (the extra bool-key set and the seq predicate)
+ * are the overflow for dev land's --json/--seq/--force and dev train:
+ * two lanes each added a rule to command_registry.c's
+ * zcl_command_registry_input_validate() chain at the same time, and keeping
+ * both pushed that file past its recorded ceiling in
+ * tools/lint/file_size_policy_baseline.txt, so the two new rules live here
+ * instead. The chain in command_registry.c still owns dispatch and the
+ * `why` message; these are pure predicates over one already-typed JSON
+ * value or a bare key. */
 
 #include "kernel/command_registry.h"
 
@@ -54,4 +64,26 @@ bool zcl_command_registry_devagent_input_ok(const char *key,
         return true;
     }
     return false;
+}
+
+/* dev.land submit/cancel's `--json` and `--force` are booleans in their own
+ * declared schema, same as the other flags in command_registry.c's bool
+ * disjunction. `include_evidence_wires` and `list` were already in that
+ * disjunction and are folded in here too, purely to keep the disjunction's
+ * own line count from growing past the ceiling — no behavior change. */
+bool command_registry_devagent_input_extra_bool_key(const char *key)
+{
+    return strcmp(key, "json") == 0 || strcmp(key, "force") == 0 ||
+           strcmp(key, "include_evidence_wires") == 0 ||
+           strcmp(key, "list") == 0;
+}
+
+/* dev.land cancel names one request by its sequence number, and `--seq=3`
+ * types as an integer: without this rule the default string branch makes
+ * the verb uninvokable from a shell while raw JSON works. The handler owns
+ * the semantics; the transport only admits the positive integer shape. */
+bool command_registry_devagent_input_seq_ok(const struct json_value *value)
+{
+    return value->type == JSON_INT && json_get_int(value) >= 1 &&
+           json_get_int(value) <= 1000000000;
 }

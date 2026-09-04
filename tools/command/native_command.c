@@ -3754,6 +3754,11 @@ int zcl_native_command_main(const char *root_word, const char *const *args,
         if (nc_dev_retrieval_try_stream(spec, words, count, consumed, &rc))
             return rc;
     }
+    if (strncmp(spec->path, "dev.train.", 10) == 0) {
+        int rc = 0;
+        if (zcl_native_dev_train_cli(spec, words, count, consumed, &rc))
+            return rc;
+    }
 #endif
 
     /* Collect the tokens the path did not consume: positionals in order and
