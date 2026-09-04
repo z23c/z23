@@ -79,10 +79,15 @@ static int test_delegation_windows_and_binding(void)
         ASSERT_EQ(vcs_zcode_dht_delegation_verify(
                       &d, genesis, noise, 120, wrong, 1000),
                   VCS_ZCODE_DHT_DELEGATION_BEACON);
+        /* At exactly the doc's expiry, vcs_zcode_dht_delegation_verify()
+         * now reports EXPIRED (a distinct, named lifecycle code) rather
+         * than falling through to zid_doc_verify() and reporting the
+         * generic SIGNATURE failure that an expired-but-otherwise-valid
+         * doc used to produce before that code existed. */
         ASSERT_EQ(vcs_zcode_dht_delegation_verify(
                       &d, genesis, noise, 120, beacon,
                       1000 + ZENDP_MAX_WINDOW_SECONDS),
-                  VCS_ZCODE_DHT_DELEGATION_SIGNATURE);
+                  VCS_ZCODE_DHT_DELEGATION_EXPIRED);
         PASS();
     } _test_next:;
     return failures;
