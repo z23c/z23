@@ -74,15 +74,15 @@ z23 discover schema <path> --side=input|output
 
 | Catalog fact | Count |
 |---|---|
-| Registry entries (branches + leaves) | 805 |
+| Registry entries (branches + leaves) | 807 |
 | Top-level roots | 13 |
 | Branches | 181 |
-| Leaves (dispatchable command paths) | 624 |
+| Leaves (dispatchable command paths) | 626 |
 | … `ready` (live handler in this build) | 557 |
-| … `compat` (metadata only, names a fallback) | 36 |
+| … `compat` (metadata only, names a fallback) | 38 |
 | … `planned` (fail-closed BLOCKED, exit 3) | 31 |
-| … dev-gated 🔧 (`ready` only in `z23-dev`) | 35 |
-| Leaves with `effect=mutate` | 217 |
+| … dev-gated 🔧 (`ready` only in `z23-dev`) | 37 |
+| Leaves with `effect=mutate` | 219 |
 | Leaves with `effect=destructive` | 5 |
 | Leaves requiring **owner** authority | 119 |
 
@@ -96,7 +96,7 @@ Per source file:
 | `engine/composition/commands/app_features.def` | 75 | 20 | 55 |
 | `engine/composition/commands/store.def` | 18 | 0 | 18 |
 | `engine/composition/commands/ops.def` | 56 | 10 | 46 |
-| `engine/composition/commands/dev.def` | 84 | 17 | 67 |
+| `engine/composition/commands/dev.def` | 86 | 17 | 69 |
 | `engine/composition/commands/code.def` | 31 | 3 | 28 |
 | `engine/composition/commands/accounts.def` | 11 | 2 | 9 |
 | `engine/composition/commands/vault.def` | 24 | 4 | 20 |
@@ -800,6 +800,8 @@ represented by its children's sections.
 | `dev agent claim` | compat 🔧 → `z23-dev dev agent claim` | mutate / dev-mutation / operator · fast/low | `cwd`, **`story`**, `files`, `release` | `zcl.agent_claim.v1` | `z23-dev dev agent claim hex-codec` | Claim files for one story so lanes do not collide — *the file-claim ledger is a development-lane coordination surface* |
 | `dev agent hot` | ready | read / read / operator · background/high | **`path`**, `group`, `cwd` | `zcl.agent_hot.v1` | `z23 dev agent hot --path=tools/command/native_devagent_hot.c` | Run one saved file's owning test group, hot or rebuilt |
 | `dev agent ticketkey` | ready | read / read / operator · fast/low | `group`, `cwd`, `tip` | `zcl.agent_ticketkey.v1` | `z23 dev agent ticketkey --group=devagent_situation` | Commuting-ticket key of one test group at one tip |
+| `dev agent queue` | compat 🔧 → `z23-dev dev agent queue` | mutate / dev-mutation / operator · fast/low | **`action`**, `kind`, `name`, `group`, `path`, `brief`, `model`, `attempt`, `json`, `cwd` | `zcl.agent_queue.v1` | `z23 dev agent queue post --kind=leaf --name=situation` | Post, dispatch, reap, and inspect async flash-unit runs without blocking — *the unit queue is a development-lane coordination surface* |
+| `dev agent mail` | compat 🔧 → `z23-dev dev agent mail` | mutate / dev-mutation / operator · fast/low | **`action`**, `to`, `kind`, `body`, `since`, `from`, **`cursor`**, `agent`, `ref`, `cwd` | `zcl.agent_mail.v1` | `z23 dev agent mail post --to=* --kind=note --body=hello` | Post, pull, and ack async agent mail without blocking — *agent mail is a development-lane coordination surface* |
 
 ### `ops` — Node diagnostics
 
