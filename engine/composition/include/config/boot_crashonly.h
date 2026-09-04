@@ -26,7 +26,15 @@ bool boot_crashonly_consume_reindex_request(const char *datadir);
  * without fixing a downstream (e.g. shielded-anchor) wedge. Coins-best at the
  * anchor but UNVERIFIED could still be torn, so it keeps consuming. Anchor 0 is
  * the distinct boot-storage episode and is never cleared by this covered-tip
- * guard. */
+ * guard.
+ *
+ * A request whose RECORDED REASON is BOOT_AUTO_REINDEX_REASON_INDEX_INTEGRITY
+ * is never cleared here at all, whatever coins-best says. Coins-best is derived
+ * TRANSPARENT state and cannot witness a block-index height/pprev mismatch, so
+ * using it to retire an integrity request discards the request before the
+ * reindex ever runs — which resets the bounded attempt budget on every restart
+ * and turns it into a permanent "attempt 1/3" crash-loop. See
+ * storage/boot_auto_reindex.h for the reason classes. */
 bool boot_crashonly_clear_reindex_request_if_covered(const char *datadir,
                                                      int coins_best_height,
                                                      bool coins_best_hash_verified);
@@ -51,7 +59,16 @@ void boot_crashonly_clear(const char *datadir);
  *                       boot does NOT re-arm the budget and crash-loop), the
  *                       crashonly_auto_reindex_exhausted page fired, and the
  *                       node stays up degraded — matching chain_tip_watchdog.
- *                  Either way operator_needed is latched (EV_OPERATOR_NEEDED). */
+ *                  Either way operator_needed is latched (EV_OPERATOR_NEEDED).
+ *
+ * Every one of these outcomes also renders a TYPED report through
+ * config/boot_refusal_reports.h (BOOT_REINDEX_RESTART_REQUESTED,
+ * BOOT_REINDEX_BUDGET_EXHAUSTED, BOOT_POST_RESTORE_INDEX_CORRUPT). The caller
+ * returns a bare bool out of app_init, so without one main.c can only print
+ * "no boot step recorded a typed reason" — which is what an operator watching
+ * a restart loop actually saw. `mismatches` additionally selects the reason
+ * class recorded in the request: >0 means block-index link damage
+ * (INDEX_INTEGRITY), which derived coins state must not be allowed to retire. */
 bool boot_crashonly_handle_unrecoverable(const char *datadir, int tip_h,
                                          int zero_nbits, int mismatches,
                                          int first_mismatch_h,

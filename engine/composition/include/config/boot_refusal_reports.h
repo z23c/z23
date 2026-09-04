@@ -56,6 +56,33 @@ void boot_report_wallet_keystore_count_mismatch(const char *datadir,
 void boot_report_wallet_scrub_failed(const char *datadir,
                                      const struct zcl_result *scrub_result);
 
+/* BOOT_REINDEX_RESTART_REQUESTED — the post-restore integrity gate armed a
+ * bounded -reindex-chainstate request and app_init is stopping so the NEXT boot
+ * can run it. This is a deliberate stop, not a mystery: without a typed report
+ * here main.c renders "node initialisation did not complete and no boot step
+ * recorded a typed reason", which tells an operator watching a restart loop
+ * nothing about why the process keeps exiting. */
+void boot_report_reindex_restart_requested(const char *datadir, int tip_h,
+                                           int attempt, int max_attempts,
+                                           int mismatches, int first_mismatch_h,
+                                           const char *reason_name);
+
+/* BOOT_REINDEX_BUDGET_EXHAUSTED — the bounded rebuild budget is spent at a
+ * stable anchor and a TERMINAL marker is persisted. The recovery ladder stops
+ * here; the node stays up degraded (exiting again would re-enter the
+ * supervisor crash-loop the budget exists to end), so this names the datadir
+ * action an operator must take to get further. */
+void boot_report_reindex_budget_exhausted(const char *datadir, int tip_h,
+                                          int attempts,
+                                          const char *reason_name);
+
+/* BOOT_POST_RESTORE_INDEX_CORRUPT — structural nBits corruption in the block
+ * index: not the reindex-recoverable shape, so no request is armed and boot
+ * stops. */
+void boot_report_post_restore_corrupt(const char *datadir, int tip_h,
+                                      int zero_nbits, int mismatches,
+                                      int first_mismatch_h);
+
 #ifdef __cplusplus
 }
 #endif

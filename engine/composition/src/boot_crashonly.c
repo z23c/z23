@@ -9,6 +9,7 @@
 
 #include "config/boot_crashonly.h"
 
+#include "config/boot_refusal_reports.h"
 #include "event/event.h"
 #include "storage/boot_auto_reindex.h"
 
@@ -39,6 +40,43 @@ bool boot_crashonly_clear_reindex_request_if_covered(const char *datadir,
         return false;
     if (anchor <= 0)
         return false; /* anchor 0 is the boot-storage episode, not a tip. */
+
+    /* REASON GATE — the fix for the observed crash-loop.
+     *
+     * Coins-best coverage is evidence about the DERIVED TRANSPARENT UTXO SET.
+     * It is not evidence about the BLOCK INDEX. When the request was armed
+     * because the post-restore integrity check found active_chain height/pprev
+     * MISMATCHES (a broken link far below the tip — h=2004318 under a tip at
+     * h=3172671 on the node that produced this bug), a hash-verified coins-best
+     * at the anchor says nothing about that link and cannot retire the request.
+     *
+     * Discarding it anyway is what made the node crash-loop: boot armed the
+     * request, the next boot cleared it on coins coverage before the reindex
+     * ever ran, the integrity check failed identically, and the attempt counter
+     * was reset to "attempt 1/3" on every restart — a bounded budget that could
+     * never be spent, so the bound never terminated anything.
+     *
+     * An UNSPECIFIED request (legacy file, boot-storage episode, or a pure
+     * tip-above-extent wedge with no link damage) keeps the historical
+     * behaviour: coins coverage still retires it, because there a from-genesis
+     * replay really would only wipe a healthy near-tip coins set. */
+    int reason = boot_auto_reindex_reason_of(datadir);
+    if (reason == BOOT_AUTO_REINDEX_REASON_INDEX_INTEGRITY) {
+        fprintf(stderr,
+                "[boot] crash-only recovery: KEEPING auto-reindex request "
+                "anchor=%d count=%d reason=%s despite derived coins-best h=%d "
+                "covering the anchor — coins-best is derived transparent state "
+                "and cannot witness a block-index link mismatch. Only the "
+                "reindex (or the exhausted budget) retires this request.\n",
+                (int)anchor, count, boot_auto_reindex_reason_name(reason),
+                coins_best_height);
+        event_emitf(EV_BOOT_ACTIVATE, 0,
+                    "crashonly_auto_reindex_kept_integrity anchor=%d count=%d "
+                    "coins_best=%d reason=%s",
+                    (int)anchor, count, coins_best_height,
+                    boot_auto_reindex_reason_name(reason));
+        return false;
+    }
     /* The anchor is the tip height at which the wedge armed the reindex.
      * "Covered" (clear the stale sentinel, do NOT wipe) means one of:
      *   - coins-best strictly ABOVE the anchor: the live reducer advanced past
@@ -109,17 +147,34 @@ bool boot_crashonly_handle_unrecoverable(const char *datadir, int tip_h,
      * bounded self-rebuild; the caller exits and the restart re-enters with the
      * reindex. */
     if (zero_nbits == 0) {
-        int n = boot_auto_reindex_request(
-            datadir, tip_h, BOOT_AUTO_REINDEX_REASON_UNSPECIFIED);
+        /* Record WHY, so the next boot's stale-clear can tell a block-index
+         * link failure from a coins-shaped one. MISMATCHES (broken height/pprev
+         * links) are block-index damage that derived coins state cannot witness
+         * and cannot repair; holes alone above the validated extent are the
+         * coins-shaped wedge the coverage clear was written for. */
+        int reason = mismatches > 0
+                         ? BOOT_AUTO_REINDEX_REASON_INDEX_INTEGRITY
+                         : BOOT_AUTO_REINDEX_REASON_UNSPECIFIED;
+        int n = boot_auto_reindex_request(datadir, tip_h, reason);
         if (n >= 1 && n <= BOOT_AUTO_REINDEX_MAX) {
             fprintf(stderr,
                 "[boot] crash-only recovery: post-restore tip-above-extent at "
-                "tip_h=%d (zero_nbits=0, attempt %d/%d) — requesting "
+                "tip_h=%d (zero_nbits=0, attempt %d/%d, reason=%s) — requesting "
                 "-reindex-chainstate; restarting to rebuild from blocks/ "
                 "(re-derive, no surgical repair, no data loss).\n",
-                tip_h, n, BOOT_AUTO_REINDEX_MAX);
+                tip_h, n, BOOT_AUTO_REINDEX_MAX,
+                boot_auto_reindex_reason_name(reason));
             event_emitf(EV_BOOT_ACTIVATE, 0,
-                "crashonly_auto_reindex_requested tip=%d attempt=%d", tip_h, n);
+                "crashonly_auto_reindex_requested tip=%d attempt=%d reason=%s",
+                tip_h, n, boot_auto_reindex_reason_name(reason));
+            /* The caller returns a bare false out of app_init from here, and
+             * main.c's report_app_init_failed then printed "no boot step
+             * recorded a typed reason" — the process was stopping ON PURPOSE
+             * and said so only in an untyped line. Render the typed shape so
+             * the restart-for-reindex is greppable and carries its next[]. */
+            boot_report_reindex_restart_requested(
+                datadir, tip_h, n, BOOT_AUTO_REINDEX_MAX, mismatches,
+                first_mismatch_h, boot_auto_reindex_reason_name(reason));
             return true;
         }
         /* Budget exhausted (n == BOOT_AUTO_REINDEX_MAX+1, the terminal marker
@@ -143,15 +198,26 @@ bool boot_crashonly_handle_unrecoverable(const char *datadir, int tip_h,
         event_emitf(EV_OPERATOR_NEEDED, 0,
             "condition=crashonly_auto_reindex_exhausted tip=%d attempts=%d",
             tip_h, BOOT_AUTO_REINDEX_MAX);
+        /* The recovery ladder STOPS here, and it must stop with a typed,
+         * greppable blocker naming the datadir action — not the untyped
+         * "no boot step recorded a typed reason" FATAL. The process itself
+         * stays up degraded (returning false below): re-exiting would put a
+         * Restart=always supervisor straight back into the crash-loop this
+         * whole budget exists to end. */
+        boot_report_reindex_budget_exhausted(
+            datadir, tip_h, BOOT_AUTO_REINDEX_MAX,
+            boot_auto_reindex_reason_name(
+                boot_auto_reindex_reason_of(datadir)));
         /* Stay-up-degraded: the caller takes the DEGRADED_SERVING branch, the
          * reducer reconciles forward, and operator_needed is latched (above). */
         return false;
     }
-    fprintf(stderr,
-        "[boot] FATAL: post-restore integrity found structural corruption at "
-        "tip_h=%d (zero_nbits=%d mismatches=%d first_mismatch_h=%d). Re-run "
-        "with -allow-degraded to serve anyway, or -reindex-chainstate to "
-        "rebuild.\n", tip_h, zero_nbits, mismatches, first_mismatch_h);
+    /* Structural nBits corruption: boot stops. Render the typed shape rather
+     * than a bare FATAL line, for the same reason as the restart path above —
+     * the caller returns false out of app_init and would otherwise reach the
+     * operator as "no boot step recorded a typed reason". */
+    boot_report_post_restore_corrupt(datadir, tip_h, zero_nbits, mismatches,
+                                     first_mismatch_h);
     event_emitf(EV_BOOT_ACTIVATE, 0,
         "FATAL post_restore_integrity_corrupt tip=%d zero_nbits=%d mismatches=%d",
         tip_h, zero_nbits, mismatches);
@@ -201,6 +267,9 @@ enum boot_gate_action boot_crashonly_storage_gate(const char *datadir,
         return BOOT_GATE_PARK_DEGRADED;
     }
 
+    /* Boot-storage gates fire before a tip is known and before the block index
+     * has been integrity-checked, so they have no index-integrity finding to
+     * record: UNSPECIFIED is the honest class here. */
     int n = boot_auto_reindex_request(datadir, BOOT_STORAGE_EPISODE_ANCHOR,
                                       BOOT_AUTO_REINDEX_REASON_UNSPECIFIED);
     if (n >= 1 && n <= BOOT_AUTO_REINDEX_MAX) {

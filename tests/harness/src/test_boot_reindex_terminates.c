@@ -24,18 +24,26 @@
  *       recovers); the budget is keyed on a STABLE identity so a moving tip
  *       cannot re-arm the cap.
  *
- * Section (I) guards the on-disk format of the request itself: the marker now
- * carries the REASON the rebuild was armed, and a marker written before that
- * field existed must still parse and keep its budget.
+ * Sections (G)-(I) guard the SECOND way the same budget failed to terminate,
+ * seen on a soak node that crash-looped 39 times at a permanent "attempt 1/3".
+ * There the cap was never reached because the request was DELETED between
+ * boots: the requester armed it on a block-index integrity failure, and the
+ * next boot's stale-clear discarded it on derived coins-best coverage —
+ * evidence about the transparent UTXO set being used to overrule a finding
+ * about block-index links. The request now records WHY it was armed, the
+ * clear honours that class, and the terminal end-state is a typed blocker
+ * rather than the untyped "no boot step recorded a typed reason" FATAL.
  */
 
 #include "test/test_core.h"
 
 #include "config/boot_crashonly.h"
+#include "config/boot_error.h"
 #include "storage/boot_auto_reindex.h"
 
 #include <errno.h>
 #include <stdio.h>
+#include <string.h>
 #include <sys/stat.h>
 
 #define BR_CHECK(name, expr) do {                          \
@@ -345,6 +353,164 @@ int test_boot_reindex_terminates(void)
         test_cleanup_tmpdir(dir);
     }
 
+    /* ──────────────────────────────────────────────────────────────────
+     * (G) THE LIVE CRASH-LOOP. A soak node crash-looped 39 times because the
+     * two halves of this module disagreed about the SAME request:
+     *
+     *   boot N   : post-restore integrity FAILS with active_chain MISMATCHES
+     *              (first at h=2004318) under a tip at h=3172671, so
+     *              boot_crashonly_handle_unrecoverable arms a request and the
+     *              process exits "attempt 1/3".
+     *   boot N+1 : boot_crashonly_clear_reindex_request_if_covered DISCARDS
+     *              that request because derived coins-best h=3172671 covers
+     *              the anchor — a judgement about the transparent UTXO set,
+     *              which cannot witness a broken block-index link 1.1M blocks
+     *              lower. The reindex never runs, the integrity check fails
+     *              identically, and the attempt counter is re-armed at 1.
+     *
+     * The budget was bounded and still never terminated, because the thing
+     * being bounded was reset every lap. The assertions:
+     *   - an INDEX_INTEGRITY request survives coins-best coverage;
+     *   - the attempt counter CLIMBS across simulated restarts (each "boot"
+     *     re-reads the sentinel from disk — the only state that crosses a
+     *     restart) and reaches the cap;
+     *   - the third failure ends in the TYPED blocker, not the untyped
+     *     "no boot step recorded a typed reason" FATAL;
+     *   - a request armed with the OLD coins-shaped reason is still cleared by
+     *     coverage exactly as before (the fix narrows nothing else).
+     * ────────────────────────────────────────────────────────────────── */
+    {
+        char dir[256];
+        test_fmt_tmpdir(dir, sizeof(dir), "boot_reindex_term", "integrity");
+        mkdir_p_br(dir);
+
+        /* The live shape: tip above the extent (zero_nbits=0) WITH mismatches
+         * below it. reindex_executable=true — blocks/ can serve the replay. */
+        const int TIP = 3172671;
+        const int MISMATCHES = 630;
+        const int FIRST_MISMATCH = 2004318;
+        /* Coins-best exactly AT the anchor and hash-verified: the coverage
+         * argument at its strongest, and still not evidence about the index. */
+        const int COINS_BEST = TIP;
+
+        boot_error_reset_for_testing();
+
+        /* ── simulated boot 1 ── */
+        bool exit1 = boot_crashonly_handle_unrecoverable(
+            dir, TIP, /*zero_nbits=*/0, MISMATCHES, FIRST_MISMATCH,
+            /*reindex_executable=*/true);
+        BR_CHECK("integrity: boot 1 arms the request and exits for reindex",
+                 exit1 && boot_auto_reindex_pending(dir));
+
+        int32_t anchor = 0;
+        int count = 0;
+        BR_CHECK("integrity: boot 1 records attempt 1",
+                 boot_auto_reindex_status(dir, &anchor, &count) && count == 1);
+        BR_CHECK("integrity: the request records the INDEX_INTEGRITY reason",
+                 boot_auto_reindex_reason_of(dir) ==
+                     BOOT_AUTO_REINDEX_REASON_INDEX_INTEGRITY);
+
+        /* The exit is deliberate, so it must carry a typed code rather than
+         * reaching the operator as "no boot step recorded a typed reason". */
+        {
+            char render[BOOT_ERROR_RENDER_MAX];
+            bool got = boot_error_last_render(render, sizeof(render)) > 0;
+            BR_CHECK("integrity: the restart-for-reindex exit is TYPED",
+                     got && strstr(render, "BOOT_REINDEX_RESTART_REQUESTED"));
+        }
+
+        /* ── simulated boot 2: the clearing rule runs first ──
+         * THE BUG: this call used to return true and delete the request. */
+        BR_CHECK("integrity: coins-best coverage does NOT clear the request",
+                 !boot_crashonly_clear_reindex_request_if_covered(
+                     dir, COINS_BEST, /*coins_best_hash_verified=*/true) &&
+                 boot_auto_reindex_pending(dir));
+        BR_CHECK("integrity: above-anchor coins-best does not clear it either",
+                 !boot_crashonly_clear_reindex_request_if_covered(
+                     dir, COINS_BEST + 5000, true) &&
+                 boot_auto_reindex_pending(dir));
+
+        /* The reindex ran and did not converge; the same verdict returns. The
+         * count must CLIMB — it is read back from disk, which is the only
+         * state that survives a restart. */
+        bool exit2 = boot_crashonly_handle_unrecoverable(
+            dir, TIP, 0, MISMATCHES, FIRST_MISMATCH, true);
+        BR_CHECK("integrity: boot 2 advances the persisted attempt to 2",
+                 exit2 && boot_auto_reindex_status(dir, &anchor, &count) &&
+                 count == 2);
+
+        /* ── simulated boot 3 ── */
+        BR_CHECK("integrity: coverage still does not clear at attempt 2",
+                 !boot_crashonly_clear_reindex_request_if_covered(
+                     dir, COINS_BEST, true));
+        bool exit3 = boot_crashonly_handle_unrecoverable(
+            dir, TIP, 0, MISMATCHES, FIRST_MISMATCH, true);
+        BR_CHECK("integrity: boot 3 advances the persisted attempt to 3 (cap)",
+                 exit3 && boot_auto_reindex_status(dir, &anchor, &count) &&
+                 count == BOOT_AUTO_REINDEX_MAX);
+
+        /* ── simulated boot 4: the budget is spent ──
+         * The ladder must STOP here, with a typed blocker naming the datadir
+         * action — and must NOT exit into another restart. */
+        boot_error_reset_for_testing();
+        bool exit4 = boot_crashonly_handle_unrecoverable(
+            dir, TIP, 0, MISMATCHES, FIRST_MISMATCH, true);
+        BR_CHECK("integrity: the 3rd failure stops the ladder, stays up",
+                 !exit4);
+        BR_CHECK("integrity: exhaustion persists the terminal marker",
+                 boot_auto_reindex_is_terminal(dir) &&
+                 !boot_auto_reindex_pending(dir));
+        {
+            char render[BOOT_ERROR_RENDER_MAX];
+            bool got = boot_error_last_render(render, sizeof(render)) > 0;
+            BR_CHECK("integrity: exhaustion renders the TYPED blocker",
+                     got && strstr(render, "BOOT_REINDEX_BUDGET_EXHAUSTED"));
+            BR_CHECK("integrity: the typed blocker names the datadir action",
+                     got && strstr(render, dir) && strstr(render, "next[1]"));
+            BR_CHECK("integrity: the typed blocker carries the reason class",
+                     got && strstr(render, "reason=index_integrity"));
+        }
+        BR_CHECK("integrity: a typed code is latched (not the untyped FATAL)",
+                 boot_error_reported() &&
+                 strcmp(boot_error_first_code(),
+                        "BOOT_REINDEX_BUDGET_EXHAUSTED") == 0);
+        boot_error_reset_for_testing();
+
+        test_cleanup_tmpdir(dir);
+    }
+
+    /* ──────────────────────────────────────────────────────────────────
+     * (H) The fix is NARROW. A request armed the OLD way — the coins-shaped
+     * wedge: a derived tip above the validated extent with NO active_chain
+     * mismatches — still carries no integrity class, and coins-best coverage
+     * still retires it exactly as before. A from-genesis replay there really
+     * would only wipe a healthy near-tip coins set.
+     * ────────────────────────────────────────────────────────────────── */
+    {
+        char dir[256];
+        test_fmt_tmpdir(dir, sizeof(dir), "boot_reindex_term", "coins_shaped");
+        mkdir_p_br(dir);
+
+        const int TIP = 800000;
+        boot_error_reset_for_testing();
+
+        bool exit1 = boot_crashonly_handle_unrecoverable(
+            dir, TIP, /*zero_nbits=*/0, /*mismatches=*/0,
+            /*first_mismatch_h=*/-1, /*reindex_executable=*/true);
+        BR_CHECK("coins-shaped: arms a request and exits for reindex",
+                 exit1 && boot_auto_reindex_pending(dir));
+        BR_CHECK("coins-shaped: no mismatches => reason stays UNSPECIFIED",
+                 boot_auto_reindex_reason_of(dir) ==
+                     BOOT_AUTO_REINDEX_REASON_UNSPECIFIED);
+        BR_CHECK("coins-shaped: hash-verified coins-best at the anchor CLEARS "
+                 "it (unchanged behaviour)",
+                 boot_crashonly_clear_reindex_request_if_covered(dir, TIP,
+                                                                 true) &&
+                 !boot_auto_reindex_pending(dir));
+        boot_error_reset_for_testing();
+
+        test_cleanup_tmpdir(dir);
+    }
 
     /* ──────────────────────────────────────────────────────────────────
      * (I) On-disk format compatibility. A request written by an older binary

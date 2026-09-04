@@ -197,3 +197,117 @@ void boot_report_wallet_scrub_failed(const char *datadir,
                       scrub_result ? scrub_result->source_line : 0,
                       WALLET_RECOVERY_DOC);
 }
+
+/* ── Crash-only rebuild ladder ────────────────────────────────────────
+ * These three name the app_init stops that the post-restore integrity gate
+ * owns. Before them, every one of these stops reached the operator as the
+ * generic "no boot step recorded a typed reason" FATAL — a restart loop with
+ * no greppable code, no measurement of how far the bounded budget had got,
+ * and no next move. The decisions still live in boot_crashonly.c; only the
+ * prose is here. */
+
+#define REINDEX_PHASE "post_restore_integrity"
+
+void boot_report_reindex_restart_requested(const char *datadir, int tip_h,
+                                           int attempt, int max_attempts,
+                                           int mismatches, int first_mismatch_h,
+                                           const char *reason_name)
+{
+    const char *dd = datadir && datadir[0] ? datadir : "(unset)";
+    char show[1200], sentinel[1200];
+    (void)snprintf(show, sizeof(show),
+                   "cat %s/auto_reindex_request", dd);
+    (void)snprintf(sentinel, sizeof(sentinel),
+                   "z23 core node bootstatus -datadir=%s", dd);
+    const struct boot_error_next next[] = {
+        { show, "the request file holds \"<anchor> <attempt> <reason>\". The "
+                "attempt field must CLIMB across restarts — if it stays at 1 "
+                "the request is being discarded before the reindex runs, which "
+                "is a bug in the clearing rule, not a corrupt datadir" },
+        { sentinel, "read the boot beacon to confirm the next boot consumed "
+                    "the request and reached a later stage than this one" },
+    };
+    boot_error_report(BOOT_ERROR_FATAL, "BOOT_REINDEX_RESTART_REQUESTED",
+                      REINDEX_PHASE,
+                      "post-restore block-index integrity failed in the "
+                      "reindex-recoverable shape; a bounded "
+                      "-reindex-chainstate request was recorded and this boot "
+                      "is stopping so the next one rebuilds the derived state "
+                      "from blocks/ — no data is deleted",
+                      next, 2,
+                      "datadir=%s tip_h=%d attempt=%d/%d reason=%s "
+                      "mismatches=%d first_mismatch_h=%d",
+                      dd, tip_h, attempt, max_attempts,
+                      reason_name ? reason_name : "unspecified",
+                      mismatches, first_mismatch_h);
+}
+
+void boot_report_reindex_budget_exhausted(const char *datadir, int tip_h,
+                                          int attempts,
+                                          const char *reason_name)
+{
+    const char *dd = datadir && datadir[0] ? datadir : "(unset)";
+    char rescue[1200], reindex[1200], clear[1200];
+    rescue_copy_command(dd, rescue, sizeof(rescue));
+    (void)snprintf(reindex, sizeof(reindex),
+                   "z23 -datadir=%s -reindex", dd);
+    (void)snprintf(clear, sizeof(clear),
+                   "rm %s/auto_reindex_request", dd);
+    const struct boot_error_next next[] = {
+        { rescue, "copy the datadir before any repair — blocks/ and the wallet "
+                  "are intact and every remaining option is judged against "
+                  "this copy" },
+        { reindex, "a FULL -reindex rebuilds the block index itself from "
+                   "blocks/, which -reindex-chainstate does not: chainstate "
+                   "reindex only re-derives the UTXO set, so it can never "
+                   "repair the block-index link damage measured below" },
+        { clear, "removing the terminal marker re-arms the bounded chainstate "
+                 "budget. Only do this after changing something — on an "
+                 "unchanged datadir it buys the same three failed attempts" },
+    };
+    boot_error_report(BOOT_ERROR_FATAL, "BOOT_REINDEX_BUDGET_EXHAUSTED",
+                      REINDEX_PHASE,
+                      "the bounded crash-only rebuild budget is spent: "
+                      "-reindex-chainstate ran its full allowance and the "
+                      "post-restore integrity check still fails. A terminal "
+                      "marker is persisted so no further reindex is requested; "
+                      "the node stays UP and serving degraded rather than "
+                      "re-entering the restart loop, and needs an operator to "
+                      "get further",
+                      next, 3,
+                      "datadir=%s tip_h=%d attempts_spent=%d reason=%s "
+                      "sentinel=%s/auto_reindex_request",
+                      dd, tip_h, attempts,
+                      reason_name ? reason_name : "unspecified", dd);
+}
+
+void boot_report_post_restore_corrupt(const char *datadir, int tip_h,
+                                      int zero_nbits, int mismatches,
+                                      int first_mismatch_h)
+{
+    const char *dd = datadir && datadir[0] ? datadir : "(unset)";
+    char rescue[1200], reindex[1200], degraded[1200];
+    rescue_copy_command(dd, rescue, sizeof(rescue));
+    (void)snprintf(reindex, sizeof(reindex), "z23 -datadir=%s -reindex", dd);
+    (void)snprintf(degraded, sizeof(degraded),
+                   "z23 -datadir=%s -allow-degraded", dd);
+    const struct boot_error_next next[] = {
+        { rescue, "copy the datadir before any repair — blocks/ and the wallet "
+                  "are intact and are what a rebuild reads from" },
+        { reindex, "zero nBits in the tip window is block-index damage, not "
+                   "derived-state drift, so the full index rebuild is the "
+                   "remedy; the chainstate-only reindex cannot reach it" },
+        { degraded, "serve from the contiguous applied tip while the rebuild "
+                    "is scheduled; the node will not advance past the damage" },
+    };
+    boot_error_report(BOOT_ERROR_FATAL, "BOOT_POST_RESTORE_INDEX_CORRUPT",
+                      REINDEX_PHASE,
+                      "post-restore integrity found STRUCTURAL block-index "
+                      "corruption (zero nBits in the tip window), which the "
+                      "crash-only chainstate rebuild cannot repair — refusing "
+                      "to boot rather than serve a tip built over it",
+                      next, 3,
+                      "datadir=%s tip_h=%d zero_nbits=%d mismatches=%d "
+                      "first_mismatch_h=%d",
+                      dd, tip_h, zero_nbits, mismatches, first_mismatch_h);
+}
