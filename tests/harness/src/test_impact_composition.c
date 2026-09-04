@@ -45,6 +45,7 @@
 #include <fcntl.h>
 #include <utime.h>
 
+#include "base/safe_alloc.h"
 #include "codeindex/codeindex.h"
 #include "command/native_dev_proof_command.h"
 #include "config/command_catalog.h"
@@ -1799,26 +1800,6 @@ static int test_ic_merkle_verifier_selects_proof_lane(void)
 }
 
 
-/* ── Proof step budgets ───────────────────────────────────────────────────
- *
- * The wall these replace was one constant for every step. Under load the test
- * dimension took 19 minutes against a 15-minute cap, the proof reported
- * `child_proof_failed_exit_124`, and the run it had just killed finished green
- * four minutes later. Every host hit it. These pin the replacement: a budget
- * sized from the plan, a kill decided by whether the step is still writing,
- * and a ceiling the environment may raise but never lower. */
-
-#define IC_FIX_BUDGET IC_FIX_ROOT "/budget"
-
-static void ic_budget_fixture(const char *sub, char out[4096])
-{
-    snprintf(out, 4096, "%s/%s", IC_FIX_BUDGET, sub);
-    (void)ic_write(out, ".keep", "");
-    char table[4096];
-    snprintf(table, sizeof(table), "%s/timing/table.tsv", out);
-    (void)remove(table);
-}
-
 static int test_ic_proof_budget_grows_with_groups(void)
 {
     int failures = 0;
@@ -2344,6 +2325,202 @@ static void ic_isolate_state_root(void)
         setenv("XDG_STATE_HOME", state, 1);
 }
 
+/* ── the changed set a ten-lane landing batch actually produces ──────────
+ *
+ * A batch of ten-plus lanes is now the landing unit, so one proof legitimately
+ * covers thousands of paths. What is pinned here is that the capture path
+ * carries that many EXACTLY: it neither truncates a long list into a shorter
+ * one that still parses, nor grows a stack frame to hold it, and it refuses
+ * above its ceiling with the observed count in the reason. */
+
+#define IC_FIX_CHANGED IC_FIX_ROOT "/changedset"
+#define IC_CHANGED_REPO IC_FIX_CHANGED "/repo"
+
+static bool ic_changed_fixture_build(void)
+{
+    /* One repository, three commits: base, base+1000 files, +3097 more (4097
+     * total against base — one past the ceiling). */
+    int rc = system(
+        "set -e; rm -rf " IC_FIX_CHANGED "; mkdir -p " IC_CHANGED_REPO "; "
+        "cd " IC_CHANGED_REPO "; git init -q .; "
+        "git config user.email fixture@example.invalid; "
+        "git config user.name fixture; git config commit.gpgsign false; "
+        "echo base > base.txt; git add -A; git commit -qm base; "
+        "git rev-parse HEAD > ../base.sha; "
+        "i=0; while [ $i -lt 1000 ]; do echo x > f$i.c; i=$((i+1)); done; "
+        "git add -A; git commit -qm batch; git rev-parse HEAD > ../one.sha; "
+        "while [ $i -lt 4097 ]; do echo x > f$i.c; i=$((i+1)); done; "
+        "git add -A; git commit -qm over; git rev-parse HEAD > ../two.sha; "
+        ">/dev/null 2>&1");
+    return rc == 0;
+}
+
+/* git writes --output relative to its own cwd, so the capture and record
+ * paths handed to the proof seam must be absolute. */
+static bool ic_changed_path(const char *rel, char *out, size_t out_len)
+{
+    char cwd[512];
+    if (!getcwd(cwd, sizeof(cwd)))
+        return false;
+    return snprintf(out, out_len, "%s/" IC_FIX_CHANGED "/%s", cwd, rel) <
+           (int)out_len;
+}
+
+static bool ic_read_sha(const char *rel, char out[65])
+{
+    char path[512];
+    if (snprintf(path, sizeof(path), "%s/%s", IC_FIX_CHANGED, rel) >=
+        (int)sizeof(path))
+        return false;
+    FILE *f = fopen(path, "r");
+    if (!f)
+        return false;
+    char line[128] = {0};
+    bool ok = fgets(line, sizeof(line), f) != NULL;
+    fclose(f);
+    if (!ok)
+        return false;
+    size_t len = strlen(line);
+    while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r'))
+        line[--len] = 0;
+    if (len == 0 || len >= 65)
+        return false;
+    (void)snprintf(out, 65, "%s", line);
+    return true;
+}
+
+static int test_ic_changed_set_carries_a_landing_batch(void)
+{
+    int failures = 0;
+    TEST("impact composition: a thousand-file changed set captures and plans") {
+        ASSERT(ic_changed_fixture_build());
+        char base[65], one[65];
+        ASSERT(ic_read_sha("base.sha", base));
+        ASSERT(ic_read_sha("one.sha", one));
+        char capture[640], record[640];
+        ASSERT(ic_changed_path("capture.txt", capture, sizeof(capture)));
+        ASSERT(ic_changed_path("changed", record, sizeof(record)));
+
+        struct zcl_dev_proof_changed_set set = {0};
+        char why[256] = {0};
+        /* This fixture is a throwaway repository under test-tmp/, so the
+         * bounded git invocation is opted in for exactly this case. */
+        ASSERT(setenv("ZCL_DEVLOOP_TEST_PROCESS", "1", 1) == 0);
+        bool captured = zcl_dev_proof_changed_set_capture(
+            IC_CHANGED_REPO, base, one, capture, record, &set, why,
+            sizeof(why));
+        (void)unsetenv("ZCL_DEVLOOP_TEST_PROCESS");
+        ASSERT(captured);
+        ASSERT(set.count == 1000);
+        ASSERT(set.files != NULL && set.bytes != NULL);
+        for (size_t i = 0; i < set.count; i++)
+            ASSERT(set.files[i] && set.files[i][0] && set.files[i][0] != '/');
+
+        /* The persisted record holds every row, not a prefix of them. */
+        FILE *f = fopen(record, "r");
+        ASSERT(f != NULL);
+        size_t lines = 0;
+        int c, last = 0;
+        while ((c = fgetc(f)) != EOF) {
+            if (c == '\n')
+                lines++;
+            last = c;
+        }
+        fclose(f);
+        ASSERT(lines == 1000);
+        ASSERT(last == '\n');
+
+        /* And the plan path accepts the whole batch. */
+        struct zcl_devloop_plan plan;
+        ASSERT(zcl_devloop_plan_files(set.files, set.count, &plan));
+        /* The fixture paths match no impact rule by design, so groups are
+         * proved separately: the same batch size with one real repo path in it
+         * still selects that path's groups, which is what shows the ceiling
+         * and not the rule table was the former limiter. */
+        const char **mixed = zcl_calloc(set.count, sizeof(*mixed), "ic mixed");
+        ASSERT(mixed != NULL);
+        for (size_t i = 0; i < set.count; i++)
+            mixed[i] = set.files[i];
+        mixed[set.count - 1] = "tools/dev/devloop.c";
+        bool mixed_planned = zcl_devloop_plan_files(mixed, set.count, &plan);
+        free((void *)mixed);
+        ASSERT(mixed_planned);
+        ASSERT(plan.path_groups_len > 0);
+
+        zcl_dev_proof_changed_set_release(&set);
+        ASSERT(set.bytes == NULL && set.files == NULL && set.count == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_ic_changed_set_refuses_above_its_ceiling(void)
+{
+    int failures = 0;
+    TEST("impact composition: an over-ceiling changed set refuses with its count") {
+        ASSERT(ic_changed_fixture_build());
+        char base[65], two[65];
+        ASSERT(ic_read_sha("base.sha", base));
+        ASSERT(ic_read_sha("two.sha", two));
+        char capture[640], record[640];
+        ASSERT(ic_changed_path("capture.txt", capture, sizeof(capture)));
+        ASSERT(ic_changed_path("over", record, sizeof(record)));
+
+        struct zcl_dev_proof_changed_set set = {0};
+        char why[256] = {0};
+        ASSERT(setenv("ZCL_DEVLOOP_TEST_PROCESS", "1", 1) == 0);
+        /* 4097 changed paths is exactly one past ZCL_DEVLOOP_MAX_FILES. */
+        bool captured = zcl_dev_proof_changed_set_capture(
+            IC_CHANGED_REPO, base, two, capture, record, &set, why,
+            sizeof(why));
+        (void)unsetenv("ZCL_DEVLOOP_TEST_PROCESS");
+        ASSERT(!captured);
+        ASSERT(set.count == 0 && set.files == NULL && set.bytes == NULL);
+        ASSERT(strstr(why, "changed_set_invalid_or_truncated") != NULL);
+        /* The refusal names the observed count — silence here is the defect
+         * this case exists for. */
+        ASSERT(strstr(why, "files=4097") != NULL);
+        ASSERT(strstr(why, "max=4096") != NULL);
+        /* A refused capture publishes no record. */
+        FILE *f = fopen(record, "r");
+        ASSERT(f == NULL);
+
+        /* The plan path refuses the same set for the same reason. */
+        const char **oversize = zcl_calloc((size_t)ZCL_DEVLOOP_MAX_FILES + 1,
+                                           sizeof(*oversize), "ic oversize");
+        ASSERT(oversize != NULL);
+        for (size_t i = 0; i <= (size_t)ZCL_DEVLOOP_MAX_FILES; i++)
+            oversize[i] = "tools/dev/devloop.c";
+        struct zcl_devloop_plan plan;
+        bool planned = zcl_devloop_plan_files(
+            oversize, (size_t)ZCL_DEVLOOP_MAX_FILES + 1, &plan);
+        free((void *)oversize);
+        ASSERT(!planned);
+        system("rm -rf " IC_FIX_CHANGED);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_ic_watch_overlay_keeps_its_own_ceiling(void)
+{
+    int failures = 0;
+    TEST("impact composition: the watcher overlay keeps a ceiling of its own") {
+        /* The two ceilings are deliberately different names with different
+         * numbers: the proof/plan set is heap-resident and large, the inotify
+         * overlay stays resident in the watcher frame and small, collapsing to
+         * a full rebuild rather than dropping paths. Collapsing them back into
+         * one number is what this case refuses. */
+        ASSERT(ZCL_DEVLOOP_MAX_FILES == 4096);
+        ASSERT(ZCL_DEVLOOP_WATCH_MAX_FILES == 256);
+        ASSERT(ZCL_DEVLOOP_WATCH_MAX_FILES < ZCL_DEVLOOP_MAX_FILES);
+        /* The overlay table must stay small enough to live in a frame. */
+        ASSERT((size_t)ZCL_DEVLOOP_WATCH_MAX_FILES *
+                   (size_t)ZCL_DEVLOOP_PATH_MAX <= 512u * 1024u);
+        PASS();
+    } _test_next:;
+    return failures;
+}
 int test_impact_composition(void)
 {
     int failures = 0;
@@ -2386,5 +2563,8 @@ int test_impact_composition(void)
     failures += test_ic_proof_dependency_crosses_filesystems();
     failures += test_ic_ram_scratch_reservations_hold_under_concurrency();
 #endif
+    failures += test_ic_changed_set_carries_a_landing_batch();
+    failures += test_ic_changed_set_refuses_above_its_ceiling();
+    failures += test_ic_watch_overlay_keeps_its_own_ceiling();
     return failures;
 }

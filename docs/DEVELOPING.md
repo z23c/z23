@@ -660,7 +660,11 @@ Before committing:
 9. Verify local HEAD, `origin/main`, and the remote branch SHA agree.
 
 Every changed C path must map to focused proof through the repository's impact
-rules. Unmapped or incomplete closure refuses receipt publication. On POSIX,
+rules. Unmapped or incomplete closure refuses receipt publication. A proof
+covers a whole landing batch, so its changed set is heap-resident and holds
+thousands of paths; a set past that ceiling, or a capture that could not be
+read whole, refuses with a typed reason naming the observed count rather than
+planning against a silently shortened list. On POSIX,
 the native receipt hook never builds, tests, lints, waits, invokes a shell, or
 fetches; a missing or
 running receipt refuses within the bounded read path and prints the exact
