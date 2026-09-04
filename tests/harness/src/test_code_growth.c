@@ -1,9 +1,15 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  * Purpose: exact daily C23 Git-history parser and refusal tests. */
 #include "science/code_growth.h"
+#if defined(_WIN32)
+#include "platform/process_lifecycle.h"
+#endif
+#include "platform/directory_compat.h"
+#include "platform/temp_directory.h"
 #include "util/file_tree_ops.h"
 #include "util/spawn.h"
 
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -18,7 +24,38 @@
 static bool growth_test_run(const char *const argv[])
 {
     char output[512];
+#if defined(_WIN32)
+    const char *image = getenv("ZCL_DEV_GIT_EXE");
+    if (!image || !image[0]) image = "C:\\msys64\\usr\\bin\\git.exe";
+    const char *native_argv[16];
+    size_t argc = 0;
+    while (argv && argv[argc] && argc + 1u < 16u) {
+        native_argv[argc] = argc == 0 ? image : argv[argc];
+        argc++;
+    }
+    if (!argv || argv[argc]) return false;
+    native_argv[argc] = NULL;
+    static const char *const environment[] = {
+        "GIT_CONFIG_NOSYSTEM=1", "GIT_OPTIONAL_LOCKS=0", "GIT_PAGER=",
+        "GIT_TERMINAL_PROMPT=0", "LANG=C", "LC_ALL=C", NULL,
+    };
+    const struct platform_process_options options = {
+        .image = image, .argv = native_argv, .env = environment,
+    };
+    struct platform_process_capture_result result = {0};
+    bool launched = platform_process_capture_stdout(
+        &options, output, sizeof(output), 30000u, &result);
+    bool ok = launched && !result.timed_out && !result.output_truncated &&
+        result.exit_code == 0;
+    if (!ok)
+        printf("code_growth fixture Git failed: command=%s launched=%d "
+               "exit=%lu timeout=%d truncated=%d\n",
+               argv[1], launched, (unsigned long)result.exit_code,
+               result.timed_out, result.output_truncated);
+    return ok;
+#else
     return zcl_spawn_capture(argv, output, sizeof(output), 30000) == 0;
+#endif
 }
 
 static bool growth_test_write(const char *path, const char *text)
@@ -78,20 +115,45 @@ static bool growth_test_commit(const char *root, const char *message)
 static int growth_cache_tests(void)
 {
     int failures = 0;
-    char root[] = "/tmp/z23-code-growth-XXXXXX";
+    char root[PLATFORM_TEMP_PATH_MAX];
     char source[512] = "", cache[512] = "", error[192];
-    bool made = mkdtemp(root) != NULL;
-    bool ready = made && growth_test_path(
-        source, sizeof(source), root, "lib/demo/src/a.c") &&
-        growth_test_path(cache, sizeof(cache), root,
-                         ".cache/z23-code-growth/git-numstat.v1");
+    bool made = platform_temp_directory_create(
+        "z23-code-growth-", root, sizeof(root));
+    if (!made)
+        printf("code_growth fixture temp root failed: errno=%d\n", errno);
+    bool source_path_ok = made && growth_test_path(
+        source, sizeof(source), root, "lib/demo/src/a.c");
+    bool cache_path_ok = source_path_ok && growth_test_path(
+        cache, sizeof(cache), root,
+        ".cache/z23-code-growth-private-v1/git-numstat.v1");
     const char *init[] = {"git", "-C", root, "init", "-q", NULL};
     char directory[512] = "";
-    ready = ready && growth_test_path(
-        directory, sizeof(directory), root, "lib/demo/src") &&
-        zcl_mkdir_p(directory, 0700).ok && growth_test_run(init) &&
-        growth_test_write(source, "int answer(void) { return 42; }\n") &&
-        growth_test_commit(root, "initial");
+    bool directory_path_ok = cache_path_ok && growth_test_path(
+        directory, sizeof(directory), root, "lib/demo/src");
+    bool mkdir_ok = directory_path_ok;
+    if (mkdir_ok) {
+        for (char *at = directory + 1; *at; at++) {
+            if (*at != '/') continue;
+            *at = '\0';
+            bool component_ok = platform_directory_ensure(directory, 0700);
+            *at = '/';
+            if (!component_ok) {
+                mkdir_ok = false;
+                break;
+            }
+        }
+        if (mkdir_ok)
+            mkdir_ok = platform_directory_ensure(directory, 0700);
+    }
+    bool init_ok = mkdir_ok && growth_test_run(init);
+    bool write_ok = init_ok && growth_test_write(
+        source, "int answer(void) { return 42; }\n");
+    bool ready = write_ok && growth_test_commit(root, "initial");
+    if (!ready)
+        printf("code_growth fixture setup failed: made=%d source=%d cache=%d "
+               "directory=%d mkdir=%d init=%d write=%d errno=%d root=%s\n",
+               made, source_path_ok, cache_path_ok, directory_path_ok,
+               mkdir_ok, init_ok, write_ok, errno, made ? root : "(none)");
     struct science_code_growth_history cold = {0}, warm = {0}, rebuilt = {0};
     bool cold_ok = ready && science_code_growth_collect(
         root, &cold, error, sizeof(error));

@@ -7,6 +7,7 @@
 #include "platform/clock.h"
 #include "platform/directory_compat.h"
 #include "platform/directory_transaction.h"
+#include "platform/private_directory.h"
 #if defined(_WIN32)
 #include "platform/process_lifecycle.h"
 #endif
@@ -128,7 +129,8 @@ static void growth_contract_digest(uint8_t out[32])
 {
     static const char contract[] =
         "z23.code-growth.v1|first-parent|reverse|no-renames|"
-        "diff-merges=first-parent|root|numstat|utc-day|c-h|test-v1";
+        "diff-merges=first-parent|root|numstat|utc-day|c-h|"
+        "test-path-v1:tests/harness,lib/test,package-test-segments,test_";
     struct sha3_256_ctx digest;
     sha3_256_init(&digest);
     sha3_256_write(&digest, (const unsigned char *)contract,
@@ -136,6 +138,19 @@ static void growth_contract_digest(uint8_t out[32])
     for (size_t i = 0; i < sizeof(growth_roots) / sizeof(growth_roots[0]); i++)
         sha3_256_write(&digest, (const unsigned char *)growth_roots[i],
                        strlen(growth_roots[i]) + 1u);
+#define SOURCE_PRUNE_DIR(name_) do { \
+    static const char kind_[] = "prune"; \
+    sha3_256_write(&digest, (const unsigned char *)kind_, sizeof(kind_)); \
+    sha3_256_write(&digest, (const unsigned char *)name_, sizeof(name_)); \
+} while (0);
+#define SOURCE_INVENTORY_PRUNE_DIR(name_) do { \
+    static const char kind_[] = "inventory-prune"; \
+    sha3_256_write(&digest, (const unsigned char *)kind_, sizeof(kind_)); \
+    sha3_256_write(&digest, (const unsigned char *)name_, sizeof(name_)); \
+} while (0);
+#include "codeindex/source_prune_dirs.def"
+#undef SOURCE_INVENTORY_PRUNE_DIR
+#undef SOURCE_PRUNE_DIR
     sha3_256_finalize(&digest, out);
 }
 
@@ -146,7 +161,11 @@ static int growth_git_capture(const char *const argv[], char *out,
                               size_t out_size, uint32_t timeout_ms)
 {
 #if defined(_WIN32)
-    const char *image = getenv("ZCL_DEV_GIT_EXE");
+    const char *configured_image = getenv("ZCL_DEV_GIT_EXE");
+    /* windows-setup's canonical root is C:\msys64. Custom roots are passed
+     * explicitly by windows-make; neither route searches PATH or the CWD. */
+    const char *image = configured_image && configured_image[0]
+        ? configured_image : "C:\\msys64\\usr\\bin\\git.exe";
     bool absolute = image &&
         ((((image[0] >= 'A' && image[0] <= 'Z') ||
            (image[0] >= 'a' && image[0] <= 'z')) && image[1] == ':' &&
@@ -217,10 +236,14 @@ static bool growth_cache_directory(char out[GROWTH_PATH_MAX], const char *root,
     char parent[GROWTH_PATH_MAX];
     int n = snprintf(parent, sizeof(parent), "%s/.cache", root);
     if (n <= 0 || (size_t)n >= sizeof(parent)) return false;
-    n = snprintf(out, GROWTH_PATH_MAX, "%s/z23-code-growth", parent);
+    /* Never adopt or rewrite the legacy Windows directory created with an
+     * inherited DACL. A new namespace lets the private-directory constructor
+     * establish owner+SYSTEM authority before any cache bytes are trusted. */
+    n = snprintf(out, GROWTH_PATH_MAX,
+                 "%s/z23-code-growth-private-v1", parent);
     if (n <= 0 || n >= (int)GROWTH_PATH_MAX) return false;
     return !create || (platform_directory_ensure(parent, 0700) &&
-                       platform_directory_ensure(out, 0700));
+                       platform_private_directory_ensure(out));
 }
 
 static void growth_cache_store(const char *root, const char head[41],
@@ -591,6 +614,10 @@ static bool growth_require_git_toplevel(const char *root, char *error,
         "git", "-C", root, "rev-parse", "--show-prefix", NULL,
     };
     int rc = growth_git_capture(argv, prefix, sizeof(prefix), 30000);
+    if (rc < 0)
+        return growth_error(
+            error, error_cap,
+            "growth is unavailable: trusted host Git could not be started");
     if (rc != 0)
         return growth_error(
             error, error_cap,
