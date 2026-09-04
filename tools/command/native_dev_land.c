@@ -44,10 +44,14 @@
  * empty | busy | started | proving | landed | failed | conflict | rebased;
  * cancel {seq, state:"cancelled"}.
  *
- * PROCESS RULE. Git is the only program this leaf runs, always through
- * util/spawn.h's zcl_spawn_capture(); popen(), system(), and a shell command
- * string are forbidden and gated. The exact proof is requested through the
- * existing dev.proof machinery (tools/dev/dev_proof.c), never re-implemented.
+ * PROCESS RULE. `git` and `make` (lint-fast, install-hooks) are the only
+ * programs this leaf runs, always through util/spawn.h's
+ * zcl_spawn_capture(); popen(), system(), and a shell command string are
+ * forbidden and gated. The exact proof is requested through the existing
+ * dev.proof machinery (tools/dev/dev_proof.c), never re-implemented. The
+ * final push carries no --no-verify: it goes through the installed
+ * pre-push hook like any other push to main, and that hook's exact-receipt
+ * admission (tools/dev/z23_git_hook.c) is what keeps it fast.
  *
  * NOTHING WAITS. submit, status and cancel touch only local files. step does
  * the rebase and the lint pass it was called to do and then RETURNS on the
@@ -751,9 +755,80 @@ static bool dl_wt_ready(const char *wt)
     return stat(marker, &st) == 0;
 }
 
+/* Whether THIS worktree's own git config already points at an installed
+ * hook set. Worktree config (`git config --worktree`) is per-worktree, not
+ * shared with the checkout that spawned it, so `git worktree add` alone
+ * leaves a brand-new worktree naked even when the source checkout has hooks
+ * armed — the landing loop must arm this one itself. */
+static bool dl_wt_hooks_ready(const char *wt)
+{
+    char out[DL_GIT_CAP];
+    const char *args[] = { "config", "--worktree", "--get",
+                           "core.hooksPath", NULL };
+    if (dl_git(wt, args, out, sizeof(out), DL_GIT_TIMEOUT_MS) != 0)
+        return false;
+    dl_trim(out);
+    return out[0] != '\0';
+}
+
+/* Test-only escape hatch: a throwaway git rig (bare origin + clone, no
+ * checkout of this repository) carries no Makefile to run `make
+ * install-hooks` in. Tests point this at a fixture hooks directory holding
+ * a real executable `pre-push` instead of invoking `make`. Never read
+ * outside a test process — dlx_isolate()/dlx_restore() in test_dev_land.c
+ * set and clear it the same way they do ZCL_LAND_PROOF_STUB. */
+static const char *dl_hooks_stub_dir(void)
+{
+    const char *s = getenv("ZCL_LAND_HOOKS_STUB_DIR");
+    return s && s[0] ? s : NULL;
+}
+
+/* Arm this worktree's own pre-push hook so the push below is admitted, or
+ * refused, the same way an operator's checkout would be: `make
+ * install-hooks` writes a --worktree-scoped core.hooksPath, which `git
+ * worktree add` never inherits on its own. This is not best-effort — an
+ * unarmed worktree would make every push here silently equivalent to
+ * `--no-verify`, which is exactly the fleet rule this leaf must not break. */
+static bool dl_wt_hooks_ensure(const char *wt, char *why, size_t why_cap)
+{
+    const char *stub_dir = dl_hooks_stub_dir();
+    char buf[DL_GIT_CAP];
+    if (dl_wt_hooks_ready(wt))
+        return true;
+    if (stub_dir) {
+        const char *ext_args[] = { "config", "extensions.worktreeConfig",
+                                   "true", NULL };
+        const char *hook_args[] = { "config", "--worktree",
+                                    "core.hooksPath", stub_dir, NULL };
+        if (dl_git(wt, ext_args, NULL, 0, DL_GIT_TIMEOUT_MS) != 0 ||
+            dl_git(wt, hook_args, NULL, 0, DL_GIT_TIMEOUT_MS) != 0) {
+            (void)snprintf(why, why_cap, "%s",
+                           "cannot arm the test hook stub");
+            return false;
+        }
+        return true;
+    }
+    {
+        const char *argv[] = { "make", "-C", wt, "install-hooks", NULL };
+        int rc = zcl_spawn_capture(argv, buf, sizeof(buf),
+                                   DL_LINT_TIMEOUT_MS);
+        if (rc != 0 || !dl_wt_hooks_ready(wt)) {
+            (void)snprintf(why, why_cap,
+                           "make install-hooks failed in the landing "
+                           "worktree: %.400s",
+                           buf);
+            return false;
+        }
+    }
+    return true;
+}
+
 /* Create the landing worktree once from the submitting checkout, and reuse
  * it forever after. It is a git worktree, not a clone: it shares the object
- * database, so making one costs a checkout and no fetch. */
+ * database, so making one costs a checkout and no fetch. Every return that
+ * hands back an existing or freshly created worktree also arms its hooks,
+ * so the push phase always goes through the same pre-push admission an
+ * operator's own checkout uses. */
 static bool dl_wt_ensure(const struct dl_dirs *d, const struct dl_row *r,
                          char *why, size_t why_cap)
 {
@@ -764,7 +839,7 @@ static bool dl_wt_ensure(const struct dl_dirs *d, const struct dl_row *r,
     if (!d || !r)
         return false;
     if (dl_wt_ready(d->wt))
-        return true;
+        return dl_wt_hooks_ensure(d->wt, why, why_cap);
     if (!r->worktree[0]) {
         (void)snprintf(why, why_cap, "%s",
                        "the request carries no source checkout");
@@ -772,10 +847,10 @@ static bool dl_wt_ensure(const struct dl_dirs *d, const struct dl_row *r,
     }
     if (dl_git(r->worktree, base_args, NULL, 0, DL_GIT_TIMEOUT_MS) == 0 &&
         dl_wt_ready(d->wt))
-        return true;
+        return dl_wt_hooks_ensure(d->wt, why, why_cap);
     if (dl_git(r->worktree, head_args, NULL, 0, DL_GIT_TIMEOUT_MS) == 0 &&
         dl_wt_ready(d->wt))
-        return true;
+        return dl_wt_hooks_ensure(d->wt, why, why_cap);
     (void)snprintf(why, why_cap, "git worktree add %s failed", d->wt);
     return false;
 }
@@ -1706,11 +1781,14 @@ static void dl_step_resume(const struct dl_dirs *d, struct dl_row *row,
     }
     (void)snprintf(row->phase, sizeof(row->phase), "push");
     {
-        /* --no-verify: the push hook exists to demand exactly the receipt
-         * this step already holds, and re-running it would pay for the
-         * proof twice. */
-        const char *push_args[] = { "push", "--no-verify", "origin",
-                                    "HEAD:main", NULL };
+        /* No --no-verify: this pushes through the installed pre-push hook
+         * like everyone else. dl_wt_ensure() already armed d->wt's own
+         * hooks, and the exact-receipt admission the hook performs
+         * (tools/dev/z23_git_hook.c) finds the very receipt this step just
+         * obtained for (local, base) at
+         * .cache/zcl-dev-proof/receipts/<local>-<base>.receipt, so the hook
+         * admits in seconds instead of re-running the proof. */
+        const char *push_args[] = { "push", "origin", "HEAD:main", NULL };
         if (dl_git(d->wt, push_args, buf, sizeof(buf), DL_GIT_TIMEOUT_MS) !=
             0) {
             row->attempt++;

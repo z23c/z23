@@ -44,6 +44,26 @@ static char g_dlx_state[1024];
 static char g_dlx_saved_xdg[4096];
 static bool g_dlx_had_xdg;
 
+#if !defined(_WIN32)
+/* The landing worktree now pushes through a real installed pre-push hook
+ * (no more --no-verify), and dev.land arms that hook itself by running
+ * `make install-hooks` in the landing worktree. The rigs below are a bare
+ * origin plus a throwaway clone — not a checkout of this repository — so
+ * there is no Makefile there to run. ZCL_LAND_HOOKS_STUB_DIR is dev.land's
+ * test-only escape hatch for exactly that: it points at a fixture
+ * directory holding a real executable `pre-push` script instead. A default
+ * no-op (exit 0) hook is armed for every isolated test below so ordinary
+ * cases behave as before; the one test that needs to prove the hook is
+ * actually consulted installs a refusing one instead. */
+static char g_dlx_hooks_ok[1024];
+
+/* Forward declared: defined below alongside the rest of the git-rig
+ * helpers (dlx_write in particular), which dlx_isolate() needs before that
+ * point in the file. */
+static bool dlx_hooks_dir(char *out, size_t cap, const char *tag,
+                          int exit_code);
+#endif
+
 static void dlx_isolate(const char *tag)
 {
     char base[512];
@@ -56,6 +76,11 @@ static void dlx_isolate(const char *tag)
     setenv("XDG_STATE_HOME", g_dlx_state, 1);
     unsetenv("ZCL_LAND_PROOF_STUB");
     unsetenv("ZCL_LAND_ALLOW_UNSIGNED");
+    unsetenv("ZCL_LAND_HOOKS_STUB_DIR");
+#if !defined(_WIN32)
+    if (dlx_hooks_dir(g_dlx_hooks_ok, sizeof(g_dlx_hooks_ok), tag, 0))
+        setenv("ZCL_LAND_HOOKS_STUB_DIR", g_dlx_hooks_ok, 1);
+#endif
 }
 
 static void dlx_restore(void)
@@ -66,6 +91,7 @@ static void dlx_restore(void)
         unsetenv("XDG_STATE_HOME");
     unsetenv("ZCL_LAND_PROOF_STUB");
     unsetenv("ZCL_LAND_ALLOW_UNSIGNED");
+    unsetenv("ZCL_LAND_HOOKS_STUB_DIR");
 }
 
 static void dlx_landdir(char *out, size_t cap)
@@ -191,6 +217,22 @@ static bool dlx_write(const char *path, const char *text)
     len = strlen(text);
     wrote = fwrite(text, 1, len, f) == len;
     return fclose(f) == 0 && wrote;
+}
+
+/* A fixture hooks directory holding one executable `pre-push` script that
+ * exits `exit_code`. Pointed at through ZCL_LAND_HOOKS_STUB_DIR in place of
+ * `make install-hooks`, which the throwaway rigs below have no Makefile
+ * to run. */
+static bool dlx_hooks_dir(char *out, size_t cap, const char *tag,
+                          int exit_code)
+{
+    char path[1200], body[64];
+    test_make_tmpdir(out, cap, "dev_land_hooks", tag);
+    (void)snprintf(path, sizeof(path), "%s/pre-push", out);
+    (void)snprintf(body, sizeof(body), "#!/bin/sh\nexit %d\n", exit_code);
+    if (!dlx_write(path, body))
+        return false;
+    return chmod(path, 0755) == 0;
 }
 
 struct dlx_rig {
@@ -492,6 +534,49 @@ int test_dev_land(void)
                strcmp(json_get_str(json_get(&outcomes->children[0],
                                             "state")), "landed") == 0);
         dlx_end(&c);
+        dlx_restore();
+        PASS();
+    }
+
+    TEST("land: pushes through the pre-push hook — a refusing hook wins") {
+        struct dlx_rig rig;
+        struct dlx_call c;
+        char before[64], after[64], hooks_dir[1024];
+        bool done = false;
+        int i;
+        dlx_isolate("hookguard");
+        ASSERT(dlx_rig_make(&rig, "hookguard_rig"));
+        ASSERT(dlx_origin_main(&rig, before));
+        /* Arm a REAL pre-push hook in the landing worktree that always
+         * refuses. dev.land no longer pushes with --no-verify (the fleet
+         * rule this whole change exists to satisfy), so if that hook is
+         * genuinely consulted the land can never succeed no matter how
+         * many times the (stubbed) proof passes — proving the removal is
+         * real and not merely cosmetic. */
+        ASSERT(dlx_hooks_dir(hooks_dir, sizeof(hooks_dir), "hookguard_hooks",
+                             1));
+        setenv("ZCL_LAND_HOOKS_STUB_DIR", hooks_dir, 1);
+        setenv("ZCL_LAND_PROOF_STUB", "pass", 1);
+        setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
+        dlx_submit(&c, &rig, rig.tip);
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        dlx_end(&c);
+        for (i = 0; i < 16 && !done; i++) {
+            dlx_begin(&c, "step");
+            ASSERT(dlx_run(&c));
+            ASSERT(dlx_ok(&c));
+            if (strcmp(dlx_str(&c, "state"), "failed") == 0) {
+                ASSERT(strcmp(dlx_str(&c, "dimension"), "push") == 0);
+                done = true;
+            }
+            dlx_end(&c);
+        }
+        ASSERT(done);
+        /* The refusing hook actually stopped it: the bare origin never
+         * moved. */
+        ASSERT(dlx_origin_main(&rig, after));
+        ASSERT(strcmp(after, before) == 0);
         dlx_restore();
         PASS();
     }
