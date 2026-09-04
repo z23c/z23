@@ -21,7 +21,10 @@
 #include "crypto/ed25519.h"
 #include "crypto/sha3.h"
 #include "platform/clock.h"
+#include <stdio.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 /* contexts/wallet/modules/zid sits BELOW core/modules/script in engine/composition/lib_module_order.def, so
  * zid_anchor.h keeps its own copy of the standard-relay ceiling. lib/test is
@@ -577,6 +580,54 @@ static void edb_add_order2(uint8_t out[32], const uint8_t a[32])
     out[31] = (uint8_t)((out[31] & 0x7fu) | ((1u - sign) << 7));
 }
 
+/* Redirect stderr into a scratch file for the duration of `fn`, then hand
+ * back whatever landed there. Same shape as log_level_capture() in
+ * test_log_level.c and brt_capture() in
+ * test_blocker_reason_truncation.c — used here to prove
+ * zid_doc_verify()'s expiry log is rate-limited rather than firing once
+ * per call. */
+static bool zid_capture_stderr(void (*fn)(void), char *out, size_t out_len)
+{
+    if (out && out_len > 0)
+        out[0] = '\0';
+    mkdir("./test-tmp", 0755);
+    char path[256];
+    snprintf(path, sizeof(path), "./test-tmp/zid_verify_capture_%d.log",
+             (int)getpid());
+    fflush(stderr);
+    int saved_fd = dup(STDERR_FILENO);
+    FILE *capf = (saved_fd >= 0) ? fopen(path, "w+") : NULL;
+    if (!capf) {
+        if (saved_fd >= 0)
+            close(saved_fd);
+        return false;
+    }
+    dup2(fileno(capf), STDERR_FILENO);
+    fn();
+    fflush(stderr);
+    dup2(saved_fd, STDERR_FILENO);
+    close(saved_fd);
+    if (out && out_len > 0) {
+        long sz = ftell(capf);
+        if (sz > 0) {
+            rewind(capf);
+            size_t want = (size_t)sz < out_len - 1 ? (size_t)sz : out_len - 1;
+            size_t got = fread(out, 1, want, capf);
+            out[got] = '\0';
+        }
+    }
+    fclose(capf);
+    unlink(path);
+    return true;
+}
+
+static struct zid_doc g_zvcap_doc;
+static uint64_t g_zvcap_now;
+static void zid_verify_under_capture(void)
+{
+    (void)zid_doc_verify(&g_zvcap_doc, g_zvcap_now);
+}
+
 static int test_ed25519_batch(void)
 {
     int failures = 0;
@@ -931,6 +982,68 @@ int test_zid(void)
     printf("zid_doc_verify: expired doc rejected (expiry <= now)... ");
     if (!zid_doc_verify(&doc, now + 3600)) printf("OK\n");
     else { printf("FAIL\n"); failures++; }
+
+    /* ── Expiry log rate limit ─────────────────────────────────────
+     * A caller that re-verifies the same already-known-expired doc on a
+     * retry timer (a cached DHT contact re-checked every reconnect, an
+     * own delegation re-checked every boot retry) must not turn one
+     * stale doc into an ERROR line every few seconds forever. The
+     * verify RESULT must stay false every time regardless. */
+    {
+        char log[4096];
+        zid_verify_expiry_log_reset_for_testing();
+
+        g_zvcap_doc = doc;
+        g_zvcap_now = now + 3600;
+        bool ok = zid_capture_stderr(zid_verify_under_capture, log, sizeof log);
+        printf("zid_doc_verify: first expiry check logs an ERROR... ");
+        if (ok && strstr(log, "ERROR") != NULL &&
+            strstr(log, "doc expired") != NULL)
+            printf("OK\n");
+        else { printf("FAIL\n"); failures++; }
+
+        /* Same doc identity, one second later — well inside the hour
+         * window. The doc is still correctly rejected but must not log
+         * again. */
+        g_zvcap_now = now + 3601;
+        ok = zid_capture_stderr(zid_verify_under_capture, log, sizeof log);
+        printf("zid_doc_verify: repeat within the hour stays false but "
+               "does not re-log... ");
+        if (ok && log[0] == '\0')
+            printf("OK\n");
+        else { printf("FAIL\n"); failures++; }
+
+        /* Verify correctness itself is never a function of the log
+         * suppression: the third call in the same window still fails. */
+        printf("zid_doc_verify: suppressed-log calls still return false... ");
+        if (!zid_doc_verify(&doc, now + 3602)) printf("OK\n");
+        else { printf("FAIL\n"); failures++; }
+
+        /* A DIFFERENT doc identity (different master_pubkey) must log its
+         * own first occurrence even while the first doc's window is
+         * still suppressed — the cache key is per-doc, not global. */
+        struct zid_doc other = doc;
+        other.master_pubkey[0] ^= 0xff;
+        g_zvcap_doc = other;
+        g_zvcap_now = now + 3603;
+        ok = zid_capture_stderr(zid_verify_under_capture, log, sizeof log);
+        printf("zid_doc_verify: a different doc identity logs its own "
+               "first occurrence... ");
+        if (ok && strstr(log, "ERROR") != NULL)
+            printf("OK\n");
+        else { printf("FAIL\n"); failures++; }
+
+        /* Past the hour window, the original doc logs again. */
+        g_zvcap_doc = doc;
+        g_zvcap_now = now + 3600 + 3600;
+        ok = zid_capture_stderr(zid_verify_under_capture, log, sizeof log);
+        printf("zid_doc_verify: past the rate-limit window logs again... ");
+        if (ok && strstr(log, "ERROR") != NULL)
+            printf("OK\n");
+        else { printf("FAIL\n"); failures++; }
+
+        zid_verify_expiry_log_reset_for_testing();
+    }
 
     printf("zid_doc_decode: truncated buffer rejected... ");
     {

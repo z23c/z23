@@ -17,6 +17,76 @@
  * body_len:2. The signature (64 bytes) follows the body. */
 #define ZID_PREFIX_LEN 51
 
+/* An expired doc that a caller keeps re-verifying (a stale cached DHT
+ * contact retried every reconnect, a delegation re-checked on every boot
+ * retry) fires this same expiry check every few seconds forever until the
+ * doc is renewed or evicted — see zid.h for the eviction/renewal
+ * contract callers must implement. That is a policy question for the
+ * caller; the log line is not: one ERROR per retry is indistinguishable
+ * from a live incident in node.log. Cap it to once per doc identity per
+ * hour. The key is (master_pubkey, expiry) — the doc identity, not a hash
+ * of the whole document — so the SAME expired doc collapses to the same
+ * slot no matter which caller re-checked it or how its body differs. */
+#define ZID_VERIFY_EXPIRY_LOG_RATE_LIMIT_SECS 3600u
+#define ZID_VERIFY_EXPIRY_LOG_CACHE           64u
+
+struct zid_verify_log_slot {
+    bool     used;
+    uint64_t key;
+    uint64_t last_logged_unix;
+};
+
+/* Best-effort suppression cache, not a security or correctness surface: a
+ * torn read/write under concurrent callers can only widen or narrow the
+ * suppression window by a beat, never change what zid_doc_verify() returns.
+ * That keeps this primitive lock-free, matching the "no allocation" contract
+ * at the top of this file. */
+static struct zid_verify_log_slot g_zid_verify_log[ZID_VERIFY_EXPIRY_LOG_CACHE];
+static size_t g_zid_verify_log_next;
+
+static uint64_t zid_verify_log_key(const struct zid_doc *doc)
+{
+    uint64_t k;
+    memcpy(&k, doc->master_pubkey, sizeof k);
+    return k ^ doc->expiry;
+}
+
+/* True at most once per ZID_VERIFY_EXPIRY_LOG_RATE_LIMIT_SECS for a given
+ * doc identity. Never suppresses the verify RESULT — only whether this
+ * particular failure gets its own log line. */
+static bool zid_verify_expiry_log_allowed(const struct zid_doc *doc,
+                                          uint64_t now_unix)
+{
+    uint64_t key = zid_verify_log_key(doc);
+    size_t hit = ZID_VERIFY_EXPIRY_LOG_CACHE;
+    for (size_t i = 0; i < ZID_VERIFY_EXPIRY_LOG_CACHE; i++)
+        if (g_zid_verify_log[i].used && g_zid_verify_log[i].key == key) {
+            hit = i;
+            break;
+        }
+    if (hit == ZID_VERIFY_EXPIRY_LOG_CACHE) {
+        hit = g_zid_verify_log_next++ % ZID_VERIFY_EXPIRY_LOG_CACHE;
+        g_zid_verify_log[hit].used = true;
+        g_zid_verify_log[hit].key = key;
+        g_zid_verify_log[hit].last_logged_unix = 0;
+    }
+    uint64_t last = g_zid_verify_log[hit].last_logged_unix;
+    if (now_unix >= last &&
+        now_unix - last >= ZID_VERIFY_EXPIRY_LOG_RATE_LIMIT_SECS) {
+        g_zid_verify_log[hit].last_logged_unix = now_unix;
+        return true;
+    }
+    return false;
+}
+
+#ifdef ZCL_TESTING
+void zid_verify_expiry_log_reset_for_testing(void)
+{
+    memset(g_zid_verify_log, 0, sizeof(g_zid_verify_log));
+    g_zid_verify_log_next = 0;
+}
+#endif
+
 void zid_blinded_key(uint8_t out[32], const uint8_t master_pubkey[32],
                      uint64_t period)
 {
@@ -103,10 +173,17 @@ bool zid_doc_verify(const struct zid_doc *doc, uint64_t now_unix)
     if (doc->body_len > ZID_BODY_MAX)
         LOG_FAIL("zid", "verify: body_len %u exceeds ZID_BODY_MAX %d",
                  doc->body_len, ZID_BODY_MAX);
-    if (now_unix >= doc->expiry)
-        LOG_FAIL("zid", "verify: doc expired (expiry=%llu now=%llu)",
-                 (unsigned long long)doc->expiry,
-                 (unsigned long long)now_unix);
+    if (now_unix >= doc->expiry) {
+        if (zid_verify_expiry_log_allowed(doc, now_unix))
+            LOG_ERROR("zid",
+                      "verify: doc expired (expiry=%llu now=%llu) — "
+                      "further repeats of this exact doc's expiry are "
+                      "suppressed for %us",
+                      (unsigned long long)doc->expiry,
+                      (unsigned long long)now_unix,
+                      ZID_VERIFY_EXPIRY_LOG_RATE_LIMIT_SECS);
+        return false;
+    }
 
     uint8_t prefix[ZID_PREFIX_LEN + ZID_BODY_MAX];
     size_t prefix_len = zid_encode_prefix(prefix, doc);

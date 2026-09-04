@@ -9,6 +9,7 @@
 #include "crypto/ed25519.h"
 #include "crypto/sha3.h"
 #include "support/cleanse.h"
+#include "util/blocker.h"
 #include "vcs/zcode_dht_identity.h"
 
 #include <limits.h>
@@ -445,6 +446,28 @@ vcs_zcode_dht_service_create(const struct vcs_zcode_dht_service_params *p) {
              "DELEGATION_%s",
              vcs_zcode_dht_delegation_error_string(delegation_error));
     vcs_zcode_dht_service_set_error(s, "local delegation verification failed");
+    if (delegation_error == VCS_ZCODE_DHT_DELEGATION_EXPIRED) {
+      /* boot_zcode_dht.c retries vcs_zcode_dht_service_create() every
+       * DHT_RETRY_SECONDS forever while the service stays disabled, which
+       * would otherwise re-derive this exact "own doc expired" fact and
+       * (pre-rate-limit) log it every retry. Renewal needs the operator's
+       * master identity seed — vcs_zcode_dht_delegation_sign() takes it as
+       * an argument and this process never reads or holds it (see the
+       * zcode.network.delegate command in
+       * tools/command/native_zcode_network_command.c, the only place a
+       * delegation is (re-)issued). Name that once as a
+       * typed blocker instead of a log line per tick; blocker_set's own
+       * rate limit keeps repeat calls here from re-firing it. */
+      struct blocker_record b;
+      if (blocker_init(&b, "zcode_dht.own_delegation_expired",
+                       "zcode_dht", BLOCKER_DEPENDENCY,
+                       "own ZCODE DHT delegation (delegation.v1) is expired "
+                       "and this process does not hold the master ZID seed "
+                       "needed to re-sign it — an operator must run the "
+                       "zcode.network.delegate command with that seed file "
+                       "to renew"))
+        (void)blocker_set(&b);
+    }
     return s;
   }
   if (s->chain_verify && !s->chain_verify(s->chain_ctx, &s->delegation)) {

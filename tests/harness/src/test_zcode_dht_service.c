@@ -36,6 +36,7 @@
 #include "vcs/zcode_dht_identity.h"
 #include "vcs/zcode_dht_service.h"
 #include "vcs/zcode_sovereignty_policy.h"
+#include "util/blocker.h"
 
 /* The slot-superseding tests reach the private intent table to stage the
  * polluted state the public API can no longer produce. */
@@ -5022,8 +5023,141 @@ _test_next:;
   return failures;
 }
 
+/* An OWN delegation that expired between boot attempts cannot be renewed by
+ * this process — vcs_zcode_dht_delegation_sign() needs the operator's master
+ * ZID seed, which this service never reads or holds. Field evidence: a
+ * fleet node re-ran vcs_zcode_dht_service_create() (boot_zcode_dht.c's
+ * dht_ensure_periodic retries every DHT_RETRY_SECONDS while disabled) and
+ * logged zid_doc_verify's expiry ERROR every single retry, forever. The fix
+ * is a distinguishable VCS_ZCODE_DHT_DELEGATION_EXPIRED error and ONE typed
+ * blocker naming the missing key, not a per-tick log line — verify both:
+ * the service reports the exact disabled reason, and the blocker registry
+ * gets exactly one entry no matter how many times create() retries. */
+static int test_own_delegation_expired_names_blocker(void) {
+  int failures = 0;
+  TEST("zcode dht service: an expired own delegation names one typed "
+       "blocker, not a log line per retry") {
+    blocker_reset_for_testing();
+    char dir[] = "/tmp/zcl_dht_own_expired_XXXXXX";
+    ASSERT(mkdtemp(dir) != NULL);
+    uint8_t genesis[32], noise[32];
+    memset(genesis, 0x11, sizeof(genesis));
+    memset(noise, 0x22, sizeof(noise));
+    ASSERT(fixture_identity(dir, 0x61, genesis, noise));
+
+    /* fixture_identity signs with expiry=90000. Create at a wall time past
+     * that — the delegation load succeeds, verify does not. */
+    for (int attempt = 0; attempt < 3; attempt++) {
+      struct vcs_zcode_dht_service *s =
+          fixture_service_at(dir, genesis, noise, 90001 + (uint64_t)attempt);
+      ASSERT(s != NULL);
+      struct vcs_zcode_dht_service_status status;
+      vcs_zcode_dht_service_status(s, &status);
+      ASSERT(!status.enabled);
+      ASSERT_STR_EQ(status.disabled_reason, "DELEGATION_expired");
+      vcs_zcode_dht_service_free(s, test_time(90001 + (uint64_t)attempt));
+    }
+
+    struct blocker_snapshot snap[BLOCKER_CAP];
+    int n = blocker_snapshot_all(snap, BLOCKER_CAP);
+    int found = -1, count = 0;
+    for (int i = 0; i < n; i++)
+      if (strcmp(snap[i].id, "zcode_dht.own_delegation_expired") == 0) {
+        found = i;
+        count++;
+      }
+    ASSERT_EQ(count, 1);
+    ASSERT(found >= 0);
+    ASSERT(strcmp(snap[found].owner_subsystem, "zcode_dht") == 0);
+    ASSERT(strstr(snap[found].reason, "master ZID seed") != NULL);
+    ASSERT(strstr(snap[found].reason, "zcode.network.delegate") != NULL);
+
+    blocker_reset_for_testing();
+    cleanup_fixture(dir);
+    PASS();
+  }
+_test_next:;
+  return failures;
+}
+
+/* A PEER's cached delegation (a routing-table contact) can go stale between
+ * reconnects: the field evidence node re-verified the same expired cached
+ * doc on every Noise reconnect (session_open runs on the boot retry
+ * cadence, every few seconds) forever. session_authenticate_cached_contact
+ * must evict the contact the FIRST time it observes the expiry, not keep
+ * re-verifying a cache entry nothing refreshes. */
+static int test_session_evicts_expired_cached_delegation(void) {
+  int failures = 0;
+  TEST("zcode dht service: a reconnect against an expired cached contact "
+       "evicts it once instead of re-verifying it forever") {
+    char adir[] = "/tmp/zcl_dht_evict_a_XXXXXX";
+    char bdir[] = "/tmp/zcl_dht_evict_b_XXXXXX";
+    ASSERT(mkdtemp(adir) != NULL && mkdtemp(bdir) != NULL);
+    uint8_t genesis[32], anoise[32], bnoise[32];
+    memset(genesis, 0x11, sizeof(genesis));
+    memset(anoise, 0x22, sizeof(anoise));
+    memset(bnoise, 0x33, sizeof(bnoise));
+    ASSERT(fixture_identity(adir, 0x61, genesis, anoise));
+    ASSERT(fixture_identity(bdir, 0x62, genesis, bnoise));
+    struct vcs_zcode_dht_service *a = fixture_service(adir, genesis, anoise);
+    ASSERT(a != NULL);
+
+    /* Seed A's routing table directly with B's (fixture, expiry=90000)
+     * delegation, as if learned earlier via a normal FIND exchange. */
+    struct vcs_zcode_dht_delegation b_delegation;
+    char error[160];
+    ASSERT(vcs_zcode_dht_delegation_load(bdir, &b_delegation, error,
+                                         sizeof(error)));
+    uint8_t b_node_id[32], distance[32];
+    ASSERT(vcs_zcode_dht_delegation_node_id(b_node_id, &b_delegation));
+    /* vcs_zcode_dht_table_remove looks the contact up in the bucket its
+     * real XOR distance from A's self_id maps to, so the eviction this
+     * test proves must place the fixture in that exact bucket, not an
+     * arbitrary one. */
+    vcs_zcode_dht_xor_distance(a->self_id, b_node_id, distance);
+    int bucket = vcs_zcode_dht_bucket_index(distance);
+    ASSERT(bucket >= 0);
+    ASSERT(vcs_zcode_dht_contact_from_delegation(
+        &a->table->buckets[bucket][0], &b_delegation, 1000, 0));
+    a->table->bucket_sizes[bucket] = 1;
+    a->table->contact_count = 1;
+
+    struct vcs_zcode_dht_delegation found[2];
+    ASSERT_EQ(vcs_zcode_dht_service_delegations_for_noise(a, bnoise, found,
+                                                          2), 1);
+
+    /* B reconnects well past the cached delegation's expiry (90000). */
+    struct vcs_zcode_dht_session bs = {.established = true,
+                                       .generation = 7,
+                                       .connection_serial = 1};
+    memcpy(bs.remote_static, bnoise, 32);
+    memset(bs.transcript_hash, 0x77, 32);
+    struct vcs_zcode_dht_time reconnect_now = {.wall_unix = 90050,
+                                               .monotonic_s = 90050};
+    /* session_open still admits the transport session even though cached-
+     * contact authentication fails — authentication and eviction are a
+     * separate concern from Noise session admission. */
+    ASSERT(vcs_zcode_dht_service_session_open(a, 1, &bs, reconnect_now));
+
+    /* The stale contact is gone — not just unauthenticated THIS time. */
+    ASSERT_EQ(a->table->contact_count, 0);
+    ASSERT_EQ(a->table->bucket_sizes[bucket], 0);
+    ASSERT_EQ(vcs_zcode_dht_service_delegations_for_noise(a, bnoise, found,
+                                                          2), 0);
+
+    vcs_zcode_dht_service_free(a, reconnect_now);
+    cleanup_fixture(adir);
+    cleanup_fixture(bdir);
+    PASS();
+  }
+_test_next:;
+  return failures;
+}
+
 int test_zcode_dht_service(void) {
   int failures = test_disabled_diagnostics();
+  failures += test_own_delegation_expired_names_blocker();
+  failures += test_session_evicts_expired_cached_delegation();
   failures += test_exact_noise_delegation_view();
   failures += test_pending_capacity_is_local_backpressure();
   failures += test_publish_reproduction_gate();

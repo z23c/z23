@@ -25,6 +25,7 @@ const char *vcs_zcode_dht_delegation_error_string(
     case VCS_ZCODE_DHT_DELEGATION_NETWORK: return "wrong-network";
     case VCS_ZCODE_DHT_DELEGATION_NOISE_KEY: return "noise-key-mismatch";
     case VCS_ZCODE_DHT_DELEGATION_BEACON: return "beacon-mismatch";
+    case VCS_ZCODE_DHT_DELEGATION_EXPIRED: return "expired";
     }
     return "unknown";
 }
@@ -136,6 +137,11 @@ enum vcs_zcode_dht_delegation_error vcs_zcode_dht_delegation_verify(
         return VCS_ZCODE_DHT_DELEGATION_WINDOW;
     if (now_unix < delegation->not_before)
         return VCS_ZCODE_DHT_DELEGATION_NOT_YET_VALID;
+    /* Named separately from a signature failure so a caller can tell
+     * "renew or evict this" (expected lifecycle) from "reject this, it is
+     * tampered or corrupt" (never renew/evict on this path). */
+    if (now_unix >= delegation->doc.expiry)
+        return VCS_ZCODE_DHT_DELEGATION_EXPIRED;
     if (!zid_doc_verify(&delegation->doc, now_unix))
         return VCS_ZCODE_DHT_DELEGATION_SIGNATURE;
     if (expected_genesis &&

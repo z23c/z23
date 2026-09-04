@@ -3,6 +3,8 @@
 
 #include "zcode_dht_service_internal.h"
 
+#include "base/log_macros.h"
+
 #include <limits.h>
 #include <string.h>
 
@@ -42,13 +44,35 @@ static bool session_authenticate_cached_contact(
                  peer->session.remote_static, 32) != 0)
         continue;
       struct vcs_zcode_dht_delegation delegation;
-      if (vcs_zcode_dht_delegation_decode(
+      uint8_t victim_node_id[32];
+      memcpy(victim_node_id, contact->node_id, 32);
+      enum vcs_zcode_dht_delegation_error verify_error =
+          vcs_zcode_dht_delegation_decode(
               &delegation, contact->delegation_wire,
-              VCS_ZCODE_DHT_DELEGATION_WIRE_BYTES) !=
-              VCS_ZCODE_DHT_DELEGATION_OK ||
-          vcs_zcode_dht_delegation_verify(
-              &delegation, service->genesis, peer->session.remote_static,
-              0, NULL, now.wall_unix) != VCS_ZCODE_DHT_DELEGATION_OK ||
+              VCS_ZCODE_DHT_DELEGATION_WIRE_BYTES) != VCS_ZCODE_DHT_DELEGATION_OK
+              ? VCS_ZCODE_DHT_DELEGATION_BODY
+              : vcs_zcode_dht_delegation_verify(
+                    &delegation, service->genesis, peer->session.remote_static,
+                    0, NULL, now.wall_unix);
+      if (verify_error == VCS_ZCODE_DHT_DELEGATION_EXPIRED) {
+        /* This contact's cached delegation is expired. Re-checking it on
+         * every reconnect (session_open runs on the boot retry cadence,
+         * every few seconds) would log the same expiry forever from a
+         * cache entry nothing ever refreshes. Evict it ONCE — the log
+         * line fires exactly here, not on a timer — so a later FIND
+         * response can re-learn this node with a fresh delegation on
+         * demand instead of the routing table holding a permanently
+         * unauthenticatable stale entry. */
+        LOG_WARN("vcs.zcode_dht",
+                 "evicting cached contact with expired delegation "
+                 "(expiry=%llu now=%llu) — a fresh copy will be learned "
+                 "on demand",
+                 (unsigned long long)delegation.doc.expiry,
+                 (unsigned long long)now.wall_unix);
+        (void)vcs_zcode_dht_table_remove(service->table, victim_node_id);
+        return false;
+      }
+      if (verify_error != VCS_ZCODE_DHT_DELEGATION_OK ||
           (service->chain_verify &&
            !service->chain_verify(service->chain_ctx, &delegation)))
         return false;

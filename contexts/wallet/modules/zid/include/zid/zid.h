@@ -55,8 +55,35 @@ bool zid_doc_decode(struct zid_doc *doc, const uint8_t *buf, size_t len);
 
 /* Verify signature + version + expiry against a caller-supplied clock:
  * false when body_len is out of range, when now_unix >= expiry, or when
- * the ed25519 signature over the wire prefix does not verify. */
+ * the ed25519 signature over the wire prefix does not verify.
+ *
+ * Expiry logging is rate-limited to once per (master_pubkey, expiry) doc
+ * identity per hour: a caller that re-verifies the same already-known-
+ * expired doc on a retry timer (a cached peer contact, a boot-retry own
+ * delegation) must not turn one stale doc into an ERROR line every few
+ * seconds forever. The return value is never affected — only whether this
+ * particular expiry gets its own log line.
+ *
+ * This function only judges; it does not fix anything. Callers own the
+ * policy for what "expired" means for THEIR copy of the doc:
+ *   - an OWN doc (this node's identity/delegation) must be re-issued from
+ *     the key that signs it — see the specific doc type's issue path
+ *     (e.g. vcs_zcode_dht_delegation_sign) — or, when that key is not
+ *     available to the running process, the caller must name ONE typed
+ *     blocker for the missing key rather than let this function's log
+ *     line stand in for diagnosis.
+ *   - a cached FOREIGN doc (a peer's routing-table contact, a DHT record)
+ *     must be evicted once verify first reports it expired, not re-verified
+ *     forever from the same stale cache slot; a fresh copy is then learned
+ *     on demand the normal way. */
 bool zid_doc_verify(const struct zid_doc *doc, uint64_t now_unix);
+
+#ifdef ZCL_TESTING
+/* Test-only: clear the expiry-log rate-limit cache so a test's own
+ * expectations about "first call logs, second call within the hour does
+ * not" are not order-dependent on whatever else ran in this process. */
+void zid_verify_expiry_log_reset_for_testing(void);
+#endif
 
 /* Fill + sign a doc: derives the keypair from `seed`, sets master_pubkey,
  * copies body/seq/expiry, and signs the wire prefix (uses

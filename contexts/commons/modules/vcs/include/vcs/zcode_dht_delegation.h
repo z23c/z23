@@ -38,6 +38,12 @@ enum vcs_zcode_dht_delegation_error {
     VCS_ZCODE_DHT_DELEGATION_NETWORK,
     VCS_ZCODE_DHT_DELEGATION_NOISE_KEY,
     VCS_ZCODE_DHT_DELEGATION_BEACON,
+    /* doc->expiry <= now_unix specifically, distinguished from a bad
+     * signature: expiry is expected lifecycle (renew/evict), a signature
+     * failure is tampering or corruption. Checked before the signature so
+     * a doc that is both expired AND has an unrelated bad body still
+     * reports the actionable one. */
+    VCS_ZCODE_DHT_DELEGATION_EXPIRED,
 };
 
 const char *vcs_zcode_dht_delegation_error_string(
