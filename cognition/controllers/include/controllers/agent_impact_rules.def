@@ -3118,3 +3118,8 @@ AGENT_IMPACT_RULE("tests/harness/src/test_postmortem.c", "postmortem make_lint_g
 AGENT_IMPACT_RULE("tests/harness/src/test_refold_auto_arm.c", "refold_auto_arm make_lint_gates")
 AGENT_IMPACT_RULE("tests/harness/src/test_refold_from_anchor_fatal.c", "refold_from_anchor_fatal make_lint_gates")
 AGENT_IMPACT_RULE("tests/harness/src/test_util_signal_handler.c", "util_signal_handler make_lint_gates")
+
+/* Per-unit input-closure digest: the key a lint gate or a test group is
+ * admitted by, folded from the source Merkle tree's directory and leaf
+ * digests. */
+AGENT_IMPACT_RULE("cognition/modules/codeindex/src/codeindex_closure.c|cognition/modules/codeindex/include/codeindex/codeindex_closure.h|tests/harness/src/test_code_closure.c", "code_closure code_merkle codeindex make_lint_gates")

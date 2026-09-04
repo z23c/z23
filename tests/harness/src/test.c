@@ -1962,6 +1962,7 @@ int main(int argc, char **argv)
       failures += test_code_semantic_candidate(); }
     { extern int test_code_vector_hint(void); failures += test_code_vector_hint(); }
     { extern int test_code_merkle(void); failures += test_code_merkle(); }
+    { extern int test_code_closure(void); failures += test_code_closure(); }
     { extern int test_code_merkle_proof(void);
       failures += test_code_merkle_proof(); }
     { extern int test_core_seal(void); failures += test_core_seal(); }
