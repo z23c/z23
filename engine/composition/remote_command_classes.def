@@ -606,6 +606,7 @@ REMOTE_COMMAND_CLASS("dev.agent.pace", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("dev.agent.outcomes", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("dev.agent.claim", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("dev.agent.ticketkey", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("dev.agent.mail", REMOTE_CLASS_NEVER, "")
 
 /* OPS — 36 never_remote leaves.
  *

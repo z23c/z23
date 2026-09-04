@@ -1469,3 +1469,34 @@ ZCL_COMMAND_DEV_COMMAND(
     zcl_native_handle_dev_agent_queue,
     "the unit queue is a development-lane coordination surface",
     "z23-dev dev agent queue")
+
+/* ── dev.agent.mail ────────────────────────────────────────────────────────
+ * Async, non-blocking agent mail. A poster appends one JSON row to the local
+ * outbox and returns; a reader re-pulls past its cursor when it wants; ack
+ * persists the cursor. Nothing blocks on a peer or a model: no network, no
+ * sleep, no poll loop. Delivery between hosts is a transport's job (one
+ * inbox file per peer); this leaf only writes and reads local files. */
+ZCL_COMMAND_DEV_COMMAND(
+    "dev.agent.mail", "dev.agent", "",
+    "Post, pull, and ack async agent mail without blocking",
+    "One append-only, cursor-based mail primitive over the owner-private "
+    "state root: post appends a row {seq, ts, from, to, kind, body, ref} to "
+    "mail/outbox.jsonl with a single O_APPEND write; pull reads every "
+    "*.jsonl under mail/ past a cursor in (ts, from, seq) order; ack "
+    "persists the cursor. Bodies over 4 KiB or mentioning a key, an onion "
+    "address, an IP, or an absolute path outside the repo are refused with "
+    "a typed error, never a crash. It touches no network and never waits.",
+    32768,
+    "agent,mail,post,pull,ack,async,cursor,fleet",
+    "zcl.agent_mail_input.v1", "zcl.agent_mail.v1",
+    "action,to,kind,body,since,from,cursor,agent,ref,cwd", "action,cursor",
+    "z23 dev agent mail post --to=* --kind=note --body=hello",
+    ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_DEV_MUTATION,
+    ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_MODE_SYNC, ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_DEV_STATE_WRITE,
+    ZCL_COMMAND_TRAIT_DEV_ONLY | ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    zcl_native_handle_dev_agent_mail,
+    "agent mail is a development-lane coordination surface",
+    "z23-dev dev agent mail")
