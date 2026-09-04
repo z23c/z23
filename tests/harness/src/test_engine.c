@@ -457,6 +457,66 @@ static int case_patch(void)
         EN_CHECK("a reply containing a NUL is refused",
                  !engine_patch_parse(nul_reply, sizeof(nul_reply) - 1, &p));
     }
+    {
+        /* A model habituated to Markdown wraps the whole envelope body in a
+         * fenced code block even though the protocol text says "no fences".
+         * Those two fence lines are not source; applying them verbatim
+         * writes a file that starts and ends with a line of backticks and
+         * fails to compile. The parser strips a bare opening fence (with an
+         * optional language tag) and a bare closing fence when they are the
+         * first and last lines of the body. */
+        static const char fenced[] =
+            "Z23-BEGIN-FILE lib/foo/src/bar.c\n"
+            "```c\n"
+            "int main(void) { return 0; }\n"
+            "```\n"
+            "Z23-END-FILE\n";
+        const bool ok = engine_patch_parse(fenced, sizeof(fenced) - 1, &p);
+        EN_CHECK("a fenced body still parses to one file",
+                 ok && p.count == 1);
+        EN_CHECK("the fence lines are stripped, not written into the file",
+                 ok && p.count == 1 && p.entries[0].content
+                 && strcmp(p.entries[0].content,
+                           "int main(void) { return 0; }\n") == 0);
+        if (ok)
+            engine_patch_free(&p);
+    }
+    {
+        /* A fence with no language tag, same requirement. */
+        static const char fenced_bare[] =
+            "Z23-BEGIN-FILE lib/foo/src/bar.c\n"
+            "```\n"
+            "int main(void) { return 0; }\n"
+            "```\n"
+            "Z23-END-FILE\n";
+        const bool ok = engine_patch_parse(fenced_bare, sizeof(fenced_bare) - 1,
+                                           &p);
+        EN_CHECK("a bare fence (no language tag) is also stripped",
+                 ok && p.count == 1 && p.entries[0].content
+                 && strcmp(p.entries[0].content,
+                           "int main(void) { return 0; }\n") == 0);
+        if (ok)
+            engine_patch_free(&p);
+    }
+    {
+        /* A line of backticks INSIDE the body, not first or last, is real
+         * content (e.g. a Markdown file the unit is writing) and must be
+         * kept verbatim. */
+        static const char inner_backticks[] =
+            "Z23-BEGIN-FILE docs/x.md\n"
+            "before\n"
+            "```\n"
+            "after\n"
+            "Z23-END-FILE\n";
+        const bool ok = engine_patch_parse(inner_backticks,
+                                           sizeof(inner_backticks) - 1, &p);
+        EN_CHECK("a non-terminal fence line is left in the body",
+                 ok && p.count == 1 && p.entries[0].content
+                 && strcmp(p.entries[0].content,
+                           "before\n```\nafter\n") == 0);
+        if (ok)
+            engine_patch_free(&p);
+    }
 
     /* Containment. This is the security-relevant half: the applier writes
      * relative to an isolated worktree, and a path that cannot escape it is

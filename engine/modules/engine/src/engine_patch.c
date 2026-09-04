@@ -119,6 +119,71 @@ static int path_index(const struct engine_patch *p, const char *path)
     return -1;
 }
 
+/* Is `s[0..n)` a bare Markdown fence line: three backticks followed by
+ * nothing but an optional language tag (letters, digits, `_`, `+`, `-`)?
+ * A model habituated to Markdown wraps a whole envelope body in a fenced
+ * code block even though engine_patch_protocol_text() says "no fences";
+ * those two lines are not source and must not be written into the file. */
+static bool is_fence_line(const char *s, size_t n)
+{
+    if (n < 3 || s[0] != '`' || s[1] != '`' || s[2] != '`')
+        return false;
+    for (size_t i = 3; i < n; i++) {
+        const char c = s[i];
+        const bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+                        || (c >= '0' && c <= '9') || c == '_' || c == '+'
+                        || c == '-';
+        if (!ok)
+            return false;
+    }
+    return true;
+}
+
+/* Trim one bare fence line, if present, from each end of [*body, *end). Each
+ * end is checked and stripped independently: a body may open with a fence
+ * and close normally (or vice versa) when a reply was cut and resumed. A
+ * fence line found anywhere else in the body is real content and is left
+ * alone — a Markdown file the unit is writing may legitimately contain
+ * one. */
+static void strip_markdown_fence(const char **body, const char **end)
+{
+    const char *b = *body;
+    const char *e = *end;
+
+    if (e > b) {
+        const char *nl = memchr(b, '\n', (size_t)(e - b));
+        const char *line_end = nl ? nl : e;
+        size_t n = (size_t)(line_end - b);
+        if (n > 0 && b[n - 1] == '\r')
+            n--;
+        if (is_fence_line(b, n) && nl)
+            b = nl + 1;
+    }
+    if (e > b) {
+        /* Find the start of the last line: scan back from e-1 (e points one
+         * past the final byte, which is the newline that ends the last
+         * content line) to the newline before it. */
+        const char *last_nl = e - 1;
+        if (last_nl >= b && *last_nl == '\n') {
+            const char *prev_nl = NULL;
+            for (const char *q = last_nl - 1; q >= b; q--) {
+                if (*q == '\n') {
+                    prev_nl = q;
+                    break;
+                }
+            }
+            const char *line_start = prev_nl ? prev_nl + 1 : b;
+            size_t n = (size_t)(last_nl - line_start);
+            if (n > 0 && line_start[n - 1] == '\r')
+                n--;
+            if (is_fence_line(line_start, n) && line_start > b)
+                e = line_start;
+        }
+    }
+    *body = b;
+    *end = e;
+}
+
 /* Close an open envelope: copy [body, body_end) into an entry for `path`.
  * A path seen before in this same reply is superseded in place — the LAST
  * envelope for a path wins, not the first — rather than refusing the whole
@@ -220,7 +285,10 @@ static bool scan_line(struct engine_patch *p, struct patch_scan *st,
         if (!st->open)
             LOG_FAIL("engine", "refusing a %s marker with no open envelope",
                      ENGINE_PATCH_END);
-        if (!commit_file(p, st->path, st->body, line_start))
+        const char *body = st->body;
+        const char *body_end = line_start;
+        strip_markdown_fence(&body, &body_end);
+        if (!commit_file(p, st->path, body, body_end))
             return false;
         st->open = false;
         return true;
