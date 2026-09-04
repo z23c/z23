@@ -17,6 +17,7 @@
  */
 
 #include "storage/boot_auto_reindex.h"
+#include "base/serialize_le.h"
 #include "platform/os_proc.h"
 #include "platform/positioned_file.h"
 #include "platform/private_file.h"
@@ -324,9 +325,10 @@ uint64_t boot_repair_episode_signature(int tip_h, int zero_nbits,
     uint64_t h = 1469598103934665603ULL;
     const int fields[4] = { tip_h, zero_nbits, mismatches, first_mismatch_h };
     for (size_t i = 0; i < 4; i++) {
-        uint32_t v = (uint32_t)fields[i];
+        uint8_t buf[4];
+        zcl_write_u32_le(buf, (uint32_t)fields[i]);
         for (int b = 0; b < 4; b++) {
-            h ^= (uint64_t)((v >> (8 * b)) & 0xffu);
+            h ^= (uint64_t)buf[b];
             h *= 1099511628211ULL;
         }
     }
