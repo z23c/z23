@@ -12,9 +12,15 @@
 #include "base/serialize_le.h"
 
 #if defined(__linux__)
-static int present_x11_clipboard_append_targets(
+/* Not static: vendor/rgfw/RGFW.h's RGFW_XHandleClipboardSelection is an
+ * external-linkage `inline` function (RGFWDEF expands to plain `inline`)
+ * that calls these through the RGFW_X11_CLIPBOARD_* hook macros below.
+ * Clang's -Wstatic-in-inline forbids an externally-linked inline function
+ * referencing an internal-linkage symbol, so these must have external
+ * linkage too even though only this translation unit calls them. */
+int present_x11_clipboard_append_targets(
     void *display, unsigned long *targets, int count, int capacity);
-static int present_x11_clipboard_write_target(
+int present_x11_clipboard_write_target(
     void *display, unsigned long requestor, unsigned long target,
     unsigned long property);
 #define RGFW_X11_CLIPBOARD_APPEND_TARGETS(display, targets, count, capacity) \
@@ -143,7 +149,7 @@ static size_t present_x11_clipboard_bmp_len;
 static uint8_t *present_x11_clipboard_png;
 static size_t present_x11_clipboard_png_len;
 
-static int present_x11_clipboard_append_targets(
+int present_x11_clipboard_append_targets(
     void *display_ptr, unsigned long *targets, int count, int capacity)
 {
     Display *display = display_ptr;
@@ -156,7 +162,7 @@ static int present_x11_clipboard_append_targets(
     return count;
 }
 
-static int present_x11_clipboard_write_target(
+int present_x11_clipboard_write_target(
     void *display_ptr, unsigned long requestor_value,
     unsigned long target_value, unsigned long property_value)
 {
