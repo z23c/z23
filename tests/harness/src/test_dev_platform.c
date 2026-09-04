@@ -358,6 +358,21 @@ static size_t read_native_cycle(const char *repo_root, char *buf, size_t cap)
 }
 
 /* Write <dir>/<rel> creating parent dirs (mirrors test_codeindex's mk_write). */
+/* Give a fixture file a settled mtime in the past. A cache that honours the
+ * racy-clean rule re-reads any file whose mtime is not strictly older than the
+ * pass that captured it, so a fixture written moments ago cannot demonstrate
+ * reuse; a settled one can, and a distinct seq per write keeps every edit
+ * visible in the stat key without depending on the clock ticking. */
+static bool dp_settle(const char *dir, const char *rel, long seq)
+{
+    char full[4096];
+    snprintf(full, sizeof(full), "%s/%s", dir, rel);
+    struct timespec times[2];
+    times[0].tv_sec = times[1].tv_sec = (time_t)(1600000000L + seq);
+    times[0].tv_nsec = times[1].tv_nsec = 0;
+    return utimensat(AT_FDCWD, full, times, 0) == 0;
+}
+
 static bool dp_mk_write(const char *dir, const char *rel, const char *content)
 {
     char full[4096];
@@ -3260,6 +3275,8 @@ static int test_native_source_cas_shadow(void)
                            "int source_cas_a(void) { return 1; }\n"));
         ASSERT(dp_mk_write(fixture, "core/modules/net/include/net/source_cas_a.h",
                            "int source_cas_a(void);\n"));
+        ASSERT(dp_settle(fixture, "core/modules/net/src/source_cas_a.c", 1));
+        ASSERT(dp_settle(fixture, "core/modules/net/include/net/source_cas_a.h", 2));
 
         struct dev_source_record first = {0}, warm = {0}, edited = {0};
         ASSERT(zcl_dev_source_cas_capture(fixture, &first));
@@ -3285,6 +3302,7 @@ static int test_native_source_cas_shadow(void)
 
         ASSERT(dp_mk_write(fixture, "core/modules/net/src/source_cas_a.c",
                            "int source_cas_a(void) { return 2; }\n"));
+        ASSERT(dp_settle(fixture, "core/modules/net/src/source_cas_a.c", 3));
         ASSERT(zcl_dev_source_cas_capture(fixture, &edited));
         ASSERT(edited.cas_present);
         ASSERT(edited.cas_files_read == 1);
@@ -3293,6 +3311,27 @@ static int test_native_source_cas_shadow(void)
         ASSERT(strcmp(first.cas_root_sha3, edited.cas_root_sha3) != 0);
         ASSERT(strcmp(first.source_id, edited.source_id) != 0);
         ASSERT(strcmp(first.mutation_id, edited.mutation_id) != 0);
+
+        /* A generation materialized onto tmpfs writes every file inside one
+         * coarse timestamp tick, so an edit made in that same tick moves no
+         * field of the stat key. Such a leaf is racily clean and must be
+         * re-read: pinned here with an mtime that is not older than any
+         * capture instant, so no field of the key moves between the two
+         * captures below and only the rule can explain the read. */
+        char racy_path[PATH_MAX];
+        ASSERT(snprintf(racy_path, sizeof(racy_path), "%s/%s", fixture,
+                        "core/modules/net/src/source_cas_a.c") > 0);
+        struct timespec ahead[2];
+        ahead[0].tv_sec = ahead[1].tv_sec = (time_t)4102444800L; /* 2100 */
+        ahead[0].tv_nsec = ahead[1].tv_nsec = 0;
+        ASSERT(utimensat(AT_FDCWD, racy_path, ahead, 0) == 0);
+        struct dev_source_record armed = {0}, racy = {0};
+        ASSERT(zcl_dev_source_cas_capture(fixture, &armed));
+        ASSERT(armed.cas_files_read == 1);
+        ASSERT(zcl_dev_source_cas_capture(fixture, &racy));
+        ASSERT(racy.cas_files_read == 1);
+        ASSERT(racy.cas_nodes_hashed == 0);
+        ASSERT(strcmp(edited.cas_root_sha3, racy.cas_root_sha3) == 0);
 
         struct dev_source_record authoritative = {0};
         memset(authoritative.source_id, 'a', 64);

@@ -140,6 +140,13 @@ bool ci_merkle_snapshot_image_forget_windows(const char *root,
                                              const char *leaf);
 #endif
 
+/* The racy-clean rule for Merkle leaves (codeindex_merkle_settled.c): the
+ * second a pass begins in, and the mtime nanoseconds such a pass may record
+ * for a leaf it just read. */
+uint64_t ci_merkle_capture_second(void);
+uint64_t ci_merkle_settled_mtime_nsec(uint64_t mtime_sec, uint64_t mtime_nsec,
+                                      uint64_t captured_sec);
+
 /* reads (self-locking; no open txn required) */
 bool ci_store_meta_get(struct ci_store *s, const char *k, void *buf,
                        size_t cap, size_t *outlen, bool *found);

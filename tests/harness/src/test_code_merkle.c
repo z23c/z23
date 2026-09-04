@@ -34,13 +34,17 @@
 #include "kernel/command_registry.h"
 #include "json/json.h"
 
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <time.h>
 
 #define CM_FIX  "test-tmp/code_merkle_fix"
 #define CM_COPY "test-tmp/code_merkle_copy"
+
+static unsigned long cm_settle_seq;
 
 static bool cm_write(const char *dir, const char *rel, const char *content)
 {
@@ -53,7 +57,16 @@ static bool cm_write(const char *dir, const char *rel, const char *content)
     if (!f) return false;
     if (content && content[0]) fwrite(content, 1, strlen(content), f);
     bool ok = fclose(f) == 0;
-    return ok;
+    /* Every fixture file stands for a source file that settled before any tool
+     * looked at it: give it a distinct mtime in the past. A file written in
+     * the same filesystem tick as the pass that reads it is racily clean by
+     * construction and has to be re-read next time (pinned in case 5), which
+     * is a different claim than the incrementality these cases count. */
+    struct timespec settled[2];
+    settled[0].tv_sec = settled[1].tv_sec =
+        (time_t)(1600000000L + (long)cm_settle_seq++);
+    settled[0].tv_nsec = settled[1].tv_nsec = 0;
+    return ok && utimensat(AT_FDCWD, full, settled, 0) == 0;
 }
 
 static bool cm_flip_last_byte(const char *path)
@@ -346,6 +359,52 @@ static int test_cm_cache_is_derived(void)
         ASSERT(ci_merkle_root(t, &r2));
         ASSERT(memcmp(r1.digest.bytes, r2.digest.bytes, 32) == 0);
         ci_merkle_free(t);
+
+        /* Racy-clean: a file whose mtime is not strictly older than the pass
+         * that recorded it was still writable while that pass looked at it, so
+         * its unmoved (dev,ino,size,mtime,ctime) key is not evidence and the
+         * next pass must re-read it. Pinned with an explicit timestamp rather
+         * than by sleeping past a tick. */
+        struct timespec ahead[2];
+        ahead[0].tv_sec = ahead[1].tv_sec = (time_t)4102444800L; /* 2100 */
+        ahead[0].tv_nsec = ahead[1].tv_nsec = 0;
+        ASSERT(utimensat(AT_FDCWD, CM_FIX "/core/cm_core.c", ahead, 0) == 0);
+        struct ci_merkle_cost armed = {0};
+        struct ci_merkle *armed_tree = ci_merkle_refresh(CM_FIX, &armed);
+        ASSERT(armed_tree);
+        ASSERT(armed.files_read == 1);   /* the mtime moved */
+        ci_merkle_free(armed_tree);
+
+        struct ci_merkle_cost racy = {0};
+        struct ci_merkle *racy_tree = ci_merkle_refresh(CM_FIX, &racy);
+        ASSERT(racy_tree);
+        ASSERT(racy.snapshot_used);
+        ASSERT(racy.files_read == 1);    /* key unmoved, re-read regardless */
+        ASSERT(racy.leaves_reused == 4);
+        ASSERT(racy.nodes_hashed == 0);  /* re-read, but nothing is dirty */
+        struct ci_merkle_node r_racy;
+        ASSERT(ci_merkle_root(racy_tree, &r_racy));
+        ASSERT(memcmp(r1.digest.bytes, r_racy.digest.bytes, 32) == 0);
+        ci_merkle_free(racy_tree);
+
+        /* and once the file settles into the past again, reuse returns. */
+        ASSERT(cm_write(CM_FIX, "core/cm_core.c",
+                        "/* cm_core — merkle fixture. */\nint cm_core(void)\n{\n"
+                        "    return 4;\n}\n"));
+        struct ci_merkle_cost resettled = {0};
+        struct ci_merkle *resettled_tree = ci_merkle_refresh(CM_FIX, &resettled);
+        ASSERT(resettled_tree);
+        ASSERT(resettled.files_read == 1);
+        ci_merkle_free(resettled_tree);
+        struct ci_merkle_cost quiet = {0};
+        struct ci_merkle *quiet_tree = ci_merkle_refresh(CM_FIX, &quiet);
+        ASSERT(quiet_tree);
+        ASSERT(quiet.files_read == 0);
+        ASSERT(quiet.leaves_reused == 5);
+        struct ci_merkle_node r_quiet;
+        ASSERT(ci_merkle_root(quiet_tree, &r_quiet));
+        ASSERT(memcmp(r1.digest.bytes, r_quiet.digest.bytes, 32) == 0);
+        ci_merkle_free(quiet_tree);
 
         /* delete the snapshot: always safe, costs only a full pass. */
         ASSERT(ci_merkle_forget(CM_FIX));

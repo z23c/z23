@@ -5,17 +5,16 @@
  * One pass over ci_enumerate_sources()' sorted repo-relative path stream builds
  * the whole tree with a small explicit frame stack: because the stream is sorted
  * by strcmp, every directory's descendants are contiguous in it, so a frame can
- * be finalized the moment the stream leaves its subtree. That is also where the
- * child order comes from — see `merkle_child_key` below, the single statement of
- * the ordering rule.
+ * be finalized the moment the stream leaves its subtree. The child order comes
+ * from `merkle_child_key` below, the single statement of the ordering rule.
  *
- * The SHA3-sealed snapshot at <root>/.codeindex/source_tree.merkle exists for exactly one
- * reason: to let a refresh re-read only the files whose (dev,ino,size,mtime,
- * ctime) cache key moved, and to let a directory whose children are all
- * unchanged keep its digest without hashing. It is derived, content-keyed, and
- * discarded whole on any doubt. Its format version is also the source inventory
- * policy version: changing ci_enumerate_sources() must bump it and force one
- * cold pass. The files on disk remain the only authority.
+ * The SHA3-sealed snapshot at <root>/.codeindex/source_tree.merkle lets a refresh
+ * re-read only the files whose (dev,ino,size,mtime,ctime) key moved, and skip
+ * hashing a directory whose children all kept their digests. That key is
+ * evidence only for a file that has settled — see ci_merkle_settled_mtime_nsec.
+ * The snapshot is derived and discarded whole on any doubt; its format version
+ * is also the inventory policy version, so changing ci_enumerate_sources() must
+ * bump it and force one cold pass. The files on disk are the only authority.
  */
 
 #include "codeindex_priv.h"
@@ -59,16 +58,13 @@ enum {
 };
 
 static const char merkle_snapshot_format[] =
-    "zcl.codeindex.source_tree.merkle.v3";
+    "zcl.codeindex.source_tree.merkle.v4";
 static const char merkle_snapshot_name[] = "source_tree.merkle";
 static const char merkle_snapshot_seal_domain[] =
     "zcl.codeindex.source_tree.merkle.seal.v1";
 /* ── records ─────────────────────────────────────────────────────────── */
 
-/* The cache key that decides whether a leaf's bytes must be re-read. Same
- * fields ci_source_stat_root_sha3() binds: every local content replacement
- * moves at least one of them. A key mismatch costs one re-read, never an
- * alarm. */
+/* The cache key that decides whether a leaf's bytes must be re-read. */
 struct merkle_stat_key {
     uint64_t dev, ino, size, mtime_sec, mtime_nsec, ctime_sec, ctime_nsec;
 };
@@ -733,6 +729,7 @@ struct merkle_build {
     /* the previous generation, or an empty one */
     struct merkle_snapshot    prev;
     bool                      use_prev;
+    uint64_t                  captured_sec; /* the second this pass began in */
     /* the frame stack */
     struct merkle_frame       frames[MERKLE_MAX_DEPTH];
     uint32_t                  depth;
@@ -953,6 +950,8 @@ static bool merkle_file_cb(const char *relpath, const struct stat *st,
         }
         b->cost.files_read++;
         b->cost.bytes_read += leaf.size;
+        leaf.key.mtime_nsec = ci_merkle_settled_mtime_nsec(
+            leaf.key.mtime_sec, leaf.key.mtime_nsec, b->captured_sec);
         /* A re-read whose digest matches the snapshot (a bare `touch`) is not
          * a change: the leaf is clean and every ancestor keeps its digest. */
         leaf.dirty = !(prev && memcmp(prev->digest.bytes, leaf.digest.bytes,
@@ -999,6 +998,7 @@ static struct ci_merkle *merkle_run(const char *root, bool use_snapshot,
     struct merkle_build b;
     memset(&b, 0, sizeof(b));
     b.root = root;
+    b.captured_sec = use_snapshot ? ci_merkle_capture_second() : 0;
 
     if (use_snapshot) {
         bool found = false;
