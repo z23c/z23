@@ -113,8 +113,7 @@ int test_shielded_receive_persist(void)
 
     const uint64_t RECV_VALUE = 125000000ULL; /* 1.25000000 ZCL */
     char datadir[256], dbpath[320];
-    snprintf(datadir, sizeof(datadir), ".zcl_test_recv_persist_%d", (int)getpid());
-    mkdir(datadir, 0755);
+    test_make_tmpdir(datadir, sizeof(datadir), "shielded", "recv_persist");
     snprintf(dbpath, sizeof(dbpath), "%s/node.db", datadir);
 
     struct wallet *w = zcl_calloc(1, sizeof(struct wallet), "srp_wallet");

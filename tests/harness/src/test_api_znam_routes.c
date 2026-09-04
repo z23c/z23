@@ -15,9 +15,7 @@ int api_znam_routes_focused_tests(void)
         char dbpath[320];
         struct node_db ndb;
         memset(&ndb, 0, sizeof(ndb));
-        snprintf(dbdir, sizeof(dbdir), ".zcl_test_api_names_%d",
-                 (int)getpid());
-        mkdir(dbdir, 0755);
+        test_make_tmpdir(dbdir, sizeof(dbdir), "api_znam", "names");
         snprintf(dbpath, sizeof(dbpath), "%s/node.db", dbdir);
 
         bool ok = node_db_open(&ndb, dbpath);
@@ -165,9 +163,7 @@ int api_znam_routes_focused_tests(void)
         char dbpath[320];
         struct node_db ndb;
         memset(&ndb, 0, sizeof(ndb));
-        snprintf(dbdir, sizeof(dbdir), ".zcl_test_api_name_show_%d",
-                 (int)getpid());
-        mkdir(dbdir, 0755);
+        test_make_tmpdir(dbdir, sizeof(dbdir), "api_znam", "name_show");
         snprintf(dbpath, sizeof(dbpath), "%s/node.db", dbdir);
 
         bool opened = node_db_open(&ndb, dbpath);

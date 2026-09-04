@@ -63,8 +63,7 @@ static int test_observation_model(void)
     char dbdir[256];
     char dbpath[320];
     struct node_db ndb;
-    snprintf(dbdir, sizeof(dbdir), ".zcl_test_netmon_%d", (int)getpid());
-    mkdir(dbdir, 0755);
+    test_make_tmpdir(dbdir, sizeof(dbdir), "netmon", "observation");
     snprintf(dbpath, sizeof(dbpath), "%s/node.db", dbdir);
     memset(&ndb, 0, sizeof(ndb));
 

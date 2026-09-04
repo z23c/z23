@@ -26,9 +26,7 @@ static char test_datadir[256];
 
 static void setup_robustness_datadir(void)
 {
-    snprintf(test_datadir, sizeof(test_datadir), ".zcl_test_robust_%d",
-             (int)getpid());
-    mkdir(test_datadir, 0755);
+    test_make_tmpdir(test_datadir, sizeof(test_datadir), "robust", "main");
 }
 
 static void cleanup_robustness_datadir(void)

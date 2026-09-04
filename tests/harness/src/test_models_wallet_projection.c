@@ -22,8 +22,7 @@ int test_model_wallet_projection(void)
         char dbpath[320];
         struct node_db ndb;
         bool ok;
-        snprintf(dbdir, sizeof(dbdir), ".zcl_test_wallet_projection_%d", (int)getpid());
-        mkdir(dbdir, 0755);
+        test_make_tmpdir(dbdir, sizeof(dbdir), "wallet", "projection");
         snprintf(dbpath, sizeof(dbpath), "%s/node.db", dbdir);
         memset(&ndb, 0, sizeof(ndb));
         ok = node_db_open(&ndb, dbpath);
@@ -121,9 +120,7 @@ int test_model_wallet_projection(void)
         char dbpath[320];
         struct node_db ndb;
         bool ok;
-        snprintf(dbdir, sizeof(dbdir),
-                 ".zcl_test_wallet_raw_projection_%d", (int)getpid());
-        mkdir(dbdir, 0755);
+        test_make_tmpdir(dbdir, sizeof(dbdir), "wallet", "raw_projection");
         snprintf(dbpath, sizeof(dbpath), "%s/node.db", dbdir);
         memset(&ndb, 0, sizeof(ndb));
         ok = node_db_open(&ndb, dbpath);
@@ -181,9 +178,8 @@ int test_model_wallet_projection(void)
         char dbpath[320];
         struct node_db ndb;
         bool ok;
-        snprintf(dbdir, sizeof(dbdir),
-                 ".zcl_test_sapling_payment_projection_%d", (int)getpid());
-        mkdir(dbdir, 0755);
+        test_make_tmpdir(dbdir, sizeof(dbdir), "wallet",
+                         "sapling_payment_projection");
         snprintf(dbpath, sizeof(dbpath), "%s/node.db", dbdir);
         memset(&ndb, 0, sizeof(ndb));
         ok = node_db_open(&ndb, dbpath);
@@ -253,9 +249,7 @@ int test_model_wallet_projection(void)
         char dbpath[320];
         struct node_db ndb;
         bool ok;
-        snprintf(dbdir, sizeof(dbdir),
-                 ".zcl_test_wallet_projection_bulk_%d", (int)getpid());
-        mkdir(dbdir, 0755);
+        test_make_tmpdir(dbdir, sizeof(dbdir), "wallet", "projection_bulk");
         snprintf(dbpath, sizeof(dbpath), "%s/node.db", dbdir);
         memset(&ndb, 0, sizeof(ndb));
         ok = node_db_open(&ndb, dbpath);
@@ -390,9 +384,7 @@ int test_model_wallet_projection(void)
         char dbpath[320];
         struct node_db ndb;
         bool ok;
-        snprintf(dbdir, sizeof(dbdir),
-                 ".zcl_test_utxo_cache_rebuild_%d", (int)getpid());
-        mkdir(dbdir, 0755);
+        test_make_tmpdir(dbdir, sizeof(dbdir), "wallet", "utxo_cache_rebuild");
         snprintf(dbpath, sizeof(dbpath), "%s/node.db", dbdir);
         memset(&ndb, 0, sizeof(ndb));
         ok = node_db_open(&ndb, dbpath);

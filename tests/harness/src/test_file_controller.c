@@ -56,8 +56,7 @@ static bool manifest_has_file_index(const struct file_manifest *fm,
 
 static void setup_manifest_test_dir(char *dir, size_t dir_sz)
 {
-    snprintf(dir, dir_sz, ".zcl_test_file_manifest_%d", (int)getpid());
-    mkdir(dir, 0755);
+    test_make_tmpdir(dir, dir_sz, "file_controller", "manifest");
 
     char blocks[320];
     snprintf(blocks, sizeof(blocks), "%s/blocks", dir);

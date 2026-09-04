@@ -510,9 +510,8 @@ int api_health_gate_focused_tests(void)
         struct block_index *blocks[4] = {0};
         struct bsp_decision decision;
         char dbdir[256];
-        snprintf(dbdir, sizeof(dbdir), ".zcl_test_api_durable_status_%d",
-                 (int)getpid());
-        mkdir(dbdir, 0755);
+        test_make_tmpdir(dbdir, sizeof(dbdir), "api_health",
+                         "durable_status");
 
         bool ok = api_test_build_chain(&ms, blocks, 4);
         ok = ok && api_test_init_connman_peer(&cm, &addr, &node, 3);
@@ -594,9 +593,7 @@ int api_health_gate_focused_tests(void)
         char dbpath[320];
         struct node_db ndb;
         memset(&ndb, 0, sizeof(ndb));
-        snprintf(dbdir, sizeof(dbdir), ".zcl_test_api_hodl_%d",
-                 (int)getpid());
-        mkdir(dbdir, 0755);
+        test_make_tmpdir(dbdir, sizeof(dbdir), "api_health", "hodl");
         snprintf(dbpath, sizeof(dbpath), "%s/node.db", dbdir);
 
         api_stop_cache();
@@ -712,9 +709,7 @@ int api_health_gate_focused_tests(void)
         char dbpath[320];
         struct node_db ndb;
         memset(&ndb, 0, sizeof(ndb));
-        snprintf(dbdir, sizeof(dbdir), ".zcl_test_api_factoids_%d",
-                 (int)getpid());
-        mkdir(dbdir, 0755);
+        test_make_tmpdir(dbdir, sizeof(dbdir), "api_health", "factoids");
         snprintf(dbpath, sizeof(dbpath), "%s/node.db", dbdir);
 
         api_stop_cache();

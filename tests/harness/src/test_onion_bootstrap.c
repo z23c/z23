@@ -31,7 +31,7 @@
  * ---------
  * Uses p2p_port = 18033 → bootstrap SocksPort 29999 (127.0.0.1), so
  * a concurrently-running production node on 8033/19999 does not
- * collide.  Datadir is an `mkdtemp` template under the CWD and is
+ * collide.  Datadir is a test_make_tmpdir() fixture under ./test-tmp/ and is
  * `rm -rf`'d on exit, pass or fail.  The tor_integration static
  * state is process-local; stopping at end restores the same initial
  * state that `test_tor_initial_state` observed at boot.
@@ -120,11 +120,8 @@ int test_onion_bootstrap(void)
      * state machine. */
     tor_integration_stop();
 
-    char datadir[] = "zcl_p11_onion_bootstrap_XXXXXX";
-    if (!mkdtemp(datadir)) {
-        printf("FAIL (mkdtemp failed for bootstrap datadir)\n");
-        return 1;
-    }
+    char datadir[256];
+    test_make_tmpdir(datadir, sizeof(datadir), "p11", "onion_bootstrap");
 
     /* Match the production wiring at boot_services.c:1303-1316 —
      * register a request handler before starting so dynhost's
