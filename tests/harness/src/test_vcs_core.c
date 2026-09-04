@@ -1201,6 +1201,30 @@ static int t_manifest_stat_cache_identity(const char *dir)
     struct stat before = {0}, after = {0};
     bool captured = path_len > 0 && (size_t)path_len < sizeof(path) &&
         stat(path, &before) == 0;
+    /* A filesystem stamps from a coarse clock. On a RAM-backed tree the
+     * rewrite below lands in the same tick as the stat above roughly a third
+     * of the time, ctime does not move, and the fixture proves nothing while
+     * reporting a failure. Wait for the clock to move first, on a path the
+     * worktree walk never sees. */
+    char tick_path[4096];
+    int tick_len = snprintf(tick_path, sizeof(tick_path), "%s/.zvcs/ctime-tick",
+                            dir);
+    bool ticked = captured && tick_len > 0 &&
+        (size_t)tick_len < sizeof(tick_path);
+    for (int spin = 0; ticked && spin < 1000000; spin++) {
+        FILE *tick_file = fopen(tick_path, "wb");
+        struct stat probe;
+        if (!tick_file) { ticked = false; break; }
+        (void)fputc('t', tick_file);
+        if (fclose(tick_file) != 0) { ticked = false; break; }
+        if (stat(tick_path, &probe) != 0) { ticked = false; break; }
+        if (probe.st_ctim.tv_sec != before.st_ctim.tv_sec ||
+            probe.st_ctim.tv_nsec != before.st_ctim.tv_nsec)
+            break;
+    }
+    VC_CHECK("cache identity: the filesystem clock moved before the edit",
+             ticked);
+    (void)unlink(tick_path);
     bool rewrote = captured && vc_write(dir, "src/cache.c", "cache-two\n");
     const struct timespec restore_times[2] = {
         before.st_atim, before.st_mtim,
@@ -1233,6 +1257,50 @@ static int t_manifest_stat_cache_identity(const char *dir)
     vcs_manifest_free(&edited_uncached);
     vcs_manifest_free(&edited_cached);
 #endif /* !defined(_WIN32) */
+
+    /* -- the cache may not answer for a file that is still moving --
+     * Every field of the key (size, mtime, ctime) survives a same-length
+     * rewrite inside one filesystem timestamp tick. Believing a row there let
+     * vcs_revert() report VCS_OK over a worktree it had not touched. */
+    VC_CHECK("cache identity: an observation a second old is believable",
+             vcs_stat_row_settled_at(10 * VCS_STAT_SETTLE_NS,
+                                     5 * VCS_STAT_SETTLE_NS,
+                                     5 * VCS_STAT_SETTLE_NS));
+    VC_CHECK("cache identity: an observation from this instant is not",
+             !vcs_stat_row_settled_at(10 * VCS_STAT_SETTLE_NS,
+                                      10 * VCS_STAT_SETTLE_NS,
+                                      10 * VCS_STAT_SETTLE_NS));
+    VC_CHECK("cache identity: a settled mtime with a fresh ctime is not",
+             !vcs_stat_row_settled_at(10 * VCS_STAT_SETTLE_NS,
+                                      5 * VCS_STAT_SETTLE_NS,
+                                      10 * VCS_STAT_SETTLE_NS));
+    VC_CHECK("cache identity: a timestamp from the future is never settled",
+             !vcs_stat_row_settled_at(10 * VCS_STAT_SETTLE_NS,
+                                      20 * VCS_STAT_SETTLE_NS,
+                                      20 * VCS_STAT_SETTLE_NS));
+
+    vc_write(dir, "src/fresh.c", "fresh-one\n");
+    struct vcs_manifest fresh = {0};
+    bool fresh_ok = vcs_manifest_build(dir, index, &fresh);
+    struct vcs_stat_cache rows = {0};
+    bool rows_ok = fresh_ok && vcs_stat_cache_load(index, &rows);
+    VC_CHECK("cache identity: a file written this instant is left uncached",
+             rows_ok && vcs_stat_cache_find(&rows, "src/fresh.c") == NULL);
+    if (rows_ok) vcs_stat_cache_free(&rows);
+
+    /* ...and because it was left uncached, a same-length rewrite landing in
+     * the very same tick is still seen. */
+    vc_write(dir, "src/fresh.c", "fresh-two\n");
+    struct vcs_manifest rewritten = {0};
+    bool rewritten_ok = vcs_manifest_build(dir, index, &rewritten);
+    uint8_t fresh_root[32], rewritten_root[32];
+    VC_CHECK("cache identity: a same-length rewrite in one tick is still seen",
+             fresh_ok && rewritten_ok &&
+             vcs_manifest_tree_hash(&fresh, fresh_root) &&
+             vcs_manifest_tree_hash(&rewritten, rewritten_root) &&
+             memcmp(fresh_root, rewritten_root, sizeof(fresh_root)) != 0);
+    vcs_manifest_free(&rewritten);
+    vcs_manifest_free(&fresh);
 
     vcs_manifest_free(&warm);
     vcs_manifest_free(&cached);

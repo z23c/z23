@@ -313,7 +313,11 @@ static bool build_cb(const char *relpath, uint32_t mode, uint64_t size,
     uint8_t blob[32];
     bool have_blob = false;
 
-    if (b->sc) {
+    /* A matching key is only evidence once the file has stopped moving: see
+     * VCS_STAT_SETTLE_NS in vcs/vcs_index.h. Inside the tick that stamped
+     * it, a same-length rewrite reproduces every field of the key. */
+    bool settled = vcs_stat_row_settled(mtime_ns, ctime_ns);
+    if (b->sc && settled) {
         const struct vcs_stat_row *row = vcs_stat_cache_find(b->sc, relpath);
         if (row && row->mtime_ns == mtime_ns && row->size == (int64_t)size &&
             row->ctime_ns == ctime_ns) {
@@ -327,8 +331,9 @@ static bool build_cb(const char *relpath, uint32_t mode, uint64_t size,
             b->err = true;
             return false;
         }
-        /* Record for stat-cache write-back. */
-        if (b->sc) {
+        /* Record for stat-cache write-back — but only a settled observation,
+         * so the row cannot be contradicted by a write in the same tick. */
+        if (b->sc && settled) {
             if (b->dirty_count == b->dirty_cap) {
                 size_t ncap = b->dirty_cap ? b->dirty_cap * 2 : 64;
                 struct dirty_row *nd =

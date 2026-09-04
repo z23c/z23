@@ -599,6 +599,24 @@ const struct vcs_stat_row *vcs_stat_cache_find(const struct vcs_stat_cache *sc,
     return NULL;
 }
 
+bool vcs_stat_row_settled_at(int64_t now_ns, int64_t mtime_ns,
+                             int64_t ctime_ns)
+{
+    int64_t newest = mtime_ns > ctime_ns ? mtime_ns : ctime_ns;
+    if (newest > now_ns) return false;      /* stamped in the future */
+    return now_ns - newest >= VCS_STAT_SETTLE_NS;
+}
+
+bool vcs_stat_row_settled(int64_t mtime_ns, int64_t ctime_ns)
+{
+    struct timespec now;
+    if (platform_time_realtime_timespec(&now) != 0)
+        return false;                       /* no clock, no shortcuts */
+    int64_t now_ns = (int64_t)now.tv_sec * INT64_C(1000000000) +
+                     (int64_t)now.tv_nsec;
+    return vcs_stat_row_settled_at(now_ns, mtime_ns, ctime_ns);
+}
+
 /* ── rebuild (recompute, never repair) ───────────────────────────── */
 
 struct rebuild_replay_ctx {
@@ -645,6 +663,10 @@ static bool rebuild_stat_cb(const char *relpath, uint32_t mode, uint64_t size,
         c->err = true;
         return false;
     }
+    /* An unsettled row would be a lie the moment the caller writes again
+     * inside the same filesystem tick; leave it out and re-hash later. */
+    if (!vcs_stat_row_settled(mtime_ns, ctime_ns))
+        return true;
     if (!vcs_index_stat_put_in_tx(c->idx, relpath, mtime_ns, (int64_t)size,
                                   ctime_ns, blob)) {
         c->err = true;

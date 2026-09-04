@@ -105,6 +105,36 @@ void vcs_stat_cache_free(struct vcs_stat_cache *sc);
 const struct vcs_stat_row *vcs_stat_cache_find(const struct vcs_stat_cache *sc,
                                                const char *path);
 
+/* -- when a stat row may be believed --
+ * A row says "a file with THESE timestamps and THIS size hashes to THIS
+ * blob". That holds only while no later write can reproduce the same
+ * timestamps. Filesystems stamp from a coarse clock -- one millisecond of
+ * granularity on both ext4 and tmpfs here -- so a file rewritten to the same
+ * length inside the tick that recorded it keeps every field of the key and
+ * silently keeps the old blob.
+ *
+ * That window is not theoretical. vcs_revert() restores a file and then
+ * rebuilds the manifest; on a RAM-backed tree nothing waits on a disk, so a
+ * caller's next write landed in the same millisecond as the restore. The
+ * following revert compared the worktree against a manifest that still
+ * described the restored bytes, found nothing to do, and returned VCS_OK
+ * over a worktree it had not changed.
+ *
+ * So a row is believed only once its timestamps are far enough in the past
+ * that no write can still share their tick. VCS_STAT_SETTLE_NS is that
+ * distance: generous next to any filesystem's granularity, and paid only by
+ * files touched in the last second, which are re-hashed instead. */
+#define VCS_STAT_SETTLE_NS INT64_C(1000000000)
+
+/* Pure form: is a file carrying these timestamps settled as of now_ns? Both
+ * timestamps count, because a chmod or a relink moves ctime alone. A
+ * timestamp in the future (clock skew, a restored archive) is never
+ * settled. */
+bool vcs_stat_row_settled_at(int64_t now_ns, int64_t mtime_ns,
+                             int64_t ctime_ns);
+/* The same question against the current wall clock. */
+bool vcs_stat_row_settled(int64_t mtime_ns, int64_t ctime_ns);
+
 /* Rebuild ALL derived rows from the worktree + commits.log. Clears the
  * tables, replays commits.log to rebuild HEAD / anchor / seal_pin, then
  * rehashes the worktree into stat_cache. Returns false on any hard error. */
