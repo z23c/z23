@@ -33,7 +33,6 @@
  *   - an END with no open envelope;
  *   - more than ENGINE_PATCH_MAX_FILES entries, or one over
  *     ENGINE_PATCH_MAX_FILE_BYTES;
- *   - the same path twice;
  *   - any path that is absolute, contains a `..` segment, starts with `.git/`,
  *     or contains a byte outside [A-Za-z0-9._/+-]. This is the containment
  *     boundary: the applier writes relative to an isolated worktree root, and
@@ -43,6 +42,16 @@
  * that proposed nothing. That distinction matters, because "the model said it
  * was done and changed nothing" is a verdict this harness must be able to
  * reach honestly rather than by crashing.
+ *
+ * ── A PATH NAMED TWICE ─────────────────────────────────────────────────
+ * Last envelope wins, not "refuse the whole reply". A model that revises
+ * itself mid-reply — emits a file, keeps thinking, then emits a corrected
+ * whole-file body for the same path — is not malformed; refusing the entire
+ * patch over it throws away a working (later) file alongside everything
+ * else the reply proposed. The final entries[] holds only the LAST envelope
+ * seen for each path (a later Z23-DELETE-FILE for a path with an earlier
+ * write applies as a delete, and vice versa), and each supersession is
+ * logged at LOG_WARN so a reviewer can see it happened.
  */
 
 #ifndef ZCL_ENGINE_PATCH_H

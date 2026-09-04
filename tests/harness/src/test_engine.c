@@ -408,11 +408,36 @@ static int case_patch(void)
                  !engine_patch_parse(stray, sizeof(stray) - 1, &p));
     }
     {
+        /* A model that revises itself mid-reply — writes a file, keeps
+         * thinking, then emits a corrected whole-file body for the same
+         * path — is not malformed. The LAST envelope for a path wins: one
+         * entry, holding the second body, not a refusal of the whole
+         * reply. */
         static const char twice[] =
             "Z23-BEGIN-FILE a.c\nx\nZ23-END-FILE\n"
             "Z23-BEGIN-FILE a.c\ny\nZ23-END-FILE\n";
-        EN_CHECK("the same path twice is refused",
-                 !engine_patch_parse(twice, sizeof(twice) - 1, &p));
+        const bool ok = engine_patch_parse(twice, sizeof(twice) - 1, &p);
+        EN_CHECK("the same path twice applies as one entry",
+                 ok && p.count == 1);
+        EN_CHECK("the later envelope's body is the one applied",
+                 ok && p.count == 1 && p.entries[0].content
+                 && strcmp(p.entries[0].content, "y\n") == 0);
+        if (ok)
+            engine_patch_free(&p);
+    }
+    {
+        /* The same supersession across kinds: a write followed by a delete
+         * for the same path leaves one entry, and it is the delete. */
+        static const char write_then_delete[] =
+            "Z23-BEGIN-FILE a.c\nx\nZ23-END-FILE\n"
+            "Z23-DELETE-FILE a.c\n";
+        const bool ok = engine_patch_parse(write_then_delete,
+                                           sizeof(write_then_delete) - 1, &p);
+        EN_CHECK("a write superseded by a delete leaves one entry",
+                 ok && p.count == 1 && p.entries[0].remove
+                 && p.entries[0].content == NULL);
+        if (ok)
+            engine_patch_free(&p);
     }
     {
         /* Prose with no envelope at all is well formed and proposes nothing.

@@ -106,16 +106,22 @@ static bool take_path(const struct line_view *l, const char *marker,
     return true;
 }
 
-static bool path_already_seen(const struct engine_patch *p, const char *path)
+/* Index of the entry already holding `path`, or -1. A path is looked up by
+ * name rather than tracked separately because ENGINE_PATCH_MAX_FILES bounds
+ * the scan to a small, fixed size. */
+static int path_index(const struct engine_patch *p, const char *path)
 {
     for (size_t i = 0; i < p->count; i++) {
         if (strcmp(p->entries[i].path, path) == 0)
-            return true;
+            return (int)i;
     }
-    return false;
+    return -1;
 }
 
-/* Close an open envelope: copy [body, body_end) into a new entry. */
+/* Close an open envelope: copy [body, body_end) into an entry for `path`.
+ * A path seen before in this same reply is superseded in place — the LAST
+ * envelope for a path wins, not the first — rather than refusing the whole
+ * reply; see the "A PATH NAMED TWICE" note in engine_patch.h. */
 static bool commit_file(struct engine_patch *p, const char *path,
                         const char *body, const char *body_end)
 {
@@ -123,30 +129,59 @@ static bool commit_file(struct engine_patch *p, const char *path,
     if (n > ENGINE_PATCH_MAX_FILE_BYTES)
         LOG_FAIL("engine", "refusing %zu bytes for %s: over the per-file cap",
                  n, path);
-    if (path_already_seen(p, path))
-        LOG_FAIL("engine", "refusing a patch that names %s twice", path);
-    if (p->count >= ENGINE_PATCH_MAX_FILES)
-        LOG_FAIL("engine", "refusing more than %u files in one patch",
-                 (unsigned)ENGINE_PATCH_MAX_FILES);
 
-    struct engine_patch_entry *e = &p->entries[p->count];
-    memcpy(e->path, path, strlen(path) + 1);
-    e->content = zcl_malloc(n + 1, "engine_patch_content");
-    if (!e->content)
+    char *content = zcl_malloc(n + 1, "engine_patch_content");
+    if (!content)
         LOG_FAIL("engine", "cannot allocate %zu bytes for %s", n + 1, path);
     if (n)
-        memcpy(e->content, body, n);
-    e->content[n] = '\0';
+        memcpy(content, body, n);
+    content[n] = '\0';
+
+    const int idx = path_index(p, path);
+    if (idx >= 0) {
+        LOG_WARN("engine", "a later envelope for %s supersedes an earlier "
+                           "one in the same reply; applying the last one",
+                 path);
+        struct engine_patch_entry *e = &p->entries[idx];
+        free(e->content);
+        e->content = content;
+        e->content_len = n;
+        e->remove = false;
+        return true;
+    }
+
+    if (p->count >= ENGINE_PATCH_MAX_FILES) {
+        free(content);
+        LOG_FAIL("engine", "refusing more than %u files in one patch",
+                 (unsigned)ENGINE_PATCH_MAX_FILES);
+    }
+    struct engine_patch_entry *e = &p->entries[p->count];
+    memcpy(e->path, path, strlen(path) + 1);
+    e->content = content;
     e->content_len = n;
     e->remove = false;
     p->count++;
     return true;
 }
 
+/* A path seen before is superseded in place, exactly as commit_file() does —
+ * a Z23-DELETE-FILE that follows an earlier write for the same path (or
+ * precedes a later one) is just the last envelope for that path winning. */
 static bool commit_delete(struct engine_patch *p, const char *path)
 {
-    if (path_already_seen(p, path))
-        LOG_FAIL("engine", "refusing a patch that names %s twice", path);
+    const int idx = path_index(p, path);
+    if (idx >= 0) {
+        LOG_WARN("engine", "a later envelope for %s supersedes an earlier "
+                           "one in the same reply; applying the last one",
+                 path);
+        struct engine_patch_entry *e = &p->entries[idx];
+        free(e->content);
+        e->content = NULL;
+        e->content_len = 0;
+        e->remove = true;
+        return true;
+    }
+
     if (p->count >= ENGINE_PATCH_MAX_FILES)
         LOG_FAIL("engine", "refusing more than %u files in one patch",
                  (unsigned)ENGINE_PATCH_MAX_FILES);
