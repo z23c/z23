@@ -2987,17 +2987,32 @@ $(TEST_PARALLEL_FAST_CANDIDATE): $(VIEW_GEN_HEADERS) $(BUILD_IDENTITY_STAMP) $(T
 # $(HOTSWAP_MODULE_LDFLAGS) — the same flags every other module uses, and
 # -Wl,-Bsymbolic is load-bearing: without it the module's internal calls
 # interpose back onto the resident copy and a swap silently does nothing.
+# The images embed ZCL_CORE_SEAL_ROOT, so hotswap/core_seal_root.h — and every
+# other header the fixture reaches — is a real prerequisite. Naming only the .c
+# left the images behind whenever the core seal was re-frozen: the loader then
+# refused them with "module consensus core seal does not match this node", and
+# a proof generation that materialised the stale image reproduced that refusal
+# on a tree whose sources were perfectly consistent. The compiler now writes
+# the dependency list and make reads it back.
+HOTSWAP_ROLLBACK_FIXTURE_DEPS := \
+	$(BUILD_DIR)/hotswap/zcl_rollback_fixture_a.d \
+	$(BUILD_DIR)/hotswap/zcl_rollback_fixture_b.d
+-include $(HOTSWAP_ROLLBACK_FIXTURE_DEPS)
+
 $(BUILD_DIR)/hotswap/zcl_rollback_fixture_%.so: $(HOTSWAP_ROLLBACK_FIXTURE_SRC) \
 		$(VIEW_GEN_HEADERS)
 	@mkdir -p $(dir $@)
 	@set -eu; \
 	tmp_o="$$(mktemp "$(dir $@).rbfix.XXXXXX.o")"; \
 	tmp_so="$$(mktemp "$(dir $@).rbfix.XXXXXX.so")"; \
-	trap 'rm -f "$$tmp_o" "$$tmp_so"' EXIT HUP INT TERM; \
+	tmp_d="$$(mktemp "$(dir $@).rbfix.XXXXXX.d")"; \
+	trap 'rm -f "$$tmp_o" "$$tmp_so" "$$tmp_d"' EXIT HUP INT TERM; \
 	$(CC) $(TEST_FAST_CFLAGS) -fPIC -DZCL_HOTSWAP_MODULE_GEN \
 	  -DZCL_HOTSWAP_MODULE_SOURCE_TU=\"$(HOTSWAP_ROLLBACK_FIXTURE_TU)\" \
 	  -DZCL_ROLLBACK_FIXTURE_MARK=\"$*\" \
+	  -MMD -MF "$$tmp_d" -MT "$@" \
 	  -c -o "$$tmp_o" $(HOTSWAP_ROLLBACK_FIXTURE_SRC); \
+	mv -f -- "$$tmp_d" "$(BUILD_DIR)/hotswap/zcl_rollback_fixture_$*.d"; \
 	$(CC) $(HOTSWAP_MODULE_LDFLAGS) -o "$$tmp_so" "$$tmp_o"; \
 	mv -f -- "$$tmp_so" "$@"; \
 	$(HOTSWAP_MODULE_CODESIGN) "$@"; \

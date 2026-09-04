@@ -1126,9 +1126,17 @@ static const char *proof_errno_name(int value)
  * generation root (/dev/shm) is a different filesystem from the checkout, so
  * link() answers EXDEV there and the dependency has to be copied byte for
  * byte. The mode carries: a hook or a .so that arrived without its executable
- * bit fails far away from here, where the cause is no longer visible. */
-static bool dependency_copy_mode(const char *source, const char *target,
-                                 mode_t mode)
+ * bit fails far away from here, where the cause is no longer visible.
+ *
+ * The MODIFICATION TIME carries for the same reason. link() preserves it for
+ * free; a copy that stamps the target with the time of the copy hands the
+ * generation an artifact that is newer than every source it was built from,
+ * and make inside the generation then declares a stale artifact up to date
+ * and never rebuilds it. That is not a hypothetical: a hot-swap fixture image
+ * copied this way kept the consensus core seal of an older build and every
+ * activation in the generation was rejected on shape. */
+static bool dependency_copy_stat(const char *source, const char *target,
+                                 const struct stat *source_st)
 {
     int input = open(source, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
     if (input < 0) return false;
@@ -1149,7 +1157,11 @@ static bool dependency_copy_mode(const char *source, const char *target,
     int saved = errno;
     if (close(input) != 0) ok = false;
     if (output >= 0) {
-        if (fchmod(output, mode & 07777) != 0) ok = false;
+        if (fchmod(output, source_st->st_mode & 07777) != 0) ok = false;
+        const struct timespec times[2] = {
+            source_st->st_atim, source_st->st_mtim,
+        };
+        if (futimens(output, times) != 0) ok = false;
         if (close(output) != 0) ok = false;
     }
     if (ok && rename(temporary, target) != 0) ok = false;
@@ -1179,7 +1191,7 @@ static bool dependency_materialize(const char *source, const char *target)
         /* Same filesystem is the fast path; a cross-device generation root is
          * not a missing dependency, so copy rather than refuse. */
         if (errno != EXDEV && errno != EPERM && errno != EMLINK) return false;
-        return dependency_copy_mode(source, target, source_st.st_mode);
+        return dependency_copy_stat(source, target, &source_st);
     }
     if (S_ISLNK(source_st.st_mode)) {
         char link_target[PATH_MAX];

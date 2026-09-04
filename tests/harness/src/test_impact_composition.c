@@ -42,6 +42,7 @@
 #include "test/test_core.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <utime.h>
 
 #include "codeindex/codeindex.h"
@@ -2242,8 +2243,20 @@ static int test_ic_proof_dependency_crosses_filesystems(void)
         ASSERT(ic_write(relative, "payload.sh", body));
         snprintf(source, sizeof(source), "%s/%s/payload.sh", cwd, relative);
         ASSERT(chmod(source, 0755) == 0);
+        /* Pin the source to a modification time that cannot be mistaken for
+         * "now". A copy that stamps the target with the time of the copy
+         * hands the generation an artifact newer than every source it was
+         * built from, and make inside the generation then declares a stale
+         * artifact up to date. link() preserves the time for free, so only a
+         * copy can lose it — and only a check like this one can see that. */
+        const struct timespec pinned[2] = {
+            { .tv_sec = 1000000000, .tv_nsec = 0 },
+            { .tv_sec = 1000000000, .tv_nsec = 123456000 },
+        };
+        ASSERT(utimensat(AT_FDCWD, source, pinned, 0) == 0);
         struct stat source_st;
         ASSERT(stat(source, &source_st) == 0);
+        ASSERT(source_st.st_mtim.tv_sec == 1000000000);
 
         /* Same filesystem keeps the link fast path: one inode, not two. */
         snprintf(same, sizeof(same), "%s/%s/linked.sh", cwd, relative);
@@ -2252,6 +2265,8 @@ static int test_ic_proof_dependency_crosses_filesystems(void)
         ASSERT(stat(same, &same_st) == 0);
         ASSERT(same_st.st_dev == source_st.st_dev);
         ASSERT(same_st.st_ino == source_st.st_ino);
+        ASSERT(same_st.st_mtim.tv_sec == source_st.st_mtim.tv_sec);
+        ASSERT(same_st.st_mtim.tv_nsec == source_st.st_mtim.tv_nsec);
 
         /* /dev/shm is the RAM-backed generation root in production. A box
          * without a writable one cannot observe the cross-device path at all,
@@ -2283,6 +2298,9 @@ static int test_ic_proof_dependency_crosses_filesystems(void)
         ASSERT(copied_st.st_dev != source_st.st_dev);
         ASSERT((copied_st.st_mode & 07777) == (source_st.st_mode & 07777));
         ASSERT((copied_st.st_mode & 0111) != 0);
+        /* The copy is as old as what it was copied from, to the nanosecond. */
+        ASSERT(copied_st.st_mtim.tv_sec == source_st.st_mtim.tv_sec);
+        ASSERT(copied_st.st_mtim.tv_nsec == source_st.st_mtim.tv_nsec);
         ASSERT((size_t)copied_st.st_size == sizeof(body) - 1);
         char read_back[128] = {0};
         FILE *fh = fopen(ram_target, "rb");
