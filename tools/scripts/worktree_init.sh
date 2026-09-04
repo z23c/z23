@@ -67,8 +67,7 @@ elif [[ -d "$CANONICAL_ROOT/vendor/include" ]]; then
     if [[ -d vendor/include ]] && diff -rq "$CANONICAL_ROOT/vendor/include" vendor/include >/dev/null 2>&1; then
         echo "[1b/3] vendor/include: already identical -- skipped"
     else
-        mkdir -p vendor/include
-        cp -a "$CANONICAL_ROOT/vendor/include/." vendor/include/
+        tools/scripts/copy_vendor_include.sh "$CANONICAL_ROOT" "$WORKTREE_ROOT"
         echo "[1b/3] vendor/include: merged from $CANONICAL_ROOT/vendor/include"
     fi
 else

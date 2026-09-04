@@ -247,13 +247,13 @@ ZCL_HOTSWAP_LOOP_ONLY := $(if $(strip $(MAKECMDGOALS)),$(if $(strip $(filter-out
 ZCL_HOTSWAP_DEPFILE_LEAN_GOALS := $(ZCL_HOTSWAP_LOOP_GOALS) hotswap-module-so
 ZCL_HOTSWAP_DEPFILE_LEAN_ONLY := $(if $(strip $(MAKECMDGOALS)),$(if $(strip $(filter-out $(ZCL_HOTSWAP_DEPFILE_LEAN_GOALS),$(MAKECMDGOALS))),,1),)
 
-# worktree-prime's whole point is to supply vendor/lib/*.a by copy instead of
-# the vendor-bootstrap rule's from-pinned-source rebuild (measured ~57s for a
-# from-empty vendor/lib on this host; `cp -a` is sub-second) — so on a fresh
-# worktree (vendor/lib empty) it must run BEFORE the -include below can see
-# missing archives and force that rebuild as a parse-time side effect. Same
-# exemption shape as ZCL_HOTSWAP_LOOP_ONLY above.
-ZCL_WORKTREE_PRIME_ONLY := $(if $(strip $(MAKECMDGOALS)),$(if $(strip $(filter-out worktree-prime,$(MAKECMDGOALS))),,1),)
+# worktree-prime supplies generated vendor/lib/*.a and vendor/include by copy
+# instead of the vendor-bootstrap rule's from-pinned-source rebuild (measured
+# ~57s for a from-empty vendor tree on this host; `cp -a` is sub-second) — so
+# on a fresh worktree it must run BEFORE the -include below can see missing
+# archives and force that rebuild as a parse-time side effect. Same exemption
+# shape as ZCL_HOTSWAP_LOOP_ONLY above.
+ZCL_WORKTREE_PRIME_ONLY := $(if $(strip $(MAKECMDGOALS)),$(if $(strip $(filter-out worktree-prime worktree-prime-selftest,$(MAKECMDGOALS))),,1),)
 
 # These front doors establish their own checksum-pinned sysroot and vendor
 # archives before entering a nested authoritative Make. On a from-empty clone,
@@ -2340,23 +2340,26 @@ new-app:
 new-app-selftest:
 	@tools/scripts/new_app.sh --selftest
 
-.PHONY: worktree-prime
-# Formalizes the "cp -a vendor/lib before a fresh worktree can link" tribal
-# knowledge (docs/work/README.md, the zclassic23-dev skill's Parallel-worktree
-# section): copies already-built vendor/lib/*.a from a sibling checkout
-# instead of paying `make vendor`'s from-pinned-source rebuild in every new
-# worktree. Source defaults to this worktree's primary checkout (derived from
-# `git rev-parse --git-common-dir`, which every `git worktree add` lane shares
-# with its origin checkout); override with SRC=<path-to-a-primed-checkout>
+.PHONY: worktree-prime worktree-prime-selftest
+# Formalizes the "copy generated vendor inputs before a fresh worktree can
+# compile and link" tribal knowledge (docs/work/README.md, the zclassic23-dev
+# skill's Parallel-worktree section): copies already-built vendor/lib/*.a and
+# generated vendor/include
+# from a sibling checkout instead of paying `make vendor`'s from-pinned-source
+# rebuild in every new worktree. Source defaults to this worktree's primary
+# checkout (derived from `git rev-parse --git-common-dir`, which every
+# `git worktree add` lane shares with its origin checkout); override with
+# SRC=<path-to-a-primed-checkout>
 # for wt2/wt3-style siblings that are not the primary checkout.
-# Two kinds of vendored artefact are untracked and must both be carried into a
-# new worktree: the built archives under vendor/lib, and the amalgamated C
-# sources beside them. Copying only the archives left vendor/sqlite3.c absent,
+# Three kinds of vendored artefact are untracked and must be carried into a new
+# worktree: the built archives under vendor/lib, generated headers under
+# vendor/include, and amalgamated C sources beside them. Copying only the
+# archives left vendor/sqlite3.c absent,
 # which no native build notices — only the Windows cross-build compiles that
 # file — so a primed worktree looked healthy right up until `make lint` failed
 # with "No rule to make target 'vendor/sqlite3.c'", a message that names a
 # missing file rather than a missing priming step.
-# A THIRD kind is worse, because nothing about it looks broken. The vendored
+# A FOURTH kind is worse, because nothing about it looks broken. The vendored
 # Tor archives (vendor/tor/libtor.a and the three ext/ archives TOR_FULL globs
 # for) are build output of a SUBMODULE, and a git worktree does not populate
 # submodules at all -- so in a fresh worktree vendor/tor is an empty gitlink,
@@ -2399,6 +2402,8 @@ worktree-prime:
 	cp -a "$$src/vendor/lib/." vendor/lib/; \
 	n=$$(ls vendor/lib | wc -l); \
 	echo "worktree-prime: copied $$n vendor archive(s) from $$src/vendor/lib"; \
+	tools/scripts/copy_vendor_include.sh "$$src" "."; \
+	echo "worktree-prime: merged generated vendor/include from $$src"; \
 	for amalgam in sqlite3.c; do \
 	  if [ ! -f "vendor/$$amalgam" ] && [ -f "$$src/vendor/$$amalgam" ]; then \
 	    cp -a "$$src/vendor/$$amalgam" "vendor/$$amalgam"; \
@@ -2432,6 +2437,9 @@ worktree-prime:
 	  echo "                worktree links the Tor STUB and the ship step will refuse"; \
 	  echo "                its candidate (build it in $$src first)"; \
 	fi
+
+worktree-prime-selftest:
+	@tools/scripts/copy_vendor_include.sh --selftest
 
 # Auto-vendor: if any required archive is absent, build it.  The per-archive
 # rule lets `make zclassic23` pull in `make vendor` transparently on a fresh
