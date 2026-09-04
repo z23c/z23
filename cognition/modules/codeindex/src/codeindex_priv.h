@@ -116,6 +116,8 @@ bool ci_store_write_image_fd(struct ci_store *s, int fd);
  * then open that exact descriptor for derived-row replacement. POSIX only;
  * callers retain and publish the descriptor. */
 bool ci_store_copy_image_fd(struct ci_store *s, int fd);
+/* The one fd-to-fd image copy. Shared by the staging clone and the spare. */
+bool ci_copy_image_fd(int source_fd, int fd);
 struct ci_store *ci_store_open_rw_fd(int fd);
 /* Bind an already-validated private store descriptor (ownership/mode/nlink
  * checked by the caller) into a read-only immutable handle — the exact
@@ -257,7 +259,36 @@ void ci_rebuild_lock_close(int dirfd, int lockfd);
 bool ci_cleanup_orphan_stages(int dirfd);
 bool ci_create_unique_stage(int dirfd, char name[128],
                             struct ci_stage_identity *identity, int *out_fd);
+/* One unused `index.kv.tmp.<pid>.<seq>` staging name. No file is created. */
+bool ci_stage_reserve_name(char name[128]);
 bool ci_remove_legacy_sidecars(int dirfd);
+
+/* ── the pre-materialized staging spare (codeindex_spare.c, POSIX) ────
+ * An incremental generation differs from the published one in a handful of
+ * SQLite pages, but staging it means first laying down a fresh 161 MB clone —
+ * and every one of those bytes is dirty page cache that the publication fsync
+ * must then wait for. On a loaded host that single fsync is the entire cost of
+ * reindexing a one-line edit.
+ *
+ * So the clone is made ONE PUBLICATION EARLY: after a successful incremental
+ * publish, `ci_spare_publish` leaves `<root>/.codeindex/index.kv.spare`
+ * holding the generation just published, and waits for nothing. Ordinary
+ * kernel writeback drains it during the gap before the next edit. The next
+ * incremental rebuild adopts that inode as its staging file, so by the time
+ * the publication fsync runs almost every page is already clean and only the
+ * pages the incremental scan actually changed have to reach the disk. The
+ * total volume written per publication is unchanged: one image either way.
+ *
+ * Nothing about the durability contract moves: the adopted inode is fsynced
+ * before renameat exactly as a freshly written one is, and a writeback error is
+ * still reported there. The spare is an optimization and never an authority —
+ * `ci_spare_adopt` refuses any spare that is not a private owner-controlled
+ * regular inode sealing the SAME generation as the live store, and a refusal
+ * simply falls back to the ordinary clone. */
+bool ci_spare_adopt(int dirfd, struct ci_store *live, char name[128],
+                    struct ci_stage_identity *identity, int *out_fd);
+bool ci_spare_publish(int dirfd);
+void ci_spare_discard(int dirfd);
 
 /* ── the C scanner (codeindex_scan.c) ─────────────────────────────────
  * Scan one in-tree file's text. Emits symbols and refs through callbacks.

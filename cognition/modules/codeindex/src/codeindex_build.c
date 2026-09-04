@@ -521,6 +521,18 @@ bool ci_cleanup_orphan_stages(int dirfd)
     return true;
 }
 
+bool ci_stage_reserve_name(char name[128])
+{
+    if (!name) LOG_FAIL("codeindex", "null staging name buffer");
+    uint64_t seq = atomic_fetch_add_explicit(&g_stage_sequence, 1,
+                                             memory_order_relaxed);
+    int n = snprintf(name, 128, "index.kv.tmp.%ld.%llu",
+                     (long)getpid(), (unsigned long long)seq);
+    if (n <= 0 || n >= 128)
+        LOG_FAIL("codeindex", "staging name overflow");
+    return true;
+}
+
 bool ci_create_unique_stage(int dirfd, char name[128],
                             struct ci_stage_identity *identity, int *out_fd)
 {
@@ -528,12 +540,7 @@ bool ci_create_unique_stage(int dirfd, char name[128],
         LOG_FAIL("codeindex", "null staging identity/fd");
     *out_fd = -1;
     for (unsigned int attempt = 0; attempt < 128; attempt++) {
-        uint64_t seq = atomic_fetch_add_explicit(&g_stage_sequence, 1,
-                                                 memory_order_relaxed);
-        int n = snprintf(name, 128, "index.kv.tmp.%ld.%llu",
-                         (long)getpid(), (unsigned long long)seq);
-        if (n <= 0 || n >= 128)
-            LOG_FAIL("codeindex", "staging name overflow");
+        if (!ci_stage_reserve_name(name)) return false;
         int fd = openat(dirfd, name,
                         O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW,
                         0600);
@@ -611,6 +618,7 @@ static bool codeindex_rebuild_internal(struct codeindex *ci,
     struct ci_merkle_leaf *current_leaves = NULL;
     int changed_count = 0;
     bool incremental = false;
+    bool adopted_spare = false;
     uint8_t current_dep_stat[32] = {0};
 
     if (!ci_cleanup_orphan_stages(dirfd)) {
@@ -711,9 +719,23 @@ static bool codeindex_rebuild_internal(struct codeindex *ci,
         incremental = inventory_same;
     }
 
-    if (!ci_create_unique_stage(dirfd, stage_name, &stage_identity, &stagefd)) {
-        failure = "unique staging allocation failed";
-        goto out;
+    /* An incremental generation is the previous one plus a handful of changed
+     * SQLite pages, so staging it by laying down a fresh full-image clone
+     * makes the publication fsync wait for the WHOLE image. A spare left by
+     * the previous publish already holds those bytes and has had the seconds
+     * since then to reach the disk, so adopting it leaves the fsync with only
+     * the pages this rebuild actually changes. See codeindex_spare.c. */
+    adopted_spare = incremental &&
+        ci_spare_adopt(dirfd, ci->store, stage_name, &stage_identity, &stagefd);
+    if (!adopted_spare) {
+        /* Any spare that survives here clones a generation we are about to
+         * replace, or one this rebuild refused. Either way it is now waste. */
+        ci_spare_discard(dirfd);
+        if (!ci_create_unique_stage(dirfd, stage_name, &stage_identity,
+                                    &stagefd)) {
+            failure = "unique staging allocation failed";
+            goto out;
+        }
     }
     if (!codeindex_test_maybe_tamper_stage(dirfd, stage_name)) {
         failure = "test staging substitution failed";
@@ -724,7 +746,7 @@ static bool codeindex_rebuild_internal(struct codeindex *ci,
     uint8_t built_dep_stat_root[32];
     if (incremental) {
         memcpy(built_dep_stat_root, current_dep_stat, 32);
-        if (!ci_store_copy_image_fd(ci->store, stagefd)) {
+        if (!adopted_spare && !ci_store_copy_image_fd(ci->store, stagefd)) {
             failure = "clone prior generation failed";
             goto out;
         }
@@ -847,6 +869,15 @@ static bool codeindex_rebuild_internal(struct codeindex *ci,
     ci->store = next;
     if (old) ci_store_close(old);
     success = true;
+
+    /* Lay down the next staging clone now and let the kernel write it back
+     * while the developer edits, so the NEXT publication's fsync has almost
+     * nothing left to flush. Only a checkout that just took the incremental
+     * path earns the extra image: a checkout that is only ever cold-built
+     * would pay a second full-image write for a spare nothing comes back for.
+     * Best effort throughout — a failure here costs the next rebuild an
+     * ordinary clone and nothing else. */
+    if (incremental) (void)ci_spare_publish(dirfd);
 
 out:
     if (st) ci_store_close(st);

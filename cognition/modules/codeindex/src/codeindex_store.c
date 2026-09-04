@@ -313,17 +313,20 @@ bool ci_store_write_image_fd(struct ci_store *s, int fd)
 #endif
 }
 
-bool ci_store_copy_image_fd(struct ci_store *s, int fd)
+/* One statement of "make `fd` hold the same bytes as `source_fd`". Both the
+ * staging clone below and the pre-materialized spare in codeindex_spare.c go
+ * through it, so there is no second copy loop to drift. */
+bool ci_copy_image_fd(int source_fd, int fd)
 {
 #if defined(_WIN32)
-    (void)s;
+    (void)source_fd;
     (void)fd;
     return false;
 #else
-    if (!s || s->bound_fd < 0 || fd < 0)
+    if (source_fd < 0 || fd < 0)
         LOG_FAIL("codeindex", "invalid source/staging fd for clone");
     struct stat st;
-    if (fstat(s->bound_fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size <= 0)
+    if (fstat(source_fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size <= 0)
         LOG_FAIL("codeindex", "inspect source generation for clone");
 #if defined(__linux__)
     off_t input_offset = 0, output_offset = 0;
@@ -331,7 +334,7 @@ bool ci_store_copy_image_fd(struct ci_store *s, int fd)
     while (output_offset < st.st_size) {
         size_t want = st.st_size - output_offset < (off_t)(16 * 1024 * 1024)
             ? (size_t)(st.st_size - output_offset) : (size_t)(16 * 1024 * 1024);
-        ssize_t copied = copy_file_range(s->bound_fd, &input_offset, fd,
+        ssize_t copied = copy_file_range(source_fd, &input_offset, fd,
                                          &output_offset, want, 0);
         if (copied < 0 && errno == EINTR) continue;
         if (copied <= 0) {
@@ -358,7 +361,7 @@ bool ci_store_copy_image_fd(struct ci_store *s, int fd)
     while (offset < st.st_size) {
         size_t want = (st.st_size - offset) < (off_t)COPY_CHUNK_BYTES
             ? (size_t)(st.st_size - offset) : COPY_CHUNK_BYTES;
-        ssize_t got = pread(s->bound_fd, buf, want, offset);
+        ssize_t got = pread(source_fd, buf, want, offset);
         if (got < 0 && errno == EINTR) continue;
         if (got <= 0) {
             failure = "read source generation for clone";
@@ -388,6 +391,19 @@ bool ci_store_copy_image_fd(struct ci_store *s, int fd)
     if (failure)
         LOG_FAIL("codeindex", "%s: %s", failure, strerror(saved));
     return true;
+#endif
+}
+
+bool ci_store_copy_image_fd(struct ci_store *s, int fd)
+{
+#if defined(_WIN32)
+    (void)s;
+    (void)fd;
+    return false;
+#else
+    if (!s || s->bound_fd < 0)
+        LOG_FAIL("codeindex", "invalid source generation for clone");
+    return ci_copy_image_fd(s->bound_fd, fd);
 #endif
 }
 
