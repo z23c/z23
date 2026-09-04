@@ -542,6 +542,30 @@ static int case_patch(void)
              && !engine_patch_path_ok("lib/a\\b.c"));
     EN_CHECK("a doubled separator is refused",
              !engine_patch_path_ok("lib//a.c"));
+
+    /* Line counting and the shrink guard: the pure logic behind refusing a
+     * whole-file reply that overwrote a file with a fraction of itself —
+     * the receipt audit's glm53-ramlease/a1 unit did exactly this to
+     * tests/harness/src/test_impact_composition.c, and the next turn could
+     * not read the tree back to notice. */
+    EN_CHECK("an empty buffer is zero lines",
+             engine_patch_count_lines("", 0) == 0
+             && engine_patch_count_lines(NULL, 0) == 0);
+    EN_CHECK("a terminated buffer counts its newlines",
+             engine_patch_count_lines("a\nb\nc\n", 6) == 3);
+    EN_CHECK("an unterminated final line still counts",
+             engine_patch_count_lines("a\nb\nc", 5) == 3);
+    EN_CHECK("a new file (no prior lines) is never a shrink",
+             !engine_patch_is_drastic_shrink(0, 1));
+    EN_CHECK("under half the old line count is a drastic shrink",
+             engine_patch_is_drastic_shrink(1850, 40));
+    EN_CHECK("exactly half is NOT a drastic shrink",
+             !engine_patch_is_drastic_shrink(100, 50));
+    EN_CHECK("one line under half IS a drastic shrink",
+             engine_patch_is_drastic_shrink(101, 50));
+    EN_CHECK("growing or holding steady is never a shrink",
+             !engine_patch_is_drastic_shrink(100, 100)
+             && !engine_patch_is_drastic_shrink(100, 500));
     EN_CHECK("an empty path is refused",
              !engine_patch_path_ok("") && !engine_patch_path_ok(NULL));
     {

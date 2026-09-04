@@ -91,6 +91,18 @@ bool engine_patch_parse(const char *text, size_t len, struct engine_patch *p);
  * deserves to be tested on its own rather than only through the parser. */
 bool engine_patch_path_ok(const char *path);
 
+/* Count lines the way a human reading a diff would: the number of '\n' bytes,
+ * plus one more if the buffer is non-empty and does not end in one (a final
+ * unterminated line is still a line). An empty buffer is 0 lines. */
+size_t engine_patch_count_lines(const char *text, size_t len);
+
+/* Is replacing a file of `old_lines` with one of `new_lines` a drastic
+ * shrink — the shape of a model whole-file reply that lost most of a file it
+ * meant to edit a few lines of? True only when the file existed before
+ * (old_lines > 0) and the new body is under half its old line count. A brand
+ * new file (old_lines == 0) is never a shrink, whatever its size. */
+bool engine_patch_is_drastic_shrink(size_t old_lines, size_t new_lines);
+
 /* The exact protocol text handed to a model. One definition, so the prompt
  * and the parser can never drift into describing different envelopes. */
 const char *engine_patch_protocol_text(void);

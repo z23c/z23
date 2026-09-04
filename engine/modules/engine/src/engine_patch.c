@@ -395,3 +395,24 @@ size_t engine_patch_describe(const struct engine_patch *p, char *buf,
     buf[used] = '\0';
     return used;
 }
+
+size_t engine_patch_count_lines(const char *text, size_t len)
+{
+    if (!text || len == 0)
+        return 0;
+    size_t n = 0;
+    for (size_t i = 0; i < len; i++) {
+        if (text[i] == '\n')
+            n++;
+    }
+    if (text[len - 1] != '\n')
+        n++;
+    return n;
+}
+
+bool engine_patch_is_drastic_shrink(size_t old_lines, size_t new_lines)
+{
+    if (old_lines == 0)
+        return false;
+    return new_lines * 2 < old_lines;
+}

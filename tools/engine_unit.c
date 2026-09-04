@@ -1175,6 +1175,82 @@ static bool ensure_parent_dirs(const char *root, const char *rel)
     return true;
 }
 
+/* Read a whole file into a heap buffer, or return NULL (including "does not
+ * exist" — a new file has nothing to shrink from, see
+ * engine_patch_is_drastic_shrink()). The caller frees. */
+static char *read_whole_file_alloc(const char *path, size_t *out_len)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f)
+        return NULL;
+    if (fseek(f, 0, SEEK_END) != 0) {
+        fclose(f);
+        return NULL;
+    }
+    const long sz = ftell(f);
+    if (sz < 0 || fseek(f, 0, SEEK_SET) != 0) {
+        fclose(f);
+        return NULL;
+    }
+    char *buf = zcl_malloc((size_t)sz + 1, "engine_unit_shrink_check");
+    if (!buf) {
+        fclose(f);
+        return NULL;
+    }
+    const size_t got = sz > 0 ? fread(buf, 1, (size_t)sz, f) : 0;
+    fclose(f);
+    if (got != (size_t)sz) {
+        free(buf);
+        return NULL;
+    }
+    buf[sz] = '\0';
+    if (out_len)
+        *out_len = (size_t)sz;
+    return buf;
+}
+
+/* Refuses a whole-file reply that overwrote an existing file with under half
+ * its own line count — the shape of a model that meant to change a few
+ * lines and instead sent a truncated or reconstructed-from-memory body. A
+ * unit's next turn cannot read the tree back to notice this on its own (see
+ * engine/engine_state.h), so the harness catches it before the damage lands
+ * on disk. Returns NULL when every entry is fine, else a message naming the
+ * first offending path and its old/new line counts (a pointer into a static
+ * buffer, valid until the next call). */
+static const char *patch_shrink_reason(const char *root,
+                                       const struct engine_patch *p)
+{
+    static char why[512];
+    for (size_t i = 0; i < p->count; i++) {
+        const struct engine_patch_entry *e = &p->entries[i];
+        if (e->remove)
+            continue;
+        char path[1024];
+        if ((size_t)snprintf(path, sizeof(path), "%s/%s", root, e->path)
+            >= sizeof(path))
+            continue;
+        size_t old_len = 0;
+        char *old = read_whole_file_alloc(path, &old_len);
+        if (!old)
+            continue;                       /* a new file: nothing to shrink from */
+        const size_t old_lines = engine_patch_count_lines(old, old_len);
+        free(old);
+        const size_t new_lines =
+            engine_patch_count_lines(e->content, e->content_len);
+        if (engine_patch_is_drastic_shrink(old_lines, new_lines)) {
+            (void)snprintf(why, sizeof(why),
+                          "%s: the reply's whole-file body has %zu line(s), "
+                          "under half of the %zu line(s) the file has now. "
+                          "Send a unified-diff hunk for the part you meant "
+                          "to change instead of reconstructing the whole "
+                          "file from memory.",
+                          e->path, new_lines, old_lines);
+            return why;
+        }
+    }
+    return NULL;
+}
+
 static bool apply_patch(const char *root, const struct engine_patch *p)
 {
     for (size_t i = 0; i < p->count; i++) {
@@ -2144,7 +2220,27 @@ int main(int argc, char **argv)
                     }
                     (void)engine_emit_file(applied_path, buf, used);
                 }
-                if (!apply_patch(workdir, &patch)) {
+                const char *shrink = patch_shrink_reason(workdir, &patch);
+                if (shrink) {
+                    if (applied_path[0]) {
+                        char msg[768];
+                        const int mn = snprintf(msg, sizeof(msg),
+                            "SHRINK_REFUSED\n%s\n", shrink);
+                        if (mn > 0)
+                            (void)engine_emit_file(applied_path, msg,
+                                (size_t)mn < sizeof(msg) ? (size_t)mn
+                                                          : sizeof(msg) - 1);
+                    }
+                    engine_emit(stderr,
+                               "engine_unit: turn %d's reply was refused "
+                               "before apply: %s\n", turn, shrink);
+                    (void)snprintf(gate_tail, sizeof(gate_tail),
+                                  "Your last reply was refused before "
+                                  "anything was written: %s", shrink);
+                    have_gate_tail = true;
+                    refused = true;
+                    engine_patch_free(&patch);
+                } else if (!apply_patch(workdir, &patch)) {
                     engine_patch_free(&patch);
                     engine_reply_free(&dr.reply);
                     free(task);
