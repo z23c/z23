@@ -53,14 +53,19 @@
  * `count`. Malformed lines are skipped, never fatal.
  *
  * ACK. Writes the decimal cursor plus "\n" to <state>/mail/cursor.<agent>
- * (0600) and returns {leaf, agent, cursor}.
+ * (0600) via a temporary file in the same directory renamed over the target,
+ * so a crash never truncates an existing cursor, and returns
+ * {leaf, agent, cursor}.
  *
- * REFUSAL. A body longer than 4096 bytes, or one that mentions a secret key,
- * an onion address, an IP address, or an absolute filesystem path outside
- * the checkout, is refused with ok=false and a MAIL_REFUSED_* code naming
- * the rule — a typed error row, never a crash. Refusal words: key, onion
+ * REFUSAL. A body longer than 4096 bytes, or one that mentions a secret key
+ * (a key word or a Z.ai-shaped token: 32 hex chars, a dot, 16 alnum), an
+ * onion address, an IP address, or an absolute filesystem path outside the
+ * checkout, is refused with ok=false and a MAIL_REFUSED_* code naming the
+ * rule — a typed error row, never a crash. Refusal words: key, onion
  * address, IP, absolute path. Repo-relative paths (no leading slash) are
- * always allowed; an absolute path under the checkout root is allowed.
+ * always allowed; an absolute path under the checkout root is allowed, but
+ * a path that climbs out with a ".." segment never is, even when it starts
+ * with the root.
  *
  * OUTPUT (zcl.agent_mail.v1). Every reply names its own `leaf`. Post returns
  * the row fields plus `cursor` (the row's seq) and `outbox`. Pull returns
@@ -178,6 +183,53 @@ static bool dvm_has_ipv4(const char *s)
     return false;
 }
 
+static int dvm_hexval(unsigned char c)
+{
+    if (c >= '0' && c <= '9')
+        return c - '0';
+    if (c >= 'a' && c <= 'f')
+        return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F')
+        return c - 'A' + 10;
+    return -1;
+}
+
+/* A Z.ai-style API key: 32 hex chars, a dot, 16 alphanumerics, bounded by
+ * non-token characters on both sides so a longer word never matches. */
+static bool dvm_has_api_key(const char *s)
+{
+    size_t n = strlen(s);
+    if (n < 49)
+        return false;
+    for (size_t i = 0; i + 49 <= n; i++) {
+        bool ok = true;
+        if (s[i + 32] != '.')
+            continue;
+        for (size_t j = 0; j < 32; j++) {
+            if (dvm_hexval((unsigned char)s[i + j]) < 0) {
+                ok = false;
+                break;
+            }
+        }
+        if (!ok)
+            continue;
+        for (size_t j = 33; j < 49; j++) {
+            if (!isalnum((unsigned char)s[i + j])) {
+                ok = false;
+                break;
+            }
+        }
+        if (!ok)
+            continue;
+        if (i > 0 && (isalnum((unsigned char)s[i - 1]) || s[i - 1] == '.'))
+            continue;
+        if (i + 49 < n && isalnum((unsigned char)s[i + 49]))
+            continue;
+        return true;
+    }
+    return false;
+}
+
 static bool dvm_has_drive_path(const char *s)
 {
     for (const char *p = s; *p; p++) {
@@ -209,7 +261,30 @@ static bool dvm_has_abs_path(const char *s)
     return false;
 }
 
-/* Absolute path under the checkout root is inside the repo, not outside it. */
+/* Does this token (up to its whitespace/quote terminator) carry a ".."
+ * segment, i.e. climb out of whatever directory it names? A bare "." or
+ * "./" segment does not escape and stays allowed; "../" anywhere in the
+ * token, or a token ending in "/..", does. */
+static bool dvm_token_escapes(const char *tok)
+{
+    for (const char *p = tok; *p; p++) {
+        if (*p == ' ' || *p == '\t' || *p == '\n' || *p == '"' ||
+            *p == '\'')
+            return false;
+        if (*p == '/' && p[1] == '.' && p[2] == '.') {
+            char e = p[3];
+            if (e == '\0' || e == '/' || e == ' ' || e == '\t' ||
+                e == '\n' || e == '"' || e == '\'')
+                return true;
+        }
+    }
+    return false;
+}
+
+/* Absolute path under the checkout root is inside the repo, not outside it —
+ * but only if the token stays under the root: any ".." segment means the
+ * path climbs out, and prefix-matching it as "under root" would let a body
+ * like <root>/../../../etc/shadow through. */
 static bool dvm_abs_under_root(const char *body, const char *root)
 {
     size_t rn;
@@ -225,6 +300,9 @@ static bool dvm_abs_under_root(const char *body, const char *root)
         if (*start == ' ' || *start == '\t' || *start == '\n' ||
             *start == '"' || *start == '\'')
             start++;
+        /* Fail closed: a climbing token is never "under" anything. */
+        if (dvm_token_escapes(start))
+            continue;
         if (strncmp(start, root, rn) == 0 &&
             (start[rn] == '/' || start[rn] == '\0' || start[rn] == '"' ||
              start[rn] == '\'' || start[rn] == ' ' || start[rn] == '\t' ||
@@ -256,6 +334,12 @@ static const char *dvm_refuse(const char *body, const char *root,
                            "onion addresses, IPs, or absolute paths");
             return "MAIL_REFUSED_KEY";
         }
+    }
+    if (dvm_has_api_key(body)) {
+        (void)snprintf(msg, cap, "%s",
+                       "refused: body contains an API key token; never "
+                       "post keys, onion addresses, IPs, or absolute paths");
+        return "MAIL_REFUSED_KEY";
     }
     if (dvm_has_ipv4(body)) {
         (void)snprintf(msg, cap, "%s",
@@ -855,6 +939,7 @@ static void dvm_ack(const struct zcl_command_request *req,
 {
     long long cursor;
     char path[PATH_MAX + 64];
+    char tmp[PATH_MAX + 96];
     char text[64];
     const char *agent;
     int fd;
@@ -875,24 +960,35 @@ static void dvm_ack(const struct zcl_command_request *req,
         return;
     }
     (void)snprintf(path, sizeof(path), "%s/cursor.%s", maildir, agent);
+    (void)snprintf(tmp, sizeof(tmp), "%s/.cursor.%s.%ld.tmp", maildir, agent,
+                   (long)getpid());
     len = (size_t)snprintf(text, sizeof(text), "%lld\n", cursor);
     if (len == 0 || len >= sizeof(text)) {
         dvm_fail(reply, "BAD_INPUT", "cursor too large to record",
                  "format budget exceeded");
         return;
     }
-    fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+    /* Write to a temp file in the SAME directory, then rename it over the
+     * cursor: rename(2) is atomic, so a crash mid-write leaves the previous
+     * cursor intact instead of an empty file that would silently rewind or
+     * lose every reader's position. */
+    fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
     if (fd < 0) {
-        dvm_fail(reply, "MAIL_WRITE_FAILED", "cannot record the cursor",
-                 path);
+        dvm_fail(reply, "MAIL_WRITE_FAILED", "cannot record the cursor", tmp);
         return;
     }
     (void)fchmod(fd, 0600);
     w = write(fd, text, len);
     (void)close(fd);
     if (w != (ssize_t)len) {
-        dvm_fail(reply, "MAIL_WRITE_FAILED", "short write of the cursor",
-                 path);
+        (void)unlink(tmp);
+        dvm_fail(reply, "MAIL_WRITE_FAILED", "short write of the cursor", tmp);
+        return;
+    }
+    if (rename(tmp, path) != 0) {
+        (void)unlink(tmp);
+        dvm_fail(reply, "MAIL_WRITE_FAILED",
+                 "cannot install the cursor file", path);
         return;
     }
     (void)json_push_kv_str(&reply->data, "leaf", DVM_LEAF);

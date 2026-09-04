@@ -18,14 +18,17 @@
 #include "test/test_core.h"
 
 #include "command/native_command.h"
+#include "command/native_devagent.h"
 #include "config/command_catalog.h"
 #include "json/json.h"
 #include "kernel/command_registry.h"
 
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #if !defined(_WIN32)
+#include <dirent.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -163,6 +166,25 @@ static void dvx_ack(struct dvx_call *c, const char *agent, long long cursor)
         (void)json_push_kv_str(&c->input, "agent", agent);
     (void)json_push_kv_int(&c->input, "cursor", cursor);
 }
+
+#if !defined(_WIN32)
+/* Refused rows must never reach the outbox: a clean pull returns nothing. */
+static bool dvx_outbox_empty(void)
+{
+    struct dvx_call p;
+    const struct json_value *rows;
+    bool empty;
+    dvx_pull(&p, 0, NULL, NULL);
+    if (!dvx_run(&p) || !dvx_ok(&p)) {
+        dvx_end(&p);
+        return false;
+    }
+    rows = dvx_arr(&p, "rows");
+    empty = rows != NULL && rows->num_children == 0;
+    dvx_end(&p);
+    return empty;
+}
+#endif
 
 int test_devagent_mail(void);
 int test_devagent_mail(void)
@@ -315,6 +337,161 @@ int test_devagent_mail(void)
         dvx_restore();
         PASS();
     }
+
+    TEST("mail: a traversal path starting with the real root is refused") {
+        struct dvx_call c;
+        char root[PATH_MAX];
+        char body[PATH_MAX + 64];
+        /* Reproduces the actual defect: a plain prefix strncmp against the
+         * checkout root, with no canonicalization, let a body naming
+         * <root>/../../../etc/shadow through as "under root" because the
+         * bytes of `root` do prefix it. Use the REAL resolved root (not a
+         * stand-in path) and a tail word that trips no other refusal rule,
+         * so this test only passes when the ".." climb itself is caught. */
+        ASSERT(zcl_devagent_checkout_root(NULL, root, sizeof(root)));
+        (void)snprintf(body, sizeof(body), "read %s/../../../secret please",
+                       root);
+        dvx_isolate("dotdot");
+        dvx_post(&c, "alice", "*", "note", body);
+        ASSERT(dvx_run(&c));
+        ASSERT(!dvx_ok(&c));
+        ASSERT(strstr(c.reply.error.code, "REFUSED") != NULL);
+        ASSERT(strstr(c.reply.error.code, "PATH") != NULL);
+        dvx_end(&c);
+        ASSERT(dvx_outbox_empty());
+        dvx_restore();
+        PASS();
+    }
+
+    TEST("mail: a bare .. and a mid-token /../ are both refused") {
+        struct dvx_call c1, c2;
+        char root[PATH_MAX];
+        char body1[PATH_MAX + 64];
+        char body2[PATH_MAX + 64];
+        ASSERT(zcl_devagent_checkout_root(NULL, root, sizeof(root)));
+        /* Token equal to the root plus a trailing "/.." (ends in "/.."). */
+        (void)snprintf(body1, sizeof(body1), "see %s/.. please", root);
+        /* ".." in the middle of the token, not just at the end. */
+        (void)snprintf(body2, sizeof(body2), "see %s/../secret/x please",
+                       root);
+        dvx_isolate("dotdot2");
+        dvx_post(&c1, "alice", "*", "note", body1);
+        ASSERT(dvx_run(&c1));
+        ASSERT(!dvx_ok(&c1));
+        ASSERT(strstr(c1.reply.error.code, "REFUSED") != NULL);
+        ASSERT(strstr(c1.reply.error.code, "PATH") != NULL);
+        dvx_end(&c1);
+        ASSERT(dvx_outbox_empty());
+        dvx_restore();
+        dvx_isolate("dotdot3");
+        dvx_post(&c2, "alice", "*", "note", body2);
+        ASSERT(dvx_run(&c2));
+        ASSERT(!dvx_ok(&c2));
+        ASSERT(strstr(c2.reply.error.code, "REFUSED") != NULL);
+        ASSERT(strstr(c2.reply.error.code, "PATH") != NULL);
+        dvx_end(&c2);
+        ASSERT(dvx_outbox_empty());
+        dvx_restore();
+        PASS();
+    }
+
+    TEST("mail: a Z.ai-shaped key token in the body is refused") {
+        struct dvx_call c;
+        dvx_isolate("apikey");
+        /* 32 hex chars, a dot, 16 alnum: the Z.ai key shape, bare. */
+        dvx_post(&c, "alice", "*", "note",
+                 "token 0123456789abcdef0123456789abcdef.ABCDEFGHIJKLMNOP "
+                 "leaked");
+        ASSERT(dvx_run(&c));
+        ASSERT(!dvx_ok(&c));
+        ASSERT(strstr(c.reply.error.code, "REFUSED") != NULL);
+        ASSERT(strstr(c.reply.error.code, "KEY") != NULL);
+        dvx_end(&c);
+        ASSERT(dvx_outbox_empty());
+        dvx_restore();
+        PASS();
+    }
+
+    TEST("mail: a bare IPv4 address in the body is refused") {
+        struct dvx_call c;
+        dvx_isolate("ipv4");
+        dvx_post(&c, "alice", "*", "note",
+                 "gateway at 192.168.1.7 is down again");
+        ASSERT(dvx_run(&c));
+        ASSERT(!dvx_ok(&c));
+        ASSERT(strstr(c.reply.error.code, "REFUSED") != NULL);
+        ASSERT(strstr(c.reply.error.code, "IP") != NULL);
+        dvx_end(&c);
+        ASSERT(dvx_outbox_empty());
+        dvx_restore();
+        PASS();
+    }
+
+    TEST("mail: an absolute path outside the root is refused") {
+        struct dvx_call c;
+        dvx_isolate("outside");
+        dvx_post(&c, "alice", "*", "note",
+                 "config broke, see /etc/shadow.conf for details");
+        ASSERT(dvx_run(&c));
+        ASSERT(!dvx_ok(&c));
+        ASSERT(strstr(c.reply.error.code, "REFUSED") != NULL);
+        ASSERT(strstr(c.reply.error.code, "PATH") != NULL);
+        dvx_end(&c);
+        ASSERT(dvx_outbox_empty());
+        dvx_restore();
+        PASS();
+    }
+
+#if !defined(_WIN32)
+    TEST("mail: ack leaves the cursor exact and no temp file behind") {
+        struct dvx_call c, a;
+        char maildir[1100], path[1200], buf[64];
+        FILE *f;
+        DIR *d;
+        struct dirent *ent;
+        bool stray_tmp = false;
+        dvx_isolate("acktmp");
+        dvx_post(&c, "alice", "*", "note", "cursor me atomically");
+        ASSERT(dvx_run(&c));
+        ASSERT(dvx_ok(&c));
+        cursor = dvx_int(&c, "cursor");
+        dvx_end(&c);
+        dvx_ack(&a, "alice", cursor);
+        ASSERT(dvx_run(&a));
+        ASSERT(dvx_ok(&a));
+        dvx_end(&a);
+        dvx_maildir(maildir, sizeof(maildir));
+        (void)snprintf(path, sizeof(path), "%s/cursor.alice", maildir);
+        f = fopen(path, "r");
+        ASSERT(f != NULL);
+        if (f) {
+            size_t got;
+            ASSERT((got = fread(buf, 1, sizeof(buf) - 1, f)) > 0);
+            buf[got] = '\0';
+            /* EXACTLY the cursor: decimal, newline, nothing else. */
+            ASSERT(got == strlen(buf));
+            ASSERT_EQ((long long)atoll(buf), cursor);
+            {
+                char want[64];
+                (void)snprintf(want, sizeof(want), "%lld\n", cursor);
+                ASSERT(strcmp(buf, want) == 0);
+            }
+            (void)fclose(f);
+        }
+        d = opendir(maildir);
+        ASSERT(d != NULL);
+        if (d) {
+            while ((ent = readdir(d)) != NULL) {
+                if (strstr(ent->d_name, ".tmp") != NULL)
+                    stray_tmp = true;
+            }
+            (void)closedir(d);
+        }
+        ASSERT(!stray_tmp);
+        dvx_restore();
+        PASS();
+    }
+#endif
 
 #if !defined(_WIN32)
     TEST("mail: two processes posting at once never interleave bytes") {
