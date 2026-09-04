@@ -74,6 +74,7 @@
 #include "base/safe_alloc.h"
 #include "controllers/agent_impact_rules.h"
 #include "json/json.h"
+#include "platform/clock.h"
 #include "sha3/sha3.h"
 #include "util/log_macros.h"
 #include "util/spawn.h"
@@ -81,7 +82,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
 
 #define DVT_LEAF "dev.agent.ticketkey"
 #define DVT_HARNESS "ticketkey.v1"
@@ -656,14 +656,9 @@ static bool dvt_scannable(const char *path)
                    strcmp(dot, ".inc") == 0 || strcmp(dot, ".def") == 0);
 }
 
-static int64_t dvt_elapsed_ms(const struct timespec *t0)
+static int64_t dvt_elapsed_ms(int64_t t0_ns)
 {
-    struct timespec t1;
-    int64_t ms;
-    if (clock_gettime(CLOCK_MONOTONIC, &t1) != 0)
-        return 0;
-    ms = (int64_t)(t1.tv_sec - t0->tv_sec) * 1000 +
-         (int64_t)(t1.tv_nsec - t0->tv_nsec) / 1000000;
+    int64_t ms = (clock_now_monotonic_ns() - t0_ns) / 1000000;
     return ms < 0 ? 0 : ms;
 }
 
@@ -775,7 +770,7 @@ static bool dvt_epoch(const char *top, char epoch_hex[65])
 void zcl_native_handle_dev_agent_ticketkey(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
 {
-    struct timespec t0;
+    int64_t t0_ns;
     const struct json_value *input;
     const char *group;
     const char *cwd;
@@ -799,10 +794,7 @@ void zcl_native_handle_dev_agent_ticketkey(
     bool progress;
     (void)memset(&set, 0, sizeof(set));
 
-    if (clock_gettime(CLOCK_MONOTONIC, &t0) != 0) {
-        t0.tv_sec = 0;
-        t0.tv_nsec = 0;
-    }
+    t0_ns = clock_now_monotonic_ns();
     if (!request || !reply)
         return;
     (void)json_push_kv_str(&reply->data, "leaf", DVT_LEAF);
@@ -1081,7 +1073,7 @@ void zcl_native_handle_dev_agent_ticketkey(
     (void)json_push_kv_str(&reply->data, "epoch", epoch_hex);
     (void)json_push_kv_str(&reply->data, "harness", DVT_HARNESS);
     (void)json_push_kv_str(&reply->data, "key", key_hex);
-    (void)json_push_kv_int(&reply->data, "elapsed_ms", dvt_elapsed_ms(&t0));
+    (void)json_push_kv_int(&reply->data, "elapsed_ms", dvt_elapsed_ms(t0_ns));
     reply->status = ZCL_COMMAND_STATUS_PASSED;
     reply->exit_code = ZCL_COMMAND_EXIT_OK;
 

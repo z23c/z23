@@ -58,6 +58,7 @@
 #include "command/native_command.h"
 
 #include "json/json.h"
+#include "platform/clock.h"
 #include "util/spawn.h"
 
 #include <limits.h>
@@ -236,7 +237,7 @@ void zcl_native_handle_dev_agent_triage(
     json_set_array(&branches_arr);
     json_init(&row);
 
-    now = time(NULL);
+    now = (time_t)(clock_now_wall_ms() / 1000);
 
     for (size_t i = 0; i < names.count && (long long)i < limit; i++) {
         const char *branch = names.names[i];

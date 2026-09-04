@@ -65,6 +65,7 @@
 #include "command/native_command.h"
 
 #include "json/json.h"
+#include "platform/clock.h"
 #include "util/spawn.h"
 
 #include <limits.h>
@@ -451,7 +452,7 @@ void zcl_native_handle_dev_agent_claim(
 
     char ts[40];
     {
-        time_t now = time(NULL);
+        time_t now = (time_t)(clock_now_wall_ms() / 1000);
         struct tm tm_utc;
         gmtime_r(&now, &tm_utc);
         (void)strftime(ts, sizeof(ts), "%Y-%m-%dT%H:%M:%SZ", &tm_utc);
