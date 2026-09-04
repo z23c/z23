@@ -966,6 +966,11 @@ ZCL_CAPABILITY_SYMBOL("pipe2", CAP_HARMLESS,
 ZCL_CAPABILITY_SYMBOL("poll", CAP_HARMLESS,
     "Reports readiness of descriptors the caller already holds. It "
     "creates nothing and moves no bytes.")
+ZCL_CAPABILITY_SYMBOL("posix_fadvise", CAP_HARMLESS,
+    "An advisory readahead/drop hint about a range of a descriptor the "
+    "caller already holds. It opens nothing, creates nothing and moves "
+    "no bytes; the kernel is free to ignore it entirely. Same class as "
+    "its mapped-page sibling posix_madvise.")
 ZCL_CAPABILITY_SYMBOL("posix_madvise", CAP_HARMLESS,
     "An advisory hint about pages already mapped.")
 ZCL_CAPABILITY_SYMBOL("pow", CAP_HARMLESS, "")
