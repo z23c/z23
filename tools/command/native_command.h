@@ -2428,6 +2428,12 @@ void zcl_native_handle_dev_agent_outcomes(
 void zcl_native_handle_dev_agent_ticketkey(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
+/* dev.agent.queue — typed non-blocking unit dispatch
+ * (tools/command/native_devagent_queue.c). Same one-handler-per-file shape
+ * as the lane-discipline leaves above. */
+void zcl_native_handle_dev_agent_queue(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
 
 /* dev.train.* — stacked-lane construction (tools/command/native_dev_train_command.c).
  * One file for all four verbs: build, check, status, drop. Compiled

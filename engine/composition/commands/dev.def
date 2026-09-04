@@ -1433,3 +1433,39 @@ ZCL_COMMAND_DEV_COMMAND(
     zcl_native_handle_dev_land,
     "the landing queue is a development-lane coordination surface",
     "z23-dev dev land")
+
+/* ── dev.agent.queue ───────────────────────────────────────────────────────
+ * The fleet's unit dispatch as a typed, non-blocking API instead of shell.
+ * A poster appends one durable row and returns; a scheduler step takes the
+ * oldest queued row, finds a free warm worktree in the pool, and launches
+ * the harness detached; a reaper collects receipts into outcomes and
+ * requeues rate-limit refusals; status renders one human screen. No verb
+ * blocks on a model, a build, or another process: a long-lived loop is the
+ * caller's business (a timer calling next+reap). */
+ZCL_COMMAND_DEV_COMMAND(
+    "dev.agent.queue", "dev.agent", "",
+    "Post, dispatch, reap, and inspect async flash-unit runs without blocking",
+    "One durable unit queue over the owner-private state root: post appends "
+    "a row {seq, kind, name, group, path, brief, model, attempt} to "
+    "queue/queue.jsonl with a single O_APPEND write; next takes the oldest "
+    "queued row under a short flock, finds a warm worktree in queue/pool.txt "
+    "that is free, and launches the unit harness detached with the same "
+    "argv the interim shell used; reap collects receipts newer than the "
+    "reap stamp into queue/outcomes.jsonl and requeues a rate-limit refusal "
+    "with attempt+1 up to 3; status reports queued, running, recent "
+    "outcomes, and pool occupancy. Bodies and paths are validated: no path "
+    "outside the repo or state dir, no name outside [A-Za-z0-9_.-]{1,64}. "
+    "It touches no network and never waits for a run.", 65536,
+    "agent,queue,post,dispatch,reap,status,async,worktree,flash",
+    "zcl.agent_queue_input.v1", "zcl.agent_queue.v1",
+    "action,kind,name,group,path,brief,model,attempt,json,cwd", "action",
+    "z23 dev agent queue post --kind=leaf --name=situation",
+    ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_DEV_MUTATION,
+    ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_MODE_SYNC, ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_DEV_STATE_WRITE,
+    ZCL_COMMAND_TRAIT_DEV_ONLY | ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    zcl_native_handle_dev_agent_queue,
+    "the unit queue is a development-lane coordination surface",
+    "z23-dev dev agent queue")

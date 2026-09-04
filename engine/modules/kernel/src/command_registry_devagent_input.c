@@ -28,6 +28,16 @@ bool zcl_command_registry_devagent_input_ok(const char *key,
                                             const struct json_value *value,
                                             bool *type_ok)
 {
+    if (strcmp(key, "attempt") == 0) {
+        /* dev.agent.queue's post attempt number: `--attempt=2` types as an
+         * integer, so the default string branch would make the leaf
+         * uninvokable from a shell while raw JSON worked. The handler owns
+         * the default (1) and the requeue ceiling (3); the transport only
+         * admits the positive integer shape. */
+        *type_ok = value->type == JSON_INT && json_get_int(value) >= 1 &&
+                   json_get_int(value) <= 1000000;
+        return true;
+    }
     if (strcmp(key, "max_age_days") == 0 || strcmp(key, "ceiling_lines") == 0) {
         /* dev.agent.triage staleness window and dev.agent.ceiling per-file
          * line ceiling. Both are typed as integers by the CLI
