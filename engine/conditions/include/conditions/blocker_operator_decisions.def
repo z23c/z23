@@ -333,3 +333,28 @@ ZCL_BLOCKER_DECISION(bundle_exporter.degraded,
     "different binary. A self-consistent foreign producer claim is still "
     "foreign, and adopting one would let this node publish state under an "
     "identity it cannot honestly make.")
+
+/* zcode_dht.own_delegation_expired — the ZCODE DHT service disables itself
+ * when this node's own delegation.v1 document is past its expiry. Renewal is
+ * a signature under the master ZID seed, which this process does not read or
+ * hold; the choice below is therefore genuinely a person's, and the DHT
+ * service stays off in the meantime rather than serving under an expired
+ * claim. ─────────────────────────────────────────────────────────────────── */
+ZCL_BLOCKER_DECISION(zcode_dht.own_delegation_expired,
+    "A person must choose; the node cannot renew its own delegation. This "
+    "node's ZCODE DHT delegation has expired, so its DHT service is disabled: "
+    "it publishes and answers nothing on the DHT. Re-signing requires the "
+    "master ZID seed, which this process never reads or holds. "
+    "OPTION A - run the zcode.network.delegate command on the machine that "
+    "holds the master ZID seed file to issue a fresh delegation, then restart "
+    "this node (or wait for its retry) to pick it up. The DHT service comes "
+    "back and the blocker clears. Cost: the seed file has to be present, "
+    "briefly, wherever that command runs. "
+    "OPTION B - leave the delegation expired. Everything else on this node is "
+    "unaffected: consensus, relay, wallet and the rest of the commons keep "
+    "working. Cost is the DHT surface only — this node stops contributing "
+    "records and stops answering lookups, so peers that would have resolved "
+    "through it fall back to others. "
+    "There is deliberately no option that keeps serving under the expired "
+    "document. An expired delegation is exactly the claim other nodes are "
+    "supposed to reject, and honouring it locally would only hide that.")

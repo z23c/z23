@@ -485,3 +485,14 @@ ZCL_BLOCKER_REMEDY(sovereign_promotion.seam_mismatch,           OWNER)
 ZCL_BLOCKER_REMEDY(hotswap.retired_generation_undrained,        ESCAPE(hotswap_reclaim_retry))
 ZCL_BLOCKER_REMEDY(config.reload_diverged,                      OWNER)
 ZCL_BLOCKER_REMEDY(service.declaration_diverged,                OWNER)
+
+/*   zcode_dht.own_delegation_expired — this node's own delegation.v1 document
+ *     has expired (contexts/commons/modules/vcs/src/zcode_dht_service.c).
+ *     OWNER, and it can be nothing else: re-signing needs the master ZID
+ *     seed, which vcs_zcode_dht_delegation_sign() takes as an argument and
+ *     this process never reads or holds. The only place a delegation is
+ *     (re-)issued is the zcode.network.delegate command, run by a person
+ *     with that seed file. There is no condition that could clear this
+ *     without the seed, and inventing one would mean holding the master
+ *     identity in the node. ─────────────────────────────────────────────── */
+ZCL_BLOCKER_REMEDY(zcode_dht.own_delegation_expired,            OWNER)
