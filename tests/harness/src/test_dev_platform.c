@@ -3679,6 +3679,63 @@ static int test_template_generator_concurrency(void)
     return failures;
 }
 
+/* The lint gates keep their scan scopes honest by planting short-lived source
+ * files inside the production tree, and the suite runs those groups next to
+ * every other group in the same checkout. A whole-tree source-identity capture
+ * takes seconds, so before this contract existed a fixture that appeared or
+ * vanished during one made `make` refuse to select a compile epoch — every
+ * concurrent build in the worktree died having run nothing.
+ *
+ * The Makefile already declines to compile these paths (a "/_" component is
+ * never a translation unit), so binding them into the build identity bought
+ * nothing. Prove both halves at once: an ephemeral fixture stays visible to
+ * Git, which is what the gates grep, while leaving the source identity of the
+ * tree byte-identical. */
+#define DP_EPHEMERAL_FIXTURE_REL \
+    "engine/services/src/_dev_platform_source_identity_fixture_tmp.c"
+
+static int test_ephemeral_fixture_leaves_source_identity(void)
+{
+    int failures = 0;
+    TEST("dev platform: ephemeral lint fixtures do not move source identity") {
+        pid_t child = fork();
+        ASSERT(child >= 0);
+        if (child == 0) {
+            execlp("bash", "bash", "-c",
+                   "set -eu\n"
+                   "fixture=" DP_EPHEMERAL_FIXTURE_REL "\n"
+                   "rm -f \"$fixture\"\n"
+                   "before=\"$(tools/dev/source-identity.sh capture-record)\"\n"
+                   "printf 'void zcl_ephemeral_fixture(void) { }\\n' "
+                   "> \"$fixture\"\n"
+                   "trap 'rm -f \"$fixture\"' EXIT HUP INT TERM\n"
+                   "listing=\"$(git ls-files --others --exclude-standard -- "
+                   "engine/services/src)\"\n"
+                   "case \"$listing\" in\n"
+                   "  *\"$fixture\"*) ;;\n"
+                   "  *) echo 'fixture is hidden from Git; the lint gates that"
+                   " grep --untracked would stop seeing their own fixtures'"
+                   " >&2; exit 1 ;;\n"
+                   "esac\n"
+                   "during=\"$(tools/dev/source-identity.sh capture-record)\"\n"
+                   "[ \"$before\" = \"$during\" ] || {\n"
+                   "  echo 'an ephemeral lint fixture changed the source"
+                   " identity; every concurrent make in this checkout would"
+                   " refuse to select a compile epoch' >&2\n"
+                   "  exit 1\n"
+                   "}\n",
+                   (char *)NULL);
+            _exit(127);
+        }
+        int status = 0;
+        ASSERT(waitpid(child, &status, 0) == child);
+        ASSERT(WIFEXITED(status));
+        ASSERT(WEXITSTATUS(status) == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_dev_platform_platform_arm(void)
 {
     int failures = 0;
@@ -3699,6 +3756,7 @@ static int test_dev_platform_platform_arm(void)
     failures += test_reflex_policy_boundary();
     failures += test_hotfork_descriptor_boundary();
     failures += test_template_generator_concurrency();
+    failures += test_ephemeral_fixture_leaves_source_identity();
     failures += test_menu_and_search();
     failures += test_change_classification();
     failures += test_change_plan_closure();

@@ -9,7 +9,12 @@
 # generated vendor headers selected by the current build are included even when
 # Git-ignored. Every file beneath the C23 source/include/template roots is also
 # inventoried independently of `.gitignore` and `.git/info/exclude`, because
-# Make wildcards and compiler includes do not honor Git ignore rules. The
+# Make wildcards and compiler includes do not honor Git ignore rules -- with
+# the one exception Make itself makes, the ephemeral lint fixture (a "/_" path
+# component), which no compile glob admits. `capture-record` re-derives the
+# whole record in a fresh process when the tree moves under an attempt, so a
+# concurrent writer costs seconds rather than the whole build; a tree that
+# never holds still still fails closed. The
 # compiler/toolchain state, environment, and full build configuration remain
 # deferred. Hidden index bits, discovery errors, and unsupported source types
 # fail closed. Linked binaries must also `verify-record` after linking; capture
@@ -68,6 +73,21 @@ fail()
 {
     echo "source-identity: $*" >&2
     exit 3
+}
+
+# A capture that loses a race with a concurrent writer is NOT the same class of
+# failure as an unreadable submodule or an unsupported file type. The test
+# suite deliberately plants short-lived files inside the worktree (the lint
+# gates do it so their scan scopes stay honest), and any other checkout
+# activity can create or remove one while a whole-tree capture is running.
+# Exit 4 marks "the tree moved under this attempt, ask again"; capture-record
+# re-derives the whole record in a fresh process instead of stopping the build
+# on the first blip. Exit 3 stays reserved for a verdict a retry cannot change.
+RACY_EXIT=4
+fail_racy()
+{
+    echo "source-identity: $*" >&2
+    exit $RACY_EXIT
 }
 
 GIT_INDEX_PATH=""
@@ -329,7 +349,46 @@ done < "$WORK/tracked-index"
 # nodes there: a compiler-followed symlink would bind only its target pathname,
 # not the mutable target bytes. `.git` metadata inside a future nested worktree
 # is pruned; initialized gitlinks are handled by collect_gitlink() above.
+#
+# One class beneath these roots is deliberately NOT a compiler input: the
+# ephemeral lint fixture. Lint-gate self-tests plant short-lived sources such
+# as engine/services/src/_trust_order_fixture_tmp.c inside the production scan
+# tree so the gates prove their scopes, and the Makefile already refuses to
+# compile them (zcl_filter_ephemeral_sources drops every path containing
+# "/_"). Inventorying a file the build never opens bought no identity and cost
+# every concurrent `make` in the checkout its compile epoch: the path set is
+# enumerated twice around a capture that takes seconds on a loaded box, so a
+# fixture that appeared or vanished in between reported "source inventory
+# changed during identity capture" and stopped the build before a single test
+# ran. Prune the same "/_" component the compile globs prune, so the inventory
+# covers exactly what the build can read.
+#
+# tools/lint/scan_exclusions.sh already gave every repo-scanning LINT gate
+# immunity to this same "scanner fixture-race"; this walk is the scanner that
+# never got it. The rule here is the Makefile's, not that file's narrower
+# fixture-name glob, because the authority for "is this a build input" is the
+# glob that decides whether the compiler ever opens it.
 BUILD_INPUT_ROOTS=(core engine contexts cognition platform tests tools)
+
+# The Makefile's own ephemeral-source predicate, expressed once here so the
+# inventory and the compile globs cannot drift apart: a path beneath a build
+# input root that carries a "/_" component is a lint fixture, never a
+# translation unit. Anything outside those roots is left alone.
+is_ephemeral_build_input()
+{
+    local candidate="$1" root
+    case "$candidate" in
+        */_*) ;;
+        *) return 1 ;;
+    esac
+    for root in "${BUILD_INPUT_ROOTS[@]}"; do
+        case "$candidate" in
+            "$root"/*) return 0 ;;
+        esac
+    done
+    return 1
+}
+
 existing_build_roots=()
 for path in "${BUILD_INPUT_ROOTS[@]}"; do
     if [ -e "$path" ] || [ -L "$path" ]; then
@@ -349,7 +408,7 @@ if [ "$MODE" = verify-mutation ]; then
     done
 fi
 if [ "${#existing_build_roots[@]}" -gt 0 ]; then
-    find "${existing_build_roots[@]}" -name .git -prune -o \
+    find "${existing_build_roots[@]}" \( -name .git -o -name "_*" \) -prune -o \
         ! -type d ! -type f -print0 \
         > "$WORK/build-root-unsupported" 2>/dev/null ||
         fail "build input root discovery failed"
@@ -357,11 +416,11 @@ if [ "${#existing_build_roots[@]}" -gt 0 ]; then
         IFS= read -r -d '' path < "$WORK/build-root-unsupported" || true
         fail "unsupported compiler input beneath build roots: ${path:-unknown}"
     fi
-    find "${existing_build_roots[@]}" -name .git -prune -o \
+    find "${existing_build_roots[@]}" \( -name .git -o -name "_*" \) -prune -o \
         -type f -print0 >> "$WORK/tracked-source" 2>/dev/null ||
         fail "build input inventory failed"
     if [ "$MODE" = verify-mutation ]; then
-        find "${existing_build_roots[@]}" -name .git -prune -o \
+        find "${existing_build_roots[@]}" \( -name .git -o -name "_*" \) -prune -o \
             -type d -print0 >> "$WORK/source-dirs" 2>/dev/null ||
             fail "build input directory inventory failed"
     fi
@@ -411,9 +470,22 @@ if [ -e vendor/include ] || [ -L vendor/include ]; then
             fail "vendor include directory inventory failed"
     fi
 fi
+# The nonignored-untracked selector reaches the same ephemeral lint fixtures
+# the recursive walk above prunes: the trust-order gate greps `--untracked`,
+# so its fixture must stay visible to Git while staying out of the build
+# inventory. Drop exactly what the compile globs drop -- a "/_" component
+# beneath a build input root. Every other untracked path, including one
+# outside those roots, is inventoried unchanged.
+: > "$WORK/untracked-source"
+while IFS= read -r -d '' path; do
+    if is_ephemeral_build_input "$path"; then
+        continue
+    fi
+    printf '%s\0' "$path" >> "$WORK/untracked-source"
+done < "$WORK/untracked"
 {
     cat "$WORK/tracked-source"
-    cat "$WORK/untracked"
+    cat "$WORK/untracked-source"
 } | LC_ALL=C sort -zu > "$WORK/source-paths"
 
 if [ "$MODE" = verify-mutation ]; then
@@ -528,11 +600,11 @@ capture_portable()
                 printf 'L\0%s\0%s\0' "$mode" "$digest"
             elif [ -f "$path" ]; then
                 raw_mode="$(stat -c '%f' -- "$path" 2>/dev/null)" ||
-                    fail "could not stat source: $path"
+                    fail_racy "could not stat source: $path"
                 canonical_source_mode F "$raw_mode" mode ||
                     fail "noncanonical regular-file mode: $path"
                 digest="$(sha256_file "$path")" ||
-                    fail "could not hash source: $path"
+                    fail_racy "could not hash source: $path"
                 printf 'F\0%s\0%s\0' "$mode" "$digest"
             elif [ ! -e "$path" ]; then
                 printf 'D\0'
@@ -581,7 +653,7 @@ capture_batched()
             printf '%s\0' "${existing_paths[@]}" > "$WORK/mode-paths"
             "$SOURCE_IDENTITY_BATCH" mode < "$WORK/mode-paths" \
                 > "$WORK/modes" ||
-                fail "dirty source changed while collecting file modes"
+                fail_racy "dirty source changed while collecting file modes"
             if [ "${ZCL_SOURCE_IDENTITY_BATCH_SHADOW:-0}" = 1 ]; then
                 : > "$WORK/modes.legacy"
                 for ((batch_start = 0;
@@ -601,12 +673,12 @@ capture_batched()
                 batch=("${existing_paths[@]:batch_start:batch_size}")
                 stat -c '%f' -- "${batch[@]}" >> "$WORK/modes" \
                     2>/dev/null ||
-                    fail "dirty source changed while collecting file modes"
+                    fail_racy "dirty source changed while collecting file modes"
             done
         fi
         mapfile -t existing_modes < "$WORK/modes"
         [ "${#existing_modes[@]}" -eq "${#existing_paths[@]}" ] ||
-            fail "file-mode batch was incomplete"
+            fail_racy "file-mode batch was incomplete"
     fi
 
     if [ "${#regular_paths[@]}" -gt 0 ]; then
@@ -615,7 +687,7 @@ capture_batched()
             printf '%s\0' "${regular_paths[@]}" > "$WORK/hash-paths"
             "$SOURCE_IDENTITY_BATCH" hash < "$WORK/hash-paths" \
                 > "$WORK/hashes" ||
-                fail "dirty source changed while hashing regular files"
+                fail_racy "dirty source changed while hashing regular files"
             if [ "${ZCL_SOURCE_IDENTITY_BATCH_SHADOW:-0}" = 1 ]; then
                 : > "$WORK/hashes.legacy"
                 for ((batch_start = 0;
@@ -634,24 +706,24 @@ capture_batched()
                   batch_start += batch_size)); do
                 batch=("${regular_paths[@]:batch_start:batch_size}")
                 sha256sum --zero -- "${batch[@]}" >> "$WORK/hashes" ||
-                    fail "dirty source changed while hashing regular files"
+                    fail_racy "dirty source changed while hashing regular files"
             done
         fi
         while IFS= read -r -d '' record; do
             [ "$hash_i" -lt "${#regular_paths[@]}" ] ||
-                fail "regular-file hash batch returned extra rows"
+                fail_racy "regular-file hash batch returned extra rows"
             digest="${record:0:64}"
             emitted="${record:66}"
             [[ "$digest" =~ ^[0-9a-f]{64}$ ]] &&
                 [[ "${record:64:2}" = "  " ||
                    "${record:64:2}" = " *" ]] &&
                 [ "$emitted" = "${regular_paths[$hash_i]}" ] ||
-                fail "regular-file hash batch was malformed or reordered"
+                fail_racy "regular-file hash batch was malformed or reordered"
             regular_digests+=("$digest")
             hash_i=$((hash_i + 1))
         done < "$WORK/hashes"
         [ "$hash_i" -eq "${#regular_paths[@]}" ] ||
-            fail "regular-file hash batch was incomplete"
+            fail_racy "regular-file hash batch was incomplete"
     fi
 
     {
@@ -746,11 +818,11 @@ mutation_token()
         batch=("${existing_paths[@]:batch_start:batch_size}")
         stat --printf='%d:%i:%s:%f:%y:%z\0' -- "${batch[@]}" \
             >> "$WORK/mutation-metadata" 2>/dev/null ||
-            fail "source changed while collecting mutation metadata"
+            fail_racy "source changed while collecting mutation metadata"
     done
     mapfile -d '' -t metadata < "$WORK/mutation-metadata"
     [ "${#metadata[@]}" -eq "${#existing_paths[@]}" ] ||
-        fail "mutation metadata batch was incomplete"
+        fail_racy "mutation metadata batch was incomplete"
 
     {
         printf 'zcl.dev_source_mutation.v1\0'
@@ -770,7 +842,7 @@ mutation_token()
         done
     } > "$WORK/mutation-preimage"
     [ "$existing_i" -eq "${#metadata[@]}" ] ||
-        fail "mutation metadata consumption was incomplete"
+        fail_racy "mutation metadata consumption was incomplete"
     sha256_file "$WORK/mutation-preimage"
 }
 
@@ -940,10 +1012,10 @@ capture_record()
     identity="$(capture)" || exit $?
     mutation_after="$(mutation_token)" || exit $?
     [ "$mutation_before" = "$mutation_after" ] ||
-        fail "source mutated during identity capture"
+        fail_racy "source mutated during identity capture"
     inventory_after="$("$SELF" inventory-token)" || exit $?
     [ "$inventory_before" = "$inventory_after" ] ||
-        fail "source inventory changed during identity capture"
+        fail_racy "source inventory changed during identity capture"
     # The legacy-named `clean` slot is a v2 capture-completeness bit, not a Git
     # cleanliness claim. Exact current bytes already identify dirty worktrees;
     # deriving authority from Git HEAD/gitlink object ids would reintroduce the
@@ -1024,6 +1096,42 @@ prune_session_cache()
     done
 }
 
+# One capture attempt is a compare-and-swap against a live checkout, and a CAS
+# that cannot be retried is not a safety property -- it is an outage. Every
+# `make` in this tree opens by capturing the whole-source identity, so a single
+# file created or removed anywhere under the build roots during those seconds
+# used to stop the build outright, having run nothing. Ask again in a FRESH
+# process instead: a new process re-enumerates the path set from scratch, so a
+# successful attempt still proves the identity it returns was bracketed by an
+# unchanged inventory and mutation token. Nothing is admitted that a single
+# attempt would have admitted; only the verdict "the tree moved, try once more"
+# stops being fatal. A tree that never holds still fails exactly as before.
+CAPTURE_RECORD_ATTEMPTS="${ZCL_SOURCE_IDENTITY_CAPTURE_ATTEMPTS:-4}"
+[[ "$CAPTURE_RECORD_ATTEMPTS" =~ ^[1-9][0-9]*$ ]] ||
+    fail "ZCL_SOURCE_IDENTITY_CAPTURE_ATTEMPTS must be a positive integer"
+
+capture_record_converged()
+{
+    local attempt record rc=0
+    for ((attempt = 1; attempt <= CAPTURE_RECORD_ATTEMPTS; attempt++)); do
+        if [ "$attempt" -eq 1 ]; then
+            if record="$(capture_record)"; then
+                printf '%s\n' "$record"
+                return 0
+            else
+                rc=$?
+            fi
+        elif record="$("$SELF" capture-record-attempt)"; then
+            printf '%s\n' "$record"
+            return 0
+        else
+            rc=$?
+        fi
+        [ "$rc" -eq "$RACY_EXIT" ] || return "$rc"
+    done
+    fail "source did not hold still across $CAPTURE_RECORD_ATTEMPTS whole-tree capture attempts; another writer is still changing this checkout (see the per-attempt reasons above)"
+}
+
 # Read-through memoization wrapper around capture_record(). The FIRST call in
 # a given ZCL_SOURCE_IDENTITY_SESSION pays the full walk and caches it; every
 # later call in the SAME session (the same live Make process) reads the cache
@@ -1034,14 +1142,14 @@ capture_record_cached()
 {
     local cache tmp record
     cache="$(session_cache_path "$ZCL_SOURCE_IDENTITY_SESSION")" || {
-        capture_record
+        capture_record_converged
         return
     }
     if [ -f "$cache" ]; then
         cat -- "$cache"
         return
     fi
-    record="$(capture_record)" || return $?
+    record="$(capture_record_converged)" || return $?
     if mkdir -p "$(dirname -- "$cache")" 2>/dev/null; then
         prune_session_cache "$(dirname -- "$cache")"
         tmp="$(mktemp "$(dirname -- "$cache")/.tmp.XXXXXX" 2>/dev/null)" || tmp=""
@@ -1076,6 +1184,13 @@ case "$MODE" in
         ;;
     capture-record)
         capture_record_cached
+        ;;
+    capture-record-attempt)
+        # Internal: exactly ONE capture attempt, never memoized and never
+        # retried. capture_record_converged() re-invokes the script this way so
+        # each retry re-enumerates the inventory in a process that has not yet
+        # opened a path set. Callers outside this file want capture-record.
+        capture_record
         ;;
     inventory-token)
         inventory_token
