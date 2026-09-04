@@ -102,3 +102,42 @@ The prompt states these rules. The model must:
 ## How to approach it
 
 Re-derive every count you touch from the tree itself and say which command produced it.
+
+## Dispatch through `dev agent queue`
+
+Dispatch goes through the typed leaf `dev agent queue`, never through
+shell scripts.
+
+### Verbs
+
+| Verb | Effect |
+| --- | --- |
+| `dev agent queue post --kind=<leaf\|doc\|file\|fix-gate> --name=<n>` | Appends one durable row and returns its sequence number at once. |
+| `dev agent queue next` | Takes the oldest queued row, finds a free warm worktree in the pool, and launches the harness detached. Returns the run or `no_free_worktree` or `empty`. Never waits for the run. |
+| `dev agent queue reap` | Records every new receipt as an outcome and requeues a rate-limit refusal with the next attempt number. Returns what it recorded. |
+| `dev agent queue status [--json]` | One screen: queued rows, running rows with worktree and age, recent outcomes, pool occupancy. |
+
+Kinds: `leaf` fixes one dev-agent leaf judged by its own group;
+`fix-gate` is the same shape for a free-form fix; `doc` writes one document
+from a brief with no group; `file` writes one file judged by `--group`.
+Doc and file units need `--path` (a repo-relative path) and `--brief` (an
+existing file inside the repo or the state dir).
+
+### State
+
+Rows live at `<state>/queue/queue.jsonl`, outcomes at
+`<state>/queue/outcomes.jsonl`, the pool list at
+`<state>/queue/pool.txt` (one warm worktree directory per line; warm means
+the directory carries `.eu-warm`). Runs live at
+`<state>/engine/<name>/a<attempt>/` with the verdict in `receipt.json`.
+`<state>` is the owner-private platform state root.
+
+### Loop
+
+No verb blocks on a model, a build, or another process. A long-lived loop
+is the caller's business: a timer or watcher calling `next` plus `reap`.
+Attempts stop after the third; a unit still failing then goes to a stronger
+model or is dropped. The harness is `tools/engine_unit.c`; the leaf
+implementation is `tools/command/native_devagent_queue.c`, declared in
+`engine/composition/commands/dev.def` and proved by
+`tests/harness/src/test_devagent_queue.c`.
