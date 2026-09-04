@@ -789,6 +789,11 @@ struct zcl_result chain_restore_finalize(struct main_state *ms, const char *data
                          "sentinel (%s): post-restore integrity is clean",
                          was_terminal ? "terminal" : "pending");
             }
+            /* Clean integrity ends the repair episode, so the durable
+             * per-finding attempt ledger goes with it. Retiring it anywhere
+             * else would reset the budget the boot gate uses to stop
+             * restarting on an unchanging finding. */
+            boot_repair_episode_clear(datadir);
         }
     }
 

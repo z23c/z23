@@ -100,17 +100,12 @@ static bool ar_read(const char *path, int32_t *anchor, int *count, int *reason)
     return ok;
 }
 
-/* fsync-durable write of "<anchor> <count> <reason>\n". Returns true on
- * success. */
-static bool ar_write(const char *datadir, const char *path,
-                     int32_t anchor, int count, int reason)
+/* fsync-durable staged replace of `path` with `buf`. Shared by the request
+ * file and the repair-episode ledger — both are top-level sentinels that must
+ * survive a crash mid-rebuild, so they get one write path, not two. */
+static bool ar_durable_write(const char *datadir, const char *path,
+                             const char *buf, size_t len)
 {
-    char buf[64];
-    int len = snprintf(buf, sizeof(buf), "%d %d %d\n", (int)anchor, count,
-                       reason);
-    if (len < 0 || len >= (int)sizeof(buf))
-        return false;
-
     char staging[640];
     int staged_len = snprintf(
         staging, sizeof(staging), "%s.%llu-%u.tmp", path,
@@ -125,7 +120,7 @@ static bool ar_write(const char *datadir, const char *path,
     bool identified = created &&
                       platform_private_file_identity(&file, &identity);
     bool ok = identified &&
-              platform_private_file_write_at(&file, buf, (size_t)len, 0) &&
+              platform_private_file_write_at(&file, buf, len, 0) &&
               platform_private_file_truncate(&file, (uint64_t)len) &&
               platform_private_file_flush(&file) &&
               platform_private_file_replace(&file, staging, path) &&
@@ -141,6 +136,19 @@ static bool ar_write(const char *datadir, const char *path,
     }
     platform_private_file_close(&file);
     return true;
+}
+
+/* fsync-durable write of "<anchor> <count> <reason>\n". Returns true on
+ * success. */
+static bool ar_write(const char *datadir, const char *path,
+                     int32_t anchor, int count, int reason)
+{
+    char buf[64];
+    int len = snprintf(buf, sizeof(buf), "%d %d %d\n", (int)anchor, count,
+                       reason);
+    if (len < 0 || len >= (int)sizeof(buf))
+        return false;
+    return ar_durable_write(datadir, path, buf, (size_t)len);
 }
 
 int boot_auto_reindex_request(const char *datadir, int32_t anchor, int reason)
@@ -284,6 +292,147 @@ void boot_auto_reindex_clear(const char *datadir)
         return;
     char path[512];
     ar_path(datadir, path, sizeof(path));
+    if (platform_private_path_absent(path))
+        return;
+    struct platform_private_file file;
+    struct platform_private_file_identity identity;
+    platform_private_file_init(&file);
+    if (platform_private_file_open_locked(path, &file) &&
+        platform_private_file_identity(&file, &identity) &&
+        platform_private_file_retire_if_identity(&file, path, &identity))
+        (void)platform_private_parent_flush(datadir);
+    platform_private_file_close(&file);
+}
+
+/* ── Repair-episode ledger ───────────────────────────────────────────────
+ * Contract + why the attempt count cannot live in the request file:
+ * storage/boot_auto_reindex.h. */
+
+static void ep_path(const char *datadir, char *out, size_t n)
+{
+    snprintf(out, n, "%s/boot_repair_episode", datadir);
+}
+
+uint64_t boot_repair_episode_signature(int tip_h, int zero_nbits,
+                                       int mismatches, int first_mismatch_h)
+{
+    /* FNV-1a over the four measured fields. The point is only that an
+     * IDENTICAL finding hashes identically and a materially different one
+     * (the damage moved, or partly healed) does not — never collision
+     * resistance against an adversary: nothing here is attacker-chosen, and
+     * the worst a collision could do is retire an episode one boot early. */
+    uint64_t h = 1469598103934665603ULL;
+    const int fields[4] = { tip_h, zero_nbits, mismatches, first_mismatch_h };
+    for (size_t i = 0; i < 4; i++) {
+        uint32_t v = (uint32_t)fields[i];
+        for (int b = 0; b < 4; b++) {
+            h ^= (uint64_t)((v >> (8 * b)) & 0xffu);
+            h *= 1099511628211ULL;
+        }
+    }
+    /* Never zero: an absent ledger reads back as 0, and the two must not be
+     * confusable. */
+    return h ? h : 1ULL;
+}
+
+/* Read "<signature> <attempts>". Returns true iff a well-formed record was
+ * read; on any miss *sig=0 and *attempts=0. Mirrors ar_read's torn-read guard
+ * (snapshot before and after, compared field-wise). */
+static bool ep_read(const char *path, uint64_t *sig, int *attempts)
+{
+    *sig = 0;
+    *attempts = 0;
+    struct platform_positioned_file file;
+    struct platform_positioned_file_snapshot before, after;
+    platform_positioned_file_init(&file);
+    if (!platform_positioned_file_open(&file, path) ||
+        !platform_positioned_file_snapshot(&file, &before) ||
+        before.size == 0 || before.size >= 64) {
+        platform_positioned_file_close(&file);
+        return false;
+    }
+    char buf[64];
+    int64_t got = platform_positioned_file_read(
+        &file, buf, (size_t)before.size, 0);
+    bool ok = got == (int64_t)before.size &&
+              platform_positioned_file_snapshot(&file, &after) &&
+              platform_positioned_file_snapshot_equal(&before, &after);
+    platform_positioned_file_close(&file);
+    if (ok) {
+        buf[before.size] = '\0';
+        unsigned long long s = 0;
+        int a = 0;
+        ok = sscanf(buf, "%llu %d", &s, &a) == 2 && s != 0 && a > 0;
+        if (ok) {
+            *sig = (uint64_t)s;
+            *attempts = a;
+        }
+    }
+    if (!ok) {
+        *sig = 0;
+        *attempts = 0;
+    }
+    return ok;
+}
+
+int boot_repair_episode_note(const char *datadir, uint64_t signature)
+{
+    if (!datadir || !datadir[0] || signature == 0)
+        return 0;
+
+    char path[512];
+    ep_path(datadir, path, sizeof(path));
+
+    uint64_t cur_sig = 0;
+    int cur_attempts = 0;
+    (void)ep_read(path, &cur_sig, &cur_attempts);
+
+    /* A DIFFERENT finding is a different episode: the datadir changed under
+     * us (the damage moved, healed partly, or a new fault replaced it), so the
+     * allowance starts over. Only the IDENTICAL finding climbs — that is the
+     * one a further restart provably cannot improve. */
+    int attempts = (cur_sig == signature && cur_attempts > 0)
+                       ? cur_attempts + 1
+                       : 1;
+
+    char buf[64];
+    int len = snprintf(buf, sizeof(buf), "%llu %d\n",
+                       (unsigned long long)signature, attempts);
+    if (len < 0 || len >= (int)sizeof(buf))
+        return 0;
+    if (!ar_durable_write(datadir, path, buf, (size_t)len))
+        return 0;
+    return attempts;
+}
+
+bool boot_repair_episode_status(const char *datadir, uint64_t *signature,
+                                int *attempts)
+{
+    if (signature)
+        *signature = 0;
+    if (attempts)
+        *attempts = 0;
+    if (!datadir || !datadir[0])
+        return false;
+    char path[512];
+    ep_path(datadir, path, sizeof(path));
+    uint64_t s = 0;
+    int a = 0;
+    if (!ep_read(path, &s, &a))
+        return false;
+    if (signature)
+        *signature = s;
+    if (attempts)
+        *attempts = a;
+    return true;
+}
+
+void boot_repair_episode_clear(const char *datadir)
+{
+    if (!datadir || !datadir[0])
+        return;
+    char path[512];
+    ep_path(datadir, path, sizeof(path));
     if (platform_private_path_absent(path))
         return;
     struct platform_private_file file;

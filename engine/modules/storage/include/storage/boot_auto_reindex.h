@@ -119,4 +119,54 @@ bool boot_auto_reindex_mark_terminal(const char *datadir, int32_t anchor);
  * next boot does not re-arm. */
 void boot_auto_reindex_clear(const char *datadir);
 
+/* ── Repair-episode ledger ───────────────────────────────────────────────
+ *
+ * THE BUDGET MUST NOT BE THE REQUEST FILE.
+ *
+ * Every count above lives in <datadir>/auto_reindex_request, and that file is
+ * legitimately DELETED by paths that know nothing about the finding which
+ * armed it: the sparse-body coverage refusal
+ * (boot_crashonly_reindex_coverage_ok), reindex_chainstate's own
+ * replay-unexecutable probe, and the sticky escalator's
+ * withdraw_stale_reindex_request. Each deletion resets the attempt count to
+ * zero, so the next boot re-detects the identical damage, writes a fresh
+ * count=1, and restarts — a bounded budget that can never be spent. That is
+ * the "attempt 1/3 forever" restart loop observed on a soak node whose
+ * post-restore check reported the SAME numbers on every boot
+ * (tip_window_holes=10000 total_holes=31768 mismatches=630 first at
+ * h=2004318, zero_nbits=0). Closing one clearing rule at a time does not fix
+ * it; the count has to stop being derived from the request's lifetime.
+ *
+ * This ledger records the attempt count against the FINDING instead: a
+ * signature over the measured integrity numbers, in its own top-level file
+ * <datadir>/boot_repair_episode. No repair-request path deletes it. A
+ * DIFFERENT finding starts a fresh episode at 1 (the datadir changed, so the
+ * budget should reset); an IDENTICAL finding climbs, whatever happened to the
+ * request file in between. It is retired only by boot_crashonly_clear() —
+ * i.e. by a boot that reached a clean post-restore integrity state, which is
+ * the one event that genuinely ends the episode. */
+
+/* Max repair attempts against one identical finding before the boot stops
+ * restarting and pages. Deliberately the same allowance as the reindex
+ * budget it backstops. */
+#define BOOT_REPAIR_EPISODE_MAX BOOT_AUTO_REINDEX_MAX
+
+/* Stable signature of one post-restore integrity finding. Pure; never zero, so
+ * a written record is always distinguishable from an absent one. */
+uint64_t boot_repair_episode_signature(int tip_h, int zero_nbits,
+                                       int mismatches, int first_mismatch_h);
+
+/* Record one boot's attempt against `signature` and return the attempt number
+ * (1 for a first/changed finding, +1 for each identical repeat), or 0 on a
+ * durable-write error. fsync-durable. */
+int boot_repair_episode_note(const char *datadir, uint64_t signature);
+
+/* Read the ledger. True iff a well-formed record exists. */
+bool boot_repair_episode_status(const char *datadir, uint64_t *signature,
+                                int *attempts);
+
+/* Retire the episode. Called only when a boot reaches clean post-restore
+ * integrity — the episode is genuinely over, so the next one starts fresh. */
+void boot_repair_episode_clear(const char *datadir);
+
 #endif /* ZCL_STORAGE_BOOT_AUTO_REINDEX_H */
