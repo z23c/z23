@@ -1,6 +1,6 @@
 # Consensus-parity audit, round 2 (2026-06-21)
 
-> Red-team of zcl23 consensus predicates vs zclassicd C++ (`/home/rhett/github/zclassic/src`).
+> Red-team of zcl23 consensus predicates vs zclassicd C++ (`~/github/zclassic/src`).
 > 10 agents, spot-checked (read 30-50 lines around each claim), classified. Full raw
 > output: workflow `parity-audit-round2` (run `wf_359bdfe4-70f`).
 >

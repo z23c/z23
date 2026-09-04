@@ -687,7 +687,7 @@ rollback are one transaction. A newer save supersedes an older candidate.
 ```bash
 # Idempotent session/bootstrap call.
 z23-dev dev loop ensure \
-  --input='{"root":"/home/rhett/github/zclassic23"}'
+  --input='{"root":"/home/you/github/zclassic23"}'
 
 # The LLM now edits any number of C files directly.
 

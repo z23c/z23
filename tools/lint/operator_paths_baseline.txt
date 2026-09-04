@@ -11,9 +11,6 @@
 #
 # Regenerate after removing some:
 #   ZCL_LINT_MODE=UPDATE ./tools/lint/check_no_operator_paths.sh
-A engine/controllers/src/blockchain_controller_admin.c 1
-A engine/composition/commands/core.def 5
-A engine/composition/commands/ops.def 1
 A contexts/commons/corpus/evidence-000002.json 6
 A contexts/commons/corpus/evidence-000003.json 6
 A contexts/commons/corpus/evidence-000004.json 8
@@ -167,18 +164,19 @@ A contexts/commons/corpus/report-000039.json 63
 A contexts/commons/corpus/report-000040.json 66
 A contexts/commons/corpus/report-000041.json 73
 A contexts/commons/corpus/report-000042.json 73
-A platform/deploy/zclassic23.env.example 1
-A platform/deploy/zclassic23-standby.env.example 1
 A docs/API_REFERENCE.md 6
 A docs/NATIVE_COMMAND_INTERFACE.md 2
-A docs/work/parity-audit-round2-findings.md 1
+A engine/composition/commands/core.def 5
+A engine/composition/commands/ops.def 1
+A engine/controllers/src/blockchain_controller_admin.c 1
+A platform/deploy/zclassic23.env.example 1
+A platform/deploy/zclassic23-standby.env.example 1
 A tests/harness/src/test_tip_agreement_watch.c 1
 A tools/lint/check_live_datadir_isolation.sh 1
 A tools/scripts/byte_exact_utxo_check.sh 2
 A tools/scripts/produce_anchor_snapshot.sh 2
 A vendor/include/sqlite3.h 7
 B cognition/controllers/src/agent_controller.c 2
-B contexts/commons/services/include/services/zcode_pointer.h 1
 B contexts/commons/corpus/evidence-000002.json 6
 B contexts/commons/corpus/evidence-000003.json 6
 B contexts/commons/corpus/evidence-000004.json 8
@@ -332,11 +330,11 @@ B contexts/commons/corpus/report-000039.json 63
 B contexts/commons/corpus/report-000040.json 66
 B contexts/commons/corpus/report-000041.json 73
 B contexts/commons/corpus/report-000042.json 73
+B contexts/commons/services/include/services/zcode_pointer.h 1
+B docs/work/HANDOFF_2026-09-04.md 1
 B platform/deploy/install-host-watchdog.sh 1
 B platform/deploy/zclassic23-host-watchdog.sh 1
 B platform/deploy/zclassic23-standby.env.example 1
-B docs/NATIVE_COMMAND_INTERFACE.md 1
-B docs/work/parity-audit-round2-findings.md 1
 B tests/harness/src/test_metaverse_catalog.c 1
 B tests/harness/src/test_tip_agreement_watch.c 1
 B tests/harness/src/test_vcs_accept.c 15

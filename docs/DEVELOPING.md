@@ -91,17 +91,19 @@ loop and the one that prevents the most expensive mistake:
 build/bin/z23 code have --input='{"text":"validation"}'
 ```
 
-Real output from this checkout, abridged (warm: ~85 ms):
+Illustrative shape, abridged (warm: tens of milliseconds; exact counts rot as
+the tree grows, so this is not a pinned fixture — re-run the command above to
+see today's numbers):
 
 ```json
 {"verdict":"ALREADY EXISTS","capabilities":[
- {"what":"validation (12 matching symbols)",
+ {"what":"validation (<n> matching symbols)",
   "header":"core/params/include/consensus/validation.h",
-  "symbol_count":12,"used_by_files":72,
+  "symbol_count":<n>,"used_by_files":<n>,
   "count_basis":"callers-of-matched-symbols"},
- {"what":"activerecord (24 matching symbols)",
+ {"what":"activerecord (<n> matching symbols)",
   "header":"engine/models/include/models/activerecord.h",
-  "symbol_count":24,"used_by_files":66,
+  "symbol_count":<n>,"used_by_files":<n>,
   "example_caller":"engine/controllers/src/store_controller.c"}]}
 ```
 
