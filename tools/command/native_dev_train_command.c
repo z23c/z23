@@ -46,6 +46,11 @@
 #define DVT_CHECK_MIN_TIMEOUT_MS 30000
 #define DVT_CHECK_MAX_TIMEOUT_MS 3600000
 
+/* Every helper below runs git, walks the checkout, or reads the stack
+ * state file, and each one is called only from the dev-build arm of a
+ * handler.  A release build compiles those arms out, so the helpers must
+ * be compiled out with them or they are dead code the compiler rejects. */
+#if defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)
 /* ── small shared helpers ─────────────────────────────────────────────── */
 
 static const char *dvt_source_root(const struct zcl_command_request *request)
@@ -194,6 +199,7 @@ static void dvt_conflict_paths(const char *stack_dir, struct json_value *out)
         line = nl ? nl + 1 : NULL;
     }
 }
+#endif /* ZCL_DEV_BUILD || ZCL_TESTING */
 
 /* ── build ────────────────────────────────────────────────────────────── */
 
@@ -463,6 +469,9 @@ void zcl_native_handle_dev_train_build(
 
 /* ── check ────────────────────────────────────────────────────────────── */
 
+/* Dev-arm only, like the helpers above: the release arm of
+ * zcl_native_handle_dev_train_check never reaches the state file. */
+#if defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)
 static void dvt_check_state_path(const char *stack_dir, char *out, size_t cap)
 {
     (void)snprintf(out, cap, "%s/build/train-check.state", stack_dir);
@@ -519,6 +528,7 @@ static bool dvt_read_check_state(const char *stack_dir, bool *ok,
     (void)fclose(f);
     return true;
 }
+#endif /* ZCL_DEV_BUILD || ZCL_TESTING */
 
 void zcl_native_handle_dev_train_check(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
