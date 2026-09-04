@@ -52,6 +52,7 @@
 #include "dev_proof_receipt.h"
 #include "devloop.h"
 #include "json/json.h"
+#include "platform/disk_space.h"
 #include "platform/ram_scratch.h"
 #include "platform/time_compat.h"
 #include "kernel/command_registry.h"
@@ -63,6 +64,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #if !defined(_WIN32)
+#include <sys/wait.h>
 #include <unistd.h>
 #endif
 
@@ -2158,6 +2160,69 @@ static int test_ic_proof_generation_prefers_ram_when_it_fits(void)
     return failures;
 }
 
+#if !defined(_WIN32)
+
+static int test_ic_ram_scratch_reservations_hold_under_concurrency(void)
+{
+    int failures = 0;
+    TEST("proof budget: RAM scratch is reserved, not just measured") {
+        char relative[2048], root[4096], cwd[2048];
+        ic_budget_fixture("ramreserve", relative);
+        ASSERT(getcwd(cwd, sizeof(cwd)) != NULL);
+        snprintf(root, sizeof(root), "%s/%s", cwd, relative);
+        setenv("ZCL_RAM_SCRATCH_ROOT", root, 1);
+        /* The room is measured on this filesystem, with a wide churn margin,
+         * so ordinary activity cannot flip a verdict mid-test. */
+        const uint64_t min_free = PLATFORM_RAM_SCRATCH_MIN_FREE_BYTES;
+        const uint64_t margin = 1024ull * 1024ull * 1024ull;
+        uint64_t free_bytes = 0;
+        ASSERT(platform_disk_space_available(root, &free_bytes));
+        ASSERT(free_bytes > min_free + 3 * margin);
+        uint64_t first_bytes = free_bytes - min_free - margin;
+        uint64_t second_bytes = 2 * margin;
+        /* Two reservations that together exceed the room: the first is
+         * admitted, the second is refused while the first is live, and
+         * releasing the first gives the second its room back. */
+        struct platform_ram_scratch_lease first = {0};
+        ASSERT(platform_ram_scratch_reserve(root, first_bytes, &first));
+        ASSERT(first.held);
+        struct platform_ram_scratch_lease second = {0};
+        ASSERT(!platform_ram_scratch_reserve(root, second_bytes, &second));
+        ASSERT(!second.held);
+        platform_ram_scratch_release(&first);
+        ASSERT(!first.held);
+        ASSERT(platform_ram_scratch_reserve(root, second_bytes, &second));
+        ASSERT(second.held);
+        platform_ram_scratch_release(&second);
+        /* A released lease's room is hand-out-able again immediately. */
+        struct platform_ram_scratch_lease again = {0};
+        ASSERT(platform_ram_scratch_reserve(root, second_bytes, &again));
+        platform_ram_scratch_release(&again);
+        /* A lease under a dead pid is stale: its bytes do not count against
+         * the room, and taking the lock removes its file. */
+        pid_t child = fork();
+        ASSERT(child >= 0);
+        if (child == 0) _exit(0);
+        int status = 0;
+        ASSERT(waitpid(child, &status, 0) == child);
+        char stale_rel[128];
+        snprintf(stale_rel, sizeof(stale_rel), ".z23-leases/%ld-1",
+                 (long)child);
+        ASSERT(ic_write(relative, stale_rel, "1099511627777"));
+        struct platform_ram_scratch_lease third = {0};
+        ASSERT(platform_ram_scratch_reserve(root, second_bytes, &third));
+        char stale[4096];
+        snprintf(stale, sizeof(stale), "%s/%s", root, stale_rel);
+        ASSERT(access(stale, F_OK) != 0);
+        platform_ram_scratch_release(&third);
+        unsetenv("ZCL_RAM_SCRATCH_ROOT");
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+#endif
+
 
 int test_impact_composition(void)
 {
@@ -2196,5 +2261,8 @@ int test_impact_composition(void)
     failures += test_ic_proof_steps_run_concurrently();
 #endif
     failures += test_ic_proof_generation_prefers_ram_when_it_fits();
+#if !defined(_WIN32)
+    failures += test_ic_ram_scratch_reservations_hold_under_concurrency();
+#endif
     return failures;
 }

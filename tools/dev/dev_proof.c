@@ -1258,8 +1258,28 @@ static bool generation_gitlink_prepare(const struct proof_paths *paths,
     return true;
 }
 
+#define PROOF_RAM_RESERVE_BYTES (6ull * 1024ull * 1024ull * 1024ull)
+
+/* ZCL_PROOF_RAM_RESERVE_BYTES may only RAISE the reservation, never shrink
+ * it. A crowded machine may refuse RAM backing outright; a spacious one may
+ * promise more than the shipped default, but no host gets to pack proofs
+ * tighter than the guard they were proved with. */
+static uint64_t proof_ram_reserve_bytes(void)
+{
+    const char *text = getenv("ZCL_PROOF_RAM_RESERVE_BYTES");
+    if (!text || !*text) return PROOF_RAM_RESERVE_BYTES;
+    char *end = NULL;
+    errno = 0;
+    unsigned long long value = strtoull(text, &end, 10);
+    if (errno || !end || *end || value == 0) return PROOF_RAM_RESERVE_BYTES;
+    if (value < PROOF_RAM_RESERVE_BYTES) return PROOF_RAM_RESERVE_BYTES;
+    return (uint64_t)value;
+}
+
 static bool generation_prepare(const struct proof_paths *paths,
-                               const char *local, char generation[PATH_MAX],
+                               const char *local,
+                               struct platform_ram_scratch_lease *ram_lease,
+                               char generation[PATH_MAX],
                                char *why, size_t why_len)
 {
     char root_parent[PATH_MAX], parent[PATH_MAX], generation_tag[33];
@@ -1292,6 +1312,18 @@ static bool generation_prepare(const struct proof_paths *paths,
      * source must admit each other whatever storage they happened to use. */
     char ram_root[PATH_MAX];
     bool ram_backed = platform_ram_scratch_root(ram_root, sizeof(ram_root), 0);
+    /* Free space seen is not free space kept: N proofs asking at once each
+     * saw the same headroom and together filled the tmpfs. A reservation
+     * held for the life of the generation is what makes this one's yes true
+     * for this one alone. Refusal is not an error — the generation falls
+     * back to disk exactly as if no RAM root had been offered. */
+    bool ram_reserve_refused = false;
+    if (ram_backed &&
+        !platform_ram_scratch_reserve(ram_root, proof_ram_reserve_bytes(),
+                                      ram_lease)) {
+        ram_backed = false;
+        ram_reserve_refused = true;
+    }
     int parent_len = ram_backed
         ? snprintf(parent, sizeof(parent), "%s/z23p", ram_root)
         : snprintf(parent, sizeof(parent), "%s/.z23p", root_parent);
@@ -1303,8 +1335,12 @@ static bool generation_prepare(const struct proof_paths *paths,
         return false;
     }
     if (paths->phases[0]) {
-        (void)zcl_dev_proof_phase_note(paths->phases, "generation_storage",
-                                       ram_backed ? "ram" : "disk");
+        (void)zcl_dev_proof_phase_note(
+            paths->phases, "generation_storage",
+            ram_backed ? "ram"
+                       : ram_reserve_refused
+                             ? "disk reason=ram_reserve_refused"
+                             : "disk");
         (void)zcl_dev_proof_phase_note(paths->phases, "generation_root",
                                        generation);
     }
@@ -2150,6 +2186,7 @@ static void proof_phase_mark(struct proof_phase_clock *clock, const char *name)
 
 static bool proof_worker(const struct proof_paths *paths,
                          const char *local, const char *base,
+                         struct platform_ram_scratch_lease *ram_lease,
                          char *why, size_t why_len)
 {
     int64_t started_us = platform_time_monotonic_us();
@@ -2159,7 +2196,7 @@ static bool proof_worker(const struct proof_paths *paths,
     if (!worktree_exact(paths->root, local, true, why, why_len)) return false;
     proof_phase_mark(&phases, "worktree_exact_root");
     char generation[PATH_MAX];
-    if (!generation_prepare(paths, local, generation, why, why_len))
+    if (!generation_prepare(paths, local, ram_lease, generation, why, why_len))
         return false;
     proof_phase_mark(&phases, "generation_prepare");
     struct proof_paths execution = *paths;
@@ -2498,8 +2535,9 @@ static bool proof_worker_run(const struct proof_paths *paths,
     struct sigaction child_action = {0};
     child_action.sa_handler = SIG_DFL;
     sigemptyset(&child_action.sa_mask);
+    struct platform_ram_scratch_lease ram_lease = {0};
     bool ok = sigaction(SIGCHLD, &child_action, NULL) == 0 &&
-              proof_worker(paths, local, base, why, why_len);
+              proof_worker(paths, local, base, &ram_lease, why, why_len);
     if (!ok && (!why || !why[0]))
         proof_why(why, why_len, "proof_child_reaping_unavailable");
     if (!ok) {
@@ -2509,6 +2547,10 @@ static bool proof_worker_run(const struct proof_paths *paths,
                                      strlen(message), 0600);
     }
     proof_lease_release(paths);
+    /* This attempt is the generation's life where RAM scratch is concerned:
+     * its reserved room goes back to the pool the moment the worker is done,
+     * every failure path included. */
+    platform_ram_scratch_release(&ram_lease);
     return ok;
 }
 
