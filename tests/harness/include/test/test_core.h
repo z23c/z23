@@ -394,7 +394,6 @@ int test_disk_monitor(void);
 int test_binary_staleness(void);
 int test_binary_ab_fallback(void);
 int test_db_maintenance(void);
-int test_storage_housekeeping(void);
 int test_mempool_limits(void);
 int test_addrman_integrity(void);
 int test_anchor_peers(void);
