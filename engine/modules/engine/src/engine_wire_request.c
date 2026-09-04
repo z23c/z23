@@ -24,6 +24,7 @@
 #include "base/safe_alloc.h"
 #include "json/json.h"
 
+#include <stdlib.h>
 #include <string.h>
 
 static bool push_message(struct json_value *arr, const char *role,
@@ -71,6 +72,23 @@ static bool build_doc(const struct engine_call *call, struct json_value *doc)
      * class of failure this module exists to refuse. */
     if (!json_push_kv_bool(doc, "stream", false))
         LOG_FAIL("engine", "cannot record the stream flag");
+
+    /* GLM models spend the whole output budget on reasoning unless the
+     * request disables it: against max_tokens 32768, glm-5.3-flash wrote
+     * 127,536 bytes of reasoning_content and no answer, and the harness
+     * refused the empty message. tools/engine_unit.c sets ZCL_ENGINE_NO_THINKING=1 per run; the resident node never dispatches. */
+    const char *no_thinking = getenv("ZCL_ENGINE_NO_THINKING");
+    if (no_thinking && strcmp(no_thinking, "1") == 0) {
+        struct json_value thinking;
+        json_init(&thinking);
+        json_set_object(&thinking);
+        const bool think_ok = json_push_kv_str(&thinking, "type", "disabled")
+                              && json_push_kv(doc, "thinking", &thinking);
+        json_free(&thinking);
+        if (!think_ok)
+            LOG_FAIL("engine", "cannot record the thinking switch");
+    }
+
     if (call->max_output_tokens > 0
         && !json_push_kv_int(doc, "max_tokens", call->max_output_tokens))
         LOG_FAIL("engine", "cannot record the output-token bound");
