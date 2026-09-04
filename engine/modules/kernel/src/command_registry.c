@@ -595,7 +595,6 @@ static bool path_valid(const char *path)
 }
 #endif
 
-
 static bool csv_token_equal(const char *csv, const char *value)
 {
     if (!csv || !csv[0] || !value)

@@ -1225,6 +1225,7 @@ add/remove a gate.
 - `check-rule-vocabulary`
 - `check-cookbook`
 - `check-no-raw-clock-outside-platform`
+- `check-no-real-clock-test-deadline`
 - `check-sysinit-ordering`
 - `check-sandbox-wired`
 - `check-no-raw-sqlite-in-controllers`
