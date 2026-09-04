@@ -206,6 +206,22 @@
                "{domain_count, asymmetric, large_domain_id}, derived {verify_workers, "
                "script_batch_cap, sqlite_*_cache_kib, sqlite_*_mmap_bytes}, and "
                "pin_reducer_available (whether -pin-reducer would take effect)"),
+    DIAG_SERVICE("storage_housekeeping", storage_housekeeping_dump_state_json,
+                 "datadir size-bound sweeper: sweeps, and the count of "
+                 "progress.kv compactions, topology.db WAL truncations and "
+                 "Tor log rotations it has performed, plus the last measured "
+                 "projection_file_bytes / projection_live_bytes / "
+                 "topology_wal_bytes and the tick interval",
+                 "engine/services/src/storage_housekeeping.c",
+                 "tests/harness/src/test_storage_pacing.c"),
+    DIAG_LOCAL("storage_pacing", storage_pacing_dump_state_json,
+               "datadir storage class (rotational/solid/unknown) + how it was "
+               "decided (override/sysfs/bench/probe/default), and the IO bounds "
+               "that class implies: sequential_readahead + "
+               "boot_readahead_window_bytes for the boot repair walks, "
+               "serialize_maintenance + maintenance_gap_ms for the maintenance "
+               "writers, wal_truncate_bytes, log_rotate_bytes, and "
+               "compact_floor_bytes/compact_ratio_pct for the projection stores"),
     DIAG_LOCAL("hw_bench", hw_bench_dump_state_json,
                "hardware bench organ: boot-time measured fsync_us + pread_us "
                "medians (or -1/'fallback' if unmeasured), fingerprint (hw_profile "

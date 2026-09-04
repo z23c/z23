@@ -58,6 +58,8 @@
 #include "services/wallet_backup_service.h"
 #include "services/disk_monitor.h"
 #include "services/binary_staleness_service.h"
+#include "services/storage_housekeeping.h"
+#include "util/storage_pacing.h"
 #include "services/binary_ab_fallback.h"
 #include "services/ibd_throttle.h"
 #include "services/db_maintenance.h"
@@ -784,7 +786,31 @@ static void boot_db_maintenance_service_stop(void *ctx)
     (void)ctx;
     db_maintenance_stop();
 }
+/* Datadir size bounds: progress.kv compaction, topology.db WAL truncation,
+ * and Tor log rotation, all paced by the measured storage class. Optional
+ * like its maintenance siblings — a node that cannot start the sweeper still
+ * runs, it just stops bounding its own datadir, and the failure is named. */
+static bool boot_storage_housekeeping_service_start(void *ctx)
+{
+    (void)ctx;
+    const char *datadir = g_datadir;
+    struct zcl_result r = storage_housekeeping_start(datadir);
+    if (r.ok) {
+        printf("Storage housekeeping started (%ds tick; storage=%s)\n",
+               STORAGE_HOUSEKEEPING_TICK_SECONDS,
+               platform_storage_class_name(storage_pacing_class()));
+        return true;
+    }
+    fprintf(stderr, "storage_housekeeping_start failed: %s\n", r.message);
+    return false;
+}
+static void boot_storage_housekeeping_service_stop(void *ctx)
+{
+    (void)ctx;
+    storage_housekeeping_stop();
+}
 static bool boot_binary_staleness_service_start(void *ctx)
+
 {
     (void)ctx;
     binary_staleness_config_defaults(&g_binary_staleness_cfg);
@@ -848,9 +874,16 @@ static bool boot_register_maintenance_services(void)
         .stop = boot_binary_staleness_service_stop,
         .flags = ZCL_SERVICE_OPTIONAL,
     };
+    const struct zcl_service_spec storage_housekeeping_spec = {
+        .name = "storage_housekeeping",
+        .start = boot_storage_housekeeping_service_start,
+        .stop = boot_storage_housekeeping_service_stop,
+        .flags = ZCL_SERVICE_OPTIONAL,
+    };
     sovereign_promotion_service_register();
     return zcl_service_kernel_register(&g_maintenance_kernel, &wallet_backup_spec) &&
            zcl_service_kernel_register(&g_maintenance_kernel, &db_maintenance_spec) &&
+           zcl_service_kernel_register(&g_maintenance_kernel, &storage_housekeeping_spec) &&
            zcl_service_kernel_register(&g_maintenance_kernel, &binary_staleness_spec) &&
            bundle_exporter_register_service(&g_maintenance_kernel, g_datadir) &&
            boot_register_network_observability_services(

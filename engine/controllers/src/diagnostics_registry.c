@@ -167,6 +167,8 @@
 #include "util/cpu_topology.h"
 #include "util/hw_bench.h"
 #include "util/hw_profile.h"
+#include "services/storage_housekeeping.h"
+#include "util/storage_pacing.h"
 #include "util/mem_pressure.h"
 #include "util/thread_profile.h"
 
