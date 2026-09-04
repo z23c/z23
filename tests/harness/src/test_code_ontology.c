@@ -4,7 +4,10 @@
 
 #include "test/test_core.h"
 
+#include "base/hex.h"
+#include "codeindex/codeindex_inventory.h"
 #include "codeindex/codeindex_source_universe.h"
+#include "platform/directory_compat.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -26,14 +29,17 @@ static bool co_write(const char *path, const char *text)
 
 static bool co_fixture(void)
 {
-    if (system("rm -rf " CO_FIX " && mkdir -p "
-               CO_FIX "/lib/demo/include/demo "
-               CO_FIX "/lib/demo/src "
-               CO_FIX "/tests/harness/src "
-               CO_FIX "/tools/dev "
-               CO_FIX "/tools/lint "
-               CO_FIX "/docs") != 0)
-        return false;
+    (void)test_rm_rf_recursive(CO_FIX);
+    static const char *const directories[] = {
+        "test-tmp", CO_FIX, CO_FIX "/lib", CO_FIX "/lib/demo",
+        CO_FIX "/lib/demo/include", CO_FIX "/lib/demo/include/demo",
+        CO_FIX "/lib/demo/src", CO_FIX "/tests",
+        CO_FIX "/tests/harness", CO_FIX "/tests/harness/src",
+        CO_FIX "/tools", CO_FIX "/tools/dev", CO_FIX "/tools/lint",
+        CO_FIX "/docs",
+    };
+    for (size_t i = 0; i < sizeof(directories) / sizeof(directories[0]); i++)
+        if (!platform_directory_ensure(directories[i], 0700)) return false;
     return co_write(CO_FIX "/lib/demo/include/demo/demo.h",
         "/* purpose: Source-universe fixture. */\n"
         "#ifndef CO_DEMO_H\n#define CO_DEMO_H\n"
@@ -60,6 +66,26 @@ static bool co_exists(const char *path)
 {
     struct stat st;
     return stat(path, &st) == 0;
+}
+
+static bool co_write_current_inventory_root(const char *root)
+{
+    struct ci_inventory_report *report = codeindex_inventory_analyze(root);
+    if (!report) return false;
+    char root_hex[65];
+    zcl_hex_encode(report->source_root_sha3,
+                   sizeof(report->source_root_sha3), root_hex);
+    char record[512];
+    int length = snprintf(
+        record, sizeof(record),
+        "{\"record\":\"inventory\",\"source_root_sha3\":\"%s\","
+        "\"files_scanned\":%d,\"production_files\":%d,"
+        "\"test_files\":%d}\n",
+        root_hex, report->files_scanned, report->production_files,
+        report->test_files);
+    codeindex_inventory_free(report);
+    return length > 0 && (size_t)length < sizeof(record) &&
+           co_write(CO_INVENTORY, record);
 }
 
 static void co_fill_root(uint8_t root[32], uint8_t seed)
@@ -264,7 +290,17 @@ static int co_live_deterministic_read_only(void)
                 ZCL_SOURCE_COVER_METADATA | ZCL_SOURCE_COVER_PUBLISHABLE));
         ASSERT(!co_exists(CO_FIX "/.zvcs"));
         ASSERT(!co_exists(CO_FIX "/.codeindex"));
-        ASSERT(system("rm -rf " CO_FIX) == 0);
+
+        ASSERT(co_write_current_inventory_root(CO_FIX));
+        struct ci_source_universe_observation rooted;
+        ASSERT(ci_source_universe_observe(CO_FIX, CO_INVENTORY, &rooted));
+        ASSERT(rooted.inventory_artifact_count_agrees);
+        ASSERT(rooted.inventory_artifact_root_agrees);
+        ASSERT(rooted.inventory_fresh);
+        ASSERT(!rooted.complete && !rooted.verified);
+        ASSERT(rooted.refusal ==
+               CI_SOURCE_UNIVERSE_REFUSAL_EVIDENCE_DISAGREES);
+        ASSERT(test_rm_rf_recursive(CO_FIX) == 0);
         PASS();
     } _test_next:;
     return failures;

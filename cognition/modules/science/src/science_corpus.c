@@ -13,6 +13,7 @@
 
 #include "science/science_corpus.h"
 
+#include "base/hex.h"
 #include "base/log_macros.h"
 #include "base/safe_alloc.h"
 #include "json/json.h"
@@ -239,6 +240,15 @@ static void read_inventory(const char *path, struct science_corpus_report *out)
         if (line_is_record(line, "inventory")) {
             struct json_value root;
             if (json_read(&root, line, len)) {
+                const char *source_root = json_get_str(
+                    json_get(&root, "source_root_sha3"));
+                memset(out->inventory_source_root_sha3, 0,
+                       sizeof(out->inventory_source_root_sha3));
+                out->inventory_source_root_available = source_root &&
+                    strlen(source_root) == 64u &&
+                    zcl_hex_decode_lower(
+                        source_root, out->inventory_source_root_sha3,
+                        sizeof(out->inventory_source_root_sha3));
                 out->inventory_files_scanned =
                     (uint64_t)json_get_int(json_get(&root, "files_scanned"));
                 out->inventory_production_files =

@@ -81,6 +81,12 @@ struct science_corpus_report {
     /* Read from the generated inventory artifact. All zero and MEANINGLESS
      * when inventory_present is false. */
     bool     inventory_present;
+    /* Exact source identity declared by the generated inventory summary.
+     * Availability is independent of count agreement: callers must compare
+     * this root with a freshly rederived inventory root before calling the
+     * artifact current. */
+    bool     inventory_source_root_available;
+    uint8_t  inventory_source_root_sha3[32];
     uint64_t inventory_files_scanned;
     uint64_t inventory_production_files;
     uint64_t inventory_test_files;

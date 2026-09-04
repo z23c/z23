@@ -308,10 +308,16 @@ bool ci_source_universe_observe(
 
     input.inventory_artifact_present = census.inventory_present;
     input.inventory_artifact_files = census.inventory_files_scanned;
-    /* science_corpus deliberately exposes only the artifact's count. A count
-     * match is not exact freshness, so the artifact root remains unavailable
-     * and reconcile refuses rather than upgrading count equality to proof. */
-    input.inventory_artifact_root_available = false;
+    input.inventory_artifact_root_available =
+        census.inventory_source_root_available;
+    input.inventory_artifact_root_domain =
+        census.inventory_source_root_available
+            ? CI_SOURCE_ROOT_CAPABILITY_INVENTORY_V1
+            : CI_SOURCE_ROOT_NONE;
+    if (census.inventory_source_root_available)
+        memcpy(input.inventory_artifact_root,
+               census.inventory_source_root_sha3,
+               sizeof(input.inventory_artifact_root));
     /* Each scan is useful candidate evidence, but none implements a canonical
      * source-universe projection or a whole-scan atomicity contract. */
     input.projection_observed_mask = 0;
