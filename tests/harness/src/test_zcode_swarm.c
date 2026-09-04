@@ -90,6 +90,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#if !defined(_WIN32)
+#include <unistd.h>
+#endif
 
 #define SW_CHECK(name, expr) do {                                       \
     if (expr) { printf("  zcode_swarm: %s... OK\n", (name)); }          \
@@ -265,10 +268,46 @@ static uint64_t sw_score_contributor(const uint8_t contributor[33],
     return SW_CONTRIBUTOR_SCORE;
 }
 
+/* This suite opens ~25 real store+book datadirs (one or two per subtest,
+ * see the file banner). Each open/close round-trips through real
+ * durable-write barriers (package_store's process lock file, the service
+ * book's save path); on a journaled disk shared with concurrent lanes
+ * those fsyncs can queue behind someone else's journal commit. The engine
+ * logic under test never inspects *where* the datadir lives, only that
+ * writes there are real and durable, so route it through tmpfs (/dev/shm)
+ * where available — same file semantics, no journal to queue behind —
+ * and fall back to the shared ./test-tmp path (test_make_tmpdir) where
+ * /dev/shm doesn't exist (e.g. macOS). */
+#if !defined(_WIN32)
+static const char *sw_test_tmp_root(void)
+{
+    static int cached = -1; /* -1 unknown, 0 = shared test-tmp, 1 = shm */
+    if (cached < 0)
+        cached = (access("/dev/shm", W_OK) == 0) ? 1 : 0;
+    return cached ? "/dev/shm/zcode_swarm-test-tmp" : NULL;
+}
+#endif
+
+static void sw_make_tmpdir(char *buf, size_t n, const char *tag)
+{
+#if !defined(_WIN32)
+    const char *root = sw_test_tmp_root();
+    if (root) {
+        int wrote = snprintf(buf, n, "%s_%d_%s", root, (int)getpid(), tag);
+        if (wrote > 0 && (size_t)wrote < n) {
+            test_rm_rf_recursive(buf);
+            (void)mkdir(buf, 0700);
+            return;
+        }
+    }
+#endif
+    test_make_tmpdir(buf, n, "zcode_swarm", tag);
+}
+
 static bool sw_node_open(struct sw_node *n, const char *tag,
                          vcs_swarm_score_fn score_fn)
 {
-    test_make_tmpdir(n->datadir, sizeof(n->datadir), "zcode_swarm", tag);
+    sw_make_tmpdir(n->datadir, sizeof(n->datadir), tag);
     snprintf(n->zcode_dir, sizeof(n->zcode_dir), "%s/zcode", n->datadir);
     n->store = vcs_package_store_open(
         n->datadir, VCS_PACKAGE_STORE_DEFAULT_QUOTA_BYTES);
