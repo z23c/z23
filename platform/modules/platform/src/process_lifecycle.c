@@ -261,10 +261,170 @@ bool platform_process_start_hidden(struct platform_process *process,
     return process_start_hidden_with_stdout(process, options, NULL);
 }
 
+bool platform_process_open_existing(struct platform_process *process,
+                                    uint64_t pid, const char *expected_image)
+{
+    if (!process || process->native != UINTPTR_MAX || pid == 0 ||
+        pid > UINT32_MAX || !expected_image) return false;
+    wchar_t *expected = NULL;
+    if (!utf16(expected_image, &expected)) return false;
+    HANDLE handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION |
+                                SYNCHRONIZE | PROCESS_TERMINATE,
+                                FALSE, (DWORD)pid);
+    wchar_t actual[32768]; DWORD count = 32768;
+    bool ok = handle && QueryFullProcessImageNameW(handle, 0, actual, &count) &&
+              _wcsicmp(actual, expected) == 0;
+    free(expected);
+    if (!ok) { if (handle) CloseHandle(handle); return false; }
+    process->native = (uintptr_t)handle; process->pid = pid; return true;
+}
+
+enum platform_process_wait_result platform_process_wait(
+    struct platform_process *process, uint32_t timeout_ms, uint32_t *exit_code)
+{
+    if (!process || process->native == UINTPTR_MAX) return PLATFORM_PROCESS_WAIT_FAILED;
+    DWORD waited = WaitForSingleObject((HANDLE)process->native, timeout_ms);
+    if (waited == WAIT_TIMEOUT) return PLATFORM_PROCESS_WAIT_RUNNING;
+    DWORD code = 0;
+    if (waited != WAIT_OBJECT_0 || !GetExitCodeProcess((HANDLE)process->native,
+                                                       &code))
+        return PLATFORM_PROCESS_WAIT_FAILED;
+    if (exit_code) *exit_code = code;
+    return PLATFORM_PROCESS_WAIT_EXITED;
+}
+
+bool platform_process_terminate(struct platform_process *process,
+                                uint32_t exit_code)
+{
+    if (!process || process->native == UINTPTR_MAX) return false;
+    if (process->containment != UINTPTR_MAX)
+        return TerminateJobObject((HANDLE)process->containment, exit_code) != 0;
+    return TerminateProcess((HANDLE)process->native, exit_code) != 0;
+}
+
+void platform_process_close(struct platform_process *process)
+{
+    if (!process || process->native == UINTPTR_MAX) return;
+    CloseHandle((HANDLE)process->native);
+    if (process->containment != UINTPTR_MAX)
+        CloseHandle((HANDLE)process->containment);
+    platform_process_init(process);
+}
+
+#else
+#include <fcntl.h>
+#include <signal.h>
+#include <sys/wait.h>
+#include <time.h>
+#include <unistd.h>
+extern char **environ;
+
+void platform_process_child_prepare_headless(void)
+{
+    (void)signal(SIGPIPE, SIG_IGN);
+}
+
+static bool fd_allowed(int fd, const struct platform_process_options *options)
+{
+    for (size_t i = 0; i < options->inherited_count; i++)
+        if (options->inherited[i] <= INT_MAX &&
+            fd == (int)options->inherited[i]) return true;
+    return false;
+}
+
+bool platform_process_start_hidden(struct platform_process *process,
+                                   const struct platform_process_options *options)
+{
+    if (!process || process->native != UINTPTR_MAX || !options ||
+        !options->image || options->image[0] != '/' || !options->argv ||
+        !options->argv[0] || !options->env ||
+        (options->inherited_count && !options->inherited) ||
+        options->inherited_count > 64u) return false;
+    for (size_t i = 0; i < options->inherited_count; i++) {
+        if (options->inherited[i] > INT_MAX || options->inherited[i] <= 2u ||
+            fcntl((int)options->inherited[i], F_GETFD) < 0) return false;
+        for (size_t j = 0; j < i; j++)
+            if (options->inherited[j] == options->inherited[i]) return false;
+    }
+    pid_t pid = fork();
+    if (pid < 0) return false;
+    if (pid == 0) {
+        if (setsid() < 0 || (options->cwd && chdir(options->cwd) != 0))
+            _exit(126);
+        int null_fd = open("/dev/null", O_RDWR | O_CLOEXEC);
+        if (null_fd < 0 || dup2(null_fd, STDIN_FILENO) < 0 ||
+            dup2(null_fd, STDOUT_FILENO) < 0 ||
+            dup2(null_fd, STDERR_FILENO) < 0) _exit(126);
+        if (null_fd > STDERR_FILENO) close(null_fd);
+        for (size_t i = 0; i < options->inherited_count; i++) {
+            int fd = (int)options->inherited[i];
+            int flags = fcntl(fd, F_GETFD);
+            if (flags < 0 || fcntl(fd, F_SETFD, flags & ~FD_CLOEXEC) != 0)
+                _exit(126);
+        }
+        long limit = sysconf(_SC_OPEN_MAX);
+        if (limit < 0) limit = 65536;
+        for (int fd = 3; fd < limit; fd++)
+            if (!fd_allowed(fd, options)) (void)close(fd);
+        execve(options->image, (char *const *)options->argv,
+               (char *const *)options->env);
+        _exit(127);
+    }
+    process->native = (uintptr_t)pid; process->pid = (uint64_t)pid; return true;
+}
+
+bool platform_process_open_existing(struct platform_process *process,
+                                    uint64_t pid, const char *expected_image)
+{
+    char actual[PATH_MAX];
+    if (!process || process->native != UINTPTR_MAX || pid <= 1 ||
+        !expected_image || !os_proc_pid_exe_path(pid, actual, sizeof(actual)) ||
+        strcmp(actual, expected_image) != 0) return false;
+    process->native = (uintptr_t)pid; process->pid = pid; return true;
+}
+
+enum platform_process_wait_result platform_process_wait(
+    struct platform_process *process, uint32_t timeout_ms, uint32_t *exit_code)
+{
+    if (!process || process->native == UINTPTR_MAX) return PLATFORM_PROCESS_WAIT_FAILED;
+    uint32_t elapsed = 0;
+    for (;;) {
+        int status = 0; pid_t result = waitpid((pid_t)process->native, &status, WNOHANG);
+        if (result == (pid_t)process->native) {
+            if (exit_code) *exit_code = WIFEXITED(status) ? (uint32_t)WEXITSTATUS(status)
+                                                         : 128u + (uint32_t)WTERMSIG(status);
+            return PLATFORM_PROCESS_WAIT_EXITED;
+        }
+        if (result < 0) return PLATFORM_PROCESS_WAIT_FAILED;
+        if (elapsed >= timeout_ms) return PLATFORM_PROCESS_WAIT_RUNNING;
+        struct timespec delay = {.tv_nsec = 1000000};
+        (void)nanosleep(&delay, NULL); elapsed++;
+    }
+}
+
+bool platform_process_terminate(struct platform_process *process,
+                                uint32_t exit_code)
+{
+    (void)exit_code;
+    return process && process->native != UINTPTR_MAX &&
+           kill((pid_t)process->native, SIGTERM) == 0;
+}
+
+void platform_process_close(struct platform_process *process)
+{
+    if (process) platform_process_init(process);
+}
+#endif
+
+/* platform_process_capture_stdout() and platform_process_detach() are
+ * declared once in process_lifecycle.h and called from other translation
+ * units, so each keeps exactly one non-static definition; the platform
+ * difference is folded into the body instead of duplicated per arm. */
 bool platform_process_capture_stdout(
     const struct platform_process_options *options, char *out, size_t out_size,
     uint32_t timeout_ms, struct platform_process_capture_result *result)
 {
+#if defined(_WIN32)
     if (out && out_size) out[0] = 0;
     if (result)
         *result = (struct platform_process_capture_result){0};
@@ -399,51 +559,18 @@ bool platform_process_capture_stdout(
     out[used] = 0;
     CloseHandle(read_handle);
     return ok;
-}
-
-bool platform_process_open_existing(struct platform_process *process,
-                                    uint64_t pid, const char *expected_image)
-{
-    if (!process || process->native != UINTPTR_MAX || pid == 0 ||
-        pid > UINT32_MAX || !expected_image) return false;
-    wchar_t *expected = NULL;
-    if (!utf16(expected_image, &expected)) return false;
-    HANDLE handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION |
-                                SYNCHRONIZE | PROCESS_TERMINATE,
-                                FALSE, (DWORD)pid);
-    wchar_t actual[32768]; DWORD count = 32768;
-    bool ok = handle && QueryFullProcessImageNameW(handle, 0, actual, &count) &&
-              _wcsicmp(actual, expected) == 0;
-    free(expected);
-    if (!ok) { if (handle) CloseHandle(handle); return false; }
-    process->native = (uintptr_t)handle; process->pid = pid; return true;
-}
-
-enum platform_process_wait_result platform_process_wait(
-    struct platform_process *process, uint32_t timeout_ms, uint32_t *exit_code)
-{
-    if (!process || process->native == UINTPTR_MAX) return PLATFORM_PROCESS_WAIT_FAILED;
-    DWORD waited = WaitForSingleObject((HANDLE)process->native, timeout_ms);
-    if (waited == WAIT_TIMEOUT) return PLATFORM_PROCESS_WAIT_RUNNING;
-    DWORD code = 0;
-    if (waited != WAIT_OBJECT_0 || !GetExitCodeProcess((HANDLE)process->native,
-                                                       &code))
-        return PLATFORM_PROCESS_WAIT_FAILED;
-    if (exit_code) *exit_code = code;
-    return PLATFORM_PROCESS_WAIT_EXITED;
-}
-
-bool platform_process_terminate(struct platform_process *process,
-                                uint32_t exit_code)
-{
-    if (!process || process->native == UINTPTR_MAX) return false;
-    if (process->containment != UINTPTR_MAX)
-        return TerminateJobObject((HANDLE)process->containment, exit_code) != 0;
-    return TerminateProcess((HANDLE)process->native, exit_code) != 0;
+#else
+    (void)options; (void)timeout_ms;
+    if (out && out_size) out[0] = 0;
+    if (result)
+        *result = (struct platform_process_capture_result){0};
+    return false;
+#endif
 }
 
 bool platform_process_detach(struct platform_process *process)
 {
+#if defined(_WIN32)
     if (!process || process->native == UINTPTR_MAX) return false;
     if (process->containment != UINTPTR_MAX) {
         HANDLE remote_job = NULL;
@@ -457,136 +584,9 @@ bool platform_process_detach(struct platform_process *process)
         CloseHandle((HANDLE)process->containment);
     platform_process_init(process);
     return true;
-}
-
-void platform_process_close(struct platform_process *process)
-{
-    if (!process || process->native == UINTPTR_MAX) return;
-    CloseHandle((HANDLE)process->native);
-    if (process->containment != UINTPTR_MAX)
-        CloseHandle((HANDLE)process->containment);
-    platform_process_init(process);
-}
-
 #else
-#include <fcntl.h>
-#include <signal.h>
-#include <sys/wait.h>
-#include <time.h>
-#include <unistd.h>
-extern char **environ;
-
-void platform_process_child_prepare_headless(void)
-{
-    (void)signal(SIGPIPE, SIG_IGN);
-}
-
-static bool fd_allowed(int fd, const struct platform_process_options *options)
-{
-    for (size_t i = 0; i < options->inherited_count; i++)
-        if (options->inherited[i] <= INT_MAX &&
-            fd == (int)options->inherited[i]) return true;
-    return false;
-}
-
-bool platform_process_start_hidden(struct platform_process *process,
-                                   const struct platform_process_options *options)
-{
-    if (!process || process->native != UINTPTR_MAX || !options ||
-        !options->image || options->image[0] != '/' || !options->argv ||
-        !options->argv[0] || !options->env ||
-        (options->inherited_count && !options->inherited) ||
-        options->inherited_count > 64u) return false;
-    for (size_t i = 0; i < options->inherited_count; i++) {
-        if (options->inherited[i] > INT_MAX || options->inherited[i] <= 2u ||
-            fcntl((int)options->inherited[i], F_GETFD) < 0) return false;
-        for (size_t j = 0; j < i; j++)
-            if (options->inherited[j] == options->inherited[i]) return false;
-    }
-    pid_t pid = fork();
-    if (pid < 0) return false;
-    if (pid == 0) {
-        if (setsid() < 0 || (options->cwd && chdir(options->cwd) != 0))
-            _exit(126);
-        int null_fd = open("/dev/null", O_RDWR | O_CLOEXEC);
-        if (null_fd < 0 || dup2(null_fd, STDIN_FILENO) < 0 ||
-            dup2(null_fd, STDOUT_FILENO) < 0 ||
-            dup2(null_fd, STDERR_FILENO) < 0) _exit(126);
-        if (null_fd > STDERR_FILENO) close(null_fd);
-        for (size_t i = 0; i < options->inherited_count; i++) {
-            int fd = (int)options->inherited[i];
-            int flags = fcntl(fd, F_GETFD);
-            if (flags < 0 || fcntl(fd, F_SETFD, flags & ~FD_CLOEXEC) != 0)
-                _exit(126);
-        }
-        long limit = sysconf(_SC_OPEN_MAX);
-        if (limit < 0) limit = 65536;
-        for (int fd = 3; fd < limit; fd++)
-            if (!fd_allowed(fd, options)) (void)close(fd);
-        execve(options->image, (char *const *)options->argv,
-               (char *const *)options->env);
-        _exit(127);
-    }
-    process->native = (uintptr_t)pid; process->pid = (uint64_t)pid; return true;
-}
-
-bool platform_process_capture_stdout(
-    const struct platform_process_options *options, char *out, size_t out_size,
-    uint32_t timeout_ms, struct platform_process_capture_result *result)
-{
-    (void)options; (void)timeout_ms;
-    if (out && out_size) out[0] = 0;
-    if (result)
-        *result = (struct platform_process_capture_result){0};
-    return false;
-}
-
-bool platform_process_open_existing(struct platform_process *process,
-                                    uint64_t pid, const char *expected_image)
-{
-    char actual[PATH_MAX];
-    if (!process || process->native != UINTPTR_MAX || pid <= 1 ||
-        !expected_image || !os_proc_pid_exe_path(pid, actual, sizeof(actual)) ||
-        strcmp(actual, expected_image) != 0) return false;
-    process->native = (uintptr_t)pid; process->pid = pid; return true;
-}
-
-enum platform_process_wait_result platform_process_wait(
-    struct platform_process *process, uint32_t timeout_ms, uint32_t *exit_code)
-{
-    if (!process || process->native == UINTPTR_MAX) return PLATFORM_PROCESS_WAIT_FAILED;
-    uint32_t elapsed = 0;
-    for (;;) {
-        int status = 0; pid_t result = waitpid((pid_t)process->native, &status, WNOHANG);
-        if (result == (pid_t)process->native) {
-            if (exit_code) *exit_code = WIFEXITED(status) ? (uint32_t)WEXITSTATUS(status)
-                                                         : 128u + (uint32_t)WTERMSIG(status);
-            return PLATFORM_PROCESS_WAIT_EXITED;
-        }
-        if (result < 0) return PLATFORM_PROCESS_WAIT_FAILED;
-        if (elapsed >= timeout_ms) return PLATFORM_PROCESS_WAIT_RUNNING;
-        struct timespec delay = {.tv_nsec = 1000000};
-        (void)nanosleep(&delay, NULL); elapsed++;
-    }
-}
-
-bool platform_process_terminate(struct platform_process *process,
-                                uint32_t exit_code)
-{
-    (void)exit_code;
-    return process && process->native != UINTPTR_MAX &&
-           kill((pid_t)process->native, SIGTERM) == 0;
-}
-
-bool platform_process_detach(struct platform_process *process)
-{
     if (!process || process->native == UINTPTR_MAX) return false;
     platform_process_init(process);
     return true;
-}
-
-void platform_process_close(struct platform_process *process)
-{
-    if (process) platform_process_init(process);
-}
 #endif
+}
