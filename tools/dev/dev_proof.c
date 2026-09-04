@@ -1996,16 +1996,62 @@ static bool receipt_store(const struct proof_paths *paths,
            proof_write_if_current(paths, paths->receipt, wire, sizeof(wire),
                                   0400);
 }
+/* Every phase before the first dimension ran with no clock on it, so a proof
+ * that spent six minutes somewhere reported only that it took six minutes.
+ * These marks cost one gettime and one appended line each, and they name the
+ * phase that actually holds the wall — which is how a "the build is slow"
+ * report becomes a fixable defect instead of a feeling. */
+struct proof_phase_clock {
+    char     path[PATH_MAX];
+    int64_t  started_us;
+    int64_t  last_us;
+    bool     open;
+};
+
+static void proof_phase_begin(struct proof_phase_clock *clock,
+                              const struct proof_paths *paths)
+{
+    if (!clock) return;
+    memset(clock, 0, sizeof(*clock));
+    clock->started_us = platform_time_monotonic_us();
+    clock->last_us = clock->started_us;
+    if (!paths || snprintf(clock->path, sizeof(clock->path),
+                           "%s/phases.txt", paths->logs) >=
+                      (int)sizeof(clock->path))
+        return;
+    clock->open = true;
+}
+
+/* Best effort by design: a proof must never fail because it could not write
+ * its own stopwatch. A lost line costs the next reader one measurement. */
+static void proof_phase_mark(struct proof_phase_clock *clock, const char *name)
+{
+    if (!clock || !clock->open || !name) return;
+    int64_t now = platform_time_monotonic_us();
+    int64_t phase_ms = (now - clock->last_us) / 1000;
+    int64_t total_ms = (now - clock->started_us) / 1000;
+    clock->last_us = now;
+    FILE *out = fopen(clock->path, "ae");
+    if (!out) return;
+    (void)fprintf(out, "zcl.dev_proof_phase.v1 %-28s %8lld ms  (cumulative %8lld ms)\n",
+                  name, (long long)phase_ms, (long long)total_ms);
+    (void)fclose(out);
+}
+
 
 static bool proof_worker(const struct proof_paths *paths,
                          const char *local, const char *base,
                          char *why, size_t why_len)
 {
     int64_t started_us = platform_time_monotonic_us();
+    struct proof_phase_clock phases;
+    proof_phase_begin(&phases, paths);
     if (!worktree_exact(paths->root, local, true, why, why_len)) return false;
+    proof_phase_mark(&phases, "worktree_exact_root");
     char generation[PATH_MAX];
     if (!generation_prepare(paths, local, generation, why, why_len))
         return false;
+    proof_phase_mark(&phases, "generation_prepare");
     struct proof_paths execution = *paths;
     (void)snprintf(execution.root, sizeof(execution.root), "%s", generation);
     char files_storage[PROOF_MAX_FILES][256];
@@ -2014,6 +2060,7 @@ static bool proof_worker(const struct proof_paths *paths,
     if (!changed_files_capture(paths, local, base, files_storage, files,
                                &file_count, why, why_len))
         return false;
+    proof_phase_mark(&phases, "changed_files_capture");
 
     bool inventory_only = inventory_output_only(files, file_count);
     struct zcl_devloop_plan plan;
@@ -2029,6 +2076,7 @@ static bool proof_worker(const struct proof_paths *paths,
                       ? admission_reason : "impact_plan_incomplete");
         return false;
     }
+    proof_phase_mark(&phases, "impact_plan_closure");
     char plan_json[ZCL_DEVLOOP_PLAN_WIRE_MAX];
     size_t plan_len = zcl_devloop_plan_json_closure(
         paths->root, files, file_count, plan_json, sizeof(plan_json));
@@ -2036,7 +2084,9 @@ static bool proof_worker(const struct proof_paths *paths,
         proof_why(why, why_len, "impact_plan_render_failed");
         return false;
     }
+    proof_phase_mark(&phases, "impact_plan_render");
     if (!worktree_exact(paths->root, local, true, why, why_len)) return false;
+    proof_phase_mark(&phases, "worktree_exact_recheck");
 
     struct dev_source_record source_before = {0}, source_after = {0};
     char sealed_source_id[65], sealed_mutation_id[65];
@@ -2050,6 +2100,7 @@ static bool proof_worker(const struct proof_paths *paths,
         proof_why(why, why_len, "source_cas_capture_failed");
         return false;
     }
+    proof_phase_mark(&phases, "source_identity_capture");
     memcpy(sealed_source_id, source_before.source_id,
            sizeof(sealed_source_id));
     memcpy(sealed_mutation_id, source_before.mutation_id,
@@ -2145,6 +2196,7 @@ static bool proof_worker(const struct proof_paths *paths,
                                generated, false, why, why_len))
                 return false;
         } else unused_dimension(ZCL_DEV_PROOF_GENERATED, generated);
+        proof_phase_mark(&phases, "dimension_generated");
         if (compile->selected) {
             char artifact[PATH_MAX];
             int artifact_len = snprintf(artifact, sizeof(artifact),
@@ -2159,6 +2211,7 @@ static bool proof_worker(const struct proof_paths *paths,
                     return false;
             }
         } else unused_dimension(ZCL_DEV_PROOF_COMPILE, compile);
+        proof_phase_mark(&phases, "dimension_compile");
         if (lint->selected) {
             const char *argv[] = {"make", "--no-print-directory", make_jobs,
                                   "lint-fast", NULL};
@@ -2166,6 +2219,7 @@ static bool proof_worker(const struct proof_paths *paths,
                                false, why, why_len))
                 return false;
         } else unused_dimension(ZCL_DEV_PROOF_LINT, lint);
+        proof_phase_mark(&phases, "dimension_lint");
         if (test->selected) {
             if (strcmp(source_before.source_id, sealed_source_id) != 0 ||
                 strcmp(source_before.mutation_id, sealed_mutation_id) != 0) {
@@ -2255,6 +2309,7 @@ static bool proof_worker(const struct proof_paths *paths,
                 return false;
             test_receipt_bind_helpers(test, helper_root);
         } else unused_dimension(ZCL_DEV_PROOF_TEST, test);
+        proof_phase_mark(&phases, "dimension_test");
     }
 
     if (!worktree_exact(generation, local, false, why, why_len) ||
