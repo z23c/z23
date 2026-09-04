@@ -566,11 +566,37 @@ bool zcl_devloop_plan_files(const char *const *files, size_t file_count,
     return true;
 }
 
-/* Hard ceiling on impacted files pulled from a single dimension's walk.
- * Hitting it marks that dimension INCOMPLETE; it never discards what the walk
- * already found. Deliberately unchanged: a cap firing is a reporting problem
- * (C1/C4), not a reason to buy a bigger number. */
-#define ZCL_DEVLOOP_CLOSURE_FILE_CAP 2048
+/* Size a closure result from the verified source corpus plus the maximum
+ * overlay contribution from this changed set. The codeindex authority's hard
+ * maximum remains the resource bound. This prevents the planner from
+ * manufacturing an incomplete result with a smaller duplicate magic cap;
+ * real engine, fan-out, depth, or corpus bounds still report INCOMPLETE. */
+static int plan_closure_file_cap_from_count(int indexed, size_t changed_count)
+{
+    if (indexed < 0)
+        return -1;
+    size_t needed = (size_t)indexed;
+    if (changed_count > SIZE_MAX - needed)
+        needed = CI_IMPACT_CLOSURE_MAX_FILES;
+    else
+        needed += changed_count;
+    if (needed > CI_IMPACT_CLOSURE_MAX_FILES)
+        needed = CI_IMPACT_CLOSURE_MAX_FILES;
+    return needed > 0 ? (int)needed : 1;
+}
+
+#if defined(ZCL_TESTING)
+int zcl_devloop_test_closure_file_cap(int indexed, size_t changed_count)
+{
+    return plan_closure_file_cap_from_count(indexed, changed_count);
+}
+#endif
+
+static int plan_closure_file_cap(struct codeindex *ci, size_t changed_count)
+{
+    return plan_closure_file_cap_from_count(codeindex_file_count(ci),
+                                             changed_count);
+}
 
 static bool plan_group_present(const struct zcl_devloop_plan *plan,
                                const char *group)
@@ -685,11 +711,25 @@ static bool plan_add_closure(const char *repo_root,
     }
 
     bool ok = true;
+    int closure_file_cap = plan_closure_file_cap(ci, file_count);
+    if (closure_file_cap < 0) {
+        if (semantic_count > 0)
+            plan_dim_set(plan, ZCL_DEVLOOP_DIM_SEMANTIC,
+                         ZCL_DEVLOOP_DIM_UNAVAILABLE,
+                         "source-corpus-count-unavailable");
+        if (include_count > 0)
+            plan_dim_set(plan, ZCL_DEVLOOP_DIM_INCLUDE,
+                         ZCL_DEVLOOP_DIM_UNAVAILABLE,
+                         "source-corpus-count-unavailable");
+        plan->closure_truncated = true;
+        codeindex_close(ci);
+        return true;
+    }
     char (*changed)[256] = semantic_count > 0
         ? zcl_malloc(sizeof(*changed) * semantic_count, "closure_changed")
         : NULL;
     char (*impacted)[256] = zcl_malloc(
-        sizeof(*impacted) * ZCL_DEVLOOP_CLOSURE_FILE_CAP, "closure_impacted");
+        sizeof(*impacted) * (size_t)closure_file_cap, "closure_impacted");
     if ((semantic_count > 0 && !changed) || !impacted) {
         ok = false;
         goto out;
@@ -712,11 +752,11 @@ static bool plan_add_closure(const char *repo_root,
             ? codeindex_impact_closure_overlay_with_terminal(
                 ci, root, changed, (int)semantic_count, 0,
                 plan_reached_proof_owner, NULL, impacted,
-                ZCL_DEVLOOP_CLOSURE_FILE_CAP, &truncated)
+                closure_file_cap, &truncated)
             : codeindex_impact_closure_with_terminal(
                 ci, changed, (int)semantic_count, 0,
                 plan_reached_proof_owner, NULL, impacted,
-                ZCL_DEVLOOP_CLOSURE_FILE_CAP, &truncated);
+                closure_file_cap, &truncated);
         if (n < 0) {
             plan_dim_set(plan, ZCL_DEVLOOP_DIM_SEMANTIC,
                          ZCL_DEVLOOP_DIM_UNAVAILABLE, "closure-query-error");
@@ -754,7 +794,7 @@ static bool plan_add_closure(const char *repo_root,
             continue;
         enum codeindex_include_dim idim = CODEINDEX_INCLUDE_DIM_UNAVAILABLE;
         int nd = codeindex_reverse_includes(ci, files[i], impacted,
-                                            ZCL_DEVLOOP_CLOSURE_FILE_CAP,
+                                            closure_file_cap,
                                             &idim);
         if (nd < 0) {
             plan_dim_set(plan, ZCL_DEVLOOP_DIM_INCLUDE,

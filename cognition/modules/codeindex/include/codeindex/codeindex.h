@@ -366,6 +366,11 @@ int codeindex_symbol_record_id(const struct ci_symbol *symbol,
  * the walked depth is complete). Returns the file count (>=0), -1 on hard error.
  * `changed_files` is an array of NUL-terminated repo-relative paths. */
 #define CI_CLOSURE_DEFAULT_DEPTH 8
+/* One authority for the largest file set the impact engine can prove. A
+ * consumer should size its bounded result buffer from its verified corpus,
+ * capped here, rather than impose a smaller unrelated ceiling that turns a
+ * complete graph into an artificial truncation. */
+#define CI_IMPACT_CLOSURE_MAX_FILES 20000
 int codeindex_impact_closure(struct codeindex *ci,
                              const char (*changed_files)[256], int n_changed,
                              int max_depth,

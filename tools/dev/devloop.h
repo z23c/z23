@@ -218,6 +218,11 @@ struct zcl_devloop_plan {
 bool zcl_devloop_plan_proof_admissible(const struct zcl_devloop_plan *plan,
                                        const char **out_reason);
 
+#if defined(ZCL_TESTING)
+/* Pure capacity seam for the corpus-sized closure regression. */
+int zcl_devloop_test_closure_file_cap(int indexed, size_t changed_count);
+#endif
+
 struct zcl_devloop_process_result {
     int exit_code;
     int term_signal;

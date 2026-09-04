@@ -201,6 +201,21 @@ static int test_ic_truncated_closure_preserves_groups(void)
     return failures;
 }
 
+static int test_ic_closure_capacity_follows_corpus(void)
+{
+    int failures = 0;
+    TEST("impact composition: planner capacity follows the verified corpus") {
+        ASSERT(zcl_devloop_test_closure_file_cap(2050, 1) == 2051);
+        ASSERT(zcl_devloop_test_closure_file_cap(0, 0) == 1);
+        ASSERT(zcl_devloop_test_closure_file_cap(
+                   CI_IMPACT_CLOSURE_MAX_FILES, 1) ==
+               CI_IMPACT_CLOSURE_MAX_FILES);
+        ASSERT(zcl_devloop_test_closure_file_cap(-1, 1) == -1);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 /* A representative high-fanout graph plan must retain substantially more
  * groups than the direct path floor without becoming incomplete. */
 static const char *const ic_many_group_files[] = {
@@ -1507,6 +1522,7 @@ int test_impact_composition(void)
 {
     int failures = 0;
     failures += test_ic_truncated_closure_preserves_groups();
+    failures += test_ic_closure_capacity_follows_corpus();
     failures += test_ic_large_plan_preserves_groups();
     failures += test_ic_command_latency_scope_is_precise();
     failures += test_ic_registry_def_has_dependents();

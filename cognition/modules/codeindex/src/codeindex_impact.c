@@ -35,9 +35,6 @@
 #define CI_CLOSURE_QUERY_BATCH 4096
 /* Distinct symbols the traversal is allowed to visit. */
 #define CI_CLOSURE_MAX_SYMS 50000
-/* Distinct impacted files the traversal is allowed to collect. */
-#define CI_CLOSURE_MAX_FILES 20000
-
 /* ── a tiny open-addressing string set (owns its keys) ──────────────────
  * Used for dedup only; iteration order is never observed, so the final file
  * list is sorted separately for determinism. */
@@ -195,7 +192,7 @@ static bool ci_closure_add_file(struct ci_closure_ctx *c, const char *path,
         return false;
     if (!added)
         return true;
-    if (c->files.len >= CI_CLOSURE_MAX_FILES) {
+    if (c->files.len >= CI_IMPACT_CLOSURE_MAX_FILES) {
         *hit_cap = true;
         return true;
     }
@@ -463,7 +460,7 @@ int codeindex_reverse_includes(struct codeindex *ci, const char *path,
 {
     if (dim) *dim = CODEINDEX_INCLUDE_DIM_UNAVAILABLE;
     if (!ci || !ci->store || !path || !path[0] || !out || cap <= 0 ||
-        cap > CI_CLOSURE_MAX_FILES || !dim)
+        cap > CI_IMPACT_CLOSURE_MAX_FILES || !dim)
         LOG_ERR("codeindex", "bad args to codeindex_reverse_includes");
 
     int64_t edges = ci_store_include_edge_count(ci->store);
