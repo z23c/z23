@@ -53,6 +53,7 @@
 #include "json/json.h"
 #include "kernel/command_registry.h"
 #include "test/testcache.h"
+#include "test_group_catalog.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -188,12 +189,15 @@ static int test_ic_truncated_closure_preserves_groups(void)
         ASSERT(zcl_devloop_plan_add_closure(IC_FIX_TRUNC, files, 1, &plan));
         ASSERT(plan.closure_attempted);
 
-        /* The bound really fired — otherwise this whole case proves nothing. */
+        /* The bound really fired — otherwise this whole case proves nothing.
+         * A capacity bound is answered by the universal closure, so the
+         * dimension is COMPLETE and says which answer it gave. */
         ASSERT(plan.dims[ZCL_DEVLOOP_DIM_SEMANTIC].status ==
-               ZCL_DEVLOOP_DIM_INCOMPLETE);
+               ZCL_DEVLOOP_DIM_COMPLETE);
         ASSERT(strcmp(plan.dims[ZCL_DEVLOOP_DIM_SEMANTIC].reason,
-                      "closure-truncated") == 0);
-        ASSERT(plan.closure_truncated);
+                      "closure-universal") == 0);
+        ASSERT(plan.closure_universal);
+        ASSERT(!plan.closure_truncated);
 
         /* C1, the whole point: INCOMPLETE is not EMPTY. The partial walk
          * reached download.c, so "download" is planned. Before this change the
@@ -550,8 +554,10 @@ static int test_ic_incomplete_dimension_refuses_proof(void)
         ASSERT(zcl_devloop_plan_proof_admissible(&good, &why));
         ASSERT(strcmp(why, "") == 0);
 
-        /* (b) a truncated closure: the tests still RUN (T1), but the plan is
-         * no longer evidence that the change is covered. */
+        /* (b) a CAPACITY-bounded closure is a different fact from a missing
+         * one: the index answered, and its answer was "more than this plan can
+         * list". The universal closure is the sound reading of that, so the
+         * plan stays admissible — and covers everything. */
         system("rm -rf " IC_FIX_TRUNC);
         ASSERT(ic_write_call_pair(IC_FIX_TRUNC));
         ASSERT(ic_write_depfiles(IC_FIX_TRUNC));
@@ -560,17 +566,17 @@ static int test_ic_incomplete_dimension_refuses_proof(void)
         ASSERT(zcl_devloop_plan_files(files, 1, &cut));
         ASSERT(zcl_devloop_plan_add_closure(IC_FIX_TRUNC, files, 1, &cut));
         why = "unset";
-        ASSERT(!zcl_devloop_plan_proof_admissible(&cut, &why));
-        ASSERT(strcmp(why, "closure-truncated") == 0);
-        /* Refusing did NOT cost the evidence. */
+        ASSERT(zcl_devloop_plan_proof_admissible(&cut, &why));
+        ASSERT(cut.closure_universal);
+        /* Widening did NOT cost the evidence the partial walk found. */
         ASSERT(ic_planned(&cut, "download"));
 
-        /* (c) ONE standard, not two. The result cache already refuses to admit
-         * a truncated closure; the plan must describe that same incompleteness
-         * with the same word. They cannot share a symbol — testcache is a
-         * test-binary-only module and is never linked into the node — so the
-         * shared thing is the vocabulary, pinned here. */
-        ASSERT(strcmp(why, testcache_reason_label(TESTCACHE_R_TRUNCATED)) == 0);
+        /* (c) the vocabulary the result cache uses for a truncated closure is
+         * still the ONE word for that condition, and it is still spoken —
+         * codeindex reports it to the planner, which is what triggers the
+         * universal answer above. Pinned here so the two cannot drift. */
+        ASSERT(strcmp("closure-truncated",
+                      testcache_reason_label(TESTCACHE_R_TRUNCATED)) == 0);
 
         /* (d) no depfiles at all: the include dimension was never answerable,
          * which is a different fact from "nothing depends on this". Same
@@ -601,11 +607,22 @@ static int test_ic_incomplete_dimension_refuses_proof(void)
         /* (f) the refusal reaches the wire: a consumer reading only the JSON
          * gets the same verdict. */
         char body[65536];
-        size_t n = zcl_devloop_plan_json_closure(IC_FIX_TRUNC, files, 1, body,
-                                                 sizeof(body));
+        size_t n = zcl_devloop_plan_json_closure(IC_FIX_NODEPS, header_files, 1,
+                                                 body, sizeof(body));
         ASSERT(n > 0 && n < sizeof(body));
         ASSERT(strstr(body, "\"proof_admissible\":false") != NULL);
-        ASSERT(strstr(body, "\"proof_refusal\":\"closure-truncated\"") != NULL);
+        ASSERT(strstr(body, "\"proof_refusal\":\"no-include-graph\"") != NULL);
+        ASSERT(strstr(body, "\"live_eligible\":false") != NULL);
+        ASSERT(strstr(body, "\"closure_universal\":false") != NULL);
+
+        /* (g) and so does the capacity answer, which is NOT a refusal. */
+        n = zcl_devloop_plan_json_closure(IC_FIX_TRUNC, files, 1, body,
+                                          sizeof(body));
+        ASSERT(n > 0 && n < sizeof(body));
+        ASSERT(strstr(body, "\"proof_admissible\":true") != NULL);
+        ASSERT(strstr(body, "\"closure_universal\":true") != NULL);
+        ASSERT(strstr(body, "\"closure_truncated\":false") != NULL);
+        ASSERT(strstr(body, "\"execution_selector\":\"universal\"") != NULL);
         ASSERT(strstr(body, "\"live_eligible\":false") != NULL);
         ASSERT(strstr(body,
                       "\"why_not_live\":\"consensus_or_chain_state_is_never_swappable\"")
@@ -620,6 +637,112 @@ static int test_ic_incomplete_dimension_refuses_proof(void)
         system("rm -rf " IC_FIX_TRUNC);
         system("rm -rf " IC_FIX_MACRO);
         system("rm -rf " IC_FIX_NODEPS);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* ── T4b: CAPACITY is answered by the universal closure ────────────────
+ *
+ * Two bounds mean "this change reaches more than the plan can enumerate":
+ * the reverse-caller walk filling a per-query batch, and the group array
+ * filling. Neither is missing evidence — the index answered both times. The
+ * sound, fail-closed reading is that EVERY group is impacted, and the proof
+ * runner must then run the whole catalog. What stays a refusal is the case
+ * where the index could not answer at all. */
+
+static int test_ic_capacity_bound_runs_everything(void)
+{
+    int failures = 0;
+    TEST("impact composition: a capacity bound runs the whole catalog") {
+        const char *files[] = { "core/modules/net/src/tor_integration.c" };
+
+        /* (a) the group array fills. The fixture names a few dozen real
+         * proof-owning test files; the seam lowers the ceiling so the cap is
+         * reachable without a fixture that has to out-name the catalog. */
+        system("rm -rf " IC_FIX_GROUP);
+        ASSERT(ic_write_call_pair(IC_FIX_GROUP));
+        ASSERT(ic_write_depfiles(IC_FIX_GROUP));
+        size_t n = sizeof(ic_many_group_files) /
+                   sizeof(ic_many_group_files[0]);
+        for (size_t i = 0; i < n; i++) {
+            char fbody[256];
+            (void)snprintf(fbody, sizeof(fbody),
+                           "/* many-group fixture */\n"
+                           "#include \"net/clp.h\"\n"
+                           "int mg_%zu(int x) { return tor_leaf(x); }\n", i);
+            ASSERT(ic_write(IC_FIX_GROUP, ic_many_group_files[i], fbody));
+        }
+        struct zcl_devloop_plan capped;
+        zcl_devloop_test_plan_group_cap = 8;
+        bool built = zcl_devloop_plan_files(files, 1, &capped) &&
+                     zcl_devloop_plan_add_closure(IC_FIX_GROUP, files, 1,
+                                                  &capped);
+        zcl_devloop_test_plan_group_cap = 0;
+        ASSERT(built);
+        ASSERT(capped.closure_universal);
+        ASSERT(!capped.closure_truncated);
+        ASSERT(capped.dims[ZCL_DEVLOOP_DIM_SEMANTIC].status ==
+               ZCL_DEVLOOP_DIM_COMPLETE);
+        ASSERT(strcmp(capped.dims[ZCL_DEVLOOP_DIM_SEMANTIC].reason,
+                      "closure-universal") == 0);
+        const char *why = "unset";
+        ASSERT(zcl_devloop_plan_proof_admissible(&capped, &why));
+        ASSERT(strcmp(why, "") == 0);
+        /* The cap kept what fit; it did not throw the partial evidence away. */
+        ASSERT(capped.closure_groups_len > 0);
+
+        /* And the SAME fixture under the production ceiling enumerates
+         * normally — so (a) is testing the cap, not the fixture. */
+        struct zcl_devloop_plan roomy;
+        ASSERT(zcl_devloop_plan_files(files, 1, &roomy));
+        ASSERT(zcl_devloop_plan_add_closure(IC_FIX_GROUP, files, 1, &roomy));
+        ASSERT(!roomy.closure_universal);
+        ASSERT(roomy.closure_groups_len > capped.closure_groups_len);
+
+        /* (b) the proof runner turns a universal plan into the whole catalog,
+         * and an ordinary plan into just its own groups. */
+        static char selector[ZCL_DEVLOOP_MAX_PLAN_SELECTIONS *
+                             (ZCL_TEST_GROUP_FULL_MAX + 1)];
+        uint32_t selected = 0;
+        memset(selector, 0, sizeof(selector));
+        ASSERT(zcl_dev_proof_test_build_test_selector(
+                   &capped, false, selector, sizeof(selector), &selected));
+        ASSERT((size_t)selected == zcl_test_group_catalog_count());
+        ASSERT(zcl_test_group_catalog_count() > 0);
+        for (size_t i = 0; i < zcl_test_group_catalog_count(); i++) {
+            char needle[ZCL_TEST_GROUP_FULL_MAX + 2];
+            (void)snprintf(needle, sizeof(needle), "%s",
+                           zcl_test_group_catalog_at(i));
+            ASSERT(strstr(selector, needle) != NULL);
+        }
+        uint32_t exact_selected = 0;
+        memset(selector, 0, sizeof(selector));
+        ASSERT(zcl_dev_proof_test_build_test_selector(
+                   &roomy, false, selector, sizeof(selector),
+                   &exact_selected));
+        ASSERT(exact_selected > 0);
+        ASSERT((size_t)exact_selected < zcl_test_group_catalog_count());
+
+        /* (c) no index at all is NOT capacity. It is the planner failing to
+         * ask, and it still refuses. */
+        struct zcl_devloop_plan blind;
+        const char *header_files[] = {
+            "core/modules/net/include/net/net.h"
+        };
+        ASSERT(zcl_devloop_plan_files(header_files, 1, &blind));
+        ASSERT(zcl_devloop_plan_add_closure("test-tmp/no-such-impact-index",
+                                            header_files, 1, &blind));
+        ASSERT(!blind.closure_universal);
+        ASSERT(blind.dims[ZCL_DEVLOOP_DIM_SEMANTIC].status ==
+               ZCL_DEVLOOP_DIM_UNAVAILABLE);
+        ASSERT(blind.dims[ZCL_DEVLOOP_DIM_INCLUDE].status ==
+               ZCL_DEVLOOP_DIM_UNAVAILABLE);
+        why = "unset";
+        ASSERT(!zcl_devloop_plan_proof_admissible(&blind, &why));
+        ASSERT(strcmp(why, "no-code-index") == 0);
+
+        system("rm -rf " IC_FIX_GROUP);
         PASS();
     } _test_next:;
     return failures;
@@ -1667,6 +1790,7 @@ int test_impact_composition(void)
     failures += test_ic_registry_def_has_dependents();
     failures += test_ic_macro_only_header_has_dependents();
     failures += test_ic_incomplete_dimension_refuses_proof();
+    failures += test_ic_capacity_bound_runs_everything();
     failures += test_ic_every_selection_has_a_reason();
     failures += test_ic_union_never_loses_a_rule_group();
     failures += test_ic_dimension_applicability_and_exact_execution();

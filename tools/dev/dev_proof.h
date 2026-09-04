@@ -84,4 +84,14 @@ bool zcl_dev_proof_wait(const char *repo_root,
                         int timeout_ms,
                         struct zcl_dev_proof_status *out);
 
+#if defined(ZCL_TESTING)
+/* Seam for the selection regression: the same builder the proof worker uses,
+ * so a test can prove a universal plan selects the whole catalog without
+ * running a proof cycle. */
+struct zcl_devloop_plan;
+bool zcl_dev_proof_test_build_test_selector(
+    const struct zcl_devloop_plan *plan, bool inventory_only,
+    char *out, size_t out_size, uint32_t *count_out);
+#endif
+
 #endif

@@ -294,7 +294,7 @@ static int impact_closure_impl(
     struct codeindex *ci, const char *overlay_root,
     const char (*changed_files)[256], int n_changed, int max_depth,
     codeindex_impact_terminal_fn terminal, void *terminal_user,
-    char (*out)[256], int cap, bool *truncated)
+    char (*out)[256], int cap, bool *truncated, bool stop_at_truncation)
 {
     if (truncated) *truncated = false;
     if (!ci || !ci->store || !changed_files || n_changed < 0 || !out ||
@@ -323,6 +323,8 @@ static int impact_closure_impl(
     struct ci_strlist next = {0};
 
     for (int i = 0; i < n_changed; i++) {
+        if (stop_at_truncation && *truncated)
+            break;
         if (!ci_closure_seed_file(&c, ci, changed_files[i], &frontier,
                                   truncated))
             goto done;
@@ -341,6 +343,8 @@ static int impact_closure_impl(
     }
 
     for (int d = 0; d < depth && frontier.len > 0; d++) {
+        if (stop_at_truncation && *truncated)
+            break;
         /* Deterministic per-level expansion order. */
         qsort(frontier.items, frontier.len, sizeof(*frontier.items),
               ci_str_cmp);
@@ -348,6 +352,11 @@ static int impact_closure_impl(
             if (!ci_closure_expand_symbol(&c, ci, frontier.items[i], &next,
                                           truncated, terminal, terminal_user))
                 goto done;
+            /* The caller has already decided a bounded closure means "run
+             * everything", so paging the rest of a huge frontier cannot
+             * change its answer — only its wall clock. Stop here. */
+            if (stop_at_truncation && *truncated)
+                break;
         }
         ci_strlist_free(&frontier);
         frontier = next;
@@ -388,7 +397,8 @@ int codeindex_impact_closure(struct codeindex *ci,
                              char (*out)[256], int cap, bool *truncated)
 {
     return impact_closure_impl(ci, NULL, changed_files, n_changed, max_depth,
-                               NULL, NULL, out, cap, truncated);
+                               NULL, NULL,
+                               out, cap, truncated, false);
 }
 
 int codeindex_impact_closure_overlay(
@@ -401,7 +411,8 @@ int codeindex_impact_closure_overlay(
         LOG_ERR("codeindex", "overlay closure root is empty");
     }
     return impact_closure_impl(ci, root, changed_files, n_changed, max_depth,
-                               NULL, NULL, out, cap, truncated);
+                               NULL, NULL,
+                               out, cap, truncated, false);
 }
 
 int codeindex_impact_closure_with_terminal(
@@ -414,7 +425,8 @@ int codeindex_impact_closure_with_terminal(
         LOG_ERR("codeindex", "terminal closure callback is empty");
     }
     return impact_closure_impl(ci, NULL, changed_files, n_changed, max_depth,
-                               terminal, terminal_user, out, cap, truncated);
+                               terminal, terminal_user,
+                               out, cap, truncated, false);
 }
 
 int codeindex_impact_closure_overlay_with_terminal(
@@ -428,7 +440,23 @@ int codeindex_impact_closure_overlay_with_terminal(
         LOG_ERR("codeindex", "overlay terminal closure input is empty");
     }
     return impact_closure_impl(ci, root, changed_files, n_changed, max_depth,
-                               terminal, terminal_user, out, cap, truncated);
+                               terminal, terminal_user,
+                               out, cap, truncated, false);
+}
+
+int codeindex_impact_closure_bounded(
+    struct codeindex *ci, const char *root,
+    const char (*changed_files)[256], int n_changed, int max_depth,
+    codeindex_impact_terminal_fn terminal, void *terminal_user,
+    char (*out)[256], int cap, bool *truncated, bool stop_at_truncation)
+{
+    if ((root && !root[0]) || !terminal) {
+        if (truncated) *truncated = false;
+        LOG_ERR("codeindex", "bounded closure input is empty");
+    }
+    return impact_closure_impl(ci, root, changed_files, n_changed, max_depth,
+                               terminal, terminal_user,
+                               out, cap, truncated, stop_at_truncation);
 }
 
 /* ── reverse INCLUDE closure ────────────────────────────────────────────

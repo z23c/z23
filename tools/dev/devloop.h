@@ -190,6 +190,17 @@ struct zcl_devloop_plan {
      * no longer implies closure_groups is empty — read `dims`. */
     bool closure_truncated;
 
+    /* CAPACITY, not missing evidence. A bound firing on a graph dimension
+     * says "this change reaches more than the plan can enumerate" — which is
+     * a fact about the plan's size, not about the index's ability to answer.
+     * The sound, fail-closed reading of that fact is the UNIVERSAL closure:
+     * every group in the catalog is impacted. The dimension is then COMPLETE
+     * with reason "closure-universal" and this flag is set, and a proof
+     * consumer must run the whole catalog rather than the group arrays above.
+     * UNAVAILABLE — no index, query error — is a different fact and still
+     * refuses proof. */
+    bool closure_universal;
+
     /* ── C5: why every selected group is here ── */
     struct zcl_devloop_selection selections[ZCL_DEVLOOP_MAX_PLAN_SELECTIONS];
     size_t selections_len;
@@ -221,6 +232,11 @@ bool zcl_devloop_plan_proof_admissible(const struct zcl_devloop_plan *plan,
 #if defined(ZCL_TESTING)
 /* Pure capacity seam for the corpus-sized closure regression. */
 int zcl_devloop_test_closure_file_cap(int indexed, size_t changed_count);
+/* Test-only ceiling on closure_groups, so the group-cap path can be reached
+ * from a fixture of a few dozen files instead of one that must out-name the
+ * whole catalog. 0 (the default) means the production cap. Values outside
+ * (0, ZCL_DEVLOOP_MAX_PLAN_GROUPS) are ignored. */
+extern size_t zcl_devloop_test_plan_group_cap;
 #endif
 
 struct zcl_devloop_process_result {

@@ -400,6 +400,20 @@ int codeindex_impact_closure_overlay_with_terminal(
     codeindex_impact_terminal_fn terminal, void *terminal_user,
     char (*out)[256], int cap, bool *truncated);
 
+/* One entry point covering both variants above plus an early exit. `root` is
+ * NULL for the store-only walk and a repo root for the overlay walk. When
+ * `stop_at_truncation` is set the traversal returns as soon as any bound
+ * fires: a caller whose answer to "the closure is bounded" is a FIXED one —
+ * such as "then run every test group" — learns nothing further from paging
+ * the rest of a very large frontier, and paging it can cost minutes. The
+ * returned set is then a prefix of the walk and *truncated is true, which is
+ * exactly what such a caller already treats as "do not trust this set". */
+int codeindex_impact_closure_bounded(
+    struct codeindex *ci, const char *root,
+    const char (*changed_files)[256], int n_changed, int max_depth,
+    codeindex_impact_terminal_fn terminal, void *terminal_user,
+    char (*out)[256], int cap, bool *truncated, bool stop_at_truncation);
+
 /* ── Forward (callee) input-closure query — the content-addressed test cache
  * key input (symmetric mirror of codeindex_impact_closure) ──────────────
  *

@@ -1425,6 +1425,25 @@ static bool inventory_output_only(const char *const *files, size_t count)
            strcmp(files[0], "docs/CAPABILITY_INVENTORY.jsonl") == 0;
 }
 
+/* Record the test-selection shape beside the dimension logs. "universal" is
+ * the whole catalog, chosen because the plan's closure was capacity-bounded;
+ * "exact" is the enumerated plan. */
+static bool proof_note_test_selection(const struct proof_paths *paths,
+                                      bool universal, uint32_t selected)
+{
+    char path[PATH_MAX];
+    if (snprintf(path, sizeof(path), "%s/%s.test-selection.log", paths->logs,
+                 paths->key) >= (int)sizeof(path))
+        return false;
+    FILE *f = fopen(path, "w");
+    if (!f) return false;
+    (void)fprintf(f, "test_selection=%s reason=%s groups_selected=%u\n",
+                  universal ? "universal" : "exact",
+                  universal ? "closure-universal" : "impact-plan",
+                  (unsigned)selected);
+    return fclose(f) == 0;
+}
+
 static bool build_test_selector(const struct zcl_devloop_plan *plan,
                                 bool inventory_only, char *out,
                                 size_t out_size, uint32_t *count_out)
@@ -1437,6 +1456,23 @@ static bool build_test_selector(const struct zcl_devloop_plan *plan,
     }
     size_t pos = 0;
     uint32_t count = 0;
+    /* A capacity-bounded plan reaches more groups than it can enumerate. The
+     * plan already turned that into the universal closure, so the proof runs
+     * the whole catalog: a large run is the honest price of a change whose
+     * blast radius does not fit in a list. */
+    if (plan->closure_universal) {
+        for (size_t i = 0; i < zcl_test_group_catalog_count(); i++) {
+            const char *full = zcl_test_group_catalog_at(i);
+            int n = snprintf(out + pos, out_size - pos, "%s%s",
+                             pos ? "," : "", full);
+            if (n <= 0 || (size_t)n >= out_size - pos) return false;
+            pos += (size_t)n;
+            count++;
+        }
+        if (count == 0) return false;
+        *count_out = count;
+        return true;
+    }
     for (int set = 0; set < 2; set++) {
         size_t len = set == 0 ? plan->path_groups_len : plan->closure_groups_len;
         for (size_t i = 0; i < len; i++) {
@@ -1466,6 +1502,15 @@ static bool build_test_selector(const struct zcl_devloop_plan *plan,
     *count_out = count;
     return true;
 }
+
+#if defined(ZCL_TESTING)
+bool zcl_dev_proof_test_build_test_selector(
+    const struct zcl_devloop_plan *plan, bool inventory_only,
+    char *out, size_t out_size, uint32_t *count_out)
+{
+    return build_test_selector(plan, inventory_only, out, out_size, count_out);
+}
+#endif
 
 static bool parse_uint_field(const char *line, const char *key, uint32_t *out)
 {
@@ -2082,6 +2127,14 @@ static bool proof_worker(const struct proof_paths *paths,
         return false;
     }
     test->selected = test_count;
+    /* Say why the run is this large, in a file a reader finds beside the test
+     * log. Without this a universal selection looks like an unexplained
+     * whole-catalog run. */
+    if (!proof_note_test_selection(&execution, plan.closure_universal,
+                                   test_count)) {
+        proof_why(why, why_len, "test_selection_note_unwritable");
+        return false;
+    }
     bool cycle_reused = !generated->selected && cycle_proof_reuse(
         paths, source_before.cas_root_sha3, receipt.dimensions);
     if (!cycle_reused) {

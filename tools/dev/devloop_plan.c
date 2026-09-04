@@ -359,6 +359,9 @@ static bool plan_group_ids_valid(const struct zcl_devloop_plan *plan)
 static bool plan_selects_full_group(const struct zcl_devloop_plan *plan,
                                     const char *full_id)
 {
+    /* The universal closure selects the whole catalog by construction. */
+    if (plan->closure_universal)
+        return true;
     for (size_t i = 0; i < plan->path_groups_len; i++)
         if (zcl_test_group_plan_selects(plan->path_groups[i], full_id))
             return true;
@@ -598,6 +601,22 @@ static int plan_closure_file_cap(struct codeindex *ci, size_t changed_count)
                                              changed_count);
 }
 
+#if defined(ZCL_TESTING)
+size_t zcl_devloop_test_plan_group_cap = 0;
+#endif
+
+/* The most closure groups this plan can name. Reaching it is a CAPACITY fact
+ * about the plan, not a gap in the index — see plan_go_universal(). */
+static size_t plan_group_cap(void)
+{
+#if defined(ZCL_TESTING)
+    if (zcl_devloop_test_plan_group_cap > 0 &&
+        zcl_devloop_test_plan_group_cap < ZCL_DEVLOOP_MAX_PLAN_GROUPS)
+        return zcl_devloop_test_plan_group_cap;
+#endif
+    return ZCL_DEVLOOP_MAX_PLAN_GROUPS;
+}
+
 static bool plan_group_present(const struct zcl_devloop_plan *plan,
                                const char *group)
 {
@@ -621,7 +640,7 @@ static bool plan_fold_reached_file(struct zcl_devloop_plan *plan,
     if (plan_semantic_leaf_group(reached, leaf_group)) {
         if (plan_group_present(plan, leaf_group))
             return true;
-        if (plan->closure_groups_len >= ZCL_DEVLOOP_MAX_PLAN_GROUPS)
+        if (plan->closure_groups_len >= plan_group_cap())
             return false;
         snprintf(plan->closure_groups[plan->closure_groups_len],
                  sizeof(plan->closure_groups[0]), "%s", leaf_group);
@@ -634,7 +653,7 @@ static bool plan_fold_reached_file(struct zcl_devloop_plan *plan,
     for (size_t g = 0; g < acc.groups_len; g++) {
         if (plan_group_present(plan, acc.groups[g]))
             continue;
-        if (plan->closure_groups_len >= ZCL_DEVLOOP_MAX_PLAN_GROUPS)
+        if (plan->closure_groups_len >= plan_group_cap())
             return false;
         snprintf(plan->closure_groups[plan->closure_groups_len],
                  sizeof(plan->closure_groups[0]), "%s", acc.groups[g]);
@@ -642,6 +661,26 @@ static bool plan_fold_reached_file(struct zcl_devloop_plan *plan,
         plan_note_selection(plan, acc.groups[g], dim, reached);
     }
     return true;
+}
+
+/* A CAPACITY bound fired on `dim`: the change reaches more than this plan can
+ * enumerate. That is not missing evidence — the index answered, and its answer
+ * was "too much to list". The sound, fail-closed reading of "too much to list"
+ * is the UNIVERSAL closure: treat every group in the catalog as impacted. The
+ * dimension is therefore COMPLETE, with the reason naming what happened, and
+ * the plan carries closure_universal for the proof runner to act on. */
+static void plan_go_universal(struct zcl_devloop_plan *plan,
+                              enum zcl_devloop_dim dim)
+{
+    plan->closure_universal = true;
+    if (plan_dim_severity(plan->dims[dim].status) >
+        plan_dim_severity(ZCL_DEVLOOP_DIM_COMPLETE))
+        return;  /* a real refusal already stands; capacity does not erase it */
+    /* plan_dim_set() only escalates, and COMPLETE is usually already the
+     * standing verdict, so name the reason directly: a reader must be able to
+     * tell a plan that enumerated everything from one that gave up listing. */
+    plan->dims[dim].status = ZCL_DEVLOOP_DIM_COMPLETE;
+    plan->dims[dim].reason = "closure-universal";
 }
 
 static bool plan_reached_proof_owner(const char *path, void *user)
@@ -664,6 +703,7 @@ static bool plan_add_closure(const char *repo_root,
 
     plan->closure_attempted = true;
     plan->closure_snapshot = false;
+    plan->closure_universal = false;
     plan->closure_groups_len = 0;
     /* This call OWNS the two graph dimensions; reset them and let the walks
      * below escalate. The OPAQUE dimension belongs to the path floor and is
@@ -748,34 +788,27 @@ static bool plan_add_closure(const char *repo_root,
          * evidence layer. Record it below, but do not walk back through its
          * generic caller/dispatcher and select unrelated proof families. An
          * unowned caller is never a boundary and the graph keeps climbing. */
-        int n = plan->closure_snapshot
-            ? codeindex_impact_closure_overlay_with_terminal(
-                ci, root, changed, (int)semantic_count, 0,
-                plan_reached_proof_owner, NULL, impacted,
-                closure_file_cap, &truncated)
-            : codeindex_impact_closure_with_terminal(
-                ci, changed, (int)semantic_count, 0,
-                plan_reached_proof_owner, NULL, impacted,
-                closure_file_cap, &truncated);
+        int n = codeindex_impact_closure_bounded(
+            ci, plan->closure_snapshot ? root : NULL,
+            changed, (int)semantic_count, 0,
+            plan_reached_proof_owner, NULL, impacted,
+            closure_file_cap, &truncated, true);
         if (n < 0) {
             plan_dim_set(plan, ZCL_DEVLOOP_DIM_SEMANTIC,
                          ZCL_DEVLOOP_DIM_UNAVAILABLE, "closure-query-error");
             ok = false;
             goto out;
         }
-        if (truncated) {
-        /* C1: the walk is INCOMPLETE, not empty. Everything it reached below
-         * is still folded in — a partial closure is real evidence, and the
-         * caller learns it is partial from dims[SEMANTIC], not by receiving
-         * an empty array that looks like "nothing to run". */
-            plan_dim_set(plan, ZCL_DEVLOOP_DIM_SEMANTIC,
-                         ZCL_DEVLOOP_DIM_INCOMPLETE, "closure-truncated");
-        }
+        /* Everything the (possibly stopped-early) walk reached is still folded
+         * in below — a partial closure is real evidence. What a CAPACITY bound
+         * changes is the answer's shape, not its availability: see
+         * plan_go_universal(). */
+        if (truncated)
+            plan_go_universal(plan, ZCL_DEVLOOP_DIM_SEMANTIC);
         for (int i = 0; i < n; i++) {
             if (!plan_fold_reached_file(plan, impacted[i],
                                         ZCL_DEVLOOP_DIM_SEMANTIC)) {
-                plan_dim_set(plan, ZCL_DEVLOOP_DIM_SEMANTIC,
-                             ZCL_DEVLOOP_DIM_INCOMPLETE, "plan-group-cap");
+                plan_go_universal(plan, ZCL_DEVLOOP_DIM_SEMANTIC);
                 break;
             }
         }
@@ -789,7 +822,11 @@ static bool plan_add_closure(const char *repo_root,
     if (include_count > 0)
         plan_dim_set(plan, ZCL_DEVLOOP_DIM_INCLUDE,
                      ZCL_DEVLOOP_DIM_COMPLETE, "");
-    for (size_t i = 0; i < file_count; i++) {
+    /* The universal closure already contains every group this dimension could
+     * name, so walking it cannot widen the answer — only delay it. */
+    if (include_count > 0 && plan->closure_universal)
+        plan_go_universal(plan, ZCL_DEVLOOP_DIM_INCLUDE);
+    for (size_t i = 0; i < file_count && !plan->closure_universal; i++) {
         if (!path_include_applies(files[i]))
             continue;
         enum codeindex_include_dim idim = CODEINDEX_INCLUDE_DIM_UNAVAILABLE;
@@ -814,8 +851,7 @@ static bool plan_add_closure(const char *repo_root,
         for (int d = 0; d < nd; d++) {
             if (!plan_fold_reached_file(plan, impacted[d],
                                         ZCL_DEVLOOP_DIM_INCLUDE)) {
-                plan_dim_set(plan, ZCL_DEVLOOP_DIM_INCLUDE,
-                             ZCL_DEVLOOP_DIM_INCOMPLETE, "plan-group-cap");
+                plan_go_universal(plan, ZCL_DEVLOOP_DIM_INCLUDE);
                 break;
             }
         }
@@ -963,8 +999,9 @@ static bool append_execution_set(const struct zcl_devloop_plan *plan,
     zcl_hex_encode(digest, sizeof(digest), digest_string);
 
     if (!appendf(out, out_sz, pos,
-                 ",\"execution_selector\":\"exact\","
-                 "\"execution_groups\":["))
+                 ",\"execution_selector\":\"%s\","
+                 "\"execution_groups\":[",
+                 plan->closure_universal ? "universal" : "exact"))
         return false;
     size_t listed = 0;
     bool abridged = false;
@@ -1074,8 +1111,10 @@ static size_t plan_json_body(const struct zcl_devloop_plan *plan,
                                 plan->closure_groups,
                                 plan->closure_groups_len) ||
             !appendf(out, out_sz, &pos,
-                     ",\"closure_truncated\":%s,\"closure_snapshot\":%s",
+                     ",\"closure_truncated\":%s,\"closure_universal\":%s,"
+                     "\"closure_snapshot\":%s",
                      plan->closure_truncated ? "true" : "false",
+                     plan->closure_universal ? "true" : "false",
                      plan->closure_snapshot ? "true" : "false"))
             return 0;
 
