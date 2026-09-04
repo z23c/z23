@@ -3227,6 +3227,21 @@ static int zwn_t_package_lifecycle(const struct chain_params *params)
     int failures = 0;
     struct zwn_fixture fixture = {0};
     const struct zwn_package_scenario scenario = zwn_package_scenarios[0];
+    /* This case builds and rebuilds the full commons package graph across
+     * four in-process nodes (cold, restart-free repeat, source edit, header
+     * edit, revert), each pass durable-writing every chunk of every one of
+     * ZWN_PACKAGE_SCENARIO_COUNT real packages through store_atomic_write.
+     * Every one of those writes normally fsyncs before its atomic rename
+     * (package_store.h's crash-recovery contract) — correct for a live node,
+     * but there is no crash here: everything lands in a tmp datadir this
+     * same process reads back and rm -rf's when done, never a power cycle.
+     * That made this the group's wall-time sink (300s+ of no output under a
+     * loaded box, killed as WEDGED-NO-OUTPUT). Defer the sync for the
+     * duration of this one case; restored at _test_next: below on every
+     * exit path (ASSERT's goto included), so it never leaks into sibling
+     * cases in this group or other groups. */
+    bool zwn_prior_store_sync = vcs_package_store_deferred_sync_enabled();
+    vcs_package_store_set_deferred_sync(true);
     TEST("parameterized signed C23 package graph: A publishes, B discovers, "
          "C and D fetch onward after A disappears") {
         struct vcs_package_prepared prepared;
@@ -3242,6 +3257,9 @@ static int zwn_t_package_lifecycle(const struct chain_params *params)
         for (size_t i = 1; i < ZWN_PACKAGE_SCENARIO_COUNT; i++) {
             const struct zwn_package_scenario *item =
                 &zwn_package_scenarios[i];
+            fprintf(stderr,
+                    "  ... package_lifecycle: preparing %s (%zu/%zu)\n",
+                    item->name, i, (size_t)ZWN_PACKAGE_SCENARIO_COUNT - 1u);
             vcs_package_transport_init(&graph_transport[i - 1u]);
             ASSERT(zwn_prepare_package_transport(
                 item, item->source_dir, item->publisher_sequence,
@@ -3262,6 +3280,10 @@ static int zwn_t_package_lifecycle(const struct chain_params *params)
         ASSERT(vcs_package_store_pin(a.store, transport.transport_root,
                                      true) == VCS_PACKAGE_STORE_OK);
         for (size_t i = 1; i < ZWN_PACKAGE_SCENARIO_COUNT; i++) {
+            fprintf(stderr,
+                    "  ... package_lifecycle: A storing %s (%zu/%zu)\n",
+                    zwn_package_scenarios[i].name, i,
+                    (size_t)ZWN_PACKAGE_SCENARIO_COUNT - 1u);
             ASSERT(vcs_package_transport_store(
                        a.store, &graph_transport[i - 1u],
                        zwn_package_scenarios[i].source_dir) ==
@@ -3335,6 +3357,9 @@ static int zwn_t_package_lifecycle(const struct chain_params *params)
         for (size_t i = 1; i < ZWN_PACKAGE_SCENARIO_COUNT; i++) {
             const struct zwn_package_scenario *item =
                 &zwn_package_scenarios[i];
+            fprintf(stderr,
+                    "  ... package_lifecycle: B fetching %s from A (%zu/%zu)\n",
+                    item->name, i, (size_t)ZWN_PACKAGE_SCENARIO_COUNT - 1u);
             struct vcs_package_transport *item_transport =
                 &graph_transport[i - 1u];
             memset(discovered, 0, sizeof(discovered));
@@ -3422,6 +3447,9 @@ static int zwn_t_package_lifecycle(const struct chain_params *params)
         for (size_t i = 1; i < ZWN_PACKAGE_SCENARIO_COUNT; i++) {
             const struct zwn_package_scenario *item =
                 &zwn_package_scenarios[i];
+            fprintf(stderr,
+                    "  ... package_lifecycle: C fetching %s from B (%zu/%zu)\n",
+                    item->name, i, (size_t)ZWN_PACKAGE_SCENARIO_COUNT - 1u);
             struct vcs_package_transport *item_transport =
                 &graph_transport[i - 1u];
             memset(discovered, 0, sizeof(discovered));
@@ -3484,6 +3512,9 @@ static int zwn_t_package_lifecycle(const struct chain_params *params)
         for (size_t i = 0; i < ZWN_PACKAGE_SCENARIO_COUNT; i++) {
             const struct zwn_package_scenario *item =
                 &zwn_package_scenarios[i];
+            fprintf(stderr,
+                    "  ... package_lifecycle: D fetching %s from C (%zu/%zu)\n",
+                    item->name, i + 1u, (size_t)ZWN_PACKAGE_SCENARIO_COUNT);
             struct vcs_package_transport *item_transport = i == 0
                 ? &transport : &graph_transport[i - 1u];
             memset(discovered, 0, sizeof(discovered));
@@ -3778,6 +3809,7 @@ static int zwn_t_package_lifecycle(const struct chain_params *params)
         vcs_package_prepared_free(&prepared);
         PASS();
     } _test_next:
+    vcs_package_store_set_deferred_sync(zwn_prior_store_sync);
     zwn_fixture_cleanup(&fixture);
     return failures;
 }
@@ -4385,6 +4417,12 @@ static int zwn_t_redundant_publish_disappear(
         ASSERT(zwn_fixture_nodes(&fixture, params, nodes,
                                  sizeof(nodes) / sizeof(nodes[0])));
         for (i = 0; i < n; i++) {
+            /* Heartbeat: each iteration content-hashes and pins a whole
+             * in-tree package; on a loaded box that can individually run
+             * past the no-output watchdog's window, so print progress
+             * rather than staying silent for the whole loop. */
+            fprintf(stderr, "  ... %s: seeding %s (%zu/%zu)\n", test_name,
+                    dirs[i], i + 1u, n);
             struct zwn_package_scenario sc = {
                 .name = dirs[i],
                 .dht_namespace = "package.c23-commons",
@@ -4424,10 +4462,13 @@ static int zwn_t_redundant_publish_disappear(
                                  sizeof(a_b_links) / sizeof(a_b_links[0])));
         ASSERT(zwn_meet_side(&a, &a_b));
         ASSERT(zwn_meet_side(&b, &b_a));
-        for (i = 0; i < n; i++)
+        for (i = 0; i < n; i++) {
+            fprintf(stderr, "  ... %s: A->B hop %zu/%zu\n", test_name,
+                    i + 1u, n);
             ASSERT(zwn_hop_carrier(&a, &b, &a_b, &b_a, &transport[i],
                                    params->pchMessageStart,
                                    now_base + (uint64_t)i * 10u));
+        }
 
         zwn_fixture_release_link(&fixture, &a_b);
         zwn_fixture_release_link(&fixture, &b_a);
@@ -4443,6 +4484,8 @@ static int zwn_t_redundant_publish_disappear(
         ASSERT(zwn_meet_side(&b, &b_c));
         ASSERT(zwn_meet_side(&c, &c_b));
         for (i = 0; i < n; i++) {
+            fprintf(stderr, "  ... %s: B->C hop %zu/%zu\n", test_name,
+                    i + 1u, n);
             ASSERT(zwn_hop_carrier(&b, &c, &b_c, &c_b, &transport[i],
                                    params->pchMessageStart,
                                    now_base + 100u + (uint64_t)i * 10u));
@@ -6158,6 +6201,21 @@ static int zwn_t_attestation_corrupt_wire(const struct chain_params *params)
     return failures;
 }
 
+/* TEMP TIMING INSTRUMENTATION — remove once the wall-time hotspot in this
+ * group is identified (see AGENTS lane/slowtests). */
+#include <time.h>
+static double zwn_now_secs(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
+}
+#define ZWN_TIMED(call) do { \
+    double _t0 = zwn_now_secs(); \
+    failures += (call); \
+    fprintf(stderr, "ZWN_TIMING %-40s %.3fs\n", #call, zwn_now_secs() - _t0); \
+} while (0)
+
 int test_zcode_swarm_net(void)
 {
     int failures = 0;
@@ -6172,25 +6230,25 @@ int test_zcode_swarm_net(void)
         PASS();
     } _test_next:;
 
-    failures += zwn_test_golden(ZWN_GOLDEN_PLAIN, params);
-    failures += zwn_test_golden(ZWN_GOLDEN_RESTART, params);
-    failures += zwn_test_golden(ZWN_GOLDEN_DISCONNECT, params);
-    failures += zwn_t_package_lifecycle(params);
-    failures += zwn_t_sovereign_source_build(params);
-    failures += zwn_t_malicious(params);
-    failures += zwn_t_corrupt_provider_repair(params);
-    failures += zwn_t_corrupt_local_repair(params);
-    failures += zwn_t_unrequested(params);
-    failures += zwn_t_quota_exhaustion(params);
-    failures += zwn_t_deterministic_replay(params);
-    failures += zwn_t_useful_c23_redundant(params);
-    failures += zwn_t_ordinary_c23_redundant(params);
-    failures += zwn_t_attestation_flight(params);
-    failures += zwn_t_task_flight(params);
-    failures += zwn_t_shared_focus_flight(params);
-    failures += zwn_t_task_hostile_pointer(params);
-    failures += zwn_t_attestation_hostile_pointer(params);
-    failures += zwn_t_attestation_corrupt_wire(params);
+    ZWN_TIMED(zwn_test_golden(ZWN_GOLDEN_PLAIN, params));
+    ZWN_TIMED(zwn_test_golden(ZWN_GOLDEN_RESTART, params));
+    ZWN_TIMED(zwn_test_golden(ZWN_GOLDEN_DISCONNECT, params));
+    ZWN_TIMED(zwn_t_package_lifecycle(params));
+    ZWN_TIMED(zwn_t_sovereign_source_build(params));
+    ZWN_TIMED(zwn_t_malicious(params));
+    ZWN_TIMED(zwn_t_corrupt_provider_repair(params));
+    ZWN_TIMED(zwn_t_corrupt_local_repair(params));
+    ZWN_TIMED(zwn_t_unrequested(params));
+    ZWN_TIMED(zwn_t_quota_exhaustion(params));
+    ZWN_TIMED(zwn_t_deterministic_replay(params));
+    ZWN_TIMED(zwn_t_useful_c23_redundant(params));
+    ZWN_TIMED(zwn_t_ordinary_c23_redundant(params));
+    ZWN_TIMED(zwn_t_attestation_flight(params));
+    ZWN_TIMED(zwn_t_task_flight(params));
+    ZWN_TIMED(zwn_t_shared_focus_flight(params));
+    ZWN_TIMED(zwn_t_task_hostile_pointer(params));
+    ZWN_TIMED(zwn_t_attestation_hostile_pointer(params));
+    ZWN_TIMED(zwn_t_attestation_corrupt_wire(params));
     if (failures == 0 && g_zwn_sovereign_receipt.ready)
         zwn_print_sovereign_receipt();
     return failures;

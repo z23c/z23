@@ -133,11 +133,13 @@ static struct zcl_result pkgl_copy_hashed(const char *src, const char *dst,
     if (ferror(in))
         bad = true;
     fclose(in);
-    if (fflush(outf) != 0
+    if (fflush(outf) != 0)
+        bad = true;
+    else if (!vcs_package_store_deferred_sync_enabled()
 #ifdef _WIN32
-        || _commit(_fileno(outf)) != 0
+             && _commit(_fileno(outf)) != 0
 #else
-        || fsync(fileno(outf)) != 0
+             && fsync(fileno(outf)) != 0
 #endif
     )
         bad = true;

@@ -193,6 +193,19 @@ const char *vcs_package_store_pool_string(enum vcs_package_store_pool pool);
 bool vcs_package_store_hosting_enabled(void);
 uint64_t vcs_package_store_quota_bytes(void);
 
+/* Deferred durable-write mode: OFF by default (every store_atomic_write
+ * fsyncs/FlushFileBuffers before its atomic rename, per the crash-recovery
+ * contract documented above). A caller that is about to perform many
+ * back-to-back durable writes whose individual per-write barrier it does
+ * not need (a multi-chunk fixture build the caller will fsync or discard
+ * as a unit) may enable it, then disable it again when done; this changes
+ * only whether each write's own fsync fires; content-address verification
+ * and the temp+rename discipline are unaffected. Global, not store-scoped,
+ * because store_atomic_write is called from several package_store
+ * translation units that do not share one store handle. */
+void vcs_package_store_set_deferred_sync(bool enabled);
+bool vcs_package_store_deferred_sync_enabled(void);
+
 /* Open (creating + recovering) the store beneath <datadir>/zcode with the
  * given quota, or close it. Open runs the full crash recovery described
  * above; returns NULL on I/O or allocation failure (logged). */

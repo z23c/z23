@@ -7,6 +7,7 @@
  * question is answered by contexts/commons/modules/vcs/package_policy.* over the facts read
  * here. */
 #include "vcs/package_service.h"
+#include "vcs/package_store.h"
 #if !defined(_WIN32)
 #include "base/hex.h"
 #include "base/log_macros.h"
@@ -133,7 +134,7 @@ static bool svc_atomic_write(const char *path, const uint8_t *data,
         }
         off += (size_t)w;
     }
-    if (fsync(fd) != 0) {
+    if (!vcs_package_store_deferred_sync_enabled() && fsync(fd) != 0) {
         close(fd);
         unlink(tmp);
         LOG_FAIL(SERVICE_LOG, "fsync temp %s: %s", tmp, strerror(errno));

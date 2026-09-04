@@ -39,6 +39,21 @@
 
 #define STORE_LOG "vcs.store"
 
+/* See vcs/package_store.h: OFF by default, so every store_atomic_write
+ * fsyncs/FlushFileBuffers before its atomic rename exactly as the
+ * crash-recovery contract requires. */
+static _Atomic bool g_store_deferred_sync = false;
+
+void vcs_package_store_set_deferred_sync(bool enabled)
+{
+    atomic_store(&g_store_deferred_sync, enabled);
+}
+
+bool vcs_package_store_deferred_sync_enabled(void)
+{
+    return atomic_load(&g_store_deferred_sync);
+}
+
 #if defined(_WIN32)
 static void store_set_errno(DWORD error)
 {
@@ -329,7 +344,7 @@ bool store_atomic_write(const char *path, const uint8_t *data,
         }
         off += written;
     }
-    if (ok)
+    if (ok && !atomic_load(&g_store_deferred_sync))
         ok = FlushFileBuffers(file) != 0;
     if (!CloseHandle(file))
         ok = false;
@@ -368,7 +383,7 @@ bool store_atomic_write(const char *path, const uint8_t *data,
         }
         off += (size_t)w;
     }
-    if (fsync(fd) != 0) {
+    if (!atomic_load(&g_store_deferred_sync) && fsync(fd) != 0) {
         close(fd);
         unlink(tmp);
         LOG_FAIL(STORE_LOG, "fsync temp %s: %s", tmp, strerror(errno));
