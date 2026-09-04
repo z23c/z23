@@ -372,6 +372,17 @@ static int test_ic_large_plan_preserves_groups(void)
         ASSERT(strstr(body, "\"dimensions\":[") != NULL);
         ASSERT(strstr(body, "\"execution_groups_abridged\":") != NULL);
 
+        /* Rendering the plan the caller already closed must produce the SAME
+         * document byte for byte. It has to, because the only reason a proof
+         * may render instead of re-closing is that the two are the same
+         * answer -- and re-closing costs a second code-index open plus a
+         * second walk of the whole reverse-caller graph. */
+        char rendered[ZCL_DEVLOOP_PLAN_WIRE_MAX + 1];
+        size_t rendered_len = zcl_devloop_plan_json_render(
+            &plan, files, 1, rendered, sizeof(rendered));
+        ASSERT(rendered_len == body_len);
+        ASSERT(memcmp(rendered, body, body_len) == 0);
+
         system("rm -rf " IC_FIX_GROUP);
         PASS();
     } _test_next:;

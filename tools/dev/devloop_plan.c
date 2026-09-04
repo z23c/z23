@@ -1266,6 +1266,16 @@ size_t zcl_devloop_plan_json_closure(const char *repo_root,
     return plan_json_body(&plan, files, file_count, true, out, out_sz);
 }
 
+size_t zcl_devloop_plan_json_render(const struct zcl_devloop_plan *plan,
+                                    const char *const *files,
+                                    size_t file_count, char *out,
+                                    size_t out_sz)
+{
+    if (!plan || !out || out_sz == 0)
+        return 0;
+    return plan_json_body(plan, files, file_count, true, out, out_sz);
+}
+
 bool zcl_devloop_unseal_token_present(const char *repo_root)
 {
     /* READ-ONLY presence check of <repo_root>/.core-unseal-token — the

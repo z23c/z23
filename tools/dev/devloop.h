@@ -573,6 +573,17 @@ size_t zcl_devloop_plan_json_closure(const char *repo_root,
                                      size_t file_count, char *out,
                                      size_t out_sz);
 
+/* The same document, rendered from a plan the caller ALREADY ran the closure
+ * on. zcl_devloop_plan_json_closure() has to open the code index and walk the
+ * whole reverse-caller graph again to rebuild a plan its caller is usually
+ * still holding; on a proof that walk is the single most expensive thing in
+ * the run. A caller that has a closed plan renders it here instead and pays
+ * for the index once. Byte-identical output for the same plan and file set. */
+size_t zcl_devloop_plan_json_render(const struct zcl_devloop_plan *plan,
+                                    const char *const *files,
+                                    size_t file_count, char *out,
+                                    size_t out_sz);
+
 /* True iff the persistent watcher should react to a change at `path`
  * (repo-relative): a .c/.h/.def/.md/.mk/.service source or the Makefile,
  * excluding editor temp files, build/, .git/, and — critically — the

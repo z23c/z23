@@ -2078,8 +2078,12 @@ static bool proof_worker(const struct proof_paths *paths,
     }
     proof_phase_mark(&phases, "impact_plan_closure");
     char plan_json[ZCL_DEVLOOP_PLAN_WIRE_MAX];
-    size_t plan_len = zcl_devloop_plan_json_closure(
-        paths->root, files, file_count, plan_json, sizeof(plan_json));
+    /* Render the plan we just closed. The _closure spelling would open the
+     * code index and re-walk the whole reverse-caller graph to rebuild the
+     * plan sitting in this frame -- the most expensive phase of the proof,
+     * paid twice for one answer. */
+    size_t plan_len = zcl_devloop_plan_json_render(
+        &plan, files, file_count, plan_json, sizeof(plan_json));
     if (!plan_len) {
         proof_why(why, why_len, "impact_plan_render_failed");
         return false;
