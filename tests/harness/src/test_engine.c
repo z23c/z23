@@ -34,6 +34,7 @@
 #include "engine/engine_receipt.h"
 #include "base/safe_alloc.h"
 #include "engine/engine_secret.h"
+#include "engine/engine_state.h"
 #include "engine/engine_verdict.h"
 #include "engine/engine_wire.h"
 #include "platform/private_file.h"
@@ -1717,6 +1718,303 @@ static int case_prompt_templates(void)
     return failures;
 }
 
+/* ── carried state (engine/engine_state.h) ───────────────────────────────
+ *
+ * What tools/engine_unit.c's turn loop depends on, tested here so a change
+ * to the extraction or formatting rules is visible without a live dispatch:
+ * a reply with a state block, a reply without one (omission means "carry
+ * the previous turn's forward, unchanged"), a reply that revises itself
+ * (last block wins, same rule engine_patch.c applies to a repeated path),
+ * the attempt-vs-turn prepend ordering, and when a turn needs compacting. */
+
+static int case_state(void)
+{
+    int failures = 0;
+    char out[ENGINE_STATE_MAX_BYTES];
+    size_t out_len = 0;
+
+    {
+        static const char reply[] =
+            "Here is my work.\n\n"
+            "<state>\n"
+            "tried: read the failing assertion\n"
+            "gate: not run yet\n"
+            "hypothesis: an off-by-one in the loop bound\n"
+            "next: fix the bound and re-run\n"
+            "</state>\n";
+        const bool ok = engine_state_extract(reply, sizeof(reply) - 1, out,
+                                             sizeof(out), &out_len);
+        EN_CHECK("a reply carrying a state block is extracted", ok);
+        EN_CHECK("the extracted text is trimmed and exact",
+                 ok && out_len > 0
+                 && strstr(out, "off-by-one") != NULL
+                 && out[0] != '\n' && out[0] != ' ');
+    }
+    {
+        static const char no_envelope[] =
+            "<state>\ntried: nothing, this reply never proposes a file\n"
+            "gate: none yet\nhypothesis: none\nnext: think more\n</state>\n";
+        EN_CHECK("extraction does not require an envelope at all",
+                 engine_state_extract(no_envelope, sizeof(no_envelope) - 1,
+                                      out, sizeof(out), &out_len));
+    }
+    {
+        static const char none[] = "Sure, here is a fix.\nNo block here.\n";
+        out[0] = 'X';
+        EN_CHECK("a reply that omits the block is reported as not found",
+                 !engine_state_extract(none, sizeof(none) - 1, out,
+                                       sizeof(out), &out_len));
+    }
+    {
+        /* Same rule engine_patch.c applies to a path emitted twice: the
+         * model revised itself, and the LAST complete block is the one
+         * that is kept — not a refusal, not the first block. */
+        static const char twice[] =
+            "<state>\ntried: FIRST DRAFT, discard this\n</state>\n"
+            "more thinking...\n"
+            "<state>\ntried: SECOND DRAFT, this is the real one\n</state>\n";
+        const bool ok = engine_state_extract(twice, sizeof(twice) - 1, out,
+                                             sizeof(out), &out_len);
+        EN_CHECK("a reply with two blocks keeps the LAST one",
+                 ok && strstr(out, "SECOND DRAFT") != NULL
+                 && strstr(out, "FIRST DRAFT") == NULL);
+    }
+    {
+        static const char truncated[] =
+            "<state>\ntried: this one never closes";
+        EN_CHECK("an unclosed block is not a match",
+                 !engine_state_extract(truncated, sizeof(truncated) - 1, out,
+                                       sizeof(out), &out_len));
+    }
+    EN_CHECK("a NULL text is not found",
+             !engine_state_extract(NULL, 0, out, sizeof(out), &out_len));
+    {
+        static const char big_open[] = "<state>";
+        static const char *closer = "</state>";
+        char huge[ENGINE_STATE_MAX_BYTES * 2];
+        size_t n = 0;
+        memcpy(huge, big_open, strlen(big_open));
+        n += strlen(big_open);
+        memset(huge + n, 'a', sizeof(huge) - n - strlen(closer) - 1);
+        n = sizeof(huge) - strlen(closer) - 1;
+        memcpy(huge + n, closer, strlen(closer));
+        n += strlen(closer);
+        const bool ok = engine_state_extract(huge, n, out, sizeof(out),
+                                             &out_len);
+        EN_CHECK("an over-long block is truncated, not refused",
+                 ok && out_len == sizeof(out) - 1);
+    }
+
+    /* ── the carried-state preamble ── */
+    {
+        char buf[512];
+        const size_t n = engine_state_format_preamble(buf, sizeof(buf),
+                                                       "my state", NULL);
+        EN_CHECK("the within-run wording says 'previous turn'",
+                 n > 0 && strstr(buf, "previous turn") != NULL
+                 && strstr(buf, "my state") != NULL);
+    }
+    {
+        char buf[512];
+        const size_t n = engine_state_format_preamble(buf, sizeof(buf),
+                                                       "prior attempt's state",
+                                                       "3");
+        EN_CHECK("a non-NULL attempt label says 'attempt 3'",
+                 n > 0 && strstr(buf, "attempt 3") != NULL
+                 && strstr(buf, "prior attempt's state") != NULL);
+    }
+    {
+        char buf[64] = "unchanged";
+        EN_CHECK("no state writes nothing",
+                 engine_state_format_preamble(buf, sizeof(buf), NULL, NULL)
+                     == 0
+                 && strcmp(buf, "unchanged") == 0);
+    }
+    {
+        /* The order tools/engine_unit.c's build_carried_preamble() relies
+         * on: an attempt's carried state, from an earlier --state-dir, comes
+         * before this run's own latest turn state. */
+        char buf[1024];
+        size_t n = engine_state_format_preamble(buf, sizeof(buf),
+                                                "ATTEMPT-STATE-TEXT", "1");
+        n += engine_state_format_preamble(buf + n, sizeof(buf) - n,
+                                          "TURN-STATE-TEXT", NULL);
+        const char *attempt_at = strstr(buf, "ATTEMPT-STATE-TEXT");
+        const char *turn_at = strstr(buf, "TURN-STATE-TEXT");
+        EN_CHECK("both pieces are present and the attempt's comes first",
+                 attempt_at && turn_at && attempt_at < turn_at);
+    }
+
+    /* ── compaction ── */
+    EN_CHECK("a small prompt does not need compaction",
+             !engine_state_needs_compaction(200, 200, 4096, ENGINE_MAX_PROMPT_BYTES));
+    EN_CHECK("a prompt at the budget's edge needs compaction",
+             engine_state_needs_compaction(ENGINE_STATE_MAX_BYTES,
+                                           4096, ENGINE_MAX_PROMPT_BYTES,
+                                           ENGINE_MAX_PROMPT_BYTES));
+    {
+        char comp[8192];
+        const size_t n = engine_state_compaction_prompt(
+            comp, sizeof(comp), "my carried state so far",
+            "First actionable line: none\n...tail...");
+        EN_CHECK("the compaction prompt carries the state and the gate tail",
+                 n > 0 && strstr(comp, "my carried state so far") != NULL
+                 && strstr(comp, "...tail...") != NULL);
+        EN_CHECK("the compaction prompt does not invite a file envelope",
+                 strstr(comp, "Z23-BEGIN-FILE") == NULL
+                 && strstr(comp, "propose file changes") != NULL);
+    }
+
+    printf("engine: %d failure(s)\n", failures);
+    return failures;
+}
+
+/* ── the turn loop end to end (fixture engine) ───────────────────────────
+ *
+ * The one thing that cannot be proven by pure-function tests above: that
+ * tools/engine_unit.c actually wires carried state into the NEXT turn's
+ * prompt. This runs the real, standalone binary (same reason
+ * test_acme_worker.c runs zclassic23-acme instead of linking it — the
+ * binary carries a TLS client, and test_cold_join_sovereign P2 asserts no
+ * such object appears in a Z23 object file) with --engine fixture across
+ * two turns and reads what it actually wrote to --state-dir: state.txt
+ * after turn 1's canned reply, and prompt.txt (turn 2's, since each turn
+ * overwrites it) proving turn 2 was handed turn 1's state.
+ */
+
+static const char ENGINE_UNIT_BIN[] = "build/bin/zclassic23-engine-unit";
+
+static bool engine_unit_binary_present(void)
+{
+    FILE *f = fopen(ENGINE_UNIT_BIN, "rb");
+    if (!f)
+        return false;
+    (void)fclose(f);
+    return true;
+}
+
+static bool write_whole_file(const char *path, const char *content)
+{
+    FILE *f = fopen(path, "wb");
+    if (!f)
+        return false;
+    const size_t len = strlen(content);
+    const bool ok = fwrite(content, 1, len, f) == len;
+    return fclose(f) == 0 && ok;
+}
+
+static bool read_whole_file(const char *path, char *out, size_t out_cap)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f)
+        return false;
+    const size_t n = fread(out, 1, out_cap - 1, f);
+    (void)fclose(f);
+    out[n] = '\0';
+    return true;
+}
+
+static int case_engine_unit_state_e2e(void)
+{
+    int failures = 0;
+
+    if (!engine_unit_binary_present()) {
+        printf("engine: FAIL (%s is a required test prerequisite for the "
+               "state-carrying end-to-end case; nothing can be asserted "
+               "without it)\n", ENGINE_UNIT_BIN);
+        return 1;
+    }
+
+    char rel_dir[512], dir[600];
+    test_make_tmpdir(rel_dir, sizeof(rel_dir), "engine_state_e2e", "run");
+    /* --worktree and --state-dir are both refused as relative paths by
+     * tools/engine_unit.c (worktree_prepare()/state_dir_prepare()), so this
+     * fixture needs the absolutized form test_abs_path() exists for. */
+    if (!test_abs_path(rel_dir, dir, sizeof(dir))) {
+        printf("engine: FAIL (could not absolutize the e2e fixture dir)\n");
+        return 1;
+    }
+    char task_path[700], reply_path[700], state_dir[700], worktree[700];
+    (void)snprintf(task_path, sizeof(task_path), "%s/task.txt", dir);
+    (void)snprintf(reply_path, sizeof(reply_path), "%s/reply.json", dir);
+    (void)snprintf(state_dir, sizeof(state_dir), "%s/state", dir);
+    (void)snprintf(worktree, sizeof(worktree), "%s/wt", dir);
+#if defined(_WIN32)
+    _mkdir(state_dir);
+#else
+    mkdir(state_dir, 0700);
+#endif
+
+    const bool wrote_task = write_whole_file(task_path,
+        "kind: fix-gate\n\nA smoke task; the fixture engine never reads "
+        "this beyond composing a prompt around it.\n");
+    /* An OpenAI-dialect response body (dispatch_fixture() pushes the canned
+     * file through the SAME hardened decoder a real HTTPS reply would go
+     * through), whose message content ends with a <state> block. */
+    const bool wrote_reply = write_whole_file(reply_path,
+        "{\"choices\":[{\"message\":{\"content\":"
+        "\"No file changes this turn.\\n\\n<state>\\n"
+        "tried: turn one of the e2e fixture check\\n"
+        "gate: none yet\\n"
+        "hypothesis: turn two should see this exact sentence\\n"
+        "next: nothing, this is a fixture\\n"
+        "</state>\\n\"}}]}");
+    EN_CHECK("fixtures for the e2e case are written", wrote_task && wrote_reply);
+    if (!wrote_task || !wrote_reply)
+        return failures + 1;
+
+    char cmd[2048];
+    (void)snprintf(cmd, sizeof(cmd),
+        "%s --engine fixture --task %s --no-group --yes-dispatch "
+        "--worktree %s --state-dir %s --fixture-reply %s --turns 2 "
+        ">%s/run.log 2>&1",
+        ENGINE_UNIT_BIN, task_path, worktree, state_dir, reply_path, dir);
+    (void)system(cmd); /* verdict is read from the files it wrote, not this */
+
+    char state_txt[512] = {0};
+    char prompt_txt[64 * 1024] = {0};
+    char state_txt_path[700], prompt_txt_path[700];
+    (void)snprintf(state_txt_path, sizeof(state_txt_path), "%s/state.txt",
+                   state_dir);
+    (void)snprintf(prompt_txt_path, sizeof(prompt_txt_path),
+                   "%s/prompt.txt", state_dir);
+    const bool have_state = read_whole_file(state_txt_path, state_txt,
+                                            sizeof(state_txt));
+    const bool have_prompt = read_whole_file(prompt_txt_path, prompt_txt,
+                                             sizeof(prompt_txt));
+
+    EN_CHECK("the harness wrote state.txt after turn 1's reply", have_state);
+    EN_CHECK("state.txt holds what turn 1's model wrote",
+             have_state
+             && strstr(state_txt, "turn two should see this exact sentence")
+                    != NULL);
+    EN_CHECK("prompt.txt (turn 2's, since each turn overwrites it) exists",
+             have_prompt);
+    EN_CHECK("turn 2's prompt was handed turn 1's carried state verbatim",
+             have_prompt
+             && strstr(prompt_txt, "turn two should see this exact sentence")
+                    != NULL);
+    EN_CHECK("turn 2's prompt announces it as carried state, not raw prose",
+             have_prompt
+             && strstr(prompt_txt, "carried state from the previous turn")
+                    != NULL);
+
+    /* worktree_prepare() names the branch "engine/unit" whenever no
+     * --territory is given (as here), a FIXED name — so a worktree and
+     * branch left behind by this run would make the NEXT run's `git
+     * worktree add -b engine/unit` refuse outright. Best-effort, since the
+     * assertions above already ran: a failure to tidy up is not this case's
+     * failure to report. */
+    char cleanup_cmd[1024];
+    (void)snprintf(cleanup_cmd, sizeof(cleanup_cmd),
+                   "git worktree remove %s --force >/dev/null 2>&1; "
+                   "git branch -D engine/unit >/dev/null 2>&1; "
+                   "git worktree prune >/dev/null 2>&1",
+                   worktree);
+    (void)system(cleanup_cmd);
+
+    return failures;
+}
 
 /* ── hash-chained engine-unit receipts ─────────────────────────────────
  * Signal, not judgement: the chain says only that nothing was altered
@@ -2152,6 +2450,8 @@ int test_engine(void)
     failures += case_cli_observation();
     failures += case_default_engine();
     failures += case_receipt_chain();
+    failures += case_state();
+    failures += case_engine_unit_state_e2e();
     printf("engine: %d failure(s)\n", failures);
     return failures;
 }
