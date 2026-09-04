@@ -14,7 +14,8 @@
  *   action   string, required: post | next | reap | status. Also the first
  *            positional, so `z23 dev agent queue post ...` works.
  *   kind     post only: leaf | doc | file | fix-gate.
- *   name     post only: [A-Za-z0-9_.-]{1,64}.
+ *   name     post only: [A-Za-z0-9_.-]{1,64}, never "." or ".." (a name is
+ *            one path segment under engine/).
  *   group    post only, required for kind=file: a test group name.
  *   path     post only, required for kind=doc|file: a repo-relative path
  *            (never absolute, never containing ..).
@@ -140,6 +141,10 @@ static bool dvq_attempt(const struct zcl_command_request *req,
 
 /* ── validators ────────────────────────────────────────────────────────── */
 
+/* A name is exactly one path segment under engine/<name>/: it must match
+ * [A-Za-z0-9_.-]{1,64} and, like every segment dvq_path_ok accepts, it must
+ * never be "." or ".." — a name of ".." would resolve the run directory one
+ * level above the intended engine/ subtree. Dots inside a name stay legal. */
 static bool dvq_name_ok(const char *s)
 {
     size_t n;
@@ -147,6 +152,8 @@ static bool dvq_name_ok(const char *s)
         return false;
     n = strlen(s);
     if (n > 64)
+        return false;
+    if (strcmp(s, ".") == 0 || strcmp(s, "..") == 0)
         return false;
     for (const char *p = s; *p; p++) {
         bool ok = (*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') ||
@@ -693,8 +700,8 @@ static void dvq_post(const struct zcl_command_request *req,
     }
     if (!name || !dvq_name_ok(name)) {
         dvq_fail(reply, "BAD_INPUT", "post",
-                 "name matches [A-Za-z0-9_.-]{1,64}",
-                 "input.name missing or misspelled");
+                 "name matches [A-Za-z0-9_.-]{1,64} and is never . or ..",
+                 "input.name missing, misspelled, or escaping");
         return;
     }
     if (!dvq_dirs_make(&d)) {

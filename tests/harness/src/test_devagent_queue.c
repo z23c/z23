@@ -260,6 +260,17 @@ static int64_t dvx_queued_attempt(const char *name)
     return attempt;
 }
 
+/* A name is one path segment under engine/: a refused name must leave
+ * neither a queue row nor any run dir. fopen is the portable existence
+ * probe here, so this check works on every host the group runs on. */
+static bool dvx_file_absent(const char *path)
+{
+    FILE *f = fopen(path, "rb");
+    if (f)
+        (void)fclose(f);
+    return f == NULL;
+}
+
 #if !defined(_WIN32)
 /* A fake zclassic23-engine-unit: parses --state-dir, writes a receipt.json
  * there, and prints lines the reap step reads (rc= plus, in rate-limit
@@ -440,6 +451,55 @@ int test_devagent_queue(void)
         ASSERT_EQ(dvx_queued_count("n2"), 0);
         ASSERT_EQ(dvx_queued_count("n3"), 0);
         ASSERT_EQ(dvx_queued_count("n4"), 0);
+        dvx_restore();
+        PASS();
+    }
+
+    TEST("queue: a name of \"..\" is refused and stores nothing") {
+        struct dvx_call c;
+        char qd[1100], engine[1200], qf[1200];
+        dvx_isolate("dotdotname");
+        dvx_post(&c, "leaf", "..", NULL, NULL, NULL, NULL, -1);
+        ASSERT(dvx_run(&c));
+        ASSERT(!dvx_ok(&c));
+        /* The typed error row still carries the leaf, never a bare 500. */
+        ASSERT_STR_EQ(dvx_str(&c, "leaf"), DVX_PATH);
+        dvx_end(&c);
+        /* A ".." name would have resolved one level above engine/: prove
+         * nothing was created under the state root at all. */
+        dvx_queuedir(qd, sizeof(qd));
+        (void)snprintf(engine, sizeof(engine), "%s/../engine", qd);
+        (void)snprintf(qf, sizeof(qf), "%s/queue.jsonl", qd);
+        ASSERT(dvx_file_absent(qf));
+        ASSERT(dvx_file_absent(engine));
+        ASSERT_EQ(dvx_queued_count(".."), 0);
+        dvx_restore();
+        PASS();
+    }
+
+    TEST("queue: a name of \".\" is refused") {
+        struct dvx_call c;
+        dvx_isolate("dotname");
+        dvx_post(&c, "leaf", ".", NULL, NULL, NULL, NULL, -1);
+        ASSERT(dvx_run(&c));
+        ASSERT(!dvx_ok(&c));
+        ASSERT_STR_EQ(dvx_str(&c, "leaf"), DVX_PATH);
+        dvx_end(&c);
+        ASSERT_EQ(dvx_queued_count("."), 0);
+        dvx_restore();
+        PASS();
+    }
+
+    TEST("queue: dots inside a name are still accepted") {
+        struct dvx_call c;
+        dvx_isolate("dotsinside");
+        dvx_post(&c, "leaf", "a..b", NULL, NULL, NULL, NULL, -1);
+        ASSERT(dvx_run(&c));
+        ASSERT(dvx_ok(&c));
+        ASSERT_STR_EQ(dvx_str(&c, "name"), "a..b");
+        ASSERT_STR_EQ(dvx_str(&c, "state"), "queued");
+        dvx_end(&c);
+        ASSERT_EQ(dvx_queued_count("a..b"), 1);
         dvx_restore();
         PASS();
     }
