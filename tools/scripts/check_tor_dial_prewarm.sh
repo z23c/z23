@@ -18,9 +18,9 @@ die() {
 }
 
 network_line=$(grep -n 'zcl_service_kernel_start_all(&svc->network_kernel)' \
-    "$BOOT" | head -1 | cut -d: -f1)
+    "$BOOT" | head -1 | cut -d: -f1 || true)
 frontend_line=$(grep -n 'zcl_service_kernel_start_all(&svc->frontend_kernel)' \
-    "$BOOT" | head -1 | cut -d: -f1)
+    "$BOOT" | head -1 | cut -d: -f1 || true)
 case "$network_line:$frontend_line" in
     *[!0-9:]*|:*|*:) die 'could not resolve network/frontend boot order' ;;
 esac
@@ -28,9 +28,13 @@ esac
     die 'connman must start before the frontend Tor service'
 
 dial_ready_line=$(grep -n 'atomic_store(&g_tor_dial_ready, true)' "$TOR" |
-    head -1 | cut -d: -f1)
-publication_line=$(grep -n 'tor_log_has_descriptor_publication(log_path' \
-    "$TOR" | head -1 | cut -d: -f1)
+    head -1 | cut -d: -f1 || true)
+# Match the call, not the argument name: a rename of the log-path variable
+# must not silently turn this ordering assertion into a no-op. The
+# `|| true` keeps a missing match a reported FAIL rather than an
+# unexplained set -e/pipefail death with no output.
+publication_line=$(grep -nE 'tor_log_has_descriptor_publication\(' \
+    "$TOR" | head -1 | cut -d: -f1 || true)
 case "$dial_ready_line:$publication_line" in
     *[!0-9:]*|:*|*:) die 'could not resolve Tor dial/publication order' ;;
 esac
