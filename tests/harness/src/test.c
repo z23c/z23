@@ -1657,6 +1657,8 @@ int main(int argc, char **argv)
     { extern int test_watcher_lease(void);
       failures += test_watcher_lease(); }
     failures += test_hw_bench();
+    { extern int test_storage_pacing(void);
+      failures += test_storage_pacing(); }
     failures += test_log_level();
     failures += test_operator_ux();
     failures += test_cli_render();

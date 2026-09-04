@@ -11,6 +11,7 @@
 
 #include "config/boot_error.h"
 #include "util/hw_bench.h"
+#include "util/storage_pacing.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -104,6 +105,13 @@ bool boot_datadir_lock_acquire(const char *datadir)
     }
     g_datadir_handle = directory;
     hw_bench_init(datadir);
+    /* Right after hw_bench, for the same reason: classify the datadir
+     * storage ONCE, here, so every later bound (WAL truncation, log
+     * rotation, projection compaction, boot readahead) reads a decision
+     * that is already made rather than probing from its own hot path.
+     * hw_bench has just run, so its measured pread median is available as
+     * free evidence and the dedicated probe usually never fires. */
+    storage_pacing_init(datadir);
     return true;
 }
 
@@ -467,6 +475,13 @@ bool boot_datadir_lock_acquire(const char *datadir)
      * concurrent/earlier hw_bench_init() (e.g. bg_validation_init) just
      * observes the cached result. */
     hw_bench_init(datadir);
+    /* Right after hw_bench, for the same reason: classify the datadir
+     * storage ONCE, here, so every later bound (WAL truncation, log
+     * rotation, projection compaction, boot readahead) reads a decision
+     * that is already made rather than probing from its own hot path.
+     * hw_bench has just run, so its measured pread median is available as
+     * free evidence and the dedicated probe usually never fires. */
+    storage_pacing_init(datadir);
 
     return true;
 }
