@@ -1668,7 +1668,7 @@ int main(int argc, char **argv)
             .model             = o.model,
             .system_prompt     = engine_system_rules(),
             .user_prompt       = prompt,
-            .max_output_tokens = 32768,
+            .max_output_tokens = 65536,
         };
         body = engine_request_alloc(&call, &body_len);
         if (!body) {
