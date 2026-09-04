@@ -110,6 +110,16 @@ void disk_block_io_close_cache_while_locked(void);
  * The main thread should continue using the cached FILE* path for
  * performance (sequential IBD benefits from the cache). */
 
+/* Tell the kernel a walk is about to read [offset, offset+length) from one
+ * block/undo file, front to back, so a seek-bound device can stream the
+ * range instead of servicing one small read at a time. Purely advisory: a
+ * missing file or a platform without the hint changes nothing but timing.
+ * Callers pace this with util/storage_pacing.h — on solid-state storage the
+ * syscall costs more than the seek it would save. */
+void disk_block_io_advise_range(const char *datadir, int nFile,
+                               const char *prefix, int64_t offset,
+                               int64_t length);
+
 /* Read raw bytes from a block/undo file at a given position.
  * Returns bytes read, or -1 on error. Thread-safe, no shared state. */
 ssize_t disk_block_pread(const char *datadir, const struct disk_block_pos *pos,

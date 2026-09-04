@@ -37,6 +37,7 @@
 #include "chain/chainparams.h"
 #include "chain/pow.h"
 #include "storage/disk_block_io.h"
+#include "util/storage_pacing.h"
 
 #include <limits.h>
 #include <pthread.h>
@@ -477,8 +478,43 @@ int block_index_repair_pprev(struct main_state *ms, const char *datadir,
 
     int repaired = 0, heights_fixed = 0, read_errors = 0;
 
+    /* Readahead over the already-sorted walk.
+     *
+     * The array is in (nFile, nDataPos) order, so the next N entries name a
+     * contiguous-enough byte range in ONE block file. On a spinning disk,
+     * telling the kernel about that range before reading it converts a
+     * per-block head movement into a streamed read; a field box spent 90
+     * minutes of boot in D state on this loop, page-faulting one 36-byte
+     * header at a time. The window comes from the measured storage class:
+     * on flash it is zero and none of this runs, because the syscall costs
+     * more than the seek it would save.
+     *
+     * Everything here is advisory. `advise_until` is the position past which
+     * the hint has already been issued; a file change resets it. */
+    const struct storage_pacing *pacing = storage_pacing();
+    const int64_t advise_window = pacing->sequential_readahead
+                                      ? pacing->boot_readahead_window_bytes
+                                      : 0;
+    int advised_file = -1;
+    int64_t advised_until = 0;
+
+    /* One fd per block file instead of one open()+close() per block. The
+     * repair reads up to ~3.2M entries; at boot no writer touches blk*.dat
+     * (body_fetch has not started and the files are append-only anyway),
+     * which is exactly the condition this cache documents as its scope. */
+    disk_block_io_read_fd_cache_enter();
+
     for (size_t i = 0; i < read_limit; i++) {
         struct block_index *bi = arr[i];
+
+        if (advise_window > 0 &&
+            (bi->nFile != advised_file ||
+             (int64_t)bi->nDataPos >= advised_until)) {
+            disk_block_io_advise_range(datadir, bi->nFile, "blk",
+                                       (int64_t)bi->nDataPos, advise_window);
+            advised_file = bi->nFile;
+            advised_until = (int64_t)bi->nDataPos + advise_window;
+        }
 
         /* Read just nVersion (4 bytes) + hashPrevBlock (32 bytes) = 36 bytes
          * from the start of block data on disk. This is much faster than
@@ -523,6 +559,8 @@ int block_index_repair_pprev(struct main_state *ms, const char *datadir,
             fflush(stdout);
         }
     }
+
+    disk_block_io_read_fd_cache_exit();
 
     /* After fixing pprev, recompute nChainWork and nChainTx.
      * Sort all entries by height for forward propagation. */

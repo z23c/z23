@@ -13,6 +13,7 @@
 #include "platform/file_sync.h"
 #include "platform/file_metadata.h"
 #include "platform/directory_compat.h"
+#include "platform/file_advice.h"
 #include "platform/positioned_io.h"
 #include <errno.h>
 #include <stdint.h>
@@ -562,7 +563,37 @@ bool read_block_from_disk_index(struct block *b,
  * No shared state, no mutex, no FILE* cache. Safe for concurrent
  * use from any number of threads simultaneously. */
 
+/* ── sequential readahead for an ordered walk ─────────────────────────
+ *
+ * The boot repair passes sort every entry they will read into (nFile,
+ * nDataPos) order and then read 36 bytes from each. On flash that is fine.
+ * On a 7200 rpm disk it is one head movement per block with nothing in
+ * flight, and a field box spent 90 minutes of boot in D state doing exactly
+ * that. The walk already knows the file and the byte range it is about to
+ * cover, so it can say so before it starts reading.
+ *
+ * Advisory in every sense: a failure to open the file, or a platform with no
+ * equivalent hint, leaves the walk exactly as fast as it was. Never an error
+ * path — a readahead hint that did not happen changes nothing but timing. */
+void disk_block_io_advise_range(const char *datadir, int nFile,
+                               const char *prefix, int64_t offset,
+                               int64_t length)
+{
+    if (!datadir || !datadir[0] || nFile < 0 || length <= 0)
+        return;
+    struct disk_block_pos pos = { .nFile = nFile, .nPos = 0 };
+    char path[512];
+    get_block_pos_filename(path, sizeof(path), datadir, &pos, prefix);
+    int fd = open(path, O_RDONLY);
+    if (fd < 0)
+        return;
+    platform_file_advise_sequential(fd, offset + length);
+    platform_file_advise_willneed(fd, offset, length);
+    close(fd);
+}
+
 ssize_t disk_block_pread(const char *datadir, const struct disk_block_pos *pos,
+
                          const char *prefix, uint8_t *buf, size_t len)
 {
     if (!datadir || !pos || !buf || pos->nFile < 0)
