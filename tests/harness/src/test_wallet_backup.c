@@ -100,14 +100,35 @@ struct wb_fixture {
     struct node_db ndb;
 };
 
+/* This suite's whole point is proving the *bytes* land in a separate backup
+ * file (see the file banner) — not proving fsync() takes any particular
+ * amount of wall time on the box running the suite. Every subtest does at
+ * least one real durable write (write-temp + fsync + atomic rename + parent
+ * dir fsync), and this file alone drives ~25 of them; on a journaled disk
+ * shared with concurrent lanes each fsync can queue behind someone else's
+ * journal commit (observed: threads parked in jbd2_log_wait_commit).
+ * tmpfs has no journal to queue behind, so route the fixture through
+ * /dev/shm where it's writable (Linux) and fall back to /tmp otherwise
+ * (macOS has no /dev/shm) — the durability *calls* are unchanged, only
+ * their backing store is memory instead of disk when memory is available. */
+static const char *wb_test_tmp_root(void)
+{
+    static int cached = -1; /* -1 unknown, 0 = /tmp, 1 = /dev/shm */
+    if (cached < 0)
+        cached = (access("/dev/shm", W_OK) == 0) ? 1 : 0;
+    return cached ? "/dev/shm" : "/tmp";
+}
+
 static bool wb_fixture_init(struct wb_fixture *f, const char *tag)
 {
     memset(f, 0, sizeof(*f));
     char datadir[256], backup_dir[256];
     snprintf(datadir, sizeof(datadir),
-             "/tmp/zcl_wb_test_%d_%s_src", (int)getpid(), tag);
+             "%s/zcl_wb_test_%d_%s_src", wb_test_tmp_root(),
+             (int)getpid(), tag);
     snprintf(backup_dir, sizeof(backup_dir),
-             "/tmp/zcl_wb_test_%d_%s_dst", (int)getpid(), tag);
+             "%s/zcl_wb_test_%d_%s_dst", wb_test_tmp_root(),
+             (int)getpid(), tag);
     if (!test_abs_path(datadir, f->datadir, sizeof(f->datadir)) ||
         !test_abs_path(backup_dir, f->backup_dir, sizeof(f->backup_dir)))
         return false;
@@ -315,9 +336,10 @@ static int t_two_runs_distinct_files(void)
     char p1[512] = "", p2[512] = "";
     bool ok1 = wallet_backup_run_once(f.backup_dir, &f.ndb,
                                        p1, sizeof(p1), NULL, NULL, 0).ok;
-    /* usec-level filename disambiguation still needs at least one
-     * usec gap, so sleep a touch. */
-    struct timespec ts = { 0, 2000000L }; nanosleep(&ts, NULL);
+    /* No sleep needed: wbs_unique_backup_timestamp_us() ratchets the
+     * embedded usec forward with an atomic CAS, so back-to-back calls
+     * always mint distinct, strictly increasing filenames even when they
+     * land in the same wall-clock microsecond. */
     bool ok2 = wallet_backup_run_once(f.backup_dir, &f.ndb,
                                        p2, sizeof(p2), NULL, NULL, 0).ok;
 
@@ -340,11 +362,13 @@ static int t_rotation(void)
     wb_fixture_init(&f, "rotate");
     wb_seed_keys(&f.ndb, 1);
 
-    /* Run 5 backups back-to-back. */
+    /* Run 5 backups back-to-back. No inter-call delay needed: the
+     * embedded usec timestamp is CAS-ratcheted forward per call, so
+     * five rapid-fire runs still land as five distinctly named,
+     * strictly ordered files. */
     for (int i = 0; i < 5; i++) {
         (void)wallet_backup_run_once(f.backup_dir, &f.ndb,
                                       NULL, 0, NULL, NULL, 0);
-        struct timespec ts = { 0, 2000000L }; nanosleep(&ts, NULL);
     }
 
     /* Five files should exist now. */
@@ -376,11 +400,13 @@ static int t_list_newest_first(void)
     wb_seed_keys(&f.ndb, 1);
 
     char p1[512], p2[512], p3[512];
+    /* wallet_backup_list now orders by the filename's embedded, CAS-
+     * ratcheted (ts, usec) pair rather than 1-second-resolution mtime
+     * (contexts/wallet/services/src/wallet_backup_rotation.c), so three
+     * back-to-back runs already come out strictly ordered without
+     * waiting a full second between each to force a new mtime bucket. */
     ZCL_TEST_SETUP(wallet_backup_run_once(f.backup_dir, &f.ndb, p1, sizeof(p1), NULL, NULL, 0));
-    /* Make the second file strictly newer by mtime. */
-    sleep(1);
     ZCL_TEST_SETUP(wallet_backup_run_once(f.backup_dir, &f.ndb, p2, sizeof(p2), NULL, NULL, 0));
-    sleep(1);
     ZCL_TEST_SETUP(wallet_backup_run_once(f.backup_dir, &f.ndb, p3, sizeof(p3), NULL, NULL, 0));
 
     char listing[10][512];
