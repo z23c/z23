@@ -1997,11 +1997,35 @@ static int rom_keystone_binding_tests(const char *dir)
     return failures;
 }
 
+/* Every generation activation in this file backs the prior consensus.db
+ * kernel up via a real VACUUM (see the "A4" comment above) — a full-file
+ * copy plus fsync of both the source and the backup. On a journaled disk
+ * shared with concurrent lanes those fsyncs can queue behind someone
+ * else's journal commit. Nothing under test cares *where* the fixture
+ * directory lives, only that the files are real, so route the one shared
+ * fixture root through tmpfs (/dev/shm) where it's writable and fall back
+ * to the normal ./test-tmp path (test_make_tmpdir) otherwise. */
+static void csi_make_tmpdir(char *buf, size_t n)
+{
+#if !defined(_WIN32)
+    if (access("/dev/shm", W_OK) == 0) {
+        int wrote = snprintf(buf, n, "/dev/shm/consensus_state_install-%d",
+                              (int)getpid());
+        if (wrote > 0 && (size_t)wrote < n) {
+            test_rm_rf_recursive(buf);
+            if (mkdir(buf, 0700) == 0 || errno == EEXIST)
+                return;
+        }
+    }
+#endif
+    test_make_tmpdir(buf, n, "consensus_state_install", "main");
+}
+
 static int test_consensus_state_snapshot_install_platform_arm(void)
 {
     printf("\n=== consensus_state_snapshot_install ===\n");
     int failures=0; char dir[256];
-    test_make_tmpdir(dir,sizeof(dir),"consensus_state_install","main");
+    csi_make_tmpdir(dir, sizeof(dir));
     failures += boot_install_gate_alias_tests(dir);
     failures += boot_install_utxo_mirror_reset_tests(dir);
     sqlite3 *db=NULL;
