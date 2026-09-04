@@ -408,12 +408,119 @@ cap_closure_grants() {
     return 1
 }
 
+# ── compiled-out detection ──────────────────────────────────────────────────
+# A declared-but-unused capability (item 3a, symmetry) can mean two very
+# different things: the file really does not need what it declares (a
+# genuine VIOLATION), or the code that would use it never compiled on THIS
+# host because a feature macro guarding it is off here (contexts/wallet's
+# GTK/WebKit GUI is the standing example: no fleet box has the toolkit dev
+# packages, so wallet_gui.c/.c_bot compile only their `#else` stub). The
+# second case proves nothing either way — treat it as UNOBSERVED, never as a
+# pass and never as a violation, and name exactly which macro(s) are absent.
+#
+# CAP_CLOSURE_DEFINED_MACRO holds every -D<NAME> macro this build's actual
+# compile line defines, in order, with a later -U<NAME> removing it again —
+# read from the same CFLAGS the Makefile hands the compiler (see
+# `make print-CFLAGS`), never guessed from file names or HAVE_* conventions.
+declare -A CAP_CLOSURE_DEFINED_MACRO=()
+CAP_CLOSURE_DEFINED_MACRO_LOADED=0
+
+cap_closure_load_defined_macros() {
+    local root="$1" text tok name
+    CAP_CLOSURE_DEFINED_MACRO=()
+    if [ -n "${CAP_CLOSURE_CFLAGS_OVERRIDE+x}" ]; then
+        text="$CAP_CLOSURE_CFLAGS_OVERRIDE"
+    else
+        text="$(cd "$root" && make -s print-CFLAGS 2>/dev/null)" || text=""
+    fi
+    for tok in $text; do
+        case "$tok" in
+            -D*)
+                name="${tok#-D}"
+                name="${name%%=*}"
+                [ -n "$name" ] && CAP_CLOSURE_DEFINED_MACRO[$name]=1
+                ;;
+            -U*)
+                name="${tok#-U}"
+                [ -n "$name" ] && unset -v 'CAP_CLOSURE_DEFINED_MACRO[$name]'
+                ;;
+        esac
+    done
+    CAP_CLOSURE_DEFINED_MACRO_LOADED=1
+}
+
+# Prints the identifiers guarding the FIRST non-blank, non-comment line of
+# $1, iff that line is `#if ...` / `#ifdef ...` — the only shape this trusts
+# as "the whole file's primary arm depends on this macro", because it is
+# textually the first thing the preprocessor sees. A guard appearing deeper
+# in the file (after real code already ran) proves nothing about the file as
+# a whole and is deliberately never matched here.
+cap_closure_first_guard_macros() {
+    local file="$1" line
+    line="$(awk '
+        BEGIN { in_comment = 0 }
+        {
+            l = $0
+            if (in_comment) {
+                if (l ~ /\*\//) { in_comment = 0 }
+                next
+            }
+            gsub(/^[ \t]+/, "", l)
+            if (l == "") next
+            if (l ~ /^\/\*/) {
+                if (l !~ /\*\//) { in_comment = 1 }
+                next
+            }
+            if (l ~ /^\/\//) next
+            print l
+            exit
+        }
+    ' "$file" 2>/dev/null)"
+    case "$line" in
+        '#if'*|'#ifdef'*)
+            printf '%s\n' "$line" \
+                | grep -oE '[A-Za-z_][A-Za-z0-9_]*' \
+                | grep -v -E '^(if|ifdef|defined)$'
+            ;;
+    esac
+}
+
+# Iff $1 ($2 = repo root) opens with a preprocessor guard AND every macro
+# named in that guard is undefined in this build's real CFLAGS, prints the
+# macro list (comma-joined) and returns 0. A guard where even one named
+# macro IS defined proves nothing — this build might still take that arm
+# via `&&`/`||` combinations this deliberately does not evaluate — so that
+# case (and "no guard at all") returns 1 and callers must treat it as an
+# ordinary, ungoverned violation, never a free pass.
+cap_closure_compiled_out_macros() {
+    local path="$1" root="$2" macros="" macro defined_any=0 joined
+    [ "$CAP_CLOSURE_DEFINED_MACRO_LOADED" -eq 1 ] || cap_closure_load_defined_macros "$root"
+    macros="$(cap_closure_first_guard_macros "$root/$path")"
+    [ -n "$macros" ] || return 1
+    while IFS= read -r macro; do
+        [ -n "$macro" ] || continue
+        if [ -n "${CAP_CLOSURE_DEFINED_MACRO[$macro]:-}" ]; then
+            defined_any=1
+        fi
+    done <<< "$macros"
+    [ "$defined_any" -eq 0 ] || return 1
+    joined="$(printf '%s\n' "$macros" | paste -sd, -)"
+    [ -n "$joined" ] || return 1
+    printf '%s' "$joined"
+    return 0
+}
+
 # ── the check ────────────────────────────────────────────────────────────────
 # Runs entirely against $root, so --selftest can aim it at a fixture. Prints
 # a report to stdout/stderr and returns 0 (clean), 1 (violations) or 2
 # (hollow / cannot read required input).
 check_root() {
     local root="$1"
+    # Each check_root call grades one specific $root/CAP_CLOSURE_CFLAGS_OVERRIDE
+    # pairing (production runs this once; --selftest runs it once per
+    # fixture with a different override each time) — never carry a prior
+    # call's cached defined-macro set into this one.
+    CAP_CLOSURE_DEFINED_MACRO_LOADED=0
     local symbols_file="$root/engine/composition/capability_symbols.def"
     local module_file="$root/engine/composition/module_capabilities.def"
     local platform_module_file=""
@@ -658,7 +765,8 @@ check_root() {
 
     # ── item 3a: symmetry — a granted class must actually be used ──────────
     # item 3b: a row's source file must still exist.
-    local overdeclared=0 platform_unobserved=0 missing_src=0 path raw tok
+    local overdeclared=0 platform_unobserved=0 missing_src=0 compiled_out=0 path raw tok
+    : > "$work/compiled_out.txt"
     for path in "${!CAP_MOD_RAW[@]}"; do
         raw="${CAP_MOD_RAW[$path]}"
         if [ ! -f "$root/$path" ]; then
@@ -680,6 +788,18 @@ check_root() {
             if ! grep -qF "$(printf '%s\t%s' "$path" "$tok")" "$work/file_uses.tsv"; then
                 if [ "$CAP_CLOSURE_ENFORCE_SYMMETRY" != "1" ]; then
                     platform_unobserved=$((platform_unobserved + 1))
+                    continue
+                fi
+                local co_macros
+                if co_macros="$(cap_closure_compiled_out_macros "$path" "$root")"; then
+                    echo "check_capability_closure: UNOBSERVED (compiled out: $co_macros) —"
+                    echo "  $path declares $tok but its primary implementation never"
+                    echo "  compiled here: the guard macro(s) $co_macros are not defined in"
+                    echo "  this build's CFLAGS. Not a violation and not a pass — the code"
+                    echo "  that would prove or disprove $tok did not run through this host's"
+                    echo "  compiler. Validate on a host that defines $co_macros."
+                    printf '%s\t%s\t%s\n' "$path" "$tok" "$co_macros" >> "$work/compiled_out.txt"
+                    compiled_out=$((compiled_out + 1))
                     continue
                 fi
                 echo "check_capability_closure: VIOLATION — $path declares $tok but its"
@@ -746,6 +866,14 @@ check_root() {
     echo "  declared-but-unobserved=$unobserved (coverage baseline=$CAP_CLOSURE_COVERAGE_BASELINE)"
     echo "  platform-target-excluded=$platform_excluded"
     echo "  platform-exact-overrides=$CAP_MOD_PLATFORM_COUNT"
+    echo "  compiled-out-unobserved=$compiled_out (never a violation, never a pass — see UNOBSERVED lines above)"
+    if [ "$compiled_out" -gt 0 ]; then
+        echo "  compiled-out rows:"
+        while IFS=$'\t' read -r co_path co_tok co_macros; do
+            [ -n "$co_path" ] || continue
+            echo "    $co_path declares $co_tok, undefined macro(s): $co_macros"
+        done < "$work/compiled_out.txt"
+    fi
 
     if [ "$violations" -gt 0 ]; then
         echo "check_capability_closure: FAIL — $violations violation(s)"
@@ -779,7 +907,17 @@ check_root() {
 #   H. a native drive-letter nm record keeps the whole object path;
 #   I. MinGW import-pointer decorations inherit the reviewed base symbol;
 #   J. a Windows exact override replaces (rather than unions with) the
-#      portable row, including CAP_NONE and exact platform coverage skips.
+#      portable row, including CAP_NONE and exact platform coverage skips;
+#   K. a Linux exact override has the same replacement semantics;
+#   L. coverage follows the exact host-source selection, not a cross-target
+#      union, while the two real standalone rows stay applicable everywhere;
+#   M. a symbol-free compiled object is still present coverage evidence, not
+#      "no object here";
+#   N. compiled-out honesty: a declaration behind a guard macro this build's
+#      real CFLAGS never define is UNOBSERVED, not a VIOLATION and not a
+#      pass (N1) — but an identically-shaped guard the CFLAGS DO define is
+#      not "compiled out", and a genuine overdeclaration behind it still
+#      VIOLATIONs (N2), so the softening cannot launder an ordinary defect.
 FIXTURE_ROOT=""
 selftest_cleanup() { [ -n "$FIXTURE_ROOT" ] && rm -rf "$FIXTURE_ROOT"; }
 
@@ -1181,8 +1319,75 @@ EOF
     CAP_CLOSURE_HOST_OS="$host_os_saved"
     CAP_CLOSURE_HOST_WINDOWS="$host_windows_saved"
 
+    # N. compiled-out honesty, both directions. N1: a file guarded by a
+    # macro this build's real CFLAGS never define compiles only its `#else`
+    # arm — the declared capability is UNOBSERVED, not a VIOLATION, and the
+    # gate still exits clean. N2: an identically-shaped guard whose macro
+    # THIS build's CFLAGS do define is not "compiled out" at all — a genuine
+    # overdeclaration behind such a guard must still VIOLATION, proving the
+    # softening above cannot be used to launder an ordinary defect.
+    d="$FIXTURE_ROOT/n"; mkdir -p "$d/fixture_src"
+    make_epoch "$d"
+    fixture_symbols "$d"
+    cat > "$d/fixture_src/compiled_out_user.c" <<'EOF'
+#if defined(FIXTURE_N_MISSING_MACRO)
+extern int connect(int, int, int);
+int use_compiled_out(void) { return connect(1, 2, 3); }
+#else
+typedef int compiled_out_user_unused;
+#endif
+EOF
+    mkdir -p "$d/build/dev-obj/epochs/fx0/fixture_src"
+    cc -std=c23 -c "$d/fixture_src/compiled_out_user.c" \
+        -o "$d/build/dev-obj/epochs/fx0/fixture_src/compiled_out_user.o" 2>/dev/null \
+      || cc -c "$d/fixture_src/compiled_out_user.c" \
+        -o "$d/build/dev-obj/epochs/fx0/fixture_src/compiled_out_user.o"
+    fixture_module_rows "$d" \
+        'ZCL_MODULE_CAPABILITY("fixture_src/compiled_out_user.c", CAP_NETWORK, "test: only real under FIXTURE_N_MISSING_MACRO")'
+    CAP_CLOSURE_CFLAGS_OVERRIDE=""
+    out="$(check_root "$d" 2>&1)"; nrc=$?
+    unset CAP_CLOSURE_CFLAGS_OVERRIDE
+    if [ "$nrc" -ne 0 ]; then
+        echo "SELFTEST FAIL: N1: a compiled-out declaration (guard macro undefined in this build) must exit 0, got $nrc"
+        echo "$out" | sed 's/^/    /'
+        rc=1
+    elif str_lacks "$out" "UNOBSERVED (compiled out: FIXTURE_N_MISSING_MACRO)"; then
+        echo "SELFTEST FAIL: N1: never reported UNOBSERVED (compiled out: ...) naming the macro"
+        echo "$out" | sed 's/^/    /'
+        rc=1
+    elif ! str_lacks "$out" "check_capability_closure: VIOLATION"; then
+        echo "SELFTEST FAIL: N1: a compiled-out declaration must never also read as a VIOLATION"
+        echo "$out" | sed 's/^/    /'
+        rc=1
+    else
+        echo "  selftest ok: N1: a declaration behind a guard this build never defines is UNOBSERVED, exit 0, never a VIOLATION"
+    fi
+
+    d="$FIXTURE_ROOT/n2"; mkdir -p "$d/fixture_src"
+    make_epoch "$d"
+    fixture_symbols "$d"
+    cat > "$d/fixture_src/still_overdeclared_user.c" <<'EOF'
+#if defined(FIXTURE_N_PRESENT_MACRO)
+static int nothing_dangerous(int x) { return x + 1; }
+int still_overdeclared_export(int x) { return nothing_dangerous(x); }
+#else
+typedef int still_overdeclared_user_unused;
+#endif
+EOF
+    mkdir -p "$d/build/dev-obj/epochs/fx0/fixture_src"
+    cc -std=c23 -DFIXTURE_N_PRESENT_MACRO -c "$d/fixture_src/still_overdeclared_user.c" \
+        -o "$d/build/dev-obj/epochs/fx0/fixture_src/still_overdeclared_user.o" 2>/dev/null \
+      || cc -DFIXTURE_N_PRESENT_MACRO -c "$d/fixture_src/still_overdeclared_user.c" \
+        -o "$d/build/dev-obj/epochs/fx0/fixture_src/still_overdeclared_user.o"
+    fixture_module_rows "$d" \
+        'ZCL_MODULE_CAPABILITY("fixture_src/still_overdeclared_user.c", CAP_NETWORK, "test: guard is on in this build, declaration is simply wrong")'
+    CAP_CLOSURE_CFLAGS_OVERRIDE="-DFIXTURE_N_PRESENT_MACRO"
+    expect_reject "N2: a guard this build DOES define is not compiled-out — genuine overdeclaration still VIOLATIONs" \
+                  "still_overdeclared_user.c declares CAP_NETWORK" "$d" || rc=1
+    unset CAP_CLOSURE_CFLAGS_OVERRIDE
+
     if [ "$rc" -eq 0 ]; then
-        echo "== selftest: PASS (13/13) =="
+        echo "== selftest: PASS (15/15) =="
     else
         echo "== selftest: FAIL =="
     fi
