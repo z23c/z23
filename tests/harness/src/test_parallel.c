@@ -162,6 +162,16 @@ struct group_result {
     long long last_size;   /* bytes of captured output at that moment */
     int wedged;            /* 1 if WE killed it for going silent */
     int silent_seconds;    /* how long it had been silent when we killed it */
+    /* ── rerun-alone policy (see rerun_load_flaky_groups) ─────────────────
+     * A group that FAILs or is WEDGED during the shared, multi-worker pool
+     * gets exactly one rerun, alone, with the pool otherwise idle. If that
+     * rerun passes, the group counts as PASS for the suite verdict but is
+     * never allowed to look identical to an ordinary pass: load_flaky stays
+     * set, and the first (contended) attempt's capture is preserved so a
+     * human can see what the shared pool actually did. */
+    int load_flaky;             /* 1 if FAIL/WEDGED under the pool, PASS alone */
+    int flaky_first_wedged;     /* 1 if the first attempt was a watchdog kill */
+    char flaky_first_log[128];  /* preserved first-attempt capture, "" if n/a */
 };
 
 /* ── The per-group watchdog is on SILENCE, not on runtime ──────────────────
@@ -861,6 +871,89 @@ static bool run_parallel_phase(
     return true;
 }
 
+/* ── Rerun-alone: a failed/wedged group gets one clean shot before it counts
+ * ──────────────────────────────────────────────────────────────────────────
+ *
+ * Two red proofs on the same day were both a group that fails only under an
+ * 8-worker contended pool and passes every time alone: a socket-deadline
+ * case in test_file_market_delivery, and (earlier) test_zcode_swarm_net and
+ * test_block_parse_cache going silent long enough to trip the watchdog. Each
+ * red throws away a ~15-minute proof for a defect that is really "this
+ * assertion assumes it has the CPU/scheduler to itself", not a code
+ * regression.
+ *
+ * The fix is not raising bounds (that just moves the cliff — see
+ * group_watchdog_expired's own rationale) and not silently retrying inside
+ * the group (that would hide a real intermittent failure as a clean PASS).
+ * Instead: after the shared pool finishes, every group that FAILed or was
+ * WEDGED gets re-run EXACTLY ONCE, alone, with the pool otherwise idle
+ * (run_group_exclusive — the same machinery host-latency-sensitive groups
+ * already use). Three outcomes:
+ *
+ *   - fail again alone  -> stays FAIL. A real regression cannot hide behind
+ *     this policy: it still has to fail once with no contention as an excuse.
+ *   - pass alone         -> counts as PASS for the suite verdict, but
+ *     load_flaky stays set forever on this result. The verdict line, the
+ *     cache, and a cache HIT on a later run all keep saying so — a load-flaky
+ *     group is never allowed to look like an ordinary green group.
+ *
+ * The first (contended) attempt's capture is preserved under a ".first" name
+ * before the alone rerun reuses the same tempfile path, so both attempts stay
+ * inspectable. Groups that already ran exclusively (group_requires_exclusive_run)
+ * are excluded: they already ran with the pool idle, so a second alone run
+ * would prove nothing new. */
+static void rerun_load_flaky_groups(struct group_result *results,
+                                    pid_t parent_pid, int timeout_secs,
+                                    bool verbose, bool activate_proof_contracts)
+{
+    for (size_t i = 0; i < g_num_groups; i++) {
+        if (results[i].skipped || results[i].cached) continue;
+        if (group_requires_exclusive_run(g_groups[i].name)) continue;
+        bool first_pass = !results[i].signaled && results[i].exit_code == 0;
+        if (first_pass) continue;
+
+        bool first_wedged = results[i].wedged != 0;
+        char first_log[128];
+        snprintf(first_log, sizeof(first_log), "%s", results[i].out_path);
+        char preserved_log[144] = "";
+        if (first_log[0]) {
+            snprintf(preserved_log, sizeof(preserved_log), "%s.first",
+                     first_log);
+            if (rename(first_log, preserved_log) != 0)
+                preserved_log[0] = '\0'; /* best effort: keep going without it */
+        }
+
+        printf("[rerun-alone] [%zu] %s — first attempt %s under the shared "
+               "pool; retrying alone with the pool idle (at most once)\n",
+               i, g_groups[i].name, first_wedged ? "was WEDGED" : "FAILED");
+        fflush(stdout);
+
+        /* Fresh watchdog/result state for a clean, independent attempt. */
+        memset(&results[i], 0, sizeof(results[i]));
+        results[i].status = -1;
+        run_group_exclusive(i, parent_pid, results, timeout_secs, verbose,
+                            activate_proof_contracts);
+
+        bool alone_pass = !results[i].signaled && results[i].exit_code == 0;
+        if (alone_pass) {
+            results[i].load_flaky = 1;
+            results[i].flaky_first_wedged = first_wedged;
+            snprintf(results[i].flaky_first_log,
+                    sizeof(results[i].flaky_first_log), "%s",
+                    preserved_log[0] ? preserved_log : "(unavailable)");
+            printf("LOAD-FLAKY %s first=%s alone=PASS first_log=%s "
+                  "alone_log=%s\n",
+                  g_groups[i].name, first_wedged ? "WEDGED" : "FAIL",
+                  results[i].flaky_first_log,
+                  results[i].out_path[0] ? results[i].out_path : "(none)");
+            fflush(stdout);
+        } else if (preserved_log[0]) {
+            /* Still FAIL: the alone log is the one that matters now. */
+            unlink(preserved_log);
+        }
+    }
+}
+
 /* What a run actually DID, as opposed to what it concluded. Carried to both the
  * terminal (the SUITE VERDICT line) and .cache/test-timing/last-run.json so
  * neither can claim a cold pass for a run that executed almost nothing. */
@@ -874,6 +967,8 @@ struct suite_verdict {
     int    groups_failed;
     int    self_skips;         /* groups printing an in-test SKIP marker */
     int    env_unobserved;    /* groups that ran but could not observe a leg */
+    int    load_flaky;        /* FAIL/WEDGED under the pool, PASS alone (this
+                                * run's rerun, or a cache hit on a prior one) */
     char   toolkey[13];
 };
 
@@ -1546,6 +1641,17 @@ int main(int argc, char **argv)
                     results[i].status = 0;
                     results[i].cached = 1;
                     cached_count++;
+                    /* A stored PASS earned by an alone rerun after a
+                     * contended FAIL/WEDGED must never come back looking like
+                     * an ordinary cache hit — that would hide the flake on
+                     * every subsequent cached run forever. Reprint it. */
+                    if (probes[i].hit_flaky) {
+                        results[i].load_flaky = 1;
+                        printf("LOAD-FLAKY %s first=CACHED alone=PASS "
+                              "first_log=(prior run) alone_log=(cache hit; "
+                              "see the run that stored this key)\n",
+                              g_groups[i].name);
+                    }
                 }
             }
         }
@@ -1652,6 +1758,13 @@ int main(int argc, char **argv)
         return 1;
     }
 
+    /* Every group that FAILed or was WEDGED under the shared pool gets one
+     * clean shot alone before it counts — see rerun_load_flaky_groups. This
+     * runs before the pass/fail accounting below so a load-flaky group's
+     * alone verdict is what gets counted, cached, and reported. */
+    rerun_load_flaky_groups(results, parent_pid, timeout_secs, verbose,
+                            activate_proof_contracts);
+
     /* All children reaped. Full-suite green output is intentionally compact:
      * replaying hundreds of passing group logs produced ~46k lines / ~1M LLM
      * tokens with no diagnostic value. Focused runs retain their one group's
@@ -1666,6 +1779,7 @@ int main(int argc, char **argv)
     int failed_groups = 0;
     int skip_groups = 0;
     int unobserved_groups = 0;
+    int load_flaky_groups = 0;
     for (size_t i = 0; i < g_num_groups; i++) {
         if (results[i].skipped) continue;
         bool pass =
@@ -1676,6 +1790,7 @@ int main(int argc, char **argv)
         results[i].env_unobserved = results[i].out_path[0]
             ? count_marker_lines(results[i].out_path, "UNOBSERVED (") : 0;
         if (results[i].env_unobserved > 0) unobserved_groups++;
+        if (results[i].load_flaky) load_flaky_groups++;
         char skip_note[32] = "";
         if (results[i].skip_markers > 0)
             snprintf(skip_note, sizeof(skip_note), ", %d SKIP",
@@ -1690,7 +1805,12 @@ int main(int argc, char **argv)
                    skip_note, results[i].wall_seconds);
             print_captured(results[i].out_path);
         }
-        if (pass && results[i].out_path[0]) unlink(results[i].out_path);
+        /* A load-flaky PASS keeps its alone-run capture on disk (not just its
+         * path string, already printed by the LOAD-FLAKY line above) so a
+         * human can inspect it after the fact instead of only after the
+         * process exits. */
+        if (pass && !results[i].load_flaky && results[i].out_path[0])
+            unlink(results[i].out_path);
     }
 
     /* ── The verdict ────────────────────────────────────────────────────────
@@ -1725,6 +1845,7 @@ int main(int argc, char **argv)
         .groups_failed = failed_groups,
         .self_skips    = skip_groups,
         .env_unobserved = unobserved_groups,
+        .load_flaky    = load_flaky_groups,
     };
     testcache_toolkey_digest12(verdict.toolkey);
 
@@ -1755,11 +1876,11 @@ int main(int argc, char **argv)
 
     printf("\nSUITE VERDICT mode=%s groups_total=%zu groups_ran=%zu "
            "groups_cached=%zu groups_gated=%zu groups_failed=%d self_skips=%d "
-           "env_unobserved=%d toolkey=%s%s\n",
+           "env_unobserved=%d load_flaky=%d toolkey=%s%s\n",
            verdict.mode, verdict.groups_total, verdict.groups_ran,
            verdict.groups_cached, verdict.groups_gated, verdict.groups_failed,
-           verdict.self_skips, verdict.env_unobserved, verdict.toolkey,
-           hotswap_verdict);
+           verdict.self_skips, verdict.env_unobserved, verdict.load_flaky,
+           verdict.toolkey, hotswap_verdict);
 
     printf("%s%s — %d/%zu groups failed, %d skipped (%.1fs wall, %d workers)%s\n",
            failed_groups != 0 ? "SOME TESTS FAILED"
@@ -1788,6 +1909,15 @@ int main(int argc, char **argv)
             if (results[i].skipped || results[i].env_unobserved == 0) continue;
             printf("  - %s: %d unobserved leg(s)\n",
                    g_groups[i].name, results[i].env_unobserved);
+        }
+    }
+    if (load_flaky_groups > 0) {
+        printf("Load-flaky groups (FAIL/WEDGED under the shared pool, PASS "
+               "alone — counted as PASS, never a silent cache hit; see the "
+               "LOAD-FLAKY lines above):\n");
+        for (size_t i = 0; i < g_num_groups; i++) {
+            if (results[i].skipped || !results[i].load_flaky) continue;
+            printf("  - %s\n", g_groups[i].name);
         }
     }
     if (failed_groups > 0) {
@@ -1842,7 +1972,16 @@ int main(int argc, char **argv)
             if (pass && results[i].skip_markers == 0 &&
                 results[i].env_unobserved == 0 && probes &&
                 probes[i].cacheable) {
-                testcache_store_pass(tc, probes[i].key);
+                /* A flaky pass IS a pass — the group's actual code proved
+                 * itself, alone. But it must never come back on a later
+                 * cache hit looking indistinguishable from an ordinary
+                 * uncontended pass: store the flag alongside the verdict so
+                 * every future hit reprints LOAD-FLAKY (see the cache-hit
+                 * arm above). */
+                if (results[i].load_flaky)
+                    testcache_store_pass_flaky(tc, probes[i].key);
+                else
+                    testcache_store_pass(tc, probes[i].key);
                 stored++;
             }
             if (cache_mode == CACHE_COLD_AUDIT && probes &&

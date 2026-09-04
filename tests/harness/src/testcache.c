@@ -52,6 +52,14 @@ extern char **environ;
 /* ── on-disk verdict record (fixed 56 bytes, addressed BY the cache key) ── */
 #define TRC_MAGIC "ZTCACHE1"      /* 8 bytes, no NUL */
 #define TRC_STATUS_PASS 1u
+/* rsvd[0] bit 0: this PASS was minted by the rerun-alone policy — the group
+ * FAILed or was WEDGED once under a contended pool before passing alone (see
+ * test_parallel.c's rerun_load_flaky_groups). A record with this bit set must
+ * report hit_flaky=true on every probe, so a cache HIT can never make the
+ * flake invisible again. rsvd[0] is 0 on every record written before this
+ * field existed, which reads as "not flaky" — the only meaning an old record
+ * can honestly carry. */
+#define TRC_FLAKY_BIT 0x01u
 struct trc_record {
     char    magic[8];
     uint8_t status;
@@ -801,15 +809,18 @@ void testcache_probe_group(struct testcache *tc, const char *group_name,
                 const struct trc_record *r = (const struct trc_record *)buf;
                 if (memcmp(r->magic, TRC_MAGIC, 8) == 0 &&
                     r->status == TRC_STATUS_PASS &&
-                    memcmp(r->key_echo, out->key, 32) == 0)
+                    memcmp(r->key_echo, out->key, 32) == 0) {
                     out->hit = true;
+                    out->hit_flaky = (r->rsvd[0] & TRC_FLAKY_BIT) != 0;
+                }
             }
             free(buf);
         }
     }
 }
 
-void testcache_store_pass(struct testcache *tc, const uint8_t key[32])
+static void trc_store_pass_ex(struct testcache *tc, const uint8_t key[32],
+                              bool flaky)
 {
     if (!tc || !key)
         return;
@@ -817,6 +828,8 @@ void testcache_store_pass(struct testcache *tc, const uint8_t key[32])
     memset(&r, 0, sizeof(r));
     memcpy(r.magic, TRC_MAGIC, 8);
     r.status = TRC_STATUS_PASS;
+    if (flaky)
+        r.rsvd[0] |= TRC_FLAKY_BIT;
     memcpy(r.key_echo, key, 32);
     /* Best-effort observability stamp; correctness never depends on it. */
     uint64_t gen = (uint64_t)platform_time_wall_time_t();
@@ -826,6 +839,16 @@ void testcache_store_pass(struct testcache *tc, const uint8_t key[32])
                                   (const uint8_t *)&r, sizeof(r)))
         ZCL_LOG_EMIT_AT(ZCL_LOG_WARN,
                         "[testcache] store_pass put_addressed failed\n");
+}
+
+void testcache_store_pass(struct testcache *tc, const uint8_t key[32])
+{
+    trc_store_pass_ex(tc, key, false);
+}
+
+void testcache_store_pass_flaky(struct testcache *tc, const uint8_t key[32])
+{
+    trc_store_pass_ex(tc, key, true);
 }
 
 void testcache_dump_group(struct testcache *tc, const char *group_name)

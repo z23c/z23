@@ -329,6 +329,47 @@ int test_testcache(void)
     }
     unsetenv("ZCL_TESTCACHE_STORE_ROOT");
 
+    /* ── Phase A3: load-flaky PASS — the rerun-alone policy's cache contract.
+     * test_parallel.c's rerun_load_flaky_groups gives a FAIL/WEDGED group one
+     * alone rerun before it counts; when that rerun passes, the group is a
+     * real PASS but must never look like an ORDINARY one on a later cache
+     * hit — a cached hit must still say "this flaked once". Exercised here
+     * directly against testcache (the module under test), not by forking a
+     * whole suite: a flaky store sets hit_flaky, an ordinary store leaves it
+     * clear, and storing over a flaky key with an ordinary PASS clears the
+     * flag (a later genuine uncontended pass is not stuck flaky forever). */
+    TC_CHECK("flaky-phase store starts empty",
+             system("rm -rf " TC_STORE) == 0 &&
+             mkdir(TC_STORE, 0755) == 0 &&
+             setenv("ZCL_TESTCACHE_STORE_ROOT", TC_STORE, 1) == 0);
+    {
+        struct testcache *tc = testcache_open(TC_FIX);
+        TC_CHECK("cache opens for the flaky-store phase", tc != NULL);
+        if (tc) {
+            struct testcache_probe p;
+            testcache_probe_group(tc, "test_demo_entry", &p);
+            TC_CHECK("flaky-phase key is cacheable", p.cacheable);
+            testcache_store_pass_flaky(tc, p.key);
+
+            struct testcache_probe p2;
+            testcache_probe_group(tc, "test_demo_entry", &p2);
+            TC_CHECK("a flaky-stored PASS still HITS", p2.cacheable && p2.hit);
+            TC_CHECK("a flaky-stored PASS reports hit_flaky on probe",
+                     p2.hit_flaky);
+
+            /* An ordinary store_pass at the SAME key (a later, genuinely
+             * uncontended run) must clear the flag — the flake is not a
+             * permanent property of the key, only of the run that minted it. */
+            testcache_store_pass(tc, p.key);
+            struct testcache_probe p3;
+            testcache_probe_group(tc, "test_demo_entry", &p3);
+            TC_CHECK("an ordinary store over a flaky key clears hit_flaky",
+                     p3.cacheable && p3.hit && !p3.hit_flaky);
+            testcache_close(tc);
+        }
+    }
+    unsetenv("ZCL_TESTCACHE_STORE_ROOT");
+
     /* ── Phase B: SOUNDNESS — edit a CLOSURE-MEMBER body => key changes, miss ── */
     TC_CHECK("rewrite leaf body", write_fixture(TC_LEAF_B, TC_OTHER_A, TC_H_A));
     {
@@ -714,7 +755,7 @@ int test_testcache(void)
                            "results[i].env_unobserved == 0"));
     TC_CHECK("runner reports env_unobserved in the machine verdict",
              file_contains("tests/harness/src/test_parallel.c",
-                           "env_unobserved=%d toolkey=%s"));
+                           "env_unobserved=%d load_flaky=%d toolkey=%s"));
     TC_CHECK("the onion bootstrap window prints UNOBSERVED, never SKIP",
              file_contains("tests/harness/src/test_onion_bootstrap.c",
                            "UNOBSERVED (tor bootstrap did not complete"));
@@ -771,6 +812,67 @@ int test_testcache(void)
     TC_CHECK("CI retry runs cold so a flake cannot be laundered into a PASS",
              file_contains("Makefile",
                            "$(TEST_PARALLEL_REL_ACTIVE) --no-cache"));
+
+    /* ── Phase L: rerun-alone policy (test_parallel.c) — source-contract
+     * pins. This module cannot fork a whole 8-worker suite run to reproduce
+     * the actual race (that is exactly the flake the policy exists for), so
+     * — same pattern as the SUITE VERDICT pins above — pin the shapes that
+     * make the four scenarios true: flaky-then-pass, fail-then-fail,
+     * watchdog-then-pass, and the cache-hit reprint. The behavioral half
+     * (testcache_store_pass_flaky / hit_flaky round-trip) is exercised for
+     * real above in Phase A3; this is the harness-side wiring around it. */
+    TC_CHECK("a FAIL/WEDGED group gets exactly one alone rerun before it counts",
+             file_contains("tests/harness/src/test_parallel.c",
+                           "static void rerun_load_flaky_groups(") &&
+             file_contains("tests/harness/src/test_parallel.c",
+                           "bool first_pass = !results[i].signaled && "
+                           "results[i].exit_code == 0;") &&
+             file_contains("tests/harness/src/test_parallel.c",
+                           "if (first_pass) continue;"));
+    TC_CHECK("groups that already ran exclusively are excluded from rerun-alone",
+             file_contains("tests/harness/src/test_parallel.c",
+                           "if (group_requires_exclusive_run(g_groups[i].name)) "
+                           "continue;"));
+    TC_CHECK("flaky-then-pass: an alone PASS sets load_flaky and prints "
+             "LOAD-FLAKY with first= and alone_log=",
+             file_contains("tests/harness/src/test_parallel.c",
+                           "results[i].load_flaky = 1;") &&
+             file_contains("tests/harness/src/test_parallel.c",
+                           "results[i].flaky_first_wedged = first_wedged;") &&
+             file_contains("tests/harness/src/test_parallel.c",
+                           "printf(\"LOAD-FLAKY %s first=%s alone=PASS "
+                           "first_log=%s \""));
+    TC_CHECK("fail-then-fail: a group that fails again alone stays FAIL and "
+             "its preserved first-attempt log is discarded, not the new one",
+             file_contains("tests/harness/src/test_parallel.c",
+                           "/* Still FAIL: the alone log is the one that "
+                           "matters now. */") &&
+             file_contains("tests/harness/src/test_parallel.c",
+                           "unlink(preserved_log);"));
+    TC_CHECK("watchdog-then-pass: the printed line distinguishes a WEDGED "
+             "first attempt from a plain FAIL",
+             file_contains("tests/harness/src/test_parallel.c",
+                           "g_groups[i].name, first_wedged ? \"WEDGED\" : "
+                           "\"FAIL\","));
+    TC_CHECK("a load-flaky PASS is stored with the flaky flag, never as an "
+             "indistinguishable ordinary PASS",
+             file_contains("tests/harness/src/test_parallel.c",
+                           "if (results[i].load_flaky)") &&
+             file_contains("tests/harness/src/test_parallel.c",
+                           "testcache_store_pass_flaky(tc, probes[i].key);"));
+    TC_CHECK("cache-hit reprint: a stored flaky PASS reprints LOAD-FLAKY on "
+             "every future cache hit instead of hiding the flake",
+             file_contains("tests/harness/src/test_parallel.c",
+                           "if (probes[i].hit_flaky) {") &&
+             file_contains("tests/harness/src/test_parallel.c",
+                           "printf(\"LOAD-FLAKY %s first=CACHED alone=PASS \""));
+    TC_CHECK("the suite verdict line carries load_flaky=<n>",
+             file_contains("tests/harness/src/test_parallel.c",
+                           "env_unobserved=%d load_flaky=%d toolkey=%s%s"));
+    TC_CHECK("load_flaky is counted from results, not just this run's reruns "
+             "(a cache hit sets it on the same field)",
+             file_contains("tests/harness/src/test_parallel.c",
+                           "if (results[i].load_flaky) load_flaky_groups++;"));
 
     system("rm -rf " TC_FIX " " TC_STORE);
     tc_env_restore(&caller_store, "ZCL_TESTCACHE_STORE_ROOT");

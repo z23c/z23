@@ -91,6 +91,13 @@ const char *testcache_reason_label(enum testcache_reason r);
 struct testcache_probe {
     bool    cacheable;    /* false => the group MUST run this time */
     bool    hit;          /* true  => a stored PASS exists at this exact key */
+    /* true => that stored PASS was minted by a rerun-alone policy pass (the
+     * group FAILed or was WEDGED once under a contended pool before passing
+     * alone — see test_parallel.c's rerun_load_flaky_groups). A cache HIT
+     * with this set must be reported (LOAD-FLAKY ...), never served silently
+     * as an ordinary pass: the flake happened, and the cache must never be
+     * the mechanism that makes it invisible again. */
+    bool    hit_flaky;
     uint8_t key[32];      /* the content-addressed key (valid iff cacheable) */
     int     n_closure;    /* number of input files hashed (diagnostic) */
     enum testcache_reason code;  /* stable bucket for the reason histogram */
@@ -113,6 +120,14 @@ bool testcache_group_is_denylisted(const char *group_name);
  * it only costs a future re-run, never correctness). Pass the key from a
  * prior cacheable probe of a group that then ran and PASSED. */
 void testcache_store_pass(struct testcache *tc, const uint8_t key[32]);
+
+/* Store a PASS verdict exactly like testcache_store_pass, but flagged
+ * load-flaky: the group FAILed or was WEDGED once under a contended pool
+ * before passing alone (see test_parallel.c's rerun_load_flaky_groups). A
+ * later probe of this key reports it via testcache_probe's out->hit_flaky so
+ * the flake is reprinted on every future cache hit, never laundered into an
+ * indistinguishable ordinary pass. */
+void testcache_store_pass_flaky(struct testcache *tc, const uint8_t key[32]);
 
 /* Diagnostic: print group_name's closure file list, key, and cacheability to
  * stdout. Drives the ZCL_TEST_CACHE_DUMP=<group> operator surface and the

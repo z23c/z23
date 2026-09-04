@@ -16,13 +16,27 @@ Every run prints one machine-greppable line **before** any verdict word:
 
 ```
 SUITE VERDICT mode=<cold|cached> groups_total=N groups_ran=N groups_cached=N \
-  groups_gated=N groups_failed=N self_skips=N toolkey=<hex12>
+  groups_gated=N groups_failed=N self_skips=N env_unobserved=N load_flaky=N \
+  toolkey=<hex12>
 ```
 
 `groups_ran` is the count actually forked, and it is the first number to read.
 Only a skip-free fresh PASS is stored; a zero-exit group that prints `SKIP (`
 never becomes a reusable PASS. The v3 key domain retires older records that
 could have been stored before this rule existed.
+
+`load_flaky` counts groups that FAILed or were WEDGED once under the shared,
+contended worker pool and then PASSED alone, with the pool otherwise idle
+(the rerun-alone policy, `rerun_load_flaky_groups` in test_parallel.c). Such a
+group counts as a real PASS for the suite verdict — its own code proved
+itself — but it is never allowed to look like an ordinary, uncontended pass:
+a `LOAD-FLAKY <group> first=<FAIL|WEDGED> alone=PASS first_log=<path>
+alone_log=<path>` line is printed the run it happens, the stored cache record
+carries the same flag, and every later cache HIT on that record reprints
+`LOAD-FLAKY <group> first=CACHED alone=PASS ...` instead of serving it as a
+silent, indistinguishable hit. A group that fails again on its alone rerun
+stays FAIL exactly as before — the policy gives a real regression no extra
+cover, it only removes the box's own contention as a false accusation.
 Only a **cold** run prints the bare token `ALL TESTS PASSED`; a cached run prints
 `ALL TESTS PASSED (CACHED)`. `tools/scripts/gate-and-report.sh` reads the
 `SUITE VERDICT` line, rejects anything whose `mode` is not `cold`, and rejects
