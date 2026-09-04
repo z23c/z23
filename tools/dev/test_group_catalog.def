@@ -810,6 +810,15 @@ ZCL_TEST_GROUP(science)
  * because a batch that rejected an agent's work over a stranger's bug would
  * be worse than not batching at all. */
 ZCL_TEST_GROUP(land_queue)
+/* The landing SERVICE: dev.land submit/status/step/cancel. The group
+ * exists for one property — nothing waits. It proves submit refuses an
+ * unsigned or unknown tip, that a step over an empty queue returns at
+ * once, that the step which asks for a proof RETURNS before any proof
+ * could finish, that a later step pushes a passing tip to a real bare
+ * origin and records landed, that a failing one records the dimension and
+ * a log path, and that a base which moved mid-proof re-rebases instead of
+ * landing evidence about a base nobody is on. */
+ZCL_TEST_GROUP(dev_land)
 ZCL_TEST_GROUP(receipt)
 ZCL_TEST_GROUP(testcache)
 ZCL_TEST_GROUP(test_group_selector)

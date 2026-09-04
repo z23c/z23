@@ -2381,6 +2381,9 @@ void zcl_native_handle_dev_agent_test(
 void zcl_native_handle_dev_agent_mutate(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
+void zcl_native_handle_dev_land(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
 
 /* dev.agent.* lane discipline — situation, rules, start, done, triage,
  * ceiling, pace, claim, outcomes. One handler per file under tools/command

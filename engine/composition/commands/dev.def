@@ -1299,3 +1299,43 @@ ZCL_COMMAND_READY_READ(
     ZCL_COMMAND_CAP_DEV_STATE_READ,
     ZCL_COMMAND_TRAIT_IDEMPOTENT | ZCL_COMMAND_TRAIT_DEV_ONLY,
     ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_dev_agent_ticketkey)
+
+/* ── dev.land ──────────────────────────────────────────────────────────────
+ * The landing service: an agent submits a tip and returns in milliseconds,
+ * a resident loop steps the queue, and the agent learns the outcome by
+ * pulling. Nothing an agent calls waits on a proof or a push. step drives
+ * one beat under a host-wide, non-blocking slot lock — rebase onto
+ * origin/main, lint, ASK for the exact proof, return — and a later step
+ * reads the proof's own answer and fast-forwards origin/main. */
+ZCL_COMMAND_DEV_COMMAND(
+    "dev.land", "dev", "",
+    "Queue a tip for proof and push without waiting for either",
+    "One durable landing queue over the owner-private state root: submit "
+    "checks that the tip exists, is signed, and shares history with "
+    "origin/main, then appends {seq, tip, worktree, note} to "
+    "land/queue.jsonl with a single O_APPEND write and returns queued; "
+    "status renders queued requests, the one in flight with its phase, "
+    "elapsed time and attempt, and the last ten outcomes with the pushed "
+    "tip or the failing dimension and its log; step takes one beat under a "
+    "non-blocking host-wide slot lock, rebasing the tip onto origin/main in "
+    "a private landing worktree, running lint-fast, requesting the exact "
+    "commit/base proof through dev.proof, and RETURNING — a later step "
+    "reads the proof state and fast-forwards origin/main, re-rebases when "
+    "the base moved, and retries a host-load failure up to three times; "
+    "cancel drops one request by sequence number. Every state change also "
+    "appends to the agent mail outbox when one exists, so an agent learns "
+    "the outcome by pulling rather than by waiting. Git is the only "
+    "program it runs, always without a shell.", 65536,
+    "land,submit,step,status,cancel,queue,proof,push,rebase,async",
+    "zcl.land_input.v1", "zcl.land.v1",
+    "action,tip,worktree,note,seq,json", "action",
+    "z23-dev dev land submit --tip=9afd46726",
+    ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_DEV_MUTATION,
+    ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_MODE_SYNC, ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_DEV_STATE_WRITE,
+    ZCL_COMMAND_TRAIT_DEV_ONLY,
+    zcl_native_handle_dev_land,
+    "the landing queue is a development-lane coordination surface",
+    "z23-dev dev land")
