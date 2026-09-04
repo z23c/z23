@@ -152,6 +152,16 @@ static void pr_mutate_claim(struct consensus_state_source_receipt *claim,
         claim->build_inputs_digest[0] ^= 0x04u;
 }
 
+static const char *pr_mutation_field_name(enum pr_claim_mutation mutation)
+{
+    switch (mutation) {
+    case PR_MUTATE_SOURCE_ROOT:   return "field=source_tree_root";
+    case PR_MUTATE_TOOLCHAIN:     return "field=toolchain_digest";
+    case PR_MUTATE_BUILD_INPUTS:  return "field=build_inputs_digest";
+    }
+    return "";
+}
+
 static bool pr_self_consistent_claim_tamper_refuses(
     sqlite3 *db, const struct consensus_state_source_receipt *original,
     const uint8_t original_epoch[32], enum pr_claim_mutation mutation,
@@ -164,10 +174,14 @@ static bool pr_self_consistent_claim_tamper_refuses(
     if (!pr_write_session_claim(db, &tampered, tampered_epoch))
         return false;
 
+    /* The refusal must name the exact field that diverged — not just say
+     * "does not exactly match" — so an operator sees which build input
+     * changed instead of re-deriving it by hand. */
     bool refused =
         !consensus_state_producer_receipt_begin(
             db, CONSENSUS_STATE_VALIDATION_FULL, err, err_size) &&
-        strstr(err, "does not exactly match current") != NULL;
+        strstr(err, "does not exactly match current") != NULL &&
+        strstr(err, pr_mutation_field_name(mutation)) != NULL;
 
     /* Restore the exact fixture regardless of the assertion result, then
      * resume once so progress_meta is also restored if vulnerable code had

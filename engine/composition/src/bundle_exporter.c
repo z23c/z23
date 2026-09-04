@@ -181,19 +181,25 @@ static void bx_name_degraded(const char *degradation)
     int32_t last_h = atomic_load(&g_bx_last_export_height);
     int64_t last_us = atomic_load(&g_bx_last_export_time_us);
     int64_t age_secs = last_us > 0 ? (GetTimeMicros() - last_us) / 1000000 : -1;
-    /* blocker_init applies the shared visible-cut policy to this full reason. */
+    /* blocker_init applies the shared visible-cut policy to this full
+     * reason, and BLOCKER_REASON_MAX (256) can lose the tail of a long
+     * reason (see util/blocker.h). `degradation` carries the one thing an
+     * operator needs — the exact refusal, e.g. producer_session_mismatch_detail's
+     * "field=X expected=Y actual=Z" — so it goes FIRST and gets the first
+     * 200 bytes; the day-count/height framing is context and can afford to
+     * be the part a tight cap trims. */
     char reason[512];
     if (last_h >= 0 && age_secs >= 0)
         snprintf(reason, sizeof reason,
-                 "no consensus-state bundle minted for %lld day(s) (newest is "
-                 "h=%d): %.110s — cold-starting peers must crawl block bodies "
-                 "from h=%d, and no in-process retry exists",
-                 (long long)(age_secs / 86400), last_h, degradation, last_h);
+                 "%.200s (no consensus-state bundle minted for %lld day(s), "
+                 "newest is h=%d; cold-starting peers must crawl block "
+                 "bodies from h=%d, no in-process retry exists)",
+                 degradation, (long long)(age_secs / 86400), last_h, last_h);
     else
         snprintf(reason, sizeof reason,
-                 "no consensus-state bundle has ever been minted here: "
-                 "%.110s — cold-starting peers get no state source from this "
-                 "node, and no in-process retry exists", degradation);
+                 "%.200s (no consensus-state bundle has ever been minted "
+                 "here; cold-starting peers get no state source from this "
+                 "node, no in-process retry exists)", degradation);
     struct blocker_record b;
     if (blocker_init(&b, "bundle_exporter.degraded", "bundle_exporter",
                      BLOCKER_DEPENDENCY, reason))

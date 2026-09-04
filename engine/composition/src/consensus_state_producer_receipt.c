@@ -266,6 +266,99 @@ bool producer_session_matches_current(
            strcmp(stored->claim.producer_commit,
                   current->producer_commit) == 0;
 }
+static void mismatch_digest8(char out[9], const uint8_t digest[32])
+{
+    char full[65];
+    zcl_hex_encode(digest, 32, full);
+    snprintf(out, 9, "%.8s", full);
+}
+/* producer_session_matches_current only reports pass/fail. This walks the
+ * exact same fields in the exact same order and stops at the first one
+ * that diverges, so the operator sees WHICH input changed (a rebuild
+ * touching only the toolchain reads differently from one that touched
+ * source) instead of one generic "does not match" sentence. Digests are
+ * shown as an 8-hex-char prefix — enough to tell two builds apart without
+ * costing the reason budget a 64-char hash on each side. */
+void producer_session_mismatch_detail(
+    const struct producer_session *stored,
+    const struct consensus_state_source_receipt *current,
+    const uint8_t current_epoch[32], const uint8_t running_binary[32],
+    char *out, size_t out_size)
+{
+    if (!out || !out_size)
+        return;
+    if (!stored || !current || !stored->present) {
+        snprintf(out, out_size, "field=session expected=present actual=absent");
+        return;
+    }
+    char exp[9], act[9];
+    if (stored->claim.schema_version != CONSENSUS_STATE_SOURCE_RECEIPT_V2 ||
+        current->schema_version != CONSENSUS_STATE_SOURCE_RECEIPT_V2) {
+        snprintf(out, out_size,
+                 "field=schema_version expected=%u actual=%u",
+                 (unsigned)current->schema_version,
+                 (unsigned)stored->claim.schema_version);
+        return;
+    }
+    if (memcmp(stored->running_binary_digest, running_binary, 32) != 0) {
+        mismatch_digest8(exp, running_binary);
+        mismatch_digest8(act, stored->running_binary_digest);
+        snprintf(out, out_size,
+                 "field=running_binary_digest expected=%s actual=%s", exp, act);
+        return;
+    }
+    if (memcmp(stored->claim.source_tree_root, current->source_tree_root,
+              32) != 0) {
+        mismatch_digest8(exp, current->source_tree_root);
+        mismatch_digest8(act, stored->claim.source_tree_root);
+        snprintf(out, out_size,
+                 "field=source_tree_root expected=%s actual=%s", exp, act);
+        return;
+    }
+    if (memcmp(stored->claim.toolchain_digest, current->toolchain_digest,
+              32) != 0) {
+        mismatch_digest8(exp, current->toolchain_digest);
+        mismatch_digest8(act, stored->claim.toolchain_digest);
+        snprintf(out, out_size,
+                 "field=toolchain_digest expected=%s actual=%s", exp, act);
+        return;
+    }
+    if (memcmp(stored->claim.build_inputs_digest,
+              current->build_inputs_digest, 32) != 0) {
+        mismatch_digest8(exp, current->build_inputs_digest);
+        mismatch_digest8(act, stored->claim.build_inputs_digest);
+        snprintf(out, out_size,
+                 "field=build_inputs_digest expected=%s actual=%s", exp, act);
+        return;
+    }
+    if (memcmp(stored->source_epoch_digest, current_epoch, 32) != 0) {
+        mismatch_digest8(exp, current_epoch);
+        mismatch_digest8(act, stored->source_epoch_digest);
+        snprintf(out, out_size,
+                 "field=source_epoch_digest expected=%s actual=%s", exp, act);
+        return;
+    }
+    if (stored->claim.source_clean != current->source_clean) {
+        snprintf(out, out_size, "field=source_clean expected=%d actual=%d",
+                 (int)current->source_clean, (int)stored->claim.source_clean);
+        return;
+    }
+    if (stored->claim.validation_profile != current->validation_profile) {
+        snprintf(out, out_size,
+                 "field=validation_profile expected=%u actual=%u",
+                 (unsigned)current->validation_profile,
+                 (unsigned)stored->claim.validation_profile);
+        return;
+    }
+    if (strcmp(stored->claim.producer_commit, current->producer_commit) !=
+        0) {
+        snprintf(out, out_size,
+                 "field=producer_commit expected=%.20s actual=%.20s",
+                 current->producer_commit, stored->claim.producer_commit);
+        return;
+    }
+    snprintf(out, out_size, "field=none (session matches)");
+}
 /* Load the singleton start session. Returns false only on a store error;
  * `out->present` reports whether a row exists. */
 bool producer_session_load(sqlite3 *db, struct producer_session *out)
@@ -434,12 +527,18 @@ bool consensus_state_producer_receipt_begin(sqlite3 *pdb,
          * claim+epoch is still foreign and must never be adopted. */
         if (!producer_session_matches_current(&existing, &claim, source_epoch,
                                      running_binary)) {
+            char detail[120];
+            producer_session_mismatch_detail(&existing, &claim, source_epoch,
+                                             running_binary, detail,
+                                             sizeof detail);
             (void)exec_checked(pdb, "ROLLBACK");
             progress_store_tx_unlock();
-            return set_err(err, err_size,
-                           "producer receipt begin: datadir session does not "
-                           "exactly match current running binary / source "
-                           "claim / source epoch / profile");
+            char msg[256];
+            snprintf(msg, sizeof msg,
+                    "producer receipt begin: session mismatch %s (datadir "
+                    "session does not exactly match current running binary "
+                    "/ source claim / source epoch / profile)", detail);
+            return set_err(err, err_size, msg);
         }
     } else if (ok) {
         ok = insert_session(pdb, &claim, running_binary, datadir, start_us);

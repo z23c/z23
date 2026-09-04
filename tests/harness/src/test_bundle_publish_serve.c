@@ -438,6 +438,15 @@ static int test_bx_degraded_names_a_blocker(void)
          * no bundle exists to serve and that no in-process retry will fix it. */
         ASSERT(strstr(snap[found].reason, "consensus-state bundle") != NULL);
         ASSERT(strstr(snap[found].reason, "no in-process retry") != NULL);
+        /* The specific refusal (bx_qualified's reason, here "coins not
+         * proven authority") must lead the string, not trail it: a
+         * BLOCKER_REASON_MAX(256) cap trims the TAIL, so if the generic
+         * "no consensus-state bundle minted..." framing came first the
+         * actionable detail could be the part that gets lost — as it was
+         * for the "datadir session does not exactly match" producer
+         * refusal in the field. */
+        ASSERT(strncmp(snap[found].reason, "coins not proven authority",
+                       strlen("coins not proven authority")) == 0);
 
         bundle_exporter_stop();
         blocker_reset_for_testing();

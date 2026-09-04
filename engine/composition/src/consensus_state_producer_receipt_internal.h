@@ -61,6 +61,17 @@ bool producer_session_matches_current(
     const uint8_t current_epoch[32],
     const uint8_t running_binary[32]);
 
+/* Same field order as producer_session_matches_current; writes a short
+ * "field=<name> expected=<8-hex> actual=<8-hex>" description of the FIRST
+ * field that diverges (or "field=none (session matches)" if it would pass)
+ * into `out`. Used to make a mismatch refusal name the exact cause instead
+ * of a generic "does not match" sentence. */
+void producer_session_mismatch_detail(
+    const struct producer_session *stored,
+    const struct consensus_state_source_receipt *current,
+    const uint8_t current_epoch[32], const uint8_t running_binary[32],
+    char *out, size_t out_size);
+
 /* Recompute the genesis..height header corpus digest and confirm the tip hash.
  * MUST stay byte-identical to prove_header_chain() in
  * consensus_state_snapshot_export_proof.c — the exporter compares the receipt's
