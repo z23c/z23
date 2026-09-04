@@ -612,10 +612,6 @@ REMOTE_COMMAND_CLASS("dev.agent.claim", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("dev.agent.ticketkey", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("dev.agent.queue", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("dev.agent.mail", REMOTE_CLASS_NEVER, "")
-REMOTE_COMMAND_CLASS("dev.train.build", REMOTE_CLASS_NEVER, "")
-REMOTE_COMMAND_CLASS("dev.train.check", REMOTE_CLASS_NEVER, "")
-REMOTE_COMMAND_CLASS("dev.train.status", REMOTE_CLASS_NEVER, "")
-REMOTE_COMMAND_CLASS("dev.train.drop", REMOTE_CLASS_NEVER, "")
 
 /* OPS — 36 never_remote leaves.
  *
