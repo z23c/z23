@@ -595,6 +595,16 @@ REMOTE_COMMAND_CLASS("dev.agent.ready", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("dev.agent.test", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("dev.agent.mutate", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("dev.agent.hot", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("dev.agent.situation", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("dev.agent.rules", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("dev.agent.start", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("dev.agent.done", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("dev.agent.triage", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("dev.agent.ceiling", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("dev.agent.pace", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("dev.agent.outcomes", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("dev.agent.claim", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("dev.agent.ticketkey", REMOTE_CLASS_NEVER, "")
 
 /* OPS — 36 never_remote leaves.
  *
