@@ -3751,7 +3751,8 @@ sapling_tree_boot_check_done:
                  * degraded. */
                 service_state_transition_and_persist(
                     SERVICE_STATE_DEGRADED_SERVING,
-                    "reindex unexecutable or budget exhausted; operator needed");
+                    "index-link repair in place, reindex unexecutable, or "
+                    "repair budget exhausted; operator needed");
             } else if (cls == CHAIN_INTEGRITY_UNRECOVERABLE) {
                 fprintf(stderr,
                     "[boot] WARNING: post-restore structural corruption at "

@@ -112,6 +112,13 @@ bool boot_crashonly_clear_reindex_request_if_covered(const char *datadir,
 void boot_crashonly_clear(const char *datadir)
 {
     boot_auto_reindex_clear(datadir);
+    /* Clean post-restore integrity is the ONE event that genuinely ends a
+     * repair episode, so it is the only place the durable per-finding attempt
+     * ledger is retired. Every other "retire the request" path knows nothing
+     * about the finding that armed it and must not reset the budget — that is
+     * precisely what turned the bounded budget into a permanent "attempt 1/3".
+     */
+    boot_repair_episode_clear(datadir);
 }
 
 bool boot_crashonly_handle_unrecoverable(const char *datadir, int tip_h,
@@ -141,21 +148,105 @@ bool boot_crashonly_handle_unrecoverable(const char *datadir, int tip_h,
         return false;
     }
 
-    /* zero_nbits==0 => the "corruption" is only holes ABOVE the validated
-     * on-disk index extent (a derived tip installed too high), NOT structural
-     * nBits damage — exactly what -reindex-chainstate rebuilds. Request a
-     * bounded self-rebuild; the caller exits and the restart re-enters with the
-     * reindex. */
     if (zero_nbits == 0) {
-        /* Record WHY, so the next boot's stale-clear can tell a block-index
-         * link failure from a coins-shaped one. MISMATCHES (broken height/pprev
-         * links) are block-index damage that derived coins state cannot witness
-         * and cannot repair; holes alone above the validated extent are the
-         * coins-shaped wedge the coverage clear was written for. */
-        int reason = mismatches > 0
-                         ? BOOT_AUTO_REINDEX_REASON_INDEX_INTEGRITY
-                         : BOOT_AUTO_REINDEX_REASON_UNSPECIFIED;
+        /* THE ATTEMPT BUDGET, taken against the FINDING rather than against
+         * the request file. The request file is deleted between boots by paths
+         * that know nothing about this finding (the sparse-body coverage
+         * refusal, reindex_chainstate's replay-unexecutable probe, the sticky
+         * escalator's stale-request withdrawal), and each deletion reset the
+         * count — which is why a soak node reported "attempt 1/3" on every one
+         * of its restarts while the numbers never moved. This ledger climbs on
+         * the identical finding no matter what happens to the request, and is
+         * retired only by a boot that reaches clean integrity. */
+        uint64_t sig = boot_repair_episode_signature(tip_h, zero_nbits,
+                                                     mismatches,
+                                                     first_mismatch_h);
+        int attempt = boot_repair_episode_note(datadir, sig);
+        if (attempt > BOOT_REPAIR_EPISODE_MAX) {
+            (void)boot_auto_reindex_mark_terminal(datadir, tip_h);
+            fprintf(stderr,
+                "[boot] crash-only recovery EXHAUSTED: the IDENTICAL "
+                "post-restore finding (tip_h=%d zero_nbits=0 mismatches=%d "
+                "first_mismatch_h=%d) has now failed %d boots in a row — NOT "
+                "restarting again, staying up DEGRADED for the operator.\n",
+                tip_h, mismatches, first_mismatch_h, attempt - 1);
+            event_emitf(EV_OPERATOR_NEEDED, 0,
+                "condition=crashonly_repair_episode_exhausted tip=%d "
+                "attempts=%d mismatches=%d first_mismatch_h=%d",
+                tip_h, BOOT_REPAIR_EPISODE_MAX, mismatches, first_mismatch_h);
+            boot_report_reindex_budget_exhausted(
+                datadir, tip_h, BOOT_REPAIR_EPISODE_MAX, mismatches,
+                first_mismatch_h,
+                boot_auto_reindex_reason_name(
+                    boot_auto_reindex_reason_of(datadir)));
+            return false;   /* stay-up-degraded; never a further restart */
+        }
+        /* attempt == 0 means the ledger write failed. Fall through on the
+         * request file's own count rather than refusing to act — a full disk
+         * must not disable recovery — but the cap above is then only as good
+         * as the request file, which is the pre-existing behaviour. */
+
+        /* THE VERB. MISMATCHES are broken active_chain height/pprev LINKS:
+         * block-index damage. -reindex-chainstate rewinds to the consistent
+         * reindex target and re-derives the TRANSPARENT UTXO SET from blocks/;
+         * it does not rebuild the block index, so it cannot repair a link. The
+         * exhausted report has always told the operator exactly that in its own
+         * next[] ("chainstate reindex only re-derives the UTXO set, so it can
+         * never repair the block-index link damage measured below") while this
+         * code armed the chainstate reindex anyway — which is why every attempt
+         * came back with the identical numbers. Do not arm it. The affected
+         * range is repaired IN PLACE by the machinery that owns it at runtime:
+         * chain_restore_finalize has already recorded the band fact
+         * (utxo_recovery_note_band_unrooted_tip -> HEADER_BAND_BLOCKER_ID), and
+         * the header-band backfill + the reducer refetch and refold that band
+         * while the node serves. So keep serving: return false and let the
+         * caller take DEGRADED_SERVING. */
+        if (mismatches > 0) {
+            /* A request armed by an EARLIER boot for this same wrong verb would
+             * otherwise be consumed on the next boot and wipe the coins set for
+             * a rebuild that provably cannot fix the damage. Retire exactly
+             * that one — identified by the reason class this site records — and
+             * nothing else. */
+            if (boot_auto_reindex_pending(datadir) &&
+                boot_auto_reindex_reason_of(datadir) ==
+                    BOOT_AUTO_REINDEX_REASON_INDEX_INTEGRITY)
+                boot_auto_reindex_clear(datadir);
+            fprintf(stderr,
+                "[boot] crash-only recovery: post-restore block-index LINK "
+                "damage at tip_h=%d (zero_nbits=0 mismatches=%d first_h=%d, "
+                "repair attempt %d/%d) — NOT requesting -reindex-chainstate: "
+                "that verb re-derives the transparent UTXO set and cannot "
+                "repair a height/pprev link. Serving DEGRADED while the "
+                "header-band backfill and the reducer refetch/refold the "
+                "affected range in place.\n",
+                tip_h, mismatches, first_mismatch_h,
+                attempt > 0 ? attempt : 1, BOOT_REPAIR_EPISODE_MAX);
+            event_emitf(EV_BOOT_ACTIVATE, 0,
+                "crashonly_index_link_repair_requested tip=%d mismatches=%d "
+                "first_mismatch_h=%d attempt=%d",
+                tip_h, mismatches, first_mismatch_h,
+                attempt > 0 ? attempt : 1);
+            boot_report_index_link_repair_requested(
+                datadir, tip_h, attempt > 0 ? attempt : 1,
+                BOOT_REPAIR_EPISODE_MAX, mismatches, first_mismatch_h);
+            return false;   /* keep serving; do not exit into a restart */
+        }
+
+        /* Holes ONLY, no link damage: a derived tip installed ABOVE the
+         * validated on-disk index extent. That IS what -reindex-chainstate
+         * rebuilds (it rewinds to the consistent target and replays from
+         * blocks/), so this shape keeps the original ladder. */
+        int reason = BOOT_AUTO_REINDEX_REASON_UNSPECIFIED;
         int n = boot_auto_reindex_request(datadir, tip_h, reason);
+        /* Bound on whichever count is FURTHER ALONG. The request file's own
+         * count restarts at 1 every time a sibling path deletes it, so the
+         * durable ledger is what makes the cap reachable; but the request file
+         * also carries budget spent by sites that do not reach this gate (the
+         * boot-storage episode, the sticky escalator's reindex rung), so it
+         * must never be talked DOWN either. Never promote a TERMINAL/failed
+         * arming (n < 1) — that would claim a request nobody wrote. */
+        if (n >= 1 && attempt > n)
+            n = attempt;
         if (n >= 1 && n <= BOOT_AUTO_REINDEX_MAX) {
             fprintf(stderr,
                 "[boot] crash-only recovery: post-restore tip-above-extent at "
@@ -205,7 +296,8 @@ bool boot_crashonly_handle_unrecoverable(const char *datadir, int tip_h,
          * Restart=always supervisor straight back into the crash-loop this
          * whole budget exists to end. */
         boot_report_reindex_budget_exhausted(
-            datadir, tip_h, BOOT_AUTO_REINDEX_MAX,
+            datadir, tip_h, BOOT_AUTO_REINDEX_MAX, mismatches,
+            first_mismatch_h,
             boot_auto_reindex_reason_name(
                 boot_auto_reindex_reason_of(datadir)));
         /* Stay-up-degraded: the caller takes the DEGRADED_SERVING branch, the

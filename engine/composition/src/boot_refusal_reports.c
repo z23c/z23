@@ -242,8 +242,46 @@ void boot_report_reindex_restart_requested(const char *datadir, int tip_h,
                       mismatches, first_mismatch_h);
 }
 
+void boot_report_index_link_repair_requested(const char *datadir, int tip_h,
+                                             int attempt, int max_attempts,
+                                             int mismatches,
+                                             int first_mismatch_h)
+{
+    const char *dd = datadir && datadir[0] ? datadir : "(unset)";
+    char status[1200], episode[1200];
+    (void)snprintf(status, sizeof(status),
+                   "z23 core node bootstatus -datadir=%s", dd);
+    (void)snprintf(episode, sizeof(episode),
+                   "cat %s/boot_repair_episode", dd);
+    const struct boot_error_next next[] = {
+        { status, "the node is UP and serving degraded. Read the beacon to "
+                  "watch the header band close; the first_mismatch_h below is "
+                  "the bottom of the range being refetched" },
+        { episode, "the ledger holds \"<finding> <attempts>\". It counts boots "
+                   "that met this SAME finding, and it is not the reindex "
+                   "request file, so no clearing rule can reset it. At the cap "
+                   "the node stops restarting and pages" },
+    };
+    boot_error_report(BOOT_ERROR_WARN, "BOOT_INDEX_LINK_REPAIR_REQUESTED",
+                      REINDEX_PHASE,
+                      "post-restore integrity measured block-index LINK "
+                      "damage with no structural nBits corruption. A "
+                      "-reindex-chainstate is NOT being requested: that verb "
+                      "re-derives the transparent UTXO set and cannot repair a "
+                      "height/pprev link, so it would restart the node for a "
+                      "rebuild that provably cannot change this measurement. "
+                      "The affected range is being refetched and refolded in "
+                      "place while the node serves degraded",
+                      next, 2,
+                      "datadir=%s tip_h=%d attempt=%d/%d zero_nbits=0 "
+                      "mismatches=%d first_mismatch_h=%d",
+                      dd, tip_h, attempt, max_attempts, mismatches,
+                      first_mismatch_h);
+}
+
 void boot_report_reindex_budget_exhausted(const char *datadir, int tip_h,
-                                          int attempts,
+                                          int attempts, int mismatches,
+                                          int first_mismatch_h,
                                           const char *reason_name)
 {
     const char *dd = datadir && datadir[0] ? datadir : "(unset)";
@@ -276,9 +314,12 @@ void boot_report_reindex_budget_exhausted(const char *datadir, int tip_h,
                       "get further",
                       next, 3,
                       "datadir=%s tip_h=%d attempts_spent=%d reason=%s "
-                      "sentinel=%s/auto_reindex_request",
+                      "mismatches=%d first_mismatch_h=%d "
+                      "sentinel=%s/auto_reindex_request "
+                      "episode=%s/boot_repair_episode",
                       dd, tip_h, attempts,
-                      reason_name ? reason_name : "unspecified", dd);
+                      reason_name ? reason_name : "unspecified",
+                      mismatches, first_mismatch_h, dd, dd);
 }
 
 void boot_report_post_restore_corrupt(const char *datadir, int tip_h,

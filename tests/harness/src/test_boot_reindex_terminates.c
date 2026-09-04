@@ -44,6 +44,7 @@
 #include <errno.h>
 #include <stdio.h>
 #include <string.h>
+#include <stdint.h>
 #include <sys/stat.h>
 
 #define BR_CHECK(name, expr) do {                          \
@@ -354,30 +355,31 @@ int test_boot_reindex_terminates(void)
     }
 
     /* ──────────────────────────────────────────────────────────────────
-     * (G) THE LIVE CRASH-LOOP. A soak node crash-looped 39 times because the
-     * two halves of this module disagreed about the SAME request:
+     * (G) THE LIVE CRASH-LOOP, both halves.
      *
      *   boot N   : post-restore integrity FAILS with active_chain MISMATCHES
-     *              (first at h=2004318) under a tip at h=3172671, so
-     *              boot_crashonly_handle_unrecoverable arms a request and the
-     *              process exits "attempt 1/3".
-     *   boot N+1 : boot_crashonly_clear_reindex_request_if_covered DISCARDS
-     *              that request because derived coins-best h=3172671 covers
-     *              the anchor — a judgement about the transparent UTXO set,
-     *              which cannot witness a broken block-index link 1.1M blocks
-     *              lower. The reindex never runs, the integrity check fails
-     *              identically, and the attempt counter is re-armed at 1.
+     *              (first at h=2004318) under a tip at h=3172671.
+     *   boot N+1 : the same thing, "attempt 1/3" again — forever.
      *
-     * The budget was bounded and still never terminated, because the thing
-     * being bounded was reset every lap. The assertions:
-     *   - an INDEX_INTEGRITY request survives coins-best coverage;
-     *   - the attempt counter CLIMBS across simulated restarts (each "boot"
-     *     re-reads the sentinel from disk — the only state that crosses a
-     *     restart) and reaches the cap;
-     *   - the third failure ends in the TYPED blocker, not the untyped
-     *     "no boot step recorded a typed reason" FATAL;
-     *   - a request armed with the OLD coins-shaped reason is still cleared by
-     *     coverage exactly as before (the fix narrows nothing else).
+     * Half one is the VERB. A mismatch is a broken active_chain height/pprev
+     * LINK. -reindex-chainstate re-derives the transparent UTXO set from
+     * blocks/ and never rebuilds the block index, so it cannot repair a link:
+     * arming it schedules a restart for a rebuild that provably cannot change
+     * the measurement. The gate must ask for the in-place band repair and keep
+     * serving instead.
+     *
+     * Half two is the BUDGET. The attempt count used to live only in the
+     * request file, which sibling paths delete on unrelated facts — the
+     * coins-best stale-clear (closed by 7d04b3662), the sparse-body coverage
+     * refusal, reindex_chainstate's replay-unexecutable probe, the escalator's
+     * stale-request withdrawal. Every deletion reset the budget. The count is
+     * now taken against the FINDING, in a ledger no repair-request path
+     * clears, so the cap is reachable however the request file is treated.
+     *
+     * The coins-coverage narrowing itself is unchanged and still asserted
+     * here: an INDEX_INTEGRITY request survives coins-best coverage, because
+     * the transparent UTXO set cannot witness a broken block-index link 1.1M
+     * blocks lower.
      * ────────────────────────────────────────────────────────────────── */
     {
         char dir[256];
@@ -395,33 +397,35 @@ int test_boot_reindex_terminates(void)
 
         boot_error_reset_for_testing();
 
-        /* ── simulated boot 1 ── */
+        /* ── simulated boot 1 ── the link-damage finding must NOT restart the
+         * node and must NOT arm the chainstate reindex. */
         bool exit1 = boot_crashonly_handle_unrecoverable(
             dir, TIP, /*zero_nbits=*/0, MISMATCHES, FIRST_MISMATCH,
             /*reindex_executable=*/true);
-        BR_CHECK("integrity: boot 1 arms the request and exits for reindex",
-                 exit1 && boot_auto_reindex_pending(dir));
+        BR_CHECK("integrity: boot 1 keeps serving (no restart-for-reindex)",
+                 !exit1);
+        BR_CHECK("integrity: boot 1 arms no -reindex-chainstate request",
+                 !boot_auto_reindex_pending(dir));
 
-        int32_t anchor = 0;
-        int count = 0;
-        BR_CHECK("integrity: boot 1 records attempt 1",
-                 boot_auto_reindex_status(dir, &anchor, &count) && count == 1);
-        BR_CHECK("integrity: the request records the INDEX_INTEGRITY reason",
-                 boot_auto_reindex_reason_of(dir) ==
-                     BOOT_AUTO_REINDEX_REASON_INDEX_INTEGRITY);
-
-        /* The exit is deliberate, so it must carry a typed code rather than
-         * reaching the operator as "no boot step recorded a typed reason". */
+        /* The decision is deliberate, so it must carry a typed code with the
+         * measurement rather than reaching the operator as a bare line. */
         {
             char render[BOOT_ERROR_RENDER_MAX];
             bool got = boot_error_last_render(render, sizeof(render)) > 0;
-            BR_CHECK("integrity: the restart-for-reindex exit is TYPED",
-                     got && strstr(render, "BOOT_REINDEX_RESTART_REQUESTED"));
+            BR_CHECK("integrity: the in-place repair decision is TYPED",
+                     got &&
+                     strstr(render, "BOOT_INDEX_LINK_REPAIR_REQUESTED") &&
+                     strstr(render, "mismatches=630") &&
+                     strstr(render, "first_mismatch_h=2004318"));
         }
 
-        /* ── simulated boot 2: the clearing rule runs first ──
-         * THE BUG: this call used to return true and delete the request. */
-        BR_CHECK("integrity: coins-best coverage does NOT clear the request",
+        /* A request armed by an OLDER binary for this same wrong verb is
+         * retired rather than consumed: the next boot must not wipe the coins
+         * set for a rebuild that cannot repair a link. */
+        (void)boot_auto_reindex_request(
+            dir, TIP, BOOT_AUTO_REINDEX_REASON_INDEX_INTEGRITY);
+        BR_CHECK("integrity: an INDEX_INTEGRITY request survives coins-best "
+                 "coverage (7d04b3662, unchanged)",
                  !boot_crashonly_clear_reindex_request_if_covered(
                      dir, COINS_BEST, /*coins_best_hash_verified=*/true) &&
                  boot_auto_reindex_pending(dir));
@@ -429,33 +433,38 @@ int test_boot_reindex_terminates(void)
                  !boot_crashonly_clear_reindex_request_if_covered(
                      dir, COINS_BEST + 5000, true) &&
                  boot_auto_reindex_pending(dir));
-
-        /* The reindex ran and did not converge; the same verdict returns. The
-         * count must CLIMB — it is read back from disk, which is the only
-         * state that survives a restart. */
-        bool exit2 = boot_crashonly_handle_unrecoverable(
+        boot_error_reset_for_testing();
+        (void)boot_crashonly_handle_unrecoverable(
             dir, TIP, 0, MISMATCHES, FIRST_MISMATCH, true);
-        BR_CHECK("integrity: boot 2 advances the persisted attempt to 2",
-                 exit2 && boot_auto_reindex_status(dir, &anchor, &count) &&
-                 count == 2);
+        BR_CHECK("integrity: the stale wrong-verb request is retired, not "
+                 "left for the next boot to consume",
+                 !boot_auto_reindex_pending(dir));
 
-        /* ── simulated boot 3 ── */
-        BR_CHECK("integrity: coverage still does not clear at attempt 2",
-                 !boot_crashonly_clear_reindex_request_if_covered(
-                     dir, COINS_BEST, true));
+        /* ── the budget climbs on the FINDING, not on the request file ──
+         * Each lap wipes the request file the way a sibling clear path does;
+         * the ledger must still reach the cap. */
+        uint64_t sig = 0;
+        int attempts = 0;
+        BR_CHECK("integrity: the durable ledger counts the finding",
+                 boot_repair_episode_status(dir, &sig, &attempts) &&
+                 attempts == 2 &&
+                 sig == boot_repair_episode_signature(TIP, 0, MISMATCHES,
+                                                      FIRST_MISMATCH));
+
+        boot_error_reset_for_testing();
         bool exit3 = boot_crashonly_handle_unrecoverable(
             dir, TIP, 0, MISMATCHES, FIRST_MISMATCH, true);
-        BR_CHECK("integrity: boot 3 advances the persisted attempt to 3 (cap)",
-                 exit3 && boot_auto_reindex_status(dir, &anchor, &count) &&
-                 count == BOOT_AUTO_REINDEX_MAX);
+        BR_CHECK("integrity: boot 3 is still in budget and still serving",
+                 !exit3 && boot_repair_episode_status(dir, &sig, &attempts) &&
+                 attempts == BOOT_REPAIR_EPISODE_MAX);
 
         /* ── simulated boot 4: the budget is spent ──
-         * The ladder must STOP here, with a typed blocker naming the datadir
-         * action — and must NOT exit into another restart. */
+         * The ladder must STOP here with a typed blocker naming the datadir
+         * action, and must never exit into another restart. */
         boot_error_reset_for_testing();
         bool exit4 = boot_crashonly_handle_unrecoverable(
             dir, TIP, 0, MISMATCHES, FIRST_MISMATCH, true);
-        BR_CHECK("integrity: the 3rd failure stops the ladder, stays up",
+        BR_CHECK("integrity: the 4th identical finding stops the ladder",
                  !exit4);
         BR_CHECK("integrity: exhaustion persists the terminal marker",
                  boot_auto_reindex_is_terminal(dir) &&
@@ -467,8 +476,9 @@ int test_boot_reindex_terminates(void)
                      got && strstr(render, "BOOT_REINDEX_BUDGET_EXHAUSTED"));
             BR_CHECK("integrity: the typed blocker names the datadir action",
                      got && strstr(render, dir) && strstr(render, "next[1]"));
-            BR_CHECK("integrity: the typed blocker carries the reason class",
-                     got && strstr(render, "reason=index_integrity"));
+            BR_CHECK("integrity: the typed blocker carries the measurement",
+                     got && strstr(render, "mismatches=630") &&
+                     strstr(render, "first_mismatch_h=2004318"));
         }
         BR_CHECK("integrity: a typed code is latched (not the untyped FATAL)",
                  boot_error_reported() &&
@@ -559,6 +569,165 @@ int test_boot_reindex_terminates(void)
                      BOOT_AUTO_REINDEX_REASON_INDEX_INTEGRITY);
 
         test_cleanup_tmpdir(dir);
+    }
+
+
+    /* ──────────────────────────────────────────────────────────────────
+     * (J) THE HOLES-ONLY RESTART LOOP. Measured on a soak node: every boot
+     * reported the IDENTICAL post-restore finding
+     *
+     *   tip_window_holes=10000 total_holes=31768 mismatches=630
+     *   (first at h=2004318) zero_nbits=0
+     *
+     * raised BOOT_REINDEX_RESTART_REQUESTED, and said "attempt 1/3" again.
+     * Two separate defects produce that:
+     *
+     *   1. THE VERB IS WRONG. zero_nbits==0 with mismatches>0 is broken
+     *      active_chain height/pprev LINKS. -reindex-chainstate re-derives
+     *      the transparent UTXO set from blocks/; it does not rebuild the
+     *      block index, so it cannot repair a link. Every attempt therefore
+     *      reproduces the identical numbers. (The exhausted report's own
+     *      next[] already tells the operator exactly this — while the code
+     *      arms the chainstate reindex anyway.)
+     *
+     *   2. THE BUDGET IS THE REQUEST FILE. The attempt count lives ONLY in
+     *      <datadir>/auto_reindex_request, and sibling paths DELETE that
+     *      file between boots on facts unrelated to this finding: the
+     *      sparse-body coverage refusal (boot_crashonly_reindex_coverage_ok),
+     *      reindex_chainstate's own unexecutable probe, and the escalator's
+     *      withdraw_stale_reindex_request. Each deletion resets the budget to
+     *      zero, the cap is never reached, and the node restarts forever.
+     *      (7d04b3662 closed ONE such path — the coins-best stale-clear — not
+     *      the class.)
+     *
+     * The invariant under test: an identical finding repeated across restarts
+     * must ADVANCE toward the cap whatever happens to the request file, and at
+     * the cap boot must STOP restarting and leave a typed blocker carrying the
+     * numbers. A fourth restart on the same finding is the bug.
+     * ────────────────────────────────────────────────────────────────── */
+    {
+        char dir[256];
+        test_fmt_tmpdir(dir, sizeof(dir), "boot_reindex_term", "holesonly");
+        mkdir_p_br(dir);
+
+        const int SOAK_TIP = 3172671;
+        const int SOAK_MISMATCHES = 630;
+        const int SOAK_FIRST_MISMATCH = 2004318;
+
+        /* Six "boots" on the identical finding, each followed by a sibling
+         * clear path wiping the request file. */
+        bool restarted[7] = { false };
+        for (int b = 1; b <= 6; b++) {
+            boot_error_reset_for_testing();
+            restarted[b] = boot_crashonly_handle_unrecoverable(
+                dir, SOAK_TIP, /*zero_nbits=*/0, SOAK_MISMATCHES,
+                SOAK_FIRST_MISMATCH, /*reindex_executable=*/true);
+            /* A sibling clear path fires between boots. */
+            boot_auto_reindex_clear(dir);
+        }
+
+        BR_CHECK("holes-only: the restart loop TERMINATES within the cap "
+                 "(no 4th restart on the identical finding)",
+                 !restarted[4] && !restarted[5] && !restarted[6]);
+
+        /* The attempt count is durable against the FINDING, so wiping the
+         * request file between boots cannot reset it. */
+        uint64_t sig = 0;
+        int attempts = 0;
+        BR_CHECK("holes-only: the attempt count ADVANCES across restarts even "
+                 "though every clear path wiped the request file",
+                 boot_repair_episode_status(dir, &sig, &attempts) &&
+                 attempts > BOOT_REPAIR_EPISODE_MAX);
+        BR_CHECK("holes-only: the signature is the finding, not the request",
+                 sig == boot_repair_episode_signature(
+                            SOAK_TIP, 0, SOAK_MISMATCHES, SOAK_FIRST_MISMATCH));
+
+        /* The stop must be typed and carry the measurement, never a silent
+         * park nor the generic "no boot step recorded a typed reason". */
+        char render[BOOT_ERROR_RENDER_MAX];
+        boot_error_reset_for_testing();
+        (void)boot_crashonly_handle_unrecoverable(
+            dir, SOAK_TIP, 0, SOAK_MISMATCHES, SOAK_FIRST_MISMATCH, true);
+        size_t n = boot_error_last_render(render, sizeof(render));
+        BR_CHECK("holes-only: the terminal stop is a typed blocker carrying "
+                 "the numbers",
+                 n > 0 && strstr(render, "mismatches=630") != NULL &&
+                 strstr(render, "first_mismatch_h=2004318") != NULL &&
+                 strstr(render, "BOOT_REINDEX_RESTART_REQUESTED") == NULL);
+
+        /* A DIFFERENT finding is a new episode and gets its own allowance —
+         * the cap must not brick a datadir whose damage actually moved. */
+        boot_error_reset_for_testing();
+        (void)boot_crashonly_handle_unrecoverable(
+            dir, SOAK_TIP, 0, /*mismatches=*/1, /*first_mismatch_h=*/9, true);
+        BR_CHECK("holes-only: a CHANGED finding starts a fresh episode at 1",
+                 boot_repair_episode_status(dir, &sig, &attempts) &&
+                 attempts == 1);
+
+        /* And a boot that reaches clean integrity retires the episode. */
+        boot_crashonly_clear(dir);
+        BR_CHECK("holes-only: clean integrity retires the episode ledger",
+                 !boot_repair_episode_status(dir, &sig, &attempts));
+
+        boot_error_reset_for_testing();
+        test_cleanup_tmpdir(dir);
+    }
+
+    /* ──────────────────────────────────────────────────────────────────
+     * (K) THE VERB. A holes-only / mismatch-only finding must not arm a
+     * from-genesis -reindex-chainstate: that verb rebuilds derived coins, not
+     * block-index links, so arming it schedules a rebuild that provably cannot
+     * repair the measured damage. The finalize gate must ask for the in-place
+     * band repair instead and keep serving. The tip-above-extent shape (holes,
+     * NO link mismatch) is what the chainstate reindex WAS written for and
+     * must still arm it.
+     * ────────────────────────────────────────────────────────────────── */
+    {
+        char dir[256];
+        test_fmt_tmpdir(dir, sizeof(dir), "boot_reindex_term", "verb");
+        mkdir_p_br(dir);
+
+        boot_error_reset_for_testing();
+        bool restart = boot_crashonly_handle_unrecoverable(
+            dir, 3172671, /*zero_nbits=*/0, /*mismatches=*/630,
+            /*first_mismatch_h=*/2004318, /*reindex_executable=*/true);
+        BR_CHECK("link damage: boot does NOT exit for a chainstate reindex",
+                 !restart);
+        BR_CHECK("link damage: no -reindex-chainstate request is armed",
+                 !boot_auto_reindex_pending(dir));
+
+        char dir2[256];
+        test_fmt_tmpdir(dir2, sizeof(dir2), "boot_reindex_term", "extent");
+        mkdir_p_br(dir2);
+        boot_error_reset_for_testing();
+        bool restart2 = boot_crashonly_handle_unrecoverable(
+            dir2, 1234567, /*zero_nbits=*/0, /*mismatches=*/0,
+            /*first_mismatch_h=*/-1, /*reindex_executable=*/true);
+        BR_CHECK("tip-above-extent: still exits to run the chainstate reindex",
+                 restart2);
+        BR_CHECK("tip-above-extent: the request is armed",
+                 boot_auto_reindex_pending(dir2));
+
+        /* And THAT ladder terminates too, even under the same request-file
+         * wiping: three restarts, then the typed exhausted blocker, never a
+         * fourth. This is the half of the loop the erasable count broke. */
+        bool restarted4 = true;
+        for (int b = 2; b <= 4; b++) {
+            boot_auto_reindex_clear(dir2);   /* a sibling clear path fires */
+            boot_error_reset_for_testing();
+            restarted4 = boot_crashonly_handle_unrecoverable(
+                dir2, 1234567, 0, 0, -1, true);
+        }
+        BR_CHECK("tip-above-extent: the 4th identical boot does NOT restart",
+                 !restarted4);
+        char render2[BOOT_ERROR_RENDER_MAX];
+        (void)boot_error_last_render(render2, sizeof(render2));
+        BR_CHECK("tip-above-extent: the cap leaves the typed exhausted blocker",
+                 strstr(render2, "BOOT_REINDEX_BUDGET_EXHAUSTED") != NULL);
+
+        boot_error_reset_for_testing();
+        test_cleanup_tmpdir(dir);
+        test_cleanup_tmpdir(dir2);
     }
 
     return failures;

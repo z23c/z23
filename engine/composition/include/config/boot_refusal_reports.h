@@ -73,8 +73,22 @@ void boot_report_reindex_restart_requested(const char *datadir, int tip_h,
  * supervisor crash-loop the budget exists to end), so this names the datadir
  * action an operator must take to get further. */
 void boot_report_reindex_budget_exhausted(const char *datadir, int tip_h,
-                                          int attempts,
+                                          int attempts, int mismatches,
+                                          int first_mismatch_h,
                                           const char *reason_name);
+
+/* BOOT_INDEX_LINK_REPAIR_REQUESTED — the post-restore integrity check measured
+ * block-index LINK damage (active_chain height/pprev mismatches) with no
+ * structural nBits corruption. -reindex-chainstate is not the verb for that: it
+ * re-derives the transparent UTXO set and never rebuilds the block index, so
+ * arming it schedules a rebuild that provably cannot repair the measurement —
+ * which is how a soak node came to restart forever on an unchanging finding.
+ * The band is repaired in place instead, by the header-band backfill and the
+ * reducer, while the node serves DEGRADED. WARN, not FATAL: boot continues. */
+void boot_report_index_link_repair_requested(const char *datadir, int tip_h,
+                                             int attempt, int max_attempts,
+                                             int mismatches,
+                                             int first_mismatch_h);
 
 /* BOOT_POST_RESTORE_INDEX_CORRUPT — structural nBits corruption in the block
  * index: not the reindex-recoverable shape, so no request is armed and boot
