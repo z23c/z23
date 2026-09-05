@@ -1,0 +1,120 @@
+/* One-paste fleet enrolment: how an owner adds a computer to the fleet.
+ *
+ * WHAT THIS BRANCH IS. Four leaves and one ceremony. `fleet invite` on the
+ * manager prints a single signed line. The owner pastes it into the AI agent
+ * on the new computer, which clones, builds and runs `fleet join`. That
+ * prints a second single line — the box's signed enrolment receipt — which
+ * the owner pastes back on the manager as `fleet admit`. `fleet machines`
+ * then lists what the fleet holds. Two pastes, three commands, no ports to
+ * open and no node required on either end.
+ *
+ * WHAT THIS BRANCH IS NOT. It is not mesh pairing and it does not grant
+ * terminal execution. A machine row is an INVENTORY record: this owner
+ * admitted this box under this name. Capability grants stay where they were
+ * — `ops mesh pair commit` and the pairing store — and `fleet join` names
+ * that as the next step rather than doing it. The ssh line `fleet admit`
+ * can add is a BRIDGE: one restricted loopback port forward, never a shell.
+ *
+ * TRUST. The token carries the operator's public key and is signed by it,
+ * so the box trusts the key the owner carried to it (trust on paste) and the
+ * manager honours only invites its own key minted. Nothing private is ever
+ * in either pasted string.
+ *
+ * Consumer defines ZCL_COMMAND_*; see engine/composition/src/command_catalog.c.
+ * The `fleet` root branch is declared in
+ * engine/composition/commands/fleet_board.def, which this file follows. */
+
+ZCL_COMMAND_READY_COMMAND(
+    "fleet.invite", "fleet", "",
+    "Mint one signed invite line that adds a computer to this fleet",
+    "One line of about three hundred characters: `z23 fleet join <token>`. "
+    "The token names the box, an expiry, a one-time nonce, an optional relay "
+    "endpoint and this box's operator public key, all signed by this box's "
+    "fleet key (created on first use). Nothing private is in it — a leaked "
+    "token can enrol one box under that name, once, before it expires, and "
+    "the machine row it produces still has to be admitted here. Refuses by "
+    "name: invite_name_invalid, invite_ttl_invalid, invite_relay_invalid, "
+    "box_key_unwritable.", 0,
+    "fleet,invite,enrol,join,token,machine,paste",
+    "zcl.fleet_invite_input.v1", "zcl.fleet.invite.v1",
+    "name,ttl_hours,relay", "name",
+    "z23 fleet invite --name=studio --ttl-hours=24",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_NONE,
+    zcl_native_fleet_enrol_dispatch)
+
+ZCL_COMMAND_READY_COMMAND(
+    "fleet.join", "fleet", "",
+    "Join this computer to a fleet from one pasted invite",
+    "Verifies the invite against the operator public key the invite itself "
+    "carries, records that key as this box's fleet operator, creates this "
+    "box's own Ed25519 key under the owner-private state root, collects what "
+    "this box can honestly say about itself, and signs one enrolment "
+    "receipt. The receipt is printed as `z23 fleet admit <receipt>` for the "
+    "owner to paste back on the manager; it is NOT sent anywhere, so no port "
+    "and no reachable relay is needed. Every fact in it is self-reported: "
+    "this box signed it, nobody measured it. Refuses by name: "
+    "invite_malformed, invite_signature_invalid, invite_expired, "
+    "box_key_unwritable.", 0,
+    "fleet,join,enrol,invite,receipt,machine,onboarding",
+    "zcl.fleet_join_input.v1", "zcl.fleet.join.v1",
+    "token", "token",
+    "z23 fleet join <token>",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_NONE,
+    zcl_native_fleet_enrol_dispatch)
+
+ZCL_COMMAND_READY_COMMAND(
+    "fleet.admit", "fleet", "",
+    "Admit one joined computer to this fleet's machine roster",
+    "Re-checks that the invite inside the receipt was minted by THIS box's "
+    "key, that its nonce has never been spent, that the name is free, and "
+    "that the box signed its own facts; then appends one operator-sealed row "
+    "to the machine roster and assigns a relay port from a closed range. "
+    "When the receipt carried a dedicated ~/.ssh/z23_fleet.pub, it also adds "
+    "ONE `restrict,port-forwarding,permitlisten=` line to the operator's "
+    "authorized_keys — a loopback port forward, never a shell, never agent "
+    "or X11 forwarding — idempotent per box name; pass --bridge=no to skip "
+    "it. Re-admitting the same box key keeps its existing port and adds "
+    "nothing. Refuses by name: receipt_malformed, box_signature_invalid, "
+    "invite_not_ours, invite_expired, invite_replayed, invite_name_taken, "
+    "roster_full, roster_unwritable.", 0,
+    "fleet,admit,enrol,roster,machine,bridge,ssh",
+    "zcl.fleet_admit_input.v1", "zcl.fleet.admit.v1",
+    "receipt,bridge", "receipt",
+    "z23 fleet admit <receipt>",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_NONE,
+    zcl_native_fleet_enrol_dispatch)
+
+ZCL_COMMAND_READY_READ(
+    "fleet.machines", "fleet", "",
+    "List the computers this owner has admitted to the fleet",
+    "Every roster row this box holds whose operator seal verifies, oldest "
+    "first, each split into `verified` (what the operator signature actually "
+    "attests: name, box public key, relay port, enrolment time) and "
+    "`self_reported` (what the box said about its own hardware, OS and "
+    "toolchain — signed by that box, measured by nobody). The two are never "
+    "merged. Rows this operator key did not seal are counted in "
+    "`unverifiable` and never rendered. Reads no node and no datadir.",
+    ZCL_COMMAND_LIST_BUDGET,
+    "fleet,machines,roster,inventory,verified,self-reported",
+    "zcl.command.empty_input.v1", "zcl.fleet.machines.v1", "", "",
+    "z23 fleet machines",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_LATENCY_FAST,
+    ZCL_COMMAND_COST_LOW, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_fleet_enrol_dispatch)

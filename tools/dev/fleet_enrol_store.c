@@ -21,11 +21,13 @@
 
 #include "base/hex.h"
 #include "base/log_macros.h"
+#include "base/safe_alloc.h"
 #include "json/json.h"
 #include "platform/positioned_file.h"
 #include "platform/private_file.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #define FLEET_DOMAIN "fleet-enrol"

@@ -2808,6 +2808,17 @@ void zcl_native_handle_dev_mind_serve(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
 
+/* ── one-paste fleet enrolment
+ * (tools/command/native_fleet_enrol_command.c). `fleet invite`, `fleet
+ * join`, `fleet admit` and `fleet machines` share one dispatcher because
+ * they are four steps of one ceremony over one record set. Unlike the board
+ * next door, these leaves ask no node: the computer being enrolled has not
+ * got one yet. Bound by engine/composition/commands/fleet_enrol.def; the
+ * record formats live in tools/dev/fleet_enrol.h. */
+void zcl_native_fleet_enrol_dispatch(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
+
 #ifdef __cplusplus
 }
 #endif

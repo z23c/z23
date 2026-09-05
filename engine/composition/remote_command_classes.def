@@ -1135,3 +1135,19 @@ REMOTE_COMMAND_CLASS("fleet.vitals.sample", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("fleet.experiment.predict", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("fleet.experiment.result", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("fleet.experiment.stats", REMOTE_CLASS_NEVER, "")
+/* ── one-paste fleet enrolment ──────────────────────────────────────────
+ * All four are NEVER, and `fleet.machines` is the reason the rule exists.
+ * The fleet map — which computers this owner has, what they run, how much
+ * of them there is, and which loopback port reaches each one — is the
+ * first thing an attacker who reaches one box wants, and it is the one
+ * read that turns a single compromise into a plan. Its *_READ macro shape
+ * does not make it a posture question about this machine; it is an
+ * inventory of every OTHER machine. The three mutating leaves are the
+ * ceremony itself: minting an invite, accepting an operator's key, and
+ * writing an authorized_keys line are owner acts carried by hand, and a
+ * remote caller asking for any of them is precisely the attack.
+ */
+REMOTE_COMMAND_CLASS("fleet.invite", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("fleet.join", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("fleet.admit", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("fleet.machines", REMOTE_CLASS_NEVER, "")
