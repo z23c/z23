@@ -20,6 +20,7 @@
 #include "base/hex.h"
 #include "base/safe_alloc.h"
 #include "json/json.h"
+#include "mind.h"
 #include "models/mesh_machine_observation.h"
 #include "models/mesh_pairing.h"
 #include "platform/time_compat.h"
@@ -66,6 +67,52 @@ static const struct mesh_machine_row *live_row_for(
     return NULL;
 }
 
+/* Project the peer's mind row out of the receipt this node already stored.
+ *
+ * Nothing here re-verifies the signature: the row is only ever read from a
+ * receipt db_mesh_machine_observation_save already validated end to end (its
+ * own contract: the exact wire must decode as a valid SIGNED receipt and hash
+ * to receipt_root). Decoding again here is how the opaque capsule bytes are
+ * reached, not a second authority. A receipt that carries no mind member adds
+ * no fields at all — a peer that said nothing must not read as a peer with an
+ * empty index. */
+static void mesh_machine_mind_json(
+    struct json_value *item,
+    const struct db_mesh_machine_observation *observation)
+{
+    struct mesh_status_receipt_v1 receipt;
+    if (mesh_status_receipt_v1_decode(&receipt, observation->receipt_wire,
+                                      observation->receipt_len) !=
+            MESH_STATUS_PROTO_OK ||
+        receipt.capsule_len == 0)
+        return;
+    struct json_value capsule;
+    json_init(&capsule);
+    struct zcl_mind_peer peer;
+    if (json_read(&capsule, (const char *)receipt.capsule,
+                  receipt.capsule_len) &&
+        zcl_mind_capsule_parse(&capsule, &peer)) {
+        json_push_kv_str(item, "mind_index_root", peer.index_root);
+        json_push_kv_int(item, "mind_index_age_s", peer.index_age_s);
+        json_push_kv_int(item, "mind_checkouts", peer.checkouts);
+        struct json_value groups;
+        json_init(&groups);
+        json_set_array(&groups);
+        for (size_t i = 0; i < peer.group_count; i++) {
+            struct json_value row;
+            json_init(&row);
+            json_set_object(&row);
+            json_push_kv_str(&row, "name", peer.groups[i].name);
+            json_push_kv_int(&row, "files", peer.groups[i].files);
+            (void)json_push_back(&groups, &row);
+            json_free(&row);
+        }
+        json_push_kv(item, "mind_groups", &groups);
+        json_free(&groups);
+    }
+    json_free(&capsule);
+}
+
 static void mesh_machine_json(struct json_value *array,
                               const struct db_mesh_machine_view *view,
                               int64_t now,
@@ -103,6 +150,7 @@ static void mesh_machine_json(struct json_value *array,
                          view->observation.received_unix);
         zcl_hex_encode(view->observation.receipt_root, 32, hex);
         json_push_kv_str(&item, "receipt_root", hex);
+        mesh_machine_mind_json(&item, &view->observation);
     }
     /* Live verdict from this call's probe, when one ran. Distinct from the
      * durable evidence above: a live timeout does not erase a fresh stored

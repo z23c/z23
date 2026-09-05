@@ -20,6 +20,7 @@
 #include "controllers/diagnostics_controller.h"
 #include "crypto/sha3.h"
 #include "json/json.h"
+#include "mind.h"
 #include "models/mesh_machine_observation.h"
 #include "models/mesh_pairing.h"
 #include "models/zid_identity.h"
@@ -565,6 +566,16 @@ static bool mesh_render_capsule(uint8_t out[MESH_STATUS_CAPSULE_MAX],
         json_free(&capsule);
         LOG_ERROR("net.mesh_status", "capsule render refused");
         return false;
+    }
+    /* What this node's mind holds, if it has one. It rides inside this
+     * capsule rather than on a wire of its own so it inherits the receipt's
+     * signature and expiry: a mind row is exactly as trustworthy, and
+     * exactly as fresh, as the receipt that carried it. A node with no
+     * resident adds nothing here — silence, never an empty claim. */
+    struct json_value mind;
+    if (zcl_mind_capsule_render(&mind)) {
+        (void)json_push_kv(&capsule, "mind", &mind);
+        json_free(&mind);
     }
     size_t needed = json_write(&capsule, NULL, 0);
     if (needed == 0) {
