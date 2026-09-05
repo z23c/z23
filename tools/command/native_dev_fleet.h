@@ -19,6 +19,13 @@ bool zcl_dev_fleet_collect(const char *checkout_root,
  * tests. These gates cannot be made green by an ordinary lane worker. */
 bool zcl_dev_fleet_gate_owner_only(const char *gate);
 
+/* The orchestrator-facing sibling: one bounded opening packet for the whole
+ * fleet. Registered as dev.fleet.start; dev.fleet.truth keeps the per-lane
+ * Git/receipt inventory above. */
+void zcl_native_handle_dev_fleet_start(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
+
 void zcl_native_handle_dev_fleet(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);

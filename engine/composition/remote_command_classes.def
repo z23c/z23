@@ -526,7 +526,7 @@ REMOTE_COMMAND_CLASS("vault.session.revoke", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("vault.swap.redeem", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("vault.swap.refund", REMOTE_CLASS_NEVER, "")
 
-/* DEV — 44 never_remote leaves (dev.hotswap.probe and dev.hotswap.apply are
+/* DEV — 68 never_remote leaves (dev.hotswap.probe and dev.hotswap.apply are
  * owner_capability above; they are the only two).
  *
  * The dev branch drives a checkout. It compiles (ZCL_COMMAND_CAP_COMPILER),
@@ -595,7 +595,8 @@ REMOTE_COMMAND_CLASS("dev.generation.rollback", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("dev.generation.compact", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("dev.diagnose.latest", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("dev.diagnose.show", REMOTE_CLASS_NEVER, "")
-REMOTE_COMMAND_CLASS("dev.fleet", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("dev.fleet.truth", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("dev.fleet.start", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("dev.agent.ready", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("dev.agent.test", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("dev.agent.mutate", REMOTE_CLASS_NEVER, "")

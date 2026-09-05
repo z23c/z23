@@ -73,6 +73,19 @@ bool zcl_command_registry_devagent_input_ok(const char *key,
                    strlen(text) <= zcl_command_registry_input_str_max(key);
         return true;
     }
+    if (strcmp(key, "budget_bytes") == 0) {
+        /* dev.fleet.start's packet size ceiling. `--budget_bytes=2048` types
+         * as an integer, so the default string branch would make the leaf
+         * uninvokable from a shell while raw JSON worked. The transport
+         * admits only the integer SHAPE and deliberately a wider range than
+         * the leaf accepts: the handler owns the 1024..65536 contract and
+         * refuses anything else by name (budget_out_of_range), so an
+         * operator who asks for 64 reads which rule fired instead of a
+         * generic type error. */
+        *type_ok = value->type == JSON_INT && json_get_int(value) >= 0 &&
+                   json_get_int(value) <= 1000000000;
+        return true;
+    }
     return false;
 }
 
@@ -83,8 +96,14 @@ bool zcl_command_registry_devagent_input_ok(const char *key,
  * own line count from growing past the ceiling — no behavior change. */
 bool command_registry_devagent_input_extra_bool_key(const char *key)
 {
+    /* `include_units` is dev.fleet.start's "list the running executor units"
+     * switch. It is deliberately NOT called `units`: the ZSLP branch of the
+     * chain in command_registry.c already owns `units` as a positive token
+     * amount, so a bool named `units` would be refused before any handler
+     * ran — and renaming the ZSLP key would change a shipped money surface. */
     return strcmp(key, "json") == 0 || strcmp(key, "force") == 0 ||
            strcmp(key, "include_evidence_wires") == 0 ||
+           strcmp(key, "include_units") == 0 ||
            strcmp(key, "list") == 0;
 }
 

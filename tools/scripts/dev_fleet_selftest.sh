@@ -113,7 +113,7 @@ write_receipt "$fixture/alpha" 'FAIL check-format'
 write_receipt "$fixture/beta" 'FAIL check-core-seal' 'FAIL check-git-hooks-installed'
 
 result="$fixture/fleet.json"
-(cd "$fixture/main" && "$fleet_bin" dev fleet > "$result")
+(cd "$fixture/main" && "$fleet_bin" dev fleet truth > "$result")
 
 main_head="$(git -C "$fixture/main" rev-parse HEAD)"
 alpha_head="$(git -C "$fixture/alpha" rev-parse HEAD)"
@@ -142,11 +142,11 @@ fi
 # proof. Changing alpha after its receipt must demote it to stale; changing
 # beta's sealed log must make its lint evidence invalid, never green.
 printf 'newer tracked dirt\n' >> "$fixture/alpha/tools/alpha.c"
-(cd "$fixture/main" && "$fleet_bin" dev fleet > "$fixture/fleet-stale.json")
+(cd "$fixture/main" && "$fleet_bin" dev fleet truth > "$fixture/fleet-stale.json")
 grep -Eq '"branch":"agent/alpha"[^}]*"lint_status":"stale"' \
     "$fixture/fleet-stale.json" || die "alpha stale receipt was trusted"
 printf 'tamper\n' >> "$fixture/beta/.cache/agent-receipts/000000-lint-fixture.log"
-(cd "$fixture/main" && "$fleet_bin" dev fleet > "$fixture/fleet-invalid.json")
+(cd "$fixture/main" && "$fleet_bin" dev fleet truth > "$fixture/fleet-invalid.json")
 grep -Eq '"branch":"agent/beta"[^}]*"lint_status":"invalid"' \
     "$fixture/fleet-invalid.json" || die "tampered beta log was trusted"
 
