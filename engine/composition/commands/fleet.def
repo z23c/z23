@@ -16,7 +16,7 @@ ZCL_COMMAND_BRANCH("fleet", "", "The owner's private fleet ledger",
 ZCL_COMMAND_BRANCH("fleet.ledger", "fleet", "Write and inspect the ledger",
                    ZCL_COMMAND_LAYER_OPS)
 
-ZCL_COMMAND_READY_COMMAND( /* the one leaf here that writes */
+ZCL_COMMAND_READY_COMMAND( /* a writer */
     "fleet.ledger.add", "fleet.ledger", "",
     "Append one signed row to this box's own chain",
     "Appends one row to this machine's chain and returns its sequence "
@@ -87,3 +87,25 @@ ZCL_COMMAND_READY_READ(
     ZCL_COMMAND_COST_LOW, ZCL_COMMAND_LANE_LOCAL,
     ZCL_COMMAND_CAP_DEV_STATE_READ, ZCL_COMMAND_TRAIT_IDEMPOTENT,
     ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_fleet_usage)
+
+ZCL_COMMAND_BRANCH("fleet.vitals", "fleet", "Sample this box into the ledger",
+                   ZCL_COMMAND_LAYER_OPS)
+
+ZCL_COMMAND_READY_COMMAND(
+    "fleet.vitals.sample", "fleet.vitals", "",
+    "Measure this box and append one signed vitals row per catalog metric",
+    "Reads host facts through the platform seam once and appends one signed "
+    "vitals row per catalog metric. An unknown id is refused by name. A fact "
+    "this platform cannot measure is stored ABSENT, never as zero. Optional "
+    "id samples one metric. It contacts no peer.", 0,
+    "fleet,vitals,sample,load,memory,disk",
+    "zcl.fleet_vitals_sample.input.v1", "zcl.fleet_vitals_sample.v1",
+    "id", "",
+    "z23 fleet vitals sample",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_DEV_MUTATION, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW, ZCL_COMMAND_CONFIRM_NONE,
+    ZCL_COMMAND_LANE_LOCAL, ZCL_COMMAND_CAP_DEV_STATE_READ,
+    ZCL_COMMAND_TRAIT_NONE,
+    zcl_native_handle_fleet_vitals_sample)

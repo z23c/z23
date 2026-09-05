@@ -129,6 +129,9 @@ bool os_proc_mem_read(struct os_proc_mem *out);
  * -1 on any read/parse failure. */
 int64_t os_proc_uptime_seconds(void);
 
+/* 1-minute load average in hundredths, or -1 if unreadable (never 0). */
+int64_t os_proc_load1_centi(void);
+
 /* Resolve this process's own executable path into `buf` (NUL-terminated,
  * with failure if it does not fit `n`). Linux: readlink /proc/self/exe. Note this is the
  * PATHNAME only — on Linux a `readlink` result whose original dentry was

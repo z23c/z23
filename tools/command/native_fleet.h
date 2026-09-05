@@ -16,5 +16,8 @@ void zcl_native_handle_fleet_ledger_status(
     struct zcl_command_reply *reply);
 void zcl_native_handle_fleet_usage(const struct zcl_command_request *request,
                                    struct zcl_command_reply *reply);
+void zcl_native_handle_fleet_vitals_sample(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
 
 #endif /* ZCL_NATIVE_FLEET_H */

@@ -6,9 +6,12 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-/* Report bytes available to the current user, not total volume free bytes.
- * Returns false for invalid, missing, or inaccessible paths and on arithmetic
- * overflow. */
+/* Available bytes, and volume size when `total_bytes` is non-NULL. Either
+ * out pointer may be NULL. False on invalid path or overflow. */
+bool platform_disk_space(const char *utf8_path, uint64_t *available_bytes,
+                         uint64_t *total_bytes);
+
+/* Available bytes to the current user. False on invalid path or overflow. */
 bool platform_disk_space_available(const char *utf8_path,
                                    uint64_t *available_bytes);
 

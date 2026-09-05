@@ -240,6 +240,7 @@ something happened, not because a timer fired.
 This table is rendered from `engine/composition/fleet_vitals.def`, which is
 the one declaration. `make check-fleet-vitals` fails if they disagree.
 
-No collector runs in this build. The ids exist so that whatever samples them
-writes into one ledger under one vocabulary, rather than into a file per host
-that only that host can read.
+`fleet vitals sample` measures this box once through the platform seam and
+appends one signed `vitals` row per catalog metric `/proc` or `statvfs` can
+answer. An unknown id is refused by name. Unmeasurable facts are stored ABSENT,
+never as zero. A second sample appends a new sequence rather than overwriting.

@@ -1127,7 +1127,7 @@ ZCL_MODULE_CAPABILITY("tools/command/native_devagent_ticketkey.c", CAP_FS_READ|C
 ZCL_MODULE_CAPABILITY("tools/command/native_dev_fleet.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("tools/command/native_dev_fleet_receipts.c", CAP_FS_READ|CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("tools/command/native_dev_fleet_start.c", CAP_FS_READ|CAP_FS_WRITE, "opens the board jsonl files, the forward plan and each worktree admin HEAD/index for reading; the write class comes with the stdio file API it uses, and this leaf never opens one for writing")
-ZCL_MODULE_CAPABILITY("tools/command/native_fleet_command.c", CAP_FS_WRITE, "")
+ZCL_MODULE_CAPABILITY("tools/command/native_fleet_command.c", CAP_FS_WRITE, "appends signed fleet-ledger rows under the datadir; host facts are read through the platform seam, never by opening /proc from this leaf")
 ZCL_MODULE_CAPABILITY("tools/command/native_fleet_roster.c", CAP_FS_WRITE, "opens <datadir>/node.db through the shared read-only seam to read the pairing and observation projections; the write class comes with the sqlite API that seam uses, and this leaf opens nothing for writing")
 ZCL_MODULE_CAPABILITY("tools/command/native_mesh_command.c", CAP_CLOCK, "")
 ZCL_MODULE_CAPABILITY("tools/command/native_metaverse_space_command.c", CAP_CLOCK, "")

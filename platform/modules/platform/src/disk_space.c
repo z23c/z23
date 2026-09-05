@@ -14,14 +14,18 @@
 #include <windows.h>
 #include <wchar.h>
 
-bool platform_disk_space_available(const char *path, uint64_t *available)
+bool platform_disk_space(const char *path, uint64_t *available, uint64_t *total)
 {
     wchar_t wide[32768];
-    if (!available || !platform_windows_wide_path(path, wide)) return false;
-    ULARGE_INTEGER caller_available;
-    if (!GetDiskFreeSpaceExW(wide, &caller_available, NULL, NULL))
+    if ((!available && !total) || !platform_windows_wide_path(path, wide))
         return false;
-    *available = caller_available.QuadPart;
+    ULARGE_INTEGER caller_available, volume;
+    if (!GetDiskFreeSpaceExW(wide, &caller_available, &volume, NULL))
+        return false;
+    if (available)
+        *available = caller_available.QuadPart;
+    if (total)
+        *total = volume.QuadPart;
     return true;
 }
 
@@ -29,17 +33,30 @@ bool platform_disk_space_available(const char *path, uint64_t *available)
 
 #include <sys/statvfs.h>
 
-bool platform_disk_space_available(const char *path, uint64_t *available)
+bool platform_disk_space(const char *path, uint64_t *available, uint64_t *total)
 {
-    if (!path || !path[0] || !available) return false;
+    if (!path || !path[0] || (!available && !total)) return false;
     struct statvfs status;
     if (statvfs(path, &status) != 0) return false;
-    uint64_t blocks = (uint64_t)status.f_bavail;
     uint64_t fragment_size = (uint64_t)status.f_frsize;
-    if (fragment_size != 0 && blocks > UINT64_MAX / fragment_size)
-        return false;
-    *available = blocks * fragment_size;
+    if (available) {
+        uint64_t blocks = (uint64_t)status.f_bavail;
+        if (fragment_size != 0 && blocks > UINT64_MAX / fragment_size)
+            return false;
+        *available = blocks * fragment_size;
+    }
+    if (total) {
+        uint64_t blocks = (uint64_t)status.f_blocks;
+        if (fragment_size != 0 && blocks > UINT64_MAX / fragment_size)
+            return false;
+        *total = blocks * fragment_size;
+    }
     return true;
 }
 
 #endif
+
+bool platform_disk_space_available(const char *path, uint64_t *available)
+{
+    return platform_disk_space(path, available, NULL);
+}

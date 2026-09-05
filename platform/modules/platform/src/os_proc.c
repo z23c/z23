@@ -308,6 +308,26 @@ int64_t os_proc_uptime_seconds(void)
 #endif
 }
 
+int64_t os_proc_load1_centi(void)
+{
+#if defined(__linux__)
+    FILE *f = fopen("/proc/loadavg", "r");
+    char buf[128];
+    unsigned whole = 0, frac = 0;
+    if (!f || !fgets(buf, sizeof buf, f)) {
+        if (f)
+            fclose(f);
+        return -1; // raw-return-ok:platform-cannot-answer
+    }
+    fclose(f);
+    if (sscanf(buf, "%u.%2u", &whole, &frac) < 1 || whole > 100000)
+        return -1; // raw-return-ok:platform-cannot-answer
+    return (int64_t)whole * 100 + (int64_t)frac;
+#else
+    return -1; // raw-return-ok:platform-cannot-answer
+#endif
+}
+
 bool os_proc_exe_path(char *buf, size_t n)
 {
     if (!buf || n == 0)

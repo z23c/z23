@@ -38,10 +38,13 @@
 #include "net/protocol.h"
 #include "platform/private_file.h"
 #include "platform/time_compat.h"
+#include "vcs/zcode_dht_identity.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 /* A pairing window that brackets any clock this test could read: what is
  * graded is the lane's decision, never the hour the box thinks it is. */
@@ -148,6 +151,57 @@ static size_t fl_rows_of(struct fl_box *b, uint8_t *out, size_t cap)
                                     &last) != ZCL_FLEET_OK)
         return 0;
     return len;
+}
+
+static bool fl_provision(const char *datadir, uint8_t box_id[32],
+                         uint8_t signer[32])
+{
+    uint8_t seed[32], online[32], mseed[32], mpub[32], msk[32];
+    uint8_t noise[32], beacon[32], genesis[32];
+    char err[160];
+    if (!vcs_zcode_dht_online_key_load_or_create(datadir, seed, online, err,
+                                                 sizeof err))
+        return false;
+    memset(seed, 0, 32);
+    memset(mseed, 0x22, 32);
+    memset(noise, 0x33, 32);
+    memset(beacon, 0x44, 32);
+    memset(genesis, 0x55, 32);
+    zcl_ed25519_keypair(mpub, msk, mseed);
+    memset(msk, 0, 32);
+    uint64_t now = (uint64_t)platform_time_wall_time_t();
+    struct vcs_zcode_dht_delegation d;
+    bool ok = vcs_zcode_dht_delegation_sign(
+                  &d, genesis, online, noise, 1, beacon,
+                  now > 10 ? now - 1 : 1, now + 3600, 1, mseed) ==
+                  VCS_ZCODE_DHT_DELEGATION_OK &&
+              vcs_zcode_dht_delegation_save(datadir, &d, err, sizeof err);
+    memset(mseed, 0, 32);
+    if (!ok)
+        return false;
+    memcpy(box_id, d.doc.master_pubkey, 32);
+    memcpy(signer, online, 32);
+    return true;
+}
+
+static void fl_sample(struct json_value *input, struct zcl_command_reply *reply)
+{
+    struct zcl_command_request request = { .input = input };
+    zcl_native_handle_fleet_vitals_sample(&request, reply);
+}
+
+static void fl_drain_queue(struct p2p_node *node, struct send_segment *sentinel)
+{
+    if (!node || !sentinel)
+        return;
+    while (sentinel->next) {
+        struct send_segment *seg = sentinel->next;
+        sentinel->next = seg->next;
+        send_segment_free(seg);
+    }
+    node->send_head = NULL;
+    node->send_tail = NULL;
+    node->transport = NULL; /* owned by the fixture */
 }
 
 int test_fleet_ledger(void)
@@ -293,6 +347,75 @@ int test_fleet_ledger(void)
         size_t count = 0;
         ASSERT_EQ(zcl_fleet_ledger_query(ma.ledger, &q, sink, 2, &count, NULL),
                   ZCL_FLEET_WINDOW);
+        PASS();
+    }
+
+    char sample_dd[320];
+    ASSERT((size_t)snprintf(sample_dd, sizeof sample_dd, "%s/sample_dd", root) <
+           sizeof sample_dd);
+    ASSERT(mkdir(sample_dd, 0700) == 0);
+    uint8_t sample_box[32], sample_signer[32];
+    ASSERT(fl_provision(sample_dd, sample_box, sample_signer));
+    zcl_native_bridge_bind_rpc(sample_dd, 0);
+
+    TEST("fleet vitals sample: catalog ids measured-or-ABSENT; unknown id "
+         "refuses by name; second sample appends a new seq") {
+        struct zcl_command_reply reply;
+        fl_sample(NULL, &reply);
+        ASSERT_EQ(reply.status, ZCL_COMMAND_STATUS_PASSED);
+        int64_t rows = json_get_int(json_get(&reply.data, "rows"));
+        ASSERT(rows > 0);
+        zcl_command_reply_free(&reply);
+        char ldir[400];
+        struct zcl_fleet_report report;
+        ASSERT((size_t)snprintf(ldir, sizeof ldir, "%s/fleet_ledger",
+                                sample_dd) < sizeof ldir);
+        struct zcl_fleet_ledger *led =
+            zcl_fleet_ledger_open(ldir, sample_box, sample_signer, &report);
+        ASSERT(led);
+        struct zcl_fleet_query q;
+        memset(&q, 0, sizeof q);
+        q.kind = ZCL_FLEET_KIND_VITALS;
+        q.days = 1;
+        q.now_unix = (int64_t)platform_time_wall_time_t();
+        q.have_box = true;
+        memcpy(q.box_id, sample_box, 32);
+        struct zcl_fleet_bucket buckets[64];
+        size_t count = 0;
+        ASSERT_EQ(zcl_fleet_ledger_query(led, &q, buckets, 64, &count, NULL),
+                  ZCL_FLEET_OK);
+        ASSERT_EQ(count, (size_t)rows);
+        for (size_t i = 0; i < count; i++) {
+            ASSERT(zcl_fleet_vital_id(buckets[i].subject));
+            uint8_t st = buckets[i].state[ZCL_FLEET_PAIR_VALUE];
+            ASSERT(st == (uint8_t)ZCL_FLEET_FIELD_PRESENT ||
+                   st == (uint8_t)ZCL_FLEET_FIELD_ABSENT);
+            if (st == (uint8_t)ZCL_FLEET_FIELD_ABSENT)
+                ASSERT_EQ(buckets[i].value[ZCL_FLEET_PAIR_VALUE], INT64_C(0));
+        }
+        uint64_t before = zcl_fleet_ledger_peer_seq(led, sample_box);
+        zcl_fleet_ledger_close(led);
+
+        struct json_value input;
+        json_init(&input);
+        json_set_object(&input);
+        ASSERT(json_push_kv_str(&input, "id", "box.invented_metric"));
+        fl_sample(&input, &reply);
+        json_free(&input);
+        ASSERT_EQ(reply.status, ZCL_COMMAND_STATUS_FAILED);
+        ASSERT_STR_EQ(reply.error.code, "VITAL_UNKNOWN");
+        ASSERT(strstr(reply.error.evidence, "box.invented_metric"));
+        zcl_command_reply_free(&reply);
+
+        fl_sample(NULL, &reply);
+        ASSERT_EQ(reply.status, ZCL_COMMAND_STATUS_PASSED);
+        ASSERT(json_get_int(json_get(&reply.data, "seq_first")) >
+               (int64_t)before);
+        zcl_command_reply_free(&reply);
+        led = zcl_fleet_ledger_open(ldir, sample_box, sample_signer, &report);
+        ASSERT(led);
+        ASSERT(zcl_fleet_ledger_peer_seq(led, sample_box) > before);
+        zcl_fleet_ledger_close(led);
         PASS();
     }
 
@@ -738,6 +861,7 @@ int test_fleet_ledger(void)
 
 _test_next:
     boot_fleet_ledger_test_bind_authority(NULL, NULL, 0);
+    zcl_native_bridge_bind_rpc("", 0);
     if (registered) {
         mesh_stream_test_reset();
         boot_fleet_ledger_test_bind(NULL, NULL, NULL);

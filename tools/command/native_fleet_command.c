@@ -1,9 +1,9 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
- * The three `fleet` leaves: append one row, say what this box holds, and
- * answer what the fleet spent.
+ * The `fleet` leaves: append one row, say what this box holds, answer
+ * what the fleet spent, and sample this box's catalog vitals.
  *
- * ALL THREE ANSWER LOCALLY. No peer is contacted, no RPC is made and no
+ * ALL OF THEM ANSWER LOCALLY. No peer is contacted, no RPC is made and no
  * node has to be running: the store is files under the datadir, and the
  * chainlog's own exclusive lock is what makes an operator's command and the
  * node's own service safe over one store. That is the whole point of every
@@ -24,9 +24,13 @@
 #include "fleetledger/fleet_ledger.h"
 #include "json/json.h"
 #include "kernel/command_registry.h"
+#include "platform/disk_space.h"
+#include "platform/logical_cpu.h"
+#include "platform/os_proc.h"
 #include "platform/time_compat.h"
 #include "vcs/zcode_dht_identity.h"
 
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -488,4 +492,146 @@ void zcl_native_handle_fleet_usage(const struct zcl_command_request *request,
     json_free(&rows);
     reply->status = ZCL_COMMAND_STATUS_PASSED;
     reply->exit_code = ZCL_COMMAND_EXIT_OK;
+}
+
+/* ── fleet vitals sample ─────────────────────────────────────────────── */
+
+enum { FLEET_HOST_N = 9 };
+static const char *const k_host_ids[FLEET_HOST_N] = {
+    "box.load1", "box.cores", "box.cores_free_for_qedc", "box.ram_used_mib",
+    "box.ram_total_mib", "box.disk_free_gib", "box.disk_free_pct",
+    "box.uptime_s", "node.rss_mib"
+};
+
+static int fleet_host_index(const char *id)
+{
+    for (int i = 0; i < FLEET_HOST_N; i++)
+        if (strcmp(k_host_ids[i], id) == 0)
+            return i;
+    return -1;
+}
+
+static void fleet_snapshot(const char *datadir, int64_t v[FLEET_HOST_N],
+                           bool p[FLEET_HOST_N])
+{
+    const int64_t mib = 1024 * 1024, gib = mib * 1024;
+    int64_t load = os_proc_load1_centi();
+    int64_t cores = (int64_t)platform_logical_cpu_count();
+    struct os_proc_mem mem = { .rss_bytes = -1, .sys_total_bytes = -1,
+                               .sys_avail_bytes = -1 };
+    bool mem_ok = os_proc_mem_read(&mem);
+    int64_t up = os_proc_uptime_seconds();
+    uint64_t d_avail = 0, d_total = 0;
+    bool disk = datadir && platform_disk_space(datadir, &d_avail, &d_total);
+    int64_t load_ceil = load >= 0 ? (load + 99) / 100 : 0;
+    p[0] = load >= 0; v[0] = load;
+    p[1] = cores > 0; v[1] = cores;
+    p[2] = load >= 0 && cores > 0;
+    v[2] = p[2] && cores > load_ceil ? cores - load_ceil : 0;
+    p[3] = mem_ok && mem.sys_total_bytes >= 0 && mem.sys_avail_bytes >= 0 &&
+           mem.sys_total_bytes >= mem.sys_avail_bytes;
+    v[3] = p[3] ? (mem.sys_total_bytes - mem.sys_avail_bytes) / mib : 0;
+    p[4] = mem_ok && mem.sys_total_bytes >= 0;
+    v[4] = p[4] ? mem.sys_total_bytes / mib : 0;
+    p[5] = disk; v[5] = disk ? (int64_t)(d_avail / (uint64_t)gib) : 0;
+    p[6] = disk && d_total > 0 && d_avail <= UINT64_MAX / 100ull;
+    v[6] = p[6] ? (int64_t)((d_avail * 100ull) / d_total) : 0;
+    p[7] = up >= 0; v[7] = up;
+    p[8] = mem_ok && mem.rss_bytes >= 0;
+    v[8] = p[8] ? mem.rss_bytes / mib : 0;
+}
+
+void zcl_native_handle_fleet_vitals_sample(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply)
+{
+    if (!reply)
+        return;
+    zcl_command_reply_init(reply, "zcl.fleet_vitals_sample.v1");
+    const char *want = NULL;
+    if (request && request->input) {
+        const struct json_value *v = json_get(request->input, "id");
+        if (v && v->type == JSON_STR)
+            want = json_get_str(v);
+    }
+    const char *ids[FLEET_HOST_N];
+    uint16_t subjects[FLEET_HOST_N];
+    size_t nids = FLEET_HOST_N;
+    memcpy(ids, k_host_ids, sizeof k_host_ids);
+    if (want && want[0]) {
+        ids[0] = want;
+        nids = 1;
+    }
+    for (size_t i = 0; i < nids; i++) {
+        if (!zcl_fleet_subject_from_name(ZCL_FLEET_KIND_VITALS, ids[i],
+                                         &subjects[i])) {
+            fleet_refuse(reply, "VITAL_UNKNOWN",
+                         "subject is a metric id from the declared fleet "
+                         "vitals catalog",
+                         ids[i], false);
+            return;
+        }
+    }
+
+    char dir[512];
+    uint8_t box_id[32], signer[32], seed[32];
+    const char *why = "";
+    if (!fleet_dir(dir, sizeof dir)) {
+        fleet_refuse(reply, "DATADIR_UNAVAILABLE",
+                     "the datadir must be an absolute path", "datadir", false);
+        return;
+    }
+    if (!fleet_identity(box_id, signer, seed, &why)) {
+        fleet_refuse(reply, "IDENTITY_UNAVAILABLE", why, "datadir", false);
+        return;
+    }
+    struct zcl_fleet_report report;
+    struct zcl_fleet_ledger *ledger =
+        zcl_fleet_ledger_open(dir, box_id, signer, &report);
+    if (!ledger) {
+        memset(seed, 0, sizeof seed);
+        fleet_refuse(reply, "LEDGER_UNAVAILABLE",
+                     zcl_fleet_status_label(report.status), "fleet_ledger",
+                     false);
+        return;
+    }
+
+    int64_t values[FLEET_HOST_N];
+    bool present[FLEET_HOST_N];
+    fleet_snapshot(zcl_native_command_datadir(), values, present);
+    uint64_t first = 0, last = 0;
+    size_t wrote = 0;
+    for (size_t i = 0; i < nids; i++) {
+        int idx = fleet_host_index(ids[i]);
+        bool have = idx >= 0 && present[idx];
+        struct zcl_fleet_pair pair = { ZCL_FLEET_PAIR_VALUE,
+                                       have ? values[idx] : 0 };
+        uint64_t seq = 0;
+        enum zcl_fleet_status status = zcl_fleet_ledger_append(
+            ledger, ZCL_FLEET_KIND_VITALS, subjects[i],
+            have ? &pair : NULL, have ? 1u : 0u, NULL, seed, &seq);
+        if (status != ZCL_FLEET_OK) {
+            memset(seed, 0, sizeof seed);
+            zcl_fleet_ledger_close(ledger);
+            fleet_refuse(reply, "LEDGER_REFUSED",
+                         zcl_fleet_status_label(status), "row", wrote > 0);
+            return;
+        }
+        if (wrote == 0)
+            first = seq;
+        last = seq;
+        wrote++;
+    }
+    memset(seed, 0, sizeof seed);
+    zcl_fleet_ledger_close(ledger);
+
+    (void)json_push_kv_str(&reply->data, "schema",
+                           "zcl.fleet_vitals_sample.v1");
+    fleet_push_box(&reply->data, box_id);
+    (void)json_push_kv_int(&reply->data, "rows", (int64_t)wrote);
+    (void)json_push_kv_int(&reply->data, "seq_first", (int64_t)first);
+    (void)json_push_kv_int(&reply->data, "seq_last", (int64_t)last);
+    reply->status = ZCL_COMMAND_STATUS_PASSED;
+    reply->exit_code = ZCL_COMMAND_EXIT_OK;
+    reply->error.mutated = true;
 }
