@@ -526,6 +526,7 @@ ZCL_MODULE_CAPABILITY("engine/composition/src/boot_endpoint_records.c", CAP_CLOC
 ZCL_MODULE_CAPABILITY("engine/composition/src/boot_error.c", CAP_FS_READ|CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("engine/composition/src/boot_export_consensus_bundle.c", CAP_FS_WRITE|CAP_FS_READ, "")
 ZCL_MODULE_CAPABILITY("engine/composition/src/boot_fast_restart.c", CAP_FS_WRITE|CAP_CLOCK|CAP_FS_READ, "")
+ZCL_MODULE_CAPABILITY("engine/composition/src/boot_fleet_board_rpc.c", CAP_FS_WRITE, "bounded allocation failure diagnostics write to stderr")
 ZCL_MODULE_CAPABILITY("engine/composition/src/boot_flight_recorder.c", CAP_FS_READ|CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("engine/composition/src/boot_frontend_services.c", CAP_FS_READ|CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("engine/composition/src/boot_full_fold.c", CAP_FS_WRITE|CAP_FS_READ, "")

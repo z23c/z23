@@ -117,6 +117,25 @@ static int test_fleet_board_bridge_basics(void)
         ASSERT(run(root,legacy,out,sizeof(out),NULL,NULL)==0);
         ASSERT(strstr(out,"legacy metric")!=NULL);
 
+        ASSERT(put(root,"chat.jsonl",
+            ROW("2026-09-05T00:00:05Z","chat-a","alpha","chat","","planning conversation")));
+        const char *chat[]={"list","--kind","chat",NULL};
+        ASSERT(run(root,chat,out,sizeof(out),NULL,NULL)==0);
+        ASSERT(strstr(out,"planning conversation")!=NULL);
+        const char *post_chat[]={"post","chat","reply",NULL};
+        ASSERT(run(root,post_chat,out,sizeof(out),"chat-agent",NULL)==0);
+        char chat_host[128];ASSERT(host_name(chat_host));
+        const char *chat_written[]={"--json","list","--kind","chat","--host",chat_host,NULL};
+        ASSERT(run(root,chat_written,out,sizeof(out),NULL,NULL)==0);
+        ASSERT(lines(out)==1);json_init(&parsed);
+        ASSERT(json_read(&parsed,out,strlen(out)));
+        ASSERT_STR_EQ(json_get_str(json_get(&parsed,"kind")),"chat");
+        ASSERT_STR_EQ(json_get_str(json_get(&parsed,"text")),"reply");
+        ASSERT_STR_EQ(json_get_str(json_get(&parsed,"agent")),"chat-agent");
+        json_free(&parsed);
+        const char *unknown_kind[]={"post","unknown-kind","must refuse",NULL};
+        ASSERT(run(root,unknown_kind,out,sizeof(out),"chat-agent",NULL)!=0);
+
         ASSERT(put(root,"open-a.jsonl",ROW("2026-09-05T01:00:00Z","need-a","alpha","need","","claimed need") ROW("2026-09-05T01:00:01Z","problem-a","alpha","problem","","still open") ROW("2026-09-05T01:00:02Z","note-a","alpha","note","","ordinary note")));
         ASSERT(put(root,"open-b.jsonl",ROW("2026-09-05T01:00:03Z","claim-b","beta","claim","need-a","cross host claim")));
         const char *open[]={"list","--open","--host","alpha",NULL};ASSERT(run(root,open,out,sizeof(out),NULL,NULL)==0);

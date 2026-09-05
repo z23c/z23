@@ -1,7 +1,9 @@
-/* Copyright 2026 Rhett Creighton. Licensed under Apache-2.0. */
+/* Copyright 2026 Rhett Creighton. Licensed under Apache-2.0.
+ * Read and append bounded records in the private fleet board projection. */
 #define _POSIX_C_SOURCE 200809L
 #include "base/safe_alloc.h"
 #include "json/json.h"
+#include "platform/time_compat.h"
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -59,7 +61,7 @@ static bool kind_ok(const char *s)
 {
     static const char *const kinds[] = {
         "problem", "need", "offer", "claim", "result", "note", "directive",
-        "cost", "packet", "status"
+        "cost", "packet", "status", "chat"
     };
     for (size_t i = 0; s && i < sizeof(kinds) / sizeof(kinds[0]); i++)
         if (!strcmp(s, kinds[i])) return true;
@@ -312,7 +314,8 @@ static bool local_host(char host[128])
 static bool identity(char ts[32],char id[128],char host[128])
 {
     struct timespec t;struct tm tm;char compact[17];
-    if(!local_host(host)||clock_gettime(CLOCK_REALTIME,&t)!=0||!gmtime_r(&t.tv_sec,&tm))return false;
+    if (!local_host(host) || platform_time_realtime_timespec(&t) != 0 ||
+        t.tv_sec <= 0 || !platform_time_utc_tm(t.tv_sec, &tm)) return false;
     if(strftime(ts,32,"%Y-%m-%dT%H:%M:%SZ",&tm)!=20||strftime(compact,17,"%Y%m%dT%H%M%S",&tm)!=15)return false;
     int n=snprintf(id,128,"%s-%s-%ld-%09ld",compact,host,(long)getpid(),t.tv_nsec);
     return n>0&&n<128;

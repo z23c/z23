@@ -254,8 +254,15 @@ static bool board_aggregate_checked(struct node_db *ndb, struct qb *q,
                                     int64_t *out)
 {
     sqlite3_stmt *s = NULL;
-    if (!out || !QB_PREPARE(ndb, q, s))
+    if (!out) {
+        LOG_WARN("fleet.board", "capacity aggregate has no output target");
         return false;
+    }
+    if (!QB_PREPARE(ndb, q, s)) {
+        LOG_WARN("fleet.board", "capacity aggregate prepare failed: %s",
+                 qb_error(q));
+        return false;
+    }
     if (!AR_STEP_ROW(s)) {
         LOG_WARN("fleet.board", "capacity aggregate did not return a row: %s",
                  sqlite3_errmsg(ndb->db));
@@ -282,12 +289,16 @@ static bool board_append_fits(struct node_db *ndb, int64_t body_bytes)
     int64_t bytes = 0;
     qb_select(&q, QB_T_fleet_board_posts);
     qb_select_count_star(&q);
-    if (!board_aggregate_checked(ndb, &q, &posts))
+    if (!board_aggregate_checked(ndb, &q, &posts)) {
+        LOG_WARN("fleet.board", "append capacity post-count aggregate failed");
         return false;
+    }
     qb_select(&q, QB_T_fleet_board_posts);
     qb_select_agg(&q, QB_SUM, QB_C_fleet_board_posts_body_bytes, true);
-    if (!board_aggregate_checked(ndb, &q, &bytes))
+    if (!board_aggregate_checked(ndb, &q, &bytes)) {
+        LOG_WARN("fleet.board", "append capacity byte-sum aggregate failed");
         return false;
+    }
     int64_t max_posts = board_max_posts();
     int64_t max_bytes = board_max_bytes();
     return posts < max_posts && body_bytes > 0 && body_bytes <= max_bytes &&
@@ -378,8 +389,11 @@ bool db_fleet_board_post_find(struct node_db *ndb, const uint8_t id[32],
     qb_select_columns(&q, k_board_cols, BOARD_NCOLS);
     qb_where_blob(&q, QB_C_fleet_board_posts_id, QB_EQ, id, 32);
     sqlite3_stmt *s = NULL;
-    if (!QB_PREPARE(ndb, &q, s))
+    if (!QB_PREPARE(ndb, &q, s)) {
+        LOG_WARN("fleet.board", "post lookup prepare failed: %s",
+                 qb_error(&q));
         return false;
+    }
     bool found = AR_STEP_ROW(s) && board_row(s, out);
     sqlite3_finalize(s);
     return found;
@@ -484,8 +498,11 @@ bool db_fleet_board_wiki_read(struct node_db *ndb, const char *slug,
     qb_order_by(&q, QB_C_fleet_board_posts_created_at, QB_DESC);
     qb_order_by(&q, QB_C_fleet_board_posts_id, QB_DESC);
     sqlite3_stmt *s = NULL;
-    if (!QB_PREPARE(ndb, &q, s))
+    if (!QB_PREPARE(ndb, &q, s)) {
+        LOG_WARN("fleet.board", "wiki latest prepare failed slug=%s: %s",
+                 slug, qb_error(&q));
         return false;
+    }
     bool found = false;
     while (!found && AR_STEP_ROW(s))
         found = board_row(s, out);
