@@ -1727,10 +1727,18 @@ selftest_macos_tampered_manifest() {
     # only what SHA256SUMS CLAIMS about them changes, which is exactly the
     # shape of drift a directory-naming bug could otherwise hide.
     bogus_sha="$(printf 'b%.0s' {1..64})"
-    sed -i "s/^[0-9a-f]\{64\}  z23\$/${bogus_sha}  z23/" \
-        "$mac/release/SHA256SUMS"
-    sed -i "s/^[0-9a-f]\{64\}  zclassic23\$/${bogus_sha}  zclassic23/" \
-        "$mac/release/SHA256SUMS"
+    local sums="$mac/release/SHA256SUMS" line hex64
+    hex64='????????????????????????????????????????????????????????????????'
+    while IFS= read -r line; do
+        case "$line" in
+            ${hex64}"  z23")
+                printf '%s  z23\n' "$bogus_sha" ;;
+            ${hex64}"  zclassic23")
+                printf '%s  zclassic23\n' "$bogus_sha" ;;
+            *)
+                printf '%s\n' "$line" ;;
+        esac
+    done <"$sums" >"$sums.tmp" && mv -f -- "$sums.tmp" "$sums"
     grep -qx "${bogus_sha}  z23" "$mac/release/SHA256SUMS" \
         || die "selftest: tamper fixture setup did not edit the z23 row"
     grep -qx "${bogus_sha}  zclassic23" "$mac/release/SHA256SUMS" \
