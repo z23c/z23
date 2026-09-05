@@ -24,10 +24,15 @@
 #include <stdlib.h>
 #include <string.h>
 #include <signal.h>
+#include <errno.h>
 #if !defined(_WIN32)
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <sys/wait.h>
+#endif
+#if defined(__linux__)
+#include <sys/vfs.h>
+#include <linux/magic.h>
 #endif
 #include <unistd.h>
 #include <fcntl.h>
@@ -181,18 +186,110 @@ static uint64_t bp_fake_evidence_probe(void *ctx)
     return g_bp_fake_evidence;
 }
 
+#if defined(__linux__)
+/* True iff `path` sits on Linux tmpfs — fsync() there is a no-op the kernel
+ * reports as success, so it never advances ru_oublock and cannot stand in
+ * for the "the OS actually pushed bytes to a device" evidence this fixture
+ * exists to manufacture. A push proof's generation root can itself be a
+ * RAM-backed tmpfs (tools/dev/dev_proof.c generation_prepare() prefers
+ * platform_ram_scratch_root(), typically /dev/shm, and runs the test
+ * process chdir()'d into it — tools/dev/dev_proof_budget.c
+ * zcl_dev_proof_step_start()), which carries test_fmt_tmpdir's cwd-relative
+ * "test-tmp/" along with it. A statfs() that fails is undecidable, not a
+ * "yes" — treated as not-tmpfs so today's behaviour holds wherever the
+ * check itself cannot run. */
+static bool bp_is_tmpfs(const char *path)
+{
+    struct statfs sfs;
+    if (statfs(path, &sfs) != 0)
+        return false;
+    return (unsigned long)sfs.f_type == (unsigned long)TMPFS_MAGIC;
+}
+
+/* mkdir -p, including the leaf, at 0700 — the same mode test_make_tmpdir
+ * already holds every other fixture directory to. Tolerates a directory
+ * (or path segment) that already exists. */
+static bool bp_mkdir_p(const char *path)
+{
+    char buf[PATH_MAX];
+    if (snprintf(buf, sizeof(buf), "%s", path) >= (int)sizeof(buf))
+        return false;
+    for (char *p = buf + 1; *p; p++) {
+        if (*p != '/')
+            continue;
+        *p = '\0';
+        if (mkdir(buf, 0700) != 0 && errno != EEXIST) {
+            *p = '/';
+            return false;
+        }
+        *p = '/';
+    }
+    return mkdir(buf, 0700) == 0 || errno == EEXIST;
+}
+
+/* Where bp_burn_block_io() falls back to when the suite's own tmpdir turns
+ * out to be tmpfs: a disk-backed private scratch dir outside test-tmp/,
+ * named the way tools/zcc.c already names its own cache root ($XDG_CACHE_HOME
+ * first, $HOME/.cache otherwise). Verifies the result is not itself tmpfs —
+ * a container can mount either of those on tmpfs too — and leaves `dir`
+ * unset (returns false) when no such root exists. No new env knob: these
+ * two variables are the ones the rest of the tree already reads for a
+ * per-user cache root. */
+static bool bp_disk_scratch_dir(char *dir, size_t dir_cap)
+{
+    const char *xdg = getenv("XDG_CACHE_HOME");
+    const char *home = getenv("HOME");
+    char base[PATH_MAX];
+    int base_len = -1;
+    if (xdg && xdg[0])
+        base_len = snprintf(base, sizeof(base), "%s/zclassic23", xdg);
+    else if (home && home[0])
+        base_len = snprintf(base, sizeof(base), "%s/.cache/zclassic23", home);
+    if (base_len <= 0 || (size_t)base_len >= sizeof(base))
+        return false;
+    int n = snprintf(dir, dir_cap, "%s/test-scratch/bootphase-%d", base,
+                     (int)getpid());
+    if (n <= 0 || (size_t)n >= dir_cap)
+        return false;
+    if (!bp_mkdir_p(dir))
+        return false;
+    if (bp_is_tmpfs(dir)) {
+        (void)rmdir(dir);
+        return false;
+    }
+    return true;
+}
+#endif /* __linux__ */
+
 /* Force `bytes` of real, device-visible write I/O so the stock
  * getrusage probe has something to observe. Uses the suite's own
  * per-pid scratch helper — never a datadir, and never a fixed path two
- * concurrent runs could collide on. Returns false if the fixture itself
- * could not be built, so a fixture failure reads as a fixture failure
- * and not as a probe defect. */
+ * concurrent runs could collide on. On Linux, redirects to a disk-backed
+ * private cache dir when that scratch helper hands back tmpfs (the push
+ * proof's RAM-backed generation root does exactly that — see
+ * bp_is_tmpfs() above), so the write below always lands somewhere fsync()
+ * is not a no-op. Returns false if the fixture itself could not be built —
+ * including "no disk-backed root exists to burn I/O on" — so a fixture
+ * failure reads as a fixture failure and not as a probe defect. */
 static bool bp_burn_block_io(size_t bytes)
 {
-    char dir[256];
+    char dir[PATH_MAX];
     test_make_tmpdir(dir, sizeof(dir), "bootphase", "io");
 
-    char path[320];
+#if defined(__linux__)
+    if (bp_is_tmpfs(dir)) {
+        test_rm_rf(dir);
+        if (!bp_disk_scratch_dir(dir, sizeof(dir))) {
+            printf("\nboot_phase: evidence fixture: bootphase/io tmpdir is "
+                   "tmpfs (fsync there never advances ru_oublock) and no "
+                   "disk-backed fallback was found — set XDG_CACHE_HOME or "
+                   "HOME to a non-tmpfs path\n");
+            return false;
+        }
+    }
+#endif
+
+    char path[PATH_MAX + 16];
     snprintf(path, sizeof(path), "%s/burn", dir);
     bool ok = false;
     int fd = open(path, O_CREAT | O_WRONLY | O_TRUNC, 0600);
