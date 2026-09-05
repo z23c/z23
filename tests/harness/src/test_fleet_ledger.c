@@ -236,20 +236,6 @@ static void fl_sample(struct json_value *input, struct zcl_command_reply *reply)
     zcl_native_handle_fleet_vitals_sample(&request, reply);
 }
 
-static void fl_drain_queue(struct p2p_node *node, struct send_segment *sentinel)
-{
-    if (!node || !sentinel)
-        return;
-    while (sentinel->next) {
-        struct send_segment *seg = sentinel->next;
-        sentinel->next = seg->next;
-        send_segment_free(seg);
-    }
-    node->send_head = NULL;
-    node->send_tail = NULL;
-    node->transport = NULL; /* owned by the fixture */
-}
-
 int test_fleet_ledger(void)
 {
     int failures = 0;
