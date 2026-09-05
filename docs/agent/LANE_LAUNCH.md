@@ -22,8 +22,12 @@ and the development procedure remains
    one worker may own a high-contention catalog such as `Makefile`, the command
    definitions, impact rules, or generated capability inventory.
 3. Use a separate worktree when workers need independent indexes or builds.
-   Create it detached at the recorded `origin/main`; the resulting commit ID is
-   the handoff. A branch is optional metadata, not evidence.
+   Create it under `~/.z23/trains/<n>`, detached at the recorded
+   `origin/main`; the resulting commit ID is the handoff. A branch is
+   optional metadata, not evidence. Workspace: this hidden tree, not a
+   directory beside `~/github/`, is where every lane, train, and unit
+   worktree lives; see
+   [`../zrc/0005-node-workspace-layout-and-hygiene.md`](../zrc/0005-node-workspace-layout-and-hygiene.md).
 4. Prime a fresh worktree with `tools/scripts/worktree_init.sh` before its first
    build. Never copy a build directory from another worktree.
 5. Pass a compact mission capsule:

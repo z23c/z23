@@ -9,10 +9,14 @@ Dispatch: [LANE_LAUNCH.md](LANE_LAUNCH.md). Report:
 
 ```
 cd /path/to/checkout && git fetch -q origin && \
-git worktree add -q ../z23-lane-<name> -b agent/<name>-<date> origin/main && \
-cd ../z23-lane-<name> && git submodule update --init --recursive -q && \
+git worktree add -q ~/.z23/lanes/<name> -b agent/<name>-<date> origin/main && \
+cd ~/.z23/lanes/<name> && git submodule update --init --recursive -q && \
 make worktree-prime && make install-hooks && make -j32 z23
 ```
+
+Workspace: lanes live in the node's hidden workspace tree, not beside the
+real checkouts; see
+[`../zrc/0005-node-workspace-layout-and-hygiene.md`](../zrc/0005-node-workspace-layout-and-hygiene.md).
 
 2. Find what your change touches. The first command prints the test groups
    that cover a file. Run those groups with the second. Note:
