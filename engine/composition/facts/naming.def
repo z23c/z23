@@ -1,0 +1,46 @@
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ *
+ * purpose: What the short names in this tree actually mean, so a reader
+ *          stops guessing from the prefix.
+ *
+ * Owner, 2026-09-05: AIs were reading "zfc" as a general Z23 prefix. It is
+ * not one — it names two FlyClient snapshot-sync messages and nothing else,
+ * and .zfctmp is an unrelated temp-file suffix. A name that looks like a
+ * family but is not one costs a reader a wrong model, which is more
+ * expensive than not knowing.
+ *
+ * Row shape and the rule against weakening an anchor: see index.def and
+ * docs/zrc/0006-knowledge-in-the-checkout.md. */
+
+ZCL_FACT("naming", "zfc_prefix",
+         "zfc* names FlyClient snapshot-sync p2p messages only: zfcchallenge and zfcproofs, nothing else in the tree.",
+         "core/modules/net/include/net/flyclient.h",
+         "MSG_FC_CHALLENGE")
+ZCL_FACT("naming", "zfc_flow",
+         "Snapshot sync flow: offer then zfcchallenge, zfcproofs, zsnapreq, data, end.",
+         "core/modules/net/include/net/snapshot_sync_contract.h",
+         "Flow: offer")
+ZCL_FACT("naming", "zfctmp",
+         ".zfctmp is the fastobj carrier temp-file suffix and is unrelated to FlyClient.",
+         "contexts/commons/modules/vcs/src/fastobj_carrier.c",
+         ".zfctmp.")
+ZCL_FACT("naming", "zrc",
+         "ZRC = Z23 Request for Comments; one file docs/zrc/NNNN-slug.md, NNNN = highest existing + 1, no registry to update.",
+         "docs/zrc/README.md",
+         "Z23 Request for Comments")
+ZCL_FACT("naming", "zfb1",
+         "ZFB1 is the fleet board gossip frame magic, followed by one type byte and a bounded body.",
+         "cognition/modules/session/include/session/fleet_board_proto.h",
+         "FLEET_BOARD_FRAME_MAGIC")
+ZCL_FACT("naming", "zpkgswm",
+         "zpkgswm is the package-swarm p2p message name; boot_zcode_swarm_send is what writes one.",
+         "engine/composition/src/boot_zcode_swarm_membership.c",
+         "void boot_zcode_swarm_send(struct msg_processor *mp, struct p2p_node *node,")
+ZCL_FACT("naming", "zpkgswm_carrier",
+         "Mesh terminal traffic rides the same zpkgswm carrier under a ZMTERM prefix, so zpkgswm is not only packages.",
+         "engine/composition/src/boot_mesh_terminal.c",
+         "Frame send (ZMTERM prefix on zpkgswm)")
+ZCL_FACT("naming", "binaries",
+         "z23 is the node, z23-dev the dev CLI, and zclassic23-engine-unit the executor harness.",
+         "Makefile",
+         "zclassic23-engine-unit")

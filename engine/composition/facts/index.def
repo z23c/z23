@@ -40,6 +40,11 @@
  * Read by tools/command/native_dev_orient.c and by nothing else; there is no
  * second copy of this table anywhere. */
 
+ZCL_FACT_TOPIC("naming",
+               "what the short names in this tree mean: zfc, zfctmp, ZFB1, "
+               "zpkgswm, ZRC, and which binary is which")
+#include "naming.def"
+
 ZCL_FACT_TOPIC("landing.proof",
                "what a dev proof receipt contains, how it is sealed and "
                "admitted, and where a refusal is cached")

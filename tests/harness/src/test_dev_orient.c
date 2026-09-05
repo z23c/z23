@@ -101,6 +101,7 @@ static const char *dvo_row_str(const struct json_value *row, const char *key)
 static const char *const dvo_required_topics[] = {
     "landing.proof", "landing.queue", "lint.gates",
     "tests.routing", "fleet.board",   "fleet.swarm",
+    "naming",
 };
 #define DVO_REQUIRED_COUNT                                                   \
     (sizeof(dvo_required_topics) / sizeof(dvo_required_topics[0]))

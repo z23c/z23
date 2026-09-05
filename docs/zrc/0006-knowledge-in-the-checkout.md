@@ -68,6 +68,14 @@ ZCL_FACT(topic, key, claim, path, anchor)
 `index.def` lists the topics and includes their files. Adding a topic is two
 lines there plus the new file — no reader anywhere keeps a second list.
 
+The first topics are the maps that were being re-derived most often:
+`landing.proof`, `landing.queue`, `lint.gates`, `tests.routing`,
+`fleet.board`, `fleet.swarm`, and `naming` — the last because short names in
+this tree read like families that they are not (`zfc` names exactly two
+FlyClient snapshot-sync messages, and `.zfctmp` is an unrelated temp-file
+suffix). Run `z23-dev dev agent orient` for the current list and counts;
+this paragraph names the starting set, not the authority.
+
 The anchor is the load-bearing field. It is chosen to be the thing that would
 have to change for the claim to stop being true: a symbol name, a `#define`,
 an exact string literal, a `CREATE TABLE` line. An anchor picked because it
