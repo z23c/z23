@@ -172,3 +172,4 @@ dev.publication.mirror.record exempt: appends optional declared mirror evidence 
 dev.publication.collect exempt: appends verified signed storage evidence to an immutable dev publication job; installs no artifact and grants no approval, deployment, wallet or publication authority
 ops.mesh.pair.revoke exempt: removes one target-local status-read authority through bounded plan/commit; it creates no authority and installs no artifact
 zcode.workspace.source.bundle.publish exempt: publicly serves an inert content-addressed source bundle behind owner authorization and idempotency confirmation; it installs no artifact and grants no execution or acceptance authority
+zcode.work.publish exempt: continues the existing bounded publication job for the exact accepted source and verified receipt lineage; it installs no artifact and grants no deployment or custody authority
