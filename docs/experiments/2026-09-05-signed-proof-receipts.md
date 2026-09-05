@@ -53,17 +53,19 @@ vendored.
 ## Cost
 
 Measured with a 200-iteration loop over the real seal and validate entry
-points, three runs, and with the pre-change code compiled from `6c5fd07b2` and
-measured the same way.
+points, and with the pre-change code compiled from `6c5fd07b2` and measured
+the same way. Six runs of each, in two sessions an hour apart, on a box that
+was also compiling other lanes — the ranges below are what that spread looks
+like, not a quiet-machine best case.
 
 | | before (v1) | after (v2) |
 |---|---|---|
 | Receipt on disk | 664 bytes | 760 bytes |
-| `..._seal()` | 2.1–3.0 µs | 1,962–2,025 µs |
-| `..._parse()` + `..._validate()` | 2.0–2.3 µs | 1,850–1,902 µs |
-| `z23-git-hook --selftest` p95 (open, read, parse, validate) | 8 µs | 1,961–2,079 µs |
+| `..._seal()` | 2.0–3.1 µs | 1,962–2,146 µs |
+| `..._parse()` + `..._validate()` | 2.0–2.3 µs | 1,850–1,988 µs |
+| `z23-git-hook --selftest` p95 (open, read, parse, validate) | 8 µs | 1,961–2,821 µs |
 
-Roughly 1.9 ms per admission and 2.0 ms per seal. Two Ed25519 group
+Roughly 2 ms per admission and 2 ms per seal. Two Ed25519 group
 operations dominate: the verify itself, and re-deriving this box's own public
 key from its seed on every call so that the own-key-is-always-trusted rule can
 be evaluated. `docs/CRYPTO_PERF.md`'s standing measurement for this tree's
