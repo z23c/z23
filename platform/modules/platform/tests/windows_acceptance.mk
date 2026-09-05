@@ -22,6 +22,7 @@ ZCL_WINDOWS_ACCEPTANCE_TESTS := \
 	consensus_state_publication_cas_refusal \
 	database_lifetime \
 	datadir_privacy \
+	dev_agent_mail \
 	dev_fleet_capture \
 	directory_compat \
 	directory_transaction \
@@ -224,6 +225,23 @@ ZCL_WINDOWS_ACCEPTANCE_mind_state_LIBS := \
 ZCL_WINDOWS_ACCEPTANCE_dev_fleet_capture_SOURCES := \
 	tests/harness/src/dev_fleet_capture_windows_acceptance.c \
 	tools/command/native_dev_fleet_process.c
+
+ZCL_WINDOWS_ACCEPTANCE_dev_agent_mail_SOURCES := \
+	tests/harness/src/dev_agent_mail_windows_acceptance.c \
+	tools/command/native_devagent_mail.c \
+	platform/modules/json/src/json.c \
+	platform/modules/platform/src/directory_transaction.c \
+	platform/modules/platform/src/private_file.c \
+	platform/modules/platform/src/private_directory.c \
+	platform/modules/platform/src/private_acl_internal.c \
+	platform/modules/platform/src/state_root.c \
+	platform/modules/platform/src/clock.c \
+	platform/modules/base/src/safe_alloc.c \
+	platform/modules/base/src/log_level.c
+ZCL_WINDOWS_ACCEPTANCE_dev_agent_mail_FLAGS := \
+	-Itools
+ZCL_WINDOWS_ACCEPTANCE_dev_agent_mail_LIBS := \
+	-ladvapi32 -lshell32 -lole32 -luuid $(ZCL_WINDOWS_ACCEPTANCE_PTHREAD_LIB)
 
 ZCL_WINDOWS_ACCEPTANCE_directory_compat_SOURCES := \
 	platform/modules/platform/tests/directory_compat_windows_acceptance.c \

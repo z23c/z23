@@ -218,6 +218,13 @@ short-lived Git command cannot lose its final answer and falsely report missing
 refs. The Windows acceptance catalog checks short responses, multi-read output,
 bounded truncation, and nonzero exits with their diagnostics.
 
+Developer mail uses native owner-private files on Windows. Post appends through
+a nonblocking locked handle after checking its ownership and link count; ack
+atomically replaces the private cursor file. Native acceptance covers post/pull,
+LF byte preservation, lock contention, hard-link refusal, and cursor replacement.
+Paths have an explicit 4096-byte command bound and refuse truncation. Cross-host
+delivery still requires a configured transport for the local outbox and inboxes.
+
 Install the audited canonical binary as a supervised per-user Task Scheduler
 job with one command:
 

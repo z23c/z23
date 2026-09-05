@@ -17,10 +17,11 @@
  * STATE. platform_state_root() names the owner-private state root (the same
  * helper other leaves use); mail lives at <state>/mail/. The directory is
  * created 0700 when missing (pull and ack create it too, so a first run
- * never fails). outbox.jsonl is created 0600. A post opens the outbox with
- * O_WRONLY|O_CREAT|O_APPEND and emits the row with ONE write() call, so two
- * processes posting at once never interleave bytes. No lock, no read-modify-
- * write on the post path.
+ * never fails). outbox.jsonl is private to its owner. On POSIX a post opens
+ * it with O_WRONLY|O_CREAT|O_APPEND and emits the row with ONE write() call.
+ * Windows uses an owner-validated private handle and a nonblocking file lock
+ * around the size/write pair, refusing contention without waiting. Both
+ * paths preserve complete row bytes without interleaving concurrent writes.
  *
  * INPUT (zcl.agent_mail_input.v1)
  *   action  required string: "post" | "pull" | "ack". First positional, so
@@ -53,7 +54,7 @@
  * `count`. Malformed lines are skipped, never fatal.
  *
  * ACK. Writes the decimal cursor plus "\n" to <state>/mail/cursor.<agent>
- * (0600) via a temporary file in the same directory renamed over the target,
+ * (owner-private) via a temporary file in the same directory renamed over the target,
  * so a crash never truncates an existing cursor, and returns
  * {leaf, agent, cursor}.
  *
@@ -76,7 +77,7 @@
  * STATE_DIR_FAILED, MAIL_WRITE_FAILED, MAIL_READ_FAILED.
  *
  * PROCESS RULE. No spawn, no shell, no popen()/system(), no sleep, no poll
- * loop. Only mkdir/open/write/read/closedir file calls below.
+ * loop. Only local filesystem operations below.
  */
 
 #include "command/native_command.h"
@@ -88,6 +89,11 @@
 #include "platform/directory_compat.h"
 #include "platform/state_root.h"
 #include "platform/time_compat.h"
+#if defined(_WIN32)
+#include "platform/directory_transaction.h"
+#include "platform/private_directory.h"
+#include "platform/private_file.h"
+#endif
 
 #include <ctype.h>
 #include <dirent.h>
@@ -115,6 +121,7 @@
 #define DVM_BODY_MAX 4096u
 #define DVM_LINE_CAP 8192
 #define DVM_ROWS_MAX 4096
+#define DVM_PATH_CAP 4096u
 
 static const char *dvm_kinds[] = {
     "need", "claim", "result", "problem", "note", "offer", "directive",
@@ -393,7 +400,13 @@ static bool dvm_escape(const char *in, char *out, size_t cap)
 
 static bool dvm_mkdir_one(const char *path)
 {
+#if defined(_WIN32)
+    /* Owner-private mail files require the private-directory ACL, not the
+     * generic ensure seam (mode is ignored on Windows CreateDirectoryW). */
+    return platform_private_directory_ensure(path);
+#else
     return platform_directory_ensure(path, 0700);
+#endif
 }
 
 static bool dvm_mail_dir(char *out, size_t cap)
@@ -411,7 +424,9 @@ static bool dvm_mail_dir(char *out, size_t cap)
         return false;
     if (!dvm_mkdir_one(out))
         return false;
+#if !defined(_WIN32)
     (void)chmod(out, 0700);
+#endif
     return true;
 }
 
@@ -628,8 +643,8 @@ static void dvm_post(const struct zcl_command_request *req,
     const char *body = NULL;
     const char *ref = dvm_str(req, "ref");
     const struct json_value *bodyv;
-    char root[PATH_MAX];
-    char outbox[PATH_MAX + 32];
+    char root[DVM_PATH_CAP];
+    char outbox[DVM_PATH_CAP];
     char ts[40];
     char esc_from[512], esc_to[512], esc_kind[64], esc_body[DVM_BODY_MAX * 2];
     char esc_ref[512];
@@ -642,8 +657,10 @@ static void dvm_post(const struct zcl_command_request *req,
     struct tm tm_utc;
     FILE *f;
     char *nl;
+#if !defined(_WIN32)
     int fd;
     ssize_t w;
+#endif
     size_t len;
 
     if (!req || !req->input) {
@@ -706,7 +723,11 @@ static void dvm_post(const struct zcl_command_request *req,
         return;
     }
 
-    (void)snprintf(outbox, sizeof(outbox), "%s/outbox.jsonl", maildir);
+    int path_length = snprintf(outbox, sizeof(outbox), "%s/outbox.jsonl", maildir);
+    if (path_length <= 0 || (size_t)path_length >= sizeof(outbox)) {
+        dvm_fail(reply, "MAIL_WRITE_FAILED", "outbox path exceeds its bound", maildir);
+        return;
+    }
     /* Next seq: one plus the largest seq already present. A duplicate seq
      * under concurrent posters is acceptable (bytes stay intact); the pull
      * cursor still advances past both on (ts, from, seq) order. */
@@ -728,8 +749,12 @@ static void dvm_post(const struct zcl_command_request *req,
     }
 
     now = platform_time_wall_time_t();
-    (void)gmtime_r(&now, &tm_utc);
-    (void)strftime(ts, sizeof(ts), "%Y-%m-%dT%H:%M:%SZ", &tm_utc);
+    if (!platform_time_utc_tm(now, &tm_utc) ||
+        strftime(ts, sizeof(ts), "%Y-%m-%dT%H:%M:%SZ", &tm_utc) == 0) {
+        dvm_fail(reply, "MAIL_WRITE_FAILED", "cannot encode the message timestamp",
+                 "UTC time conversion failed");
+        return;
+    }
 
     if (!dvm_escape(from, esc_from, sizeof(esc_from)) ||
         !dvm_escape(to, esc_to, sizeof(esc_to)) ||
@@ -760,6 +785,30 @@ static void dvm_post(const struct zcl_command_request *req,
         return;
     }
 
+#if defined(_WIN32)
+    /* A nonblocking private-file lock serializes the size/write pair. Raw
+     * handle writes preserve LF bytes and do not inherit a CRT descriptor. */
+    struct platform_private_file file;
+    platform_private_file_init(&file);
+    bool written = platform_private_file_open_locked_create(outbox, &file);
+    if (written) {
+        /* Borrow the already-open handle for metadata only; `file` retains
+         * sole ownership of its lock and close. Never re-open the pathname
+         * to decide whether this exact object is private and unaliased. */
+        struct platform_directory_child view = {.native = file.native};
+        struct platform_directory_child_info info;
+        written = platform_directory_child_info(&view, &info) &&
+            info.current_user_only && info.link_count == 1 &&
+            platform_private_file_write_at(&file, line, len, info.size) &&
+            platform_private_file_flush(&file);
+    }
+    platform_private_file_close(&file);
+    if (!written) {
+        dvm_fail(reply, "MAIL_WRITE_FAILED", "cannot append the private outbox",
+                 outbox);
+        return;
+    }
+#else
     fd = open(outbox, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0600);
     if (fd < 0) {
         dvm_fail(reply, "MAIL_WRITE_FAILED", "cannot open the outbox",
@@ -774,6 +823,7 @@ static void dvm_post(const struct zcl_command_request *req,
                  outbox);
         return;
     }
+#endif
 
     (void)json_push_kv_str(&reply->data, "leaf", DVM_LEAF);
     (void)json_push_kv_int(&reply->data, "seq", seq);
@@ -837,7 +887,7 @@ static void dvm_pull(const struct zcl_command_request *req,
         return;
     }
     while ((ent = readdir(d)) != NULL) {
-        char path[PATH_MAX + 64];
+        char path[DVM_PATH_CAP];
         const char *dot;
         FILE *f;
         size_t namelen = strlen(ent->d_name);
@@ -850,7 +900,13 @@ static void dvm_pull(const struct zcl_command_request *req,
             continue;
         if (strcmp(ent->d_name, ".jsonl") == 0)
             continue;
-        (void)snprintf(path, sizeof(path), "%s/%s", maildir, ent->d_name);
+        int path_length = snprintf(path, sizeof(path), "%s/%s", maildir, ent->d_name);
+        if (path_length <= 0 || (size_t)path_length >= sizeof(path)) {
+            (void)closedir(d);
+            free(rows);
+            dvm_fail(reply, "MAIL_READ_FAILED", "mail path exceeds its bound", maildir);
+            return;
+        }
         f = fopen(path, "r");
         if (!f)
             continue;
@@ -934,12 +990,14 @@ static void dvm_ack(const struct zcl_command_request *req,
                     struct zcl_command_reply *reply, const char *maildir)
 {
     long long cursor;
-    char path[PATH_MAX + 64];
-    char tmp[PATH_MAX + 96];
+    char path[DVM_PATH_CAP];
+    char tmp[DVM_PATH_CAP];
     char text[64];
     const char *agent;
+#if !defined(_WIN32)
     int fd;
     ssize_t w;
+#endif
     size_t len;
 
     if (!dvm_int(req, "cursor", &cursor)) {
@@ -955,9 +1013,14 @@ static void dvm_ack(const struct zcl_command_request *req,
                  "input.agent has an illegal spelling");
         return;
     }
-    (void)snprintf(path, sizeof(path), "%s/cursor.%s", maildir, agent);
-    (void)snprintf(tmp, sizeof(tmp), "%s/.cursor.%s.%ld.tmp", maildir, agent,
-                   (long)getpid());
+    int path_length = snprintf(path, sizeof(path), "%s/cursor.%s", maildir, agent);
+    int temp_length = snprintf(tmp, sizeof(tmp), "%s/.cursor.%s.%ld.tmp", maildir,
+                               agent, (long)getpid());
+    if (path_length <= 0 || (size_t)path_length >= sizeof(path) ||
+        temp_length <= 0 || (size_t)temp_length >= sizeof(tmp)) {
+        dvm_fail(reply, "MAIL_WRITE_FAILED", "cursor path exceeds its bound", maildir);
+        return;
+    }
     len = (size_t)snprintf(text, sizeof(text), "%lld\n", cursor);
     if (len == 0 || len >= sizeof(text)) {
         dvm_fail(reply, "BAD_INPUT", "cursor too large to record",
@@ -968,6 +1031,23 @@ static void dvm_ack(const struct zcl_command_request *req,
      * cursor: rename(2) is atomic, so a crash mid-write leaves the previous
      * cursor intact instead of an empty file that would silently rewind or
      * lose every reader's position. */
+#if defined(_WIN32)
+    struct platform_private_file file;
+    platform_private_file_init(&file);
+    if (!platform_private_file_create(tmp, &file)) {
+        dvm_fail(reply, "MAIL_WRITE_FAILED", "cannot create the private cursor", tmp);
+        return;
+    }
+    bool installed = platform_private_file_write_at(&file, text, len, 0) &&
+        platform_private_file_replace(&file, tmp, path);
+    if (!installed) {
+        (void)platform_private_file_retire(&file, tmp);
+        platform_private_file_close(&file);
+        dvm_fail(reply, "MAIL_WRITE_FAILED", "cannot install the private cursor", path);
+        return;
+    }
+    platform_private_file_close(&file);
+#else
     fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
     if (fd < 0) {
         dvm_fail(reply, "MAIL_WRITE_FAILED", "cannot record the cursor", tmp);
@@ -987,6 +1067,7 @@ static void dvm_ack(const struct zcl_command_request *req,
                  "cannot install the cursor file", path);
         return;
     }
+#endif
     (void)json_push_kv_str(&reply->data, "leaf", DVM_LEAF);
     (void)json_push_kv_str(&reply->data, "agent", agent);
     (void)json_push_kv_int(&reply->data, "cursor", cursor);
