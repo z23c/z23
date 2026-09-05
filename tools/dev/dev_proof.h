@@ -97,6 +97,11 @@ struct zcl_devloop_plan;
 bool zcl_dev_proof_test_build_test_selector(
     const struct zcl_devloop_plan *plan, bool inventory_only,
     char *out, size_t out_size, uint32_t *count_out);
+/* Seam for the stress-env regression: the exact call the test dimension
+ * makes right before it launches its runner, so a test can prove
+ * ZCL_STRESS_TESTS lands in this process's own environ (and therefore in
+ * every execvp()'d test child) without driving a full proof cycle. */
+bool zcl_dev_proof_test_stress_env_prepare(char *why, size_t why_len);
 #endif
 
 #endif

@@ -828,6 +828,12 @@ ZCL_TEST_GROUP(land_queue)
 ZCL_TEST_GROUP(dev_land)
 ZCL_TEST_GROUP(receipt)
 ZCL_TEST_GROUP(testcache)
+/* The push proof's test dimension must set ZCL_STRESS_TESTS=1 in its own
+ * environ (execvp reuses it, unconditionally, regardless of what a
+ * resident daemon's first environment held) or ~16 stress-marked groups
+ * self-skip and testcache caches the SKIP as a PASS. See
+ * tools/dev/dev_proof.c's proof_stress_tests_env_prepare(). */
+ZCL_TEST_GROUP(dev_proof_stress_env)
 ZCL_TEST_GROUP(test_group_selector)
 ZCL_TEST_GROUP(metaverse_catalog)
 ZCL_TEST_GROUP(node_character)

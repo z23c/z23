@@ -1895,6 +1895,36 @@ static bool environment_root(uint8_t out[32])
     return true;
 }
 
+/* The test dimension's runner is exec'd with execvp(), which reuses this
+ * process's own `environ` -- there is no separate envp built per child, so
+ * whatever this process last set is exactly what every forked test child
+ * inherits. A resident proof daemon forks many cycles from one long-lived
+ * process and keeps the environment it started with; roughly sixteen
+ * registered groups carry `if (!getenv("ZCL_STRESS_TESTS")) { SKIP(...) }`
+ * (tests/harness/src/test_kill9_recovery.c and friends), and testcache.c
+ * keys a cached verdict on that variable being present. Without this call
+ * the daemon's first environment silently outlives the setting: those
+ * groups self-skip and testcache happily caches the SKIP as a PASS, so a
+ * push proof admits a commit having never run its stress lane. Set it here,
+ * unconditionally, right before the test dimension launches -- not once at
+ * daemon start, and not left to whatever exported the hook that invoked
+ * this binary. */
+static bool proof_stress_tests_env_prepare(char *why, size_t why_len)
+{
+    if (setenv("ZCL_STRESS_TESTS", "1", 1) != 0) {
+        proof_why(why, why_len, "stress_tests_env_unavailable");
+        return false;
+    }
+    return true;
+}
+
+#if defined(ZCL_TESTING)
+bool zcl_dev_proof_test_stress_env_prepare(char *why, size_t why_len)
+{
+    return proof_stress_tests_env_prepare(why, why_len);
+}
+#endif
+
 static bool proof_make_jobs_arg(char out[16])
 {
     uint32_t jobs = platform_logical_cpu_count();
@@ -2518,6 +2548,7 @@ static bool proof_worker(const struct proof_paths *paths,
                     generation_checkpoint.source_id, sealed_source_id);
                 return false;
             }
+            if (!proof_stress_tests_env_prepare(why, why_len)) return false;
             if (setenv("ZCL_TESTCACHE_STORE_ROOT", paths->root, 1) != 0) {
                 proof_why(why, why_len, "test_cache_store_root_unavailable");
                 return false;
