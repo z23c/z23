@@ -676,6 +676,8 @@ void zcl_devloop_process_cancel_poll_clear(void);
 #if defined(ZCL_TESTING) && !defined(_WIN32)
 /* Deterministic process-backed KAT for exact-commit scheduling priority. */
 bool zcl_devloop_watch_commit_preemption_selftest(void);
+/* Real bounded-stream KAT for watcher-local queue backpressure. */
+bool zcl_devloop_watch_stream_backpressure_selftest(const char *repo_root);
 #endif
 #if defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)
 bool zcl_devloop_deterministic_compile_failure(

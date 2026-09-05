@@ -799,11 +799,18 @@ static bool watch_build_edit_epoch(struct watch_context *ctx,
     return true;
 }
 
+static bool watch_stream_flush(struct watch_context *ctx);
+
 static bool watch_stream_enqueue(struct watch_context *ctx, const char *body,
                                  size_t len)
 {
     if (!ctx || !body || len == 0 || len >= ZCL_DEVLOOP_CYCLE_JSON_MAX ||
-        ctx->pending_count >= sizeof(ctx->pending) / sizeof(ctx->pending[0]))
+        ctx->pending_count > sizeof(ctx->pending) / sizeof(ctx->pending[0]))
+        return false;
+    /* Local buffer pressure is not stream corruption. Seal the already
+     * visible epochs in order before reserving another bounded slot. */
+    if (ctx->pending_count == sizeof(ctx->pending) / sizeof(ctx->pending[0]) &&
+        !watch_stream_flush(ctx))
         return false;
     struct watch_pending_event *event = &ctx->pending[ctx->pending_count];
     char why[160] = {0};
@@ -838,6 +845,104 @@ static bool watch_stream_flush(struct watch_context *ctx)
     ctx->pending_count = 0;
     return true;
 }
+
+#if defined(ZCL_TESTING)
+bool zcl_devloop_watch_stream_backpressure_selftest(const char *repo_root)
+{
+    if (!repo_root || !repo_root[0])
+        return false;
+    struct watch_context ctx = {0};
+    if (snprintf(ctx.root, sizeof(ctx.root), "%s", repo_root) <= 0 ||
+        strlen(repo_root) >= sizeof(ctx.root))
+        return false;
+    char why[160] = {0};
+    if (!zcl_devloop_cycle_stream_reset(repo_root, 0, why, sizeof(why)))
+        return false;
+
+    char events[5][256];
+    size_t lengths[5];
+    for (size_t i = 0; i < 5; i++) {
+        int n = snprintf(
+            events[i], sizeof(events[i]),
+            "{\"schema\":\"zcl.dev_cycle.v1\",\"producer\":\"watch-test\","
+            "\"status\":\"impact_ready\",\"action\":\"reflex\","
+            "\"reason\":\"event-%zu\",\"phase\":\"IMPACT_READY\","
+            "\"runtime_published\":false,\"elapsed_ms\":%zu,\"files\":[]}",
+            i + 1, i + 1);
+        if (n <= 0 || (size_t)n >= sizeof(events[i]))
+            return false;
+        lengths[i] = (size_t)n;
+    }
+    for (size_t i = 0; i < 4; i++)
+        if (!watch_stream_enqueue(&ctx, events[i], lengths[i]))
+            return false;
+
+    /* The fifth event is the born-red assertion: a full local queue must seal
+     * its first four exact epochs and retain the new event, not stop watching. */
+    if (!watch_stream_enqueue(&ctx, events[4], lengths[4]) ||
+        ctx.pending_count != 1)
+        return false;
+    char out[512];
+    size_t out_len = 0;
+    int64_t epoch = 0, after = 0;
+    if (zcl_devloop_cycle_state_read(
+            repo_root, out, sizeof(out), &out_len, &epoch, why,
+            sizeof(why)) != ZCL_DEVLOOP_STATE_FOUND || epoch != 4 ||
+        out_len != lengths[3] || memcmp(out, events[3], out_len) != 0)
+        return false;
+    for (size_t i = 0; i < 4; i++) {
+        if (zcl_devloop_cycle_state_read_after(
+                repo_root, after, out, sizeof(out), &out_len, &epoch,
+                why, sizeof(why)) != ZCL_DEVLOOP_STATE_FOUND ||
+            epoch != after + 1 || out_len != lengths[i] ||
+            memcmp(out, events[i], out_len) != 0)
+            return false;
+        after = epoch;
+    }
+    if (zcl_devloop_cycle_state_read_after(
+            repo_root, after, out, sizeof(out), &out_len, &epoch,
+            why, sizeof(why)) != ZCL_DEVLOOP_STATE_FOUND ||
+        epoch != 5 || out_len != lengths[4] ||
+        memcmp(out, events[4], out_len) != 0 ||
+        !watch_stream_flush(&ctx) || ctx.pending_count != 0)
+        return false;
+    if (zcl_devloop_cycle_state_read(
+            repo_root, out, sizeof(out), &out_len, &epoch, why,
+            sizeof(why)) != ZCL_DEVLOOP_STATE_FOUND || epoch != 5 ||
+        out_len != lengths[4] || memcmp(out, events[4], out_len) != 0)
+        return false;
+
+    /* Losing the volatile generation underneath a full pending queue makes
+     * the fifth enqueue's automatic flush fail closed. No pending body drops. */
+    for (size_t i = 0; i < 4; i++)
+        if (!watch_stream_enqueue(&ctx, events[i], lengths[i]))
+            return false;
+    if (ctx.pending_count != 4 ||
+        !zcl_devloop_cycle_stream_reset(repo_root, 5, why, sizeof(why)) ||
+        watch_stream_enqueue(&ctx, events[4], lengths[4]) ||
+        ctx.pending_count != 4)
+        return false;
+    if (zcl_devloop_cycle_state_read(
+            repo_root, out, sizeof(out), &out_len, &epoch, why,
+            sizeof(why)) != ZCL_DEVLOOP_STATE_FOUND || epoch != 5)
+        return false;
+    size_t pending_before = ctx.pending_count;
+    if (watch_stream_enqueue(&ctx, "{}", ZCL_DEVLOOP_CYCLE_JSON_MAX) ||
+        ctx.pending_count != pending_before ||
+        zcl_devloop_cycle_state_read(
+            repo_root, out, sizeof(out), &out_len, &epoch, why,
+            sizeof(why)) != ZCL_DEVLOOP_STATE_FOUND || epoch != 5)
+        return false;
+    ctx.pending_count = 5; /* impossible live state: guard before slot access */
+    if (watch_stream_enqueue(&ctx, events[4], lengths[4]) ||
+        ctx.pending_count != 5 ||
+        zcl_devloop_cycle_state_read(
+            repo_root, out, sizeof(out), &out_len, &epoch, why,
+            sizeof(why)) != ZCL_DEVLOOP_STATE_FOUND || epoch != 5)
+        return false;
+    return true;
+}
+#endif
 
 static bool watch_emit_edit_seen(struct watch_context *ctx)
 {

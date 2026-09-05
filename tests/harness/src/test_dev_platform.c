@@ -3216,6 +3216,33 @@ static int test_exact_commit_preempts_edit_proof(void)
     return failures;
 }
 
+static int test_watcher_stream_backpressure(void)
+{
+    int failures = 0;
+    char home[PATH_MAX] = {0}, repo[PATH_MAX] = {0};
+    const char *current_home = getenv("HOME");
+    char *saved_home = current_home ? strdup(current_home) : NULL;
+    TEST("dev platform: full watcher event queue flushes exact epochs and remains live") {
+        ASSERT(!current_home || saved_home);
+        test_make_tmpdir(home, sizeof(home), "dev_platform", "watch_stream");
+        int n = snprintf(repo, sizeof(repo), "%s/repo", home);
+        ASSERT(n > 0 && (size_t)n < sizeof(repo));
+        ASSERT(mkdir(repo, 0700) == 0);
+        ASSERT(platform_environment_set("HOME", home, 1) == 0);
+        ASSERT(zcl_devloop_watch_stream_backpressure_selftest(repo));
+        PASS();
+    } _test_next:;
+    if (saved_home) {
+        (void)platform_environment_set("HOME", saved_home, 1);
+        free(saved_home);
+    } else {
+        (void)dp_environment_unset("HOME");
+    }
+    if (home[0])
+        test_rm_rf_recursive(home);
+    return failures;
+}
+
 struct process_poll_fixture {
     unsigned calls;
     unsigned cancel_after;
@@ -3908,6 +3935,7 @@ static int test_dev_platform_platform_arm(void)
 #endif
     failures += test_resident_process_cancellation();
     failures += test_exact_commit_preempts_edit_proof();
+    failures += test_watcher_stream_backpressure();
     failures += test_resident_process_supersession();
     failures += test_native_source_cas_shadow();
     failures += test_source_identity_failure_tokens();
