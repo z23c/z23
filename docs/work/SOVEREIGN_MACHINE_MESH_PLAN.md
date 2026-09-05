@@ -529,6 +529,12 @@ so the decision is visible rather than looking like an oversight. When a
 challenge-response makes one of them peer-verifiable, that row's
 verification changes and its count can rise in the same edit.
 
+The roster returns that table with its answer. Every rule, including the
+sentence saying why it pays what it pays, rides in the same reply as the
+counts it produced, so an operator reading a zero can see the reason
+without being sent to a file to find it. A number nobody can account for
+is how a reward scheme stops being believed.
+
 The `game` service is how two fleets meet. It registers on the stream
 layer beside the terminal, so a match rides the Noise session and the
 pairing that already exist: no new listener, no new port, no second

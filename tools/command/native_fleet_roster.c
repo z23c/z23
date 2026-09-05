@@ -27,6 +27,7 @@
  *              self_reported[] {fact, observed, why},
  *              airships{<asset>: count}}
  *   row_count, total, truncated, airships{<asset>: fleet total}
+ *   rules[]   {fact, asset, per_node, verification, confidence, why}
  *
  * TWO CLASSES, NEVER ONE FIELD. `verified` carries only facts the rule
  * table marks PEER_VERIFIED, each with the time the observation was made;
@@ -41,6 +42,12 @@
  * through fleet_airship_award, over the facts OBSERVED TO HOLD. The facts
  * and the assets are read from that table too, so adding either is one .def
  * edit and no edit here.
+ *
+ * THE RULES COME WITH THE ANSWER. `rules` renders every row of that table,
+ * including the sentence saying why it pays what it pays, so an operator
+ * reading a count of zero can see the reason in the same reply instead of
+ * being sent to a file to find out. A number nobody can account for is how
+ * a reward scheme stops being believed.
  *
  * REFUSALS. ROSTER_UNPAIRED_OPERATOR when no machine is paired at all —
  * an empty fleet is a state to fix, not an empty list to render. And
@@ -128,8 +135,8 @@ static bool roster_observe(const char *fact,
 }
 
 /* One roster row: identity, both fact classes, and what the rule table
- * awards this machine. Returns the count of facts observed to hold, which
- * the caller needs for nothing but reading the row back in a test. */
+ * awards this machine. The fact lists come from the table, so a new fact
+ * lands in the right class here without an edit. */
 static void roster_push_row(struct json_value *rows,
                             const struct mesh_pairing_public_view *view,
                             const struct roster_evidence *evidence)
@@ -281,7 +288,7 @@ void zcl_native_handle_fleet_roster(const struct zcl_command_request *request,
     struct roster_evidence evidence[ROSTER_ROW_MAX];
     struct db_mesh_machine_view *machines = NULL;
     struct db_mesh_pairing_counts counts;
-    struct json_value rows, airships;
+    struct json_value rows, airships, rules;
     const struct json_value *arg;
     const char *datadir = NULL;
     sqlite3 *db = NULL;
@@ -375,6 +382,34 @@ void zcl_native_handle_fleet_roster(const struct zcl_command_request *request,
     }
     (void)json_push_kv(&reply->data, "airships", &airships);
     json_free(&airships);
+
+    /* Every count above, accounted for in the same reply. */
+    json_init(&rules);
+    json_set_array(&rules);
+    for (size_t i = 0; i < fleet_airship_rule_count(); i++) {
+        const struct fleet_airship_rule_v1 *rule = fleet_airship_rule_at(i);
+        struct json_value entry;
+
+        if (!rule)
+            continue;
+        json_init(&entry);
+        json_set_object(&entry);
+        (void)json_push_kv_str(&entry, "fact", rule->fact);
+        (void)json_push_kv_str(&entry, "asset", rule->asset);
+        (void)json_push_kv_int(&entry, "per_node", (int64_t)rule->per_node);
+        (void)json_push_kv_str(
+            &entry, "verification",
+            fleet_airship_verification_name(
+                fleet_airship_verification_of(rule->fact)));
+        (void)json_push_kv_str(&entry, "confidence",
+                               fleet_airship_confidence_name(
+                                   rule->confidence));
+        (void)json_push_kv_str(&entry, "why", rule->why);
+        (void)json_push_back(&rules, &entry);
+        json_free(&entry);
+    }
+    (void)json_push_kv(&reply->data, "rules", &rules);
+    json_free(&rules);
 
     reply->status = ZCL_COMMAND_STATUS_PASSED;
 }
