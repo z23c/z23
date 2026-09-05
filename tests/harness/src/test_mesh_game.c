@@ -275,23 +275,23 @@ int test_mesh_game(void)
 
         struct mesh_game_frame frame;
         game_hello(&frame, peer_zid);
-        ASSERT(game_send(1, true, &frame));
+        ASSERT(game_send(0, true, &frame));
         ASSERT_EQ(mesh_stream_test_live_count(MESH_GAME_SERVICE_NAME),
                   (size_t)1);
         game_drain();
 
         game_roster(&frame, peer_zid, 2u);
-        ASSERT(game_send(1, false, &frame));
+        ASSERT(game_send(0, false, &frame));
         ASSERT_EQ(mesh_stream_test_live_count(MESH_GAME_SERVICE_NAME),
                   (size_t)1);
 
         game_match_open(&frame, 3u);
-        ASSERT(game_send(1, false, &frame));
+        ASSERT(game_send(0, false, &frame));
         ASSERT_EQ(mesh_stream_test_live_count(MESH_GAME_SERVICE_NAME),
                   (size_t)1);
 
         game_match_state(&frame, 7u, 3u);
-        ASSERT(game_send(1, false, &frame));
+        ASSERT(game_send(0, false, &frame));
         ASSERT_EQ(mesh_stream_test_live_count(MESH_GAME_SERVICE_NAME),
                   (size_t)1);
         game_drain();
@@ -300,7 +300,7 @@ int test_mesh_game(void)
         frame.kind = MESH_GAME_KIND_MATCH_CLOSE;
         frame.body.match_close.reason_len = 4u;
         memcpy(frame.body.match_close.reason, "over", 4);
-        ASSERT(game_send(1, false, &frame));
+        ASSERT(game_send(0, false, &frame));
         ASSERT_EQ(mesh_stream_test_live_count(MESH_GAME_SERVICE_NAME),
                   (size_t)0);
         ASSERT(strcmp(game_close_token(), "game_ok") == 0);
@@ -314,10 +314,10 @@ int test_mesh_game(void)
         struct mesh_game_frame frame;
 
         game_hello(&frame, peer_zid);
-        ASSERT(game_send(3, true, &frame));
+        ASSERT(game_send(2, true, &frame));
         game_drain();
         game_roster(&frame, stranger, 1u);
-        ASSERT(game_send(3, false, &frame));
+        ASSERT(game_send(2, false, &frame));
         ASSERT_EQ(mesh_stream_test_live_count(MESH_GAME_SERVICE_NAME),
                   (size_t)0);
         ASSERT(strcmp(game_close_token(),
@@ -332,7 +332,7 @@ int test_mesh_game(void)
         struct mesh_game_frame frame;
 
         game_hello(&frame, stranger);
-        ASSERT(game_send(5, true, &frame));
+        ASSERT(game_send(4, true, &frame));
         ASSERT_EQ(mesh_stream_test_live_count(MESH_GAME_SERVICE_NAME),
                   (size_t)0);
         PASS();
@@ -345,14 +345,14 @@ int test_mesh_game(void)
         struct mesh_game_frame frame;
 
         game_hello(&frame, peer_zid);
-        ASSERT(game_send(7, true, &frame));
+        ASSERT(game_send(6, true, &frame));
         game_drain();
         game_roster(&frame, peer_zid, 1u);
-        ASSERT(game_send(7, false, &frame));
+        ASSERT(game_send(6, false, &frame));
         game_match_open(&frame, 2u);
-        ASSERT(game_send(7, false, &frame));
+        ASSERT(game_send(6, false, &frame));
         game_match_state(&frame, 1u, 4u);
-        ASSERT(game_send(7, false, &frame));
+        ASSERT(game_send(6, false, &frame));
         ASSERT_EQ(mesh_stream_test_live_count(MESH_GAME_SERVICE_NAME),
                   (size_t)0);
         ASSERT(strcmp(game_close_token(), "game_state_overflow") == 0);
@@ -367,11 +367,11 @@ int test_mesh_game(void)
         uint8_t bogus[8];
 
         game_hello(&frame, peer_zid);
-        ASSERT(game_send(9, true, &frame));
+        ASSERT(game_send(8, true, &frame));
         game_drain();
         memset(bogus, 0, sizeof(bogus));
         bogus[0] = 0x77; /* no kind claims this byte */
-        ASSERT(game_send_raw(9, bogus, sizeof(bogus)));
+        ASSERT(game_send_raw(8, bogus, sizeof(bogus)));
         ASSERT_EQ(mesh_stream_test_live_count(MESH_GAME_SERVICE_NAME),
                   (size_t)0);
         ASSERT(strcmp(game_close_token(), "game_unknown_kind") == 0);
@@ -381,10 +381,10 @@ int test_mesh_game(void)
         game_drain();
         mesh_stream_test_reset();
         game_hello(&frame, peer_zid);
-        ASSERT(game_send(11, true, &frame));
+        ASSERT(game_send(10, true, &frame));
         game_drain();
         game_match_state(&frame, 1u, 1u);
-        ASSERT(game_send(11, false, &frame));
+        ASSERT(game_send(10, false, &frame));
         ASSERT_EQ(mesh_stream_test_live_count(MESH_GAME_SERVICE_NAME),
                   (size_t)0);
         ASSERT(strcmp(game_close_token(), "game_sequence") == 0);
