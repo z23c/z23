@@ -126,7 +126,14 @@ struct state_offer_v1 {
     uint8_t header_hash[32];         /* block hash at bundle_height */
     uint8_t content_digest[32];      /* whole-file SHA3 — the install check */
     uint8_t chunk_tree_root[32];     /* RMF chunk_root — the serve-request key */
-    uint8_t mmb_peaks_digest[32];    /* offerer's MMB peaks at bundle_height */
+    /* The offerer's MMB peaks digest at offerer_tip_height — the accumulator a
+     * phase-2 sampling proof samples from. ZRC-0011 section 1 writes this "at
+     * bundle_height"; this tree can produce an MMB root for the state it
+     * currently holds and has no accessor for a historical one, and a work
+     * proof wants the tip anchor in any case. The offer carries
+     * offerer_tip_height beside it so the anchor is never ambiguous, and the
+     * freshness rule already bounds the two heights within 576 of each other. */
+    uint8_t mmb_peaks_digest[32];
     uint8_t producer_receipt_id[32]; /* mint identity, for dedup + freshness */
     uint8_t offerer_online_pubkey[32]; /* durable Ed25519 key that signed this */
     uint64_t content_bytes;

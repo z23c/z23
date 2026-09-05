@@ -1,5 +1,6 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  * The only lib/net-to-swarm adapter; see config/boot_zcode_swarm.h. */
+#include "config/state_offer_service.h"
 #include "config/boot_zcode_swarm.h"
 #include "config/boot_zcode_swarm_membership.h"
 #include "config/boot_zcode_swarm_receipt.h"
@@ -735,6 +736,13 @@ void boot_zcode_swarm_tick(struct msg_processor *mp, struct p2p_node *node,
     if (!mp || !node)
         return;
     boot_fleet_board_tick(mp, node, ctx);
+    /* ZRC-0011: the consumer half advances on the peer-link tick, which is the
+     * first place in this process that runs WITH a live peer. The boot-time
+     * state-source decision runs long before connman is up, so a first boot
+     * with an empty file_services cache could never benefit from a peer it had
+     * not met yet; this is where it can. The call decides and returns — the
+     * download it may start runs on its own thread, never on this one. */
+    state_offer_service_tick();
     int64_t wall = (int64_t)platform_time_wall_time_t();
     boot_zcode_swarm_lock();
     struct vcs_swarm_engine *engine =
@@ -870,6 +878,7 @@ void boot_zcode_swarm_shutdown(void)
     }
     boot_zcode_dht_shutdown();
     boot_mesh_status_shutdown();
+    state_offer_service_shutdown();
     boot_fleet_board_shutdown();
     boot_mesh_game_shutdown();
     boot_fleet_ledger_shutdown();

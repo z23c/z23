@@ -7,6 +7,7 @@
 #include "config/boot_refusal_reports.h"
 #include "util/sysinit.h"
 #include "config/boot_shutdown_marker.h"
+#include "config/state_offer_service.h"
 #include "util/shutdown_stagewatch.h"
 #include "config/boot_background_workers.h"
 #include "config/bundle_fetch_seeds.h"  /* ZCL_BUNDLE_FETCH_CLEARNET_SEEDS */
@@ -748,6 +749,11 @@ bool app_init_services(struct app_context *ctx,
     boot_wire_zswap_yardsale(svc->msg_processor, svc);
     msg_processor_set_file_service_save(svc->msg_processor,
                                         boot_save_file_service, svc);
+    state_offer_service_start(svc->datadir, svc->node_db);
+    /* ZRC-0011: the same handshake message now also carries signed state
+     * offers. Wiring the sink is what turns "a peer serves files" into "a peer
+     * holds THIS state", which is what a fresh node needs to act. */
+    state_offer_service_wire(svc->msg_processor);
     msg_processor_set_snapshot_active(svc->msg_processor,
                                       boot_snapshot_active, svc);
     msg_processor_set_snapshot_anchor_accessors(
