@@ -1261,6 +1261,8 @@ int main(int argc, char **argv)
       failures += test_mesh_status_proto(); }
     { extern int test_state_offer(void);
       failures += test_state_offer(); }
+    { extern int test_state_offer_store(void);
+      failures += test_state_offer_store(); }
     { extern int test_mesh_private_object_proto(void);
       failures += test_mesh_private_object_proto(); }
     { extern int test_mesh_private_object_crypto(void);
