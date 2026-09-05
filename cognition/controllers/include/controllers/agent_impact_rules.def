@@ -2489,7 +2489,7 @@ AGENT_IMPACT_RULE("platform/modules/platform/tests/cli_render_env_windows_accept
 AGENT_IMPACT_RULE("platform/modules/platform/tests/thread_join_windows_acceptance.c", "make_lint_gates")
 AGENT_IMPACT_RULE("tests/harness/src/dev_fleet_capture_windows_acceptance.c", "make_lint_gates")
 AGENT_IMPACT_RULE("tests/harness/src/dev_agent_mail_windows_acceptance.c", "make_lint_gates")
-AGENT_IMPACT_RULE("tools/command/native_devagent_mail.c", "devagent_mail make_lint_gates")
+AGENT_IMPACT_RULE("tools/command/native_devagent_mail.c|tests/harness/src/test_devagent_mail.c", "devagent_mail make_lint_gates")
 
 /* Two probe programs that arrived under platform/modules/platform/tests with NO reader at
  * all -- weaker than the acceptance programs above, which at least

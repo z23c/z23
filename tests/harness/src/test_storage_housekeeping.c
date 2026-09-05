@@ -162,6 +162,9 @@ int test_storage_housekeeping(void)
         storage_housekeeping_stats(&after);
         SHK_CHECK("the synchronous boot sweep ran",
                   after.sweeps >= before.sweeps + 1);
+        SHK_CHECK("an unmeasured projection reports unavailable byte counts",
+                  after.projection_file_bytes == -1 &&
+                  after.projection_live_bytes == -1);
 
         storage_housekeeping_stop();
         SHK_CHECK("stop joins and returns on an empty datadir", true);

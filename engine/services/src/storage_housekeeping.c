@@ -55,11 +55,16 @@ static char g_datadir[1024];
 
 static void sweep_projection(const struct storage_pacing *pacing)
 {
-    struct projection_store_usage before, after;
+    /* Compaction can refuse before measuring a closed or unavailable store.
+     * Preserve the unavailable sentinel until it supplies an observation. */
+    struct projection_store_usage after = {
+        .page_size = -1, .page_count = -1, .free_pages = -1,
+        .file_bytes = -1, .live_bytes = -1, .free_bytes = -1,
+    };
     if (!storage_pacing_maintenance_begin())
         return;
     bool compacted = projection_store_compact_if_needed(
-        pacing->compact_floor_bytes, pacing->compact_ratio_pct, &before,
+        pacing->compact_floor_bytes, pacing->compact_ratio_pct, NULL,
         &after);
     storage_pacing_maintenance_end();
 
