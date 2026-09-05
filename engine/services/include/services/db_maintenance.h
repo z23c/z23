@@ -186,7 +186,14 @@ void db_maintenance_stop(void);
  *   "vacuum"  — VACUUM  (caller is responsible for idle check)
  *
  * Returns ZCL_OK on SQLite success. `db` must be opened. Emits the
- * _START / _DONE / _FAILED events on success and failure paths. */
+ * _START / _DONE / _FAILED events on success and failure paths.
+ *
+ * While a bulk node_db catchup walk is running this YIELDS the tick
+ * instead: it returns a non-ok result whose message is
+ * "deferred, catchup active", emits no events, counts no failure, and
+ * leaves the op's last-run stamp untouched so the next call still finds
+ * the op due. At most DB_MAINT_MAX_CATCHUP_DEFERRALS calls in a row
+ * yield; the one after that runs. */
 struct zcl_result db_maintenance_run_now(struct node_db *db, const char *op);
 
 /* Checkpoint+truncate the node.db WAL NOW using the db registered by
