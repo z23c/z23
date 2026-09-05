@@ -28,6 +28,14 @@
  * with ZCL_MIND_STATE_DIR pointed at the fixture so nothing touches the
  * operator's own mind state. */
 
+
+/* realpath() is declared by glibc only under _DEFAULT_SOURCE; without this
+ * the fortify inline hides that at -O2 and the file is a hard C23 error at
+ * -O0 and on any other libc. The macro is read when <features.h> is first
+ * pulled in, so it has to come before the first include. */
+#if !defined(_WIN32) && !defined(_DEFAULT_SOURCE)
+#define _DEFAULT_SOURCE
+#endif
 #include "test/test_core.h"
 
 #include "codeindex/codeindex.h"

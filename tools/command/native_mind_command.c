@@ -15,6 +15,7 @@
 
 #include "command/native_command.h"
 
+#include "base/hex.h"
 #include "codeindex/codeindex.h"
 #include "controllers/agent_impact_rules.h"
 #include "controllers/rpc_client.h"
@@ -117,16 +118,11 @@ static void mind_refuse_stale(struct zcl_command_reply *reply,
  * sealed root. Never a zeroed root presented as an identity. */
 static void mind_index_root(struct codeindex *ci, char out[65])
 {
-    static const char hex[] = "0123456789abcdef";
     uint8_t root[32];
-    out[0] = '\0';
+    out[0] = 0;
     if (!ci || !codeindex_source_root_sha3(ci, root))
         return;
-    for (size_t i = 0; i < sizeof(root); i++) {
-        out[i * 2] = hex[root[i] >> 4];
-        out[i * 2 + 1] = hex[root[i] & 0x0f];
-    }
-    out[64] = '\0';
+    zcl_hex_encode(root, sizeof(root), out);
 }
 
 /* ── the six questions ────────────────────────────────────────────────── */

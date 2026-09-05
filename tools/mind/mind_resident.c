@@ -6,6 +6,7 @@
 
 #include "codeindex/codeindex.h"
 #include "codeindex/codeindex_build.h"
+#include "base/hex.h"
 #include "platform/directory_watcher.h"
 #include "platform/time_compat.h"
 #include "util/log_macros.h"
@@ -96,14 +97,8 @@ static void mind_observe(struct zcl_mind_checkout *c, long long now)
      * which measured a different build. */
     (void)codeindex_build_cold_ms(ci, &c->build_cold_ms, &c->build_cold_files);
     uint8_t root_sha3[32];
-    static const char hex[] = "0123456789abcdef";
-    if (codeindex_source_root_sha3(ci, root_sha3)) {
-        for (size_t i = 0; i < sizeof(root_sha3); i++) {
-            c->index_root[i * 2] = hex[root_sha3[i] >> 4];
-            c->index_root[i * 2 + 1] = hex[root_sha3[i] & 0x0f];
-        }
-        c->index_root[64] = '\0';
-    }
+    if (codeindex_source_root_sha3(ci, root_sha3))
+        zcl_hex_encode(root_sha3, sizeof(root_sha3), c->index_root);
     struct ci_group groups[ZCL_MIND_GROUPS_MAX];
     int n = codeindex_groups(ci, groups, ZCL_MIND_GROUPS_MAX);
     for (int i = 0; i < n && c->group_count < ZCL_MIND_GROUPS_MAX; i++) {
@@ -147,8 +142,8 @@ static bool mind_rebuild(struct zcl_mind_checkout *c, long long now)
     return ok;
 }
 
-int zcl_mind_serve(zcl_mind_stop_predicate stop, void *stop_opaque,
-                   long long max_cycles)
+static int mind_serve_posix(zcl_mind_stop_predicate stop, void *stop_opaque,
+                            long long max_cycles)
 {
     char lock_path[ZCL_MIND_PATH_MAX];
     struct zcl_mind_registry reg;
@@ -273,8 +268,8 @@ retire:
 
 #else /* _WIN32 */
 
-int zcl_mind_serve(zcl_mind_stop_predicate stop, void *stop_opaque,
-                   long long max_cycles)
+static int mind_serve_posix(zcl_mind_stop_predicate stop, void *stop_opaque,
+                            long long max_cycles)
 {
     (void)stop; (void)stop_opaque; (void)max_cycles;
     LOG_ERROR("mind", "serve: the mind resident is POSIX-only on this build");
@@ -282,3 +277,13 @@ int zcl_mind_serve(zcl_mind_stop_predicate stop, void *stop_opaque,
 }
 
 #endif /* _WIN32 */
+
+/* ONE definition of the public entry point, above the platform split: the
+ * arms differ only in how the singleton and the watch are held, and two
+ * non-static bodies for one name is exactly what check-arm-symbol-single
+ * refuses — the strictest arm would otherwise be invisible to the other. */
+int zcl_mind_serve(zcl_mind_stop_predicate stop, void *stop_opaque,
+                   long long max_cycles)
+{
+    return mind_serve_posix(stop, stop_opaque, max_cycles);
+}
