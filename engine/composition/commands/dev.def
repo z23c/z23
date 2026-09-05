@@ -1018,6 +1018,120 @@ ZCL_COMMAND_READY_READ(
     ZCL_COMMAND_TRAIT_IDEMPOTENT | ZCL_COMMAND_TRAIT_DEV_ONLY,
     ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_dev_fleet_start)
 
+/* ── dev.fleet.tunnel ──────────────────────────────────────────────────────
+ * A TCP tunnel between two paired machines, carried as a service on the
+ * mesh stream layer. The acceptor dials its own loopback and nothing else,
+ * and only a port one of its own allow rows names for that exact peer.
+ * Nothing is allowed by default: forwarding ssh is one row, written on the
+ * machine being reached. */
+ZCL_COMMAND_BRANCH("dev.fleet.tunnel", "dev.fleet",
+                   "Loopback TCP tunnels between paired machines",
+                   ZCL_COMMAND_LAYER_DEV)
+
+ZCL_COMMAND_READY_COMMAND(
+    "dev.fleet.tunnel.open", "dev.fleet.tunnel", "",
+    "Open a local entrance to one port on a paired machine's loopback",
+    "Binds a listener on 127.0.0.1 and reports the port it got; every "
+    "connection accepted there becomes one stream to the peer, which dials "
+    "its own loopback at remote_port and refuses unless one of its allow "
+    "rows names this machine and that port. local_port 0 asks the OS for a "
+    "free port. Refusals are named: tunnel_peer_unpaired (no live pairing "
+    "row), tunnel_local_bind_failed, tunnel_cap. Whether anything is "
+    "carried is the far side's decision, not this one.",
+    ZCL_COMMAND_RESULT_BUDGET,
+    "tunnel,ssh,port,forward,mesh,stream,loopback",
+    "zcl.dev_fleet_tunnel_open.input.v1", "zcl.dev_fleet_tunnel.open.v1",
+    "peer,remote_port,local_port", "peer",
+    "z23 dev fleet tunnel open --peer=<id> --remote-port=22 --local-port=2222",
+    ZCL_COMMAND_LAYER_DEV, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_NODE,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_CONFIRM_NONE,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_NONE,
+    zcl_native_handle_dev_fleet_tunnel_open)
+
+ZCL_COMMAND_READY_COMMAND(
+    "dev.fleet.tunnel.close", "dev.fleet.tunnel", "",
+    "Close one local tunnel entrance and every connection on it",
+    "Drops the listener and ends each live stream it opened by name, so the "
+    "local programs holding those connections see them close. Idempotent "
+    "only in effect: closing an id that is not open is refused, never "
+    "reported as a close that happened.",
+    ZCL_COMMAND_RESULT_BUDGET, "tunnel,close,port,forward,mesh",
+    "zcl.dev_fleet_tunnel_close.input.v1", "zcl.dev_fleet_tunnel.close.v1",
+    "tunnel_id", "tunnel_id",
+    "z23 dev fleet tunnel close --tunnel-id=1",
+    ZCL_COMMAND_LAYER_DEV, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_NODE,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_CONFIRM_NONE,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_NONE,
+    zcl_native_handle_dev_fleet_tunnel_close)
+
+ZCL_COMMAND_READY_READ(
+    "dev.fleet.tunnel.list", "dev.fleet.tunnel", "",
+    "Show both directions: the entrances open here and what this node admits",
+    "Every local entrance with its peer, its local and remote port, the "
+    "connections live on it now and since it opened, bytes each way, and "
+    "its age; then this node's own allow rows, which are what it will let a "
+    "peer reach on its loopback. An empty allow list is the honest answer "
+    "that this node carries nothing for anyone.",
+    ZCL_COMMAND_RESULT_BUDGET, "tunnel,list,ports,allow,mesh",
+    "zcl.command.empty_input.v1", "zcl.dev_fleet_tunnel.list.v1", "", "",
+    "z23 dev fleet tunnel list",
+    ZCL_COMMAND_LAYER_DEV, ZCL_COMMAND_SCOPE_NODE,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_LATENCY_FAST,
+    ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_dev_fleet_tunnel_list)
+
+ZCL_COMMAND_READY_COMMAND(
+    "dev.fleet.tunnel.allow", "dev.fleet.tunnel", "",
+    "Let one paired machine reach one port on this node's loopback",
+    "Writes one row naming a peer and a port into this node's allow table, "
+    "with the operator's own reason. This is the whole authority a tunnel "
+    "acceptor consults: no row, no tunnel, and a row admits that one port "
+    "for that one peer on 127.0.0.1 only. Forwarding ssh is this call with "
+    "port 22. Re-writing an existing row replaces its reason and widens "
+    "nothing.",
+    ZCL_COMMAND_RESULT_BUDGET, "tunnel,allow,ssh,port,authority,mesh",
+    "zcl.dev_fleet_tunnel_allow.input.v1", "zcl.dev_fleet_tunnel.allow.v1",
+    "peer,port,why", "peer",
+    "z23 dev fleet tunnel allow --peer=<id> --port=22 --why=ssh",
+    ZCL_COMMAND_LAYER_DEV, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_NODE,
+    ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_CONFIRM_NONE,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_NONE,
+    zcl_native_handle_dev_fleet_tunnel_allow)
+
+ZCL_COMMAND_READY_COMMAND(
+    "dev.fleet.tunnel.deny", "dev.fleet.tunnel", "",
+    "Take back one allow row",
+    "Removes the row naming that peer and that port, so the next open for "
+    "it is refused tunnel_target_not_allowed. Live streams the row already "
+    "admitted are ended by closing the entrance, not by this call. Removing "
+    "a row that is not there is refused, never reported as a removal.",
+    ZCL_COMMAND_RESULT_BUDGET, "tunnel,deny,revoke,port,authority,mesh",
+    "zcl.dev_fleet_tunnel_deny.input.v1", "zcl.dev_fleet_tunnel.deny.v1",
+    "peer,port", "peer",
+    "z23 dev fleet tunnel deny --peer=<id> --port=22",
+    ZCL_COMMAND_LAYER_DEV, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_NODE,
+    ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_CONFIRM_NONE,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_NONE,
+    zcl_native_handle_dev_fleet_tunnel_deny)
+
 /* ── dev.train ─────────────────────────────────────────────────────────────
  * Stacks lanes onto origin/main without waiting on lint. `build` fetches
  * origin, opens a detached worktree at <checkout-parent>/z23-stack<name>,

@@ -30,4 +30,22 @@ void zcl_native_handle_dev_fleet(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
 
+/* `dev fleet tunnel` — the operator's five leaves over the node's tunnel
+ * service. Each dials the running node; none decides admission itself. */
+void zcl_native_handle_dev_fleet_tunnel_open(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
+void zcl_native_handle_dev_fleet_tunnel_close(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
+void zcl_native_handle_dev_fleet_tunnel_list(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
+void zcl_native_handle_dev_fleet_tunnel_allow(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
+void zcl_native_handle_dev_fleet_tunnel_deny(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
+
 #endif /* ZCL_NATIVE_DEV_FLEET_H */
