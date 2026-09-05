@@ -96,3 +96,14 @@ Every ZRC body has these sections, in this order:
    resolve, and claims must stay true.
 6. **Status changes are commits.** A status change is not complete until it
    is committed; there is no other place a ZRC's current status is recorded.
+
+## Proposals
+
+Numbers are assigned by listing this directory, not by editing a registry;
+the lines below are a reading aid, and a ZRC's own header is what its status
+means.
+
+- [`0007-asynchronous-p2p-landing.md`](0007-asynchronous-p2p-landing.md) —
+  candidates, per-group verdicts and publications as gossiped signed rows, so
+  landing is asynchronous, decentralized, and pays only for what a change can
+  reach.
