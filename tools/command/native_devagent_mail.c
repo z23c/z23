@@ -85,6 +85,7 @@
 #include "base/safe_alloc.h"
 #include "command/native_devagent.h"
 #include "json/json.h"
+#include "platform/directory_compat.h"
 #include "platform/state_root.h"
 #include "platform/time_compat.h"
 
@@ -382,13 +383,7 @@ static bool dvm_escape(const char *in, char *out, size_t cap)
 
 static bool dvm_mkdir_one(const char *path)
 {
-    if (mkdir(path, 0700) == 0)
-        return true;
-    if (errno == EEXIST) {
-        struct stat st;
-        return stat(path, &st) == 0 && S_ISDIR(st.st_mode);
-    }
-    return false;
+    return platform_directory_ensure(path, 0700);
 }
 
 static bool dvm_mail_dir(char *out, size_t cap)
