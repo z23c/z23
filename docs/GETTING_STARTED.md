@@ -94,20 +94,26 @@ pinned SHA-256, and compiles them locally into `vendor/lib/`. After that,
 archives are cached and builds are offline. Exact versions, hashes, and the
 vendoring model are in [`docs/BUILD.md`](BUILD.md).
 
-**Optional — the real Tor onion service.** The default build links a Tor
-*stub*, which cannot publish a `.onion`. The durable service therefore leaves
-Tor disabled unless the operator explicitly requests it. To build the real
-embedded Tor:
+**Tor is bundled, and it is on.** A plain `make` builds the pinned embedded
+Tor and links it: the node reaches the onion network and publishes its own
+`.onion` with no flag. The first build compiles Tor once (about two minutes
+on a 32-core box, dominated by its `configure`, so a small box is not much
+slower); after that the archives are cached under `vendor/tor/` and reused,
+and a new worktree hardlinks them from the checkout it was created from
+instead of rebuilding.
 
-```bash
-make tor-full
-```
+`-no-tor` is the opt-out. It is refused on a canonical, soak or standby
+operator lane — those serve the network, and a node quietly off the onion
+network there is the failure this default exists to prevent.
 
-This initializes the pinned submodule and produces its four required static
-archives with an embedding profile that avoids undeclared optional host
-libraries. Later invocations are incremental. When `vendor/tor/libtor.a`
-exists, the Makefile links it automatically and `-tor` publishes a real onion
-address.
+`make tor-full` still exists and forces the Tor rebuild. `make tor-ready`
+is the cheap front door (present → nothing, else hardlink, else build).
+
+**The stub is a dev-only opt-in.** `make ZCL_TOR=stub ...` links
+`vendor/lib/libtor_stub.a`, whose every entry point fails. It prints one
+loud line while building, `zclassic23 -version` reports `tor: stub`, the
+binary refuses `-tor`, the onion flags and onion-node mode at runtime, and
+no ship or install step will package it.
 
 **Fast compile-check inner loop** (no link, good for verifying a change
 compiles before a full build):
@@ -188,9 +194,10 @@ vendored OpenSSL, libevent, and zlib rather than at the system trees macOS does
 not ship. The archives — not the host OS — select what the node links, on every
 host. This build path **has been observed to complete on an arm64 Mac** (`make tor-full`,
 ~110 s, producing `vendor/tor/libtor.a` from vendored OpenSSL/libevent/zlib).
-Until it is measured on Intel macOS, treat embedded Tor there as untested. The
-default Tor stub keeps ordinary node operation available but does not publish an
-onion service.
+Until it is measured on Intel macOS, treat embedded Tor there as untested; a
+Mac that cannot build it can fall back to `make ZCL_TOR=stub`, which keeps
+ordinary node operation available but publishes no onion service and
+cannot be shipped.
 
 ### Your one obvious next action
 
@@ -357,8 +364,8 @@ on what you already have, so read the first line of each before picking:
    hostnames and trusts no certificate authority, so there is no DNS seeder
    to be censored or spoofed. The compiled-in fixed seeds are raw IP
    addresses; the onion seeds are `.onion` directory nodes and are only
-   dialled if you built the real Tor fork (`make tor-full`) and passed `-tor`
-   — on a default (Tor-stub) build the fixed IP seeds are the whole bootstrap.
+   dialled by a real-Tor build, which is the default; on a `ZCL_TOR=stub`
+   build the fixed IP seeds are the whole bootstrap.
    Either way, the seeds are a starting point, not the network: within the
    first minute or two the node's peer set normally contains addresses that
    are not in the compiled list at all, because peers gossip addresses to each
@@ -411,9 +418,9 @@ choosing it for anything that needs full history (e.g. a public explorer).
 The node **is its own web server** — no nginx/reverse proxy. The explorer
 (`/explorer`, JSON API under `/api`) is reachable two ways:
 
-- **Over the onion service** — build the real Tor fork (above) and run
-  `-tor`; the explorer is served on the node's `.onion`, visible via
-  `z23 status`. No certificate needed.
+- **Over the onion service** — on by default; the explorer is served on the
+  node's `.onion`, visible via `z23 status`. No certificate needed. (A
+  `-no-tor` or `ZCL_TOR=stub` build has no onion address to serve it on.)
 - **Over HTTPS on clearnet** — drop a TLS certificate/key at
   `<datadir>/ssl/fullchain.pem` and `<datadir>/ssl/privkey.pem`; the HTTPS
   explorer starts on port `8443` once the node is near tip. Without a cert
@@ -476,10 +483,9 @@ after `git clone` into `~/zclassic23`; if you cloned elsewhere, edit the
 [`platform/deploy/zclassic23.env.example`](../platform/deploy/zclassic23.env.example) and edit
 it; the unit sources this file optionally, so a fresh clone without it still
 starts cleanly and syncs over clearnet. The unit does not request Tor by
-default because the default build links the offline stub. After building the
-real implementation with `make tor-full`, set `ZCL_TOR_FLAG=-tor` in that
-environment file to request the onion service. An explicit request remains
-fail-closed: service readiness waits for onion descriptor publication rather
+default; it no longer needs to, because a full build starts Tor on its own.
+`ZCL_TOR_FLAG=-tor` in that environment file is now redundant and harmless.
+Readiness stays fail-closed: it waits for onion descriptor publication rather
 than silently reporting a clearnet-only node as ready.
 
 **On macOS**, install the binary once, then use the provided LaunchAgent:
@@ -696,7 +702,7 @@ machine:
   for any peer address you can get hold of.
 - `~/.config/zclassic23/onion-seeds`, one `.onion` directory node per line
   (`#` comments allowed), which the node re-reads on every seed round. This
-  needs a Tor-capable build (`make tor-full`) and `-tor`; on a Tor-stub build
+  needs a real-Tor build, which is the default; on a `ZCL_TOR=stub` build
   the file is read but nothing can be dialled.
 
 **Stuck height** (not climbing toward tip): a stall is never silent — it is

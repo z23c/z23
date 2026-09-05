@@ -85,12 +85,24 @@ through Git, never copied objects.
 
 ## Tor on Windows
 
-`make vendor` (and its cross equivalent above) only ever produces the
-offline-friendly `libtor_stub.a`; onion transport is explicit opt-in through
-`make tor-full` on every platform, Windows included. Skip it and a Windows
-`z23.exe` links exactly like today: it compiles, links, and starts, but its
-`tor_run_main` is the stub's and returns without ever opening an onion
-service.
+Real Tor is the default here too. `make vendor` produces only the
+offline-friendly `libtor_stub.a`, but a build that links a node establishes
+the Tor archives first, so a Windows `z23.exe` reaches the onion network and
+publishes its own `.onion` with no flag. `-no-tor` opts out and is refused on
+a canonical, soak or standby operator lane.
+
+`make ZCL_TOR=stub …` is the dev-only escape. It links the stub, prints one
+loud line, stamps `tor: stub` into `z23.exe -version`, and produces a binary
+that refuses `-tor`, the onion flags and onion-node mode, and that no ship or
+install step will package. Its `tor_run_main` is the stub's and returns
+without ever opening an onion service.
+
+A cross build gets its own clean export of the pinned Tor commit as the
+configure source directory, `vendor/cross/x86_64-w64-mingw32/tor-src`. It has
+to: the host build configures `vendor/tor` in place, and autoconf refuses any
+out-of-tree configure against an already-configured source directory, so
+before this the Windows cross Tor build failed on every box that had ever run
+`make tor-full` for the host.
 
 Cross, from Linux, once the pinned OpenSSL/libevent/zlib archives above exist
 under `vendor/cross/x86_64-w64-mingw32`:

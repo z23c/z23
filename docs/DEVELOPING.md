@@ -283,6 +283,22 @@ records bind exact bytes, toolchain, flags, and mutation state. Never fabricate
 or pass `BUILD_SOURCE_RECORD` or `ZCL_FAST_BUILD_SOURCE_RECORD`; the owning
 build process captures and verifies them.
 
+Every profile links the real embedded Tor. A build that would link a node
+establishes the four `vendor/tor/` archives first — hardlinked from the
+checkout your worktree was created from when that one already has them
+(milliseconds), compiled from the pinned submodule otherwise (about two
+minutes, once per box). `make tor-ready` is that front door on its own and
+`make tor-full` forces the rebuild. Tor-routed dialing and the onion service
+are then ON at runtime with no flag; `-no-tor` opts out and is refused on a
+canonical, soak or standby operator lane.
+
+`make ZCL_TOR=stub …` is the dev-only escape: it links the offline stub,
+prints one loud line, stamps `tor: stub` into `zclassic23 -version`, and
+produces a binary that refuses `-tor`, the onion flags and onion-node mode
+and that no ship or install step will package. Reach for it only when a box
+genuinely cannot build Tor; `check-tor-full-default` is what keeps the
+default honest.
+
 ### Fast dev builds
 
 The compiler-speed loop is `make dev` or `ZCL_PROFILE=dev make`. It writes

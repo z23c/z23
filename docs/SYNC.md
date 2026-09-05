@@ -134,7 +134,8 @@ that limit and makes the transfer resumable across peers.
 nodes quickly. Today it keeps consensus state, P2P, RPC, FlyClient/MMB proof
 serving, and normal block relay; snapshot offer construction and payload serving
 remain contained until the `coins_kv` payload-binding gate exists. It does not start explorer
-cache prewarming, store/market services, onion hosting (unless `-tor` is set), or
+cache prewarming, store/market services, onion hosting (which a full build starts
+unless `-no-tor` is passed), or
 file-service snapshot export and chunk/block-piece manifests.
 
 Full, onion-node, and legacy-compat profiles keep the broader app surfaces. The
@@ -342,7 +343,7 @@ a completed walk.
 ├── mmb_leaves.bin           Merkle Mountain Belt leaf cache
 ├── file_manifest.bin        File-service chunk manifest
 ├── explorer/                Block-explorer cache (factoids, CSS)
-├── tor_data/                Embedded Tor state (when -tor is set)
+├── tor_data/                Embedded Tor state (unless -no-tor is passed)
 ├── .cookie                  RPC auth cookie
 └── node.log                 Structured event log
 ```
