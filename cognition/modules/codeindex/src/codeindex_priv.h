@@ -90,6 +90,12 @@ void             ci_store_unlock(struct ci_store *s);
 bool ci_codeindex_refresh(struct codeindex *ci);
 bool ci_codeindex_source_view_is_stale(struct codeindex *ci, bool *stale);
 
+/* Owner-marker seam (codeindex_owner.c). The refusal record is thread-local
+ * so a leaf can explain the refusal it just got without any caller passing a
+ * buffer down through every open. */
+void ci_owner_clear_refusal(void);
+void ci_owner_record_refusal(struct codeindex *ci, const char *root);
+
 /* single-writer transaction control */
 bool ci_store_begin(struct ci_store *s);
 bool ci_store_commit(struct ci_store *s);

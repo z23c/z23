@@ -155,6 +155,68 @@ struct codeindex *codeindex_open_retrieval_view(const char *root);
  * for bounded resident overlay queries which scan changed files themselves;
  * callers must not present the handle as a fresh source index. */
 struct codeindex *codeindex_open_existing(const char *root);
+
+/* ── Rebuild ownership: one process rebuilds a checkout's index ──────────
+ *
+ * MEASURED PROBLEM (train 6, 2026-09-05). Every leaf that opened a stale
+ * store rebuilt it INSIDE the query: 6,750 / 6,988 / 7,577 ms, all three
+ * ending fail-closed, and a fourth completing in 12,301 ms. That is the
+ * worst agent-facing latency in the system, and the refusals are a real
+ * race — a query rebuilding while another writer moves the tree.
+ *
+ * THE RULE. A resident mind (tools/mind, `z23 mind serve`) claims a
+ * checkout by writing an owner marker beside the store. While that claim is
+ * LIVE, a stale open is REFUSED with a typed `index_stale` refusal instead
+ * of rebuilding: the answer a query would have served after twelve seconds
+ * of writing is not a faster answer, it is a different process doing the
+ * owner's job.
+ *
+ * WHY THE CLAIM EXPIRES. If the owner stops heart-beating, its claim goes
+ * stale after CODEINDEX_OWNER_HEARTBEAT_MAX_AGE_S and every reader returns
+ * to rebuilding for itself. Refusing forever because a resident died would
+ * brick every query on the box; expiry is the honest failure direction and
+ * is stated here so nobody has to infer it. */
+#define CODEINDEX_OWNER_HEARTBEAT_MAX_AGE_S 120
+
+/* Everything a caller needs to explain a refusal without opening a file:
+ * which index generation was consulted, how old it is, and whether an owner
+ * is heart-beating for this checkout at all. */
+struct codeindex_stale_refusal {
+    bool      recorded;
+    char      index_root[65];        /* hex source_root_sha3, "" if unsealed */
+    long long index_age_s;           /* age of the published generation */
+    bool      owner_present;
+    long long owner_pid;
+    long long owner_heartbeat_unix;
+    long long owner_heartbeat_age_s;
+};
+
+/* Open WITHOUT ever rebuilding, and say whether what was opened is stale.
+ * NULL means there is no readable store at all — distinct from a stale one,
+ * which opens and reports *stale_out = true. This is the open mode every
+ * query leaf reaches through the owner check above; it is also how the mind
+ * itself inspects a checkout it has not rebuilt yet. */
+struct codeindex *codeindex_open_readonly(const char *root, bool *stale_out);
+
+/* The owner marker at <root>/.codeindex/owner.v1. claim() is the resident's
+ * heartbeat write and release() is its retirement; read() reports a claim
+ * without judging its age, and is_live() applies the expiry above. Only the
+ * resident calls claim/release. */
+bool codeindex_owner_claim(const char *root, long long pid,
+                           long long heartbeat_unix);
+bool codeindex_owner_release(const char *root, long long pid);
+bool codeindex_owner_read(const char *root, long long *pid_out,
+                          long long *heartbeat_unix_out);
+bool codeindex_owner_is_live(const char *root, long long now_unix);
+
+/* The last `index_stale` refusal recorded on THIS thread, cleared by the next
+ * successful open. False when the most recent open did not refuse for
+ * staleness — never a zeroed record presented as a refusal. */
+bool codeindex_last_stale_refusal(struct codeindex_stale_refusal *out);
+
+/* Age in seconds of the published generation at <root>, from the store file
+ * itself. Negative when there is no store to age. */
+long long codeindex_generation_age_s(const char *root, long long now_unix);
 void codeindex_close(struct codeindex *ci);
 
 /* Exact content root of the source generation this verified handle reads.

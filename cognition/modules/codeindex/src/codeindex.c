@@ -2,12 +2,17 @@
  *
  * codeindex — public lifecycle: open (verify-on-read, lazily rebuild if the
  * source tree changed) and close. Queries live in codeindex_query.c; the
- * rebuild/staleness machinery in codeindex_build.c. */
+ * rebuild/staleness machinery in codeindex_build.c.
+ *
+ * A stale open normally rebuilds here. When a resident mind owns the checkout
+ * (codeindex_owner.c) it does not: the open is refused with a typed
+ * `index_stale` record instead of a second writer racing the owner. */
 
 #include "codeindex_priv.h"
 #include "codeindex/codeindex_merkle.h"
 #include "codeindex/codeindex_build.h"
 
+#include "platform/time_compat.h"
 #include "util/log_macros.h"
 #include "util/safe_alloc.h"
 
@@ -46,6 +51,24 @@ struct codeindex *codeindex_open_existing(const char *root)
     return ci;
 }
 
+/* The one place a reader decides between rebuilding and refusing.
+ *
+ * `ci` is stale. If a resident mind is heart-beating for this checkout, the
+ * rebuild is that resident's job and doing it here would be a second writer
+ * on the store — the exact race codeindex_build_store.c already refuses,
+ * paid for at query latency. Record the typed refusal and return false so
+ * the caller closes and returns NULL; every existing leaf keeps its existing
+ * NULL handling and `mind ask` renders the refusal in full. */
+static bool ci_refresh_or_refuse(struct codeindex *ci, const char *root)
+{
+    if (codeindex_owner_is_live(root, (long long)platform_time_wall_time_t())) {
+        ci_owner_record_refusal(ci, root);
+        return false;
+    }
+    ci_owner_clear_refusal();
+    return ci_codeindex_refresh(ci);
+}
+
 struct codeindex *codeindex_open(const char *root)
 {
     struct codeindex *ci = codeindex_alloc(root);
@@ -61,10 +84,12 @@ struct codeindex *codeindex_open(const char *root)
         stale = true;
     }
     if (!ci->store || stale) {
-        if (!ci_codeindex_refresh(ci)) {
+        if (!ci_refresh_or_refuse(ci, root)) {
             codeindex_close(ci);
-            LOG_NULL("codeindex", "rebuild failed");
+            LOG_NULL("codeindex", "rebuild failed or refused: index_stale");
         }
+    } else {
+        ci_owner_clear_refusal();
     }
     return ci;
 }
@@ -81,11 +106,34 @@ struct codeindex *codeindex_open_source_view(const char *root)
         stale = true;
     }
     if (!ci->store || stale) {
-        if (!ci_codeindex_refresh(ci)) {
+        if (!ci_refresh_or_refuse(ci, root)) {
             codeindex_close(ci);
-            LOG_NULL("codeindex", "source-view rebuild failed");
+            LOG_NULL("codeindex",
+                     "source-view rebuild failed or refused: index_stale");
         }
+    } else {
+        ci_owner_clear_refusal();
     }
+    return ci;
+}
+
+/* Never rebuilds, never refuses: it reports. The mind uses this to decide
+ * whether a checkout needs work; a query leaf uses it to answer from the
+ * generation it has while saying how old that generation is. */
+struct codeindex *codeindex_open_readonly(const char *root, bool *stale_out)
+{
+    if (stale_out) *stale_out = true;
+    struct codeindex *ci = codeindex_alloc(root);
+    if (!ci) return NULL;
+    ci->store = ci_store_open(root);
+    if (!ci->store) {
+        codeindex_close(ci);
+        return NULL;
+    }
+    bool stale = true;
+    if (!ci_codeindex_source_view_is_stale(ci, &stale))
+        stale = true;
+    if (stale_out) *stale_out = stale;
     return ci;
 }
 
@@ -99,6 +147,15 @@ struct codeindex *codeindex_open_retrieval_view(const char *root)
         return NULL;
     }
     if (!valid) {
+        /* Same rule as a stale source open: an invalid projection is the
+         * owner's work to redo, not this query's. */
+        if (codeindex_owner_is_live(root,
+                                    (long long)platform_time_wall_time_t())) {
+            ci_owner_record_refusal(ci, root);
+            codeindex_close(ci);
+            LOG_NULL("codeindex",
+                     "retrieval projection refused: index_stale");
+        }
         if (!codeindex_rebuild(ci) ||
             !ci_store_retrieval_projection_is_valid(ci->store, &valid) ||
             !valid) {
