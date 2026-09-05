@@ -2504,11 +2504,31 @@ SKYCOMBAT_GAME_SRCS := $(SKYCOMBAT_GAME_MAIN) \
 	$(SKYCOMBAT_DIR)/src/views/combat_effects.c
 SKYCOMBAT_GAME_OBJS := $(patsubst $(SKYCOMBAT_DIR)/%.c,$(SKYCOMBAT_OBJ_DIR)/%.o,$(SKYCOMBAT_GAME_SRCS))
 
-$(Z23RAYLIB_OBJ_DIR)/%.o: $(Z23RAYLIB_DIR)/src/%.c
+# The probe is a FILE target, not just a phony one, and every game and raylib
+# object takes it as an order-only prerequisite. Under `make -j` a phony
+# sibling prerequisite does not stop the other siblings, so a host without the
+# headers used to print the refusal and then keep compiling for a screenful;
+# with the stamp in front, one line is the whole output. FORCE keeps the probe
+# honest on every run without dirtying a single object.
+SKYCOMBAT_PLATFORM_STAMP := $(SKYCOMBAT_OBJ_DIR)/.platform-ok
+
+$(SKYCOMBAT_PLATFORM_STAMP): FORCE
+	@mkdir -p $(dir $@)
+	@missing=""; \
+	for h in $(SKYCOMBAT_PLATFORM_HEADERS); do \
+	  [ -e "/usr/include/$$h" ] || [ -e "/usr/local/include/$$h" ] || missing="$$missing $$h"; \
+	done; \
+	if [ -n "$$missing" ]; then \
+	  echo "game_platform_headers_missing:$$missing"; \
+	  exit 2; \
+	fi
+	@touch $@
+
+$(Z23RAYLIB_OBJ_DIR)/%.o: $(Z23RAYLIB_DIR)/src/%.c | $(SKYCOMBAT_PLATFORM_STAMP)
 	@mkdir -p $(dir $@)
 	$(CC) $(Z23RAYLIB_CFLAGS) -c $< -o $@
 
-$(SKYCOMBAT_OBJ_DIR)/%.o: $(SKYCOMBAT_DIR)/%.c
+$(SKYCOMBAT_OBJ_DIR)/%.o: $(SKYCOMBAT_DIR)/%.c | $(SKYCOMBAT_PLATFORM_STAMP)
 	@mkdir -p $(dir $@)
 	$(CC) $(SKYCOMBAT_CFLAGS) -c $< -o $@
 
@@ -2519,17 +2539,9 @@ $(Z23RAYLIB_LIB): $(Z23RAYLIB_OBJS)
 
 .PHONY: game-platform-probe game game-check
 # One typed refusal, never a wall of "No such file" from the preprocessor.
-game-platform-probe:
-	@missing=""; \
-	for h in $(SKYCOMBAT_PLATFORM_HEADERS); do \
-	  [ -e "/usr/include/$$h" ] || [ -e "/usr/local/include/$$h" ] || missing="$$missing $$h"; \
-	done; \
-	if [ -n "$$missing" ]; then \
-	  echo "game_platform_headers_missing:$$missing"; \
-	  exit 2; \
-	fi
+game-platform-probe: $(SKYCOMBAT_PLATFORM_STAMP)
 
-game: game-platform-probe $(SKYCOMBAT_GAME_OBJS) $(Z23RAYLIB_LIB)
+game: $(SKYCOMBAT_GAME_OBJS) $(Z23RAYLIB_LIB)
 	@mkdir -p $(BIN_DIR)
 	$(CC) $(SKYCOMBAT_CFLAGS) $(SKYCOMBAT_GAME_OBJS) $(Z23RAYLIB_LIB) \
 		$(SKYCOMBAT_HOST_LIBS) -o $(BIN_DIR)/z23-skycombat
@@ -2538,7 +2550,7 @@ game: game-platform-probe $(SKYCOMBAT_GAME_OBJS) $(Z23RAYLIB_LIB)
 # The counts below are a floor, not decoration: an empty object list is exactly
 # how this target would "pass" while compiling nothing (a renamed variable did
 # that once already), so it refuses instead of printing a zero.
-game-check: game-platform-probe $(SKYCOMBAT_OBJS) $(Z23RAYLIB_OBJS)
+game-check: $(SKYCOMBAT_OBJS) $(Z23RAYLIB_OBJS)
 	@test $(words $(SKYCOMBAT_SRCS)) -ge 60 || { echo "game_check_scan_floor: only $(words $(SKYCOMBAT_SRCS)) game sources found" >&2; exit 2; }
 	@test $(words $(Z23RAYLIB_SRCS)) -eq 5 || { echo "game_check_scan_floor: expected 5 raylib sources, found $(words $(Z23RAYLIB_SRCS))" >&2; exit 2; }
 	@echo "game-check: compiled $(words $(SKYCOMBAT_SRCS)) game and $(words $(Z23RAYLIB_SRCS)) raylib translation units, no link"
