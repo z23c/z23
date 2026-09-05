@@ -107,28 +107,66 @@ static int test_tor_stop_when_not_running(void)
     return failures;
 }
 
-static int test_boot_onion_early_skips_without_tor(void)
+/* Tor is the DEFAULT: a build that linked real Tor opens its onion with no
+ * flag at all, and -no-tor is the only thing that stops it. This used to
+ * assert the opposite — that an absent -tor left Tor idle — which was the
+ * behaviour that let a node boot clearnet-only because a unit file forgot a
+ * flag.
+ *
+ * Two halves, because only one of them can be exercised without starting a
+ * real Tor: the OFF path runs boot_onion_tor_start_early() for real and
+ * insists nothing came up, and the ON path asserts the decision
+ * (boot_profile_has_onion) rather than paying 30 s to watch Tor bootstrap in
+ * a unit test. */
+static int test_boot_onion_early_skips_only_when_told(void)
 {
     int failures = 0;
-    printf("test_boot_onion_early_skips_without_tor: ");
+    printf("test_boot_onion_early_skips_only_when_told: ");
 
     char tmpdir[512];
     test_make_tmpdir(tmpdir, sizeof(tmpdir), "tor", "earlyskip");
     struct app_context ctx;
     memset(&ctx, 0, sizeof(ctx));
     ctx.datadir = tmpdir;
-    ctx.tor = false;
+    ctx.no_tor = true;
     ctx.p2p_port = 39040;
     bool ok = boot_onion_tor_start_early(&ctx);
     bool idle = !tor_integration_is_enabled() && !tor_integration_is_ready();
-    if (ok && idle)
-        printf("OK\n");
-    else {
-        printf("FAIL (ok=%d enabled=%d ready=%d)\n",
+
+    /* -no-tor leaves Tor idle whichever Tor this binary linked. */
+    if (!ok || !idle) {
+        printf("FAIL (-no-tor: ok=%d enabled=%d ready=%d)\n",
                ok, tor_integration_is_enabled(), tor_integration_is_ready());
         failures++;
         tor_integration_stop();
+        remove_tree(tmpdir);
+        return failures;
     }
+
+    /* Same datadir, no flags at all: a real-Tor build must decide to start,
+     * a stub build must not — and the decision must track the LINKED Tor,
+     * not a build-time define. */
+    struct app_context def;
+    memset(&def, 0, sizeof(def));
+    def.datadir = tmpdir;
+    def.p2p_port = 39040;
+    if (boot_profile_has_onion(&def) != app_tor_real_build_linked()) {
+        printf("FAIL (default: has_onion=%d real_tor_linked=%d)\n",
+               boot_profile_has_onion(&def), app_tor_real_build_linked());
+        failures++;
+        remove_tree(tmpdir);
+        return failures;
+    }
+
+    /* And -no-tor must beat the default on either build. */
+    if (boot_profile_has_onion(&ctx)) {
+        printf("FAIL (-no-tor did not beat the default)\n");
+        failures++;
+        remove_tree(tmpdir);
+        return failures;
+    }
+
+    printf("OK\n");
     remove_tree(tmpdir);
     return failures;
 }
@@ -851,7 +889,7 @@ int test_tor(void)
     failures += test_tor_initial_state();
     failures += test_tor_requested_without_start();
     failures += test_tor_stop_when_not_running();
-    failures += test_boot_onion_early_skips_without_tor();
+    failures += test_boot_onion_early_skips_only_when_told();
 
     /* torrc generation — bootstrap port derivation */
     failures += test_tor_write_torrc_bootstrap_port();
