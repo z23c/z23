@@ -54,15 +54,15 @@ static void tunnel_fail(struct zcl_command_reply *reply, const char *code,
                            message, evidence);
 }
 
-/* One bounded node call. `input` is moved into the params array; `body`
+/* One bounded node call. `arguments` is moved into the params array; `body`
  * receives the parsed reply and belongs to the caller. */
-static bool tunnel_rpc(struct json_value *input, const char *method,
+static bool tunnel_rpc(struct json_value *arguments, const char *method,
                        struct json_value *body,
                        struct zcl_command_reply *reply)
 {
     struct rpc_arg_builder args;
     rpc_arg_builder_init(&args);
-    rpc_arg_builder_push_value(&args, input);
+    rpc_arg_builder_push_value(&args, arguments);
     char *params = rpc_arg_builder_to_json(&args);
     if (!params) {
         tunnel_fail(reply, "ARG_BUILD_FAILED", "normalize",
@@ -114,7 +114,7 @@ static void tunnel_finish(struct json_value *body,
     json_free(body);
 }
 
-static const struct json_value *tunnel_input(
+static const struct json_value *tunnel_leaf_input(
     const struct zcl_command_request *request)
 {
     return request && request->input && request->input->type == JSON_OBJ
@@ -124,16 +124,15 @@ static const struct json_value *tunnel_input(
 
 /* A 64-hex peer id, or nothing. The node re-checks it; the leaf checks it
  * too so a typo never costs a round trip. */
-static const char *tunnel_peer(const struct json_value *in)
+static const char *tunnel_hex64(const char *peer)
 {
-    const char *peer = in ? json_get_str(json_get(in, "peer")) : NULL;
     return peer && strlen(peer) == 64 ? peer : NULL;
 }
 
-static int64_t tunnel_int(const struct json_value *in, const char *key,
+static int64_t tunnel_int(const struct json_value *object, const char *key,
                           int64_t missing)
 {
-    const struct json_value *value = in ? json_get(in, key) : NULL;
+    const struct json_value *value = object ? json_get(object, key) : NULL;
     return value && value->type == JSON_INT ? json_get_int(value) : missing;
 }
 
@@ -150,10 +149,10 @@ void zcl_native_handle_dev_fleet_tunnel_open(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply)
 {
-    const struct json_value *in = tunnel_input(request);
-    const char *peer = tunnel_peer(in);
-    int64_t remote = tunnel_int(in, "remote_port", -1);
-    int64_t local = tunnel_int(in, "local_port", 0);
+    const struct json_value *input = tunnel_leaf_input(request);
+    const char *peer = tunnel_hex64(json_get_str(json_get(input, "peer")));
+    int64_t remote = tunnel_int(input, "remote_port", -1);
+    int64_t local = tunnel_int(input, "local_port", 0);
     if (!peer) {
         tunnel_invalid(reply, "MISSING_PEER",
                        "peer (64 lowercase hex) is required", "peer");
@@ -165,35 +164,36 @@ void zcl_native_handle_dev_fleet_tunnel_open(
                        "remote_port");
         return;
     }
-    struct json_value input, body;
-    json_init(&input);
-    json_set_object(&input);
-    json_push_kv_str(&input, "peer", peer);
-    json_push_kv_int(&input, "remote_port", remote);
-    json_push_kv_int(&input, "local_port", local);
-    if (tunnel_rpc(&input, "mesh_tunnel_open", &body, reply))
+    struct json_value args, body;
+    json_init(&args);
+    json_set_object(&args);
+    json_push_kv_str(&args, "peer", peer);
+    json_push_kv_int(&args, "remote_port", remote);
+    json_push_kv_int(&args, "local_port", local);
+    if (tunnel_rpc(&args, "mesh_tunnel_open", &body, reply))
         tunnel_finish(&body, reply, "mesh_tunnel_open");
-    json_free(&input);
+    json_free(&args);
 }
 
 void zcl_native_handle_dev_fleet_tunnel_close(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply)
 {
-    int64_t id = tunnel_int(tunnel_input(request), "tunnel_id", -1);
+    const struct json_value *input = tunnel_leaf_input(request);
+    int64_t id = tunnel_int(input, "tunnel_id", -1);
     if (id < 1) {
         tunnel_invalid(reply, "MISSING_TUNNEL_ID",
                        "tunnel_id is required and is a positive integer",
                        "tunnel_id");
         return;
     }
-    struct json_value input, body;
-    json_init(&input);
-    json_set_object(&input);
-    json_push_kv_int(&input, "tunnel_id", id);
-    if (tunnel_rpc(&input, "mesh_tunnel_close", &body, reply))
+    struct json_value args, body;
+    json_init(&args);
+    json_set_object(&args);
+    json_push_kv_int(&args, "tunnel_id", id);
+    if (tunnel_rpc(&args, "mesh_tunnel_close", &body, reply))
         tunnel_finish(&body, reply, "mesh_tunnel_close");
-    json_free(&input);
+    json_free(&args);
 }
 
 void zcl_native_handle_dev_fleet_tunnel_list(
@@ -201,22 +201,22 @@ void zcl_native_handle_dev_fleet_tunnel_list(
     struct zcl_command_reply *reply)
 {
     (void)request;
-    struct json_value input, body;
-    json_init(&input);
-    json_set_object(&input);
-    if (tunnel_rpc(&input, "mesh_tunnel_list", &body, reply))
+    struct json_value args, body;
+    json_init(&args);
+    json_set_object(&args);
+    if (tunnel_rpc(&args, "mesh_tunnel_list", &body, reply))
         tunnel_finish(&body, reply, "mesh_tunnel_list");
-    json_free(&input);
+    json_free(&args);
 }
 
 void zcl_native_handle_dev_fleet_tunnel_allow(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply)
 {
-    const struct json_value *in = tunnel_input(request);
-    const char *peer = tunnel_peer(in);
-    const char *why = in ? json_get_str(json_get(in, "why")) : NULL;
-    int64_t port = tunnel_int(in, "port", -1);
+    const struct json_value *input = tunnel_leaf_input(request);
+    const char *peer = tunnel_hex64(json_get_str(json_get(input, "peer")));
+    const char *why = json_get_str(json_get(input, "why"));
+    int64_t port = tunnel_int(input, "port", -1);
     if (!peer) {
         tunnel_invalid(reply, "MISSING_PEER",
                        "peer (64 lowercase hex) is required", "peer");
@@ -226,24 +226,24 @@ void zcl_native_handle_dev_fleet_tunnel_allow(
         tunnel_invalid(reply, "INVALID_PORT", "port is 1..65535", "port");
         return;
     }
-    struct json_value input, body;
-    json_init(&input);
-    json_set_object(&input);
-    json_push_kv_str(&input, "peer", peer);
-    json_push_kv_int(&input, "port", port);
-    json_push_kv_str(&input, "why", why ? why : "");
-    if (tunnel_rpc(&input, "mesh_tunnel_allow", &body, reply))
+    struct json_value args, body;
+    json_init(&args);
+    json_set_object(&args);
+    json_push_kv_str(&args, "peer", peer);
+    json_push_kv_int(&args, "port", port);
+    json_push_kv_str(&args, "why", why ? why : "");
+    if (tunnel_rpc(&args, "mesh_tunnel_allow", &body, reply))
         tunnel_finish(&body, reply, "mesh_tunnel_allow");
-    json_free(&input);
+    json_free(&args);
 }
 
 void zcl_native_handle_dev_fleet_tunnel_deny(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply)
 {
-    const struct json_value *in = tunnel_input(request);
-    const char *peer = tunnel_peer(in);
-    int64_t port = tunnel_int(in, "port", -1);
+    const struct json_value *input = tunnel_leaf_input(request);
+    const char *peer = tunnel_hex64(json_get_str(json_get(input, "peer")));
+    int64_t port = tunnel_int(input, "port", -1);
     if (!peer) {
         tunnel_invalid(reply, "MISSING_PEER",
                        "peer (64 lowercase hex) is required", "peer");
@@ -253,12 +253,12 @@ void zcl_native_handle_dev_fleet_tunnel_deny(
         tunnel_invalid(reply, "INVALID_PORT", "port is 1..65535", "port");
         return;
     }
-    struct json_value input, body;
-    json_init(&input);
-    json_set_object(&input);
-    json_push_kv_str(&input, "peer", peer);
-    json_push_kv_int(&input, "port", port);
-    if (tunnel_rpc(&input, "mesh_tunnel_deny", &body, reply))
+    struct json_value args, body;
+    json_init(&args);
+    json_set_object(&args);
+    json_push_kv_str(&args, "peer", peer);
+    json_push_kv_int(&args, "port", port);
+    if (tunnel_rpc(&args, "mesh_tunnel_deny", &body, reply))
         tunnel_finish(&body, reply, "mesh_tunnel_deny");
-    json_free(&input);
+    json_free(&args);
 }

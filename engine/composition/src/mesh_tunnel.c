@@ -406,8 +406,11 @@ static void tunnel_drain_socket(struct mesh_stream *st,
         int n = platform_socket_receive_nonblocking(s->sock, buf, take);
         if (n > 0) {
             if (!mesh_stream_send(st, buf, (size_t)n)) {
-                /* The credit was checked above; a refusal here means the
-                 * link went away, and the pump ends the stream by name. */
+                /* The credit and the bound were both checked above, so a
+                 * refusal here means the link is gone — and these bytes
+                 * have already left the socket. End the tunnel by name
+                 * rather than let a caller believe they arrived. */
+                tunnel_end(st, MESH_TUNNEL_REFUSED_UNAVAILABLE);
                 return;
             }
             s->bytes_to_peer += (uint64_t)n;
@@ -508,17 +511,30 @@ static void tunnel_service_data(struct mesh_stream *st,
     struct mesh_tunnel_session *s = st->service_state;
     if (!s || payload_len == 0)
         return;
+    /* Slide what is still unwritten to the front first: the bytes already
+     * gone are the credit already granted back, and what is left is what
+     * the peer's remaining credit is measured against. */
+    if (s->pending_off) {
+        memmove(s->pending, s->pending + s->pending_off,
+                s->pending_len - s->pending_off);
+        s->pending_len -= s->pending_off;
+        s->pending_off = 0;
+    }
     /* The stream layer never delivers more than the credit this side
      * granted, and this side grants only what has left for the socket, so
-     * the chunk always fits. A payload that does not is the primitive
-     * behaving unlike its contract: end the tunnel rather than grow. */
+     * after that slide the chunk always fits. A payload that does not is
+     * the primitive behaving unlike its contract: end the tunnel by name
+     * rather than grow past the window. */
     if (s->pending_len + payload_len > MESH_TUNNEL_CHUNK) {
         tunnel_end(st, MESH_TUNNEL_REFUSED_CAP);
         return;
     }
     memcpy(s->pending + s->pending_len, payload, payload_len);
     s->pending_len += (uint32_t)payload_len;
-    tunnel_flush(st, s);
+    /* A dial still in flight has no socket to write to yet; the tick
+     * finishes it and flushes what is waiting. */
+    if (!s->connecting)
+        tunnel_flush(st, s);
 }
 
 /* One live tunnel, once per stream tick: finish the dial if it is still
@@ -542,7 +558,10 @@ static void tunnel_stream_tick(struct mesh_stream *st, int64_t now)
         s->connecting = false;
     }
     tunnel_flush(st, s);
-    if (!st->ended)
+    /* A flush that failed ended the stream, and this service releases its
+     * slot from on_close — so `s` is gone and `st` is a free slot. `used`
+     * is the only field that still says so after the release memset. */
+    if (st->used && !st->ended)
         tunnel_drain_socket(st, s);
 }
 

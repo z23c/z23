@@ -173,3 +173,5 @@ dev.publication.collect exempt: appends verified signed storage evidence to an i
 ops.mesh.pair.revoke exempt: removes one target-local status-read authority through bounded plan/commit; it creates no authority and installs no artifact
 zcode.workspace.source.bundle.publish exempt: publicly serves an inert content-addressed source bundle behind owner authorization and idempotency confirmation; it installs no artifact and grants no execution or acceptance authority
 zcode.work.publish exempt: continues the existing bounded publication job for the exact accepted source and verified receipt lineage; it installs no artifact and grants no deployment or custody authority
+dev.fleet.tunnel.allow exempt: writes one datadir policy row naming a peer and a loopback port that the tunnel acceptor consults; installs no artifact, changes no binary, and grants no execution, wallet or publication authority
+dev.fleet.tunnel.deny exempt: removes one such policy row, which can only narrow what this node admits; installs no artifact and grants nothing
