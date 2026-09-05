@@ -47,11 +47,25 @@ void print_usage(const char *prog)
     printf("  -externalip=<ip[:port]>  Advertise this public P2P endpoint\n");
     printf("  -gen                Enable mining\n");
     printf("  -txindex            Transaction index\n");
-    printf("  -tor                Start Tor hidden service (dynhost blog)\n");
-    printf("  -onion-persist[=0]  With -tor: keep a persistent .onion identity in\n");
-    printf("                      <datadir>/tor_data/onion_service instead of a\n");
+    printf("  -tor                Redundant: a build that linked real Tor\n");
+    printf("                      (`--version` prints `tor: full`) starts the\n");
+    printf("                      hidden service and routes dialling through\n");
+    printf("                      Tor with no flag. Still accepted so existing\n");
+    printf("                      units keep booting; REFUSED on a `tor: stub`\n");
+    printf("                      build, which has no Tor to start.\n");
+    printf("  -no-tor             Turn Tor off: no hidden service, clearnet\n");
+    printf("                      dialling only. REFUSED on a network-serving\n");
+    printf("                      operator lane (-operator-lane=canonical,\n");
+    printf("                      soak or standby) — losing the onion there is\n");
+    printf("                      an outage, not a local preference.\n");
+    printf("  -allow-tor-stub-dev  Let a `tor: stub` binary boot even though\n");
+    printf("                      Tor was asked for, for offline unit tests\n");
+    printf("                      that need no network. Tor still does not\n");
+    printf("                      start. REFUSED on canonical/soak/standby.\n");
+    printf("  -onion-persist[=0]  When Tor runs, keep a persistent .onion identity\n");
+    printf("                      in <datadir>/tor_data/onion_service instead of a\n");
     printf("                      fresh ephemeral address every boot. Default: ON\n");
-    printf("                      when -tor is combined with at least one\n");
+    printf("                      when Tor is running combined with at least one\n");
     printf("                      -addnode=<x>.onion peer (a node pinning fleet\n");
     printf("                      peers by onion needs its own to stay fixed\n");
     printf("                      too); OFF otherwise. -onion-persist=0 forces\n");
@@ -66,7 +80,10 @@ void print_usage(const char *prog)
     printf("                      clearnet explorer (optional; defaults to the\n");
     printf("                      request Host header with a single cert)\n");
     printf("  -profile=<name>     Service profile: full, zclassic-only, explorer, onion-node, legacy-compat\n");
-    printf("  -operator-lane=<name>  Operator lane: canonical, soak, dev, test, copy\n");
+    printf("  -operator-lane=<name>  Operator lane: canonical, soak, dev, test,\n");
+    printf("                      copy, standby. canonical, soak and standby\n");
+    printf("                      serve the network, so the Tor escape\n");
+    printf("                      hatches above are refused on them.\n");
     printf("  -utxomirror=auto|off  Derived UTXO mirror policy (default: auto)\n");
     printf("  -bodyhistorybackfill=throttled|off|normal  Below-tip body policy\n");
     printf("                      (default: throttled; forward work always wins)\n");
@@ -304,6 +321,49 @@ bool args_onion_persist_default(bool tor, const char *const *addnode_peers,
     return false;
 }
 
+/* ── Tor admission: the words for a refusal the pure policy decided ────
+ *
+ * app_tor_policy_refusal_code() (engine/composition/src/app_context.c) owns
+ * the DECISION and is pure, so a unit test asserts the code without a
+ * datadir, a linker choice, or captured stderr. This function owns only the
+ * operator-facing rendering: the message, the measured evidence, and next
+ * steps that actually run in the state the refusal leaves behind. */
+#define ARGS_TOR_PHASE "tor_policy"
+
+static void args_report_tor_refusal(const struct app_context *ctx,
+                                    const char *code, bool real_tor_linked)
+{
+    const char *lane = app_operator_lane_name(ctx->operator_lane);
+    const char *build = real_tor_linked ? "full" : "stub";
+
+    if (strcmp(code, APP_TOR_REFUSE_DISABLE_ON_SERVING_LANE) == 0) {
+        const struct boot_error_next next[] = {
+            { "zclassic23 --version",
+              "confirm which Tor this binary linked; -no-tor only means "
+              "anything on a build that prints `tor: full`" },
+            { "zclassic23 -operator-lane=dev -datadir=<dev datadir> -no-tor",
+              "run the clearnet-only experiment on a dev lane, where taking "
+              "Tor down costs nobody their reachability" },
+        };
+        boot_error_report(BOOT_ERROR_FATAL, code, ARGS_TOR_PHASE,
+                          "-no-tor would take a network-serving node off "
+                          "Tor; this lane's peers reach it by its onion",
+                          next, 2,
+                          "flag=-no-tor operator_lane=%s tor_build=%s",
+                          lane, build);
+        return;
+    }
+
+    /* No arm matched: report the code anyway rather than returning quietly.
+     * A policy code with no words is a bug in THIS function, and a boot that
+     * continued because of it would be the exact fail-open this whole path
+     * exists to prevent. */
+    boot_error_report(BOOT_ERROR_FATAL, code, ARGS_TOR_PHASE,
+                      "Tor policy refused this argv and args.c has no "
+                      "wording for the code it returned (fail closed)",
+                      NULL, 0, "operator_lane=%s tor_build=%s", lane, build);
+}
+
 int args_parse_node_options(int argc, char **argv, struct app_context *ctx,
                             bool *show_metrics)
 {
@@ -414,6 +474,7 @@ int args_parse_node_options(int argc, char **argv, struct app_context *ctx,
         else if (strcmp(argv[i], "-allow-degraded") == 0) ctx->allow_degraded = true;
         else if (strncmp(argv[i], "-showmetrics=", 13) == 0) *show_metrics = atoi(argv[i]+13) != 0;
         else if (strcmp(argv[i], "-tor") == 0) ctx->tor = true;
+        else if (strcmp(argv[i], "-no-tor") == 0) ctx->no_tor = true;
         else if (strcmp(argv[i], "-onion-persist") == 0 ||
                  strcmp(argv[i], "-onion-persist=1") == 0)
             ctx->onion_persist = true;
@@ -698,5 +759,20 @@ int args_parse_node_options(int argc, char **argv, struct app_context *ctx,
     if (!ctx->onion_persist && !ctx->onion_persist_forced_off)
         ctx->onion_persist = args_onion_persist_default(
             ctx->tor, ctx->addnode_peers, ctx->n_addnode_peers);
+    /* Fail-closed Tor admission, LAST in the ladder so every flag it reads
+     * has been parsed, and still at parse time so a refused argv never
+     * reaches a datadir. The link-time fact is read HERE and injected, which
+     * is what lets the policy itself stay pure and testable on both build
+     * identities from one test binary. */
+    {
+        const bool real_tor_linked = app_tor_real_build_linked();
+        const char *tor_refusal =
+            app_tor_policy_refusal_code(ctx, real_tor_linked);
+        if (tor_refusal) {
+            args_report_tor_refusal(ctx, tor_refusal, real_tor_linked);
+            return 1;
+        }
+    }
+
     return -1; /* parsed OK — caller continues booting */
 }

@@ -211,24 +211,32 @@ struct app_context {
                                  * through the existing utxo_apply nullifier
                                  * writer, then exits before services. Populate
                                  * only: no consensus predicate changes. */
-    bool tor;
-    bool onion_persist;          /* -onion-persist / -onion-persist=1 : with
-                                  * -tor, use a persistent seed-backed .onion
-                                  * identity at <datadir>/tor_data/onion_service
-                                  * instead of dynhost's per-boot ephemeral
-                                  * service. Resolved by
-                                  * args_parse_node_options() at the end of
-                                  * the argv loop: an explicit -onion-persist
-                                  * or -onion-persist=1 forces ON; an
-                                  * explicit -onion-persist=0 forces OFF
-                                  * (onion_persist_forced_off below); absent
-                                  * either, it defaults to
+    bool tor;                    /* -tor : redundant on a real-Tor build
+                                  * (Tor is the default there) and REFUSED on
+                                  * a stub build, which has no Tor to start.
+                                  * Kept accepted so existing deploy units and
+                                  * runbooks that pass it keep booting. */
+    bool no_tor;                 /* -no-tor : the only off switch. Refused on
+                                  * a network-serving operator lane
+                                  * (canonical/soak/standby) — see
+                                  * app_tor_policy_refusal_code(). */
+    bool onion_persist;          /* -onion-persist / -onion-persist=1 : when
+                                  * Tor runs, use a persistent seed-backed
+                                  * .onion identity at
+                                  * <datadir>/tor_data/onion_service instead
+                                  * of dynhost's per-boot ephemeral service.
+                                  * Resolved by args_parse_node_options() at
+                                  * the end of the argv loop: an explicit
+                                  * -onion-persist or -onion-persist=1 forces
+                                  * ON; an explicit -onion-persist=0 forces
+                                  * OFF (onion_persist_forced_off below);
+                                  * absent either, it defaults to
                                   * args_onion_persist_default() — ON when
-                                  * -tor is combined with at least one
+                                  * Tor is running combined with at least one
                                   * -addnode=<x>.onion peer, OFF otherwise. */
     bool onion_persist_forced_off; /* -onion-persist=0 was given explicitly;
                                     * parse-time only, so the
-                                    * -tor+onion-addnode default above is
+                                    * onion-addnode default above is
                                     * suppressed rather than re-applied. Not
                                     * meaningful once args parsing returns. */
     bool onion_rotate;           /* -onion-rotate : with -onion-persist,
@@ -459,6 +467,45 @@ const char *app_runtime_profile_accepted_csv(void);
  * describes what the build system intended, a weak symbol reports what the
  * linker actually resolved, and only the second one cannot lie. */
 bool app_tor_real_build_linked(void);
+
+/* ── Tor policy ──────────────────────────────────────────────────────
+ *
+ * Tor is not an opt-in feature of a full build; it is how a z23 node is
+ * reachable and how it dials. So on a binary that linked real Tor the onion
+ * starts with NO flag, and `-no-tor` is the single off switch.
+ *
+ * Every function below is PURE and takes the "did this binary link real
+ * Tor?" fact as a PARAMETER rather than calling app_tor_real_build_linked()
+ * itself. The production callers inject that reader; a test binary — which
+ * links whichever Tor the build chose and so cannot answer for both — injects
+ * true and false in turn and covers both branches without relinking. This is
+ * the same injected-fact shape wallet_at_rest_boot_decision() uses for the
+ * policy/context split just below. */
+
+/* The lanes that put this datadir on the network for other people: the live
+ * node, the soak node that shadows it, and the standby that can be promoted
+ * to it. Losing the onion on one of these is an outage or a deanonymisation,
+ * never a local convenience, so the escape hatches are refused here. */
+bool app_operator_lane_serves_network(enum zcl_operator_lane lane);
+
+/* Should this boot start the hidden service and route dialling through Tor?
+ * True on a real-Tor build unless -no-tor. A stub build answers false: the
+ * argv that would have asked for an onion is refused before this is reached
+ * (see below), so reaching here means nobody asked. */
+bool app_tor_should_start(bool real_tor_linked, bool no_tor);
+
+/* The stable boot_error codes app_tor_policy_refusal_code() can return. They
+ * are macros so the refusal site and its test assert the SAME literal; each
+ * expands to a greppable SCREAMING_SNAKE_CASE string, as config/boot_error.h
+ * requires. Never reword one in place — add a new code. */
+#define APP_TOR_REFUSE_DISABLE_ON_SERVING_LANE "BOOT_TOR_DISABLE_LANE_REFUSED"
+
+/* The whole fail-closed Tor admission decision, in one pure function.
+ * Returns NULL when this argv may boot, or the stable boot_error code the
+ * caller must refuse with. Never returns a code the caller may ignore: a
+ * non-NULL answer means the process stops. */
+const char *app_tor_policy_refusal_code(const struct app_context *ctx,
+                                        bool real_tor_linked);
 bool app_runtime_profile_has_explorer(enum zcl_runtime_profile profile);
 bool app_runtime_profile_has_store(enum zcl_runtime_profile profile);
 bool app_runtime_profile_has_onion(enum zcl_runtime_profile profile,

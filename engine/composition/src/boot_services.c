@@ -211,10 +211,16 @@ bool boot_profile_has_store(const struct app_context *ctx)
     return app_runtime_profile_has_store(ctx->runtime_profile);
 }
 
+/* Tor is the DEFAULT on a real-Tor build, so this no longer asks whether the
+ * operator opted in with -tor or -profile=onion-node — both still parse, and
+ * both are now redundant. It asks the two questions that can still answer no:
+ * did this binary link a Tor at all, and did the operator turn it off with
+ * -no-tor (which app_tor_policy_refusal_code refuses outright on a
+ * network-serving lane). PURE apart from the link-time read. */
 bool boot_profile_has_onion(const struct app_context *ctx)
 {
-    return ctx && app_runtime_profile_has_onion(ctx->runtime_profile,
-                                                ctx->tor);
+    return ctx && app_tor_should_start(app_tor_real_build_linked(),
+                                       ctx->no_tor);
 }
 
 /* FIX 1 seam (see boot_internal.h). PURE: no side effects. */

@@ -110,6 +110,60 @@ bool app_tor_real_build_linked(void)
     return dynhost_client_fetch != NULL;
 }
 
+/* ── Tor policy (see config/boot.h for the contract) ─────────────────── */
+
+bool app_operator_lane_serves_network(enum zcl_operator_lane lane)
+{
+    switch (lane) {
+    case ZCL_OPERATOR_LANE_CANONICAL:
+    case ZCL_OPERATOR_LANE_SOAK:
+    case ZCL_OPERATOR_LANE_STANDBY:
+        return true;
+    case ZCL_OPERATOR_LANE_DEV:
+    case ZCL_OPERATOR_LANE_TEST:
+    case ZCL_OPERATOR_LANE_COPY:
+    case ZCL_OPERATOR_LANE_UNKNOWN:
+    default:
+        return false;
+    }
+}
+
+bool app_tor_should_start(bool real_tor_linked, bool no_tor)
+{
+    /* -no-tor is the ONE off switch, and it is refused outright on a
+     * network-serving lane (app_tor_policy_refusal_code) — so reaching here
+     * with no_tor set means an operator turned Tor off somewhere it is
+     * allowed to be off. */
+    if (no_tor)
+        return false;
+    /* A stub-linked binary has no Tor to start. Any argv that ASKED for one
+     * was already refused, so answering false here is not a silent downgrade;
+     * it is the only truthful answer left. */
+    if (!real_tor_linked)
+        return false;
+    /* Real Tor linked and nobody turned it off: start it, whatever the
+     * runtime profile. -tor and -profile=onion-node still parse and still
+     * mean the same thing; they are now redundant rather than required. */
+    return true;
+}
+
+const char *app_tor_policy_refusal_code(const struct app_context *ctx,
+                                        bool real_tor_linked)
+{
+    (void)real_tor_linked;
+    if (!ctx)
+        return NULL;
+
+    /* A canonical / soak / standby datadir is on the network for other
+     * people. Turning its onion off is an outage and a deanonymisation, not
+     * a local convenience, so -no-tor is refused there rather than honoured
+     * with a warning nobody reads in a unit's journal. */
+    if (ctx->no_tor && app_operator_lane_serves_network(ctx->operator_lane))
+        return APP_TOR_REFUSE_DISABLE_ON_SERVING_LANE;
+
+    return NULL;
+}
+
 bool app_runtime_profile_has_explorer(enum zcl_runtime_profile profile)
 {
     return profile == ZCL_RUNTIME_FULL ||

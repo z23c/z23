@@ -50,7 +50,6 @@
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
-#include <sys/stat.h>
 
 extern _Atomic int g_deferred_proof_validation_below_height;
 
@@ -478,18 +477,33 @@ bool boot_onion_tor_start_early(const struct app_context *app)
     if (!app || !app->datadir)
         return false;
 
-    char onion_dir[512];
-    snprintf(onion_dir, sizeof(onion_dir), "%s/onion-keys", app->datadir);
-    struct stat onion_st;
-    bool has_onion_keys = (stat(onion_dir, &onion_st) == 0);
+    /* The old "<datadir>/onion-keys exists" fallback is gone. It existed to
+     * start Tor for an operator who had an onion identity but forgot -tor;
+     * with Tor on by default there is nobody left for it to rescue, and on a
+     * stub build it was actively wrong — a directory a real-Tor build left
+     * behind would have sent this down the start path for a Tor that cannot
+     * bootstrap. Say which binary this is instead.
+     *
+     * Argv that ASKED for an onion never reaches here at all:
+     * app_tor_policy_refusal_code() refused the boot at parse time. */
+    const bool real_tor = app_tor_real_build_linked();
+    if (!real_tor) {
+        if (app->onion_persist || app->onion_rotate || app->tor)
+            fprintf(stderr,
+                    "Warning: Tor flags have no effect: this binary linked "
+                    "the Tor stub (`z23 --version` prints `tor: stub`)\n");
+        printf("Tor: unavailable — this binary linked the Tor stub; rebuild "
+               "with `make tor-full` for an onion and Tor-routed dialling\n");
+        return true;
+    }
 
-    if (!boot_profile_has_onion(app) && !has_onion_keys) {
+    if (!boot_profile_has_onion(app)) {
         if (app->onion_persist || app->onion_rotate)
             fprintf(stderr,
                     "Warning: -onion-persist/-onion-rotate have no effect: "
-                    "Tor is not enabled (use -tor or "
-                    "-profile=onion-node)\n");
-        printf("Tor: skipped (use -tor or -profile=onion-node to enable)\n");
+                    "Tor was turned off with -no-tor\n");
+        printf("Tor: off (-no-tor); this node publishes no onion and dials "
+               "clearnet only\n");
         return true;
     }
 
