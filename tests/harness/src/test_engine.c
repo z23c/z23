@@ -1578,6 +1578,22 @@ static int case_cli_argv(void)
 {
     int failures = 0;
 
+    int turns = 77;
+    EN_CHECK("CLI turns accepts the bounded decimal range",
+             engine_cli_turns_parse("1", &turns) && turns == 1
+             && engine_cli_turns_parse("256", &turns) && turns == 256);
+    turns = 77;
+    EN_CHECK("a missing CLI turn value is refused without changing output",
+             !engine_cli_turns_parse(NULL, &turns) && turns == 77);
+    const char *bad_turns[] = { "", "0", "257", "+1", " 1", "1 ",
+        "1x", "999999999999999999999999" };
+    for (size_t i = 0; i < sizeof(bad_turns) / sizeof(bad_turns[0]); i++) {
+        const char *text = bad_turns[i];
+        turns = 77;
+        EN_CHECK("malformed CLI turns are refused without changing output",
+                 !engine_cli_turns_parse(text, &turns) && turns == 77);
+    }
+
     /* Every CLI row is complete, and no other row pretends to be one. This is
      * the check that fails the day someone adds a CLI vendor and stops at the
      * program name. */
@@ -1598,6 +1614,13 @@ static int case_cli_argv(void)
              cli_rows_complete);
     EN_CHECK("and no non-CLI row carries either", non_cli_rows_clean);
     EN_CHECK("more than one CLI vendor is registered", cli_rows >= 2);
+
+    const struct engine_vendor *grok_cap = engine_by_id("grok-cli");
+    const struct engine_vendor *glm_cap = engine_by_id("glm");
+    EN_CHECK("Grok CLI explicitly accepts turns",
+             grok_cap && engine_cli_accepts_turns(grok_cap));
+    EN_CHECK("GLM does not claim a CLI turn slot",
+             glm_cap && !engine_cli_accepts_turns(glm_cap));
 
     const struct engine_cli_inputs in = {
         .prompt  = "/tmp/p.txt",
@@ -2898,10 +2921,25 @@ static int case_receipt_chain(void)
         third[line3_n] = '\0';
     }
     EN_CHECK("cumulative-session ambiguity keeps raw calls but refuses totals",
+             strstr(third, "\"usage_scope\":\"non_additive_observation\"") != NULL &&
              strstr(third, "\"prompt_tokens\":10") != NULL &&
              strstr(third, "\"prompt_tokens\":20") != NULL &&
              strstr(third, "\"total_prompt_tokens\":-1") != NULL &&
              strstr(third, "\"total_reported_tokens\":-1") != NULL);
+
+    char resumed_path[512], resumed_text[ENGINE_RECEIPT_LINE_MAX + 2u];
+    (void)snprintf(resumed_path, sizeof(resumed_path), "%s.resumed", path);
+    receipt_unlink(resumed_path);
+    c.invocations_count = 1;
+    size_t resumed_n = 0;
+    EN_CHECK("a first externally resumed observation is non-additive too",
+             engine_receipt_append(resumed_path, &c, NULL) &&
+             receipt_read_whole(resumed_path, resumed_text,
+                                sizeof(resumed_text), &resumed_n) &&
+             strstr(resumed_text, "\"usage_scope\":\"non_additive_observation\"") &&
+             strstr(resumed_text, "\"prompt_tokens\":10") &&
+             strstr(resumed_text, "\"total_reported_tokens\":-1"));
+    receipt_unlink(resumed_path);
 
     struct zcl_rule_receipt_log scored;
     uint32_t bad_line = 0;

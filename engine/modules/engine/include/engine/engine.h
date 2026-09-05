@@ -132,7 +132,7 @@ enum engine_cli_output {
  *
  *   {prompt}   the prompt file path, or the prompt text — see cli_prompt
  *   {workdir}  the directory the CLI should work in
- *   {turns}    the repair-turn cap, decimal
+ *   {turns}    the CLI turn cap, decimal
  *   {model}    the model id
  *
  * A placeholder a vendor's CLI has no flag for is simply not in its row.
@@ -188,6 +188,9 @@ struct engine_vendor {
     /* Optional CLI flag whose following argument is low/medium/high/xhigh.
      * NULL means this row cannot accept an explicit reasoning effort. */
     const char      *cli_reasoning_effort_flag;
+    /* Optional CLI flag whose following argument is a session UUID to resume.
+     * NULL means this row cannot accept a resume session. */
+    const char      *cli_resume_flag;
     enum engine_cli_prompt cli_prompt;
     /* Some installed CLIs reject pipe-backed stdio even in single-turn mode.
      * This is invocation metadata, not a vendor-name special case: the
@@ -264,6 +267,9 @@ struct engine_cli_inputs {
     const char *turns;    /* already rendered decimal */
     const char *model;
     const char *reasoning_effort; /* NULL/provider_default omits the flag */
+    /* Borrowed. NULL omits the resume flag. A non-NULL value must be a
+     * canonical lowercase hexadecimal UUID. */
+    const char *resume_session_id;
 };
 
 /* The closed effort vocabulary shared by HTTP requests, CLI argv, and
@@ -271,12 +277,25 @@ struct engine_cli_inputs {
 bool engine_reasoning_effort_valid(const char *effort);
 bool engine_reasoning_effort_explicit(const char *effort);
 
+/* NULL/omitted is valid. A supplied id must be 36 lowercase hex characters
+ * with hyphens at indexes 8, 13, 18, and 23. */
+bool engine_resume_session_id_valid(const char *id);
+
+/* Parse a decimal CLI turn cap. The accepted range is deliberately small so
+ * callers can pass the value to every supported local CLI safely. On refusal
+ * `out` is left untouched. */
+bool engine_cli_turns_parse(const char *text, int *out);
+
+/* True only when a local CLI row explicitly maps the turn-cap placeholder. */
+bool engine_cli_accepts_turns(const struct engine_vendor *v);
+
 /* Build the full argv for a CLI vendor into `out`, NULL-terminated.
  *
  * Returns the number of entries written EXCLUDING the terminator, or 0 on any
  * refusal — an unknown placeholder, a placeholder the caller did not supply,
  * an argument-mode prompt over ENGINE_CLI_ARG_PROMPT_MAX, a row with no
- * template, or a `cap` too small to hold the result. Every pointer written
+ * template, an invalid or unsupported resume session, or a `cap` too small
+ * to hold the result. Every pointer written
  * borrows from the vendor row or from `in`; nothing is copied and nothing is
  * allocated, so `out` is only valid while both outlive it.
  *

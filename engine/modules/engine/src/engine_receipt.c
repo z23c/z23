@@ -419,14 +419,22 @@ static bool build_line(const struct engine_receipt *r, const char *prev_sha3,
         && json_push_kv_str(&doc, "task_sha3", or_empty(r->task_sha3))
         && json_push_kv_str(&doc, "group", or_empty(r->group))
         && json_push_kv_str(&doc, "accounting_scope", "terminal_dispatch")
-        && json_push_kv_int(&doc, "prompt_tokens", r->prompt_tokens)
-        && json_push_kv_int(&doc, "completion_tokens", r->completion_tokens)
+        && json_push_kv_str(&doc, "usage_scope", r->invocation_totals_ambiguous
+                            ? "non_additive_observation" : "terminal_dispatch")
+        && json_push_kv_int(&doc, "prompt_tokens", r->invocation_totals_ambiguous
+                            ? ENGINE_RECEIPT_UNREPORTED : r->prompt_tokens)
+        && json_push_kv_int(&doc, "completion_tokens", r->invocation_totals_ambiguous
+                            ? ENGINE_RECEIPT_UNREPORTED : r->completion_tokens)
         && json_push_kv_int(&doc, "cache_read_input_tokens",
-                            r->cache_read_input_tokens)
+                            r->invocation_totals_ambiguous ? ENGINE_RECEIPT_UNREPORTED
+                                                          : r->cache_read_input_tokens)
         && json_push_kv_int(&doc, "cache_creation_input_tokens",
-                            r->cache_creation_input_tokens)
-        && json_push_kv_int(&doc, "reasoning_tokens", r->reasoning_tokens)
-        && json_push_kv_int(&doc, "total_tokens", r->total_tokens)
+                            r->invocation_totals_ambiguous ? ENGINE_RECEIPT_UNREPORTED
+                                                          : r->cache_creation_input_tokens)
+        && json_push_kv_int(&doc, "reasoning_tokens", r->invocation_totals_ambiguous
+                            ? ENGINE_RECEIPT_UNREPORTED : r->reasoning_tokens)
+        && json_push_kv_int(&doc, "total_tokens", r->invocation_totals_ambiguous
+                            ? ENGINE_RECEIPT_UNREPORTED : r->total_tokens)
         && json_push_kv_int(&doc, "turns", r->turns)
         && json_push_kv(&doc, "invocations", &invocations)
         && json_push_kv_int(&doc, "total_prompt_tokens",

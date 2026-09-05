@@ -144,6 +144,7 @@ static const struct engine_vendor k_engine_vendors[] = {
         .program       = "grok",
         .cli_argv      = k_grok_cli_argv,
         .cli_reasoning_effort_flag = "--reasoning-effort",
+        .cli_resume_flag = "--resume",
         .cli_prompt    = ENGINE_CLI_PROMPT_FILE,
         .cli_needs_tty = true,
         .cli_output    = ENGINE_CLI_OUTPUT_GROK_JSON,

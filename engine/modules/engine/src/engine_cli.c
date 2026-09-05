@@ -32,6 +32,54 @@ bool engine_reasoning_effort_explicit(const char *effort)
            strcmp(effort, ENGINE_REASONING_EFFORT_PROVIDER_DEFAULT) != 0;
 }
 
+bool engine_resume_session_id_valid(const char *id)
+{
+    if (!id)
+        return true;
+    if (strlen(id) != 36u)
+        return false;
+    for (size_t i = 0; i < 36u; i++) {
+        if (i == 8u || i == 13u || i == 18u || i == 23u) {
+            if (id[i] != '-')
+                return false;
+            continue;
+        }
+        const char c = id[i];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')))
+            return false;
+    }
+    return true;
+}
+
+bool engine_cli_turns_parse(const char *text, int *out)
+{
+    if (!text || !out || !text[0])
+        return false;
+    unsigned value = 0;
+    for (size_t i = 0; text[i]; i++) {
+        const unsigned char c = (unsigned char)text[i];
+        if (c < (unsigned char)'0' || c > (unsigned char)'9')
+            return false;
+        value = value * 10u + (unsigned)(c - (unsigned char)'0');
+        if (value > 256u)
+            return false;
+    }
+    if (value < 1u)
+        return false;
+    *out = (int)value;
+    return true;
+}
+
+bool engine_cli_accepts_turns(const struct engine_vendor *v)
+{
+    if (!v || v->wire != ENGINE_WIRE_LOCAL_CLI || !v->cli_argv)
+        return false;
+    for (size_t i = 0; v->cli_argv[i]; i++)
+        if (strcmp(v->cli_argv[i], ENGINE_CLI_TURNS_TOKEN) == 0)
+            return true;
+    return false;
+}
+
 /* Resolve one template element. A literal returns itself. A placeholder
  * returns the caller's value, or NULL when the caller did not supply one —
  * which is a refusal, not an empty argument. */
@@ -107,6 +155,18 @@ size_t engine_cli_argv_build(const struct engine_vendor *v,
                        v->id, cap);
         out[n++] = v->cli_reasoning_effort_flag;
         out[n++] = in->reasoning_effort;
+    }
+    if (!engine_resume_session_id_valid(in->resume_session_id))
+        LOG_RETURN(0, "engine", "invalid resume session id");
+    if (in->resume_session_id) {
+        if (!v->cli_resume_flag)
+            LOG_RETURN(0, "engine", "engine %s accepts no resume session",
+                       v->id);
+        if (n + 3 > cap)
+            LOG_RETURN(0, "engine", "engine %s needs more than %zu argv slots",
+                       v->id, cap);
+        out[n++] = v->cli_resume_flag;
+        out[n++] = in->resume_session_id;
     }
     out[n] = NULL;
     return n;

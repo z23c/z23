@@ -57,6 +57,10 @@
  *                      when every invocation reported it; otherwise -1
  *   accounting_scope   "terminal_dispatch": labels the compatibility timing
  *                      and token fields above, which describe the last turn
+ *   usage_scope        "non_additive_observation" when a resumed or repeated
+ *                      session may include earlier usage; raw counters stay
+ *                      observable, but every checked token total is unknown.
+ *                      Otherwise "terminal_dispatch".
  *   total_invocation_elapsed_ms: checked sum of raw request durations only;
  *                      excludes retry backoff, proof, and operator delay
  *   cumulative_proof_ms: all gate time across repair turns

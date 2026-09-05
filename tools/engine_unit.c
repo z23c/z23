@@ -171,6 +171,7 @@ struct unit_opts {
     const char *kind;
     const char *model;
     const char *reasoning_effort;
+    const char *resume_session_id;
     const char *worktree;
     const char *fixture_reply;
     const char *key_file;
@@ -180,6 +181,8 @@ struct unit_opts {
      * its own receipt — see unit_ledger_row(). */
     const char *fleet_ledger_bin;
     int    turns;
+    int    cli_turns; /* 0 means omitted: the CLI inherits --turns */
+    bool   cli_turns_set;
     int    timeout_s;
     /* The gate gets its own clock. A cold worktree compiles the whole tree
      * before it runs one assertion, and on a loaded box that is minutes of
@@ -226,6 +229,8 @@ static void usage(void)
 "  --worktree DIR    isolated worktree to work in (created if absent)\n"
 "  --model ID        override the engine's default model\n"
 "  --reasoning-effort E  provider_default, low, medium, high, or xhigh\n"
+"  --resume UUID     continue a grok-cli session (canonical lowercase UUID)\n"
+"  --cli-turns N     installed-CLI turn cap (1..256); omitted uses --turns\n"
 "  --turns N         repair turns when a reply does not apply (default %d)\n"
 "  --timeout N       dispatch wall clock in seconds (default %d, max %d)\n"
 "  --gate-timeout N  wall clock for the gate run; defaults to --timeout. A\n"
@@ -299,6 +304,7 @@ static bool parse_args(int argc, char **argv, struct unit_opts *o)
         TAKE("--kind", kind)
         TAKE("--model", model)
         TAKE("--reasoning-effort", reasoning_effort)
+        TAKE("--resume", resume_session_id)
         TAKE("--worktree", worktree)
         TAKE("--fixture-reply", fixture_reply)
         TAKE("--key-file", key_file)
@@ -307,13 +313,18 @@ static bool parse_args(int argc, char **argv, struct unit_opts *o)
 #undef TAKE
         if (strcmp(a, "--turns") == 0 || strcmp(a, "--timeout") == 0
             || strcmp(a, "--gate-timeout") == 0
-            || strcmp(a, "--max-cost-usd") == 0) {
+            || strcmp(a, "--max-cost-usd") == 0
+            || strcmp(a, "--cli-turns") == 0) {
             if (!need_value(argc, i, a))
                 return false;
             const char *v = argv[++i];
             if (strcmp(a, "--turns") == 0)
                 o->turns = atoi(v);
-            else if (strcmp(a, "--timeout") == 0)
+            else if (strcmp(a, "--cli-turns") == 0) {
+                o->cli_turns_set = true;
+                if (!engine_cli_turns_parse(v, &o->cli_turns))
+                    LOG_FAIL("engine_unit", "--cli-turns requires decimal 1..256");
+            } else if (strcmp(a, "--timeout") == 0)
                 o->timeout_s = atoi(v);
             else if (strcmp(a, "--gate-timeout") == 0)
                 o->gate_timeout_s = atoi(v);
@@ -1186,8 +1197,8 @@ static bool dispatch_fixture(const struct engine_vendor *v, const char *path,
  * directly, so the prompt path never passes through metacharacter expansion. */
 static bool dispatch_cli(const struct engine_vendor *v, const char *prompt_path,
                          const char *prompt_text, const char *model,
-                         const char *reasoning_effort,
-                         const char *workdir, int turns, int timeout_ms,
+                         const char *workdir, int timeout_ms,
+                         const struct unit_opts *o, int capture_ordinal,
                          struct dispatch_result *dr)
 {
     /* Which of the two the vendor wants is a row, not a branch here. */
@@ -1203,6 +1214,8 @@ static bool dispatch_cli(const struct engine_vendor *v, const char *prompt_path,
                  "a CLI engine reads its prompt from a file: pass --state-dir "
                  "so one can be written");
     }
+    const int turns = (o->cli_turns_set && o->cli_turns > 0)
+                          ? o->cli_turns : o->turns;
     char turn_cap[32];
     (void)snprintf(turn_cap, sizeof(turn_cap), "%d", turns > 0 ? turns : 1);
     const struct engine_cli_inputs in = {
@@ -1210,7 +1223,8 @@ static bool dispatch_cli(const struct engine_vendor *v, const char *prompt_path,
         .workdir = workdir,
         .turns   = turn_cap,
         .model   = model && model[0] ? model : v->default_model,
-        .reasoning_effort = reasoning_effort,
+        .reasoning_effort = o->reasoning_effort,
+        .resume_session_id = o->resume_session_id,
     };
     const char *argv[ENGINE_CLI_ARGV_MAX];
     if (engine_cli_argv_build(v, &in, argv, ENGINE_CLI_ARGV_MAX) == 0) {
@@ -1223,9 +1237,22 @@ static bool dispatch_cli(const struct engine_vendor *v, const char *prompt_path,
         dr->err = ENGINE_ERR_REFUSED;
         LOG_FAIL("engine_unit", "cannot allocate the CLI transcript buffer");
     }
+    log[0] = '\0';
     bool timed_out = false;
     const int rc = run_cli(
         v, argv, log, UNIT_GATE_LOG_BYTES, timeout_ms, &timed_out);
+    if (o->state_dir && o->state_dir[0]) {
+        char path[1024], capture_hex[65];
+        uint8_t capture_root[32];
+        zcl_sha3_256((const unsigned char *)log, strlen(log), capture_root);
+        zcl_hex_encode(capture_root, sizeof(capture_root), capture_hex);
+        if ((size_t)snprintf(path, sizeof(path), "%s/cli-capture-%d-%s.txt",
+                             o->state_dir, capture_ordinal, capture_hex) >= sizeof(path) ||
+            !engine_emit_file(path, log, strlen(log)))
+            engine_emit(stderr, "engine_unit: could not preserve CLI capture\n");
+    }
+    engine_emit(stderr, "engine_unit: %s child_exit=%d timeout=%s\n",
+                v->id, rc, timed_out ? "yes" : "no");
     if (rc < 0) {
         free(log);
         dr->err = ENGINE_ERR_NETWORK;
@@ -1700,14 +1727,33 @@ static void write_receipt(const struct unit_opts *o,
                           int64_t proof_latency_ms,
                           enum engine_verdict verdict,
                           size_t state_bytes, bool state_updated,
-                          int compactions, bool needs_operator)
+                          int compactions, bool needs_operator,
+                          bool totals_ambiguous)
 {
     char text[4096];
+    /* Raw observations remain in the invocation chain and captured provider
+     * output. Compatibility fields must not look like per-run deltas. */
+    struct engine_usage additive_usage;
+    if (totals_ambiguous) {
+        additive_usage = *usage;
+        additive_usage.tokens_known = false;
+        additive_usage.prompt_tokens_known = false;
+        additive_usage.completion_tokens_known = false;
+        additive_usage.cache_read_input_tokens_known = false;
+        additive_usage.cache_creation_input_tokens_known = false;
+        additive_usage.reasoning_tokens_known = false;
+        additive_usage.total_tokens_known = false;
+        additive_usage.cost_known = false;
+        usage = &additive_usage;
+    }
     struct json_value doc;
     json_init(&doc);
     json_set_object(&doc);
     bool ok = json_push_kv_str(&doc, "schema", "zcl.engine_unit.v1") &&
         json_push_kv_str(&doc, "accounting_scope", "terminal_dispatch") &&
+        json_push_kv_str(&doc, "usage_scope", totals_ambiguous
+            ? "non_additive_observation" : "terminal_dispatch") &&
+        json_push_kv_bool(&doc, "resumed_session", o->resume_session_id != NULL) &&
         json_push_kv_bool(&doc, "needs_operator", needs_operator) &&
         json_push_kv_str(&doc, "engine", v->id) &&
         json_push_kv_str(&doc, "model", o->model ? o->model :
@@ -1748,15 +1794,18 @@ static void write_receipt(const struct unit_opts *o,
             json_push_kv_str(&doc, "request_id", observation->request_id) &&
             json_push_kv_str(&doc, "stop_reason", observation->stop_reason) &&
             json_push_kv_int(&doc, "turns", observation->turns) &&
-            json_push_kv_int(&doc, "input_tokens", observation->input_tokens) &&
-            json_push_kv_int(&doc, "cache_read_input_tokens",
+            receipt_push_counter(&doc, "input_tokens", !totals_ambiguous,
+                                 observation->input_tokens) &&
+            receipt_push_counter(&doc, "cache_read_input_tokens", !totals_ambiguous,
                              observation->cache_read_input_tokens) &&
-            json_push_kv_int(&doc, "cache_creation_input_tokens",
+            receipt_push_counter(&doc, "cache_creation_input_tokens", !totals_ambiguous,
                              observation->cache_creation_input_tokens) &&
-            json_push_kv_int(&doc, "output_tokens", observation->output_tokens) &&
-            json_push_kv_int(&doc, "reasoning_tokens",
+            receipt_push_counter(&doc, "output_tokens", !totals_ambiguous,
+                                 observation->output_tokens) &&
+            receipt_push_counter(&doc, "reasoning_tokens", !totals_ambiguous,
                              observation->reasoning_tokens) &&
-            json_push_kv_int(&doc, "total_tokens", observation->total_tokens);
+            receipt_push_counter(&doc, "total_tokens", !totals_ambiguous,
+                                 observation->total_tokens);
     } else if (ok) {
         if (reply_resolved_model && reply_resolved_model[0])
             ok = json_push_kv_str(&doc, "resolved_model",
@@ -1867,7 +1916,8 @@ static bool append_unit_receipt(const struct unit_opts *o,
         .invocations = invocations ? invocations->items : NULL,
         .invocations_count = invocations ? invocations->count : 0,
         .invocation_totals_ambiguous =
-            invocations ? invocations->totals_ambiguous : false,
+            o->resume_session_id != NULL ||
+            (invocations && invocations->totals_ambiguous),
         .cumulative_proof_ms = cumulative_proof_ms,
         .unit_elapsed_ms = unit_elapsed_ms,
         .dispatch_ms = dispatch_latency_ms,
@@ -2192,8 +2242,8 @@ static bool dispatch_with_retries(const struct engine_vendor *v,
             break;
         case ENGINE_WIRE_LOCAL_CLI:
             ok = dispatch_cli(v, prompt_path, prompt_text, o->model,
-                              o->reasoning_effort, workdir,
-                              o->turns, o->timeout_s * 1000, dr);
+                              workdir, o->timeout_s * 1000, o,
+                              (int)invocations->count + 1, dr);
             break;
         case ENGINE_WIRE_LOCAL_FIXTURE:
             ok = dispatch_fixture(v, o->fixture_reply, dr);
@@ -2246,8 +2296,13 @@ int main(int argc, char **argv)
     }
     /* Before --engine is required: a bare --probe covers every vendor, and
      * naming one narrows it rather than being the way in. */
-    if (o.probe)
+    if (o.probe) {
+        if (o.resume_session_id)
+            return fail_setup("--resume is not valid on --probe");
+        if (o.cli_turns_set)
+            return fail_setup("--cli-turns is not valid on --probe");
         return probe_all(&o);
+    }
     /* An unnamed engine resolves to the registry default rather than being a
      * usage error. The choice is still SAID OUT LOUD below: an operator who
      * did not pick an engine should learn which one they got from the run,
@@ -2261,6 +2316,17 @@ int main(int argc, char **argv)
         && !v->supports_reasoning_effort)
         return fail_setup("selected engine accepts no explicit reasoning "
                           "effort");
+    if (!engine_resume_session_id_valid(o.resume_session_id))
+        return fail_setup("--resume needs a canonical lowercase hexadecimal "
+                          "UUID");
+    if (o.resume_session_id && !v->cli_resume_flag)
+        return fail_setup("selected engine accepts no --resume session");
+    if (o.cli_turns_set) {
+        if (o.cli_turns < 1 || o.cli_turns > 256)
+            return fail_setup("--cli-turns must be between 1 and 256");
+        if (!engine_cli_accepts_turns(v))
+            return fail_setup("selected engine does not consume --cli-turns");
+    }
     if (!o.engine_id)
         engine_emit(stdout, "engine_unit: no --engine given, using %s (%s)\n",
                     v->id, v->display);
@@ -2483,7 +2549,11 @@ int main(int argc, char **argv)
     bool have_gate_tail = false;
 
     struct dispatch_result dr = {0};
-    struct invocation_log invocations = {0};
+    /* The first observation after external resume may already include usage
+     * from an earlier process. Preserve it, but never infer a dispatch delta. */
+    struct invocation_log invocations = {
+        .totals_ambiguous = o.resume_session_id != NULL,
+    };
     struct engine_gate_reading gate = {0};
     bool timed_out = false;
     size_t changed = 0;
@@ -2965,7 +3035,8 @@ int main(int argc, char **argv)
                   &gate, changed,
                   dr.attempts, dr.dispatch_latency_ms, proof_latency_ms,
                   verdict, have_turn_state ? strlen(turn_state) : 0,
-                  state_updated_last, compactions, needs_operator);
+                  state_updated_last, compactions, needs_operator,
+                  invocations.totals_ambiguous);
     const bool durable_receipt = append_unit_receipt(
         &o, v, &dr.reply.usage, &dr.cli_observation, dr.reply.model, &gate,
         changed, dr.attempts, dr.dispatch_latency_ms, proof_latency_ms,
