@@ -19,6 +19,27 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 TOR_DIR="$ROOT/vendor/tor"
 HOST_OS="$(uname -s 2>/dev/null || echo unknown)"
+
+# VENDOR_TARGET=<triple> cross-builds Tor for another platform: the same
+# selector tools/scripts/build_vendor.sh already uses for the rest of the
+# vendor stack (see its VENDOR_TARGET comment). vendor/tor holds ONE checkout
+# shared by every target -- a cross build must not overwrite a host build's
+# objects in place, so it gets its own out-of-tree build directory under
+# vendor/cross/<triple>/tor, exactly the path ZCL_TOR_TREE in the Makefile
+# already reads. Tor's build is one non-recursive automake Makefile (every
+# src/**/include.am is `include`d from the top-level Makefile.am), so a plain
+# autoconf out-of-tree build -- $srcdir/configure run from an empty directory
+# -- is sufficient: no new build logic, only a different working directory,
+# --host, and where the vendored OpenSSL/libevent/zlib come from. Empty when
+# VENDOR_TARGET is unset, so every existing native path is byte-for-byte
+# unchanged.
+VENDOR_TARGET="${VENDOR_TARGET:-}"
+TOR_BUILD_DIR="$TOR_DIR"
+VENDOR_ROOT_DIR="$ROOT/vendor"
+if [ -n "$VENDOR_TARGET" ]; then
+    TOR_BUILD_DIR="$ROOT/vendor/cross/$VENDOR_TARGET/tor"
+    VENDOR_ROOT_DIR="$ROOT/vendor/cross/$VENDOR_TARGET"
+fi
 if [ "$HOST_OS" = "Darwin" ]; then
     MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-14.0}"
     [ "$MACOSX_DEPLOYMENT_TARGET" = "14.0" ] || {
@@ -87,7 +108,7 @@ fi
 # the node links vendor/lib/libevent.a. That is the same latent skew,
 # still open, and it needs the headers vendored before it can be closed.
 configure_opts=(
-    --with-openssl-dir="$ROOT/vendor"
+    --with-openssl-dir="$VENDOR_ROOT_DIR"
     --disable-asciidoc
     --disable-systemd
     --disable-seccomp
@@ -102,58 +123,103 @@ if [ "$HOST_OS" = "Darwin" ]; then
     configure_opts+=("CFLAGS=-mmacosx-version-min=$MACOSX_DEPLOYMENT_TARGET")
 fi
 
-case "$HOST_OS" in
-Darwin|MINGW*|MSYS*)
-    # Tor's TOR_SEARCH_LIBRARY expands --with-<lib>-dir=D into -ID/include and
-    # -LD/lib, which is exactly the shape of this repository's vendor tree. Fail
-    # closed on the pieces that must already be there rather than letting
-    # configure fall back to a system library.
-    #
-    # Neither macOS nor an MSYS2/mingw Windows host has a system
-    # OpenSSL/libevent/zlib that Tor should be linked against here. On Windows
-    # MSYS2 may well HAVE those packages, which is worse than not having them:
-    # configure would silently pick a different OpenSSL from the one the node
-    # links, and the skew is invisible because both sides compile. Point Tor at
-    # the same vendor tree the node uses, on every host that needs it.
+# configure.ac's own TOR_SEARCH_LIBRARY(libevent, ...) probe already links
+# -liphlpapi/-lbcrypt/-lws2_32 and passes. Its LATER AC_SEARCH_LIBS(event_new,
+# ...) / AC_SEARCH_LIBS(evdns_base_new, ...) probe of that same libevent only
+# seeds LIBS with $TOR_LIB_WS32, so the vendored Windows libevent.a -- which
+# calls if_nametoindex (iphlpapi) -- fails to link there and configure aborts
+# with "libevent2 is installed but linking it failed". Pre-seeding LIBS here
+# reaches that probe's own save_LIBS baseline, so this is a build input (the
+# same shape as LIBEVENT_CONFIGURE_LIBS in build_vendor.sh, one probe short
+# of the libs its own vendored dependency needs), never a patch to
+# configure.ac.
+is_windows_target=false
+case "$HOST_OS" in MINGW*|MSYS*) is_windows_target=true ;; esac
+case "$VENDOR_TARGET" in *mingw*|*windows*) is_windows_target=true ;; esac
+if $is_windows_target; then
+    configure_opts+=("LIBS=-liphlpapi -lbcrypt -lws2_32")
+fi
+
+# A cross build supplies its own host triple and toolchain -- the same
+# VENDOR_CC/VENDOR_AR/VENDOR_RANLIB names and $VENDOR_TARGET-<tool> defaults
+# tools/scripts/build_vendor.sh already uses, so one triple selects the same
+# toolchain everywhere in this repository. tor_cross_env stays empty on every
+# native build, so the `env` call below runs configure with the ambient
+# environment, unchanged from before this array existed.
+tor_cross_env=()
+if [ -n "$VENDOR_TARGET" ]; then
+    # Tor's own configure.ac refuses a cross build whose discovered tools are
+    # not ALL triple-prefixed (its AC_PROG_AR kludge sets ac_tool_warned the
+    # moment any one of them, e.g. a system-wide pkg-config, is not) -- a
+    # correctly-targeted mingw-w64 CC/AR/RANLIB still trips it. This is Tor's
+    # own documented escape hatch for exactly that false positive
+    # (configure.ac's error text names the flag), not a new check invented
+    # here.
+    configure_opts+=(--host="$VENDOR_TARGET" --disable-tool-name-check)
+    tor_cross_env=(
+        "CC=${VENDOR_CC:-$VENDOR_TARGET-gcc}"
+        "AR=${VENDOR_AR:-$VENDOR_TARGET-ar}"
+        "RANLIB=${VENDOR_RANLIB:-$VENDOR_TARGET-ranlib}"
+    )
+fi
+
+# Tor's TOR_SEARCH_LIBRARY expands --with-<lib>-dir=D into -ID/include and
+# -LD/lib, which is exactly the shape of this repository's vendor tree (host
+# vendor/, cross vendor/cross/<triple>/). Fail closed on the pieces that must
+# already be there rather than letting configure fall back to a system
+# library.
+#
+# Neither macOS nor an MSYS2/mingw Windows host has a system
+# OpenSSL/libevent/zlib that Tor should be linked against here, and a cross
+# build has no host libraries to discover at all. On Windows MSYS2 may well
+# HAVE those packages, which is worse than not having them: configure would
+# silently pick a different OpenSSL from the one the node links, and the skew
+# is invisible because both sides compile. Point Tor at the same vendor tree
+# the node links for this exact target, on every host/target that needs it.
+needs_vendored_deps=false
+case "$HOST_OS" in Darwin|MINGW*|MSYS*) needs_vendored_deps=true ;; esac
+case "$VENDOR_TARGET" in *mingw*|*windows*|*darwin*) needs_vendored_deps=true ;; esac
+if $needs_vendored_deps; then
     vendor_missing=""
     for required in \
-        vendor/lib/libcrypto.a vendor/lib/libssl.a \
-        vendor/lib/libevent.a vendor/lib/libz.a \
-        vendor/include/openssl/ssl.h vendor/include/event2/event.h \
-        vendor/include/zlib.h
+        "$VENDOR_ROOT_DIR/lib/libcrypto.a" "$VENDOR_ROOT_DIR/lib/libssl.a" \
+        "$VENDOR_ROOT_DIR/lib/libevent.a" "$VENDOR_ROOT_DIR/lib/libz.a" \
+        "$VENDOR_ROOT_DIR/include/openssl/ssl.h" "$VENDOR_ROOT_DIR/include/event2/event.h" \
+        "$VENDOR_ROOT_DIR/include/zlib.h"
     do
-        [ -s "$ROOT/$required" ] || vendor_missing="$vendor_missing $required"
+        [ -s "$required" ] || vendor_missing="$vendor_missing ${required#"$ROOT"/}"
     done
     if [ -n "$vendor_missing" ]; then
         echo "tor-full: building the vendored Tor dependencies first (missing:$vendor_missing)"
-        "$ROOT/tools/scripts/build_vendor.sh" libcrypto.a libssl.a libevent.a libz.a
+        VENDOR_TARGET="$VENDOR_TARGET" "$ROOT/tools/scripts/build_vendor.sh" libcrypto.a libssl.a libevent.a libz.a
         vendor_missing=""
         for required in \
-            vendor/lib/libcrypto.a vendor/lib/libssl.a \
-            vendor/lib/libevent.a vendor/lib/libz.a \
-            vendor/include/openssl/ssl.h vendor/include/event2/event.h \
-            vendor/include/zlib.h
+            "$VENDOR_ROOT_DIR/lib/libcrypto.a" "$VENDOR_ROOT_DIR/lib/libssl.a" \
+            "$VENDOR_ROOT_DIR/lib/libevent.a" "$VENDOR_ROOT_DIR/lib/libz.a" \
+            "$VENDOR_ROOT_DIR/include/openssl/ssl.h" "$VENDOR_ROOT_DIR/include/event2/event.h" \
+            "$VENDOR_ROOT_DIR/include/zlib.h"
         do
-            [ -s "$ROOT/$required" ] || vendor_missing="$vendor_missing $required"
+            [ -s "$required" ] || vendor_missing="$vendor_missing ${required#"$ROOT"/}"
         done
     fi
     if [ -n "$vendor_missing" ]; then
-        echo "tor-full: $HOST_OS must link the vendored OpenSSL/libevent/zlib," >&2
+        echo "tor-full: ${VENDOR_TARGET:-$HOST_OS} must link the vendored OpenSSL/libevent/zlib," >&2
         echo "tor-full: and they are still absent:$vendor_missing" >&2
         echo "tor-full: run tools/scripts/build_vendor.sh and rerun." >&2
         exit 5
     fi
     configure_opts+=(
-        "--with-openssl-dir=$ROOT/vendor"
-        "--with-libevent-dir=$ROOT/vendor"
-        "--with-zlib-dir=$ROOT/vendor"
+        "--with-openssl-dir=$VENDOR_ROOT_DIR"
+        "--with-libevent-dir=$VENDOR_ROOT_DIR"
+        "--with-zlib-dir=$VENDOR_ROOT_DIR"
     )
-    ;;
-esac
+fi
+
+mkdir -p "$TOR_BUILD_DIR"
 
 configure_args=""
-if [ -x "$TOR_DIR/config.status" ]; then
-    configure_args="$($TOR_DIR/config.status --config 2>/dev/null || true)"
+if [ -x "$TOR_BUILD_DIR/config.status" ]; then
+    configure_args="$($TOR_BUILD_DIR/config.status --config 2>/dev/null || true)"
 fi
 configured=true
 for option in "${configure_opts[@]}"; do
@@ -164,9 +230,10 @@ for option in "${configure_opts[@]}"; do
 done
 
 if [ "$configured" != true ]; then
-    (cd "$TOR_DIR" && \
+    (cd "$TOR_BUILD_DIR" && \
         ac_cv_lib_cap_cap_init=no ac_cv_func_cap_set_proc=no \
-        ./configure "${configure_opts[@]}")
+        env ${tor_cross_env[@]+"${tor_cross_env[@]}"} \
+        "$TOR_DIR/configure" "${configure_opts[@]}")
 fi
 
 jobs="${ZCL_TOR_JOBS:-$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)}"
@@ -174,7 +241,7 @@ case "$jobs" in
     ''|*[!0-9]*) echo "tor-full: ZCL_TOR_JOBS must be a positive integer" >&2; exit 2 ;;
     0) echo "tor-full: ZCL_TOR_JOBS must be greater than zero" >&2; exit 2 ;;
 esac
-make -C "$TOR_DIR" -j"$jobs" libtor.a
+make -C "$TOR_BUILD_DIR" -j"$jobs" libtor.a
 
 for archive in \
     libtor.a \
@@ -182,11 +249,11 @@ for archive in \
     src/ext/ed25519/ref10/libed25519_ref10.a \
     src/ext/keccak-tiny/libkeccak-tiny.a
 do
-    [ -s "$TOR_DIR/$archive" ] || {
+    [ -s "$TOR_BUILD_DIR/$archive" ] || {
         echo "tor-full: missing expected archive $archive" >&2
         exit 1
     }
 done
 
 commit="$(git -C "$TOR_DIR" rev-parse --short=12 HEAD)"
-echo "tor-full: ready commit=$commit archives=4 embedded_profile=self_contained host=$HOST_OS"
+echo "tor-full: ready commit=$commit archives=4 embedded_profile=self_contained target=${VENDOR_TARGET:-host} host=$HOST_OS dir=${TOR_BUILD_DIR#"$ROOT"/}"

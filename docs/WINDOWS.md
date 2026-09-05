@@ -83,6 +83,46 @@ native host slots in `vendor/lib` and `vendor/include`. Native UCRT64 and WSL2
 still need separate `build/` and host-vendor trees; move changes between them
 through Git, never copied objects.
 
+## Tor on Windows
+
+`make vendor` (and its cross equivalent above) only ever produces the
+offline-friendly `libtor_stub.a`; onion transport is explicit opt-in through
+`make tor-full` on every platform, Windows included. Skip it and a Windows
+`z23.exe` links exactly like today: it compiles, links, and starts, but its
+`tor_run_main` is the stub's and returns without ever opening an onion
+service.
+
+Cross, from Linux, once the pinned OpenSSL/libevent/zlib archives above exist
+under `vendor/cross/x86_64-w64-mingw32`:
+
+```bash
+make ZCL_TARGET=windows-x86_64 tor-full
+make ZCL_TARGET=windows-x86_64 -j"$(nproc)" z23 zclassic23-acme
+```
+
+Native, from UCRT64, once `make vendor` has produced the host archives:
+
+```bash
+make tor-full
+make -j"$(getconf _NPROCESSORS_ONLN)" z23
+```
+
+Both invoke the same `tools/scripts/build_tor_full.sh` against the same
+pinned `vendor/tor` submodule, and point Tor's own `configure` at the same
+`--with-openssl-dir`/`--with-libevent-dir`/`--with-zlib-dir` vendor tree
+already used on Linux and macOS. The cross run adds only `--host` for the
+mingw triple, the matching cross toolchain, and an out-of-tree build
+directory so it can never collide with a native UCRT64 build of the same
+submodule checkout: the cross archives land at
+`vendor/cross/x86_64-w64-mingw32/tor/libtor.a` plus the `ext/` archives at
+their usual relative paths beneath it (`src/ext/ed25519/donna/`,
+`src/ext/ed25519/ref10/`, `src/ext/keccak-tiny/`), while the native UCRT64
+run places that same archive set directly under `vendor/tor/`. Either path
+is exactly `ZCL_TOR_TREE` in the Makefile, so `make ZCL_TARGET=windows-x86_64
+z23` and a plain UCRT64 `make z23` both pick the real archives over the stub
+automatically the moment they exist — the same evidence-based `TOR_FULL`
+selection every other platform already uses, never an OS check.
+
 ## Native UCRT64 lane
 
 Install MSYS2 to `C:\msys64`, open **MSYS2 UCRT64**, and run:

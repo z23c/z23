@@ -1768,8 +1768,10 @@ vendor-ready:
 # pinned submodule, disables optional host-library integrations that the
 # self-contained outer link does not consume, and produces every static archive
 # TOR_FULL needs. The default vendor path remains the offline-friendly stub.
+# ZCL_CROSS_TRIPLE is empty on the default (host) target, so this forwards
+# nothing there -- same pass-through the vendor%.a rule below already uses.
 tor-full:
-	@tools/scripts/build_tor_full.sh
+	VENDOR_TARGET=$(ZCL_CROSS_TRIPLE) tools/scripts/build_tor_full.sh
 
 # Included only on the first parse when inputs are missing or a requested
 # front door can repair them. Remaking an included makefile forces GNU Make to
