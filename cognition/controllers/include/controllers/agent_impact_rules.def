@@ -1058,6 +1058,20 @@ AGENT_IMPACT_RULE("engine/composition/src/mesh_stream.c|engine/composition/inclu
 /* The TCP tunnel service on those streams: the loopback-only acceptor, the
  * per-peer allow table that admits a target port, and the local listeners. */
 AGENT_IMPACT_RULE("engine/composition/src/mesh_tunnel.c|engine/composition/src/mesh_tunnel_rpc.c|engine/composition/include/config/mesh_tunnel.h|tests/harness/src/test_mesh_tunnel.c|tools/command/native_dev_fleet_tunnel.c", "mesh_tunnel mesh_stream zcode_swarm native_api_contract command_registry_catalog make_lint_gates")
+/* Mesh game service (the "game" stream service on zpkgswm): the fixed-shape
+ * five-frame wire an imported game drives — HELLO, ROSTER, MATCH_OPEN,
+ * MATCH_STATE, MATCH_CLOSE — and the session that admits them in order and
+ * refuses everything else by name. The test proves the round trip and every
+ * named refusal over the same two-peer loopback the stream primitive is
+ * proven on. */
+AGENT_IMPACT_RULE("engine/composition/src/boot_mesh_game.c|engine/composition/include/config/boot_mesh_game.h|tests/harness/src/test_mesh_game.c", "mesh_game fleet_airship_rules mesh_stream boot_mesh_terminal mesh_pairing make_lint_gates")
+/* Fleet airship reward table: the one place a fact about a fleet node earns
+ * an in-game asset, its compiled accessor, and the lint gate that refuses a
+ * row paying out for a fact a machine reported about itself. The test reads
+ * the compiled table and the function the roster actually calls, because a
+ * table that grades clean and a build that pays differently is exactly the
+ * gap a reward scheme gets exploited through. */
+AGENT_IMPACT_RULE("engine/composition/fleet_airship_rules.def|engine/composition/include/config/fleet_airship_rules.h|engine/composition/src/fleet_airship_rules.c|tests/harness/src/test_fleet_airship_rules.c", "fleet_airship_rules mesh_game make_lint_gates")
 /* -confine strict node confinement (seccomp ALLOW-list + Landlock, applied at
  * the SERVICES_RUNNING boundary): the allow-set + installer in os_sandbox, its
  * boot wiring, the -confine flag, the named blocker binding, and the
