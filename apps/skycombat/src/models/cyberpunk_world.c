@@ -1,5 +1,6 @@
-/* SPDX-FileCopyrightText: 2025 Rhett Creighton
- * SPDX-License-Identifier: Apache-2.0
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ *
+ * Sky Combat: cyberpunk world elements.
  */
 
 #include "sky_combat/models/cyberpunk_world.h"
@@ -175,7 +176,7 @@ void cyberpunk_spawn_building(cyberpunk_world_t* world, Vector3 pos, float heigh
     building->pulse_speed = 0.1f + (float)(rand() % 20) / 100.0f;
 }
 
-void cyberpunk_spawn_hologram(cyberpunk_world_t* world, Vector3 pos, const char* text) {
+void cyberpunk_spawn_hologram(cyberpunk_world_t* world, Vector3 pos,[[maybe_unused]] const char* text) {
     if (!world || !world->elements || world->element_count >= world->max_elements) return;
     
     world_element_t* hologram = &world->elements[world->element_count++];
@@ -265,6 +266,7 @@ void cyberpunk_world_update(cyberpunk_world_t* world, float dt) {
                 // Gentle bobbing
                 elem->position.y += sinf(elem->animation_time * elem->pulse_speed) * 0.5f;
                 break;
+            default: break;
         }
         
         // Update trails
@@ -379,6 +381,7 @@ void cyberpunk_world_draw(cyberpunk_world_t* world, Camera3D camera) {
                 field_pos.y -= elem->scale.y;
                 DrawCylinder(field_pos, elem->scale.x/2, elem->scale.x/2, 5.0f, 16, glow_color);
                 break;
+            default: break;
         }
     }
     

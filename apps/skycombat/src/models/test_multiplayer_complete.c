@@ -1,5 +1,6 @@
-/* SPDX-FileCopyrightText: 2025 Rhett Creighton
- * SPDX-License-Identifier: Apache-2.0
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ *
+ * Sky Combat: headless check of a full split-screen match.
  */
 
 #include <stdio.h>
@@ -164,8 +165,8 @@ int main(void) {
                     
                     match_player_killed(match, killer_id, i, killer->team_id, victim->team_id);
                     
-                    const char* killer_team = killer->team_id == 0 ? "Red" : "Blue";
-                    const char* victim_team = victim->team_id == 0 ? "Red" : "Blue";
+                    [[maybe_unused]] const char* killer_team = killer->team_id == 0 ? "Red" : "Blue";
+                    [[maybe_unused]] const char* victim_team = victim->team_id == 0 ? "Red" : "Blue";
                     printf("         Score after kill: Red %d - Blue %d\n",
                            match->team_scores[0], match->team_scores[1]);
                 }

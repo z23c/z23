@@ -1,5 +1,6 @@
-/* SPDX-FileCopyrightText: 2025 Rhett Creighton
- * SPDX-License-Identifier: Apache-2.0
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ *
+ * Sky Combat: cyber dragon boss.
  */
 
 #include "sky_combat/models/boss_cyber_dragon.h"
@@ -401,7 +402,7 @@ void cyber_dragon_update_phase(cyber_dragon_t* dragon) {
     }
 }
 
-void cyber_dragon_draw(cyber_dragon_t* dragon, Camera3D camera) {
+void cyber_dragon_draw(cyber_dragon_t* dragon,[[maybe_unused]] Camera3D camera) {
     if (!dragon) return;
     
     // Determine color based on phase and damage
@@ -508,7 +509,7 @@ void cyber_dragon_draw(cyber_dragon_t* dragon, Camera3D camera) {
     }
 }
 
-void cyber_dragon_draw_effects(cyber_dragon_t* dragon, Camera3D camera) {
+void cyber_dragon_draw_effects(cyber_dragon_t* dragon,[[maybe_unused]] Camera3D camera) {
     if (!dragon) return;
     
     // Plasma storm effect

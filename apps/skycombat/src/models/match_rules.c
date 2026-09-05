@@ -1,5 +1,6 @@
-/* SPDX-FileCopyrightText: 2025 Rhett Creighton
- * SPDX-License-Identifier: Apache-2.0
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ *
+ * Sky Combat: match scoring, teams and win conditions.
  */
 
 #include "sky_combat/models/match_rules.h"
@@ -127,7 +128,7 @@ void match_rules_king_of_hill(match_rules_t* rules, float time_limit) {
     rules->points_per_kill = 5;
 }
 
-void match_add_score(match_state_t* state, int player_id, int team_id, int points) {
+void match_add_score(match_state_t* state,[[maybe_unused]] int player_id, int team_id, int points) {
     if (state->rules.teams_enabled && team_id >= 0 && team_id < state->rules.team_count) {
         state->team_scores[team_id] += points;
         

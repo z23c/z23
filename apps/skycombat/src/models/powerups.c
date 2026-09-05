@@ -1,5 +1,6 @@
-/* SPDX-FileCopyrightText: 2025 Rhett Creighton
- * SPDX-License-Identifier: Apache-2.0
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ *
+ * Sky Combat: power-up spawning and pickup.
  */
 
 #include "sky_combat/models/powerups.h"
@@ -78,7 +79,7 @@ void powerup_manager_update(powerup_manager_t* manager, float dt) {
         
         // Check each spawn point
         for (int i = 0; i < manager->spawn_point_count; i++) {
-            powerup_spawn_point_t* sp = &manager->spawn_points[i];
+            [[maybe_unused]] powerup_spawn_point_t* sp = &manager->spawn_points[i];
             
             // Check if this spawn point is occupied
             bool occupied = false;

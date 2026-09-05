@@ -1,5 +1,6 @@
-/* SPDX-FileCopyrightText: 2025 Rhett Creighton
- * SPDX-License-Identifier: Apache-2.0
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ *
+ * Sky Combat: turns validated input into aircraft motion.
  */
 
 #include "../../specifications/joystick_control_specs.h"
@@ -74,7 +75,7 @@ void aircraft_input_controller_update(void) {
 
 /* Apply input to aircraft */
 void aircraft_input_controller_apply_to_aircraft(
-    Vector3* position,
+    [[maybe_unused]] Vector3* position,
     Vector3* rotation,
     float* throttle,
     bool* afterburner,

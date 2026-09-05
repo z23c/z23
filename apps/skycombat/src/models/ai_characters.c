@@ -1,5 +1,6 @@
-/* SPDX-FileCopyrightText: 2025 Rhett Creighton
- * SPDX-License-Identifier: Apache-2.0
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ *
+ * Sky Combat: ground AI characters.
  */
 
 #include <raylib.h>
@@ -204,6 +205,7 @@ void update_ai_characters(void* buildings, int building_count) {
                 }
                 break;
             }
+            default: break;
         }
     }
 }

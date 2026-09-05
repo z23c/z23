@@ -1,5 +1,6 @@
-/* SPDX-FileCopyrightText: 2025 Rhett Creighton
- * SPDX-License-Identifier: Apache-2.0
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ *
+ * Sky Combat: 3D building error classes and compile-time bounds.
  */
 
 #ifndef _3D_BUILDING_ERRORS_H
@@ -51,17 +52,17 @@
 
 /* Ensure errors are impossible at compile time */
 #define PROVE_NO_FALL_THROUGH() \
-    _Static_assert(GROUND_DETECTION_RANGE > 0, "Ground detection must be positive")
+    _Static_assert((int)GROUND_DETECTION_RANGE_TENTHS > 0, "Ground detection must be positive")
 
 #define PROVE_NO_CEILING_STUCK() \
-    _Static_assert(PLAYER_JUMP_HEIGHT < BUILDING_MIN_CEILING_HEIGHT * 2, \
+    _Static_assert((int)PLAYER_JUMP_HEIGHT < (int)BUILDING_MIN_CEILING_HEIGHT * 2, \
                    "Jump height must not exceed ceiling clearance")
 
 #define PROVE_BUILDINGS_HAVE_INTERIOR() \
-    _Static_assert(BUILDING_MIN_INTERIOR_VOLUME > 0, "Buildings must have volume")
+    _Static_assert((int)BUILDING_MIN_INTERIOR_VOLUME > 0, "Buildings must have volume")
 
 #define PROVE_BUILDINGS_FIT_CHARACTER() \
-    _Static_assert(BUILDING_MIN_CEILING_HEIGHT > PLAYER_HEIGHT, \
+    _Static_assert((int)BUILDING_MIN_CEILING_HEIGHT > (int)PLAYER_HEIGHT, \
                    "Buildings must accommodate player height")
 
 #define PROVE_VALID_ARRAY_BOUNDS() \

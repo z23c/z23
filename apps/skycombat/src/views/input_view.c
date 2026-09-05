@@ -1,5 +1,6 @@
-/* SPDX-FileCopyrightText: 2025 Rhett Creighton
- * SPDX-License-Identifier: Apache-2.0
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ *
+ * Sky Combat: on-screen input state overlay.
  */
 
 #include "sky_combat/views/input_view.h"
@@ -25,11 +26,11 @@ void input_view_destroy(input_view_t* view) {
     free(view);
 }
 
-void input_view_draw_overlay(input_view_t* view,
+void input_view_draw_overlay([[maybe_unused]] input_view_t* view,
                             const validated_input_t* input,
                             const game_actions_t* actions,
                             int screen_width,
-                            int screen_height) {
+                            [[maybe_unused]] int screen_height) {
     if (!input->is_valid) return;
     
     // Background panel
@@ -95,7 +96,7 @@ void input_view_draw_overlay(input_view_t* view,
              ax + 100, ay, 16, YELLOW);
 }
 
-void input_view_draw_controller(input_view_t* view,
+void input_view_draw_controller([[maybe_unused]] input_view_t* view,
                                const validated_input_t* input,
                                int x, int y) {
     // Draw simplified controller diagram
@@ -126,7 +127,7 @@ void input_view_draw_controller(input_view_t* view,
     DrawText("BRAKE", x + width/2 + 10, y + 50, 14, input->buttons[3] ? RED : GRAY);
 }
 
-void input_view_draw_error(input_view_t* view,
+void input_view_draw_error([[maybe_unused]] input_view_t* view,
                           const char* error,
                           int screen_width,
                           int screen_height) {

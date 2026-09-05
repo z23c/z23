@@ -1,5 +1,6 @@
-/* SPDX-FileCopyrightText: 2025 Rhett Creighton
- * SPDX-License-Identifier: Apache-2.0
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ *
+ * Sky Combat: overdrive charge and multipliers.
  */
 
 #include "sky_combat/models/overdrive.h"
@@ -122,7 +123,7 @@ float overdrive_get_damage_multiplier(overdrive_system_t* overdrive) {
     return overdrive->damage_multiplier;
 }
 
-void overdrive_draw_effects(overdrive_system_t* overdrive, Vector3 position, Camera3D camera) {
+void overdrive_draw_effects(overdrive_system_t* overdrive, Vector3 position,[[maybe_unused]] Camera3D camera) {
     if (!overdrive || !overdrive->active) return;
     
     // Glowing aura around aircraft

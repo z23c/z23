@@ -1,5 +1,6 @@
-/* SPDX-FileCopyrightText: 2025 Rhett Creighton
- * SPDX-License-Identifier: Apache-2.0
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ *
+ * Sky Combat: explosion and impact effects.
  */
 
 #include "sky_combat/views/combat_effects.h"
@@ -290,12 +291,12 @@ void effects_activate_bullet_time(effects_manager_t* manager, float duration) {
     manager->motion_blur = 0.8f;
 }
 
-void effects_screen_shake(effects_manager_t* manager, float intensity, float duration) {
+void effects_screen_shake(effects_manager_t* manager, float intensity,[[maybe_unused]] float duration) {
     manager->screen_shake = intensity;
     // Screen shake decays over time
 }
 
-void effects_screen_flash(effects_manager_t* manager, Color color, float duration) {
+void effects_screen_flash(effects_manager_t* manager, Color color,[[maybe_unused]] float duration) {
     manager->screen_flash = color;
     manager->flash_intensity = 1.0f;
 }
@@ -357,6 +358,7 @@ void effects_update(effects_manager_t* manager, float dt) {
                 // Expanding shockwave
                 effect->intensity = 1.0f - (effect->elapsed / effect->duration);
                 break;
+            default: break;
         }
     }
     
@@ -446,6 +448,7 @@ void effects_draw(effects_manager_t* manager, Camera3D camera) {
                 // Flash
                 DrawSphere(effect->position, 2.0f * (1 - progress), color);
                 break;
+            default: break;
         }
         
         // Draw effect particles

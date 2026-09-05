@@ -1,5 +1,6 @@
-/* SPDX-FileCopyrightText: 2025 Rhett Creighton
- * SPDX-License-Identifier: Apache-2.0
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ *
+ * Sky Combat: damage and scoring system.
  */
 
 #include <stdlib.h>
@@ -10,6 +11,6 @@ void combat_process_damage(int* health, int damage) {
     if (*health < 0) *health = 0;
 }
 
-void combat_update_projectiles(float dt) {
+void combat_update_projectiles([[maybe_unused]] float dt) {
     // Update projectile positions and collisions
 }

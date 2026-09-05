@@ -1,5 +1,6 @@
-/* SPDX-FileCopyrightText: 2025 Rhett Creighton
- * SPDX-License-Identifier: Apache-2.0
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ *
+ * Sky Combat: split-screen match, built up phase by phase.
  */
 
 #include <raylib.h>
@@ -98,10 +99,10 @@ static ultimate_game_t* game_create(void) {
     }
     
     // PHASE 3: Add AI aircraft (no combat yet, just flying around)
-    int ai1 = aircraft_manager_add(game->aircraft_mgr, "SECRETARIAT", RED, true, false);
-    int ai2 = aircraft_manager_add(game->aircraft_mgr, "SEATTLE SLEW", MAROON, true, false);
-    int ai3 = aircraft_manager_add(game->aircraft_mgr, "AFFIRMED", BLUE, true, false);
-    int ai4 = aircraft_manager_add(game->aircraft_mgr, "WAR ADMIRAL", DARKGREEN, true, false);
+    [[maybe_unused]] int ai1 = aircraft_manager_add(game->aircraft_mgr, "SECRETARIAT", RED, true, false);
+    [[maybe_unused]] int ai2 = aircraft_manager_add(game->aircraft_mgr, "SEATTLE SLEW", MAROON, true, false);
+    [[maybe_unused]] int ai3 = aircraft_manager_add(game->aircraft_mgr, "AFFIRMED", BLUE, true, false);
+    [[maybe_unused]] int ai4 = aircraft_manager_add(game->aircraft_mgr, "WAR ADMIRAL", DARKGREEN, true, false);
     
     // PHASE 3: Set AI skill levels - LOW like Pac-Man ghosts
     for (int i = 0; i < game->aircraft_mgr->aircraft_count; i++) {
@@ -190,7 +191,7 @@ static void handle_combat_ultimate(ultimate_game_t* game, input_state_fast_t* in
     }
     
     // Apply overdrive multipliers
-    float damage_mult = overdrive_get_damage_multiplier(game->overdrive);
+    [[maybe_unused]] float damage_mult = overdrive_get_damage_multiplier(game->overdrive);
     
     // Firing is now handled in main loop for continuous stream
     // Overdrive triple shot is handled there too

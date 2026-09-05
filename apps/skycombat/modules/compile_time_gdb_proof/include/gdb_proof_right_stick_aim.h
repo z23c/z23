@@ -1,5 +1,6 @@
-/* SPDX-FileCopyrightText: 2025 Rhett Creighton
- * SPDX-License-Identifier: Apache-2.0
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ *
+ * Sky Combat GDB proof module: right-stick aim proofs.
  */
 
 #ifndef GDB_PROOF_RIGHT_STICK_AIM_H

@@ -1,5 +1,6 @@
-/* SPDX-FileCopyrightText: 2025 Rhett Creighton
- * SPDX-License-Identifier: Apache-2.0
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ *
+ * Sky Combat: joystick range and latency specification.
  */
 
 #ifndef JOYSTICK_CONTROL_SPECS_H
@@ -74,10 +75,10 @@ typedef struct {
 } while(0)
 
 #define PROVE_CONTROL_RATES() do { \
-    _Static_assert(MAX_PITCH_RATE > 0 && MAX_PITCH_RATE <= 180.0f, "Invalid pitch rate"); \
-    _Static_assert(MAX_ROLL_RATE > 0 && MAX_ROLL_RATE <= 360.0f, "Invalid roll rate"); \
-    _Static_assert(MAX_YAW_RATE > 0 && MAX_YAW_RATE <= 180.0f, "Invalid yaw rate"); \
-    _Static_assert(MAX_THROTTLE_RATE > 0, "Invalid throttle rate"); \
+    _Static_assert((int)MAX_PITCH_RATE > 0 && (int)MAX_PITCH_RATE <= 180, "Invalid pitch rate"); \
+    _Static_assert((int)MAX_ROLL_RATE > 0 && (int)MAX_ROLL_RATE <= 360, "Invalid roll rate"); \
+    _Static_assert((int)MAX_YAW_RATE > 0 && (int)MAX_YAW_RATE <= 180, "Invalid yaw rate"); \
+    _Static_assert((int)MAX_THROTTLE_RATE > 0, "Invalid throttle rate"); \
 } while(0)
 
 #define PROVE_RESPONSE_TIME() do { \

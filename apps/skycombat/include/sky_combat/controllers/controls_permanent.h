@@ -1,5 +1,6 @@
-/* SPDX-FileCopyrightText: 2025 Rhett Creighton
- * SPDX-License-Identifier: Apache-2.0
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ *
+ * Sky Combat: the locked ASTRO C40 control map.
  */
 
 #ifndef SKY_COMBAT_CONTROLS_PERMANENT_H

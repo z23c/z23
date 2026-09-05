@@ -1,5 +1,6 @@
-/* SPDX-FileCopyrightText: 2025 Rhett Creighton
- * SPDX-License-Identifier: Apache-2.0
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ *
+ * Sky Combat: world geometry and bounds.
  */
 
 #include <stdlib.h>
@@ -15,7 +16,7 @@ void world_generate(void) {
     // World generation
 }
 
-void world_update(float dt) {
+void world_update([[maybe_unused]] float dt) {
     // World update
 }
 

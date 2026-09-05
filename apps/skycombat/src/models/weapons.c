@@ -1,5 +1,6 @@
-/* SPDX-FileCopyrightText: 2025 Rhett Creighton
- * SPDX-License-Identifier: Apache-2.0
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ *
+ * Sky Combat: weapon systems and projectiles.
  */
 
 #include "sky_combat/models/weapons.h"
@@ -364,7 +365,7 @@ void weapons_fire_bullet(weapons_system_t* weapons, Vector3 position, Vector3 di
     
     // NO COOLDOWN - Continuous firing!
     // But fine-tuning can make it even faster
-    float effective_cooldown = 0.0f;  // No cooldown at all
+    [[maybe_unused]] float effective_cooldown = 0.0f;  // No cooldown at all
     
     // Add recoil and muzzle flash
     weapons->recoil_amount += 0.5f;
@@ -516,7 +517,7 @@ void weapons_fire_missile(weapons_system_t* weapons, Vector3 position, Vector3 d
 }
 
 // New weapon firing functions
-void weapons_fire_laser(weapons_system_t* weapons, Vector3 position, Vector3 direction, float yaw) {
+void weapons_fire_laser(weapons_system_t* weapons, Vector3 position, Vector3 direction,[[maybe_unused]] float yaw) {
     CHECK_NULL(weapons);
     if (!weapons_can_fire(weapons, WEAPON_LASER)) return;
     
@@ -541,7 +542,7 @@ void weapons_fire_laser(weapons_system_t* weapons, Vector3 position, Vector3 dir
     }
 }
 
-void weapons_fire_plasma(weapons_system_t* weapons, Vector3 position, Vector3 direction, float yaw) {
+void weapons_fire_plasma(weapons_system_t* weapons, Vector3 position, Vector3 direction,[[maybe_unused]] float yaw) {
     CHECK_NULL(weapons);
     if (!weapons_can_fire(weapons, WEAPON_PLASMA)) return;
     
@@ -566,7 +567,7 @@ void weapons_fire_plasma(weapons_system_t* weapons, Vector3 position, Vector3 di
     }
 }
 
-void weapons_fire_railgun(weapons_system_t* weapons, Vector3 position, Vector3 direction, float yaw) {
+void weapons_fire_railgun(weapons_system_t* weapons, Vector3 position, Vector3 direction,[[maybe_unused]] float yaw) {
     CHECK_NULL(weapons);
     if (!weapons_can_fire(weapons, WEAPON_RAILGUN)) return;
     
@@ -592,7 +593,7 @@ void weapons_fire_railgun(weapons_system_t* weapons, Vector3 position, Vector3 d
     }
 }
 
-void weapons_fire_spread(weapons_system_t* weapons, Vector3 position, Vector3 direction, float yaw) {
+void weapons_fire_spread(weapons_system_t* weapons, Vector3 position, Vector3 direction,[[maybe_unused]] float yaw) {
     CHECK_NULL(weapons);
     if (!weapons_can_fire(weapons, WEAPON_SPREAD)) return;
     

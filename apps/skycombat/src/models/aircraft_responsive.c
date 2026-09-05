@@ -1,5 +1,6 @@
-/* SPDX-FileCopyrightText: 2025 Rhett Creighton
- * SPDX-License-Identifier: Apache-2.0
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ *
+ * Sky Combat: responsive flight-model variant.
  */
 
 #include "sky_combat/models/aircraft.h"
@@ -67,7 +68,7 @@ void aircraft_update_responsive(aircraft_t* aircraft, float stick_x, float stick
 // Camera update function moved to camera_controller.c to avoid duplication
 
 // Instant barrel roll - simplified for existing struct
-void aircraft_barrel_roll_instant(aircraft_t* aircraft, float direction) {
+void aircraft_barrel_roll_instant(aircraft_t* aircraft,[[maybe_unused]] float direction) {
     if (!aircraft) return;
     
     // We'll handle barrel roll in the main game logic

@@ -1,5 +1,6 @@
-/* SPDX-FileCopyrightText: 2025 Rhett Creighton
- * SPDX-License-Identifier: Apache-2.0
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ *
+ * Sky Combat: signal-handler crash reporting.
  */
 
 #include <stdio.h>
@@ -11,55 +12,63 @@
 #include <sys/resource.h>
 #include <math.h>
 
+/* write(2) carries warn_unused_result, and a signal handler has nowhere to
+ * report a short write to: consume the result here, once, instead of at each
+ * call site. Still async-signal-safe - one write(2) and nothing else. */
+static void crash_write(const char *msg, size_t len) {
+    ssize_t written = write(STDERR_FILENO, msg, len);
+    (void)written;
+}
+
 // Enhanced signal handler for catching crashes
-static void crash_handler(int sig, siginfo_t *info, void *context) {
+static void crash_handler(int sig, siginfo_t *info,[[maybe_unused]] void *context) {
     // Use write() instead of printf() - signal safe
     const char *msg = "\n=== CRASH PROTECTION ACTIVATED ===\n";
-    write(STDERR_FILENO, msg, strlen(msg));
+    crash_write(msg, strlen(msg));
     
     // Signal type
     char sig_msg[128];
     snprintf(sig_msg, sizeof(sig_msg), "Signal: %d (", sig);
-    write(STDERR_FILENO, sig_msg, strlen(sig_msg));
+    crash_write(sig_msg, strlen(sig_msg));
     
     switch(sig) {
         case SIGSEGV:
-            write(STDERR_FILENO, "Segmentation fault", 18);
+            crash_write("Segmentation fault", 18);
             break;
         case SIGFPE:
-            write(STDERR_FILENO, "Floating point exception", 24);
+            crash_write("Floating point exception", 24);
             break;
         case SIGBUS:
-            write(STDERR_FILENO, "Bus error", 9);
+            crash_write("Bus error", 9);
             break;
         case SIGILL:
-            write(STDERR_FILENO, "Illegal instruction", 19);
+            crash_write("Illegal instruction", 19);
             break;
         case SIGABRT:
-            write(STDERR_FILENO, "Abort", 5);
+            crash_write("Abort", 5);
             break;
         default:
-            write(STDERR_FILENO, "Unknown", 7);
+            crash_write("Unknown", 7);
             break;
     }
-    write(STDERR_FILENO, ")\n", 2);
+    crash_write(")\n", 2);
     
     // Additional info for SIGSEGV and SIGBUS
     if (sig == SIGSEGV || sig == SIGBUS) {
         char addr_msg[128];
         snprintf(addr_msg, sizeof(addr_msg), "Fault address: %p\n", info->si_addr);
-        write(STDERR_FILENO, addr_msg, strlen(addr_msg));
+        crash_write(addr_msg, strlen(addr_msg));
     }
     
     // Backtrace
-    write(STDERR_FILENO, "\nBacktrace:\n", 12);
+    crash_write("\nBacktrace:\n", 12);
     void *buffer[30];
     int nptrs = backtrace(buffer, 30);
     backtrace_symbols_fd(buffer, nptrs, STDERR_FILENO);
     
     // Graceful exit message
-    write(STDERR_FILENO, "\nSafety system prevented crash!\n", 32);
-    write(STDERR_FILENO, "Exiting cleanly...\n", 19);
+    crash_write("\nSafety system prevented crash!\n", 32);
+    crash_write("Exiting cleanly...\n", 19);
     
     // Exit cleanly instead of dumping core
     _exit(1);

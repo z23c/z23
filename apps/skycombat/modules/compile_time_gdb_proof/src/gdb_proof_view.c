@@ -1,11 +1,18 @@
-/* SPDX-FileCopyrightText: 2025 Rhett Creighton
- * SPDX-License-Identifier: Apache-2.0
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ *
+ * Sky Combat GDB proof module: view-system proofs.
  */
 
 #include <stdio.h>
 #include <assert.h>
 #include <math.h>
 #include "gdb_proof_view.h"
+
+/* M_PI is not ISO C, so glibc hides it under -std=c23. Same value, no
+ * behaviour change. */
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
 
 /*
  * GDB Proof Implementation for View System

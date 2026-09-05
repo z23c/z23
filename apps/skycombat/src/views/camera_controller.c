@@ -1,5 +1,6 @@
-/* SPDX-FileCopyrightText: 2025 Rhett Creighton
- * SPDX-License-Identifier: Apache-2.0
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ *
+ * Sky Combat: chase, orbit and cockpit cameras.
  */
 
 #include "sky_combat/views/camera_controller.h"
@@ -35,7 +36,6 @@ static Vector3 calculate_follow_position(camera_controller_t* controller);
 static Vector3 calculate_orbit_position(camera_controller_t* controller);
 static Vector3 calculate_cockpit_position(camera_controller_t* controller);
 static void update_shake(camera_controller_t* controller, float dt);
-static void update_smooth_values(camera_controller_t* controller, float dt);
 static void update_transition(camera_controller_t* controller, float dt);
 static void apply_constraints(camera_controller_t* controller);
 

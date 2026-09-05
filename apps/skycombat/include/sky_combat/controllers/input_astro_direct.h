@@ -1,5 +1,6 @@
-/* SPDX-FileCopyrightText: 2025 Rhett Creighton
- * SPDX-License-Identifier: Apache-2.0
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ *
+ * Sky Combat: direct ASTRO C40 joystick reader.
  */
 
 #ifndef SKY_COMBAT_INPUT_ASTRO_DIRECT_H

@@ -1,5 +1,6 @@
-/* SPDX-FileCopyrightText: 2025 Rhett Creighton
- * SPDX-License-Identifier: Apache-2.0
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ *
+ * Sky Combat: multi-aircraft roster and per-aircraft weapons.
  */
 
 /**
@@ -402,7 +403,7 @@ void aircraft_manager_fire_weapon_aimed(aircraft_manager_t* manager, int aircraf
     }
     
     /* Apply power-up effects to fire rate */
-    float fire_rate_mod = 1.0f;
+    [[maybe_unused]] float fire_rate_mod = 1.0f;
     if (ma->powerup_effects.rapid_fire_active) {
         fire_rate_mod = ma->powerup_effects.fire_rate_multiplier;
     }

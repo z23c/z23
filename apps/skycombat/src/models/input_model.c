@@ -1,8 +1,10 @@
-/* SPDX-FileCopyrightText: 2025 Rhett Creighton
- * SPDX-License-Identifier: Apache-2.0
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ *
+ * Sky Combat: validated joystick input model.
  */
 
 #include "sky_combat/models/input_model.h"
+#include <limits.h>
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
@@ -52,18 +54,28 @@ const control_mapping_t* input_model_get_mapping(const input_model_t* model) {
     return &model->mapping;
 }
 
-bool input_model_validate_axis_range(short value) {
-    return value >= AXIS_MIN && value <= AXIS_MAX;
+/* The ASTRO C40 axis floor/ceiling and the L2 full-press value sit exactly on
+ * `short`'s own limits, so the parameter type already enforces those bounds and
+ * a runtime test of them can never fail (-Wtype-limits says so). Pin the
+ * relationship at compile time instead: if a spec change ever moves one of
+ * these inside short's range, this stops building and the runtime test has to
+ * come back. */
+static_assert(AXIS_MIN == SHRT_MIN, "axis floor must be short's floor");
+static_assert(AXIS_MAX == SHRT_MAX, "axis ceiling must be short's ceiling");
+static_assert(L2_TRIGGER_PRESSED == SHRT_MAX, "L2 full press must be short's ceiling");
+
+bool input_model_validate_axis_range([[maybe_unused]] short value) {
+    return true;
 }
 
 bool input_model_validate_l2_trigger(short value) {
     // L2: -32767 (unpressed) to 32767 (fully pressed)
-    return value >= L2_TRIGGER_UNPRESSED && value <= L2_TRIGGER_PRESSED;
+    return (int)value >= L2_TRIGGER_UNPRESSED;
 }
 
 bool input_model_validate_r2_trigger(short value) {
     // R2: -32767 (unpressed) to 0 (fully pressed) - unique ASTRO C40 behavior
-    return value >= R2_TRIGGER_UNPRESSED && value <= 0;
+    return (int)value >= R2_TRIGGER_UNPRESSED && (int)value <= 0;
 }
 
 static float normalize_axis(short value) {

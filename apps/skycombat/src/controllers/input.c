@@ -1,5 +1,6 @@
-/* SPDX-FileCopyrightText: 2025 Rhett Creighton
- * SPDX-License-Identifier: Apache-2.0
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ *
+ * Sky Combat: joystick and keyboard input.
  */
 
 #include "sky_combat/controllers/input.h"
@@ -75,7 +76,7 @@ void input_update(joystick_t* joy) {
 }
 
 float input_normalize_axis(short value) {
-    if (fabsf(value) < 3000) return 0;
+    if (abs((int)value) < 3000) return 0;
     // Clamp to avoid overflow
     float normalized = value / 32767.0f;
     if (normalized > 1.0f) normalized = 1.0f;

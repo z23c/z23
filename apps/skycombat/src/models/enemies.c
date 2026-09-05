@@ -1,5 +1,6 @@
-/* SPDX-FileCopyrightText: 2025 Rhett Creighton
- * SPDX-License-Identifier: Apache-2.0
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ *
+ * Sky Combat: enemy spawning and AI.
  */
 
 #include "sky_combat/models/enemies.h"
@@ -73,13 +74,13 @@ typedef struct {
 } enemy_properties_t;
 
 static const enemy_properties_t enemy_props[] = {
-    [ENEMY_DRONE] = {20, 60, 2.0f, 0.0f, 3.0f, (Color){0, 255, 255, 255}, 100},      // Cyan planes
-    [ENEMY_FIGHTER] = {30, 80, 3.0f, 0.0f, 4.0f, (Color){255, 0, 128, 255}, 250},    // Hot pink planes
-    [ENEMY_TURRET] = {40, 40, 4.0f, 0.0f, 3.5f, (Color){255, 255, 0, 255}, 300},     // Yellow planes
-    [ENEMY_BOMBER] = {50, 30, 1.0f, 0.0f, 6.0f, (Color){0, 255, 0, 255}, 500},       // Green planes
-    [ENEMY_SWARM] = {10, 100, 5.0f, 0.0f, 2.0f, (Color){255, 128, 0, 255}, 50},      // Orange planes
-    [ENEMY_BOSS_MECH] = {100, 50, 2.0f, 0.0f, 8.0f, (Color){128, 0, 255, 255}, 5000}, // Purple planes
-    [ENEMY_BOSS_CARRIER] = {200, 20, 0.5f, 0.0f, 10.0f, (Color){255, 0, 255, 255}, 10000}, // Magenta planes
+    [ENEMY_DRONE] = {20, 60, 2.0f, 0.0f, 3.0f, {0, 255, 255, 255}, 100},      // Cyan planes
+    [ENEMY_FIGHTER] = {30, 80, 3.0f, 0.0f, 4.0f, {255, 0, 128, 255}, 250},    // Hot pink planes
+    [ENEMY_TURRET] = {40, 40, 4.0f, 0.0f, 3.5f, {255, 255, 0, 255}, 300},     // Yellow planes
+    [ENEMY_BOMBER] = {50, 30, 1.0f, 0.0f, 6.0f, {0, 255, 0, 255}, 500},       // Green planes
+    [ENEMY_SWARM] = {10, 100, 5.0f, 0.0f, 2.0f, {255, 128, 0, 255}, 50},      // Orange planes
+    [ENEMY_BOSS_MECH] = {100, 50, 2.0f, 0.0f, 8.0f, {128, 0, 255, 255}, 5000}, // Purple planes
+    [ENEMY_BOSS_CARRIER] = {200, 20, 0.5f, 0.0f, 10.0f, {255, 0, 255, 255}, 10000}, // Magenta planes
 };
 
 enemy_manager_t* enemies_create(int max_enemies) {
@@ -230,7 +231,7 @@ void enemies_spawn_formation(enemy_manager_t* manager, enemy_type_t type, Vector
     }
 }
 
-void enemy_ai_update(enemy_t* enemy, Vector3 player_pos, float dt) {
+void enemy_ai_update(enemy_t* enemy,[[maybe_unused]] Vector3 player_pos,[[maybe_unused]] float dt) {
     if (!enemy || enemy->health <= 0) return;
     
     // PRACTICE MODE - Enemies completely ignore the player!
@@ -448,6 +449,7 @@ void enemies_update(enemy_manager_t* manager, Vector3 player_pos, float dt) {
                     enemy->state = AI_CHASE;
                 }
                 break;
+            default: break;
         }
         
         // Update visual effects

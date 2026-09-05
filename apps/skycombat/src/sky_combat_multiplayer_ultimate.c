@@ -1,5 +1,6 @@
-/* SPDX-FileCopyrightText: 2025 Rhett Creighton
- * SPDX-License-Identifier: Apache-2.0
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ *
+ * Sky Combat: five-player split-screen game.
  */
 
 #include <raylib.h>
@@ -138,7 +139,7 @@ static void render_aircraft_ultimate(const managed_aircraft_t* aircraft,
 }
 
 /* Render power-up with effects */
-static void render_powerup_ultimate(const powerup_t* powerup, effects_manager_t* effects, float game_time) {
+static void render_powerup_ultimate(const powerup_t* powerup,[[maybe_unused]] effects_manager_t* effects, float game_time) {
     if (!powerup->active) return;
     
     /* Floating animation */

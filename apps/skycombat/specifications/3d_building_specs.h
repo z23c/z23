@@ -1,5 +1,6 @@
-/* SPDX-FileCopyrightText: 2025 Rhett Creighton
- * SPDX-License-Identifier: Apache-2.0
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ *
+ * Sky Combat: 3D building and character movement specification.
  */
 
 #ifndef _3D_BUILDING_SPECS_H
@@ -25,7 +26,8 @@
 
 /* SPEC_3D_003: Character movement specifications */
 #define PLAYER_HEIGHT 2.0f
-#define PLAYER_RADIUS 0.5f
+#define PLAYER_RADIUS_TENTHS 5.0f    /* the same radius in tenths of a unit */
+#define PLAYER_RADIUS (PLAYER_RADIUS_TENTHS/10.0f)
 #define PLAYER_JUMP_HEIGHT 3.0f      /* Like Mario 64 */
 #define PLAYER_JUMP_DISTANCE 5.0f    
 #define PLAYER_WALK_SPEED 5.0f       /* units per second */
@@ -42,7 +44,8 @@
 /* SPEC_3D_005: Collision detection requirements */
 #define COLLISION_EPSILON 0.01f
 #define MAX_COLLISION_ITERATIONS 10
-#define GROUND_DETECTION_RANGE 0.1f
+#define GROUND_DETECTION_RANGE_TENTHS 1.0f    /* the same range in tenths of a unit */
+#define GROUND_DETECTION_RANGE (GROUND_DETECTION_RANGE_TENTHS/10.0f)
 
 /* Building structure that MUST be validated */
 typedef struct {
@@ -73,6 +76,14 @@ typedef struct {
 
 /* ===== COMPILE-TIME PROOF MACROS ===== */
 
+/* C23 (6.7.11) lets _Static_assert see a floating constant only as the
+ * immediate operand of a cast, so each bound below casts its constants to int
+ * rather than comparing floats. Every constant these checks touch is a whole
+ * number in the unit it is cast in - the two that are not (PLAYER_RADIUS,
+ * GROUND_DETECTION_RANGE) carry a _TENTHS spelling that is, and the float is
+ * derived from it - so the comparisons hold exactly the values they held
+ * before, with no bound relaxed. */
+
 /* Verify building meets specifications */
 #define PROVE_BUILDING_VALID(building) do { \
     _Static_assert(1, "Building validation required"); \
@@ -94,15 +105,15 @@ typedef struct {
 
 /* Verify jump mechanics are possible */
 #define PROVE_JUMP_MECHANICS() do { \
-    _Static_assert(PLAYER_JUMP_HEIGHT > PLAYER_HEIGHT, "Jump must exceed player height"); \
-    _Static_assert(PLAYER_JUMP_HEIGHT < BUILDING_MIN_CEILING_HEIGHT * 2, "Jump too high for buildings"); \
-    _Static_assert(PLAYER_JUMP_DISTANCE > PLAYER_RADIUS * 2, "Jump distance too short"); \
+    _Static_assert((int)PLAYER_JUMP_HEIGHT > (int)PLAYER_HEIGHT, "Jump must exceed player height"); \
+    _Static_assert((int)PLAYER_JUMP_HEIGHT < (int)BUILDING_MIN_CEILING_HEIGHT * 2, "Jump too high for buildings"); \
+    _Static_assert((int)PLAYER_JUMP_DISTANCE * 10 > (int)PLAYER_RADIUS_TENTHS * 2, "Jump distance too short"); \
 } while(0)
 
 /* Verify flying mechanics don't break building interactions */
 #define PROVE_FLYING_COMPATIBLE() do { \
-    _Static_assert(FLYING_MIN_TURN_RADIUS < 50.0f, "Turn radius too large for city navigation"); \
-    _Static_assert(FLYING_CRUISE_SPEED > PLAYER_RUN_SPEED, "Flying must be faster than running"); \
+    _Static_assert((int)FLYING_MIN_TURN_RADIUS < 50, "Turn radius too large for city navigation"); \
+    _Static_assert((int)FLYING_CRUISE_SPEED > (int)PLAYER_RUN_SPEED, "Flying must be faster than running"); \
 } while(0)
 
 /* ===== RUNTIME VERIFICATION FUNCTIONS ===== */
@@ -151,8 +162,8 @@ static inline void calculate_jump_physics(character_state_t* character, float de
     PROVE_FLYING_COMPATIBLE(); \
     _Static_assert(sizeof(building_spec_t) > 0, "Building spec required"); \
     _Static_assert(sizeof(character_state_t) > 0, "Character state required"); \
-    _Static_assert(BUILDING_MIN_INTERIOR_VOLUME > 0, "Buildings must have volume"); \
-    _Static_assert(PLAYER_HEIGHT < BUILDING_MIN_CEILING_HEIGHT, "Player must fit in buildings"); \
+    _Static_assert((int)BUILDING_MIN_INTERIOR_VOLUME > 0, "Buildings must have volume"); \
+    _Static_assert((int)PLAYER_HEIGHT < (int)BUILDING_MIN_CEILING_HEIGHT, "Player must fit in buildings"); \
 } while(0)
 
 #endif /* _3D_BUILDING_SPECS_H */

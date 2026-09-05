@@ -1,5 +1,6 @@
-/* SPDX-FileCopyrightText: 2025 Rhett Creighton
- * SPDX-License-Identifier: Apache-2.0
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ *
+ * Sky Combat: headless check of power-ups.
  */
 
 #include <stdio.h>
@@ -105,6 +106,7 @@ int main(void) {
                         player->health = player->max_health;
                         printf("Fully repaired!\n");
                         break;
+                    default: break;
                 }
             }
         }

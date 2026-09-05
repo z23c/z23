@@ -1,5 +1,6 @@
-/* SPDX-FileCopyrightText: 2025 Rhett Creighton
- * SPDX-License-Identifier: Apache-2.0
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ *
+ * Sky Combat: on-foot character model.
  */
 
 #include <stdlib.h>
@@ -12,11 +13,11 @@ typedef struct {
     bool active;
 } character_t;
 
-void character_create(Vector3 pos) {
+void character_create([[maybe_unused]] Vector3 pos) {
     // Character creation
 }
 
-void character_update(float dt) {
+void character_update([[maybe_unused]] float dt) {
     // Character AI update
 }
 

@@ -1,5 +1,6 @@
-/* SPDX-FileCopyrightText: 2025 Rhett Creighton
- * SPDX-License-Identifier: Apache-2.0
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ *
+ * Sky Combat: compile-time specification checks.
  */
 
 #ifndef SPECIFICATION_ENFORCEMENT_H
@@ -165,6 +166,10 @@ typedef struct {
 
 // Verify specifications at compile time
 SPEC_REQUIRE(sizeof(int) >= 4, "int must be at least 32 bits");
-SPEC_REQUIRE(NULL == 0, "NULL must be zero");
+/* The line that stood here asserted `NULL == 0`. C23 6.7.11 needs an integer
+ * constant expression and that comparison is an address constant, so it never
+ * was one; nothing is lost by dropping it either, because C 6.3.2.3 already
+ * guarantees a null pointer constant compares equal to 0 on every conforming
+ * implementation. The width check above is the one a build can actually fail. */
 
 #endif // SPECIFICATION_ENFORCEMENT_H

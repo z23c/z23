@@ -1,5 +1,6 @@
-/* SPDX-FileCopyrightText: 2025 Rhett Creighton
- * SPDX-License-Identifier: Apache-2.0
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ *
+ * Sky Combat: aircraft flight physics.
  */
 
 #include "sky_combat/models/aircraft.h"
@@ -65,7 +66,7 @@ void aircraft_update(aircraft_t* aircraft, float inputX, float inputY, float dt)
     aircraft->altitude = aircraft->position.y;
 }
 
-void aircraft_draw(aircraft_t* aircraft, float gameTime) {
+void aircraft_draw([[maybe_unused]] aircraft_t* aircraft,[[maybe_unused]] float gameTime) {
     // Draw implementation would go here
 }
 

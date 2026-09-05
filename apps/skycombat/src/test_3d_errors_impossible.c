@@ -1,5 +1,6 @@
-/* SPDX-FileCopyrightText: 2025 Rhett Creighton
- * SPDX-License-Identifier: Apache-2.0
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ *
+ * Sky Combat: headless check that the 3D error classes cannot occur.
  */
 
 #include "../specifications/3d_building_specs.h"
@@ -53,7 +54,7 @@ int test_ceiling_stuck() {
     }
     
     /* Compile-time proof already ensures jump < ceiling */
-    _Static_assert(PLAYER_JUMP_HEIGHT < BUILDING_MIN_CEILING_HEIGHT * 2, 
+    _Static_assert((int)PLAYER_JUMP_HEIGHT < (int)BUILDING_MIN_CEILING_HEIGHT * 2, 
                    "Jump height safe");
     
     printf("✓ Ceiling stuck PREVENTED - max height constrained\n");

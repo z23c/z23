@@ -1,5 +1,6 @@
-/* SPDX-FileCopyrightText: 2025 Rhett Creighton
- * SPDX-License-Identifier: Apache-2.0
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ *
+ * Sky Combat: neural-network AI pilot.
  */
 
 #include "sky_combat/models/ai_pilot.h"
@@ -265,14 +266,20 @@ void ai_pilot_save(ai_pilot_t* pilot, const char* filename) {
 bool ai_pilot_load(ai_pilot_t* pilot, const char* filename) {
     FILE* file = fopen(filename, "rb");
     if (!file) return false;
-    
-    // Load network weights and training state
-    fread(pilot->weights_input_hidden, sizeof(pilot->weights_input_hidden), 1, file);
-    fread(pilot->weights_hidden_output, sizeof(pilot->weights_hidden_output), 1, file);
-    fread(pilot->bias_hidden, sizeof(pilot->bias_hidden), 1, file);
-    fread(pilot->bias_output, sizeof(pilot->bias_output), 1, file);
-    fread(&pilot->episodes_trained, sizeof(pilot->episodes_trained), 1, file);
-    fread(&pilot->best_score, sizeof(pilot->best_score), 1, file);
+    /* A short read leaves the network half-initialised, so refuse the file
+     * instead of flying on whatever was already in the struct. */
+    bool complete =
+        fread(pilot->weights_input_hidden, sizeof(pilot->weights_input_hidden), 1, file) == 1 &&
+        fread(pilot->weights_hidden_output, sizeof(pilot->weights_hidden_output), 1, file) == 1 &&
+        fread(pilot->bias_hidden, sizeof(pilot->bias_hidden), 1, file) == 1 &&
+        fread(pilot->bias_output, sizeof(pilot->bias_output), 1, file) == 1 &&
+        fread(&pilot->episodes_trained, sizeof(pilot->episodes_trained), 1, file) == 1 &&
+        fread(&pilot->best_score, sizeof(pilot->best_score), 1, file) == 1;
+    if (!complete) {
+        fclose(file);
+        printf("AI Pilot load failed: %s is truncated\n", filename);
+        return false;
+    }
     
     fclose(file);
     printf("AI Pilot loaded from %s\n", filename);
