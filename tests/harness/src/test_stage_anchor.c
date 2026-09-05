@@ -215,7 +215,15 @@ int test_stage_anchor(void)
 
     /* ── IDEMPOTENT re-anchor to the same target is a no-op ───────── */
     {
-        const char *path = "test_stage_anchor_idem.db";
+        /* Under ./test-tmp, not the checkout root: this block's raw BEGIN
+         * IMMEDIATE / ROLLBACK holds an open rollback journal for longer
+         * than the other blocks' single autocommit writes, so a kill or
+         * interrupted run between the BEGIN and the final unlink() used to
+         * strand test_stage_anchor_idem.db-journal in the repo root. */
+        char dir[192];
+        test_make_tmpdir(dir, sizeof(dir), "stage_anchor", "idem");
+        char path[256];
+        snprintf(path, sizeof(path), "%s/stage_anchor_idem.db", dir);
         sqlite3 *db = sa_open(path);
 
         bool ok = stage_anchor_upstream_cursors_to(db, 4242, "test",
@@ -249,7 +257,7 @@ int test_stage_anchor(void)
                  ok && outer_still_open && outer_rolled_back);
 
         sqlite3_close(db);
-        unlink(path);
+        test_cleanup_tmpdir(dir);
     }
 
     /* ── P2: utxo_apply never advances past coins_applied_height ──── */
