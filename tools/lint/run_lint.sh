@@ -236,6 +236,7 @@ gate_command() {
         check-condition-cooldown)          echo './tools/scripts/check_condition_cooldown.sh' ;;
         check-doc-accuracy)                echo './tools/scripts/check_doc_accuracy.sh' ;;
         check-doc-counts)                  echo './tools/scripts/check_doc_counts.sh' ;;
+        check-orient-facts)                echo './tools/lint/check_orient_facts.sh --selftest && ./tools/lint/check_orient_facts.sh' ;;
         check-no-stale-pinned-facts)       echo './tools/lint/check_no_stale_pinned_facts.sh' ;;
         check-no-uncited-victory)          echo './tools/scripts/check_no_uncited_victory.sh' ;;
         check-doc-claims)                  echo './tools/lint/check_doc_claims.sh' ;;

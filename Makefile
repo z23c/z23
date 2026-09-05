@@ -5512,6 +5512,7 @@ LINT_FAST_GATES := \
     check-windows-acceptance-guard \
     check-pipefail-status-pipe \
     check-doc-counts \
+    check-orient-facts \
     check-arena-view-stub
 
 ifeq ($(ZCL_LINT_SERIAL),1)
@@ -12661,6 +12662,18 @@ check-doc-counts:
 fix-doc-counts:
 	@./tools/scripts/check_doc_counts.sh --fix
 
+# Gate — the checkout's own knowledge stays true. Every row in
+# engine/composition/facts/ carries the repo-relative file its claim was read
+# from and a literal anchor from that file; this re-proves both on every
+# commit, so a fact that stopped being true fails the build instead of
+# misleading the next reader. No baseline and no exemption list: weakening an
+# anchor to make a stale row pass is the one failure this cannot allow. The
+# selftest plants a broken anchor and proves the gate trips on it.
+check-orient-facts:
+	@echo "══ LINT: orientation facts still true ══"
+	@./tools/lint/check_orient_facts.sh --selftest
+	@./tools/lint/check_orient_facts.sh
+
 # Gate — the stopwatch skip-streak detector's SHELL halves. The C half is
 # covered by the test_stopwatch_skip_watch group; the shell half (the shared
 # class-table parser both stopwatch scripts source, plus the judge's report
@@ -13587,6 +13600,7 @@ LINT_GATES := \
     check-condition-cooldown \
     check-doc-accuracy \
     check-doc-counts \
+    check-orient-facts \
     check-no-stale-pinned-facts \
     check-no-uncited-victory \
     check-doc-claims \
