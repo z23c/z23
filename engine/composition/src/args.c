@@ -48,9 +48,14 @@ void print_usage(const char *prog)
     printf("  -gen                Enable mining\n");
     printf("  -txindex            Transaction index\n");
     printf("  -tor                Start Tor hidden service (dynhost blog)\n");
-    printf("  -onion-persist      With -tor: keep a persistent .onion identity in\n");
-    printf("                      <datadir>/tor_data/onion_service (default:\n");
-    printf("                      ephemeral — new address every boot)\n");
+    printf("  -onion-persist[=0]  With -tor: keep a persistent .onion identity in\n");
+    printf("                      <datadir>/tor_data/onion_service instead of a\n");
+    printf("                      fresh ephemeral address every boot. Default: ON\n");
+    printf("                      when -tor is combined with at least one\n");
+    printf("                      -addnode=<x>.onion peer (a node pinning fleet\n");
+    printf("                      peers by onion needs its own to stay fixed\n");
+    printf("                      too); OFF otherwise. -onion-persist=0 forces\n");
+    printf("                      ephemeral even with pinned onion peers.\n");
     printf("  -onion-rotate       With -onion-persist: archive the current\n");
     printf("                      identity and mint a fresh one (logs old+new\n");
     printf("                      addresses)\n");
@@ -275,6 +280,30 @@ bool args_should_auto_add_local_peer(bool connect_only, int own_p2p_port,
            legacy_p2p_port > 0 && own_p2p_port != legacy_p2p_port;
 }
 
+/* Whether the -onion-persist default (no explicit -onion-persist or
+ * -onion-persist=0/1 given) should resolve to ON. There is no dedicated
+ * "-fleet"/devfleet profile flag in this binary (checked: neither args.c nor
+ * any engine/composition/src/boot*.c file names one), so the signal used
+ * here is the one already on the command line that means the same thing: a
+ * node dials at least one PINNED peer by its .onion address. That is
+ * exactly what fleet members do to find each other (-addnode=<peer>.onion
+ * :port), and it is reciprocal — if OTHER nodes are meant to keep dialling
+ * this one at a fixed address, this node's own address must stop rotating
+ * too. A plain -tor node with no pinned onion peer (an ordinary privacy
+ * user, or an outbound-only client) gets no benefit from a fixed address
+ * and keeps the more private ephemeral default. Pure and exported so the
+ * default is covered without booting Tor. */
+bool args_onion_persist_default(bool tor, const char *const *addnode_peers,
+                                int n_addnode_peers)
+{
+    if (!tor || !addnode_peers)
+        return false;
+    for (int i = 0; i < n_addnode_peers; i++)
+        if (addnode_peers[i] && strstr(addnode_peers[i], ".onion"))
+            return true;
+    return false;
+}
+
 int args_parse_node_options(int argc, char **argv, struct app_context *ctx,
                             bool *show_metrics)
 {
@@ -385,7 +414,13 @@ int args_parse_node_options(int argc, char **argv, struct app_context *ctx,
         else if (strcmp(argv[i], "-allow-degraded") == 0) ctx->allow_degraded = true;
         else if (strncmp(argv[i], "-showmetrics=", 13) == 0) *show_metrics = atoi(argv[i]+13) != 0;
         else if (strcmp(argv[i], "-tor") == 0) ctx->tor = true;
-        else if (strcmp(argv[i], "-onion-persist") == 0) ctx->onion_persist = true;
+        else if (strcmp(argv[i], "-onion-persist") == 0 ||
+                 strcmp(argv[i], "-onion-persist=1") == 0)
+            ctx->onion_persist = true;
+        else if (strcmp(argv[i], "-onion-persist=0") == 0) {
+            ctx->onion_persist = false;
+            ctx->onion_persist_forced_off = true;
+        }
         else if (strcmp(argv[i], "-onion-rotate") == 0) ctx->onion_rotate = true;
         else if (strncmp(argv[i], "-utxomirror=", 12) == 0) {
             const char *mode = argv[i] + 12;
@@ -650,5 +685,12 @@ int args_parse_node_options(int argc, char **argv, struct app_context *ctx,
                 "-v2transport is deprecated; use -noisetransport%s\n",
                 noise_new_set ? " (new spelling takes precedence)" : "");
     }
+    /* Resolve the -onion-persist default AFTER the whole loop so flag order
+     * never matters (-addnode=/-tor/-onion-persist can appear in any
+     * order). Only applies when the operator did not name either explicit
+     * form above — see args_onion_persist_default(). */
+    if (!ctx->onion_persist && !ctx->onion_persist_forced_off)
+        ctx->onion_persist = args_onion_persist_default(
+            ctx->tor, ctx->addnode_peers, ctx->n_addnode_peers);
     return -1; /* parsed OK — caller continues booting */
 }

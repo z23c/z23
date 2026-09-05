@@ -319,6 +319,89 @@ static int test_onion_persist_args_parse(void)
     return failures;
 }
 
+/* A fleet member that pins its peers by .onion address needs its OWN onion
+ * to stay fixed too, so -tor + at least one -addnode=<x>.onion peer must
+ * default -onion-persist ON even with no explicit flag — while a plain -tor
+ * node (no pinned onion peer) keeps the more private ephemeral default, and
+ * an explicit -onion-persist=0 must still force ephemeral even with a
+ * pinned onion peer. */
+static int test_onion_persist_fleet_default(void)
+{
+    int failures = 0;
+    printf("test_onion_persist_fleet_default: ");
+
+    /* Direct coverage of the pure decision function. */
+    const char *onion_peer[] = {
+        "n3c4bry42qzoiduhfqk33ugeptdycmnsmjnrkmjirrudtpw7xvhc5kid.onion:39360"
+    };
+    const char *clearnet_peer[] = { "203.0.113.9:8033" };
+    bool pure_off_no_tor = !args_onion_persist_default(false, onion_peer, 1);
+    bool pure_on = args_onion_persist_default(true, onion_peer, 1);
+    bool pure_off_no_onion_peer =
+        !args_onion_persist_default(true, clearnet_peer, 1);
+    bool pure_off_no_peers = !args_onion_persist_default(true, NULL, 0);
+
+    /* -tor + a pinned .onion addnode, no explicit -onion-persist: defaults
+     * ON. Order-independent — the addnode arrives before -tor here. */
+    struct app_context fleet_ctx = {0};
+    bool show_metrics = false;
+    char *fleet_argv[] = {
+        "zclassic23",
+        "-addnode=n3c4bry42qzoiduhfqk33ugeptdycmnsmjnrkmjirrudtpw7xvhc5kid.onion:39360",
+        "-tor",
+    };
+    int fleet_rc = args_parse_node_options(3, fleet_argv, &fleet_ctx,
+                                           &show_metrics);
+    bool fleet_defaults_on = fleet_rc == -1 && fleet_ctx.onion_persist &&
+                             !fleet_ctx.onion_persist_forced_off;
+
+    /* -tor alone, no pinned onion peer: still defaults OFF (ephemeral). */
+    struct app_context plain_ctx = {0};
+    char *plain_argv[] = { "zclassic23", "-tor" };
+    int plain_rc = args_parse_node_options(2, plain_argv, &plain_ctx,
+                                           &show_metrics);
+    bool plain_stays_ephemeral = plain_rc == -1 && !plain_ctx.onion_persist;
+
+    /* -tor + pinned onion peer + explicit -onion-persist=0: forced off. */
+    struct app_context forced_off_ctx = {0};
+    char *forced_off_argv[] = {
+        "zclassic23",
+        "-tor",
+        "-addnode=n3c4bry42qzoiduhfqk33ugeptdycmnsmjnrkmjirrudtpw7xvhc5kid.onion:39360",
+        "-onion-persist=0",
+    };
+    int forced_off_rc = args_parse_node_options(4, forced_off_argv,
+                                                &forced_off_ctx,
+                                                &show_metrics);
+    bool forced_off = forced_off_rc == -1 && !forced_off_ctx.onion_persist &&
+                      forced_off_ctx.onion_persist_forced_off;
+
+    /* -onion-persist=1 is the explicit-on spelling alongside the bare form. */
+    struct app_context explicit_on_ctx = {0};
+    char *explicit_on_argv[] = { "zclassic23", "-onion-persist=1" };
+    int explicit_on_rc = args_parse_node_options(2, explicit_on_argv,
+                                                 &explicit_on_ctx,
+                                                 &show_metrics);
+    bool explicit_on = explicit_on_rc == -1 && explicit_on_ctx.onion_persist &&
+                       !explicit_on_ctx.onion_persist_forced_off;
+
+    if (pure_off_no_tor && pure_on && pure_off_no_onion_peer &&
+        pure_off_no_peers && fleet_defaults_on && plain_stays_ephemeral &&
+        forced_off && explicit_on) {
+        printf("OK\n");
+    } else {
+        printf("FAIL (pure_off_no_tor=%d pure_on=%d pure_off_no_onion_peer=%d "
+               "pure_off_no_peers=%d fleet_defaults_on=%d "
+               "plain_stays_ephemeral=%d forced_off=%d explicit_on=%d)\n",
+               pure_off_no_tor, pure_on, pure_off_no_onion_peer,
+               pure_off_no_peers, fleet_defaults_on, plain_stays_ephemeral,
+               forced_off, explicit_on);
+        failures++;
+    }
+
+    return failures;
+}
+
 static int test_stability_control_args_parse(void)
 {
     int failures = 0;
@@ -387,6 +470,7 @@ int test_onion_persistence(void)
     failures += test_onion_identity_rotation();
     failures += test_onion_ephemeral_default();
     failures += test_onion_persist_args_parse();
+    failures += test_onion_persist_fleet_default();
     failures += test_stability_control_args_parse();
     failures += test_auto_local_peer_refuses_self_endpoint();
 

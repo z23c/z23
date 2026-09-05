@@ -59,6 +59,17 @@ bool args_should_auto_add_local_peer(bool connect_only, int own_p2p_port,
                                      int legacy_p2p_port,
                                      bool already_listed);
 
+/* Whether the -onion-persist default (no explicit -onion-persist or
+ * -onion-persist=0/1 on the command line) should resolve to ON: true when
+ * -tor is given together with at least one -addnode= peer whose value
+ * contains ".onion". There is no separate "-fleet"/devfleet profile flag in
+ * this binary, so pinning at least one peer by onion address is the
+ * existing signal for "this node needs peers to find it at a fixed
+ * address" — the same reason -onion-persist exists at all. Pure and
+ * exported so the default is covered without booting Tor. */
+bool args_onion_persist_default(bool tor, const char *const *addnode_peers,
+                                int n_addnode_peers);
+
 /* The -help / --help usage text. */
 void print_usage(const char *prog);
 

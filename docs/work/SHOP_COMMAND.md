@@ -40,13 +40,22 @@ the stable address + a rotation path. The explorer dump
 report the persisted address across restarts. Tests: identity stable
 across two boots, rotation changes it, ephemeral default unchanged.
 
-Landed 2026-08-09: `-onion-persist` (opt-in; default stays ephemeral)
+Landed 2026-08-09: `-onion-persist` (opt-in; default was ephemeral)
 mints or reuses a seed-backed identity in
 `<datadir>/tor_data/onion_service/` and installs it as the dynhost
 service, so the explorer dump's `onion_address` is stable across
 restarts; `-onion-rotate` (requires `-onion-persist`) archives the old
 identity and logs the old+new addresses. Test group:
 `test_onion_persistence`.
+
+Landed 2026-09-05: the default flips to ON when `-tor` is combined with
+at least one `-addnode=<peer>.onion` peer — a node pinning fleet peers by
+onion needs its own onion to stay fixed too, and a fleet member otherwise
+depends on every operator remembering the flag in their unit file.
+A plain `-tor` node with no pinned onion peer keeps the ephemeral
+default; `-onion-persist=0` forces ephemeral even with pinned onion
+peers. See `args_onion_persist_default()`
+(`engine/composition/src/args.c`).
 
 ### B. `app shop init` / `app shop status` (the orchestration)
 

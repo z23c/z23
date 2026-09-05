@@ -210,10 +210,25 @@ struct app_context {
                                  * writer, then exits before services. Populate
                                  * only: no consensus predicate changes. */
     bool tor;
-    bool onion_persist;          /* -onion-persist : with -tor, use a
-                                  * persistent seed-backed .onion identity at
-                                  * <datadir>/tor_data/onion_service instead
-                                  * of dynhost's per-boot ephemeral service */
+    bool onion_persist;          /* -onion-persist / -onion-persist=1 : with
+                                  * -tor, use a persistent seed-backed .onion
+                                  * identity at <datadir>/tor_data/onion_service
+                                  * instead of dynhost's per-boot ephemeral
+                                  * service. Resolved by
+                                  * args_parse_node_options() at the end of
+                                  * the argv loop: an explicit -onion-persist
+                                  * or -onion-persist=1 forces ON; an
+                                  * explicit -onion-persist=0 forces OFF
+                                  * (onion_persist_forced_off below); absent
+                                  * either, it defaults to
+                                  * args_onion_persist_default() — ON when
+                                  * -tor is combined with at least one
+                                  * -addnode=<x>.onion peer, OFF otherwise. */
+    bool onion_persist_forced_off; /* -onion-persist=0 was given explicitly;
+                                    * parse-time only, so the
+                                    * -tor+onion-addnode default above is
+                                    * suppressed rather than re-applied. Not
+                                    * meaningful once args parsing returns. */
     bool onion_rotate;           /* -onion-rotate : with -onion-persist,
                                   * archive the current persistent identity
                                   * and mint a fresh one (logs old+new
