@@ -1,0 +1,85 @@
+/* The owner's private fleet ledger. Consumer defines ZCL_COMMAND_*.
+ *
+ * A root of its own rather than a branch under `dev`, because this is not
+ * part of the development loop: it is the owner's operational record of
+ * every machine, written by collectors and read on any of them. It is
+ * declared LAST so the existing root order, which is a wire contract, does
+ * not move.
+ *
+ * Every leaf here answers from local files. Nothing contacts a peer, and
+ * nothing prints a row's contents anywhere a row could leave this machine.
+ * See docs/FLEET_LEDGER.md. */
+
+ZCL_COMMAND_BRANCH("fleet", "", "The owner's private fleet ledger",
+                   ZCL_COMMAND_LAYER_OPS)
+
+ZCL_COMMAND_BRANCH("fleet.ledger", "fleet", "Write and inspect the ledger",
+                   ZCL_COMMAND_LAYER_OPS)
+
+ZCL_COMMAND_READY_COMMAND( /* the one leaf here that writes */
+    "fleet.ledger.add", "fleet.ledger", "",
+    "Append one signed row to this box's own chain",
+    "Appends one row to this machine's chain and returns its sequence "
+    "number. kind is usage, task or vitals; subject is that kind's own "
+    "closed vocabulary, so a vitals subject outside the declared catalog is "
+    "refused. Measurements are passed as named pairs; a pair that is not "
+    "passed is absent, which is a different fact from zero and is stored as "
+    "one. note is a short label such as a task id. The row is signed by this "
+    "node's delegated online key and carries its master key as the writer, "
+    "both read from the datadir; a box with no filed delegation cannot "
+    "write. It contacts no peer.", 0,
+    "fleet,ledger,usage,tokens,vitals,append,record",
+    "zcl.fleet_ledger_add.input.v1", "zcl.fleet_ledger_add.v1",
+    "kind,subject,note,tokens_in,tokens_out,tokens_cached,tokens_reasoning,"
+    "wall_ms,turns,tool_uses,cost_micro_usd,value,count,bytes,limit",
+    "kind,subject",
+    "z23 fleet ledger add --kind=usage --subject=grok --tokens_in=1200",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_DEV_MUTATION, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW, ZCL_COMMAND_CONFIRM_NONE,
+    ZCL_COMMAND_LANE_LOCAL, ZCL_COMMAND_CAP_DEV_STATE_READ,
+    ZCL_COMMAND_TRAIT_NONE,
+    zcl_native_handle_fleet_ledger_add)
+
+ZCL_COMMAND_READY_READ(
+    "fleet.ledger.status", "fleet.ledger", "",
+    "Per box: rows held, last sequence, and how stale the replica is",
+    "Reports every chain this machine holds — its own and one replica per "
+    "paired peer — with the rows held, the last sequence number, and the age "
+    "of the newest row in seconds. A replica answers instantly and that is "
+    "not the same as answering currently, so the age is always reported and "
+    "never rounded away. Also reports what the load cost and whether the "
+    "index had to fold any row out of its per-day window. It contacts no "
+    "peer and prints no row contents.", 8192,
+    "fleet,ledger,status,replica,freshness,boxes",
+    "zcl.command.empty_input.v1", "zcl.fleet_ledger_status.v1", "", "",
+    "z23 fleet ledger status",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_LATENCY_FAST,
+    ZCL_COMMAND_COST_LOW, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_DEV_STATE_READ, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_fleet_ledger_status)
+
+ZCL_COMMAND_READY_READ(
+    "fleet.usage", "fleet", "",
+    "What every box spent, per provider, over the last days",
+    "Sums the usage rows every chain here holds over a window of whole UTC "
+    "days, grouped by box and provider, with cached tokens counted apart "
+    "from the rest. Absent measurements are reported absent, never as zero. "
+    "Where a quota row states a weekly cap for a provider, the share of it "
+    "already spent is reported too. The answer comes from the in-memory "
+    "index alone: no file is opened and no peer is asked, and the cost of "
+    "that walk is reported so the claim can be checked rather than "
+    "believed. days is 1 to the index window and defaults to 7; a longer "
+    "window is refused rather than answered from days the index does not "
+    "hold.", 16384,
+    "fleet,usage,tokens,spend,provider,quota,week",
+    "zcl.fleet_usage.input.v1", "zcl.fleet_usage.v1",
+    "days,provider,box", "",
+    "z23 fleet usage --days=7",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_LATENCY_INSTANT,
+    ZCL_COMMAND_COST_LOW, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_DEV_STATE_READ, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_fleet_usage)
