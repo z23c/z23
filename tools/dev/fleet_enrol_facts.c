@@ -16,10 +16,12 @@
  * The `_WIN32` branch exists because tools/dev sources are compiled for
  * ZCL_TARGET=windows-x86_64 like every other release translation unit, so
  * <sys/utsname.h> and <sys/statvfs.h> cannot be reached unconditionally.
- * The SUPPORTED Windows path for enrolment is still WSL2 (docs/agent/
- * FLEET_JOIN.md says so): the native branch answers the same questions so
- * the file compiles and reports honestly, not because a native Windows box
- * can serve the mesh terminal yet.
+ * The SUPPORTED Windows path is the native MSYS2 UCRT64 build (docs/
+ * WINDOWS.md), so this branch is the one a real Windows member runs, not a
+ * compile-only placeholder. What a Windows member cannot do yet is serve
+ * the mesh terminal, whose worker is POSIX-only until its ConPTY arm lands;
+ * that is a missing capability on a real member, and enrolment says nothing
+ * about it either way.
  */
 
 #include "fleet_enrol.h"

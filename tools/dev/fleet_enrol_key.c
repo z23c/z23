@@ -10,8 +10,8 @@
  * must not revoke the other, and one file cannot be revoked twice.
  *
  * platform_state_root() is where the Windows/POSIX difference already lives,
- * so nothing in this file needs a _WIN32 branch to work on a box running
- * inside WSL2 or natively.
+ * so nothing in this file needs a _WIN32 branch: it works the same on a
+ * native MSYS2 UCRT64 box as on Linux or macOS.
  */
 
 #include "fleet_enrol.h"

@@ -71,11 +71,14 @@ ZCL_COMMAND_READY_COMMAND(
     "and no reachable relay is needed. Every fact in it is self-reported: "
     "this box signed it, nobody measured it. Refuses by name: "
     "invite_malformed, invite_signature_invalid, invite_expired, "
-    "box_key_unwritable.", 0,
-    "fleet,join,enrol,invite,receipt,machine,onboarding",
+    "join_onion_invalid, box_key_unwritable. Optional --onion records the "
+    "persistent onion hostname this box will answer on, beside its name and "
+    "signed with the rest of the receipt; it is self-reported until a peer "
+    "dials it.", 0,
+    "fleet,join,enrol,invite,receipt,machine,onboarding,onion",
     "zcl.fleet_join_input.v1", "zcl.fleet.join.v1",
-    "token", "token",
-    "z23 fleet join <token>",
+    "token,onion", "token",
+    "z23 fleet join <token> [--onion=<v3>.onion]",
     ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
     ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_LOCAL,
     ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,

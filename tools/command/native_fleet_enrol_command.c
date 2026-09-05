@@ -109,12 +109,13 @@ static void fe_invite(const struct zcl_command_request *request,
 
 /* ── fleet join ─────────────────────────────────────────────────────────── */
 
-static void fe_join_facts(struct json_value *out,
+static void fe_join_facts(struct json_value *out, const char *onion,
                           const struct fleet_box_facts *facts)
 {
     struct json_value self;
     json_init(&self);
     json_set_object(&self);
+    (void)json_push_kv_str(&self, "onion", onion);
     (void)json_push_kv_str(&self, "hostname", facts->hostname);
     (void)json_push_kv_str(&self, "os", facts->os);
     (void)json_push_kv_str(&self, "os_version", facts->os_version);
@@ -142,8 +143,23 @@ static void fe_join(const struct zcl_command_request *request,
     size_t invite_len = 0;
     const char *token = json_get_str(json_get(request ? request->input : NULL,
                                               "token"));
+    /* Self-reported and optional. The owner (or the agent on this box) says
+     * where this machine will answer; this lane does not run a node and has
+     * nothing to read the address off, and inventing one would be worse than
+     * an empty column. */
+    const char *onion = json_get_str(json_get(request ? request->input : NULL,
+                                              "onion"));
     const char *why = NULL;
     bool present = false;
+    if (!onion) onion = "";
+    if (!fleet_enrol_onion_valid(onion)) {
+        fe_fail(reply, "FLEET_ONION_INVALID", "normalize",
+                "--onion must be this box's v3 onion hostname: 56 lowercase "
+                "letters and digits 2-7, then .onion, with an optional :port. "
+                "Leave it off if this box has no persistent onion yet.",
+                FLEET_ENROL_WHY_ONION_INVALID);
+        return;
+    }
     if (!fleet_invite_parse(token, &invite, invite_wire, sizeof(invite_wire),
                             &invite_len, &why)) {
         fe_fail(reply, "FLEET_INVITE_INVALID", "normalize",
@@ -172,7 +188,8 @@ static void fe_join(const struct zcl_command_request *request,
     }
     fleet_enrol_facts_collect(&facts);
     fleet_enrol_ssh_pubkey(ssh, sizeof(ssh));
-    if (!fleet_receipt_mint(invite_wire, invite_len, &facts, ssh, seed, pubkey,
+    if (!fleet_receipt_mint(invite_wire, invite_len, onion, &facts, ssh, seed,
+                            pubkey,
                             receipt, sizeof(receipt), &why)) {
         fe_fail(reply, "FLEET_RECEIPT_REFUSED", "execute",
                 "this box could not sign its enrolment receipt.", why);
@@ -189,7 +206,7 @@ static void fe_join(const struct zcl_command_request *request,
     (void)json_push_kv_str(&reply->data, "admit_command", line);
     (void)json_push_kv_str(&reply->data, "paste_to",
                            "the manager computer that printed the invite");
-    fe_join_facts(&reply->data, &facts);
+    fe_join_facts(&reply->data, onion, &facts);
     /* The native path this lane does not build. Naming it as a typed field
      * is the honest form of "not yet": it says what comes next and does not
      * pretend the mesh pairing already happened. */
@@ -358,6 +375,10 @@ static void fe_admit(const struct zcl_command_request *request,
     zcl_hex_encode(receipt.box_pubkey, FLEET_ENROL_PUBKEY_BYTES, hex);
     (void)json_push_kv_str(&reply->data, "schema", "zcl.fleet.admit.v1");
     (void)json_push_kv_str(&reply->data, "name", receipt.invite.name);
+    /* Echoed so the operator sees the locator the box claimed at the moment
+     * they admitted it, and can notice a surprise before it is a roster row
+     * somebody else reads. Still self-reported: nothing here dialled it. */
+    (void)json_push_kv_str(&reply->data, "self_reported_onion", receipt.onion);
     (void)json_push_kv_str(&reply->data, "box_pubkey", hex);
     (void)json_push_kv_int(&reply->data, "relay_port", port);
     (void)json_push_kv_int(&reply->data, "enrolled_at", now);

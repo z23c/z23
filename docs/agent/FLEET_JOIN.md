@@ -36,7 +36,8 @@ and every refusal names, because it is how people talk about a computer.
 
 A machine's onion address, Noise fingerprint and ZID are a different kind
 of thing. They are observed, they can rotate, and none of them is ever used
-as the name.
+as the name. See "The onion column" below for the one of those the record
+carries today.
 
 Renaming is not supported. The name is bound inside the signature the new
 computer makes over its own enrolment receipt, so nobody — including the
@@ -50,12 +51,18 @@ You need a C23 toolchain, `git`, and enough disk for a build.
 
 **macOS.** Xcode command line tools (`xcode-select --install`).
 
-**Windows.** Join from inside **WSL2 Ubuntu**, not from native Windows.
-The build cross-compiles for Windows and the enrolment code compiles there,
-but the supported path for running a fleet member today is WSL2: the mesh
-terminal worker is POSIX-only, so a native Windows box cannot yet serve the
-remote-shell side of the fleet at all. Install WSL2, open the Ubuntu shell,
-and follow the Linux steps inside it.
+**Windows.** The Windows path is the **native MSYS2 UCRT64 build** — install
+MSYS2, open the UCRT64 shell, and follow `docs/WINDOWS.md`. Enrolment is
+native Windows code: it reads the computer's own facts through the Win32
+calls and writes its key under the Windows state root, with no Linux layer
+underneath.
+
+One capability is still POSIX-only: the mesh terminal worker, which is what
+lets a terminal reach a machine through z23. Its ConPTY arm is being written
+now. Until that lands, a Windows machine enrols, appears in `fleet machines`
+and holds a name like any other, and cannot yet serve the remote-terminal
+side. That is a missing capability on a real member, not a reason to join
+from somewhere else.
 
 ## What the AI agent on the new computer does
 
@@ -63,7 +70,7 @@ and follow the Linux steps inside it.
 git clone https://github.com/z23c/z23.git
 cd z23
 make -j8 build/bin/z23-dev
-build/bin/z23-dev fleet join <token>
+build/bin/z23-dev fleet join <token>          # add --onion=<v3>.onion if this box has one
 ```
 
 Then hand the printed `z23 fleet admit …` line back to the owner.
@@ -87,6 +94,35 @@ The computer signed it, so it is authenticated; nobody measured it, so it is
 not verified. `z23 fleet machines` keeps self-reported facts in their own
 object, separate from what the operator's signature actually attests (the
 name, the public key, the assigned port, the time).
+
+## The onion column
+
+A machine may also carry an **onion** — the persistent v3 onion hostname it
+says it will answer on. Pass it at step 2:
+
+```sh
+z23 fleet join <token> --onion=<56-characters>.onion
+```
+
+It is optional. A computer with no persistent onion yet joins without one
+and the column is empty.
+
+It is **self-reported**, exactly like the hardware facts. The joining
+computer signs the string, so the record proves that computer claimed that
+address; nobody has dialled it, so the record proves nothing about whether
+it answers. `fleet machines` prints it in the `self_reported` object beside
+the hostname, never in the `verified` object beside the name. A later change
+that actually dials the address and gets the machine's key back is what
+would move it.
+
+It is a column, not a handle. Two machines that rotate their onions are
+still the same two names, and a refusal still says the name.
+
+The grammar is closed: 56 characters of `a-z` and `2-7`, then `.onion`, with
+an optional `:port`. A v2 address, an uppercase spelling, a plain hostname
+and an IP literal are all refused as `join_onion_invalid` on the computer
+that typed it — where somebody can fix the typo — rather than signed into a
+record nobody can use.
 
 ## The ssh bridge
 
@@ -158,4 +194,5 @@ Each of these is the exact evidence string a refusal carries.
 | `box_key_unwritable` | The state root is unreachable or the key file is not this user's alone |
 | `roster_full` | Every assignable relay port is taken |
 | `roster_unreadable` / `roster_unwritable` | The roster could not be read or appended to |
+| `join_onion_invalid` | `--onion` is not a v3 onion hostname with an optional port |
 | `authorized_keys_unwritable` | `~/.ssh` does not exist, or the file cannot be written |

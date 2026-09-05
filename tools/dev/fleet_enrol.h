@@ -43,9 +43,18 @@
  * first and what every refusal says, because it is how the owner and their
  * agents TALK about a machine. A machine's onion address, Noise
  * fingerprint and ZID are a different kind of thing: they are OBSERVED,
- * they rotate, and none of them is ever the display name. This record
- * carries none of them today; when a column for one arrives it arrives as
- * an observed fact beside the name, never in place of it.
+ * they rotate, and none of them is ever the display name.
+ *
+ * The receipt carries ONE of those columns today: an optional `onion`, the
+ * persistent onion hostname the joining box says it will be reachable at.
+ * It is beside the name, never instead of it, and it is SELF-REPORTED — the
+ * box signed the string, so it is authenticated, but no peer has dialled it
+ * and `fleet machines` renders it in the self_reported object for exactly
+ * that reason. A later unit that actually dials the address and gets the
+ * box's key back is what would make it verified; until then a reader that
+ * treats this field as proof of reachability is reading it wrong. It exists
+ * now so that unit, and the NAT-traversal work behind it, has a signed
+ * place to look the address up instead of inventing a second registry.
  *
  * The name is bound inside the box's own signature over the receipt, which
  * is what makes "this box, under this name" one statement rather than two.
@@ -92,6 +101,10 @@ enum {
     FLEET_ENROL_NAME_MIN = 2,
     FLEET_ENROL_NAME_MAX = 24,
     FLEET_ENROL_RELAY_MAX = 64,
+    /* A v3 onion hostname is 56 base32 characters plus ".onion" = 62. The
+     * ceiling leaves room for an explicit ":port" and nothing more; it is
+     * NOT a general host field. */
+    FLEET_ENROL_ONION_MAX = 72,
     FLEET_ENROL_TEXT_MAX = 96,     /* hostname/os-version/toolchain fields */
     FLEET_ENROL_SSH_MAX = 512,
     FLEET_ENROL_PATH_MAX = 4096,
@@ -99,8 +112,8 @@ enum {
      * allocates or copies anything, so a pasted blob can never be a length
      * argument to something larger than the buffer holding it. */
     FLEET_ENROL_INVITE_WIRE_MAX = 256,
-    FLEET_ENROL_RECEIPT_WIRE_MAX = 1536,
-    FLEET_ENROL_MACHINE_WIRE_MAX = 1664,
+    FLEET_ENROL_RECEIPT_WIRE_MAX = 1616,
+    FLEET_ENROL_MACHINE_WIRE_MAX = 1744,
     /* base64url is 4 characters per 3 bytes; +8 covers the remainder and
      * the NUL with room to spare. */
     FLEET_ENROL_MACHINE_TEXT_MAX = (FLEET_ENROL_MACHINE_WIRE_MAX * 4) / 3 + 8,
@@ -132,6 +145,7 @@ enum {
 #define FLEET_ENROL_WHY_INVITE_NOT_OURS "invite_not_ours"
 #define FLEET_ENROL_WHY_INVITE_REPLAYED "invite_replayed"
 #define FLEET_ENROL_WHY_NAME_TAKEN "invite_name_taken"
+#define FLEET_ENROL_WHY_ONION_INVALID "join_onion_invalid"
 #define FLEET_ENROL_WHY_RECEIPT_MALFORMED "receipt_malformed"
 #define FLEET_ENROL_WHY_BOX_SIGNATURE "box_signature_invalid"
 #define FLEET_ENROL_WHY_ROSTER_UNREADABLE "roster_unreadable"
@@ -178,6 +192,10 @@ struct fleet_receipt {
      * re-encoding of a parse. */
     uint8_t invite_wire[FLEET_ENROL_INVITE_WIRE_MAX];
     size_t invite_wire_len;
+    /* The persistent onion hostname this box says it answers on, or "" when
+     * it has none yet. Self-reported: signed by the box, dialled by nobody.
+     * Beside the name, never a substitute for it. */
+    char onion[FLEET_ENROL_ONION_MAX + 1];
     struct fleet_box_facts facts;
     char ssh_pubkey[FLEET_ENROL_SSH_MAX + 1]; /* "" when the box has none */
     uint8_t box_pubkey[FLEET_ENROL_PUBKEY_BYTES];
@@ -201,6 +219,14 @@ struct fleet_machine {
  * line the name reaches. */
 bool fleet_enrol_name_valid(const char *name);
 
+/* Validate one optional onion locator: empty (the box has none), or a v3
+ * hostname — exactly 56 characters of [a-z2-7] then ".onion" — with an
+ * optional ":<port>" of one to five decimal digits. Closed allowlist: a v2
+ * address, an uppercase spelling, a bare hostname and an IP literal are all
+ * refused, because this field is a persistent onion identity and nothing
+ * else. Says nothing about whether the address answers. */
+bool fleet_enrol_onion_valid(const char *onion);
+
 /* Mint a signed invite. `seed`/`pubkey` are this box's key. `text` receives
  * the unpadded base64url token. Refuses by name; writes nothing on refusal. */
 bool fleet_invite_mint(const char *name, int64_t ttl_hours, const char *relay,
@@ -219,8 +245,10 @@ bool fleet_invite_parse(const char *text, struct fleet_invite *out,
                         const char **why);
 
 /* Sign one enrolment receipt with the box key. `invite_wire` is the token
- * bytes `fleet_invite_parse` returned. */
+ * bytes `fleet_invite_parse` returned. `onion` may be NULL or "" and is
+ * refused by name when it is neither empty nor a v3 locator. */
 bool fleet_receipt_mint(const uint8_t *invite_wire, size_t invite_wire_len,
+                        const char *onion,
                         const struct fleet_box_facts *facts,
                         const char *ssh_pubkey,
                         const uint8_t seed[FLEET_ENROL_SEED_BYTES],

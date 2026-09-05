@@ -224,6 +224,34 @@ bool fleet_enrol_name_valid(const char *name)
     return true;
 }
 
+bool fleet_enrol_onion_valid(const char *onion)
+{
+    /* 56 base32 characters + ".onion". A v3 address is a public key in
+     * disguise, so this length is the whole grammar; anything shorter is a
+     * v2 address or a guess. */
+    enum { FE_ONION_B32 = 56, FE_ONION_HOST = FE_ONION_B32 + 6 };
+    size_t n = onion ? strlen(onion) : 0;
+    size_t digits = 0;
+    if (n == 0) return true; /* the box has none, which is not an error */
+    if (n < (size_t)FE_ONION_HOST || n > (size_t)FLEET_ENROL_ONION_MAX)
+        return false;
+    for (size_t i = 0; i < (size_t)FE_ONION_B32; ++i) {
+        char c = onion[i];
+        /* RFC 4648 base32, lowercase only: one spelling per address, so two
+         * rows that differ by a capital are never two machines. */
+        if (!((c >= 'a' && c <= 'z') || (c >= '2' && c <= '7')))
+            return false;
+    }
+    if (memcmp(onion + FE_ONION_B32, ".onion", 6) != 0) return false;
+    if (n == (size_t)FE_ONION_HOST) return true;
+    if (onion[FE_ONION_HOST] != ':') return false;
+    for (size_t i = (size_t)FE_ONION_HOST + 1u; i < n; ++i) {
+        if (onion[i] < '0' || onion[i] > '9') return false;
+        if (++digits > 5u) return false;
+    }
+    return digits > 0;
+}
+
 static bool fe_relay_valid(const char *relay)
 {
     size_t n = relay ? strlen(relay) : 0;
@@ -349,7 +377,7 @@ bool fleet_invite_parse(const char *text, struct fleet_invite *out,
 /* ── receipt ────────────────────────────────────────────────────────────── */
 
 static void fe_receipt_body(struct fe_put *p, const uint8_t *invite_wire,
-                            size_t invite_wire_len,
+                            size_t invite_wire_len, const char *onion,
                             const struct fleet_box_facts *f,
                             const char *ssh_pubkey,
                             const uint8_t pubkey[FLEET_ENROL_PUBKEY_BYTES])
@@ -357,6 +385,9 @@ static void fe_receipt_body(struct fe_put *p, const uint8_t *invite_wire,
     fe_put_u8(p, FE_VERSION);
     fe_put_be(p, invite_wire_len, 2);
     fe_put_raw(p, invite_wire, invite_wire_len);
+    /* Immediately after the invite, so the locator sits beside the name it
+     * belongs to rather than buried among the hardware facts. */
+    fe_put_str8(p, onion ? onion : "");
     fe_put_str8(p, f->hostname);
     fe_put_str8(p, f->os);
     fe_put_str8(p, f->os_version);
@@ -371,6 +402,7 @@ static void fe_receipt_body(struct fe_put *p, const uint8_t *invite_wire,
 }
 
 bool fleet_receipt_mint(const uint8_t *invite_wire, size_t invite_wire_len,
+                        const char *onion,
                         const struct fleet_box_facts *facts,
                         const char *ssh_pubkey,
                         const uint8_t seed[FLEET_ENROL_SEED_BYTES],
@@ -386,7 +418,13 @@ bool fleet_receipt_mint(const uint8_t *invite_wire, size_t invite_wire_len,
         fe_why(why, FLEET_ENROL_WHY_ARGUMENTS);
         return false;
     }
-    fe_receipt_body(&p, invite_wire, invite_wire_len, facts, ssh_pubkey,
+    /* Refused HERE, on the box that typed it, where somebody can fix the
+     * typo — not silently dropped into a signed record nobody can dial. */
+    if (!fleet_enrol_onion_valid(onion)) {
+        fe_why(why, FLEET_ENROL_WHY_ONION_INVALID);
+        return false;
+    }
+    fe_receipt_body(&p, invite_wire, invite_wire_len, onion, facts, ssh_pubkey,
                     pubkey);
     if (!p.ok) {
         fe_why(why, FLEET_ENROL_WHY_ARGUMENTS);
@@ -415,6 +453,14 @@ static bool fe_receipt_fields(struct fe_get *g, size_t body_len,
     }
     memcpy(out->invite_wire, invite_at, invite_len);
     out->invite_wire_len = invite_len;
+    fe_get_text(g, out->onion, sizeof(out->onion), 1);
+    /* Re-checked on the way in, not just on the way out: this box is not the
+     * box that minted the receipt, and a signature proves who wrote a string,
+     * never that the string is a locator. */
+    if (!g->ok || !fleet_enrol_onion_valid(out->onion)) {
+        fe_why(why, FLEET_ENROL_WHY_ONION_INVALID);
+        return false;
+    }
     fe_get_text(g, out->facts.hostname, sizeof(out->facts.hostname), 1);
     fe_get_text(g, out->facts.os, sizeof(out->facts.os), 1);
     fe_get_text(g, out->facts.os_version, sizeof(out->facts.os_version), 1);

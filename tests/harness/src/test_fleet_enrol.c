@@ -32,6 +32,10 @@
 
 #define FE_NOW 1757030400
 #define FE_TTL 24
+/* 56 base32 characters then ".onion": a v3 locator with the right SHAPE and
+ * no owner. Nothing dials it; the field is self-reported by construction. */
+#define FE_ONION \
+    "abcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrstuvwx.onion"
 
 static char g_fe_state[PATH_MAX];
 static char g_fe_home[PATH_MAX];
@@ -148,8 +152,9 @@ static bool fe_row(const char *name, uint8_t op_byte, uint8_t box_byte,
                              sizeof(token), &invite, &why) &&
            fleet_invite_parse(token, &invite, invite_wire, sizeof(invite_wire),
                               &invite_len, &why) &&
-           fleet_receipt_mint(invite_wire, invite_len, &facts, ssh, box_seed,
-                              box_pub, receipt, sizeof(receipt), &why) &&
+           fleet_receipt_mint(invite_wire, invite_len, FE_ONION, &facts, ssh,
+                              box_seed, box_pub, receipt, sizeof(receipt),
+                              &why) &&
            fleet_receipt_parse(receipt, &parsed, receipt_wire,
                                sizeof(receipt_wire), &receipt_len, &why) &&
            fleet_machine_mint(receipt_wire, receipt_len, FE_NOW, port, op_seed,
@@ -295,7 +300,7 @@ static int test_fe_receipt(void)
                                  token, sizeof(token), &invite, &why));
         ASSERT(fleet_invite_parse(token, &invite, invite_wire,
                                   sizeof(invite_wire), &invite_len, &why));
-        ASSERT(fleet_receipt_mint(invite_wire, invite_len, &facts,
+        ASSERT(fleet_receipt_mint(invite_wire, invite_len, FE_ONION, &facts,
                                   "ssh-ed25519 AAAAkey owner@box", box_seed,
                                   box_pub, receipt, sizeof(receipt), &why));
         ASSERT(fleet_receipt_parse(receipt, &parsed, NULL, 0, NULL, &why));
@@ -307,6 +312,10 @@ static int test_fe_receipt(void)
         ASSERT_STR_EQ(parsed.facts.hostname, "build-box-7");
         ASSERT_EQ(parsed.facts.cores, 8u);
         ASSERT_STR_EQ(parsed.ssh_pubkey, "ssh-ed25519 AAAAkey owner@box");
+        /* The locator rides beside the name, under the SAME box signature.
+         * A receipt that carried it outside the signed body would let a
+         * carrier point the fleet at an address the box never claimed. */
+        ASSERT_STR_EQ(parsed.onion, FE_ONION);
         /* EVERY signed byte, one at a time — a fact, the embedded invite,
          * the ssh key the bridge would authorize, the box key, and the
          * signature itself. A signature covering only part of the record
@@ -481,6 +490,96 @@ static int test_fe_bridge(void)
     return failures;
 }
 
+/* ── the onion locator ──────────────────────────────────────────────────── */
+
+static int test_fe_onion_grammar(void)
+{
+    int failures = 0;
+    TEST("fleet enrol: the onion column accepts a v3 locator and empty, and "
+         "refuses everything a reader could mistake for one") {
+        char shorter[80], capital[80], ported[80], bad_port[80];
+        size_t n = strlen(FE_ONION);
+        /* Empty is the normal state of a box with no persistent onion yet.
+         * It is a missing column, not a bad one, so it must not refuse. */
+        ASSERT(fleet_enrol_onion_valid(""));
+        ASSERT(fleet_enrol_onion_valid(FE_ONION));
+        /* An explicit port is allowed; the address is a locator. */
+        ASSERT(snprintf(ported, sizeof(ported), "%s:9050", FE_ONION) > 0);
+        ASSERT(fleet_enrol_onion_valid(ported));
+        /* A v2 address is 16 characters and is not this. Truncating the v3
+         * body must refuse rather than land in some shorter grammar. */
+        ASSERT(n < sizeof(shorter));
+        memcpy(shorter, FE_ONION, n + 1u);
+        memmove(shorter + 16, shorter + n - 6, 7);
+        ASSERT(!fleet_enrol_onion_valid(shorter));
+        /* One spelling per address: an uppercase body is the same key and a
+         * different string, and two spellings would be two rows. */
+        memcpy(capital, FE_ONION, n + 1u);
+        capital[0] = 'A';
+        ASSERT(!fleet_enrol_onion_valid(capital));
+        /* '1', '0' and '8' are not in RFC 4648 base32, so a hand-typed
+         * address that swapped one for a letter is refused, not enrolled. */
+        memcpy(capital, FE_ONION, n + 1u);
+        capital[3] = '1';
+        ASSERT(!fleet_enrol_onion_valid(capital));
+        /* The suffix is checked, not assumed. */
+        memcpy(capital, FE_ONION, n + 1u);
+        capital[n - 1] = 'x';
+        ASSERT(!fleet_enrol_onion_valid(capital));
+        /* A port is digits, and only as many as a port has. */
+        ASSERT(snprintf(bad_port, sizeof(bad_port), "%s:90x0", FE_ONION) > 0);
+        ASSERT(!fleet_enrol_onion_valid(bad_port));
+        ASSERT(snprintf(bad_port, sizeof(bad_port), "%s:", FE_ONION) > 0);
+        ASSERT(!fleet_enrol_onion_valid(bad_port));
+        ASSERT(snprintf(bad_port, sizeof(bad_port), "%s:123456", FE_ONION) > 0);
+        ASSERT(!fleet_enrol_onion_valid(bad_port));
+        /* A hostname and an IP literal are not onion identities, and this
+         * field is an onion identity or nothing. */
+        ASSERT(!fleet_enrol_onion_valid("relay.example.com"));
+        ASSERT(!fleet_enrol_onion_valid("192.0.2.1:9050"));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* A receipt whose signature is intact but whose onion field is not a
+ * locator must be refused on the way IN. The manager did not mint that
+ * string; a signature proves who wrote it, never that it is dialable. */
+static int test_fe_onion_refused_at_mint(void)
+{
+    int failures = 0;
+    TEST("fleet enrol: a receipt is refused by name when its onion is not a "
+         "v3 locator") {
+        uint8_t op_seed[32], op_pub[32], box_seed[32], box_pub[32];
+        uint8_t invite_wire[FLEET_ENROL_INVITE_WIRE_MAX];
+        char token[FLEET_ENROL_MACHINE_TEXT_MAX];
+        char receipt[FLEET_ENROL_MACHINE_TEXT_MAX];
+        struct fleet_invite invite;
+        struct fleet_box_facts facts = fe_facts();
+        size_t invite_len = 0;
+        const char *why = NULL;
+        fe_key(0x81, op_seed, op_pub);
+        fe_key(0x82, box_seed, box_pub);
+        ASSERT(fleet_invite_mint("studio", FE_TTL, "", op_seed, op_pub, FE_NOW,
+                                 token, sizeof(token), &invite, &why));
+        ASSERT(fleet_invite_parse(token, &invite, invite_wire,
+                                  sizeof(invite_wire), &invite_len, &why));
+        why = NULL;
+        ASSERT(!fleet_receipt_mint(invite_wire, invite_len, "node4.local",
+                                   &facts, "", box_seed, box_pub, receipt,
+                                   sizeof(receipt), &why));
+        ASSERT_STR_EQ(why, FLEET_ENROL_WHY_ONION_INVALID);
+        /* And an absent locator is not an error: the box simply has none. */
+        why = NULL;
+        ASSERT(fleet_receipt_mint(invite_wire, invite_len, "", &facts, "",
+                                  box_seed, box_pub, receipt, sizeof(receipt),
+                                  &why));
+        ASSERT(why == NULL);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 /* ── rendering ──────────────────────────────────────────────────────────── */
 
 static int test_fe_render(void)
@@ -513,6 +612,10 @@ static int test_fe_render(void)
         ASSERT(json_get(verified, "hostname") == NULL);
         ASSERT(json_get(verified, "cores") == NULL);
         ASSERT(json_get(self, "name") == NULL);
+        ASSERT_STR_EQ(json_get_str(json_get(self, "onion")), FE_ONION);
+        /* The locator is a column, never the handle: it never appears in the
+         * verified object and never replaces the name. */
+        ASSERT(json_get(verified, "onion") == NULL);
         ASSERT_STR_EQ(json_get_str(json_get(self, "hostname")), "build-box-7");
         ASSERT_EQ(json_get_int(json_get(self, "cores")), 8);
         /* And nothing private reaches the render: the roster row carries no
@@ -538,6 +641,8 @@ int test_fleet_enrol(void)
     failures += test_fe_roster_admission();
     failures += test_fe_replay();
     failures += test_fe_bridge();
+    failures += test_fe_onion_grammar();
+    failures += test_fe_onion_refused_at_mint();
     failures += test_fe_render();
     fe_restore();
     return failures;

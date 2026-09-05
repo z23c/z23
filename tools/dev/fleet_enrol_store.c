@@ -312,6 +312,12 @@ void fleet_machine_render(const struct fleet_machine *machine,
     /* What the BOX said about itself. Signed by the box, measured by
      * nobody. Kept in its own object so no reader can mistake one for the
      * other by reading a flat row. */
+    /* The locator sits beside the name — first in this object, so a reader
+     * scanning `fleet machines` finds "who" and "where" together. It stays
+     * on the self_reported side because the box asserted it and nobody has
+     * dialled it; moving it under `verified` would be a lie about what the
+     * operator signature covers. */
+    (void)json_push_kv_str(&self_reported, "onion", machine->receipt.onion);
     (void)json_push_kv_str(&self_reported, "hostname",
                            machine->receipt.facts.hostname);
     (void)json_push_kv_str(&self_reported, "os", machine->receipt.facts.os);
