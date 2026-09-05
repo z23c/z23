@@ -112,6 +112,14 @@ makes a receipt **attributable**; it does not make it **portable**. Making a
 proof from box A usable on box B needs the key to stop binding host-specific
 strings, and that is the commuting-ticket lane's work, not this one's.
 
+That gap is closed. `compiler_root` is now the toolchain capsule root, the
+flag and build-graph roots come from the build plan with the checkout's
+location written out of it, and `environment_root` no longer binds `PATH`.
+Two boxes with the same capsule over the same tree produce the same four
+roots. See the receipt paragraph in [`../DEVELOPING.md`](../DEVELOPING.md);
+receipts written under the meaning described above are refused by name as
+`receipt_schema_old`.
+
 ## Two allowlists, on purpose, for now
 
 The fleet already has a signed, allowlisted worker path:

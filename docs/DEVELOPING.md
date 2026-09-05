@@ -671,6 +671,24 @@ running receipt refuses within the bounded read path and prints the exact
 `z23-dev dev proof wait` command for that commit/base pair. A normal
 non-fast-forward race also refuses without deleting reusable child evidence.
 
+A receipt is keyed by the toolchain that produced it, not by where the
+checkout happened to sit. Its compiler root is the toolchain capsule — the
+content of the compiler driver and backend, the assembler version, the
+sysroot and ABI aggregates, and the target probe — the same value
+`z23-dev zcode work toolchain` prints. Its flag and build-graph roots come
+from the build plan with the checkout's absolute location written out of it,
+using the constant the build already tells the compiler to record in its
+place, and with the epoch name of the object directories reduced to a token,
+because that name is derived from a compiler fingerprint that spells the
+checkout out loud. Its environment root binds the variables that reach the
+compiler without passing through a flag, and no longer binds the search path,
+which resolves nothing this build compiles with. Two boxes with the same
+capsule over the same tree therefore produce the same four roots and can
+compare receipts; the same tree in two worktrees on one box does too. What a
+receipt is keyed by is versioned apart from its layout, so a receipt written
+under the previous meaning is refused by name (`receipt_schema_old`) rather
+than compared against roots derived a different way — re-prove it.
+
 A receipt is signed, not merely sealed. Each box keeps one Ed25519 keypair
 under its owner-private development state root, created on first use by
 whichever proof seals the first receipt and never by a verifier; the receipt
