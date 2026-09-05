@@ -186,6 +186,8 @@ path:
   — architectural reference, off the public-node critical path unless the
   current plan explicitly pulls in a bounded item.
 - [`adr/`](adr/) — historical design decisions; useful context, not live state.
+- [`zrc/`](zrc/) — the ZRC (Z23 Request for Comments) process for proposing a
+  new subsystem or standing rule before it is built; see `zrc/README.md`.
 - [`work/README.md`](work/README.md), [`work/agent-protocol.md`](work/agent-protocol.md),
   and [`agent/`](agent/) — one maintainer's optional orchestration references,
   not the universal contributor workflow.
