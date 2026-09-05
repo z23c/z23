@@ -1055,6 +1055,9 @@ AGENT_IMPACT_RULE("engine/composition/src/boot_mesh_terminal_client.c|engine/com
  * table both sides use, the credit window and the service registry every
  * confined service (the terminal among them) registers into. */
 AGENT_IMPACT_RULE("engine/composition/src/mesh_stream.c|engine/composition/include/config/mesh_stream.h|tests/harness/src/test_mesh_stream.c|tests/harness/src/mesh_stream_fixture.c|tests/harness/include/test/mesh_stream_fixture.h", "mesh_stream boot_mesh_terminal mesh_terminal_client zcode_swarm make_lint_gates")
+/* The TCP tunnel service on those streams: the loopback-only acceptor, the
+ * per-peer allow table that admits a target port, and the local listeners. */
+AGENT_IMPACT_RULE("engine/composition/src/mesh_tunnel.c|engine/composition/src/mesh_tunnel_rpc.c|engine/composition/include/config/mesh_tunnel.h|tests/harness/src/test_mesh_tunnel.c|tools/command/native_dev_fleet_tunnel.c", "mesh_tunnel mesh_stream zcode_swarm native_api_contract command_registry_catalog make_lint_gates")
 /* -confine strict node confinement (seccomp ALLOW-list + Landlock, applied at
  * the SERVICES_RUNNING boundary): the allow-set + installer in os_sandbox, its
  * boot wiring, the -confine flag, the named blocker binding, and the

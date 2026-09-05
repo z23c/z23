@@ -160,10 +160,13 @@ void mesh_tunnel_register_rpc(struct rpc_table *table);
 
 #ifdef ZCL_TESTING
 /* Test seams: drive the exact production accept path and per-stream copy
- * without a supervisor. reset closes every listener and clears the allow
- * table; tick runs one listener beat and then the service tick over every
- * live tunnel stream, which is what the two supervised ticks do in
- * production. */
+ * without a supervisor. bind records the composition context and registers
+ * the service WITHOUT a supervised tick, so a loopback test drives the
+ * beats itself; pass NULL to unbind. reset closes every listener and
+ * clears the allow table; tick runs one listener beat and then the service
+ * tick over every live tunnel stream, which is exactly what the supervised
+ * ticks do in production. */
+void mesh_tunnel_test_bind(struct boot_svc_ctx *svc);
 void mesh_tunnel_test_reset(void);
 void mesh_tunnel_test_tick(int64_t now_unix);
 #endif

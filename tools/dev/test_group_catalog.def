@@ -584,6 +584,8 @@ ZCL_TEST_GROUP(boot_mesh_terminal)
 ZCL_TEST_GROUP(mesh_terminal_client)
 /* multiplexed streams: frames, credit, per-peer cap, named refusals */
 ZCL_TEST_GROUP(mesh_stream)
+/* mesh tunnels: the two admission gates, bytes both ways, back-pressure */
+ZCL_TEST_GROUP(mesh_tunnel)
 ZCL_TEST_GROUP(confine)
 ZCL_TEST_GROUP(seed_tape)
 ZCL_TEST_GROUP(postmortem)

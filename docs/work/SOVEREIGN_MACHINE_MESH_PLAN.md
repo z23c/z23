@@ -442,6 +442,51 @@ mint), and `stream_malformed`. A stream that cannot be admitted is never
 reserved, and a refusal that cannot be sent is never treated as an
 admission.
 
+### Tunnels
+
+A tunnel is not a wire either. It is the second service on the stream
+layer, named `tcp`, and one local TCP connection is one stream. The side
+that opens a tunnel binds a listener on its own loopback and turns each
+connection it accepts there into a stream carrying a fixed header that
+names a target port and nothing else. The side that answers dials its own
+loopback and only its own loopback: the dial address is a constant in the
+code, not a field on the wire, so no payload and no configuration can send
+the acceptor anywhere but the machine it is already running on.
+
+**Nothing is allowed by default.** The acceptor consults one local table of
+allow rows, each naming exactly one paired peer and exactly one port, with
+the operator's own reason for it. No file means no rows; no row means every
+open is refused. There is no wildcard port, no port range, and no default
+entry, and a row is written on the machine being reached — never by the
+machine doing the reaching. Forwarding ssh is therefore one row, for port
+22, written by that machine's owner:
+
+```text
+z23 dev fleet tunnel allow --peer=<id> --port=22 --why=ssh   # on the far machine
+z23 dev fleet tunnel open  --peer=<id> --remote-port=22 --local-port=2222
+ssh -p 2222 localhost
+```
+
+`z23 dev fleet tunnel list` shows both directions at once: the entrances
+open here, and the rows this machine admits for others. `deny` takes a row
+back, and `close` drops an entrance and every connection on it.
+
+Bytes move under the stream's own credit and nothing else. A side never
+reads more from its socket than the credit it holds, and grants credit back
+only as bytes actually reach the far socket, so a program that stops reading
+stalls its own tunnel at one chunk instead of growing the node's memory.
+Socket close becomes a stream close, and a stream close shuts the socket
+down, so neither end can be left holding a connection the other has ended.
+
+The refusals are the tunnel's own, and each names the thing it protected:
+`tunnel_target_not_allowed` (no row admits this peer and this port),
+`tunnel_peer_unpaired` (no live pairing row names this peer),
+`tunnel_dial_failed` (a row admitted the port and nothing was listening on
+the loopback behind it), `tunnel_local_bind_failed`, `tunnel_cap`, and
+`tunnel_malformed`. The stream layer's own refusals still stand in front of
+all of them: an open over a link that is not an established Noise session,
+or from a peer with no pairing row, never reaches the tunnel service at all.
+
 ## Hot-swap taxonomy
 
 "Hot swap" is not one guarantee. The operator and receipt must name the exact

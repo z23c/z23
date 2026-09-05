@@ -973,6 +973,23 @@ void mesh_tunnel_shutdown(void)
 }
 
 #ifdef ZCL_TESTING
+void mesh_tunnel_test_bind(struct boot_svc_ctx *svc)
+{
+    if (!svc) {
+        if (g_tun_registered)
+            mesh_stream_service_unregister(MESH_TUNNEL_SERVICE_NAME);
+        g_tun_registered = false;
+        g_tun_svc = NULL;
+        return;
+    }
+    g_tun_svc = svc;
+    tunnel_lock();
+    tunnel_allow_load_locked();
+    tunnel_unlock();
+    if (!g_tun_registered)
+        g_tun_registered = tunnel_register_service();
+}
+
 void mesh_tunnel_test_reset(void)
 {
     tunnel_lock();
