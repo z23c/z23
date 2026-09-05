@@ -1,7 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * z23-lint — C23 replacements for tools/lint shell gates.
- * Invoke: z23-lint <gate-name> [--selftest] | z23-lint --list
+ * Invoke: z23-lint <gate-name> [--selftest] | z23-lint <gate-name> [args...] | --list
  */
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
@@ -153,8 +153,10 @@ static int replay(FILE *out)
     return err ? die("z23-lint: read failed\n", "") : 0;
 }
 
-static int check_no_python_run(void)
+static int check_no_python_run(int argc, char **argv)
 {
+    (void)argc;
+    (void)argv;
     regex_t re;
     int cr = compile_ref(&re);
     if (cr) return cr;
@@ -243,8 +245,9 @@ static int compile_mal(regex_t *hit, regex_t *excl, const char *nm, const char *
     return err;
 }
 
-static int scan_mal(const char *path, struct mal_acc *a)
+static int scan_mal(const char *path, void *ctx)
 {
+    struct mal_acc *a = ctx;
     FILE *f = fopen(path, "r");
     if (!f)
         return die("z23-lint: cannot open %s\n", path);
@@ -268,7 +271,8 @@ static int scan_mal(const char *path, struct mal_acc *a)
     return fin(f, line, path, rc);
 }
 
-static int walk_mal(const char *dir, struct mal_acc *a)
+static int walk_src(const char *dir, int hdrs,
+                    int (*scan)(const char *, void *), void *ctx)
 {
     struct dirent **names = NULL;
     int n = scandir(dir, &names, NULL, alphasort);
@@ -287,10 +291,10 @@ static int walk_mal(const char *dir, struct mal_acc *a)
             else if (lstat(path, &st) != 0)
                 rc = die("z23-lint: cannot stat %s\n", path);
             else if (S_ISDIR(st.st_mode))
-                rc = walk_mal(path, a);
+                rc = walk_src(path, hdrs, scan, ctx);
             else if (S_ISREG(st.st_mode) && nl >= 2 && name[nl - 2] == '.'
-                     && (name[nl - 1] == 'c' || name[nl - 1] == 'h'))
-                rc = scan_mal(path, a);
+                     && (name[nl - 1] == 'c' || (hdrs && name[nl - 1] == 'h')))
+                rc = scan(path, ctx);
         }
         free(names[i]);
     }
@@ -304,9 +308,9 @@ static int mal_pass(const char *nm, const char *xtra)
     int cr = compile_mal(&hit, &excl, nm, xtra);
     if (cr) return cr;
     struct mal_acc a = { .hit = &hit, .excl = &excl, .hits = 0 };
-    int rc = walk_mal("app", &a);
+    int rc = walk_src("app", 1, scan_mal, &a);
     if (rc == 0)
-        rc = walk_mal("tools", &a);
+        rc = walk_src("tools", 1, scan_mal, &a);
     if (rc == 0 && a.hits) {
         printf("FAIL: bare %s in app/tools code (use zcl_%s or mark // raw-alloc-ok)\n", nm, nm);
         rc = 1;
@@ -315,8 +319,10 @@ static int mal_pass(const char *nm, const char *xtra)
     return rc;
 }
 
-static int check_malloc_run(void)
+static int check_malloc_run(int argc, char **argv)
 {
+    (void)argc;
+    (void)argv;
     int rc = mal_pass("malloc", "|zcl_calloc|zcl_realloc");
     if (rc == 0)
         rc = mal_pass("calloc", "");
@@ -496,8 +502,10 @@ static int np_ban(const regex_t *re, const char *err)
     return rc;
 }
 
-static int check_dev_proof_native_fast_path_run(void)
+static int check_dev_proof_native_fast_path_run(int argc, char **argv)
 {
+    (void)argc;
+    (void)argv;
     for (size_t i = 0; i < sizeof k_np / sizeof k_np[0]; i++) {
         int m = miss(k_np[i], stderr, "native proof fast path: missing %s\n");
         if (m)
@@ -554,8 +562,10 @@ static int bsh_comp(regex_t *hook, regex_t *plain)
                      "db_wallet_seed_save)", "[[:space:]]*\\(", "");
 }
 
-static int check_before_save_hooks_run(void)
+static int check_before_save_hooks_run(int argc, char **argv)
 {
+    (void)argc;
+    (void)argv;
     regex_t hook, plain;
     int cr = bsh_comp(&hook, &plain);
     if (cr) return cr;
@@ -601,9 +611,208 @@ static int check_before_save_hooks_selftest(void)
     return st_ok(bad, "check_before_save_hooks selftest: OK\n");
 }
 
+struct lg_acc {
+    regex_t *hit;
+    regex_t *excl;
+    regex_t *prev;
+    const char *skip_sub;
+    const char *skip_eq;
+    int hits;
+};
+
+static void drop3(regex_t *a, regex_t *b, regex_t *c)
+{
+    drop2(a, b);
+    regfree(c);
+}
+
+static int scan_lg(const char *path, void *ctx)
+{
+    struct lg_acc *a = ctx;
+    if ((a->skip_sub && strstr(path, a->skip_sub) != NULL)
+        || (a->skip_eq && strcmp(path, a->skip_eq) == 0))
+        return 0;
+    FILE *f = fopen(path, "r");
+    if (!f)
+        return die("z23-lint: cannot open %s\n", path);
+    char *buf[2] = { NULL, NULL };
+    size_t cap[2] = { 0, 0 };
+    int cur = 0, lineno = 0, rc = 0;
+    ssize_t n;
+    while ((n = getline(&buf[cur], &cap[cur], f)) >= 0) {
+        char *line = buf[cur];
+        lineno++;
+        if (regexec(a->hit, line, 0, NULL, 0) == 0
+            && regexec(a->excl, line, 0, NULL, 0) != 0
+            && !(lineno > 1
+                 && regexec(a->prev, buf[1 - cur], 0, NULL, 0) == 0)) {
+            if (n > 0 && line[n - 1] == '\n')
+                line[n - 1] = '\0';
+            if (fprintf(stdout, "%s:%d:%s\n", path, lineno, line) < 0) {
+                rc = die("z23-lint: write failed\n", "");
+                break;
+            }
+            a->hits++;
+        }
+        cur = 1 - cur;
+    }
+    rc = fin(f, NULL, path, rc);
+    free(buf[0]);
+    free(buf[1]);
+    return rc;
+}
+
+static int lg_got(const regex_t *hit, const regex_t *excl, const regex_t *prev,
+                  const char *p, const char *s)
+{
+    if (regexec(hit, s, 0, NULL, 0) != 0)
+        return 0;
+    if (regexec(excl, s, 0, NULL, 0) == 0)
+        return 0;
+    if (p && regexec(prev, p, 0, NULL, 0) == 0)
+        return 0;
+    return 1;
+}
+
+static int lg_want(const char *tag, const regex_t *hit, const regex_t *excl,
+                   const regex_t *prev, const char *p, const char *s, int w)
+{
+    if (lg_got(hit, excl, prev, p, s) != w) {
+        fprintf(stderr, "%s selftest: want %d: %s\n", tag, w, s);
+        return 1;
+    }
+    return 0;
+}
+
+static int pt_comp(regex_t *hit, regex_t *excl, regex_t *prev)
+{
+    int cr = compile_pat(hit, REG_EXTENDED, "pthread_create",
+                         "[[:space:]]*\\(", "", "");
+    if (cr)
+        return cr;
+    cr = pair_comp(excl, REG_EXTENDED, "thread_registry_spawn",
+                   "|thread_registry_trampoline", "|raw-pthread-ok", "",
+                   prev, REG_EXTENDED, "raw-pthread-ok", "", "", "");
+    if (cr)
+        regfree(hit);
+    return cr;
+}
+
+static int check_pthread_create_run(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+    regex_t hit, excl, prev;
+    int cr = pt_comp(&hit, &excl, &prev);
+    if (cr)
+        return cr;
+    struct lg_acc a = {
+        .hit = &hit, .excl = &excl, .prev = &prev,
+        .skip_sub = "tests/harness/include/test/",
+        .skip_eq = "platform/modules/util/src/thread_registry.c",
+        .hits = 0
+    };
+    static const char *const roots[] = { "lib", "app", "tools", "config" };
+    int rc = 0;
+    for (size_t i = 0; rc == 0 && i < sizeof roots / sizeof roots[0]; i++)
+        rc = walk_src(roots[i], 0, scan_lg, &a);
+    if (rc == 0 && a.hits) {
+        fputs("FAIL: raw pthread_create in production code (use thread_registry_spawn{,_ex} or mark // raw-pthread-ok: <reason>)\n",
+              stdout);
+        rc = 1;
+    } else if (rc == 0) {
+        fputs("  OK: all pthread_create call sites accounted for\n", stdout);
+    }
+    drop3(&hit, &excl, &prev);
+    return rc;
+}
+
+static int check_pthread_create_selftest(void)
+{
+    regex_t hit, excl, prev;
+    int cr = pt_comp(&hit, &excl, &prev);
+    if (cr)
+        return cr;
+    const char *t = "check_pthread_create";
+    int bad = lg_want(t, &hit, &excl, &prev, NULL,
+                      "    pthread_crea" "te(&t, 0, f, 0);", 1)
+            | lg_want(t, &hit, &excl, &prev, NULL,
+                      "    thread_registry_spawn(...)", 0)
+            | lg_want(t, &hit, &excl, &prev, NULL,
+                      "    pthread_crea" "te(&t, 0, f, 0); // raw-pthread-ok: x", 0)
+            | lg_want(t, &hit, &excl, &prev, "// raw-pthread-ok: startup",
+                      "pthread_crea" "te(", 0)
+            | lg_want(t, &hit, &excl, &prev, NULL,
+                      "my_pthread_create_wrapper(", 0);
+    drop3(&hit, &excl, &prev);
+    return st_ok(bad, "check_pthread_create selftest: OK\n");
+}
+
+static int ser_comp(regex_t *hit, regex_t *excl, regex_t *prev)
+{
+    int cr = compile_pat(hit, REG_EXTENDED, "return -1;", "", "", "");
+    if (cr)
+        return cr;
+    cr = pair_comp(excl, REG_EXTENDED, "LOG_ERR|LOG_FAIL|LOG_RETURN|log_json",
+                   "|(//|/\\*) raw-return-ok:[A-Za-z][A-Za-z0-9_-]+", "", "",
+                   prev, REG_EXTENDED, "LOG_ERR|LOG_FAIL|LOG_RETURN|",
+                   "log_json.*error", "", "");
+    if (cr)
+        regfree(hit);
+    return cr;
+}
+
+static int check_silent_error_returns_run(int argc, char **argv)
+{
+    if (argc < 4)
+        return die("usage: check_silent_error_returns.sh <scan-dir> <fail-label> <ok-label> <fix-hint>\n",
+                   "");
+    regex_t hit, excl, prev;
+    int cr = ser_comp(&hit, &excl, &prev);
+    if (cr)
+        return cr;
+    struct lg_acc a = {
+        .hit = &hit, .excl = &excl, .prev = &prev,
+        .skip_sub = NULL, .skip_eq = NULL, .hits = 0
+    };
+    int rc = walk_src(argv[0], 0, scan_lg, &a);
+    if (rc == 0 && a.hits) {
+        printf("FAIL: silent error returns found in %s (%s)\n", argv[1], argv[3]);
+        rc = 1;
+    } else if (rc == 0) {
+        printf("  OK: all %s error returns logged\n", argv[2]);
+    }
+    drop3(&hit, &excl, &prev);
+    return rc;
+}
+
+static int check_silent_error_returns_selftest(void)
+{
+    regex_t hit, excl, prev;
+    int cr = ser_comp(&hit, &excl, &prev);
+    if (cr)
+        return cr;
+    const char *t = "check_silent_error_returns";
+    int bad = lg_want(t, &hit, &excl, &prev, NULL, "    return -1;", 1)
+            | lg_want(t, &hit, &excl, &prev, NULL,
+                      "    LOG_ERR(\"x\"); return -1;", 0)
+            | lg_want(t, &hit, &excl, &prev, "    LOG_FAIL(\"bad\");",
+                      "    return -1;", 0)
+            | lg_want(t, &hit, &excl, &prev, NULL,
+                      "    return -1; // raw-return-ok:reason_1", 0)
+            | lg_want(t, &hit, &excl, &prev, NULL,
+                      "    return -1; // raw-return-ok:", 1)
+            | lg_want(t, &hit, &excl, &prev, "    log_json(\"error\", ...)",
+                      "    return -1;", 0)
+            | lg_want(t, &hit, &excl, &prev, "    log_json(\"info\", ...)",
+                      "    return -1;", 1);
+    drop3(&hit, &excl, &prev);
+    return st_ok(bad, "check_silent_error_returns selftest: OK\n");
+}
+
 struct lint_gate {
     const char *name;
-    int (*run)(void);
+    int (*run)(int argc, char **argv);
     int (*selftest)(void);
 };
 
@@ -613,6 +822,9 @@ static const struct lint_gate k_gates[] = {
     { "check-dev-proof-native-fast-path", check_dev_proof_native_fast_path_run,
       check_dev_proof_native_fast_path_selftest },
     { "check-before-save-hooks", check_before_save_hooks_run, check_before_save_hooks_selftest },
+    { "check-pthread-create", check_pthread_create_run, check_pthread_create_selftest },
+    { "check-silent-error-returns", check_silent_error_returns_run,
+      check_silent_error_returns_selftest },
 };
 
 int main(int argc, char **argv)
@@ -623,7 +835,8 @@ int main(int argc, char **argv)
         return 0;
     }
     if (argc < 2)
-        return die("z23-lint: usage: z23-lint <gate-name> [--selftest] | --list\n", "");
+        return die("z23-lint: usage: z23-lint <gate-name> [--selftest] | z23-lint <gate-name> [args...] | --list\n",
+                   "");
     const struct lint_gate *g = NULL;
     for (size_t i = 0; i < sizeof k_gates / sizeof k_gates[0]; i++) {
         if (strcmp(argv[1], k_gates[i].name) == 0)
@@ -633,7 +846,5 @@ int main(int argc, char **argv)
         return die("z23-lint: unknown gate: %s\n", argv[1]);
     if (argc >= 3 && strcmp(argv[2], "--selftest") == 0)
         return g->selftest();
-    if (argc >= 3)
-        return die("z23-lint: unexpected argument: %s\n", argv[2]);
-    return g->run();
+    return g->run(argc - 2, argv + 2);
 }

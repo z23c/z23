@@ -30,7 +30,6 @@ tools/dev/zcode_dht_acceptance.sh 1
 tools/lint/check_hotswap_eligible_scope.sh 1
 tools/lint/check_no_stale_pinned_facts.sh 1
 tools/lint/check_release_no_dev_symbols.sh 1
-tools/lint/check_silent_error_returns.sh 1
 tools/lint/check_thread_supervision.sh 1
 tools/lint/gate_doc_no_false_deleted.sh 1
 tools/lint/selftest_scanner_immunity.sh 1

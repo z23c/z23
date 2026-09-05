@@ -11315,22 +11315,22 @@ check-simd-os-support:
 	@echo "══ LINT: SIMD dispatch checks OS state, not just CPUID ══"
 	@./tools/lint/check_simd_os_support.sh
 
-check-silent-errors-services:
+check-silent-errors-services: $(LINTC_TOOL)
 	@echo "══ LINT: silent error returns in services ══"
 	@./tools/lint/check_silent_error_returns.sh engine/services/src services service \
 	    "use LOG_ERR/LOG_FAIL/LOG_RETURN, prev-line error log, or mark // raw-return-ok:<reason>"
 
-check-silent-errors-controllers:
+check-silent-errors-controllers: $(LINTC_TOOL)
 	@echo "══ LINT: silent error returns in controllers ══"
 	@./tools/lint/check_silent_error_returns.sh engine/controllers/src controllers controller \
 	    "use LOG_ERR/LOG_RETURN, prev-line fprintf, or mark // raw-return-ok:<reason>"
 
-check-silent-errors-jobs:
+check-silent-errors-jobs: $(LINTC_TOOL)
 	@echo "══ LINT: silent error returns in jobs ══"
 	@./tools/lint/check_silent_error_returns.sh engine/jobs/src jobs job \
 	    "use LOG_ERR/LOG_FAIL/LOG_RETURN, prev-line error log, or mark // raw-return-ok:<reason>"
 
-check-silent-errors-conditions:
+check-silent-errors-conditions: $(LINTC_TOOL)
 	@echo "══ LINT: silent error returns in conditions ══"
 	@./tools/lint/check_silent_error_returns.sh engine/conditions/src conditions condition \
 	    "use LOG_ERR/LOG_FAIL/LOG_RETURN, prev-line error log, or mark // raw-return-ok:<reason>"
@@ -11363,7 +11363,7 @@ check-before-save-hooks: $(LINTC_TOOL)
 # detached-helper wrappers, are explicitly opted out with a `raw-pthread-ok`
 # marker on the call line or the line immediately above. The registry's own
 # implementation in platform/modules/util/src/thread_registry.c is implicitly skipped.
-check-pthread-create:
+check-pthread-create: $(LINTC_TOOL)
 	@echo "══ LINT: raw pthread_create outside thread_registry ══"
 	@./tools/lint/check_pthread_create.sh
 
