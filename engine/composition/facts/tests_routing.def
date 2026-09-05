@@ -1,0 +1,92 @@
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ *
+ * purpose: How a source file routes to its test groups, how ONE group is
+ *          run, and where a group is registered.
+ *
+ * Row shape and the rule against weakening an anchor: see index.def and
+ * docs/zrc/0006-knowledge-in-the-checkout.md. */
+
+ZCL_FACT("tests.routing", "code_tests_leaf_declared",
+         "The code.tests command leaf is declared in engine/composition/commands/code.def and bound to the native handler zcl_native_handle_code_tests.",
+         "engine/composition/commands/code.def",
+         "zcl_native_handle_code_tests")
+ZCL_FACT("tests.routing", "code_tests_handler_impl",
+         "zcl_native_handle_code_tests, the code.tests C handler, is implemented in tools/command/native_code_command.c.",
+         "tools/command/native_code_command.c",
+         "void zcl_native_handle_code_tests(const struct zcl_command_request")
+ZCL_FACT("tests.routing", "impact_rules_def_format",
+         "cognition/controllers/include/controllers/agent_impact_rules.def documents its own AGENT_IMPACT_RULE patterns as shell/fnmatch syntax.",
+         "cognition/controllers/include/controllers/agent_impact_rules.def",
+         "Patterns use shell/fnmatch syntax")
+ZCL_FACT("tests.routing", "impact_rules_unmatched_fallback",
+         "A path matching no AGENT_IMPACT_RULE falls back to the make_lint_gates group in zcl_native_code_route_for_path.",
+         "tools/command/native_code_command.c",
+         "make_lint_gates")
+ZCL_FACT("tests.routing", "only_ignored_on_test_parallel",
+         "make test_parallel ONLY=<group> only builds the runner; the Makefile errors that ONLY is IGNORED by this goal.",
+         "Makefile",
+         "is IGNORED by this goal")
+ZCL_FACT("tests.routing", "tfast_supports_only",
+         "make t-fast ONLY=<group> is the supported one-group run path; it re-enters make as t-fast-locked with ONLY forwarded.",
+         "Makefile",
+         "t-fast-locked ONLY='$(ONLY)'")
+ZCL_FACT("tests.routing", "stack_unlimited_required",
+         "ZCL_TEST_STACK_SETUP expands to ulimit -s unlimited and is run before the fast test binary to avoid SIGSEGV.",
+         "Makefile",
+         "ZCL_TEST_STACK_SETUP = ulimit -s unlimited")
+ZCL_FACT("tests.routing", "tfast_locked_runs_only_flag",
+         "t-fast-locked builds TEST_PARALLEL_FAST_CANDIDATE, applies ZCL_TEST_STACK_SETUP, then runs the binary with --only=$(ONLY).",
+         "Makefile",
+         "$(TEST_PARALLEL_FAST_ACTIVE) --only=$(ONLY)")
+ZCL_FACT("tests.routing", "group_registry_single_file",
+         "Every parallel test group is registered once via ZCL_TEST_GROUP(name) in tools/dev/test_group_catalog.def, the canonical registry.",
+         "tools/dev/test_group_catalog.def",
+         "Canonical parallel-test registry")
+ZCL_FACT("tests.routing", "group_catalog_includes_def",
+         "tools/dev/test_group_catalog.c builds the group name array by including test_group_catalog.def under the ZCL_TEST_GROUP macro.",
+         "tools/dev/test_group_catalog.c",
+         "test_group_catalog.def")
+ZCL_FACT("tests.routing", "semantic_leaf_source_path",
+         "The semantic-leaf macro derives a group's source file path as tests/harness/src/test_<name>.c, binding the registry name to the source filename.",
+         "tools/dev/test_group_catalog.c",
+         "tests/harness/src/test_")
+ZCL_FACT("tests.routing", "test_srcs_wildcard",
+         "The Makefile compiles every file matched by wildcard tests/harness/src/*.c into the test binaries, so a new test_<name>.c is picked up automatically.",
+         "Makefile",
+         "$(wildcard tests/harness/src/*.c))")
+ZCL_FACT("tests.routing", "consensus_risk_routes_heaviest",
+         "A path under core/ or the listed consensus prefixes routes to consensus_parity regardless of the shared rule table.",
+         "tools/command/native_code_command.c",
+         "consensus_parity")
+ZCL_FACT("tests.routing", "sealed_core_whole_tree",
+         "code_path_is_consensus_risk treats the entire core/ tree as sealed consensus surface, not just named subdirectories.",
+         "tools/command/native_code_command.c",
+         ", 5) == 0) return true;")
+ZCL_FACT("tests.routing", "route_parity_invariant",
+         "code.tests' route for a path is checked to equal dev test plan's proof_group for the same file by a route-parity invariant in test_codeindex.c.",
+         "tools/command/native_code_command.c",
+         "route-parity invariant in test_codeindex.c")
+ZCL_FACT("tests.routing", "matched_flag_reports_hit",
+         "code.tests reports a boolean matched field equal to whether any shared AGENT_IMPACT_RULE fired (shared_rule_hits > 0).",
+         "tools/command/native_code_command.c",
+         ", acc.shared_rule_hits > 0")
+ZCL_FACT("tests.routing", "impact_composition_test_purpose",
+         "test_impact_composition.c is an adversarial test that the hand-authored impact rules and the scanned codeindex call graph compose honestly.",
+         "tests/harness/src/test_impact_composition.c",
+         "systems COMPOSE honestly")
+ZCL_FACT("tests.routing", "code_impact_test_purpose",
+         "test_code_impact.c documents the code.impact contract as the blast-radius leaf built on the same shared resolver as code.tests.",
+         "tests/harness/src/test_code_impact.c",
+         "code.impact contract: the blast-radius leaf")
+ZCL_FACT("tests.routing", "tools_command_wildcard_rule",
+         "The rule pattern tools/command/* routes any file added under tools/command/ to command_registry_catalog and related groups.",
+         "cognition/controllers/include/controllers/agent_impact_rules.def",
+         "tools/command/*|tests/harness/src/test_command_registry_catalog.c")
+ZCL_FACT("tests.routing", "impact_rules_def_self_rule",
+         "Editing agent_impact_rules.def itself is routed by a rule naming code_impact, impact_composition and test_group_selector among its groups.",
+         "cognition/controllers/include/controllers/agent_impact_rules.def",
+         "code_impact impact_composition syncdiag_rpc test_group_selector make_lint_gates")
+ZCL_FACT("tests.routing", "exclusive_run_groups_serialized",
+         "zcl_test_group_requires_exclusive_run names groups such as test_command_registry_latency and test_sapling_crypto that must run serialized, not parallel.",
+         "tools/dev/test_group_catalog.c",
+         "zcl_test_group_requires_exclusive_run")

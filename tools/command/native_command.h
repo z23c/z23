@@ -2476,6 +2476,17 @@ void zcl_native_handle_dev_agent_situation(
 void zcl_native_handle_dev_agent_rules(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
+
+/* dev.orient — the compiled fact table in engine/composition/facts/,
+ * listed by topic, returned for one topic, or filtered by substring.
+ * Implemented in tools/command/native_dev_orient.c. */
+void zcl_native_handle_dev_orient(const struct zcl_command_request *request,
+                                  struct zcl_command_reply *reply);
+
+/* The one-line fact-table banner dev.fleet.start and dev.agent.start print,
+ * derived from the same compiled table so no second count exists. */
+void zcl_dev_orient_banner(char *out, size_t cap);
+
 void zcl_native_handle_dev_agent_start(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);

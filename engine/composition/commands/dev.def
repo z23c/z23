@@ -69,6 +69,35 @@ ZCL_COMMAND_READY_READ(
     ZCL_COMMAND_TRAIT_IDEMPOTENT | ZCL_COMMAND_TRAIT_DEV_ONLY,
     ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_dev_ff)
 
+/* ── dev.orient ────────────────────────────────────────────────────────────
+ * The checkout's own answer to "what is already known about this?". Every
+ * row it returns carries the file it was read from and a literal anchor a
+ * lint gate re-proves on every commit, so an agent reads source only for the
+ * gap the table does not cover. See docs/zrc/0006-knowledge-in-the-checkout.md. */
+
+ZCL_COMMAND_READY_READ(
+    "dev.orient", "dev", "",
+    "What this checkout already knows, as verified rows",
+    "The compiled fact table in engine/composition/facts/: the topic listing "
+    "with a row count each, one topic's rows, or the rows whose key, claim or "
+    "path contain a substring. Every row carries the repo-relative path it "
+    "was read from and a literal anchor that tools/lint/check_orient_facts.sh "
+    "proves still exists in that file, so a row that stopped being true fails "
+    "the build instead of misleading a reader. An undeclared topic is refused "
+    "by name; an empty query result is reported as a true count of zero. The "
+    "table is compiled in — nothing is read from disk and no process runs.",
+    65536,
+    "dev,orient,facts,knowledge,topic,query,rows",
+    "zcl.dev_orient_input.v1", "zcl.dev_orient.v1", "topic,query", "topic",
+    "z23-dev dev orient landing.proof",
+    ZCL_COMMAND_LAYER_DEV, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_LATENCY_INSTANT,
+    ZCL_COMMAND_COST_LOW, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_NONE,
+    ZCL_COMMAND_TRAIT_DETERMINISTIC | ZCL_COMMAND_TRAIT_IDEMPOTENT |
+        ZCL_COMMAND_TRAIT_DEV_ONLY,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_dev_orient)
+
 ZCL_COMMAND_BRANCH("dev.retrieval", "dev",
                    "Retrieval quality for a source generation",
                    ZCL_COMMAND_LAYER_DEV)

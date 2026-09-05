@@ -1,0 +1,108 @@
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ *
+ * purpose: How a lint gate is wired, how lint differs from lint-fast, and
+ *          why a gate that scanned nothing must refuse to pass.
+ *
+ * Row shape and the rule against weakening an anchor: see index.def and
+ * docs/zrc/0006-knowledge-in-the-checkout.md. */
+
+ZCL_FACT("lint.gates", "gate_wiring_two_files",
+         "Adding a lint gate touches Makefile (check-<name> target and LINT_GATES line) and run_lint.sh gate_command().",
+         "tools/lint/check_lint_gate_wiring.sh",
+         "Adding a lint gate is a TWO-FILE operation")
+ZCL_FACT("lint.gates", "gate_wiring_assertion_a",
+         "check_lint_gate_wiring.sh asserts A that every LINT_GATES/LINT_FAST_GATES member has a gate_command() case entry.",
+         "tools/lint/check_lint_gate_wiring.sh",
+         "gate(s) in LINT_GATES/LINT_FAST_GATES with NO gate_command() entry")
+ZCL_FACT("lint.gates", "gate_wiring_assertion_b",
+         "check_lint_gate_wiring.sh asserts B that every gate_command() entry is named by one of the two gate lists, else it is dead wiring.",
+         "tools/lint/check_lint_gate_wiring.sh",
+         "gate_command() entries that NO gate list names (dead wiring)")
+ZCL_FACT("lint.gates", "gate_wiring_assertion_c",
+         "check_lint_gate_wiring.sh asserts C that every listed gate has a real check-<name> Makefile target for the ZCL_LINT_SERIAL=1 fallback.",
+         "tools/lint/check_lint_gate_wiring.sh",
+         "listed gate(s) with no 'check-...:' target")
+ZCL_FACT("lint.gates", "gate_wiring_assertion_d",
+         "check_lint_gate_wiring.sh asserts D that every gate_command() script path actually exists on disk.",
+         "tools/lint/check_lint_gate_wiring.sh",
+         "gate_command() entries naming a script that does not exist")
+ZCL_FACT("lint.gates", "gate_wiring_2026_incident",
+         "On 2026-08-26 three gates landed in LINT_GATES without a run_lint.sh case entry, making make lint exit 2 tree-wide until wired.",
+         "tools/lint/check_lint_gate_wiring.sh",
+         "On 2026-08-26 three gates landed with step 1 and without step 2")
+ZCL_FACT("lint.gates", "lint_gates_list_defined",
+         "The LINT_GATES list, the source of truth for the make lint umbrella, is defined starting with check-lint-gate-wiring as its first member.",
+         "Makefile",
+         "LINT_GATES :=")
+ZCL_FACT("lint.gates", "lint_fast_gates_list_defined",
+         "The LINT_FAST_GATES list for make lint-fast is a separate, smaller backslash-continued block in Makefile.",
+         "Makefile",
+         "LINT_FAST_GATES :=")
+ZCL_FACT("lint.gates", "lint_target_invokes_driver",
+         "The default (non-serial) make lint recipe invokes tools/lint/run_lint.sh with the full LINT_GATES list as arguments.",
+         "Makefile",
+         "$(LINT_GATES)")
+ZCL_FACT("lint.gates", "lint_fast_target_invokes_driver",
+         "The default lint-fast recipe invokes the same run_lint.sh driver but passes LINT_FAST_GATES instead of LINT_GATES.",
+         "Makefile",
+         "$(LINT_FAST_GATES)")
+ZCL_FACT("lint.gates", "lint_serial_fallback_makefile",
+         "Setting ZCL_LINT_SERIAL=1 makes the lint target run LINT_GATES as plain Make prerequisites instead of calling run_lint.sh.",
+         "Makefile",
+         "lint: $(LINT_GATES)")
+ZCL_FACT("lint.gates", "driver_execs_scripts_directly",
+         "run_lint.sh execs each gate's own script directly via its gate_command() table and never reads the Makefile recipe.",
+         "Makefile",
+         "the parallel driver execs each gate's script directly and never reads")
+ZCL_FACT("lint.gates", "driver_list_flag",
+         "run_lint.sh --list derives gate names by grepping its own gate_command() case labels so reformatting cannot desync the probe.",
+         "tools/lint/run_lint.sh",
+         "Gate names = the case labels in gate_command() (read from")
+ZCL_FACT("lint.gates", "driver_print_command_flag",
+         "run_lint.sh --print-command GATE is the one supported external reader of a single gate's exact invocation string.",
+         "tools/lint/run_lint.sh",
+         "--print-command GATE   (one gate's exact command)")
+ZCL_FACT("lint.gates", "driver_jobs_env_default",
+         "run_lint.sh defaults its parallel worker count to 8 via the ZCL_LINT_JOBS environment variable when --jobs is not given.",
+         "tools/lint/run_lint.sh",
+         "${ZCL_LINT_JOBS:-8}")
+ZCL_FACT("lint.gates", "driver_budget_env_default",
+         "run_lint.sh applies a soft 75-second wall-time budget via ZCL_LINT_BUDGET_SEC, warning rather than failing past it.",
+         "tools/lint/run_lint.sh",
+         "${ZCL_LINT_BUDGET_SEC:-75}")
+ZCL_FACT("lint.gates", "driver_timing_dir_default",
+         "run_lint.sh writes per-run gate timing artifacts under .cache/lint-timing by default, overridable via ZCL_LINT_TIMING_DIR.",
+         "tools/lint/run_lint.sh",
+         "${ZCL_LINT_TIMING_DIR:-$ROOT/.cache/lint-timing}")
+ZCL_FACT("lint.gates", "driver_serial_prologue",
+         "run_lint.sh forces check-git-hooks-installed to run serially and first, ahead of the parallel gate pool.",
+         "tools/lint/run_lint.sh",
+         "check-git-hooks-installed")
+ZCL_FACT("lint.gates", "scan_floor_capability_closure",
+         "check_capability_closure.sh enforces an anti-hollow floor of 500 scanned objects via CAP_CLOSURE_MIN_OBJECTS_SCANNED.",
+         "tools/lint/check_capability_closure.sh",
+         "CAP_CLOSURE_MIN_OBJECTS_SCANNED=500")
+ZCL_FACT("lint.gates", "scan_floor_clang_portability",
+         "check_clang_portability.sh sets a known source floor of 900 translation units so a broken Makefile parse cannot silently pass.",
+         "tools/lint/check_clang_portability.sh",
+         "SRC_FLOOR=900")
+ZCL_FACT("lint.gates", "scan_floor_byte_order_measured",
+         "check_byte_order_codec_single.sh documents a measured case where a floor of 800 still let 78 percent of files silently drop.",
+         "tools/lint/check_byte_order_codec_single.sh",
+         "this gate could silently lose 2797")
+ZCL_FACT("lint.gates", "scan_floor_honest_witness",
+         "check_honest_witness.sh names a silent scanned-0-to-0-violations pass as the exact fail-silent hole its gate closes.",
+         "tools/lint/check_honest_witness.sh",
+         "scanned 0 -> 0 violations -> clean")
+ZCL_FACT("lint.gates", "arm_symbol_baseline_file",
+         "check_arm_symbol_single.sh reads a shrink-only ratchet baseline of path-function pairs from arm_symbol_single_baseline.txt.",
+         "tools/lint/check_arm_symbol_single.sh",
+         "${ZCL_ARM_SYMBOL_BASELINE:-tools/lint/arm_symbol_single_baseline.txt}")
+ZCL_FACT("lint.gates", "arm_symbol_baseline_update_manual",
+         "The arm_symbol_single baseline is only rewritten by an explicit UPDATE invocation, never automatically by make lint.",
+         "tools/lint/check_arm_symbol_single.sh",
+         "UPDATE rewrites the baseline")
+ZCL_FACT("lint.gates", "arm_symbol_baseline_artifact_id",
+         "The generated arm_symbol_single_baseline.txt file carries a versioned artifact-id header line identifying its schema.",
+         "tools/lint/arm_symbol_single_baseline.txt",
+         "artifact-id: zcl.arm_symbol_single_baseline.v1")

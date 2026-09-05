@@ -1,0 +1,140 @@
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ *
+ * purpose: What a dev proof receipt contains, how it is sealed and admitted, and where it is cached.
+ *
+ * One ZCL_FACT row per verified fact. Fields, in order:
+ *   topic   dotted topic id, identical on every row in this file.
+ *   key     snake_case, unique within the topic.
+ *   claim   one sentence, <= 160 chars, no tab and no quote.
+ *   path    repo-relative file the claim was read from.
+ *   anchor  literal substring that must still exist in that file.
+ *
+ * tools/lint/check_orient_facts.sh proves every path and anchor on every
+ * commit, so a row that stops being true fails the build instead of
+ * misleading the next reader. Never weaken an anchor to make it match;
+ * delete or rewrite the row. See docs/zrc/0006-knowledge-in-the-checkout.md. */
+
+ZCL_FACT("landing.proof", "receipt_roots_list",
+         "The receipt struct carries 10 fixed content roots plus 4 dimension roots.",
+         "tools/dev/dev_proof_receipt.h",
+         "uint8_t child_set_root[ZCL_DEV_PROOF_ROOT_BYTES];")
+ZCL_FACT("landing.proof", "source_root_calc",
+         "source_root is SHA3 over the domain string plus the local commit hex text, not tree content.",
+         "tools/dev/dev_proof.c",
+         "zcl.dev_proof_git_source.v1")
+ZCL_FACT("landing.proof", "changed_set_root_calc",
+         "changed_set_root is a file hash over the changed-files list at paths->changed.",
+         "tools/dev/dev_proof.c",
+         "zcl.dev_proof_changed_set.v1")
+ZCL_FACT("landing.proof", "impact_policy_root_file",
+         "impact_policy_root first hashes the agent_impact_rules.def file bytes.",
+         "tools/dev/dev_proof.c",
+         "agent_impact_rules.def")
+ZCL_FACT("landing.proof", "impact_policy_root_plan",
+         "impact_policy_root is then rehashed together with the rendered impact-plan JSON.",
+         "tools/dev/dev_proof.c",
+         "zcl.dev_proof_impact_plan.v1")
+ZCL_FACT("landing.proof", "build_identity_capture",
+         "compiler/flags/environment/build_graph roots all come from one call to zcl_dev_proof_build_identity_v1_capture.",
+         "tools/dev/dev_proof.c",
+         "zcl_dev_proof_build_identity_v1_capture")
+ZCL_FACT("landing.proof", "compiler_root_source",
+         "compiler_root is copied from the toolchain capsule's content root.",
+         "tools/dev/dev_proof.c",
+         "memcpy(receipt.compiler_root, identity.compiler, 32);")
+ZCL_FACT("landing.proof", "compiler_id_dropped",
+         "The build-plan hasher explicitly skips the COMPILER_ID line before hashing flags/build_graph.",
+         "tools/dev/dev_proof.c",
+         "if (strcmp(line,")
+ZCL_FACT("landing.proof", "plan_path_neutralised",
+         "Plan values are rewritten to a virtual root token before hashing so absolute checkout paths do not appear in flags/build_graph roots.",
+         "tools/dev/dev_proof.c",
+         "PROOF_PLAN_VIRTUAL_ROOT")
+ZCL_FACT("landing.proof", "env_root_fields",
+         "environment_root hashes only a fixed named-variable list (CC, CXX, CFLAGS, ... SOURCE_DATE_EPOCH).",
+         "tools/dev/dev_proof.c",
+         "CPLUS_INCLUDE_PATH")
+ZCL_FACT("landing.proof", "path_excluded",
+         "PATH is deliberately excluded from environment_root because a reordered PATH must not move any root.",
+         "tools/dev/dev_proof.c",
+         "A reordered PATH now moves no root")
+ZCL_FACT("landing.proof", "source_cas_content",
+         "source_cas_root/mutation_root come from a native content-addressed Merkle tree over source bytes, not box identity.",
+         "tools/dev/dev_source_identity.c",
+         "zcl.dev_source_cas_identity.v1")
+ZCL_FACT("landing.proof", "child_set_root_calc",
+         "child_set_root is a pure SHA3 function of the receipt's own 4 dimension roots and counts.",
+         "tools/dev/dev_proof_receipt.c",
+         "zcl.dev_proof_child_set.v1")
+ZCL_FACT("landing.proof", "signer_key_path",
+         "Each box keeps one Ed25519 signing key at platform_state_root()/proof-signer/signer.ed25519.",
+         "tools/dev/dev_proof_signer.c",
+         "SIGNER_KEY_LEAF")
+ZCL_FACT("landing.proof", "signer_allow_path",
+         "Cross-box trust is via a signers.allow file, one 64-hex pubkey per line, under the same state directory.",
+         "tools/dev/dev_proof_signer.c",
+         "SIGNER_ALLOW_LEAF")
+ZCL_FACT("landing.proof", "hook_ancestor_check",
+         "The pre-push hook first requires the advertised base to be an ancestor of the local commit.",
+         "tools/dev/z23_git_hook.c",
+         "remote-base-not-ancestor")
+ZCL_FACT("landing.proof", "validate_signer_before_structure",
+         "Receipt validation checks the signer identity before any structural/root check.",
+         "tools/dev/dev_proof_receipt.c",
+         "Identity of the signer is decided before anything the record claims")
+ZCL_FACT("landing.proof", "validate_roots_nonzero",
+         "Validation requires every one of the 10 fixed roots to be non-zero.",
+         "tools/dev/dev_proof_receipt.c",
+         "receipt_required_root_missing")
+ZCL_FACT("landing.proof", "validate_child_set_match",
+         "Validation recomputes child_set_root and requires it to match the stored value.",
+         "tools/dev/dev_proof_receipt.c",
+         "receipt_child_set_mismatch")
+ZCL_FACT("landing.proof", "hook_child_receipt_required",
+         "Every selected dimension must also have a matching child receipt file under .cache/zcl-dev-proof/children/.",
+         "tools/dev/z23_git_hook.c",
+         "child-receipt-missing-or-invalid")
+ZCL_FACT("landing.proof", "testcache_key_def",
+         "testcache keys a per-group verdict on a SHA3-256 of the group's forward input closure, not the whole-tree closure or a tip sha.",
+         "tests/harness/include/test/testcache.h",
+         "The key is SHA3-256 over that closure")
+ZCL_FACT("landing.proof", "testcache_store_default",
+         "The testcache object store defaults to the repo root but can be redirected via ZCL_TESTCACHE_STORE_ROOT.",
+         "tests/harness/src/testcache.c",
+         "ZCL_TESTCACHE_STORE_ROOT")
+ZCL_FACT("landing.proof", "testcache_pass_only",
+         "testcache only ever stores PASS verdicts; a fail is never cached.",
+         "tests/harness/include/test/testcache.h",
+         "only PASS verdicts are ever stored (a fail is never cached)")
+ZCL_FACT("landing.proof", "testcache_called_in_test_runner",
+         "testcache_probe_group is called from the parallel test runner, after binaries are already built.",
+         "tests/harness/src/test_parallel.c",
+         "testcache_probe_group(tc, g_groups[i].name, &probes[i]);")
+ZCL_FACT("landing.proof", "cycle_reuse_keyed_on_cas",
+         "Whole-cycle reuse (cycle_proof_reuse) is keyed on source_cas content, not the commit sha.",
+         "tools/dev/dev_proof.c",
+         "cycle_proof_reuse(")
+ZCL_FACT("landing.proof", "impact_rule_format",
+         "An impact rule maps a pipe-separated file-path set to a space-separated list of group names.",
+         "cognition/controllers/include/controllers/agent_impact_rules.def",
+         "AGENT_IMPACT_RULE(")
+ZCL_FACT("landing.proof", "dimension_complete_strict",
+         "A dimension only counts complete when it has zero failed and zero skipped items.",
+         "tools/dev/dev_proof_receipt.c",
+         "dim->failed != 0 || dim->skipped != 0")
+ZCL_FACT("landing.proof", "fail_closed_whole_proof",
+         "Any failed dimension aborts the whole proof before a receipt is stored; there is no partial/no-new-red pass state.",
+         "tools/dev/dev_proof.c",
+         "Fail closed on the first dimension that failed")
+ZCL_FACT("landing.proof", "capsule_fields",
+         "The toolchain capsule digests compiler driver, backend, assembler version, sysroot, target probes, and ABI files by content.",
+         "contexts/commons/modules/vcs/include/vcs/build_action.h",
+         "uint8_t abi_files_sha3[32];")
+ZCL_FACT("landing.proof", "capsule_no_mtime",
+         "The toolchain capsule capture explicitly uses no mtime.",
+         "contexts/commons/modules/vcs/include/vcs/build_action.h",
+         "No mtime participates.")
+ZCL_FACT("landing.proof", "receipt_references_capsule",
+         "The receipt's compiler_root is populated directly from the toolchain capsule's root hash.",
+         "tools/dev/dev_proof.c",
+         "identity.compiler")

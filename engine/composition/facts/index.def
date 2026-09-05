@@ -1,0 +1,71 @@
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ *
+ * purpose: The index of verified-fact topics. This file, plus the topic
+ *          files it includes, is the whole fact table compiled into z23-dev.
+ *
+ * WHY THIS EXISTS. Owner directive, 2026-09-05: "always be building things
+ * you need to know into z23 so you don't have to burn tokens to learn in the
+ * future." Before this table, the same maps of the landing path, the board
+ * protocol and the lint system were re-derived from source by each AI reader
+ * that needed them, at roughly a hundred thousand tokens a time, several
+ * times a day, and the result died with that reader's context. A map that is
+ * not in the tree is not knowledge; it is a bill that comes due again.
+ *
+ * Include with BOTH macros defined; either may be a no-op:
+ *
+ *   ZCL_FACT_TOPIC(topic, blurb)
+ *       topic — dotted topic id, e.g. "landing.proof".
+ *       blurb — one short phrase naming what the topic covers.
+ *
+ *   ZCL_FACT(topic, key, claim, path, anchor)
+ *       topic  — the enclosing ZCL_FACT_TOPIC's id, repeated on every row so
+ *                a row is meaningful when it is read alone.
+ *       key    — snake_case, unique within the topic.
+ *       claim  — ONE sentence, at most 160 chars, no tab and no quote. What
+ *                is true, in the words the next reader needs.
+ *       path   — repo-relative file the claim was read from.
+ *       anchor — a literal substring, at most 80 chars, that must still be
+ *                findable in that file. The anchor is what makes the row a
+ *                FACT rather than an opinion: when the code moves, the
+ *                anchor stops matching and the gate fails.
+ *
+ * A topic is one file. Adding a topic is two lines here plus that file;
+ * nothing else in the tree changes, and no reader keeps a second list.
+ *
+ * tools/lint/check_orient_facts.sh proves every path and every anchor on
+ * every commit and has no baseline and no exemption list. NEVER weaken an
+ * anchor to make a stale row pass — rewrite the row against what the code
+ * now says, or delete it. See docs/zrc/0006-knowledge-in-the-checkout.md.
+ *
+ * Read by tools/command/native_dev_orient.c and by nothing else; there is no
+ * second copy of this table anywhere. */
+
+ZCL_FACT_TOPIC("landing.proof",
+               "what a dev proof receipt contains, how it is sealed and "
+               "admitted, and where a refusal is cached")
+#include "landing_proof.def"
+
+ZCL_FACT_TOPIC("landing.queue",
+               "how dev.land queues a lane, the states its rows move "
+               "through, and what dev train does with them")
+#include "landing_queue.def"
+
+ZCL_FACT_TOPIC("lint.gates",
+               "how a lint gate is wired, how lint differs from lint-fast, "
+               "and why a gate needs a scan floor")
+#include "lint_gates.def"
+
+ZCL_FACT_TOPIC("tests.routing",
+               "how a source file routes to its test groups and how one "
+               "group is run")
+#include "tests_routing.def"
+
+ZCL_FACT_TOPIC("fleet.board",
+               "how the fleet board stores, signs, verifies and gossips a "
+               "post")
+#include "fleet_board.def"
+
+ZCL_FACT_TOPIC("fleet.swarm",
+               "how the ZCODE package swarm chunks, paces and stores "
+               "content-addressed packages")
+#include "fleet_swarm.def"

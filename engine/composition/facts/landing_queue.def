@@ -1,0 +1,148 @@
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ *
+ * purpose: How dev.land queues a lane, what states its rows move through, and what the train does.
+ *
+ * One ZCL_FACT row per verified fact. Fields, in order:
+ *   topic   dotted topic id, identical on every row in this file.
+ *   key     snake_case, unique within the topic.
+ *   claim   one sentence, <= 160 chars, no tab and no quote.
+ *   path    repo-relative file the claim was read from.
+ *   anchor  literal substring that must still exist in that file.
+ *
+ * tools/lint/check_orient_facts.sh proves every path and anchor on every
+ * commit, so a row that stops being true fails the build instead of
+ * misleading the next reader. Never weaken an anchor to make it match;
+ * delete or rewrite the row. See docs/zrc/0006-knowledge-in-the-checkout.md. */
+
+ZCL_FACT("landing.queue", "land_row_schema",
+         "dev.land's queue row is struct dl_row with seq/tip/state/phase/attempt/base/local/pushed fields.",
+         "tools/command/native_dev_land.c",
+         "struct dl_row {")
+ZCL_FACT("landing.queue", "land_state_dir",
+         "dev.land's state lives under <platform_state_root>/land with mode 0700.",
+         "tools/command/native_dev_land.c",
+         "STATE. <platform_state_root>/land (0700):")
+ZCL_FACT("landing.queue", "land_mail_outbox",
+         "Every dev.land outcome also appends to <platform_state_root>/mail/outbox.jsonl if that dir exists.",
+         "tools/command/native_dev_land.c",
+         "Every outcome also appends to <platform_state_root>/mail/outbox.jsonl when")
+ZCL_FACT("landing.queue", "land_step_start_fn",
+         "dl_step_start drives a queued row through worktree/rebase/lint/proof-request.",
+         "tools/command/native_dev_land.c",
+         "static void dl_step_start(const struct dl_dirs *d, struct dl_row *row,")
+ZCL_FACT("landing.queue", "land_step_resume_fn",
+         "dl_step_resume reads the proof result for an inflight row and can push or requeue it.",
+         "tools/command/native_dev_land.c",
+         "static void dl_step_resume(const struct dl_dirs *d, struct dl_row *row,")
+ZCL_FACT("landing.queue", "land_wt_ensure_fn",
+         "dl_wt_ensure creates or reuses the private landing worktree before any git action.",
+         "tools/command/native_dev_land.c",
+         "static bool dl_wt_ensure(const struct dl_dirs *d, const struct dl_row *r,")
+ZCL_FACT("landing.queue", "land_already_landed_fn",
+         "dl_already_landed short-circuits a row whose tip is already an ancestor of origin/main.",
+         "tools/command/native_dev_land.c",
+         "static bool dl_already_landed(const struct dl_dirs *d, struct dl_row *row)")
+ZCL_FACT("landing.queue", "land_rebase_fn",
+         "dl_rebase fetches origin, checks out the tip, and rebases it onto origin/main, aborting on conflict.",
+         "tools/command/native_dev_land.c",
+         "static int dl_rebase(const struct dl_dirs *d, struct dl_row *row,")
+ZCL_FACT("landing.queue", "land_lint_fast_fn",
+         "dl_lint_fast runs make lint-fast in the landing worktree as the step before requesting a proof.",
+         "tools/command/native_dev_land.c",
+         "static int dl_lint_fast(const struct dl_dirs *d, struct dl_row *row)")
+ZCL_FACT("landing.queue", "land_nothing_waits",
+         "dev.land's contract states step never sleeps or waits for a proof to finish; it returns after requesting one.",
+         "tools/command/native_dev_land.c",
+         "NOTHING WAITS. submit, status and cancel touch only local files. step does")
+ZCL_FACT("landing.queue", "land_attempt_max",
+         "dev.land bounds base-moved and push-refused retries to DL_ATTEMPT_MAX = 3 attempts.",
+         "tools/command/native_dev_land.c",
+         "#define DL_ATTEMPT_MAX 3")
+ZCL_FACT("landing.queue", "land_push_refused_retry",
+         "If the fast-forward push is refused, dev.land logs the refusal and rebases again on the next step, bounded by DL_ATTEMPT_MAX.",
+         "tools/command/native_dev_land.c",
+         "the fast-forward push was refused; rebasing")
+ZCL_FACT("landing.queue", "land_no_no_verify",
+         "dev.land's final push carries no --no-verify and goes through the installed pre-push hook.",
+         "tools/command/native_dev_land.c",
+         "* final push carries no --no-verify: it goes through the installed")
+ZCL_FACT("landing.queue", "land_signed_commit_required",
+         "dev.land refuses to submit a tip unless it can verify main's signed-commit requirement, absent a dev-only escape hatch.",
+         "tools/command/native_dev_land.c",
+         "main takes signed commits only; sign the tip and")
+ZCL_FACT("landing.queue", "land_state_root_scope",
+         "dev.land resolves its state directory from platform_state_root, the local per-user state root.",
+         "tools/command/native_dev_land.c",
+         "if (!d || !platform_state_root(d->root, sizeof(d->root)))")
+ZCL_FACT("landing.queue", "land_queue_lock",
+         "dev.land's queue.lock is a flock guarding row seq assignment and rewrite.",
+         "tools/command/native_dev_land.c",
+         "if (flock(fd, nonblocking ? (LOCK_EX | LOCK_NB) : LOCK_EX) != 0) {")
+ZCL_FACT("landing.queue", "land_slot_lock_hostwide",
+         "dev.land's slot.lock is documented as the HOST-WIDE landing slot, taken non-blocking inside step.",
+         "tools/command/native_dev_land.c",
+         "*   slot.lock       the HOST-WIDE landing slot, taken NON-BLOCKING inside")
+ZCL_FACT("landing.queue", "land_slot_lock_call",
+         "dl_step takes the slot lock via dl_slot_lock before picking a row to drive.",
+         "tools/command/native_dev_land.c",
+         "slot = dl_slot_lock(d.land);")
+ZCL_FACT("landing.queue", "train_is_worktree",
+         "dev train build's train is a detached git worktree at z23-stack<name>, built by cherry-picking each source's commits, with no lint-fast run inside build.",
+         "tools/command/native_dev_train_command.c",
+         "docs once, and returns — it never runs lint-fast itself. dev train check")
+ZCL_FACT("landing.queue", "train_conflict_aborts_all",
+         "dev train build reports state:conflict and stops the whole build on the first cherry-pick conflict from any source.",
+         "tools/command/native_dev_train_command.c",
+         "(void)json_push_kv_str(&reply->data,")
+ZCL_FACT("landing.queue", "train_conflict_code",
+         "The cherry-pick conflict is surfaced as a CHERRY_PICK_CONFLICT failure, leaving the stack worktree mid-pick.",
+         "tools/command/native_dev_train_command.c",
+         "ZCL_COMMAND_EXIT_BLOCKED,")
+ZCL_FACT("landing.queue", "train_check_reads_gates",
+         "dev train check parses FAIL <gate> lines out of the gate-run output into gates_failed.",
+         "tools/command/native_dev_train_command.c",
+         "if (strncmp(line,")
+ZCL_FACT("landing.queue", "agentq_state_dir",
+         "dev.agent.queue's state lives at <platform_state_root>/queue with queue.jsonl as one JSON object per line.",
+         "tools/command/native_devagent_queue.c",
+         "* STATE. <platform_state_root>/queue (0700): queue.jsonl (one JSON object")
+ZCL_FACT("landing.queue", "agentq_reap_stamp",
+         "dev.agent.queue keeps a .reap_stamp file in its state dir alongside outcomes.jsonl.",
+         "tools/command/native_devagent_queue.c",
+         "* line), outcomes.jsonl, and .reap_stamp. Runs live in")
+ZCL_FACT("landing.queue", "agentq_no_verb_blocks",
+         "dev.agent.queue's contract says no verb blocks on a model, a build, or another process.",
+         "tools/command/native_devagent_queue.c",
+         "* <platform_state_root>/engine/<name>/a<attempt>/. No verb blocks on a")
+ZCL_FACT("landing.queue", "agentq_reap_running_only",
+         "dvq_reap only inspects rows currently in state running when looking for a terminal outcome.",
+         "tools/command/native_devagent_queue.c",
+         "if (strcmp(r->state,")
+ZCL_FACT("landing.queue", "agentq_requeue_cap",
+         "dev.agent.queue requeues a rate-limited run only while its attempt count is still below 3.",
+         "tools/command/native_devagent_queue.c",
+         "r->attempt < 3) {")
+ZCL_FACT("landing.queue", "event_cond_timedwait",
+         "The async event dispatcher blocks on pthread_cond_timedwait with a 1-second deadline, waking on signal or timeout.",
+         "engine/modules/event/src/event.c",
+         "pthread_cond_timedwait(&g_async.wake_cond,")
+ZCL_FACT("landing.queue", "event_cond_signal",
+         "async_enqueue wakes the in-process dispatch thread with pthread_cond_signal after publishing a new event.",
+         "engine/modules/event/src/event.c",
+         "pthread_cond_signal(&g_async.wake_cond);")
+ZCL_FACT("landing.queue", "fleetboard_follow_is_poll",
+         "fleet_board.def's only follow leaf is a counts leaf a dispatcher must poll, not a blocking wait.",
+         "engine/composition/commands/fleet_board.def",
+         "counts) so a dispatcher can follow the work.")
+ZCL_FACT("landing.queue", "hook_only_main",
+         "The pre-push hook refuses any push whose remote ref is not refs/heads/main.",
+         "tools/dev/z23_git_hook.c",
+         "if (strcmp(remote_ref,")
+ZCL_FACT("landing.queue", "hook_admit_pair_call",
+         "pre_push calls admit_pair(root, local, base) to validate the receipt before allowing the push.",
+         "tools/dev/z23_git_hook.c",
+         "if (admit_pair(root, local, base) != 0) return 1;")
+ZCL_FACT("landing.queue", "slot_lock_host_local_by_design",
+         "dev.land's slot lock is deliberately host-local: a second host proving the same tip is documented as not this host's problem.",
+         "tools/command/native_dev_land.c",
+         "a second host proving the same tip is not")

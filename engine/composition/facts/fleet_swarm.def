@@ -1,0 +1,44 @@
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ *
+ * purpose: How the ZCODE package swarm chunks, paces and stores content-addressed packages.
+ *
+ * One ZCL_FACT row per verified fact. Fields, in order:
+ *   topic   dotted topic id, identical on every row in this file.
+ *   key     snake_case, unique within the topic.
+ *   claim   one sentence, <= 160 chars, no tab and no quote.
+ *   path    repo-relative file the claim was read from.
+ *   anchor  literal substring that must still exist in that file.
+ *
+ * tools/lint/check_orient_facts.sh proves every path and anchor on every
+ * commit, so a row that stops being true fails the build instead of
+ * misleading the next reader. Never weaken an anchor to make it match;
+ * delete or rewrite the row. See docs/zrc/0006-knowledge-in-the-checkout.md. */
+
+ZCL_FACT("fleet.swarm", "swarm_chunk_bytes",
+         "VCS_PACKAGE_CHUNK_BYTES fixes the package swarm's per-chunk payload at 1 MiB.",
+         "contexts/commons/modules/vcs/include/vcs/package_manifest.h",
+         "#define VCS_PACKAGE_CHUNK_BYTES (1024u * 1024u)")
+ZCL_FACT("fleet.swarm", "swarm_frame_ceiling",
+         "The largest non-header package-swarm frame is header+88 bytes+one full VCS_PACKAGE_CHUNK_BYTES chunk.",
+         "contexts/commons/modules/vcs/include/vcs/package_swarm.h",
+         "(VCS_PACKAGE_SWARM_HEADER_BYTES + 88u + VCS_PACKAGE_CHUNK_BYTES)")
+ZCL_FACT("fleet.swarm", "swarm_peer_inflight_cap",
+         "Per-peer in-flight chunk requests are capped at VCS_SWARM_PEER_INFLIGHT_MAX = 8.",
+         "contexts/commons/modules/vcs/include/vcs/package_swarm_node.h",
+         "#define VCS_SWARM_PEER_INFLIGHT_MAX 8u")
+ZCL_FACT("fleet.swarm", "swarm_global_inflight_cap",
+         "Global in-flight chunk requests across all peers are capped at VCS_SWARM_GLOBAL_INFLIGHT_MAX = 64.",
+         "contexts/commons/modules/vcs/include/vcs/package_swarm_node.h",
+         "#define VCS_SWARM_GLOBAL_INFLIGHT_MAX 64u")
+ZCL_FACT("fleet.swarm", "package_store_content_addressed",
+         "The package store is described as the node's local content-addressed ZCODE package store.",
+         "contexts/commons/modules/vcs/include/vcs/package_store.h",
+         "* package_store — the node's local content-addressed ZCODE package store")
+ZCL_FACT("fleet.swarm", "blob_store_path",
+         "blob_store publishes any small blob as a one-file content.v2 package under the fixed path blob.",
+         "contexts/commons/modules/vcs/include/vcs/blob_store.h",
+         "#define VCS_BLOB_PATH")
+ZCL_FACT("fleet.swarm", "blob_store_max_bytes",
+         "blob_store caps a blob at VCS_BLOB_MAX_BYTES = 8192 bytes, well under one 1 MiB package chunk.",
+         "contexts/commons/modules/vcs/include/vcs/blob_store.h",
+         "#define VCS_BLOB_MAX_BYTES 8192u")

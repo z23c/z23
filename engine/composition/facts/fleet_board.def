@@ -1,0 +1,136 @@
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ *
+ * purpose: How the fleet board stores, signs, verifies and gossips a post.
+ *
+ * One ZCL_FACT row per verified fact. Fields, in order:
+ *   topic   dotted topic id, identical on every row in this file.
+ *   key     snake_case, unique within the topic.
+ *   claim   one sentence, <= 160 chars, no tab and no quote.
+ *   path    repo-relative file the claim was read from.
+ *   anchor  literal substring that must still exist in that file.
+ *
+ * tools/lint/check_orient_facts.sh proves every path and anchor on every
+ * commit, so a row that stops being true fails the build instead of
+ * misleading the next reader. Never weaken an anchor to make it match;
+ * delete or rewrite the row. See docs/zrc/0006-knowledge-in-the-checkout.md. */
+
+ZCL_FACT("fleet.board", "board_table_schema",
+         "fleet_board_post_fields.def declares the fleet_board_posts row schema once, id field first.",
+         "engine/models/include/models/def/fleet_board_post_fields.def",
+         "ZCL_MODEL_BLOB(id,          post.id,          32)")
+ZCL_FACT("fleet.board", "board_migration_create_table",
+         "The fleet_board_posts table is created in migration v67_up with a CHECK on kind 1..7.",
+         "engine/models/src/database_migrate_features_v67_up.c",
+         "CREATE TABLE IF NOT EXISTS fleet_board_posts(")
+ZCL_FACT("fleet.board", "board_chain_domain",
+         "The local hash chain uses a distinct domain string zcl.fleet_board_chain.v1, NUL-separated from the post domain.",
+         "cognition/modules/session/include/session/fleet_board_proto.h",
+         "FLEET_BOARD_CHAIN_V1_DOMAIN")
+ZCL_FACT("fleet.board", "board_chain_step_fn",
+         "fleet_board_chain_step computes the next local chain link from previous chain and post id.",
+         "cognition/modules/session/include/session/fleet_board_proto.h",
+         "void fleet_board_chain_step(const uint8_t previous[32], const uint8_t id[32],")
+ZCL_FACT("fleet.board", "board_sign_fn",
+         "fleet_board_post_sign fills id and signature from a host Ed25519 keypair.",
+         "cognition/modules/session/include/session/fleet_board_proto.h",
+         "enum fleet_board_result fleet_board_post_sign(")
+ZCL_FACT("fleet.board", "board_verify_fn",
+         "fleet_board_post_verify re-derives the id from bytes and checks the signature.",
+         "cognition/modules/session/include/session/fleet_board_proto.h",
+         "enum fleet_board_result fleet_board_post_verify(")
+ZCL_FACT("fleet.board", "board_verify_call",
+         "Verification calls ed25519_verify against post->host_pubkey carried inside the post itself.",
+         "cognition/modules/session/src/fleet_board_proto.c",
+         "if (!ed25519_verify(post->signature, digest, sizeof(digest),")
+ZCL_FACT("fleet.board", "board_sign_call",
+         "Signing calls ed25519_sign with the caller-supplied secret_seed and host_pubkey.",
+         "cognition/modules/session/src/fleet_board_proto.c",
+         "ed25519_sign(post->signature, digest, sizeof(digest), secret_seed,")
+ZCL_FACT("fleet.board", "board_body_max",
+         "The canonical signed post body is capped at FLEET_BOARD_BODY_MAX = 17408 bytes.",
+         "cognition/modules/session/include/session/fleet_board_proto.h",
+         "FLEET_BOARD_BODY_MAX = 17408,")
+ZCL_FACT("fleet.board", "board_ttl_max",
+         "A board post's TTL is capped at FLEET_BOARD_TTL_MAX = 2592000 seconds (30 days).",
+         "cognition/modules/session/include/session/fleet_board_proto.h",
+         "FLEET_BOARD_TTL_MAX = 2592000,      /* 30 days */")
+ZCL_FACT("fleet.board", "board_future_skew",
+         "A post dated more than FLEET_BOARD_FUTURE_SKEW_MAX = 300s ahead of the receiver's clock is refused.",
+         "cognition/modules/session/include/session/fleet_board_proto.h",
+         "FLEET_BOARD_FUTURE_SKEW_MAX = 300,")
+ZCL_FACT("fleet.board", "board_frame_magic",
+         "Every board gossip frame begins with the 4-byte magic ZFB1.",
+         "cognition/modules/session/include/session/fleet_board_proto.h",
+         "#define FLEET_BOARD_FRAME_MAGIC")
+ZCL_FACT("fleet.board", "board_frame_ids_max",
+         "One INV or GET frame carries at most FLEET_BOARD_FRAME_IDS_MAX = 128 ids.",
+         "cognition/modules/session/include/session/fleet_board_proto.h",
+         "FLEET_BOARD_FRAME_IDS_MAX = 128,")
+ZCL_FACT("fleet.board", "board_frame_max_bytes",
+         "FLEET_BOARD_FRAME_MAX bounds an id-list frame to 4+1+2+128*32 bytes.",
+         "cognition/modules/session/include/session/fleet_board_proto.h",
+         "FLEET_BOARD_FRAME_MAX = 4 + 1 + 2 + 128 * 32,")
+ZCL_FACT("fleet.board", "board_identity_load_or_create",
+         "The board loads or creates the node's durable Ed25519 online key via vcs_zcode_dht_online_key_load_or_create, so a fresh node gets one on first use.",
+         "engine/composition/src/boot_fleet_board.c",
+         "if (!vcs_zcode_dht_online_key_load_or_create(datadir, seed, pubkey, err,")
+ZCL_FACT("fleet.board", "board_peer_frame_ceiling",
+         "A single peer may deliver at most FLEET_BOARD_PEER_FRAMES_PER_WINDOW = 64 board frames per window.",
+         "engine/composition/include/config/boot_fleet_board.h",
+         "FLEET_BOARD_PEER_FRAMES_PER_WINDOW = 64,")
+ZCL_FACT("fleet.board", "board_announce_period",
+         "Each peer is announced this node's inventory at most once per FLEET_BOARD_ANNOUNCE_PERIOD_SECONDS = 30.",
+         "engine/composition/include/config/boot_fleet_board.h",
+         "FLEET_BOARD_ANNOUNCE_PERIOD_SECONDS = 30,")
+ZCL_FACT("fleet.board", "board_receive_ceiling",
+         "Aggregate receive work is bounded by FLEET_BOARD_RECEIVE_FRAMES_PER_WINDOW = peer_slots*per_peer_ceiling.",
+         "engine/composition/include/config/boot_fleet_board.h",
+         "FLEET_BOARD_RECEIVE_FRAMES_PER_WINDOW =")
+ZCL_FACT("fleet.board", "board_send_uses_zpkgswm",
+         "The board sends its frames on the existing zpkgswm message rather than a new P2P command.",
+         "engine/composition/src/boot_fleet_board.c",
+         "if (!p2p_node_begin_message(node,")
+ZCL_FACT("fleet.board", "board_ids_before_query",
+         "fleet_board_announce_to pages the local ledger via db_fleet_board_ids_before for INV announcements.",
+         "engine/composition/src/boot_fleet_board.c",
+         "int n = db_fleet_board_ids_before(ndb, now, before_seq, ids,")
+ZCL_FACT("fleet.board", "board_have_check",
+         "fleet_board_handle_inv asks back only for ids this node does not already hold, via db_fleet_board_have.",
+         "engine/composition/src/boot_fleet_board.c",
+         "if (!db_fleet_board_have(ndb, ids[i])) {")
+ZCL_FACT("fleet.board", "board_local_publish_flood",
+         "A freshly published post is flooded as a one-id INV frame to every connected peer immediately.",
+         "engine/composition/src/boot_fleet_board.c",
+         "msg_processor_flood_message(mp,")
+ZCL_FACT("fleet.board", "board_frame_dispatch",
+         "The swarm frame multiplexer tries boot_fleet_board_frame before swarm-hosting engine logic runs.",
+         "engine/composition/src/boot_zcode_swarm.c",
+         "if (boot_fleet_board_frame(mp, node, payload, payload_len, ctx))")
+ZCL_FACT("fleet.board", "board_tick_dispatch",
+         "The per-peer swarm tick calls boot_fleet_board_tick to drive the 30s announce cadence.",
+         "engine/composition/src/boot_zcode_swarm.c",
+         "boot_fleet_board_tick(mp, node, ctx);")
+ZCL_FACT("fleet.board", "board_db_have_fn",
+         "db_fleet_board_have is the dedup check used before requesting or re-storing an id.",
+         "engine/models/src/fleet_board_post.c",
+         "bool db_fleet_board_have(struct node_db *ndb, const uint8_t id[32])")
+ZCL_FACT("fleet.board", "board_db_ingest_fn",
+         "db_fleet_board_post_ingest is the single write path that stores a verified post and extends the local chain.",
+         "engine/models/src/fleet_board_post.c",
+         "enum fleet_board_result db_fleet_board_post_ingest(")
+ZCL_FACT("fleet.board", "board_db_find_fn",
+         "db_fleet_board_post_find serves one stored post by id for GET handling.",
+         "engine/models/src/fleet_board_post.c",
+         "bool db_fleet_board_post_find(struct node_db *ndb, const uint8_t id[32],")
+ZCL_FACT("fleet.board", "board_db_ids_before_fn",
+         "db_fleet_board_ids_before is the paging query used for both announce and full backfill.",
+         "engine/models/src/fleet_board_post.c",
+         "int db_fleet_board_ids_before(struct node_db *ndb, int64_t now,")
+ZCL_FACT("fleet.board", "event_async_observer_register",
+         "event_observe_async registers an in-process callback for one event type; it is not RPC-exposed.",
+         "engine/modules/event/src/event.c",
+         "bool event_observe_async(enum event_type type, event_observer_fn fn, void *ctx)")
+ZCL_FACT("fleet.board", "event_async_dispatch_thread",
+         "The async event dispatcher is a dedicated thread that pthread_cond_timedwaits up to 1s for new events.",
+         "engine/modules/event/src/event.c",
+         "pthread_cond_timedwait(&g_async.wake_cond,")
