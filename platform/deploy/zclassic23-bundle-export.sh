@@ -127,7 +127,22 @@ run_export() {
     if [ "$rc" -ne 0 ] || ! printf '%s' "$out" | grep -q '^EXPORTED:'; then
         local reason
         reason="$(printf '%s' "$out" | grep -oE 'REFUSED: -export-consensus-bundle: .*' | tail -1)"
+        # The export verb's own REFUSED: prefix only covers exit paths inside
+        # boot_export_consensus_bundle.c. A -mint-anchor precondition or any
+        # other boot-time refusal (engine/composition/src/boot_mint_anchor_preflight.c,
+        # wallet_identity/lane binding, etc.) exits nonzero with a "FATAL: ..."
+        # line instead, which the pattern above never matches — without this
+        # fallback that real reason is silently discarded and every verdict
+        # collapses to the uninformative generic string below.
+        if [ -z "$reason" ]; then
+            reason="$(printf '%s' "$out" | grep -oE 'FATAL:.*' | tail -1)"
+        fi
         [ -n "$reason" ] || reason="non-zero exit ($rc) with no EXPORTED/REFUSED line"
+        # Always keep the verb's full raw stdout+stderr from the last failing
+        # run on disk (overwritten each time) — the verdict log's one-line
+        # `reason` is necessarily lossy, and this is the only place the
+        # complete diagnostic text survives once the run exits.
+        printf '%s\n' "$out" > "$dir/bundle-export-last-failure.log" 2>/dev/null
         # The exporter refuses (engine/composition/src/consensus_state_snapshot_export.c
         # output_name_absent()) whenever consensus-state-bundle-<height>.sqlite
         # already exists in <dir> — the ordinary steady state between compiled
@@ -193,10 +208,34 @@ cmd_selftest() {
         [ "$?" -ne 0 ] || { cat "$tmp/run1.out"; echo "selftest: FAIL expected nonzero exit on fresh empty datadir" >&2; exit 1; }
         grep -q 'TERMINAL: REFUSED' "$tmp/dd1/bundle-export-verdicts.log" \
             || { cat "$tmp/dd1/bundle-export-verdicts.log"; echo "selftest: FAIL no REFUSED verdict line" >&2; exit 1; }
+        [ -s "$tmp/dd1/bundle-export-last-failure.log" ] \
+            || { echo "selftest: FAIL no bundle-export-last-failure.log captured" >&2; exit 1; }
         echo "selftest: ok case=refused-on-unexportable-datadir"
     else
         echo "selftest: SKIP case=refused-on-unexportable-datadir (no built binary at $bin — run make build-only first)"
     fi
+
+    # A boot-time FATAL (e.g. a -mint-anchor precondition or wallet_identity
+    # lane mismatch) never matches the export verb's own "REFUSED:
+    # -export-consensus-bundle:" prefix — assert the FATAL fallback still
+    # produces a non-generic reason instead of silently discarding it (this is
+    # exactly what happened in production: every verdict line collapsed to
+    # "non-zero exit (1) with no EXPORTED/REFUSED line" for days while the
+    # real cause sat unread in the subshell's $out).
+    mkdir -p "$tmp/dd3/fakebin"
+    cat > "$tmp/dd3/fakebin/fake-z23" <<'EOF'
+#!/bin/sh
+echo "FATAL: normal node boot preflight failed: fixture reason" >&2
+exit 1
+EOF
+    chmod +x "$tmp/dd3/fakebin/fake-z23"
+    mkdir -p "$tmp/dd3/dd"
+    ZCL_EXPORT_BINARY="$tmp/dd3/fakebin/fake-z23" bash "$0" "$tmp/dd3/dd" >/dev/null 2>&1
+    grep -q 'reason=FATAL: normal node boot preflight failed: fixture reason' \
+        "$tmp/dd3/dd/bundle-export-verdicts.log" \
+        || { cat "$tmp/dd3/dd/bundle-export-verdicts.log"; \
+             echo "selftest: FAIL FATAL: line was not surfaced into the verdict reason" >&2; exit 1; }
+    echo "selftest: ok case=fatal-reason-surfaced-not-swallowed"
 
     mkdir -p "$tmp/dd2"
     for h in 1001 1002 1003 1004; do
