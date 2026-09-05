@@ -20,6 +20,7 @@
 #include "config/mesh_stream.h"
 #include "config/runtime.h"
 #include "test/mesh_stream_fixture.h"
+#include "test/mesh_stream_loopback.h"
 #include "test/mesh_term_fixture.h"
 
 #include "base/safe_alloc.h"
@@ -42,7 +43,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define FL_WIRE_MAX 16384u
 /* A pairing window that brackets any clock this test could read: what is
  * graded is the lane's decision, never the hour the box thinks it is. */
 #define FL_PAIRED_AT INT64_C(1)
@@ -148,107 +148,6 @@ static size_t fl_rows_of(struct fl_box *b, uint8_t *out, size_t cap)
                                     &last) != ZCL_FLEET_OK)
         return 0;
     return len;
-}
-
-/* ── the loopback wire, as test_mesh_stream drives it ────────────────── */
-
-/* A queue head that is never sent, so p2p_node_end_message never asks the
- * (invalid) socket to write. Real segments queue behind it. */
-static struct send_segment *fl_sentinel(struct p2p_node *node)
-{
-    struct send_segment *sentinel =
-        zcl_calloc(1, sizeof(*sentinel), "fl_sentinel");
-    node->send_head = sentinel;
-    node->send_tail = sentinel;
-    node->send_offset = 0;
-    return sentinel;
-}
-
-/* Take the next sealed segment queued on `from`, open it on the peer's
- * transport, and copy out the one zpkgswm payload it carries. */
-static size_t fl_take(struct p2p_node *from, struct send_segment *sentinel,
-                      struct noise_transport *to_transport, uint8_t *out,
-                      size_t out_cap, bool *more)
-{
-    *more = false;
-    struct send_segment *seg = sentinel->next;
-    if (!seg)
-        return 0;
-    *more = true;
-    sentinel->next = seg->next;
-    if (from->send_tail == seg)
-        from->send_tail = sentinel;
-    if (from->send_size >= seg->size)
-        from->send_size -= seg->size;
-    else
-        from->send_size = 0;
-    from->send_offset = 0;
-
-    uint8_t *wire = NULL, *plain = NULL;
-    size_t wire_len = 0, plain_len = 0, moved = 0;
-    if (noise_transport_feed(to_transport, seg->data, seg->size, &wire,
-                             &wire_len, &plain, &plain_len) &&
-        wire_len == 0 && plain_len > MSG_HEADER_SIZE &&
-        memcmp(plain + MESSAGE_START_SIZE, "zpkgswm", 7) == 0) {
-        size_t payload_len = plain_len - MSG_HEADER_SIZE;
-        if (payload_len <= out_cap) {
-            memcpy(out, plain + MSG_HEADER_SIZE, payload_len);
-            moved = payload_len;
-        }
-    }
-    free(wire);
-    free(plain);
-    send_segment_free(seg);
-    return moved;
-}
-
-/* Every queued frame, opened on the peer's transport and thrown away.
- * Noise records must be opened in the order they were sealed, so a test
- * that wants a clean queue still has to feed every record through. */
-static void fl_discard(struct p2p_node *from, struct send_segment *sentinel,
-                       struct noise_transport *to_transport)
-{
-    for (;;) {
-        uint8_t frame[FL_WIRE_MAX];
-        bool more = false;
-        (void)fl_take(from, sentinel, to_transport, frame, sizeof(frame),
-                      &more);
-        if (!more)
-            break;
-    }
-}
-
-/* Every frame queued on `from`, through the production decoder on `to`. */
-static size_t fl_pump(struct p2p_node *from, struct send_segment *sentinel,
-                      struct noise_transport *to_transport,
-                      struct msg_processor *mp, struct p2p_node *to)
-{
-    size_t frames = 0;
-    for (;;) {
-        uint8_t frame[FL_WIRE_MAX];
-        bool more = false;
-        size_t n =
-            fl_take(from, sentinel, to_transport, frame, sizeof(frame), &more);
-        if (!more)
-            break;
-        if (n && mesh_stream_frame(mp, to, frame, n, NULL))
-            frames++;
-    }
-    return frames;
-}
-
-static void fl_drain_queue(struct p2p_node *node, struct send_segment *sentinel)
-{
-    if (!node || !sentinel)
-        return;
-    while (sentinel->next) {
-        struct send_segment *seg = sentinel->next;
-        sentinel->next = seg->next;
-        send_segment_free(seg);
-    }
-    node->send_head = NULL;
-    node->send_tail = NULL;
-    node->transport = NULL; /* owned by the fixture */
 }
 
 int test_fleet_ledger(void)
@@ -582,8 +481,8 @@ int test_fleet_ledger(void)
         nodes[1] = answerer;
         nm.nodes = nodes;
         nm.num_nodes = 2;
-        ask_queue = fl_sentinel(asker);
-        answer_queue = fl_sentinel(answerer);
+        ask_queue = mesh_loop_sentinel(asker);
+        answer_queue = mesh_loop_sentinel(answerer);
         ASSERT(ask_queue && answer_queue);
         mp.net_mgr = &nm;
         mp.params = chain_params_get();
@@ -604,7 +503,7 @@ int test_fleet_ledger(void)
          * name before the service is asked anything. These are the owner's
          * private rows: an unpaired stranger must not reach the service at
          * all, not merely be answered nothing. */
-        uint8_t frame[FL_WIRE_MAX];
+        uint8_t frame[MESH_LOOP_WIRE_MAX];
         uint8_t pull[FLEET_LEDGER_PULL_BYTES];
         pull[0] = (uint8_t)FLEET_LEDGER_MSG_PULL;
         pull[1] = 1u;
@@ -614,10 +513,11 @@ int test_fleet_ledger(void)
             sizeof frame);
         ASSERT(frame_len != 0);
         ASSERT(mesh_stream_frame(&mp, answerer, frame, frame_len, NULL));
-        uint8_t answer[FL_WIRE_MAX];
+        uint8_t answer[MESH_LOOP_WIRE_MAX];
         bool more = false;
-        size_t answer_len = fl_take(answerer, answer_queue, f.term_peer.ini,
-                                    answer, sizeof answer, &more);
+        size_t answer_len =
+            mesh_loop_take(answerer, answer_queue, f.term_peer.ini, answer,
+                           sizeof answer, &more);
         ASSERT(more);
         uint8_t kind = 0;
         ASSERT(mesh_stream_test_read_header(answer, answer_len, &kind, NULL));
@@ -646,12 +546,12 @@ int test_fleet_ledger(void)
         ASSERT(boot_fleet_ledger_test_pull(
             f.resp_noise_pub, wa.box_id, wa.signer,
             zcl_fleet_ledger_peer_seq(wb.ledger, wa.box_id)));
-        ASSERT_EQ(fl_pump(asker, ask_queue, f.res_term, &mp, answerer),
+        ASSERT_EQ(mesh_loop_pump(asker, ask_queue, f.res_term, &mp, answerer),
                   (size_t)1);
         boot_fleet_ledger_test_serve(); /* the answer */
         boot_fleet_ledger_test_serve(); /* nothing left to say: close */
-        ASSERT(fl_pump(answerer, answer_queue, f.term_peer.ini, &mp, asker) >=
-               (size_t)2);
+        ASSERT(mesh_loop_pump(answerer, answer_queue, f.term_peer.ini, &mp,
+                              asker) >= (size_t)2);
         boot_fleet_ledger_test_drain_into(wb.ledger);
         ASSERT_EQ(zcl_fleet_ledger_peer_seq(wb.ledger, wa.box_id),
                   UINT64_C(3));
@@ -662,16 +562,17 @@ int test_fleet_ledger(void)
          * away first — a Noise record must be opened in the order it was
          * sealed — so the count below is this pull's traffic and nothing
          * left over from the last one. */
-        fl_discard(asker, ask_queue, f.res_term);
-        fl_discard(answerer, answer_queue, f.term_peer.ini);
+        mesh_loop_discard(asker, ask_queue, f.res_term);
+        mesh_loop_discard(answerer, answer_queue, f.term_peer.ini);
         mesh_stream_test_reset();
         ASSERT(boot_fleet_ledger_test_pull(
             f.resp_noise_pub, wa.box_id, wa.signer,
             zcl_fleet_ledger_peer_seq(wb.ledger, wa.box_id)));
-        ASSERT_EQ(fl_pump(asker, ask_queue, f.res_term, &mp, answerer),
+        ASSERT_EQ(mesh_loop_pump(asker, ask_queue, f.res_term, &mp, answerer),
                   (size_t)1);
         boot_fleet_ledger_test_serve();
-        ASSERT_EQ(fl_pump(answerer, answer_queue, f.term_peer.ini, &mp, asker),
+        ASSERT_EQ(mesh_loop_pump(answerer, answer_queue, f.term_peer.ini, &mp,
+                                 asker),
                   (size_t)1); /* the CLOSE alone */
         boot_fleet_ledger_test_drain_into(wb.ledger);
         ASSERT_EQ(zcl_fleet_ledger_peer_seq(wb.ledger, wa.box_id),
@@ -698,8 +599,8 @@ int test_fleet_ledger(void)
         /* With the identity ACTIVE the REAL pull lane — pairing list,
          * delegation lookup, authority and all — opens exactly one stream
          * toward this peer, and refuses nothing. */
-        fl_discard(asker, ask_queue, f.res_term);
-        fl_discard(answerer, answer_queue, f.term_peer.ini);
+        mesh_loop_discard(asker, ask_queue, f.res_term);
+        mesh_loop_discard(answerer, answer_queue, f.term_peer.ini);
         mesh_stream_test_reset();
         boot_fleet_ledger_test_pull_paired(wb.ledger, FL_AUTHORITY_NOW);
         ASSERT_EQ(mesh_stream_test_live_count(FLEET_LEDGER_SERVICE_NAME),
@@ -722,8 +623,8 @@ int test_fleet_ledger(void)
         ASSERT(mesh_pairing_allows(&still, MESH_PAIRING_CAP_STATUS_READ,
                                    FL_AUTHORITY_NOW));
 
-        fl_discard(asker, ask_queue, f.res_term);
-        fl_discard(answerer, answer_queue, f.term_peer.ini);
+        mesh_loop_discard(asker, ask_queue, f.res_term);
+        mesh_loop_discard(answerer, answer_queue, f.term_peer.ini);
         mesh_stream_test_reset();
 
         /* PULL: the peer is not asked. No stream is opened at all, and the
@@ -737,7 +638,7 @@ int test_fleet_ledger(void)
         /* ACCEPT: the peer is not answered. The pairing row still grants
          * the capability, so the primitive admits the OPEN and it is THIS
          * lane that refuses it — before a byte of the ledger is read. */
-        uint8_t frame[FL_WIRE_MAX];
+        uint8_t frame[MESH_LOOP_WIRE_MAX];
         uint8_t pull[FLEET_LEDGER_PULL_BYTES];
         pull[0] = (uint8_t)FLEET_LEDGER_MSG_PULL;
         pull[1] = 1u;
@@ -747,10 +648,11 @@ int test_fleet_ledger(void)
             sizeof frame);
         ASSERT(frame_len != 0);
         ASSERT(mesh_stream_frame(&mp, answerer, frame, frame_len, NULL));
-        uint8_t answer[FL_WIRE_MAX];
+        uint8_t answer[MESH_LOOP_WIRE_MAX];
         bool more = false;
-        size_t answer_len = fl_take(answerer, answer_queue, f.term_peer.ini,
-                                    answer, sizeof answer, &more);
+        size_t answer_len =
+            mesh_loop_take(answerer, answer_queue, f.term_peer.ini, answer,
+                           sizeof answer, &more);
         ASSERT(more);
         uint8_t kind = 0;
         ASSERT(mesh_stream_test_read_header(answer, answer_len, &kind, NULL));
@@ -762,8 +664,8 @@ int test_fleet_ledger(void)
         ASSERT_EQ(boot_fleet_ledger_delegation_refused_count(), refused + 2);
         /* Nothing arrived and nothing was sent: no second frame follows
          * the refusal, and the replica is exactly where it was. */
-        ASSERT_EQ(fl_take(answerer, answer_queue, f.term_peer.ini, answer,
-                          sizeof answer, &more),
+        ASSERT_EQ(mesh_loop_take(answerer, answer_queue, f.term_peer.ini,
+                                 answer, sizeof answer, &more),
                   (size_t)0);
         ASSERT(!more);
         ASSERT_EQ(zcl_fleet_ledger_peer_seq(wb.ledger, wa.box_id), seq_before);
@@ -785,16 +687,17 @@ int test_fleet_ledger(void)
         /* One more answered pull than the inbox has slots, with nothing
          * committed in between. The last one has nowhere to go. */
         for (unsigned i = 0; i < FLEET_LEDGER_INBOX_MAX + 1u; i++) {
-            fl_discard(asker, ask_queue, f.res_term);
-            fl_discard(answerer, answer_queue, f.term_peer.ini);
+            mesh_loop_discard(asker, ask_queue, f.res_term);
+            mesh_loop_discard(answerer, answer_queue, f.term_peer.ini);
             mesh_stream_test_reset();
             ASSERT(boot_fleet_ledger_test_pull(f.resp_noise_pub, wa.box_id,
                                                wa.signer, 0));
-            ASSERT_EQ(fl_pump(asker, ask_queue, f.res_term, &mp, answerer),
+            ASSERT_EQ(mesh_loop_pump(asker, ask_queue, f.res_term, &mp,
+                                     answerer),
                       (size_t)1);
             boot_fleet_ledger_test_serve(); /* the answer */
             boot_fleet_ledger_test_serve(); /* nothing left: close */
-            ASSERT(fl_pump(answerer, answer_queue, f.term_peer.ini, &mp,
+            ASSERT(mesh_loop_pump(answerer, answer_queue, f.term_peer.ini, &mp,
                            asker) >= (size_t)2);
         }
         ASSERT_EQ(boot_fleet_ledger_inbox_full_count(), dropped + 1);
@@ -842,8 +745,8 @@ _test_next:
     }
     mesh_stream_test_bind(NULL);
     app_runtime_set_current(NULL);
-    fl_drain_queue(asker, ask_queue);
-    fl_drain_queue(answerer, answer_queue);
+    mesh_loop_free_queue(asker, ask_queue);
+    mesh_loop_free_queue(answerer, answer_queue);
     if (asker)
         p2p_node_free(asker);
     if (answerer)

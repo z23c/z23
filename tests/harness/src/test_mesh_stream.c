@@ -17,6 +17,7 @@
 #include "config/mesh_stream.h"
 #include "config/runtime.h"
 #include "test/mesh_stream_fixture.h"
+#include "test/mesh_stream_loopback.h"
 #include "test/mesh_term_fixture.h"
 
 #include "base/safe_alloc.h"
@@ -32,7 +33,6 @@
 
 #define STREAM_TEST_ECHO "echo"
 #define STREAM_TEST_GUARD "guarded"
-#define STREAM_TEST_WIRE_MAX 16384u
 #define STREAM_TEST_WINDOW 4096u
 /* A pairing window that brackets any clock this test could read: the
  * lane under test grades the row, not the hour the box thinks it is. */
@@ -135,98 +135,6 @@ static bool stream_test_register(const char *name, uint64_t capability)
     svc.on_close = stream_test_close;
     svc.on_release = stream_test_release;
     return mesh_stream_service_register(&svc);
-}
-
-/* ── The loopback wire ───────────────────────────────────────────────── */
-
-/* A queue head that is never sent, so p2p_node_end_message never asks the
- * (invalid) socket to write. Real segments queue behind it. */
-static struct send_segment *stream_test_sentinel(struct p2p_node *node)
-{
-    struct send_segment *sentinel =
-        zcl_calloc(1, sizeof(*sentinel), "stream_test_sentinel");
-    node->send_head = sentinel;
-    node->send_tail = sentinel;
-    node->send_offset = 0;
-    return sentinel;
-}
-
-/* Take the next sealed segment queued on `from`, open it on the peer's
- * transport, and copy out the one zpkgswm payload it carries. `*more` is
- * true whenever a segment was taken, so a caller can tell an empty queue
- * from a frame it could not read. */
-static size_t stream_test_take(struct p2p_node *from,
-                               struct send_segment *sentinel,
-                               struct noise_transport *to_transport,
-                               uint8_t *out, size_t out_cap, bool *more)
-{
-    *more = false;
-    struct send_segment *seg = sentinel->next;
-    if (!seg)
-        return 0;
-    *more = true;
-    sentinel->next = seg->next;
-    if (from->send_tail == seg)
-        from->send_tail = sentinel;
-    if (from->send_size >= seg->size)
-        from->send_size -= seg->size;
-    else
-        from->send_size = 0;
-    from->send_offset = 0;
-
-    uint8_t *wire = NULL, *plain = NULL;
-    size_t wire_len = 0, plain_len = 0, moved = 0;
-    if (noise_transport_feed(to_transport, seg->data, seg->size, &wire,
-                             &wire_len, &plain, &plain_len) &&
-        wire_len == 0 && plain_len > MSG_HEADER_SIZE &&
-        memcmp(plain + MESSAGE_START_SIZE, "zpkgswm", 7) == 0) {
-        size_t payload_len = plain_len - MSG_HEADER_SIZE;
-        if (payload_len <= out_cap) {
-            memcpy(out, plain + MSG_HEADER_SIZE, payload_len);
-            moved = payload_len;
-        }
-    }
-    free(wire);
-    free(plain);
-    send_segment_free(seg);
-    return moved;
-}
-
-/* Every queued frame, opened on the peer's transport and thrown away.
- * Noise records must be opened in the order they were sealed, so a test
- * that wants a clean queue still has to feed every record through. */
-static void stream_test_discard(struct p2p_node *from,
-                                struct send_segment *sentinel,
-                                struct noise_transport *to_transport)
-{
-    for (;;) {
-        uint8_t frame[STREAM_TEST_WIRE_MAX];
-        bool more = false;
-        (void)stream_test_take(from, sentinel, to_transport, frame,
-                               sizeof(frame), &more);
-        if (!more)
-            break;
-    }
-}
-
-/* Every frame queued on `from`, through the production decoder on `to`. */
-static size_t stream_test_pump(struct p2p_node *from,
-                               struct send_segment *sentinel,
-                               struct noise_transport *to_transport,
-                               struct msg_processor *mp, struct p2p_node *to)
-{
-    size_t frames = 0;
-    for (;;) {
-        uint8_t frame[STREAM_TEST_WIRE_MAX];
-        bool more = false;
-        size_t n = stream_test_take(from, sentinel, to_transport, frame,
-                                    sizeof(frame), &more);
-        if (!more)
-            break;
-        if (n && mesh_stream_frame(mp, to, frame, n, NULL))
-            frames++;
-    }
-    return frames;
 }
 
 /* Visitor helpers: the stream verbs are lock-held-only, so every one of
@@ -377,8 +285,8 @@ int test_mesh_stream(void)
         nodes[1] = b;
         nm.nodes = nodes;
         nm.num_nodes = 2;
-        a_queue = stream_test_sentinel(a);
-        b_queue = stream_test_sentinel(b);
+        a_queue = mesh_loop_sentinel(a);
+        b_queue = mesh_loop_sentinel(b);
         ASSERT(a_queue && b_queue);
 
         mp.net_mgr = &nm;
@@ -405,11 +313,11 @@ int test_mesh_stream(void)
                                    (const uint8_t *)"hi", 2, NULL, &id),
                   MESH_STREAM_OK);
         ASSERT_EQ(id & 1u, UINT64_C(0)); /* the dialling side mints even */
-        ASSERT_EQ(stream_test_pump(a, a_queue, f.res_term, &mp, b),
+        ASSERT_EQ(mesh_loop_pump(a, a_queue, f.res_term, &mp, b),
                   (size_t)1);
         ASSERT_EQ(g_opens, (size_t)1);
         ASSERT_EQ(mesh_stream_test_live_count(STREAM_TEST_ECHO), (size_t)2);
-        ASSERT_EQ(stream_test_pump(b, b_queue, f.term_peer.ini, &mp, a),
+        ASSERT_EQ(mesh_loop_pump(b, b_queue, f.term_peer.ini, &mp, a),
                   (size_t)1);
         ASSERT_EQ(g_data_frames, (size_t)1);
         ASSERT_EQ(g_last_data_len, (size_t)5);
@@ -419,7 +327,7 @@ int test_mesh_stream(void)
         uint8_t chunk[64];
         memset(chunk, 'x', sizeof(chunk));
         ASSERT(stream_test_send(id, true, chunk, sizeof(chunk)));
-        ASSERT_EQ(stream_test_pump(a, a_queue, f.res_term, &mp, b),
+        ASSERT_EQ(mesh_loop_pump(a, a_queue, f.res_term, &mp, b),
                   (size_t)1);
         ASSERT_EQ(g_data_frames, (size_t)2);
         ASSERT_EQ(g_data_bytes, (size_t)5 + sizeof(chunk));
@@ -433,7 +341,7 @@ int test_mesh_stream(void)
         ASSERT(v.found);
         ASSERT_EQ(v.send_credit, STREAM_TEST_WINDOW - (uint32_t)sizeof(chunk));
         ASSERT(stream_test_grant(id, false, (uint32_t)sizeof(chunk)));
-        ASSERT_EQ(stream_test_pump(b, b_queue, f.term_peer.ini, &mp, a),
+        ASSERT_EQ(mesh_loop_pump(b, b_queue, f.term_peer.ini, &mp, a),
                   (size_t)1);
         memset(&v, 0, sizeof(v));
         v.id = id;
@@ -449,7 +357,7 @@ int test_mesh_stream(void)
         v.local_initiator = true;
         mesh_stream_visit(STREAM_TEST_ECHO, stream_test_close_visit, &v);
         ASSERT(v.found);
-        ASSERT_EQ(stream_test_pump(a, a_queue, f.res_term, &mp, b),
+        ASSERT_EQ(mesh_loop_pump(a, a_queue, f.res_term, &mp, b),
                   (size_t)1);
         ASSERT_EQ(g_closes, (size_t)2);
         ASSERT_EQ(g_last_close, MESH_STREAM_CLOSED_BY_SERVICE);
@@ -474,15 +382,15 @@ int test_mesh_stream(void)
 
     TEST("mesh stream: a spent credit window stops the sender until a "
          "window arrives") {
-        stream_test_discard(a, a_queue, f.res_term);
-        stream_test_discard(b, b_queue, f.term_peer.ini);
+        mesh_loop_discard(a, a_queue, f.res_term);
+        mesh_loop_discard(b, b_queue, f.term_peer.ini);
         mesh_stream_test_reset();
         stream_test_counters_reset();
         uint64_t id = UINT64_MAX;
         ASSERT_EQ(mesh_stream_open(STREAM_TEST_ECHO, f.resp_noise_pub,
                                    STREAM_TEST_WINDOW, NULL, 0, NULL, &id),
                   MESH_STREAM_OK);
-        ASSERT_EQ(stream_test_pump(a, a_queue, f.res_term, &mp, b),
+        ASSERT_EQ(mesh_loop_pump(a, a_queue, f.res_term, &mp, b),
                   (size_t)1);
 
         /* The whole window in one frame, then nothing: the sender is
@@ -490,22 +398,22 @@ int test_mesh_stream(void)
         memset(g_big, 'y', sizeof(g_big));
         ASSERT(stream_test_send(id, true, g_big, sizeof(g_big)));
         ASSERT(!stream_test_send(id, true, "z", 1));
-        ASSERT_EQ(stream_test_pump(a, a_queue, f.res_term, &mp, b),
+        ASSERT_EQ(mesh_loop_pump(a, a_queue, f.res_term, &mp, b),
                   (size_t)1);
         ASSERT_EQ(g_data_bytes, (size_t)STREAM_TEST_WINDOW);
 
         /* The receiver makes room and says so; the sender moves again. */
         ASSERT(stream_test_grant(id, false, 16u));
-        ASSERT_EQ(stream_test_pump(b, b_queue, f.term_peer.ini, &mp, a),
+        ASSERT_EQ(mesh_loop_pump(b, b_queue, f.term_peer.ini, &mp, a),
                   (size_t)1);
         ASSERT(stream_test_send(id, true, "z", 1));
-        ASSERT_EQ(stream_test_pump(a, a_queue, f.res_term, &mp, b),
+        ASSERT_EQ(mesh_loop_pump(a, a_queue, f.res_term, &mp, b),
                   (size_t)1);
         ASSERT_EQ(g_data_bytes, (size_t)STREAM_TEST_WINDOW + 1u);
 
         /* A peer that spends credit it was never granted is ended by
          * name, not absorbed: the raw frame is composed by hand. */
-        uint8_t frame[STREAM_TEST_WIRE_MAX];
+        uint8_t frame[MESH_LOOP_WIRE_MAX];
         uint8_t spend[64];
         memset(spend, 'q', sizeof(spend));
         size_t frame_len = mesh_stream_test_data_frame(id, spend,
@@ -527,8 +435,8 @@ int test_mesh_stream(void)
 
     TEST("mesh stream: the per-peer cap and the open cadence bound one "
          "peer's share of the table") {
-        stream_test_discard(a, a_queue, f.res_term);
-        stream_test_discard(b, b_queue, f.term_peer.ini);
+        mesh_loop_discard(a, a_queue, f.res_term);
+        mesh_loop_discard(b, b_queue, f.term_peer.ini);
         mesh_stream_test_reset();
         stream_test_counters_reset();
         uint64_t ids[MESH_STREAM_PER_PEER_MAX];
@@ -542,7 +450,7 @@ int test_mesh_stream(void)
                                    STREAM_TEST_WINDOW, NULL, 0, NULL, &extra),
                   MESH_STREAM_REFUSED_CAP);
         ASSERT_EQ(extra, UINT64_MAX);
-        ASSERT_EQ(stream_test_pump(a, a_queue, f.res_term, &mp, b),
+        ASSERT_EQ(mesh_loop_pump(a, a_queue, f.res_term, &mp, b),
                   (size_t)MESH_STREAM_PER_PEER_MAX);
         ASSERT_EQ(mesh_stream_test_live_count(STREAM_TEST_ECHO),
                   (size_t)2 * MESH_STREAM_PER_PEER_MAX);
@@ -551,7 +459,7 @@ int test_mesh_stream(void)
          * responder allows a single peer, and is refused by name — the
          * cadence gate stands in front of the table cap, so a burst never
          * reaches the slots at all. */
-        uint8_t frame[STREAM_TEST_WIRE_MAX];
+        uint8_t frame[MESH_LOOP_WIRE_MAX];
         size_t frame_len = mesh_stream_test_open_frame(
             2u * MESH_STREAM_PER_PEER_MAX, STREAM_TEST_WINDOW,
             STREAM_TEST_ECHO, NULL, 0, frame, sizeof(frame));
@@ -559,9 +467,9 @@ int test_mesh_stream(void)
         ASSERT(mesh_stream_frame(&mp, b, frame, frame_len, NULL));
         ASSERT_EQ(mesh_stream_test_live_count(STREAM_TEST_ECHO),
                   (size_t)2 * MESH_STREAM_PER_PEER_MAX);
-        uint8_t answer[STREAM_TEST_WIRE_MAX];
+        uint8_t answer[MESH_LOOP_WIRE_MAX];
         bool more = false;
-        size_t answer_len = stream_test_take(b, b_queue, f.term_peer.ini,
+        size_t answer_len = mesh_loop_take(b, b_queue, f.term_peer.ini,
                                              answer, sizeof(answer), &more);
         ASSERT(more);
         uint8_t kind = 0;
@@ -577,23 +485,23 @@ int test_mesh_stream(void)
 
     TEST("mesh stream: an unknown service, an unpaired peer and a link "
          "that is not Noise are refused by name") {
-        stream_test_discard(a, a_queue, f.res_term);
-        stream_test_discard(b, b_queue, f.term_peer.ini);
+        mesh_loop_discard(a, a_queue, f.res_term);
+        mesh_loop_discard(b, b_queue, f.term_peer.ini);
         mesh_stream_test_reset();
         stream_test_counters_reset();
         ASSERT(stream_test_register(STREAM_TEST_GUARD,
                                     MESH_PAIRING_CAP_TERMINAL_EXEC));
 
         /* a) A service nobody registered. */
-        uint8_t frame[STREAM_TEST_WIRE_MAX];
+        uint8_t frame[MESH_LOOP_WIRE_MAX];
         size_t frame_len = mesh_stream_test_open_frame(0, STREAM_TEST_WINDOW,
                                                        "nosuch", NULL, 0,
                                                        frame, sizeof(frame));
         ASSERT(frame_len != 0);
         ASSERT(mesh_stream_frame(&mp, b, frame, frame_len, NULL));
-        uint8_t answer[STREAM_TEST_WIRE_MAX];
+        uint8_t answer[MESH_LOOP_WIRE_MAX];
         bool more = false;
-        size_t answer_len = stream_test_take(b, b_queue, f.term_peer.ini,
+        size_t answer_len = mesh_loop_take(b, b_queue, f.term_peer.ini,
                                              answer, sizeof(answer), &more);
         ASSERT(more);
         uint8_t kind = 0;
@@ -608,7 +516,7 @@ int test_mesh_stream(void)
                                                 frame, sizeof(frame));
         ASSERT(frame_len != 0);
         ASSERT(mesh_stream_frame(&mp, b, frame, frame_len, NULL));
-        answer_len = stream_test_take(b, b_queue, f.term_peer.ini, answer,
+        answer_len = mesh_loop_take(b, b_queue, f.term_peer.ini, answer,
                                       sizeof(answer), &more);
         ASSERT(more);
         ASSERT(mesh_stream_test_read_header(answer, answer_len, &kind, NULL));
@@ -644,7 +552,7 @@ int test_mesh_stream(void)
         ASSERT(frame_len != 0);
         ASSERT(mesh_stream_frame(&mp, &plain, frame, frame_len, NULL));
         ASSERT_EQ(mesh_stream_test_live_count(STREAM_TEST_GUARD), (size_t)1);
-        (void)stream_test_take(b, b_queue, f.term_peer.ini, answer,
+        (void)mesh_loop_take(b, b_queue, f.term_peer.ini, answer,
                                sizeof(answer), &more);
         ASSERT(!more);
         mesh_stream_service_unregister(STREAM_TEST_GUARD);
@@ -746,25 +654,11 @@ _test_next:
     mesh_stream_test_bind(NULL);
     app_runtime_set_current(NULL);
     if (a) {
-        while (a_queue && a_queue->next) {
-            struct send_segment *seg = a_queue->next;
-            a_queue->next = seg->next;
-            send_segment_free(seg);
-        }
-        a->send_head = NULL;
-        a->send_tail = NULL;
-        a->transport = NULL; /* owned by the fixture */
+        mesh_loop_free_queue(a, a_queue);
         p2p_node_free(a);
     }
     if (b) {
-        while (b_queue && b_queue->next) {
-            struct send_segment *seg = b_queue->next;
-            b_queue->next = seg->next;
-            send_segment_free(seg);
-        }
-        b->send_head = NULL;
-        b->send_tail = NULL;
-        b->transport = NULL;
+        mesh_loop_free_queue(b, b_queue);
         p2p_node_free(b);
     }
     free(a_queue);
