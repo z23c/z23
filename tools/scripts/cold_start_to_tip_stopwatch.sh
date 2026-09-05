@@ -28,9 +28,9 @@
 # the stopwatch at a freshly-integrated build without editing this file.
 #
 # FULLY ISOLATED + NON-DESTRUCTIVE:
-#   - datadir is ALWAYS a fresh mktemp under /tmp — there is no flag or env
-#     var to point it at any other path, so it can never collide with a
-#     live datadir,
+#   - datadir is ALWAYS a fresh mktemp under the operator's existing scratch
+#     root (ZCL_CS_ROOT, default $HOME/.local/state/zclassic23/scratch/coldstart),
+#     never an existing datadir. Prepare that private scratch root before use,
 #   - isolated $HOME (no co-located ~/.zclassic legacy dir the node could
 #     auto-import from — the genuinely-fresh-machine condition),
 #   - dedicated non-live ports (39170-39173), -listen=0, -nolegacyimport,
@@ -2578,7 +2578,8 @@ fi
 [ -z "$BUNDLE_PATH" ] || [ -f "$BUNDLE_PATH" ] \
     || skip "bundle fixture absent: $BUNDLE_PATH"
 
-DATADIR="$(mktemp -d /tmp/zcl-c3-stopwatch.XXXXXX)" || die "mktemp datadir failed"
+CS_ROOT="${ZCL_CS_ROOT:-$HOME/.local/state/zclassic23/scratch/coldstart}"
+DATADIR="$(mktemp -d "$CS_ROOT/zcl-c3-stopwatch.XXXXXX")" || die "mktemp datadir failed; create the private scratch root or set ZCL_CS_ROOT"
 ISO_HOME="$DATADIR-home"
 mkdir -p "$ISO_HOME" || die "mkdir isolated HOME failed"
 # Provision ONLY the proving-params dir into the isolated home (chain state
@@ -2591,7 +2592,7 @@ REAL_PARAMS="${ZCL_CS_PARAMS_DIR:-$HOME/.zcash-params}"
 
 cleanup() {
     [ -n "$PID" ] && kill -KILL -- "-$PID" 2>/dev/null || true
-    case "$DATADIR" in /tmp/zcl-c3-stopwatch.*) rm -rf "$DATADIR" "$ISO_HOME" 2>/dev/null || true ;; esac
+    case "$DATADIR" in "$CS_ROOT"/zcl-c3-stopwatch.*) rm -rf "$DATADIR" "$ISO_HOME" 2>/dev/null || true ;; esac
 }
 trap cleanup EXIT INT TERM
 
