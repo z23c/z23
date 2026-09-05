@@ -1235,14 +1235,14 @@ static bool handle_zfileaddr(struct msg_processor *mp, struct p2p_node *node,
         memcpy(fip, node->addr.svc.addr.ip, 16);
 
         if (mp->file_service_save)
-            (void)mp->file_service_save(
-                fip, fport, node->addr.svc.port,
+            (void)mp->file_service_save(fip, fport, node->addr.svc.port,
                 (int64_t)platform_time_wall_time_t(), true,
                 mp->file_service_save_ctx);
         char ipbuf[NET_ADDR_STR_MAX + 1];
         net_addr_to_string(&node->addr.svc.addr, ipbuf, sizeof(ipbuf));
         printf("Peer %s: file service at port %d (saved)\n",
                ipbuf, fport);
+        zcl_state_offer_relay_handle_zfileaddr_tail(mp, node, s, fport, fip);
     }
     return true;
 }

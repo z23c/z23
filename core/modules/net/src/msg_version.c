@@ -16,6 +16,7 @@
 #include "net/peer_identity.h"
 #include "net/p2p_message.h"
 #include "net/file_service.h"
+#include "net/state_offer.h"
 #include "net/peer_lifecycle.h"
 #include "net/port_policy.h"
 #include "net/peer_scoring.h"
@@ -654,6 +655,17 @@ bool process_version(struct msg_processor *mp, struct p2p_node *node,
             struct byte_stream fs_msg;
             stream_init(&fs_msg, 4);
             stream_write_bytes(&fs_msg, faddr, 2);
+            /* ZRC-0011 phase 1a: say WHICH state we hold, not just that we
+             * serve files. The offer batch is APPENDED after the two-byte
+             * port, so an older peer reads its two bytes and ignores the rest
+             * and we stay readable to every node already deployed. Nothing is
+             * appended when this node has no eligible bundle or registered no
+             * provider — that is the pre-offer message, byte for byte. */
+            uint8_t offers[STATE_OFFER_BATCH_V1_MAX_WIRE_BYTES];
+            size_t offers_len = state_offer_collect_wire(offers,
+                                                         sizeof(offers));
+            if (offers_len > 0)
+                stream_write_bytes(&fs_msg, offers, offers_len);
             p2p_node_begin_message(node, "zfileaddr",
                                     mp->params->pchMessageStart);
             p2p_node_write_message_data(node, fs_msg.data, fs_msg.size);

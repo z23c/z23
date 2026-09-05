@@ -110,6 +110,19 @@ typedef bool (*msg_file_service_save_fn)(const uint8_t ip[16],
                                          int64_t last_seen,
                                          bool is_zcl23,
                                          void *ctx);
+/* ZRC-0011: one verified state offer that arrived appended to "zfileaddr".
+ * `ip` and `file_service_port` are the endpoint the consumer would dial — taken
+ * from the LIVE CONNECTION and the message's own port field, never from the
+ * offer, so no row can redirect a consumer at a third party. The offer's
+ * signature has already been verified against its own advertised identity by
+ * the time this runs; deciding whether that identity is worth acting on is the
+ * sink's job, not the net layer's. */
+struct state_offer_v1;
+typedef void (*msg_state_offer_record_fn)(const struct state_offer_v1 *offer,
+                                          const uint8_t ip[16],
+                                          uint16_t file_service_port,
+                                          int64_t peer_id, int64_t now_unix,
+                                          void *ctx);
 typedef bool (*msg_snapshot_active_fn)(void *ctx);
 typedef struct block_index *(*msg_snapshot_anchor_get_fn)(void *ctx);
 typedef void (*msg_snapshot_anchor_set_fn)(struct block_index *anchor,
@@ -379,6 +392,9 @@ void msg_processor_flood_message(struct msg_processor *mp,
 void msg_processor_set_file_service_save(struct msg_processor *mp,
                                          msg_file_service_save_fn save,
                                          void *ctx);
+void msg_processor_set_state_offer_record(struct msg_processor *mp,
+                                          msg_state_offer_record_fn record,
+                                          void *ctx);
 void msg_processor_set_snapshot_active(struct msg_processor *mp,
                                        msg_snapshot_active_fn active,
                                        void *ctx);

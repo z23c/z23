@@ -385,6 +385,43 @@ enum state_offer_error state_offer_batch_v1_encode(
     return STATE_OFFER_OK;
 }
 
+/* ── Offer production seam ─────────────────────────────────────────── */
+
+static state_offer_provider_fn g_provider;
+static void *g_provider_ctx;
+
+void state_offer_set_provider(state_offer_provider_fn provider, void *ctx)
+{
+    g_provider = provider;
+    g_provider_ctx = ctx;
+}
+
+size_t state_offer_collect_wire(uint8_t *out, size_t out_capacity)
+{
+    if (!out || out_capacity < STATE_OFFER_BATCH_V1_HEADER_BYTES)
+        return 0;
+    if (!g_provider)
+        return 0; /* nothing registered: advertise the port alone, as before */
+
+    struct state_offer_batch_v1 batch;
+    memset(&batch, 0, sizeof(batch));
+    uint32_t count = g_provider(&batch, g_provider_ctx);
+    if (count == 0 || count > STATE_OFFER_MAX_PER_PEER)
+        return 0;
+    batch.count = count;
+
+    /* We hold OUR OWN batch to the rule we hold a peer's to. A provider bug
+     * must cost us a silent no-offer, never a malformed batch every peer is
+     * entitled to score us for. */
+    if (state_offer_batch_v1_validate(&batch) != STATE_OFFER_OK)
+        return 0;
+    size_t len = 0;
+    if (state_offer_batch_v1_encode(&batch, out, out_capacity, &len) !=
+        STATE_OFFER_OK)
+        return 0;
+    return len;
+}
+
 enum state_offer_error state_offer_batch_v1_decode(
     struct state_offer_batch_v1 *out, const uint8_t *wire, size_t wire_len)
 {

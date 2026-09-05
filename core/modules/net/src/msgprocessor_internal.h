@@ -26,6 +26,7 @@
 #include "net/net.h"
 #include "net/p2p_message.h"
 #include "net/fast_sync.h"
+#include "net/state_offer_relay.h"
 #include "core/serialize.h"
 
 /* ── Dispatch-table handler wrappers ──────────────────────────────

@@ -196,4 +196,24 @@ enum state_offer_error state_offer_batch_v1_encode(
 enum state_offer_error state_offer_batch_v1_decode(
     struct state_offer_batch_v1 *out, const uint8_t *wire, size_t wire_len);
 
+/* ── Offer production seam ───────────────────────────────────────────
+ *
+ * The net layer knows WHEN to advertise (the "zfileaddr" send site, once per
+ * ZCL23 handshake) but cannot know WHAT: a complete offer needs the bundle's
+ * own SQLite manifest (block hash, producer receipt) and the node's durable
+ * signing identity, neither of which net owns. Composition registers a provider
+ * that fills a batch; net asks. A node that registers nothing simply advertises
+ * its port as before, which is the pre-offer behaviour unchanged. */
+typedef uint32_t (*state_offer_provider_fn)(struct state_offer_batch_v1 *out,
+                                            void *ctx);
+void state_offer_set_provider(state_offer_provider_fn provider, void *ctx);
+
+/* Ask the registered provider for this node's current offers and encode them.
+ * Returns the encoded length, or 0 when there is nothing to say — including
+ * when the provider produced a batch that does not validate. Refusing to send
+ * our OWN malformed batch is the same fail-closed rule the receive side uses;
+ * a bug on the producing side must not become a refusal every peer has to
+ * score us for. */
+size_t state_offer_collect_wire(uint8_t *out, size_t out_capacity);
+
 #endif /* ZCL_NET_STATE_OFFER_H */
