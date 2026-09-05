@@ -148,6 +148,19 @@ LIB_MODULE("chainlog")
 LIB_MODULE("science")
 LIB_MODULE("core")
 LIB_MODULE("crypto")
+/* The owner's private fleet ledger: a typed row, its chain, its in-memory
+ * index and the closed vocabularies those are written in. It references
+ * base, sha3, platform (the private-file and clock seams) and chainlog —
+ * all well below — plus core/modules/crypto for Ed25519, so directly above
+ * crypto is its LOWEST legal rank, not a convenient one. It is beside
+ * chainlog in engine/modules rather than under a bounded context's modules
+ * directory because it is infrastructure over that primitive, not a
+ * bounded product context:
+ * it models no wallet, market or name, and a row in it grants nothing.
+ *
+ * Like chainlog, it holds no key material — signing takes a seed as an
+ * argument — so its rank buys it no authority it could later leak. */
+LIB_MODULE("fleetledger")
 LIB_MODULE("zid")
 LIB_MODULE("noise")
 LIB_MODULE("bloom")

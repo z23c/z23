@@ -1,0 +1,127 @@
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ *
+ * fleet_vitals — the CLOSED catalog of metric ids the owner's private fleet
+ * ledger will carry as `vitals` rows. A number whose id is not written down
+ * here is not a metric: `fleet ledger add --kind=vitals` refuses an unknown
+ * subject with `vital_unknown` rather than storing a value nobody can later
+ * say the meaning of.
+ *
+ * This file is the ONE declaration. Everything else derives from it:
+ *
+ *   engine/modules/fleetledger/src/fleet_ledger_catalog.c   the subject enum
+ *   docs/FLEET_LEDGER.md                                    the rendered table
+ *   tools/lint/check_fleet_vitals.sh                        the gate
+ *
+ * Row shape:
+ *
+ *   FLEET_VITAL(id_, unit_, agg_, cadence_s_, why_)
+ *
+ *   id_        the metric id, verbatim and stable. Renaming one is a new id,
+ *              because rows already written carry the old subject index.
+ *   unit_      what the value counts. Non-empty: a bare integer whose unit
+ *              nobody wrote down cannot be added to another one.
+ *   agg_       "gauge" (the value AT a moment; a day's cell keeps the last)
+ *              or "sum" (a quantity that accumulates over the day).
+ *   cadence_s_ how often a collector is expected to sample it, in seconds.
+ *              0 means "per event" — the sample exists because something
+ *              happened, not because a timer fired.
+ *   why_       what decision the number is for. A metric nobody can name a
+ *              use for is a number that will be collected and never read.
+ *
+ * ORDER IS IDENTITY. A row's position is its subject index on the wire and
+ * in every chainlog already written. Append new rows at the END of their
+ * section; never reorder, never delete. Deleting one would silently
+ * re-point every stored row after it at a different metric.
+ *
+ * Nothing here is public. These are the owner's own machines measuring
+ * themselves; the values move only between paired peers over Noise and
+ * never reach the public site or the interim board.
+ */
+
+/* ── box: the machine itself ─────────────────────────────────────────── */
+FLEET_VITAL("box.load1", "load", "gauge", 300,
+            "whether this box has room for another lane right now")
+FLEET_VITAL("box.cores", "count", "gauge", 86400,
+            "the ceiling every parallelism decision is measured against")
+FLEET_VITAL("box.cores_free_for_qedc", "count", "gauge", 300,
+            "cores a new lane may take without starving the owner's shell")
+FLEET_VITAL("box.ram_used_mib", "MiB", "gauge", 300,
+            "how close this box is to the pressure that kills a build")
+FLEET_VITAL("box.ram_total_mib", "MiB", "gauge", 86400,
+            "the denominator the used figure is only meaningful against")
+FLEET_VITAL("box.disk_free_gib", "GiB", "gauge", 300,
+            "how long this box can keep proving before it runs out of disk")
+FLEET_VITAL("box.disk_free_pct", "%", "gauge", 300,
+            "the same fact on a scale that compares across unequal disks")
+FLEET_VITAL("box.builders", "count", "gauge", 300,
+            "compiler processes on one disk, against the per-disk ceiling")
+FLEET_VITAL("box.worktrees", "count", "gauge", 3600,
+            "how many lane checkouts this box is carrying")
+FLEET_VITAL("box.worktree_bytes", "bytes", "gauge", 86400,
+            "disk a garbage collection could give back without losing work")
+FLEET_VITAL("box.uptime_s", "s", "gauge", 3600,
+            "whether a box restarted under a measurement nobody saw")
+
+/* ── node: the running full node on that machine ─────────────────────── */
+FLEET_VITAL("node.height", "blocks", "gauge", 300,
+            "whether this node is at the tip or still catching up")
+FLEET_VITAL("node.peers", "count", "gauge", 300,
+            "whether the node has anyone to learn the tip from")
+FLEET_VITAL("node.onion_reachable", "0/1", "gauge", 900,
+            "whether other machines can reach this one at all")
+FLEET_VITAL("node.rss_mib", "MiB", "gauge", 300,
+            "the node's own share of the memory pressure above")
+FLEET_VITAL("node.restarts_24h", "count", "sum", 3600,
+            "a crash loop, which reads as healthy in any single sample")
+
+/* ── dev: what the development loop actually costs ───────────────────── */
+FLEET_VITAL("dev.proof_wall_s", "s", "sum", 0,
+            "the dominant cost of landing anything, per proof")
+FLEET_VITAL("dev.proof_attempts", "count", "sum", 0,
+            "how often a moved base threw a finished proof away")
+FLEET_VITAL("dev.proof_slot_busy_s", "s", "sum", 0,
+            "how long one box's proof lock kept every other lane waiting")
+FLEET_VITAL("dev.lint_full_wall_s", "s", "sum", 0,
+            "the gate cost a lane pays before it may ask for a proof")
+FLEET_VITAL("dev.build_only_wall_s", "s", "sum", 0,
+            "the build half of that cost, separated so a fix can be aimed")
+FLEET_VITAL("dev.gate_red_count", "count", "gauge", 0,
+            "how many gates a tip is failing, which is the work remaining")
+FLEET_VITAL("dev.train_landed", "count", "sum", 0,
+            "the only measure of the loop that is an outcome, not activity")
+FLEET_VITAL("dev.train_lines", "lines", "sum", 0,
+            "how much change each landing carried, against the size cap")
+FLEET_VITAL("dev.lane_wall_s", "s", "sum", 0,
+            "what one lane cost end to end, for the next lane's estimate")
+FLEET_VITAL("dev.unit_wall_s", "s", "sum", 0,
+            "the same for one dispatched unit, per executor")
+FLEET_VITAL("dev.verify_wall_s", "s", "sum", 0,
+            "what verification costs, which decides whether to verify twice")
+FLEET_VITAL("dev.defects_found", "count", "sum", 0,
+            "what verification is worth, against the line above")
+
+/* ── spend: tokens and money, per provider ───────────────────────────── */
+FLEET_VITAL("spend.tokens_in", "tokens", "sum", 0,
+            "prompt tokens, the half a shorter brief actually reduces")
+FLEET_VITAL("spend.tokens_out", "tokens", "sum", 0,
+            "completion tokens, the half the task's difficulty sets")
+FLEET_VITAL("spend.tokens_cached", "tokens", "sum", 0,
+            "tokens a cache hit made cheap, counted apart so it can be seen")
+FLEET_VITAL("spend.tokens_reasoning", "tokens", "sum", 0,
+            "thinking tokens, which a thinking-level choice moves directly")
+FLEET_VITAL("spend.week_pct", "%", "gauge", 3600,
+            "how much of this week's cap is already gone")
+FLEET_VITAL("spend.cost_usd", "USD", "sum", 0,
+            "the same spend where a provider states a price for it")
+
+/* ── agent: what a task did, not what it cost ────────────────────────── */
+FLEET_VITAL("agent.turns", "count", "sum", 0,
+            "turns to finish, which separates a hard task from a long one")
+FLEET_VITAL("agent.tool_uses", "count", "sum", 0,
+            "tool calls to finish, the same fact from the other side")
+
+/* ── story: the passage walk ─────────────────────────────────────────── */
+FLEET_VITAL("story.passage_wall_s", "s", "sum", 0,
+            "what one passage of the walk cost, per passage")
+FLEET_VITAL("story.predict_error", "ratio", "gauge", 86400,
+            "how wrong the estimate was, which is whether it may be trusted")
