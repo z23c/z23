@@ -313,7 +313,7 @@ void weapons_draw(weapons_system_t* weapons) {
     for (int i = 0; i < MAX_LASERS; i++) {
         if (weapons->lasers[i].active) {
             // Draw laser beam with glow effect
-            float beam_width = 2.0f + sinf(GetTime() * 20.0f) * 0.5f;
+            float beam_width = 2.0f + sinf((float)GetTime() * 20.0f) * 0.5f;
             
             // Outer glow
             DrawCylinderEx(weapons->lasers[i].position, weapons->lasers[i].end_position, 
@@ -334,7 +334,7 @@ void weapons_draw(weapons_system_t* weapons) {
     for (int i = 0; i < MAX_PLASMA; i++) {
         if (weapons->plasma[i].active) {
             // Plasma ball with energy effect
-            float pulse = sinf(GetTime() * 10.0f + i) * 0.3f + 1.0f;
+            float pulse = sinf((float)GetTime() * 10.0f + (float)i) * 0.3f + 1.0f;
             
             // Outer energy field
             DrawSphere(weapons->plasma[i].position, weapons->plasma[i].size * 2 * pulse, 

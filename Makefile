@@ -830,6 +830,20 @@ ARENA_VIEW_INCLUDES = -Itools \
 	-Iplatform/modules/sha3/include -Iplatform/modules/support/include \
 	-Ivendor/include
 
+
+# tests/harness/src/test_skycombat_models.c #includes two apps/skycombat model
+# sources the way test_arena_view.c #includes its packages, so the harness needs
+# to resolve <raylib.h> and "sky_combat/...". Named here because ZCL_ALL_INCLUDES
+# is the one place header roots are declared as a set, and because the harness
+# compiles under five different flag sets (fast, rel, asan, tsan, the LTO
+# monolith) that would otherwise each need the same three -I flags kept in step.
+# ORDER MATTERS: this goes LAST, so every project root is searched first. The
+# one basename in vendor/raylib/src generic enough to shadow something later is
+# config.h; nothing in this tree includes a bare "config.h" today, and a new one
+# should not start.
+SKYCOMBAT_TEST_INCLUDES = -Iapps/skycombat/include -Iapps/skycombat/specifications \
+	-Ivendor/raylib/src
+
 # ZCL_ALL_INCLUDES — the one place the header roots are named as a set, so an
 # ad-hoc compile (a cross-compiler syntax sweep, a one-off -fsyntax-only check,
 # a language server) can ask the build what its include path IS instead of
@@ -842,7 +856,8 @@ ZCL_ALL_INCLUDES = $(APP_INCLUDES) $(CONFIG_INCLUDES) $(LIB_INCLUDES) \
 	$(CORE_INCLUDES) $(PORTS_INCLUDES) $(DOMAIN_INCLUDES) \
 	$(APPLICATION_INCLUDES) $(ADAPTERS_INCLUDES) $(REDUCER_INCLUDES) \
 	$(TOOLS_INCLUDES) \
-	$(DEVLOOP_INCLUDES) -Itests/harness/include -Ivendor/include -Ivendor/x11/include
+	$(DEVLOOP_INCLUDES) -Itests/harness/include -Ivendor/include -Ivendor/x11/include \
+	$(SKYCOMBAT_TEST_INCLUDES)
 
 .PHONY: print-includes
 print-includes:

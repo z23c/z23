@@ -495,6 +495,12 @@ AGENT_IMPACT_RULE("contexts/commons/modules/zanc/*|contexts/commons/models/src/z
 AGENT_IMPACT_RULE("contexts/market/modules/zslp/*|tests/harness/src/test_slp.c|tests/harness/src/test_protocols.c|core/modules/script/include/script/op_return_push.h", "slp protocols make_lint_gates")
 AGENT_IMPACT_RULE("contexts/market/modules/zswap/*|tests/harness/src/test_zswap_quote.c|tests/harness/src/test_zswap_yardsale.c|tests/harness/src/test_zswap_ceremony.c|contexts/market/models/src/zswap_ad.c|contexts/market/models/include/models/zswap_ad.h", "zswap_quote zswap_yardsale zswap_ceremony make_lint_gates")
 AGENT_IMPACT_RULE("contexts/commons/apps/yardsale/*|contexts/market/controllers/src/yardsale_controller.c|contexts/market/controllers/include/controllers/yardsale_controller.h|contexts/market/controllers/src/yardsale_site_controller.c|engine/controllers/include/controllers/web_form.h|contexts/market/controllers/include/controllers/yardsale_site_controller.h|contexts/market/controllers/src/yardsale_site_controller_buy.c|contexts/market/controllers/include/controllers/yardsale_site_internal.h|tests/harness/src/test_yardsale_app.c", "yardsale_app dev_platform zswap_ceremony make_lint_gates")
+/* The imported game and the raylib it draws through. skycombat_models is the
+ * only group that compiles either one, and it #includes the two model sources
+ * directly, so a change to them has no other reachable test. make_lint_gates
+ * rides along because apps/ and vendor/ are both scanned roots for the
+ * structural gates. */
+AGENT_IMPACT_RULE("apps/skycombat/*|vendor/raylib/*|tests/harness/src/test_skycombat_models.c", "skycombat_models make_lint_gates")
 /* Yardsale wallet glue: typed yardsale.* native leaves -> node RPC ->
  * yardsale_wallet_service plan/commit against the yardsale_plans table. */
 AGENT_IMPACT_RULE("contexts/wallet/services/src/yardsale_wallet_service.c|contexts/wallet/services/src/yardsale_wallet_service_buy.c|contexts/wallet/services/include/services/yardsale_wallet_service.h|contexts/wallet/services/include/services/yardsale_wallet_internal.h|contexts/market/models/src/yardsale_plan.c|contexts/market/models/include/models/yardsale_plan.h|contexts/wallet/controllers/src/yardsale_wallet_controller.c|contexts/wallet/controllers/include/controllers/yardsale_wallet_controller.h|tools/command/native_yardsale_command.c|engine/composition/commands/yardsale.def|tests/harness/src/test_yardsale_wallet.c", "yardsale_wallet yardsale_app db_validators command_registry_catalog cli_render make_lint_gates")
