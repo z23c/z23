@@ -1335,11 +1335,89 @@ DEV_TSAN_LDFLAGS = $(filter-out $(ZCL_LTO_FLAG),$(LDFLAGS)) $(ZCL_DEV_LINKER) $(
 # selection was written to prevent (a binary whose tor_run_main is not the one
 # the gate believes) comes straight back in a new form.
 ZCL_TOR_TREE := $(if $(ZCL_CROSS_TRIPLE),vendor/cross/$(ZCL_CROSS_TRIPLE)/tor,vendor/tor)
-TOR_FULL = $(wildcard $(ZCL_TOR_TREE)/libtor.a \
+TOR_ARCHIVE_PATHS := $(ZCL_TOR_TREE)/libtor.a \
 	$(ZCL_TOR_TREE)/src/ext/ed25519/donna/libed25519_donna.a \
 	$(ZCL_TOR_TREE)/src/ext/ed25519/ref10/libed25519_ref10.a \
-	$(ZCL_TOR_TREE)/src/ext/keccak-tiny/libkeccak-tiny.a)
+	$(ZCL_TOR_TREE)/src/ext/keccak-tiny/libkeccak-tiny.a
+
+# ZCL_TOR is the ONE knob that chooses which Tor a build links.
+#
+#   full  (default)  the pinned embedded Tor, built once and cached under
+#                    $(ZCL_TOR_TREE). The node can reach the onion network.
+#   stub             vendor/lib/libtor_stub.a: every symbol present, every
+#                    entry point a failure. Dev-only, and it must be asked
+#                    for by name.
+#
+# It replaces "whatever the wildcard happened to find". The archives-exist
+# wildcard below is still what the LINK consumes -- it remains evidence-based
+# and host-independent, exactly as documented above -- but absence is no
+# longer an answer. Absence is a missing build input, and the bootstrap under
+# TOR_BOOTSTRAP_MK establishes it before anything links, the same way
+# VENDOR_BOOTSTRAP_MK establishes vendor/lib.
+#
+# Why this had to change: the silent fallback shipped nodes that are blind to
+# the onion network. It compiles, it links, it passes the whole suite, and
+# `-tor` is simply inert. This project is onion-first; a node without real Tor
+# is a defect, not a configuration.
+ZCL_TOR ?= full
+ifeq ($(filter full stub,$(ZCL_TOR)),)
+$(error ZCL_TOR must be 'full' (the default) or 'stub', not '$(ZCL_TOR)')
+endif
+
+TOR_FULL = $(if $(filter stub,$(ZCL_TOR)),,$(wildcard $(TOR_ARCHIVE_PATHS)))
 TOR_LIBS = $(if $(TOR_FULL),$(TOR_FULL),-L$(ZCL_VENDOR_LIB) -ltor_stub)
+TOR_MISSING_ARCHIVES := $(filter-out $(wildcard $(TOR_ARCHIVE_PATHS)),$(TOR_ARCHIVE_PATHS))
+
+# Goals that never link a node. Bootstrapping Tor for them is pure cost.
+#
+# This is a SKIP list rather than an allow list, and the polarity is the whole
+# point: a goal nobody thought about gets REAL Tor. An allow list would mean
+# every unlisted goal silently links the stub, which is the exact
+# default-permit shape this change exists to delete.
+ZCL_TOR_SKIP_GOALS := clean distclean clean-% help tor-full tor-ready \
+	vendor vendor-force vendor-ready vendor-provenance worktree-prime \
+	worktree-prime-selftest install-hooks setup \
+	check-% lint lint-% %-selftest docs docs-%
+ZCL_TOR_LINK_REQUESTED := $(if $(strip $(MAKECMDGOALS)),\
+	$(strip $(filter-out $(ZCL_TOR_SKIP_GOALS),$(MAKECMDGOALS))),default-goal)
+
+TOR_BOOTSTRAP_MK := build/identity/tor-inputs-ready.mk
+# Same restart mechanism as VENDOR_BOOTSTRAP_MK: remaking an included makefile
+# makes GNU Make re-exec, and the second parse's $(wildcard) sees the archives
+# the first parse established. That is what lets a plain `make` depend on the
+# Tor archives without threading them through every one of the ~20 link
+# recipes that reference $(TOR_LIBS).
+#
+# ZCL_C23_PORTABLE_RELEASE is excluded on purpose: that build must compile Tor
+# with the portable sysroot's pinned compiler, not this host's, so
+# tools/scripts/build_c23_portable_release.sh establishes the archives itself
+# through that toolchain before it ever calls make.
+ifeq ($(ZCL_TOR),full)
+ifneq ($(strip $(TOR_MISSING_ARCHIVES)),)
+ifneq ($(strip $(ZCL_TOR_LINK_REQUESTED)),)
+ifneq ($(ZCL_STANDALONE_CLEAN),1)
+ifneq ($(ZCL_WORKTREE_PRIME_ONLY),1)
+ifneq ($(ZCL_PORTABLE_FRONTDOOR_ONLY),1)
+ifneq ($(ZCL_C23_PORTABLE_RELEASE),1)
+ifeq ($(strip $(MAKE_RESTARTS)),)
+-include $(TOR_BOOTSTRAP_MK)
+endif
+endif
+endif
+endif
+endif
+endif
+endif
+endif
+
+# The stub is reachable, but never quietly. One loud line on every parse that
+# selects it, whether by ZCL_TOR=stub or by archives that a skipped goal did
+# not bootstrap.
+ifeq ($(ZCL_TOR),stub)
+$(warning ZCL_TOR=stub - LINKING THE OFFLINE TOR STUB. This binary is stamped tor=stub: it cannot reach the onion network, it refuses -tor and onion-node mode at runtime, and no ship or install step will accept it. Drop ZCL_TOR=stub for a real-Tor node.)
+else ifneq ($(strip $(TOR_MISSING_ARCHIVES)),)
+$(warning no Tor archives under $(ZCL_TOR_TREE) - anything linked now gets the OFFLINE TOR STUB and is stamped tor=stub. Run `make tor-full` (or `make tor-ready`, which hardlinks them from a sibling checkout when it can).)
+endif
 # All dependencies bundled in vendor/lib as static archives.
 # Zero system library requirements beyond libc.
 # OpenSSL 3.0 (Apache 2.0), libevent and zlib are vendored and statically
@@ -1749,7 +1827,7 @@ endif
 # committed to git; `make vendor` builds the rest from source (pinned URL +
 # SHA256), so `git clone && make zclassic23` links in one shot.  See
 # docs/BUILD.md and tools/scripts/build_vendor.sh.
-.PHONY: vendor vendor-force vendor-provenance vendor-ready tor-full check-vendor-provenance
+.PHONY: vendor vendor-force vendor-provenance vendor-ready tor-full tor-ready tor-check check-vendor-provenance
 # Build every missing OR provenance-stale vendor/lib/*.a from its pinned,
 # SHA256-verified source. `make vendor-force` rebuilds all of them.
 vendor:
@@ -1764,14 +1842,42 @@ vendor-ready:
 	@tools/scripts/build_vendor.sh
 	@tools/dep_audit.sh
 
-# Explicit opt-in for the real embedded onion service. This initializes the
-# pinned submodule, disables optional host-library integrations that the
-# self-contained outer link does not consume, and produces every static archive
-# TOR_FULL needs. The default vendor path remains the offline-friendly stub.
+# Build the real embedded onion service from the pinned submodule. This
+# initializes the submodule, disables optional host-library integrations that
+# the self-contained outer link does not consume, and produces every static
+# archive TOR_FULL needs. Forces the compile even when archives already exist.
 # ZCL_CROSS_TRIPLE is empty on the default (host) target, so this forwards
 # nothing there -- same pass-through the vendor%.a rule below already uses.
 tor-full:
 	VENDOR_TARGET=$(ZCL_CROSS_TRIPLE) tools/scripts/build_tor_full.sh
+
+# The cheap front door, and the one the bootstrap uses: archives present ->
+# nothing, else hardlink them from a sibling checkout that already paid for
+# the build, else compile. `make tor-full` stays the "rebuild anyway" hammer.
+tor-ready:
+	@ZCL_TOR='$(ZCL_TOR)' ZCL_CROSS_TRIPLE='$(ZCL_CROSS_TRIPLE)' \
+	  tools/scripts/tor_archives_ready.sh ready
+
+# Ask, without building: does this checkout hold real Tor archives?
+tor-check:
+	@ZCL_CROSS_TRIPLE='$(ZCL_CROSS_TRIPLE)' \
+	  tools/scripts/tor_archives_ready.sh check
+
+# Establishes the Tor archives on the FIRST parse, then forces GNU Make to
+# restart so the second parse's TOR_FULL wildcard sees them. Mirrors
+# $(VENDOR_BOOTSTRAP_MK) below, including the session-cache drop: the
+# pre-restart parse memoized a source-identity capture that predates these
+# archives, and without the drop the post-restart parse would cache-hit that
+# cold record instead of re-deriving identity from the bytes now linked.
+$(TOR_BOOTSTRAP_MK): tor-ready
+	@set -eu; \
+	mkdir -p "$(dir $@)"; \
+	ZCL_SOURCE_IDENTITY_SESSION='$(ZCL_SOURCE_IDENTITY_SESSION)' tools/dev/source-identity.sh session-cache-drop; \
+	tmp="$$(mktemp "$(dir $@).tor-ready.XXXXXX")"; \
+	trap 'rm -f "$$tmp"' EXIT HUP INT TERM; \
+	printf '%s\n' '# generated: Tor archives established before source identity capture' > "$$tmp"; \
+	mv -f -- "$$tmp" "$@"; \
+	trap - EXIT HUP INT TERM
 
 # Included only on the first parse when inputs are missing or a requested
 # front door can repair them. Remaking an included makefile forces GNU Make to
@@ -2654,25 +2760,13 @@ worktree-prime:
 	      git submodule update --init vendor/tor >/dev/null 2>&1 \
 	        || echo "worktree-prime: WARNING - vendor/tor init failed; this worktree links the Tor STUB" >&2 ;; \
 	esac; \
-	tor_copied=0; \
-	if [ -e vendor/tor/.git ]; then \
-	  for a in vendor/tor/libtor.a \
-	           vendor/tor/src/ext/ed25519/donna/libed25519_donna.a \
-	           vendor/tor/src/ext/ed25519/ref10/libed25519_ref10.a \
-	           vendor/tor/src/ext/keccak-tiny/libkeccak-tiny.a; do \
-	    if [ ! -f "$$a" ] && [ -f "$$src/$$a" ]; then \
-	      mkdir -p "$${a%/*}"; \
-	      cp -a "$$src/$$a" "$$a"; \
-	      tor_copied=$$((tor_copied+1)); \
-	    fi; \
-	  done; \
-	fi; \
-	if [ "$$tor_copied" -gt 0 ]; then \
-	  echo "worktree-prime: copied $$tor_copied vendored Tor archive(s) from $$src (real-Tor link)"; \
-	elif [ ! -f vendor/tor/libtor.a ]; then \
-	  echo "worktree-prime: NOTE - no vendor/tor/libtor.a here or in $$src, so this"; \
-	  echo "                worktree links the Tor STUB and the ship step will refuse"; \
-	  echo "                its candidate (build it in $$src first)"; \
+	if ZCL_TOR=full tools/scripts/tor_archives_ready.sh link-only; then \
+	  :; \
+	else \
+	  echo "worktree-prime: no real Tor archives here or in $$src, so building them"; \
+	  echo "                once from the pinned submodule (a stub-linked worktree"; \
+	  echo "                cannot produce a shippable candidate)"; \
+	  ZCL_TOR=full tools/scripts/tor_archives_ready.sh ready; \
 	fi
 
 worktree-prime-selftest:
