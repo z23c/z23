@@ -292,7 +292,7 @@ test_groups: 1120
 port_interfaces: 13
 persistence_adapters: 14
 condition_registrations: 52
-command_bundles: 27
+command_bundles: 28
 command_roots: 13
 dumpstate_subsystems: 166
 app_shape_folders: 7
@@ -427,7 +427,7 @@ Use `docs/AGENT_ARCHITECTURE.md` as the full checklist. The short path:
 
 ### Add a native command
 1. Declare the command in the matching `engine/composition/commands/*.def` bundle.
-   There are 27 command bundles; `ls engine/composition/commands/*.def
+   There are 28 command bundles; `ls engine/composition/commands/*.def
    engine/composition/commands/*/*.def` is the list — do not work from a remembered one,
    and do not drop the nested half of that glob. Docs said "eight" for months
    after `vault` and `zcode` landed, and the flat glob alone silently stopped

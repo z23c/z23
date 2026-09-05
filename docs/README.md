@@ -104,6 +104,9 @@ from a hash, signature, test, or reproduction receipt.
 - [`CODEBASE_MAP.md`](CODEBASE_MAP.md) — source ownership and extension recipes.
 - [`AGENT_TRAPS.md`](AGENT_TRAPS.md) — intentional behavior and already-solved
   problems to check before editing.
+- [`MIND.md`](MIND.md) — the per-node resident that owns rebuilding this box's
+  code index, what it holds, and why a stale answer is refused rather than
+  rebuilt inside a query.
 - [`DEFENSIVE_CODING.md`](DEFENSIVE_CODING.md) — lint-enforced C and
   architecture rules.
 - [`API_REFERENCE.md`](API_REFERENCE.md) — generated command catalog; edit its
