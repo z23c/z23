@@ -10789,7 +10789,7 @@ pre-push-ci: windows-portability-acceptance
 check-agent-cli: zclassic23
 	@tools/scripts/check_agentdeployguard_cli_exit.sh
 
-check-malloc:
+check-malloc: $(LINTC_TOOL)
 	@echo "══ LINT: bare malloc/calloc/realloc in app/tools code ══"
 	@./tools/lint/check_malloc.sh
 
