@@ -1979,6 +1979,24 @@ static int sr_add(struct sr_set *s, const char *name)
     return 0;
 }
 
+static int sr_load(struct sr_set *s, const char *path)
+{
+    FILE *f = fopen(path, "r");
+    if (!f) return 0;
+    char *line = NULL;
+    size_t cap = 0;
+    int rc = 0;
+    while (rc == 0 && getline(&line, &cap, f) >= 0) {
+        char *h = strchr(line, '#'), *p = line;
+        if (h) *h = '\0';
+        while (*p && isspace((unsigned char)*p)) p++;
+        size_t n = strlen(p);
+        while (n && isspace((unsigned char)p[n - 1])) p[--n] = '\0';
+        if (n) rc = sr_add(s, p);
+    }
+    return fin(f, line, path, rc);
+}
+
 static void sr_del(struct sr_set *s, const char *name)
 {
     for (int i = 0; i < s->count; i++)
@@ -2125,6 +2143,234 @@ static int check_no_stray_root_files_selftest(void)
     return st_ok(bad, "check_no_stray_root_files selftest: OK\n");
 }
 
+static int ps_hit_line(const char *s)
+{
+    return strstr(s, "\"/proc/" "self") || strstr(s, "\"/proc/" "uptime");
+}
+static int ps_skip(const char *path, const struct sr_set *base)
+{
+    return lint_path_is_excluded(path)
+        || strncmp(path, "platform/modules/platform/", 26) == 0 || sr_has(base, path);
+}
+struct ps_acc { const struct sr_set *base; char (*hit)[192]; int n, max; };
+static int scan_ps(const char *path, void *ctx)
+{
+    struct ps_acc *a = ctx;
+    if (ps_skip(path, a->base)) return 0;
+    FILE *f = fopen(path, "r");
+    if (!f) return die("z23-lint: cannot open %s\n", path);
+    char *line = NULL;
+    size_t cap = 0;
+    int rc = 0, found = 0;
+    while (!found && getline(&line, &cap, f) >= 0) found = ps_hit_line(line);
+    if (found) {
+        size_t n = strlen(path);
+        if (a->n >= a->max || n >= 192) rc = die("z23-lint: derived buffer overflow\n", "");
+        else memcpy(a->hit[a->n++], path, n + 1);
+    }
+    return fin(f, line, path, rc);
+}
+
+static int check_proc_self_shim_run(int argc, char **argv)
+{
+    (void)argc; (void)argv;
+    struct sr_set base = {0};
+    int rc = sr_load(&base, "tools/lint/proc_self_shim_baseline.txt");
+    if (rc) return rc;
+    char hit[64][192];
+    struct ps_acc a = { .base = &base, .hit = hit, .max = 64 };
+    static const char *const roots[] = { "app", "config", "lib", "tools" };
+    for (size_t i = 0; rc == 0 && i < sizeof roots / sizeof roots[0]; i++)
+        rc = walk_src(roots[i], 0, scan_ps, &a);
+    if (rc) return rc;
+    if (!a.n)
+        return puts("check_proc_self_shim: clean — no new raw /proc/self or /proc/uptime reads") < 0
+                   ? die("z23-lint: write failed\n", "") : 0;
+    char cwd[4096], bpath[4096];
+    if (!getcwd(cwd, sizeof cwd)) return die("z23-lint: getcwd failed\n", "");
+    if (ovf(snprintf(bpath, sizeof bpath, "%s/tools/lint/proc_self_shim_baseline.txt", cwd),
+            sizeof bpath))
+        return 2;
+    if (fprintf(stderr, "check_proc_self_shim: raw /proc/self or /proc/uptime read(s) "
+                        "outside platform/modules/platform/, not in %s:\n", bpath) < 0)
+        return die("z23-lint: write failed\n", "");
+    for (int i = 0; i < a.n; i++)
+        if (fprintf(stderr, "  %s\n", a.hit[i]) < 0)
+            return die("z23-lint: write failed\n", "");
+    if (fprintf(stderr, "\nRoute through platform/os_proc.h, or add the file to %s with a "
+                        "reason if genuinely exempt (e.g. async-signal-safety, per "
+                        "engine/modules/sim/src/postmortem.c:1040).\n", bpath) < 0)
+        return die("z23-lint: write failed\n", "");
+    return 1;
+}
+
+static int check_proc_self_shim_selftest(void)
+{
+    const char *hit = "printf(\"%s\", \"/proc/" "self/exe\");";
+    struct sr_set empty = {0}, base = {0};
+    int bad = !ps_hit_line(hit) || ps_hit_line("int x;") || ps_hit_line("/proc/" "self");
+    bad |= ps_skip("tools/foo.c", &empty) || !ps_skip("platform/modules/platform/os.c", &empty);
+    if (sr_add(&base, "tools/foo.c")) return 2;
+    bad |= !(ps_hit_line(hit) && !ps_skip("tools/foo.c", &empty));
+    bad |= ps_hit_line(hit) && !ps_skip("tools/foo.c", &base);
+    const char *old = getenv("ZCL_LINT_PRODUCTION_SCAN");
+    if (setenv("ZCL_LINT_PRODUCTION_SCAN", "1", 1) != 0) bad = 1;
+    bad |= !lint_path_is_excluded("tools/_xfixture.c") || !ps_skip("tools/_xfixture.c", &empty);
+    if (old) (void)setenv("ZCL_LINT_PRODUCTION_SCAN", old, 1);
+    else (void)unsetenv("ZCL_LINT_PRODUCTION_SCAN");
+    bad |= lint_path_is_excluded("tools/_xfixture.c") || ps_skip("tools/_xfixture.c", &empty);
+    return st_ok(bad, "check_proc_self_shim selftest: OK\n");
+}
+
+static const char *const k_simd_del[] = {
+    "keccak_x4_available", "core/modules/crypto/src/keccak_x4.c",
+};
+static int has_ci(const char *h, const char *n)
+{
+    size_t nlen = strlen(n);
+    for (; *h; h++) {
+        size_t i = 0;
+        while (i < nlen && h[i]
+               && tolower((unsigned char)h[i]) == tolower((unsigned char)n[i])) i++;
+        if (i == nlen) return 1;
+    }
+    return 0;
+}
+static int mem_local(const char *t)
+{
+    return strstr(t, "crypto/simd_dispatch.h")
+        || (has_ci(t, "xgetbv") && has_ci(t, "osxsave"));
+}
+static int mem_del(const char *t)
+{
+    for (size_t i = 0; i + 1 < sizeof k_simd_del / sizeof k_simd_del[0]; i += 2)
+        if (strstr(t, k_simd_del[i])) return 1;
+    return 0;
+}
+static int file_has(const char *path, const char *nd, int ci, int *found)
+{
+    FILE *f = fopen(path, "r");
+    if (!f) return -1;
+    char *line = NULL;
+    size_t cap = 0;
+    *found = 0;
+    while (!*found && getline(&line, &cap, f) >= 0)
+        *found = ci ? has_ci(line, nd) : strstr(line, nd) != NULL;
+    return fin(f, line, path, 0);
+}
+static int simd_local_file(const char *path, int *ok)
+{
+    int a = 0, b = 0, c = 0, rc = file_has(path, "crypto/simd_dispatch.h", 0, &a);
+    if (rc) return rc;
+    if (a) { *ok = 1; return 0; }
+    rc = file_has(path, "xgetbv", 1, &b);
+    if (rc) return rc;
+    rc = file_has(path, "osxsave", 1, &c);
+    if (rc) return rc;
+    *ok = b && c;
+    return 0;
+}
+struct simd_acc { char f[64][192]; int n; };
+static int scan_avx(const char *path, void *ctx)
+{
+    struct simd_acc *a = ctx;
+    int found = 0, rc = file_has(path, "__attribute__((target(\"" "avx", 0, &found);
+    if (rc < 0) return die("z23-lint: cannot open %s\n", path);
+    if (rc || !found) return rc;
+    size_t n = strlen(path);
+    if (a->n >= 64 || n >= 192) return die("z23-lint: derived buffer overflow\n", "");
+    memcpy(a->f[a->n++], path, n + 1);
+    return 0;
+}
+static int simd_open(const char *path, int rc)
+{ return rc < 0 ? die("z23-lint: cannot open %s\n", path) : rc; }
+
+static int check_simd_os_support_run(int argc, char **argv)
+{
+    (void)argc; (void)argv;
+    struct simd_acc a = {0};
+    static const char *const roots[] = {
+        "core", "engine", "contexts", "cognition", "platform", "tests",
+        "tools", "apps", "vendor", "docs", "app", "lib", "config"
+    };
+    int rc = 0, v = 0;
+    for (size_t i = 0; rc == 0 && i < sizeof roots / sizeof roots[0]; i++)
+        rc = walk_src(roots[i], 0, scan_avx, &a);
+    if (rc == 0)
+        rc = gate_require_scanned(a.n, 1, "check_simd_os_support",
+                                  "expected at least core/modules/crypto/src/blake2b_avx2.c "
+                                  "to carry target(\"avx...\")");
+    for (size_t i = 0; rc == 0 && i + 1 < sizeof k_simd_del / sizeof k_simd_del[0]; i += 2) {
+        const char *name = k_simd_del[i], *file = k_simd_del[i + 1];
+        struct stat st;
+        if (stat(file, &st) != 0 || !S_ISREG(st.st_mode)) {
+            if (fprintf(stderr, "%s: delegate '%s' names a file that no longer exists\n",
+                        file, name) < 0)
+                return die("z23-lint: write failed\n", "");
+            v++;
+            continue;
+        }
+        int ok = 0;
+        rc = simd_open(file, simd_local_file(file, &ok));
+        if (rc) return rc;
+        if (!ok) {
+            if (fprintf(stderr, "%s: defines delegate '%s' but performs no OS-state check\n",
+                        file, name) < 0
+                || fputs("    -> every caller that relies on it is now unguarded\n", stderr) < 0)
+                return die("z23-lint: write failed\n", "");
+            v++;
+        }
+    }
+    for (int i = 0; rc == 0 && i < a.n; i++) {
+        int ok = 0, del = 0;
+        rc = simd_open(a.f[i], simd_local_file(a.f[i], &ok));
+        if (rc) return rc;
+        if (ok) continue;
+        for (size_t d = 0; d + 1 < sizeof k_simd_del / sizeof k_simd_del[0]; d += 2) {
+            int fnd = 0;
+            rc = simd_open(a.f[i], file_has(a.f[i], k_simd_del[d], 0, &fnd));
+            if (rc) return rc;
+            if (fnd) { del = 1; break; }
+        }
+        if (del) continue;
+        if (fprintf(stderr, "%s: dispatches into target(\"avx...\") code with no OS-state check\n",
+                    a.f[i]) < 0
+            || fputs("    -> #include \"crypto/simd_dispatch.h\" and gate the dispatch on\n",
+                     stderr) < 0
+            || fputs("       simd_host_has_avx2() / simd_host_has_avx512f()\n", stderr) < 0)
+            return die("z23-lint: write failed\n", "");
+        v++;
+    }
+    if (rc) return rc;
+    const char *mode = clock_mode();
+    if (printf("[check_simd_os_support] scanned %d AVX dispatch file(s), %d violation(s) "
+               "(mode: %s)\n", a.n, v, mode) < 0
+        || puts("[check_simd_os_support] CPUID says what the CPU decodes; XCR0 says what") < 0
+        || puts("[check_simd_os_support] the OS will save. Dispatching on the first alone") < 0
+        || puts("[check_simd_os_support] is a SIGILL on a host booted with the state off.") < 0)
+        return die("z23-lint: write failed\n", "");
+    return clock_grade(v, mode);
+}
+
+static int check_simd_os_support_selftest(void)
+{
+    const char *avx = "__attribute__((target(\"" "avx2\"))) void zz(void) {}";
+    char a[160], b[200], c[180], d[180], e[200];
+    if (ovf(snprintf(a, sizeof a, "%s", avx), sizeof a)
+        || ovf(snprintf(b, sizeof b, "#include \"crypto/simd_dispatch.h\"\n%s", avx), sizeof b)
+        || ovf(snprintf(c, sizeof c, "XGETBV osxsave\n%s", avx), sizeof c)
+        || ovf(snprintf(d, sizeof d, "xgetbv\n%s", avx), sizeof d)
+        || ovf(snprintf(e, sizeof e, "keccak_x4_available\n%s", avx), sizeof e))
+        return 2;
+    int bad = mem_local(a) || !mem_local(b) || !mem_local(c) || mem_local(d)
+            || !mem_del(e) || mem_del(a)
+            || mem_local(a) || mem_del(a)
+            || !(!mem_local(d) && !mem_del(d))
+            || !(!mem_local(e) && mem_del(e))
+            || mem_local("void keccak_x4_available(void) {}");
+    return st_ok(bad, "check_simd_os_support selftest: OK\n");
+}
+
 struct lint_gate {
     const char *name;
     int (*run)(int argc, char **argv);
@@ -2150,6 +2396,8 @@ static const struct lint_gate k_gates[] = {
       check_no_writer_below_sealed_frontier_selftest },
     { "check-no-stray-root-files", check_no_stray_root_files_run,
       check_no_stray_root_files_selftest },
+    { "check-proc-self-shim", check_proc_self_shim_run, check_proc_self_shim_selftest },
+    { "check-simd-os-support", check_simd_os_support_run, check_simd_os_support_selftest },
 };
 
 int main(int argc, char **argv)

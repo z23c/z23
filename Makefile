@@ -11319,7 +11319,7 @@ check-no-adx-overclaim:
 # every target("avx…") file to reach the audited predicate in
 # crypto/simd_dispatch.h, read XCR0 with an OSXSAVE guard itself, or delegate
 # to a named predicate that does.
-check-simd-os-support:
+check-simd-os-support: $(LINTC_TOOL)
 	@echo "══ LINT: SIMD dispatch checks OS state, not just CPUID ══"
 	@./tools/lint/check_simd_os_support.sh
 
@@ -11755,7 +11755,7 @@ check-no-writer-below-sealed-frontier: $(LINTC_TOOL)
 # platform/modules/platform/ — every such read migrates onto platform/os_proc.h.
 # RATCHET: tools/lint/proc_self_shim_baseline.txt grandfathers today's
 # sites; shrink-only.
-check-proc-self-shim:
+check-proc-self-shim: $(LINTC_TOOL)
 	@echo "→ Gate: proc_self_shim (os-substrate Rung 1)"
 	@./tools/lint/check_proc_self_shim.sh
 
