@@ -97,6 +97,7 @@ ZCL_MODULE_CAPABILITY("platform/modules/platform/src/current_identity.c", CAP_PR
 ZCL_MODULE_CAPABILITY("platform/modules/platform/src/directory_transaction.c", CAP_DYNLOAD|CAP_FS_READ|CAP_FS_WRITE, "Resolves optional kernel file primitives before applying a retained-directory transaction.")
 ZCL_MODULE_CAPABILITY("platform/modules/platform/src/directory_watcher.c", CAP_CLOCK|CAP_FS_READ|CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("platform/modules/platform/src/dlopen_pin.c", CAP_NONE, "")
+ZCL_MODULE_CAPABILITY("platform/modules/platform/src/file_clone.c", CAP_NONE, "the Windows arm reports clone unavailable without reaching the host")
 ZCL_MODULE_CAPABILITY("platform/modules/platform/src/os_binary_slots.c", CAP_NONE, "")
 ZCL_MODULE_CAPABILITY("platform/modules/platform/src/os_proc.c", CAP_CLOCK|CAP_DYNLOAD|CAP_FS_READ|CAP_PROCESS, "Resolves Windows process APIs and creates or supervises bounded child processes.")
 ZCL_MODULE_CAPABILITY("platform/modules/platform/src/os_proc_mem.c", CAP_PROCESS, "Inspects memory accounting on a supplied process handle.")

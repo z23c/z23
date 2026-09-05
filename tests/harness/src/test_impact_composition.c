@@ -35,6 +35,9 @@
  * feature-test macro asks for it; without this the file compiles today by
  * accident of -O2 and is a hard C23 error at -O0 or on another libc. Must
  * precede the first #include, which is where <features.h> is read. */
+#if defined(__linux__) && !defined(_GNU_SOURCE)
+#define _GNU_SOURCE
+#endif
 #if !defined(_WIN32) && !defined(_DEFAULT_SOURCE)
 #define _DEFAULT_SOURCE
 #endif
@@ -57,6 +60,7 @@
 #include "devloop.h"
 #include "json/json.h"
 #include "platform/disk_space.h"
+#include "platform/file_clone.h"
 #include "platform/ram_scratch.h"
 #include "platform/time_compat.h"
 #include "kernel/command_registry.h"
@@ -2233,6 +2237,111 @@ static int test_ic_ram_scratch_reservations_hold_under_concurrency(void)
  * and told the reader to run `make vendor` on a tree where vendor/lib was
  * present. This pins both halves of the cure: the copy happens, and it is
  * faithful. */
+#if defined(__linux__)
+static int ic_empty_fd(const char *root, const char *name, int flags,
+                       char path[4096])
+{
+    if (snprintf(path, 4096, "%s/%s", root, name) >= 4096 ||
+        !ic_write(root, name, ""))
+        return -1;
+    return open(path, flags | O_CLOEXEC);
+}
+
+static bool ic_clone_refusal(const char *root, const char *source_path,
+                             const char *name, int source_flags,
+                             int destination_flags, bool same_inode)
+{
+    char destination_path[4096];
+    int destination = ic_empty_fd(root, name, destination_flags,
+                                  destination_path);
+    int source = open(same_inode ? destination_path : source_path,
+                      source_flags | O_CLOEXEC);
+    bool refused = source >= 0 && destination >= 0 &&
+                   platform_file_clone_fd(source, destination) ==
+                       PLATFORM_FILE_CLONE_REFUSED;
+    bool source_closed = source < 0 || close(source) == 0;
+    bool destination_closed = destination < 0 || close(destination) == 0;
+    return refused && source_closed && destination_closed;
+}
+
+static int test_ic_platform_file_clone_contract(void)
+{
+    int failures = 0;
+    TEST("platform file clone: capability fallback and descriptor contract") {
+        char root[4096], source_path[4096], destination_path[4096];
+        ic_budget_fixture("fileclone", root);
+        static const char body[] = "independent generation bytes\n";
+        ASSERT(ic_write(root, "source", body));
+        ASSERT(snprintf(source_path, sizeof source_path, "%s/source", root) <
+               (int)sizeof source_path);
+        int source = open(source_path, O_RDONLY | O_CLOEXEC);
+        int destination = ic_empty_fd(root, "destination", O_RDWR,
+                                      destination_path);
+        ASSERT(source >= 0 && destination >= 0);
+        ASSERT(lseek(source, 2, SEEK_SET) == 2);
+        ASSERT(lseek(destination, 0, SEEK_SET) == 0);
+        enum platform_file_clone_result result =
+            platform_file_clone_fd(source, destination);
+        ASSERT(result == PLATFORM_FILE_CLONE_CLONED ||
+               result == PLATFORM_FILE_CLONE_UNAVAILABLE);
+        struct stat source_st, destination_st;
+        ASSERT(fstat(source, &source_st) == 0);
+        ASSERT(fstat(destination, &destination_st) == 0);
+        ASSERT(source_st.st_dev != destination_st.st_dev ||
+               source_st.st_ino != destination_st.st_ino);
+        ASSERT(lseek(source, 0, SEEK_CUR) == 2);
+        ASSERT(lseek(destination, 0, SEEK_CUR) == 0);
+        if (result == PLATFORM_FILE_CLONE_CLONED) {
+            char copy[sizeof body] = {0};
+            ASSERT(destination_st.st_size == (off_t)(sizeof body - 1));
+            ASSERT(pread(destination, copy, sizeof body - 1, 0) ==
+                   (ssize_t)(sizeof body - 1));
+            ASSERT(memcmp(copy, body, sizeof body - 1) == 0);
+        } else {
+            ASSERT(destination_st.st_size == 0);
+        }
+        ASSERT(close(destination) == 0);
+        ASSERT(close(source) == 0);
+
+        struct {
+            const char *name;
+            int source_flags, destination_flags;
+            bool same_inode;
+        } refusals[] = {
+            { "writeonly-source", O_WRONLY, O_WRONLY, false },
+            { "readonly-destination", O_RDONLY, O_RDONLY, false },
+            { "append-destination", O_RDONLY, O_WRONLY | O_APPEND, false },
+            { "opath-source", O_PATH, O_WRONLY, false },
+            { "same-inode", O_RDONLY, O_RDWR, true },
+        };
+        for (size_t i = 0; i < sizeof refusals / sizeof refusals[0]; i++)
+            ASSERT(ic_clone_refusal(root, source_path, refusals[i].name,
+                                    refusals[i].source_flags,
+                                    refusals[i].destination_flags,
+                                    refusals[i].same_inode));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+#endif
+
+static bool ic_generation_stat_equal(const struct stat *a,
+                                     const struct stat *b)
+{
+    if (a->st_dev != b->st_dev || a->st_ino != b->st_ino ||
+        a->st_size != b->st_size || a->st_mode != b->st_mode ||
+        a->st_mtim.tv_sec != b->st_mtim.tv_sec ||
+        a->st_mtim.tv_nsec != b->st_mtim.tv_nsec)
+        return false;
+#if defined(__APPLE__)
+    return a->st_ctimespec.tv_sec == b->st_ctimespec.tv_sec &&
+           a->st_ctimespec.tv_nsec == b->st_ctimespec.tv_nsec;
+#else
+    return a->st_ctim.tv_sec == b->st_ctim.tv_sec &&
+           a->st_ctim.tv_nsec == b->st_ctim.tv_nsec;
+#endif
+}
+
 static int test_ic_proof_dependency_crosses_filesystems(void)
 {
     int failures = 0;
@@ -2259,8 +2368,10 @@ static int test_ic_proof_dependency_crosses_filesystems(void)
         ASSERT(stat(source, &source_st) == 0);
         ASSERT(source_st.st_mtim.tv_sec == 1000000000);
 
-        /* Mac proof lanes must not expose a donor's writable inode through
-         * an allowed generation pathname. Linux retains its link fast path. */
+        /* No proof generation may expose a donor's writable inode through an
+         * allowed generation pathname. A second concurrent generation must
+         * not change the first generation's mutation identity merely by
+         * materializing the same selected vendor dependency. */
         snprintf(same, sizeof(same), "%s/%s/linked.sh", cwd, relative);
 #if defined(__APPLE__)
         /* A generation made by an older worker may already share the inode. */
@@ -2271,25 +2382,65 @@ static int test_ic_proof_dependency_crosses_filesystems(void)
         struct stat same_st;
         ASSERT(stat(same, &same_st) == 0);
         ASSERT(same_st.st_dev == source_st.st_dev);
-#if defined(__APPLE__)
         ASSERT(same_st.st_ino != source_st.st_ino);
-#else
-        ASSERT(same_st.st_ino == source_st.st_ino);
-#endif
+        ASSERT((same_st.st_mode & 07777) == (source_st.st_mode & 07777));
         ASSERT(same_st.st_mtim.tv_sec == source_st.st_mtim.tv_sec);
         ASSERT(same_st.st_mtim.tv_nsec == source_st.st_mtim.tv_nsec);
-#if defined(__APPLE__)
-        int modified = open(same, O_WRONLY);
-        ASSERT(modified >= 0);
-        ASSERT(write(modified, "X", 1) == 1);
-        ASSERT(close(modified) == 0);
-        int original = open(source, O_RDONLY);
-        ASSERT(original >= 0);
-        char first_byte = 0;
-        ASSERT(read(original, &first_byte, 1) == 1);
-        ASSERT(close(original) == 0);
-        ASSERT(first_byte == body[0]);
-#endif
+        ASSERT((size_t)same_st.st_size == sizeof(body) - 1);
+
+        char second[4096];
+        snprintf(second, sizeof(second), "%s/%s/second.sh", cwd, relative);
+        struct stat first_before_second, first_after_second;
+        ASSERT(stat(same, &first_before_second) == 0);
+        ASSERT(zcl_dev_proof_dependency_materialize(source, second));
+        struct stat second_st;
+        ASSERT(stat(second, &second_st) == 0);
+        ASSERT(second_st.st_ino != source_st.st_ino);
+        ASSERT(second_st.st_ino != same_st.st_ino);
+        ASSERT((second_st.st_mode & 07777) == (source_st.st_mode & 07777));
+        ASSERT(second_st.st_mtim.tv_sec == source_st.st_mtim.tv_sec);
+        ASSERT(second_st.st_mtim.tv_nsec == source_st.st_mtim.tv_nsec);
+        ASSERT((size_t)second_st.st_size == sizeof(body) - 1);
+        ASSERT(stat(same, &first_after_second) == 0);
+        ASSERT(ic_generation_stat_equal(&first_before_second,
+                                        &first_after_second));
+
+        /* A donor rebuilt in place must not rewrite either already-frozen
+         * generation. Restore the fixture before asserting so a born-red
+         * failure cannot leak changed bytes into later cases. */
+        int donor = open(source, O_WRONLY);
+        bool donor_changed = donor >= 0 && pwrite(donor, "X", 1, 0) == 1;
+        if (donor >= 0)
+            donor_changed = close(donor) == 0 && donor_changed;
+        char first_seen[sizeof(body)] = {0};
+        char second_seen[sizeof(body)] = {0};
+        int first = open(same, O_RDONLY);
+        bool first_read = first >= 0 &&
+                          read(first, first_seen, sizeof(body) - 1) ==
+                              (ssize_t)(sizeof(body) - 1);
+        if (first >= 0)
+            first_read = close(first) == 0 && first_read;
+        int second_fd = open(second, O_RDONLY);
+        bool second_read = second_fd >= 0 &&
+                           read(second_fd, second_seen, sizeof(body) - 1) ==
+                               (ssize_t)(sizeof(body) - 1);
+        if (second_fd >= 0)
+            second_read = close(second_fd) == 0 && second_read;
+        donor = open(source, O_WRONLY);
+        bool donor_restored = donor >= 0 &&
+                              pwrite(donor, body, 1, 0) == 1;
+        if (donor >= 0)
+            donor_restored = close(donor) == 0 && donor_restored;
+        donor_restored = utimensat(AT_FDCWD, source, pinned, 0) == 0 &&
+                           donor_restored;
+        struct stat first_after_donor;
+        bool first_stable = stat(same, &first_after_donor) == 0 &&
+                            ic_generation_stat_equal(&first_after_second,
+                                                     &first_after_donor);
+        ASSERT(donor_changed && first_read && second_read && donor_restored);
+        ASSERT(memcmp(first_seen, body, sizeof(body) - 1) == 0);
+        ASSERT(memcmp(second_seen, body, sizeof(body) - 1) == 0);
+        ASSERT(first_stable);
 
         /* Pin the fallback on every native host, including those without
          * /dev/shm. Only EXDEV is injected; copying and metadata are real. */
@@ -3471,6 +3622,9 @@ int test_impact_composition(void)
 #endif
     failures += test_ic_proof_generation_prefers_ram_when_it_fits();
 #if !defined(_WIN32)
+#if defined(__linux__)
+    failures += test_ic_platform_file_clone_contract();
+#endif
     failures += test_ic_proof_dependency_crosses_filesystems();
     failures += test_ic_ram_scratch_reservations_hold_under_concurrency();
 #endif

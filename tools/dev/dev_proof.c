@@ -13,6 +13,7 @@
 #include "base/serialize_le.h"
 #include "json/json.h"
 #include "platform/directory_compat.h"
+#include "platform/file_clone.h"
 #include "platform/logical_cpu.h"
 #include "platform/private_directory.h"
 #include "platform/ram_scratch.h"
@@ -1401,16 +1402,15 @@ static const char *proof_errno_name(int value)
     }
 }
 
-/* Independent copies on macOS prevent generation writes reaching donors
- * through shared inodes. Elsewhere link() is the fast path but only works
- * inside one filesystem. A RAM-backed
- * generation root (/dev/shm) is a different filesystem from the checkout, so
- * link() answers EXDEV there and the dependency has to be copied byte for
- * byte. The mode carries: a hook or a .so that arrived without its executable
+/* Every generation owns independent dependency inodes. Creating another
+ * hardlink changes the shared inode's ctime, invalidating an in-flight proof
+ * even when its source bytes are unchanged. Clone when the platform supports
+ * it, otherwise copy bytes; never link a donor into a live generation.
+ * The mode carries: a hook or a .so that arrived without its executable
  * bit fails far away from here, where the cause is no longer visible.
  *
- * The MODIFICATION TIME carries for the same reason. link() preserves it for
- * free; a copy that stamps the target with the time of the copy hands the
+ * The MODIFICATION TIME carries for the same reason. A copy that stamps the
+ * target with the time of the copy hands the
  * generation an artifact that is newer than every source it was built from,
  * and make inside the generation then declares a stale artifact up to date
  * and never rebuilds it. That is not a hypothetical: a hot-swap fixture image
@@ -1427,8 +1427,14 @@ static bool dependency_copy_stat(const char *source, const char *target,
     bool ok = temporary_len > 0 && temporary_len < (int)sizeof(temporary);
     int output = ok ? mkstemp(temporary) : -1;
     if (output < 0) ok = false;
+    enum platform_file_clone_result cloned = PLATFORM_FILE_CLONE_UNAVAILABLE;
+    if (ok) cloned = platform_file_clone_fd(input, output);
+    if (cloned == PLATFORM_FILE_CLONE_REFUSED) {
+        errno = EIO;
+        ok = false;
+    }
     unsigned char buffer[65536];
-    while (ok) {
+    while (ok && cloned == PLATFORM_FILE_CLONE_UNAVAILABLE) {
         ssize_t got = read(input, buffer, sizeof(buffer));
         if (got < 0 && errno == EINTR) continue;
         if (got < 0) ok = false;
@@ -1465,14 +1471,7 @@ static int dependency_seed(const char *source, const char *target,
         return -1;
     }
 #endif
-#if defined(__APPLE__)
-    /* Seatbelt grants paths, not independent ownership of a shared inode.
-     * A writable generation must not be able to overwrite its donor. */
     return dependency_copy_stat(source, target, source_st) ? 0 : -1;
-#else
-    (void)source_st;
-    return link(source, target);
-#endif
 }
 
 static bool dependency_materialize(const char *source, const char *target)
@@ -1485,14 +1484,7 @@ static bool dependency_materialize(const char *source, const char *target)
         target_exists = false;
     }
     if (S_ISREG(source_st.st_mode)) {
-#if !defined(__APPLE__)
-        if (target_exists && S_ISREG(target_st.st_mode) &&
-            source_st.st_dev == target_st.st_dev &&
-            source_st.st_ino == target_st.st_ino)
-            return true;
-        if (target_exists && unlink(target) != 0) return false;
-#endif
-        /* On macOS the temporary copy replaces an old shared inode only
+        /* The temporary copy replaces an old shared inode only
          * after the source is open and the independent copy is complete. */
         if (dependency_seed(source, target, &source_st) == 0) return true;
         /* Same filesystem is the fast path; a cross-device generation root is

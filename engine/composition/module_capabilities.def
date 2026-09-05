@@ -787,6 +787,7 @@ ZCL_MODULE_CAPABILITY("platform/modules/platform/src/directory_transaction.c", C
 ZCL_MODULE_CAPABILITY("platform/modules/platform/src/directory_watcher.c", CAP_FS_WRITE|CAP_FS_READ, "")
 ZCL_MODULE_CAPABILITY("platform/modules/platform/src/disk_space.c", CAP_FS_READ, "")
 ZCL_MODULE_CAPABILITY("platform/modules/platform/src/dlopen_pin.c", CAP_FS_READ|CAP_FS_WRITE, "")
+ZCL_MODULE_CAPABILITY("platform/modules/platform/src/file_clone.c", CAP_FS_READ|CAP_FS_WRITE|CAP_PRIVILEGE, "descriptor-bound independent file cloning reaches the Linux kernel through the FICLONE ioctl")
 ZCL_MODULE_CAPABILITY("platform/modules/platform/src/file_metadata.c", CAP_FS_READ, "")
 ZCL_MODULE_CAPABILITY("platform/modules/platform/src/os_binary_slots.c", CAP_FS_WRITE|CAP_FS_READ, "")
 ZCL_MODULE_CAPABILITY("platform/modules/platform/src/os_proc.c", CAP_FS_READ|CAP_CLOCK|CAP_PROCESS|CAP_PRIVILEGE, "portable process identity and liveness: probes a pid with kill(pid, 0) and reaches the kernel directly via syscall() for the tid glibc's gettid() wrapper does not expose under strict C23 flags")
