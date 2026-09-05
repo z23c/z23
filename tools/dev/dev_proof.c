@@ -486,13 +486,19 @@ static bool process_ok(const struct zcl_devloop_process_result *result)
            result->term_signal == 0 && result->exit_code == 0;
 }
 
-static bool git_capture_within(const char *root, const char *const argv[],
-                                 int timeout_ms, char *out, size_t out_size)
+/* Preserve a process result for the small number of Git reads whose failure
+ * becomes proof evidence.  The ordinary wrappers below keep their compact
+ * Boolean interfaces for the remaining Git queries. */
+static bool git_capture_observed(const char *root, const char *const argv[],
+                                 int timeout_ms, char *out, size_t out_size,
+                                 struct zcl_devloop_process_result *observed)
 {
     struct zcl_devloop_process_result result = {0};
-    if (!root || !argv || !out || out_size == 0 ||
-        !zcl_devloop_process_run(root, argv, timeout_ms, &result) ||
-        !process_ok(&result) || result.output_len >= out_size)
+    bool ran = root && argv && out && out_size > 0 &&
+               zcl_devloop_process_run(root, argv, timeout_ms, &result);
+    if (observed)
+        *observed = result;
+    if (!ran || !process_ok(&result) || result.output_len >= out_size)
         return false;
     size_t len = result.output_len;
     while (len > 0 && (result.output[len - 1] == '\n' ||
@@ -503,6 +509,12 @@ static bool git_capture_within(const char *root, const char *const argv[],
     return true;
 }
 
+static bool git_capture_within(const char *root, const char *const argv[],
+                               int timeout_ms, char *out, size_t out_size)
+{
+    return git_capture_observed(root, argv, timeout_ms, out, out_size, NULL);
+}
+
 /* Every git query in this file answers within seconds or is not worth
  * waiting on. Only the generation reaper's recursive delete needs a budget
  * of its own, so it names one and everything else keeps the shared bound. */
@@ -510,6 +522,32 @@ static bool git_capture(const char *root, const char *const argv[],
                         char *out, size_t out_size)
 {
     return git_capture_within(root, argv, 30000, out, out_size);
+}
+
+static void git_capture_why(const char *operation,
+                            const struct zcl_devloop_process_result *result,
+                            size_t output_capacity, char *why,
+                            size_t why_len)
+{
+    if (!operation || !result || !why || why_len == 0)
+        return;
+    if (result->timed_out) {
+        proof_whyf(why, why_len, "%s_timeout", operation);
+    } else if (result->cancelled) {
+        proof_whyf(why, why_len, "%s_cancelled", operation);
+    } else if (result->term_signal != 0) {
+        proof_whyf(why, why_len, "%s_signal_%d", operation,
+                   result->term_signal);
+    } else if (result->exit_code != 0) {
+        proof_whyf(why, why_len, "%s_exit_%d", operation,
+                   result->exit_code);
+    } else if (result->output_truncated) {
+        proof_whyf(why, why_len, "%s_truncated", operation);
+    } else if (result->output_len >= output_capacity) {
+        proof_whyf(why, why_len, "%s_oversize", operation);
+    } else {
+        proof_whyf(why, why_len, "%s_launch_failed", operation);
+    }
 }
 
 static bool proof_resolve_pair_platform(const char *repo_root,
@@ -1272,17 +1310,34 @@ static bool worktree_exact(const char *root, const char *local,
                            bool include_untracked, char *why, size_t why_len)
 {
     char head[65], status[ZCL_DEVLOOP_OUTPUT_MAX];
+    struct zcl_devloop_process_result head_result = {0};
+    struct zcl_devloop_process_result status_result = {0};
     const char *head_argv[] = {"git", "rev-parse", "--verify", "HEAD", NULL};
     const char *status_argv[] = {
         "git", "status", "--porcelain=v1",
         include_untracked ? "--untracked-files=normal" : "--untracked-files=no",
         NULL};
-    if (!git_capture(root, head_argv, head, sizeof(head)) ||
-        strcmp(head, local) != 0) {
+    if (!git_capture_observed(root, head_argv, 30000, head, sizeof(head),
+                              &head_result)) {
+        git_capture_why("head_capture", &head_result, sizeof(head), why,
+                        why_len);
+        return false;
+    }
+    if (!proof_oid_text(head)) {
+        proof_why(why, why_len, "head_capture_output_invalid");
+        return false;
+    }
+    if (strcmp(head, local) != 0) {
         proof_why(why, why_len, "head_changed_during_proof");
         return false;
     }
-    if (!git_capture(root, status_argv, status, sizeof(status)) || status[0]) {
+    if (!git_capture_observed(root, status_argv, 30000, status,
+                              sizeof(status), &status_result)) {
+        git_capture_why("worktree_status_capture", &status_result,
+                        sizeof(status), why, why_len);
+        return false;
+    }
+    if (status[0]) {
         proof_why(why, why_len, "worktree_not_clean");
         return false;
     }
