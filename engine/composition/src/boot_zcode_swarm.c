@@ -7,6 +7,7 @@
 #include "config/boot_internal.h"
 #include "config/boot_fleet_board.h"
 #include "config/boot_mesh_status.h"
+#include "config/boot_mesh_game.h"
 #include "config/boot_mesh_terminal.h"
 #include "config/mesh_stream.h"
 #include "config/mesh_tunnel.h"
@@ -839,6 +840,7 @@ void boot_zcode_swarm_wire(struct boot_svc_ctx *svc)
     mesh_stream_wire(svc);
     boot_mesh_terminal_wire(svc);
     mesh_tunnel_wire(svc);
+    boot_mesh_game_wire(svc);
     liveness_contract_init(&s_timer_contract, "net.zcode_swarm");
     s_timer_contract.on_tick = boot_zcode_swarm_timer_tick;
     supervisor_domains_init();
@@ -867,6 +869,7 @@ void boot_zcode_swarm_shutdown(void)
     boot_zcode_dht_shutdown();
     boot_mesh_status_shutdown();
     boot_fleet_board_shutdown();
+    boot_mesh_game_shutdown();
     boot_mesh_terminal_shutdown();
     mesh_tunnel_shutdown();
     mesh_stream_shutdown();
