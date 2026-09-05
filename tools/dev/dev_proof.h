@@ -92,6 +92,15 @@ struct zcl_dev_proof_changed_set {
 
 /* Capture the exact base..local changed set the proof worker plans against.
  *
+ * `repo_root` must be a git worktree already checked out to exactly `local`
+ * (a live worktree a concurrent step can still rebase is the wrong thing to
+ * pass — the generation copy `worktree_exact()` already pinned is the
+ * right one; passing the shared source worktree here reopens the same
+ * source-identity TOCTOU the generation checkpoint exists to close). Any
+ * such worktree resolves `base` and `local` from the shared object
+ * database, so a private git worktree sharing the same .git works exactly
+ * like the original checkout for `merge-base`/`diff`.
+ *
  * The list is written to `scratch_path` by git and read whole, so no fixed
  * capture buffer can silently shorten it; over-ceiling and unreadable captures
  * refuse with a typed reason naming the observed count. `persist_path` (may be

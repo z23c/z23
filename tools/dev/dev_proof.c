@@ -4540,8 +4540,18 @@ static bool proof_worker(const struct proof_paths *paths,
         proof_why(why, why_len, "changed_set_request_invalid");
         return false;
     }
+    /* `generation` — not `paths->root` — is what this reads: a private git
+     * worktree generation_prepare() just worktree_exact()'d to exactly
+     * `local`, sharing paths->root's object database so `base` still
+     * resolves. paths->root is the shared landing worktree a concurrent
+     * `dev land step` can rebase out from under a still-running proof; a
+     * changed-set capture that read it there could TOCTOU between this
+     * call and the source-identity checkpoint proof_worker_body() takes on
+     * `generation` moments later, refusing with remote_base_not_ancestor
+     * for a base that was real when this request was queued. `generation`
+     * is sealed by worktree_exact() above and touched by nothing else. */
     struct zcl_dev_proof_changed_set changed = {0};
-    if (!zcl_dev_proof_changed_set_capture(paths->root, base, local, scratch,
+    if (!zcl_dev_proof_changed_set_capture(generation, base, local, scratch,
                                            paths->changed, &changed, why,
                                            why_len))
         return false;

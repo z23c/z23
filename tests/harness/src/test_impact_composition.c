@@ -2685,6 +2685,68 @@ static int test_ic_changed_set_carries_a_landing_batch(void)
     return failures;
 }
 
+/* dev_proof's own worker never captures the changed set against the shared
+ * landing worktree: it captures against `generation`, the private
+ * `git worktree add --detach` copy generation_prepare() already pinned to
+ * exactly `local`, so a concurrent `dev land step` rebasing the shared
+ * worktree cannot TOCTOU the capture. This proves the half of that contract
+ * this seam owns: a repo_root that is a real git worktree sharing another
+ * checkout's object database (not the checkout itself) still resolves
+ * `base` and `local` and captures the exact changed set. */
+static int test_ic_changed_set_reads_a_private_generation_worktree(void)
+{
+    int failures = 0;
+    TEST("impact composition: changed-set capture reads a private "
+        "generation worktree sharing another checkout's object database") {
+        ASSERT(ic_changed_fixture_build());
+        char base[65], one[65];
+        ASSERT(ic_read_sha("base.sha", base));
+        ASSERT(ic_read_sha("one.sha", one));
+        char generation[640];
+        ASSERT(ic_changed_path("generation", generation, sizeof(generation)));
+
+        /* Exactly what generation_prepare() does to produce `generation`:
+         * a detached worktree of the submitting checkout, pinned to the
+         * proof's `local`. Its .git file points back at IC_CHANGED_REPO's
+         * gitdir rather than duplicating the object store. */
+        char cmd[1400];
+        ASSERT((size_t)snprintf(
+            cmd, sizeof(cmd),
+            "git -C " IC_CHANGED_REPO
+            " worktree add --quiet --detach %s %s >/dev/null 2>&1",
+            generation, one) < sizeof(cmd));
+        ASSERT(system(cmd) == 0);
+
+        char capture[640], record[640];
+        ASSERT(ic_changed_path("capture_gen.txt", capture, sizeof(capture)));
+        ASSERT(ic_changed_path("changed_gen", record, sizeof(record)));
+        struct zcl_dev_proof_changed_set set = {0};
+        char why[256] = {0};
+        ASSERT(setenv("ZCL_DEVLOOP_TEST_PROCESS", "1", 1) == 0);
+        /* The point under test: repo_root is the WORKTREE COPY, never
+         * IC_CHANGED_REPO itself. `base` still resolves through the
+         * shared object database this worktree was added from. */
+        bool captured = zcl_dev_proof_changed_set_capture(
+            generation, base, one, capture, record, &set, why, sizeof(why));
+        (void)unsetenv("ZCL_DEVLOOP_TEST_PROCESS");
+        ASSERT(captured);
+        ASSERT(set.count == 1000);
+        ASSERT(set.files != NULL && set.bytes != NULL);
+        for (size_t i = 0; i < set.count; i++)
+            ASSERT(set.files[i] && set.files[i][0] && set.files[i][0] != '/');
+        zcl_dev_proof_changed_set_release(&set);
+
+        char rmcmd[700];
+        ASSERT((size_t)snprintf(rmcmd, sizeof(rmcmd),
+                                "git -C " IC_CHANGED_REPO
+                                " worktree remove --force %s >/dev/null 2>&1",
+                                generation) < sizeof(rmcmd));
+        (void)system(rmcmd);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_ic_changed_set_refuses_above_its_ceiling(void)
 {
     int failures = 0;
@@ -3672,6 +3734,7 @@ int test_impact_composition(void)
     failures += test_ic_ram_scratch_reservations_hold_under_concurrency();
 #endif
     failures += test_ic_changed_set_carries_a_landing_batch();
+    failures += test_ic_changed_set_reads_a_private_generation_worktree();
     failures += test_ic_changed_set_refuses_above_its_ceiling();
     failures += test_ic_watch_overlay_keeps_its_own_ceiling();
     return failures;
