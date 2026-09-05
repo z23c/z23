@@ -1,0 +1,104 @@
+[Unit]
+Description=Z23 per-node mind: the one process that rebuilds this box's code indexes
+# ONE PER NODE, not one per checkout. zcl-devd@.service is instanced per
+# checkout (%i) and says so; a box with five worktrees runs five of them.
+# A mind cannot work that way, because its whole value is that EXACTLY ONE
+# process rebuilds an index. It therefore takes no instance name: it reads
+# the checkouts it owns from a state file and holds a node-wide lock, so a
+# second copy refuses to start rather than racing the first.
+#
+# WHAT IT REPLACES. Every leaf that opened a stale code index used to rebuild
+# it inside the query. Measured on a full tree: 6,750 / 6,988 / 7,577 ms, all
+# three ending fail-closed because another writer moved the tree mid-build,
+# and a fourth completing in 12,301 ms. With this unit running, those queries
+# refuse with a typed index_stale carrying the index root, its age and this
+# service's last heartbeat, and this service does the rebuild once.
+#
+# This unit runs NO node. It has no datadir, no P2P or RPC port, no wallet
+# and no network listener. It reads source files and writes each registered
+# checkout's own .codeindex directory and its own state directory, and
+# nothing else.
+#
+# Register the checkouts it owns before starting it, one absolute path per
+# line under a schema header:
+#
+#   mkdir -p ~/.local/state/z23/dev/mind
+#   { echo 'zcl.mind_registry.v1'; \
+#     echo 'zcl.mind_checkout.v1 '"$HOME"/github/zclassic23; } \
+#     > ~/.local/state/z23/dev/mind/checkouts.v1
+#
+# Install:
+#   cp platform/deploy/zcl-mind.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user start zcl-mind
+#   z23 dev mind status
+#
+# Linger, so the mind survives logout like every other critical user service:
+#   loginctl enable-linger "$USER"
+#
+# Retire it by removing the registry file; it releases every claim and exits,
+# and queries go back to rebuilding for themselves rather than refusing
+# behind an owner that is gone.
+#
+# Remove completely:
+#   systemctl --user stop zcl-mind
+#   rm ~/.config/systemd/user/zcl-mind.service
+#   systemctl --user daemon-reload
+#   rm -rf ~/.local/state/z23/dev/mind
+
+# Deliberately NOT installable at boot: there is no [Install] section, so
+# `systemctl --user enable` refuses until the operator adds one on purpose.
+
+# A crashed mind should come back, but one that cannot start must not spin:
+# five failures in ten minutes and systemd gives up. "Cannot start" here is
+# usually one of two honest refusals — another mind holds the node, or no
+# checkout is registered — and neither is fixed by retrying.
+StartLimitIntervalSec=600
+StartLimitBurst=5
+
+[Service]
+Type=simple
+WorkingDirectory=%h
+
+Environment="ZCL_MIND_STATE_DIR=%h/.local/state/z23/dev/mind"
+
+# An index rebuild is one process reading source and writing one SQLite
+# store; it is IO-heavy and single-writer, never a compile fan-out. It shares
+# this box with the live node and the dev lanes and must always lose to them.
+CPUQuota=200%
+CPUWeight=10
+IOWeight=10
+Nice=19
+IOSchedulingClass=idle
+IOSchedulingPriority=7
+# Sized to fit under check-systemd-memory-budget beside the live node and the
+# dev lanes. A full-tree index build holds one staging database and the scan
+# buffers; if a larger tree ever needs more, raise this on purpose and re-run
+# the budget gate rather than dropping the cap.
+MemoryHigh=2G
+MemoryMax=3G
+MemorySwapMax=256M
+TasksMax=64
+OOMScoreAdjust=500
+
+ExecStart=%h/github/zclassic23/build/bin/z23-mind dev mind serve
+
+# The resident handles SIGTERM cooperatively: it finishes or abandons the
+# current rebuild, releases every checkout's owner claim so no query is left
+# refusing behind a dead owner, and removes its lock record.
+KillMode=control-group
+TimeoutStopSec=120
+
+Restart=on-failure
+RestartSec=30
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+# Exactly the paths a rebuild writes: the checkouts it owns and its own state
+# directory. It never writes a datadir and never reads one.
+ReadWritePaths=%h/github
+ReadWritePaths=%h/.local/state/z23
+
+StandardOutput=journal
+StandardError=journal

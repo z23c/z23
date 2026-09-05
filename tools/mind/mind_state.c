@@ -17,10 +17,23 @@
  * generous against ZCL_MIND_CHECKOUTS_MAX rows and checked on write. */
 #define MIND_DOC_MAX 16384
 
+/* ZCL_MIND_STATE_DIR names the directory outright; it is what the service
+ * unit sets and what a test points at its own fixture. Without it the mind
+ * lives beside every other development state, under platform_state_root().
+ * A relative override is refused: a resident that resolved its own lock
+ * against a working directory would hold a different lock per caller, which
+ * is exactly the singleton this unit exists to be. */
 bool zcl_mind_state_dir(char *out, size_t cap)
 {
+    if (!out) return false;
+    const char *env = getenv("ZCL_MIND_STATE_DIR");
+    if (env && env[0] == '/') {
+        int n = snprintf(out, cap, "%s", env);
+        return n > 0 && (size_t)n < cap &&
+               platform_private_directory_ensure(out);
+    }
     char root[ZCL_MIND_PATH_MAX];
-    if (!out || !platform_state_root(root, sizeof(root)))
+    if (!platform_state_root(root, sizeof(root)))
         return false;
     int n = snprintf(out, cap, "%s/mind", root);
     return n > 0 && (size_t)n < cap && platform_private_directory_ensure(out);

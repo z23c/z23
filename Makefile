@@ -4414,6 +4414,18 @@ dev-bin z23-dev zclassic23-dev: $(ZCLASSIC23_DEV_BIN) $(ZCLASSIC23_DEV_BIN_ALIAS
 	$(HOTSWAP_ACTION_PLAN) $(DEV_PACKAGE_VERIFIER_TARGET) \
 	$(ZCL_ADAPTER_RUNNER_TARGET)
 
+# The name the mind's service unit executes. It is the SAME program, hard
+# linked: the resident is `dev mind serve`, and building a second binary that
+# linked its own copy of the code index would be a second implementation of
+# the very thing the mind exists to have exactly one of. The distinct name is
+# operational, not structural — systemd, ps and journalctl name the resident
+# rather than showing another z23-dev among the lanes.
+.PHONY: z23-mind
+Z23_MIND_BIN = $(BIN_DIR)/z23-mind$(ZCL_HOST_EXEEXT)
+z23-mind: $(Z23_MIND_BIN)
+$(Z23_MIND_BIN): $(ZCLASSIC23_DEV_BIN)
+	@$(if $(ZCL_HOST_WINDOWS),cp -f "$<" "$@",ln -f "$<" "$@")
+
 # Compiler-speed front door: non-LTO, -Og/-g1, separate epoch, unsippable name.
 # Does not replace z23-dev's platform-qualified watch-loop extras.  Windows
 # omits the proof-only restart plan until an explicit dev-proof-bundle request.
