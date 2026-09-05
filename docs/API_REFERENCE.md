@@ -74,17 +74,17 @@ z23 discover schema <path> --side=input|output
 
 | Catalog fact | Count |
 |---|---|
-| Registry entries (branches + leaves) | 824 |
+| Registry entries (branches + leaves) | 831 |
 | Top-level roots | 14 |
-| Branches | 186 |
-| Leaves (dispatchable command paths) | 638 |
-| … `ready` (live handler in this build) | 568 |
+| Branches | 187 |
+| Leaves (dispatchable command paths) | 644 |
+| … `ready` (live handler in this build) | 574 |
 | … `compat` (metadata only, names a fallback) | 39 |
 | … `planned` (fail-closed BLOCKED, exit 3) | 31 |
 | … dev-gated 🔧 (`ready` only in `z23-dev`) | 38 |
-| Leaves with `effect=mutate` | 222 |
+| Leaves with `effect=mutate` | 226 |
 | Leaves with `effect=destructive` | 5 |
-| Leaves requiring **owner** authority | 120 |
+| Leaves requiring **owner** authority | 122 |
 
 Per source file:
 
@@ -95,8 +95,8 @@ Per source file:
 | `engine/composition/commands/apps.def` | 16 | 3 | 13 |
 | `engine/composition/commands/app_features.def` | 75 | 20 | 55 |
 | `engine/composition/commands/store.def` | 18 | 0 | 18 |
-| `engine/composition/commands/ops.def` | 56 | 10 | 46 |
-| `engine/composition/commands/dev.def` | 89 | 18 | 71 |
+| `engine/composition/commands/ops.def` | 57 | 10 | 47 |
+| `engine/composition/commands/dev.def` | 95 | 19 | 76 |
 | `engine/composition/commands/code.def` | 33 | 4 | 29 |
 | `engine/composition/commands/accounts.def` | 11 | 2 | 9 |
 | `engine/composition/commands/vault.def` | 24 | 4 | 20 |
@@ -782,6 +782,16 @@ represented by its children's sections.
 | `dev fleet truth` | ready | read / read / operator · fast/low | none | `zcl.dev_fleet.v1` | `z23 dev fleet truth` | Show the Git and lint-receipt truth for every origin lane |
 | `dev fleet start` | ready | read / read / operator · foreground/low | `since`, `budget_bytes`, `board_dir`, `include_units`, `cwd` | `zcl.fleet_start.v1` | `z23 dev fleet start` | One opening answer for an orchestrator: the whole fleet in one bounded packet |
 
+#### `dev.fleet.tunnel` — Loopback TCP tunnels between paired machines
+
+| Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
+|---|---|---|---|---|---|---|
+| `dev fleet tunnel open` | ready | mutate / app-write / operator · fast/low | **`peer`**, `remote_port`, `local_port` | `zcl.dev_fleet_tunnel.open.v1` | `z23 dev fleet tunnel open --peer=<id> --remote-port=22 --local-port=2222` | Open a local entrance to one port on a paired machine's loopback |
+| `dev fleet tunnel close` | ready | mutate / app-write / operator · fast/low | **`tunnel_id`** | `zcl.dev_fleet_tunnel.close.v1` | `z23 dev fleet tunnel close --tunnel-id=1` | Close one local tunnel entrance and every connection on it |
+| `dev fleet tunnel list` | ready | read / read / operator · fast/low | none | `zcl.dev_fleet_tunnel.list.v1` | `z23 dev fleet tunnel list` | Show both directions: the entrances open here and what this node admits |
+| `dev fleet tunnel allow` | ready | mutate / app-write / **owner** · fast/low | **`peer`**, `port`, `why` | `zcl.dev_fleet_tunnel.allow.v1` | `z23 dev fleet tunnel allow --peer=<id> --port=22 --why=ssh` | Let one paired machine reach one port on this node's loopback |
+| `dev fleet tunnel deny` | ready | mutate / app-write / **owner** · fast/low | **`peer`**, `port` | `zcl.dev_fleet_tunnel.deny.v1` | `z23 dev fleet tunnel deny --peer=<id> --port=22` | Take back one allow row |
+
 #### `dev.train` — Stack lanes onto main without waiting on lint
 
 | Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
@@ -880,6 +890,7 @@ represented by its children's sections.
 | `ops mesh identity` (aliases: `ops.machine.status`, `machine.status`) | ready | read / read / operator · fast/low | none | `zcl.machine_mesh_identity.v1` | `z23 ops mesh identity` | Report this machine's mesh identity readiness |
 | `ops mesh status` | ready | read / read / operator · foreground/low | **`pairing_id`** | `zcl.mesh_status_receipt_view.v1` | `z23 ops mesh status --pairing_id=<64hex>` | Request one paired machine's signed status receipt |
 | `ops mesh machines` | ready | read / read / operator · foreground/low | none | `zcl.mesh.machines.v1` | `z23 ops mesh machines` | List paired machines: durable verified evidence plus a live probe |
+| `ops mesh roster` (aliases: `fleet.roster`) | ready | read / read / operator · fast/low | `datadir` | `zcl.fleet_roster.v1` | `z23 fleet roster` | List this operator's machines with each fact labelled by who established it |
 | `ops mesh join` | ready | mutate / core-recovery / operator · foreground/low | **`endpoint`**, `address` | `zcl.ops_mesh_join_status.v1` | `z23 ops mesh join --endpoint=<host:port>` | Join a peer from a verified session invite |
 | `ops mesh join_status` | ready | read / read / operator · fast/low | **`endpoint`**, `address` | `zcl.ops_mesh_join_status.v1` | `z23 ops mesh join_status --endpoint=<host:port>` | Report whether a mesh join has peered |
 
@@ -1766,6 +1777,7 @@ Every alias resolves through the same grammar as its canonical path
 | `ops.selfheal` | `ops.debug.dash.selfheal` |
 | `ops.machine.status` | `ops.mesh.identity` |
 | `machine.status` | `ops.mesh.identity` |
+| `fleet.roster` | `ops.mesh.roster` |
 | `dev.change.cycle` | `dev.change.apply` |
 | `dev.loop.watch` | `dev.loop.ensure` |
 | `dev.loop.heartbeat` | `dev.loop.status` |
