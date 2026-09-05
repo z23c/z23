@@ -315,6 +315,15 @@ static const struct rlw_leaf g_rlw_leaves[] = {
     { "core.storage.query.offline",
       zcl_native_handle_core_storage_query_offline,
       "sql", "SELECT 1",        NULL, NULL, NULL },
+    /* core.storage.schema.offline: the rolling-upgrade verdict leaf. Its
+     * classifier (node_db_schema_preflight_existing) never calls
+     * sqlite3_open at all for the present/absent/foreign/garbage cases —
+     * it stat()s the path and reads the raw SQLite header with a plain
+     * open(O_RDONLY) — so it is exercised here with no input beyond
+     * datadir, the same as the other zero-argument leaves above. */
+    { "core.storage.schema.offline",
+      zcl_native_handle_core_storage_schema_offline,
+      NULL, NULL,               NULL, NULL, NULL },
     /* Narrower than the five above, and stated so: bootstatus reads
      * <datadir>/boot_status.json and never opens a database at all, so what
      * is proven here is only that it creates nothing and quarantines

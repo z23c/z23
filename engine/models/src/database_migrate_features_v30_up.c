@@ -16,10 +16,12 @@
 #include "models/database.h"
 #include "models/database_internal.h"
 
-int node_db_migrate_features_v30_up(struct node_db *ndb, int *version)
+int node_db_migrate_features_v30_up(struct node_db *ndb, int *version,
+                                    int *floor)
 {
     int applied = 0;
     int current_ver = *version;
+    int floor_ver = *floor;
 
     if (current_ver < 30) {
         /* v30: ZCL Anchors (ZANC) — software/package digest anchoring. One
@@ -39,7 +41,7 @@ int node_db_migrate_features_v30_up(struct node_db *ndb, int *version)
 
         node_db_exec(ndb,
             "INSERT OR IGNORE INTO schema_migrations(version) VALUES('030')");
-        DB_MIGRATE_PERSIST_VERSION(ndb, 30);
+        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 30, floor_ver);
         current_ver = 30;
         applied++;
     }
@@ -72,7 +74,7 @@ int node_db_migrate_features_v30_up(struct node_db *ndb, int *version)
 
         node_db_exec(ndb,
             "INSERT OR IGNORE INTO schema_migrations(version) VALUES('031')");
-        DB_MIGRATE_PERSIST_VERSION(ndb, 31);
+        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 31, floor_ver);
         current_ver = 31;
         applied++;
     }
@@ -113,7 +115,7 @@ int node_db_migrate_features_v30_up(struct node_db *ndb, int *version)
 
         node_db_exec(ndb,
             "INSERT OR IGNORE INTO schema_migrations(version) VALUES('032')");
-        DB_MIGRATE_PERSIST_VERSION(ndb, 32);
+        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 32, floor_ver);
         current_ver = 32;
         applied++;
     }
@@ -141,7 +143,7 @@ int node_db_migrate_features_v30_up(struct node_db *ndb, int *version)
 
         node_db_exec(ndb,
             "INSERT OR IGNORE INTO schema_migrations(version) VALUES('033')");
-        DB_MIGRATE_PERSIST_VERSION(ndb, 33);
+        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 33, floor_ver);
         current_ver = 33;
         applied++;
     }
@@ -162,7 +164,7 @@ int node_db_migrate_features_v30_up(struct node_db *ndb, int *version)
 
         node_db_exec(ndb,
             "INSERT OR IGNORE INTO schema_migrations(version) VALUES('034')");
-        DB_MIGRATE_PERSIST_VERSION(ndb, 34);
+        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 34, floor_ver);
         current_ver = 34;
         applied++;
     }
@@ -186,7 +188,7 @@ int node_db_migrate_features_v30_up(struct node_db *ndb, int *version)
 
         node_db_exec(ndb,
             "INSERT OR IGNORE INTO schema_migrations(version) VALUES('035')");
-        DB_MIGRATE_PERSIST_VERSION(ndb, 35);
+        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 35, floor_ver);
         current_ver = 35;
         applied++;
     }
@@ -223,7 +225,7 @@ int node_db_migrate_features_v30_up(struct node_db *ndb, int *version)
 
         node_db_exec(ndb,
             "INSERT OR IGNORE INTO schema_migrations(version) VALUES('036')");
-        DB_MIGRATE_PERSIST_VERSION(ndb, 36);
+        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 36, floor_ver);
         current_ver = 36;
         applied++;
     }
@@ -265,7 +267,7 @@ int node_db_migrate_features_v30_up(struct node_db *ndb, int *version)
 
         node_db_exec(ndb,
             "INSERT OR IGNORE INTO schema_migrations(version) VALUES('037')");
-        DB_MIGRATE_PERSIST_VERSION(ndb, 37);
+        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 37, floor_ver);
         current_ver = 37;
         applied++;
     }
@@ -314,7 +316,7 @@ int node_db_migrate_features_v30_up(struct node_db *ndb, int *version)
 
         node_db_exec(ndb,
             "INSERT OR IGNORE INTO schema_migrations(version) VALUES('038')");
-        DB_MIGRATE_PERSIST_VERSION(ndb, 38);
+        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 38, floor_ver);
         current_ver = 38;
         applied++;
     }
@@ -357,7 +359,7 @@ int node_db_migrate_features_v30_up(struct node_db *ndb, int *version)
 
         node_db_exec(ndb,
             "INSERT OR IGNORE INTO schema_migrations(version) VALUES('039')");
-        DB_MIGRATE_PERSIST_VERSION(ndb, 39);
+        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 39, floor_ver);
         current_ver = 39;
         applied++;
     }
@@ -411,7 +413,7 @@ int node_db_migrate_features_v30_up(struct node_db *ndb, int *version)
 
         node_db_exec(ndb,
             "INSERT OR IGNORE INTO schema_migrations(version) VALUES('040')");
-        DB_MIGRATE_PERSIST_VERSION(ndb, 40);
+        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 40, floor_ver);
         current_ver = 40;
         applied++;
     }
@@ -510,7 +512,7 @@ int node_db_migrate_features_v30_up(struct node_db *ndb, int *version)
 
         node_db_exec(ndb,
             "INSERT OR IGNORE INTO schema_migrations(version) VALUES('041')");
-        DB_MIGRATE_PERSIST_VERSION(ndb, 41);
+        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 41, floor_ver);
         current_ver = 41;
         applied++;
     }
@@ -549,7 +551,7 @@ int node_db_migrate_features_v30_up(struct node_db *ndb, int *version)
 
         node_db_exec(ndb,
             "INSERT OR IGNORE INTO schema_migrations(version) VALUES('042')");
-        DB_MIGRATE_PERSIST_VERSION(ndb, 42);
+        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 42, floor_ver);
         current_ver = 42;
         applied++;
     }
@@ -578,7 +580,7 @@ int node_db_migrate_features_v30_up(struct node_db *ndb, int *version)
             "ON build_actions(task_root_sha3,candidate_root_sha3,state)");
         node_db_exec(ndb,
             "INSERT OR IGNORE INTO schema_migrations(version) VALUES('043')");
-        DB_MIGRATE_PERSIST_VERSION(ndb, 43);
+        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 43, floor_ver);
         current_ver = 43;
         applied++;
     }
@@ -598,7 +600,7 @@ int node_db_migrate_features_v30_up(struct node_db *ndb, int *version)
             "ON build_receipts(action_id,trust_state,created_at)");
         node_db_exec(ndb,
             "INSERT OR IGNORE INTO schema_migrations(version) VALUES('044')");
-        DB_MIGRATE_PERSIST_VERSION(ndb, 44);
+        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 44, floor_ver);
         current_ver = 44;
         applied++;
     }
@@ -625,7 +627,7 @@ int node_db_migrate_features_v30_up(struct node_db *ndb, int *version)
             "ON zcode_lane_receipts(source_root_sha3,lane,created_at)");
         node_db_exec(ndb,
             "INSERT OR IGNORE INTO schema_migrations(version) VALUES('045')");
-        DB_MIGRATE_PERSIST_VERSION(ndb, 45);
+        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 45, floor_ver);
         current_ver = 45;
         applied++;
     }
@@ -658,7 +660,7 @@ int node_db_migrate_features_v30_up(struct node_db *ndb, int *version)
             "ON zslp_ledger(token_id,role,spent_by_txid)");
         node_db_exec(ndb,
             "INSERT OR IGNORE INTO schema_migrations(version) VALUES('046')");
-        DB_MIGRATE_PERSIST_VERSION(ndb, 46);
+        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 46, floor_ver);
         current_ver = 46;
         applied++;
     }
@@ -695,7 +697,7 @@ int node_db_migrate_features_v30_up(struct node_db *ndb, int *version)
             "raw_tx BLOB NOT NULL) WITHOUT ROWID");
         node_db_exec(ndb,
             "INSERT OR IGNORE INTO schema_migrations(version) VALUES('047')");
-        DB_MIGRATE_PERSIST_VERSION(ndb, 47);
+        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 47, floor_ver);
         current_ver = 47;
         applied++;
     }
@@ -732,7 +734,7 @@ int node_db_migrate_features_v30_up(struct node_db *ndb, int *version)
 
         node_db_exec(ndb,
             "INSERT OR IGNORE INTO schema_migrations(version) VALUES('048')");
-        DB_MIGRATE_PERSIST_VERSION(ndb, 48);
+        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 48, floor_ver);
         current_ver = 48;
         applied++;
     }
@@ -740,5 +742,9 @@ int node_db_migrate_features_v30_up(struct node_db *ndb, int *version)
     /* v49+ continues in database_migrate_features_v49_up.c (same E1
      * file-size split as the v30 handoff). */
     *version = current_ver;
-    return applied + node_db_migrate_features_v49_up(ndb, version);
+    *floor = floor_ver;
+    int applied2 = node_db_migrate_features_v49_up(ndb, version, floor);
+    if (applied2 < 0)
+        return applied2; /* v49_up (or v67_up) already set version and floor */
+    return applied + applied2;
 }

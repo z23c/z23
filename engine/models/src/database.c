@@ -572,7 +572,8 @@ static bool node_db_open_impl(struct node_db *ndb, const char *path,
     struct node_db_schema_preflight prelease_preflight =
         node_db_schema_preflight_existing(path);
     if (prelease_preflight.state == NODE_DB_SCHEMA_PREFLIGHT_NEWER) {
-        node_db_log_newer_schema_refusal((int)prelease_preflight.version);
+        node_db_log_newer_schema_refusal((int)prelease_preflight.version,
+                                         (int)prelease_preflight.floor);
         return false;
     }
     if (prelease_preflight.state == NODE_DB_SCHEMA_PREFLIGHT_UNKNOWN) {
@@ -605,7 +606,8 @@ static bool node_db_open_impl(struct node_db *ndb, const char *path,
     struct node_db_schema_preflight preflight =
         node_db_schema_preflight_existing(path);
     if (preflight.state == NODE_DB_SCHEMA_PREFLIGHT_NEWER) {
-        node_db_log_newer_schema_refusal((int)preflight.version);
+        node_db_log_newer_schema_refusal((int)preflight.version,
+                                         (int)preflight.floor);
         return node_db_open_abort(ndb);
     }
     if (preflight.state == NODE_DB_SCHEMA_PREFLIGHT_UNKNOWN) {

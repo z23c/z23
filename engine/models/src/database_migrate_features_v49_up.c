@@ -16,10 +16,12 @@
 #include "models/database.h"
 #include "models/database_internal.h"
 
-int node_db_migrate_features_v49_up(struct node_db *ndb, int *version)
+int node_db_migrate_features_v49_up(struct node_db *ndb, int *version,
+                                    int *floor)
 {
     int applied = 0;
     int current_ver = *version;
+    int floor_ver = *floor;
 
     if (current_ver < 49) {
         /* v49: ZCODE science — the durable plan/commit idempotency ledger
@@ -126,7 +128,7 @@ int node_db_migrate_features_v49_up(struct node_db *ndb, int *version)
             "expires_at INTEGER NOT NULL)");
         node_db_exec(ndb,
             "INSERT OR IGNORE INTO schema_migrations(version) VALUES('049')");
-        DB_MIGRATE_PERSIST_VERSION(ndb, 49);
+        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 49, floor_ver);
         current_ver = 49;
         applied++;
     }
@@ -149,7 +151,7 @@ int node_db_migrate_features_v49_up(struct node_db *ndb, int *version)
             "created_at INTEGER NOT NULL)");
         node_db_exec(ndb,
             "INSERT OR IGNORE INTO schema_migrations(version) VALUES('050')");
-        DB_MIGRATE_PERSIST_VERSION(ndb, 50);
+        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 50, floor_ver);
         current_ver = 50;
         applied++;
     }
@@ -159,6 +161,11 @@ int node_db_migrate_features_v49_up(struct node_db *ndb, int *version)
          * ledger's kind CHECK with 'findings' for
          * zcode.science.findings.plan|commit. SQLite cannot ALTER a CHECK
          * constraint, so the table is rebuilt and rows carry over. */
+        if (!node_db_backup_before_breaking_migration(ndb, current_ver)) {
+            *version = current_ver;
+            *floor = floor_ver;
+            return NODE_DB_MIGRATE_ERR_BACKUP_FAILED;
+        }
         node_db_exec(ndb,
             "CREATE TABLE IF NOT EXISTS zcode_science_plans_v51 ("
             "plan_root TEXT PRIMARY KEY CHECK(length(plan_root)=64),"
@@ -178,7 +185,8 @@ int node_db_migrate_features_v49_up(struct node_db *ndb, int *version)
             "RENAME TO zcode_science_plans");
         node_db_exec(ndb,
             "INSERT OR IGNORE INTO schema_migrations(version) VALUES('051')");
-        DB_MIGRATE_PERSIST_VERSION(ndb, 51);
+        floor_ver = 51; /* BREAKING: kind CHECK rebuild */
+        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 51, floor_ver);
         current_ver = 51;
         applied++;
     }
@@ -210,7 +218,7 @@ int node_db_migrate_features_v49_up(struct node_db *ndb, int *version)
             "ON agent_sessions(wallet_scope,wallet_instance_id,revoked)");
         node_db_exec(ndb,
             "INSERT OR IGNORE INTO schema_migrations(version) VALUES('052')");
-        DB_MIGRATE_PERSIST_VERSION(ndb, 52);
+        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 52, floor_ver);
         current_ver = 52;
         applied++;
     }
@@ -229,7 +237,7 @@ int node_db_migrate_features_v49_up(struct node_db *ndb, int *version)
             "ON agent_sessions(wallet_scope,lifetime_spent_zat)");
         node_db_exec(ndb,
             "INSERT OR IGNORE INTO schema_migrations(version) VALUES('053')");
-        DB_MIGRATE_PERSIST_VERSION(ndb, 53);
+        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 53, floor_ver);
         current_ver = 53;
         applied++;
     }
@@ -265,7 +273,7 @@ int node_db_migrate_features_v49_up(struct node_db *ndb, int *version)
             "ON vault_intents(wallet_scope,wallet_instance_id,state)");
         node_db_exec(ndb,
             "INSERT OR IGNORE INTO schema_migrations(version) VALUES('054')");
-        DB_MIGRATE_PERSIST_VERSION(ndb, 54);
+        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 54, floor_ver);
         current_ver = 54;
         applied++;
     }
@@ -329,7 +337,7 @@ int node_db_migrate_features_v49_up(struct node_db *ndb, int *version)
             "ON file_offers(expires_unix) WHERE auth_version=1");
         node_db_exec(ndb,
             "INSERT OR IGNORE INTO schema_migrations(version) VALUES('055')");
-        DB_MIGRATE_PERSIST_VERSION(ndb, 55);
+        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 55, floor_ver);
         current_ver = 55;
         applied++;
     }
@@ -377,7 +385,7 @@ int node_db_migrate_features_v49_up(struct node_db *ndb, int *version)
             "ON market_payment_claims(txid)");
         node_db_exec(ndb,
             "INSERT OR IGNORE INTO schema_migrations(version) VALUES('056')");
-        DB_MIGRATE_PERSIST_VERSION(ndb, 56);
+        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 56, floor_ver);
         current_ver = 56;
         applied++;
     }
@@ -408,7 +416,7 @@ int node_db_migrate_features_v49_up(struct node_db *ndb, int *version)
             "ON market_contents(registered_at DESC)");
         node_db_exec(ndb,
             "INSERT OR IGNORE INTO schema_migrations(version) VALUES('057')");
-        DB_MIGRATE_PERSIST_VERSION(ndb, 57);
+        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 57, floor_ver);
         current_ver = 57;
         applied++;
     }
@@ -435,7 +443,7 @@ int node_db_migrate_features_v49_up(struct node_db *ndb, int *version)
             "WHERE application_kind<>'' AND idempotency_key<>''");
         node_db_exec(ndb,
             "INSERT OR IGNORE INTO schema_migrations(version) VALUES('058')");
-        DB_MIGRATE_PERSIST_VERSION(ndb, 58);
+        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 58, floor_ver);
         current_ver = 58;
         applied++;
     }
@@ -483,7 +491,7 @@ int node_db_migrate_features_v49_up(struct node_db *ndb, int *version)
             "ON market_download_chunks(plan_id,chunk_index)");
         node_db_exec(ndb,
             "INSERT OR IGNORE INTO schema_migrations(version) VALUES('059')");
-        DB_MIGRATE_PERSIST_VERSION(ndb, 59);
+        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 59, floor_ver);
         current_ver = 59;
         applied++;
     }
@@ -508,7 +516,7 @@ int node_db_migrate_features_v49_up(struct node_db *ndb, int *version)
             "ON vault_intent_inputs(plan_id)");
         node_db_exec(ndb,
             "INSERT OR IGNORE INTO schema_migrations(version) VALUES('060')");
-        DB_MIGRATE_PERSIST_VERSION(ndb, 60);
+        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 60, floor_ver);
         current_ver = 60;
         applied++;
     }
@@ -520,6 +528,11 @@ int node_db_migrate_features_v49_up(struct node_db *ndb, int *version)
          * wallet can reserve and recover its own exact transaction plans.
          * SQLite cannot ALTER a CHECK constraint, so rebuild the parent
          * table atomically and preserve every existing intent and index. */
+        if (!node_db_backup_before_breaking_migration(ndb, current_ver)) {
+            *version = current_ver;
+            *floor = floor_ver;
+            return NODE_DB_MIGRATE_ERR_BACKUP_FAILED;
+        }
         if (!node_db_exec(ndb,
             "PRAGMA foreign_keys=OFF;"
             "BEGIN IMMEDIATE;"
@@ -576,7 +589,8 @@ int node_db_migrate_features_v49_up(struct node_db *ndb, int *version)
                 "INSERT OR IGNORE INTO schema_migrations(version) "
                 "VALUES('061')"))
             LOG_ERR("db", "migrate v61: migration stamp failed");
-        DB_MIGRATE_PERSIST_VERSION(ndb, 61);
+        floor_ver = 61; /* BREAKING: vault_intents CHECK rebuild */
+        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 61, floor_ver);
         current_ver = 61;
         applied++;
     }
@@ -594,7 +608,7 @@ int node_db_migrate_features_v49_up(struct node_db *ndb, int *version)
             "created_at INTEGER NOT NULL CHECK(created_at>0))");
         node_db_exec(ndb,
             "INSERT OR IGNORE INTO schema_migrations(version) VALUES('062')");
-        DB_MIGRATE_PERSIST_VERSION(ndb, 62);
+        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 62, floor_ver);
         current_ver = 62;
         applied++;
     }
@@ -606,6 +620,11 @@ int node_db_migrate_features_v49_up(struct node_db *ndb, int *version)
          * SQLite cannot ALTER the v55 CHECK(auth_version IN (0,1)), so
          * rebuild the table atomically and preserve every offer and index
          * (the unique indexes widen to IN (1,2)). */
+        if (!node_db_backup_before_breaking_migration(ndb, current_ver)) {
+            *version = current_ver;
+            *floor = floor_ver;
+            return NODE_DB_MIGRATE_ERR_BACKUP_FAILED;
+        }
         if (!node_db_exec(ndb,
             "PRAGMA foreign_keys=OFF;"
             "BEGIN IMMEDIATE;"
@@ -665,7 +684,8 @@ int node_db_migrate_features_v49_up(struct node_db *ndb, int *version)
                 "INSERT OR IGNORE INTO schema_migrations(version) "
                 "VALUES('063')"))
             LOG_ERR("db", "migrate v63: migration stamp failed");
-        DB_MIGRATE_PERSIST_VERSION(ndb, 63);
+        floor_ver = 63; /* BREAKING: file_offers CHECK rebuild */
+        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 63, floor_ver);
         current_ver = 63;
         applied++;
     }
@@ -681,6 +701,11 @@ int node_db_migrate_features_v49_up(struct node_db *ndb, int *version)
          * SQLite cannot ALTER a CHECK, so rebuild atomically, preserving
          * every row and index (no stored row can violate the new CHECK:
          * the old one was strictly tighter). */
+        if (!node_db_backup_before_breaking_migration(ndb, current_ver)) {
+            *version = current_ver;
+            *floor = floor_ver;
+            return NODE_DB_MIGRATE_ERR_BACKUP_FAILED;
+        }
         if (!node_db_exec(ndb,
             "PRAGMA foreign_keys=OFF;"
             "BEGIN IMMEDIATE;"
@@ -732,7 +757,8 @@ int node_db_migrate_features_v49_up(struct node_db *ndb, int *version)
                 "INSERT OR IGNORE INTO schema_migrations(version) "
                 "VALUES('064')"))
             LOG_ERR("db", "migrate v64: migration stamp failed");
-        DB_MIGRATE_PERSIST_VERSION(ndb, 64);
+        floor_ver = 64; /* BREAKING: market_payment_claims CHECK rebuild */
+        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 64, floor_ver);
         current_ver = 64;
         applied++;
     }
@@ -754,7 +780,7 @@ int node_db_migrate_features_v49_up(struct node_db *ndb, int *version)
                 "INSERT OR IGNORE INTO schema_migrations(version) "
                 "VALUES('065')"))
             LOG_ERR("db", "migrate v65: migration stamp failed");
-        DB_MIGRATE_PERSIST_VERSION(ndb, 65);
+        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 65, floor_ver);
         current_ver = 65;
         applied++;
     }
@@ -802,11 +828,15 @@ int node_db_migrate_features_v49_up(struct node_db *ndb, int *version)
                 "INSERT OR IGNORE INTO schema_migrations(version) "
                 "VALUES('066')"))
             LOG_ERR("db", "migrate v66: migration stamp failed");
-        DB_MIGRATE_PERSIST_VERSION(ndb, 66);
+        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 66, floor_ver);
         current_ver = 66;
         applied++;
     }
 
     *version = current_ver;
-    return applied + node_db_migrate_features_v67_up(ndb, version);
+    *floor = floor_ver;
+    int applied2 = node_db_migrate_features_v67_up(ndb, version, floor);
+    if (applied2 < 0)
+        return applied2; /* v67_up already set version and floor before it */
+    return applied + applied2;
 }

@@ -100,6 +100,97 @@ void zcl_native_handle_core_storage_query_offline(
     reply->exit_code = ZCL_COMMAND_EXIT_OK;
 }
 
+/* ── core.storage.schema.offline ─────────────────────────────────────── */
+
+void zcl_native_handle_core_storage_schema_offline(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply)
+{
+    if (!request || !reply)
+        return;
+
+    const char *datadir = json_get_str(json_get(request->input, "datadir"));
+    if (!datadir || !datadir[0]) {
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INVALID, "MISSING_DATADIR",
+                               "normalize", false, false,
+                               "no datadir given",
+                               "core.storage.schema.offline");
+        return;
+    }
+
+    char path[1200];
+    int n = snprintf(path, sizeof(path), "%s/node.db", datadir);
+    if (n <= 0 || (size_t)n >= (int)sizeof(path)) {
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INVALID,
+                               "DATADIR_PATH_TOO_LONG", "normalize", false,
+                               false, "datadir path too long", datadir);
+        return;
+    }
+
+    /* node_db_schema_report_for_path is the read-only preflight (never
+     * create, migrate, or write) so this answers even when the live node
+     * would refuse to boot against the same file. */
+    struct node_db_schema_report rep;
+    if (!node_db_schema_report_for_path(path, &rep)) {
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INTERNAL,
+                               "SCHEMA_REPORT_FAILED", "execute", false,
+                               false, "schema classification failed", path);
+        return;
+    }
+
+    if (rep.fresh) {
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_BLOCKED,
+                               ZCL_COMMAND_EXIT_BLOCKED, "NODE_DB_NOT_FOUND",
+                               "execute", true, false,
+                               "no existing node.db at this datadir to "
+                               "classify — boot a node here once first",
+                               path);
+        return;
+    }
+    if (rep.unknown) {
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_BLOCKED,
+                               ZCL_COMMAND_EXIT_BLOCKED,
+                               "SCHEMA_VERSION_UNKNOWN", "execute", true,
+                               false,
+                               rep.detail && rep.detail[0]
+                                   ? rep.detail
+                                   : "node.db schema could not be classified",
+                               path);
+        return;
+    }
+
+    const char *verdict_name;
+    switch (rep.verdict) {
+    case NODE_DB_SCHEMA_VERDICT_SAME:
+        verdict_name = "same";
+        break;
+    case NODE_DB_SCHEMA_VERDICT_DOWNGRADE_OK:
+        verdict_name = "downgrade_ok";
+        break;
+    case NODE_DB_SCHEMA_VERDICT_DOWNGRADE_REFUSED:
+        verdict_name = "downgrade_refused";
+        break;
+    case NODE_DB_SCHEMA_VERDICT_UPGRADE:
+    default:
+        verdict_name = "upgrade";
+        break;
+    }
+
+    (void)json_push_kv_str(&reply->data, "datadir", datadir);
+    (void)json_push_kv_str(&reply->data, "node_db", path);
+    (void)json_push_kv_int(&reply->data, "schema_version", rep.schema_version);
+    (void)json_push_kv_int(&reply->data, "schema_compat_floor",
+                           rep.schema_compat_floor);
+    (void)json_push_kv_int(&reply->data, "node_db_max_schema",
+                           NODE_DB_MAX_SCHEMA);
+    (void)json_push_kv_str(&reply->data, "verdict", verdict_name);
+    reply->status = ZCL_COMMAND_STATUS_PASSED;
+    reply->exit_code = ZCL_COMMAND_EXIT_OK;
+}
+
 /* ── core.sync.frontier.offline ──────────────────────────────────────── */
 
 void zcl_native_handle_core_sync_frontier_offline(

@@ -1997,6 +1997,16 @@ void zcl_native_handle_core_node_bootwait(
 void zcl_native_handle_core_storage_query_offline(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
+/* core.storage.schema.offline — read-only rolling-upgrade/downgrade
+ * classification of a datadir's node.db: schema_version,
+ * schema_compat_floor, this binary's NODE_DB_MAX_SCHEMA, and the verdict
+ * (upgrade/same/downgrade_ok/downgrade_refused) via
+ * node_db_schema_report_for_path(), which never creates, migrates, or
+ * writes. Answers even when the live node would refuse to boot against the
+ * same file — that refusal is exactly what this leaf explains. */
+void zcl_native_handle_core_storage_schema_offline(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
 void zcl_native_handle_core_sync_frontier_offline(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);

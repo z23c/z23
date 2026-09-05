@@ -1449,6 +1449,26 @@ ZCL_COMMAND_READY_READ(
     ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
     ZCL_COMMAND_CAP_CHAIN_READ, ZCL_COMMAND_TRAIT_IDEMPOTENT,
     ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_core_storage_query_offline)
+ZCL_COMMAND_READY_READ(
+    "core.storage.schema.offline", "core.storage", "",
+    "Rolling-upgrade schema verdict for a datadir's node.db",
+    "schema_version, schema_compat_floor, this binary's NODE_DB_MAX_SCHEMA, "
+    "and the verdict (upgrade/same/downgrade_ok/downgrade_refused) read "
+    "directly from --datadir=<path>'s own node.db at call time via the "
+    "read-only schema preflight — no node contact, no RPC, no create, "
+    "migrate, or write of any kind, so this answers even when the live "
+    "node would itself refuse to boot against the same file.", 0,
+    "storage,schema,version,floor,compat,upgrade,downgrade,offline,datadir",
+    "zcl.core_storage_schema_offline.input.v1", "zcl.storage_schema.v1",
+    "datadir", "",
+    "z23 core storage schema offline "
+    "--input='{\"datadir\":\"/home/you/.zclassic-c23\"}'",
+    ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_SCOPE_OFFLINE_COPY,
+    ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_CHAIN_READ, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_core_storage_schema_offline)
 
 /* ── mining ────────────────────────────────────────────────────────── */
 ZCL_COMMAND_BRANCH("core.mining", "core", "Mining info and benchmarks",

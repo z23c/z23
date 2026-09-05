@@ -324,21 +324,72 @@ bool node_db_rebuild_indexes(struct node_db *ndb);
 /* Highest schema_version this binary knows how to read or migrate.
  * Bump in lockstep with the last `if (current_ver < N)` block in
  * node_db_migrate(). A node.db with `schema_version > NODE_DB_MAX_SCHEMA`
- * was written by a newer binary and is unsafe to open — its tables
- * may use columns this binary doesn't understand, leading to silent
- * data corruption on writes. node_db_migrate() refuses to proceed
- * in that case (Campaign C3: schema-downgrade detection). */
+ * was written by a newer binary. Whether that is safe to open depends on
+ * the database's own schema_compat_floor (see node_db_schema_compat_floor
+ * below): within the floor, this binary opens READ-COMPATIBLE (no schema
+ * write is attempted); above the floor, node_db_migrate() refuses to
+ * proceed (Campaign C3: schema-downgrade detection). */
 #define NODE_DB_MAX_SCHEMA NODE_DB_SCHEMA_LATEST
 
 /* Schema version for future migrations. */
 int node_db_schema_version(struct node_db *ndb);
 
+/* The lowest schema_version whose binary can still open and run this
+ * database correctly — i.e. the newest BREAKING migration ever applied to
+ * it. Every migration block in node_db_migrate() / node_db_migrate_features*
+ * is either ADDITIVE (a new table/column/index an older binary simply
+ * ignores — the floor does not move) or BREAKING (a rename, drop, or a
+ * change to what an existing column/row means — the floor becomes that
+ * migration's version), and the floor is persisted in the same write as
+ * schema_version so a reader never observes one bumped without the other.
+ *
+ * A database with no schema_compat_floor key at all (any node.db written
+ * before this floor existed) is treated as floor == its own schema_version:
+ * no downgrade is assumed safe for a database this binary never classified
+ * itself, rather than guessing a lower floor for it. */
+int node_db_schema_compat_floor(struct node_db *ndb);
+
+/* One of the four rolling-upgrade verdicts a schema report resolves to,
+ * comparing an existing database's schema_version/schema_compat_floor
+ * against this binary's own NODE_DB_MAX_SCHEMA. See
+ * node_db_schema_report_for_path(). */
+enum node_db_schema_verdict {
+    NODE_DB_SCHEMA_VERDICT_UPGRADE = 0,   /* version < MAX: a migration would run */
+    NODE_DB_SCHEMA_VERDICT_SAME,          /* version == MAX: nothing to do */
+    NODE_DB_SCHEMA_VERDICT_DOWNGRADE_OK,  /* version > MAX, floor <= MAX: opens read-compatible */
+    NODE_DB_SCHEMA_VERDICT_DOWNGRADE_REFUSED, /* version > MAX, floor > MAX: refused */
+};
+
+/* Read-only classification of the node.db at `path` — schema_version,
+ * schema_compat_floor, and the rolling-upgrade verdict this binary's
+ * NODE_DB_MAX_SCHEMA resolves to — with NO create, migrate, or write of any
+ * kind: it is the read-only preflight (node_db_schema_preflight_existing)
+ * wrapped in a public, model-boundary-respecting shape so command leaves
+ * never need the internal preflight header. `fresh` is true for a missing
+ * or genuinely empty database (no schema_version to report); `unknown` is
+ * true when the existing file could not be classified at all (`detail`
+ * names why) — neither case has a meaningful verdict. Returns false only
+ * when `path` or `out` is NULL. */
+struct node_db_schema_report {
+    bool fresh;
+    bool unknown;
+    int32_t schema_version;
+    int32_t schema_compat_floor;
+    enum node_db_schema_verdict verdict;
+    const char *detail;
+};
+bool node_db_schema_report_for_path(const char *path,
+                                    struct node_db_schema_report *out);
+
 /* Rails-style migration runner.
  * Runs all pending migrations from db/migrate/ directory.
  * Tracks applied migrations in schema_migrations table.
  * Returns number of migrations applied, or -1 on error.
- * Returns -2 if the on-disk schema_version exceeds NODE_DB_MAX_SCHEMA
- * (downgrade attempted — fatal). */
+ * Returns 0 (no blocks applied, no schema write attempted) when the on-disk
+ * schema_version exceeds NODE_DB_MAX_SCHEMA but the database's own
+ * schema_compat_floor is at or below it — this binary opens READ-COMPATIBLE.
+ * Returns -2 when schema_version exceeds NODE_DB_MAX_SCHEMA and the floor
+ * does too (downgrade attempted below the database's own floor — fatal). */
 int node_db_migrate(struct node_db *ndb, const char *datadir);
 
 #endif

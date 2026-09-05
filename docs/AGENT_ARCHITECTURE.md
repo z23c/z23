@@ -105,6 +105,54 @@ Build each feature in this order.
 - `consensus.db` (the kernel store — `progress.kv` on a pre-flip datadir) is
   not a domain model store. Do not route stage cursors through ActiveRecord.
 
+### Rolling upgrades and rollback
+
+Every migration block in `node_db_migrate()` / `node_db_migrate_features*()`
+is classified ADDITIVE or BREAKING, and that classification is what makes a
+fleet rollback possible on a `node.db` too large to casually back up. ADDITIVE
+means a new table, column, or index an older binary simply never touches;
+BREAKING means a rename, drop, or a change to what an existing column or row
+means — anything a table-rebuild (`CREATE` the new shape, copy rows, `DROP`
+the old table, rename) had to do because SQLite cannot alter a `CHECK`
+constraint or a column's meaning in place. Be conservative when classifying a
+new block: anything that changes the meaning of existing data is BREAKING.
+
+Alongside `schema_version`, the node state store also carries
+`schema_compat_floor` — the oldest schema version that can still open this
+database without attempting a schema write, persisted in the same transaction
+as `schema_version` on every migration step. An ADDITIVE step leaves the floor
+where it was; a BREAKING step raises it to the version it just applied. A
+database from before this bookkeeping existed carries no floor row at all, and
+is treated as its own `schema_version` — never guessed lower — so an old
+recording never appears more permissive than it actually is.
+
+This is what lets an older binary run against a newer database: if
+`schema_version` is above what the binary knows but `schema_compat_floor` is
+not, the binary opens read-compatible — it runs normally and simply never
+attempts a schema write, logging one line naming both versions. If the floor
+itself is above what the binary knows, it refuses to open, naming both
+versions and the floor, because a binary that has never seen the BREAKING
+change cannot safely read or write through it.
+
+The read-only leaf `core.storage.schema.offline` reports `schema_version`,
+`schema_compat_floor`, this binary's own latest known schema, and the verdict
+(upgrade, same, downgrade_ok, or downgrade_refused) for a stopped datadir's
+`node.db`, with no node contact and no write of any kind — the same question
+an operator would otherwise only get an answer to by trying to boot.
+
+The opt-in `-db-backup-before-migrate` flag copies `node.db` to a sibling
+`.bak` file, via SQLite's own online backup API, immediately before each
+BREAKING step is applied, and refuses to proceed with that step at all if free
+space is short. It defaults off because the copy it makes is the same size as
+the database itself, so nobody pays for it who did not ask.
+
+Rolling back an upgrade that turned out to be read-compatible is one
+operator recipe: stop the node, reinstall the older binary, start it — it
+opens read-compatible and runs normally, with the WARN line above confirming
+it. A BREAKING upgrade cannot be rolled back this way; that is exactly what
+the compat floor is for refusing, and exactly why the backup flag exists for
+an upgrade an operator is not yet sure of.
+
 ## REST Rules
 
 - REST resources are nouns, versioned at `/api/v1`, and self-describing through

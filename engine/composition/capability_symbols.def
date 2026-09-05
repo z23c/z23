@@ -347,6 +347,14 @@ ZCL_CAPABILITY_SYMBOL("pwrite", CAP_FS_WRITE, "")
 ZCL_CAPABILITY_SYMBOL("remove", CAP_FS_WRITE, "")
 ZCL_CAPABILITY_SYMBOL("renameat2", CAP_FS_WRITE, "")
 ZCL_CAPABILITY_SYMBOL("rmdir", CAP_FS_WRITE, "")
+ZCL_CAPABILITY_SYMBOL("sqlite3_backup_finish", CAP_FS_WRITE,
+    "Releases the online-backup handle; the backup it finishes wrote a "
+    "whole destination database file.")
+ZCL_CAPABILITY_SYMBOL("sqlite3_backup_init", CAP_FS_WRITE,
+    "Opens an online backup: the whole point is copying pages onto a "
+    "destination file this process creates.")
+ZCL_CAPABILITY_SYMBOL("sqlite3_backup_step", CAP_FS_WRITE,
+    "Copies source pages onto the destination file page by page.")
 ZCL_CAPABILITY_SYMBOL("sqlite3_close", CAP_FS_WRITE,
     "Checkpoints and removes the write ahead log, so closing is itself "
     "a write.")

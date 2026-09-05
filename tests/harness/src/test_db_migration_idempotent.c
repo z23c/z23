@@ -11,6 +11,7 @@
 
 #include "test/test_core.h"
 #include "models/database.h"
+#include "models/database_internal.h"
 #include "models/fleet_board_post.h"
 #include "session/fleet_board_proto.h"
 #include "crypto/ed25519.h"
@@ -274,6 +275,44 @@ static bool db_mig_stamp_schema(sqlite3 *db, int32_t version)
               sqlite3_changes(db) == 1;
     sqlite3_finalize(st);
     return ok;
+}
+
+static bool db_mig_stamp_floor(sqlite3 *db, int32_t floor)
+{
+    sqlite3_stmt *st = NULL;
+    int rc = sqlite3_prepare_v2(db,
+        "UPDATE node_state SET value=? WHERE key='schema_compat_floor'",
+        -1, &st, NULL);
+    if (rc != SQLITE_OK)
+        return false;
+    rc = sqlite3_bind_blob(st, 1, &floor, sizeof(floor), SQLITE_TRANSIENT);
+    bool ok = rc == SQLITE_OK && sqlite3_step(st) == SQLITE_DONE &&
+              sqlite3_changes(db) == 1;
+    sqlite3_finalize(st);
+    return ok;
+}
+
+/* A minimal struct node_db populated by hand (mirrors the memset(ndb, 0,
+ * sizeof(*ndb)) every real node_db_open_impl() path performs) so tests can
+ * drive node_db_migrate() directly against hand-stamped node_state rows,
+ * without going through the open-time preflight — which would itself refuse
+ * or reclassify some of the exact states these tests need to stamp. */
+static bool db_mig_open_raw_handle(struct node_db *ndb, const char *dbpath)
+{
+    memset(ndb, 0, sizeof(*ndb));
+    if (sqlite3_open(dbpath, &ndb->db) != SQLITE_OK)
+        return false;
+    snprintf(ndb->path, sizeof(ndb->path), "%s", dbpath);
+    ndb->open = true;
+    return true;
+}
+
+static void db_mig_close_raw_handle(struct node_db *ndb)
+{
+    if (ndb->db)
+        sqlite3_close(ndb->db);
+    ndb->db = NULL;
+    ndb->open = false;
 }
 
 static int db_mig_count(sqlite3 *db, const char *sql)
@@ -847,6 +886,12 @@ static int t_newer_schema_delete_refusal_is_zero_mutation(void)
         ASSERT(sqlite3_open(dbpath, &raw) == SQLITE_OK);
         ASSERT(db_mig_exec_raw(raw, "PRAGMA journal_mode=DELETE"));
         ASSERT(db_mig_stamp_schema(raw, NODE_DB_MAX_SCHEMA + 1));
+        /* The seed above already migrated to latest, which persists a real
+         * schema_compat_floor (79) below NODE_DB_MAX_SCHEMA. Left alone that
+         * floor would make this look like a read-compatible rolling upgrade
+         * instead of the genuinely incompatible future schema this test
+         * means to simulate, so pin the floor above LATEST too. */
+        ASSERT(db_mig_stamp_floor(raw, NODE_DB_MAX_SCHEMA + 1));
         /* A future schema need not contain every table this older binary
          * knows.  Refusal must happen before create_schema() can add one. */
         ASSERT(db_mig_exec_raw(raw, "DROP TABLE peers"));
@@ -895,6 +940,11 @@ static int t_newer_schema_wal_refusal_is_zero_mutation(void)
         ASSERT(sqlite3_open(dbpath, &raw) == SQLITE_OK);
         ASSERT(db_mig_exec_raw(raw, "PRAGMA journal_mode=WAL"));
         ASSERT(db_mig_stamp_schema(raw, NODE_DB_MAX_SCHEMA + 1));
+        /* Pin the floor above LATEST too: the seed's own real
+         * schema_compat_floor (79) would otherwise make this look like a
+         * read-compatible rolling upgrade rather than a genuinely
+         * incompatible future schema. */
+        ASSERT(db_mig_stamp_floor(raw, NODE_DB_MAX_SCHEMA + 1));
         sqlite3_close(raw);
         raw = NULL;
 
@@ -926,6 +976,11 @@ static int t_newer_schema_only_in_uncheckpointed_wal(void)
             "PRAGMA journal_mode=WAL;PRAGMA wal_autocheckpoint=0;"
             "BEGIN IMMEDIATE"));
         ASSERT(db_mig_stamp_schema(writer, NODE_DB_MAX_SCHEMA + 1));
+        /* Same transaction, same reasoning as the other two refusal tests:
+         * pin the floor above LATEST too, so the seed's own real
+         * schema_compat_floor (checkpointed into the base file already)
+         * cannot make this look like a read-compatible rolling upgrade. */
+        ASSERT(db_mig_stamp_floor(writer, NODE_DB_MAX_SCHEMA + 1));
         ASSERT(db_mig_exec_raw(writer, "COMMIT"));
 
         char wal[560], shm[560];
@@ -1263,6 +1318,273 @@ static int t_v82_board_kind_ceiling_row_copy_is_lossless(void)
     return failures;
 }
 
+static int t_additive_migration_keeps_floor(void)
+{
+    int failures = 0;
+    char dir[256];
+    db_mig_path(dir, sizeof(dir), "additive_floor");
+    mkdir_p(dir);
+    char dbpath[512];
+    snprintf(dbpath, sizeof(dbpath), "%s/node.db", dir);
+
+    TEST("db_mig: an additive-only step leaves schema_compat_floor unchanged") {
+        struct node_db seed;
+        ASSERT(node_db_open(&seed, dbpath));
+        node_db_close(&seed);
+
+        /* v80 is the last version and is ADDITIVE (see
+         * database_migrate_features_v67_up.c). Roll the database back to
+         * "just before v80, floor already at 79" and confirm crossing it
+         * leaves schema_compat_floor exactly where it was. */
+        sqlite3 *raw = NULL;
+        ASSERT(sqlite3_open(dbpath, &raw) == SQLITE_OK);
+        ASSERT(db_mig_stamp_schema(raw, 79));
+        ASSERT(db_mig_stamp_floor(raw, 79));
+        sqlite3_close(raw);
+        raw = NULL;
+
+        struct node_db ndb;
+        ASSERT(db_mig_open_raw_handle(&ndb, dbpath));
+        int rc = node_db_migrate(&ndb, NULL);
+        ASSERT(rc >= 0);
+        ASSERT_EQ(node_db_schema_version(&ndb), NODE_DB_SCHEMA_LATEST);
+        ASSERT_EQ(node_db_schema_compat_floor(&ndb), 79);
+        db_mig_close_raw_handle(&ndb);
+        PASS();
+    } _test_next:;
+    test_cleanup_tmpdir(dir);
+    return failures;
+}
+
+static int t_breaking_migration_raises_floor(void)
+{
+    int failures = 0;
+    char dir[256];
+    db_mig_path(dir, sizeof(dir), "breaking_floor");
+    mkdir_p(dir);
+    char dbpath[512];
+    snprintf(dbpath, sizeof(dbpath), "%s/node.db", dir);
+
+    TEST("db_mig: crossing a BREAKING step raises schema_compat_floor") {
+        struct node_db seed;
+        ASSERT(node_db_open(&seed, dbpath));
+        node_db_close(&seed);
+
+        /* v79 (mesh_capability_grants v2 rebuild) is classified BREAKING.
+         * Roll the database back to "just before v79, floor still at 78"
+         * and confirm crossing it pulls the floor up to 79 — one short of
+         * the resulting schema_version, because v80 above it is additive. */
+        sqlite3 *raw = NULL;
+        ASSERT(sqlite3_open(dbpath, &raw) == SQLITE_OK);
+        ASSERT(db_mig_stamp_schema(raw, 78));
+        ASSERT(db_mig_stamp_floor(raw, 78));
+        sqlite3_close(raw);
+        raw = NULL;
+
+        struct node_db ndb;
+        ASSERT(db_mig_open_raw_handle(&ndb, dbpath));
+        int rc = node_db_migrate(&ndb, NULL);
+        ASSERT(rc >= 0);
+        ASSERT_EQ(node_db_schema_version(&ndb), NODE_DB_SCHEMA_LATEST);
+        ASSERT_EQ(node_db_schema_compat_floor(&ndb), 79);
+        db_mig_close_raw_handle(&ndb);
+        PASS();
+    } _test_next:;
+    test_cleanup_tmpdir(dir);
+    return failures;
+}
+
+static int t_older_binary_within_floor_opens_read_compatible(void)
+{
+    int failures = 0;
+    char dir[256];
+    db_mig_path(dir, sizeof(dir), "read_compat");
+    mkdir_p(dir);
+    char dbpath[512];
+    snprintf(dbpath, sizeof(dbpath), "%s/node.db", dir);
+
+    TEST("db_mig: schema above LATEST with floor at/below LATEST opens read-compatible") {
+        struct node_db seed;
+        ASSERT(node_db_open(&seed, dbpath));
+        node_db_close(&seed);
+
+        sqlite3 *raw = NULL;
+        ASSERT(sqlite3_open(dbpath, &raw) == SQLITE_OK);
+        ASSERT(db_mig_stamp_schema(raw, NODE_DB_MAX_SCHEMA + 1));
+        ASSERT(db_mig_stamp_floor(raw, NODE_DB_MAX_SCHEMA));
+        int ledger_before = db_mig_count(raw,
+            "SELECT count(*) FROM schema_migrations");
+        sqlite3_close(raw);
+        raw = NULL;
+
+        /* This is the actual rollback scenario: an older binary (this
+         * process, pinned at NODE_DB_MAX_SCHEMA) opens a database a newer
+         * binary already migrated one step past it, but whose own
+         * compat floor says nothing BREAKING happened above this binary's
+         * ceiling. The open must succeed and must not touch the schema. */
+        struct node_db reopened;
+        ASSERT(node_db_open(&reopened, dbpath));
+        ASSERT(reopened.open);
+        ASSERT_EQ(node_db_schema_version(&reopened), NODE_DB_MAX_SCHEMA + 1);
+        ASSERT_EQ(node_db_schema_compat_floor(&reopened), NODE_DB_MAX_SCHEMA);
+        node_db_close(&reopened);
+
+        ASSERT(sqlite3_open(dbpath, &raw) == SQLITE_OK);
+        int32_t stored_version = 0;
+        ASSERT(db_mig_raw_schema(raw, &stored_version));
+        ASSERT_EQ(stored_version, NODE_DB_MAX_SCHEMA + 1);
+        int ledger_after = db_mig_count(raw,
+            "SELECT count(*) FROM schema_migrations");
+        ASSERT_EQ(ledger_after, ledger_before);
+        sqlite3_close(raw);
+        PASS();
+    } _test_next:;
+    test_cleanup_tmpdir(dir);
+    return failures;
+}
+
+static int t_floor_above_latest_refuses_with_typed_error(void)
+{
+    int failures = 0;
+    char dir[256];
+    db_mig_path(dir, sizeof(dir), "floor_refused");
+    mkdir_p(dir);
+    char dbpath[512];
+    snprintf(dbpath, sizeof(dbpath), "%s/node.db", dir);
+
+    TEST("db_mig: a compat floor above LATEST refuses even with a distinct newer version") {
+        struct node_db seed;
+        ASSERT(node_db_open(&seed, dbpath));
+        node_db_close(&seed);
+
+        /* floor is stamped ABOVE schema_version itself (which is already
+         * above LATEST) to prove the refusal reads schema_compat_floor
+         * specifically, not merely re-deriving a verdict from version. */
+        sqlite3 *raw = NULL;
+        ASSERT(sqlite3_open(dbpath, &raw) == SQLITE_OK);
+        ASSERT(db_mig_exec_raw(raw, "PRAGMA journal_mode=DELETE"));
+        ASSERT(db_mig_stamp_schema(raw, NODE_DB_MAX_SCHEMA + 1));
+        ASSERT(db_mig_stamp_floor(raw, NODE_DB_MAX_SCHEMA + 5));
+        sqlite3_close(raw);
+        raw = NULL;
+
+        ASSERT(db_mig_refusal_preserves_family(dbpath, 4));
+
+        ASSERT(sqlite3_open(dbpath, &raw) == SQLITE_OK);
+        int32_t stored_version = 0;
+        ASSERT(db_mig_raw_schema(raw, &stored_version));
+        ASSERT_EQ(stored_version, NODE_DB_MAX_SCHEMA + 1);
+        sqlite3_close(raw);
+        PASS();
+    } _test_next:;
+    test_cleanup_tmpdir(dir);
+    return failures;
+}
+
+static int t_backup_flag_writes_file_before_breaking_step(void)
+{
+    int failures = 0;
+    char dir[256];
+    db_mig_path(dir, sizeof(dir), "backup_writes");
+    mkdir_p(dir);
+    char dbpath[512];
+    snprintf(dbpath, sizeof(dbpath), "%s/node.db", dir);
+
+    TEST("db_mig: -db-backup-before-migrate writes node.db.schema<N>.bak before a BREAKING step") {
+        struct node_db seed;
+        ASSERT(node_db_open(&seed, dbpath));
+        node_db_close(&seed);
+
+        /* v75 (Yardsale plan state-CHECK rebuild) always runs its rebuild
+         * unconditionally once current_ver < 75 — unlike v79, it has no
+         * "already in the target shape" short-circuit, so this is a clean
+         * BREAKING step to prove the backup guard against. */
+        sqlite3 *raw = NULL;
+        ASSERT(sqlite3_open(dbpath, &raw) == SQLITE_OK);
+        ASSERT(db_mig_stamp_schema(raw, 74));
+        ASSERT(db_mig_stamp_floor(raw, 74));
+        sqlite3_close(raw);
+        raw = NULL;
+
+        ASSERT(setenv("ZCL_DB_BACKUP_BEFORE_MIGRATE", "1", 1) == 0);
+        node_db_backup_set_free_bytes_override_for_test(
+            (int64_t)16 * 1024 * 1024 * 1024);
+
+        struct node_db ndb;
+        ASSERT(db_mig_open_raw_handle(&ndb, dbpath));
+        int rc = node_db_migrate(&ndb, NULL);
+        db_mig_close_raw_handle(&ndb);
+
+        node_db_backup_set_free_bytes_override_for_test(-1);
+        unsetenv("ZCL_DB_BACKUP_BEFORE_MIGRATE");
+
+        ASSERT(rc >= 0);
+
+        /* current_ver was 74 at the moment the v75 BREAKING step's guard
+         * ran, so the backup is named for the version it protected. */
+        char bak_path[600];
+        snprintf(bak_path, sizeof(bak_path), "%s.schema74.bak", dbpath);
+        struct stat st;
+        ASSERT(stat(bak_path, &st) == 0);
+        ASSERT(st.st_size > 0);
+        unlink(bak_path);
+        PASS();
+    } _test_next:;
+    test_cleanup_tmpdir(dir);
+    return failures;
+}
+
+static int t_backup_flag_refuses_on_insufficient_space(void)
+{
+    int failures = 0;
+    char dir[256];
+    db_mig_path(dir, sizeof(dir), "backup_refuses");
+    mkdir_p(dir);
+    char dbpath[512];
+    snprintf(dbpath, sizeof(dbpath), "%s/node.db", dir);
+
+    TEST("db_mig: -db-backup-before-migrate refuses the BREAKING step when free space is short") {
+        struct node_db seed;
+        ASSERT(node_db_open(&seed, dbpath));
+        node_db_close(&seed);
+
+        /* Same v75 boundary as the write test: its rebuild runs
+         * unconditionally, so the backup guard is guaranteed to fire. */
+        sqlite3 *raw = NULL;
+        ASSERT(sqlite3_open(dbpath, &raw) == SQLITE_OK);
+        ASSERT(db_mig_stamp_schema(raw, 74));
+        ASSERT(db_mig_stamp_floor(raw, 74));
+        sqlite3_close(raw);
+        raw = NULL;
+
+        ASSERT(setenv("ZCL_DB_BACKUP_BEFORE_MIGRATE", "1", 1) == 0);
+        node_db_backup_set_free_bytes_override_for_test(1024);
+
+        struct node_db ndb;
+        ASSERT(db_mig_open_raw_handle(&ndb, dbpath));
+        int rc = node_db_migrate(&ndb, NULL);
+        int32_t version_after = (int32_t)node_db_schema_version(&ndb);
+        int32_t floor_after = (int32_t)node_db_schema_compat_floor(&ndb);
+        db_mig_close_raw_handle(&ndb);
+
+        node_db_backup_set_free_bytes_override_for_test(-1);
+        unsetenv("ZCL_DB_BACKUP_BEFORE_MIGRATE");
+
+        ASSERT_EQ(rc, NODE_DB_MIGRATE_ERR_BACKUP_FAILED);
+        /* Zero mutation: the guard fires before any DDL or persist call. */
+        ASSERT_EQ(version_after, 74);
+        ASSERT_EQ(floor_after, 74);
+
+        char bak_path[600];
+        snprintf(bak_path, sizeof(bak_path), "%s.schema74.bak", dbpath);
+        struct stat st;
+        ASSERT(stat(bak_path, &st) != 0);
+        PASS();
+    } _test_next:;
+    test_cleanup_tmpdir(dir);
+    return failures;
+}
+
 int test_db_migration_idempotent(void);
 
 int test_db_migration_idempotent(void)
@@ -1288,5 +1610,11 @@ int test_db_migration_idempotent(void)
     failures += t_supported_current_schema_reopens_normally();
     failures += t_v29_incompatible_schema_fails_without_stamp();
     failures += t_v82_board_kind_ceiling_row_copy_is_lossless();
+    failures += t_additive_migration_keeps_floor();
+    failures += t_breaking_migration_raises_floor();
+    failures += t_older_binary_within_floor_opens_read_compatible();
+    failures += t_floor_above_latest_refuses_with_typed_error();
+    failures += t_backup_flag_writes_file_before_breaking_step();
+    failures += t_backup_flag_refuses_on_insufficient_space();
     return failures;
 }

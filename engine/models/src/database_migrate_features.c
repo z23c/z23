@@ -120,10 +120,11 @@ static bool migration_app_events_schema_valid(struct node_db *ndb)
                k_app_events_previous_index_stored);
 }
 
-int node_db_migrate_features(struct node_db *ndb, int *version)
+int node_db_migrate_features(struct node_db *ndb, int *version, int *floor)
 {
     int applied = 0;
     int current_ver = *version;
+    int floor_ver = *floor;
 
     if (current_ver < 14) {
         /* v14: Store product/order tables as model-owned app schema. */
@@ -156,7 +157,7 @@ int node_db_migrate_features(struct node_db *ndb, int *version)
 
         node_db_exec(ndb,
             "INSERT OR IGNORE INTO schema_migrations(version) VALUES('014')");
-        DB_MIGRATE_PERSIST_VERSION(ndb, 14);
+        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 14, floor_ver);
         current_ver = 14;
         applied++;
     }
@@ -182,7 +183,7 @@ int node_db_migrate_features(struct node_db *ndb, int *version)
 
         node_db_exec(ndb,
             "INSERT OR IGNORE INTO schema_migrations(version) VALUES('015')");
-        DB_MIGRATE_PERSIST_VERSION(ndb, 15);
+        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 15, floor_ver);
         current_ver = 15;
         applied++;
     }
@@ -221,7 +222,7 @@ int node_db_migrate_features(struct node_db *ndb, int *version)
 
         node_db_exec(ndb,
             "INSERT OR IGNORE INTO schema_migrations(version) VALUES('016')");
-        DB_MIGRATE_PERSIST_VERSION(ndb, 16);
+        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 16, floor_ver);
         current_ver = 16;
         applied++;
     }
@@ -249,7 +250,7 @@ int node_db_migrate_features(struct node_db *ndb, int *version)
 
         node_db_exec(ndb,
             "INSERT OR IGNORE INTO schema_migrations(version) VALUES('017')");
-        DB_MIGRATE_PERSIST_VERSION(ndb, 17);
+        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 17, floor_ver);
         current_ver = 17;
         applied++;
     }
@@ -281,7 +282,7 @@ int node_db_migrate_features(struct node_db *ndb, int *version)
 
         node_db_exec(ndb,
             "INSERT OR IGNORE INTO schema_migrations(version) VALUES('018')");
-        DB_MIGRATE_PERSIST_VERSION(ndb, 18);
+        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 18, floor_ver);
         current_ver = 18;
         applied++;
     }
@@ -309,7 +310,7 @@ int node_db_migrate_features(struct node_db *ndb, int *version)
             "ON hodl_history(time)");
         node_db_exec(ndb,
             "INSERT OR IGNORE INTO schema_migrations(version) VALUES('019')");
-        DB_MIGRATE_PERSIST_VERSION(ndb, 19);
+        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 19, floor_ver);
         current_ver = 19;
         applied++;
     }
@@ -326,7 +327,7 @@ int node_db_migrate_features(struct node_db *ndb, int *version)
         node_db_exec(ndb, "ALTER TABLE products ADD COLUMN content_hash BLOB");
         node_db_exec(ndb,
             "INSERT OR IGNORE INTO schema_migrations(version) VALUES('020')");
-        DB_MIGRATE_PERSIST_VERSION(ndb, 20);
+        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 20, floor_ver);
         current_ver = 20;
         applied++;
     }
@@ -350,7 +351,7 @@ int node_db_migrate_features(struct node_db *ndb, int *version)
         if (!node_db_exec(ndb,
             "INSERT OR IGNORE INTO schema_migrations(version) VALUES('021')"))
             LOG_ERR("db", "v21 migration failed stamping schema_migrations");
-        DB_MIGRATE_PERSIST_VERSION(ndb, 21);
+        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 21, floor_ver);
         current_ver = 21;
         applied++;
     }
@@ -372,7 +373,7 @@ int node_db_migrate_features(struct node_db *ndb, int *version)
         if (!node_db_exec(ndb,
             "INSERT OR IGNORE INTO schema_migrations(version) VALUES('022')"))
             LOG_ERR("db", "v22 migration failed stamping schema_migrations");
-        DB_MIGRATE_PERSIST_VERSION(ndb, 22);
+        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 22, floor_ver);
         current_ver = 22;
         applied++;
     }
@@ -413,7 +414,7 @@ int node_db_migrate_features(struct node_db *ndb, int *version)
         if (!node_db_exec(ndb,
             "INSERT OR IGNORE INTO schema_migrations(version) VALUES('023')"))
             LOG_ERR("db", "v23 migration failed stamping schema_migrations");
-        DB_MIGRATE_PERSIST_VERSION(ndb, 23);
+        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 23, floor_ver);
         current_ver = 23;
         applied++;
     }
@@ -465,7 +466,7 @@ int node_db_migrate_features(struct node_db *ndb, int *version)
         if (!node_db_exec(ndb,
             "INSERT OR IGNORE INTO schema_migrations(version) VALUES('024')"))
             LOG_ERR("db", "v24 migration failed stamping schema_migrations");
-        DB_MIGRATE_PERSIST_VERSION(ndb, 24);
+        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 24, floor_ver);
         current_ver = 24;
         applied++;
     }
@@ -487,7 +488,7 @@ int node_db_migrate_features(struct node_db *ndb, int *version)
         if (!node_db_exec(ndb,
             "INSERT OR IGNORE INTO schema_migrations(version) VALUES('025')"))
             LOG_ERR("db", "v25 migration failed stamping schema_migrations");
-        DB_MIGRATE_PERSIST_VERSION(ndb, 25);
+        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 25, floor_ver);
         current_ver = 25;
         applied++;
     }
@@ -537,7 +538,7 @@ int node_db_migrate_features(struct node_db *ndb, int *version)
 
         node_db_exec(ndb,
             "INSERT OR IGNORE INTO schema_migrations(version) VALUES('026')");
-        DB_MIGRATE_PERSIST_VERSION(ndb, 26);
+        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 26, floor_ver);
         current_ver = 26;
         applied++;
     }
@@ -569,7 +570,7 @@ int node_db_migrate_features(struct node_db *ndb, int *version)
 
         node_db_exec(ndb,
             "INSERT OR IGNORE INTO schema_migrations(version) VALUES('027')");
-        DB_MIGRATE_PERSIST_VERSION(ndb, 27);
+        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 27, floor_ver);
         current_ver = 27;
         applied++;
     }
@@ -629,7 +630,7 @@ int node_db_migrate_features(struct node_db *ndb, int *version)
 
         node_db_exec(ndb,
             "INSERT OR IGNORE INTO schema_migrations(version) VALUES('028')");
-        DB_MIGRATE_PERSIST_VERSION(ndb, 28);
+        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 28, floor_ver);
         current_ver = 28;
         applied++;
     }
@@ -652,9 +653,17 @@ int node_db_migrate_features(struct node_db *ndb, int *version)
                       "INSERT OR IGNORE INTO schema_migrations(version) "
                       "VALUES('029')");
         int32_t version_29 = 29;
+        /* v29 is ADDITIVE (a new shared table + indexes): floor_ver carries
+         * over unchanged, but is still persisted in the same transaction as
+         * schema_version so a reader never observes one bumped without the
+         * other. */
+        int32_t floor_29 = (int32_t)floor_ver;
         if (ok)
             ok = node_db_state_set(ndb, "schema_version", &version_29,
                                    sizeof(version_29));
+        if (ok)
+            ok = node_db_state_set(ndb, "schema_compat_floor", &floor_29,
+                                   sizeof(floor_29));
         if (ok)
             ok = node_db_commit(ndb);
         if (!ok) {
@@ -666,9 +675,18 @@ int node_db_migrate_features(struct node_db *ndb, int *version)
         applied++;
     }
 
-    int applied2 = node_db_migrate_features_v30_up(ndb, &current_ver);
+    int applied2 = node_db_migrate_features_v30_up(ndb, &current_ver, &floor_ver);
+    if (applied2 < 0) {
+        /* A breaking step downstream refused for want of a pre-migration
+         * backup: current_ver/floor_ver were left exactly where that step's
+         * own guard set them, before it touched anything. */
+        *version = current_ver;
+        *floor = floor_ver;
+        return applied2;
+    }
     applied += applied2;
 
     *version = current_ver;
+    *floor = floor_ver;
     return applied;
 }

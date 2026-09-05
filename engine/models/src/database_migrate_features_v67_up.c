@@ -99,20 +99,22 @@ static int db_migrate_v82_agents_kind(struct node_db *ndb)
  * were — the next boot retries v82 from scratch, same as any other
  * mid-migration crash. */
 static int db_migrate_step_82(struct node_db *ndb, int *current_ver,
-                              int *applied)
+                              int *applied, int floor_ver)
 {
     if (*current_ver >= 82) return 0;
     if (db_migrate_v82_agents_kind(ndb) < 0) return -1;
-    DB_MIGRATE_PERSIST_VERSION(ndb, 82);
+    DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 82, floor_ver);
     *current_ver = 82;
     (*applied)++;
     return 0;
 }
 
-int node_db_migrate_features_v67_up(struct node_db *ndb, int *version)
+int node_db_migrate_features_v67_up(struct node_db *ndb, int *version,
+                                    int *floor)
 {
     int applied = 0;
     int current_ver = *version;
+    int floor_ver = *floor;
     if (current_ver < 67) {
         /* v67: signed seller claims bound to a want, direct artifact SHA3,
          * content.v2 CAS root, and optional node-verifiable receipts. This
@@ -159,7 +161,7 @@ int node_db_migrate_features_v67_up(struct node_db *ndb, int *version)
                 "INSERT OR IGNORE INTO schema_migrations(version) "
                 "VALUES('067')"))
             LOG_ERR("db", "migrate v67: migration stamp failed");
-        DB_MIGRATE_PERSIST_VERSION(ndb, 67);
+        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 67, floor_ver);
         current_ver = 67;
         applied++;
     }
@@ -213,7 +215,7 @@ int node_db_migrate_features_v67_up(struct node_db *ndb, int *version)
                 "INSERT OR IGNORE INTO schema_migrations(version) "
                 "VALUES('068')"))
             LOG_ERR("db", "migrate v68: migration stamp failed");
-        DB_MIGRATE_PERSIST_VERSION(ndb, 68);
+        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 68, floor_ver);
         current_ver = 68;
         applied++;
     }
@@ -221,6 +223,11 @@ int node_db_migrate_features_v67_up(struct node_db *ndb, int *version)
         /* v69: new async events bind the candidate source root directly.
          * Existing v68 rows retain their v1 event roots and an empty source;
          * the next append upgrades that chain to the v2 root domain. */
+        if (!node_db_backup_before_breaking_migration(ndb, current_ver)) {
+            *version = current_ver;
+            *floor = floor_ver;
+            return NODE_DB_MIGRATE_ERR_BACKUP_FAILED;
+        }
         if (!node_db_exec(ndb,
                 "CREATE TABLE build_proof_events_v69("
                 "event_root TEXT NOT NULL UNIQUE CHECK(length(event_root)=64),"
@@ -281,7 +288,8 @@ int node_db_migrate_features_v67_up(struct node_db *ndb, int *version)
                 "INSERT OR IGNORE INTO schema_migrations(version) "
                 "VALUES('069')"))
             LOG_ERR("db", "migrate v69: migration stamp failed");
-        DB_MIGRATE_PERSIST_VERSION(ndb, 69);
+        floor_ver = 69; /* BREAKING: build_proof_events source-root rebuild */
+        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 69, floor_ver);
         current_ver = 69;
         applied++;
     }
@@ -305,7 +313,7 @@ int node_db_migrate_features_v67_up(struct node_db *ndb, int *version)
                 "INSERT OR IGNORE INTO schema_migrations(version) "
                 "VALUES('070')"))
             LOG_ERR("db", "migrate v70: migration stamp failed");
-        DB_MIGRATE_PERSIST_VERSION(ndb, 70);
+        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 70, floor_ver);
         current_ver = 70;
         applied++;
     }
@@ -328,7 +336,7 @@ int node_db_migrate_features_v67_up(struct node_db *ndb, int *version)
                 "INSERT OR IGNORE INTO schema_migrations(version) "
                 "VALUES('071')"))
             LOG_ERR("db", "migrate v71: migration stamp failed");
-        DB_MIGRATE_PERSIST_VERSION(ndb, 71);
+        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 71, floor_ver);
         current_ver = 71;
         applied++;
     }
@@ -347,7 +355,7 @@ int node_db_migrate_features_v67_up(struct node_db *ndb, int *version)
                 "INSERT OR IGNORE INTO schema_migrations(version) "
                 "VALUES('072')"))
             LOG_ERR("db", "migrate v72: migration stamp failed");
-        DB_MIGRATE_PERSIST_VERSION(ndb, 72);
+        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 72, floor_ver);
         current_ver = 72;
         applied++;
     }
@@ -368,7 +376,7 @@ int node_db_migrate_features_v67_up(struct node_db *ndb, int *version)
                 "INSERT OR IGNORE INTO schema_migrations(version) "
                 "VALUES('073')"))
             LOG_ERR("db", "migrate v73: migration stamp failed");
-        DB_MIGRATE_PERSIST_VERSION(ndb, 73);
+        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 73, floor_ver);
         current_ver = 73;
         applied++;
     }
@@ -387,7 +395,7 @@ int node_db_migrate_features_v67_up(struct node_db *ndb, int *version)
                 "INSERT OR IGNORE INTO schema_migrations(version) "
                 "VALUES('074')"))
             LOG_ERR("db", "migrate v74: migration stamp failed");
-        DB_MIGRATE_PERSIST_VERSION(ndb, 74);
+        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 74, floor_ver);
         current_ver = 74;
         applied++;
     }
@@ -395,6 +403,11 @@ int node_db_migrate_features_v67_up(struct node_db *ndb, int *version)
         /* v75: an in-flight Yardsale confirmation is durable before its
          * outbound accept can leave the node. ARMING is intentionally sticky
          * across an uncertain process exit, preventing automatic replay. */
+        if (!node_db_backup_before_breaking_migration(ndb, current_ver)) {
+            *version = current_ver;
+            *floor = floor_ver;
+            return NODE_DB_MIGRATE_ERR_BACKUP_FAILED;
+        }
         if (!node_db_exec(ndb,
                 "CREATE TABLE yardsale_plans_v75("
                 "plan_root TEXT PRIMARY KEY CHECK(length(plan_root)=64),"
@@ -418,7 +431,8 @@ int node_db_migrate_features_v67_up(struct node_db *ndb, int *version)
                 "INSERT OR IGNORE INTO schema_migrations(version) "
                 "VALUES('075')"))
             LOG_ERR("db", "migrate v75: migration stamp failed");
-        DB_MIGRATE_PERSIST_VERSION(ndb, 75);
+        floor_ver = 75; /* BREAKING: yardsale_plans state-CHECK rebuild */
+        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 75, floor_ver);
         current_ver = 75;
         applied++;
     }
@@ -453,7 +467,7 @@ int node_db_migrate_features_v67_up(struct node_db *ndb, int *version)
                 "INSERT OR IGNORE INTO schema_migrations(version) "
                 "VALUES('076')"))
             LOG_ERR("db", "migrate v76: migration stamp failed");
-        DB_MIGRATE_PERSIST_VERSION(ndb, 76);
+        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 76, floor_ver);
         current_ver = 76;
         applied++;
     }
@@ -476,7 +490,7 @@ int node_db_migrate_features_v67_up(struct node_db *ndb, int *version)
                 "INSERT OR IGNORE INTO schema_migrations(version) "
                 "VALUES('077')"))
             LOG_ERR("db", "migrate v77: migration stamp failed");
-        DB_MIGRATE_PERSIST_VERSION(ndb, 77);
+        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 77, floor_ver);
         current_ver = 77;
         applied++;
     }
@@ -518,7 +532,7 @@ int node_db_migrate_features_v67_up(struct node_db *ndb, int *version)
                 "INSERT OR IGNORE INTO schema_migrations(version) "
                 "VALUES('078')"))
             LOG_ERR("db", "migrate v78: migration stamp failed");
-        DB_MIGRATE_PERSIST_VERSION(ndb, 78);
+        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 78, floor_ver);
         current_ver = 78;
         applied++;
     }
@@ -529,6 +543,11 @@ int node_db_migrate_features_v67_up(struct node_db *ndb, int *version)
          * authority with canonical sealed geometry and resumable claims. A
          * fresh baseline already has the v79 shape and skips replacement. */
         if (!mesh_capability_v79_present(ndb)) {
+            if (!node_db_backup_before_breaking_migration(ndb, current_ver)) {
+                *version = current_ver;
+                *floor = floor_ver;
+                return NODE_DB_MIGRATE_ERR_BACKUP_FAILED;
+            }
             if (!node_db_exec(ndb,
                     "DROP INDEX IF EXISTS "
                     "idx_mesh_capability_grants_pairing_state"))
@@ -578,7 +597,8 @@ int node_db_migrate_features_v67_up(struct node_db *ndb, int *version)
                 "INSERT OR IGNORE INTO schema_migrations(version) "
                 "VALUES('079')"))
             LOG_ERR("db", "migrate v79: migration stamp failed");
-        DB_MIGRATE_PERSIST_VERSION(ndb, 79);
+        floor_ver = 79; /* BREAKING: mesh_capability_grants v2 rebuild */
+        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 79, floor_ver);
         current_ver = 79;
         applied++;
     }
@@ -636,7 +656,7 @@ int node_db_migrate_features_v67_up(struct node_db *ndb, int *version)
                 "INSERT OR IGNORE INTO schema_migrations(version) "
                 "VALUES('080')"))
             LOG_ERR("db", "migrate v80: migration stamp failed");
-        DB_MIGRATE_PERSIST_VERSION(ndb, 80);
+        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 80, floor_ver);
         current_ver = 80;
         applied++;
     }
@@ -666,11 +686,12 @@ int node_db_migrate_features_v67_up(struct node_db *ndb, int *version)
                 "INSERT OR IGNORE INTO schema_migrations(version) "
                 "VALUES('081')"))
             LOG_ERR("db", "migrate v81: migration stamp failed");
-        DB_MIGRATE_PERSIST_VERSION(ndb, 81);
+        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 81, floor_ver);
         current_ver = 81;
         applied++;
     }
-    (void)db_migrate_step_82(ndb, &current_ver, &applied);
+    (void)db_migrate_step_82(ndb, &current_ver, &applied, floor_ver);
     *version = current_ver;
+    *floor = floor_ver;
     return applied;
 }

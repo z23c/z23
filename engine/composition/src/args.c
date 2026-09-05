@@ -136,6 +136,12 @@ void print_usage(const char *prog)
     printf("                      phrase when stdout is not a terminal (the words\n");
     printf("                      would only reach node.log). Nothing is printed and\n");
     printf("                      no phrase is drawn; back it up as a file instead.\n");
+    printf("  -db-backup-before-migrate  Copy node.db to node.db.schema<N>.bak\n");
+    printf("                      beside it before this boot applies any BREAKING\n");
+    printf("                      schema step (default OFF: node.db is routinely\n");
+    printf("                      too large to casually double; opt in for one\n");
+    printf("                      upgrade you want a rollback copy of). Refuses to\n");
+    printf("                      start the migration if free space is short.\n");
     printf("  -backfill-nullifiers  One-shot owner-gated C-3 nullifier history backfill\n");
     printf("  -enforce-sapling-root  Reject ANY hashFinalSaplingRoot mismatch\n");
     printf("                      (default OFF: only all-zeros is rejected).\n");
@@ -722,6 +728,22 @@ int args_parse_node_options(int argc, char **argv, struct app_context *ctx,
              * creates one says so loudly. Read by
              * boot_wallet_phrase_backup_waived() (config/boot_wallet_phrase.h). */
             platform_environment_set("ZCL_WALLET_NO_PHRASE_BACKUP", "1",
+                                     1);
+        }
+        else if (strcmp(argv[i], "-db-backup-before-migrate") == 0) {
+            /* Opt-in pre-migration safety net. node.db is routinely too
+             * large to casually copy before every upgrade "just in case" —
+             * that size is exactly why a newer binary opening an older
+             * database now has a read-compatible path instead of a hard
+             * refusal (see database_migrate.c). This flag is the opposite
+             * choice for the one upgrade an operator judges worth the wait
+             * and the disk: before this boot applies any BREAKING schema
+             * step, it copies node.db to node.db.schema<N>.bak beside it via
+             * SQLite's online backup API, and refuses to proceed with that
+             * step at all if free space is short. Read by
+             * node_db_backup_before_breaking_migration()
+             * (engine/models/src/database_backup.c). Default OFF. */
+            platform_environment_set("ZCL_DB_BACKUP_BEFORE_MIGRATE", "1",
                                      1);
         }
         else if (strcmp(argv[i], "-rebuildfromlog") == 0) ctx->boot_from_log = true;

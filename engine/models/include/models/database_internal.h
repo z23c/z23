@@ -55,33 +55,90 @@
 #define ZCL_NODE_DB_PRAGMA_NUM_(x_) #x_
 #define ZCL_NODE_DB_PRAGMA_NUM(x_) ZCL_NODE_DB_PRAGMA_NUM_(x_)
 
-/* Persist the schema_version counter; halt migration on failure so
- * we don't silently re-apply the same migration on next boot. Used by
- * every versioned migration block in database_migrate.c and
- * database_migrate_features.c. */
-#define DB_MIGRATE_PERSIST_VERSION(ndb, ver) do { \
+/* Persist schema_version AND schema_compat_floor together, in the same
+ * write, so a reader can never observe one bumped without the other; halt
+ * migration on failure so we don't silently re-apply the same migration on
+ * next boot. `floor_ver` is the RUNNING floor value the caller is
+ * threading through its migration chain: pass it unchanged for an ADDITIVE
+ * step (a new table/column/index an older binary simply ignores) and set it
+ * to `ver` itself, before this call, for a BREAKING step (a rename, drop, or
+ * a change to what an existing column/row means). Used by every versioned
+ * migration block in database_migrate.c and database_migrate_features*.c. */
+#define DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, ver, floor_ver) do { \
     int32_t _v = (int32_t)(ver); \
-    if (!node_db_state_set((ndb), "schema_version", &_v, sizeof(_v))) { \
+    int32_t _f = (int32_t)(floor_ver); \
+    bool _txn_owned = node_db_begin((ndb)); \
+    bool _ok = node_db_state_set((ndb), "schema_version", &_v, sizeof(_v)) && \
+               node_db_state_set((ndb), "schema_compat_floor", &_f, \
+                                 sizeof(_f)); \
+    if (_txn_owned) { \
+        if (_ok) \
+            _ok = node_db_commit((ndb)); \
+        else \
+            (void)node_db_rollback((ndb)); \
+    } \
+    if (!_ok) { \
         LOG_ERR("db", "migrate: failed to persist " \
-                "schema_version=%d; aborting migration to prevent " \
-                "loop on next boot", (int)_v); \
+                "schema_version=%d schema_compat_floor=%d atomically; " \
+                "aborting migration to prevent loop on next boot", \
+                (int)_v, (int)_f); \
     } \
 } while (0)
 
-/* Log the Campaign-C3 newer-schema refusal banner. Defined in
+/* Log the Campaign-C3 newer-schema refusal banner: schema_version exceeds
+ * NODE_DB_MAX_SCHEMA AND the database's own schema_compat_floor is also
+ * above it, so no binary at this level can safely open it. Defined in
  * database_migrate.c; called by the open-time preflight in database.c
  * (before anything writes to the datadir) and by node_db_migrate()'s
  * own recheck. */
-void node_db_log_newer_schema_refusal(int current_ver);
+void node_db_log_newer_schema_refusal(int current_ver, int floor);
+/* Log the read-compatible open banner: schema_version exceeds
+ * NODE_DB_MAX_SCHEMA but the database's own schema_compat_floor is at or
+ * below it, so this binary opens normally without attempting any schema
+ * write. Defined in database_migrate.c; called only from node_db_migrate()
+ * (the preflight in database.c already let the open proceed). */
+void node_db_log_read_compatible_open(int current_ver, int floor);
 void node_db_log_unknown_schema_refusal(const char *detail);
+
+/* node_db_migrate()'s error code when a required pre-migration backup could
+ * not be written (see node_db_backup_before_breaking_migration below) — kept
+ * distinct from the generic -1 "not open" so a caller can tell WHY the
+ * migration stopped instead of only that it did. */
+#define NODE_DB_MIGRATE_ERR_BACKUP_FAILED (-3)
+
+/* Opt-in pre-migration safety net for -db-backup-before-migrate
+ * (ZCL_DB_BACKUP_BEFORE_MIGRATE; see engine/composition/src/args.c). When the
+ * flag is unset this is a no-op that returns true immediately — it never
+ * gates a migration nobody asked it to protect. When set, it copies ndb's
+ * live database to node.db.schema<old_schema_version>.bak beside it, via
+ * SQLite's own online backup API, before a BREAKING migration step (one that
+ * renames, drops, or repurposes existing rows/columns — see the versions
+ * marked BREAKING in database_migrate_features_v49_up.c and
+ * database_migrate_features_v67_up.c) is allowed to touch the live file.
+ * Refuses (returns false, writing nothing partial) rather than racing a full
+ * disk when free space is short. Defined in database_backup.c. */
+bool node_db_backup_before_breaking_migration(struct node_db *ndb,
+                                              int old_schema_version);
+
+/* Unit-test seam: override the free-space figure
+ * node_db_backup_before_breaking_migration() compares against the database
+ * file size + margin, without touching the real filesystem. A negative value
+ * (the default) restores the real platform_disk_space_available() query.
+ * Process-local; mirrors disk_monitor_set_free_bytes_for_test(). */
+void node_db_backup_set_free_bytes_override_for_test(int64_t bytes);
 
 /* Existing-file schema preflight. This runs before database.c opens a
  * write-capable handle or applies journal_mode=WAL. FRESH includes a missing
  * path and a genuinely empty SQLite store; SUPPORTED means an exact, readable
- * 4-byte schema marker in this binary's supported range. */
+ * 4-byte schema marker in this binary's supported range; READ_COMPATIBLE
+ * means the marker is above this binary's NODE_DB_MAX_SCHEMA but the
+ * database's own schema_compat_floor is not — the open proceeds exactly like
+ * SUPPORTED, and node_db_migrate()'s own recheck (which independently
+ * derives the same floor) logs the WARN and skips every schema write. */
 enum node_db_schema_preflight_state {
     NODE_DB_SCHEMA_PREFLIGHT_FRESH = 0,
     NODE_DB_SCHEMA_PREFLIGHT_SUPPORTED,
+    NODE_DB_SCHEMA_PREFLIGHT_READ_COMPATIBLE,
     NODE_DB_SCHEMA_PREFLIGHT_NEWER,
     NODE_DB_SCHEMA_PREFLIGHT_UNKNOWN,
 };
@@ -89,6 +146,11 @@ enum node_db_schema_preflight_state {
 struct node_db_schema_preflight {
     enum node_db_schema_preflight_state state;
     int32_t version;
+    /* schema_compat_floor as read from this database, or `version` itself
+     * when no floor key is recorded (pre-unit database: no downgrade is
+     * assumed safe). Populated for SUPPORTED, READ_COMPATIBLE and NEWER;
+     * 0 for FRESH/UNKNOWN, where no version was established. */
+    int32_t floor;
     const char *detail;
 };
 
@@ -99,21 +161,25 @@ struct node_db_schema_preflight node_db_schema_preflight_existing(
  * and orders, ZCL Market file offers, ZNAM name registry, ZMSG
  * messaging, ZSWP atomic-swap contracts, HODL wave history, and the
  * content-addressed blob store. `*version` is the current schema
- * version on entry and the post-migration version on return; returns
+ * version on entry and the post-migration version on return; `*floor` is
+ * likewise the running schema_compat_floor. Returns
  * the number of migration blocks applied. (Defined in
  * database_migrate_features.c; called only by node_db_migrate().) */
-int node_db_migrate_features(struct node_db *ndb, int *version);
+int node_db_migrate_features(struct node_db *ndb, int *version, int *floor);
 
 /* Continuation of node_db_migrate_features() for schema v30+ (E1 file-size
  * split — database_migrate_features_v30_up.c). Same contract; called only by
  * node_db_migrate_features() at the v30 handoff. */
-int node_db_migrate_features_v30_up(struct node_db *ndb, int *version);
+int node_db_migrate_features_v30_up(struct node_db *ndb, int *version,
+                                    int *floor);
 
 /* Continuation of node_db_migrate_features_v30_up() for schema v49+ (same
  * E1 file-size split — database_migrate_features_v49_up.c). Same contract;
  * called only by node_db_migrate_features_v30_up() at the v49 handoff. */
-int node_db_migrate_features_v49_up(struct node_db *ndb, int *version);
-int node_db_migrate_features_v67_up(struct node_db *ndb, int *version);
+int node_db_migrate_features_v49_up(struct node_db *ndb, int *version,
+                                    int *floor);
+int node_db_migrate_features_v67_up(struct node_db *ndb, int *version,
+                                    int *floor);
 
 /* Execute `sql`, logging any error with `where` context. Returns the
  * sqlite3 rc so callers can make tolerance decisions. (Defined in

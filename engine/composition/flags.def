@@ -470,6 +470,11 @@ Z23_FLAG("ZCL_CYCLOMATIC_ROOT", "env_build", "-", "-",
           "can measure a planted fixture instead of the whole checkout")
 Z23_FLAG("ZCL_DATADIR", "env_runtime", "-", "-",
           "first use engine/entry/main_cli_modes.c:2421; documented at docs/BENCHMARKS_LOG.md:34: | 2026-06-04 | 671fd79e3 | #6 soak-ci proxy (make soak-ci, 180s --ci-proxy) | machinery...")
+Z23_FLAG("ZCL_DB_BACKUP_BEFORE_MIGRATE", "env_runtime", "-", "-",
+          "set by -db-backup-before-migrate (engine/composition/src/args.c:746); "
+          "first use engine/models/src/database_backup.c:63; when set, copies "
+          "node.db to node.db.schema<N>.bak via SQLite's online backup API "
+          "before a BREAKING migration step touches the live file")
 Z23_FLAG("ZCL_DB_LIFETIME_TRACE", "env_runtime", "-", "-",
           "undocumented; first use engine/models/src/database_lifetime.c:92")
 Z23_FLAG("ZCL_DB_LONG_OP_LOG_ALL", "env_runtime", "-", "-",

@@ -297,11 +297,15 @@ REMOTE_COMMAND_CLASS("status", REMOTE_CLASS_NEVER, "")
  *
  *   Raw chain and database content rather than a posture projection —
  *   core.chain.block.get, core.chain.transaction.get, core.chain.mempool.list,
- *   core.storage.query, core.storage.query.offline, core.storage.integrity.
- *   The P2P protocol already serves blocks to anyone who asks, with its own
- *   bounds; core.storage.query is arbitrary query authority over the node
- *   database, which is the general-purpose primitive a typed channel exists to
- *   refuse.
+ *   core.storage.query, core.storage.query.offline, core.storage.integrity,
+ *   core.storage.schema.offline. The P2P protocol already serves blocks to
+ *   anyone who asks, with its own bounds; core.storage.query is arbitrary
+ *   query authority over the node database, which is the general-purpose
+ *   primitive a typed channel exists to refuse. core.storage.schema.offline
+ *   answers with nothing but integers and a verdict string, but it is an
+ *   OFFLINE_COPY leaf that opens an arbitrary caller-named datadir path on
+ *   this machine's own filesystem — the same path-reach this group already
+ *   refuses regardless of how bounded the payload coming back is.
  *
  *   Unbounded or work-starting calls. core.node.bootwait and core.chain.wait.*
  *   block until something happens, which turns one remote call into a held
@@ -373,6 +377,7 @@ REMOTE_COMMAND_CLASS("core.wallet.replay", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("core.storage.integrity", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("core.storage.query", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("core.storage.query.offline", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("core.storage.schema.offline", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("core.mining.benchmark", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("core.node.bootwait", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("core.identity.resolve", REMOTE_CLASS_NEVER, "")

@@ -27,11 +27,41 @@
 
 /* The Campaign-C3 newer-schema refusal banner, shared by the open-time
  * preflight in database.c (which fires before anything writes to the
- * datadir) and the migration-runner recheck in node_db_migrate() below. */
-void node_db_log_newer_schema_refusal(int current_ver)
+ * datadir) and the migration-runner recheck in node_db_migrate() below.
+ * Fires only when the database's own schema_compat_floor is ALSO above
+ * NODE_DB_MAX_SCHEMA — a floor at or below it opens READ-COMPATIBLE instead
+ * (see node_db_log_read_compatible_open). */
+void node_db_log_newer_schema_refusal(int current_ver, int floor)
 {
-    LOG_WARN("model", "\nFATAL: node.db schema_version=%d but this binary only knows up to %d.\n" "       Refusing to open a database written by a newer binary —\n" "       writes through this layer would silently corrupt the data.\n" "       Either run a binary that supports schema v%d+,\n" "       or restore node.db from a backup taken before the upgrade.\n", current_ver, NODE_DB_MAX_SCHEMA, current_ver);
+    LOG_WARN("model",
+        "\nFATAL: node.db schema_version=%d but this binary only knows up to %d,\n"
+        "       and the database's own compat floor is v%d — still newer than\n"
+        "       this binary. Refusing to open: writes through this layer would\n"
+        "       silently corrupt data this binary cannot fully understand.\n"
+        "       Either run a binary that supports schema v%d+ (the floor),\n"
+        "       or restore node.db from a backup taken before the upgrade.\n",
+        current_ver, NODE_DB_MAX_SCHEMA, floor, floor);
     fflush(stderr);
+}
+
+/* The read-compatible open banner: schema_version is above what this binary
+ * knows, but the database's own compat floor says an older binary at this
+ * exact level is still safe to run against it — every migration block below
+ * is skipped (no schema write is attempted) and this binary otherwise opens
+ * and runs normally. This is the rollback path Campaign C3 did not have: an
+ * operator can downgrade the binary back to schema v<floor>+ and it just
+ * works, read/write, without ever touching the schema this binary does not
+ * understand. */
+void node_db_log_read_compatible_open(int current_ver, int floor)
+{
+    LOG_WARN("model",
+        "db: node.db schema_version=%d is newer than this binary's latest "
+        "known schema %d (this binary is OLDER than the database that last "
+        "migrated it). Opening READ-COMPATIBLE: the database's own compat "
+        "floor is v%d, at or below what this binary understands, so no "
+        "schema change will be attempted. This is expected during a rolling "
+        "downgrade; upgrade this binary to schema v%d+ when convenient.",
+        current_ver, NODE_DB_MAX_SCHEMA, floor, current_ver);
 }
 
 void node_db_log_unknown_schema_refusal(const char *detail)
@@ -229,10 +259,56 @@ int node_db_schema_version(struct node_db *ndb)
     return ver;
 }
 
+int node_db_schema_compat_floor(struct node_db *ndb)
+{
+    int32_t floor = 0;
+    size_t len = 0;
+    if (!node_db_state_get(ndb, "schema_compat_floor",
+                           &floor, sizeof(floor), &len) ||
+        len != sizeof(floor)) {
+        /* No floor recorded — a pre-unit database, or a fresh one mid-boot
+         * before its first migration block has stamped one. Never guess a
+         * lower floor than what this database is already known to be at. */
+        return node_db_schema_version(ndb);
+        // raw-return-ok:missing-key-means-floor-equals-own-version
+    }
+    return floor;
+}
+
 int node_db_migrate(struct node_db *ndb, const char *datadir)
 {
     (void)datadir;
     if (!ndb->open) return -1;
+
+    /* Campaign C3: schema-downgrade / compat-floor recheck. This mirrors
+     * (and is independently re-derived from the same node_state keys as)
+     * the open-time preflight in database.c, which already decided whether
+     * to let this open proceed at all — a runtime reopen does not go
+     * through that preflight a second time, so this recheck is the only
+     * gate it sees. Checked FIRST, before the schema_migrations bootstrap
+     * below: a read-compatible open must never attempt any schema write,
+     * not even an idempotent one.
+     *
+     * If schema_version exceeds what this binary knows about AND the
+     * database's own schema_compat_floor is also above it, refuse: the
+     * newer binary applied at least one BREAKING change (a rename, drop, or
+     * a change to what an existing column/row means) that this binary
+     * cannot safely read or write through. If the floor is at or below what
+     * this binary knows, every change beyond it was ADDITIVE (new
+     * tables/columns/indexes this binary simply does not touch) — open and
+     * run normally, but skip every migration block below: this binary must
+     * never attempt a schema write for a version it does not understand. */
+    int current_ver = node_db_schema_version(ndb);
+    if (current_ver > NODE_DB_MAX_SCHEMA) {
+        int floor = node_db_schema_compat_floor(ndb);
+        if (floor > NODE_DB_MAX_SCHEMA) {
+            node_db_log_newer_schema_refusal(current_ver, floor);
+            return -2;
+        }
+        if (!ndb->suppress_migrate_banner)
+            node_db_log_read_compatible_open(current_ver, floor);
+        return 0;
+    }
 
     /* Ensure schema_migrations table exists.  If this fails,
      * node_db_schema_version() will return 0 and every migration will
@@ -248,27 +324,11 @@ int node_db_migrate(struct node_db *ndb, const char *datadir)
     }
 
     int applied = 0;
-    int current_ver = node_db_schema_version(ndb);
+    int floor = node_db_schema_compat_floor(ndb);
     /* Boot prints the version banner; a runtime reopen suppresses it so the
      * reopen cannot be mistaken for a boot in a filtered log. */
     if (!ndb->suppress_migrate_banner)
         printf("db: current schema version %d\n", current_ver);
-
-    /* Campaign C3: schema-downgrade detection.
-     *
-     * If the on-disk schema_version exceeds what this binary knows
-     * about, refuse to proceed. The newer binary may have added
-     * columns or constraints we don't understand; opening as-is and
-     * writing through this binary's persistence layer would silently
-     * corrupt the data the newer binary expected to see.
-     *
-     * The operator must either run a binary that supports schema vN+,
-     * or restore from a backup taken before the upgrade. There is no
-     * automatic downgrade path. */
-    if (current_ver > NODE_DB_MAX_SCHEMA) {
-        node_db_log_newer_schema_refusal(current_ver);
-        return -2;
-    }
 
     /* Future migrations go here as versioned blocks.
      * Each block checks schema_migrations before running.
@@ -289,7 +349,7 @@ int node_db_migrate(struct node_db *ndb, const char *datadir)
     if (current_ver < 2) {
         node_db_exec(ndb,
             "INSERT OR IGNORE INTO schema_migrations(version) VALUES('002')");
-        DB_MIGRATE_PERSIST_VERSION(ndb, 2);
+        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 2, floor);
         current_ver = 2;
         applied++;
     }
@@ -304,7 +364,7 @@ int node_db_migrate(struct node_db *ndb, const char *datadir)
             "ALTER TABLE wallet_sapling_notes ADD COLUMN witness_height INTEGER DEFAULT 0");
         node_db_exec(ndb,
             "INSERT OR IGNORE INTO schema_migrations(version) VALUES('003')");
-        DB_MIGRATE_PERSIST_VERSION(ndb, 3);
+        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 3, floor);
         current_ver = 3;
         applied++;
     }
@@ -339,7 +399,7 @@ int node_db_migrate(struct node_db *ndb, const char *datadir)
             " ON block_index_cache(height)");
         node_db_exec(ndb,
             "INSERT OR IGNORE INTO schema_migrations(version) VALUES('004')");
-        DB_MIGRATE_PERSIST_VERSION(ndb, 4);
+        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 4, floor);
         current_ver = 4;
         applied++;
     }
@@ -409,7 +469,7 @@ int node_db_migrate(struct node_db *ndb, const char *datadir)
 
         node_db_exec(ndb,
             "INSERT OR IGNORE INTO schema_migrations(version) VALUES('005')");
-        DB_MIGRATE_PERSIST_VERSION(ndb, 5);
+        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 5, floor);
         current_ver = 5;
         applied++;
     }
@@ -429,7 +489,7 @@ int node_db_migrate(struct node_db *ndb, const char *datadir)
             "v6: idx_snote_address");
         node_db_exec(ndb,
             "INSERT OR IGNORE INTO schema_migrations(version) VALUES('006')");
-        DB_MIGRATE_PERSIST_VERSION(ndb, 6);
+        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 6, floor);
         current_ver = 6;
         applied++;
     }
@@ -478,7 +538,7 @@ int node_db_migrate(struct node_db *ndb, const char *datadir)
 
         node_db_exec(ndb,
             "INSERT OR IGNORE INTO schema_migrations(version) VALUES('007')");
-        DB_MIGRATE_PERSIST_VERSION(ndb, 7);
+        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 7, floor);
         current_ver = 7;
         applied++;
     }
@@ -510,7 +570,7 @@ int node_db_migrate(struct node_db *ndb, const char *datadir)
 
         node_db_exec(ndb,
             "INSERT OR IGNORE INTO schema_migrations(version) VALUES('008')");
-        DB_MIGRATE_PERSIST_VERSION(ndb, 8);
+        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 8, floor);
         current_ver = 8;
         applied++;
     }
@@ -603,7 +663,7 @@ int node_db_migrate(struct node_db *ndb, const char *datadir)
 
         node_db_exec(ndb,
             "INSERT OR IGNORE INTO schema_migrations(version) VALUES('009')");
-        DB_MIGRATE_PERSIST_VERSION(ndb, 9);
+        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 9, floor);
         current_ver = 9;
         applied++;
     }
@@ -617,7 +677,7 @@ int node_db_migrate(struct node_db *ndb, const char *datadir)
             "duplicate column name");
         node_db_exec(ndb,
             "INSERT OR IGNORE INTO schema_migrations(version) VALUES('010')");
-        DB_MIGRATE_PERSIST_VERSION(ndb, 10);
+        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 10, floor);
         current_ver = 10;
         applied++;
     }
@@ -640,7 +700,7 @@ int node_db_migrate(struct node_db *ndb, const char *datadir)
             "ON peers(is_zcl23 DESC, bandwidth_score DESC)");
         node_db_exec(ndb,
             "INSERT OR IGNORE INTO schema_migrations(version) VALUES('011')");
-        DB_MIGRATE_PERSIST_VERSION(ndb, 11);
+        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 11, floor);
         current_ver = 11;
         applied++;
     }
@@ -664,7 +724,7 @@ int node_db_migrate(struct node_db *ndb, const char *datadir)
 
         node_db_exec(ndb,
             "INSERT OR IGNORE INTO schema_migrations(version) VALUES('012')");
-        DB_MIGRATE_PERSIST_VERSION(ndb, 12);
+        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 12, floor);
         current_ver = 12;
         applied++;
     }
@@ -694,7 +754,7 @@ int node_db_migrate(struct node_db *ndb, const char *datadir)
 
         node_db_exec(ndb,
             "INSERT OR IGNORE INTO schema_migrations(version) VALUES('013')");
-        DB_MIGRATE_PERSIST_VERSION(ndb, 13);
+        DB_MIGRATE_PERSIST_VERSION_FLOOR(ndb, 13, floor);
         current_ver = 13;
         applied++;
     }
@@ -704,9 +764,9 @@ int node_db_migrate(struct node_db *ndb, const char *datadir)
      * blob store) are applied by node_db_migrate_features() in
      * database_migrate_features.c — same versioned-block pattern, same
      * schema_migrations + schema_version stamping. */
-    int feature_applied = node_db_migrate_features(ndb, &current_ver);
+    int feature_applied = node_db_migrate_features(ndb, &current_ver, &floor);
     if (feature_applied < 0)
-        return -1;
+        return feature_applied; /* e.g. NODE_DB_MIGRATE_ERR_BACKUP_FAILED */
     applied += feature_applied;
 
     if (applied > 0)

@@ -256,6 +256,7 @@ ZCL_MODULE_CAPABILITY("engine/models/src/build_fabric.c", CAP_FS_WRITE|CAP_FS_RE
 ZCL_MODULE_CAPABILITY("engine/models/src/build_proof_event.c", CAP_FS_WRITE|CAP_FS_READ, "")
 ZCL_MODULE_CAPABILITY("engine/models/src/contact.c", CAP_FS_WRITE|CAP_FS_READ, "")
 ZCL_MODULE_CAPABILITY("engine/models/src/database.c", CAP_FS_READ|CAP_CLOCK|CAP_FS_WRITE, "")
+ZCL_MODULE_CAPABILITY("engine/models/src/database_backup.c", CAP_FS_READ|CAP_FS_WRITE, "-db-backup-before-migrate's online-backup copy: stats and reads node.db's own size, queries free space, and writes a whole sibling .bak database file via SQLite's backup API before a BREAKING migration step")
 ZCL_MODULE_CAPABILITY("engine/models/src/database_lifetime.c", CAP_FS_READ|CAP_FS_WRITE|CAP_PRIVILEGE, "the one process-wide ownership boundary for SQLite file lifetimes: reaches the kernel directly via syscall() for the no-clobber rename glibc does not expose under strict C23 flags")
 ZCL_MODULE_CAPABILITY("engine/models/src/database_long_op.c", CAP_FS_READ, "")
 ZCL_MODULE_CAPABILITY("engine/models/src/database_migrate.c", CAP_FS_READ|CAP_CLOCK|CAP_FS_WRITE, "")

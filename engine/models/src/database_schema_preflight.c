@@ -260,6 +260,58 @@ static bool parse_migration_version(const unsigned char *text, int bytes,
     return true;
 }
 
+/* Read the schema_compat_floor node_state key the same way schema_version
+ * itself is read: exactly one 4-byte blob. Absence is NOT an error — it is
+ * the expected shape of any database written before the compat floor
+ * existed — so the caller supplies `marker` (the already-validated
+ * schema_version) as the conservative default: no downgrade is assumed
+ * safe for a database this binary never classified itself. */
+static bool read_compat_floor(sqlite3 *db, int32_t marker, int32_t *floor_out,
+                              const char **detail_out)
+{
+    sqlite3_stmt *stmt = NULL;
+    int rc = sqlite3_prepare_v2(db,
+        "SELECT value FROM node_state WHERE key='schema_compat_floor'",
+        -1, &stmt, NULL);
+    if (rc != SQLITE_OK || !stmt) {
+        sqlite3_finalize(stmt);
+        *detail_out = "SCHEMA_VERSION_UNKNOWN: compat floor marker is unreadable";
+        return false;
+    }
+
+    int rows = 0;
+    int32_t value = 0;
+    bool malformed = false;
+    while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) { // raw-sql-ok:read-only-schema-preflight
+        rows++;
+        if (rows != 1 || sqlite3_column_type(stmt, 0) != SQLITE_BLOB ||
+            sqlite3_column_bytes(stmt, 0) != (int)sizeof(value) ||
+            !sqlite3_column_blob(stmt, 0)) {
+            malformed = true;
+            continue;
+        }
+        memcpy(&value, sqlite3_column_blob(stmt, 0), sizeof(value));
+    }
+    sqlite3_finalize(stmt);
+    if (rc != SQLITE_DONE) {
+        *detail_out = "SCHEMA_VERSION_UNKNOWN: compat floor marker read failed";
+        return false;
+    }
+    if (rows == 0) {
+        /* No floor was ever recorded for this database. Never guess a lower
+         * floor than its own schema_version. */
+        *floor_out = marker;
+        return true;
+    }
+    if (malformed) {
+        *detail_out =
+            "SCHEMA_VERSION_UNKNOWN: compat floor marker is not one 4-byte blob";
+        return false;
+    }
+    *floor_out = value;
+    return true;
+}
+
 static bool migration_ledger_consistent(sqlite3 *db, int32_t marker,
                                         const char **detail_out)
 {
@@ -360,16 +412,45 @@ static struct node_db_schema_preflight inspect_schema(sqlite3 *db)
     if (version <= 0)
         return preflight_result(NODE_DB_SCHEMA_PREFLIGHT_UNKNOWN, version,
             "SCHEMA_VERSION_UNKNOWN: schema marker is unsupported");
-    if (version > NODE_DB_MAX_SCHEMA)
-        return preflight_result(NODE_DB_SCHEMA_PREFLIGHT_NEWER, version,
-                                "newer schema marker");
+
+    if (version > NODE_DB_MAX_SCHEMA) {
+        /* Newer than this binary knows. Whether that is refused outright or
+         * opened READ-COMPATIBLE depends entirely on the database's own
+         * compat floor — never on this binary guessing. */
+        int32_t floor = version;
+        const char *floor_detail = NULL;
+        if (!read_compat_floor(db, version, &floor, &floor_detail))
+            return preflight_result(NODE_DB_SCHEMA_PREFLIGHT_UNKNOWN, version,
+                                    floor_detail);
+        if (floor > NODE_DB_MAX_SCHEMA) {
+            struct node_db_schema_preflight out = preflight_result(
+                NODE_DB_SCHEMA_PREFLIGHT_NEWER, version,
+                "newer schema marker above this binary's compat floor");
+            out.floor = floor;
+            return out;
+        }
+        const char *ledger_detail = NULL;
+        if (!migration_ledger_consistent(db, version, &ledger_detail)) {
+            struct node_db_schema_preflight out = preflight_result(
+                NODE_DB_SCHEMA_PREFLIGHT_UNKNOWN, version, ledger_detail);
+            out.floor = floor;
+            return out;
+        }
+        struct node_db_schema_preflight out = preflight_result(
+            NODE_DB_SCHEMA_PREFLIGHT_READ_COMPATIBLE, version,
+            "newer schema marker within this binary's compat floor");
+        out.floor = floor;
+        return out;
+    }
 
     const char *detail = NULL;
     if (!migration_ledger_consistent(db, version, &detail))
         return preflight_result(NODE_DB_SCHEMA_PREFLIGHT_UNKNOWN, version,
                                 detail);
-    return preflight_result(NODE_DB_SCHEMA_PREFLIGHT_SUPPORTED, version,
-                            "supported schema marker");
+    struct node_db_schema_preflight out = preflight_result(
+        NODE_DB_SCHEMA_PREFLIGHT_SUPPORTED, version, "supported schema marker");
+    out.floor = version;
+    return out;
 }
 
 struct node_db_schema_preflight node_db_schema_preflight_existing(
@@ -455,4 +536,43 @@ struct node_db_schema_preflight node_db_schema_preflight_existing(
         sqlite3_close(db);
     close(fd);
     return out;
+}
+
+bool node_db_schema_report_for_path(const char *path,
+                                    struct node_db_schema_report *out)
+{
+    if (!path || !out)
+        return false;
+    memset(out, 0, sizeof(*out));
+
+    struct node_db_schema_preflight pf = node_db_schema_preflight_existing(path);
+    switch (pf.state) {
+    case NODE_DB_SCHEMA_PREFLIGHT_FRESH:
+        out->fresh = true;
+        out->detail = pf.detail;
+        return true;
+    case NODE_DB_SCHEMA_PREFLIGHT_UNKNOWN:
+        out->unknown = true;
+        out->detail = pf.detail;
+        return true;
+    case NODE_DB_SCHEMA_PREFLIGHT_SUPPORTED:
+    case NODE_DB_SCHEMA_PREFLIGHT_READ_COMPATIBLE:
+    case NODE_DB_SCHEMA_PREFLIGHT_NEWER:
+        out->schema_version = pf.version;
+        out->schema_compat_floor = pf.floor;
+        out->detail = pf.detail;
+        if (pf.version < NODE_DB_MAX_SCHEMA)
+            out->verdict = NODE_DB_SCHEMA_VERDICT_UPGRADE;
+        else if (pf.version == NODE_DB_MAX_SCHEMA)
+            out->verdict = NODE_DB_SCHEMA_VERDICT_SAME;
+        else if (pf.floor <= NODE_DB_MAX_SCHEMA)
+            out->verdict = NODE_DB_SCHEMA_VERDICT_DOWNGRADE_OK;
+        else
+            out->verdict = NODE_DB_SCHEMA_VERDICT_DOWNGRADE_REFUSED;
+        return true;
+    default:
+        out->unknown = true;
+        out->detail = "SCHEMA_VERSION_UNKNOWN: unrecognized preflight state";
+        return true;
+    }
 }
