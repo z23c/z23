@@ -7,6 +7,7 @@
 #include "json/json.h"
 #include "platform/private_directory.h"
 #include "platform/state_root.h"
+#include "base/safe_alloc.h"
 #include "util/log_macros.h"
 
 #include <stdio.h>
@@ -82,7 +83,7 @@ static char *mind_slurp(const char *path, size_t *len_out)
     if (len_out) *len_out = 0;
     FILE *f = fopen(path, "rb");
     if (!f) return NULL;
-    char *buf = malloc(MIND_DOC_MAX + 1u);
+    char *buf = zcl_malloc(MIND_DOC_MAX + 1u, "mind.doc");
     if (!buf) { (void)fclose(f); return NULL; }
     size_t n = fread(buf, 1, MIND_DOC_MAX, f);
     (void)fclose(f);
@@ -142,7 +143,7 @@ bool zcl_mind_registry_write(const struct zcl_mind_registry *reg)
     char path[ZCL_MIND_PATH_MAX];
     if (!zcl_mind_registry_path(path, sizeof(path)))
         LOG_FAIL("mind", "resolve registry path");
-    char *text = malloc(MIND_DOC_MAX);
+    char *text = zcl_malloc(MIND_DOC_MAX, "mind.doc");
     if (!text) LOG_FAIL("mind", "registry buffer");
     int used = snprintf(text, MIND_DOC_MAX, "%s\n", ZCL_MIND_REGISTRY_MAGIC);
     bool ok = used > 0 && (size_t)used < MIND_DOC_MAX;
@@ -221,7 +222,7 @@ bool zcl_mind_heartbeat_write(const struct zcl_mind_heartbeat *beat)
     struct json_value doc;
     if (!heartbeat_json(beat, &doc))
         LOG_FAIL("mind", "render heartbeat");
-    char *text = malloc(MIND_DOC_MAX);
+    char *text = zcl_malloc(MIND_DOC_MAX, "mind.doc");
     size_t n = text ? json_write(&doc, text, MIND_DOC_MAX) : 0;
     json_free(&doc);
     bool ok = text && n > 0 && n < MIND_DOC_MAX &&
