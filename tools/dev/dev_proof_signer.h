@@ -80,11 +80,6 @@ bool zcl_dev_proof_signer_public(
     uint8_t pubkey[ZCL_DEV_PROOF_SIGNER_PUBKEY_BYTES], bool *present,
     const char **why);
 
-/* Same, but creating the keypair on first use, so an operator can ask for
- * the key they are about to hand another box. */
-bool zcl_dev_proof_signer_public_ensure(
-    uint8_t pubkey[ZCL_DEV_PROOF_SIGNER_PUBKEY_BYTES], const char **why);
-
 struct zcl_dev_proof_allowlist_state {
     bool present;        /* signers.allow exists and was read */
     uint32_t trusted;    /* well-formed 64-hex keys accepted from the file */

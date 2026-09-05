@@ -212,29 +212,6 @@ bool zcl_dev_proof_signer_public(
     return true;
 }
 
-bool zcl_dev_proof_signer_public_ensure(
-    uint8_t pubkey[ZCL_DEV_PROOF_SIGNER_PUBKEY_BYTES], const char **why)
-{
-    uint8_t seed[SIGNER_SEED_BYTES];
-    bool have = false;
-    signer_why(why, NULL);
-    if (!pubkey) {
-        signer_why(why, WHY_ARGUMENTS);
-        LOG_FAIL(SIGNER_DOMAIN, "public key ensure needs an output");
-    }
-    memset(pubkey, 0, ZCL_DEV_PROOF_SIGNER_PUBKEY_BYTES);
-    if (!signer_seed_load(seed, true, &have, why))
-        return false;
-    if (!have) {
-        memory_cleanse(seed, sizeof(seed));
-        signer_why(why, WHY_UNREADABLE);
-        LOG_FAIL(SIGNER_DOMAIN, "signing key still absent after create");
-    }
-    signer_pubkey_from_seed(seed, pubkey);
-    memory_cleanse(seed, sizeof(seed));
-    return true;
-}
-
 bool zcl_dev_proof_signer_sign(
     const uint8_t *message, size_t message_len,
     uint8_t pubkey[ZCL_DEV_PROOF_SIGNER_PUBKEY_BYTES],
