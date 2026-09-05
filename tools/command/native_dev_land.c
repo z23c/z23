@@ -2529,6 +2529,15 @@ static int dl_lint_fast(const struct dl_dirs *d, struct dl_row *row)
 static bool dl_materialize_file(const char *source, const char *target,
                                 const struct stat *source_st)
 {
+#if defined(_WIN32)
+    /* dev land step already refuses with STEP_WINDOWS_UNAVAILABLE before
+     * any caller reaches dl_materialize()/dl_materialize_file() (see
+     * dl_step below) -- POSIX hardlink/permission-bit semantics below have
+     * no portable Windows equivalent worth building for a path that never
+     * runs there, so this arm keeps the refusal instead of the body. */
+    (void)source; (void)target; (void)source_st;
+    return false;
+#else
     int input, output;
     char tmp[4096 + 96];
     bool ok;
@@ -2593,10 +2602,15 @@ static bool dl_materialize_file(const char *source, const char *target,
     if (!ok)
         (void)unlink(tmp);
     return ok;
+#endif
 }
 
 static bool dl_materialize(const char *source, const char *target)
 {
+#if defined(_WIN32)
+    (void)source; (void)target;
+    return false;
+#else
     struct stat source_st, target_st;
     DIR *dir;
     struct dirent *entry;
@@ -2630,6 +2644,7 @@ static bool dl_materialize(const char *source, const char *target)
             ok = false;
     }
     return closedir(dir) == 0 && ok;
+#endif
 }
 
 /* A local mkdir -p for a dependency's target directory. dev_proof.c has its
@@ -2867,6 +2882,16 @@ static bool dl_wt_vendor_ensure(const struct dl_dirs *d,
                                 const struct dl_row *r, char *why,
                                 size_t why_cap)
 {
+#if defined(_WIN32)
+    /* dev land step already refuses with STEP_WINDOWS_UNAVAILABLE before
+     * any caller reaches here (see dl_step below); mirror that refusal
+     * instead of building a portable lstat/hardlink dependency check for
+     * a path Windows never runs. */
+    (void)d; (void)r;
+    (void)snprintf(why, why_cap,
+                   "proof_generation_dependency_check_unavailable:windows");
+    return false;
+#else
     bool tor_pin_checked = false;
     for (size_t i = 0;
         i < sizeof(DL_VENDOR_DEPS) / sizeof(DL_VENDOR_DEPS[0]); i++) {
@@ -2909,6 +2934,7 @@ static bool dl_wt_vendor_ensure(const struct dl_dirs *d,
         }
     }
     return true;
+#endif
 }
 
 #if defined(__linux__)
