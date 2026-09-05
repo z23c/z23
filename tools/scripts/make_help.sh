@@ -31,6 +31,8 @@ first	setup	arm the git hooks and generate compile_commands.json (idempotent)
 first	z23	build the public node (bare make does the same; vendor setup is automatic)
 loop	all	build the node plus the monolithic test harness and auxiliary tools
 loop	new-app	scaffold a GUI app from zhello: make new-app NAME=myapp, then make myapp
+loop	game	link the Sky Combat binary at build/bin/z23-skycombat (opt-in; needs X11/GL)
+loop	game-check	compile apps/skycombat and vendor/raylib to objects only, no window needed
 loop	build-only	compile every translation unit, no link — genuinely parallel under -j
 loop	syntax-check	whole-tree no-link syntax pass in one compiler invocation
 loop	dev-bin	non-LTO local node binary at build/bin/zclassic23-dev

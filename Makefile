@@ -2361,6 +2361,173 @@ new-app:
 new-app-selftest:
 	@tools/scripts/new_app.sh --selftest
 
+# ---------------------------------------------------------------------------
+# Sky Combat: the 3D game under apps/skycombat, drawn by the trimmed raylib
+# under vendor/raylib. Everything below is OPT-IN. No target here is reachable
+# from `all`, `z23`, `build-only`, `test`, the push proof or any lint gate; a
+# box that cannot build a window still builds and proves the node.
+#
+# Two goals:
+#   make game        links build/bin/z23-skycombat and needs a real X11/GL
+#                    toolchain. It never runs the binary.
+#   make game-check  compiles every game and raylib object and links nothing.
+#                    That is what a headless box can prove, and it is this
+#                    lane's gate.
+#
+# Flag policy, in one line each (docs/DEFENSIVE_CODING.md carries the rule):
+#   apps/skycombat  our code, so C23 + -Werror + -pedantic + the portability
+#                   gates, exactly GUI_APP_CFLAGS above plus -Wvla, -Walloca,
+#                   -Wshift-overflow=2, -Wstrict-prototypes, -Wundef and the
+#                   rest. Not -Wdouble-promotion: that is a node numeric-
+#                   determinism gate, and a renderer passes floats to printf
+#                   by the language's own rules.
+#   vendor/raylib   third-party source. Warnings are REPORTED, never fatal,
+#                   and every build knob is a -D here so the vendored files
+#                   stay byte-identical to upstream (vendor/raylib/SHA256SUMS).
+# Z23RAYLIB_ prefix, not RAYLIB_: tools/arena_view.c already claims RAYLIB_CFLAGS
+# and RAYLIB_LIBS further down for the raylib it finds through pkg-config. That
+# viewer still wants a system raylib; pointing it at this vendored copy is a
+# separate change and a separate owner (docs/GAME.md notes it).
+SKYCOMBAT_DIR := apps/skycombat
+Z23RAYLIB_DIR := vendor/raylib
+SKYCOMBAT_OBJ_DIR := $(BUILD_DIR)/skycombat
+Z23RAYLIB_OBJ_DIR := $(BUILD_DIR)/raylib
+Z23RAYLIB_LIB := $(BUILD_DIR)/lib/libz23raylib.a
+
+# The header closure RGFW and rlgl reach for on each host. `make game` and
+# `make game-check` probe these and refuse by name rather than letting the
+# compiler produce a wall of errors about a missing -dev package.
+ifeq ($(ZCL_HOST_OS),Darwin)
+SKYCOMBAT_PLATFORM_HEADERS :=
+SKYCOMBAT_HOST_LIBS := -framework Cocoa -framework IOKit -framework OpenGL \
+	-framework CoreVideo -framework CoreFoundation -lm
+else ifneq ($(filter MINGW% MSYS% CYGWIN%,$(ZCL_HOST_OS)),)
+SKYCOMBAT_PLATFORM_HEADERS :=
+SKYCOMBAT_HOST_LIBS := -lgdi32 -lopengl32 -lwinmm -lshell32 -lm
+else
+SKYCOMBAT_PLATFORM_HEADERS := X11/Xlib.h X11/extensions/Xrandr.h \
+	X11/extensions/XInput2.h X11/Xcursor/Xcursor.h GL/glx.h
+SKYCOMBAT_HOST_LIBS := -lX11 -lXrandr -lXi -lXcursor -lGL -lm -lpthread -ldl
+endif
+
+# Every SUPPORT_* knob raylib's config.h guards with #ifndef, set from here so
+# the vendored config.h is never edited. Off: all audio, every model file
+# format (cgltf/tinyobj/vox/m3d), every image file format (stb_image/qoi/pep),
+# font file loading, image export, screen capture, mesh generation and the
+# deflate codec. On: the five renderer modules, the default font, the camera
+# and gesture systems and GenImage* -- exactly what the game calls.
+Z23RAYLIB_CPPFLAGS := -DPLATFORM_DESKTOP_RGFW -DGRAPHICS_API_OPENGL_33 \
+	-DSUPPORT_MODULE_RSHAPES=1 -DSUPPORT_MODULE_RTEXT=1 \
+	-DSUPPORT_MODULE_RTEXTURES=1 -DSUPPORT_MODULE_RMODELS=1 \
+	-DSUPPORT_MODULE_RAUDIO=0 \
+	-DSUPPORT_FILEFORMAT_PNG=0 -DSUPPORT_FILEFORMAT_BMP=0 \
+	-DSUPPORT_FILEFORMAT_TGA=0 -DSUPPORT_FILEFORMAT_JPG=0 \
+	-DSUPPORT_FILEFORMAT_GIF=0 -DSUPPORT_FILEFORMAT_QOI=0 \
+	-DSUPPORT_FILEFORMAT_PEP=0 -DSUPPORT_FILEFORMAT_PSD=0 \
+	-DSUPPORT_FILEFORMAT_DDS=0 -DSUPPORT_FILEFORMAT_HDR=0 \
+	-DSUPPORT_FILEFORMAT_PIC=0 -DSUPPORT_FILEFORMAT_PNM=0 \
+	-DSUPPORT_FILEFORMAT_KTX=0 -DSUPPORT_FILEFORMAT_ASTC=0 \
+	-DSUPPORT_FILEFORMAT_PKM=0 -DSUPPORT_FILEFORMAT_PVR=0 \
+	-DSUPPORT_FILEFORMAT_TTF=0 -DSUPPORT_FILEFORMAT_FNT=0 \
+	-DSUPPORT_FILEFORMAT_BDF=0 \
+	-DSUPPORT_FILEFORMAT_OBJ=0 -DSUPPORT_FILEFORMAT_MTL=0 \
+	-DSUPPORT_FILEFORMAT_IQM=0 -DSUPPORT_FILEFORMAT_GLTF=0 \
+	-DSUPPORT_FILEFORMAT_VOX=0 -DSUPPORT_FILEFORMAT_M3D=0 \
+	-DSUPPORT_IMAGE_EXPORT=0 -DSUPPORT_SCREEN_CAPTURE=0 \
+	-DSUPPORT_MESH_GENERATION=0 -DSUPPORT_COMPRESSION_API=0 \
+	-I$(Z23RAYLIB_DIR)/src
+Z23RAYLIB_CFLAGS := -std=$(ZCL_C_STD) -O2 -Wall -Wextra $(Z23RAYLIB_CPPFLAGS)
+
+# RAYMATH_USE_SIMD_INTRINSICS is the one raymath.h knob the game's own -Wundef
+# would trip over, so it is spelled out rather than left undefined.
+SKYCOMBAT_CFLAGS := -std=$(ZCL_C_STD) -O2 -Wall -Wextra -Werror -pedantic \
+	-Wstrict-prototypes -Wundef -Wshift-overflow=2 -Wattribute-alias=2 \
+	-Walloca -Wvla -Wduplicated-cond -Wduplicated-branches -Wtrampolines \
+	-Wflex-array-member-not-at-end \
+	$(ZCL_WARN_STRINGOP_OVERFLOW) -D_POSIX_C_SOURCE=200809L \
+	-DRAYMATH_USE_SIMD_INTRINSICS=0 $(Z23RAYLIB_CPPFLAGS) \
+	-I$(SKYCOMBAT_DIR)/include -I$(SKYCOMBAT_DIR)/specifications \
+	-I$(SKYCOMBAT_DIR)/modules/compile_time_gdb_proof/include
+
+Z23RAYLIB_SRCS := $(Z23RAYLIB_DIR)/src/rcore.c $(Z23RAYLIB_DIR)/src/rshapes.c \
+	$(Z23RAYLIB_DIR)/src/rtext.c $(Z23RAYLIB_DIR)/src/rtextures.c \
+	$(Z23RAYLIB_DIR)/src/rmodels.c
+Z23RAYLIB_OBJS := $(patsubst $(Z23RAYLIB_DIR)/src/%.c,$(Z23RAYLIB_OBJ_DIR)/%.o,$(Z23RAYLIB_SRCS))
+
+# Explicit directory list, never a recursive wildcard: a file that appears
+# under apps/skycombat without being named here does not silently join a build.
+SKYCOMBAT_SRCS := \
+	$(wildcard $(SKYCOMBAT_DIR)/src/*.c) \
+	$(wildcard $(SKYCOMBAT_DIR)/src/controllers/*.c) \
+	$(wildcard $(SKYCOMBAT_DIR)/src/core/*.c) \
+	$(wildcard $(SKYCOMBAT_DIR)/src/models/*.c) \
+	$(wildcard $(SKYCOMBAT_DIR)/src/systems/*.c) \
+	$(wildcard $(SKYCOMBAT_DIR)/src/utils/*.c) \
+	$(wildcard $(SKYCOMBAT_DIR)/src/views/*.c) \
+	$(wildcard $(SKYCOMBAT_DIR)/modules/compile_time_gdb_proof/*.c) \
+	$(wildcard $(SKYCOMBAT_DIR)/modules/compile_time_gdb_proof/src/*.c)
+SKYCOMBAT_OBJS := $(patsubst $(SKYCOMBAT_DIR)/%.c,$(SKYCOMBAT_OBJ_DIR)/%.o,$(SKYCOMBAT_SRCS))
+
+# The one playable program. The imported tree carries several entry points --
+# standalone demos and headless spec runners, each with its own main() -- so
+# the binary names its own, and the link set is the exact closure of that
+# main's undefined symbols over the other objects. game-check still compiles
+# every file; only the link is selective.
+SKYCOMBAT_GAME_MAIN := $(SKYCOMBAT_DIR)/src/sky_combat_multiplayer_ultimate.c
+SKYCOMBAT_GAME_SRCS := $(SKYCOMBAT_GAME_MAIN) \
+	$(SKYCOMBAT_DIR)/src/controllers/input_controller_fast.c \
+	$(SKYCOMBAT_DIR)/src/controllers/input_mvc_fast.c \
+	$(SKYCOMBAT_DIR)/src/models/aircraft.c \
+	$(SKYCOMBAT_DIR)/src/models/aircraft_manager.c \
+	$(SKYCOMBAT_DIR)/src/models/aircraft_responsive.c \
+	$(SKYCOMBAT_DIR)/src/models/cyberpunk_world.c \
+	$(SKYCOMBAT_DIR)/src/models/input_model_fast.c \
+	$(SKYCOMBAT_DIR)/src/models/match_rules.c \
+	$(SKYCOMBAT_DIR)/src/models/powerups.c \
+	$(SKYCOMBAT_DIR)/src/models/weapons.c \
+	$(SKYCOMBAT_DIR)/src/views/camera_controller.c \
+	$(SKYCOMBAT_DIR)/src/views/combat_effects.c
+SKYCOMBAT_GAME_OBJS := $(patsubst $(SKYCOMBAT_DIR)/%.c,$(SKYCOMBAT_OBJ_DIR)/%.o,$(SKYCOMBAT_GAME_SRCS))
+
+$(Z23RAYLIB_OBJ_DIR)/%.o: $(Z23RAYLIB_DIR)/src/%.c
+	@mkdir -p $(dir $@)
+	$(CC) $(Z23RAYLIB_CFLAGS) -c $< -o $@
+
+$(SKYCOMBAT_OBJ_DIR)/%.o: $(SKYCOMBAT_DIR)/%.c
+	@mkdir -p $(dir $@)
+	$(CC) $(SKYCOMBAT_CFLAGS) -c $< -o $@
+
+$(Z23RAYLIB_LIB): $(Z23RAYLIB_OBJS)
+	@mkdir -p $(dir $@)
+	@rm -f $@
+	$(AR) rcs $@ $^
+
+.PHONY: game-platform-probe game game-check
+# One typed refusal, never a wall of "No such file" from the preprocessor.
+game-platform-probe:
+	@missing=""; \
+	for h in $(SKYCOMBAT_PLATFORM_HEADERS); do \
+	  [ -e "/usr/include/$$h" ] || [ -e "/usr/local/include/$$h" ] || missing="$$missing $$h"; \
+	done; \
+	if [ -n "$$missing" ]; then \
+	  echo "game_platform_headers_missing:$$missing"; \
+	  exit 2; \
+	fi
+
+game: game-platform-probe $(SKYCOMBAT_GAME_OBJS) $(Z23RAYLIB_LIB)
+	@mkdir -p $(BIN_DIR)
+	$(CC) $(SKYCOMBAT_CFLAGS) $(SKYCOMBAT_GAME_OBJS) $(Z23RAYLIB_LIB) \
+		$(SKYCOMBAT_HOST_LIBS) -o $(BIN_DIR)/z23-skycombat
+	@echo "game: built $(BIN_DIR)/z23-skycombat (not run: it opens a window)"
+
+# The counts below are a floor, not decoration: an empty object list is exactly
+# how this target would "pass" while compiling nothing (a renamed variable did
+# that once already), so it refuses instead of printing a zero.
+game-check: game-platform-probe $(SKYCOMBAT_OBJS) $(Z23RAYLIB_OBJS)
+	@test $(words $(SKYCOMBAT_SRCS)) -ge 60 || { echo "game_check_scan_floor: only $(words $(SKYCOMBAT_SRCS)) game sources found" >&2; exit 2; }
+	@test $(words $(Z23RAYLIB_SRCS)) -eq 5 || { echo "game_check_scan_floor: expected 5 raylib sources, found $(words $(Z23RAYLIB_SRCS))" >&2; exit 2; }
+	@echo "game-check: compiled $(words $(SKYCOMBAT_SRCS)) game and $(words $(Z23RAYLIB_SRCS)) raylib translation units, no link"
+
 .PHONY: worktree-prime worktree-prime-selftest
 # Formalizes the "copy generated vendor inputs before a fresh worktree can
 # compile and link" tribal knowledge (docs/work/README.md, the zclassic23-dev
