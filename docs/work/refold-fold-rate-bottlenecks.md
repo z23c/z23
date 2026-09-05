@@ -1,7 +1,17 @@
 # From-genesis refold: fold-rate bottlenecks + fix plan
 
-> All fixes below are gated on `refold_in_progress()` so a normal boot/sync
-> stays byte-identical. Verify against code before relying; specifics rot.
+> **Superseded as a description of the current live-sync scheduler
+> (2026-09-05, see [`../zrc/0011-fast-sync-over-the-peer-link.md`](../zrc/0011-fast-sync-over-the-peer-link.md)).**
+> The "#2 — scheduler ceiling" section below describes a flat
+> 2s-tick/100-batch staged-sync scheduler with no catch-up override; that
+> scheduler shape no longer matches the tree. Live catchup is now gated by
+> `catchup_cadence_active()` (`engine/jobs/include/jobs/catchup_cadence.h`,
+> `engine/jobs/src/catchup_cadence.c`), which widens the per-stage drain
+> batch and shortens the per-child tick period while a node is genuinely
+> behind a connected peer's tip. This document's from-genesis `-refold-staged`
+> analysis (the split-brain root cause and bottleneck #1) is unaffected and
+> still applies to that offline fold mode; only the "#2" live-scheduler
+> ceiling claim is stale. Verify against code before relying; specifics rot.
 
 ## The split-brain root cause
 
