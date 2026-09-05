@@ -448,10 +448,23 @@ TOR_STUB_REFUSAL='refusing to package a tor=stub binary: it cannot reach the oni
 # producing side is where this is fail-closed: tools/ship.sh and
 # tools/scripts/build_c23_portable_release.sh refuse a stub they built.
 verify_release_not_tor_stub() {
-    local dir="$1" node="$1/z23" stamp
+    local dir="$1" node="$1/z23" stamp timeout_cmd=""
     [ -x "$node" ] || return 0
-    stamp="$("$node" -version 2>/dev/null |
-        sed -n 's/^tor: \(full\|stub\)$/\1/p' | head -1)" || return 0
+    # Running a payload is the only way to read its stamp, and running an
+    # arbitrary executable needs two bounds or it is a hang, not a check: a
+    # deadline, and a stdin it cannot consume. The deploy selftest stages a
+    # 16 kB fixture at this path that blocks forever on stdin; without both
+    # bounds this refusal hung the whole install there.
+    if command -v timeout >/dev/null 2>&1; then
+        timeout_cmd=timeout
+    elif command -v gtimeout >/dev/null 2>&1; then
+        # coreutils on macOS installs GNU timeout under this name.
+        timeout_cmd=gtimeout
+    else
+        return 0
+    fi
+    stamp="$("$timeout_cmd" 10 "$node" -version </dev/null 2>/dev/null |
+        sed -n 's/^tor: \(full\|stub\)$/\1/p' | head -1)" || stamp=""
     [ "$stamp" = stub ] \
         && die "$TOR_STUB_REFUSAL (the release at $dir reports tor: stub)"
     return 0
