@@ -74,17 +74,17 @@ z23 discover schema <path> --side=input|output
 
 | Catalog fact | Count |
 |---|---|
-| Registry entries (branches + leaves) | 810 |
+| Registry entries (branches + leaves) | 811 |
 | Top-level roots | 13 |
 | Branches | 182 |
-| Leaves (dispatchable command paths) | 628 |
-| … `ready` (live handler in this build) | 558 |
+| Leaves (dispatchable command paths) | 629 |
+| … `ready` (live handler in this build) | 559 |
 | … `compat` (metadata only, names a fallback) | 39 |
 | … `planned` (fail-closed BLOCKED, exit 3) | 31 |
 | … dev-gated 🔧 (`ready` only in `z23-dev`) | 38 |
-| Leaves with `effect=mutate` | 219 |
+| Leaves with `effect=mutate` | 220 |
 | Leaves with `effect=destructive` | 5 |
-| Leaves requiring **owner** authority | 119 |
+| Leaves requiring **owner** authority | 120 |
 
 Per source file:
 
@@ -100,7 +100,7 @@ Per source file:
 | `engine/composition/commands/code.def` | 31 | 3 | 28 |
 | `engine/composition/commands/accounts.def` | 11 | 2 | 9 |
 | `engine/composition/commands/vault.def` | 24 | 4 | 20 |
-| `engine/composition/commands/zcode.def` | 248 | 59 | 189 |
+| `engine/composition/commands/zcode.def` | 249 | 59 | 190 |
 | `engine/composition/commands/zcode_science.def` | 25 | 7 | 18 |
 | `engine/composition/commands/metaverse.def` | 30 | 7 | 23 |
 | `engine/composition/commands/yardsale.def` | 7 | 2 | 5 |
@@ -1110,6 +1110,7 @@ represented by its children's sections.
 | `zcode work show` | ready | read / read / operator · fast/low | `workspace`, `work`, `datadir`, `details` | `zcl.zcode_work_status.v1` | `z23-dev zcode work show --input='{"work":"latest"}'` | Show one human-first work result |
 | `zcode work run` | ready | mutate / app-write / operator · foreground/moderate | `workspace`, `work`, `adapter`, `datadir`, `details` | `zcl.zcode_work_run.v1` | `z23-dev zcode work run --input='{"work":"latest","adapter":"manual"}'` | Run one contained adapter handoff |
 | `zcode work accept` | ready | mutate / app-write / operator · foreground/moderate | `workspace`, `work`, `datadir`, `confirmation_identity`, `details` | `zcl.zcode_work_accept.v1` | `z23-dev zcode work accept --input='{"work":"latest"}'` | Accept one exact proven candidate |
+| `zcode work publish` | ready | mutate / app-write / **owner** · foreground/moderate | `workspace`, `work`, `datadir`, **`job_root`**, `details` | `zcl.zcode_work_publish.v1` | `z23 zcode work publish --input='<typed continuation from work accept>'` | Continue publication of one exact accepted work |
 | `zcode work offer` | ready | mutate / app-write / operator · foreground/low | **`package_root`**, `datadir` | `zcl.zcode_work_offer.v1` | `z23 zcode work offer --input='{"package_root":"<64hex>"}'` | Make one accepted solution discoverable by its task |
 | `zcode work pull` | ready | mutate / app-write / operator · foreground/moderate | **`task_root`**, `datadir`, `maximum_records` | `zcl.zcode_work_pull.v1` | `z23 zcode work pull --input='{"task_root":"<64hex>"}'` | Fetch and verify published solutions for one task root |
 | `zcode work review` | ready | mutate / app-write / operator · foreground/moderate | `workspace`, `work`, `adapter`, **`verdict`**, **`findings`** | `zcl.zcode_work_review.v1` | `z23-dev zcode work review --input='{"work":"latest","adapter":"manual","verdict":"approve","findings":"No blocking findings."}'` | Review one exact candidate |
