@@ -1,0 +1,8 @@
+component=raylib
+version=6.1-dev
+upstream=https://github.com/raysan5/raylib
+revision=550dd0e0a3c1e2b0eb2b5b3ed4cbbea4c3f8be55
+license=Zlib (vendor/raylib/LICENSE)
+files=src/{rcore,rshapes,rtext,rtextures,rmodels}.c, src/{raylib,raymath,rlgl,config,rgestures,rcamera}.h, src/platforms/rcore_desktop_rgfw.c, src/external/{glad,stb_image_resize2,stb_perlin,fix_win32_compatibility,win32_clipboard}.h, src/external/RGFW/{RGFW.h,deps/minigamepad.h}, LICENSE
+integration=static archive build/lib/libz23raylib.a behind `make game` / `make game-check`; renders apps/skycombat only, never linked into the node binary
+local_patch=none — verbatim upstream files; every build knob is passed as -D from the Makefile because raylib's config.h guards each one with #ifndef
