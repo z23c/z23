@@ -8,6 +8,14 @@
  * then lists what the fleet holds. Two pastes, three commands, no ports to
  * open and no node required on either end.
  *
+ * NAMES. Every machine has one required, unique, human-readable name,
+ * chosen by the owner at `fleet invite --name=`. It leads every reply and
+ * every refusal, because it is how people talk about a computer. A box's
+ * onion address, Noise fingerprint and ZID are observed facts that rotate;
+ * none of them is ever the name. Renaming is not an edit: the name is bound
+ * inside the box's own signature over its receipt, so a rename would need
+ * its own operator-signed record kind and is deliberately not here.
+ *
  * WHAT THIS BRANCH IS NOT. It is not mesh pairing and it does not grant
  * terminal execution. A machine row is an INVENTORY record: this owner
  * admitted this box under this name. Capability grants stay where they were
@@ -28,6 +36,10 @@ ZCL_COMMAND_READY_COMMAND(
     "fleet.invite", "fleet", "",
     "Mint one signed invite line that adds a computer to this fleet",
     "One line of about three hundred characters: `z23 fleet join <token>`. "
+    "--name is REQUIRED and is the human handle every fleet leaf prints "
+    "first: 2 to 24 characters of a-z, 0-9 and interior dashes, unique "
+    "across this fleet. A box's onion address, Noise fingerprint and ZID "
+    "are observed facts that may rotate; none of them is ever its name. "
     "The token names the box, an expiry, a one-time nonce, an optional relay "
     "endpoint and this box's operator public key, all signed by this box's "
     "fleet key (created on first use). Nothing private is in it — a leaked "
@@ -107,7 +119,9 @@ ZCL_COMMAND_READY_READ(
     "attests: name, box public key, relay port, enrolment time) and "
     "`self_reported` (what the box said about its own hardware, OS and "
     "toolchain — signed by that box, measured by nobody). The two are never "
-    "merged. Rows this operator key did not seal are counted in "
+    "merged. The NAME leads every row: it is the handle the owner and their "
+    "agents use to talk about a machine, and it never changes with the "
+    "box's onion address, Noise fingerprint or ZID. Rows this operator key did not seal are counted in "
     "`unverifiable` and never rendered. Reads no node and no datadir.",
     ZCL_COMMAND_LIST_BUDGET,
     "fleet,machines,roster,inventory,verified,self-reported",

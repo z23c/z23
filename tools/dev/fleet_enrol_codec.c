@@ -209,11 +209,16 @@ static bool fe_open(const char *text, const char *domain,
 bool fleet_enrol_name_valid(const char *name)
 {
     size_t n = name ? strlen(name) : 0;
-    if (n == 0 || n > (size_t)FLEET_ENROL_NAME_MAX) return false;
+    if (n < (size_t)FLEET_ENROL_NAME_MIN || n > (size_t)FLEET_ENROL_NAME_MAX)
+        return false;
     for (size_t i = 0; i < n; ++i) {
         char c = name[i];
         bool alnum = (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9');
-        if (!alnum && !(i > 0 && (c == '.' || c == '_' || c == '-')))
+        /* One spelling per name: lowercase letters, digits and interior
+         * dashes only. A name a person can say out loud is the point, and
+         * two names that differ by a dot or a capital would be two handles
+         * for one machine in conversation. */
+        if (!alnum && !(i > 0 && i + 1u < n && c == '-'))
             return false;
     }
     return true;

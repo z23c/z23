@@ -151,15 +151,15 @@ void fleet_enrol_facts_collect(struct fleet_box_facts *out)
     {
         struct utsname sys;
         struct statvfs disk;
-        char host[FLEET_ENROL_TEXT_MAX + 1];
         long cores = sysconf(_SC_NPROCESSORS_ONLN);
         long pages = sysconf(_SC_PHYS_PAGES);
         long page_size = sysconf(_SC_PAGESIZE);
-        if (gethostname(host, sizeof(host)) == 0) {
-            host[sizeof(host) - 1] = '\0';
-            fe_copy_clean(out->hostname, sizeof(out->hostname), host);
-        }
         if (uname(&sys) == 0) {
+            /* nodename, not gethostname(2): it is the same string from a
+             * call this tree already classifies, so collecting a fact costs
+             * no new external symbol. The hostname is a FACT about the box,
+             * never its fleet name — the owner chose that at invite time. */
+            fe_copy_clean(out->hostname, sizeof(out->hostname), sys.nodename);
             fe_copy_clean(out->os, sizeof(out->os), sys.sysname);
             fe_copy_clean(out->arch, sizeof(out->arch), sys.machine);
             if (!fe_os_release_pretty(out->os_version, sizeof(out->os_version)))

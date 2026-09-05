@@ -37,6 +37,23 @@
  * `fleet join` therefore emits a typed `next_step` naming the native mesh
  * pairing that follows once the box has a node and a delegation.
  *
+ * THE NAME IS THE HANDLE. Every machine carries one required, unique,
+ * human-readable name, chosen by the owner at `fleet invite --name=` and
+ * bound into the invite the box signs back. It is what every leaf prints
+ * first and what every refusal says, because it is how the owner and their
+ * agents TALK about a machine. A machine's onion address, Noise
+ * fingerprint and ZID are a different kind of thing: they are OBSERVED,
+ * they rotate, and none of them is ever the display name. This record
+ * carries none of them today; when a column for one arrives it arrives as
+ * an observed fact beside the name, never in place of it.
+ *
+ * The name is bound inside the box's own signature over the receipt, which
+ * is what makes "this box, under this name" one statement rather than two.
+ * The cost of that is that renaming is not an edit: the operator cannot
+ * re-sign a box's receipt. A rename needs its own operator-signed record
+ * kind and a resolution rule in the reader; it is deliberately not part of
+ * this record set.
+ *
  * WHAT IS AND IS NOT ATTESTED. The operator signature on a roster line
  * attests the NAME, the box public key, the relay port and the enrolment
  * time — the operator decided those. Everything the box says about its own
@@ -67,7 +84,13 @@ enum {
     FLEET_ENROL_NONCE_BYTES = 16,
     FLEET_ENROL_PUBKEY_HEX = 65,   /* 64 hex digits + NUL */
     FLEET_ENROL_NONCE_HEX = 33,
-    FLEET_ENROL_NAME_MAX = 32,
+    /* The human name. Every leaf prints it first and every refusal names
+     * it, because it is how the owner and their agents TALK about a
+     * machine. Two to twenty-four characters so it fits a sentence and a
+     * terminal column; one spelling per name so two people saying
+     * "workshop" mean one box. */
+    FLEET_ENROL_NAME_MIN = 2,
+    FLEET_ENROL_NAME_MAX = 24,
     FLEET_ENROL_RELAY_MAX = 64,
     FLEET_ENROL_TEXT_MAX = 96,     /* hostname/os-version/toolchain fields */
     FLEET_ENROL_SSH_MAX = 512,
@@ -172,11 +195,10 @@ struct fleet_machine {
 
 /* ── codec (tools/dev/fleet_enrol_codec.c) ──────────────────────────────── */
 
-/* Validate one invite name: 1..FLEET_ENROL_NAME_MAX bytes of
- * [a-z0-9._-], first byte alphanumeric. The name reaches an
- * `authorized_keys` comment and a roster line, so the character set is a
- * closed allowlist, never a denylist of the separators that would break
- * them. */
+/* Validate one fleet name: 2..24 bytes of [a-z0-9-] with the first and
+ * last byte alphanumeric. Closed allowlist, never a denylist of the
+ * separators that would break the `authorized_keys` comment and the roster
+ * line the name reaches. */
 bool fleet_enrol_name_valid(const char *name);
 
 /* Mint a signed invite. `seed`/`pubkey` are this box's key. `text` receives

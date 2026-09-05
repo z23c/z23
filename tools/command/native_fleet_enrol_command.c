@@ -76,9 +76,10 @@ static void fe_invite(const struct zcl_command_request *request,
     bool present = false;
     if (!fleet_enrol_name_valid(name)) {
         fe_fail(reply, "FLEET_NAME_INVALID", "normalize",
-                "--name is 1 to 32 characters of a-z, 0-9, dot, underscore "
-                "or dash, starting with a letter or digit. The name reaches "
-                "an ssh authorized_keys comment, so the set is closed.",
+                "--name is required and is how you will refer to this "
+                "computer from now on: 2 to 24 characters of a-z, 0-9 and "
+                "interior dashes, starting and ending with a letter or "
+                "digit. Pick something you would say out loud.",
                 FLEET_ENROL_WHY_NAME_INVALID);
         return;
     }
@@ -248,9 +249,14 @@ static bool fe_admit_checks(struct zcl_command_reply *reply,
         return false;
     }
     if (scan->name_taken) {
-        fe_fail(reply, "FLEET_NAME_TAKEN", "authorize",
-                "another box already holds this name. Mint the invite under "
-                "a different --name.", FLEET_ENROL_WHY_NAME_TAKEN);
+        char message[192];
+        (void)snprintf(message, sizeof(message),
+                       "another computer is already called \"%s\" in this "
+                       "fleet, and one name means one machine. Mint the "
+                       "invite under a different --name.",
+                       receipt->invite.name);
+        fe_fail(reply, "FLEET_NAME_TAKEN", "authorize", message,
+                FLEET_ENROL_WHY_NAME_TAKEN);
         return false;
     }
     /* A box re-enrolling keeps the port it already has, so re-running admit

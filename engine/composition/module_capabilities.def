@@ -1183,6 +1183,8 @@ ZCL_MODULE_CAPABILITY("tools/dev/dev_proof.c", CAP_FS_READ|CAP_FS_WRITE|CAP_PROC
 ZCL_MODULE_CAPABILITY("tools/dev/dev_proof_budget.c", CAP_FS_READ|CAP_FS_WRITE|CAP_PROCESS|CAP_CLOCK|CAP_PRIVILEGE, "zcl_dev_proof_step_start() forks and execvp()s the watched proof-step child under its own session (setsid), raises its RLIMIT_STACK before exec; zcl_dev_proof_step_poll() kills (SIGTERM then SIGKILL) and waitpid()s the child's process group when the wall-clock/progress budget (CAP_CLOCK: nanosleep) is exceeded")
 ZCL_MODULE_CAPABILITY("tools/dev/dev_proof_receipt.c", CAP_FS_WRITE, "encodes and verifies the signed exact-key verdict-leaf and child-receipt wire formats; verdict_fail() names every refusal on stderr")
 ZCL_MODULE_CAPABILITY("tools/dev/dev_proof_signer.c", CAP_FS_WRITE, "custodies this box's Ed25519 push-proof signing key and its signers.allow trust list under the state root, and names key creation and every refusal on stderr")
+ZCL_MODULE_CAPABILITY("tools/dev/fleet_enrol_facts.c", CAP_FS_READ, "")
+ZCL_MODULE_CAPABILITY("tools/dev/fleet_enrol_store.c", CAP_FS_WRITE, "custodies this owner's machine roster and spent-invite list under the state root, and appends the ONE restricted port-forwarding line the ssh bridge adds to the operator's authorized_keys")
 ZCL_MODULE_CAPABILITY("tools/dev/dev_workspace.c", CAP_FS_WRITE|CAP_FS_READ|CAP_CLOCK, "")
 ZCL_MODULE_CAPABILITY("tools/dev/devloop_app.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("tools/dev/devloop_baseline.c", CAP_FS_WRITE|CAP_PROCESS|CAP_FS_READ, "the dev loop's detach launcher: forks the generation-baseline build off into its own process group")
