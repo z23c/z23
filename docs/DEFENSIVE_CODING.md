@@ -1271,6 +1271,7 @@ add/remove a gate.
 - `check-no-stray-untracked-source`
 - `check-codeindex-coverage`
 - `check-mind-owns-rebuild`
+- `check-tor-full-default`
 - `check-no-stray-root-files`
 - `check-observability-pairing`
 - `check-no-hardlink-seeding`

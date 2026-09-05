@@ -13039,6 +13039,12 @@ check-mind-owns-rebuild:
 	@./tools/lint/check_mind_owns_rebuild.sh --selftest
 	@./tools/lint/check_mind_owns_rebuild.sh
 
+.PHONY: check-tor-full-default
+check-tor-full-default:
+	@echo "══ LINT: real Tor is the default link, a stub cannot be packaged ══"
+	@./tools/lint/check_tor_full_default.sh --selftest
+	@./tools/lint/check_tor_full_default.sh
+
 # Adding a lint gate is a TWO-FILE operation and nothing enforced the second
 # file: the Makefile gets a `check-*:` target plus a LINT_GATES line, and
 # tools/lint/run_lint.sh's gate_command() case table gets the invocation,
@@ -13098,6 +13104,7 @@ LINT_GATES := \
     check-no-stray-untracked-source \
     check-codeindex-coverage \
     check-mind-owns-rebuild \
+    check-tor-full-default \
     check-no-stray-root-files \
     check-scanner-immunity \
     check-git-hooks-installed \
