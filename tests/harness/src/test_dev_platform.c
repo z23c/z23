@@ -3243,6 +3243,34 @@ static int test_watcher_stream_backpressure(void)
     return failures;
 }
 
+static int test_watch_idle_exit(void)
+{
+    int failures = 0;
+    TEST("dev platform: idle watcher exits; source/pending/landing reset or refuse idle-exit") {
+        ASSERT(ZCL_DEVLOOP_WATCH_IDLE_BUDGET_MS == (60 * 60 * 1000));
+        ASSERT(zcl_devloop_watch_idle_exit_selftest());
+
+        char fixture[PATH_MAX];
+        char land_wt[PATH_MAX];
+        char other[PATH_MAX];
+        int n = snprintf(fixture, sizeof(fixture),
+                         "test-tmp/devloop_land_pred_%ld", (long)getpid());
+        ASSERT(n > 0 && (size_t)n < sizeof(fixture));
+        n = snprintf(land_wt, sizeof(land_wt), "%s/land/wt", fixture);
+        ASSERT(n > 0 && (size_t)n < sizeof(land_wt));
+        n = snprintf(other, sizeof(other), "%s/other", fixture);
+        ASSERT(n > 0 && (size_t)n < sizeof(other));
+        ASSERT(dp_mk_write(fixture, "land/queue.lock", "land\n"));
+        ASSERT(dp_mk_write(land_wt, ".keep", "wt\n"));
+        ASSERT(dp_mk_write(other, ".keep", "not land\n"));
+        ASSERT(zcl_devloop_watch_root_is_landing(land_wt));
+        ASSERT(!zcl_devloop_watch_root_is_landing(other));
+        ASSERT(!zcl_devloop_watch_root_is_landing(NULL));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 struct process_poll_fixture {
     unsigned calls;
     unsigned cancel_after;
@@ -3936,6 +3964,7 @@ static int test_dev_platform_platform_arm(void)
     failures += test_resident_process_cancellation();
     failures += test_exact_commit_preempts_edit_proof();
     failures += test_watcher_stream_backpressure();
+    failures += test_watch_idle_exit();
     failures += test_resident_process_supersession();
     failures += test_native_source_cas_shadow();
     failures += test_source_identity_failure_tokens();

@@ -23,6 +23,7 @@
 #include "platform/private_directory.h"
 #include "platform/process_lock.h"
 #include "platform/time_compat.h"
+#include "platform/clock.h"
 
 #if !defined(_WIN32)
 #include <dirent.h>
@@ -262,6 +263,7 @@ struct watch_context {
     bool force_full_source_rescan;
     uint64_t mutation_sequence;
     int64_t first_mutation_us;
+    int64_t idle_since_us;
     bool edit_seen_emitted;
     struct ci_merkle *verified_tree;
     char verified_root[65];
@@ -472,6 +474,85 @@ static bool watch_commit_proof_prioritize(struct watch_context *ctx)
     return request_current_clean;
 }
 
+static bool mkdirs(const char *path);
+
+/* A landing worktree is <state_root>/land/wt; queue.lock lives in
+ * <state_root>/land, one segment above the watched root. Presence of that
+ * sibling lock is the exact land-state signal — not a "wt" name guess. */
+static bool watch_root_is_landing(const char *root)
+{
+    char lock_path[PATH_MAX];
+    int n;
+
+    if (!root || !root[0])
+        return false;
+    n = snprintf(lock_path, sizeof(lock_path), "%s/../queue.lock", root);
+    if (n <= 0 || (size_t)n >= sizeof(lock_path))
+        return true;
+    return access(lock_path, F_OK) == 0;
+}
+
+static void watch_idle_touch(struct watch_context *ctx)
+{
+    if (!ctx)
+        return;
+    ctx->idle_since_us = platform_time_monotonic_us();
+}
+
+/* True only when the idle wait observed no source work, no queued proof, no
+ * in-flight proof worker, and a non-landing root past the idle budget. */
+static bool watch_idle_poll_should_exit(struct watch_context *ctx)
+{
+    if (!ctx)
+        return false;
+    if (zcl_dev_proof_queue_has_pending(ctx->root) ||
+        ctx->proof_worker_pid > 1) {
+        watch_idle_touch(ctx);
+        return false;
+    }
+    if (watch_root_is_landing(ctx->root))
+        return false;
+    return platform_time_monotonic_us() - ctx->idle_since_us >=
+        (int64_t)ZCL_DEVLOOP_WATCH_IDLE_BUDGET_MS * 1000;
+}
+
+static bool watch_stopped_heartbeat_line(char *buf, size_t len, bool idle_exit)
+{
+    int n;
+
+    if (!buf || len == 0) {
+        fprintf(stderr,
+                "[devloop] watch: stopped heartbeat buffer missing\n");
+        return false;
+    }
+    if (idle_exit)
+        n = snprintf(buf, len,
+                     "{\"schema\":\"zcl.dev_watch_heartbeat.v1\","
+                     "\"status\":\"stopped\",\"pid\":%ld,"
+                     "\"reason\":\"idle_exit\"}\n",
+                     (long)getpid());
+    else
+        n = snprintf(buf, len,
+                     "{\"schema\":\"zcl.dev_watch_heartbeat.v1\","
+                     "\"status\":\"stopped\",\"pid\":%ld}\n",
+                     (long)getpid());
+    if (n < 0 || (size_t)n >= len) {
+        fprintf(stderr,
+                "[devloop] watch: stopped heartbeat could not be formatted\n");
+        return false;
+    }
+    return true;
+}
+
+static void watch_emit_stopped_heartbeat(bool idle_exit)
+{
+    char line[192];
+
+    if (!watch_stopped_heartbeat_line(line, sizeof(line), idle_exit))
+        return;
+    fputs(line, stdout);
+}
+
 #if defined(ZCL_TESTING)
 bool zcl_devloop_watch_commit_preemption_selftest(void)
 {
@@ -527,6 +608,181 @@ bool zcl_devloop_watch_commit_preemption_selftest(void)
     (void)kill(dirty_edit, SIGTERM);
     watch_proof_join(&ctx);
     return edit_retired && commit_preserved && dirty_preserved;
+}
+
+bool zcl_devloop_watch_root_is_landing(const char *root)
+{
+    return watch_root_is_landing(root);
+}
+
+struct watch_idle_clock {
+    int64_t mono_us;
+};
+
+static int64_t watch_idle_clock_mono_ns(void *self)
+{
+    struct watch_idle_clock *clock = self;
+    return clock ? clock->mono_us * 1000 : 0;
+}
+
+static int64_t watch_idle_clock_wall_ms(void *self)
+{
+    (void)self;
+    return 0;
+}
+
+static bool watch_idle_selftest_write_request(const char *root)
+{
+    char dir[PATH_MAX], path[PATH_MAX];
+    int n;
+    int fd;
+    ssize_t wrote;
+    static const char body[] =
+        "zcl.dev_proof_request.v1\n"
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"
+        "1111111111111111111111111111111111111111\n"
+        "1\n"
+        "1\n";
+
+    if (!root)
+        return false;
+    n = snprintf(dir, sizeof(dir), "%s/.cache/zcl-dev-proof/requests", root);
+    if (n <= 0 || (size_t)n >= sizeof(dir) || !mkdirs(dir))
+        return false;
+    n = snprintf(path, sizeof(path),
+                 "%s/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-"
+                 "1111111111111111111111111111111111111111.request",
+                 dir);
+    if (n <= 0 || (size_t)n >= sizeof(path))
+        return false;
+    fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+    if (fd < 0)
+        return false;
+    wrote = write(fd, body, sizeof(body) - 1);
+    if (close(fd) != 0 || wrote != (ssize_t)(sizeof(body) - 1))
+        return false;
+    return zcl_dev_proof_queue_has_pending(root);
+}
+
+static void watch_idle_selftest_clear_request(const char *root)
+{
+    char path[PATH_MAX];
+    int n;
+
+    if (!root)
+        return;
+    n = snprintf(path, sizeof(path),
+                 "%s/.cache/zcl-dev-proof/requests/"
+                 "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-"
+                 "1111111111111111111111111111111111111111.request",
+                 root);
+    if (n > 0 && (size_t)n < sizeof(path))
+        (void)unlink(path);
+}
+
+bool zcl_devloop_watch_idle_exit_selftest(void)
+{
+    struct watch_idle_clock clock = { .mono_us = 1000 };
+    const clock_iface_t iface = {
+        .now_monotonic_ns = watch_idle_clock_mono_ns,
+        .now_wall_ms = watch_idle_clock_wall_ms,
+        .self = &clock,
+    };
+    const int64_t budget_us = (int64_t)ZCL_DEVLOOP_WATCH_IDLE_BUDGET_MS * 1000;
+    char base[PATH_MAX], plain[PATH_MAX], land_parent[PATH_MAX],
+        land_wt[PATH_MAX], queue_lock[PATH_MAX];
+    char heartbeat[192];
+    struct watch_context ctx = {0};
+    bool ok = true;
+    int n;
+    int lock_fd;
+
+    n = snprintf(base, sizeof(base), "test-tmp/devloop_idle_%ld",
+                 (long)getpid());
+    if (n <= 0 || (size_t)n >= sizeof(base))
+        return false;
+    n = snprintf(plain, sizeof(plain), "%s/plain", base);
+    if (n <= 0 || (size_t)n >= sizeof(plain))
+        return false;
+    n = snprintf(land_parent, sizeof(land_parent), "%s/land", base);
+    if (n <= 0 || (size_t)n >= sizeof(land_parent))
+        return false;
+    n = snprintf(land_wt, sizeof(land_wt), "%s/wt", land_parent);
+    if (n <= 0 || (size_t)n >= sizeof(land_wt))
+        return false;
+    n = snprintf(queue_lock, sizeof(queue_lock), "%s/queue.lock", land_parent);
+    if (n <= 0 || (size_t)n >= sizeof(queue_lock))
+        return false;
+    if (!mkdirs(plain) || !mkdirs(land_wt))
+        return false;
+    lock_fd = open(queue_lock, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+    if (lock_fd < 0)
+        return false;
+    if (close(lock_fd) != 0)
+        return false;
+    if (!realpath(plain, ctx.root))
+        return false;
+
+    clock_set_default(&iface);
+
+    if (!watch_root_is_landing(land_wt) || watch_root_is_landing(plain) ||
+        watch_root_is_landing(ctx.root) || watch_root_is_landing(NULL) ||
+        watch_root_is_landing(""))
+        ok = false;
+
+    ctx.idle_since_us = platform_time_monotonic_us();
+    ctx.proof_worker_pid = 0;
+    clock.mono_us = 1000 + budget_us;
+    if (!watch_idle_poll_should_exit(&ctx))
+        ok = false;
+    if (!watch_stopped_heartbeat_line(heartbeat, sizeof(heartbeat), true) ||
+        !strstr(heartbeat, "\"schema\":\"zcl.dev_watch_heartbeat.v1\"") ||
+        !strstr(heartbeat, "\"status\":\"stopped\"") ||
+        !strstr(heartbeat, "\"reason\":\"idle_exit\""))
+        ok = false;
+
+    clock.mono_us = 1000;
+    ctx.idle_since_us = platform_time_monotonic_us();
+    clock.mono_us = 1000 + budget_us / 2;
+    watch_idle_touch(&ctx);
+    clock.mono_us = 1000 + budget_us;
+    if (watch_idle_poll_should_exit(&ctx))
+        ok = false;
+
+    clock.mono_us = 1000;
+    ctx.idle_since_us = platform_time_monotonic_us();
+    clock.mono_us = 1000 + budget_us / 2;
+    if (!watch_idle_selftest_write_request(ctx.root) ||
+        !zcl_dev_proof_queue_has_pending(ctx.root) ||
+        watch_idle_poll_should_exit(&ctx))
+        ok = false;
+    watch_idle_selftest_clear_request(ctx.root);
+    clock.mono_us = 1000 + budget_us;
+    if (zcl_dev_proof_queue_has_pending(ctx.root) ||
+        watch_idle_poll_should_exit(&ctx))
+        ok = false;
+
+    clock.mono_us = 1000;
+    ctx.idle_since_us = platform_time_monotonic_us();
+    ctx.proof_worker_pid = 2;
+    clock.mono_us = 1000 + budget_us;
+    if (watch_idle_poll_should_exit(&ctx))
+        ok = false;
+    ctx.proof_worker_pid = 0;
+
+    if (!realpath(land_wt, ctx.root))
+        ok = false;
+    clock.mono_us = 1000;
+    ctx.idle_since_us = platform_time_monotonic_us();
+    clock.mono_us = 1000 + budget_us * 2;
+    if (!watch_root_is_landing(ctx.root) ||
+        watch_idle_poll_should_exit(&ctx))
+        ok = false;
+
+    clock_reset_default();
+    watch_idle_selftest_clear_request(plain);
+    (void)unlink(queue_lock);
+    return ok;
 }
 #endif
 
@@ -989,6 +1245,7 @@ static bool watch_emit_edit_seen(struct watch_context *ctx)
     (void)fputc('\n', stdout);
     (void)fflush(stdout);
     ctx->edit_seen_emitted = true;
+    watch_idle_touch(ctx);
     return true;
 }
 
@@ -1286,6 +1543,7 @@ static void add_changed(struct watch_context *ctx, const char *path)
 {
     if (!ctx || !relevant_file(path))
         return;
+    watch_idle_touch(ctx);
     for (size_t i = 0; i < ctx->changed_count; i++) {
         if (strcmp(ctx->changed[i], path) == 0)
             return;
@@ -1782,6 +2040,8 @@ int zcl_devloop_watch_mode_until(const char *repo_root,
            zcl_devloop_publish_mode_applies(publish_mode) ? "true" : "false");
     fflush(stdout);
 
+    bool idle_exit = false;
+    ctx.idle_since_us = platform_time_monotonic_us();
     while (!g_watch_stop && !(stop && stop(stop_opaque))) {
         watch_commit_proof_prioritize(&ctx);
         if (!watch_proof_start(&ctx, lock_fd)) {
@@ -1792,6 +2052,9 @@ int zcl_devloop_watch_mode_until(const char *repo_root,
             fprintf(stderr, "[devloop] commit proof worker start failed\n");
             break;
         }
+        if (zcl_dev_proof_queue_has_pending(ctx.root) ||
+            ctx.proof_worker_pid > 1)
+            watch_idle_touch(&ctx);
         if (ctx.changed_count == 0 && !ctx.prepared_epoch_ready) {
             int prc = watch_wait_for_events(&ctx, stop ? 100 : 1000);
             if (prc < 0) {
@@ -1799,11 +2062,17 @@ int zcl_devloop_watch_mode_until(const char *repo_root,
                         strerror(errno));
                 break;
             }
-            if (prc == 0)
+            if (prc == 0) {
+                if (watch_idle_poll_should_exit(&ctx)) {
+                    idle_exit = true;
+                    break;
+                }
                 continue;
+            }
             if (ctx.changed_count == 0)
                 continue;
         }
+        watch_idle_touch(&ctx);
 
 #if defined(__APPLE__)
         /* EVFILT_VNODE identifies the directory that moved, not the final
@@ -2046,8 +2315,7 @@ int zcl_devloop_watch_mode_until(const char *repo_root,
 
     watch_proof_stop(&ctx);
     zcl_devloop_process_cancel_poll_clear();
-    printf("{\"schema\":\"zcl.dev_watch_heartbeat.v1\","
-           "\"status\":\"stopped\",\"pid\":%ld}\n", (long)getpid());
+    watch_emit_stopped_heartbeat(idle_exit);
     watch_backend_close(&ctx);
     /* Release singleton ownership after the obsolete proof's active child
      * session has been signalled. Reaping the already-cancelled worker cannot

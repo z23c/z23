@@ -57,6 +57,9 @@ extern "C" {
 #define ZCL_DEVLOOP_FIRST_ERROR_MAX 512
 #define ZCL_DEVLOOP_CYCLE_JSON_MAX 8192
 #define ZCL_DEVLOOP_WATCH_LOCK_REL ".cache/zcl-dev-watch.lock"
+/* Non-landing watchers exit after this much idle (no source event, no
+ * pending proof request, no proof in flight). One hour; compile-time only. */
+#define ZCL_DEVLOOP_WATCH_IDLE_BUDGET_MS (60 * 60 * 1000)
 
 /* ── the three dependency dimensions a plan is the UNION of ─────────────
  *
@@ -678,6 +681,9 @@ void zcl_devloop_process_cancel_poll_clear(void);
 bool zcl_devloop_watch_commit_preemption_selftest(void);
 /* Real bounded-stream KAT for watcher-local queue backpressure. */
 bool zcl_devloop_watch_stream_backpressure_selftest(const char *repo_root);
+/* Idle-budget exit, landing-root exemption, and stopped-heartbeat reason. */
+bool zcl_devloop_watch_root_is_landing(const char *root);
+bool zcl_devloop_watch_idle_exit_selftest(void);
 #endif
 #if defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)
 bool zcl_devloop_deterministic_compile_failure(
