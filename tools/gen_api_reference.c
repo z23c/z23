@@ -314,6 +314,9 @@ static const struct row g_rows[] = {
 #define ZCL_DEF_FILE "engine/composition/commands/mind.def"
 #include "../engine/composition/commands/mind.def"
 #undef ZCL_DEF_FILE
+#define ZCL_DEF_FILE "engine/composition/commands/fleet.def"
+#include "../engine/composition/commands/fleet.def"
+#undef ZCL_DEF_FILE
 #define ZCL_DEF_FILE "engine/composition/commands/telemetry/root.def"
 #include "../engine/composition/commands/telemetry/root.def"
 #undef ZCL_DEF_FILE
