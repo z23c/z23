@@ -137,12 +137,15 @@ struct fleet_box_facts {
     char os[FLEET_ENROL_TEXT_MAX + 1];
     char os_version[FLEET_ENROL_TEXT_MAX + 1];
     char arch[FLEET_ENROL_TEXT_MAX + 1];
-    char toolchain[FLEET_ENROL_TEXT_MAX + 1]; /* capsule root, or empty */
+    /* The compiler that built this binary (__VERSION__), captured at
+     * compile time. Not the toolchain capsule root: capturing that means
+     * spawning the compiler, and an enrolment must not need a process
+     * spawn capability to say what built it. */
+    char toolchain[FLEET_ENROL_TEXT_MAX + 1];
     char git_head[FLEET_ENROL_TEXT_MAX + 1];
     uint32_t cores;
     uint64_t ram_mb;
     uint64_t disk_free_mb;
-    int64_t build_epoch;
 };
 
 struct fleet_receipt {
