@@ -400,7 +400,7 @@ ZCL_MODULE_CAPABILITY("engine/services/src/network_crawler_probe.c", CAP_FS_WRIT
 ZCL_MODULE_CAPABILITY("engine/services/src/network_monitor.c", CAP_CLOCK, "")
 ZCL_MODULE_CAPABILITY("engine/services/src/network_telemetry_fill.c", CAP_NETWORK, "fills a telemetry leaf by dialing the dynhost network client")
 ZCL_MODULE_CAPABILITY("engine/services/src/node_db_catchup_mmap.c", CAP_FS_READ, "")
-ZCL_MODULE_CAPABILITY("engine/services/src/node_db_catchup_service.c", CAP_FS_READ|CAP_FS_WRITE, "")
+ZCL_MODULE_CAPABILITY("engine/services/src/node_db_catchup_service.c", CAP_FS_READ|CAP_FS_WRITE|CAP_CLOCK, "reads block files and writes the SQLite projection; sleeps between post-commit BEGIN IMMEDIATE retries")
 ZCL_MODULE_CAPABILITY("engine/services/src/node_db_import_pipeline.c", CAP_FS_READ|CAP_CLOCK, "")
 ZCL_MODULE_CAPABILITY("engine/services/src/node_db_import_service.c", CAP_FS_READ|CAP_FS_WRITE|CAP_CLOCK, "")
 ZCL_MODULE_CAPABILITY("engine/services/src/node_health_service.c", CAP_FS_READ|CAP_FS_WRITE, "")

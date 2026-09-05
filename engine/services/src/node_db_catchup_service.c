@@ -117,6 +117,127 @@ bool advance_wallet_witnesses(struct node_db *ndb,
                               struct incremental_merkle_tree *tree,
                               int height, struct wallet *wallet);
 
+/* ── "A catchup walk is running" ──────────────────────────────────────
+ *
+ * db_maintenance asks this before taking the node.db write lock for its
+ * periodic wal/analyze/vacuum op, because that op is what pushes this
+ * walk's post-commit BEGIN IMMEDIATE past its 10 s busy timeout. A depth
+ * counter rather than a flag so the bounded whole-walk restart (which
+ * re-enters node_db_catchup_service_run) nests cleanly. Incremented and
+ * decremented in lockstep with the sync-controller's own catchup job
+ * status, through the two wrappers below — every begin has exactly one
+ * finish on every return path. */
+static _Atomic int g_catchup_active_depth = 0;
+
+bool node_db_catchup_service_active(void)
+{
+    return atomic_load(&g_catchup_active_depth) > 0;
+}
+
+static void catchup_active_begin(int start_height, int target_height)
+{
+    atomic_fetch_add(&g_catchup_active_depth, 1);
+    sync_job_catchup_begin(start_height, target_height);
+}
+
+static void catchup_active_finish(void)
+{
+    atomic_fetch_sub(&g_catchup_active_depth, 1);
+    sync_job_catchup_finish();
+}
+
+#ifdef ZCL_TESTING
+/* Reopen-retry fixtures — see node_db_catchup_service.h. */
+static _Atomic int  g_test_reopen_busy_armed = 0;
+static _Atomic int  g_test_reopen_attempts = 0;
+static _Atomic bool g_test_reopen_no_backoff = false;
+
+void node_db_catchup_test_force_reopen_busy(int n)
+{
+    atomic_store(&g_test_reopen_busy_armed, n > 0 ? n : 0);
+    atomic_store(&g_test_reopen_no_backoff, n > 0);
+}
+
+int node_db_catchup_test_reopen_attempts(void)
+{
+    return atomic_load(&g_test_reopen_attempts);
+}
+
+void node_db_catchup_test_set_active(bool active)
+{
+    atomic_store(&g_catchup_active_depth, active ? 1 : 0);
+}
+
+void node_db_catchup_test_reset_reopen(void)
+{
+    atomic_store(&g_test_reopen_busy_armed, 0);
+    atomic_store(&g_test_reopen_attempts, 0);
+    atomic_store(&g_test_reopen_no_backoff, false);
+    atomic_store(&g_catchup_active_depth, 0);
+}
+#endif
+
+/* One BEGIN IMMEDIATE attempt on the post-commit reopen path. Under
+ * ZCL_TESTING an armed injection fails the attempt exactly as a plain
+ * SQLITE_BUSY would, without touching the handle — so the retry plumbing
+ * runs for real against a database that is not actually locked. */
+static bool catchup_reopen_attempt(struct node_db *ndb)
+{
+#ifdef ZCL_TESTING
+    atomic_fetch_add(&g_test_reopen_attempts, 1);
+    int armed = atomic_load(&g_test_reopen_busy_armed);
+    while (armed > 0) {
+        if (atomic_compare_exchange_weak(&g_test_reopen_busy_armed,
+                                         &armed, armed - 1))
+            return false;
+    }
+#endif
+    return node_db_begin_immediate(ndb);
+}
+
+/* Backoff before retry number `attempt` (1-based): BASE doubled per prior
+ * retry, capped at MAX. */
+static int catchup_reopen_backoff_ms(int attempt)
+{
+#ifdef ZCL_TESTING
+    if (atomic_load(&g_test_reopen_no_backoff))
+        return 0;
+#endif
+    int ms = NODE_DB_CATCHUP_REOPEN_BACKOFF_BASE_MS;
+    for (int i = 1; i < attempt && ms < NODE_DB_CATCHUP_REOPEN_BACKOFF_MAX_MS;
+         i++)
+        ms *= 2;
+    return ms > NODE_DB_CATCHUP_REOPEN_BACKOFF_MAX_MS
+        ? NODE_DB_CATCHUP_REOPEN_BACKOFF_MAX_MS : ms;
+}
+
+/* Reopen the batch transaction after a clean COMMIT, surviving a transient
+ * SQLITE_BUSY (see the policy comment in node_db_catchup_service.h).
+ * Returns true with a write transaction open. On false the caller keeps
+ * the unchanged fail-closed abort; *busy_snapshot_out is set when the
+ * failure carried the one class no wait can cure, so the whole-walk
+ * restart guard answers it instead of this loop. */
+static bool catchup_reopen_batch_txn(struct node_db *ndb, int h,
+                                     bool *busy_snapshot_out)
+{
+    for (int attempt = 1; attempt <= NODE_DB_CATCHUP_REOPEN_MAX_ATTEMPTS;
+         attempt++) {
+        if (catchup_reopen_attempt(ndb))
+            return true;
+        if (node_db_catchup_lock_guard_busy_snapshot(ndb)) {
+            *busy_snapshot_out = true;
+            return false;
+        }
+        if (attempt > NODE_DB_CATCHUP_REOPEN_MAX_RETRIES)
+            break;
+        LOG_WARN("catchup",
+                 "catchup: reopen busy, retry %d/%d (height %d)",
+                 attempt, NODE_DB_CATCHUP_REOPEN_MAX_RETRIES, h);
+        platform_sleep_ms(catchup_reopen_backoff_ms(attempt));
+    }
+    return false;
+}
+
 /* Lean index: block header + txid index + the full explorer projections.
  *
  * Per-block write order: stamp the txid index rows (transactions table),
@@ -278,7 +399,7 @@ int node_db_catchup_service_run(struct node_db *ndb,
     int start = db_tip + 1;
     if (start < 0) start = 0;
     int total = chain_tip - start + 1;
-    sync_job_catchup_begin(start, chain_tip);
+    catchup_active_begin(start, chain_tip);
 
     bool proven_authority = false;
     int32_t proven_applied = -1;
@@ -301,7 +422,7 @@ int node_db_catchup_service_run(struct node_db *ndb,
     if (!sync_db_turbo_scope_begin(&turbo_mode, ndb, bulk_mode)) {
         fprintf(stderr, "catchup: failed to enter turbo mode\n");
         node_db_catchup_lock_guard_note_outcome(true);
-        sync_job_catchup_finish();
+        catchup_active_finish();
         return -1; // raw-return-ok:logged-above
     }
 
@@ -317,7 +438,7 @@ int node_db_catchup_service_run(struct node_db *ndb,
             fprintf(stderr, "catchup: failed to restore normal mode after BEGIN failure\n");
         restore_ok = false;
         node_db_catchup_lock_guard_note_outcome(true);
-        sync_job_catchup_finish();
+        catchup_active_finish();
         return -1; // raw-return-ok:logged-above
     }
     tx_open = true;
@@ -328,7 +449,7 @@ int node_db_catchup_service_run(struct node_db *ndb,
             fprintf(stderr, "catchup: failed to restore normal mode after initial COMMIT failure\n");
         restore_ok = false;
         node_db_catchup_lock_guard_note_outcome(true);
-        sync_job_catchup_finish();
+        catchup_active_finish();
         return -1; // raw-return-ok:logged-above
     }
     tx_open = false;
@@ -377,7 +498,7 @@ int node_db_catchup_service_run(struct node_db *ndb,
             fprintf(stderr, "catchup: failed to restore normal mode after tx open failure\n");
         restore_ok = false;
         node_db_catchup_lock_guard_note_outcome(true);
-        sync_job_catchup_finish();
+        catchup_active_finish();
         return -1; // raw-return-ok:logged-above
     }
     tx_open = true;
@@ -667,7 +788,11 @@ int node_db_catchup_service_run(struct node_db *ndb,
             printf("SQLite: %d/%d blocks (height %d, %d blk/s, %d wallet txs)\n",
                    indexed, total, h, rate, wallet_hits);
             fflush(stdout);
-            if (!node_db_begin_immediate(ndb)) {
+            /* The batch just committed is durable no matter what happens
+             * next, so a busy reopen is worth waiting out rather than
+             * aborting the pass (which stops catchup, withholds the boot
+             * watchdog ping, and gets the node killed). */
+            if (!catchup_reopen_batch_txn(ndb, h, &busy_snapshot)) {
                 LOG_WARN("catchup", "catchup: failed to reopen transaction after batch commit");
                 failed = true;
                 break;
@@ -778,14 +903,14 @@ int node_db_catchup_service_run(struct node_db *ndb,
      * pass's own writes can no longer produce the class; this covers any
      * residual/regressed deferred writer. */
     if (node_db_catchup_lock_guard_restart_needed(failed, busy_snapshot)) {
-        sync_job_catchup_finish();
+        catchup_active_finish();
         int r = node_db_catchup_service_run(ndb, chain, w, datadir);
         node_db_catchup_lock_guard_restart_done();
         return r;
     }
 
     if (failed || !restore_ok) {
-        sync_job_catchup_finish();
+        catchup_active_finish();
         LOG_ERR("sync", "catchup: aborting (failed=%d, restore_ok=%d, indexed=%d)",
                 failed, restore_ok, indexed);
     }
@@ -829,7 +954,7 @@ int node_db_catchup_service_run(struct node_db *ndb,
     if (indexed > 10000)
         node_db_wal_checkpoint(ndb);
 
-    sync_job_catchup_finish();
+    catchup_active_finish();
     return indexed;
 }
 
