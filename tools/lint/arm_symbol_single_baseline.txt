@@ -67,8 +67,8 @@ core/modules/sapling/src/params_fetch_session.c	zcl_param_serve_manifest
 core/modules/sapling/src/params_fetch_session.c	zcl_param_serve_prepare
 core/modules/sapling/src/params_fetch_session.c	zcl_param_serve_ready
 core/modules/sapling/src/params_fetch_session.c	zcl_param_serve_shutdown
-engine/composition/src/boot_auto_install_bundle.c	boot_auto_install_clear_failed_marker
 engine/composition/src/boot_auto_install_bundle.c	boot_autodetect_consensus_bundle
+engine/composition/src/boot_auto_install_bundle.c	boot_auto_install_clear_failed_marker
 engine/composition/src/boot_auto_install_bundle.c	boot_install_bundle_clear
 engine/composition/src/boot_auto_install_bundle.c	boot_install_bundle_consume
 engine/composition/src/boot_auto_install_bundle.c	boot_install_bundle_pending
@@ -142,7 +142,7 @@ platform/modules/platform/src/directory_transaction.c	platform_directory_transac
 platform/modules/platform/src/directory_watcher.c	platform_directory_watcher_close
 platform/modules/platform/src/directory_watcher.c	platform_directory_watcher_init
 platform/modules/platform/src/directory_watcher.c	platform_directory_watcher_open
-platform/modules/platform/src/disk_space.c	platform_disk_space_available
+platform/modules/platform/src/disk_space.c	platform_disk_space
 platform/modules/platform/src/logical_cpu.c	platform_logical_cpu_count
 platform/modules/platform/src/os_binary_slots.c	os_binary_slots_close_launch
 platform/modules/platform/src/os_binary_slots.c	os_binary_slots_ensure_directory
