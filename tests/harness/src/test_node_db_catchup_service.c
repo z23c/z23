@@ -3,6 +3,7 @@
 #include "test/test_core.h"
 #include "services/node_db_catchup_service.h"
 #include "services/node_db_catchup_lock_guard.h"
+#include "services/db_maintenance.h"
 #include "models/database.h"
 #include "models/block.h"
 #include "models/explorer_index.h"
@@ -26,6 +27,64 @@
     if (expr) printf("OK\n"); \
     else { printf("FAIL\n"); failures++; } \
 } while (0)
+
+/* Arguments for the one catchup run whose stderr is captured, so the
+ * capture helper below can stay a plain void(void) thunk. */
+static struct node_db          *g_cap_ndb;
+static const struct active_chain *g_cap_chain;
+static const char              *g_cap_datadir;
+static int                      g_cap_result;
+
+static void ndc_run_catchup_capture(void)
+{
+    g_cap_result = node_db_catchup_service_run(
+        g_cap_ndb, g_cap_chain, NULL, g_cap_datadir);
+}
+
+/* Redirect stderr to a scratch file for the duration of `fn`, then hand
+ * back what landed in it. Mirrors log_level_capture() in
+ * test_log_level.c. Returns false when the plumbing itself failed —
+ * callers treat that as a real FAIL, because the captured text is what is
+ * under test. */
+static bool ndc_capture_stderr(void (*fn)(void), char *out, size_t out_len)
+{
+    if (out && out_len > 0)
+        out[0] = '\0';
+
+    mkdir("./test-tmp", 0755);
+    char path[256];
+    snprintf(path, sizeof(path), "./test-tmp/ndc_catchup_stderr_%d.log",
+             (int)getpid());
+
+    fflush(stderr);
+    int saved_fd = dup(STDERR_FILENO);
+    FILE *capf = (saved_fd >= 0) ? fopen(path, "w+") : NULL;
+    if (!capf) {
+        if (saved_fd >= 0)
+            close(saved_fd);
+        return false;
+    }
+    dup2(fileno(capf), STDERR_FILENO);
+
+    fn();
+
+    fflush(stderr);
+    dup2(saved_fd, STDERR_FILENO);
+    close(saved_fd);
+
+    if (out && out_len > 0) {
+        long sz = ftell(capf);
+        if (sz > 0) {
+            rewind(capf);
+            size_t want = (size_t)sz < out_len - 1 ? (size_t)sz : out_len - 1;
+            size_t got = fread(out, 1, want, capf);
+            out[got] = '\0';
+        }
+    }
+    fclose(capf);
+    unlink(path);
+    return true;
+}
 
 int test_node_db_catchup_service(void)
 {
@@ -265,11 +324,14 @@ int test_node_db_catchup_service(void)
     {
         enum { FIX_N = 5 };
         char dirF[256], dirA[256], dirB[256], dirC[256], dirD[256];
+        char dirR[256], dirS[256];
         test_make_tmpdir(dirF, sizeof(dirF), "node_db_catchup", "fix");
         test_make_tmpdir(dirA, sizeof(dirA), "node_db_catchup", "batchA");
         test_make_tmpdir(dirB, sizeof(dirB), "node_db_catchup", "batchB");
         test_make_tmpdir(dirC, sizeof(dirC), "node_db_catchup", "snapC");
         test_make_tmpdir(dirD, sizeof(dirD), "node_db_catchup", "continuousD");
+        test_make_tmpdir(dirR, sizeof(dirR), "node_db_catchup", "reopenR");
+        test_make_tmpdir(dirS, sizeof(dirS), "node_db_catchup", "reopenS");
         char blocksF[512];
         snprintf(blocksF, sizeof(blocksF), "%s/blocks", dirF);
         mkdir(blocksF, 0755);
@@ -316,10 +378,13 @@ int test_node_db_catchup_service(void)
         NDC_CHECK("five-block fixture builds and installs", built);
 
         char pathA[512], pathB[512], pathC[512], pathD[512];
+        char pathR[512], pathS[512];
         snprintf(pathA, sizeof(pathA), "%s/node.db", dirA);
         snprintf(pathB, sizeof(pathB), "%s/node.db", dirB);
         snprintf(pathC, sizeof(pathC), "%s/node.db", dirC);
         snprintf(pathD, sizeof(pathD), "%s/node.db", dirD);
+        snprintf(pathR, sizeof(pathR), "%s/node.db", dirR);
+        snprintf(pathS, sizeof(pathS), "%s/node.db", dirS);
 
         /* (c1) Batch cap 2 over 5 blocks: commits at indexed=2 and 4 plus
          * the final commit — multiple transactions, never one unbounded
@@ -372,6 +437,94 @@ int test_node_db_catchup_service(void)
                   restarts_after == restarts_before + 1);
         NDC_CHECK("the restarted walk completes with identical state",
                   resC == FIX_N && tipC == tipA);
+
+        /* (r1) ONE transient SQLITE_BUSY on the post-batch-commit
+         * BEGIN IMMEDIATE. This is the class a wait cures: the batch
+         * already committed durably and the walk holds no snapshot, so
+         * the reopen retries in place and the pass completes with the
+         * identical state. Aborting here instead is what stopped catchup
+         * on the node1 devfleet node — with catchup stopped the boot
+         * watchdog withholds its ping, systemd kills the node, and the
+         * next boot repeats the whole thing at a random height. */
+        struct node_db ndbR;
+        bool openR = built && node_db_open(&ndbR, pathR);
+        node_db_catchup_lock_guard_test_reset();
+        node_db_catchup_test_reset_reopen();
+        node_db_catchup_lock_guard_test_set_batch_size(2);
+        node_db_catchup_test_force_reopen_busy(1);
+        int resR = openR ? node_db_catchup_service_run(&ndbR, &ac, NULL, dirF) : -1;
+        int tipR = openR ? node_db_sync_get_tip_height(&ndbR) : -1;
+        int maxR = openR ? db_block_max_height(&ndbR) : -1;
+        int attemptsR = node_db_catchup_test_reopen_attempts();
+        NDC_CHECK("a transient busy reopen never aborts the walk",
+                  resR == FIX_N && tipR == FIX_N && maxR == FIX_N);
+        /* Two mid-walk commits (blocks 2 and 4) means two reopens; the
+         * injected busy costs exactly one extra BEGIN. */
+        NDC_CHECK("the retry costs exactly one extra BEGIN attempt",
+                  attemptsR == 3);
+
+        /* (r2) A busy that never clears. The walk spends exactly
+         * NODE_DB_CATCHUP_REOPEN_MAX_ATTEMPTS BEGINs on it, names every
+         * retry, then keeps the unchanged fail-closed abort — the budget
+         * buys patience, it does not remove the wall. */
+        struct node_db ndbS;
+        bool openS = built && node_db_open(&ndbS, pathS);
+        node_db_catchup_lock_guard_test_reset();
+        node_db_catchup_test_reset_reopen();
+        node_db_catchup_lock_guard_test_set_batch_size(2);
+        node_db_catchup_test_force_reopen_busy(
+            NODE_DB_CATCHUP_REOPEN_MAX_ATTEMPTS);
+        char logS[16384];
+        g_cap_ndb = &ndbS;
+        g_cap_chain = &ac;
+        g_cap_datadir = dirF;
+        g_cap_result = -99;
+        bool capturedS = openS && ndc_capture_stderr(ndc_run_catchup_capture,
+                                                     logS, sizeof(logS));
+        int attemptsS = node_db_catchup_test_reopen_attempts();
+        char firstS[64], lastS[64];
+        snprintf(firstS, sizeof(firstS), "catchup: reopen busy, retry 1/%d",
+                 NODE_DB_CATCHUP_REOPEN_MAX_RETRIES);
+        snprintf(lastS, sizeof(lastS), "catchup: reopen busy, retry %d/%d",
+                 NODE_DB_CATCHUP_REOPEN_MAX_RETRIES,
+                 NODE_DB_CATCHUP_REOPEN_MAX_RETRIES);
+        NDC_CHECK("a busy that never clears still fails closed",
+                  capturedS && g_cap_result == -1 &&
+                  strstr(logS, "catchup: failed to reopen transaction after "
+                               "batch commit") != NULL &&
+                  strstr(logS, "catchup: aborting (failed=1, restore_ok=1")
+                      != NULL);
+        NDC_CHECK("the reopen budget is spent exactly once, in full",
+                  attemptsS == NODE_DB_CATCHUP_REOPEN_MAX_ATTEMPTS);
+        NDC_CHECK("every retry is named in the log",
+                  capturedS && strstr(logS, firstS) != NULL &&
+                  strstr(logS, lastS) != NULL);
+        node_db_catchup_test_reset_reopen();
+        if (openS) node_db_close(&ndbS);
+
+        /* (r3) The other half of the same policy: db_maintenance is the
+         * writer whose lock hold produced the busy above, so it yields
+         * its tick while a walk is running and runs on the next call once
+         * the walk is over. The yield is bounded — a multi-hour catchup
+         * must not silence housekeeping for its whole duration. */
+        node_db_catchup_test_set_active(true);
+        bool deferred = openB && !db_maintenance_run_now(&ndbB, "wal").ok;
+        node_db_catchup_test_set_active(false);
+        bool ran_after = openB && db_maintenance_run_now(&ndbB, "wal").ok;
+        NDC_CHECK("db_maintenance defers its tick while catchup is active",
+                  deferred);
+        NDC_CHECK("db_maintenance runs on the next tick once catchup ends",
+                  ran_after);
+
+        node_db_catchup_test_set_active(true);
+        bool budget_held = openB;
+        for (int i = 0; i < DB_MAINT_MAX_CATCHUP_DEFERRALS && budget_held; i++)
+            budget_held = !db_maintenance_run_now(&ndbB, "wal").ok;
+        bool ran_at_bound = openB && db_maintenance_run_now(&ndbB, "wal").ok;
+        node_db_catchup_test_set_active(false);
+        NDC_CHECK("the courtesy holds for the whole deferral budget",
+                  budget_held);
+        NDC_CHECK("housekeeping is never deferred forever", ran_at_bound);
 
         /* (park) Eight consecutive failed passes name the
          * node_db_catchup.abort_storm blocker and park the worker; a
@@ -464,16 +617,20 @@ int test_node_db_catchup_service(void)
         }
 
         node_db_catchup_lock_guard_test_reset();
+        node_db_catchup_test_reset_reopen();
         blocker_reset_for_testing();
         if (openA) node_db_close(&ndbA);
         if (openB) node_db_close(&ndbB);
         if (openC) node_db_close(&ndbC);
+        if (openR) node_db_close(&ndbR);
         active_chain_free(&ac);
         test_cleanup_tmpdir(dirF);
         test_cleanup_tmpdir(dirA);
         test_cleanup_tmpdir(dirB);
         test_cleanup_tmpdir(dirC);
         test_cleanup_tmpdir(dirD);
+        test_cleanup_tmpdir(dirR);
+        test_cleanup_tmpdir(dirS);
     }
 
     test_cleanup_tmpdir(dir);
