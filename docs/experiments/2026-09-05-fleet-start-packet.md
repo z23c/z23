@@ -43,6 +43,14 @@ row the packet actually emits; 13 rows at the default budget is 13 of them. A
 fleet-sized checkout, and the packet reports its own `elapsed_ms`,
 `latency_budget_ms` and `budget_exceeded` so a caller never has to guess.
 
+One cold run did exceed it. Immediately after a full `make lint` had evicted
+the git object pages, the first call took **1082 ms** and the envelope said so:
+`budget_exceeded: true`. The five runs that followed, on the same checkout with
+a load average of 52, took **459, 480, 480, 462, 459 ms**. The declaration is a
+promise about the warm path, and the envelope reports the cold one honestly
+rather than hiding it — a caller that cares can read `budget_exceeded` instead
+of trusting the class.
+
 Every emitted worktree row was fully measured — no row came back with
 `dirty: -1` — so the per-section wall (550 ms) was never the binding
 constraint at the default budget. It exists for the case where it is.
