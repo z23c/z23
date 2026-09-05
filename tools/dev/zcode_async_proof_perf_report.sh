@@ -40,7 +40,7 @@ quantile() {
             printf " expected=%d missing=%d invalid=%d complete=%s\n",
                    expected,missing,invalid,
                    (n > 0 && !missing && !invalid) ? "true" : "false"
-            if (!n || invalid) exit 1
+            if (!n || missing || invalid) exit 1
         }'
 }
 

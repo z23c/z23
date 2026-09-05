@@ -31,6 +31,19 @@ check '^remote_execution_us n=3 p50_us=10000000 p95_us=10000001 mean_us=10000000
 check '^remote_cpu_us n=3 p50_us=0 p95_us=0 mean_us=0 max_us=0 expected=3 missing=0 invalid=0 complete=true$'
 check '^worker_cache_hits=0/3$'
 
+# A structurally valid result with one requested metric absent is incomplete,
+# while every other field remains measured and valid.
+printf '{"durable_action_lookup_dedup_us":2,"local_submit_us":3,"local_first_feedback_us":4,"live_rpc_admission_us":5,"live_rpc_request_bytes":6,"live_rpc_response_bytes":7}\n' >"$scratch/async-submit-3-result.json"
+if bash "$report" "$scratch" >"$scratch/report"; then
+    printf 'proof-perf selftest: missing foreground metric did not refuse\n' >&2
+    exit 1
+fi
+check '^foreground_request_creation_us n=2 .* expected=3 missing=1 invalid=0 complete=false$'
+
+# Restore the complete baseline before exercising malformed and oversized
+# worker observations below.
+printf '{"foreground_request_creation_us":1,"durable_action_lookup_dedup_us":2,"local_submit_us":3,"local_first_feedback_us":4,"live_rpc_admission_us":5,"live_rpc_request_bytes":6,"live_rpc_response_bytes":7}\n' >"$scratch/async-submit-3-result.json"
+
 # Repeated executions are samples too. Missing, invalid, and large spans must
 # neither disappear nor be confused with real measured zero durations.
 worker 1 ''
