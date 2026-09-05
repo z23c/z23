@@ -1045,11 +1045,16 @@ AGENT_IMPACT_RULE("tests/harness/src/test_terminal_worker_sandbox.c|platform/mod
  * hard byte budgets, and ends every session with a named close reason and
  * a census-verified process-group kill. */
 AGENT_IMPACT_RULE("cognition/modules/session/src/mesh_terminal_worker.c|cognition/modules/session/include/session/mesh_terminal_worker.h|tests/harness/src/test_mesh_terminal_worker.c", "mesh_terminal_worker terminal_worker_sandbox os_sandbox make_lint_gates")
-/* Mesh terminal serving lane (ZMTERM on zpkgswm): the pairing-bound OPEN
- * responder and bounded session table, the shared mesh identity/session-peer
- * helpers it reuses, and the receipt/decision surface it exports. */
-AGENT_IMPACT_RULE("engine/composition/src/boot_mesh_terminal.c|engine/composition/include/config/boot_mesh_terminal.h|tests/harness/src/test_boot_mesh_terminal.c", "boot_mesh_terminal mesh_status_wire mesh_terminal_proto make_lint_gates")
-AGENT_IMPACT_RULE("engine/composition/src/boot_mesh_terminal_client.c|engine/composition/src/boot_mesh_terminal_rpc.c|engine/composition/src/boot_mesh_terminal_internal.h|engine/composition/src/boot_mesh_status.c|engine/composition/src/boot_mesh_status_internal.h|engine/composition/src/boot_mesh_status_requester.c|tests/harness/src/mesh_term_fixture.c|tests/harness/include/test/mesh_term_fixture.h|tests/harness/src/test_mesh_terminal_client.c", "mesh_terminal_client boot_mesh_terminal mesh_status_wire make_lint_gates")
+/* Mesh terminal serving lane (the "terminal" stream service): the
+ * pairing-bound OPEN responder and bounded session table, the shared mesh
+ * identity/session-peer helpers it reuses, and the receipt/decision
+ * surface it exports. */
+AGENT_IMPACT_RULE("engine/composition/src/boot_mesh_terminal.c|engine/composition/include/config/boot_mesh_terminal.h|tests/harness/src/test_boot_mesh_terminal.c", "boot_mesh_terminal mesh_stream mesh_status_wire mesh_terminal_proto make_lint_gates")
+AGENT_IMPACT_RULE("engine/composition/src/boot_mesh_terminal_client.c|engine/composition/src/boot_mesh_terminal_rpc.c|engine/composition/src/boot_mesh_terminal_internal.h|engine/composition/src/boot_mesh_status.c|engine/composition/src/boot_mesh_status_internal.h|engine/composition/src/boot_mesh_status_requester.c|tests/harness/src/mesh_term_fixture.c|tests/harness/include/test/mesh_term_fixture.h|tests/harness/src/test_mesh_terminal_client.c", "mesh_terminal_client boot_mesh_terminal mesh_stream mesh_status_wire make_lint_gates")
+/* Multiplexed streams on zpkgswm: the frame codec, the one per-peer stream
+ * table both sides use, the credit window and the service registry every
+ * confined service (the terminal among them) registers into. */
+AGENT_IMPACT_RULE("engine/composition/src/mesh_stream.c|engine/composition/include/config/mesh_stream.h|tests/harness/src/test_mesh_stream.c|tests/harness/src/mesh_stream_fixture.c|tests/harness/include/test/mesh_stream_fixture.h", "mesh_stream boot_mesh_terminal mesh_terminal_client zcode_swarm make_lint_gates")
 /* -confine strict node confinement (seccomp ALLOW-list + Landlock, applied at
  * the SERVICES_RUNNING boundary): the allow-set + installer in os_sandbox, its
  * boot wiring, the -confine flag, the named blocker binding, and the

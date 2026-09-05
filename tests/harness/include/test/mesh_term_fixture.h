@@ -63,6 +63,13 @@ bool mesh_term_pair_accept(struct mesh_term_fixture *f,
                            struct mesh_term_peer *peer,
                            uint64_t capability_mask);
 
+/* Files the pairing row the accept ceremony would leave, over a
+ * caller-chosen validity window — for the lanes that read the row on the
+ * real clock rather than on the fixture's fixed one. */
+bool mesh_term_pair_row(struct mesh_term_fixture *f,
+                        struct mesh_term_peer *peer, uint64_t capability_mask,
+                        int64_t paired_at, int64_t expires_at);
+
 /* Seal frame bytes on `from` and deliver them to `to`; plaintext must
  * equal the input byte-for-byte with no wire reply. */
 bool mesh_term_frame_roundtrip(struct noise_transport *from,

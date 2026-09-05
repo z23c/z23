@@ -578,10 +578,12 @@ ZCL_TEST_GROUP(os_sandbox_hotswap_interaction)
 ZCL_TEST_GROUP(terminal_worker_sandbox)
 /* live confined terminal worker: PTY pump, budgets, named endings */
 ZCL_TEST_GROUP(mesh_terminal_worker)
-/* mesh terminal wire: ZMTERM responder decision, receipts, session table */
+/* mesh terminal wire: the responder decision, receipts, session table */
 ZCL_TEST_GROUP(boot_mesh_terminal)
-/* mesh terminal requester: receipt binding, DATA sequence/FIFO, watchdogs */
+/* mesh terminal requester: receipt binding, DATA sequence, credit, watchdogs */
 ZCL_TEST_GROUP(mesh_terminal_client)
+/* multiplexed streams: frames, credit, per-peer cap, named refusals */
+ZCL_TEST_GROUP(mesh_stream)
 ZCL_TEST_GROUP(confine)
 ZCL_TEST_GROUP(seed_tape)
 ZCL_TEST_GROUP(postmortem)

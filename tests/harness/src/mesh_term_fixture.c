@@ -249,6 +249,34 @@ void mesh_term_compose_open(const struct mesh_term_fixture *f,
     out->rows = 24;
 }
 
+bool mesh_term_pair_row(struct mesh_term_fixture *f,
+                        struct mesh_term_peer *peer, uint64_t capability_mask,
+                        int64_t paired_at, int64_t expires_at)
+{
+    /* The row exactly as mesh_pairing_service_accept derives and files it,
+     * over a caller-chosen validity window. The accept ceremony itself
+     * re-verifies the delegation against the clock it is handed, and the
+     * fixture's delegations are signed for a fixed window; a lane that
+     * reads the pairing row on the REAL clock therefore needs the row, not
+     * a second ceremony. */
+    struct db_mesh_pairing row;
+    memset(&row, 0, sizeof(row));
+    memcpy(row.network_genesis, peer->delegation.network_genesis, 32);
+    memcpy(row.peer_master_pubkey, peer->delegation.doc.master_pubkey, 32);
+    memcpy(row.peer_noise_pubkey, peer->delegation.noise_static_pubkey, 32);
+    row.capability_mask = capability_mask;
+    row.delegation_sequence = peer->delegation.doc.seq;
+    row.paired_at = paired_at;
+    row.expires_at = expires_at;
+    if (!mesh_pairing_id_derive(row.network_genesis, row.peer_master_pubkey,
+                                row.peer_noise_pubkey, row.pairing_id))
+        return false;
+    if (!db_mesh_pairing_insert(&f->ndb, &row))
+        return false;
+    peer->pairing = row;
+    return true;
+}
+
 bool mesh_term_pair_accept(struct mesh_term_fixture *f,
                            struct mesh_term_peer *peer,
                            uint64_t capability_mask)

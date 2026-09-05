@@ -1,23 +1,28 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
- * Proves the mesh terminal wire fails closed: the ZMTERM responder
- * decision is pairing-, capability-, and session-bound; the OK receipt
- * carries the granted session bounds and nothing else answers OK; CLOSED
- * evidence receipts bind the open even after its answer window; and the
- * OPEN admit gate rate-limits and refuses replays. Drives the exact
- * production decision and composition against a real node.db fixture,
- * real Ed25519 keys, and real in-process Noise transports driven
- * buffer-to-buffer (no sockets), with two independently paired peers —
- * one status-read only, one carrying the commit-time terminal-exec
- * capability — so the capability gate is exercised at the wire layer AND
- * through the real pairing-service authorization. The fixture primitives
- * are shared with the requester-lane group (mesh_term_fixture). */
+ * Proves the mesh terminal wire fails closed: the responder decision is
+ * pairing-, capability-, and session-bound; the OK receipt carries the
+ * granted session bounds and nothing else answers OK; CLOSED evidence
+ * receipts bind the open even after its answer window; and the OPEN admit
+ * gate rate-limits and refuses replays. Drives the exact production
+ * decision and composition against a real node.db fixture, real Ed25519
+ * keys, and real in-process Noise transports driven buffer-to-buffer (no
+ * sockets), with two independently paired peers — one status-read only,
+ * one carrying the commit-time terminal-exec capability — so the
+ * capability gate is exercised at the wire layer AND through the real
+ * pairing-service authorization. The terminal rides the mesh stream
+ * primitive, so its wire frames are stream frames carrying one terminal
+ * message each. The fixture primitives are shared with the requester-lane
+ * group (mesh_term_fixture). */
 
 #include "test/test_core.h"
 
 #include "config/boot_mesh_terminal.h"
+#include "config/mesh_stream.h"
+#include "test/mesh_stream_fixture.h"
 #include "test/mesh_term_fixture.h"
 #include "base/hex.h"
+#include "base/serialize_le.h"
 #include "services/mesh_pairing_service.h"
 
 #include <stdio.h>
@@ -33,19 +38,17 @@ int test_boot_mesh_terminal(void)
     struct mesh_term_fixture f;
     bool fixture_open = false;
 
-    TEST("boot mesh terminal: frame dispatch claims only the ZMTERM "
+    TEST("boot mesh terminal: stream frame dispatch claims only the stream "
          "namespace") {
         ASSERT(mesh_term_fixture_open(&f, dir));
         fixture_open = true;
         const uint8_t other[] = "ZMSTAT\x01 garbage";
-        ASSERT(!boot_mesh_terminal_frame(NULL, NULL, other, sizeof(other),
-                                         NULL));
-        const uint8_t ours[] = "ZMTERM\x7f garbage";
-        ASSERT(boot_mesh_terminal_frame(NULL, NULL, ours, sizeof(ours),
-                                        NULL));
+        ASSERT(!mesh_stream_frame(NULL, NULL, other, sizeof(other), NULL));
+        const uint8_t ours[] = "ZSTRM\x7f garbage";
+        ASSERT(mesh_stream_frame(NULL, NULL, ours, sizeof(ours), NULL));
         /* Prefix alone is shorter than prefix+kind: not a frame. */
-        ASSERT(!boot_mesh_terminal_frame(NULL, NULL,
-                                         (const uint8_t *)"ZMTERM", 6, NULL));
+        ASSERT(!mesh_stream_frame(NULL, NULL, (const uint8_t *)"ZSTRM",
+                                  MESH_STREAM_FRAME_PREFIX_LEN, NULL));
         PASS();
     }
 
@@ -180,30 +183,40 @@ int test_boot_mesh_terminal(void)
         ASSERT_EQ(mesh_terminal_receipt_v1_matches_open(&receipt, &open),
                   MESH_TERMINAL_PROTO_OK);
 
-        /* The exact ZMTERM receipt frame crosses the live Noise session. */
+        /* The exact wire the responder puts on the link: one stream DATA
+         * frame carrying the terminal's receipt message. */
         uint8_t receipt_wire[MESH_TERMINAL_RECEIPT_V1_MAX_WIRE_BYTES];
         size_t receipt_len = 0;
         ASSERT_EQ(mesh_terminal_receipt_v1_encode(&receipt, receipt_wire,
                                                   sizeof(receipt_wire),
                                                   &receipt_len),
                   MESH_TERMINAL_PROTO_OK);
-        uint8_t frame[MESH_TERMINAL_FRAME_MAX];
-        memcpy(frame, MESH_TERMINAL_FRAME_PREFIX,
-               MESH_TERMINAL_FRAME_PREFIX_LEN);
-        frame[MESH_TERMINAL_FRAME_PREFIX_LEN] =
-            MESH_TERMINAL_FRAME_KIND_RECEIPT;
-        memcpy(frame + MESH_TERMINAL_FRAME_PREFIX_LEN + 1u, receipt_wire,
-               receipt_len);
-        uint8_t delivered[MESH_TERMINAL_FRAME_MAX];
+        uint8_t msg[MESH_TERMINAL_MSG_MAX];
+        ASSERT(1u + receipt_len <= sizeof(msg));
+        msg[0] = MESH_TERMINAL_MSG_RECEIPT;
+        memcpy(msg + 1, receipt_wire, receipt_len);
+        uint8_t frame[MESH_TERMINAL_MSG_MAX + 64u];
+        size_t frame_len = mesh_stream_test_data_frame(2, msg,
+                                                       1u + receipt_len,
+                                                       frame, sizeof(frame));
+        ASSERT(frame_len != 0);
+        uint8_t delivered[sizeof(frame)];
         ASSERT(mesh_term_frame_roundtrip(f.res_term, f.term_peer.ini, frame,
-                                         MESH_TERMINAL_FRAME_PREFIX_LEN + 1u +
-                                             receipt_len,
-                                         delivered, sizeof(delivered)));
+                                         frame_len, delivered,
+                                         sizeof(delivered)));
+        uint8_t kind = 0;
+        uint64_t stream_id = 0;
+        ASSERT(mesh_stream_test_read_header(delivered, frame_len, &kind,
+                                            &stream_id));
+        ASSERT_EQ(kind, MESH_STREAM_KIND_DATA);
+        ASSERT_EQ(stream_id, UINT64_C(2));
+        const uint8_t *body =
+            delivered + MESH_STREAM_FRAME_PREFIX_LEN + 1u + 8u;
+        ASSERT_EQ((size_t)zcl_read_u16_le(body), 1u + receipt_len);
+        ASSERT_EQ(body[2], MESH_TERMINAL_MSG_RECEIPT);
         struct mesh_terminal_receipt_v1 decoded;
-        ASSERT_EQ(mesh_terminal_receipt_v1_decode(
-                      &decoded,
-                      delivered + MESH_TERMINAL_FRAME_PREFIX_LEN + 1u,
-                      receipt_len),
+        ASSERT_EQ(mesh_terminal_receipt_v1_decode(&decoded, body + 3,
+                                                  receipt_len),
                   MESH_TERMINAL_PROTO_OK);
         ASSERT_EQ(mesh_terminal_receipt_v1_matches_open(&decoded, &open),
                   MESH_TERMINAL_PROTO_OK);
