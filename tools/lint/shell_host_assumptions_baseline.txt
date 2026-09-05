@@ -61,7 +61,6 @@ stat	tools/dev/agent-doctor.sh	4
 stat	tools/dev/arena_acceptance.sh	3
 stat	tools/dev/arena_product_journey_hook.sh	1
 stat	tools/dev/attestation_flight_hook.sh	1
-stat	tools/dev/build-epoch-key.sh	1
 stat	tools/dev/build-epoch-selftest.sh	1
 stat	tools/dev/c23_commons_beta_hook.sh	2
 stat	tools/dev/compile-epoch-object.sh	1
