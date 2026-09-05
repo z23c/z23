@@ -161,6 +161,23 @@ if [ -n "$VENDOR_TARGET" ]; then
         "AR=${VENDOR_AR:-$VENDOR_TARGET-ar}"
         "RANLIB=${VENDOR_RANLIB:-$VENDOR_TARGET-ranlib}"
     )
+elif [ -n "${VENDOR_CC:-}" ]; then
+    # A host build normally lets Tor's configure discover the compiler, and
+    # that stays the default. But when the CALLER pins one, Tor must use that
+    # one. The portable Linux release does exactly this: it rebuilds every
+    # vendor archive through tools/scripts/c23_portable_sysroot.sh's wrapper
+    # (VENDOR_CC=cc with the wrapper first in PATH) so the whole artifact sits
+    # on one ABI floor. Before this arm, Tor was the single input that ignored
+    # the pin -- which is precisely why the release used to force the stub
+    # instead of carrying a libtor.a compiled to a newer floor than the binary
+    # it was linked into.
+    #
+    # Recorded as a configure ARGUMENT rather than only an environment
+    # variable, because the `configured` comparison below reads
+    # `config.status --config`: a later CC change must re-run configure and
+    # rebuild the objects, not silently reuse a libtor.a built by the other
+    # compiler.
+    configure_opts+=("CC=$VENDOR_CC")
 fi
 
 # Tor's TOR_SEARCH_LIBRARY expands --with-<lib>-dir=D into -ID/include and

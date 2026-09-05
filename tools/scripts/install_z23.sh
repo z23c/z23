@@ -430,11 +430,39 @@ fetch_into() {
     esac
 }
 
+# The same sentence tools/scripts/tor_stamp_lib.sh carries. This script must
+# run standalone on a box with no checkout, so it cannot source that file; the
+# check-tor-full-default lint gate is what keeps the two copies identical.
+TOR_STUB_REFUSAL='refusing to package a tor=stub binary: it cannot reach the onion network; rebuild with make tor-full'
+
+# `z23 -version` prints exactly one of `tor: full` / `tor: stub`, derived from
+# a weak symbol that resolves only when the real Tor archives were linked. A
+# node that cannot reach the onion network is not a Z23 node, so a release
+# that admits to being one is refused before anything is placed.
+#
+# Scope, stated honestly: this reads the stamp only when the payload is
+# executable here. A release fetched over HTTP arrives without the execute
+# bit (this installer does not set one), and a cross-platform payload could
+# not run at all -- neither is evidence about Tor, and inventing a refusal
+# from "I could not look" would fail installs for an unrelated reason. The
+# producing side is where this is fail-closed: tools/ship.sh and
+# tools/scripts/build_c23_portable_release.sh refuse a stub they built.
+verify_release_not_tor_stub() {
+    local dir="$1" node="$1/z23" stamp
+    [ -x "$node" ] || return 0
+    stamp="$("$node" -version 2>/dev/null |
+        sed -n 's/^tor: \(full\|stub\)$/\1/p' | head -1)" || return 0
+    [ "$stamp" = stub ] \
+        && die "$TOR_STUB_REFUSAL (the release at $dir reports tor: stub)"
+    return 0
+}
+
 verify_strict() {
     local dir="$1"
     validate_payload_sizes "$dir"
     sha256_check_manifest "$dir/SHA256SUMS" >/dev/null \
         || die "SHA256SUMS mismatch — refusing to install"
+    verify_release_not_tor_stub "$dir"
 }
 
 atomic_relative_link() {
@@ -1005,6 +1033,47 @@ selftest_local_refusals() {
         || die "selftest: mismatch must be named"
     if [ -e "$tmp/empty-dest/bin/z23" ]; then
         die "selftest: mismatch installed z23 anyway"
+    fi
+
+    # A release whose node admits it links the Tor stub is refused, with its
+    # checksums perfectly intact. This is the whole point: a stub release is
+    # not a corrupt release, it is an authentic one that cannot do the job.
+    mkdir -p "$tmp/stub-release"
+    printf '#!/bin/sh\nprintf "z23 v0.1.0 (source 000000000000)\\ntor: stub\\n"\n' \
+        >"$tmp/stub-release/z23"
+    chmod 755 "$tmp/stub-release/z23"
+    ln -f -- "$tmp/stub-release/z23" "$tmp/stub-release/zclassic23"
+    cp -f -- "$tmp/good/zclassic23-package-verify" \
+        "$tmp/good/zclassic23-acme" "$tmp/good/AGENT_CARD.md" \
+        "$tmp/stub-release/"
+    (cd "$tmp/stub-release" && sha256sum $RELEASE_MEMBERS >SHA256SUMS)
+    rc=0
+    run_install "$tmp/stub-dest" "$tmp/units" "$tmp/stub-release" \
+        >/dev/null 2>"$tmp/stub.err" || rc=$?
+    [ "$rc" -eq 1 ] || die "selftest: a tor=stub release must exit 1"
+    grep -qF "$TOR_STUB_REFUSAL" "$tmp/stub.err" \
+        || die "selftest: a tor=stub release must be refused by the exact shared sentence"
+    if [ -e "$tmp/stub-dest/bin/z23" ]; then
+        die "selftest: a tor=stub release was installed anyway"
+    fi
+
+    # Positive control: the same shape, stamped full, must NOT be refused for
+    # this reason. Without it the check above would pass even if the refusal
+    # fired on every release.
+    mkdir -p "$tmp/full-release"
+    printf '#!/bin/sh\nprintf "z23 v0.1.0 (source 000000000000)\\ntor: full\\n"\n' \
+        >"$tmp/full-release/z23"
+    chmod 755 "$tmp/full-release/z23"
+    ln -f -- "$tmp/full-release/z23" "$tmp/full-release/zclassic23"
+    cp -f -- "$tmp/good/zclassic23-package-verify" \
+        "$tmp/good/zclassic23-acme" "$tmp/good/AGENT_CARD.md" \
+        "$tmp/full-release/"
+    (cd "$tmp/full-release" && sha256sum $RELEASE_MEMBERS >SHA256SUMS)
+    rc=0
+    run_install "$tmp/full-dest" "$tmp/units" "$tmp/full-release" \
+        >/dev/null 2>"$tmp/full.err" || rc=$?
+    if grep -qF "$TOR_STUB_REFUSAL" "$tmp/full.err"; then
+        die "selftest: a tor=full release was refused as a stub"
     fi
 }
 

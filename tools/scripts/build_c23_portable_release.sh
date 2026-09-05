@@ -8,6 +8,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 # shellcheck source=tools/scripts/source_identity_lib.sh
 . "$SCRIPT_DIR/source_identity_lib.sh"
+# shellcheck source=tools/scripts/tor_stamp_lib.sh
+. "$SCRIPT_DIR/tor_stamp_lib.sh"
 
 verify_source_epoch() {
     local before="$1" after="$2" baked="$3"
@@ -79,15 +81,31 @@ zcl_is_sha256 "$SOURCE_BEFORE" || {
     exit 1
 }
 
-# The portable baseline is the ordinary offline-friendly node. A checkout
-# containing an optional host-built full-Tor archive must not silently import
-# that host ABI into this artifact; the stub leaves Tor explicitly disabled.
+# The portable release carries REAL Tor.
+#
+# It used to pass TOR_FULL= and ship the stub on purpose. The stated reason
+# was sound -- a host-built libtor.a would import this box's ABI into a
+# supposedly portable artifact -- but the conclusion was not: it made the
+# published Linux release the one build that cannot reach the onion network,
+# on an onion-first project, and nothing downstream could tell. The right fix
+# is the same one every other third-party input already gets: rebuild Tor
+# through the portable wrapper, at the same floor, before the products link.
+# build_tor_full.sh honors VENDOR_CC on a host build for exactly this call.
+PATH="$PORTABLE_CC_DIR:$PATH" VENDOR_CC=cc "$SCRIPT_DIR/build_tor_full.sh"
+
 products=(zclassic23 zcl-rpc zcl-nodectl zclassic23-package-sign zclassic23-package-verify zclassic23-acme)
 # The two tiny stable-name helpers are FORCE-built by their canonical rules;
 # changing this compiler also changes vendor provenance, which invalidates the
 # two whole-program products without making every source prerequisite phony.
+# ZCL_C23_PORTABLE_RELEASE=1 also keeps the Makefile's Tor bootstrap out of
+# this build: the archives were just established with the portable compiler
+# above, and the bootstrap would have used this host's.
 PATH="$PORTABLE_CC_DIR:$PATH" make -C "$REPO_ROOT" CC=cc VENDOR_CC=cc \
-    ZCL_C23_PORTABLE_RELEASE=1 TOR_FULL= "${products[@]}"
+    ZCL_C23_PORTABLE_RELEASE=1 "${products[@]}"
+
+# The artifact must say so itself. Reading the stamp out of the binary is the
+# only proof that the link consumed real Tor; archives on disk are not.
+zcl_tor_require_full "$REPO_ROOT/build/bin/zclassic23" "the portable release node" || exit 1
 for product in "${products[@]}"; do
     ZCL_C23_MAX_GLIBC=GLIBC_2.31 \
         "$SCRIPT_DIR/check_c23_node_binary.sh" \

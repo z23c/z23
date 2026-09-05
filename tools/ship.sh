@@ -58,6 +58,8 @@ cd "$REPO_ROOT"
 
 # shellcheck source=tools/scripts/source_identity_lib.sh
 . "$REPO_ROOT/tools/scripts/source_identity_lib.sh"  # zcl_is_sha256, zcl_json_first_sha256
+# shellcheck source=tools/scripts/tor_stamp_lib.sh
+. "$REPO_ROOT/tools/scripts/tor_stamp_lib.sh"  # ZCL_TOR_STUB_REFUSAL, zcl_tor_require_full
 
 REMOTE_HOSTS_RAW="${ZCL_SHIP_HOSTS:-${ZCL_SHIP_REMOTE:-}}"
 PROOF_SERVER="${ZCL_SHIP_PROOF_SERVER:-}"
@@ -578,7 +580,7 @@ say "source     $(git rev-parse --short HEAD)  $(git log -1 --format=%s | cut -c
 # ship_candidate_has_real_tor refusal is then the first signal. That later
 # check still runs: archives on disk do not prove the candidate linked them.
 ship_checkout_has_real_tor_archives "$REPO_ROOT" ||
-    die "this checkout would link the Tor stub (one or more of the four TOR_FULL archives is missing from vendor/tor), so the candidate would be refused after the gate; run make worktree-prime — git worktree add does not populate the vendor/tor submodule"
+    die "$ZCL_TOR_STUB_REFUSAL (one or more of the four TOR_FULL archives is missing from vendor/tor, so this checkout would link the stub and the candidate would be refused after the gate; run make tor-ready — git worktree add does not populate the vendor/tor submodule)"
 say "tor        four TOR_FULL archives present"
 
 # Refuse in seconds, not after the gate and the 200-second build. Every name
@@ -766,7 +768,12 @@ else
     # Not redundant with the archive preflight: only the built binary proves
     # the link consumed real Tor rather than -ltor_stub.
     ship_candidate_has_real_tor "$CANDIDATE" ||
-        die "candidate did not report exact tor_build=real_tor; nothing was transferred or restarted"
+        die "$ZCL_TOR_STUB_REFUSAL (the candidate did not report exact tor_build=real_tor; nothing was transferred or restarted)"
+    # Second, independent reading of the same link-time fact: the candidate's
+    # own -version stamp. telemetry and -version derive from one weak symbol,
+    # so agreeing is expected and DISAGREEING means the binary under the
+    # candidate path is not the one telemetry was read from.
+    zcl_tor_require_full "$CANDIDATE" "the ship candidate" || exit 1
     say "tor        candidate reports exact real_tor"
 
     RELEASE_MANIFEST="$(mktemp "${TMPDIR:-/tmp}/zclassic23.ship.manifest.XXXXXX")"
