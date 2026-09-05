@@ -5,6 +5,7 @@
 
 #include "config/boot_internal.h"
 #include "models/fleet_board_post.h"
+#include "net/fast_sync.h"
 #include "net/net.h"
 #include "net/peer_scoring.h"
 #include "platform/time_compat.h"
@@ -355,6 +356,13 @@ void boot_fleet_board_tick(struct msg_processor *mp, struct p2p_node *node,
 {
     (void)ctx;
     if (!mp || !node)
+        return;
+    /* This tick runs before inbound version processing. Do not send board
+     * traffic or consume its announce window until negotiation is complete. */
+    enum peer_state state = atomic_load(&node->state);
+    if (state < PEER_HANDSHAKE_COMPLETE || state > PEER_SNAPSHOT_RECEIVING ||
+        atomic_load(&node->disconnect) ||
+        !peer_supports_fast_sync(node->services))
         return;
     int64_t now = (int64_t)platform_time_wall_time_t();
     bool due = fleet_board_announce_due(node->id, now);

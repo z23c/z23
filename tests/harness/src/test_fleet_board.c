@@ -20,6 +20,8 @@
 #include "models/database.h"
 #include "models/fleet_board_post.h"
 #include "session/fleet_board_proto.h"
+#include "chain/chainparams.h"
+#include "net/fast_sync.h"
 #include "rpc/server.h"
 #include "net/net.h"
 #include "net/peer_scoring.h"
@@ -890,6 +892,78 @@ static int test_fleet_board_local_capacity_does_not_score_peer(void)
     return failures;
 }
 
+static int test_fleet_board_waits_for_peer_handshake(void)
+{
+    int failures = 0;
+    bool db_open = false;
+    struct node_db db = {0};
+    struct net_manager nm;
+    struct p2p_node *node = NULL;
+    net_manager_init(&nm);
+    TEST("fleet board: inventory waits for an eligible completed handshake") {
+        const struct chain_params *params = chain_params_get();
+        const int64_t now = (int64_t)platform_time_wall_time_t();
+        struct msg_processor mp = {.params = params, .net_mgr = &nm};
+        struct boot_svc_ctx svc = {.node_db = &db, .msg_processor = &mp,
+                                   .params = params};
+        struct net_address addr;
+        uint8_t seed[32], pk[32];
+        struct fleet_board_post post;
+
+        ASSERT(params != NULL);
+        net_address_init(&addr);
+        uint8_t ip4[4] = {192, 0, 2, 44};
+        net_addr_set_ipv4(&addr.svc.addr, ip4);
+        addr.svc.port = 8233;
+        node = p2p_node_create(&nm, ZCL_INVALID_SOCKET, &addr,
+                               "board-handshake", false);
+        ASSERT(node != NULL);
+        ASSERT(node_db_open(&db, ":memory:"));
+        db_open = true;
+        boot_fleet_board_shutdown();
+        boot_fleet_board_wire(&svc);
+
+        fb_test_identity(15, seed, pk);
+        fb_test_compose(&post, FLEET_BOARD_KIND_NOTE, "handshake-fixture",
+                        "announce only after version and verack", now, 3600);
+        ASSERT_EQ(fleet_board_post_sign(&post, seed, pk), FLEET_BOARD_OK);
+        ASSERT_EQ(db_fleet_board_post_ingest(&db, &post, now, NULL),
+                  FLEET_BOARD_OK);
+        node->services = NODE_NETWORK | NODE_ZCL23;
+        ASSERT(peer_set_state_checked((uint32_t)node->id, &node->state,
+                                      PEER_CONNECTED, "fixture connected"));
+        ASSERT(peer_set_state_checked((uint32_t)node->id, &node->state,
+                                      PEER_VERSION_SENT, "fixture version"));
+        boot_fleet_board_tick(&mp, node, &svc);
+        ASSERT_EQ(node->send_size, 0u);
+
+        ASSERT(peer_set_state_checked((uint32_t)node->id, &node->state,
+                                      PEER_HANDSHAKE_COMPLETE,
+                                      "fixture verack"));
+        node->services = NODE_NETWORK;
+        boot_fleet_board_tick(&mp, node, &svc);
+        ASSERT_EQ(node->send_size, 0u);
+        node->services |= NODE_ZCL23;
+        boot_fleet_board_tick(&mp, node, &svc);
+        ASSERT(node->send_size > 0);
+
+        size_t sent = node->send_size;
+        boot_fleet_board_shutdown();
+        boot_fleet_board_wire(&svc);
+        atomic_store(&node->disconnect, true);
+        boot_fleet_board_tick(&mp, node, &svc);
+        ASSERT_EQ(node->send_size, sent);
+        PASS();
+    } _test_next:;
+    boot_fleet_board_shutdown();
+    if (db_open)
+        node_db_close(&db);
+    if (node)
+        p2p_node_free(node);
+    net_manager_free(&nm);
+    return failures;
+}
+
 static int test_fleet_board_durable_wiki(void)
 {
     int failures = 0;
@@ -1217,6 +1291,7 @@ int test_fleet_board(void)
     failures += test_fleet_board_inventory_pages();
     failures += test_fleet_board_wiki();
     failures += test_fleet_board_two_nodes();
+    failures += test_fleet_board_waits_for_peer_handshake();
     failures += test_fleet_board_peer_churn_limits();
     failures += test_fleet_board_rpc_verification();
     failures += test_fleet_board_rpc_concurrency();
