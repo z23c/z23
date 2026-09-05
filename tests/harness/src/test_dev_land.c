@@ -656,6 +656,50 @@ int test_dev_land(void)
         PASS();
     }
 
+    TEST("land: an absent resident watcher is named, twice, not hidden") {
+        struct dlx_rig rig;
+        struct dlx_call c;
+        dlx_isolate("watcher_absent");
+        ASSERT(dlx_rig_make(&rig, "watcher_absent_rig"));
+        setenv("ZCL_LAND_PROOF_STUB", "watcher_absent", 1);
+        setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
+        dlx_submit(&c, &rig, rig.tip);
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        dlx_end(&c);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        ASSERT(strcmp(dlx_str(&c, "state"), "started") == 0);
+        ASSERT(strcmp(dlx_str(&c, "detail"),
+                      "resident_proof_watcher_absent") == 0);
+        dlx_end(&c);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        ASSERT(strcmp(dlx_str(&c, "state"), "proving") == 0);
+        ASSERT(strcmp(dlx_str(&c, "detail"),
+                      "resident_proof_watcher_absent") == 0);
+        dlx_end(&c);
+        dlx_restore();
+        PASS();
+    }
+
+    TEST("land: an unrelated stub value still reports its own detail") {
+        struct dlx_rig rig;
+        struct dlx_call c;
+        dlx_isolate("stub_running");
+        ASSERT(dlx_rig_make(&rig, "stub_running_rig"));
+        setenv("ZCL_LAND_PROOF_STUB", "running", 1);
+        setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
+        dlx_submit(&c, &rig, rig.tip);
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        dlx_end(&c);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        ASSERT(strcmp(dlx_str(&c, "detail"), "proof stub: running") == 0);
+        dlx_end(&c);
+        dlx_restore();
+        PASS();
+    }
+
     TEST("land: a passing proof fast-forwards the real origin and lands") {
         struct dlx_rig rig;
         struct dlx_call c;

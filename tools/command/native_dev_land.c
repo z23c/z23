@@ -81,6 +81,7 @@
 #include "util/spawn.h"
 
 #ifdef ZCL_DEV_BUILD
+#include "command/native_dev_loop_command.h"
 #include "dev_proof.h"
 #endif
 
@@ -1119,6 +1120,54 @@ static const char *dl_stub(void)
 #endif
 }
 
+#ifdef ZCL_DEV_BUILD
+/* WHY. A proof request is only a file; the resident watcher consumes it.
+ * Landing starts that watcher in verify mode, or names why it is absent,
+ * rather than sitting in proving with nobody draining the queue. */
+static void dl_watcher_kick(const char *wt, char *detail, size_t cap)
+{
+    struct json_value input;
+    struct zcl_command_request req;
+    struct zcl_command_reply reply;
+    const char *err, *mode;
+    const struct json_value *mode_v;
+
+    if (!wt || !wt[0] || zcl_native_dev_loop_proof_queue_ready(wt))
+        return;
+    json_init(&input);
+    json_set_object(&input);
+    memset(&req, 0, sizeof(req));
+    zcl_command_reply_init(&reply, "zcl.dev_loop_status.v1");
+    if (json_push_kv_str(&input, "root", wt) &&
+        json_push_kv_str(&input, "mode", "verify")) {
+        req.input = &input;
+        zcl_native_handle_dev_loop_start_async(&req, &reply);
+        if (reply.exit_code == ZCL_COMMAND_EXIT_OK) {
+            (void)snprintf(detail, cap, "%s",
+                           "resident_proof_watcher_started");
+        } else if (strcmp(reply.error.code, "WATCHER_MODE_MISMATCH") == 0) {
+            mode_v = json_get(&reply.data, "mode");
+            mode = (mode_v && mode_v->type == JSON_STR)
+                       ? json_get_str(mode_v) : "";
+            (void)snprintf(detail, cap,
+                           "resident_proof_watcher_mode_mismatch: %s",
+                           mode && mode[0] ? mode : "unknown");
+        } else {
+            err = reply.error.message[0] ? reply.error.message
+                : (reply.error.evidence[0] ? reply.error.evidence
+                                           : "start_failed");
+            (void)snprintf(detail, cap,
+                           "resident_proof_watcher_absent: %s", err);
+        }
+    } else {
+        (void)snprintf(detail, cap, "%s",
+                       "resident_proof_watcher_absent: request_alloc");
+    }
+    zcl_command_reply_free(&reply);
+    json_free(&input);
+}
+#endif
+
 static enum dl_proof dl_proof_request(const char *wt, const char *local,
                                       const char *base, char *detail,
                                       size_t cap)
@@ -1127,7 +1176,11 @@ static enum dl_proof dl_proof_request(const char *wt, const char *local,
     if (detail && cap)
         detail[0] = '\0';
     if (stub) {
-        (void)snprintf(detail, cap, "proof stub: %s", stub);
+        if (strcmp(stub, "watcher_absent") == 0)
+            (void)snprintf(detail, cap, "%s",
+                           "resident_proof_watcher_absent");
+        else
+            (void)snprintf(detail, cap, "proof stub: %s", stub);
         return DL_PROOF_PENDING;
     }
 #ifdef ZCL_DEV_BUILD
@@ -1145,6 +1198,8 @@ static enum dl_proof dl_proof_request(const char *wt, const char *local,
             return DL_PROOF_PASSED;
         if (status.state == ZCL_DEV_PROOF_STATE_FAILED)
             return DL_PROOF_FAILED;
+        if (!zcl_native_dev_loop_proof_queue_ready(wt))
+            dl_watcher_kick(wt, detail, cap);
         return DL_PROOF_PENDING;
     }
 #else
@@ -1176,7 +1231,11 @@ static enum dl_proof dl_proof_read(const char *wt, const char *local,
             (void)snprintf(detail, cap, "proof stub: fail");
             return DL_PROOF_FAILED;
         }
-        (void)snprintf(detail, cap, "proof stub: %s", stub);
+        if (strcmp(stub, "watcher_absent") == 0)
+            (void)snprintf(detail, cap, "%s",
+                           "resident_proof_watcher_absent");
+        else
+            (void)snprintf(detail, cap, "proof stub: %s", stub);
         return DL_PROOF_PENDING;
     }
 #ifdef ZCL_DEV_BUILD
@@ -1833,6 +1892,27 @@ static int dl_rebase(const struct dl_dirs *d, struct dl_row *row,
     if (!dl_rev_parse(d->wt, "HEAD", row->local)) {
         (void)snprintf(why, why_cap, "the rebased head cannot be named");
         return -1;
+    }
+    /* WHY. git worktree add leaves vendor/tor as an empty gitlink. Proof
+     * generation then points the submodule url at that empty directory and
+     * fails. Seed it from the submitting checkout, which already has the
+     * gitlink. Fixture rigs under the proof stub have no submodule, so the
+     * live landing is the exercise of this path. */
+    if (!dl_stub()) {
+        char cfg[4096 + 64];
+        const char *gl[] = {
+            "-c", "protocol.file.allow=always", "-c", cfg,
+            "submodule", "update", "--init", "--no-fetch", "--",
+            "vendor/tor", NULL
+        };
+        if (snprintf(cfg, sizeof(cfg),
+                     "submodule.vendor/tor.url=%s/vendor/tor",
+                     row->worktree) >= (int)sizeof(cfg) ||
+            dl_git(d->wt, gl, buf, sizeof(buf), DL_GIT_TIMEOUT_MS) != 0) {
+            (void)snprintf(why, why_cap, "%s",
+                           "landing_worktree_gitlink_failed");
+            return -1;
+        }
     }
     return 1;
 }
@@ -2565,6 +2645,15 @@ static void dl_step_resume(const struct dl_dirs *d, struct dl_row *row,
                       sizeof(dimension), detail, sizeof(detail));
     (void)snprintf(row->detail, sizeof(row->detail), "%s", detail);
     if (p == DL_PROOF_PENDING) {
+#ifdef ZCL_DEV_BUILD
+        /* WHY. Resume used to keep proving with a stale queued detail
+         * while no watcher existed for the landing worktree. */
+        if (!dl_stub() && !zcl_native_dev_loop_proof_queue_ready(d->wt)) {
+            (void)snprintf(row->detail, sizeof(row->detail), "%s",
+                           "resident_proof_watcher_absent");
+            dl_watcher_kick(d->wt, row->detail, sizeof(row->detail));
+        }
+#endif
         if (dl_commit_or_report(d, row, false, reply, "proving"))
             dl_step_reply(reply, row, "proving");
         return;
