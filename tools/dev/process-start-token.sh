@@ -7,48 +7,55 @@
 # exposes the process start record through ps, which is hashed to a path-safe
 # token.
 
-set -euo pipefail
-
-pid="${1:-}"
-[[ "$pid" =~ ^[1-9][0-9]*$ ]] || exit 2
-
-proc_start_token()
+zcl_process_start_token()
 {
-    record="$(sed -n '1p' "/proc/$pid/stat" 2>/dev/null)"
-    [ -n "$record" ] || return 1
-    # The parenthesized command may contain spaces. Strip through its final
-    # closing parenthesis; starttime is field 20 of the remaining fields.
-    rest="${record##*) }"
-    set -- $rest
-    [ "$#" -ge 20 ] || return 1
-    [[ "${20}" =~ ^[0-9]+$ ]] || return 1
-    printf '%s\n' "${20}"
+    local pid="${1:-}"
+    local record rest first second observed_pid attempt
+
+    [[ "$pid" =~ ^[1-9][0-9]*$ ]] || return 2
+
+    case "$(uname -s 2>/dev/null)" in
+    Linux|MINGW*|MSYS*)
+        record=""
+        if ! IFS= read -r record 2>/dev/null < "/proc/$pid/stat"; then
+            return 1
+        fi
+        [ -n "$record" ] || return 1
+        # The parenthesized command may contain spaces. Strip through its final
+        # closing parenthesis; starttime is field 20 of the remaining fields.
+        rest="${record##*) }"
+        set -- $rest
+        [ "$#" -ge 20 ] || return 1
+        [[ "${20}" =~ ^[0-9]+$ ]] || return 1
+        printf '%s\n' "${20}"
+        ;;
+    Darwin)
+        record=""
+        for attempt in 1 2 3 4 5 6 7 8 9 10; do
+            first="$(LC_ALL=C ps -p "$pid" -o pid=,lstart=,uid= 2>/dev/null)" || first=""
+            second="$(LC_ALL=C ps -p "$pid" -o pid=,lstart=,uid= 2>/dev/null)" || second=""
+            if [ -n "$first" ] && [ "$first" = "$second" ] &&
+               kill -0 "$pid" 2>/dev/null; then
+                record="$first"
+                break
+            fi
+        done
+        [ -n "$record" ] || return 1
+        observed_pid="${record#${record%%[![:space:]]*}}"
+        observed_pid="${observed_pid%%[[:space:]]*}"
+        [ "$observed_pid" = "$pid" ] || return 1
+        (
+            set -o pipefail
+            printf '%s' "$record" | shasum -a 256 | awk '{print $1}'
+        )
+        ;;
+    *)
+        return 2
+        ;;
+    esac
 }
 
-case "$(uname -s 2>/dev/null)" in
-Linux|MINGW*|MSYS*)
-    proc_start_token
-    ;;
-Darwin)
-    record=""
-    for attempt in 1 2 3 4 5 6 7 8 9 10; do
-        set +e
-        first="$(LC_ALL=C ps -p "$pid" -o pid=,lstart=,uid= 2>/dev/null)"
-        second="$(LC_ALL=C ps -p "$pid" -o pid=,lstart=,uid= 2>/dev/null)"
-        set -e
-        if [ -n "$first" ] && [ "$first" = "$second" ] &&
-           kill -0 "$pid" 2>/dev/null; then
-            record="$first"
-            break
-        fi
-    done
-    [ -n "$record" ] || exit 1
-    observed_pid="${record#${record%%[![:space:]]*}}"
-    observed_pid="${observed_pid%%[[:space:]]*}"
-    [ "$observed_pid" = "$pid" ] || exit 1
-    printf '%s' "$record" | shasum -a 256 | awk '{print $1}'
-    ;;
-*)
-    exit 2
-    ;;
-esac
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    set -euo pipefail
+    zcl_process_start_token "${1:-}"
+fi

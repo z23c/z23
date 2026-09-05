@@ -7,6 +7,7 @@ export LC_ALL=C
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SELF_DIR/build-epoch-open-file-identity.sh"
 source "$SELF_DIR/build-epoch-lock-wait.sh"
+source "$SELF_DIR/process-start-token.sh"
 
 fail()
 {
@@ -293,7 +294,7 @@ compile_one()
                     continue
                 fi
                 empty_deadline=0
-                actual="$("$SELF_DIR/process-start-token.sh" "$pid" 2>/dev/null || true)"
+                actual="$(zcl_process_start_token "$pid" 2>/dev/null || true)"
                 if [ -z "$actual" ] || [ "$actual" != "$start" ]; then
                     now="$(date +%s)"
                     if [ "$pid" != "$stale_pid" ] ||
@@ -314,7 +315,7 @@ compile_one()
             done
             [ -d "$ADMISSION_LOCK_DIR" ] && [ ! -L "$ADMISSION_LOCK_DIR" ] ||
                 fail 'epoch admission lock directory is not regular'
-            owner_start="$("$SELF_DIR/process-start-token.sh" "$$")" ||
+            owner_start="$(zcl_process_start_token "$$")" ||
                 fail 'could not identify epoch admission lock owner'
             [ -n "$owner_start" ] ||
                 fail 'epoch admission lock owner start token is empty'

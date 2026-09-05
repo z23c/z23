@@ -134,6 +134,43 @@ build_candidate()
 [ -f "$IDENTITY_TOOL" ] || fail 'open-file identity helper is missing'
 command -v sha256sum >/dev/null 2>&1 || fail 'sha256sum is unavailable'
 
+phase process-start-token
+bash -s -- "$SELF_DIR" <<'TOKEN_TEST' || fail 'process start-token function contract'
+set -euo pipefail
+helper="$1/process-start-token.sh"
+expected="$("$helper" "$$")"
+pid=caller_pid record=caller_record rest=caller_rest
+set -- alpha beta
+options_before="$-"
+source "$helper"
+[ "$-" = "$options_before" ] && [ "$#" = 2 ] && [ "$1" = alpha ]
+[ "$pid" = caller_pid ] && [ "$record" = caller_record ] && [ "$rest" = caller_rest ]
+# Invoke directly too: command substitution would hide leaked variables.
+zcl_process_start_token "$$" >/dev/null
+[ "$-" = "$options_before" ] && [ "$#" = 2 ] && [ "$2" = beta ]
+[ "$pid" = caller_pid ] && [ "$record" = caller_record ] && [ "$rest" = caller_rest ]
+[ "$(zcl_process_start_token "$$")" = "$expected" ]
+for invalid in 0 -1 abc; do
+    rc=0
+    result="$(zcl_process_start_token "$invalid")" || rc=$?
+    [ "$rc" = 2 ] && [ -z "$result" ]
+done
+rc=0
+result="$(zcl_process_start_token 999999999 2>/dev/null)" || rc=$?
+[ "$rc" = 1 ] && [ -z "$result" ]
+# A hash failure must refuse even when the sourcing caller disables pipefail.
+(
+    set +o pipefail
+    uname() { printf 'Darwin\n'; }
+    ps() { printf '%s Sat Sep 5 12:00:00 2026 1000\n' "$$"; }
+    shasum() { return 1; }
+    rc=0
+    result="$(zcl_process_start_token "$$")" || rc=$?
+    [ "$rc" -ne 0 ] && [ -z "$result" ]
+    ! shopt -qo pipefail
+)
+TOKEN_TEST
+
 source "$IDENTITY_TOOL"
 z23_build_epoch_identity_values_match 0x10 00042 16 42 ||
     fail 'equivalent device/inode values did not match'
