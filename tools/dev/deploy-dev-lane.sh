@@ -1055,7 +1055,7 @@ main() {
 
     cleanup_dropins
     mkdir -p "$HOME/.config/systemd/user" "$(dirname "$BUILD_ID_DROPIN")"
-    install -m 644 "$REPO/deploy/$UNIT" "$HOME/.config/systemd/user/$UNIT"
+    install -m 644 "$REPO/platform/deploy/$UNIT" "$HOME/.config/systemd/user/$UNIT"
     if ! activate_candidate; then
         write_deploy_state "$VERIFY_STATUS" "$VERIFY_DETAIL"
         echo "[dev-lane] REJECTED: $CANDIDATE_GENERATION; rollback=$ROLLBACK_STATUS" >&2
