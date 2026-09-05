@@ -43,6 +43,9 @@ static const char *tunnel_refusal_help(const char *refusal)
         return "no tunnel with that id is open on this node";
     if (strcmp(refusal, "tunnel_malformed") == 0)
         return "the request named no peer, or a port outside 1..65535";
+    if (strcmp(refusal, "tunnel_unavailable") == 0)
+        return "this node has no datadir or no mesh composition yet, so it "
+               "cannot answer honestly about tunnels";
     return "the node refused the tunnel request";
 }
 
