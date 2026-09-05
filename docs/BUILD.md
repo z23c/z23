@@ -574,10 +574,11 @@ Notes:
 <!-- claim: file-present vendor/x11/SHA256SUMS # vendored X11 header pin -->
 <!-- claim: symbol-present vendor/x11/include Makefile # the include wiring -->
 - **raylib is vendored source, not an archive `make vendor` builds.** The Sky
-  Combat game (`apps/skycombat`) renders with raylib, and raylib is committed
-  as trimmed C source under `vendor/raylib/`: 20 upstream files — the five
-  renderer modules the game calls, their headers, the RGFW desktop backend and
-  the eight single-file dependencies those include — against ~306,000 lines
+  Combat game (`apps/skycombat`, see [GAME.md](GAME.md)) renders with raylib,
+  and raylib is committed as trimmed C source under `vendor/raylib/`: 20
+  upstream files — the five renderer modules the game calls, their headers,
+  the RGFW desktop backend and the eight single-file dependencies those
+  include — against ~306,000 lines
   upstream. Audio, model/mesh file loading and the GLFW/SDL backends are not
   imported. raylib keeps its own licence (zlib, `vendor/raylib/LICENSE`); the
   origin commit and the local-patch record live in `vendor/raylib/SOURCE` and

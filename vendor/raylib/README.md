@@ -10,8 +10,8 @@ miniaudio, dr_*, jar_*, qoa), every model file format (cgltf, tinyobj, m3d, vox,
 image file format (stb_image, qoi, pep), glfw, sdl, drm, android, web and the software rasteriser.
 Why RGFW and not glfw: RGFW is a single pure-C header on Linux, Windows and macOS, so the desktop
 backend needs no Objective-C source and no second build system; z23 already pins RGFW separately at
-`vendor/rgfw/` for `lib/presentation`, and the two copies stay independent because raylib's backend
-is written against the RGFW revision raylib bundles.
+`vendor/rgfw/` for `contexts/explorer/modules/presentation`, and the two copies stay independent
+because raylib's backend is written against the RGFW revision raylib bundles.
 Local patches under `-std=c2x`: none. Every build knob is passed as `-D` from the Makefile (`make
 game`, `make game-check`) because raylib's `config.h` guards each one with `#ifndef`, so the vendored
 files stay byte-identical to upstream and `sha256sum --check vendor/raylib/SHA256SUMS` proves it.

@@ -177,6 +177,9 @@ appropriate ledgered benchmark.
 These are useful but do not define the primary product or current critical
 path:
 
+- [`GAME.md`](GAME.md) — Sky Combat (`apps/skycombat`), the split-screen flight
+  game that ships from this repo behind the opt-in `make game`; not the node,
+  and not on any node critical path.
 - [`METAVERSE.md`](METAVERSE.md) and [`METAVERSE_MVP.md`](METAVERSE_MVP.md) —
   engine/application/creation layer; token economics remain simulation-only.
 - [`FILE_MARKET_PROTOCOL.md`](FILE_MARKET_PROTOCOL.md) — marketplace protocol;
