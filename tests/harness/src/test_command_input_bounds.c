@@ -94,6 +94,138 @@ static bool cib_accepts_int(const char *path, const char *key, int64_t value)
     return ok;
 }
 
+enum cib_fleet_type { CIB_FLEET_INT, CIB_FLEET_STRING, CIB_FLEET_BOOL,
+                      CIB_FLEET_REAL };
+
+static bool cib_fleet_value(const struct zcl_command_spec *spec,
+                            const char *kind, const char *subject,
+                            const char *key, enum cib_fleet_type type,
+                            int64_t value, bool duplicate, bool *built_out)
+{
+    struct json_value input;
+    json_init(&input);
+    json_set_object(&input);
+    bool built = json_push_kv_str(&input, "kind", kind) &&
+                 json_push_kv_str(&input, "subject", subject);
+    if (built && type == CIB_FLEET_INT)
+        built = json_push_kv_int(&input, key, value);
+    else if (built && type == CIB_FLEET_STRING)
+        built = json_push_kv_str(&input, key, "1");
+    else if (built && type == CIB_FLEET_BOOL)
+        built = json_push_kv_bool(&input, key, true);
+    else if (built)
+        built = json_push_kv_real(&input, key, 1.5);
+    if (built && duplicate)
+        built = json_push_kv_int(&input, key, value);
+    bool accepted = built &&
+        zcl_command_registry_input_validate(spec, &input, NULL, 0);
+    json_free(&input);
+    *built_out = built;
+    return accepted;
+}
+
+static int t_fleet_ledger_numeric_keys(void)
+{
+    int failures = 0;
+    const char *const keys[] = {
+        "tokens_in", "tokens_out", "tokens_cached", "tokens_reasoning",
+        "wall_ms", "turns", "tool_uses", "cost_micro_usd", "value",
+        "count", "bytes", "limit",
+    };
+    const struct zcl_command_spec *spec =
+        zcl_command_registry_find(zcl_command_catalog(), "fleet.ledger.add",
+                                  NULL);
+    CIB_CHECK("fleet.ledger.add resolves", spec != NULL);
+    if (!spec)
+        return failures;
+
+    struct json_value input;
+    json_init(&input);
+    json_set_object(&input);
+    bool built = json_push_kv_str(&input, "kind", "usage") &&
+                 json_push_kv_str(&input, "subject", "grok");
+    CIB_CHECK("fleet usage without counters constructs", built);
+    if (built)
+        CIB_CHECK("fleet usage permits every counter to be absent",
+                  zcl_command_registry_input_validate(spec, &input, NULL, 0));
+    json_free(&input);
+
+    for (size_t i = 0; i < sizeof keys / sizeof keys[0]; i++) {
+        char name[128];
+        bool made = false;
+        bool accepted = cib_fleet_value(spec, "usage", "grok", keys[i],
+                                        CIB_FLEET_INT, 0, false, &made);
+        snprintf(name, sizeof name, "%s measured zero constructs", keys[i]);
+        CIB_CHECK(name, made);
+        snprintf(name, sizeof name, "%s accepts measured zero", keys[i]);
+        CIB_CHECK(name, made && accepted);
+        accepted = cib_fleet_value(spec, "usage", "grok", keys[i],
+                                   CIB_FLEET_INT, INT64_C(4294967296), false,
+                                   &made);
+        snprintf(name, sizeof name, "%s wide integer constructs", keys[i]);
+        CIB_CHECK(name, made);
+        snprintf(name, sizeof name, "%s accepts a wide integer", keys[i]);
+        CIB_CHECK(name, made && accepted);
+
+        if (strcmp(keys[i], "value") != 0) {
+            accepted = cib_fleet_value(spec, "usage", "grok", keys[i],
+                                       CIB_FLEET_INT, -1, false, &made);
+            snprintf(name, sizeof name, "%s negative counter constructs",
+                     keys[i]);
+            CIB_CHECK(name, made);
+            snprintf(name, sizeof name, "%s refuses a negative counter",
+                     keys[i]);
+            CIB_CHECK(name, made && !accepted);
+        }
+        const enum cib_fleet_type wrong[] = {
+            CIB_FLEET_STRING, CIB_FLEET_BOOL, CIB_FLEET_REAL,
+        };
+        const char *const labels[] = { "string", "boolean", "real" };
+        for (size_t j = 0; j < sizeof wrong / sizeof wrong[0]; j++) {
+            accepted = cib_fleet_value(spec, "usage", "grok", keys[i],
+                                       wrong[j], 0, false, &made);
+            snprintf(name, sizeof name, "%s %s constructs", keys[i],
+                     labels[j]);
+            CIB_CHECK(name, made);
+            snprintf(name, sizeof name, "%s refuses a %s", keys[i],
+                     labels[j]);
+            CIB_CHECK(name, made && !accepted);
+        }
+    }
+
+    bool accepted = cib_fleet_value(spec, "vitals", "box.load1", "value",
+                                    CIB_FLEET_INT, -1, false, &built);
+    CIB_CHECK("negative gauge input constructs", built);
+    CIB_CHECK("a negative gauge value is valid", built && accepted);
+    accepted = cib_fleet_value(spec, "usage", "grok", "tokens_in",
+                               CIB_FLEET_INT, 1, true, &built);
+    CIB_CHECK("duplicate counter input constructs", built);
+    CIB_CHECK("duplicate counter keys are refused", built && !accepted);
+
+    const struct zcl_command_spec *query = zcl_command_registry_find(
+        zcl_command_catalog(), "core.storage.query", NULL);
+    CIB_CHECK("core.storage.query resolves for collateral limit checks",
+              query != NULL);
+    const int64_t limits[] = { 1, 0, INT64_C(4294967296) };
+    const bool limit_ok[] = { true, false, false };
+    for (size_t i = 0; query && i < sizeof limits / sizeof limits[0]; i++) {
+        json_init(&input);
+        json_set_object(&input);
+        built = json_push_kv_str(&input, "sql", "SELECT 1") &&
+                json_push_kv_int(&input, "limit", limits[i]);
+        CIB_CHECK("complete core storage query input constructs", built);
+        if (built) {
+            bool valid = zcl_command_registry_input_validate(
+                query, &input, NULL, 0);
+            CIB_CHECK(limit_ok[i] ? "core storage query accepts limit one"
+                                  : "core storage query refuses bad limit",
+                      valid == limit_ok[i]);
+        }
+        json_free(&input);
+    }
+    return failures;
+}
+
 /* ── 1. Both edges of three differently-limited keys ─────────────────── */
 
 static int t_key_edges(void)
@@ -644,6 +776,7 @@ int test_command_input_bounds(void)
     failures += t_no_collateral_loosening();
     failures += t_vault_effects_array();
     failures += t_liquidity_numeric_input();
+    failures += t_fleet_ledger_numeric_keys();
     failures += t_package_prepare_sequence();
     failures += t_package_fetch_maximum_bytes();
     failures += t_fleet_usage_days();

@@ -17,12 +17,9 @@
 #ifndef ZCL_HOTFORK_COMMAND_INPUT_CORE
 static bool command_is_branch(const struct zcl_command_spec *spec);
 
-/* Defined in command_registry_devagent_input.c — split out to keep this
- * file under its recorded file-size-ceiling baseline. Returns true iff
- * `key` is one of the dev.agent-leaf keys it owns, in which case *type_ok
- * carries the transport type verdict; returns false (leaving *type_ok
- * untouched) for every other key so the caller's else-if chain continues. */
-bool zcl_command_registry_devagent_input_ok(const char *key,
+/* The overflow helper owns dev-agent keys and path-scoped fleet counters;
+ * false leaves the verdict untouched so the generic rules continue. */
+bool zcl_command_registry_devagent_input_ok(const char *path, const char *key,
                                             const struct json_value *value,
                                             bool *type_ok);
 
@@ -1313,10 +1310,12 @@ bool zcl_command_registry_input_validate(const struct zcl_command_spec *spec,
                     strcmp(spec->path, "fleet.usage") == 0)) {
             /* Positive selectors; handlers own their semantic bounds. */
             type_ok = value->type == JSON_INT && json_get_int(value) > 0;
-        } else if (strcmp(key, "limit") == 0 || strcmp(key, "depth") == 0) {
+        } else if ((strcmp(key, "limit") == 0 &&
+                    strcmp(spec->path, "fleet.ledger.add") != 0) ||
+                   strcmp(key, "depth") == 0) {
             type_ok = value->type == JSON_INT && json_get_int(value) >= 1 &&
                       json_get_int(value) <= 1000000;
-        } else if (zcl_command_registry_devagent_input_ok(key, value,
+        } else if (zcl_command_registry_devagent_input_ok(spec->path, key, value,
                                                           &type_ok)) {
             /* Handled by the dev.agent-leaf rules in
              * command_registry_devagent_input.c. */

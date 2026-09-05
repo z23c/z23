@@ -24,10 +24,24 @@
 
 #include <string.h>
 
-bool zcl_command_registry_devagent_input_ok(const char *key,
+bool zcl_command_registry_devagent_input_ok(const char *path, const char *key,
                                             const struct json_value *value,
                                             bool *type_ok)
 {
+    if (path && strcmp(path, "fleet.ledger.add") == 0 &&
+        (strcmp(key, "tokens_in") == 0 || strcmp(key, "tokens_out") == 0 ||
+         strcmp(key, "tokens_cached") == 0 ||
+         strcmp(key, "tokens_reasoning") == 0 || strcmp(key, "wall_ms") == 0 ||
+         strcmp(key, "turns") == 0 || strcmp(key, "tool_uses") == 0 ||
+         strcmp(key, "cost_micro_usd") == 0 || strcmp(key, "value") == 0 ||
+         strcmp(key, "count") == 0 || strcmp(key, "bytes") == 0 ||
+         strcmp(key, "limit") == 0)) {
+        /* Ledger gauges can be signed; counters include measured zero.
+         * Scope common names such as value and limit to this exact leaf. */
+        *type_ok = value->type == JSON_INT &&
+                   (strcmp(key, "value") == 0 || json_get_int(value) >= 0);
+        return true;
+    }
     if (strcmp(key, "attempt") == 0) {
         /* dev.agent.queue's post attempt number: `--attempt=2` types as an
          * integer, so the default string branch would make the leaf
