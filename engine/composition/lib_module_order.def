@@ -79,6 +79,16 @@ LIB_MODULE("retrieval")
  * IO-free evaluator. Depends only on base and sha3; application services own
  * extraction, CAS, projections, clocks and policy. */
 LIB_MODULE("ontology")
+/* What the fleet has written down about itself — executor routing, the
+ * landing rules, and the proof-failure signatures that name a trap — read
+ * from engine/composition/fleet_facts.def as an X-macro paste. Depends only
+ * on base (bounded copies, hex) and sha3 (the row root), so directly above
+ * sha3 is its lowest legal rank; it is ranked beside ontology because the two
+ * answer neighbouring questions, not because either references the other. It
+ * deliberately does NOT reach ontology: that module is a fixed four-term Horn
+ * kernel whose vocabulary tests pin, and this is a growing table with no
+ * rules. */
+LIB_MODULE("fleetfacts")
 /* A proof receipt: one claim that a named test group reached a named verdict
  * over an exactly identified source tree, in the fixed form it travels in.
  * Depends on base and sha3 and NOTHING else — deliberately. It does not sign

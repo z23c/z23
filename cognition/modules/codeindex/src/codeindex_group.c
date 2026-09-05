@@ -245,6 +245,7 @@ const char *ci_group_purpose(const char *group)
     if (module_group_is(group, "zid")) return "sovereign identity Phase 1: signed identity documents + blinded record keys (ed25519/SHA3, pure codec)";
     if (module_group_is(group, "codeindex")) return "the in-binary source-code navigator index: scan, store, query, the `code` CLI";
     if (module_group_is(group, "ontology")) return "canonical source-universe, contextual predicate-calculus objects, and bounded paraconsistent inference";
+    if (module_group_is(group, "fleetfacts")) return "what the fleet has written down about itself — which executor handles which unit kind, what a train and a proof require, which failure signature names which trap — as typed rows over a closed vocabulary, asked by subject";
     if (module_group_is(group, "retrieval")) return "BM25 ranked retrieval over an in-memory corpus: an inverted index that answers \"which records are about this?\" in rank order rather than in match order";
     if (module_group_is(group, "chainlog")) return "a durable append-only log whose every frame is SHA3-linked to the one before it, so an edit anywhere shows up as a named first bad sequence number";
     if (module_group_is(group, "science")) return "the claim register for what makes a model write good C23: a claim is refused unless it names the metric, direction, effect floor and sample floor that could show it wrong, and status is derived from recorded trials rather than set";

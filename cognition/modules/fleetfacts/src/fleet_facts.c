@@ -1,0 +1,216 @@
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ * Purpose: The fleet's own doctrine as typed rows, asked by subject. */
+#include "fleetfacts/fleet_facts.h"
+
+#include "base/hex.h"
+#include "sha3/sha3.h"
+
+#include <string.h>
+
+/* The table is pasted straight from the one declaration. A second copy here
+ * could disagree with the lint gate that validates the first, and the
+ * disagreement would be silent: the gate would pass while the binary answered
+ * from something else. */
+
+static const char *const k_relations[] = {
+#define FLEET_RELATION(name_) name_,
+#include "../../../../engine/composition/fleet_facts.def"
+#undef FLEET_RELATION
+};
+
+static const char *const k_contexts[] = {
+#define FLEET_CONTEXT(name_) name_,
+#include "../../../../engine/composition/fleet_facts.def"
+#undef FLEET_CONTEXT
+};
+
+static const char *const k_terms[] = {
+#define FLEET_TERM(name_) name_,
+#include "../../../../engine/composition/fleet_facts.def"
+#undef FLEET_TERM
+};
+
+struct ff_row {
+    const char *subject;
+    const char *relation;
+    const char *object;
+    const char *context;
+    const char *confidence;
+    const char *why;
+};
+
+static const struct ff_row k_rows[] = {
+#define FLEET_FACT(s_, r_, o_, c_, conf_, why_) {s_, r_, o_, c_, conf_, why_},
+#include "../../../../engine/composition/fleet_facts.def"
+#undef FLEET_FACT
+};
+
+#define FF_COUNT(a) (sizeof(a) / sizeof((a)[0]))
+
+/* Copy a table token into its bounded field. The lint gate refuses a token or
+ * a why longer than the field, so a truncation here means the gate and this
+ * header disagree; truncate rather than overrun, and keep the string
+ * terminated so the caller still gets a readable answer. */
+static void ff_copy(char *dst, size_t cap, const char *src)
+{
+    size_t n;
+
+    if (cap == 0)
+        return;
+    n = src ? strlen(src) : 0u;
+    if (n >= cap)
+        n = cap - 1u;
+    if (n > 0)
+        memcpy(dst, src, n);
+    dst[n] = '\0';
+}
+
+static enum zcl_fleet_fact_confidence ff_confidence(const char *name)
+{
+    if (name && strcmp(name, "DOCTRINE") == 0)
+        return ZCL_FLEET_CONFIDENCE_DOCTRINE;
+    if (name && strcmp(name, "OBSERVED") == 0)
+        return ZCL_FLEET_CONFIDENCE_OBSERVED;
+    return ZCL_FLEET_CONFIDENCE_UNKNOWN;
+}
+
+/* The row's canonical root. Domain-separated, NUL-terminated fields, so no
+ * two different row shapes can hash to the same bytes by concatenation. */
+static void ff_root(const struct ff_row *row, char out[65])
+{
+    static const char domain[] = "zcl.fleet_fact.v1";
+    const char *const parts[4] = {row->subject, row->relation, row->object,
+                                  row->context};
+    struct sha3_256_ctx sha;
+    uint8_t digest[32];
+
+    sha3_256_init(&sha);
+    sha3_256_write(&sha, (const uint8_t *)domain, sizeof(domain));
+    for (size_t i = 0; i < 4; i++)
+        sha3_256_write(&sha, (const uint8_t *)parts[i], strlen(parts[i]) + 1u);
+    sha3_256_finalize(&sha, digest);
+    zcl_hex_encode(digest, sizeof(digest), out);
+}
+
+static void ff_fill(const struct ff_row *row, struct zcl_fleet_fact_v1 *out)
+{
+    memset(out, 0, sizeof(*out));
+    ff_copy(out->subject, sizeof(out->subject), row->subject);
+    ff_copy(out->relation, sizeof(out->relation), row->relation);
+    ff_copy(out->object, sizeof(out->object), row->object);
+    ff_copy(out->context, sizeof(out->context), row->context);
+    ff_copy(out->why, sizeof(out->why), row->why);
+    out->confidence = ff_confidence(row->confidence);
+    ff_root(row, out->provenance);
+}
+
+size_t zcl_fleet_facts_row_count(void) { return FF_COUNT(k_rows); }
+
+bool zcl_fleet_facts_get(size_t index, struct zcl_fleet_fact_v1 *out)
+{
+    if (!out || index >= FF_COUNT(k_rows))
+        return false;
+    ff_fill(&k_rows[index], out);
+    return true;
+}
+
+size_t zcl_fleet_facts_relation_count(void) { return FF_COUNT(k_relations); }
+
+const char *zcl_fleet_facts_relation_at(size_t index)
+{
+    return index < FF_COUNT(k_relations) ? k_relations[index] : NULL;
+}
+
+size_t zcl_fleet_facts_context_count(void) { return FF_COUNT(k_contexts); }
+
+const char *zcl_fleet_facts_context_at(size_t index)
+{
+    return index < FF_COUNT(k_contexts) ? k_contexts[index] : NULL;
+}
+
+size_t zcl_fleet_facts_term_count(void) { return FF_COUNT(k_terms); }
+
+const char *zcl_fleet_facts_term_at(size_t index)
+{
+    return index < FF_COUNT(k_terms) ? k_terms[index] : NULL;
+}
+
+const char *zcl_fleet_facts_confidence_name(enum zcl_fleet_fact_confidence c)
+{
+    switch (c) {
+    case ZCL_FLEET_CONFIDENCE_DOCTRINE: return "doctrine";
+    case ZCL_FLEET_CONFIDENCE_OBSERVED: return "observed";
+    case ZCL_FLEET_CONFIDENCE_UNKNOWN: break;
+    }
+    return "unknown";
+}
+
+/* An empty filter matches everything; a present one matches exactly. There is
+ * no prefix or fuzzy match on purpose: the vocabulary is closed and printed by
+ * the leaf, so a near miss is answered UNKNOWN rather than guessed at. */
+static bool ff_filter_matches(const char *filter, const char *value)
+{
+    return !filter || filter[0] == '\0' || strcmp(filter, value) == 0;
+}
+
+/* The typed no-answer. It carries the ask back so a caller reading one row
+ * out of context still knows what was asked, and an all-zero provenance
+ * because there is no row to cite. */
+static void ff_unknown(const char *subject, const char *relation,
+                       const char *context,
+                       struct zcl_fleet_facts_answer_v1 *out)
+{
+    struct zcl_fleet_fact_v1 *row = &out->rows[0];
+
+    memset(row, 0, sizeof(*row));
+    ff_copy(row->subject, sizeof(row->subject), subject);
+    ff_copy(row->relation, sizeof(row->relation), relation ? relation : "");
+    ff_copy(row->context, sizeof(row->context), context ? context : "");
+    ff_copy(row->why, sizeof(row->why),
+            "no row in engine/composition/fleet_facts.def answers this ask; "
+            "that table is the whole of what the fleet has written down");
+    memset(row->provenance, '0', 64);
+    row->provenance[64] = '\0';
+    row->confidence = ZCL_FLEET_CONFIDENCE_UNKNOWN;
+    out->row_count = 1;
+    out->total = 1;
+    out->unknown = true;
+}
+
+bool zcl_fleet_facts_query(const char *subject, const char *relation,
+                           const char *context, size_t max_rows,
+                           struct zcl_fleet_facts_answer_v1 *out)
+{
+    size_t limit;
+
+    if (!out)
+        return false;
+    memset(out, 0, sizeof(*out));
+    if (!subject || subject[0] == '\0')
+        return false;
+
+    limit = max_rows;
+    if (limit == 0 || limit > ZCL_FLEET_FACTS_MAX_ROWS)
+        limit = ZCL_FLEET_FACTS_MAX_ROWS;
+
+    for (size_t i = 0; i < FF_COUNT(k_rows); i++) {
+        const struct ff_row *row = &k_rows[i];
+
+        if (strcmp(subject, row->subject) != 0)
+            continue;
+        if (!ff_filter_matches(relation, row->relation))
+            continue;
+        if (!ff_filter_matches(context, row->context))
+            continue;
+        out->total++;
+        if (out->row_count < limit)
+            ff_fill(row, &out->rows[out->row_count++]);
+    }
+
+    if (out->total == 0) {
+        ff_unknown(subject, relation, context, out);
+        return true;
+    }
+    out->truncated = out->total > out->row_count;
+    return true;
+}
