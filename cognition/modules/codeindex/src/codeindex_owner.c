@@ -79,11 +79,17 @@ bool codeindex_owner_claim(const char *root, long long pid,
      * the ordinary first cycle, and the claim is what stops a reader
      * building the first generation underneath the owner. */
 #if defined(_WIN32)
+    /* .codeindex is an owner-private marker directory: on Windows that
+     * means a real ACL, not just a mode bit CreateDirectoryW ignores
+     * (platform_directory_create takes no security attributes), so this
+     * arm goes through the private-directory seam codeindex_build_windows.c
+     * already uses for its own owner-private index directory. */
     if (!platform_private_directory_ensure(dir))
+        LOG_FAIL("codeindex", "create index directory for owner marker");
 #else
     if (mkdir(dir, 0700) != 0 && errno != EEXIST)
-#endif
         LOG_FAIL("codeindex", "create index directory for owner marker");
+#endif
     FILE *f = fopen(tmp, "wb");
     if (!f) LOG_FAIL("codeindex", "open owner marker for write");
     bool ok = fwrite(line, 1, (size_t)n, f) == (size_t)n;
