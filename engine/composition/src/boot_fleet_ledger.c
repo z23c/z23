@@ -11,6 +11,7 @@
 #include "config/boot_fleet_ledger.h"
 
 #include "config/boot_internal.h"
+#include "config/boot_zcode_dht.h"
 #include "config/mesh_stream.h"
 #include "config/runtime.h"
 #include "boot_mesh_status_internal.h"
@@ -21,6 +22,7 @@
 #include "models/mesh_pairing.h"
 #include "net/net.h"
 #include "platform/time_compat.h"
+#include "services/mesh_pairing_service.h"
 #include "supervisors/domains.h"
 #include "util/log_macros.h"
 #include "util/supervisor.h"
@@ -70,6 +72,20 @@ static struct fleet_inbox_slot g_inbox[FLEET_LEDGER_INBOX_MAX];
 static struct liveness_contract g_ledger_contract;
 static supervisor_child_id g_ledger_child = SUPERVISOR_INVALID_ID;
 static int64_t g_last_pull;
+/* Counted refusals. Both are facts an operator has to be able to see: one
+ * says a paired peer's identity is no longer current, the other says this
+ * box could not keep up with what it asked for. Neither names the peer. */
+static _Atomic uint64_t g_delegation_refused;
+static _Atomic uint64_t g_inbox_full;
+
+#ifdef ZCL_TESTING
+/* See boot_fleet_ledger_test_bind_authority: the DHT composition root this
+ * test group cannot host, and nothing else. */
+static bool g_test_authority;
+static struct vcs_zcode_dht_delegation g_test_delegation;
+static uint8_t g_test_genesis[32];
+static int64_t g_test_now;
+#endif
 
 static void ledger_lock(void)
 {
@@ -109,11 +125,130 @@ static bool pull_decode(const uint8_t *in, size_t len, uint64_t *since_out)
     return true;
 }
 
+/* ── the delegation a pairing row cannot vouch for ───────────────────── */
+
+/* A pairing row states its OWN window and its own revocation. It cannot
+ * state whether the peer's master identity is still ACTIVE on chain: a
+ * master that has been revoked or superseded leaves every local row it was
+ * ever written into untouched. So the two questions are asked separately,
+ * exactly as boot_mesh_status_requester.c and boot_mesh_terminal_client.c
+ * already ask them, and a peer must pass both.
+ *
+ * The three helpers below name the composition roots this decision reads,
+ * so the test group can stand in for the one it cannot host without ever
+ * standing in for the authority itself. */
+
+static bool ledger_peer_delegation(const struct db_mesh_pairing *row,
+                                   struct vcs_zcode_dht_delegation *out)
+{
+#ifdef ZCL_TESTING
+    if (g_test_authority) {
+        if (memcmp(row->peer_noise_pubkey,
+                   g_test_delegation.noise_static_pubkey, 32) != 0)
+            return false;
+        *out = g_test_delegation;
+        return true;
+    }
+#endif
+    return boot_mesh_peer_delegation(row, out);
+}
+
+static bool ledger_network_genesis(uint8_t out[32])
+{
+#ifdef ZCL_TESTING
+    if (g_test_authority) {
+        memcpy(out, g_test_genesis, 32);
+        return true;
+    }
+#endif
+    return boot_zcode_dht_network_genesis(out);
+}
+
+static int64_t ledger_now(void)
+{
+#ifdef ZCL_TESTING
+    if (g_test_authority)
+        return g_test_now;
+#endif
+    return (int64_t)platform_time_wall_time_t();
+}
+
+/* Is this peer's delegation still current, on top of its pairing row being
+ * unexpired? A refusal is counted and named; it never names the peer,
+ * because who this box is paired with is the owner's business and a log is
+ * not private. */
+static bool ledger_delegation_current(
+    struct node_db *ndb, const struct db_mesh_pairing *row,
+    const struct vcs_zcode_dht_delegation *peer,
+    const uint8_t session_noise_static[32], int64_t now)
+{
+    uint8_t network_genesis[32];
+    enum mesh_pairing_reason reason = MESH_PAIRING_BAD_ARGUMENT;
+    if (ledger_network_genesis(network_genesis))
+        reason = mesh_pairing_service_authorize_status(
+            ndb, network_genesis, row->pairing_id, peer,
+            session_noise_static, now);
+    if (reason == MESH_PAIRING_OK)
+        return true;
+    atomic_fetch_add_explicit(&g_delegation_refused, 1, memory_order_relaxed);
+    LOG_WARN("fleet.ledger", "%s: %s",
+             zcl_fleet_status_label(ZCL_FLEET_DELEGATION_EXPIRED),
+             mesh_pairing_reason_token(reason));
+    return false;
+}
+
+/* The pairing row for one Noise static, scanned the way the stream
+ * primitive scans it (mesh_stream.c, stream_peer_pairing_allows): bounded,
+ * and fail-closed on an unreadable list. */
+static bool ledger_pairing_for_peer(struct node_db *ndb,
+                                    const uint8_t peer_noise_static[32],
+                                    struct db_mesh_pairing *out)
+{
+    struct db_mesh_pairing *rows =
+        zcl_calloc(FLEET_LEDGER_PAIRINGS_MAX, sizeof *rows,
+                   "fleet_ledger_pairing_lookup");
+    if (!rows)
+        return false;
+    int count = db_mesh_pairing_list(ndb, rows, FLEET_LEDGER_PAIRINGS_MAX);
+    bool found = false;
+    for (int i = 0; i < count && !found; i++) {
+        if (memcmp(rows[i].peer_noise_pubkey, peer_noise_static, 32) != 0)
+            continue;
+        *out = rows[i];
+        found = true;
+    }
+    free(rows);
+    return found;
+}
+
+/* Everything the accept side has to prove about a peer that is already
+ * through the primitive's Noise and capability gates. */
+static bool ledger_accept_authorized(const uint8_t peer_noise_static[32])
+{
+    struct node_db *ndb = app_runtime_node_db();
+    if (!ndb || !app_runtime_node_db_handle_open(ndb))
+        return false;
+    struct db_mesh_pairing row;
+    struct vcs_zcode_dht_delegation peer;
+    if (!ledger_pairing_for_peer(ndb, peer_noise_static, &row) ||
+        !ledger_peer_delegation(&row, &peer)) {
+        atomic_fetch_add_explicit(&g_delegation_refused, 1,
+                                  memory_order_relaxed);
+        LOG_WARN("fleet.ledger", "%s: delegation_unresolved",
+                 zcl_fleet_status_label(ZCL_FLEET_DELEGATION_EXPIRED));
+        return false;
+    }
+    return ledger_delegation_current(ndb, &row, &peer, peer_noise_static,
+                                     ledger_now());
+}
+
 /* ── the service callbacks ───────────────────────────────────────────── */
 
 /* An inbound OPEN. The primitive has already proven an established Noise
- * session and a pairing row granting the capability; what is left is to
- * read the answer once, here, so the tick never has to touch a file. */
+ * session and a pairing row granting the capability; this lane additionally
+ * proves the peer's delegation is still current, which the primitive's
+ * pairing check cannot say, and only then reads the answer once, here, so
+ * the tick never has to touch a file. */
 static enum mesh_stream_refusal ledger_service_open(struct mesh_stream *st,
                                                     const uint8_t *payload,
                                                     size_t len, uint8_t *reply,
@@ -129,6 +264,12 @@ static enum mesh_stream_refusal ledger_service_open(struct mesh_stream *st,
     uint64_t since = 0;
     if (!pull_decode(payload, len, &since))
         return MESH_STREAM_REFUSED_MALFORMED;
+
+    /* Before ANY file is read: a peer whose delegation is no longer current
+     * may not use this service, which is what REFUSED_PEER_UNPAIRED already
+     * means. Nothing is read and nothing is answered. */
+    if (!ledger_accept_authorized(st->peer_static))
+        return MESH_STREAM_REFUSED_PEER_UNPAIRED;
 
     ledger_lock();
     struct zcl_fleet_ledger *ledger = g_ledger;
@@ -238,8 +379,17 @@ static void ledger_service_close(struct mesh_stream *st,
         slot->rows = rows;
     }
     zcl_mutex_unlock(&g_ledger_lock);
-    if (!slot)
-        free(rows); /* the inbox is full; the next pull asks again */
+    if (!slot) {
+        /* The inbox is full; the next pull asks for the same range again,
+         * so no row is lost — only delayed. That is still a fact about
+         * this box keeping up, so it is counted and said out loud rather
+         * than dropped in silence. */
+        free(rows);
+        atomic_fetch_add_explicit(&g_inbox_full, 1, memory_order_relaxed);
+        LOG_WARN("fleet.ledger",
+                 "replica batch deferred: inbox full (%u slots)",
+                 (unsigned)FLEET_LEDGER_INBOX_MAX);
+    }
 }
 
 static void ledger_service_release(struct mesh_stream *st, void *ctx)
@@ -374,7 +524,14 @@ static void ledger_pull_paired_peers(struct zcl_fleet_ledger *ledger,
          * peer whose delegation cannot be resolved is not asked: an answer
          * we could not attribute is an answer we could not accept. */
         struct vcs_zcode_dht_delegation peer;
-        if (!boot_mesh_peer_delegation(&rows[i], &peer))
+        if (!ledger_peer_delegation(&rows[i], &peer))
+            continue;
+        /* And that delegation must still be CURRENT. The pairing row's own
+         * window says nothing about a master identity revoked or
+         * superseded on chain, so a stale peer is neither asked nor
+         * answered — the same question the accept side asks. */
+        if (!ledger_delegation_current(ndb, &rows[i], &peer,
+                                       rows[i].peer_noise_pubkey, now))
             continue;
         struct fleet_live_probe probe;
         memset(&probe, 0, sizeof probe);
@@ -415,6 +572,16 @@ static void ledger_tick(struct liveness_contract *contract)
     g_last_pull = now;
     zcl_mutex_unlock(&g_ledger_lock);
     ledger_pull_paired_peers(ledger, now);
+}
+
+uint64_t boot_fleet_ledger_delegation_refused_count(void)
+{
+    return atomic_load_explicit(&g_delegation_refused, memory_order_relaxed);
+}
+
+uint64_t boot_fleet_ledger_inbox_full_count(void)
+{
+    return atomic_load_explicit(&g_inbox_full, memory_order_relaxed);
 }
 
 /* ── lifecycle ───────────────────────────────────────────────────────── */
@@ -550,6 +717,32 @@ bool boot_fleet_ledger_test_pull(const uint8_t peer_noise[32],
                                  uint64_t since_seq)
 {
     return ledger_open_pull(peer_noise, peer_box_id, peer_signer, since_seq);
+}
+
+void boot_fleet_ledger_test_bind_authority(
+    const struct vcs_zcode_dht_delegation *peer_delegation,
+    const uint8_t network_genesis[32], int64_t now)
+{
+    ledger_lock();
+    if (peer_delegation && network_genesis && now > 0) {
+        g_test_delegation = *peer_delegation;
+        memcpy(g_test_genesis, network_genesis, 32);
+        g_test_now = now;
+        g_test_authority = true;
+    } else {
+        memset(&g_test_delegation, 0, sizeof g_test_delegation);
+        memset(g_test_genesis, 0, sizeof g_test_genesis);
+        g_test_now = 0;
+        g_test_authority = false;
+    }
+    zcl_mutex_unlock(&g_ledger_lock);
+}
+
+void boot_fleet_ledger_test_pull_paired(struct zcl_fleet_ledger *ledger,
+                                        int64_t now)
+{
+    if (ledger && now > 0)
+        ledger_pull_paired_peers(ledger, now);
 }
 
 /* The acceptor's drain, run once, from inside the lane lock — which is

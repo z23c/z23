@@ -49,9 +49,11 @@ ZCL_COMMAND_READY_READ(
     "paired peer — with the rows held, the last sequence number, and the age "
     "of the newest row in seconds. A replica answers instantly and that is "
     "not the same as answering currently, so the age is always reported and "
-    "never rounded away. Also reports what the load cost and whether the "
-    "index had to fold any row out of its per-day window. It contacts no "
-    "peer and prints no row contents.", 8192,
+    "never rounded away. Also reports what the load cost, whether the index "
+    "had to fold any row out of its per-day window, how many peers the "
+    "replication lane refused because their delegation was no longer "
+    "current, and how many arriving batches found no free commit slot. It "
+    "contacts no peer and prints no row contents.", 8192,
     "fleet,ledger,status,replica,freshness,boxes",
     "zcl.command.empty_input.v1", "zcl.fleet_ledger_status.v1", "", "",
     "z23 fleet ledger status",
@@ -68,10 +70,12 @@ ZCL_COMMAND_READY_READ(
     "days, grouped by box and provider, with cached tokens counted apart "
     "from the rest. Absent measurements are reported absent, never as zero. "
     "Where a quota row states a weekly cap for a provider, the share of it "
-    "already spent is reported too. The answer comes from the in-memory "
-    "index alone: no file is opened and no peer is asked, and the cost of "
-    "that walk is reported so the claim can be checked rather than "
-    "believed. days is 1 to the index window and defaults to 7; a longer "
+    "already spent is reported too. No peer is asked. The ledger is opened "
+    "fresh on every call, which reads every chain from disk and re-verifies "
+    "every row's signature before the index is walked; the two costs are "
+    "reported separately as load_us and index_us so the claim can be "
+    "checked rather than believed. days is 1 to the index window and "
+    "defaults to 7; a longer "
     "window is refused rather than answered from days the index does not "
     "hold.", 16384,
     "fleet,usage,tokens,spend,provider,quota,week",

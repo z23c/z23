@@ -20,6 +20,7 @@
 
 #include "base/hex.h"
 #include "base/safe_alloc.h"
+#include "config/boot_fleet_ledger.h"
 #include "fleetledger/fleet_ledger.h"
 #include "json/json.h"
 #include "kernel/command_registry.h"
@@ -285,6 +286,13 @@ void zcl_native_handle_fleet_ledger_status(
      * smaller number as if it were the whole one. */
     (void)json_push_kv_int(&reply->data, "index_overflow_rows",
                            (int64_t)overflow);
+    /* What the replication lane refused and what it could not keep up with,
+     * counted since this process started. A pairing row whose peer identity
+     * was revoked on chain is invisible in every other field here. */
+    (void)json_push_kv_int(&reply->data, "delegation_refused",
+                           (int64_t)boot_fleet_ledger_delegation_refused_count());
+    (void)json_push_kv_int(&reply->data, "inbox_full",
+                           (int64_t)boot_fleet_ledger_inbox_full_count());
     (void)json_push_kv(&reply->data, "chains", &rows);
     json_free(&rows);
     reply->status = ZCL_COMMAND_STATUS_PASSED;
