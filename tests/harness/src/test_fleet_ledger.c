@@ -162,6 +162,27 @@ static enum zcl_fleet_status fl_add_result(struct fl_box *b, const char *id,
                                    b->seed, NULL);
 }
 
+static enum zcl_fleet_status fl_add_result_counters(
+    struct fl_box *b, const char *id, uint8_t task_class, uint8_t model,
+    uint8_t outcome, const struct zcl_fleet_pair *counters, size_t n_counters)
+{
+    struct zcl_fleet_pair p[7];
+    if (n_counters > 4)
+        return ZCL_FLEET_ARGUMENT;
+    for (size_t i = 0; i < n_counters; i++)
+        p[i] = counters[i];
+    size_t n = n_counters;
+    p[n].key = ZCL_FLEET_PAIR_TASK_CLASS;
+    p[n++].value = task_class;
+    p[n].key = ZCL_FLEET_PAIR_OUTCOME;
+    p[n++].value = outcome;
+    p[n].key = ZCL_FLEET_PAIR_MODEL;
+    p[n++].value = model;
+    return zcl_fleet_ledger_append(b->ledger, ZCL_FLEET_KIND_EXPERIMENT,
+                                   ZCL_FLEET_EXPERIMENT_RESULT, p, n, id,
+                                   b->seed, NULL);
+}
+
 /* The one usage bucket for a provider over today, or false. */
 static bool fl_usage_bucket(struct zcl_fleet_ledger *ledger, uint16_t provider,
                             const uint8_t box_id[32],
@@ -562,6 +583,56 @@ int test_fleet_ledger(void)
         ASSERT_EQ(groups[2].have_pred_actual, (uint8_t)1);
         ASSERT_EQ(groups[2].pred_actual_bp, INT64_C(4000));
         ASSERT_EQ(unpredicted, UINT64_C(1));
+
+        uint8_t task_docs = 0, model_glm = 0;
+        ASSERT(zcl_fleet_experiment_enum_from_name("task_class", "unit_docs",
+                                                   &task_docs));
+        ASSERT(zcl_fleet_experiment_enum_from_name("model", "glm",
+                                                   &model_glm));
+        const struct zcl_fleet_pair observed[] = {
+            { ZCL_FLEET_PAIR_TOKENS_IN, INT64_C(13320) },
+            { ZCL_FLEET_PAIR_TOKENS_OUT, INT64_C(1362) },
+            { ZCL_FLEET_PAIR_TOKENS_CACHED, INT64_C(100) },
+            { ZCL_FLEET_PAIR_TOKENS_REASONING, INT64_C(1199) },
+        };
+        const struct zcl_fleet_pair reasoning_only[] = {
+            { ZCL_FLEET_PAIR_TOKENS_REASONING, INT64_C(1199) },
+        };
+        const struct zcl_fleet_pair measured_zero[] = {
+            { ZCL_FLEET_PAIR_TOKENS_IN, INT64_C(0) },
+            { ZCL_FLEET_PAIR_TOKENS_OUT, INT64_C(0) },
+            { ZCL_FLEET_PAIR_TOKENS_CACHED, INT64_C(0) },
+            { ZCL_FLEET_PAIR_TOKENS_REASONING, INT64_C(0) },
+        };
+        ASSERT_EQ(fl_add_result_counters(&ex, "t-token-subsets", task_docs,
+                                         model, outcome, observed,
+                                         sizeof observed / sizeof observed[0]),
+                  ZCL_FLEET_OK);
+        ASSERT_EQ(fl_add_result_counters(
+                      &ex, "t-reasoning-only", task_docs, model_glm, outcome,
+                      reasoning_only,
+                      sizeof reasoning_only / sizeof reasoning_only[0]),
+                  ZCL_FLEET_OK);
+        ASSERT_EQ(fl_add_result_counters(
+                      &ex, "t-measured-zero", task_docs, model_codex, outcome,
+                      measured_zero,
+                      sizeof measured_zero / sizeof measured_zero[0]),
+                  ZCL_FLEET_OK);
+        ASSERT_EQ(zcl_fleet_ledger_experiment_stats(ex.ledger, groups, 8,
+                                                    &count, &unpredicted, NULL),
+                  ZCL_FLEET_OK);
+        ASSERT_EQ(count, (size_t)6);
+        ASSERT_EQ(groups[3].task_class, task_docs);
+        ASSERT_EQ(groups[3].model, model);
+        ASSERT_EQ(groups[3].have_median_tokens, (uint8_t)1);
+        ASSERT_EQ(groups[3].median_tokens, INT64_C(14682));
+        ASSERT_EQ(groups[4].task_class, task_docs);
+        ASSERT_EQ(groups[4].model, model_glm);
+        ASSERT_EQ(groups[4].have_median_tokens, (uint8_t)0);
+        ASSERT_EQ(groups[5].task_class, task_docs);
+        ASSERT_EQ(groups[5].model, model_codex);
+        ASSERT_EQ(groups[5].have_median_tokens, (uint8_t)1);
+        ASSERT_EQ(groups[5].median_tokens, INT64_C(0));
         PASS();
     }
 

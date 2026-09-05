@@ -373,11 +373,8 @@ static void index_experiment(struct zcl_fleet_ledger *l,
         tokens += v;
         have = true;
     }
-    v = pair_value(row, ZCL_FLEET_PAIR_TOKENS_REASONING, &present);
-    if (present) {
-        tokens += v;
-        have = true;
-    }
+    /* Reasoning is already in output, and cached input already in input.
+     * Those subsets alone cannot establish a measured total. */
     e->tokens = tokens;
     e->have_tokens = have;
     e->wall_s = pair_value(row, ZCL_FLEET_PAIR_WALL_S, &present);
