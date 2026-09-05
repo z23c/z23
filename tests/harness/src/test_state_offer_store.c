@@ -383,6 +383,88 @@ static int unsigned_offer_refused(void)
     return failures;
 }
 
+/* ── first boot, no cached file service, a peer offers after connect ──────
+ *
+ * The path this proves is the one an operator actually hits: a node whose
+ * file_services cache is empty (nothing to arm from — the store starts cold)
+ * connects to a peer, the peer appends its offers to the zfileaddr it already
+ * sends after the handshake, and the node fetches without anyone passing a
+ * flag. The socket is the only piece left out: the producer's bytes are built
+ * through the same state_offer_collect_wire the send site calls, and read back
+ * through the same state_offer_batch_v1_decode the receive site calls, so the
+ * bytes crossing the seam here are byte-for-byte the ones that cross the wire.
+ *
+ * It also proves the endpoint rule: the offer carries no host, so the address
+ * dialled can only be the one the connection came from. */
+
+static struct state_offer_batch_v1 g_advertised;
+
+static uint32_t advertise_provider(struct state_offer_batch_v1 *out, void *ctx)
+{
+    (void)ctx;
+    *out = g_advertised;
+    return out->count;
+}
+
+static int first_boot_peer_offer_is_consumed(void)
+{
+    int failures = 0;
+    TEST_CASE("a cold node with no cached file service consumes a peer's "
+              "offer and fetches without an operator flag") {
+        uint8_t ip[16];
+        an_ip(ip, 9);
+        state_offer_store_reset();
+
+        /* The producer side: what a peer at tip 900100 would advertise —
+         * one stale bundle it still holds and one inside the window. */
+        memset(&g_advertised, 0, sizeof(g_advertised));
+        g_advertised.version = STATE_OFFER_VERSION;
+        g_advertised.flags = STATE_OFFER_FLAGS_NONE;
+        g_advertised.offerer_tip_height = 900100;
+        g_advertised.count = 2;
+        make_offer(&g_advertised.offers[0], 900090, 900100, 0x30);
+        make_offer(&g_advertised.offers[1], 900100, 900100, 0x50);
+        state_offer_set_provider(advertise_provider, NULL);
+
+        uint8_t wire[STATE_OFFER_BATCH_V1_MAX_WIRE_BYTES];
+        size_t wire_len = state_offer_collect_wire(wire, sizeof(wire));
+        ASSERT(wire_len > 0);
+        ASSERT(wire_len <= sizeof(wire));
+        state_offer_set_provider(NULL, NULL);
+
+        /* The consumer side, cold: nothing was cached, the first peer has just
+         * connected, and the only thing that has happened is this message. */
+        state_offer_store_note_first_peer(5000);
+        ASSERT(state_offer_store_wait_armed());
+
+        struct state_offer_batch_v1 heard;
+        ASSERT_EQ(state_offer_batch_v1_decode(&heard, wire, wire_len),
+                  STATE_OFFER_OK);
+        ASSERT_EQ(heard.count, 2u);
+        for (uint32_t i = 0; i < heard.count; i++) {
+            /* 18034 is the port the zfileaddr message itself carried and `ip`
+             * is the connection's address — neither came from the offer. */
+            ASSERT_EQ(state_offer_store_record(&heard.offers[i], ip, 18034, 42,
+                                               5100 + (int64_t)i),
+                      STATE_OFFER_STORE_KEPT);
+        }
+
+        struct state_offer_record chosen;
+        ASSERT_EQ(state_offer_store_decide(5200, &chosen),
+                  STATE_OFFER_DECIDE_FETCH);
+        ASSERT_EQ(chosen.offer.bundle_height, 900100);
+        ASSERT_EQ(chosen.file_service_port, 18034);
+        ASSERT(memcmp(chosen.peer_ip, ip, 16) == 0);
+
+        /* And it decided well inside the bounded wait, not after it. */
+        struct state_offer_store_status st;
+        state_offer_store_status_get(&st);
+        ASSERT(5200 - st.wait_started_ms < STATE_OFFER_WAIT_MS);
+        ASSERT_EQ(st.newest_height_seen, 900100);
+    } TEST_END
+    return failures;
+}
+
 int test_state_offer_store(void)
 {
     int failures = 0;
@@ -395,6 +477,7 @@ int test_state_offer_store(void)
     failures += silent_peer_set_fallback();
     failures += endpoint_required();
     failures += unsigned_offer_refused();
+    failures += first_boot_peer_offer_is_consumed();
     state_offer_store_reset();
     return failures;
 }
