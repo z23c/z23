@@ -5,7 +5,9 @@
 #include "base/hex.h"
 #include "command/native_command.h"
 #include "command/native_story_internal.h"
+#include "config/command_catalog.h"
 #include "json/json.h"
+#include "kernel/command_registry.h"
 #include "vcs/vcs_manifest.h"
 #include "vcs/zcode_focus.h"
 
@@ -104,7 +106,124 @@ static const char *story_largest_missing(
     return "none";
 }
 
+static enum zcl_ontology_status story_proof_status(
+    enum zcl_ontology_status build, enum zcl_ontology_status test)
+{
+    if (build == ZCL_ONTOLOGY_BOTH || test == ZCL_ONTOLOGY_BOTH)
+        return ZCL_ONTOLOGY_INCOMPLETE;
+    if (build == ZCL_ONTOLOGY_DISPROVED || test == ZCL_ONTOLOGY_DISPROVED)
+        return ZCL_ONTOLOGY_DISPROVED;
+    if (build == ZCL_ONTOLOGY_INCOMPLETE || test == ZCL_ONTOLOGY_INCOMPLETE)
+        return ZCL_ONTOLOGY_INCOMPLETE;
+    if (build == ZCL_ONTOLOGY_UNKNOWN || test == ZCL_ONTOLOGY_UNKNOWN)
+        return ZCL_ONTOLOGY_UNKNOWN;
+    return ZCL_ONTOLOGY_PROVED;
+}
+
+void story_journey_build(
+    const struct story_loaded_work *loaded,
+    struct story_journey_stage out[STORY_JOURNEY_STAGE_COUNT])
+{
+    if (!loaded || !out) return;
+    const struct zcl_story_event_v1 *event = loaded->events;
+    const enum zcl_ontology_status proof = story_proof_status(
+        event[3].status, event[4].status);
+    const struct story_journey_stage stages[STORY_JOURNEY_STAGE_COUNT] = {
+        { "describe", "user", event[0].status, "user_asks",
+          "canonical_task_goal_relation", "", false },
+        { "reuse", "retrieval", event[1].status, "agent_finds_code",
+          "context_and_reuse_relation", "story.focus", true },
+        { "need", "user", ZCL_ONTOLOGY_UNKNOWN, "",
+          "no_canonical_need_object", "", false },
+        { "job", "code", event[0].status, "user_asks",
+          "canonical_task_relation", "story.focus", true },
+        { "candidate", "code", event[2].status, "agent_edits",
+          "candidate_patch_relation", "zcode.work.run", true },
+        { "proof", "proof", proof,
+          "builds,tests", "build_and_declared_test_relations",
+          "zcode.package.dev.evidence", true },
+        { "reproduce", "platform", ZCL_ONTOLOGY_UNKNOWN, "",
+          "reproduction_authority_not_inspected_by_story_show",
+          "", false },
+        { "accept", "user", event[6].status, "user_accepts",
+          "user_acceptance_relation", "zcode.work.accept", true },
+        { "use", "integration", ZCL_ONTOLOGY_UNKNOWN, "",
+          "post_acceptance_use_authority_not_inspected_by_story_show",
+          "", false },
+    };
+    memcpy(out, stages, sizeof(stages));
+}
+
+const struct story_journey_stage *story_journey_next(
+    const struct story_journey_stage stages[STORY_JOURNEY_STAGE_COUNT])
+{
+    for (size_t i = 0; i < STORY_JOURNEY_STAGE_COUNT; i++)
+        if (stages[i].actionable &&
+            stages[i].status != ZCL_ONTOLOGY_PROVED)
+            return &stages[i];
+    return NULL;
+}
+
+static bool story_push_journey(
+    const struct zcl_command_request *request,
+    const struct story_loaded_work *loaded,
+    struct json_value *object)
+{
+    struct story_journey_stage stages[STORY_JOURNEY_STAGE_COUNT];
+    story_journey_build(loaded, stages);
+    const struct zcl_command_registry *registry =
+        request && request->context && request->context->registry
+            ? request->context->registry : zcl_command_catalog();
+    struct json_value journey;
+    json_init(&journey); json_set_array(&journey);
+    bool ok = true;
+    bool hints_registered_available = true;
+    for (size_t i = 0; ok && i < STORY_JOURNEY_STAGE_COUNT; i++) {
+        const struct zcl_command_spec *spec = stages[i].next_command[0]
+            ? zcl_command_registry_find(registry, stages[i].next_command, NULL)
+            : NULL;
+        if (stages[i].next_command[0])
+            hints_registered_available = hints_registered_available &&
+                spec != NULL && spec->availability == ZCL_COMMAND_READY;
+        struct json_value row;
+        json_init(&row); json_set_object(&row);
+        ok = json_push_kv_str(&row, "stage", stages[i].stage) &&
+            json_push_kv_str(&row, "role", stages[i].role) &&
+            json_push_kv_str(&row, "status",
+                             story_status_name(stages[i].status)) &&
+            json_push_kv_str(&row, "reason", stages[i].reason) &&
+            json_push_kv_str(&row, "evidence_event",
+                             stages[i].evidence_event) &&
+            json_push_kv_str(&row, "command_hint", stages[i].next_command) &&
+            json_push_kv_bool(&row, "actionable", stages[i].actionable) &&
+            json_push_back(&journey, &row);
+        json_free(&row);
+    }
+    const struct story_journey_stage *next = story_journey_next(stages);
+    bool inspection_required = false;
+    for (size_t i = 0; i < STORY_JOURNEY_STAGE_COUNT; i++)
+        inspection_required = inspection_required ||
+            (!stages[i].actionable &&
+             stages[i].status != ZCL_ONTOLOGY_PROVED);
+    if (ok) ok = json_push_kv(object, "journey", &journey) &&
+        json_push_kv_bool(object,
+                          "journey_command_hints_registered_available",
+                          hints_registered_available) &&
+        json_push_kv_str(object, "journey_next_command_hint",
+                         next ? next->next_command : "") &&
+        json_push_kv_str(object, "journey_next_stage",
+                         next ? next->stage
+                              : inspection_required
+                                  ? "inspection_required" : "complete") &&
+        json_push_kv_bool(object, "journey_actionable_complete", next == NULL) &&
+        json_push_kv_bool(object, "journey_inspection_required",
+                          inspection_required);
+    json_free(&journey);
+    return ok;
+}
+
 static bool story_render_show(struct zcl_command_reply *reply,
+                              const struct zcl_command_request *request,
                               const struct story_loaded_work *loaded,
                               bool full)
 {
@@ -121,7 +240,8 @@ static bool story_render_show(struct zcl_command_reply *reply,
         : loaded->events[5].status == ZCL_ONTOLOGY_DISPROVED
         ? "inspect the exact app-run observation and repair the application before recording another run"
         : "capture one canonical receipt that binds the exact built application to its observed execution";
-    ok = ok &&
+    ok = ok && (!full || story_push_journey(
+                    request, loaded, &reply->data)) &&
         json_push_kv_str(&reply->data, "status",
                          story_status_name(loaded->show.status)) &&
         json_push_kv_bool(&reply->data, "complete", loaded->show.complete) &&
@@ -170,7 +290,7 @@ void zcl_native_handle_story_show(const struct zcl_command_request *request,
                          &loaded, reply))
         return;
     bool full = request->view && strcmp(request->view, "full") == 0;
-    if (!story_render_show(reply, &loaded, full))
+    if (!story_render_show(reply, request, &loaded, full))
         story_fail(reply, "STORY_OUTPUT_FAILED", "render",
                    "bounded story view could not be rendered");
 }

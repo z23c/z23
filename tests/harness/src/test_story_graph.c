@@ -99,6 +99,51 @@ static int sg_unknown_and_incomplete(void)
     return failures;
 }
 
+static int sg_journey_branches(void)
+{
+    int failures = 0;
+    TEST("story journey: proof, inspection, and acceptance branches stay explicit") {
+        struct zcl_story_event_v1 events[7];
+        sg_complete(events);
+        struct story_loaded_work loaded = {0};
+        memcpy(loaded.events, events, sizeof(events));
+        struct story_journey_stage stages[STORY_JOURNEY_STAGE_COUNT];
+
+        story_journey_build(&loaded, stages);
+        ASSERT_EQ(stages[2].status, ZCL_ONTOLOGY_UNKNOWN);
+        ASSERT_EQ(stages[5].status, ZCL_ONTOLOGY_PROVED);
+        ASSERT_EQ(stages[6].status, ZCL_ONTOLOGY_UNKNOWN);
+        ASSERT(!stages[2].actionable);
+        ASSERT(!stages[6].actionable);
+        ASSERT(!stages[8].actionable);
+        ASSERT(story_journey_next(stages) == NULL);
+
+        loaded.events[3].status = ZCL_ONTOLOGY_UNKNOWN;
+        story_journey_build(&loaded, stages);
+        ASSERT_EQ(stages[5].status, ZCL_ONTOLOGY_UNKNOWN);
+        ASSERT(strcmp(story_journey_next(stages)->next_command,
+                      "zcode.package.dev.evidence") == 0);
+
+        loaded.events[3].status = ZCL_ONTOLOGY_DISPROVED;
+        story_journey_build(&loaded, stages);
+        ASSERT_EQ(stages[5].status, ZCL_ONTOLOGY_DISPROVED);
+        ASSERT(strcmp(story_journey_next(stages)->stage, "proof") == 0);
+
+        loaded.events[3].status = ZCL_ONTOLOGY_BOTH;
+        story_journey_build(&loaded, stages);
+        ASSERT_EQ(stages[5].status, ZCL_ONTOLOGY_INCOMPLETE);
+
+        loaded.events[3].status = ZCL_ONTOLOGY_PROVED;
+        loaded.events[6].status = ZCL_ONTOLOGY_UNKNOWN;
+        story_journey_build(&loaded, stages);
+        ASSERT_EQ(stages[7].status, ZCL_ONTOLOGY_UNKNOWN);
+        ASSERT(strcmp(stages[7].next_command, "zcode.work.accept") == 0);
+        ASSERT(strcmp(story_journey_next(stages)->stage, "accept") == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int sg_why_chain(void)
 {
     int failures = 0;
@@ -609,6 +654,7 @@ int test_story_graph(void)
     int failures = 0;
     failures += sg_complete_story();
     failures += sg_unknown_and_incomplete();
+    failures += sg_journey_branches();
     failures += sg_why_chain();
     failures += sg_diff();
     failures += sg_refusals();

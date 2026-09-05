@@ -36,6 +36,24 @@ enum story_context_status {
     STORY_CONTEXT_UNAVAILABLE,
 };
 
+enum { STORY_JOURNEY_STAGE_COUNT = 9 };
+
+struct story_journey_stage {
+    const char *stage;
+    const char *role;
+    enum zcl_ontology_status status;
+    const char *evidence_event;
+    const char *reason;
+    const char *next_command;
+    bool actionable;
+};
+
+void story_journey_build(
+    const struct story_loaded_work *loaded,
+    struct story_journey_stage out[STORY_JOURNEY_STAGE_COUNT]);
+const struct story_journey_stage *story_journey_next(
+    const struct story_journey_stage stages[STORY_JOURNEY_STAGE_COUNT]);
+
 bool story_load_work(const struct zcl_command_request *request,
                      const char *workspace, const char *work,
                      const char *datadir, struct story_loaded_work *loaded,

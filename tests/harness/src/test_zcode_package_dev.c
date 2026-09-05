@@ -957,6 +957,7 @@ static __attribute__((unused)) int zpd_test_twelve_task_benchmark(void)
         uint64_t selected_bytes = 0, total_bytes = 0, context_us = 0;
         uint64_t model_context_bytes = 0;
         size_t story_projection_bytes = 0, story_full_bytes = 0;
+        size_t story_full_envelope_bytes = 0;
         size_t story_source_status_bytes = 0, story_focus_bytes = 0;
         for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
             uint8_t preedit_focus_root[32] = {0};
@@ -1302,8 +1303,69 @@ static __attribute__((unused)) int zpd_test_twelve_task_benchmark(void)
                                            "zcl.story_show_full_test.v1");
                     zcl_native_handle_story_show(&request, &reply);
                     ASSERT(reply.status == ZCL_COMMAND_STATUS_PASSED);
+                    const struct json_value *journey = json_get(
+                        &reply.data, "journey");
+                    ASSERT(journey && journey->type == JSON_ARR);
+                    ASSERT(json_size(journey) == 9);
+                    ASSERT(strcmp(json_get_str(json_get(
+                                      &journey->children[6], "stage")),
+                                  "reproduce") == 0);
+                    ASSERT(strcmp(json_get_str(json_get(
+                                      &journey->children[6], "status")),
+                                  "UNKNOWN") == 0);
+                    ASSERT(strcmp(json_get_str(json_get(
+                                      &journey->children[7], "status")),
+                                  "PROVED") == 0);
+                    ASSERT(strcmp(json_get_str(json_get(
+                                      &reply.data, "journey_next_stage")),
+                                  "inspection_required") == 0);
+                    ASSERT(json_get_bool(json_get(
+                               &reply.data, "journey_actionable_complete")));
+                    ASSERT(json_get_bool(json_get(
+                               &reply.data, "journey_inspection_required")));
                     story_full_bytes = json_write(&reply.data, NULL, 0);
                     ASSERT(story_full_bytes > story_projection_bytes);
+                    ASSERT(story_full_bytes < ZCL_COMMAND_LIST_BUDGET);
+                    {
+                        const struct zcl_command_registry *registry =
+                            zcl_command_catalog();
+                        const struct zcl_command_spec *spec =
+                            zcl_command_registry_find(
+                                registry, "story.show", NULL);
+                        struct zcl_command_context command_context = {
+                            .registry = registry,
+                            .authority_ceiling = ZCL_COMMAND_AUTH_OWNER,
+                            .granted_capabilities = ~(uint64_t)0,
+                        };
+                        char envelope[ZCL_COMMAND_LIST_BUDGET + 1u];
+                        enum zcl_command_exit exit_code =
+                            ZCL_COMMAND_EXIT_INTERNAL;
+                        ASSERT(spec != NULL);
+                        size_t envelope_bytes =
+                            zcl_command_registry_execute_json(
+                                registry, spec, &command_context, &input,
+                                false, spec->path, "full", 0, 0, NULL,
+                                envelope, sizeof(envelope), &exit_code);
+                        story_full_envelope_bytes = envelope_bytes;
+                        ASSERT(exit_code == ZCL_COMMAND_EXIT_OK);
+                        ASSERT(envelope_bytes > 0 &&
+                               envelope_bytes <= ZCL_COMMAND_LIST_BUDGET);
+                        /* Production-valid status/list/next-hint growth is
+                         * <=192 bytes; bounded read authority adds 7 and both
+                         * elapsed counters add <=36: reserve 256 for <=235.
+                         * The goal/workspace are not emitted in this view. */
+                        ASSERT(envelope_bytes + 256u <
+                               ZCL_COMMAND_LIST_BUDGET);
+                        ASSERT(strstr(envelope,
+                                      "RESPONSE_BUDGET_EXCEEDED") == NULL);
+                        struct json_value serialized;
+                        json_init(&serialized);
+                        ASSERT(json_read(&serialized, envelope,
+                                         envelope_bytes));
+                        ASSERT(json_size(json_get(json_get(
+                                   &serialized, "data"), "journey")) == 9);
+                        json_free(&serialized);
+                    }
                     zcl_command_reply_free(&reply); json_free(&input);
 
                     json_init(&input); json_set_object(&input);
@@ -1388,6 +1450,7 @@ static __attribute__((unused)) int zpd_test_twelve_task_benchmark(void)
                "accepted=%zu refused=%zu context=%llu/%llu bytes "
                "model_context_bytes=%llu context_us=%llu "
                "story_bytes=%zu story_full_bytes=%zu "
+               "story_full_envelope_bytes=%zu "
                "story_context_saved_pct=%zu "
                "story_focus_bytes=%zu story_focus_join_saved_pct=%zu "
                "story_source_status_bytes=%zu "
@@ -1398,6 +1461,7 @@ static __attribute__((unused)) int zpd_test_twelve_task_benchmark(void)
                (unsigned long long)model_context_bytes,
                (unsigned long long)context_us,
                story_projection_bytes, story_full_bytes,
+               story_full_envelope_bytes,
                (story_full_bytes - story_projection_bytes) * 100u /
                    story_full_bytes,
                story_focus_bytes,
