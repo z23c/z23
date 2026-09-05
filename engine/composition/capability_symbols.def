@@ -231,6 +231,9 @@ ZCL_CAPABILITY_SYMBOL("posix_spawnattr_setflags", CAP_PROCESS,
 ZCL_CAPABILITY_SYMBOL("setenv", CAP_PROCESS,
     "Mutates the block a later exec inherits, which is how PATH and the "
     "loader variables get chosen.")
+ZCL_CAPABILITY_SYMBOL("unsetenv", CAP_PROCESS,
+    "The other half of a scoped setenv/unsetenv pair around one child "
+    "spawn: removes a variable from the block a later exec inherits.")
 ZCL_CAPABILITY_SYMBOL("setpgid", CAP_PROCESS,
     "Process group control, the other half of daemonising a spawned "
     "child.")

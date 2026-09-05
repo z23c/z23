@@ -3093,6 +3093,42 @@ bool zcl_dev_proof_warm_seed_and_retime(const char *donor_build,
 }
 #endif /* ZCL_DEV_BUILD || ZCL_TESTING */
 
+/* A fresh generation checkout never carries build/bin/zcc: it is a build
+ * artifact, deliberately absent from the `dependencies[]` list above so every
+ * generation self-hosts its own compile cache from source. Left unbootstrapped
+ * here, the FIRST `make` invocation that touches $(CC) builds it lazily at
+ * Makefile parse time (tools/dev/zcc_bootstrap.sh). The lint and test
+ * dimensions below are launched as two independent `make` child processes
+ * before either is waited on (by design — see the comment at their call
+ * site), and each reparses the Makefile and re-runs that same parse-time
+ * bootstrap independently. Two such parses racing their first-ever bootstrap
+ * of this generation observed BUILD_COMPILER_ID diverge between the epoch a
+ * session was acquired under and the epoch verified against it later
+ * (`compiler/toolchain changed during build`), even though the underlying
+ * zcc bytes end up identical: the race is over which parse's view of
+ * $(CC) — bare `cc` because its bootstrap had not yet completed, or the
+ * fully wrapped `zcc cc` — gets recorded first.
+ *
+ * Bootstrap once, synchronously, right here, before any make process for
+ * this generation exists. Every later parse-time freshness check then finds
+ * zcc already newer than every one of its own inputs and does nothing, so
+ * there is no first-mover race left to lose. Advisory only, exactly like the
+ * script's own contract ("never fails a build"): a failure here is not a
+ * generation-prepare failure, it just falls back to the previous lazy,
+ * single-caller bootstrap the first make invocation still performs. */
+static void generation_zcc_bootstrap(const char *generation)
+{
+    char bin_dir[PATH_MAX];
+    if (!generation ||
+        snprintf(bin_dir, sizeof(bin_dir), "%s/build/bin", generation) >=
+            (int)sizeof(bin_dir))
+        return;
+    if (setenv("ZCL_BIN_DIR", bin_dir, 1) != 0) return;
+    const char *argv[] = {"tools/dev/zcc_bootstrap.sh", NULL};
+    struct zcl_devloop_process_result result = {0};
+    (void)zcl_devloop_process_run(generation, argv, 60000, &result);
+    (void)unsetenv("ZCL_BIN_DIR");
+}
 
 static bool generation_prepare(const struct proof_paths *paths,
                                const char *local,
@@ -3266,6 +3302,9 @@ static bool generation_prepare(const struct proof_paths *paths,
         proof_why(why, why_len, "proof_generation_not_exact");
         return false;
     }
+    /* Close the lazy-bootstrap race before any dimension's `make` process
+     * exists for this generation (see generation_zcc_bootstrap). */
+    generation_zcc_bootstrap(generation);
     /* Stamp the generation as taken before the slow preparation below.
      * The .z23p pool is shared by every checkout under this parent, so a
      * sibling lane's reaper may look at this directory at any moment;
