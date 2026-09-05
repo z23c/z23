@@ -1288,8 +1288,12 @@ static bool dispatch_cli(const struct engine_vendor *v, const char *prompt_path,
     }
     free(log);
     if (dr->cli_observation.known) {
+        /* The parser validated nonnegative, consistent totals for either
+         * cache accounting shape. Normalize the projected input count while
+         * retaining the exact raw observation in the receipt. */
         dr->reply.usage.prompt_tokens =
-            dr->cli_observation.input_tokens;
+            dr->cli_observation.total_tokens -
+            dr->cli_observation.output_tokens;
         dr->reply.usage.completion_tokens =
             dr->cli_observation.output_tokens;
         dr->reply.usage.total_tokens =

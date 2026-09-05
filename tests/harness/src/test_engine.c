@@ -2465,6 +2465,173 @@ static int case_engine_unit_state_e2e(void)
     return failures;
 }
 
+#if !defined(_WIN32)
+static bool engine_test_shell_quote(const char *in, char *out, size_t cap)
+{
+    size_t n = 0;
+    if (!in || !out || cap < 3)
+        return false;
+    out[n++] = '\'';
+    for (const char *p = in; *p; p++) {
+        static const char escaped_quote[] = "'\\''";
+        const char *piece = *p == '\'' ? escaped_quote : p;
+        const size_t count = *p == '\'' ? sizeof(escaped_quote) - 1u : 1u;
+        if (n + count + 2u > cap)
+            return false;
+        memcpy(out + n, piece, count);
+        n += count;
+    }
+    out[n++] = '\'';
+    out[n] = '\0';
+    return true;
+}
+
+static int case_engine_unit_grok_projection_e2e(void)
+{
+    int failures = 0;
+    if (!engine_unit_binary_present()) {
+        printf("engine: FAIL (%s is required for Grok projection e2e)\n",
+               ENGINE_UNIT_BIN);
+        return 1;
+    }
+
+    char rel[512], dir[600];
+    test_make_tmpdir(rel, sizeof(rel), "engine_grok_projection", "run");
+    if (!test_abs_path(rel, dir, sizeof(dir))) {
+        printf("engine: FAIL (could not absolutize Grok fixture)\n");
+        return 1;
+    }
+    char bin_dir[700], source[700], fake_grok[700], task[700];
+    char first[700], second[700], counter[700], state[700], worktree[700];
+    char receipt_path[740], chain_path[740], log_path[740];
+    (void)snprintf(bin_dir, sizeof(bin_dir), "%s/bin", dir);
+    (void)snprintf(source, sizeof(source), "%s/fake-grok.c", dir);
+    (void)snprintf(fake_grok, sizeof(fake_grok), "%s/grok", bin_dir);
+    (void)snprintf(task, sizeof(task), "%s/task.txt", dir);
+    (void)snprintf(first, sizeof(first), "%s/inclusive.json", dir);
+    (void)snprintf(second, sizeof(second), "%s/additive.json", dir);
+    (void)snprintf(counter, sizeof(counter), "%s/counter", dir);
+    (void)snprintf(state, sizeof(state), "%s/state", dir);
+    (void)snprintf(worktree, sizeof(worktree), "%s/wt", dir);
+    (void)snprintf(receipt_path, sizeof(receipt_path), "%s/receipt.json", state);
+    (void)snprintf(chain_path, sizeof(chain_path), "%s/%s", state,
+                   ENGINE_RECEIPT_FILENAME);
+    (void)snprintf(log_path, sizeof(log_path), "%s/run.log", dir);
+    const bool dirs_ok = mkdir(bin_dir, 0700) == 0 && mkdir(state, 0700) == 0;
+
+    static const char fake_source[] =
+        "#include <stdio.h>\n#include <stdlib.h>\n"
+        "int main(void){const char*c=getenv(\"ZCL_FAKE_COUNT\");"
+        "const char*a=getenv(\"ZCL_FAKE_FIRST\");"
+        "const char*b=getenv(\"ZCL_FAKE_SECOND\");"
+        "if(!c||!a||!b)return 2;FILE*f=fopen(c,\"rb\");"
+        "int later=f!=0;if(f&&fclose(f))return 3;"
+        "if(!later){f=fopen(c,\"wb\");if(!f||fclose(f))return 4;}"
+        "f=fopen(later?b:a,\"rb\");if(!f)return 5;int ch;"
+        "while((ch=fgetc(f))!=EOF)if(fputc(ch,stdout)==EOF)return 6;"
+        "if(ferror(f)||fclose(f)||fflush(stdout))return 7;return 0;}\n";
+    static const char inclusive[] =
+        "{\"text\":\"done\",\"stopReason\":\"end_turn\","
+        "\"sessionId\":\"23c9be10-5084-43a4-8e1a-2735a4650981\","
+        "\"requestId\":\"ddc16017-2c5f-4c34-9fa9-ce50a4ec48a0\","
+        "\"usage\":{\"input_tokens\":100,"
+        "\"cache_read_input_tokens\":60,"
+        "\"cache_creation_input_tokens\":10,\"output_tokens\":25,"
+        "\"reasoning_tokens\":7,\"total_tokens\":125},\"num_turns\":1,"
+        "\"modelUsage\":{\"grok-4.6-build\":{\"inputTokens\":100,"
+        "\"outputTokens\":25,\"cacheReadInputTokens\":60,"
+        "\"cacheCreationInputTokens\":10,\"modelCalls\":1}}}";
+    static const char additive[] =
+        "{\"text\":\"done\",\"stopReason\":\"cancelled\","
+        "\"sessionId\":\"8a79ed87-5aaa-4924-b75d-f29a52ac3818\","
+        "\"requestId\":\"db6794ee-c1e6-4bc8-9b9c-3961c6382f16\","
+        "\"usage\":{\"input_tokens\":231579,"
+        "\"cache_read_input_tokens\":265088,"
+        "\"cache_creation_input_tokens\":0,\"output_tokens\":9830,"
+        "\"reasoning_tokens\":8841,\"total_tokens\":506497},"
+        "\"num_turns\":10,\"modelUsage\":{\"grok-4.6-build\":{"
+        "\"inputTokens\":231579,\"outputTokens\":9830,"
+        "\"cacheReadInputTokens\":265088,"
+        "\"cacheCreationInputTokens\":0,\"modelCalls\":10}}}";
+    const bool files_ok = dirs_ok
+        && write_whole_file(source, fake_source)
+        && write_whole_file(task, "kind: fix-gate\n\nMeasure accounting.\n")
+        && write_whole_file(first, inclusive)
+        && write_whole_file(second, additive);
+    EN_CHECK("Grok dispatch fixtures are written", files_ok);
+
+    char command[8192];
+    char q_bin[1404], q_source[1404], q_grok[1404], q_task[1404];
+    char q_first[1404], q_second[1404], q_counter[1404], q_state[1404];
+    char q_worktree[1404], q_log[1404];
+    const bool quoted = engine_test_shell_quote(bin_dir, q_bin, sizeof(q_bin))
+        && engine_test_shell_quote(source, q_source, sizeof(q_source))
+        && engine_test_shell_quote(fake_grok, q_grok, sizeof(q_grok))
+        && engine_test_shell_quote(task, q_task, sizeof(q_task))
+        && engine_test_shell_quote(first, q_first, sizeof(q_first))
+        && engine_test_shell_quote(second, q_second, sizeof(q_second))
+        && engine_test_shell_quote(counter, q_counter, sizeof(q_counter))
+        && engine_test_shell_quote(state, q_state, sizeof(q_state))
+        && engine_test_shell_quote(worktree, q_worktree, sizeof(q_worktree))
+        && engine_test_shell_quote(log_path, q_log, sizeof(q_log));
+    bool compiled = false;
+    bool detached = false;
+    if (files_ok && quoted) {
+        (void)snprintf(command, sizeof(command),
+                       "git -c core.hooksPath=/dev/null worktree add "
+                       "--detach %s HEAD >/dev/null 2>&1",
+                       q_worktree);
+        detached = system(command) == 0;
+        (void)snprintf(command, sizeof(command),
+                       "cc -std=c23 -O0 -o %s %s", q_grok, q_source);
+        compiled = system(command) == 0;
+    }
+    EN_CHECK("the fixture owns a detached worktree", detached);
+    EN_CHECK("the fake Grok CLI fixture compiles as C23", compiled);
+    if (compiled && detached) {
+        (void)snprintf(command, sizeof(command),
+            "PATH=%s:$PATH ZCL_FAKE_COUNT=%s ZCL_FAKE_FIRST=%s "
+            "ZCL_FAKE_SECOND=%s %s --engine grok-cli --task %s --no-group "
+            "--yes-dispatch --turns 2 --worktree %s --state-dir %s "
+            ">%s 2>&1", q_bin, q_counter, q_first, q_second, ENGINE_UNIT_BIN,
+            q_task, q_worktree, q_state, q_log);
+        (void)system(command); /* durable receipts are the evidence */
+    }
+
+    char receipt[8192] = {0};
+    char chain[32768] = {0};
+    const bool have_receipt = compiled && detached
+        && read_whole_file(receipt_path, receipt, sizeof(receipt));
+    const bool have_chain = compiled && detached
+        && read_whole_file(chain_path, chain, sizeof(chain));
+    EN_CHECK("the Grok dispatch wrote its one-run receipt", have_receipt);
+    EN_CHECK("the Grok dispatch wrote its receipt chain", have_chain);
+    EN_CHECK("additive Grok projection preserves raw and normalized counters",
+             have_receipt
+             && strstr(receipt, "\"prompt_tokens\":496667")
+             && strstr(receipt, "\"input_tokens\":231579")
+             && strstr(receipt, "\"output_tokens\":9830")
+             && strstr(receipt, "\"cache_read_input_tokens\":265088")
+             && strstr(receipt, "\"total_tokens\":506497"));
+    EN_CHECK("both Grok accounting shapes are durable per invocation",
+             have_chain
+             && strstr(chain, "\"prompt_tokens\":100,\"completion_tokens\":25,\"cache_read_input_tokens\":60")
+             && strstr(chain, "\"prompt_tokens\":496667,\"completion_tokens\":9830,\"cache_read_input_tokens\":265088")
+             && strstr(chain, "\"total_prompt_tokens\":496767")
+             && strstr(chain, "\"total_completion_tokens\":9855")
+             && strstr(chain, "\"total_reported_tokens\":506622"));
+
+    if (detached) {
+        (void)snprintf(command, sizeof(command),
+                       "git worktree remove --force %s >/dev/null 2>&1",
+                       q_worktree);
+        EN_CHECK("only the fixture's detached worktree is removed",
+                 system(command) == 0);
+    }
+    return failures;
+}
+#endif
+
 /* ── hash-chained engine-unit receipts ─────────────────────────────────
  * Signal, not judgement: the chain says only that nothing was altered
  * after the fact. A tampered earlier line makes every later prev_sha3
@@ -3101,6 +3268,9 @@ int test_engine(void)
     failures += case_receipt_chain();
     failures += case_state();
     failures += case_engine_unit_state_e2e();
+#if !defined(_WIN32)
+    failures += case_engine_unit_grok_projection_e2e();
+#endif
     printf("engine: %d failure(s)\n", failures);
     return failures;
 }
