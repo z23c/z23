@@ -107,3 +107,7 @@ means.
   candidates, per-group verdicts and publications as gossiped signed rows, so
   landing is asynchronous, decentralized, and pays only for what a change can
   reach.
+- [`0008-process-story-graph.md`](0008-process-story-graph.md) — every
+  process step is a passage with entry and exit predicates; evidence carries a
+  grade from measured to rumour; a story next leaf deduces the next passage and
+  cites what it used; the graph and the wiki replicate across the fleet.
