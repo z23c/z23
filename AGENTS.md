@@ -61,11 +61,16 @@ contains software-understanding machinery; and `platform/ports/` plus
 the authority that owns them. Do not recreate global `app/`, `lib/`, `config/`,
 `domain/`, `platform/ports/`, or `platform/adapters/` roots.
 
+`apps/` is the one root that is not the node: programs that ship from this
+repository but link nothing from `core/` or `engine/` (today `apps/skycombat`,
+see `docs/GAME.md`). They are C23 with `-Werror` and must pass the portability
+gates; the node-architecture gates do not scan them.
+
 Run `make check-architecture-tree` after placement changes. It rejects legacy
-roots, unknown rooms, duplicate module owners, module-manifest drift, and
-reducer-owned paths outside `engine/reducer/`. The generated view is
-`build/bin/z23 code context-map`; do not hand-maintain a competing ownership
-catalog.
+roots, an undeclared top-level entry, unknown rooms, duplicate module owners,
+module-manifest drift, and reducer-owned paths outside `engine/reducer/`. The
+generated view is `build/bin/z23 code context-map`; do not hand-maintain a
+competing ownership catalog.
 
 ## Operating rules
 

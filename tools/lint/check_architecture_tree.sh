@@ -17,16 +17,26 @@ expected="$(mktemp "${TMPDIR:-/tmp}/z23-architecture-expected.XXXXXX")"
 readonly tracked actual expected
 trap 'rm -f "$tracked" "$actual" "$expected"' EXIT
 git ls-files > "$tracked"
-
-# The root is the public table of contents, not an overflow namespace.  The
-# current tree needs 24 entries for the five product authorities, developer
-# and distribution surfaces, tool-discovery files, and legal/build metadata.
-# Any 25th entry must first be placed under an existing owner or deliberately
-# replace something here; merely tracking it must not make the root grow.
-root_entries="$(awk -F/ '{ seen[$1] = 1 } END { print length(seen) }' "$tracked")"
-if (( root_entries > 24 )); then
-    echo "check-architecture-tree: root-entry budget exceeded: $root_entries > 24" >&2
-    echo "check-architecture-tree: place the new entry under its owning authority" >&2
+# The root is the public table of contents, not an overflow namespace.  It is a
+# CLOSED, DECLARED set, not a headcount: every tracked top-level entry must be
+# named here and every name here must still exist.  A bare "<= N entries"
+# budget passed a silent swap that kept the count the same, and it could only
+# ever say "too many", never "which one, and who owns it".  Adding a root means
+# editing this list in a commit that argues for it -- placing the thing under an
+# existing owner is still the first answer.
+declared_roots=(
+    AGENTS.md CLAUDE.md COPYING LICENSE Makefile NOTICE README.md
+    .clangd .claude .gitattributes .github .gitignore .gitmodules .grok .ignore
+    apps        # applications that ship from here but are not the node (docs/GAME.md)
+    cognition contexts core docs engine platform tests tools vendor
+)
+awk -F/ '{ seen[$1] = 1 } END { for (r in seen) print r }' "$tracked" | sort > "$actual"
+printf '%s\n' "${declared_roots[@]}" | sort > "$expected"
+if ! cmp -s "$actual" "$expected"; then
+    echo "check-architecture-tree: root entries differ from the declared set" >&2
+    echo "check-architecture-tree: place the new entry under its owning authority," >&2
+    echo "check-architecture-tree: or declare it in tools/lint/check_architecture_tree.sh" >&2
+    diff -u "$expected" "$actual" >&2 || true
     fail=1
 fi
 
