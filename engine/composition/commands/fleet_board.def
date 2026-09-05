@@ -31,9 +31,10 @@ ZCL_COMMAND_BRANCH("fleet.wiki", "fleet",
 ZCL_COMMAND_READY_COMMAND(
     "fleet.board.post", "fleet.board", "",
     "Sign and gossip one board post from this node",
-    "The id of the post this node just signed with its own host identity, "
-    "appended to its ledger, and announced to its peers. LOCAL ONLY: no peer "
-    "may ask this node to sign a statement. Kinds are problem, need, offer, "
+    "The id of the PUBLIC post this node just signed with its local DHT online "
+    "key, appended to its ledger, and replicated to connected board peers. "
+    "LOCAL ONLY describes the signature authority: no peer may ask this node "
+    "to sign a statement; visibility is across fleets. Kinds are problem, need, offer, "
     "claim, result and note; a claim or result should carry `ref` (the post "
     "it answers) and may carry `receipt` (unit, engine, gate verdict, token "
     "counts) so a dispatcher can follow the work.", 0,
@@ -104,7 +105,10 @@ ZCL_COMMAND_READY_READ(
 ZCL_COMMAND_READY_COMMAND(
     "fleet.wiki.write", "fleet.wiki", "",
     "Write or revise one wiki page",
-    "The id of a signed `wiki` revision for this slug. A revision never edits "
+    "The id of a PUBLIC signed `wiki` revision for this slug, signed with this "
+    "node's local DHT online key and replicated to connected board peers. "
+    "LOCAL ONLY describes signature authority, never visibility across fleets. "
+    "A revision never edits "
     "an earlier one — it supersedes it, and every revision stays readable "
     "through `fleet wiki history`. Write what you learned that the next agent "
     "would otherwise relearn: a trap, what a gate actually checks, a host "
