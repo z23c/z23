@@ -6,7 +6,8 @@
  * split out to keep block_index_projection.c under the file-size ceiling —
  * the same "_internal.h" convention engine/jobs/src/ already uses for its own
  * per-stage helper splits. Not a public API; nothing outside this
- * directory includes it. */
+ * directory includes it except the projection's own harness, which reads
+ * the catch-up WAL stats fields. */
 
 #ifndef ZCL_STORAGE_BLOCK_INDEX_PROJECTION_INTERNAL_H
 #define ZCL_STORAGE_BLOCK_INDEX_PROJECTION_INTERNAL_H
@@ -23,6 +24,11 @@
  * at most one batch's worth of events, not the whole backlog. */
 #define BIP_BATCH_EVENTS 1000
 
+/* Mid-catch-up PASSIVE checkpoint bound. 32 MiB is ~10x under the 4.19 GB /
+ * (13200/1000) ≈ 320 MB per-batch WAL growth measured on a 2-vCPU node
+ * applying ~22 headers/s with no checkpoint until the stream ended. */
+#define BIP_WAL_BUDGET_BYTES (32u * 1024u * 1024u)
+
 struct block_index_projection {
     sqlite3       *db;
     event_log_t   *log;
@@ -35,6 +41,13 @@ struct block_index_projection {
     uint64_t       events_consumed_total;
     uint64_t       replace_collisions_total;
     int64_t        last_catch_up_ms;
+
+    /* Catch-up WAL bound. `wal_budget_bytes` defaults to BIP_WAL_BUDGET_BYTES;
+     * tests may lower it on the open handle. `max_wal_bytes_seen` is the
+     * peak on-disk `-wal` size observed at a batch boundary this process. */
+    uint64_t       wal_budget_bytes;
+    uint64_t       max_wal_bytes_seen;
+    uint64_t       wal_passive_checkpoints;
 };
 
 struct catch_up_ctx {

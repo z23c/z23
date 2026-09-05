@@ -27,6 +27,11 @@
  *                                solution bytes
  *  11. bound_dirty_delta     — exact flat identity admits only post-bind
  *                                unique hashes; tamper falls back
+ *  12. catch_up_wal_budget   — enough headers to cross a lowered WAL budget
+ *                                more than once; peak -wal stays within one
+ *                                batch of the bound; final TRUNCATE still 0
+ *  13. catch_up_wal_reader   — get() from a second thread during catch-up;
+ *                                no deadlock, budget still held
  *
  * Scratch files live under ./test-tmp/bip_<pid>_<tag>/ in line with the
  * project's no-/tmp convention. */
@@ -37,10 +42,13 @@
 #include "storage/block_index_projection.h"
 #include "storage/event_log.h"
 #include "storage/event_log_payloads.h"
+#include "../../../engine/modules/storage/src/block_index_projection_internal.h"
 
 #include <errno.h>
 #include <fcntl.h>
 #include <inttypes.h>
+#include <pthread.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -861,6 +869,151 @@ done:
     return *failures - start_failures;
 }
 
+/* One batch of small-solution headers is far under the production 32 MiB
+ * bound, so tests lower wal_budget_bytes. Slack is one 1000-row batch of
+ * 4 KiB WAL frames plus headroom. */
+#define BIP_TEST_WAL_BUDGET_BYTES  (64u * 1024u)
+#define BIP_TEST_WAL_BATCH_SLACK   (8u * 1024u * 1024u)
+#define BIP_TEST_WAL_BATCHES       5
+
+static bool emit_n_headers(event_log_t *log, uint32_t seed0, int n)
+{
+    for (int i = 0; i < n; i++) {
+        struct ev_block_header h;
+        uint8_t sol[8] = {0};
+        make_header(&h, sol, sizeof(sol), seed0 + (uint32_t)i, i, 0x20);
+        if (!emit_header(log, &h, sol))
+            return false;
+    }
+    return true;
+}
+
+static int run_catch_up_wal_budget(int *failures)
+{
+    int start_failures = *failures;
+
+    char dir[256]; test_make_tmpdir(dir, sizeof(dir), "bip", "wal_budget");
+    char el_path[320]; snprintf(el_path, sizeof(el_path), "%s/log.bin", dir);
+    char db_path[320]; snprintf(db_path, sizeof(db_path), "%s/p.db", dir);
+
+    event_log_t *log = event_log_open(el_path);
+    if (!log) { *failures += 1; goto done; }
+
+    int n = BIP_TEST_WAL_BATCHES * BIP_BATCH_EVENTS;
+    BIP_CHECK("wal_budget: emit headers", emit_n_headers(log, 0xA000u, n));
+
+    block_index_projection_t *p = block_index_projection_open(db_path, log);
+    if (!p) { event_log_close(log); *failures += 1; goto done; }
+    p->wal_budget_bytes = BIP_TEST_WAL_BUDGET_BYTES;
+
+    uint64_t off = block_index_projection_catch_up(p);
+    BIP_CHECK("wal_budget: catch_up succeeds", off != (uint64_t)-1);
+    BIP_CHECK("wal_budget: row count matches emitted headers",
+              block_index_projection_count(p) == (uint64_t)n);
+    BIP_CHECK("wal_budget: crossed the bound more than once",
+              p->wal_passive_checkpoints >= 2);
+    BIP_CHECK("wal_budget: peak WAL exceeded the lowered bound",
+              p->max_wal_bytes_seen > BIP_TEST_WAL_BUDGET_BYTES);
+    BIP_CHECK("wal_budget: peak WAL stayed within one batch of the bound",
+              p->max_wal_bytes_seen <= BIP_TEST_WAL_BUDGET_BYTES +
+                  BIP_TEST_WAL_BATCH_SLACK);
+
+    char wal_path[336]; snprintf(wal_path, sizeof(wal_path), "%s-wal", db_path);
+    BIP_CHECK("wal_budget: final TRUNCATE still leaves WAL at 0",
+              bip_file_size(wal_path) == 0);
+
+    block_index_projection_close(p);
+    event_log_close(log);
+    bip_cleanup_dir(dir);
+done:
+    return *failures - start_failures;
+}
+
+struct wal_reader_arg {
+    block_index_projection_t *p;
+    uint8_t hash[32];
+    atomic_int stop;
+    atomic_uint_least64_t gets;
+};
+
+static void *wal_reader_main(void *user)
+{
+    struct wal_reader_arg *a = (struct wal_reader_arg *)user;
+    while (!atomic_load_explicit(&a->stop, memory_order_acquire)) {
+        struct disk_block_index got;
+        disk_block_index_init(&got);
+        (void)block_index_projection_get(a->p, a->hash, &got);
+        atomic_fetch_add_explicit(&a->gets, 1, memory_order_relaxed);
+    }
+    return NULL;
+}
+
+static int run_catch_up_wal_reader(int *failures)
+{
+    int start_failures = *failures;
+
+    char dir[256]; test_make_tmpdir(dir, sizeof(dir), "bip", "wal_reader");
+    char el_path[320]; snprintf(el_path, sizeof(el_path), "%s/log.bin", dir);
+    char db_path[320]; snprintf(db_path, sizeof(db_path), "%s/p.db", dir);
+
+    event_log_t *log = event_log_open(el_path);
+    if (!log) { *failures += 1; goto done; }
+
+    int n = 3 * BIP_BATCH_EVENTS;
+    BIP_CHECK("wal_reader: emit headers", emit_n_headers(log, 0xB000u, n));
+
+    block_index_projection_t *p = block_index_projection_open(db_path, log);
+    if (!p) { event_log_close(log); *failures += 1; goto done; }
+    p->wal_budget_bytes = BIP_TEST_WAL_BUDGET_BYTES;
+
+    struct wal_reader_arg arg;
+    memset(&arg, 0, sizeof(arg));
+    arg.p = p;
+    pthread_t th;
+    int th_rc = pthread_create(&th, NULL, wal_reader_main, &arg);
+    BIP_CHECK("wal_reader: reader thread starts", th_rc == 0);
+
+    int64_t t0 = 0;
+    {
+        struct timespec ts;
+        platform_time_monotonic_timespec(&ts);
+        t0 = (int64_t)ts.tv_sec * 1000 + (int64_t)ts.tv_nsec / 1000000;
+    }
+    uint64_t off = block_index_projection_catch_up(p);
+    {
+        struct timespec ts;
+        platform_time_monotonic_timespec(&ts);
+        int64_t elapsed = (int64_t)ts.tv_sec * 1000 +
+                          (int64_t)ts.tv_nsec / 1000000 - t0;
+        BIP_CHECK("wal_reader: catch_up did not block past 30s",
+                  elapsed < 30000);
+    }
+
+    atomic_store_explicit(&arg.stop, 1, memory_order_release);
+    if (th_rc == 0)
+        BIP_CHECK("wal_reader: reader joins", pthread_join(th, NULL) == 0);
+
+    BIP_CHECK("wal_reader: catch_up succeeds with a concurrent get()",
+              off != (uint64_t)-1);
+    BIP_CHECK("wal_reader: row count matches emitted headers",
+              block_index_projection_count(p) == (uint64_t)n);
+    BIP_CHECK("wal_reader: mid-run PASSIVE checkpoints still fired",
+              p->wal_passive_checkpoints >= 2);
+    BIP_CHECK("wal_reader: peak WAL stayed within one batch of the bound",
+              p->max_wal_bytes_seen <= BIP_TEST_WAL_BUDGET_BYTES +
+                  BIP_TEST_WAL_BATCH_SLACK);
+
+    char wal_path[336]; snprintf(wal_path, sizeof(wal_path), "%s-wal", db_path);
+    BIP_CHECK("wal_reader: final TRUNCATE still leaves WAL at 0",
+              bip_file_size(wal_path) == 0);
+
+    block_index_projection_close(p);
+    event_log_close(log);
+    bip_cleanup_dir(dir);
+done:
+    return *failures - start_failures;
+}
+
 int test_block_index_projection(void)
 {
     printf("\n=== block_index_projection tests ===\n");
@@ -878,6 +1031,8 @@ int test_block_index_projection(void)
     run_resume_from_partial(&failures);
     run_collision_accounting_cached_stmt(&failures);
     run_bound_dirty_delta(&failures);
+    run_catch_up_wal_budget(&failures);
+    run_catch_up_wal_reader(&failures);
 
     printf("block_index_projection: %d failures\n", failures);
     return failures;

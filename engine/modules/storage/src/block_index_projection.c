@@ -33,6 +33,7 @@
 #include "util/log_macros.h"
 #include "util/safe_alloc.h"
 #include "crypto/sha3.h"
+#include "platform/file_metadata.h"
 #include <inttypes.h>
 #include <pthread.h>
 #include <sqlite3.h>
@@ -242,6 +243,7 @@ block_index_projection_t *block_index_projection_open(const char *path,
     pthread_mutex_init(&p->mu, NULL);
     snprintf(p->path, sizeof(p->path), "%s", path);
     p->opened_at = wall_now_s();
+    p->wal_budget_bytes = BIP_WAL_BUDGET_BYTES;
 
     /* Restore cursor + counters from prior session. */
     p->last_consumed_offset    = meta_get_u64(db, "last_consumed_offset", 0);
@@ -294,6 +296,55 @@ bool batch_begin(struct catch_up_ctx *c)
     return true;
 }
 
+static uint64_t wal_file_bytes(const char *db_path)
+{
+    char wal_path[sizeof(((block_index_projection_t *)0)->path) + 8];
+    int n = snprintf(wal_path, sizeof(wal_path), "%s-wal", db_path);
+    if (n <= 0 || (size_t)n >= sizeof(wal_path))
+        return 0;
+    struct platform_file_metadata metadata;
+    if (platform_file_metadata_read(wal_path, &metadata) !=
+            PLATFORM_FILE_METADATA_OK)
+        return 0;
+    return metadata.size;
+}
+
+/* PASSIVE never waits. BUSY or a partial drain is logged and the already-
+ * committed batch stands; the next batch boundary (or the final TRUNCATE)
+ * tries again. */
+static void maybe_checkpoint_wal_budget(struct catch_up_ctx *c)
+{
+    if (c->ins_stmt) sqlite3_reset(c->ins_stmt);
+    if (c->exists_stmt) sqlite3_reset(c->exists_stmt);
+    if (c->blob_stmt) sqlite3_reset(c->blob_stmt);
+    if (c->dirty_stmt) sqlite3_reset(c->dirty_stmt);
+
+    uint64_t wal_bytes = wal_file_bytes(c->p->path);
+    if (wal_bytes > c->p->max_wal_bytes_seen)
+        c->p->max_wal_bytes_seen = wal_bytes;
+    if (wal_bytes <= c->p->wal_budget_bytes)
+        return;
+
+    int log_frames = 0;
+    int ckpt_frames = 0;
+    int rc = sqlite3_wal_checkpoint_v2(  // raw-sql-ok:kernel-primitive
+        c->p->db, NULL, SQLITE_CHECKPOINT_PASSIVE,
+        &log_frames, &ckpt_frames);
+    c->p->wal_passive_checkpoints++;
+    if (rc == SQLITE_BUSY ||
+        (rc == SQLITE_OK && log_frames > 0 && ckpt_frames < log_frames)) {
+        fprintf(stderr,  // obs-ok:block-index-projection-lifecycle
+                "[block_index_projection] mid-catch-up PASSIVE checkpoint "
+                "partial rc=%d log_frames=%d ckpt_frames=%d wal_bytes=%"
+                PRIu64 "\n",
+                rc, log_frames, ckpt_frames, wal_bytes);
+    } else if (rc != SQLITE_OK) {
+        fprintf(stderr,  // obs-ok:block-index-projection-lifecycle
+                "[block_index_projection] mid-catch-up PASSIVE checkpoint "
+                "rc=%d (%s)\n", rc, sqlite3_errstr(rc));
+    }
+}
+
 bool batch_commit(struct catch_up_ctx *c)
 {
     /* Persist the cursor + counters inside the same txn. */
@@ -323,6 +374,7 @@ bool batch_commit(struct catch_up_ctx *c)
     c->total_consumed               += c->batch_count;
     c->batch_count                   = 0;
     c->collisions                    = 0;
+    maybe_checkpoint_wal_budget(c);
     return true;
 }
 
