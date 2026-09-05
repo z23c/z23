@@ -4224,10 +4224,14 @@ static bool proof_worker_body(const struct proof_paths *paths,
         proof_phase_mark(phases, "dimension_lint_and_test");
     }
 
-    if (!worktree_exact(generation, local, false, why, why_len) ||
-        !zcl_dev_source_cas_capture(generation, &source_after) ||
-        !source_after.cas_present ||
-        strcmp(source_before.cas_root_sha3, source_after.cas_root_sha3) != 0) {
+    if (!worktree_exact(generation, local, false, why, why_len))
+        return false;
+    if (!zcl_dev_source_cas_capture(generation, &source_after) ||
+        !source_after.cas_present) {
+        proof_why(why, why_len, "source_cas_recapture_failed");
+        return false;
+    }
+    if (strcmp(source_before.cas_root_sha3, source_after.cas_root_sha3) != 0) {
         proof_why(why, why_len, "source_epoch_superseded");
         return false;
     }
