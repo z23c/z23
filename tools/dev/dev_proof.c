@@ -3011,11 +3011,14 @@ static bool generation_prepare(const struct proof_paths *paths,
         "vendor/tor/src/ext/ed25519/ref10/libed25519_ref10.a",
         "vendor/tor/src/ext/keccak-tiny/libkeccak-tiny.a",
         "build/githooks", "build/bin/z23-git-hook",
+#if defined(__linux__)
         /* Order-only test-binary prerequisites that no admitted executable
          * links against: the rollback group dlopens these fixture images by
-         * name, so an exact generation without them cannot run the group. */
+         * name on Linux. Other hosts report fixture_required=false, matching
+         * the Makefile's Linux-only prerequisites. */
         "build/hotswap/zcl_rollback_fixture_a.so",
         "build/hotswap/zcl_rollback_fixture_b.so",
+#endif
     };
     char build_dir[PATH_MAX], bin_dir[PATH_MAX];
     if (snprintf(build_dir, sizeof(build_dir), "%s/build", generation) >=
