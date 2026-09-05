@@ -43,8 +43,8 @@ validation; kinds PROBLEM, NEED, OFFER, CLAIM, RESULT, NOTE, WIKI) is the one
 evidence store that is both read by C23 and replicated between nodes. Gate
 verdicts and proof receipts are C23-native and measured. Experiment rows
 (`~/.local/state/zclassic23/experiments/rows.tsv`) have no C23 reader on
-`main`; review ref fleetobserve7 adds `tools/dev/fleet_observe.c` and
-`engine/composition/fleet_facts.def` as the first reader. Review ref
+`main`; review ref fleetobserve7 adds `tools/dev/fleet_observe.c` and <!-- doc-path-ok: ZRC-0008 design target, not yet in the tree -->
+`engine/composition/fleet_facts.def` as the first reader. Review ref <!-- doc-path-ok: ZRC-0008 design target, not yet in the tree -->
 orientfacts adds verified fact rows behind `dev agent orient`.
 [`0004-wiki-daily-board-public-page.md`](0004-wiki-daily-board-public-page.md)
 designs the wiki and the privacy-gated public page; the page half is unbuilt.
@@ -58,7 +58,7 @@ can be read as if the step were done. This ZRC names the missing graph.
 
 ### 1. Passage registry
 
-A passage registry `engine/composition/passage_registry.def` in the
+A passage registry `engine/composition/passage_registry.def` in the <!-- doc-path-ok: ZRC-0008 design target, not yet in the tree -->
 condition-registry shape: passage name, the process it belongs to (landing,
 proving, deploying, joining, verifying, delegating), entry predicates, exit
 predicates, the evidence kinds that can witness each predicate, and the next
@@ -147,7 +147,7 @@ layer.
 Typed refusals:
 
 - `story_passage_unknown` — the named passage is not a row in
-  `engine/composition/passage_registry.def`
+  `engine/composition/passage_registry.def` <!-- doc-path-ok: ZRC-0008 design target, not yet in the tree -->
 - `story_evidence_missing` — a cited evidence row is not in the fact store
 - `story_absence_is_not_proof` — a predicate was going to be treated as true
   because no row spoke to it
@@ -159,7 +159,7 @@ Typed refusals:
 Gates:
 
 - A lint gate: every process step named in `docs/agent/*.md` has a passage
-  row in `engine/composition/passage_registry.def`.
+  row in `engine/composition/passage_registry.def`. <!-- doc-path-ok: ZRC-0008 design target, not yet in the tree -->
 - A test: a deduction with only RUMOUR evidence is reported as a rumour,
   never as a claim, a statistic, or a measurement.
 
