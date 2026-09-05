@@ -125,3 +125,62 @@ Every delegated task is a ledger row: model, thinking
 level, tokens, wall time, outcome, lines changed.
 Heuristics about executors are derived from the ledger,
 never from impressions.
+
+## 2026-09-05 (later) — deploys, limits, and the join test
+
+A fresh landing or train worktree cannot prove until
+`make dev-bin` has written `build/dev-loop/restart.env`.
+`tools/dev/dev_proof.c` `proof_plan_roots()` reads that file
+from the worktree root; the refusal used to be the unnamed
+`proof_toolchain_or_policy_unavailable` (the unit
+`proofmsg` names it). After any failed attempt, also delete
+`.cache/zcl-dev-proof/<tip>-<base>.failed`: the verdict is
+cached per `(tip, base)`, and the closure digest ignores
+untracked archives.
+
+`tools/ship.sh` refuses a dirty tree. "Dirty" includes one
+untracked or gitignored stray entry in the repository root
+(a `.gate_launch_1.out`, an empty `examples/` directory);
+`check-no-stray-root-files` is part of its gate. The gate is
+`make lint` plus the full `make test-parallel` on the
+shipping box, banked per source id under `~/.cache/zcl-ship`.
+The push-hook receipt does not count. The rollback commit
+comes from `ZCL_AGENT_EXPECT_BUILD_COMMIT` in the RUNNING
+daemon's `/proc` environ on the target.
+`ZCL_SHIP_ACCEPT_ONE_WAY_SCHEMA=1` is inert unless the
+schema code changed since that commit; when it did, it
+disarms rollback. Wrap the run in `ulimit -s unlimited` and
+a transient `systemd-run --user` unit so a shell timeout
+cannot kill it.
+
+Rebasing a train that took `--ours` for
+`docs/CODEBASE_MAP.md` drops the other side's DOC-COUNTS
+increment. `check-doc-counts` then fails with
+`test_groups MISMATCH — code=N doc-says=N-1`. Fix the
+`test_groups:` line in the DOC-COUNTS block, never the code.
+
+`build/bin/zclassic23 msg_send <peer_id> "text"` failed for
+every peer because `engine/modules/rpc/src/client.c`'s
+`convert_table` had no `{ "msg_send", 0 }` row: the peer id
+went over the wire as a JSON string and `json_get_int()`
+(`platform/modules/json/src/json.c:249`) returns 0 for a
+string, so the node looked up peer 0. Raw JSON-RPC with a
+numeric id always worked. Any fail-open integer read of a
+string parameter has the same shape.
+
+`engine/conditions/src/peer_floor_violated.c` answered
+"too few healthy OUTBOUND peers" by dropping every inbound
+peer beyond two (loop near line 129). Dropping inbound
+cannot raise the outbound count, so the condition never
+cleared and it starved legitimate joiners: node1's public
+node shed 11 inbound peers in one remedy, and a fleet node
+stayed in `version_sent` until rotated out. A remedy must
+act on the quantity the condition measures.
+
+The Claude session limit (HTTP 429
+`session limit · resets 6pm (UTC)`) kills every Opus/Sonnet
+subagent on its next call at once. Their worktrees keep the
+uncommitted work and each agent resumes from its transcript
+when messaged again; launched shell pipelines, Grok jobs,
+and Codex keep running. Put landings and deploys in
+transient units with logs before the limit can hit.
