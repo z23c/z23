@@ -7,11 +7,23 @@
  * every bundle it installs goes through the installer's checkpoint and
  * Sapling-root re-derivation, exactly as an operator-seeded bundle does. */
 
+// supervisor-ok:bounded-offer-fetch — the one thread here is a single joined
+// download, not a resident service: it is started only when the store has
+// chosen an offer, at most one exists at a time, the next tick joins it before
+// starting another, and shutdown joins it too. It has no loop to wedge in — it
+// runs the ROM fetch path once and returns — and the transport's own connect
+// and receive windows bound a silent peer. Its progress is visible while it
+// runs through the state_offer status row (chunks and bytes landed), so a slow
+// or stalled transfer is observable rather than a quiet gap.
+
 #include "config/state_offer_service.h"
 
 #include "config/consensus_state_install_runtime.h"
 #include "config/consensus_state_snapshot_install.h"
 #include "config/state_offer_store.h"
+#include "conditions/stale_offers_only.h"
+
+#include "platform/time_compat.h"
 
 #include "chain/mmb.h"
 #include "jobs/reducer_frontier.h"
@@ -28,7 +40,6 @@
 #include <pthread.h>
 #include <stdio.h>
 #include <string.h>
-#include <time.h>
 
 #define SOSVC_SUBSYS "state_offer"
 
@@ -67,19 +78,17 @@ static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_t g_fetch_thread;
 static bool g_fetch_running;
 static bool g_fetch_started;
+static bool g_fallback_raised;
 static struct state_offer_record g_fetch_target;
 
 static int64_t sosvc_now_unix(void)
 {
-    return (int64_t)time(NULL);
+    return (int64_t)platform_time_wall_time_t();
 }
 
 static int64_t sosvc_now_ms(void)
 {
-    struct timespec ts;
-    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0)
-        return 0;
-    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+    return platform_time_monotonic_ms();
 }
 
 /* This node's MMB peaks digest at its own tip — the accumulator a phase-2
@@ -407,6 +416,7 @@ void state_offer_service_start(const char *datadir, struct node_db *ndb)
     g_artifact_count = 0;
     g_fetch_started = false;
     g_fetch_running = false;
+    g_fallback_raised = false;
 
     uint8_t pubkey[32];
     char err[160];
@@ -450,7 +460,25 @@ void state_offer_service_tick(void)
     }
 
     struct state_offer_record chosen;
-    if (state_offer_store_decide(now_ms, &chosen) != STATE_OFFER_DECIDE_FETCH)
+    enum state_offer_decision decision =
+        state_offer_store_decide(now_ms, &chosen);
+    if (decision == STATE_OFFER_DECIDE_FALL_BACK && !g_fallback_raised) {
+        /* Raised ONCE, the moment the wait closes: the node is folding forward
+         * from whatever it has, and an operator is entitled to read why and
+         * how stale their peers were rather than infer it from a silent
+         * genesis fold. The condition owns the clear. */
+        g_fallback_raised = true;
+        struct state_offer_store_status st;
+        state_offer_store_status_get(&st);
+        struct stale_offers_only_facts f = {
+            .newest_height_seen = st.newest_height_seen,
+            .peers_offering = st.peers_offering,
+            .offers_seen = st.offers_seen,
+            .baseline_hstar = reducer_frontier_provable_tip_cached(),
+        };
+        stale_offers_only_raise(&f);
+    }
+    if (decision != STATE_OFFER_DECIDE_FETCH)
         return;
 
     g_fetch_target = chosen;
