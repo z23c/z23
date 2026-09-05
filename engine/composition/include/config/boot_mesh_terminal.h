@@ -1,18 +1,27 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
- * purpose: Authenticated confined-terminal lane on zpkgswm ("ZMTERM").
+ * purpose: Authenticated confined-terminal service on the mesh stream
+ * primitive.
  *
- * The mesh terminal protocol multiplexes on the same frozen "zpkgswm" P2P
- * message as mesh status, with its own "ZMTERM" prefix: no new wire
- * message, no listener, no port. It inherits the established Noise
- * session, the onion path, and connman session management. An OPEN frame
- * (a mesh_terminal_open_v1 binding the live session, the pairing, and a
- * 60-second answer window) is answered with a signed
- * mesh_terminal_receipt_v1 — OK carrying the granted session bounds, or a
- * named refusal — only when the session is an established Noise session
- * bound to a live ZID delegation whose pairing row carries the commit-time
- * MESH_PAIRING_CAP_TERMINAL_EXEC capability. Anything less is dropped
- * quietly or refused by name; responder key material never crosses an
- * unauthenticated channel.
+ * The terminal is a service on mesh_stream (config/mesh_stream.h): it
+ * registers the name "terminal" and receives open/data/close/tick for
+ * every stream of that name, whichever side opened it. The stream
+ * primitive owns the wire framing, the one session table both sides
+ * share, the credit window, the per-peer cap, and the single drain, so
+ * this lane carries no prefix parser, no session table and no pump of its
+ * own. Streams ride the same frozen "zpkgswm" P2P message as mesh status:
+ * no new wire message, no listener, no port, and the established Noise
+ * session, the onion path and connman session management are inherited.
+ *
+ * A stream OPEN carries a mesh_terminal_open_v1 (binding the live session,
+ * the pairing, and a 60-second answer window) and is answered with a
+ * signed mesh_terminal_receipt_v1 — OK carrying the granted session
+ * bounds as the stream's first DATA, or a named refusal riding the CLOSE
+ * — only when the session is an established Noise session bound to a live
+ * ZID delegation whose pairing row carries the commit-time
+ * MESH_PAIRING_CAP_TERMINAL_EXEC capability. That same capability is what
+ * the stream primitive demands of the peer's pairing row before an OPEN
+ * ever reaches this lane. Anything less is dropped quietly or refused by
+ * name; responder key material never crosses an unauthenticated channel.
  *
  * An OK receipt opens one confined terminal worker (mesh_terminal_worker):
  * the granted shell on a PTY inside the terminal-worker sandbox profile,
@@ -44,19 +53,28 @@ struct p2p_node;
 struct rpc_table;
 struct vcs_zcode_dht_delegation;
 
-#define MESH_TERMINAL_FRAME_PREFIX "ZMTERM"
-#define MESH_TERMINAL_FRAME_PREFIX_LEN 6u
-#define MESH_TERMINAL_FRAME_KIND_OPEN 0x01u
-#define MESH_TERMINAL_FRAME_KIND_RECEIPT 0x02u
-#define MESH_TERMINAL_FRAME_KIND_DATA 0x03u
-#define MESH_TERMINAL_FRAME_KIND_RESIZE 0x04u
-#define MESH_TERMINAL_FRAME_KIND_CLOSE 0x05u
-#define MESH_TERMINAL_FRAME_MAX                              \
-    (MESH_TERMINAL_FRAME_PREFIX_LEN + 1u +                   \
-     (MESH_TERMINAL_RECEIPT_V1_MAX_WIRE_BYTES >              \
-              MESH_TERMINAL_DATA_V1_MAX_WIRE_BYTES           \
-          ? MESH_TERMINAL_RECEIPT_V1_MAX_WIRE_BYTES          \
-          : MESH_TERMINAL_DATA_V1_MAX_WIRE_BYTES))
+/* The stream service name this lane registers. */
+#define MESH_TERMINAL_SERVICE_NAME "terminal"
+
+/* The lane's own message set, carried inside a stream DATA or CLOSE
+ * payload as one leading kind byte then the mesh_terminal_proto wire. A
+ * stream OPEN's payload is a mesh_terminal_open_v1 and carries no kind
+ * byte: an open is the only thing an open can be.
+ *
+ * RESIZE is a terminal-level message inside DATA, not a stream control
+ * frame: geometry is the terminal's business and the stream primitive has
+ * no opinion about it. RECEIPT rides DATA when the stream is live (the OK
+ * grant, the CLOSED evidence) and rides CLOSE when the open was refused
+ * and no stream exists to carry it. */
+#define MESH_TERMINAL_MSG_RECEIPT 0x01u
+#define MESH_TERMINAL_MSG_DATA 0x02u
+#define MESH_TERMINAL_MSG_RESIZE 0x03u
+#define MESH_TERMINAL_MSG_CLOSE 0x04u
+#define MESH_TERMINAL_MSG_MAX                                \
+    (1u + (MESH_TERMINAL_RECEIPT_V1_MAX_WIRE_BYTES >         \
+                   MESH_TERMINAL_DATA_V1_MAX_WIRE_BYTES      \
+               ? MESH_TERMINAL_RECEIPT_V1_MAX_WIRE_BYTES     \
+               : MESH_TERMINAL_DATA_V1_MAX_WIRE_BYTES))
 
 /* Responder-side session policy. These are the node's OWN ceilings — the
  * OK receipt's capsule states exactly these bounds and the worker enforces
@@ -67,8 +85,10 @@ struct vcs_zcode_dht_delegation;
 #define MESH_TERMINAL_SERVICE_MAX_BYTES_IN UINT64_C(65536)
 #define MESH_TERMINAL_SERVICE_MAX_BYTES_OUT UINT64_C(1048576)
 
-/* Bounded session table: four concurrent confined terminals per node. A
- * fifth concurrent OPEN is refused with CONCURRENCY_LIMIT, never queued. */
+/* Four concurrent confined terminals per node. A fifth concurrent OPEN is
+ * refused with CONCURRENCY_LIMIT, never queued. The streams themselves
+ * live in the stream table; this is the lane's own ceiling on how many of
+ * them may hold a live confined worker. */
 #define MESH_TERMINAL_SESSIONS_MAX 4u
 
 /* Receipts are valid at most this long after observation; bounded well
@@ -78,23 +98,18 @@ struct vcs_zcode_dht_delegation;
 #define MESH_TERMINAL_OPEN_ADMIT_MS UINT64_C(30000)
 #define MESH_TERMINAL_OPEN_RATE_PER_SECOND 4u
 
-/* DATA frames the pump drains per live session per tick; leftover output
- * waits for the next tick, so a noisy shell is throttled, never unbounded.
- * With the 100 ms pump cadence this is ~640 KiB/s worst case per session,
- * far above interactive use and far under the 1 MiB lifetime byte cap. */
+/* DATA messages the stream drain moves per live session per tick;
+ * leftover output waits for the next tick, so a noisy shell is throttled,
+ * never unbounded. With the 100 ms drain cadence this is ~640 KiB/s worst
+ * case per session, far above interactive use and far under the 1 MiB
+ * lifetime byte cap — and the stream's credit window stops the sender
+ * dead when the requester has not read what it already has. */
 #define MESH_TERMINAL_PUMP_CHUNKS_PER_TICK 16
 
-/* msg_zcode_swarm_frame_fn adapter: returns true only when the ZMTERM
- * namespace matched and the frame was consumed (answered, pumped, or
- * dropped by policy). Unknown prefixes return false so later swarm
- * dispatchers see the frame unchanged. */
-bool boot_mesh_terminal_frame(struct msg_processor *mp, struct p2p_node *node,
-                              const uint8_t *payload, size_t payload_len,
-                              struct boot_svc_ctx *svc);
-
-/* Records the composition context and starts the supervised pump tick.
- * Shutdown kills every live session (census-verified), removes their
- * working directories, and unregisters the tick. */
+/* Records the composition context and registers the "terminal" stream
+ * service. Shutdown unregisters it, which ends every live stream: each
+ * one kills its worker (census-verified) and removes its working
+ * directory. */
 void boot_mesh_terminal_wire(struct boot_svc_ctx *svc);
 void boot_mesh_terminal_shutdown(void);
 
@@ -262,17 +277,19 @@ bool boot_mesh_terminal_test_open_admit(
     const struct mesh_terminal_open_v1 *open,
     const struct noise_transport_snapshot *session, uint64_t now_mono_ms);
 
-/* Test seam: reserve one client session directly, bypassing the send path
- * (which needs a live composition context). The open's own binding fields
- * must be real — the watchdogs and every ingress path verify against
- * them. opened/last_activity 0 means "now". */
+/* Test seam: reserve one requester stream and its session directly,
+ * bypassing the send path (which needs a live composition context). The
+ * open's own binding fields must be real — the watchdogs and every
+ * ingress path verify against them. opened/last_activity 0 means "now".
+ * The stream id is returned so a test can address the exact stream the
+ * wire would. */
 bool boot_mesh_terminal_client_test_inject(
     const struct mesh_terminal_open_v1 *open,
     const uint8_t expected_responder_master[32],
     const uint8_t expected_responder_online[32],
     const uint8_t peer_noise_static[32], const char *pairing_id_hex,
     uint64_t opened_unix, uint64_t last_activity_unix, bool open_confirmed,
-    uint8_t terminal_id_out[32]);
+    uint8_t terminal_id_out[32], uint64_t *stream_id_out);
 void boot_mesh_terminal_client_test_reset(void);
 #endif
 

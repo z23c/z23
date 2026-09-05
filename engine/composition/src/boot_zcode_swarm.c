@@ -8,6 +8,7 @@
 #include "config/boot_fleet_board.h"
 #include "config/boot_mesh_status.h"
 #include "config/boot_mesh_terminal.h"
+#include "config/mesh_stream.h"
 #include "config/runtime.h"
 #include "config/boot_zcode_async_proof.h"
 #include "config/boot_zcode_work_perf.h"
@@ -540,10 +541,13 @@ bool boot_zcode_swarm_frame(struct msg_processor *mp, struct p2p_node *node,
      * board leg answers before swarm hosting is even considered. */
     if (boot_fleet_board_frame(mp, node, payload, payload_len, ctx))
         return true;
-    /* Confined mesh terminal: same reasoning — its OPENs are answered on
-     * the pairing authority alone, never gated on swarm hosting. */
-    if (boot_mesh_terminal_frame(mp, node, payload, payload_len,
-                                 (struct boot_svc_ctx *)ctx))
+    /* Multiplexed streams (the confined terminal among them): one lookup
+     * by service name inside the primitive replaces what used to be a
+     * per-service link in this chain. Same reasoning as mesh status — a
+     * stream's OPEN is answered on the pairing authority alone, never
+     * gated on swarm hosting. */
+    if (mesh_stream_frame(mp, node, payload, payload_len,
+                          (struct boot_svc_ctx *)ctx))
         return true;
     boot_zcode_swarm_lock();
     struct vcs_swarm_engine *engine =
@@ -831,6 +835,7 @@ void boot_zcode_swarm_wire(struct boot_svc_ctx *svc)
     s_svc = svc;
     boot_mesh_status_wire(svc);
     boot_fleet_board_wire(svc);
+    mesh_stream_wire(svc);
     boot_mesh_terminal_wire(svc);
     liveness_contract_init(&s_timer_contract, "net.zcode_swarm");
     s_timer_contract.on_tick = boot_zcode_swarm_timer_tick;
@@ -861,6 +866,7 @@ void boot_zcode_swarm_shutdown(void)
     boot_mesh_status_shutdown();
     boot_fleet_board_shutdown();
     boot_mesh_terminal_shutdown();
+    mesh_stream_shutdown();
     boot_zcode_swarm_lock();
     s_svc = NULL;
     vcs_swarm_engine_set_global(NULL);
