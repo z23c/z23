@@ -630,6 +630,31 @@ static int pre_push(void)
     return 0;
 }
 
+#if !defined(_WIN32)
+/* True only where a resident proof watcher was armed on purpose before: the
+ * watcher itself writes <root>/.cache/zcl-dev-watch.lock (format "<pid>
+ * <mode> starting|ready proofq1") the moment a developer runs `dev loop
+ * ensure` or `dev proof ensure` in that worktree. A dead pid in the lock is
+ * fine -- re-arming a previously armed worktree is exactly the point. This
+ * is a presence check only; it never parses or trusts the lock contents. */
+static bool resident_armed(const char *root)
+{
+    char lock[PATH_MAX];
+    int n = snprintf(lock, sizeof(lock), "%s/.cache/zcl-dev-watch.lock", root);
+    if (n <= 0 || (size_t)n >= sizeof(lock)) return false;
+    return access(lock, F_OK) == 0;
+}
+#endif
+
+/* A hook never arms a resident the user did not arm; it only re-arms one.
+ * post-commit / post-checkout / post-merge run in every worktree on every
+ * commit, including a dozen unattended agent worktrees on a fleet box --
+ * forking a full proof watcher there on every rebase, unconditionally,
+ * armed strays nobody asked for (17 in one box at once, load 96). So this
+ * only forks the watcher where <root>/.cache/zcl-dev-watch.lock already
+ * exists, i.e. where a developer previously started one on purpose; a
+ * worktree that never ran `dev loop ensure` / `dev proof ensure` stays
+ * quiet forever. */
 static int notify_proof(void)
 {
 #if defined(_WIN32)
@@ -642,6 +667,7 @@ static int notify_proof(void)
 #else
     char root[PATH_MAX], binary[PATH_MAX];
     if (!repo_root(root)) return 0;
+    if (!resident_armed(root)) return 0;
     int n = snprintf(binary, sizeof(binary), "%s/build/bin/z23-dev", root);
     if (n <= 0 || (size_t)n >= sizeof(binary))
         return 0;
@@ -883,12 +909,86 @@ static int selftest(void)
                                             why, sizeof(why)) &&
             strcmp(why, ZCL_DEV_PROOF_SIGNER_WHY_UNSIGNED) == 0))
         return 1;
+#if !defined(_WIN32)
+    /* resident_armed(): a hook only re-arms a resident watcher where one was
+     * armed on purpose before (a lock file the watcher itself wrote). Prove
+     * the three cases directly against the predicate. */
+    {
+        char fixture_dir[PATH_MAX];
+        int fdn = snprintf(fixture_dir, sizeof(fixture_dir),
+                           "/tmp/z23-git-hook-armed-%ld", (long)getpid());
+        if (fdn <= 0 || (size_t)fdn >= sizeof(fixture_dir)) return 1;
+        if (mkdir(fixture_dir, 0700) != 0 && errno != EEXIST) return 1;
+        if (resident_armed(fixture_dir)) {
+            (void)fprintf(stderr,
+                          "git-hook-selftest: FAIL case=unarmed-worktree "
+                          "— resident_armed() true with no lock file\n");
+            (void)rmdir(fixture_dir);
+            return 1;
+        }
+        char cache_dir[PATH_MAX];
+        int cn = snprintf(cache_dir, sizeof(cache_dir), "%s/.cache",
+                          fixture_dir);
+        if (cn <= 0 || (size_t)cn >= sizeof(cache_dir) ||
+            (mkdir(cache_dir, 0700) != 0 && errno != EEXIST)) {
+            (void)rmdir(fixture_dir);
+            return 1;
+        }
+        char lock_path[PATH_MAX];
+        int ln = snprintf(lock_path, sizeof(lock_path),
+                          "%s/zcl-dev-watch.lock", cache_dir);
+        if (ln <= 0 || (size_t)ln >= sizeof(lock_path)) {
+            (void)rmdir(cache_dir);
+            (void)rmdir(fixture_dir);
+            return 1;
+        }
+        int lock_fd = open(lock_path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+        if (lock_fd < 0) {
+            (void)rmdir(cache_dir);
+            (void)rmdir(fixture_dir);
+            return 1;
+        }
+        /* A dead pid is fine -- re-arming a previously armed worktree is
+         * exactly the point; resident_armed() checks presence, not the pid. */
+        static const char dead_pid_lock[] = "999999 loop ready proofq1\n";
+        ssize_t wrote = write(lock_fd, dead_pid_lock,
+                              sizeof(dead_pid_lock) - 1);
+        (void)close(lock_fd);
+        if (wrote != (ssize_t)(sizeof(dead_pid_lock) - 1)) {
+            (void)unlink(lock_path);
+            (void)rmdir(cache_dir);
+            (void)rmdir(fixture_dir);
+            return 1;
+        }
+        bool armed_with_lock = resident_armed(fixture_dir);
+        (void)unlink(lock_path);
+        (void)rmdir(cache_dir);
+        (void)rmdir(fixture_dir);
+        if (!armed_with_lock) {
+            (void)fprintf(stderr,
+                          "git-hook-selftest: FAIL case=armed-worktree "
+                          "— resident_armed() false with a dead-pid lock "
+                          "present\n");
+            return 1;
+        }
+        char overlong_root[PATH_MAX + 32];
+        memset(overlong_root, 'a', sizeof(overlong_root) - 1);
+        overlong_root[sizeof(overlong_root) - 1] = 0;
+        if (resident_armed(overlong_root)) {
+            (void)fprintf(stderr,
+                          "git-hook-selftest: FAIL case=overlong-root "
+                          "— resident_armed() true on an over-long root "
+                          "path\n");
+            return 1;
+        }
+    }
+#endif
     zcl_log_level_set(restore_level);
     (void)printf("git-hook-selftest: PASS checks=1000 p95_us=%llu "
                  "tamper_refused=true incomplete_refused=true "
                  "hollow_refused=true stale_refused=true "
                  "signature_refused=true unsigned_refused=true "
-                 "child_processes=0\n",
+                 "child_processes=0 resident_armed_checked=true\n",
                  (unsigned long long)(samples[949] / 1000u));
     return samples[949] < 250000000u ? 0 : 1;
 }

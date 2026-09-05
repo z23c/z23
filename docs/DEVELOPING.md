@@ -567,7 +567,12 @@ build/bin/z23-dev dev proof wait
 ```
 
 `dev.proof.ensure` is idempotent and normally runs from `post-commit`,
-`post-merge`, or `post-checkout`. It binds the local commit and advertised
+`post-merge`, or `post-checkout` -- but only to re-arm a resident proof
+watcher that was already armed on purpose in that worktree (it checks for
+`<root>/.cache/zcl-dev-watch.lock`, written by `dev loop ensure` / `dev proof
+ensure` themselves). A worktree that never ran one of those commands stays
+quiet on every commit; a hook never arms a resident the user did not arm. It
+binds the local commit and advertised
 remote base to exact source/CAS and mutation roots, changed-set and impact
 policy, compiler/flags/environment/build graph, and complete generated,
 compile, lint, and test accounting. A missing, stale, incomplete, skipped, or
