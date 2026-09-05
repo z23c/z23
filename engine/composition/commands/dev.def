@@ -962,7 +962,7 @@ ZCL_COMMAND_DEV_READ(
  * `truth` is the per-lane inventory; `start` is the whole fleet in one
  * bounded packet for the session that dispatches lanes. */
 ZCL_COMMAND_BRANCH("dev.fleet", "dev",
-                   "Fleet truth, and the orchestrator's opening packet",
+                   "Fleet truth, the opening packet, and what is known",
                    ZCL_COMMAND_LAYER_DEV)
 
 ZCL_COMMAND_READY_READ(
@@ -1131,6 +1131,40 @@ ZCL_COMMAND_READY_COMMAND(
     ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
     ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_NONE,
     zcl_native_handle_dev_fleet_tunnel_deny)
+
+/* `know` is the same family read from the other side: `truth` and `start`
+ * observe this checkout, and `know` answers from the doctrine rows in
+ * engine/composition/fleet_facts.def, so no specialist has to re-derive the
+ * routing table or the trap list from prose. It hangs here rather than
+ * directly under `dev` because the `dev` branch menu is 3,045 bytes of its
+ * 3,072-byte contract budget and one more child overflows it; `z23 dev know`
+ * still resolves, through the alias. */
+ZCL_COMMAND_READY_READ(
+    "dev.fleet.know", "dev.fleet", "dev.know",
+    "Ask what the fleet knows about a subject before acting on it",
+    "Answers one subject from engine/composition/fleet_facts.def: which "
+    "executor handles which unit kind, what a train and a proof require, and "
+    "which proof-failure signature names which trap. Each row carries its "
+    "relation, its object, the context it holds in, the row's canonical root "
+    "as provenance, a confidence of doctrine or observed, and one sentence "
+    "saying why. relation and context are optional filters drawn from closed "
+    "vocabularies, and a value outside either is refused with the whole set "
+    "named rather than guessed at. A subject no row answers returns exactly "
+    "one row with confidence unknown, never an empty list. budget_bytes is "
+    "256..16384 and defaults to 4096; a reply cut by it reports truncated "
+    "with the full total, so no row is dropped silently. It reads this "
+    "table and nothing else: no file, no process, no node, no datadir.",
+    16384,
+    "know,facts,doctrine,executor,routing,trap,train,fleet,budget",
+    "zcl.dev_know_input.v1", "zcl.dev_know.v1",
+    "subject,relation,context,budget_bytes", "subject",
+    "z23 dev know --subject=sonnet",
+    ZCL_COMMAND_LAYER_DEV, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_LATENCY_INSTANT,
+    ZCL_COMMAND_COST_TINY, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_NONE,
+    ZCL_COMMAND_TRAIT_IDEMPOTENT | ZCL_COMMAND_TRAIT_DEV_ONLY,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_dev_know)
 
 /* ── dev.train ─────────────────────────────────────────────────────────────
  * Stacks lanes onto origin/main without waiting on lint. `build` fetches

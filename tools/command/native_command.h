@@ -2413,6 +2413,14 @@ void zcl_native_handle_dev_land(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
 
+/* dev.fleet.know, aliased `dev know` — the fleet fact table, asked by
+ * subject. It reads engine/composition/fleet_facts.def as an X-macro paste
+ * through cognition/modules/fleetfacts and touches nothing else: no file,
+ * no process, no node, no datadir. */
+void zcl_native_handle_dev_know(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
+
 /* dev.agent.* lane discipline — situation, rules, start, done, triage,
  * ceiling, pace, claim, outcomes. One handler per file under tools/command
  * (native_devagent_<leaf>.c) so each can be implemented and reviewed on its
