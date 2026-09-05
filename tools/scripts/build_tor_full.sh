@@ -35,9 +35,19 @@ HOST_OS="$(uname -s 2>/dev/null || echo unknown)"
 # unchanged.
 VENDOR_TARGET="${VENDOR_TARGET:-}"
 TOR_BUILD_DIR="$TOR_DIR"
+# Where configure lives. The host build configures the submodule IN TREE, so
+# vendor/tor gains a config.status; autoconf then REFUSES any out-of-tree
+# configure against that same source directory ("source directory already
+# configured; run make distclean there first"). A cross build must therefore
+# not use vendor/tor as its srcdir at all -- as written, `make tor-full`
+# followed by `make ZCL_TARGET=windows-x86_64 tor-full` died there, and
+# Windows silently kept the stub. It gets a clean export of the pinned commit
+# instead; see the cross block below.
+TOR_SRC_DIR="$TOR_DIR"
 VENDOR_ROOT_DIR="$ROOT/vendor"
 if [ -n "$VENDOR_TARGET" ]; then
     TOR_BUILD_DIR="$ROOT/vendor/cross/$VENDOR_TARGET/tor"
+    TOR_SRC_DIR="$ROOT/vendor/cross/$VENDOR_TARGET/tor-src"
     VENDOR_ROOT_DIR="$ROOT/vendor/cross/$VENDOR_TARGET"
 fi
 if [ "$HOST_OS" = "Darwin" ]; then
@@ -62,11 +72,34 @@ if [ -z "$expected" ] || [ "$actual" != "$expected" ]; then
     exit 3
 fi
 
+# A cross build gets its own CLEAN export of the pinned commit as srcdir.
+#
+# `git archive HEAD` writes exactly the tracked bytes at the pin -- no
+# config.status, no host objects, nothing the host build left behind -- so
+# autoconf's "source directory already configured" refusal cannot fire, and
+# the cross build cannot pick up a host artifact by accident. It is also the
+# only reason a Windows cross build works at all on a box that already ran
+# `make tor-full` for the host, which is every box that develops here.
+#
+# Re-exported only when the export is absent or its recorded pin differs, so
+# the ordinary rerun costs one file read.
+if [ -n "$VENDOR_TARGET" ]; then
+    pin="$(git -C "$TOR_DIR" rev-parse HEAD)"
+    if [ ! -f "$TOR_SRC_DIR/.zcl-tor-pin" ] ||
+       [ "$(cat "$TOR_SRC_DIR/.zcl-tor-pin" 2>/dev/null)" != "$pin" ]; then
+        echo "tor-full: exporting the pinned Tor source for $VENDOR_TARGET (clean srcdir; the host build configured vendor/tor in place)"
+        rm -rf "$TOR_SRC_DIR"
+        mkdir -p "$TOR_SRC_DIR"
+        git -C "$TOR_DIR" archive --format=tar HEAD | tar -x -C "$TOR_SRC_DIR"
+        printf '%s\n' "$pin" > "$TOR_SRC_DIR/.zcl-tor-pin"
+    fi
+fi
+
 # Tor does not track its generated ./configure (vendor/tor/.gitignore names
 # /configure), so a fresh checkout must run autogen.sh. That needs the autotools
 # on every host, macOS included; say so by name instead of letting autoreconf
 # fail with a message that does not identify what is missing.
-if [ ! -x "$TOR_DIR/configure" ]; then
+if [ ! -x "$TOR_SRC_DIR/configure" ]; then
     missing=""
     for tool in autoconf automake aclocal autoheader; do
         command -v "$tool" >/dev/null 2>&1 || missing="$missing $tool"
@@ -78,12 +111,12 @@ if [ ! -x "$TOR_DIR/configure" ]; then
         missing="$missing libtoolize(glibtoolize)"
     fi
     if [ -n "$missing" ]; then
-        echo "tor-full: vendor/tor ships no generated ./configure, so autogen.sh must run," >&2
+        echo "tor-full: ${TOR_SRC_DIR#"$ROOT"/} ships no generated ./configure, so autogen.sh must run," >&2
         echo "tor-full: but these autotools are absent:$missing" >&2
         echo "tor-full: install autoconf, automake and libtool for this host, then rerun." >&2
         exit 4
     fi
-    (cd "$TOR_DIR" && ./autogen.sh)
+    (cd "$TOR_SRC_DIR" && ./autogen.sh)
 fi
 
 # Compile Tor against the SAME OpenSSL the node links, not the host's.
@@ -250,7 +283,7 @@ if [ "$configured" != true ]; then
     (cd "$TOR_BUILD_DIR" && \
         ac_cv_lib_cap_cap_init=no ac_cv_func_cap_set_proc=no \
         env ${tor_cross_env[@]+"${tor_cross_env[@]}"} \
-        "$TOR_DIR/configure" "${configure_opts[@]}")
+        "$TOR_SRC_DIR/configure" "${configure_opts[@]}")
 fi
 
 jobs="${ZCL_TOR_JOBS:-$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)}"
