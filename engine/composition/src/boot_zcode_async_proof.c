@@ -112,7 +112,27 @@ static bool async_proof_rpc_run(
                   reply.exit_code == ZCL_COMMAND_EXIT_OK;
     (void)json_push_kv_bool(result, "ok", passed);
     if (passed) {
-        (void)json_push_kv(result, "data", &reply.data);
+        struct json_value next;
+        json_init(&next); json_set_array(&next);
+        bool rendered = json_push_kv(result, "data", &reply.data);
+        for (size_t i = 0; rendered && i < reply.next_count; i++) {
+            struct json_value item;
+            json_init(&item); json_set_object(&item);
+            rendered = json_push_kv_str(&item, "command", reply.next[i].command) &&
+                json_push_kv_str(&item, "input_json", reply.next[i].input_json) &&
+                json_push_kv_str(&item, "reason", reply.next[i].reason) &&
+                json_push_back(&next, &item);
+            json_free(&item);
+        }
+        rendered = rendered && json_push_kv(result, "next", &next);
+        json_free(&next);
+        if (!rendered) {
+            json_free(result); json_set_object(result);
+            (void)json_push_kv_bool(result, "ok", false);
+            (void)json_push_kv_str(result, "code", "LIVE_REPLY_RENDER_FAILED");
+            (void)json_push_kv_str(result, "message",
+                                   "the exact command continuation could not be serialized");
+        }
     } else {
         (void)json_push_kv_str(result, "code",
                                reply.error.code[0] ? reply.error.code :
@@ -176,6 +196,9 @@ ASYNC_OWNED_WORK_RPC(async_proof_rpc_work_status, "zcode_work_status",
 ASYNC_OWNED_WORK_RPC(async_proof_rpc_work_accept, "zcode_work_accept",
     "zcl.zcode_work_accept.v1", zcl_native_handle_zcode_work_accept,
     "WORK_ACCEPT_FAILED", "accept")
+ASYNC_OWNED_WORK_RPC(async_proof_rpc_work_publish, "zcode_work_publish",
+    "zcl.zcode_work_publish.v1", zcl_native_handle_zcode_work_publish,
+    "WORK_PUBLISH_FAILED", "publish")
 ASYNC_OWNED_WORK_RPC(async_proof_rpc_release_confirm,
     "zcode_work_release_confirm",
     "zcl.app_presentation_release_confirm.v1",
@@ -228,6 +251,7 @@ void boot_zcode_async_proof_register_rpc(struct rpc_table *table)
         {"zcode", "zcode_work_evidence", async_proof_rpc_evidence, true},
         {"zcode", "zcode_work_status", async_proof_rpc_work_status, true},
         {"zcode", "zcode_work_accept", async_proof_rpc_work_accept, true},
+        {"zcode", "zcode_work_publish", async_proof_rpc_work_publish, true},
         {"zcode", "zcode_work_release_confirm",
          async_proof_rpc_release_confirm, true},
         {"zcode", "zcode_publish_plan_owned",

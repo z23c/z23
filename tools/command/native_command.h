@@ -702,6 +702,9 @@ void zcl_native_handle_zcode_work_review(
 void zcl_native_handle_zcode_work_accept(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
+void zcl_native_handle_zcode_work_publish(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
 void zcl_native_handle_story_focus(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);

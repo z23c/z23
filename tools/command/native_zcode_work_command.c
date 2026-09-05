@@ -3144,7 +3144,7 @@ void zcl_native_handle_zcode_work_accept(
             json_push_kv_bool(&reply->data, "publication_reused",
                               publication.reused) &&
             json_push_kv_str(&reply->data, "next_safe_command",
-                             "dev.publication advance") &&
+                             "zcode work publish") &&
             json_push_kv_bool(&reply->data, "details_available", true) &&
             (!details || (
                 json_push_kv_str(&reply->data, "publication_workspace",
@@ -3162,11 +3162,12 @@ void zcl_native_handle_zcode_work_accept(
                     publication_proof_hex) &&
                 json_push_kv(&reply->data, "expert", &expert))) &&
             json_push_kv_str(&next_input, "workspace", workspace) &&
+            json_push_kv_str(&next_input, "work", work_id) &&
             json_push_kv_str(&next_input, "datadir", datadir) &&
             json_push_kv_str(&next_input, "job_root",
                              publication_job_hex) &&
             zwork_add_next(
-                reply, "dev.publication.advance", &next_input,
+                reply, "zcode.work.publish", &next_input,
                 "advance the accepted exact source through its existing publication job");
         json_free(&next_input);
         json_free(&expert);
@@ -3178,5 +3179,218 @@ void zcl_native_handle_zcode_work_accept(
     zcl_command_reply_free(&final_reply);
     zcl_command_reply_free(&lane_reply);
     vcs_zcode_task_index_free(index);
+}
+
+/* A job locator never grants acceptance. Follow its existing, root-checked
+ * progress chain back to the exact accepted lane before invoking its owner. */
+static bool zwork_publication_bound(
+    const char *workspace, const uint8_t job_root[32],
+    const struct vcs_zcode_accepted_work_v1 *accepted,
+    enum vcs_devloop_publication_phase *phase)
+{
+    struct vcs_devloop_publication_job job;
+    struct vcs_devloop_publication_receipt progress;
+    uint8_t progress_root[32];
+    if (!vcs_devloop_publication_job_load(workspace, job_root, &job) ||
+        !vcs_devloop_publication_job_is_queued(workspace, job_root) ||
+        memcmp(job.source_tree_root,
+               accepted->candidate.candidate_source_root, 32) != 0 ||
+        !vcs_devloop_publication_progress_load(
+            workspace, job_root, &progress, progress_root))
+        return false;
+    *phase = progress.phase;
+    for (unsigned i = 0; i < VCS_DEVLOOP_PUBLICATION_PHASE_SOURCE_REPRODUCED;
+         i++) {
+        if (memcmp(progress.job_root, job_root, 32) != 0) return false;
+        if (progress.phase == VCS_DEVLOOP_PUBLICATION_PHASE_ACCEPTED_LANE_BOUND) {
+            if (memcmp(progress.artifact_root,
+                       accepted->accepted_work_root, 32) != 0 ||
+                !vcs_devloop_publication_receipt_load(
+                    workspace, progress.predecessor_receipt_root, &progress))
+                return false;
+            const uint8_t zero[32] = {0};
+            return progress.phase == VCS_DEVLOOP_PUBLICATION_PHASE_WAITING_ACCEPTANCE &&
+                memcmp(progress.job_root, job_root, 32) == 0 &&
+                memcmp(progress.predecessor_receipt_root, zero, 32) == 0;
+        }
+        if (progress.phase <= VCS_DEVLOOP_PUBLICATION_PHASE_ACCEPTED_LANE_BOUND ||
+            progress.phase > VCS_DEVLOOP_PUBLICATION_PHASE_SOURCE_REPRODUCED)
+            return false;
+        enum vcs_devloop_publication_phase prior_phase = progress.phase;
+        if (!vcs_devloop_publication_receipt_load(
+                workspace, progress.predecessor_receipt_root, &progress) ||
+            progress.phase != prior_phase - 1)
+            return false;
+    }
+    return false;
+}
+
+void zcl_native_handle_zcode_work_publish(
+    const struct zcl_command_request *request, struct zcl_command_reply *reply)
+{
+    if (!request || !reply) return;
+    const char *workspace_arg = zwork_str(request->input, "workspace");
+    const char *work = zwork_str(request->input, "work");
+    const char *proof_datadir = zwork_str(request->input, "datadir");
+    const char *job_hex = zwork_str(request->input, "job_root");
+    bool details = zwork_bool(request->input, "details");
+    if (zcl_native_forward_live_command(
+            request, proof_datadir, "zcode_work_publish",
+            "LIVE_WORK_PUBLISH_FAILED", "publish", "zcode.work.publish",
+            reply))
+        return;
+    char workspace[ZWORK_PATH_MAX], datadir[ZWORK_PATH_MAX];
+    uint8_t job_root[32];
+    if (!platform_directory_canonical_real(
+            workspace_arg && workspace_arg[0] ? workspace_arg : ".",
+            workspace, sizeof(workspace)) ||
+        !job_hex || !zcl_hex_decode_lower(job_hex, job_root, 32)) {
+        zwork_fail(reply, "BAD_PUBLICATION_INPUT", "resolve",
+                   "use the exact publication continuation returned by work accept",
+                   false, false);
+        return;
+    }
+    struct vcs_zcode_task_index *index = vcs_zcode_task_index_build(
+        workspace, platform_time_wall_unix());
+    bool ambiguous = false;
+    const struct vcs_zcode_task_index_entry *entry = index
+        ? zwork_resolve(index, work, &ambiguous) : NULL;
+    if (!entry || entry->expired ||
+        strcmp(entry->state, VCS_ZCODE_TASK_STATE_PROVEN) != 0) {
+        zwork_fail(reply, ambiguous ? "AMBIGUOUS_WORK" : "WORK_NOT_ACCEPTED",
+                   "verify", "the current exact work must already be accepted",
+                   false, false);
+        vcs_zcode_task_index_free(index);
+        return;
+    }
+    bool path_ok = proof_datadir && proof_datadir[0]
+        ? platform_directory_canonical_real(proof_datadir, datadir, sizeof(datadir))
+        : zwork_task_path(datadir, entry->task_root_hex, "/zbuild");
+    char db_path[ZWORK_PATH_MAX];
+    int n = path_ok ? snprintf(db_path, sizeof(db_path), "%s/node.db", datadir) : -1;
+    struct node_db local = {0};
+    struct node_db *ndb = n > 0 && (size_t)n < sizeof(db_path)
+        ? zwork_runtime_ledger(db_path) : NULL;
+    bool owned = ndb != NULL;
+    if (!owned) ndb = &local;
+    bool opened = n > 0 && (size_t)n < sizeof(db_path) &&
+        (owned || node_db_open_existing_runtime(ndb, db_path, "zcode.work.publish"));
+    struct zcode_accepted_work_status accepted;
+    uint8_t task_root[32], candidate_root[32], policy_root[32];
+    bool verified = opened && zcode_accepted_work_find(
+        ndb, workspace, entry->latest_candidate_source_root_hex,
+        (int64_t)platform_time_wall_unix(), false, &accepted).ok &&
+        zcl_hex_decode_lower(entry->task_root_hex, task_root, 32) &&
+        zcl_hex_decode_lower(entry->latest_candidate_root_hex, candidate_root, 32) &&
+        zcl_hex_decode_lower(entry->proof_policy_root_hex, policy_root, 32) &&
+        memcmp(task_root, accepted.accepted.task_root, 32) == 0 &&
+        memcmp(candidate_root, accepted.accepted.candidate_root, 32) == 0 &&
+        memcmp(policy_root, accepted.accepted.proof_policy_root, 32) == 0;
+    if (opened && !owned) node_db_close(ndb);
+    enum vcs_devloop_publication_phase phase = 0;
+    if (!verified || !zwork_publication_bound(
+            workspace, job_root, &accepted.accepted, &phase)) {
+        zwork_fail(reply, "WORK_PUBLICATION_MISMATCH", "verify",
+                   "the queued publication must bind this exact currently accepted work",
+                   false, false);
+        vcs_zcode_task_index_free(index);
+        return;
+    }
+    char work_id[32];
+    (void)snprintf(work_id, sizeof(work_id), "work-%.12s", entry->task_root_hex);
+    vcs_zcode_task_index_free(index);
+
+    struct json_value input;
+    json_init(&input); json_set_object(&input);
+    bool rendered = json_push_kv_str(&input, "workspace", workspace) &&
+        json_push_kv_str(&input, "datadir", datadir) &&
+        json_push_kv_str(&input, "job_root", job_hex) &&
+        json_push_kv_bool(&input, "details", details);
+    if (!rendered) {
+        json_free(&input);
+        zwork_fail(reply, "PUBLICATION_INPUT_FAILED", "render",
+                   "the exact publication input exceeded its bound", false, false);
+        return;
+    }
+    struct zcl_command_context context = request->context
+        ? *request->context : (struct zcl_command_context){0};
+    context.source_root = workspace;
+    struct zcl_command_request inner_request = *request;
+    inner_request.context = &context;
+    inner_request.input = &input;
+    struct zcl_command_reply inner;
+    zcl_command_reply_init(&inner, "zcl.zcode_work_publish.v1");
+    bool collect = phase == VCS_DEVLOOP_PUBLICATION_PHASE_PROVIDER_ANNOUNCED ||
+                   phase == VCS_DEVLOOP_PUBLICATION_PHASE_STORAGE_ACKNOWLEDGED;
+    if (collect) zcl_native_handle_dev_publication_collect(&inner_request, &inner);
+    else zcl_native_handle_dev_publication_advance(&inner_request, &inner);
+    if (inner.status != ZCL_COMMAND_STATUS_PASSED) {
+        reply->status = inner.status;
+        reply->exit_code = inner.exit_code;
+        reply->error = inner.error;
+        zcl_command_reply_free(&inner);
+        json_free(&input);
+        return;
+    }
+    if (!collect && !zwork_bool(&inner.data, "acceptance_reverified")) {
+        zcl_command_reply_free(&inner);
+        json_free(&input);
+        zwork_fail(reply, "WORK_PUBLICATION_MISMATCH", "verify",
+                   "publication could not reverify the current accepted work",
+                   true, false);
+        return;
+    }
+    const char *status = zwork_str(&inner.data, "status");
+    const char *next_action = zwork_str(&inner.data, "next_action");
+    const char *next_safe = zwork_str(&inner.data, "next_safe_command");
+    const char *schema = NULL;
+    if (!collect && phase != VCS_DEVLOOP_PUBLICATION_PHASE_SOURCE_REPRODUCED) {
+        if (next_safe && strcmp(next_safe, "zcode package dev publish plan") == 0)
+            schema = "zcode.package.dev.publish.plan";
+        else if (next_safe && strcmp(next_safe, "zcode passport plan") == 0)
+            schema = "zcode.passport.plan";
+        else if (next_safe && strcmp(next_safe, "zcode workspace manifest plan") == 0)
+            schema = "zcode.workspace.manifest.plan";
+        else if (next_safe && strcmp(next_safe, "zcode network publish") == 0)
+            schema = "zcode.network.publish";
+    }
+    rendered = status && json_push_kv_str(&reply->data, "work_id", work_id) &&
+        json_push_kv_str(&reply->data, "status", status) &&
+        json_push_kv_str(&reply->data, "stage", "Publishing") &&
+        json_push_kv_str(&reply->data, "next_action", next_action ? next_action :
+            strcmp(status, "SOURCE_REPRODUCED") == 0
+                ? "Keep this accepted package available to other nodes."
+                : "Continue collecting independent storage and source reproduction evidence.") &&
+        json_push_kv_str(&reply->data, "next_safe_command",
+                         schema ? next_safe : "zcode work status") &&
+        json_push_kv_bool(&reply->data, "acceptance_reverified", true) &&
+        json_push_kv_bool(&reply->data, "details_available", true);
+    const char *fields[] = {"receipt_reused", "receipt_written", "network_called",
+        "wallet_called", "package_written", "mapping_cache_written", "storage_acks",
+        "reproduced", "physical_independence_attested"};
+    for (size_t i = 0; rendered && i < sizeof(fields) / sizeof(fields[0]); i++) {
+        const struct json_value *value = json_get(&inner.data, fields[i]);
+        if (value) rendered = json_push_kv(&reply->data, fields[i], value);
+    }
+    rendered = rendered && (!details || (
+        json_push_kv_str(&reply->data, "publication_job_root", job_hex) &&
+        json_push_kv(&reply->data, "expert", &inner.data)));
+    json_free(&input); json_set_object(&input);
+    if (schema) {
+        rendered = rendered && json_push_kv_str(&input, "path", schema) &&
+            zwork_add_next(reply, "discover.schema", &input,
+                           "inspect the publisher inputs required by the existing next step");
+    } else {
+        rendered = rendered && json_push_kv_str(&input, "workspace", workspace) &&
+            json_push_kv_str(&input, "datadir", datadir) &&
+            json_push_kv_str(&input, "work", work_id) &&
+            zwork_add_next(reply, "zcode.work.status", &input,
+                           "inspect this accepted work and its current publication continuation");
+    }
+    zcl_command_reply_free(&inner);
+    json_free(&input);
+    if (!rendered)
+        zwork_fail(reply, "PUBLICATION_OUTPUT_FAILED", "render",
+                   "the publication continuation exceeded its output bound", false, true);
 }
 #endif

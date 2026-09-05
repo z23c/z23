@@ -745,7 +745,7 @@ ZCL_COMMAND_READY_COMMAND(
     "It does not edit source files, publish a package, or give the adapter "
     "acceptance authority. Repeating an already-PROVEN acceptance is "
     "idempotent. The default result hides roots and carries the existing "
-    "publication job in a typed next action; details=true exposes exact "
+    "publication job through zcode.work.publish in a typed next action; details=true exposes exact "
     "identities.", ZCL_COMMAND_RESULT_BUDGET,
     "zcode,work,accept,human,proven,lane,evidence",
     "zcl.zcode_work_accept.input.v1", "zcl.zcode_work_accept.v1",
@@ -759,6 +759,33 @@ ZCL_COMMAND_READY_COMMAND(
     ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
     ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
     zcl_native_handle_zcode_work_accept)
+
+ZCL_COMMAND_READY_COMMAND(
+    "zcode.work.publish", "zcode.work", "",
+    "Continue publication of one exact accepted work",
+    "Consumes the typed continuation from work accept, independently reloads "
+    "the current accepted task, candidate and proof policy, and checks the "
+    "existing queued job and accepted-lane receipt chain. It reuses the "
+    "ordinary publication advance or evidence collection machinery without "
+    "recapturing or repackaging the application. Independent evidence remains "
+    "locally verified; publisher metadata and offline signing remain explicit "
+    "next steps. No acceptance, signing, wallet or deployment authority is "
+    "granted. Default output is compact; details=true exposes exact evidence.",
+    ZCL_COMMAND_RESULT_BUDGET,
+    "zcode,work,publish,publication,accepted,reproduce,continuation",
+    "zcl.zcode_work_publish.input.v1", "zcl.zcode_work_publish.v1",
+    "workspace,work,datadir,job_root,details", "job_root",
+    "z23 zcode work publish --input='<typed continuation from work accept>'",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_CONFIRM_NONE,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_DEV_STATE_WRITE | ZCL_COMMAND_CAP_CHAIN_READ |
+        ZCL_COMMAND_CAP_P2P_TOPIC,
+    ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    zcl_native_handle_zcode_work_publish)
 
 /* ── work transport: solutions move between nodes, keyed by task ──────
  * A task is content-addressed (task_root); a solution is the source

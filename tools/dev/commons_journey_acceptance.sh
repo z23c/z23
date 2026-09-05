@@ -1452,6 +1452,54 @@ cj_journey_accept() {
     [ "${#CJ_ACCEPTED_WORK}" -eq 64 ] ||
         cj_die "acceptance bound no lane receipt root: $accept"
 
+    # Follow the public typed handoff through the live ledger. Mapping is a
+    # continuation of this accepted application; offline signing and the
+    # existing reproduction/use legs below keep these exact identities.
+    local publication_job publish_input publish plain_details shown
+    publication_job="$(cj_field data.publication_job_root "$accept" '')"
+    [ "${#publication_job}" -eq 64 ] ||
+        cj_die "acceptance bound no publication job: $accept"
+    [ "$(cj_field next.0.command "$accept" '')" = zcode.work.publish ] &&
+        [ -z "$(cj_field next.1.command "$accept" '')" ] ||
+        cj_die "acceptance returned no single public publication continuation: $accept"
+    publish_input="$(cj_field next.0.input "$accept" '')"
+    [ "$(cj_field job_root "$publish_input" '')" = "$publication_job" ] &&
+        [ "$(cj_field datadir "$publish_input" '')" = "$DHT_DD_A" ] ||
+        cj_die "publication continuation changed the job or proof ledger: $accept"
+    publish="$(cj_a zcode work publish --input="$publish_input")"
+    cj_require_ok "work publish" "$publish"
+    printf '%s\n' "$publish" >"$DHT_WORK/work-publish.json"
+    [ "$(cj_field data.acceptance_reverified "$publish" False)" = True ] ||
+        cj_die "public publication did not reverify acceptance: $publish"
+    [ "$(cj_field data.status "$publish" '')" = PACKAGE_MAPPING_READY ] ||
+        cj_die "public publication did not map the accepted source: $publish"
+    [ "$(cj_field next.0.command "$publish" '')" = discover.schema ] &&
+        [ "$(cj_field next.0.input.path "$publish" '')" = zcode.package.dev.publish.plan ] &&
+        [ -z "$(cj_field next.1.command "$publish" '')" ] ||
+        cj_die "public publication lost its typed signing continuation: $publish"
+    [ -z "$(cj_field data.publication_job_root "$publish" '')" ] &&
+        [ -z "$(cj_field data.expert "$publish" '')" ] ||
+        cj_die "public publication exposed exact roots without details=true: $publish"
+    # json-get emits a canonical object; add only the presentation flag.
+    plain_details="$(printf '%s' "$publish_input" | sed 's/}$/,"details":true}/')"
+    plain_details="$(cj_a zcode work publish --input="$plain_details")"
+    cj_require_ok "work publish (details/retry)" "$plain_details"
+    printf '%s\n' "$plain_details" >"$DHT_WORK/work-publish-details.json"
+    [ "$(cj_field data.acceptance_reverified "$plain_details" False)" = True ] &&
+        [ "$(cj_field data.receipt_reused "$plain_details" False)" = True ] ||
+        cj_die "public publication retry did not reverify and reuse its receipt: $plain_details"
+    [ "$(cj_field data.publication_job_root "$plain_details" '')" = "$publication_job" ] &&
+        [ "$(cj_field data.expert.lane_receipt_root "$plain_details" '')" = "$CJ_ACCEPTED_WORK" ] ||
+        cj_die "public publication changed the job or accepted lane: $plain_details"
+    cj_human_first "work publish" "$publish"
+    cj_roots_hidden "work publish" "$publish" "$plain_details"
+    shown="$(cj_a zcode work show \
+        --input="{\"workspace\":\"$CJ_WS\",\"work\":\"$(cj_field work "$publish_input" '')\",\"datadir\":\"$DHT_DD_A\",\"details\":true}")"
+    cj_require_ok "work show after publication continuation" "$shown"
+    [ "$(cj_field data.expert.candidate_source_root "$shown" '')" = "$CJ_ACCEPTED_SOURCE" ] &&
+        [ "$(cj_field data.expert.accepted_work_root "$shown" '')" = "$CJ_ACCEPTED_WORK" ] ||
+        cj_die "publication continuation changed the accepted source or decision: $shown"
+
     # Saying yes twice is the same yes.
     again="$(cj_a zcode work accept \
         --input="{\"workspace\":\"$CJ_WS\",\"work\":\"latest\",\"datadir\":\"$DHT_DD_A\"}")"

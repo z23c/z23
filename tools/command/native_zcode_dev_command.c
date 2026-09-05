@@ -8,6 +8,7 @@
 #include "base/serialize_le.h"
 #include "crypto/sha3.h"
 #include "config/runtime.h"
+#include "config/command_catalog.h"
 #include "hotswap/hotswap_service.h"
 #include "json/json.h"
 #include "models/database.h"
@@ -180,6 +181,38 @@ bool zcl_native_forward_live_command(
     const struct json_value *data = json_get(&body, "data");
     if (ok && ok->type == JSON_BOOL && json_get_bool(ok) &&
         data && data->type == JSON_OBJ) {
+        const struct json_value *next = json_get(&body, "next");
+        bool next_ok = !next || (next->type == JSON_ARR &&
+                                 json_size(next) <= ZCL_COMMAND_MAX_NEXT);
+        for (size_t i = 0; next_ok && next && i < json_size(next); i++) {
+            const struct json_value *item = json_at(next, i);
+            const char *command = json_get_str(json_get(item, "command"));
+            const char *input_json = json_get_str(json_get(item, "input_json"));
+            const char *reason = json_get_str(json_get(item, "reason"));
+            struct json_value next_input;
+            json_init(&next_input);
+            const struct zcl_command_spec *spec = command
+                ? zcl_command_registry_find(zcl_command_catalog(), command, NULL)
+                : NULL;
+            char why[160];
+            next_ok = item && item->type == JSON_OBJ && spec && input_json && reason &&
+                strlen(input_json) < sizeof(reply->next[0].input_json) &&
+                json_read(&next_input, input_json, strlen(input_json)) &&
+                zcl_command_registry_input_validate(
+                    spec, &next_input, why, sizeof(why)) &&
+                zcl_command_reply_add_next(reply, command, input_json, reason);
+            json_free(&next_input);
+        }
+        if (!next_ok) {
+            reply->next_count = 0;
+            json_free(&body);
+            zcl_command_reply_fail(
+                reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_FAILED,
+                "LIVE_CONTINUATION_INVALID", "decode", true, false,
+                "the selected node returned a malformed or over-budget continuation",
+                evidence);
+            return true;
+        }
         json_free(&reply->data);
         json_init(&reply->data);
         json_copy(&reply->data, data);
