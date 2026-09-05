@@ -52,6 +52,7 @@
 #include "event/event.h"
 #include "util/signal_handler.h"
 #include "util/clientversion.h"
+#include "util/log_json.h"
 
 #include <errno.h>
 #include <limits.h>
@@ -157,6 +158,7 @@ struct group_result {
                           * an environment that did not deliver in-window. Not
                           * a skip; never cached. See count_marker_lines. */
     int cached;          /* 1 if returned from the content-addressed cache */
+    int measured;        /* 1 once an actual group child was started */
     /* ── progress watchdog state (see group_watchdog_expired) ───────────── */
     time_t last_progress;  /* when this group's output last grew */
     long long last_size;   /* bytes of captured output at that moment */
@@ -703,9 +705,13 @@ static void run_group_exclusive(size_t idx, pid_t parent_pid,
 
     int status = 0;
     bool killed = false;
+    bool successfully_reaped = false;
     for (;;) {
         int pr = child_poll(child, &status);
-        if (pr == 1) break;
+        if (pr == 1) {
+            successfully_reaped = true;
+            break;
+        }
         if (pr < 0) {
             status = 1;
             break;
@@ -737,6 +743,8 @@ static void run_group_exclusive(size_t idx, pid_t parent_pid,
     memcpy(results[idx].out_path, out_path, sizeof(results[idx].out_path));
     time_t now = platform_time_wall_time_t();
     results[idx].wall_seconds = (double)(now - results[idx].start);
+    if (successfully_reaped)
+        results[idx].measured = 1;
 }
 
 enum pool_phase {
@@ -845,6 +853,7 @@ static bool run_parallel_phase(
                sizeof(results[idx].out_path));
         time_t now = platform_time_wall_time_t();
         results[idx].wall_seconds = (double)(now - results[idx].start);
+        results[idx].measured = 1;
         if (verbose)
             printf("[done    ] [%zu] %s (%s, %.0fs)\n",
                    idx, g_groups[idx].name,
@@ -960,6 +969,19 @@ struct suite_verdict {
     char   toolkey[13];
 };
 
+static bool g_hotswap_module_active;
+static char g_hotswap_module_sha[65];
+static char g_hotswap_module_source[256];
+
+static bool timing_json_string(FILE *fp, const char *text)
+{
+    char escaped[1537];
+    if (!fp || !text || strnlen(text, 256) >= 256)
+        return false;
+    (void)log_json_escape(escaped, sizeof(escaped), text);
+    return fprintf(fp, "\"%s\"", escaped) >= 0;
+}
+
 /* Per-group JSON timing artifact — the same "make results visible so
  * regressions are visible" pattern as tools/lint/run_lint.sh's
  * .cache/lint-timing/last-run.json (schema zcl.lint_timing.v1), applied
@@ -970,8 +992,11 @@ struct suite_verdict {
  * dependency. Groups are ordered slowest-first (a plain insertion sort
  * over at most a few hundred entries — not worth a qsort comparator
  * closure). Best-effort: a write failure is reported but never fails
- * the run — this is an observability artifact, not a test outcome. */
+ * the run — this mutable diagnostic report is never signed evidence or an
+ * admission authority. */
 static void write_test_timing_json(const struct group_result *results,
+                                   const struct testcache_probe *probes,
+                                   bool activate_proof_contracts,
                                    double startup_seconds,
                                    double wall_seconds, int jobs,
                                    size_t group_count, int failed_groups,
@@ -1021,6 +1046,7 @@ static void write_test_timing_json(const struct group_result *results,
         free(order);
         return;
     }
+    bool render_failed = false;
 
     time_t now = platform_time_wall_time_t();
     struct tm tm_utc;
@@ -1054,6 +1080,29 @@ static void write_test_timing_json(const struct group_result *results,
     fprintf(fp, "  \"groups_cached\":%zu,\n", v->groups_cached);
     fprintf(fp, "  \"groups_cacheable\":%zu,\n", v->groups_cacheable);
     fprintf(fp, "  \"toolkey\":\"%s\",\n", v->toolkey);
+    fprintf(fp, "  \"self_skips\":%d,\n", v->self_skips);
+    fprintf(fp, "  \"env_unobserved\":%d,\n", v->env_unobserved);
+    fprintf(fp, "  \"load_flaky\":%d,\n", v->load_flaky);
+    fprintf(fp, "  \"toolkey_full\":");
+    if (!timing_json_string(fp, testcache_toolkey()))
+        render_failed = true;
+    fprintf(fp, ",\n  \"hotswap_module_active\":%s,\n",
+            g_hotswap_module_active ? "true" : "false");
+    fprintf(fp, "  \"hotswap_module_sha256\":");
+    if (g_hotswap_module_active) {
+        if (!timing_json_string(fp, g_hotswap_module_sha))
+            render_failed = true;
+    }
+    else
+        fprintf(fp, "null");
+    fprintf(fp, ",\n  \"hotswap_module_source\":");
+    if (g_hotswap_module_active) {
+        if (!timing_json_string(fp, g_hotswap_module_source))
+            render_failed = true;
+    }
+    else
+        fprintf(fp, "null");
+    fprintf(fp, ",\n");
     fprintf(fp, "  \"groups\":[\n");
     int first = 1;
     for (size_t k = 0; k < group_count; k++) {
@@ -1066,24 +1115,56 @@ static void write_test_timing_json(const struct group_result *results,
         long long ms = (long long)(results[i].wall_seconds * 1000.0);
         int rc = results[i].signaled ? -results[i].exit_code
                                      : results[i].exit_code;
+        bool key_valid = !g_hotswap_module_active && probes &&
+                         probes[i].key_valid;
+        bool measured = results[i].measured != 0;
+        enum zcl_test_proof_contract contract = activate_proof_contracts
+            ? zcl_test_group_proof_contract(g_groups[i].name)
+            : ZCL_TEST_PROOF_NONE;
         fprintf(fp,
                 "    {\"name\":\"%s\",\"ms\":%lld,\"rc\":%d,"
-                "\"signaled\":%s,\"cached\":%s}",
+                "\"signaled\":%s,\"cached\":%s,\"measured\":%s,"
+                "\"key_valid\":%s,\"input_key\":",
                 g_groups[i].name, ms, rc,
                 results[i].signaled ? "true" : "false",
-                results[i].cached ? "true" : "false");
+                results[i].cached ? "true" : "false",
+                measured ? "true" : "false",
+                key_valid ? "true" : "false");
+        if (key_valid) {
+            fputc('"', fp);
+            for (size_t b = 0; b < sizeof(probes[i].key); b++)
+                fprintf(fp, "%02x", probes[i].key[b]);
+            fputc('"', fp);
+        } else {
+            fprintf(fp, "null");
+        }
+        fprintf(fp,
+                ",\"proof_contract\":%d,\"skip_markers\":%d,"
+                "\"env_unobserved\":%d,\"load_flaky\":%d}",
+                (int)contract, results[i].skip_markers,
+                results[i].env_unobserved, results[i].load_flaky);
     }
     fprintf(fp, "\n  ]\n}\n");
-    fclose(fp);
+    bool write_failed = render_failed || ferror(fp) != 0;
+    if (fclose(fp) != 0)
+        write_failed = true;
     free(order);
+
+    if (write_failed) {
+        fprintf(stderr, "test_parallel: timing artifact write failed\n");
+        (void)remove(tmp_path);
+        return;
+    }
 
 #if defined(_WIN32)
     /* Windows rename() refuses an existing target; the timing artifact is a
      * best-effort cache, so replacing last run's file is correct. */
     (void)remove(final_path);
 #endif
-    if (rename(tmp_path, final_path) != 0)
+    if (rename(tmp_path, final_path) != 0) {
         perror("test_parallel: rename timing artifact");
+        (void)remove(tmp_path);
+    }
 }
 
 /* ── Module mode: run the real groups against a hot-swapped .so ────────────
@@ -1115,10 +1196,6 @@ static void write_test_timing_json(const struct group_result *results,
 #ifndef ZCL_TEST_COMPILE_EPOCH
 #define ZCL_TEST_COMPILE_EPOCH ""
 #endif
-
-static bool g_hotswap_module_active;
-static char g_hotswap_module_sha[65];
-static char g_hotswap_module_source[256];
 
 /* Returns false when module mode was requested but could not be honored — the
  * caller must exit non-zero rather than run against resident code. */
@@ -1832,7 +1909,8 @@ int main(int argc, char **argv)
     };
     testcache_toolkey_digest12(verdict.toolkey);
 
-    write_test_timing_json(results, startup_wall, wall, jobs, g_num_groups,
+    write_test_timing_json(results, probes, activate_proof_contracts,
+                           startup_wall, wall, jobs, g_num_groups,
                            failed_groups,
                            pre_skipped, &verdict);
 

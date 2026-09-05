@@ -5,6 +5,7 @@
 #include "platform/os_proc.h"
 #include "test_group_catalog.h"
 #include "util/clientversion.h"
+#include "json/json.h"
 
 #include <stdio.h>
 #include <stdint.h>
@@ -69,6 +70,46 @@ static int capture_command(const char *command, char *out, size_t cap)
     if (status < 0 || !WIFEXITED(status))
         return -1;
     return WEXITSTATUS(status);
+}
+
+/* These nested runs select at most two groups. Refuse a larger or partial
+ * artifact instead of accidentally validating a prefix of another run. */
+static bool selector_timing_read(struct json_value *out)
+{
+    char bytes[8192];
+    FILE *fp = fopen(".cache/test-timing/last-run.json", "rb");
+    if (!fp) {
+        fprintf(stderr, "selector: timing artifact open failed\n");
+        return false;
+    }
+    size_t n = fread(bytes, 1, sizeof(bytes), fp);
+    bool complete = !ferror(fp) && feof(fp) && n < sizeof(bytes);
+    if (fclose(fp) != 0)
+        complete = false;
+    if (!complete || !json_read(out, bytes, n) || out->type != JSON_OBJ) {
+        fprintf(stderr, "selector: timing artifact incomplete or invalid\n");
+        json_free(out);
+        return false;
+    }
+    return true;
+}
+
+static bool selector_timing_zero(const struct json_value *row, const char *key)
+{
+    const struct json_value *v = json_get(row, key);
+    return v && v->type == JSON_INT && json_get_int(v) == 0;
+}
+
+static bool selector_timing_hex_key(const struct json_value *value)
+{
+    const char *s = json_get_str(value);
+    if (!s || strlen(s) != 64)
+        return false;
+    for (size_t i = 0; i < 64; i++)
+        if (!((s[i] >= '0' && s[i] <= '9') ||
+              (s[i] >= 'a' && s[i] <= 'f')))
+            return false;
+    return true;
 }
 
 static void reverse_range(char *b, size_t lo, size_t hi)
@@ -801,6 +842,37 @@ static int test_runner_exact_selection(void)
         ASSERT(strstr(out, "\"startup_ms\":") != NULL);
         ASSERT(strstr(out, "\"test_body_ms\":") != NULL);
 
+        struct json_value timing = {0};
+        ASSERT(selector_timing_read(&timing));
+        ASSERT(selector_timing_zero(&timing, "self_skips"));
+        ASSERT(selector_timing_zero(&timing, "env_unobserved"));
+        ASSERT(selector_timing_zero(&timing, "load_flaky"));
+        ASSERT(selector_timing_hex_key(json_get(&timing, "toolkey_full")));
+        const struct json_value *module = json_get(&timing,
+                                                   "hotswap_module_active");
+        ASSERT(module && module->type == JSON_BOOL && !json_get_bool(module));
+        ASSERT(json_get(&timing, "hotswap_module_sha256") &&
+               json_is_null(json_get(&timing, "hotswap_module_sha256")));
+        ASSERT(json_get(&timing, "hotswap_module_source") &&
+               json_is_null(json_get(&timing, "hotswap_module_source")));
+        const struct json_value *timing_rows = json_get(&timing, "groups");
+        ASSERT(timing_rows && timing_rows->type == JSON_ARR &&
+               json_size(timing_rows) == 1);
+        const struct json_value *timing_row = json_at(timing_rows, 0);
+        ASSERT(strcmp(json_get_str(json_get(timing_row, "name")),
+                      "test_hex_codec") == 0);
+        ASSERT(json_get_bool(json_get(timing_row, "measured")));
+        const struct json_value *key_valid = json_get(timing_row, "key_valid");
+        ASSERT(key_valid && key_valid->type == JSON_BOOL &&
+               !json_get_bool(key_valid));
+        ASSERT(json_get(timing_row, "input_key") &&
+               json_is_null(json_get(timing_row, "input_key")));
+        ASSERT(selector_timing_zero(timing_row, "proof_contract"));
+        ASSERT(selector_timing_zero(timing_row, "skip_markers"));
+        ASSERT(selector_timing_zero(timing_row, "env_unobserved"));
+        ASSERT(selector_timing_zero(timing_row, "load_flaky"));
+        json_free(&timing);
+
         n = snprintf(command, sizeof(command), "\"%s\" --source-id 2>&1",
                      exe);
         ASSERT(n > 0 && (size_t)n < sizeof(command));
@@ -855,6 +927,7 @@ static int test_runner_exact_selection(void)
                      "--exact=test_store_e2e_gate "
                      "--activate-proof-contracts --cache 2>&1", exe);
         ASSERT(n > 0 && (size_t)n < sizeof(command));
+        char first_proof_key[65] = {0};
         for (int proof_run = 0; proof_run < 2; proof_run++) {
             rc = capture_command(command, out, sizeof(out));
             dump_bad_rc("nested proof-contract activation", rc, 0, out);
@@ -868,7 +941,41 @@ static int test_runner_exact_selection(void)
                    NULL);
             ASSERT(strstr(out, "groups_ran=1 groups_cached=0") != NULL);
             ASSERT(strstr(out, "groups_failed=0 self_skips=0") != NULL);
+            ASSERT(selector_timing_read(&timing));
+            timing_rows = json_get(&timing, "groups");
+            ASSERT(timing_rows && json_size(timing_rows) == 1);
+            timing_row = json_at(timing_rows, 0);
+            ASSERT(json_get_bool(json_get(timing_row, "measured")));
+            ASSERT(!json_get_bool(json_get(timing_row, "cached")));
+            ASSERT(json_get_int(json_get(timing_row, "proof_contract")) ==
+                   ZCL_TEST_PROOF_STRESS);
+            ASSERT(json_get_bool(json_get(timing_row, "key_valid")));
+            ASSERT(selector_timing_hex_key(json_get(timing_row, "input_key")));
+            const char *key = json_get_str(json_get(timing_row, "input_key"));
+            if (proof_run == 0)
+                memcpy(first_proof_key, key, sizeof(first_proof_key));
+            else
+                ASSERT(strcmp(first_proof_key, key) == 0);
+            ASSERT(selector_timing_zero(timing_row, "skip_markers"));
+            ASSERT(selector_timing_zero(timing_row, "env_unobserved"));
+            json_free(&timing);
         }
+
+        n = snprintf(command, sizeof(command),
+                     "env -u ZCL_STRESS_TESTS \"%s\" --jobs=1 "
+                     "--exact=test_store_e2e_gate --no-cache 2>&1", exe);
+        ASSERT(n > 0 && (size_t)n < sizeof(command));
+        rc = capture_command(command, out, sizeof(out));
+        ASSERT(rc == 0);
+        ASSERT(strstr(out, "self_skips=1") != NULL);
+        ASSERT(selector_timing_read(&timing));
+        ASSERT(json_get_int(json_get(&timing, "self_skips")) == 1);
+        timing_row = json_at(json_get(&timing, "groups"), 0);
+        ASSERT(json_get_int(json_get(timing_row, "skip_markers")) > 0);
+        ASSERT(json_get_bool(json_get(timing_row, "measured")));
+        ASSERT(selector_timing_zero(timing_row, "rc"));
+        ASSERT(selector_timing_zero(timing_row, "proof_contract"));
+        json_free(&timing);
 
         n = snprintf(command, sizeof(command),
                      "\"%s\" --activate-proof-contracts --no-cache 2>&1",
