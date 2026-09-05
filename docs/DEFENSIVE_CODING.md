@@ -1235,6 +1235,7 @@ add/remove a gate.
 - `check-model-validation`
 - `check-persona-resolves`
 - `check-specialists`
+- `check-fleet-airship-rules`
 - `check-prompt-templates`
 - `check-rule-vocabulary`
 - `check-cookbook`

@@ -2677,7 +2677,7 @@ $(filter-out $(ZCL_VENDOR_LIB)/libsecp256k1.a,$(VENDOR_LIBS)):
         check-outparam-init-before-return \
         check-before-save-hooks check-pthread-create check-model-validation \
         check-model-sql-literals \
-        check-persona-resolves check-specialists check-prompt-templates check-rule-vocabulary check-cookbook \
+        check-persona-resolves check-specialists check-fleet-airship-rules check-prompt-templates check-rule-vocabulary check-cookbook \
         check-long-functions check-rpc-registrar check-lag-slo-observable \
         check-controller-private-headers \
         check-file-size-ceiling check-framework-filename-suffix \
@@ -11367,6 +11367,11 @@ check-specialists:
 	@./tools/lint/check_specialists.sh --selftest
 	@./tools/lint/check_specialists.sh
 
+check-fleet-airship-rules:
+	@echo "══ LINT: no airship rule pays for a fact a node reported about itself ══"
+	@./tools/lint/check_fleet_airship_rules.sh --selftest
+	@./tools/lint/check_fleet_airship_rules.sh
+
 check-prompt-templates:
 	@echo "══ LINT: every prompt template names a declared section ══"
 	@./tools/lint/check_prompt_templates.sh --selftest
@@ -12932,6 +12937,7 @@ LINT_GATES := \
     check-model-sql-literals \
     check-persona-resolves \
     check-specialists \
+    check-fleet-airship-rules \
     check-prompt-templates \
     check-rule-vocabulary \
     check-cookbook \

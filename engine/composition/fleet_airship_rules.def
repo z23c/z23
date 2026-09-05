@@ -1,0 +1,99 @@
+/* Copyright 2026 Rhett Creighton - Apache License 2.0 */
+/*
+ * fleet_airship_rules.def — the ONE table that says what a fact about a
+ * fleet node earns it in a game. `fleet.roster` derives its `airships`
+ * object from these rows and from nothing else.
+ *
+ * The table exists because "reward more computing resources" is only
+ * honest when the reward rests on something a stranger cannot simply
+ * claim. So every fact carries HOW IT IS KNOWN, and the gate refuses any
+ * row that pays out for a fact the node told us about itself.
+ *
+ * Three X-macro families. Define the ones you want before including; each
+ * undeclared family expands to nothing, so a consumer never has to define
+ * a macro it does not read.
+ *
+ *   AIRSHIP_FACT(name, verification)
+ *       The CLOSED set of facts a roster row may carry. `verification` is
+ *       "PEER_VERIFIED" (another machine observed it and could have
+ *       observed otherwise) or "SELF_REPORTED" (the node said so). There
+ *       is no third value: a fact whose provenance nobody can name does
+ *       not belong in a reward table.
+ *
+ *   AIRSHIP_ASSET(name)
+ *       The CLOSED set of in-game assets a rule may award. An asset with
+ *       no paying rule today is still schema: it says where a future rule
+ *       would land.
+ *
+ *   AIRSHIP_RULE(fact, asset, per_node, confidence, why)
+ *       `per_node` is how many of `asset` one node earns for holding
+ *       `fact`, written as a decimal count. `confidence` is "OBSERVED"
+ *       (the award follows from a peer-verified observation) or
+ *       "DOCTRINE" (this table asserts the row; today that is only ever
+ *       the zero rows). `why` is the row's justification for a reader —
+ *       it is prose, and it is never a fact or an asset.
+ *
+ * The seed table is deliberately small, because today the mesh
+ * peer-verifies exactly one thing: whether a dial to a node connects.
+ * CPU count, free disk and build identity all cross the wire as the
+ * node's own word, so each of them earns ZERO here, written down as a
+ * row rather than left out — an absent row reads as an oversight, and a
+ * zero row reads as the decision it is. When a challenge-response makes
+ * one of them peer-verifiable, that row's verification changes and its
+ * count can rise in the same edit.
+ *
+ * tools/lint/check_fleet_airship_rules.sh is the price of writing here:
+ * every rule must name a declared fact and a declared asset, a rule that
+ * pays anything must name a PEER_VERIFIED fact and carry OBSERVED, a rule
+ * on a SELF_REPORTED fact must pay zero and carry DOCTRINE, no row may
+ * repeat another, and no declared term may go unused.
+ */
+
+#ifndef AIRSHIP_FACT
+#define AIRSHIP_FACT(name_, verification_)
+#define ZCL_AIRSHIP_FACT_LOCAL_
+#endif
+#ifndef AIRSHIP_ASSET
+#define AIRSHIP_ASSET(name_)
+#define ZCL_AIRSHIP_ASSET_LOCAL_
+#endif
+#ifndef AIRSHIP_RULE
+#define AIRSHIP_RULE(fact_, asset_, per_node_, confidence_, why_)
+#define ZCL_AIRSHIP_RULE_LOCAL_
+#endif
+
+/* ── facts, and how each one is known ──────────────────────────────────── */
+AIRSHIP_FACT("reachable", "PEER_VERIFIED")
+AIRSHIP_FACT("reachable_two_paths", "PEER_VERIFIED")
+AIRSHIP_FACT("cpus", "SELF_REPORTED")
+AIRSHIP_FACT("disk_free", "SELF_REPORTED")
+AIRSHIP_FACT("build_identity", "SELF_REPORTED")
+
+/* ── assets ────────────────────────────────────────────────────────────── */
+AIRSHIP_ASSET("airship")
+AIRSHIP_ASSET("escort")
+
+/* ── rules ─────────────────────────────────────────────────────────────── */
+AIRSHIP_RULE("reachable", "airship", "1", "OBSERVED",
+             "a dial from another machine either completed a Noise handshake or it did not, so a node nobody can reach cannot claim this one")
+AIRSHIP_RULE("reachable_two_paths", "escort", "1", "OBSERVED",
+             "answering on a direct address and on an onion address is two independent observations, each one the observer made rather than accepted")
+AIRSHIP_RULE("cpus", "airship", "0", "DOCTRINE",
+             "the core count crosses the wire as the node's own word; paying for it would pay whoever types the largest number, so it earns nothing")
+AIRSHIP_RULE("disk_free", "airship", "0", "DOCTRINE",
+             "free bytes are self-reported the same way; a proof of storage that makes the claim expensive to fake would turn this into a paying row")
+AIRSHIP_RULE("build_identity", "airship", "0", "DOCTRINE",
+             "the build hash in VERSION is format-checked, never matched against the binary that sent it, so it identifies a claim and not a machine")
+
+#ifdef ZCL_AIRSHIP_FACT_LOCAL_
+#undef ZCL_AIRSHIP_FACT_LOCAL_
+#undef AIRSHIP_FACT
+#endif
+#ifdef ZCL_AIRSHIP_ASSET_LOCAL_
+#undef ZCL_AIRSHIP_ASSET_LOCAL_
+#undef AIRSHIP_ASSET
+#endif
+#ifdef ZCL_AIRSHIP_RULE_LOCAL_
+#undef ZCL_AIRSHIP_RULE_LOCAL_
+#undef AIRSHIP_RULE
+#endif
