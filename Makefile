@@ -11672,7 +11672,7 @@ check-no-raw-clock-outside-platform:
 # Gate: sysinit boot-boundary ordering (HARD). Pins the deterministic
 # (stage, order, name) run order of the declarative boot-stage records in
 # engine/composition/src/boot.c against a golden file. See check_sysinit_ordering.sh.
-check-sysinit-ordering:
+check-sysinit-ordering: $(LINTC_TOOL)
 	@echo "→ Gate: sysinit_ordering"
 	@./tools/lint/check_sysinit_ordering.sh
 
@@ -11805,7 +11805,7 @@ check-no-python: $(LINTC_TOOL)
 # one use in a header included by ~1100 translation units produced over seven
 # thousand diagnostics under `clang -std=c23 -pedantic`. C23 spells it
 # `__VA_OPT__(,) __VA_ARGS__` with an identical token stream.
-check-no-gnu-va-args:
+check-no-gnu-va-args: $(LINTC_TOOL)
 	@echo "══ LINT: C23 __VA_OPT__, never the GNU comma-swallowing extension ══"
 	@./tools/lint/check_no_gnu_va_args.sh
 

@@ -810,6 +810,285 @@ static int check_silent_error_returns_selftest(void)
     return st_ok(bad, "check_silent_error_returns selftest: OK\n");
 }
 
+static int va_comp(regex_t *hit, regex_t *excl, regex_t *prev)
+{
+    int cr = compile_pat(hit, REG_EXTENDED, ",[[:space:]]*##", "[[:space:]]*",
+                         "__VA", "_ARGS__");
+    if (cr) return cr;
+    cr = pair_comp(excl, REG_EXTENDED, "gnu-va-args-ok", "", "", "",
+                   prev, REG_EXTENDED, "gnu-va-args-ok", "", "", "");
+    if (cr) regfree(hit);
+    return cr;
+}
+
+static int check_no_gnu_va_args_run(int argc, char **argv)
+{
+    (void)argc; (void)argv;
+    regex_t hit, excl, prev;
+    int cr = va_comp(&hit, &excl, &prev);
+    if (cr) return cr;
+    struct lg_acc a = { .hit = &hit, .excl = &excl, .prev = &prev, .hits = 0 };
+    static const char *const roots[] = {
+        "app", "config", "core", "lib", "domain", "engine/application",
+        "platform/adapters", "platform/ports", "src", "tools"
+    };
+    int rc = 0;
+    for (size_t i = 0; rc == 0 && i < sizeof roots / sizeof roots[0]; i++)
+        rc = walk_src(roots[i], 1, scan_lg, &a);
+    if (rc == 0 && a.hits) {
+        fputs("FAIL: GNU ', ##" "__VA_ARGS__' extension in C23 source.\n"
+              "      Use '__VA_OPT__(,) __VA_ARGS__' instead, or mark the line\n"
+              "      // gnu-va-args-ok: <reason>\n", stdout);
+        rc = 1;
+    } else if (rc == 0) {
+        fputs("  OK: no GNU comma-swallowing __VA_ARGS__ (C23 __VA_OPT__ everywhere)\n",
+              stdout);
+    }
+    drop3(&hit, &excl, &prev);
+    return rc;
+}
+
+static int check_no_gnu_va_args_selftest(void)
+{
+    regex_t hit, excl, prev;
+    int cr = va_comp(&hit, &excl, &prev);
+    if (cr) return cr;
+    const char *t = "check_no_gnu_va_args";
+    char h[72], m[88];
+    if (snprintf(h, sizeof h, "    fprintf(stderr, fmt, ##%s", "__VA_ARGS__);")
+            >= (int)sizeof h
+        || snprintf(m, sizeof m, "%s // gnu-va-args-ok: legacy", h) >= (int)sizeof m) {
+        drop3(&hit, &excl, &prev);
+        return die("z23-lint: selftest buffer overflow\n", "");
+    }
+    int bad = lg_want(t, &hit, &excl, &prev, NULL, h, 1)
+            | lg_want(t, &hit, &excl, &prev, NULL,
+                      "    LOG_ERR(fmt __VA_OPT__(,) __VA_ARGS__);", 0)
+            | lg_want(t, &hit, &excl, &prev, NULL, m, 0)
+            | lg_want(t, &hit, &excl, &prev, "// gnu-va-args-ok: legacy", h, 0)
+            | lg_want(t, &hit, &excl, &prev, NULL, "    x = a ## b;", 0);
+    drop3(&hit, &excl, &prev);
+    return st_ok(bad, "check_no_gnu_va_args selftest: OK\n");
+}
+
+enum { SI_MAX = 64, SI_NAME = 96, SI_OUT = 8192 };
+struct si_rec { int rank, order; char name[SI_NAME]; };
+struct si_acc { struct si_rec rec[SI_MAX]; int n, rc; char err[256]; };
+static const char k_si_src[] = "engine/composition/src/boot.c";
+static const char k_si_gold[] = "tools/lint/sysinit_ordering_golden.txt";
+
+static int si_rank_of(const char *s)
+{
+    static const char *const nm[] = {
+        "INIT", "DATADIR_LOCKED", "CRYPTO_READY", "DB_OPEN", "WALLET_LOADED",
+        "BLOCK_INDEX_LOADED", "CHAIN_TIP_RESOLVED", "NETWORK_READY",
+        "SERVICES_RUNNING", "READY", "SHUTDOWN_REQUESTED", "SHUTDOWN_COMPLETE"
+    };
+    for (int i = 0; i < 12; i++)
+        if (strcmp(nm[i], s) == 0) return i;
+    return -1;
+}
+
+static int si_cmp(const void *a, const void *b)
+{
+    const struct si_rec *x = a, *y = b;
+    if (x->rank != y->rank) return (x->rank > y->rank) - (x->rank < y->rank);
+    if (x->order != y->order) return (x->order > y->order) - (x->order < y->order);
+    return strcmp(x->name, y->name);
+}
+
+static int si_cap(const regex_t *re, const char *s, char *dst, size_t cap)
+{
+    regmatch_t m[2];
+    if (regexec(re, s, 2, m, 0) != 0 || m[1].rm_so < 0) return 0;
+    size_t n = (size_t)(m[1].rm_eo - m[1].rm_so);
+    if (n >= cap) n = cap - 1;
+    memcpy(dst, s + m[1].rm_so, n);
+    dst[n] = '\0';
+    return 1;
+}
+
+static int si_comp(regex_t *stg, regex_t *ord, regex_t *nam)
+{
+    int cr = compile_pat(stg, REG_EXTENDED,
+                         "\\.stage[[:space:]]*=[[:space:]]*BOOT_STAGE_([A-Z_]*)",
+                         "", "", "");
+    if (cr) return cr;
+    cr = pair_comp(ord, REG_EXTENDED,
+                   "\\.order[[:space:]]*=[[:space:]]*(-?[0-9]*)", "", "", "",
+                   nam, REG_EXTENDED,
+                   "\\.name[[:space:]]*=[[:space:]]*\"([^\"]*)\"", "", "", "");
+    if (cr) regfree(stg);
+    return cr;
+}
+
+static int si_die(struct si_acc *a, const char *fmt, const char *arg)
+{
+    snprintf(a->err, sizeof a->err, fmt, arg);
+    a->rc = 2;
+    return 2;
+}
+
+static int si_feed(struct si_acc *a, const regex_t *stg, const regex_t *ord,
+                   const regex_t *nam, const char *line)
+{
+    char stage[32], order[16], name[SI_NAME];
+    if (!si_cap(stg, line, stage, sizeof stage) || !stage[0]) return 0;
+    if (!si_cap(ord, line, order, sizeof order) || !order[0]
+        || !si_cap(nam, line, name, sizeof name) || !name[0])
+        return si_die(a, "check_sysinit_ordering: FATAL — record line missing .order/.name: %s\n",
+                      line);
+    int rank = si_rank_of(stage);
+    if (rank < 0)
+        return si_die(a, "check_sysinit_ordering: FATAL — unknown BOOT_STAGE_%s (update STAGE_RANK)\n",
+                      stage);
+    if (a->n >= SI_MAX)
+        return si_die(a, "check_sysinit_ordering: FATAL — too many boundary records\n", "");
+    a->rec[a->n].rank = rank;
+    a->rec[a->n].order = (int)strtol(order, NULL, 10);
+    memcpy(a->rec[a->n].name, name, sizeof name);
+    a->n++;
+    return 0;
+}
+
+static int si_finish(struct si_acc *a, char *out, size_t outsz, int *nrec)
+{
+    if (a->rc) return 2;
+    if (a->n == 0)
+        return si_die(a, "check_sysinit_ordering: FATAL — no boundary records found in %s\n",
+                      k_si_src);
+    qsort(a->rec, (size_t)a->n, sizeof a->rec[0], si_cmp);
+    size_t used = 0;
+    for (int i = 0; i < a->n; i++) {
+        int k = snprintf(out + used, outsz - used, "%02d %06d %s\n",
+                         a->rec[i].rank, a->rec[i].order, a->rec[i].name);
+        if (k < 0 || (size_t)k >= outsz - used)
+            return si_die(a, "z23-lint: derived buffer overflow\n", "");
+        used += (size_t)k;
+    }
+    if (nrec) *nrec = a->n;
+    return 0;
+}
+
+static int si_from_buf(const char *src, char *out, size_t outsz, int *nrec,
+                       char *err, size_t errsz)
+{
+    regex_t stg, ord, nam;
+    int cr = si_comp(&stg, &ord, &nam);
+    if (cr) return cr;
+    struct si_acc a = { 0 };
+    char buf[1024];
+    if (snprintf(buf, sizeof buf, "%s", src) >= (int)sizeof buf) {
+        drop3(&stg, &ord, &nam);
+        return die("z23-lint: selftest buffer overflow\n", "");
+    }
+    for (char *p = buf, *nl; p; p = nl ? nl + 1 : NULL) {
+        nl = strchr(p, '\n');
+        if (nl) *nl = '\0';
+        if (si_feed(&a, &stg, &ord, &nam, p)) break;
+        if (!nl) break;
+    }
+    drop3(&stg, &ord, &nam);
+    int rc = si_finish(&a, out, outsz, nrec);
+    if (rc) snprintf(err, errsz, "%s", a.err);
+    return rc;
+}
+
+static int si_load(struct si_acc *a)
+{
+    regex_t stg, ord, nam;
+    int cr = si_comp(&stg, &ord, &nam);
+    if (cr) return cr;
+    FILE *f = fopen(k_si_src, "r");
+    if (!f) {
+        drop3(&stg, &ord, &nam);
+        return die("z23-lint: cannot open %s\n", k_si_src);
+    }
+    char *line = NULL;
+    size_t cap = 0;
+    ssize_t n;
+    while ((n = getline(&line, &cap, f)) >= 0) {
+        if (n > 0 && line[n - 1] == '\n') line[n - 1] = '\0';
+        if (si_feed(a, &stg, &ord, &nam, line)) break;
+    }
+    int fr = fin(f, line, k_si_src, 0);
+    drop3(&stg, &ord, &nam);
+    if (a->rc) { fputs(a->err, stderr); return 2; }
+    return fr;
+}
+
+static int check_sysinit_ordering_run(int argc, char **argv)
+{
+    struct si_acc a = { 0 };
+    int rc = si_load(&a);
+    if (rc) return rc;
+    char der[SI_OUT], gold[SI_OUT];
+    int nrec = 0;
+    if (si_finish(&a, der, sizeof der, &nrec)) { fputs(a.err, stderr); return 2; }
+    if (argc >= 1 && strcmp(argv[0], "--update") == 0) {
+        FILE *g = fopen(k_si_gold, "w");
+        if (!g) return die("z23-lint: cannot open %s\n", k_si_gold);
+        size_t dn = strlen(der);
+        rc = fwrite(der, 1, dn, g) != dn;
+        if (fclose(g) != 0 && rc == 0) return die("z23-lint: fclose failed: %s\n", k_si_gold);
+        if (rc) return die("z23-lint: write failed\n", "");
+        printf("[check_sysinit_ordering] golden updated (%d records)\n", nrec);
+        return 0;
+    }
+    FILE *g = fopen(k_si_gold, "r");
+    if (!g) {
+        fputs("check_sysinit_ordering: FATAL — missing golden tools/lint/sysinit_ordering_golden.txt (run --update)\n",
+              stderr);
+        return 2;
+    }
+    size_t used = fread(gold, 1, sizeof gold - 1, g);
+    rc = ferror(g) ? die("z23-lint: read failed: %s\n", k_si_gold) : 0;
+    if (rc == 0 && used == sizeof gold - 1 && !feof(g))
+        rc = die("z23-lint: file too large: %s\n", k_si_gold);
+    gold[used] = '\0';
+    if (fclose(g) != 0 && rc == 0) return die("z23-lint: fclose failed: %s\n", k_si_gold);
+    if (rc) return rc;
+    if (strcmp(gold, der) != 0) {
+        fprintf(stderr, "--- %s\n%s+++ derived\n%s", k_si_gold, gold, der);
+        fputs("[check_sysinit_ordering] FAIL — sysinit boundary order drifted from the golden.\n"
+              "[check_sysinit_ordering] If intentional: tools/lint/check_sysinit_ordering.sh --update\n",
+              stderr);
+        return 1;
+    }
+    int nl = 0;
+    for (size_t i = 0; i < used; i++) if (gold[i] == '\n') nl++;
+    printf("[check_sysinit_ordering] OK — %d boundary records match the golden\n", nl);
+    return 0;
+}
+
+static int si_want(const char *src, int want_rc, const char *need)
+{
+    char out[SI_OUT], err[256];
+    int n = 0, rc = si_from_buf(src, out, sizeof out, &n, err, sizeof err);
+    int bad = rc != want_rc || (want_rc ? strstr(err, need) == NULL : strcmp(out, need) != 0);
+    if (bad)
+        fprintf(stderr, "check_sysinit_ordering selftest: want rc %d got %d\n", want_rc, rc);
+    return bad;
+}
+
+static int check_sysinit_ordering_selftest(void)
+{
+    const char *fwd =
+        "{ .stage = BOOT_STAGE_WALLET_LOADED, .order = 10, .name = \"wallet_loaded\" }\n"
+        "{ .stage = BOOT_STAGE_BLOCK_INDEX_LOADED, .order = 10, .name = \"block_index_loaded\" }\n";
+    const char *rev =
+        "{ .stage = BOOT_STAGE_BLOCK_INDEX_LOADED, .order = 10, .name = \"block_index_loaded\" }\n"
+        "{ .stage = BOOT_STAGE_WALLET_LOADED, .order = 10, .name = \"wallet_loaded\" }\n";
+    const char *exp = "04 000010 wallet_loaded\n05 000010 block_index_loaded\n";
+    int bad = si_want(fwd, 0, exp) | si_want(rev, 0, exp)
+            | si_want("{ .stage = BOOT_STAGE_NOPE, .order = 1, .name = \"x\" }\n", 2,
+                      "unknown BOOT_STAGE_NOPE (update STAGE_RANK)")
+            | si_want("{ .stage=BOOT_STAGE_INIT, .name=\"x\" }\n", 2,
+                      "record line missing .order/.name:")
+            | si_want("", 2, "no boundary records found in engine/composition/src/boot.c");
+    return st_ok(bad, "check_sysinit_ordering selftest: OK\n");
+}
+
 struct lint_gate {
     const char *name;
     int (*run)(int argc, char **argv);
@@ -825,6 +1104,8 @@ static const struct lint_gate k_gates[] = {
     { "check-pthread-create", check_pthread_create_run, check_pthread_create_selftest },
     { "check-silent-error-returns", check_silent_error_returns_run,
       check_silent_error_returns_selftest },
+    { "check-no-gnu-va-args", check_no_gnu_va_args_run, check_no_gnu_va_args_selftest },
+    { "check-sysinit-ordering", check_sysinit_ordering_run, check_sysinit_ordering_selftest },
 };
 
 int main(int argc, char **argv)
