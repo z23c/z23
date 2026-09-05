@@ -546,6 +546,7 @@ ZCL_MODULE_CAPABILITY("engine/composition/src/boot_mesh_status_requester.c", CAP
 ZCL_MODULE_CAPABILITY("engine/composition/src/boot_mesh_terminal.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("engine/composition/src/boot_mesh_terminal_client.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("engine/composition/src/boot_mesh_terminal_rpc.c", CAP_FS_WRITE, "")
+ZCL_MODULE_CAPABILITY("engine/composition/src/mesh_tunnel.c", CAP_NETWORK|CAP_FS_READ|CAP_FS_WRITE, "the TCP tunnel service: binds and accepts on 127.0.0.1 for the entrances an operator opens, dials 127.0.0.1 and only 127.0.0.1 for a port an allow row admits, copies bytes over those sockets, and reads and rewrites the datadir allow table that is the whole authority admitting a target")
 ZCL_MODULE_CAPABILITY("engine/composition/src/boot_mint_anchor.c", CAP_FS_WRITE|CAP_FS_READ, "")
 ZCL_MODULE_CAPABILITY("engine/composition/src/boot_mint_anchor_bundle_export.c", CAP_FS_WRITE|CAP_FS_READ, "")
 ZCL_MODULE_CAPABILITY("engine/composition/src/boot_mint_anchor_drive.c", CAP_FS_WRITE|CAP_CLOCK, "")
