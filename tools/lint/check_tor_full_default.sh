@@ -55,6 +55,14 @@ note() { printf '%s: FAIL — %s\n' "$GATE" "$1" >&2; fail=1; }
 # make this gate pass or fail on where somebody put a line break.
 mk_joined() { sed -e :a -e '/\\$/{N;s/\\\n//;ta}' "$1"; }
 
+# In-place edit without `sed -i`, which is GNU-only (BSD sed demands an
+# explicit backup suffix) and which check-shell-host-assumptions counts as
+# host-assumption debt. Only the selftest's throwaway fixtures go through it.
+edit_file() {
+    local f="$1" expr="$2" tmp="$1.zcl-edit"
+    sed -e "$expr" "$f" > "$tmp" && mv -f "$tmp" "$f"
+}
+
 check_root() {
     local root="$1" mk="$1/Makefile" f joined
     [ -f "$mk" ] || { note "no Makefile under $root"; return 1; }
@@ -155,35 +163,32 @@ run_selftest() {
 
     # 1. The refusal sentence drifts in the standalone installer copy.
     seed "$bad"
-    sed -i 's/refusing to package a tor=stub binary/refusing to install a stub binary/' \
-        "$bad/tools/scripts/install_z23.sh"
+    edit_file "$bad/tools/scripts/install_z23.sh" 's/refusing to package a tor=stub binary/refusing to install a stub binary/'
     expect reject "$bad" "a reworded refusal sentence in install_z23.sh"
 
     # 2. The bootstrap include is dropped, so a plain make links the stub.
     seed "$bad"
-    sed -i 's@^-include \$(TOR_BOOTSTRAP_MK)$@# removed@' "$bad/Makefile"
+    edit_file "$bad/Makefile" 's@^-include \$(TOR_BOOTSTRAP_MK)$@# removed@'
     expect reject "$bad" "no \$(TOR_BOOTSTRAP_MK) include"
 
     # 3. ZCL_TOR stops defaulting to full.
     seed "$bad"
-    sed -i 's@^ZCL_TOR ?= full$@ZCL_TOR ?= stub@' "$bad/Makefile"
+    edit_file "$bad/Makefile" 's@^ZCL_TOR ?= full$@ZCL_TOR ?= stub@'
     expect reject "$bad" "ZCL_TOR defaulting to something other than full"
 
     # 4. The forced-stub release path comes back.
     seed "$bad"
-    sed -i 's%ZCL_C23_PORTABLE_RELEASE=1 %ZCL_C23_PORTABLE_RELEASE=1 TOR_FULL= %' \
-        "$bad/tools/scripts/build_c23_portable_release.sh"
+    edit_file "$bad/tools/scripts/build_c23_portable_release.sh" 's%ZCL_C23_PORTABLE_RELEASE=1 %ZCL_C23_PORTABLE_RELEASE=1 TOR_FULL= %'
     expect reject "$bad" "TOR_FULL= forced empty again"
 
     # 5. `make install` stops reading the stamp.
     seed "$bad"
-    sed -i 's/zcl_tor_require_full/some_other_check/g' "$bad/Makefile"
+    edit_file "$bad/Makefile" 's/zcl_tor_require_full/some_other_check/g'
     expect reject "$bad" "make install no longer reading the tor stamp"
 
     # 6. ship.sh loses its reach to the refusal.
     seed "$bad"
-    sed -i 's/ZCL_TOR_STUB_REFUSAL/SOME_OTHER_MESSAGE/g; s/zcl_tor_require_full/some_other_check/g' \
-        "$bad/tools/ship.sh"
+    edit_file "$bad/tools/ship.sh" 's/ZCL_TOR_STUB_REFUSAL/SOME_OTHER_MESSAGE/g; s/zcl_tor_require_full/some_other_check/g'
     expect reject "$bad" "ship.sh no longer reaching the tor=stub refusal"
 
     rm -rf "$tmp"
