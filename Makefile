@@ -11696,7 +11696,7 @@ check-peer-floor-single-source:
 # os-substrate Rung 0: no system()/popen()/execlp() in the resident node
 # binary's own code — every shell-out migrated onto platform/modules/util spawn +
 # file_tree_ops. HARD (FAIL); tools/ and tests/harness/include/test/ are out of scope.
-check-no-shellouts:
+check-no-shellouts: $(LINTC_TOOL)
 	@echo "→ Gate: no_shellouts (os-substrate Rung 0)"
 	@./tools/lint/check_no_shellouts.sh
 
@@ -12045,7 +12045,7 @@ check-consensus-parity:
 # engine/composition/commands/*.def must supply a non-empty `semantics` argument (the
 # OUTPUT-interpretation contract). The compiler enforces presence; this gate
 # rejects the empty/blank placeholder and fails loud on a hollow scan.
-check-command-contract:
+check-command-contract: $(LINTC_TOOL)
 	@echo "══ LINT: command-contract semantics ══"
 	@./tools/lint/check_command_contract.sh
 

@@ -14,6 +14,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 static const char k_ls_all[] = "git ls-files -z";
 static const char k_ls_refs[] =
@@ -293,8 +294,10 @@ static int walk_src(const char *dir, int hdrs,
                 rc = die("z23-lint: cannot stat %s\n", path);
             else if (S_ISDIR(st.st_mode))
                 rc = walk_src(path, hdrs, scan, ctx);
-            else if (S_ISREG(st.st_mode) && nl >= 2 && name[nl - 2] == '.'
-                     && (name[nl - 1] == 'c' || (hdrs && name[nl - 1] == 'h')))
+            else if (S_ISREG(st.st_mode) && nl >= 2
+                     && ((hdrs == 2 && nl >= 4 && memcmp(name + nl - 4, ".def", 4) == 0)
+                         || (hdrs != 2 && name[nl - 2] == '.'
+                             && (name[nl - 1] == 'c' || (hdrs && name[nl - 1] == 'h')))))
                 rc = scan(path, ctx);
         }
         free(names[i]);
@@ -1507,7 +1510,8 @@ static int repo_shape_room_dirs(const char *shape, char out[][RS_PATH], int max,
     return 0;
 }
 
-struct clock_acc { regex_t *re; char *buf; size_t cap, used; };
+struct clock_acc { regex_t *re; char *buf; size_t cap, used;
+                   int (*keep)(const char *, const char *); };
 
 static int clock_comp(regex_t *re)
 {
@@ -1534,7 +1538,7 @@ static int clock_keep(const char *path, const char *text)
 static int scan_clock(const char *path, void *ctx)
 {
     struct clock_acc *a = ctx;
-    if (!clock_keep(path, "")) return 0;
+    if (a->keep && !a->keep(path, "")) return 0;
     FILE *f = fopen(path, "r");
     if (!f) return die("z23-lint: cannot open %s\n", path);
     char *line = NULL;
@@ -1545,7 +1549,7 @@ static int scan_clock(const char *path, void *ctx)
         lineno++;
         if (regexec(a->re, line, 0, NULL, 0) != 0) continue;
         if (n > 0 && line[n - 1] == '\n') line[n - 1] = '\0';
-        if (!clock_keep(path, line)) continue;
+        if (a->keep && !a->keep(path, line)) continue;
         int k = snprintf(a->buf + a->used, a->cap - a->used, "%s:%d:%s\n",
                          path, lineno, line);
         if (ovf(k, a->cap - a->used)) { rc = 2; break; }
@@ -1586,7 +1590,9 @@ static int check_no_raw_clock_outside_platform_run(int argc, char **argv)
     if (rc) return rc;
     char matches[CLK_MATCH];
     matches[0] = '\0';
-    struct clock_acc a = { .re = &re, .buf = matches, .cap = sizeof matches, .used = 0 };
+    struct clock_acc a = {
+        .re = &re, .buf = matches, .cap = sizeof matches, .used = 0, .keep = clock_keep
+    };
     static const char *const prefix[] = {
         "tools", "engine/composition", "engine/application",
         "platform/adapters", "platform/ports"
@@ -1611,12 +1617,13 @@ static int check_no_raw_clock_outside_platform_run(int argc, char **argv)
     return rc ? rc : clock_grade(violations, mode);
 }
 
-static int clock_case(const regex_t *re, const char *path, const char *text,
-                      int want_n, int want_rc, const char *mode)
+static int keep_case(int (*keep)(const char *, const char *), const regex_t *re,
+                     const char *path, const char *text,
+                     int want_n, int want_rc, const char *mode)
 {
     char buf[256] = {0};
     int n = 0;
-    if (regexec(re, text, 0, NULL, 0) == 0 && clock_keep(path, text)
+    if (regexec(re, text, 0, NULL, 0) == 0 && keep(path, text)
         && ovf(snprintf(buf, sizeof buf, "%s:%d:%s\n", path, 1, text), sizeof buf))
         return 1;
     if (gate_count_and_report(buf, &n)) return 1;
@@ -1638,13 +1645,13 @@ static int check_no_raw_clock_outside_platform_selftest(void)
     const char *t = "check_no_raw_clock_outside_platform";
     int bad = want(t, &re, "int x = 1;", 0) | want(t, &re, hit, 1)
             | want(t, &re, "my_clock" "_gettime(&ts);", 0)
-            | clock_case(&re, "tools/lint/foo.c", "int x = 1;", 0, 0, "FAIL")
-            | clock_case(&re, "tools/lint/foo.c", hit, 1, 1, "FAIL")
-            | clock_case(&re, "platform/modules/platform/src/clock.c", hit, 0, 0, "FAIL")
-            | clock_case(&re, "tools/lint/foo.c", marked, 0, 0, "FAIL");
+            | keep_case(clock_keep, &re, "tools/lint/foo.c", "int x = 1;", 0, 0, "FAIL")
+            | keep_case(clock_keep, &re, "tools/lint/foo.c", hit, 1, 1, "FAIL")
+            | keep_case(clock_keep, &re, "platform/modules/platform/src/clock.c", hit, 0, 0, "FAIL")
+            | keep_case(clock_keep, &re, "tools/lint/foo.c", marked, 0, 0, "FAIL");
     const char *oldm = getenv("ZCL_LINT_MODE");
     if (setenv("ZCL_LINT_MODE", "WARN", 1) != 0) bad = 1;
-    bad |= clock_case(&re, "tools/lint/foo.c", hit, 1, 0, clock_mode());
+    bad |= keep_case(clock_keep, &re, "tools/lint/foo.c", hit, 1, 0, clock_mode());
     if (oldm) (void)setenv("ZCL_LINT_MODE", oldm, 1);
     else (void)unsetenv("ZCL_LINT_MODE");
     (void)lint_filter_excluded;
@@ -1652,6 +1659,193 @@ static int check_no_raw_clock_outside_platform_selftest(void)
     (void)repo_shape_room_dirs;
     regfree(&re);
     return st_ok(bad, "check_no_raw_clock_outside_platform selftest: OK\n");
+}
+
+static int so_keep(const char *path, const char *text)
+{
+    const char *t = text;
+    while (isspace((unsigned char)*t)) t++;
+    return strncmp(path, "tests/", 6) && !strstr(text, "// shellout-ok")
+        && *t != '*' && !(t[0] == '/' && (t[1] == '/' || t[1] == '*'));
+}
+
+static int so_comp(regex_t *re)
+{
+    return compile_pat(re, REG_EXTENDED, "(^|[^[:alnum:]_])sys" "tem[[:space:]]*\\(|",
+                       "(^|[^[:alnum:]_])po" "pen[[:space:]]*\\(|",
+                       "(^|[^[:alnum:]_])exec" "lp[[:space:]]*\\(", "");
+}
+
+static int so_summary(int v, const char *mode)
+{
+    return (printf("[check_no_shellouts] %d violation(s) found (mode: %s)\n", v, mode) < 0
+            || puts("[check_no_shellouts] the node must not shell out — use platform/modules/util spawn") < 0
+            || puts("[check_no_shellouts] (zcl_spawn_detached/zcl_spawn_capture) or") < 0
+            || puts("[check_no_shellouts] platform/modules/util file_tree_ops (zcl_tree_copy/zcl_tree_remove);") < 0
+            || puts("[check_no_shellouts] add // shellout-ok for a documented, reviewed exception") < 0)
+               ? die("z23-lint: write failed\n", "") : 0;
+}
+
+static int check_no_shellouts_run(int argc, char **argv)
+{
+    (void)argc; (void)argv;
+    regex_t re;
+    int rc = so_comp(&re), v = 0;
+    if (rc) return rc;
+    char matches[CLK_MATCH] = {0};
+    struct clock_acc a = { .re = &re, .buf = matches, .cap = sizeof matches, .keep = so_keep };
+    static const char *const roots[] = { "core", "engine", "contexts", "cognition", "platform" };
+    rc = clock_walk(roots, sizeof roots / sizeof roots[0], &a);
+    if (rc == 0) rc = gate_count_and_report(matches, &v);
+    if (rc == 0) rc = so_summary(v, clock_mode());
+    regfree(&re);
+    return rc ? rc : clock_grade(v, clock_mode());
+}
+
+static int check_no_shellouts_selftest(void)
+{
+    regex_t re;
+    if (so_comp(&re)) return 2;
+    char hit[48], marked[64], commented[56];
+    snprintf(hit, sizeof hit, "    sys%s", "tem(\"rm -rf /tmp/x\");");
+    snprintf(marked, sizeof marked, "%s // shellout-ok", hit);
+    snprintf(commented, sizeof commented, "    // sys%s", "tem(\"x\");");
+    int bad = keep_case(so_keep, &re, "engine/foo.c", "int x = 1;", 0, 0, "FAIL")
+            | keep_case(so_keep, &re, "engine/foo.c", hit, 1, 1, "FAIL")
+            | keep_case(so_keep, &re, "tests/foo.c", hit, 0, 0, "FAIL")
+            | keep_case(so_keep, &re, "engine/foo.c", marked, 0, 0, "FAIL")
+            | keep_case(so_keep, &re, "engine/foo.c", commented, 0, 0, "FAIL");
+    const char *oldm = getenv("ZCL_LINT_MODE");
+    if (setenv("ZCL_LINT_MODE", "WARN", 1) != 0) bad = 1;
+    bad |= keep_case(so_keep, &re, "engine/foo.c", hit, 1, 0, clock_mode());
+    if (oldm) (void)setenv("ZCL_LINT_MODE", oldm, 1);
+    else (void)unsetenv("ZCL_LINT_MODE");
+    regfree(&re);
+    return st_ok(bad, "check_no_shellouts selftest: OK\n");
+}
+
+struct cc_acc { regex_t *leaf, *empty; char *buf; size_t cap, used;
+                int n_files, n_leaf, n_empty; };
+
+static int cc_comp(regex_t *leaf, regex_t *empty)
+{
+    return pair_comp(leaf, REG_EXTENDED,
+                     "ZCL_COMMAND_(READY_READ|COMPAT_READ|PLANNED_READ|",
+                     "PLANNED_COMMAND|COMPAT_COMMAND|READY_COMMAND|DEV_READ|DEV_COMMAND)\\(",
+                     "", "", empty, REG_EXTENDED,
+                     "\"[[:space:]]*\"[[:space:]]*,[[:space:]]*(0|[1-9][0-9]*|ZCL_COMMAND_[A-Z_]+)",
+                     "", "", "");
+}
+
+static int cc_feed(struct cc_acc *a, const char *path, const char *line, int lineno)
+{
+    for (const char *p = line; ; ) {
+        regmatch_t m;
+        if (regexec(a->leaf, p, 1, &m, 0) != 0) break;
+        a->n_leaf++;
+        p += m.rm_eo > 0 ? (size_t)m.rm_eo : 1;
+    }
+    if (regexec(a->empty, line, 0, NULL, 0) != 0) return 0;
+    int k = snprintf(a->buf + a->used, a->cap - a->used, "%s:%d:%s\n", path, lineno, line);
+    if (ovf(k, a->cap - a->used)) return 2;
+    a->used += (size_t)k;
+    a->n_empty++;
+    return 0;
+}
+
+static int scan_cc(const char *path, void *ctx)
+{
+    struct cc_acc *a = ctx;
+    FILE *f = fopen(path, "r");
+    if (!f) return die("z23-lint: cannot open %s\n", path);
+    char *line = NULL;
+    size_t cap = 0;
+    ssize_t n;
+    int lineno = 0, rc = 0;
+    a->n_files++;
+    while ((n = getline(&line, &cap, f)) >= 0) {
+        if (n > 0 && line[n - 1] == '\n') line[n - 1] = '\0';
+        if ((rc = cc_feed(a, path, line, ++lineno)) != 0) break;
+    }
+    return fin(f, line, path, rc);
+}
+
+static int cc_msgs(int n_empty, int n_leaf, const char *hits, const char *mode)
+{
+    if (n_empty > 0) {
+        if (fputs(hits, stdout) < 0
+            || printf("[check_command_contract] %d leaf(s) with an empty/blank "
+                      "semantics argument (mode: %s)\n", n_empty, mode) < 0
+            || puts("  Every leaf must supply a specific one-line OUTPUT-interpretation") < 0
+            || puts("  semantics (source/freshness/units/completeness) — not \"\" and not") < 0
+            || puts("  a restatement of summary. See engine/modules/kernel/include/kernel/") < 0
+            || puts("  command_registry.h (struct zcl_command_spec.semantics).") < 0)
+            return die("z23-lint: write failed\n", "");
+        if (strcmp(mode, "FAIL") == 0) return 1;
+    }
+    return printf("[check_command_contract] PASS (%d leaves, all with semantics)\n",
+                  n_leaf) < 0 ? die("z23-lint: write failed\n", "") : 0;
+}
+
+static int check_command_contract_run(int argc, char **argv)
+{
+    (void)argc; (void)argv;
+    const char *dir = getenv("ZCL_COMMAND_CONTRACT_DIR");
+    if (!dir || !dir[0]) dir = "engine/composition/commands";
+    regex_t leaf, empty;
+    int cr = cc_comp(&leaf, &empty);
+    if (cr) return cr;
+    char hits[CLK_MATCH] = {0}, hint[4096];
+    struct cc_acc a = { .leaf = &leaf, .empty = &empty, .buf = hits, .cap = sizeof hits };
+    int rc = walk_src(dir, 2, scan_cc, &a);
+    if (rc == 0 && ovf(snprintf(hint, sizeof hint, "no *.def under: %s", dir), sizeof hint))
+        rc = 2;
+    if (rc == 0)
+        rc = gate_require_scanned(a.n_files, 1, "check_command_contract", hint);
+    if (rc == 0)
+        rc = gate_require_scanned(a.n_leaf, 125, "check_command_contract",
+                                  "leaf-macro population collapsed under floor");
+    if (rc == 0) rc = cc_msgs(a.n_empty, a.n_leaf, hits, clock_mode());
+    drop2(&leaf, &empty);
+    return rc;
+}
+
+static int cc_fatal(int count, int floor, const char *hint, const char *need)
+{
+    int save = dup(STDERR_FILENO);
+    FILE *tf = tmpfile();
+    char buf[2048] = {0};
+    if (save < 0 || !tf) return 1;
+    if (dup2(fileno(tf), STDERR_FILENO) < 0) { close(save); fclose(tf); return 1; }
+    int rc = gate_require_scanned(count, floor, "check_command_contract", hint);
+    fflush(stderr);
+    (void)dup2(save, STDERR_FILENO);
+    close(save);
+    rewind(tf);
+    if (fread(buf, 1, sizeof buf - 1, tf) == 0) buf[0] = '\0';
+    fclose(tf);
+    return rc != 2 || !strstr(buf, "FATAL") || !strstr(buf, need);
+}
+
+static int check_command_contract_selftest(void)
+{
+    regex_t leaf, empty;
+    if (cc_comp(&leaf, &empty)) return 2;
+    char hits[256] = {0};
+    struct cc_acc a = { .leaf = &leaf, .empty = &empty, .buf = hits, .cap = sizeof hits };
+    const char *okl = "ZCL_COMMAND_READY_READ(\"n\", \"s\", \"height from tip\", 0)";
+    const char *badl = "ZCL_COMMAND_READY_READ(\"n\", \"s\", \"\", 0)";
+    int bad = cc_feed(&a, "x.def", okl, 1) || a.n_leaf != 1 || a.n_empty != 0;
+    a.n_leaf = a.n_empty = 0;
+    a.used = 0;
+    hits[0] = '\0';
+    bad |= cc_feed(&a, "x.def", badl, 1) || a.n_leaf != 1 || a.n_empty != 1
+        || clock_grade(a.n_empty, "FAIL") != 1 || clock_grade(a.n_empty, "WARN") != 0;
+    drop2(&leaf, &empty);
+    bad |= cc_fatal(0, 1, "no *.def under: empty", "no *.def under:")
+        | cc_fatal(0, 125, "leaf-macro population collapsed under floor",
+                   "leaf-macro population collapsed under floor");
+    return st_ok(bad, "check_command_contract selftest: OK\n");
 }
 
 struct lint_gate {
@@ -1673,6 +1867,8 @@ static const struct lint_gate k_gates[] = {
     { "check-sysinit-ordering", check_sysinit_ordering_run, check_sysinit_ordering_selftest },
     { "check-no-raw-clock-outside-platform", check_no_raw_clock_outside_platform_run,
       check_no_raw_clock_outside_platform_selftest },
+    { "check-no-shellouts", check_no_shellouts_run, check_no_shellouts_selftest },
+    { "check-command-contract", check_command_contract_run, check_command_contract_selftest },
 };
 
 int main(int argc, char **argv)
