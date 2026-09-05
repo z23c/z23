@@ -6,6 +6,10 @@
 #include "command/native_dev_proof_command.h"
 
 #include "dev_proof.h"
+#ifdef ZCL_DEV_BUILD
+#include "base/hex.h"
+#include "dev_proof_signer.h"
+#endif
 #include "json/json.h"
 
 #include <stdio.h>
@@ -325,6 +329,67 @@ static void proof_wait(
 #endif
 }
 
+/* Read-only: what identity this box signs its receipts with, and whose
+ * receipts it will admit. Never creates a key — the first proof does that —
+ * so an operator can ask this question from any lane without side effects. */
+static void proof_signer(
+    const struct zcl_command_request *request, struct zcl_command_reply *reply)
+{
+    (void)request;
+#ifndef ZCL_DEV_BUILD
+    zcl_command_reply_fail(
+        reply, ZCL_COMMAND_STATUS_BLOCKED, ZCL_COMMAND_EXIT_BLOCKED,
+        "DEV_BUILD_REQUIRED", "dispatch", false, false,
+        "push-proof signer identity requires the dev binary", "make dev-bin");
+#else
+    uint8_t pubkey[ZCL_DEV_PROOF_SIGNER_PUBKEY_BYTES];
+    char hex[ZCL_DEV_PROOF_SIGNER_PUBKEY_HEX];
+    char key_path[ZCL_DEV_PROOF_SIGNER_PATH_MAX];
+    char allow_path[ZCL_DEV_PROOF_SIGNER_PATH_MAX];
+    struct zcl_dev_proof_allowlist_state allowlist = {0};
+    bool present = false;
+    const char *why = NULL;
+    if (!zcl_dev_proof_signer_paths(key_path, sizeof(key_path), allow_path,
+                                    sizeof(allow_path))) {
+        zcl_command_reply_fail(
+            reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
+            "SIGNER_STATE_ROOT_UNAVAILABLE", "resolve", false, false,
+            "could not resolve the owner-private development state root",
+            "set HOME or XDG_STATE_HOME");
+        return;
+    }
+    if (!zcl_dev_proof_signer_public(pubkey, &present, &why) ||
+        !zcl_dev_proof_signer_allowlist_state(&allowlist, &why)) {
+        (void)json_push_kv_str(&reply->data, "schema",
+                               "zcl.dev_proof_signer.v1");
+        (void)json_push_kv_str(&reply->data, "key_path", key_path);
+        zcl_command_reply_fail(
+            reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
+            "SIGNER_KEY_UNREADABLE", "resolve", false, false,
+            "this box has a signing key it cannot read",
+            why ? why : "signer_key_unreadable");
+        return;
+    }
+    zcl_hex_encode(pubkey, sizeof(pubkey), hex);
+    (void)json_push_kv_str(&reply->data, "schema", "zcl.dev_proof_signer.v1");
+    (void)json_push_kv_bool(&reply->data, "key_present", present);
+    (void)json_push_kv_str(&reply->data, "pubkey", present ? hex : "");
+    (void)json_push_kv_str(&reply->data, "key_path", key_path);
+    (void)json_push_kv_str(&reply->data, "allowlist_path", allow_path);
+    (void)json_push_kv_bool(&reply->data, "allowlist_present",
+                            allowlist.present);
+    (void)json_push_kv_int(&reply->data, "trusted_signers",
+                           (int64_t)allowlist.trusted);
+    (void)json_push_kv_int(&reply->data, "malformed_lines",
+                           (int64_t)allowlist.malformed);
+    (void)json_push_kv_bool(&reply->data, "self_listed", allowlist.self_listed);
+    if (!present)
+        (void)zcl_command_reply_add_next(
+            reply, "dev.proof.ensure", "{}",
+            "this box has no signing key yet; the first proof creates one");
+#endif
+}
+
 void zcl_native_dev_proof_dispatch(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
 {
@@ -335,6 +400,8 @@ void zcl_native_dev_proof_dispatch(
         proof_status(request, reply);
     else if (path && strcmp(path, "dev.proof.wait") == 0)
         proof_wait(request, reply);
+    else if (path && strcmp(path, "dev.proof.signer") == 0)
+        proof_signer(request, reply);
     else
         zcl_command_reply_fail(
             reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,

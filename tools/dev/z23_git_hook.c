@@ -7,6 +7,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "dev_proof_receipt.h"
+#include "dev_proof_signer.h"
 #include "base/hex.h"
 #include "base/safe_alloc.h"
 #include "platform/positioned_file.h"
@@ -545,6 +546,13 @@ static int admit_pair(const char *root, const char *local, const char *base)
     struct zcl_dev_acceptance_receipt_v1 receipt;
     char why[128] = {0};
     if (!read_exact_at(root, path, wire, sizeof(wire))) {
+        /* A cache written before receipts were signed is exactly the right
+         * size for the unsigned record. Say so by name instead of calling
+         * it missing: the operator's next step is the same re-prove, and
+         * the reason they are re-proving is legible. */
+        if (read_exact_at(root, path, wire,
+                          ZCL_DEV_PROOF_UNSIGNED_WIRE_BYTES))
+            return refusal(ZCL_DEV_PROOF_SIGNER_WHY_UNSIGNED, local, base, 0);
         int64_t eta = running_eta(root, local, base);
         return refusal(eta >= 0 ? "running" : "receipt-missing",
                        local, base, eta >= 0 ? eta : 0);

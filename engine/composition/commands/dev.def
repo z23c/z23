@@ -715,6 +715,26 @@ ZCL_COMMAND_DEV_COMMAND(
     "proof receipt waiting requires the dev binary",
     "z23-dev dev proof status")
 
+ZCL_COMMAND_DEV_READ(
+    "dev.proof.signer", "dev.proof", "",
+    "Show this box's receipt signing key and who it trusts",
+    "Prints the Ed25519 public key this box signs push-proof receipts with, "
+    "the owner-private paths that hold it and the signers.allow trust list, "
+    "and how many trusted and malformed lines that list has. Creates "
+    "nothing: the first proof creates the key. Copy the printed key into "
+    "another box's signers.allow to let it admit receipts proved here.", 0,
+    "dev,proof,signer,key,allowlist,receipt,push",
+    "zcl.dev_proof_signer_input.v1", "zcl.dev_proof_signer.v1",
+    "", "",
+    "z23-dev dev proof signer",
+    ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_INSTANT, ZCL_COMMAND_COST_TINY,
+    ZCL_COMMAND_LANE_LOCAL, ZCL_COMMAND_CAP_DEV_STATE_READ,
+    ZCL_COMMAND_TRAIT_IDEMPOTENT | ZCL_COMMAND_TRAIT_DEV_ONLY,
+    zcl_native_handle_dev_verify_change,
+    "push-proof signer identity requires the dev binary",
+    "z23-dev dev proof signer")
+
 ZCL_COMMAND_READY_READ(
     "dev.test.plan", "dev.test", "", "Map changed files to mandatory proof groups",
     "A deterministic mapping of the given file list to mandatory proof "

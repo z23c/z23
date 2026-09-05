@@ -1,7 +1,16 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
- * purpose: Canonical fixed-width local development acceptance receipts. */
+ * purpose: Canonical fixed-width signed local development acceptance
+ *          receipts.
+ *
+ * v1 sealed a receipt with a keyless SHA3-256 digest, so admission trusted
+ * whoever last wrote the cache file. v2 keeps that record byte for byte and
+ * appends a fixed signer trailer: the producer's Ed25519 public key and its
+ * signature over the whole sealed v1 body. The digest still says what the
+ * proof covered; the signature now says who ran it. */
 
 #include "dev_proof_receipt.h"
+
+#include "dev_proof_signer.h"
 
 #include "base/hex.h"
 #include "base/serialize_le.h"
@@ -12,12 +21,27 @@
 
 #define PROOF_MAGIC "Z23PRF1\0"
 #define PROOF_MAGIC_BYTES 8u
-#define PROOF_VERSION 1u
+#define PROOF_VERSION_UNSIGNED 1u
+#define PROOF_VERSION 2u
 #define PROOF_POLICY_VERSION 1u
 #define PROOF_FIXED_ROOTS 10u
 #define PROOF_DIMENSION_WIRE_BYTES 52u
-#define PROOF_SEAL_OFFSET (ZCL_DEV_PROOF_WIRE_BYTES - ZCL_DEV_PROOF_ROOT_BYTES)
+#define PROOF_SEAL_OFFSET \
+    (ZCL_DEV_PROOF_UNSIGNED_WIRE_BYTES - ZCL_DEV_PROOF_ROOT_BYTES)
+/* What the Ed25519 signature covers: a domain string and the entire sealed
+ * v1 body, whose last 32 bytes are the v1 digest. Signing the body rather
+ * than the digest alone means a single flipped byte anywhere in the record —
+ * including in the stored seal — is refused as signature_invalid instead of
+ * as some downstream structural surprise. */
+#define PROOF_SIGN_DOMAIN "zcl.dev_proof_receipt.v2"
+#define PROOF_SIGN_DOMAIN_BYTES (sizeof(PROOF_SIGN_DOMAIN) - 1u)
+#define PROOF_SIGN_MESSAGE_BYTES \
+    (PROOF_SIGN_DOMAIN_BYTES + ZCL_DEV_PROOF_UNSIGNED_WIRE_BYTES)
+/* The child receipt is untouched by v2: same magic, same version, same
+ * bytes, so a proof that only re-seals its parent does not orphan the
+ * children it already wrote. */
 #define CHILD_MAGIC "Z23CHD1\0"
+#define CHILD_VERSION 1u
 #define CHILD_SEAL_OFFSET \
     (ZCL_DEV_PROOF_CHILD_WIRE_BYTES - ZCL_DEV_PROOF_ROOT_BYTES)
 
@@ -110,9 +134,11 @@ static void get_bytes(const uint8_t **cursor, void *bytes, size_t len)
     *cursor += len;
 }
 
-bool zcl_dev_proof_receipt_serialize(
-    const struct zcl_dev_acceptance_receipt_v1 *receipt,
-    uint8_t out[ZCL_DEV_PROOF_WIRE_BYTES])
+/* The v1 body, always stamped with the current version. Every digest, every
+ * signature and the first 664 bytes of every stored record come from here,
+ * so there is exactly one canonical encoding of a receipt. */
+static bool serialize_body(const struct zcl_dev_acceptance_receipt_v1 *receipt,
+                           uint8_t out[ZCL_DEV_PROOF_UNSIGNED_WIRE_BYTES])
 {
     if (!receipt || !out)
         return false;
@@ -148,6 +174,19 @@ bool zcl_dev_proof_receipt_serialize(
     put_u32(&p, receipt->policy_version);
     put_u32(&p, receipt->complete);
     put_bytes(&p, receipt->seal, ZCL_DEV_PROOF_ROOT_BYTES);
+    return (size_t)(p - out) == ZCL_DEV_PROOF_UNSIGNED_WIRE_BYTES;
+}
+
+bool zcl_dev_proof_receipt_serialize(
+    const struct zcl_dev_acceptance_receipt_v1 *receipt,
+    uint8_t out[ZCL_DEV_PROOF_WIRE_BYTES])
+{
+    if (!receipt || !out || !receipt->has_signature ||
+        !serialize_body(receipt, out))
+        return false;
+    uint8_t *p = out + ZCL_DEV_PROOF_UNSIGNED_WIRE_BYTES;
+    put_bytes(&p, receipt->signer_pubkey, ZCL_DEV_PROOF_PUBKEY_BYTES);
+    put_bytes(&p, receipt->signature, ZCL_DEV_PROOF_SIGNATURE_BYTES);
     return (size_t)(p - out) == ZCL_DEV_PROOF_WIRE_BYTES;
 }
 
@@ -155,11 +194,18 @@ bool zcl_dev_proof_receipt_parse(
     const uint8_t *wire, size_t wire_len,
     struct zcl_dev_acceptance_receipt_v1 *out)
 {
-    if (!wire || !out || wire_len != ZCL_DEV_PROOF_WIRE_BYTES ||
-        memcmp(wire, PROOF_MAGIC, PROOF_MAGIC_BYTES) != 0)
+    bool signed_record;
+    if (wire_len == ZCL_DEV_PROOF_WIRE_BYTES)
+        signed_record = true;
+    else if (wire_len == ZCL_DEV_PROOF_UNSIGNED_WIRE_BYTES)
+        signed_record = false;
+    else
+        return false;
+    if (!wire || !out || memcmp(wire, PROOF_MAGIC, PROOF_MAGIC_BYTES) != 0)
         return false;
     const uint8_t *p = wire + PROOF_MAGIC_BYTES;
-    if (get_u32(&p) != PROOF_VERSION)
+    if (get_u32(&p) !=
+        (signed_record ? PROOF_VERSION : PROOF_VERSION_UNSIGNED))
         return false;
     memset(out, 0, sizeof(*out));
     out->local_commit_len = *p++;
@@ -192,6 +238,11 @@ bool zcl_dev_proof_receipt_parse(
     out->policy_version = get_u32(&p);
     out->complete = get_u32(&p);
     get_bytes(&p, out->seal, ZCL_DEV_PROOF_ROOT_BYTES);
+    if (signed_record) {
+        get_bytes(&p, out->signer_pubkey, ZCL_DEV_PROOF_PUBKEY_BYTES);
+        get_bytes(&p, out->signature, ZCL_DEV_PROOF_SIGNATURE_BYTES);
+        out->has_signature = true;
+    }
     return (size_t)(p - wire) == wire_len;
 }
 
@@ -199,12 +250,12 @@ static bool receipt_digest(const struct zcl_dev_acceptance_receipt_v1 *receipt,
                            uint8_t out[ZCL_DEV_PROOF_ROOT_BYTES])
 {
     struct zcl_dev_acceptance_receipt_v1 copy;
-    uint8_t wire[ZCL_DEV_PROOF_WIRE_BYTES];
+    uint8_t wire[ZCL_DEV_PROOF_UNSIGNED_WIRE_BYTES];
     if (!receipt || !out)
         return false;
     copy = *receipt;
     memset(copy.seal, 0, sizeof(copy.seal));
-    if (!zcl_dev_proof_receipt_serialize(&copy, wire))
+    if (!serialize_body(&copy, wire))
         return false;
     struct sha3_256_ctx sha;
     sha3_256_init(&sha);
@@ -215,11 +266,40 @@ static bool receipt_digest(const struct zcl_dev_acceptance_receipt_v1 *receipt,
     return true;
 }
 
+/* The exact bytes the signer signs and the verifier checks. */
+static bool receipt_sign_message(
+    const struct zcl_dev_acceptance_receipt_v1 *receipt,
+    uint8_t out[PROOF_SIGN_MESSAGE_BYTES])
+{
+    if (!receipt || !out)
+        return false;
+    memcpy(out, PROOF_SIGN_DOMAIN, PROOF_SIGN_DOMAIN_BYTES);
+    return serialize_body(receipt, out + PROOF_SIGN_DOMAIN_BYTES);
+}
+
 bool zcl_dev_proof_receipt_seal(struct zcl_dev_acceptance_receipt_v1 *receipt)
 {
+    uint8_t message[PROOF_SIGN_MESSAGE_BYTES];
+    const char *why = NULL;
     if (!receipt)
         return false;
-    return receipt_digest(receipt, receipt->seal);
+    /* Seal over a record that carries no signature yet, so the digest a
+     * verifier recomputes never depends on the signature covering it. */
+    receipt->has_signature = false;
+    memset(receipt->signer_pubkey, 0, sizeof(receipt->signer_pubkey));
+    memset(receipt->signature, 0, sizeof(receipt->signature));
+    if (!receipt_digest(receipt, receipt->seal) ||
+        !receipt_sign_message(receipt, message))
+        return false;
+    if (!zcl_dev_proof_signer_sign(message, sizeof(message),
+                                   receipt->signer_pubkey,
+                                   receipt->signature, &why)) {
+        memset(receipt->signer_pubkey, 0, sizeof(receipt->signer_pubkey));
+        memset(receipt->signature, 0, sizeof(receipt->signature));
+        return false; /* no unsigned fallback: an unsealed receipt is a NO */
+    }
+    receipt->has_signature = true;
+    return true;
 }
 
 bool zcl_dev_proof_receipt_child_set_root(
@@ -268,6 +348,23 @@ bool zcl_dev_proof_receipt_validate(
         memcmp(receipt->local_commit, local, local_len) != 0 ||
         memcmp(receipt->remote_base, base, base_len) != 0)
         return fail(why, why_len, "receipt_commit_or_base_mismatch");
+    /* Identity of the signer is decided before anything the record claims
+     * about itself, so a forged or edited record is named as forged rather
+     * than as whichever structural check its edit happened to trip. The one
+     * check that runs first is the commit/base pair above: a correctly
+     * signed receipt for a different push is a mismatch, not a forgery. */
+    if (!receipt->has_signature)
+        return fail(why, why_len, ZCL_DEV_PROOF_SIGNER_WHY_UNSIGNED);
+    uint8_t message[PROOF_SIGN_MESSAGE_BYTES];
+    const char *signer_why = NULL;
+    if (!receipt_sign_message(receipt, message))
+        return fail(why, why_len, "receipt_encoding_failed");
+    if (!zcl_dev_proof_signer_verify(message, sizeof(message),
+                                     receipt->signer_pubkey,
+                                     receipt->signature, &signer_why))
+        return fail(why, why_len,
+                    signer_why ? signer_why
+                               : ZCL_DEV_PROOF_SIGNER_WHY_SIGNATURE_INVALID);
     if (receipt->policy_version != PROOF_POLICY_VERSION ||
         receipt->complete != 1)
         return fail(why, why_len, "receipt_policy_incomplete");
@@ -306,7 +403,7 @@ bool zcl_dev_proof_child_receipt_create(
         return false;
     uint8_t *p = out;
     put_bytes(&p, CHILD_MAGIC, PROOF_MAGIC_BYTES);
-    put_u32(&p, PROOF_VERSION);
+    put_u32(&p, CHILD_VERSION);
     put_u32(&p, (uint32_t)id);
     put_bytes(&p, dimension->receipt_root, ZCL_DEV_PROOF_ROOT_BYTES);
     put_u32(&p, dimension->selected);
@@ -333,7 +430,7 @@ bool zcl_dev_proof_child_receipt_validate(
         memcmp(wire, CHILD_MAGIC, PROOF_MAGIC_BYTES) != 0)
         return false;
     const uint8_t *p = wire + PROOF_MAGIC_BYTES;
-    if (get_u32(&p) != PROOF_VERSION || get_u32(&p) != (uint32_t)id)
+    if (get_u32(&p) != CHILD_VERSION || get_u32(&p) != (uint32_t)id)
         return false;
     uint8_t evidence[ZCL_DEV_PROOF_ROOT_BYTES], seal[ZCL_DEV_PROOF_ROOT_BYTES];
     get_bytes(&p, evidence, sizeof(evidence));

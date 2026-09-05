@@ -2330,9 +2330,24 @@ static int test_ic_proof_dependency_crosses_filesystems(void)
 
 #endif
 
+/* Sealing a receipt now needs this box's Ed25519 signing key, which lives
+ * under the resolved state root. Point that root into this group's own
+ * test-tmp tree for the whole group, so a test run creates a throwaway key
+ * instead of touching (or depending on) the operator's real one. The group
+ * runs in its own child process, so the environment change is contained. */
+static void ic_isolate_state_root(void)
+{
+    static char state[PATH_MAX];
+    char base[PATH_MAX - 64];
+    test_make_tmpdir(base, sizeof(base), "impact_composition", "state");
+    if (snprintf(state, sizeof(state), "%s/state", base) > 0)
+        setenv("XDG_STATE_HOME", state, 1);
+}
+
 int test_impact_composition(void)
 {
     int failures = 0;
+    ic_isolate_state_root();
     failures += test_ic_truncated_closure_preserves_groups();
     failures += test_ic_closure_capacity_follows_corpus();
     failures += test_ic_large_plan_preserves_groups();
