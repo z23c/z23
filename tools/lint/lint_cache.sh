@@ -188,6 +188,8 @@ lint_cache_never_reason() {
             echo "expands ~ to \$HOME and probes paths outside the repo, and executes other lint gates as oracles" ;;
         check-no-stray-untracked-source)
             echo "its entire job is reading untracked and ignored worktree state; also the always-fresh backstop" ;;
+        check-no-hardlink-seeding)
+            echo "reads current dependency inode link counts, including ignored files; source content hashes do not cover this state" ;;
         check-no-stray-root-files)
             echo "'ls -A .' reads the real root directory listing, ignored entries included" ;;
         check-fuzz-artifact-ledger)

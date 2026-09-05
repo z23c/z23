@@ -147,6 +147,7 @@ gate_command() {
         check-package-anatomy)             echo './tools/lint/check_package_anatomy.sh --selftest && ./tools/lint/check_package_anatomy.sh' ;;
         check-coins-lookup-nullcheck)      echo 'tools/scripts/check_coins_lookup_nullcheck.sh' ;;
         check-observability-pairing)       echo '"$ZCL_LINT_BIN_DIR/check_observability_pairing"' ;;
+        check-no-hardlink-seeding)         echo '"$ZCL_LINT_BIN_DIR/check_no_hardlink_seeding" --selftest && "$ZCL_LINT_BIN_DIR/check_no_hardlink_seeding"' ;;
         check-silent-errors-services)      echo './tools/lint/check_silent_error_returns.sh engine/services/src services service "use LOG_ERR/LOG_FAIL/LOG_RETURN, prev-line error log, or mark // raw-return-ok:<reason>"' ;;
         check-silent-errors-controllers)   echo './tools/lint/check_silent_error_returns.sh engine/controllers/src controllers controller "use LOG_ERR/LOG_RETURN, prev-line fprintf, or mark // raw-return-ok:<reason>"' ;;
         check-silent-errors-jobs)          echo './tools/lint/check_silent_error_returns.sh engine/jobs/src jobs job "use LOG_ERR/LOG_FAIL/LOG_RETURN, prev-line error log, or mark // raw-return-ok:<reason>"' ;;

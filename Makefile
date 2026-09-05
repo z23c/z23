@@ -11004,6 +11004,21 @@ check-observability-pairing: tools/check_observability_pairing
 	@echo "══ LINT: observable stderr diagnostics ══"
 	@$(BIN_DIR)/check_observability_pairing
 
+HARDLINK_SEEDING_SRCS = tools/check_no_hardlink_seeding.c \
+    platform/modules/platform/src/directory_compat.c \
+    platform/modules/platform/src/file_metadata.c platform/modules/base/src/safe_alloc.c
+.PHONY: check-no-hardlink-seeding
+$(BIN_DIR)/check_no_hardlink_seeding: $(HARDLINK_SEEDING_SRCS)
+	@mkdir -p $(dir $@)
+	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
+	    $(ZCL_PLATFORM_CPPFLAGS) \
+	    -Iplatform/modules/platform/include -Iplatform/modules/base/include \
+	    -o $@ $(HARDLINK_SEEDING_SRCS)
+
+check-no-hardlink-seeding: $(BIN_DIR)/check_no_hardlink_seeding
+	@$(BIN_DIR)/check_no_hardlink_seeding --selftest
+	@$(BIN_DIR)/check_no_hardlink_seeding
+
 # Gate E1's binary — the file-size policy checker (see check-file-size-ceiling
 # below). Three sources, no external deps: the tool, platform/modules/platform's UTF-8
 # directory listing (dirent on POSIX, FindFirstFileW on Win32) and the checked
@@ -13006,6 +13021,7 @@ LINT_GATES := \
     check-blob-read-bounds \
     check-coins-lookup-nullcheck \
     check-observability-pairing \
+    check-no-hardlink-seeding \
     check-silent-errors-services \
     check-silent-errors-controllers \
     check-silent-errors-jobs \
@@ -13184,6 +13200,7 @@ LINT_GATES := \
 # umbrellas: run_lint.sh dispatches the same gate set in cold, cached, and
 # cold-audit modes, so their build prerequisites must not drift apart.
 LINT_BUILT_PREREQS = tools/core_seal tools/check_observability_pairing \
+	$(BIN_DIR)/check_no_hardlink_seeding \
 	$(ZCODE_PACKAGE_REGISTRY_CHECK_BIN) $(JSONQ_BIN) \
 	$(FILE_SIZE_POLICY_BIN) $(Z23_BOOTSTRAP_BIN) $(EQUIHASH_FACT_TOOL) \
 	$(BIN_DIR)/z23_bounded_run $(BIN_DIR)/agent_sha3 $(RETRIEVAL_EVAL_BIN)

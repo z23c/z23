@@ -281,6 +281,7 @@ assert green).
 | `check-coins-lookup-nullcheck` | HARD | Coins lookups null-check the returned coin before use. |
 | `check-log-macro-return-type` | HARD | Returning `LOG_*` macros match the enclosing function return type (`LOG_FAIL` only in bool-returning functions, `LOG_ERR` only in int-returning functions, `LOG_NULL` only in pointer-returning functions). |
 | `check-observability-pairing` | HARD | `fprintf(stderr,…)` pairs with an event emit / terminal propagation. Override `// obs-ok:<tag>`. |
+| `check-no-hardlink-seeding` | HARD | Regular files beneath `vendor/`, `build/hotswap/`, and `build/githooks/`, including ignored dependencies, must own their inodes (`st_nlink == 1`). The uncached C23 checker refuses unreadable roots and traversal limits; symlinks are not traversed. Repair shared paths only when no proof is in flight: replacement changes the donor's ctime. This is a local filesystem observation, not immutable proof. |
 | `check-pthread-create` | HARD | Thread spawns go through the sanctioned registry, not raw `pthread_create`. |
 | `check-no-runtime-abort` | RATCHET | New runtime `assert(` / `abort(` in network-reachable modules. `_Static_assert` is NOT counted. Override `// abort-ok:<reason>`. |
 
@@ -1272,6 +1273,7 @@ add/remove a gate.
 - `check-mind-owns-rebuild`
 - `check-no-stray-root-files`
 - `check-observability-pairing`
+- `check-no-hardlink-seeding`
 - `check-hex-codec-single`
 - `check-one-result-type`
 - `check-one-write-path`
