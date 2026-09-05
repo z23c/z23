@@ -1683,6 +1683,54 @@ static int case_cli_argv(void)
         EN_CHECK("an unknown CLI effort is refused",
                  engine_cli_argv_build(fileq, &invalid_effort, argv,
                                        ENGINE_CLI_ARGV_MAX) == 0);
+
+        const struct engine_vendor *grok = engine_by_id("grok-cli");
+        EN_CHECK("grok-cli exposes its resume flag", grok != NULL
+                 && grok->cli_resume_flag != NULL
+                 && strcmp(grok->cli_resume_flag, "--resume") == 0);
+        if (grok) {
+            const char *session = "23c9be10-5084-43a4-8e1a-2735a4650981";
+            struct engine_cli_inputs base_resume = in;
+            base_resume.reasoning_effort = "low";
+            struct engine_cli_inputs resumed = base_resume;
+            resumed.resume_session_id = session;
+            size_t base_n = engine_cli_argv_build(grok, &base_resume, argv,
+                                                   ENGINE_CLI_ARGV_MAX);
+            const char *base_argv[ENGINE_CLI_ARGV_MAX];
+            memcpy(base_argv, argv, sizeof(base_argv));
+            size_t resumed_n = engine_cli_argv_build(grok, &resumed, argv,
+                                                      ENGINE_CLI_ARGV_MAX);
+            bool has_resume = false, has_id = false, has_restore = false;
+            bool preserved = resumed_n == base_n + 2;
+            for (size_t i = 0; preserved && i < base_n; i++)
+                preserved = strcmp(base_argv[i], argv[i]) == 0;
+            for (size_t i = 1; i < resumed_n; i++) {
+                if (strcmp(argv[i], "--resume") == 0) has_resume = true;
+                if (strcmp(argv[i], session) == 0) has_id = true;
+                if (strcmp(argv[i], "--restore-code") == 0) has_restore = true;
+            }
+            EN_CHECK("valid Grok resume appends exactly flag and session",
+                     base_n > 0 && resumed_n == base_n + 2
+                     && preserved && has_resume && has_id && !has_restore);
+            EN_CHECK("Grok resume needs the additional argv capacity",
+                     engine_cli_argv_build(grok, &base_resume, argv, base_n + 1) == base_n
+                     && engine_cli_argv_build(grok, &resumed, argv, resumed_n)
+                            == 0
+                     && engine_cli_argv_build(grok, &resumed, argv, resumed_n + 1)
+                            == resumed_n);
+
+            const char *bad[] = { "", " ",
+                "23c9be10-5084-43a4-8e1a-2735a465098",
+                "23c9be10-5084-43a4-8e1a-2735a4650981\n",
+                "23C9BE10-5084-43A4-8E1A-2735A4650981", NULL };
+            for (size_t i = 0; bad[i]; i++) {
+                struct engine_cli_inputs invalid = in;
+                invalid.resume_session_id = bad[i];
+                EN_CHECK("malformed Grok resume session is refused",
+                         engine_cli_argv_build(grok, &invalid, argv,
+                                               ENGINE_CLI_ARGV_MAX) == 0);
+            }
+        }
     }
 
     if (argq) {
@@ -1702,6 +1750,12 @@ static int case_cli_argv(void)
         struct engine_cli_inputs unsupported = argin;
         unsupported.reasoning_effort = "low";
         EN_CHECK("a CLI with no effort flag refuses an explicit effort",
+                 engine_cli_argv_build(argq, &unsupported, argv,
+                                       ENGINE_CLI_ARGV_MAX) == 0);
+        unsupported.reasoning_effort = NULL;
+        unsupported.resume_session_id =
+            "23c9be10-5084-43a4-8e1a-2735a4650981";
+        EN_CHECK("an unsupported CLI refuses a resume session",
                  engine_cli_argv_build(argq, &unsupported, argv,
                                        ENGINE_CLI_ARGV_MAX) == 0);
 
