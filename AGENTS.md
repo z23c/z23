@@ -306,6 +306,22 @@ mission.
 - Add a native command only for a recurring operator or agent product need,
   not for a one-off development convenience.
 - Keep tests scoped to local fixtures, isolated datadirs, and consenting peers.
+- **Fleet access is a prerequisite for distributed work.** Participating
+  machines must establish authenticated machine access in both directions
+  between each pair, using direct connections or tunnels where needed. Agents
+  coordinate and repair authorized development routes directly instead of
+  relying on human message relays. Before dispatch, verify a bounded command
+  and an exact-object transfer in each direction; a ping or delivered board
+  message alone does not qualify a route. Each receiver controls the permitted
+  workspace, commands, concurrency, access lifetime, and revocation. Reuse
+  existing SSH, tunnel, and native transport configuration; keep private
+  credentials local and endpoints out of public coordination messages. Record
+  route readiness and missing access in existing task/action/receipt evidence,
+  using peer aliases and object roots. Machine access retains the authority
+  boundaries above, including the separate production and custody gates.
+  Recurring fleet transport, tunnels, access control, and job execution belong
+  in the existing C23 node services. Shell is bootstrap, build, and test glue;
+  do not add a shell orchestration layer for these product capabilities.
 - Use existing CAS, task, candidate, action, receipt, queue, and signature
   authorities. Do not create a parallel source of truth for convenience.
 - No consensus or custody claim is complete because a unit test passed. Run

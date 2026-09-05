@@ -85,7 +85,10 @@ Split agreed on the board, 2026-09-04:
 ## Rules
 
 - GitHub carries exactly one branch, `main`. No other ref is ever pushed.
-- Shell access, keys, tunnels, and datadir paths never move between nodes.
+- Fleet machine access follows the [central operating contract](../../AGENTS.md#development-contract).
+  Authenticated SSH and tunnels connect consenting development machines;
+  each receiver controls and can revoke access. Private credentials and
+  endpoints stay in local configuration.
 - Shell scripts are interim. The real channel is a C23 leaf on every node.
 
 ## Async agent mail: the C23 leaf
