@@ -84,6 +84,36 @@ z23 dev know --subject=grok --relation=routable_for
 z23 dev know --subject=glm --relation=probe_for
 ```
 
+### Ledger columns
+
+`tools/dev/fleet_observe.c` reads the experiment ledger
+(`$XDG_STATE_HOME/zclassic23/experiments/rows.tsv`, or
+`~/.local/state/zclassic23/experiments/rows.tsv`), a tab-separated file, 22
+columns per row, one row per predict/result. This is the closed vocabulary a
+row is checked against; a value outside it, or a row missing a column, is a
+malformed ledger, refused by line number:
+
+| # | Column | Closed vocabulary / format |
+| --- | --- | --- |
+| 0 | ts | ISO-8601 UTC, e.g. `2026-09-05T11:40:56Z` |
+| 1 | kind | `predict`, `result` |
+| 2 | box | free text (hostname/box id) |
+| 3 | task_id | free text |
+| 4 | task_class | `read`, `verify`, `unit_docs`, `unit_c23_one_file`, `lane_multi_file`, `rebase_land`, `diagnose`, `land_train`, `unknown` |
+| 5 | story | free text |
+| 6 | executor | `claude-fable`, `claude-opus`, `claude-sonnet`, `claude-haiku`, `grok`, `glm`, `codex`, `muse`, `mac` |
+| 7 | harness | free text (e.g. `agent-tool`) |
+| 8 | model | free text (e.g. `sonnet`) |
+| 9 | effort | free text (e.g. `medium`) |
+| 10-16 | token/turn/wall ints | seven integers |
+| 17 | outcome | `LAND`, `FIX_LAND`, `FIX`, `HOLD`, `READY`, `blocked`, `timeout`, `wrong`, `landed`, `failed`, `unknown` |
+| 18-20 | lines_added / lines_removed / defects | integers |
+| 21 | note | free text |
+
+The vocabulary lives in code as `k_task_classes`, `k_executors`, `k_kinds`
+and `k_outcomes` in `tools/dev/fleet_observe.c`; this table is the prose
+mirror an operator reads.
+
 <!-- FLEET-OBSERVATIONS-BEGIN -->
 
 | Executor | Relation | Task class | n | window (days) |

@@ -9,7 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* ── closed vocabularies (SCHEMA.md) ──────────────────────────────────── */
+/* ── closed vocabularies (docs/agent/EXECUTOR_HEURISTICS.md) ──────── */
 
 static const char *const k_task_classes[] = {
     "read", "verify", "unit_docs", "unit_c23_one_file", "lane_multi_file",
@@ -145,17 +145,17 @@ bool fo_parse_line(const char *line, size_t line_no, struct fo_row *out,
     }
     if (!fo_task_class_known(fields[4])) {
         fo_err(err, err_cap, line_no,
-               "task_class is outside the closed vocabulary in SCHEMA.md");
+               "task_class is outside the closed vocabulary in docs/agent/EXECUTOR_HEURISTICS.md");
         return false;
     }
     if (!fo_executor_known(fields[6])) {
         fo_err(err, err_cap, line_no,
-               "executor is outside the closed vocabulary in SCHEMA.md");
+               "executor is outside the closed vocabulary in docs/agent/EXECUTOR_HEURISTICS.md");
         return false;
     }
     if (!fo_outcome_known(fields[17])) {
         fo_err(err, err_cap, line_no,
-               "outcome is outside the closed vocabulary in SCHEMA.md");
+               "outcome is outside the closed vocabulary in docs/agent/EXECUTOR_HEURISTICS.md");
         return false;
     }
 
@@ -369,8 +369,8 @@ size_t fo_render_def(const struct fo_observation *obs, size_t obs_count,
         "den_,\n"
         " *                window_days_, generated_unix_) — subject is an "
         "executor,\n"
-        " * object a task_class, both from the ledger's SCHEMA.md "
-        "vocabulary.\n"
+        " * object a task_class, both from the ledger's closed vocabulary "
+        "(docs/agent/EXECUTOR_HEURISTICS.md, \"Ledger columns\").\n"
         " * relation is one of routable_for, refused_for, probe_for, "
         "observed_for\n"
         " * or handles_with_finisher — ground verdicts a generator computed, "

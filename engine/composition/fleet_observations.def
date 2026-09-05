@@ -13,7 +13,7 @@
  *
  * FLEET_OBSERVED(subject_, relation_, object_, context_, num_, den_,
  *                window_days_, generated_unix_) — subject is an executor,
- * object a task_class, both from the ledger's SCHEMA.md vocabulary.
+ * object a task_class, both from the ledger's closed vocabulary (docs/agent/EXECUTOR_HEURISTICS.md, "Ledger columns").
  * relation is one of routable_for, refused_for, probe_for, observed_for
  * or handles_with_finisher — ground verdicts a generator computed, never
  * a number a reader has to interpret. See tools/dev/fleet_observe.h for

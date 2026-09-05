@@ -11,10 +11,11 @@
  * is the price of writing it: --check regenerates from a fixture ledger and
  * diffs the committed .def, so a hand edit is caught rather than believed.
  *
- * SCHEMA. ~/.local/state/zclassic23/experiments/SCHEMA.md is the ledger's
- * closed vocabulary for `task_class`, `executor`, `harness`, `effort` and
- * `outcome`. A row using a term outside that vocabulary, or missing a
- * column, is a malformed ledger — refused by line number, never guessed at.
+ * SCHEMA. docs/agent/EXECUTOR_HEURISTICS.md's "Ledger columns" table names
+ * the ledger's closed vocabulary for `task_class`, `executor`, `harness`,
+ * `effort` and `outcome`. A row using a term outside that vocabulary, or
+ * missing a column, is a malformed ledger — refused by line number, never
+ * guessed at.
  *
  * THRESHOLDS (named here, never as bare numbers in the emitted .def):
  *   FO_ROUTABLE_MIN_N     an (executor, task_class) pair needs this many
@@ -91,7 +92,8 @@ struct fo_observation {
 bool fo_parse_iso8601(const char *s, int64_t *out);
 
 /* Parses one non-header TSV ledger line (22 tab-separated fields per
- * SCHEMA.md) into `out`. `line_no` is 1-based, used only to build `err`.
+ * docs/agent/EXECUTOR_HEURISTICS.md's ledger columns table) into `out`.
+ * `line_no` is 1-based, used only to build `err`.
  * Returns false and fills `err` (bounded, always NUL-terminated) on: a wrong
  * field count, an unparsable timestamp, or a value outside the closed
  * enums this generator reads (kind, task_class, executor, outcome). */
