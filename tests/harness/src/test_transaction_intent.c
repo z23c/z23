@@ -1373,6 +1373,21 @@ int test_transaction_intent(void)
         PASS();
     }
 
+    TEST("wallet identity adopts persisted lane when runtime lane is unknown") {
+        if (ndb.open) node_db_close(&ndb);
+        ASSERT(node_db_open(&ndb, ":memory:"));
+        const uint8_t genesis[32] = { 0x71 };
+        struct wallet_identity_row identity;
+        ASSERT(wallet_identity_ensure(&ndb, genesis, "canonical", &identity));
+        struct wallet_identity_row out;
+        ASSERT(wallet_identity_ensure(&ndb, genesis, "unknown", &out) &&
+               strcmp(out.operator_lane, "canonical") == 0);
+        ASSERT(!wallet_identity_ensure(&ndb, genesis, "soak", &out));
+        ASSERT(wallet_identity_ensure(&ndb, genesis, "canonical", &out));
+        node_db_close(&ndb);
+        PASS();
+    }
+
     TEST("isolated test custody reserves and survives restart without "
          "entering dev or prod scope") {
         if (ndb.open) node_db_close(&ndb);

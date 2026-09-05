@@ -14,7 +14,8 @@ Type=oneshot
 # full safety-invariant writeup (NEVER touches a non-*.log file, NEVER
 # follows a symlink, flock-serialized per file).
 ExecStart=%h/github/zclassic23/tools/scripts/zcl-logrotate.sh
-TimeoutStartSec=120
+# copytruncate of a large log on a spinning disk needs minutes, not seconds.
+TimeoutStartSec=900
 Nice=15
 IOSchedulingClass=idle
 StandardOutput=journal

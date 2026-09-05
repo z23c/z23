@@ -103,12 +103,18 @@ bool wallet_identity_ensure(struct node_db *ndb,
     struct wallet_identity_row existing;
     if (wallet_identity_find(ndb, &existing)) {
         if (memcmp(existing.network_genesis, network_genesis, 32) != 0 ||
-            strcmp(existing.operator_lane, operator_lane) != 0)
+            (strcmp(existing.operator_lane, operator_lane) != 0 &&
+             strcmp(operator_lane, "unknown") != 0))
             LOG_FAIL("wallet_identity",
                      "identity conflict: persisted lane=%s does not match "
                      "runtime lane=%s or network genesis changed",
                      existing.operator_lane, operator_lane);
         *out = existing;
+        if (strcmp(existing.operator_lane, operator_lane) != 0)
+            LOG_INFO("wallet_identity",
+                     "identity: adopted persisted operator lane=%s "
+                     "(no -operator-lane given)",
+                     existing.operator_lane);
         return true;
     }
 

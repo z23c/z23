@@ -24,9 +24,8 @@ Description=Z23 SLO Pager — fail-state IS the page (canonical no-advance / sta
 Type=oneshot
 WorkingDirectory=%h/github/zclassic23
 ExecStart=%h/github/zclassic23/tools/scripts/slo_page_if_stalled.sh evaluate
-# One ledger read + a little arithmetic + at most a wall/append on fire —
-# sub-second work. 30s is a wide margin against a slow disk.
-TimeoutStartSec=30
+# walking the ledger on a spinning disk needs more than 30s
+TimeoutStartSec=120
 Nice=10
 StandardOutput=journal
 StandardError=journal
