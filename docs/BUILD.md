@@ -573,6 +573,23 @@ Notes:
   only when a window is actually opened.
 <!-- claim: file-present vendor/x11/SHA256SUMS # vendored X11 header pin -->
 <!-- claim: symbol-present vendor/x11/include Makefile # the include wiring -->
+- **raylib is vendored source, not an archive `make vendor` builds.** The Sky
+  Combat game (`apps/skycombat`) renders with raylib, and raylib is committed
+  as trimmed C source under `vendor/raylib/`: 20 upstream files — the five
+  renderer modules the game calls, their headers, the RGFW desktop backend and
+  the eight single-file dependencies those include — against ~306,000 lines
+  upstream. Audio, model/mesh file loading and the GLFW/SDL backends are not
+  imported. raylib keeps its own licence (zlib, `vendor/raylib/LICENSE`); the
+  origin commit and the local-patch record live in `vendor/raylib/SOURCE` and
+  `vendor/raylib/README.md`, and the file digests are pinned in
+  `vendor/raylib/SHA256SUMS`. It builds to `build/lib/libz23raylib.a` only
+  under the opt-in `make game` / `make game-check` targets, so the node build,
+  `build-only`, the push proof and every lint gate are untouched by it.
+  Vendored raylib compiles with warnings reported but not fatal;
+  `apps/skycombat` — our own code — stays `-std=c23 -Werror -pedantic`.
+<!-- claim: file-present vendor/raylib/SHA256SUMS # vendored raylib digest pin -->
+<!-- claim: file-present vendor/raylib/LICENSE # raylib keeps its zlib licence -->
+<!-- claim: symbol-present libz23raylib Makefile # the opt-in raylib archive -->
 
 ### Native instruments and deterministic text
 

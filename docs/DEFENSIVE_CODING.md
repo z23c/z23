@@ -249,6 +249,20 @@ Gates fall into three modes:
   allowed 801..1500 buffer that never fails, and a hard 1500-line limit —
   so there is nothing left to warn about between the target and the limit.
 
+Gates also apply to two tiers of code, and the tier is the directory, not the
+gate's mood. The **node** — `core/`, `engine/`, `contexts/`, `cognition/`,
+`platform/`, `tools/command/` — carries all of it: the AR lifecycle, the
+`LOG_*` macros, supervisor registration, the JSON init rule, no raw SQLite.
+**Application code under `apps/`** is held to C23 conformance and portability
+only: it compiles `-std=c23 -Werror -pedantic` and it must pass the
+portability gates (`check-windows-cross-syntax` scans `apps/skycombat` for
+exactly that reason), but the node-architecture gates do not apply to it,
+because a renderer has no models, no supervisor, and no database to be
+disciplined about. That scoping is wired as explicit path lists in each gate's
+`SCAN_ROOTS` — never by weakening a check or raising a baseline. Third-party
+source under `vendor/` is in neither tier: it is excluded from production
+scans wholesale, `vendor/raylib` exactly as `vendor/tor` is.
+
 Each gate's intent is one row below. Implementation scripts live under
 `tools/scripts/` or `tools/lint/`. The E-series gates are tested in
 `tests/harness/src/test_make_lint_gates.c` (plant fixture → assert trip → remove →

@@ -76,7 +76,12 @@ CC_BIN="${ZCL_MINGW_CC:-x86_64-w64-mingw32-gcc}"
 BASELINE="tools/lint/windows_cross_syntax_baseline.txt"
 SRC_FLOOR=150
 INC_FLOOR=50
-SCAN_ROOTS=(core engine contexts cognition platform tools/command)
+# apps/ is application code, not node code: the node doctrine gates do not
+# reach it (docs/DEFENSIVE_CODING.md), but portability is not doctrine - a
+# _WIN32 branch written under apps/skycombat has to cross-compile like any
+# other. It contributes no TU today because nothing there names _WIN32; the
+# root is here so the day one does, this gate reads it.
+SCAN_ROOTS=(core engine contexts cognition platform tools/command apps/skycombat)
 TEST_COMPAT_HEADER="test/windows_compat.h"
 
 echo "══ LINT: Windows cross-syntax (mingw -fsyntax-only over every _WIN32 TU) ══"
@@ -272,9 +277,9 @@ esac
 
 # ── Include search path ───────────────────────────────────────────────────
 # Proven recipe: every source-tree directory named include, excluding build,
-# test output, agent scratch, and vendor/tor, each as -I<dir>, plus -I. A
-# hand-picked subset misses headers such as core/hash.h, sqlite3.h, and
-# config/runtime.h.
+# test output, agent scratch, and the vendored third-party roots (vendor/tor,
+# vendor/raylib), each as -I<dir>, plus -I. A hand-picked subset misses
+# headers such as core/hash.h, sqlite3.h, and config/runtime.h.
 INC_NUL="$WORK/inc.nul"
 : > "$INC_NUL"
 printf '%s\0' -I. >> "$INC_NUL"
@@ -285,7 +290,8 @@ find . \( -path './.git' -o -path './.git/*' \
           -o -path './build' -o -path './build/*' \
           -o -path './test-tmp' -o -path './test-tmp/*' \
           -o -path './.claude' -o -path './.claude/*' \
-          -o -path './vendor/tor' -o -path './vendor/tor/*' \) -prune \
+          -o -path './vendor/tor' -o -path './vendor/tor/*' \
+          -o -path './vendor/raylib' -o -path './vendor/raylib/*' \) -prune \
      -o -type d -name include -print0 2>/dev/null |
     while IFS= read -r -d '' d; do
         printf '%s\0' "-I$d"
