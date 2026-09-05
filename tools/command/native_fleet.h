@@ -19,5 +19,14 @@ void zcl_native_handle_fleet_usage(const struct zcl_command_request *request,
 void zcl_native_handle_fleet_vitals_sample(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
+void zcl_native_handle_fleet_experiment_predict(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
+void zcl_native_handle_fleet_experiment_result(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
+void zcl_native_handle_fleet_experiment_stats(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
 
 #endif /* ZCL_NATIVE_FLEET_H */

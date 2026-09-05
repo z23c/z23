@@ -109,3 +109,81 @@ ZCL_COMMAND_READY_COMMAND(
     ZCL_COMMAND_LANE_LOCAL, ZCL_COMMAND_CAP_DEV_STATE_READ,
     ZCL_COMMAND_TRAIT_NONE,
     zcl_native_handle_fleet_vitals_sample)
+
+ZCL_COMMAND_BRANCH("fleet.experiment", "fleet",
+                   "Record and query delegation experiments",
+                   ZCL_COMMAND_LAYER_OPS)
+
+ZCL_COMMAND_READY_COMMAND(
+    "fleet.experiment.predict", "fleet.experiment", "",
+    "Append one signed predict row for a delegated task",
+    "Appends one kind=experiment subject=predict row to this machine's chain "
+    "and returns its sequence number. task_id is the note two rows of one "
+    "delegation link by. task_class, harness, model and effort are closed "
+    "vocabularies; a name that is not in the field's table, or the named "
+    "member unknown, is refused by that field's name rather than stored. "
+    "tokens and wall_s are the predicted cost, absent when omitted. It "
+    "contacts no peer.", 0,
+    "fleet,experiment,predict,delegation,tokens",
+    "zcl.fleet_experiment_predict.input.v1", "zcl.fleet_experiment_predict.v1",
+    "task_id,task_class,story,executor,harness,model,effort,tokens,wall_s,"
+    "outcome,note",
+    "task_id",
+    "z23 fleet experiment predict --task_id=u1 --task_class=read "
+    "--harness=manual --model=grok --effort=low --tokens=1200 --wall_s=30",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_DEV_MUTATION, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW, ZCL_COMMAND_CONFIRM_NONE,
+    ZCL_COMMAND_LANE_LOCAL, ZCL_COMMAND_CAP_DEV_STATE_READ,
+    ZCL_COMMAND_TRAIT_NONE,
+    zcl_native_handle_fleet_experiment_predict)
+
+ZCL_COMMAND_READY_COMMAND(
+    "fleet.experiment.result", "fleet.experiment", "",
+    "Append one signed result row for a delegated task",
+    "Appends one kind=experiment subject=result row to this machine's chain "
+    "and returns its sequence number. task_id is the note that pairs it with "
+    "the predict, when one was written. task_class, model and outcome are "
+    "closed vocabularies; a name that is not in the field's table, or the "
+    "named member unknown, is refused by that field's name rather than "
+    "stored. in, out, cache, reasoning, tool_uses, turns, wall_s, added, "
+    "removed and defects are the measured cost, absent when omitted. A "
+    "result with no matching predict is stored and later counted as "
+    "unpredicted. It contacts no peer.", 0,
+    "fleet,experiment,result,delegation,outcome",
+    "zcl.fleet_experiment_result.input.v1", "zcl.fleet_experiment_result.v1",
+    "task_id,task_class,story,executor,harness,model,effort,in,out,cache,"
+    "reasoning,tool_uses,turns,wall_s,outcome,added,removed,defects,note",
+    "task_id",
+    "z23 fleet experiment result --task_id=u1 --task_class=read "
+    "--model=grok --outcome=LAND --in=800 --out=200 --wall_s=28",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_DEV_MUTATION, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW, ZCL_COMMAND_CONFIRM_NONE,
+    ZCL_COMMAND_LANE_LOCAL, ZCL_COMMAND_CAP_DEV_STATE_READ,
+    ZCL_COMMAND_TRAIT_NONE,
+    zcl_native_handle_fleet_experiment_result)
+
+ZCL_COMMAND_READY_READ(
+    "fleet.experiment.stats", "fleet.experiment", "",
+    "Per task_class and model: counts, LAND rate, medians, predicted-vs-actual",
+    "Walks the experiment events this machine's index kept and prints one "
+    "line per (task_class, model) plus a total line. Each line reports "
+    "predict and result counts, LAND rate in basis points, median wall_s "
+    "and tokens of the results, predicted-versus-actual token ratio in "
+    "basis points, and how many results had no matching predict. task_class "
+    "and model, when passed, restrict the table; a name that is not in the "
+    "field's table is refused by that field's name. The answer comes from "
+    "the in-memory index alone: no peer is asked. Absent medians print as "
+    "absent, never as zero.", 16384,
+    "fleet,experiment,stats,delegation,model",
+    "zcl.fleet_experiment_stats.input.v1", "zcl.fleet_experiment_stats.v1",
+    "task_class,model", "",
+    "z23 fleet experiment stats --task_class=read --model=grok",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_LATENCY_INSTANT,
+    ZCL_COMMAND_COST_LOW, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_DEV_STATE_READ, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_fleet_experiment_stats)

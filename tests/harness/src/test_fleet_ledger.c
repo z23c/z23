@@ -116,6 +116,52 @@ static enum zcl_fleet_status fl_add_vital(struct fl_box *b, const char *id,
                                    &pair, 1, NULL, b->seed, NULL);
 }
 
+static enum zcl_fleet_status fl_add_predict(struct fl_box *b, const char *id,
+                                            uint8_t task_class, uint8_t harness,
+                                            uint8_t model, uint8_t effort,
+                                            int64_t tokens, int64_t wall_s)
+{
+    struct zcl_fleet_pair p[6];
+    size_t n = 0;
+    p[n].key = ZCL_FLEET_PAIR_TOKENS_IN;
+    p[n++].value = tokens;
+    p[n].key = ZCL_FLEET_PAIR_WALL_S;
+    p[n++].value = wall_s;
+    p[n].key = ZCL_FLEET_PAIR_TASK_CLASS;
+    p[n++].value = task_class;
+    p[n].key = ZCL_FLEET_PAIR_HARNESS;
+    p[n++].value = harness;
+    p[n].key = ZCL_FLEET_PAIR_MODEL;
+    p[n++].value = model;
+    p[n].key = ZCL_FLEET_PAIR_EFFORT;
+    p[n++].value = effort;
+    return zcl_fleet_ledger_append(b->ledger, ZCL_FLEET_KIND_EXPERIMENT,
+                                   ZCL_FLEET_EXPERIMENT_PREDICT, p, n, id,
+                                   b->seed, NULL);
+}
+
+static enum zcl_fleet_status fl_add_result(struct fl_box *b, const char *id,
+                                           uint8_t task_class, uint8_t model,
+                                           uint8_t outcome, int64_t tokens,
+                                           int64_t wall_s)
+{
+    struct zcl_fleet_pair p[5];
+    size_t n = 0;
+    p[n].key = ZCL_FLEET_PAIR_TOKENS_IN;
+    p[n++].value = tokens;
+    p[n].key = ZCL_FLEET_PAIR_WALL_S;
+    p[n++].value = wall_s;
+    p[n].key = ZCL_FLEET_PAIR_TASK_CLASS;
+    p[n++].value = task_class;
+    p[n].key = ZCL_FLEET_PAIR_OUTCOME;
+    p[n++].value = outcome;
+    p[n].key = ZCL_FLEET_PAIR_MODEL;
+    p[n++].value = model;
+    return zcl_fleet_ledger_append(b->ledger, ZCL_FLEET_KIND_EXPERIMENT,
+                                   ZCL_FLEET_EXPERIMENT_RESULT, p, n, id,
+                                   b->seed, NULL);
+}
+
 /* The one usage bucket for a provider over today, or false. */
 static bool fl_usage_bucket(struct zcl_fleet_ledger *ledger, uint16_t provider,
                             const uint8_t box_id[32],
@@ -212,9 +258,9 @@ int test_fleet_ledger(void)
     test_make_tmpdir(root, sizeof(root), "fleet_ledger", "store");
     test_make_tmpdir(wire_dir, sizeof(wire_dir), "fleet_ledger", "wire");
 
-    struct fl_box ma, mb, ta, wa, wb;
+    struct fl_box ma, mb, ta, wa, wb, ex;
     bool ma_open = false, mb_open = false, ta_open = false;
-    bool wa_open = false, wb_open = false;
+    bool wa_open = false, wb_open = false, ex_open = false;
 
     struct mesh_term_fixture f;
     bool fixture_open = false;
@@ -416,6 +462,122 @@ int test_fleet_ledger(void)
         ASSERT(led);
         ASSERT(zcl_fleet_ledger_peer_seq(led, sample_box) > before);
         zcl_fleet_ledger_close(led);
+        PASS();
+    }
+
+    TEST("fleet ledger: predict then result then stats, and a result "
+         "without a predict is unpredicted") {
+        ASSERT(fl_box_open(&ex, root, "exp", 0x41));
+        ex_open = true;
+        uint8_t task_class = 0, harness = 0, model = 0, effort = 0, outcome = 0;
+        ASSERT(zcl_fleet_experiment_enum_from_name("task_class", "read",
+                                                   &task_class) &&
+               zcl_fleet_experiment_enum_stored("task_class", task_class));
+        ASSERT(zcl_fleet_experiment_enum_from_name("harness", "manual",
+                                                   &harness) &&
+               zcl_fleet_experiment_enum_stored("harness", harness));
+        ASSERT(zcl_fleet_experiment_enum_from_name("model", "grok", &model) &&
+               zcl_fleet_experiment_enum_stored("model", model));
+        ASSERT(zcl_fleet_experiment_enum_from_name("effort", "low", &effort) &&
+               zcl_fleet_experiment_enum_stored("effort", effort));
+        ASSERT(zcl_fleet_experiment_enum_from_name("outcome", "LAND",
+                                                   &outcome) &&
+               zcl_fleet_experiment_enum_stored("outcome", outcome));
+        ASSERT_EQ(fl_add_predict(&ex, "t-exp-1", task_class, harness, model,
+                                 effort, 100, 10),
+                  ZCL_FLEET_OK);
+        ASSERT_EQ(fl_add_result(&ex, "t-exp-1", task_class, model, outcome, 80,
+                                12),
+                  ZCL_FLEET_OK);
+        struct zcl_fleet_experiment_group groups[8];
+        size_t count = 0;
+        uint64_t unpredicted = 0;
+        ASSERT_EQ(zcl_fleet_ledger_experiment_stats(ex.ledger, groups, 8,
+                                                    &count, &unpredicted, NULL),
+                  ZCL_FLEET_OK);
+        ASSERT_EQ(count, (size_t)1);
+        ASSERT_EQ(groups[0].task_class, task_class);
+        ASSERT_EQ(groups[0].model, model);
+        ASSERT_EQ(groups[0].predicts, UINT64_C(1));
+        ASSERT_EQ(groups[0].results, UINT64_C(1));
+        ASSERT_EQ(groups[0].lands, UINT64_C(1));
+        ASSERT_EQ(groups[0].unpredicted, UINT64_C(0));
+        ASSERT_EQ(unpredicted, UINT64_C(0));
+        ASSERT_EQ(groups[0].have_median_wall, (uint8_t)1);
+        ASSERT_EQ(groups[0].median_wall_s, INT64_C(12));
+        ASSERT_EQ(groups[0].have_median_tokens, (uint8_t)1);
+        ASSERT_EQ(groups[0].median_tokens, INT64_C(80));
+        ASSERT_EQ(groups[0].have_pred_actual, (uint8_t)1);
+        ASSERT_EQ(groups[0].pred_actual_bp, INT64_C(12500));
+
+        ASSERT_EQ(fl_add_result(&ex, "t-orphan", task_class, model, outcome, 50,
+                                8),
+                  ZCL_FLEET_OK);
+        ASSERT_EQ(zcl_fleet_ledger_experiment_stats(ex.ledger, groups, 8,
+                                                    &count, &unpredicted, NULL),
+                  ZCL_FLEET_OK);
+        ASSERT_EQ(count, (size_t)1);
+        ASSERT_EQ(groups[0].predicts, UINT64_C(1));
+        ASSERT_EQ(groups[0].results, UINT64_C(2));
+        ASSERT_EQ(groups[0].unpredicted, UINT64_C(1));
+        ASSERT_EQ(unpredicted, UINT64_C(1));
+        PASS();
+    }
+
+    TEST("fleet ledger: a bad task_class and a bad harness refuse by "
+         "name") {
+        if (!ex_open) {
+            ASSERT(fl_box_open(&ex, root, "exp-enum", 0x42));
+            ex_open = true;
+        }
+        uint8_t value = 0;
+        ASSERT(!zcl_fleet_experiment_enum_from_name("task_class",
+                                                    "not_a_class", &value));
+        ASSERT(!zcl_fleet_experiment_enum_from_name("harness", "not_a_harness",
+                                                    &value));
+        ASSERT(zcl_fleet_experiment_enum_from_name("task_class", "unknown",
+                                                   &value));
+        ASSERT(!zcl_fleet_experiment_enum_stored("task_class", value));
+        ASSERT_STR_EQ(zcl_fleet_status_label(ZCL_FLEET_EXPERIMENT_ENUM),
+                      "experiment_enum");
+
+        uint8_t task_class = 0, harness = 0, model = 0, effort = 0;
+        ASSERT(zcl_fleet_experiment_enum_from_name("task_class", "read",
+                                                   &task_class));
+        ASSERT(zcl_fleet_experiment_enum_from_name("harness", "manual",
+                                                   &harness));
+        ASSERT(zcl_fleet_experiment_enum_from_name("model", "grok", &model));
+        ASSERT(zcl_fleet_experiment_enum_from_name("effort", "low", &effort));
+        struct zcl_fleet_pair bad_class[4];
+        size_t n = 0;
+        bad_class[n].key = ZCL_FLEET_PAIR_TASK_CLASS;
+        bad_class[n++].value = 99;
+        bad_class[n].key = ZCL_FLEET_PAIR_HARNESS;
+        bad_class[n++].value = harness;
+        bad_class[n].key = ZCL_FLEET_PAIR_MODEL;
+        bad_class[n++].value = model;
+        bad_class[n].key = ZCL_FLEET_PAIR_EFFORT;
+        bad_class[n++].value = effort;
+        ASSERT_EQ(zcl_fleet_ledger_append(
+                      ex.ledger, ZCL_FLEET_KIND_EXPERIMENT,
+                      ZCL_FLEET_EXPERIMENT_PREDICT, bad_class, n, "t-bad-class",
+                      ex.seed, NULL),
+                  ZCL_FLEET_EXPERIMENT_ENUM);
+        struct zcl_fleet_pair bad_harness[4];
+        n = 0;
+        bad_harness[n].key = ZCL_FLEET_PAIR_TASK_CLASS;
+        bad_harness[n++].value = task_class;
+        bad_harness[n].key = ZCL_FLEET_PAIR_HARNESS;
+        bad_harness[n++].value = 99;
+        bad_harness[n].key = ZCL_FLEET_PAIR_MODEL;
+        bad_harness[n++].value = model;
+        bad_harness[n].key = ZCL_FLEET_PAIR_EFFORT;
+        bad_harness[n++].value = effort;
+        ASSERT_EQ(zcl_fleet_ledger_append(
+                      ex.ledger, ZCL_FLEET_KIND_EXPERIMENT,
+                      ZCL_FLEET_EXPERIMENT_PREDICT, bad_harness, n,
+                      "t-bad-harness", ex.seed, NULL),
+                  ZCL_FLEET_EXPERIMENT_ENUM);
         PASS();
     }
 
@@ -891,6 +1053,8 @@ _test_next:
         fl_box_close(&ta);
     if (mb_open)
         fl_box_close(&mb);
+    if (ex_open)
+        fl_box_close(&ex);
     if (ma_open)
         fl_box_close(&ma);
     test_rm_rf_recursive(wire_dir);

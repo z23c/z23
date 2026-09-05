@@ -60,6 +60,7 @@ one chain and replayed into another, or moved within its own.
 | `usage` | what one provider was asked to do, and what it cost | yes |
 | `task` | facts about a unit of work, including a quota | yes |
 | `vitals` | one sample of one declared fleet metric | yes |
+| `experiment` | a predicted cost and the measured result of one delegated task | yes |
 | `attest` | reserved for attested machine capability | no |
 | `reward` | reserved for game rewards | no |
 
@@ -147,6 +148,9 @@ z23 fleet usage --days=7
 z23 fleet usage --days=7 --provider=claude-opus
 z23 fleet ledger status
 z23 fleet ledger add --kind=usage --subject=grok --tokens_in=... --note=<task>
+z23 fleet experiment predict --task_id=<task> --task_class=read --harness=manual --model=grok --effort=low
+z23 fleet experiment result --task_id=<task> --task_class=read --model=grok --outcome=LAND
+z23 fleet experiment stats
 ```
 
 `fleet ledger status` prints, per box, how many rows are held, the last
@@ -181,6 +185,7 @@ the end of a batch leaves the replica exactly as it was.
 | `vital_unknown` | a `vitals` subject that is not in the catalog |
 | `ledger_kind_not_writable` | a kind this build reserves but does not write |
 | `ledger_window_exceeded` | a query asked for more days than the index keeps |
+| `experiment_enum` | an experiment field whose name is not in that field's closed vocabulary |
 
 A chain that refuses is never repaired and never skipped. The refusal is the
 evidence that something was altered, and rewriting the row would destroy it.
@@ -244,3 +249,48 @@ the one declaration. `make check-fleet-vitals` fails if they disagree.
 appends one signed `vitals` row per catalog metric `/proc` or `statvfs` can
 answer. An unknown id is refused by name. Unmeasurable facts are stored ABSENT,
 never as zero. A second sample appends a new sequence rather than overwriting.
+
+## Experiments
+
+A box records a prediction before a delegated task, then the result after.
+`task_id` is the note that links those two rows. Any machine that holds the
+chain can ask how they compare, from local files, without asking a peer.
+
+```
+z23 fleet experiment predict --task_id=<task> --task_class=read --harness=manual --model=grok --effort=low --tokens=... --wall_s=...
+z23 fleet experiment result --task_id=<task> --task_class=read --model=grok --outcome=LAND --in=... --out=... --wall_s=...
+z23 fleet experiment stats
+z23 fleet experiment stats --task_class=read --model=grok
+```
+
+`fleet experiment predict` writes `kind=experiment` `subject=predict`.
+`fleet experiment result` writes `kind=experiment` `subject=result`.
+`fleet experiment stats` prints one line per (`task_class`, `model`) plus a
+total line.
+
+The vocabularies are closed. A name that is not in the field's table, or the
+named member `unknown`, is refused as `experiment_enum` by that field's name
+and is never stored.
+
+task_class: `unknown` (not stored), `read`, `verify`, `unit_docs`,
+`unit_c23_one_file`, `lane_multi_file`, `rebase_land`, `diagnose`,
+`land_train`
+
+harness: `agent-tool`, `grok-cli-queue`, `opencode-remote`, `codex-exec`,
+`manual`, `stack-loop`, `dev-land`, `engine-unit`
+
+outcome: `unknown` (not stored), `LAND`, `FIX_LAND`, `FIX`, `HOLD`, `READY`,
+`blocked`, `timeout`, `wrong`, `landed`, `failed`
+
+model: `unknown` (not stored), `opus`, `sonnet`, `haiku`, `grok`, `glm`,
+`codex`
+
+effort: `unknown` (not stored), `low`, `medium`, `high`
+
+Stats reports, per `task_class` and `model`: how many predicts, how many
+results, the LAND rate in basis points, the median `wall_s` and tokens of
+the results, the predicted-versus-actual token ratio in basis points, and
+how many results had no matching predict. A total line sums the counts.
+Absent medians and ratios print as absent, never as zero. A result written
+with no earlier predict for the same `task_id` is stored and counted as
+unpredicted.

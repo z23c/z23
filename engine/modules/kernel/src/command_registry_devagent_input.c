@@ -86,6 +86,20 @@ bool zcl_command_registry_devagent_input_ok(const char *key,
                    json_get_int(value) <= 1000000000;
         return true;
     }
+    if (strcmp(key, "tokens") == 0 || strcmp(key, "wall_s") == 0 ||
+        strcmp(key, "in") == 0 || strcmp(key, "out") == 0 ||
+        strcmp(key, "cache") == 0 || strcmp(key, "reasoning") == 0 ||
+        strcmp(key, "tool_uses") == 0 || strcmp(key, "turns") == 0 ||
+        strcmp(key, "added") == 0 || strcmp(key, "removed") == 0 ||
+        strcmp(key, "defects") == 0) {
+        /* fleet.experiment.predict|result measured and predicted quantities.
+         * `--tokens=1200` types as an integer, so the default string branch
+         * would make the leaves uninvokable from a shell. The handler owns
+         * presence versus absence; the transport only admits a non-negative
+         * integer shape. These names are unique to those leaves today. */
+        *type_ok = value->type == JSON_INT && json_get_int(value) >= 0;
+        return true;
+    }
     return false;
 }
 
