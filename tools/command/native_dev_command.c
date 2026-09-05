@@ -2069,6 +2069,80 @@ void zcl_native_handle_dev_drive(
 
 #endif /* ZCL_DEV_BUILD || ZCL_TESTING */
 
+#if defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)
+struct zcl_dev_watch_start_info {
+    int64_t pid;
+    bool ready;
+    bool is_watcher;
+    enum zcl_devloop_publish_mode publish_mode;
+};
+
+struct zcl_dev_watch_start_wait_reply_internal {
+    enum zcl_command_status status;
+    enum zcl_command_exit exit_code;
+    const char *code;
+    const char *message;
+    bool retryable;
+};
+
+static struct zcl_dev_watch_start_wait_reply_internal
+dev_watch_start_wait_classify(
+    const struct zcl_dev_watch_start_info *started,
+    enum zcl_devloop_publish_mode requested_mode)
+{
+    struct zcl_dev_watch_start_wait_reply_internal reply = {
+        .status = ZCL_COMMAND_STATUS_PASSED,
+        .exit_code = ZCL_COMMAND_EXIT_OK,
+        .code = "",
+        .message = "",
+        .retryable = false,
+    };
+    if (started && started->pid > 1 && started->is_watcher &&
+        started->publish_mode == requested_mode) {
+        if (started->ready)
+            return reply;
+        reply.status = ZCL_COMMAND_STATUS_BLOCKED;
+        reply.exit_code = ZCL_COMMAND_EXIT_BLOCKED;
+        reply.code = "WATCH_STARTING";
+        reply.message =
+            "watcher did not finish source reconciliation within 5 seconds";
+        reply.retryable = true;
+        return reply;
+    }
+    reply.status = ZCL_COMMAND_STATUS_FAILED;
+    reply.exit_code = ZCL_COMMAND_EXIT_FAILED;
+    reply.code = "WATCH_START_FAILED";
+    reply.message = "watcher did not acquire its singleton lock";
+    reply.retryable = true;
+    return reply;
+}
+
+#ifdef ZCL_TESTING
+struct zcl_dev_watch_start_wait_reply
+zcl_native_dev_watch_start_wait_classify(
+    int64_t pid, bool ready, bool is_watcher, int publish_mode,
+    int requested_mode)
+{
+    struct zcl_dev_watch_start_info started = {
+        .pid = pid,
+        .ready = ready,
+        .is_watcher = is_watcher,
+        .publish_mode = (enum zcl_devloop_publish_mode)publish_mode,
+    };
+    struct zcl_dev_watch_start_wait_reply_internal inner =
+        dev_watch_start_wait_classify(
+            &started, (enum zcl_devloop_publish_mode)requested_mode);
+    return (struct zcl_dev_watch_start_wait_reply){
+        .status = (int)inner.status,
+        .exit_code = (int)inner.exit_code,
+        .code = inner.code,
+        .message = inner.message,
+        .retryable = inner.retryable,
+    };
+}
+#endif
+#endif
+
 #ifdef ZCL_DEV_BUILD
 
 static bool dev_reflex_policy_frozen_kat(const void *vtable,
@@ -3027,13 +3101,29 @@ static void dev_loop_ensure(
     for (int i = 0; i < 250 &&
          (!dev_watcher_active(root, &started) || !started.ready); i++)
         platform_sleep_ms(20);
-    if (started.pid <= 1 || !started.ready ||
-        started.publish_mode != requested_mode ||
-        !dev_pid_is_watcher(started.pid)) {
-        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
-                               ZCL_COMMAND_EXIT_FAILED, "WATCH_START_FAILED",
-                               "start", true, false,
-                               "watcher did not acquire its singleton lock", log);
+    struct zcl_dev_watch_start_info wait_obs = {
+        .pid = (int64_t)started.pid,
+        .ready = started.ready,
+        .is_watcher = dev_pid_is_watcher(started.pid),
+        .publish_mode = started.publish_mode,
+    };
+    struct zcl_dev_watch_start_wait_reply_internal wait =
+        dev_watch_start_wait_classify(&wait_obs, requested_mode);
+    if (wait.status == ZCL_COMMAND_STATUS_BLOCKED) {
+        char evidence[96];
+        (void)snprintf(evidence, sizeof(evidence),
+                       "watcher_id=%ld watcher_ready=false",
+                       (long)started.pid);
+        dev_emit_loop_status(root, reply);
+        zcl_command_reply_fail(reply, wait.status, wait.exit_code, wait.code,
+                               "start", wait.retryable, false, wait.message,
+                               evidence);
+        return;
+    }
+    if (wait.status != ZCL_COMMAND_STATUS_PASSED) {
+        zcl_command_reply_fail(reply, wait.status, wait.exit_code, wait.code,
+                               "start", wait.retryable, false, wait.message,
+                               log);
 #if defined(_WIN32)
         (void)platform_process_terminate(&child, 1);
         platform_process_close(&child);

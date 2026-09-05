@@ -7,9 +7,11 @@
 #include "test/test_core.h"
 #include "test/test_timing_budget.h"
 
+#include "command/native_dev_loop_command.h"
 #include "dev_activation.h"
 #include "dev_failure_store.h"
 #include "devloop.h"
+#include "kernel/command_registry.h"
 #include "hotswap/hotfork_capsule.h"
 #include "framework/app_definition.h"
 #include "framework/app_platform.h"
@@ -1679,6 +1681,49 @@ static int test_native_activation_result_mapping(void)
         ASSERT(!out.ok);
         ASSERT(out.capsule[0] == '\0');
         ASSERT(out.generation_hex[0] == '\0');
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_watch_start_wait_reply(void)
+{
+    int failures = 0;
+    TEST("dev platform: starting lock with a live watcher is blocked, dead pid fails") {
+        /* Fresh-start wait: a live watcher that holds the lock in `starting`
+         * is BLOCKED/WATCH_STARTING (retryable). A dead pid is still
+         * WATCH_START_FAILED — the lock was never acquired. */
+        struct zcl_dev_watch_start_wait_reply starting =
+            zcl_native_dev_watch_start_wait_classify(
+                4242, false, true, (int)ZCL_DEVLOOP_PUBLISH_VERIFY_ONLY,
+                (int)ZCL_DEVLOOP_PUBLISH_VERIFY_ONLY);
+        ASSERT(starting.status == (int)ZCL_COMMAND_STATUS_BLOCKED);
+        ASSERT(starting.exit_code == (int)ZCL_COMMAND_EXIT_BLOCKED);
+        ASSERT(starting.retryable);
+        ASSERT(strcmp(starting.code, "WATCH_STARTING") == 0);
+        ASSERT(strcmp(starting.message,
+                      "watcher did not finish source reconciliation within "
+                      "5 seconds") == 0);
+        struct zcl_dev_watch_start_wait_reply dead =
+            zcl_native_dev_watch_start_wait_classify(
+                4242, false, false, (int)ZCL_DEVLOOP_PUBLISH_VERIFY_ONLY,
+                (int)ZCL_DEVLOOP_PUBLISH_VERIFY_ONLY);
+        ASSERT(dead.status == (int)ZCL_COMMAND_STATUS_FAILED);
+        ASSERT(dead.exit_code == (int)ZCL_COMMAND_EXIT_FAILED);
+        ASSERT(dead.retryable);
+        ASSERT(strcmp(dead.code, "WATCH_START_FAILED") == 0);
+        ASSERT(strcmp(dead.message,
+                      "watcher did not acquire its singleton lock") == 0);
+        struct zcl_dev_watch_start_wait_reply pid1 =
+            zcl_native_dev_watch_start_wait_classify(
+                1, false, true, (int)ZCL_DEVLOOP_PUBLISH_VERIFY_ONLY,
+                (int)ZCL_DEVLOOP_PUBLISH_VERIFY_ONLY);
+        ASSERT(strcmp(pid1.code, "WATCH_START_FAILED") == 0);
+        struct zcl_dev_watch_start_wait_reply mismatch =
+            zcl_native_dev_watch_start_wait_classify(
+                4242, false, true, (int)ZCL_DEVLOOP_PUBLISH_APPLY,
+                (int)ZCL_DEVLOOP_PUBLISH_VERIFY_ONLY);
+        ASSERT(strcmp(mismatch.code, "WATCH_START_FAILED") == 0);
         PASS();
     } _test_next:;
     return failures;
@@ -3876,6 +3921,7 @@ static int test_dev_platform_platform_arm(void)
     failures += test_change_classification();
     failures += test_change_plan_closure();
     failures += test_watcher_publication_containment();
+    failures += test_watch_start_wait_reply();
     failures += test_watch_relevance();
     failures += test_core_classification();
     failures += test_core_refusal_envelope();
