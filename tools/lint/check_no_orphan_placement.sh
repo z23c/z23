@@ -48,10 +48,16 @@ fi
 # fixed Commons package layout (LICENSE/include/src/tests/zcode-package.json)
 # enforced by the package factory gate, and the corpus census counts them
 # through package-store intake — they have no node navigator group by design.
+# apps/ is application code, not node code. The navigator groups this gate
+# checks are the node's own (ci_group_for_path), and codeindex does not scan
+# apps/ at all — it is not in source_roots.def — so a file there resolves to the
+# catch-all "root" no matter where it sits. Its placement discipline is the
+# application's own layout, and its C23 and portability gates are separate; see
+# the two-tier rule in docs/DEFENSIVE_CODING.md §7.
 is_excluded() {
     local f="$1" base="${1##*/}"
     case "$f" in
-        vendor/*|build/*|tests/harness/fixtures/*|contexts/commons/packages/*) return 0 ;;
+        apps/*|vendor/*|build/*|tests/harness/fixtures/*|contexts/commons/packages/*) return 0 ;;
     esac
     case "$base" in
         _*) return 0 ;;
