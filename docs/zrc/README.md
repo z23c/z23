@@ -115,3 +115,7 @@ means.
   private fleet rooms, chat, presence, and membership ride mesh streams between
   paired members only; the public board, block relay, and DHT never carry a
   private row, room name, or post id that would reveal a private room exists.
+- [`0010-composable-proofs.md`](0010-composable-proofs.md) —
+  a signed Merkle tree of per-group verdict leaves, so a receiver admits a
+  tip when trusted producers' union covers the required closure; covered
+  work is never re-proven.
