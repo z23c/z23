@@ -2783,6 +2783,23 @@ void zcl_native_handle_fleet_wiki_history(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
 
+/* ── the per-node mind (tools/command/native_mind_command.c). `ask` reads the
+ * published index generation and NEVER rebuilds: a stale generation is
+ * refused with INDEX_STALE rather than answered, because the resident owns
+ * the rebuild and a superseded answer is wrong in a way the caller cannot
+ * see. `status --fleet` reads the mind rows peers already delivered inside
+ * signed mesh-status receipts and fails closed with no local node. Bound by
+ * engine/composition/commands/mind.def. */
+void zcl_native_handle_dev_mind_ask(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
+void zcl_native_handle_dev_mind_status(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
+void zcl_native_handle_dev_mind_serve(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
+
 #ifdef __cplusplus
 }
 #endif

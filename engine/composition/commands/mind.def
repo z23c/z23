@@ -1,0 +1,103 @@
+/* The per-node mind: one resident that owns rebuilding this box's code
+ * indexes, and the two questions everything else asks it.
+ *
+ * WHY IT EXISTS. Every leaf that opened a stale index used to rebuild it
+ * inside the query — measured at 6,750 to 12,301 ms, three of four runs
+ * ending fail-closed because a second writer had moved the tree. The mind
+ * makes that rebuild one process's job. Everything else asks, and a stale
+ * answer is refused rather than served.
+ *
+ * WHAT THIS BRANCH IS NOT. It is not an authority. `ask` reports where a
+ * symbol is, which group owns a file, and which groups a change touches; it
+ * decides nothing. No gate reads it and no verdict may cite it. It also
+ * never fetches: `status --fleet` reads mind rows peers already delivered
+ * inside signed, expiring mesh-status receipts the node collected on its own
+ * cadence, and says nothing at all when there is no node to have collected
+ * them.
+ *
+ * Consumer defines ZCL_COMMAND_*; see engine/composition/src/command_catalog.c. */
+
+ZCL_COMMAND_BRANCH("dev.mind", "dev",
+                   "The node's resident index owner, and what to ask it",
+                   ZCL_COMMAND_LAYER_DEV)
+
+ZCL_COMMAND_READY_READ(
+    "dev.mind.ask", "dev.mind", "",
+    "Ask this node's mind one bounded question about the tree",
+    "Answers one of six questions from the PUBLISHED index generation and "
+    "never rebuilds. `where_is` gives the exact definition site of a symbol, "
+    "falling back to near names when nothing matches exactly. `owns` gives "
+    "the group a file or a symbol's defining file belongs to; the full "
+    "territory scorecard is `code territory`. `tests_for` names the groups "
+    "the shared impact rules match for a path, and points at `code tests` "
+    "for the single group a proof routes to, because that routing policy is "
+    "owned there and is not restated here. `executor_for`, `trap_of` and "
+    "`next_passage` return not_yet_available: the fact rows and the story "
+    "walker they need are not in this tree, and inventing an answer would "
+    "fabricate exactly what those lanes exist to measure. A generation the "
+    "source tree has moved past is refused as INDEX_STALE carrying the index "
+    "root, its age, and the owning mind's last heartbeat — never answered "
+    "and never rebuilt.", 8192,
+    "mind,ask,where,owns,tests,symbol,index,stale",
+    "zcl.mind_ask_input.v1", "zcl.mind_answer.v1",
+    "kind,subject", "kind,subject",
+    "z23 dev mind ask where_is codeindex_open",
+    ZCL_COMMAND_LAYER_DEV, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_LATENCY_FAST,
+    ZCL_COMMAND_COST_LOW, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_CHECKOUT_READ | ZCL_COMMAND_CAP_DEV_STATE_READ,
+    ZCL_COMMAND_TRAIT_IDEMPOTENT | ZCL_COMMAND_TRAIT_DEV_ONLY,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_dev_mind_ask)
+
+ZCL_COMMAND_READY_READ(
+    "dev.mind.status", "dev.mind", "",
+    "Whether a mind is running here, and what each checkout's index holds",
+    "The local heartbeat — process, age, last rebuild — and one row per "
+    "registered checkout naming its index root, that generation's age, "
+    "whether the source tree has moved past it, whether a live owner claim "
+    "exists for it, and the groups the mind actually saw. `heartbeat_expired` "
+    "and `no_heartbeat` are distinct states and neither is reported as "
+    "running. With --fleet it also reads the mind row each paired node "
+    "delivered inside a signed, expiring mesh-status receipt this node "
+    "already collected; a peer that carried no mind row is reported as "
+    "not_reported, which is not the same as a peer with an empty index. "
+    "--fleet fails closed with no local node, because there is then nothing "
+    "collected to read and this command never dials a peer itself.", 16384,
+    "mind,status,heartbeat,index,fleet,peers,owner",
+    "zcl.mind_status_input.v1", "zcl.mind_status.v1",
+    "fleet", "",
+    "z23 dev mind status",
+    ZCL_COMMAND_LAYER_DEV, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_LATENCY_FAST,
+    ZCL_COMMAND_COST_LOW, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_DEV_STATE_READ,
+    ZCL_COMMAND_TRAIT_IDEMPOTENT | ZCL_COMMAND_TRAIT_DEV_ONLY,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_dev_mind_status)
+
+ZCL_COMMAND_READY_COMMAND(
+    "dev.mind.serve", "dev.mind", "",
+    "Run this node's mind until its checkout registry is removed",
+    "Takes the node-wide singleton lock, claims every checkout named in the "
+    "registry state file, watches each of their source trees through the "
+    "same platform watcher the dev loop uses, and rebuilds an index only "
+    "when that checkout's published generation is behind its tree. This is "
+    "the ONE process allowed to rebuild; check-mind-owns-rebuild proves no "
+    "other caller of codeindex_rebuild exists. It refuses to start when "
+    "another mind already holds this node or when no checkout is registered, "
+    "because a heartbeat claiming coverage nobody has is worse than none. "
+    "Removing the registry file retires it, and retiring releases every "
+    "claim so queries resume rather than refusing behind a dead owner. "
+    "`cycles` bounds the run for tests; the service runs it unbounded.", 4096,
+    "mind,serve,resident,rebuild,index,owner,watch",
+    "zcl.mind_serve_input.v1", "zcl.mind_serve.v1",
+    "cycles", "",
+    "z23 dev mind serve",
+    ZCL_COMMAND_LAYER_DEV, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_DEV_MUTATION, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_PERSISTENT, ZCL_COMMAND_COST_HIGH,
+    ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_CHECKOUT_READ | ZCL_COMMAND_CAP_CHECKOUT_WRITE |
+        ZCL_COMMAND_CAP_DEV_STATE_READ | ZCL_COMMAND_CAP_DEV_STATE_WRITE,
+    ZCL_COMMAND_TRAIT_DEV_ONLY,
+    zcl_native_handle_dev_mind_serve)
