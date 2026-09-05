@@ -67,8 +67,8 @@
  * the rebuild only through zcl_devagent_run_make() from
  * command/native_devagent.h — the same code path dev.agent.test and
  * dev.agent.mutate use. No second runner, no shell, no popen()/system().
- * Residency is read through a weak import of the watcher's own probe
- * (NULL wherever the watcher is not linked, where the leaf rebuilds).
+ * Dev builds read residency through the watcher's own probe. Other builds
+ * do not link the watcher and always take the rebuild path.
  * The leaf starts no node, touches no datadir, and writes nothing itself;
  * make and the runner write only under the checkout's build/.
  *
@@ -78,9 +78,9 @@
  */
 
 #include "command/native_command.h"
+#include "command/native_dev_loop_command.h"
 #include "command/native_devagent.h"
 
-#include "base/compiler.h"
 #include "controllers/agent_impact_rules.h"
 #include "dev/test_group_catalog.h"
 #include "json/json.h"
@@ -100,19 +100,16 @@
 
 /* The resident-loop probe lives in the dev-only watcher section of
  * native_dev_command.c, so release and test binaries link no such symbol.
- * Re-declare its exact address as a weak import — the same idiom
- * network_telemetry_fill.c uses for the Tor link fact — and read the
- * existing link-time fact instead of inventing a second detector. In a
- * binary that links the watcher (z23-dev) this is the real residency
- * check; everywhere else it is NULL and the leaf rebuilds. A loop this
- * binary cannot observe is no loop: rebuilding is the honest path. */
-extern bool zcl_native_dev_loop_proof_queue_ready(const char *repo_root)
-    ZCL_WEAK_IMPORT;
-
+ * Guard the reference with the definition's build flag so non-dev links
+ * require no watcher symbol. Without that probe the leaf must rebuild. */
 static bool dvh_loop_resident(const char *root)
 {
-    return zcl_native_dev_loop_proof_queue_ready != NULL &&
-           zcl_native_dev_loop_proof_queue_ready(root);
+#ifdef ZCL_DEV_BUILD
+    return zcl_native_dev_loop_proof_queue_ready(root);
+#else
+    (void)root;
+    return false;
+#endif
 }
 
 /* A refusal that does not name the command that fixes it is a dead end. */
