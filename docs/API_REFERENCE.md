@@ -74,15 +74,15 @@ z23 discover schema <path> --side=input|output
 
 | Catalog fact | Count |
 |---|---|
-| Registry entries (branches + leaves) | 836 |
+| Registry entries (branches + leaves) | 846 |
 | Top-level roots | 14 |
-| Branches | 188 |
-| Leaves (dispatchable command paths) | 648 |
-| … `ready` (live handler in this build) | 578 |
+| Branches | 191 |
+| Leaves (dispatchable command paths) | 655 |
+| … `ready` (live handler in this build) | 585 |
 | … `compat` (metadata only, names a fallback) | 39 |
 | … `planned` (fail-closed BLOCKED, exit 3) | 31 |
 | … dev-gated 🔧 (`ready` only in `z23-dev`) | 38 |
-| Leaves with `effect=mutate` | 227 |
+| Leaves with `effect=mutate` | 231 |
 | Leaves with `effect=destructive` | 5 |
 | Leaves requiring **owner** authority | 122 |
 
@@ -108,6 +108,7 @@ Per source file:
 | `engine/composition/commands/story.def` | 5 | 1 | 4 |
 | `engine/composition/commands/fleet_board.def` | 11 | 3 | 8 |
 | `engine/composition/commands/mind.def` | 4 | 1 | 3 |
+| `engine/composition/commands/fleet.def` | 10 | 3 | 7 |
 | `engine/composition/commands/telemetry/root.def` | 6 | 2 | 4 |
 | `engine/composition/commands/telemetry/watch.def` | 1 | 0 | 1 |
 | `engine/composition/commands/telemetry/runtime.def` | 4 | 1 | 3 |
@@ -175,7 +176,7 @@ The root order below is a wire contract, not a presentation choice.
 | `yardsale` | `yardsale` | branch | ready | For-sale-by-owner signed ads, settled bilaterally |
 | `zses` | `zses` | branch | ready | Session invites |
 | `story` | `story` | branch | ready | Rooted causal views of development work |
-| `fleet` | `fleet` | branch | ready | The fleet message board and wiki |
+| `fleet` | `fleet` | branch | ready | The fleet message board and wiki, and the owner's private fleet ledger |
 
 
 ## The tree, leaf by leaf
@@ -1733,7 +1734,11 @@ represented by its children's sections.
 | `story why` | ready | read / read / public · foreground/low | `workspace`, **`work`**, `datadir`, **`event`** | `zcl.story_why.v1` | `z23 story why work-<task-prefix> user_accepts` | Explain the exact causal chain for one development event |
 | `story diff` | ready | read / read / public · foreground/low | `workspace`, **`before`**, **`after`**, `datadir` | `zcl.story_diff.v1` | `z23 story diff work-<before-prefix> work-<after-prefix>` | Diff two exact-root development stories |
 
-### `fleet` — The fleet message board and wiki
+### `fleet` — The fleet message board and wiki, and the owner's private fleet ledger
+
+| Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
+|---|---|---|---|---|---|---|
+| `fleet usage` | ready | read / read / operator · instant/low | `days`, `provider`, `box` | `zcl.fleet_usage.v1` | `z23 fleet usage --days=7` | What every box spent, per provider, over the last days |
 
 #### `fleet.board` — Signed, gossiped posts every node carries
 
@@ -1752,6 +1757,27 @@ represented by its children's sections.
 | `fleet wiki read` | ready | read / read / operator · fast/low | **`slug`** | `zcl.fleet_board_post.v1` | `z23 fleet wiki read push-gate` | Read the latest revision of one page |
 | `fleet wiki list` | ready | read / read / operator · fast/low | none | `zcl.fleet_board_list.v1` | `z23 fleet wiki list` | Every page this node holds |
 | `fleet wiki history` | ready | read / read / operator · fast/low | **`slug`** | `zcl.fleet_board_list.v1` | `z23 fleet wiki history push-gate` | Every revision of one page, newest first |
+
+#### `fleet.ledger` — Write and inspect the ledger
+
+| Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
+|---|---|---|---|---|---|---|
+| `fleet ledger add` | ready | mutate / dev-mutation / operator · fast/low | **`kind`**, **`subject`**, `note`, `tokens_in`, `tokens_out`, `tokens_cached`, `tokens_reasoning`, `wall_ms`, `turns`, `tool_uses`, `cost_micro_usd`, `value`, `count`, `bytes`, `limit` | `zcl.fleet_ledger_add.v1` | `z23 fleet ledger add --kind=usage --subject=grok --tokens_in=1200` | Append one signed row to this box's own chain |
+| `fleet ledger status` | ready | read / read / operator · fast/low | none | `zcl.fleet_ledger_status.v1` | `z23 fleet ledger status` | Per box: rows held, last sequence, and how stale the replica is |
+
+#### `fleet.vitals` — Sample this box into the ledger
+
+| Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
+|---|---|---|---|---|---|---|
+| `fleet vitals sample` | ready | mutate / dev-mutation / operator · fast/low | `id` | `zcl.fleet_vitals_sample.v1` | `z23 fleet vitals sample` | Measure this box and append one signed vitals row per catalog metric |
+
+#### `fleet.experiment` — Record and query delegation experiments
+
+| Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
+|---|---|---|---|---|---|---|
+| `fleet experiment predict` | ready | mutate / dev-mutation / operator · fast/low | **`task_id`**, `task_class`, `story`, `executor`, `harness`, `model`, `effort`, `tokens`, `wall_s`, `outcome`, `note` | `zcl.fleet_experiment_predict.v1` | `z23 fleet experiment predict --task_id=u1 --task_class=read --harness=manual --model=grok --effort=low --tokens=1200 --wall_s=30` | Append one signed predict row for a delegated task |
+| `fleet experiment result` | ready | mutate / dev-mutation / operator · fast/low | **`task_id`**, `task_class`, `story`, `executor`, `harness`, `model`, `effort`, `in`, `out`, `cache`, `reasoning`, `tool_uses`, `turns`, `wall_s`, `outcome`, `added`, `removed`, `defects`, `note` | `zcl.fleet_experiment_result.v1` | `z23 fleet experiment result --task_id=u1 --task_class=read --model=grok --outcome=LAND --in=800 --out=200 --wall_s=28` | Append one signed result row for a delegated task |
+| `fleet experiment stats` | ready | read / read / operator · instant/low | `task_class`, `model` | `zcl.fleet_experiment_stats.v1` | `z23 fleet experiment stats --task_class=read --model=grok` | Per task_class and model: counts, LAND rate, medians, predicted-vs-actual |
 
 
 ## Aliases
