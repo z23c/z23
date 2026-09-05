@@ -334,10 +334,10 @@ static bool receipt_from_json(const struct json_value *o,
 
     int64_t n = 0;
     if (jint(o, "ts", &n) && n >= 0) r->ts = (uint64_t)n;
-    if (jint(o, "prompt_tokens", &n) && n >= 0) r->prompt_tokens = (uint64_t)n;
+    if (jint(o, "prompt_tokens", &n) && n >= 0) r->prompt_tokens = n;
     if (jint(o, "completion_tokens", &n) && n >= 0)
-        r->completion_tokens = (uint64_t)n;
-    if (jint(o, "wall_ms", &n) && n >= 0) r->wall_ms = (uint64_t)n;
+        r->completion_tokens = n;
+    if (jint(o, "wall_ms", &n) && n >= 0) r->wall_ms = n;
     if (jint(o, "http_status", &n)) r->http_status = n;
 
     const struct json_value *shown = json_get(o, "rules_shown");
@@ -431,6 +431,9 @@ zcl_rule_receipts_parse(const char *text, size_t len,
 
         struct zcl_rule_receipt r;
         memset(&r, 0, sizeof r);
+        r.prompt_tokens = -1;
+        r.completion_tokens = -1;
+        r.wall_ms = -1;
         if (!receipt_from_json(&v, &r)) {
             json_free(&v);
             return ZCL_RULE_CHAIN_MALFORMED;

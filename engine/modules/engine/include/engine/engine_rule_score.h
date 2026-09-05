@@ -167,9 +167,9 @@ struct zcl_rule_receipt {
     char     rules_shown[ZCL_RULE_SHOWN_MAX][ZCL_RULE_ID_MAX];
     uint32_t rules_shown_count;
     uint64_t ts;
-    uint64_t prompt_tokens;
-    uint64_t completion_tokens;
-    uint64_t wall_ms;
+    int64_t  prompt_tokens;   /* -1 when absent or malformed */
+    int64_t  completion_tokens;
+    int64_t  wall_ms;
     int64_t  http_status;
     /* outcome */
     bool     applied;

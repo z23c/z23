@@ -731,6 +731,59 @@ static int case_builtin(void)
     return failures;
 }
 
+/* Unknown measurements must not train a policy as zero-cost observations.
+ * Outcome scoring remains usable even when a provider reports no usage. */
+static int case_measurement_unknowns(void)
+{
+    int failures = 0;
+    static const struct {
+        const char *fields;
+        int64_t prompt, completion, wall;
+    } cases[] = {
+        {"", -1, -1, -1},
+        {"\"prompt_tokens\":-1,\"completion_tokens\":-1,\"wall_ms\":-1,",
+         -1, -1, -1},
+        {"\"prompt_tokens\":null,\"completion_tokens\":\"12\",\"wall_ms\":true,",
+         -1, -1, -1},
+        {"\"prompt_tokens\":-2,\"completion_tokens\":1.5,\"wall_ms\":{},",
+         -1, -1, -1},
+        {"\"prompt_tokens\":0,\"completion_tokens\":0,\"wall_ms\":0,", 0, 0, 0},
+        {"\"prompt_tokens\":12,\"wall_ms\":9999,", 12, -1, 9999},
+        {"\"completion_tokens\":34,\"wall_ms\":10000,", -1, 34, 10000},
+        {"\"prompt_tokens\":56,\"completion_tokens\":78,\"wall_ms\":10001,",
+         56, 78, 10001}
+    };
+    struct zcl_rule_receipt_log *parsed = calloc(1, sizeof *parsed);
+    ER_CHECK("measurement fixture allocates", parsed != NULL);
+    if (!parsed) return failures;
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        char line[1024];
+        int n = snprintf(line, sizeof line,
+            "{\"schema\":\"zcl.engine_unit_receipt.v1\","
+            "\"prev_sha3\":\"%064d\",\"unit_id\":\"measured\","
+            "\"task_sha3\":\"%064d\",%s\"outcome\":{\"gate_pass\":true}}\n",
+            0, 0, cases[i].fields);
+        uint32_t bad = 0;
+        bool bounded = n > 0 && (size_t)n < sizeof line;
+        enum zcl_rule_chain_status status = bounded
+            ? zcl_rule_receipts_parse(line, (size_t)n, parsed, &bad)
+            : ZCL_RULE_CHAIN_MALFORMED;
+        ER_CHECK("usage availability preserves valid outcome receipt",
+                 status == ZCL_RULE_CHAIN_OK && bad == 0 && parsed->count == 1);
+        if (status != ZCL_RULE_CHAIN_OK || parsed->count != 1) continue;
+        ER_CHECK("prompt unknown remains distinct from measured zero",
+                 (int64_t)parsed->r[0].prompt_tokens == cases[i].prompt);
+        ER_CHECK("completion unknown remains distinct from measured zero",
+                 (int64_t)parsed->r[0].completion_tokens == cases[i].completion);
+        ER_CHECK("wall unknown remains distinct; long samples retained",
+                 (int64_t)parsed->r[0].wall_ms == cases[i].wall);
+        ER_CHECK("measurement absence never fabricates gate failure",
+                 parsed->r[0].gate_pass);
+    }
+    free(parsed);
+    return failures;
+}
+
 int test_engine_rules(void)
 {
     int failures = 0;
@@ -741,6 +794,7 @@ int test_engine_rules(void)
     failures += case_miner();
     failures += case_rewrite();
     failures += case_builtin();
+    failures += case_measurement_unknowns();
     printf("engine_rules: %d failure(s)\n", failures);
     return failures;
 }
