@@ -32,6 +32,7 @@
 #if !defined(_WIN32)
 #include <errno.h>
 #include <fcntl.h>
+#include <sys/file.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
@@ -176,6 +177,16 @@ static const struct json_value *dlx_arr(const struct dlx_call *c,
 {
     const struct json_value *v = json_get(&c->reply.data, key);
     return v && v->type == JSON_ARR ? v : NULL;
+}
+
+static const char *dlx_err_code(const struct dlx_call *c)
+{
+    return c->reply.error.code;
+}
+
+static const char *dlx_err_evidence(const struct dlx_call *c)
+{
+    return c->reply.error.evidence;
 }
 
 #if !defined(_WIN32)
@@ -356,6 +367,59 @@ static bool dlx_file_exists(const char *path)
     struct stat st;
     return path && path[0] && stat(path, &st) == 0;
 }
+
+/* Whole-file slurp for a byte-identical before/after comparison. Bounded:
+ * queue.jsonl in these tests is a handful of rows, never near this cap. */
+static bool dlx_slurp(const char *path, char *out, size_t cap, size_t *len)
+{
+    FILE *f = path ? fopen(path, "rb") : NULL;
+    size_t n;
+    if (!f)
+        return false;
+    n = fread(out, 1, cap, f);
+    if (ferror(f) || (size_t)ftell(f) == cap) {
+        fclose(f);
+        return false;
+    }
+    fclose(f);
+    if (len)
+        *len = n;
+    return true;
+}
+
+#if !defined(_WIN32)
+/* Take dev.land's own step.lock exactly the way dl_step_lock() does —
+ * open(O_RDWR|O_CREAT|O_CLOEXEC) then flock(LOCK_EX|LOCK_NB) on
+ * `<landdir>/step.lock` — so the test proves the production leaf refuses a
+ * SECOND holder of the very same advisory lock it takes internally, not a
+ * stand-in. dl_step_lock()/dl_lock_path() are file-static, so a test in a
+ * separate translation unit reaches the lock the only way another process
+ * driving the queue would: by name, with the same open+flock discipline. */
+static int dlx_step_lock_take(const char *landdir)
+{
+    char path[1200];
+    int fd;
+    if ((size_t)snprintf(path, sizeof(path), "%s/step.lock", landdir) >=
+        sizeof(path))
+        return -1;
+    fd = open(path, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+    if (fd < 0)
+        return -1;
+    if (flock(fd, LOCK_EX | LOCK_NB) != 0) {
+        close(fd);
+        return -1;
+    }
+    return fd;
+}
+
+static void dlx_step_lock_release(int fd)
+{
+    if (fd < 0)
+        return;
+    (void)flock(fd, LOCK_UN);
+    close(fd);
+}
+#endif
 
 /* ── vendor/tor submodule fixtures ────────────────────────────────────────
  *
@@ -753,6 +817,61 @@ int test_dev_land(void)
         dlx_end(&c);
         t1 = time(NULL);
         ASSERT((long long)(t1 - t0) < 10);
+        dlx_restore();
+        PASS();
+    }
+
+    TEST("land: a step finds its own lock already held and says STEP_BUSY, "
+        "retryable, touching nothing; released, it proceeds") {
+        struct dlx_rig rig;
+        struct dlx_call c;
+        char landdir[1200];
+        char qpath[1400];
+        char before[4096], after[4096];
+        size_t before_len = 0, after_len = 0;
+        int lockfd;
+
+        dlx_isolate("stepbusy");
+        ASSERT(dlx_rig_make(&rig, "stepbusy_rig"));
+        setenv("ZCL_LAND_PROOF_STUB", "running", 1);
+        setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
+        dlx_submit(&c, &rig, rig.tip);
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        dlx_end(&c);
+
+        dlx_landdir(landdir, sizeof(landdir));
+        (void)snprintf(qpath, sizeof(qpath), "%s/queue.jsonl", landdir);
+        ASSERT(dlx_slurp(qpath, before, sizeof(before), &before_len));
+
+        /* Take the same step.lock dev.land's own dl_step_lock() takes,
+         * through the identical open+flock(LOCK_EX|LOCK_NB) discipline. */
+        lockfd = dlx_step_lock_take(landdir);
+        ASSERT(lockfd >= 0);
+
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c));
+        ASSERT(!dlx_ok(&c));
+        ASSERT(strcmp(dlx_err_code(&c), "STEP_BUSY") == 0);
+        ASSERT(c.reply.error.retryable);
+        ASSERT(!c.reply.error.mutated);
+        ASSERT(strstr(dlx_err_evidence(&c), "queue=") != NULL);
+        ASSERT(strstr(dlx_err_evidence(&c), landdir) != NULL);
+        dlx_end(&c);
+
+        /* Untouched: the queued row is still queued, never rebased. */
+        ASSERT(dlx_slurp(qpath, after, sizeof(after), &after_len));
+        ASSERT_EQ((long long)before_len, (long long)after_len);
+        ASSERT(memcmp(before, after, before_len) == 0);
+
+        /* Released, a step proceeds exactly as it would have. */
+        dlx_step_lock_release(lockfd);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        ASSERT(strcmp(dlx_str(&c, "state"), "started") == 0);
+        dlx_end(&c);
+
         dlx_restore();
         PASS();
     }

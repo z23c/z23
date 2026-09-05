@@ -28,10 +28,15 @@
  *   queue.jsonl     one JSON object per line; the live request rows.
  *   outcomes.jsonl  one appended row per terminal outcome, newest last.
  *   queue.lock      the short row-file lock (seq assignment, rewrite).
- *   slot.lock       the HOST-WIDE landing slot, taken NON-BLOCKING inside
- *                   step and released before step returns. It is never held
- *                   across steps: a second host proving the same tip is not
- *                   this host's problem.
+ *   step.lock       the queue's own step lock: exclusive, NON-BLOCKING,
+ *                   taken before step touches anything and held across the
+ *                   whole step (rebase, lint, proof request, status read,
+ *                   push), released on every exit path. A second `dev land
+ *                   step` invocation that cannot take it replies STEP_BUSY
+ *                   (ZCL_COMMAND_STATUS_BLOCKED, retryable) without
+ *                   touching the queue or the worktree; the caller retries.
+ *                   It is never held across separate step calls: a second
+ *                   host proving the same tip is not this host's problem.
  *   wt/             the private landing worktree, created once and reused.
  *   logs/           one log per attempt; a failure row names its log.
  * Every outcome also appends to <platform_state_root>/mail/outbox.jsonl when
@@ -41,8 +46,12 @@
  * OUTPUT (zcl.land.v1) on ok=true: leaf is always "dev.land", plus per
  * action: submit {seq, tip, state:"queued"}; status {queued, in_flight,
  * outcomes} plus screen unless json=true; step {state} where state is one of
- * empty | busy | started | proving | landed | failed | conflict | rebased;
- * cancel {seq, state:"cancelled"}.
+ * empty | started | proving | landed | failed | conflict | rebased; cancel
+ * {seq, state:"cancelled"}.
+ *
+ * step ALSO fails closed with code STEP_BUSY (ZCL_COMMAND_STATUS_BLOCKED,
+ * retryable) when another step is already driving this queue: no row is
+ * read, no file is touched, and the caller retries rather than waiting.
  *
  * step ALSO carries persist:"failed" (plus persist_reason) alongside the
  * `state` it names when the row's own commit to queue.jsonl/outcomes.jsonl
@@ -63,7 +72,10 @@
  * dev.proof machinery (tools/dev/dev_proof.c), never re-implemented. The
  * final push carries no --no-verify: it goes through the installed
  * pre-push hook like any other push to main, and that hook's exact-receipt
- * admission (tools/dev/z23_git_hook.c) is what keeps it fast.
+ * admission (tools/dev/z23_git_hook.c) is what keeps it fast. One driver
+ * steps this queue at a time: `step` holds step.lock for its whole run, and
+ * a second driver that finds it held gets STEP_BUSY and retries rather than
+ * racing the first driver's rebase/lint against the worktree.
  *
  * NOTHING WAITS. submit, status and cancel touch only local files. step does
  * the rebase and the lint pass it was called to do and then RETURNS on the
@@ -139,6 +151,27 @@ static void dl_fail(struct zcl_command_reply *reply, const char *code,
                            ZCL_COMMAND_EXIT_FAILED, code, phase, false,
                            false, msg, evidence);
     reply->error.human_action_required = true;
+}
+
+/* Another driver already holds step.lock. Nothing has been read or touched
+ * yet — the lock is the first thing step takes — so this always fires
+ * before any queue or worktree access. Retryable: the caller is expected to
+ * step again shortly rather than treat this as a real failure. dl_lock_path
+ * does not hand back the holder's pid (it is a plain open+flock, not a
+ * pid-file), so the evidence names what is knowable: the queue directory
+ * the lock lives in. */
+static void dl_step_busy(struct zcl_command_reply *reply, const char *landdir)
+{
+    char evidence[4096 + 64];
+    (void)snprintf(evidence, sizeof(evidence), "holder_pid=unknown queue=%s",
+                   landdir ? landdir : "");
+    (void)json_push_kv_str(&reply->data, "leaf", DL_LEAF);
+    zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_BLOCKED,
+                           ZCL_COMMAND_EXIT_BLOCKED, "STEP_BUSY", "step",
+                           true, false,
+                           "another driver is already stepping this queue; "
+                           "retry",
+                           evidence);
 }
 
 /* ── input accessors ───────────────────────────────────────────────────── */
@@ -702,14 +735,16 @@ static int dl_rows_lock(const char *landdir)
     return dl_lock_path(path, false);
 }
 
-/* The HOST-WIDE landing slot. Non-blocking on purpose: a step that cannot
- * have the slot says so and returns, because a step that waited would be
- * exactly the blocking this leaf exists to remove. */
-static int dl_slot_lock(const char *landdir)
+/* The queue's step lock. Non-blocking on purpose: a step that cannot have
+ * it says so and returns, because a step that waited would be exactly the
+ * blocking this leaf exists to remove. Reuses dl_lock_path(), the same
+ * open+flock(LOCK_EX|LOCK_NB) helper queue.lock uses, rather than a second
+ * raw lock primitive. */
+static int dl_step_lock(const char *landdir)
 {
     char path[4096 + 32];
     if (!landdir ||
-        snprintf(path, sizeof(path), "%s/slot.lock", landdir) >=
+        snprintf(path, sizeof(path), "%s/step.lock", landdir) >=
             (int)sizeof(path))
         return -1;
     return dl_lock_path(path, true);
@@ -1771,7 +1806,7 @@ static bool dl_commit_row(const struct dl_dirs *d, struct dl_row *row,
         }
         rows[kept++] = rows[i];
     }
-    /* The row was picked (under the slot lock) before this commit takes
+    /* The row was picked (under the step lock) before this commit takes
      * the row lock. If `cancel` removed it from queue.jsonl in between,
      * `row->seq` is no longer present here: there is nothing left to keep
      * "inflight" and no cancelled row should ever get a second, later
@@ -3376,11 +3411,14 @@ static void dl_step(const struct zcl_command_request *req,
                 "platform_state_root too long");
         return;
     }
-    /* The host-wide landing slot, taken without blocking and released
-     * before this call returns. It is never held across steps. */
-    slot = dl_slot_lock(d.land);
+    /* The queue's step lock, taken without blocking, before anything else
+     * is read or touched, and held for the whole step below (rebase, lint,
+     * proof request, status read, push) — never just the request. Released
+     * on every exit path via dl_unlock(), including every early return
+     * this function takes. */
+    slot = dl_step_lock(d.land);
     if (slot < 0) {
-        dl_step_reply(reply, NULL, "busy");
+        dl_step_busy(reply, d.land);
         return;
     }
     if (!dl_load_rows(qpath, &rows, &nrows)) {
@@ -3415,7 +3453,7 @@ static void dl_step(const struct zcl_command_request *req,
 #if defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)
     /* Test-only: a fixed, tiny window between picking a row here and
      * driving it below, so a test can race a concurrent cancel (which
-     * takes the row lock, not this slot lock) against this exact gap
+     * takes the row lock, not this step lock) against this exact gap
      * deterministically instead of depending on process-scheduling luck.
      * Never read outside a test process. */
     {

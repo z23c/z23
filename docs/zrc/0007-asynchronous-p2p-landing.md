@@ -39,7 +39,7 @@ properties of that machine are the cost.
   blockage.
 - **Landing is single-box and human-driven.** The native queue's state lives
   under one host's state root, its rows are unsigned and not content-addressed,
-  its host-wide `slot.lock` is explicitly not a fleet-wide gate
+  its per-queue `step.lock` is explicitly not a fleet-wide gate
   (`tools/command/native_dev_land.c`), and nothing calls `step` — a shell loop
   with a sleep does. Work moves between boxes as bundles over a side channel.
 - **The same change is verified three or four times.** Lane gates, a verify

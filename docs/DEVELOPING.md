@@ -664,6 +664,13 @@ Before committing:
    or pull request for coordination.
 9. Verify local HEAD, `origin/main`, and the remote branch SHA agree.
 
+A resident loop lands the same way through the native async queue
+(`z23-dev dev land submit|status|step|cancel`, `tools/command/native_dev_land.c`):
+one driver steps that queue at a time, since `step` holds a per-queue lock for
+its whole run and a second driver that finds it held gets `STEP_BUSY`
+(retryable) and steps again shortly rather than racing the first driver's
+rebase and lint against the shared landing worktree.
+
 Every changed C path must map to focused proof through the repository's impact
 rules. Unmapped or incomplete closure refuses receipt publication. A proof
 covers a whole landing batch, so its changed set is heap-resident and holds

@@ -91,11 +91,13 @@ push. `dev land` splits that in two so no agent waits for any of it.
 | `dev land cancel --seq N` | Drops one request and records the cancellation. | Nothing. |
 
 `step` is the only verb that does work, and it never waits for a proof. It
-takes the host-wide landing slot (`<state>/land/slot.lock`) **non-blocking**,
-returning `busy` rather than queueing behind another step, and it releases
-the slot before it returns — the lock is never held across steps. With
-nothing in flight it takes the oldest queued request, rebases the tip onto
-origin/main in the private landing worktree at `<state>/land/wt`, runs
+takes the queue's own step lock (`<state>/land/step.lock`) **non-blocking**
+before touching anything, holds it for the whole step, and releases it on
+every exit path — the lock is never held across separate step calls. A
+second driver that finds it held gets `STEP_BUSY` (retryable) instead of
+queueing behind or racing the first step. With nothing in flight it takes
+the oldest queued request, rebases the tip onto origin/main in the private
+landing worktree at `<state>/land/wt`, runs
 `make lint-fast`, ASKS for the exact commit/base proof through the existing
 `dev proof ensure` machinery, and returns. A later step reads the proof's own
 state: passed fast-forwards `origin/main` and records `landed`; failed
