@@ -119,3 +119,8 @@ means.
   a signed Merkle tree of per-group verdict leaves, so a receiver admits a
   tip when trusted producers' union covers the required closure; covered
   work is never re-proven.
+- [`0011-fast-sync-over-the-peer-link.md`](0011-fast-sync-over-the-peer-link.md) —
+  signed state offers and a resumable chunked bundle transfer over the
+  existing peer link, with sublinear FlyClient-style verification, so a
+  fresh node no longer needs an operator-configured file-service host or
+  onion catalog address to sync fast.
