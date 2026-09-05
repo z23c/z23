@@ -819,6 +819,13 @@ AGENT_IMPACT_RULE("cognition/modules/codeindex/*|tests/harness/src/test_codeinde
  * on generated 50k/500k-file trees plus sub-50 ms warm questions. */
 AGENT_IMPACT_RULE("cognition/modules/codeindex/*|tests/harness/src/test_codeindex_scale.c", "codeindex codeindex_scale make_lint_gates")
 
+/* The per-node mind: the resident that owns rebuilding an index, the owner
+ * marker the codeindex open path reads before it may rebuild, and the leaves
+ * that ask it. The codeindex glob is in the pattern because the refusal
+ * itself lives in that module — a change there decides whether a query is
+ * refused or served, which is exactly what the mind group proves. */
+AGENT_IMPACT_RULE("tools/mind/*|cognition/modules/codeindex/*|tools/command/native_mind_command.c|engine/composition/commands/mind.def|platform/deploy/zcl-mind.service|tools/lint/check_mind_owns_rebuild.sh|docs/MIND.md|tests/harness/src/test_mind.c", "mind codeindex command_registry_catalog native_api_contract make_lint_gates")
+
 /* Code navigator command surface: the `code` branch backed by cognition/modules/codeindex. */
 AGENT_IMPACT_RULE("cognition/modules/codeindex/*|engine/composition/commands/code.def|tools/command/native_code_command.c|tools/command/native_code_context_command.c|tools/command/native_code_guide_command.c|tools/command/native_code_relations_command.c|tests/harness/src/test_code_impact.c", "codeindex code_capsule code_impact command_registry_catalog make_lint_gates")
 
