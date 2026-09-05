@@ -24,7 +24,12 @@
  *     node on this host.
  *   - Nothing here pushes, deploys, or touches a datadir. A human reads the
  *     diff. That is not a policy this program enforces by asking nicely: it
- *     has no code that could do any of those things.
+ *     has no code that could do any of those things. --fleet-ledger is not
+ *     an exception to that and is worth reading as the proof of it: asked to
+ *     record what a run cost, this program opens nothing, holds no key, and
+ *     hands six measured integers to an absolute path the operator named, on
+ *     an argv with no shell. The datadir and the signing key stay entirely
+ *     inside the program that already owns them.
  *   - A timeout reports itself AS a timeout, never as a failure or a pass.
  *   - There is deliberately NO node command leaf for any of this, and so no
  *     row in config/remote_command_classes.def. A leaf would be a way to ask
@@ -170,6 +175,10 @@ struct unit_opts {
     const char *fixture_reply;
     const char *key_file;
     const char *state_dir;
+    /* An absolute path to the z23 binary that owns the owner's fleet ledger,
+     * or NULL. NULL is the default and means this run records nothing beyond
+     * its own receipt — see unit_ledger_row(). */
+    const char *fleet_ledger_bin;
     int    turns;
     int    timeout_s;
     /* The gate gets its own clock. A cold worktree compiles the whole tree
@@ -223,6 +232,11 @@ static void usage(void)
 "                    cold worktree builds the tree first, which is minutes\n"
 "                    of honest work that says nothing about the model\n"
 "  --state-dir DIR   0700 directory for the prompt, gate log, and receipt\n"
+"  --fleet-ledger P  absolute path to a z23 binary, which is then asked to\n"
+"                    record this run's tokens and wall time in the owner's\n"
+"                    private fleet ledger. This program never opens the\n"
+"                    ledger or a datadir itself. Omitted, nothing is\n"
+"                    recorded anywhere but the receipt\n"
 "  --max-cost-usd X  refuse to continue past this reported spend\n"
 "  --key-file PATH   a private key file outside the repo\n"
 "  --fixture-reply F for --engine fixture: a canned response body\n"
@@ -289,6 +303,7 @@ static bool parse_args(int argc, char **argv, struct unit_opts *o)
         TAKE("--fixture-reply", fixture_reply)
         TAKE("--key-file", key_file)
         TAKE("--state-dir", state_dir)
+        TAKE("--fleet-ledger", fleet_ledger_bin)
 #undef TAKE
         if (strcmp(a, "--turns") == 0 || strcmp(a, "--timeout") == 0
             || strcmp(a, "--gate-timeout") == 0
@@ -1941,6 +1956,126 @@ static bool receipt_plan_fits(const struct unit_opts *o,
     return engine_receipt_fits(&plan);
 }
 
+/* ── the owner's fleet ledger ─────────────────────────────────────────────
+ *
+ * The same numbers as the receipt above, in the one place the owner can ask
+ * the whole fleet at once (docs/FLEET_LEDGER.md).
+ *
+ * This program does NOT open the ledger. The ledger lives under a datadir,
+ * every row is signed by the node's delegated online key, and the boundary
+ * at the top of this file is that nothing here reaches either — a dispatcher
+ * that handles a vendor's response over TLS is the last process that should
+ * be holding a signing key. So the numbers are handed to the program whose
+ * job that already is, as an argv with no shell, and only when the operator
+ * named that program's absolute path on the command line. Left unnamed, this
+ * run behaves byte for byte as it did before the ledger existed.
+ *
+ * Every value on that argv is an integer this program measured or a name
+ * from a closed table. No model output reaches it, and a value the vendor
+ * did not report is left OFF the line entirely rather than sent as zero,
+ * because absent and zero are different facts and the ledger stores them
+ * as different facts. */
+
+/* Which provider a vendor row spends against, or NULL for one that spends
+ * nothing the owner is billed for. Closed on both sides: an id this table
+ * does not name records no row at all, because a row filed under the wrong
+ * provider is worse than a row that is missing. */
+static const char *unit_ledger_provider(const char *engine_id)
+{
+    if (!engine_id)
+        return NULL;
+    if (strcmp(engine_id, "grok") == 0 || strcmp(engine_id, "grok-cli") == 0)
+        return "grok";
+    if (strcmp(engine_id, "glm") == 0 || strcmp(engine_id, "glm-cli") == 0)
+        return "glm";
+    if (strcmp(engine_id, "openai") == 0)
+        return "codex";
+    return NULL; /* `fixture` spends nothing; an unknown id names nothing */
+}
+
+/* One `--key=value` argument, or nothing at all when the value is absent.
+ * ENGINE_RECEIPT_UNREPORTED is this program's own word for "the vendor did
+ * not say", and it must not be laundered into a measurement. */
+static void unit_ledger_pair(const char *key, int64_t value, char (*slots)[48],
+                             const char **argv, size_t *n, size_t cap)
+{
+    if (value == ENGINE_RECEIPT_UNREPORTED || value < 0 || *n + 1 >= cap)
+        return;
+    char *slot = slots[*n];
+    if ((size_t)snprintf(slot, sizeof(slots[0]), "--%s=%lld", key,
+                         (long long)value) >= sizeof(slots[0]))
+        return;
+    argv[(*n)++] = slot;
+}
+
+static void unit_ledger_row(const struct unit_opts *o,
+                            const struct engine_vendor *v,
+                            const struct engine_usage *usage,
+                            const struct engine_cli_observation *obs,
+                            int64_t wall_ms, const char *task_sha3)
+{
+    if (!o->fleet_ledger_bin || !o->fleet_ledger_bin[0])
+        return;
+    if (o->fleet_ledger_bin[0] != '/')
+        return; /* an absolute path, so PATH order cannot choose the program */
+    const char *provider = unit_ledger_provider(v ? v->id : NULL);
+    if (!provider)
+        return;
+
+    char subject[64];
+    char note[64];
+    if ((size_t)snprintf(subject, sizeof(subject), "--subject=%s", provider) >=
+        sizeof(subject))
+        return;
+    /* The task's own content digest is the task id: it names the unit
+     * without carrying a byte of it. */
+    if ((size_t)snprintf(note, sizeof(note), "--note=%.32s",
+                         task_sha3 ? task_sha3 : "") >= sizeof(note))
+        return;
+
+    const char *argv[16];
+    char slots[8][48];
+    size_t n = 0;
+    argv[n++] = o->fleet_ledger_bin;
+    argv[n++] = "fleet";
+    argv[n++] = "ledger";
+    argv[n++] = "add";
+    argv[n++] = "--kind=usage";
+    argv[n++] = subject;
+    argv[n++] = note;
+    const size_t fixed = n;
+    const bool tok = usage && usage->tokens_known;
+    unit_ledger_pair("tokens_in", tok ? usage->prompt_tokens
+                                      : ENGINE_RECEIPT_UNREPORTED,
+                     slots, argv, &n, sizeof(argv) / sizeof(argv[0]));
+    unit_ledger_pair("tokens_out", tok ? usage->completion_tokens
+                                       : ENGINE_RECEIPT_UNREPORTED,
+                     slots, argv, &n, sizeof(argv) / sizeof(argv[0]));
+    const bool seen = obs && obs->known;
+    unit_ledger_pair("tokens_cached",
+                     seen ? obs->cache_read_input_tokens
+                          : ENGINE_RECEIPT_UNREPORTED,
+                     slots, argv, &n, sizeof(argv) / sizeof(argv[0]));
+    unit_ledger_pair("tokens_reasoning",
+                     seen ? obs->reasoning_tokens : ENGINE_RECEIPT_UNREPORTED,
+                     slots, argv, &n, sizeof(argv) / sizeof(argv[0]));
+    unit_ledger_pair("wall_ms", wall_ms, slots, argv, &n,
+                     sizeof(argv) / sizeof(argv[0]));
+    unit_ledger_pair("turns", seen ? obs->turns : ENGINE_RECEIPT_UNREPORTED,
+                     slots, argv, &n, sizeof(argv) / sizeof(argv[0]));
+    if (n == fixed)
+        return; /* nothing was measured, so there is nothing to record */
+    argv[n] = NULL;
+
+    /* The row is a record, not evidence: a box with no filed delegation, or
+     * no ledger at all, refuses it, and that must not change this unit's
+     * verdict. The output is discarded for the same reason the ledger is
+     * private — it is the owner's data and this program's stdout is a
+     * transcript somebody reads. */
+    char sink[256];
+    (void)zcl_spawn_capture(argv, sink, sizeof(sink), 10000);
+}
+
 /* ── carried state across attempts ───────────────────────────────────────
  *
  * A caller who repeats a unit that did not land runs this program again with
@@ -2840,6 +2975,8 @@ int main(int argc, char **argv)
         engine_emit(stderr,
                     "engine_unit: authoritative invocation receipt was "
                     "refused; this run cannot claim complete accounting\n");
+    unit_ledger_row(&o, v, &dr.reply.usage, &dr.cli_observation,
+                    dr.dispatch_latency_ms + proof_latency_ms, task_sha3_hex);
     if (durable_receipt)
         engine_emit(stdout, "engine_unit: %s\n", engine_verdict_name(verdict));
     else
