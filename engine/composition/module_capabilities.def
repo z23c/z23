@@ -620,6 +620,7 @@ ZCL_MODULE_CAPABILITY("engine/composition/src/consensus_state_snapshot_install_a
 ZCL_MODULE_CAPABILITY("engine/composition/src/consensus_state_snapshot_output_seal.c", CAP_FS_WRITE|CAP_FS_READ, "")
 ZCL_MODULE_CAPABILITY("engine/composition/src/db_service.c", CAP_CLOCK|CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("engine/composition/src/file_ops.c", CAP_FS_WRITE, "")
+ZCL_MODULE_CAPABILITY("engine/composition/src/mesh_stream.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("engine/composition/src/mint_anchor_progress.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("engine/composition/src/rom_bundle_admission.c", CAP_FS_READ, "")
 ZCL_MODULE_CAPABILITY("engine/composition/src/runtime.c", CAP_FS_READ|CAP_FS_WRITE, "")
