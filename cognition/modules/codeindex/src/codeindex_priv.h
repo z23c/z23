@@ -227,6 +227,25 @@ bool ci_store_ensure_schema(sqlite3 *db);
 typedef bool (*ci_enum_cb)(const char *relpath, const struct stat *st,
                            void *user);
 bool ci_enumerate_sources(const char *root, ci_enum_cb cb, void *user);
+
+/* Native source identity used by the Merkle leaf cache on every host. */
+struct ci_merkle_stat_key {
+    uint64_t dev, ino, size, mtime_sec, mtime_nsec, ctime_sec, ctime_nsec;
+};
+typedef bool (*ci_merkle_source_cb)(const char *relpath,
+    const struct ci_merkle_stat_key *key, void *user);
+bool ci_enumerate_merkle_sources(const char *root,
+    ci_merkle_source_cb cb, void *user);
+#if defined(_WIN32)
+/* Preserve native file identity and subsecond timestamps for freshness keys;
+ * the CRT stat adapter narrows these fields and is unsuitable for reuse. */
+struct platform_directory_entry;
+typedef bool (*ci_windows_source_cb)(
+    const char *relpath, const struct platform_directory_entry *snapshot,
+    void *user);
+bool ci_enumerate_source_snapshots_windows(
+    const char *root, ci_windows_source_cb cb, void *user);
+#endif
 /* True iff `relpath` names an X-macro registry (`*.def`): an include-graph node
  * that is hashed and filed but never handed to the C scanner. */
 bool ci_path_is_registry(const char *relpath);

@@ -184,12 +184,22 @@ ZCL_WINDOWS_ACCEPTANCE_database_lifetime_LIBS := \
 ZCL_WINDOWS_ACCEPTANCE_codeindex_freshness_SOURCES := \
 	tests/harness/src/codeindex_freshness_windows_acceptance.c \
 	cognition/modules/codeindex/src/codeindex_build_windows.c \
+	cognition/modules/codeindex/src/codeindex_merkle.c \
+	cognition/modules/codeindex/src/codeindex_merkle_sources.c \
+	cognition/modules/codeindex/src/codeindex_merkle_settled.c \
+	cognition/modules/codeindex/src/codeindex_merkle_snapshot_windows.c \
 	platform/modules/platform/src/directory_compat.c \
+	platform/modules/platform/src/directory_transaction.c \
+	platform/modules/platform/src/positioned_file.c \
+	platform/modules/platform/src/private_directory.c \
+	platform/modules/platform/src/private_acl_internal.c \
+	platform/modules/platform/src/clock.c \
 	platform/modules/base/src/safe_alloc.c \
 	platform/modules/base/src/log_level.c \
 	platform/modules/sha3/src/sha3.c
 ZCL_WINDOWS_ACCEPTANCE_codeindex_freshness_FLAGS := \
 	-DCI_WINDOWS_FRESHNESS_ONLY -Icognition/modules/codeindex/src
+ZCL_WINDOWS_ACCEPTANCE_codeindex_freshness_LIBS := -ladvapi32
 
 ZCL_WINDOWS_ACCEPTANCE_mind_state_SOURCES := \
 	tests/harness/src/mind_state_windows_acceptance.c \

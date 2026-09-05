@@ -179,7 +179,8 @@ static void directory_snapshot_to_stat(
     st->st_ctime = (time_t)snapshot->changed_seconds;
 }
 
-bool ci_enumerate_sources(const char *root, ci_enum_cb callback, void *user)
+bool ci_enumerate_source_snapshots_windows(
+    const char *root, ci_windows_source_cb callback, void *user)
 {
     if (!root || !callback)
         LOG_FAIL("codeindex", "null argument to Windows source enumeration");
@@ -200,9 +201,7 @@ bool ci_enumerate_sources(const char *root, ci_enum_cb callback, void *user)
         if (i > 0 && strcmp(paths.items[i].value,
                             paths.items[i - 1].value) == 0)
             continue;
-        struct stat st;
-        directory_snapshot_to_stat(&paths.items[i].snapshot, &st);
-        ok = callback(paths.items[i].value, &st, user);
+        ok = callback(paths.items[i].value, &paths.items[i].snapshot, user);
     }
     strvec_free(&paths);
     return ok;
@@ -211,6 +210,30 @@ collect_failed:
     strvec_free(&paths);
     LOG_FAIL("codeindex", "Windows source enumeration failed: %s",
              strerror(errno ? errno : EIO));
+}
+
+struct stat_enumeration {
+    ci_enum_cb callback;
+    void *user;
+};
+
+static bool source_snapshot_to_stat_callback(
+    const char *path, const struct platform_directory_entry *snapshot,
+    void *user)
+{
+    struct stat_enumeration *enumeration = user;
+    struct stat st;
+    directory_snapshot_to_stat(snapshot, &st);
+    return enumeration->callback(path, &st, enumeration->user);
+}
+
+bool ci_enumerate_sources(const char *root, ci_enum_cb callback, void *user)
+{
+    if (!callback)
+        LOG_FAIL("codeindex", "null Windows source enumeration callback");
+    struct stat_enumeration enumeration = {callback, user};
+    return ci_enumerate_source_snapshots_windows(
+        root, source_snapshot_to_stat_callback, &enumeration);
 }
 
 static void write_u64le(struct sha3_256_ctx *sha, uint64_t value)

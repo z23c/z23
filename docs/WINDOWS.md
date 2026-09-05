@@ -30,7 +30,11 @@ The same native acceptance requires the canonical warm capability query to
 remain inside the command's declared 250 ms latency budget. A separate native
 program bounds the unchanged source-metadata freshness root at 150 ms, using
 one retained directory handle per source directory rather than reopening every
-source path. These are executable Windows contracts, not cross-compile claims.
+source path. It also requires the warm Merkle refresh to reuse every unchanged
+leaf within 150 ms and detect same-size subsecond edits. Merkle comparison uses
+the full native directory metadata, preserving file IDs and timestamp precision
+that the CRT `stat` adapter would narrow. These are executable Windows contracts,
+not cross-compile claims.
 The source-tree Merkle cache and territory roll-up memo use the same retained
 private child transaction on Windows, so warm provenance and dispatch queries
 can reuse sealed derived state after the source generation is unchanged. The

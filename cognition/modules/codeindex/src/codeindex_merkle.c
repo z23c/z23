@@ -64,17 +64,12 @@ static const char merkle_snapshot_seal_domain[] =
     "zcl.codeindex.source_tree.merkle.seal.v1";
 /* ── records ─────────────────────────────────────────────────────────── */
 
-/* The cache key that decides whether a leaf's bytes must be re-read. */
-struct merkle_stat_key {
-    uint64_t dev, ino, size, mtime_sec, mtime_nsec, ctime_sec, ctime_nsec;
-};
-
 struct merkle_leaf_rec {
     char                   path[256];
     struct zcl_sha3_digest digest;
     struct zcl_sha3_digest content_digest;
     uint64_t               size;
-    struct merkle_stat_key key;
+    struct ci_merkle_stat_key key;
     bool                   dirty; /* digest differs from the snapshot's */
 };
 
@@ -209,7 +204,7 @@ static bool merkle_leaf_digest(const char *root, const char *relpath,
                                struct zcl_sha3_digest *out,
                                struct zcl_sha3_digest *content_out,
                                uint64_t *out_size,
-                               struct merkle_stat_key *out_key, bool *found)
+                               struct ci_merkle_stat_key *out_key, bool *found)
 {
     *found = false;
     struct platform_positioned_file file;
@@ -891,8 +886,8 @@ static bool merkle_add_leaf(struct merkle_build *b,
     return true;
 }
 
-static bool merkle_file_cb(const char *relpath, const struct stat *st,
-                           void *user)
+static bool merkle_file_key_cb(const char *relpath,
+                               const struct ci_merkle_stat_key *live, void *user)
 {
     struct merkle_build *b = user;
     if (b->err) return false;
@@ -912,28 +907,12 @@ static bool merkle_file_cb(const char *relpath, const struct stat *st,
     memset(&leaf, 0, sizeof(leaf));
     ci_cpy(leaf.path, sizeof(leaf.path), relpath);
 
-    struct merkle_stat_key live = {
-        .dev = (uint64_t)st->st_dev,
-        .ino = (uint64_t)st->st_ino,
-        .size = (uint64_t)st->st_size,
-#if defined(_WIN32)
-        .mtime_sec = (uint64_t)st->st_mtime,
-        .mtime_nsec = 0,
-        .ctime_sec = (uint64_t)st->st_ctime,
-        .ctime_nsec = 0,
-#else
-        .mtime_sec = (uint64_t)st->st_mtim.tv_sec,
-        .mtime_nsec = (uint64_t)st->st_mtim.tv_nsec,
-        .ctime_sec = (uint64_t)st->st_ctim.tv_sec,
-        .ctime_nsec = (uint64_t)st->st_ctim.tv_nsec,
-#endif
-    };
     const struct merkle_leaf_rec *prev =
         b->use_prev ? merkle_find_leaf(b->prev.leaves, b->prev.nleaves, relpath)
                     : NULL;
     if (b->use_prev && !prev)
         b->cost.inventory_changed = true;
-    if (prev && memcmp(&prev->key, &live, sizeof(live)) == 0) {
+    if (prev && memcmp(&prev->key, live, sizeof(*live)) == 0) {
         leaf.digest = prev->digest;
         leaf.content_digest = prev->content_digest;
         leaf.size = prev->size;
@@ -1014,7 +993,8 @@ static struct ci_merkle *merkle_run(const char *root, bool use_snapshot,
         merkle_build_release(&b);
         LOG_NULL("codeindex", "seed merkle root frame");
     }
-    if (!ci_enumerate_sources(root, merkle_file_cb, &b) || b.err) {
+    bool enumerated = ci_enumerate_merkle_sources(root, merkle_file_key_cb, &b);
+    if (!enumerated || b.err) {
         merkle_build_release(&b);
         free(b.leaves);
         free(b.nodes);
@@ -1257,7 +1237,7 @@ bool ci_merkle_hash_changed_leaf(const char *root, const char *filepath,
     if (!root || !root[0] || !merkle_relative_path_valid(filepath) || !out ||
         !found)
         LOG_FAIL("codeindex", "invalid changed-leaf hash request");
-    struct merkle_stat_key key;
+    struct ci_merkle_stat_key key;
     memset(out, 0, sizeof(*out));
     (void)snprintf(out->path, sizeof(out->path), "%s", filepath);
     return merkle_leaf_digest(root, filepath, &out->digest,
