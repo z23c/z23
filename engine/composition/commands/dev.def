@@ -981,13 +981,15 @@ ZCL_COMMAND_READY_READ(
     "result answered, origin/main's head, subject, age and this checkout's "
     "red lint gates, and the ordered next actions. Sections carry state, "
     "count, total and truncated; a section cut by budget_bytes says so and "
+    "reports its total. cwd names the checkout to read; the default is the "
+    "process working directory. "
     "reports its total, so no row is ever dropped silently. budget_bytes is "
     "1024..15360 and defaults to 6144. Pass the returned cursor back as "
     "since for the changes alone. It never fetches "
     "and never reads a node, RPC endpoint, or datadir.", 16384,
     "fleet,orchestrator,start,orient,board,worktrees,units,cursor,budget",
     "zcl.fleet_start_input.v1", "zcl.fleet_start.v1",
-    "since,budget_bytes,board_dir,include_units", "",
+    "since,budget_bytes,board_dir,include_units,cwd", "",
     "z23 dev fleet start",
     ZCL_COMMAND_LAYER_DEV, ZCL_COMMAND_SCOPE_LOCAL,
     ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_LATENCY_FOREGROUND,

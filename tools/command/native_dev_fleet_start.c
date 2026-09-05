@@ -20,6 +20,9 @@
  *   budget_bytes   INT, default 6144, min 1024, max 15360. Out of range →
  *                  refusal code `budget_out_of_range`.
  *   board_dir      STRING. Default: $HOME/.local/state/zclassic23/board.
+ *   cwd            STRING. Directory to run Git in. Default: the process
+ *                  working directory. The checkout is whatever
+ *                  `git rev-parse --show-toplevel` names there.
  *   include_units  BOOL, default true. False, or no `systemctl`, makes the
  *                  units section `unobserved`. The key is NOT called `units`:
  *                  the transport validator already owns `units` as a ZSLP
@@ -79,7 +82,6 @@
 
 #include "command/native_dev_fleet.h"
 #include "command/native_dev_fleet_internal.h"
-#include "command/native_devagent.h"
 
 #include "base/safe_alloc.h"
 #include "json/json.h"
@@ -655,9 +657,17 @@ static void fs_wt_ahead_behind(struct fs_ctx *ctx, struct fs_wt *w)
     }
 }
 
+/* `--no-optional-locks` is load-bearing, not decoration. A plain
+ * `git status` REWRITES the index whenever a stat cache entry moved, and the
+ * index mtime is exactly the signal this packet uses to decide what changed
+ * since the caller's cursor. Measured: the first call statused every emitted
+ * worktree, stamped each index with "now", and the next call with that call's
+ * own cursor reported worktrees as changed that nobody had touched. A read
+ * that perturbs its own change signal reports noise forever. */
 static void fs_wt_dirty(struct fs_ctx *ctx, struct fs_wt *w)
 {
-    static const char *const args[] = {"status", "--porcelain", NULL};
+    static const char *const args[] = {"--no-optional-locks", "status",
+                                       "--porcelain", NULL};
     if (!fs_git(ctx, w->path, args)) return;
     w->dirty = (long long)fs_count_lines(ctx->capture);
 }
@@ -787,6 +797,7 @@ void zcl_native_handle_dev_fleet_start(const struct zcl_command_request *request
     char origin_main[ZCL_FLEET_OID_MAX] = "";
     char self_head[ZCL_FLEET_OID_MAX] = "";
     char self_branch[192] = "";
+    const char *start_dir = ".";
     char newest_board_id[96] = "";
     bool want_units = true;
     bool stale = false;
@@ -835,21 +846,9 @@ void zcl_native_handle_dev_fleet_start(const struct zcl_command_request *request
                            json_get_str(v));
         v = json_get(request->input, "include_units");
         if (v && v->type == JSON_BOOL) want_units = json_get_bool(v);
-    }
-
-    if (!zcl_devagent_checkout_root(NULL, ctx.root, sizeof(ctx.root))) {
-        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_BLOCKED,
-                               ZCL_COMMAND_EXIT_BLOCKED, "NOT_IN_A_CHECKOUT",
-                               "resolve", false, false,
-                               "no Z23 checkout root exists above the current "
-                               "directory",
-                               "dev.fleet.start reads only local Git, the "
-                               "board directory, and systemd user units");
-        (void)snprintf(reply->error.next_action,
-                       sizeof(reply->error.next_action),
-                       "cd into a Z23 checkout, then rerun: z23 dev fleet "
-                       "start");
-        return;
+        v = json_get(request->input, "cwd");
+        if (v && v->type == JSON_STR && json_get_str(v) && json_get_str(v)[0])
+            start_dir = json_get_str(v);
     }
 
     ctx.capture = zcl_malloc(FS_CAPTURE_BYTES, "fleet_start_capture");
@@ -863,6 +862,34 @@ void zcl_native_handle_dev_fleet_start(const struct zcl_command_request *request
                                "cannot allocate the fleet packet buffers",
                                "dev.fleet.start bounds every buffer up front");
         return;
+    }
+
+    /* Git itself names the checkout. The marker walk dev.agent.* uses would
+     * be wrong here: it climbs PAST a repository that carries no Z23 marker
+     * into whatever ancestor does, so a caller pointed at one checkout would
+     * silently be answered about another. This leaf reads Git, the board and
+     * systemd — none of which need a Z23 marker to be true. */
+    {
+        static const char *const args[] = {"rev-parse", "--show-toplevel",
+                                           NULL};
+        if (!fs_git(&ctx, start_dir, args)) {
+            free(ctx.capture); free(wts); free(board);
+            zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_BLOCKED,
+                                   ZCL_COMMAND_EXIT_BLOCKED,
+                                   "NOT_IN_A_CHECKOUT", "resolve", false,
+                                   false,
+                                   "no Git checkout exists at or above the "
+                                   "requested directory",
+                                   "dev.fleet.start reads only local Git, the "
+                                   "board directory, and systemd user units");
+            (void)snprintf(reply->error.next_action,
+                           sizeof(reply->error.next_action),
+                           "cd into a checkout (or pass cwd), then rerun: "
+                           "z23 dev fleet start");
+            return;
+        }
+        fs_strip(ctx.capture);
+        (void)snprintf(ctx.root, sizeof(ctx.root), "%s", ctx.capture);
     }
 
     {
@@ -944,7 +971,8 @@ void zcl_native_handle_dev_fleet_start(const struct zcl_command_request *request
                              &checkout_ahead);
         }
         {
-            static const char *const args[] = {"status", "--porcelain", NULL};
+            static const char *const args[] = {"--no-optional-locks", "status",
+                                               "--porcelain", NULL};
             if (fs_git(&ctx, ctx.root, args))
                 checkout_dirty = (long long)fs_count_lines(ctx.capture);
         }
@@ -1021,8 +1049,14 @@ void zcl_native_handle_dev_fleet_start(const struct zcl_command_request *request
         size_t eligible = 0, emitted = 0, head_len, rows_len;
         int64_t wall = ctx.started_ms + FS_WORKTREE_WALL_MS;
 
+        /* The cursor second is INCLUSIVE. A file mtime has one-second
+         * granularity, so a worktree touched later in the same second the
+         * previous call started would be invisible forever under a strict
+         * comparison. Repeating at most one second of rows is the failure
+         * an orchestrator can absorb; never seeing a lane move is not. */
         for (size_t i = 0; i < wt_count; i++)
-            if (!since.present || wts[i].mtime > since.unix_seconds) eligible++;
+            if (!since.present || wts[i].mtime >= since.unix_seconds)
+                eligible++;
 
         json_init(&head_probe);
         fs_head(&head_probe, "observed", (long long)eligible,
@@ -1039,7 +1073,7 @@ void zcl_native_handle_dev_fleet_start(const struct zcl_command_request *request
             struct json_value row;
             char shown[ZCL_FLEET_PATH_MAX];
             size_t next_len;
-            if (since.present && w->mtime <= since.unix_seconds) continue;
+            if (since.present && w->mtime < since.unix_seconds) continue;
 
             if (platform_time_monotonic_ms() < wall) {
                 if (w->ahead == FS_UNMEASURED) fs_wt_ahead_behind(&ctx, w);
