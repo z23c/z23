@@ -96,7 +96,7 @@ static char *mind_slurp(const char *path, size_t *len_out)
  * One header line naming the schema, then one line per checkout:
  *
  *   zcl.mind_registry.v1
- *   zcl.mind_checkout.v1 /home/user/github/zclassic23
+ *   zcl.mind_checkout.v1 $HOME/github/zclassic23   (written expanded)
  *
  * Typed on purpose: an untyped list of paths is indistinguishable from a
  * truncated one, and a resident that guessed would claim a checkout nobody
