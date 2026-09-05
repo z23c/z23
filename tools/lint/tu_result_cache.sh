@@ -161,10 +161,10 @@ TU_CACHE_OFF_REASON=""
 # a few are worth keeping — but only a few, since each holds an entry per TU.
 TU_CACHE_KEEP_GENERATIONS="${ZCL_LINT_TU_CACHE_GENERATIONS:-6}"
 
-tu_cache__sha_stdin() { sha256sum | cut -c1-64; }
+tu_cache__sha_stdin() { sha256sum --binary | cut -c1-64; }
 
 tu_cache__sha_file() {
-    if [ -f "$1" ]; then sha256sum -- "$1" | cut -c1-64; else printf 'absent'; fi
+    if [ -f "$1" ]; then sha256sum --binary -- "$1" | cut -c1-64; else printf 'absent'; fi
 }
 
 tu_cache__disable() {
@@ -298,7 +298,7 @@ tu_cache_include_digest() {
     local sha_err="$scratch/tu-cache-sha-err.txt"
     local rc bad hashed
     LC_ALL=C sort -u "$list" | tr '\n' '\0' |
-        xargs -0 -r sha256sum >"$sha_out" 2>"$sha_err"
+        xargs -0 -r sha256sum --binary >"$sha_out" 2>"$sha_err"
     rc=$?
     if [ "$rc" -ne 0 ]; then
         bad="$(grep -vE '^sha256sum: .*: No such file or directory$' "$sha_err" 2>/dev/null)"
@@ -311,7 +311,7 @@ tu_cache_include_digest() {
         # `find` listed a moment earlier — drop it, keep whatever hashed.
     fi
 
-    hashed="$(awk '{ h = $1; $1 = ""; sub(/^ +/, "", $0); printf "%s\t%s\n", $0, h }' \
+    hashed="$(awk '{ h = $1; $1 = ""; sub(/^ +/, "", $0); sub(/^\*/, "", $0); printf "%s\t%s\n", $0, h }' \
         "$sha_out" | LC_ALL=C sort)"
     [ -n "$hashed" ] || return 1
     printf '%s\n' "$hashed" | tu_cache__sha_stdin
@@ -487,7 +487,7 @@ tu_cache_plan() {
     # cryptography a warm run performs.
     sha_list="$ZCL_TU_CACHE_SCRATCH/tu-cache-src-sha.txt"
     : > "$sha_list"
-    tr '\n' '\0' < "$src_list" | xargs -0 -r sha256sum > "$sha_list" 2>/dev/null || true
+    tr '\n' '\0' < "$src_list" | xargs -0 -r sha256sum --binary > "$sha_list" 2>/dev/null || true
     count_src="$(grep -c . "$src_list" || true)"; [ -n "$count_src" ] || count_src=0
     count_sha="$(grep -c . "$sha_list" || true)"; [ -n "$count_sha" ] || count_sha=0
     if [ "$count_sha" -ne "$count_src" ]; then
@@ -499,6 +499,12 @@ tu_cache_plan() {
     fi
 
     while read -r sha path; do
+        # GNU checksum records contain a mode marker before the filename.
+        # MSYS2 defaults to binary ('*'), while POSIX defaults to text (' ').
+        # Always request raw bytes and strip exactly that one binary marker;
+        # retaining it turns every Windows source path into a nonexistent file.
+        # The synthetic cold/warm proof now exercises this on every host.
+        path="${path#\*}"
         [ -n "$path" ] || continue
         if [ "${#sha}" -eq 64 ]; then
             ent="$ZCL_TU_CACHE_DIR/$path.$sha"
@@ -577,7 +583,7 @@ tu_cache__event() {
 # renamed, so an entry is complete or absent, never partial.
 tu_cache__store() {
     local src="$1" rc="$2" log="$3" sha ent tmp haslog=0
-    sha="$(sha256sum -- "$src" 2>/dev/null)"
+    sha="$(sha256sum --binary -- "$src" 2>/dev/null)"
     sha="${sha%% *}"
     [ "${#sha}" -eq 64 ] || return 1
     ent="$ZCL_TU_CACHE_DIR/$src.$sha"
@@ -747,6 +753,8 @@ END_STUB
     read -r h m s <<<"$(tu_cache__self_sweep "$base" "$stub" "$root" "$flags" "$srclist")"
     { [ "$h" = 0 ] && [ "$m" = "$n" ] && [ "$s" = "$n" ]; } || tu_cache__self_fail \
         "a cold run over $n synthetic TUs reported '$h' hit / '$m' miss / '$s' stored, wanted 0/$n/$n"
+    cmp -s "$srclist" "$base/miss.txt" || tu_cache__self_fail \
+        "checksum mode markers changed the cold compiler source paths"
     cp -r "$base/out" "$base/cold-out"
     [ "$(cat "$base/out/${root//[^[:alnum:]]/_}_src_u7_c.rc")" = 1 ] ||
         tu_cache__self_fail "the planted failing unit did not fail on the cold run"
