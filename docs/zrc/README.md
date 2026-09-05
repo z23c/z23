@@ -124,3 +124,9 @@ means.
   existing peer link, with sublinear FlyClient-style verification, so a
   fresh node no longer needs an operator-configured file-service host or
   onion catalog address to sync fast.
+- [`0012-fleet-boards-scopes-anchored-identity-inter-fleet-rooms.md`](0012-fleet-boards-scopes-anchored-identity-inter-fleet-rooms.md) —
+  compartmentalized fleet/direct/across-fleet scopes on the existing signed
+  board, one identity system rooted in a ZClassic on-chain ZID anchor,
+  epoch-key encryption for fleet-private rows, a durable e2e direct-message
+  store, anchored inter-fleet rooms, and a periodic on-chain checkpoint of
+  the board's own hash chain.
