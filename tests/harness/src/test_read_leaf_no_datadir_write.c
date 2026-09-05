@@ -227,6 +227,13 @@ static const struct rlw_leaf g_rlw_leaves[] = {
     { "core.wallet.recovery.status",
       zcl_native_handle_wallet_recovery_status,
       NULL, NULL,               NULL, NULL, NULL },
+    /* The fleet roster reads the pairing and observation projections for a
+     * game that rewards machines. An operator pointing it at a copied
+     * datadir has to be able to hash that copy afterwards and get the same
+     * answer, so it opens through zcl_native_node_db_require_readonly()
+     * and is exercised here rather than trusted to. */
+    { "ops.mesh.roster",        zcl_native_handle_fleet_roster,
+      NULL, NULL,               NULL, NULL, NULL },
     /* The two leaves this file used to only NAME as open defects.
      *
      * app.store.products reached node_db_open_runtime — READWRITE|CREATE,

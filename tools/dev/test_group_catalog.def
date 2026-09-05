@@ -586,6 +586,10 @@ ZCL_TEST_GROUP(mesh_terminal_client)
 ZCL_TEST_GROUP(mesh_stream)
 /* mesh tunnels: the two admission gates, bytes both ways, back-pressure */
 ZCL_TEST_GROUP(mesh_tunnel)
+/* fleet-vs-fleet wire: the five game frames, order, identity, overflow */
+ZCL_TEST_GROUP(mesh_game)
+/* what a fleet node's facts earn, and what a self-reported one does not */
+ZCL_TEST_GROUP(fleet_airship_rules)
 ZCL_TEST_GROUP(confine)
 ZCL_TEST_GROUP(seed_tape)
 ZCL_TEST_GROUP(postmortem)
