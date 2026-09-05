@@ -818,6 +818,10 @@ ADAPTERS_SRCS = $(call zcl_filter_ephemeral_sources,\
 # tools/ header root (the "command/" prefix for the native command adapter,
 # plus any other tools headers).
 TOOLS_INCLUDES = -Itools
+# The per-node mind (tools/mind): the resident that owns index rebuilds and
+# the state every reader of it shares. Its own header root so nothing has to
+# reach it through a relative path.
+MIND_INCLUDES = -Itools/mind
 # Hosted arena packages + Inter canvas, used by arena_frame and the
 # arena_view harness group. Namespaced headers only (zdogview/, zdogfight/,
 # zprng/).
@@ -855,7 +859,7 @@ SKYCOMBAT_TEST_INCLUDES = -Iapps/skycombat/include -Iapps/skycombat/specificatio
 ZCL_ALL_INCLUDES = $(APP_INCLUDES) $(CONFIG_INCLUDES) $(LIB_INCLUDES) \
 	$(CORE_INCLUDES) $(PORTS_INCLUDES) $(DOMAIN_INCLUDES) \
 	$(APPLICATION_INCLUDES) $(ADAPTERS_INCLUDES) $(REDUCER_INCLUDES) \
-	$(TOOLS_INCLUDES) \
+	$(TOOLS_INCLUDES) $(MIND_INCLUDES) \
 	$(DEVLOOP_INCLUDES) -Itests/harness/include -Ivendor/include -Ivendor/x11/include \
 	$(SKYCOMBAT_TEST_INCLUDES)
 
@@ -919,9 +923,15 @@ COMMAND_CATALOG_DEFS = $(wildcard engine/composition/commands/*.def) \
 	$(wildcard engine/composition/commands/*/*.def)
 
 NODE_ENTRY_SRCS = engine/entry/main.c engine/entry/main_cli_modes.c
+# The per-node mind. Release-visible for the same reason COMMAND_SRCS is:
+# the node renders its own mind row into the signed mesh-status capsule, and
+# a node that could not say what index it holds could not be asked.
+MIND_SRCS = $(call zcl_filter_ephemeral_sources,\
+	$(wildcard tools/mind/*.c))
+
 ALL_SRCS = $(APP_SRCS) $(REDUCER_SRCS) $(CONFIG_SRCS) $(LIB_SRCS) \
 	$(CORE_SRCS) $(DOMAIN_SRCS) $(APPLICATION_SRCS) $(ADAPTERS_SRCS) \
-	$(DEVLOOP_SRCS) $(COMMAND_SRCS)
+	$(DEVLOOP_SRCS) $(COMMAND_SRCS) $(MIND_SRCS)
 ALL_OBJS = $(patsubst %.c,$(OBJ_DIR)/%.o,$(ALL_SRCS))
 
 # The DEV binary keeps everything: the release source set plus the dev-only
