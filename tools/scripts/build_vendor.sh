@@ -81,7 +81,25 @@ fi
 # shellcheck source=tools/scripts/vendor_provenance_lib.sh
 . "$SCRIPT_DIR/vendor_provenance_lib.sh"
 
-JOBS="$(nproc 2>/dev/null || echo 4)"
+# JOBS: an explicit value from the environment always wins (the caller, or a
+# Makefile that exports JOBS=<n> ahead of this script). Otherwise honour the
+# caller's `make -jN`: the Makefile invokes this script with no argument, but
+# GNU Make exports MAKEFLAGS into the environment of every recipe subprocess
+# it spawns, this script included, so `make -j2 vendor` must not spawn one
+# submake per core. Only when neither is given do we fall back to a default
+# that leaves headroom on big boxes.
+CPU_COUNT="$(nproc 2>/dev/null || echo 4)"
+if [[ -z "${JOBS:-}" ]]; then
+    if [[ "${MAKEFLAGS:-}" =~ (^|[[:space:]])-j([0-9]+) ]]; then
+        JOBS="${BASH_REMATCH[2]}"
+    elif [[ "${MAKEFLAGS:-}" =~ --jobs=([0-9]+) ]]; then
+        JOBS="${BASH_REMATCH[1]}"
+    elif [[ "$CPU_COUNT" -ge 16 ]]; then
+        JOBS=$((CPU_COUNT - 8))
+    else
+        JOBS="$CPU_COUNT"
+    fi
+fi
 FORCE="${VENDOR_FORCE:-0}"
 OFFLINE="${ZCL_VENDOR_OFFLINE:-0}"
 VENDOR_LOCK_DIR="${VENDOR_LOCK_DIR:-$VENDOR/.build.lock}"
