@@ -76,3 +76,50 @@ Peer ids on the onion mesh churn. The node2 peer was id 60,
 dropped between two sends ten minutes apart, and came back as
 id 114 after a onetry dial. Resolve the id from `getpeerinfo`
 before every send; never cache it across sends.
+
+## 2026-09-05 — trains, proofs, reviews, and the ledger
+
+A lane that only runs the group it wrote still breaks a train
+on a pinned root count in another group. The checkout routes
+every group for each file the lane touched. Ask
+`build/bin/z23-dev code tests` and run every group it names.
+
+A train claim names a box and can be transferred. When the
+claiming box is overloaded, the train stays live while that
+box cannot prove it. Bundle the train
+(`git bundle create <f> origin/main..HEAD`), copy it to an
+idle box, and post that the claim moved. The idle box proves
+and pushes. The transfer rule lives in
+`docs/agent/TRAIN_PROTOCOL.md`.
+
+Proof generation runs on a RAM filesystem. Probes that
+measure device I/O (fsync throughput, block counters) fail
+there for reasons unrelated to load. A fixture must detect
+the medium and say so; it never blames load.
+
+`git cherry-pick -q` is not a valid invocation. Git prints
+usage, applies nothing, and a pipeline that swallows the
+exit code reports success. Always check the commit count
+after assembling a train.
+
+`LOG_ERR` logs and returns -1. A second call placed after
+it in the same block is unreachable, so a reviewer who
+reports a double call there is wrong. Reviewers must know
+which log macros return; the returning set lives in
+`base/log_macros.h`.
+
+A test fixture that creates or removes files inside the
+source tree while a proof runs changes the parent
+directory's epoch. The prover correctly refuses the receipt
+as superseded. Fixtures write under the generation's
+scratch/state directory.
+
+The prover's runner uses exit status 126 for its own
+child-setup failures (setsid, chdir, dup2) and 127 for a
+real exec failure. Only the former is transient and
+retryable.
+
+Every delegated task is a ledger row: model, thinking
+level, tokens, wall time, outcome, lines changed.
+Heuristics about executors are derived from the ledger,
+never from impressions.

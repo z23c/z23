@@ -52,7 +52,7 @@ A node in IDLE posts a claim and enters PROVING. PROVING ends in exactly one of 
 | `<new tip>` | The origin/main tip after the push. |
 | `<reason>` | Why the train was withdrawn. |
 
-No node starts a proof against a base another node has claimed and not resolved. A claim is resolved by either form of result row.
+No node starts a proof against a base another node has claimed and not resolved. A claim is resolved by either form of result row. A claim names a box and can be transferred: when the claiming box is overloaded, bundle the train (`git bundle create <f> origin/main..HEAD`), copy it to an idle box, and post that the claim moved; the idle box proves and pushes.
 
 ## Rules
 
