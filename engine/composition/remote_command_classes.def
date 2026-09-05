@@ -751,7 +751,7 @@ REMOTE_COMMAND_CLASS("code.provenance.facts", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("code.provenance.emitter", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("code.provenance.relations", REMOTE_CLASS_NEVER, "")
 
-/* ZCODE — 204 never_remote leaves (zcode.workspace.source.bundle.fetch is
+/* ZCODE — 205 never_remote leaves (zcode.workspace.source.bundle.fetch is
  * owner_capability above).
  *
  * The C23 Commons branch builds, seals, installs, publishes, reproduces and
@@ -804,6 +804,8 @@ REMOTE_COMMAND_CLASS("zcode.work.status", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("zcode.work.show", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("zcode.work.run", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("zcode.work.accept", REMOTE_CLASS_NEVER, "")
+/* Mutates the accepted publication job; not a machine-posture read. */
+REMOTE_COMMAND_CLASS("zcode.work.publish", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("zcode.work.offer", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("zcode.work.pull", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("zcode.task.offer", REMOTE_CLASS_NEVER, "")

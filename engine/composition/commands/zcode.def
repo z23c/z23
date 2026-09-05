@@ -774,7 +774,8 @@ ZCL_COMMAND_READY_COMMAND(
     ZCL_COMMAND_RESULT_BUDGET,
     "zcode,work,publish,publication,accepted,reproduce,continuation",
     "zcl.zcode_work_publish.input.v1", "zcl.zcode_work_publish.v1",
-    "workspace,work,datadir,job_root,details", "job_root",
+    "workspace,work,datadir,job_root,details,path,kind,namespace,"
+    "transport_root,include_evidence_wires,board,action_id", "job_root",
     "z23 zcode work publish --input='<typed continuation from work accept>'",
     ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
     ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_LOCAL,
