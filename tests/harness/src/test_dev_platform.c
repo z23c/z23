@@ -3743,7 +3743,8 @@ static int test_template_generator_concurrency(void)
  * never a translation unit), so binding them into the build identity bought
  * nothing. Prove both halves at once: an ephemeral fixture stays visible to
  * Git, which is what the gates grep, while leaving the source identity of the
- * tree byte-identical. */
+ * tree byte-identical. Exercise it in a disposable Git worktree so its
+ * directory churn cannot overlap a frozen proof generation. */
 #define DP_EPHEMERAL_FIXTURE_REL \
     "engine/services/src/_dev_platform_source_identity_fixture_tmp.c"
 
@@ -3757,11 +3758,24 @@ static int test_ephemeral_fixture_leaves_source_identity(void)
             execlp("bash", "bash", "-c",
                    "set -eu\n"
                    "fixture=" DP_EPHEMERAL_FIXTURE_REL "\n"
+                   "origin=\"$(pwd -P)\"\n"
+                   "scratch=\"$(mktemp -d "
+                   "${TMPDIR:-/tmp}/zcl-identity-fixture.XXXXXX)\"\n"
+                   "tree=\"$scratch/tree\"\n"
+                   "cleanup() {\n"
+                   "  rm -f \"$tree/$fixture\"\n"
+                   "  cd \"$origin\"\n"
+                   "  git worktree remove --force \"$tree\" "
+                   ">/dev/null 2>&1 || :\n"
+                   "  rm -rf \"$scratch\"\n"
+                   "}\n"
+                   "trap cleanup EXIT HUP INT TERM\n"
+                   "git worktree add --detach \"$tree\" HEAD >/dev/null\n"
+                   "cd \"$tree\"\n"
                    "rm -f \"$fixture\"\n"
                    "before=\"$(tools/dev/source-identity.sh capture-record)\"\n"
                    "printf 'void zcl_ephemeral_fixture(void) { }\\n' "
                    "> \"$fixture\"\n"
-                   "trap 'rm -f \"$fixture\"' EXIT HUP INT TERM\n"
                    "listing=\"$(git ls-files --others --exclude-standard -- "
                    "engine/services/src)\"\n"
                    "case \"$listing\" in\n"
@@ -3771,12 +3785,37 @@ static int test_ephemeral_fixture_leaves_source_identity(void)
                    " >&2; exit 1 ;;\n"
                    "esac\n"
                    "during=\"$(tools/dev/source-identity.sh capture-record)\"\n"
-                   "[ \"$before\" = \"$during\" ] || {\n"
+                   "read -r before_id before_clean before_mutation "
+                   "<<< \"$before\"\n"
+                   "read -r during_id during_clean during_mutation "
+                   "<<< \"$during\"\n"
+                   "[ \"$before_id\" = \"$during_id\" ] && "
+                   "[ \"$before_clean\" = \"$during_clean\" ] || {\n"
                    "  echo 'an ephemeral lint fixture changed the source"
                    " identity; every concurrent make in this checkout would"
                    " refuse to select a compile epoch' >&2\n"
                    "  exit 1\n"
-                   "}\n",
+                   "}\n"
+                   "tools/dev/source-identity.sh verify-mutation "
+                   "\"$before_mutation\" >/dev/null\n"
+                   "rm -f \"$fixture\"\n"
+                   "after=\"$(tools/dev/source-identity.sh capture-record)\"\n"
+                   "read -r after_id after_clean after_mutation "
+                   "<<< \"$after\"\n"
+                   "[ \"$before_id\" = \"$after_id\" ] && "
+                   "[ \"$before_clean\" = \"$after_clean\" ] || {\n"
+                   "  echo 'removing an ephemeral lint fixture changed the"
+                   " source identity' >&2\n"
+                   "  exit 1\n"
+                   "}\n"
+                   "[ \"$before_mutation\" = \"$during_mutation\" ] && "
+                   "[ \"$during_mutation\" = \"$after_mutation\" ] || {\n"
+                   "  echo 'an ephemeral lint fixture entered the source"
+                   " mutation epoch' >&2\n"
+                   "  exit 1\n"
+                   "}\n"
+                   "tools/dev/source-identity.sh verify-mutation "
+                   "\"$before_mutation\" >/dev/null\n",
                    (char *)NULL);
             _exit(127);
         }
