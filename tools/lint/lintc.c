@@ -1511,7 +1511,7 @@ static int repo_shape_room_dirs(const char *shape, char out[][RS_PATH], int max,
 }
 
 struct clock_acc { regex_t *re; char *buf; size_t cap, used;
-                   int (*keep)(const char *, const char *); };
+                   int (*keep)(const char *, const char *); int raw; };
 
 static int clock_comp(regex_t *re)
 {
@@ -1548,6 +1548,7 @@ static int scan_clock(const char *path, void *ctx)
     while ((n = getline(&line, &cap, f)) >= 0) {
         lineno++;
         if (regexec(a->re, line, 0, NULL, 0) != 0) continue;
+        a->raw++;
         if (n > 0 && line[n - 1] == '\n') line[n - 1] = '\0';
         if (a->keep && !a->keep(path, line)) continue;
         int k = snprintf(a->buf + a->used, a->cap - a->used, "%s:%d:%s\n",
@@ -1848,6 +1849,282 @@ static int check_command_contract_selftest(void)
     return st_ok(bad, "check_command_contract selftest: OK\n");
 }
 
+static const char *const k_wf_allow[] = {
+    "engine/modules/storage/src/chain_segment.c",
+    "engine/modules/storage/include/storage/chain_segment.h",
+    "engine/services/src/segment_sealer_service.c",
+    "engine/controllers/src/chain_segment_controller.c",
+    "engine/conditions/src/segment_corruption.c",
+};
+
+static int wf_allowed(const char *path)
+{
+    for (size_t i = 0; i < sizeof k_wf_allow / sizeof k_wf_allow[0]; i++)
+        if (strcmp(path, k_wf_allow[i]) == 0) return 1;
+    return 0;
+}
+
+static int wf_keep(const char *path, const char *text)
+{
+    const char *t = text;
+    while (isspace((unsigned char)*t)) t++;
+    return strncmp(path, "tests/", 6) && !strstr(text, "// writer-below-frontier-ok")
+        && *t != '*' && !(t[0] == '/' && (t[1] == '/' || t[1] == '*'))
+        && (!*t || !wf_allowed(path));
+}
+
+static int wf_comp(regex_t *re)
+{
+    return compile_pat(re, REG_EXTENDED,
+                       "(^|[^[:alnum:]_])chain_segment_seal" "_range[[:space:]]*\\(|",
+                       "(^|[^[:alnum:]_])chain_segment_manifest" "_rebuild[[:space:]]*\\(",
+                       "", "");
+}
+
+static int wf_need_files(void)
+{
+    for (size_t i = 0; i < sizeof k_wf_allow / sizeof k_wf_allow[0]; i++) {
+        struct stat st;
+        if (stat(k_wf_allow[i], &st) == 0 && S_ISREG(st.st_mode)) continue;
+        fprintf(stderr, "check_no_writer_below_sealed_frontier: FATAL — "
+                        "designated writer file '%s' is missing.\n", k_wf_allow[i]);
+        fputs("  The sealed-store write surface moved; update this gate's\n"
+              "  ALLOWLIST deliberately instead of letting the scan go hollow.\n",
+              stderr);
+        return 2;
+    }
+    return 0;
+}
+
+static int wf_summary(int raw, int v, const char *mode)
+{
+    return (printf("[check_no_writer_below_sealed_frontier] scanned %d "
+                   "call/declaration site(s); %d violation(s) (mode: %s)\n",
+                   raw, v, mode) < 0
+            || puts("[check_no_writer_below_sealed_frontier] only the "
+                    "sealer/RPC/healer/writer may call") < 0
+            || puts("[check_no_writer_below_sealed_frontier] chain_segment_seal"
+                    "_range() or chain_segment_manifest" "_rebuild();") < 0
+            || puts("[check_no_writer_below_sealed_frontier] add // "
+                    "writer-below-frontier-ok for a documented, reviewed exception") < 0)
+               ? die("z23-lint: write failed\n", "") : 0;
+}
+
+static int check_no_writer_below_sealed_frontier_run(int argc, char **argv)
+{
+    (void)argc; (void)argv;
+    int rc = wf_need_files();
+    if (rc) return rc;
+    regex_t re;
+    rc = wf_comp(&re);
+    if (rc) return rc;
+    char matches[CLK_MATCH] = {0};
+    struct clock_acc a = { .re = &re, .buf = matches, .cap = sizeof matches, .keep = wf_keep };
+    static const char *const roots[] = { "core", "engine", "contexts", "cognition", "platform" };
+    int n_roots = 0;
+    for (size_t i = 0; i < sizeof roots / sizeof roots[0]; i++) {
+        struct stat st;
+        if (stat(roots[i], &st) == 0 && S_ISDIR(st.st_mode)) n_roots++;
+    }
+    rc = gate_require_scanned(n_roots, 5, "check_no_writer_below_sealed_frontier",
+                              "expected all five production authorities to exist");
+    if (rc == 0) rc = clock_walk(roots, sizeof roots / sizeof roots[0], &a);
+    if (rc == 0)
+        rc = gate_require_scanned(a.raw, 5, "check_no_writer_below_sealed_frontier",
+                                  "chain_segment_seal" "_range/chain_segment_manifest"
+                                  "_rebuild appear to have been renamed");
+    int v = 0;
+    if (rc == 0) rc = gate_count_and_report(matches, &v);
+    if (rc == 0) rc = wf_summary(a.raw, v, clock_mode());
+    regfree(&re);
+    return rc ? rc : clock_grade(v, clock_mode());
+}
+
+static int check_no_writer_below_sealed_frontier_selftest(void)
+{
+    regex_t re;
+    if (wf_comp(&re)) return 2;
+    char hit[48], marked[80], commented[56];
+    snprintf(hit, sizeof hit, "    chain_segment_seal%s", "_range(s, 0, 1);");
+    snprintf(marked, sizeof marked, "%s // writer-below-frontier-ok", hit);
+    snprintf(commented, sizeof commented, "    // chain_segment_seal%s", "_range(s, 0, 1);");
+    int bad = keep_case(wf_keep, &re, "engine/foo.c", "int x = 1;", 0, 0, "FAIL")
+            | keep_case(wf_keep, &re, "engine/foo.c", hit, 1, 1, "FAIL")
+            | keep_case(wf_keep, &re, k_wf_allow[0], hit, 0, 0, "FAIL")
+            | keep_case(wf_keep, &re, "tests/foo.c", hit, 0, 0, "FAIL")
+            | keep_case(wf_keep, &re, "engine/foo.c", marked, 0, 0, "FAIL")
+            | keep_case(wf_keep, &re, "engine/foo.c", commented, 0, 0, "FAIL");
+    const char *oldm = getenv("ZCL_LINT_MODE");
+    if (setenv("ZCL_LINT_MODE", "WARN", 1) != 0) bad = 1;
+    bad |= keep_case(wf_keep, &re, "engine/foo.c", hit, 1, 0, clock_mode());
+    if (oldm) (void)setenv("ZCL_LINT_MODE", oldm, 1);
+    else (void)unsetenv("ZCL_LINT_MODE");
+    regfree(&re);
+    return st_ok(bad, "check_no_writer_below_sealed_frontier selftest: OK\n");
+}
+
+enum { SR_ALLOW = 256, SR_NAME = 96, SR_STRAY = 128 };
+struct sr_set { char n[SR_ALLOW][SR_NAME]; int count; };
+struct sr_acc { struct sr_set allowed; int tracked; };
+
+static int sr_has(const struct sr_set *s, const char *name)
+{ for (int i = 0; i < s->count; i++) if (!strcmp(s->n[i], name)) return 1; return 0; }
+
+static int sr_add(struct sr_set *s, const char *name)
+{
+    size_t n = strlen(name);
+    if (sr_has(s, name)) return 0;
+    if (s->count >= SR_ALLOW || n >= SR_NAME) return die("z23-lint: stray-root overflow\n", "");
+    memcpy(s->n[s->count++], name, n + 1);
+    return 0;
+}
+
+static void sr_del(struct sr_set *s, const char *name)
+{
+    for (int i = 0; i < s->count; i++)
+        if (!strcmp(s->n[i], name)) {
+            if (i + 1 < s->count) memcpy(s->n[i], s->n[s->count - 1], SR_NAME);
+            s->count--;
+            return;
+        }
+}
+
+static const char *const k_sr_root_allowed[] = {
+    ".git", "build", "vendor", "test-tmp", "compile_commands.json",
+    ".cache", ".codeindex", ".zvcs", ".core-unseal-token", ".zcl_test_render",
+    "chaos-output", ".antigravitycli", ".gemini", ".aider", ".vscode", ".idea",
+    "tags", "TAGS", ".DS_Store",
+};
+
+static int sr_seed(struct sr_set *s)
+{
+    for (size_t i = 0; i < sizeof k_sr_root_allowed / sizeof k_sr_root_allowed[0]; i++)
+        if (sr_add(s, k_sr_root_allowed[i])) return 2;
+    return 0;
+}
+static int sr_on_track(const char *path, void *ctx)
+{
+    struct sr_acc *a = ctx;
+    const char *sl = strchr(path, '/');
+    size_t n = sl ? (size_t)(sl - path) : strlen(path);
+    char seg[SR_NAME];
+    a->tracked++;
+    if (n >= sizeof seg) return die("z23-lint: stray-root overflow\n", "");
+    memcpy(seg, path, n); seg[n] = '\0';
+    return sr_add(&a->allowed, seg);
+}
+static int sr_ok_name(const char *name, const struct sr_set *al)
+{
+    const char *base = strncmp(name, ".aider", 6) == 0 ? ".aider" : name;
+    return sr_has(al, base) || !strncmp(name, "core.", 5) || !strncmp(name, "vgcore.", 7);
+}
+
+static int sr_feed(const struct sr_set *al, const char *const *names, int n,
+                   char stray[][SR_NAME], int max, int *ns, int *scanned)
+{
+    *ns = 0;
+    *scanned = 0;
+    for (int i = 0; i < n; i++) {
+        if (!names[i][0] || !strcmp(names[i], ".") || !strcmp(names[i], "..")) continue;
+        (*scanned)++;
+        if (sr_ok_name(names[i], al)) continue;
+        if (*ns >= max || strlen(names[i]) >= SR_NAME)
+            return die("z23-lint: stray-root overflow\n", "");
+        memcpy(stray[(*ns)++], names[i], strlen(names[i]) + 1);
+    }
+    return 0;
+}
+
+static int sr_report(char stray[][SR_NAME], int n)
+{
+    if (fprintf(stderr, "FAIL: %d stray entr(y/ies) in the repository root\n", n) < 0
+        || fputs("  The root is a curated list: source areas, top-level docs, and a\n"
+                 "  short allowlist of generated/local entries. These are neither.\n"
+                 "  They are gitignored, so 'git status' stays clean while 'ls' shows\n"
+                 "  a junk drawer — that is exactly what this gate exists to stop.\n",
+                 stderr) < 0)
+        return die("z23-lint: write failed\n", "");
+    for (int i = 0; i < n; i++)
+        if (fprintf(stderr, "    %s [stray root entry]\n", stray[i]) < 0)
+            return die("z23-lint: write failed\n", "");
+    if (fputs("  Fix at the WRITER, not here: a test writes its scratch under\n"
+              "  ./test-tmp/ (test_make_tmpdir in tests/harness/include/test/test_core.h),\n"
+              "  a script writes its log under a state/log dir. 'git add' it if it\n"
+              "  is real new content; delete it if it is debris.\n", stderr) < 0)
+        return die("z23-lint: write failed\n", "");
+    return 1;
+}
+
+static int check_no_stray_root_files_run(int argc, char **argv)
+{
+    (void)argc; (void)argv;
+    struct sr_acc a = {0};
+    int rc = sr_seed(&a.allowed);
+    if (rc == 0) rc = each_zpath(k_ls_all, sr_on_track, &a);
+    if (rc == 0)
+        rc = gate_require_scanned(a.tracked, 100, "check-no-stray-root-files",
+                "git ls-files returned almost nothing — not a git checkout, or the wrong cwd.");
+    if (rc) return rc;
+    const char *extra = getenv("ZCL_ROOT_STRAY_EXTRA_FOR_TEST");
+    if (extra && extra[0]) sr_del(&a.allowed, extra);
+    struct dirent **names = NULL;
+    int nd = scandir(".", &names, NULL, alphasort);
+    if (nd < 0) return die("z23-lint: cannot scan %s\n", ".");
+    char stray[SR_STRAY][SR_NAME];
+    int ns = 0, scanned = 0;
+    for (int i = 0; i < nd; i++) {
+        const char *name = names[i]->d_name;
+        if (rc == 0 && strcmp(name, ".") && strcmp(name, "..")) {
+            scanned++;
+            if (!sr_ok_name(name, &a.allowed)) {
+                if (ns >= SR_STRAY || strlen(name) >= SR_NAME)
+                    rc = die("z23-lint: stray-root overflow\n", "");
+                else memcpy(stray[ns++], name, strlen(name) + 1);
+            }
+        }
+        free(names[i]);
+    }
+    free(names);
+    if (rc == 0)
+        rc = gate_require_scanned(scanned, 20, "check-no-stray-root-files",
+                                  "the repo root listed fewer than 20 entries — wrong cwd?");
+    if (rc) return rc;
+    if (ns) return sr_report(stray, ns);
+    return printf("[check_no_stray_root_files] scanned %d root entr(y/ies); 0 strays\n",
+                  scanned) < 0 ? die("z23-lint: write failed\n", "") : 0;
+}
+
+static int check_no_stray_root_files_selftest(void)
+{
+    struct sr_set al = {0};
+    char stray[8][SR_NAME];
+    int ns = 0, sc = 0, bad = sr_seed(&al) != 0;
+    const char *okn[] = { ".git", "build", "vendor", "test-tmp", ".aider" };
+    bad |= sr_feed(&al, okn, 5, stray, 8, &ns, &sc) || ns != 0 || sc != 5;
+    const char *badn[] = { ".git", "junk.db" };
+    ns = sc = 0;
+    bad |= sr_feed(&al, badn, 2, stray, 8, &ns, &sc) || ns != 1
+        || strcmp(stray[0], "junk.db") || sr_report(stray, ns) != 1;
+    const char *aid[] = { ".aider.tags.cache.v3" };
+    ns = sc = 0;
+    bad |= sr_feed(&al, aid, 1, stray, 8, &ns, &sc) || ns != 0;
+    const char *core[] = { "core.1234", "vgcore.9" };
+    ns = sc = 0;
+    bad |= sr_feed(&al, core, 2, stray, 8, &ns, &sc) || ns != 0;
+    const char *old = getenv("ZCL_ROOT_STRAY_EXTRA_FOR_TEST");
+    if (setenv("ZCL_ROOT_STRAY_EXTRA_FOR_TEST", "build", 1) != 0) bad = 1;
+    {
+        const char *e = getenv("ZCL_ROOT_STRAY_EXTRA_FOR_TEST");
+        if (e && e[0]) sr_del(&al, e);
+    }
+    const char *ex[] = { "build" };
+    ns = sc = 0;
+    bad |= sr_feed(&al, ex, 1, stray, 8, &ns, &sc) || ns != 1 || strcmp(stray[0], "build");
+    if (old) (void)setenv("ZCL_ROOT_STRAY_EXTRA_FOR_TEST", old, 1);
+    else (void)unsetenv("ZCL_ROOT_STRAY_EXTRA_FOR_TEST");
+    return st_ok(bad, "check_no_stray_root_files selftest: OK\n");
+}
+
 struct lint_gate {
     const char *name;
     int (*run)(int argc, char **argv);
@@ -1869,6 +2146,10 @@ static const struct lint_gate k_gates[] = {
       check_no_raw_clock_outside_platform_selftest },
     { "check-no-shellouts", check_no_shellouts_run, check_no_shellouts_selftest },
     { "check-command-contract", check_command_contract_run, check_command_contract_selftest },
+    { "check-no-writer-below-sealed-frontier", check_no_writer_below_sealed_frontier_run,
+      check_no_writer_below_sealed_frontier_selftest },
+    { "check-no-stray-root-files", check_no_stray_root_files_run,
+      check_no_stray_root_files_selftest },
 };
 
 int main(int argc, char **argv)

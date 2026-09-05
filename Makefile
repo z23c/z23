@@ -11747,7 +11747,7 @@ check-app-bundle-reproducible:
 # may call the store's WRITE API (chain_segment_seal_range /
 # chain_segment_manifest_rebuild). See
 # tools/lint/check_no_writer_below_sealed_frontier.sh for the rationale.
-check-no-writer-below-sealed-frontier:
+check-no-writer-below-sealed-frontier: $(LINTC_TOOL)
 	@echo "→ Gate: no_writer_below_sealed_frontier (sealed ROM segment store)"
 	@./tools/lint/check_no_writer_below_sealed_frontier.sh
 
@@ -12816,7 +12816,7 @@ check-no-stray-untracked-source:
 # short allowlist of generated/local entries. Anything else (a stray database,
 # a nohup capture, a second scratch dir) is gitignored debris that `git status`
 # never objected to. See tools/lint/check_no_stray_root_files.sh.
-check-no-stray-root-files:
+check-no-stray-root-files: $(LINTC_TOOL)
 	@echo "══ LINT: no stray files in the repository root ══"
 	@./tools/lint/check_no_stray_root_files.sh
 
