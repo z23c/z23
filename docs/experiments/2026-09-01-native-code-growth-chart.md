@@ -104,6 +104,17 @@ identity. Terminating that exact obsolete process group released the lock, and
 the queued focused presentation group then passed. Cooperative cancellation
 of obsolete proof work remains a measured orientation/build-loop improvement.
 
+Follow-up (2026-09-05): this refusal folded several distinct causes behind
+one string, and a fresh `git worktree add` train/landing worktree hit the
+worst of them — no build ever ran there, so
+`build/dev-loop/restart.env` did not exist and the reader had no way to tell
+"this checkout never ran `make dev-bin`" apart from "the identity went
+stale mid-proof" above. `zcl_dev_proof_build_identity_v1_capture()` now
+reports the specific cause through its `why` output when it has one, so a
+missing restart plan refuses as `restart_env_missing:<path> (make dev-bin)`
+and only an unclassified cause still falls back to
+`proof_toolchain_or_policy_unavailable`.
+
 ## Readability and navigation acceptance
 
 Date: 2026-09-02T12:40:58-04:00 / 2026-09-02T16:40:58Z

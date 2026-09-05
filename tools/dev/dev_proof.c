@@ -2098,7 +2098,8 @@ static bool proof_plan_key_is_flag(const char *key)
  * library redirections, which environment_root binds. Dropping it is the
  * whole reason two boxes can compare receipts at all. */
 static bool proof_plan_roots(const char *root, uint8_t flags[32],
-                             uint8_t build_graph[32])
+                             uint8_t build_graph[32], char *why,
+                             size_t why_len)
 {
     char path[PATH_MAX], body[PROOF_PLAN_MAX_BYTES];
     size_t root_len = root ? strlen(root) : 0;
@@ -2109,8 +2110,23 @@ static bool proof_plan_roots(const char *root, uint8_t flags[32],
         snprintf(path, sizeof(path), "%s/build/dev-loop/restart.env", root) >=
             (int)sizeof(path))
         return false;
+    errno = 0;
     FILE *f = fopen(path, "rb");
-    if (!f) return false;
+    if (!f) {
+        /* `make dev-bin` is the sole writer of this file (dev-linker-select.sh
+         * plus the dev build's restart-env generator); a fresh `git worktree
+         * add` checkout never ran it, and ten proof attempts folding this into
+         * "proof_toolchain_or_policy_unavailable" never said so. Name the path
+         * and the exact command the same way the vendor dependency check
+         * below names its own missing input. */
+        if (errno == ENOENT)
+            proof_whyf(why, why_len, "restart_env_missing:%s (make dev-bin)",
+                       path);
+        else
+            proof_whyf(why, why_len, "restart_env_unreadable:%s (%s)", path,
+                       proof_errno_name(errno));
+        return false;
+    }
     size_t n = fread(body, 1, sizeof(body) - 1, f);
     bool ok = !ferror(f) && n > 0 && n < sizeof(body) - 1;
     fclose(f);
@@ -2190,14 +2206,16 @@ static bool proof_environment_root(uint8_t out[32])
  * absolute paths yields the same four values. That is what makes a receipt
  * mean anything on a second box. */
 bool zcl_dev_proof_build_identity_v1_capture(
-    const char *repo_root, struct zcl_dev_proof_build_identity_v1 *out)
+    const char *repo_root, struct zcl_dev_proof_build_identity_v1 *out,
+    char *why, size_t why_len)
 {
     struct vcs_toolchain_capsule_v1 capsule;
     if (!repo_root || !out) return false;
     memset(out, 0, sizeof(*out));
     return vcs_toolchain_capsule_v1_capture(&capsule) &&
            vcs_toolchain_capsule_v1_root(&capsule, out->compiler) &&
-           proof_plan_roots(repo_root, out->flags, out->build_graph) &&
+           proof_plan_roots(repo_root, out->flags, out->build_graph, why,
+                            why_len) &&
            proof_environment_root(out->environment);
 }
 
@@ -2250,7 +2268,7 @@ static bool warm_marker_write(const char *generation, const char *root,
                               const char *local, const char *base)
 {
     struct zcl_dev_proof_build_identity_v1 identity;
-    if (!zcl_dev_proof_build_identity_v1_capture(root, &identity))
+    if (!zcl_dev_proof_build_identity_v1_capture(root, &identity, NULL, 0))
         return false;
     return warm_marker_write_at(generation, root, local, base,
                                 platform_time_wall_unix(), &identity);
@@ -2630,7 +2648,7 @@ static bool warm_donor_scan(const char *parent, const char *root,
      * any candidate: fail closed to cold rather than adopt objects this
      * scan cannot prove match. */
     struct zcl_dev_proof_build_identity_v1 current;
-    if (!zcl_dev_proof_build_identity_v1_capture(root, &current))
+    if (!zcl_dev_proof_build_identity_v1_capture(root, &current, NULL, 0))
         return false;
     DIR *dir = opendir(parent);
     if (!dir || !parent || !root || !in_use || !donor) {
@@ -4202,9 +4220,17 @@ static bool proof_worker_body(const struct proof_paths *paths,
                  "%s/cognition/controllers/include/controllers/agent_impact_rules.def",
                  generation) >= (int)sizeof(policy_path) ||
         !hash_file("zcl.dev_proof_impact_policy.v1", policy_path,
-                   receipt.impact_policy_root) ||
-        !zcl_dev_proof_build_identity_v1_capture(paths->root, &identity)) {
+                   receipt.impact_policy_root)) {
         proof_why(why, why_len, "proof_toolchain_or_policy_unavailable");
+        return false;
+    }
+    if (!zcl_dev_proof_build_identity_v1_capture(paths->root, &identity, why,
+                                                 why_len)) {
+        /* build_identity_v1_capture names its own exact cause (for example
+         * restart_env_missing) through proof_plan_roots; fall back to the
+         * umbrella reason only when it left why untouched. */
+        if (!why || !why[0])
+            proof_why(why, why_len, "proof_toolchain_or_policy_unavailable");
         return false;
     }
     /* The same four roots the warm-start donor marker seals, from the same

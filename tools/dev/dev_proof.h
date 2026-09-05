@@ -72,10 +72,14 @@ struct zcl_dev_proof_build_identity_v1 {
  * environment_root/build_graph_root and the warm-start donor seal both come
  * from this call, so the two can never disagree. Reads
  * <repo_root>/build/dev-loop/restart.env and captures the toolchain capsule;
- * false means one of those was unavailable and no root was produced.
- * Defined on POSIX hosts, like the rest of the proof worker. */
+ * false means one of those was unavailable and no root was produced. `why`
+ * (may be NULL) receives the exact cause -- for example
+ * "restart_env_missing:<path> (make dev-bin)" when a fresh worktree never
+ * ran the generator that writes that file. Defined on POSIX hosts, like the
+ * rest of the proof worker. */
 bool zcl_dev_proof_build_identity_v1_capture(
-    const char *repo_root, struct zcl_dev_proof_build_identity_v1 *out);
+    const char *repo_root, struct zcl_dev_proof_build_identity_v1 *out,
+    char *why, size_t why_len);
 
 /* One captured base..local changed set. Heap-resident: the row ceiling is a
  * landing-batch ceiling (thousands of paths), which must never sit in a stack

@@ -3127,8 +3127,8 @@ static int test_pw_identity_survives_a_second_checkout_path(void)
         ASSERT(ic_write_build_plan(root_b, epoch_b, compiler_id_b, "-O2",
                                    NULL));
         struct zcl_dev_proof_build_identity_v1 a = {0}, b = {0};
-        ASSERT(zcl_dev_proof_build_identity_v1_capture(root_a, &a));
-        ASSERT(zcl_dev_proof_build_identity_v1_capture(root_b, &b));
+        ASSERT(zcl_dev_proof_build_identity_v1_capture(root_a, &a, NULL, 0));
+        ASSERT(zcl_dev_proof_build_identity_v1_capture(root_b, &b, NULL, 0));
         ASSERT(memcmp(&a, &b, sizeof(a)) == 0);
         /* Equal-because-empty would satisfy the line above and prove
          * nothing, so every root has to carry something. */
@@ -3143,8 +3143,10 @@ static int test_pw_identity_survives_a_second_checkout_path(void)
         /* A checkout root a prefix rewrite cannot model is refused rather
          * than half-applied. */
         struct zcl_dev_proof_build_identity_v1 refused = {0};
-        ASSERT(!zcl_dev_proof_build_identity_v1_capture("/", &refused));
-        ASSERT(!zcl_dev_proof_build_identity_v1_capture(root_a, NULL));
+        ASSERT(!zcl_dev_proof_build_identity_v1_capture("/", &refused, NULL,
+                                                         0));
+        ASSERT(!zcl_dev_proof_build_identity_v1_capture(root_a, NULL, NULL,
+                                                         0));
         /* The four roots this box puts in a receipt, printed so two boxes
          * can be compared without either running a proof. */
         char compiler_hex[65], flags_hex[65], environment_hex[65];
@@ -3182,11 +3184,12 @@ static int test_pw_identity_keeps_its_four_roots_apart(void)
         test_make_tmpdir(root, sizeof(root), "proof_identity", "separation");
         struct zcl_dev_proof_build_identity_v1 baseline = {0}, moved = {0};
         ASSERT(ic_write_build_plan(root, epoch, compiler_id, "-O2", NULL));
-        ASSERT(zcl_dev_proof_build_identity_v1_capture(root, &baseline));
+        ASSERT(zcl_dev_proof_build_identity_v1_capture(root, &baseline, NULL,
+                                                       0));
 
         /* A flag the plan passes moves flags_root and nothing else. */
         ASSERT(ic_write_build_plan(root, epoch, compiler_id, "-O0", NULL));
-        ASSERT(zcl_dev_proof_build_identity_v1_capture(root, &moved));
+        ASSERT(zcl_dev_proof_build_identity_v1_capture(root, &moved, NULL, 0));
         ASSERT(memcmp(moved.flags, baseline.flags, 32) != 0);
         ASSERT(memcmp(moved.compiler, baseline.compiler, 32) == 0);
         ASSERT(memcmp(moved.environment, baseline.environment, 32) == 0);
@@ -3197,7 +3200,7 @@ static int test_pw_identity_keeps_its_four_roots_apart(void)
          * is an input nobody notices changing. */
         ASSERT(ic_write_build_plan(root, epoch, compiler_id, "-O2",
                                    "DEV_SOMETHING_NEW=1\n"));
-        ASSERT(zcl_dev_proof_build_identity_v1_capture(root, &moved));
+        ASSERT(zcl_dev_proof_build_identity_v1_capture(root, &moved, NULL, 0));
         ASSERT(memcmp(moved.build_graph, baseline.build_graph, 32) != 0);
         ASSERT(memcmp(moved.compiler, baseline.compiler, 32) == 0);
         ASSERT(memcmp(moved.flags, baseline.flags, 32) == 0);
@@ -3206,7 +3209,7 @@ static int test_pw_identity_keeps_its_four_roots_apart(void)
         /* A plan line that is not KEY=VALUE is refused, not guessed at. */
         ASSERT(ic_write_build_plan(root, epoch, compiler_id, "-O2",
                                    "a line with no equals sign\n"));
-        ASSERT(!zcl_dev_proof_build_identity_v1_capture(root, &moved));
+        ASSERT(!zcl_dev_proof_build_identity_v1_capture(root, &moved, NULL, 0));
         ASSERT(ic_write_build_plan(root, epoch, compiler_id, "-O2", NULL));
 
         /* An environment variable that reaches the compiler without going
@@ -3217,7 +3220,7 @@ static int test_pw_identity_keeps_its_four_roots_apart(void)
             snprintf(restore_cflags, sizeof(restore_cflags), "%s",
                      saved_cflags);
         ASSERT(setenv("CFLAGS", "-fsanitize=undefined", 1) == 0);
-        ASSERT(zcl_dev_proof_build_identity_v1_capture(root, &moved));
+        ASSERT(zcl_dev_proof_build_identity_v1_capture(root, &moved, NULL, 0));
         ASSERT(memcmp(moved.environment, baseline.environment, 32) != 0);
         ASSERT(memcmp(moved.compiler, baseline.compiler, 32) == 0);
         ASSERT(memcmp(moved.flags, baseline.flags, 32) == 0);
@@ -3238,7 +3241,7 @@ static int test_pw_identity_keeps_its_four_roots_apart(void)
         ASSERT(snprintf(reordered, sizeof(reordered), "/nonexistent-probe:%s",
                         restore_path) < (int)sizeof(reordered));
         ASSERT(setenv("PATH", reordered, 1) == 0);
-        ASSERT(zcl_dev_proof_build_identity_v1_capture(root, &moved));
+        ASSERT(zcl_dev_proof_build_identity_v1_capture(root, &moved, NULL, 0));
         ASSERT(setenv("PATH", restore_path, 1) == 0);
         ASSERT(memcmp(&moved, &baseline, sizeof(moved)) == 0);
 
@@ -3255,6 +3258,45 @@ static int test_pw_identity_keeps_its_four_roots_apart(void)
         ASSERT(memcmp(here, elsewhere, 32) != 0);
         ASSERT(memcmp(here, baseline.compiler, 32) == 0);
 
+        ASSERT(test_rm_rf_recursive(root) == 0);
+#endif
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* A fresh `git worktree add` checkout never ran `make dev-bin`, so
+ * build/dev-loop/restart.env does not exist there yet. Two landing trains
+ * lost proof attempts to "proof_toolchain_or_policy_unavailable" without it
+ * ever naming that file or the command that produces it; this pins the
+ * exact refusal text so it cannot regress back into the umbrella reason. */
+static int test_pw_identity_names_missing_restart_env(void)
+{
+    int failures = 0;
+    TEST("proof identity: absent restart.env names the path and the fix") {
+#if defined(_WIN32)
+        ASSERT(true);
+#else
+        char root[4096];
+        test_make_tmpdir(root, sizeof(root), "proof_identity",
+                         "no_restart_env");
+        char expect_path[4096];
+        ASSERT(snprintf(expect_path, sizeof(expect_path),
+                        "%s/build/dev-loop/restart.env", root) <
+               (int)sizeof(expect_path));
+        struct zcl_dev_proof_build_identity_v1 identity = {0};
+        char why[256] = {0};
+        ASSERT(!zcl_dev_proof_build_identity_v1_capture(root, &identity, why,
+                                                        sizeof(why)));
+        char expect_why[512];
+        ASSERT(snprintf(expect_why, sizeof(expect_why),
+                        "restart_env_missing:%s (make dev-bin)",
+                        expect_path) < (int)sizeof(expect_why));
+        ASSERT(strcmp(why, expect_why) == 0);
+        /* A NULL why buffer must not crash the caller: it is the ordinary
+         * shape at the two donor/warm call sites that do not report why. */
+        ASSERT(!zcl_dev_proof_build_identity_v1_capture(root, &identity, NULL,
+                                                        0));
         ASSERT(test_rm_rf_recursive(root) == 0);
 #endif
         PASS();
@@ -3604,6 +3646,7 @@ int test_impact_composition(void)
     failures += test_pw_marker_identity_invalidates_stale_donor();
     failures += test_pw_identity_survives_a_second_checkout_path();
     failures += test_pw_identity_keeps_its_four_roots_apart();
+    failures += test_pw_identity_names_missing_restart_env();
     failures += test_pw_receipt_refuses_an_older_root_policy();
     failures += test_pw_status_line_reports_warm_or_typed_cold();
     failures += test_pw_seed_links_replaces_and_copies();
