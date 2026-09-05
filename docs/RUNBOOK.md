@@ -518,7 +518,12 @@ next onion-seed pass (boot-time discovery, and any time the
 (`engine/conditions/src/peer_floor_violated.c`) detects when healthy outbound
 peers stay below 3 for 60+ seconds. Its remedy is independent of whether the
 legacy `zclassicd` oracle/mirror is reachable — that source is not consulted
-by this decision at all. When healthy outbound is exactly zero it additionally
+by this decision at all. The deficit this condition detects is entirely on
+the outbound side, so the remedy only ever dials for more outbound peers
+(clearing addnode backoff, kicking seed discovery, and the onion-directory
+fallback below) — it never disconnects inbound peers to chase an outbound
+floor, so an inbound joiner keeps completing its handshake undisturbed. When
+healthy outbound is exactly zero it additionally
 calls `connman_kick_onion_seeds()` (the operator file above, then the
 hardcoded `kOnionSeeds`, then any `.onion` peers discovered via on-chain ZSLP
 scan). After 5 fast attempts without the tip resuming, the condition pages

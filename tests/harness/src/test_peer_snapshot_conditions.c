@@ -122,6 +122,71 @@ int test_peer_snapshot_conditions(void)
     }
 
     {
+        /* outbound=1, inbound=13 (the observed fleet shape): the remedy must
+         * never shed inbound peers to chase an OUTBOUND floor deficit — that
+         * can only starve legitimate joiners, never raise healthy_outbound.
+         * It must instead act on the side that CAN clear the condition: an
+         * addnode with only pure-TCP failure history has its backoff/last
+         * attempt cleared so the dialer retries it immediately (the existing
+         * "request more outbound dials" action; see
+         * engine/conditions/src/peer_floor_violated.c). */
+        struct fake_clock_peer_snapshot clock;
+        fake_clock_install(&clock, 1500);
+        struct connman cm;
+        struct download_manager dm;
+        struct main_state ms;
+        reset_peer_snapshot_conditions(&cm, &dm, &ms);
+        bool ok = true;
+        register_peer_floor_violated();
+
+        struct p2p_node healthy_outbound = {0};
+        healthy_outbound.id = 1;
+        healthy_outbound.state = PEER_ACTIVE;
+        healthy_outbound.services = NODE_NETWORK;
+
+        enum { N_INBOUND = 13, N_NODES = 1 + N_INBOUND };
+        struct p2p_node inbound[N_INBOUND] = {0};
+        for (int i = 0; i < N_INBOUND; i++) {
+            inbound[i].id = (uint64_t)(100 + i);
+            inbound[i].inbound = true;
+            /* Peer 0 is a brand-new joiner still mid-handshake — the exact
+             * shape that used to sit in version_sent and get rotated out. */
+            inbound[i].state = (i == 0) ? PEER_VERSION_SENT : PEER_ACTIVE;
+        }
+
+        struct p2p_node *peers[N_NODES];
+        peers[0] = &healthy_outbound;
+        for (int i = 0; i < N_INBOUND; i++)
+            peers[1 + i] = &inbound[i];
+        cm.manager.nodes = peers;
+        cm.manager.num_nodes = N_NODES;
+
+        /* One addnode whose only history is pure-TCP failures — the case
+         * the remedy forgives above zero healthy outbound. */
+        cm.num_addnodes = 1;
+        cm.addnode_tcp_failures[0] = 3;
+        cm.addnode_protocol_failures[0] = 0;
+        cm.addnode_backoff_sec[0] = 900;
+        cm.addnode_last_attempt[0] = 1500;
+
+        condition_engine_tick();
+        ok = ok && peer_floor_violated_test_remedy_calls() == 0;
+        fake_clock_set(&clock, 1561);
+        condition_engine_tick();
+        ok = ok && peer_floor_violated_test_remedy_calls() == 1;
+
+        for (int i = 0; i < N_INBOUND; i++)
+            ok = ok && !inbound[i].disconnect;
+        ok = ok && !healthy_outbound.disconnect;
+        ok = ok && cm.addnode_backoff_sec[0] == 0;
+        ok = ok && cm.addnode_last_attempt[0] == 0;
+        PEER_SNAPSHOT_CHECK(
+            "peer floor keeps all inbound and requests an outbound dial",
+            ok);
+        cleanup_peer_snapshot_conditions();
+    }
+
+    {
         struct fake_clock_peer_snapshot clock;
         fake_clock_install(&clock, 2000);
         struct connman cm;

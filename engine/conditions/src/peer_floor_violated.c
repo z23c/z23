@@ -102,8 +102,7 @@ static enum condition_remedy_result remedy_peer_floor_violated(void)
     if (!recover)
         return COND_REMEDY_SKIP;
 
-    size_t inbound_seen = 0;
-    size_t inbound_dropped = 0;
+    size_t inbound_kept = 0;
     size_t outbound_dropped = 0;
     zcl_mutex_lock(&cm->manager.cs_nodes);
     for (size_t i = 0; i < cm->manager.num_nodes; i++) {
@@ -126,16 +125,25 @@ static enum condition_remedy_result remedy_peer_floor_violated(void)
                 P2P_DISCONNECT_SOURCE_PEER_POLICY, n->endpoint_generation);
             outbound_dropped++;
         }
-        if (n && n->inbound && !n->disconnect) {
-            inbound_seen++;
-            if (inbound_seen > 2) {
-                (void)p2p_node_request_disconnect(
-                    n, P2P_DISCONNECT_POLICY_ROTATION,
-                    P2P_DISCONNECT_SOURCE_PEER_POLICY,
-                    n->endpoint_generation);
-                inbound_dropped++;
-            }
-        }
+        /* Dropping inbound peers cannot raise the healthy-outbound count —
+         * the deficit this condition detects is entirely on the outbound
+         * side (connman_get_outbound_health() / connman_outbound_healthy_count()
+         * never count inbound), so tearing down inbound connections here
+         * only starves legitimate inbound joiners (they can sit in
+         * version_sent and be rotated out) without ever touching the
+         * quantity the witness checks. This condition has no separate
+         * mechanism that limits inbound INFLUENCE on the sync decisions
+         * this remedy/witness pair reads: connman_max_peer_height()
+         * (core/modules/net/src/connman.c:2879) folds starting_height from
+         * every handshaked NODE_NETWORK peer, inbound included, into
+         * peer_max with no inbound/outbound distinction, and that peer_max
+         * feeds both the recovery decision above and
+         * witness_peer_floor_violated()'s "nothing left to fetch" check
+         * below. A future influence limit belongs there, as a filtered
+         * read; it is not this eviction. So: count what stays connected,
+         * emit it as a typed observation, and drop nothing inbound. */
+        if (n && n->inbound && !n->disconnect)
+            inbound_kept++;
     }
     zcl_mutex_unlock(&cm->manager.cs_nodes);
 
@@ -178,8 +186,9 @@ static enum condition_remedy_result remedy_peer_floor_violated(void)
                                  atomic_load(&g_outbound_at_detect),
                                  "condition:peer_floor_violated");
     event_emitf(EV_SYNC_STATE_CHANGE, 0,
-                "condition PEER_FLOOR drop_outbound=%zu drop_inbound=%zu",
-                outbound_dropped, inbound_dropped);
+                "condition PEER_FLOOR drop_outbound=%zu "
+                "peer_floor_inbound_kept=%zu",
+                outbound_dropped, inbound_kept);
 
 #ifdef ZCL_TESTING
     atomic_fetch_add(&g_test_remedy_calls, 1);
