@@ -19,6 +19,7 @@
 #include "platform/directory_compat.h"
 #include "platform/time_compat.h"
 #include "services/build_fabric_service.h"
+#include "services/build_fabric_async.h"
 #include "services/build_fabric_worker.h"
 #include "services/zcode_lane_service.h"
 #include "util/safe_alloc.h"
@@ -3003,6 +3004,10 @@ static int test_zd_improve_command(void)
         (void)snprintf(db_path, sizeof(db_path), "%s/node.db", workspace);
         struct node_db ndb = {0};
         ASSERT(node_db_open(&ndb, db_path));
+        struct db_build_proof_event timing_requested;
+        ASSERT(db_build_proof_event_requested(
+            &ndb, action_id, build_fabric_proof_request_id(action_id),
+            &timing_requested));
         struct zcode_lane_status frontier_status;
         ASSERT(zcode_lane_find(&ndb, workspace, candidate_source_saved,
                                &frontier_status).ok);
@@ -5737,6 +5742,33 @@ static int test_zd_improve_command(void)
                                       "release_identity_satisfied")));
         ASSERT(json_get_bool(json_get(&evidence_reply.data,
                                       "policy_satisfied")));
+        ASSERT(json_get_bool(json_get(&evidence_reply.data,
+                                      "async_timings_available")));
+        const struct json_value *latency = json_get(
+            &evidence_reply.data, "latency");
+        ASSERT(latency != NULL);
+        /* Aggregate objects are additive: keep the original scalar key and
+         * distinguish an absent remote stage from a measured local submit. */
+        ASSERT(json_get(latency, "local_submit_us") != NULL);
+        ASSERT_EQ(json_get_int(json_get(latency, "local_submit_us")),
+                  timing_requested.elapsed_us);
+        const struct json_value *submit_metric = json_get(latency, "local_submit");
+        const struct json_value *remote_metric = json_get(latency, "remote_execution");
+        ASSERT(submit_metric != NULL);
+        ASSERT(remote_metric != NULL);
+        ASSERT_EQ(json_get_int(json_get(submit_metric, "measured_count")), 1);
+        ASSERT(json_get(submit_metric, "missing_count") != NULL);
+        ASSERT_EQ(json_get_int(json_get(submit_metric, "missing_count")), 0);
+        ASSERT_EQ(json_get_int(json_get(submit_metric, "p95_us")),
+                  timing_requested.elapsed_us);
+        ASSERT(json_get(remote_metric, "measured_count") != NULL);
+        ASSERT_EQ(json_get_int(json_get(remote_metric, "measured_count")), 0);
+        ASSERT_EQ(json_get_int(json_get(remote_metric, "missing_count")), 1);
+        ASSERT(json_get_int(json_get(latency, "total_events")) >= 1);
+        ASSERT(json_get(latency, "failure_events") != NULL);
+        ASSERT_EQ(json_get_int(json_get(latency, "failure_events")), 0);
+        ASSERT(json_get(latency, "retry_events") != NULL);
+        ASSERT_EQ(json_get_int(json_get(latency, "retry_events")), 0);
         zcl_command_reply_free(&evidence_reply);
         json_free(&evidence_input);
         free(task_recipe_hex); free(task_recipe_wire);

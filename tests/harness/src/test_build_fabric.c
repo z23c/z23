@@ -390,6 +390,15 @@ static int test_bf_async_proof_events(void)
         ASSERT_EQ(timings.remote_execution_us, 30);
         ASSERT_EQ(timings.receipt_verification_us, 40);
         ASSERT_EQ(timings.total_background_proof_us, 60);
+        ASSERT_EQ(timings.metric_local_submit.measured_count, 1);
+        ASSERT_EQ(timings.metric_local_submit.min_us, 17);
+        ASSERT_EQ(timings.metric_local_submit.max_us, 17);
+        ASSERT_EQ(timings.metric_local_submit.mean_us, 17);
+        ASSERT_EQ(timings.metric_local_submit.p50_us, 17);
+        ASSERT_EQ(timings.metric_local_submit.p95_us, 17);
+        ASSERT_EQ(timings.metric_local_submit.missing_count, 0);
+        ASSERT_EQ(timings.total_events, 8);
+        ASSERT_EQ(timings.failure_events, 0);
 
         struct db_service db_service;
         db_service_init(&db_service);
@@ -437,6 +446,175 @@ static int test_bf_async_proof_events(void)
         ASSERT(db_build_proof_event_latest(
             &ndb, newer_action.action_id, &latest));
         ASSERT_STR_EQ(latest.state, "REQUESTED");
+        node_db_close(&ndb);
+        test_rm_rf(dir);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static bool bf_timing_request(struct node_db *ndb,
+                              struct db_build_action *action,
+                              struct db_build_proof_event *requested)
+{
+    struct db_build_job job;
+    bf_job(&job); bf_action(action);
+    (void)snprintf(action->task_root_sha3,
+                   sizeof(action->task_root_sha3), "%s", id_a);
+    (void)snprintf(action->candidate_root_sha3,
+                   sizeof(action->candidate_root_sha3), "%s", id_b);
+    (void)snprintf(action->proof_policy_root_sha3,
+                   sizeof(action->proof_policy_root_sha3), "%s", id_c);
+    bool created = false;
+    return bf_canonicalize(&job, action) &&
+        build_fabric_plan(ndb, &job, action).ok &&
+        build_fabric_proof_request(ndb, action->action_id, "/tmp/project",
+                                  0, 0, 1000, requested, &created).ok &&
+        created;
+}
+
+static int test_bf_async_timing_samples(void)
+{
+    int failures = 0;
+    TEST("build_fabric: timings include slow failures, retries and measured zero") {
+        struct node_db ndb;
+        char dir[256], path[320];
+        ASSERT(bf_open(&ndb, dir, sizeof(dir), path, sizeof(path), "timings"));
+        struct db_build_action action;
+        struct db_build_proof_event requested, event;
+        ASSERT(bf_timing_request(&ndb, &action, &requested));
+        struct build_fabric_proof_timings timings;
+        ASSERT(build_fabric_proof_timings(&ndb, action.action_id, &timings).ok);
+        ASSERT_EQ(timings.local_submit_us, 0);
+        ASSERT_EQ(timings.metric_local_submit.measured_count, 1);
+        ASSERT_EQ(timings.metric_local_submit.missing_count, 0);
+        ASSERT_EQ(timings.remote_execution_us, 0);
+        ASSERT_EQ(timings.metric_remote_execution.measured_count, 0);
+        ASSERT_EQ(timings.metric_remote_execution.missing_count, 1);
+
+        /* Deliberately unsorted, on both sides of the former ten-second
+         * report filter. Failed attempts remain part of the distribution. */
+        const int64_t execution_us[] = {10000001, 9999999, 10000000};
+        const int64_t discovery_us[] = {0, 7, 11};
+        for (size_t i = 0; i < 3; i++) {
+            int64_t now = 1001 + (int64_t)i * 4;
+            ASSERT(build_fabric_proof_transition(
+                &ndb, action.action_id, "PEER_DISCOVERED", 9,
+                requested.request_id, id_d, NULL, 1100,
+                discovery_us[i], now, &event).ok);
+            ASSERT(build_fabric_proof_transition(
+                &ndb, action.action_id, "CONTEXT_READY", 9,
+                requested.request_id, NULL, NULL, 0, 15, now + 1, &event).ok);
+            ASSERT(build_fabric_proof_transition(
+                &ndb, action.action_id, "RUNNING", 9,
+                requested.request_id, NULL, NULL, 0, 20, now + 2, &event).ok);
+            ASSERT(build_fabric_proof_transition(
+                &ndb, action.action_id, i < 2 ? "REMOTE_RED" : "REMOTE_GREEN",
+                9, requested.request_id, NULL, id_a, 0,
+                execution_us[i], now + 3, &event).ok);
+        }
+        ASSERT(build_fabric_proof_timings(&ndb, action.action_id, &timings).ok);
+        ASSERT_EQ(timings.total_events, 13);
+        ASSERT_EQ(timings.failure_events, 2);
+        ASSERT_EQ(timings.retry_events, 2);
+        ASSERT_EQ(timings.peer_discovery_us, 0);
+        ASSERT_EQ(timings.metric_peer_discovery.measured_count, 3);
+        ASSERT_EQ(timings.metric_peer_discovery.missing_count, 0);
+        ASSERT_EQ(timings.metric_peer_discovery.min_us, 0);
+        ASSERT_EQ(timings.metric_peer_discovery.max_us, 11);
+        ASSERT_EQ(timings.metric_peer_discovery.mean_us, 6);
+        ASSERT_EQ(timings.metric_peer_discovery.p50_us, 7);
+        ASSERT_EQ(timings.metric_peer_discovery.p95_us, 11);
+        ASSERT_EQ(timings.remote_execution_us, 10000001);
+        ASSERT_EQ(timings.metric_remote_execution.measured_count, 3);
+        ASSERT_EQ(timings.metric_remote_execution.missing_count, 0);
+        ASSERT_EQ(timings.metric_remote_execution.min_us, 9999999);
+        ASSERT_EQ(timings.metric_remote_execution.max_us, 10000001);
+        ASSERT_EQ(timings.metric_remote_execution.mean_us, 10000000);
+        ASSERT_EQ(timings.metric_remote_execution.p50_us, 10000000);
+        ASSERT_EQ(timings.metric_remote_execution.p95_us, 10000001);
+        ASSERT_EQ(timings.metric_transfer.measured_count, 3);
+        ASSERT_EQ(timings.metric_remote_queue.measured_count, 3);
+        ASSERT_EQ(timings.metric_receipt_verification.measured_count, 0);
+        ASSERT_EQ(timings.metric_receipt_verification.missing_count, 1);
+        ASSERT_EQ(timings.metric_total_background_proof.measured_count, 0);
+        ASSERT_EQ(timings.metric_total_background_proof.missing_count, 1);
+        ASSERT_EQ(timings.metric_local_submit.measured_count +
+                  timings.metric_peer_discovery.measured_count +
+                  timings.metric_transfer.measured_count +
+                  timings.metric_remote_queue.measured_count +
+                  timings.metric_remote_execution.measured_count +
+                  timings.metric_receipt_verification.measured_count +
+                  timings.metric_total_background_proof.measured_count,
+                  timings.total_events);
+        node_db_close(&ndb);
+        test_rm_rf(dir);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_bf_async_timing_capacity(void)
+{
+    int failures = 0;
+    TEST("build_fabric: timing chain accepts 64 events and refuses truncation") {
+        struct node_db ndb;
+        char dir[256], path[320];
+        ASSERT(bf_open(&ndb, dir, sizeof(dir), path, sizeof(path), "timing_bound"));
+        struct db_build_action action;
+        struct db_build_proof_event requested, event;
+        ASSERT(bf_timing_request(&ndb, &action, &requested));
+        for (int64_t i = 1; i < 64; i++) {
+            ASSERT(build_fabric_proof_transition(
+                &ndb, action.action_id, "PEER_DISCOVERED", 9,
+                requested.request_id, id_d, NULL, 1100, 1,
+                1000 + i, &event).ok);
+        }
+        struct build_fabric_proof_timings timings;
+        ASSERT(build_fabric_proof_timings(&ndb, action.action_id, &timings).ok);
+        ASSERT_EQ(timings.total_events, 64);
+        ASSERT_EQ(timings.metric_peer_discovery.measured_count, 63);
+        ASSERT_EQ(timings.metric_peer_discovery.mean_us, 1);
+        ASSERT_EQ(timings.retry_events, 62);
+        ASSERT(build_fabric_proof_transition(
+            &ndb, action.action_id, "PEER_DISCOVERED", 9,
+            requested.request_id, id_d, NULL, 1100, 1, 1064, &event).ok);
+        struct zcl_result result = build_fabric_proof_timings(
+            &ndb, action.action_id, &timings);
+        ASSERT(!result.ok);
+        ASSERT(strstr(result.message, "capacity") != NULL);
+        node_db_close(&ndb);
+        test_rm_rf(dir);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_bf_async_timing_overflow(void)
+{
+    int failures = 0;
+    TEST("build_fabric: timings refuse sum overflow without wrapping") {
+        struct node_db ndb;
+        char dir[256], path[320];
+        ASSERT(bf_open(&ndb, dir, sizeof(dir), path, sizeof(path), "timing_sum"));
+        struct db_build_action action;
+        struct db_build_proof_event requested, event;
+        ASSERT(bf_timing_request(&ndb, &action, &requested));
+        ASSERT(build_fabric_proof_transition(
+            &ndb, action.action_id, "PEER_DISCOVERED", 9,
+            requested.request_id, id_d, NULL, 1100,
+            INT64_MAX, 1001, &event).ok);
+        struct build_fabric_proof_timings timings;
+        ASSERT(build_fabric_proof_timings(&ndb, action.action_id, &timings).ok);
+        ASSERT_EQ(timings.metric_peer_discovery.mean_us, INT64_MAX);
+        ASSERT_EQ(timings.metric_peer_discovery.p95_us, INT64_MAX);
+        ASSERT(build_fabric_proof_transition(
+            &ndb, action.action_id, "PEER_DISCOVERED", 9,
+            requested.request_id, id_d, NULL, 1100, 1, 1002, &event).ok);
+        struct zcl_result result = build_fabric_proof_timings(
+            &ndb, action.action_id, &timings);
+        ASSERT(!result.ok);
+        ASSERT(strstr(result.message, "overflow") != NULL);
         node_db_close(&ndb);
         test_rm_rf(dir);
         PASS();
@@ -2205,6 +2383,9 @@ int test_build_fabric(void)
     failures += test_bf_migration();
     failures += test_bf_lifecycle();
     failures += test_bf_async_proof_events();
+    failures += test_bf_async_timing_samples();
+    failures += test_bf_async_timing_capacity();
+    failures += test_bf_async_timing_overflow();
     failures += test_bf_validation();
     failures += test_bf_service();
     failures += test_bf_reproduction_plan();

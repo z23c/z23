@@ -863,11 +863,45 @@ void zcl_native_handle_zcode_evidence(
                              timings.receipt_verification_us) &&
             json_push_kv_int(&latency, "total_background_proof_us",
                              timings.total_background_proof_us) &&
-            json_push_kv(&reply->data, "latency", &latency);
+            json_push_kv_int(&latency, "total_events",
+                               (int64_t)timings.total_events) &&
+            json_push_kv_int(&latency, "failure_events",
+                               (int64_t)timings.failure_events) &&
+            json_push_kv_int(&latency, "retry_events",
+                               (int64_t)timings.retry_events);
+        const struct build_fabric_timing_metric *ms[] = {
+            &timings.metric_local_submit, &timings.metric_peer_discovery,
+            &timings.metric_transfer, &timings.metric_remote_queue,
+            &timings.metric_remote_execution,
+            &timings.metric_receipt_verification,
+            &timings.metric_total_background_proof};
+        const char *mn[] = {"local_submit", "peer_discovery", "transfer",
+            "remote_queue", "remote_execution", "receipt_verification",
+            "total_background_proof"};
+        for (size_t i = 0; rendered && i < sizeof(ms) / sizeof(ms[0]); i++) {
+            struct json_value metric;
+            json_init(&metric); json_set_object(&metric);
+            rendered = json_push_kv_int(&metric, "measured_count",
+                                        (int64_t)ms[i]->measured_count) &&
+                json_push_kv_int(&metric, "missing_count",
+                                 (int64_t)ms[i]->missing_count) &&
+                json_push_kv_int(&metric, "min_us", ms[i]->min_us) &&
+                json_push_kv_int(&metric, "max_us", ms[i]->max_us) &&
+                json_push_kv_int(&metric, "mean_us", ms[i]->mean_us) &&
+                json_push_kv_int(&metric, "p50_us", ms[i]->p50_us) &&
+                json_push_kv_int(&metric, "p95_us", ms[i]->p95_us) &&
+                json_push_kv(&latency, mn[i], &metric);
+            json_free(&metric);
+        }
+        rendered = rendered && json_push_kv(&reply->data, "latency", &latency);
         json_free(&latency);
         if (!rendered)
             zdev_fail(reply, "TIMING_OUTPUT_FAILED",
                       "async proof timing report exceeded its bound");
+    } else if (!json_push_kv_str(&reply->data, "async_timings_unavailable_reason",
+                                 timed.message)) {
+        zdev_fail(reply, "TIMING_OUTPUT_FAILED",
+                  "async proof timing refusal could not be rendered");
     }
 }
 

@@ -237,34 +237,65 @@ struct zcl_result build_fabric_proof_timings(
     if (out) memset(out, 0, sizeof(*out));
     if (!ndb || !ndb->open || !action_id || !out)
         return ZCL_ERR(-1, "async proof timings require exact inputs");
-    struct db_build_proof_event events[64];
+    struct db_build_proof_event events[65];
     int count = db_build_proof_events_for_action(
         ndb, action_id, events, sizeof(events) / sizeof(events[0]));
     if (count <= 0)
         return ZCL_ERR(-1, "async proof timing chain is absent or invalid");
+    if (count > 64)
+        return ZCL_ERR(-1, "async proof timing chain exceeds bounded capacity");
+    int64_t *values[7] = { &out->local_submit_us, &out->peer_discovery_us,
+        &out->transfer_us, &out->remote_queue_us, &out->remote_execution_us,
+        &out->receipt_verification_us, &out->total_background_proof_us };
+    struct build_fabric_timing_metric *metrics[7] = {
+        &out->metric_local_submit, &out->metric_peer_discovery,
+        &out->metric_transfer, &out->metric_remote_queue,
+        &out->metric_remote_execution, &out->metric_receipt_verification,
+        &out->metric_total_background_proof };
+    int64_t samples[7][64];
+    size_t sample_count[7] = {0};
+    const char *states[7] = {"REQUESTED", "PEER_DISCOVERED", "CONTEXT_READY",
+        "RUNNING", "REMOTE_GREEN", "RECEIPT_VERIFIED",
+        "READY_FOR_ACCEPTANCE"};
+    out->total_events = (uint64_t)count;
     for (int i = 0; i < count; i++) {
         const char *state = events[i].state;
-        if (strcmp(state, "REQUESTED") == 0 && out->local_submit_us == 0)
-            out->local_submit_us = events[i].elapsed_us;
-        else if (strcmp(state, "PEER_DISCOVERED") == 0 &&
-                 out->peer_discovery_us == 0)
-            out->peer_discovery_us = events[i].elapsed_us;
-        else if (strcmp(state, "CONTEXT_READY") == 0 &&
-                 out->transfer_us == 0)
-            out->transfer_us = events[i].elapsed_us;
-        else if (strcmp(state, "RUNNING") == 0 &&
-                 out->remote_queue_us == 0)
-            out->remote_queue_us = events[i].elapsed_us;
-        else if ((strcmp(state, "REMOTE_GREEN") == 0 ||
-                  strcmp(state, "REMOTE_RED") == 0) &&
-                 out->remote_execution_us == 0)
-            out->remote_execution_us = events[i].elapsed_us;
-        else if (strcmp(state, "RECEIPT_VERIFIED") == 0 &&
-                 out->receipt_verification_us == 0)
-            out->receipt_verification_us = events[i].elapsed_us;
-        else if (strcmp(state, "READY_FOR_ACCEPTANCE") == 0 &&
-                 out->total_background_proof_us == 0)
-            out->total_background_proof_us = events[i].elapsed_us;
+        if (strcmp(state, "REMOTE_RED") == 0) out->failure_events++;
+        for (size_t j = 0; j < 7; j++) {
+            if (strcmp(state, states[j]) != 0 &&
+                !(j == 4 && strcmp(state, "REMOTE_RED") == 0)) continue;
+            if (sample_count[j] == 0) *values[j] = events[i].elapsed_us;
+            samples[j][sample_count[j]++] = events[i].elapsed_us;
+            break;
+        }
     }
+    for (size_t j = 0; j < 7; j++) {
+        struct build_fabric_timing_metric *m = metrics[j];
+        m->measured_count = sample_count[j];
+        m->missing_count = sample_count[j] == 0 ? 1 : 0;
+        if (!sample_count[j]) continue;
+        int64_t sum = 0;
+        for (size_t a = 0; a < sample_count[j]; a++) {
+            if ((samples[j][a] > 0 && sum > INT64_MAX - samples[j][a]) ||
+                (samples[j][a] < 0 && sum < INT64_MIN - samples[j][a]))
+                return ZCL_ERR(-1, "async proof timing sum overflow");
+            sum += samples[j][a];
+            if (a == 0 || samples[j][a] < m->min_us) m->min_us = samples[j][a];
+            if (a == 0 || samples[j][a] > m->max_us) m->max_us = samples[j][a];
+        }
+        for (size_t a = 1; a < sample_count[j]; a++) {
+            int64_t value = samples[j][a];
+            size_t b = a;
+            while (b > 0 && samples[j][b - 1] > value) {
+                samples[j][b] = samples[j][b - 1];
+                b--;
+            }
+            samples[j][b] = value;
+        }
+        m->mean_us = sum / (int64_t)sample_count[j];
+        m->p50_us = samples[j][(sample_count[j]-1u)/2u];
+        m->p95_us = samples[j][(sample_count[j]*95u-1u)/100u];
+    }
+    out->retry_events = sample_count[1] > 1 ? sample_count[1] - 1u : 0;
     return ZCL_OK;
 }

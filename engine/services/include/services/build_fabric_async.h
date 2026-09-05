@@ -29,6 +29,16 @@ struct zcl_result build_fabric_proof_transition(
     int64_t now,
     struct db_build_proof_event *out);
 
+struct build_fabric_timing_metric {
+    uint64_t measured_count;
+    uint64_t missing_count;
+    int64_t min_us;
+    int64_t max_us;
+    int64_t mean_us;
+    int64_t p50_us;
+    int64_t p95_us;
+};
+
 struct build_fabric_proof_timings {
     int64_t local_submit_us;
     int64_t peer_discovery_us;
@@ -37,10 +47,24 @@ struct build_fabric_proof_timings {
     int64_t remote_execution_us;
     int64_t receipt_verification_us;
     int64_t total_background_proof_us;
+    struct build_fabric_timing_metric metric_local_submit,
+      metric_peer_discovery, metric_transfer,
+      metric_remote_queue, metric_remote_execution,
+      metric_receipt_verification, metric_total_background_proof;
+    uint64_t total_events;
+    uint64_t failure_events;
+    uint64_t retry_events;
 };
 
-/* Derive named latency categories from the append-only event chain. Missing
- * future stages remain zero; no remote timing can alter local feedback. */
+/* Derive named latency categories from the complete append-only event chain.
+ * Legacy scalars preserve the first measurement, including zero. Aggregates
+ * include every matching event (both REMOTE_GREEN and REMOTE_RED executions).
+ * missing_count is one when the category has no event, otherwise zero; it is
+ * not an estimate of unobserved worker attempts. Means truncate toward zero;
+ * percentiles use nearest rank. retry_events counts PEER_DISCOVERED events
+ * after the first; failure_events counts REMOTE_RED observations, not process
+ * crashes. Chains over 64 events and sum overflow refuse without claiming a
+ * complete report. No timing can alter proof acceptance or local feedback. */
 struct zcl_result build_fabric_proof_timings(
     struct node_db *ndb, const char *action_id,
     struct build_fabric_proof_timings *out);

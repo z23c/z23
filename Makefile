@@ -3794,7 +3794,11 @@ zcode-dht-harness-selftest: tools/arena-product-journey-c23 process-group-exec
 # Zero-wait development protocol acceptance. The exact groups jointly prove
 # three interchangeable signed work nodes, dead-peer retry/stale-result
 # refusal, the append-only requester ledger, and the user-facing local path.
-zcode-async-proof-acceptance: zclassic23 zcl-rpc tools/arena-product-journey-c23
+.PHONY: zcode-async-proof-perf-selftest
+zcode-async-proof-perf-selftest:
+	@bash tools/dev/zcode_async_proof_perf_report_selftest.sh
+
+zcode-async-proof-acceptance: zclassic23 zcl-rpc tools/arena-product-journey-c23 zcode-async-proof-perf-selftest
 	@$(MAKE) --no-print-directory zcode-dht-harness-selftest
 	@$(MAKE) --no-print-directory t-fast-exact \
 	  ONLY='test_build_fabric,test_zcode_dev_objects,test_zcode_package_dev'
