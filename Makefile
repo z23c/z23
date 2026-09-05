@@ -10417,8 +10417,10 @@ GIT_HOOK_SRCS = tools/dev/z23_git_hook.c tools/dev/dev_proof_receipt.c \
 	platform/modules/platform/src/state_root.c
 GIT_HOOK_LIBS =
 ifeq ($(ZCL_HOST_WINDOWS),1)
-GIT_HOOK_SRCS += platform/modules/platform/src/private_acl_internal.c
-GIT_HOOK_LIBS += -ladvapi32 -lbcrypt -lshell32 -lole32
+GIT_HOOK_SRCS += platform/modules/platform/src/private_acl_internal.c \
+	core/modules/crypto/src/random_secret.c core/modules/core/src/random.c
+GIT_HOOK_LIBS += -ladvapi32 -lbcrypt -lshell32 -lole32 -luuid
+GIT_HOOK_WINDOWS_INCLUDES = -Icore/modules/core/include -Icore/math/include
 GIT_HOOK_HOST = windows
 else
 GIT_HOOK_HOST = posix
@@ -10428,14 +10430,15 @@ GIT_HOOK_CFLAGS = -std=$(ZCL_C_STD) -O2 -Wall -Wextra -Werror -pedantic \
 	$(ZCL_PLATFORM_CPPFLAGS) -ffunction-sections -fdata-sections \
 	-Itools/dev -Iplatform/modules/base/include -Iplatform/modules/sha3/include \
 	-Iplatform/modules/platform/include -Iplatform/modules/support/include \
-	-Iplatform/modules/util/include -Icore/modules/crypto/include
+	-Iplatform/modules/util/include -Icore/modules/crypto/include \
+	$(GIT_HOOK_WINDOWS_INCLUDES)
 
 .PHONY: git-hook git-hook-selftest install-hooks
 git-hook: $(GIT_HOOK_BIN)
 
-# --gc-sections: ed25519's batch-verify path (never called here) references
-# zcl_random_secret_bytes -> the sealed tree's random.c; the collector drops
-# it, exactly as tools/corpus-census does.
+# The ELF collector drops ed25519's unused batch-verification path. PE/COFF
+# retains its RNG references, so the Windows sources above provide the real
+# implementation instead of relying on section collection to close the link.
 $(GIT_HOOK_BIN): $(GIT_HOOK_SRCS)
 	@mkdir -p $(dir $@)
 	$(CC) $(GIT_HOOK_CFLAGS) -o $@ $(GIT_HOOK_SRCS) \
