@@ -37,9 +37,9 @@ ZCL_FACT("naming", "zpkgswm",
          "engine/composition/src/boot_zcode_swarm_membership.c",
          "void boot_zcode_swarm_send(struct msg_processor *mp, struct p2p_node *node,")
 ZCL_FACT("naming", "zpkgswm_carrier",
-         "Mesh terminal traffic rides the same zpkgswm carrier under a ZMTERM prefix, so zpkgswm is not only packages.",
-         "engine/composition/src/boot_mesh_terminal.c",
-         "Frame send (ZMTERM prefix on zpkgswm)")
+         "The mesh terminal now rides the shared mesh-stream multiplexed primitive over the zpkgswm carrier (ZSTRM prefix), so zpkgswm is not only packages.",
+         "engine/composition/src/mesh_stream.c",
+         "multiplexed stream primitive on zpkgswm")
 ZCL_FACT("naming", "binaries",
          "z23 is the node, z23-dev the dev CLI, and zclassic23-engine-unit the executor harness.",
          "Makefile",
