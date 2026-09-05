@@ -11339,7 +11339,7 @@ check-wallet-raw-prepare-log:
 	@echo "══ LINT: raw sqlite3_prepare_v2 unlogged NULL-check (RATCHET) ══"
 	@ZCL_LINT_MODE=FAIL ./tools/lint/check_wallet_raw_prepare_log.sh
 
-check-before-save-hooks:
+check-before-save-hooks: $(LINTC_TOOL)
 	@echo "══ LINT: critical models wire before_save hooks ══"
 	@./tools/lint/check_before_save_hooks.sh
 
@@ -12874,7 +12874,7 @@ check-zcc-epoch-batch:
 	@echo "══ LINT: epoch batch manifests refuse incomplete authority ══"
 	@./tools/lint/check_zcc_epoch_batch.sh
 
-check-dev-proof-native-fast-path:
+check-dev-proof-native-fast-path: $(LINTC_TOOL)
 	@echo "══ LINT: native push admission has no shell or build authority ══"
 	@./tools/lint/check_dev_proof_native_fast_path.sh
 
