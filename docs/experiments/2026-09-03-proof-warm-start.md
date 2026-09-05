@@ -142,11 +142,13 @@ The donor scan above only ever compared `root`/`local`/`base`/`completed`
 in the `build/.proof-build-complete` marker — a donor built under a
 different compiler, `CFLAGS`, or a vendor archive rebuilt in place could
 still be adopted, because none of those move a tracked source blob and the
-wrapper-inputs diff never sees them. The marker now also seals the same
-three domains the receipt hashes into `compiler_root`/`flags_root`/
-`build_graph_root` (`tools/dev/dev_proof_receipt.h`); `warm_donor_scan`
-refuses a candidate whose identity does not match this proof's own, and a
-marker written before this field existed (a `fields != 7` shortfall)
-refuses outright rather than being adopted unverified. Covered by
+wrapper-inputs diff never sees them. The marker now also seals the four
+roots the receipt records — `compiler_root`, `flags_root`,
+`environment_root`, `build_graph_root` — read from the one call that
+derives them (`zcl_dev_proof_build_identity_v1_capture`), so the donor gate
+and the receipt cannot disagree; `warm_donor_scan` refuses a candidate whose
+identity does not match this proof's own, and a marker written before those
+fields existed (a `fields != 8` shortfall) refuses outright rather than
+being adopted unverified. Covered by
 `test_pw_marker_identity_invalidates_stale_donor` in
 `tests/harness/src/test_impact_composition.c`.
