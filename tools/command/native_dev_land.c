@@ -2042,10 +2042,153 @@ static const char *const DL_VENDOR_DEPS[] = {
     "vendor/tor/src/ext/keccak-tiny/libkeccak-tiny.a",
 };
 
+/* .git marks a submodule as actually checked out in this worktree; the
+ * gitlink entry every `git worktree add` carries is metadata alone and
+ * never populates the working tree the way an init/checkout does. */
+static bool dl_wt_submodule_ready(const char *wt, const char *subpath)
+{
+    char marker[4096 + 16];
+    struct stat st;
+    if (!wt || !subpath ||
+        snprintf(marker, sizeof(marker), "%s/%s/.git", wt, subpath) >=
+            (int)sizeof(marker))
+        return false;
+    return stat(marker, &st) == 0;
+}
+
+/* `make worktree-prime` (Makefile:2400) initialises this submodule BEFORE
+ * copying any vendor/tor archive into a fresh worktree; a bare `git
+ * worktree add` never checks a submodule out on its own, so the first time
+ * a landing worktree reaches here vendor/tor is a nonempty-once-copied-into,
+ * uninitialised directory and tools/dev/source-identity.sh refuses outright
+ * ("nonempty uninitialised gitlink would omit bytes: vendor/tor") the very
+ * next time this worktree's own build/dev-loop/restart.env is captured.
+ * This has to run, and succeed, before any vendor/tor entry below is
+ * materialized — mirroring worktree-prime's ordering instead of inventing
+ * a second one. It goes through dl_git(), the one git spawn seam this
+ * whole file uses: no second way to launch git. */
+static bool dl_wt_submodule_ensure(const struct dl_dirs *d,
+                                   const char *subpath, char *why,
+                                   size_t why_cap)
+{
+    char buf[DL_GIT_CAP];
+    const char *argv[] = { "submodule", "update", "--init", "--", subpath,
+                           NULL };
+    if (dl_wt_submodule_ready(d->wt, subpath))
+        return true;
+    if (dl_git(d->wt, argv, buf, sizeof(buf), DL_GIT_TIMEOUT_MS) != 0 ||
+        !dl_wt_submodule_ready(d->wt, subpath)) {
+        (void)snprintf(why, why_cap,
+                       "proof_generation_dependency_unavailable:%s "
+                       "(submodule init failed)",
+                       subpath);
+        return false;
+    }
+    return true;
+}
+
+/* Whether the tip's own tree names vendor/tor as a real submodule (a
+ * 160000/commit gitlink entry) rather than a plain directory of tracked
+ * files. Every hermetic test rig in this file is a throwaway git repo with
+ * no .gitmodules, where vendor/tor is fixture files committed as ordinary
+ * blobs — there is no submodule to init or pin there, and treating it as
+ * one would refuse those rigs for a condition that does not apply to them.
+ * Only a real gitlink entry triggers the init-then-pin-check sequence
+ * below; anything else (a normal tree, or the path missing outright) is
+ * left to the existing lstat-and-copy path unchanged. */
+static bool dl_wt_vendor_tor_is_submodule(const struct dl_dirs *d,
+                                          const struct dl_row *r)
+{
+    char out[512];
+    const char *args[] = { "ls-tree", r->tip, "--", "vendor/tor", NULL };
+    if (dl_git(d->wt, args, out, sizeof(out), DL_GIT_TIMEOUT_MS) != 0)
+        return false;
+    return strncmp(out, "160000 commit ", 14) == 0;
+}
+
+/* The vendor/tor archives dl_materialize() is about to reuse were built by
+ * the SUBMITTING checkout, against whatever commit that checkout's own
+ * vendor/tor working tree happened to be at — not necessarily the commit
+ * the tip being proven actually pins. Nothing before this compared the
+ * two, so a submitting checkout sitting on a stale or ahead vendor/tor
+ * would hand the proof a libtor.a built from source that does not match
+ * what the tip's gitlink names, and the proof would never know. This
+ * checks the landing worktree's own pinned gitlink for the tip
+ * (`<tip>:vendor/tor`, resolved through the worktree's shared object
+ * database regardless of which worktree the blob table lives under)
+ * against the submitting checkout's checked-out submodule HEAD, and
+ * refuses by name on any mismatch or unresolved side rather than reusing
+ * an archive that was never proven to belong to this tip. */
+static bool dl_wt_vendor_tor_pin_matches(const struct dl_dirs *d,
+                                         const struct dl_row *r, char *why,
+                                         size_t why_cap)
+{
+    char spec[128], tip_pin[80], src_pin[80], src_dir[4096 + 96];
+    const char *tip_args[] = { "rev-parse", "--verify", "--quiet", spec,
+                               NULL };
+    const char *src_args[] = { "rev-parse", "--verify", "--quiet", "HEAD",
+                               NULL };
+    if (snprintf(spec, sizeof(spec), "%s:vendor/tor", r->tip) >=
+        (int)sizeof(spec)) {
+        (void)snprintf(why, why_cap, "%s",
+                       "proof_generation_dependency_unavailable:vendor/tor "
+                       "(tip commit too long)");
+        return false;
+    }
+    if (dl_git(d->wt, tip_args, tip_pin, sizeof(tip_pin),
+              DL_GIT_TIMEOUT_MS) != 0) {
+        (void)snprintf(why, why_cap, "%s",
+                       "proof_generation_dependency_unavailable:vendor/tor "
+                       "(tip carries no vendor/tor gitlink)");
+        return false;
+    }
+    dl_trim(tip_pin);
+    if (!dl_sha_ok(tip_pin)) {
+        (void)snprintf(why, why_cap, "%s",
+                       "proof_generation_dependency_unavailable:vendor/tor "
+                       "(tip carries no vendor/tor gitlink)");
+        return false;
+    }
+    if (!r->worktree[0] ||
+        snprintf(src_dir, sizeof(src_dir), "%s/vendor/tor", r->worktree) >=
+            (int)sizeof(src_dir)) {
+        (void)snprintf(why, why_cap, "%s",
+                       "proof_generation_dependency_unavailable:"
+                       "vendor/tor/libtor.a (no source checkout)");
+        return false;
+    }
+    if (dl_git(src_dir, src_args, src_pin, sizeof(src_pin),
+              DL_GIT_TIMEOUT_MS) != 0) {
+        (void)snprintf(why, why_cap, "%s",
+                       "proof_generation_dependency_unavailable:"
+                       "vendor/tor/libtor.a (submitting checkout's "
+                       "vendor/tor is not checked out)");
+        return false;
+    }
+    dl_trim(src_pin);
+    if (!dl_sha_ok(src_pin)) {
+        (void)snprintf(why, why_cap, "%s",
+                       "proof_generation_dependency_unavailable:"
+                       "vendor/tor/libtor.a (submitting checkout's "
+                       "vendor/tor is not checked out)");
+        return false;
+    }
+    if (strcmp(tip_pin, src_pin) != 0) {
+        (void)snprintf(why, why_cap,
+                       "proof_generation_dependency_unavailable:"
+                       "vendor/tor/libtor.a (submodule commit %s != tip "
+                       "%s)",
+                       src_pin, tip_pin);
+        return false;
+    }
+    return true;
+}
+
 static bool dl_wt_vendor_ensure(const struct dl_dirs *d,
                                 const struct dl_row *r, char *why,
                                 size_t why_cap)
 {
+    bool tor_pin_checked = false;
     for (size_t i = 0;
         i < sizeof(DL_VENDOR_DEPS) / sizeof(DL_VENDOR_DEPS[0]); i++) {
         char source[4096 + 96], target[4096 + 96];
@@ -2058,6 +2201,16 @@ static bool dl_wt_vendor_ensure(const struct dl_dirs *d,
                            "proof_generation_dependency_path_too_long:%s",
                            DL_VENDOR_DEPS[i]);
             return false;
+        }
+        if (strncmp(DL_VENDOR_DEPS[i], "vendor/tor/", 11) == 0 &&
+            dl_wt_vendor_tor_is_submodule(d, r)) {
+            if (!dl_wt_submodule_ensure(d, "vendor/tor", why, why_cap))
+                return false;
+            if (!tor_pin_checked) {
+                if (!dl_wt_vendor_tor_pin_matches(d, r, why, why_cap))
+                    return false;
+                tor_pin_checked = true;
+            }
         }
         if (lstat(target, &st) == 0)
             continue; /* already materialized in this worktree */

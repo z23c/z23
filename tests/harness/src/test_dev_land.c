@@ -78,6 +78,12 @@ static void dlx_isolate(const char *tag)
     unsetenv("ZCL_LAND_ALLOW_UNSIGNED");
     unsetenv("ZCL_LAND_HOOKS_STUB_DIR");
     unsetenv("ZCL_LAND_TEST_PICK_DELAY_MS");
+    /* The vendor/tor submodule fixtures below add a real gitlink pointing
+     * at a same-host bare repo; modern git's default transport allowlist
+     * otherwise refuses a local `file://`-style remote reached through
+     * `git submodule update --init`. This is a process-local env var, not
+     * a persistent git config write. */
+    setenv("GIT_ALLOW_PROTOCOL", "file:http:https:git:ssh", 1);
 #if !defined(_WIN32)
     if (dlx_hooks_dir(g_dlx_hooks_ok, sizeof(g_dlx_hooks_ok), tag, 0))
         setenv("ZCL_LAND_HOOKS_STUB_DIR", g_dlx_hooks_ok, 1);
@@ -94,6 +100,7 @@ static void dlx_restore(void)
     unsetenv("ZCL_LAND_ALLOW_UNSIGNED");
     unsetenv("ZCL_LAND_HOOKS_STUB_DIR");
     unsetenv("ZCL_LAND_TEST_PICK_DELAY_MS");
+    unsetenv("GIT_ALLOW_PROTOCOL");
 }
 
 static void dlx_landdir(char *out, size_t cap)
@@ -342,6 +349,123 @@ static bool dlx_file_exists(const char *path)
 {
     struct stat st;
     return path && path[0] && stat(path, &st) == 0;
+}
+
+/* ── vendor/tor submodule fixtures ────────────────────────────────────────
+ *
+ * A gitlink entry (mode 160000) plus a .gitmodules record it in, staged
+ * directly through `update-index --cacheinfo` rather than a real
+ * `submodule add`: the object the gitlink names never has to exist for
+ * dl_wt_vendor_tor_is_submodule()'s `ls-tree` check to see a real
+ * submodule entry, which is all the init-failure ordering test below
+ * needs. */
+static bool dlx_gitlink_commit(const char *dir, const char *path,
+                               const char *sha, const char *url,
+                               char out_tip[64])
+{
+    char cacheinfo[160], gm_path[1200], gm_body[512];
+    const char *update_index[] = { "update-index", "--add", "--cacheinfo",
+                                   cacheinfo, NULL };
+    const char *add[] = { "add", ".gitmodules", NULL };
+    const char *commit[] = { "-c", "user.name=land",
+                             "-c", "user.email=land@z23.invalid",
+                             "commit", "--quiet", "--no-verify",
+                             "--no-gpg-sign", "-m", "add vendor/tor gitlink",
+                             NULL };
+    const char *head[] = { "rev-parse", "HEAD", NULL };
+    if ((size_t)snprintf(cacheinfo, sizeof(cacheinfo), "160000,%s,%s", sha,
+                         path) >= sizeof(cacheinfo))
+        return false;
+    if (dlx_git(dir, update_index) != 0)
+        return false;
+    (void)snprintf(gm_path, sizeof(gm_path), "%s/.gitmodules", dir);
+    (void)snprintf(gm_body, sizeof(gm_body),
+                  "[submodule \"%s\"]\n\tpath = %s\n\turl = %s\n", path,
+                  path, url);
+    if (!dlx_write(gm_path, gm_body))
+        return false;
+    if (dlx_git(dir, add) != 0)
+        return false;
+    if (dlx_git(dir, commit) != 0)
+        return false;
+    return dlx_git_out(dir, head, out_tip, 64) == 0 &&
+          strlen(out_tip) == 40;
+}
+
+/* A tiny local bare repo with two commits (rev_a, rev_b), used as
+ * vendor/tor's own upstream for the mismatch fixture below: a real
+ * `submodule add`/checkout against a same-host repo, no network. */
+struct dlx_subrepo {
+    char bare[600];
+    char rev_a[64];
+    char rev_b[64];
+};
+
+static bool dlx_subrepo_make(struct dlx_subrepo *sub, const char *tag)
+{
+    char base[512], work[700];
+    const char *push[] = { "push", "--quiet", "origin", "HEAD:main", NULL };
+    test_make_tmpdir(base, sizeof(base), "dev_land_sub", tag);
+    (void)snprintf(sub->bare, sizeof(sub->bare), "%s/sub.git", base);
+    (void)snprintf(work, sizeof(work), "%s/subwork", base);
+    {
+        const char *init_bare[] = { "init", "--quiet", "--bare",
+                                    "--initial-branch=main", sub->bare,
+                                    NULL };
+        if (dlx_git(NULL, init_bare) != 0)
+            return false;
+    }
+    {
+        const char *clone[] = { "clone", "--quiet", sub->bare, work, NULL };
+        if (dlx_git(NULL, clone) != 0)
+            return false;
+    }
+    if (!dlx_commit(work, "a.txt", "a\n", sub->rev_a))
+        return false;
+    if (dlx_git(work, push) != 0)
+        return false;
+    if (!dlx_commit(work, "b.txt", "b\n", sub->rev_b))
+        return false;
+    if (dlx_git(work, push) != 0)
+        return false;
+    return true;
+}
+
+/* A real `git submodule add` of `url` at `path` inside `dir`, committed as
+ * the new tip. protocol.file.allow=always is needed on modern git for a
+ * same-host bare repo used as a submodule remote. */
+static bool dlx_submodule_add(const char *dir, const char *url,
+                              const char *path, char out_tip[64])
+{
+    const char *add[] = { "-c", "protocol.file.allow=always", "submodule",
+                          "add", "--quiet", url, path, NULL };
+    const char *commit[] = { "-c", "user.name=land",
+                             "-c", "user.email=land@z23.invalid",
+                             "commit", "--quiet", "--no-verify",
+                             "--no-gpg-sign", "-m", "add vendor/tor",
+                             NULL };
+    const char *head[] = { "rev-parse", "HEAD", NULL };
+    if (dlx_git(dir, add) != 0)
+        return false;
+    if (dlx_git(dir, commit) != 0)
+        return false;
+    return dlx_git_out(dir, head, out_tip, 64) == 0 &&
+          strlen(out_tip) == 40;
+}
+
+/* Detach the submodule working tree at `dir`/`path` onto `rev`, without
+ * touching the superproject's own index/gitlink: the drift a stale
+ * submitting checkout would show against the tip it is landing. */
+static bool dlx_submodule_checkout(const char *dir, const char *path,
+                                   const char *rev)
+{
+    char sub_dir[900];
+    const char *checkout[] = { "checkout", "--quiet", "--detach", rev,
+                               NULL };
+    if ((size_t)snprintf(sub_dir, sizeof(sub_dir), "%s/%s", dir, path) >=
+        sizeof(sub_dir))
+        return false;
+    return dlx_git(sub_dir, checkout) == 0;
 }
 
 static void dlx_submit(struct dlx_call *c, const struct dlx_rig *rig,
@@ -1341,6 +1465,130 @@ int test_dev_land(void)
                       "proof_generation_dependency_unavailable:vendor/lib")
               != NULL);
         ASSERT(strstr(dlx_str(&c, "detail"), "make vendor") != NULL);
+        dlx_end(&c);
+        unsetenv("ZCL_LAND_DEPS_TEST_FORCE");
+        dlx_restore();
+        PASS();
+    }
+
+    TEST("land: vendor/tor as a real submodule gitlink is initialised "
+        "before any archive is materialized, and a failed init refuses by "
+        "name without ever copying one") {
+        struct dlx_rig rig;
+        struct dlx_call c;
+        char wt[1200], check[1400];
+        dlx_isolate("subinitfail");
+        ASSERT(dlx_rig_make(&rig, "subinitfail_rig"));
+        /* vendor/tor recorded as a real gitlink (mode 160000) in the tip,
+         * .gitmodules pointing at a URL nothing can ever clone. The
+         * archive itself IS present in the submitting checkout — proving
+         * the refusal comes from the failed submodule init, ahead of the
+         * archive copy, and not from a missing source file. */
+        /* update-index --cacheinfo requires the named object to exist in
+         * THIS repo's own object database even for a gitlink (it does not
+         * dereference it as a submodule commit) — the tip's own current
+         * commit id is a convenient, always-present stand-in. */
+        ASSERT(dlx_gitlink_commit(rig.clone, "vendor/tor", rig.tip,
+                                  "/no/such/path/does-not-exist.git",
+                                  rig.tip));
+        ASSERT(dlx_write_dep(rig.clone, "vendor/lib/libfoo.a", "fake\n"));
+        ASSERT(dlx_write_dep(rig.clone, "vendor/include/foo.h", "fake\n"));
+        ASSERT(dlx_write_dep(rig.clone, "vendor/tor/libtor.a", "fake\n"));
+        ASSERT(dlx_write_dep(
+            rig.clone,
+            "vendor/tor/src/ext/ed25519/donna/libed25519_donna.a",
+            "fake\n"));
+        ASSERT(dlx_write_dep(
+            rig.clone, "vendor/tor/src/ext/ed25519/ref10/libed25519_ref10.a",
+            "fake\n"));
+        ASSERT(dlx_write_dep(
+            rig.clone, "vendor/tor/src/ext/keccak-tiny/libkeccak-tiny.a",
+            "fake\n"));
+        setenv("ZCL_LAND_DEPS_TEST_FORCE", "1", 1);
+        setenv("ZCL_LAND_PROOF_STUB", "running", 1);
+        setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
+        dlx_submit(&c, &rig, rig.tip);
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        dlx_end(&c);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        ASSERT(strcmp(dlx_str(&c, "state"), "failed") == 0);
+        ASSERT(strcmp(dlx_str(&c, "dimension"), "worktree_deps") == 0);
+        ASSERT(strstr(dlx_str(&c, "detail"),
+                      "proof_generation_dependency_unavailable:vendor/tor")
+              != NULL);
+        ASSERT(strstr(dlx_str(&c, "detail"), "submodule init failed") !=
+              NULL);
+        /* Ordering: the archive that WAS available in the submitting
+         * checkout must never have been copied, because the failed
+         * submodule init refused before dl_wt_vendor_ensure() ever reached
+         * the materialize step for it. */
+        dlx_landdir(wt, sizeof(wt));
+        (void)snprintf(check, sizeof(check), "%s/wt/vendor/tor/libtor.a",
+                       wt);
+        ASSERT(!dlx_file_exists(check));
+        dlx_end(&c);
+        unsetenv("ZCL_LAND_DEPS_TEST_FORCE");
+        dlx_restore();
+        PASS();
+    }
+
+    TEST("land: a submitting checkout whose vendor/tor HEAD differs from "
+        "the tip's pinned gitlink refuses by name, naming both commits, "
+        "instead of reusing the stale archive") {
+        struct dlx_rig rig;
+        struct dlx_subrepo sub;
+        struct dlx_call c;
+        char wt[1200], check[1400];
+        dlx_isolate("submismatch");
+        ASSERT(dlx_rig_make(&rig, "submismatch_rig"));
+        ASSERT(dlx_subrepo_make(&sub, "submismatch_sub"));
+        /* A real submodule add: the tip's gitlink pins rev_b (the bare
+         * repo's HEAD at add time). */
+        ASSERT(dlx_submodule_add(rig.clone, sub.bare, "vendor/tor",
+                                 rig.tip));
+        ASSERT(dlx_write_dep(rig.clone, "vendor/lib/libfoo.a", "fake\n"));
+        ASSERT(dlx_write_dep(rig.clone, "vendor/include/foo.h", "fake\n"));
+        ASSERT(dlx_write_dep(rig.clone, "vendor/tor/libtor.a", "fake\n"));
+        ASSERT(dlx_write_dep(
+            rig.clone,
+            "vendor/tor/src/ext/ed25519/donna/libed25519_donna.a",
+            "fake\n"));
+        ASSERT(dlx_write_dep(
+            rig.clone, "vendor/tor/src/ext/ed25519/ref10/libed25519_ref10.a",
+            "fake\n"));
+        ASSERT(dlx_write_dep(
+            rig.clone, "vendor/tor/src/ext/keccak-tiny/libkeccak-tiny.a",
+            "fake\n"));
+        /* Now drift the SUBMITTING checkout's own submodule working tree
+         * onto rev_a, without touching the superproject's committed
+         * gitlink — exactly the staleness dl_wt_vendor_tor_pin_matches()
+         * exists to catch: the tip still pins rev_b. */
+        ASSERT(dlx_submodule_checkout(rig.clone, "vendor/tor", sub.rev_a));
+        setenv("ZCL_LAND_DEPS_TEST_FORCE", "1", 1);
+        setenv("ZCL_LAND_PROOF_STUB", "running", 1);
+        setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
+        dlx_submit(&c, &rig, rig.tip);
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        dlx_end(&c);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        ASSERT(strcmp(dlx_str(&c, "state"), "failed") == 0);
+        ASSERT(strcmp(dlx_str(&c, "dimension"), "worktree_deps") == 0);
+        ASSERT(strstr(dlx_str(&c, "detail"),
+                      "proof_generation_dependency_unavailable:"
+                      "vendor/tor/libtor.a") != NULL);
+        ASSERT(strstr(dlx_str(&c, "detail"), "submodule commit") != NULL);
+        ASSERT(strstr(dlx_str(&c, "detail"), sub.rev_a) != NULL);
+        ASSERT(strstr(dlx_str(&c, "detail"), sub.rev_b) != NULL);
+        dlx_landdir(wt, sizeof(wt));
+        (void)snprintf(check, sizeof(check), "%s/wt/vendor/tor/libtor.a",
+                       wt);
+        ASSERT(!dlx_file_exists(check));
         dlx_end(&c);
         unsetenv("ZCL_LAND_DEPS_TEST_FORCE");
         dlx_restore();
