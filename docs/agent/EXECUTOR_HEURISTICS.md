@@ -72,6 +72,36 @@ Notes:
 - A pinned test is a registered test group that actually runs; group catalogue: tools/dev/test_group_catalog.def.
 - Every brief carries NEVER git stash; briefs: docs/work/agent-protocol.md.
 
+## Observed routing
+
+This table is GENERATED from `engine/composition/fleet_observations.def`,
+which `tools/dev/fleet_observe.c` generates from the experiment ledger — a
+MEASURED table, distinct from the DOCTRINE one above. Do not edit it here;
+regenerate the .def and run `make docs-executor-routing`. Ask it directly:
+
+```
+z23 dev know --subject=grok --relation=routable_for
+z23 dev know --subject=glm --relation=probe_for
+```
+
+<!-- FLEET-OBSERVATIONS-BEGIN -->
+
+| Executor | Relation | Task class | n | window (days) |
+| --- | --- | --- | --- | --- |
+| claude-haiku | probe_for | diagnose | 0/1 | 7 |
+| claude-opus | routable_for | lane_multi_file | 3/3 | 7 |
+| claude-sonnet | observed_for | rebase_land | 3/4 | 7 |
+| claude-sonnet | routable_for | verify | 10/10 | 7 |
+| glm | probe_for | unit_c23_one_file | 0/1 | 7 |
+| glm | observed_for | verify | 2/3 | 7 |
+| grok | handles_with_finisher | unit_c23_one_file | 2/3 | 7 |
+| grok | routable_for | unit_c23_one_file | 3/3 | 7 |
+| grok | probe_for | unit_docs | 2/2 | 7 |
+| mac | refused_for | land_train | 0/2 | 7 |
+| muse | observed_for | lane_multi_file | 1/6 | 7 |
+
+<!-- FLEET-OBSERVATIONS-END -->
+
 ## How to update this table
 
 - Append a row with the count and the date.

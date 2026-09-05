@@ -1,0 +1,42 @@
+/* Copyright 2026 Rhett Creighton - Apache License 2.0 */
+/*
+ * fleet_observations.def — GENERATED. Do not hand-edit.
+ *
+ * Regenerate with:
+ *   build/bin/z23-fleet-observe --ledger=<path> --days=7 --out=engine/composition/fleet_observations.def
+ *
+ * Source for the committed copy: tests/fixtures/fleet_observations/rows.tsv (the live ledger at
+ * $XDG_STATE_HOME/zclassic23/experiments/rows.tsv is used only when
+ * an operator runs the tool by hand). tools/lint/check_fleet_observations.sh
+ * regenerates from that same fixture and diffs this file: a hand edit
+ * fails the gate. window_days=7, generated_unix=1788512400.
+ *
+ * FLEET_OBSERVED(subject_, relation_, object_, context_, num_, den_,
+ *                window_days_, generated_unix_) — subject is an executor,
+ * object a task_class, both from the ledger's SCHEMA.md vocabulary.
+ * relation is one of routable_for, refused_for, probe_for, observed_for
+ * or handles_with_finisher — ground verdicts a generator computed, never
+ * a number a reader has to interpret. See tools/dev/fleet_observe.h for
+ * the exact thresholds.
+ */
+#ifndef FLEET_OBSERVED
+#define FLEET_OBSERVED(subject_, relation_, object_, context_, num_, den_, window_days_, generated_unix_)
+#define ZCL_FLEET_OBSERVED_LOCAL_
+#endif
+
+FLEET_OBSERVED("claude-haiku", "probe_for", "diagnose", "observation", 0, 1, 7, 1788512400)
+FLEET_OBSERVED("claude-opus", "routable_for", "lane_multi_file", "observation", 3, 3, 7, 1788512400)
+FLEET_OBSERVED("claude-sonnet", "observed_for", "rebase_land", "observation", 3, 4, 7, 1788512400)
+FLEET_OBSERVED("claude-sonnet", "routable_for", "verify", "observation", 10, 10, 7, 1788512400)
+FLEET_OBSERVED("glm", "probe_for", "unit_c23_one_file", "observation", 0, 1, 7, 1788512400)
+FLEET_OBSERVED("glm", "observed_for", "verify", "observation", 2, 3, 7, 1788512400)
+FLEET_OBSERVED("grok", "handles_with_finisher", "unit_c23_one_file", "observation", 2, 3, 7, 1788512400)
+FLEET_OBSERVED("grok", "routable_for", "unit_c23_one_file", "observation", 3, 3, 7, 1788512400)
+FLEET_OBSERVED("grok", "probe_for", "unit_docs", "observation", 2, 2, 7, 1788512400)
+FLEET_OBSERVED("mac", "refused_for", "land_train", "observation", 0, 2, 7, 1788512400)
+FLEET_OBSERVED("muse", "observed_for", "lane_multi_file", "observation", 1, 6, 7, 1788512400)
+
+#ifdef ZCL_FLEET_OBSERVED_LOCAL_
+#undef FLEET_OBSERVED
+#undef ZCL_FLEET_OBSERVED_LOCAL_
+#endif

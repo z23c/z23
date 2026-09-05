@@ -1,0 +1,36 @@
+ts	kind	box	task_id	task_class	story	executor	harness	model	effort	tokens_in	tokens_out	tokens_cache	tokens_reasoning	tool_uses	turns	wall_s	outcome	lines_added	lines_removed	defects	note
+2026-09-02T09:00:00Z	result	node2	fx_grok_unit1	unit_c23_one_file	seed	grok	grok-cli-queue	grok-4.6	high	186000	9000	0	0	0	25	600	FIX_LAND	60	3	1	grok one-file unit, needed a mechanical finish
+2026-09-03T09:00:00Z	result	node2	fx_grok_unit2	unit_c23_one_file	seed	grok	grok-cli-queue	grok-4.6	high	459000	12000	0	0	0	30	900	FIX_LAND	80	2	1	turn cap hit after tests green
+2026-09-04T09:00:00Z	result	node2	fx_grok_unit3	unit_c23_one_file	seed	grok	grok-cli-queue	grok-4.6	high	200000	10000	0	0	0	25	620	LAND	70	1	0	clean landing
+2026-09-02T10:00:00Z	result	node2	fx_grok_docs1	unit_docs	seed	grok	grok-cli-queue	grok-4.6	medium	40000	3000	0	0	0	8	200	LAND	20	0	0	docs unit
+2026-09-03T10:00:00Z	result	node2	fx_grok_docs2	unit_docs	seed	grok	grok-cli-queue	grok-4.6	medium	42000	3200	0	0	0	9	210	LAND	22	0	0	docs unit
+2026-09-02T11:00:00Z	result	node3	fx_glm_unit1	unit_c23_one_file	seed	glm	opencode-remote	glm-5.3	medium	95000	7000	0	0	0	14	480	FIX	40	4	1	logic ok, tests thin; requires a finisher
+2026-09-03T12:00:00Z	result	node3	fx_glm_verify1	verify	seed	glm	opencode-remote	glm-5.3	medium	60000	3000	0	0	0	1	120	LAND	0	0	0	glm verify pass
+2026-09-03T13:00:00Z	result	node3	fx_glm_verify2	verify	seed	glm	opencode-remote	glm-5.3	medium	61000	3100	0	0	0	1	120	LAND	0	0	0	glm verify pass
+2026-09-03T14:00:00Z	result	node3	fx_glm_verify3	verify	seed	glm	opencode-remote	glm-5.3	medium	62000	3200	0	0	0	1	130	FIX	0	0	1	glm verify missed a defect
+2026-09-01T09:00:00Z	result	node1	fx_sonnet_verify1	verify	seed	claude-sonnet	agent-tool	sonnet	medium	1000	800	40000	0	10	1	120	LAND	0	0	0	sonnet verify
+2026-09-01T10:00:00Z	result	node1	fx_sonnet_verify2	verify	seed	claude-sonnet	agent-tool	sonnet	medium	1000	800	40000	0	10	1	120	LAND	0	0	0	sonnet verify
+2026-09-01T11:00:00Z	result	node1	fx_sonnet_verify3	verify	seed	claude-sonnet	agent-tool	sonnet	medium	1000	800	40000	0	10	1	120	LAND	0	0	0	sonnet verify
+2026-09-01T12:00:00Z	result	node1	fx_sonnet_verify4	verify	seed	claude-sonnet	agent-tool	sonnet	medium	1000	800	40000	0	10	1	120	FIX_LAND	5	0	0	sonnet verify
+2026-09-02T09:00:00Z	result	node1	fx_sonnet_verify5	verify	seed	claude-sonnet	agent-tool	sonnet	medium	1000	800	40000	0	10	1	120	LAND	0	0	0	sonnet verify
+2026-09-02T10:00:00Z	result	node1	fx_sonnet_verify6	verify	seed	claude-sonnet	agent-tool	sonnet	medium	1000	800	40000	0	10	1	120	LAND	0	0	0	sonnet verify
+2026-09-02T11:00:00Z	result	node1	fx_sonnet_verify7	verify	seed	claude-sonnet	agent-tool	sonnet	medium	1000	800	40000	0	10	1	120	LAND	0	0	0	sonnet verify
+2026-09-02T12:00:00Z	result	node1	fx_sonnet_verify8	verify	seed	claude-sonnet	agent-tool	sonnet	medium	1000	800	40000	0	10	1	120	LAND	0	0	0	sonnet verify
+2026-09-03T09:00:00Z	result	node1	fx_sonnet_verify9	verify	seed	claude-sonnet	agent-tool	sonnet	medium	1000	800	40000	0	10	1	120	LAND	0	0	0	sonnet verify
+2026-09-03T10:00:00Z	result	node1	fx_sonnet_verify10	verify	seed	claude-sonnet	agent-tool	sonnet	medium	1000	800	40000	0	10	1	120	LAND	0	0	0	sonnet verify
+2026-09-01T13:00:00Z	result	node1	fx_sonnet_rebase1	rebase_land	seed	claude-sonnet	agent-tool	sonnet	high	60000	5000	80000	0	12	1	180	LAND	30	5	0	sonnet rebase land
+2026-09-01T14:00:00Z	result	node1	fx_sonnet_rebase2	rebase_land	seed	claude-sonnet	agent-tool	sonnet	high	61000	5200	80000	0	12	1	185	LAND	28	4	0	sonnet rebase land
+2026-09-02T13:00:00Z	result	node1	fx_sonnet_rebase3	rebase_land	seed	claude-sonnet	agent-tool	sonnet	high	62000	5300	80000	0	12	1	190	LAND	31	3	0	sonnet rebase land
+2026-09-02T14:00:00Z	result	node1	fx_sonnet_rebase4	rebase_land	seed	claude-sonnet	agent-tool	sonnet	high	63000	5400	80000	0	12	1	195	FIX	0	0	1	sonnet rebase conflict remained
+2026-09-01T15:00:00Z	result	node1	fx_opus_lane1	lane_multi_file	seed	claude-opus	agent-tool	opus	xhigh	900000	60000	400000	0	80	60	5400	LAND	220	18	0	opus lane self-land
+2026-09-02T15:00:00Z	result	node1	fx_opus_lane2	lane_multi_file	seed	claude-opus	agent-tool	opus	xhigh	1100000	72000	500000	0	90	70	6100	LAND	260	20	0	opus lane self-land
+2026-09-03T15:00:00Z	result	node1	fx_opus_lane3	lane_multi_file	seed	claude-opus	agent-tool	opus	xhigh	1000000	65000	450000	0	85	65	5800	LAND	240	19	0	opus lane self-land
+2026-09-03T16:00:00Z	result	node1	fx_haiku_diagnose1	diagnose	seed	claude-haiku	agent-tool	haiku	low	20000	1500	5000	0	6	1	60	HOLD	0	0	0	haiku called a trap a real defect
+2026-08-30T09:00:00Z	result	node4	fx_muse_lane1	lane_multi_file	seed	muse	manual	muse	xhigh	300000	40000	0	0	40	1	7200	LAND	90	4	0	muse lane finished within the wall
+2026-08-30T10:00:00Z	result	node4	fx_muse_lane2	lane_multi_file	seed	muse	manual	muse	xhigh	310000	5000	0	0	5	1	7200	timeout	0	0	0	muse wall expired uncommitted
+2026-08-31T09:00:00Z	result	node4	fx_muse_lane3	lane_multi_file	seed	muse	manual	muse	xhigh	305000	4800	0	0	5	1	7200	timeout	0	0	0	muse wall expired uncommitted
+2026-08-31T10:00:00Z	result	node4	fx_muse_lane4	lane_multi_file	seed	muse	manual	muse	xhigh	312000	5200	0	0	5	1	7200	FIX	0	0	1	muse merged a foreign branch into its lane
+2026-09-01T09:00:00Z	result	node4	fx_muse_lane5	lane_multi_file	seed	muse	manual	muse	xhigh	308000	4900	0	0	5	1	7200	blocked	0	0	0	muse wrote outside the worktree
+2026-09-01T10:00:00Z	result	node4	fx_muse_lane6	lane_multi_file	seed	muse	manual	muse	xhigh	315000	5100	0	0	5	1	7200	timeout	0	0	0	muse wall expired uncommitted
+2026-08-30T09:00:00Z	result	node4	fx_mac_proof1	land_train	seed	mac	dev-land	-	default	0	0	0	0	0	0	1200	failed	0	0	0	mac full proof refused
+2026-08-30T10:00:00Z	result	node4	fx_mac_proof2	land_train	seed	mac	dev-land	-	default	0	0	0	0	0	0	1250	blocked	0	0	0	mac full proof refused

@@ -889,7 +889,8 @@ DEV_STANDALONE_SRCS = tools/dev/hotswap_verify_so.c \
 	tools/dev/windows_headless_run.c \
 	tools/dev/z23_bounded_run.c \
 	tools/dev/z23_git_hook.c \
-	tools/dev/z23_doctor.c
+	tools/dev/z23_doctor.c \
+	tools/dev/fleet_observe_main.c
 # The mutation harness proper (operators + campaign core) has no main() and
 # is proved by the registered `mutation_harness` group, so it is linked into
 # the dev binary and the test harness but kept out of the release node — a
@@ -2687,7 +2688,7 @@ $(filter-out $(ZCL_VENDOR_LIB)/libsecp256k1.a,$(VENDOR_LIBS)):
         check-outparam-init-before-return \
         check-before-save-hooks check-pthread-create check-model-validation \
         check-model-sql-literals \
-        check-persona-resolves check-specialists check-fleet-airship-rules check-fleet-facts check-prompt-templates check-rule-vocabulary check-cookbook \
+        check-persona-resolves check-specialists check-fleet-airship-rules check-fleet-facts check-fleet-observations check-prompt-templates check-rule-vocabulary check-cookbook \
         check-long-functions check-rpc-registrar check-lag-slo-observable \
         check-controller-private-headers \
         check-file-size-ceiling check-framework-filename-suffix \
@@ -3798,6 +3799,16 @@ $(BIN_DIR)/z23_bounded_run: tools/dev/z23_bounded_run.c \
 	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 	    -Iplatform/modules/base/include \
 	    $(Z23_BOUNDED_RUN_PLATFORM_FLAGS) -o $@ $^
+
+# z23-fleet-observe: generates engine/composition/fleet_observations.def from
+# the experiment ledger. tools/dev/fleet_observe.c carries no main() (so the
+# test harness links it directly); fleet_observe_main.c is the CLI shim, kept
+# out of DEVLOOP_ALL_SRCS via DEV_STANDALONE_SRCS below.
+$(BIN_DIR)/z23-fleet-observe: tools/dev/fleet_observe.c \
+		tools/dev/fleet_observe_main.c
+	@mkdir -p $(dir $@)
+	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic -D_POSIX_C_SOURCE=200809L \
+	    -Itools/dev -o $@ $^
 .PHONY: check-capability-closure
 check-capability-closure:
 	@./tools/lint/check_capability_closure.sh --selftest
@@ -11400,6 +11411,11 @@ check-fleet-facts:
 	@./tools/lint/check_fleet_facts.sh --selftest
 	@./tools/lint/check_fleet_facts.sh
 
+check-fleet-observations: $(BIN_DIR)/z23-fleet-observe
+	@echo "══ LINT: fleet_observations.def reproduces from its fixture ledger ══"
+	@./tools/lint/check_fleet_observations.sh --selftest
+	@./tools/lint/check_fleet_observations.sh
+
 check-prompt-templates:
 	@echo "══ LINT: every prompt template names a declared section ══"
 	@./tools/lint/check_prompt_templates.sh --selftest
@@ -12517,6 +12533,7 @@ $(CAPABILITY_INVENTORY_TOOL): $(CAPABILITY_INVENTORY_SRCS) \
 .PHONY: docs-executor-routing
 docs-executor-routing:
 	@./tools/lint/check_fleet_facts.sh --write-doc
+	@./tools/lint/check_fleet_observations.sh --write-doc
 
 .PHONY: tools/gen_capability_inventory docs-capability-inventory
 tools/gen_capability_inventory: $(CAPABILITY_INVENTORY_TOOL)
@@ -12988,6 +13005,7 @@ LINT_GATES := \
     check-specialists \
     check-fleet-airship-rules \
     check-fleet-facts \
+    check-fleet-observations \
     check-prompt-templates \
     check-rule-vocabulary \
     check-cookbook \

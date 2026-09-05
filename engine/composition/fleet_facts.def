@@ -60,6 +60,16 @@ FLEET_RELATION("lives_at")
 FLEET_RELATION("requires")
 FLEET_RELATION("max")
 FLEET_RELATION("trap_signature")
+/* MEASURED relations — never written as a FLEET_FACT row below. They are
+ * the closed vocabulary tools/dev/fleet_observe.c emits into
+ * engine/composition/fleet_observations.def, declared here only so
+ * dev.fleet.know accepts them as a --relation filter; see that file and
+ * cognition/modules/fleetfacts for where the rows actually live. */
+FLEET_RELATION("routable_for")
+FLEET_RELATION("refused_for")
+FLEET_RELATION("probe_for")
+FLEET_RELATION("observed_for")
+FLEET_RELATION("handles_with_finisher")
 
 /* ── contexts ──────────────────────────────────────────────────────────── */
 FLEET_CONTEXT("platform:linux")

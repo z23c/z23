@@ -1237,6 +1237,7 @@ add/remove a gate.
 - `check-specialists`
 - `check-fleet-airship-rules`
 - `check-fleet-facts`
+- `check-fleet-observations`
 - `check-prompt-templates`
 - `check-rule-vocabulary`
 - `check-cookbook`
