@@ -373,15 +373,25 @@ static void fe_admit(const struct zcl_command_request *request,
 struct fe_list {
     struct json_value *array;
     uint32_t rendered;
+    uint32_t dropped;
 };
 
 static void fe_list_row(const struct fleet_machine *machine, void *user)
 {
     struct fe_list *list = user;
     struct json_value row;
+    /* The roster cannot hold more rows than the closed relay-port range has
+     * ports, so this cap can only ever bind on a file somebody grew by
+     * hand. It is still counted rather than silently dropped: a fleet map
+     * that quietly omits a machine is worse than one that says it did. */
+    if (list->rendered >= (uint32_t)FLEET_ENROL_ROSTER_MAX) {
+        list->dropped++;
+        return;
+    }
     json_init(&row);
     fleet_machine_render(machine, &row);
     if (json_push_back(list->array, &row)) list->rendered++;
+    else list->dropped++;
     json_free(&row);
 }
 
@@ -392,7 +402,7 @@ static void fe_machines(const struct zcl_command_request *request,
     uint8_t seed[FLEET_ENROL_SEED_BYTES], own[FLEET_ENROL_PUBKEY_BYTES];
     char hex[FLEET_ENROL_PUBKEY_HEX];
     struct json_value array;
-    struct fe_list list = { &array, 0 };
+    struct fe_list list = { &array, 0, 0 };
     struct fleet_roster_scan scan = {0};
     const char *why = NULL;
     bool joined = false, own_present = false;
@@ -429,6 +439,8 @@ static void fe_machines(const struct zcl_command_request *request,
                            joined || own_present ? hex : "");
     (void)json_push_kv_bool(&reply->data, "joined", joined);
     (void)json_push_kv_int(&reply->data, "total", (int64_t)scan.rows);
+    (void)json_push_kv_int(&reply->data, "returned", (int64_t)list.rendered);
+    (void)json_push_kv_bool(&reply->data, "truncated", list.dropped != 0);
     /* Counted, never rendered: a line this operator key did not seal is
      * somebody else's row or a corrupted one, and either way it is not
      * evidence about this fleet. */

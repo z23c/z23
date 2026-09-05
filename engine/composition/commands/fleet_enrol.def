@@ -122,8 +122,12 @@ ZCL_COMMAND_READY_READ(
     "merged. The NAME leads every row: it is the handle the owner and their "
     "agents use to talk about a machine, and it never changes with the "
     "box's onion address, Noise fingerprint or ZID. Rows this operator key did not seal are counted in "
-    "`unverifiable` and never rendered. Reads no node and no datadir.",
-    ZCL_COMMAND_LIST_BUDGET,
+    "`unverifiable` and never rendered. total/returned/truncated make the "
+    "bounds explicit. Reads no node and no datadir.",
+    /* The whole roster is bounded by the closed relay-port range, so this
+     * leaf's largest possible answer is computable and small; the default
+     * list budget would silently cut a fleet in half. */
+    65536,
     "fleet,machines,roster,inventory,verified,self-reported",
     "zcl.command.empty_input.v1", "zcl.fleet.machines.v1", "", "",
     "z23 fleet machines",
