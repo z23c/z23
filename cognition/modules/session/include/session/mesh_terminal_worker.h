@@ -6,7 +6,11 @@
  * hang or exhaust the node: wall-clock lifetime, idle timeout, input and
  * output byte budgets, and a census-backed process-group kill are all
  * enforced HERE, above the seccomp/Landlock cage the child itself runs
- * under. Linux only; every other platform refuses by name. */
+ * under, on Linux. Windows spawns the same grant behind ConPTY
+ * (CreatePseudoConsole) instead of a PTY, enforces the same byte/lifetime/
+ * idle budgets, and has no seccomp/Landlock-equivalent cage or process-group
+ * census yet — that gap is unverified/open, not silently claimed closed.
+ * Every other platform refuses by name. */
 
 #ifndef ZCL_SESSION_MESH_TERMINAL_WORKER_H
 #define ZCL_SESSION_MESH_TERMINAL_WORKER_H
@@ -45,6 +49,22 @@ enum mesh_terminal_worker_error {
 
 const char *mesh_terminal_worker_error_string(
     enum mesh_terminal_worker_error error);
+
+/* Platform-neutral byte-budget bookkeeping: true when accepting `n` more
+ * bytes on top of `used` bytes already charged against `max` would cross
+ * the budget. The Windows ConPTY arm's input path uses this for the same
+ * check the POSIX arm inlines (unchanged there); exported so it is
+ * provable with a Linux-hosted unit test — no spawned shell, no mingw
+ * build — rather than only ever exercised behind a live session. */
+bool mesh_terminal_worker_budget_would_overrun(uint64_t used, uint64_t max,
+                                               size_t n);
+
+/* Platform-neutral: bounds-check requested terminal geometry against the
+ * proto's wire limits (MESH_TERMINAL_MAX_COLS/ROWS). Every spawn and
+ * resize call on every arm goes through this one copy; exported for the
+ * same reason as the budget helper above — a Linux-hosted unit test can
+ * call it directly. */
+bool geometry_in_bounds(uint16_t cols, uint16_t rows);
 
 struct mesh_terminal_worker_config {
     /* Absolute path of the ONE shell binary the child may exec; it is
@@ -86,6 +106,16 @@ struct mesh_terminal_worker {
     uint64_t max_bytes_out;
     uint64_t lifetime_seconds;
     uint64_t idle_seconds;
+#if defined(_WIN32)
+    /* ConPTY handles. Opaque void* so this header stays free of
+     * <windows.h>: HANDLE and HPCON are both pointer-sized opaque handles
+     * on every Windows target this project builds for. NULL once closed,
+     * mirroring master_fd's -1-when-closed convention. */
+    void *win_pc;          /* HPCON: the pseudoconsole */
+    void *win_process;     /* HANDLE: the spawned shell process */
+    void *win_input_write; /* HANDLE: our end of the ConPTY's input pipe */
+    void *win_output_read; /* HANDLE: our end of the ConPTY's output pipe */
+#endif
 };
 
 /* Spawn the confined shell. The child: setsid() (becoming its own

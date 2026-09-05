@@ -123,6 +123,65 @@ static int check(int failures, bool ok, const char *label)
     return ok ? failures : failures + 1;
 }
 
+/* Platform-neutral bookkeeping: geometry_in_bounds and
+ * mesh_terminal_worker_budget_would_overrun are pure functions of
+ * primitive types shared by every platform arm, including the Windows
+ * ConPTY arm this Linux harness never builds or runs. Proving their
+ * boundaries here needs no spawned shell, no PTY, and no mingw build —
+ * it runs on every host that runs this test group at all. */
+static int test_mesh_terminal_worker_bookkeeping(void)
+{
+    printf("\n=== mesh terminal worker bookkeeping (platform-neutral) ===\n");
+    int failures = 0;
+
+    failures = check(failures, !geometry_in_bounds(0, 24),
+                     "geometry: zero cols refused");
+    failures = check(failures, !geometry_in_bounds(80, 0),
+                     "geometry: zero rows refused");
+    failures = check(failures,
+                     !geometry_in_bounds(
+                         (uint16_t)(MESH_TERMINAL_MAX_COLS + 1), 24),
+                     "geometry: cols over proto max refused");
+    failures = check(failures,
+                     !geometry_in_bounds(
+                         80, (uint16_t)(MESH_TERMINAL_MAX_ROWS + 1)),
+                     "geometry: rows over proto max refused");
+    failures = check(failures,
+                     geometry_in_bounds(MESH_TERMINAL_MAX_COLS,
+                                        MESH_TERMINAL_MAX_ROWS),
+                     "geometry: proto max accepted");
+    failures = check(failures, geometry_in_bounds(1, 1),
+                     "geometry: 1x1 accepted");
+
+    failures = check(failures,
+                     !mesh_terminal_worker_budget_would_overrun(0, 16, 16),
+                     "budget: exactly at the cap is not an overrun");
+    failures = check(failures,
+                     !mesh_terminal_worker_budget_would_overrun(15, 16, 1),
+                     "budget: the last byte under the cap fits");
+    failures = check(failures,
+                     mesh_terminal_worker_budget_would_overrun(0, 16, 17),
+                     "budget: one byte past an empty cap overruns");
+    failures = check(failures,
+                     mesh_terminal_worker_budget_would_overrun(16, 16, 1),
+                     "budget: any byte past an already-full cap overruns");
+    failures = check(failures,
+                     mesh_terminal_worker_budget_would_overrun(17, 16, 0),
+                     "budget: already over the cap overruns even on 0 more");
+    failures = check(failures,
+                     !mesh_terminal_worker_budget_would_overrun(
+                         UINT64_MAX - 1, UINT64_MAX, 1),
+                     "budget: exact headroom at the top of the range fits "
+                     "(no wraparound in max-used)");
+    failures = check(failures,
+                     mesh_terminal_worker_budget_would_overrun(
+                         UINT64_MAX, UINT64_MAX, 1),
+                     "budget: no headroom left at the top of the range");
+
+    printf("mesh_terminal_worker bookkeeping: %d failures\n", failures);
+    return failures;
+}
+
 #if !defined(__linux__)
 
 /* The worker must refuse honestly on platforms with no confinement
@@ -474,5 +533,7 @@ static int test_mesh_terminal_worker_platform_arm(void)
 
 int test_mesh_terminal_worker(void)
 {
-    return test_mesh_terminal_worker_platform_arm();
+    int failures = test_mesh_terminal_worker_bookkeeping();
+    failures += test_mesh_terminal_worker_platform_arm();
+    return failures;
 }

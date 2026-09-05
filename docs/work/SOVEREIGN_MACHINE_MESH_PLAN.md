@@ -400,8 +400,12 @@ same authenticated Z23 session. Z23 implements terminal framing, resize, flow
 control, expiry, revocation, quotas, and receipts in C23; it does not parse
 shell syntax. Windows connects the confined worker to ConPTY and
 `CreateProcessW`; Linux and macOS connect it to a PTY and a descriptor-safe
-spawn primitive. The worker launches only the locally configured shell or
-agent entry point. No separately installed SSH server is required.
+spawn primitive. The Windows arm cross-compiles and enforces the same byte
+and lifetime budgets as the PTY arm, but has not yet run a real session on a
+Windows machine, and has no Landlock/seccomp-equivalent confinement cage or
+process-group census there yet. The worker launches only the locally
+configured shell or agent entry point. No separately installed SSH server is
+required.
 
 The worker runs under a dedicated unprivileged identity or an equivalently
 proven restricted token, in a separately owned workspace. It cannot read the
