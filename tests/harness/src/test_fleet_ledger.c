@@ -14,6 +14,7 @@
 
 #include "test/test_core.h"
 
+#include "command/native_fleet.h"
 #include "config/boot_fleet_ledger.h"
 #include "config/boot_internal.h"
 #include "config/mesh_stream.h"
@@ -23,9 +24,13 @@
 
 #include "base/safe_alloc.h"
 #include "chain/chainparams.h"
+#include "command/native_command.h"
 #include "crypto/ed25519.h"
 #include "fleetledger/fleet_ledger.h"
+#include "json/json.h"
+#include "kernel/command_registry.h"
 #include "models/mesh_pairing.h"
+#include "models/zid_identity.h"
 #include "net/msgprocessor.h"
 #include "net/net.h"
 #include "net/noise_transport.h"
@@ -42,6 +47,12 @@
  * graded is the lane's decision, never the hour the box thinks it is. */
 #define FL_PAIRED_AT INT64_C(1)
 #define FL_PAIRING_EXPIRES INT64_C(4102444800)
+/* The clock the delegation authority is asked on. The fixture's
+ * delegations are signed for a fixed window, and the accept callback is
+ * handed no clock, so the authority seam names the hour once. The pairing
+ * row's window above brackets both this and any real clock, which is the
+ * point: what decides below is the DELEGATION, never the hour. */
+#define FL_AUTHORITY_NOW INT64_C(2500)
 
 /* ── one box, made from nothing ──────────────────────────────────────── */
 
@@ -620,6 +631,13 @@ int test_fleet_ledger(void)
         ASSERT(mesh_term_pair_row(&f, &f.term_peer,
                                   MESH_PAIRING_CAP_STATUS_READ, FL_PAIRED_AT,
                                   FL_PAIRING_EXPIRES));
+        /* A pairing row is not enough on either half: the peer's
+         * delegation has to still be current, and this group cannot host
+         * the DHT service that holds it. The seam supplies that service's
+         * answer and the genesis it is bound to — the authority itself
+         * still runs against the fixture's real node.db. */
+        boot_fleet_ledger_test_bind_authority(&f.term_peer.delegation,
+                                              f.genesis, FL_AUTHORITY_NOW);
 
         /* Box wb asks box wa for everything after what it holds, which is
          * nothing, and commits what comes back. */
@@ -668,7 +686,155 @@ int test_fleet_ledger(void)
         PASS();
     }
 
+    TEST("fleet ledger: a peer whose delegation is no longer current is "
+         "refused on both halves and the replica does not move") {
+        /* Nothing about the PAIRING changes in this case. The row keeps
+         * its capability and its window, and only the master identity
+         * behind it stops being current — the exact fact a pairing row
+         * cannot express, and the reason the lane asks twice. */
+        uint64_t refused = boot_fleet_ledger_delegation_refused_count();
+        uint64_t seq_before = zcl_fleet_ledger_peer_seq(wb.ledger, wa.box_id);
+
+        /* With the identity ACTIVE the REAL pull lane — pairing list,
+         * delegation lookup, authority and all — opens exactly one stream
+         * toward this peer, and refuses nothing. */
+        fl_discard(asker, ask_queue, f.res_term);
+        fl_discard(answerer, answer_queue, f.term_peer.ini);
+        mesh_stream_test_reset();
+        boot_fleet_ledger_test_pull_paired(wb.ledger, FL_AUTHORITY_NOW);
+        ASSERT_EQ(mesh_stream_test_live_count(FLEET_LEDGER_SERVICE_NAME),
+                  (size_t)1);
+        ASSERT_EQ(boot_fleet_ledger_delegation_refused_count(), refused);
+
+        /* The peer's master identity is revoked on chain. */
+        struct zid_identity identity;
+        ASSERT(db_zid_identity_find(
+            &f.ndb, f.term_peer.delegation.doc.master_pubkey, &identity));
+        (void)snprintf(identity.status, sizeof identity.status, "%s",
+                       ZID_IDENTITY_STATUS_REVOKED);
+        ASSERT(db_zid_identity_save(&f.ndb, &identity));
+        /* The pairing row itself is untouched: still granted, still
+         * unrevoked, still inside its window. */
+        struct db_mesh_pairing still;
+        ASSERT(db_mesh_pairing_find(&f.ndb, f.term_peer.pairing.pairing_id,
+                                    &still));
+        ASSERT_EQ(still.revoked_at, INT64_C(0));
+        ASSERT(mesh_pairing_allows(&still, MESH_PAIRING_CAP_STATUS_READ,
+                                   FL_AUTHORITY_NOW));
+
+        fl_discard(asker, ask_queue, f.res_term);
+        fl_discard(answerer, answer_queue, f.term_peer.ini);
+        mesh_stream_test_reset();
+
+        /* PULL: the peer is not asked. No stream is opened at all, and the
+         * refusal is counted under the name the catalog already carried. */
+        boot_fleet_ledger_test_pull_paired(wb.ledger, FL_AUTHORITY_NOW);
+        ASSERT_EQ(mesh_stream_test_live_count(FLEET_LEDGER_SERVICE_NAME),
+                  (size_t)0);
+        ASSERT_EQ(boot_fleet_ledger_delegation_refused_count(), refused + 1);
+        ASSERT_EQ(zcl_fleet_ledger_peer_seq(wb.ledger, wa.box_id), seq_before);
+
+        /* ACCEPT: the peer is not answered. The pairing row still grants
+         * the capability, so the primitive admits the OPEN and it is THIS
+         * lane that refuses it — before a byte of the ledger is read. */
+        uint8_t frame[FL_WIRE_MAX];
+        uint8_t pull[FLEET_LEDGER_PULL_BYTES];
+        pull[0] = (uint8_t)FLEET_LEDGER_MSG_PULL;
+        pull[1] = 1u;
+        memset(pull + 2, 0, 8);
+        size_t frame_len = mesh_stream_test_open_frame(
+            6, 4096u, FLEET_LEDGER_SERVICE_NAME, pull, sizeof pull, frame,
+            sizeof frame);
+        ASSERT(frame_len != 0);
+        ASSERT(mesh_stream_frame(&mp, answerer, frame, frame_len, NULL));
+        uint8_t answer[FL_WIRE_MAX];
+        bool more = false;
+        size_t answer_len = fl_take(answerer, answer_queue, f.term_peer.ini,
+                                    answer, sizeof answer, &more);
+        ASSERT(more);
+        uint8_t kind = 0;
+        ASSERT(mesh_stream_test_read_header(answer, answer_len, &kind, NULL));
+        ASSERT_EQ(kind, MESH_STREAM_KIND_CLOSE);
+        ASSERT_EQ(answer[MESH_STREAM_FRAME_PREFIX_LEN + 1u + 8u],
+                  MESH_STREAM_REFUSED_PEER_UNPAIRED);
+        ASSERT_EQ(mesh_stream_test_live_count(FLEET_LEDGER_SERVICE_NAME),
+                  (size_t)0);
+        ASSERT_EQ(boot_fleet_ledger_delegation_refused_count(), refused + 2);
+        /* Nothing arrived and nothing was sent: no second frame follows
+         * the refusal, and the replica is exactly where it was. */
+        ASSERT_EQ(fl_take(answerer, answer_queue, f.term_peer.ini, answer,
+                          sizeof answer, &more),
+                  (size_t)0);
+        ASSERT(!more);
+        ASSERT_EQ(zcl_fleet_ledger_peer_seq(wb.ledger, wa.box_id), seq_before);
+        PASS();
+    }
+
+    TEST("fleet ledger: a batch with no free commit slot is counted, said "
+         "out loud, and asked for again") {
+        /* The identity is current again: what this case measures is the
+         * inbox bound, not the delegation. */
+        struct zid_identity identity;
+        ASSERT(db_zid_identity_find(
+            &f.ndb, f.term_peer.delegation.doc.master_pubkey, &identity));
+        (void)snprintf(identity.status, sizeof identity.status, "%s",
+                       ZID_IDENTITY_STATUS_ACTIVE);
+        ASSERT(db_zid_identity_save(&f.ndb, &identity));
+        uint64_t dropped = boot_fleet_ledger_inbox_full_count();
+
+        /* One more answered pull than the inbox has slots, with nothing
+         * committed in between. The last one has nowhere to go. */
+        for (unsigned i = 0; i < FLEET_LEDGER_INBOX_MAX + 1u; i++) {
+            fl_discard(asker, ask_queue, f.res_term);
+            fl_discard(answerer, answer_queue, f.term_peer.ini);
+            mesh_stream_test_reset();
+            ASSERT(boot_fleet_ledger_test_pull(f.resp_noise_pub, wa.box_id,
+                                               wa.signer, 0));
+            ASSERT_EQ(fl_pump(asker, ask_queue, f.res_term, &mp, answerer),
+                      (size_t)1);
+            boot_fleet_ledger_test_serve(); /* the answer */
+            boot_fleet_ledger_test_serve(); /* nothing left: close */
+            ASSERT(fl_pump(answerer, answer_queue, f.term_peer.ini, &mp,
+                           asker) >= (size_t)2);
+        }
+        ASSERT_EQ(boot_fleet_ledger_inbox_full_count(), dropped + 1);
+
+        /* No row is lost: the batch that was dropped is the same range the
+         * next pull asks for, and the eight that were kept commit to
+         * exactly what this box already held. */
+        boot_fleet_ledger_test_drain_into(wb.ledger);
+        ASSERT_EQ(zcl_fleet_ledger_peer_seq(wb.ledger, wa.box_id),
+                  UINT64_C(3));
+
+        /* And an operator can see both counts, because `fleet ledger
+         * status` prints them beside the chains it already reports. */
+        struct fl_box sb;
+        ASSERT(fl_box_open(&sb, wire_dir, "fleet_ledger", 0x71));
+        fl_box_close(&sb);
+        zcl_native_bridge_bind_rpc(wire_dir, 0);
+        struct zcl_command_request request;
+        struct zcl_command_reply reply;
+        memset(&request, 0, sizeof request);
+        zcl_native_handle_fleet_ledger_status(&request, &reply);
+        ASSERT_EQ(reply.status, ZCL_COMMAND_STATUS_PASSED);
+        const struct json_value *inbox_full =
+            json_get(&reply.data, "inbox_full");
+        const struct json_value *refused =
+            json_get(&reply.data, "delegation_refused");
+        ASSERT(inbox_full != NULL && refused != NULL);
+        ASSERT_EQ(json_get_int(inbox_full),
+                  (int64_t)boot_fleet_ledger_inbox_full_count());
+        ASSERT_EQ(json_get_int(refused),
+                  (int64_t)boot_fleet_ledger_delegation_refused_count());
+        ASSERT(json_get_int(inbox_full) > 0);
+        ASSERT(json_get_int(refused) > 0);
+        zcl_command_reply_free(&reply);
+        zcl_native_bridge_bind_rpc("", 0);
+        PASS();
+    }
+
 _test_next:
+    boot_fleet_ledger_test_bind_authority(NULL, NULL, 0);
     if (registered) {
         mesh_stream_test_reset();
         boot_fleet_ledger_test_bind(NULL, NULL, NULL);
