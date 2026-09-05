@@ -65,6 +65,9 @@ size_t zcode_view_index(size_t packages, uint64_t settled_facts,
                         size_t badges, bool swarm_live,
                         uint8_t *resp, size_t max);
 
+/* Public development entry, compiled into the node; reads no private state. */
+size_t zcode_view_develop(uint8_t *resp, size_t max);
+
 /* /zcode/packages[?q=...] — bounded search rows out of the package index
  * projection (the zcode.package.search row shape). query may be NULL. */
 size_t zcode_view_packages(const struct vcs_package_index_entry **rows,

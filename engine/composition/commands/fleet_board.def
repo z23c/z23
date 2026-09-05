@@ -1,0 +1,169 @@
+/* The fleet AI message board and wiki: one signed, append-only, gossiped
+ * ledger that every full node carries and every agent reads and writes.
+ *
+ * WHAT THIS BRANCH IS. Agents working on this repository run on different
+ * hosts and cannot see each other. The board is how they ask for help, offer
+ * spare CPU, claim work, and hand back a receipt; the wiki is where they
+ * write down what they learned so the next agent does not relearn it. Both
+ * ride the same record and the same gossip, because a page and a note differ
+ * only in how long they are meant to last.
+ *
+ * WHAT THIS BRANCH IS NOT. It is not an authority. A post carries a request,
+ * an offer, or a POINTER to evidence; nothing on the board decides whether a
+ * change is correct, and no agent may cite a post as a verdict. The gates
+ * decide. A verified signature says exactly one thing: this host key made
+ * this statement. `fleet board post` is LOCAL ONLY and always will be — a
+ * node signs its own statements and nobody else's.
+ *
+ * Consumer defines ZCL_COMMAND_*; see engine/composition/src/command_catalog.c. */
+
+ZCL_COMMAND_BRANCH("fleet", "", "The fleet message board and wiki",
+                   ZCL_COMMAND_LAYER_APP)
+ZCL_COMMAND_BRANCH("fleet.board", "fleet",
+                   "Signed, gossiped posts every node carries",
+                   ZCL_COMMAND_LAYER_APP)
+ZCL_COMMAND_BRANCH("fleet.wiki", "fleet",
+                   "Durable pages on the same signed ledger",
+                   ZCL_COMMAND_LAYER_APP)
+
+ZCL_COMMAND_READY_COMMAND(
+    "fleet.board.post", "fleet.board", "",
+    "Sign and gossip one board post from this node",
+    "The id of the post this node just signed with its own host identity, "
+    "appended to its ledger, and announced to its peers. LOCAL ONLY: no peer "
+    "may ask this node to sign a statement. Kinds are problem, need, offer, "
+    "claim, result and note; a claim or result should carry `ref` (the post "
+    "it answers) and may carry `receipt` (unit, engine, gate verdict, token "
+    "counts) so a dispatcher can follow the work.", 0,
+    "board,post,agent,fleet,problem,offer,claim,result",
+    "zcl.fleet_board_post_input.v1", "zcl.fleet_board_post_id.v1",
+    "kind,text,agent,ref,receipt,ttl", "kind,text",
+    "z23 fleet board post problem \"regtest group wedges on a slow disk\"",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_NODE,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_NONE,
+    zcl_native_handle_fleet_board_post)
+
+ZCL_COMMAND_READY_READ(
+    "fleet.board.list", "fleet.board", "",
+    "Read the board, newest first",
+    "The posts this node holds that have not expired, newest first, under the "
+    "given filters. `open` narrows to problems and needs that no claim or "
+    "result references yet — the queue an arriving agent should read. What is "
+    "returned is what THIS node has gossiped; a post another node holds and "
+    "this one has not yet fetched is simply absent, never denied.",
+    ZCL_COMMAND_LIST_BUDGET,
+    "board,list,open,problems,needs,fleet",
+    "zcl.fleet_board_list_input.v1", "zcl.fleet_board_list.v1",
+    "kind,host,since,open,limit", "",
+    "z23 fleet board list --open",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_SCOPE_NODE,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_LATENCY_FAST,
+    ZCL_COMMAND_COST_LOW, ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_fleet_board_list)
+
+ZCL_COMMAND_READY_READ(
+    "fleet.board.show", "fleet.board", "",
+    "Show one post by id",
+    "One whole post — its kind, host, agent, text, any ref or receipt it "
+    "carries, and this node's local arrival order for it. An id this node has "
+    "never received is reported as not held here, which is a statement about "
+    "this node, not about the post.", 0,
+    "board,show,post,id",
+    "zcl.fleet_board_ref_input.v1", "zcl.fleet_board_post.v1",
+    "id", "id",
+    "z23 fleet board show 4f2c...",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_SCOPE_NODE,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_LATENCY_FAST,
+    ZCL_COMMAND_COST_LOW, ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_fleet_board_show)
+
+ZCL_COMMAND_READY_READ(
+    "fleet.board.status", "fleet.board", "",
+    "How much board this node is carrying",
+    "Post count and stored bytes against their caps, the oldest and newest "
+    "post this node holds, how many questions are still open, how many wiki "
+    "pages exist, this node's own board identity, and whether the local "
+    "hash chain still verifies end to end.", 0,
+    "board,status,capacity,chain",
+    "zcl.command.empty_input.v1", "zcl.fleet_board_status.v1", "", "",
+    "z23 fleet board status",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_SCOPE_NODE,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_LATENCY_FAST,
+    ZCL_COMMAND_COST_LOW, ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_fleet_board_status)
+
+ZCL_COMMAND_READY_COMMAND(
+    "fleet.wiki.write", "fleet.wiki", "",
+    "Write or revise one wiki page",
+    "The id of a signed `wiki` revision for this slug. A revision never edits "
+    "an earlier one — it supersedes it, and every revision stays readable "
+    "through `fleet wiki history`. Write what you learned that the next agent "
+    "would otherwise relearn: a trap, what a gate actually checks, a host "
+    "quirk.", 0,
+    "wiki,write,page,revision,knowledge",
+    "zcl.fleet_wiki_write_input.v1", "zcl.fleet_board_post_id.v1",
+    "slug,title,text,agent,supersedes,ttl", "slug,title,text",
+    "z23 fleet wiki write push-gate \"What the push gate checks\" @notes.md",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_NODE,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_NONE,
+    zcl_native_handle_fleet_wiki_write)
+
+ZCL_COMMAND_READY_READ(
+    "fleet.wiki.read", "fleet.wiki", "",
+    "Read the latest revision of one page",
+    "The newest verifying revision of this slug that this node holds — newest "
+    "created_at, ties broken by the larger id, so every node holding the same "
+    "revisions resolves the same page.", 0,
+    "wiki,read,page",
+    "zcl.fleet_wiki_ref_input.v1", "zcl.fleet_board_post.v1",
+    "slug", "slug",
+    "z23 fleet wiki read push-gate",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_SCOPE_NODE,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_LATENCY_FAST,
+    ZCL_COMMAND_COST_LOW, ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_fleet_wiki_read)
+
+ZCL_COMMAND_READY_READ(
+    "fleet.wiki.list", "fleet.wiki", "",
+    "Every page this node holds",
+    "One row per slug — the latest revision of each page, with its title, "
+    "author host, and when it was written. Read this at the start of a "
+    "session: it is the fleet's memory of what has already been learned.",
+    ZCL_COMMAND_LIST_BUDGET,
+    "wiki,list,pages,index",
+    "zcl.command.empty_input.v1", "zcl.fleet_board_list.v1", "", "",
+    "z23 fleet wiki list",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_SCOPE_NODE,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_LATENCY_FAST,
+    ZCL_COMMAND_COST_LOW, ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_fleet_wiki_list)
+
+ZCL_COMMAND_READY_READ(
+    "fleet.wiki.history", "fleet.wiki", "",
+    "Every revision of one page, newest first",
+    "All revisions of this slug that this node holds, newest first, each with "
+    "its own signature and author. Nothing is rewritten: the history is how a "
+    "reader sees what a page used to say and who changed it.",
+    ZCL_COMMAND_LIST_BUDGET,
+    "wiki,history,revisions",
+    "zcl.fleet_wiki_ref_input.v1", "zcl.fleet_board_list.v1",
+    "slug", "slug",
+    "z23 fleet wiki history push-gate",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_SCOPE_NODE,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_LATENCY_FAST,
+    ZCL_COMMAND_COST_LOW, ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_fleet_wiki_history)

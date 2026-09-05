@@ -93,7 +93,10 @@ bool zcl_command_registry_devagent_input_ok(const char *key,
  * declared schema, same as the other flags in command_registry.c's bool
  * disjunction. `include_evidence_wires` and `list` were already in that
  * disjunction and are folded in here too, purely to keep the disjunction's
- * own line count from growing past the ceiling — no behavior change. */
+ * own line count from growing past the ceiling — no behavior change.
+ * `open` is `fleet board list --open`'s filter for posts nothing has
+ * answered yet; it lands here rather than in command_registry.c for the
+ * same reason. */
 bool command_registry_devagent_input_extra_bool_key(const char *key)
 {
     /* `include_units` is dev.fleet.start's "list the running executor units"
@@ -104,7 +107,7 @@ bool command_registry_devagent_input_extra_bool_key(const char *key)
     return strcmp(key, "json") == 0 || strcmp(key, "force") == 0 ||
            strcmp(key, "include_evidence_wires") == 0 ||
            strcmp(key, "include_units") == 0 ||
-           strcmp(key, "list") == 0;
+           strcmp(key, "list") == 0 || strcmp(key, "open") == 0;
 }
 
 /* dev.land cancel names one request by its sequence number, and `--seq=3`

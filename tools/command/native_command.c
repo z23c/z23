@@ -78,6 +78,13 @@ bool zcl_native_command_is_root(const char *word)
     static const char *const roots[] = {
         "status", "core", "app", "dev", "ops", "discover", "code", "vault",
         "zcode", "metaverse", "yardsale", "zses", "story", "help",
+        /* The fleet AI message board and wiki. A root rather than an
+         * `ops.*` child for the same reason `general` is: it is what an
+         * agent reads BEFORE it starts work and writes when it finishes,
+         * and a prefix between an agent and the fleet's shared memory is
+         * how that memory stops being read. It grants no authority — the
+         * board carries requests and pointers, and the gates decide. */
+        "fleet",
         "search",
         /* Operator-UX convenience roots: bare aliases of ops.explain /
          * ops.profile so `z23 explain sync` / `zclassic23 profile`

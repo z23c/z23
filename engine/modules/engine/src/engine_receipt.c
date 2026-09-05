@@ -12,6 +12,7 @@
  */
 
 #include "engine/engine_receipt.h"
+#include "engine/engine.h"
 
 #include "base/hex.h"
 #include "base/log_macros.h"
@@ -23,6 +24,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -59,6 +61,19 @@ static int receipt_open(const char *path, int flags, int mode)
 static const char *or_empty(const char *s)
 {
     return s ? s : "";
+}
+
+static bool push_nullable_string(struct json_value *doc, const char *key,
+                                 const char *value)
+{
+    if (value && value[0])
+        return json_push_kv_str(doc, key, value);
+    struct json_value null_value;
+    json_init(&null_value);
+    json_set_null(&null_value);
+    bool ok = json_push_kv(doc, key, &null_value);
+    json_free(&null_value);
+    return ok;
 }
 
 static void sha3_hex(const char *data, size_t len, char out[65])
@@ -317,6 +332,70 @@ static bool build_line(const struct engine_receipt *r, const char *prev_sha3,
         && json_push_kv_int(&outcome, "lines_changed", r->outcome.lines_changed)
         && json_push_kv_int(&outcome, "lint_rc", r->outcome.lint_rc);
 
+    struct json_value invocations;
+    json_init(&invocations);
+    json_set_array(&invocations);
+    int64_t total_prompt = 0;
+    int64_t total_completion = 0;
+    int64_t total_cache_read = 0;
+    int64_t total_cache_creation = 0;
+    int64_t total_reasoning = 0;
+    int64_t total_reported = 0;
+    int64_t total_invocation_elapsed = 0;
+    bool invocation_elapsed_known = true;
+    bool totals_known[6] = { true, true, true, true, true, true };
+    for (size_t i = 0; ok && i < r->invocations_count; i++) {
+        const struct engine_receipt_invocation *in = &r->invocations[i];
+        struct json_value item;
+        json_init(&item);
+        json_set_object(&item);
+        ok = json_push_kv_int(&item, "ordinal", in->ordinal)
+            && json_push_kv_str(&item, "phase", or_empty(in->phase))
+            && json_push_kv_str(&item, "result", or_empty(in->result))
+            && json_push_kv_int(&item, "elapsed_ms", in->elapsed_ms)
+            && json_push_kv_int(&item, "http_status", in->http_status)
+            && push_nullable_string(&item, "resolved_model",
+                                    in->resolved_model)
+            && json_push_kv_int(&item, "prompt_tokens", in->prompt_tokens)
+            && json_push_kv_int(&item, "completion_tokens",
+                                in->completion_tokens)
+            && json_push_kv_int(&item, "cache_read_input_tokens",
+                                in->cache_read_input_tokens)
+            && json_push_kv_int(&item, "cache_creation_input_tokens",
+                                in->cache_creation_input_tokens)
+            && json_push_kv_int(&item, "reasoning_tokens",
+                                in->reasoning_tokens)
+            && json_push_kv_int(&item, "total_tokens", in->total_tokens)
+            && json_push_back(&invocations, &item);
+        json_free(&item);
+
+#define ADD_TOTAL(index, field, total) do {                                \
+    const int64_t value = in->field;                                       \
+    if (value < 0 || total > INT64_MAX - value)                            \
+        totals_known[index] = false;                                       \
+    else if (totals_known[index])                                          \
+        total += value;                                                     \
+} while (0)
+        ADD_TOTAL(0, prompt_tokens, total_prompt);
+        ADD_TOTAL(1, completion_tokens, total_completion);
+        ADD_TOTAL(2, cache_read_input_tokens, total_cache_read);
+        ADD_TOTAL(3, cache_creation_input_tokens, total_cache_creation);
+        ADD_TOTAL(4, reasoning_tokens, total_reasoning);
+        ADD_TOTAL(5, total_tokens, total_reported);
+#undef ADD_TOTAL
+        if (in->elapsed_ms < 0 ||
+            total_invocation_elapsed > INT64_MAX - in->elapsed_ms)
+            invocation_elapsed_known = false;
+        else if (invocation_elapsed_known)
+            total_invocation_elapsed += in->elapsed_ms;
+    }
+    if (r->invocations_count == 0 || r->invocation_totals_ambiguous) {
+        for (size_t i = 0; i < 6; i++)
+            totals_known[i] = false;
+    }
+    if (r->invocations_count == 0)
+        invocation_elapsed_known = false;
+
     struct json_value doc;
     json_init(&doc);
     json_set_object(&doc);
@@ -326,20 +405,64 @@ static bool build_line(const struct engine_receipt *r, const char *prev_sha3,
         && json_push_kv_str(&doc, "unit_id", unit_id)
         && json_push_kv_int(&doc, "ts", r->ts)
         && json_push_kv_str(&doc, "engine", or_empty(r->engine))
-        && json_push_kv_str(&doc, "model", or_empty(r->model))
+        /* Retain the v1 reader's grouping key while making requested and
+         * provider-reported identities independently observable. */
+        && json_push_kv_str(&doc, "model", or_empty(r->requested_model))
+        && json_push_kv_str(&doc, "requested_model",
+                            or_empty(r->requested_model))
+        && push_nullable_string(&doc, "resolved_model", r->resolved_model)
+        && json_push_kv_str(&doc, "reasoning_effort",
+                            or_empty(r->reasoning_effort))
         && json_push_kv_str(&doc, "kind", or_empty(r->kind))
         && json_push_kv_str(&doc, "template_sha3", or_empty(r->template_sha3))
         && json_push_kv(&doc, "rules_shown", &rules)
         && json_push_kv_str(&doc, "task_sha3", or_empty(r->task_sha3))
         && json_push_kv_str(&doc, "group", or_empty(r->group))
+        && json_push_kv_str(&doc, "accounting_scope", "terminal_dispatch")
         && json_push_kv_int(&doc, "prompt_tokens", r->prompt_tokens)
         && json_push_kv_int(&doc, "completion_tokens", r->completion_tokens)
+        && json_push_kv_int(&doc, "cache_read_input_tokens",
+                            r->cache_read_input_tokens)
+        && json_push_kv_int(&doc, "cache_creation_input_tokens",
+                            r->cache_creation_input_tokens)
+        && json_push_kv_int(&doc, "reasoning_tokens", r->reasoning_tokens)
+        && json_push_kv_int(&doc, "total_tokens", r->total_tokens)
+        && json_push_kv_int(&doc, "turns", r->turns)
+        && json_push_kv(&doc, "invocations", &invocations)
+        && json_push_kv_int(&doc, "total_prompt_tokens",
+                            totals_known[0] ? total_prompt
+                                            : ENGINE_RECEIPT_UNREPORTED)
+        && json_push_kv_int(&doc, "total_completion_tokens",
+                            totals_known[1] ? total_completion
+                                            : ENGINE_RECEIPT_UNREPORTED)
+        && json_push_kv_int(&doc, "total_cache_read_input_tokens",
+                            totals_known[2] ? total_cache_read
+                                            : ENGINE_RECEIPT_UNREPORTED)
+        && json_push_kv_int(&doc, "total_cache_creation_input_tokens",
+                            totals_known[3] ? total_cache_creation
+                                            : ENGINE_RECEIPT_UNREPORTED)
+        && json_push_kv_int(&doc, "total_reasoning_tokens",
+                            totals_known[4] ? total_reasoning
+                                            : ENGINE_RECEIPT_UNREPORTED)
+        && json_push_kv_int(&doc, "total_reported_tokens",
+                            totals_known[5] ? total_reported
+                                            : ENGINE_RECEIPT_UNREPORTED)
+        && json_push_kv_int(&doc, "total_invocation_elapsed_ms",
+                            invocation_elapsed_known
+                                ? total_invocation_elapsed
+                                : ENGINE_RECEIPT_UNREPORTED)
+        && json_push_kv_int(&doc, "cumulative_proof_ms",
+                            r->cumulative_proof_ms)
+        && json_push_kv_int(&doc, "unit_elapsed_ms", r->unit_elapsed_ms)
+        && json_push_kv_int(&doc, "dispatch_ms", r->dispatch_ms)
+        && json_push_kv_int(&doc, "proof_ms", r->proof_ms)
         && json_push_kv_int(&doc, "wall_ms", r->wall_ms)
         && json_push_kv_int(&doc, "http_status", r->http_status)
         && json_push_kv(&doc, "outcome", &outcome)
         && json_push_kv_str(&doc, "worktree_head", or_empty(r->worktree_head));
     json_free(&rules);
     json_free(&outcome);
+    json_free(&invocations);
     if (!ok) {
         json_free(&doc);
         LOG_FAIL("engine_receipt", "cannot assemble the receipt document");
@@ -355,6 +478,22 @@ static bool build_line(const struct engine_receipt *r, const char *prev_sha3,
     return true;
 }
 
+bool engine_receipt_fits(const struct engine_receipt *r)
+{
+    if (!r || !r->engine || !r->engine[0] || !r->requested_model ||
+        !r->requested_model[0] || r->rules_count > ENGINE_RECEIPT_RULES_MAX ||
+        r->invocations_count > ENGINE_RECEIPT_INVOCATIONS_MAX ||
+        (r->invocations_count > 0 && !r->invocations) ||
+        !r->reasoning_effort || !r->reasoning_effort[0] ||
+        !engine_reasoning_effort_valid(r->reasoning_effort))
+        return false;
+    static const char zero[65] =
+        "0000000000000000000000000000000000000000000000000000000000000000";
+    char line[ENGINE_RECEIPT_LINE_MAX + 1u];
+    size_t len = 0;
+    return build_line(r, zero, line, ENGINE_RECEIPT_LINE_MAX, &len);
+}
+
 bool engine_receipt_append(const char *path, const struct engine_receipt *r,
                            char *out_line_sha3)
 {
@@ -366,10 +505,22 @@ bool engine_receipt_append(const char *path, const struct engine_receipt *r,
         LOG_FAIL("engine_receipt",
                  "refusing a receipt with no engine id: a cost nobody can "
                  "attribute is not a measurement");
+    if (!r->requested_model || !r->requested_model[0])
+        LOG_FAIL("engine_receipt", "refusing a receipt with no requested model");
     if (r->rules_count > ENGINE_RECEIPT_RULES_MAX)
         LOG_FAIL("engine_receipt",
                  "refusing %zu rule ids: over the cap of %u", r->rules_count,
                  (unsigned)ENGINE_RECEIPT_RULES_MAX);
+    if (r->invocations_count > ENGINE_RECEIPT_INVOCATIONS_MAX)
+        LOG_FAIL("engine_receipt",
+                 "refusing %zu invocations: over the complete-record cap of %u",
+                 r->invocations_count,
+                 (unsigned)ENGINE_RECEIPT_INVOCATIONS_MAX);
+    if (r->invocations_count > 0 && !r->invocations)
+        LOG_FAIL("engine_receipt", "refusing a non-empty NULL invocation list");
+    if (!r->reasoning_effort || !r->reasoning_effort[0] ||
+        !engine_reasoning_effort_valid(r->reasoning_effort))
+        LOG_FAIL("engine_receipt", "refusing an invalid reasoning effort");
 
     /* O_RDWR because this same fd must read the tail; O_APPEND so the one
      * write(2) cannot overwrite earlier records even if the lock is lost.

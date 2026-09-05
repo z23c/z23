@@ -16,7 +16,7 @@
  *      renders as NOTHING (write_bounded_json returns 0), not as a truncated
  *      menu. Root menu, the zcode menu, and the two new menus are all measured
  *      through the REAL renderer, and the root child count is pinned so a bare
- *      alias can never quietly become a 13th root.
+ *      alias can never quietly become a 15th root.
  *   4. The handler on a temp datadir: it writes <datadir>/z23.conf with
  *      packagehost=1 and a buildworker line that AGREES with what it reported
  *      about the local compiler, preserves unrelated lines already in the
@@ -219,7 +219,7 @@ static int t_menu_budgets(void)
 
     /* An alias is not a child of "", so it must not appear at the root and
      * must not move the pinned root count (test_command_registry_catalog's
-     * ASSERT_EQ(roots, 13) depends on exactly this). */
+     * ASSERT_EQ(roots, 14) depends on exactly this). */
     ZNJ_CHECK("`join` and `update` do NOT render as root children",
               root_n > 0 && strstr(out, "\"join\"") == NULL &&
               strstr(out, "\"update\"") == NULL);
@@ -229,7 +229,7 @@ static int t_menu_budgets(void)
         if (!p || !p[0])
             roots++;
     }
-    ZNJ_CHECK("the registry still has exactly 13 roots", roots == 13);
+    ZNJ_CHECK("the registry still has exactly 14 roots", roots == 14);
 
     static const char *const branches[] = { "zcode", "zcode.node",
                                             "zcode.node.update" };

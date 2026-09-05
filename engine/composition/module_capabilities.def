@@ -268,6 +268,7 @@ ZCL_MODULE_CAPABILITY("engine/models/src/database_schema_preflight.c", CAP_FS_RE
 ZCL_MODULE_CAPABILITY("engine/models/src/db_txn.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("contexts/explorer/models/src/explorer_index.c", CAP_FS_WRITE|CAP_FS_READ, "")
 ZCL_MODULE_CAPABILITY("contexts/market/models/src/explorer_index_zslp.c", CAP_FS_READ|CAP_FS_WRITE, "")
+ZCL_MODULE_CAPABILITY("engine/models/src/fleet_board_post.c", CAP_FS_WRITE|CAP_FS_READ, "")
 ZCL_MODULE_CAPABILITY("engine/models/src/file_offer.c", CAP_FS_WRITE|CAP_FS_READ, "")
 ZCL_MODULE_CAPABILITY("engine/models/src/file_service.c", CAP_FS_WRITE|CAP_FS_READ, "")
 ZCL_MODULE_CAPABILITY("engine/models/src/header_admit_log.c", CAP_FS_WRITE, "")

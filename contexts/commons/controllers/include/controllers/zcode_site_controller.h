@@ -5,6 +5,7 @@
  * https_server.c) the same way the ZCL Names site is:
  *
  *   GET /zcode                              landing (projection counts)
+ *   GET /zcode/develop                      public C23 development entry
  *   GET /zcode/packages[?q=<keyword>]       bounded search over the index
  *   GET /zcode/package/<package-root>       release envelope + publisher
  *                                           signature + manifest + verifier

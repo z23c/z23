@@ -74,15 +74,15 @@ z23 discover schema <path> --side=input|output
 
 | Catalog fact | Count |
 |---|---|
-| Registry entries (branches + leaves) | 811 |
-| Top-level roots | 13 |
-| Branches | 182 |
-| Leaves (dispatchable command paths) | 629 |
-| … `ready` (live handler in this build) | 559 |
+| Registry entries (branches + leaves) | 822 |
+| Top-level roots | 14 |
+| Branches | 185 |
+| Leaves (dispatchable command paths) | 637 |
+| … `ready` (live handler in this build) | 567 |
 | … `compat` (metadata only, names a fallback) | 39 |
 | … `planned` (fail-closed BLOCKED, exit 3) | 31 |
 | … dev-gated 🔧 (`ready` only in `z23-dev`) | 38 |
-| Leaves with `effect=mutate` | 220 |
+| Leaves with `effect=mutate` | 222 |
 | Leaves with `effect=destructive` | 5 |
 | Leaves requiring **owner** authority | 120 |
 
@@ -106,6 +106,7 @@ Per source file:
 | `engine/composition/commands/yardsale.def` | 7 | 2 | 5 |
 | `engine/composition/commands/zses.def` | 4 | 2 | 2 |
 | `engine/composition/commands/story.def` | 5 | 1 | 4 |
+| `engine/composition/commands/fleet_board.def` | 11 | 3 | 8 |
 | `engine/composition/commands/telemetry/root.def` | 6 | 2 | 4 |
 | `engine/composition/commands/telemetry/watch.def` | 1 | 0 | 1 |
 | `engine/composition/commands/telemetry/runtime.def` | 4 | 1 | 3 |
@@ -173,6 +174,7 @@ The root order below is a wire contract, not a presentation choice.
 | `yardsale` | `yardsale` | branch | ready | For-sale-by-owner signed ads, settled bilaterally |
 | `zses` | `zses` | branch | ready | Session invites |
 | `story` | `story` | branch | ready | Rooted causal views of development work |
+| `fleet` | `fleet` | branch | ready | The fleet message board and wiki |
 
 
 ## The tree, leaf by leaf
@@ -1704,6 +1706,26 @@ represented by its children's sections.
 | `story why` | ready | read / read / public · foreground/low | `workspace`, **`work`**, `datadir`, **`event`** | `zcl.story_why.v1` | `z23 story why work-<task-prefix> user_accepts` | Explain the exact causal chain for one development event |
 | `story diff` | ready | read / read / public · foreground/low | `workspace`, **`before`**, **`after`**, `datadir` | `zcl.story_diff.v1` | `z23 story diff work-<before-prefix> work-<after-prefix>` | Diff two exact-root development stories |
 
+### `fleet` — The fleet message board and wiki
+
+#### `fleet.board` — Signed, gossiped posts every node carries
+
+| Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
+|---|---|---|---|---|---|---|
+| `fleet board post` | ready | mutate / app-write / operator · fast/low | **`kind`**, **`text`**, `agent`, `ref`, `receipt`, `ttl` | `zcl.fleet_board_post_id.v1` | `z23 fleet board post problem "regtest group wedges on a slow disk"` | Sign and gossip one board post from this node |
+| `fleet board list` | ready | read / read / operator · fast/low | `kind`, `host`, `since`, `open`, `limit` | `zcl.fleet_board_list.v1` | `z23 fleet board list --open` | Read the board, newest first |
+| `fleet board show` | ready | read / read / operator · fast/low | **`id`** | `zcl.fleet_board_post.v1` | `z23 fleet board show 4f2c...` | Show one post by id |
+| `fleet board status` | ready | read / read / operator · fast/low | none | `zcl.fleet_board_status.v1` | `z23 fleet board status` | How much board this node is carrying |
+
+#### `fleet.wiki` — Durable pages on the same signed ledger
+
+| Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
+|---|---|---|---|---|---|---|
+| `fleet wiki write` | ready | mutate / app-write / operator · fast/low | **`slug`**, **`title`**, **`text`**, `agent`, `supersedes`, `ttl` | `zcl.fleet_board_post_id.v1` | `z23 fleet wiki write push-gate "What the push gate checks" @notes.md` | Write or revise one wiki page |
+| `fleet wiki read` | ready | read / read / operator · fast/low | **`slug`** | `zcl.fleet_board_post.v1` | `z23 fleet wiki read push-gate` | Read the latest revision of one page |
+| `fleet wiki list` | ready | read / read / operator · fast/low | none | `zcl.fleet_board_list.v1` | `z23 fleet wiki list` | Every page this node holds |
+| `fleet wiki history` | ready | read / read / operator · fast/low | **`slug`** | `zcl.fleet_board_list.v1` | `z23 fleet wiki history push-gate` | Every revision of one page, newest first |
+
 
 ## Aliases
 
@@ -1814,6 +1836,9 @@ promise the same document shape.
 | `zcl.zcode_science_work.v1` | `zcode.science.work.status`, `zcode.science.work.receipt` |
 | `zcl.build_job.v1` | `metaverse.build.submit`, `metaverse.build.cancel` |
 | `zcl.build_worker.v1` | `metaverse.build.worker.approve`, `metaverse.build.worker.revoke` |
+| `zcl.fleet_board_post_id.v1` | `fleet.board.post`, `fleet.wiki.write` |
+| `zcl.fleet_board_list.v1` | `fleet.board.list`, `fleet.wiki.list`, `fleet.wiki.history` |
+| `zcl.fleet_board_post.v1` | `fleet.board.show`, `fleet.wiki.read` |
 | `zcl.telemetry.alerts.v1` | `ops.telemetry.alerts.active`, `ops.telemetry.alerts.history` |
 | `zcl.telemetry.network.v1` | `ops.telemetry.network.summary`, `ops.telemetry.network.peers`, `ops.telemetry.network.tor`, `ops.telemetry.network.transport` |
 

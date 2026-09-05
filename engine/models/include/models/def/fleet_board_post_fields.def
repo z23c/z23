@@ -1,0 +1,68 @@
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ *
+ * fleet_board_post_fields.def — the persisted columns of the fleet board and
+ * wiki ledger, declared ONCE. See models/model_fields.h for what is derived
+ * from these lists and why nothing here may be spelled a second time.
+ *
+ * Order is meaning: it is the SQL column order, the SELECT read index, and
+ * the typed query builder's column array, all at the same time. Insert a
+ * field in the middle and all three move together.
+ *
+ * Every column is a field the wire already signs, plus this node's own local
+ * bookkeeping (arrival order, the hash-chain link, and the canonical byte
+ * count). The canonical body itself is NOT stored: the encoding is a total
+ * function of these fields, so re-encoding reproduces it exactly, and the
+ * read re-derives the id and compares it against the stored one — a stronger
+ * integrity check than keeping a second copy of the bytes that could rot
+ * apart from the columns beside it.
+ */
+
+/* fleet_board_posts — schema v80. */
+#define FLEET_BOARD_POST_FIELDS \
+    ZCL_MODEL_BLOB(id,          post.id,          32), \
+    ZCL_MODEL_I64 (seq,         seq),                  \
+    ZCL_MODEL_U16 (kind,        post.kind),            \
+    ZCL_MODEL_U64 (created_at,  post.created_at),      \
+    ZCL_MODEL_U32 (ttl,         post.ttl),             \
+    ZCL_MODEL_I64 (expires_at,  expires_at),           \
+    ZCL_MODEL_BLOB(ref,         post.ref,         32), \
+    ZCL_MODEL_BLOB(host_pubkey, post.host_pubkey, 32), \
+    ZCL_MODEL_TEXT(agent,       post.agent),           \
+    ZCL_MODEL_TEXT(slug,        post.slug),            \
+    ZCL_MODEL_TEXT(title,       post.title),           \
+    ZCL_MODEL_BLOB(supersedes,  post.supersedes,  32), \
+    ZCL_MODEL_TEXT(receipt,     post.receipt),         \
+    ZCL_MODEL_TEXT(text,        post.text),            \
+    ZCL_MODEL_I64 (body_bytes,  body_bytes),           \
+    ZCL_MODEL_BLOB(signature,   post.signature,   64), \
+    ZCL_MODEL_BLOB(chain_prev,  chain_prev,       32), \
+    ZCL_MODEL_BLOB(chain_hash,  chain_hash,       32), \
+    ZCL_MODEL_I64 (received_at, received_at)
+
+/* The eviction scan's own projection. Deciding what to drop needs the id, the
+ * kind, and (for a wiki revision) the slug — never a 16 KiB page body. Its
+ * own list means its own read indices, so a bounded page of candidates costs
+ * kilobytes of stack instead of megabytes. */
+#define FLEET_BOARD_EVICT_FIELDS \
+    ZCL_MODEL_BLOB(id,         id,   32), \
+    ZCL_MODEL_U16 (kind,       kind),     \
+    ZCL_MODEL_TEXT(slug,       slug),     \
+    ZCL_MODEL_I64 (body_bytes, body_bytes)
+
+/* The local hash chain's own projection: the three columns a chain walk
+ * compares, and nothing else. `board_head_chain` reads the same list so the
+ * chain is read one way everywhere. */
+#define FLEET_BOARD_CHAIN_FIELDS \
+    ZCL_MODEL_BLOB(id,         id,         32), \
+    ZCL_MODEL_BLOB(chain_prev, chain_prev, 32), \
+    ZCL_MODEL_BLOB(chain_hash, chain_hash, 32)
+
+/* Single-column projections. A one-column read is where an index looks most
+ * harmless and is therefore where one is most likely to survive a column
+ * being inserted above it; deriving these too means the file contains no
+ * hand-written column index at all. */
+#define FLEET_BOARD_ID_FIELDS \
+    ZCL_MODEL_BLOB(id, id, 32)
+
+#define FLEET_BOARD_SLUG_FIELDS \
+    ZCL_MODEL_TEXT(slug, slug)

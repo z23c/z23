@@ -2734,6 +2734,43 @@ void zcl_native_handle_ops_telemetry_alerts_active(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
 
+/* ── the fleet AI message board and wiki
+ * (tools/command/native_fleet_board_command.c). Every leaf asks the local
+ * running node over the `fleet_board` RPC method and fails closed when none
+ * answers; none of them can write a private copy. Bound by
+ * engine/composition/commands/fleet_board.def. */
+enum {
+    /* One board call, JSON-encoded: a wiki page is the largest thing that
+     * fits, plus room for the field names around it. */
+    FLEET_BOARD_RPC_PARAMS_MAX = 24576,
+    /* One rendered board line. A post's text is capped at 2 KiB. */
+    FLEET_BOARD_LINE_MAX = 2560,
+};
+void zcl_native_handle_fleet_board_post(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
+void zcl_native_handle_fleet_board_list(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
+void zcl_native_handle_fleet_board_show(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
+void zcl_native_handle_fleet_board_status(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
+void zcl_native_handle_fleet_wiki_write(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
+void zcl_native_handle_fleet_wiki_read(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
+void zcl_native_handle_fleet_wiki_list(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
+void zcl_native_handle_fleet_wiki_history(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
+
 #ifdef __cplusplus
 }
 #endif

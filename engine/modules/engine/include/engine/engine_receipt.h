@@ -35,15 +35,33 @@
  *                      they are the same dispatch to anyone reading later.
  *   ts                 unix seconds, integer
  *   engine             registry id ("glm", "grok-cli", "fixture")
- *   model              the model actually used, resolved
+ *   model              requested_model compatibility key for v1 readers
+ *   requested_model    model sent: caller override or registry default
+ *   resolved_model     provider-reported model, null when unreported
+ *   reasoning_effort   requested low/medium/high/xhigh, or provider_default
  *   kind               the prompt template kind ("fix-gate", …), "" if none
  *   template_sha3      64 hex over the template's bodies, "" if none
  *   rules_shown        array of rule id strings that were IN the prompt
  *   task_sha3          64 hex over the task file's exact bytes
  *   group              the test group the unit was judged on, "" if none
- *   prompt_tokens      integer, -1 when the vendor did not report
+ *   prompt_tokens      terminal-dispatch compatibility counters; integer,
+ *                      -1 when the vendor did not report
  *   completion_tokens  integer, -1 when the vendor did not report
- *   wall_ms            integer: dispatch plus gate, the whole unit
+ *   cache_read_input_tokens/cache_creation_input_tokens/reasoning_tokens/
+ *                      total_tokens/turns: integer, -1 when unreported
+ *   invocations        every provider dispatch in ordinal order, including
+ *                      repair turns, compactions, and failed retry attempts.
+ *                      Each entry carries phase, result, elapsed_ms,
+ *                      http_status, and the six raw provider counters.
+ *   total_*_tokens     a checked sum of the corresponding raw counter only
+ *                      when every invocation reported it; otherwise -1
+ *   accounting_scope   "terminal_dispatch": labels the compatibility timing
+ *                      and token fields above, which describe the last turn
+ *   total_invocation_elapsed_ms: checked sum of raw request durations only;
+ *                      excludes retry backoff, proof, and operator delay
+ *   cumulative_proof_ms: all gate time across repair turns
+ *   unit_elapsed_ms    monotonic elapsed time across the whole repair loop
+ *   dispatch_ms/proof_ms/wall_ms: terminal-turn compatibility timings
  *   http_status        integer, 0 for a CLI or fixture engine
  *   outcome            object:
  *                        applied        bool  work reached the worktree
@@ -94,10 +112,16 @@
 /* Longest line this writer will produce. A record over it is REFUSED rather
  * than truncated: half a JSON object appended to a chain would break every
  * link after it and look like tampering. */
-#define ENGINE_RECEIPT_LINE_MAX  8192u
+#define ENGINE_RECEIPT_LINE_MAX  16384u
 
 /* How many rule ids one record may carry. */
 #define ENGINE_RECEIPT_RULES_MAX 32u
+
+/* A provider call may not start unless one slot remains. The standalone
+ * dispatcher also proves its complete configured turn/retry plan fits this
+ * bound before its first call, so reaching the bound cannot strand an
+ * already-paid-for observation outside the receipt. */
+#define ENGINE_RECEIPT_INVOCATIONS_MAX 24u
 
 /* Told to a token field the vendor did not report. */
 #define ENGINE_RECEIPT_UNREPORTED (-1)
@@ -112,12 +136,29 @@ struct engine_receipt_outcome {
     int64_t lint_rc;        /* ENGINE_RECEIPT_UNREPORTED when none was run */
 };
 
+struct engine_receipt_invocation {
+    int64_t     ordinal;       /* one-based dispatch order */
+    const char *phase;         /* "turn" or "compaction" */
+    const char *result;        /* "ok" or engine error label */
+    int64_t     elapsed_ms;
+    int64_t     http_status;   /* 0 for CLI/fixture/no HTTP response */
+    const char *resolved_model; /* NULL means this call did not report one */
+    int64_t     prompt_tokens;
+    int64_t     completion_tokens;
+    int64_t     cache_read_input_tokens;
+    int64_t     cache_creation_input_tokens;
+    int64_t     reasoning_tokens;
+    int64_t     total_tokens;  /* provider's field; never synthesized */
+};
+
 /* Everything one record says. Every pointer borrows from the caller and is
  * read only during the call. A NULL string field is written as "". */
 struct engine_receipt {
     int64_t     ts;                 /* unix seconds */
     const char *engine;             /* required */
-    const char *model;
+    const char *requested_model;
+    const char *resolved_model;     /* NULL means provider did not report */
+    const char *reasoning_effort;
     const char *kind;
     const char *template_sha3;      /* 64 hex or NULL */
     const char *const *rules_shown; /* may be NULL when rules_count is 0 */
@@ -126,6 +167,20 @@ struct engine_receipt {
     const char *group;
     int64_t     prompt_tokens;
     int64_t     completion_tokens;
+    int64_t     cache_read_input_tokens;
+    int64_t     cache_creation_input_tokens;
+    int64_t     reasoning_tokens;
+    int64_t     total_tokens;
+    int64_t     turns;
+    const struct engine_receipt_invocation *invocations;
+    size_t      invocations_count;
+    /* A resumed provider session may report counters cumulatively. Its raw
+     * invocations remain evidence, but summing them would double count. */
+    bool        invocation_totals_ambiguous;
+    int64_t     cumulative_proof_ms;
+    int64_t     unit_elapsed_ms;
+    int64_t     dispatch_ms;
+    int64_t     proof_ms;
     int64_t     wall_ms;
     int64_t     http_status;
     const char *worktree_head;      /* 40 hex or NULL */
@@ -150,6 +205,11 @@ struct engine_receipt {
  * have room for 65 bytes. */
 bool engine_receipt_append(const char *path, const struct engine_receipt *r,
                            char *out_line_sha3);
+
+/* Pure preflight for the exact bounded JSON record. Callers that will spend
+ * provider quota use this before their first dispatch, with worst-case
+ * counters and every possible invocation slot populated. */
+bool engine_receipt_fits(const struct engine_receipt *r);
 
 struct engine_receipt_chain_report {
     uint64_t records;         /* lines accepted before the outcome below */

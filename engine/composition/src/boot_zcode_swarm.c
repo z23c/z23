@@ -5,6 +5,7 @@
 #include "config/boot_zcode_swarm_receipt.h"
 #include "config/boot_zcode_dht.h"
 #include "config/boot_internal.h"
+#include "config/boot_fleet_board.h"
 #include "config/boot_mesh_status.h"
 #include "config/boot_mesh_terminal.h"
 #include "config/runtime.h"
@@ -535,6 +536,10 @@ bool boot_zcode_swarm_frame(struct msg_processor *mp, struct p2p_node *node,
     if (boot_mesh_status_frame(mp, node, payload, payload_len,
                                (struct boot_svc_ctx *)ctx))
         return true;
+    /* The AI message board and wiki: every full node carries them, so the
+     * board leg answers before swarm hosting is even considered. */
+    if (boot_fleet_board_frame(mp, node, payload, payload_len, ctx))
+        return true;
     /* Confined mesh terminal: same reasoning — its OPENs are answered on
      * the pairing authority alone, never gated on swarm hosting. */
     if (boot_mesh_terminal_frame(mp, node, payload, payload_len,
@@ -722,6 +727,7 @@ void boot_zcode_swarm_tick(struct msg_processor *mp, struct p2p_node *node,
 {
     if (!mp || !node)
         return;
+    boot_fleet_board_tick(mp, node, ctx);
     int64_t wall = (int64_t)platform_time_wall_time_t();
     boot_zcode_swarm_lock();
     struct vcs_swarm_engine *engine =
@@ -824,6 +830,7 @@ void boot_zcode_swarm_wire(struct boot_svc_ctx *svc)
                                   boot_zcode_swarm_tick, svc);
     s_svc = svc;
     boot_mesh_status_wire(svc);
+    boot_fleet_board_wire(svc);
     boot_mesh_terminal_wire(svc);
     liveness_contract_init(&s_timer_contract, "net.zcode_swarm");
     s_timer_contract.on_tick = boot_zcode_swarm_timer_tick;
@@ -852,6 +859,7 @@ void boot_zcode_swarm_shutdown(void)
     }
     boot_zcode_dht_shutdown();
     boot_mesh_status_shutdown();
+    boot_fleet_board_shutdown();
     boot_mesh_terminal_shutdown();
     boot_zcode_swarm_lock();
     s_svc = NULL;

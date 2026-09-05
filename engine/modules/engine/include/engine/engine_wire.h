@@ -46,6 +46,7 @@
 struct engine_call {
     const struct engine_vendor *vendor;
     const char *model;          /* NULL selects vendor->default_model */
+    const char *reasoning_effort; /* optional low/medium/high/xhigh */
     const char *system_prompt;  /* may be NULL */
     const char *user_prompt;    /* required, <= ENGINE_MAX_PROMPT_BYTES */
     int         max_output_tokens; /* <= 0 omits the field */
@@ -63,7 +64,16 @@ struct engine_usage {
     int64_t prompt_tokens;
     int64_t completion_tokens;
     int64_t total_tokens;
+    int64_t cache_read_input_tokens;
+    int64_t cache_creation_input_tokens;
+    int64_t reasoning_tokens;
     double  cost_usd;
+    bool    prompt_tokens_known;
+    bool    completion_tokens_known;
+    bool    total_tokens_known;
+    bool    cache_read_input_tokens_known;
+    bool    cache_creation_input_tokens_known;
+    bool    reasoning_tokens_known;
     bool    tokens_known;
     bool    cost_known;
 };

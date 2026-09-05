@@ -233,6 +233,86 @@ bool engine_cli_observation_parse(const struct engine_vendor *vendor,
 /* Usage is optional and stays optional. A vendor that omits it, or sends it
  * with the wrong types, leaves the operator without a cost line — which is
  * reported as unknown, not invented, and never as zero. */
+static bool read_counter(const struct json_value *object,
+                         const char *const *keys, size_t key_count,
+                         int64_t *out)
+{
+    bool found = false;
+    int64_t value = 0;
+    for (size_t i = 0; i < key_count; i++) {
+        const struct json_value *item = json_get(object, keys[i]);
+        if (!item)
+            continue;
+        if (item->type != JSON_INT || json_get_int(item) < 0)
+            return false;
+        if (found && value != json_get_int(item))
+            return false;
+        value = json_get_int(item);
+        found = true;
+    }
+    if (found) *out = value;
+    return found;
+}
+
+enum counter_state {
+    COUNTER_ABSENT,
+    COUNTER_VALID,
+    COUNTER_INVALID,
+};
+
+static enum counter_state read_counter_at(const struct json_value *object,
+                                          const char *key, int64_t *out)
+{
+    const struct json_value *item = json_get(object, key);
+    if (!item) return COUNTER_ABSENT;
+    if (item->type != JSON_INT || json_get_int(item) < 0)
+        return COUNTER_INVALID;
+    *out = json_get_int(item);
+    return COUNTER_VALID;
+}
+
+static enum counter_state read_detail_counter(const struct json_value *usage,
+                                              const char *object_key,
+                                              const char *counter_key,
+                                              int64_t *out)
+{
+    const struct json_value *details = json_get(usage, object_key);
+    if (!details) return COUNTER_ABSENT;
+    if (details->type != JSON_OBJ) return COUNTER_INVALID;
+    return read_counter_at(details, counter_key, out);
+}
+
+static bool read_counter_locations(const struct json_value *usage,
+                                   const char *direct_key,
+                                   const char *first_details,
+                                   const char *second_details,
+                                   const char *detail_key, int64_t *out)
+{
+    bool found = false;
+    int64_t value = 0;
+    int64_t candidate = 0;
+    enum counter_state state = read_counter_at(usage, direct_key, &candidate);
+    if (state == COUNTER_INVALID) return false;
+    if (state == COUNTER_VALID) {
+        value = candidate;
+        found = true;
+    }
+
+    const char *locations[] = { first_details, second_details };
+    for (size_t i = 0; i < 2 && locations[i]; i++) {
+        state = read_detail_counter(usage, locations[i], detail_key,
+                                    &candidate);
+        if (state == COUNTER_INVALID) return false;
+        if (state == COUNTER_VALID) {
+            if (found && candidate != value) return false;
+            value = candidate;
+            found = true;
+        }
+    }
+    if (found) *out = value;
+    return found;
+}
+
 static void read_usage(const struct json_value *root, struct engine_usage *u)
 {
     memset(u, 0, sizeof(*u));
@@ -240,23 +320,23 @@ static void read_usage(const struct json_value *root, struct engine_usage *u)
     if (!usage || usage->type != JSON_OBJ)
         return;
 
-    static const char *const k_prompt[] = { "prompt_tokens", "input_tokens" };
-    static const char *const k_completion[] = { "completion_tokens",
-                                                "output_tokens" };
-    for (size_t i = 0; i < 2; i++) {
-        const struct json_value *v = json_get(usage, k_prompt[i]);
-        if (v && v->type == JSON_INT && json_get_int(v) >= 0)
-            u->prompt_tokens = json_get_int(v);
-        v = json_get(usage, k_completion[i]);
-        if (v && v->type == JSON_INT && json_get_int(v) >= 0)
-            u->completion_tokens = json_get_int(v);
-    }
-    const struct json_value *tot = json_get(usage, "total_tokens");
-    if (tot && tot->type == JSON_INT && json_get_int(tot) >= 0)
-        u->total_tokens = json_get_int(tot);
-    else
-        u->total_tokens = u->prompt_tokens + u->completion_tokens;
-    u->tokens_known = (u->total_tokens > 0);
+    static const char *const prompt[] = { "prompt_tokens", "input_tokens" };
+    static const char *const completion[] = { "completion_tokens", "output_tokens" };
+    static const char *const total[] = { "total_tokens" };
+    static const char *const cache_create[] = { "cache_creation_input_tokens" };
+    u->prompt_tokens_known = read_counter(usage,prompt,2,&u->prompt_tokens);
+    u->completion_tokens_known = read_counter(usage,completion,2,&u->completion_tokens);
+    u->total_tokens_known = read_counter(usage,total,1,&u->total_tokens);
+    u->cache_read_input_tokens_known = read_counter_locations(
+        usage,"cache_read_input_tokens","prompt_tokens_details",
+        "input_tokens_details","cached_tokens",&u->cache_read_input_tokens);
+    u->cache_creation_input_tokens_known =
+        read_counter(usage,cache_create,1,&u->cache_creation_input_tokens);
+    u->reasoning_tokens_known = read_counter_locations(
+        usage,"reasoning_tokens","completion_tokens_details",
+        "output_tokens_details","reasoning_tokens",&u->reasoning_tokens);
+    u->tokens_known = u->prompt_tokens_known && u->completion_tokens_known &&
+                      u->total_tokens_known;
 
     /* Few vendors report money. When one does, it is reported verbatim; when
      * none does, the operator is told the cost is unknown rather than free. */

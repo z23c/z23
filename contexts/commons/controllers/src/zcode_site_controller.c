@@ -3,7 +3,7 @@
  * ZCODE Library HTML site controller (slice 13). See
  * controllers/zcode_site_controller.h for the route list and the truth /
  * safe-downloading discipline. Rendering lives in
- * contexts/explorer/views/src/zcode_view{,_pages}.c; this file owns routing, the
+ * contexts/commons/views/src/zcode_view{,_pages}.c; this file owns routing, the
  * projection reads, and the CAS download path.
  *
  * Every read goes through the SAME contexts/commons/modules/vcs projections the zcode.* typed
@@ -706,6 +706,11 @@ size_t zcode_site_handle_request(const char *method, const char *path,
     }
     route[rlen] = '\0';
     const char *query = path[rlen] == '?' ? path + rlen + 1 : NULL;
+
+    /* Public onboarding is compiled content, independent of private stores. */
+    if (zs_path_eq(route, "/zcode/develop") ||
+        zs_path_eq(route, "/zcode/develop/"))
+        return zcode_view_develop(response, response_max);
 
     char dd[4400];
     if (!zs_datadir(datadir, dd))

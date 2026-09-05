@@ -32,6 +32,7 @@
 #include "engine/engine_patch.h"
 #include "engine/engine_prompt.h"
 #include "engine/engine_receipt.h"
+#include "engine/engine_rule_score.h"
 #include "base/safe_alloc.h"
 #include "engine/engine_secret.h"
 #include "engine/engine_state.h"
@@ -153,6 +154,28 @@ static int case_request(void)
                  && strstr(body, "json_schema") == NULL);
         free(body);
     }
+    struct engine_vendor effort_vendor = *engine_by_id("grok");
+    effort_vendor.supports_reasoning_effort = true;
+    call.vendor = &effort_vendor;
+    call.user_prompt = "x";
+    call.reasoning_effort = "high";
+    body = engine_request_alloc(&call, &len);
+    EN_CHECK("an explicit supported effort reaches the HTTP request",
+             body && strstr(body, "\"reasoning_effort\":\"high\"") != NULL);
+    free(body);
+    call.reasoning_effort = ENGINE_REASONING_EFFORT_PROVIDER_DEFAULT;
+    body = engine_request_alloc(&call, &len);
+    EN_CHECK("provider-default effort sends no guessed HTTP field",
+             body && strstr(body, "reasoning_effort") == NULL);
+    free(body);
+    call.vendor = v;
+    call.reasoning_effort = "high";
+    EN_CHECK("an unsupported HTTP effort is refused",
+             engine_request_alloc(&call, &len) == NULL);
+    call.reasoning_effort = "maximum";
+    EN_CHECK("an unknown HTTP effort is refused",
+             engine_request_alloc(&call, &len) == NULL);
+    call.reasoning_effort = NULL;
     call.user_prompt = NULL;
     EN_CHECK("a call with no prompt is refused",
              engine_request_alloc(&call, &len) == NULL);
@@ -202,6 +225,113 @@ static int case_hostile(void)
         EN_CHECK("the finish reason survives", ok && strcmp(r.finish_reason, "stop") == 0);
         if (ok)
             engine_reply_free(&r);
+    }
+
+    {
+        static const char zero[] =
+            "{\"choices\":[{\"message\":{\"content\":\"ok\"}}],"
+            "\"usage\":{\"prompt_tokens\":0,\"completion_tokens\":0,"
+            "\"total_tokens\":0}}";
+        struct engine_reply r;
+        const bool ok = engine_response_parse(v,zero,sizeof(zero)-1,&r);
+        EN_CHECK("explicit zero HTTP usage remains known",
+                 ok && r.usage.tokens_known && r.usage.prompt_tokens_known &&
+                 r.usage.completion_tokens_known && r.usage.total_tokens_known);
+        if (ok) engine_reply_free(&r);
+    }
+    {
+        static const char partial[] =
+            "{\"choices\":[{\"message\":{\"content\":\"ok\"}}],"
+            "\"usage\":{\"input_tokens\":7}}";
+        struct engine_reply r;
+        const bool ok=engine_response_parse(v,partial,sizeof(partial)-1,&r);
+        EN_CHECK("partial HTTP usage preserves known input and unknown output",
+                 ok && r.usage.prompt_tokens_known && r.usage.prompt_tokens==7 &&
+                 !r.usage.completion_tokens_known && !r.usage.total_tokens_known &&
+                 !r.usage.tokens_known);
+        if(ok)engine_reply_free(&r);
+    }
+    {
+        static const char details[] =
+            "{\"choices\":[{\"message\":{\"content\":\"ok\"}}],"
+            "\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":20,"
+            "\"total_tokens\":120,\"prompt_tokens_details\":{\"cached_tokens\":60},"
+            "\"completion_tokens_details\":{\"reasoning_tokens\":8}}}";
+        struct engine_reply r;
+        const bool ok=engine_response_parse(v,details,sizeof(details)-1,&r);
+        EN_CHECK("HTTP cache and reasoning detail subsets are preserved",
+                 ok && r.usage.cache_read_input_tokens_known &&
+                 r.usage.cache_read_input_tokens==60 &&
+                 r.usage.reasoning_tokens_known && r.usage.reasoning_tokens==8 &&
+                 !r.usage.cache_creation_input_tokens_known);
+        if(ok)engine_reply_free(&r);
+    }
+    {
+        static const char conflicting_details[] =
+            "{\"choices\":[{\"message\":{\"content\":\"ok\"}}],"
+            "\"usage\":{\"cache_read_input_tokens\":40,"
+            "\"prompt_tokens_details\":{\"cached_tokens\":39}}}";
+        struct engine_reply r;
+        const bool ok=engine_response_parse(v,conflicting_details,
+                                            sizeof(conflicting_details)-1,&r);
+        EN_CHECK("conflicting HTTP usage locations remain unknown",
+                 ok && !r.usage.cache_read_input_tokens_known);
+        if(ok)engine_reply_free(&r);
+    }
+    {
+        static const char fallback_details[] =
+            "{\"choices\":[{\"message\":{\"content\":\"ok\"}}],"
+            "\"usage\":{\"prompt_tokens_details\":{},"
+            "\"input_tokens_details\":{\"cached_tokens\":31}}}";
+        struct engine_reply r;
+        const bool ok=engine_response_parse(v,fallback_details,
+                                            sizeof(fallback_details)-1,&r);
+        EN_CHECK("empty first detail location allows a valid second location",
+                 ok && r.usage.cache_read_input_tokens_known &&
+                 r.usage.cache_read_input_tokens==31);
+        if(ok)engine_reply_free(&r);
+    }
+    {
+        static const char malformed_details[] =
+            "{\"choices\":[{\"message\":{\"content\":\"ok\"}}],"
+            "\"usage\":{\"prompt_tokens_details\":\"invalid\","
+            "\"input_tokens_details\":{\"cached_tokens\":31}}}";
+        struct engine_reply r;
+        const bool ok=engine_response_parse(v,malformed_details,
+                                            sizeof(malformed_details)-1,&r);
+        EN_CHECK("malformed detail container invalidates the counter",
+                 ok && !r.usage.cache_read_input_tokens_known);
+        if(ok)engine_reply_free(&r);
+    }
+    {
+        static const char malformed[] =
+            "{\"choices\":[{\"message\":{\"content\":\"ok\"}}],"
+            "\"usage\":{\"prompt_tokens\":-1,\"completion_tokens\":\"two\","
+            "\"total_tokens\":9223372036854775807,"
+            "\"prompt_tokens_details\":{\"cached_tokens\":-2},"
+            "\"completion_tokens_details\":{\"reasoning_tokens\":\"many\"}}}";
+        struct engine_reply r;
+        const bool ok=engine_response_parse(v,malformed,sizeof(malformed)-1,&r);
+        EN_CHECK("malformed and negative HTTP counters remain unknown",
+                 ok && !r.usage.prompt_tokens_known &&
+                 !r.usage.completion_tokens_known &&
+                 !r.usage.cache_read_input_tokens_known &&
+                 !r.usage.reasoning_tokens_known && r.usage.total_tokens_known &&
+                 r.usage.total_tokens==INT64_MAX);
+        if(ok)engine_reply_free(&r);
+    }
+    {
+        static const char no_derived_overflow[] =
+            "{\"choices\":[{\"message\":{\"content\":\"ok\"}}],"
+            "\"usage\":{\"prompt_tokens\":9223372036854775807,"
+            "\"completion_tokens\":1}}";
+        struct engine_reply r;
+        const bool ok=engine_response_parse(v,no_derived_overflow,
+                                            sizeof(no_derived_overflow)-1,&r);
+        EN_CHECK("missing total is not derived through an overflowing sum",
+                 ok && r.usage.prompt_tokens_known &&
+                 r.usage.completion_tokens_known && !r.usage.total_tokens_known);
+        if(ok)engine_reply_free(&r);
     }
 
     EN_CHECK("an empty body is refused", refuses("", 0));
@@ -1474,6 +1604,7 @@ static int case_cli_argv(void)
         .workdir = "/w",
         .turns   = "3",
         .model   = "m-1",
+        .reasoning_effort = "high",
     };
     const char *argv[ENGINE_CLI_ARGV_MAX];
 
@@ -1499,7 +1630,8 @@ static int case_cli_argv(void)
         EN_CHECK("which is NULL-terminated", n > 0 && argv[n] == NULL);
         bool carries_prompt = false, carries_workdir = false;
         bool carries_bypass = false, carries_no_plan = false;
-        bool carries_model = false, disables_subagents = false;
+        bool carries_model = false, carries_effort = false;
+        bool carries_effort_flag = false, disables_subagents = false;
         bool disables_web = false, pins_tools = false;
         bool carries_no_placeholders = true;
         for (size_t i = 1; i < n; i++) {
@@ -1509,6 +1641,10 @@ static int case_cli_argv(void)
                 carries_bypass = true;
             if (strcmp(argv[i], "--no-plan") == 0) carries_no_plan = true;
             if (strcmp(argv[i], in.model) == 0) carries_model = true;
+            if (strcmp(argv[i], in.reasoning_effort) == 0)
+                carries_effort = true;
+            if (strcmp(argv[i], "--reasoning-effort") == 0)
+                carries_effort_flag = true;
             if (strcmp(argv[i], "--no-subagents") == 0)
                 disables_subagents = true;
             if (strcmp(argv[i], "--disable-web-search") == 0)
@@ -1524,11 +1660,29 @@ static int case_cli_argv(void)
         EN_CHECK("and disables the interactive plan approval stop",
                  carries_no_plan);
         EN_CHECK("and passes the requested model", carries_model);
+        EN_CHECK("and passes explicit reasoning effort as its own flag/value",
+                 carries_effort_flag && carries_effort);
         EN_CHECK("and disables hidden subagent work", disables_subagents);
         EN_CHECK("and disables unrelated web retrieval", disables_web);
         EN_CHECK("and pins the observable repository tool schema", pins_tools);
         EN_CHECK("and no placeholder survived substitution",
                  carries_no_placeholders);
+        struct engine_cli_inputs provider_default = in;
+        provider_default.reasoning_effort =
+            ENGINE_REASONING_EFFORT_PROVIDER_DEFAULT;
+        n = engine_cli_argv_build(fileq, &provider_default, argv,
+                                  ENGINE_CLI_ARGV_MAX);
+        bool omitted_effort = n > 0;
+        for (size_t i = 1; i < n; i++)
+            if (strcmp(argv[i], "--reasoning-effort") == 0)
+                omitted_effort = false;
+        EN_CHECK("provider-default effort emits no empty CLI flag",
+                 omitted_effort);
+        struct engine_cli_inputs invalid_effort = in;
+        invalid_effort.reasoning_effort = "maximum";
+        EN_CHECK("an unknown CLI effort is refused",
+                 engine_cli_argv_build(fileq, &invalid_effort, argv,
+                                       ENGINE_CLI_ARGV_MAX) == 0);
     }
 
     if (argq) {
@@ -1545,6 +1699,11 @@ static int case_cli_argv(void)
             if (strcmp(argv[i], argin.prompt) == 0) carries_text = true;
         EN_CHECK("an argument-prompt vendor receives the prompt TEXT, not a "
                  "path", n > 0 && carries_text);
+        struct engine_cli_inputs unsupported = argin;
+        unsupported.reasoning_effort = "low";
+        EN_CHECK("a CLI with no effort flag refuses an explicit effort",
+                 engine_cli_argv_build(argq, &unsupported, argv,
+                                       ENGINE_CLI_ARGV_MAX) == 0);
 
         /* The kernel caps a single argv string far below the prompt ceiling.
          * Refusing here names the real reason; letting it through would
@@ -2124,7 +2283,10 @@ static int case_engine_unit_state_e2e(void)
         "gate: none yet\\n"
         "hypothesis: turn two should see this exact sentence\\n"
         "next: nothing, this is a fixture\\n"
-        "</state>\\n\"}}]}");
+        "</state>\\n\"}}],\"usage\":{\"prompt_tokens\":10,"
+        "\"completion_tokens\":4,\"total_tokens\":14,"
+        "\"prompt_tokens_details\":{\"cached_tokens\":6},"
+        "\"completion_tokens_details\":{\"reasoning_tokens\":2}}}");
     EN_CHECK("fixtures for the e2e case are written", wrote_task && wrote_reply);
     if (!wrote_task || !wrote_reply)
         return failures + 1;
@@ -2139,15 +2301,25 @@ static int case_engine_unit_state_e2e(void)
 
     char state_txt[512] = {0};
     char prompt_txt[64 * 1024] = {0};
-    char state_txt_path[700], prompt_txt_path[700];
+    char state_txt_path[700], prompt_txt_path[700], receipt_path[700];
+    char chain_path[700];
     (void)snprintf(state_txt_path, sizeof(state_txt_path), "%s/state.txt",
                    state_dir);
     (void)snprintf(prompt_txt_path, sizeof(prompt_txt_path),
                    "%s/prompt.txt", state_dir);
+    (void)snprintf(receipt_path, sizeof(receipt_path), "%s/receipt.json",
+                   state_dir);
+    (void)snprintf(chain_path, sizeof(chain_path), "%s/%s", state_dir,
+                   ENGINE_RECEIPT_FILENAME);
     const bool have_state = read_whole_file(state_txt_path, state_txt,
                                             sizeof(state_txt));
     const bool have_prompt = read_whole_file(prompt_txt_path, prompt_txt,
                                              sizeof(prompt_txt));
+    char receipt[8192] = {0};
+    const bool have_receipt = read_whole_file(receipt_path,receipt,
+                                              sizeof(receipt));
+    char chain[32768] = {0};
+    const bool have_chain = read_whole_file(chain_path, chain, sizeof(chain));
 
     EN_CHECK("the harness wrote state.txt after turn 1's reply", have_state);
     EN_CHECK("state.txt holds what turn 1's model wrote",
@@ -2164,6 +2336,27 @@ static int case_engine_unit_state_e2e(void)
              have_prompt
              && strstr(prompt_txt, "carried state from the previous turn")
                     != NULL);
+    EN_CHECK("HTTP usage reaches the durable one-run receipt without loss",
+             have_receipt && strstr(receipt,"\"input_tokens\":10") &&
+             strstr(receipt,"\"output_tokens\":4") &&
+             strstr(receipt,"\"total_tokens\":14") &&
+             strstr(receipt,"\"cache_read_input_tokens\":6") &&
+             strstr(receipt,"\"reasoning_tokens\":2") &&
+             strstr(receipt,"\"cache_creation_input_tokens\":null"));
+    EN_CHECK("both repair dispatches reach one authoritative chain receipt",
+             have_chain &&
+             strstr(chain, "\"ordinal\":1,\"phase\":\"turn\"") &&
+             strstr(chain, "\"ordinal\":2,\"phase\":\"turn\"") &&
+             strstr(chain, "\"total_prompt_tokens\":20") &&
+             strstr(chain, "\"total_completion_tokens\":8") &&
+             strstr(chain, "\"total_cache_read_input_tokens\":12") &&
+             strstr(chain, "\"total_cache_creation_input_tokens\":-1") &&
+             strstr(chain, "\"total_reasoning_tokens\":4") &&
+             strstr(chain, "\"total_reported_tokens\":28") &&
+             strstr(chain, "\"accounting_scope\":\"terminal_dispatch\"") &&
+             strstr(chain, "\"total_invocation_elapsed_ms\":") &&
+             strstr(chain, "\"cumulative_proof_ms\":0") &&
+             strstr(chain, "\"unit_elapsed_ms\":"));
 
     /* worktree_prepare() names the branch "engine/unit" whenever no
      * --territory is given (as here), a FIXED name — so a worktree and
@@ -2193,14 +2386,41 @@ static struct engine_receipt receipt_fixture(const char *engine, int64_t ts)
     memset(&r, 0, sizeof(r));
     r.ts = ts;
     r.engine = engine;
-    r.model = "m";
+    r.requested_model = ENGINE_REASONING_EFFORT_PROVIDER_DEFAULT;
+    r.resolved_model = NULL;
+    r.reasoning_effort = ENGINE_REASONING_EFFORT_PROVIDER_DEFAULT;
     r.kind = "fix-gate";
     r.prompt_tokens = ENGINE_RECEIPT_UNREPORTED;
     r.completion_tokens = ENGINE_RECEIPT_UNREPORTED;
+    r.cache_read_input_tokens = ENGINE_RECEIPT_UNREPORTED;
+    r.cache_creation_input_tokens = ENGINE_RECEIPT_UNREPORTED;
+    r.reasoning_tokens = ENGINE_RECEIPT_UNREPORTED;
+    r.total_tokens = ENGINE_RECEIPT_UNREPORTED;
+    r.turns = ENGINE_RECEIPT_UNREPORTED;
     r.wall_ms = 10;
     r.http_status = 0;
     r.outcome.lint_rc = ENGINE_RECEIPT_UNREPORTED;
     return r;
+}
+
+static struct engine_receipt_invocation
+receipt_invocation(int64_t ordinal, const char *phase, const char *result,
+                   int64_t prompt, int64_t completion, int64_t cache_read,
+                   int64_t cache_creation, int64_t reasoning, int64_t total)
+{
+    return (struct engine_receipt_invocation) {
+        .ordinal = ordinal,
+        .phase = phase,
+        .result = result,
+        .elapsed_ms = ordinal * 10,
+        .http_status = strcmp(result, "ok") == 0 ? 200 : 503,
+        .prompt_tokens = prompt,
+        .completion_tokens = completion,
+        .cache_read_input_tokens = cache_read,
+        .cache_creation_input_tokens = cache_creation,
+        .reasoning_tokens = reasoning,
+        .total_tokens = total,
+    };
 }
 
 static void receipt_head_path(const char *path, char *out, size_t cap)
@@ -2431,6 +2651,85 @@ static int case_receipt_chain(void)
     struct engine_receipt a = receipt_fixture("fixture", 1000);
     struct engine_receipt b = receipt_fixture("glm", 1001);
     struct engine_receipt c = receipt_fixture("grok", 1002);
+    struct engine_receipt_invocation calls[4] = {
+        receipt_invocation(1, "turn", "network", -1, -1, -1, -1, -1, -1),
+        receipt_invocation(2, "turn", "ok", 10, 4, 6, 0, 2, 14),
+        receipt_invocation(3, "compaction", "ok", 3, 2, 1, -1, 0, 5),
+        receipt_invocation(4, "turn", "ok", 12, 5, 4, 0, 1, 17),
+    };
+    struct engine_receipt_invocation overflow_calls[2] = {
+        receipt_invocation(1, "turn", "ok", INT64_MAX, 0, 0, 0, 0,
+                           INT64_MAX),
+        receipt_invocation(2, "turn", "ok", 1, 0, 0, 0, 0, 1),
+    };
+    a.invocations = calls;
+    a.invocations_count = sizeof(calls) / sizeof(calls[0]);
+    calls[1].resolved_model = "grok-build-a";
+    calls[2].resolved_model = "grok-build-b";
+    b.invocations = overflow_calls;
+    b.invocations_count = sizeof(overflow_calls) / sizeof(overflow_calls[0]);
+    struct engine_receipt_invocation resumed_calls[2] = {
+        receipt_invocation(1, "turn", "ok", 10, 4, 0, 0, 1, 14),
+        receipt_invocation(2, "turn", "ok", 20, 8, 0, 0, 2, 28),
+    };
+    c.invocations = resumed_calls;
+    c.invocations_count = sizeof(resumed_calls) / sizeof(resumed_calls[0]);
+    c.invocation_totals_ambiguous = true;
+    struct engine_receipt_invocation maximum_calls
+        [ENGINE_RECEIPT_INVOCATIONS_MAX];
+    char maximum_model[96];
+    char maximum_rule[64];
+    memset(maximum_model, 'm', sizeof(maximum_model) - 1u);
+    maximum_model[sizeof(maximum_model) - 1u] = '\0';
+    memset(maximum_rule, 'r', sizeof(maximum_rule) - 1u);
+    maximum_rule[sizeof(maximum_rule) - 1u] = '\0';
+    for (size_t i = 0; i < ENGINE_RECEIPT_INVOCATIONS_MAX; i++) {
+        maximum_calls[i] = receipt_invocation(
+            INT64_MAX, "compaction", "receipt_capacity_worst_case",
+            INT64_MAX, INT64_MAX, INT64_MAX, INT64_MAX, INT64_MAX,
+            INT64_MAX);
+        maximum_calls[i].elapsed_ms = INT64_MAX;
+        maximum_calls[i].http_status = INT64_MAX;
+        maximum_calls[i].resolved_model = maximum_model;
+    }
+    struct engine_receipt maximum = receipt_fixture("fixture", INT64_MAX);
+    maximum.requested_model = maximum_model;
+    maximum.resolved_model = maximum_model;
+    maximum.group = maximum_rule;
+    maximum.invocations = maximum_calls;
+    maximum.invocations_count = ENGINE_RECEIPT_INVOCATIONS_MAX;
+    maximum.cumulative_proof_ms = INT64_MAX;
+    maximum.unit_elapsed_ms = INT64_MAX;
+    EN_CHECK("the maximum operational dispatch plan fits the 16 KiB record",
+             engine_receipt_fits(&maximum));
+    const char *maximum_rules[ENGINE_RECEIPT_RULES_MAX];
+    for (size_t i = 0; i < ENGINE_RECEIPT_RULES_MAX; i++)
+        maximum_rules[i] = maximum_rule;
+    maximum.rules_shown = maximum_rules;
+    maximum.rules_count = ENGINE_RECEIPT_RULES_MAX;
+    EN_CHECK("maximum rule and model metadata still fit the record",
+             engine_receipt_fits(&maximum));
+    char overlong_model[ENGINE_RECEIPT_LINE_MAX];
+    memset(overlong_model, 'x', sizeof(overlong_model) - 1u);
+    overlong_model[sizeof(overlong_model) - 1u] = '\0';
+    maximum.requested_model = overlong_model;
+    EN_CHECK("metadata that would overflow the record is detected preflight",
+             !engine_receipt_fits(&maximum));
+    a.requested_model = "grok-4.6";
+    a.resolved_model = "grok-4.6-build";
+    a.reasoning_effort = "high";
+    a.prompt_tokens = 100;
+    a.completion_tokens = 25;
+    a.cache_read_input_tokens = 60;
+    a.cache_creation_input_tokens = 10;
+    a.reasoning_tokens = 7;
+    a.total_tokens = 125;
+    a.turns = 4;
+    a.dispatch_ms = 2018;
+    a.proof_ms = 91;
+    a.wall_ms = 2109;
+    a.cumulative_proof_ms = 180;
+    a.unit_elapsed_ms = 2200;
     EN_CHECK("the first record appends", engine_receipt_append(path, &a, NULL));
     EN_CHECK("the second record appends", engine_receipt_append(path, &b, NULL));
     EN_CHECK("the third record appends", engine_receipt_append(path, &c, NULL));
@@ -2477,6 +2776,85 @@ static int case_receipt_chain(void)
     EN_CHECK("ts is a JSON integer, not a float",
              strstr(first, "\"ts\":1000") != NULL
              && strstr(first, "\"ts\":1000.") == NULL);
+    EN_CHECK("the durable receipt preserves requested and resolved model",
+             strstr(first, "\"model\":\"grok-4.6\"") != NULL &&
+             strstr(first, "\"requested_model\":\"grok-4.6\"") != NULL &&
+             strstr(first, "\"resolved_model\":\"grok-4.6-build\"") != NULL);
+    EN_CHECK("the durable receipt preserves effort and complete CLI usage",
+             strstr(first, "\"reasoning_effort\":\"high\"") != NULL &&
+             strstr(first, "\"cache_read_input_tokens\":60") != NULL &&
+             strstr(first, "\"cache_creation_input_tokens\":10") != NULL &&
+             strstr(first, "\"reasoning_tokens\":7") != NULL &&
+             strstr(first, "\"total_tokens\":125") != NULL &&
+             strstr(first, "\"turns\":4") != NULL);
+    EN_CHECK("dispatch and proof timing remain separately measurable",
+             strstr(first, "\"dispatch_ms\":2018") != NULL &&
+             strstr(first, "\"proof_ms\":91") != NULL &&
+             strstr(first, "\"wall_ms\":2109") != NULL &&
+             strstr(first, "\"accounting_scope\":\"terminal_dispatch\"") != NULL);
+    EN_CHECK("whole-loop timing is separate from terminal compatibility timing",
+             strstr(first, "\"total_invocation_elapsed_ms\":100") != NULL &&
+             strstr(first, "\"cumulative_proof_ms\":180") != NULL &&
+             strstr(first, "\"unit_elapsed_ms\":2200") != NULL);
+    EN_CHECK("retry, repair, and compaction calls remain separate observations",
+             strstr(first, "\"ordinal\":1,\"phase\":\"turn\",\"result\":\"network\"") != NULL &&
+             strstr(first, "\"ordinal\":3,\"phase\":\"compaction\",\"result\":\"ok\"") != NULL &&
+             strstr(first, "\"ordinal\":4,\"phase\":\"turn\",\"result\":\"ok\"") != NULL);
+    EN_CHECK("each invocation preserves its own resolved model identity",
+             strstr(first, "\"resolved_model\":\"grok-build-a\"") != NULL &&
+             strstr(first, "\"resolved_model\":\"grok-build-b\"") != NULL);
+    EN_CHECK("missing and zero raw counters remain distinguishable",
+             strstr(first, "\"cache_creation_input_tokens\":-1") != NULL &&
+             strstr(first, "\"cache_creation_input_tokens\":0") != NULL);
+    EN_CHECK("partial reporting makes only the affected checked totals unknown",
+             strstr(first, "\"total_prompt_tokens\":-1") != NULL &&
+             strstr(first, "\"total_completion_tokens\":-1") != NULL &&
+             strstr(first, "\"total_reasoning_tokens\":-1") != NULL &&
+             strstr(first, "\"total_reported_tokens\":-1") != NULL);
+
+    const char *line2 = NULL;
+    size_t line2_n = 0;
+    char second[ENGINE_RECEIPT_LINE_MAX + 2u] = {0};
+    EN_CHECK("the unknown-metadata receipt is readable",
+             receipt_nth_line(whole, whole_n, 2, &line2, &line2_n) &&
+             line2_n < sizeof(second));
+    if (line2 && line2_n < sizeof(second)) {
+        memcpy(second, line2, line2_n);
+        second[line2_n] = '\0';
+    }
+    EN_CHECK("unreported measurement remains explicit UNKNOWN",
+             strstr(second, "\"resolved_model\":null") != NULL &&
+             strstr(second, "\"reasoning_effort\":\"provider_default\"") != NULL &&
+             strstr(second, "\"reasoning_tokens\":-1") != NULL &&
+             strstr(second, "\"cache_read_input_tokens\":-1") != NULL);
+    EN_CHECK("overflow refuses a fabricated aggregate while preserving raw counters",
+             strstr(second, "\"prompt_tokens\":9223372036854775807") != NULL &&
+             strstr(second, "\"total_prompt_tokens\":-1") != NULL &&
+             strstr(second, "\"total_completion_tokens\":0") != NULL &&
+             strstr(second, "\"total_reasoning_tokens\":0") != NULL);
+
+    const char *line3 = NULL;
+    size_t line3_n = 0;
+    char third[ENGINE_RECEIPT_LINE_MAX + 2u] = {0};
+    EN_CHECK("the resumed-session receipt is readable",
+             receipt_nth_line(whole, whole_n, 3, &line3, &line3_n) &&
+             line3_n < sizeof(third));
+    if (line3 && line3_n < sizeof(third)) {
+        memcpy(third, line3, line3_n);
+        third[line3_n] = '\0';
+    }
+    EN_CHECK("cumulative-session ambiguity keeps raw calls but refuses totals",
+             strstr(third, "\"prompt_tokens\":10") != NULL &&
+             strstr(third, "\"prompt_tokens\":20") != NULL &&
+             strstr(third, "\"total_prompt_tokens\":-1") != NULL &&
+             strstr(third, "\"total_reported_tokens\":-1") != NULL);
+
+    struct zcl_rule_receipt_log scored;
+    uint32_t bad_line = 0;
+    EN_CHECK("the score reader keeps one trial per outer receipt",
+             zcl_rule_receipts_parse(whole, whole_n, &scored, &bad_line)
+                 == ZCL_RULE_CHAIN_OK &&
+             scored.count == 3 && scored.r[0].prompt_tokens == 100);
 
     struct engine_receipt knull = receipt_fixture("fixture", 1003);
     knull.kind = NULL;

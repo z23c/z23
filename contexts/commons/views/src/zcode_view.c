@@ -8,6 +8,9 @@
 
 #include "views/zcode_view_internal.h"
 #include "util/template.h" /* html_escape */
+#include "util/log_macros.h"
+
+#include <limits.h>
 
 /* ── HTTP wrappers ────────────────────────────────────────────────── */
 
@@ -15,13 +18,23 @@ static size_t zcode_wrap_response(const char *body, size_t body_len,
                                   const char *status, uint8_t *resp,
                                   size_t max)
 {
-    return (size_t)snprintf((char *)resp, max,
+    if (!resp || max == 0 || !body || body_len > INT_MAX) {
+        LOG_ERROR("zcode.site", "invalid HTML response or body bound");
+        return 0;
+    }
+    int n = snprintf((char *)resp, max,
         "HTTP/1.1 %s\r\n"
         "Content-Type: text/html; charset=utf-8\r\n"
         "Content-Length: %zu\r\n"
         "Connection: close\r\n\r\n"
         "%.*s",
         status, body_len, (int)body_len, body);
+    if (n < 0 || (size_t)n >= max) {
+        LOG_ERROR("zcode.site", "HTML response exceeds transport capacity");
+        resp[0] = 0;
+        return 0;
+    }
+    return (size_t)n;
 }
 
 size_t zcode_html_response(const char *body, size_t body_len,

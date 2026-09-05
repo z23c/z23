@@ -488,6 +488,64 @@ int node_db_migrate_features_v67_up(struct node_db *ndb, int *version)
         current_ver = 79;
         applied++;
     }
+    if (current_ver < 80) {
+        /* v80: the fleet AI message board and wiki — one append-only, signed,
+         * gossiped ledger every full node carries. `seq` is this node's local
+         * arrival order and `chain_hash` chains the ids in that order, so the
+         * local ledger is tamper-evident; neither is gossiped and neither
+         * orders the board for anybody else. Posts are application overlay
+         * and are never consulted by consensus. Every column the wire signs
+         * is bounded here too, so a row that could not have been a valid post
+         * cannot be inserted even by a local bug. */
+        if (!node_db_exec(ndb,
+                "CREATE TABLE IF NOT EXISTS fleet_board_posts("
+                "id BLOB PRIMARY KEY CHECK(length(id)=32),"
+                "seq INTEGER NOT NULL,"
+                "kind INTEGER NOT NULL CHECK(kind BETWEEN 1 AND 7),"
+                "created_at INTEGER NOT NULL CHECK(created_at>0),"
+                "ttl INTEGER NOT NULL CHECK(ttl BETWEEN 1 AND 2592000),"
+                "expires_at INTEGER NOT NULL CHECK(expires_at>created_at),"
+                "ref BLOB NOT NULL CHECK(length(ref)=32),"
+                "host_pubkey BLOB NOT NULL CHECK(length(host_pubkey)=32),"
+                "agent TEXT NOT NULL CHECK(length(agent)<=64),"
+                "slug TEXT NOT NULL CHECK(length(slug)<=64),"
+                "title TEXT NOT NULL CHECK(length(title)<=128),"
+                "supersedes BLOB NOT NULL CHECK(length(supersedes)=32),"
+                "receipt TEXT NOT NULL CHECK(length(receipt)<=256),"
+                "text TEXT NOT NULL CHECK(length(text) BETWEEN 1 AND 16384),"
+                "body_bytes INTEGER NOT NULL CHECK(body_bytes BETWEEN 1 AND 17408),"
+                "signature BLOB NOT NULL CHECK(length(signature)=64),"
+                "chain_prev BLOB NOT NULL CHECK(length(chain_prev)=32),"
+                "chain_hash BLOB NOT NULL CHECK(length(chain_hash)=32),"
+                "received_at INTEGER NOT NULL CHECK(received_at>=0))"))
+            LOG_ERR("db", "migrate v80: fleet board table failed");
+        if (!node_db_exec(ndb,
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_fleet_board_seq "
+                "ON fleet_board_posts(seq)"))
+            LOG_ERR("db", "migrate v80: fleet board seq index failed");
+        /* The three reads the board actually makes: newest-first listing,
+         * "has anything answered this post" for --open, and the wiki's
+         * latest-revision-per-slug resolution. */
+        if (!node_db_exec(ndb,
+                "CREATE INDEX IF NOT EXISTS idx_fleet_board_created "
+                "ON fleet_board_posts(created_at DESC,id)"))
+            LOG_ERR("db", "migrate v80: fleet board created index failed");
+        if (!node_db_exec(ndb,
+                "CREATE INDEX IF NOT EXISTS idx_fleet_board_ref "
+                "ON fleet_board_posts(ref,kind)"))
+            LOG_ERR("db", "migrate v80: fleet board ref index failed");
+        if (!node_db_exec(ndb,
+                "CREATE INDEX IF NOT EXISTS idx_fleet_board_slug "
+                "ON fleet_board_posts(slug,created_at DESC,id)"))
+            LOG_ERR("db", "migrate v80: fleet board slug index failed");
+        if (!node_db_exec(ndb,
+                "INSERT OR IGNORE INTO schema_migrations(version) "
+                "VALUES('080')"))
+            LOG_ERR("db", "migrate v80: migration stamp failed");
+        DB_MIGRATE_PERSIST_VERSION(ndb, 80);
+        current_ver = 80;
+        applied++;
+    }
     *version = current_ver;
     return applied;
 }

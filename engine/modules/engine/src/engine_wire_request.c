@@ -51,6 +51,16 @@ static bool build_doc(const struct engine_call *call, struct json_value *doc)
     json_set_object(doc);
     if (!json_push_kv_str(doc, "model", model))
         LOG_FAIL("engine", "cannot record the model in the request");
+    if (!engine_reasoning_effort_valid(call->reasoning_effort))
+        LOG_FAIL("engine", "invalid reasoning effort");
+    if (engine_reasoning_effort_explicit(call->reasoning_effort)) {
+        if (!call->vendor->supports_reasoning_effort)
+            LOG_FAIL("engine", "engine %s accepts no reasoning effort",
+                     call->vendor->id);
+        if (!json_push_kv_str(doc, "reasoning_effort",
+                              call->reasoning_effort))
+            LOG_FAIL("engine", "cannot record the reasoning effort");
+    }
 
     struct json_value msgs;
     json_init(&msgs);

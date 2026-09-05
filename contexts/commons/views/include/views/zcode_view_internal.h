@@ -29,6 +29,7 @@ static inline int zcode_body_start(char *buf, size_t max, const char *title)
         "<nav class='nav' aria-label='ZCODE sections'>"
         "<a href='/zcode'>ZCODE</a>"
         "<a href='/zcode/packages'>Packages</a>"
+        "<a href='/zcode/develop'>Develop</a>"
         "<a href='/zcode/leaderboard'>Rankings</a>"
         "<a href='/zcode/badges'>Badges</a>"
         "</nav>"

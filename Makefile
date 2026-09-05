@@ -3037,8 +3037,11 @@ endif
 # such object appears in a Z23 object file). Order-only, same as
 # zclassic23-acme above, so the test build guarantees it exists without
 # making every unrelated test recompile when engine_unit.c changes.
-$(TEST_PARALLEL_REL_CANDIDATE): | $(ENGINE_UNIT_BIN)
-$(TEST_PARALLEL_FAST_CANDIDATE): | $(ENGINE_UNIT_BIN)
+# ENGINE_UNIT_BIN is declared later; prerequisites expand while parsing.
+$(TEST_PARALLEL_REL_CANDIDATE): | $(BIN_DIR)/zclassic23-engine-unit
+$(TEST_PARALLEL_FAST_CANDIDATE): | $(BIN_DIR)/zclassic23-engine-unit
+$(TEST_PARALLEL_REL_CANDIDATE): | $(BIN_DIR)/fleet-board-bridge
+$(TEST_PARALLEL_FAST_CANDIDATE): | $(BIN_DIR)/fleet-board-bridge
 
 # Expanding the complete object list inside a recipe makes the recipe itself
 # one oversized `/bin/sh -c` argument on Linux.  GNU Make writes the exact,
@@ -3125,7 +3128,8 @@ test-parallel-active:
 	@$(CHECKOUT_LOCK_TOOL) foreground "$(CHECKOUT_LOCK)" -- \
 	  $(MAKE) --no-print-directory test-parallel-active-locked
 
-test-parallel-active-locked: $(TEST_PARALLEL_REL_CANDIDATE) dev-package-verifier-ensure
+test-parallel-active-locked: $(TEST_PARALLEL_REL_CANDIDATE) \
+	dev-package-verifier-ensure $(BIN_DIR)/z23-git-hook$(ZCL_HOST_EXEEXT)
 	$(ZCL_TEST_STACK_SETUP) && $(LINKED_TEST_ENV) $(TEST_PARALLEL_REL_ACTIVE)
 
 test-parallel-fast-active:
@@ -3133,7 +3137,8 @@ test-parallel-fast-active:
 	@$(CHECKOUT_LOCK_TOOL) foreground "$(CHECKOUT_LOCK)" -- \
 	  $(MAKE) --no-print-directory test-parallel-fast-active-locked
 
-test-parallel-fast-active-locked: $(TEST_PARALLEL_FAST_CANDIDATE) dev-package-verifier-ensure
+test-parallel-fast-active-locked: $(TEST_PARALLEL_FAST_CANDIDATE) \
+	dev-package-verifier-ensure $(BIN_DIR)/z23-git-hook$(ZCL_HOST_EXEEXT)
 	$(ZCL_TEST_STACK_SETUP) && $(LINKED_TEST_ENV) $(TEST_PARALLEL_FAST_ACTIVE)
 
 .PHONY: test-parallel
@@ -3678,7 +3683,8 @@ t-fast:
 	@$(CHECKOUT_LOCK_TOOL) foreground "$(CHECKOUT_LOCK)" -- \
 	  $(MAKE) --no-print-directory t-fast-locked ONLY='$(ONLY)'
 
-t-fast-locked: $(TEST_PARALLEL_FAST_CANDIDATE) dev-package-verifier-ensure
+t-fast-locked: $(TEST_PARALLEL_FAST_CANDIDATE) dev-package-verifier-ensure \
+	$(BIN_DIR)/z23-git-hook$(ZCL_HOST_EXEEXT)
 	$(ZCL_TEST_STACK_SETUP) && $(LINKED_TEST_ENV) $(TEST_PARALLEL_FAST_ACTIVE) --only=$(ONLY)
 
 # Proof-facing sibling of t-fast. The human convenience target above keeps its
@@ -3690,7 +3696,8 @@ t-fast-exact:
 	  $(MAKE) --no-print-directory t-fast-exact-locked \
 	    EXACT_ONLY_MATCHED='$(EXACT_ONLY_MATCHED)'
 
-t-fast-exact-locked: $(TEST_PARALLEL_FAST_CANDIDATE) dev-package-verifier-ensure
+t-fast-exact-locked: $(TEST_PARALLEL_FAST_CANDIDATE) dev-package-verifier-ensure \
+	$(BIN_DIR)/z23-git-hook$(ZCL_HOST_EXEEXT)
 	$(ZCL_TEST_STACK_SETUP) && \
 	  $(LINKED_TEST_ENV) $(TEST_PARALLEL_FAST_ACTIVE) --exact=$(EXACT_ONLY_MATCHED) $(T_FAST_EXACT_ARGS)
 
@@ -3699,7 +3706,7 @@ t-fast-exact-locked: $(TEST_PARALLEL_FAST_CANDIDATE) dev-package-verifier-ensure
 # and invokes that admitted runner once; no fallback target may both build and
 # execute a suite.
 dev-proof-bundle: $(TEST_PARALLEL_FAST_CANDIDATE) dev-bin $(DEV_RESTART_PLAN) zcl-nodectl \
-	zclassic23-acme fbsh engine-unit
+	zclassic23-acme fbsh engine-unit $(BIN_DIR)/z23-git-hook$(ZCL_HOST_EXEEXT)
 
 # Closed historical-failure corpus required by build_release_confirmation.v2.
 # This focused physical gate is uncached and exact; release qualification also
@@ -6938,6 +6945,23 @@ $(JSONQ_BIN): tools/jsonq.c \
 	    -Icontexts/commons/packages/zjsonp/include -Icontexts/commons/packages/zutf8/include \
 	    -o $@ tools/jsonq.c contexts/commons/packages/zjsonp/src/zjsonp.c \
 	    contexts/commons/packages/zutf8/src/zutf8.c
+
+# Native bridge over the existing private fleet JSONL projection.
+.PHONY: fleet-board-bridge
+fleet-board-bridge: $(BIN_DIR)/fleet-board-bridge
+$(BIN_DIR)/fleet-board-bridge: tools/fleet_board_bridge.c \
+    platform/modules/json/src/json.c platform/modules/base/src/safe_alloc.c \
+    platform/modules/base/src/log_level.c \
+    platform/modules/json/include/json/json.h \
+    platform/modules/base/include/base/safe_alloc.h \
+    platform/modules/base/include/base/log_level.h \
+    platform/modules/base/include/base/format_attribute.h \
+    platform/modules/base/include/base/utc_tm.h \
+    platform/modules/base/include/base/stdio_lock.h
+	@mkdir -p $(dir $@)
+	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
+	    -D_POSIX_C_SOURCE=200809L -Iplatform/modules/base/include \
+	    -Iplatform/modules/json/include -o $@ $(filter %.c,$^) -lm
 
 # Strict line-protocol adapter over the maintained retrieval evaluator. The
 # historical runner supplies two sealed rank lists per reviewed task; this

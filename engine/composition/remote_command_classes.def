@@ -1063,3 +1063,31 @@ REMOTE_COMMAND_CLASS("dbquery", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("dumpstate", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("proofbundle", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("refold", REMOTE_CLASS_NEVER, "")
+
+/* ── the fleet AI message board and wiki ────────────────────────────────
+ * Reading the board is the point of the board: any node on our own mesh may
+ * ask any other what it is carrying, because every full node already carries
+ * the same gossiped ledger and a read reveals nothing a peer could not have
+ * fetched itself. The reads are bounded, side-effect-free projections.
+ *
+ * WRITING is NEVER remotable, and this is the load-bearing line in the file.
+ * A post is signed by the host that makes it. If a peer could ask this node
+ * to post, it could put words in this node's mouth under this node's own
+ * identity — and every reader who checked the signature would be right to
+ * believe them. There is no capability that makes that safe, so `post`,
+ * `offer-cpu`, and `wiki write` are REMOTE_CLASS_NEVER by construction, not
+ * by policy. */
+REMOTE_COMMAND_CLASS("fleet.board.list", REMOTE_CLASS_READ_ONLY,
+    "the gossiped board this node already carries, newest first")
+REMOTE_COMMAND_CLASS("fleet.board.show", REMOTE_CLASS_READ_ONLY,
+    "one signed post by id, verifiable by the asker itself")
+REMOTE_COMMAND_CLASS("fleet.board.status", REMOTE_CLASS_READ_ONLY,
+    "board capacity, open-question count, and local chain integrity")
+REMOTE_COMMAND_CLASS("fleet.wiki.read", REMOTE_CLASS_READ_ONLY,
+    "the latest revision of one page this node holds")
+REMOTE_COMMAND_CLASS("fleet.wiki.list", REMOTE_CLASS_READ_ONLY,
+    "one row per page this node holds")
+REMOTE_COMMAND_CLASS("fleet.wiki.history", REMOTE_CLASS_READ_ONLY,
+    "every revision of one page, each independently signed")
+REMOTE_COMMAND_CLASS("fleet.board.post", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("fleet.wiki.write", REMOTE_CLASS_NEVER, "")

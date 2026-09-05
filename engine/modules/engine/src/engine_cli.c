@@ -18,6 +18,20 @@
 
 #include <string.h>
 
+bool engine_reasoning_effort_valid(const char *effort)
+{
+    return !effort || !effort[0] ||
+           strcmp(effort, ENGINE_REASONING_EFFORT_PROVIDER_DEFAULT) == 0 ||
+           strcmp(effort, "low") == 0 || strcmp(effort, "medium") == 0 ||
+           strcmp(effort, "high") == 0 || strcmp(effort, "xhigh") == 0;
+}
+
+bool engine_reasoning_effort_explicit(const char *effort)
+{
+    return effort && effort[0] &&
+           strcmp(effort, ENGINE_REASONING_EFFORT_PROVIDER_DEFAULT) != 0;
+}
+
 /* Resolve one template element. A literal returns itself. A placeholder
  * returns the caller's value, or NULL when the caller did not supply one —
  * which is a refusal, not an empty argument. */
@@ -81,6 +95,18 @@ size_t engine_cli_argv_build(const struct engine_vendor *v,
             LOG_RETURN(0, "engine",
                        "engine %s needs more than %zu argv slots", v->id, cap);
         out[n++] = value;
+    }
+    if (!engine_reasoning_effort_valid(in->reasoning_effort))
+        LOG_RETURN(0, "engine", "invalid reasoning effort");
+    if (engine_reasoning_effort_explicit(in->reasoning_effort)) {
+        if (!v->cli_reasoning_effort_flag)
+            LOG_RETURN(0, "engine", "engine %s accepts no reasoning effort",
+                       v->id);
+        if (n + 3 > cap)
+            LOG_RETURN(0, "engine", "engine %s needs more than %zu argv slots",
+                       v->id, cap);
+        out[n++] = v->cli_reasoning_effort_flag;
+        out[n++] = in->reasoning_effort;
     }
     out[n] = NULL;
     return n;

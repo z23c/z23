@@ -144,6 +144,8 @@ enum engine_cli_output {
 #define ENGINE_CLI_TURNS_TOKEN   "{turns}"
 #define ENGINE_CLI_MODEL_TOKEN   "{model}"
 
+#define ENGINE_REASONING_EFFORT_PROVIDER_DEFAULT "provider_default"
+
 /* Longest argv this tree will build for a CLI, argv[0] and the NUL included. */
 #define ENGINE_CLI_ARGV_MAX 24u
 
@@ -183,6 +185,9 @@ struct engine_vendor {
     /* CLI dialect only. NULL-terminated argument template, argv[0] excluded
      * because it is always `program`. NULL for a non-CLI vendor. */
     const char *const *cli_argv;
+    /* Optional CLI flag whose following argument is low/medium/high/xhigh.
+     * NULL means this row cannot accept an explicit reasoning effort. */
+    const char      *cli_reasoning_effort_flag;
     enum engine_cli_prompt cli_prompt;
     /* Some installed CLIs reject pipe-backed stdio even in single-turn mode.
      * This is invocation metadata, not a vendor-name special case: the
@@ -190,6 +195,7 @@ struct engine_vendor {
      * true. It changes no authority and is never used by the node. */
     bool             cli_needs_tty;
     enum engine_cli_output cli_output;
+    bool             supports_reasoning_effort;
     enum engine_wire wire;
     enum engine_delivery delivery;
     bool             costs_money;    /* false only for the fixture engine */
@@ -257,7 +263,13 @@ struct engine_cli_inputs {
     const char *workdir;
     const char *turns;    /* already rendered decimal */
     const char *model;
+    const char *reasoning_effort; /* NULL/provider_default omits the flag */
 };
+
+/* The closed effort vocabulary shared by HTTP requests, CLI argv, and
+ * receipts. NULL/empty/provider_default means let the provider decide. */
+bool engine_reasoning_effort_valid(const char *effort);
+bool engine_reasoning_effort_explicit(const char *effort);
 
 /* Build the full argv for a CLI vendor into `out`, NULL-terminated.
  *

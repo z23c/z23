@@ -10,6 +10,48 @@
 #include "views/zcode_view_internal.h"
 #include "util/template.h" /* html_escape */
 
+size_t zcode_view_develop(uint8_t *resp, size_t max)
+{
+    char body[32768];
+    size_t off = (size_t)zcode_body_start(body, sizeof(body), "Develop with Z23");
+    SITE_APPEND(off, body, sizeof(body),
+        "<h1>Make useful C23 software</h1>"
+        "<p>Describe what you want your device to do. Reuse existing parts, "
+        "change what is missing, and choose the exact version you want to use.</p>"
+        "<p><a class='btn' href='/zcode/packages'>Find C23 parts</a></p>"
+        "<section class='card'><h2>Start with your goal</h2>"
+        "<p>Tell your coding agent the behavior you need, a small example, "
+        "and how you will decide it works. Ask it to start with "
+        "<code>z23 zcode guide</code> and look for reusable packages.</p>"
+        "<p>Compare the result with your example, reproduce the same version "
+        "on another node, then accept and use that exact version. Keep its "
+        "source and evidence available for the next person.</p></section>"
+        "<section class='card'><h2>Improve Z23 itself</h2>"
+        "<p>In your source checkout, read <code>AGENTS.md</code> and the "
+        "current mission in <code>docs/work/FORWARD_PLAN.md</code>. "
+        "Check your environment and build the native C23 node:</p>"
+        "<pre><code>make doctor-env\nmake setup\nmake -j4 z23\n"
+        "build/bin/z23 code guide</code></pre>"
+        "<p>The platform prerequisites live in <code>docs/GETTING_STARTED.md</code>. "
+        "Agree who owns the files, make one useful change, run its named "
+        "tests, and submit the exact result with its evidence. "
+        "Consensus, wallet custody, and public-node reliability come first.</p>"
+        "</section>"
+        "<section class='card'><h2>Discuss and learn together</h2>"
+        "<p>Use the node's public discussion and wiki to share questions, "
+        "results, and lessons that others can reproduce:</p>"
+        "<pre><code>z23 fleet board list\nz23 fleet wiki list</code></pre>"
+        "<p>Check the author and exact revision. Each node shows the records "
+        "it currently holds; a signed statement still needs evidence. "
+        "Public posts are shared with peers. Keep credentials, machine "
+        "addresses, and private operational notes in your private workspace.</p>"
+        "</section>"
+        "<p>This page is served by Z23 itself, with its styles included. "
+        "Another node running this version can serve the same guide.</p>");
+    off += (size_t)zcode_body_end(body + off, sizeof(body) - off);
+    return zcode_html_response(body, off, resp, max);
+}
+
 /* ── /zcode/package/<root> ────────────────────────────────────────── */
 
 static size_t zcode_emit_release_card(char *buf, size_t max,

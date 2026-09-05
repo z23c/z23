@@ -51,6 +51,7 @@
 #include "platform/time_compat.h"
 
 #include <errno.h>
+#include <dirent.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -688,17 +689,73 @@ static bool vc_file_matches(const char *dir, const char *rel, const char *expect
 /* Count regular files under a directory tree. */
 static int vc_count_objects(const char *repo)
 {
-    char cmd[4096];
-    /* pure-C count would be verbose; a find|wc via popen is fine in a test. */
-    snprintf(cmd, sizeof(cmd),
-             "find '%s/.zvcs/objects' -type f ! -path '*/tmp/*' 2>/dev/null | wc -l",
-             repo);
-    FILE *p = popen(cmd, "r");
-    if (!p) return -1;
-    int c = -1;
-    if (fscanf(p, "%d", &c) != 1) c = -1;
-    pclose(p);
-    return c;
+    char objects[4096];
+    int n = snprintf(objects, sizeof(objects), "%s/.zvcs/objects", repo);
+    if (n < 0 || (size_t)n >= sizeof(objects)) return -1;
+    DIR *root = opendir(objects);
+    if (!root) return -1;
+
+    int count = 0;
+    struct dirent *shard;
+    for (;;) {
+        errno = 0;
+        shard = readdir(root);
+        if (!shard) {
+            if (errno != 0 || closedir(root) != 0) return -1;
+            break;
+        }
+        if (strcmp(shard->d_name, ".") == 0 ||
+            strcmp(shard->d_name, "..") == 0 ||
+            strcmp(shard->d_name, "tmp") == 0)
+            continue;
+        if (strlen(shard->d_name) != 2 ||
+            strspn(shard->d_name, "0123456789abcdef") != 2) {
+            (void)closedir(root);
+            return -1;
+        }
+        struct stat shard_st;
+        if (fstatat(dirfd(root), shard->d_name, &shard_st,
+                    AT_SYMLINK_NOFOLLOW) != 0 || !S_ISDIR(shard_st.st_mode)) {
+            (void)closedir(root);
+            return -1;
+        }
+        char shard_path[4096];
+        n = snprintf(shard_path, sizeof(shard_path), "%s/%s", objects,
+                     shard->d_name);
+        if (n < 0 || (size_t)n >= sizeof(shard_path)) {
+            closedir(root);
+            return -1;
+        }
+        DIR *entries = opendir(shard_path);
+        if (!entries) {
+            (void)closedir(root);
+            return -1;
+        }
+        struct dirent *entry;
+        for (;;) {
+            errno = 0;
+            entry = readdir(entries);
+            if (!entry) {
+                if (errno != 0 || closedir(entries) != 0) {
+                    (void)closedir(root);
+                    return -1;
+                }
+                break;
+            }
+            if (strcmp(entry->d_name, ".") == 0 ||
+                strcmp(entry->d_name, "..") == 0)
+                continue;
+            struct stat st;
+            if (fstatat(dirfd(entries), entry->d_name, &st,
+                        AT_SYMLINK_NOFOLLOW) != 0 || !S_ISREG(st.st_mode)) {
+                (void)closedir(entries);
+                (void)closedir(root);
+                return -1;
+            }
+            count++;
+        }
+    }
+    return count;
 }
 
 /* Count leftover ZVCS staging temp files (<...>.zvcstmp.<pid>.<seq>) anywhere

@@ -15,7 +15,7 @@
  * lane's measured lessons without retaining a second dispatcher.
  *
  * ── SAFETY BOUNDARIES, ALL FAIL-CLOSED ───────────────────────────────────
- *   - Dispatching costs money and writes code, so it requires --yes-dispatch
+ *   - Dispatching consumes provider quota and may edit code; use --yes-dispatch
  *     on every single run. There is no config file that turns that off and no
  *     environment variable that implies it.
  *   - Work lands in an ISOLATED git worktree, never the caller's checkout.
@@ -165,6 +165,7 @@ struct unit_opts {
     const char *territory;
     const char *kind;
     const char *model;
+    const char *reasoning_effort;
     const char *worktree;
     const char *fixture_reply;
     const char *key_file;
@@ -211,10 +212,11 @@ static void usage(void)
 "                    Its generated brief — owns, routes, reaches, the gates\n"
 "                    that bind it, where its evidence is weakest — is put in\n"
 "                    the prompt. A name the tree does not declare is refused.\n"
-"  --yes-dispatch    REQUIRED. Dispatching costs money and writes code, so\n"
-"                    it is opted into per run and can never be defaulted on\n"
+"  --yes-dispatch    REQUIRED. Dispatch consumes provider quota and may\n"
+"                    apply scoped edits; opt in per run, never by default\n"
 "  --worktree DIR    isolated worktree to work in (created if absent)\n"
 "  --model ID        override the engine's default model\n"
+"  --reasoning-effort E  provider_default, low, medium, high, or xhigh\n"
 "  --turns N         repair turns when a reply does not apply (default %d)\n"
 "  --timeout N       dispatch wall clock in seconds (default %d, max %d)\n"
 "  --gate-timeout N  wall clock for the gate run; defaults to --timeout. A\n"
@@ -227,7 +229,7 @@ static void usage(void)
 "  --dry-run         print the composed prompt and exit without dispatching\n"
 "  --probe           one minimal real call per HTTPS vendor; prints the\n"
 "                    status, the latency and what came back. Needs\n"
-"                    --yes-dispatch: it is a billed call like any other\n"
+"                    --yes-dispatch: it consumes the configured provider access\n"
 "\n"
 "Exit: 0 the unit landed and its group passed. 1 any other verdict —\n"
 "      including TIMEOUT and including an engine that reported success and\n"
@@ -282,6 +284,7 @@ static bool parse_args(int argc, char **argv, struct unit_opts *o)
         TAKE("--territory", territory)
         TAKE("--kind", kind)
         TAKE("--model", model)
+        TAKE("--reasoning-effort", reasoning_effort)
         TAKE("--worktree", worktree)
         TAKE("--fixture-reply", fixture_reply)
         TAKE("--key-file", key_file)
@@ -772,6 +775,89 @@ struct dispatch_result {
     int64_t             dispatch_latency_ms;
 };
 
+/* The chainlog owns the durable sequence; this stack object only keeps the
+ * bounded observations until that one record is appended. */
+struct invocation_log {
+    struct engine_receipt_invocation items[ENGINE_RECEIPT_INVOCATIONS_MAX];
+    char session_ids[ENGINE_RECEIPT_INVOCATIONS_MAX]
+                    [ENGINE_CLI_SESSION_ID_MAX];
+    char resolved_models[ENGINE_RECEIPT_INVOCATIONS_MAX][96];
+    size_t count;
+    size_t session_count;
+    bool totals_ambiguous;
+};
+
+static int64_t reported_counter(bool known, int64_t value)
+{
+    return known ? value : ENGINE_RECEIPT_UNREPORTED;
+}
+
+static bool invocation_log_has_room(const struct invocation_log *log)
+{
+    if (log->count < ENGINE_RECEIPT_INVOCATIONS_MAX)
+        return true;
+    LOG_FAIL("engine_unit",
+             "refusing provider dispatch %zu: receipt invocation cap is %u",
+             log->count + 1u, (unsigned)ENGINE_RECEIPT_INVOCATIONS_MAX);
+}
+
+static bool invocation_log_add(struct invocation_log *log, const char *phase,
+                               bool ok, const struct dispatch_result *dr,
+                               int64_t elapsed_ms)
+{
+    if (!invocation_log_has_room(log))
+        return false;
+    struct engine_receipt_invocation *in = &log->items[log->count];
+    char *resolved_model = log->resolved_models[log->count];
+    if (dr->reply.model[0])
+        (void)snprintf(resolved_model, 96, "%s", dr->reply.model);
+    else if (dr->cli_observation.known)
+        (void)snprintf(resolved_model, 96, "%s",
+                       dr->cli_observation.resolved_model);
+    *in = (struct engine_receipt_invocation) {
+        .ordinal = (int64_t)log->count + 1,
+        .phase = phase,
+        .result = ok ? "ok" : engine_err_name(dr->err),
+        .elapsed_ms = elapsed_ms,
+        .http_status = dr->http_status,
+        .resolved_model = resolved_model[0] ? resolved_model : NULL,
+        .prompt_tokens = reported_counter(dr->reply.usage.prompt_tokens_known,
+                                           dr->reply.usage.prompt_tokens),
+        .completion_tokens = reported_counter(
+            dr->reply.usage.completion_tokens_known,
+            dr->reply.usage.completion_tokens),
+        .cache_read_input_tokens = reported_counter(
+            dr->reply.usage.cache_read_input_tokens_known,
+            dr->reply.usage.cache_read_input_tokens),
+        .cache_creation_input_tokens = reported_counter(
+            dr->reply.usage.cache_creation_input_tokens_known,
+            dr->reply.usage.cache_creation_input_tokens),
+        .reasoning_tokens = reported_counter(
+            dr->reply.usage.reasoning_tokens_known,
+            dr->reply.usage.reasoning_tokens),
+        .total_tokens = reported_counter(dr->reply.usage.total_tokens_known,
+                                          dr->reply.usage.total_tokens),
+    };
+    log->count++;
+
+    /* A repeated structured session id may be a resumed session whose usage
+     * is cumulative. Keep both raw observations, but refuse to sum them. */
+    if (dr->cli_observation.known && dr->cli_observation.session_id[0]) {
+        for (size_t i = 0; i < log->session_count; i++) {
+            if (strcmp(log->session_ids[i],
+                       dr->cli_observation.session_id) == 0) {
+                log->totals_ambiguous = true;
+                return true;
+            }
+        }
+        (void)snprintf(log->session_ids[log->session_count],
+                       ENGINE_CLI_SESSION_ID_MAX, "%s",
+                       dr->cli_observation.session_id);
+        log->session_count++;
+    }
+    return true;
+}
+
 /* One HTTPS attempt. The credential is built into a stack buffer here, handed
  * straight to the transport, and wiped before returning: it is never stored,
  * never formatted into a log line, and never reaches a receipt. */
@@ -854,7 +940,8 @@ static int fail_setup(const char *why);
  * The prompt is written to a temp file for a file-mode row and passed
  * directly for an argument-mode one, so the probe exercises the same seam
  * the real dispatch uses rather than a simplified one. */
-static int probe_cli(const struct engine_vendor *v, const char *model_override)
+static int probe_cli(const struct engine_vendor *v, const char *model_override,
+                     const char *reasoning_effort)
 {
     if (!v->program || !v->program[0]) {
         printf("NO PROGRAM IN ROW\n");
@@ -881,6 +968,7 @@ static int probe_cli(const struct engine_vendor *v, const char *model_override)
         .workdir = ".",
         .turns   = "1",
         .model   = model_override ? model_override : v->default_model,
+        .reasoning_effort = reasoning_effort,
     };
     const char *argv[ENGINE_CLI_ARGV_MAX];
     if (engine_cli_argv_build(v, &in, argv, ENGINE_CLI_ARGV_MAX) == 0) {
@@ -948,13 +1036,14 @@ static int probe_cli(const struct engine_vendor *v, const char *model_override)
     return rc == 0 ? 0 : 1;
 }
 
-static int probe_one(const struct engine_vendor *v, const char *model_override)
+static int probe_one(const struct engine_vendor *v, const char *model_override,
+                     const char *reasoning_effort)
 {
     printf("  %-10s %-44s ", v->id, v->display);
     fflush(stdout);
 
     if (v->wire == ENGINE_WIRE_LOCAL_CLI)
-        return probe_cli(v, model_override);
+        return probe_cli(v, model_override, reasoning_effort);
     if (v->wire != ENGINE_WIRE_OPENAI_CHAT) {
         printf("SKIPPED (sends nothing)\n");
         return 0;
@@ -973,6 +1062,7 @@ static int probe_one(const struct engine_vendor *v, const char *model_override)
     const struct engine_call call = {
         .vendor            = v,
         .model             = model,
+        .reasoning_effort  = reasoning_effort,
         .system_prompt     = NULL,
         .user_prompt       = "Reply with the word: ok",
         .max_output_tokens = UNIT_PROBE_OUTPUT_TOKENS,
@@ -1036,7 +1126,7 @@ static int probe_all(const struct unit_opts *o)
         if (o->engine_id && strcmp(v->id, o->engine_id) != 0)
             continue;
         probed++;
-        failures += probe_one(v, o->model);
+        failures += probe_one(v, o->model, o->reasoning_effort);
     }
     if (probed == 0) {
         return fail_setup("no engine matched --engine; see --list");
@@ -1081,6 +1171,7 @@ static bool dispatch_fixture(const struct engine_vendor *v, const char *path,
  * directly, so the prompt path never passes through metacharacter expansion. */
 static bool dispatch_cli(const struct engine_vendor *v, const char *prompt_path,
                          const char *prompt_text, const char *model,
+                         const char *reasoning_effort,
                          const char *workdir, int turns, int timeout_ms,
                          struct dispatch_result *dr)
 {
@@ -1104,6 +1195,7 @@ static bool dispatch_cli(const struct engine_vendor *v, const char *prompt_path,
         .workdir = workdir,
         .turns   = turn_cap,
         .model   = model && model[0] ? model : v->default_model,
+        .reasoning_effort = reasoning_effort,
     };
     const char *argv[ENGINE_CLI_ARGV_MAX];
     if (engine_cli_argv_build(v, &in, argv, ENGINE_CLI_ARGV_MAX) == 0) {
@@ -1143,6 +1235,18 @@ static bool dispatch_cli(const struct engine_vendor *v, const char *prompt_path,
             dr->cli_observation.output_tokens;
         dr->reply.usage.total_tokens =
             dr->cli_observation.total_tokens;
+        dr->reply.usage.cache_read_input_tokens =
+            dr->cli_observation.cache_read_input_tokens;
+        dr->reply.usage.cache_creation_input_tokens =
+            dr->cli_observation.cache_creation_input_tokens;
+        dr->reply.usage.reasoning_tokens =
+            dr->cli_observation.reasoning_tokens;
+        dr->reply.usage.prompt_tokens_known = true;
+        dr->reply.usage.completion_tokens_known = true;
+        dr->reply.usage.total_tokens_known = true;
+        dr->reply.usage.cache_read_input_tokens_known = true;
+        dr->reply.usage.cache_creation_input_tokens_known = true;
+        dr->reply.usage.reasoning_tokens_known = true;
         dr->reply.usage.tokens_known = true;
         (void)snprintf(dr->reply.model, sizeof(dr->reply.model), "%s",
                        dr->cli_observation.resolved_model);
@@ -1563,10 +1667,18 @@ static bool receipt_push_null(struct json_value *doc, const char *key)
     return ok;
 }
 
+static bool receipt_push_counter(struct json_value *doc, const char *key,
+                                 bool known, int64_t value)
+{
+    return known ? json_push_kv_int(doc, key, value)
+                 : receipt_push_null(doc, key);
+}
+
 static void write_receipt(const struct unit_opts *o,
                           const struct engine_vendor *v,
                           const struct engine_usage *usage,
                           const struct engine_cli_observation *observation,
+                          const char *reply_resolved_model,
                           const struct engine_gate_reading *g,
                           size_t files_changed, int attempts,
                           int64_t dispatch_latency_ms,
@@ -1580,18 +1692,22 @@ static void write_receipt(const struct unit_opts *o,
     json_init(&doc);
     json_set_object(&doc);
     bool ok = json_push_kv_str(&doc, "schema", "zcl.engine_unit.v1") &&
+        json_push_kv_str(&doc, "accounting_scope", "terminal_dispatch") &&
         json_push_kv_bool(&doc, "needs_operator", needs_operator) &&
         json_push_kv_str(&doc, "engine", v->id) &&
         json_push_kv_str(&doc, "model", o->model ? o->model :
                          (v->default_model ? v->default_model : "")) &&
+        json_push_kv_str(&doc, "requested_model", o->model ? o->model :
+                         (v->default_model ? v->default_model : "")) &&
+        json_push_kv_str(&doc, "reasoning_effort",
+                         o->reasoning_effort ? o->reasoning_effort :
+                         ENGINE_REASONING_EFFORT_PROVIDER_DEFAULT) &&
         json_push_kv_str(&doc, "territory", o->territory ? o->territory : "") &&
         json_push_kv_str(&doc, "group", o->group ? o->group : "") &&
         json_push_kv_int(&doc, "files_changed", (int64_t)files_changed) &&
         json_push_kv_int(&doc, "groups_ran", g->groups_ran) &&
         json_push_kv_int(&doc, "groups_failed", g->groups_failed) &&
         json_push_kv_bool(&doc, "cached", g->cached_mode) &&
-        json_push_kv_int(&doc, "prompt_tokens", usage->prompt_tokens) &&
-        json_push_kv_int(&doc, "completion_tokens", usage->completion_tokens) &&
         json_push_kv_bool(&doc, "cost_usd_known", usage->cost_known) &&
         json_push_kv_real(&doc, "cost_usd", usage->cost_usd) &&
         json_push_kv_int(&doc, "attempts", attempts) &&
@@ -1603,6 +1719,13 @@ static void write_receipt(const struct unit_opts *o,
         json_push_kv_int(&doc, "state_bytes", (int64_t)state_bytes) &&
         json_push_kv_bool(&doc, "state_updated", state_updated) &&
         json_push_kv_int(&doc, "compactions", (int64_t)compactions);
+    if (ok)
+        ok = receipt_push_counter(&doc,"prompt_tokens",
+                                  usage->prompt_tokens_known,
+                                  usage->prompt_tokens) &&
+             receipt_push_counter(&doc,"completion_tokens",
+                                  usage->completion_tokens_known,
+                                  usage->completion_tokens);
     if (ok && observation && observation->known) {
         ok = json_push_kv_str(&doc, "resolved_model",
                               observation->resolved_model) &&
@@ -1620,15 +1743,32 @@ static void write_receipt(const struct unit_opts *o,
                              observation->reasoning_tokens) &&
             json_push_kv_int(&doc, "total_tokens", observation->total_tokens);
     } else if (ok) {
+        if (reply_resolved_model && reply_resolved_model[0])
+            ok = json_push_kv_str(&doc, "resolved_model",
+                                  reply_resolved_model);
+        else
+            ok = receipt_push_null(&doc, "resolved_model");
         static const char *const unknown_keys[] = {
-            "resolved_model", "session_id", "request_id", "stop_reason",
-            "turns", "input_tokens", "cache_read_input_tokens",
-            "cache_creation_input_tokens", "output_tokens",
-            "reasoning_tokens", "total_tokens",
+            "session_id", "request_id", "stop_reason", "turns",
         };
         for (size_t i = 0;
              ok && i < sizeof(unknown_keys) / sizeof(unknown_keys[0]); i++)
             ok = receipt_push_null(&doc, unknown_keys[i]);
+        if (ok)
+            ok = receipt_push_counter(&doc,"input_tokens",
+                    usage->prompt_tokens_known,usage->prompt_tokens) &&
+                 receipt_push_counter(&doc,"cache_read_input_tokens",
+                    usage->cache_read_input_tokens_known,
+                    usage->cache_read_input_tokens) &&
+                 receipt_push_counter(&doc,"cache_creation_input_tokens",
+                    usage->cache_creation_input_tokens_known,
+                    usage->cache_creation_input_tokens) &&
+                 receipt_push_counter(&doc,"output_tokens",
+                    usage->completion_tokens_known,usage->completion_tokens) &&
+                 receipt_push_counter(&doc,"reasoning_tokens",
+                    usage->reasoning_tokens_known,usage->reasoning_tokens) &&
+                 receipt_push_counter(&doc,"total_tokens",
+                    usage->total_tokens_known,usage->total_tokens);
     }
     const size_t n = ok ? json_write(&doc, text, sizeof(text) - 2u) :
                           sizeof(text);
@@ -1648,23 +1788,28 @@ static void write_receipt(const struct unit_opts *o,
 
 /* The sequence, not the one-run snapshot above. One JSON line appended to
  * <state-dir>/engine_receipts.chainlog; see engine/engine_receipt.h. */
-static void append_unit_receipt(const struct unit_opts *o,
+static bool append_unit_receipt(const struct unit_opts *o,
                                 const struct engine_vendor *v,
                                 const struct engine_usage *usage,
+                                const struct engine_cli_observation *observation,
+                                const char *resolved_model,
                                 const struct engine_gate_reading *g,
                                 size_t files_changed, int attempts,
                                 int64_t dispatch_latency_ms,
                                 int64_t proof_latency_ms,
+                                int64_t cumulative_proof_ms,
+                                int64_t unit_elapsed_ms,
                                 int http_status,
                                 enum engine_verdict verdict,
-                                const char *task_sha3)
+                                const char *task_sha3,
+                                const struct invocation_log *invocations)
 {
     if (!o->state_dir || !o->state_dir[0])
-        return;
+        return true;
     char path[1024];
     if ((size_t)snprintf(path, sizeof(path), "%s/%s",
                          o->state_dir, ENGINE_RECEIPT_FILENAME) >= sizeof(path))
-        return;
+        return false;
 
     char template_hex[65] = {0};
     if (o->kind && o->kind[0]) {
@@ -1676,18 +1821,42 @@ static void append_unit_receipt(const struct unit_opts *o,
     struct engine_receipt r = {
         .ts = clock_now_wall_ms() / 1000,
         .engine = v->id,
-        .model = o->model ? o->model
-                          : (v->default_model ? v->default_model : ""),
+        .requested_model = o->model ? o->model
+                                    : (v->default_model ? v->default_model : ""),
+        .resolved_model = observation && observation->known
+                              ? observation->resolved_model
+                              : (resolved_model && resolved_model[0]
+                                     ? resolved_model : NULL),
+        .reasoning_effort = o->reasoning_effort ? o->reasoning_effort
+                              : ENGINE_REASONING_EFFORT_PROVIDER_DEFAULT,
         .kind = o->kind,
         .template_sha3 = template_hex[0] ? template_hex : NULL,
         .rules_shown = NULL,
         .rules_count = 0,
         .task_sha3 = task_sha3,
         .group = o->group,
-        .prompt_tokens = usage->tokens_known ? usage->prompt_tokens
+        .prompt_tokens = usage->prompt_tokens_known ? usage->prompt_tokens
                                              : ENGINE_RECEIPT_UNREPORTED,
-        .completion_tokens = usage->tokens_known ? usage->completion_tokens
+        .completion_tokens = usage->completion_tokens_known ? usage->completion_tokens
                                                  : ENGINE_RECEIPT_UNREPORTED,
+        .cache_read_input_tokens = usage->cache_read_input_tokens_known
+            ? usage->cache_read_input_tokens : ENGINE_RECEIPT_UNREPORTED,
+        .cache_creation_input_tokens = usage->cache_creation_input_tokens_known
+            ? usage->cache_creation_input_tokens : ENGINE_RECEIPT_UNREPORTED,
+        .reasoning_tokens = usage->reasoning_tokens_known
+            ? usage->reasoning_tokens : ENGINE_RECEIPT_UNREPORTED,
+        .total_tokens = usage->total_tokens_known ? usage->total_tokens
+                                                  : ENGINE_RECEIPT_UNREPORTED,
+        .turns = observation && observation->known
+            ? observation->turns : ENGINE_RECEIPT_UNREPORTED,
+        .invocations = invocations ? invocations->items : NULL,
+        .invocations_count = invocations ? invocations->count : 0,
+        .invocation_totals_ambiguous =
+            invocations ? invocations->totals_ambiguous : false,
+        .cumulative_proof_ms = cumulative_proof_ms,
+        .unit_elapsed_ms = unit_elapsed_ms,
+        .dispatch_ms = dispatch_latency_ms,
+        .proof_ms = proof_latency_ms,
         .wall_ms = dispatch_latency_ms + proof_latency_ms,
         .http_status = http_status,
         .worktree_head = NULL,
@@ -1701,7 +1870,75 @@ static void append_unit_receipt(const struct unit_opts *o,
             .lint_rc = ENGINE_RECEIPT_UNREPORTED,
         },
     };
-    (void)engine_receipt_append(path, &r, NULL);
+    return engine_receipt_append(path, &r, NULL);
+}
+
+static bool receipt_plan_fits(const struct unit_opts *o,
+                              const struct engine_vendor *v,
+                              const char *task_sha3, size_t invocation_count)
+{
+    struct engine_receipt_invocation worst[ENGINE_RECEIPT_INVOCATIONS_MAX];
+    char resolved_model[96];
+    memset(resolved_model, 'm', sizeof(resolved_model) - 1u);
+    resolved_model[sizeof(resolved_model) - 1u] = '\0';
+    for (size_t i = 0; i < invocation_count; i++) {
+        worst[i] = (struct engine_receipt_invocation) {
+            .ordinal = INT64_MAX,
+            .phase = "compaction",
+            .result = "receipt_capacity_worst_case",
+            .elapsed_ms = INT64_MAX,
+            .http_status = INT64_MAX,
+            .resolved_model = resolved_model,
+            .prompt_tokens = INT64_MAX,
+            .completion_tokens = INT64_MAX,
+            .cache_read_input_tokens = INT64_MAX,
+            .cache_creation_input_tokens = INT64_MAX,
+            .reasoning_tokens = INT64_MAX,
+            .total_tokens = INT64_MAX,
+        };
+    }
+    char template_hex[65] = {0};
+    if (o->kind && o->kind[0]) {
+        uint8_t digest[32];
+        engine_prompt_template_sha3(o->kind, digest);
+        zcl_hex_encode(digest, 32, template_hex);
+    }
+    const struct engine_receipt plan = {
+        .ts = INT64_MAX,
+        .engine = v->id,
+        .requested_model = o->model ? o->model
+                                    : (v->default_model ? v->default_model : ""),
+        .resolved_model = resolved_model,
+        .reasoning_effort = o->reasoning_effort ? o->reasoning_effort
+                              : ENGINE_REASONING_EFFORT_PROVIDER_DEFAULT,
+        .kind = o->kind,
+        .template_sha3 = template_hex[0] ? template_hex : NULL,
+        .task_sha3 = task_sha3,
+        .group = o->group,
+        .prompt_tokens = INT64_MAX,
+        .completion_tokens = INT64_MAX,
+        .cache_read_input_tokens = INT64_MAX,
+        .cache_creation_input_tokens = INT64_MAX,
+        .reasoning_tokens = INT64_MAX,
+        .total_tokens = INT64_MAX,
+        .turns = INT64_MAX,
+        .invocations = worst,
+        .invocations_count = invocation_count,
+        .cumulative_proof_ms = INT64_MAX,
+        .unit_elapsed_ms = INT64_MAX,
+        .dispatch_ms = INT64_MAX,
+        .proof_ms = INT64_MAX,
+        .wall_ms = INT64_MAX,
+        .http_status = INT64_MAX,
+        .outcome = {
+            .groups_ran = INT64_MAX,
+            .groups_failed = INT64_MAX,
+            .retries = INT64_MAX,
+            .lines_changed = INT64_MAX,
+            .lint_rc = INT64_MAX,
+        },
+    };
+    return engine_receipt_fits(&plan);
 }
 
 /* ── carried state across attempts ───────────────────────────────────────
@@ -1788,12 +2025,22 @@ static bool dispatch_with_retries(const struct engine_vendor *v,
                                   const char *body, size_t body_len,
                                   const char *prompt_path, const char *prompt_text,
                                   const char *workdir,
-                                  struct dispatch_result *dr)
+                                  struct dispatch_result *dr,
+                                  struct invocation_log *invocations)
 {
     struct engine_breaker breaker = {0};
     const int budget = v->max_retries < 0 ? 0 : v->max_retries;
     const int64_t started_ns = clock_now_monotonic_ns();
     for (int attempt = 0; attempt <= budget; attempt++) {
+        if (!invocation_log_has_room(invocations)) {
+            dr->err = ENGINE_ERR_REFUSED;
+            return false;
+        }
+        engine_reply_free(&dr->reply);
+        memset(&dr->reply, 0, sizeof(dr->reply));
+        memset(&dr->cli_observation, 0, sizeof(dr->cli_observation));
+        dr->err = ENGINE_OK;
+        dr->http_status = 0;
         dr->attempts = attempt + 1;
         const int64_t now = clock_now_monotonic_ns() / 1000000;
         if (engine_breaker_is_open(&breaker, now)) {
@@ -1803,17 +2050,26 @@ static bool dispatch_with_retries(const struct engine_vendor *v,
                      "circuit on %s", breaker.consecutive_failures, v->id);
         }
         bool ok = false;
+        const int64_t attempt_started_ns = clock_now_monotonic_ns();
         switch (v->wire) {
         case ENGINE_WIRE_OPENAI_CHAT:
             ok = dispatch_https(v, body, body_len, o->timeout_s * 1000, dr);
             break;
         case ENGINE_WIRE_LOCAL_CLI:
-            ok = dispatch_cli(v, prompt_path, prompt_text, o->model, workdir,
+            ok = dispatch_cli(v, prompt_path, prompt_text, o->model,
+                              o->reasoning_effort, workdir,
                               o->turns, o->timeout_s * 1000, dr);
             break;
         case ENGINE_WIRE_LOCAL_FIXTURE:
             ok = dispatch_fixture(v, o->fixture_reply, dr);
             break;
+        }
+        const int64_t attempt_elapsed_ms =
+            (clock_now_monotonic_ns() - attempt_started_ns) / 1000000;
+        if (!invocation_log_add(invocations, "turn", ok, dr,
+                                attempt_elapsed_ms)) {
+            dr->err = ENGINE_ERR_REFUSED;
+            return false;
         }
         engine_breaker_record(&breaker, ok ? ENGINE_OK : dr->err, now);
         dr->dispatch_latency_ms =
@@ -1846,6 +2102,9 @@ int main(int argc, char **argv)
     struct unit_opts o;
     if (!parse_args(argc, argv, &o))
         return 2;
+    if (!engine_reasoning_effort_valid(o.reasoning_effort))
+        return fail_setup("--reasoning-effort must be provider_default, low, "
+                          "medium, high, or xhigh");
     if (o.list) {
         list_engines();
         return 0;
@@ -1863,6 +2122,10 @@ int main(int argc, char **argv)
     if (!v)
         return fail_setup(o.engine_id ? "unknown --engine; see --list"
                                       : "this build has no default engine");
+    if (engine_reasoning_effort_explicit(o.reasoning_effort)
+        && !v->supports_reasoning_effort)
+        return fail_setup("selected engine accepts no explicit reasoning "
+                          "effort");
     if (!o.engine_id)
         engine_emit(stdout, "engine_unit: no --engine given, using %s (%s)\n",
                     v->id, v->display);
@@ -1873,6 +2136,21 @@ int main(int argc, char **argv)
                           "truly cannot have one");
     if (o.turns < 1 || o.turns > 10)
         return fail_setup("--turns must be between 1 and 10");
+    const size_t retry_attempts =
+        (size_t)(v->max_retries < 0 ? 0 : v->max_retries) + 1u;
+    const size_t possible_compactions =
+        v->wire == ENGINE_WIRE_LOCAL_CLI ? 0u : (size_t)o.turns - 1u;
+    const size_t invocation_capacity_needed =
+        (size_t)o.turns * retry_attempts + possible_compactions;
+    if (invocation_capacity_needed > ENGINE_RECEIPT_INVOCATIONS_MAX) {
+        char why[192];
+        (void)snprintf(why, sizeof(why),
+                       "--turns and %s's retry budget could require %zu "
+                       "provider calls; receipt cap is %u",
+                       v->id, invocation_capacity_needed,
+                       (unsigned)ENGINE_RECEIPT_INVOCATIONS_MAX);
+        return fail_setup(why);
+    }
     if (o.timeout_s < 1 || o.timeout_s > UNIT_MAX_TIMEOUT)
         return fail_setup("--timeout is outside its permitted range");
     if (o.gate_timeout_s != 0
@@ -1994,6 +2272,21 @@ int main(int argc, char **argv)
             "refusing to dispatch without --yes-dispatch. This spends money "
             "and writes code; it is opted into per run, never defaulted on");
     }
+    if (!o.state_dir || !o.state_dir[0]) {
+        free(prompt);
+        free(task);
+        free(brief);
+        return fail_setup("--state-dir is required so every provider call "
+                          "can reach the authoritative receipt chain");
+    }
+    if (!receipt_plan_fits(&o, v, task_sha3_hex,
+                           invocation_capacity_needed)) {
+        free(prompt);
+        free(task);
+        free(brief);
+        return fail_setup("the complete worst-case invocation receipt would "
+                          "exceed its 16 KiB bound; refusing before dispatch");
+    }
 
     char where[128] = {0};
     if (!engine_secret_load(v, o.key_file, where, sizeof(where))) {
@@ -2055,13 +2348,17 @@ int main(int argc, char **argv)
     bool have_gate_tail = false;
 
     struct dispatch_result dr = {0};
+    struct invocation_log invocations = {0};
     struct engine_gate_reading gate = {0};
     bool timed_out = false;
     size_t changed = 0;
     enum engine_verdict verdict = ENGINE_VERDICT_REFUSED;
     int64_t proof_latency_ms = 0;
+    int64_t cumulative_proof_ms = 0;
     char *delivered = NULL;
     char prompt_path[1024] = {0};
+    bool dispatch_failed = false;
+    const int64_t unit_started_ns = clock_now_monotonic_ns();
 
     for (int turn = 1; turn <= o.turns; turn++) {
         if (turn > 1) {
@@ -2100,10 +2397,17 @@ int main(int argc, char **argv)
                     have_gate_tail ? gate_tail : NULL);
                 struct dispatch_result cdr = {0};
                 bool compacted = false;
+                bool compaction_dispatched = false;
+                const int64_t compaction_started_ns = clock_now_monotonic_ns();
+                if (!invocation_log_has_room(&invocations)) {
+                    dispatch_failed = true;
+                    break;
+                }
                 if (v->wire == ENGINE_WIRE_OPENAI_CHAT) {
                     const struct engine_call ccall = {
                         .vendor            = v,
                         .model             = o.model,
+                        .reasoning_effort  = o.reasoning_effort,
                         .system_prompt     = NULL,
                         .user_prompt       = comp_prompt,
                         .max_output_tokens = 2048,
@@ -2111,12 +2415,24 @@ int main(int argc, char **argv)
                     size_t cbody_len = 0;
                     char *cbody = engine_request_alloc(&ccall, &cbody_len);
                     if (cbody) {
+                        compaction_dispatched = true;
                         compacted = dispatch_https(v, cbody, cbody_len,
                                                    o.timeout_s * 1000, &cdr);
                         free(cbody);
                     }
                 } else if (v->wire == ENGINE_WIRE_LOCAL_FIXTURE) {
+                    compaction_dispatched = true;
                     compacted = dispatch_fixture(v, o.fixture_reply, &cdr);
+                }
+                const int64_t compaction_elapsed_ms =
+                    (clock_now_monotonic_ns() - compaction_started_ns) /
+                    1000000;
+                if (compaction_dispatched &&
+                    !invocation_log_add(&invocations, "compaction", compacted,
+                                        &cdr, compaction_elapsed_ms)) {
+                    engine_reply_free(&cdr.reply);
+                    dispatch_failed = true;
+                    break;
                 }
                 if (compacted) {
                     size_t extracted_len = 0;
@@ -2145,14 +2461,16 @@ int main(int argc, char **argv)
                 engine_reply_free(&cdr.reply);
             }
 
+            if (dispatch_failed)
+                break;
+
             free(prompt);
             prompt = compose_prompt(&o, v, task, brief, carried_preamble,
                                     have_gate_tail ? gate_tail : NULL);
             if (!prompt) {
-                free(task);
-                free(brief);
-                engine_secret_clear();
-                return 2;
+                dispatch_failed = true;
+                verdict = ENGINE_VERDICT_REFUSED;
+                break;
             }
         }
 
@@ -2169,12 +2487,13 @@ int main(int argc, char **argv)
         delivered = engine_prompt_compose(v->wire, prompt, &delivered_len);
         if (!delivered) {
             free(prompt);
-            free(task);
-            free(brief);
-            engine_secret_clear();
-            return fail_setup("the composed prompt could not be prepared for "
-                              "this engine; refusing to dispatch a partial "
-                              "one");
+            prompt = NULL;
+            engine_emit(stderr,
+                        "engine_unit: the composed prompt could not be "
+                        "prepared for this engine; refusing dispatch\n");
+            dispatch_failed = true;
+            verdict = ENGINE_VERDICT_REFUSED;
+            break;
         }
 
         /* The prompt is checked against the declared shape before it is
@@ -2200,11 +2519,13 @@ int main(int argc, char **argv)
                          "engine already receives on its own channel",
                          audit.repeated ? audit.repeated : "a section");
             free(delivered);
+            delivered = NULL;
             free(prompt);
-            free(task);
-            free(brief);
-            engine_secret_clear();
-            return fail_setup(why);
+            prompt = NULL;
+            engine_emit(stderr, "engine_unit: %s\n", why);
+            dispatch_failed = true;
+            verdict = ENGINE_VERDICT_REFUSED;
+            break;
         }
 
         memset(prompt_path, 0, sizeof(prompt_path));
@@ -2230,6 +2551,7 @@ int main(int argc, char **argv)
             const struct engine_call call = {
                 .vendor            = v,
                 .model             = o.model,
+                .reasoning_effort  = o.reasoning_effort,
                 .system_prompt     = engine_system_rules(),
                 .user_prompt       = prompt,
                 .max_output_tokens = 65536,
@@ -2237,11 +2559,14 @@ int main(int argc, char **argv)
             body = engine_request_alloc(&call, &body_len);
             if (!body) {
                 free(delivered);
+                delivered = NULL;
                 free(prompt);
-                free(task);
-                free(brief);
-                engine_secret_clear();
-                return fail_setup("could not build the request body");
+                prompt = NULL;
+                engine_emit(stderr,
+                            "engine_unit: could not build the request body\n");
+                dispatch_failed = true;
+                verdict = ENGINE_VERDICT_REFUSED;
+                break;
             }
         }
         free(prompt);
@@ -2249,15 +2574,14 @@ int main(int argc, char **argv)
 
         const bool got = dispatch_with_retries(v, &o, body, body_len,
                                                prompt_path, delivered,
-                                               workdir, &dr);
+                                               workdir, &dr, &invocations);
         free(body);
         free(delivered);
         delivered = NULL;
         if (!got) {
-            free(task);
-            free(brief);
-            engine_secret_clear();
-            return 1;
+            dispatch_failed = true;
+            verdict = ENGINE_VERDICT_REFUSED;
+            break;
         }
 
         /* Archive the raw completion before any envelope parsing touches
@@ -2289,17 +2613,19 @@ int main(int argc, char **argv)
 
         if (o.max_cost_usd > 0.0 && dr.reply.usage.cost_known
             && dr.reply.usage.cost_usd > o.max_cost_usd) {
-            engine_reply_free(&dr.reply);
-            free(task);
-            free(brief);
-            engine_secret_clear();
-            return fail_setup("the reported spend exceeded --max-cost-usd");
+            engine_emit(stderr,
+                        "engine_unit: the reported spend exceeded "
+                        "--max-cost-usd\n");
+            dispatch_failed = true;
+            verdict = ENGINE_VERDICT_REFUSED;
+            break;
         }
 
         /* Apply. A CLI engine has already edited the worktree; an API
          * engine's reply carries file bodies. Either way the NEXT step
          * measures the diff. */
         bool refused = false;
+        bool apply_failed = false;
         if (v->delivery == ENGINE_DELIVERS_ENVELOPE) {
             struct engine_patch patch;
             char applied_path[1024] = {0};
@@ -2382,15 +2708,16 @@ int main(int argc, char **argv)
                     refused = true;
                     engine_patch_free(&patch);
                 } else if (!apply_patch(workdir, &patch)) {
-                    engine_patch_free(&patch);
-                    engine_reply_free(&dr.reply);
-                    free(task);
-                    free(brief);
-                    engine_secret_clear();
-                    return 1;
+                    apply_failed = true;
                 }
                 engine_patch_free(&patch);
             }
+        }
+
+        if (apply_failed) {
+            dispatch_failed = true;
+            verdict = ENGINE_VERDICT_REFUSED;
+            break;
         }
 
         changed = worktree_changed_files(workdir);
@@ -2427,6 +2754,11 @@ int main(int argc, char **argv)
             }
             proof_latency_ms =
                 (clock_now_monotonic_ns() - proof_started_ns) / 1000000;
+            if (cumulative_proof_ms >= 0 && proof_latency_ms >= 0 &&
+                cumulative_proof_ms <= INT64_MAX - proof_latency_ms)
+                cumulative_proof_ms += proof_latency_ms;
+            else
+                cumulative_proof_ms = ENGINE_RECEIPT_UNREPORTED;
             have_gate_tail = gate_tail[0] != '\0';
             engine_emit(stdout,
                         "  gate:       verdict_line=%s mode=%s groups_ran=%ld "
@@ -2484,6 +2816,8 @@ int main(int argc, char **argv)
             break;
     }
 
+    const int64_t unit_elapsed_ms =
+        (clock_now_monotonic_ns() - unit_started_ns) / 1000000;
     const bool needs_operator =
         have_turn_state
         && engine_state_next_is_operator(turn_state, strlen(turn_state));
@@ -2492,19 +2826,33 @@ int main(int argc, char **argv)
                     "engine_unit: needs_operator=true — the unit's state "
                     "block names its next step as an operator action; see "
                     "state.txt\n");
-    write_receipt(&o, v, &dr.reply.usage, &dr.cli_observation, &gate, changed,
+    write_receipt(&o, v, &dr.reply.usage, &dr.cli_observation, dr.reply.model,
+                  &gate, changed,
                   dr.attempts, dr.dispatch_latency_ms, proof_latency_ms,
                   verdict, have_turn_state ? strlen(turn_state) : 0,
                   state_updated_last, compactions, needs_operator);
-    append_unit_receipt(&o, v, &dr.reply.usage, &gate, changed, dr.attempts,
-                        dr.dispatch_latency_ms, proof_latency_ms,
-                        dr.http_status, verdict, task_sha3_hex);
-    engine_emit(stdout, "engine_unit: %s\n", engine_verdict_name(verdict));
+    const bool durable_receipt = append_unit_receipt(
+        &o, v, &dr.reply.usage, &dr.cli_observation, dr.reply.model, &gate,
+        changed, dr.attempts, dr.dispatch_latency_ms, proof_latency_ms,
+        cumulative_proof_ms, unit_elapsed_ms, dr.http_status, verdict,
+        task_sha3_hex, &invocations);
+    if (!durable_receipt)
+        engine_emit(stderr,
+                    "engine_unit: authoritative invocation receipt was "
+                    "refused; this run cannot claim complete accounting\n");
+    if (durable_receipt)
+        engine_emit(stdout, "engine_unit: %s\n", engine_verdict_name(verdict));
+    else
+        engine_emit(stdout, "engine_unit: RECEIPT_REFUSED (gate verdict %s)\n",
+                    engine_verdict_name(verdict));
     engine_emit(stdout, "  review the diff before anything else: git -C %s diff\n",
                 workdir);
     engine_reply_free(&dr.reply);
     engine_secret_clear();
+    free(prompt);
+    free(delivered);
     free(task);
     free(brief);
-    return engine_verdict_is_pass(verdict) ? 0 : 1;
+    return durable_receipt && !dispatch_failed &&
+                   engine_verdict_is_pass(verdict) ? 0 : 1;
 }

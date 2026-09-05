@@ -483,6 +483,48 @@ static const char *zs_get(const char *dd, const char *path, size_t *len_out)
 
 /* ══ 1+2. route coverage + projection agreement ═══════════════════════ */
 
+static int t_development_public(void)
+{
+    int failures = 0;
+    size_t len = 0;
+    const char *r = zs_get("private-fleet-canary-A", "/zcode/develop", &len);
+    ZS_CHECK("development route is useful without a package store",
+             len > 0 && len < 65536 && strstr(r, "HTTP/1.1 200 OK") == r &&
+             strstr(r, "Make useful C23 software") &&
+             strstr(r, "z23 zcode guide") && strstr(r, "AGENTS.md") &&
+             strstr(r, "href='/zcode/packages'") &&
+             strstr(r, "z23 fleet wiki list"));
+    char *first = malloc(len + 1);
+    ZS_CHECK("development comparison allocation", first != NULL);
+    if (!first)
+        return failures;
+    memcpy(first, r, len + 1);
+    size_t other_len = 0;
+    r = zs_get("private-fleet-canary-B",
+               "/zcode/develop?private-fleet-canary-query", &other_len);
+    ZS_CHECK("public development content is independent of private context",
+             len == other_len && memcmp(first, r, len + 1) == 0 &&
+             !strstr(r, "private-fleet-canary"));
+    r = zs_get("private-fleet-canary-C", "/zcode/develop/", &other_len);
+    ZS_CHECK("development trailing slash resolves the same page",
+             len == other_len && memcmp(first, r, len + 1) == 0);
+    const char *payload = strstr(first, "\r\n\r\n");
+    const char *length_header = strstr(first, "Content-Length: ");
+    unsigned long declared = 0;
+    ZS_CHECK("development HTTP length describes the complete body",
+             payload && length_header &&
+             sscanf(length_header, "Content-Length: %lu", &declared) == 1 &&
+             declared == strlen(payload + 4));
+    free(first);
+    uint8_t small[33];
+    memset(small, 0x5a, sizeof(small));
+    size_t n = zcode_site_handle_request("GET", "/zcode/develop", NULL, 0,
+                                         small, sizeof(small) - 1, NULL);
+    ZS_CHECK("small HTTP response refuses rather than returning an oversized length",
+             n == 0 && small[32] == 0x5a);
+    return failures;
+}
+
 static int t_routes_and_agreement(const char *dd)
 {
     int failures = 0;
@@ -959,6 +1001,7 @@ int test_zcode_site(void)
     mkdir(dd, 0755);
 
     char root_hex[65] = "", lic[96] = "";
+    failures += t_development_public();
     failures += t_routes_and_agreement(dd);
     /* Re-derive the fixture root/license for the download + swarm tests
      * (the agreement test committed exactly one package: alice/demo). */

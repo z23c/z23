@@ -80,7 +80,7 @@
 #define ZCL_RULE_RECEIPT_MAX     4096u
 #define ZCL_RULE_KILLER_MAX      8u
 #define ZCL_RULE_KIND_ROWS_MAX   32u
-#define ZCL_RULE_LINE_MAX        8192u
+#define ZCL_RULE_LINE_MAX        16384u
 #define ZCL_RULE_DEF_MAX         (512u * 1024u)
 #define ZCL_RULE_LOG_MAX         (16u * 1024u * 1024u)
 
