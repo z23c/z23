@@ -36,15 +36,35 @@ Verified on this checkout:
 
 ## Routing rule
 
-Route by the story's next beat, not by author:
+Route by the story's next beat, not by author. This table is GENERATED from
+`engine/composition/fleet_facts.def`, which is where a routing fact is written
+and the only place `z23 dev know` reads. Do not edit it here; change the row
+and run `make docs-executor-routing`. Ask it directly instead of reading it:
 
-| Story's next beat | Route |
-| --- | --- |
-| pinned-test single file | GLM 5.3 flash |
-| scoped implementation with a test group | Sonnet or GLM 5.3 |
-| hard concurrency/consensus | Opus |
-| verification (LAND/HOLD) | Sonnet |
-| anything with a 2 h wall | Muse plus a finisher |
+```
+z23 dev know --subject=sonnet
+z23 dev know --subject=glm-5.3-flash --relation=handles_poorly
+```
+
+<!-- FLEET-FACTS-ROUTING-BEGIN -->
+
+| Executor | Relation | Object | Why |
+| --- | --- | --- | --- |
+| glm-5.3 | handles_well | audit-only | answers is-this-stale honestly, including an honest negative result |
+| glm-5.3 | handles_well | scoped-implementation | takes a brief that invites planning, which the flash tier cannot |
+| glm-5.3-flash | handles_poorly | multi-file-implementation | writes outside the worktree, merges a foreign branch into its lane, rewrites a whole file when asked for one row |
+| glm-5.3-flash | handles_well | single-file-pinned-test | one file, one registered group that actually runs, and a per-file change ceiling |
+| glm-5.3-flash | requires | pinned-test | a registered group in tools/dev/test_group_catalog.def that runs, not a test file that merely exists |
+| haiku | handles_well | mechanical-rows | row edits, doc counts, log triage; state the commit trailer literally or it goes missing |
+| muse | handles_well | long-wall-implementation | the only tier given a two-hour wall; specify interfaces (file, flags, error names, fixtures), never goals |
+| muse | requires | finisher | a unit is not done until a finisher has run, because the wall expires with the work uncommitted |
+| opus | handles_well | hard-implementation | deep debugging and design judgement; read its refusal, a brief that duplicates a landed subsystem is correctly declined |
+| sonnet | handles_well | finishing-rebase | finishes an unfinished unit and resolves a rebase conflict; the brief must forbid git stash explicitly |
+| sonnet | handles_well | gate-fixing | give it the exact gate name; a gate is never turned green by raising a baseline |
+| sonnet | handles_well | scoped-implementation | one well-scoped change with a named test group and a stated acceptance bar |
+| sonnet | handles_well | verification | reads a diff, runs the named gates, answers LAND or HOLD; keep it in the foreground, it stalls waiting on a background notification |
+
+<!-- FLEET-FACTS-ROUTING-END -->
 
 Notes:
 

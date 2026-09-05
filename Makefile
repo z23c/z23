@@ -2687,7 +2687,7 @@ $(filter-out $(ZCL_VENDOR_LIB)/libsecp256k1.a,$(VENDOR_LIBS)):
         check-outparam-init-before-return \
         check-before-save-hooks check-pthread-create check-model-validation \
         check-model-sql-literals \
-        check-persona-resolves check-specialists check-fleet-airship-rules check-prompt-templates check-rule-vocabulary check-cookbook \
+        check-persona-resolves check-specialists check-fleet-airship-rules check-fleet-facts check-prompt-templates check-rule-vocabulary check-cookbook \
         check-long-functions check-rpc-registrar check-lag-slo-observable \
         check-controller-private-headers \
         check-file-size-ceiling check-framework-filename-suffix \
@@ -11395,6 +11395,11 @@ check-fleet-airship-rules:
 	@./tools/lint/check_fleet_airship_rules.sh --selftest
 	@./tools/lint/check_fleet_airship_rules.sh
 
+check-fleet-facts:
+	@echo "══ LINT: every fleet fact resolves and the routing doc renders it ══"
+	@./tools/lint/check_fleet_facts.sh --selftest
+	@./tools/lint/check_fleet_facts.sh
+
 check-prompt-templates:
 	@echo "══ LINT: every prompt template names a declared section ══"
 	@./tools/lint/check_prompt_templates.sh --selftest
@@ -12505,6 +12510,14 @@ $(CAPABILITY_INVENTORY_TOOL): $(CAPABILITY_INVENTORY_SRCS) \
 	    -Icore/modules/crypto/include -Iplatform/modules/platform/include \
 	    -o $@ $(CAPABILITY_INVENTORY_SRCS) $(CAPABILITY_INVENTORY_PLATFORM_LIBS)
 
+# docs/agent/EXECUTOR_HEURISTICS.md's routing table is GENERATED from
+# engine/composition/fleet_facts.def, the one place a routing fact is written
+# and the table `z23 dev know` answers from. Fix a mismatch with this target,
+# never by editing the block in the page.
+.PHONY: docs-executor-routing
+docs-executor-routing:
+	@./tools/lint/check_fleet_facts.sh --write-doc
+
 .PHONY: tools/gen_capability_inventory docs-capability-inventory
 tools/gen_capability_inventory: $(CAPABILITY_INVENTORY_TOOL)
 docs-capability-inventory: $(CAPABILITY_INVENTORY_TOOL)
@@ -12974,6 +12987,7 @@ LINT_GATES := \
     check-persona-resolves \
     check-specialists \
     check-fleet-airship-rules \
+    check-fleet-facts \
     check-prompt-templates \
     check-rule-vocabulary \
     check-cookbook \
