@@ -96,8 +96,12 @@ static bool rpc_tunnel_close(const struct json_value *params, bool help,
         return true;
     }
     int64_t id = tun_int(tun_input(params), "tunnel_id");
-    if (id <= 0 || !mesh_tunnel_close((uint64_t)id)) {
+    if (id <= 0) {
         tun_refuse(result, MESH_TUNNEL_REFUSED_MALFORMED);
+        return true;
+    }
+    if (!mesh_tunnel_close((uint64_t)id)) {
+        tun_refuse(result, MESH_TUNNEL_REFUSED_NO_SUCH_TUNNEL);
         return true;
     }
     json_set_object(result);
@@ -204,8 +208,13 @@ static bool rpc_tunnel_deny(const struct json_value *params, bool help,
     }
     const struct json_value *in = tun_input(params);
     uint16_t port = 0;
-    if (!tun_port(in, "port", true, &port) ||
-        !mesh_tunnel_deny(tun_str(in, "peer"), port)) {
+    if (!tun_port(in, "port", true, &port)) {
+        tun_refuse(result, MESH_TUNNEL_REFUSED_MALFORMED);
+        return true;
+    }
+    /* Nothing to take back is not a removal: the caller learns that this
+     * node was already admitting nothing for that peer and that port. */
+    if (!mesh_tunnel_deny(tun_str(in, "peer"), port)) {
         tun_refuse(result, MESH_TUNNEL_REFUSED_TARGET_NOT_ALLOWED);
         return true;
     }

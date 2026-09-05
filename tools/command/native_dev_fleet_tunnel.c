@@ -39,6 +39,8 @@ static const char *tunnel_refusal_help(const char *refusal)
     if (strcmp(refusal, "tunnel_dial_failed") == 0)
         return "the far machine allowed the port and nothing was listening "
                "on its loopback there";
+    if (strcmp(refusal, "tunnel_no_such_tunnel") == 0)
+        return "no tunnel with that id is open on this node";
     if (strcmp(refusal, "tunnel_malformed") == 0)
         return "the request named no peer, or a port outside 1..65535";
     return "the node refused the tunnel request";

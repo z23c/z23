@@ -124,6 +124,7 @@ const char *mesh_tunnel_refusal_string(enum mesh_tunnel_refusal reason)
     case MESH_TUNNEL_REFUSED_LOCAL_BIND_FAILED:
         return "tunnel_local_bind_failed";
     case MESH_TUNNEL_REFUSED_PEER_UNPAIRED: return "tunnel_peer_unpaired";
+    case MESH_TUNNEL_REFUSED_NO_SUCH_TUNNEL: return "tunnel_no_such_tunnel";
     case MESH_TUNNEL_ENDED_LOCAL_CLOSE: return "tunnel_local_closed";
     }
     return "tunnel_unavailable";

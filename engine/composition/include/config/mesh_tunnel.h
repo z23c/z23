@@ -94,8 +94,10 @@ enum mesh_tunnel_refusal {
     MESH_TUNNEL_REFUSED_LOCAL_BIND_FAILED = 6,
     /* The peer holds no live pairing row on this node. */
     MESH_TUNNEL_REFUSED_PEER_UNPAIRED = 7,
+    /* No entrance with that id is open on this node. */
+    MESH_TUNNEL_REFUSED_NO_SUCH_TUNNEL = 8,
     /* The socket on this side ended the connection. */
-    MESH_TUNNEL_ENDED_LOCAL_CLOSE = 8,
+    MESH_TUNNEL_ENDED_LOCAL_CLOSE = 9,
 };
 
 /* "tunnel_target_not_allowed", "tunnel_peer_unpaired",
