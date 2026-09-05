@@ -141,7 +141,7 @@
 #define ZCL_FLEET_ROW_VERSION 1u
 #define ZCL_FLEET_DOMAIN      "zcl.fleet_ledger_row.v1"
 
-#define ZCL_FLEET_PAIRS_MAX   12u
+#define ZCL_FLEET_PAIRS_MAX   16u
 #define ZCL_FLEET_NOTE_MAX    160u
 #define ZCL_FLEET_ID_BYTES    32u
 #define ZCL_FLEET_HASH_BYTES  32u
@@ -196,7 +196,11 @@ enum zcl_fleet_status {
     ZCL_FLEET_DELEGATION_EXPIRED,
     ZCL_FLEET_SEQUENCE,          /* sequence numbers are not dense */
     ZCL_FLEET_WINDOW,            /* more days asked for than the index keeps */
-    ZCL_FLEET_FULL               /* a bounded table is full */
+    ZCL_FLEET_FULL,              /* a bounded table is full */
+    /* An experiment enum was missing, was `unknown`, or was not in that
+     * field's closed vocabulary. Named so a caller can say which field
+     * refused rather than collapsing it into a generic malformed row. */
+    ZCL_FLEET_EXPERIMENT_ENUM
 };
 
 /* "ok", "ledger_chain_broken", "ledger_sig_invalid", "ledger_peer_unpaired",
@@ -207,15 +211,24 @@ const char *zcl_fleet_status_label(enum zcl_fleet_status s);
 
 /* Row kinds. The ledger is generic on purpose: the same chain, index and
  * sync later carry attestations and game rewards without a second store.
- * Only `usage`, `task` and `vitals` are writable in this build; the other
- * two are declared so their wire values are reserved now rather than
- * colliding with something later. */
+ * Only `usage`, `task`, `vitals` and `experiment` are writable in this
+ * build; `attest` and `reward` are declared so their wire values are
+ * reserved now rather than colliding with something later. */
 enum zcl_fleet_kind {
     ZCL_FLEET_KIND_USAGE = 1,
     ZCL_FLEET_KIND_TASK = 2,
     ZCL_FLEET_KIND_ATTEST = 3,
     ZCL_FLEET_KIND_REWARD = 4,
-    ZCL_FLEET_KIND_VITALS = 5
+    ZCL_FLEET_KIND_VITALS = 5,
+    ZCL_FLEET_KIND_EXPERIMENT = 6
+};
+
+/* kind=experiment: the wire subject is the phase. The task_id lives in
+ * `note` — a uint16 cannot hold it, and two rows of one delegation link
+ * by that note. */
+enum zcl_fleet_experiment_phase {
+    ZCL_FLEET_EXPERIMENT_PREDICT = 0,
+    ZCL_FLEET_EXPERIMENT_RESULT = 1
 };
 
 /* kind=usage: who was asked to do the work. */
@@ -257,9 +270,18 @@ enum zcl_fleet_pair_key {
     ZCL_FLEET_PAIR_VALUE = 9,
     ZCL_FLEET_PAIR_COUNT = 10,
     ZCL_FLEET_PAIR_BYTES = 11,
-    ZCL_FLEET_PAIR_LIMIT = 12
+    ZCL_FLEET_PAIR_LIMIT = 12,
+    ZCL_FLEET_PAIR_WALL_S = 13,
+    ZCL_FLEET_PAIR_LINES_ADDED = 14,
+    ZCL_FLEET_PAIR_LINES_REMOVED = 15,
+    ZCL_FLEET_PAIR_DEFECTS = 16,
+    ZCL_FLEET_PAIR_TASK_CLASS = 17,
+    ZCL_FLEET_PAIR_HARNESS = 18,
+    ZCL_FLEET_PAIR_OUTCOME = 19,
+    ZCL_FLEET_PAIR_MODEL = 20,
+    ZCL_FLEET_PAIR_EFFORT = 21
 };
-#define ZCL_FLEET_PAIR_KEY_MAX ZCL_FLEET_PAIR_LIMIT
+#define ZCL_FLEET_PAIR_KEY_MAX ZCL_FLEET_PAIR_EFFORT
 
 /* A number the writer did not have is ABSENT, never zero: a task that
  * reported no cached tokens and a task whose provider does not report them
@@ -307,6 +329,17 @@ bool zcl_fleet_subject_from_name(uint8_t kind, const char *name,
                                  uint16_t *subject_out);
 const char *zcl_fleet_pair_name(uint8_t key);
 bool zcl_fleet_pair_from_name(const char *name, uint8_t *key_out);
+
+/* Experiment closed vocabularies. `unknown` is a named member so a
+ * refusal can say the word; it is never stored. A name that is not in
+ * the field's table is the same refusal. `field` is the input key
+ * (`task_class`, `harness`, `outcome`, `model`, `effort`). */
+bool zcl_fleet_experiment_enum_from_name(const char *field, const char *name,
+                                         uint8_t *out);
+const char *zcl_fleet_experiment_enum_name(const char *field, uint8_t value);
+bool zcl_fleet_experiment_enum_stored(const char *field, uint8_t value);
+bool zcl_fleet_experiment_enum_key(uint8_t key);
+bool zcl_fleet_experiment_enum_pair_ok(uint8_t key, int64_t value);
 
 /* The vitals catalog, from engine/composition/fleet_vitals.def. Index is
  * the subject value on the wire, so the order in that file is identity. */
@@ -504,6 +537,32 @@ enum zcl_fleet_status zcl_fleet_ledger_query(
  * operator surfaces say so rather than printing a smaller number as if it
  * were the whole one. */
 uint64_t zcl_fleet_ledger_index_overflow(const struct zcl_fleet_ledger *l);
+
+/* One (task_class, model) answer over the experiment events the index
+ * kept. Medians and the predicted-vs-actual ratio need per-row values,
+ * so this walk is over those events rather than over merged day cells.
+ * Rates and ratios are basis points, never a float. */
+struct zcl_fleet_experiment_group {
+    uint8_t task_class;
+    uint8_t model;
+    uint64_t predicts;
+    uint64_t results;
+    uint64_t lands;
+    uint64_t unpredicted;
+    int64_t median_wall_s;
+    int64_t median_tokens;
+    int64_t pred_actual_bp;
+    uint8_t have_median_wall;
+    uint8_t have_median_tokens;
+    uint8_t have_pred_actual;
+};
+
+enum zcl_fleet_status zcl_fleet_ledger_experiment_stats(
+    const struct zcl_fleet_ledger *ledger,
+    struct zcl_fleet_experiment_group *out, size_t cap, size_t *count,
+    uint64_t *unpredicted, uint64_t *index_us);
+
+uint64_t zcl_fleet_ledger_experiment_overflow(const struct zcl_fleet_ledger *l);
 
 /* The UTC day number a timestamp falls in — the index's bucket key, exposed
  * because a caller rendering a table needs the same arithmetic. */

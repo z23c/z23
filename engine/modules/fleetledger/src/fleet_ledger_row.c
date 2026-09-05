@@ -75,12 +75,42 @@ enum zcl_fleet_status zcl_fleet_row_validate(const struct zcl_fleet_row *row)
         return ZCL_FLEET_MALFORMED;
     /* Ascending with no repeats: one canonical order, and a key can never
      * appear twice so a sum can never double-count one row. */
+    bool have_task_class = false, have_model = false, have_harness = false;
+    bool have_effort = false, have_outcome = false;
     for (size_t i = 0; i < row->pair_count; i++) {
         uint8_t key = row->pair[i].key;
         if (!zcl_fleet_pair_name(key))
             return ZCL_FLEET_PAIR_UNKNOWN;
         if (i > 0 && key <= row->pair[i - 1].key)
             return ZCL_FLEET_MALFORMED;
+        if (zcl_fleet_experiment_enum_key(key)) {
+            if (row->kind != ZCL_FLEET_KIND_EXPERIMENT)
+                return ZCL_FLEET_PAIR_UNKNOWN;
+            if (!zcl_fleet_experiment_enum_pair_ok(key, row->pair[i].value))
+                return ZCL_FLEET_EXPERIMENT_ENUM;
+            if (key == ZCL_FLEET_PAIR_TASK_CLASS)
+                have_task_class = true;
+            else if (key == ZCL_FLEET_PAIR_MODEL)
+                have_model = true;
+            else if (key == ZCL_FLEET_PAIR_HARNESS)
+                have_harness = true;
+            else if (key == ZCL_FLEET_PAIR_EFFORT)
+                have_effort = true;
+            else if (key == ZCL_FLEET_PAIR_OUTCOME)
+                have_outcome = true;
+        }
+    }
+    if (row->kind == ZCL_FLEET_KIND_EXPERIMENT) {
+        /* The task_id is the note: two rows of one delegation link by it. */
+        if (row->note_len == 0)
+            return ZCL_FLEET_ARGUMENT;
+        if (!have_task_class || !have_model)
+            return ZCL_FLEET_EXPERIMENT_ENUM;
+        if (row->subject == ZCL_FLEET_EXPERIMENT_PREDICT &&
+            (!have_harness || !have_effort))
+            return ZCL_FLEET_EXPERIMENT_ENUM;
+        if (row->subject == ZCL_FLEET_EXPERIMENT_RESULT && !have_outcome)
+            return ZCL_FLEET_EXPERIMENT_ENUM;
     }
     return ZCL_FLEET_OK;
 }
