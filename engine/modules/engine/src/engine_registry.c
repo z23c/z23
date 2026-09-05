@@ -30,7 +30,7 @@
  * engine/engine.h for the placeholder vocabulary. */
 
 /* Reads its prompt from a file and has a turn cap of its own. */
-static const char *const k_grok_cli_argv[] = {
+static const char *const k_grok_cli_start_argv[] = {
     "--prompt-file", ENGINE_CLI_PROMPT_TOKEN,
     "--cwd",         ENGINE_CLI_WORKDIR_TOKEN,
     "--max-turns",   ENGINE_CLI_TURNS_TOKEN,
@@ -51,12 +51,15 @@ static const char *const k_grok_cli_argv[] = {
  * and mapping a repair budget of 3 onto it would cap real work at three tool
  * calls. So no {turns} slot — the CLI keeps its own default, which is the
  * honest answer to "we have nothing to say about this". */
-static const char *const k_glm_cli_argv[] = {
+static const char *const k_glm_cli_start_argv[] = {
     "--no-color",
     "--directory", ENGINE_CLI_WORKDIR_TOKEN,
     "--model",     ENGINE_CLI_MODEL_TOKEN,
     "--prompt",    ENGINE_CLI_PROMPT_TOKEN,
     NULL
+};
+static const char *const k_grok_cli_resume_argv[] = {
+    "--resume", ENGINE_CLI_RESUME_TOKEN, NULL
 };
 
 static const struct engine_vendor k_engine_vendors[] = {
@@ -142,12 +145,12 @@ static const struct engine_vendor k_engine_vendors[] = {
         .key_env       = NULL,
         .key_file_rel  = NULL,
         .program       = "grok",
-        .cli_argv      = k_grok_cli_argv,
+        .start_argv    = k_grok_cli_start_argv,
         .cli_reasoning_effort_flag = "--reasoning-effort",
-        .cli_resume_flag = "--resume",
+        .resume_argv = k_grok_cli_resume_argv,
         .cli_prompt    = ENGINE_CLI_PROMPT_FILE,
         .cli_needs_tty = true,
-        .cli_output    = ENGINE_CLI_OUTPUT_GROK_JSON,
+        .report_format = ENGINE_CLI_OUTPUT_GROK_JSON,
         .supports_reasoning_effort = true,
         .wire          = ENGINE_WIRE_LOCAL_CLI,
         .delivery      = ENGINE_DELIVERS_EDITS,
@@ -175,7 +178,7 @@ static const struct engine_vendor k_engine_vendors[] = {
         .key_file_rel  = NULL,
         .program       = "zai",
         .is_default    = true,
-        .cli_argv      = k_glm_cli_argv,
+        .start_argv    = k_glm_cli_start_argv,
         .cli_prompt    = ENGINE_CLI_PROMPT_ARG,
         .wire          = ENGINE_WIRE_LOCAL_CLI,
         .delivery      = ENGINE_DELIVERS_EDITS,
@@ -227,6 +230,12 @@ const struct engine_vendor *engine_by_id(const char *id)
             return &k_engine_vendors[i];
     }
     return NULL;
+}
+
+const char *const *engine_registry_resume_argv(const char *name)
+{
+    const struct engine_vendor *v = engine_by_id(name);
+    return v ? v->resume_argv : NULL;
 }
 
 const char *engine_endpoint(const struct engine_vendor *v)

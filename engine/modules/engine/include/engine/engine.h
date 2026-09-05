@@ -142,6 +142,7 @@ enum engine_cli_output {
 #define ENGINE_CLI_PROMPT_TOKEN  "{prompt}"
 #define ENGINE_CLI_WORKDIR_TOKEN "{workdir}"
 #define ENGINE_CLI_TURNS_TOKEN   "{turns}"
+#define ENGINE_CLI_RESUME_TOKEN  "{resume_session_id}"
 #define ENGINE_CLI_MODEL_TOKEN   "{model}"
 
 #define ENGINE_REASONING_EFFORT_PROVIDER_DEFAULT "provider_default"
@@ -184,20 +185,20 @@ struct engine_vendor {
     const char      *program;        /* argv[0] for a CLI dialect, else NULL */
     /* CLI dialect only. NULL-terminated argument template, argv[0] excluded
      * because it is always `program`. NULL for a non-CLI vendor. */
-    const char *const *cli_argv;
+    const char *const *start_argv;
     /* Optional CLI flag whose following argument is low/medium/high/xhigh.
      * NULL means this row cannot accept an explicit reasoning effort. */
     const char      *cli_reasoning_effort_flag;
-    /* Optional CLI flag whose following argument is a session UUID to resume.
-     * NULL means this row cannot accept a resume session. */
-    const char      *cli_resume_flag;
+    /* Optional NULL-terminated extension appended after start argv and effort.
+     * Uses the same closed placeholders; NULL refuses session resumption. */
+    const char *const *resume_argv;
     enum engine_cli_prompt cli_prompt;
     /* Some installed CLIs reject pipe-backed stdio even in single-turn mode.
      * This is invocation metadata, not a vendor-name special case: the
      * standalone dispatcher selects the existing PTY capture transport when
      * true. It changes no authority and is never used by the node. */
     bool             cli_needs_tty;
-    enum engine_cli_output cli_output;
+    enum engine_cli_output report_format;
     bool             supports_reasoning_effort;
     enum engine_wire wire;
     enum engine_delivery delivery;
@@ -255,6 +256,8 @@ bool engine_needs_key(const struct engine_vendor *v);
  * Defaulting WHICH engine is not defaulting WHETHER to dispatch. Every path
  * that spends money or writes code still requires its own per-run opt-in. */
 const struct engine_vendor *engine_default(void);
+/* Borrowed extension template, or NULL for an unknown/unsupported engine. */
+const char *const *engine_registry_resume_argv(const char *name);
 
 
 /* What a caller supplies for the placeholders. A field a row does not name

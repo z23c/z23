@@ -1604,9 +1604,9 @@ static int case_cli_argv(void)
         const struct engine_vendor *v = engine_at(i);
         if (v->wire == ENGINE_WIRE_LOCAL_CLI) {
             cli_rows++;
-            if (!v->program || !v->program[0] || !v->cli_argv)
+            if (!v->program || !v->program[0] || !v->start_argv)
                 cli_rows_complete = false;
-        } else if (v->program || v->cli_argv) {
+        } else if (v->program || v->start_argv) {
             non_cli_rows_clean = false;
         }
     }
@@ -1616,7 +1616,7 @@ static int case_cli_argv(void)
     EN_CHECK("more than one CLI vendor is registered", cli_rows >= 2);
 
     const struct engine_vendor *grok_cap = engine_by_id("grok-cli");
-    const struct engine_vendor *glm_cap = engine_by_id("glm");
+    const struct engine_vendor *glm_cap = engine_by_id("glm-cli");
     EN_CHECK("Grok CLI explicitly accepts turns",
              grok_cap && engine_cli_accepts_turns(grok_cap));
     EN_CHECK("GLM does not claim a CLI turn slot",
@@ -1708,10 +1708,15 @@ static int case_cli_argv(void)
                                        ENGINE_CLI_ARGV_MAX) == 0);
 
         const struct engine_vendor *grok = engine_by_id("grok-cli");
-        EN_CHECK("grok-cli exposes its resume flag", grok != NULL
-                 && grok->cli_resume_flag != NULL
-                 && strcmp(grok->cli_resume_flag, "--resume") == 0);
+        EN_CHECK("grok-cli exposes its resume argv", grok != NULL
+                 && grok->resume_argv != NULL
+                 && strcmp(grok->resume_argv[0], "--resume") == 0
+                 && strcmp(grok->resume_argv[1], ENGINE_CLI_RESUME_TOKEN) == 0);
         if (grok) {
+            EN_CHECK("resume accessor returns the registered extension",
+                     engine_registry_resume_argv("grok-cli") == grok->resume_argv
+                     && engine_registry_resume_argv("glm-cli") == NULL
+                     && engine_registry_resume_argv("unknown-engine") == NULL);
             const char *session = "23c9be10-5084-43a4-8e1a-2735a4650981";
             struct engine_cli_inputs base_resume = in;
             base_resume.reasoning_effort = "low";
@@ -1741,6 +1746,14 @@ static int case_cli_argv(void)
                             == 0
                      && engine_cli_argv_build(grok, &resumed, argv, resumed_n + 1)
                             == resumed_n);
+            struct engine_vendor malformed_resume = *grok;
+            static const char *const unknown_resume[] = {
+                "--resume", "{unknown_session}", NULL
+            };
+            malformed_resume.resume_argv = unknown_resume;
+            EN_CHECK("an unknown resume placeholder is refused",
+                     engine_cli_argv_build(&malformed_resume, &resumed, argv,
+                                           ENGINE_CLI_ARGV_MAX) == 0);
 
             const char *bad[] = { "", " ",
                 "23c9be10-5084-43a4-8e1a-2735a465098",
@@ -1823,14 +1836,14 @@ static int case_cli_argv(void)
     static const char *const bogus_argv[] = { "--flag", "{mdoel}", NULL };
     struct engine_vendor bogus = {
         .id = "bogus", .program = "true",
-        .cli_argv = bogus_argv, .cli_prompt = ENGINE_CLI_PROMPT_FILE,
+        .start_argv = bogus_argv, .cli_prompt = ENGINE_CLI_PROMPT_FILE,
         .wire = ENGINE_WIRE_LOCAL_CLI,
     };
     EN_CHECK("an unknown placeholder is refused, not passed through",
              engine_cli_argv_build(&bogus, &in, argv, ENGINE_CLI_ARGV_MAX) == 0);
 
     struct engine_vendor no_template = bogus;
-    no_template.cli_argv = NULL;
+    no_template.start_argv = NULL;
     EN_CHECK("a CLI row with no template is refused",
              engine_cli_argv_build(&no_template, &in, argv,
                                    ENGINE_CLI_ARGV_MAX) == 0);

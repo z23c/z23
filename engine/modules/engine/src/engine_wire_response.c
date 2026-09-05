@@ -223,9 +223,9 @@ bool engine_cli_observation_parse(const struct engine_vendor *vendor,
     memset(out, 0, sizeof(*out));
     if (!vendor)
         LOG_FAIL("engine", "refusing CLI metadata without a vendor");
-    if (vendor->cli_output == ENGINE_CLI_OUTPUT_PLAIN)
+    if (vendor->report_format == ENGINE_CLI_OUTPUT_PLAIN)
         return true;
-    if (vendor->cli_output != ENGINE_CLI_OUTPUT_GROK_JSON)
+    if (vendor->report_format != ENGINE_CLI_OUTPUT_GROK_JSON)
         LOG_FAIL("engine", "refusing unknown CLI output shape");
     return cli_observation_from_grok(body, len, out);
 }

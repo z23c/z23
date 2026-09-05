@@ -72,10 +72,10 @@ bool engine_cli_turns_parse(const char *text, int *out)
 
 bool engine_cli_accepts_turns(const struct engine_vendor *v)
 {
-    if (!v || v->wire != ENGINE_WIRE_LOCAL_CLI || !v->cli_argv)
+    if (!v || v->wire != ENGINE_WIRE_LOCAL_CLI || !v->start_argv)
         return false;
-    for (size_t i = 0; v->cli_argv[i]; i++)
-        if (strcmp(v->cli_argv[i], ENGINE_CLI_TURNS_TOKEN) == 0)
+    for (size_t i = 0; v->start_argv[i]; i++)
+        if (strcmp(v->start_argv[i], ENGINE_CLI_TURNS_TOKEN) == 0)
             return true;
     return false;
 }
@@ -94,6 +94,7 @@ static const char *resolve(const char *slot,
     if (strcmp(slot, ENGINE_CLI_WORKDIR_TOKEN) == 0) return in->workdir;
     if (strcmp(slot, ENGINE_CLI_TURNS_TOKEN) == 0)   return in->turns;
     if (strcmp(slot, ENGINE_CLI_MODEL_TOKEN) == 0)   return in->model;
+    if (strcmp(slot, ENGINE_CLI_RESUME_TOKEN) == 0) return in->resume_session_id;
     /* A brace-shaped slot this file does not know is not passed through as a
      * literal. A CLI receiving the six characters {mdoel} would treat them as
      * a value and do something confident and wrong. */
@@ -109,7 +110,7 @@ size_t engine_cli_argv_build(const struct engine_vendor *v,
         LOG_RETURN(0, "engine", "bad arguments to engine_cli_argv_build");
     if (!v->program || !v->program[0])
         LOG_RETURN(0, "engine", "engine %s names no program to run", v->id);
-    if (!v->cli_argv)
+    if (!v->start_argv)
         LOG_RETURN(0, "engine", "engine %s carries no argv template", v->id);
 
     /* An argument-mode prompt is bounded well below the prompt ceiling,
@@ -127,17 +128,17 @@ size_t engine_cli_argv_build(const struct engine_vendor *v,
 
     size_t n = 0;
     out[n++] = v->program;
-    for (size_t i = 0; v->cli_argv[i]; i++) {
+    for (size_t i = 0; v->start_argv[i]; i++) {
         bool unknown = false;
-        const char *value = resolve(v->cli_argv[i], in, &unknown);
+        const char *value = resolve(v->start_argv[i], in, &unknown);
         if (unknown)
             LOG_RETURN(0, "engine",
                        "engine %s names the argv placeholder %s, which this "
-                       "build does not know", v->id, v->cli_argv[i]);
+                       "build does not know", v->id, v->start_argv[i]);
         if (!value || !value[0])
             LOG_RETURN(0, "engine",
                        "engine %s needs a value for %s and none was supplied",
-                       v->id, v->cli_argv[i]);
+                       v->id, v->start_argv[i]);
         /* +1 for the terminator, which is written after the loop. */
         if (n + 1 >= cap)
             LOG_RETURN(0, "engine",
@@ -159,14 +160,19 @@ size_t engine_cli_argv_build(const struct engine_vendor *v,
     if (!engine_resume_session_id_valid(in->resume_session_id))
         LOG_RETURN(0, "engine", "invalid resume session id");
     if (in->resume_session_id) {
-        if (!v->cli_resume_flag)
+        if (!v->resume_argv)
             LOG_RETURN(0, "engine", "engine %s accepts no resume session",
                        v->id);
         if (n + 3 > cap)
             LOG_RETURN(0, "engine", "engine %s needs more than %zu argv slots",
                        v->id, cap);
-        out[n++] = v->cli_resume_flag;
-        out[n++] = in->resume_session_id;
+        for (size_t i = 0; v->resume_argv[i]; i++) {
+            bool unknown = false;
+            const char *value = resolve(v->resume_argv[i], in, &unknown);
+            if (unknown || !value || !value[0] || n + 1 >= cap)
+                LOG_RETURN(0, "engine", "invalid resume argv template");
+            out[n++] = value;
+        }
     }
     out[n] = NULL;
     return n;

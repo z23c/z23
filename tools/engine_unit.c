@@ -181,7 +181,7 @@ struct unit_opts {
      * its own receipt — see unit_ledger_row(). */
     const char *fleet_ledger_bin;
     int    turns;
-    int    cli_turns; /* 0 means omitted: the CLI inherits --turns */
+    int    cli_turns; /* 0 means omitted: the CLI inherits --rounds */
     bool   cli_turns_set;
     int    timeout_s;
     /* The gate gets its own clock. A cold worktree compiles the whole tree
@@ -230,8 +230,9 @@ static void usage(void)
 "  --model ID        override the engine's default model\n"
 "  --reasoning-effort E  provider_default, low, medium, high, or xhigh\n"
 "  --resume UUID     continue a grok-cli session (canonical lowercase UUID)\n"
-"  --cli-turns N     installed-CLI turn cap (1..256); omitted uses --turns\n"
-"  --turns N         repair turns when a reply does not apply (default %d)\n"
+"  --max-turns N     installed-CLI turn cap (1..256); omitted uses --rounds\n"
+"  --rounds N        judge/repair rounds (1..10, default %d)\n"
+"  --turns N         compatibility spelling of --rounds\n"
 "  --timeout N       dispatch wall clock in seconds (default %d, max %d)\n"
 "  --gate-timeout N  wall clock for the gate run; defaults to --timeout. A\n"
 "                    cold worktree builds the tree first, which is minutes\n"
@@ -291,6 +292,21 @@ static bool parse_args(int argc, char **argv, struct unit_opts *o)
     o->timeout_s = UNIT_DEFAULT_TIMEOUT;
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
+        if (strncmp(a, "--resume=", 9) == 0) {
+            o->resume_session_id = a + 9;
+            continue;
+        }
+        if (strncmp(a, "--max-turns=", 12) == 0) {
+            o->cli_turns_set = true;
+            if (!engine_cli_turns_parse(a + 12, &o->cli_turns))
+                LOG_FAIL("engine_unit", "--max-turns requires decimal 1..256");
+            continue;
+        }
+        if (strncmp(a, "--rounds=", 9) == 0) {
+            if (!engine_cli_turns_parse(a + 9, &o->turns) || o->turns > 10)
+                LOG_FAIL("engine_unit", "--rounds requires decimal 1..10");
+            continue;
+        }
 #define TAKE(flag, field)                                   \
         if (strcmp(a, flag) == 0) {                         \
             if (!need_value(argc, i, flag)) return false; \
@@ -311,19 +327,20 @@ static bool parse_args(int argc, char **argv, struct unit_opts *o)
         TAKE("--state-dir", state_dir)
         TAKE("--fleet-ledger", fleet_ledger_bin)
 #undef TAKE
-        if (strcmp(a, "--turns") == 0 || strcmp(a, "--timeout") == 0
+        if (strcmp(a, "--turns") == 0 || strcmp(a, "--rounds") == 0 || strcmp(a, "--timeout") == 0
             || strcmp(a, "--gate-timeout") == 0
             || strcmp(a, "--max-cost-usd") == 0
-            || strcmp(a, "--cli-turns") == 0) {
+            || strcmp(a, "--max-turns") == 0) {
             if (!need_value(argc, i, a))
                 return false;
             const char *v = argv[++i];
-            if (strcmp(a, "--turns") == 0)
-                o->turns = atoi(v);
-            else if (strcmp(a, "--cli-turns") == 0) {
+            if (strcmp(a, "--turns") == 0 || strcmp(a, "--rounds") == 0) {
+                if (!engine_cli_turns_parse(v, &o->turns) || o->turns > 10)
+                    LOG_FAIL("engine_unit", "--rounds requires decimal 1..10");
+            } else if (strcmp(a, "--max-turns") == 0) {
                 o->cli_turns_set = true;
                 if (!engine_cli_turns_parse(v, &o->cli_turns))
-                    LOG_FAIL("engine_unit", "--cli-turns requires decimal 1..256");
+                    LOG_FAIL("engine_unit", "--max-turns requires decimal 1..256");
             } else if (strcmp(a, "--timeout") == 0)
                 o->timeout_s = atoi(v);
             else if (strcmp(a, "--gate-timeout") == 0)
@@ -1026,7 +1043,7 @@ static int probe_cli(const struct engine_vendor *v, const char *model_override,
         free(log);
         return 1;
     }
-    if (v->cli_output == ENGINE_CLI_OUTPUT_GROK_JSON) {
+    if (v->report_format == ENGINE_CLI_OUTPUT_GROK_JSON) {
         struct engine_cli_observation observation;
         if (!engine_cli_observation_parse(v, log, strlen(log), &observation)) {
             printf("MALFORMED SESSION METADATA in %lldms\n",
@@ -2300,7 +2317,7 @@ int main(int argc, char **argv)
         if (o.resume_session_id)
             return fail_setup("--resume is not valid on --probe");
         if (o.cli_turns_set)
-            return fail_setup("--cli-turns is not valid on --probe");
+            return fail_setup("--max-turns is not valid on --probe");
         return probe_all(&o);
     }
     /* An unnamed engine resolves to the registry default rather than being a
@@ -2319,13 +2336,13 @@ int main(int argc, char **argv)
     if (!engine_resume_session_id_valid(o.resume_session_id))
         return fail_setup("--resume needs a canonical lowercase hexadecimal "
                           "UUID");
-    if (o.resume_session_id && !v->cli_resume_flag)
+    if (o.resume_session_id && !v->resume_argv)
         return fail_setup("selected engine accepts no --resume session");
     if (o.cli_turns_set) {
         if (o.cli_turns < 1 || o.cli_turns > 256)
-            return fail_setup("--cli-turns must be between 1 and 256");
+            return fail_setup("--max-turns must be between 1 and 256");
         if (!engine_cli_accepts_turns(v))
-            return fail_setup("selected engine does not consume --cli-turns");
+            return fail_setup("selected engine does not consume --max-turns");
     }
     if (!o.engine_id)
         engine_emit(stdout, "engine_unit: no --engine given, using %s (%s)\n",
@@ -2336,7 +2353,7 @@ int main(int argc, char **argv)
         return fail_setup("need --group NAME, or --no-group if this unit "
                           "truly cannot have one");
     if (o.turns < 1 || o.turns > 10)
-        return fail_setup("--turns must be between 1 and 10");
+        return fail_setup("--rounds must be between 1 and 10");
     const size_t retry_attempts =
         (size_t)(v->max_retries < 0 ? 0 : v->max_retries) + 1u;
     const size_t possible_compactions =
@@ -2346,7 +2363,7 @@ int main(int argc, char **argv)
     if (invocation_capacity_needed > ENGINE_RECEIPT_INVOCATIONS_MAX) {
         char why[192];
         (void)snprintf(why, sizeof(why),
-                       "--turns and %s's retry budget could require %zu "
+                       "--rounds and %s's retry budget could require %zu "
                        "provider calls; receipt cap is %u",
                        v->id, invocation_capacity_needed,
                        (unsigned)ENGINE_RECEIPT_INVOCATIONS_MAX);
