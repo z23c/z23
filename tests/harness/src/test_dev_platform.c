@@ -3378,6 +3378,29 @@ static int test_source_identity_failure_tokens(void)
         ASSERT(strcmp(why, "source_identity_exit_7") == 0);
         ASSERT(!zcl_dev_source_identity_failure_retryable(why));
 
+        /* 126 is the runner's OWN pre-exec setup-failure convention
+         * (zcl_devloop_process_run's forked child: setsid, ready-pipe
+         * write, chdir, dup2 -- see ZCL_DEVLOOP_PROCESS_EXIT_SETUP_FAILED),
+         * never the capture command's exit code. A transient failure there
+         * under load is load-shaped, so it must classify distinctly from an
+         * ordinary nonzero exit and must be retryable. */
+        memset(&result, 0, sizeof(result));
+        result.exit_code = ZCL_DEVLOOP_PROCESS_EXIT_SETUP_FAILED;
+        ASSERT(zcl_dev_source_identity_classify_failure(&result, why,
+                                                         sizeof(why)));
+        ASSERT(strcmp(why, "source_identity_runner_setup_failed") == 0);
+        ASSERT(zcl_dev_source_identity_failure_retryable(why));
+
+        /* 127 stays "exec failed" -- a real execvp failure naming a missing
+         * or unrunnable tool, which is a deterministic defect a retry
+         * cannot fix. */
+        memset(&result, 0, sizeof(result));
+        result.exit_code = 127;
+        ASSERT(zcl_dev_source_identity_classify_failure(&result, why,
+                                                         sizeof(why)));
+        ASSERT(strcmp(why, "source_identity_exit_127") == 0);
+        ASSERT(!zcl_dev_source_identity_failure_retryable(why));
+
         memset(&result, 0, sizeof(result));
         result.output_truncated = true;
         ASSERT(zcl_dev_source_identity_classify_failure(&result, why,

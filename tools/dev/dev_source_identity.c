@@ -42,6 +42,14 @@ bool zcl_dev_source_identity_classify_failure(
                        result->term_signal);
         return true;
     }
+    if (result->exit_code == ZCL_DEVLOOP_PROCESS_EXIT_SETUP_FAILED) {
+        /* The runner itself failed before exec (setsid, ready-pipe write,
+         * chdir, dup2) — not the capture command. Distinct from an ordinary
+         * nonzero exit so it can be retried; see
+         * zcl_dev_source_identity_failure_retryable(). */
+        (void)snprintf(why, why_len, "source_identity_runner_setup_failed");
+        return true;
+    }
     if (result->exit_code != 0) {
         (void)snprintf(why, why_len, "source_identity_exit_%d",
                        result->exit_code);
@@ -60,12 +68,15 @@ bool zcl_dev_source_identity_failure_retryable(const char *why)
     if (!why)
         return false;
     /* Retry only conditions load can plausibly cause: the capture ran too
-     * long, was interrupted by a signal, or its output was cut short. A
-     * nonzero exit or an invalid/malformed record is a deterministic tool
-     * or content defect that a retry cannot fix. */
+     * long, was interrupted by a signal, its output was cut short, or the
+     * runner itself failed to get the command started (setsid, ready-pipe
+     * write, chdir, dup2 — see ZCL_DEVLOOP_PROCESS_EXIT_SETUP_FAILED). A
+     * nonzero exit from the command itself, or an invalid/malformed record,
+     * is a deterministic tool or content defect that a retry cannot fix. */
     return strncmp(why, "source_identity_timeout", 23) == 0 ||
            strncmp(why, "source_identity_signal_", 23) == 0 ||
-           strncmp(why, "source_identity_output_truncated", 33) == 0;
+           strncmp(why, "source_identity_output_truncated", 33) == 0 ||
+           strncmp(why, "source_identity_runner_setup_failed", 36) == 0;
 }
 
 static bool lower_hex64(const char *input, char out[65])

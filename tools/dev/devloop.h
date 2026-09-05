@@ -250,6 +250,11 @@ int zcl_devloop_test_closure_file_cap(int indexed, size_t changed_count);
 extern size_t zcl_devloop_test_plan_group_cap;
 #endif
 
+/* The forked child's own convention for a pre-exec setup failure (setsid,
+ * the ready-pipe write, chdir(cwd), dup2) — never the command's exit code.
+ * 127 stays "exec failed"; this runner never changes either number. */
+#define ZCL_DEVLOOP_PROCESS_EXIT_SETUP_FAILED 126
+
 struct zcl_devloop_process_result {
     int exit_code;
     int term_signal;

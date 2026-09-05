@@ -619,10 +619,10 @@ static bool process_run_impl(const char *cwd, int exec_fd,
     if (!darwin_attested_spawn && pid == 0) {
         close(ready_fds[0]);
         if (setsid() < 0)
-            _exit(126);
+            _exit(ZCL_DEVLOOP_PROCESS_EXIT_SETUP_FAILED);
         char ready = '1';
         if (write(ready_fds[1], &ready, 1) != 1)
-            _exit(126);
+            _exit(ZCL_DEVLOOP_PROCESS_EXIT_SETUP_FAILED);
         /* Keep the CLOEXEC descriptor open through setup. The parent sees
          * EOF exactly when exec succeeds (or the child exits), separating
          * process startup from command body time without a wrapper. */
@@ -630,18 +630,18 @@ static bool process_run_impl(const char *cwd, int exec_fd,
         if (raise_stack) {
             struct rlimit limit;
             if (getrlimit(RLIMIT_STACK, &limit) != 0)
-                _exit(126);
+                _exit(ZCL_DEVLOOP_PROCESS_EXIT_SETUP_FAILED);
             if (limit.rlim_cur != limit.rlim_max) {
                 limit.rlim_cur = limit.rlim_max;
                 if (setrlimit(RLIMIT_STACK, &limit) != 0)
-                    _exit(126);
+                    _exit(ZCL_DEVLOOP_PROCESS_EXIT_SETUP_FAILED);
             }
         }
         if (chdir(cwd) != 0)
-            _exit(126);
+            _exit(ZCL_DEVLOOP_PROCESS_EXIT_SETUP_FAILED);
         if (dup2(fds[1], STDOUT_FILENO) < 0 ||
             dup2(fds[1], STDERR_FILENO) < 0)
-            _exit(126);
+            _exit(ZCL_DEVLOOP_PROCESS_EXIT_SETUP_FAILED);
         close(fds[1]);
         if (exec_fd >= 0) {
             extern char **environ;
