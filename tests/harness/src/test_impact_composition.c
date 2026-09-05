@@ -2259,15 +2259,37 @@ static int test_ic_proof_dependency_crosses_filesystems(void)
         ASSERT(stat(source, &source_st) == 0);
         ASSERT(source_st.st_mtim.tv_sec == 1000000000);
 
-        /* Same filesystem keeps the link fast path: one inode, not two. */
+        /* Mac proof lanes must not expose a donor's writable inode through
+         * an allowed generation pathname. Linux retains its link fast path. */
         snprintf(same, sizeof(same), "%s/%s/linked.sh", cwd, relative);
+#if defined(__APPLE__)
+        /* A generation made by an older worker may already share the inode. */
+        ASSERT(unlink(same) == 0 || errno == ENOENT);
+        ASSERT(link(source, same) == 0);
+#endif
         ASSERT(zcl_dev_proof_dependency_materialize(source, same));
         struct stat same_st;
         ASSERT(stat(same, &same_st) == 0);
         ASSERT(same_st.st_dev == source_st.st_dev);
+#if defined(__APPLE__)
+        ASSERT(same_st.st_ino != source_st.st_ino);
+#else
         ASSERT(same_st.st_ino == source_st.st_ino);
+#endif
         ASSERT(same_st.st_mtim.tv_sec == source_st.st_mtim.tv_sec);
         ASSERT(same_st.st_mtim.tv_nsec == source_st.st_mtim.tv_nsec);
+#if defined(__APPLE__)
+        int modified = open(same, O_WRONLY);
+        ASSERT(modified >= 0);
+        ASSERT(write(modified, "X", 1) == 1);
+        ASSERT(close(modified) == 0);
+        int original = open(source, O_RDONLY);
+        ASSERT(original >= 0);
+        char first_byte = 0;
+        ASSERT(read(original, &first_byte, 1) == 1);
+        ASSERT(close(original) == 0);
+        ASSERT(first_byte == body[0]);
+#endif
 
         /* Pin the fallback on every native host, including those without
          * /dev/shm. Only EXDEV is injected; copying and metadata are real. */
@@ -3283,7 +3305,11 @@ static int test_pw_seed_links_replaces_and_copies(void)
         unsigned long long gen_zcc_ino = 0, donor_zcc_ino = 0;
         ASSERT(pw_stat_ino(gen_a_o, &gen_a_ino));
         ASSERT(pw_stat_ino(donor_a_o, &donor_a_ino));
+#if defined(__APPLE__)
+        ASSERT(gen_a_ino != donor_a_ino);
+#else
         ASSERT(gen_a_ino == donor_a_ino);
+#endif
         ASSERT(pw_stat_ino(gen_zcc, &gen_zcc_ino));
         ASSERT(pw_stat_ino(donor_zcc, &donor_zcc_ino));
         ASSERT(gen_zcc_ino != donor_zcc_ino);
@@ -3322,6 +3348,13 @@ static int test_pw_seed_links_replaces_and_copies(void)
         ASSERT(ok);
         ASSERT(changed_ns > seed_ns);
         ASSERT(seed_ns > same_ns);
+#if defined(__APPLE__)
+        /* A hostile build need not use the cooperative publisher. Writing
+         * the allowed path in place must still leave the donor intact. */
+        ASSERT(ic_write(root, "gen/build/obj/epochs/E/mod/a.o", "HOSTILE"));
+        ASSERT(pw_read_all(donor_a_o, buf, sizeof(buf), NULL));
+        ASSERT(strcmp(buf, "OBJECT-A-V1") == 0);
+#endif
         /* Publisher semantics: rebuild through staging plus rename. The
          * donor keeps its bytes and its inode; the new object diverges. */
         ASSERT(ic_write(root, "gen/build/obj/epochs/E/mod/a.o.new",

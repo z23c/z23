@@ -1401,7 +1401,9 @@ static const char *proof_errno_name(int value)
     }
 }
 
-/* link() is the fast path but only works inside one filesystem. A RAM-backed
+/* Independent copies on macOS prevent generation writes reaching donors
+ * through shared inodes. Elsewhere link() is the fast path but only works
+ * inside one filesystem. A RAM-backed
  * generation root (/dev/shm) is a different filesystem from the checkout, so
  * link() answers EXDEV there and the dependency has to be copied byte for
  * byte. The mode carries: a hook or a .so that arrived without its executable
@@ -1451,7 +1453,8 @@ static bool dependency_copy_stat(const char *source, const char *target,
     return ok;
 }
 
-static int dependency_link(const char *source, const char *target)
+static int dependency_seed(const char *source, const char *target,
+                           const struct stat *source_st)
 {
 #if defined(ZCL_TESTING)
     /* Exercise the real fallback without requiring a second filesystem. */
@@ -1462,7 +1465,14 @@ static int dependency_link(const char *source, const char *target)
         return -1;
     }
 #endif
+#if defined(__APPLE__)
+    /* Seatbelt grants paths, not independent ownership of a shared inode.
+     * A writable generation must not be able to overwrite its donor. */
+    return dependency_copy_stat(source, target, source_st) ? 0 : -1;
+#else
+    (void)source_st;
     return link(source, target);
+#endif
 }
 
 static bool dependency_materialize(const char *source, const char *target)
@@ -1475,12 +1485,16 @@ static bool dependency_materialize(const char *source, const char *target)
         target_exists = false;
     }
     if (S_ISREG(source_st.st_mode)) {
+#if !defined(__APPLE__)
         if (target_exists && S_ISREG(target_st.st_mode) &&
             source_st.st_dev == target_st.st_dev &&
             source_st.st_ino == target_st.st_ino)
             return true;
         if (target_exists && unlink(target) != 0) return false;
-        if (dependency_link(source, target) == 0) return true;
+#endif
+        /* On macOS the temporary copy replaces an old shared inode only
+         * after the source is open and the independent copy is complete. */
+        if (dependency_seed(source, target, &source_st) == 0) return true;
         /* Same filesystem is the fast path; a cross-device generation root is
          * not a missing dependency, so copy rather than refuse. */
         if (errno != EXDEV && errno != EPERM && errno != EMLINK) return false;
@@ -1882,7 +1896,9 @@ static bool warm_seed_remember(struct warm_seed_accum *accum, const char *rel)
 }
 
 /* One regular donor file: link it (immutable output) or copy it (small
- * executed wrapper). The target is unlinked first so link() never follows
+ * executed wrapper). macOS copies both classes so a writable generation
+ * cannot mutate a donor through a shared inode. Before linking, unlink
+ * the target so link() never follows
  * a stale symlink and never fails with EEXIST. Any single-file failure
  * skips that file and moves on: a missing seed only costs a recompile. */
 static void warm_seed_file(const char *donor_file, const char *gen_file,
@@ -1897,8 +1913,12 @@ static void warm_seed_file(const char *donor_file, const char *gen_file,
         gen_exists = false;
     }
     if (class == WARM_SEED_LINK) {
+#if defined(__APPLE__)
+        if (!dependency_copy_stat(donor_file, gen_file, donor_st)) return;
+#else
         if (gen_exists && unlink(gen_file) != 0) return;
         if (link(donor_file, gen_file) != 0) return;
+#endif
     } else if (class == WARM_SEED_COPY) {
         if (!warm_copy_file(donor_file, gen_file)) return;
     } else {
@@ -2483,7 +2503,14 @@ static bool warm_retime_outputs(const char *gen_build,
                                 struct warm_seed_accum *accum,
                                 struct timespec *seed_stamp)
 {
-    if (platform_time_realtime_timespec(seed_stamp) != 0) return false;
+    /* The platform wall clock is millisecond-granular; filesystem creation
+     * timestamps can be finer. A stamp from the current tick could precede
+     * a source just materialized in that tick. Wait for the next real tick
+     * before stamping seeds, so unchanged sources remain strictly older. */
+    struct timespec began;
+    if (platform_time_realtime_timespec(&began) != 0 ||
+        !warm_stamp_after(&began, seed_stamp))
+        return false;
     for (size_t i = 0; i < accum->count; i++) {
         char path[PATH_MAX];
         if (snprintf(path, sizeof(path), "%s/%s", gen_build,
