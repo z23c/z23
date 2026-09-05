@@ -2477,7 +2477,7 @@ void zcl_native_handle_dev_agent_rules(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
 
-/* dev.orient — the compiled fact table in engine/composition/facts/,
+/* dev.agent.orient — the compiled fact table in engine/composition/facts/,
  * listed by topic, returned for one topic, or filtered by substring.
  * Implemented in tools/command/native_dev_orient.c. */
 void zcl_native_handle_dev_orient(const struct zcl_command_request *request,

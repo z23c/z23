@@ -1219,6 +1219,7 @@ add/remove a gate.
 - `check-doc-accuracy`
 - `check-doc-claims`
 - `check-doc-counts`
+- `check-orient-facts`
 - `check-doc-inline-paths`
 - `check-describe-budget`
 - `check-domain-purity`

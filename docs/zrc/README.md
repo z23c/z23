@@ -11,6 +11,20 @@ history — before the implementation work starts, not after.
 This directory is the durable record. [`0001-zrc-process.md`](0001-zrc-process.md)
 is this process itself, written as the first ZRC.
 
+## Index
+
+| ZRC | Title |
+|---|---|
+| [0001](0001-zrc-process.md) | The ZRC process |
+| [0002](0002-streams-over-the-peer-link.md) | Streams over the peer link |
+| [0003](0003-deterministic-build-environment.md) | Deterministic build environment |
+| [0004](0004-wiki-daily-board-public-page.md) | Wiki, daily board, public page |
+| [0005](0005-node-workspace-layout-and-hygiene.md) | Node workspace layout and hygiene |
+| [0006](0006-knowledge-in-the-checkout.md) | Knowledge in the checkout |
+
+This table is a convenience, not a registry: the directory listing is the
+authority, and the next number is the one after the highest file here.
+
 ## How a ZRC differs from an ADR
 
 [`../adr/`](../adr/) records decisions already made about the existing

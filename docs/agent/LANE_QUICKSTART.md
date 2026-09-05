@@ -18,7 +18,16 @@ Workspace: lanes live in the node's hidden workspace tree, not beside the
 real checkouts; see
 [`../zrc/0005-node-workspace-layout-and-hygiene.md`](../zrc/0005-node-workspace-layout-and-hygiene.md).
 
-2. Find what your change touches. The first command prints the test groups
+2. Orient first: `z23-dev dev agent orient --query=<your files>`. The
+   checkout carries verified rows about how it works — the landing path, the
+   lint gates, test routing, the board — each with the file it was read from
+   and a literal anchor that `make check-orient-facts` re-proves on every
+   commit. Query before you read source, then read only the gap. `... orient`
+   alone lists the topics; `... orient <topic>` returns one. When your own
+   reading produces a map worth keeping, land it as rows in the same lane —
+   see [`../zrc/0006-knowledge-in-the-checkout.md`](../zrc/0006-knowledge-in-the-checkout.md).
+
+3. Find what your change touches. The first command prints the test groups
    that cover a file. Run those groups with the second. Note:
    `make test_parallel ONLY=x` only builds.
 
@@ -27,7 +36,7 @@ build/bin/z23 code tests <file>
 ulimit -s unlimited; make -j32 t-fast ONLY=<group>
 ```
 
-3. Gate. Iterate with lint-fast. Before you report, background full lint
+4. Gate. Iterate with lint-fast. Before you report, background full lint
    and read its summary (minutes). Then verdict prints one screen: red
    gates with their fix hint, failed groups, and a final VERDICT line.
    Quote those lines; never paraphrase.
@@ -38,11 +47,11 @@ make lint
 make verdict
 ```
 
-4. `check-git-hooks-installed` builds `z23-git-hook` itself, so `make lint`
+5. `check-git-hooks-installed` builds `z23-git-hook` itself, so `make lint`
    passes on a plain checkout without a prior `make install-hooks`; a red
    result there is yours like any other gate.
 
-5. Land. Main rejects merge commits. Re-run the routed groups after a
+6. Land. Main rejects merge commits. Re-run the routed groups after a
    rebase that touched your files, then hand off; the orchestrator pushes.
    Commit trailer: `Co-Authored-By: <agent name> <noreply address>` as
    your harness specifies.
@@ -51,7 +60,7 @@ make verdict
 git fetch origin && git rebase origin/main
 ```
 
-6. Traps, one line each:
+7. Traps, one line each:
    - Never edit a shell script while a run of it is in flight.
    - A foreground command longer than 10 minutes gets killed; background
      it and poll a log.
@@ -60,7 +69,7 @@ git fetch origin && git rebase origin/main
    - Never touch core/, wallet custody, consensus seals, or a live node.
    - One worktree per lane; never two lanes in one checkout.
 
-7. Report. Use the shape in [LANE_REPORT.md](LANE_REPORT.md). End with:
+8. Report. Use the shape in [LANE_REPORT.md](LANE_REPORT.md). End with:
 
 ```
 head <hash>, base <hash>, acceptance green, ready for review

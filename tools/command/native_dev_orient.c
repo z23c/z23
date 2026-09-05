@@ -1,5 +1,5 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
- * purpose: dev.orient — answer, from the compiled fact table, what this
+ * purpose: dev.agent.orient — answer, from the compiled fact table, what this
  *          checkout already knows, so a reader does not re-derive it.
  *
  * ── CONTRACT (this file is the whole implementation) ──────────────────────
@@ -27,7 +27,7 @@
  *          or within `topic` when both are given.
  *
  * OUTPUT (zcl.dev_orient.v1) on ok=true
- *   leaf          "dev.orient"
+ *   leaf          "dev.agent.orient"
  *   source        "engine/composition/facts/index.def"
  *   mode          "topics" | "topic" | "query"
  *   topic         echoed when `topic` was given
@@ -64,7 +64,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#define DVO_LEAF "dev.orient"
+#define DVO_LEAF "dev.agent.orient"
 #define DVO_SOURCE "engine/composition/facts/index.def"
 
 /* Rows returned in one reply. The whole table is far larger than any single
@@ -303,7 +303,7 @@ void zcl_dev_orient_banner(char *out, size_t cap)
 #undef ZCL_FACT_TOPIC
 
     (void)snprintf(out, cap,
-                   "%lld rows in %zu topics - z23-dev dev orient <topic> | "
-                   "--query=",
+                   "%lld rows in %zu topics - z23-dev dev agent orient "
+                   "<topic> | --query=<substring>",
                    rows, DVO_TOPIC_COUNT);
 }

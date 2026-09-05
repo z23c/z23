@@ -1,9 +1,9 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
- * ACCEPTANCE BAR for dev.orient (tools/command/native_dev_orient.c) and for
+ * ACCEPTANCE BAR for dev.agent.orient (tools/command/native_dev_orient.c) and for
  * the gate that keeps its rows honest (tools/lint/check_orient_facts.sh).
  *
- * The leaf half calls the bound handler DIRECTLY — dev.orient is a dev-lane
+ * The leaf half calls the bound handler DIRECTLY — the leaf is a dev-lane
  * leaf and an in-process call is exactly what the CLI does after input
  * validation — but every input first crosses the REAL registry validator, so
  * a key the .def never declared fails here rather than only from a shell.
@@ -26,7 +26,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define DVO_PATH "dev.orient"
+#define DVO_PATH "dev.agent.orient"
 
 /* ── one in-process invocation ─────────────────────────────────────────── */
 
@@ -305,7 +305,7 @@ int test_dev_orient(void)
         (void)snprintf(needle, sizeof(needle), "%lld rows",
                        dvo_int(&c, "total_rows"));
         ASSERT(strstr(banner, needle) != NULL);
-        ASSERT(strstr(banner, "dev orient") != NULL);
+        ASSERT(strstr(banner, "dev agent orient") != NULL);
         dvo_end(&c);
         PASS();
     }
