@@ -17,7 +17,9 @@
  *
  * Consumer defines ZCL_COMMAND_*; see engine/composition/src/command_catalog.c. */
 
-ZCL_COMMAND_BRANCH("fleet", "", "The fleet message board and wiki",
+ZCL_COMMAND_BRANCH("fleet", "",
+                   "The fleet message board and wiki, and the owner's "
+                   "private fleet ledger",
                    ZCL_COMMAND_LAYER_APP)
 ZCL_COMMAND_BRANCH("fleet.board", "fleet",
                    "Signed, gossiped posts every node carries",

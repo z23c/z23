@@ -1,17 +1,14 @@
 /* The owner's private fleet ledger. Consumer defines ZCL_COMMAND_*.
  *
- * A root of its own rather than a branch under `dev`, because this is not
- * part of the development loop: it is the owner's operational record of
- * every machine, written by collectors and read on any of them. It is
- * declared LAST so the existing root order, which is a wire contract, does
- * not move.
+ * Leaves under the existing `fleet` root (declared once, in
+ * engine/composition/commands/fleet_board.def, alongside the fleet board and
+ * wiki) rather than a root of its own: `fleet` already exists as a wire
+ * contract, and a second ZCL_COMMAND_BRANCH row for the same path is a
+ * path collision the registry refuses to build with.
  *
  * Every leaf here answers from local files. Nothing contacts a peer, and
  * nothing prints a row's contents anywhere a row could leave this machine.
  * See docs/FLEET_LEDGER.md. */
-
-ZCL_COMMAND_BRANCH("fleet", "", "The owner's private fleet ledger",
-                   ZCL_COMMAND_LAYER_OPS)
 
 ZCL_COMMAND_BRANCH("fleet.ledger", "fleet", "Write and inspect the ledger",
                    ZCL_COMMAND_LAYER_OPS)
