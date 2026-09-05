@@ -1194,6 +1194,7 @@ ZCL_MODULE_CAPABILITY("tools/dev/devloop_watch.c", CAP_FS_READ|CAP_FS_WRITE|CAP_
 ZCL_MODULE_CAPABILITY("tools/dev/fleet_observe.c", CAP_FS_READ, "reads the experiment ledger (rows.tsv) to compute fleet routing observations; rendering happens into a caller-supplied buffer, and the .def file write itself lives in tools/dev/fleet_observe_main.c, the CLI shim, not here")
 ZCL_MODULE_CAPABILITY("tools/dev/mutation_ops.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("tools/dev/mutation_run.c", CAP_FS_WRITE|CAP_PROCESS|CAP_FS_READ|CAP_PRIVILEGE, "the mutation campaign core: forks and confines a compile+test child process per mutant")
+ZCL_MODULE_CAPABILITY("tools/dev/test_group_catalog.c", CAP_FS_WRITE, "writes contextual refusal diagnostics to the native diagnostic stream while validating registered test-group catalog inputs")
 ZCL_MODULE_CAPABILITY("tools/mind/mind_resident.c", CAP_FS_READ|CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("tools/mind/mind_state.c", CAP_FS_READ|CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("tools/package_verify.c", CAP_FS_READ|CAP_FS_WRITE|CAP_PROCESS|CAP_CLOCK|CAP_WALLET|CAP_RANDOM, "the standalone ZCODE package build/attestation verifier: forks a confined child to reproduce a build, and signs the resulting attestation with secp256k1_ecdsa_sign over the verifier's own key material")
