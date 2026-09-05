@@ -47,6 +47,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "test_group_catalog.h"
+
 /* Opaque handle: open once per run in the parent, before any fork. */
 struct testcache;
 
@@ -81,6 +83,7 @@ enum testcache_reason {
     TESTCACHE_R_GRAPH_STALE,       /* an input is newer than the include graph */
     TESTCACHE_R_CHANGED_INPUT,     /* resident snapshot closure reaches edit */
     TESTCACHE_R_ACTIVE_PROOF_CONTRACT, /* activated exact proof always runs */
+    TESTCACHE_R_PROOF_CONTRACT_INVALID, /* unknown activation policy */
     TESTCACHE_R__COUNT
 };
 
@@ -89,6 +92,9 @@ const char *testcache_reason_label(enum testcache_reason r);
 
 /* The per-group cache decision. */
 struct testcache_probe {
+    /* Derived identity within the verified closure model. It does not alone
+     * prove complete behavior and may be valid when reuse remains forbidden. */
+    bool    key_valid;
     bool    cacheable;    /* false => the group MUST run this time */
     bool    hit;          /* true  => a stored PASS exists at this exact key */
     /* true => that stored PASS was minted by a rerun-alone policy pass (the
@@ -98,7 +104,7 @@ struct testcache_probe {
      * as an ordinary pass: the flake happened, and the cache must never be
      * the mechanism that makes it invisible again. */
     bool    hit_flaky;
-    uint8_t key[32];      /* the content-addressed key (valid iff cacheable) */
+    uint8_t key[32];      /* valid iff key_valid */
     int     n_closure;    /* number of input files hashed (diagnostic) */
     enum testcache_reason code;  /* stable bucket for the reason histogram */
     char    reason[96];   /* why uncacheable, or a short closure note */
@@ -110,6 +116,14 @@ struct testcache_probe {
  * UNCACHEABLE (fail-safe). *out is always fully populated. */
 void testcache_probe_group(struct testcache *tc, const char *group_name,
                            struct testcache_probe *out);
+
+/* Compute the key for an activated proof contract. The result domain-wraps
+ * the byte-identical ordinary v4 key with the canonical contract assignment.
+ * A valid activated key is evidence identity only: it is never cacheable,
+ * never reports a hit, and must never be passed to testcache_store_pass(). */
+void testcache_probe_group_proof(
+    struct testcache *tc, const char *group_name,
+    enum zcl_test_proof_contract contract, struct testcache_probe *out);
 
 /* True when group_name is on the external-input denylist (never cacheable).
  * Exposed so the contract test can re-derive the exec-a-built-binary set from

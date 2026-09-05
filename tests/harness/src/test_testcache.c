@@ -299,6 +299,75 @@ int test_testcache(void)
         }
     }
 
+    /* Activated execution has its own identity but must run even when a PASS
+     * exists at that identity. Exercise the real closure and object store. */
+    {
+        struct testcache *tc = testcache_open(TC_FIX);
+        TC_CHECK("policy fixture cache opens", tc != NULL);
+        if (tc) {
+            struct testcache_probe ordinary, none, active[4], again, bad;
+            testcache_probe_group(tc, "test_demo_entry", &ordinary);
+            testcache_probe_group_proof(tc, "test_demo_entry",
+                                       ZCL_TEST_PROOF_NONE, &none);
+            TC_CHECK("NONE preserves ordinary key and stored hit",
+                     ordinary.key_valid && none.key_valid && none.cacheable &&
+                     none.hit && memcmp(ordinary.key, none.key, 32) == 0);
+            const enum zcl_test_proof_contract modes[] = {
+                ZCL_TEST_PROOF_STRESS, ZCL_TEST_PROOF_EVENT_LOG_KILL9,
+                ZCL_TEST_PROOF_EVENT_LOG_BENCH, ZCL_TEST_PROOF_GOLDEN_TIMING,
+            };
+            const char *const names[] = {
+                "ZCL_STRESS_TESTS", "ZCL_EVENT_LOG_KILL9_FUZZ",
+                "ZCL_EVENT_LOG_BENCH_PROOF", "ZCL_GOLDEN_TIMING_STRICT",
+            };
+            for (size_t i = 0; i < 4; i++) {
+                const char *name = NULL, *value = NULL;
+                TC_CHECK("contract resolves exact child assignment",
+                         zcl_test_proof_contract_environment(modes[i],
+                                                            &name, &value) &&
+                         name && value && strcmp(name, names[i]) == 0 &&
+                         strcmp(value, "1") == 0);
+                testcache_probe_group_proof(tc, "test_demo_entry", modes[i],
+                                           &active[i]);
+                TC_CHECK("activated bounded closure has identity but no reuse",
+                         active[i].key_valid && !active[i].cacheable &&
+                         !active[i].hit && !active[i].hit_flaky &&
+                         active[i].n_closure == 5 &&
+                         active[i].code == TESTCACHE_R_ACTIVE_PROOF_CONTRACT);
+                TC_CHECK("activated identity differs from ordinary identity",
+                         memcmp(active[i].key, ordinary.key, 32) != 0);
+                for (size_t j = 0; j < i; j++)
+                    TC_CHECK("different execution contracts never alias",
+                             memcmp(active[i].key, active[j].key, 32) != 0);
+                /* Deliberately inject a forbidden PASS through the low-level
+                 * store: neither ordinary nor flaky records may skip proof. */
+                testcache_store_pass_flaky(tc, active[i].key);
+                testcache_probe_group_proof(tc, "test_demo_entry", modes[i],
+                                           &again);
+                TC_CHECK("poisoned active PASS cannot suppress fresh execution",
+                         again.key_valid && !again.cacheable && !again.hit &&
+                         !again.hit_flaky &&
+                         memcmp(again.key, active[i].key, 32) == 0);
+            }
+            testcache_probe_group_proof(tc, "test_demo_entry",
+                                       (enum zcl_test_proof_contract)255, &bad);
+            TC_CHECK("unknown execution policy refuses identity and reuse",
+                     !bad.key_valid && !bad.cacheable && !bad.hit &&
+                     bad.code == TESTCACHE_R_PROOF_CONTRACT_INVALID);
+            testcache_probe_group_proof(tc, "test_explorer_index",
+                                       ZCL_TEST_PROOF_STRESS, &bad);
+            TC_CHECK("activation cannot qualify external-input closure",
+                     !bad.key_valid && !bad.cacheable && !bad.hit &&
+                     bad.code == TESTCACHE_R_EXTERNAL_INPUT);
+            testcache_probe_group_proof(tc, "test_no_such_symbol_zzz",
+                                       ZCL_TEST_PROOF_STRESS, &bad);
+            TC_CHECK("activation cannot qualify unresolved closure",
+                     !bad.key_valid && !bad.cacheable && !bad.hit &&
+                     bad.code == TESTCACHE_R_ENTRY_UNRESOLVED);
+            testcache_close(tc);
+        }
+    }
+
     /* ── Phase A2: receipt storage is independent from source inspection ── */
     TC_CHECK("separate verdict store starts empty",
              system("rm -rf " TC_STORE) == 0 &&
@@ -417,6 +486,11 @@ int test_testcache(void)
             testcache_probe_group(tc, "test_demo_entry", &p);
             TC_CHECK("snapshot closure reaching edit is uncacheable",
                      !p.cacheable &&
+                     p.code == TESTCACHE_R_CHANGED_INPUT);
+            testcache_probe_group_proof(tc, "test_demo_entry",
+                                       ZCL_TEST_PROOF_STRESS, &p);
+            TC_CHECK("activated snapshot cannot identify an edited closure",
+                     !p.key_valid && !p.cacheable && !p.hit &&
                      p.code == TESTCACHE_R_CHANGED_INPUT);
             testcache_close(tc);
         }
@@ -593,6 +667,50 @@ int test_testcache(void)
                  back && strcmp(back, "tc-phase-h-sentinel") == 0);
     }
     tc_env_restore(&caller_stress, "ZCL_STRESS_TESTS");
+
+    /* Inherited flags still affect ordinary execution. The activated-key
+     * extension must not remove any flag from the existing parent digest. */
+    const char *const proof_flags[] = {
+        "ZCL_STRESS_TESTS", "ZCL_EVENT_LOG_KILL9_FUZZ",
+        "ZCL_EVENT_LOG_BENCH_PROOF", "ZCL_GOLDEN_TIMING_STRICT",
+    };
+    for (size_t i = 0; i < 4; i++) {
+        struct tc_envsave caller_flag;
+        tc_env_capture(&caller_flag, proof_flags[i]);
+        TC_CHECK("clear inherited proof flag", unsetenv(proof_flags[i]) == 0);
+        uint8_t unset_key[32] = {0};
+        bool unset_valid = false;
+        struct testcache *tc = testcache_open(TC_FIX);
+        TC_CHECK("inherited flag fixture opens", tc != NULL);
+        if (tc) {
+            struct testcache_probe p;
+            testcache_probe_group(tc, "test_demo_entry", &p);
+            unset_valid = p.key_valid;
+            memcpy(unset_key, p.key, sizeof(unset_key));
+            testcache_close(tc);
+        }
+        const char *const values[] = {"0", "1", "2"};
+        uint8_t value_keys[3][32] = {{0}};
+        for (size_t v = 0; v < 3; v++) {
+            TC_CHECK("set inherited proof flag",
+                     setenv(proof_flags[i], values[v], 1) == 0);
+            tc = testcache_open(TC_FIX);
+            TC_CHECK("inherited value fixture opens", tc != NULL);
+            if (tc) {
+                struct testcache_probe p;
+                testcache_probe_group(tc, "test_demo_entry", &p);
+                TC_CHECK("inherited flag differs from unset ordinary key",
+                         unset_valid && p.key_valid && p.cacheable &&
+                         memcmp(unset_key, p.key, 32) != 0);
+                memcpy(value_keys[v], p.key, 32);
+                for (size_t earlier = 0; earlier < v; earlier++)
+                    TC_CHECK("inherited values remain distinct",
+                             memcmp(value_keys[earlier], p.key, 32) != 0);
+                testcache_close(tc);
+            }
+        }
+        tc_env_restore(&caller_flag, proof_flags[i]);
+    }
 
     /* Fast-CI's frozen source record is orchestration identity, not test
      * behavior. Hashing it globally defeats the closure key: even a docs-only

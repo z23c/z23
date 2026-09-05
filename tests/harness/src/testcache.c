@@ -506,6 +506,25 @@ static void trc_put_u32le(unsigned char b[4], uint32_t v)
     b[3] = (unsigned char)(v >> 24);
 }
 
+static void trc_wrap_proof_key(
+    const uint8_t ordinary_key[32], enum zcl_test_proof_contract contract,
+    const char *env_name, const char *env_value, uint8_t out_key[32])
+{
+    static const char DOMAIN[] = "zcl.testcache.proof-key.v1";
+    struct sha3_256_ctx ctx;
+    unsigned char le[4];
+    sha3_256_init(&ctx);
+    sha3_256_write(&ctx, (const unsigned char *)DOMAIN, sizeof(DOMAIN));
+    sha3_256_write(&ctx, ordinary_key, 32);
+    trc_put_u32le(le, (uint32_t)contract);
+    sha3_256_write(&ctx, le, sizeof(le));
+    sha3_256_write(&ctx, (const unsigned char *)env_name,
+                   strlen(env_name) + 1);
+    sha3_256_write(&ctx, (const unsigned char *)env_value,
+                   strlen(env_value) + 1);
+    sha3_256_finalize(&ctx, out_key);
+}
+
 /* Fold the closure into the SHA3 key. Files are already sorted by
  * codeindex_forward_closure. Returns false on a file-read failure; sets
  * *stale when any input is newer than the include graph that produced it. */
@@ -672,6 +691,8 @@ const char *testcache_reason_label(enum testcache_reason r)
     case TESTCACHE_R_CHANGED_INPUT:    return "changed-input-runs-fresh";
     case TESTCACHE_R_ACTIVE_PROOF_CONTRACT:
         return "active-proof-contract";
+    case TESTCACHE_R_PROOF_CONTRACT_INVALID:
+        return "invalid-proof-contract";
     case TESTCACHE_R__COUNT:           break;
     }
     return "unknown";
@@ -707,10 +728,23 @@ const char *testcache_toolkey(void)
 }
 
 /* Populate *out for group_name. Fail-safe: any failure => uncacheable. */
-void testcache_probe_group(struct testcache *tc, const char *group_name,
-                           struct testcache_probe *out)
+static void testcache_probe_group_internal(
+    struct testcache *tc, const char *group_name,
+    enum zcl_test_proof_contract contract, bool activated,
+    struct testcache_probe *out)
 {
     memset(out, 0, sizeof(*out));
+    const char *env_name = NULL;
+    const char *env_value = NULL;
+    if (activated &&
+        (!zcl_test_proof_contract_environment(contract, &env_name,
+                                               &env_value) ||
+         contract == ZCL_TEST_PROOF_NONE || !env_name || !env_value)) {
+        out->code = TESTCACHE_R_PROOF_CONTRACT_INVALID;
+        snprintf(out->reason, sizeof(out->reason),
+                 "invalid activated proof contract");
+        return;
+    }
     if (!tc || !tc->ci || !group_name || !group_name[0]) {
         out->code = TESTCACHE_R_NO_HANDLE;
         snprintf(out->reason, sizeof(out->reason), "no cache handle");
@@ -792,6 +826,19 @@ void testcache_probe_group(struct testcache *tc, const char *group_name,
         return;
     }
 
+    out->key_valid = true;
+    if (activated) {
+        uint8_t ordinary_key[32];
+        memcpy(ordinary_key, out->key, sizeof(ordinary_key));
+        trc_wrap_proof_key(ordinary_key, contract, env_name, env_value,
+                           out->key);
+        out->code = TESTCACHE_R_ACTIVE_PROOF_CONTRACT;
+        out->n_closure = nc;
+        snprintf(out->reason, sizeof(out->reason),
+                 "activated proof contract runs fresh (%d inputs)", nc);
+        return;
+    }
+
     out->cacheable = true;
     out->code = TESTCACHE_R_OK;
     out->n_closure = nc;
@@ -817,6 +864,24 @@ void testcache_probe_group(struct testcache *tc, const char *group_name,
             free(buf);
         }
     }
+}
+
+void testcache_probe_group(struct testcache *tc, const char *group_name,
+                           struct testcache_probe *out)
+{
+    testcache_probe_group_internal(tc, group_name, ZCL_TEST_PROOF_NONE,
+                                   false, out);
+}
+
+void testcache_probe_group_proof(
+    struct testcache *tc, const char *group_name,
+    enum zcl_test_proof_contract contract, struct testcache_probe *out)
+{
+    if (contract == ZCL_TEST_PROOF_NONE) {
+        testcache_probe_group(tc, group_name, out);
+        return;
+    }
+    testcache_probe_group_internal(tc, group_name, contract, true, out);
 }
 
 static void trc_store_pass_ex(struct testcache *tc, const uint8_t key[32],

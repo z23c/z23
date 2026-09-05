@@ -270,31 +270,19 @@ static int get_nproc(void)
 static bool activate_proof_contract(size_t idx)
 {
     const char *env_name = NULL;
-    switch (zcl_test_group_proof_contract(g_groups[idx].name)) {
-    case ZCL_TEST_PROOF_NONE:
+    enum zcl_test_proof_contract contract =
+        zcl_test_group_proof_contract(g_groups[idx].name);
+    if (contract == ZCL_TEST_PROOF_NONE)
         return true;
-    case ZCL_TEST_PROOF_STRESS:
-        env_name = "ZCL_STRESS_TESTS";
-        break;
-    case ZCL_TEST_PROOF_EVENT_LOG_KILL9:
-        env_name = "ZCL_EVENT_LOG_KILL9_FUZZ";
-        break;
-    case ZCL_TEST_PROOF_EVENT_LOG_BENCH:
-        /* Push authority needs a bounded throughput proof.  The explicit
-         * ZCL_EVENT_LOG_BENCH=1 contract remains the full standalone
-         * measurement and is never enabled by the parallel gate. */
-        env_name = "ZCL_EVENT_LOG_BENCH_PROOF";
-        break;
-    case ZCL_TEST_PROOF_GOLDEN_TIMING:
-        env_name = "ZCL_GOLDEN_TIMING_STRICT";
-        break;
-    default:
+    const char *env_value = NULL;
+    if (!zcl_test_proof_contract_environment(contract, &env_name,
+                                              &env_value)) {
         fprintf(stderr,
                 "test_parallel: invalid proof contract group=%s\n",
                 g_groups[idx].name);
         return false;
     }
-    if (setenv(env_name, "1", 1) != 0) {
+    if (setenv(env_name, env_value, 1) != 0) {
         fprintf(stderr,
                 "test_parallel: proof contract activation failed group=%s "
                 "env=%s: %s\n",
@@ -1616,19 +1604,14 @@ int main(int argc, char **argv)
     if (cache_mode != CACHE_OFF) {
         for (size_t i = 0; i < g_num_groups; i++) {
             if (results[i].skipped) continue;
-            /* Proof policy is applied in the child after the ordinary cache
-             * key is computed. Never consult or populate that policy-blind
-             * keyspace for an activated proof: exact push authority must
-             * execute under the requested environment every time. */
+            enum zcl_test_proof_contract contract =
+                zcl_test_group_proof_contract(g_groups[i].name);
             if (activate_proof_contracts &&
-                zcl_test_group_proof_contract(g_groups[i].name) !=
-                    ZCL_TEST_PROOF_NONE) {
-                probes[i].code = TESTCACHE_R_ACTIVE_PROOF_CONTRACT;
-                snprintf(probes[i].reason, sizeof(probes[i].reason),
-                         "activated exact proof runs fresh");
-                continue;
-            }
-            testcache_probe_group(tc, g_groups[i].name, &probes[i]);
+                contract != ZCL_TEST_PROOF_NONE)
+                testcache_probe_group_proof(tc, g_groups[i].name, contract,
+                                            &probes[i]);
+            else
+                testcache_probe_group(tc, g_groups[i].name, &probes[i]);
         }
         /* CACHE_ON: a provable stored PASS at the current key means the group
          * cannot have changed — mark it CACHED (status 0 excludes it from

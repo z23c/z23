@@ -36,6 +36,11 @@ bool zcl_test_group_requires_exclusive_run(const char *full_id);
  * registered and unique before a runner may activate these contracts. */
 enum zcl_test_proof_contract
 zcl_test_group_proof_contract(const char *full_id);
+/* Resolve the exact environment assignment used to activate a proof
+ * contract. NONE is valid and returns NULL name/value; unknown values fail. */
+bool zcl_test_proof_contract_environment(
+    enum zcl_test_proof_contract contract,
+    const char **env_name, const char **env_value);
 bool zcl_test_group_proof_contracts_valid(void);
 
 /* True only for a mechanically audited test translation-unit proof leaf. */

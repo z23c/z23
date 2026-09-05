@@ -99,13 +99,58 @@ zcl_test_group_proof_contract(const char *full_id)
     return ZCL_TEST_PROOF_NONE;
 }
 
+bool zcl_test_proof_contract_environment(
+    enum zcl_test_proof_contract contract,
+    const char **env_name, const char **env_value)
+{
+    if (env_name)
+        *env_name = NULL;
+    if (env_value)
+        *env_value = NULL;
+    if (!env_name || !env_value) {
+        fprintf(stderr,
+                "test_group_catalog: proof contract environment output missing\n");
+        return false;
+    }
+    switch (contract) {
+    case ZCL_TEST_PROOF_NONE:
+        return true;
+    case ZCL_TEST_PROOF_STRESS:
+        *env_name = "ZCL_STRESS_TESTS";
+        break;
+    case ZCL_TEST_PROOF_EVENT_LOG_KILL9:
+        *env_name = "ZCL_EVENT_LOG_KILL9_FUZZ";
+        break;
+    case ZCL_TEST_PROOF_EVENT_LOG_BENCH:
+        /* The bounded push proof is distinct from the full standalone
+         * ZCL_EVENT_LOG_BENCH=1 measurement. */
+        *env_name = "ZCL_EVENT_LOG_BENCH_PROOF";
+        break;
+    case ZCL_TEST_PROOF_GOLDEN_TIMING:
+        *env_name = "ZCL_GOLDEN_TIMING_STRICT";
+        break;
+    default:
+        fprintf(stderr,
+                "test_group_catalog: unknown proof contract value=%d\n",
+                (int)contract);
+        return false;
+    }
+    *env_value = "1";
+    return true;
+}
+
 bool zcl_test_group_proof_contracts_valid(void)
 {
     for (size_t i = 0; i < sizeof(g_proof_contracts) /
                             sizeof(g_proof_contracts[0]); i++) {
+        const char *env_name = NULL;
+        const char *env_value = NULL;
         if (!zcl_test_group_catalog_contains(g_proof_contracts[i].full_id) ||
             g_proof_contracts[i].contract <= ZCL_TEST_PROOF_NONE ||
-            g_proof_contracts[i].contract > ZCL_TEST_PROOF_GOLDEN_TIMING)
+            g_proof_contracts[i].contract > ZCL_TEST_PROOF_GOLDEN_TIMING ||
+            !zcl_test_proof_contract_environment(
+                g_proof_contracts[i].contract, &env_name, &env_value) ||
+            !env_name || !env_value)
             return false;
         for (size_t j = 0; j < i; j++)
             if (strcmp(g_proof_contracts[i].full_id,
