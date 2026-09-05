@@ -12,7 +12,9 @@
 #include <stdio.h>
 #include <string.h>
 #include <dirent.h>
+#include <errno.h>
 #include <sys/stat.h>
+#include <sys/types.h>
 
 /* One line, fixed shape, written whole by the resident on every heartbeat:
  *
@@ -65,10 +67,17 @@ bool codeindex_owner_claim(const char *root, long long pid,
                      heartbeat_unix);
     if (n <= 0 || (size_t)n >= sizeof(line))
         LOG_FAIL("codeindex", "owner claim does not fit");
-    char tmp[CI_PATH_MAX];
+    char tmp[CI_PATH_MAX], dir[CI_PATH_MAX];
     int tn = snprintf(tmp, sizeof(tmp), "%s.tmp", path);
-    if (tn <= 0 || (size_t)tn >= sizeof(tmp))
+    int dn = snprintf(dir, sizeof(dir), "%s/.codeindex", root);
+    if (tn <= 0 || (size_t)tn >= sizeof(tmp) || dn <= 0 ||
+        (size_t)dn >= sizeof(dir))
         LOG_FAIL("codeindex", "owner claim path too long");
+    /* A checkout can be claimed before it has ever been indexed — that is
+     * the ordinary first cycle, and the claim is what stops a reader
+     * building the first generation underneath the owner. */
+    if (mkdir(dir, 0700) != 0 && errno != EEXIST)
+        LOG_FAIL("codeindex", "create index directory for owner marker");
     FILE *f = fopen(tmp, "wb");
     if (!f) LOG_FAIL("codeindex", "open owner marker for write");
     bool ok = fwrite(line, 1, (size_t)n, f) == (size_t)n;
