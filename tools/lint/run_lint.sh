@@ -98,6 +98,7 @@ gate_command() {
         check-checkout-lock)               echo 'tools/dev/checkout-lock-selftest.sh' ;;
         check-no-stray-untracked-source)   echo './tools/lint/check_no_stray_untracked_source.sh' ;;
         check-codeindex-coverage)          echo './tools/lint/check_codeindex_coverage.sh --selftest && ./tools/lint/check_codeindex_coverage.sh' ;;
+        check-mind-owns-rebuild)           echo './tools/lint/check_mind_owns_rebuild.sh --selftest && ./tools/lint/check_mind_owns_rebuild.sh' ;;
         check-no-stray-root-files)         echo './tools/lint/check_no_stray_root_files.sh' ;;
         check-scanner-immunity)            echo './tools/lint/selftest_scanner_immunity.sh' ;;
         check-zcc-cache)                   echo './tools/lint/check_zcc_cache.sh' ;;

@@ -12836,6 +12836,18 @@ check-codeindex-coverage: $(ZCLASSIC23_DEV_BIN)
 	@./tools/lint/check_codeindex_coverage.sh --selftest
 	@./tools/lint/check_codeindex_coverage.sh
 
+# One process rebuilds a checkout's index: the node's resident mind. Every
+# other caller of codeindex_rebuild is a second writer that races the
+# resident's publication AND pays the rebuild inside whatever it was doing —
+# measured at 6,750 to 12,301 ms per query, three of four runs ending
+# fail-closed because the tree moved underneath the build. A source-level
+# fact, so no binary and no index: it needs nothing but git and grep.
+.PHONY: check-mind-owns-rebuild
+check-mind-owns-rebuild:
+	@echo "══ LINT: only the mind rebuilds a code index ══"
+	@./tools/lint/check_mind_owns_rebuild.sh --selftest
+	@./tools/lint/check_mind_owns_rebuild.sh
+
 # Adding a lint gate is a TWO-FILE operation and nothing enforced the second
 # file: the Makefile gets a `check-*:` target plus a LINT_GATES line, and
 # tools/lint/run_lint.sh's gate_command() case table gets the invocation,
@@ -12894,6 +12906,7 @@ LINT_GATES := \
     check-checkout-lock \
     check-no-stray-untracked-source \
     check-codeindex-coverage \
+    check-mind-owns-rebuild \
     check-no-stray-root-files \
     check-scanner-immunity \
     check-git-hooks-installed \
