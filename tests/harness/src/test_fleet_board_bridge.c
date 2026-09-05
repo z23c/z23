@@ -122,6 +122,11 @@ static int test_fleet_board_bridge_basics(void)
         const char *chat[]={"list","--kind","chat",NULL};
         ASSERT(run(root,chat,out,sizeof(out),NULL,NULL)==0);
         ASSERT(strstr(out,"planning conversation")!=NULL);
+        ASSERT(put(root,"ask.jsonl",
+            ROW("2026-09-05T00:00:06Z","ask-a","alpha","ask","","informational ask")));
+        const char *ask[]={"list","--kind","ask",NULL};
+        ASSERT(run(root,ask,out,sizeof(out),NULL,NULL)==0);
+        ASSERT(strstr(out,"informational ask")!=NULL);
         const char *post_chat[]={"post","chat","reply",NULL};
         ASSERT(run(root,post_chat,out,sizeof(out),"chat-agent",NULL)==0);
         char chat_host[128];ASSERT(host_name(chat_host));
@@ -140,12 +145,15 @@ static int test_fleet_board_bridge_basics(void)
         ASSERT(put(root,"open-b.jsonl",ROW("2026-09-05T01:00:03Z","claim-b","beta","claim","need-a","cross host claim")));
         const char *open[]={"list","--open","--host","alpha",NULL};ASSERT(run(root,open,out,sizeof(out),NULL,NULL)==0);
         ASSERT(strstr(out,"still open")&& !strstr(out,"claimed need")&&!strstr(out,"ordinary note"));
+        ASSERT(strstr(out,"informational ask")==NULL);
 
         pid_t kids[8];for(size_t i=0;i<8;i++){kids[i]=fork();ASSERT(kids[i]>=0);if(kids[i]==0){char tmp[256];const char *p[]={"post","note","parallel",NULL};_exit(run(root,p,tmp,sizeof(tmp),"parallel-agent",NULL));}}
         for(size_t i=0;i<8;i++){int st=0;ASSERT(waitpid(kids[i],&st,0)==kids[i]);ASSERT(WIFEXITED(st)&&WEXITSTATUS(st)==0);}
         const char *parallel[]={"list","--kind","note","-n","20",NULL};ASSERT(run(root,parallel,out,sizeof(out),NULL,NULL)==0);ASSERT(lines(out)>=9);
 
         ASSERT(put(root,"bad.jsonl","{not-json}\n"));ASSERT(run(root,list_json,out,sizeof(out),NULL,NULL)!=0);char p[PATH_MAX];snprintf(p,sizeof(p),"%s/bad.jsonl",root);ASSERT(unlink(p)==0);
+        ASSERT(put(root,"bad.jsonl",ROW("2026-09-05T00:00:07Z","unknown-a","alpha","unknown-kind","","must refuse")));
+        ASSERT(run(root,list_json,out,sizeof(out),NULL,NULL)!=0);ASSERT(unlink(p)==0);
         snprintf(p,sizeof(p),"%s/link.jsonl",root);ASSERT(symlink("/dev/null",p)==0);ASSERT(run(root,list_json,out,sizeof(out),NULL,NULL)!=0);ASSERT(unlink(p)==0);
         ASSERT(cleanup(root));PASS();
     } _test_next:;

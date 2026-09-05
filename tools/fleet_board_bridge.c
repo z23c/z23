@@ -61,7 +61,7 @@ static bool kind_ok(const char *s)
 {
     static const char *const kinds[] = {
         "problem", "need", "offer", "claim", "result", "note", "directive",
-        "cost", "packet", "status", "chat"
+        "cost", "packet", "status", "chat", "ask"
     };
     for (size_t i = 0; s && i < sizeof(kinds) / sizeof(kinds[0]); i++)
         if (!strcmp(s, kinds[i])) return true;
