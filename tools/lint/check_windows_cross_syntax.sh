@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Copyright 2026 Rhett Creighton - Apache License 2.0
 #
-# check_windows_cross_syntax.sh — syntax-only mingw sweep of every .c file
-# under every production/dev source root whose text contains _WIN32.
+# check_windows_cross_syntax.sh — syntax-only mingw sweep of every
+# translation unit the release node binary compiles.
 #
 # WHY THIS EXISTS
 # gcc and clang on this box never take the _WIN32 branch, so a Windows-only
@@ -13,12 +13,19 @@
 # not link, does not produce objects, and is not a substitute for the native
 # UCRT64 build.
 #
-# File set is SELF-MAINTAINING: a file that gains Windows code joins the gate
-# the day the token _WIN32 appears. This includes the public node entry points
-# under src/ and release-visible command adapters under tools/command/;
-# omitting those roots previously left current release TUs outside every
-# Windows compile gate. Standalone and dev-only tools keep their own build
-# targets rather than being misgraded as node translation units here.
+# File set is the release build's OWN translation-unit list: `make -s
+# print-node-c23-srcs` prints NODE_C23_SRCS, the exact set the real node
+# binary compiles (engine/entry/main*.c plus ALL_SRCS: core, engine,
+# contexts, cognition, platform, and the release-visible tools/command and
+# tools/mind adapters). This replaces an earlier _WIN32-token grep, which
+# stayed blind to any file that had never grown Windows-specific code yet -
+# a bare mkdir() call with no #ifdef around it, say - so a plain portability
+# bug in an ordinary TU never reached this gate at all. Selecting from
+# NODE_C23_SRCS means every file the node ships compiles here, whether or
+# not it mentions _WIN32 today. Standalone and dev-only tools stay out
+# because NODE_C23_SRCS itself excludes them (DEV_ONLY_SRCS,
+# DEV_STANDALONE_SRCS in the Makefile); this script applies no separate
+# filter of its own.
 #
 # SKIP contract: when mingw is absent, print SKIP and exit 0. An outside
 # contributor is never blocked by a cross-compiler they do not have. SKIP is
@@ -285,7 +292,7 @@ INC_NUL="$WORK/inc.nul"
 printf '%s\0' -I. >> "$INC_NUL"
 # TOOLS_INCLUDES: command/native_command.h lives at tools/command/, not
 # under a directory named include. Same -Itools the node build uses.
-printf '%s\0' -Itools -Itools/dev >> "$INC_NUL"
+printf '%s\0' -Itools -Itools/dev -Itools/mind >> "$INC_NUL"
 find . \( -path './.git' -o -path './.git/*' \
           -o -path './build' -o -path './build/*' \
           -o -path './test-tmp' -o -path './test-tmp/*' \
@@ -428,39 +435,32 @@ PROBE
     # real flag set. Everything above is hollow if a stale cached verdict
     # can be replayed, so the two are graded together.
     selftest_srcs="$WORK/selftest-srcs.txt"
-    selftest_roots=()
-    for d in "${SCAN_ROOTS[@]}"; do
-        [ -d "$d" ] && selftest_roots+=("$d")
-    done
-    : > "$selftest_srcs"
-    if [ "${#selftest_roots[@]}" -gt 0 ]; then
-        find "${selftest_roots[@]}" -name '*.c' -type f -print0 2>/dev/null |
-            xargs -0 -r grep -l '_WIN32' 2>/dev/null |
-            LC_ALL=C sort > "$selftest_srcs" || true
+    if make -s ZCL_TARGET=windows-x86_64 print-node-c23-srcs 2>/dev/null |
+            grep -E '\.c$' | LC_ALL=C sort -u > "$selftest_srcs.tmp"; then
+        mv "$selftest_srcs.tmp" "$selftest_srcs"
+    else
+        : > "$selftest_srcs"
     fi
     tu_cache_selftest "$GATE" "$SCRIPT_DIR/check_windows_cross_syntax.sh" \
         "$CC_BIN" "$WORK/flags.nul" "$WORK" "$(head -1 "$selftest_srcs")"
     exit 0
 fi
 
-# ── Source set: every .c under the scan roots whose text contains _WIN32 ─
-present_roots=()
-for d in "${SCAN_ROOTS[@]}"; do
-    [ -d "$d" ] && present_roots+=("$d")
-done
-if [ "${#present_roots[@]}" -eq 0 ]; then
-    echo "$GATE: FATAL — none of the scan roots exist." >&2
+# ── Source set: every TU the release node binary actually compiles ───────
+SRC_LIST="$WORK/srcs.txt"
+if ! make -s ZCL_TARGET=windows-x86_64 print-node-c23-srcs > "$SRC_LIST.raw" 2>"$WORK/print-node-c23-srcs.err"; then
+    echo "$GATE: FATAL — 'make -s ZCL_TARGET=windows-x86_64 print-node-c23-srcs' failed:" >&2
+    sed 's/^/  /' "$WORK/print-node-c23-srcs.err" >&2
     exit 2
 fi
-
-SRC_LIST="$WORK/srcs.txt"
-find "${present_roots[@]}" -name '*.c' -type f -print0 2>/dev/null |
-    xargs -0 -r grep -l '_WIN32' 2>/dev/null |
-    LC_ALL=C sort > "$SRC_LIST" || true
+# Makefile parse-time $(shell ...) side effects (template generation status
+# lines) print to stdout ahead of the recipe's own output even under -s;
+# keep only lines that are actually a .c path.
+grep -E '\.c$' "$SRC_LIST.raw" | LC_ALL=C sort -u > "$SRC_LIST"
 SRC_COUNT="$(grep -c . "$SRC_LIST" || true)"
 [ -n "$SRC_COUNT" ] || SRC_COUNT=0
 gate_require_scanned "$SRC_COUNT" "$SRC_FLOOR" "$GATE" \
-    "scanned ${present_roots[*]} for .c files containing _WIN32 — a directory move would empty this"
+    "'make -s ZCL_TARGET=windows-x86_64 print-node-c23-srcs' printed no translation units — NODE_C23_SRCS moved or the target broke"
 
 # ── Parallel compile. Each TU writes its OWN log: concurrent writers
 #    sharing one fd tear output once a diagnostic exceeds PIPE_BUF. ───────

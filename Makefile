@@ -1599,6 +1599,14 @@ NODE_C23_OBJ_DIR = $(NODE_C23_OBJ_ROOT)/epochs/$(NODE_C23_COMPILE_EPOCH)
 # $^ ($(NODE_ENTRY_SRCS) then $(ALL_SRCS)), and LTO symbol placement follows
 # input order. patsubst preserves it.
 NODE_C23_SRCS = $(NODE_ENTRY_SRCS) $(ALL_SRCS)
+
+# The windows-cross-syntax lint gate grades exactly the TUs the release
+# node binary compiles, not a _WIN32-token grep guess. One .PHONY print
+# target per line keeps the list script-consumable without a second
+# source of truth.
+.PHONY: print-node-c23-srcs
+print-node-c23-srcs:
+	@printf '%s\n' $(NODE_C23_SRCS)
 NODE_C23_OBJS = $(patsubst %.c,$(NODE_C23_OBJ_DIR)/%.o,$(NODE_C23_SRCS))
 NODE_C23_LINK_RSP = $(NODE_C23_OBJ_DIR)/link-inputs.$(BUILD_INVOCATION_ID).rsp
 # The external package verifier shares the node's exact C23 compile profile

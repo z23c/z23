@@ -101,6 +101,16 @@
 #include <time.h>
 #include <unistd.h>
 
+/* MinGW declares neither macro: O_APPEND/O_CREAT etc. are ANSI, but
+ * close-on-exec and fchmod are POSIX-only. The outbox/cursor files are
+ * process-local and short-lived, so inheritance across exec is not a
+ * concern here worth a real Windows handle-flag implementation - the
+ * existing zero-fallback used by engine_receipt.c/engine_secret.c applies
+ * the same way. */
+#ifndef O_CLOEXEC
+#define O_CLOEXEC 0
+#endif
+
 #define DVM_LEAF "dev.agent.mail"
 #define DVM_BODY_MAX 4096u
 #define DVM_LINE_CAP 8192
