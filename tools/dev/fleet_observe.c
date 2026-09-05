@@ -64,7 +64,23 @@ static bool digits(const char *s, int n, int *out)
 }
 
 /* Days from the civil epoch (1970-01-01) to (y, m, d), Howard Hinnant's
- * days_from_civil — exact, no libc timegm() dependency. */
+ * days_from_civil — exact, no libc timegm() dependency.
+ *
+ * CONVERGENCE NOTE: contexts/commons/packages/ztime already ships this exact
+ * primitive (ztime_days_from_civil, ztime/ztime.h:42) plus a stricter whole-
+ * timestamp parser (ztime_parse, ztime/ztime.h:54, which is what
+ * fo_parse_iso8601() below duplicates and rejects leap seconds ":60" that
+ * this file currently lets through). ztime.c has zero dependencies beyond
+ * <stdio.h>/<string.h>, so pulling it in would not widen tools/dev's link
+ * graph the way engine_rule_score would — but ztime is not wired into any
+ * Makefile target yet (it lives under a "packages" directory, not one of
+ * the "modules" directories the DEVLOOP_ALL_SRCS and LIB_SRCS wildcards
+ * scan), so using it here would be the first integration point for a
+ * currently-orphaned package. That is a deliberate build-graph decision,
+ * not a side effect of a lint-fixing pass, so it is left named here rather
+ * than done: converge
+ * fo_parse_iso8601/days_from_civil onto ztime_parse/ztime_days_from_civil
+ * the next time this file is touched for another reason. */
 static int64_t days_from_civil(int64_t y, int m, int d)
 {
     y -= (m <= 2);
