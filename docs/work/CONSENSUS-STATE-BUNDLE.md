@@ -42,9 +42,35 @@ committed components:
 
 An exporter qualification failure is a persistent dependency warning. It does
 not suppress validation, transaction relay, wallet use, or public serving by an
-otherwise ready node. The warning remains active until an operator restores a
-matching producer session and the exporter mints again; new joiners otherwise
-pay the growing distance from the newest bundle as block-download time.
+otherwise ready node. New joiners otherwise pay the growing distance from the
+newest bundle as block-download time.
+
+The exporter recovers on its own. The durable producer session is bound to the
+running executable's image digest, so every binary upgrade — even a rebuild of
+the identical source tree — makes the stored session foreign and
+`consensus_state_producer_receipt_begin()` refuses. That refusal used to be
+decided once at boot and never re-run, so an upgraded node silently stopped
+minting for good. `bundle_exporter` now re-runs every qualification rung and
+re-opens the session on its ordinary tick, with exponential backoff from one
+tick to one hour, and raises the `bundle_exporter.degraded` condition only
+after three consecutive failed attempts — long enough that boot ordering does
+not trip it, short enough that a real outage is named within a minute or two.
+The condition's reason carries the literal refusal first (for a mismatch, the
+exact diverging field), then the newest minted height and its age in days, and
+the whole sentence is short enough to fit `BLOCKER_REASON_MAX` unclipped. It is
+cleared the moment a generation is minted or the session is re-derived.
+
+Re-deriving is gated, not automatic. A foreign session row is retired and a new
+one derived from the running binary **only** when the source epoch already
+stamped into that datadir's fold rows is byte-identical to the running build's
+(`source_tree_root`, `toolchain_digest`, `build_inputs_digest`, `source_clean`
+— the executable image is deliberately not an input to it). That is the case
+where the export's own stage-row proof still holds verbatim over every
+`genesis..H*` row already on disk, so the re-derive changes nothing the bundle
+claims. When the source epoch actually changed, every stamped row carries the
+old epoch, no bundle could be proven from them, and the session stays refused
+and named — recovery there needs a re-fold, or the operator's explicit
+`producer session retire`.
 
 `consensus_state_snapshot_install()` is a deliberately contained, read-only
 admission validator. The name reserves the single future installation service;

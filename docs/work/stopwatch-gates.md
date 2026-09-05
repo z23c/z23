@@ -381,10 +381,17 @@ header seed from a second host.
 
 So a cold client fetching from this node inherits a bundle whose height is
 about 166,000 blocks behind where the node itself is, and must fold the
-difference — which is the path that livelocks above. Re-opening the exporter
-means restarting the canonical node onto a matching binary. That is the
-operator's decision under AGENTS.md P0, not this lane's, and it is the exact
-prerequisite C3 is waiting on.
+difference — which is the path that livelocks above.
+
+That reading is from 2026-08-20, and the "restart onto a matching binary" part
+of it no longer holds. The exporter now retries the session on its own tick
+with bounded backoff, and when the datadir's stamped source epoch is already
+this build's it retires the foreign session row and re-derives one from the
+running binary, so an upgraded node resumes minting without an operator. What
+still needs a re-fold (or an explicit `producer session retire`) is a genuine
+source-epoch change: those fold rows carry the previous epoch and no bundle can
+be proven from them. `dumpstate bundle_exporter` reports the streak directly —
+`consecutive_failures`, `degraded_after_failures`, and `recover_backoff_secs`.
 
 ## Running the reports
 

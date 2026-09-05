@@ -44,6 +44,41 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+/* ── Recovery policy (both platform arms) ───────────────────────────
+ * The exporter used to decide qualification and the producer session ONCE, at
+ * boot, and never again. A node upgraded twice a day therefore stopped minting
+ * forever the first time its executable changed (see bx_recover_session for the
+ * exact mechanism). Recovery is now a normal tick step, with three constants:
+ *
+ * BX_DEGRADED_AFTER_FAILURES — how many CONSECUTIVE failed attempts before the
+ *   outage is named as bundle_exporter.degraded. 3, not 1: the first attempt
+ *   happens during boot, when the coins store may still be opening, the refold
+ *   marker may not have landed, and the in-RAM overlay may still be draining —
+ *   all of which clear on their own within a tick or two. At the default 30s
+ *   tick, 3 puts the blocker up ~60-90s into a real outage: far too fast to
+ *   matter to an operator, far too slow to fire on boot ordering. It is also
+ *   not 1 for a second reason — a one-shot raise cannot tell a blip from an
+ *   outage, and the whole point of this record is that it means something.
+ *
+ * BX_RECOVER_BACKOFF_MAX_SECS — a failed recovery attempt costs a durable read
+ *   and a BEGIN IMMEDIATE on the shared progress store, so a hopeless cause (a
+ *   real source change; see bx_epoch_adoptable) must not re-run it every tick.
+ *   Doubling from one tick to an hour keeps the fast cases fast and the
+ *   hopeless case cheap, and never stops retrying entirely. */
+#define BX_DEGRADED_AFTER_FAILURES   3
+#define BX_RECOVER_BACKOFF_MAX_SECS  3600
+#define BX_DEGRADED_BLOCKER_ID       "bundle_exporter.degraded"
+/* May a FOREIGN producer session be retired and re-derived from the running
+ * binary? Only when the source epoch already stamped into this datadir's fold
+ * rows is byte-identical to this build's. Platform-independent and pure, so it
+ * lives above the split and has exactly one definition; either side absent
+ * fails CLOSED. See the block above bx_recover_session for why this is the
+ * whole safety argument. */
+static inline bool bx_epoch_adoptable(const uint8_t *stamped,
+                                      const uint8_t *current)
+{
+    return stamped && current && memcmp(stamped, current, 32) == 0;
+}
 #if defined(_WIN32)
 /* Native Windows export/retention stays fail-closed until the snapshot writer,
  * durable installation, and pruning transaction have passed the Windows
@@ -107,6 +142,13 @@ void bundle_exporter_rotate_for_test(const char *dir, int keep,
     (void)datadir;
 }
 void bundle_exporter_set_rotate_skip_validate_for_test(bool on) { (void)on; }
+/* Native Windows export is security-refused before any path is composed, so
+ * there is no module state and no session to recover. These are the per-arm
+ * STATIC halves of the recovery seams; the one exported definition of each
+ * lives past the platform split at the bottom of the file. */
+static bool bx_recover_once_impl(void) { return false; }
+static void bx_note_export_ok_impl(void) {}
+static void bx_inject_session_failure_impl(const char *err) { (void)err; }
 #endif
 #else
 #include <dirent.h>
@@ -134,6 +176,18 @@ static struct {
     int64_t  max_tip_gap;         /* ZCL_BUNDLE_EXPORT_MAX_TIP_GAP at-tip  */
     int      keep;                /* ZCL_BUNDLE_EXPORT_KEEP (>=1) */
     int64_t  tick_secs;           /* ZCL_BUNDLE_EXPORT_TICK_SECS worker poll */
+    int      consecutive_failures; /* consecutive failed mint/recovery attempts */
+    int64_t  recover_backoff_secs; /* current bounded recovery backoff */
+    int64_t  recover_next_us;      /* earliest next recovery attempt */
+    bool     blocker_raised;       /* BX_DEGRADED_BLOCKER_ID is set by us */
+#ifdef ZCL_TESTING
+    /* Test-only injection: the recovery step treats qualification as passed
+     * and the producer-session begin as REFUSED with this text, so the
+     * mismatch -> re-derive -> retry path is reachable from a unit fixture
+     * without a fully folded, proven-authority datadir. */
+    bool     inject_session_failure;
+    char     inject_session_err[256];
+#endif
     pthread_t worker;
     bool      worker_running;     /* true iff `worker` is joinable */
 } g_bx = {
@@ -160,50 +214,96 @@ static void bx_note_refusal(const char *fmt, ...)
     pthread_mutex_unlock(&g_bx.lock);
 }
 /* A degraded exporter is a SILENT production outage, and that is the whole
- * reason this exists. Qualification and the producer session are decided ONCE,
- * in bundle_exporter_start; nothing re-runs them in-process. So a node that
- * comes up degraded logs one WARN at boot and then ticks forever, exporting
- * nothing, while `dumpstate bundle_exporter` reports exports_ok=0 AND
- * exports_failed=0 — the shape of a node that is working fine, not one that
- * stopped a month ago. Measured on the canonical node 2026-08-19: the last
- * mint was 2026-07-24, 165,288 blocks behind its own tip, because a binary
- * upgrade left the stored producer session foreign to the running build. The
- * refusal was correct; the silence was not. Every cold-starting peer inherits
- * that staleness as crawl time, so the outage is named here with the numbers
- * that make it actionable.
+ * reason this exists. Measured on the canonical node 2026-08-19: the last mint
+ * was 2026-07-24, 165,288 blocks behind its own tip, because a binary upgrade
+ * left the stored producer session foreign to the running build. The refusal
+ * was correct; the silence, and the absence of any in-process recovery, were
+ * not. The exporter now RETRIES on its own tick with bounded backoff
+ * (bx_recover_session) and only names the outage after
+ * BX_DEGRADED_AFTER_FAILURES consecutive failures, with the LITERAL cause
+ * leading the reason.
  *
- * BLOCKER_DEPENDENCY: the gates never re-run, so nothing in this process can
- * clear it and dependency blockers never TTL-retire. The optional exporter
- * must not hard-gate validation, relay, or serving. Re-mint only after an
- * operator restarts the node on a matching build. */
+ * BLOCKER_DEPENDENCY: dependency blockers never TTL-retire, and the optional
+ * exporter must not hard-gate validation, relay, or serving. The record is
+ * cleared by this process the moment a mint succeeds or the session is
+ * re-derived (bx_attempt_succeeded).
+ *
+ * REASON BUDGET — this used to overflow. blocker_init copies into a
+ * BLOCKER_REASON_MAX (256) field through the shared visible-cut policy, and
+ * the old framing produced intended_len=275 for a real producer-session
+ * refusal: the record was stored with a "[cut" marker and the operator lost
+ * the tail. `degradation` carries the one thing an operator needs — the exact
+ * refusal, e.g. producer_session_mismatch_detail's "field=X expected=Y
+ * actual=Z" — so it leads and gets the first 160 bytes. The framing below is
+ * bounded at 90 bytes (39 lead-in + 6 days + 11 + 10 height + 24 tail), so the
+ * whole reason is at most 250 bytes and always FITS. Do not lengthen either
+ * half without re-doing this arithmetic; the capacity is not the thing to
+ * raise. */
 static void bx_name_degraded(const char *degradation)
 {
     int32_t last_h = atomic_load(&g_bx_last_export_height);
     int64_t last_us = atomic_load(&g_bx_last_export_time_us);
     int64_t age_secs = last_us > 0 ? (GetTimeMicros() - last_us) / 1000000 : -1;
-    /* blocker_init applies the shared visible-cut policy to this full
-     * reason, and BLOCKER_REASON_MAX (256) can lose the tail of a long
-     * reason (see util/blocker.h). `degradation` carries the one thing an
-     * operator needs — the exact refusal, e.g. producer_session_mismatch_detail's
-     * "field=X expected=Y actual=Z" — so it goes FIRST and gets the first
-     * 200 bytes; the day-count/height framing is context and can afford to
-     * be the part a tight cap trims. */
     char reason[512];
     if (last_h >= 0 && age_secs >= 0)
         snprintf(reason, sizeof reason,
-                 "%.200s (no consensus-state bundle minted for %lld day(s), "
-                 "newest is h=%d; cold-starting peers must crawl block "
-                 "bodies from h=%d, no in-process retry exists)",
-                 degradation, (long long)(age_secs / 86400), last_h, last_h);
+                 "%.160s (no consensus-state bundle minted for %lldd, "
+                 "newest h=%d; retrying with backoff)",
+                 degradation, (long long)(age_secs / 86400), last_h);
     else
         snprintf(reason, sizeof reason,
-                 "%.200s (no consensus-state bundle has ever been minted "
-                 "here; cold-starting peers get no state source from this "
-                 "node, no in-process retry exists)", degradation);
+                 "%.160s (no consensus-state bundle minted here yet; "
+                 "retrying with backoff)", degradation);
     struct blocker_record b;
-    if (blocker_init(&b, "bundle_exporter.degraded", "bundle_exporter",
+    if (blocker_init(&b, BX_DEGRADED_BLOCKER_ID, "bundle_exporter",
                      BLOCKER_DEPENDENCY, reason))
         (void)blocker_set(&b);
+}
+/* One failed attempt (a refused mint, or a refused recovery). Records the
+ * literal cause, advances the bounded recovery backoff, and names the outage
+ * once — and only once — BX_DEGRADED_AFTER_FAILURES consecutive failures have
+ * accrued. Callers must NOT hold g_bx.lock. */
+static void bx_attempt_failed(const char *cause)
+{
+    char degradation[256];
+    bool name_it;
+    pthread_mutex_lock(&g_bx.lock);
+    if (g_bx.consecutive_failures < INT32_MAX)
+        g_bx.consecutive_failures++;
+    snprintf(g_bx.degradation_reason, sizeof g_bx.degradation_reason, "%s",
+             cause && cause[0] ? cause : "producer session not open");
+    snprintf(degradation, sizeof degradation, "%s", g_bx.degradation_reason);
+    int64_t backoff = g_bx.recover_backoff_secs;
+    if (backoff <= 0)
+        backoff = g_bx.tick_secs > 0 ? g_bx.tick_secs : 1;
+    else if (backoff < BX_RECOVER_BACKOFF_MAX_SECS)
+        backoff *= 2;
+    if (backoff > BX_RECOVER_BACKOFF_MAX_SECS)
+        backoff = BX_RECOVER_BACKOFF_MAX_SECS;
+    g_bx.recover_backoff_secs = backoff;
+    g_bx.recover_next_us = GetTimeMicros() + backoff * 1000000;
+    name_it = g_bx.consecutive_failures >= BX_DEGRADED_AFTER_FAILURES;
+    if (name_it)
+        g_bx.blocker_raised = true;
+    pthread_mutex_unlock(&g_bx.lock);
+    if (name_it)
+        bx_name_degraded(degradation);
+}
+/* One successful attempt (a minted generation, or a re-derived session). The
+ * named cause is provably gone, so the record goes with it and the backoff
+ * resets. Callers must NOT hold g_bx.lock. */
+static void bx_attempt_succeeded(void)
+{
+    pthread_mutex_lock(&g_bx.lock);
+    g_bx.consecutive_failures = 0;
+    g_bx.recover_backoff_secs = 0;
+    g_bx.recover_next_us = 0;
+    g_bx.degradation_reason[0] = '\0';
+    bool clear = g_bx.blocker_raised;
+    g_bx.blocker_raised = false;
+    pthread_mutex_unlock(&g_bx.lock);
+    if (clear)
+        blocker_clear(BX_DEGRADED_BLOCKER_ID);
 }
 static int64_t bx_env_i64(const char *name, int64_t dflt)
 {
@@ -283,6 +383,165 @@ static bool bx_qualified(sqlite3 *pdb, char *reason, size_t cap)
 bool bundle_exporter_source_identity_is_exact_for_test(const char *source_id)
 {
     return bx_is_exact_source_id(source_id);
+}
+#endif
+/* ── Producer-session recovery ──────────────────────────────────────
+ * WHY AN UPGRADE STOPS THE MINT. The durable session row
+ * (consensus_state_producer_session) is bound to running_binary_digest =
+ * SHA3-256 of the running executable's on-disk image
+ * (producer_running_binary_digest). consensus_state_producer_receipt_begin
+ * ADOPTS NOTHING: it recomputes this build's claim and refuses unless the
+ * stored row matches exactly, running_binary_digest FIRST
+ * (producer_session_matches_current in consensus_state_producer_receipt.c).
+ * Any relink changes the image bytes, so every binary upgrade — even a rebuild
+ * of the identical source tree — makes the stored session foreign and begin()
+ * returns "session mismatch field=running_binary_digest ...". Until now nothing
+ * in-process re-ran it, so the node never minted again.
+ *
+ * WHY RE-DERIVING IS SOUND, AND ONLY SOMETIMES. The export proof does not care
+ * which executable IMAGE stamped the fold rows; it requires every genesis..H*
+ * row of every source-epoch-bound stage to carry the receipt's
+ * source_epoch_digest (consensus_export_prove_stage_rows in
+ * consensus_state_snapshot_export_proof.c), and it re-checks the finalized
+ * receipt's running_binary_digest against the LIVE /proc/self/exe itself. The
+ * epoch is SHA3(source_tree_root || toolchain_digest || build_inputs_digest ||
+ * source_clean) — consensus_state_source_epoch_digest — and does NOT include
+ * the image digest. So:
+ *
+ *   - epoch stamped in this datadir == this build's epoch: the rows already on
+ *     disk still prove out verbatim under a session owned by this executable.
+ *     Retiring the foreign row and re-deriving one is a rubber stamp — the same
+ *     act consensus_state_producer_session_retire performs, reaching the same
+ *     bundle, with the export's own proof re-run from scratch afterwards.
+ *
+ *   - epoch differs: the source tree, toolchain, or build inputs actually
+ *     changed. Every stamped row carries the OLD epoch, so a re-derived receipt
+ *     would prove nothing and the export would refuse with MISSING_PROOF
+ *     anyway. Retiring here would destroy the audit row for no gain. We do NOT.
+ *     That case stays exactly as fail-closed as it was, named with its literal
+ *     cause, and needs a re-fold (or an operator's explicit retire).
+ *
+ * Nothing below weakens a rung: bx_qualified is re-run in full every attempt,
+ * begin() still refuses what it always refused, retire() still refuses to
+ * delete a session this build owns, and the export proof is unchanged.
+ * bx_epoch_adoptable itself lives above the platform split. */
+/* Is the source epoch already stamped into this datadir's fold rows exactly
+ * this build's epoch? Callers must NOT hold g_bx.lock (progress_store_tx_lock
+ * and g_bx.lock stay strictly disjoint in this module). */
+static bool bx_stamped_epoch_is_this_build(sqlite3 *pdb)
+{
+    uint8_t current[32];
+    if (!consensus_state_producer_receipt_current_binary_epoch(current))
+        return false;
+    uint8_t stamped[32];
+    size_t got = 0;
+    bool found = false;
+    progress_store_tx_lock();
+    bool read_ok = progress_meta_get_blob_exact(
+        pdb, CONSENSUS_STATE_SOURCE_EPOCH_META_KEY, stamped, sizeof stamped,
+        &got, &found);
+    progress_store_tx_unlock();
+    if (!read_ok || !found || got != sizeof stamped)
+        return false;
+    return bx_epoch_adoptable(stamped, current);
+}
+/* One recovery attempt: re-qualify, re-open the producer session, and — only
+ * when the stamped epoch says it is a rubber stamp — retire the foreign
+ * session row and re-derive one from this running binary. Returns true iff a
+ * session is open afterwards. Accounts exactly one failure or one success.
+ * `force` skips the backoff window (test seam). */
+static bool bx_recover_session(bool force)
+{
+    pthread_mutex_lock(&g_bx.lock);
+    sqlite3 *pdb = g_bx.pdb;
+    int64_t next_us = g_bx.recover_next_us;
+#ifdef ZCL_TESTING
+    bool inject = g_bx.inject_session_failure;
+    char inject_err[256];
+    snprintf(inject_err, sizeof inject_err, "%s", g_bx.inject_session_err);
+#endif
+    pthread_mutex_unlock(&g_bx.lock);
+    if (!pdb) {
+        bx_attempt_failed("progress store handle unavailable");
+        return false;
+    }
+    if (!force && next_us > 0 && GetTimeMicros() < next_us)
+        return false; /* inside the backoff window: no attempt, no accounting */
+    char err[256] = "";
+#ifdef ZCL_TESTING
+    if (inject) {
+        snprintf(err, sizeof err, "%s",
+                 inject_err[0] ? inject_err : "injected session refusal");
+    } else
+#endif
+    {
+        char reason[256] = "";
+        if (!bx_qualified(pdb, reason, sizeof reason)) {
+            bx_attempt_failed(reason[0] ? reason
+                                        : "provenance does not qualify");
+            return false;
+        }
+        if (consensus_state_producer_receipt_begin(
+                pdb, CONSENSUS_STATE_VALIDATION_FULL, err, sizeof err)) {
+            pthread_mutex_lock(&g_bx.lock);
+            g_bx.session_open = true;
+            g_bx.qualified = true;
+            pthread_mutex_unlock(&g_bx.lock);
+            bx_attempt_succeeded();
+            return true;
+        }
+    }
+    /* begin() refused. Re-derive ONLY when the epoch on disk is ours. */
+    if (bx_stamped_epoch_is_this_build(pdb)) {
+        char rerr[256] = "";
+        enum consensus_state_producer_session_retire_result rc =
+            consensus_state_producer_session_retire(pdb, NULL, rerr,
+                                                    sizeof rerr);
+        if (rc == CONSENSUS_STATE_PRODUCER_SESSION_RETIRE_RETIRED ||
+            rc == CONSENSUS_STATE_PRODUCER_SESSION_RETIRE_ABSENT) {
+            char err2[256] = "";
+            if (consensus_state_producer_receipt_begin(
+                    pdb, CONSENSUS_STATE_VALIDATION_FULL, err2,
+                    sizeof err2)) {
+                LOG_INFO("bundle_exporter",
+                         "producer session re-derived from this running "
+                         "binary (same source epoch); minting resumes");
+                pthread_mutex_lock(&g_bx.lock);
+                g_bx.session_open = true;
+                g_bx.qualified = true;
+                pthread_mutex_unlock(&g_bx.lock);
+                bx_attempt_succeeded();
+                return true;
+            }
+            snprintf(err, sizeof err, "%s",
+                     err2[0] ? err2 : "producer session refused after "
+                                      "re-derive");
+        } else if (rc == CONSENSUS_STATE_PRODUCER_SESSION_RETIRE_ERROR) {
+            snprintf(err, sizeof err, "%s",
+                     rerr[0] ? rerr : "producer session retire failed");
+        }
+    }
+    bx_attempt_failed(err[0] ? err : "producer session refused");
+    return false;
+}
+#ifdef ZCL_TESTING
+/* Per-arm STATIC halves of the recovery seams; the one exported definition of
+ * each lives past the platform split at the bottom of the file. */
+static bool bx_recover_once_impl(void)
+{
+    return bx_recover_session(true);
+}
+static void bx_note_export_ok_impl(void)
+{
+    bx_attempt_succeeded();
+}
+static void bx_inject_session_failure_impl(const char *err)
+{
+    pthread_mutex_lock(&g_bx.lock);
+    g_bx.inject_session_failure = err != NULL;
+    snprintf(g_bx.inject_session_err, sizeof g_bx.inject_session_err, "%s",
+             err ? err : "");
+    pthread_mutex_unlock(&g_bx.lock);
 }
 #endif
 /* ── GAP-1: at-tip + time-cadence gates (pure, unit-tested) ─────────── */
@@ -424,12 +683,17 @@ static void bx_try_export_once(void)
                                                    err, sizeof err)) {
         bx_note_refusal("%s", err[0] ? err : "receipt finalize failed");
         atomic_fetch_add(&g_bx_exports_failed, 1);
+        bx_attempt_failed(err[0] ? err : "receipt finalize failed");
         return;
     }
     int dir_fd = open(bundles_dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
     if (dir_fd < 0) {
         bx_note_refusal("open bundles dir failed: %s", strerror(errno));
         atomic_fetch_add(&g_bx_exports_failed, 1);
+        char why[256];
+        snprintf(why, sizeof why, "open bundles dir failed: %s",
+                 strerror(errno));
+        bx_attempt_failed(why);
         return;
     }
     struct consensus_state_snapshot_export_request req;
@@ -481,6 +745,9 @@ static void bx_try_export_once(void)
                          "rom_seed scan will pick it up", rel, (int)rrc);
         }
         bx_rotate(bundles_dir, keep, datadir);
+        /* A minted generation is the definition of "not degraded": the record
+         * and the failure streak both go. */
+        bx_attempt_succeeded();
     } else {
         bx_note_refusal("%s", res.reason[0] ? res.reason : "export refused");
         atomic_fetch_add(&g_bx_exports_failed, 1);
@@ -488,6 +755,7 @@ static void bx_try_export_once(void)
                  "export refused height=%d status=%d reason=%s",
                  h, (int)res.status,
                  res.reason[0] ? res.reason : "(none)");
+        bx_attempt_failed(res.reason[0] ? res.reason : "export refused");
     }
 }
 /* ── Worker loop ────────────────────────────────────────────────── */
@@ -514,18 +782,14 @@ static void *bx_worker_main(void *arg)
         bool session = g_bx.session_open;
         pthread_mutex_unlock(&g_bx.lock);
         if (!session) {
-            /* Degraded — keep heartbeating, never export, and SAY SO every
-             * tick. blocker_set's own token bucket collapses the repeats, so
-             * this costs one stored record and keeps it from being retired as
-             * stale evidence while the outage is still real. */
-            pthread_mutex_lock(&g_bx.lock);
-            char degradation[256];
-            snprintf(degradation, sizeof degradation, "%s",
-                     g_bx.degradation_reason[0] ? g_bx.degradation_reason
-                                                : "producer session not open");
-            pthread_mutex_unlock(&g_bx.lock);
-            bx_name_degraded(degradation);
-            continue;
+            /* Degraded — keep heartbeating and TRY TO FIX IT. bx_recover_session
+             * re-runs every qualification rung and re-opens the producer
+             * session, re-deriving it from this running binary when (and only
+             * when) the epoch stamped in this datadir is already ours. It
+             * self-rate-limits with bounded backoff and names the outage once
+             * BX_DEGRADED_AFTER_FAILURES consecutive attempts have failed. */
+            if (!bx_recover_session(false))
+                continue;
         }
         bx_try_export_once();
     }
@@ -567,6 +831,10 @@ bool bundle_exporter_start(sqlite3 *pdb, const char *datadir)
     g_bx.tick_secs = bx_env_i64("ZCL_BUNDLE_EXPORT_TICK_SECS", 30);
     if (g_bx.tick_secs < 1)
         g_bx.tick_secs = 1;
+    /* A fresh arm starts a fresh streak. */
+    g_bx.consecutive_failures = 0;
+    g_bx.recover_backoff_secs = 0;
+    g_bx.recover_next_us = 0;
     if (mkdir(g_bx.bundles_dir, 0700) != 0 && errno != EEXIST)
         LOG_WARN("bundle_exporter", "mkdir %s failed: %s",
                  g_bx.bundles_dir, strerror(errno));
@@ -618,12 +886,15 @@ bool bundle_exporter_start(sqlite3 *pdb, const char *datadir)
     atomic_store(&g_bx_last_export_height,
                  bx_scan_newest(bundles_dir, &newest_mtime_us));
     atomic_store(&g_bx_last_export_time_us, newest_mtime_us);
-    /* Name it now, not one worker tick from now: the generation scan above is
-     * what supplies the staleness numbers, so this is the first moment the
-     * blocker can carry them. The worker re-fires it on every tick. */
+    /* Account it now, not one worker tick from now: the generation scan above
+     * is what supplies the staleness numbers, so this is the first moment a
+     * blocker could carry them. This counts as attempt #1 of
+     * BX_DEGRADED_AFTER_FAILURES — a boot that has not yet finished opening
+     * the coins store is not yet an outage — and the worker retries from
+     * there. */
     if (!session_open)
-        bx_name_degraded(degradation[0] ? degradation
-                                        : "producer session not open");
+        bx_attempt_failed(degradation[0] ? degradation
+                                         : "producer session not open");
     /* Register the supervised (best-effort, no-stall) contract. */
     if (supervisor_start()) {
         liveness_contract_init(&g_bx_contract, "ops.bundle_exporter");
@@ -715,10 +986,13 @@ bool bundle_exporter_dump_state_json(struct json_value *out, const char *key)
     char bundles_dir[1100];
     bool session_open, qualified;
     int64_t every_blocks, every_secs, min_secs, max_tip_gap;
-    int keep;
+    int keep, consecutive_failures;
+    int64_t recover_backoff_secs;
     pthread_mutex_lock(&g_bx.lock);
     session_open = g_bx.session_open;
     qualified = g_bx.qualified;
+    consecutive_failures = g_bx.consecutive_failures;
+    recover_backoff_secs = g_bx.recover_backoff_secs;
     every_blocks = g_bx.every_blocks;
     every_secs = g_bx.every_secs;
     min_secs = g_bx.min_secs;
@@ -746,6 +1020,12 @@ bool bundle_exporter_dump_state_json(struct json_value *out, const char *key)
     json_push_kv_int(out, "min_secs", min_secs);
     json_push_kv_int(out, "max_tip_gap", max_tip_gap);
     json_push_kv_int(out, "keep", keep);
+    /* Recovery is observable: how long the current failure streak is, how far
+     * it still is from naming the outage, and how long until the next try. */
+    json_push_kv_int(out, "consecutive_failures", consecutive_failures);
+    json_push_kv_int(out, "degraded_after_failures",
+                     BX_DEGRADED_AFTER_FAILURES);
+    json_push_kv_int(out, "recover_backoff_secs", recover_backoff_secs);
     json_push_kv_str(out, "bundles_dir", bundles_dir);
     /* Generations currently on disk (heights present), newest first. */
     struct bx_gen gens[BX_MAX_GENERATIONS];
@@ -779,3 +1059,29 @@ bool bundle_exporter_dump_state_json(struct json_value *out, const char *key)
     return true;
 }
 #endif /* _WIN32 */
+#ifdef ZCL_TESTING
+/* ── Recovery seams: ONE definition each, past the platform split ────
+ * Both arms above expose only static halves, so none of these becomes a
+ * per-arm duplicate symbol. */
+bool bundle_exporter_epoch_adoptable_for_test(const uint8_t *stamped,
+                                              const uint8_t *current)
+{
+    return bx_epoch_adoptable(stamped, current);
+}
+bool bundle_exporter_recover_once_for_test(void)
+{
+    return bx_recover_once_impl();
+}
+void bundle_exporter_note_export_ok_for_test(void)
+{
+    bx_note_export_ok_impl();
+}
+void bundle_exporter_inject_session_failure_for_test(const char *err)
+{
+    bx_inject_session_failure_impl(err);
+}
+int bundle_exporter_degraded_after_failures_for_test(void)
+{
+    return BX_DEGRADED_AFTER_FAILURES;
+}
+#endif
