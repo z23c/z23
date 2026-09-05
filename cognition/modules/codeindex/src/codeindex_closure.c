@@ -16,6 +16,7 @@
 
 #include "codeindex/codeindex_closure.h"
 
+#include "base/serialize_le.h"
 #include "crypto/sha3.h"
 #include "platform/positioned_file.h"
 
@@ -146,8 +147,7 @@ static bool closure_raw_digest(const char *root, const char *relpath,
     sha3_256_write(&sha, (const unsigned char *)domain, sizeof(domain));
     sha3_256_write(&sha, (const unsigned char *)relpath, strlen(relpath) + 1);
     unsigned char size_wire[8];
-    for (unsigned i = 0; i < 8; i++)
-        size_wire[i] = (unsigned char)((before.size >> (i * 8)) & 0xffU);
+    zcl_write_u64_le(size_wire, before.size);
     sha3_256_write(&sha, size_wire, sizeof(size_wire));
 
     unsigned char buf[64 * 1024];
@@ -224,8 +224,7 @@ bool ci_closure_seal(const struct ci_closure *c, struct zcl_sha3_digest *out)
     sha3_256_write(&sha, (const unsigned char *)c->domain,
                    strlen(c->domain) + 1);
     unsigned char count_wire[4];
-    for (unsigned i = 0; i < 4; i++)
-        count_wire[i] = (unsigned char)((c->nentries >> (i * 8)) & 0xffU);
+    zcl_write_u32_le(count_wire, c->nentries);
     sha3_256_write(&sha, count_wire, sizeof(count_wire));
     for (uint32_t i = 0; i < c->nentries; i++) {
         const uint16_t k = order[i];
