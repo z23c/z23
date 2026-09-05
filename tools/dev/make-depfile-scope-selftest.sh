@@ -65,6 +65,9 @@ PROBE_MK="$WORK/probe.mk"
     done
     printf '\n'
     printf 'fast-compile build-only t-fast t dev-failure-execution-id: $(ZCL_DEP_PROBE_OBJECTS)\n'
+    # These recipes normally invoke a recursive Make even under -n. Replace
+    # only their actions; retain the real graph selection and prerequisites.
+    printf 't-hotswap hotswap-test-so: $(ZCL_DEP_PROBE_OBJECTS)\n\t@:\n'
     printf 'zclassic23 z23 zclassic23-package-verify: $(ZCL_DEP_PROBE_OBJECTS)\n'
     printf 'zcl-depfile-unknown zcl-depfile-default: $(ZCL_DEP_PROBE_OBJECTS)\n'
     printf '\t@:\n'
@@ -135,6 +138,17 @@ assert_exact_profiles "$WORK/strict.out" test-strict
 run_probe "$WORK/failure-id.out" dev-failure-execution-id
 assert_exact_profiles "$WORK/failure-id.out" ""
 
+# Module recipes compile directly and never consume the linked harness's
+# object graph. A newer unrelated header must not schedule object rebuilds.
+run_probe "$WORK/hot-loop.out" t-hotswap ONLY=boot_phase
+assert_exact_profiles "$WORK/hot-loop.out" ""
+run_probe "$WORK/hot-module.out" hotswap-test-so
+assert_exact_profiles "$WORK/hot-module.out" ""
+run_probe "$WORK/hot-both.out" t-hotswap hotswap-test-so ONLY=boot_phase
+assert_exact_profiles "$WORK/hot-both.out" ""
+run_probe "$WORK/hot-mixed.out" t-hotswap t-fast ONLY=boot_phase
+assert_exact_profiles "$WORK/hot-mixed.out" "build-only dev test-fast test-strict node-c23"
+
 # The shipped node binary, under both spellings of its goal. Narrowing to
 # node-c23 alone is the point: a missing exact-goal branch would silently widen
 # this to every profile, and a missing -include would silently empty it.
@@ -156,4 +170,4 @@ run_probe "$WORK/default.out"
 assert_exact_profiles "$WORK/default.out" node-c23
 
 printf '%s\n' \
-    'make-depfile-scope-selftest: PASS header_rebuild=true single_goal_scoped=true node_c23_scoped=true mixed_unknown_all=true default_node_c23=true'
+    'make-depfile-scope-selftest: PASS header_rebuild=true single_goal_scoped=true node_c23_scoped=true hot_module_scoped=true mixed_unknown_all=true default_node_c23=true'

@@ -315,6 +315,80 @@ if "$KEY_TOOL" key "$SOURCE_A" 1 "$MUTATION_A1" "$COMPILER_ID" \
     fail 'retired source-keyed epoch derivation was accepted'
 fi
 
+# t-hotswap already paid for an exact source record before its recipe runs.
+# Its recursive Make must receive that record as an argv assignment: an
+# ambient value is not authority, and recapturing the whole tree duplicates
+# the dominant hot-loop cost. Exercise the real recipe with inert fixtures.
+phase t-hotswap-source-record-forwarding
+HOT_FIX="$WORK/t-hotswap-forward"
+HOT_MAKE="$HOT_FIX/fake-make"
+HOT_HARNESS="$HOT_FIX/test_parallel_fast"
+HOT_MODULE="$HOT_FIX/module.so"
+HOT_ARGS="$HOT_FIX/recursive.args"
+HOT_HARNESS_ARGS="$HOT_FIX/harness.args"
+HOT_LOG="$HOT_FIX/run.log"
+HOT_RECORD="$SOURCE_A 1 $MUTATION_A1"
+AMBIENT_RECORD="$(sha_label ambient-record) 1 $(sha_label ambient-mutation)"
+mkdir -p "$HOT_FIX"
+cat > "$HOT_MAKE" <<'HOT_MAKE_EOF'
+#!/bin/sh
+set -eu
+: "${Z23_HOT_ARGS:?}" "${Z23_HOT_MODULE:?}"
+printf '%s\n' "$@" > "$Z23_HOT_ARGS"
+: > "$Z23_HOT_MODULE"
+printf '%s\n' "$Z23_HOT_MODULE"
+HOT_MAKE_EOF
+cat > "$HOT_HARNESS" <<'HOT_HARNESS_EOF'
+#!/bin/sh
+set -eu
+: "${Z23_HOT_HARNESS_ARGS:?}"
+printf '%s\n' "$@" > "$Z23_HOT_HARNESS_ARGS"
+[ -n "${ZCL_HOTSWAP_TEST_MODULE:-}" ] &&
+    [ -f "$ZCL_HOTSWAP_TEST_MODULE" ]
+HOT_HARNESS_EOF
+chmod +x "$HOT_MAKE" "$HOT_HARNESS"
+
+run_hot_fixture()
+{
+    BUILD_SOURCE_RECORD="$AMBIENT_RECORD" \
+    Z23_HOT_ARGS="$HOT_ARGS" Z23_HOT_MODULE="$HOT_MODULE" \
+    Z23_HOT_HARNESS_ARGS="$HOT_HARNESS_ARGS" \
+    make --no-print-directory \
+        MAKE="$HOT_MAKE" BUILD_SOURCE_RECORD="$HOT_RECORD" \
+        ZCL_EPOCH_PROFILES= ZCL_DEPFILE_PROFILES= \
+        VIEW_GEN_HEADERS_EARLY= VIEW_GEN_HEADERS= \
+        TEST_FAST_COMPILE_EPOCH="$EPOCH_MAIN" \
+        TEST_PARALLEL_FAST_CANDIDATE="$HOT_HARNESS" \
+        TEST_PARALLEL_FAST_ACTIVE="$HOT_HARNESS" \
+        HOTSWAP_TEST_SO_DIR="$HOT_FIX" \
+        t-hotswap ONLY=hotswap_policy_module \
+        HANDLER=zcode.package.policy.limits
+}
+
+run_hot_fixture > "$HOT_LOG" 2>&1 || {
+    sed 's/^/build-epoch-selftest: t-hotswap fixture: /' "$HOT_LOG" >&2
+    fail 'real t-hotswap recipe failed with inert module and harness fixtures'
+}
+grep -Fqx "BUILD_SOURCE_RECORD=$HOT_RECORD" "$HOT_ARGS" ||
+    fail 't-hotswap recursive Make did not receive the exact parent source record as argv'
+if grep -Fqx "BUILD_SOURCE_RECORD=$AMBIENT_RECORD" "$HOT_ARGS"; then
+    fail 't-hotswap substituted an ambient source record for the parent record'
+fi
+grep -Fqx -- '--only=hotswap_policy_module' "$HOT_HARNESS_ARGS" ||
+    fail 't-hotswap fixture did not execute the requested group'
+
+# Forwarding must not move work ahead of the existing harness prerequisite:
+# absence still refuses before recursive Make runs.
+rm -f "$HOT_HARNESS"
+: > "$HOT_ARGS"
+if run_hot_fixture > "$HOT_LOG" 2>&1; then
+    fail 't-hotswap accepted a missing test harness'
+fi
+grep -Fq 'no test harness for this compile epoch yet' "$HOT_LOG" ||
+    fail 't-hotswap missing-harness refusal lost its explanatory error'
+[ ! -s "$HOT_ARGS" ] ||
+    fail 't-hotswap invoked recursive Make before refusing a missing harness'
+
 STABLE="$WORK/bin/fixture"
 STATE="$WORK/source.state"
 VERIFY="$WORK/verify-record.sh"

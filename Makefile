@@ -256,14 +256,15 @@ ZCL_HOTSWAP_LOOP_GOALS := hotswap-try hotswap-apply hotswap \
 	$(ZCL_GUI_APP_GOALS)
 ZCL_HOTSWAP_LOOP_ONLY := $(if $(strip $(MAKECMDGOALS)),$(if $(strip $(filter-out $(ZCL_HOTSWAP_LOOP_GOALS),$(MAKECMDGOALS))),,1),)
 
-# hotswap-module-so compiles exactly one TU via a direct $(CC) shell command in
-# its recipe body, never through make's %.o pattern rules, so it needs none of
-# the four object depfile graphs either — unlike hotswap-try/hotswap-apply it
-# DOES stamp its artifact names with the real captured source identity (see
-# BUILD_SOURCE_RECORD below), so it deliberately stays out of
+# The module recipes compile one TU (or declared island) directly with $(CC),
+# never through make's %.o pattern rules. t-hotswap runs an already-linked
+# harness, so these goals need no object depfile graphs. Unlike
+# hotswap-try/hotswap-apply they retain the real captured source identity (see
+# BUILD_SOURCE_RECORD below), so they deliberately stay out of
 # ZCL_HOTSWAP_LOOP_GOALS above (that set fakes a zero identity). This wider
 # set only gates the depfile-graph import skip.
-ZCL_HOTSWAP_DEPFILE_LEAN_GOALS := $(ZCL_HOTSWAP_LOOP_GOALS) hotswap-module-so
+ZCL_HOTSWAP_DEPFILE_LEAN_GOALS := $(ZCL_HOTSWAP_LOOP_GOALS) hotswap-module-so \
+	t-hotswap hotswap-test-so
 ZCL_HOTSWAP_DEPFILE_LEAN_ONLY := $(if $(strip $(MAKECMDGOALS)),$(if $(strip $(filter-out $(ZCL_HOTSWAP_DEPFILE_LEAN_GOALS),$(MAKECMDGOALS))),,1),)
 
 # worktree-prime supplies generated vendor/lib/*.a and vendor/include by copy
@@ -5137,7 +5138,7 @@ t-hotswap:
 	  echo "  then every later edit to a swappable TU is a module build only." >&2; \
 	  exit 2; }
 	@set -eu; \
-	so="$$($(MAKE) --no-print-directory hotswap-test-so \
+	so="$$($(MAKE) --no-print-directory BUILD_SOURCE_RECORD="$(BUILD_SOURCE_RECORD)" hotswap-test-so \
 	  $(if $(FILE),FILE=$(FILE),HANDLER=$(HANDLER)) | tail -1)"; \
 	case "$$so" in /*) ;; *) so="$(CURDIR)/$$so" ;; esac; \
 	[ -n "$$so" ] && [ -f "$$so" ] || { \
