@@ -9584,6 +9584,8 @@ DESTDIR ?=
 DEPLOY_VERIFY_STAGE ?= stable
 define INSTALL_C23_PRODUCTS
 set -eu; \
+. tools/scripts/tor_stamp_lib.sh; \
+zcl_tor_require_full "$(ZCLASSIC23_BIN)" "the node this install would place"; \
 install -d "$(DESTDIR)$(PREFIX)/bin"; \
 install -m 755 $(ZCLASSIC23_BIN) "$(DESTDIR)$(PREFIX)/bin/z23"; \
 ln -sfn z23 "$(DESTDIR)$(PREFIX)/bin/zclassic23"; \

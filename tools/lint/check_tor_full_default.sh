@@ -84,6 +84,10 @@ check_root() {
     grep -qF 'ZCL_TOR=stub - LINKING THE OFFLINE TOR STUB' "$mk" \
         || note "selecting the stub prints no loud line"
 
+    # `make install` places a binary, so it is a packaging step too.
+    grep -qF 'zcl_tor_require_full' "$mk" \
+        || note "the Makefile's install recipe never reads the tor stamp, so \`make install\` would place a stub node"
+
     # (iii) The refusal sentence, byte for byte, in every carrier.
     for f in "${REFUSAL_FILES[@]}"; do
         [ -f "$root/$f" ] || { note "$f is missing"; continue; }
@@ -171,7 +175,12 @@ run_selftest() {
         "$bad/tools/scripts/build_c23_portable_release.sh"
     expect reject "$bad" "TOR_FULL= forced empty again"
 
-    # 5. ship.sh loses its reach to the refusal.
+    # 5. `make install` stops reading the stamp.
+    seed "$bad"
+    sed -i 's/zcl_tor_require_full/some_other_check/g' "$bad/Makefile"
+    expect reject "$bad" "make install no longer reading the tor stamp"
+
+    # 6. ship.sh loses its reach to the refusal.
     seed "$bad"
     sed -i 's/ZCL_TOR_STUB_REFUSAL/SOME_OTHER_MESSAGE/g; s/zcl_tor_require_full/some_other_check/g' \
         "$bad/tools/ship.sh"
