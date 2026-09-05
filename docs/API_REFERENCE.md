@@ -74,15 +74,15 @@ z23 discover schema <path> --side=input|output
 
 | Catalog fact | Count |
 |---|---|
-| Registry entries (branches + leaves) | 831 |
+| Registry entries (branches + leaves) | 835 |
 | Top-level roots | 14 |
-| Branches | 187 |
-| Leaves (dispatchable command paths) | 644 |
-| … `ready` (live handler in this build) | 574 |
+| Branches | 188 |
+| Leaves (dispatchable command paths) | 647 |
+| … `ready` (live handler in this build) | 577 |
 | … `compat` (metadata only, names a fallback) | 39 |
 | … `planned` (fail-closed BLOCKED, exit 3) | 31 |
 | … dev-gated 🔧 (`ready` only in `z23-dev`) | 38 |
-| Leaves with `effect=mutate` | 226 |
+| Leaves with `effect=mutate` | 227 |
 | Leaves with `effect=destructive` | 5 |
 | Leaves requiring **owner** authority | 122 |
 
@@ -107,6 +107,7 @@ Per source file:
 | `engine/composition/commands/zses.def` | 4 | 2 | 2 |
 | `engine/composition/commands/story.def` | 5 | 1 | 4 |
 | `engine/composition/commands/fleet_board.def` | 11 | 3 | 8 |
+| `engine/composition/commands/mind.def` | 4 | 1 | 3 |
 | `engine/composition/commands/telemetry/root.def` | 6 | 2 | 4 |
 | `engine/composition/commands/telemetry/watch.def` | 1 | 0 | 1 |
 | `engine/composition/commands/telemetry/runtime.def` | 4 | 1 | 3 |
@@ -821,6 +822,14 @@ represented by its children's sections.
 | `dev agent ticketkey` | ready | read / read / operator · fast/low | `group`, `cwd`, `tip` | `zcl.agent_ticketkey.v1` | `z23 dev agent ticketkey --group=devagent_situation` | Commuting-ticket key of one test group at one tip |
 | `dev agent queue` | compat 🔧 → `z23-dev dev agent queue` | mutate / dev-mutation / operator · fast/low | **`action`**, `kind`, `name`, `group`, `path`, `brief`, `model`, `attempt`, `json`, `cwd` | `zcl.agent_queue.v1` | `z23 dev agent queue post --kind=leaf --name=situation` | Post, dispatch, reap, and inspect async flash-unit runs without blocking — *the unit queue is a development-lane coordination surface* |
 | `dev agent mail` | compat 🔧 → `z23-dev dev agent mail` | mutate / dev-mutation / operator · fast/low | **`action`**, `to`, `kind`, `body`, `since`, `from`, **`cursor`**, `agent`, `ref`, `cwd` | `zcl.agent_mail.v1` | `z23 dev agent mail post --to=* --kind=note --body=hello` | Post, pull, and ack async agent mail without blocking — *agent mail is a development-lane coordination surface* |
+
+#### `dev.fleet.mind` — The node's resident index owner, and what to ask it
+
+| Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
+|---|---|---|---|---|---|---|
+| `dev fleet mind ask` | ready | read / read / operator · fast/low | **`kind`**, **`subject`** | `zcl.mind_answer.v1` | `z23 dev fleet mind ask where_is codeindex_open` | Ask this node's mind one bounded question about the tree |
+| `dev fleet mind status` | ready | read / read / operator · fast/low | `fleet` | `zcl.mind_status.v1` | `z23 dev fleet mind status` | Whether a mind is running here, and what each checkout's index holds |
+| `dev fleet mind serve` | ready | mutate / dev-mutation / operator · persistent/high | `cycles` | `zcl.mind_serve.v1` | `z23 dev fleet mind serve` | Run this node's mind until its checkout registry is removed |
 
 ### `ops` — Node diagnostics
 
