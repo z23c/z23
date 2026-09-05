@@ -107,12 +107,10 @@
 #define GIT_HOOKS_SCRIPT_REL "tools/scripts/check_git_hooks_installed.sh"
 #define PRIV_RECEIPT_SCRIPT_REL \
     "tools/lint/check_privileged_transition_receipt.sh"
-/* Gate — no ordinal comparison of enum sync_trust_state. Plant a fixture with
- * an ordinal comparison into a scanned dir → trip; remove → recover. */
+/* Gate — no ordinal comparison of enum sync_trust_state. The script owns a
+ * private Git fixture repository for its trip/recover selftest. */
 #define TRUST_ORDER_SCRIPT_REL \
     "tools/scripts/check_no_trust_state_ordering.sh"
-#define TRUST_ORDER_FIXTURE_DST \
-    "engine/services/src/_trust_order_fixture_tmp.c"
 #define GIT_HOOKS_PRE_PUSH_REL "tools/dev/z23_git_hook.c"
 /* Fixture path PREFIXES, not whole paths: these two checks live in the
  * REALROOT lane, which runs inside the worker pool, so they are resolved

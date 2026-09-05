@@ -40,8 +40,8 @@
  *   LINT_LANE_REALROOT   needs the real .git (git grep / git ls-files /
  *                        .git/hooks) or is hermetic (its own mktemp sandbox),
  *                        but never mutates a tracked path. Pool-eligible.
- *   LINT_LANE_EXCLUSIVE  genuinely plants into the REAL worktree. Only two
- *                        checks qualify. This lane keeps the historic group
+ *   LINT_LANE_EXCLUSIVE  plants into the REAL worktree (the stray-root-file
+ *                        check). This lane keeps the historic group
  *                        name `make_lint_gates` and stays the exclusive
  *                        pre-pass — which also guarantees the tree is quiet
  *                        while the shards build their sandboxes.
@@ -338,9 +338,8 @@ static const struct lint_gate_entry g_lint_gate_entries[] = {
     S_(t_hotswap_service_island_gate),
     S_(t_privileged_transition_receipt_gate),
     S_(t_blocker_escape_registered_gate),
-    /* Plants engine/services/src/_trust_order_fixture_tmp.c into the REAL tree
-     * (the gate greps --untracked, which needs the real .git). */
-    X_(t_no_trust_state_ordering_gate),
+    /* Read-only real scan plus a private Git-backed fixture repository. */
+    N_(t_no_trust_state_ordering_gate),
     S_(t_lint_gates_fail_loud_on_empty_scan),
     /* Hermetic: builds its fixture trees under TMPDIR and reads Makefile /
      * run_lint.sh, never writing into the worktree. */
@@ -759,7 +758,7 @@ int test_make_lint_gates_heavy_02(void)
     return lint_run_owned(LINT_OWNER_HEAVY_BASE + 1);
 }
 
-/* The exclusive lane — the two checks that genuinely plant into the live
+/* The exclusive lane — the remaining check that plants into the live
  * worktree. Keeps the historic group name, so `--only=make_lint_gates` (a
  * substring match) still selects this plus every shard, and every impact rule
  * naming `make_lint_gates` keeps resolving. */
@@ -831,10 +830,15 @@ static int t_partition_shards_all_carry_work(void)
     int heavy_counts[LINT_GATE_HEAVY_COUNT];
     for (int h = 0; h < LINT_GATE_HEAVY_COUNT; h++) heavy_counts[h] = 0;
     int realroot_count = 0, exclusive_count = 0, heavy_lane_entries = 0;
+    int trust_order_owner = LINT_OWNER_NONE, stray_root_owner = LINT_OWNER_NONE;
 
     for (size_t i = 0; i < LINT_GATE_ENTRY_COUNT; i++) {
         if (g_lint_gate_entries[i].lane == LINT_LANE_HEAVY) heavy_lane_entries++;
         int owner = lint_owner_of(i);
+        if (g_lint_gate_entries[i].fn == t_no_trust_state_ordering_gate)
+            trust_order_owner = owner;
+        if (g_lint_gate_entries[i].fn == t_no_stray_root_files)
+            stray_root_owner = owner;
         if (owner >= 0 && owner < LINT_GATE_SHARD_COUNT) shard_counts[owner]++;
         else if (owner >= LINT_OWNER_HEAVY_BASE &&
                  owner < LINT_OWNER_HEAVY_BASE + LINT_GATE_HEAVY_COUNT)
@@ -850,7 +854,7 @@ static int t_partition_shards_all_carry_work(void)
     for (int h = 0; h < LINT_GATE_HEAVY_COUNT; h++)
         if (heavy_counts[h] != 1) empty_heavy++;
 
-    TEST("[lint-gate] every group carries work; both planters stay exclusive") {
+    TEST("[lint-gate] every group carries work; only the live planter stays exclusive") {
         ASSERT(empty_shards == 0);
         /* Every heavy group owns exactly one check, and there is a group for
          * every HEAVY entry — tag a third one without adding its group and
@@ -858,9 +862,11 @@ static int t_partition_shards_all_carry_work(void)
          * and this makes legible. */
         ASSERT(empty_heavy == 0);
         ASSERT(heavy_lane_entries == LINT_GATE_HEAVY_COUNT);
-        /* Exactly the two checks that write into the live worktree. If a new
-         * check starts planting into the real tree, tag it X_ and bump this. */
-        ASSERT(exclusive_count == 2);
+        /* The trust-order matrix now owns a private Git fixture. Pin both
+         * owners so isolation cannot silently regress to live planting. */
+        ASSERT(trust_order_owner == LINT_OWNER_REALROOT);
+        ASSERT(stray_root_owner == LINT_OWNER_EXCLUSIVE);
+        ASSERT(exclusive_count == 1);
         ASSERT(realroot_count >= 1);
         PASS();
     } _test_next:;

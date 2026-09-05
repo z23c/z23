@@ -44,6 +44,7 @@ ORDER_RE='(<=|>=|<|>)[[:space:]]*SYNC_TRUST_|SYNC_TRUST_[A-Z_]+[[:space:]]*(<=|>
 # seen; the shared scan_exclusions filter drops fixture/build/vendor noise when
 # run through `make lint` (ZCL_LINT_PRODUCTION_SCAN=1), and passes everything
 # through when a selftest execs this script directly.
+scan_sources() {
 mapfile -t hits < <(
     git grep --untracked -nE "$ORDER_RE" -- \
         "${scan_pathspecs[@]}" 2>/dev/null \
@@ -80,3 +81,43 @@ fi
 
 echo "check_no_trust_state_ordering: clean — no ordinal sync_trust_state comparison (${#universe[@]} files scanned)"
 exit 0
+}
+
+# Exercise the same Git-backed scanner in a private repository. No fixture
+# enters a live source directory, where concurrent proof lint can observe it.
+if [[ "${1:-}" == "--selftest" ]]; then
+    st_tmp=$(mktemp -d "${TMPDIR:-/tmp}/trust_order_selftest.XXXXXX")
+    trap 'rm -rf "$st_tmp"' EXIT
+    git -C "$st_tmp" init -q
+    mkdir -p "$st_tmp/engine/services/src"
+    st_source="$st_tmp/engine/services/src/probe.c"
+    st_expect() {
+        local want="$1" label="$2" actual=0 output
+        output=$(cd "$st_tmp" && scan_sources 2>&1) || actual=$?
+        if [[ "$actual" != "$want" ]]; then
+            printf 'check_no_trust_state_ordering --selftest: FAIL %s: rc=%s want=%s\n%s\n' \
+                "$label" "$actual" "$want" "$output" >&2
+            exit 1
+        fi
+        printf '  ok %s (rc=%s)\n' "$label" "$actual"
+    }
+    printf 'int f(int st) { return st == SYNC_TRUST_SOVEREIGN; }\n' > "$st_source"
+    st_expect 0 'clean untracked source'
+    printf 'int f(int st) { return st >= SYNC_TRUST_SOVEREIGN; }\n' > "$st_source"
+    st_expect 1 'untracked ordinal comparison'
+    git -C "$st_tmp" add engine/services/src/probe.c
+    st_expect 1 'tracked ordinal comparison'
+    printf 'int f(int st) { return SYNC_TRUST_SOVEREIGN <= st; }\n' > "$st_source"
+    st_expect 1 'reversed ordinal comparison'
+    printf 'int f(int st) { return st < SYNC_TRUST_STATE_COUNT; }\n' > "$st_source"
+    st_expect 0 'count sentinel recovers'
+    rm "$st_source"
+    st_expect 2 'empty scan fails closed'
+    echo 'check_no_trust_state_ordering --selftest: PASS'
+    exit 0
+fi
+if (( $# != 0 )); then
+    echo 'check_no_trust_state_ordering: FATAL — expected no arguments or --selftest' >&2
+    exit 2
+fi
+scan_sources

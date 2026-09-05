@@ -590,36 +590,16 @@ int t_dumper_never_blocks_gate(void)
 /* Gate check-no-trust-state-ordering: the sync_trust_state enumerators are
  * ORTHOGONAL provenance facts, so any </<=/>/>= comparison against a
  * SYNC_TRUST_* value is forbidden (it invites the `state >= X` mis-grant bug).
- * Real tree is clean; a planted fixture carrying `st >= SYNC_TRUST_SOVEREIGN`
- * trips (exit 1); removing it recovers. Mirrors t_e13_consensus_parity_fixture. */
+ * The script exercises tracked/untracked violations and recovery in its own
+ * private Git repository, leaving the live source tree read-only. */
 int t_no_trust_state_ordering_gate(void)
 {
     int failures = 0;
-    char path[PATH_MAX];
-    unlink_rel(TRUST_ORDER_FIXTURE_DST);
     int baseline_rc = run_gate_script(TRUST_ORDER_SCRIPT_REL, NULL);
-    int planted = (repo_path(path, sizeof(path), TRUST_ORDER_FIXTURE_DST) == 0 &&
-                   write_file(path,
-                       "/* Transient lint-gate selftest fixture for "
-                       "check-no-trust-state-ordering;\n"
-                       " * planted+removed by test_make_lint_gates.c. Not "
-                       "part of the build. */\n"
-                       "#include \"services/sync_trust_policy.h\"\n"
-                       "int _trust_order_fixture_probe(enum sync_trust_state st)"
-                       "\n{\n"
-                       "    if (st >= SYNC_TRUST_SOVEREIGN)\n"
-                       "        return 1;\n"
-                       "    return 0;\n"
-                       "}\n") == 0) ? 0 : -1;
-    int trip_rc = planted == 0
-        ? run_gate_script(TRUST_ORDER_SCRIPT_REL, NULL) : -1;
-    unlink_rel(TRUST_ORDER_FIXTURE_DST);
-    int recover_rc = run_gate_script(TRUST_ORDER_SCRIPT_REL, NULL);
-    TEST("[lint-gate] no-trust-state-ordering: clean, trips on ordinal cmp, recovers") {
+    int selftest_rc = run_gate_script_selftest(TRUST_ORDER_SCRIPT_REL);
+    TEST("[lint-gate] no-trust-state-ordering: real tree clean, private Git fixture matrix") {
         ASSERT(baseline_rc == 0);
-        ASSERT(planted == 0);
-        ASSERT(trip_rc != 0);
-        ASSERT(recover_rc == 0);
+        ASSERT(selftest_rc == 0);
         PASS();
     } _test_next:;
     return failures;
