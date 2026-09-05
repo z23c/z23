@@ -4342,8 +4342,10 @@ static bool proof_worker_body(const struct proof_paths *paths,
                 strcmp(source_before.mutation_id, sealed_mutation_id) != 0) {
                 proof_whyf(
                     why, why_len,
-                    "proof_saved_source_identity_changed_actual_%.16s_sealed_%.16s",
-                    source_before.source_id, sealed_source_id);
+                    "proof_saved_source_identity_changed_source_actual_%.16s_sealed_%.16s"
+                    "_mutation_actual_%.16s_sealed_%.16s",
+                    source_before.source_id, sealed_source_id,
+                    source_before.mutation_id, sealed_mutation_id);
                 return false;
             }
             struct dev_source_record generation_checkpoint = {0};
@@ -4361,8 +4363,10 @@ static bool proof_worker_body(const struct proof_paths *paths,
                        sealed_mutation_id) != 0) {
                 proof_whyf(
                     why, why_len,
-                    "proof_generation_source_identity_changed_actual_%.16s_sealed_%.16s",
-                    generation_checkpoint.source_id, sealed_source_id);
+                    "proof_generation_source_identity_changed_source_actual_%.16s_sealed_%.16s"
+                    "_mutation_actual_%.16s_sealed_%.16s",
+                    generation_checkpoint.source_id, sealed_source_id,
+                    generation_checkpoint.mutation_id, sealed_mutation_id);
                 return false;
             }
             if (!proof_stress_tests_env_prepare(why, why_len)) return false;
