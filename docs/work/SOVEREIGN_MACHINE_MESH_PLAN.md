@@ -411,6 +411,37 @@ tears down access and emits a bounded signed receipt. Relay and rendezvous
 peers forward opaque ciphertext only and never acquire endpoint credentials or
 access authority.
 
+### Streams
+
+The terminal does not own a wire of its own. It is one **service** on a
+multiplexed stream layer that rides the authenticated session: a service
+registers a name once and receives open, data, window, close, tick, and
+release callbacks; nothing else is exposed to it. Every stream lives in
+one table shared by both ends, with initiator parity on stream ids so two
+peers opening at the same instant can never mint the same id, and each
+stream is pinned to the exact Noise session it was opened on — a frame
+arriving on a newer or different connection is not that stream's frame.
+
+Flow control is a credit window. The opener declares the window it will
+accept, no DATA frame may exceed the credit the peer has granted, and a
+WINDOW frame replenishes it as the reader makes room. A single frame is
+bounded well below the bearer's message ceiling, so no one stream can
+starve the link, and every peer is bounded by a per-peer stream cap, a
+per-peer open cadence, and an idle timeout that ends a stream nobody is
+using.
+
+Every refusal is named and closes the stream rather than degrading it:
+`stream_link_not_noise` (the link is not an established Noise session),
+`stream_peer_unpaired` (no live pairing row grants the capability the
+service asked for), `stream_service_unknown` (no service registered that
+name), `stream_cap` (the peer already holds its share of the table),
+`stream_credit_exceeded` (the peer spent credit it was never granted),
+`stream_open_rate` (opens faster than the cadence a single peer is allowed),
+`stream_id_parity` and `stream_id_in_use` (an id that is not the peer's to
+mint), and `stream_malformed`. A stream that cannot be admitted is never
+reserved, and a refusal that cannot be sent is never treated as an
+admission.
+
 ## Hot-swap taxonomy
 
 "Hot swap" is not one guarantee. The operator and receipt must name the exact
