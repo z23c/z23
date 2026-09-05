@@ -446,6 +446,19 @@ bool app_runtime_profile_parse(const char *name,
  * aliases included. Lives beside the parser so a rejection can print the
  * accepted set instead of making the reader go find it. */
 const char *app_runtime_profile_accepted_csv(void);
+
+/* ── Tor build identity ──────────────────────────────────────────────
+ *
+ * True when THIS binary linked the real Tor (libtor.a), false when it
+ * linked the stub (libtor_stub.a). Read from the same link-time weak
+ * reference the existing readers use — see
+ * engine/services/src/network_telemetry_fill.c's nt_real_tor_linked() and
+ * contexts/market/controllers/src/shop_native_probes.c's
+ * shop_tor_real_build_linked() — so this is a fourth READER of one fact,
+ * not a second source of truth. Deliberately NOT a -D define: a define
+ * describes what the build system intended, a weak symbol reports what the
+ * linker actually resolved, and only the second one cannot lie. */
+bool app_tor_real_build_linked(void);
 bool app_runtime_profile_has_explorer(enum zcl_runtime_profile profile);
 bool app_runtime_profile_has_store(enum zcl_runtime_profile profile);
 bool app_runtime_profile_has_onion(enum zcl_runtime_profile profile,

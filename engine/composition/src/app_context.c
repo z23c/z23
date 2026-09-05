@@ -1,8 +1,11 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0 */
 
 #include "config/boot.h"
+
+#include "base/compiler.h"
 #include "wallet/wallet_keystore.h"
 
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -83,6 +86,28 @@ const char *app_runtime_profile_accepted_csv(void)
 {
     return "full, zclassic-only (alias: zclassic), explorer, "
            "onion-node (alias: onion), legacy-compat (alias: legacy)";
+}
+
+/* ── Tor build identity (see config/boot.h) ─────────────────────────
+ *
+ * Re-declaring this weak reference READS the existing link-time fact; it
+ * does not create a second one. The declaration is copied verbatim from
+ * engine/services/src/network_telemetry_fill.c (whose comment records the
+ * same reasoning) and is repeated at
+ * contexts/market/controllers/src/shop_native_probes.c and
+ * core/modules/net/src/tor_fetch.c. vendor/tor_stub.c supplies every symbol
+ * tor_integration.c needs EXCEPT dynhost_client_fetch, so this one symbol is
+ * the only runtime-observable difference between a stub build and a real
+ * one. There is no shared header for it by design: each reader states what
+ * it is reading, and a -D define would let the build claim a Tor the linker
+ * never resolved. */
+extern int dynhost_client_fetch(const char *, uint16_t, const char *,
+    void (*)(int, const uint8_t *, size_t, void *), void *, int)
+    ZCL_WEAK_IMPORT;
+
+bool app_tor_real_build_linked(void)
+{
+    return dynhost_client_fetch != NULL;
 }
 
 bool app_runtime_profile_has_explorer(enum zcl_runtime_profile profile)
