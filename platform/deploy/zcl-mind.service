@@ -31,7 +31,7 @@ Description=Z23 per-node mind: the one process that rebuilds this box's code ind
 #   cp platform/deploy/zcl-mind.service ~/.config/systemd/user/
 #   systemctl --user daemon-reload
 #   systemctl --user start zcl-mind
-#   z23 dev mind status
+#   z23 dev fleet mind status
 #
 # Linger, so the mind survives logout like every other critical user service:
 #   loginctl enable-linger "$USER"
@@ -81,7 +81,7 @@ MemorySwapMax=256M
 TasksMax=64
 OOMScoreAdjust=500
 
-ExecStart=%h/github/zclassic23/build/bin/z23-mind dev mind serve
+ExecStart=%h/github/zclassic23/build/bin/z23-mind dev fleet mind serve
 
 # The resident handles SIGTERM cooperatively: it finishes or abandons the
 # current rebuild, releases every checkout's owner claim so no query is left

@@ -1,6 +1,6 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
- * `dev mind ask|status|serve` — the CLI half of the per-node mind.
+ * `dev fleet mind ask|status|serve` — the CLI half of the per-node mind.
  *
  * ASK never rebuilds and never serves a stale answer. Those are the same
  * rule seen from two sides: the resident owns the rebuild, so a query that
@@ -61,15 +61,6 @@ static const char *mind_source_root(const struct zcl_command_request *request)
     return env && env[0] ? env : ".";
 }
 
-static void mind_push_str(struct json_value *arr, const char *s)
-{
-    struct json_value item;
-    json_init(&item);
-    json_set_str(&item, s ? s : "");
-    (void)json_push_back(arr, &item);
-    json_free(&item);
-}
-
 /* One row of an answer: what was found, where, and what kind of thing it is.
  * Rows are uniform across question kinds on purpose — a caller renders the
  * table once. */
@@ -115,10 +106,10 @@ static void mind_refuse_stale(struct zcl_command_reply *reply,
                 "rebuilds and never answers from a superseded generation; "
                 "ask again once the mind publishes."
               : "the index for this checkout is behind the source tree and "
-                "no mind owns it. Start one with `z23 dev mind serve` (or "
+                "no mind owns it. Start one with `z23 dev fleet mind serve` (or "
                 "the zcl-mind user unit) so exactly one process rebuilds it.",
         evidence);
-    (void)zcl_command_reply_add_next(reply, "dev.mind.status", "{}",
+    (void)zcl_command_reply_add_next(reply, "dev.fleet.mind.status", "{}",
                                      "see whether a mind is running here");
 }
 
@@ -478,7 +469,7 @@ static bool mind_status_fleet(struct zcl_command_reply *reply)
             "no local node answered. Peer mind rows arrive inside signed "
             "mesh-status receipts the node collects; without a node there is "
             "nothing collected to read, and this command never dials a peer "
-            "itself.", "dev.mind");
+            "itself.", "dev.fleet.mind");
         return false;
     }
     struct json_value body;
@@ -493,7 +484,7 @@ static bool mind_status_fleet(struct zcl_command_reply *reply)
                                ZCL_COMMAND_EXIT_INTERNAL, "BAD_MACHINE_BODY",
                                "serialize", false, false,
                                "the node returned no machine list",
-                               "dev.mind");
+                               "dev.fleet.mind");
         return false;
     }
     struct json_value rows;
@@ -573,7 +564,7 @@ void zcl_native_handle_dev_mind_serve(
             "MIND_NOT_STARTED", "dispatch", true, false,
             "the resident did not start: either another mind already holds "
             "this node, or no checkout is registered. Register one by writing "
-            "the checkouts state file, then start it again.", "dev.mind");
+            "the checkouts state file, then start it again.", "dev.fleet.mind");
         return;
     }
     (void)json_push_kv_str(&reply->data, "schema", "zcl.mind_serve.v1");

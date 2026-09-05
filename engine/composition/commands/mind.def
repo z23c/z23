@@ -15,14 +15,22 @@
  * cadence, and says nothing at all when there is no node to have collected
  * them.
  *
+ * WHERE IT SITS. Under `dev fleet`, not at the root and not directly under
+ * `dev`. The root is pinned at its current count by the registry catalog
+ * test, and the `dev` branch menu was measured within tens of bytes of
+ * ZCL_COMMAND_BRANCH_BUDGET before this branch existed, so one more child
+ * there renders MENU_BUDGET for every caller of `z23 dev`. `dev fleet` is
+ * where the fleet-wide half of this unit already reads from, and it has the
+ * room. Placement follows the budget; it is not a claim about scope.
+ *
  * Consumer defines ZCL_COMMAND_*; see engine/composition/src/command_catalog.c. */
 
-ZCL_COMMAND_BRANCH("dev.mind", "dev",
+ZCL_COMMAND_BRANCH("dev.fleet.mind", "dev.fleet",
                    "The node's resident index owner, and what to ask it",
                    ZCL_COMMAND_LAYER_DEV)
 
 ZCL_COMMAND_READY_READ(
-    "dev.mind.ask", "dev.mind", "",
+    "dev.fleet.mind.ask", "dev.fleet.mind", "",
     "Ask this node's mind one bounded question about the tree",
     "Answers one of six questions from the PUBLISHED index generation and "
     "never rebuilds. `where_is` gives the exact definition site of a symbol, "
@@ -41,7 +49,7 @@ ZCL_COMMAND_READY_READ(
     "mind,ask,where,owns,tests,symbol,index,stale",
     "zcl.mind_ask_input.v1", "zcl.mind_answer.v1",
     "kind,subject", "kind,subject",
-    "z23 dev mind ask where_is codeindex_open",
+    "z23 dev fleet mind ask where_is codeindex_open",
     ZCL_COMMAND_LAYER_DEV, ZCL_COMMAND_SCOPE_LOCAL,
     ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_LATENCY_FAST,
     ZCL_COMMAND_COST_LOW, ZCL_COMMAND_LANE_LOCAL,
@@ -50,7 +58,7 @@ ZCL_COMMAND_READY_READ(
     ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_dev_mind_ask)
 
 ZCL_COMMAND_READY_READ(
-    "dev.mind.status", "dev.mind", "",
+    "dev.fleet.mind.status", "dev.fleet.mind", "",
     "Whether a mind is running here, and what each checkout's index holds",
     "The local heartbeat — process, age, last rebuild wall clock and "
     "duration — and one row per registered checkout naming its index root, "
@@ -74,7 +82,7 @@ ZCL_COMMAND_READY_READ(
     "mind,status,heartbeat,index,fleet,peers,owner",
     "zcl.mind_status_input.v1", "zcl.mind_status.v1",
     "fleet", "",
-    "z23 dev mind status",
+    "z23 dev fleet mind status",
     ZCL_COMMAND_LAYER_DEV, ZCL_COMMAND_SCOPE_LOCAL,
     ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_LATENCY_FAST,
     ZCL_COMMAND_COST_LOW, ZCL_COMMAND_LANE_LOCAL,
@@ -83,7 +91,7 @@ ZCL_COMMAND_READY_READ(
     ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_dev_mind_status)
 
 ZCL_COMMAND_READY_COMMAND(
-    "dev.mind.serve", "dev.mind", "",
+    "dev.fleet.mind.serve", "dev.fleet.mind", "",
     "Run this node's mind until its checkout registry is removed",
     "Takes the node-wide singleton lock, claims every checkout named in the "
     "registry state file, watches each of their source trees through the "
@@ -99,7 +107,7 @@ ZCL_COMMAND_READY_COMMAND(
     "mind,serve,resident,rebuild,index,owner,watch",
     "zcl.mind_serve_input.v1", "zcl.mind_serve.v1",
     "cycles", "",
-    "z23 dev mind serve",
+    "z23 dev fleet mind serve",
     ZCL_COMMAND_LAYER_DEV, ZCL_COMMAND_EFFECT_MUTATE,
     ZCL_COMMAND_RISK_DEV_MUTATION, ZCL_COMMAND_SCOPE_LOCAL,
     ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,

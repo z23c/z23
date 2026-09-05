@@ -61,24 +61,24 @@ so expiry is the deliberate failure direction rather than an oversight.
 A stale answer is refused, never served, and never repaired inside a query.
 
 An index generation is stale when the source tree has moved past it. Asked
-against a stale generation, `z23 dev mind ask` returns the typed refusal
+against a stale generation, `z23 dev fleet mind ask` returns the typed refusal
 `INDEX_STALE`, carrying the index root it consulted, that generation's age,
 and — when there is one — the owning mind's process and the age of its last
 heartbeat. The two cases are distinguished in the message, because the next
 action differs: wait for the owner to publish, or start an owner.
 
-`z23 dev mind status` reports staleness rather than refusing on it: its job
+`z23 dev fleet mind status` reports staleness rather than refusing on it: its job
 is to describe what this box has, including the fact that what it has is
 behind. It never rebuilds either.
 
 ## How to ask
 
 ```
-z23 dev mind ask where_is <symbol>      # the exact definition site
-z23 dev mind ask owns <path-or-symbol>  # the group it belongs to
-z23 dev mind ask tests_for <path>       # the groups a change there touches
-z23 dev mind status                     # this box: heartbeat and each checkout
-z23 dev mind status --fleet             # every paired node's index root and age
+z23 dev fleet mind ask where_is <symbol>      # the exact definition site
+z23 dev fleet mind ask owns <path-or-symbol>  # the group it belongs to
+z23 dev fleet mind ask tests_for <path>       # the groups a change there touches
+z23 dev fleet mind status                     # this box: heartbeat and each checkout
+z23 dev fleet mind status --fleet             # every paired node's index root and age
 ```
 
 Three further questions — `executor_for`, `trap_of` and `next_passage` —
@@ -99,7 +99,7 @@ rather than on a wire of its own, so a mind row is exactly as trustworthy,
 and exactly as fresh, as the receipt that carried it: an expired receipt
 takes its mind row with it, and only paired peers ever see one.
 
-`z23 dev mind status --fleet` reads the rows peers already delivered on that
+`z23 dev fleet mind status --fleet` reads the rows peers already delivered on that
 cadence. It never dials a peer itself, and with no local node it fails closed
 rather than reporting an empty fleet. A peer that carried no mind row is
 reported as not having reported one, which is not the same as a peer whose
