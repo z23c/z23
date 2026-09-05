@@ -12211,6 +12211,16 @@ check-doc-counts:
 	@echo "══ LINT: doc counts vs code ══"
 	@./tools/scripts/check_doc_counts.sh
 
+# The REPAIR half of the gate above. check_doc_counts.sh already carries a
+# --fix mode (the code is authoritative, so a drift is always resolved by
+# rewriting the declared values from the code-measured ones) but nothing
+# could reach it through `make`. dev.land's rebase auto-resolve
+# (tools/command/native_dev_land.c) names one make target per regenerated
+# artifact, and docs/CODEBASE_MAP.md had none.
+.PHONY: fix-doc-counts
+fix-doc-counts:
+	@./tools/scripts/check_doc_counts.sh --fix
+
 # Gate — the stopwatch skip-streak detector's SHELL halves. The C half is
 # covered by the test_stopwatch_skip_watch group; the shell half (the shared
 # class-table parser both stopwatch scripts source, plus the judge's report

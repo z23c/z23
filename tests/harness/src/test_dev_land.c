@@ -78,6 +78,8 @@ static void dlx_isolate(const char *tag)
     unsetenv("ZCL_LAND_ALLOW_UNSIGNED");
     unsetenv("ZCL_LAND_HOOKS_STUB_DIR");
     unsetenv("ZCL_LAND_TEST_PICK_DELAY_MS");
+    unsetenv("ZCL_LAND_REGEN_MAKE_STUB");
+    unsetenv("ZCL_LAND_REGEN_GATE_STUB_FAIL");
     /* The vendor/tor submodule fixtures below add a real gitlink pointing
      * at a same-host bare repo; modern git's default transport allowlist
      * otherwise refuses a local `file://`-style remote reached through
@@ -100,6 +102,8 @@ static void dlx_restore(void)
     unsetenv("ZCL_LAND_ALLOW_UNSIGNED");
     unsetenv("ZCL_LAND_HOOKS_STUB_DIR");
     unsetenv("ZCL_LAND_TEST_PICK_DELAY_MS");
+    unsetenv("ZCL_LAND_REGEN_MAKE_STUB");
+    unsetenv("ZCL_LAND_REGEN_GATE_STUB_FAIL");
     unsetenv("GIT_ALLOW_PROTOCOL");
 }
 
@@ -481,6 +485,143 @@ static bool dlx_origin_main(const struct dlx_rig *rig, char out[64])
 {
     const char *args[] = { "rev-parse", "main", NULL };
     return dlx_git_out(rig->bare, args, out, 64) == 0 && strlen(out) == 40;
+}
+
+/* Commit whatever is in `dir`'s working tree under `msg`. Unlike
+ * dlx_commit() this plants no file of its own: the caller has already
+ * written the paths it wants recorded (docs/... through dlx_write_dep()),
+ * which is what a generated-artifact conflict fixture needs. */
+static bool dlx_commit_tree(const char *dir, const char *msg, char out[64])
+{
+    const char *add[] = { "add", "-A", NULL };
+    const char *commit[] = { "-c", "user.name=land",
+                             "-c", "user.email=land@z23.invalid",
+                             "commit", "--quiet", "--no-verify",
+                             "--no-gpg-sign", "-m", msg, NULL };
+    const char *head[] = { "rev-parse", "HEAD", NULL };
+    if (dlx_git(dir, add) != 0 || dlx_git(dir, commit) != 0)
+        return false;
+    return dlx_git_out(dir, head, out, 64) == 0 && strlen(out) == 40;
+}
+
+/* Make an initialised submodule look UNINITIALISED, the way
+ * dl_wt_submodule_ready() defines it: the .git marker inside the
+ * submodule's working tree is gone. A real `git submodule deinit` would
+ * also drop the working-tree files these cases still need present, so the
+ * marker alone is the minimal, precise fixture. */
+static bool dlx_submodule_uninit(const char *dir, const char *path)
+{
+    char marker[900];
+    if ((size_t)snprintf(marker, sizeof(marker), "%s/%s/.git", dir, path) >=
+        sizeof(marker))
+        return false;
+    return remove(marker) == 0;
+}
+
+/* Arm REAL commit signing in the rig, repo-wide, the way the maintainer
+ * host arms it: an ssh key this fixture generates, an allowed-signers file
+ * so `%G?` can actually verify what it produced, and commit.gpgsign on.
+ * The landing worktree is a `git worktree add` off this clone and shares
+ * its config, so a commit dev.land makes there is signed by AMBIENT config
+ * alone — which is the property under test: the leaf passes no signing
+ * flag of its own, exactly like dev.train's regenerate-docs commit. */
+static bool dlx_sign_arm(const char *dir, const char *tag)
+{
+    char base[512], key[700], pub[720], allowed[760], line[1600];
+    char pubtext[1024], sink[4096];
+    const char *keygen[] = { "ssh-keygen", "-q", "-t", "ed25519", "-N", "",
+                             "-C", "dev-land-fixture", "-f", key, NULL };
+    const char *c_format[] = { "config", "gpg.format", "ssh", NULL };
+    const char *c_key[] = { "config", "user.signingkey", pub, NULL };
+    const char *c_sign[] = { "config", "commit.gpgsign", "true", NULL };
+    const char *c_allow[] = { "config", "gpg.ssh.allowedSignersFile",
+                              allowed, NULL };
+    const char *c_name[] = { "config", "user.name", "land", NULL };
+    const char *c_mail[] = { "config", "user.email", "land@z23.invalid",
+                             NULL };
+    FILE *f;
+    test_make_tmpdir(base, sizeof(base), "dev_land_sign", tag);
+    (void)snprintf(key, sizeof(key), "%s/k", base);
+    (void)snprintf(pub, sizeof(pub), "%s/k.pub", base);
+    (void)snprintf(allowed, sizeof(allowed), "%s/allowed_signers", base);
+    if (zcl_spawn_capture(keygen, sink, sizeof(sink), 60000) != 0)
+        return false;
+    f = fopen(pub, "rb");
+    if (!f)
+        return false;
+    if (!fgets(pubtext, sizeof(pubtext), f)) {
+        (void)fclose(f);
+        return false;
+    }
+    (void)fclose(f);
+    (void)snprintf(line, sizeof(line), "land@z23.invalid %s", pubtext);
+    if (!dlx_write(allowed, line))
+        return false;
+    return dlx_git(dir, c_format) == 0 && dlx_git(dir, c_key) == 0 &&
+          dlx_git(dir, c_sign) == 0 && dlx_git(dir, c_allow) == 0 &&
+          dlx_git(dir, c_name) == 0 && dlx_git(dir, c_mail) == 0;
+}
+
+/* A rig whose origin and whose submitted tip regenerate the SAME generated
+ * artifacts differently, so `git rebase origin/main` reports exactly those
+ * paths as unmerged. `extra` (may be NULL) is one more path both sides
+ * change, for the mixed-conflict case that must stay a plain conflict.
+ * `out_tip` receives the tip to submit. */
+static bool dlx_regen_conflict(struct dlx_rig *rig, const char *extra,
+                               char out_tip[64])
+{
+    const char *push[] = { "push", "--quiet", "origin", "HEAD:main", NULL };
+    const char *branch[] = { "branch", "keep-tip", NULL };
+    char basec[64], theirs[64];
+    const char *reset[] = { "reset", "--quiet", "--hard", basec, NULL };
+    /* A shared base both sides agree on, on origin/main. */
+    if (!dlx_write_dep(rig->clone, "docs/CAPABILITY_INVENTORY.jsonl",
+                       "base\n") ||
+        !dlx_write_dep(rig->clone, "docs/API_REFERENCE.md", "base\n") ||
+        !dlx_write_dep(rig->clone, "docs/CODEBASE_MAP.md", "base\n"))
+        return false;
+    if (extra && !dlx_write_dep(rig->clone, extra, "base\n"))
+        return false;
+    if (!dlx_commit_tree(rig->clone, "generated artifacts", basec))
+        return false;
+    if (dlx_git(rig->clone, push) != 0)
+        return false;
+    /* The submitted tip: its own real work, plus its regeneration of two
+     * of the three artifacts. */
+    if (!dlx_write_dep(rig->clone, "docs/CAPABILITY_INVENTORY.jsonl",
+                       "mine\n") ||
+        !dlx_write_dep(rig->clone, "docs/CODEBASE_MAP.md", "mine\n") ||
+        !dlx_write_dep(rig->clone, "mine.txt", "mine\n"))
+        return false;
+    if (extra && !dlx_write_dep(rig->clone, extra, "mine\n"))
+        return false;
+    if (!dlx_commit_tree(rig->clone, "the submitted work", out_tip))
+        return false;
+    /* Keep it reachable while the clone's own branch rewinds. */
+    if (dlx_git(rig->clone, branch) != 0)
+        return false;
+    if (dlx_git(rig->clone, reset) != 0)
+        return false;
+    /* origin/main lands someone else's train, which regenerated the same
+     * two artifacts from ITS code. */
+    if (!dlx_write_dep(rig->clone, "docs/CAPABILITY_INVENTORY.jsonl",
+                       "theirs\n") ||
+        !dlx_write_dep(rig->clone, "docs/CODEBASE_MAP.md", "theirs\n"))
+        return false;
+    if (extra && !dlx_write_dep(rig->clone, extra, "theirs\n"))
+        return false;
+    if (!dlx_commit_tree(rig->clone, "someone else's train", theirs))
+        return false;
+    return dlx_git(rig->clone, push) == 0;
+}
+
+/* The landing worktree's checkout directory, where the regeneration commit
+ * this leaf makes has to be observable. */
+static void dlx_land_wt(char *out, size_t cap)
+{
+    char land[1200];
+    dlx_landdir(land, sizeof(land));
+    (void)snprintf(out, cap, "%s/wt", land);
 }
 
 #endif /* !defined(_WIN32) */
@@ -1635,6 +1776,260 @@ int test_dev_land(void)
         ASSERT(!dlx_file_exists(check));
         dlx_end(&c);
         unsetenv("ZCL_LAND_DEPS_TEST_FORCE");
+        dlx_restore();
+        PASS();
+    }
+
+    TEST("land: an uninitialised vendor/tor in the SUBMITTING checkout "
+        "refuses by name and by fix, never as a phantom pin mismatch") {
+        struct dlx_rig rig;
+        struct dlx_subrepo sub;
+        struct dlx_call c;
+        char suffix[256];
+        dlx_isolate("subuninit");
+        ASSERT(dlx_rig_make(&rig, "subuninit_rig"));
+        ASSERT(dlx_subrepo_make(&sub, "subuninit_sub"));
+        /* The pin is CORRECT: the tip's gitlink and the submodule the
+         * checkout holds are the same commit. The only defect is that the
+         * checkout's vendor/tor is not checked out. */
+        ASSERT(dlx_submodule_add(rig.clone, sub.bare, "vendor/tor",
+                                 rig.tip));
+        ASSERT(dlx_write_dep(rig.clone, "vendor/lib/libfoo.a", "fake\n"));
+        ASSERT(dlx_write_dep(rig.clone, "vendor/include/foo.h", "fake\n"));
+        ASSERT(dlx_write_dep(rig.clone, "vendor/tor/libtor.a", "fake\n"));
+        ASSERT(dlx_write_dep(
+            rig.clone,
+            "vendor/tor/src/ext/ed25519/donna/libed25519_donna.a",
+            "fake\n"));
+        ASSERT(dlx_write_dep(
+            rig.clone, "vendor/tor/src/ext/ed25519/ref10/libed25519_ref10.a",
+            "fake\n"));
+        ASSERT(dlx_write_dep(
+            rig.clone, "vendor/tor/src/ext/keccak-tiny/libkeccak-tiny.a",
+            "fake\n"));
+        ASSERT(dlx_submodule_uninit(rig.clone, "vendor/tor"));
+        setenv("ZCL_LAND_DEPS_TEST_FORCE", "1", 1);
+        setenv("ZCL_LAND_PROOF_STUB", "running", 1);
+        setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
+        dlx_submit(&c, &rig, rig.tip);
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        dlx_end(&c);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        ASSERT(strcmp(dlx_str(&c, "state"), "failed") == 0);
+        ASSERT(strcmp(dlx_str(&c, "dimension"), "worktree_deps") == 0);
+        /* The whole point: NOT "submodule commit <superproject sha> != tip
+         * <pin>". A bare `git -C <checkout>/vendor/tor rev-parse HEAD`
+         * walks up to the enclosing superproject and answers with a commit
+         * that is not a submodule commit at all. */
+        ASSERT(strstr(dlx_str(&c, "detail"), "submodule commit") == NULL);
+        ASSERT(strstr(dlx_str(&c, "detail"),
+                      "proof_generation_dependency_unavailable:vendor/tor "
+                      "(submodule uninitialised in ") != NULL);
+        (void)snprintf(suffix, sizeof(suffix),
+                       "; run git submodule update --init vendor/tor)");
+        ASSERT(strstr(dlx_str(&c, "detail"), suffix) != NULL);
+        ASSERT(strstr(dlx_str(&c, "detail"), rig.clone) != NULL);
+        dlx_end(&c);
+        unsetenv("ZCL_LAND_DEPS_TEST_FORCE");
+        dlx_restore();
+        PASS();
+    }
+
+    TEST("land: a landing worktree already standing on the tip's vendor/tor "
+        "pin with the archive in place never consults the submitting "
+        "checkout again") {
+        struct dlx_rig rig;
+        struct dlx_subrepo sub;
+        struct dlx_call c;
+        char wt[1200], check[1400], second[64];
+        dlx_isolate("subtrust");
+        ASSERT(dlx_rig_make(&rig, "subtrust_rig"));
+        ASSERT(dlx_subrepo_make(&sub, "subtrust_sub"));
+        ASSERT(dlx_submodule_add(rig.clone, sub.bare, "vendor/tor",
+                                 rig.tip));
+        ASSERT(dlx_write_dep(rig.clone, "vendor/lib/libfoo.a", "fake\n"));
+        ASSERT(dlx_write_dep(rig.clone, "vendor/include/foo.h", "fake\n"));
+        ASSERT(dlx_write_dep(rig.clone, "vendor/tor/libtor.a", "fake\n"));
+        ASSERT(dlx_write_dep(
+            rig.clone,
+            "vendor/tor/src/ext/ed25519/donna/libed25519_donna.a",
+            "fake\n"));
+        ASSERT(dlx_write_dep(
+            rig.clone, "vendor/tor/src/ext/ed25519/ref10/libed25519_ref10.a",
+            "fake\n"));
+        ASSERT(dlx_write_dep(
+            rig.clone, "vendor/tor/src/ext/keccak-tiny/libkeccak-tiny.a",
+            "fake\n"));
+        ASSERT(dlx_write_dep(rig.clone,
+                             "build/hotswap/zcl_rollback_fixture_a.so",
+                             "fake\n"));
+        ASSERT(dlx_write_dep(rig.clone,
+                             "build/hotswap/zcl_rollback_fixture_b.so",
+                             "fake\n"));
+        setenv("ZCL_LAND_DEPS_TEST_FORCE", "1", 1);
+        setenv("ZCL_LAND_PROOF_STUB", "running", 1);
+        setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
+        /* Round one: an ordinary landing, which initialises the landing
+         * worktree's own vendor/tor at the tip's pin and materializes
+         * libtor.a beside it. */
+        dlx_submit(&c, &rig, rig.tip);
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        dlx_end(&c);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        ASSERT(strcmp(dlx_str(&c, "state"), "started") == 0);
+        dlx_end(&c);
+        setenv("ZCL_LAND_PROOF_STUB", "pass", 1);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        ASSERT(strcmp(dlx_str(&c, "state"), "landed") == 0);
+        dlx_end(&c);
+        dlx_landdir(wt, sizeof(wt));
+        (void)snprintf(check, sizeof(check), "%s/wt/vendor/tor/libtor.a",
+                       wt);
+        ASSERT(dlx_file_exists(check));
+        /* Round two: a new tip carrying the SAME gitlink, submitted from a
+         * checkout whose vendor/tor is now uninitialised. Nothing over
+         * there can answer for the pin any more — and nothing has to. */
+        ASSERT(dlx_commit(rig.clone, "second.txt", "two\n", second));
+        ASSERT(dlx_submodule_uninit(rig.clone, "vendor/tor"));
+        setenv("ZCL_LAND_PROOF_STUB", "running", 1);
+        dlx_submit(&c, &rig, second);
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        dlx_end(&c);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        ASSERT(strcmp(dlx_str(&c, "state"), "started") == 0);
+        dlx_end(&c);
+        setenv("ZCL_LAND_PROOF_STUB", "pass", 1);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        ASSERT(strcmp(dlx_str(&c, "state"), "landed") == 0);
+        dlx_end(&c);
+        unsetenv("ZCL_LAND_DEPS_TEST_FORCE");
+        dlx_restore();
+        PASS();
+    }
+
+    TEST("land: a rebase conflict confined to the regenerated artifacts is "
+        "resolved from the code and recorded as a signed regeneration "
+        "commit, not refused") {
+        struct dlx_rig rig;
+        struct dlx_call c;
+        char tip[64], landwt[1300], subject[512], sig[64];
+        const char *log_subject[] = { "log", "-1", "--pretty=%s", NULL };
+        const char *log_sig[] = { "log", "-1", "--pretty=%G?", NULL };
+        dlx_isolate("regenauto");
+        ASSERT(dlx_rig_make(&rig, "regenauto_rig"));
+        ASSERT(dlx_sign_arm(rig.clone, "regenauto_key"));
+        ASSERT(dlx_regen_conflict(&rig, NULL, tip));
+        setenv("ZCL_LAND_PROOF_STUB", "running", 1);
+        setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
+        setenv("ZCL_LAND_REGEN_MAKE_STUB", "1", 1);
+        dlx_submit(&c, &rig, tip);
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        dlx_end(&c);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        /* Past the rebase and into the proof: the conflict never became a
+         * terminal state. */
+        ASSERT(strcmp(dlx_str(&c, "state"), "started") == 0);
+        ASSERT(strstr(dlx_str(&c, "detail"),
+                      "rebase: regenerated "
+                      "docs/CAPABILITY_INVENTORY.jsonl,"
+                      "docs/CODEBASE_MAP.md") != NULL);
+        dlx_end(&c);
+        dlx_land_wt(landwt, sizeof(landwt));
+        ASSERT(dlx_git_out(landwt, log_subject, subject, sizeof(subject)) ==
+              0);
+        ASSERT(strncmp(subject,
+                       "Regenerate the capability inventory and codebase "
+                       "map after rebasing onto ",
+                       strlen("Regenerate the capability inventory and "
+                              "codebase map after rebasing onto ")) == 0);
+        /* Signed by AMBIENT config: dev.land passes no signing flag, and
+         * main rejects an unsigned commit. */
+        ASSERT(dlx_git_out(landwt, log_sig, sig, sizeof(sig)) == 0);
+        ASSERT(strcmp(sig, "N") != 0);
+        unsetenv("ZCL_LAND_REGEN_MAKE_STUB");
+        dlx_restore();
+        PASS();
+    }
+
+    TEST("land: a post-regeneration gate that still refuses fails the row "
+        "by name instead of landing a tree the gates reject") {
+        struct dlx_rig rig;
+        struct dlx_call c;
+        char tip[64];
+        dlx_isolate("regengate");
+        ASSERT(dlx_rig_make(&rig, "regengate_rig"));
+        ASSERT(dlx_regen_conflict(&rig, NULL, tip));
+        setenv("ZCL_LAND_PROOF_STUB", "running", 1);
+        setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
+        setenv("ZCL_LAND_REGEN_MAKE_STUB", "1", 1);
+        setenv("ZCL_LAND_REGEN_GATE_STUB_FAIL", "1", 1);
+        dlx_submit(&c, &rig, tip);
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        dlx_end(&c);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        ASSERT(strcmp(dlx_str(&c, "state"), "failed") == 0);
+        ASSERT(strcmp(dlx_str(&c, "dimension"), "rebase") == 0);
+        ASSERT(strstr(dlx_str(&c, "detail"),
+                      "check-generated-artifact-contradictions refused "
+                      "after auto-resolving the rebase") != NULL);
+        ASSERT(strstr(dlx_str(&c, "detail"),
+                      "ZCL_LAND_REGEN_GATE_STUB_FAIL") != NULL);
+        dlx_end(&c);
+        unsetenv("ZCL_LAND_REGEN_MAKE_STUB");
+        unsetenv("ZCL_LAND_REGEN_GATE_STUB_FAIL");
+        dlx_restore();
+        PASS();
+    }
+
+    TEST("land: one conflicted path outside the regenerated-artifact table "
+        "keeps the whole conflict a conflict") {
+        struct dlx_rig rig;
+        struct dlx_call c;
+        char tip[64];
+        dlx_isolate("regenmixed");
+        ASSERT(dlx_rig_make(&rig, "regenmixed_rig"));
+        ASSERT(dlx_regen_conflict(&rig, "change.txt", tip));
+        setenv("ZCL_LAND_PROOF_STUB", "running", 1);
+        setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
+        setenv("ZCL_LAND_REGEN_MAKE_STUB", "1", 1);
+        dlx_submit(&c, &rig, tip);
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        dlx_end(&c);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        ASSERT(strcmp(dlx_str(&c, "state"), "conflict") == 0);
+        ASSERT(strcmp(dlx_str(&c, "dimension"), "rebase") == 0);
+        ASSERT(strstr(dlx_str(&c, "detail"), "change.txt") != NULL);
+        ASSERT(strstr(dlx_str(&c, "detail"),
+                      "docs/CAPABILITY_INVENTORY.jsonl") != NULL);
+        ASSERT(strstr(dlx_str(&c, "detail"), "docs/CODEBASE_MAP.md") !=
+              NULL);
+        /* No regeneration note anywhere: nothing was auto-resolved. */
+        ASSERT(strstr(dlx_str(&c, "detail"), "rebase: regenerated") ==
+              NULL);
+        dlx_end(&c);
+        unsetenv("ZCL_LAND_REGEN_MAKE_STUB");
         dlx_restore();
         PASS();
     }

@@ -100,7 +100,8 @@ origin/main in the private landing worktree at `<state>/land/wt`, runs
 `dev proof ensure` machinery, and returns. A later step reads the proof's own
 state: passed fast-forwards `origin/main` and records `landed`; failed
 records the failing dimension, the log path, and the first actionable line
-from that log. A rebase conflict is terminal and names the conflicting paths.
+from that log. A rebase conflict is terminal and names the conflicting paths,
+with one exception described under "Conflicts on generated artifacts" below.
 If origin/main moved while the proof ran, the receipt describes a base nobody
 is on, so the request re-rebases with `attempt+1` instead of landing stale
 evidence. A host-load failure — a source-identity race, a timeout — retries
@@ -113,6 +114,56 @@ never by waiting on this queue.
 The landing worktree is created once from the submitting checkout and reused.
 Run `tools/scripts/worktree_init.sh` in it once so `make lint-fast` there has
 its vendor prerequisites.
+
+### Conflicts on generated artifacts
+
+`docs/CAPABILITY_INVENTORY.jsonl`, `docs/API_REFERENCE.md` and the
+`<!-- DOC-COUNTS -->` block of `docs/CODEBASE_MAP.md` are generated from the
+code, so tips landing in the same window collide on them by construction and
+a textual merge of two generated files settles nothing — the code is what is
+authoritative. When **every** conflicted path is one of those three,
+`dev land` takes the upstream side of each, finishes the rebase, and re-runs
+the generator that owns the file: `make docs-capability-inventory`,
+`make docs-api-reference`, and `make fix-doc-counts` (the repair half of
+`check-doc-counts`, which runs `tools/scripts/check_doc_counts.sh --fix` to
+rewrite the declared counts from the code-measured ones). It then runs
+`make check-generated-artifact-contradictions` and `make check-doc-counts` in
+the landing worktree; a gate that still refuses fails the row with
+`dimension=rebase` and that gate's own line, never a landing. On success the
+regenerated content is committed with a subject naming what was regenerated
+and the base it was rebased onto — signed by ambient `commit.gpgsign`
+configuration, with no signing flag of its own — and the row's `detail`
+carries `rebase: regenerated <paths>`.
+
+The table is closed. A conflict touching any other path — even alongside
+these — stays an ordinary conflict, reported exactly as before, because
+nothing mechanical can settle it.
+
+### vendor/tor in the landing worktree
+
+The proof's generation copies the vendored Tor archives out of the landing
+worktree, so `dev land` primes them there. Where the tip records `vendor/tor`
+as a real submodule gitlink, the landing worktree's own submodule is
+initialised first and its checked-out commit must equal the commit the tip
+pins.
+
+Two things follow. When the landing worktree is already standing on the tip's
+pinned commit and still holds `vendor/tor/libtor.a` from an earlier train,
+that is accepted directly and the submitting checkout is never consulted —
+the archive persists across trains, so re-deriving the pin from a fresh
+checkout every time is what made an unrelated checkout's state able to refuse
+a sound tip. Otherwise the submitting checkout's own `vendor/tor` must be
+checked out; when it is not, the refusal says so and says what fixes it:
+
+```
+proof_generation_dependency_unavailable:vendor/tor (submodule uninitialised in <checkout>; run git submodule update --init vendor/tor)
+```
+
+That refusal replaces a misleading one. Running `git rev-parse HEAD` inside an
+uninitialised gitlink directory walks up to the enclosing superproject and
+answers with the superproject's own HEAD, which is not a submodule commit at
+all — so the check used to report a pin mismatch against a commit that meant
+nothing.
 
 Commuting tickets plug in at one named seam. Per-group tickets (node2's
 `dev.proof.tickets`) name the groups a proof may skip because the change
