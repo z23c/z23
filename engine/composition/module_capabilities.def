@@ -1116,6 +1116,7 @@ ZCL_MODULE_CAPABILITY("tools/command/native_devagent_start.c", CAP_FS_READ, "sta
 ZCL_MODULE_CAPABILITY("tools/command/native_devagent_ticketkey.c", CAP_FS_READ|CAP_FS_WRITE, "reads the ticket key material from disk and writes the derived key file back")
 ZCL_MODULE_CAPABILITY("tools/command/native_dev_fleet.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("tools/command/native_dev_fleet_receipts.c", CAP_FS_READ|CAP_FS_WRITE, "")
+ZCL_MODULE_CAPABILITY("tools/command/native_dev_fleet_start.c", CAP_FS_READ|CAP_FS_WRITE, "opens the board jsonl files, the forward plan and each worktree admin HEAD/index for reading; the write class comes with the stdio file API it uses, and this leaf never opens one for writing")
 ZCL_MODULE_CAPABILITY("tools/command/native_mesh_command.c", CAP_CLOCK, "")
 ZCL_MODULE_CAPABILITY("tools/command/native_metaverse_space_command.c", CAP_CLOCK, "")
 ZCL_MODULE_CAPABILITY("tools/command/native_metaverse_space_scout_command.c", CAP_FS_WRITE, "")
