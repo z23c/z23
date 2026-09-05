@@ -632,6 +632,12 @@ int args_parse_node_options(int argc, char **argv, struct app_context *ctx,
                    CLIENT_VERSION_MAJOR, CLIENT_VERSION_MINOR,
                    CLIENT_VERSION_REVISION,
                    zcl_build_source_id_sha256());
+            /* Which Tor this binary linked, on its own greppable line. The
+             * two spellings are exactly "tor: full" and "tor: stub" so a
+             * deploy script can decide with one grep instead of running the
+             * node and reading its boot log. */
+            printf("tor: %s\n",
+                   app_tor_real_build_linked() ? "full" : "stub");
             return 0;
         }
         else if (argv[i][0] == '-' && !main_flag_is_known_extra(argv[i])) {
