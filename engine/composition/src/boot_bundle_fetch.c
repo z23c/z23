@@ -21,6 +21,7 @@
 #include "platform/private_directory.h"
 #include "platform/private_file.h"
 #include "platform/safe_root_read.h"
+#include "platform/time_compat.h"
 #include "util/log_macros.h"
 #include "util/safe_alloc.h"                    /* zcl_malloc */
 #include <errno.h>
@@ -33,6 +34,74 @@
 /* The manifest commitment (a /directory.json body) is small + auditable; cap
  * the read well above a realistic ROM directory (a few artifacts). */
 #define BBF_DIRECTORY_JSON_MAX (64u * 1024u)
+#define BBF_PROGRESS_INTERVAL_MS 1000
+
+/* One instance lives on boot_bundle_fetch_download's stack. Both parallel ROM
+ * fetchers serialize callback entry with their existing callback mutex, so no
+ * second lock or lifetime is needed here. Progress is observational only:
+ * returning true preserves transport, verification, and refusal behavior. */
+struct bbf_progress {
+    uint32_t total_chunks;
+    uint32_t done_chunks;
+    uint64_t total_bytes;
+    uint64_t done_bytes;
+    int64_t last_log_ms;
+    bool verifying_logged;
+};
+
+static void bbf_progress_log(const char *phase, uint32_t done_chunks,
+                             uint32_t total_chunks, uint64_t done_bytes,
+                             uint64_t total_bytes, const char *guidance)
+{
+    LOG_INFO(BBF_SUBSYS,
+             "instant-on: phase=%s chunks=%u/%u bytes=%llu/%llu — %s",
+             phase, done_chunks, total_chunks,
+             (unsigned long long)done_bytes,
+             (unsigned long long)total_bytes, guidance);
+}
+
+static bool bbf_download_progress(uint32_t chunks_done, uint32_t num_chunks,
+                                  uint64_t bytes_done, void *opaque)
+{
+    struct bbf_progress *p = opaque;
+    if (!p)
+        return true;
+
+    /* The committed manifest owns both ceilings. A worker callback can arrive
+     * out of order. Both parallel ROM drivers serialize callbacks; retaining
+     * maxima here also keeps the projection robust to completion order. */
+    (void)num_chunks;
+    if (chunks_done > p->total_chunks)
+        chunks_done = p->total_chunks;
+    if (bytes_done > p->total_bytes)
+        bytes_done = p->total_bytes;
+    if (chunks_done > p->done_chunks)
+        p->done_chunks = chunks_done;
+    if (bytes_done > p->done_bytes)
+        p->done_bytes = bytes_done;
+
+    int64_t now_ms = platform_time_monotonic_ms();
+    /* In the verified-resume driver, its durable chunk mark and byte counter
+     * are separate operations. Do not announce a coherent terminal snapshot
+     * until serialized callbacks have observed both committed totals. */
+    bool complete = p->done_chunks == p->total_chunks &&
+                    p->done_bytes == p->total_bytes;
+    bool due = p->last_log_ms == 0 || now_ms < p->last_log_ms ||
+               now_ms - p->last_log_ms >= BBF_PROGRESS_INTERVAL_MS;
+    if (complete && !p->verifying_logged) {
+        bbf_progress_log("verifying", p->done_chunks, p->total_chunks,
+                         p->done_bytes, p->total_bytes,
+                         "download complete; checking downloaded bytes");
+        p->verifying_logged = true;
+        p->last_log_ms = now_ms;
+    } else if (!complete && due) {
+        bbf_progress_log("downloading", p->done_chunks, p->total_chunks,
+                         p->done_bytes, p->total_bytes,
+                         "keep this node running while the checkpoint downloads");
+        p->last_log_ms = now_ms;
+    }
+    return true;
+}
 /* ── Gate ───────────────────────────────────────────────────────────────── */
 /* MAINNET-ONLY. The artifact this weld downloads is bound at install to the
  * compiled CHECKPOINT_ROM, and that checkpoint is a MAINNET one (see
@@ -113,6 +182,7 @@ bool boot_bundle_fetch_download(const char *datadir,
     if (!m->filename[0] || !rom_fetch_manifest_sane(m))
         LOG_FAIL(BBF_SUBSYS,
                  "refusing bundle fetch: committed manifest not sane / no name");
+
     char bundles[PATH_MAX];
     int bn = snprintf(bundles, sizeof(bundles), "%s/bundles", datadir);
     if (bn < 0 || (size_t)bn >= sizeof(bundles))
@@ -131,6 +201,13 @@ bool boot_bundle_fetch_download(const char *datadir,
         zcl_malloc((size_t)ROM_SEED_MAX_CHUNKS * 32, "bbf_chunk_sha3");
     if (!chunk_sha3)
         LOG_FAIL(BBF_SUBSYS, "OOM allocating chunk-manifest buffer");
+    struct bbf_progress progress = {
+        .total_chunks = m->num_chunks,
+        .total_bytes = m->size_bytes,
+    };
+    LOG_INFO(BBF_SUBSYS,
+             "instant-on: phase=preparing — checking download sources for %s",
+             m->filename);
     /* The pre-flight runs against EVERY seed at once rather than walking them.
      * A seed that accepts the connection and then goes silent costs the whole
      * connect budget plus the whole probe budget, and walking multiplied that
@@ -148,22 +225,46 @@ bool boot_bundle_fetch_download(const char *datadir,
     uint32_t workers = (uint32_t)(2 * npeers);
     if (workers > ROM_FETCH_MAX_WORKERS)
         workers = ROM_FETCH_MAX_WORKERS;
+    bbf_progress_log("downloading", 0, m->num_chunks, 0, m->size_bytes,
+                     "keep this node running while the checkpoint downloads");
+    progress.last_log_ms = platform_time_monotonic_ms();
     bool ok;
     if (have_manifest)
         ok = rom_fetch_download_verified_parallel(peers, npeers, m, chunk_sha3,
                                                   manifest_chunks, bundles,
-                                                  NULL, NULL);
+                                                  bbf_download_progress,
+                                                  &progress);
     else
         ok = rom_fetch_download_parallel(peers, npeers, m, bundles, workers,
-                                         NULL, NULL);
+                                         bbf_download_progress, &progress);
     free(chunk_sha3);
+
+    /* A fully resumed verified artifact may require no chunk callback. Still
+     * expose the boundary between byte acquisition and state validation. */
+    if (ok && !progress.verifying_logged) {
+        progress.done_chunks = progress.total_chunks;
+        progress.done_bytes = progress.total_bytes;
+        bbf_progress_log("verifying", progress.done_chunks,
+                         progress.total_chunks, progress.done_bytes,
+                         progress.total_bytes,
+                         "download complete; state verification is next");
+        progress.verifying_logged = true;
+    }
+    uint32_t final_chunks = progress.done_chunks;
+    uint64_t final_bytes = progress.done_bytes;
     if (!ok) {
+        bbf_progress_log("fallback", final_chunks, m->num_chunks,
+                         final_bytes, m->size_bytes,
+                         "download unavailable; continuing with ordinary P2P sync");
         LOG_WARN(BBF_SUBSYS,
                  "instant-on bundle fetch did not complete for %s "
                  "(content-verify/transport failure — left partial for resume, "
                  "boot falls back to P2P / operator bundle)", m->filename);
         return false;
     }
+    bbf_progress_log("downloaded", final_chunks, m->num_chunks,
+                     final_bytes, m->size_bytes,
+                     "content is downloaded; state verification is next");
     LOG_INFO(BBF_SUBSYS,
              "instant-on bundle fetch landed %s/%s (%u chunks, content-verified) "
              "— the autodetect installs it under the CHECKPOINT_ROM authority",

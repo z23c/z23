@@ -26,6 +26,7 @@
  * the install path fail-closes at admission (exactly the sovereignty guard). */
 
 #include "test/test_core.h"
+#include "base/log_macros.h"
 
 #include "config/boot.h"                       /* struct app_context */
 #include "config/boot_bundle_fetch.h"
@@ -310,6 +311,75 @@ static int case_pick_kinds(void)
 
 /* ── (c)+(d) E2E against the real serve path ────────────────────────────── */
 
+/* Capture the real threaded download's foreground messages in this isolated
+ * test process. Always restore stderr and its level before assertions run. */
+static bool bbf_capture_download(const char *dir,
+                                 const struct rom_fetch_peer *peers,
+                                 const struct rom_fetch_manifest *manifest,
+                                 bool *download_ok, char *out, size_t cap)
+{
+    FILE *capture = tmpfile();
+    if (!capture)
+        LOG_FAIL("test_boot_bundle_fetch", "cannot create log capture");
+    int saved = dup(STDERR_FILENO);
+    if (saved < 0) {
+        fclose(capture);
+        LOG_FAIL("test_boot_bundle_fetch", "cannot save stderr");
+    }
+    fflush(stderr);
+    if (dup2(fileno(capture), STDERR_FILENO) < 0) {
+        close(saved);
+        fclose(capture);
+        LOG_FAIL("test_boot_bundle_fetch", "cannot redirect stderr");
+    }
+    enum zcl_log_level level = zcl_log_level_get();
+    zcl_log_level_set(ZCL_LOG_ALL);
+    *download_ok = boot_bundle_fetch_download(dir, peers, 1, manifest);
+    fflush(stderr);
+    zcl_log_level_set(level);
+    int restored = dup2(saved, STDERR_FILENO);
+    close(saved);
+    if (restored < 0) {
+        fclose(capture);
+        LOG_FAIL("test_boot_bundle_fetch", "cannot restore stderr");
+    }
+    rewind(capture);
+    size_t n = fread(out, 1, cap - 1, capture);
+    out[n] = '\0';
+    bool ok = !ferror(capture) && fgetc(capture) == EOF;
+    if (fclose(capture) != 0)
+        ok = false;
+    if (!ok)
+        LOG_FAIL("test_boot_bundle_fetch", "log capture failed or exceeded bound");
+    return true;
+}
+
+/* Observe actual callback counters rather than a simulated progress object. */
+static bool bbf_progress_is_bounded(const char *log,
+                                    const struct rom_fetch_manifest *manifest)
+{
+    unsigned last_chunks = 0, reports = 0;
+    unsigned long long last_bytes = 0;
+    for (const char *p = log; (p = strstr(p, " chunks=")) != NULL; p++) {
+        unsigned chunks = 0, total_chunks = 0;
+        unsigned long long bytes = 0, total_bytes = 0;
+        if (sscanf(p, " chunks=%u/%u bytes=%llu/%llu", &chunks, &total_chunks,
+                   &bytes, &total_bytes) != 4)
+            continue;
+        if (total_chunks != manifest->num_chunks ||
+            total_bytes != manifest->size_bytes || chunks > total_chunks ||
+            bytes > total_bytes || chunks < last_chunks || bytes < last_bytes)
+            LOG_FAIL("test_boot_bundle_fetch", "progress regressed or exceeded manifest");
+        last_chunks = chunks;
+        last_bytes = bytes;
+        reports++;
+    }
+    if (reports == 0 || reports > manifest->num_chunks + 2 ||
+        last_chunks != manifest->num_chunks || last_bytes != manifest->size_bytes)
+        LOG_FAIL("test_boot_bundle_fetch", "missing, unbounded or incomplete progress");
+    return true;
+}
+
 static int case_e2e(void)
 {
     int failures = 0;
@@ -363,7 +433,11 @@ static int case_e2e(void)
         snprintf(peers[0].addr, sizeof(peers[0].addr), "%s", "127.0.0.1");
         peers[0].port = port;
 
-        ASSERT(boot_bundle_fetch_download(cdir, peers, 1, &m));
+        char progress_log[16384];
+        bool download_ok = false;
+        ASSERT(bbf_capture_download(cdir, peers, &m, &download_ok,
+                                    progress_log, sizeof(progress_log)));
+        ASSERT(download_ok);
         char landed[1200];
         snprintf(landed, sizeof(landed), "%s/bundles/%s", cdir, m.filename);
         ASSERT(rom_fetch_verify_file(landed, &m));
@@ -415,7 +489,10 @@ static int case_e2e(void)
         ASSERT(cdir2 != NULL);
         struct rom_fetch_manifest bad = m;
         bad.whole_sha3[0] ^= 0x01;
-        ASSERT(!boot_bundle_fetch_download(cdir2, peers, 1, &bad));
+        char bad_progress_log[16384];
+        ASSERT(bbf_capture_download(cdir2, peers, &bad, &download_ok,
+                                    bad_progress_log, sizeof(bad_progress_log)));
+        ASSERT(!download_ok);
         char *bad_auto = boot_autodetect_consensus_bundle(cdir2);
         ASSERT(bad_auto == NULL); /* nothing installable landed */
         free(bad_auto);
@@ -475,6 +552,26 @@ static int case_e2e(void)
         test_rm_rf_recursive(cdir3);
         rmdir(sdir);
         rom_seed_reset();
+
+        /* Assert UI behavior after stopping the server: a missing progress
+         * callback must not leave a serving fixture behind for later cases. */
+        const char *preparing = strstr(progress_log, "phase=preparing");
+        const char *downloading = strstr(progress_log, "phase=downloading");
+        const char *verifying = strstr(progress_log, "phase=verifying");
+        const char *downloaded = strstr(progress_log, "phase=downloaded");
+        ASSERT(preparing && downloading && verifying && downloaded);
+        ASSERT(preparing < downloading && downloading < verifying &&
+               verifying < downloaded);
+        ASSERT(strstr(progress_log, "phase=ready") == NULL);
+        ASSERT(strstr(progress_log, "phase=installed") == NULL);
+        ASSERT(bbf_progress_is_bounded(progress_log, &m));
+        verifying = strstr(bad_progress_log, "phase=verifying");
+        const char *fallback = strstr(bad_progress_log, "phase=fallback");
+        ASSERT(verifying && fallback && verifying < fallback);
+        ASSERT(strstr(bad_progress_log, "phase=downloaded") == NULL);
+        ASSERT(strstr(bad_progress_log, "phase=ready") == NULL);
+        ASSERT(strstr(bad_progress_log, "phase=installed") == NULL);
+        ASSERT(bbf_progress_is_bounded(bad_progress_log, &bad));
     } _test_next:;
     return failures;
 }
