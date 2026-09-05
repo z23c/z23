@@ -2108,7 +2108,7 @@ static int test_ic_proof_generation_prefers_ram_when_it_fits(void)
 {
     int failures = 0;
     TEST("proof budget: RAM-backed scratch is used only when it really fits") {
-        char relative[2048], root[4096], probe[4096], cwd[2048];
+        char relative[4096], root[4096], probe[4096], cwd[2048];
         ic_budget_fixture("ramscratch", relative);
         ASSERT(getcwd(cwd, sizeof(cwd)) != NULL);
         snprintf(root, sizeof(root), "%s/%s", cwd, relative);
@@ -2168,7 +2168,7 @@ static int test_ic_ram_scratch_reservations_hold_under_concurrency(void)
 {
     int failures = 0;
     TEST("proof budget: RAM scratch is reserved, not just measured") {
-        char relative[2048], root[4096], cwd[2048];
+        char relative[4096], root[4096], cwd[2048];
         ic_budget_fixture("ramreserve", relative);
         ASSERT(getcwd(cwd, sizeof(cwd)) != NULL);
         snprintf(root, sizeof(root), "%s/%s", cwd, relative);
@@ -2267,6 +2267,44 @@ static int test_ic_proof_dependency_crosses_filesystems(void)
         ASSERT(same_st.st_ino == source_st.st_ino);
         ASSERT(same_st.st_mtim.tv_sec == source_st.st_mtim.tv_sec);
         ASSERT(same_st.st_mtim.tv_nsec == source_st.st_mtim.tv_nsec);
+
+        /* Pin the fallback on every native host, including those without
+         * /dev/shm. Only EXDEV is injected; copying and metadata are real. */
+        char forced[4096];
+        snprintf(forced, sizeof(forced), "%s/%s/copied.sh", cwd, relative);
+        ASSERT(setenv("ZCL_DEV_PROOF_TEST_LINK_ERRNO", "EXDEV", 1) == 0);
+        bool copied = zcl_dev_proof_dependency_materialize(source, forced);
+        int cleared = unsetenv("ZCL_DEV_PROOF_TEST_LINK_ERRNO");
+        ASSERT(cleared == 0);
+        ASSERT(copied);
+        struct stat forced_st;
+        ASSERT(stat(forced, &forced_st) == 0);
+        ASSERT(forced_st.st_dev == source_st.st_dev);
+        ASSERT(forced_st.st_ino != source_st.st_ino);
+        ASSERT((forced_st.st_mode & 07777) == (source_st.st_mode & 07777));
+        ASSERT(forced_st.st_mtim.tv_sec == source_st.st_mtim.tv_sec);
+        ASSERT(forced_st.st_mtim.tv_nsec == source_st.st_mtim.tv_nsec);
+        ASSERT((size_t)forced_st.st_size == sizeof(body) - 1);
+        char forced_body[sizeof(body)] = {0};
+        FILE *forced_file = fopen(forced, "rb");
+        ASSERT(forced_file != NULL);
+        size_t forced_len = fread(forced_body, 1, sizeof(forced_body),
+                                  forced_file);
+        int closed = fclose(forced_file);
+        ASSERT(closed == 0);
+        ASSERT(forced_len == sizeof(body) - 1);
+        ASSERT(memcmp(forced_body, body, sizeof(body) - 1) == 0);
+        ASSERT(unlink(forced) == 0);
+
+        /* An unrelated link error must retain its refusal and errno. */
+        ASSERT(setenv("ZCL_DEV_PROOF_TEST_LINK_ERRNO", "EACCES", 1) == 0);
+        bool denied = zcl_dev_proof_dependency_materialize(source, forced);
+        int denied_errno = errno;
+        cleared = unsetenv("ZCL_DEV_PROOF_TEST_LINK_ERRNO");
+        ASSERT(cleared == 0);
+        ASSERT(!denied);
+        ASSERT(denied_errno == EACCES);
+        ASSERT(lstat(forced, &forced_st) != 0 && errno == ENOENT);
 
         /* /dev/shm is the RAM-backed generation root in production. A box
          * without a writable one cannot observe the cross-device path at all,

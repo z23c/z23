@@ -1441,6 +1441,20 @@ static bool dependency_copy_stat(const char *source, const char *target,
     return ok;
 }
 
+static int dependency_link(const char *source, const char *target)
+{
+#if defined(ZCL_TESTING)
+    /* Exercise the real fallback without requiring a second filesystem. */
+    const char *failure = getenv("ZCL_DEV_PROOF_TEST_LINK_ERRNO");
+    if (failure && (strcmp(failure, "EXDEV") == 0 ||
+                    strcmp(failure, "EACCES") == 0)) {
+        errno = strcmp(failure, "EXDEV") == 0 ? EXDEV : EACCES;
+        return -1;
+    }
+#endif
+    return link(source, target);
+}
+
 static bool dependency_materialize(const char *source, const char *target)
 {
     struct stat source_st, target_st;
@@ -1456,7 +1470,7 @@ static bool dependency_materialize(const char *source, const char *target)
             source_st.st_ino == target_st.st_ino)
             return true;
         if (target_exists && unlink(target) != 0) return false;
-        if (link(source, target) == 0) return true;
+        if (dependency_link(source, target) == 0) return true;
         /* Same filesystem is the fast path; a cross-device generation root is
          * not a missing dependency, so copy rather than refuse. */
         if (errno != EXDEV && errno != EPERM && errno != EMLINK) return false;
