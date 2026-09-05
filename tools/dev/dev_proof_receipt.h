@@ -26,6 +26,61 @@
 #define ZCL_DEV_PROOF_PUBKEY_BYTES 32u
 #define ZCL_DEV_PROOF_SIGNATURE_BYTES 64u
 #define ZCL_DEV_PROOF_CHILD_WIRE_BYTES 100u
+
+/* A signed per-group observation. This is deliberately a different wire
+ * object from the pair receipt above: old receipt parsers reject its size and
+ * magic, and no verdict leaf alone admits a publication.
+ *
+ * Canonical wire layout (little-endian integers):
+ *   0   magic[8] = "Z23VLF1\0"
+ *   8   version u32 = 1
+ *   12  verdict u8 (PASS=1, FAIL=2)
+ *   13  group_len u8 (1..127)
+ *   14  reserved[2] = zero
+ *   16  exact test-cache key[32]
+ *   48  group[128] (group_len bytes then a canonical zero tail)
+ *   176 observed_unix u64
+ *   184 elapsed_ms u64
+ *   192 log_seq u64
+ *   200 prev_log_head[32]
+ *   232 producer_pubkey[32]
+ *   264 signature[64]
+ *
+ * The Ed25519 message is domain "zcl.dev_verdict_leaf.v1" followed by bytes
+ * [0,232). The future CAS root is SHA3-256 over domain
+ * "zcl.dev_verdict_leaf_root.v1" followed by all 328 signed wire bytes. */
+#define ZCL_DEV_VERDICT_LEAF_KEY_BYTES 32u
+#define ZCL_DEV_VERDICT_LEAF_GROUP_BYTES 128u
+#define ZCL_DEV_VERDICT_LEAF_GROUP_MAX 127u
+#define ZCL_DEV_VERDICT_LEAF_UNSIGNED_WIRE_BYTES 232u
+#define ZCL_DEV_VERDICT_LEAF_WIRE_BYTES 328u
+
+enum zcl_dev_verdict_leaf_verdict {
+    ZCL_DEV_VERDICT_LEAF_PASS = 1,
+    ZCL_DEV_VERDICT_LEAF_FAIL = 2,
+};
+
+struct zcl_dev_verdict_leaf_v1 {
+    uint8_t key[ZCL_DEV_VERDICT_LEAF_KEY_BYTES];
+    char group[ZCL_DEV_VERDICT_LEAF_GROUP_BYTES];
+    uint8_t group_len;
+    enum zcl_dev_verdict_leaf_verdict verdict;
+    uint64_t observed_unix;
+    uint64_t elapsed_ms;
+    uint64_t log_seq;
+    uint8_t prev_log_head[ZCL_DEV_PROOF_ROOT_BYTES];
+    bool has_signature;
+    uint8_t producer_pubkey[ZCL_DEV_PROOF_PUBKEY_BYTES];
+    uint8_t signature[ZCL_DEV_PROOF_SIGNATURE_BYTES];
+};
+
+#define ZCL_DEV_VERDICT_WHY_ARGUMENTS "verdict_leaf_arguments_invalid"
+#define ZCL_DEV_VERDICT_WHY_FRAMING "verdict_leaf_framing_invalid"
+#define ZCL_DEV_VERDICT_WHY_SCHEMA "verdict_leaf_schema_unknown"
+#define ZCL_DEV_VERDICT_WHY_ENCODING "verdict_leaf_encoding_invalid"
+#define ZCL_DEV_VERDICT_WHY_UNSIGNED "verdict_leaf_unsigned"
+#define ZCL_DEV_VERDICT_WHY_KEY "verdict_leaf_key_mismatch"
+#define ZCL_DEV_VERDICT_WHY_GROUP "verdict_leaf_group_mismatch"
 /* What the roots in a receipt mean, versioned apart from the record layout.
  * Every producer stamps this and every reader refuses anything else, so a
  * receipt whose roots were derived under an older policy is named
@@ -129,5 +184,29 @@ bool zcl_dev_proof_child_receipt_validate(
     const uint8_t *wire, size_t wire_len,
     enum zcl_dev_proof_dimension_id id,
     const struct zcl_dev_proof_dimension *dimension);
+
+/* Sign one structurally valid PASS or FAIL observation with this box's
+ * existing proof identity. This authenticates an observation; it grants no
+ * coverage, union, publication, or admission authority. */
+bool zcl_dev_verdict_leaf_sign(struct zcl_dev_verdict_leaf_v1 *leaf,
+                               char *why, size_t why_len);
+bool zcl_dev_verdict_leaf_serialize(
+    const struct zcl_dev_verdict_leaf_v1 *leaf,
+    uint8_t out[ZCL_DEV_VERDICT_LEAF_WIRE_BYTES],
+    char *why, size_t why_len);
+bool zcl_dev_verdict_leaf_parse(
+    const uint8_t *wire, size_t wire_len,
+    struct zcl_dev_verdict_leaf_v1 *out,
+    char *why, size_t why_len);
+/* expected_key and expected_group are mandatory. A true result means the
+ * exact-key/group observation has a trusted valid signature, including when
+ * verdict==FAIL. The caller must inspect verdict; true never means PASS. */
+bool zcl_dev_verdict_leaf_verify(
+    const struct zcl_dev_verdict_leaf_v1 *leaf,
+    const uint8_t expected_key[ZCL_DEV_VERDICT_LEAF_KEY_BYTES],
+    const char *expected_group, char *why, size_t why_len);
+bool zcl_dev_verdict_leaf_root(
+    const struct zcl_dev_verdict_leaf_v1 *leaf,
+    uint8_t out[ZCL_DEV_PROOF_ROOT_BYTES], char *why, size_t why_len);
 
 #endif

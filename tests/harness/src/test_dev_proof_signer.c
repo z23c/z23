@@ -20,6 +20,7 @@
 #include "crypto/ed25519.h"
 #include "dev_proof_receipt.h"
 #include "dev_proof_signer.h"
+#include "sha3/sha3.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -522,6 +523,167 @@ static int test_dps_hook_admission(void)
 }
 #endif
 
+/* Independent wire/domain expectations: do not derive these from the codec. */
+#define DPS_LEAF_DOMAIN "zcl.dev_verdict_leaf.v1"
+#define DPS_LEAF_ROOT_DOMAIN "zcl.dev_verdict_leaf_root.v1"
+
+static struct zcl_dev_verdict_leaf_v1 dps_leaf(void)
+{
+    struct zcl_dev_verdict_leaf_v1 leaf = {0};
+    memset(leaf.key, 0x42, sizeof(leaf.key));
+    memcpy(leaf.group, "test_fixture", sizeof("test_fixture"));
+    leaf.group_len = 12;
+    leaf.verdict = ZCL_DEV_VERDICT_LEAF_PASS;
+    leaf.observed_unix = 0x0102030405060708ULL;
+    leaf.elapsed_ms = 10001;
+    leaf.log_seq = 1;
+    return leaf;
+}
+
+static int test_dps_leaf_round_trip(void)
+{
+    int failures = 0;
+    TEST("verdict leaf: canonical signed observations preserve PASS, FAIL and full durations without admitting a pair") {
+        dps_isolate("leaf_round_trip");
+        struct zcl_dev_verdict_leaf_v1 leaf = dps_leaf(), parsed;
+        struct zcl_dev_acceptance_receipt_v1 pair;
+        uint8_t wire[328], again[328], root[32], expected_root[32];
+        uint8_t message[sizeof(DPS_LEAF_DOMAIN) - 1u + 232u];
+        char why[128];
+        ASSERT(ZCL_DEV_VERDICT_LEAF_WIRE_BYTES == sizeof(wire));
+        const uint64_t durations[] = {0, 9999, 10000, 10001, UINT64_MAX};
+        for (size_t i = 0; i < sizeof(durations) / sizeof(durations[0]); i++) {
+            leaf.elapsed_ms = durations[i];
+            leaf.verdict = i % 2 ? ZCL_DEV_VERDICT_LEAF_FAIL : ZCL_DEV_VERDICT_LEAF_PASS;
+            ASSERT(zcl_dev_verdict_leaf_sign(&leaf, why, sizeof(why)));
+            ASSERT(zcl_dev_verdict_leaf_serialize(&leaf, wire, why, sizeof(why)));
+            ASSERT(memcmp(wire, "Z23VLF1\0", 8) == 0);
+            ASSERT(wire[8] == 1 && wire[9] == 0 && wire[10] == 0 && wire[11] == 0);
+            ASSERT(wire[12] == (i % 2 ? 2 : 1) && wire[13] == 12);
+            ASSERT(wire[14] == 0 && wire[15] == 0);
+            ASSERT(memcmp(wire + 16, leaf.key, 32) == 0);
+            ASSERT(memcmp(wire + 48, "test_fixture", 12) == 0);
+            for (size_t j = 60; j < 176; j++) ASSERT(wire[j] == 0);
+            for (size_t j = 0; j < 8; j++) {
+                ASSERT(wire[176 + j] == (uint8_t)(8 - j));
+                ASSERT(wire[184 + j] == (uint8_t)(durations[i] >> (j * 8)));
+            }
+            ASSERT(wire[192] == 1);
+            for (size_t j = 193; j < 232; j++) ASSERT(wire[j] == 0);
+            memcpy(message, DPS_LEAF_DOMAIN, sizeof(DPS_LEAF_DOMAIN) - 1u);
+            memcpy(message + sizeof(DPS_LEAF_DOMAIN) - 1u, wire, 232);
+            ASSERT(ed25519_verify(wire + 264, message, sizeof(message), wire + 232));
+            ASSERT(zcl_dev_verdict_leaf_parse(wire, sizeof(wire), &parsed, why, sizeof(why)));
+            ASSERT(zcl_dev_verdict_leaf_verify(&parsed, leaf.key, "test_fixture", why, sizeof(why)));
+            ASSERT(parsed.verdict == leaf.verdict && parsed.elapsed_ms == durations[i]);
+            ASSERT(zcl_dev_verdict_leaf_serialize(&parsed, again, why, sizeof(why)));
+            ASSERT(memcmp(wire, again, sizeof(wire)) == 0);
+            ASSERT(zcl_dev_verdict_leaf_root(&parsed, root, why, sizeof(why)));
+            struct sha3_256_ctx hash;
+            sha3_256_init(&hash);
+            sha3_256_write(&hash, (const uint8_t *)DPS_LEAF_ROOT_DOMAIN,
+                           sizeof(DPS_LEAF_ROOT_DOMAIN) - 1u);
+            sha3_256_write(&hash, wire, sizeof(wire));
+            sha3_256_finalize(&hash, expected_root);
+            ASSERT(memcmp(root, expected_root, sizeof(root)) == 0);
+            ASSERT(!zcl_dev_proof_receipt_parse(wire, sizeof(wire), &pair));
+        }
+        dps_restore();
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_dps_leaf_tamper(void)
+{
+    int failures = 0;
+    TEST("verdict leaf: exact key/group, signed bytes and receiver trust are independent requirements") {
+        dps_isolate("leaf_tamper");
+        struct zcl_dev_verdict_leaf_v1 leaf = dps_leaf(), parsed;
+        uint8_t wire[328], other_key[32], seed[32], pubkey[32], secret[32];
+        uint8_t message[sizeof(DPS_LEAF_DOMAIN) - 1u + 232u];
+        char why[128], allow_path[PATH_MAX], allowed[66];
+        ASSERT(zcl_dev_verdict_leaf_sign(&leaf, why, sizeof(why)));
+        memcpy(other_key, leaf.key, sizeof(other_key)); other_key[0] ^= 1;
+        ASSERT(!zcl_dev_verdict_leaf_verify(&leaf, other_key, leaf.group, why, sizeof(why)));
+        ASSERT_STR_EQ(why, "verdict_leaf_key_mismatch");
+        ASSERT(!zcl_dev_verdict_leaf_verify(&leaf, leaf.key, "other_group", why, sizeof(why)));
+        ASSERT_STR_EQ(why, "verdict_leaf_group_mismatch");
+        const size_t offsets[] = {16, 48, 176, 184, 264, 327};
+        for (size_t i = 0; i < sizeof(offsets) / sizeof(offsets[0]); i++) {
+            ASSERT(zcl_dev_verdict_leaf_serialize(&leaf, wire, why, sizeof(why)));
+            wire[offsets[i]] ^= 1;
+            ASSERT(zcl_dev_verdict_leaf_parse(wire, sizeof(wire), &parsed, why, sizeof(why)));
+            ASSERT(!zcl_dev_verdict_leaf_verify(&parsed, parsed.key, parsed.group, why, sizeof(why)));
+            ASSERT_STR_EQ(why, "signature_invalid");
+        }
+        ASSERT(zcl_dev_verdict_leaf_serialize(&leaf, wire, why, sizeof(why)));
+        memset(seed, 0x71, sizeof(seed));
+        ed25519_keypair(pubkey, secret, seed);
+        memcpy(message, DPS_LEAF_DOMAIN, sizeof(DPS_LEAF_DOMAIN) - 1u);
+        memcpy(message + sizeof(DPS_LEAF_DOMAIN) - 1u, wire, 232);
+        memcpy(wire + 232, pubkey, 32);
+        ed25519_sign(wire + 264, message, sizeof(message), seed, pubkey);
+        ASSERT(ed25519_verify(wire + 264, message, sizeof(message), pubkey));
+        ASSERT(zcl_dev_verdict_leaf_parse(wire, sizeof(wire), &parsed, why, sizeof(why)));
+        ASSERT(!zcl_dev_verdict_leaf_verify(&parsed, leaf.key, leaf.group, why, sizeof(why)));
+        ASSERT_STR_EQ(why, "signer_unknown");
+        ASSERT(dps_allow_path(allow_path, sizeof(allow_path)));
+        zcl_hex_encode(pubkey, 32, allowed); allowed[64] = '\n'; allowed[65] = 0;
+        ASSERT(dps_write(allow_path, allowed, 65, 0600));
+        ASSERT(zcl_dev_verdict_leaf_verify(&parsed, leaf.key, leaf.group, why, sizeof(why)));
+        dps_restore();
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_dps_leaf_bounds(void)
+{
+    int failures = 0;
+    TEST("verdict leaf: malformed framing, noncanonical bytes and impossible log links refuse") {
+        dps_isolate("leaf_bounds");
+        struct zcl_dev_verdict_leaf_v1 leaf = dps_leaf(), parsed;
+        uint8_t wire[329] = {0}; char why[128];
+        ASSERT(!zcl_dev_verdict_leaf_serialize(&leaf, wire, why, sizeof(why)));
+        ASSERT_STR_EQ(why, "verdict_leaf_unsigned");
+        ASSERT(zcl_dev_verdict_leaf_sign(&leaf, why, sizeof(why)));
+        ASSERT(zcl_dev_verdict_leaf_serialize(&leaf, wire, why, sizeof(why)));
+        const size_t lengths[] = {0, 1, 8, 12, 232, 327, 329};
+        for (size_t i = 0; i < sizeof(lengths) / sizeof(lengths[0]); i++) {
+            ASSERT(!zcl_dev_verdict_leaf_parse(wire, lengths[i], &parsed, why, sizeof(why)));
+            ASSERT(why[0] != 0);
+        }
+        const size_t offsets[] = {0, 8, 12, 13, 14, 15, 48, 60, 175, 192, 200};
+        const uint8_t values[] = {0, 99, 0, 128, 1, 1, ' ', 1, 1, 0, 1};
+        for (size_t i = 0; i < sizeof(offsets) / sizeof(offsets[0]); i++) {
+            ASSERT(zcl_dev_verdict_leaf_serialize(&leaf, wire, why, sizeof(why)));
+            wire[offsets[i]] = values[i];
+            ASSERT(!zcl_dev_verdict_leaf_parse(wire, 328, &parsed, why, sizeof(why)));
+            ASSERT(why[0] != 0);
+        }
+        parsed = dps_leaf(); memset(parsed.key, 0, 32);
+        ASSERT(!zcl_dev_verdict_leaf_sign(&parsed, why, sizeof(why)));
+        parsed = dps_leaf(); parsed.observed_unix = 0;
+        ASSERT(!zcl_dev_verdict_leaf_sign(&parsed, why, sizeof(why)));
+        parsed = dps_leaf(); parsed.log_seq = 2;
+        ASSERT(!zcl_dev_verdict_leaf_sign(&parsed, why, sizeof(why)));
+        memset(parsed.prev_log_head, 0x31, 32);
+        memset(parsed.group, 'a', 127); parsed.group[127] = 0; parsed.group_len = 127;
+        ASSERT(zcl_dev_verdict_leaf_sign(&parsed, why, sizeof(why)));
+        ASSERT(zcl_dev_verdict_leaf_verify(&parsed, parsed.key, parsed.group, why, sizeof(why)));
+        parsed.group[127] = 'a'; parsed.group_len = 128;
+        ASSERT(!zcl_dev_verdict_leaf_sign(&parsed, why, sizeof(why)));
+        ASSERT(!zcl_dev_verdict_leaf_parse(NULL, 328, &parsed, why, sizeof(why)));
+        ASSERT(!zcl_dev_verdict_leaf_sign(NULL, why, sizeof(why)));
+        ASSERT(!zcl_dev_verdict_leaf_verify(&leaf, NULL, leaf.group, why, sizeof(why)));
+        ASSERT(!zcl_dev_verdict_leaf_verify(&leaf, leaf.key, NULL, why, sizeof(why)));
+        dps_restore();
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_dev_proof_signer(void)
 {
     int failures = 0;
@@ -530,6 +692,9 @@ int test_dev_proof_signer(void)
     failures += test_dps_unsigned_record();
     failures += test_dps_allowlist();
     failures += test_dps_key_unreadable();
+    failures += test_dps_leaf_round_trip();
+    failures += test_dps_leaf_tamper();
+    failures += test_dps_leaf_bounds();
 #if !defined(_WIN32)
     failures += test_dps_hook_admission();
 #endif

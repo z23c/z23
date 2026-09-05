@@ -44,6 +44,13 @@
 #define CHILD_VERSION 1u
 #define CHILD_SEAL_OFFSET \
     (ZCL_DEV_PROOF_CHILD_WIRE_BYTES - ZCL_DEV_PROOF_ROOT_BYTES)
+#define VERDICT_MAGIC "Z23VLF1\0"
+#define VERDICT_VERSION 1u
+#define VERDICT_SIGN_DOMAIN "zcl.dev_verdict_leaf.v1"
+#define VERDICT_ROOT_DOMAIN "zcl.dev_verdict_leaf_root.v1"
+#define VERDICT_SIGN_MESSAGE_BYTES \
+    ((sizeof(VERDICT_SIGN_DOMAIN) - 1u) + \
+     ZCL_DEV_VERDICT_LEAF_UNSIGNED_WIRE_BYTES)
 
 static bool root_nonzero(const uint8_t root[ZCL_DEV_PROOF_ROOT_BYTES])
 {
@@ -460,4 +467,221 @@ bool zcl_dev_proof_child_receipt_validate(
     sha3_256_write(&sha, wire, CHILD_SEAL_OFFSET);
     sha3_256_finalize(&sha, expected);
     return memcmp(expected, seal, sizeof(seal)) == 0;
+}
+
+static bool verdict_fail(char *why, size_t why_len, const char *message)
+{
+    (void)fprintf(stderr, "dev-verdict-leaf: %s\n", message);
+    if (why && why_len) (void)snprintf(why, why_len, "%s", message);
+    return false;
+}
+
+static bool verdict_nonzero(const uint8_t *bytes, size_t len)
+{
+    uint8_t any = 0;
+    for (size_t i = 0; i < len; i++) any |= bytes[i];
+    return any != 0;
+}
+
+static bool verdict_group_char(unsigned char c)
+{
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+           (c >= '0' && c <= '9') || c == '.' || c == '_' ||
+           c == '-' || c == '/';
+}
+
+static bool verdict_group_text(const char *group, size_t *len_out)
+{
+    if (!group) return false;
+    size_t len = 0;
+    while (len <= ZCL_DEV_VERDICT_LEAF_GROUP_MAX && group[len]) {
+        if (!verdict_group_char((unsigned char)group[len])) return false;
+        len++;
+    }
+    if (len == 0 || len > ZCL_DEV_VERDICT_LEAF_GROUP_MAX) return false;
+    if (len_out) *len_out = len;
+    return true;
+}
+
+static bool verdict_payload_valid(const struct zcl_dev_verdict_leaf_v1 *leaf)
+{
+    if (!leaf ||
+        (leaf->verdict != ZCL_DEV_VERDICT_LEAF_PASS &&
+         leaf->verdict != ZCL_DEV_VERDICT_LEAF_FAIL) ||
+        leaf->group_len == 0 ||
+        leaf->group_len > ZCL_DEV_VERDICT_LEAF_GROUP_MAX ||
+        !verdict_nonzero(leaf->key, sizeof(leaf->key)) ||
+        leaf->observed_unix == 0 || leaf->log_seq == 0)
+        return false;
+    for (size_t i = 0; i < leaf->group_len; i++)
+        if (!verdict_group_char((unsigned char)leaf->group[i])) return false;
+    for (size_t i = leaf->group_len; i < sizeof(leaf->group); i++)
+        if (leaf->group[i] != 0) return false;
+    bool have_prev = verdict_nonzero(leaf->prev_log_head,
+                                     sizeof(leaf->prev_log_head));
+    return (leaf->log_seq == 1 && !have_prev) ||
+           (leaf->log_seq > 1 && have_prev);
+}
+
+static bool verdict_body(
+    const struct zcl_dev_verdict_leaf_v1 *leaf,
+    uint8_t out[ZCL_DEV_VERDICT_LEAF_UNSIGNED_WIRE_BYTES])
+{
+    if (!out || !verdict_payload_valid(leaf)) return false;
+    uint8_t *p = out;
+    put_bytes(&p, VERDICT_MAGIC, 8);
+    put_u32(&p, VERDICT_VERSION);
+    *p++ = (uint8_t)leaf->verdict;
+    *p++ = leaf->group_len;
+    *p++ = 0;
+    *p++ = 0;
+    put_bytes(&p, leaf->key, sizeof(leaf->key));
+    put_bytes(&p, leaf->group, sizeof(leaf->group));
+    put_u64(&p, leaf->observed_unix);
+    put_u64(&p, leaf->elapsed_ms);
+    put_u64(&p, leaf->log_seq);
+    put_bytes(&p, leaf->prev_log_head, sizeof(leaf->prev_log_head));
+    return (size_t)(p - out) == ZCL_DEV_VERDICT_LEAF_UNSIGNED_WIRE_BYTES;
+}
+
+static bool verdict_message(const struct zcl_dev_verdict_leaf_v1 *leaf,
+                            uint8_t out[VERDICT_SIGN_MESSAGE_BYTES])
+{
+    memcpy(out, VERDICT_SIGN_DOMAIN, sizeof(VERDICT_SIGN_DOMAIN) - 1u);
+    return verdict_body(leaf, out + sizeof(VERDICT_SIGN_DOMAIN) - 1u);
+}
+
+bool zcl_dev_verdict_leaf_sign(struct zcl_dev_verdict_leaf_v1 *leaf,
+                               char *why, size_t why_len)
+{
+    uint8_t message[VERDICT_SIGN_MESSAGE_BYTES];
+    const char *signer_why = NULL;
+    if (!leaf)
+        return verdict_fail(why, why_len, ZCL_DEV_VERDICT_WHY_ARGUMENTS);
+    leaf->has_signature = false;
+    memset(leaf->producer_pubkey, 0, sizeof(leaf->producer_pubkey));
+    memset(leaf->signature, 0, sizeof(leaf->signature));
+    if (!verdict_message(leaf, message))
+        return verdict_fail(why, why_len, ZCL_DEV_VERDICT_WHY_ENCODING);
+    if (!zcl_dev_proof_signer_sign(message, sizeof(message),
+                                   leaf->producer_pubkey, leaf->signature,
+                                   &signer_why))
+        return verdict_fail(why, why_len, signer_why ? signer_why :
+                            ZCL_DEV_VERDICT_WHY_UNSIGNED);
+    leaf->has_signature = true;
+    if (why && why_len) why[0] = 0;
+    return true;
+}
+
+bool zcl_dev_verdict_leaf_serialize(
+    const struct zcl_dev_verdict_leaf_v1 *leaf,
+    uint8_t out[ZCL_DEV_VERDICT_LEAF_WIRE_BYTES],
+    char *why, size_t why_len)
+{
+    if (!leaf || !out)
+        return verdict_fail(why, why_len, ZCL_DEV_VERDICT_WHY_ARGUMENTS);
+    if (!leaf->has_signature ||
+        !verdict_nonzero(leaf->producer_pubkey,
+                         sizeof(leaf->producer_pubkey)) ||
+        !verdict_nonzero(leaf->signature, sizeof(leaf->signature)))
+        return verdict_fail(why, why_len, ZCL_DEV_VERDICT_WHY_UNSIGNED);
+    if (!verdict_body(leaf, out))
+        return verdict_fail(why, why_len, ZCL_DEV_VERDICT_WHY_ENCODING);
+    uint8_t *p = out + ZCL_DEV_VERDICT_LEAF_UNSIGNED_WIRE_BYTES;
+    put_bytes(&p, leaf->producer_pubkey, sizeof(leaf->producer_pubkey));
+    put_bytes(&p, leaf->signature, sizeof(leaf->signature));
+    if (why && why_len) why[0] = 0;
+    if ((size_t)(p - out) != ZCL_DEV_VERDICT_LEAF_WIRE_BYTES)
+        return verdict_fail(why, why_len, ZCL_DEV_VERDICT_WHY_ENCODING);
+    return true;
+}
+
+bool zcl_dev_verdict_leaf_parse(
+    const uint8_t *wire, size_t wire_len,
+    struct zcl_dev_verdict_leaf_v1 *out, char *why, size_t why_len)
+{
+    if (!out)
+        return verdict_fail(why, why_len, ZCL_DEV_VERDICT_WHY_ARGUMENTS);
+    memset(out, 0, sizeof(*out));
+    if (!wire || wire_len != ZCL_DEV_VERDICT_LEAF_WIRE_BYTES)
+        return verdict_fail(why, why_len, ZCL_DEV_VERDICT_WHY_FRAMING);
+    if (memcmp(wire, VERDICT_MAGIC, 8) != 0 ||
+        zcl_read_u32_le(wire + 8) != VERDICT_VERSION)
+        return verdict_fail(why, why_len, ZCL_DEV_VERDICT_WHY_SCHEMA);
+    if (wire[14] != 0 || wire[15] != 0)
+        return verdict_fail(why, why_len, ZCL_DEV_VERDICT_WHY_ENCODING);
+
+    struct zcl_dev_verdict_leaf_v1 parsed;
+    memset(&parsed, 0, sizeof(parsed));
+    parsed.verdict = (enum zcl_dev_verdict_leaf_verdict)wire[12];
+    parsed.group_len = wire[13];
+    memcpy(parsed.key, wire + 16, sizeof(parsed.key));
+    memcpy(parsed.group, wire + 48, sizeof(parsed.group));
+    parsed.observed_unix = zcl_read_u64_le(wire + 176);
+    parsed.elapsed_ms = zcl_read_u64_le(wire + 184);
+    parsed.log_seq = zcl_read_u64_le(wire + 192);
+    memcpy(parsed.prev_log_head, wire + 200, sizeof(parsed.prev_log_head));
+    memcpy(parsed.producer_pubkey, wire + 232,
+           sizeof(parsed.producer_pubkey));
+    memcpy(parsed.signature, wire + 264, sizeof(parsed.signature));
+    parsed.has_signature = true;
+    if (!verdict_payload_valid(&parsed))
+        return verdict_fail(why, why_len, ZCL_DEV_VERDICT_WHY_ENCODING);
+    *out = parsed;
+    if (why && why_len) why[0] = 0;
+    return true;
+}
+
+bool zcl_dev_verdict_leaf_verify(
+    const struct zcl_dev_verdict_leaf_v1 *leaf,
+    const uint8_t expected_key[ZCL_DEV_VERDICT_LEAF_KEY_BYTES],
+    const char *expected_group, char *why, size_t why_len)
+{
+    uint8_t message[VERDICT_SIGN_MESSAGE_BYTES];
+    const char *signer_why = NULL;
+    size_t expected_len = 0;
+    if (!leaf || !expected_key ||
+        !verdict_group_text(expected_group, &expected_len))
+        return verdict_fail(why, why_len, ZCL_DEV_VERDICT_WHY_ARGUMENTS);
+    if (!verdict_payload_valid(leaf))
+        return verdict_fail(why, why_len, ZCL_DEV_VERDICT_WHY_ENCODING);
+    if (memcmp(leaf->key, expected_key, sizeof(leaf->key)) != 0)
+        return verdict_fail(why, why_len, ZCL_DEV_VERDICT_WHY_KEY);
+    if (leaf->group_len != expected_len ||
+        memcmp(leaf->group, expected_group, expected_len) != 0)
+        return verdict_fail(why, why_len, ZCL_DEV_VERDICT_WHY_GROUP);
+    if (!leaf->has_signature ||
+        !verdict_nonzero(leaf->producer_pubkey,
+                         sizeof(leaf->producer_pubkey)) ||
+        !verdict_nonzero(leaf->signature, sizeof(leaf->signature)))
+        return verdict_fail(why, why_len, ZCL_DEV_VERDICT_WHY_UNSIGNED);
+    if (!verdict_message(leaf, message))
+        return verdict_fail(why, why_len, ZCL_DEV_VERDICT_WHY_ENCODING);
+    if (!zcl_dev_proof_signer_verify(message, sizeof(message),
+                                     leaf->producer_pubkey, leaf->signature,
+                                     &signer_why))
+        return verdict_fail(why, why_len, signer_why ? signer_why :
+                            ZCL_DEV_PROOF_SIGNER_WHY_SIGNATURE_INVALID);
+    if (why && why_len) why[0] = 0;
+    return true;
+}
+
+bool zcl_dev_verdict_leaf_root(
+    const struct zcl_dev_verdict_leaf_v1 *leaf,
+    uint8_t out[ZCL_DEV_PROOF_ROOT_BYTES], char *why, size_t why_len)
+{
+    uint8_t wire[ZCL_DEV_VERDICT_LEAF_WIRE_BYTES];
+    if (!out)
+        return verdict_fail(why, why_len, ZCL_DEV_VERDICT_WHY_ARGUMENTS);
+    memset(out, 0, ZCL_DEV_PROOF_ROOT_BYTES);
+    if (!zcl_dev_verdict_leaf_serialize(leaf, wire, why, why_len))
+        return false;
+    struct sha3_256_ctx sha;
+    sha3_256_init(&sha);
+    sha3_256_write(&sha, (const uint8_t *)VERDICT_ROOT_DOMAIN,
+                   sizeof(VERDICT_ROOT_DOMAIN) - 1u);
+    sha3_256_write(&sha, wire, sizeof(wire));
+    sha3_256_finalize(&sha, out);
+    if (why && why_len) why[0] = 0;
+    return true;
 }
