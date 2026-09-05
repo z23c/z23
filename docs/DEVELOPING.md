@@ -667,6 +667,24 @@ running receipt refuses within the bounded read path and prints the exact
 `z23-dev dev proof wait` command for that commit/base pair. A normal
 non-fast-forward race also refuses without deleting reusable child evidence.
 
+A receipt is signed, not merely sealed. Each box keeps one Ed25519 keypair
+under its owner-private development state root, created on first use by
+whichever proof seals the first receipt and never by a verifier; the receipt
+carries that public key and a signature over its whole sealed body, and
+sealing fails by name rather than fall back to an unsigned record. Admission
+verifies the signature and then asks whether it trusts the signer: this box's
+own key is always trusted, and any other box's key is trusted only when its 64
+hex characters appear on their own line in `signers.allow` beside the key
+(`#` comments and blank lines are fine, malformed lines are counted and
+skipped). To let another operator admit receipts proved here, run
+`z23-dev dev proof signer`, which prints this box's public key, both paths and
+the current trust counts, and paste the printed key into their `signers.allow`.
+The refusals are named: `receipt_unsigned` (a record from before receipts were
+signed — re-prove), `signature_invalid` (the record was edited after signing),
+`signer_unknown` (a real signature from a box this one does not trust), and
+`signer_key_unreadable` (this box has a key file that is not a private 32-byte
+seed).
+
 The source-identity capture that seals a proof's evidence (`zcl_dev_source_cas_capture`
 / `zcl_dev_source_identity_capture` in `tools/dev/dev_source_identity.c`) runs
 under real host load and can legitimately take longer than one fixed budget.

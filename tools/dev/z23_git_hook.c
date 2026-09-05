@@ -10,6 +10,7 @@
 #include "dev_proof_signer.h"
 #include "base/hex.h"
 #include "base/safe_alloc.h"
+#include "base/log_level.h"
 #include "platform/positioned_file.h"
 #if defined(_WIN32)
 #include "platform/private_file.h"
@@ -704,6 +705,21 @@ static bool selftest_fixture_remove(const char *path)
 }
 #endif
 
+/* One deliberate negative in the selftest. `refused` is what the case was
+ * supposed to prove; when it did not hold, put the log floor back so the
+ * operator sees why, and name the case rather than returning a bare 1. */
+static bool selftest_refused(const char *name, enum zcl_log_level restore,
+                             bool refused)
+{
+    if (refused)
+        return true;
+    zcl_log_level_set(restore);
+    (void)fprintf(stderr,
+                  "git-hook-selftest: FAIL case=%s — this receipt was "
+                  "supposed to be refused and was not\n", name);
+    return false;
+}
+
 static int selftest(void)
 {
     static const char local[] =
@@ -808,41 +824,71 @@ static int selftest(void)
     if (unlink(fixture) != 0) return 1;
 #endif
     qsort(samples, 1000, sizeof(samples[0]), compare_u64);
+    /* Everything below is a refusal the selftest WANTS. Signature checks log
+     * at ERROR when they refuse, which is right in a hook and wrong here: a
+     * passing gate that prints ERROR lines teaches its readers to ignore
+     * them. Silence the deliberate negatives, and let selftest_refused()
+     * restore the floor and name the case if one of them does not refuse. */
+    enum zcl_log_level restore_level = zcl_log_level_get();
+    zcl_log_level_set(ZCL_LOG_OFF);
     struct zcl_dev_acceptance_receipt_v1 tampered = receipt;
     tampered.dimensions[ZCL_DEV_PROOF_TEST].skipped = 1;
-    if (zcl_dev_proof_receipt_validate(&tampered, local, base,
-                                       why, sizeof(why)))
+    if (!selftest_refused("skipped-dimension", restore_level,
+            !zcl_dev_proof_receipt_validate(&tampered, local, base,
+                                            why, sizeof(why))))
         return 1;
     tampered = receipt;
     memset(tampered.compiler_root, 0, sizeof(tampered.compiler_root));
-    if (!zcl_dev_proof_receipt_seal(&tampered) ||
-        zcl_dev_proof_receipt_validate(&tampered, local, base,
-                                       why, sizeof(why)))
+    if (!selftest_refused("hollow-compiler-root", restore_level,
+            zcl_dev_proof_receipt_seal(&tampered) &&
+            !zcl_dev_proof_receipt_validate(&tampered, local, base,
+                                            why, sizeof(why))))
         return 1;
     tampered = receipt;
     tampered.complete = 0;
-    if (!zcl_dev_proof_receipt_seal(&tampered) ||
-        zcl_dev_proof_receipt_validate(&tampered, local, base,
-                                       why, sizeof(why)))
+    if (!selftest_refused("incomplete-receipt", restore_level,
+            zcl_dev_proof_receipt_seal(&tampered) &&
+            !zcl_dev_proof_receipt_validate(&tampered, local, base,
+                                            why, sizeof(why))))
         return 1;
     tampered = receipt;
     tampered.child_set_root[0] ^= 1u;
-    if (!zcl_dev_proof_receipt_seal(&tampered) ||
-        zcl_dev_proof_receipt_validate(&tampered, local, base,
-                                       why, sizeof(why)))
+    if (!selftest_refused("child-set-mismatch", restore_level,
+            zcl_dev_proof_receipt_seal(&tampered) &&
+            !zcl_dev_proof_receipt_validate(&tampered, local, base,
+                                            why, sizeof(why))))
         return 1;
-    if (zcl_dev_proof_receipt_validate(&receipt, local,
-          "3333333333333333333333333333333333333333", why, sizeof(why)))
+    if (!selftest_refused("stale-remote-base", restore_level,
+            !zcl_dev_proof_receipt_validate(&receipt, local,
+                "3333333333333333333333333333333333333333",
+                why, sizeof(why))))
         return 1;
     wire[100] ^= 1u;
     struct zcl_dev_acceptance_receipt_v1 parsed;
-    if (!zcl_dev_proof_receipt_parse(wire, sizeof(wire), &parsed) ||
-        zcl_dev_proof_receipt_validate(&parsed, local, base,
-                                       why, sizeof(why)))
+    if (!selftest_refused("edited-signed-record", restore_level,
+            zcl_dev_proof_receipt_parse(wire, sizeof(wire), &parsed) &&
+            !zcl_dev_proof_receipt_validate(&parsed, local, base,
+                                            why, sizeof(why)) &&
+            strcmp(why, ZCL_DEV_PROOF_SIGNER_WHY_SIGNATURE_INVALID) == 0))
         return 1;
+    /* A record from before receipts were signed: the same body, the version
+     * stamped back to 1, no trailer. It parses and is named, never admitted. */
+    if (!selftest_refused("unsigned-v1-record", restore_level,
+            zcl_dev_proof_receipt_serialize(&receipt, wire) &&
+            (wire[ZCL_DEV_PROOF_WIRE_VERSION_OFFSET] = 1u,
+             zcl_dev_proof_receipt_parse(
+                 wire, ZCL_DEV_PROOF_UNSIGNED_WIRE_BYTES, &parsed)) &&
+            !parsed.has_signature &&
+            !zcl_dev_proof_receipt_validate(&parsed, local, base,
+                                            why, sizeof(why)) &&
+            strcmp(why, ZCL_DEV_PROOF_SIGNER_WHY_UNSIGNED) == 0))
+        return 1;
+    zcl_log_level_set(restore_level);
     (void)printf("git-hook-selftest: PASS checks=1000 p95_us=%llu "
                  "tamper_refused=true incomplete_refused=true "
-                 "hollow_refused=true stale_refused=true child_processes=0\n",
+                 "hollow_refused=true stale_refused=true "
+                 "signature_refused=true unsigned_refused=true "
+                 "child_processes=0\n",
                  (unsigned long long)(samples[949] / 1000u));
     return samples[949] < 250000000u ? 0 : 1;
 }
