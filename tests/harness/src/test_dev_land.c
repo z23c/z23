@@ -22,6 +22,7 @@
 #include "config/command_catalog.h"
 #include "json/json.h"
 #include "kernel/command_registry.h"
+#include "platform/time_compat.h"
 #include "util/spawn.h"
 
 #include <stdio.h>
@@ -30,6 +31,7 @@
 #include <time.h>
 #if !defined(_WIN32)
 #include <errno.h>
+#include <fcntl.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
@@ -1548,11 +1550,20 @@ int test_dev_land(void)
         "dependencies from the submitting checkout") {
         struct dlx_rig rig;
         struct dlx_call c;
-        char wt[1200], check[1400];
-        struct stat st;
+        char wt[1200], check[1400], source[1400];
+        struct stat st, source_st;
         dlx_isolate("depsok");
         ASSERT(dlx_rig_make(&rig, "depsok_rig"));
         ASSERT(dlx_write_dep(rig.clone, "vendor/lib/libfoo.a", "fake\n"));
+        (void)snprintf(source, sizeof(source), "%s/vendor/lib/libfoo.a",
+                       rig.clone);
+        const struct timespec pinned[2] = {
+            { .tv_sec = 1700000000, .tv_nsec = 123456789 },
+            { .tv_sec = 1700000000, .tv_nsec = 123456789 },
+        };
+        ASSERT(chmod(source, 0640) == 0);
+        ASSERT(utimensat(AT_FDCWD, source, pinned, 0) == 0);
+        ASSERT(stat(source, &source_st) == 0 && S_ISREG(source_st.st_mode));
         ASSERT(dlx_write_dep(rig.clone, "vendor/include/foo.h", "fake\n"));
         ASSERT(dlx_write_dep(rig.clone, "vendor/tor/libtor.a", "fake\n"));
         ASSERT(dlx_write_dep(
@@ -1599,7 +1610,18 @@ int test_dev_land(void)
         dlx_landdir(wt, sizeof(wt));
         (void)snprintf(check, sizeof(check), "%s/wt/vendor/lib/libfoo.a",
                        wt);
-        ASSERT(stat(check, &st) == 0);
+        ASSERT(stat(check, &st) == 0 && S_ISREG(st.st_mode));
+        /* A landing generation must own its dependency inode. A hard link
+         * lets later donor metadata or byte changes mutate sealed evidence. */
+        ASSERT(st.st_dev != source_st.st_dev || st.st_ino != source_st.st_ino);
+        ASSERT((st.st_mode & 07777) == (source_st.st_mode & 07777));
+#if defined(__APPLE__)
+        ASSERT(st.st_mtimespec.tv_sec == source_st.st_mtimespec.tv_sec);
+        ASSERT(st.st_mtimespec.tv_nsec == source_st.st_mtimespec.tv_nsec);
+#else
+        ASSERT(st.st_mtim.tv_sec == source_st.st_mtim.tv_sec);
+        ASSERT(st.st_mtim.tv_nsec == source_st.st_mtim.tv_nsec);
+#endif
         (void)snprintf(check, sizeof(check), "%s/wt/vendor/include/foo.h",
                        wt);
         ASSERT(stat(check, &st) == 0);

@@ -76,6 +76,7 @@
 
 #include "base/safe_alloc.h"
 #include "json/json.h"
+#include "platform/file_clone.h"
 #include "platform/state_root.h"
 #include "platform/time_compat.h"
 #include "util/spawn.h"
@@ -2485,32 +2486,17 @@ static int dl_lint_fast(const struct dl_dirs *d, struct dl_row *row)
  * regardless of the proof. What is left is primed here, once per worktree
  * lifetime, so the proof always finds the rest already in place. */
 
-/* A local link-then-copy primitive, deliberately not the shared
- * zcl_dev_proof_dependency_materialize() (tools/dev/dev_proof.c): that
- * function is real dev.proof machinery, and this file's own `#include
- * "dev_proof.h"` above is itself gated on ZCL_DEV_BUILD, so calling it here
- * would fail to even declare in the plain node build, and — because
- * dev_proof.c is only ever compiled into the dev/test build, never the
- * plain node's object set — would fail to LINK in a release build even if
- * the declaration were forced visible. That is the layering violation
- * DEVELOPING.md warns about, one build-profile boundary wide rather than a
- * namespace one, so this is the smallest shared helper instead: the same
- * link-with-copy-fallback shape, without the symlink case neither vendor
- * archives nor hotswap fixture images ever need (fail closed on anything
- * that is not a plain file or a directory). Unlike its sibling, this one
- * compiles into every profile — including the plain test harness that
- * exercises `test_dev_land` — so the priming below is exercised for real
- * rather than only ever seen by production. */
+/* Landing dependencies own independent inodes: a new hardlink changes the
+ * donor's ctime and can invalidate another sealed proof generation. The
+ * platform clone seam is available in every build profile; unsupported
+ * cloning falls back to bytes copied into the same exclusive temporary file.
+ * Preserve mode and mtime before publication, as the old hardlink did. */
 static bool dl_materialize_file(const char *source, const char *target,
                                 const struct stat *source_st)
 {
     int input, output;
     char tmp[4096 + 96];
     bool ok;
-    if (link(source, target) == 0)
-        return true;
-    if (errno != EXDEV && errno != EPERM && errno != EMLINK)
-        return false;
     input = open(source, O_RDONLY | O_CLOEXEC);
     if (input < 0)
         return false;
@@ -2524,8 +2510,10 @@ static bool dl_materialize_file(const char *source, const char *target,
         (void)close(input);
         return false;
     }
-    ok = true;
-    while (ok) {
+    enum platform_file_clone_result cloned =
+        platform_file_clone_fd(input, output);
+    ok = cloned != PLATFORM_FILE_CLONE_REFUSED;
+    while (ok && cloned == PLATFORM_FILE_CLONE_UNAVAILABLE) {
         unsigned char buf[65536];
         ssize_t got = read(input, buf, sizeof(buf));
         ssize_t off = 0;
@@ -2541,7 +2529,7 @@ static bool dl_materialize_file(const char *source, const char *target,
             ssize_t wrote = write(output, buf + off, (size_t)(got - off));
             if (wrote < 0 && errno == EINTR)
                 continue;
-            if (wrote < 0)
+            if (wrote <= 0)
                 ok = false;
             else
                 off += wrote;
@@ -2549,6 +2537,18 @@ static bool dl_materialize_file(const char *source, const char *target,
     }
     if (ok)
         ok = fchmod(output, source_st->st_mode & 07777) == 0;
+#if !defined(_WIN32)
+    /* Landing steps refuse on Windows; POSIX hosts preserve nanoseconds. */
+    const struct timespec times[2] = {
+#if defined(__APPLE__)
+        source_st->st_atimespec, source_st->st_mtimespec,
+#else
+        source_st->st_atim, source_st->st_mtim,
+#endif
+    };
+    if (ok)
+        ok = futimens(output, times) == 0;
+#endif
     if (close(input) != 0)
         ok = false;
     if (close(output) != 0)
