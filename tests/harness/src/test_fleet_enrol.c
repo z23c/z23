@@ -104,6 +104,16 @@ static size_t fe_occurrences(const char *body, const char *needle)
     return n;
 }
 
+/* How many wire bytes a pasted record decodes to. 0 when it is not
+ * decodable at all, which every caller below asserts against first. */
+static size_t fe_wire_len(const char *text)
+{
+    uint8_t wire[FLEET_ENROL_MACHINE_WIRE_MAX];
+    size_t len = 0;
+    if (!acme_b64url_decode(text, wire, sizeof(wire), &len)) return 0;
+    return len;
+}
+
 /* Decode `text`, flip one bit at `offset`, and re-encode. This is exactly
  * what a hostile paste is: still valid base64url, one byte different. */
 static bool fe_tamper(const char *text, size_t offset, char *out, size_t cap)
@@ -195,7 +205,8 @@ static int test_fe_invite_tampered(void)
                                  token, sizeof(token), &invite, &why));
         /* Every byte of the signed body, one at a time. A signature that
          * covered only part of the record would let one of these through. */
-        for (body = 0; body < 40u; ++body) {
+        ASSERT(fe_wire_len(token) > 0u);
+        for (body = 0; body < fe_wire_len(token); ++body) {
             ASSERT(fe_tamper(token, body, forged, sizeof(forged)));
             why = NULL;
             ASSERT(!fleet_invite_parse(forged, &parsed, NULL, 0, NULL, &why));
@@ -296,9 +307,13 @@ static int test_fe_receipt(void)
         ASSERT_STR_EQ(parsed.facts.hostname, "build-box-7");
         ASSERT_EQ(parsed.facts.cores, 8u);
         ASSERT_STR_EQ(parsed.ssh_pubkey, "ssh-ed25519 AAAAkey owner@box");
-        /* Editing any signed byte — a fact, the embedded invite, or the
-         * ssh key the bridge would authorize — is refused. */
-        for (size_t at = 0; at < 400u; at += 37u) {
+        /* EVERY signed byte, one at a time — a fact, the embedded invite,
+         * the ssh key the bridge would authorize, the box key, and the
+         * signature itself. A signature covering only part of the record
+         * would let one of these through, and "some of the bytes" is
+         * exactly the bug a sampled loop would miss. */
+        ASSERT(fe_wire_len(receipt) > 0u);
+        for (size_t at = 0; at < fe_wire_len(receipt); ++at) {
             ASSERT(fe_tamper(receipt, at, forged, sizeof(forged)));
             why = NULL;
             ASSERT(!fleet_receipt_parse(forged, &parsed, NULL, 0, NULL, &why));
