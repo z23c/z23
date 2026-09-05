@@ -15,10 +15,11 @@
  *
  *   AIRSHIP_FACT(name, verification)
  *       The CLOSED set of facts a roster row may carry. `verification` is
- *       "PEER_VERIFIED" (another machine observed it and could have
- *       observed otherwise) or "SELF_REPORTED" (the node said so). There
- *       is no third value: a fact whose provenance nobody can name does
- *       not belong in a reward table.
+ *       PEER_VERIFIED (another machine observed it and could have observed
+ *       otherwise) or SELF_REPORTED (the node said so) — a bare token, so
+ *       a third value fails to compile rather than defaulting quietly.
+ *       There is no third value: a fact whose provenance nobody can name
+ *       does not belong in a reward table.
  *
  *   AIRSHIP_ASSET(name)
  *       The CLOSED set of in-game assets a rule may award. An asset with
@@ -27,11 +28,13 @@
  *
  *   AIRSHIP_RULE(fact, asset, per_node, confidence, why)
  *       `per_node` is how many of `asset` one node earns for holding
- *       `fact`, written as a decimal count. `confidence` is "OBSERVED"
- *       (the award follows from a peer-verified observation) or
- *       "DOCTRINE" (this table asserts the row; today that is only ever
- *       the zero rows). `why` is the row's justification for a reader —
- *       it is prose, and it is never a fact or an asset.
+ *       `fact` — a count in C and a count to the gate, never a string
+ *       either has to parse into one privately. `confidence` is OBSERVED
+ *       (the award follows from a peer-verified observation) or DOCTRINE
+ *       (this table asserts the row; today that is only ever the zero
+ *       rows). Both are bare tokens for the same reason `verification` is.
+ *       `why` is the row's justification for a reader — it is prose, and
+ *       it is never a fact or an asset.
  *
  * The seed table is deliberately small, because today the mesh
  * peer-verifies exactly one thing: whether a dial to a node connects.
@@ -63,26 +66,26 @@
 #endif
 
 /* ── facts, and how each one is known ──────────────────────────────────── */
-AIRSHIP_FACT("reachable", "PEER_VERIFIED")
-AIRSHIP_FACT("reachable_two_paths", "PEER_VERIFIED")
-AIRSHIP_FACT("cpus", "SELF_REPORTED")
-AIRSHIP_FACT("disk_free", "SELF_REPORTED")
-AIRSHIP_FACT("build_identity", "SELF_REPORTED")
+AIRSHIP_FACT("reachable", PEER_VERIFIED)
+AIRSHIP_FACT("reachable_two_paths", PEER_VERIFIED)
+AIRSHIP_FACT("cpus", SELF_REPORTED)
+AIRSHIP_FACT("disk_free", SELF_REPORTED)
+AIRSHIP_FACT("build_identity", SELF_REPORTED)
 
 /* ── assets ────────────────────────────────────────────────────────────── */
 AIRSHIP_ASSET("airship")
 AIRSHIP_ASSET("escort")
 
 /* ── rules ─────────────────────────────────────────────────────────────── */
-AIRSHIP_RULE("reachable", "airship", "1", "OBSERVED",
+AIRSHIP_RULE("reachable", "airship", 1, OBSERVED,
              "a dial from another machine either completed a Noise handshake or it did not, so a node nobody can reach cannot claim this one")
-AIRSHIP_RULE("reachable_two_paths", "escort", "1", "OBSERVED",
+AIRSHIP_RULE("reachable_two_paths", "escort", 1, OBSERVED,
              "answering on a direct address and on an onion address is two independent observations, each one the observer made rather than accepted")
-AIRSHIP_RULE("cpus", "airship", "0", "DOCTRINE",
+AIRSHIP_RULE("cpus", "airship", 0, DOCTRINE,
              "the core count crosses the wire as the node's own word; paying for it would pay whoever types the largest number, so it earns nothing")
-AIRSHIP_RULE("disk_free", "airship", "0", "DOCTRINE",
+AIRSHIP_RULE("disk_free", "airship", 0, DOCTRINE,
              "free bytes are self-reported the same way; a proof of storage that makes the claim expensive to fake would turn this into a paying row")
-AIRSHIP_RULE("build_identity", "airship", "0", "DOCTRINE",
+AIRSHIP_RULE("build_identity", "airship", 0, DOCTRINE,
              "the build hash in VERSION is format-checked, never matched against the binary that sent it, so it identifies a claim and not a machine")
 
 #ifdef ZCL_AIRSHIP_FACT_LOCAL_

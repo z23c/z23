@@ -16,7 +16,8 @@
 # names a PEER_VERIFIED fact and is OBSERVED; a rule on a SELF_REPORTED fact
 # pays zero and is DOCTRINE; every rule has a bounded why; no two rules repeat
 # a fact/asset pair; no declared name goes unread; and at least one rule pays,
-# so a table that stopped rewarding is noticed rather than read as clean.
+# so a table that stopped rewarding is noticed rather than read as clean. A
+# row that mixes up quoted and bare fields is MALFORMED, never half-read.
 #
 # Usage: tools/lint/check_fleet_airship_rules.sh [--selftest]
 # Env:   ZCL_AIRSHIP_ROOT, ZCL_AIRSHIP_DEF, ZCL_AIRSHIP_FLOOR (default 5)
@@ -35,25 +36,35 @@ WHY_MAX=191
 PER_NODE_MAX=8
 
 # One reader for all three families: TAG<TAB>field... so a malformed row is
-# reported rather than silently skipped.
+# reported rather than silently skipped. A row mixes quoted names with bare
+# tokens (the counts and the two vocabularies the compiler pastes), so the
+# quoted strings are lifted out FIRST and the commas they leave behind are
+# what positions the bare fields — never a regex guessing at position.
 parse_rows() {
     awk '
     /^AIRSHIP_(FACT|ASSET|RULE)\(/ {
         c = 1; buf = ""
         tag = substr($0, 9); sub(/\(.*/, "", tag)
-        want = (tag == "RULE") ? 5 : (tag == "FACT") ? 2 : 1
+        want = (tag == "RULE") ? 3 : 1
     }
     c { buf = buf $0 }
     c && /\)[[:space:]]*$/ {
         c = 0; n = 0; rest = buf
         while (match(rest, /"([^"\\]|\\.)*"/)) {
             p[++n] = substr(rest, RSTART + 1, RLENGTH - 2)
-            rest = substr(rest, RSTART + RLENGTH)
+            rest = substr(rest, 1, RSTART - 1) substr(rest, RSTART + RLENGTH)
         }
+        sub(/^[^(]*\(/, "", rest); sub(/\)[ \t]*$/, "", rest)
+        m = split(rest, f, ",")
+        for (i = 1; i <= m; i++) gsub(/[ \t]/, "", f[i])
         if (n != want) { printf "MALFORMED\t%s\n", tag; next }
-        line = tag
-        for (i = 1; i <= n; i++) line = line "\t" p[i]
-        print line
+        if (tag == "ASSET" && rest !~ /[^ \t]/) { printf "ASSET\t%s\n", p[1]; next }
+        if (tag == "FACT" && m == 2) { printf "FACT\t%s\t%s\n", p[1], f[2]; next }
+        if (tag == "RULE" && m == 5) {
+            printf "RULE\t%s\t%s\t%s\t%s\t%s\n", p[1], p[2], f[3], f[4], p[3]
+            next
+        }
+        printf "MALFORMED\t%s\n", tag
     }' "$1"
 }
 rows_of() { printf '%s\n' "$1" | awk -F'\t' -v t="$2" '$1 == t'; }
@@ -130,8 +141,8 @@ if [ "${1:-}" = "--selftest" ]; then
     tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
     fails=0
     SDEF="$tmp/rules.def"
-    head_rows='AIRSHIP_FACT("reachable", "PEER_VERIFIED")
-AIRSHIP_FACT("cpus", "SELF_REPORTED")
+    head_rows='AIRSHIP_FACT("reachable", PEER_VERIFIED)
+AIRSHIP_FACT("cpus", SELF_REPORTED)
 AIRSHIP_ASSET("airship")'
     expect() { # <label> <pass|fail> <rules>
         local got=pass
@@ -145,32 +156,47 @@ AIRSHIP_ASSET("airship")'
             fails=$((fails + 1))
         fi
     }
-    good='AIRSHIP_RULE("reachable", "airship", "1", "OBSERVED", "a dial connects or it does not")
-AIRSHIP_RULE("cpus", "airship", "0", "DOCTRINE", "the node says so itself")'
+    good='AIRSHIP_RULE("reachable", "airship", 1, OBSERVED, "a dial connects or it does not")
+AIRSHIP_RULE("cpus", "airship", 0, DOCTRINE, "the node says so itself")'
     expect "a paying peer-verified rule beside a zero self-reported one" pass "$good"
     expect "a self-reported fact that pays" fail \
-        'AIRSHIP_RULE("reachable", "airship", "1", "OBSERVED", "w")
-AIRSHIP_RULE("cpus", "airship", "2", "OBSERVED", "the node says so itself")'
+        'AIRSHIP_RULE("reachable", "airship", 1, OBSERVED, "w")
+AIRSHIP_RULE("cpus", "airship", 2, OBSERVED, "the node says so itself")'
     expect "an asset no row declares" fail \
-        'AIRSHIP_RULE("reachable", "zeppelin", "1", "OBSERVED", "w")
-AIRSHIP_RULE("cpus", "airship", "0", "DOCTRINE", "w")'
+        'AIRSHIP_RULE("reachable", "zeppelin", 1, OBSERVED, "w")
+AIRSHIP_RULE("cpus", "airship", 0, DOCTRINE, "w")'
     expect "a fact no row declares" fail \
-        'AIRSHIP_RULE("ram_total", "airship", "1", "OBSERVED", "w")
-AIRSHIP_RULE("cpus", "airship", "0", "DOCTRINE", "w")
-AIRSHIP_RULE("reachable", "airship", "1", "OBSERVED", "w")'
+        'AIRSHIP_RULE("ram_total", "airship", 1, OBSERVED, "w")
+AIRSHIP_RULE("cpus", "airship", 0, DOCTRINE, "w")
+AIRSHIP_RULE("reachable", "airship", 1, OBSERVED, "w")'
     expect "a zero rule claiming to be an observation" fail \
-        'AIRSHIP_RULE("reachable", "airship", "1", "OBSERVED", "w")
-AIRSHIP_RULE("cpus", "airship", "0", "OBSERVED", "w")'
+        'AIRSHIP_RULE("reachable", "airship", 1, OBSERVED, "w")
+AIRSHIP_RULE("cpus", "airship", 0, OBSERVED, "w")'
     expect "a duplicated rule" fail "$good
-AIRSHIP_RULE(\"reachable\", \"airship\", \"1\", \"OBSERVED\", \"w\")"
+AIRSHIP_RULE(\"reachable\", \"airship\", 1, OBSERVED, \"w\")"
+    expect "a per_node and a confidence written as strings" fail \
+        'AIRSHIP_RULE("reachable", "airship", "1", "OBSERVED", "w")
+AIRSHIP_RULE("cpus", "airship", 0, DOCTRINE, "w")'
     expect "an empty why" fail \
-        'AIRSHIP_RULE("reachable", "airship", "1", "OBSERVED", "")
-AIRSHIP_RULE("cpus", "airship", "0", "DOCTRINE", "w")'
+        'AIRSHIP_RULE("reachable", "airship", 1, OBSERVED, "")
+AIRSHIP_RULE("cpus", "airship", 0, DOCTRINE, "w")'
     expect "a declared fact no rule reads" fail \
-        'AIRSHIP_RULE("reachable", "airship", "1", "OBSERVED", "w")'
+        'AIRSHIP_RULE("reachable", "airship", 1, OBSERVED, "w")'
     expect "a table where nothing pays" fail \
-        'AIRSHIP_RULE("reachable", "airship", "0", "DOCTRINE", "w")
-AIRSHIP_RULE("cpus", "airship", "0", "DOCTRINE", "w")'
+        'AIRSHIP_RULE("reachable", "airship", 0, DOCTRINE, "w")
+AIRSHIP_RULE("cpus", "airship", 0, DOCTRINE, "w")'
+    # A verification the table never declares, which needs its own head rows.
+    printf '%s\n' 'AIRSHIP_FACT("reachable", TRUSTED)
+AIRSHIP_ASSET("airship")
+AIRSHIP_RULE("reachable", "airship", 1, OBSERVED, "w")' > "$SDEF"
+    if ZCL_AIRSHIP_ROOT="$tmp" ZCL_AIRSHIP_DEF="rules.def" ZCL_AIRSHIP_FLOOR=1 \
+        bash "$REPO_ROOT/tools/lint/check_fleet_airship_rules.sh" >/dev/null 2>&1; then
+        echo "$GATE: SELFTEST FAILED — a third verification value passed" >&2
+        fails=$((fails + 1))
+    else
+        echo "  selftest ok: a verification that is neither PEER_VERIFIED nor SELF_REPORTED"
+    fi
+
     rc=0
     ZCL_AIRSHIP_ROOT="$tmp" ZCL_AIRSHIP_DEF="missing.def" ZCL_AIRSHIP_FLOOR=1 \
         bash "$REPO_ROOT/tools/lint/check_fleet_airship_rules.sh" >/dev/null 2>&1 || rc=$?

@@ -647,6 +647,12 @@ REMOTE_COMMAND_CLASS("dev.agent.mail", REMOTE_CLASS_NEVER, "")
  *   actually wants from one box is ops.mesh.status, promoted above, which
  *   projects reachability and dials nothing.
  *
+ *   ops.mesh.roster is the same pairing roster read without the probe and
+ *   without the write, so none of the spend arguments apply to it — and it
+ *   is still NEVER, on the enumeration rule alone: it names every machine
+ *   this operator paired and how each was reached, which is the map before
+ *   the target.
+ *
  *   The trust surface this channel rides on. ops.mesh.identity reveals this
  *   node's identity; ops.mesh.pair.plan / .commit / .list / .revoke and
  *   ops.mesh.join change or enumerate who it trusts. Letting a remote caller
@@ -685,6 +691,7 @@ REMOTE_COMMAND_CLASS("ops.debug.rom_seed.disable", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("ops.debug.rom_seed.publish", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("ops.debug.rom_fetch.bundle", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("ops.mesh.machines", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("ops.mesh.roster", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("ops.mesh.identity", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("ops.mesh.pair.plan", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("ops.mesh.pair.commit", REMOTE_CLASS_NEVER, "")

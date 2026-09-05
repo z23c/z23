@@ -612,6 +612,40 @@ ZCL_COMMAND_READY_READ(
     ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
     ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
     ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_ops_mesh_machines)
+/* `machines` is the operator's diagnostic view of the same store, and it
+ * dials. `roster` is the fleet as a game sees it: no probe, no node, no
+ * write, and every fact split by who established it, so nothing a machine
+ * claimed about itself can be read as something a peer confirmed. It is
+ * aliased `fleet roster` because that is the name the game asks by. */
+ZCL_COMMAND_READY_READ(
+    "ops.mesh.roster", "ops.mesh", "fleet.roster",
+    "List this operator's machines with each fact labelled by who "
+    "established it",
+    "Every machine paired with this one, read from the durable pairing and "
+    "observation stores under a datadir opened read-only: the chain "
+    "identity fingerprint, a short Noise fingerprint, the pairing state, "
+    "and two separate fact classes that never share a field. verified "
+    "carries only facts a peer established, each with the time that "
+    "observation was made; self_reported carries the facts a machine states "
+    "about itself, which no consumer can mistake for the first class. A "
+    "fact this node has no observer for comes back observed:false with the "
+    "reason, never as a silent false. airships is what "
+    "engine/composition/fleet_airship_rules.def awards for the verified "
+    "facts, per machine and for the fleet, and the assets and facts come "
+    "from that table rather than from this leaf. Rows are capped and the "
+    "reply reports total and truncated. It refuses an operator with no "
+    "pairing at all, and refuses two rows carrying one chain identity "
+    "rather than count one machine as two. It never dials, never probes, "
+    "never writes, and never asks a running node anything.",
+    ZCL_COMMAND_RESULT_BUDGET,
+    "fleet,roster,machines,airships,verified,reachable,game,identity",
+    "zcl.fleet_roster_input.v1", "zcl.fleet_roster.v1", "datadir", "",
+    "z23 fleet roster",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_fleet_roster)
 ZCL_COMMAND_BRANCH("ops.mesh.pair", "ops.mesh", "Pairing",
                    ZCL_COMMAND_LAYER_OPS)
 ZCL_COMMAND_READY_READ(

@@ -250,6 +250,13 @@ void zcl_native_handle_ops_mesh_status(
 void zcl_native_handle_ops_mesh_machines(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
+/* ops.mesh.roster, aliased `fleet roster` — this operator's own machines,
+ * with every fact labelled by who established it and the in-game assets
+ * engine/composition/fleet_airship_rules.def awards for the verified ones.
+ * It reads <datadir>/node.db read-only and asks no running node anything. */
+void zcl_native_handle_fleet_roster(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
 void zcl_native_handle_ops_mesh_pair_plan(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
