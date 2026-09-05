@@ -74,11 +74,11 @@ z23 discover schema <path> --side=input|output
 
 | Catalog fact | Count |
 |---|---|
-| Registry entries (branches + leaves) | 835 |
+| Registry entries (branches + leaves) | 836 |
 | Top-level roots | 14 |
 | Branches | 188 |
-| Leaves (dispatchable command paths) | 647 |
-| … `ready` (live handler in this build) | 577 |
+| Leaves (dispatchable command paths) | 648 |
+| … `ready` (live handler in this build) | 578 |
 | … `compat` (metadata only, names a fallback) | 39 |
 | … `planned` (fail-closed BLOCKED, exit 3) | 31 |
 | … dev-gated 🔧 (`ready` only in `z23-dev`) | 38 |
@@ -96,7 +96,7 @@ Per source file:
 | `engine/composition/commands/app_features.def` | 75 | 20 | 55 |
 | `engine/composition/commands/store.def` | 18 | 0 | 18 |
 | `engine/composition/commands/ops.def` | 57 | 10 | 47 |
-| `engine/composition/commands/dev.def` | 95 | 19 | 76 |
+| `engine/composition/commands/dev.def` | 96 | 19 | 77 |
 | `engine/composition/commands/code.def` | 33 | 4 | 29 |
 | `engine/composition/commands/accounts.def` | 11 | 2 | 9 |
 | `engine/composition/commands/vault.def` | 24 | 4 | 20 |
@@ -776,12 +776,13 @@ represented by its children's sections.
 |---|---|---|---|---|---|---|
 | `dev test background status` | planned | read / read / operator · instant/low | none | `zcl.dev_background_quality.v1` | `z23 dev test background status` | Read lint, sanitizer, replay, and reproducibility freshness — *native background-quality projection is not implemented* |
 
-#### `dev.fleet` — Fleet truth, and the orchestrator's opening packet
+#### `dev.fleet` — Fleet truth, the opening packet, and what is known
 
 | Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
 |---|---|---|---|---|---|---|
 | `dev fleet truth` | ready | read / read / operator · fast/low | none | `zcl.dev_fleet.v1` | `z23 dev fleet truth` | Show the Git and lint-receipt truth for every origin lane |
 | `dev fleet start` | ready | read / read / operator · foreground/low | `since`, `budget_bytes`, `board_dir`, `include_units`, `cwd` | `zcl.fleet_start.v1` | `z23 dev fleet start` | One opening answer for an orchestrator: the whole fleet in one bounded packet |
+| `dev fleet know` (aliases: `dev.know`) | ready | read / read / operator · instant/tiny | **`subject`**, `relation`, `context`, `budget_bytes` | `zcl.dev_know.v1` | `z23 dev know --subject=sonnet` | Ask what the fleet knows about a subject before acting on it |
 
 #### `dev.fleet.tunnel` — Loopback TCP tunnels between paired machines
 
@@ -1791,6 +1792,7 @@ Every alias resolves through the same grammar as its canonical path
 | `dev.loop.watch` | `dev.loop.ensure` |
 | `dev.loop.heartbeat` | `dev.loop.status` |
 | `dev.test.focused` | `dev.test.run` |
+| `dev.know` | `dev.fleet.know` |
 | `dev.agent.shippable` | `dev.agent.ready` |
 | `dev.agent.group` | `dev.agent.test` |
 | `dev.agent.mutation` | `dev.agent.mutate` |
