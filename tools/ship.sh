@@ -774,10 +774,12 @@ else
     # so agreeing is expected and DISAGREEING means the binary under the
     # candidate path is not the one telemetry was read from.
     zcl_tor_require_full "$CANDIDATE" "the ship candidate" || exit 1
+    zcl_tor_write_stamp_sidecar "$CANDIDATE" ||
+        die "could not write the tor stamp sidecar next to the ship candidate"
     say "tor        candidate reports exact real_tor"
 
     RELEASE_MANIFEST="$(mktemp "${TMPDIR:-/tmp}/zclassic23.ship.manifest.XXXXXX")"
-    trap 'rm -f "$CANDIDATE" "$RELEASE_MANIFEST" "${WORKER_FILES[@]}"' EXIT HUP INT TERM
+    trap 'rm -f "$CANDIDATE" "$CANDIDATE.tor-stamp" "$RELEASE_MANIFEST" "${WORKER_FILES[@]}"' EXIT HUP INT TERM
     {
         printf '%s  z23\n' "$ARTIFACT_SHA"
         printf '%s  %s\n' "${WORKER_SHAS[0]}" "${WORKER_NAMES[0]}"
@@ -792,12 +794,13 @@ else
     # same names covered by the release manifest.
     STAGE_BUNDLE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/zclassic23.ship.bundle.XXXXXX")"
     install -m 755 "$CANDIDATE" "$STAGE_BUNDLE_DIR/z23"
+    install -m 644 "$CANDIDATE.tor-stamp" "$STAGE_BUNDLE_DIR/z23.tor-stamp"
     for i in "${!WORKER_NAMES[@]}"; do
         install -m 755 "${WORKER_FILES[$i]}" \
             "$STAGE_BUNDLE_DIR/${WORKER_NAMES[$i]}"
     done
     install -m 644 "$RELEASE_MANIFEST" "$STAGE_BUNDLE_DIR/MANIFEST.sha256"
-    trap 'rm -f "$CANDIDATE" "$RELEASE_MANIFEST" "${WORKER_FILES[@]}"; [ -z "${STAGE_BUNDLE_DIR:-}" ] || find "$STAGE_BUNDLE_DIR" -depth -delete' EXIT HUP INT TERM
+    trap 'rm -f "$CANDIDATE" "$CANDIDATE.tor-stamp" "$RELEASE_MANIFEST" "${WORKER_FILES[@]}"; [ -z "${STAGE_BUNDLE_DIR:-}" ] || find "$STAGE_BUNDLE_DIR" -depth -delete' EXIT HUP INT TERM
 
     CAND_MAX_GLIBC="$(objdump -T "$CANDIDATE" 2>/dev/null |
         grep -oE 'GLIBC_[0-9]+(\.[0-9]+)+' | sort -V | tail -1 || true)"

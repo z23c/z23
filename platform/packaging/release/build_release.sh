@@ -55,6 +55,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 FLOOR_GATE="$REPO_ROOT/tools/scripts/ci_symbol_floor_gate.sh"
 NODE_AUDIT="$REPO_ROOT/tools/scripts/check_c23_node_binary.sh"
+# shellcheck source=tools/scripts/tor_stamp_lib.sh
+. "$REPO_ROOT/tools/scripts/tor_stamp_lib.sh"
 
 die() { printf 'build_release: REFUSE: %s\n' "$*" >&2; exit 1; }
 say() { printf 'build_release: %s\n' "$*" >&2; }
@@ -459,6 +461,10 @@ package_from_bin() {
     esac
     (cd "$out_dir" && sha256_check SHA256SUMS >/dev/null) \
         || die "SHA256SUMS does not match packaged files"
+
+    # Extra evidence, not a SHA256SUMS member: an installer that cannot
+    # execute this payload still fail-closes on the exact `-version` line.
+    zcl_tor_write_stamp_sidecar "$out_dir/z23$exe" || true
 
     say "packed $out_dir for $platform ($(printf '%s, ' $members)AGENT_CARD.md, SHA256SUMS)"
 }

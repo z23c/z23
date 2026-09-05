@@ -17,6 +17,9 @@
 # Sourced, never executed. install_z23.sh deliberately does NOT source this
 # (it must run standalone on a box with no checkout) and carries its own copy
 # of the sentence; check-tor-full-default is what keeps the copies identical.
+# Producers also write <binary>.tor-stamp (the exact `-version` stamp line)
+# so an installer that cannot execute a foreign-arch payload can still refuse
+# anything other than `tor: full`.
 
 # THE sentence. Do not reword it in place — a reworded refusal is a refusal
 # nobody's runbook, gate, or grep will find.
@@ -49,4 +52,19 @@ zcl_tor_require_full() {
             return 1
             ;;
     esac
+}
+
+# Write <node>.tor-stamp containing the exact `-version` stamp line
+# (`tor: full` or `tor: stub`). Callers that already required `full` still
+# write the sidecar: the installer reads it when it cannot execute the payload.
+zcl_tor_write_stamp_sidecar() {
+    local node="$1" stamp sidecar
+    stamp="$(zcl_tor_stamp "$node" 2>/dev/null || true)"
+    case "$stamp" in
+        full|stub) ;;
+        *) return 1 ;;
+    esac
+    sidecar="${node}.tor-stamp"
+    printf 'tor: %s\n' "$stamp" >"$sidecar" || return 1
+    return 0
 }

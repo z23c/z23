@@ -106,6 +106,10 @@ PATH="$PORTABLE_CC_DIR:$PATH" make -C "$REPO_ROOT" CC=cc VENDOR_CC=cc \
 # The artifact must say so itself. Reading the stamp out of the binary is the
 # only proof that the link consumed real Tor; archives on disk are not.
 zcl_tor_require_full "$REPO_ROOT/build/bin/zclassic23" "the portable release node" || exit 1
+zcl_tor_write_stamp_sidecar "$REPO_ROOT/build/bin/zclassic23" || {
+    echo "c23-portable-release: could not write the tor stamp sidecar next to the portable release node" >&2
+    exit 1
+}
 for product in "${products[@]}"; do
     ZCL_C23_MAX_GLIBC=GLIBC_2.31 \
         "$SCRIPT_DIR/check_c23_node_binary.sh" \

@@ -504,7 +504,9 @@ installer:
 tools/scripts/install_z23.sh --source=build/release/z23-darwin-arm64
 ```
 
-That path verifies the closed manifest, installs immutable generations under
+That path verifies the closed manifest, refuses a node that does not stamp
+`tor: full` (and, when the payload cannot run on this host, a missing
+`z23.tor-stamp` sidecar), installs immutable generations under
 `~/.local/lib/z23/generations/<sha256>` — each directory named by the exact
 sha256 SHA256SUMS records for `z23`, the same digest `sha256sum -c --strict`
 already verified the installed bytes against, never a hash of the manifest

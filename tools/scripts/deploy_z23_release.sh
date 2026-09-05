@@ -276,6 +276,10 @@ selftest_make_release() {
 #include <unistd.h>
 int main(int argc, char **argv) {
     if (argc == 2 && strcmp(argv[1], "status") == 0) return 0;
+    if (argc == 2 && strcmp(argv[1], "-version") == 0) {
+        (void)write(STDOUT_FILENO, "tor: full\n", 10);
+        return 0;
+    }
     for (;;) pause();
 }
 EOF

@@ -426,6 +426,13 @@ fetch_into() {
                 [ -f "$src/$name" ] || die "listed file missing: $src/$name"
                 cp -f -- "$src/$name" "$dest/$name"
             done <"$dest/SHA256SUMS"
+            # Sidecar is extra evidence, not a SHA256SUMS member. Copy it when
+            # the source carries one so a foreign-arch payload can still be
+            # refused or accepted without executing it.
+            if [ -f "$src/z23.tor-stamp" ]; then
+                cp -f -- "$src/z23.tor-stamp" "$dest/z23.tor-stamp" \
+                    || die "could not copy z23.tor-stamp from $src"
+            fi
             ;;
     esac
 }
@@ -438,36 +445,139 @@ TOR_STUB_REFUSAL='refusing to package a tor=stub binary: it cannot reach the oni
 # `z23 -version` prints exactly one of `tor: full` / `tor: stub`, derived from
 # a weak symbol that resolves only when the real Tor archives were linked. A
 # node that cannot reach the onion network is not a Z23 node, so a release
-# that admits to being one is refused before anything is placed.
+# that does not prove `tor: full` is refused before anything is placed.
 #
-# Scope, stated honestly: this reads the stamp only when the payload is
-# executable here. A release fetched over HTTP arrives without the execute
-# bit (this installer does not set one), and a cross-platform payload could
-# not run at all -- neither is evidence about Tor, and inventing a refusal
-# from "I could not look" would fail installs for an unrelated reason. The
-# producing side is where this is fail-closed: tools/ship.sh and
-# tools/scripts/build_c23_portable_release.sh refuse a stub they built.
+# Fail closed. An executable payload must print the exact stamp line; a
+# timeout, a missing line, a non-zero exit, or `tor: stub` are all refusals.
+# A payload this host cannot execute (cross-platform / Exec format error)
+# must carry <binary>.tor-stamp with that same line. "I could not look" is
+# not "it is fine".
+#
+# Running an arbitrary executable needs two bounds or it is a hang, not a
+# check: a deadline, and a stdin it cannot consume. The deadline is 10 s
+# unless Z23_INSTALL_TOR_STAMP_TIMEOUT is a positive integer (the selftest
+# sets 1 so a sleeping fixture is a timeout, not a stall).
 verify_release_not_tor_stub() {
-    local dir="$1" node="$1/z23" stamp timeout_cmd=""
-    [ -x "$node" ] || return 0
-    # Running a payload is the only way to read its stamp, and running an
-    # arbitrary executable needs two bounds or it is a hang, not a check: a
-    # deadline, and a stdin it cannot consume. The deploy selftest stages a
-    # 16 kB fixture at this path that blocks forever on stdin; without both
-    # bounds this refusal hung the whole install there.
+    local dir="$1" node="$1/z23" sidecar="$1/z23.tor-stamp"
+    local stamp="" rc=0 budget out err timeout_cmd="" line
+    [ -f "$node" ] || die "tor_stamp_unreadable: $TOR_STUB_REFUSAL (the release at $dir has no z23)"
+
+    refuse_tor_stamp() {
+        local reason="$1" detail="$2"
+        die "$reason: $TOR_STUB_REFUSAL ($detail)"
+    }
+
+    stamp_from_text() {
+        stamp=""
+        while IFS= read -r line || [ -n "$line" ]; do
+            line="${line%$'\r'}"
+            case "$line" in
+                'tor: full') stamp=full; return 0 ;;
+                'tor: stub') stamp=stub; return 0 ;;
+            esac
+        done
+        return 0
+    }
+
+    read_sidecar_stamp() {
+        [ -f "$sidecar" ] || refuse_tor_stamp tor_stamp_sidecar_missing \
+            "the release at $dir is not executable here and carries no z23.tor-stamp sidecar"
+        stamp=""
+        stamp_from_text <"$sidecar"
+        case "$stamp" in
+            full) return 0 ;;
+            stub)
+                refuse_tor_stamp tor_stamp_stub \
+                    "the release at $dir sidecar reports tor: stub"
+                ;;
+            *)
+                refuse_tor_stamp tor_stamp_unreadable \
+                    "the release at $dir sidecar is not an exact tor: full/stub line"
+                ;;
+        esac
+    }
+
+    chmod u+x "$node" 2>/dev/null || true
+
+    budget="${Z23_INSTALL_TOR_STAMP_TIMEOUT:-10}"
+    case "$budget" in
+        ''|*[!0-9]*|0) budget=10 ;;
+    esac
+
+    out="$(mktemp "$dir/.tor-stamp-out.XXXXXX")" \
+        || die "tor_stamp_unreadable: $TOR_STUB_REFUSAL (could not stage a stamp capture at $dir)"
+    err="$(mktemp "$dir/.tor-stamp-err.XXXXXX")" \
+        || die "tor_stamp_unreadable: $TOR_STUB_REFUSAL (could not stage a stamp capture at $dir)"
+
     if command -v timeout >/dev/null 2>&1; then
         timeout_cmd=timeout
     elif command -v gtimeout >/dev/null 2>&1; then
         # coreutils on macOS installs GNU timeout under this name.
         timeout_cmd=gtimeout
+    fi
+
+    rc=0
+    if [ -n "$timeout_cmd" ]; then
+        "$timeout_cmd" "$budget" "$node" -version </dev/null >"$out" 2>"$err" \
+            || rc=$?
     else
+        "$node" -version </dev/null >"$out" 2>"$err" &
+        local pid=$!
+        local waited=0
+        while [ "$waited" -lt "$budget" ]; do
+            if ! kill -0 "$pid" 2>/dev/null; then
+                wait "$pid" || rc=$?
+                break
+            fi
+            sleep 1
+            waited=$((waited + 1))
+        done
+        if kill -0 "$pid" 2>/dev/null; then
+            kill "$pid" 2>/dev/null || true
+            wait "$pid" 2>/dev/null || true
+            rc=124
+        fi
+    fi
+
+    if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
+        rm -f -- "$out" "$err"
+        refuse_tor_stamp tor_stamp_timeout \
+            "the release at $dir did not print a tor stamp before the ${budget}s deadline"
+    fi
+
+    if [ "$rc" -eq 126 ] || [ "$rc" -eq 127 ] ||
+       grep -qiE 'Exec format error|cannot execute binary file' "$err"; then
+        rm -f -- "$out" "$err"
+        read_sidecar_stamp
         return 0
     fi
-    stamp="$("$timeout_cmd" 10 "$node" -version </dev/null 2>/dev/null |
-        sed -n 's/^tor: \(full\|stub\)$/\1/p' | head -1)" || stamp=""
-    [ "$stamp" = stub ] \
-        && die "$TOR_STUB_REFUSAL (the release at $dir reports tor: stub)"
-    return 0
+
+    stamp_from_text <"$out"
+    case "$stamp" in
+        stub)
+            rm -f -- "$out" "$err"
+            refuse_tor_stamp tor_stamp_stub \
+                "the release at $dir reports tor: stub"
+            ;;
+        full)
+            if [ "$rc" -ne 0 ]; then
+                rm -f -- "$out" "$err"
+                refuse_tor_stamp tor_stamp_unreadable \
+                    "the release at $dir printed tor: full but -version exited $rc"
+            fi
+            rm -f -- "$out" "$err"
+            return 0
+            ;;
+        *)
+            rm -f -- "$out" "$err"
+            if [ "$rc" -ne 0 ]; then
+                refuse_tor_stamp tor_stamp_unreadable \
+                    "the release at $dir -version exited $rc with no tor stamp"
+            fi
+            refuse_tor_stamp tor_stamp_missing \
+                "the release at $dir printed no tor: stamp, so nothing proves it links real Tor"
+            ;;
+    esac
 }
 
 verify_strict() {
@@ -887,6 +997,7 @@ run_install() {
 
 SELFTEST_TMP=""
 SELFTEST_MANIFEST_SHA=""
+SELFTEST_TOR_CASES=""
 
 selftest_prepare() {
     local tmp
@@ -902,7 +1013,11 @@ selftest_prepare() {
     export Z23_INSTALL_TEST_PLATFORM=Linux
 
     # A release is five names, and z23/zclassic23 are the same bytes.
-    printf 'payload-a\n' >"$tmp/good/z23"
+    # The node is a tiny executable that stamps tor: full so the fail-closed
+    # installer check has a positive control that is not the real binary.
+    printf '#!/bin/sh\nprintf "z23 v0.1.0 (source 000000000000)\\ntor: full\\n"\n' \
+        >"$tmp/good/z23"
+    chmod 755 "$tmp/good/z23"
     ln -f -- "$tmp/good/z23" "$tmp/good/zclassic23"
     printf 'confined-verifier\n' >"$tmp/good/zclassic23-package-verify"
     printf 'cert-worker\n' >"$tmp/good/zclassic23-acme"
@@ -936,7 +1051,9 @@ selftest_prepare() {
     printf '# Z23 agent card\n\nTAMPERED: attacker instructions.\n' \
         >"$tmp/tampered-card/AGENT_CARD.md"
 
-    printf 'replacement-node\n' >"$tmp/http/replaced/z23"
+    printf '#!/bin/sh\nprintf "z23 v0.1.0 (source 000000000000)\\ntor: full\\n"\n' \
+        >"$tmp/http/replaced/z23"
+    chmod 755 "$tmp/http/replaced/z23"
     ln -f -- "$tmp/http/replaced/z23" "$tmp/http/replaced/zclassic23"
     printf 'replacement-verifier\n' \
         >"$tmp/http/replaced/zclassic23-package-verify"
@@ -1048,46 +1165,121 @@ selftest_local_refusals() {
         die "selftest: mismatch installed z23 anyway"
     fi
 
+    # Stamp-check fixtures share the four non-node members from the good
+    # release and only replace the node bytes + SHA256SUMS.
+    selftest_write_node_release() {
+        local dest="$1"
+        mkdir -p "$dest"
+        cat >"$dest/z23"
+        chmod 755 "$dest/z23"
+        ln -f -- "$dest/z23" "$dest/zclassic23"
+        cp -f -- "$tmp/good/zclassic23-package-verify" \
+            "$tmp/good/zclassic23-acme" "$tmp/good/AGENT_CARD.md" \
+            "$dest/"
+        (cd "$dest" && sha256sum $RELEASE_MEMBERS >SHA256SUMS)
+    }
+
+    selftest_expect_stamp_refuse() {
+        local src="$1" dest="$2" err="$3" reason="$4" label="$5"
+        rc=0
+        run_install "$dest" "$tmp/units" "$src" >/dev/null 2>"$err" || rc=$?
+        [ "$rc" -eq 1 ] || die "selftest: $label must exit 1"
+        grep -qF "$reason" "$err" \
+            || die "selftest: $label must name $reason"
+        grep -qF "$TOR_STUB_REFUSAL" "$err" \
+            || die "selftest: $label must carry the shared refusal sentence"
+        if [ -e "$dest/bin/z23" ]; then
+            die "selftest: $label was installed anyway"
+        fi
+        SELFTEST_TOR_CASES="${SELFTEST_TOR_CASES:+$SELFTEST_TOR_CASES }$reason"
+    }
+
     # A release whose node admits it links the Tor stub is refused, with its
     # checksums perfectly intact. This is the whole point: a stub release is
     # not a corrupt release, it is an authentic one that cannot do the job.
-    mkdir -p "$tmp/stub-release"
-    printf '#!/bin/sh\nprintf "z23 v0.1.0 (source 000000000000)\\ntor: stub\\n"\n' \
-        >"$tmp/stub-release/z23"
-    chmod 755 "$tmp/stub-release/z23"
-    ln -f -- "$tmp/stub-release/z23" "$tmp/stub-release/zclassic23"
-    cp -f -- "$tmp/good/zclassic23-package-verify" \
-        "$tmp/good/zclassic23-acme" "$tmp/good/AGENT_CARD.md" \
-        "$tmp/stub-release/"
-    (cd "$tmp/stub-release" && sha256sum $RELEASE_MEMBERS >SHA256SUMS)
-    rc=0
-    run_install "$tmp/stub-dest" "$tmp/units" "$tmp/stub-release" \
-        >/dev/null 2>"$tmp/stub.err" || rc=$?
-    [ "$rc" -eq 1 ] || die "selftest: a tor=stub release must exit 1"
-    grep -qF "$TOR_STUB_REFUSAL" "$tmp/stub.err" \
-        || die "selftest: a tor=stub release must be refused by the exact shared sentence"
-    if [ -e "$tmp/stub-dest/bin/z23" ]; then
-        die "selftest: a tor=stub release was installed anyway"
-    fi
+    selftest_write_node_release "$tmp/stub-release" <<'EOF'
+#!/bin/sh
+printf "z23 v0.1.0 (source 000000000000)\ntor: stub\n"
+EOF
+    selftest_expect_stamp_refuse \
+        "$tmp/stub-release" "$tmp/stub-dest" "$tmp/stub.err" \
+        tor_stamp_stub "a tor=stub release"
 
-    # Positive control: the same shape, stamped full, must NOT be refused for
-    # this reason. Without it the check above would pass even if the refusal
-    # fired on every release.
-    mkdir -p "$tmp/full-release"
-    printf '#!/bin/sh\nprintf "z23 v0.1.0 (source 000000000000)\\ntor: full\\n"\n' \
-        >"$tmp/full-release/z23"
-    chmod 755 "$tmp/full-release/z23"
-    ln -f -- "$tmp/full-release/z23" "$tmp/full-release/zclassic23"
+    # Missing stamp line, clean exit: not stub, still not proof of real Tor.
+    selftest_write_node_release "$tmp/missing-stamp" <<'EOF'
+#!/bin/sh
+printf "z23 v0.1.0 (source 000000000000)\n"
+EOF
+    selftest_expect_stamp_refuse \
+        "$tmp/missing-stamp" "$tmp/missing-dest" "$tmp/missing-stamp.err" \
+        tor_stamp_missing "a release with no tor stamp"
+
+    # Sleeps longer than the selftest budget (Z23_INSTALL_TOR_STAMP_TIMEOUT=1).
+    selftest_write_node_release "$tmp/timeout-stamp" <<'EOF'
+#!/bin/sh
+sleep 5
+printf "tor: full\n"
+EOF
+    selftest_expect_stamp_refuse \
+        "$tmp/timeout-stamp" "$tmp/timeout-dest" "$tmp/timeout-stamp.err" \
+        tor_stamp_timeout "a release whose -version exceeds the stamp deadline"
+
+    # Runnable, but -version fails and prints no stamp.
+    selftest_write_node_release "$tmp/unreadable-stamp" <<'EOF'
+#!/bin/sh
+exit 2
+EOF
+    selftest_expect_stamp_refuse \
+        "$tmp/unreadable-stamp" "$tmp/unreadable-dest" \
+        "$tmp/unreadable-stamp.err" \
+        tor_stamp_unreadable "a release whose -version is unreadable"
+
+    # Foreign payload: not executable on this host, and no sidecar.
+    mkdir -p "$tmp/sidecar-missing"
+    printf '\177ELF\002\001\001\000not-runnable-on-this-host\n' \
+        >"$tmp/sidecar-missing/z23"
+    chmod 755 "$tmp/sidecar-missing/z23"
+    ln -f -- "$tmp/sidecar-missing/z23" "$tmp/sidecar-missing/zclassic23"
     cp -f -- "$tmp/good/zclassic23-package-verify" \
         "$tmp/good/zclassic23-acme" "$tmp/good/AGENT_CARD.md" \
-        "$tmp/full-release/"
-    (cd "$tmp/full-release" && sha256sum $RELEASE_MEMBERS >SHA256SUMS)
+        "$tmp/sidecar-missing/"
+    (cd "$tmp/sidecar-missing" && sha256sum $RELEASE_MEMBERS >SHA256SUMS)
+    selftest_expect_stamp_refuse \
+        "$tmp/sidecar-missing" "$tmp/sidecar-missing-dest" \
+        "$tmp/sidecar-missing.err" \
+        tor_stamp_sidecar_missing \
+        "a non-executable release with no tor-stamp sidecar"
+
+    # Same foreign payload, sidecar says full: that is enough to install.
+    mkdir -p "$tmp/sidecar-full"
+    printf '\177ELF\002\001\001\000not-runnable-on-this-host\n' \
+        >"$tmp/sidecar-full/z23"
+    chmod 755 "$tmp/sidecar-full/z23"
+    ln -f -- "$tmp/sidecar-full/z23" "$tmp/sidecar-full/zclassic23"
+    cp -f -- "$tmp/good/zclassic23-package-verify" \
+        "$tmp/good/zclassic23-acme" "$tmp/good/AGENT_CARD.md" \
+        "$tmp/sidecar-full/"
+    printf 'tor: full\n' >"$tmp/sidecar-full/z23.tor-stamp"
+    (cd "$tmp/sidecar-full" && sha256sum $RELEASE_MEMBERS >SHA256SUMS)
+    rc=0
+    run_install "$tmp/sidecar-full-dest" "$tmp/units" "$tmp/sidecar-full" \
+        >/dev/null 2>"$tmp/sidecar-full.err" || rc=$?
+    [ "$rc" -eq 0 ] || die "selftest: a non-executable release with a full sidecar must install"
+    SELFTEST_TOR_CASES="${SELFTEST_TOR_CASES:+$SELFTEST_TOR_CASES }tor_stamp_sidecar_full"
+
+    # Positive control: the same shape, stamped full, must install.
+    selftest_write_node_release "$tmp/full-release" <<'EOF'
+#!/bin/sh
+printf "z23 v0.1.0 (source 000000000000)\ntor: full\n"
+EOF
     rc=0
     run_install "$tmp/full-dest" "$tmp/units" "$tmp/full-release" \
         >/dev/null 2>"$tmp/full.err" || rc=$?
+    [ "$rc" -eq 0 ] || die "selftest: a tor=full release must install"
     if grep -qF "$TOR_STUB_REFUSAL" "$tmp/full.err"; then
         die "selftest: a tor=full release was refused as a stub"
     fi
+    SELFTEST_TOR_CASES="${SELFTEST_TOR_CASES:+$SELFTEST_TOR_CASES }tor_stamp_full"
 }
 
 selftest_remote_authority() {
@@ -1610,11 +1802,13 @@ selftest_macos_transaction() {
 
     cat >"$mac/v1/z23" <<'EOF'
 #!/usr/bin/env bash
+printf 'tor: full\n'
 [ "${Z23_INSTALL_TEST_READY_FAIL:-0}" != 1 ]
 EOF
     cat >"$mac/v2/z23" <<'EOF'
 #!/usr/bin/env bash
 # Distinct candidate bytes: readiness stays the same, identity does not.
+printf 'tor: full\n'
 [ "${Z23_INSTALL_TEST_READY_FAIL:-0}" != 1 ]
 EOF
     chmod 755 "$mac/v1/z23" "$mac/v2/z23"
@@ -1845,6 +2039,10 @@ selftest_macos_tampered_manifest() {
 }
 
 selftest() {
+    # Only the selftest tightens the stamp deadline so a sleeping fixture is
+    # a timeout refusal rather than a 10 s stall.
+    export Z23_INSTALL_TOR_STAMP_TIMEOUT=1
+    SELFTEST_TOR_CASES=""
     selftest_prepare
     selftest_prepare_curl_mock
     selftest_local_refusals
@@ -1860,7 +2058,7 @@ selftest() {
     selftest_macos_tampered_manifest
     selftest_front_door
 
-    say "selftest PASS"
+    say "selftest PASS $SELFTEST_TOR_CASES"
     trap - EXIT
     chmod -R u+w "$SELFTEST_TMP" 2>/dev/null || true
     rm -rf "$SELFTEST_TMP"
