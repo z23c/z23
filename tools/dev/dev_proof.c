@@ -1882,22 +1882,74 @@ static void warm_seed_rollback(const char *gen_build,
     }
 }
 
+/* The toolchain/flags/build-graph identity a generation's objects were
+ * compiled under. Sealed alongside the build-complete marker so a later
+ * proof cannot adopt those objects across a compiler upgrade, a changed
+ * CC/CFLAGS, or a vendor archive rebuilt in place -- none of which leave a
+ * source diff the wrapper-inputs check would catch. Deliberately the same
+ * three domains the receipt itself hashes (see receipt.compiler_root,
+ * .flags_root, .build_graph_root in dev_proof_receipt.h): a donor whose
+ * identity does not match this proof's own is exactly as inadmissible as a
+ * receipt would be. */
+struct proof_build_identity {
+    uint8_t compiler[32];
+    uint8_t flags[32];
+    uint8_t build_graph[32];
+};
+
+/* Hashes the same build-action file the receipt hashes, with the same
+ * three domain tags, so a warm-start comparison and the receipt's own
+ * fields can never disagree about what "the build identity" means. */
+static bool proof_build_identity_capture(const char *root,
+                                         struct proof_build_identity *out)
+{
+    char action_path[PATH_MAX];
+    if (!root || !out ||
+        snprintf(action_path, sizeof(action_path),
+                 "%s/build/dev-loop/restart.env", root) >=
+            (int)sizeof(action_path))
+        return false;
+    return hash_file("zcl.dev_proof_compiler.v1", action_path,
+                     out->compiler) &&
+           hash_file("zcl.dev_proof_flags.v1", action_path, out->flags) &&
+           hash_file("zcl.dev_proof_build_graph.v1", action_path,
+                     out->build_graph);
+}
+
+static bool proof_build_identity_equal(const struct proof_build_identity *a,
+                                       const struct proof_build_identity *b)
+{
+    return a && b && memcmp(a->compiler, b->compiler, 32) == 0 &&
+           memcmp(a->flags, b->flags, 32) == 0 &&
+           memcmp(a->build_graph, b->build_graph, 32) == 0;
+}
+
 /* The build-complete marker is the donor gate: it says a full `make
- * build-only` finished in this generation for the marked commit. Written
- * best effort after the compile dimension; a missing marker only costs a
- * cold build. */
+ * build-only` finished in this generation for the marked commit under the
+ * sealed `identity`. Written best effort after the compile dimension; a
+ * missing marker only costs a cold build. */
 static bool warm_marker_write_at(const char *generation, const char *root,
                                    const char *local, const char *base,
-                                   int64_t completed)
+                                   int64_t completed,
+                                   const struct proof_build_identity *identity)
 {
-    char path[PATH_MAX], body[PATH_MAX + 256];
+    char path[PATH_MAX], body[PATH_MAX + 512];
+    char compiler_hex[65], flags_hex[65], build_graph_hex[65];
+    if (identity) {
+        zcl_hex_encode(identity->compiler, 32, compiler_hex);
+        zcl_hex_encode(identity->flags, 32, flags_hex);
+        zcl_hex_encode(identity->build_graph, 32, build_graph_hex);
+    }
     int path_len = generation ? snprintf(path, sizeof(path), "%s/%s",
                                          generation, PROOF_WARM_MARKER_REL)
                               : -1;
-    int body_len = path_len > 0 && root && local && base && completed > 0
+    int body_len = path_len > 0 && root && local && base && completed > 0 &&
+            identity
         ? snprintf(body, sizeof(body), "%s\nroot=%s\nlocal=%s\nbase=%s\n"
-                   "completed=%lld\n", PROOF_WARM_MARKER_SCHEMA, root,
-                   local, base, (long long)completed)
+                   "completed=%lld\ncompiler=%s\nflags=%s\nbuild_graph=%s\n",
+                   PROOF_WARM_MARKER_SCHEMA, root, local, base,
+                   (long long)completed, compiler_hex, flags_hex,
+                   build_graph_hex)
         : -1;
     return path_len > 0 && path_len < (int)sizeof(path) && body_len > 0 &&
            body_len < (int)sizeof(body) &&
@@ -1907,8 +1959,11 @@ static bool warm_marker_write_at(const char *generation, const char *root,
 static bool warm_marker_write(const char *generation, const char *root,
                               const char *local, const char *base)
 {
+    struct proof_build_identity identity;
+    if (!proof_build_identity_capture(root, &identity))
+        return false;
     return warm_marker_write_at(generation, root, local, base,
-                                platform_time_wall_unix());
+                                platform_time_wall_unix(), &identity);
 }
 
 static bool warm_marker_line(const char *line, const char *key,
@@ -1925,7 +1980,8 @@ static bool warm_marker_line(const char *line, const char *key,
 
 static bool warm_marker_read(const char *generation, char root[PATH_MAX],
                              char local[65], char base[65],
-                             int64_t *completed_out)
+                             int64_t *completed_out,
+                             struct proof_build_identity *identity_out)
 {
     char path[PATH_MAX], body[2048];
     if (!generation ||
@@ -1943,21 +1999,34 @@ static bool warm_marker_read(const char *generation, char root[PATH_MAX],
     if (!line || strcmp(line, PROOF_WARM_MARKER_SCHEMA) != 0) return false;
     char completed_text[32] = {0};
     char got_root[PATH_MAX] = {0}, got_local[65] = {0}, got_base[65] = {0};
+    char compiler_hex[65] = {0}, flags_hex[65] = {0}, build_graph_hex[65] = {0};
     int fields = 0;
     while ((line = strtok_r(NULL, "\n", &save))) {
         if (warm_marker_line(line, "root", got_root, sizeof(got_root)) ||
             warm_marker_line(line, "local", got_local, sizeof(got_local)) ||
             warm_marker_line(line, "base", got_base, sizeof(got_base)) ||
             warm_marker_line(line, "completed", completed_text,
-                             sizeof(completed_text)))
+                             sizeof(completed_text)) ||
+            warm_marker_line(line, "compiler", compiler_hex,
+                             sizeof(compiler_hex)) ||
+            warm_marker_line(line, "flags", flags_hex, sizeof(flags_hex)) ||
+            warm_marker_line(line, "build_graph", build_graph_hex,
+                             sizeof(build_graph_hex)))
             fields++;
         else
             return false;
     }
     /* proof_oid_text rejects anything that is not a lowercase hex object
-     * id; the root check below bars escapes. Any shortfall refuses. */
-    if (fields != 4 || !proof_oid_text(got_local) ||
-        !proof_oid_text(got_base))
+     * id; the root check below bars escapes. Any shortfall refuses -- a
+     * marker from before the identity fields existed is exactly the
+     * shortfall this rejects, so an old marker degrades to cold rather
+     * than being adopted unverified. */
+    struct proof_build_identity identity;
+    if (fields != 7 || !proof_oid_text(got_local) ||
+        !proof_oid_text(got_base) ||
+        !zcl_hex_decode_lower(compiler_hex, identity.compiler, 32) ||
+        !zcl_hex_decode_lower(flags_hex, identity.flags, 32) ||
+        !zcl_hex_decode_lower(build_graph_hex, identity.build_graph, 32))
         return false;
     if (got_root[0] != '/' || strstr(got_root, "..") ||
         strchr(got_root, '\\'))
@@ -1970,6 +2039,7 @@ static bool warm_marker_read(const char *generation, char root[PATH_MAX],
     if (local) (void)snprintf(local, 65, "%s", got_local);
     if (base) (void)snprintf(base, 65, "%s", got_base);
     if (completed_out) *completed_out = (int64_t)completed;
+    if (identity_out) *identity_out = identity;
     return true;
 }
 
@@ -2255,6 +2325,12 @@ struct warm_donor {
 static bool warm_donor_scan(const char *parent, const char *root,
                             const char *in_use, struct warm_donor *donor)
 {
+    /* No verifiable identity for THIS proof means no safe comparison for
+     * any candidate: fail closed to cold rather than adopt objects this
+     * scan cannot prove match. */
+    struct proof_build_identity current;
+    if (!proof_build_identity_capture(root, &current))
+        return false;
     DIR *dir = opendir(parent);
     if (!dir || !parent || !root || !in_use || !donor) {
         if (dir) (void)closedir(dir);
@@ -2272,9 +2348,11 @@ static bool warm_donor_scan(const char *parent, const char *root,
             continue;
         char marker_root[PATH_MAX], marker_local[65], marker_base[65];
         int64_t completed = 0;
+        struct proof_build_identity candidate_identity;
         if (!warm_marker_read(candidate_path, marker_root, marker_local,
-                              marker_base, &completed) ||
-            strcmp(marker_root, root) != 0)
+                              marker_base, &completed, &candidate_identity) ||
+            strcmp(marker_root, root) != 0 ||
+            !proof_build_identity_equal(&current, &candidate_identity))
             continue;
         char head[65];
         const char *head_argv[] = {"git", "-C", candidate_path, "rev-parse",
@@ -2324,12 +2402,16 @@ static bool warm_donor_scan(const char *parent, const char *root,
     if (found) {
         /* Re-read the marker now the survey is done. A sibling lane can
          * finish a build in this generation while the scan runs; if the
-         * marker moved, the surveyed choice is stale and cold is safe. */
+         * marker or the identity it was sealed under moved, the surveyed
+         * choice is stale and cold is safe. */
         char marker_root[PATH_MAX], marker_local[65], marker_base[65];
         int64_t completed = 0;
+        struct proof_build_identity recheck_identity;
         if (!warm_marker_read(candidates[best].path, marker_root,
-                              marker_local, marker_base, &completed) ||
+                              marker_local, marker_base, &completed,
+                              &recheck_identity) ||
             strcmp(marker_local, candidates[best].local) != 0 ||
+            !proof_build_identity_equal(&current, &recheck_identity) ||
             snprintf(donor->path, sizeof(donor->path), "%s",
                      candidates[best].path) >= (int)sizeof(donor->path) ||
             snprintf(donor->local, sizeof(donor->local), "%s",
@@ -2479,7 +2561,7 @@ static void generation_pool_reap(const struct proof_paths *paths,
          * decides whose donor survives. */
         bool complete = warm_marker_read(candidate, marker_root,
                                          marker_local, marker_base,
-                                         &completed);
+                                         &completed, NULL);
         bool live;
         if (complete) {
             /* The lease lives under the marked root, which may be a
@@ -2633,16 +2715,35 @@ int zcl_dev_proof_warm_pick(const struct zcl_dev_proof_warm_candidate *c,
 
 bool zcl_dev_proof_warm_marker_write(const char *generation,
                                      const char *root, const char *local,
-                                     const char *base, int64_t completed)
+                                     const char *base, int64_t completed,
+                                     const uint8_t compiler[32],
+                                     const uint8_t flags[32],
+                                     const uint8_t build_graph[32])
 {
-    return warm_marker_write_at(generation, root, local, base, completed);
+    struct proof_build_identity identity;
+    if (!compiler || !flags || !build_graph)
+        return false;
+    memcpy(identity.compiler, compiler, 32);
+    memcpy(identity.flags, flags, 32);
+    memcpy(identity.build_graph, build_graph, 32);
+    return warm_marker_write_at(generation, root, local, base, completed,
+                                &identity);
 }
 
 bool zcl_dev_proof_warm_marker_read(const char *generation,
                                     char root[PATH_MAX], char local[65],
-                                    char base[65], int64_t *completed)
+                                    char base[65], int64_t *completed,
+                                    uint8_t compiler[32], uint8_t flags[32],
+                                    uint8_t build_graph[32])
 {
-    return warm_marker_read(generation, root, local, base, completed);
+    struct proof_build_identity identity;
+    if (!warm_marker_read(generation, root, local, base, completed,
+                          &identity))
+        return false;
+    if (compiler) memcpy(compiler, identity.compiler, 32);
+    if (flags) memcpy(flags, identity.flags, 32);
+    if (build_graph) memcpy(build_graph, identity.build_graph, 32);
+    return true;
 }
 
 bool zcl_dev_proof_warm_seed_and_retime(const char *donor_build,

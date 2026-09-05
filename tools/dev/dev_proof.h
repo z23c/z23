@@ -172,12 +172,23 @@ enum zcl_dev_proof_warm_seed_class zcl_dev_proof_warm_classify(
     const char *rel, bool is_reg);
 int zcl_dev_proof_warm_pick(const struct zcl_dev_proof_warm_candidate *c,
                             size_t n);
+/* `compiler`/`flags`/`build_graph` seal the same three domains the
+ * receipt hashes into compiler_root/flags_root/build_graph_root
+ * (dev_proof_receipt.h) -- what the donor was built under. A marker
+ * without a matching triple on read is refused, so the harness proves the
+ * invalidation directly rather than only through the private
+ * warm_marker_read() it gates. */
 bool zcl_dev_proof_warm_marker_write(const char *generation,
                                      const char *root, const char *local,
-                                     const char *base, int64_t completed);
+                                     const char *base, int64_t completed,
+                                     const uint8_t compiler[32],
+                                     const uint8_t flags[32],
+                                     const uint8_t build_graph[32]);
 bool zcl_dev_proof_warm_marker_read(const char *generation,
                                     char root[PATH_MAX], char local[65],
-                                    char base[65], int64_t *completed);
+                                    char base[65], int64_t *completed,
+                                    uint8_t compiler[32], uint8_t flags[32],
+                                    uint8_t build_graph[32]);
 /* Seed donor_build into gen_build (object and depfile outputs linked,
  * wrapper copied, everything else skipped) and repair the timestamp graph
  * so exactly `changed` (relative to gen_src) reads newer than the seeds.
