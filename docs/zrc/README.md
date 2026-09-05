@@ -111,3 +111,7 @@ means.
   process step is a passage with entry and exit predicates; evidence carries a
   grade from measured to rumour; a story next leaf deduces the next passage and
   cites what it used; the graph and the wiki replicate across the fleet.
+- [`0009-private-fleet-on-a-public-network.md`](0009-private-fleet-on-a-public-network.md) —
+  private fleet rooms, chat, presence, and membership ride mesh streams between
+  paired members only; the public board, block relay, and DHT never carry a
+  private row, room name, or post id that would reveal a private room exists.
