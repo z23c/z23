@@ -1799,7 +1799,25 @@ static int test_ic_merkle_verifier_selects_proof_lane(void)
     return failures;
 }
 
+/* ── Proof step budgets ───────────────────────────────────────────────────
+ *
+ * The wall these replace was one constant for every step. Under load the test
+ * dimension took 19 minutes against a 15-minute cap, the proof reported
+ * `child_proof_failed_exit_124`, and the run it had just killed finished green
+ * four minutes later. Every host hit it. These pin the replacement: a budget
+ * sized from the plan, a kill decided by whether the step is still writing,
+ * and a ceiling the environment may raise but never lower. */
 
+#define IC_FIX_BUDGET IC_FIX_ROOT "/budget"
+
+static void ic_budget_fixture(const char *sub, char out[4096])
+{
+    snprintf(out, 4096, "%s/%s", IC_FIX_BUDGET, sub);
+    (void)ic_write(out, ".keep", "");
+    char table[4096];
+    snprintf(table, sizeof(table), "%s/timing/table.tsv", out);
+    (void)remove(table);
+}
 
 static int test_ic_proof_budget_grows_with_groups(void)
 {
