@@ -597,7 +597,20 @@ static void *boot_sd_watchdog_pet_main(void *arg)
             s_last_pet = pet;
         }
         if (pet) {
+            int64_t send_start_us = platform_time_monotonic_us();
             sd_notify_watchdog_ping();
+            int64_t send_us = platform_time_monotonic_us() - send_start_us;
+            /* The pet thread has one blocking call: sd_send() inside
+             * sd_notify_watchdog_ping(). A slow-but-not-yet-full systemd
+             * receiver can make it take real time even after it stops
+             * hanging outright (sd_notify.c's non-blocking socket now
+             * bounds the worst case, but a receiver right at the edge is
+             * still worth naming before the next stall repeats it). */
+            if (send_us > period_us / 2) {
+                LOG_WARN("boot",
+                         "[sd_watchdog] notify send took %lld ms",
+                         (long long)(send_us / 1000));
+            }
         }
         int64_t left_us = period_us;
         while (left_us > 0 && !atomic_load(&g_pet_stop) &&

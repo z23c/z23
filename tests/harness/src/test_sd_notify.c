@@ -870,6 +870,62 @@ static int test_sd_notify_platform_arm(void)
                   dipped < high && back == high);
     }
 
+    /* ── a full, never-drained receiver must not park the caller ──
+     * Reproduces the live fleet incident: systemd's watchdog killed the
+     * node 30 times in 3 days while every application signal stayed
+     * healthy, because the one blocking call in the pet loop — sd_send()
+     * — parked on a full receiver with no timeout. This binds a receiver
+     * exactly like systemd's own notify socket and never reads from it,
+     * so the kernel's receive buffer fills and stays full. sd_notify
+     * must return false promptly instead of hanging. */
+    {
+        char path[108];
+        int rfd = sdn_bind_path_socket(path, sizeof(path));
+        SDN_CHECK("flood: receiver socket bound", rfd >= 0);
+
+        if (rfd >= 0) {
+            /* Shrink the receive buffer so a handful of sends fill it
+             * without needing thousands of iterations. */
+            int rcvbuf = 1024;
+            setsockopt(rfd, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
+
+            setenv("NOTIFY_SOCKET", path, 1);
+            sd_notify_reset_for_testing();
+            SDN_CHECK("flood: init succeeds", sd_notify_init());
+
+            char payload[400];
+            memset(payload, 'x', sizeof(payload) - 1);
+            payload[sizeof(payload) - 1] = '\0';
+
+            int64_t start_us = platform_time_monotonic_us();
+            int64_t deadline_us = start_us + 2000000; /* 2 s bound */
+            bool saw_drop = false;
+            /* The receiver is never drained, so a few hundred sends are
+             * more than enough to fill a 1 KiB buffer; the outer 2 s
+             * deadline is the actual assertion, this cap is just a
+             * belt-and-suspenders escape from an unbounded loop. */
+            for (int i = 0; i < 100000 && !saw_drop; i++) {
+                if (!sd_notify_status(payload))
+                    saw_drop = true;
+                if (platform_time_monotonic_us() > deadline_us)
+                    break;
+            }
+            int64_t elapsed_us = platform_time_monotonic_us() - start_us;
+
+            SDN_CHECK("flood: a full receiver is reported as a dropped "
+                      "send, not silence",
+                      saw_drop);
+            SDN_CHECK("flood: sd_notify never parks on a full receiver "
+                      "(bounded by 2s)",
+                      elapsed_us < 2000000);
+
+            unlink(path);
+            close(rfd);
+            unsetenv("NOTIFY_SOCKET");
+            sd_notify_reset_for_testing();
+        }
+    }
+
     return failures;
 }
 

@@ -98,6 +98,9 @@ static bool sd_send(const char *msg)
 #if defined(SOCK_CLOEXEC)
                     | SOCK_CLOEXEC
 #endif
+#if defined(SOCK_NONBLOCK)
+                    | SOCK_NONBLOCK
+#endif
                     , 0);
     if (fd < 0) {
         LOG_WARN("sd_notify", "socket failed: %s", strerror(errno));
@@ -105,6 +108,18 @@ static bool sd_send(const char *msg)
     }
 #if !defined(SOCK_CLOEXEC)
     if (fcntl(fd, F_SETFD, FD_CLOEXEC) != 0) {
+        (void)close(fd);
+        return false;
+    }
+#endif
+#if !defined(SOCK_NONBLOCK)
+    /* Never block the caller on a slow or full systemd receiver: a
+     * blocking sendto() below has, on a live fleet node, parked the
+     * watchdog pet thread until systemd's own WatchdogSec killed the
+     * process — silently, with no trace beyond status=134 in the
+     * journal. Non-blocking + treating EAGAIN as a dropped ping (below)
+     * keeps this call bounded no matter how backed up the receiver is. */
+    if (fcntl(fd, F_SETFL, O_NONBLOCK) != 0) {
         (void)close(fd);
         return false;
     }
@@ -130,6 +145,21 @@ static bool sd_send(const char *msg)
                         (struct sockaddr *)&sa, sa_len);
     close(fd);
     if (rc < 0) {
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            /* Name which message kind was dropped (e.g. "WATCHDOG",
+             * "READY", "STATUS") rather than dumping the whole line —
+             * that is what a journal reader needs to diagnose the next
+             * stall without a rebuild. */
+            char kind[32];
+            size_t klen = strcspn(msg, "=\n");
+            if (klen >= sizeof(kind))
+                klen = sizeof(kind) - 1;
+            memcpy(kind, msg, klen);
+            kind[klen] = '\0';
+            LOG_WARN("sd_notify",
+                     "sendto would block, dropping %s notification", kind);
+            return false;
+        }
         LOG_WARN("sd_notify", "sendto failed: %s", strerror(errno));
         return false;
     }
