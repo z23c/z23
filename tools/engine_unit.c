@@ -1503,6 +1503,8 @@ static bool byte_is_space(char c)
 static char *build_task_with_file_contents(const char *text, size_t text_len,
                                            const char *workdir)
 {
+    if (!text || text_len > SIZE_MAX - TASK_FILE_CONTEXT_MAX_TOTAL_BYTES - 4096u)
+        LOG_NULL("engine_unit", "task is too large for bounded file context");
     const size_t cap = text_len + TASK_FILE_CONTEXT_MAX_TOTAL_BYTES + 4096u;
     char *out = zcl_malloc(cap, "engine_unit_task_context");
     if (!out)

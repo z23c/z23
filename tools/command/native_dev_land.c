@@ -3449,10 +3449,20 @@ scan_failed:
  * proof stub alone: no hermetic test rig here carries one. Any failure
  * refuses with the failing dependency's own typed reason; none of them
  * silently continues past a missing one. */
+#endif /* !_WIN32: dependency priming belongs to the POSIX landing step. */
+
 static bool dl_wt_proof_deps_ensure(const struct dl_dirs *d,
                                     const struct dl_row *r, bool stubbed,
                                     char *why, size_t why_cap)
 {
+#if defined(_WIN32)
+    (void)d;
+    (void)r;
+    (void)stubbed;
+    (void)snprintf(why, why_cap, "%s",
+                   "STEP_WINDOWS_UNAVAILABLE: POSIX landing dependencies");
+    return false;
+#else
     if (!stubbed || dl_deps_test_force()) {
         if (!dl_wt_vendor_ensure(d, r, why, why_cap))
             return false;
@@ -3472,6 +3482,7 @@ static bool dl_wt_proof_deps_ensure(const struct dl_dirs *d,
     if (!stubbed && !dl_wt_restart_env_ensure(d, why, why_cap))
         return false;
     return true;
+#endif
 }
 
 /* Take the oldest queued request and drive it to the point where the proof

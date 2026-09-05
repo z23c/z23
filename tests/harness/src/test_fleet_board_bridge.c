@@ -1,12 +1,14 @@
 /* Copyright 2026 Rhett Creighton. Licensed under Apache-2.0. */
 #define _POSIX_C_SOURCE 200809L
 #include "test/test_core.h"
+#include <stdio.h>
+
+#if !defined(_WIN32)
 #include "json/json.h"
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -282,8 +284,16 @@ static int test_fleet_board_bridge_post_file_bound(void)
     } _test_next:;
     return failures;
 }
+#endif /* !_WIN32: the bridge requires POSIX child and filesystem semantics. */
+
 int test_fleet_board_bridge(void)
 {
+#if defined(_WIN32)
+    printf("fleet_board_bridge: UNAVAILABLE on native Windows "
+           "(POSIX subprocess and filesystem fixture)\n");
+    return 1;
+#else
     return test_fleet_board_bridge_basics()+test_fleet_board_bridge_merge()+
            test_fleet_board_bridge_merge_bounds()+test_fleet_board_bridge_post_file_bound();
+#endif
 }

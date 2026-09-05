@@ -3411,8 +3411,12 @@ endif
 # ENGINE_UNIT_BIN is declared later; prerequisites expand while parsing.
 $(TEST_PARALLEL_REL_CANDIDATE): | $(BIN_DIR)/zclassic23-engine-unit
 $(TEST_PARALLEL_FAST_CANDIDATE): | $(BIN_DIR)/zclassic23-engine-unit
+ifneq ($(ZCL_HOST_WINDOWS),1)
+# The bridge fixture uses POSIX process/filesystem contracts. Its registered
+# Windows group refuses explicitly; unrelated focused groups do not need it.
 $(TEST_PARALLEL_REL_CANDIDATE): | $(BIN_DIR)/fleet-board-bridge
 $(TEST_PARALLEL_FAST_CANDIDATE): | $(BIN_DIR)/fleet-board-bridge
+endif
 
 # Expanding the complete object list inside a recipe makes the recipe itself
 # one oversized `/bin/sh -c` argument on Linux.  GNU Make writes the exact,
