@@ -243,8 +243,16 @@ static void tunnel_allow_load_locked(void)
     char path[1024];
     char *text = NULL;
     size_t len = 0;
-    if (!tunnel_allow_path(path, sizeof(path)) ||
-        !zcl_read_whole_file_text(path, MESH_TUNNEL_ALLOW_FILE_MAX, &text,
+    if (!tunnel_allow_path(path, sizeof(path)))
+        return;
+    /* No file is not a failure. It is the honest answer that this node
+     * allows nothing, and it is the answer on every node until an operator
+     * writes a row — so it is not logged as an error either. */
+    FILE *probe = fopen(path, "rb");
+    if (!probe)
+        return;
+    (void)fclose(probe);
+    if (!zcl_read_whole_file_text(path, MESH_TUNNEL_ALLOW_FILE_MAX, &text,
                                   &len, TUN_TAG))
         return;
     char *cursor = text;
@@ -414,6 +422,22 @@ static void tunnel_drain_socket(struct mesh_stream *st,
     }
 }
 
+/* A service-level refusal, with its token written into the reply the CLOSE
+ * carries, so the far side reads the name of the thing that was protected
+ * rather than a bare verdict. */
+static enum mesh_stream_refusal tunnel_refuse(enum mesh_tunnel_refusal why,
+                                              uint8_t *reply, size_t reply_cap,
+                                              size_t *reply_len)
+{
+    const char *token = mesh_tunnel_refusal_string(why);
+    size_t len = strlen(token);
+    *reply_len = len <= reply_cap ? len : 0;
+    if (*reply_len)
+        memcpy(reply, token, len);
+    atomic_fetch_add(&g_tun_opens_refused, 1);
+    return MESH_STREAM_CLOSED_BY_SERVICE;
+}
+
 /* The acceptor's answer to an inbound OPEN. Two gates, both fail-closed:
  * the peer must hold a live pairing row this node can name it by, and an
  * allow row must admit that exact name and that exact port. Only then is
@@ -423,8 +447,6 @@ static enum mesh_stream_refusal tunnel_service_open(
     uint8_t *reply, size_t reply_cap, size_t *reply_len, void *ctx)
 {
     (void)ctx;
-    (void)reply;
-    (void)reply_cap;
     *reply_len = 0;
     uint16_t port = 0;
     if (!tunnel_open_decode(payload, payload_len, &port)) {
@@ -441,12 +463,12 @@ static enum mesh_stream_refusal tunnel_service_open(
     bool allowed = tunnel_allowed_locked(peer, port);
     tunnel_unlock();
     if (!allowed) {
-        atomic_fetch_add(&g_tun_opens_refused, 1);
         LOG_WARN(TUN_TAG, "%s: no allow row admits port %u for this peer",
                  mesh_tunnel_refusal_string(
                      MESH_TUNNEL_REFUSED_TARGET_NOT_ALLOWED),
                  (unsigned)port);
-        return MESH_STREAM_CLOSED_BY_SERVICE;
+        return tunnel_refuse(MESH_TUNNEL_REFUSED_TARGET_NOT_ALLOWED, reply,
+                             reply_cap, reply_len);
     }
     struct mesh_tunnel_session *s =
         zcl_calloc(1, sizeof(*s), "mesh_tunnel_session");
@@ -466,7 +488,8 @@ static enum mesh_stream_refusal tunnel_service_open(
             atomic_fetch_add(&g_tun_dials_failed, 1);
             tunnel_socket_drop(&s->sock);
             free(s);
-            return MESH_STREAM_CLOSED_BY_SERVICE;
+            return tunnel_refuse(MESH_TUNNEL_REFUSED_DIAL_FAILED, reply,
+                                 reply_cap, reply_len);
         }
         s->connecting = true;
     }

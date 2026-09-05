@@ -46,10 +46,11 @@
  * that a wedged copy fails the assertion instead of the group. */
 #define TUNNEL_TEST_SETTLE_ROUNDS 40
 #define TUNNEL_TEST_IO_WAIT_MS 2000
-/* More than the credit window plus any kernel buffer in the path, so a
- * sender that ignored credit would be caught pushing all of it. */
+/* Far more than the beats that follow it may carry, so a sender that
+ * ignored its credit would be caught pushing the rest. */
 #define TUNNEL_TEST_FLOOD_BYTES (size_t)(256u * 1024u)
-#define TUNNEL_TEST_SLOW_RCVBUF 4096
+#define TUNNEL_TEST_CLIENT_SNDBUF (1024 * 1024)
+#define TUNNEL_TEST_CREDIT_ROUNDS 3
 
 /* ── The loopback wire (the stream fixture's, one service further on) ─── */
 
@@ -495,13 +496,10 @@ int test_mesh_tunnel(void)
         PASS();
     }
 
-    TEST("mesh tunnel: a reader that stops reading stops the sender, and "
-         "starts it again when it catches up") {
+    TEST("mesh tunnel: the sender never reads more from its socket than the "
+         "credit it holds, and moves again once the reader catches up") {
         tunnel_drop(&target);
-        /* A deliberately small receive buffer on the stand-in server, so
-         * the path cannot swallow the flood in kernel memory and the only
-         * thing that can stop the sender is its own credit. */
-        target = tunnel_listen_local(&target_port, TUNNEL_TEST_SLOW_RCVBUF);
+        target = tunnel_listen_local(&target_port, 0);
         ASSERT(target != PLATFORM_SOCKET_INVALID);
         ASSERT_EQ(mesh_tunnel_allow(f.term_peer.pairing.pairing_id,
                                     target_port, "slow reader"),
@@ -514,13 +512,16 @@ int test_mesh_tunnel(void)
                   MESH_TUNNEL_OK);
         client = tunnel_dial_local(local_port);
         ASSERT(client != PLATFORM_SOCKET_INVALID);
+        (void)platform_socket_set_send_buffer(client,
+                                              TUNNEL_TEST_CLIENT_SNDBUF);
         tunnel_beat(&wire, 2);
         served = tunnel_accept_local(target);
         ASSERT(served != PLATFORM_SOCKET_INVALID);
         tunnel_beat(&wire, 2);
 
-        /* Push as much as the local socket will take, and read nothing at
-         * the far end. */
+        /* Everything the local socket will take, in one go and with no
+         * beat in between, so what the tunnel then moves is decided by
+         * credit alone and not by how the writer paced itself. */
         uint8_t *flood = zcl_calloc(1, TUNNEL_TEST_FLOOD_BYTES, "tunnel_flood");
         ASSERT(flood != NULL);
         memset(flood, 'z', TUNNEL_TEST_FLOOD_BYTES);
@@ -531,32 +532,38 @@ int test_mesh_tunnel(void)
             if (n <= 0)
                 break;
             wrote += (size_t)n;
-            tunnel_beat(&wire, 1);
         }
-        tunnel_beat(&wire, TUNNEL_TEST_SETTLE_ROUNDS);
         free(flood);
-        ASSERT(wrote > (size_t)MESH_TUNNEL_CHUNK);
+        ASSERT(wrote > (size_t)TUNNEL_TEST_CREDIT_ROUNDS * MESH_TUNNEL_CHUNK);
 
+        /* One beat is one credit window: the sender may spend the credit
+         * it holds and not a byte more, and only the WINDOW that comes
+         * back in that beat lets it spend again. So after a fixed number
+         * of beats the bytes moved are bounded by that many windows —
+         * which is the whole back-pressure claim, in a form no kernel
+         * buffer size can flatter. */
+        tunnel_beat(&wire, TUNNEL_TEST_CREDIT_ROUNDS);
         struct mesh_tunnel_row rows[MESH_TUNNEL_LISTENERS_MAX];
         size_t total = 0;
         ASSERT_EQ(mesh_tunnel_list(rows, MESH_TUNNEL_LISTENERS_MAX, &total),
                   (size_t)1);
-        uint64_t stalled = rows[0].bytes_to_peer;
-        /* It moved, and it stopped: the sender is held by the credit it
-         * has left, not by hope that the reader will keep up. */
-        ASSERT(stalled > 0);
-        ASSERT(stalled < (uint64_t)wrote);
+        uint64_t paced = rows[0].bytes_to_peer;
+        ASSERT(paced > 0);
+        ASSERT(paced <= (uint64_t)TUNNEL_TEST_CREDIT_ROUNDS *
+                            MESH_TUNNEL_CHUNK);
+        ASSERT(paced < (uint64_t)wrote);
 
-        /* The reader catches up, and the sender moves again. */
+        /* The reader catches up, and every byte written arrives — the
+         * window paces the copy, it never drops any of it. */
         size_t drained = 0;
-        for (int i = 0; i < TUNNEL_TEST_SETTLE_ROUNDS; i++) {
+        for (int i = 0; i < TUNNEL_TEST_SETTLE_ROUNDS && drained < wrote; i++) {
+            tunnel_beat(&wire, TUNNEL_TEST_SETTLE_ROUNDS);
             drained += tunnel_drain(served);
-            tunnel_beat(&wire, 4);
         }
-        ASSERT(drained > 0);
+        ASSERT_EQ(drained, wrote);
         ASSERT_EQ(mesh_tunnel_list(rows, MESH_TUNNEL_LISTENERS_MAX, &total),
                   (size_t)1);
-        ASSERT(rows[0].bytes_to_peer > stalled);
+        ASSERT_EQ(rows[0].bytes_to_peer, (uint64_t)wrote);
 
         tunnel_drop(&client);
         tunnel_drop(&served);
