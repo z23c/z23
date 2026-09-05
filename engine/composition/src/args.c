@@ -355,14 +355,18 @@ static void args_report_tor_refusal(const struct app_context *ctx,
     }
 
     if (strcmp(code, APP_TOR_REFUSE_STUB_ESCAPE_ON_SERVING_LANE) == 0) {
+        /* The dev-lane move leads because it is right on EITHER build
+         * identity; `make tor-full` only helps the reader who is holding a
+         * stub, and a first next step that no-ops for everyone else teaches
+         * them to stop reading these. */
         const struct boot_error_next next[] = {
-            { "make tor-full",
-              "build a binary that links real Tor; `zclassic23 --version` "
-              "then prints `tor: full` and this lane needs no escape" },
             { "zclassic23 -operator-lane=dev -datadir=<dev datadir> "
               "-allow-tor-stub-dev",
               "use the escape where it belongs — an offline dev/test datadir "
               "that serves nobody" },
+            { "make tor-full",
+              "if this binary prints `tor: stub`, build one that links real "
+              "Tor; a serving lane then needs no escape at all" },
         };
         boot_error_report(BOOT_ERROR_FATAL, code, ARGS_TOR_PHASE,
                           "-allow-tor-stub-dev is a development escape for "
