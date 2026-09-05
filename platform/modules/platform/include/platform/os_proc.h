@@ -206,6 +206,13 @@ void os_proc_mem_set_override(const struct os_proc_mem *forced);
  * two censuses taken the same way are directly comparable. */
 bool os_proc_open_fd_count(size_t *out);
 
+/* Close every descriptor above stderr in a freshly forked, single-threaded
+ * child, before confinement and exec. The actual descriptor census includes
+ * handles above a lowered RLIMIT_NOFILE. Never call in a resident parent.
+ * Returns false with errno on an incomplete census or close; callers must
+ * refuse exec. Windows returns unavailable (its launchers use handle lists). */
+bool os_proc_close_inherited_fds(void);
+
 /* ── Per-THREAD kernel work counters ─────────────────────────────────────
  *
  * The counters a liveness check needs in order to tell a thread that is

@@ -16,6 +16,7 @@
 #include "platform/os_proc.h"
 
 #include <errno.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -33,7 +34,7 @@
 #include <unistd.h>
 #endif
 
-#if !defined(__APPLE__) && !defined(_WIN32)
+#if !defined(_WIN32)
 #include <dirent.h>
 #endif
 
@@ -578,6 +579,44 @@ bool os_proc_cmdline_has_token(const char *token)
         }
     }
     return false;
+#endif
+}
+
+bool os_proc_close_inherited_fds(void)
+{
+#if defined(_WIN32)
+    errno = ENOSYS;
+    return false; // raw-return-ok:caller-logs-context
+#else
+    DIR *directory = opendir("/dev/fd");
+    if (!directory) return false; // raw-return-ok:caller-logs-context
+    int own = dirfd(directory);
+    bool ok = own >= 0;
+    while (ok) {
+        errno = 0;
+        struct dirent *entry = readdir(directory);
+        if (!entry) {
+            ok = errno == 0;
+            break;
+        }
+        if (entry->d_name[0] == '.') continue;
+        char *end = NULL;
+        long number = strtol(entry->d_name, &end, 10);
+        if (errno || !end || *end || number < 0 || number > INT_MAX) {
+            errno = EINVAL;
+            ok = false;
+            break;
+        }
+        int fd = (int)number;
+        if (fd > STDERR_FILENO && fd != own && close(fd) != 0 &&
+            errno != EBADF)
+            ok = false;
+    }
+    int saved = errno;
+    if (closedir(directory) != 0)
+        return false; // raw-return-ok:caller-logs-context
+    if (!ok) errno = saved;
+    return ok;
 #endif
 }
 

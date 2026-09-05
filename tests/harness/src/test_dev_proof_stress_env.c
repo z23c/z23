@@ -35,9 +35,17 @@
 #include "test/test_core.h"
 
 #include "dev_proof.h"
+#include "dev_proof_budget.h"
 
 #include <stdlib.h>
 #include <string.h>
+#if defined(__APPLE__)
+#include <fcntl.h>
+#include <stdio.h>
+#include <sys/resource.h>
+#include <sys/wait.h>
+#include <unistd.h>
+#endif
 
 static int test_dps_absent_becomes_present(void)
 {
@@ -87,10 +95,70 @@ static int test_dps_unconditional_overwrite(void)
     return failures;
 }
 
+#if defined(__APPLE__)
+/* The worker's descriptors are authority even when the child cannot open
+ * their original paths. Exercise the real step launcher after lowering the
+ * descriptor ceiling: a loop bounded by the new limit would miss fd 512. */
+static int test_dps_mac_child_descriptors(void)
+{
+    int failures = 0;
+    TEST_CASE("dev_proof: Mac steps inherit neither stdin nor high descriptors")
+    {
+        char root[4096], input[4096], log[4096];
+        test_make_tmpdir(root, sizeof(root), "proof_descriptors", "mac");
+        ASSERT(snprintf(input, sizeof(input), "%s/input", root) > 0);
+        ASSERT(snprintf(log, sizeof(log), "%s/child.log", root) > 0);
+        int source = open(input, O_RDWR | O_CREAT | O_TRUNC, 0600);
+        ASSERT(source >= 0);
+        ASSERT(write(source, "fixture-authority\n", 18) == 18);
+        ASSERT(lseek(source, 0, SEEK_SET) == 0);
+        /* Only the fixture subprocess changes its stdin and limits. */
+        pid_t child = fork();
+        ASSERT(child >= 0);
+        if (child == 0) {
+            if (dup2(source, 512) != 512 ||
+                dup2(source, STDIN_FILENO) != STDIN_FILENO)
+                _exit(70);
+            struct rlimit limit;
+            if (getrlimit(RLIMIT_NOFILE, &limit) != 0) _exit(71);
+            limit.rlim_cur = 128;
+            if (setrlimit(RLIMIT_NOFILE, &limit) != 0) _exit(72);
+            const struct zcl_dev_proof_budget budget = {
+                .budget_ms = 5000, .ceiling_ms = 5000,
+                .no_progress_ms = 5000,
+            };
+            const char *fds[] = {
+                "/bin/sh", "-c", "test ! -e /dev/fd/512", NULL,
+            };
+            const char *stdin_probe[] = {
+                "/bin/sh", "-c", "if IFS= read -r line; then exit 1; fi",
+                NULL,
+            };
+            int fd_rc = zcl_dev_proof_run_watched(
+                ".", log, fds, &budget, NULL);
+            int stdin_rc = zcl_dev_proof_run_watched(
+                ".", log, stdin_probe, &budget, NULL);
+            _exit(fd_rc == 0 && stdin_rc == 0 ? 0 : 73);
+        }
+        int status = 0;
+        ASSERT(waitpid(child, &status, 0) == child);
+        ASSERT(close(source) == 0);
+        ASSERT(WIFEXITED(status));
+        ASSERT(WEXITSTATUS(status) == 0);
+        ASSERT(test_rm_rf_recursive(root) == 0);
+    }
+    TEST_END
+    return failures;
+}
+#endif
+
 int test_dev_proof_stress_env(void)
 {
     int failures = 0;
     failures += test_dps_absent_becomes_present();
     failures += test_dps_unconditional_overwrite();
+#if defined(__APPLE__)
+    failures += test_dps_mac_child_descriptors();
+#endif
     return failures;
 }
