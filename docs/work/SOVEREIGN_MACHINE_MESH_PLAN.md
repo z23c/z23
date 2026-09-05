@@ -482,7 +482,8 @@ The refusals are the tunnel's own, and each names the thing it protected:
 `tunnel_target_not_allowed` (no row admits this peer and this port),
 `tunnel_peer_unpaired` (no live pairing row names this peer),
 `tunnel_dial_failed` (a row admitted the port and nothing was listening on
-the loopback behind it), `tunnel_local_bind_failed`, `tunnel_cap`, and
+the loopback behind it), `tunnel_local_bind_failed`, `tunnel_cap`,
+`tunnel_no_such_tunnel` (no entrance here carries that id), and
 `tunnel_malformed`. The stream layer's own refusals still stand in front of
 all of them: an open over a link that is not an established Noise session,
 or from a peer with no pairing row, never reaches the tunnel service at all.
