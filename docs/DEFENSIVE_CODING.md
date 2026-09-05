@@ -1375,6 +1375,7 @@ add/remove a gate.
 - `check-no-unattended-publish`
 - `check-tor-dial-prewarm`
 - `check-fleet-source-status`
+- `check-fleet-vitals`
 - `check-zcc-cache`
 - `check-zcc-epoch-object`
 - `check-zcc-epoch-batch`

@@ -1110,3 +1110,24 @@ REMOTE_COMMAND_CLASS("fleet.wiki.history", REMOTE_CLASS_READ_ONLY,
     "every revision of one page, each independently signed")
 REMOTE_COMMAND_CLASS("fleet.board.post", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("fleet.wiki.write", REMOTE_CLASS_NEVER, "")
+
+/* THE OWNER'S PRIVATE FLEET LEDGER — 3 never_remote.
+ *
+ * Every row in this ledger is the owner's own record of the owner's own
+ * machines, and the whole design keeps it off every wire but one: a pull
+ * between two peers the owner has paired, over an established Noise session,
+ * carrying that peer's own rows and nothing else (docs/FLEET_LEDGER.md).
+ *
+ * A remote leaf would be a second way in, with a different shape and a
+ * different authority — a peer asking this node to render its ledger rather
+ * than replicating what it is entitled to and rendering it locally. There is
+ * nothing a caller could learn through these leaves that a paired peer cannot
+ * already answer for itself from its own replica, so the remote form buys no
+ * capability and costs the property the ledger is built around.
+ *
+ * `fleet ledger add` is a writer besides: a leaf that lets a peer append rows
+ * signed by THIS node's key, attributed to this machine, is a leaf that lets a
+ * peer put words in the owner's mouth. */
+REMOTE_COMMAND_CLASS("fleet.ledger.add", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("fleet.ledger.status", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("fleet.usage", REMOTE_CLASS_NEVER, "")
