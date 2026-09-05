@@ -40,8 +40,8 @@
  *   LINT_LANE_REALROOT   needs the real .git (git grep / git ls-files /
  *                        .git/hooks) or is hermetic (its own mktemp sandbox),
  *                        but never mutates a tracked path. Pool-eligible.
- *   LINT_LANE_EXCLUSIVE  plants into the REAL worktree (the stray-root-file
- *                        check). This lane keeps the historic group
+ *   LINT_LANE_EXCLUSIVE  retains the root-file check and stale sandbox cleanup
+ *                        in the historic group for compatibility. It keeps the
  *                        name `make_lint_gates` and stays the exclusive
  *                        pre-pass — which also guarantees the tree is quiet
  *                        while the shards build their sandboxes.
@@ -347,7 +347,7 @@ static const struct lint_gate_entry g_lint_gate_entries[] = {
     N_(t_lint_umbrellas_share_built_prereqs),
     S_(t_no_dev_history_in_contracts),
     S_(t_no_uncited_victory),
-    /* Plants a stray file at the REAL repo root. */
+    /* Read-only root probe retained in the historical base group. */
     X_(t_no_stray_root_files),
 };
 #undef S_
@@ -758,8 +758,8 @@ int test_make_lint_gates_heavy_02(void)
     return lint_run_owned(LINT_OWNER_HEAVY_BASE + 1);
 }
 
-/* The exclusive lane — the remaining check that plants into the live
- * worktree. Keeps the historic group name, so `--only=make_lint_gates` (a
+/* The exclusive lane — stale sandbox cleanup and the read-only root probe.
+ * Keeps the historic group name, so `--only=make_lint_gates` (a
  * substring match) still selects this plus every shard, and every impact rule
  * naming `make_lint_gates` keeps resolving. */
 int test_make_lint_gates(void)
@@ -854,7 +854,7 @@ static int t_partition_shards_all_carry_work(void)
     for (int h = 0; h < LINT_GATE_HEAVY_COUNT; h++)
         if (heavy_counts[h] != 1) empty_heavy++;
 
-    TEST("[lint-gate] every group carries work; only the live planter stays exclusive") {
+    TEST("[lint-gate] every group carries work; the root probe retains its base group") {
         ASSERT(empty_shards == 0);
         /* Every heavy group owns exactly one check, and there is a group for
          * every HEAVY entry — tag a third one without adding its group and
@@ -863,7 +863,7 @@ static int t_partition_shards_all_carry_work(void)
         ASSERT(empty_heavy == 0);
         ASSERT(heavy_lane_entries == LINT_GATE_HEAVY_COUNT);
         /* The trust-order matrix now owns a private Git fixture. Pin both
-         * owners so isolation cannot silently regress to live planting. */
+         * owners so coverage stays stable across fixture isolation. */
         ASSERT(trust_order_owner == LINT_OWNER_REALROOT);
         ASSERT(stray_root_owner == LINT_OWNER_EXCLUSIVE);
         ASSERT(exclusive_count == 1);

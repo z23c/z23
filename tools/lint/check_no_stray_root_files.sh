@@ -37,8 +37,8 @@
 # Selftest override: ZCL_ROOT_STRAY_EXTRA_FOR_TEST names one additional
 # root-relative entry to treat as a stray candidate even if it would
 # otherwise be allowed. The selftest in tests/harness/src/test_make_lint_gates.c
-# uses the plain plant/trip/recover path and does not need it; the variable
-# exists so a future probe can trip the gate without writing to the tree.
+# uses this to trip the gate without writing to the live tree. The override
+# affects only that child process; concurrent production scans are unchanged.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
