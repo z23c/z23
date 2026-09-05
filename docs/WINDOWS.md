@@ -213,6 +213,11 @@ Native hook generations are content-addressed and
 `core.hooksPath` switches atomically, so a locked running executable cannot
 block an update. `make windows-acceptance` remains an explicit parity gate.
 
+The native fleet Git capture drains the pipe after observing child exit, so a
+short-lived Git command cannot lose its final answer and falsely report missing
+refs. The Windows acceptance catalog checks short responses, multi-read output,
+bounded truncation, and nonzero exits with their diagnostics.
+
 Install the audited canonical binary as a supervised per-user Task Scheduler
 job with one command:
 

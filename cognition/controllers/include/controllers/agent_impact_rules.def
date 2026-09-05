@@ -2487,6 +2487,7 @@ AGENT_IMPACT_RULE("platform/modules/platform/tests/cli_render_env_windows_accept
  * Closing this means either wiring that target into a lint gate or moving its
  * assertions into a registered tests/harness/src group. */
 AGENT_IMPACT_RULE("platform/modules/platform/tests/thread_join_windows_acceptance.c", "make_lint_gates")
+AGENT_IMPACT_RULE("tests/harness/src/dev_fleet_capture_windows_acceptance.c", "make_lint_gates")
 
 /* Two probe programs that arrived under platform/modules/platform/tests with NO reader at
  * all -- weaker than the acceptance programs above, which at least

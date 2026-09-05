@@ -22,6 +22,7 @@ ZCL_WINDOWS_ACCEPTANCE_TESTS := \
 	consensus_state_publication_cas_refusal \
 	database_lifetime \
 	datadir_privacy \
+	dev_fleet_capture \
 	directory_compat \
 	directory_transaction \
 	disk_space \
@@ -219,6 +220,10 @@ ZCL_WINDOWS_ACCEPTANCE_mind_state_SOURCES := \
 ZCL_WINDOWS_ACCEPTANCE_mind_state_FLAGS := -Itools/mind
 ZCL_WINDOWS_ACCEPTANCE_mind_state_LIBS := \
 	-ladvapi32 -lshell32 -lole32 -luuid $(ZCL_WINDOWS_ACCEPTANCE_PTHREAD_LIB)
+
+ZCL_WINDOWS_ACCEPTANCE_dev_fleet_capture_SOURCES := \
+	tests/harness/src/dev_fleet_capture_windows_acceptance.c \
+	tools/command/native_dev_fleet_process.c
 
 ZCL_WINDOWS_ACCEPTANCE_directory_compat_SOURCES := \
 	platform/modules/platform/tests/directory_compat_windows_acceptance.c \

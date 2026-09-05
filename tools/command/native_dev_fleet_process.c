@@ -80,18 +80,33 @@ static int fleet_capture_windows(const char *cwd, const char *const argv[],
 
     size_t length = 0;
     bool exited = false;
-    int64_t waited_ms = 0;
-    while (waited_ms < 30000) {
-        DWORD available = 0;
-        if (!PeekNamedPipe(read_handle, NULL, 0, NULL, &available, NULL))
+    bool capture_failed = false;
+    ULONGLONG started = GetTickCount64();
+    while (GetTickCount64() - started < 30000) {
+        /* Observe exit BEFORE peeking. A child can write its entire answer
+         * and exit during the wait; a pre-wait empty pipe says nothing about
+         * those final bytes. Once exit is observed, drain one final snapshot. */
+        DWORD wait = WaitForSingleObject(process.hProcess, 10);
+        if (wait == WAIT_OBJECT_0) exited = true;
+        else if (wait != WAIT_TIMEOUT) {
+            capture_failed = true;
             break;
+        }
+        DWORD available = 0;
+        if (!PeekNamedPipe(read_handle, NULL, 0, NULL, &available, NULL) &&
+            GetLastError() != ERROR_BROKEN_PIPE) {
+            capture_failed = true;
+            break;
+        }
         while (available > 0) {
             char scratch[4096];
             DWORD want = available > sizeof(scratch) ? sizeof(scratch)
                                                        : available;
             DWORD got = 0;
-            if (!ReadFile(read_handle, scratch, want, &got, NULL) || got == 0)
+            if (!ReadFile(read_handle, scratch, want, &got, NULL) || got == 0) {
+                capture_failed = true;
                 break;
+            }
             size_t room = length + 1 < cap ? cap - length - 1 : 0;
             size_t copy = got < room ? (size_t)got : room;
             if (copy) memcpy(out + length, scratch, copy);
@@ -99,21 +114,21 @@ static int fleet_capture_windows(const char *cwd, const char *const argv[],
             if (copy != got) *truncated = true;
             available -= got;
         }
-        DWORD wait = WaitForSingleObject(process.hProcess, 10);
-        if (wait == WAIT_OBJECT_0) exited = true;
-        else if (wait == WAIT_FAILED) break;
-        if (exited && available == 0) break;
-        waited_ms += 10;
+        if (capture_failed || exited) break;
     }
     if (!exited) {
         (void)TerminateProcess(process.hProcess, 124);
         (void)WaitForSingleObject(process.hProcess, INFINITE);
     }
     DWORD exit_code = 1;
-    (void)GetExitCodeProcess(process.hProcess, &exit_code);
+    if (!GetExitCodeProcess(process.hProcess, &exit_code)) capture_failed = true;
     CloseHandle(read_handle); CloseHandle(process.hProcess);
     out[length] = 0;
-    return exited ? (int)exit_code : -1;
+    if (!exited || capture_failed) {
+        fprintf(stderr, "dev.fleet: Git output capture failed or timed out\n");
+        return -1;
+    }
+    return (int)exit_code;
 }
 #endif
 
