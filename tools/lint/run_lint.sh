@@ -136,6 +136,7 @@ gate_command() {
         check-fleet-airship-rules)         echo './tools/lint/check_fleet_airship_rules.sh --selftest && ./tools/lint/check_fleet_airship_rules.sh' ;;
         check-fleet-facts)                 echo './tools/lint/check_fleet_facts.sh --selftest && ./tools/lint/check_fleet_facts.sh' ;;
         check-fleet-observations)          echo './tools/lint/check_fleet_observations.sh --selftest && ./tools/lint/check_fleet_observations.sh' ;;
+        check-fleet-vitals)                echo './tools/lint/check_fleet_vitals.sh --selftest && ./tools/lint/check_fleet_vitals.sh' ;;
         check-prompt-templates)            echo './tools/lint/check_prompt_templates.sh --selftest && ./tools/lint/check_prompt_templates.sh' ;;
         check-rule-vocabulary)             echo './tools/lint/check_rule_vocabulary.sh --selftest && ./tools/lint/check_rule_vocabulary.sh' ;;
         check-cookbook)                    echo './tools/lint/check_cookbook.sh --selftest && ./tools/lint/check_cookbook.sh' ;;

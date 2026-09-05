@@ -591,6 +591,12 @@ ZCL_TEST_GROUP(mesh_tunnel)
 ZCL_TEST_GROUP(mesh_game)
 /* what a fleet node's facts earn, and what a self-reported one does not */
 ZCL_TEST_GROUP(fleet_airship_rules)
+/* The owner's private fleet ledger: what a row means, how two statements
+ * about the same thing combine, and every way a batch is refused. The group
+ * exists for one distinction the whole design rests on — a refused batch
+ * leaves the replica exactly where it was, so a forged, tampered or
+ * unpaired row can never plant a prefix of itself. */
+ZCL_TEST_GROUP(fleet_ledger)
 ZCL_TEST_GROUP(confine)
 ZCL_TEST_GROUP(seed_tape)
 ZCL_TEST_GROUP(postmortem)

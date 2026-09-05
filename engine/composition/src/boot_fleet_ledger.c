@@ -320,6 +320,37 @@ static bool ledger_live_visitor(struct mesh_stream *st, void *ctx)
     return true;
 }
 
+/* Compose the one PULL this protocol has and put it on the wire toward a
+ * peer whose identity the caller has already verified. Both the lane and
+ * the loopback test enter here, so a test drives the exact frame and the
+ * exact per-stream state production does. */
+static bool ledger_open_pull(const uint8_t peer_noise[32],
+                             const uint8_t peer_box_id[32],
+                             const uint8_t peer_signer[32], uint64_t since_seq)
+{
+    struct fleet_pull_state *p = zcl_calloc(1, sizeof *p, "fleet_ledger_pull");
+    if (!p)
+        return false;
+    memcpy(p->peer_box_id, peer_box_id, 32);
+    memcpy(p->peer_signer, peer_signer, 32);
+    uint8_t frame[FLEET_LEDGER_PULL_BYTES];
+    size_t frame_len = pull_encode(since_seq, frame);
+    uint64_t stream_id = 0;
+    enum mesh_stream_refusal refusal =
+        mesh_stream_open(FLEET_LEDGER_SERVICE_NAME, peer_noise, 0, frame,
+                         frame_len, p, &stream_id);
+    if (refusal != MESH_STREAM_OK) {
+        /* A peer that is simply not connected is the ordinary case on a
+         * mesh and is not worth a line; anything else is. */
+        if (refusal != MESH_STREAM_REFUSED_PEER_NOT_CONNECTED)
+            LOG_WARN("fleet.ledger", "pull not opened: %s",
+                     mesh_stream_refusal_string(refusal));
+        free(p);
+        return false;
+    }
+    return true;
+}
+
 /* Open one pull toward every paired peer that is due one. The pairing check
  * is this lane's own: the primitive would refuse an inbound open from an
  * unpaired peer, but nothing would stop this side dialing one, and a row
@@ -353,28 +384,10 @@ static void ledger_pull_paired_peers(struct zcl_fleet_ledger *ledger,
         if (probe.found)
             continue;
 
-        struct fleet_pull_state *p =
-            zcl_calloc(1, sizeof *p, "fleet_ledger_pull");
-        if (!p)
-            break;
-        memcpy(p->peer_box_id, peer.doc.master_pubkey, 32);
-        memcpy(p->peer_signer, peer.online_pubkey, 32);
-        uint8_t frame[FLEET_LEDGER_PULL_BYTES];
-        size_t frame_len = pull_encode(
-            zcl_fleet_ledger_peer_seq(ledger, p->peer_box_id), frame);
-        uint64_t stream_id = 0;
-        enum mesh_stream_refusal refusal =
-            mesh_stream_open(FLEET_LEDGER_SERVICE_NAME,
-                             rows[i].peer_noise_pubkey, 0, frame, frame_len,
-                             p, &stream_id);
-        if (refusal != MESH_STREAM_OK) {
-            /* A peer that is simply not connected is the ordinary case on a
-             * mesh and is not worth a line; anything else is. */
-            if (refusal != MESH_STREAM_REFUSED_PEER_NOT_CONNECTED)
-                LOG_WARN("fleet.ledger", "pull not opened: %s",
-                          mesh_stream_refusal_string(refusal));
-            free(p);
-        }
+        (void)ledger_open_pull(
+            rows[i].peer_noise_pubkey, peer.doc.master_pubkey,
+            peer.online_pubkey,
+            zcl_fleet_ledger_peer_seq(ledger, peer.doc.master_pubkey));
     }
     free(rows);
 }
@@ -506,3 +519,57 @@ void boot_fleet_ledger_shutdown(void)
     zcl_mutex_unlock(&g_ledger_lock);
     zcl_fleet_ledger_close(ledger);
 }
+
+#ifdef ZCL_TESTING
+void boot_fleet_ledger_test_bind(struct zcl_fleet_ledger *ledger,
+                                 const uint8_t box_id[32],
+                                 const uint8_t signer[32])
+{
+    ledger_lock();
+    g_ledger = ledger;
+    if (ledger && box_id && signer) {
+        memcpy(g_self_box_id, box_id, 32);
+        memcpy(g_self_signer, signer, 32);
+    } else {
+        memset(g_self_box_id, 0, 32);
+        memset(g_self_signer, 0, 32);
+    }
+    for (size_t i = 0; i < FLEET_LEDGER_INBOX_MAX; i++) {
+        free(g_inbox[i].rows);
+        g_inbox[i].rows = NULL;
+        g_inbox[i].used = false;
+        g_inbox[i].len = 0;
+    }
+    g_last_pull = 0;
+    zcl_mutex_unlock(&g_ledger_lock);
+}
+
+bool boot_fleet_ledger_test_pull(const uint8_t peer_noise[32],
+                                 const uint8_t peer_box_id[32],
+                                 const uint8_t peer_signer[32],
+                                 uint64_t since_seq)
+{
+    return ledger_open_pull(peer_noise, peer_box_id, peer_signer, since_seq);
+}
+
+/* The acceptor's drain, run once, from inside the lane lock — which is
+ * exactly where and how the shared stream pump runs it. */
+static bool ledger_serve_visitor(struct mesh_stream *st, void *ctx)
+{
+    (void)ctx;
+    if (!st->local_initiator && !st->ended)
+        ledger_service_tick(st, (int64_t)platform_time_wall_time_t(), NULL);
+    return true;
+}
+
+void boot_fleet_ledger_test_serve(void)
+{
+    mesh_stream_visit(FLEET_LEDGER_SERVICE_NAME, ledger_serve_visitor, NULL);
+}
+
+void boot_fleet_ledger_test_drain_into(struct zcl_fleet_ledger *ledger)
+{
+    if (ledger)
+        ledger_drain_inbox(ledger);
+}
+#endif

@@ -58,4 +58,32 @@ void boot_fleet_ledger_shutdown(void);
  * test can register the service without a live composition context. */
 bool boot_fleet_ledger_register_service(void);
 
+#ifdef ZCL_TESTING
+struct zcl_fleet_ledger;
+/* Test seams that drive the EXACT production callbacks, the same way
+ * mesh_stream's own seams do — no reimplementation of the protocol lives
+ * in the test.
+ *
+ * A loopback runs both halves in one process, and the served identity is
+ * process-wide, so the seams name the store each half acts on rather than
+ * sharing one: bind supplies the ANSWERING box's store and identity, the
+ * pair wire() would have read from the datadir; pull opens the asking
+ * half's stream toward an already-verified peer, skipping only the
+ * delegation lookup, which belongs to the mesh status lane and not to
+ * this one; serve runs the answering tick once; drain_into runs the inbox
+ * commit the supervisor tick would have run, against the ASKING box's
+ * store, synchronously, so a test never waits on a clock.
+ *
+ * Pass NULL to bind to unbind and empty the inbox. */
+void boot_fleet_ledger_test_bind(struct zcl_fleet_ledger *ledger,
+                                 const uint8_t box_id[32],
+                                 const uint8_t signer[32]);
+bool boot_fleet_ledger_test_pull(const uint8_t peer_noise[32],
+                                 const uint8_t peer_box_id[32],
+                                 const uint8_t peer_signer[32],
+                                 uint64_t since_seq);
+void boot_fleet_ledger_test_serve(void);
+void boot_fleet_ledger_test_drain_into(struct zcl_fleet_ledger *ledger);
+#endif
+
 #endif /* ZCL_CONFIG_BOOT_FLEET_LEDGER_H */

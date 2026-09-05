@@ -2688,7 +2688,7 @@ $(filter-out $(ZCL_VENDOR_LIB)/libsecp256k1.a,$(VENDOR_LIBS)):
         check-outparam-init-before-return \
         check-before-save-hooks check-pthread-create check-model-validation \
         check-model-sql-literals \
-        check-persona-resolves check-specialists check-fleet-airship-rules check-fleet-facts check-fleet-observations check-prompt-templates check-rule-vocabulary check-cookbook \
+        check-persona-resolves check-specialists check-fleet-airship-rules check-fleet-facts check-fleet-observations check-fleet-vitals check-prompt-templates check-rule-vocabulary check-cookbook \
         check-long-functions check-rpc-registrar check-lag-slo-observable \
         check-controller-private-headers \
         check-file-size-ceiling check-framework-filename-suffix \
@@ -11416,6 +11416,11 @@ check-fleet-observations: $(BIN_DIR)/z23-fleet-observe
 	@./tools/lint/check_fleet_observations.sh --selftest
 	@./tools/lint/check_fleet_observations.sh
 
+check-fleet-vitals:
+	@echo "══ LINT: the fleet vitals catalog is closed and its table matches ══"
+	@./tools/lint/check_fleet_vitals.sh --selftest
+	@./tools/lint/check_fleet_vitals.sh
+
 check-prompt-templates:
 	@echo "══ LINT: every prompt template names a declared section ══"
 	@./tools/lint/check_prompt_templates.sh --selftest
@@ -13006,6 +13011,7 @@ LINT_GATES := \
     check-fleet-airship-rules \
     check-fleet-facts \
     check-fleet-observations \
+    check-fleet-vitals \
     check-prompt-templates \
     check-rule-vocabulary \
     check-cookbook \
