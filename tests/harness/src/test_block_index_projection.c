@@ -51,7 +51,7 @@
 #define BIP_CHECK(name, expr) do { \
     printf("block_index_projection: %s... ", (name)); \
     if ((expr)) printf("OK\n"); \
-    else { printf("FAIL\n"); failures++; } \
+    else { printf("FAIL\n"); (*failures)++; } \
 } while (0)
 
 /* ── Tmpdir helpers ────────────────────────────────────────────────── */
