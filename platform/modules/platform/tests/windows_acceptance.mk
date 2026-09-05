@@ -34,6 +34,7 @@ ZCL_WINDOWS_ACCEPTANCE_TESTS := \
 	hotswap_elf_probe_refusal \
 	logical_cpu \
 	log_level \
+	mind_state \
 	mint_anchor_export_refusal \
 	mint_anchor_preflight_refusal \
 	nat_gateway \
@@ -189,6 +190,22 @@ ZCL_WINDOWS_ACCEPTANCE_codeindex_freshness_SOURCES := \
 	platform/modules/sha3/src/sha3.c
 ZCL_WINDOWS_ACCEPTANCE_codeindex_freshness_FLAGS := \
 	-DCI_WINDOWS_FRESHNESS_ONLY -Icognition/modules/codeindex/src
+
+ZCL_WINDOWS_ACCEPTANCE_mind_state_SOURCES := \
+	tests/harness/src/mind_state_windows_acceptance.c \
+	tools/mind/mind_state.c \
+	cognition/modules/codeindex/src/codeindex_owner.c \
+	platform/modules/json/src/json.c \
+	platform/modules/platform/src/path_replace.c \
+	platform/modules/platform/src/private_directory.c \
+	platform/modules/platform/src/private_acl_internal.c \
+	platform/modules/platform/src/state_root.c \
+	platform/modules/platform/src/clock.c \
+	platform/modules/base/src/safe_alloc.c \
+	platform/modules/base/src/log_level.c
+ZCL_WINDOWS_ACCEPTANCE_mind_state_FLAGS := -Itools/mind
+ZCL_WINDOWS_ACCEPTANCE_mind_state_LIBS := \
+	-ladvapi32 -lshell32 -lole32 -luuid $(ZCL_WINDOWS_ACCEPTANCE_PTHREAD_LIB)
 
 ZCL_WINDOWS_ACCEPTANCE_directory_compat_SOURCES := \
 	platform/modules/platform/tests/directory_compat_windows_acceptance.c \

@@ -6,6 +6,8 @@
 #include "codeindex_priv.h"
 
 #include "base/hex.h"
+#include "platform/path_replace.h"
+#include "platform/private_directory.h"
 #include "platform/time_compat.h"
 #include "util/log_macros.h"
 
@@ -76,14 +78,18 @@ bool codeindex_owner_claim(const char *root, long long pid,
     /* A checkout can be claimed before it has ever been indexed — that is
      * the ordinary first cycle, and the claim is what stops a reader
      * building the first generation underneath the owner. */
+#if defined(_WIN32)
+    if (!platform_private_directory_ensure(dir))
+#else
     if (mkdir(dir, 0700) != 0 && errno != EEXIST)
+#endif
         LOG_FAIL("codeindex", "create index directory for owner marker");
     FILE *f = fopen(tmp, "wb");
     if (!f) LOG_FAIL("codeindex", "open owner marker for write");
     bool ok = fwrite(line, 1, (size_t)n, f) == (size_t)n;
     ok = fflush(f) == 0 && ok;
     ok = fclose(f) == 0 && ok;
-    if (!ok || rename(tmp, path) != 0) {
+    if (!ok || platform_path_replace(tmp, path) != 0) {
         (void)remove(tmp);
         LOG_FAIL("codeindex", "publish owner marker");
     }

@@ -5,6 +5,8 @@
 #include "mind.h"
 
 #include "json/json.h"
+#include "platform/path_compat.h"
+#include "platform/path_replace.h"
 #include "platform/private_directory.h"
 #include "platform/state_root.h"
 #include "base/safe_alloc.h"
@@ -28,7 +30,7 @@ bool zcl_mind_state_dir(char *out, size_t cap)
 {
     if (!out) return false;
     const char *env = getenv("ZCL_MIND_STATE_DIR");
-    if (env && env[0] == '/') {
+    if (platform_path_is_absolute(env)) {
         int n = snprintf(out, cap, "%s", env);
         return n > 0 && (size_t)n < cap &&
                platform_private_directory_ensure(out);
@@ -71,7 +73,7 @@ static bool mind_publish(const char *path, const char *text, size_t len)
     bool ok = fwrite(text, 1, len, f) == len;
     ok = fflush(f) == 0 && ok;
     ok = fclose(f) == 0 && ok;
-    if (!ok || rename(tmp, path) != 0) {
+    if (!ok || platform_path_replace(tmp, path) != 0) {
         (void)remove(tmp);
         LOG_FAIL("mind", "publish %s", path);
     }
@@ -126,7 +128,7 @@ bool zcl_mind_registry_load(struct zcl_mind_registry *out)
         size_t taglen = strlen(tag);
         if (strncmp(line, tag, taglen) != 0) continue;
         const char *root = line + taglen;
-        if (root[0] != '/') continue;      /* relative roots break writers */
+        if (!platform_path_is_absolute(root)) continue;
         if (out->count >= ZCL_MIND_CHECKOUTS_MAX) break;
         size_t rl = strlen(root);
         if (rl == 0 || rl >= ZCL_MIND_PATH_MAX) continue;
