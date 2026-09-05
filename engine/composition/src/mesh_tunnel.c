@@ -367,6 +367,16 @@ static void tunnel_end(struct mesh_stream *st, enum mesh_tunnel_refusal why)
                       (const uint8_t *)token, strlen(token));
 }
 
+/* A socket call that moved nothing and did not fail: the copy stops for
+ * this beat and picks up on the next one. A signal or a full buffer is a
+ * pause, never a reason to end somebody's connection. */
+static bool tunnel_retry_later(void)
+{
+    int error = platform_socket_last_error();
+    return platform_socket_error_would_block(error) ||
+           platform_socket_error_interrupted(error);
+}
+
 /* Move what the peer sent into the socket, and grant credit back ONLY for
  * bytes that actually left. A socket nobody reads therefore stalls its own
  * tunnel at one chunk and never grows this node's memory. */
@@ -383,8 +393,7 @@ static void tunnel_flush(struct mesh_stream *st,
             (void)mesh_stream_grant(st, (uint32_t)n);
             continue;
         }
-        if (n < 0 && platform_socket_error_would_block(
-                         platform_socket_last_error()))
+        if (n < 0 && tunnel_retry_later())
             return;
         tunnel_end(st, MESH_TUNNEL_ENDED_LOCAL_CLOSE);
         return;
@@ -416,8 +425,7 @@ static void tunnel_drain_socket(struct mesh_stream *st,
             s->bytes_to_peer += (uint64_t)n;
             continue;
         }
-        if (n < 0 && platform_socket_error_would_block(
-                         platform_socket_last_error()))
+        if (n < 0 && tunnel_retry_later())
             return;
         s->local_eof = true;
         tunnel_end(st, MESH_TUNNEL_ENDED_LOCAL_CLOSE);
