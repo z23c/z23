@@ -58,7 +58,9 @@
  *
  * Then `cursor` (opaque: newest board id, origin/main head, unix seconds),
  * `bytes` (this data object's own serialized size), `elapsed_ms`,
- * `latency_budget_ms`, `budget_exceeded`, `budget_bytes`.
+ * `latency_budget_ms`, `budget_exceeded`, `budget_bytes`, and `facts` —
+ * one line naming how many verified fact rows this checkout carries and
+ * how to query them, from the compiled table in engine/composition/facts/.
  *
  * BUDGET. Sections are assembled in the order above and rows stop being
  * added when the packet would exceed `budget_bytes`. A section that was cut
@@ -1474,6 +1476,17 @@ void zcl_native_handle_dev_fleet_start(const struct zcl_command_request *request
         (void)json_push_kv_bool(data, "budget_exceeded",
                                 elapsed > FS_LATENCY_BUDGET_MS);
         (void)json_push_kv_int(data, "budget_bytes", ctx.budget);
+
+        /* Orientation is one line, not a discovery process. The fact table
+         * is the cheapest read in the checkout and the one an orienting
+         * session most needs to know exists; the count comes from the
+         * compiled rows, so it is never a number somebody typed. Pushed
+         * before `bytes` so it is inside the size this packet reports. */
+        {
+            char facts_line[192];
+            zcl_dev_orient_banner(facts_line, sizeof(facts_line));
+            (void)json_push_kv_str(data, "facts", facts_line);
+        }
 
         /* `bytes` reports the size of the document it is itself inside, so
          * solve for it: adding the member costs 9 bytes plus its digits, and

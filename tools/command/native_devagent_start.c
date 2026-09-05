@@ -42,6 +42,10 @@
  *              "make lint-fast", and when the situation is
  *              "shared_checkout_lane" it also contains
  *              "commit on your lane branch; do not push".
+ *   facts      one line naming how many verified fact rows this checkout
+ *              carries and how to query them, from the compiled table in
+ *              engine/composition/facts/ — so a lane orients by asking
+ *              rather than by re-reading source.
  *
  * SCOPE RULE. Do NOT call the code.tests handler or any other leaf's handler.
  * This file answers on its own so it can be implemented, reviewed and
@@ -458,6 +462,13 @@ void zcl_native_handle_dev_agent_start(
     (void)json_push_kv(&reply->data, "worktree", &worktree_obj);
     (void)json_push_kv(&reply->data, "files", &files_arr);
     (void)json_push_kv(&reply->data, "next", &next_arr);
+
+    /* Orientation is one line, not a discovery process: an agent that
+     * knows the table exists queries it instead of re-deriving the same
+     * map from source. Counted from the compiled rows, never typed. */
+    char facts_line[192];
+    zcl_dev_orient_banner(facts_line, sizeof(facts_line));
+    (void)json_push_kv_str(&reply->data, "facts", facts_line);
 
     json_free(&situation_obj);
     json_free(&rules_arr);
