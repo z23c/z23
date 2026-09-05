@@ -1779,6 +1779,7 @@ int main(int argc, char **argv)
       failures += test_ontology_manifest_rules(); }
     { extern int test_ontology_vocabulary(void);
       failures += test_ontology_vocabulary(); }
+    { extern int test_fleet_facts(void); failures += test_fleet_facts(); }
     { extern int test_zcode_benchmark_exec(void);
       failures += test_zcode_benchmark_exec(); }
     { extern int test_zcode_discovery_projection(void);

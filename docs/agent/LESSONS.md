@@ -19,6 +19,8 @@ remains inspectable. There are no open lessons at this baseline.
 
 Re-derive every count you touch from the tree itself and say which command produced it.
 
+Ask `z23 dev know --subject=<term>` before acting on a subject: which executor handles a unit kind, what a train and a proof require, and which failure signature names which trap are rows in `engine/composition/fleet_facts.def`, not prose to re-read here.
+
 # Territory engine/modules/engine
 
 What follows is the tree's own answer about this territory,

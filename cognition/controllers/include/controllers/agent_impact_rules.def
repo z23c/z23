@@ -3164,3 +3164,4 @@ AGENT_IMPACT_RULE("tests/harness/src/test_util_signal_handler.c", "util_signal_h
  * admitted by, folded from the source Merkle tree's directory and leaf
  * digests. */
 AGENT_IMPACT_RULE("cognition/modules/codeindex/src/codeindex_closure.c|cognition/modules/codeindex/include/codeindex/codeindex_closure.h|tests/harness/src/test_code_closure.c", "code_closure code_merkle codeindex make_lint_gates")
+AGENT_IMPACT_RULE("engine/composition/fleet_facts.def|cognition/modules/fleetfacts/*|tools/command/native_dev_know.c|tools/lint/check_fleet_facts.sh|tests/harness/src/test_fleet_facts.c|docs/agent/EXECUTOR_HEURISTICS.md", "fleet_facts command_registry_catalog native_api_contract make_lint_gates")
