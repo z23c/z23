@@ -23,7 +23,7 @@
 #define PROOF_MAGIC_BYTES 8u
 #define PROOF_VERSION_UNSIGNED 1u
 #define PROOF_VERSION 2u
-#define PROOF_POLICY_VERSION 1u
+#define PROOF_POLICY_VERSION ZCL_DEV_PROOF_POLICY_VERSION
 #define PROOF_FIXED_ROOTS 10u
 #define PROOF_DIMENSION_WIRE_BYTES 52u
 #define PROOF_SEAL_OFFSET \
@@ -365,8 +365,16 @@ bool zcl_dev_proof_receipt_validate(
         return fail(why, why_len,
                     signer_why ? signer_why
                                : ZCL_DEV_PROOF_SIGNER_WHY_SIGNATURE_INVALID);
-    if (receipt->policy_version != PROOF_POLICY_VERSION ||
-        receipt->complete != 1)
+    /* Named before completeness, and named for what it is: a receipt whose
+     * roots were derived under a policy this build does not implement is
+     * refused, never silently compared against roots that mean something
+     * else. A receipt from a NEWER policy gets its own name -- calling it
+     * old would be a lie, and re-running the proof is not the fix for it. */
+    if (receipt->policy_version < PROOF_POLICY_VERSION)
+        return fail(why, why_len, "receipt_schema_old");
+    if (receipt->policy_version > PROOF_POLICY_VERSION)
+        return fail(why, why_len, "receipt_schema_newer_than_this_build");
+    if (receipt->complete != 1)
         return fail(why, why_len, "receipt_policy_incomplete");
     const uint8_t *roots[PROOF_FIXED_ROOTS] = {
         receipt->source_root, receipt->source_cas_root,

@@ -1245,7 +1245,7 @@ static struct zcl_dev_acceptance_receipt_v1 ic_valid_dev_proof_receipt(void)
         receipt.dimensions[i].selected = 1;
         receipt.dimensions[i].reused = 1;
     }
-    receipt.policy_version = 1;
+    receipt.policy_version = ZCL_DEV_PROOF_POLICY_VERSION;
     receipt.complete = 1;
     (void)zcl_dev_proof_receipt_child_set_root(
         &receipt, receipt.child_set_root);
@@ -2773,48 +2773,37 @@ static int test_pw_marker_round_trip_and_refusals(void)
         char gen[4096];
         ASSERT(snprintf(gen, sizeof(gen), "%s/gen", root) > 0);
         ASSERT(ic_write(root, "gen/build/.keep", "marker parent\n"));
-        uint8_t compiler_a[32], flags_a[32], build_graph_a[32];
-        memset(compiler_a, 0xaa, sizeof(compiler_a));
-        memset(flags_a, 0xbb, sizeof(flags_a));
-        memset(build_graph_a, 0xcc, sizeof(build_graph_a));
+        struct zcl_dev_proof_build_identity_v1 identity_a;
+        memset(identity_a.compiler, 0xaa, 32);
+        memset(identity_a.flags, 0xbb, 32);
+        memset(identity_a.environment, 0xdd, 32);
+        memset(identity_a.build_graph, 0xcc, 32);
         ASSERT(zcl_dev_proof_warm_marker_write(gen, "/fixtures/proof-warm",
                                                local, base, 1700000000LL,
-                                               compiler_a, flags_a,
-                                               build_graph_a));
+                                               &identity_a));
         char got_root[4096] = {0}, got_local[65] = {0}, got_base[65] = {0};
         int64_t completed = 0;
-        uint8_t got_compiler[32] = {0}, got_flags[32] = {0};
-        uint8_t got_build_graph[32] = {0};
+        struct zcl_dev_proof_build_identity_v1 got = {0};
         ASSERT(zcl_dev_proof_warm_marker_read(gen, got_root, got_local,
-                                              got_base, &completed,
-                                              got_compiler, got_flags,
-                                              got_build_graph));
+                                              got_base, &completed, &got));
         ASSERT(strcmp(got_root, "/fixtures/proof-warm") == 0);
         ASSERT(strcmp(got_local, local) == 0);
         ASSERT(strcmp(got_base, base) == 0);
         ASSERT(completed == 1700000000LL);
-        ASSERT(memcmp(got_compiler, compiler_a, 32) == 0);
-        ASSERT(memcmp(got_flags, flags_a, 32) == 0);
-        ASSERT(memcmp(got_build_graph, build_graph_a, 32) == 0);
+        ASSERT(memcmp(&got, &identity_a, sizeof(got)) == 0);
         /* Refusals: wrong schema, forged commit, missing file. */
         ASSERT(ic_write(root, "gen/build/.proof-build-complete",
                         "bogus-schema\nroot=/x\nlocal=aa\n"));
         ASSERT(!zcl_dev_proof_warm_marker_read(gen, got_root, got_local,
-                                               got_base, &completed,
-                                               got_compiler, got_flags,
-                                               got_build_graph));
+                                               got_base, &completed, &got));
         ASSERT(ic_write(root, "gen/build/.proof-build-complete",
                         "zcl.proof_build_complete.v1\nroot=/fixtures/"
                         "proof-warm\nlocal=zzzz\nbase=111111111111111111111"
                         "11111111111111111111\ncompleted=1700000000\n"));
         ASSERT(!zcl_dev_proof_warm_marker_read(gen, got_root, got_local,
-                                               got_base, &completed,
-                                               got_compiler, got_flags,
-                                               got_build_graph));
+                                               got_base, &completed, &got));
         ASSERT(!zcl_dev_proof_warm_marker_read(NULL, got_root, got_local,
-                                               got_base, &completed,
-                                               got_compiler, got_flags,
-                                               got_build_graph));
+                                               got_base, &completed, &got));
         ASSERT(test_rm_rf_recursive(root) == 0);
 #endif
         PASS();
@@ -2841,43 +2830,41 @@ static int test_pw_marker_identity_invalidates_stale_donor(void)
         ASSERT(ic_write(root, "gen/build/.keep", "identity parent\n"));
         /* The donor was built under identity A (say, today's compiler and
          * flags). */
-        uint8_t compiler_a[32], flags_a[32], build_graph_a[32];
-        memset(compiler_a, 0x11, sizeof(compiler_a));
-        memset(flags_a, 0x22, sizeof(flags_a));
-        memset(build_graph_a, 0x33, sizeof(build_graph_a));
+        struct zcl_dev_proof_build_identity_v1 identity_a;
+        memset(identity_a.compiler, 0x11, 32);
+        memset(identity_a.flags, 0x22, 32);
+        memset(identity_a.environment, 0x77, 32);
+        memset(identity_a.build_graph, 0x33, 32);
         ASSERT(zcl_dev_proof_warm_marker_write(gen, "/fixtures/proof-warm",
                                                local, base, 1700000001LL,
-                                               compiler_a, flags_a,
-                                               build_graph_a));
+                                               &identity_a));
         char got_root[4096] = {0}, got_local[65] = {0}, got_base[65] = {0};
         int64_t completed = 0;
-        uint8_t sealed_compiler[32] = {0}, sealed_flags[32] = {0};
-        uint8_t sealed_build_graph[32] = {0};
+        struct zcl_dev_proof_build_identity_v1 sealed = {0};
         ASSERT(zcl_dev_proof_warm_marker_read(gen, got_root, got_local,
-                                              got_base, &completed,
-                                              sealed_compiler, sealed_flags,
-                                              sealed_build_graph));
+                                              got_base, &completed, &sealed));
         /* This proof's OWN identity (say, after a compiler upgrade, a
          * CFLAGS change, or a vendor archive rebuilt in place -- none of
          * which move a tracked source blob, so the wrapper-inputs diff
-         * would see no change) is B: every one of the three sealed roots
+         * would see no change) is B: every one of the four sealed roots
          * must differ from A, which is exactly what a donor-scan compare
-         * (memcmp-equal across all three) is built to catch and refuse. */
-        uint8_t compiler_b[32], flags_b[32], build_graph_b[32];
-        memset(compiler_b, 0x44, sizeof(compiler_b));
-        memset(flags_b, 0x55, sizeof(flags_b));
-        memset(build_graph_b, 0x66, sizeof(build_graph_b));
-        ASSERT(memcmp(sealed_compiler, compiler_b, 32) != 0);
-        ASSERT(memcmp(sealed_flags, flags_b, 32) != 0);
-        ASSERT(memcmp(sealed_build_graph, build_graph_b, 32) != 0);
+         * (memcmp-equal across all four) is built to catch and refuse. */
+        struct zcl_dev_proof_build_identity_v1 identity_b;
+        memset(identity_b.compiler, 0x44, 32);
+        memset(identity_b.flags, 0x55, 32);
+        memset(identity_b.environment, 0x88, 32);
+        memset(identity_b.build_graph, 0x66, 32);
+        ASSERT(memcmp(sealed.compiler, identity_b.compiler, 32) != 0);
+        ASSERT(memcmp(sealed.flags, identity_b.flags, 32) != 0);
+        ASSERT(memcmp(sealed.environment, identity_b.environment, 32) != 0);
+        ASSERT(memcmp(sealed.build_graph, identity_b.build_graph, 32) != 0);
         /* A single matching field is not enough to admit a donor: the same
          * compiler with different flags is still a different build. */
-        ASSERT(memcmp(sealed_compiler, compiler_a, 32) == 0);
-        ASSERT(memcmp(sealed_flags, flags_b, 32) != 0);
-        /* A marker from before identity sealing existed (three fields
-         * short) is a shortfall the field count refuses, not a triple of
-         * zero bytes an equality check could accidentally treat as a
-         * match. */
+        ASSERT(memcmp(sealed.compiler, identity_a.compiler, 32) == 0);
+        ASSERT(memcmp(sealed.flags, identity_b.flags, 32) != 0);
+        /* A marker from before identity sealing existed (four fields
+         * short) is a shortfall the field count refuses, not a run of zero
+         * bytes an equality check could accidentally treat as a match. */
         ASSERT(ic_write(root, "gen/build/.proof-build-complete",
                         "zcl.proof_build_complete.v1\nroot=/fixtures/"
                         "proof-warm\nlocal=2222222222222222222222222222222"
@@ -2885,8 +2872,7 @@ static int test_pw_marker_identity_invalidates_stale_donor(void)
                         "33333333\ncompleted=1700000001\n"));
         ASSERT(!zcl_dev_proof_warm_marker_read(gen, got_root, got_local,
                                                got_base, &completed,
-                                               sealed_compiler, sealed_flags,
-                                               sealed_build_graph));
+                                               &sealed));
         ASSERT(test_rm_rf_recursive(root) == 0);
 #endif
         PASS();

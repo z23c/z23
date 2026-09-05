@@ -86,7 +86,7 @@ static struct zcl_dev_acceptance_receipt_v1 dps_receipt(void)
     };
     for (size_t i = 0; i < sizeof(roots) / sizeof(roots[0]); i++)
         memset(roots[i], (int)i + 1, ZCL_DEV_PROOF_ROOT_BYTES);
-    receipt.policy_version = 1;
+    receipt.policy_version = ZCL_DEV_PROOF_POLICY_VERSION;
     receipt.complete = 1;
     receipt.created_unix = 1757030400u;
     receipt.elapsed_ms = 1234u;

@@ -45,7 +45,17 @@
 #endif
 
 #define PROOF_MAX_JOBS 16u
-#define PROOF_ENV_DOMAIN "zcl.dev_proof_environment.v1"
+/* v2 of these three roots: v1 was three domain tags over one file that baked
+ * the absolute checkout path, so no two boxes ever agreed. A v1 root can
+ * never collide with a v2 root, and a receipt carrying v1 roots is refused
+ * by policy version rather than compared (dev_proof_receipt.c). */
+#define PROOF_ENV_DOMAIN "zcl.dev_proof_environment.v2"
+#define PROOF_FLAGS_DOMAIN "zcl.dev_proof_flags.v2"
+#define PROOF_BUILD_GRAPH_DOMAIN "zcl.dev_proof_build_graph.v2"
+/* The directory the build tells the compiler to record instead of this
+ * checkout: Makefile ZCL_REPRO_ROOT, fed to -ffile-prefix-map. */
+#define PROOF_PLAN_VIRTUAL_ROOT "/zclassic23"
+#define PROOF_PLAN_MAX_BYTES 65536u
 
 struct proof_paths {
     char root[PATH_MAX];
@@ -1999,45 +2009,193 @@ static void warm_seed_rollback(const char *gen_build,
     }
 }
 
-/* The toolchain/flags/build-graph identity a generation's objects were
- * compiled under. Sealed alongside the build-complete marker so a later
- * proof cannot adopt those objects across a compiler upgrade, a changed
- * CC/CFLAGS, or a vendor archive rebuilt in place -- none of which leave a
- * source diff the wrapper-inputs check would catch. Deliberately the same
- * three domains the receipt itself hashes (see receipt.compiler_root,
- * .flags_root, .build_graph_root in dev_proof_receipt.h): a donor whose
- * identity does not match this proof's own is exactly as inadmissible as a
- * receipt would be. */
-struct proof_build_identity {
-    uint8_t compiler[32];
-    uint8_t flags[32];
-    uint8_t build_graph[32];
-};
-
-/* Hashes the same build-action file the receipt hashes, with the same
- * three domain tags, so a warm-start comparison and the receipt's own
- * fields can never disagree about what "the build identity" means. */
-static bool proof_build_identity_capture(const char *root,
-                                         struct proof_build_identity *out)
+/* Is `s` the start of a 64-character lowercase hex digest? Stops at the
+ * terminator, so a shorter tail is simply not one. */
+static bool proof_epoch_digest(const char *s)
 {
-    char action_path[PATH_MAX];
-    if (!root || !out ||
-        snprintf(action_path, sizeof(action_path),
-                 "%s/build/dev-loop/restart.env", root) >=
-            (int)sizeof(action_path))
-        return false;
-    return hash_file("zcl.dev_proof_compiler.v1", action_path,
-                     out->compiler) &&
-           hash_file("zcl.dev_proof_flags.v1", action_path, out->flags) &&
-           hash_file("zcl.dev_proof_build_graph.v1", action_path,
-                     out->build_graph);
+    for (size_t i = 0; i < 64; i++) {
+        char c = s[i];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')))
+            return false;
+    }
+    return true;
 }
 
-static bool proof_build_identity_equal(const struct proof_build_identity *a,
-                                       const struct proof_build_identity *b)
+/* Hash one build-plan value with every trace of WHERE this checkout lives
+ * taken out, so the same tree at two absolute paths hashes equal.
+ *
+ * Two rewrites, and a reason for each:
+ *  - the checkout root becomes the constant the build already tells the
+ *    compiler to record in its place (-ffile-prefix-map=$(CURDIR)=/zclassic23,
+ *    Makefile REPRO_CFLAGS). Hashing the real path keyed the receipt on a
+ *    string the compiler had itself erased.
+ *  - the epoch segment of an object directory becomes a fixed token. The
+ *    epoch is a cache-partition name derived from the compiler fingerprint
+ *    and the flag text (Makefile zcl_compile_epoch), and that fingerprint
+ *    hashes the CC command string, which spells the checkout out loud
+ *    (tools/dev/build-epoch-key.sh). It is a digest, so no later rewrite can
+ *    reach the path inside it -- and what it stood for is a receipt root in
+ *    its own right now: the compiler by content in compiler_root, the flags
+ *    in flags_root. */
+static void proof_hash_plan_value(struct sha3_256_ctx *sha, const char *root,
+                                  size_t root_len, const char *value)
+{
+    static const char epochs[] = "epochs/";
+    static const char epoch_token[] = "<epoch>";
+    for (const char *p = value; *p;) {
+        if (strncmp(p, root, root_len) == 0) {
+            sha3_256_write(sha, (const uint8_t *)PROOF_PLAN_VIRTUAL_ROOT,
+                           sizeof(PROOF_PLAN_VIRTUAL_ROOT) - 1);
+            p += root_len;
+        } else if (strncmp(p, epochs, sizeof(epochs) - 1) == 0 &&
+                   proof_epoch_digest(p + sizeof(epochs) - 1)) {
+            sha3_256_write(sha, (const uint8_t *)epochs, sizeof(epochs) - 1);
+            sha3_256_write(sha, (const uint8_t *)epoch_token,
+                           sizeof(epoch_token) - 1);
+            p += sizeof(epochs) - 1 + 64;
+        } else {
+            sha3_256_write(sha, (const uint8_t *)p, 1);
+            p++;
+        }
+    }
+    sha3_256_write(sha, (const uint8_t *)"", 1);
+}
+
+/* Which half of the build plan a key belongs to. A key this build has never
+ * heard of goes to the build graph rather than nowhere: a line added to
+ * build/dev-loop/restart.env tomorrow must change the identity, never slip
+ * past it. */
+static bool proof_plan_key_is_flag(const char *key)
+{
+    static const char *const flag_keys[] = {
+        "CC", "DEV_CFLAGS", "DEV_LDFLAGS", "DEV_LIBS",
+        "TEST_CFLAGS", "TEST_LDFLAGS", "TEST_LIBS",
+    };
+    for (size_t i = 0; i < sizeof(flag_keys) / sizeof(flag_keys[0]); i++)
+        if (strcmp(key, flag_keys[i]) == 0)
+            return true;
+    return false;
+}
+
+/* The flag and build-graph roots, from one read of the build plan.
+ *
+ * COMPILER_ID is the one line dropped rather than hashed. It is a digest of
+ * the CC command string, which contains this checkout's absolute path, so
+ * nothing can neutralise it after the fact -- and the toolchain capsule now
+ * says by content what COMPILER_ID said by name, including the header and
+ * library redirections, which environment_root binds. Dropping it is the
+ * whole reason two boxes can compare receipts at all. */
+static bool proof_plan_roots(const char *root, uint8_t flags[32],
+                             uint8_t build_graph[32])
+{
+    char path[PATH_MAX], body[PROOF_PLAN_MAX_BYTES];
+    size_t root_len = root ? strlen(root) : 0;
+    /* A root of "" or "/" would rewrite the head of every absolute path in
+     * the plan, including the sysroot library paths. Refuse instead of
+     * modelling it, exactly as zcc's prefix-map reader does. */
+    if (!flags || !build_graph || root_len < 2u || root[0] != '/' ||
+        snprintf(path, sizeof(path), "%s/build/dev-loop/restart.env", root) >=
+            (int)sizeof(path))
+        return false;
+    FILE *f = fopen(path, "rb");
+    if (!f) return false;
+    size_t n = fread(body, 1, sizeof(body) - 1, f);
+    bool ok = !ferror(f) && n > 0 && n < sizeof(body) - 1;
+    fclose(f);
+    if (!ok) return false;
+    body[n] = 0;
+    struct sha3_256_ctx flags_sha, graph_sha;
+    hash_begin(&flags_sha, PROOF_FLAGS_DOMAIN);
+    hash_begin(&graph_sha, PROOF_BUILD_GRAPH_DOMAIN);
+    char *save = NULL;
+    for (char *line = strtok_r(body, "\n", &save); line;
+         line = strtok_r(NULL, "\n", &save)) {
+        char *eq = strchr(line, '=');
+        if (!eq) return false; /* a plan line that is not KEY=VALUE */
+        *eq = 0;
+        if (strcmp(line, "COMPILER_ID") == 0) continue;
+        struct sha3_256_ctx *sha =
+            proof_plan_key_is_flag(line) ? &flags_sha : &graph_sha;
+        sha3_256_write(sha, (const uint8_t *)line, strlen(line) + 1);
+        proof_hash_plan_value(sha, root, root_len, eq + 1);
+    }
+    sha3_256_finalize(&flags_sha, flags);
+    sha3_256_finalize(&graph_sha, build_graph);
+    return true;
+}
+
+/* The variables a receipt binds, and why each is here rather than in a flag:
+ * every one changes what the resolved compiler is handed without appearing
+ * in the plan's argv text -- header and library search redirection, the
+ * driver's subprogram prefix, the SDK root, the build clock. CC/CXX/CFLAGS/
+ * CPPFLAGS/LDFLAGS are here because they are the operator's stated intent;
+ * their effect on the objects is already in flags_root, since Make bakes
+ * them into the plan.
+ *
+ * PATH is deliberately absent, and its absence is the point. Hashing the
+ * literal search path made two boxes with one toolchain disagree about a
+ * variable that resolves nothing this build compiles with: the toolchain
+ * capsule reads the driver at its absolute path
+ * (platform/modules/platform/src/toolchain.c) and hashes the driver, the
+ * backend, the assembler version, the sysroot and the ABI libraries by
+ * content. A reordered PATH now moves no root; a different compiler binary
+ * still moves compiler_root. Locale is absent for the same reason -- it
+ * moves diagnostics, never produced bytes. */
+static bool proof_environment_root(uint8_t out[32])
+{
+    static const char *const names[] = {
+        "CC", "CXX", "CFLAGS", "CPPFLAGS", "LDFLAGS",
+        "CPATH", "C_INCLUDE_PATH", "CPLUS_INCLUDE_PATH", "COMPILER_PATH",
+        "LIBRARY_PATH", "GCC_EXEC_PREFIX", "SDKROOT", "SOURCE_DATE_EPOCH",
+    };
+    struct sha3_256_ctx sha;
+    hash_begin(&sha, PROOF_ENV_DOMAIN);
+    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+        const char *value = getenv(names[i]);
+        /* Set-to-empty and unset are different facts; a bare value would
+         * make them hash the same. */
+        static const char set_tag[] = "set", unset_tag[] = "unset";
+        const char *tag = value ? set_tag : unset_tag;
+        sha3_256_write(&sha, (const uint8_t *)names[i], strlen(names[i]) + 1);
+        sha3_256_write(&sha, (const uint8_t *)tag, strlen(tag) + 1);
+        if (value)
+            sha3_256_write(&sha, (const uint8_t *)value, strlen(value) + 1);
+    }
+    sha3_256_finalize(&sha, out);
+    return true;
+}
+
+/* The one derivation of a proof's four toolchain roots. The receipt writes
+ * them into compiler_root/flags_root/environment_root/build_graph_root, and
+ * the warm-start build-complete marker seals the same four from the same
+ * call -- so a donor whose build identity does not match this proof's own is
+ * exactly as inadmissible as a receipt would be, and there is no second
+ * derivation for the two to drift apart on. That matters because a compiler
+ * upgrade, a changed CFLAGS, or a vendor archive rebuilt in place leaves no
+ * source diff the wrapper-inputs check would catch.
+ *
+ * None of the four carries this checkout's location, so the same tree at two
+ * absolute paths yields the same four values. That is what makes a receipt
+ * mean anything on a second box. */
+bool zcl_dev_proof_build_identity_v1_capture(
+    const char *repo_root, struct zcl_dev_proof_build_identity_v1 *out)
+{
+    struct vcs_toolchain_capsule_v1 capsule;
+    if (!repo_root || !out) return false;
+    memset(out, 0, sizeof(*out));
+    return vcs_toolchain_capsule_v1_capture(&capsule) &&
+           vcs_toolchain_capsule_v1_root(&capsule, out->compiler) &&
+           proof_plan_roots(repo_root, out->flags, out->build_graph) &&
+           proof_environment_root(out->environment);
+}
+
+static bool proof_build_identity_equal(
+    const struct zcl_dev_proof_build_identity_v1 *a,
+    const struct zcl_dev_proof_build_identity_v1 *b)
 {
     return a && b && memcmp(a->compiler, b->compiler, 32) == 0 &&
            memcmp(a->flags, b->flags, 32) == 0 &&
+           memcmp(a->environment, b->environment, 32) == 0 &&
            memcmp(a->build_graph, b->build_graph, 32) == 0;
 }
 
@@ -2048,13 +2206,15 @@ static bool proof_build_identity_equal(const struct proof_build_identity *a,
 static bool warm_marker_write_at(const char *generation, const char *root,
                                    const char *local, const char *base,
                                    int64_t completed,
-                                   const struct proof_build_identity *identity)
+                                   const struct zcl_dev_proof_build_identity_v1 *identity)
 {
     char path[PATH_MAX], body[PATH_MAX + 512];
-    char compiler_hex[65], flags_hex[65], build_graph_hex[65];
+    char compiler_hex[65], flags_hex[65], environment_hex[65];
+    char build_graph_hex[65];
     if (identity) {
         zcl_hex_encode(identity->compiler, 32, compiler_hex);
         zcl_hex_encode(identity->flags, 32, flags_hex);
+        zcl_hex_encode(identity->environment, 32, environment_hex);
         zcl_hex_encode(identity->build_graph, 32, build_graph_hex);
     }
     int path_len = generation ? snprintf(path, sizeof(path), "%s/%s",
@@ -2063,10 +2223,11 @@ static bool warm_marker_write_at(const char *generation, const char *root,
     int body_len = path_len > 0 && root && local && base && completed > 0 &&
             identity
         ? snprintf(body, sizeof(body), "%s\nroot=%s\nlocal=%s\nbase=%s\n"
-                   "completed=%lld\ncompiler=%s\nflags=%s\nbuild_graph=%s\n",
+                   "completed=%lld\ncompiler=%s\nflags=%s\nenvironment=%s\n"
+                   "build_graph=%s\n",
                    PROOF_WARM_MARKER_SCHEMA, root, local, base,
                    (long long)completed, compiler_hex, flags_hex,
-                   build_graph_hex)
+                   environment_hex, build_graph_hex)
         : -1;
     return path_len > 0 && path_len < (int)sizeof(path) && body_len > 0 &&
            body_len < (int)sizeof(body) &&
@@ -2076,8 +2237,8 @@ static bool warm_marker_write_at(const char *generation, const char *root,
 static bool warm_marker_write(const char *generation, const char *root,
                               const char *local, const char *base)
 {
-    struct proof_build_identity identity;
-    if (!proof_build_identity_capture(root, &identity))
+    struct zcl_dev_proof_build_identity_v1 identity;
+    if (!zcl_dev_proof_build_identity_v1_capture(root, &identity))
         return false;
     return warm_marker_write_at(generation, root, local, base,
                                 platform_time_wall_unix(), &identity);
@@ -2098,7 +2259,7 @@ static bool warm_marker_line(const char *line, const char *key,
 static bool warm_marker_read(const char *generation, char root[PATH_MAX],
                              char local[65], char base[65],
                              int64_t *completed_out,
-                             struct proof_build_identity *identity_out)
+                             struct zcl_dev_proof_build_identity_v1 *identity_out)
 {
     char path[PATH_MAX], body[2048];
     if (!generation ||
@@ -2117,6 +2278,7 @@ static bool warm_marker_read(const char *generation, char root[PATH_MAX],
     char completed_text[32] = {0};
     char got_root[PATH_MAX] = {0}, got_local[65] = {0}, got_base[65] = {0};
     char compiler_hex[65] = {0}, flags_hex[65] = {0}, build_graph_hex[65] = {0};
+    char environment_hex[65] = {0};
     int fields = 0;
     while ((line = strtok_r(NULL, "\n", &save))) {
         if (warm_marker_line(line, "root", got_root, sizeof(got_root)) ||
@@ -2127,6 +2289,8 @@ static bool warm_marker_read(const char *generation, char root[PATH_MAX],
             warm_marker_line(line, "compiler", compiler_hex,
                              sizeof(compiler_hex)) ||
             warm_marker_line(line, "flags", flags_hex, sizeof(flags_hex)) ||
+            warm_marker_line(line, "environment", environment_hex,
+                             sizeof(environment_hex)) ||
             warm_marker_line(line, "build_graph", build_graph_hex,
                              sizeof(build_graph_hex)))
             fields++;
@@ -2138,11 +2302,12 @@ static bool warm_marker_read(const char *generation, char root[PATH_MAX],
      * marker from before the identity fields existed is exactly the
      * shortfall this rejects, so an old marker degrades to cold rather
      * than being adopted unverified. */
-    struct proof_build_identity identity;
-    if (fields != 7 || !proof_oid_text(got_local) ||
+    struct zcl_dev_proof_build_identity_v1 identity;
+    if (fields != 8 || !proof_oid_text(got_local) ||
         !proof_oid_text(got_base) ||
         !zcl_hex_decode_lower(compiler_hex, identity.compiler, 32) ||
         !zcl_hex_decode_lower(flags_hex, identity.flags, 32) ||
+        !zcl_hex_decode_lower(environment_hex, identity.environment, 32) ||
         !zcl_hex_decode_lower(build_graph_hex, identity.build_graph, 32))
         return false;
     if (got_root[0] != '/' || strstr(got_root, "..") ||
@@ -2445,8 +2610,8 @@ static bool warm_donor_scan(const char *parent, const char *root,
     /* No verifiable identity for THIS proof means no safe comparison for
      * any candidate: fail closed to cold rather than adopt objects this
      * scan cannot prove match. */
-    struct proof_build_identity current;
-    if (!proof_build_identity_capture(root, &current))
+    struct zcl_dev_proof_build_identity_v1 current;
+    if (!zcl_dev_proof_build_identity_v1_capture(root, &current))
         return false;
     DIR *dir = opendir(parent);
     if (!dir || !parent || !root || !in_use || !donor) {
@@ -2465,7 +2630,7 @@ static bool warm_donor_scan(const char *parent, const char *root,
             continue;
         char marker_root[PATH_MAX], marker_local[65], marker_base[65];
         int64_t completed = 0;
-        struct proof_build_identity candidate_identity;
+        struct zcl_dev_proof_build_identity_v1 candidate_identity;
         if (!warm_marker_read(candidate_path, marker_root, marker_local,
                               marker_base, &completed, &candidate_identity) ||
             strcmp(marker_root, root) != 0 ||
@@ -2523,7 +2688,7 @@ static bool warm_donor_scan(const char *parent, const char *root,
          * choice is stale and cold is safe. */
         char marker_root[PATH_MAX], marker_local[65], marker_base[65];
         int64_t completed = 0;
-        struct proof_build_identity recheck_identity;
+        struct zcl_dev_proof_build_identity_v1 recheck_identity;
         if (!warm_marker_read(candidates[best].path, marker_root,
                               marker_local, marker_base, &completed,
                               &recheck_identity) ||
@@ -2838,37 +3003,22 @@ int zcl_dev_proof_warm_pick(const struct zcl_dev_proof_warm_candidate *c,
     return warm_pick_donor(c, n);
 }
 
-bool zcl_dev_proof_warm_marker_write(const char *generation,
-                                     const char *root, const char *local,
-                                     const char *base, int64_t completed,
-                                     const uint8_t compiler[32],
-                                     const uint8_t flags[32],
-                                     const uint8_t build_graph[32])
+bool zcl_dev_proof_warm_marker_write(
+    const char *generation, const char *root, const char *local,
+    const char *base, int64_t completed,
+    const struct zcl_dev_proof_build_identity_v1 *identity)
 {
-    struct proof_build_identity identity;
-    if (!compiler || !flags || !build_graph)
-        return false;
-    memcpy(identity.compiler, compiler, 32);
-    memcpy(identity.flags, flags, 32);
-    memcpy(identity.build_graph, build_graph, 32);
     return warm_marker_write_at(generation, root, local, base, completed,
-                                &identity);
+                                identity);
 }
 
-bool zcl_dev_proof_warm_marker_read(const char *generation,
-                                    char root[PATH_MAX], char local[65],
-                                    char base[65], int64_t *completed,
-                                    uint8_t compiler[32], uint8_t flags[32],
-                                    uint8_t build_graph[32])
+bool zcl_dev_proof_warm_marker_read(
+    const char *generation, char root[PATH_MAX], char local[65],
+    char base[65], int64_t *completed,
+    struct zcl_dev_proof_build_identity_v1 *identity)
 {
-    struct proof_build_identity identity;
-    if (!warm_marker_read(generation, root, local, base, completed,
-                          &identity))
-        return false;
-    if (compiler) memcpy(compiler, identity.compiler, 32);
-    if (flags) memcpy(flags, identity.flags, 32);
-    if (build_graph) memcpy(build_graph, identity.build_graph, 32);
-    return true;
+    return warm_marker_read(generation, root, local, base, completed,
+                            identity);
 }
 
 bool zcl_dev_proof_warm_seed_and_retime(const char *donor_build,
@@ -3456,24 +3606,6 @@ static bool cycle_proof_reuse(
     return true;
 }
 
-static bool environment_root(uint8_t out[32])
-{
-    static const char *const names[] = {
-        "CC", "CFLAGS", "CPPFLAGS", "LDFLAGS", "LANG", "LC_ALL",
-        "PATH", "ZCL_FAST_CC", "ZCL_FAST_JOBS",
-    };
-    struct sha3_256_ctx sha;
-    hash_begin(&sha, PROOF_ENV_DOMAIN);
-    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
-        const char *value = getenv(names[i]);
-        sha3_256_write(&sha, (const uint8_t *)names[i], strlen(names[i]) + 1);
-        sha3_256_write(&sha, (const uint8_t *)(value ? value : ""),
-                       value ? strlen(value) + 1 : 1);
-    }
-    sha3_256_finalize(&sha, out);
-    return true;
-}
-
 /* The test dimension's runner is exec'd with execvp(), which reuses this
  * process's own `environ` -- there is no separate envp built per child, so
  * whatever this process last set is exactly what every forked test child
@@ -4028,25 +4160,24 @@ static bool proof_worker_body(const struct proof_paths *paths,
         proof_why(why, why_len, "changed_set_hash_failed");
         return false;
     }
-    char policy_path[PATH_MAX], action_path[PATH_MAX];
+    char policy_path[PATH_MAX];
+    struct zcl_dev_proof_build_identity_v1 identity;
     if (snprintf(policy_path, sizeof(policy_path),
                  "%s/cognition/controllers/include/controllers/agent_impact_rules.def",
                  generation) >= (int)sizeof(policy_path) ||
-        snprintf(action_path, sizeof(action_path),
-                 "%s/build/dev-loop/restart.env", paths->root) >=
-            (int)sizeof(action_path) ||
         !hash_file("zcl.dev_proof_impact_policy.v1", policy_path,
                    receipt.impact_policy_root) ||
-        !hash_file("zcl.dev_proof_compiler.v1", action_path,
-                   receipt.compiler_root) ||
-        !hash_file("zcl.dev_proof_flags.v1", action_path,
-                   receipt.flags_root) ||
-        !hash_file("zcl.dev_proof_build_graph.v1", action_path,
-                   receipt.build_graph_root) ||
-        !environment_root(receipt.environment_root)) {
+        !zcl_dev_proof_build_identity_v1_capture(paths->root, &identity)) {
         proof_why(why, why_len, "proof_toolchain_or_policy_unavailable");
         return false;
     }
+    /* The same four roots the warm-start donor marker seals, from the same
+     * call: the receipt and the donor gate cannot disagree about what this
+     * build was. */
+    memcpy(receipt.compiler_root, identity.compiler, 32);
+    memcpy(receipt.flags_root, identity.flags, 32);
+    memcpy(receipt.environment_root, identity.environment, 32);
+    memcpy(receipt.build_graph_root, identity.build_graph, 32);
     struct sha3_256_ctx impact;
     hash_begin(&impact, "zcl.dev_proof_impact_plan.v1");
     sha3_256_write(&impact, receipt.impact_policy_root, 32);
@@ -4310,7 +4441,7 @@ static bool proof_worker_body(const struct proof_paths *paths,
     receipt.created_unix = (uint64_t)platform_time_wall_unix();
     receipt.elapsed_ms = (uint64_t)((platform_time_monotonic_us() - started_us) /
                                     1000);
-    receipt.policy_version = 1;
+    receipt.policy_version = ZCL_DEV_PROOF_POLICY_VERSION;
     receipt.complete = 1;
     if (!receipt_store(paths, &receipt)) {
         proof_why(why, why_len, "receipt_publication_failed");

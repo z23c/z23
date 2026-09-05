@@ -747,7 +747,7 @@ static int selftest(void)
         receipt.dimensions[i].selected = 1;
         receipt.dimensions[i].reused = 1;
     }
-    receipt.policy_version = 1;
+    receipt.policy_version = ZCL_DEV_PROOF_POLICY_VERSION;
     receipt.complete = 1;
     if (!zcl_dev_proof_receipt_child_set_root(
             &receipt, receipt.child_set_root) ||

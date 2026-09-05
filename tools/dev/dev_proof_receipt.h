@@ -26,6 +26,16 @@
 #define ZCL_DEV_PROOF_PUBKEY_BYTES 32u
 #define ZCL_DEV_PROOF_SIGNATURE_BYTES 64u
 #define ZCL_DEV_PROOF_CHILD_WIRE_BYTES 100u
+/* What the roots in a receipt mean, versioned apart from the record layout.
+ * Every producer stamps this and every reader refuses anything else, so a
+ * receipt whose roots were derived under an older policy is named
+ * (`receipt_schema_old`) instead of being compared against roots that mean
+ * something different. Policy 1 keyed compiler/flags/build_graph to three
+ * domain tags over one file that spelled the producer's checkout path, and
+ * environment to the literal PATH; policy 2 keys them to the toolchain
+ * capsule and to path-neutralised build-plan text, so two boxes with one
+ * toolchain agree. */
+#define ZCL_DEV_PROOF_POLICY_VERSION 2u
 
 enum zcl_dev_proof_dimension_id {
     ZCL_DEV_PROOF_GENERATED = 0,

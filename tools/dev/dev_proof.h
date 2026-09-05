@@ -48,6 +48,35 @@ struct zcl_dev_proof_child_action_inputs_v1 {
     uint32_t selected;
 };
 
+/* What a proof was run under, in four roots. None of them contains this
+ * checkout's location, so the same tree at two absolute paths -- on this box
+ * or on another with the same toolchain -- produces the same four values,
+ * which is what lets one box read another's receipt.
+ *
+ *   compiler     the toolchain capsule root: driver and backend bytes,
+ *                assembler version, sysroot and ABI aggregates, target probe.
+ *   flags        the compiler command and every flag the build plan passes.
+ *   environment  the variables that reach the compiler without going through
+ *                a flag (header/library redirection, SDK root, build clock).
+ *   build_graph  which objects, response files and products the plan links.
+ */
+struct zcl_dev_proof_build_identity_v1 {
+    uint8_t compiler[32];
+    uint8_t flags[32];
+    uint8_t environment[32];
+    uint8_t build_graph[32];
+};
+
+/* Derive that identity for one checkout. This is the only derivation of
+ * these four roots in the tree: the receipt's compiler_root/flags_root/
+ * environment_root/build_graph_root and the warm-start donor seal both come
+ * from this call, so the two can never disagree. Reads
+ * <repo_root>/build/dev-loop/restart.env and captures the toolchain capsule;
+ * false means one of those was unavailable and no root was produced.
+ * Defined on POSIX hosts, like the rest of the proof worker. */
+bool zcl_dev_proof_build_identity_v1_capture(
+    const char *repo_root, struct zcl_dev_proof_build_identity_v1 *out);
+
 /* One captured base..local changed set. Heap-resident: the row ceiling is a
  * landing-batch ceiling (thousands of paths), which must never sit in a stack
  * frame. `files` holds `count` pointers into `bytes`; release both together. */
@@ -179,23 +208,19 @@ enum zcl_dev_proof_warm_seed_class zcl_dev_proof_warm_classify(
     const char *rel, bool is_reg);
 int zcl_dev_proof_warm_pick(const struct zcl_dev_proof_warm_candidate *c,
                             size_t n);
-/* `compiler`/`flags`/`build_graph` seal the same three domains the
- * receipt hashes into compiler_root/flags_root/build_graph_root
- * (dev_proof_receipt.h) -- what the donor was built under. A marker
- * without a matching triple on read is refused, so the harness proves the
- * invalidation directly rather than only through the private
+/* `identity` seals what the donor was built under: the same four roots the
+ * receipt records (dev_proof_receipt.h), from the same capture call. A
+ * marker without a matching identity on read is refused, so the harness
+ * proves the invalidation directly rather than only through the private
  * warm_marker_read() it gates. */
-bool zcl_dev_proof_warm_marker_write(const char *generation,
-                                     const char *root, const char *local,
-                                     const char *base, int64_t completed,
-                                     const uint8_t compiler[32],
-                                     const uint8_t flags[32],
-                                     const uint8_t build_graph[32]);
-bool zcl_dev_proof_warm_marker_read(const char *generation,
-                                    char root[PATH_MAX], char local[65],
-                                    char base[65], int64_t *completed,
-                                    uint8_t compiler[32], uint8_t flags[32],
-                                    uint8_t build_graph[32]);
+bool zcl_dev_proof_warm_marker_write(
+    const char *generation, const char *root, const char *local,
+    const char *base, int64_t completed,
+    const struct zcl_dev_proof_build_identity_v1 *identity);
+bool zcl_dev_proof_warm_marker_read(
+    const char *generation, char root[PATH_MAX], char local[65],
+    char base[65], int64_t *completed,
+    struct zcl_dev_proof_build_identity_v1 *identity);
 /* Seed donor_build into gen_build (object and depfile outputs linked,
  * wrapper copied, everything else skipped) and repair the timestamp graph
  * so exactly `changed` (relative to gen_src) reads newer than the seeds.
