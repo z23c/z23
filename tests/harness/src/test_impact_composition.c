@@ -45,6 +45,7 @@
 #include <fcntl.h>
 #include <utime.h>
 
+#include "base/hex.h"
 #include "base/safe_alloc.h"
 #include "codeindex/codeindex.h"
 #include "command/native_dev_proof_command.h"
@@ -2880,6 +2881,248 @@ static int test_pw_marker_identity_invalidates_stale_donor(void)
     return failures;
 }
 
+#if !defined(_WIN32)
+/* One build plan, written the way Make writes it for a checkout that lives
+ * at `root`. The two values a second checkout genuinely cannot reproduce
+ * are part of it on purpose: the -ffile-prefix-map that names the checkout,
+ * and the epoch digest, which comes from a compiler fingerprint that hashes
+ * the CC command string and therefore the checkout path. */
+static bool ic_write_build_plan(const char *root, const char *epoch,
+                                const char *compiler_id, const char *cflags,
+                                const char *extra_line)
+{
+    char plan[8192];
+    int n = snprintf(plan, sizeof(plan),
+        "CC=%s/build/bin/zcc cc\n"
+        "COMPILER_ID=%s\n"
+        "BASE_GENERATION=%s\n"
+        "DEV_CFLAGS=-std=c23 %s -ffile-prefix-map=%s=/zclassic23\n"
+        "DEV_LDFLAGS=-pthread -pie\n"
+        "DEV_LIBS=vendor/lib/libsecp256k1.a -lm\n"
+        "DEV_OBJ_DIR=build/dev-obj/epochs/%s\n"
+        "DEV_LINK_RSP=build/dev-obj/epochs/%s/link-inputs.rsp\n"
+        "DEV_BASE_RELOC=build/dev-obj/epochs/%s/restart-base.o\n"
+        "TEST_CFLAGS=-std=c23 -g -ffile-prefix-map=%s=/zclassic23\n"
+        "TEST_LDFLAGS=-pthread -pie\n"
+        "TEST_LIBS=vendor/lib/libsecp256k1.a -lm\n"
+        "TEST_OBJ_DIR=build/test-obj/epochs/%s\n"
+        "TEST_LINK_RSP=build/test-obj/epochs/%s/link-inputs.rsp\n"
+        "TEST_BASE_RELOC=build/test-obj/epochs/%s/restart-base.o\n"
+        "%s",
+        root, compiler_id,
+        "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        cflags, root, epoch, epoch, epoch, root, epoch, epoch, epoch,
+        extra_line ? extra_line : "");
+    return n > 0 && (size_t)n < (int)sizeof(plan) &&
+           ic_write(root, "build/dev-loop/restart.env", plan);
+}
+
+static bool ic_root_set(const uint8_t root[32])
+{
+    uint8_t any = 0;
+    for (size_t i = 0; i < 32; i++) any |= root[i];
+    return any != 0;
+}
+#endif
+
+/* The property the whole receipt rests on: one tree at two absolute paths
+ * has one build identity. Until it did, a receipt was a statement about the
+ * directory that produced it and meant nothing anywhere else. */
+static int test_pw_identity_survives_a_second_checkout_path(void)
+{
+    int failures = 0;
+    TEST("proof identity: two checkout paths, one set of roots") {
+#if defined(_WIN32)
+        ASSERT(true);
+#else
+        static const char epoch_a[] =
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        static const char epoch_b[] =
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        static const char compiler_id_a[] =
+            "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+        static const char compiler_id_b[] =
+            "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+        char root_a[4096], root_b[4096];
+        test_make_tmpdir(root_a, sizeof(root_a), "proof_identity",
+                         "checkout_a");
+        test_make_tmpdir(root_b, sizeof(root_b), "proof_identity",
+                         "checkout_b_longer_name");
+        ASSERT(strcmp(root_a, root_b) != 0);
+        ASSERT(ic_write_build_plan(root_a, epoch_a, compiler_id_a, "-O2",
+                                   NULL));
+        ASSERT(ic_write_build_plan(root_b, epoch_b, compiler_id_b, "-O2",
+                                   NULL));
+        struct zcl_dev_proof_build_identity_v1 a = {0}, b = {0};
+        ASSERT(zcl_dev_proof_build_identity_v1_capture(root_a, &a));
+        ASSERT(zcl_dev_proof_build_identity_v1_capture(root_b, &b));
+        ASSERT(memcmp(&a, &b, sizeof(a)) == 0);
+        /* Equal-because-empty would satisfy the line above and prove
+         * nothing, so every root has to carry something. */
+        ASSERT(ic_root_set(a.compiler) && ic_root_set(a.flags) &&
+               ic_root_set(a.environment) && ic_root_set(a.build_graph));
+        /* compiler_root is the toolchain capsule, not a hash of the plan. */
+        struct vcs_toolchain_capsule_v1 capsule;
+        uint8_t capsule_root[32];
+        ASSERT(vcs_toolchain_capsule_v1_capture(&capsule));
+        ASSERT(vcs_toolchain_capsule_v1_root(&capsule, capsule_root));
+        ASSERT(memcmp(a.compiler, capsule_root, 32) == 0);
+        /* A checkout root a prefix rewrite cannot model is refused rather
+         * than half-applied. */
+        struct zcl_dev_proof_build_identity_v1 refused = {0};
+        ASSERT(!zcl_dev_proof_build_identity_v1_capture("/", &refused));
+        ASSERT(!zcl_dev_proof_build_identity_v1_capture(root_a, NULL));
+        /* The four roots this box puts in a receipt, printed so two boxes
+         * can be compared without either running a proof. */
+        char compiler_hex[65], flags_hex[65], environment_hex[65];
+        char build_graph_hex[65];
+        zcl_hex_encode(a.compiler, 32, compiler_hex);
+        zcl_hex_encode(a.flags, 32, flags_hex);
+        zcl_hex_encode(a.environment, 32, environment_hex);
+        zcl_hex_encode(a.build_graph, 32, build_graph_hex);
+        printf("impact_composition: proof build identity compiler=%s "
+               "flags=%s environment=%s build_graph=%s\n",
+               compiler_hex, flags_hex, environment_hex, build_graph_hex);
+        ASSERT(test_rm_rf_recursive(root_a) == 0);
+        ASSERT(test_rm_rf_recursive(root_b) == 0);
+#endif
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* Each root answers one question, and moving one input moves exactly one
+ * root. A root that moved for someone else's reason is a root nobody can
+ * read. */
+static int test_pw_identity_keeps_its_four_roots_apart(void)
+{
+    int failures = 0;
+    TEST("proof identity: one input moves exactly one root") {
+#if defined(_WIN32)
+        ASSERT(true);
+#else
+        static const char epoch[] =
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        static const char compiler_id[] =
+            "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+        char root[4096];
+        test_make_tmpdir(root, sizeof(root), "proof_identity", "separation");
+        struct zcl_dev_proof_build_identity_v1 baseline = {0}, moved = {0};
+        ASSERT(ic_write_build_plan(root, epoch, compiler_id, "-O2", NULL));
+        ASSERT(zcl_dev_proof_build_identity_v1_capture(root, &baseline));
+
+        /* A flag the plan passes moves flags_root and nothing else. */
+        ASSERT(ic_write_build_plan(root, epoch, compiler_id, "-O0", NULL));
+        ASSERT(zcl_dev_proof_build_identity_v1_capture(root, &moved));
+        ASSERT(memcmp(moved.flags, baseline.flags, 32) != 0);
+        ASSERT(memcmp(moved.compiler, baseline.compiler, 32) == 0);
+        ASSERT(memcmp(moved.environment, baseline.environment, 32) == 0);
+        ASSERT(memcmp(moved.build_graph, baseline.build_graph, 32) == 0);
+
+        /* A plan line this build has never heard of lands in the build
+         * graph. It must never be silently dropped: an input nobody hashes
+         * is an input nobody notices changing. */
+        ASSERT(ic_write_build_plan(root, epoch, compiler_id, "-O2",
+                                   "DEV_SOMETHING_NEW=1\n"));
+        ASSERT(zcl_dev_proof_build_identity_v1_capture(root, &moved));
+        ASSERT(memcmp(moved.build_graph, baseline.build_graph, 32) != 0);
+        ASSERT(memcmp(moved.compiler, baseline.compiler, 32) == 0);
+        ASSERT(memcmp(moved.flags, baseline.flags, 32) == 0);
+        ASSERT(memcmp(moved.environment, baseline.environment, 32) == 0);
+
+        /* A plan line that is not KEY=VALUE is refused, not guessed at. */
+        ASSERT(ic_write_build_plan(root, epoch, compiler_id, "-O2",
+                                   "a line with no equals sign\n"));
+        ASSERT(!zcl_dev_proof_build_identity_v1_capture(root, &moved));
+        ASSERT(ic_write_build_plan(root, epoch, compiler_id, "-O2", NULL));
+
+        /* An environment variable that reaches the compiler without going
+         * through a flag moves environment_root and nothing else. */
+        const char *saved_cflags = getenv("CFLAGS");
+        char restore_cflags[4096] = {0};
+        if (saved_cflags)
+            snprintf(restore_cflags, sizeof(restore_cflags), "%s",
+                     saved_cflags);
+        ASSERT(setenv("CFLAGS", "-fsanitize=undefined", 1) == 0);
+        ASSERT(zcl_dev_proof_build_identity_v1_capture(root, &moved));
+        ASSERT(memcmp(moved.environment, baseline.environment, 32) != 0);
+        ASSERT(memcmp(moved.compiler, baseline.compiler, 32) == 0);
+        ASSERT(memcmp(moved.flags, baseline.flags, 32) == 0);
+        ASSERT(memcmp(moved.build_graph, baseline.build_graph, 32) == 0);
+        if (saved_cflags)
+            ASSERT(setenv("CFLAGS", restore_cflags, 1) == 0);
+        else
+            ASSERT(unsetenv("CFLAGS") == 0);
+
+        /* PATH moves nothing. It used to move environment_root, which is
+         * why two boxes with one toolchain could never agree; the compiler
+         * is identified by the bytes of the driver it resolves, not by the
+         * search order that would have found it. */
+        const char *saved_path = getenv("PATH");
+        char restore_path[8192] = {0}, reordered[8192];
+        ASSERT(saved_path != NULL);
+        snprintf(restore_path, sizeof(restore_path), "%s", saved_path);
+        ASSERT(snprintf(reordered, sizeof(reordered), "/nonexistent-probe:%s",
+                        restore_path) < (int)sizeof(reordered));
+        ASSERT(setenv("PATH", reordered, 1) == 0);
+        ASSERT(zcl_dev_proof_build_identity_v1_capture(root, &moved));
+        ASSERT(setenv("PATH", restore_path, 1) == 0);
+        ASSERT(memcmp(&moved, &baseline, sizeof(moved)) == 0);
+
+        /* A different compiler binary still moves compiler_root: the
+         * capsule carries the driver's bytes, so replacing the driver
+         * changes the root even though no path changed. */
+        struct vcs_toolchain_capsule_v1 capsule, swapped;
+        uint8_t here[32], elsewhere[32];
+        ASSERT(vcs_toolchain_capsule_v1_capture(&capsule));
+        ASSERT(vcs_toolchain_capsule_v1_root(&capsule, here));
+        swapped = capsule;
+        swapped.compiler_driver_sha3[0] ^= 1u;
+        ASSERT(vcs_toolchain_capsule_v1_root(&swapped, elsewhere));
+        ASSERT(memcmp(here, elsewhere, 32) != 0);
+        ASSERT(memcmp(here, baseline.compiler, 32) == 0);
+
+        ASSERT(test_rm_rf_recursive(root) == 0);
+#endif
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* A receipt whose roots were derived under the old meaning is named, not
+ * compared. Comparing it would ask whether a hash of a checkout path equals
+ * a hash of a toolchain. */
+static int test_pw_receipt_refuses_an_older_root_policy(void)
+{
+    int failures = 0;
+    static const char local[] =
+        "1111111111111111111111111111111111111111";
+    static const char base[] =
+        "2222222222222222222222222222222222222222";
+    TEST("proof identity: a receipt from the old root policy is refused") {
+        struct zcl_dev_acceptance_receipt_v1 receipt =
+            ic_valid_dev_proof_receipt();
+        char why[128];
+        ASSERT(zcl_dev_proof_receipt_validate(&receipt, local, base,
+                                              why, sizeof(why)));
+        ASSERT(ZCL_DEV_PROOF_POLICY_VERSION >= 2u);
+        struct zcl_dev_acceptance_receipt_v1 old = receipt;
+        old.policy_version = ZCL_DEV_PROOF_POLICY_VERSION - 1u;
+        ASSERT(zcl_dev_proof_receipt_seal(&old));
+        ASSERT(!zcl_dev_proof_receipt_validate(&old, local, base,
+                                               why, sizeof(why)));
+        ASSERT(strcmp(why, "receipt_schema_old") == 0);
+        struct zcl_dev_acceptance_receipt_v1 newer = receipt;
+        newer.policy_version = ZCL_DEV_PROOF_POLICY_VERSION + 1u;
+        ASSERT(zcl_dev_proof_receipt_seal(&newer));
+        ASSERT(!zcl_dev_proof_receipt_validate(&newer, local, base,
+                                               why, sizeof(why)));
+        ASSERT(strcmp(why, "receipt_schema_newer_than_this_build") == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 /* The one line a developer reads beside an admitted receipt: what the
  * sidecar warm_sidecar_write() left behind, turned into "warm-start from
  * donor <id>" or "cold: <typed reason>" -- never prose, never a env-var
@@ -3175,6 +3418,9 @@ int test_impact_composition(void)
     failures += test_pw_pick_newest_complete_idle();
     failures += test_pw_marker_round_trip_and_refusals();
     failures += test_pw_marker_identity_invalidates_stale_donor();
+    failures += test_pw_identity_survives_a_second_checkout_path();
+    failures += test_pw_identity_keeps_its_four_roots_apart();
+    failures += test_pw_receipt_refuses_an_older_root_policy();
     failures += test_pw_status_line_reports_warm_or_typed_cold();
     failures += test_pw_seed_links_replaces_and_copies();
     failures += test_pw_seed_cold_without_seedables();
