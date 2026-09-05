@@ -39,7 +39,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 FRONT_DOOR="$SCRIPT_DIR/install.sh"
 BOOTSTRAP="${Z23_BOOTSTRAP_BIN:-$REPO_ROOT/build/bin/z23-bootstrap}"
 
@@ -335,12 +335,39 @@ case_boot_print_pin() {
     grep -qx -- "$GOOD_PIN" "$ROOT/printpin.out" \
         || die "--print-pin must print the agreed pin and nothing else"
 
+    local marker="SENSITIVE_BOOTSTRAP_MARKER_9f3a"
     RC=0
     env -i PATH="$ROOT/minbin" HOME="$ROOT" TMPDIR="$BOOTTMP" \
-        "$BOOTSTRAP" --wat >"$ROOT/badarg.out" 2>"$ROOT/badarg.err" || RC=$?
+        "$BOOTSTRAP" "$marker" >"$ROOT/badarg.out" 2>"$ROOT/badarg.err" || RC=$?
     [ "$RC" -eq 1 ] || die "an unknown argument must refuse (rc=$RC)"
-    grep -q 'unknown argument: --wat' "$ROOT/badarg.err" \
-        || die "an unknown argument must be named"
+    if grep -q "$marker" "$ROOT/badarg.out" || grep -q "$marker" "$ROOT/badarg.err"; then
+        die "the sensitive argument was disclosed"
+    fi
+    grep -q 'unsupported bootstrap argument' "$ROOT/badarg.err" \
+        || die "an unknown argument refusal must be explanatory"
+
+    # Even the diagnostic mode accepts exactly one switch. A sensitive marker
+    # supplied as a second argument must never be echoed, and argc refusal must
+    # happen before scratch creation, network access, or installer handoff.
+    rm -rf -- "$BOOTTMP"
+    mkdir -p "$BOOTTMP"
+    RC=0
+    env -i PATH="$ROOT/minbin" HOME="$ROOT" TMPDIR="$BOOTTMP" \
+        Z23_FD_TEST_ARGV_LOG="$ROOT/extra.argv" \
+        Z23_INSTALL_TEST_ORIGIN="file://$ROOT/http/front" \
+        Z23_INSTALL_TEST_PIN_REPO_URL="file://$ROOT/http/repo/RELEASE_PIN" \
+        "$BOOTSTRAP" --print-pin "$marker" >"$ROOT/extra.out" \
+        2>"$ROOT/extra.err" || RC=$?
+    [ "$RC" -eq 1 ] || die "--print-pin with an extra argument must refuse (rc=$RC)"
+    if grep -q "$marker" "$ROOT/extra.out" || grep -q "$marker" "$ROOT/extra.err"; then
+        die "the sensitive extra argument was disclosed"
+    fi
+    grep -q 'unsupported bootstrap argument' "$ROOT/extra.err" \
+        || die "the extra bootstrap argument refusal must be explanatory"
+    [ -z "$(ls -A "$BOOTTMP")" ] \
+        || die "argument refusal created scratch state"
+    [ ! -e "$ROOT/extra.argv" ] \
+        || die "argument refusal reached the installer handoff"
     say "PASS --print-pin resolves the channels and installs nothing"
 }
 

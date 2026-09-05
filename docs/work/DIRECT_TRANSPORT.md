@@ -8,6 +8,11 @@
 > FAST without giving up censorship resistance or user control. Application
 > plane only — no consensus surface anywhere below.
 
+Private fleet invitation exchange follows the narrower
+[`bootstrap joining contract`](./BOOTSTRAP_PLAN.md#private-fleet-joining):
+onion only, with no direct candidate racing or clearnet fallback. The realtime
+transport choices below do not authorize exposing a private fleet endpoint.
+
 ## The ladder this completes
 
 1. TCP clearnet direct (`-addnode ip:port`) — shipped.
@@ -90,9 +95,9 @@ Rules:
 - Hermit nodes complete full sync, ZMSG, and UDP sessions while appearing
   in no discovery surface; a capture gate greps directory/PEX/census
   artifacts for their absence on every run.
-- Honest limitation, stated once: unpublished ≠ unseen. Any direct peer
-  observes the connection source. True invisibility means onion-only
-  operation — which is why it is the default.
+- Honest limitation: unpublished does not mean unseen. A direct peer observes
+  the connection source. Onion transport protects endpoint location; it does
+  not guarantee invisibility or prevent every form of traffic correlation.
 - Operator truth card in `z23 status`: one plain-language line ("the world
   can see: your .onion address") plus the single command to change posture.
 

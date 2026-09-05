@@ -1422,7 +1422,7 @@ selftest_release_pin() {
 # not shipped inside the served script: that script has to stay short enough
 # that a careful person reads it before piping it to a shell.
 selftest_front_door() {
-    local dir="$SCRIPT_DIR/../../packaging/install"
+    local dir="$SCRIPT_DIR/../../platform/packaging/install"
     # This installer also ships alone (the front door downloads just this
     # file), and then there is no repository beside it to test. That is
     # UNOBSERVED, not a pass — but inside the repository, where every gate

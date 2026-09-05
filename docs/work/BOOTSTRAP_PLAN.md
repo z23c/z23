@@ -119,6 +119,59 @@ tampered mirror, successful fallback, and identical installed bytes from two
 unrelated mirrors. Peer discovery and mirror selection must not change release
 authority.
 
+## Private fleet joining
+
+The intended flow is: install Z23, enter one invitation through a private
+local input, connect over onion, and approve the requested access locally.
+This is an acceptance requirement, not a claim that the current installers
+complete that flow. Windows must use the same native C23 policy as Linux and
+macOS; platform shims only start the verified native program.
+
+Fleet invitation exchange must verify the expected onion service identity
+and separately authenticate both application identities before admission. It must
+not race direct TCP/UDP candidates, resolve the onion name through public
+DNS, use a public onion gateway, or silently fall back to clearnet. An
+unavailable Tor runtime or unreachable onion service produces a bounded,
+actionable refusal. Downloading the public installer from `z23.sh` remains
+a separate HTTPS operation and must never receive the invitation.
+
+No central join registry, analytics endpoint, or public fleet membership
+directory is part of this flow. Reuse the existing invitation, identity,
+admission, and receipt authorities, extending their versioned contracts where
+needed; an existing signature or expiry check does not establish every gate
+below. Invites bind the expected operator and requested scope, expire, and
+refuse replay or tampering under receiver-local policy. A friendly short
+name is not an authentication secret. Invitation secrets must stay out of
+process arguments, URLs, shell history, diagnostics, and public board/wiki
+posts; noninteractive callers need a bounded private input channel.
+
+Joining does not grant unrestricted machine access. Each receiving operator
+controls peer admission, allowed tasks and paths, resource limits, lease
+duration, cancellation, and revocation. Any machine-access tunnel uses the
+same onion transport and explicit local access policy. Fleet membership
+grants no wallet, consensus, deployment, or arbitrary shell authority.
+Private operational evidence stays local or within the authorized fleet;
+public development pages contain no invitation secrets or machine topology.
+
+Onion services protect endpoint location, but neither onion transport nor
+the absence of analytics guarantees that activity cannot be correlated.
+Application content, stable identities, timing, and a compromised endpoint
+can disclose information. State the actual privacy boundary rather than
+promising untrackability. See the Tor Project's
+[operational security guidance](https://community.torproject.org/onion-services/advanced/opsec/).
+
+Acceptance must observe two consenting hosts completing the exact invitation
+exchange, including a native Windows receiver. Freeze refusal fixtures for
+expiry, replay, tampering, wrong operator, denied scope, and unavailable Tor.
+Exercise the join handler behind a controlled network/resolver boundary that
+records and refuses any path outside its onion transport; the Tor runtime's
+own relay connections remain separate. Scan captured diagnostics for invite
+secrets and observe refusal of attempted direct fallback, public DNS lookup
+of the onion name, and join analytics requests. Verify that cancellation and
+revocation stop authorized work and
+that blockchain responsiveness retains priority. A parsed invitation or a
+cross-linked executable alone does not satisfy these gates.
+
 ## Platform work
 
 - **Linux-x86_64:** packaging and the systemd installer exist. Public bootstrap

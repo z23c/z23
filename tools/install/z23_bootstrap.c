@@ -492,12 +492,12 @@ static int bootstrap_main(int argc, char **argv)
      * surface install.sh had. An unknown argument is refused rather than
      * ignored: a typo that silently installs is worse than one that stops. */
     if (argc > 2)
-        die("unknown argument: %s", argv[2]);
+        die("unsupported bootstrap arguments; use --print-pin");
     if (argc == 2) {
         if (strcmp(argv[1], "--print-pin") == 0)
             print_pin = true;
         else
-            die("unknown argument: %s", argv[1]);
+            die("unsupported bootstrap argument; use --print-pin");
     }
 
     const char *origin = getenv("Z23_INSTALL_TEST_ORIGIN");
