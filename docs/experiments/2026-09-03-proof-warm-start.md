@@ -52,8 +52,8 @@ on a 32-CPU host). Numbers below are the receipt sidecars verbatim.
 
 | run | commit | warm | donor_local | files_linked | bytes_linked | compile_mode | compile_ms | bundle_ms | receipt |
 |-----|--------|------|-------------|--------------|--------------|--------------|------------|-----------|---------|
-| cold | `994bc0858` | 0 | - | 0 | 0 | built | 109180 | 102573 | FAILED (2 test groups, build phases green) |
-| warm | `0510045c` | 1 | `994bc0858` | 15098 | 835402816 | built | 126584 | 114209 | FAILED (same 2 test groups, build phases green) |
+| cold | `994bc0858` | 0 | - | 0 | 0 | built | 109180 | 102573 | FAILED (2 test groups <!-- doc-count-ok: this run's failing-group count, not a whole-repo total -->, build phases green) |
+| warm | `0510045c` | 1 | `994bc0858` | 15098 | 835402816 | built | 126584 | 114209 | FAILED (same 2 test groups <!-- doc-count-ok: this run's failing-group count, not a whole-repo total -->, build phases green) |
 
 Prior-session sidecars, same host, same probe shape (supporting data):
 
