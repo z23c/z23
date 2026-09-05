@@ -108,13 +108,13 @@ static bool zdev_runtime_owns_ledger(const char *datadir)
  * revalidates it and commits through app_runtime_node_db(). Ownership comes
  * from the database lease, not an RPC-cookie convention: credential-directory
  * nodes deliberately have no <datadir>/.cookie. */
-bool zcl_native_forward_live_command(
-    const struct zcl_command_request *request, const char *datadir,
+static bool zdev_forward_live_input(
+    const struct json_value *input, const char *datadir,
     const char *rpc_method, const char *fallback_code,
     const char *fallback_phase, const char *evidence,
     struct zcl_command_reply *reply)
 {
-    if (!request || !request->input || !datadir || !datadir[0] ||
+    if (!input || !datadir || !datadir[0] ||
         zdev_runtime_owns_ledger(datadir))
         return false;
     char db_path[ZDEV_PATH_MAX];
@@ -143,7 +143,7 @@ bool zcl_native_forward_live_command(
     int64_t encode_started_us = platform_time_monotonic_us();
     struct json_value params;
     json_init(&params); json_set_array(&params);
-    bool built = json_push_back(&params, request->input);
+    bool built = json_push_back(&params, input);
     size_t needed = built ? json_write(&params, NULL, 0) : 0;
     char *wire = needed > 0 && needed < 256u * 1024u
         ? zcl_malloc(needed + 1u, "zcode.live_rpc") : NULL;
@@ -245,6 +245,17 @@ bool zcl_native_forward_live_command(
     }
     json_free(&body);
     return true;
+}
+
+bool zcl_native_forward_live_command(
+    const struct zcl_command_request *request, const char *datadir,
+    const char *rpc_method, const char *fallback_code,
+    const char *fallback_phase, const char *evidence,
+    struct zcl_command_reply *reply)
+{
+    return zdev_forward_live_input(
+        request ? request->input : NULL, datadir, rpc_method, fallback_code,
+        fallback_phase, evidence, reply);
 }
 
 static int64_t zdev_int(const struct json_value *input, const char *key,
@@ -791,14 +802,39 @@ void zcl_native_handle_zcode_evidence(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
 {
     if (!request || !reply) return;
-    const char *workspace_arg = zdev_str(request->input, "workspace");
-    const char *action_id = zdev_str(request->input, "action_id");
-    const char *datadir = zdev_str(request->input, "datadir");
+    zcl_native_zcode_evidence_exact(
+        zdev_str(request->input, "workspace"),
+        zdev_str(request->input, "datadir"),
+        zdev_str(request->input, "action_id"), reply);
+}
+
+void zcl_native_zcode_evidence_exact(
+    const char *workspace_arg, const char *datadir_arg, const char *action_id,
+    struct zcl_command_reply *reply)
+{
+    if (!reply) return;
+    const char *datadir = datadir_arg;
     if (!datadir || !datadir[0]) datadir = zcl_native_command_datadir();
-    if (zcl_native_forward_live_command(
-            request, datadir, "zcode_work_evidence",
-            "LIVE_EVIDENCE_FAILED", "evaluate", "zcode.evidence", reply))
+    struct json_value params;
+    json_init(&params); json_set_object(&params);
+    bool rendered = workspace_arg && datadir && action_id &&
+        json_push_kv_str(&params, "workspace", workspace_arg) &&
+        json_push_kv_str(&params, "datadir", datadir) &&
+        json_push_kv_str(&params, "action_id", action_id);
+    if (!rendered) {
+        json_free(&params);
+        zcl_command_reply_fail(
+            reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
+            "BAD_EVIDENCE_INPUT", "validate", false, false,
+            "workspace must resolve and action_id must be 64 lowercase hex",
+            "zcode.evidence");
         return;
+    }
+    bool forwarded = zdev_forward_live_input(
+            &params, datadir, "zcode_work_evidence",
+            "LIVE_EVIDENCE_FAILED", "evaluate", "zcode.evidence", reply);
+    json_free(&params);
+    if (forwarded) return;
     char workspace[ZDEV_PATH_MAX];
     uint8_t action_check[32];
     if (!workspace_arg || !platform_directory_canonical_real(

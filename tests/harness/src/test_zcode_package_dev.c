@@ -3935,6 +3935,22 @@ static __attribute__((unused)) int zpd_test_work_start(void)
             const struct zcl_command_spec *spec =
                 zcl_command_registry_find(registry, "zcode.work.publish", NULL);
             ASSERT(spec != NULL);
+            const char *internal_keys[] = {
+                "path", "kind", "namespace", "transport_root",
+                "include_evidence_wires", "board", "action_id",
+            };
+            for (size_t i = 0;
+                 i < sizeof(internal_keys) / sizeof(internal_keys[0]); i++) {
+                struct json_value invalid;
+                json_init(&invalid);
+                json_copy(&invalid, &guided_publication_next);
+                ASSERT(json_push_kv_str(&invalid, internal_keys[i], "private"));
+                char why[160] = {0};
+                ASSERT(!zcl_command_registry_input_validate(
+                    spec, &invalid, why, sizeof(why)));
+                ASSERT(strstr(why, "unknown input key") != NULL);
+                json_free(&invalid);
+            }
             struct zcl_command_context context = {
                 .registry = registry,
                 .source_root = root,

@@ -866,17 +866,10 @@ static bool dev_publication_lane_lookup(
 
     bool proof_verified = false;
     for (int i = 0; i < action_count && !proof_verified; i++) {
-        struct json_value input;
-        json_init(&input); json_set_object(&input);
-        bool input_ok = json_push_kv_str(&input, "workspace", workspace) &&
-            json_push_kv_str(&input, "datadir", datadir) &&
-            json_push_kv_str(&input, "action_id", actions[i].action_id);
-        struct zcl_command_request evidence_request = { .input = &input };
         struct zcl_command_reply evidence_reply;
         zcl_command_reply_init(&evidence_reply, "zcl.zcode_evidence.v1");
-        if (input_ok)
-            zcl_native_handle_zcode_evidence(
-                &evidence_request, &evidence_reply);
+        zcl_native_zcode_evidence_exact(
+            workspace, datadir, actions[i].action_id, &evidence_reply);
         const char *evaluated_proof = json_get_str(
             json_get(&evidence_reply.data, "proof_set_root"));
         const struct json_value *policy_value = json_get(
@@ -887,7 +880,6 @@ static bool dev_publication_lane_lookup(
             json_get_bool(policy_value) && evaluated_proof &&
             strcmp(evaluated_proof, status.proof_set_root_sha3) == 0;
         zcl_command_reply_free(&evidence_reply);
-        json_free(&input);
     }
     if (!proof_verified) return false;
     memcpy(lane_root, accepted.accepted_work_root, 32);
@@ -897,11 +889,12 @@ static bool dev_publication_lane_lookup(
     return true;
 }
 
-void zcl_native_handle_dev_publication_advance(
-    const struct zcl_command_request *request, struct zcl_command_reply *reply)
+void zcl_dev_publication_advance(
+    const struct zcl_dev_publication_input *input,
+    struct zcl_command_reply *reply)
 {
-    const char *job_hex = json_get_str(json_get(request->input, "job_root"));
-    bool details = json_get_bool(json_get(request->input, "details"));
+    const char *job_hex = input ? input->job_root : NULL;
+    bool details = input && input->details;
     uint8_t job_root[32];
     char job_root_err[128];
     if (!zcl_native_require_hex64("job_root", job_hex, job_root, job_root_err,
@@ -913,9 +906,8 @@ void zcl_native_handle_dev_publication_advance(
         return;
     }
     char resolved_workspace[PATH_MAX];
-    const char *workspace = json_get_str(json_get(request->input,
-                                                   "workspace"));
-    const char *repo_root = dev_source_root(request);
+    const char *workspace = input ? input->workspace : NULL;
+    const char *repo_root = input ? input->source_root : NULL;
     if (workspace && workspace[0]) {
         if (!dev_canonical_directory(workspace, resolved_workspace)) {
             zcl_command_reply_fail(
@@ -945,7 +937,7 @@ void zcl_native_handle_dev_publication_advance(
         repo_root, job_root, &job);
     bool have_progress = vcs_devloop_publication_progress_load(
         repo_root, job_root, &progress, loaded_progress_root);
-    const char *datadir = json_get_str(json_get(request->input, "datadir"));
+    const char *datadir = input ? input->datadir : NULL;
     uint8_t lane_root[32];
     char proof_set_hex[65] = "", lane_name[16] = "";
     bool source_reproduced = have_progress && progress.phase ==
@@ -1352,10 +1344,24 @@ void zcl_native_handle_dev_publication_advance(
             "z23 zcode guide");
 }
 
-void zcl_native_handle_dev_publication_collect(
+void zcl_native_handle_dev_publication_advance(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
 {
-    const char *job_hex = json_get_str(json_get(request->input, "job_root"));
+    struct zcl_dev_publication_input publication = {
+        .source_root = dev_source_root(request),
+        .workspace = json_get_str(json_get(request->input, "workspace")),
+        .datadir = json_get_str(json_get(request->input, "datadir")),
+        .job_root = json_get_str(json_get(request->input, "job_root")),
+        .details = json_get_bool(json_get(request->input, "details")),
+    };
+    zcl_dev_publication_advance(&publication, reply);
+}
+
+void zcl_dev_publication_collect(
+    const struct zcl_dev_publication_input *input,
+    struct zcl_command_reply *reply)
+{
+    const char *job_hex = input ? input->job_root : NULL;
     uint8_t job_root[32];
     char job_root_err[128];
     if (!zcl_native_require_hex64("job_root", job_hex, job_root, job_root_err,
@@ -1378,7 +1384,7 @@ void zcl_native_handle_dev_publication_collect(
             "getblockhash(0)");
         return;
     }
-    const char *repo_root = dev_source_root(request);
+    const char *repo_root = input ? input->source_root : NULL;
     struct vcs_devloop_publication_ack_target target;
     bool collecting_reproduction =
         vcs_devloop_publication_source_reproduction_target(
@@ -1428,21 +1434,11 @@ void zcl_native_handle_dev_publication_collect(
 
     char transport_hex[65];
     zcl_hex_encode(target.transport_root, 32, transport_hex);
-    struct json_value input;
-    json_init(&input);
-    json_set_object(&input);
-    (void)json_push_kv_str(
-        &input, "kind", collecting_reproduction
-                            ? "source_reproduction_ack" : "storage_ack");
-    (void)json_push_kv_str(&input, "namespace", target.namespace_name);
-    (void)json_push_kv_str(&input, "transport_root", transport_hex);
-    (void)json_push_kv_bool(&input, "include_evidence_wires", true);
-    struct zcl_command_request discovery_request = *request;
-    discovery_request.input = &input;
     struct zcl_command_reply discovery;
     zcl_command_reply_init(&discovery, "zcl.zcode_network_records.v1");
-    zcl_native_handle_zcode_network_records(&discovery_request, &discovery);
-    json_free(&input);
+    zcl_native_zcode_network_records_exact(
+        collecting_reproduction ? "source_reproduction_ack" : "storage_ack",
+        target.namespace_name, transport_hex, true, &discovery);
     if (discovery.exit_code != ZCL_COMMAND_EXIT_OK) {
         zcl_command_reply_fail(
             reply, discovery.status, discovery.exit_code,
@@ -1595,6 +1591,16 @@ void zcl_native_handle_dev_publication_collect(
             (void)json_push_kv_str(
                 &reply->data, "next_command", reproduce);
     }
+}
+
+void zcl_native_handle_dev_publication_collect(
+    const struct zcl_command_request *request, struct zcl_command_reply *reply)
+{
+    struct zcl_dev_publication_input publication = {
+        .source_root = dev_source_root(request),
+        .job_root = json_get_str(json_get(request->input, "job_root")),
+    };
+    zcl_dev_publication_collect(&publication, reply);
 }
 
 void zcl_native_handle_dev_core_boundary(

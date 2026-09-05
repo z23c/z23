@@ -497,14 +497,14 @@ static void zdn_release_capability(const char *cancel_method,
   free(node_rpc_call(cancel_method, params));
   free(params);
 }
-static void zdn_async_wrapper(const struct zcl_command_request *request,
+static void zdn_async_wrapper(const struct json_value *params,
                               struct zcl_command_reply *reply,
                               const char *begin_method,
                               const char *poll_method,
                               const char *cancel_method,
                               uint64_t deadline_seconds) {
   struct json_value body;
-  if (!zdn_rpc_body(request->input, reply, begin_method, &body))
+  if (!zdn_rpc_body(params, reply, begin_method, &body))
     return;
   if (!json_get_bool_or(&body, "ok", false)) {
     zdn_apply_body(reply, &body, begin_method);
@@ -574,7 +574,8 @@ void zcl_native_handle_zcode_network_peers(
 void zcl_native_handle_zcode_network_find(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply) {
-  zdn_async_wrapper(request, reply, "zcode_dht_find_begin",
+  zdn_async_wrapper(request ? request->input : NULL, reply,
+                    "zcode_dht_find_begin",
                     "zcode_dht_find_poll", "zcode_dht_find_cancel",
                     VCS_ZCODE_DHT_LOOKUP_CEILING_S + 5u);
 }
@@ -620,10 +621,42 @@ void zcl_native_handle_zcode_network_records(
     json_free(&input);
     return;
   }
-  zdn_async_wrapper(request, reply, "zcode_dht_record_begin",
+  zdn_async_wrapper(request ? request->input : NULL, reply,
+                    "zcode_dht_record_begin",
                     "zcode_dht_record_poll", "zcode_dht_record_cancel",
                     VCS_ZCODE_DHT_LOOKUP_CEILING_S +
                         VCS_ZCODE_DHT_SERVICE_QUERY_TIMEOUT_S + 5u);
+}
+
+void zcl_native_zcode_network_records_exact(
+    const char *kind, const char *namespace_name,
+    const char *transport_root, bool include_evidence_wires,
+    struct zcl_command_reply *reply) {
+  if (!kind || !namespace_name || !transport_root || !reply) {
+    zdn_fail(reply, "BAD_RECORD_QUERY", "normalize",
+             "the typed record query is incomplete", "zcode.network.records");
+    return;
+  }
+  struct json_value params;
+  json_init(&params);
+  json_set_object(&params);
+  bool rendered = json_push_kv_str(&params, "kind", kind) &&
+      json_push_kv_str(&params, "namespace", namespace_name) &&
+      json_push_kv_str(&params, "transport_root", transport_root) &&
+      json_push_kv_bool(&params, "include_evidence_wires",
+                        include_evidence_wires);
+  if (!rendered) {
+    json_free(&params);
+    zdn_fail(reply, "RECORD_QUERY_RENDER_FAILED", "normalize",
+             "the typed record query exceeded its bound",
+             "zcode.network.records");
+    return;
+  }
+  zdn_async_wrapper(&params, reply, "zcode_dht_record_begin",
+                    "zcode_dht_record_poll", "zcode_dht_record_cancel",
+                    VCS_ZCODE_DHT_LOOKUP_CEILING_S +
+                        VCS_ZCODE_DHT_SERVICE_QUERY_TIMEOUT_S + 5u);
+  json_free(&params);
 }
 
 void zcl_native_handle_zcode_network_records_begin(
@@ -847,7 +880,8 @@ void zcl_native_handle_zcode_package_source_reproduce(
 void zcl_native_handle_zcode_network_replication(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply) {
-  zdn_async_wrapper(request, reply, "zcode_dht_replication_begin",
+  zdn_async_wrapper(request ? request->input : NULL, reply,
+                    "zcode_dht_replication_begin",
                     "zcode_dht_replication_poll",
                     "zcode_dht_replication_cancel",
                     VCS_ZCODE_DHT_LOOKUP_CEILING_S +

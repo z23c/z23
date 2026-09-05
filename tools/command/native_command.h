@@ -166,6 +166,24 @@ void zcl_native_handle_dev_publication_advance(
 void zcl_native_handle_dev_publication_collect(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
+
+/* Typed publication continuation used by zcode.work.publish after it has
+ * independently bound an accepted work item to its queued job. Public command
+ * handlers remain responsible for parsing their own declared JSON schemas. */
+struct zcl_dev_publication_input {
+    const char *source_root;
+    const char *workspace;
+    const char *datadir;
+    const char *job_root;
+    bool details;
+};
+
+void zcl_dev_publication_advance(
+    const struct zcl_dev_publication_input *input,
+    struct zcl_command_reply *reply);
+void zcl_dev_publication_collect(
+    const struct zcl_dev_publication_input *input,
+    struct zcl_command_reply *reply);
 void zcl_native_handle_dev_publication_mirror_record(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
@@ -1096,6 +1114,9 @@ void zcl_native_handle_zcode_improve(
 void zcl_native_handle_zcode_evidence(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
+void zcl_native_zcode_evidence_exact(
+    const char *workspace, const char *datadir, const char *action_id,
+    struct zcl_command_reply *reply);
 void zcl_native_handle_zcode_accept(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
@@ -1188,6 +1209,10 @@ void zcl_native_handle_zcode_network_find_cancel(
     struct zcl_command_reply *reply);
 void zcl_native_handle_zcode_network_records(
     const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
+void zcl_native_zcode_network_records_exact(
+    const char *kind, const char *namespace_name,
+    const char *transport_root, bool include_evidence_wires,
     struct zcl_command_reply *reply);
 bool zcl_native_zcode_network_genesis(uint8_t out[32]);
 void zcl_native_handle_zcode_network_records_begin(

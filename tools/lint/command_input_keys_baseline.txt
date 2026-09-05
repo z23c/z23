@@ -141,11 +141,6 @@ zcode.work.accept source_root # work accept reloads the latest canonical candida
 zcode.work.accept action_id # work accept reloads the latest signed receipt action for private evidence/promotion calls; request->input never reaches it.
 zcode.workspace.manifest.plan signature # the shared manifest parser reads this only when the caller passes commit=true; plan fixes commit=false and rejects signature before that branch.
 dev.drive job_root # drive derives this from the SHA3-sealed cycle before privately invoking the existing publication-status verifier; request->input never reaches it.
-dev.publication.collect kind # collector fixes this to storage_ack in its private authenticated DHT discovery request; request->input never reaches it.
-dev.publication.collect namespace # collector reloads this from the immutable provider receipt for its private DHT discovery request; request->input never reaches it.
-dev.publication.collect transport_root # collector reloads this from the verified release package for its private DHT discovery request; request->input never reaches it.
-dev.publication.collect include_evidence_wires # collector fixes this true only for its bounded private evidence handoff; request->input never reaches it.
-dev.publication.collect board # the records board arm lives in the nested handler; the collector builds its own private discovery request and request->input never reaches that arm.
 app.presentation.publication-status namespace # the model reads this only from the node's internal signed-record projection; request->input never reaches it.
 app.presentation.publication-status semantic_root # the model reads this only from the node's internal signed pointer projection; request->input never reaches it.
 zcode.task.board board  # handler injects fixed board=true into a private records request and forwards that object; zcode.task.board declares only datadir, so the kernel rejects board from an operator and request->input never reaches the nested read.
