@@ -191,6 +191,22 @@ static size_t fl_take(struct p2p_node *from, struct send_segment *sentinel,
     return moved;
 }
 
+/* Every queued frame, opened on the peer's transport and thrown away.
+ * Noise records must be opened in the order they were sealed, so a test
+ * that wants a clean queue still has to feed every record through. */
+static void fl_discard(struct p2p_node *from, struct send_segment *sentinel,
+                       struct noise_transport *to_transport)
+{
+    for (;;) {
+        uint8_t frame[FL_WIRE_MAX];
+        bool more = false;
+        (void)fl_take(from, sentinel, to_transport, frame, sizeof(frame),
+                      &more);
+        if (!more)
+            break;
+    }
+}
+
 /* Every frame queued on `from`, through the production decoder on `to`. */
 static size_t fl_pump(struct p2p_node *from, struct send_segment *sentinel,
                       struct noise_transport *to_transport,
@@ -228,9 +244,9 @@ int test_fleet_ledger(void)
 {
     int failures = 0;
     char root[256];
-    char wire_dir[320];
+    char wire_dir[256];
     test_make_tmpdir(root, sizeof(root), "fleet_ledger", "store");
-    (void)snprintf(wire_dir, sizeof wire_dir, "%s/wire_fixture", root);
+    test_make_tmpdir(wire_dir, sizeof(wire_dir), "fleet_ledger", "wire");
 
     struct fl_box ma, mb, ta, wa, wb;
     bool ma_open = false, mb_open = false, ta_open = false;
@@ -623,7 +639,13 @@ int test_fleet_ledger(void)
                   UINT64_C(3));
 
         /* Asking again, now holding all three, moves no row: the answer is
-         * empty and the stream closes without ever sending a DATA frame. */
+         * empty and the stream closes without ever sending a DATA frame.
+         * The finished exchange's own trailing frames are opened and thrown
+         * away first — a Noise record must be opened in the order it was
+         * sealed — so the count below is this pull's traffic and nothing
+         * left over from the last one. */
+        fl_discard(asker, ask_queue, f.res_term);
+        fl_discard(answerer, answer_queue, f.term_peer.ini);
         mesh_stream_test_reset();
         ASSERT(boot_fleet_ledger_test_pull(
             f.resp_noise_pub, wa.box_id, wa.signer,
@@ -678,6 +700,7 @@ _test_next:
         fl_box_close(&mb);
     if (ma_open)
         fl_box_close(&ma);
+    test_rm_rf_recursive(wire_dir);
     test_rm_rf_recursive(root);
     return failures;
 }
