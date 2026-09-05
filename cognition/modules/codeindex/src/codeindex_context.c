@@ -29,7 +29,7 @@ static const struct ci_module_context k_modules[] = {
     {"crypto", "core"}, {"crypto_registry", "core"},
     {"determinism", "engine"}, {"encoding", "platform"},
     {"engine", "engine"}, {"event", "engine"},
-    {"fingerprint", "cognition"}, {"fleetfacts", "cognition"},
+    {"fingerprint", "cognition"}, {"fleetfacts", "cognition"}, {"fleetledger", "engine"},
     {"framework", "engine"},
     {"health", "engine"}, {"hotswap", "engine"},
     {"install", "platform"}, {"json", "platform"},
