@@ -5161,6 +5161,7 @@ syntax-check: $(VIEW_GEN_HEADERS)
 # the parallel driver. Same ZCL_LINT_SERIAL=1 fallback as lint.
 # Run full `make lint` at sub-wave boundaries / before commit.
 EQUIHASH_FACT_TOOL = $(BIN_DIR)/equihash-params-fact
+LINTC_TOOL = $(BIN_DIR)/z23-lint
 EQUIHASH_FACT_SRCS = tools/equihash_params_fact.c \
     core/chainparams/src/chainparams.c core/chainparams/src/chainparamsbase.c \
     core/params/src/upgrades.c core/consensus/src/upgrades.c \
@@ -5200,7 +5201,7 @@ ifeq ($(ZCL_LINT_SERIAL),1)
 lint-fast: $(LINT_FAST_GATES)
 	@echo "lint-fast: OK (serial)"
 else
-lint-fast: $(EQUIHASH_FACT_TOOL)
+lint-fast: $(EQUIHASH_FACT_TOOL) $(LINTC_TOOL)
 	@tools/lint/run_lint.sh --jobs "$(ZCL_LINT_JOBS)" --bin-dir "$(BIN_DIR)" $(LINT_FAST_GATES)
 	@echo "lint-fast: OK"
 endif
@@ -11771,7 +11772,7 @@ check-toolchain:
 
 # No Python source, shebang, or runtime invocation in the executable tree.
 # Historical vector comments may name a Python origin; they must not call it.
-check-no-python:
+check-no-python: $(LINTC_TOOL)
 	@echo "══ LINT: no Python runtime ══"
 	@./tools/lint/check_no_python.sh --selftest
 	@./tools/lint/check_no_python.sh
@@ -12589,6 +12590,12 @@ $(EQUIHASH_FACT_TOOL): $(EQUIHASH_FACT_SRCS)
 	    -Icore/modules/sapling/include -Icontexts/wallet/modules/keys/include -Iengine/modules/event/include \
 	    -o $@ $(EQUIHASH_FACT_SRCS)
 
+$(LINTC_TOOL): tools/lint/lintc.c
+	@mkdir -p $(dir $@)
+	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
+	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) \
+	    -o $@ tools/lint/lintc.c
+
 .PHONY: tools/equihash-params-fact docs-equihash-params equihash-facts equihash-facts-check
 tools/equihash-params-fact: $(EQUIHASH_FACT_TOOL)
 docs-equihash-params: $(EQUIHASH_FACT_TOOL)
@@ -13187,7 +13194,7 @@ ifeq ($(ZCL_LINT_SERIAL),1)
 lint: $(LINT_GATES)
 	@echo "══ LINT: all checks passed (serial) ══"
 else
-lint:
+lint: $(LINTC_TOOL)
 	@tools/lint/run_lint.sh --jobs "$(ZCL_LINT_JOBS)" --bin-dir "$(BIN_DIR)" $(LINT_GATES)
 	@echo "══ LINT: all checks passed ══"
 endif
