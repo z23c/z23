@@ -135,3 +135,18 @@ No speedup is demonstrated by these runs, and the data says why:
 4. Find what removed the K1/K2 donor markers; a pool that silently
    loses donors turns warm runs cold without a trace (the sidecar
    still says `warm=0`, which is the only signal).
+
+## Update 2026-09-05: donor identity is now sealed
+
+The donor scan above only ever compared `root`/`local`/`base`/`completed`
+in the `build/.proof-build-complete` marker — a donor built under a
+different compiler, `CFLAGS`, or a vendor archive rebuilt in place could
+still be adopted, because none of those move a tracked source blob and the
+wrapper-inputs diff never sees them. The marker now also seals the same
+three domains the receipt hashes into `compiler_root`/`flags_root`/
+`build_graph_root` (`tools/dev/dev_proof_receipt.h`); `warm_donor_scan`
+refuses a candidate whose identity does not match this proof's own, and a
+marker written before this field existed (a `fields != 7` shortfall)
+refuses outright rather than being adopted unverified. Covered by
+`test_pw_marker_identity_invalidates_stale_donor` in
+`tests/harness/src/test_impact_composition.c`.
