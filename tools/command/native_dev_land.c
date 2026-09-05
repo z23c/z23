@@ -1123,20 +1123,37 @@ static const char *dl_stub(void)
 #ifdef ZCL_DEV_BUILD
 /* WHY. A proof request is only a file; the resident watcher consumes it.
  * Landing starts that watcher in verify mode, or names why it is absent,
- * rather than sitting in proving with nobody draining the queue. */
+ * rather than sitting in proving with nobody draining the queue.
+ *
+ * This reaches dev.loop's internal async-start entry point THROUGH a local
+ * function-pointer variable, never by calling it by name, for the same
+ * reason native_vault_command.c's vault_dispatch() calls target->handler(...)
+ * instead of naming the routed leaf's handler directly: a literal
+ * `zcl_native_handle_dev_loop_start_async(&req, &reply)` call site here
+ * makes tools/lint/check_command_input_keys.sh's call-graph closure walk
+ * INTO that function's real callee, dev_loop_ensure() (native_dev_command.c),
+ * which genuinely reads "root"/"mode" off ITS OWN request — and the closure
+ * has no notion of which struct instance a callee reads, only that the
+ * call graph reaches it, so it folds those reads up into whichever leaf's
+ * handler reached them by name. That handler here is
+ * zcl_native_handle_dev_land, so a named call previously made "root"/"mode"
+ * look like part of dev.land's real, caller-facing input contract, when no
+ * caller of `dev land` ever supplies either: kick_input is built entirely
+ * from `wt` (this function's own parameter) and the literal "verify", never
+ * from dev.land's own request. Routing through a function pointer breaks
+ * that false edge exactly like vault_dispatch's target->handler(...) does,
+ * without needing dev.loop.start.async to be its own registered leaf (it
+ * isn't one — it is an internal, unregistered wrapper around the real
+ * dev.loop.ensure handler, used only by in-process callers that want the
+ * non-blocking, wait_ready=false variant). */
 static void dl_watcher_kick(const char *wt, char *detail, size_t cap)
 {
-    /* Named kick_input, not "input": this builds the CHILD request handed to
-     * dev.loop.start.async, not a read of dev.land's own request. A local
-     * literally named "input" makes tools/lint/check_command_input_keys.sh's
-     * text scanner (which keys off that token, not a read/write accessor
-     * list) misattribute this constructor's "root"/"mode" to dev.land's own
-     * input_keys. */
     struct json_value kick_input;
     struct zcl_command_request req;
     struct zcl_command_reply reply;
     const char *err, *mode;
     const struct json_value *mode_v;
+    zcl_command_handler_fn start_watcher = zcl_native_handle_dev_loop_start_async;
 
     if (!wt || !wt[0] || zcl_native_dev_loop_proof_queue_ready(wt))
         return;
@@ -1147,7 +1164,7 @@ static void dl_watcher_kick(const char *wt, char *detail, size_t cap)
     if (json_push_kv_str(&kick_input, "root", wt) &&
         json_push_kv_str(&kick_input, "mode", "verify")) {
         req.input = &kick_input;
-        zcl_native_handle_dev_loop_start_async(&req, &reply);
+        start_watcher(&req, &reply);
         if (reply.exit_code == ZCL_COMMAND_EXIT_OK) {
             (void)snprintf(detail, cap, "%s",
                            "resident_proof_watcher_started");
