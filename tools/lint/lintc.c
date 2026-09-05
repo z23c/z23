@@ -6,6 +6,7 @@
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #endif
+#include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
 #include <regex.h>
@@ -1089,6 +1090,570 @@ static int check_sysinit_ordering_selftest(void)
     return st_ok(bad, "check_sysinit_ordering selftest: OK\n");
 }
 
+/* C scan_exclusions/repo_shape/gate_lib bits. Non-parity: no ZCL_GATE_SCAN_LOG. */
+enum { RS_MAX = 256, RS_NAME = 64, RS_PATH = 192, RS_AUTH = 32, RS_SHAPE = 16,
+       CLK_MATCH = 65536 };
+static const char k_planted[] = "tools/lint/fixtures/planted";
+static const char k_clock_script[] =
+    "tools/lint/check_no_raw_clock_outside_platform.sh";
+static regex_t g_excl_re;
+static int g_excl_ok, g_n_ctx, g_n_shapes, g_n_libs, g_n_mods, g_n_auth, g_rs_ready;
+static char g_ctx[RS_MAX][RS_NAME], g_shapes[RS_SHAPE][RS_NAME];
+static char g_libs[RS_MAX][RS_NAME], g_mods[RS_MAX][RS_PATH], g_auth[RS_AUTH][RS_PATH];
+static const char *const k_domain[] = {
+    "contexts/wallet/domain", "platform/domain/encoding"
+};
+
+static int ovf(int n, size_t cap)
+{ return (n < 0 || (size_t)n >= cap) ? die("z23-lint: derived buffer overflow\n", "") : 0; }
+static int rs_ovf(void) { return die("z23-lint: repo-shape overflow\n", ""); }
+static const char *rs_root(void)
+{ const char *e = getenv("ZCL_REPO_SHAPE_ROOT"); return (e && e[0]) ? e : "."; }
+static int lint_prod_scan(void)
+{ const char *e = getenv("ZCL_LINT_PRODUCTION_SCAN"); return e && strcmp(e, "1") == 0; }
+
+static int excl_ensure(void)
+{
+    if (g_excl_ok) return 0;
+    char pat[256];
+    int n = snprintf(pat, sizeof pat, "%s|%s%s%s%s%s",
+                     "(^|/)_[^/]*fixture[^/]*\\.[ch]$", "(^|/)", k_planted,
+                     "/|(^|/)build/|(^|/)vendor/|(^|/)\\.claude/",
+                     "|(^|/)test-tmp/", "");
+    if (ovf(n, sizeof pat)) return 2;
+    int err = reg_fail(&g_excl_re, regcomp(&g_excl_re, pat, REG_EXTENDED));
+    return err ? err : (g_excl_ok = 1, 0);
+}
+
+static int lint_path_is_excluded(const char *path)
+{ return lint_prod_scan() && !excl_ensure() && regexec(&g_excl_re, path, 0, NULL, 0) == 0; }
+
+static int lint_filter_excluded(const char *in, char *out, size_t cap)
+{
+    if (!lint_prod_scan())
+        return ovf(snprintf(out, cap, "%s", in), cap);
+    if (excl_ensure()) return 2;
+    size_t used = 0;
+    out[0] = '\0';
+    for (const char *p = in; *p; ) {
+        const char *nl = strchr(p, '\n');
+        size_t n = nl ? (size_t)(nl - p) : strlen(p);
+        char line[4096];
+        if (n >= sizeof line) return die("z23-lint: derived buffer overflow\n", "");
+        memcpy(line, p, n);
+        line[n] = '\0';
+        if (regexec(&g_excl_re, line, 0, NULL, 0) != 0) {
+            int k = snprintf(out + used, cap - used, "%s%s", line, nl ? "\n" : "");
+            if (ovf(k, cap - used)) return 2;
+            used += (size_t)k;
+        }
+        p = nl ? nl + 1 : p + n;
+        if (!nl) break;
+    }
+    return 0;
+}
+
+static int lint_annotate_stray(const char *path, FILE *out)
+{
+    char cmd[4096];
+    if (ovf(snprintf(cmd, sizeof cmd, "git ls-files --error-unmatch -- %s", path),
+            sizeof cmd))
+        return 2;
+    FILE *p = popen(cmd, "r");
+    if (!p) return die("z23-lint: popen failed (%s)\n", cmd);
+    char *buf = NULL;
+    size_t cap = 0;
+    while (getline(&buf, &cap, p) >= 0) { }
+    free(buf);
+    int st = pclose(p);
+    if (st == 0)
+        return fputs(path, out) < 0 ? die("z23-lint: write failed\n", "") : 0;
+    return fprintf(out, "%s [untracked stray file -- not a code violation; "
+                   "likely left by a crashed agent/worktree, delete it]", path) < 0
+               ? die("z23-lint: write failed\n", "") : 0;
+}
+
+static int gate_require_scanned(int count, int floor, const char *name,
+                                const char *hint)
+{
+    if (count >= floor) return 0;
+    fprintf(stderr, "%s: FATAL — scan set is '%d' (< floor %d).\n", name, count, floor);
+    fputs("  The scan producer (find/glob/grep) returned too little; a\n"
+          "  scanned dir/file was likely renamed, moved, or deleted.\n"
+          "  Refusing to report 'clean' off a hollow (empty) scan.\n", stderr);
+    if (hint && hint[0]) fprintf(stderr, "  %s\n", hint);
+    return 2;
+}
+
+static int gate_count_and_report(const char *matches, int *out_count)
+{
+    *out_count = 0;
+    if (!matches) return 0;
+    int any = 0;
+    for (const char *s = matches; *s; s++)
+        if (!isspace((unsigned char)*s)) { any = 1; break; }
+    if (!any) return 0;
+    for (const char *p = matches; *p; ) {
+        const char *nl = strchr(p, '\n');
+        size_t n = nl ? (size_t)(nl - p) : strlen(p);
+        if (n > 0) {
+            (*out_count)++;
+            if (fwrite(p, 1, n, stderr) != n || fputc('\n', stderr) == EOF)
+                return die("z23-lint: write failed\n", "");
+        }
+        if (!nl) break;
+        p = nl + 1;
+    }
+    return 0;
+}
+
+static int rs_continues(const char *s)
+{
+    size_t n = strlen(s);
+    while (n && (s[n - 1] == '\n' || s[n - 1] == '\r' || s[n - 1] == ' '
+                 || s[n - 1] == '\t'))
+        n--;
+    return n && s[n - 1] == '\\';
+}
+
+static int rs_emit(char *line, char dst[][RS_NAME], int max, int *n)
+{
+    char *hash = strchr(line, '#');
+    if (hash) *hash = '\0';
+    for (char *q = line; *q; q++) if (*q == '\\') *q = ' ';
+    *n = 0;
+    for (char *p = line; *p; ) {
+        while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
+        if (!*p) break;
+        char *s = p;
+        while (*p && *p != ' ' && *p != '\t' && *p != '\n' && *p != '\r') p++;
+        char save = *p;
+        *p = '\0';
+        if (*n >= max || strlen(s) >= RS_NAME) return rs_ovf();
+        memcpy(dst[*n], s, strlen(s) + 1);
+        (*n)++;
+        *p = save;
+        if (save) p++;
+    }
+    return 0;
+}
+
+static int rs_make_list(const char *variable, char dst[][RS_NAME], int max, int *n)
+{
+    const char *mk = getenv("ZCL_REPO_SHAPE_MAKEFILE");
+    char path[4096];
+    if (!mk || !mk[0]) {
+        if (ovf(snprintf(path, sizeof path, "%s/Makefile", rs_root()), sizeof path))
+            return 2;
+        mk = path;
+    }
+    FILE *f = fopen(mk, "r");
+    if (!f) return die("z23-lint: cannot open %s\n", mk);
+    char *line = NULL, assembled[8192];
+    size_t cap = 0, alen = strlen(variable);
+    int found = 0, rc = 0;
+    assembled[0] = '\0';
+    while (getline(&line, &cap, f) >= 0) {
+        if (!found) {
+            if (strncmp(line, variable, alen) != 0) continue;
+            const char *p = line + alen;
+            while (*p == ' ' || *p == '\t') p++;
+            if (*p != '=') continue;
+            found = 1;
+            if (ovf(snprintf(assembled, sizeof assembled, "%s", p + 1), sizeof assembled)) {
+                rc = 2; break;
+            }
+            if (!rs_continues(line)) break;
+            continue;
+        }
+        size_t used = strlen(assembled);
+        int k = snprintf(assembled + used, sizeof assembled - used, " %s", line);
+        if (ovf(k, sizeof assembled - used)) { rc = 2; break; }
+        if (!rs_continues(line)) break;
+    }
+    if (rc == 0) rc = found ? rs_emit(assembled, dst, max, n) : (*n = 0, 0);
+    return fin(f, line, mk, rc);
+}
+
+static int rs_cmp_name(const void *a, const void *b) { return strcmp(a, b); }
+
+static int rs_uniq(void *arr, int n, size_t stride)
+{
+    if (n <= 1) return n;
+    qsort(arr, (size_t)n, stride, rs_cmp_name);
+    int w = 1;
+    char *base = arr;
+    for (int i = 1; i < n; i++) {
+        if (strcmp(base + (size_t)i * stride, base + (size_t)(w - 1) * stride) != 0) {
+            if (w != i)
+                memcpy(base + (size_t)w * stride, base + (size_t)i * stride, stride);
+            w++;
+        }
+    }
+    return w;
+}
+
+static const char *rs_env_or(const char *env, char *buf, size_t cap, const char *fmt)
+{
+    const char *e = getenv(env);
+    if (e && e[0]) return e;
+    return ovf(snprintf(buf, cap, fmt, rs_root()), cap) ? NULL : buf;
+}
+
+static int rs_lib_modules(void)
+{
+    char path[4096];
+    const char *md = rs_env_or("ZCL_REPO_SHAPE_MODULE_DEF", path, sizeof path,
+                               "%s/engine/composition/lib_module_order.def");
+    if (!md) return 2;
+    FILE *f = fopen(md, "r");
+    if (!f) return die("z23-lint: cannot open %s\n", md);
+    char *line = NULL;
+    size_t cap = 0;
+    g_n_libs = 0;
+    int rc = 0;
+    while (getline(&line, &cap, f) >= 0) {
+        char *p = line;
+        while (*p == ' ' || *p == '\t') p++;
+        if (strncmp(p, "LIB_MODULE(\"", 12) != 0) continue;
+        p += 12;
+        char *e = p;
+        while ((*e >= 'A' && *e <= 'Z') || (*e >= 'a' && *e <= 'z')
+               || (*e >= '0' && *e <= '9') || *e == '_')
+            e++;
+        if (*e != '"' || e[1] != ')' ) continue;
+        size_t n = (size_t)(e - p);
+        if (g_n_libs >= RS_MAX || n >= RS_NAME) { rc = rs_ovf(); break; }
+        memcpy(g_libs[g_n_libs], p, n);
+        g_libs[g_n_libs][n] = '\0';
+        g_n_libs++;
+    }
+    rc = fin(f, line, md, rc);
+    if (rc) return rc;
+    g_n_libs = rs_uniq(g_libs, g_n_libs, RS_NAME);
+    return 0;
+}
+
+static int rs_is_module_dir(const char *rel)
+{
+    const char *slash = strrchr(rel, '/');
+    if (!slash || slash == rel || slash[1] == '\0') return 0;
+    if (slash >= rel + 8 && strncmp(slash - 8, "/modules", 8) == 0) return 1;
+    return strncmp(rel, "modules/", 8) == 0 && strchr(rel + 8, '/') == NULL;
+}
+
+static int rs_mod_walk(const char *dir, int depth)
+{
+    struct dirent **names = NULL;
+    int n = scandir(dir, &names, NULL, alphasort);
+    if (n < 0)
+        return (errno == ENOENT || errno == EACCES) ? 0
+            : die("z23-lint: cannot scan %s\n", dir);
+    int rc = 0;
+    for (int i = 0; i < n; i++) {
+        const char *name = names[i]->d_name;
+        if (rc == 0 && strcmp(name, ".") && strcmp(name, "..")) {
+            char path[4096];
+            struct stat st;
+            int k = snprintf(path, sizeof path, "%s/%s", dir, name);
+            if (ovf(k, sizeof path)) rc = 2;
+            else if (lstat(path, &st) != 0)
+                rc = (errno == ENOENT || errno == EACCES) ? 0
+                    : die("z23-lint: cannot stat %s\n", path);
+            else if (S_ISDIR(st.st_mode)) {
+                int nd = depth + 1;
+                if (nd >= 2 && nd <= 4) {
+                    const char *root = rs_root();
+                    size_t rl = strlen(root);
+                    const char *rel = (strncmp(path, root, rl) == 0 && path[rl] == '/')
+                        ? path + rl + 1 : path;
+                    if (rs_is_module_dir(rel)) {
+                        if (g_n_mods >= RS_MAX || strlen(rel) >= RS_PATH) rc = rs_ovf();
+                        else { memcpy(g_mods[g_n_mods], rel, strlen(rel) + 1); g_n_mods++; }
+                    }
+                }
+                if (rc == 0 && nd < 4) rc = rs_mod_walk(path, nd);
+            }
+        }
+        free(names[i]);
+    }
+    free(names);
+    return rc;
+}
+
+static int rs_isdir(const char *rel)
+{
+    char path[4096];
+    struct stat st;
+    if (ovf(snprintf(path, sizeof path, "%s/%s", rs_root(), rel), sizeof path))
+        return 0;
+    return stat(path, &st) == 0 && S_ISDIR(st.st_mode);
+}
+
+static int rs_put(char out[][RS_PATH], int max, int *n, const char *base,
+                  const char *leaf)
+{
+    char path[RS_PATH];
+    int k = (leaf && leaf[0]) ? snprintf(path, sizeof path, "%s/%s", base, leaf)
+                              : snprintf(path, sizeof path, "%s", base);
+    if (ovf(k, sizeof path)) return 2;
+    if (!rs_isdir(path)) return 0;
+    if (*n >= max) return rs_ovf();
+    memcpy(out[*n], path, strlen(path) + 1);
+    (*n)++;
+    return 0;
+}
+
+static int rs_init(void)
+{
+    if (g_rs_ready) return 0;
+    char mk[4096], md[4096];
+    const char *mkp = rs_env_or("ZCL_REPO_SHAPE_MAKEFILE", mk, sizeof mk, "%s/Makefile");
+    const char *mdp = rs_env_or("ZCL_REPO_SHAPE_MODULE_DEF", md, sizeof md,
+                                "%s/engine/composition/lib_module_order.def");
+    if (!mkp || !mdp) return 2;
+    FILE *fm = fopen(mkp, "r"), *fd = fopen(mdp, "r");
+    if (!fm || !fd) {
+        if (fm) fclose(fm);
+        if (fd) fclose(fd);
+        fputs("repo-shape: FATAL — architecture declarations are unreadable\n", stderr);
+        return 2;
+    }
+    fclose(fm); fclose(fd);
+    int rc = rs_make_list("PRODUCT_CONTEXTS", g_ctx, RS_MAX, &g_n_ctx);
+    if (rc == 0) rc = rs_make_list("APP_DIRS", g_shapes, RS_SHAPE, &g_n_shapes);
+    if (rc == 0) rc = rs_lib_modules();
+    if (rc == 0)
+        rc = gate_require_scanned(g_n_ctx, 1, "repo-shape",
+                                  "PRODUCT_CONTEXTS parse came back empty");
+    if (rc == 0)
+        rc = gate_require_scanned(g_n_shapes, 1, "repo-shape",
+                                  "APP_DIRS parse came back empty");
+    if (rc == 0)
+        rc = gate_require_scanned(g_n_libs, 1, "repo-shape",
+                                  "module declaration parse came back empty");
+    g_n_mods = 0;
+    static const char *const auth[] = {
+        "core", "engine", "cognition", "platform", "contexts"
+    };
+    for (size_t i = 0; rc == 0 && i < sizeof auth / sizeof auth[0]; i++) {
+        char start[4096];
+        if (ovf(snprintf(start, sizeof start, "%s/%s", rs_root(), auth[i]), sizeof start))
+            return 2;
+        rc = rs_mod_walk(start, 0);
+    }
+    if (rc) return rc;
+    g_n_mods = rs_uniq(g_mods, g_n_mods, RS_PATH);
+    rc = gate_require_scanned(g_n_mods, g_n_libs, "repo-shape",
+                              "physical module directory set is incomplete");
+    if (rc) return rc;
+    memcpy(g_auth[0], "engine", 7);
+    memcpy(g_auth[1], "cognition", 10);
+    g_n_auth = 2;
+    for (int i = 0; i < g_n_ctx; i++) {
+        if (g_n_auth >= RS_AUTH) return rs_ovf();
+        if (ovf(snprintf(g_auth[g_n_auth], RS_PATH, "contexts/%s", g_ctx[i]), RS_PATH))
+            return 2;
+        g_n_auth++;
+    }
+    g_rs_ready = 1;
+    return 0;
+}
+
+static int repo_shape_dirs(const char *family, const char *leaf,
+                           char out[][RS_PATH], int max, int *n)
+{
+    int rc = rs_init();
+    if (rc) return rc;
+    *n = 0;
+    if (strcmp(family, "app") == 0) {
+        for (int a = 0; rc == 0 && a < g_n_auth; a++)
+            for (int s = 0; rc == 0 && s < g_n_shapes; s++) {
+                char base[RS_PATH];
+                if (ovf(snprintf(base, sizeof base, "%s/%s", g_auth[a], g_shapes[s]),
+                        sizeof base))
+                    return 2;
+                rc = rs_put(out, max, n, base, leaf);
+            }
+        return rc;
+    }
+    if (strcmp(family, "lib") == 0) {
+        for (int i = 0; rc == 0 && i < g_n_mods; i++)
+            rc = rs_put(out, max, n, g_mods[i], leaf);
+        return rc;
+    }
+    if (strcmp(family, "domain") == 0) {
+        for (size_t i = 0; rc == 0 && i < sizeof k_domain / sizeof k_domain[0]; i++)
+            rc = rs_put(out, max, n, k_domain[i], leaf);
+        return rc;
+    }
+    fprintf(stderr, "repo_shape_dirs: FATAL — unknown family '%s'\n", family);
+    return 2;
+}
+
+static int repo_shape_room_dirs(const char *shape, char out[][RS_PATH], int max,
+                                int *n)
+{
+    int rc = rs_init();
+    if (rc) return rc;
+    *n = 0;
+    for (int i = 0; rc == 0 && i < g_n_auth; i++)
+        rc = rs_put(out, max, n, g_auth[i], shape);
+    if (rc) return rc;
+    if (*n == 0) {
+        fprintf(stderr, "repo_shape_room_dirs: FATAL — no '%s' room exists\n", shape);
+        return 2;
+    }
+    return 0;
+}
+
+struct clock_acc { regex_t *re; char *buf; size_t cap, used; };
+
+static int clock_comp(regex_t *re)
+{
+    char pat[256];
+    int n = snprintf(pat, sizeof pat, "%s%s%s%s",
+                     "(^|[^[:alnum:]_])clock" "_gettime[[:space:]]*\\(|",
+                     "(^|[^[:alnum:]_])get" "timeofday[[:space:]]*\\(|",
+                     "(^|[^[:alnum:]_])ti" "me[[:space:]]*\\([[:space:]]*NULL[[:space:]]*\\)|",
+                     "(^|[^[:alnum:]_])get" "random[[:space:]]*\\(");
+    return ovf(n, sizeof pat) ? 2 : reg_fail(re, regcomp(re, pat, REG_EXTENDED));
+}
+
+static int clock_keep(const char *path, const char *text)
+{
+    size_t sl = sizeof k_clock_script - 1;
+    if (lint_path_is_excluded(path)
+        || strncmp(path, "platform/modules/platform/", 26) == 0
+        || (strncmp(path, k_clock_script, sl) == 0 && (path[sl] == '\0' || path[sl] == ':'))
+        || strstr(text, "// platform-ok") != NULL)
+        return 0;
+    return 1;
+}
+
+static int scan_clock(const char *path, void *ctx)
+{
+    struct clock_acc *a = ctx;
+    if (!clock_keep(path, "")) return 0;
+    FILE *f = fopen(path, "r");
+    if (!f) return die("z23-lint: cannot open %s\n", path);
+    char *line = NULL;
+    size_t cap = 0;
+    ssize_t n;
+    int lineno = 0, rc = 0;
+    while ((n = getline(&line, &cap, f)) >= 0) {
+        lineno++;
+        if (regexec(a->re, line, 0, NULL, 0) != 0) continue;
+        if (n > 0 && line[n - 1] == '\n') line[n - 1] = '\0';
+        if (!clock_keep(path, line)) continue;
+        int k = snprintf(a->buf + a->used, a->cap - a->used, "%s:%d:%s\n",
+                         path, lineno, line);
+        if (ovf(k, a->cap - a->used)) { rc = 2; break; }
+        a->used += (size_t)k;
+    }
+    return fin(f, line, path, rc);
+}
+
+static const char *clock_mode(void)
+{ const char *m = getenv("ZCL_LINT_MODE"); return (m && m[0]) ? m : "FAIL"; }
+static int clock_grade(int v, const char *mode)
+{ return (v > 0 && strcmp(mode, "FAIL") == 0) ? 1 : 0; }
+
+static int clock_summary(int v, const char *mode)
+{
+    return (printf("[check_no_raw_clock_outside_platform] %d violation(s) found (mode: %s)\n",
+                   v, mode) < 0
+            || puts("[check_no_raw_clock_outside_platform] ratchet now FAIL -- no new raw clock calls allowed") < 0
+            || puts("[check_no_raw_clock_outside_platform] use platform.clock/platform.rng or add // platform-ok for a documented exception") < 0)
+               ? die("z23-lint: write failed\n", "") : 0;
+}
+
+static int clock_walk(const char *const *roots, size_t nr, void *ctx)
+{
+    int rc = 0;
+    for (size_t i = 0; rc == 0 && i < nr; i++) rc = walk_src(roots[i], 1, scan_clock, ctx);
+    return rc;
+}
+
+static int check_no_raw_clock_outside_platform_run(int argc, char **argv)
+{
+    (void)argc; (void)argv;
+    const char *mode = clock_mode();
+    int rc = rs_init();
+    if (rc) return rc;
+    regex_t re;
+    rc = clock_comp(&re);
+    if (rc) return rc;
+    char matches[CLK_MATCH];
+    matches[0] = '\0';
+    struct clock_acc a = { .re = &re, .buf = matches, .cap = sizeof matches, .used = 0 };
+    static const char *const prefix[] = {
+        "tools", "engine/composition", "engine/application",
+        "platform/adapters", "platform/ports"
+    };
+    static const char *const suffix[] = {
+        "core/consensus", "core/params", "core/math", "core/chainparams"
+    };
+    rc = clock_walk(prefix, sizeof prefix / sizeof prefix[0], &a);
+    char dirs[RS_MAX][RS_PATH];
+    int n = 0;
+    if (rc == 0) rc = repo_shape_dirs("app", "", dirs, RS_MAX, &n);
+    for (int i = 0; rc == 0 && i < n; i++) rc = walk_src(dirs[i], 1, scan_clock, &a);
+    n = 0;
+    if (rc == 0) rc = repo_shape_dirs("lib", "", dirs, RS_MAX, &n);
+    for (int i = 0; rc == 0 && i < n; i++) rc = walk_src(dirs[i], 1, scan_clock, &a);
+    if (rc == 0) rc = clock_walk(k_domain, sizeof k_domain / sizeof k_domain[0], &a);
+    if (rc == 0) rc = clock_walk(suffix, sizeof suffix / sizeof suffix[0], &a);
+    int violations = 0;
+    if (rc == 0) rc = gate_count_and_report(matches, &violations);
+    if (rc == 0) rc = clock_summary(violations, mode);
+    regfree(&re);
+    return rc ? rc : clock_grade(violations, mode);
+}
+
+static int clock_case(const regex_t *re, const char *path, const char *text,
+                      int want_n, int want_rc, const char *mode)
+{
+    char buf[256] = {0};
+    int n = 0;
+    if (regexec(re, text, 0, NULL, 0) == 0 && clock_keep(path, text)
+        && ovf(snprintf(buf, sizeof buf, "%s:%d:%s\n", path, 1, text), sizeof buf))
+        return 1;
+    if (gate_count_and_report(buf, &n)) return 1;
+    return n != want_n || clock_grade(n, mode) != want_rc;
+}
+
+static int check_no_raw_clock_outside_platform_selftest(void)
+{
+    regex_t re;
+    int cr = clock_comp(&re);
+    if (cr) return cr;
+    char hit[80], marked[96];
+    if (snprintf(hit, sizeof hit, "    clock" "_gettime(CLOCK_REALTIME, &ts);")
+            >= (int)sizeof hit
+        || snprintf(marked, sizeof marked, "%s // platform-ok", hit) >= (int)sizeof marked) {
+        regfree(&re);
+        return die("z23-lint: selftest buffer overflow\n", "");
+    }
+    const char *t = "check_no_raw_clock_outside_platform";
+    int bad = want(t, &re, "int x = 1;", 0) | want(t, &re, hit, 1)
+            | want(t, &re, "my_clock" "_gettime(&ts);", 0)
+            | clock_case(&re, "tools/lint/foo.c", "int x = 1;", 0, 0, "FAIL")
+            | clock_case(&re, "tools/lint/foo.c", hit, 1, 1, "FAIL")
+            | clock_case(&re, "platform/modules/platform/src/clock.c", hit, 0, 0, "FAIL")
+            | clock_case(&re, "tools/lint/foo.c", marked, 0, 0, "FAIL");
+    const char *oldm = getenv("ZCL_LINT_MODE");
+    if (setenv("ZCL_LINT_MODE", "WARN", 1) != 0) bad = 1;
+    bad |= clock_case(&re, "tools/lint/foo.c", hit, 1, 0, clock_mode());
+    if (oldm) (void)setenv("ZCL_LINT_MODE", oldm, 1);
+    else (void)unsetenv("ZCL_LINT_MODE");
+    (void)lint_filter_excluded;
+    (void)lint_annotate_stray;
+    (void)repo_shape_room_dirs;
+    regfree(&re);
+    return st_ok(bad, "check_no_raw_clock_outside_platform selftest: OK\n");
+}
+
 struct lint_gate {
     const char *name;
     int (*run)(int argc, char **argv);
@@ -1106,6 +1671,8 @@ static const struct lint_gate k_gates[] = {
       check_silent_error_returns_selftest },
     { "check-no-gnu-va-args", check_no_gnu_va_args_run, check_no_gnu_va_args_selftest },
     { "check-sysinit-ordering", check_sysinit_ordering_run, check_sysinit_ordering_selftest },
+    { "check-no-raw-clock-outside-platform", check_no_raw_clock_outside_platform_run,
+      check_no_raw_clock_outside_platform_selftest },
 };
 
 int main(int argc, char **argv)

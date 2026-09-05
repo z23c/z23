@@ -11665,7 +11665,7 @@ check-framework-filename-suffix:
 	@echo "→ Gate #22: framework_filename_suffix"
 	@./tools/lint/check_framework_filename_suffix.sh
 
-check-no-raw-clock-outside-platform:
+check-no-raw-clock-outside-platform: $(LINTC_TOOL)
 	@echo "→ Gate #19: no_raw_clock_outside_platform"
 	@./tools/lint/check_no_raw_clock_outside_platform.sh
 
