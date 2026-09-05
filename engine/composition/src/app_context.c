@@ -147,10 +147,19 @@ bool app_tor_should_start(bool real_tor_linked, bool no_tor)
     return true;
 }
 
+/* Did this argv ASK for an onion? Composed from the same profile predicate
+ * the boot path has always used, plus the two identity flags that are
+ * meaningless without a running Tor. Kept as one expression so a new -onion*
+ * flag has exactly one place to be added. */
+static bool app_tor_argv_asked_for_onion(const struct app_context *ctx)
+{
+    return app_runtime_profile_has_onion(ctx->runtime_profile, ctx->tor) ||
+           ctx->onion_persist || ctx->onion_rotate;
+}
+
 const char *app_tor_policy_refusal_code(const struct app_context *ctx,
                                         bool real_tor_linked)
 {
-    (void)real_tor_linked;
     if (!ctx)
         return NULL;
 
@@ -160,6 +169,22 @@ const char *app_tor_policy_refusal_code(const struct app_context *ctx,
      * with a warning nobody reads in a unit's journal. */
     if (ctx->no_tor && app_operator_lane_serves_network(ctx->operator_lane))
         return APP_TOR_REFUSE_DISABLE_ON_SERVING_LANE;
+
+    /* The dev escape is checked BEFORE the stub-build refusal it suppresses,
+     * so it cannot buy a serving lane its way past that refusal: on
+     * canonical / soak / standby the escape is itself the refusal. */
+    if (ctx->allow_tor_stub_dev &&
+        app_operator_lane_serves_network(ctx->operator_lane))
+        return APP_TOR_REFUSE_STUB_ESCAPE_ON_SERVING_LANE;
+
+    /* A stub-linked binary cannot open an onion or dial through Tor. Asking
+     * it to is refused rather than downgraded to a warning: a node that
+     * believes it is onion-only while speaking clearnet is worse than one
+     * that would not start. -allow-tor-stub-dev is the narrow way out, for
+     * offline unit tests, and it never makes Tor run. */
+    if (!real_tor_linked && !ctx->allow_tor_stub_dev &&
+        app_tor_argv_asked_for_onion(ctx))
+        return APP_TOR_REFUSE_STUB_BUILD_ASKED_FOR_TOR;
 
     return NULL;
 }

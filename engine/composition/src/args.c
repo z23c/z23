@@ -354,6 +354,53 @@ static void args_report_tor_refusal(const struct app_context *ctx,
         return;
     }
 
+    if (strcmp(code, APP_TOR_REFUSE_STUB_ESCAPE_ON_SERVING_LANE) == 0) {
+        const struct boot_error_next next[] = {
+            { "make tor-full",
+              "build a binary that links real Tor; `zclassic23 --version` "
+              "then prints `tor: full` and this lane needs no escape" },
+            { "zclassic23 -operator-lane=dev -datadir=<dev datadir> "
+              "-allow-tor-stub-dev",
+              "use the escape where it belongs — an offline dev/test datadir "
+              "that serves nobody" },
+        };
+        boot_error_report(BOOT_ERROR_FATAL, code, ARGS_TOR_PHASE,
+                          "-allow-tor-stub-dev is a development escape for "
+                          "offline tests and must not run a network-serving "
+                          "lane",
+                          next, 2,
+                          "flag=-allow-tor-stub-dev operator_lane=%s "
+                          "tor_build=%s", lane, build);
+        return;
+    }
+
+    if (strcmp(code, APP_TOR_REFUSE_STUB_BUILD_ASKED_FOR_TOR) == 0) {
+        const struct boot_error_next next[] = {
+            { "make tor-full",
+              "build a binary that links real Tor — this is the fix; "
+              "`zclassic23 --version` then prints `tor: full`" },
+            { "zclassic23 --version",
+              "read the Tor identity of the binary you are actually running; "
+              "it prints `tor: stub` today" },
+            { "zclassic23 -allow-tor-stub-dev -operator-lane=dev "
+              "-datadir=<dev datadir>",
+              "boot this stub binary anyway for an offline test; Tor still "
+              "does not start, and the escape is refused on canonical, soak "
+              "and standby" },
+        };
+        boot_error_report(BOOT_ERROR_FATAL, code, ARGS_TOR_PHASE,
+                          "this binary linked the Tor stub, so it cannot "
+                          "open the onion this argv asked for",
+                          next, 3,
+                          "tor_build=%s operator_lane=%s tor=%d "
+                          "onion_persist=%d onion_rotate=%d profile=%s",
+                          build, lane, ctx->tor ? 1 : 0,
+                          ctx->onion_persist ? 1 : 0,
+                          ctx->onion_rotate ? 1 : 0,
+                          app_runtime_profile_name(ctx->runtime_profile));
+        return;
+    }
+
     /* No arm matched: report the code anyway rather than returning quietly.
      * A policy code with no words is a bug in THIS function, and a boot that
      * continued because of it would be the exact fail-open this whole path
@@ -475,6 +522,8 @@ int args_parse_node_options(int argc, char **argv, struct app_context *ctx,
         else if (strncmp(argv[i], "-showmetrics=", 13) == 0) *show_metrics = atoi(argv[i]+13) != 0;
         else if (strcmp(argv[i], "-tor") == 0) ctx->tor = true;
         else if (strcmp(argv[i], "-no-tor") == 0) ctx->no_tor = true;
+        else if (strcmp(argv[i], "-allow-tor-stub-dev") == 0)
+            ctx->allow_tor_stub_dev = true;
         else if (strcmp(argv[i], "-onion-persist") == 0 ||
                  strcmp(argv[i], "-onion-persist=1") == 0)
             ctx->onion_persist = true;

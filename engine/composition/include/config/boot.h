@@ -220,6 +220,12 @@ struct app_context {
                                   * a network-serving operator lane
                                   * (canonical/soak/standby) — see
                                   * app_tor_policy_refusal_code(). */
+    bool allow_tor_stub_dev;     /* -allow-tor-stub-dev : let a stub-linked
+                                  * binary boot even though Tor was asked
+                                  * for, for offline unit tests that need no
+                                  * network. Tor still does not start. The
+                                  * escape is itself REFUSED on a
+                                  * network-serving lane. */
     bool onion_persist;          /* -onion-persist / -onion-persist=1 : when
                                   * Tor runs, use a persistent seed-backed
                                   * .onion identity at
@@ -499,6 +505,9 @@ bool app_tor_should_start(bool real_tor_linked, bool no_tor);
  * expands to a greppable SCREAMING_SNAKE_CASE string, as config/boot_error.h
  * requires. Never reword one in place — add a new code. */
 #define APP_TOR_REFUSE_DISABLE_ON_SERVING_LANE "BOOT_TOR_DISABLE_LANE_REFUSED"
+#define APP_TOR_REFUSE_STUB_ESCAPE_ON_SERVING_LANE \
+    "BOOT_TOR_STUB_ESCAPE_LANE_REFUSED"
+#define APP_TOR_REFUSE_STUB_BUILD_ASKED_FOR_TOR "BOOT_TOR_STUB_BUILD_REFUSED"
 
 /* The whole fail-closed Tor admission decision, in one pure function.
  * Returns NULL when this argv may boot, or the stable boot_error code the
