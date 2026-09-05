@@ -154,6 +154,7 @@ ZCL_TEST_GROUP(mesh_capability_grant)
 ZCL_TEST_GROUP(mesh_capability_proto)
 ZCL_TEST_GROUP(mesh_pairing_controller)
 ZCL_TEST_GROUP(mesh_status_proto)
+ZCL_TEST_GROUP(state_offer)
 /* mesh terminal open/receipt/data/resize/close wire codec and receipt proof */
 ZCL_TEST_GROUP(mesh_terminal_proto)
 ZCL_TEST_GROUP(mesh_private_object_proto)
