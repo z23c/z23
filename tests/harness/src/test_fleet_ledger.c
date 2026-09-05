@@ -455,7 +455,8 @@ int test_fleet_ledger(void)
          "without a predict is unpredicted") {
         ASSERT(fl_box_open(&ex, root, "exp", 0x41));
         ex_open = true;
-        uint8_t task_class = 0, harness = 0, model = 0, effort = 0, outcome = 0;
+        uint8_t task_class = 0, task_verify = 0, harness = 0;
+        uint8_t model = 0, model_codex = 0, effort = 0, outcome = 0;
         ASSERT(zcl_fleet_experiment_enum_from_name("task_class", "read",
                                                    &task_class) &&
                zcl_fleet_experiment_enum_stored("task_class", task_class));
@@ -464,6 +465,12 @@ int test_fleet_ledger(void)
                zcl_fleet_experiment_enum_stored("harness", harness));
         ASSERT(zcl_fleet_experiment_enum_from_name("model", "grok", &model) &&
                zcl_fleet_experiment_enum_stored("model", model));
+        ASSERT(zcl_fleet_experiment_enum_from_name("task_class", "verify",
+                                                   &task_verify) &&
+               zcl_fleet_experiment_enum_stored("task_class", task_verify));
+        ASSERT(zcl_fleet_experiment_enum_from_name("model", "codex",
+                                                   &model_codex) &&
+               zcl_fleet_experiment_enum_stored("model", model_codex));
         ASSERT(zcl_fleet_experiment_enum_from_name("effort", "low", &effort) &&
                zcl_fleet_experiment_enum_stored("effort", effort));
         ASSERT(zcl_fleet_experiment_enum_from_name("outcome", "LAND",
@@ -506,6 +513,54 @@ int test_fleet_ledger(void)
         ASSERT_EQ(groups[0].predicts, UINT64_C(1));
         ASSERT_EQ(groups[0].results, UINT64_C(2));
         ASSERT_EQ(groups[0].unpredicted, UINT64_C(1));
+        ASSERT_EQ(unpredicted, UINT64_C(1));
+
+        /* A task ID is not enough to pair observations. Freeze collisions
+         * differing only by model and only by task class before adding the
+         * corresponding predictions. */
+        ASSERT_EQ(fl_add_predict(&ex, "t-model-scope", task_class, harness,
+                                 model, effort, 300, 9),
+                  ZCL_FLEET_OK);
+        ASSERT_EQ(fl_add_result(&ex, "t-model-scope", task_class, model_codex,
+                                outcome, 100, 11),
+                  ZCL_FLEET_OK);
+        ASSERT_EQ(fl_add_predict(&ex, "t-class-scope", task_class, harness,
+                                 model_codex, effort, 400, 13),
+                  ZCL_FLEET_OK);
+        ASSERT_EQ(fl_add_result(&ex, "t-class-scope", task_verify, model_codex,
+                                outcome, 200, 15),
+                  ZCL_FLEET_OK);
+        ASSERT_EQ(zcl_fleet_ledger_experiment_stats(ex.ledger, groups, 8,
+                                                    &count, &unpredicted, NULL),
+                  ZCL_FLEET_OK);
+        ASSERT_EQ(count, (size_t)3);
+        ASSERT_EQ(groups[1].task_class, task_class);
+        ASSERT_EQ(groups[1].model, model_codex);
+        ASSERT_EQ(groups[1].unpredicted, UINT64_C(1));
+        ASSERT_EQ(groups[1].have_pred_actual, (uint8_t)0);
+        ASSERT_EQ(groups[2].task_class, task_verify);
+        ASSERT_EQ(groups[2].model, model_codex);
+        ASSERT_EQ(groups[2].unpredicted, UINT64_C(1));
+        ASSERT_EQ(groups[2].have_pred_actual, (uint8_t)0);
+        ASSERT_EQ(unpredicted, UINT64_C(3));
+
+        /* The matching prediction follows a conflicting one in ledger order;
+         * the ratio must use the prediction in the result's own group. */
+        ASSERT_EQ(fl_add_predict(&ex, "t-model-scope", task_class, harness,
+                                 model_codex, effort, 50, 10),
+                  ZCL_FLEET_OK);
+        ASSERT_EQ(fl_add_predict(&ex, "t-class-scope", task_verify, harness,
+                                 model_codex, effort, 80, 14),
+                  ZCL_FLEET_OK);
+        ASSERT_EQ(zcl_fleet_ledger_experiment_stats(ex.ledger, groups, 8,
+                                                    &count, &unpredicted, NULL),
+                  ZCL_FLEET_OK);
+        ASSERT_EQ(groups[1].unpredicted, UINT64_C(0));
+        ASSERT_EQ(groups[1].have_pred_actual, (uint8_t)1);
+        ASSERT_EQ(groups[1].pred_actual_bp, INT64_C(5000));
+        ASSERT_EQ(groups[2].unpredicted, UINT64_C(0));
+        ASSERT_EQ(groups[2].have_pred_actual, (uint8_t)1);
+        ASSERT_EQ(groups[2].pred_actual_bp, INT64_C(4000));
         ASSERT_EQ(unpredicted, UINT64_C(1));
         PASS();
     }

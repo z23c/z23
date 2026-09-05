@@ -990,10 +990,11 @@ uint64_t zcl_fleet_ledger_experiment_overflow(const struct zcl_fleet_ledger *l)
     return l ? l->experiment_overflow : 0;
 }
 
-static bool notes_equal(const struct fleet_experiment_event *a,
-                        const struct fleet_experiment_event *b)
+static bool experiment_task_equal(const struct fleet_experiment_event *a,
+                                  const struct fleet_experiment_event *b)
 {
-    return a->note_len == b->note_len &&
+    return a->task_class == b->task_class && a->model == b->model &&
+           a->note_len == b->note_len &&
            memcmp(a->note, b->note, a->note_len) == 0;
 }
 
@@ -1061,7 +1062,7 @@ enum zcl_fleet_status zcl_fleet_ledger_experiment_stats(
             for (uint32_t j = 0; j < ledger->experiment_count; j++) {
                 const struct fleet_experiment_event *p = &ledger->experiment[j];
                 if (p->phase == ZCL_FLEET_EXPERIMENT_PREDICT &&
-                    notes_equal(p, e)) {
+                    experiment_task_equal(p, e)) {
                     found = true;
                     break;
                 }
@@ -1093,7 +1094,8 @@ enum zcl_fleet_status zcl_fleet_ledger_experiment_stats(
             for (uint32_t j = 0; j < ledger->experiment_count; j++) {
                 const struct fleet_experiment_event *p = &ledger->experiment[j];
                 if (p->phase != ZCL_FLEET_EXPERIMENT_PREDICT ||
-                    !notes_equal(p, e) || !p->have_tokens || !e->have_tokens)
+                    !experiment_task_equal(p, e) || !p->have_tokens ||
+                    !e->have_tokens)
                     continue;
                 pred_sum += p->tokens;
                 act_sum += e->tokens;
