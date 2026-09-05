@@ -560,14 +560,14 @@ int test_mesh_stream(void)
     }
 
     TEST("mesh stream: an OPEN with the wrong id parity is refused by name") {
-        stream_test_discard(a, a_queue, f.res_term);
-        stream_test_discard(b, b_queue, f.term_peer.ini);
+        mesh_loop_discard(a, a_queue, f.res_term);
+        mesh_loop_discard(b, b_queue, f.term_peer.ini);
         mesh_stream_test_reset();
         stream_test_counters_reset();
         /* b accepted the link so it mints odd ids; inbound OPEN is even. */
         size_t live = mesh_stream_test_live_count(STREAM_TEST_ECHO);
-        uint8_t frame[STREAM_TEST_WIRE_MAX];
-        uint8_t answer[STREAM_TEST_WIRE_MAX];
+        uint8_t frame[MESH_LOOP_WIRE_MAX];
+        uint8_t answer[MESH_LOOP_WIRE_MAX];
         uint8_t kind = 0;
         uint64_t answer_id = 0;
         bool more = false;
@@ -578,7 +578,7 @@ int test_mesh_stream(void)
         ASSERT(mesh_stream_frame(&mp, b, frame, frame_len, NULL));
         ASSERT_EQ(mesh_stream_test_live_count(STREAM_TEST_ECHO), live);
         ASSERT_EQ(g_opens, (size_t)0);
-        size_t answer_len = stream_test_take(b, b_queue, f.term_peer.ini,
+        size_t answer_len = mesh_loop_take(b, b_queue, f.term_peer.ini,
                                              answer, sizeof(answer), &more);
         ASSERT(more);
         ASSERT(mesh_stream_test_read_header(answer, answer_len, &kind,
@@ -599,20 +599,20 @@ int test_mesh_stream(void)
 
     TEST("mesh stream: a duplicate OPEN of a live id is refused and the "
          "live stream keeps its state") {
-        stream_test_discard(a, a_queue, f.res_term);
-        stream_test_discard(b, b_queue, f.term_peer.ini);
+        mesh_loop_discard(a, a_queue, f.res_term);
+        mesh_loop_discard(b, b_queue, f.term_peer.ini);
         mesh_stream_test_reset();
         stream_test_counters_reset();
         uint64_t id = UINT64_MAX;
         ASSERT_EQ(mesh_stream_open(STREAM_TEST_ECHO, f.resp_noise_pub,
                                    STREAM_TEST_WINDOW, NULL, 0, NULL, &id),
                   MESH_STREAM_OK);
-        ASSERT_EQ(stream_test_pump(a, a_queue, f.res_term, &mp, b),
+        ASSERT_EQ(mesh_loop_pump(a, a_queue, f.res_term, &mp, b),
                   (size_t)1);
         ASSERT_EQ(g_opens, (size_t)1);
         ASSERT_EQ(mesh_stream_test_live_count(STREAM_TEST_ECHO), (size_t)2);
-        uint8_t frame[STREAM_TEST_WIRE_MAX];
-        uint8_t answer[STREAM_TEST_WIRE_MAX];
+        uint8_t frame[MESH_LOOP_WIRE_MAX];
+        uint8_t answer[MESH_LOOP_WIRE_MAX];
         uint8_t kind = 0;
         uint64_t answer_id = 0;
         bool more = false;
@@ -621,7 +621,7 @@ int test_mesh_stream(void)
             sizeof(frame));
         ASSERT(frame_len != 0);
         ASSERT(mesh_stream_frame(&mp, b, frame, frame_len, NULL));
-        size_t answer_len = stream_test_take(b, b_queue, f.term_peer.ini,
+        size_t answer_len = mesh_loop_take(b, b_queue, f.term_peer.ini,
                                              answer, sizeof(answer), &more);
         ASSERT(more);
         ASSERT(mesh_stream_test_read_header(answer, answer_len, &kind,
@@ -634,7 +634,7 @@ int test_mesh_stream(void)
         uint8_t chunk[32];
         memset(chunk, 'd', sizeof(chunk));
         ASSERT(stream_test_send(id, true, chunk, sizeof(chunk)));
-        ASSERT_EQ(stream_test_pump(a, a_queue, f.res_term, &mp, b),
+        ASSERT_EQ(mesh_loop_pump(a, a_queue, f.res_term, &mp, b),
                   (size_t)1);
         ASSERT_EQ(g_data_bytes, sizeof(chunk));
         struct stream_test_visit v;
