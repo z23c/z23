@@ -1308,6 +1308,81 @@ int test_rpc(void) {
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
 
+    printf("rpc_convert_values msg_send/msg_inbox peer-id and flag rows... ");
+    {
+        /* msg_send on the default p2p channel: argument 0 is a numeric
+         * peer ID and must come out as JSON_INT, not JSON_STR — this is
+         * the exact row that fixed "Peer not found or disconnected" for
+         * every peer, because the handler reads it with json_get_int()
+         * (which returns 0 for a string). */
+        bool ok = rpc_should_convert_param("msg_send", 0);
+
+        const char *p2p_params[] = { "60", "hello" };
+        struct json_value p2p_result;
+        ok = ok && rpc_convert_values("msg_send", p2p_params, 2, &p2p_result);
+        ok = ok && p2p_result.type == JSON_ARR &&
+            json_size(&p2p_result) == 2;
+        ok = ok && json_at(&p2p_result, 0)->type == JSON_INT;
+        ok = ok && json_get_int(json_at(&p2p_result, 0)) == 60;
+        json_free(&p2p_result);
+
+        /* msg_send on the onchain channel: argument 0 is a z-address
+         * string. The static (method, idx) table cannot see argument 2,
+         * so rpc_convert_values() itself must leave argument 0 alone here
+         * or every onchain CLI send would fail to parse. */
+        const char *onchain_params[] = {
+            "zs1exampleaddress", "hello", "onchain", "zs1fromaddress"
+        };
+        struct json_value onchain_result;
+        ok = ok && rpc_convert_values("msg_send", onchain_params, 4,
+                                      &onchain_result);
+        ok = ok && onchain_result.type == JSON_ARR &&
+            json_size(&onchain_result) == 4;
+        ok = ok && json_at(&onchain_result, 0)->type == JSON_STR;
+        ok = ok && strcmp(json_get_str(json_at(&onchain_result, 0)),
+                          "zs1exampleaddress") == 0;
+        json_free(&onchain_result);
+
+        /* msg_inbox: one audited method besides msg_send whose handler
+         * (msg_inbox_unread_only) reads its only argument with
+         * json_get_int(...) != 0. */
+        ok = ok && rpc_should_convert_param("msg_inbox", 0);
+        ok = ok && rpc_should_convert_param("msg_inbox_index", 0);
+
+        const char *inbox_params[] = { "1" };
+        struct json_value inbox_result;
+        ok = ok && rpc_convert_values("msg_inbox", inbox_params, 1,
+                                      &inbox_result);
+        ok = ok && inbox_result.type == JSON_ARR &&
+            json_size(&inbox_result) == 1;
+        ok = ok && json_at(&inbox_result, 0)->type == JSON_INT;
+        ok = ok && json_get_int(json_at(&inbox_result, 0)) == 1;
+        json_free(&inbox_result);
+
+        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
+    }
+
+    printf("rpc_convert_values msg_send rejects a non-numeric peer id... ");
+    {
+        /* Before the msg_send row existed, a non-numeric first argument
+         * was sent through as a JSON string and the node's
+         * json_get_int() silently read it as peer 0. Now that argument 0
+         * is a convert-table entry, an unquoted non-numeric token is not
+         * valid JSON, and rpc_convert_values() must refuse with a typed
+         * failure (false) instead of ever producing a JSON_STR or
+         * JSON_INT 0 for it. */
+        const char *bad_params[] = { "not-a-peer-id", "hello" };
+        struct json_value bad_result;
+        bool ok = !rpc_convert_values("msg_send", bad_params, 2, &bad_result);
+        /* rpc_convert_values() documents that on failure *result is left
+         * partially built and still owned by the caller; free it and
+         * confirm no element was ever appended for the rejected argument. */
+        ok = ok && json_size(&bad_result) == 0;
+        json_free(&bad_result);
+
+        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
+    }
+
     printf("rpc_cli_print_json_result... ");
     {
         bool ok = rpc_test_cli_print_case(

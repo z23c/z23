@@ -122,7 +122,25 @@ static const struct convert_param convert_table[] = {
      * second argument.  Without this row zclassic-cli quoted the JSON and the
      * node correctly refused it as "second param must be an object", forcing
      * agents to bypass the supported client for custody discovery. */
-    { "agentsession", 1 }
+    { "agentsession", 1 },
+    /* msg_send's first argument is a numeric peer ID on the default p2p
+     * channel. rpc_msg_send() in messaging_controller.c reads it with
+     * json_get_int(), which silently returns 0 for a JSON string, so
+     * without this row `zclassic23 msg_send <peer_id> "text"` looked up
+     * peer 0 for every peer ID and always failed with "Peer not found or
+     * disconnected". The onchain channel's recipient (a z-address string)
+     * is excluded from this conversion in rpc_convert_values() below,
+     * which can see the "onchain" channel argument this static table
+     * cannot. */
+    { "msg_send", 0 },
+    /* msg_inbox / msg_inbox_index take one truthiness argument, and both
+     * handlers read it with json_get_int(...) != 0 (msg_inbox_unread_only
+     * in messaging_controller.c), not json_get_bool(). Without these rows
+     * the argument was sent as a JSON string, json_get_int() returned 0
+     * for it regardless of value, and `unread_only` could never be set
+     * from the command line. */
+    { "msg_inbox", 0 },
+    { "msg_inbox_index", 0 }
 };
 
 #define NUM_CONVERT_PARAMS \
@@ -137,14 +155,35 @@ bool rpc_should_convert_param(const char *method, int param_idx)
     return false;
 }
 
+/* msg_send's recipient (argument 0) is numeric only on the default p2p
+ * channel; on the onchain channel (argument 2 == "onchain") it is a
+ * z-address string. json_read() requires JSON syntax, so converting an
+ * unquoted address would refuse every onchain send with "Failed to parse
+ * parameters". The (method, idx) table above cannot see argument 2, so the
+ * exclusion lives here where the whole argument list is visible. */
+static bool rpc_msg_send_recipient_is_onchain_string(const char *method,
+                                                     const char **str_params,
+                                                     size_t num_params)
+{
+    return strcmp(method, "msg_send") == 0 && num_params >= 3 &&
+           str_params[2] != NULL && strcmp(str_params[2], "onchain") == 0;
+}
+
 bool rpc_convert_values(const char *method, const char **str_params,
                         size_t num_params, struct json_value *result)
 {
     json_init(result);
     json_set_array(result);
 
+    bool msg_send_onchain =
+        rpc_msg_send_recipient_is_onchain_string(method, str_params,
+                                                 num_params);
+
     for (size_t i = 0; i < num_params; i++) {
-        if (!rpc_should_convert_param(method, (int)i)) {
+        bool convert = rpc_should_convert_param(method, (int)i);
+        if (convert && i == 0 && msg_send_onchain)
+            convert = false;
+        if (!convert) {
             struct json_value sv;
             json_init(&sv);
             json_set_str(&sv, str_params[i]);

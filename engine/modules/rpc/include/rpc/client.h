@@ -26,6 +26,10 @@ bool rpc_should_convert_param(const char *method, int param_idx);
  * rpc_should_convert_param(method, i) is true, is parsed as a JSON value
  * (number/bool/array/object). Parsing wraps the argument in [ ... ] and parses
  * a one-element array, so a bare token like 0 or true or {"a":1} is accepted.
+ * One method is context-sensitive rather than a pure (method, idx) lookup:
+ * msg_send's argument 0 is excluded from conversion when argument 2 is the
+ * literal string "onchain", because that channel's recipient is a z-address
+ * string rather than a numeric peer ID.
  * On success initializes *result to the array and returns true; the caller owns
  * *result and must json_free it. On any parse failure (a convertible argument
  * that is not valid JSON, or an allocation failure) returns false; *result is
