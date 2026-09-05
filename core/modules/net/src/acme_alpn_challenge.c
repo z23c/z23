@@ -262,6 +262,21 @@ static int alpn_select(SSL *ssl, const unsigned char **out, unsigned char *outle
         return SSL_TLSEXT_ERR_NOACK;
     }
 
+    /* A TLS-ALPN-01 challenge is single-use: the CA validates it with one
+     * handshake, and the worker that drives the order (tools/acme) is a
+     * separate process that cannot reach into this one's memory to say
+     * "validated" or "failed" — the handoff file above is the only signal it
+     * can send. Disarm the moment this connection has taken the armed
+     * material, on both the path below that presents it and the one that
+     * cannot, so a challenge never outlives the single handshake it was
+     * armed for. Without this, `armed_take()` above would keep matching on
+     * domain alone and hand every later connection — including the next
+     * renewal's, whose key authorization is different — this same stale
+     * certificate until the process restarted. Disarming here instead makes
+     * the NEXT connection fall through to the handoff-file read above, so a
+     * fresh handoff always wins over whatever was armed before. */
+    acme_alpn_challenge_disarm();
+
     /* The ALPN callback runs before the server chooses its certificate, so
      * an SSL-scoped certificate set here is the one presented on this
      * connection only; the listener's own SSL_CTX is untouched. */

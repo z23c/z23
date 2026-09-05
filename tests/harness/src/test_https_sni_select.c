@@ -34,6 +34,7 @@
 #include "net/acme_selfsigned.h"
 #include "net/https_server.h"
 
+#include <openssl/asn1.h>
 #include <openssl/err.h>
 #include <openssl/objects.h>
 #include <openssl/pem.h>
@@ -98,20 +99,38 @@ struct served {
     char cn[256];       /* subject CN of the leaf the server presented */
     char alpn[64];      /* the protocol the server selected, or "" */
     bool acme_identifier; /* the leaf carries the RFC 8737 extension */
+    uint8_t acme_digest[32]; /* that extension's SHA-256(key authorization) */
 };
 
 /* True when this leaf is an ACME TLS-ALPN-01 challenge certificate. The
  * extension, not the name: a challenge certificate carries the SAME subject
  * CN as the ordinary certificate for that domain, so the name cannot tell
- * them apart and this is the only honest discriminator. */
-static bool leaf_has_acme_identifier(X509 *leaf)
+ * them apart and this is the only honest discriminator. Also decodes the
+ * extension's payload into `digest` (when non-NULL) so a caller can tell
+ * WHICH challenge a certificate answers, not merely that it answers one --
+ * that is what distinguishes a fresh renewal from a stale reused cert. */
+static bool leaf_has_acme_identifier(X509 *leaf, uint8_t digest[32])
 {
     ASN1_OBJECT *obj = OBJ_txt2obj(ACME_ID_OID_TEXT, 1);
     if (!obj)
         return false;
     const int idx = X509_get_ext_by_OBJ(leaf, obj, -1);
     ASN1_OBJECT_free(obj);
-    return idx >= 0;
+    if (idx < 0)
+        return false;
+    if (digest) {
+        X509_EXTENSION *ext = X509_get_ext(leaf, idx);
+        ASN1_OCTET_STRING *raw = ext ? X509_EXTENSION_get_data(ext) : NULL;
+        const unsigned char *p = raw ? ASN1_STRING_get0_data(raw) : NULL;
+        const int n = raw ? ASN1_STRING_length(raw) : 0;
+        ASN1_OCTET_STRING *inner = p ? d2i_ASN1_OCTET_STRING(NULL, &p, n) : NULL;
+        if (inner && ASN1_STRING_length(inner) == 32)
+            memcpy(digest, ASN1_STRING_get0_data(inner), 32);
+        else
+            memset(digest, 0, 32);
+        ASN1_OCTET_STRING_free(inner);
+    }
+    return true;
 }
 
 /* Connect, handshake, record what came back. `sni` NULL means send no
@@ -182,7 +201,7 @@ static bool handshake(const char *sni, bool offer_acme_alpn,
     if (X509_NAME_get_text_by_NID(X509_get_subject_name(leaf), NID_commonName,
                                   out->cn, (int)sizeof(out->cn)) <= 0)
         goto done;
-    out->acme_identifier = leaf_has_acme_identifier(leaf);
+    out->acme_identifier = leaf_has_acme_identifier(leaf, out->acme_digest);
     ok = true;
 
 done:
@@ -418,7 +437,18 @@ int test_https_sni_select(void)
                  "configured for that name",
                  got && s.acme_identifier);
 
-        acme_alpn_challenge_disarm();
+        /* This is the fix under test: presenting a TLS-ALPN-01 challenge
+         * certificate is what "validate" means from the front door's side
+         * (the CA is a separate connection this process never hears back
+         * from), so serving it must disarm the responder BY ITSELF, with no
+         * explicit disarm() call in between. Before this file's fix,
+         * nothing in production ever called acme_alpn_challenge_disarm(),
+         * so this checked false and the certificate stayed armed for the
+         * life of the process. */
+        SN_CHECK("serving the challenge disarms it with no explicit "
+                 "disarm() call — arm, validate, disarm",
+                 !acme_alpn_challenge_armed());
+
         memset(&s, 0, sizeof(s));
         SN_CHECK("with nothing armed, that same name is served its own "
                  "certificate again",
@@ -434,6 +464,49 @@ int test_https_sni_select(void)
                  "ordinary certificate and no ALPN",
                  handshake(ALPHA, true, &s) && !s.acme_identifier &&
                  strcmp(s.cn, ALPHA) == 0 && s.alpn[0] == '\0');
+    }
+
+    /* ── a renewal never reuses a stale challenge (the reported bug) ──
+     *
+     * Two validations in a row for the SAME domain, each with its own key
+     * authorization — exactly a certificate renewal. Before the disarm fix
+     * above, the second validation would still match on domain alone inside
+     * armed_take() and be served the FIRST challenge's certificate, whose
+     * acmeIdentifier digest no longer matches what the CA expects; the CA
+     * would fail that validation, and it would keep failing every renewal
+     * until the process restarted. */
+    {
+        uint8_t want_a[32], want_b[32];
+        SN_CHECK("the first challenge's expected digest computes",
+                 acme_alpn_challenge_digest("first.thumbprint", want_a));
+        SN_CHECK("the second challenge's expected digest computes",
+                 acme_alpn_challenge_digest("second.thumbprint", want_b));
+        SN_CHECK("the two challenges expect different digests",
+                 memcmp(want_a, want_b, 32) != 0);
+
+        SN_CHECK("armed for the first validation",
+                 acme_alpn_challenge_arm(ALPHA, "first.thumbprint"));
+        struct served first = {0};
+        const bool got_first = handshake(ALPHA, true, &first);
+        SN_CHECK("the first validation is served a challenge certificate "
+                 "carrying the FIRST digest",
+                 got_first && first.acme_identifier &&
+                 memcmp(first.acme_digest, want_a, 32) == 0);
+        SN_CHECK("that validation leaves the responder disarmed",
+                 !acme_alpn_challenge_armed());
+
+        SN_CHECK("armed again for the SAME domain with a fresh key "
+                 "authorization, as a renewal would",
+                 acme_alpn_challenge_arm(ALPHA, "second.thumbprint"));
+        struct served second = {0};
+        const bool got_second = handshake(ALPHA, true, &second);
+        SN_CHECK("the renewal's validation is served a challenge certificate "
+                 "carrying the SECOND digest, not the first one's",
+                 got_second && second.acme_identifier &&
+                 memcmp(second.acme_digest, want_b, 32) == 0 &&
+                 memcmp(second.acme_digest, want_a, 32) != 0);
+        SN_CHECK("the renewal leaves the responder disarmed too",
+                 !acme_alpn_challenge_armed());
     }
 
     /* ── renewing one name disturbs no other ───────────────────────── */
