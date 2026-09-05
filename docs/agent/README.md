@@ -42,7 +42,7 @@ Five more documents are being written in parallel. Cite them even before they la
 
 ## Ask the checkout
 
-These five commands answer questions in milliseconds and need no running node.
+These commands answer questions in milliseconds and need no running node.
 
 | Question | Command |
 |---|---|
@@ -51,6 +51,7 @@ These five commands answer questions in milliseconds and need no running node.
 | Which room owns a file? | `build/bin/z23-dev code room --input='{"path":"<file>"}'` |
 | What is the impact of a set of files? | `build/bin/z23-dev agentimpact <files...>` |
 | Is this checkout ready for an agent? | `build/bin/z23-dev dev agent ready` |
+| What is the WHOLE fleet doing, and what do I do first? | `build/bin/z23-dev dev fleet start` |
 
 ## Rules that stand
 

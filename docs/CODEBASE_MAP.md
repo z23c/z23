@@ -340,12 +340,19 @@ public surface is currently verify/check only. `MODE=auto`/`apply`, direct
 relinking all fail closed during Phase-0 containment. The live hot-swap loop
 is the swappable-leaf module path (`make hotswap-try` / `make hotswap-apply`,
 see §4), not a watcher mode.
-Fleet-wide checkout truth is `z23 dev fleet`, implemented by
+Fleet-wide checkout truth is `z23 dev fleet truth`, implemented by
 `tools/command/native_dev_fleet*.c`. It enumerates only `origin/main` and
 `origin/agent/*`, joins matching attached worktrees, and admits lint claims
 only from locally validated `.cache/agent-receipts` chains. Its isolated
 three-worktree acceptance is `tools/scripts/dev_fleet_selftest.sh`; neither
 path reads a live node or datadir.
+The sibling `z23 dev fleet start` (`tools/command/native_dev_fleet_start.c`,
+group `dev_fleet_start`) answers the orchestrator's opening question instead:
+this checkout, the mission pointers, every linked worktree newest first, the
+running executor units, the fleet hosts, the unanswered board rows, main, and
+the ordered next actions, all inside a caller-set byte budget. Its board
+reading is isolated behind one function so the signed gossiped board can
+replace the source without touching a section.
 
 `tools/dev/deploy-dev-lane.sh` contains the intended immutable
 content-addressed generation transaction (activation lock,

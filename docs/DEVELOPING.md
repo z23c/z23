@@ -454,7 +454,7 @@ build/bin/mutation-campaign --file=<any .c> --list   # enumerate only; no build
 
 ### Reading fleet truth
 
-Run `z23 dev fleet` from any checkout to see `origin/main` and every locally
+Run `z23 dev fleet truth` from any checkout to see `origin/main` and every locally
 known `origin/agent/*` lane in one result. It reports exact remote heads,
 attached worktrees, each lane's remote/unpublished/dirty file union, and red
 lint checks from current `.cache/agent-receipts` evidence. A missing receipt is
@@ -467,6 +467,20 @@ you need newer remote-tracking refs. It reads Git metadata and self-sealed lint
 receipt/log pairs only; it never opens a node datadir or contacts a live node.
 The permanent acceptance is `make dev-fleet-selftest`, which constructs an
 isolated origin with three worktrees and no node.
+
+Run `z23 dev fleet start` when the question is not "what is one lane doing"
+but "what is the whole fleet doing, and what do I do first". It answers in a
+single packet whose size you set with `budget_bytes`: whether this checkout is
+behind `origin/main`, the mission document pointers, every linked worktree
+sharing this git common dir with its ahead, behind, dirty and modification
+time newest first, the running executor units, each fleet host's last posted
+offer, the board needs and problems no later claim or result answered,
+`origin/main`'s head and this checkout's red lint gates, and the ordered next
+actions as `{action, reason, command}`. Every section reports `state`, `count`,
+`total` and `truncated`, so a section the budget cut says so and names how many
+rows it had; nothing is dropped silently. Pass the `cursor` it returns back as
+`since` to get only what changed. Like `truth`, it never fetches and never
+reads a node or datadir.
 
 `z23 code tests <file.c>` names the group that covers a file, which is the
 `--group=` argument. `--limit=N` takes a sample instead of the whole file, and
