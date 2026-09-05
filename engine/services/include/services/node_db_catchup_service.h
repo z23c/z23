@@ -131,6 +131,12 @@ int node_db_catchup_test_reopen_attempts(void);
  * db_maintenance without running a walk. */
 void node_db_catchup_test_set_active(bool active);
 
+/* Raw begin/finish depth counter behind node_db_catchup_service_active()'s
+ * `> 0` test. That test alone cannot tell a healthy 0 apart from a -1 left
+ * by a begin paired with two finishes, so a regression test that must
+ * catch the double-finish class reads this directly. */
+int node_db_catchup_test_active_depth(void);
+
 /* Clear every reopen override and counter above. */
 void node_db_catchup_test_reset_reopen(void);
 #endif

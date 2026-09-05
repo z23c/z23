@@ -499,6 +499,45 @@ int test_node_db_catchup_service(void)
         NDC_CHECK("every retry is named in the log",
                   capturedS && strstr(logS, firstS) != NULL &&
                   strstr(logS, lastS) != NULL);
+
+        /* (r2b) Regression guard: that plain fail-closed abort above must
+         * pair its one catchup_active_begin() with exactly one finish.
+         * LOG_ERR (base/log_macros.h) logs AND returns, so the
+         * catchup_active_finish() immediately above the LOG_ERR call at
+         * the "aborting" site is this pass's ONLY finish — the
+         * unconditional one at the bottom of node_db_catchup_service_run
+         * is unreachable once that LOG_ERR fires. A future edit that adds
+         * a second finish there (misreading LOG_ERR as a plain log call,
+         * as LOG_WARN/LOG_ERROR are) would drive the depth counter to -1
+         * instead of 0 — invisible to node_db_catchup_service_active()'s
+         * `> 0` test right here, but it would make the counter misreport
+         * the NEXT walk as inactive, defeating the db_maintenance
+         * deferral this service exists to provide. Check both: the
+         * coarse active flag now, and the raw depth (must land on 0, not
+         * -1) so such a regression is caught even though -1 also reads
+         * as "inactive". */
+        NDC_CHECK("catchup reports inactive right after a plain failed pass",
+                  !node_db_catchup_service_active());
+        NDC_CHECK("the active-depth counter is paired to zero, not -1",
+                  node_db_catchup_test_active_depth() == 0);
+
+        /* A following real walk (no injected failure — the busy budget
+         * armed above is already fully spent) must drain the rest of the
+         * same database's pending work and land the depth counter back on
+         * zero again. Under the double-finish regression described above,
+         * the prior pass leaves the counter at -1, so this fresh
+         * begin/finish would net -1 instead of 0 — proving the "fresh
+         * begin" case is paired too, not only the failure case just
+         * exercised. */
+        int resS2 = openS
+            ? node_db_catchup_service_run(&ndbS, &ac, NULL, dirF) : -1;
+        NDC_CHECK("a following real walk drains the rest of the work",
+                  resS2 == FIX_N - 2);
+        NDC_CHECK("catchup reports inactive after the following real walk",
+                  !node_db_catchup_service_active());
+        NDC_CHECK("the depth counter is still paired after a fresh begin",
+                  node_db_catchup_test_active_depth() == 0);
+
         node_db_catchup_test_reset_reopen();
         if (openS) node_db_close(&ndbS);
 

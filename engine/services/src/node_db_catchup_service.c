@@ -168,6 +168,11 @@ void node_db_catchup_test_set_active(bool active)
     atomic_store(&g_catchup_active_depth, active ? 1 : 0);
 }
 
+int node_db_catchup_test_active_depth(void)
+{
+    return atomic_load(&g_catchup_active_depth);
+}
+
 void node_db_catchup_test_reset_reopen(void)
 {
     atomic_store(&g_test_reopen_busy_armed, 0);
@@ -909,6 +914,15 @@ int node_db_catchup_service_run(struct node_db *ndb,
         return r;
     }
 
+    /* LOG_ERR (base/log_macros.h) logs AND `return -1;`s — this branch
+     * never falls through to the unconditional catchup_active_finish()
+     * at the bottom of this function, so the finish just above already
+     * pairs the one begin from the top of this pass exactly once. A
+     * plain read of this block (mistaking LOG_ERR for a non-returning
+     * log call, like its LOG_WARN/LOG_ERROR neighbors) makes the pairing
+     * look broken; it is not. Do not add a second finish on this path,
+     * and do not remove this one — either change puts
+     * g_catchup_active_depth off by one on every failed-closed pass. */
     if (failed || !restore_ok) {
         catchup_active_finish();
         LOG_ERR("sync", "catchup: aborting (failed=%d, restore_ok=%d, indexed=%d)",
