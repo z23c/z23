@@ -797,8 +797,8 @@ static int dl_rows_lock(const char *landdir)
  * it says so and returns, because a step that waited would be exactly the
  * blocking this leaf exists to remove. Reuses dl_lock_path(), the same
  * open+flock(LOCK_EX|LOCK_NB) helper queue.lock uses, rather than a second
- * raw lock primitive. */
-static int dl_step_lock(const char *landdir)
+ * raw lock primitive. Windows refuses step before this POSIX helper is used. */
+[[maybe_unused]] static int dl_step_lock(const char *landdir)
 {
     char path[4096 + 32];
     if (!landdir ||
@@ -3700,8 +3700,9 @@ static void dl_step_start(const struct dl_dirs *d, struct dl_row *row,
         dl_step_reply(reply, row, "started");
 }
 
-/* Read the proof's own state for the in-flight request and act once. */
-static void dl_step_resume(const struct dl_dirs *d, struct dl_row *row,
+/* Read the proof's own state for the in-flight request and act once.
+ * Windows refuses step before entering this POSIX-only call graph. */
+[[maybe_unused]] static void dl_step_resume(const struct dl_dirs *d, struct dl_row *row,
                            struct zcl_command_reply *reply)
 {
     char detail[512], dimension[48], buf[DL_GIT_CAP];
@@ -3857,13 +3858,6 @@ static void dl_step_resume(const struct dl_dirs *d, struct dl_row *row,
 static void dl_step(const struct zcl_command_request *req,
                     struct zcl_command_reply *reply)
 {
-    struct dl_dirs d;
-    struct dl_row *rows = NULL;
-    struct dl_row pick;
-    size_t nrows = 0;
-    char qpath[4096 + 32];
-    bool have_inflight = false, have_queued = false;
-    int slot;
     (void)req;
 #if defined(_WIN32)
     dl_fail(reply, "STEP_WINDOWS_UNAVAILABLE", "slot",
@@ -3871,6 +3865,13 @@ static void dl_step(const struct zcl_command_request *req,
             "run the landing loop on a POSIX host");
     return;
 #else
+    struct dl_dirs d;
+    struct dl_row *rows = NULL;
+    struct dl_row pick;
+    size_t nrows = 0;
+    char qpath[4096 + 32];
+    bool have_inflight = false, have_queued = false;
+    int slot;
     if (!dl_dirs_make(&d)) {
         dl_fail(reply, "STATE_DIR_FAILED", "slot",
                 "cannot resolve the owner-private state root",
