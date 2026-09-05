@@ -50,7 +50,9 @@
 #define FLEET_DIR_PEER "peer"
 #define FLEET_SELF_FILE "self.chainlog"
 
-/* One (box, kind, subject, day) cell. */
+/* One (box, kind, subject, day) cell. `value` is combined by each key's
+ * declared merge class, and `state` is the byte that keeps a measured zero
+ * apart from a key no row ever carried. */
 struct fleet_cell {
     bool used;
     uint8_t box;      /* index into ledger->box[] */
@@ -59,8 +61,8 @@ struct fleet_cell {
     uint32_t day;
     uint64_t rows;
     int64_t last_ts;
-    int64_t sum[ZCL_FLEET_PAIR_KEY_MAX + 1];
-    bool present[ZCL_FLEET_PAIR_KEY_MAX + 1];
+    int64_t value[ZCL_FLEET_PAIR_KEY_MAX + 1];
+    uint8_t state[ZCL_FLEET_PAIR_KEY_MAX + 1];
 };
 
 /* One (box, kind, subject) whole-history remainder: everything outside the
@@ -72,8 +74,8 @@ struct fleet_series {
     uint16_t subject;
     uint64_t rows;
     int64_t last_ts;
-    int64_t sum[ZCL_FLEET_PAIR_KEY_MAX + 1];
-    bool present[ZCL_FLEET_PAIR_KEY_MAX + 1];
+    int64_t value[ZCL_FLEET_PAIR_KEY_MAX + 1];
+    uint8_t state[ZCL_FLEET_PAIR_KEY_MAX + 1];
 };
 
 struct fleet_box {
@@ -90,6 +92,7 @@ struct zcl_fleet_ledger {
     char dir[512];
     bool have_self;
     uint8_t self_id[ZCL_FLEET_ID_BYTES];
+    uint8_t self_signer[ZCL_FLEET_ID_BYTES];
     struct fleet_box box[ZCL_FLEET_BOXES_MAX];
     struct fleet_cell *cell;     /* ZCL_FLEET_INDEX_CELLS */
     struct fleet_series *series; /* ZCL_FLEET_INDEX_SERIES */
@@ -187,29 +190,50 @@ static struct fleet_series *series_for(struct zcl_fleet_ledger *l, uint8_t box,
     return free_slot;
 }
 
-static void accumulate(int64_t *sum, bool *present,
+/* Apply one row's pairs by their declared merge class. A COUNTER adds; an
+ * LWW or OWNER_ONLY key takes the latest statement. "Latest" is the row
+ * that arrives last, and rows only ever arrive in chain order — load walks
+ * seq ascending, append writes seq+1, replicate appends ascending — so the
+ * chain's own order decides, never the writer's clock. */
+static void accumulate(int64_t *value, uint8_t *state,
                        const struct zcl_fleet_row *row)
 {
     for (size_t i = 0; i < row->pair_count; i++) {
         uint8_t key = row->pair[i].key;
-        sum[key] += row->pair[i].value;
-        present[key] = true;
+        enum zcl_fleet_merge merge =
+            zcl_fleet_pair_merge(row->kind, row->subject, key);
+        if (merge == ZCL_FLEET_MERGE_COUNTER &&
+            state[key] == ZCL_FLEET_FIELD_PRESENT)
+            value[key] += row->pair[i].value;
+        else
+            value[key] = row->pair[i].value;
+        state[key] = ZCL_FLEET_FIELD_PRESENT;
     }
 }
 
-/* Fold one cell into its series remainder and free the slot. */
+/* Fold one cell into its series remainder and free the slot. The remainder
+ * is combined by the same classes: a counter's days add, and a gauge's
+ * remainder keeps the newest day it saw rather than a meaningless total. */
 static void cell_fold(struct zcl_fleet_ledger *l, struct fleet_cell *c)
 {
     struct fleet_series *s = series_for(l, c->box, c->kind, c->subject);
     if (s) {
         s->rows += c->rows;
-        if (c->last_ts > s->last_ts)
+        bool newer = c->last_ts >= s->last_ts;
+        if (newer)
             s->last_ts = c->last_ts;
         for (size_t k = 0; k <= ZCL_FLEET_PAIR_KEY_MAX; k++) {
-            if (!c->present[k])
+            if (c->state[k] != ZCL_FLEET_FIELD_PRESENT)
                 continue;
-            s->sum[k] += c->sum[k];
-            s->present[k] = true;
+            enum zcl_fleet_merge merge =
+                zcl_fleet_pair_merge(c->kind, c->subject, (uint8_t)k);
+            if (merge == ZCL_FLEET_MERGE_COUNTER &&
+                s->state[k] == ZCL_FLEET_FIELD_PRESENT)
+                s->value[k] += c->value[k];
+            else if (merge == ZCL_FLEET_MERGE_COUNTER ||
+                     s->state[k] != ZCL_FLEET_FIELD_PRESENT || newer)
+                s->value[k] = c->value[k];
+            s->state[k] = ZCL_FLEET_FIELD_PRESENT;
         }
     }
     memset(c, 0, sizeof(*c));
@@ -251,7 +275,7 @@ static void index_row(struct zcl_fleet_ledger *l, uint8_t box,
                 c->rows++;
                 if (row->ts_unix > c->last_ts)
                     c->last_ts = row->ts_unix;
-                accumulate(c->sum, c->present, row);
+                accumulate(c->value, c->state, row);
                 if (cellular)
                     *cellular = true;
                 return;
@@ -265,7 +289,7 @@ static void index_row(struct zcl_fleet_ledger *l, uint8_t box,
             free_slot->day = day;
             free_slot->rows = 1;
             free_slot->last_ts = row->ts_unix;
-            accumulate(free_slot->sum, free_slot->present, row);
+            accumulate(free_slot->value, free_slot->state, row);
             if (cellular)
                 *cellular = true;
             return;
@@ -282,7 +306,7 @@ static void index_row(struct zcl_fleet_ledger *l, uint8_t box,
     s->rows++;
     if (row->ts_unix > s->last_ts)
         s->last_ts = row->ts_unix;
-    accumulate(s->sum, s->present, row);
+    accumulate(s->value, s->state, row);
 }
 
 uint64_t zcl_fleet_ledger_index_overflow(const struct zcl_fleet_ledger *l)
@@ -335,7 +359,7 @@ static enum zcl_fleet_status chain_load(struct zcl_fleet_ledger *l,
             status = ZCL_FLEET_SEQUENCE;
         if (status == ZCL_FLEET_OK &&
             memcmp(row.box_id, box->id, ZCL_FLEET_ID_BYTES) != 0)
-            status = ZCL_FLEET_PEER_UNPAIRED;
+            status = ZCL_FLEET_NOT_OWNER;
         if (status == ZCL_FLEET_OK &&
             memcmp(row.prev_hash, expect, ZCL_FLEET_HASH_BYTES) != 0)
             status = ZCL_FLEET_CHAIN_BROKEN;
@@ -412,11 +436,18 @@ static enum zcl_fleet_status load_peers(struct zcl_fleet_ledger *l,
 
 struct zcl_fleet_ledger *zcl_fleet_ledger_open(
     const char *dir, const uint8_t self_box_id[ZCL_FLEET_ID_BYTES],
+    const uint8_t self_signer[ZCL_FLEET_ID_BYTES],
     struct zcl_fleet_report *report)
 {
     if (!report)
         return NULL;
     memset(report, 0, sizeof(*report));
+    if (self_box_id && !self_signer) {
+        /* A box that can write must say which key will sign; a reader with
+         * no identity passes neither. Half an identity is not one. */
+        report->status = ZCL_FLEET_ARGUMENT;
+        return NULL;
+    }
     if (!dir || dir[0] != '/') {
         /* A relative datadir has bitten this tree before: the writer and
          * the reader resolve it against different working directories and
@@ -454,6 +485,7 @@ struct zcl_fleet_ledger *zcl_fleet_ledger_open(
     if (self_box_id) {
         l->have_self = true;
         memcpy(l->self_id, self_box_id, ZCL_FLEET_ID_BYTES);
+        memcpy(l->self_signer, self_signer, ZCL_FLEET_ID_BYTES);
         struct fleet_box *self = box_intern(l, self_box_id, true);
         if (!self) {
             report->status = ZCL_FLEET_FULL;
@@ -542,6 +574,7 @@ enum zcl_fleet_status zcl_fleet_ledger_append(
     for (size_t i = 0; i < pair_count; i++)
         row.pair[i] = pairs[i];
     memcpy(row.box_id, ledger->self_id, ZCL_FLEET_ID_BYTES);
+    memcpy(row.signer, ledger->self_signer, ZCL_FLEET_ID_BYTES);
     row.ts_unix = (int64_t)platform_time_wall_time_t();
     if (row.ts_unix <= 0)
         return ZCL_FLEET_ARGUMENT;
@@ -653,10 +686,11 @@ enum zcl_fleet_status zcl_fleet_ledger_read_since(
 
 enum zcl_fleet_status zcl_fleet_ledger_replicate(
     struct zcl_fleet_ledger *ledger,
-    const uint8_t peer_box_id[ZCL_FLEET_ID_BYTES], const uint8_t *rows,
+    const uint8_t peer_box_id[ZCL_FLEET_ID_BYTES],
+    const uint8_t peer_signer[ZCL_FLEET_ID_BYTES], const uint8_t *rows,
     size_t len, size_t *accepted)
 {
-    if (!ledger || !peer_box_id || (!rows && len))
+    if (!ledger || !peer_box_id || !peer_signer || (!rows && len))
         return ZCL_FLEET_ARGUMENT;
     if (accepted)
         *accepted = 0;
@@ -688,7 +722,13 @@ enum zcl_fleet_status zcl_fleet_ledger_replicate(
         if (st != ZCL_FLEET_OK)
             return st;
         offset += used;
+        /* Two different refusals, because they are two different problems.
+         * A row claiming another machine is a peer writing outside its own
+         * ownership; a row signed by a key this peer's delegation does not
+         * delegate is a link carrying somebody else's authority. */
         if (memcmp(row.box_id, peer_box_id, ZCL_FLEET_ID_BYTES) != 0)
+            return ZCL_FLEET_NOT_OWNER;
+        if (memcmp(row.signer, peer_signer, ZCL_FLEET_ID_BYTES) != 0)
             return ZCL_FLEET_PEER_UNPAIRED;
         if (row.seq < next_seq)
             continue; /* already held: a second pull is a no-op */
@@ -837,13 +877,25 @@ enum zcl_fleet_status zcl_fleet_ledger_query(
             break;
         }
         b->rows += c->rows;
-        if (c->last_ts > b->last_ts)
+        /* Cells are visited in pool order, not day order, so an LWW key
+         * takes the cell with the newest timestamp rather than the last one
+         * the walk happened to reach. Within a cell the chain's order
+         * already decided; between cells of one series, the day does. */
+        bool newer = c->last_ts >= b->last_ts;
+        if (newer)
             b->last_ts = c->last_ts;
         for (size_t k = 0; k <= ZCL_FLEET_PAIR_KEY_MAX; k++) {
-            if (!c->present[k])
+            if (c->state[k] != ZCL_FLEET_FIELD_PRESENT)
                 continue;
-            b->sum[k] += c->sum[k];
-            b->present[k] = true;
+            enum zcl_fleet_merge merge =
+                zcl_fleet_pair_merge(c->kind, c->subject, (uint8_t)k);
+            if (merge == ZCL_FLEET_MERGE_COUNTER &&
+                b->state[k] == ZCL_FLEET_FIELD_PRESENT)
+                b->value[k] += c->value[k];
+            else if (merge == ZCL_FLEET_MERGE_COUNTER ||
+                     b->state[k] != ZCL_FLEET_FIELD_PRESENT || newer)
+                b->value[k] = c->value[k];
+            b->state[k] = ZCL_FLEET_FIELD_PRESENT;
         }
     }
     int64_t end = platform_time_monotonic_us();

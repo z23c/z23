@@ -35,6 +35,9 @@ const char *zcl_fleet_status_label(enum zcl_fleet_status s)
     case ZCL_FLEET_CHAIN_BROKEN:      return "ledger_chain_broken";
     case ZCL_FLEET_SIG_INVALID:       return "ledger_sig_invalid";
     case ZCL_FLEET_PEER_UNPAIRED:     return "ledger_peer_unpaired";
+    case ZCL_FLEET_NOT_OWNER:         return "ledger_not_owner";
+    case ZCL_FLEET_DELEGATION_EXPIRED:
+        return "ledger_delegation_expired";
     case ZCL_FLEET_SEQUENCE:          return "ledger_sequence";
     case ZCL_FLEET_WINDOW:            return "ledger_window_exceeded";
     case ZCL_FLEET_FULL:              return "ledger_full";
@@ -214,6 +217,55 @@ static const char *const k_pair_names[ZCL_FLEET_PAIR_KEY_MAX + 1] = {
     "wall_ms", "turns", "tool_uses", "cost_micro_usd",
     "value", "count", "bytes", "limit",
 };
+
+/* The declared merge class of each key, in the same order. `value` is the
+ * one key whose class is not fixed here: under a `vitals` row it is decided
+ * by the metric's own aggregation, which the catalog already states, and a
+ * second declaration in this table could only ever disagree with it. */
+static const uint8_t k_pair_merge[ZCL_FLEET_PAIR_KEY_MAX + 1] = {
+    ZCL_FLEET_MERGE_OWNER_ONLY,  /* 0 is not a key */
+    ZCL_FLEET_MERGE_COUNTER,     /* tokens_in */
+    ZCL_FLEET_MERGE_COUNTER,     /* tokens_out */
+    ZCL_FLEET_MERGE_COUNTER,     /* tokens_cached */
+    ZCL_FLEET_MERGE_COUNTER,     /* tokens_reasoning */
+    ZCL_FLEET_MERGE_COUNTER,     /* wall_ms */
+    ZCL_FLEET_MERGE_COUNTER,     /* turns */
+    ZCL_FLEET_MERGE_COUNTER,     /* tool_uses */
+    ZCL_FLEET_MERGE_COUNTER,     /* cost_micro_usd */
+    ZCL_FLEET_MERGE_OWNER_ONLY,  /* value — resolved per vitals metric */
+    ZCL_FLEET_MERGE_COUNTER,     /* count */
+    ZCL_FLEET_MERGE_COUNTER,     /* bytes */
+    /* A cap is the latest cap the owner declared, never a running total of
+     * every cap ever declared. */
+    ZCL_FLEET_MERGE_LWW,         /* limit */
+};
+
+const char *zcl_fleet_merge_name(enum zcl_fleet_merge merge)
+{
+    switch (merge) {
+    case ZCL_FLEET_MERGE_IMMUTABLE:  return "immutable";
+    case ZCL_FLEET_MERGE_COUNTER:    return "counter";
+    case ZCL_FLEET_MERGE_LWW:        return "lww";
+    case ZCL_FLEET_MERGE_OWNER_ONLY: return "owner_only";
+    }
+    return "owner_only";
+}
+
+enum zcl_fleet_merge zcl_fleet_pair_merge(uint8_t kind, uint16_t subject,
+                                          uint8_t key)
+{
+    if (key < 1 || key > ZCL_FLEET_PAIR_KEY_MAX)
+        return ZCL_FLEET_MERGE_OWNER_ONLY;
+    if (kind == ZCL_FLEET_KIND_VITALS && key == ZCL_FLEET_PAIR_VALUE) {
+        const char *agg = zcl_fleet_vital_agg(subject);
+        if (agg && strcmp(agg, "sum") == 0)
+            return ZCL_FLEET_MERGE_COUNTER;
+        /* A gauge is the value AT a moment. Adding two of them produces a
+         * number that measures nothing, so the latest one wins. */
+        return ZCL_FLEET_MERGE_LWW;
+    }
+    return (enum zcl_fleet_merge)k_pair_merge[key];
+}
 
 const char *zcl_fleet_pair_name(uint8_t key)
 {

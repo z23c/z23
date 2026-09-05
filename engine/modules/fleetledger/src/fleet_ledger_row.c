@@ -109,6 +109,8 @@ static size_t row_write_body(const struct zcl_fleet_row *row, uint8_t *out)
     n += 8;
     memcpy(out + n, row->box_id, ZCL_FLEET_ID_BYTES);
     n += ZCL_FLEET_ID_BYTES;
+    memcpy(out + n, row->signer, ZCL_FLEET_ID_BYTES);
+    n += ZCL_FLEET_ID_BYTES;
     memcpy(out + n, row->prev_hash, ZCL_FLEET_HASH_BYTES);
     n += ZCL_FLEET_HASH_BYTES;
     for (size_t i = 0; i < row->pair_count; i++) {
@@ -170,6 +172,8 @@ enum zcl_fleet_status zcl_fleet_row_decode(const uint8_t *in, size_t len,
     n += 8;
     memcpy(out->box_id, in + n, ZCL_FLEET_ID_BYTES);
     n += ZCL_FLEET_ID_BYTES;
+    memcpy(out->signer, in + n, ZCL_FLEET_ID_BYTES);
+    n += ZCL_FLEET_ID_BYTES;
     memcpy(out->prev_hash, in + n, ZCL_FLEET_HASH_BYTES);
     n += ZCL_FLEET_HASH_BYTES;
     for (size_t i = 0; i < out->pair_count; i++) {
@@ -212,13 +216,13 @@ enum zcl_fleet_status zcl_fleet_row_sign(
     if (shape != ZCL_FLEET_OK)
         return shape;
 
-    /* The row says who wrote it; this proves the seed agrees. A row signed
-     * by a key that is not its box_id would verify nowhere and would be
-     * discovered only by the peer that received it. */
+    /* The row names the key it was signed by; this proves the seed agrees.
+     * A row signed by a key it does not name would verify nowhere and would
+     * be discovered only by the peer that received it. */
     uint8_t pk[32];
     uint8_t sk[32];
     zcl_ed25519_keypair(pk, sk, seed);
-    if (memcmp(pk, row->box_id, ZCL_FLEET_ID_BYTES) != 0) {
+    if (memcmp(pk, row->signer, ZCL_FLEET_ID_BYTES) != 0) {
         memset(sk, 0, sizeof sk);
         return ZCL_FLEET_SIG_INVALID;
     }
@@ -239,7 +243,7 @@ enum zcl_fleet_status zcl_fleet_row_verify(const struct zcl_fleet_row *row)
         return shape;
     uint8_t msg[sizeof(ZCL_FLEET_DOMAIN) + ZCL_FLEET_ROW_MAX_BYTES];
     size_t msg_len = sign_message(row, msg);
-    if (!ed25519_verify(row->sig, msg, msg_len, row->box_id))
+    if (!ed25519_verify(row->sig, msg, msg_len, row->signer))
         return ZCL_FLEET_SIG_INVALID;
     return ZCL_FLEET_OK;
 }

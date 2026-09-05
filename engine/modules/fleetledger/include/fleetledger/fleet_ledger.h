@@ -36,27 +36,65 @@
  *
  * IT HOLDS NO KEY MATERIAL
  * ------------------------
- * Same discipline as chainlog: signing takes a seed as an argument and the
- * handle never keeps it, so this module can never become the place a secret
- * quietly lives. Verification needs only the row's own box_id, which IS the
- * signer's Ed25519 public key.
+ * Same discipline as chainlog: signing takes the online key's seed as an
+ * argument and the handle never keeps it, so this module can never become
+ * the place a secret quietly lives. Verification needs only the row's own
+ * `signer` field, which is a public key.
  *
- * WHO A ROW IS FROM, AND WHY THAT KEY
- * -----------------------------------
- * `box_id` is the node-side ZCODE DHT online Ed25519 public key
- * (`<datadir>/zcode/dht/online_ed25519.key`, mode 0600). It is the key the
- * mesh pairing's delegation already binds to the peer's Noise static, so a
- * receiver can check a row's authorship against trust it ALREADY holds —
- * no new trust root, no new key file, and no second identity to revoke. The
- * dev proof signer is deliberately not used: it identifies a development
- * checkout's build receipts, not a machine on this mesh, and it is bound to
- * no peer link at all.
+ * WHO A ROW IS FROM, AND WHY THOSE KEYS
+ * -------------------------------------
+ * There is ONE node identity, and it is the one boot_mesh_pairing already
+ * consumes: `struct vcs_zcode_dht_delegation`. A row carries both halves of
+ * it, because they answer different questions.
  *
- * The module never looks a pairing up. `zcl_fleet_ledger_replicate` is told
- * which box_id the caller's pairing row authorises, and refuses every row
- * that does not carry exactly that one (`ledger_peer_unpaired`). The
- * pairing lookup stays where the pairing rows live; the refusal stays here,
- * where the bytes are.
+ *   box_id — the delegation's `doc.master_pubkey`. WHICH MACHINE this is.
+ *            It survives an online-key rotation and a renewal, so a box's
+ *            history stays one history across both.
+ *   signer — the delegation's `online_pubkey`. WHICH KEY signed this row.
+ *            The short-lived key is what actually signs, so a compromise of
+ *            a running node does not reach the master.
+ *
+ * The delegation document is what binds them, and it binds the peer's Noise
+ * static in the same breath — so the machine that sent a row over a Noise
+ * session, the key that signed it and the identity it claims are one fact,
+ * checked once, in the layer that holds delegations. The dev proof signer
+ * is deliberately never used: it identifies a development checkout's build
+ * receipts, is bound to no peer link, and a checkout that proved a build is
+ * not a machine on this mesh.
+ *
+ * This module verifies the signature under `signer` and NOTHING ELSE about
+ * identity: it never opens a key file, never derives a key, and never looks
+ * a delegation or a pairing up. `zcl_fleet_ledger_replicate` is TOLD the
+ * box_id and the signer the caller's verified delegation authorises, and
+ * refuses any row that does not carry exactly those. That keeps the
+ * delegation's own lifecycle — where an EXPIRED document is a distinct and
+ * expected outcome, never confused with a bad signature — in the one place
+ * that can judge it, and keeps the refusal here, where the bytes are.
+ *
+ * MERGE CLASS IS DECLARED, AND ENFORCED ON REPLAY
+ * -----------------------------------------------
+ * Two boxes' rows about the same subject and day are combined by a rule
+ * declared in the schema, never guessed at read time:
+ *
+ *   IMMUTABLE  — seq, ts_unix, box_id, signer, kind, subject, prev_hash and
+ *                the signature. Nothing ever restates them; a row that
+ *                disagrees is not a merge, it is a different row.
+ *   COUNTER    — a per-box, add-only quantity; reading is a sum. This is
+ *                what tokens_in, tokens_out, tokens_cached,
+ *                tokens_reasoning, wall_ms and turns are, and it is why two
+ *                boxes' spend can be added at all.
+ *   LWW        — the latest statement wins, ordered by (seq, box_id) and
+ *                NEVER by wall time. A clock that is wrong or adjusted must
+ *                not be able to decide which of two facts is newer, so the
+ *                chain's own order decides. `note` is LWW, and so is a
+ *                gauge: a load average is the value AT a moment, and adding
+ *                two of them produces a number that measures nothing.
+ *   OWNER_ONLY — the default for anything not named above: only the writer
+ *                box may state it. A row inside an authorised batch that
+ *                claims a different writer refuses as `ledger_not_owner`.
+ *
+ * The index is fed in chain order and only ever in chain order, which is
+ * what makes "the latest statement" well defined without a clock.
  *
  * NOTHING PARTIAL
  * ---------------
@@ -67,22 +105,30 @@
  *
  * ON THE WIRE AND ON DISK (big-endian, no padding, no locale, no float)
  * --------------------------------------------------------------------
+ * The fixed header carries everything IMMUTABLE, seq and ts_unix included,
+ * so a reader knows when and where a row belongs before it has looked at
+ * one byte of variable-length payload.
+ *
  *     0  version   u8   = ZCL_FLEET_ROW_VERSION
  *     1  kind      u8
  *     2  subject   u16
  *     4  pairs     u8   <= ZCL_FLEET_PAIRS_MAX
  *     5  note_len  u8   <= ZCL_FLEET_NOTE_MAX
  *     6  seq       u64  1-based, dense within its own chain
- *    14  ts_unix   i64
- *    22  box_id    [32] the signer's Ed25519 public key
- *    54  prev_hash [32] SHA3-256(domain || the whole previous row, sig and
+ *    14  ts_unix   i64  the writer's statement of WHEN, and never an order
+ *    22  box_id    [32] the delegation's master public key: which machine
+ *    54  signer    [32] the delegation's online public key: which key signed
+ *    86  prev_hash [32] SHA3-256(domain || the whole previous row, sig and
  *                       all); 32 zero bytes for seq 1
- *    86  pairs     each { key u8, value i64 }, ascending by key, no repeats
+ *   118  pairs     each { key u8, value i64 }, ascending by key, no repeats
  *   ...  note      note_len bytes, no NUL, no control bytes
- *   ...  sig       [64] Ed25519 over domain || every byte above
+ *   ...  sig       [64] Ed25519 over domain || every byte above, under
+ *                       `signer`
  *
  * The signature covers prev_hash and seq, so a row cannot be lifted out of
- * one chain and replayed into another, or moved within its own.
+ * one chain and replayed into another, or moved within its own. It covers
+ * box_id and signer together, so a row cannot be re-attributed to another
+ * machine or another key without breaking it.
  */
 
 #ifndef ZCL_FLEET_LEDGER_H
@@ -103,7 +149,7 @@
 #define ZCL_FLEET_SEED_BYTES  32u
 
 /* Fixed header, one encoded pair, and the largest a whole row can be. */
-#define ZCL_FLEET_ROW_HEAD_BYTES 86u
+#define ZCL_FLEET_ROW_HEAD_BYTES 118u
 #define ZCL_FLEET_ROW_PAIR_BYTES 9u
 #define ZCL_FLEET_ROW_MAX_BYTES                                              \
     (ZCL_FLEET_ROW_HEAD_BYTES + ZCL_FLEET_PAIRS_MAX * ZCL_FLEET_ROW_PAIR_BYTES \
@@ -138,8 +184,16 @@ enum zcl_fleet_status {
     ZCL_FLEET_VITAL_UNKNOWN,     /* kind=vitals, id not in the vitals catalog */
     ZCL_FLEET_PAIR_UNKNOWN,      /* a pair key outside the closed enum */
     ZCL_FLEET_CHAIN_BROKEN,      /* prev_hash does not continue the chain */
-    ZCL_FLEET_SIG_INVALID,       /* the signature does not verify under box_id */
+    ZCL_FLEET_SIG_INVALID,       /* the signature does not verify under signer */
     ZCL_FLEET_PEER_UNPAIRED,     /* a row from a box this link may not carry */
+    ZCL_FLEET_NOT_OWNER,         /* a field only its writer box may state */
+    /* The peer's delegation document expired. Kept distinct from a bad
+     * signature on purpose: an expiry is expected lifecycle and the answer
+     * is a renewal, while a signature failure is tampering or corruption
+     * and the answer is never to accept the row. Collapsing the two would
+     * make an ordinary renewal look like an attack and an attack look like
+     * an ordinary renewal. */
+    ZCL_FLEET_DELEGATION_EXPIRED,
     ZCL_FLEET_SEQUENCE,          /* sequence numbers are not dense */
     ZCL_FLEET_WINDOW,            /* more days asked for than the index keeps */
     ZCL_FLEET_FULL               /* a bounded table is full */
@@ -210,7 +264,37 @@ enum zcl_fleet_pair_key {
 /* A number the writer did not have is ABSENT, never zero: a task that
  * reported no cached tokens and a task whose provider does not report them
  * are different facts, and summing them as zero loses the difference. A
- * caller with nothing to say about a key omits the pair. */
+ * caller with nothing to say about a key omits the pair.
+ *
+ * Absence is carried as a STATE BYTE beside every value rather than as a
+ * sentinel inside it, because every sentinel is a number somebody will one
+ * day legitimately measure. This is kpi_ledger's rule, and it is the field
+ * that makes the distinction survive being written down instead of merely
+ * being rendered. */
+enum zcl_fleet_field_state {
+    ZCL_FLEET_FIELD_ABSENT = 0,  /* no row ever carried this key */
+    ZCL_FLEET_FIELD_PRESENT = 1  /* at least one did; the value is real */
+};
+
+/* How two statements about the same (box, kind, subject, day) combine. It
+ * is declared here, per pair key, and applied on replay — never decided at
+ * read time by whichever caller happened to ask. */
+enum zcl_fleet_merge {
+    ZCL_FLEET_MERGE_IMMUTABLE = 0,  /* stated once; never restated */
+    ZCL_FLEET_MERGE_COUNTER = 1,    /* per-box, add-only; reading is a sum */
+    ZCL_FLEET_MERGE_LWW = 2,        /* latest by (seq, box_id), never by clock */
+    ZCL_FLEET_MERGE_OWNER_ONLY = 3  /* only the writer box may state it */
+};
+
+const char *zcl_fleet_merge_name(enum zcl_fleet_merge merge);
+
+/* The class of one pair key, in the context of the row that carries it. A
+ * `vitals` row's `value` takes its class from the catalog's own aggregation
+ * — a `sum` metric is a COUNTER and a `gauge` is LWW — because the catalog
+ * is where that was already declared and a second declaration here could
+ * only ever disagree with it. */
+enum zcl_fleet_merge zcl_fleet_pair_merge(uint8_t kind, uint16_t subject,
+                                          uint8_t key);
 
 const char *zcl_fleet_kind_name(uint8_t kind);
 bool zcl_fleet_kind_from_name(const char *name, uint8_t *kind_out);
@@ -242,7 +326,8 @@ struct zcl_fleet_pair {
 struct zcl_fleet_row {
     uint64_t seq;
     int64_t ts_unix;
-    uint8_t box_id[ZCL_FLEET_ID_BYTES];
+    uint8_t box_id[ZCL_FLEET_ID_BYTES]; /* delegation doc.master_pubkey */
+    uint8_t signer[ZCL_FLEET_ID_BYTES]; /* delegation online_pubkey */
     uint8_t kind;
     uint16_t subject;
     uint8_t pair_count;
@@ -274,12 +359,17 @@ enum zcl_fleet_status zcl_fleet_row_decode(const uint8_t *in, size_t len,
 void zcl_fleet_row_hash(const uint8_t *encoded, size_t len,
                         uint8_t out[ZCL_FLEET_HASH_BYTES]);
 
-/* Fill row->sig. The seed is used and forgotten: it is not stored anywhere
- * and the row's box_id must be the public key that seed derives. */
+/* Fill row->sig with the online key. The seed is used and forgotten: it is
+ * not stored anywhere, and the row's `signer` must be the public key that
+ * seed derives — a row signed by a key it does not name would verify
+ * nowhere and would be discovered only by the peer that received it. */
 enum zcl_fleet_status zcl_fleet_row_sign(
     struct zcl_fleet_row *row, const uint8_t seed[ZCL_FLEET_SEED_BYTES]);
 
-/* Verify the signature under the row's own box_id. */
+/* Verify the signature under the row's own `signer`. This says the bytes
+ * are intact and were signed by that key. Whether that key is the online
+ * key `box_id` delegated is the caller's question, answered from the
+ * delegation document; this module has no opinion on it. */
 enum zcl_fleet_status zcl_fleet_row_verify(const struct zcl_fleet_row *row);
 
 /* ── The ledger ──────────────────────────────────────────────────────── */
@@ -311,6 +401,7 @@ struct zcl_fleet_ledger;
  * and the sequence number. */
 struct zcl_fleet_ledger *zcl_fleet_ledger_open(
     const char *dir, const uint8_t self_box_id[ZCL_FLEET_ID_BYTES],
+    const uint8_t self_signer[ZCL_FLEET_ID_BYTES],
     struct zcl_fleet_report *report);
 
 void zcl_fleet_ledger_close(struct zcl_fleet_ledger *ledger);
@@ -339,18 +430,24 @@ enum zcl_fleet_status zcl_fleet_ledger_read_since(
     uint64_t *last_seq);
 
 /* Verify and append a batch to `peer_box_id`'s replica. ALL OR NOTHING: the
- * whole batch is decoded, every signature checked under `peer_box_id`, and
- * the chain continuity checked against the replica's current head and
- * across the batch, BEFORE anything is written. Any row whose box_id is not
- * `peer_box_id` refuses the batch as `ledger_peer_unpaired` — a paired link
- * carries that peer's rows and nobody else's, so a peer cannot use its own
- * authorised link to plant rows attributed to a third machine.
+ * whole batch is decoded, every signature checked, every row's authorship
+ * checked, and the chain continuity checked against the replica's current
+ * head and across the batch, BEFORE anything is written.
+ *
+ * `peer_box_id` and `peer_signer` are what the caller's VERIFIED delegation
+ * authorises for this link. A row naming a different box refuses the batch
+ * as `ledger_not_owner` — a paired link carries that peer's own rows and
+ * nobody else's, so a peer cannot use its own authorised link to plant rows
+ * attributed to a third machine. A row naming a different signer refuses as
+ * `ledger_peer_unpaired`: the key that signed it is not the online key this
+ * box's delegation delegates, whatever the signature says.
  *
  * Rows at or below the replica's head are dropped as already held, which is
  * what makes a second pull a no-op rather than a refusal. */
 enum zcl_fleet_status zcl_fleet_ledger_replicate(
     struct zcl_fleet_ledger *ledger,
-    const uint8_t peer_box_id[ZCL_FLEET_ID_BYTES], const uint8_t *rows,
+    const uint8_t peer_box_id[ZCL_FLEET_ID_BYTES],
+    const uint8_t peer_signer[ZCL_FLEET_ID_BYTES], const uint8_t *rows,
     size_t len, size_t *accepted);
 
 /* ── Querying ────────────────────────────────────────────────────────── */
@@ -379,16 +476,18 @@ struct zcl_fleet_query {
     int64_t now_unix;      /* the caller's clock; the module reads none */
 };
 
-/* One (box, subject) answer over the asked-for window, with the pair sums
- * added by key. `absent[k]` distinguishes "summed to zero" from "no row
- * ever carried this key", which is the whole point of the -1/absent rule. */
+/* One (box, subject) answer over the asked-for window. Each key is combined
+ * by its own declared merge class: a COUNTER is added, an LWW or OWNER_ONLY
+ * key keeps the latest statement in chain order. `state[k]` distinguishes
+ * "measured zero" from "no row ever carried this key", which is the whole
+ * point of the absent rule. */
 struct zcl_fleet_bucket {
     uint8_t box_id[ZCL_FLEET_ID_BYTES];
     uint16_t subject;
     uint64_t rows;
     int64_t last_ts;
-    int64_t sum[ZCL_FLEET_PAIR_KEY_MAX + 1];
-    bool present[ZCL_FLEET_PAIR_KEY_MAX + 1];
+    int64_t value[ZCL_FLEET_PAIR_KEY_MAX + 1];
+    uint8_t state[ZCL_FLEET_PAIR_KEY_MAX + 1]; /* enum zcl_fleet_field_state */
 };
 
 /* Answer from the in-memory index alone: no file is opened, no lock is

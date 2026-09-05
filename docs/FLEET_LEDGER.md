@@ -41,13 +41,14 @@ has a meaning somebody wrote down.
 | --- | --- |
 | `seq` | position in its own box's chain, dense and one-based |
 | `ts_unix` | when the writer says it happened |
-| `box_id` | who wrote it: the node-side online Ed25519 public key |
+| `box_id` | which machine wrote it: the delegation master public key |
+| `signer` | which key signed it: the delegation online public key |
 | `kind` | one of the closed row kinds below |
 | `subject` | what the row is about, scoped by kind |
 | pairs | up to twelve `key`/`value` measurements, ascending by key |
 | `note` | a short human-readable label, such as a task id |
 | `prev_hash` | the hash of the whole previous row, signature included |
-| `sig` | Ed25519 over everything above, under `box_id` |
+| `sig` | Ed25519 over everything above, under `signer` |
 
 The signature covers `prev_hash` and `seq`, so a row cannot be lifted out of
 one chain and replayed into another, or moved within its own.
@@ -74,16 +75,55 @@ permanently and silently. A writer with nothing to say about a key omits the
 pair; the operator surfaces print `-` for an absent value and a number for a
 zero one, and a query answer says which keys were present at all.
 
-## Why this key signs a row
+## Which keys, and why those
 
-`box_id` is the node-side ZCODE DHT online Ed25519 public key. It is the key
-the mesh pairing's delegation already binds to that peer's Noise static, so
-a receiver checks a row's authorship against trust it already holds: no new
-trust root, no second key file, and nothing extra to revoke.
+There is one node identity, and it is the one the mesh pairing ceremony
+already consumes: the chain-bound ZID delegation. A row carries both halves
+of it, because they answer different questions.
+
+- **`box_id`** is the delegation's master public key: *which machine*. It
+  survives an online-key rotation and a renewal, so a box's history stays
+  one history across both.
+- **`signer`** is the delegation's online public key: *which key signed this
+  row*. The short-lived key does the signing, so compromising a running node
+  does not reach the master.
+
+The delegation document binds those two and the peer's Noise static in the
+same breath, so the machine that sent a row, the key that signed it and the
+identity it claims are one fact, checked once, where delegations are held.
+A receiver therefore checks authorship against trust it already holds: no
+new trust root, no second key file, nothing extra to revoke.
+
+An expired delegation is reported as expired (`ledger_delegation_expired`)
+and never as a bad signature. An expiry is ordinary lifecycle and the answer
+is a renewal; a signature failure is tampering and the answer is never to
+accept the row. Collapsing them would make a renewal look like an attack and
+an attack look like a renewal.
 
 The dev proof signer is deliberately not used. It identifies a development
-checkout's build receipts, it is bound to no peer link, and a machine on
-this mesh is not the same thing as a checkout that proved a build.
+checkout's build receipts, it is bound to no peer link, and a checkout that
+proved a build is not a machine on this mesh.
+
+## How two statements combine
+
+A merge class is declared per field in the schema and applied on replay,
+never guessed at read time.
+
+| Class | Rule | Where it applies |
+| --- | --- | --- |
+| immutable | stated once, never restated | `seq`, `ts_unix`, `box_id`, `signer`, `kind`, `subject`, `prev_hash`, `sig` |
+| counter | per-box, add-only; reading is a sum | `tokens_in`, `tokens_out`, `tokens_cached`, `tokens_reasoning`, `wall_ms`, `turns`, and the other add-only quantities |
+| lww | the latest statement wins | `note`, `limit`, and any metric the catalog declares a gauge |
+| owner\_only | only the writer box may state it | everything else |
+
+Latest means latest in **chain order** — by sequence number within a box,
+and per box across boxes — and never by wall time. A clock that is wrong or
+was adjusted must not be able to decide which of two facts is newer.
+
+This is why a gauge is not summed. A load average is the value at a moment;
+adding two of them produces a number that measures nothing. The vitals
+catalog already declares which metrics are gauges and which accumulate, and
+the ledger takes the class from there rather than stating it twice.
 
 ## How a question is answered
 
@@ -119,8 +159,10 @@ the end of a batch leaves the replica exactly as it was.
 | Refusal | What happened |
 | --- | --- |
 | `ledger_chain_broken` | a row does not continue the chain it claims to |
-| `ledger_sig_invalid` | the signature does not verify under its own `box_id` |
-| `ledger_peer_unpaired` | a row from a box this link may not carry |
+| `ledger_sig_invalid` | the signature does not verify under its own `signer` |
+| `ledger_peer_unpaired` | a row signed by a key this peer's delegation does not delegate |
+| `ledger_not_owner` | a row claiming a machine that is not the peer on this link |
+| `ledger_delegation_expired` | the peer's delegation has run out; renew it |
 | `ledger_sequence` | sequence numbers are not dense |
 | `vital_unknown` | a `vitals` subject that is not in the catalog |
 | `ledger_kind_not_writable` | a kind this build reserves but does not write |
