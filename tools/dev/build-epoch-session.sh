@@ -523,6 +523,8 @@ if [ -e "$UNVERIFIED" ] || [ -L "$UNVERIFIED" ]; then
         fail 'failed-epoch quarantine destination already exists'
     mv -- "$EPOCH_DIR" "$failed_epoch" ||
         fail 'could not quarantine unverified compile epoch'
+    printf 'build-epoch-session: quarantined unverified epoch %s; %s\n' \
+        "$EPOCH" 'full object rebuild required' >&2
     if [ "$CANDIDATE_ROOT" != - ]; then
         candidate_epoch="$CANDIDATE_ROOT/epochs/$EPOCH"
         if [ -e "$candidate_epoch" ] || [ -L "$candidate_epoch" ]; then
