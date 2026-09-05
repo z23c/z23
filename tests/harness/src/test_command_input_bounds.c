@@ -30,6 +30,7 @@
 #include "json/json.h"
 #include "kernel/command_registry.h"
 
+#include "fleetledger/fleet_ledger.h"
 #include "vcs/package_manifest.h"
 #include "vcs/package_recipe.h"
 #include "vcs/package_release.h"
@@ -583,6 +584,57 @@ static int t_package_fetch_maximum_bytes(void)
     return failures;
 }
 
+static int t_fleet_usage_days(void)
+{
+    int failures = 0;
+    const struct zcl_command_spec *usage = zcl_command_registry_find(
+        zcl_command_catalog(), "fleet.usage", NULL);
+    CIB_CHECK("fleet.usage resolves", usage != NULL);
+    if (!usage)
+        return failures;
+
+    CIB_CHECK("fleet usage admits day one",
+              cib_accepts_int("fleet.usage", "days", 1));
+    CIB_CHECK("fleet usage admits its default seven-day window",
+              cib_accepts_int("fleet.usage", "days", 7));
+    CIB_CHECK("fleet usage transport admits the index window",
+              cib_accepts_int("fleet.usage", "days", ZCL_FLEET_INDEX_DAYS));
+
+    static const char *const refused[] = {
+        "{\"days\":0}", "{\"days\":-1}", "{\"days\":\"7\"}",
+        "{\"days\":true}", "{\"days\":7.0}", "{\"days\":null}",
+    };
+    for (size_t i = 0; i < sizeof(refused) / sizeof(refused[0]); i++) {
+        struct json_value input;
+        json_init(&input);
+        const bool built = json_read(&input, refused[i], strlen(refused[i]));
+        const bool accepted = built && zcl_command_registry_input_validate(
+            usage, &input, NULL, 0);
+        CIB_CHECK("fleet usage refuses a non-positive or non-integer day",
+                  built && !accepted);
+        json_free(&input);
+    }
+
+    struct zcl_command_spec other = *usage;
+    other.path = "fixture.fleet-usage-shape";
+    struct json_value input;
+    json_init(&input);
+    json_set_object(&input);
+    const bool string_built = json_push_kv_str(&input, "days", "7");
+    CIB_CHECK("days remains an ordinary string outside fleet.usage",
+              string_built && zcl_command_registry_input_validate(
+                  &other, &input, NULL, 0));
+    json_free(&input);
+    json_init(&input);
+    json_set_object(&input);
+    const bool int_built = json_push_kv_int(&input, "days", 7);
+    CIB_CHECK("the integer exception is scoped to fleet.usage",
+              int_built && !zcl_command_registry_input_validate(
+                  &other, &input, NULL, 0));
+    json_free(&input);
+    return failures;
+}
+
 int test_command_input_bounds(void)
 {
     printf("\n=== command_input_bounds: per-key input length rules ===\n");
@@ -594,6 +646,7 @@ int test_command_input_bounds(void)
     failures += t_liquidity_numeric_input();
     failures += t_package_prepare_sequence();
     failures += t_package_fetch_maximum_bytes();
+    failures += t_fleet_usage_days();
     printf("=== command_input_bounds complete: %d failure(s) ===\n", failures);
     return failures;
 }

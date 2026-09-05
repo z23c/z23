@@ -1308,10 +1308,10 @@ bool zcl_command_registry_input_validate(const struct zcl_command_spec *spec,
             type_ok = value->type == JSON_INT && json_get_int(value) >= 0;
         } else if (strcmp(key, "cutoff_height") == 0 ||
                    strcmp(key, "cutoff_mtp") == 0 ||
-                   strcmp(key, "epoch_capacity_atoms") == 0) {
-            /* Simulation projections bind their result to an explicit,
-             * positive caller-owned cutoff. Handlers re-check semantic
-             * ranges; the registry only makes the typed CLI path reachable. */
+                   strcmp(key, "epoch_capacity_atoms") == 0 ||
+                   (strcmp(key, "days") == 0 &&
+                    strcmp(spec->path, "fleet.usage") == 0)) {
+            /* Positive selectors; handlers own their semantic bounds. */
             type_ok = value->type == JSON_INT && json_get_int(value) > 0;
         } else if (strcmp(key, "limit") == 0 || strcmp(key, "depth") == 0) {
             type_ok = value->type == JSON_INT && json_get_int(value) >= 1 &&
