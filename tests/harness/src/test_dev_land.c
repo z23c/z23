@@ -221,6 +221,48 @@ static bool dlx_write(const char *path, const char *text)
     return fclose(f) == 0 && wrote;
 }
 
+#if !defined(_WIN32)
+/* mkdir -p, for planting a fake dependency file several directories deep
+ * (vendor/tor/src/ext/ed25519/donna/...) under a throwaway rig clone. */
+static bool dlx_mkdir_p(const char *path)
+{
+    char buf[1200];
+    size_t len = path ? strlen(path) : 0;
+    char *p;
+    if (!len || len >= sizeof(buf))
+        return false;
+    memcpy(buf, path, len + 1);
+    for (p = buf + 1; *p; p++) {
+        if (*p == '/') {
+            *p = '\0';
+            if (mkdir(buf, 0700) != 0 && errno != EEXIST)
+                return false;
+            *p = '/';
+        }
+    }
+    return mkdir(buf, 0700) == 0 || errno == EEXIST;
+}
+
+/* Plant a fake proof-generation dependency (or its stand-in) at `rel`
+ * under `root`, creating whatever directories `rel` needs. Content is
+ * irrelevant: dl_wt_vendor_ensure()/dl_wt_hotswap_ensure() only ever check
+ * for existence and copy bytes, they never open a vendored archive or
+ * parse a fixture image. */
+static bool dlx_write_dep(const char *root, const char *rel,
+                          const char *body)
+{
+    char path[1400], dir[1400], *slash;
+    if ((size_t)snprintf(path, sizeof(path), "%s/%s", root, rel) >=
+        sizeof(path))
+        return false;
+    (void)snprintf(dir, sizeof(dir), "%s", path);
+    slash = strrchr(dir, '/');
+    if (slash)
+        *slash = '\0';
+    return dlx_mkdir_p(dir) && dlx_write(path, body);
+}
+#endif
+
 /* A fixture hooks directory holding one executable `pre-push` script that
  * exits `exit_code`. Pointed at through ZCL_LAND_HOOKS_STUB_DIR in place of
  * `make install-hooks`, which the throwaway rigs below have no Makefile
@@ -1189,6 +1231,118 @@ int test_dev_land(void)
         dlx_end(&c);
         ASSERT(dlx_origin_main(&rig, after));
         ASSERT(strcmp(after, mid) != 0);
+        dlx_restore();
+        PASS();
+    }
+
+    TEST("land: the landing worktree gets the proof's vendored "
+        "dependencies from the submitting checkout") {
+        struct dlx_rig rig;
+        struct dlx_call c;
+        char wt[1200], check[1400];
+        struct stat st;
+        dlx_isolate("depsok");
+        ASSERT(dlx_rig_make(&rig, "depsok_rig"));
+        ASSERT(dlx_write_dep(rig.clone, "vendor/lib/libfoo.a", "fake\n"));
+        ASSERT(dlx_write_dep(rig.clone, "vendor/include/foo.h", "fake\n"));
+        ASSERT(dlx_write_dep(rig.clone, "vendor/tor/libtor.a", "fake\n"));
+        ASSERT(dlx_write_dep(
+            rig.clone,
+            "vendor/tor/src/ext/ed25519/donna/libed25519_donna.a",
+            "fake\n"));
+        ASSERT(dlx_write_dep(
+            rig.clone, "vendor/tor/src/ext/ed25519/ref10/libed25519_ref10.a",
+            "fake\n"));
+        ASSERT(dlx_write_dep(
+            rig.clone, "vendor/tor/src/ext/keccak-tiny/libkeccak-tiny.a",
+            "fake\n"));
+        ASSERT(dlx_write_dep(rig.clone,
+                             "build/hotswap/zcl_rollback_fixture_a.so",
+                             "fake\n"));
+        ASSERT(dlx_write_dep(rig.clone,
+                             "build/hotswap/zcl_rollback_fixture_b.so",
+                             "fake\n"));
+        /* Forces dl_wt_vendor_ensure()/dl_wt_hotswap_ensure() to run for
+         * real even though ZCL_LAND_PROOF_STUB replaces the proof itself —
+         * see dl_deps_test_force()'s comment in native_dev_land.c. */
+        setenv("ZCL_LAND_DEPS_TEST_FORCE", "1", 1);
+        setenv("ZCL_LAND_PROOF_STUB", "running", 1);
+        setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
+        dlx_submit(&c, &rig, rig.tip);
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        dlx_end(&c);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        ASSERT(strcmp(dlx_str(&c, "state"), "started") == 0);
+        dlx_end(&c);
+        setenv("ZCL_LAND_PROOF_STUB", "pass", 1);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        ASSERT(strcmp(dlx_str(&c, "state"), "landed") == 0);
+        dlx_end(&c);
+        /* Every dependency the proof's own dependencies[] array names (the
+         * vendor group, plus the Linux hotswap fixtures) is now present in
+         * the landing worktree, materialized from the submitting checkout
+         * rather than left for the proof to discover missing. */
+        dlx_landdir(wt, sizeof(wt));
+        (void)snprintf(check, sizeof(check), "%s/wt/vendor/lib/libfoo.a",
+                       wt);
+        ASSERT(stat(check, &st) == 0);
+        (void)snprintf(check, sizeof(check), "%s/wt/vendor/include/foo.h",
+                       wt);
+        ASSERT(stat(check, &st) == 0);
+        (void)snprintf(check, sizeof(check), "%s/wt/vendor/tor/libtor.a",
+                       wt);
+        ASSERT(stat(check, &st) == 0);
+        (void)snprintf(
+            check, sizeof(check),
+            "%s/wt/vendor/tor/src/ext/ed25519/donna/libed25519_donna.a",
+            wt);
+        ASSERT(stat(check, &st) == 0);
+        (void)snprintf(
+            check, sizeof(check),
+            "%s/wt/build/hotswap/zcl_rollback_fixture_a.so", wt);
+        ASSERT(stat(check, &st) == 0);
+        (void)snprintf(
+            check, sizeof(check),
+            "%s/wt/build/hotswap/zcl_rollback_fixture_b.so", wt);
+        ASSERT(stat(check, &st) == 0);
+        unsetenv("ZCL_LAND_DEPS_TEST_FORCE");
+        dlx_restore();
+        PASS();
+    }
+
+    TEST("land: a proof-generation dependency missing from the submitting "
+        "checkout too refuses by name instead of proceeding") {
+        struct dlx_rig rig;
+        struct dlx_call c;
+        dlx_isolate("depsmissing");
+        ASSERT(dlx_rig_make(&rig, "depsmissing_rig"));
+        /* No vendor/lib at all in the submitting checkout: the landing
+         * worktree cannot materialize what does not exist anywhere, so the
+         * step must refuse by name rather than silently proceed to a proof
+         * request the real dependencies[] check would only fail later. */
+        setenv("ZCL_LAND_DEPS_TEST_FORCE", "1", 1);
+        setenv("ZCL_LAND_PROOF_STUB", "running", 1);
+        setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
+        dlx_submit(&c, &rig, rig.tip);
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        dlx_end(&c);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        ASSERT(strcmp(dlx_str(&c, "state"), "failed") == 0);
+        ASSERT(strcmp(dlx_str(&c, "dimension"), "worktree_deps") == 0);
+        ASSERT(strstr(dlx_str(&c, "detail"),
+                      "proof_generation_dependency_unavailable:vendor/lib")
+              != NULL);
+        ASSERT(strstr(dlx_str(&c, "detail"), "make vendor") != NULL);
+        dlx_end(&c);
+        unsetenv("ZCL_LAND_DEPS_TEST_FORCE");
         dlx_restore();
         PASS();
     }

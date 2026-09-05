@@ -85,6 +85,7 @@
 #endif
 
 #include <ctype.h>
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -1860,6 +1861,366 @@ static int dl_lint_fast(const struct dl_dirs *d, struct dl_row *row)
     return rc;
 }
 
+/* ── proof-generation dependencies the landing worktree must hold ───────
+ *
+ * dev_proof.c's prepare_generation() only ever COPIES the entries in its
+ * `dependencies[]` array (vendor/lib, vendor/include, the four vendor/tor
+ * archives, build/githooks and, on Linux, the two hotswap rollback fixture
+ * images) out of paths->root — this worktree — into the proof's private
+ * generation; it never builds any of them itself. Separately, the receipt's
+ * build-identity capture reads build/dev-loop/restart.env straight from
+ * paths->root. A bare `git worktree add` inherits none of this: vendored
+ * archives are gitignored, the Tor submodule is not checked out into a
+ * fresh worktree, and nothing has ever linked a test binary here — so
+ * every one of them is missing the first time a fresh landing worktree
+ * reaches this point, and the proof refuses by name
+ * (`proof_generation_dependency_unavailable:<dep> (<fix>)` for the copied
+ * set; `proof_toolchain_or_policy_unavailable` for the restart plan).
+ * build/githooks is already handled: dl_wt_hooks_ensure() above arms it
+ * unconditionally via `make install-hooks`, which every push needs
+ * regardless of the proof. What is left is primed here, once per worktree
+ * lifetime, so the proof always finds the rest already in place. */
+
+/* A local link-then-copy primitive, deliberately not the shared
+ * zcl_dev_proof_dependency_materialize() (tools/dev/dev_proof.c): that
+ * function is real dev.proof machinery, and this file's own `#include
+ * "dev_proof.h"` above is itself gated on ZCL_DEV_BUILD, so calling it here
+ * would fail to even declare in the plain node build, and — because
+ * dev_proof.c is only ever compiled into the dev/test build, never the
+ * plain node's object set — would fail to LINK in a release build even if
+ * the declaration were forced visible. That is the layering violation
+ * DEVELOPING.md warns about, one build-profile boundary wide rather than a
+ * namespace one, so this is the smallest shared helper instead: the same
+ * link-with-copy-fallback shape, without the symlink case neither vendor
+ * archives nor hotswap fixture images ever need (fail closed on anything
+ * that is not a plain file or a directory). Unlike its sibling, this one
+ * compiles into every profile — including the plain test harness that
+ * exercises `test_dev_land` — so the priming below is exercised for real
+ * rather than only ever seen by production. */
+static bool dl_materialize_file(const char *source, const char *target,
+                                const struct stat *source_st)
+{
+    int input, output;
+    char tmp[4096 + 96];
+    bool ok;
+    if (link(source, target) == 0)
+        return true;
+    if (errno != EXDEV && errno != EPERM && errno != EMLINK)
+        return false;
+    input = open(source, O_RDONLY | O_CLOEXEC);
+    if (input < 0)
+        return false;
+    if (snprintf(tmp, sizeof(tmp), "%s.tmp.%ld", target, (long)getpid()) >=
+        (int)sizeof(tmp)) {
+        (void)close(input);
+        return false;
+    }
+    output = open(tmp, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+    if (output < 0) {
+        (void)close(input);
+        return false;
+    }
+    ok = true;
+    while (ok) {
+        unsigned char buf[65536];
+        ssize_t got = read(input, buf, sizeof(buf));
+        ssize_t off = 0;
+        if (got < 0 && errno == EINTR)
+            continue;
+        if (got < 0) {
+            ok = false;
+            break;
+        }
+        if (got == 0)
+            break;
+        while (ok && off < got) {
+            ssize_t wrote = write(output, buf + off, (size_t)(got - off));
+            if (wrote < 0 && errno == EINTR)
+                continue;
+            if (wrote < 0)
+                ok = false;
+            else
+                off += wrote;
+        }
+    }
+    if (ok)
+        ok = fchmod(output, source_st->st_mode & 07777) == 0;
+    if (close(input) != 0)
+        ok = false;
+    if (close(output) != 0)
+        ok = false;
+    if (ok && rename(tmp, target) != 0)
+        ok = false;
+    if (!ok)
+        (void)unlink(tmp);
+    return ok;
+}
+
+static bool dl_materialize(const char *source, const char *target)
+{
+    struct stat source_st, target_st;
+    DIR *dir;
+    struct dirent *entry;
+    bool ok;
+    if (lstat(source, &source_st) != 0)
+        return false;
+    if (lstat(target, &target_st) == 0)
+        return true; /* the caller already checked readiness */
+    if (S_ISREG(source_st.st_mode))
+        return dl_materialize_file(source, target, &source_st);
+    if (!S_ISDIR(source_st.st_mode))
+        return false; /* fail closed: only plain files and directories */
+    dir = opendir(source);
+    if (!dir)
+        return false;
+    if (!dl_mkdir_one(target)) {
+        (void)closedir(dir);
+        return false;
+    }
+    ok = true;
+    while (ok && (entry = readdir(dir)) != NULL) {
+        char child_source[4096 + 96], child_target[4096 + 96];
+        if (strcmp(entry->d_name, ".") == 0 ||
+            strcmp(entry->d_name, "..") == 0)
+            continue;
+        if (snprintf(child_source, sizeof(child_source), "%s/%s", source,
+                     entry->d_name) >= (int)sizeof(child_source) ||
+            snprintf(child_target, sizeof(child_target), "%s/%s", target,
+                     entry->d_name) >= (int)sizeof(child_target) ||
+            !dl_materialize(child_source, child_target))
+            ok = false;
+    }
+    return closedir(dir) == 0 && ok;
+}
+
+/* A local mkdir -p for a dependency's target directory. dev_proof.c has its
+ * own private version of this (dependency_parent_ensure); it is not
+ * exported, so this is the smallest reimplementation rather than a second
+ * layering violation to reach it. */
+static bool dl_mkdir_parents(const char *path)
+{
+    char buf[4096 + 96];
+    char *slash;
+    if (!path || snprintf(buf, sizeof(buf), "%s", path) >= (int)sizeof(buf))
+        return false;
+    slash = strrchr(buf, '/');
+    if (!slash || slash == buf)
+        return true;
+    *slash = '\0';
+    for (char *p = buf + 1;; p++) {
+        if (*p != '/' && *p != '\0')
+            continue;
+        char saved = *p;
+        *p = '\0';
+        if (!dl_mkdir_one(buf))
+            return false;
+        *p = saved;
+        if (!saved)
+            break;
+    }
+    return true;
+}
+
+/* vendor/lib, vendor/include and the four vendor/tor archives: expensive to
+ * build (minutes of `make vendor`) but cheap to copy from an already-primed
+ * submitting checkout. This is exactly the set `make worktree-prime`
+ * copies (minus its Tor submodule `git` init, which a proof reading these
+ * exact paths by `lstat` does not need); rather than shell out to that
+ * make target — which would require this worktree, and every hermetic test
+ * rig exercising this path, to carry its own Makefile — this uses the
+ * dl_materialize() link-then-copy primitive above, which mirrors the
+ * proof's own generation-prep copier without depending on it (see that
+ * function's comment for why). Each entry is checked and refused by name,
+ * matching dev_proof.c's own vocabulary, so a dependency missing from the
+ * submitting checkout too is never silently skipped. */
+static const char *const DL_VENDOR_DEPS[] = {
+    "vendor/lib",
+    "vendor/include",
+    "vendor/tor/libtor.a",
+    "vendor/tor/src/ext/ed25519/donna/libed25519_donna.a",
+    "vendor/tor/src/ext/ed25519/ref10/libed25519_ref10.a",
+    "vendor/tor/src/ext/keccak-tiny/libkeccak-tiny.a",
+};
+
+static bool dl_wt_vendor_ensure(const struct dl_dirs *d,
+                                const struct dl_row *r, char *why,
+                                size_t why_cap)
+{
+    for (size_t i = 0;
+        i < sizeof(DL_VENDOR_DEPS) / sizeof(DL_VENDOR_DEPS[0]); i++) {
+        char source[4096 + 96], target[4096 + 96];
+        struct stat st;
+        if (snprintf(target, sizeof(target), "%s/%s", d->wt,
+                     DL_VENDOR_DEPS[i]) >= (int)sizeof(target) ||
+            snprintf(source, sizeof(source), "%s/%s", r->worktree,
+                     DL_VENDOR_DEPS[i]) >= (int)sizeof(source)) {
+            (void)snprintf(why, why_cap,
+                           "proof_generation_dependency_path_too_long:%s",
+                           DL_VENDOR_DEPS[i]);
+            return false;
+        }
+        if (lstat(target, &st) == 0)
+            continue; /* already materialized in this worktree */
+        if (!r->worktree[0] || lstat(source, &st) != 0) {
+            (void)snprintf(why, why_cap,
+                           "proof_generation_dependency_unavailable:%s "
+                           "(make vendor)",
+                           DL_VENDOR_DEPS[i]);
+            return false;
+        }
+        if (!dl_mkdir_parents(target) ||
+            !dl_materialize(source, target)) {
+            (void)snprintf(why, why_cap,
+                           "proof_generation_dependency_copy_failed:%s",
+                           DL_VENDOR_DEPS[i]);
+            return false;
+        }
+    }
+    return true;
+}
+
+#if defined(__linux__)
+/* The rollback test group dlopens these two fixture images by name; the
+ * proof's own dependency check names `make test_parallel` as their fix.
+ * Since the landing worktree carries the same source revision the
+ * submitting checkout does (after the rebase two steps up), copying an
+ * already-built image from there is both cheap and no less faithful than
+ * one built here would be, and avoids running a multi-minute full test
+ * link inside a landing step just to obtain two small fixture images. */
+static const char *const DL_HOTSWAP_DEPS[] = {
+    "build/hotswap/zcl_rollback_fixture_a.so",
+    "build/hotswap/zcl_rollback_fixture_b.so",
+};
+
+static bool dl_wt_hotswap_ensure(const struct dl_dirs *d,
+                                 const struct dl_row *r, char *why,
+                                 size_t why_cap)
+{
+    for (size_t i = 0;
+        i < sizeof(DL_HOTSWAP_DEPS) / sizeof(DL_HOTSWAP_DEPS[0]); i++) {
+        char source[4096 + 96], target[4096 + 96];
+        struct stat st;
+        if (snprintf(target, sizeof(target), "%s/%s", d->wt,
+                     DL_HOTSWAP_DEPS[i]) >= (int)sizeof(target) ||
+            snprintf(source, sizeof(source), "%s/%s", r->worktree,
+                     DL_HOTSWAP_DEPS[i]) >= (int)sizeof(source)) {
+            (void)snprintf(why, why_cap,
+                           "proof_generation_dependency_path_too_long:%s",
+                           DL_HOTSWAP_DEPS[i]);
+            return false;
+        }
+        if (stat(target, &st) == 0)
+            continue;
+        if (!r->worktree[0] || stat(source, &st) != 0) {
+            (void)snprintf(why, why_cap,
+                           "proof_generation_dependency_unavailable:%s "
+                           "(make test_parallel)",
+                           DL_HOTSWAP_DEPS[i]);
+            return false;
+        }
+        if (!dl_mkdir_parents(target) ||
+            !dl_materialize(source, target)) {
+            (void)snprintf(why, why_cap,
+                           "proof_generation_dependency_copy_failed:%s",
+                           DL_HOTSWAP_DEPS[i]);
+            return false;
+        }
+    }
+    return true;
+}
+#endif
+
+/* Test-only escape hatch: exercises the copy-based priming above (vendor
+ * archives, hotswap fixtures) against a fixture checkout even though
+ * ZCL_LAND_PROOF_STUB also skips lint and the proof itself in the same
+ * step. Never read outside a test process, the same guard and reasoning as
+ * dl_hooks_stub_dir() above. build/dev-loop/restart.env is not covered:
+ * building it needs a real Makefile, which the throwaway git rigs this
+ * unlocks for have none of. */
+static bool dl_deps_test_force(void)
+{
+#if defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)
+    const char *s = getenv("ZCL_LAND_DEPS_TEST_FORCE");
+    return s && s[0];
+#else
+    return false;
+#endif
+}
+
+/* build/dev-loop/restart.env bakes this worktree's own absolute paths
+ * (DEV_OBJ_DIR, DEV_LINK_RSP, ...), so unlike the vendored archives it
+ * cannot be copied from the submitting checkout: a copy would hand the
+ * proof another worktree's paths and every restart plan built into it
+ * would name files that do not exist here. It has to be built, once, in
+ * this worktree, through the same make target the Makefile itself builds
+ * it with. */
+static bool dl_wt_restart_env_ready(const char *wt)
+{
+    char path[4096 + 32];
+    struct stat st;
+    if (!wt || snprintf(path, sizeof(path),
+                        "%s/build/dev-loop/restart.env", wt) >=
+                   (int)sizeof(path))
+        return false;
+    return stat(path, &st) == 0;
+}
+
+static bool dl_wt_restart_env_ensure(const struct dl_dirs *d, char *why,
+                                     size_t why_cap)
+{
+    char *buf;
+    int rc;
+    if (dl_wt_restart_env_ready(d->wt))
+        return true;
+    buf = (char *)zcl_malloc(DL_LOG_CAP, "dev.land.restartenv");
+    if (!buf) {
+        (void)snprintf(why, why_cap, "%s",
+                       "out of memory building the dev-loop restart plan");
+        return false;
+    }
+    {
+        const char *argv[] = { "make", "-C", d->wt,
+                               "build/dev-loop/restart.env", NULL };
+        rc = zcl_spawn_capture(argv, buf, DL_LOG_CAP, DL_LINT_TIMEOUT_MS);
+    }
+    if (rc != 0 || !dl_wt_restart_env_ready(d->wt)) {
+        (void)snprintf(why, why_cap,
+                       "building build/dev-loop/restart.env failed in the "
+                       "landing worktree (the proof's receipt identity "
+                       "capture reads it from this worktree and cannot "
+                       "use a copy from elsewhere): %.300s",
+                       buf);
+        free(buf);
+        return false;
+    }
+    free(buf);
+    return true;
+}
+
+/* The copy-based dependencies (vendor archives, hotswap fixtures) run
+ * whenever a real proof is about to be requested, or when a test forces
+ * them on despite the proof stub. The restart plan always needs a real
+ * `make` invocation against a real Makefile, so it stays gated on the
+ * proof stub alone: no hermetic test rig here carries one. Any failure
+ * refuses with the failing dependency's own typed reason; none of them
+ * silently continues past a missing one. */
+static bool dl_wt_proof_deps_ensure(const struct dl_dirs *d,
+                                    const struct dl_row *r, bool stubbed,
+                                    char *why, size_t why_cap)
+{
+    if (!stubbed || dl_deps_test_force()) {
+        if (!dl_wt_vendor_ensure(d, r, why, why_cap))
+            return false;
+#if defined(__linux__)
+        if (!dl_wt_hotswap_ensure(d, r, why, why_cap))
+            return false;
+#endif
+    }
+    if (!stubbed && !dl_wt_restart_env_ensure(d, why, why_cap))
+        return false;
+    return true;
+}
+
 /* Take the oldest queued request and drive it to the point where the proof
  * has been ASKED FOR. Then return: the answer arrives on a later step. */
 /* A row can be re-driven from "inflight" after a step that already pushed
@@ -1984,6 +2345,24 @@ static void dl_step_start(const struct dl_dirs *d, struct dl_row *row,
      * the groups it names are admitted here and the proof asks for less. */
     if (dl_tickets_admit(row, row->base, tickets, sizeof(tickets)))
         dl_log(row, tickets);
+    /* The exact proof's own private generation only ever COPIES its
+     * dependencies out of this worktree, and reads the restart plan
+     * straight from it; it never builds any of them. The stub skips the
+     * make-based restart plan for the same reason it skips lint: it
+     * replaces the proof, not the worktree the proof would have used. */
+    (void)snprintf(row->phase, sizeof(row->phase), "prebuild");
+    if (!dl_wt_proof_deps_ensure(d, row, dl_stub() != NULL, why,
+                                 sizeof(why))) {
+        (void)snprintf(row->state, sizeof(row->state), "failed");
+        (void)snprintf(row->dimension, sizeof(row->dimension),
+                       "worktree_deps");
+        (void)snprintf(row->detail, sizeof(row->detail), "%s", why);
+        dl_log(row, why);
+        dl_log(row, "\n");
+        if (dl_commit_or_report(d, row, true, reply, "failed"))
+            dl_step_reply(reply, row, "failed");
+        return;
+    }
     (void)snprintf(row->phase, sizeof(row->phase), "prove");
     p = dl_proof_request(d->wt, row->local, row->base, detail,
                          sizeof(detail));
