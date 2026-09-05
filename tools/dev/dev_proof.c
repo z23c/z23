@@ -76,13 +76,16 @@ struct proof_paths {
 
 /* Warm-start outcome for one generation, carried from generation_prepare()
  * to the proof worker so the receipt sidecar can say what the build reused.
- * Cold is always correct; every field here is advisory. */
+ * Cold is always correct; every field here is advisory. `cold_reason` is a
+ * short typed string (never prose), set only on the cold path, so the one
+ * status line a developer reads never has to guess why. */
 struct proof_warmstart {
     char donor[33];
     char donor_local[65];
     uint64_t files_linked;
     uint64_t bytes_linked;
     bool armed;
+    char cold_reason[24];
 };
 
 static void proof_why(char *why, size_t why_len, const char *message)
@@ -606,6 +609,45 @@ static bool proof_read_text(const char *path, char *out, size_t out_size)
     return ok;
 }
 
+/* One line for `dev proof status`/`dev proof wait` to show beside an
+ * admitted receipt: what the compile step actually reused, or the typed
+ * reason it did not. Reads the sidecar warm_sidecar_write() leaves beside
+ * the receipt (schema "zcl.dev_proof_warmstart.v1", defined next to the
+ * writer further down as PROOF_WARM_SIDECAR_SCHEMA -- duplicated here as a
+ * literal because this reader sits well above that definition in the file
+ * and the project avoids forward declarations). Any I/O or parse failure
+ * -- older receipt, a cycle-reused receipt with no fresh sidecar, a
+ * corrupt file -- leaves `out` untouched so the caller's existing fallback
+ * detail stands; this is display-only and can never affect admission. */
+static bool warm_status_line(const char *warmstart_path, char *out,
+                             size_t out_len)
+{
+    char body[1024];
+    if (!warmstart_path || !out || out_len == 0 ||
+        !proof_read_text(warmstart_path, body, sizeof(body)))
+        return false;
+    char *save = NULL;
+    char *line = strtok_r(body, "\n", &save);
+    if (!line || strcmp(line, "zcl.dev_proof_warmstart.v1") != 0)
+        return false;
+    char warm_flag = 0;
+    char donor[33] = {0}, reason[24] = {0};
+    while ((line = strtok_r(NULL, "\n", &save))) {
+        if (strncmp(line, "warm=", 5) == 0)
+            warm_flag = line[5];
+        else if (strncmp(line, "donor=", 6) == 0)
+            (void)snprintf(donor, sizeof(donor), "%s", line + 6);
+        else if (strncmp(line, "reason=", 7) == 0)
+            (void)snprintf(reason, sizeof(reason), "%s", line + 7);
+    }
+    if (warm_flag == '1' && donor[0] && strcmp(donor, "-") != 0)
+        return snprintf(out, out_len, "warm-start from donor %s", donor) > 0;
+    if (warm_flag == '0')
+        return snprintf(out, out_len, "cold: %s",
+                        reason[0] ? reason : "unknown") > 0;
+    return false;
+}
+
 static bool proof_log_contains(const char *path, const char *needle)
 {
     if (!path || !needle || !needle[0])
@@ -793,8 +835,14 @@ static bool proof_status_read_platform(const char *repo_root,
     struct zcl_dev_acceptance_receipt_v1 receipt;
     if (receipt_load(&paths, local, base, &receipt, why, sizeof(why))) {
         out->state = ZCL_DEV_PROOF_STATE_PASSED;
-        (void)snprintf(out->detail, sizeof(out->detail), "%s",
-                       "exact_receipt_admitted");
+        /* The compile step's own sidecar says what it reused in one line;
+         * fall back to the fixed status word only when there is none (an
+         * older receipt, or one settled by cycle reuse with no fresh
+         * compile of its own). */
+        if (!warm_status_line(paths.warmstart, out->detail,
+                              sizeof(out->detail)))
+            (void)snprintf(out->detail, sizeof(out->detail), "%s",
+                           "exact_receipt_admitted");
         return true;
     }
     int64_t pid = 0, started = 0;
@@ -2447,14 +2495,20 @@ static bool warm_start_generation(const struct proof_paths *paths,
     if (!paths || !parent || !generation || !local || !warm) return false;
     memset(&donor, 0, sizeof(donor));
     memset(warm, 0, sizeof(*warm));
-    if (!warm_donor_scan(parent, paths->root, generation, &donor))
+    if (!warm_donor_scan(parent, paths->root, generation, &donor)) {
+        (void)snprintf(warm->cold_reason, sizeof(warm->cold_reason), "%s",
+                       "no_eligible_donor");
         return false;
+    }
     char donor_build[PATH_MAX], gen_build[PATH_MAX];
     if (snprintf(donor_build, sizeof(donor_build), "%s/build", donor.path) >=
             (int)sizeof(donor_build) ||
         snprintf(gen_build, sizeof(gen_build), "%s/build", generation) >=
-            (int)sizeof(gen_build))
+            (int)sizeof(gen_build)) {
+        (void)snprintf(warm->cold_reason, sizeof(warm->cold_reason), "%s",
+                       "seed_failed");
         return false;
+    }
     struct warm_seed_accum accum = {0};
     /* Every build profile's epoch tree, not just build-only's: the test
      * phase's dev-proof-bundle compiles the full harness, and its
@@ -2474,6 +2528,8 @@ static bool warm_start_generation(const struct proof_paths *paths,
                  warm_retime_sources(generation, donor.local, local,
                                      &seed_stamp);
     if (!armed) {
+        (void)snprintf(warm->cold_reason, sizeof(warm->cold_reason), "%s",
+                       "seed_failed");
         warm_seed_rollback(gen_build, &accum);
         warm_seed_accum_free(&accum);
         return false;
@@ -2969,10 +3025,15 @@ static bool generation_prepare(const struct proof_paths *paths,
      * never fails the prepare. Any refusal inside degrades to the cold
      * build the proof has always run. ZCL_DEV_PROOF_WARM=0 forces that
      * cold path for measurement. */
-    if (warm && !warm_start_disabled()) {
-        memset(warm, 0, sizeof(*warm));
-        (void)warm_start_generation(paths, parent, generation, local,
-                                    warm);
+    if (warm) {
+        if (warm_start_disabled()) {
+            (void)snprintf(warm->cold_reason, sizeof(warm->cold_reason), "%s",
+                           "disabled");
+        } else {
+            memset(warm, 0, sizeof(*warm));
+            (void)warm_start_generation(paths, parent, generation, local,
+                                        warm);
+        }
     }
     /* Last, so it can only ever run against a generation that is stamped
      * and therefore cannot be the thing reclaimed, and so it sits after
@@ -3368,6 +3429,12 @@ static bool proof_stress_tests_env_prepare(char *why, size_t why_len)
 bool zcl_dev_proof_test_stress_env_prepare(char *why, size_t why_len)
 {
     return proof_stress_tests_env_prepare(why, why_len);
+}
+
+bool zcl_dev_proof_test_warm_status_line(const char *warmstart_path,
+                                         char *out, size_t out_len)
+{
+    return warm_status_line(warmstart_path, out, out_len);
 }
 #endif
 
@@ -3779,14 +3846,17 @@ static void warm_sidecar_write(const struct proof_paths *paths,
         ? snprintf(body, sizeof(body),
                    "%s\nwarm=%d\ndonor=%s\ndonor_local=%s\nfiles_linked=%llu\n"
                    "bytes_linked=%llu\ncompile_mode=%s\ncompile_ms=%llu\n"
-                   "bundle_ms=%llu\n",
+                   "bundle_ms=%llu\nreason=%s\n",
                    PROOF_WARM_SIDECAR_SCHEMA, warm->armed ? 1 : 0,
                    warm->armed ? warm->donor : "-",
                    warm->armed ? warm->donor_local : "-",
                    (unsigned long long)warm->files_linked,
                    (unsigned long long)warm->bytes_linked, compile_mode,
                    (unsigned long long)compile_ms,
-                   (unsigned long long)bundle_ms)
+                   (unsigned long long)bundle_ms,
+                   warm->armed ? "-"
+                               : (warm->cold_reason[0] ? warm->cold_reason
+                                                        : "unknown"))
         : -1;
     if (len > 0 && len < (int)sizeof(body))
         (void)write_atomic(paths->warmstart, body, (size_t)len, 0400);

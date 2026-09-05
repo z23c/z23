@@ -131,6 +131,13 @@ bool zcl_dev_proof_test_build_test_selector(
  * ZCL_STRESS_TESTS lands in this process's own environ (and therefore in
  * every execvp()'d test child) without driving a full proof cycle. */
 bool zcl_dev_proof_test_stress_env_prepare(char *why, size_t why_len);
+/* Seam for the warm-status-line regression: the exact reader
+ * `dev proof status`/`dev proof wait` uses to turn one warm-start sidecar
+ * into the single line a developer reads beside an admitted receipt, so a
+ * test can prove "warm-start from donor <id>" / "cold: <typed reason>"
+ * against a fixture sidecar without driving a full proof cycle. */
+bool zcl_dev_proof_test_warm_status_line(const char *warmstart_path,
+                                         char *out, size_t out_len);
 #endif
 
 /* Warm-start survey types. Inert data, declared unconditionally so every

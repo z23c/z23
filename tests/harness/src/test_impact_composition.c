@@ -2856,6 +2856,68 @@ static int test_pw_marker_identity_invalidates_stale_donor(void)
     return failures;
 }
 
+/* The one line a developer reads beside an admitted receipt: what the
+ * sidecar warm_sidecar_write() left behind, turned into "warm-start from
+ * donor <id>" or "cold: <typed reason>" -- never prose, never a env-var
+ * name, and never silent about which of the two happened. */
+static int test_pw_status_line_reports_warm_or_typed_cold(void)
+{
+    int failures = 0;
+    TEST("proof warm start: the status line names the donor or the typed "
+        "cold reason") {
+        char root[4096];
+        test_make_tmpdir(root, sizeof(root), "proof_warm", "statusline");
+        char sidecar[4096];
+        ASSERT(snprintf(sidecar, sizeof(sidecar), "%s/x.warmstart", root) >
+              0);
+        char line[256];
+        /* warm=1 with a donor tag reports the donor. */
+        ASSERT(ic_write(root, "x.warmstart",
+                        "zcl.dev_proof_warmstart.v1\nwarm=1\n"
+                        "donor=abc123donor\ndonor_local="
+                        "4444444444444444444444444444444444444444\n"
+                        "files_linked=12\nbytes_linked=4096\n"
+                        "compile_mode=reused\ncompile_ms=10\n"
+                        "bundle_ms=5\nreason=-\n"));
+        ASSERT(zcl_dev_proof_test_warm_status_line(sidecar, line,
+                                                   sizeof(line)));
+        ASSERT(strcmp(line, "warm-start from donor abc123donor") == 0);
+        /* warm=0 with a typed reason reports that reason, not prose. */
+        ASSERT(ic_write(root, "x.warmstart",
+                        "zcl.dev_proof_warmstart.v1\nwarm=0\ndonor=-\n"
+                        "donor_local=-\nfiles_linked=0\nbytes_linked=0\n"
+                        "compile_mode=built\ncompile_ms=9000\n"
+                        "bundle_ms=0\nreason=no_eligible_donor\n"));
+        ASSERT(zcl_dev_proof_test_warm_status_line(sidecar, line,
+                                                   sizeof(line)));
+        ASSERT(strcmp(line, "cold: no_eligible_donor") == 0);
+        /* The opt-out switch's own reason surfaces the same way. */
+        ASSERT(ic_write(root, "x.warmstart",
+                        "zcl.dev_proof_warmstart.v1\nwarm=0\ndonor=-\n"
+                        "donor_local=-\nfiles_linked=0\nbytes_linked=0\n"
+                        "compile_mode=built\ncompile_ms=9000\n"
+                        "bundle_ms=0\nreason=disabled\n"));
+        ASSERT(zcl_dev_proof_test_warm_status_line(sidecar, line,
+                                                   sizeof(line)));
+        ASSERT(strcmp(line, "cold: disabled") == 0);
+        /* A missing sidecar (no compile ran this cycle, e.g. a
+         * cycle-reused receipt) refuses rather than fabricating a line;
+         * the caller's own fixed fallback stands. */
+        char missing[4096];
+        ASSERT(snprintf(missing, sizeof(missing), "%s/none.warmstart",
+                        root) > 0);
+        ASSERT(!zcl_dev_proof_test_warm_status_line(missing, line,
+                                                     sizeof(line)));
+        /* A foreign or truncated file refuses the same way. */
+        ASSERT(ic_write(root, "x.warmstart", "not-the-right-schema\n"));
+        ASSERT(!zcl_dev_proof_test_warm_status_line(sidecar, line,
+                                                     sizeof(line)));
+        ASSERT(test_rm_rf_recursive(root) == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 /* The opt-out switch the production prepare gates on. Proves each
  * spelling forces cold and that anything else (including unset) leaves
  * warm start armed. Restores the prior value: the variable is
@@ -3089,6 +3151,7 @@ int test_impact_composition(void)
     failures += test_pw_pick_newest_complete_idle();
     failures += test_pw_marker_round_trip_and_refusals();
     failures += test_pw_marker_identity_invalidates_stale_donor();
+    failures += test_pw_status_line_reports_warm_or_typed_cold();
     failures += test_pw_seed_links_replaces_and_copies();
     failures += test_pw_seed_cold_without_seedables();
     failures += test_pw_disable_switch_forces_cold();
