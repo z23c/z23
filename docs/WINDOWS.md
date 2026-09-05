@@ -115,8 +115,9 @@ mingw triple, the matching cross toolchain, and an out-of-tree build
 directory so it can never collide with a native UCRT64 build of the same
 submodule checkout: the cross archives land at
 `vendor/cross/x86_64-w64-mingw32/tor/libtor.a` plus the `ext/` archives at
-their usual relative paths beneath it (`src/ext/ed25519/donna/`,
-`src/ext/ed25519/ref10/`, `src/ext/keccak-tiny/`), while the native UCRT64
+their usual relative paths beneath it (`vendor/cross/x86_64-w64-mingw32/tor/src/ext/ed25519/donna/`,
+`vendor/cross/x86_64-w64-mingw32/tor/src/ext/ed25519/ref10/`, and
+`vendor/cross/x86_64-w64-mingw32/tor/src/ext/keccak-tiny/`), while the native UCRT64
 run places that same archive set directly under `vendor/tor/`. Either path
 is exactly `ZCL_TOR_TREE` in the Makefile, so `make ZCL_TARGET=windows-x86_64
 z23` and a plain UCRT64 `make z23` both pick the real archives over the stub
