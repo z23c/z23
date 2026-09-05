@@ -38,6 +38,7 @@ Five more documents are being written in parallel. Cite them even before they la
 | docs/agent/NATIVE_CHANNEL.md | How agents on different nodes find each other. |
 | docs/agent/TRAIN_PROTOCOL.md | Landing on main as a state machine. |
 | docs/agent/UNIT_DISPATCH.md | Run a unit through the C23 harness. |
+| docs/agent/FLEET_JOIN.md | Join a computer to an owner's fleet from one pasted line. |
 | docs/work/AGENT_SYNC_PLAN.md | The plan that ties them together. |
 
 ## Ask the checkout

@@ -338,6 +338,15 @@ machine and requested capability template, and records the peer's ZID and Noise
 static key locally. First contact without this confirmation may discover and
 fetch public content but receives no private-machine capability.
 
+Pairing is not the first step, because it cannot be. It needs a running node
+with an on-chain identity delegation on both sides, and a computer the owner
+has just switched on has neither. The first step is enrolment: `fleet
+invite`, `fleet join`, `fleet admit` and `fleet machines`
+(`engine/composition/commands/fleet_enrol.def`), which record a named machine
+from two pasted strings and no network call, and grant nothing. `fleet join`
+names this section's ceremony as its `next_step`. See
+[`../agent/FLEET_JOIN.md`](../agent/FLEET_JOIN.md) for the owner-facing page.
+
 Pairing records are exportable as encrypted, owner-controlled recovery objects.
 They are never published to the public DHT or Commons. Removing a peer, rotating
 its delegated key, or revoking a capability does not require a central service.
