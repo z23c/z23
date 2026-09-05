@@ -357,6 +357,11 @@ void zcl_native_handle_code_recent(
 void zcl_native_handle_code_fetch(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
+/* code.index.metrics — the published image's own build/size/freshness
+ * numbers. Opens an existing store only; never rebuilds. */
+void zcl_native_handle_code_index_metrics(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
 /* code.tests — the routing link: which focused test group a change to one file
  * routes to, mirroring `dev test plan` (tools/dev/devloop_plan.c). */
 void zcl_native_handle_code_tests(

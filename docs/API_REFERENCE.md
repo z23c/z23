@@ -74,11 +74,11 @@ z23 discover schema <path> --side=input|output
 
 | Catalog fact | Count |
 |---|---|
-| Registry entries (branches + leaves) | 822 |
+| Registry entries (branches + leaves) | 824 |
 | Top-level roots | 14 |
-| Branches | 185 |
-| Leaves (dispatchable command paths) | 637 |
-| … `ready` (live handler in this build) | 567 |
+| Branches | 186 |
+| Leaves (dispatchable command paths) | 638 |
+| … `ready` (live handler in this build) | 568 |
 | … `compat` (metadata only, names a fallback) | 39 |
 | … `planned` (fail-closed BLOCKED, exit 3) | 31 |
 | … dev-gated 🔧 (`ready` only in `z23-dev`) | 38 |
@@ -97,7 +97,7 @@ Per source file:
 | `engine/composition/commands/store.def` | 18 | 0 | 18 |
 | `engine/composition/commands/ops.def` | 56 | 10 | 46 |
 | `engine/composition/commands/dev.def` | 89 | 18 | 71 |
-| `engine/composition/commands/code.def` | 31 | 3 | 28 |
+| `engine/composition/commands/code.def` | 33 | 4 | 29 |
 | `engine/composition/commands/accounts.def` | 11 | 2 | 9 |
 | `engine/composition/commands/vault.def` | 24 | 4 | 20 |
 | `engine/composition/commands/zcode.def` | 249 | 59 | 190 |
@@ -1035,6 +1035,12 @@ represented by its children's sections.
 | `code cost` | ready | read / read / public · fast/tiny | **`path`** | `zcl.code_cost.v1` | `z23 code cost cognition/modules/codeindex/src/codeindex_build.c` | Price the proof of a change |
 | `code recent` | ready | read / read / public · fast/tiny | **`path`**, **`since`** | `zcl.code_recent.v1` | `z23 code recent cognition/modules/codeindex HEAD~5` | List what changed under a path lately |
 | `code fetch` | ready | mutate / dev-mutation / public · background/moderate | `from` | `zcl.code_fetch.v1` | `z23 code fetch --from=/path/to/other-checkout` | Install another checkout's verified code index |
+
+#### `code.index` — Code-index self metrics
+
+| Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
+|---|---|---|---|---|---|---|
+| `code index metrics` | ready | read / read / public · foreground/low | none | `zcl.code_index_metrics.v1` | `z23 code index metrics` | Report the code index's own numbers |
 
 #### `code.provenance` — Attribute output to its producing code
 

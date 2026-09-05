@@ -731,6 +731,7 @@ REMOTE_COMMAND_CLASS("code.recent", REMOTE_CLASS_NEVER, "")
  * that writes <root>/.codeindex must never be drivable from a wire. */
 REMOTE_COMMAND_CLASS("code.fetch", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("code.context-map", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("code.index.metrics", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("code.tests", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("code.room", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("code.file", REMOTE_CLASS_NEVER, "")

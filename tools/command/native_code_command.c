@@ -26,6 +26,8 @@
 #include "controllers/agent_impact_rules.h"
 #include "base/hex.h"
 #include "kpi/kpi.h"
+#include "platform/file_metadata.h"
+#include "platform/time_compat.h"
 #include "territory/territory.h"
 #include "test_group_catalog.h"
 
@@ -70,6 +72,7 @@ enum {
     CODE_MERKLE_CHILD_CAP = 40, /* direct subtree roots rendered by code.merkle
                                  * (list budget); `children_total` always
                                  * reports the true count */
+    CODE_METRICS_GROUP_CAP = 40,
 };
 
 /* Bounded copy of at most `max` visible chars of `src` into dst[cap]; appends
@@ -130,6 +133,105 @@ static struct codeindex *code_open_source_view(
                                code_source_root(request));
     }
     return ci;
+}
+
+static int64_t code_index_leaf_bytes(const char *root, const char *leaf)
+{
+    char path[4096];
+    int n = snprintf(path, sizeof(path), "%s/.codeindex/%s", root, leaf);
+    if (n <= 0 || (size_t)n >= sizeof(path)) return 0;
+    struct platform_file_metadata meta;
+    if (platform_file_metadata_read(path, &meta) != PLATFORM_FILE_METADATA_OK)
+        return 0;
+    if (meta.size > (uint64_t)INT64_MAX) return INT64_MAX;
+    return (int64_t)meta.size;
+}
+
+void zcl_native_handle_code_index_metrics(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply)
+{
+    const char *root = code_source_root(request);
+    struct codeindex *ci = codeindex_open_existing(root);
+    if (!ci) {
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INTERNAL, "CODEINDEX_OPEN",
+                               "dispatch", true, false,
+                               "could not open the existing code index",
+                               root);
+        return;
+    }
+
+    long long cold_ms = 0, cold_files = 0;
+    (void)codeindex_build_cold_ms(ci, &cold_ms, &cold_files);
+
+    int64_t files = 0, symbols = 0, refs = 0, groups = 0;
+    if (!codeindex_table_counts(ci, &files, &symbols, &refs, &groups)) {
+        codeindex_close(ci);
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INTERNAL, "COUNT_FAILED",
+                               "query", false, false,
+                               "could not count code-index tables", root);
+        return;
+    }
+
+    int64_t t0 = platform_time_monotonic_ms();
+    bool current = false;
+    if (!codeindex_source_view_is_current(ci, &current)) {
+        codeindex_close(ci);
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INTERNAL, "FRESHNESS_CHECK",
+                               "measure", false, false,
+                               "could not run a source-only freshness check",
+                               root);
+        return;
+    }
+    int64_t freshness_ms = platform_time_monotonic_ms() - t0;
+    if (freshness_ms < 0) freshness_ms = 0;
+
+    struct ci_group_metric gm[CODE_METRICS_GROUP_CAP];
+    int ng = codeindex_group_metrics(ci, gm, CODE_METRICS_GROUP_CAP);
+    if (ng < 0) {
+        codeindex_close(ci);
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INTERNAL, "GROUP_METRICS",
+                               "query", false, false,
+                               "could not read per-group index counts", root);
+        return;
+    }
+    struct json_value per;
+    json_init(&per);
+    json_set_array(&per);
+    for (int i = 0; i < ng; i++) {
+        struct json_value o;
+        json_init(&o);
+        json_set_object(&o);
+        (void)json_push_kv_str(&o, "name", gm[i].name);
+        (void)json_push_kv_int(&o, "files", gm[i].files);
+        (void)json_push_kv_int(&o, "lines", gm[i].lines);
+        (void)json_push_back(&per, &o);
+        json_free(&o);
+    }
+
+    (void)json_push_kv_int(&reply->data, "build_cold_ms", cold_ms);
+    (void)json_push_kv_int(&reply->data, "build_cold_files", cold_files);
+    (void)json_push_kv_int(&reply->data, "image_bytes",
+                           code_index_leaf_bytes(root, "index.kv"));
+    (void)json_push_kv_int(&reply->data, "merkle_bytes",
+                           code_index_leaf_bytes(root, "source_tree.merkle"));
+    (void)json_push_kv_int(
+        &reply->data, "territory_bytes",
+        code_index_leaf_bytes(root, "territory_reach.v1") +
+            code_index_leaf_bytes(root, "territory_rollup.v1"));
+    (void)json_push_kv_int(&reply->data, "freshness_check_ms", freshness_ms);
+    (void)json_push_kv_bool(&reply->data, "stale", !current);
+    (void)json_push_kv_int(&reply->data, "files_indexed", files);
+    (void)json_push_kv_int(&reply->data, "symbols", symbols);
+    (void)json_push_kv_int(&reply->data, "refs", refs);
+    (void)json_push_kv_int(&reply->data, "groups_count", groups);
+    (void)json_push_kv(&reply->data, "per_group", &per);
+    json_free(&per);
+    codeindex_close(ci);
 }
 
 /* Positional/typed string input for `key` (NULL when absent/empty). */

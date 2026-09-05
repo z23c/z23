@@ -192,6 +192,32 @@ ZCL_COMMAND_READY_COMMAND(
     ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_NONE,
     zcl_native_handle_code_fetch)
 
+/* Nested under firsthour so the parent `code` menu stays inside
+ * ZCL_COMMAND_BRANCH_BUDGET. Path stays code.index.metrics. */
+ZCL_COMMAND_BRANCH("code.index", "code.firsthour",
+                   "Code-index self metrics",
+                   ZCL_COMMAND_LAYER_CODE)
+
+ZCL_COMMAND_READY_READ(
+    "code.index.metrics", "code.index", "",
+    "Report the code index's own numbers",
+    "The published image's cold-build receipt, on-disk byte sizes, one timed "
+    "source-only freshness check, and row counts from the existing store. "
+    "Never rebuilds: a stale image reports stale=true with the numbers it "
+    "already holds. freshness_check_ms is a measurement, never a gate.",
+    ZCL_COMMAND_LIST_BUDGET,
+    "code,index,metrics,freshness,size,build,receipt",
+    "zcl.command.empty_input.v1",
+    "zcl.code_index_metrics.v1", "", "",
+    "z23 code index metrics",
+    ZCL_COMMAND_LAYER_CODE, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_PUBLIC, ZCL_COMMAND_LATENCY_FOREGROUND,
+    ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_NONE,
+    ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_code_index_metrics)
+
 ZCL_COMMAND_READY_READ(
     "code.tests", "code", "",
     "Route a file to focused tests",

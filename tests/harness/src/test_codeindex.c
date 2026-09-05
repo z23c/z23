@@ -58,6 +58,7 @@
 } while (0)
 
 #define FIX "test-tmp/ci_fix"
+#define MET_FIX "test-tmp/ci_metrics"
 
 /* The fixture mirrors the real object layout: every depfile the build writes
  * lands in a per-build compile epoch, `<object-root>/.current-epoch` names the
@@ -1773,6 +1774,61 @@ static int test_codeindex_platform_arm(void)
             codeindex_close(cl);
         }
         system("rm -rf " CL_FIX);
+    }
+
+    /* ── code.index.metrics: schema, receipt parity, stale without rebuild ── */
+    {
+        system("rm -rf " MET_FIX);
+        CI_CHECK("metrics fixture writes",
+                 mk_write(MET_FIX, "core/modules/net/src/metrics_fix.c",
+                          "/* core/modules/net/src/metrics_fix.c — metrics "
+                          "fixture. */\n"
+                          "int metrics_fix(void)\n{\n    return 1;\n}\n"));
+        struct codeindex *built = codeindex_open(MET_FIX);
+        CI_CHECK("metrics fixture indexes", built != NULL);
+        if (built) codeindex_close(built);
+
+        struct zcl_command_context ctx = { .source_root = MET_FIX };
+        struct json_value input;
+        json_init(&input);
+        json_set_object(&input);
+        struct zcl_command_request request = {
+            .input = &input, .context = &ctx, .view = "normal",
+            .invoked_name = "code.index.metrics",
+        };
+        struct zcl_command_reply reply;
+        zcl_command_reply_init(&reply, "zcl.code_index_metrics.v1");
+        zcl_native_handle_code_index_metrics(&request, &reply);
+        int64_t cold_files =
+            json_get_int(json_get(&reply.data, "build_cold_files"));
+        int64_t files_indexed =
+            json_get_int(json_get(&reply.data, "files_indexed"));
+        int64_t cold_ms =
+            json_get_int(json_get(&reply.data, "build_cold_ms"));
+        CI_CHECK("metrics schema and fresh receipt match file count",
+                 reply.status != ZCL_COMMAND_STATUS_FAILED &&
+                 reply.data_schema &&
+                 strcmp(reply.data_schema, "zcl.code_index_metrics.v1") == 0 &&
+                 !json_get_bool(json_get(&reply.data, "stale")) &&
+                 cold_files == files_indexed && cold_files > 0);
+        zcl_command_reply_free(&reply);
+
+        CI_CHECK("metrics stale edit writes",
+                 mk_write(MET_FIX, "core/modules/net/src/metrics_fix.c",
+                          "/* core/modules/net/src/metrics_fix.c — metrics "
+                          "fixture. */\n"
+                          "int metrics_fix(void)\n{\n    return 1;\n}\n"
+                          "int metrics_added(void)\n{\n    return 2;\n}\n"));
+        zcl_command_reply_init(&reply, "zcl.code_index_metrics.v1");
+        zcl_native_handle_code_index_metrics(&request, &reply);
+        CI_CHECK("metrics reports stale without rewriting the cold receipt",
+                 reply.status != ZCL_COMMAND_STATUS_FAILED &&
+                 json_get_bool(json_get(&reply.data, "stale")) &&
+                 json_get_int(json_get(&reply.data, "build_cold_ms")) ==
+                     cold_ms);
+        zcl_command_reply_free(&reply);
+        json_free(&input);
+        system("rm -rf " MET_FIX);
     }
 
     return failures;

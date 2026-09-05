@@ -11,6 +11,7 @@
 #include "util/log_macros.h"
 #include "util/safe_alloc.h"
 
+#include <sqlite3.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -161,6 +162,72 @@ bool codeindex_build_cold_ms(struct codeindex *ci, long long *ms_out,
     *ms_out = ms;
     *files_out = files;
     return true;
+}
+
+static bool ci_count_sql(struct ci_store *s, const char *sql, int64_t *out)
+{
+    if (out) *out = 0;
+    if (!s || !sql || !out) return false;
+    ci_store_lock(s);
+    sqlite3_stmt *stmt = NULL;
+    sqlite3 *db = ci_store_db(s);
+    if (!db || sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) {
+        ci_store_unlock(s);
+        return false;
+    }
+    bool ok = sqlite3_step(stmt) == SQLITE_ROW;  // raw-sql-ok:codeindex-derived
+    if (ok) *out = sqlite3_column_int64(stmt, 0);
+    sqlite3_finalize(stmt);
+    ci_store_unlock(s);
+    return ok;
+}
+
+bool codeindex_table_counts(struct codeindex *ci, int64_t *files,
+                            int64_t *symbols, int64_t *refs, int64_t *groups)
+{
+    if (files) *files = 0;
+    if (symbols) *symbols = 0;
+    if (refs) *refs = 0;
+    if (groups) *groups = 0;
+    if (!ci || !ci->store || !files || !symbols || !refs || !groups)
+        LOG_FAIL("codeindex", "null arg to table_counts");
+    if (!ci_count_sql(ci->store, "SELECT COUNT(*) FROM files", files) ||
+        !ci_count_sql(ci->store, "SELECT COUNT(*) FROM symbols", symbols) ||
+        !ci_count_sql(ci->store, "SELECT COUNT(*) FROM refs", refs) ||
+        !ci_count_sql(ci->store, "SELECT COUNT(*) FROM groups", groups))
+        LOG_FAIL("codeindex", "count index tables");
+    return true;
+}
+
+int codeindex_group_metrics(struct codeindex *ci, struct ci_group_metric *out,
+                            int cap)
+{
+    if (!ci || !ci->store || !out || cap <= 0)
+        LOG_ERR("codeindex", "bad arg to group_metrics");
+    ci_store_lock(ci->store);
+    sqlite3_stmt *stmt = NULL;
+    sqlite3 *db = ci_store_db(ci->store);
+    static const char sql[] =
+        "SELECT g.path,"
+        "(SELECT COUNT(*) FROM files f WHERE f.\"group\"=g.path),"
+        "(SELECT COUNT(*) FROM symbols s WHERE s.\"group\"=g.path) "
+        "FROM groups g ORDER BY g.path";
+    if (!db || sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) {
+        ci_store_unlock(ci->store);
+        LOG_ERR("codeindex", "prepare group_metrics");
+    }
+    int n = 0, rc;
+    while (n < cap && (rc = sqlite3_step(stmt)) == SQLITE_ROW) {  // raw-sql-ok:codeindex-derived
+        memset(&out[n], 0, sizeof(out[n]));
+        ci_cpy(out[n].name, sizeof(out[n].name),
+               (const char *)sqlite3_column_text(stmt, 0));
+        out[n].files = sqlite3_column_int64(stmt, 1);
+        out[n].lines = sqlite3_column_int64(stmt, 2);
+        n++;
+    }
+    sqlite3_finalize(stmt);
+    ci_store_unlock(ci->store);
+    return n;
 }
 
 bool codeindex_retrieval_projection_root_sha3(struct codeindex *ci,

@@ -173,6 +173,18 @@ bool codeindex_source_root_sha3(struct codeindex *ci, uint8_t out[32]);
 bool codeindex_build_cold_ms(struct codeindex *ci, long long *ms_out,
                              long long *files_out);
 
+/* Exact row counts of the published generation. Never rebuilds. */
+bool codeindex_table_counts(struct codeindex *ci, int64_t *files,
+                            int64_t *symbols, int64_t *refs, int64_t *groups);
+/* Per-group file count and indexed-symbol count (`lines`). */
+struct ci_group_metric {
+    char name[64];
+    int64_t files;
+    int64_t lines;
+};
+int codeindex_group_metrics(struct codeindex *ci, struct ci_group_metric *out,
+                            int cap);
+
 /* Exact logical root of the groups/files/symbols/refs projection consumed by
  * retrieval. Unlike source_root_sha3, this binds scanner output as well as
  * source identity. A retrieval view verifies it before adoption; snapshot
