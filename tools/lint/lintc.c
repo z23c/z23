@@ -14,6 +14,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 static const char k_ls_all[] = "git ls-files -z";
@@ -66,7 +67,17 @@ static int compile_ref(regex_t *re)
     return reg_fail(re, regcomp(re, pat, REG_EXTENDED));
 }
 
-static int each_zpath(const char *cmd, int (*fn)(const char *, void *), void *ctx)
+static int cmd_done(const char *cmd, int st, int allow_exit1)
+{
+    if (st == 0)
+        return 0;
+    if (allow_exit1 && st != -1 && WIFEXITED(st) && WEXITSTATUS(st) == 1)
+        return 0;
+    return die("z23-lint: command failed (%s)\n", cmd);
+}
+
+static int each_zpath_st(const char *cmd, int allow_exit1,
+                         int (*fn)(const char *, void *), void *ctx)
 {
     FILE *pipe = popen(cmd, "r");
     if (!pipe)
@@ -88,7 +99,12 @@ static int each_zpath(const char *cmd, int (*fn)(const char *, void *), void *ct
     int st = pclose(pipe);
     if (rc != 0)
         return rc;
-    return st != 0 ? die("z23-lint: command failed (%s)\n", cmd) : 0;
+    return cmd_done(cmd, st, allow_exit1);
+}
+
+static int each_zpath(const char *cmd, int (*fn)(const char *, void *), void *ctx)
+{
+    return each_zpath_st(cmd, 0, fn, ctx);
 }
 
 static int note(struct acc *a, const char *fmt, const char *path, int lineno,
@@ -2271,17 +2287,19 @@ static int simd_local_file(const char *path, int *ok)
     return 0;
 }
 struct simd_acc { char f[64][192]; int n; };
-static int scan_avx(const char *path, void *ctx)
+/* git grep -l of tracked *.c (not a filesystem walk): untracked probes do not count. */
+static const char k_simd_grep[] =
+    "git grep -l -z -E '__attribute__\\(\\(" "target\\(\"avx' -- '*.c'";
+static int simd_add_path(const char *path, void *ctx)
 {
     struct simd_acc *a = ctx;
-    int found = 0, rc = file_has(path, "__attribute__((target(\"" "avx", 0, &found);
-    if (rc < 0) return die("z23-lint: cannot open %s\n", path);
-    if (rc || !found) return rc;
     size_t n = strlen(path);
     if (a->n >= 64 || n >= 192) return die("z23-lint: derived buffer overflow\n", "");
     memcpy(a->f[a->n++], path, n + 1);
     return 0;
 }
+static int simd_pcmp(const void *a, const void *b)
+{ return strcmp((const char *)a, (const char *)b); }
 static int simd_open(const char *path, int rc)
 { return rc < 0 ? die("z23-lint: cannot open %s\n", path) : rc; }
 
@@ -2289,13 +2307,9 @@ static int check_simd_os_support_run(int argc, char **argv)
 {
     (void)argc; (void)argv;
     struct simd_acc a = {0};
-    static const char *const roots[] = {
-        "core", "engine", "contexts", "cognition", "platform", "tests",
-        "tools", "apps", "vendor", "docs", "app", "lib", "config"
-    };
-    int rc = 0, v = 0;
-    for (size_t i = 0; rc == 0 && i < sizeof roots / sizeof roots[0]; i++)
-        rc = walk_src(roots[i], 0, scan_avx, &a);
+    int rc = each_zpath_st(k_simd_grep, 1, simd_add_path, &a), v = 0;
+    if (rc == 0 && a.n > 1)
+        qsort(a.f, (size_t)a.n, sizeof a.f[0], simd_pcmp);
     if (rc == 0)
         rc = gate_require_scanned(a.n, 1, "check_simd_os_support",
                                   "expected at least core/modules/crypto/src/blake2b_avx2.c "
@@ -2371,6 +2385,409 @@ static int check_simd_os_support_selftest(void)
     return st_ok(bad, "check_simd_os_support selftest: OK\n");
 }
 
+static int slurp_popen_lines(const char *cmd, int allow_exit1, char *out, size_t cap,
+                             size_t *used)
+{
+    FILE *p = popen(cmd, "r");
+    if (!p) return die("z23-lint: popen failed (%s)\n", cmd);
+    char *line = NULL;
+    size_t lcap = 0;
+    ssize_t n;
+    int rc = 0;
+    *used = 0;
+    out[0] = '\0';
+    while ((n = getline(&line, &lcap, p)) >= 0) {
+        if (n > 0 && line[n - 1] == '\n') line[--n] = '\0';
+        if (n <= 0) continue;
+        int k = snprintf(out + *used, cap - *used, "%s\n", line);
+        if (ovf(k, cap - *used)) { rc = 2; break; }
+        *used += (size_t)k;
+    }
+    if (rc == 0 && ferror(p)) rc = die("z23-lint: read failed (%s)\n", cmd);
+    free(line);
+    int st = pclose(p);
+    if (rc) return rc;
+    return cmd_done(cmd, st, allow_exit1);
+}
+
+static int c23_ends(const char *path, const char *suf)
+{
+    size_t n = strlen(path), m = strlen(suf);
+    return n >= m && memcmp(path + n - m, suf, m) == 0;
+}
+static int c23_seg_end(const char *path, const char *name)
+{
+    size_t n = strlen(path), m = strlen(name);
+    if (n < m || memcmp(path + n - m, name, m) != 0) return 0;
+    return n == m || path[n - m - 1] == '/';
+}
+static int c23_path_hit(const char *path)
+{
+    static const char dir[] = { '.', 'c', 'a', 'r', 'g', 'o', '/', '\0' };
+    static const char mid[] = { '/', '.', 'c', 'a', 'r', 'g', 'o', '/', '\0' };
+    if (c23_seg_end(path, "Cargo.toml") || c23_seg_end(path, "Cargo.lock")
+        || c23_seg_end(path, "build.rs") || c23_ends(path, ".rs"))
+        return 1;
+    return !strncmp(path, dir, 7) || strstr(path, mid) != NULL;
+}
+static int c23_skip_ref(const char *path)
+{
+    return !strcmp(path, "contexts/wallet/domain/src/mnemonic.c")
+        || !strcmp(path, "core/modules/sapling/src/circuit_gadgets.c");
+}
+static int c23_fill_pat(char *pat, size_t cap)
+{
+    return ovf(snprintf(pat, cap, "%s%s%s%s%s",
+                       "ZCL_WITH_", "RUST|librust", "zcash\\.a|librust",
+                       "zcash_[A-Za-z0-9_]*|-l" "rust[A-Za-z0-9_]*|",
+                       "(^|[^A-Za-z0-9_])(car" "go|rust" "c)([^A-Za-z0-9_]|$)"), cap);
+}
+static int c23_comp(regex_t *re)
+{
+    char pat[256];
+    int rc = c23_fill_pat(pat, sizeof pat);
+    return rc ? rc : reg_fail(re, regcomp(re, pat, REG_EXTENDED));
+}
+static int c23_grep_cmd(char *cmd, size_t cap)
+{
+    char pat[256];
+    int rc = c23_fill_pat(pat, sizeof pat);
+    if (rc) return rc;
+    return ovf(snprintf(cmd, cap,
+        "git grep -n -E '%s' -- Makefile config app core domain "
+        "lib ports adapters packages src tools "
+        "':!contexts/wallet/domain/src/mnemonic.c' "
+        "':!core/modules/sapling/src/circuit_gadgets.c'", pat), cap);
+}
+struct c23_acc { char *paths; size_t pcap, plen; };
+static int c23_on_track(const char *path, void *ctx)
+{
+    struct c23_acc *a = ctx;
+    if (!c23_path_hit(path)) return 0;
+    int k = snprintf(a->paths + a->plen, a->pcap - a->plen, "%s\n", path);
+    if (ovf(k, a->pcap - a->plen)) return 2;
+    a->plen += (size_t)k;
+    return 0;
+}
+
+static int check_c23_only_run(int argc, char **argv)
+{
+    (void)argc; (void)argv;
+    char paths[CLK_MATCH] = {0}, refs[CLK_MATCH] = {0}, cmd[1024];
+    struct c23_acc a = { .paths = paths, .pcap = sizeof paths };
+    int rc = each_zpath(k_ls_all, c23_on_track, &a);
+    if (rc == 0) rc = c23_grep_cmd(cmd, sizeof cmd);
+    size_t rlen = 0;
+    if (rc == 0) rc = slurp_popen_lines(cmd, 1, refs, sizeof refs, &rlen);
+    if (rc) return rc;
+    if (a.plen || rlen) {
+        if (fputs("check_c23_only: FAIL — Z23 must have no Rust dependency\n", stderr) < 0)
+            return die("z23-lint: write failed\n", "");
+        if (a.plen && fwrite(paths, 1, a.plen, stderr) != a.plen)
+            return die("z23-lint: write failed\n", "");
+        if (rlen && fwrite(refs, 1, rlen, stderr) != rlen)
+            return die("z23-lint: write failed\n", "");
+        return 1;
+    }
+    return fputs("check_c23_only: clean — no Rust source, manifest, build, link, or FFI path\n",
+                 stdout) < 0 ? die("z23-lint: write failed\n", "") : 0;
+}
+
+static int check_c23_only_selftest(void)
+{
+    regex_t re;
+    int cr = c23_comp(&re);
+    if (cr) return cr;
+    char cg[24], lr[40], wr[24], pdir[24], pmid[32];
+    if (snprintf(cg, sizeof cg, "car%s", "go build") >= (int)sizeof cg
+        || snprintf(lr, sizeof lr, "cc main.o -l%s", "rustzcash") >= (int)sizeof lr
+        || snprintf(wr, sizeof wr, "ZCL_WITH_%s=1", "RUST") >= (int)sizeof wr
+        || snprintf(pdir, sizeof pdir, ".car%s", "go/config") >= (int)sizeof pdir
+        || snprintf(pmid, sizeof pmid, "vendor/.car%s", "go/config") >= (int)sizeof pmid) {
+        regfree(&re);
+        return die("z23-lint: selftest buffer overflow\n", "");
+    }
+    int bad = want("check_c23_only", &re, "cc -std=c23 main.c", 0)
+            | want("check_c23_only", &re, cg, 1)
+            | want("check_c23_only", &re, lr, 1)
+            | want("check_c23_only", &re, wr, 1)
+            | !c23_path_hit("pkg/Cargo.toml")
+            | !c23_path_hit("x/Cargo.lock")
+            | !c23_path_hit("x/build.rs")
+            | !c23_path_hit("tools/zz_probe.rs")
+            | !c23_path_hit(pdir)
+            | !c23_path_hit(pmid)
+            | c23_path_hit("tools/foo.c")
+            | c23_path_hit("Cargo.tomlx")
+            | !c23_skip_ref("contexts/wallet/domain/src/mnemonic.c")
+            | !c23_skip_ref("core/modules/sapling/src/circuit_gadgets.c")
+            | c23_skip_ref("tools/foo.c");
+    regfree(&re);
+    return st_ok(bad, "check_c23_only selftest: OK\n");
+}
+
+enum { HS_NEST = 64 };
+struct hs_st {
+    const regex_t *re;
+    const char *path;
+    char *buf;
+    size_t cap, *used;
+    int depth, dev_active, lineno;
+    int dev_frame[HS_NEST], dev_branch[HS_NEST];
+};
+static int hs_dl_comp(regex_t *re)
+{
+    return compile_pat(re, REG_EXTENDED, "(^|[^[:alnum:]_])dl(open|sym|close)",
+                       "[[:space:]]*[(]", "", "");
+}
+static const char *hs_after_hash(const char *line)
+{
+    while (*line == ' ' || *line == '\t') line++;
+    if (*line != '#') return NULL;
+    line++;
+    while (*line == ' ' || *line == '\t') line++;
+    return line;
+}
+static int hs_pp(const char *line)
+{
+    const char *p = hs_after_hash(line);
+    if (!p) return 0;
+    if (!strncmp(p, "ifdef", 5) && (p[5] == ' ' || p[5] == '\t')) {
+        p += 5;
+        while (*p == ' ' || *p == '\t') p++;
+        if (!strncmp(p, "ZCL_DEV_BUILD", 13)) return 1;
+        return 2;
+    }
+    if (p[0] == 'i' && p[1] == 'f') return 2;
+    if (!strncmp(p, "elif", 4) || !strncmp(p, "else", 4)) return 3;
+    if (!strncmp(p, "endif", 5)) return 4;
+    return 0;
+}
+static int hs_feed(struct hs_st *s, const char *line)
+{
+    s->lineno++;
+    int k = hs_pp(line);
+    if (k == 1 || k == 2) {
+        if (s->depth + 1 >= HS_NEST)
+            return die("z23-lint: ifdef nest too deep: %s\n", s->path);
+        s->depth++;
+        s->dev_frame[s->depth] = (k == 1);
+        s->dev_branch[s->depth] = (k == 1);
+        if (k == 1) s->dev_active++;
+        return 0;
+    }
+    if (k == 3) {
+        if (s->depth > 0 && s->dev_frame[s->depth] && s->dev_branch[s->depth]) {
+            s->dev_active--;
+            s->dev_branch[s->depth] = 0;
+        }
+        return 0;
+    }
+    if (k == 4) {
+        if (s->depth > 0) {
+            if (s->dev_frame[s->depth] && s->dev_branch[s->depth]) s->dev_active--;
+            s->dev_frame[s->depth] = 0;
+            s->dev_branch[s->depth] = 0;
+            s->depth--;
+        }
+        return 0;
+    }
+    if (regexec(s->re, line, 0, NULL, 0) != 0 || s->dev_active >= 1) return 0;
+    int n = snprintf(s->buf + *s->used, s->cap - *s->used, "%s:%d: %s\n",
+                     s->path, s->lineno, line);
+    if (ovf(n, s->cap - *s->used)) return 2;
+    *s->used += (size_t)n;
+    return 0;
+}
+static int hs_scan_text(const char *text, const char *path, const regex_t *re,
+                        char *buf, size_t cap, size_t *used)
+{
+    struct hs_st s = {
+        .re = re, .path = path, .buf = buf, .cap = cap, .used = used,
+        .depth = 0, .dev_active = 0, .lineno = 0
+    };
+    *used = 0;
+    buf[0] = '\0';
+    const char *p = text;
+    while (*p) {
+        const char *nl = strchr(p, '\n');
+        size_t n = nl ? (size_t)(nl - p) : strlen(p);
+        char line[4096];
+        if (n >= sizeof line) return die("z23-lint: derived buffer overflow\n", "");
+        memcpy(line, p, n);
+        line[n] = '\0';
+        int rc = hs_feed(&s, line);
+        if (rc) return rc;
+        if (!nl) break;
+        p = nl + 1;
+    }
+    return 0;
+}
+static int hs_scan_path(const char *path, const regex_t *re, char *buf, size_t cap,
+                        size_t *used)
+{
+    FILE *f = fopen(path, "r");
+    if (!f) return die("z23-lint: cannot open %s\n", path);
+    struct hs_st s = {
+        .re = re, .path = path, .buf = buf, .cap = cap, .used = used,
+        .depth = 0, .dev_active = 0, .lineno = 0
+    };
+    *used = 0;
+    buf[0] = '\0';
+    char *line = NULL;
+    size_t lcap = 0;
+    ssize_t n;
+    int rc = 0;
+    while ((n = getline(&line, &lcap, f)) >= 0) {
+        if (n > 0 && line[n - 1] == '\n') line[n - 1] = '\0';
+        rc = hs_feed(&s, line);
+        if (rc) break;
+    }
+    return fin(f, line, path, rc);
+}
+struct hs_out_acc { const regex_t *re; char *buf; size_t cap, used; };
+static int scan_hs_out(const char *path, void *ctx)
+{
+    struct hs_out_acc *a = ctx;
+    if (!strncmp(path, "engine/modules/hotswap/", 23)) return 0;
+    FILE *f = fopen(path, "r");
+    if (!f) return die("z23-lint: cannot open %s\n", path);
+    char *line = NULL;
+    size_t cap = 0;
+    ssize_t n;
+    int lineno = 0, rc = 0;
+    while ((n = getline(&line, &cap, f)) >= 0) {
+        lineno++;
+        if (regexec(a->re, line, 0, NULL, 0) != 0) continue;
+        if (n > 0 && line[n - 1] == '\n') line[n - 1] = '\0';
+        int k = snprintf(a->buf + a->used, a->cap - a->used, "%s:%d:%s\n",
+                         path, lineno, line);
+        if (ovf(k, a->cap - a->used)) { rc = 2; break; }
+        a->used += (size_t)k;
+    }
+    return fin(f, line, path, rc);
+}
+static int hs_each_src(const char *dir, const regex_t *re, int *saw)
+{
+    struct dirent **names = NULL;
+    int n = scandir(dir, &names, NULL, alphasort);
+    if (n < 0) return errno == ENOENT ? 0 : die("z23-lint: cannot scan %s\n", dir);
+    int rc = 0;
+    char bad[CLK_MATCH];
+    for (int i = 0; i < n; i++) {
+        const char *name = names[i]->d_name;
+        if (rc == 0 && strcmp(name, ".") && strcmp(name, "..")) {
+            char path[4096];
+            struct stat st;
+            size_t nl = strlen(name);
+            int k = snprintf(path, sizeof path, "%s/%s", dir, name);
+            if (k < 0 || (size_t)k >= sizeof path)
+                rc = die("z23-lint: path too long: %s\n", dir);
+            else if (lstat(path, &st) != 0)
+                rc = die("z23-lint: cannot stat %s\n", path);
+            else if (S_ISREG(st.st_mode) && nl >= 2 && name[nl - 2] == '.'
+                     && name[nl - 1] == 'c') {
+                size_t used = 0;
+                rc = hs_scan_path(path, re, bad, sizeof bad, &used);
+                if (rc == 0 && used) {
+                    if (fputs(bad, stdout) < 0
+                        || printf("FAIL: dl* call outside a #ifdef ZCL_DEV_BUILD region in %s\n",
+                                  path) < 0)
+                        rc = die("z23-lint: write failed\n", "");
+                    else rc = 1;
+                }
+                if (saw) (*saw)++;
+            }
+        }
+        free(names[i]);
+    }
+    free(names);
+    return rc;
+}
+
+static int check_hotswap_dev_only_run(int argc, char **argv)
+{
+    (void)argc; (void)argv;
+    regex_t re;
+    int cr = hs_dl_comp(&re);
+    if (cr) return cr;
+    char hits[CLK_MATCH] = {0};
+    struct hs_out_acc a = { .re = &re, .buf = hits, .cap = sizeof hits };
+    static const char *const roots[] = {
+        "app", "tools", "lib", "config", "src", "domain", "application", "adapters"
+    };
+    int rc = 0;
+    for (size_t i = 0; rc == 0 && i < sizeof roots / sizeof roots[0]; i++)
+        rc = walk_src(roots[i], 0, scan_hs_out, &a);
+    if (rc == 0 && a.used) {
+        if (fputs(hits, stdout) < 0
+            || puts("FAIL: dlopen/dlsym/dlclose outside engine/modules/hotswap/ (release must be static)") < 0)
+            rc = die("z23-lint: write failed\n", "");
+        else rc = 1;
+    }
+    if (rc == 0) rc = hs_each_src("engine/modules/hotswap/src", &re, NULL);
+    regfree(&re);
+    if (rc) return rc;
+    return puts("  OK: hot-swap dynamic loading is dev-only") < 0
+               ? die("z23-lint: write failed\n", "") : 0;
+}
+
+static int check_hotswap_dev_only_selftest(void)
+{
+    regex_t re;
+    int cr = hs_dl_comp(&re);
+    if (cr) return cr;
+    char nested[160], elseb[160], inner[160], pfx[160], d1[64], d2[64], d3[48];
+    char nbuf[256], ebuf[256], ibuf[256];
+    size_t nused = 0, eused = 0, iused = 0;
+    if (snprintf(nested, sizeof nested,
+                 "#ifdef ZCL_DEV_BUILD\n#if defined(__APPLE__)\ndl%s(\"dev\", 0);\n"
+                 "#endif\n#endif\n", "open") >= (int)sizeof nested
+        || snprintf(elseb, sizeof elseb,
+                    "#ifdef ZCL_DEV_BUILD\ndl%s(\"dev\", 0);\n#else\ndl%s(\"release\", 0);\n"
+                    "#endif\n", "open", "open") >= (int)sizeof elseb
+        || snprintf(inner, sizeof inner,
+                    "#ifdef ZCL_DEV_BUILD\n#if 0\ndl%s(\"inner\", 0);\n#endif\n#endif\n",
+                    "open") >= (int)sizeof inner
+        || snprintf(pfx, sizeof pfx, "%s\n%s\n%s\n",
+                    "static void *vfs_dir_xdlopen(void);",
+                    "static void *vfs_dir_xdlsym(void);",
+                    "static void vfs_dir_xdlclose(void);") >= (int)sizeof pfx
+        || snprintf(d1, sizeof d1, "void *p = dl%s(\"fixture\", 0);", "open") >= (int)sizeof d1
+        || snprintf(d2, sizeof d2, "p = dl%s (h, \"fixture\");", "sym") >= (int)sizeof d2
+        || snprintf(d3, sizeof d3, "(void)dl%s(h);", "close") >= (int)sizeof d3) {
+        regfree(&re);
+        return die("z23-lint: selftest buffer overflow\n", "");
+    }
+    int rc = hs_scan_text(nested, "-", &re, nbuf, sizeof nbuf, &nused);
+    if (rc == 0) rc = hs_scan_text(elseb, "-", &re, ebuf, sizeof ebuf, &eused);
+    if (rc == 0) rc = hs_scan_text(inner, "-", &re, ibuf, sizeof ibuf, &iused);
+    int pfx_hit = 0, direct = 0;
+    const char *pl = pfx;
+    while (rc == 0 && *pl) {
+        const char *nl = strchr(pl, '\n');
+        size_t n = nl ? (size_t)(nl - pl) : strlen(pl);
+        char line[160];
+        if (n >= sizeof line) { rc = 2; break; }
+        memcpy(line, pl, n);
+        line[n] = '\0';
+        if (regexec(&re, line, 0, NULL, 0) == 0) pfx_hit++;
+        pl = nl ? nl + 1 : pl + n;
+        if (!nl) break;
+    }
+    if (rc == 0) {
+        if (regexec(&re, d1, 0, NULL, 0) == 0) direct++;
+        if (regexec(&re, d2, 0, NULL, 0) == 0) direct++;
+        if (regexec(&re, d3, 0, NULL, 0) == 0) direct++;
+    }
+    int bad = rc != 0 || nused != 0 || eused == 0 || iused != 0 || pfx_hit != 0
+            || direct != 3;
+    if (bad)
+        fputs("FAIL: hot-swap dev-region scanner selftest\n", stderr);
+    regfree(&re);
+    return st_ok(bad, "check_hotswap_dev_only selftest: OK\n");
+}
+
 struct lint_gate {
     const char *name;
     int (*run)(int argc, char **argv);
@@ -2398,6 +2815,8 @@ static const struct lint_gate k_gates[] = {
       check_no_stray_root_files_selftest },
     { "check-proc-self-shim", check_proc_self_shim_run, check_proc_self_shim_selftest },
     { "check-simd-os-support", check_simd_os_support_run, check_simd_os_support_selftest },
+    { "check-c23-only", check_c23_only_run, check_c23_only_selftest },
+    { "check-hotswap-dev-only", check_hotswap_dev_only_run, check_hotswap_dev_only_selftest },
 };
 
 int main(int argc, char **argv)

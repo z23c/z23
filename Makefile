@@ -10820,7 +10820,7 @@ check-vcs-no-sha1:
 #   (2) inside engine/modules/hotswap sources, every such call sits within a
 #       `#ifdef ZCL_DEV_BUILD` region (a pragmatic toggle scan — see below),
 # so a release build links zero dynamic-loading code.
-check-hotswap-dev-only:
+check-hotswap-dev-only: $(LINTC_TOOL)
 	@echo "══ LINT: hot-swap dlopen confined to engine/modules/hotswap under ZCL_DEV_BUILD ══"
 	@./tools/lint/check_hotswap_dev_only.sh
 
@@ -11780,7 +11780,7 @@ check-no-trust-state-ordering:
 # compiled-language path: C23. Historical external vectors may retain source
 # attribution, but no Rust source, manifest, toolchain, archive, linker flag or
 # FFI route may re-enter the executable tree.
-check-c23-only:
+check-c23-only: $(LINTC_TOOL)
 	@echo "══ LINT: C23-only build and runtime ══"
 	@./tools/lint/check_c23_only.sh --selftest
 	@./tools/lint/check_c23_only.sh
