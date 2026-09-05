@@ -1126,7 +1126,13 @@ static const char *dl_stub(void)
  * rather than sitting in proving with nobody draining the queue. */
 static void dl_watcher_kick(const char *wt, char *detail, size_t cap)
 {
-    struct json_value input;
+    /* Named kick_input, not "input": this builds the CHILD request handed to
+     * dev.loop.start.async, not a read of dev.land's own request. A local
+     * literally named "input" makes tools/lint/check_command_input_keys.sh's
+     * text scanner (which keys off that token, not a read/write accessor
+     * list) misattribute this constructor's "root"/"mode" to dev.land's own
+     * input_keys. */
+    struct json_value kick_input;
     struct zcl_command_request req;
     struct zcl_command_reply reply;
     const char *err, *mode;
@@ -1134,13 +1140,13 @@ static void dl_watcher_kick(const char *wt, char *detail, size_t cap)
 
     if (!wt || !wt[0] || zcl_native_dev_loop_proof_queue_ready(wt))
         return;
-    json_init(&input);
-    json_set_object(&input);
+    json_init(&kick_input);
+    json_set_object(&kick_input);
     memset(&req, 0, sizeof(req));
     zcl_command_reply_init(&reply, "zcl.dev_loop_status.v1");
-    if (json_push_kv_str(&input, "root", wt) &&
-        json_push_kv_str(&input, "mode", "verify")) {
-        req.input = &input;
+    if (json_push_kv_str(&kick_input, "root", wt) &&
+        json_push_kv_str(&kick_input, "mode", "verify")) {
+        req.input = &kick_input;
         zcl_native_handle_dev_loop_start_async(&req, &reply);
         if (reply.exit_code == ZCL_COMMAND_EXIT_OK) {
             (void)snprintf(detail, cap, "%s",
@@ -1164,7 +1170,7 @@ static void dl_watcher_kick(const char *wt, char *detail, size_t cap)
                        "resident_proof_watcher_absent: request_alloc");
     }
     zcl_command_reply_free(&reply);
-    json_free(&input);
+    json_free(&kick_input);
 }
 #endif
 
