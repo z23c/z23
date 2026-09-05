@@ -159,4 +159,10 @@ void state_offer_store_note_fetch_progress(uint32_t chunks_done,
                                            uint64_t bytes_done,
                                            uint64_t bytes_total);
 
+/* The one typed status row for this lane (`ops state --subsystem=state_offer`):
+ * offers seen, the chosen offer's height, fetch progress, and — when the node
+ * stopped waiting — the reason, naming the newest height any peer offered. */
+struct json_value;
+bool state_offer_dump_state_json(struct json_value *out, const char *key);
+
 #endif /* ZCL_CONFIG_STATE_OFFER_STORE_H */

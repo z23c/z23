@@ -73,6 +73,61 @@ bootstrap authority. A contained activation ends in the typed
 `snapshot_sync.activation_unified_installer_required` blocker and cannot enter
 `SNAPSYNC_COMPLETE`.
 
+### State offers over the peer link (ZRC-0011 phase 1a)
+
+A node used to have no way to ask a peer it was already connected to whether
+that peer held a recent state. The handshake carried `zfileaddr`, which said
+only "my file service is on port N" — no height, no digest, no producer — and
+boot armed bundle-fetch seeds from a *cached* table of past advertisements, so
+a node's very first start, with an empty datadir and an empty cache, had nobody
+to ask. It fell back to a from-genesis fold and named
+`bootstrap.no_state_source`.
+
+`zfileaddr` now carries an optional **signed state-offer batch** appended after
+its two-byte port. Each offer names the bundle's height, its block hash, its
+whole-file SHA3, the ROM chunk-manifest root the fetch path already serves
+against, the offering peer's own tip, its MMB peaks digest and the producing
+mint, and is signed with the offering node's durable Ed25519 online identity.
+Old and new nodes stay readable to each other: an older peer reads its two
+bytes and ignores the rest; a newer peer reading an older message records a
+port with no offers.
+
+What a consuming node does with them:
+
+- **Freshness is a refusal, not a preference.** An offer more than 576 blocks
+  behind the *offering* peer's own tip is refused on parse, so a stale offer
+  can never teach a consumer a wrong newest height. A node does not mint such
+  an offer either — the same predicate decides both sides.
+- **An offer is a claim, never an authority.** The bytes are fetched through
+  the unchanged ROM path: every chunk is content-verified against the offer's
+  own chunk root *before* it is written, the whole file is SHA3-checked before
+  the atomic rename, and the landed file is installed through the unchanged
+  install path — checkpoint re-derivation and Sapling-root re-derivation,
+  exactly as for a bundle an operator dropped in by hand. Nothing here relaxes
+  any of those checks.
+- **A bad offerer is scored, not banned.** A bundle that fails verification is
+  discarded, its digest refused for the rest of the run, its offerer struck,
+  and the next offer tried. The peer is never address-banned: every inbound
+  Tor-forwarded peer arrives from one shared loopback source, so an address ban
+  for one bad bundle would close the node's whole inbound door.
+- **The wait is bounded and loud.** From the first connected peer the node
+  keeps doing headers while it waits up to two minutes for an acceptable
+  offer. If none arrives it stops waiting and says so, naming the newest height
+  any peer offered, through `bootstrap.stale_offers_only` — never a silent drop
+  back to genesis.
+- **Discovery is capped.** At most four offers per peer per message, sixteen
+  retained across all peers, deduplicated on content digest.
+
+Status: `build/bin/z23 ops state --subsystem=state_offer` reports offers seen
+and retained, peers offering, the newest height offered, the chosen offer's
+height and digest, fetch progress, and the fallback reason once the wait
+closes.
+
+Phase 1a moves the bytes over the existing file-service dial, so an onion-only
+peer's offer is recorded but not fetchable — that transport has no route to it.
+Phase 1b moves the transfer onto the ZRC-0002 peer-link stream, which removes
+that limit and makes the transfer resumable across peers.
+
 ### zclassic-only serving profile
 
 `-profile=zclassic-only` is intended for power nodes whose job is to sync other

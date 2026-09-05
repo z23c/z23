@@ -303,10 +303,18 @@ on what you already have, so read the first line of each before picking:
 - Paths 1 and 3 are faster but each needs an input you must obtain
   separately: path 1 needs the address of a serving peer that you learned
   from somewhere outside the software, and path 3 needs a `zclassicd` datadir
-  already on the machine. Neither is a step you can follow from a clean clone
-  with no prior contacts, and the node does not discover a file-service host
-  on its own — with no `-fileservice`, it names the blocker
-  `bootstrap.no_state_source` in the log and proceeds with path 2.
+  already on the machine.
+- **A node with peers now asks them.** Once connected, a node reads the signed
+  state offers its peers append to the handshake — bundle height, digest,
+  producer — picks the newest one within 576 blocks of that peer's own tip, and
+  fetches and installs it with no flag from you, through the same chunk-by-chunk
+  verification and the same checkpoint-bound install an operator-supplied bundle
+  goes through (see [`SYNC.md`](SYNC.md), "State offers over the peer link").
+  If nobody offers anything acceptable within two minutes of your first peer,
+  the node stops waiting and says so — naming the newest height it did see, in
+  `bootstrap.stale_offers_only` — and proceeds with path 2. A node with **no**
+  peers at all still names `bootstrap.no_state_source` and folds from genesis;
+  there is nobody to ask.
 
 1. **Instant-on from serving Z23 peers** (fastest, but you must already know
    a peer address). Name one

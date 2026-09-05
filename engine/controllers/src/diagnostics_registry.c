@@ -122,6 +122,7 @@
 #include "config/boot_blkidx_ladder.h"
 #include "config/boot_endpoint_records.h"
 #include "config/boot_bundle_fetch.h"
+#include "config/state_offer_store.h"
 #include "config/boot_flight_recorder.h"
 #include "config/boot_zcode_dht.h"
 #include "config/boot_zcode_swarm_receipt.h"

@@ -131,6 +131,16 @@
                  "unified installer.",
                  "core/modules/net/src/rom_fetch.c",
                  "tests/harness/src/test_rom_fetch.c"),
+    DIAG_SERVICE("state_offer", state_offer_dump_state_json,
+                 "State offers over the peer link (ZRC-0011 phase 1a): offers "
+                 "seen and retained, peers offering, the newest height any "
+                 "peer offered, the chosen offer's height and digest, fetch "
+                 "chunks/bytes progress, and — once the bounded wait closes — "
+                 "the reason this node stopped waiting for a state source. "
+                 "Discovery and choice only; every byte stays content-verified "
+                 "and the install stays checkpoint-bound.",
+                 "engine/composition/src/state_offer_store.c",
+                 "tests/harness/src/test_state_offer_store.c"),
     DIAG_ENTRY("tip_agreement", tip_agreement_dump_state_json,
                "REPORTER ONLY — the OFF-HOST tip-hash agreement ledger on "
                "disk (the only parity evidence here that is not 127.0.0.1): "

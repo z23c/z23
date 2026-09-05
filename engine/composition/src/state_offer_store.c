@@ -7,6 +7,8 @@
 
 #include "config/state_offer_store.h"
 
+#include "base/hex.h"
+#include "json/json.h"
 #include "util/log_macros.h"
 
 #include <stdio.h>
@@ -414,4 +416,43 @@ void state_offer_store_status_get(struct state_offer_store_status *out)
             seen_peers[npeers++] = g_offers[i].peer_id;
     }
     out->peers_offering = npeers;
+}
+
+/* ── Introspection ──────────────────────────────────────────────────── */
+
+bool state_offer_dump_state_json(struct json_value *out, const char *key)
+{
+    (void)key;
+    if (!out)
+        return false;
+    json_set_object(out);
+
+    struct state_offer_store_status s;
+    state_offer_store_status_get(&s);
+
+    json_push_kv_bool(out, "wait_armed", s.wait_armed);
+    json_push_kv_int(out, "wait_seconds", STATE_OFFER_WAIT_MS / 1000);
+    json_push_kv_str(out, "decision",
+                     state_offer_decision_string(s.last_decision));
+    json_push_kv_int(out, "offers_seen", (int64_t)s.offers_seen);
+    json_push_kv_int(out, "offers_retained", (int64_t)s.offers_retained);
+    json_push_kv_int(out, "offers_rejected", (int64_t)s.offers_rejected);
+    json_push_kv_int(out, "peers_offering", (int64_t)s.peers_offering);
+    json_push_kv_int(out, "newest_height_seen", (int64_t)s.newest_height_seen);
+    json_push_kv_int(out, "chosen_height", (int64_t)s.chosen_height);
+    if (s.chosen_height > 0) {
+        char digest_hex[65];
+        zcl_hex_encode(s.chosen_digest, 32, digest_hex);
+        digest_hex[64] = '\0';
+        json_push_kv_str(out, "chosen_digest", digest_hex);
+    }
+    json_push_kv_int(out, "fetch_chunks_done", (int64_t)s.fetch_chunks_done);
+    json_push_kv_int(out, "fetch_chunks_total", (int64_t)s.fetch_chunks_total);
+    json_push_kv_int(out, "fetch_bytes_done", (int64_t)s.fetch_bytes_done);
+    json_push_kv_int(out, "fetch_bytes_total", (int64_t)s.fetch_bytes_total);
+    /* Present only when the node actually stopped waiting, so an empty field
+     * never reads as "we gave up for no stated reason". */
+    if (s.fallback_reason[0])
+        json_push_kv_str(out, "fallback_reason", s.fallback_reason);
+    return true;
 }
