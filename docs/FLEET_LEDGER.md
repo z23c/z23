@@ -94,11 +94,20 @@ identity it claims are one fact, checked once, where delegations are held.
 A receiver therefore checks authorship against trust it already holds: no
 new trust root, no second key file, nothing extra to revoke.
 
-An expired delegation is reported as expired (`ledger_delegation_expired`)
-and never as a bad signature. An expiry is ordinary lifecycle and the answer
-is a renewal; a signature failure is tampering and the answer is never to
-accept the row. Collapsing them would make a renewal look like an attack and
-an attack look like a renewal.
+A delegation that is no longer current is reported as such
+(`ledger_delegation_expired`) and never as a bad signature. A lapsed or
+revoked identity is ordinary lifecycle and the answer is a renewal; a
+signature failure is tampering and the answer is never to accept the row.
+Collapsing them would make a renewal look like an attack and an attack look
+like a renewal.
+
+That currency is checked on BOTH halves of replication, before a stream is
+opened and before an inbound one is answered, because a pairing record
+states only its own window and its own revocation. A master identity that
+has been revoked or superseded on chain leaves every local pairing row it
+was ever written into untouched, so a box that trusted the row alone would
+keep exchanging the owner's private rows with an identity the rest of the
+mesh no longer trusts.
 
 The dev proof signer is deliberately not used. It identifies a development
 checkout's build receipts, it is bound to no peer link, and a checkout that
@@ -144,6 +153,11 @@ z23 fleet ledger add --kind=usage --subject=grok --tokens_in=... --note=<task>
 sequence number, and how old the newest row is. A replica answers instantly
 and that is not the same as answering currently, so the age is always shown.
 
+It also prints two counts the chains themselves cannot show:
+`delegation_refused`, the peers this box neither asked nor answered because
+their delegation was no longer current, and `inbox_full`, the arriving
+batches that found no free commit slot. Neither names a peer.
+
 The index keeps a bounded number of days of per-day detail; older days are
 folded into a whole-history remainder, which keeps every total exact while
 the table stays a fixed size. A query for a window longer than the index
@@ -162,7 +176,7 @@ the end of a batch leaves the replica exactly as it was.
 | `ledger_sig_invalid` | the signature does not verify under its own `signer` |
 | `ledger_peer_unpaired` | a row signed by a key this peer's delegation does not delegate |
 | `ledger_not_owner` | a row claiming a machine that is not the peer on this link |
-| `ledger_delegation_expired` | the peer's delegation has run out; renew it |
+| `ledger_delegation_expired` | the peer's master identity is no longer ACTIVE, or its delegation has run out |
 | `ledger_sequence` | sequence numbers are not dense |
 | `vital_unknown` | a `vitals` subject that is not in the catalog |
 | `ledger_kind_not_writable` | a kind this build reserves but does not write |
