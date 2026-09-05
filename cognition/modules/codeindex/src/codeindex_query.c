@@ -333,3 +333,10 @@ int codeindex_symbol_id(struct codeindex *ci, const char *name,
         return -1;
     return codeindex_symbol_record_id(&s, buf, cap);
 }
+
+bool codeindex_row_counts(struct codeindex *ci, struct ci_row_counts *out)
+{
+    if (!ci || !ci->store || !out)
+        LOG_FAIL("codeindex", "bad arg to codeindex_row_counts");
+    return ci_store_row_counts(ci->store, out);
+}

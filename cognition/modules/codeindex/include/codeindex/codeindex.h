@@ -374,6 +374,25 @@ int codeindex_includes_of_file_page(struct codeindex *ci, const char *path,
  * count (>=0), -1 on error. */
 int64_t codeindex_include_edge_count(struct codeindex *ci);
 
+/* Exact row totals for one index generation: what the store HOLDS, which is
+ * not the same as what the checkout contains. A file the scanner admitted but
+ * could not parse contributes a file row and no symbols, so a metrics answer
+ * that reported one number for both would claim coverage it does not have.
+ * The five are read together under one lock and therefore describe one
+ * consistent generation. */
+struct ci_row_counts {
+    int64_t files;
+    int64_t symbols;
+    int64_t includes;
+    int64_t refs;
+    int64_t groups;
+};
+bool codeindex_row_counts(struct codeindex *ci, struct ci_row_counts *out);
+
+/* Total bytes of the published generation on disk (every file under
+ * <root>/.codeindex). Negative when there is no generation to measure. */
+long long codeindex_generation_bytes(const char *root);
+
 /* True iff `path` names a compiled translation unit (a `.c`), the only file
  * class for which codeindex_includes_of_file can return a non-empty forward
  * answer. Pure: no I/O, no index. */

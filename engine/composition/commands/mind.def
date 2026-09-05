@@ -52,10 +52,18 @@ ZCL_COMMAND_READY_READ(
 ZCL_COMMAND_READY_READ(
     "dev.mind.status", "dev.mind", "",
     "Whether a mind is running here, and what each checkout's index holds",
-    "The local heartbeat — process, age, last rebuild — and one row per "
-    "registered checkout naming its index root, that generation's age, "
-    "whether the source tree has moved past it, whether a live owner claim "
-    "exists for it, and the groups the mind actually saw. `heartbeat_expired` "
+    "The local heartbeat — process, age, last rebuild wall clock and "
+    "duration — and one row per registered checkout naming its index root, "
+    "that generation's age and size in bytes, whether the source tree has "
+    "moved past it, whether a live owner claim exists for it, the store's own "
+    "cold-build receipt, and the exact rows the generation holds: files, "
+    "symbols, includes, refs and groups. Those are separate facts and are "
+    "never collapsed — a file the scanner admitted but could not parse "
+    "contributes a file row and no symbols, so one number for both would "
+    "report coverage the index does not have. With no resident running, the "
+    "same numbers are read straight from this checkout's published "
+    "generation and labelled read_directly, because a box with no mind still "
+    "has an index. Nothing here rebuilds. `heartbeat_expired` "
     "and `no_heartbeat` are distinct states and neither is reported as "
     "running. With --fleet it also reads the mind row each paired node "
     "delivered inside a signed, expiring mesh-status receipt this node "

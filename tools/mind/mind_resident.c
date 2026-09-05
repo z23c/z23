@@ -74,10 +74,27 @@ static void mind_observe(struct zcl_mind_checkout *c, long long now)
     c->indexed = ci != NULL;
     c->stale = ci ? stale : true;
     c->index_age_s = codeindex_generation_age_s(c->root, now);
+    c->index_bytes = codeindex_generation_bytes(c->root);
     c->index_root[0] = '\0';
     c->group_count = 0;
+    c->files = c->symbols = c->includes = c->refs = 0;
+    c->build_cold_ms = c->build_cold_files = 0;
     if (!ci)
         return;
+    /* The metrics nobody else measures. They come from the store the mind
+     * just published, under one lock, so the numbers describe one generation
+     * rather than several taken as the tree moved. */
+    struct ci_row_counts counts;
+    if (codeindex_row_counts(ci, &counts)) {
+        c->files = counts.files;
+        c->symbols = counts.symbols;
+        c->includes = counts.includes;
+        c->refs = counts.refs;
+    }
+    /* Absent on a store built before the receipt existed. Absence stays zero
+     * and is reported as zero; it is never filled in from this run's timing,
+     * which measured a different build. */
+    (void)codeindex_build_cold_ms(ci, &c->build_cold_ms, &c->build_cold_files);
     uint8_t root_sha3[32];
     static const char hex[] = "0123456789abcdef";
     if (codeindex_source_root_sha3(ci, root_sha3)) {

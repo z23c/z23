@@ -11,6 +11,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <dirent.h>
 #include <sys/stat.h>
 
 /* One line, fixed shape, written whole by the resident on every heartbeat:
@@ -156,4 +157,27 @@ bool codeindex_last_stale_refusal(struct codeindex_stale_refusal *out)
     if (!out) return false;
     *out = g_last_refusal;
     return g_last_refusal.recorded;
+}
+
+long long codeindex_generation_bytes(const char *root)
+{
+    char dir[CI_PATH_MAX];
+    if (!root || !root[0]) return -1;
+    int n = snprintf(dir, sizeof(dir), "%s/.codeindex", root);
+    if (n <= 0 || (size_t)n >= sizeof(dir)) return -1;
+    DIR *d = opendir(dir);
+    if (!d) return -1;
+    long long total = 0;
+    struct dirent *e;
+    while ((e = readdir(d)) != NULL) {
+        if (e->d_name[0] == '.') continue;
+        char path[CI_PATH_MAX];
+        int pn = snprintf(path, sizeof(path), "%s/%s", dir, e->d_name);
+        struct stat st;
+        if (pn > 0 && (size_t)pn < sizeof(path) && stat(path, &st) == 0 &&
+            S_ISREG(st.st_mode))
+            total += (long long)st.st_size;
+    }
+    (void)closedir(d);
+    return total;
 }

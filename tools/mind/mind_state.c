@@ -197,6 +197,13 @@ static bool heartbeat_json(const struct zcl_mind_heartbeat *beat,
              json_push_kv_int(&row, "rebuilds", c->rebuilds) &&
              json_push_kv_bool(&row, "indexed", c->indexed) &&
              json_push_kv_bool(&row, "stale", c->stale) &&
+             json_push_kv_int(&row, "files", c->files) &&
+             json_push_kv_int(&row, "symbols", c->symbols) &&
+             json_push_kv_int(&row, "includes", c->includes) &&
+             json_push_kv_int(&row, "refs", c->refs) &&
+             json_push_kv_int(&row, "index_bytes", c->index_bytes) &&
+             json_push_kv_int(&row, "build_cold_ms", c->build_cold_ms) &&
+             json_push_kv_int(&row, "build_cold_files", c->build_cold_files) &&
              json_push_back(&rows, &row);
         json_free(&row);
     }
@@ -284,6 +291,13 @@ bool zcl_mind_heartbeat_read(struct zcl_mind_heartbeat *out)
         c->rebuilds = doc_int(row, "rebuilds");
         c->indexed = doc_bool(row, "indexed");
         c->stale = doc_bool(row, "stale");
+        c->files = doc_int(row, "files");
+        c->symbols = doc_int(row, "symbols");
+        c->includes = doc_int(row, "includes");
+        c->refs = doc_int(row, "refs");
+        c->index_bytes = doc_int(row, "index_bytes");
+        c->build_cold_ms = doc_int(row, "build_cold_ms");
+        c->build_cold_files = doc_int(row, "build_cold_files");
         const struct json_value *groups = json_get(row, "groups");
         size_t gn = groups && groups->type == JSON_ARR ? json_size(groups) : 0;
         for (size_t g = 0; g < gn && c->group_count < ZCL_MIND_GROUPS_MAX; g++) {

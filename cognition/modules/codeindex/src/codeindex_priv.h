@@ -202,6 +202,8 @@ int  ci_store_dependents_of_file(struct ci_store *s, const char *dep_path,
 /* Total include edges in the store. ZERO means the depfile graph was ABSENT
  * when the index was built — an availability fact, not an empty answer. */
 int64_t ci_store_include_edge_count(struct ci_store *s);
+struct ci_row_counts;
+bool ci_store_row_counts(struct ci_store *s, struct ci_row_counts *out);
 
 /* Canonical per-symbol row hash used for verify-on-read. Deterministic over
  * all card fields. */

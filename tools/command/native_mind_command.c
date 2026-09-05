@@ -345,6 +345,50 @@ void zcl_native_handle_dev_mind_ask(const struct zcl_command_request *request,
 
 /* ── status ───────────────────────────────────────────────────────────── */
 
+/* The same numbers, read straight from the checkout's published generation
+ * when no resident has published a heartbeat for it. A box with no mind still
+ * has an index, and a metrics answer that reported nothing there would be
+ * describing the resident rather than the index. Read-only: this never
+ * rebuilds, and a stale generation is reported as stale, not refreshed. */
+static void mind_status_direct(struct zcl_command_reply *reply,
+                               const char *root, long long now)
+{
+    bool stale = true;
+    struct codeindex *ci = codeindex_open_readonly(root, &stale);
+    struct json_value row;
+    json_init(&row);
+    json_set_object(&row);
+    (void)json_push_kv_str(&row, "root", root);
+    (void)json_push_kv_bool(&row, "indexed", ci != NULL);
+    (void)json_push_kv_bool(&row, "stale", ci ? stale : true);
+    (void)json_push_kv_int(&row, "index_age_s",
+                           codeindex_generation_age_s(root, now));
+    (void)json_push_kv_int(&row, "index_bytes",
+                           codeindex_generation_bytes(root));
+    if (ci) {
+        char index_root[65];
+        mind_index_root(ci, index_root);
+        (void)json_push_kv_str(&row, "index_root", index_root);
+        struct ci_row_counts counts;
+        if (codeindex_row_counts(ci, &counts)) {
+            (void)json_push_kv_int(&row, "files", counts.files);
+            (void)json_push_kv_int(&row, "symbols", counts.symbols);
+            (void)json_push_kv_int(&row, "includes", counts.includes);
+            (void)json_push_kv_int(&row, "refs", counts.refs);
+            (void)json_push_kv_int(&row, "group_count", counts.groups);
+        }
+        long long cold_ms = 0, cold_files = 0;
+        (void)codeindex_build_cold_ms(ci, &cold_ms, &cold_files);
+        (void)json_push_kv_int(&row, "build_cold_ms", cold_ms);
+        (void)json_push_kv_int(&row, "build_cold_files", cold_files);
+        codeindex_close(ci);
+    }
+    (void)json_push_kv_bool(&row, "owned", codeindex_owner_is_live(root, now));
+    (void)json_push_kv(&reply->data, "checkout", &row);
+    json_free(&row);
+    (void)json_push_kv_str(&reply->data, "checkout_source", "read_directly");
+}
+
 static void mind_status_local(struct zcl_command_reply *reply, long long now,
                               bool *running_out)
 {
@@ -377,9 +421,24 @@ static void mind_status_local(struct zcl_command_reply *reply, long long now,
         (void)json_push_kv_str(&row, "index_root", c->index_root);
         (void)json_push_kv_int(&row, "index_age_s", c->index_age_s);
         (void)json_push_kv_int(&row, "last_rebuild_ms", c->last_rebuild_ms);
+        (void)json_push_kv_int(&row, "last_rebuild_unix", c->last_rebuild_unix);
         (void)json_push_kv_int(&row, "rebuilds", c->rebuilds);
         (void)json_push_kv_bool(&row, "indexed", c->indexed);
         (void)json_push_kv_bool(&row, "stale", c->stale);
+        /* What the generation holds. files and symbols are separate facts:
+         * a file the scanner admitted but could not parse contributes a file
+         * row and no symbols, and one number for both would report coverage
+         * the index does not have. build_cold_* is the store's own receipt
+         * for the last FULL build; an incremental refresh never rewrites it,
+         * so it always describes a cold build and never this one. */
+        (void)json_push_kv_int(&row, "files", c->files);
+        (void)json_push_kv_int(&row, "symbols", c->symbols);
+        (void)json_push_kv_int(&row, "includes", c->includes);
+        (void)json_push_kv_int(&row, "refs", c->refs);
+        (void)json_push_kv_int(&row, "group_count", (int64_t)c->group_count);
+        (void)json_push_kv_int(&row, "index_bytes", c->index_bytes);
+        (void)json_push_kv_int(&row, "build_cold_ms", c->build_cold_ms);
+        (void)json_push_kv_int(&row, "build_cold_files", c->build_cold_files);
         (void)json_push_kv_bool(&row, "owned",
                                 codeindex_owner_is_live(c->root, now));
         json_init(&groups);
@@ -486,6 +545,8 @@ void zcl_native_handle_dev_mind_status(
     bool running = false;
     (void)json_push_kv_str(&reply->data, "schema", "zcl.mind_status.v1");
     mind_status_local(reply, now, &running);
+    if (!running)
+        mind_status_direct(reply, mind_source_root(request), now);
     if (mind_flag(request, "fleet") && !mind_status_fleet(reply))
         return;
     char summary[320];

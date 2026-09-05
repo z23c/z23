@@ -61,6 +61,19 @@ struct zcl_mind_checkout {
     long long rebuilds;
     bool      indexed;
     bool      stale;
+    /* What the generation HOLDS, read from the store itself when the mind
+     * published it. Files and symbols are different facts: a file the
+     * scanner admitted but could not parse contributes a file row and no
+     * symbols, so one number for both would claim coverage the index does
+     * not have. build_cold_* is the store's own receipt for the last FULL
+     * build, which an incremental refresh never rewrites. */
+    long long files;
+    long long symbols;
+    long long includes;
+    long long refs;
+    long long index_bytes;
+    long long build_cold_ms;
+    long long build_cold_files;
     /* What the mind actually SAW, recorded when it published the generation.
      * Recomputing these on a peer's request would put a database open on the
      * mesh status responder's latency path; a heartbeat read is a file. */

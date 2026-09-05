@@ -547,3 +547,46 @@ int64_t ci_store_include_edge_count(struct ci_store *s)
         LOG_ERR("codeindex", "read include_edge_count");
     return count;
 }
+
+/* Exact row totals for the derived tables a caller can be shown: what the
+ * index actually HOLDS, as opposed to what the checkout contains. The two
+ * differ (a file the scanner admitted but could not parse contributes a file
+ * row and no symbols), and a metrics answer that conflated them would report
+ * coverage it does not have. One prepared count per table under the same
+ * lock, so the five numbers describe one consistent generation. */
+bool ci_store_row_counts(struct ci_store *s, struct ci_row_counts *out)
+{
+    if (!out) LOG_FAIL("codeindex", "null out to row_counts");
+    memset(out, 0, sizeof(*out));
+    if (!s) LOG_FAIL("codeindex", "null store to row_counts");
+    static const char *const sql[] = {
+        "SELECT COUNT(*) FROM files",
+        "SELECT COUNT(*) FROM symbols",
+        "SELECT COUNT(*) FROM includes",
+        "SELECT COUNT(*) FROM refs",
+        "SELECT COUNT(*) FROM \"groups\"",
+    };
+    int64_t *slot[] = {&out->files, &out->symbols, &out->includes,
+                       &out->refs, &out->groups};
+    pthread_mutex_lock(&s->lock);
+    for (size_t i = 0; i < sizeof(sql) / sizeof(*sql); i++) {
+        sqlite3_stmt *stmt = NULL;
+        if (sqlite3_prepare_v2(s->db, sql[i], -1, &stmt, NULL) != SQLITE_OK) {
+            pthread_mutex_unlock(&s->lock);
+            memset(out, 0, sizeof(*out));
+            LOG_FAIL("codeindex", "prepare row count %zu", i);
+        }
+        int64_t count = -1;
+        if (sqlite3_step(stmt) == SQLITE_ROW)  // raw-sql-ok:codeindex-derived
+            count = sqlite3_column_int64(stmt, 0);
+        sqlite3_finalize(stmt);
+        if (count < 0) {
+            pthread_mutex_unlock(&s->lock);
+            memset(out, 0, sizeof(*out));
+            LOG_FAIL("codeindex", "read row count %zu", i);
+        }
+        *slot[i] = count;
+    }
+    pthread_mutex_unlock(&s->lock);
+    return true;
+}
