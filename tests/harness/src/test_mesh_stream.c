@@ -26,7 +26,6 @@
 #include "net/net.h"
 #include "net/noise_transport.h"
 #include "net/protocol.h"
-#include "platform/time_compat.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -35,6 +34,10 @@
 #define STREAM_TEST_GUARD "guarded"
 #define STREAM_TEST_WIRE_MAX 16384u
 #define STREAM_TEST_WINDOW 4096u
+/* A pairing window that brackets any clock this test could read: the
+ * lane under test grades the row, not the hour the box thinks it is. */
+#define STREAM_TEST_PAIRED_AT INT64_C(1)
+#define STREAM_TEST_PAIRING_EXPIRES INT64_C(4102444800)
 
 /* ── A test service: the whole contract a service implements ─────────── */
 
@@ -615,12 +618,14 @@ int test_mesh_stream(void)
         ASSERT_EQ(mesh_stream_test_live_count(STREAM_TEST_GUARD), (size_t)0);
 
         /* The same open, once the peer holds the capability the service
-         * asked for, is admitted. */
-        uint64_t now = (uint64_t)platform_time_wall_time_t();
+         * asked for, is admitted. The row's window is a fixed one that no
+         * clock this test could read falls outside, so the assertion
+         * grades the stream lane's decision and never the box. */
         ASSERT(mesh_term_pair_row(&f, &f.term_peer,
                                   MESH_PAIRING_CAP_STATUS_READ |
                                       MESH_PAIRING_CAP_TERMINAL_EXEC,
-                                  (int64_t)now - 60, (int64_t)now + 3600));
+                                  STREAM_TEST_PAIRED_AT,
+                                  STREAM_TEST_PAIRING_EXPIRES));
         frame_len = mesh_stream_test_open_frame(4, STREAM_TEST_WINDOW,
                                                 STREAM_TEST_GUARD, NULL, 0,
                                                 frame, sizeof(frame));
