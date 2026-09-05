@@ -2235,7 +2235,7 @@ static bool warm_stamp_after(const struct timespec *seed_stamp,
 {
     if (!seed_stamp || !source_stamp) return false;
     for (int spins = 0; spins < 1000000; spins++) {
-        if (clock_gettime(CLOCK_REALTIME, source_stamp) != 0)
+        if (platform_time_realtime_timespec(source_stamp) != 0)
             return false;
         if (warm_timespec_after(source_stamp, seed_stamp)) return true;
     }
@@ -2249,7 +2249,7 @@ static bool warm_retime_outputs(const char *gen_build,
                                 struct warm_seed_accum *accum,
                                 struct timespec *seed_stamp)
 {
-    if (clock_gettime(CLOCK_REALTIME, seed_stamp) != 0) return false;
+    if (platform_time_realtime_timespec(seed_stamp) != 0) return false;
     for (size_t i = 0; i < accum->count; i++) {
         char path[PATH_MAX];
         if (snprintf(path, sizeof(path), "%s/%s", gen_build,
