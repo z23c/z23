@@ -488,6 +488,71 @@ the loopback behind it), `tunnel_local_bind_failed`, `tunnel_cap`,
 all of them: an open over a link that is not an established Noise session,
 or from a peer with no pairing row, never reaches the tunnel service at all.
 
+### Fleet roster and the game service
+
+An operator's machines are worth something to that operator, and the mesh
+is where the fleet becomes visible as a fleet rather than as a list of
+addresses. Two surfaces make it usable, and both rest on a rule the mesh
+already keeps: never confuse what a peer established with what a machine
+claimed.
+
+`z23 fleet roster` answers, from the durable pairing and observation
+projections under a datadir opened read-only, which machines this operator
+paired and what each has proved. Every row carries the chain identity
+fingerprint, a short Noise fingerprint, the pairing state, and two
+separate fact arrays that never share a field: `verified` holds only facts
+a peer established, each with the time that observation was made, and
+`self_reported` holds the facts a machine states about itself. A fact this
+node has no observer for comes back unobserved with the reason — an
+unobserved fact is not a false one, and the roster says which it is
+rather than flattening both to a silent false. The leaf dials nothing,
+probes nothing, writes nothing, and asks no running node anything, so an
+operator can point it at a copied datadir and the copy's hash still
+describes it afterwards. It refuses an operator with no pairing at all
+instead of rendering an empty fleet, and refuses two rows carrying one
+chain identity instead of counting one machine as two. It is never
+reachable remotely: naming every machine an operator runs is the map an
+attacker would want before choosing a target.
+
+What a verified fact is worth in a game is written in
+`engine/composition/fleet_airship_rules.def` and nowhere else. Each fact
+declares whether a peer observed it or the machine reported it, each rule
+says how many in-game assets that fact earns and carries the sentence
+saying why, and `check-fleet-airship-rules` refuses any edit that would
+pay for a self-reported claim, name a fact or asset no row declares,
+dress a zero row up as an observation, or leave the table paying nothing
+at all. Today the mesh peer-verifies exactly one thing — whether a dial to
+a machine connects — so a reachable machine earns an airship, a machine
+answering on two independent paths earns an escort, and the core count,
+the free disk and the build identity each earn zero, written down as rows
+so the decision is visible rather than looking like an oversight. When a
+challenge-response makes one of them peer-verifiable, that row's
+verification changes and its count can rise in the same edit.
+
+The `game` service is how two fleets meet. It registers on the stream
+layer beside the terminal, so a match rides the Noise session and the
+pairing that already exist: no new listener, no new port, no second
+identity. Five frames and nothing else — `HELLO` (who is talking and which
+roster they will send, carried in the stream open itself), `ROSTER` (the
+sending fleet's machines and what each earned, verified fields only),
+`MATCH_OPEN` (the shared seed and the airship count the match will fly),
+`MATCH_STATE` (one tick and one opaque pose per airship), and
+`MATCH_CLOSE` (the named end). There is no game inside the service: no
+physics, no simulation, no scoring, no roster generation, which is what
+lets the game change without the wire changing.
+
+Each refusal ends the stream with its own token in the close payload, the
+same token the log prints: `game_unknown_kind`, `game_malformed`,
+`game_sequence` (a frame arriving where the session is not),
+`game_hello_identity_mismatch` and `game_roster_identity_mismatch` (a
+fleet may only ever claim its own machines), `game_roster_overflow`,
+`game_asset_vocabulary` (a roster counting assets this build does not
+declare), and `game_state_overflow` (a state frame carrying more airships
+than the match declared). The peer's identity comes from the local pairing
+row that authorized the stream — the same row the terminal lane reads —
+and the wire is only ever compared against it. An idle match is reaped by
+the stream layer's own timeout; the service adds no clock.
+
 ## Hot-swap taxonomy
 
 "Hot swap" is not one guarantee. The operator and receipt must name the exact

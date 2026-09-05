@@ -71,10 +71,13 @@ rows_of() { printf '%s\n' "$1" | awk -F'\t' -v t="$2" '$1 == t'; }
 
 scan() {
     local rows="$1" facts assets rules names name verification
+    local fact_names asset_names
     facts="$(rows_of "$rows" FACT)"
     assets="$(rows_of "$rows" ASSET)"
     rules="$(rows_of "$rows" RULE)"
     names="$(printf '%s\n%s\n' "$facts" "$assets" | awk -F'\t' 'NF{print $2}')"
+    fact_names="$(printf '%s\n' "$facts" | awk -F'\t' 'NF{print $2}')"
+    asset_names="$(printf '%s\n' "$assets" | awk -F'\t' 'NF{print $2}')"
 
     grep -q '^MALFORMED' <<<"$rows" && echo "  a row does not carry the right number of strings"
     while IFS= read -r name; do
@@ -98,7 +101,7 @@ scan() {
         [ -n "$fact" ] || continue
         verification="$(rows_of "$rows" FACT | awk -F'\t' -v f="$fact" '$2 == f { print $3 }')"
         [ -n "$verification" ] || echo "  rule on '$fact' names a fact no row declares"
-        printf '%s\n' "$assets" | awk -F'\t' 'NF{print $2}' | grep -qxF "$asset" || \
+        grep -qxF "$asset" <<<"$asset_names" || \
             echo "  rule '$fact' awards '$asset', which no row declares"
         if ! grep -qE '^(0|[1-9][0-9]*)$' <<<"$per" || [ "$per" -gt "$PER_NODE_MAX" ]; then
             echo "  rule '$fact' -> '$asset' pays '$per', which is not a decimal count at or under $PER_NODE_MAX"
@@ -128,12 +131,14 @@ scan() {
           done
     used_facts="$(printf '%s\n' "$rules" | awk -F'\t' 'NF{print $2}' | LC_ALL=C sort -u)"
     used_assets="$(printf '%s\n' "$rules" | awk -F'\t' 'NF{print $3}' | LC_ALL=C sort -u)"
-    printf '%s\n' "$facts" | awk -F'\t' 'NF{print $2}' | while IFS= read -r name; do
-        grep -qxF "$name" <<<"$used_facts" || echo "  fact '$name' is declared but no rule reads it"
-    done
-    printf '%s\n' "$assets" | awk -F'\t' 'NF{print $2}' | while IFS= read -r name; do
-        grep -qxF "$name" <<<"$used_assets" || echo "  asset '$name' is declared but no rule awards it"
-    done
+    while IFS= read -r name; do
+        [ -n "$name" ] && ! grep -qxF "$name" <<<"$used_facts" && \
+            echo "  fact '$name' is declared but no rule reads it"
+    done <<<"$fact_names"
+    while IFS= read -r name; do
+        [ -n "$name" ] && ! grep -qxF "$name" <<<"$used_assets" && \
+            echo "  asset '$name' is declared but no rule awards it"
+    done <<<"$asset_names"
     [ "$paying" -gt 0 ] || echo "  no rule pays anything, so the table rewards nothing at all"
 }
 
