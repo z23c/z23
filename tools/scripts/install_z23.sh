@@ -28,6 +28,12 @@
 #   Z23_RELEASE_SOURCE=<url> Z23_RELEASE_MANIFEST_SHA256=<sha256> install_z23.sh
 #   Z23_RELEASE_SOURCE=<local-dir> install_z23.sh
 #   install_z23.sh --selftest
+#   install_z23.sh --generation-status=<generation-dir>
+#                        macOS only: print an installed generation's
+#                        directory name, the sha256 SHA256SUMS records for
+#                        its z23, the sha256 of the z23 bytes on disk, and a
+#                        `provenance: consistent|mismatch` verdict — reading
+#                        the installed tree alone, no fetch or rebuild.
 #
 # Env:
 #   Z23_RELEASE_MANIFEST_SHA256
@@ -446,11 +452,41 @@ atomic_relative_link() {
 
 macos_generation_matches() {
     local stage="$1" generation="$2" name
-    for name in z23 zclassic23-package-verify zclassic23-acme AGENT_CARD.md; do
+    for name in z23 zclassic23-package-verify zclassic23-acme AGENT_CARD.md \
+        SHA256SUMS; do
         cmp -s "$stage/$name" "$generation/$name" || return 1
     done
     [ -L "$generation/zclassic23" ] \
         && [ "$(readlink "$generation/zclassic23")" = z23 ]
+}
+
+# ── Post-install provenance ─────────────────────────────────────────────────
+# The one question a fleet auditor, another agent, or a future upgrade asks
+# about an installed generation directory: "does this directory's NAME equal
+# the sha256 SHA256SUMS records for z23, and does that in turn equal the
+# sha256 of the z23 bytes actually sitting there?" This answers it from the
+# installed tree alone -- no network fetch, no rebuild -- because the
+# generation keeps its own verified SHA256SUMS copy (see
+# install_payload_macos_generation). Prints both quantities and one literal
+# verdict line so a caller can grep for it without parsing prose.
+generation_provenance() {
+    local generation="$1" name recorded actual
+    name="$(basename -- "$generation")"
+    [ -f "$generation/SHA256SUMS" ] \
+        || die "generation has no retained SHA256SUMS: $generation"
+    [ -f "$generation/z23" ] \
+        || die "generation has no z23 binary: $generation"
+    recorded="$(manifest_digest_of "$generation" z23)"
+    actual="$(sha256_file "$generation/z23")"
+    printf 'generation: %s\n' "$name"
+    printf 'sha256sums_z23: %s\n' "$recorded"
+    printf 'installed_z23_sha256: %s\n' "$actual"
+    if [ "$name" = "$recorded" ] && [ "$recorded" = "$actual" ]; then
+        printf 'provenance: consistent\n'
+        return 0
+    fi
+    printf 'provenance: mismatch\n'
+    return 1
 }
 
 MACOS_GENERATION=""
@@ -467,7 +503,15 @@ install_payload_macos_generation() {
     root="$prefix/lib/z23"
     generations="$root/generations"
     MACOS_GENERATIONS="$generations"
-    MACOS_GENERATION_ID="$(sha256_file "$stage/SHA256SUMS")"
+    # The generation is named by the sha256 SHA256SUMS records for z23 --
+    # the same quantity `manifest_digest_of` already extracts to compare the
+    # z23/zclassic23 rows in validate_manifest_contract -- and NOT by hashing
+    # the SHA256SUMS file itself. Those are different numbers: one is "the
+    # digest of the installed binary", the other is "the digest of a file
+    # that lists digests". verify_strict() (sha256sum -c --strict) has
+    # already proven this generation's z23 bytes hash to exactly this
+    # recorded digest, so the directory name IS the binary's proven identity.
+    MACOS_GENERATION_ID="$(manifest_digest_of "$stage" z23)"
     MACOS_GENERATION="$generations/$MACOS_GENERATION_ID"
     mkdir -p "$generations" "$prefix/bin" "$prefix/share/z23"
 
@@ -483,6 +527,11 @@ install_payload_macos_generation() {
             install -m 555 "$stage/$name" "$MACOS_INCOMING/$name"
         done
         install -m 444 "$stage/AGENT_CARD.md" "$MACOS_INCOMING/AGENT_CARD.md"
+        # Retained beside the binary it names the generation after, so a
+        # later provenance check (generation_provenance) or fleet audit reads
+        # the installed tree alone -- no re-fetch, no rebuild -- to answer
+        # whether the directory name still equals what SHA256SUMS records.
+        install -m 444 "$stage/SHA256SUMS" "$MACOS_INCOMING/SHA256SUMS"
         ln -s z23 "$MACOS_INCOMING/zclassic23" \
             || die "could not create the macOS generation node alias"
         # APFS refuses to rename the generation after its owner-write bit is
@@ -764,6 +813,12 @@ install_from_source() {
     install_platform="${Z23_INSTALL_TEST_PLATFORM:-$(uname -s)}"
     if [ "$install_platform" = Darwin ]; then
         install_payload_macos_generation "$INSTALL_STAGE" "$prefix"
+        # Self-check, not re-verification: the ID above was already derived
+        # from, and verify_strict already proved against, this exact
+        # SHA256SUMS. A mismatch here means the naming/persistence logic
+        # itself is broken, not that anything is being re-trusted.
+        generation_provenance "$MACOS_GENERATION" >&2 \
+            || die "macOS generation provenance check failed for $MACOS_GENERATION"
     else
         install_payload "$INSTALL_STAGE" "$prefix"
     fi
@@ -1463,6 +1518,7 @@ selftest_macos_transaction() {
     local prefix="$mac/prefix & native" launchd="$mac/LaunchAgents"
     local datadir="$mac/data & chain" mock="$mac/mockbin" rc out
     local v1_id v2_id current_target last_good_target
+    local v1_manifest_file_sha
     mkdir -p "$mac/v1" "$mac/v2" "$mock" "$launchd" "$datadir"
 
     # This host normally has Homebrew sha256sum, which would otherwise hide
@@ -1490,14 +1546,25 @@ EOF
             "$mac/$version/zclassic23-acme"
         (cd "$mac/$version" && sha256sum $RELEASE_MEMBERS >SHA256SUMS)
     done
-    v1_id="$(sha256_file "$mac/v1/SHA256SUMS")"
-    v2_id="$(sha256_file "$mac/v2/SHA256SUMS")"
+    # The generation ID is the sha256 SHA256SUMS records for z23 -- the same
+    # quantity manifest_digest_of extracts in validate_manifest_contract --
+    # NOT the sha256 of the SHA256SUMS file itself. v1_manifest_file_sha
+    # holds that other, deliberately-different quantity purely to prove
+    # sha256_file's shasum fallback below; the two are asserted distinct
+    # immediately after, so a regression back to hashing the manifest file
+    # (which would silently rename every generation) fails loudly here
+    # rather than passing by accident.
+    v1_id="$(manifest_digest_of "$mac/v1" z23)"
+    v2_id="$(manifest_digest_of "$mac/v2" z23)"
+    v1_manifest_file_sha="$(sha256_file "$mac/v1/SHA256SUMS")"
+    [ "$v1_id" != "$v1_manifest_file_sha" ] \
+        || die "selftest: fixture's z23 digest collided with its manifest-file digest"
     if command -v shasum >/dev/null 2>&1; then
         ln -s "$(command -v shasum)" "$mac/hashbin/shasum"
         ln -s "$(command -v awk)" "$mac/hashbin/awk"
         ln -s "$(command -v dirname)" "$mac/hashbin/dirname"
         ln -s "$(command -v basename)" "$mac/hashbin/basename"
-        [ "$(PATH="$mac/hashbin" sha256_file "$mac/v1/SHA256SUMS")" = "$v1_id" ] \
+        [ "$(PATH="$mac/hashbin" sha256_file "$mac/v1/SHA256SUMS")" = "$v1_manifest_file_sha" ] \
             || die "selftest: stock macOS shasum digest path drifted"
         PATH="$mac/hashbin" sha256_check_manifest "$mac/v1/SHA256SUMS" >/dev/null \
             || die "selftest: stock macOS shasum manifest check failed"
@@ -1555,6 +1622,20 @@ EOF
         || die "selftest: first macOS generation is not last-good"
     [ -L "$prefix/bin/z23" ] && [ -x "$prefix/bin/z23" ] \
         || die "selftest: stable macOS z23 name does not resolve to its generation"
+
+    # The defect this proves fixed: the directory name is the sha256
+    # SHA256SUMS records for z23, not the sha256 of the SHA256SUMS file.
+    cmp -s "$mac/v1/SHA256SUMS" "$prefix/lib/z23/generations/$v1_id/SHA256SUMS" \
+        || die "selftest: generation did not retain its verified SHA256SUMS"
+    generation_provenance "$prefix/lib/z23/generations/$v1_id" \
+        >"$mac/provenance.out" \
+        || die "selftest: generation_provenance reported mismatch for a freshly verified install"
+    grep -qx "generation: $v1_id" "$mac/provenance.out" \
+        || die "selftest: generation_provenance did not print the directory name"
+    grep -qx "sha256sums_z23: $v1_id" "$mac/provenance.out" \
+        || die "selftest: generation_provenance did not print the SHA256SUMS z23 digest"
+    grep -qx 'provenance: consistent' "$mac/provenance.out" \
+        || die "selftest: generation_provenance did not print the consistent verdict"
     [ -f "$launchd/org.z23.zclassic.plist" ] \
         || die "selftest: macOS install did not commit a launchd plist"
     grep -q '&amp; native/bin/z23' "$launchd/org.z23.zclassic.plist" \
@@ -1618,6 +1699,61 @@ EOF
         || die "selftest: macOS lifecycle did not use launchctl kickstart"
 }
 
+# A fixture package into a scratch prefix, tampered so SHA256SUMS no longer
+# names the z23 bytes that actually sit beside it. verify_strict() must
+# refuse before install_payload_macos_generation ever runs, so this proves
+# the refusal happens BY NAME (a fixed, grep-able message) and BEFORE any
+# directory -- correctly or incorrectly named -- is created.
+selftest_macos_tampered_manifest() {
+    local mac="$SELFTEST_TMP/macos-tamper" prefix bogus_sha rc=0
+
+    prefix="$mac/prefix"
+    mkdir -p "$mac/release" "$prefix"
+    printf '#!/usr/bin/env bash\ntrue\n' >"$mac/release/z23"
+    chmod 755 "$mac/release/z23"
+    ln -f -- "$mac/release/z23" "$mac/release/zclassic23"
+    printf 'verifier\n' >"$mac/release/zclassic23-package-verify"
+    printf 'acme\n' >"$mac/release/zclassic23-acme"
+    printf '# agent card\n' >"$mac/release/AGENT_CARD.md"
+    chmod 755 "$mac/release/zclassic23-package-verify" \
+        "$mac/release/zclassic23-acme"
+    (cd "$mac/release" && sha256sum $RELEASE_MEMBERS >SHA256SUMS)
+
+    # Tamper: rewrite the z23 and zclassic23 rows' digests (they are the same
+    # hard-linked bytes, so both rows must move together or the EARLIER
+    # z23/zclassic23 alias-consistency check would refuse first, for a
+    # different reason than the one this test proves) to a different, still
+    # well-formed 64-lowercase-hex value. The bytes on disk are untouched --
+    # only what SHA256SUMS CLAIMS about them changes, which is exactly the
+    # shape of drift a directory-naming bug could otherwise hide.
+    bogus_sha="$(printf 'b%.0s' {1..64})"
+    sed -i "s/^[0-9a-f]\{64\}  z23\$/${bogus_sha}  z23/" \
+        "$mac/release/SHA256SUMS"
+    sed -i "s/^[0-9a-f]\{64\}  zclassic23\$/${bogus_sha}  zclassic23/" \
+        "$mac/release/SHA256SUMS"
+    grep -qx "${bogus_sha}  z23" "$mac/release/SHA256SUMS" \
+        || die "selftest: tamper fixture setup did not edit the z23 row"
+    grep -qx "${bogus_sha}  zclassic23" "$mac/release/SHA256SUMS" \
+        || die "selftest: tamper fixture setup did not edit the zclassic23 row"
+
+    Z23_INSTALL_TEST_PLATFORM=Darwin Z23_SKIP_SYSTEMD=1 \
+        Z23_INSTALL_PREFIX="$prefix" \
+        "$SCRIPT_DIR/install_z23.sh" --source="$mac/release" \
+        >/dev/null 2>"$mac/tamper.err" || rc=$?
+    [ "$rc" -eq 1 ] || die "selftest: tampered SHA256SUMS must refuse to install"
+    grep -q 'SHA256SUMS mismatch' "$mac/tamper.err" \
+        || die "selftest: tampered SHA256SUMS refusal did not name the mismatch"
+
+    # Refuses BY NAME: no generation is created under the tampered digest,
+    # the real one, or any other name -- naming never runs because
+    # verify_strict refuses first.
+    [ ! -e "$prefix/lib/z23/generations/$bogus_sha" ] \
+        || die "selftest: a generation was created under the tampered digest"
+    [ ! -d "$prefix/lib/z23/generations" ] \
+        || [ -z "$(ls -A "$prefix/lib/z23/generations" 2>/dev/null)" ] \
+        || die "selftest: a tampered manifest still produced a generation directory"
+}
+
 selftest() {
     selftest_prepare
     selftest_prepare_curl_mock
@@ -1631,6 +1767,7 @@ selftest() {
     selftest_local_manifest_refusals
     selftest_release_pin
     selftest_macos_transaction
+    selftest_macos_tampered_manifest
     selftest_front_door
 
     say "selftest PASS"
@@ -1646,6 +1783,10 @@ ATTEST_ARG=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --selftest) selftest; exit 0 ;;
+        --generation-status=*)
+            generation_provenance "${1#--generation-status=}"
+            exit $?
+            ;;
         --source=*) SOURCE="${1#--source=}"; shift ;;
         --source)
             [ $# -ge 2 ] || die "--source needs a url or directory"

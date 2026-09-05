@@ -499,12 +499,17 @@ tools/scripts/install_z23.sh --source=build/release/z23-darwin-arm64
 ```
 
 That path verifies the closed manifest, installs immutable generations under
-`~/.local/lib/z23/generations`, switches `current` atomically, validates its
-plist with `plutil`, uses `launchctl bootstrap`/`bootout`/`kickstart`, waits for
-typed node readiness, qualifies the running image, and automatically restores
-`last-good` if the candidate fails. It operates on `~/.zclassic-c23`; use only
-with an operator-approved release and datadir. The public download front door
-remains disabled until the signed platform index and fresh-host acceptance in
+`~/.local/lib/z23/generations/<sha256>` — each directory named by the exact
+sha256 SHA256SUMS records for `z23`, the same digest `sha256sum -c --strict`
+already verified the installed bytes against, never a hash of the manifest
+file itself — switches `current` atomically, validates its plist with
+`plutil`, uses `launchctl bootstrap`/`bootout`/`kickstart`, waits for typed
+node readiness, qualifies the running image, and automatically restores
+`last-good` if the candidate fails. `install_z23.sh --generation-status=<dir>`
+reports that directory's provenance (`consistent`/`mismatch`) from the
+installed tree alone. It operates on `~/.zclassic-c23`; use only with an
+operator-approved release and datadir. The public download front door remains
+disabled until the signed platform index and fresh-host acceptance in
 [`docs/work/BOOTSTRAP_PLAN.md`](work/BOOTSTRAP_PLAN.md) are complete.
 
 `make service-install` fails closed if `$(PREFIX)/bin/z23` is missing, so
