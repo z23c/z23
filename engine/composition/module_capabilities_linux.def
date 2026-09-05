@@ -13,7 +13,6 @@
 
 ZCL_MODULE_CAPABILITY("contexts/explorer/views/src/ui_present_host.c", CAP_PROCESS|CAP_CLOCK|CAP_PRIVILEGE|CAP_NETWORK, "hosts the native presentation window: listens on an AF_UNIX socket, spawns the presentation child process, and narrows that child's privileges before handing it the socket")
 ZCL_MODULE_CAPABILITY("engine/composition/src/boot_memory_guard.c", CAP_FS_WRITE|CAP_CLOCK, "")
-ZCL_MODULE_CAPABILITY("engine/composition/src/boot_mesh_terminal.c", CAP_NONE, "")
 ZCL_MODULE_CAPABILITY("engine/composition/src/boot_mint_anchor_preflight.c", CAP_FS_READ|CAP_FS_WRITE|CAP_CLOCK, "")
 ZCL_MODULE_CAPABILITY("cognition/modules/codeindex/src/codeindex_build_store.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("cognition/modules/codeindex/src/codeindex_merkle_snapshot_windows.c", CAP_NONE, "")
