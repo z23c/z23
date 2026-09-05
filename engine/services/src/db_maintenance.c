@@ -60,6 +60,7 @@
 
 #include "adapters/outbound/persistence/db_maintenance_sqlite.h"
 #include "ports/db_maintenance_port.h"
+#include "services/node_db_catchup_service.h"
 
 #include "supervisors/domains.h"
 #include "util/log_macros.h"
@@ -105,6 +106,12 @@ struct db_maintenance_state {
     char    last_error[256];
 
     db_maintenance_vacuum_gate_fn vacuum_gate;
+
+    /* Consecutive ticks yielded to an active catchup walk. Reset by any
+     * run that actually happens; bounded by
+     * DB_MAINT_MAX_CATCHUP_DEFERRALS so housekeeping cannot be deferred
+     * for the whole of a multi-hour catchup. */
+    int catchup_deferrals;
 
     /* Supervisor liveness. loop_ticks advances once per
      * outer-loop wake so the supervisor sees forward progress between
@@ -374,9 +381,44 @@ static void dbm_note_run_locked(const char *op,
     }
 }
 
+/* Decide whether this tick yields to a running catchup walk. Assumes
+ * g_dbm.lock is held; returns true when the caller must skip the op.
+ *
+ * Every op below takes the node.db write lock, and holding it past the
+ * catchup walk's 10 s busy timeout is what made that walk's post-commit
+ * BEGIN IMMEDIATE fail (the node1 abort loop, 2026-09-05). Yielding
+ * leaves the op's last-run stamp untouched, so the next tick still finds
+ * it due — no separate rescheduling to get wrong. The yield is bounded:
+ * after DB_MAINT_MAX_CATCHUP_DEFERRALS in a row one run goes ahead and
+ * says so, because housekeeping that defers forever never happens. */
+static bool dbm_defer_for_catchup_locked(const char *op)
+{
+    if (!node_db_catchup_service_active()) {
+        g_dbm.catchup_deferrals = 0;
+        return false;
+    }
+    if (g_dbm.catchup_deferrals >= DB_MAINT_MAX_CATCHUP_DEFERRALS) {
+        LOG_WARN("db_maintenance",
+                 "db_maintenance: deferral bound reached, running with "
+                 "catchup active (op=%s bound=%d)",
+                 op, DB_MAINT_MAX_CATCHUP_DEFERRALS);
+        g_dbm.catchup_deferrals = 0;
+        return false;
+    }
+    g_dbm.catchup_deferrals++;
+    LOG_INFO("db_maintenance",
+             "db_maintenance: deferred, catchup active (op=%s deferral=%d/%d)",
+             op, g_dbm.catchup_deferrals, DB_MAINT_MAX_CATCHUP_DEFERRALS);
+    return true;
+}
+
 /* ── run_now ────────────────────────────────────────────────── */
 
-struct zcl_result db_maintenance_run_now(struct node_db *db, const char *op)
+/* `may_defer` is false only for the disk-full reclaim leg
+ * (db_maintenance_checkpoint_now): an emergency checkpoint yields to
+ * nothing. */
+static struct zcl_result dbm_run_now(struct node_db *db, const char *op,
+                                     bool may_defer)
 {
     if (!db || !db->open || !db->db)
         return ZCL_ERR(-1, "db_maint: run_now called with null or closed db");
@@ -392,6 +434,11 @@ struct zcl_result db_maintenance_run_now(struct node_db *db, const char *op)
     db_maintenance_sqlite_bind(&store_ctx, db->db, &port);
 
     pthread_mutex_lock(&g_dbm.lock);
+
+    if (may_defer && dbm_defer_for_catchup_locked(op)) {
+        pthread_mutex_unlock(&g_dbm.lock);
+        return ZCL_ERR(-4, "db_maint: deferred, catchup active (op=%s)", op);
+    }
 
     event_emitf(EV_DB_MAINTENANCE_START, 0, "op=%s", op);
 
@@ -445,6 +492,11 @@ struct zcl_result db_maintenance_run_now(struct node_db *db, const char *op)
     return ZCL_OK;
 }
 
+struct zcl_result db_maintenance_run_now(struct node_db *db, const char *op)
+{
+    return dbm_run_now(db, op, /*may_defer=*/true);
+}
+
 struct zcl_result db_maintenance_checkpoint_now(void)
 {
     /* Reclaim the node.db WAL using the handle registered by
@@ -452,14 +504,19 @@ struct zcl_result db_maintenance_checkpoint_now(void)
      * not themselves hold the node_db. Routing through run_now serializes with
      * the maintenance thread on g_dbm.lock — no concurrent sqlite access on the
      * shared handle. Read the pointer under the lock, then release it before
-     * run_now re-acquires (run_now guards a closed/null db itself). */
+     * run_now re-acquires (run_now guards a closed/null db itself).
+     *
+     * This leg does NOT yield to a running catchup: it is the disk-full
+     * reclaim, where deferring the checkpoint is what fills the disk. The
+     * scheduled ticks yield (see dbm_defer_for_catchup_locked); an
+     * emergency does not. */
     pthread_mutex_lock(&g_dbm.lock);
     struct node_db *db = g_dbm.db;
     pthread_mutex_unlock(&g_dbm.lock);
     if (!db)
         return ZCL_ERR(-21,
             "db_maint: checkpoint_now with no registered db (not started)");
-    return db_maintenance_run_now(db, "wal");
+    return dbm_run_now(db, "wal", /*may_defer=*/false);
 }
 
 /* ── Thread loop ────────────────────────────────────────────── */

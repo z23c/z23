@@ -105,6 +105,21 @@
  * ZCL_WAL_MAX_BYTES.  Default 100 MB. */
 #define DB_MAINT_DEFAULT_WAL_MAX_BYTES  (100 * 1024 * 1024)
 
+/* Consecutive maintenance runs that yield to an active bulk node_db
+ * catchup before one runs anyway.
+ *
+ * Every op here takes the node.db write lock, and holding it past the
+ * catchup walk's 10 s busy timeout is what made that walk's post-commit
+ * BEGIN IMMEDIATE fail — so a tick that lands mid-walk steps aside and
+ * lets the next one try (the op's last-run stamp is untouched, so it stays
+ * due). But housekeeping that defers forever is housekeeping that never
+ * happens: a multi-hour catchup would silence the WAL byte cap for its
+ * whole duration. After this many yields one run goes ahead, and catchup's
+ * own bounded reopen retry (NODE_DB_CATCHUP_REOPEN_MAX_ATTEMPTS) absorbs
+ * the lock it takes — deference is a courtesy, not a veto, and neither
+ * side can wedge the other. */
+#define DB_MAINT_MAX_CATCHUP_DEFERRALS  8
+
 /* ── Config ─────────────────────────────────────────────────── */
 
 /* Each interval has three states, and the third one is the point:
