@@ -11468,7 +11468,7 @@ check-silent-errors-conditions: $(LINTC_TOOL)
 # Closes the bool/`return false;` blind spot of the four int-convention gates
 # above: flags a NEW swallowed call failure (if (!call(...)) return false; with
 # no LOG_*). RATCHET (shrink-only) — today's population is baselined.
-check-silent-errors-bool:
+check-silent-errors-bool: $(LINTC_TOOL)
 	@echo "══ LINT: silent call-guard return-false (RATCHET) ══"
 	@ZCL_LINT_MODE=FAIL ./tools/lint/check_silent_bool_errors.sh
 
@@ -12094,7 +12094,7 @@ check-result-discard:
 # Gate #20 graduated WARN → RATCHET (E10): fails on any new controller
 # file that uses raw sqlite. Baseline of grandfathered files lives in
 # tools/lint/no_raw_sqlite_in_controllers_baseline.txt (may only shrink).
-check-no-raw-sqlite-in-controllers:
+check-no-raw-sqlite-in-controllers: $(LINTC_TOOL)
 	@echo "→ Gate #20: no_raw_sqlite_in_controllers"
 	@ZCL_LINT_MODE=RATCHET ./tools/lint/check_no_raw_sqlite_in_controllers.sh
 

@@ -67,6 +67,10 @@ static const struct lint_gate k_gates[] = {
     { "check-group-purpose", check_group_purpose_run, check_group_purpose_selftest },
     { "check-no-new-borrowed-seed", check_no_new_borrowed_seed_run,
       check_no_new_borrowed_seed_selftest },
+    { "check-silent-errors-bool", check_silent_errors_bool_run,
+      check_silent_errors_bool_selftest },
+    { "check-no-raw-sqlite-in-controllers", check_no_raw_sqlite_in_controllers_run,
+      check_no_raw_sqlite_in_controllers_selftest },
 };
 
 int main(int argc, char **argv)

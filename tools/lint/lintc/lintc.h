@@ -156,5 +156,9 @@ int check_group_purpose_run(int argc, char **argv);
 int check_group_purpose_selftest(void);
 int check_no_new_borrowed_seed_run(int argc, char **argv);
 int check_no_new_borrowed_seed_selftest(void);
+int check_silent_errors_bool_run(int argc, char **argv);
+int check_silent_errors_bool_selftest(void);
+int check_no_raw_sqlite_in_controllers_run(int argc, char **argv);
+int check_no_raw_sqlite_in_controllers_selftest(void);
 
 #endif
