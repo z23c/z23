@@ -37,10 +37,11 @@ fail()
 usage()
 {
     printf '%s\n' \
-        'Usage: tools/dev/generate-compdb.sh [--status|--clangd-check|--no-clangd-check]' \
+        'Usage: tools/dev/generate-compdb.sh [--status|--selftest|--clangd-check|--no-clangd-check]' \
         '' \
         'Generates root compile_commands.json from exact forced dry-runs of DEV_OBJS.' \
         'clangd is optional; --clangd-check validates one representative TU.' \
+        '--selftest proves the dry-run parser against native zcc and legacy recipes.' \
         '' \
         'Environment:' \
         '  ZCL_AGENT_COMPDB_PATH          output database path' \
@@ -48,6 +49,101 @@ usage()
         '  ZCL_AGENT_INDEX_STATUS_PATH    metadata JSON path' \
         '  ZCL_AGENT_INDEX_CLANGD_CHECK   0 (default) or 1' \
         '  ZCL_AGENT_INDEX_CHECK_FILE     representative TU for clangd --check'
+}
+
+# Native backend (ZCL_OBJECT_BACKEND=native) dry-runs
+#   build/bin/zcc --epoch-object dep <object> <source> ... -- <compiler...>
+# Legacy backend dry-runs
+#   tools/dev/compile-epoch-object.sh dep <object> <source> ... -- <compiler...>
+# The parser used to require only the second token, so a native-backend
+# checkout reported FATAL: parsed 0 compile commands.
+extract_compile_rows()
+{
+    local raw="$1" rows="$2"
+    awk '
+        {
+            if (sub(/\\$/, "")) {
+                continued = continued $0 " "
+                next
+            }
+            print continued $0
+            continued = ""
+        }
+        END { if (continued != "") print continued }
+    ' "$raw" | awk '
+        index($0, "compile-epoch-object.sh dep ") ||
+        index($0, "--epoch-object dep ") {
+            n = split($0, words, /[[:space:]]+/)
+            source = ""
+            object = ""
+            separator = 0
+            for (i = 1; i <= n; i++) {
+                if (((words[i] ~ /compile-epoch-object[.]sh$/) ||
+                     (words[i] == "--epoch-object")) &&
+                    i + 3 <= n && words[i + 1] == "dep") {
+                    object = words[i + 2]
+                    source = words[i + 3]
+                }
+                if (words[i] == "--")
+                    separator = i
+            }
+            gsub(/^"|"$/, "", object)
+            gsub(/^"|"$/, "", source)
+            command = ""
+            if (separator > 0) {
+                for (i = separator + 1; i <= n; i++)
+                    command = command (command == "" ? "" : " ") words[i]
+                dep = object
+                sub(/[.]o$/, ".d", dep)
+                command = command " -MMD -MP -MF " dep " -MT " object \
+                          " -c -o " object " " source
+            }
+            if (source ~ /[.]c$/ &&
+                object ~ /^build\/dev-obj\/epochs\/[0-9a-f]+\/.*[.]o$/ &&
+                separator > 0)
+                print source "\t" object "\t" command
+        }
+    ' | LC_ALL=C sort -t $'\t' -k1,1 -u > "$rows"
+}
+
+parse_selftest()
+{
+    local dir raw rows n
+    dir="$(mktemp -d "${TMPDIR:-/tmp}/zcl-compdb-selftest.XXXXXX")" ||
+        fail 'could not create parser selftest directory'
+    raw="$dir/dry-run.txt"
+    rows="$dir/rows.tsv"
+
+    printf '%s\n' 'echo not a compile recipe' > "$raw"
+    extract_compile_rows "$raw" "$rows"
+    n="$(sed '/^$/d' "$rows" | wc -l | tr -d ' ')"
+    if [ "$n" -ne 0 ]; then
+        rm -rf "$dir"
+        fail "parser accepted a dry-run line with no epoch-object recipe ($n rows)"
+    fi
+
+    printf '%s\n' \
+        'build/bin/zcc --epoch-object dep build/dev-obj/epochs/aae5d144f70e20d2641da5ea64328e8a478a85d79a8486ab685d6b18532c5151/platform/modules/base/src/safe_alloc.o platform/modules/base/src/safe_alloc.c deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef 1 deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef aae5d144f70e20d2641da5ea64328e8a478a85d79a8486ab685d6b18532c5151 deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef build/dev-obj/epochs/aae5d144f70e20d2641da5ea64328e8a478a85d79a8486ab685d6b18532c5151/.build-session -- build/bin/zcc cc -std=c23' \
+        > "$raw"
+    extract_compile_rows "$raw" "$rows"
+    n="$(sed '/^$/d' "$rows" | wc -l | tr -d ' ')"
+    if [ "$n" -ne 1 ] || ! grep -q 'safe_alloc.c' "$rows"; then
+        rm -rf "$dir"
+        fail "parser missed the native zcc --epoch-object dep recipe ($n rows)"
+    fi
+
+    printf '%s\n' \
+        'tools/dev/compile-epoch-object.sh dep build/dev-obj/epochs/aae5d144f70e20d2641da5ea64328e8a478a85d79a8486ab685d6b18532c5151/platform/modules/base/src/hex.o platform/modules/base/src/hex.c deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef 1 deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef aae5d144f70e20d2641da5ea64328e8a478a85d79a8486ab685d6b18532c5151 deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef build/dev-obj/epochs/aae5d144f70e20d2641da5ea64328e8a478a85d79a8486ab685d6b18532c5151/.build-session -- cc -std=c23' \
+        > "$raw"
+    extract_compile_rows "$raw" "$rows"
+    n="$(sed '/^$/d' "$rows" | wc -l | tr -d ' ')"
+    if [ "$n" -ne 1 ] || ! grep -q 'hex.c' "$rows"; then
+        rm -rf "$dir"
+        fail "parser missed the legacy compile-epoch-object.sh dep recipe ($n rows)"
+    fi
+
+    rm -rf "$dir"
+    log 'parser selftest PASS (native zcc and legacy epoch-object recipes)'
 }
 
 json_escape()
@@ -248,12 +344,14 @@ main()
     case "${1:-}" in
         --help|-h) usage; return 0 ;;
         --status) emit_runtime_status; return 0 ;;
+        --selftest) parse_selftest; return 0 ;;
         --clangd-check) CLANGD_CHECK=1 ;;
         --no-clangd-check|"") ;;
         *) usage >&2; return 2 ;;
     esac
 
     [ -f "$ROOT/Makefile" ] || fail "Makefile not found below $ROOT"
+    parse_selftest
     mkdir -p "$(dirname "$OUTPUT")" "$STATE_DIR" \
              "$(dirname "$STATUS_FILE")"
     TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/zcl-agent-index.XXXXXX")" ||
@@ -277,48 +375,7 @@ main()
     ZCL_COMPDB_FORCE=1 "$MAKE_BIN" --no-print-directory -n \
         "${dev_objects[@]}" > "$raw"
 
-    awk '
-        {
-            if (sub(/\\$/, "")) {
-                continued = continued $0 " "
-                next
-            }
-            print continued $0
-            continued = ""
-        }
-        END { if (continued != "") print continued }
-    ' "$raw" | awk '
-        index($0, "compile-epoch-object.sh dep ") {
-            n = split($0, words, /[[:space:]]+/)
-            source = ""
-            object = ""
-            separator = 0
-            for (i = 1; i <= n; i++) {
-                if (words[i] ~ /compile-epoch-object[.]sh$/ &&
-                    i + 3 <= n && words[i + 1] == "dep") {
-                    object = words[i + 2]
-                    source = words[i + 3]
-                }
-                if (words[i] == "--")
-                    separator = i
-            }
-            gsub(/^"|"$/, "", object)
-            gsub(/^"|"$/, "", source)
-            command = ""
-            if (separator > 0) {
-                for (i = separator + 1; i <= n; i++)
-                    command = command (command == "" ? "" : " ") words[i]
-                dep = object
-                sub(/[.]o$/, ".d", dep)
-                command = command " -MMD -MP -MF " dep " -MT " object \
-                          " -c -o " object " " source
-            }
-            if (source ~ /[.]c$/ &&
-                object ~ /^build\/dev-obj\/epochs\/[0-9a-f]+\/.*[.]o$/ &&
-                separator > 0)
-                print source "\t" object "\t" command
-        }
-    ' | LC_ALL=C sort -t $'\t' -k1,1 -u > "$rows"
+    extract_compile_rows "$raw" "$rows"
 
     entry_count="$(sed '/^$/d' "$rows" | wc -l | tr -d ' ')"
     if [ "$entry_count" -ne "$object_count" ]; then
