@@ -66,7 +66,7 @@
 # ── cache identity ───────────────────────────────────────────────────────
 # Bump on ANY change to what the key covers or how a verdict is decided; it
 # partitions the keyspace so an old record can never be read by new logic.
-LINT_CACHE_SCHEMA="zcl.lint_cache.v1"
+LINT_CACHE_SCHEMA="zcl.lint_cache.v2"
 
 LINT_CACHE_AVAILABLE=0    # 1 only when the tree key was fully derived
 LINT_CACHE_TREE_KEY=""    # SHA-256 over everything a production scan can see
@@ -142,6 +142,8 @@ check-platform-header-guards
 # to the same never-cached outcome with a note.
 lint_cache_never_reason() {
     case "$1" in
+        check-lint-cache)
+            echo "executes native Git and hash tools against isolated filesystem fixtures" ;;
         check-standalone-tools-link)
             echo "runs 'make' and links 18 tool binaries — depends on build/ state and the toolchain" ;;
         check-arena-view-stub)
@@ -226,50 +228,108 @@ lint_cache_derive_tree_key() {
     tracked_manifest="$tmp/tracked"
     untracked_manifest="$tmp/untracked"
 
-    # Tracked content. Mode 160000 is the vendor/tor gitlink (a submodule
-    # pointer, not a file) — dropped, and no cacheable gate reads it.
-    expect="$(git -C "$root" ls-files -s -z 2>/dev/null \
-        | awk -v RS='\0' '$1 != "160000"' | wc -l)"
-    if ! git -C "$root" ls-files -s -z 2>/dev/null \
-            | awk -v RS='\0' -v ORS='\0' '$1 != "160000" { sub(/^[^\t]*\t/, ""); print }' \
-            | (cd "$root" && xargs -0 -r sha256sum) 2>/dev/null \
-            | LC_ALL=C sort > "$tracked_manifest"; then
+    # Decode NUL records with Bash; Darwin awk treats RS=NUL as one record.
+    # Keep paths NUL-delimited through hashing, including tabs/newlines.
+    local record path mode visible_expect
+    expect=0
+    if ! git -C "$root" ls-files -s -z > "$tmp/index"; then
+        lint_cache_note "unavailable: cannot enumerate tracked files"
+        rm -rf "$tmp"; return 1
+    fi
+    if ! : > "$tmp/tracked-paths"; then
+        lint_cache_note "unavailable: cannot initialize manifest"
+        rm -rf "$tmp"; return 1
+    fi
+    record=""
+    while IFS= read -r -d '' record; do
+        mode="${record%% *}"
+        [ "$mode" != 160000 ] || continue
+        if [[ "$record" != *$'\t'* ]]; then
+            lint_cache_note "unavailable: malformed index record"
+            rm -rf "$tmp"; return 1
+        fi
+        path="${record#*$'\t'}"
+        if ! printf '%s\0' "$path" >> "$tmp/tracked-paths"; then
+            lint_cache_note "unavailable: cannot write tracked path manifest"
+            rm -rf "$tmp"; return 1
+        fi
+        expect=$((expect + 1))
+    done < "$tmp/index"
+    if [ -n "$record" ]; then
+        lint_cache_note "unavailable: unterminated tracked index record"
+        rm -rf "$tmp"; return 1
+    fi
+    if ! : > "$tracked_manifest"; then
+        lint_cache_note "unavailable: cannot initialize manifest"
+        rm -rf "$tmp"; return 1
+    fi
+    if [ -s "$tmp/tracked-paths" ] && ! (
+        set -o pipefail
+        cd "$root" && xargs -0 sha256sum -- < "$tmp/tracked-paths" |
+            LC_ALL=C sort > "$tracked_manifest"
+    ); then
         lint_cache_note "unavailable: could not hash the tracked tree (a tracked file is missing or unreadable)"
         rm -rf "$tmp"; return 1
     fi
     got="$(wc -l < "$tracked_manifest")"
-    # Anti-hollow floor, in the spirit of gate_lib.sh's gate_require_scanned:
-    # a short manifest means a partial input set, and a key over a partial
-    # input set is exactly how a cache starts hiding violations.
     if [ "$got" -ne "$expect" ] || [ "$got" -lt 100 ]; then
         lint_cache_note "unavailable: hashed $got of $expect tracked files — refusing to key off a partial tree"
         rm -rf "$tmp"; return 1
     fi
     LINT_CACHE_TRACKED_N="$got"
 
-    # Untracked, non-ignored files, filtered to exactly what a production scan
-    # can see (scan_exclusions.sh's contract: transient fixtures and
-    # build/vendor/.claude/test-tmp noise are invisible to every gate, so they
-    # must not move the key either).
-    # awk, not `grep -v`, for the filter: grep exits 1 when it drops every
-    # line, and under `set -o pipefail` a clean tree would then look like a
-    # hashing failure and disable the cache on exactly the runs it exists for.
-    if ! git -C "$root" ls-files -z --others --exclude-standard 2>/dev/null \
-            | awk -v RS='\0' -v ORS='\0' '
-                  /(^|\/)_[^\/]*fixture[^\/]*\.[ch]$/ { next }
-                  /(^|\/)(tools\/lint\/fixtures\/planted|build|vendor|\.claude|test-tmp)\// { next }
-                  { print }' \
-            | (cd "$root" && xargs -0 -r sha256sum) 2>/dev/null \
-            | LC_ALL=C sort > "$untracked_manifest"; then
+    if ! git -C "$root" ls-files -z --others --exclude-standard > "$tmp/others"; then
+        lint_cache_note "unavailable: cannot enumerate untracked files"
+        rm -rf "$tmp"; return 1
+    fi
+    if ! : > "$tmp/untracked-paths"; then
+        lint_cache_note "unavailable: cannot initialize manifest"
+        rm -rf "$tmp"; return 1
+    fi
+    visible_expect=0
+    path=""
+    while IFS= read -r -d '' path; do
+        if [[ "$path" =~ (^|/)_([^/]*fixture[^/]*)\.[ch]$ ]] ||
+           [[ "$path" =~ (^|/)(tools/lint/fixtures/planted|build|vendor|\.claude|test-tmp)/ ]]; then
+            continue
+        fi
+        if ! printf '%s\0' "$path" >> "$tmp/untracked-paths"; then
+            lint_cache_note "unavailable: cannot write untracked path manifest"
+            rm -rf "$tmp"; return 1
+        fi
+        visible_expect=$((visible_expect + 1))
+    done < "$tmp/others"
+    if [ -n "$path" ]; then
+        lint_cache_note "unavailable: unterminated untracked path record"
+        rm -rf "$tmp"; return 1
+    fi
+    if ! : > "$untracked_manifest"; then
+        lint_cache_note "unavailable: cannot initialize manifest"
+        rm -rf "$tmp"; return 1
+    fi
+    if [ -s "$tmp/untracked-paths" ] && ! (
+        set -o pipefail
+        cd "$root" && xargs -0 sha256sum -- < "$tmp/untracked-paths" |
+            LC_ALL=C sort > "$untracked_manifest"
+    ); then
         lint_cache_note "unavailable: could not hash the visible untracked set"
         rm -rf "$tmp"; return 1
     fi
     LINT_CACHE_UNTRACKED_N="$(wc -l < "$untracked_manifest")"
+    if [ "$LINT_CACHE_UNTRACKED_N" -ne "$visible_expect" ]; then
+        lint_cache_note "unavailable: hashed $LINT_CACHE_UNTRACKED_N of $visible_expect visible untracked files"
+        rm -rf "$tmp"; return 1
+    fi
 
-    LINT_CACHE_TREE_KEY="$( { printf '%s\ntracked %s\nuntracked %s\n' \
+    if ! LINT_CACHE_TREE_KEY="$(set -o pipefail
+        { printf '%s\ntracked %s\nuntracked %s\n' \
             "$LINT_CACHE_SCHEMA" "$LINT_CACHE_TRACKED_N" "$LINT_CACHE_UNTRACKED_N"
           cat "$tracked_manifest" "$untracked_manifest"; } \
-        | sha256sum | awk '{print $1}')"
+        | sha256sum | awk '{print $1}')"; then
+        lint_cache_note "unavailable: cannot hash complete manifests"
+        LINT_CACHE_TREE_KEY=""
+        rm -rf "$tmp"; return 1
+    fi
     rm -rf "$tmp"
     [[ "$LINT_CACHE_TREE_KEY" =~ ^[0-9a-f]{64}$ ]] || {
         lint_cache_note "unavailable: tree key is not a sha256"; return 1; }

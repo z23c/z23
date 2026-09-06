@@ -13104,6 +13104,10 @@ check-tor-provenance: $(TOR_PROVENANCE_BIN)
 # at all. This asserts the same parity as a gate, both directions, plus a Make
 # target for every listed name (ZCL_LINT_SERIAL=1 needs it) and an existing
 # script behind every table entry.
+.PHONY: check-lint-cache
+check-lint-cache:
+	@./tools/lint/lint_cache_selftest.sh
+
 check-lint-gate-wiring:
 	@echo "══ LINT: every listed gate is wired in run_lint.sh, and back ══"
 	@./tools/lint/check_lint_gate_wiring.sh --selftest
@@ -13144,6 +13148,7 @@ ZCL_LINT_JOBS ?= $(shell j=$$(( $(ZCL_LINT_NPROC) * 3 / 4 )); \
                    if [ "$$j" -lt 8 ]; then j=8; fi; \
                    if [ "$$j" -gt 24 ]; then j=24; fi; echo "$$j")
 LINT_GATES := \
+    check-lint-cache \
     check-lint-gate-wiring \
     check-toolchain \
     check-no-retired-agent-protocol \

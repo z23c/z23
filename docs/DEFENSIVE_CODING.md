@@ -1184,6 +1184,7 @@ against the Makefile `lint:` target. Keep it sorted; edit it whenever you
 add/remove a gate.
 
 <!-- LINT-GATES-BEGIN -->
+- `check-lint-cache`
 - `check-lint-gate-wiring`
 - `check-accel-oracle-pinned`
 - `check-blob-read-bounds`
