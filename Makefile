@@ -11764,7 +11764,7 @@ check-framework-shape:
 # Gate #22 — framework filename suffix (HARD). The recurrence guard for the
 # S1 service renames: no app/ file may carry a foreign shape's name suffix
 # (e.g. *_controller.c in services/). Override: // suffix-ok:<tag>.
-check-framework-filename-suffix:
+check-framework-filename-suffix: $(LINTC_TOOL)
 	@echo "→ Gate #22: framework_filename_suffix"
 	@./tools/lint/check_framework_filename_suffix.sh
 
@@ -12911,7 +12911,7 @@ check-checkout-lock:
 # under a scanned source dir as "untracked stray file (not a code
 # violation)" before any OTHER gate has a chance to report its content as
 # if it were a real defect. See tools/lint/check_no_stray_untracked_source.sh.
-check-no-stray-untracked-source:
+check-no-stray-untracked-source: $(LINTC_TOOL)
 	@echo "══ LINT: no stray untracked source (DX1) ══"
 	@./tools/lint/check_no_stray_untracked_source.sh
 

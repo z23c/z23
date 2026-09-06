@@ -1673,7 +1673,6 @@ static int check_no_raw_clock_outside_platform_selftest(void)
     else (void)unsetenv("ZCL_LINT_MODE");
     (void)lint_filter_excluded;
     (void)lint_annotate_stray;
-    (void)repo_shape_room_dirs;
     regfree(&re);
     return st_ok(bad, "check_no_raw_clock_outside_platform selftest: OK\n");
 }
@@ -7487,6 +7486,500 @@ static int check_asan_adx_exception_selftest(void)
     return 0;
 }
 
+enum { FFS_OWN_N = 7, FFS_VMAX = 1024, FFS_VLEN = 384 };
+static const struct { const char *folder; const char *suffix; } k_ffs_own[] = {
+    { "controllers", "controller" },
+    { "services", "service" },
+    { "models", "model" },
+    { "views", "view" },
+    { "jobs", "job" },
+    { "supervisors", "supervisor" },
+    { "conditions", "condition" },
+};
+static const char *const k_ffs_all[] = {
+    "controller", "service", "model", "view", "job", "supervisor", "condition"
+};
+
+static const char *ffs_own_suffix(const char *folder)
+{
+    for (size_t i = 0; i < sizeof k_ffs_own / sizeof k_ffs_own[0]; i++)
+        if (strcmp(k_ffs_own[i].folder, folder) == 0)
+            return k_ffs_own[i].suffix;
+    return NULL;
+}
+
+static int ffs_in_shapes(const char *folder, const char shapes[][RS_NAME], int n)
+{
+    for (int i = 0; i < n; i++)
+        if (strcmp(shapes[i], folder) == 0)
+            return 1;
+    return 0;
+}
+
+static const char *ffs_foreign_shape(const char *b, const char *own)
+{
+    for (size_t i = 0; i < sizeof k_ffs_all / sizeof k_ffs_all[0]; i++) {
+        const char *shape = k_ffs_all[i];
+        if (strcmp(shape, own) == 0)
+            continue;
+        size_t sl = strlen(shape), bl = strlen(b);
+        if (bl >= sl + 1 && b[bl - sl - 1] == '_' && strcmp(b + bl - sl, shape) == 0)
+            return shape;
+    }
+    return NULL;
+}
+
+static int ffs_marker_comp(regex_t *re)
+{
+    return compile_pat(re, REG_EXTENDED,
+                       "//[[:space:]]*suffix", "-ok:[A-Za-z0-9][A-Za-z0-9_-]*",
+                       "", "");
+}
+
+static int ffs_buf_has_marker(const char *text, const regex_t *re)
+{
+    const char *p = text;
+    while (*p) {
+        const char *nl = strchr(p, '\n');
+        size_t n = nl ? (size_t)(nl - p) : strlen(p);
+        char line[4096];
+        if (n < sizeof line) {
+            memcpy(line, p, n);
+            line[n] = '\0';
+            if (regexec(re, line, 0, NULL, 0) == 0)
+                return 1;
+        }
+        if (!nl)
+            break;
+        p = nl + 1;
+    }
+    return 0;
+}
+
+static int ffs_file_has_marker(const char *path, const regex_t *re, int *hit)
+{
+    FILE *f = fopen(path, "r");
+    if (!f) {
+        *hit = 0;
+        return 0;
+    }
+    char *line = NULL;
+    size_t cap = 0;
+    *hit = 0;
+    while (!*hit && getline(&line, &cap, f) >= 0)
+        if (regexec(re, line, 0, NULL, 0) == 0)
+            *hit = 1;
+    return fin(f, line, path, 0);
+}
+
+static int ffs_scan_room(const char *d, const char *own, const regex_t *re,
+                         char v[][FFS_VLEN], int *nv)
+{
+    char src[4096];
+    if (ovf(snprintf(src, sizeof src, "%s/src", d), sizeof src))
+        return 2;
+    struct dirent **names = NULL;
+    int n = scandir(src, &names, NULL, alphasort);
+    if (n < 0)
+        return (errno == ENOENT || errno == ENOTDIR) ? 0
+            : die("z23-lint: cannot scan %s\n", src);
+    int rc = 0;
+    for (int i = 0; i < n; i++) {
+        const char *name = names[i]->d_name;
+        if (rc == 0 && strcmp(name, ".") != 0 && strcmp(name, "..") != 0) {
+            char path[4096];
+            struct stat st;
+            size_t nl = strlen(name);
+            int k = snprintf(path, sizeof path, "%s/%s", src, name);
+            if (k < 0 || (size_t)k >= sizeof path)
+                rc = die("z23-lint: path too long: %s\n", src);
+            else if (lstat(path, &st) != 0)
+                rc = die("z23-lint: cannot stat %s\n", path);
+            else if (S_ISREG(st.st_mode) && nl >= 2
+                     && name[nl - 2] == '.' && name[nl - 1] == 'c') {
+                char b[256];
+                if (nl - 2 >= sizeof b)
+                    rc = die("z23-lint: derived buffer overflow\n", "");
+                else {
+                    memcpy(b, name, nl - 2);
+                    b[nl - 2] = '\0';
+                    int marked = 0;
+                    rc = ffs_file_has_marker(path, re, &marked);
+                    if (rc == 0 && !marked) {
+                        const char *shape = ffs_foreign_shape(b, own);
+                        if (shape) {
+                            if (*nv >= FFS_VMAX)
+                                rc = die("z23-lint: derived buffer overflow\n", "");
+                            else if (ovf(snprintf(v[*nv], FFS_VLEN,
+                                    "%s ends in foreign-shape suffix _%s "
+                                    "(this folder's shape: %s)",
+                                    path, shape, own), FFS_VLEN))
+                                rc = 2;
+                            else
+                                (*nv)++;
+                        }
+                    }
+                }
+            }
+        }
+        free(names[i]);
+    }
+    free(names);
+    return rc;
+}
+
+static int check_framework_filename_suffix_run(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+    int rc = rs_init();
+    if (rc)
+        return rc;
+    for (int i = 0; i < g_n_shapes; i++) {
+        if (ffs_own_suffix(g_shapes[i]))
+            continue;
+        fprintf(stderr, "check_framework_filename_suffix: FATAL — Makefile APP_DIRS has\n");
+        fprintf(stderr, "  '%s' but the OWN[] suffix map has no entry for it.\n",
+                g_shapes[i]);
+        fprintf(stderr, "  Add its singular suffix; leaving it out silently exempts the\n");
+        fprintf(stderr, "  whole app/%s/ tree from this gate.\n", g_shapes[i]);
+        return 2;
+    }
+    for (size_t i = 0; i < sizeof k_ffs_own / sizeof k_ffs_own[0]; i++) {
+        if (ffs_in_shapes(k_ffs_own[i].folder, g_shapes, g_n_shapes))
+            continue;
+        fprintf(stderr, "check_framework_filename_suffix: FATAL — OWN[] has '%s'\n",
+                k_ffs_own[i].folder);
+        fprintf(stderr, "  but the Makefile's APP_DIRS does not declare it.\n");
+        return 2;
+    }
+    regex_t re;
+    rc = ffs_marker_comp(&re);
+    if (rc)
+        return rc;
+    static char viol[FFS_VMAX][FFS_VLEN];
+    int nv = 0;
+    char rooms[RS_MAX][RS_PATH];
+    for (size_t i = 0; rc == 0 && i < sizeof k_ffs_own / sizeof k_ffs_own[0]; i++) {
+        int nr = 0;
+        rc = repo_shape_room_dirs(k_ffs_own[i].folder, rooms, RS_MAX, &nr);
+        for (int r = 0; rc == 0 && r < nr; r++)
+            rc = ffs_scan_room(rooms[r], k_ffs_own[i].suffix, &re, viol, &nv);
+    }
+    regfree(&re);
+    if (rc)
+        return rc;
+    if (nv == 0)
+        return puts("check_framework_filename_suffix: clean — no shape file carries a "
+                    "foreign-shape filename suffix") < 0
+                   ? die("z23-lint: write failed\n", "") : 0;
+    if (printf("\ncheck_framework_filename_suffix: %d foreign-shape filename suffix "
+               "violation(s)\n\n", nv) < 0)
+        return die("z23-lint: write failed\n", "");
+    for (int i = 0; i < nv; i++)
+        if (printf("  %s\n", viol[i]) < 0)
+            return die("z23-lint: write failed\n", "");
+    if (fputs("\nFix options:\n"
+              "  1. Rename the file to its own shape's suffix or a bare entity name.\n"
+              "  2. Move it to the folder whose shape its suffix names.\n"
+              "  3. If the entity name legitimately ends in that shape word, add a\n"
+              "     top-of-file marker '// suffix-ok:<tag>' explaining why.\n",
+              stdout) < 0)
+        return die("z23-lint: write failed\n", "");
+    return 1;
+}
+
+static int check_framework_filename_suffix_selftest(void)
+{
+    regex_t re;
+    int cr = ffs_marker_comp(&re);
+    if (cr)
+        return cr;
+    int bad = 0;
+    const char *shape = ffs_foreign_shape("foo_controller", "service");
+    bad |= !(shape && strcmp(shape, "controller") == 0);
+    bad |= ffs_foreign_shape("foo_service", "service") != NULL;
+    bad |= ffs_foreign_shape("block", "model") != NULL;
+    const char *marked = "/* header */\nint x;\n// suffix-ok:file_service\n";
+    bad |= !ffs_buf_has_marker(marked, &re);
+    bad |= ffs_buf_has_marker("int x;\nvoid f(void) {}\n", &re);
+    bad |= !(ffs_buf_has_marker(marked, &re)
+             && ffs_foreign_shape("file_service", "model") != NULL);
+    char full[FFS_OWN_N][RS_NAME];
+    for (int i = 0; i < FFS_OWN_N; i++)
+        memcpy(full[i], k_ffs_own[i].folder, strlen(k_ffs_own[i].folder) + 1);
+    int cover_own = 1, cover_shapes = 1;
+    for (int i = 0; i < FFS_OWN_N; i++)
+        if (!ffs_in_shapes(k_ffs_own[i].folder, full, FFS_OWN_N))
+            cover_own = 0;
+    for (int i = 0; i < FFS_OWN_N; i++)
+        if (!ffs_own_suffix(full[i]))
+            cover_shapes = 0;
+    bad |= !cover_own || !cover_shapes;
+    char miss[FFS_OWN_N][RS_NAME];
+    for (int i = 0; i < FFS_OWN_N - 1; i++)
+        memcpy(miss[i], k_ffs_own[i].folder, strlen(k_ffs_own[i].folder) + 1);
+    int miss_cover = 1;
+    for (int i = 0; i < FFS_OWN_N; i++)
+        if (!ffs_in_shapes(k_ffs_own[i].folder, miss, FFS_OWN_N - 1))
+            miss_cover = 0;
+    bad |= miss_cover;
+    char extra[FFS_OWN_N + 1][RS_NAME];
+    for (int i = 0; i < FFS_OWN_N; i++)
+        memcpy(extra[i], k_ffs_own[i].folder, strlen(k_ffs_own[i].folder) + 1);
+    memcpy(extra[FFS_OWN_N], "widgets", 8);
+    int extra_cover = 1;
+    for (int i = 0; i < FFS_OWN_N + 1; i++)
+        if (!ffs_own_suffix(extra[i]))
+            extra_cover = 0;
+    bad |= extra_cover;
+    regfree(&re);
+    return st_ok(bad, "check_framework_filename_suffix selftest: OK\n");
+}
+
+enum { SUS_DIRS = 32, SUS_STRAY_N = 256, SUS_STRAY_L = 512, SUS_TRACK = 2 * 1024 * 1024 };
+static const char *const k_sus_dirs[] = {
+    "core", "engine", "contexts", "cognition", "platform", "core", "adapters", "tools"
+};
+
+static int sus_split_ws(const char *s, char out[][RS_PATH], int max, int *n)
+{
+    *n = 0;
+    while (*s) {
+        while (*s && isspace((unsigned char)*s))
+            s++;
+        if (!*s)
+            break;
+        const char *e = s;
+        while (*e && !isspace((unsigned char)*e))
+            e++;
+        size_t len = (size_t)(e - s);
+        if (*n >= max || len >= RS_PATH)
+            return die("z23-lint: derived buffer overflow\n", "");
+        memcpy(out[*n], s, len);
+        out[*n][len] = '\0';
+        (*n)++;
+        s = e;
+    }
+    return 0;
+}
+
+static int sus_has_seg(const char *path, const char *seg)
+{
+    char needle[192];
+    int n = snprintf(needle, sizeof needle, "/%s/", seg);
+    if (n < 0 || (size_t)n >= sizeof needle)
+        return 0;
+    if (strstr(path, needle) != NULL)
+        return 1;
+    size_t sl = strlen(seg);
+    return strncmp(path, seg, sl) == 0 && path[sl] == '/';
+}
+
+static int sus_fix_comp(regex_t *re)
+{
+    return compile_pat(re, REG_EXTENDED, ".*/_[^/]*fixture[^/]*\\.", "[ch]$", "", "");
+}
+
+static int sus_excluded(const char *path, const regex_t *fixre)
+{
+    if (sus_has_seg(path, k_planted) || sus_has_seg(path, "build")
+        || sus_has_seg(path, "vendor") || sus_has_seg(path, "test-tmp"))
+        return 1;
+    return regexec(fixre, path, 0, NULL, 0) == 0;
+}
+
+static int sus_in_set(const char *buf, size_t used, const char *path)
+{
+    size_t n = strlen(path);
+    for (size_t i = 0; i < used; ) {
+        size_t m = strlen(buf + i);
+        if (m == n && memcmp(buf + i, path, n) == 0)
+            return 1;
+        i += m + 1;
+    }
+    return 0;
+}
+
+struct sus_track { char *buf; size_t cap, used; };
+static int sus_on_track(const char *path, void *ctx)
+{
+    struct sus_track *t = ctx;
+    size_t n = strlen(path) + 1;
+    if (t->used + n > t->cap)
+        return die("z23-lint: derived buffer overflow\n", "");
+    memcpy(t->buf + t->used, path, n);
+    t->used += n;
+    return 0;
+}
+
+struct sus_acc {
+    const regex_t *fixre;
+    const char *track;
+    size_t tused;
+    char (*stray)[SUS_STRAY_L];
+    int nstray, ncand;
+};
+
+static int sus_scan(const char *path, void *ctx)
+{
+    struct sus_acc *a = ctx;
+    if (sus_excluded(path, a->fixre))
+        return 0;
+    a->ncand++;
+    if (sus_in_set(a->track, a->tused, path))
+        return 0;
+    size_t n = strlen(path);
+    if (a->nstray >= SUS_STRAY_N || n >= SUS_STRAY_L)
+        return die("z23-lint: derived buffer overflow\n", "");
+    memcpy(a->stray[a->nstray], path, n + 1);
+    a->nstray++;
+    return 0;
+}
+
+static int sus_seen(const char seen[][RS_PATH], int n, const char *d)
+{
+    for (int i = 0; i < n; i++)
+        if (strcmp(seen[i], d) == 0)
+            return 1;
+    return 0;
+}
+
+static int check_no_stray_untracked_source_run(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+    char scan[SUS_DIRS][RS_PATH];
+    int nd = 0, rc = 0;
+    const char *env = getenv("ZCL_STRAY_SCAN_DIRS_FOR_TEST");
+    if (env && env[0])
+        rc = sus_split_ws(env, scan, SUS_DIRS, &nd);
+    else {
+        for (size_t i = 0; i < sizeof k_sus_dirs / sizeof k_sus_dirs[0]; i++) {
+            size_t n = strlen(k_sus_dirs[i]);
+            memcpy(scan[nd], k_sus_dirs[i], n + 1);
+            nd++;
+        }
+    }
+    if (rc)
+        return rc;
+    char exist[SUS_DIRS][RS_PATH];
+    int ne = 0;
+    for (int i = 0; i < nd; i++) {
+        struct stat st;
+        if (stat(scan[i], &st) == 0 && S_ISDIR(st.st_mode)) {
+            size_t n = strlen(scan[i]);
+            if (ne >= SUS_DIRS || n >= RS_PATH)
+                return die("z23-lint: derived buffer overflow\n", "");
+            memcpy(exist[ne], scan[i], n + 1);
+            ne++;
+        }
+    }
+    rc = gate_require_scanned(ne, 1, "check-no-stray-untracked-source",
+                              "none of the scanned root dirs exist — layout changed?");
+    if (rc)
+        return rc;
+    regex_t fixre;
+    rc = sus_fix_comp(&fixre);
+    if (rc)
+        return rc;
+    char lscmd[8192];
+    int k = snprintf(lscmd, sizeof lscmd, "git ls-files -z --");
+    if (ovf(k, sizeof lscmd)) {
+        regfree(&fixre);
+        return 2;
+    }
+    size_t used = (size_t)k;
+    for (int i = 0; i < ne; i++) {
+        k = snprintf(lscmd + used, sizeof lscmd - used, " %s", exist[i]);
+        if (ovf(k, sizeof lscmd - used)) {
+            regfree(&fixre);
+            return 2;
+        }
+        used += (size_t)k;
+    }
+    static char track[SUS_TRACK];
+    struct sus_track t = { .buf = track, .cap = sizeof track };
+    rc = each_zpath(lscmd, sus_on_track, &t);
+    if (rc) {
+        regfree(&fixre);
+        return rc;
+    }
+    static char stray[SUS_STRAY_N][SUS_STRAY_L];
+    struct sus_acc a = {
+        .fixre = &fixre, .track = track, .tused = t.used, .stray = stray
+    };
+    char walked[SUS_DIRS][RS_PATH];
+    int nw = 0;
+    for (int i = 0; rc == 0 && i < ne; i++) {
+        if (sus_seen(walked, nw, exist[i]))
+            continue;
+        size_t n = strlen(exist[i]);
+        if (nw >= SUS_DIRS || n >= RS_PATH)
+            rc = die("z23-lint: derived buffer overflow\n", "");
+        else {
+            memcpy(walked[nw], exist[i], n + 1);
+            nw++;
+            rc = walk_src(exist[i], 1, sus_scan, &a);
+        }
+    }
+    regfree(&fixre);
+    if (rc)
+        return rc;
+    if (a.nstray > 0) {
+        if (fprintf(stderr, "FAIL: %d untracked stray file(s) under scanned source dirs\n",
+                    a.nstray) < 0
+            || fputs("  These are NOT code violations — they are files git does not track,\n"
+                     "  most often leftovers from a crashed agent or an abandoned worktree\n"
+                     "  (files matching the lint-gate selftest fixture naming convention,\n"
+                     "  _*fixture*.c, are excluded from this check — see the header comment).\n"
+                     "  Delete them (or 'git add' if intentional new source):\n",
+                     stderr) < 0)
+            return die("z23-lint: write failed\n", "");
+        for (int i = 0; i < a.nstray; i++)
+            if (fprintf(stderr, "    %s [untracked stray file -- not a code violation]\n",
+                        a.stray[i]) < 0)
+                return die("z23-lint: write failed\n", "");
+        return 1;
+    }
+    char joined[2048];
+    size_t ju = 0;
+    joined[0] = '\0';
+    for (int i = 0; i < ne; i++) {
+        k = snprintf(joined + ju, sizeof joined - ju, "%s%s", i ? " " : "", exist[i]);
+        if (ovf(k, sizeof joined - ju))
+            return 2;
+        ju += (size_t)k;
+    }
+    return printf("[check_no_stray_untracked_source] scanned %d file(s) under %s; "
+                  "0 untracked strays\n", a.ncand, joined) < 0
+               ? die("z23-lint: write failed\n", "") : 0;
+}
+
+static int check_no_stray_untracked_source_selftest(void)
+{
+    regex_t re;
+    int cr = sus_fix_comp(&re);
+    if (cr)
+        return cr;
+    int bad = 0;
+    bad |= !sus_excluded("tools/lint/fixtures/planted/foo.c", &re);
+    bad |= !sus_excluded("x/tools/lint/fixtures/planted/foo.c", &re);
+    bad |= !sus_excluded("core/foo/build/x.c", &re);
+    bad |= !sus_excluded("engine/vendor/x.c", &re);
+    bad |= !sus_excluded("core/test-tmp/x.c", &re);
+    bad |= !sus_excluded("core/src/_abfixture.c", &re);
+    bad |= sus_excluded("core/consensus/src/foo.c", &re);
+    bad |= sus_excluded("core/.claude/foo.c", &re);
+    char set[32];
+    memcpy(set, "core/a.c", 9);
+    memcpy(set + 9, "core/b.c", 9);
+    bad |= !sus_in_set(set, 18, "core/a.c");
+    bad |= sus_in_set(set, 18, "core/missing.c");
+    regfree(&re);
+    return st_ok(bad, "check_no_stray_untracked_source selftest: OK\n");
+}
+
 struct lint_gate {
     const char *name;
     int (*run)(int argc, char **argv);
@@ -7542,6 +8035,10 @@ static const struct lint_gate k_gates[] = {
       check_codeindex_coverage_selftest },
     { "check-asan-adx-exception", check_asan_adx_exception_run,
       check_asan_adx_exception_selftest },
+    { "check-framework-filename-suffix", check_framework_filename_suffix_run,
+      check_framework_filename_suffix_selftest },
+    { "check-no-stray-untracked-source", check_no_stray_untracked_source_run,
+      check_no_stray_untracked_source_selftest },
 };
 
 int main(int argc, char **argv)
