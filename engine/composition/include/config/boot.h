@@ -177,7 +177,9 @@ struct app_context {
                                  * receipt bind, so a foreign binary that did not
                                  * itself fold this datadir can still export the
                                  * (byte-identical-shape) bundle. Exits after
-                                 * EXPORTED or a typed REFUSED. Default false. */
+                                 * EXPORTED or a typed REFUSED. A permanent boot
+                                 * blocker under this flag refuses (exit 1) instead
+                                 * of parking. Default false. */
     const char *promote_shielded_history; /* -promote-shielded-history=<producer>
                                  * : TERMINAL offline promote. Installs a finished
                                  * producer's below-checkpoint shielded history

@@ -15,7 +15,12 @@
 #include "test/test_core.h"
 #include "platform/socket_compat.h"
 #include "config/boot.h"
+#include "config/boot_error.h"
+#include "config/boot_internal.h"
+#include "util/blocker.h"
 #include "util/boot_phase.h"
+#include "util/boot_status.h"
+#include "util/thread_registry.h"
 #include <sqlite3.h>
 #include "util/sd_notify.h"
 #include <stddef.h>
@@ -323,6 +328,78 @@ static bool bp_burn_block_io(size_t bytes)
     else { printf("FAIL\n"); failures++; } \
 } while (0)
 
+void boot_test_bind_app_context(const struct app_context *ctx);
+
+/* Capture stdout+stderr around a gate call. The export wrapper greps the
+ * combined stream for REFUSED/EXPORTED; PARKED is on stderr. */
+static bool bp_capture_gate(const char *datadir, char *out, size_t cap,
+                            bool *fn_rc)
+{
+    FILE *capture = tmpfile();
+    if (!capture)
+        return false;
+    int saved_out = dup(STDOUT_FILENO);
+    int saved_err = dup(STDERR_FILENO);
+    if (saved_out < 0 || saved_err < 0) {
+        if (saved_out >= 0) close(saved_out);
+        if (saved_err >= 0) close(saved_err);
+        fclose(capture);
+        return false;
+    }
+    fflush(stdout);
+    fflush(stderr);
+    if (dup2(fileno(capture), STDOUT_FILENO) < 0 ||
+        dup2(fileno(capture), STDERR_FILENO) < 0) {
+        dup2(saved_out, STDOUT_FILENO);
+        dup2(saved_err, STDERR_FILENO);
+        close(saved_out);
+        close(saved_err);
+        fclose(capture);
+        return false;
+    }
+    *fn_rc = boot_node_db_open_failed_gate(datadir);
+    fflush(stdout);
+    fflush(stderr);
+    (void)dup2(saved_out, STDOUT_FILENO);
+    (void)dup2(saved_err, STDERR_FILENO);
+    close(saved_out);
+    close(saved_err);
+    rewind(capture);
+    size_t n = fread(out, 1, cap - 1, capture);
+    out[n] = '\0';
+    bool ok = !ferror(capture);
+    if (fclose(capture) != 0)
+        ok = false;
+    return ok;
+}
+
+static struct app_context g_bp_park_ctx;
+
+static void bp_park_fixture_begin(char *dir, size_t dir_cap, bool export_mode)
+{
+    test_make_tmpdir(dir, dir_cap, "bootphase",
+                     export_mode ? "export_park" : "serve_park");
+    boot_status_init(dir);
+    boot_error_reset_for_testing();
+    blocker_reset_for_testing();
+    thread_registry_reset_for_test();
+    thread_registry_request_shutdown();
+    memset(&g_bp_park_ctx, 0, sizeof(g_bp_park_ctx));
+    g_bp_park_ctx.datadir = dir;
+    g_bp_park_ctx.export_consensus_bundle = export_mode;
+    boot_test_bind_app_context(&g_bp_park_ctx);
+}
+
+static void bp_park_fixture_end(const char *dir)
+{
+    boot_test_bind_app_context(NULL);
+    boot_status_init(NULL);
+    boot_error_reset_for_testing();
+    blocker_reset_for_testing();
+    thread_registry_reset_for_test();
+    test_rm_rf(dir);
+}
+
 int test_boot_phase(void)
 {
 #if defined(_WIN32)
@@ -424,6 +501,62 @@ int test_boot_phase(void)
         !boot_test_params_thread_failure_is_fatal(true, true, true));
     BP_CHECK("non-mainnet params thread failure stays warning-only",
         !boot_test_params_thread_failure_is_fatal(true, false, false));
+
+    /* ── export mode must not park on a permanent blocker ─────────
+     * Shutdown is already requested so a missing export-mode branch cannot
+     * sleep; the assertions distinguish REFUSED from PARKED. */
+    {
+        char dir[PATH_MAX];
+        char captured[4096];
+        bool gate_rc = true;
+        struct boot_status_snapshot snap;
+        char why[128];
+
+        bp_park_fixture_begin(dir, sizeof(dir), true);
+        bool captured_ok = bp_capture_gate(dir, captured, sizeof(captured),
+                                           &gate_rc);
+        bool status_ok = boot_status_read(dir, &snap, why, sizeof(why));
+        BP_CHECK("export+node_db_unopened: gate returns (does not park)",
+                 captured_ok && !gate_rc);
+        BP_CHECK("export+node_db_unopened: REFUSED line names the blocker",
+                 captured_ok &&
+                 strstr(captured,
+                        "REFUSED: -export-consensus-bundle: reason=node_db_unopened")
+                     != NULL);
+        BP_CHECK("export+node_db_unopened: does not emit PARKED",
+                 captured_ok && strstr(captured, "PARKED") == NULL);
+        BP_CHECK("export+node_db_unopened: latches FATAL (exit 1 path)",
+                 boot_error_reported());
+        BP_CHECK("export+node_db_unopened: boot_status names the blocker",
+                 status_ok && strcmp(snap.blocker, "node_db_unopened") == 0);
+        bp_park_fixture_end(dir);
+    }
+
+    /* Serving mode still parks. Shutdown is pre-requested so the wait loop
+     * does not sleep. */
+    {
+        char dir[PATH_MAX];
+        char captured[4096];
+        bool gate_rc = true;
+        struct boot_status_snapshot snap;
+        char why[128];
+
+        bp_park_fixture_begin(dir, sizeof(dir), false);
+        bool captured_ok = bp_capture_gate(dir, captured, sizeof(captured),
+                                           &gate_rc);
+        bool status_ok = boot_status_read(dir, &snap, why, sizeof(why));
+        BP_CHECK("serving+node_db_unopened: park path returns after shutdown",
+                 captured_ok && !gate_rc);
+        BP_CHECK("serving+node_db_unopened: emits PARKED",
+                 captured_ok && strstr(captured, "PARKED") != NULL);
+        BP_CHECK("serving+node_db_unopened: does not emit REFUSED",
+                 captured_ok && strstr(captured, "REFUSED") == NULL);
+        BP_CHECK("serving+node_db_unopened: does not latch FATAL",
+                 !boot_error_reported());
+        BP_CHECK("serving+node_db_unopened: boot_status names the blocker",
+                 status_ok && strcmp(snap.blocker, "node_db_unopened") == 0);
+        bp_park_fixture_end(dir);
+    }
 
     /* ── boot_need_legacy_header_pull (fresh-datadir need_zcd fix) ──
      * MEMORY/bug: on a genuinely fresh/empty datadir both

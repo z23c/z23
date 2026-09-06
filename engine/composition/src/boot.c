@@ -16,6 +16,7 @@
 #include "config/boot_legacy_blocks.h"
 #include "config/boot_memory_guard.h"
 #include "config/boot_postmortem.h"
+#include "config/boot_error.h"
 #include "config/boot_refusal_reports.h"
 #include "config/boot_shutdown_marker.h"
 #include "util/shutdown_stagewatch.h"
@@ -186,6 +187,7 @@ static struct node_db g_node_db;
 static struct db_service g_db_service;
 static struct app_runtime_context g_boot_runtime;
 static const char *g_datadir = NULL;
+static const struct app_context *g_boot_app_ctx;
 const char *g_blog_datadir = NULL;
 static _Atomic bool g_running = false;
 static struct wallet_backup_config g_wallet_backup_cfg;
@@ -255,9 +257,6 @@ static struct boot_svc_ctx g_svc;
 /* Single source of truth for the live boot service context — the &g_svc handed
  * to app_init_services; boot_services.c's main.c-facing entry points read it. */
 struct boot_svc_ctx *boot_active_svc(void) { return &g_svc; }
-/* boot_park_until_shutdown prototype is in config/boot_internal.h (included
- * above); defined below (line ~1175), non-static so boot_node_db_gate.c can
- * share the same park path. */
 static bool boot_params_thread_failure_is_fatal(const struct app_context *ctx,
                                                 const char *network_id)
 {
@@ -265,6 +264,8 @@ static bool boot_params_thread_failure_is_fatal(const struct app_context *ctx,
            strcmp(network_id, "main") == 0 && !ctx->mint_anchor_fast;
 }
 #ifdef ZCL_TESTING
+void boot_test_bind_app_context(const struct app_context *ctx);
+void boot_test_bind_app_context(const struct app_context *ctx) { g_boot_app_ctx = ctx; }
 bool boot_test_params_thread_failure_is_fatal(bool has_params_dir,
                                               bool is_mainnet,
                                               bool mint_anchor_fast)
@@ -1166,28 +1167,26 @@ void boot_stop_db_service_kernel(void)
     zcl_service_kernel_stop_all(&g_boot_db_kernel);
     zcl_service_kernel_reset(&g_boot_db_kernel);
 }
-/* Park the process alive-but-degraded after a boot-storage gate exhausted its
- * bounded re-derive budget. This is the TERMINATING end-state for a genuinely
- * unrecoverable local-storage corruption: the operator was paged ONCE (the
- * gate emitted EV_OPERATOR_NEEDED), and instead of _exit()ing into a
- * Restart=always crash-loop the process stays alive so the halt is observable
- * (the PID lock is held, the page stands) and never a silent power-cycle.
- * Blocks until a shutdown is requested (SIGTERM/SIGINT → the signal handler
- * calls thread_registry_request_shutdown), then returns false so the caller
- * exits cleanly. This converts "crash-loop" into "named blocker, parked", honouring
- * the stickiness law that a stall is never a silent stop. Never returns true.
- *
- * The wait condition is thread_registry_shutdown_requested() — the single
- * source of truth set by the SIGINT/SIGTERM handler installed in main() before
- * app_init (and re-installed inside it). It is NOT g_running (which is not yet
- * set true at the pre-services boot-storage gates). Polls on a short sleep so a
- * service-manager stop is honoured promptly. */
+/* Park alive-degraded until shutdown, then return false. Never true.
+ * -export-consensus-bundle: one REFUSED line, latch FATAL, return (exit 1). */
 bool boot_park_until_shutdown(const char *gate_name)
 {
+    const char *name = gate_name ? gate_name : "boot_storage_gate";
+    boot_status_set_blocker(name, name);
+    if (g_boot_app_ctx && g_boot_app_ctx->export_consensus_bundle) {
+        fprintf(stdout,
+                "REFUSED: -export-consensus-bundle: reason=%s\n", name);
+        fflush(stdout);
+        boot_error_report(BOOT_ERROR_FATAL, "BOOT_EXPORT_BLOCKED",
+                          "export_consensus_bundle",
+                          "one-shot export hit a permanent boot blocker",
+                          NULL, 0, "reason=%s", name);
+        LOG_FAIL("boot.park", "export mode refuses to park at gate %s", name);
+    }
     fprintf(stderr,
         "[boot] PARKED alive-degraded at gate '%s' — bounded re-derive budget "
         "exhausted; the operator was paged. NOT crash-looping; waiting for a "
-        "shutdown signal.\n", gate_name ? gate_name : "boot_storage_gate");
+        "shutdown signal.\n", name);
     while (!thread_registry_shutdown_requested())
         sleep(2);
     return false;
@@ -1287,6 +1286,7 @@ static bool sapling_tree_attempt_fold_forward(struct app_context *ctx,
 }
 bool app_init(struct app_context *ctx)
 {
+    g_boot_app_ctx = ctx;
     int64_t t_boot_start = boot_clock_ms();
     int64_t t_phase;
     /* ── Move 5 boot checklist: prologue steps ───────────────────
