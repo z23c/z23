@@ -4307,6 +4307,27 @@ static int trs_on_recipe(FILE *out, int cov, int start, const char *argv,
     return 0;
 }
 
+/* The original gate piped Makefile lines through a bash command
+ * substitution ($(awk ...) / $(grep ...)), and bash silently drops any
+ * embedded NUL byte from that captured text rather than truncating at it.
+ * getline() keeps the NUL as a literal byte, so strstr()/regexec() on the
+ * raw buffer would stop early instead — a divergence from the original's
+ * behavior. Squeeze NULs out (and drop the trailing newline) so a line
+ * with an embedded NUL is judged on the same reassembled text the original
+ * bash pipeline saw. */
+static ssize_t trs_squeeze_line(char *buf, ssize_t n)
+{
+    if (n > 0 && buf[n - 1] == '\n')
+        n--;
+    ssize_t w = 0;
+    for (ssize_t r = 0; r < n; r++) {
+        if (buf[r] != '\0')
+            buf[w++] = buf[r];
+    }
+    buf[w] = '\0';
+    return w;
+}
+
 static int trs_check(FILE *out)
 {
     regex_t seedre, trig, covre, cont;
@@ -4345,8 +4366,7 @@ static int trs_check(FILE *out)
         size_t used = 0;
         int rc = 0;
         while ((n = getline(&line, &cap, f)) >= 0) {
-            if (n > 0 && line[n - 1] == '\n')
-                line[n - 1] = '\0';
+            n = trs_squeeze_line(line, n);
             if (regexec(&seedre, line, 0, NULL, 0) != 0)
                 continue;
             size_t ln = strlen(line);
@@ -4409,8 +4429,7 @@ static int trs_check(FILE *out)
     int dep_total = 0, dep_seeded = 0, cov_total = 0;
     while ((n = getline(&line, &cap, f)) >= 0) {
         lineno++;
-        if (n > 0 && line[n - 1] == '\n')
-            line[n - 1] = '\0';
+        n = trs_squeeze_line(line, n);
         if (regexec(&trig, line, 0, NULL, 0) != 0)
             continue;
         found = 1;
@@ -4421,8 +4440,7 @@ static int trs_check(FILE *out)
             if (n < 0)
                 break;
             lineno++;
-            if (n > 0 && line[n - 1] == '\n')
-                line[n - 1] = '\0';
+            n = trs_squeeze_line(line, n);
         }
         if (n < 0 && ferror(f)) {
             rc = die("z23-lint: read failed: %s\n", "Makefile");
