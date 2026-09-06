@@ -688,6 +688,32 @@ its whole run and a second driver that finds it held gets `STEP_BUSY`
 (retryable) and steps again shortly rather than racing the first driver's
 rebase and lint against the shared landing worktree.
 
+Each attempt the queue steps proves against its own proof generation, a
+private copy of the tree rooted at `<ram_root>/z23p/<tag>` when RAM scratch is
+reserved or `<dirname(landing_worktree)>/.z23p/<tag>` on disk otherwise
+(`tools/dev/dev_proof.c`). A generation is disposable: the leaf removes it
+once its attempt lands, fails, or is superseded, keeping only generations
+that are still in flight, and it also sweeps any generation left over from a
+prior run at the next submit or step so a resident leaf never accumulates
+finished generations across restarts. What a generation keeps past its own
+lifetime is warm-start's own donor set of immutable build outputs, reaped
+under the same existing newest-donor policy, not proof state.
+
+Vendored dependencies a generation needs are materialized into it as private
+copies, never as hard links to the submitting checkout, so no generation can
+observe or corrupt another attempt's tree through a shared inode. Before an
+attempt proceeds, `dl_wt_proof_deps_ensure` in `tools/command/native_dev_land.c`
+scans the landing worktree for any dependency file whose link count exceeds
+one and demands a full accounting of every extra name: a name that resolves
+inside the leaf's own generation roots (either `z23p` parent) is a leftover
+from an earlier generation's donor linking, not an external hazard, so the
+leaf repairs it in place — materializing a private copy over that name and
+verifying it now has a link count of exactly one before continuing. Any
+extra name that does not resolve inside those roots is left alone and the
+attempt refuses by the exact unexplained path
+(`proof_generation_dependency_unexplained_links:<relative>`) rather than
+guessing at its origin.
+
 Every changed C path must map to focused proof through the repository's impact
 rules. Unmapped or incomplete closure refuses receipt publication. A proof
 covers a whole landing batch, so its changed set is heap-resident and holds
