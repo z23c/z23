@@ -13,6 +13,7 @@
 #include "json/json.h"
 
 #include <stdarg.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -89,22 +90,32 @@ static int64_t rd_int(const struct json_value *object, const char *key)
     return v ? json_get_int(v) : -1;
 }
 
-/* "z23-dev(12345) claude(12399)", cut to `cap`. */
+/* "z23-dev(12345) bash(9911)" — whole entries only. A column cut mid-number
+ * would print a pid that does not exist, so the rendering stops at the last
+ * entry that fits and says how many it did not name. */
 static void rd_processes(const struct json_value *row, char *out, size_t cap)
 {
     const struct json_value *arr = json_get(row, "processes");
-    size_t used = 0;
+    int64_t total = rd_int(row, "process_count");
+    size_t used = 0, shown = 0;
+    size_t room = cap > 6 ? cap - 6 : 0;
     out[0] = 0;
     if (!arr || arr->type != JSON_ARR) return;
     for (size_t i = 0; i < arr->num_children; i++) {
         const struct json_value *p = json_at(arr, i);
-        int n = snprintf(out + used, cap - used, "%s%s(%lld)",
-                         used ? " " : "", rd_str(p, "exe"),
-                         (long long)rd_int(p, "pid"));
-        if (n < 0 || (size_t)n >= cap - used) { out[used] = 0; return; }
+        char one[80];
+        int n = snprintf(one, sizeof(one), "%s%s(%lld)", used ? " " : "",
+                         rd_str(p, "exe"), (long long)rd_int(p, "pid"));
+        if (n < 0 || used + (size_t)n > room) break;
+        memcpy(out + used, one, (size_t)n + 1);
         used += (size_t)n;
+        shown++;
     }
-    if (!used) (void)snprintf(out, cap, "%s", "-");
+    if (total > (int64_t)shown)
+        (void)snprintf(out + used, cap - used, "%s+%lld", used ? " " : "",
+                       (long long)(total - (int64_t)shown));
+    else if (!used)
+        (void)snprintf(out, cap, "%s", "-");
 }
 
 static void rd_running(struct rd_buf *b, const struct json_value *running)
@@ -124,7 +135,7 @@ static void rd_running(struct rd_buf *b, const struct json_value *running)
     }
     for (size_t i = 0; i < count; i++) {
         const struct json_value *row = json_at(rows, i);
-        char edited[16], git[16], dirty[16], procs[64];
+        char edited[16], git[16], dirty[16], procs[27];
         const char *ready = rd_str(row, "ready");
         rd_processes(row, procs, sizeof(procs));
         rd_put(b, "  %-18s %-8s %-10s %5s %7s %7s  %-26.26s %s\n",
