@@ -10,6 +10,19 @@
 # height and the public-node hardening diagnostics are registered by the
 # running daemon.
 #
+# The node's FIRST `healthcheck` reply on a boot is deliberately bounded: it
+# answers from a cached agent summary and marks itself
+# "result_completeness":"bounded" / "partial_result":true so a caller never
+# mistakes a cheap cached answer for a proven one. Judging that bounded
+# payload as the health verdict fails a synced, idle-at-tip node forever,
+# since the cached summary never resolves the fields this script requires.
+# So: when a `healthcheck` reply comes back bounded, this script asks the
+# SAME node for `healthcheck` in full mode exactly once and judges that
+# reply instead; if the full call fails or answers bounded again, the
+# original bounded reply keeps failing the existing checks below, same as
+# before this fix — never a new way to pass, only a new way not to spuriously
+# fail. See healthcheck_is_bounded() / rpc_call_healthcheck_full() below.
+#
 # ── Why there is no "deadline that means failure" any more ─────────────────
 # This check used to answer "did the node get ready inside N seconds?", and
 # that question has no honest answer: N encodes an assumption about the disk
@@ -251,6 +264,45 @@ chain_tip_from_text() {
     fi
 }
 
+# The first `healthcheck` reply on a boot is a cached, incomplete answer by
+# design (event_healthcheck_controller.c rpc_healthcheck_bounded()): it marks
+# itself with either key below. Bounded must never be judged as a health
+# verdict on its own. Pure text parser, defined here (ahead of the selftest
+# entry point) so the selftest can pin it without a live node.
+healthcheck_is_bounded() {
+    printf '%s\n' "$1" |
+        grep -qE '"result_completeness"[[:space:]]*:[[:space:]]*"bounded"' &&
+        return 0
+    printf '%s\n' "$1" |
+        grep -qE '"partial_result"[[:space:]]*:[[:space:]]*true'
+}
+
+# rpc_healthcheck_bounded()/rpc_healthcheck_full() in
+# engine/controllers/src/event_healthcheck_controller.c accept "full mode"
+# two different ways depending on how each RPC tool serializes a positional
+# argument, and the two tools do NOT serialize the same argument text the
+# same way (proven against cli.c's rpc_convert_values(), which leaves
+# "healthcheck" unconverted, and zcl-rpc.c's raw single-arg passthrough):
+#   zclassic-cli: an unconverted method wraps every positional argument as a
+#     JSON string, so the bare word `full` becomes the one-element JSON array
+#     params ["full"] — matched by healthcheck_params_request_full()'s
+#     JSON_ARR/JSON_STR branch ("full" or "detailed").
+#   zcl-rpc: a single trailing argument is spliced into the request body
+#     UNQUOTED, so the bare word `full` would produce invalid JSON
+#     ("params":[full]); the literal object text {"mode":"full"} is valid
+#     JSON there and produces params [{"mode":"full"}] — matched by the
+#     same function's JSON_ARR/JSON_OBJ recursion into {"mode":"full"}.
+# Pure lookup so the selftest can pin both forms without a live node;
+# rpc_call_healthcheck_full() near rpc_call() is the one place that actually
+# issues the call.
+healthcheck_full_mode_args_for_tool() {
+    case "$1" in
+        zclassic-cli) printf '%s\n' full ;;
+        zcl-rpc) printf '%s\n' '{"mode":"full"}' ;;
+        *) return 2 ;;
+    esac
+}
+
 service_pid_is_stable() {
     stable_pid=$(systemctl --user show zclassic23 -p MainPID --value 2>/dev/null || true)
     [ "$stable_pid" = "$SERVICE_MAIN_PID" ] || return 1
@@ -467,6 +519,41 @@ cancelled_write_bytes: 999999'
     selftest_trapkeys='{"initialblockdownload":false,"best_header_height":77,"blocks":50,"headers":50}'
     [ "$(chain_tip_from_text "$selftest_trapkeys")" = at_tip ] || return 1
 
+    # ── bounded-vs-full healthcheck discriminator ───────────────────────────
+    # THE CASE THIS FIX EXISTS FOR: the first `healthcheck` reply on every
+    # boot answers from a cached agent summary and marks itself bounded. A
+    # bounded payload must never be judged healthy on its own, even when it
+    # happens to also carry "healthy":true.
+    selftest_bounded_mode='{"schema":"zcl.healthcheck.v1","status":"ok","result_completeness":"bounded","partial_result":true,"partial_reason":"bounded_first_call_uses_cached_status","healthy":true,"full_mode_command":"z23 healthcheck full"}'
+    healthcheck_is_bounded "$selftest_bounded_mode" || return 1
+    # The keys are independent: either alone marks bounded.
+    selftest_bounded_partial_only='{"schema":"zcl.healthcheck.v1","partial_result":true}'
+    healthcheck_is_bounded "$selftest_bounded_partial_only" || return 1
+    selftest_bounded_completeness_only='{"schema":"zcl.healthcheck.v1","result_completeness":"bounded"}'
+    healthcheck_is_bounded "$selftest_bounded_completeness_only" || return 1
+    # A full-mode reply carries neither key and must not be judged bounded.
+    selftest_full_mode='{"schema":"zcl.healthcheck.v1","status":"ok","result_completeness":"full","partial_result":false,"healthy":true}'
+    if healthcheck_is_bounded "$selftest_full_mode"; then
+        return 1
+    fi
+    # A payload with neither key present is not bounded either.
+    if healthcheck_is_bounded '{"schema":"zcl.healthcheck.v1","status":"ok","healthy":true}'; then
+        return 1
+    fi
+
+    # The exact argument text each RPC tool needs to reach full mode, proven
+    # against how each tool serializes it and against
+    # healthcheck_params_request_full() in
+    # engine/controllers/src/event_healthcheck_controller.c: zclassic-cli
+    # wraps the bare word as a JSON string, so it must be unquoted; zcl-rpc
+    # splices a single trailing argument in unquoted, so it must already be
+    # valid JSON.
+    [ "$(healthcheck_full_mode_args_for_tool zclassic-cli)" = full ] || return 1
+    [ "$(healthcheck_full_mode_args_for_tool zcl-rpc)" = '{"mode":"full"}' ] || return 1
+    if healthcheck_full_mode_args_for_tool some-other-tool >/dev/null; then
+        return 1
+    fi
+
     echo "deploy_verify selftest: PASS"
 }
 
@@ -639,6 +726,15 @@ rpc_call() {
             ;;
         *) return 2 ;;
     esac
+}
+
+# healthcheck_full_mode_args_for_tool() (defined above, ahead of the selftest
+# entry point) is the pure lookup naming the exact argument text each RPC
+# tool needs to reach full mode; this is the one place that actually issues
+# that call, against whichever tool $RPC_TOOL names.
+rpc_call_healthcheck_full() {
+    full_args=$(healthcheck_full_mode_args_for_tool "$(basename "$RPC_TOOL")") || return 2
+    rpc_call healthcheck "$full_args"
 }
 
 START_TS=$(date +%s)
@@ -967,6 +1063,17 @@ verify_contract() {
 
     health=$(rpc_call healthcheck 2>&1 || true)
     health=$(json_rpc_result "$health")
+    if healthcheck_is_bounded "$health"; then
+        full_health=$(rpc_call_healthcheck_full 2>&1 || true)
+        full_health=$(json_rpc_result "$full_health")
+        # A failed or still-bounded full-mode reply must not replace the
+        # bounded one: fail closed and let the checks below judge (and fail)
+        # the same bounded payload they always have, never a new payload
+        # this script has not proven.
+        if [ -n "$full_health" ] && ! healthcheck_is_bounded "$full_health"; then
+            health="$full_health"
+        fi
+    fi
     json_top_key_is_string "$health" consensus_authority local_consensus_validation ||
         { last_err="healthcheck authority contract missing: $health"; return 1; }
     json_not_has_key "$health" mirror_authorization_enabled ||
