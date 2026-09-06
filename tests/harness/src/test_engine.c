@@ -1728,6 +1728,12 @@ static int case_cli_argv(void)
             memcpy(base_argv, argv, sizeof(base_argv));
             size_t resumed_n = engine_cli_argv_build(grok, &resumed, argv,
                                                       ENGINE_CLI_ARGV_MAX);
+            size_t verbatim_hits = 0;
+            for (size_t i = 0; i < resumed_n; i++)
+                if (strcmp(argv[i], "--verbatim") == 0)
+                    verbatim_hits++;
+            EN_CHECK("Grok argv preserves the supplied prompt exactly once",
+                     resumed_n > 0 && verbatim_hits == 1);
             bool has_resume = false, has_id = false, has_restore = false;
             bool preserved = resumed_n == base_n + 2;
             for (size_t i = 0; preserved && i < base_n; i++)
@@ -1746,6 +1752,14 @@ static int case_cli_argv(void)
                             == 0
                      && engine_cli_argv_build(grok, &resumed, argv, resumed_n + 1)
                             == resumed_n);
+            const char *combined_argv[25];
+            size_t combined_n = engine_cli_argv_build(grok, &resumed,
+                                                       combined_argv, 25);
+            EN_CHECK("Grok effort and resume fit 25 slots including NULL",
+                     combined_n == 24 && combined_argv[combined_n] == NULL);
+            EN_CHECK("Grok effort and resume refuse only 24 slots",
+                     engine_cli_argv_build(grok, &resumed, combined_argv, 24)
+                         == 0);
             struct engine_vendor malformed_resume = *grok;
             static const char *const unknown_resume[] = {
                 "--resume", "{unknown_session}", NULL

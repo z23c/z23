@@ -29,9 +29,12 @@
  * argv[0] is the vendor's `program` and is not repeated here. See
  * engine/engine.h for the placeholder vocabulary. */
 
-/* Reads its prompt from a file and has a turn cap of its own. */
+/* Reads its prompt from a file and has a turn cap of its own.
+ * Keep the supplied context inline: automatic prompt offloading would spend
+ * a worker turn reading back a file instead of acting on that context. */
 static const char *const k_grok_cli_start_argv[] = {
     "--prompt-file", ENGINE_CLI_PROMPT_TOKEN,
+    "--verbatim",
     "--cwd",         ENGINE_CLI_WORKDIR_TOKEN,
     "--max-turns",   ENGINE_CLI_TURNS_TOKEN,
     "--model",       ENGINE_CLI_MODEL_TOKEN,

@@ -44,7 +44,6 @@ bool fo_outcome_is_land(const char *outcome)
 {
     return outcome && (strcmp(outcome, "LAND") == 0 ||
                         strcmp(outcome, "FIX_LAND") == 0 ||
-                        strcmp(outcome, "READY") == 0 ||
                         strcmp(outcome, "landed") == 0);
 }
 

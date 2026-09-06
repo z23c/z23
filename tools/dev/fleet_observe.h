@@ -107,7 +107,8 @@ bool fo_executor_known(const char *v);
 bool fo_kind_known(const char *v);
 bool fo_outcome_known(const char *v);
 
-/* True for the LAND-class outcomes: LAND, FIX_LAND, READY, landed. */
+/* True for the LAND-class outcomes: LAND, FIX_LAND, landed.
+ * READY remains a valid observation, but does not establish landing. */
 bool fo_outcome_is_land(const char *outcome);
 
 /* ── aggregation and classification ───────────────────────────────────── */

@@ -148,7 +148,7 @@ enum engine_cli_output {
 #define ENGINE_REASONING_EFFORT_PROVIDER_DEFAULT "provider_default"
 
 /* Longest argv this tree will build for a CLI, argv[0] and the NUL included. */
-#define ENGINE_CLI_ARGV_MAX 24u
+#define ENGINE_CLI_ARGV_MAX 25u
 
 /* A prompt passed as an ARGUMENT is bounded far below ENGINE_MAX_PROMPT_BYTES.
  * Linux caps a single argv string at MAX_ARG_STRLEN — 32 pages, 131072 bytes

@@ -31,6 +31,20 @@ static struct fo_pair fo_pair(const char *ex, const char *tc, int64_t n,
     return p;
 }
 
+static struct fo_row fo_result(const char *outcome)
+{
+    struct fo_row row;
+
+    memset(&row, 0, sizeof(row));
+    row.ts_unix = 1000;
+    (void)snprintf(row.kind, sizeof(row.kind), "result");
+    (void)snprintf(row.executor, sizeof(row.executor), "grok");
+    (void)snprintf(row.task_class, sizeof(row.task_class),
+                   "unit_c23_one_file");
+    (void)snprintf(row.outcome, sizeof(row.outcome), "%s", outcome);
+    return row;
+}
+
 static int test_fleet_observe_classify(void)
 {
     int failures = 0;
@@ -128,6 +142,62 @@ _test_next:;
     return failures;
 }
 
+static int test_fleet_observe_ready_accounting(void)
+{
+    int failures = 0;
+
+    TEST("land outcomes retain legacy spellings without promoting readiness") {
+        ASSERT(fo_outcome_is_land("LAND"));
+        ASSERT(fo_outcome_is_land("FIX_LAND"));
+        ASSERT(fo_outcome_is_land("landed"));
+        ASSERT(!fo_outcome_is_land("READY"));
+        ASSERT(!fo_outcome_is_land("FIX"));
+        ASSERT(!fo_outcome_is_land("HOLD"));
+        ASSERT(!fo_outcome_is_land(NULL));
+        PASS();
+    }
+
+    TEST("aggregate: READY results count as completed observations, not land") {
+        struct fo_row rows[3];
+        struct fo_pair pairs[1];
+        struct fo_observation out[2];
+
+        for (size_t i = 0; i < 3; i++)
+            rows[i] = fo_result("READY");
+        memset(pairs, 0, sizeof(pairs));
+        ASSERT_EQ((int)fo_aggregate(rows, 3, 1000, 7, pairs, 1), 1);
+        ASSERT_EQ(pairs[0].n, (int64_t)3);
+        ASSERT_EQ(pairs[0].land, (int64_t)0);
+        ASSERT_EQ((int)fo_classify(&pairs[0], out), 1);
+        ASSERT_STR_EQ(out[0].relation, "refused_for");
+        ASSERT_EQ(out[0].num, (int64_t)0);
+        ASSERT_EQ(out[0].den, (int64_t)3);
+        PASS();
+    }
+
+    TEST("aggregate: four LAND plus READY is routable at exactly 4/5") {
+        struct fo_row rows[5];
+        struct fo_pair pairs[1];
+        struct fo_observation out[2];
+
+        for (size_t i = 0; i < 4; i++)
+            rows[i] = fo_result("LAND");
+        rows[4] = fo_result("READY");
+        memset(pairs, 0, sizeof(pairs));
+        ASSERT_EQ((int)fo_aggregate(rows, 5, 1000, 7, pairs, 1), 1);
+        ASSERT_EQ(pairs[0].n, (int64_t)5);
+        ASSERT_EQ(pairs[0].land, (int64_t)4);
+        ASSERT_EQ((int)fo_classify(&pairs[0], out), 1);
+        ASSERT_STR_EQ(out[0].relation, "routable_for");
+        ASSERT_EQ(out[0].num, (int64_t)4);
+        ASSERT_EQ(out[0].den, (int64_t)5);
+        PASS();
+    }
+
+_test_next:;
+    return failures;
+}
+
 /* ── ledger parsing: malformed rows and unknown enums ─────────────────── */
 
 static int test_fleet_observe_parse(void)
@@ -146,6 +216,19 @@ static int test_fleet_observe_parse(void)
         ASSERT_STR_EQ(row.executor, "claude-sonnet");
         ASSERT_STR_EQ(row.task_class, "verify");
         ASSERT_STR_EQ(row.outcome, "LAND");
+        PASS();
+    }
+
+    TEST("parse: READY remains a valid stored outcome") {
+        struct fo_row row;
+        char err[128];
+        const char *line =
+            "2026-09-01T09:00:00Z\tresult\tnode1\tt1\tverify\tstory\t"
+            "claude-sonnet\tagent-tool\tsonnet\tmedium\t1\t1\t1\t0\t1\t1\t"
+            "1\tREADY\t0\t0\t0\tnote";
+
+        ASSERT(fo_parse_line(line, 8, &row, err, sizeof(err)));
+        ASSERT_STR_EQ(row.outcome, "READY");
         PASS();
     }
 
@@ -315,6 +398,7 @@ int test_fleet_observe(void)
 {
     int failures = 0;
     failures += test_fleet_observe_classify();
+    failures += test_fleet_observe_ready_accounting();
     failures += test_fleet_observe_parse();
     failures += test_fleet_observe_check();
     failures += test_fleet_observe_dev_know();
