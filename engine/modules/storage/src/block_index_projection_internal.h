@@ -29,6 +29,28 @@
  * applying ~22 headers/s with no checkpoint until the stream ended. */
 #define BIP_WAL_BUDGET_BYTES (32u * 1024u * 1024u)
 
+/* Page cache for the hash-keyed WITHOUT ROWID block_index B-tree.
+ *
+ * Measured on a quiet HDD box (iostat): the consensus-state bundle
+ * exporter sat >20 min at boot in block_index_projection_catch_up()
+ * (called from engine/composition/src/boot_projections.c BEFORE the
+ * BLOCK_INDEX_LOADED stage is recorded) doing 50-66 random reads/s of
+ * 4-16 KB with 24-54 ms await, plus 15 MB/s write bursts at every
+ * 1000-event batch commit — because create_schema() clusters
+ * block_index on `hash BLOB PRIMARY KEY ... WITHOUT ROWID` (a B-tree
+ * keyed on random bytes) and apply_pragmas() previously set only
+ * journal_mode=WAL, synchronous=NORMAL, foreign_keys=ON,
+ * busy_timeout=5000, temp_store=MEMORY. SQLite's default ~2 MB page
+ * cache made every exists_stmt/ins_stmt lookup in catch_up_cb an
+ * uncached random seek.
+ *
+ * PRAGMA cache_size is negative KiB. mmap stays 0: a hash-keyed table
+ * gains nothing from mmap on a rotational disk and the process may be
+ * memory-constrained. Operators on a low-RAM HDD box may lower the
+ * cache with ZCL_BIP_PAGE_CACHE_KIB (decimal in [2048, 4194304]). */
+#define BIP_PAGE_CACHE_KIB 262144
+#define BIP_MMAP_BYTES     0
+
 struct block_index_projection {
     sqlite3       *db;
     event_log_t   *log;

@@ -89,14 +89,42 @@ static void checkpoint_wal(sqlite3 *db, const char *when)
     if (err) sqlite3_free(err);
 }
 
+static long bip_page_cache_kib(void)
+{
+    const char *e = getenv("ZCL_BIP_PAGE_CACHE_KIB");
+    if (!e)
+        return (long)BIP_PAGE_CACHE_KIB;
+    char *end = NULL;
+    long n = strtol(e, &end, 10);
+    if (end != e && *end == '\0' && n >= 2048 && n <= 4194304)
+        return n;
+    LOG_WARN("block_index_projection",
+             "ignoring ZCL_BIP_PAGE_CACHE_KIB=%s "
+             "(want decimal in [2048, 4194304])",
+             e);
+    return (long)BIP_PAGE_CACHE_KIB;
+}
+
 static bool apply_pragmas(sqlite3 *db)
 {
-    static const char *const pragmas[] = {
+    char cache_pragma[64];
+    snprintf(cache_pragma, sizeof(cache_pragma), "PRAGMA cache_size=-%ld",
+             bip_page_cache_kib());
+#if BIP_MMAP_BYTES != 0
+    char mmap_pragma[64];
+    snprintf(mmap_pragma, sizeof(mmap_pragma), "PRAGMA mmap_size=%lld",
+             (long long)BIP_MMAP_BYTES);
+#endif
+    const char *const pragmas[] = {
         "PRAGMA journal_mode=WAL",
         "PRAGMA synchronous=NORMAL",
         "PRAGMA foreign_keys=ON",
         "PRAGMA busy_timeout=5000",
         "PRAGMA temp_store=MEMORY",
+        cache_pragma,
+#if BIP_MMAP_BYTES != 0
+        mmap_pragma,
+#endif
         NULL,
     };
     for (size_t i = 0; pragmas[i]; i++) {

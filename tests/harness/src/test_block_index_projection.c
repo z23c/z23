@@ -32,6 +32,9 @@
  *                                batch of the bound; final TRUNCATE still 0
  *  13. catch_up_wal_reader   — get() from a second thread during catch-up;
  *                                no deadlock, budget still held
+ *  14. page_cache_pragmas    — open applies PRAGMA cache_size=-BIP_PAGE_CACHE_KIB;
+ *                                ZCL_BIP_PAGE_CACHE_KIB=4096 → -4096;
+ *                                out-of-range override is ignored
  *
  * Scratch files live under ./test-tmp/bip_<pid>_<tag>/ in line with the
  * project's no-/tmp convention. */
@@ -52,6 +55,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sqlite3.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -876,6 +880,7 @@ done:
 #define BIP_TEST_WAL_BATCH_SLACK   (8u * 1024u * 1024u)
 #define BIP_TEST_WAL_BATCHES       5
 
+
 static bool emit_n_headers(event_log_t *log, uint32_t seed0, int n)
 {
     for (int i = 0; i < n; i++) {
@@ -1014,6 +1019,73 @@ done:
     return *failures - start_failures;
 }
 
+/* Read PRAGMA cache_size on the projection's own sqlite handle. Per-connection
+ * (a second sqlite3_open of the same file would see SQLite's default cache). */
+static int64_t bip_pragma_cache_size(block_index_projection_t *p)
+{
+    sqlite3_stmt *stmt = NULL;
+    int64_t v = 0;
+    if (!p || sqlite3_prepare_v2(p->db, "PRAGMA cache_size", -1, &stmt, NULL)
+            != SQLITE_OK)
+        return 0;
+    if (sqlite3_step(stmt) == SQLITE_ROW) // raw-sql-ok:test-pragma-read
+        v = sqlite3_column_int64(stmt, 0);
+    sqlite3_finalize(stmt);
+    return v;
+}
+
+static int run_page_cache_pragmas(int *failures)
+{
+    int start_failures = *failures;
+
+    char saved[64];
+    bool had = false;
+    {
+        const char *cur = getenv("ZCL_BIP_PAGE_CACHE_KIB");
+        if (cur) {
+            snprintf(saved, sizeof(saved), "%s", cur);
+            had = true;
+        }
+    }
+    unsetenv("ZCL_BIP_PAGE_CACHE_KIB");
+
+    char dir[256]; test_make_tmpdir(dir, sizeof(dir), "bip", "page_cache");
+    char el_path[320]; snprintf(el_path, sizeof(el_path), "%s/log.bin", dir);
+    char db_path[320]; snprintf(db_path, sizeof(db_path), "%s/p.db", dir);
+
+    event_log_t *log = event_log_open(el_path);
+    BIP_CHECK("page_cache: event log opens", log != NULL);
+    if (!log) goto done;
+
+    block_index_projection_t *p = block_index_projection_open(db_path, log);
+    BIP_CHECK("page_cache: projection opens", p != NULL);
+    if (!p) { event_log_close(log); goto done; }
+    BIP_CHECK("page_cache: default cache_size",
+              bip_pragma_cache_size(p) == -(int64_t)BIP_PAGE_CACHE_KIB);
+    block_index_projection_close(p);
+
+    setenv("ZCL_BIP_PAGE_CACHE_KIB", "4096", 1);
+    p = block_index_projection_open(db_path, log);
+    BIP_CHECK("page_cache: override 4096",
+              p && bip_pragma_cache_size(p) == -4096);
+    if (p) block_index_projection_close(p);
+
+    setenv("ZCL_BIP_PAGE_CACHE_KIB", "1", 1);
+    p = block_index_projection_open(db_path, log);
+    BIP_CHECK("page_cache: out-of-range ignored",
+              p && bip_pragma_cache_size(p) == -(int64_t)BIP_PAGE_CACHE_KIB);
+    if (p) block_index_projection_close(p);
+
+    event_log_close(log);
+    bip_cleanup_dir(dir);
+done:
+    if (had)
+        setenv("ZCL_BIP_PAGE_CACHE_KIB", saved, 1);
+    else
+        unsetenv("ZCL_BIP_PAGE_CACHE_KIB");
+    return *failures - start_failures;
+}
+
 int test_block_index_projection(void)
 {
     printf("\n=== block_index_projection tests ===\n");
@@ -1022,6 +1094,7 @@ int test_block_index_projection(void)
 
     run_payload_roundtrip(&failures);
     run_open_close_clean(&failures);
+    run_page_cache_pragmas(&failures);
     run_single_header_consumed(&failures);
     run_get_by_height(&failures);
     run_iterate_canonical(&failures);
