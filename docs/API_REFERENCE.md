@@ -74,11 +74,11 @@ z23 discover schema <path> --side=input|output
 
 | Catalog fact | Count |
 |---|---|
-| Registry entries (branches + leaves) | 853 |
+| Registry entries (branches + leaves) | 855 |
 | Top-level roots | 14 |
 | Branches | 192 |
-| Leaves (dispatchable command paths) | 661 |
-| … `ready` (live handler in this build) | 590 |
+| Leaves (dispatchable command paths) | 663 |
+| … `ready` (live handler in this build) | 592 |
 | … `compat` (metadata only, names a fallback) | 40 |
 | … `planned` (fail-closed BLOCKED, exit 3) | 31 |
 | … dev-gated 🔧 (`ready` only in `z23-dev`) | 39 |
@@ -108,9 +108,8 @@ Per source file:
 | `engine/composition/commands/story.def` | 5 | 1 | 4 |
 | `engine/composition/commands/fleet_board.def` | 11 | 3 | 8 |
 | `engine/composition/commands/mind.def` | 4 | 1 | 3 |
-| `engine/composition/commands/fleet.def` | 10 | 3 | 7 |
+| `engine/composition/commands/fleet.def` | 12 | 3 | 9 |
 | `engine/composition/commands/fleet_agents.def` | 1 | 0 | 1 |
-| `engine/composition/commands/fleet.def` | 11 | 3 | 8 |
 | `engine/composition/commands/fleet_enrol.def` | 4 | 0 | 4 |
 | `engine/composition/commands/telemetry/root.def` | 6 | 2 | 4 |
 | `engine/composition/commands/telemetry/watch.def` | 1 | 0 | 1 |
@@ -1749,6 +1748,7 @@ represented by its children's sections.
 | Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
 |---|---|---|---|---|---|---|
 | `fleet usage` | ready | read / read / operator · instant/low | `days`, `provider`, `box` | `zcl.fleet_usage.v1` | `z23 fleet usage --days=7` | What every box spent, per provider, over the last days |
+| `fleet objectives` | ready | read / read / operator · foreground/low | `outcomes`, `attempts_dir`, `repo`, `lintc_dir`, `baseline` | `zcl.fleet_objectives.v1` | `z23-dev fleet objectives` | Every objective z23 optimizes, its current value, target, and status |
 | `fleet invite` | ready | mutate / app-write / **owner** · fast/low | **`name`**, `ttl_hours`, `relay` | `zcl.fleet.invite.v1` | `z23 fleet invite --name=studio --ttl-hours=24` | Mint one signed invite line that adds a computer to this fleet |
 | `fleet join` | ready | mutate / app-write / **owner** · fast/low | **`token`**, `onion` | `zcl.fleet.join.v1` | `z23 fleet join <token> [--onion=<v3>.onion]` | Join this computer to a fleet from one pasted invite |
 | `fleet admit` | ready | mutate / app-write / **owner** · fast/low | **`receipt`**, `bridge` | `zcl.fleet.admit.v1` | `z23 fleet admit <receipt>` | Admit one joined computer to this fleet's machine roster |
