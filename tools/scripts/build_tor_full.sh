@@ -18,6 +18,9 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 TOR_DIR="$ROOT/vendor/tor"
+
+# shellcheck source=tools/scripts/tor_provenance_lib.sh
+. "$ROOT/tools/scripts/tor_provenance_lib.sh"
 HOST_OS="$(uname -s 2>/dev/null || echo unknown)"
 
 # VENDOR_TARGET=<triple> cross-builds Tor for another platform: the same
@@ -304,6 +307,40 @@ do
         exit 1
     }
 done
+
+# Bind these bytes to what produced them: the vendor/tor commit (already
+# validated above), the compiler that actually built libtor.a, and the
+# configure flags. Every existing readiness check downstream (tor_archives_
+# ready.sh, ship.sh) only asked "do the archives exist"; this closes that.
+#
+# The compiler is recorded here, from what configure/make ACTUALLY used,
+# rather than assumed from VENDOR_CC/the ambient environment: the ordinary
+# host build (VENDOR_TARGET empty, VENDOR_CC unset) lets Tor's own configure
+# autodetect CC, and nothing before this recorded which compiler it picked
+# (see build_tor_full.sh's own header comment on the cross/pinned-host
+# branches above -- this default-host arm was the one gap).
+if [ -n "$VENDOR_TARGET" ]; then
+    effective_cc="${VENDOR_CC:-$VENDOR_TARGET-gcc}"
+elif [ -n "${VENDOR_CC:-}" ]; then
+    effective_cc="$VENDOR_CC"
+else
+    effective_cc="$(awk -F'=' '/^CC[ \t]*=/{ sub(/^[ \t]*/, "", $2); print $2; exit }' "$TOR_BUILD_DIR/Makefile" 2>/dev/null || true)"
+    [ -n "$effective_cc" ] || effective_cc="${CC:-cc}"
+fi
+zcl_tor_provenance_ensure_bin "$ROOT" || {
+    echo "tor-full: could not build the Tor provenance verifier" >&2
+    exit 1
+}
+compiler_id="$("$ROOT/tools/dev/build-epoch-key.sh" compiler-id "$effective_cc" "$effective_cc")" || {
+    echo "tor-full: could not derive a compiler identity for $effective_cc" >&2
+    exit 1
+}
+configure_args_sha256="$(printf '%s\0' "${configure_opts[@]}" | sha256sum | awk '{print $1}')"
+"$(zcl_tor_provenance_bin "$ROOT")" write "$TOR_BUILD_DIR" \
+    "$actual" "$compiler_id" "$configure_args_sha256" || {
+    echo "tor-full: could not write the Tor provenance manifest" >&2
+    exit 1
+}
 
 commit="$(git -C "$TOR_DIR" rev-parse --short=12 HEAD)"
 echo "tor-full: ready commit=$commit archives=4 embedded_profile=self_contained target=${VENDOR_TARGET:-host} host=$HOST_OS dir=${TOR_BUILD_DIR#"$ROOT"/}"

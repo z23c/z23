@@ -33,7 +33,16 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# The checkout this SCRIPT lives in -- immutable, unlike $ROOT below, which
+# the --selftest fixture below deliberately reassigns (in a subshell) to
+# point have_all()/link_from() at a fake data directory instead of this real
+# one. z23-tor-provenance's own source and binary always live under the real
+# checkout, never under a fixture.
+SCRIPT_ROOT="$ROOT"
 cd "$ROOT"
+
+# shellcheck source=tools/scripts/tor_provenance_lib.sh
+. "$SCRIPT_ROOT/tools/scripts/tor_provenance_lib.sh"
 
 # The Makefile's ZCL_TOR_TREE: one host tree, or one tree per cross triple.
 TRIPLE="${ZCL_CROSS_TRIPLE:-}"
@@ -50,12 +59,34 @@ ARCHIVES=(
     "$TOR_TREE/src/ext/keccak-tiny/libkeccak-tiny.a"
 )
 
+# The ambient compiler build_tor_full.sh's default (uninstrumented) host path
+# would resolve, mirroring VENDOR_CC/cross-triple precedence there: an
+# explicit pin wins, else the ambient $CC, else plain "cc" -- the same
+# fallback chain autoconf's own AC_PROG_CC applies.
+tor_ambient_compiler() {
+    if [ -n "$TRIPLE" ]; then
+        printf '%s\n' "${VENDOR_CC:-$TRIPLE-gcc}"
+    else
+        printf '%s\n' "${VENDOR_CC:-${CC:-cc}}"
+    fi
+}
+
 have_all() {
     local a
     for a in "${ARCHIVES[@]}"; do
         [ -s "$ROOT/$a" ] || return 1
     done
-    return 0
+    # Existence is not enough: bind the archives to the vendor/tor commit,
+    # compiler, and configure flags that produced them (see
+    # tools/tor_provenance.c). A mismatch here -- a stale libtor.a left over
+    # from a different compiler, most concretely -- is treated exactly like
+    # a missing archive: fall through to a real rebuild.
+    zcl_tor_provenance_ensure_bin "$SCRIPT_ROOT" || return 1
+    local cc cid
+    cc="$(tor_ambient_compiler)"
+    command -v "${cc%% *}" >/dev/null 2>&1 || return 1
+    cid="$("$SCRIPT_ROOT/tools/dev/build-epoch-key.sh" compiler-id "$cc" "$cc" 2>/dev/null)" || return 1
+    "$(zcl_tor_provenance_bin "$SCRIPT_ROOT")" check "$ROOT/$TOR_TREE" --compiler-id "$cid" >/dev/null 2>&1
 }
 
 # The one loud line. Nothing else in a build says "this binary cannot see the
@@ -112,6 +143,16 @@ link_from() {
             return 1
         fi
     done
+    # Carry the SOURCE's provenance manifest alongside the copied bytes --
+    # never write a fresh one here. The bytes did not change, so the record
+    # of what produced them (vendor/tor commit, compiler, configure flags)
+    # is still true; only the copy destination changed. If the source has no
+    # manifest at all (an older checkout that predates this), have_all's
+    # provenance check below fails closed and do_ready falls through to a
+    # real build, same as any other mismatch.
+    if [ -s "$src/$TOR_TREE/.provenance" ]; then
+        cp -a --reflink=auto -- "$src/$TOR_TREE/.provenance" "$ROOT/$TOR_TREE/.provenance" 2>/dev/null || true
+    fi
     have_all || return 1
     echo "tor-ready: copied $linked vendored Tor archive(s) from $src (independent inodes; real-Tor link, no rebuild)"
     return 0
@@ -193,6 +234,25 @@ case "${1:-ready}" in
             mkdir -p "$fake_primary/${a%/*}"
             printf 'fixture tor archive bytes\n' >"$fake_primary/$a"
         done
+        # link_from's have_all() now also checks provenance after the copy,
+        # so the fixture primary needs a manifest that matches its own
+        # archive bytes and the compiler id have_all() will independently
+        # recompute -- exactly what a real checkout's build_tor_full.sh run
+        # would have written.
+        zcl_tor_provenance_ensure_bin "$SCRIPT_ROOT" || {
+            echo "tor_archives_ready: selftest FAILED — could not build z23-tor-provenance" >&2
+            exit 1
+        }
+        selftest_cid="$("$SCRIPT_ROOT/tools/dev/build-epoch-key.sh" compiler-id "$(tor_ambient_compiler)" "$(tor_ambient_compiler)" 2>/dev/null)" || {
+            echo "tor_archives_ready: selftest FAILED — could not derive a fixture compiler id" >&2
+            exit 1
+        }
+        "$(zcl_tor_provenance_bin "$SCRIPT_ROOT")" write "$fake_primary/$TOR_TREE" \
+            "$(printf '%040x' 1)" "$selftest_cid" \
+            "$(printf 'selftest-configure-args' | sha256sum | awk '{print $1}')" >/dev/null || {
+            echo "tor_archives_ready: selftest FAILED — could not write fixture provenance manifest" >&2
+            exit 1
+        }
         (
             ROOT="$fake_wt"
             cd "$fake_wt"
@@ -215,6 +275,13 @@ case "${1:-ready}" in
                 exit 1
             fi
         done
+        # link_from must carry the SOURCE's provenance manifest alongside the
+        # archives it copies, never write a fresh one (see the comment above
+        # link_from's copy loop).
+        if ! cmp -s "$fake_primary/$TOR_TREE/.provenance" "$fake_wt/$TOR_TREE/.provenance"; then
+            echo "tor_archives_ready: selftest FAILED — link_from did not carry the source's .provenance manifest byte-for-byte" >&2
+            exit 1
+        fi
         cleanup_fixture
         trap - EXIT
         echo "tor_archives_ready: selftest PASS"
