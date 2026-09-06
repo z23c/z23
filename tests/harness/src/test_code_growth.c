@@ -130,9 +130,15 @@ static int growth_cache_tests(void)
     char directory[512] = "";
     bool directory_path_ok = cache_path_ok && growth_test_path(
         directory, sizeof(directory), root, "lib/demo/src");
-    bool mkdir_ok = directory_path_ok;
+    bool mkdir_ok = directory_path_ok && made;
     if (mkdir_ok) {
-        for (char *at = directory + 1; *at; at++) {
+        /* Walk only below the private temp root. Walking from directory+1 of
+         * an absolute TMPDIR path would platform_directory_ensure("/var"),
+         * and Darwin /var is a symlink (lstat refuses it; mkdir EEXIST). */
+        size_t root_len = strlen(root);
+        char *at = directory + root_len;
+        if (*at == '/') at++;
+        for (; *at; at++) {
             if (*at != '/') continue;
             *at = '\0';
             bool component_ok = platform_directory_ensure(directory, 0700);
