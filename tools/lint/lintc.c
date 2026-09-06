@@ -7766,14 +7766,20 @@ static int sus_split_ws(const char *s, char out[][RS_PATH], int max, int *n)
 
 static int sus_has_seg(const char *path, const char *seg)
 {
+    /* Reproduce the original's find "-not -path" clause exactly: a literal
+     * "/seg/" substring, requiring a slash BEFORE the segment too. A bare
+     * top-of-path prefix match (no leading slash) is NOT excluded by the
+     * original — that matters concretely for LINT_PLANTED_DIR
+     * ("tools/lint/fixtures/planted"), since "tools" is itself one of the
+     * scanned top-level dirs: a stray reached as "tools/lint/fixtures/
+     * planted/x.c" has no leading slash before "tools" and the original's
+     * fnmatch pattern does not match it. A prefix-match branch here would
+     * silently NARROW this gate's reporting versus the original. */
     char needle[192];
     int n = snprintf(needle, sizeof needle, "/%s/", seg);
     if (n < 0 || (size_t)n >= sizeof needle)
         return 0;
-    if (strstr(path, needle) != NULL)
-        return 1;
-    size_t sl = strlen(seg);
-    return strncmp(path, seg, sl) == 0 && path[sl] == '/';
+    return strstr(path, needle) != NULL;
 }
 
 static int sus_fix_comp(regex_t *re)
@@ -7963,7 +7969,11 @@ static int check_no_stray_untracked_source_selftest(void)
     if (cr)
         return cr;
     int bad = 0;
-    bad |= !sus_excluded("tools/lint/fixtures/planted/foo.c", &re);
+    /* A bare top-of-path occurrence (no leading slash before "tools") is
+     * NOT excluded, matching the original's find "-not -path" fnmatch
+     * semantics for this clause, which requires a slash before the
+     * segment too. */
+    bad |= sus_excluded("tools/lint/fixtures/planted/foo.c", &re);
     bad |= !sus_excluded("x/tools/lint/fixtures/planted/foo.c", &re);
     bad |= !sus_excluded("core/foo/build/x.c", &re);
     bad |= !sus_excluded("engine/vendor/x.c", &re);
