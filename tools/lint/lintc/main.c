@@ -109,6 +109,10 @@ static const struct lint_gate k_gates[] = {
     { "check-route-command-parity", check_route_command_parity_run,
       check_route_command_parity_selftest },
     { "check-flag-registry", check_flag_registry_run, check_flag_registry_selftest },
+    { "check-rpc-registrar", check_rpc_registrar_run,
+      check_rpc_registrar_selftest },
+    { "check-coins-lookup-nullcheck", check_coins_lookup_nullcheck_run,
+      check_coins_lookup_nullcheck_selftest },
 };
 
 int main(int argc, char **argv)
