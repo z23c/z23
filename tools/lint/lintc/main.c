@@ -106,6 +106,8 @@ static const struct lint_gate k_gates[] = {
       check_zclassicd_reach_allowlist_selftest },
     { "check-file-purpose", check_file_purpose_run,
       check_file_purpose_selftest },
+    { "check-route-command-parity", check_route_command_parity_run,
+      check_route_command_parity_selftest },
 };
 
 int main(int argc, char **argv)

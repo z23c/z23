@@ -258,5 +258,7 @@ int check_zclassicd_reach_allowlist_run(int argc, char **argv);
 int check_zclassicd_reach_allowlist_selftest(void);
 int check_file_purpose_run(int argc, char **argv);
 int check_file_purpose_selftest(void);
+int check_route_command_parity_run(int argc, char **argv);
+int check_route_command_parity_selftest(void);
 
 #endif

@@ -5313,6 +5313,7 @@ LINTC_SRCS = tools/lint/lintc/lib.c tools/lint/lintc/gate_boot_wiring.c tools/li
     tools/lint/lintc/gate_framework_shape.c \
     tools/lint/lintc/gate_zclassicd_reach.c \
     tools/lint/lintc/gate_file_purpose.c \
+    tools/lint/lintc/gate_route_command_parity.c \
     tools/lint/lintc/main.c
 LINTC_OBJS = $(LINTC_SRCS:tools/lint/lintc/%.c=build/lintc-obj/%.o)
 # Apple Clang enables -Wunused-but-set-variable under -Wextra -Werror for
@@ -12309,7 +12310,7 @@ check-no-new-coin-backfill-caller: $(LINTC_TOOL)
 # honest "none:<reason>" listed in the shrink-only
 # tools/lint/route_command_parity_baseline.txt. A new unmapped route or a
 # command_path that doesn't resolve to a real leaf fails the gate.
-check-route-command-parity:
+check-route-command-parity: $(LINTC_TOOL)
 	@echo "══ LINT: REST route <-> native command parity (OS-B3b) ══"
 	@./tools/lint/check_route_command_parity.sh .
 
