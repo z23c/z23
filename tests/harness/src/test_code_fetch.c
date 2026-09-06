@@ -41,6 +41,7 @@
 
 #include <pthread.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 #define FETCH_FIX "test-tmp/ci_fetch"
 #define FETCH_A   FETCH_FIX "/tree_a"
@@ -318,6 +319,19 @@ static int test_incremental_copy_allocation_failure(void)
         ASSERT(fetch_mk_write(FETCH_B, "src/fetch_alpha.c",
             "/* src/fetch_alpha.c — allocation-failure edit. */\n"
             "int fetch_alpha(void)\n{\n    return 3;\n}\n"));
+
+        /* A prior incremental publish may have left index.kv.spare. Adopting
+         * it skips the publication-critical clone, so the one-shot
+         * codeindex_store_copy fault would fire in best-effort spare_publish
+         * after a successful open. Remove the spare so the shipped malloc
+         * clone is the path that must fail closed. */
+        {
+            char spare[4096];
+            int n = snprintf(spare, sizeof(spare),
+                             "%s/.codeindex/index.kv.spare", FETCH_B);
+            ASSERT(n > 0 && (size_t)n < sizeof(spare));
+            (void)unlink(spare);
+        }
 
         zcl_alloc_fault_fail_next("codeindex_store_copy");
         struct codeindex *index = codeindex_open(FETCH_B);
