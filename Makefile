@@ -7296,7 +7296,7 @@ simnet-fuzz-sweep: wire_sweep
 # Gate: the simnet_wire harness must be pure in-memory — no real sockets.
 # See tools/scripts/check_wire_harness_security_gate.sh.
 .PHONY: check-wire-harness-security-gate
-check-wire-harness-security-gate:
+check-wire-harness-security-gate: $(LINTC_TOOL)
 	@echo "══ LINT: simnet_wire harness has zero real-network calls ══"
 	@bash tools/scripts/check_wire_harness_security_gate.sh
 
@@ -7624,7 +7624,7 @@ check-fleet-source-status:
 	@tools/scripts/check_fleet_source_status.sh
 
 .PHONY: check-tor-dial-prewarm
-check-tor-dial-prewarm:
+check-tor-dial-prewarm: $(LINTC_TOOL)
 	@tools/scripts/check_tor_dial_prewarm.sh
 
 # Physical native-agent UI acceptance driver. It links only the workstation's

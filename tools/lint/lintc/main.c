@@ -113,6 +113,10 @@ static const struct lint_gate k_gates[] = {
       check_rpc_registrar_selftest },
     { "check-coins-lookup-nullcheck", check_coins_lookup_nullcheck_run,
       check_coins_lookup_nullcheck_selftest },
+    { "check-wire-harness-security-gate", check_wire_harness_security_gate_run,
+      check_wire_harness_security_gate_selftest },
+    { "check-tor-dial-prewarm", check_tor_dial_prewarm_run,
+      check_tor_dial_prewarm_selftest },
 };
 
 int main(int argc, char **argv)
