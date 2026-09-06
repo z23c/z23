@@ -13,6 +13,7 @@
 #include "base/serialize_le.h"
 #include "json/json.h"
 #include "platform/directory_compat.h"
+#include "platform/disk_space.h"
 #include "platform/file_clone.h"
 #include "platform/logical_cpu.h"
 #include "platform/private_directory.h"
@@ -1697,6 +1698,21 @@ static bool warm_tag_name(const char *name)
     return true;
 }
 
+/* How many generation directories the pool already holds. Read only when a
+ * RAM reservation was refused: the log line names the count so a full pool
+ * is diagnosable from the log alone instead of a manual `ls` weeks later. */
+static size_t generation_dir_count(const char *parent)
+{
+    DIR *dir = opendir(parent);
+    if (!dir) return 0;
+    size_t count = 0;
+    for (struct dirent *entry = readdir(dir); entry; entry = readdir(dir)) {
+        if (warm_tag_name(entry->d_name)) count++;
+    }
+    (void)closedir(dir);
+    return count;
+}
+
 enum warm_seed_class {
     WARM_SEED_SKIP,
     WARM_SEED_LINK,
@@ -3190,12 +3206,28 @@ static bool generation_prepare(const struct proof_paths *paths,
         return false;
     }
     if (paths->phases[0]) {
-        (void)zcl_dev_proof_phase_note(
-            paths->phases, "generation_storage",
-            ram_backed ? "ram"
-                       : ram_reserve_refused
-                             ? "disk reason=ram_reserve_refused"
-                             : "disk");
+        char storage_note[192];
+        if (ram_reserve_refused) {
+            uint64_t ram_free_bytes = 0;
+            (void)platform_disk_space_available(ram_root, &ram_free_bytes);
+            char ram_pool[PATH_MAX];
+            size_t ram_pool_count = 0;
+            if (snprintf(ram_pool, sizeof(ram_pool), "%s/z23p", ram_root) <
+                (int)sizeof(ram_pool))
+                ram_pool_count = generation_dir_count(ram_pool);
+            (void)snprintf(storage_note, sizeof(storage_note),
+                           "disk reason=ram_reserve_refused "
+                           "requested_bytes=%llu free_bytes=%llu "
+                           "generations=%zu",
+                           (unsigned long long)proof_ram_reserve_bytes(),
+                           (unsigned long long)ram_free_bytes,
+                           ram_pool_count);
+        } else {
+            (void)snprintf(storage_note, sizeof(storage_note), "%s",
+                           ram_backed ? "ram" : "disk");
+        }
+        (void)zcl_dev_proof_phase_note(paths->phases, "generation_storage",
+                                       storage_note);
         (void)zcl_dev_proof_phase_note(paths->phases, "generation_root",
                                        generation);
     }
