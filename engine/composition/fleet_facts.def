@@ -84,6 +84,7 @@ FLEET_CONTEXT("observation")
 
 /* ── vocabulary ────────────────────────────────────────────────────────── */
 FLEET_TERM("audit-only")
+FLEET_TERM("base-relative-diff")
 FLEET_TERM("box")
 FLEET_TERM("branch-budget")
 FLEET_TERM("bulk-copy-while-serving")
@@ -97,19 +98,24 @@ FLEET_TERM("dev-describe-branch")
 FLEET_TERM("docs/agent/TRAIN_PROTOCOL.md")
 FLEET_TERM("engine/composition/fleet_facts.def")
 FLEET_TERM("executor-routing")
+FLEET_TERM("fifteen-hundred-lines")
+FLEET_TERM("file-size-ceiling")
 FLEET_TERM("finisher")
 FLEET_TERM("finishing-rebase")
 FLEET_TERM("four-lanes")
 FLEET_TERM("full-build-epoch")
 FLEET_TERM("gate-fixing")
+FLEET_TERM("gate-port-pair")
 FLEET_TERM("git-stash")
 FLEET_TERM("glm-5.3")
 FLEET_TERM("glm-5.3-flash")
 FLEET_TERM("grok")
+FLEET_TERM("grok-queue-judge")
 FLEET_TERM("haiku")
 FLEET_TERM("hard-implementation")
 FLEET_TERM("identity-refusal")
 FLEET_TERM("impact-planner-refusal")
+FLEET_TERM("landing-failure")
 FLEET_TERM("landing-worktree")
 FLEET_TERM("lane")
 FLEET_TERM("lint-fast-green")
@@ -121,12 +127,16 @@ FLEET_TERM("multi-file-implementation")
 FLEET_TERM("muse")
 FLEET_TERM("not-fast-forward")
 FLEET_TERM("one-driver")
+FLEET_TERM("one-make")
 FLEET_TERM("one-proof")
 FLEET_TERM("one-worktree")
 FLEET_TERM("opus")
 FLEET_TERM("pinned-test")
 FLEET_TERM("proof")
+FLEET_TERM("proof-accounting")
+FLEET_TERM("proof-failed-marker")
 FLEET_TERM("proof-generation-root")
+FLEET_TERM("proof-lock")
 FLEET_TERM("push")
 FLEET_TERM("ram-backed-filesystem")
 FLEET_TERM("ram-generation-root")
@@ -139,10 +149,13 @@ FLEET_TERM("ship-box-toolchain")
 FLEET_TERM("signature")
 FLEET_TERM("single-file-pinned-test")
 FLEET_TERM("sonnet")
+FLEET_TERM("stale-installed-hook")
+FLEET_TERM("stray-lane-watcher")
 FLEET_TERM("tests/harness/src/test_boot_phase.c")
 FLEET_TERM("test_boot_phase")
 FLEET_TERM("train")
 FLEET_TERM("train-protocol")
+FLEET_TERM("unobserved-leg")
 FLEET_TERM("unsigned-commit")
 FLEET_TERM("verification")
 
@@ -171,10 +184,14 @@ FLEET_FACT("glm-5.3-flash", "requires", "pinned-test", "doctrine", "DOCTRINE",
            "a registered group in tools/dev/test_group_catalog.def that runs, not a test file that merely exists")
 FLEET_FACT("grok", "handles_well", "single-file-pinned-test", "doctrine", "DOCTRINE",
            "one function, one table row, one test: the lint-gate ports and the bip page cache each landed in one round; brief it with file:line, the literal output strings, and the mutation check")
+FLEET_FACT("grok", "handles_well", "gate-port-pair", "doctrine", "DOCTRINE",
+           "two small self-contained lint gates in one job land in one round at the cost of one; pair gates that source no helper script and pin both output strings")
 FLEET_FACT("grok", "handles_poorly", "seam-finding", "doctrine", "DOCTRINE",
            "a brief that says find where X is registered burns every round; name the seam yourself (file, function, table row) before queueing")
 FLEET_FACT("grok", "requires", "finisher", "doctrine", "DOCTRINE",
            "a rounds-exhausted verdict is judged, not trusted: rerun the judged group in the unit worktree first; two of two such verdicts were stale judge logs over a fix already committed")
+FLEET_FACT("grok-queue-judge", "requires", "base-relative-diff", "doctrine", "DOCTRINE",
+           "a judge that diffs only the dirty tree reports a committed second-round fix as no change and hands the verifier a stale log; count commits since BASE plus dirty files, and rebuild dev-bin before the judged group")
 FLEET_FACT("muse", "handles_well", "long-wall-implementation", "doctrine", "DOCTRINE",
            "the only tier given a two-hour wall; specify interfaces (file, flags, error names, fixtures), never goals")
 FLEET_FACT("muse", "requires", "finisher", "doctrine", "DOCTRINE",
@@ -191,6 +208,8 @@ FLEET_FACT("box", "max", "one-proof", "lane_state:proof", "DOCTRINE",
            "one proof per box at a time; that lock is what makes a second proof's verdict mean anything")
 FLEET_FACT("lane", "max", "one-worktree", "doctrine", "DOCTRINE",
            "one worktree per lane, and never two lanes in one checkout")
+FLEET_FACT("lane", "max", "one-make", "box:any", "DOCTRINE",
+           "two make invocations running at once in one worktree rebuild objects under a live test group and report failures the code does not have; an agent that sees an unexplained engine failure first checks for its own second make")
 FLEET_FACT("commit", "requires", "signature", "doctrine", "DOCTRINE",
            "every commit is signed; git log --format=%G? must show no N before anything is proven")
 FLEET_FACT("main", "refuses_when", "unsigned-commit", "doctrine", "DOCTRINE",
@@ -207,6 +226,8 @@ FLEET_FACT("live-datadir", "refuses_when", "bulk-copy-while-serving", "box:any",
            "a 34 GB cp -a of a live datadir on the box serving it stalled the projection worker past its deadline and the watchdog killed the public node; copy from a stopped node or from a leaf")
 FLEET_FACT("dev-describe-branch", "max", "branch-budget", "doctrine", "DOCTRINE",
            "ZCL_COMMAND_BRANCH_BUDGET caps one describe branch at 3072 bytes and the dev branch sat 14 bytes under it on 2026-09-06; a new dev.* command needs a trimmed summary or a regrouping first")
+FLEET_FACT("file-size-ceiling", "max", "fifteen-hundred-lines", "doctrine", "DOCTRINE",
+           "check-file-size-ceiling fails any source file above 1500 lines and the baseline shrinks, so a three-hundred-line feature in a thirteen-hundred-line file needs the author to split along a seam before a verifier can say LAND")
 
 /* ── proof traps: a failure signature, and what it actually means ──────── */
 FLEET_FACT("proof", "refuses_when", "self-skip", "lane_state:proof", "DOCTRINE",
@@ -225,6 +246,16 @@ FLEET_FACT("check-windows-acceptance", "trap_signature", "ship-box-toolchain", "
            "one box's mingw resolves clock_gettime and another's does not; a green acceptance on the assembling box proves nothing about the shipping box, so the gate that counts runs where make ship runs")
 FLEET_FACT("shared-inode", "trap_signature", "identity-refusal", "lane_state:proof", "DOCTRINE",
            "replacing a hardlinked vendor input bumps the shared inode's ctime and every in-flight proof whose seal covered it refuses on identity; dedupe only between landings, and copy with reflink, never link")
+FLEET_FACT("landing-worktree", "trap_signature", "stale-installed-hook", "lane_state:train", "DOCTRINE",
+           "landing-worktree pre-push is a symlink into build/githooks; proof rebuild of z23-git-hook trips check_git_hooks_installed and test_make_lint_gates_realroot; check out the tip and make install-hooks before every submit")
+FLEET_FACT("proof-accounting", "refuses_when", "self-skip", "lane_state:proof", "DOCTRINE",
+           "test_log_account admits a landing only when ran+reused=selected and failed, skipped, unobserved are zero; SKIP because the host lacks a feature fails the landing, so observe what the host offers instead of skipping")
+FLEET_FACT("proof-accounting", "refuses_when", "unobserved-leg", "lane_state:proof", "DOCTRINE",
+           "an UNOBSERVED leg (tor bootstrap missed its window at load thirty) counts like a failure; the runner reruns an UNOBSERVED-only pass once and never caches it, and a load-sensitive probe says so in its own output")
+FLEET_FACT("proof-lock", "trap_signature", "stray-lane-watcher", "lane_state:proof", "DOCTRINE",
+           "lane commits fork a z23-dev proof-ensure watcher holding the per-box proof lock; landing at resident_proof_request_queued with no attempt dir and empty leases waits on one; kill by exact pid, never by pattern, before submit")
+FLEET_FACT("landing-failure", "trap_signature", "proof-failed-marker", "lane_state:train", "DOCTRINE",
+           "the reason is .cache/zcl-dev-proof/<tip>-<base>.failed, the step and exit are in the newest attempts/phases.txt, and failed groups with their repro line are in logs/*.test.log; read those three before touching the train")
 
 /* ── where the rest of the doctrine is written down ────────────────────── */
 FLEET_FACT("executor-routing", "lives_at", "engine/composition/fleet_facts.def", "doctrine", "DOCTRINE",

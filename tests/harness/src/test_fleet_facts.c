@@ -205,6 +205,32 @@ static int test_fleet_facts_table(void)
         PASS();
     }
 
+    TEST("fleet_facts: proof-lock trap_signature is stray-lane-watcher and landing-worktree trap_signature is stale-installed-hook") {
+        struct zcl_fleet_facts_answer_v1 lock, hook;
+        bool saw_watcher = false;
+        bool saw_hook = false;
+
+        ASSERT(zcl_fleet_facts_query("proof-lock", "trap_signature", NULL,
+                                     ZCL_FLEET_FACTS_MAX_ROWS, &lock));
+        ASSERT(!lock.unknown);
+        for (size_t i = 0; i < lock.row_count; i++) {
+            ASSERT(lock.rows[i].confidence == ZCL_FLEET_CONFIDENCE_DOCTRINE);
+            if (strcmp(lock.rows[i].object, "stray-lane-watcher") == 0)
+                saw_watcher = true;
+        }
+        ASSERT(saw_watcher);
+
+        ASSERT(zcl_fleet_facts_query("landing-worktree", "trap_signature", NULL,
+                                     ZCL_FLEET_FACTS_MAX_ROWS, &hook));
+        ASSERT(!hook.unknown);
+        for (size_t i = 0; i < hook.row_count; i++) {
+            if (strcmp(hook.rows[i].object, "stale-installed-hook") == 0)
+                saw_hook = true;
+        }
+        ASSERT(saw_hook);
+        PASS();
+    }
+
     TEST("fleet_facts: the context filter selects one microtheory") {
         struct zcl_fleet_facts_answer_v1 proof, doctrine;
         ASSERT(zcl_fleet_facts_query("test_boot_phase", NULL, "lane_state:proof",
