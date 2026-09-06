@@ -273,6 +273,7 @@ gate_command() {
         check-vcs-no-git)                  echo 'tools/scripts/check_vcs_no_git.sh' ;;
         check-vcs-no-sha1)                 echo 'tools/scripts/check_vcs_no_sha1.sh && tools/dev/source-identity-selftest.sh' ;;
         check-vendor-provenance)           echo 'tools/scripts/test_vendor_provenance.sh' ;;
+        check-tor-provenance)              echo './tools/lint/check_tor_provenance.sh' ;;
         check-command-contract)            echo './tools/lint/check_command_contract.sh' ;;
         check-command-availability-truthful) echo './tools/lint/check_command_availability_truthful.sh' ;;
         check-command-input-keys)          echo './tools/lint/check_command_input_keys.sh' ;;

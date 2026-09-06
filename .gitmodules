@@ -1,3 +1,4 @@
 [submodule "vendor/tor"]
 	path = vendor/tor
 	url = https://github.com/RhettCreighton/tor.git
+	ignore = untracked

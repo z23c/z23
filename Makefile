@@ -659,6 +659,12 @@ ZCL_NODECTL_BIN = $(BIN_DIR)/zcl-nodectl
 # Gate E1 file-size policy checker (rule near check-file-size-ceiling below).
 # Declared here because the test binaries take it as an order-only prereq.
 FILE_SIZE_POLICY_BIN = $(BIN_DIR)/file_size_policy
+# Tor archive provenance verifier — binds the four bundled Tor archives to the
+# vendor/tor commit, compiler identity, and configure flags that produced
+# them, instead of every readiness check asking only "do the bytes exist"
+# (rule near check-tor-provenance below). Declared here, before its first use
+# in check-ship-remote-transaction's prerequisite list further down.
+TOR_PROVENANCE_BIN = $(BIN_DIR)/z23-tor-provenance
 
 # POSIX-only operator tools: zcl-nodectl uses fork/signals/arpa/inet.h and
 # zclassic-cli uses poll.h. They are not in the native Windows node path, so
@@ -1895,7 +1901,7 @@ $(VENDOR_BOOTSTRAP_MK): vendor-ready
 	printf '%s\n' '# generated: vendor inputs established before source identity capture' > "$$tmp"; \
 	mv -f -- "$$tmp" "$@"; \
 	trap - EXIT HUP INT TERM
-check-vendor-provenance:
+check-vendor-provenance: $(TOR_PROVENANCE_BIN)
 	@tools/scripts/test_vendor_provenance.sh
 	@tools/scripts/build_vendor_offline_selftest.sh
 	@tools/scripts/repro_network_policy_selftest.sh
@@ -1904,6 +1910,7 @@ check-vendor-provenance:
 	@sha256sum --check vendor/typography/SHA256SUMS
 	@sha256sum --check vendor/x11/SHA256SUMS
 	@sha256sum --check vendor/freebsd-sh/SHA256SUMS
+	@./tools/lint/check_tor_provenance.sh
 
 # Reusable native presentation package. This deliberately has a tiny source
 # closure: fourteen project TUs plus pinned RGFW headers, with no node/app objects.
@@ -12410,7 +12417,7 @@ check-verification-coverage:
 # and its systemd identity intent; the success case must qualify the /proc
 # executable bytes and status command before considering activation complete.
 # jsonq: ship.sh's release-candidate real-Tor gate reads candidate JSON with it.
-check-ship-remote-transaction: jsonq
+check-ship-remote-transaction: jsonq $(TOR_PROVENANCE_BIN)
 	@echo "══ LINT: remote ship transaction rollback + process qualification ══"
 	@./tools/ship.sh --selftest
 	@./tools/ship_selftest.sh
@@ -13059,6 +13066,28 @@ check-tor-full-default:
 	@./tools/lint/check_tor_full_default.sh --selftest
 	@./tools/lint/check_tor_full_default.sh
 
+# The Tor archive provenance verifier itself — no engine includes, links only
+# zsha256 (self-contained SHA-256, no dependencies beyond libc).
+TOR_PROVENANCE_SRCS = tools/tor_provenance.c \
+    contexts/commons/packages/zsha256/src/zsha256.c
+$(TOR_PROVENANCE_BIN): $(TOR_PROVENANCE_SRCS)
+	@mkdir -p $(dir $@)
+	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
+	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) \
+	    -Icontexts/commons/packages/zsha256/include \
+	    -o $@ $(TOR_PROVENANCE_SRCS)
+
+.PHONY: tools/tor-provenance check-tor-provenance
+tools/tor-provenance: $(TOR_PROVENANCE_BIN)
+
+# Gate — the bundled Tor archives are bound to the vendor/tor commit and
+# archive bytes that produced them, not merely present and non-empty (see
+# tools/tor_provenance.c). check-vendor-provenance also runs this so Tor is
+# covered where the other vendor trees already are.
+check-tor-provenance: $(TOR_PROVENANCE_BIN)
+	@echo "══ LINT: bundled Tor archives are bound to their commit + bytes ══"
+	@./tools/lint/check_tor_provenance.sh
+
 # Adding a lint gate is a TWO-FILE operation and nothing enforced the second
 # file: the Makefile gets a `check-*:` target plus a LINT_GATES line, and
 # tools/lint/run_lint.sh's gate_command() case table gets the invocation,
@@ -13282,6 +13311,7 @@ LINT_GATES := \
     check-vcs-no-git \
     check-vcs-no-sha1 \
     check-vendor-provenance \
+    check-tor-provenance \
     check-command-contract \
     check-command-availability-truthful \
     check-command-input-keys \
@@ -13332,7 +13362,8 @@ LINT_BUILT_PREREQS = tools/core_seal tools/check_observability_pairing \
 	$(ZCODE_PACKAGE_REGISTRY_CHECK_BIN) $(JSONQ_BIN) \
 	$(FILE_SIZE_POLICY_BIN) $(Z23_BOOTSTRAP_BIN) $(EQUIHASH_FACT_TOOL) \
 	$(BIN_DIR)/z23_bounded_run $(BIN_DIR)/agent_sha3 $(RETRIEVAL_EVAL_BIN) \
-	$(BIN_DIR)/z23-fleet-observe
+	$(BIN_DIR)/z23-fleet-observe \
+	$(TOR_PROVENANCE_BIN)
 lint lint-cached lint-cold-audit: $(ZCLASSIC23_DEV_BIN) \
 	$(DEV_PACKAGE_VERIFY_BIN) $(LINT_BUILT_PREREQS)
 
