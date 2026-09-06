@@ -10,10 +10,11 @@
 /* WHAT THIS IS. engine/composition/fleet_facts.def holds what the fleet knows
  * about itself — which executor handles which unit kind, what the landing
  * rules are, which proof failure signature names which trap. This module is
- * the only reader of that table, and `dev.know` is the only caller. There is
- * no inference here: a row is answered or it is not, and "not" is answered as
- * one UNKNOWN row rather than as an empty result, so an ask is never met with
- * silence a caller can mistake for a denial.
+ * the only reader of that table. `dev.know` and `dev.fleet.mind.ask` (the
+ * `executor_for` and `trap_of` questions) query it; nothing else may parse
+ * the .def. There is no inference here: a row is answered or it is not, and
+ * "not" is answered as one UNKNOWN row rather than as an empty result, so an
+ * ask is never met with silence a caller can mistake for a denial.
  *
  * WHAT THIS IS NOT. It is not the ontology module. cognition/modules/ontology
  * is a fixed four-term Horn kernel whose vocabulary several tests pin; this

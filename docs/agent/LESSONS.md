@@ -19,7 +19,7 @@ remains inspectable. There are no open lessons at this baseline.
 
 Re-derive every count you touch from the tree itself and say which command produced it.
 
-Ask `z23 dev know --subject=<term>` before acting on a subject: which executor handles a unit kind, what a train and a proof require, and which failure signature names which trap are rows in `engine/composition/fleet_facts.def`, not prose to re-read here.
+Ask `z23 dev know --subject=<term>` before acting on a subject: which executor handles a unit kind, what a train and a proof require, and which failure signature names which trap are rows in `engine/composition/fleet_facts.def`, not prose to re-read here. `z23 dev fleet mind ask executor_for <term>` and `z23 dev fleet mind ask trap_of <term>` are the same table through the mind's question vocabulary.
 
 # Territory engine/modules/engine
 

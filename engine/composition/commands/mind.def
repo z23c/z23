@@ -32,21 +32,24 @@ ZCL_COMMAND_BRANCH("dev.fleet.mind", "dev.fleet",
 ZCL_COMMAND_READY_READ(
     "dev.fleet.mind.ask", "dev.fleet.mind", "",
     "Ask this node's mind one bounded question about the tree",
-    "Answers one of six questions from the PUBLISHED index generation and "
-    "never rebuilds. `where_is` gives the exact definition site of a symbol, "
+    "Answers one of six questions and never rebuilds. `where_is` and `owns` "
+    "read the PUBLISHED index generation. `where_is` gives the exact "
+    "definition site of a symbol, "
     "falling back to near names when nothing matches exactly. `owns` gives "
     "the group a file or a symbol's defining file belongs to; the full "
     "territory scorecard is `code territory`. `tests_for` names the groups "
     "the shared impact rules match for a path, and points at `code tests` "
     "for the single group a proof routes to, because that routing policy is "
-    "owned there and is not restated here. `executor_for`, `trap_of` and "
-    "`next_passage` return not_yet_available: the fact rows and the story "
-    "walker they need are not in this tree, and inventing an answer would "
-    "fabricate exactly what those lanes exist to measure. A generation the "
+    "owned there and is not restated here. `executor_for` and `trap_of` "
+    "answer from the fleet fact table through the same query `dev.know` "
+    "uses: every row about a subject, or only its trap_signature rows. An "
+    "unanswered subject is one UNKNOWN row, never silence. `next_passage` "
+    "returns not_yet_available: the story walker is not in this tree. A "
+    "generation the "
     "source tree has moved past is refused as INDEX_STALE carrying the index "
     "root, its age, and the owning mind's last heartbeat — never answered "
     "and never rebuilt.", 8192,
-    "mind,ask,where,owns,tests,symbol,index,stale",
+    "mind,ask,where,owns,tests,symbol,index,stale,executor,trap,fleet",
     "zcl.mind_ask_input.v1", "zcl.mind_answer.v1",
     "kind,subject", "kind,subject",
     "z23 dev fleet mind ask where_is codeindex_open",

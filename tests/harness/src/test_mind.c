@@ -23,6 +23,9 @@
  *   5. peer capsule — a mind row rides a signed mesh-status receipt, survives
  *      encode/decode, and parses back; an expired receipt is refused and
  *      takes its mind row with it.
+ *   6. fleet fact questions — executor_for and trap_of answer from the same
+ *      table dev.know reads; an unknown subject is UNKNOWN, not
+ *      not_yet_available; next_passage still names the missing story walker.
  *
  * All scratch work happens under ./test-tmp/ (project no-/tmp convention),
  * with ZCL_MIND_STATE_DIR pointed at the fixture so nothing touches the
@@ -40,8 +43,11 @@
 
 #include "codeindex/codeindex.h"
 #include "codeindex/codeindex_build.h"
+#include "command/native_command.h"
+#include "config/command_catalog.h"
 #include "crypto/ed25519.h"
 #include "json/json.h"
+#include "kernel/command_registry.h"
 #include "mind.h"
 #include "session/mesh_status_proto.h"
 
@@ -508,6 +514,148 @@ static int test_mind_peer_capsule(void)
     return failures;
 }
 
+/* ── 6. fleet fact questions through mind.ask ─────────────────────────── */
+
+#define MIND_ASK_PATH "dev.fleet.mind.ask"
+
+struct mind_ask_call {
+    struct json_value input;
+    struct zcl_command_request request;
+    struct zcl_command_reply reply;
+};
+
+static void mind_ask_begin(struct mind_ask_call *c)
+{
+    json_init(&c->input);
+    json_set_object(&c->input);
+    memset(&c->request, 0, sizeof(c->request));
+    c->request.input = &c->input;
+    c->request.spec =
+        zcl_command_registry_find(zcl_command_catalog(), MIND_ASK_PATH, NULL);
+    zcl_command_reply_init(&c->reply, "zcl.mind_answer.v1");
+}
+
+static bool mind_ask_run(struct mind_ask_call *c)
+{
+    char why[192];
+
+    if (c->request.spec &&
+        !zcl_command_registry_input_validate(c->request.spec, &c->input, why,
+                                             sizeof(why))) {
+        printf("[input rejected: %s] ", why);
+        return false;
+    }
+    zcl_native_handle_dev_mind_ask(&c->request, &c->reply);
+    return true;
+}
+
+static void mind_ask_end(struct mind_ask_call *c)
+{
+    zcl_command_reply_free(&c->reply);
+    json_free(&c->input);
+}
+
+static const struct json_value *mind_ask_get(const struct mind_ask_call *c,
+                                             const char *key)
+{
+    return json_get(&c->reply.data, key);
+}
+
+static const char *mind_ask_str(const struct mind_ask_call *c, const char *key)
+{
+    const struct json_value *v = mind_ask_get(c, key);
+    return v && v->type == JSON_STR && json_get_str(v) ? json_get_str(v) : "";
+}
+
+static const char *mind_ask_row_str(const struct mind_ask_call *c, size_t index,
+                                    const char *key)
+{
+    const struct json_value *rows = mind_ask_get(c, "rows");
+    const struct json_value *row = rows ? json_at(rows, index) : NULL;
+    const struct json_value *v = row ? json_get(row, key) : NULL;
+    return v && v->type == JSON_STR && json_get_str(v) ? json_get_str(v) : "";
+}
+
+static int64_t mind_ask_row_count(const struct mind_ask_call *c)
+{
+    const struct json_value *v = mind_ask_get(c, "row_count");
+    return v && v->type == JSON_INT ? json_get_int(v) : -1;
+}
+
+static int test_mind_ask_fleet_facts(void)
+{
+    int failures = 0;
+
+    TEST("mind.ask: executor_for sonnet answers from the fleet table, "
+         "never not_yet_available") {
+        struct mind_ask_call c;
+        bool saw_handles_well = false;
+
+        mind_ask_begin(&c);
+        (void)json_push_kv_str(&c.input, "kind", "executor_for");
+        (void)json_push_kv_str(&c.input, "subject", "sonnet");
+        ASSERT(mind_ask_run(&c));
+        ASSERT_EQ((int)c.reply.status, (int)ZCL_COMMAND_STATUS_PASSED);
+        ASSERT(mind_ask_get(&c, "not_yet_available") == NULL);
+        ASSERT(mind_ask_row_count(&c) >= 2);
+        ASSERT(strstr(mind_ask_str(&c, "summary"), "dev know") != NULL);
+        for (int64_t i = 0; i < mind_ask_row_count(&c); i++) {
+            if (strcmp(mind_ask_row_str(&c, (size_t)i, "where"),
+                       "handles_well") == 0)
+                saw_handles_well = true;
+        }
+        ASSERT(saw_handles_well);
+        mind_ask_end(&c);
+        PASS();
+    }
+
+    TEST("mind.ask: trap_of names the trap, and an unknown subject is "
+         "UNKNOWN rather than not_yet_available") {
+        struct mind_ask_call c;
+
+        mind_ask_begin(&c);
+        (void)json_push_kv_str(&c.input, "kind", "trap_of");
+        (void)json_push_kv_str(&c.input, "subject", "test_boot_phase");
+        ASSERT(mind_ask_run(&c));
+        ASSERT_EQ((int)c.reply.status, (int)ZCL_COMMAND_STATUS_PASSED);
+        ASSERT(mind_ask_get(&c, "not_yet_available") == NULL);
+        ASSERT_EQ(mind_ask_row_count(&c), (int64_t)1);
+        ASSERT_STR_EQ(mind_ask_row_str(&c, 0, "what"), "ram-generation-root");
+        ASSERT_STR_EQ(mind_ask_row_str(&c, 0, "where"), "trap_signature");
+        mind_ask_end(&c);
+
+        mind_ask_begin(&c);
+        (void)json_push_kv_str(&c.input, "kind", "trap_of");
+        (void)json_push_kv_str(&c.input, "subject", "no-such-subject");
+        ASSERT(mind_ask_run(&c));
+        ASSERT_EQ((int)c.reply.status, (int)ZCL_COMMAND_STATUS_PASSED);
+        ASSERT(mind_ask_get(&c, "not_yet_available") == NULL);
+        ASSERT_EQ(mind_ask_row_count(&c), (int64_t)1);
+        ASSERT_STR_EQ(mind_ask_row_str(&c, 0, "what"), "unknown");
+        ASSERT(strstr(mind_ask_row_str(&c, 0, "detail"), "unknown:") != NULL);
+        mind_ask_end(&c);
+        PASS();
+    }
+
+    TEST("mind.ask: next_passage still names the missing story walker") {
+        struct mind_ask_call c;
+
+        mind_ask_begin(&c);
+        (void)json_push_kv_str(&c.input, "kind", "next_passage");
+        ASSERT(mind_ask_run(&c));
+        ASSERT_EQ((int)c.reply.status, (int)ZCL_COMMAND_STATUS_PASSED);
+        ASSERT(strstr(mind_ask_str(&c, "not_yet_available"),
+                      "story walker") != NULL);
+        ASSERT(strstr(mind_ask_str(&c, "summary"), "not_yet_available") !=
+               NULL);
+        mind_ask_end(&c);
+        PASS();
+    }
+
+    _test_next:;
+    return failures;
+}
+
 int test_mind(void)
 {
     int failures = 0;
@@ -539,6 +687,7 @@ int test_mind(void)
     failures += test_mind_resident_rebuild_economy();
     failures += test_mind_stale_query_is_refused();
     failures += test_mind_peer_capsule();
+    failures += test_mind_ask_fleet_facts();
 
     (void)unsetenv("ZCL_MIND_STATE_DIR");
     (void)test_rm_rf_recursive(MIND_FIX);

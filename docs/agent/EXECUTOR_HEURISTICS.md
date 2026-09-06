@@ -38,12 +38,15 @@ Verified on this checkout:
 
 Route by the story's next beat, not by author. This table is GENERATED from
 `engine/composition/fleet_facts.def`, which is where a routing fact is written
-and the only place `z23 dev know` reads. Do not edit it here; change the row
-and run `make docs-executor-routing`. Ask it directly instead of reading it:
+and the only place `z23 dev know` and `z23 dev fleet mind ask executor_for`
+read routing facts. Do not edit it here; change the row and run
+`make docs-executor-routing`. Ask it directly instead of reading it:
 
 ```
 z23 dev know --subject=sonnet
 z23 dev know --subject=glm-5.3-flash --relation=handles_poorly
+z23 dev fleet mind ask executor_for sonnet
+z23 dev fleet mind ask trap_of test_boot_phase
 ```
 
 <!-- FLEET-FACTS-ROUTING-BEGIN -->

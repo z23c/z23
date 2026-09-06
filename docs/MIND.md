@@ -77,14 +77,17 @@ behind. It never rebuilds either.
 z23 dev fleet mind ask where_is <symbol>      # the exact definition site
 z23 dev fleet mind ask owns <path-or-symbol>  # the group it belongs to
 z23 dev fleet mind ask tests_for <path>       # the groups a change there touches
+z23 dev fleet mind ask executor_for <term>    # what the fleet wrote about that executor
+z23 dev fleet mind ask trap_of <term>         # the trap_signature row for that subject
 z23 dev fleet mind status                     # this box: heartbeat and each checkout
 z23 dev fleet mind status --fleet             # every paired node's index root and age
 ```
 
-Three further questions — `executor_for`, `trap_of` and `next_passage` —
-answer `not_yet_available` and name what they are waiting for. The fact rows
-and the story walker they need are not in this tree yet. Answering anyway
-would fabricate exactly the evidence those lanes exist to measure.
+`executor_for` and `trap_of` answer from the same fleet fact table `z23 dev
+know` reads. An unanswered subject is one UNKNOWN row, never silence and
+never a guessed near miss. `next_passage` still answers `not_yet_available`:
+the forward story walker is not in this tree yet, and inventing a next beat
+would fabricate the evidence that walker exists to measure.
 
 `tests_for` names the groups the shared impact rules match for a path. Which
 single group a proof routes to is `z23 code tests`, and that routing policy

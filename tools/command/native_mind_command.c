@@ -19,6 +19,7 @@
 #include "codeindex/codeindex.h"
 #include "controllers/agent_impact_rules.h"
 #include "controllers/rpc_client.h"
+#include "fleetfacts/fleet_facts.h"
 #include "json/json.h"
 #include "kernel/command_registry.h"
 #include "mind.h"
@@ -222,24 +223,70 @@ static void mind_answer_tests_for(const char *subject, struct json_value *rows,
                        "gives the routing floor", subject, subject);
 }
 
-/* Two questions this baseline cannot answer, said as facts rather than
- * failures. `dev know` and the fleet fact tables are not in this tree, and
- * the forward half of the story graph has not landed; a mind that answered
- * anyway would be inventing the very rows those lanes exist to measure. */
+/* `next_passage` still cannot answer: the forward story walker is not in
+ * this tree. Saying so is a fact. Inventing a next beat would fabricate
+ * the evidence that walker exists to measure. */
 static void mind_answer_not_yet(const char *kind, struct json_value *data,
                                 char *summary, size_t cap)
 {
-    const char *needs =
-        strcmp(kind, "next_passage") == 0
-            ? "the story walker (forward passages, requires, choices)"
-            : strcmp(kind, "executor_for") == 0
-                  ? "the fleet observation rows and the `dev know` leaf"
-                  : "the trap_signature fact rows and the `dev know` leaf";
+    const char *needs = "the story walker (forward passages, requires, choices)";
     (void)json_push_kv_str(data, "not_yet_available", needs);
     (void)snprintf(summary, cap,
                    "not_yet_available: answering '%s' needs %s, which is not "
                    "in this tree. This is a statement about what exists, not "
                    "a failed lookup", kind, needs);
+}
+
+/* `executor_for` and `trap_of` read the same table `dev.know` reads. This
+ * leaf does not parse fleet_facts.def; the fleetfacts module is the only
+ * reader. An unanswered subject is one UNKNOWN row, never silence and never
+ * a near-miss guess. */
+static void mind_answer_fleet(const char *kind, const char *subject,
+                              struct json_value *rows, char *summary,
+                              size_t cap)
+{
+    const char *relation = (kind && strcmp(kind, "trap_of") == 0)
+                               ? "trap_signature"
+                               : NULL;
+    struct zcl_fleet_facts_answer_v1 answer;
+
+    memset(&answer, 0, sizeof(answer));
+    if (!zcl_fleet_facts_query(subject, relation, NULL,
+                               ZCL_FLEET_FACTS_MAX_ROWS, &answer)) {
+        (void)snprintf(summary, cap,
+                       "the fleet fact table refused this ask as malformed");
+        return;
+    }
+    for (size_t i = 0; i < answer.row_count; i++) {
+        const struct zcl_fleet_fact_v1 *row = &answer.rows[i];
+        char detail[ZCL_FLEET_FACTS_WHY_CAP + 32];
+        const char *what = row->object[0] ? row->object
+                           : answer.unknown ? "unknown"
+                                            : "";
+        const char *where = row->relation[0] ? row->relation : kind;
+
+        (void)snprintf(detail, sizeof(detail), "%s: %s",
+                       zcl_fleet_facts_confidence_name(row->confidence),
+                       row->why);
+        mind_push_row(rows, what, where, 0, detail);
+    }
+    if (answer.unknown)
+        (void)snprintf(summary, cap,
+                       "the fleet has written nothing about '%s'%s. That is "
+                       "an UNKNOWN row from the same table `z23 dev know` "
+                       "reads, not a denial and not a guess",
+                       subject,
+                       relation ? " as trap_signature" : "");
+    else if (answer.truncated)
+        (void)snprintf(summary, cap,
+                       "%zu of %zu fleet fact row(s) about %s; truncated. "
+                       "`z23 dev know --subject=%s` is the same table",
+                       answer.row_count, answer.total, subject, subject);
+    else
+        (void)snprintf(summary, cap,
+                       "%zu fleet fact row(s) about %s; `z23 dev know "
+                       "--subject=%s` is the same table",
+                       answer.total, subject, subject);
 }
 
 void zcl_native_handle_dev_mind_ask(const struct zcl_command_request *request,
@@ -311,6 +358,9 @@ void zcl_native_handle_dev_mind_ask(const struct zcl_command_request *request,
         codeindex_close(ci);
     } else if (strcmp(kind, "tests_for") == 0) {
         mind_answer_tests_for(subject, &rows, summary, sizeof(summary));
+    } else if (strcmp(kind, "executor_for") == 0 ||
+               strcmp(kind, "trap_of") == 0) {
+        mind_answer_fleet(kind, subject, &rows, summary, sizeof(summary));
     } else {
         mind_answer_not_yet(kind, &reply->data, summary, sizeof(summary));
     }
