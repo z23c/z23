@@ -85,7 +85,38 @@ have_all() {
     cc="$(tor_ambient_compiler)"
     command -v "${cc%% *}" >/dev/null 2>&1 || return 1
     cid="$("$SCRIPT_ROOT/tools/dev/build-epoch-key.sh" compiler-id "$cc" "$cc" 2>/dev/null)" || return 1
-    "$(zcl_tor_provenance_bin "$SCRIPT_ROOT")" check "$ROOT/$TOR_TREE" --compiler-id "$cid" >/dev/null 2>&1
+    "$(zcl_tor_provenance_bin "$SCRIPT_ROOT")" check "$ROOT/$TOR_TREE" --compiler-id "$cid" >/dev/null 2>&1 || \
+        tor_alias_check "$cc"
+}
+
+# The manifest records the compiler by the command string vendor/tor's own
+# configure resolved CC to when the archives were built (typically "gcc",
+# read back from vendor/tor/Makefile by tor_ambient_compiler() above). A
+# worktree that got its archives by copy (link_from) never ran configure
+# there, so it has no Makefile to read and tor_ambient_compiler() falls back
+# to the literal command "cc" -- a different command string for what is
+# usually the very same compiler binary. Compiler identity is bound to the
+# string (tools/dev/build-epoch-key.sh), so the plain check above rejects a
+# tree that is, byte for byte, exactly what the manifest describes. Retry
+# with any other command name that resolves to the SAME binary as the
+# ambient guess -- never a different one, that would still be a real
+# mismatch -- before have_all() gives up.
+tor_alias_check() {
+    local primary_cc="$1" primary_path cand cand_path tried cid
+    primary_path="$(command -v "${primary_cc%% *}" 2>/dev/null)" || return 1
+    primary_path="$(realpath -- "$primary_path" 2>/dev/null)" || return 1
+    tried=" $primary_cc "
+    for cand in gcc cc clang "${CC:-}" "${VENDOR_CC:-}"; do
+        [ -n "$cand" ] || continue
+        case "$tried" in *" $cand "*) continue ;; esac
+        tried="$tried$cand "
+        cand_path="$(command -v "$cand" 2>/dev/null)" || continue
+        cand_path="$(realpath -- "$cand_path" 2>/dev/null)" || continue
+        [ "$cand_path" = "$primary_path" ] || continue
+        cid="$("$SCRIPT_ROOT/tools/dev/build-epoch-key.sh" compiler-id "$cand" "$cand" 2>/dev/null)" || continue
+        "$(zcl_tor_provenance_bin "$SCRIPT_ROOT")" check "$ROOT/$TOR_TREE" --compiler-id "$cid" >/dev/null 2>&1 && return 0
+    done
+    return 1
 }
 
 # The one loud line. Nothing else in a build says "this binary cannot see the
@@ -363,6 +394,42 @@ case "${1:-ready}" in
         if [ -s "$fake_wt2/$TOR_TREE/.provenance" ]; then
             echo "tor_archives_ready: selftest FAILED — link_from wrote a manifest of its own for a manifest-less donor" >&2
             exit 1
+        fi
+        # have_all() must accept a manifest recorded under one alias for the
+        # compiler (e.g. "gcc", what vendor/tor's real configure picked) when
+        # the ambient guess in THIS tree resolves to a different alias for
+        # the very same binary (e.g. "cc", what tor_ambient_compiler() falls
+        # back to with no vendor/tor/Makefile and CC unset -- exactly the
+        # state a freshly linked worktree is in; see tor_alias_check() and
+        # the header comment on tor_ambient_compiler()). Skip cleanly if this
+        # host's gcc and cc are not the same binary, since the fix does not
+        # apply there.
+        gcc_path="$(command -v gcc 2>/dev/null || true)"
+        cc_path="$(command -v cc 2>/dev/null || true)"
+        if [ -n "$gcc_path" ] && [ -n "$cc_path" ] && \
+           [ "$(realpath -- "$gcc_path" 2>/dev/null)" = "$(realpath -- "$cc_path" 2>/dev/null)" ]; then
+            fake_wt3="$fixture/worktree3"
+            mkdir -p "$fake_wt3"
+            for a in "${ARCHIVES[@]}"; do
+                mkdir -p "$fake_wt3/${a%/*}"
+                printf 'fixture tor archive bytes\n' >"$fake_wt3/$a"
+            done
+            alias_cid="$("$SCRIPT_ROOT/tools/dev/build-epoch-key.sh" compiler-id gcc gcc 2>/dev/null)" || {
+                echo "tor_archives_ready: selftest FAILED — could not derive the gcc alias compiler id" >&2
+                exit 1
+            }
+            "$(zcl_tor_provenance_bin "$SCRIPT_ROOT")" write "$fake_wt3/$TOR_TREE" \
+                "$(printf '%040x' 1)" "$alias_cid" \
+                "$(printf 'selftest-configure-args' | sha256sum | awk '{print $1}')" >/dev/null || {
+                echo "tor_archives_ready: selftest FAILED — could not write the alias fixture manifest" >&2
+                exit 1
+            }
+            if ! (ROOT="$fake_wt3"; cd "$fake_wt3" && unset CC VENDOR_CC; have_all) >/dev/null 2>&1; then
+                echo "tor_archives_ready: selftest FAILED — have_all() rejected a manifest recorded under a same-binary compiler alias" >&2
+                exit 1
+            fi
+        else
+            echo "tor_archives_ready: selftest SKIP — gcc and cc are not the same binary on this host, cannot exercise the alias path"
         fi
         cleanup_fixture
         trap - EXIT
