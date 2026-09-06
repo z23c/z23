@@ -430,7 +430,19 @@ recipe_flags_host() {
         sqlite) printf '%s' '-O2 -fPIC -DSQLITE_THREADSAFE=1 -DSQLITE_ENABLE_FTS5 -DSQLITE_ENABLE_RTREE -DSQLITE_ENABLE_JSON1 -DSQLITE_ENABLE_COLUMN_METADATA -DSQLITE_OMIT_DEPRECATED -DSQLITE_DEFAULT_FOREIGN_KEYS=1; ar=Dcr' ;;
         zlib) printf '%s' 'CFLAGS=-O2 -fPIC; ./configure --static; make libz.a' ;;
         openssl) printf '%s' './Configure no-shared no-tests --prefix=/usr/local --openssldir=/etc/ssl --libdir=lib; make build_libs' ;;
-        libevent) printf '%s' "apply pinned secure-rng ABI patch (evutil_rand.c definition + event2/util.h declaration); CFLAGS=-O2 -fPIC -Ivendor/include; LDFLAGS=-Lvendor/lib; CPPFLAGS=$LIBEVENT_CPPFLAGS; ./configure --disable-shared --enable-static --disable-samples --disable-libevent-regress; thread_archive=$LIBEVENT_THREAD_ARCHIVE; require=evutil_secure_rng_add_bytes; stage=include/event2" ;;
+        libevent)
+            # The descriptor is a recipe IDENTITY, hashed into the stamp that
+            # `--check-provenance` compares byte-for-byte at any checkout: it
+            # must read the same at the root checkout and inside a proof
+            # generation's copy under /dev/shm, or a path-only difference
+            # reads as a changed recipe and forces a rebuild that re-touches
+            # vendor/include and vendor/lib out from under the generation.
+            # LIBEVENT_CPPFLAGS embeds the absolute $INC, so fold it back to
+            # the literal "vendor" prefix for the descriptor only; the real
+            # compile flags passed to ./configure below stay absolute.
+            local desc_cppflags="${LIBEVENT_CPPFLAGS//"$VENDOR"/vendor}"
+            printf '%s' "apply pinned secure-rng ABI patch (evutil_rand.c definition + event2/util.h declaration); CFLAGS=-O2 -fPIC -Ivendor/include; LDFLAGS=-Lvendor/lib; CPPFLAGS=$desc_cppflags; ./configure --disable-shared --enable-static --disable-samples --disable-libevent-regress; thread_archive=$LIBEVENT_THREAD_ARCHIVE; require=evutil_secure_rng_add_bytes; stage=include/event2"
+            ;;
         leveldb) printf '%s' "route=direct-cxx11; -std=c++11 -O2 -DNDEBUG -fPIC -fno-exceptions -fno-rtti; $LEVELDB_PLATFORM; crc32c=off; snappy=off"
             ;;
         secp_native) printf '%s' 'cmake static; recovery=on; ecdh=on; tests=off; benchmarks=off; examples=off' ;;

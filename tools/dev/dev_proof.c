@@ -3472,6 +3472,20 @@ static bool generation_prepare(const struct proof_paths *paths,
          * Tor from source in RAM, and the next warm restart then re-copies
          * the original libtor.a under a manifest that no longer matches it. */
         "vendor/tor/.provenance",
+        /* The Windows cross build and the tarballs it draws from must never
+         * run inside a generation: `make vendor` re-touches vendor/include
+         * and vendor/lib as a side effect, and the full lint gate's Windows
+         * acceptance check triggers that rebuild. Carrying the finished
+         * cross-build output and cache in means the generation's copy of
+         * vendor/include and vendor/lib stays byte- and mtime-identical
+         * across a lint run instead of being silently rewritten underneath
+         * the proof's mutation check. */
+        "vendor/.build-x86_64-w64-mingw32",
+        "vendor/.cache",
+        /* The cross target's staged lib/include, read by the Windows
+         * acceptance check itself; without it the check has to stage the
+         * cross build from scratch even with the two entries above present. */
+        "vendor/cross",
         "vendor/tor/src/ext/ed25519/donna/libed25519_donna.a",
         "vendor/tor/src/ext/ed25519/ref10/libed25519_ref10.a",
         "vendor/tor/src/ext/keccak-tiny/libkeccak-tiny.a",
