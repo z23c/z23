@@ -57,6 +57,55 @@ static void ag_refuse(struct zcl_command_reply *reply, const char *code,
     reply->error.human_action_required = true;
 }
 
+/* `since` is a window in HOURS, and 0 means the whole ledger. It arrives as
+ * an integer from the typed CLI and as a string from a hand-written input
+ * object; both are read, and anything outside the range is refused rather
+ * than clamped, because a silently narrowed window reports a grade the
+ * caller did not ask for. */
+static bool ag_read_since(const struct zcl_command_request *request,
+                          int64_t *hours)
+{
+    const struct json_value *v;
+    const char *text;
+    long long parsed;
+    if (!request || !request->input) return true;
+    v = json_get(request->input, "since");
+    if (!v) return true;
+    text = json_get_str(v);
+    parsed = v->type == JSON_INT ? (long long)json_get_int(v)
+                                 : atoll(text ? text : "-1");
+    if (parsed < 0 || parsed > AG_MAX_SINCE_HOURS) return false;
+    *hours = parsed;
+    return true;
+}
+
+/* The three groupings. An unknown one is named back to the caller rather
+ * than quietly answered as the default. */
+static bool ag_read_group_by(const struct zcl_command_request *request,
+                             const char **group_by)
+{
+    const struct json_value *v;
+    const char *by;
+    if (!request || !request->input) return true;
+    v = json_get(request->input, "by");
+    if (!v || v->type != JSON_STR) return true;
+    by = json_get_str(v);
+    if (strcmp(by, "executor") != 0 && strcmp(by, "lane") != 0 &&
+        strcmp(by, "class") != 0)
+        return false;
+    *group_by = by;
+    return true;
+}
+
+static bool ag_read_flag(const struct zcl_command_request *request,
+                         const char *key, bool fallback)
+{
+    const struct json_value *v;
+    if (!request || !request->input) return fallback;
+    v = json_get(request->input, key);
+    return v && v->type == JSON_BOOL ? json_get_bool(v) : fallback;
+}
+
 void zcl_native_handle_dev_agents(const struct zcl_command_request *request,
                                   struct zcl_command_reply *reply)
 {
@@ -69,45 +118,26 @@ void zcl_native_handle_dev_agents(const struct zcl_command_request *request,
 
     memset(&options, 0, sizeof(options));
     options.since_hours = AG_DEFAULT_SINCE_HOURS;
-    options.collect_units = true;
     /* The one reading of a real clock in this command, taken through the
      * injectable platform clock so a test can decide `now` and grade the
      * same fixture to the same numbers forever. */
     options.now_unix = clock_now_wall_ms() / 1000;
 
-    if (request && request->input) {
-        const struct json_value *v = json_get(request->input, "since");
-        if (v) {
-            long long hours = v->type == JSON_INT
-                                  ? (long long)json_get_int(v)
-                                  : atoll(json_get_str(v) ? json_get_str(v)
-                                                          : "-1");
-            if (hours < 0 || hours > AG_MAX_SINCE_HOURS) {
-                ag_refuse(reply, "SINCE_OUT_OF_RANGE",
-                          "since is a number of hours between 0 and 8760; "
-                          "0 means the whole ledger",
-                          "input.since is outside the accepted range",
-                          "rerun with --since=<hours> in 0..8760");
-                return;
-            }
-            options.since_hours = hours;
-        }
-        v = json_get(request->input, "by");
-        if (v && v->type == JSON_STR) {
-            const char *by = json_get_str(v);
-            if (strcmp(by, "executor") != 0 && strcmp(by, "lane") != 0 &&
-                strcmp(by, "class") != 0) {
-                ag_refuse(reply, "UNKNOWN_GROUPING",
-                          "by is executor, lane, or class",
-                          "input.by is not one of the three groupings",
-                          "rerun with --by=executor, --by=lane or --by=class");
-                return;
-            }
-            options.group_by = by;
-        }
-        v = json_get(request->input, "include_units");
-        if (v && v->type == JSON_BOOL) options.collect_units = json_get_bool(v);
+    if (!ag_read_since(request, &options.since_hours)) {
+        ag_refuse(reply, "SINCE_OUT_OF_RANGE",
+                  "since is a number of hours between 0 and 8760; 0 means the "
+                  "whole ledger",
+                  "input.since is outside the accepted range",
+                  "rerun with --since=<hours> in 0..8760");
+        return;
     }
+    if (!ag_read_group_by(request, &options.group_by)) {
+        ag_refuse(reply, "UNKNOWN_GROUPING", "by is executor, lane, or class",
+                  "input.by is not one of the three groupings",
+                  "rerun with --by=executor, --by=lane or --by=class");
+        return;
+    }
+    options.collect_units = ag_read_flag(request, "include_units", true);
     options.root = ag_input_str(request, "root");
     options.ledger = ag_input_str(request, "ledger");
 

@@ -105,29 +105,54 @@ static int64_t ag_days_from_civil(int64_t y, int64_t m, int64_t d)
     return era * 146097 + doe - 719468;
 }
 
+/* The fixed-width separators an ISO instant must carry before any digit is
+ * worth reading. */
+static bool ag_ts_shape_ok(const char *text)
+{
+    static const unsigned char at[6] = {4, 7, 10, 13, 16, 19};
+    static const char want[6] = {'-', '-', 'T', ':', ':', 'Z'};
+    if (!text || strlen(text) < 20) return false;
+    for (size_t i = 0; i < 6; i++)
+        if (text[at[i]] != want[i]) return false;
+    return true;
+}
+
+/* One fixed-width run of decimal digits. Anything else fails the row. */
+static bool ag_ts_digits(const char *text, size_t offset, size_t width,
+                         int64_t *out)
+{
+    int64_t value = 0;
+    for (size_t i = 0; i < width; i++) {
+        char c = text[offset + i];
+        if (c < '0' || c > '9') return false;
+        value = value * 10 + (c - '0');
+    }
+    *out = value;
+    return true;
+}
+
+/* Calendar ranges, leap second included. Day-of-month is bounded at 31 and
+ * not per-month: this rejects nonsense without pretending to be a calendar. */
+static bool ag_ts_in_range(const int64_t f[6])
+{
+    if (f[1] < 1 || f[1] > 12) return false;
+    if (f[2] < 1 || f[2] > 31) return false;
+    if (f[3] > 23 || f[4] > 59 || f[5] > 60) return false;
+    return true;
+}
+
 /* "2026-09-06T18:09:45Z" -> unix seconds. Returns false on any other shape:
  * a timestamp this reader cannot place in time makes the whole row
  * unusable, and guessing one would put a row in the wrong window. */
 static bool ag_parse_ts(const char *text, int64_t *out)
 {
-    int64_t f[6];
     static const unsigned char offs[6] = {0, 5, 8, 11, 14, 17};
     static const unsigned char widths[6] = {4, 2, 2, 2, 2, 2};
-    if (!text || strlen(text) < 20 || text[4] != '-' || text[7] != '-' ||
-        text[10] != 'T' || text[13] != ':' || text[16] != ':' ||
-        text[19] != 'Z')
-        return false;
-    for (size_t i = 0; i < 6; i++) {
-        f[i] = 0;
-        for (size_t j = 0; j < widths[i]; j++) {
-            char c = text[offs[i] + j];
-            if (c < '0' || c > '9') return false;
-            f[i] = f[i] * 10 + (c - '0');
-        }
-    }
-    if (f[1] < 1 || f[1] > 12 || f[2] < 1 || f[2] > 31 || f[3] > 23 ||
-        f[4] > 59 || f[5] > 60)
-        return false;
+    int64_t f[6];
+    if (!ag_ts_shape_ok(text)) return false;
+    for (size_t i = 0; i < 6; i++)
+        if (!ag_ts_digits(text, offs[i], widths[i], &f[i])) return false;
+    if (!ag_ts_in_range(f)) return false;
     *out = ag_days_from_civil(f[0], f[1], f[2]) * 86400 + f[3] * 3600 +
            f[4] * 60 + f[5];
     return true;
@@ -215,74 +240,114 @@ struct ag_scan {
     bool truncated;
 };
 
-/* One streaming pass over the ledger. A line longer than AG_LINE_MAX is
- * consumed to its newline and counted once as malformed, so an oversized row
- * can never be re-read as several well-formed ones. */
+/* A row the reader could not use. The first few line numbers are kept so the
+ * report can name them; the count is kept for all of them. */
+static void ag_note_bad(struct ag_scan *scan)
+{
+    if (scan->bad_count < AG_MAX_REPORTED_BAD_LINES)
+        scan->bad_lines[scan->bad_count] = (int64_t)scan->line_count;
+    scan->bad_count++;
+}
+
+/* One line, newline stripped. A line longer than the buffer is consumed to
+ * its newline and reported as INCOMPLETE, so an oversized row can never be
+ * re-read as several well-formed ones. */
+static bool ag_read_line(FILE *file, char *line, size_t cap, size_t *len_out,
+                         bool *complete)
+{
+    size_t len;
+    if (!fgets(line, (int)cap, file)) return false;
+    len = strlen(line);
+    *complete = len > 0 && line[len - 1] == '\n';
+    if (!*complete && !feof(file)) {
+        int c;
+        while ((c = fgetc(file)) != EOF && c != '\n') { }
+    }
+    while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r'))
+        line[--len] = 0;
+    *len_out = len;
+    return true;
+}
+
+static void ag_take_predict(struct ag_scan *scan, char *const fields[],
+                            int64_t ts)
+{
+    struct ag_predict *p;
+    if (scan->predict_count >= AG_MAX_PREDICTS) return;
+    p = &scan->predicts[scan->predict_count++];
+    p->ts = ts;
+    p->wall_s = ag_int(fields[AG_COL_WALL_S]);
+    ag_copy(p->task_id, sizeof(p->task_id), fields[AG_COL_TASK_ID]);
+}
+
+/* Every result is counted in the ledger total; only the ones inside the
+ * window are kept for grading, so the report can say how much of the ledger
+ * the window covered. */
+static void ag_take_result(struct ag_scan *scan,
+                           const struct zcl_agents_options *options,
+                           char *const fields[], size_t key_column,
+                           int64_t cutoff, int64_t ts)
+{
+    struct ag_result *r;
+    scan->result_total++;
+    if (options->since_hours > 0 && ts < cutoff) return;
+    if (scan->result_count >= AG_MAX_RESULTS) {
+        scan->truncated = true;
+        return;
+    }
+    r = &scan->results[scan->result_count++];
+    r->ts = ts;
+    r->wall_s = ag_int(fields[AG_COL_WALL_S]);
+    r->tokens = ag_int(fields[AG_COL_TOKENS_IN]) +
+                ag_int(fields[AG_COL_TOKENS_OUT]);
+    ag_copy(r->key, sizeof(r->key), fields[key_column]);
+    ag_copy(r->task_id, sizeof(r->task_id), fields[AG_COL_TASK_ID]);
+    ag_copy(r->outcome, sizeof(r->outcome), fields[AG_COL_OUTCOME]);
+}
+
+/* Classify one already-read line. The header is skipped, a blank line is
+ * nothing, and everything the vocabulary does not cover is reported by line
+ * number rather than guessed at. */
+static void ag_scan_row(struct ag_scan *scan,
+                        const struct zcl_agents_options *options, char *line,
+                        size_t len, bool complete, size_t key_column,
+                        int64_t cutoff)
+{
+    char *fields[AG_COLUMNS];
+    int64_t ts = 0;
+    if (scan->line_count == 1 && strncmp(line, "ts\t", 3) == 0) return;
+    if (!len) return;
+    if (!complete || ag_split(line, fields) < AG_COLUMNS) {
+        ag_note_bad(scan);
+        return;
+    }
+    if (!ag_parse_ts(fields[AG_COL_TS], &ts)) {
+        ag_note_bad(scan);
+        return;
+    }
+    if (strcmp(fields[AG_COL_KIND], "predict") == 0) {
+        ag_take_predict(scan, fields, ts);
+        return;
+    }
+    if (strcmp(fields[AG_COL_KIND], "result") != 0) {
+        ag_note_bad(scan);
+        return;
+    }
+    ag_take_result(scan, options, fields, key_column, cutoff, ts);
+}
+
+/* One streaming pass over the ledger. */
 static void ag_scan_file(FILE *file, const struct zcl_agents_options *options,
                          size_t key_column, int64_t cutoff,
                          struct ag_scan *scan)
 {
     char line[AG_LINE_MAX];
-    while (scan->line_count < AG_MAX_LINES && fgets(line, sizeof(line), file)) {
-        char *fields[AG_COLUMNS];
-        size_t len = strlen(line);
-        bool complete = len > 0 && line[len - 1] == '\n';
+    size_t len = 0;
+    bool complete = false;
+    while (scan->line_count < AG_MAX_LINES &&
+           ag_read_line(file, line, sizeof(line), &len, &complete)) {
         scan->line_count++;
-        if (!complete && !feof(file)) {
-            int c;
-            while ((c = fgetc(file)) != EOF && c != '\n') { }
-            complete = false;
-        }
-        while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r'))
-            line[--len] = 0;
-        if (scan->line_count == 1 && strncmp(line, "ts\t", 3) == 0)
-            continue;
-        if (!len)
-            continue;
-        if (!complete || ag_split(line, fields) < AG_COLUMNS) {
-            if (scan->bad_count < AG_MAX_REPORTED_BAD_LINES)
-                scan->bad_lines[scan->bad_count] = (int64_t)scan->line_count;
-            scan->bad_count++;
-            continue;
-        }
-        int64_t ts = 0;
-        if (!ag_parse_ts(fields[AG_COL_TS], &ts)) {
-            if (scan->bad_count < AG_MAX_REPORTED_BAD_LINES)
-                scan->bad_lines[scan->bad_count] = (int64_t)scan->line_count;
-            scan->bad_count++;
-            continue;
-        }
-        if (strcmp(fields[AG_COL_KIND], "predict") == 0) {
-            if (scan->predict_count < AG_MAX_PREDICTS) {
-                struct ag_predict *p = &scan->predicts[scan->predict_count++];
-                p->ts = ts;
-                p->wall_s = ag_int(fields[AG_COL_WALL_S]);
-                ag_copy(p->task_id, sizeof(p->task_id),
-                        fields[AG_COL_TASK_ID]);
-            }
-            continue;
-        }
-        if (strcmp(fields[AG_COL_KIND], "result") != 0) {
-            if (scan->bad_count < AG_MAX_REPORTED_BAD_LINES)
-                scan->bad_lines[scan->bad_count] = (int64_t)scan->line_count;
-            scan->bad_count++;
-            continue;
-        }
-        scan->result_total++;
-        if (options->since_hours > 0 && ts < cutoff)
-            continue;
-        if (scan->result_count >= AG_MAX_RESULTS) {
-            scan->truncated = true;
-            continue;
-        }
-        struct ag_result *r = &scan->results[scan->result_count++];
-        r->ts = ts;
-        r->wall_s = ag_int(fields[AG_COL_WALL_S]);
-        r->tokens = ag_int(fields[AG_COL_TOKENS_IN]) +
-                    ag_int(fields[AG_COL_TOKENS_OUT]);
-        ag_copy(r->key, sizeof(r->key), fields[key_column]);
-        ag_copy(r->task_id, sizeof(r->task_id), fields[AG_COL_TASK_ID]);
-        ag_copy(r->outcome, sizeof(r->outcome), fields[AG_COL_OUTCOME]);
+        ag_scan_row(scan, options, line, len, complete, key_column, cutoff);
     }
 }
 
@@ -340,50 +405,220 @@ static void ag_push_row(struct json_value *rows, const char *key,
     json_free(&row);
 }
 
+/* The group name a result belongs to. A row whose grouping column is blank
+ * is still a delegation and is reported under one honest name rather than
+ * dropped. */
+static const char *ag_key_of(const struct ag_result *result)
+{
+    return result->key[0] ? result->key : "(unnamed)";
+}
+
+struct ag_buffers {
+    struct ag_group *groups;
+    int64_t *walls;
+    int64_t *ratios;
+};
+
+static void ag_free_buffers(struct ag_scan *scan, struct ag_buffers *buf)
+{
+    free(scan->results);
+    free(scan->predicts);
+    free(buf->groups);
+    free(buf->walls);
+    free(buf->ratios);
+    scan->results = NULL;
+    scan->predicts = NULL;
+    buf->groups = NULL;
+    buf->walls = NULL;
+    buf->ratios = NULL;
+}
+
+/* Every buffer this read will ever need, taken up front and bounded. */
+static bool ag_alloc_buffers(struct ag_scan *scan, struct ag_buffers *buf)
+{
+    scan->results = zcl_calloc(AG_MAX_RESULTS, sizeof(*scan->results),
+                               "agents_ledger_results");
+    scan->predicts = zcl_calloc(AG_MAX_PREDICTS, sizeof(*scan->predicts),
+                                "agents_ledger_predicts");
+    buf->groups = zcl_calloc(AG_MAX_GROUPS, sizeof(*buf->groups),
+                             "agents_ledger_groups");
+    buf->walls = zcl_calloc(AG_MAX_RESULTS, sizeof(*buf->walls),
+                            "agents_ledger_walls");
+    buf->ratios = zcl_calloc(AG_MAX_RESULTS, sizeof(*buf->ratios),
+                             "agents_ledger_ratios");
+    if (scan->results && scan->predicts && buf->groups && buf->walls &&
+        buf->ratios)
+        return true;
+    ag_free_buffers(scan, buf);
+    return false;
+}
+
+/* Fold one result into a tally: the counts, the tokens, and the newest row. */
+static void ag_tally(struct ag_group *g, const struct ag_result *r)
+{
+    g->tasks++;
+    g->tokens += r->tokens;
+    if (r->ts > g->last_ts) g->last_ts = r->ts;
+    if (ag_is_success(r->outcome)) g->success++;
+    else if (ag_is_failure(r->outcome)) g->failure++;
+    else g->other++;
+}
+
+/* The tally for one key, created on first sight. NULL once the group table
+ * is full — a group past the bound is left out of the table rather than
+ * merged into a neighbour's numbers. */
+static struct ag_group *ag_group_for(struct ag_group *groups, size_t *count,
+                                     const char *key)
+{
+    for (size_t i = 0; i < *count; i++)
+        if (strcmp(groups[i].key, key) == 0) return &groups[i];
+    if (*count >= AG_MAX_GROUPS) return NULL;
+    ag_copy(groups[*count].key, sizeof(groups[*count].key), key);
+    return &groups[(*count)++];
+}
+
+/* Every result counted twice: once into its own group, once into the total. */
+static size_t ag_accumulate(const struct ag_scan *scan, struct ag_group *groups,
+                            struct ag_group *all)
+{
+    size_t count = 0;
+    for (size_t i = 0; i < scan->result_count; i++) {
+        const struct ag_result *r = &scan->results[i];
+        struct ag_group *g = ag_group_for(groups, &count, ag_key_of(r));
+        if (!g) continue;
+        ag_tally(g, r);
+        ag_tally(all, r);
+    }
+    return count;
+}
+
+/* Median wall time and median actual-over-predicted wall for one key, or for
+ * every result when `key` is NULL. Both walk the same rows through the same
+ * pairing rule, so the total line is computed exactly like a group line. */
+static void ag_medians(const struct ag_scan *scan, const char *key,
+                       struct ag_buffers *buf, int64_t *wall, int64_t *ratio)
+{
+    size_t walls = 0, rats = 0;
+    for (size_t i = 0; i < scan->result_count; i++) {
+        const struct ag_result *r = &scan->results[i];
+        int64_t predicted;
+        if (key && strcmp(ag_key_of(r), key) != 0) continue;
+        buf->walls[walls++] = r->wall_s;
+        predicted = ag_predicted_wall(scan, r);
+        if (predicted > 0 && r->wall_s >= 0)
+            buf->ratios[rats++] = r->wall_s * 10000 / predicted;
+    }
+    *wall = ag_median(buf->walls, walls);
+    *ratio = ag_median(buf->ratios, rats);
+}
+
+static void ag_push_totals(struct json_value *total,
+                           const struct ag_group *all, int64_t wall,
+                           int64_t ratio)
+{
+    int64_t graded = all->success + all->failure;
+    (void)json_push_kv_int(total, "tasks", all->tasks);
+    (void)json_push_kv_int(total, "success", all->success);
+    (void)json_push_kv_int(total, "failure", all->failure);
+    (void)json_push_kv_int(total, "other", all->other);
+    (void)json_push_kv_int(total, "success_rate_bp",
+                           graded > 0 ? all->success * 10000 / graded : -1);
+    (void)json_push_kv_int(total, "median_wall_s", wall);
+    (void)json_push_kv_int(total, "median_ratio_bp", ratio);
+}
+
+static void ag_push_bad_lines(struct json_value *bad,
+                              const struct ag_scan *scan)
+{
+    size_t shown = scan->bad_count < AG_MAX_REPORTED_BAD_LINES
+                       ? scan->bad_count
+                       : AG_MAX_REPORTED_BAD_LINES;
+    for (size_t i = 0; i < shown; i++) {
+        struct json_value n;
+        json_init(&n);
+        json_set_int(&n, scan->bad_lines[i]);
+        (void)json_push_back(bad, &n);
+        json_free(&n);
+    }
+}
+
+/* One row per group, newest-heaviest first, up to the transport bound. */
+static size_t ag_push_group_rows(const struct ag_scan *scan,
+                                 struct ag_buffers *buf, size_t group_count,
+                                 int64_t now_unix, struct json_value *rows)
+{
+    size_t emitted = 0;
+    while (emitted < group_count && emitted < ZCL_AGENTS_MAX_GRADE_ROWS) {
+        const struct ag_group *g = &buf->groups[emitted];
+        int64_t wall = -1, ratio = -1;
+        ag_medians(scan, g->key, buf, &wall, &ratio);
+        ag_push_row(rows, g->key, g, wall, ratio, now_unix);
+        emitted++;
+    }
+    return emitted;
+}
+
+/* Which file this read used, and which rows of it were usable. */
+static void ag_push_provenance(struct json_value *out,
+                               const struct zcl_agents_options *options,
+                               const char *path, const struct ag_scan *scan)
+{
+    const char *by = options->group_by && options->group_by[0]
+                         ? options->group_by
+                         : "executor";
+    (void)json_push_kv_str(out, "state", "observed");
+    (void)json_push_kv_str(out, "ledger", path);
+    (void)json_push_kv_str(out, "group_by", by);
+    (void)json_push_kv_int(out, "window_hours", options->since_hours);
+    (void)json_push_kv_int(out, "ledger_lines", (int64_t)scan->line_count);
+    (void)json_push_kv_int(out, "result_rows_total",
+                           (int64_t)scan->result_total);
+    (void)json_push_kv_int(out, "result_rows_in_window",
+                           (int64_t)scan->result_count);
+    (void)json_push_kv_int(out, "predict_rows", (int64_t)scan->predict_count);
+    (void)json_push_kv_int(out, "skipped_rows", (int64_t)scan->bad_count);
+}
+
+/* Resolve the ledger path and open it. The refusal names the exact file,
+ * because "no ledger" and "the wrong ledger" need different next actions. */
+static FILE *ag_open_ledger(const struct zcl_agents_options *options,
+                            char *path, size_t cap, char *why, size_t why_size)
+{
+    FILE *file;
+    if (options->ledger && options->ledger[0])
+        (void)snprintf(path, cap, "%s", options->ledger);
+    else
+        zcl_agents_default_ledger(path, cap);
+    file = fopen(path, "rb");
+    if (!file && why)
+        (void)snprintf(why, why_size,
+                       "no delegation ledger to grade: %s does not exist or "
+                       "cannot be read", path);
+    return file;
+}
+
 bool zcl_agents_grades_json(const struct zcl_agents_options *options,
                             struct json_value *out, char *why,
                             size_t why_size)
 {
     char path[ZCL_AGENTS_PATH_MAX];
     struct ag_scan scan;
-    struct ag_group *groups = NULL;
-    struct json_value rows, bad, total;
-    int64_t *scratch = NULL, *ratios = NULL;
-    size_t group_count = 0, emitted = 0;
+    struct ag_buffers buf;
     struct ag_group all;
+    struct json_value rows, bad, total;
     int64_t all_wall = -1, all_ratio = -1;
+    size_t group_count, emitted;
     FILE *file;
 
     if (!options || !out) return false;
-    if (options->ledger && options->ledger[0])
-        (void)snprintf(path, sizeof(path), "%s", options->ledger);
-    else
-        zcl_agents_default_ledger(path, sizeof(path));
-
-    file = fopen(path, "rb");
-    if (!file) {
-        if (why)
-            (void)snprintf(why, why_size,
-                           "no delegation ledger to grade: %s does not exist "
-                           "or cannot be read", path);
-        return false;
-    }
+    file = ag_open_ledger(options, path, sizeof(path), why, why_size);
+    if (!file) return false;
 
     memset(&scan, 0, sizeof(scan));
+    memset(&buf, 0, sizeof(buf));
     memset(&all, 0, sizeof(all));
-    scan.results = zcl_calloc(AG_MAX_RESULTS, sizeof(*scan.results),
-                              "agents_ledger_results");
-    scan.predicts = zcl_calloc(AG_MAX_PREDICTS, sizeof(*scan.predicts),
-                               "agents_ledger_predicts");
-    groups = zcl_calloc(AG_MAX_GROUPS, sizeof(*groups), "agents_ledger_groups");
-    scratch = zcl_calloc(AG_MAX_RESULTS, sizeof(*scratch),
-                         "agents_ledger_walls");
-    ratios = zcl_calloc(AG_MAX_RESULTS, sizeof(*ratios),
-                        "agents_ledger_ratios");
-    if (!scan.results || !scan.predicts || !groups || !scratch || !ratios) {
+    if (!ag_alloc_buffers(&scan, &buf)) {
         (void)fclose(file);
-        free(scan.results); free(scan.predicts); free(groups); free(scratch);
-        free(ratios);
         if (why)
             (void)snprintf(why, why_size,
                            "cannot allocate the ledger buffers for %s", path);
@@ -394,97 +629,21 @@ bool zcl_agents_grades_json(const struct zcl_agents_options *options,
                  options->now_unix - options->since_hours * 3600, &scan);
     (void)fclose(file);
 
-    for (size_t i = 0; i < scan.result_count; i++) {
-        const struct ag_result *r = &scan.results[i];
-        struct ag_group *g = NULL;
-        const char *key = r->key[0] ? r->key : "(unnamed)";
-        for (size_t j = 0; j < group_count; j++)
-            if (strcmp(groups[j].key, key) == 0) { g = &groups[j]; break; }
-        if (!g) {
-            if (group_count >= AG_MAX_GROUPS) continue;
-            g = &groups[group_count++];
-            ag_copy(g->key, sizeof(g->key), key);
-        }
-        for (size_t pass = 0; pass < 2; pass++) {
-            struct ag_group *t = pass ? &all : g;
-            t->tasks++;
-            t->tokens += r->tokens;
-            if (r->ts > t->last_ts) t->last_ts = r->ts;
-            if (ag_is_success(r->outcome)) t->success++;
-            else if (ag_is_failure(r->outcome)) t->failure++;
-            else t->other++;
-        }
-    }
-    qsort(groups, group_count, sizeof(*groups), ag_group_compare);
+    group_count = ag_accumulate(&scan, buf.groups, &all);
+    qsort(buf.groups, group_count, sizeof(*buf.groups), ag_group_compare);
 
     json_init(&rows); json_set_array(&rows);
     json_init(&bad); json_set_array(&bad);
     json_init(&total); json_set_object(&total);
 
-    for (size_t j = 0; j < group_count && emitted < ZCL_AGENTS_MAX_GRADE_ROWS;
-         j++) {
-        size_t walls = 0, rats = 0;
-        for (size_t i = 0; i < scan.result_count; i++) {
-            const struct ag_result *r = &scan.results[i];
-            const char *key = r->key[0] ? r->key : "(unnamed)";
-            int64_t predicted;
-            if (strcmp(key, groups[j].key) != 0) continue;
-            scratch[walls++] = r->wall_s;
-            predicted = ag_predicted_wall(&scan, r);
-            if (predicted > 0 && r->wall_s >= 0)
-                ratios[rats++] = r->wall_s * 10000 / predicted;
-        }
-        ag_push_row(&rows, groups[j].key, &groups[j], ag_median(scratch, walls),
-                    ag_median(ratios, rats), options->now_unix);
-        emitted++;
-    }
-
-    {
-        size_t walls = 0, rats = 0;
-        for (size_t i = 0; i < scan.result_count; i++) {
-            int64_t predicted = ag_predicted_wall(&scan, &scan.results[i]);
-            scratch[walls++] = scan.results[i].wall_s;
-            if (predicted > 0 && scan.results[i].wall_s >= 0)
-                ratios[rats++] = scan.results[i].wall_s * 10000 / predicted;
-        }
-        all_wall = ag_median(scratch, walls);
-        all_ratio = ag_median(ratios, rats);
-    }
-    (void)json_push_kv_int(&total, "tasks", all.tasks);
-    (void)json_push_kv_int(&total, "success", all.success);
-    (void)json_push_kv_int(&total, "failure", all.failure);
-    (void)json_push_kv_int(&total, "other", all.other);
-    (void)json_push_kv_int(&total, "success_rate_bp",
-                           all.success + all.failure > 0
-                               ? all.success * 10000 /
-                                     (all.success + all.failure)
-                               : -1);
-    (void)json_push_kv_int(&total, "median_wall_s", all_wall);
-    (void)json_push_kv_int(&total, "median_ratio_bp", all_ratio);
-
-    for (size_t i = 0; i < scan.bad_count && i < AG_MAX_REPORTED_BAD_LINES;
-         i++) {
-        struct json_value n;
-        json_init(&n);
-        json_set_int(&n, scan.bad_lines[i]);
-        (void)json_push_back(&bad, &n);
-        json_free(&n);
-    }
+    emitted = ag_push_group_rows(&scan, &buf, group_count, options->now_unix,
+                                 &rows);
+    ag_medians(&scan, NULL, &buf, &all_wall, &all_ratio);
+    ag_push_totals(&total, &all, all_wall, all_ratio);
+    ag_push_bad_lines(&bad, &scan);
 
     json_set_object(out);
-    (void)json_push_kv_str(out, "state", "observed");
-    (void)json_push_kv_str(out, "ledger", path);
-    (void)json_push_kv_str(out, "group_by",
-                           options->group_by && options->group_by[0]
-                               ? options->group_by
-                               : "executor");
-    (void)json_push_kv_int(out, "window_hours", options->since_hours);
-    (void)json_push_kv_int(out, "ledger_lines", (int64_t)scan.line_count);
-    (void)json_push_kv_int(out, "result_rows_total", (int64_t)scan.result_total);
-    (void)json_push_kv_int(out, "result_rows_in_window",
-                           (int64_t)scan.result_count);
-    (void)json_push_kv_int(out, "predict_rows", (int64_t)scan.predict_count);
-    (void)json_push_kv_int(out, "skipped_rows", (int64_t)scan.bad_count);
+    ag_push_provenance(out, options, path, &scan);
     (void)json_push_kv(out, "skipped_lines", &bad);
     (void)json_push_kv_int(out, "count", (int64_t)emitted);
     (void)json_push_kv_int(out, "total", (int64_t)group_count);
@@ -494,7 +653,6 @@ bool zcl_agents_grades_json(const struct zcl_agents_options *options,
     (void)json_push_kv(out, "totals", &total);
 
     json_free(&rows); json_free(&bad); json_free(&total);
-    free(scan.results); free(scan.predicts); free(groups); free(scratch);
-    free(ratios);
+    ag_free_buffers(&scan, &buf);
     return true;
 }

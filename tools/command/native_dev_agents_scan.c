@@ -378,49 +378,38 @@ static void sc_collect_units(struct json_value *out)
     json_free(&rows);
 }
 
-void zcl_agents_running_json(const struct zcl_agents_options *options,
-                             struct json_value *out)
+/* This user's home, or the working directory when the environment has none.
+ * Every default path below is built from exactly this one answer. */
+static const char *sc_home(void)
 {
-    struct sc_ctx ctx;
-    struct sc_workspace *list = NULL;
-    struct json_value rows, units;
-    char root[ZCL_AGENTS_PATH_MAX], ready_dir[ZCL_AGENTS_PATH_MAX];
-    char child[ZCL_AGENTS_PATH_MAX];
     const char *home = getenv("HOME");
-    size_t count = 0, emitted = 0, live_count = 0, process_count = 0;
-    int64_t window;
+    return home && home[0] ? home : ".";
+}
 
-    if (!out) return;
-    json_set_object(out);
-    json_init(&rows);
-    json_set_array(&rows);
-    memset(&ctx, 0, sizeof(ctx));
-
+/* Where the workspaces live and where their READY markers are written. A
+ * caller-supplied root moves BOTH, so a test drives the whole scan against a
+ * fixture tree without touching this machine. */
+static void sc_resolve_roots(const struct zcl_agents_options *options,
+                             char *root, size_t root_cap, char *ready_dir,
+                             size_t ready_cap)
+{
     if (options->root && options->root[0]) {
-        (void)snprintf(root, sizeof(root), "%s", options->root);
-        sc_join(ready_dir, sizeof(ready_dir), root, "scratch");
-    } else {
-        (void)snprintf(root, sizeof(root), "%s/.z23",
-                       home && home[0] ? home : ".");
-        (void)snprintf(ready_dir, sizeof(ready_dir),
-                       "%s/.local/state/zclassic23/scratch",
-                       home && home[0] ? home : ".");
-    }
-
-    list = zcl_calloc(SC_MAX_WORKSPACES, sizeof(*list), "agents_workspaces");
-    ctx.procs = zcl_calloc(SC_MAX_PROCS, sizeof(*ctx.procs), "agents_procs");
-    ctx.capture = zcl_malloc(SC_CAPTURE_BYTES, "agents_git_capture");
-    if (!list || !ctx.procs || !ctx.capture) {
-        free(list); free(ctx.procs); free(ctx.capture);
-        (void)json_push_kv_str(out, "state", "unavailable");
-        (void)json_push_kv_str(out, "note",
-                               "cannot allocate the workspace scan buffers");
-        (void)json_push_kv_int(out, "count", 0);
-        (void)json_push_kv(out, "rows", &rows);
-        json_free(&rows);
+        (void)snprintf(root, root_cap, "%s", options->root);
+        sc_join(ready_dir, ready_cap, root, "scratch");
         return;
     }
+    (void)snprintf(root, root_cap, "%s/.z23", sc_home());
+    (void)snprintf(ready_dir, ready_cap, "%s/.local/state/zclassic23/scratch",
+                   sc_home());
+}
 
+/* The four places an agent works. The landing worktree is the odd one: it
+ * lives outside ~/.z23 on a real box and inside the fixture root in a test. */
+static size_t sc_enumerate(const struct zcl_agents_options *options,
+                           const char *root, struct sc_workspace *list)
+{
+    char child[ZCL_AGENTS_PATH_MAX];
+    size_t count = 0;
     sc_join(child, sizeof(child), root, "lanes");
     count = sc_add_kind(list, count, child, "lane");
     sc_join(child, sizeof(child), root, "units");
@@ -431,63 +420,125 @@ void zcl_agents_running_json(const struct zcl_agents_options *options,
         sc_join(child, sizeof(child), root, "land");
     else
         (void)snprintf(child, sizeof(child), "%s/.local/state/z23/dev/land",
-                       home && home[0] ? home : ".");
-    count = sc_add_kind(list, count, child, "landing");
+                       sc_home());
+    return sc_add_kind(list, count, child, "landing");
+}
 
-    sc_collect_procs(&ctx);
-    /* "Running now" is a fixed, short window on purpose. It is not the
-     * ledger's `since`: a workspace whose Git state last moved half a week
-     * ago is a real part of the grade history and is not running now, and
-     * folding the two windows together would put two hundred idle worktrees
-     * under a heading that says RUNNING. */
-    window = SC_WINDOW_HOURS * 3600;
+/* Decide which workspaces are worth the expensive reads.
+ *
+ * "Running now" is a fixed, short window on purpose. It is not the ledger's
+ * `since`: a workspace whose Git state last moved half a week ago is a real
+ * part of the grade history and is not running now, and folding the two
+ * windows together would put two hundred idle worktrees under a heading that
+ * says RUNNING. */
+static void sc_classify(const struct sc_ctx *ctx,
+                        const struct zcl_agents_options *options,
+                        struct sc_workspace *list, size_t count,
+                        size_t *with_process, size_t *live)
+{
+    int64_t window = SC_WINDOW_HOURS * 3600;
     for (size_t i = 0; i < count; i++) {
-        list[i].git_mtime = sc_git_mtime(list[i].path);
-        list[i].has_process = false;
-        for (size_t p = 0; p < ctx.proc_count && !list[i].has_process; p++)
-            if (sc_inside(ctx.procs[p].cwd, list[i].path))
-                list[i].has_process = true;
-        list[i].moved = list[i].git_mtime > 0 &&
-                        options->now_unix - list[i].git_mtime <= window;
-        list[i].live = list[i].has_process || list[i].moved;
-        if (list[i].has_process) process_count++;
-        if (list[i].live) live_count++;
+        struct sc_workspace *w = &list[i];
+        w->git_mtime = sc_git_mtime(w->path);
+        w->has_process = false;
+        for (size_t p = 0; p < ctx->proc_count && !w->has_process; p++)
+            if (sc_inside(ctx->procs[p].cwd, w->path)) w->has_process = true;
+        w->moved = w->git_mtime > 0 &&
+                   options->now_unix - w->git_mtime <= window;
+        w->live = w->has_process || w->moved;
+        if (w->has_process) (*with_process)++;
+        if (w->live) (*live)++;
     }
+}
+
+/* Ages are reported only when the reader has both ends of them. A -1 means
+ * "not measured", which is a different fact from zero. */
+static int64_t sc_age(int64_t now_unix, int64_t stamp)
+{
+    if (stamp <= 0 || now_unix < stamp) return SC_UNMEASURED;
+    return now_unix - stamp;
+}
+
+/* One workspace row. Past the shared wall the Git read and the source walk
+ * are skipped and the row says so, rather than reporting a number nobody
+ * waited for. */
+static void sc_emit_row(struct sc_ctx *ctx,
+                        const struct zcl_agents_options *options,
+                        const struct sc_workspace *w, const char *ready_dir,
+                        struct json_value *rows)
+{
+    struct json_value row;
+    size_t budget = SC_WALK_ENTRY_MAX;
+    int64_t newest = 0;
+    json_init(&row);
+    json_set_object(&row);
+    (void)json_push_kv_str(&row, "name", w->name);
+    (void)json_push_kv_str(&row, "kind", w->kind);
+    (void)json_push_kv_str(&row, "path", w->path);
+    if (platform_time_monotonic_ms() < ctx->deadline_ms) {
+        sc_push_git(ctx, w, &row);
+        newest = sc_source_mtime(w->path, 0, &budget);
+    } else {
+        (void)json_push_kv_str(&row, "head", "");
+        (void)json_push_kv_int(&row, "dirty", SC_UNMEASURED);
+    }
+    (void)json_push_kv_int(&row, "newest_source_age_s",
+                           sc_age(options->now_unix, newest));
+    (void)json_push_kv_int(&row, "git_age_s",
+                           sc_age(options->now_unix, w->git_mtime));
+    sc_push_processes(ctx, w, &row);
+    sc_push_ready(ready_dir, w->name, &row);
+    (void)json_push_back(rows, &row);
+    json_free(&row);
+}
+
+/* The scan could not even take its own buffers. Reported as a section that
+ * observed nothing, never as a section that found nothing. */
+static void sc_refuse(struct json_value *out, struct json_value *rows)
+{
+    (void)json_push_kv_str(out, "state", "unavailable");
+    (void)json_push_kv_str(out, "note",
+                           "cannot allocate the workspace scan buffers");
+    (void)json_push_kv_int(out, "count", 0);
+    (void)json_push_kv(out, "rows", rows);
+}
+
+void zcl_agents_running_json(const struct zcl_agents_options *options,
+                             struct json_value *out)
+{
+    struct sc_ctx ctx;
+    struct sc_workspace *list = NULL;
+    struct json_value rows, units;
+    char root[ZCL_AGENTS_PATH_MAX], ready_dir[ZCL_AGENTS_PATH_MAX];
+    size_t count = 0, emitted = 0, live_count = 0, process_count = 0;
+
+    if (!out) return;
+    json_set_object(out);
+    json_init(&rows);
+    json_set_array(&rows);
+    memset(&ctx, 0, sizeof(ctx));
+    sc_resolve_roots(options, root, sizeof(root), ready_dir,
+                     sizeof(ready_dir));
+
+    list = zcl_calloc(SC_MAX_WORKSPACES, sizeof(*list), "agents_workspaces");
+    ctx.procs = zcl_calloc(SC_MAX_PROCS, sizeof(*ctx.procs), "agents_procs");
+    ctx.capture = zcl_malloc(SC_CAPTURE_BYTES, "agents_git_capture");
+    if (!list || !ctx.procs || !ctx.capture) {
+        free(list); free(ctx.procs); free(ctx.capture);
+        sc_refuse(out, &rows);
+        json_free(&rows);
+        return;
+    }
+
+    count = sc_enumerate(options, root, list);
+    sc_collect_procs(&ctx);
+    sc_classify(&ctx, options, list, count, &process_count, &live_count);
     qsort(list, count, sizeof(*list), sc_compare);
 
     ctx.deadline_ms = platform_time_monotonic_ms() + SC_WALL_MS;
-    for (size_t i = 0;
-         i < count && list[i].live && emitted < ZCL_AGENTS_MAX_WORKSPACE_ROWS;
-         i++) {
-        struct json_value row;
-        size_t budget = SC_WALK_ENTRY_MAX;
-        int64_t newest;
-        json_init(&row);
-        json_set_object(&row);
-        (void)json_push_kv_str(&row, "name", list[i].name);
-        (void)json_push_kv_str(&row, "kind", list[i].kind);
-        (void)json_push_kv_str(&row, "path", list[i].path);
-        if (platform_time_monotonic_ms() < ctx.deadline_ms) {
-            sc_push_git(&ctx, &list[i], &row);
-            newest = sc_source_mtime(list[i].path, 0, &budget);
-        } else {
-            (void)json_push_kv_str(&row, "head", "");
-            (void)json_push_kv_int(&row, "dirty", SC_UNMEASURED);
-            newest = 0;
-        }
-        (void)json_push_kv_int(&row, "newest_source_age_s",
-                               newest > 0 && options->now_unix >= newest
-                                   ? options->now_unix - newest
-                                   : SC_UNMEASURED);
-        (void)json_push_kv_int(&row, "git_age_s",
-                               list[i].git_mtime > 0 &&
-                                       options->now_unix >= list[i].git_mtime
-                                   ? options->now_unix - list[i].git_mtime
-                                   : SC_UNMEASURED);
-        sc_push_processes(&ctx, &list[i], &row);
-        sc_push_ready(ready_dir, list[i].name, &row);
-        (void)json_push_back(&rows, &row);
-        json_free(&row);
+    while (emitted < count && list[emitted].live &&
+           emitted < ZCL_AGENTS_MAX_WORKSPACE_ROWS) {
+        sc_emit_row(&ctx, options, &list[emitted], ready_dir, &rows);
         emitted++;
     }
 
