@@ -20,8 +20,10 @@
  * This group is the arm64 mirror of that guard: the host feature report is
  * probed here, independently of the code under test, and if the OS says the
  * extension is present the dispatch MUST have the tier active. On a host
- * without the extensions — and on x86 — every leg degrades to SKIP and the
- * group passes.
+ * without the extensions — and on x86 — each reachability leg instead
+ * asserts the ARM tier is UNREACHABLE (sha256_select_impl() and
+ * zcl_crc32c_impl_name() must never report the ARM hardware tier active),
+ * so the group never self-skips: it always makes an observation.
  *
  * Legs:
  *   1. sha256 reachability: FEAT_SHA256 advertised -> the node selects the
@@ -105,13 +107,6 @@ int test_arm_hw_tiers(void)
     printf("\n=== arm_hw_tiers (arm64 hardware tier reachability) ===\n");
     int failures = 0;
 
-    if (!host_has("hw.optional.arm.FEAT_SHA256") &&
-        !host_has("hw.optional.arm.FEAT_CRC32")) {
-        printf("arm_hw_tiers: SKIP (host advertises neither FEAT_SHA256 nor "
-               "FEAT_CRC32)\n");
-        return 0;
-    }
-
     /* ── 1. sha256 reachability — the regression guard ───────────────── */
     if (host_has("hw.optional.arm.FEAT_SHA256")) {
         printf("arm_hw_tiers: FEAT_SHA256 advertised, tier selected... ");
@@ -131,7 +126,26 @@ int test_arm_hw_tiers(void)
             failures++;
         }
     } else {
-        printf("arm_hw_tiers: SKIP sha256 legs (no FEAT_SHA256)\n");
+        /* No ARM SHA extension advertised: the honest observation here is
+         * not "untested" but "unreachable" — sha256_select_impl() must
+         * refuse to install the ARMv8 SHA transform, the same way it would
+         * on a host that never compiled the tier in. */
+        printf("arm_hw_tiers: host advertises no FEAT_SHA256; ARM sha256 "
+               "tier unreachable... ");
+        int installed = sha256_select_impl(SHA256_IMPL_SHANI);
+        const char *impl = sha256_implementation();
+        sha256_select_impl(SHA256_IMPL_AUTO);
+        if (strstr(impl, "ARMv8 SHA") == NULL) {
+            printf("OK (%s)\n", impl);
+        } else {
+            printf("FAIL (%s, installed=%d)\n", impl, installed);
+            printf("  The host advertises no FEAT_SHA256 but "
+                   "sha256_implementation() reports the ARMv8 SHA hardware\n"
+                   "  tier active anyway — the runtime gate in "
+                   "core/modules/crypto/src/sha256.c is not honoring the OS\n"
+                   "  feature report.\n");
+            failures++;
+        }
     }
 
     /* ── 2. FIPS-180-4 KATs through the ACTIVE dispatch ──────────────── */
@@ -206,7 +220,23 @@ int test_arm_hw_tiers(void)
             failures++;
         }
     } else {
-        printf("arm_hw_tiers: SKIP crc32c legs (no FEAT_CRC32)\n");
+        /* No ARM Castagnoli extension advertised: assert the ARM crc32c
+         * tier is unreachable rather than skipping the leg outright. */
+        printf("arm_hw_tiers: host advertises no FEAT_CRC32; ARM crc32c "
+               "tier unreachable... ");
+        (void)zcl_crc32c("", 0);   /* force the once-only probe + self-check */
+        const char *impl = zcl_crc32c_impl_name();
+        if (strstr(impl, "armv8") == NULL) {
+            printf("OK (%s)\n", impl);
+        } else {
+            printf("FAIL (%s)\n", impl);
+            printf("  The host advertises no FEAT_CRC32 but "
+                   "zcl_crc32c_impl_name() reports the ARMv8 crc32 hardware\n"
+                   "  tier active anyway — the runtime gate in "
+                   "platform/modules/util/src/crc32c.c is not honoring the OS\n"
+                   "  feature report.\n");
+            failures++;
+        }
     }
 
     /* ── 5. active tier vs reference table over the width boundaries ─── */
