@@ -172,5 +172,9 @@ int check_blob_read_bounds_run(int argc, char **argv);
 int check_blob_read_bounds_selftest(void);
 int check_posix_ere_only_run(int argc, char **argv);
 int check_posix_ere_only_selftest(void);
+int check_no_orphan_placement_run(int argc, char **argv);
+int check_no_orphan_placement_selftest(void);
+int check_architecture_tree_run(int argc, char **argv);
+int check_architecture_tree_selftest(void);
 
 #endif

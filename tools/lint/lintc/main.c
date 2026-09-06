@@ -74,6 +74,10 @@ static const struct lint_gate k_gates[] = {
     { "check-blob-read-bounds", check_blob_read_bounds_run,
       check_blob_read_bounds_selftest },
     { "check-posix-ere-only", check_posix_ere_only_run, check_posix_ere_only_selftest },
+    { "check-no-orphan-placement", check_no_orphan_placement_run,
+      check_no_orphan_placement_selftest },
+    { "check-architecture-tree", check_architecture_tree_run,
+      check_architecture_tree_selftest },
 };
 
 int main(int argc, char **argv)

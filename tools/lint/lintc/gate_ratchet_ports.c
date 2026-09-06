@@ -1,7 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * Gates: check-no-new-borrowed-seed, check-silent-errors-bool,
- * check-no-raw-sqlite-in-controllers
+ * check-no-raw-sqlite-in-controllers, check-no-orphan-placement
  * Default landing spot for a FUTURE gate port: a shrink-only caller-baseline
  * ratchet (walk_src over production roots plus a comment-stripped baseline
  * file) joins this family. A filesystem-tree-walking gate that is not a
@@ -995,4 +995,175 @@ int check_no_raw_sqlite_in_controllers_selftest(void)
                             &base) != 1;
     regfree(&re);
     return st_ok(bad, "check_no_raw_sqlite_in_controllers selftest: OK\n");
+}
+
+static const char *const k_op_tops[] = {
+    "core", "engine", "contexts", "cognition", "platform", "tools", "tests"
+};
+static const char k_op_ls[] = "git ls-files -z -- '*.c' '*.h'";
+static const char k_op_base[] = "tools/lint/orphan_placement_baseline.txt";
+static const char k_op_msg[] =
+    "%s: orphan placement — resolves to the catch-all 'root' group; move it under a known top "
+    "(lib/<mod>, app/<shape>, core, config, tools, domain, adapters, ports)\n";
+
+static int op_excluded(const char *f)
+{
+    static const char *const pfx[] = {
+        "apps/", "vendor/", "build/", "tests/harness/fixtures/",
+        "contexts/commons/packages/"
+    };
+    for (size_t i = 0; i < sizeof pfx / sizeof pfx[0]; i++)
+        if (!strncmp(f, pfx[i], strlen(pfx[i])))
+            return 1;
+    const char *b = strrchr(f, '/');
+    b = b ? b + 1 : f;
+    return *b == '_';
+}
+
+static int op_placed(const char *f)
+{
+    for (size_t i = 0; i < sizeof k_op_tops / sizeof k_op_tops[0]; i++) {
+        size_t n = strlen(k_op_tops[i]);
+        if (!strncmp(f, k_op_tops[i], n) && f[n] == '/')
+            return 1;
+    }
+    return 0;
+}
+
+static int op_allow(const char *mode, const struct sr_set *base, const char *f)
+{
+    return strcmp(mode, "FAIL") != 0 && sr_has(base, f);
+}
+
+static const char *op_mode(void)
+{
+    const char *m = getenv("ZCL_LINT_MODE");
+    return (m && m[0]) ? m : "WARN";
+}
+
+struct op_acc {
+    const char *mode;
+    const struct sr_set *base;
+    int scanned, considered, violations, allowlisted;
+};
+
+static int op_one(struct op_acc *a, const char *f)
+{
+    a->scanned++;
+    if (op_excluded(f))
+        return 0;
+    a->considered++;
+    if (op_placed(f))
+        return 0;
+    if (op_allow(a->mode, a->base, f)) {
+        a->allowlisted++;
+        return 0;
+    }
+    a->violations++;
+    return fprintf(stderr, k_op_msg, f) < 0 ? die("z23-lint: write failed\n", "") : 0;
+}
+
+static int op_on_path(const char *path, void *ctx)
+{
+    return op_one(ctx, path);
+}
+
+static int op_env(struct op_acc *a, const char *env)
+{
+    const char *p = env;
+    while (*p) {
+        while (*p == ' ' || *p == '\t' || *p == '\n')
+            p++;
+        if (!*p)
+            break;
+        const char *s = p;
+        while (*p && *p != ' ' && *p != '\t' && *p != '\n')
+            p++;
+        size_t n = (size_t)(p - s);
+        char path[4096];
+        if (n >= sizeof path)
+            return die("z23-lint: path too long: %s\n", "ZCL_ORPHAN_PLACEMENT_FILES");
+        memcpy(path, s, n);
+        path[n] = '\0';
+        int rc = op_one(a, path);
+        if (rc)
+            return rc;
+    }
+    return 0;
+}
+
+static int op_report(const struct op_acc *a)
+{
+    if (printf("[check_no_orphan_placement] scanned %d tracked source(s), considered %d after excludes\n",
+               a->scanned, a->considered) < 0
+        || printf("[check_no_orphan_placement] %d violation(s) found (mode: %s)\n",
+                  a->violations, a->mode) < 0)
+        return die("z23-lint: write failed\n", "");
+    if (a->allowlisted > 0
+        && printf("[check_no_orphan_placement] %d allowlisted violation(s) ignored\n",
+                  a->allowlisted) < 0)
+        return die("z23-lint: write failed\n", "");
+    if (a->violations > 0
+        && puts("[check_no_orphan_placement] give the file an obvious home, or (shrink-only) write to tools/lint/orphan_placement_baseline.txt")
+           == EOF)
+        return die("z23-lint: write failed\n", "");
+    return 0;
+}
+
+int check_no_orphan_placement_run(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+    struct sr_set base = {0};
+    int rc = sr_load(&base, k_op_base);
+    if (rc)
+        return rc;
+    struct op_acc a = { .mode = op_mode(), .base = &base };
+    const char *env = getenv("ZCL_ORPHAN_PLACEMENT_FILES");
+    int floor = 1500;
+    if (env && env[0]) {
+        floor = 1;
+        rc = op_env(&a, env);
+    } else {
+        rc = each_zpath(k_op_ls, op_on_path, &a);
+    }
+    if (rc)
+        return rc;
+    rc = gate_require_scanned(a.scanned, floor, "check-no-orphan-placement",
+                              "git ls-files returned too few .c/.h — run from repo root inside the worktree?");
+    if (rc)
+        return rc;
+    rc = op_report(&a);
+    if (rc)
+        return rc;
+    if (a.violations > 0
+        && (strcmp(a.mode, "FAIL") == 0 || strcmp(a.mode, "RATCHET") == 0))
+        return 1;
+    return 0;
+}
+
+int check_no_orphan_placement_selftest(void)
+{
+    int bad = 0;
+    bad |= !op_excluded("apps/x.c");
+    bad |= !op_excluded("vendor/x.c");
+    bad |= !op_excluded("build/x.c");
+    bad |= !op_excluded("tests/harness/fixtures/x.c");
+    bad |= !op_excluded("contexts/commons/packages/x.c");
+    bad |= !op_excluded("core/src/_hidden.c");
+    bad |= op_excluded("core/modules/util/src/placed.c");
+    for (size_t i = 0; i < sizeof k_op_tops / sizeof k_op_tops[0]; i++) {
+        char p[80];
+        if (snprintf(p, sizeof p, "%s/foo.c", k_op_tops[i]) >= (int)sizeof p)
+            bad = 1;
+        else
+            bad |= !op_placed(p);
+    }
+    bad |= op_placed("docs/examples/01_mint_and_spend.c");
+    struct sr_set base = {0};
+    bad |= sr_add(&base, "orphan.c");
+    bad |= !op_allow("WARN", &base, "orphan.c");
+    bad |= !op_allow("RATCHET", &base, "orphan.c");
+    bad |= op_allow("FAIL", &base, "orphan.c");
+    return st_ok(bad, "check_no_orphan_placement selftest: OK\n");
 }

@@ -5299,7 +5299,8 @@ LINTC_SRCS = tools/lint/lintc/lib.c tools/lint/lintc/gate_pattern_small.c \
     tools/lint/lintc/gate_tree_walk.c tools/lint/lintc/gate_git_scan_a.c \
     tools/lint/lintc/gate_git_scan_b.c tools/lint/lintc/gate_landing_proof.c \
     tools/lint/lintc/gate_build_config.c tools/lint/lintc/gate_doc_index.c \
-    tools/lint/lintc/gate_ratchet_ports.c tools/lint/lintc/main.c
+    tools/lint/lintc/gate_ratchet_ports.c tools/lint/lintc/gate_repo_shape.c \
+    tools/lint/lintc/main.c
 LINTC_OBJS = $(LINTC_SRCS:tools/lint/lintc/%.c=build/lintc-obj/%.o)
 EQUIHASH_FACT_SRCS = tools/equihash_params_fact.c \
     core/chainparams/src/chainparams.c core/chainparams/src/chainparamsbase.c \
@@ -12168,7 +12169,7 @@ check-group-purpose: $(LINTC_TOOL)
 
 # The source tree is an executable architecture contract: five authorities,
 # a closed product-context set, single-owner modules, and one reducer room.
-check-architecture-tree:
+check-architecture-tree: $(LINTC_TOOL)
 	@echo "→ architecture_tree"
 	@./tools/lint/check_architecture_tree.sh
 
@@ -12178,7 +12179,7 @@ check-architecture-tree:
 # violation. RATCHET against the shrink-only
 # tools/lint/orphan_placement_baseline.txt (palace P4.4); graduates to FAIL
 # when it empties.
-check-no-orphan-placement:
+check-no-orphan-placement: $(LINTC_TOOL)
 	@echo "→ Gate P3: check_no_orphan_placement"
 	@ZCL_LINT_MODE=RATCHET ./tools/lint/check_no_orphan_placement.sh
 
