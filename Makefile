@@ -5310,6 +5310,7 @@ LINTC_SRCS = tools/lint/lintc/lib.c tools/lint/lintc/gate_boot_wiring.c tools/li
     tools/lint/lintc/gate_ratchet_ports.c tools/lint/lintc/gate_repo_shape.c tools/lint/lintc/gate_def_parsers.c tools/lint/lintc/gate_zcode_packages.c \
     tools/lint/lintc/gate_source_fences.c tools/lint/lintc/gate_compile_fixture.c \
     tools/lint/lintc/gate_function_complexity.c \
+    tools/lint/lintc/gate_framework_shape.c \
     tools/lint/lintc/main.c
 LINTC_OBJS = $(LINTC_SRCS:tools/lint/lintc/%.c=build/lintc-obj/%.o)
 # Apple Clang enables -Wunused-but-set-variable under -Wextra -Werror for
@@ -11833,7 +11834,7 @@ check-supervisor-progress-declared:
 
 # Gate #18 graduated WARN → RATCHET (E10): fails on any new off-shape
 # app/ .c file (the allowlist is the baseline and is currently empty).
-check-framework-shape:
+check-framework-shape: $(LINTC_TOOL)
 	@echo "→ Gate #18: framework_shape_check"
 	@ZCL_LINT_MODE=RATCHET ./tools/lint/framework_shape_check.sh
 

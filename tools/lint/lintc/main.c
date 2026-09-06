@@ -100,6 +100,8 @@ static const struct lint_gate k_gates[] = {
     { "check-arena-view-stub", check_arena_view_stub_run, check_arena_view_stub_selftest },
     { "check-cyclomatic-complexity", check_cyclomatic_complexity_run,
       check_cyclomatic_complexity_selftest },
+    { "check-framework-shape", check_framework_shape_run,
+      check_framework_shape_selftest },
 };
 
 int main(int argc, char **argv)

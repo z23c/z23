@@ -32,6 +32,8 @@ extern int g_n_ctx;
 extern char g_ctx[RS_MAX][RS_NAME];
 extern int g_n_libs;
 extern char g_libs[RS_MAX][RS_NAME];
+extern int g_n_auth;
+extern char g_auth[RS_AUTH][RS_PATH];
 
 int die(const char *msg, const char *arg);
 int fin(FILE *f, char *line, const char *path, int rc);
@@ -250,5 +252,7 @@ int check_arena_view_stub_run(int argc, char **argv);
 int check_arena_view_stub_selftest(void);
 int check_cyclomatic_complexity_run(int argc, char **argv);
 int check_cyclomatic_complexity_selftest(void);
+int check_framework_shape_run(int argc, char **argv);
+int check_framework_shape_selftest(void);
 
 #endif
