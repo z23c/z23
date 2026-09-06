@@ -16,6 +16,14 @@
 #define PATH_MAX 4096
 #endif
 
+/* Compiled-in lint-dimension allowances until this checkout has measured
+ * its own. Landing adds the Windows acceptance compile on top of lint-fast. */
+#define PROOF_LINT_DEFAULT_MS 600000
+/* Warm `make check-windows-acceptance` on this host was 18 s to the first
+ * mingw link (codeindex_freshness.exe, 2026-09-06). Six minutes of headroom
+ * on the developer lint-fast budget covers a cold catalog link. */
+#define PROOF_LINT_LANDING_MS (PROOF_LINT_DEFAULT_MS + 360000)
+
 enum zcl_dev_proof_state {
     ZCL_DEV_PROOF_STATE_INVALID = -1,
     ZCL_DEV_PROOF_STATE_MISSING = 0,
@@ -181,6 +189,14 @@ bool zcl_dev_proof_test_stress_env_prepare(char *why, size_t why_len);
  * against a fixture sidecar without driving a full proof cycle. */
 bool zcl_dev_proof_test_warm_status_line(const char *warmstart_path,
                                          char *out, size_t out_len);
+/* Seam for the landing-lint regression: the same argv, fallback budget, and
+ * recorded target list the proof worker uses for the lint dimension, so a
+ * test can prove a landing root runs lint-fast then check-windows-acceptance
+ * without driving a make or a proof cycle. */
+bool zcl_dev_proof_test_lint_argv(const char *root, const char *jobs,
+                                  const char **argv, size_t argv_cap,
+                                  size_t *argc_out, int64_t *fallback_ms,
+                                  const char **targets_out);
 #endif
 
 /* Warm-start survey types. Inert data, declared unconditionally so every

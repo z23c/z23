@@ -6,6 +6,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -734,6 +735,19 @@ bool zcl_devloop_watch_lock_path(const char *repo_root,
  * changes from compilers and indexers do not constitute a source save. */
 bool zcl_devloop_watch_event_is_mutation(uint32_t inotify_mask);
 bool zcl_devloop_watch_dir_is_ignored(const char *name);
+/* Path of the landing queue.lock that sits beside a landing worktree
+ * (`<root>/../queue.lock`). Shared by the watcher and the proof worker so
+ * they cannot disagree about the sibling; each caller tests existence with
+ * its own filesystem capability. */
+static inline bool zcl_devloop_landing_queue_lock_path(const char *root,
+                                                      char *out, size_t out_sz)
+{
+    int n;
+    if (!root || !*root || !out || out_sz == 0)
+        return false;
+    n = snprintf(out, out_sz, "%s/../queue.lock", root);
+    return n > 0 && (size_t)n < out_sz;
+}
 /* Canonical-worktree identity and SHA3-sealed cycle state.  Readers never
  * create state. ABSENT is an honest empty result; INVALID must fail closed. */
 bool zcl_devloop_workspace_id(const char *repo_root, char out[65]);

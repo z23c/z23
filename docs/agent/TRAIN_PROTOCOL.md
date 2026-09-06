@@ -99,7 +99,8 @@ queueing behind or racing the first step. With nothing in flight it takes
 the oldest queued request, rebases the tip onto origin/main in the private
 landing worktree at `<state>/land/wt`, runs
 `make lint-fast`, ASKS for the exact commit/base proof through the existing
-`dev proof ensure` machinery, and returns. A later step reads the proof's own
+`dev proof ensure` machinery, and returns. A landing proof also builds the
+Windows acceptance tests. A later step reads the proof's own
 state: passed fast-forwards `origin/main` and records `landed`; failed
 records the failing dimension, the log path, and the first actionable line
 from that log. A rebase conflict is terminal and names the conflicting paths,

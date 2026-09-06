@@ -3395,9 +3395,53 @@ static struct zcl_dev_proof_budget proof_step_budget(
 
 #define PROOF_GENERATED_DEFAULT_MS 300000
 #define PROOF_COMPILE_DEFAULT_MS 900000
-#define PROOF_LINT_DEFAULT_MS 600000
 #define PROOF_BUNDLE_DEFAULT_MS 1800000
 #define PROOF_HELPERS_DEFAULT_MS 120000
+#define PROOF_LINT_ARGV_CAP 6u
+
+static bool proof_root_is_landing(const char *root)
+{
+#if defined(_WIN32)
+    (void)root;
+    return false;
+#else
+    char lock[PATH_MAX];
+    if (!zcl_devloop_landing_queue_lock_path(root, lock, sizeof(lock)))
+        return false;
+    return access(lock, F_OK) == 0;
+#endif
+}
+
+/* Fill the lint-dimension make argv. A landing root (sibling queue.lock)
+ * runs lint-fast then check-windows-acceptance in one invocation; every
+ * other proof stays on lint-fast. `jobs` is stored by pointer and must
+ * outlive argv. */
+static bool proof_lint_prepare(const char *root, const char *jobs,
+                               const char **argv, size_t argv_cap,
+                               int64_t *fallback_ms, const char **targets)
+{
+    bool landing;
+    if (!jobs || !*jobs || !argv || argv_cap < PROOF_LINT_ARGV_CAP ||
+        !fallback_ms || !targets)
+        return false;
+    landing = proof_root_is_landing(root);
+    argv[0] = "make";
+    argv[1] = "--no-print-directory";
+    argv[2] = jobs;
+    argv[3] = "lint-fast";
+    if (landing) {
+        argv[4] = "check-windows-acceptance";
+        argv[5] = NULL;
+        *fallback_ms = PROOF_LINT_LANDING_MS;
+        *targets = "lint-fast check-windows-acceptance";
+    } else {
+        argv[4] = NULL;
+        argv[5] = NULL;
+        *fallback_ms = PROOF_LINT_DEFAULT_MS;
+        *targets = "lint-fast";
+    }
+    return true;
+}
 
 static bool inventory_output_only(const char *const *files, size_t count)
 {
@@ -3715,6 +3759,22 @@ bool zcl_dev_proof_test_warm_status_line(const char *warmstart_path,
                                          char *out, size_t out_len)
 {
     return warm_status_line(warmstart_path, out, out_len);
+}
+
+bool zcl_dev_proof_test_lint_argv(const char *root, const char *jobs,
+                                  const char **argv, size_t argv_cap,
+                                  size_t *argc_out, int64_t *fallback_ms,
+                                  const char **targets_out)
+{
+    const char *targets = NULL;
+    size_t n = 0;
+    if (!argc_out || !proof_lint_prepare(root, jobs, argv, argv_cap,
+                                         fallback_ms, &targets))
+        return false;
+    while (argv[n]) n++;
+    *argc_out = n;
+    if (targets_out) *targets_out = targets;
+    return true;
 }
 #endif
 
@@ -4387,10 +4447,20 @@ static bool proof_worker_body(const struct proof_paths *paths,
         size_t run_count = 0;
         char binary[PATH_MAX] = {0}, generation_binary[PATH_MAX] = {0};
         uint8_t helper_root[32] = {0};
-        const char *lint_argv[] = {"make", "--no-print-directory", make_jobs,
-                                   "lint-fast", NULL};
+        const char *lint_argv[PROOF_LINT_ARGV_CAP];
+        int64_t lint_fallback_ms = PROOF_LINT_DEFAULT_MS;
+        const char *lint_targets = "lint-fast";
+        if (!proof_lint_prepare(paths->root, make_jobs, lint_argv,
+                                PROOF_LINT_ARGV_CAP, &lint_fallback_ms,
+                                &lint_targets)) {
+            proof_why(why, why_len, "lint_argv_invalid");
+            return false;
+        }
         struct zcl_dev_proof_budget lint_budget =
-            proof_step_budget(paths, "lint", PROOF_LINT_DEFAULT_MS);
+            proof_step_budget(paths, "lint", lint_fallback_ms);
+        if (lint->selected && paths->phases[0])
+            (void)zcl_dev_proof_phase_note(paths->phases, "lint_targets",
+                                           lint_targets);
         if (!lint->selected) unused_dimension(ZCL_DEV_PROOF_LINT, lint);
         if (!test->selected) unused_dimension(ZCL_DEV_PROOF_TEST, test);
         only[0] = 0;

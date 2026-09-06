@@ -3675,6 +3675,58 @@ static int test_pw_seed_cold_without_seedables(void)
     return failures;
 }
 
+static int test_ic_landing_proof_lint_argv(void)
+{
+    int failures = 0;
+    TEST("proof lint: a landing root runs windows acceptance; a developer root does not") {
+#if defined(_WIN32)
+        ASSERT(true);
+#else
+        char land[4096], wt[4096], jobs[] = "-j4";
+        const char *argv[8];
+        size_t argc = 0;
+        int64_t fallback_ms = 0;
+        const char *targets = NULL;
+
+        test_make_tmpdir(land, sizeof(land), "proof_lint", "landing");
+        ASSERT(snprintf(wt, sizeof(wt), "%s/wt", land) > 0);
+        ASSERT(mkdir(wt, 0755) == 0);
+        ASSERT(ic_write(land, "queue.lock", ""));
+        ASSERT(zcl_dev_proof_test_lint_argv(wt, jobs, argv, 8, &argc,
+                                            &fallback_ms, &targets));
+        ASSERT(argc == 5);
+        ASSERT(strcmp(argv[0], "make") == 0);
+        ASSERT(strcmp(argv[1], "--no-print-directory") == 0);
+        ASSERT(strcmp(argv[2], jobs) == 0);
+        ASSERT(strcmp(argv[3], "lint-fast") == 0);
+        ASSERT(strcmp(argv[4], "check-windows-acceptance") == 0);
+        ASSERT(argv[5] == NULL);
+        ASSERT(fallback_ms == PROOF_LINT_LANDING_MS);
+        ASSERT(strcmp(targets, "lint-fast check-windows-acceptance") == 0);
+
+        char dev_parent[4096], dev[4096];
+        test_make_tmpdir(dev_parent, sizeof(dev_parent), "proof_lint", "dev");
+        ASSERT(snprintf(dev, sizeof(dev), "%s/wt", dev_parent) > 0);
+        ASSERT(mkdir(dev, 0755) == 0);
+        argc = 0;
+        fallback_ms = 0;
+        targets = NULL;
+        ASSERT(zcl_dev_proof_test_lint_argv(dev, jobs, argv, 8, &argc,
+                                            &fallback_ms, &targets));
+        ASSERT(argc == 4);
+        ASSERT(strcmp(argv[3], "lint-fast") == 0);
+        ASSERT(argv[4] == NULL);
+        ASSERT(fallback_ms == PROOF_LINT_DEFAULT_MS);
+        ASSERT(strcmp(targets, "lint-fast") == 0);
+
+        ASSERT(test_rm_rf_recursive(land) == 0);
+        ASSERT(test_rm_rf_recursive(dev_parent) == 0);
+#endif
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_impact_composition(void)
 {
     int failures = 0;
@@ -3716,6 +3768,7 @@ int test_impact_composition(void)
     failures += test_pw_disable_switch_forces_cold();
     failures += test_ic_fast_sync_splits_keep_proof_lane();
     failures += test_ic_merkle_verifier_selects_proof_lane();
+    failures += test_ic_landing_proof_lint_argv();
     failures += test_ic_proof_budget_grows_with_groups();
     failures += test_ic_proof_budget_learns_from_this_checkout();
     failures += test_ic_proof_ceiling_env_raises_only();
