@@ -5303,6 +5303,15 @@ LINTC_SRCS = tools/lint/lintc/lib.c tools/lint/lintc/gate_boot_wiring.c tools/li
     tools/lint/lintc/gate_ratchet_ports.c tools/lint/lintc/gate_repo_shape.c tools/lint/lintc/gate_def_parsers.c \
     tools/lint/lintc/main.c
 LINTC_OBJS = $(LINTC_SRCS:tools/lint/lintc/%.c=build/lintc-obj/%.o)
+# Apple Clang enables -Wunused-but-set-variable under -Wextra -Werror for
+# patterns (e.g. an increment-only counter) that gcc's -Wextra does not
+# flag, so a lint-runtime source that builds clean here can refuse on
+# macOS. Run clang -fsyntax-only with the same strictness on every build
+# when clang is on this box's PATH, so that class of Mac-only failure
+# surfaces on Linux instead of only in a macOS build. This is a syntax
+# check only -- gcc still produces the object -- and it must never be
+# silently skipped: when clang is absent the recipe says so explicitly.
+LINTC_CLANG := $(shell command -v clang 2>/dev/null)
 EQUIHASH_FACT_SRCS = tools/equihash_params_fact.c \
     core/chainparams/src/chainparams.c core/chainparams/src/chainparamsbase.c \
     core/params/src/upgrades.c core/consensus/src/upgrades.c \
@@ -12767,6 +12776,7 @@ $(EQUIHASH_FACT_TOOL): $(EQUIHASH_FACT_SRCS)
 build/lintc-obj/%.o: tools/lint/lintc/%.c tools/lint/lintc/lintc.h
 	@mkdir -p $(dir $@)
 	$(CC) $(LINTC_CFLAGS) -c -o $@ $<
+	$(if $(LINTC_CLANG),$(LINTC_CLANG) $(LINTC_CFLAGS) -Wunused-but-set-variable -Wunused-variable -fsyntax-only $<,echo "lintc: clang not on PATH; Apple Clang strictness UNOBSERVED for $<")
 
 $(LINTC_TOOL): $(LINTC_OBJS)
 	@mkdir -p $(dir $@)

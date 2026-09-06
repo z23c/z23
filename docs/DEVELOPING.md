@@ -608,6 +608,12 @@ submitting checkout's own `make lint` judges. The measured lint wall time
 lands in the receipt's phases file as `lint_wall_ms`, beside the
 `lint_targets` line naming what ran.
 
+The lint runtime itself (`build/bin/z23-lint`) is syntax-checked with clang
+on every build when clang is on PATH, so Apple Clang's stricter diagnostics
+(e.g. `-Wunused-but-set-variable`) are caught on Linux instead of only
+surfacing on a macOS build; when clang is absent the build says the check
+was unobserved rather than staying silent.
+
 Both dimensions run inside one generation worktree, so everything either of
 them builds or is handed happens once, before they start: the admitted
 executables, the test runner, the depfile tree, then a single `make` that
