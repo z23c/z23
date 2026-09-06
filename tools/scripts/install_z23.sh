@@ -456,7 +456,8 @@ TOR_STUB_REFUSAL='refusing to package a tor=stub binary: it cannot reach the oni
 # Running an arbitrary executable needs two bounds or it is a hang, not a
 # check: a deadline, and a stdin it cannot consume. The deadline is 10 s
 # unless Z23_INSTALL_TOR_STAMP_TIMEOUT is a positive integer (the selftest
-# sets 1 so a sleeping fixture is a timeout, not a stall).
+# sets 10 explicitly, and tightens it to 1 on the sleeping fixture alone,
+# so that one case is a timeout rather than a stall).
 verify_release_not_tor_stub() {
     local dir="$1" node="$1/z23" sidecar="$1/z23.tor-stamp"
     local stamp="" sidecar_binary_sha256="" rc=0 budget out err timeout_cmd="" line
