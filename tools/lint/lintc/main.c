@@ -102,6 +102,8 @@ static const struct lint_gate k_gates[] = {
       check_cyclomatic_complexity_selftest },
     { "check-framework-shape", check_framework_shape_run,
       check_framework_shape_selftest },
+    { "check-zclassicd-reach-allowlist", check_zclassicd_reach_allowlist_run,
+      check_zclassicd_reach_allowlist_selftest },
 };
 
 int main(int argc, char **argv)

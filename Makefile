@@ -5311,6 +5311,7 @@ LINTC_SRCS = tools/lint/lintc/lib.c tools/lint/lintc/gate_boot_wiring.c tools/li
     tools/lint/lintc/gate_source_fences.c tools/lint/lintc/gate_compile_fixture.c \
     tools/lint/lintc/gate_function_complexity.c \
     tools/lint/lintc/gate_framework_shape.c \
+    tools/lint/lintc/gate_zclassicd_reach.c \
     tools/lint/lintc/main.c
 LINTC_OBJS = $(LINTC_SRCS:tools/lint/lintc/%.c=build/lintc-obj/%.o)
 # Apple Clang enables -Wunused-but-set-variable under -Wextra -Werror for
@@ -12318,7 +12319,7 @@ check-doc-no-false-deleted:
 	@echo "══ LINT: doc no-false-deleted ══"
 	@./tools/lint/gate_doc_no_false_deleted.sh .
 
-check-zclassicd-reach-allowlist:
+check-zclassicd-reach-allowlist: $(LINTC_TOOL)
 	@echo "══ LINT: zclassicd reach allowlist (node stands alone) ══"
 	@./tools/lint/gate_zclassicd_reach_allowlist.sh .
 

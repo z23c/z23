@@ -254,5 +254,7 @@ int check_cyclomatic_complexity_run(int argc, char **argv);
 int check_cyclomatic_complexity_selftest(void);
 int check_framework_shape_run(int argc, char **argv);
 int check_framework_shape_selftest(void);
+int check_zclassicd_reach_allowlist_run(int argc, char **argv);
+int check_zclassicd_reach_allowlist_selftest(void);
 
 #endif
