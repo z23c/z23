@@ -1022,6 +1022,80 @@ int lint_base_load(struct lint_base *b, const char *path, FILE *err)
     return 0;
 }
 
+/* Presence-set loader: the gate_load_list_file() semantics the shell
+ * allowlist gates used, as a lint_base row set. One plain key per line (no
+ * :M); `#` starts a comment ANYWHERE on the line; leading/trailing
+ * whitespace is trimmed; blank and comment lines are skipped; duplicate
+ * keys collapse silently; a missing or non-regular file yields an empty
+ * set, not an error. Rows are stored pinned=1 — membership is
+ * lint_base_observe(b, key, 1) >= 0. lint_base_finish does NOT apply: an
+ * entry no scan observed is unused, never stale. The set is
+ * superset-allowed by contract (contract in lintc.h). */
+static char *lb_set_key(char *line)
+{
+    char *h = strchr(line, '#');
+    if (h)
+        *h = '\0';
+    char *p = line;
+    while (*p && isspace((unsigned char)*p))
+        p++;
+    size_t n = strlen(p);
+    while (n && isspace((unsigned char)p[n - 1]))
+        p[--n] = '\0';
+    return n ? p : NULL;
+}
+
+static int lb_set_add(struct lint_base *b, const char *key, const char *path)
+{
+    size_t n = strlen(key);
+    if (b->n >= LB_MAX || n >= LB_KEY)
+        return die("z23-lint: baseline overflow: %s\n", path);
+    struct lb_row *r = &b->row[b->n++];
+    memcpy(r->key, key, n + 1);
+    r->pinned = 1;
+    r->cur = 0;
+    r->seen = 0;
+    return 0;
+}
+
+static void lb_set_dedup(struct lint_base *b)
+{
+    qsort(b->row, (size_t)b->n, sizeof b->row[0], lb_cmp);
+    int w = 0;
+    for (int i = 0; i < b->n; i++) {
+        if (w > 0 && strcmp(b->row[w - 1].key, b->row[i].key) == 0)
+            continue;
+        if (w != i)
+            memcpy(&b->row[w], &b->row[i], sizeof b->row[0]);
+        w++;
+    }
+    b->n = w;
+}
+
+int lint_base_load_set(struct lint_base *b, const char *path)
+{
+    struct stat st;
+    b->n = 0;
+    if (stat(path, &st) != 0 || !S_ISREG(st.st_mode))
+        return 0;
+    FILE *f = fopen(path, "r");
+    if (!f)
+        return die("z23-lint: cannot open %s\n", path);
+    char *line = NULL;
+    size_t cap = 0;
+    int rc = 0;
+    while (rc == 0 && getline(&line, &cap, f) >= 0) {
+        char *key = lb_set_key(line);
+        if (key)
+            rc = lb_set_add(b, key, path);
+    }
+    rc = fin(f, line, path, rc);
+    if (rc)
+        return rc;
+    lb_set_dedup(b);
+    return 0;
+}
+
 int lint_base_observe(struct lint_base *b, const char *key, int m)
 {
     struct lb_row k;

@@ -116,12 +116,24 @@ int lint_families_ledger(void);
  * stale diagnostics and returns their count. Generation (the gate's
  * --write-baseline upkeep path): lint_base_pin per over-cap item, then
  * lint_base_write. Storage is caller-owned fixed buffers; declare the
- * struct in static storage (it is ~2.5 MB). */
+ * struct in static storage (it is ~2.5 MB).
+ *
+ * Presence-set mode (lint_base_load_set): gates ported from the shell
+ * gate_load_list_file() allowlists keep those semantics instead — the
+ * baseline is a SET of plain keys (no :M), `#` starts a comment anywhere
+ * on the line, whitespace is trimmed, duplicates collapse silently, and a
+ * missing file is an empty set, not an error. Membership is
+ * lint_base_observe(b, key, 1) >= 0. The set is superset-allowed: an
+ * entry no scan observed is unused, never stale, so lint_base_finish is
+ * not called on a set baseline. Choose this mode only when the gate's
+ * pre-existing baseline contract demands it; new shrink-only ratchets use
+ * the exact-pin flow above. */
 enum { LB_MAX = 8192, LB_KEY = 320 };
 struct lb_row { char key[LB_KEY]; int pinned, cur, seen; };
 struct lint_base { struct lb_row row[LB_MAX]; int n; };
 
 int lint_base_load(struct lint_base *b, const char *path, FILE *err);
+int lint_base_load_set(struct lint_base *b, const char *path);
 int lint_base_observe(struct lint_base *b, const char *key, int m);
 int lint_base_finish(const struct lint_base *b, FILE *out);
 int lint_base_pin(struct lint_base *b, const char *key, int m);
