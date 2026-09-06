@@ -11708,7 +11708,7 @@ check-no-shellouts: $(LINTC_TOOL)
 # file is spent the moment it lands. HARD (FAIL), no baseline — a committed
 # credential is not something to ratchet down over time. Proven to actually
 # fail by tests/harness/src/test_engine.c, which plants one in a fixture tree.
-check-no-api-keys:
+check-no-api-keys: $(LINTC_TOOL)
 	@echo "→ Gate: no_api_keys (no committed credential)"
 	@./tools/lint/check_no_api_keys.sh
 
@@ -12496,8 +12496,8 @@ check-plan-claims:
 # at WALLET_PERSISTENCE_RECOVERY.md, which had never existed — a dead pointer
 # at the one moment the reader most needs the instructions.
 # check-markdown-links covers .md-to-.md; this covers .md inside C literals.
-# See tools/lint/check_error_doc_refs.sh (has --selftest).
-check-error-doc-refs:
+# See tools/lint/check_error_doc_refs.sh (original script had no --selftest; the C23 port adds one).
+check-error-doc-refs: $(LINTC_TOOL)
 	@echo "══ LINT: operator-named docs exist (C string literals) ══"
 	@./tools/lint/check_error_doc_refs.sh
 

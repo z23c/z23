@@ -2788,6 +2788,421 @@ static int check_hotswap_dev_only_selftest(void)
     return st_ok(bad, "check_hotswap_dev_only selftest: OK\n");
 }
 
+/* check-no-api-keys: tracked-file credential shapes. Prefixes are split so
+ * this translation unit is not itself a hit. */
+static int nak_fill_pat(char *pat, size_t cap)
+{
+    return ovf(snprintf(pat, cap, "%s%s%s%s%s%s%s%s",
+        "\\b" "s" "k-" "[A-Za-z0-9_-]{20,}|",
+        "\\b" "x" "ai-" "[A-Za-z0-9_-]{20,}|",
+        "\\b" "g" "sk_" "[A-Za-z0-9_-]{20,}|",
+        "\\b" "g" "hp_" "[A-Za-z0-9_-]{20,}|",
+        "\\b" "g" "lpat-" "[A-Za-z0-9_-]{20,}|",
+        "\\b" "A" "KIA" "[A-Z0-9]{16}|",
+        "Bearer[[:space:]]+[A-Za-z0-9._-]{24,}|",
+        "[0-9a-f]{32,}\\.[A-Za-z0-9]{16,}"), cap);
+}
+
+static int nak_comp(regex_t *re)
+{
+    char pat[320];
+    int rc = nak_fill_pat(pat, sizeof pat);
+    return rc ? rc : reg_fail(re, regcomp(re, pat, REG_EXTENDED));
+}
+
+static int nak_skip_path(const char *path)
+{
+    static const char *const ext[] = {
+        ".png", ".jpg", ".gz", ".xz", ".zip", ".pdf", ".ico", ".bin", ".dat"
+    };
+    if (!strcmp(path, "tools/lint/check_no_api_keys.sh")) return 1;
+    if (!strncmp(path, "vendor/", 7)) return 1;
+    if (!strncmp(path, "tests/harness/fuzz_seeds/", 25)) return 1;
+    for (size_t i = 0; i < sizeof ext / sizeof ext[0]; i++)
+        if (c23_ends(path, ext[i])) return 1;
+    return 0;
+}
+
+static int nak_has(const char *s, size_t n, const char *needle)
+{
+    size_t m = strlen(needle);
+    if (m == 0 || m > n) return 0;
+    for (size_t i = 0; i + m <= n; i++)
+        if (memcmp(s + i, needle, m) == 0) return 1;
+    return 0;
+}
+
+struct nak_acc { regex_t *re; FILE *hits; int nfiles, nhits; };
+
+static int nak_scan_file(const char *path, struct nak_acc *a)
+{
+    FILE *f = fopen(path, "r");
+    if (!f) return 0;
+    char *line = NULL;
+    size_t cap = 0;
+    ssize_t n;
+    int lineno = 0, rc = 0;
+    while ((n = getline(&line, &cap, f)) >= 0) {
+        lineno++;
+        if (n > 0 && line[n - 1] == '\n') line[--n] = '\0';
+        if (nak_has(line, (size_t)n, "api-key-example-ok")) continue;
+        for (ssize_t i = 0; i < n; i++)
+            if (line[i] == '\0') line[i] = ' ';
+        if (n <= 0 || regexec(a->re, line, 0, NULL, 0) != 0) continue;
+        a->nhits++;
+        if (a->nhits > 20) continue;
+        if (fprintf(a->hits, "%s:%d:", path, lineno) < 0) {
+            rc = die("z23-lint: write failed\n", "");
+            break;
+        }
+        for (ssize_t i = 0; i < n; i++) {
+            unsigned char c = (unsigned char)line[i];
+            if (c == '\0') continue;
+            if (fputc(c, a->hits) == EOF) {
+                rc = die("z23-lint: write failed\n", "");
+                break;
+            }
+        }
+        if (rc) break;
+        if (fputc('\n', a->hits) == EOF) {
+            rc = die("z23-lint: write failed\n", "");
+            break;
+        }
+    }
+    return fin(f, line, path, rc);
+}
+
+static int nak_on_track(const char *path, void *ctx)
+{
+    struct nak_acc *a = ctx;
+    if (nak_skip_path(path)) return 0;
+    a->nfiles++;
+    return nak_scan_file(path, a);
+}
+
+static int nak_scan_env(const char *env, struct nak_acc *a)
+{
+    const char *p = env;
+    while (*p) {
+        while (*p == ' ' || *p == '\t' || *p == '\n') p++;
+        if (!*p) break;
+        const char *start = p;
+        while (*p && *p != ' ' && *p != '\t' && *p != '\n') p++;
+        size_t n = (size_t)(p - start);
+        char path[4096];
+        if (n >= sizeof path)
+            return die("z23-lint: path too long: %s\n", "ZCL_API_KEY_SCAN_FILES");
+        memcpy(path, start, n);
+        path[n] = '\0';
+        a->nfiles++;
+        int rc = nak_scan_file(path, a);
+        if (rc) return rc;
+    }
+    return 0;
+}
+
+static int nak_too_few(int nfiles, int floor)
+{
+    if (nfiles >= floor) return 0;
+    if (fprintf(stderr,
+                "check_no_api_keys: FATAL — scanned %d files (floor %d).\n",
+                nfiles, floor) < 0
+        || fputs("check_no_api_keys: a broken scan is never reported as clean.\n",
+                 stderr) < 0)
+        return die("z23-lint: write failed\n", "");
+    return 2;
+}
+
+static int nak_replay20(FILE *hits)
+{
+    if (fseek(hits, 0, SEEK_SET) != 0) return die("z23-lint: fseek failed\n", "");
+    char *line = NULL;
+    size_t cap = 0;
+    ssize_t n;
+    int shown = 0, rc = 0;
+    while (shown < 20 && (n = getline(&line, &cap, hits)) >= 0) {
+        if (fwrite(line, 1, (size_t)n, stdout) != (size_t)n) {
+            rc = die("z23-lint: write failed\n", "");
+            break;
+        }
+        shown++;
+    }
+    int err = ferror(hits);
+    free(line);
+    return rc ? rc : (err ? die("z23-lint: read failed\n", "") : 0);
+}
+
+static int nak_finish(struct nak_acc *a, int floor)
+{
+    int rc = nak_too_few(a->nfiles, floor);
+    if (rc) return rc;
+    if (a->nhits) {
+        if (fputs("[check_no_api_keys] a credential-shaped string is in a tracked file:\n",
+                  stdout) < 0)
+            return die("z23-lint: write failed\n", "");
+        rc = nak_replay20(a->hits);
+        if (rc) return rc;
+        if (fputs("[check_no_api_keys] a key in this tree is SPENT — it is in the history,\n"
+                  "[check_no_api_keys] on every clone, and on every mirror. Rotate it, then\n"
+                  "[check_no_api_keys] keep the replacement in the environment or in a 0600\n"
+                  "[check_no_api_keys] file outside the repository (see engine/engine_secret.h).\n"
+                  "[check_no_api_keys] For a documented non-credential, append the marker\n"
+                  "[check_no_api_keys] api-key-example-ok to the line.\n", stdout) < 0)
+            return die("z23-lint: write failed\n", "");
+        return 1;
+    }
+    return printf("[check_no_api_keys] 0 violation(s) across %d file(s) (mode: FAIL)\n",
+                  a->nfiles) < 0 ? die("z23-lint: write failed\n", "") : 0;
+}
+
+static int check_no_api_keys_run(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+    regex_t re;
+    int cr = nak_comp(&re);
+    if (cr) return cr;
+    FILE *hits = tmpfile();
+    if (!hits) {
+        regfree(&re);
+        return die("z23-lint: tmpfile failed\n", "");
+    }
+    struct nak_acc a = { .re = &re, .hits = hits };
+    const char *env = getenv("ZCL_API_KEY_SCAN_FILES");
+    int floor = 1000, rc;
+    if (env && env[0]) {
+        floor = 1;
+        rc = nak_scan_env(env, &a);
+    } else {
+        rc = each_zpath(k_ls_all, nak_on_track, &a);
+    }
+    if (rc == 0) rc = nak_finish(&a, floor);
+    fclose(hits);
+    regfree(&re);
+    return rc;
+}
+
+static int nak_want(const regex_t *re, const char *s, int w)
+{
+    int got = (strstr(s, "api-key-example-ok") == NULL)
+           && (regexec(re, s, 0, NULL, 0) == 0);
+    if (got != w) {
+        fprintf(stderr, "check_no_api_keys selftest: want %d: %s\n", w, s);
+        return 1;
+    }
+    return 0;
+}
+
+static int check_no_api_keys_selftest(void)
+{
+    regex_t re;
+    int cr = nak_comp(&re);
+    if (cr) return cr;
+    char sk[48], xai[48], gsk[48], ghp[48], glp[56], akia[40];
+    char br[64], dig[80], okm[80], sha[48], shortsk[40];
+    if (snprintf(sk, sizeof sk, "%s%s", "s" "k-", "abcdefghijklmnopqrst") >= (int)sizeof sk
+        || snprintf(xai, sizeof xai, "%s%s", "x" "ai-", "abcdefghijklmnopqrst") >= (int)sizeof xai
+        || snprintf(gsk, sizeof gsk, "%s%s", "g" "sk_", "abcdefghijklmnopqrst") >= (int)sizeof gsk
+        || snprintf(ghp, sizeof ghp, "%s%s", "g" "hp_", "abcdefghijklmnopqrst") >= (int)sizeof ghp
+        || snprintf(glp, sizeof glp, "%s%s", "g" "lpat-", "abcdefghijklmnopqrst") >= (int)sizeof glp
+        || snprintf(akia, sizeof akia, "%s%s", "A" "KIA", "ABCDEFGHIJKLMNOP") >= (int)sizeof akia
+        || snprintf(br, sizeof br, "Bearer %s", "abcdefghijklmnopqrstuvwx") >= (int)sizeof br
+        || snprintf(dig, sizeof dig, "%s.%s", "0123456789abcdef0123456789abcdef",
+                    "abcdefghijklmnop") >= (int)sizeof dig
+        || snprintf(okm, sizeof okm, "%s api-key-example-ok", sk) >= (int)sizeof okm
+        || snprintf(sha, sizeof sha, "%s",
+                    "0123456789abcdef0123456789abcdef01234567") >= (int)sizeof sha
+        || snprintf(shortsk, sizeof shortsk, "%s%s", "s" "k-",
+                    "abcdefghijklmnopqrs") >= (int)sizeof shortsk) {
+        regfree(&re);
+        return die("z23-lint: selftest buffer overflow\n", "");
+    }
+    int bad = nak_want(&re, sk, 1) | nak_want(&re, xai, 1) | nak_want(&re, gsk, 1)
+            | nak_want(&re, ghp, 1) | nak_want(&re, glp, 1) | nak_want(&re, akia, 1)
+            | nak_want(&re, br, 1) | nak_want(&re, dig, 1)
+            | nak_want(&re, okm, 0) | nak_want(&re, sha, 0) | nak_want(&re, shortsk, 0)
+            | nak_want(&re, "cc -std=c23 main.c", 0)
+            | (nak_too_few(0, 1) != 2) | (nak_too_few(1, 1) != 0)
+            | (nak_too_few(999, 1000) != 2)
+            | !nak_skip_path("vendor/foo.c")
+            | !nak_skip_path("tests/harness/fuzz_seeds/x.bin")
+            | !nak_skip_path("docs/x.png")
+            | nak_skip_path("tools/lint/lintc.c");
+    regfree(&re);
+    return st_ok(bad, "check_no_api_keys selftest: OK\n");
+}
+
+static int edr_skip_path(const char *path)
+{
+    if (!strncmp(path, "tests/harness/", 14)) return 1;
+    return !(c23_ends(path, ".c") || c23_ends(path, ".h"));
+}
+
+static int edr_word(unsigned char c)
+{
+    return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
+        || (c >= '0' && c <= '9') || c == '_' || c == '.' || c == '/' || c == '-';
+}
+
+static int edr_exists(const char *path)
+{
+    struct stat st;
+    return stat(path, &st) == 0;
+}
+
+static int edr_resolves(const char *tok)
+{
+    if (edr_exists(tok)) return 1;
+    const char *base = strrchr(tok, '/');
+    base = base ? base + 1 : tok;
+    char p[4096];
+    int n = snprintf(p, sizeof p, "docs/%s", base);
+    if (ovf(n, sizeof p)) return 0;
+    if (edr_exists(p)) return 1;
+    n = snprintf(p, sizeof p, "docs/work/%s", base);
+    if (ovf(n, sizeof p)) return 0;
+    return edr_exists(p);
+}
+
+static int edr_tok_end_md(const char *tok)
+{
+    size_t n = strlen(tok);
+    if (n < 3 || memcmp(tok + n - 3, ".md", 3) != 0) return 0;
+    if (n == 3) return 0;
+    if (n >= 4 && memcmp(tok + n - 4, "/.md", 4) == 0) return 0;
+    return 1;
+}
+
+static int edr_lit_skip(const char *s, const char *e)
+{
+    for (const char *p = s; p < e; p++) {
+        if (*p == '*') return 1;
+        if (*p == '%' && (p + 1) < e) {
+            char n = p[1];
+            if (n == 's' || n == 'd' || n == 'l' || n == 'z') return 1;
+        }
+    }
+    return 0;
+}
+
+static int edr_line(const char *file, int lineno, char *line, FILE *out, int *violations)
+{
+    if (!strstr(line, ".md")) return 0;
+    if (strstr(line, "// error-doc-ref-ok:")) return 0;
+    for (char *p = line; *p; p++) {
+        if (*p != '"') continue;
+        char *start = p + 1;
+        char *end = start;
+        while (*end && *end != '"') end++;
+        if (!*end) break;
+        p = end;
+        int has_md = 0;
+        for (char *q = start; q < end; q++)
+            if (q + 2 < end && q[0] == '.' && q[1] == 'm' && q[2] == 'd') has_md = 1;
+        if (!has_md || edr_lit_skip(start, end)) continue;
+        char *q = start;
+        while (q < end) {
+            while (q < end && !edr_word((unsigned char)*q)) q++;
+            if (q >= end) break;
+            char *tok = q;
+            while (q < end && edr_word((unsigned char)*q)) q++;
+            char saved = *q;
+            *q = '\0';
+            if (edr_tok_end_md(tok) && !edr_resolves(tok)) {
+                (*violations)++;
+                if (out && fprintf(out, "  %s:%d names a document that does not exist: %s\n",
+                                   file, lineno, tok) < 0) {
+                    *q = saved;
+                    return die("z23-lint: write failed\n", "");
+                }
+            }
+            *q = saved;
+        }
+    }
+    return 0;
+}
+
+static int edr_scan_file(const char *path, int *violations)
+{
+    FILE *f = fopen(path, "r");
+    if (!f) return 0;
+    char *line = NULL;
+    size_t cap = 0;
+    ssize_t n;
+    int lineno = 0, rc = 0;
+    while ((n = getline(&line, &cap, f)) >= 0) {
+        lineno++;
+        if (n > 0 && line[n - 1] == '\n') line[n - 1] = '\0';
+        rc = edr_line(path, lineno, line, stdout, violations);
+        if (rc) break;
+    }
+    return fin(f, line, path, rc);
+}
+
+static int edr_on_track(const char *path, void *ctx)
+{
+    int *violations = ctx;
+    if (edr_skip_path(path)) return 0;
+    return edr_scan_file(path, violations);
+}
+
+static int edr_fail(int n)
+{
+    if (printf("\ncheck_error_doc_refs: FAIL — %d operator-facing reference(s) to a missing document\n"
+               "\n"
+               "An error message that names a document the reader cannot open is worse\n"
+               "than one that names nothing: it spends a round trip and it costs the\n"
+               "error surface its credibility. Either write the document, or replace the\n"
+               "reference with a command you have actually run.\n"
+               "\n"
+               "If the path is genuinely produced at runtime, append\n"
+               "  // error-doc-ref-ok:<reason>\n"
+               "to the line.\n", n) < 0)
+        return die("z23-lint: write failed\n", "");
+    return 1;
+}
+
+static int check_error_doc_refs_run(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+    int violations = 0;
+    int rc = each_zpath(k_ls_all, edr_on_track, &violations);
+    if (rc) return rc;
+    if (violations) return edr_fail(violations);
+    return fputs("check_error_doc_refs: clean — every document named in a C string literal exists\n",
+                 stdout) < 0 ? die("z23-lint: write failed\n", "") : 0;
+}
+
+static int check_error_doc_refs_selftest(void)
+{
+    char real[] = "const char *p = \"AGENTS.md\";";
+    char miss[] = "const char *p = \"lintc11-no-such.md\";";
+    char conv[] = "const char *p = \"lintc11-no-such-%s.md\";";
+    char mark[] = "const char *p = \"lintc11-no-such.md\"; // error-doc-ref-ok:runtime";
+    char docs[] = "const char *p = \"GETTING_STARTED.md\";";
+    int v = 0, bad = 0;
+    FILE *out = tmpfile();
+    if (!out) return die("z23-lint: tmpfile failed\n", "");
+    bad |= edr_line("tools/t.c", 1, real, out, &v) != 0 || v != 0;
+    v = 0;
+    bad |= edr_line("tools/t.c", 3, miss, out, &v) != 0 || v != 1;
+    v = 0;
+    bad |= edr_line("tools/t.c", 4, conv, out, &v) != 0 || v != 0;
+    v = 0;
+    bad |= edr_line("tools/t.c", 5, mark, out, &v) != 0 || v != 0;
+    v = 0;
+    bad |= edr_line("tools/t.c", 6, docs, out, &v) != 0 || v != 0;
+    bad |= !edr_skip_path("tests/harness/foo.c")
+        || !edr_skip_path("tests/harness/include/test/x.h")
+        || edr_skip_path("tools/t.c")
+        || !edr_skip_path("docs/x." "md");
+    fclose(out);
+    if (bad)
+        fputs("FAIL: check_error_doc_refs selftest\n", stderr);
+    return st_ok(bad, "check_error_doc_refs selftest: OK\n");
+}
+
 struct lint_gate {
     const char *name;
     int (*run)(int argc, char **argv);
@@ -2817,6 +3232,8 @@ static const struct lint_gate k_gates[] = {
     { "check-simd-os-support", check_simd_os_support_run, check_simd_os_support_selftest },
     { "check-c23-only", check_c23_only_run, check_c23_only_selftest },
     { "check-hotswap-dev-only", check_hotswap_dev_only_run, check_hotswap_dev_only_selftest },
+    { "check-no-api-keys", check_no_api_keys_run, check_no_api_keys_selftest },
+    { "check-error-doc-refs", check_error_doc_refs_run, check_error_doc_refs_selftest },
 };
 
 int main(int argc, char **argv)
