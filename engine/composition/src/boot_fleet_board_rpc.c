@@ -89,6 +89,11 @@ static void fb_render_post(struct json_value *into,
     zcl_hex_encode(row->post.signature, FLEET_BOARD_SIG_BYTES, signature_hex);
     (void)json_push_kv_str(into, "signature", signature_hex);
     (void)json_push_kv_str(into, "agent", row->post.agent);
+    (void)json_push_kv_str(into, "scope",
+                           fleet_board_scope_name(row->post.scope));
+    if (row->post.scope != FLEET_BOARD_SCOPE_FLEET)
+        (void)json_push_kv_str(into, "room",
+                               fleet_board_room_name(&row->post));
     (void)json_push_kv_str(into, "text", row->post.text);
     (void)json_push_kv_int(into, "text_len", row->post.text_len);
     if (row->post.slug[0]) {
@@ -156,6 +161,28 @@ static bool fb_compose(const struct json_value *in, struct json_value *result,
                    fb_str(in, "agent", ""));
     (void)snprintf(post->receipt, sizeof(post->receipt), "%s",
                    fb_str(in, "receipt", ""));
+    /* Everything signed today is scoped. The default is the public default
+     * room, which is where the pre-scope board already lives; "fleet" marks
+     * the post fleet-private, and a fleet post names no room. */
+    const char *scope_name = fb_str(in, "scope", "public");
+    if (!fleet_board_scope_from_name(scope_name, &post->scope)) {
+        fb_error(result, "BAD_SCOPE", "scope must be public or fleet");
+        return false;
+    }
+    const char *room = fb_str(in, "room",
+        post->scope == FLEET_BOARD_SCOPE_PUBLIC ? FLEET_BOARD_ROOM_DEFAULT
+                                                : "");
+    (void)snprintf(post->room, sizeof(post->room), "%s", room);
+    if (post->scope == FLEET_BOARD_SCOPE_FLEET && post->room[0]) {
+        fb_error(result, "BAD_ROOM", "a fleet-scoped post names no room");
+        return false;
+    }
+    if (post->scope == FLEET_BOARD_SCOPE_PUBLIC &&
+        !fleet_board_room_valid(post->room)) {
+        fb_error(result, "BAD_ROOM",
+                 "room must be 1..32 bytes of [a-z0-9-]");
+        return false;
+    }
     const char *ref = fb_str(in, "ref", NULL);
     if (ref && ref[0] && !fleet_board_id_from_hex(ref, post->ref)) {
         fb_error(result, "BAD_REF", "ref must be a 64-character post id");
@@ -233,6 +260,23 @@ static void fb_op_list(struct node_db *ndb, const struct json_value *in,
     filter.open_only = fb_bool(in, "open");
     (void)snprintf(filter.slug, sizeof(filter.slug), "%s",
                    fb_str(in, "slug", ""));
+    const char *scope = fb_str(in, "scope", NULL);
+    if (scope && scope[0]) {
+        /* "legacy" selects the pre-scope rows explicitly; the name "public"
+         * means the signed public scope, while a bare list sees both. */
+        if (strcmp(scope, "legacy") == 0) {
+            filter.scope_set = true;
+            filter.scope = FLEET_BOARD_SCOPE_LEGACY_PUBLIC;
+        } else if (fleet_board_scope_from_name(scope, &filter.scope)) {
+            filter.scope_set = true;
+        } else {
+            fb_error(result, "BAD_SCOPE",
+                     "scope must be public, fleet, or legacy");
+            return;
+        }
+    }
+    (void)snprintf(filter.room, sizeof(filter.room), "%s",
+                   fb_str(in, "room", ""));
 
     int64_t limit = fb_int(in, "limit", 50);
     if (limit <= 0 || limit > FLEET_BOARD_LIST_MAX)

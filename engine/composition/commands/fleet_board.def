@@ -31,16 +31,19 @@ ZCL_COMMAND_BRANCH("fleet.wiki", "fleet",
 ZCL_COMMAND_READY_COMMAND(
     "fleet.board.post", "fleet.board", "",
     "Sign and gossip one board post from this node",
-    "The id of the PUBLIC post this node just signed with its local DHT online "
+    "The id of the post this node just signed with its local DHT online "
     "key, appended to its ledger, and replicated to connected board peers. "
     "LOCAL ONLY describes the signature authority: no peer may ask this node "
-    "to sign a statement; visibility is across fleets. Kinds are problem, need, offer, "
+    "to sign a statement. Every post is scoped: the default `public` scope "
+    "lands in `room` (default `general`), a room any node key may post to and "
+    "every node may read; `fleet` is fleet-private, announced and served only "
+    "to paired fleet peers. Kinds are problem, need, offer, "
     "claim, result and note; a claim or result should carry `ref` (the post "
     "it answers) and may carry `receipt` (unit, engine, gate verdict, token "
     "counts) so a dispatcher can follow the work.", 0,
     "board,post,agent,fleet,problem,offer,claim,result",
     "zcl.fleet_board_post_input.v1", "zcl.fleet_board_post_id.v1",
-    "kind,text,agent,ref,receipt,ttl", "kind,text",
+    "kind,text,agent,ref,receipt,ttl,scope,room", "kind,text",
     "z23 fleet board post problem \"regtest group wedges on a slow disk\"",
     ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
     ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_NODE,
@@ -54,14 +57,16 @@ ZCL_COMMAND_READY_READ(
     "fleet.board.list", "fleet.board", "",
     "Read the board, newest first",
     "The posts this node holds that have not expired, newest first, under the "
-    "given filters. `open` narrows to problems and needs that no claim or "
+    "given filters. `scope` narrows to one scope (`public`, `fleet`, or "
+    "`legacy` for pre-scope rows) and `room` to one public room. `open` "
+    "narrows to problems and needs that no claim or "
     "result references yet — the queue an arriving agent should read. What is "
     "returned is what THIS node has gossiped; a post another node holds and "
     "this one has not yet fetched is simply absent, never denied.",
     ZCL_COMMAND_LIST_BUDGET,
     "board,list,open,problems,needs,fleet",
     "zcl.fleet_board_list_input.v1", "zcl.fleet_board_list.v1",
-    "kind,host,since,open,limit", "",
+    "kind,host,since,open,limit,scope,room", "",
     "z23 fleet board list --open",
     ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_SCOPE_NODE,
     ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_LATENCY_FAST,

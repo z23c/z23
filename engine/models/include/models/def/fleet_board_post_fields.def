@@ -17,7 +17,9 @@
  * apart from the columns beside it.
  */
 
-/* fleet_board_posts — schema v80. */
+/* fleet_board_posts — schema v81. The final two columns arrived in v81 with
+ * the signed scope, so they sit at the end: that is both the ALTER TABLE
+ * append order and the fresh-CREATE column order, which must be the same. */
 #define FLEET_BOARD_POST_FIELDS \
     ZCL_MODEL_BLOB(id,          post.id,          32), \
     ZCL_MODEL_I64 (seq,         seq),                  \
@@ -37,7 +39,9 @@
     ZCL_MODEL_BLOB(signature,   post.signature,   64), \
     ZCL_MODEL_BLOB(chain_prev,  chain_prev,       32), \
     ZCL_MODEL_BLOB(chain_hash,  chain_hash,       32), \
-    ZCL_MODEL_I64 (received_at, received_at)
+    ZCL_MODEL_I64 (received_at, received_at),          \
+    ZCL_MODEL_U16 (scope,       post.scope),           \
+    ZCL_MODEL_TEXT(room,        post.room)
 
 /* The eviction scan's own projection. Deciding what to drop needs the id, the
  * kind, and (for a wiki revision) the slug — never a 16 KiB page body. Its

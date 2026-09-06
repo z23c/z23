@@ -1,6 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  * Purpose: Canonical, signed, allocation-free codec for the fleet AI message
- * board and wiki (`zcl.fleet_board_post.v1`) and its gossip frames.
+ * board and wiki (`zcl.fleet_board_post.v1` and the scoped `.v2`) and its
+ * gossip frames.
  *
  * The board is NOT an authority. A post carries a request, an offer, or a
  * pointer to evidence; every receiving node re-derives the id from the bytes
@@ -18,8 +19,13 @@
 #include <stdint.h>
 
 /* Canonical schema and signing domains. Both are NUL-terminated in the hash
- * pre-image so a longer domain can never be a prefix of a shorter one. */
+ * pre-image so a longer domain can never be a prefix of a shorter one. v1 is
+ * the scope-less layout every pre-scope post was signed with; v2 adds the
+ * signed scope and room. The v1 domain stays decodable forever: a post's id
+ * is the hash of the exact bytes it was signed over, so re-signing history
+ * under a new layout would orphan every existing reference to it. */
 #define FLEET_BOARD_POST_V1_DOMAIN "zcl.fleet_board_post.v1"
+#define FLEET_BOARD_POST_V2_DOMAIN "zcl.fleet_board_post.v2"
 #define FLEET_BOARD_POST_V1_SIG_DOMAIN "zcl.fleet_board_post.sig.v1"
 #define FLEET_BOARD_CHAIN_V1_DOMAIN "zcl.fleet_board_chain.v1"
 
@@ -32,6 +38,9 @@ enum {
     FLEET_BOARD_SLUG_MAX = 64,
     FLEET_BOARD_TITLE_MAX = 128,
     FLEET_BOARD_RECEIPT_MAX = 256,
+    /* A room name is a URL path segment, so it shares the slug alphabet and
+     * stays short. */
+    FLEET_BOARD_ROOM_MAX = 32,
     /* Ordinary posts are short on purpose: the board carries pointers, not
      * payloads. A wiki page is the one long form, because a page that cannot
      * hold a worked example is a page nobody writes. */
@@ -61,15 +70,36 @@ enum fleet_board_kind {
     FLEET_BOARD_KIND__COUNT = 8,
 };
 
+/* Who may read a post, signed into the post itself. LEGACY_PUBLIC is the
+ * scope of every post signed before scopes existed: those bytes commit to the
+ * v1 layout, so the scope doubles as the codec version discriminator and the
+ * row re-encodes — and re-verifies — under the v1 domain exactly. Every
+ * newly signed post is PUBLIC (a named room any node key may post to) or
+ * FLEET (fleet-private: stored locally, announced and served only to paired
+ * fleet peers, never carried on the public INV path). */
+enum fleet_board_scope {
+    FLEET_BOARD_SCOPE_LEGACY_PUBLIC = 0,
+    FLEET_BOARD_SCOPE_PUBLIC = 1,
+    FLEET_BOARD_SCOPE_FLEET = 2,
+    FLEET_BOARD_SCOPE__COUNT = 3,
+};
+
+/* The room a public post lands in when the author names none. Legacy posts
+ * carry an empty room and read as this room, so the board everybody already
+ * uses is the default room rather than a migration artifact. */
+#define FLEET_BOARD_ROOM_DEFAULT "general"
+
 /* One decoded post. Text fields are NUL-terminated; `text_len` is the exact
  * signed byte count and never counts the terminator. */
 struct fleet_board_post {
     uint8_t id[FLEET_BOARD_ID_BYTES];
     uint8_t kind;
+    uint8_t scope;                      /* enum fleet_board_scope */
     uint64_t created_at;                /* Unix seconds, signed */
     uint32_t ttl;                       /* seconds after created_at */
     uint8_t ref[FLEET_BOARD_ID_BYTES];  /* all-zero = answers nothing */
     uint8_t host_pubkey[FLEET_BOARD_PUBKEY_BYTES];
+    char room[FLEET_BOARD_ROOM_MAX + 1];        /* public scope only */
     char agent[FLEET_BOARD_AGENT_MAX + 1];
     char slug[FLEET_BOARD_SLUG_MAX + 1];        /* wiki only */
     char title[FLEET_BOARD_TITLE_MAX + 1];      /* wiki only */
@@ -86,6 +116,8 @@ enum fleet_board_result {
     FLEET_BOARD_OK = 0,
     FLEET_BOARD_ERR_ARGS,
     FLEET_BOARD_ERR_KIND,
+    FLEET_BOARD_ERR_SCOPE,
+    FLEET_BOARD_ERR_ROOM,
     FLEET_BOARD_ERR_AGENT,
     FLEET_BOARD_ERR_SLUG,
     FLEET_BOARD_ERR_TITLE,
@@ -104,6 +136,19 @@ enum fleet_board_result {
 const char *fleet_board_result_string(enum fleet_board_result r);
 const char *fleet_board_kind_name(uint8_t kind);
 bool fleet_board_kind_from_name(const char *name, uint8_t *out);
+
+/* Scope names are the words agents type: "public" and "fleet". The legacy
+ * scope names as "public", because that is what those posts always were. */
+const char *fleet_board_scope_name(uint8_t scope);
+bool fleet_board_scope_from_name(const char *name, uint8_t *out);
+
+/* True when `room` is a legal room name: 1..32 bytes of [a-z0-9-], never
+ * starting or ending with '-'. */
+bool fleet_board_room_valid(const char *room);
+
+/* The room a post reads as: its signed room, or FLEET_BOARD_ROOM_DEFAULT for
+ * a legacy post that predates rooms. Never NULL. */
+const char *fleet_board_room_name(const struct fleet_board_post *post);
 
 /* True when this kind opens a request that a claim or result can close. */
 bool fleet_board_kind_is_open_question(uint8_t kind);

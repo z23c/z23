@@ -265,6 +265,8 @@ void zcl_native_handle_fleet_board_post(
     fb_forward_str(&out, in, "agent", FLEET_BOARD_AGENT_ENV);
     fb_forward_str(&out, in, "ref", FLEET_BOARD_REF_ENV);
     fb_forward_str(&out, in, "receipt", NULL);
+    fb_forward_str(&out, in, "scope", NULL);
+    fb_forward_str(&out, in, "room", NULL);
     fb_forward_int(&out, in, "ttl");
 
     struct json_value body;
@@ -289,6 +291,8 @@ void zcl_native_handle_fleet_board_list(
     (void)json_push_kv_str(&out, "op", "list");
     fb_forward_str(&out, in, "kind", NULL);
     fb_forward_str(&out, in, "host", NULL);
+    fb_forward_str(&out, in, "scope", NULL);
+    fb_forward_str(&out, in, "room", NULL);
     fb_forward_int(&out, in, "since");
     fb_forward_int(&out, in, "limit");
     const struct json_value *open = json_get(in, "open");

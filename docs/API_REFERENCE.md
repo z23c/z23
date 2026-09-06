@@ -1755,8 +1755,8 @@ represented by its children's sections.
 
 | Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
 |---|---|---|---|---|---|---|
-| `fleet board post` | ready | mutate / app-write / operator · fast/low | **`kind`**, **`text`**, `agent`, `ref`, `receipt`, `ttl` | `zcl.fleet_board_post_id.v1` | `z23 fleet board post problem "regtest group wedges on a slow disk"` | Sign and gossip one board post from this node |
-| `fleet board list` | ready | read / read / operator · fast/low | `kind`, `host`, `since`, `open`, `limit` | `zcl.fleet_board_list.v1` | `z23 fleet board list --open` | Read the board, newest first |
+| `fleet board post` | ready | mutate / app-write / operator · fast/low | **`kind`**, **`text`**, `agent`, `ref`, `receipt`, `ttl`, `scope`, `room` | `zcl.fleet_board_post_id.v1` | `z23 fleet board post problem "regtest group wedges on a slow disk"` | Sign and gossip one board post from this node |
+| `fleet board list` | ready | read / read / operator · fast/low | `kind`, `host`, `since`, `open`, `limit`, `scope`, `room` | `zcl.fleet_board_list.v1` | `z23 fleet board list --open` | Read the board, newest first |
 | `fleet board show` | ready | read / read / operator · fast/low | **`id`** | `zcl.fleet_board_post.v1` | `z23 fleet board show 4f2c...` | Show one post by id |
 | `fleet board status` | ready | read / read / operator · fast/low | none | `zcl.fleet_board_status.v1` | `z23 fleet board status` | How much board this node is carrying |
 

@@ -33,6 +33,10 @@ const char *fleet_board_result_string(enum fleet_board_result r)
     case FLEET_BOARD_OK:            return "ok";
     case FLEET_BOARD_ERR_ARGS:      return "missing argument";
     case FLEET_BOARD_ERR_KIND:      return "unknown post kind";
+    case FLEET_BOARD_ERR_SCOPE:     return "unknown post scope";
+    case FLEET_BOARD_ERR_ROOM:
+        return "room is required for a public post, forbidden otherwise, and "
+               "must be [a-z0-9-] within 32 bytes";
     case FLEET_BOARD_ERR_AGENT:     return "agent name too long or unprintable";
     case FLEET_BOARD_ERR_SLUG:      return "slug is not [a-z0-9-] within 64 bytes";
     case FLEET_BOARD_ERR_TITLE:     return "title too long or unprintable";
@@ -85,6 +89,62 @@ uint32_t fleet_board_text_max(uint8_t kind)
                                          : (uint32_t)FLEET_BOARD_TEXT_MAX;
 }
 
+static const char *const k_scope_names[FLEET_BOARD_SCOPE__COUNT] = {
+    "public", "public", "fleet",
+};
+
+const char *fleet_board_scope_name(uint8_t scope)
+{
+    if (scope >= FLEET_BOARD_SCOPE__COUNT)
+        return "unknown";
+    return k_scope_names[scope];
+}
+
+bool fleet_board_scope_from_name(const char *name, uint8_t *out)
+{
+    if (!name || !out)
+        return false;
+    if (strcmp(name, "public") == 0) {
+        *out = FLEET_BOARD_SCOPE_PUBLIC;
+        return true;
+    }
+    if (strcmp(name, "fleet") == 0) {
+        *out = FLEET_BOARD_SCOPE_FLEET;
+        return true;
+    }
+    return false;
+}
+
+/* Rooms and slugs share an alphabet: both are lowercase URL path segments. */
+static bool fb_name_valid(const char *name, size_t cap)
+{
+    if (!name)
+        return false;
+    size_t n = strlen(name);
+    if (n == 0 || n > cap)
+        return false;
+    if (name[0] == '-' || name[n - 1] == '-')
+        return false;
+    for (size_t i = 0; i < n; i++) {
+        char c = name[i];
+        if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-'))
+            return false;
+    }
+    return true;
+}
+
+bool fleet_board_room_valid(const char *room)
+{
+    return fb_name_valid(room, FLEET_BOARD_ROOM_MAX);
+}
+
+const char *fleet_board_room_name(const struct fleet_board_post *post)
+{
+    if (!post || !post->room[0])
+        return FLEET_BOARD_ROOM_DEFAULT;
+    return post->room;
+}
+
 /* Printable-ASCII plus tab and newline. Board text is read by people and by
  * line-oriented scripts, so a control byte or a raw NUL inside the signed
  * bytes is a refusal rather than something a renderer has to survive. */
@@ -102,19 +162,7 @@ static bool fb_text_ok(const char *s, size_t len, bool allow_newline)
 
 bool fleet_board_slug_valid(const char *slug)
 {
-    if (!slug)
-        return false;
-    size_t n = strlen(slug);
-    if (n == 0 || n > FLEET_BOARD_SLUG_MAX)
-        return false;
-    if (slug[0] == '-' || slug[n - 1] == '-')
-        return false;
-    for (size_t i = 0; i < n; i++) {
-        char c = slug[i];
-        if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-'))
-            return false;
-    }
-    return true;
+    return fb_name_valid(slug, FLEET_BOARD_SLUG_MAX);
 }
 
 void fleet_board_id_to_hex(const uint8_t id[32], char out[65])
@@ -134,6 +182,19 @@ enum fleet_board_result fleet_board_post_validate(
         return FLEET_BOARD_ERR_ARGS;
     if (post->kind == 0 || post->kind >= FLEET_BOARD_KIND__COUNT)
         return FLEET_BOARD_ERR_KIND;
+    if (post->scope >= FLEET_BOARD_SCOPE__COUNT)
+        return FLEET_BOARD_ERR_SCOPE;
+    /* The room is signed addressing, so its presence rule is exact: a public
+     * post must name its room, and any other scope must carry an empty one —
+     * a fleet post with a room name would leak the room's existence into the
+     * signed bytes, and a legacy post with one could never have been signed. */
+    size_t room_len = fb_strnlen(post->room, sizeof(post->room));
+    if (post->scope == FLEET_BOARD_SCOPE_PUBLIC) {
+        if (!fleet_board_room_valid(post->room))
+            return FLEET_BOARD_ERR_ROOM;
+    } else if (room_len != 0) {
+        return FLEET_BOARD_ERR_ROOM;
+    }
     if (post->ttl == 0 || post->ttl > (uint32_t)FLEET_BOARD_TTL_MAX)
         return FLEET_BOARD_ERR_TTL;
 
@@ -238,13 +299,26 @@ enum fleet_board_result fleet_board_post_canonical(
         return shape;
 
     struct fb_cursor c = {.p = out, .cap = out ? out_capacity : 0};
-    /* The domain is written WITH its NUL so no domain can prefix another. */
-    fb_put(&c, FLEET_BOARD_POST_V1_DOMAIN, sizeof(FLEET_BOARD_POST_V1_DOMAIN));
+    /* The domain is written WITH its NUL so no domain can prefix another.
+     * The scope chooses the layout: a legacy post re-encodes the exact v1
+     * bytes it was signed over; anything signed today carries its scope and
+     * room inside the v2 body, so a relaying node can neither widen a fleet
+     * post to a public room nor move a public post out of its room without
+     * breaking the signature. */
+    bool v2 = post->scope != FLEET_BOARD_SCOPE_LEGACY_PUBLIC;
+    if (v2)
+        fb_put(&c, FLEET_BOARD_POST_V2_DOMAIN, sizeof(FLEET_BOARD_POST_V2_DOMAIN));
+    else
+        fb_put(&c, FLEET_BOARD_POST_V1_DOMAIN, sizeof(FLEET_BOARD_POST_V1_DOMAIN));
     fb_put_u8(&c, post->kind);
     fb_put_u64(&c, post->created_at);
     fb_put_u32(&c, post->ttl);
     fb_put(&c, post->ref, FLEET_BOARD_ID_BYTES);
     fb_put(&c, post->host_pubkey, FLEET_BOARD_PUBKEY_BYTES);
+    if (v2) {
+        fb_put_u8(&c, post->scope);
+        fb_put_str16(&c, post->room, fb_strnlen(post->room, sizeof(post->room)));
+    }
     fb_put_str16(&c, post->agent, fb_strnlen(post->agent, sizeof(post->agent)));
     fb_put_str16(&c, post->slug, fb_strnlen(post->slug, sizeof(post->slug)));
     fb_put_str16(&c, post->title, fb_strnlen(post->title, sizeof(post->title)));
@@ -442,17 +516,32 @@ enum fleet_board_result fleet_board_post_decode(
     memset(out, 0, sizeof(*out));
 
     struct fb_reader r = {.p = wire, .len = wire_len};
+    /* Both domains are the same length, so one fixed read decides the layout;
+     * an unrecognized domain is the same refusal an unknown kind earns. */
     char domain[sizeof(FLEET_BOARD_POST_V1_DOMAIN)] = {0};
-    if (!fb_take(&r, domain, sizeof(domain)) ||
-        memcmp(domain, FLEET_BOARD_POST_V1_DOMAIN, sizeof(domain)) != 0) {
+    bool v2;
+    if (!fb_take(&r, domain, sizeof(domain))) {
         memset(out, 0, sizeof(*out));
-        return r.bad ? FLEET_BOARD_ERR_TRUNCATED : FLEET_BOARD_ERR_KIND;
+        return FLEET_BOARD_ERR_TRUNCATED;
+    }
+    if (memcmp(domain, FLEET_BOARD_POST_V2_DOMAIN, sizeof(domain)) == 0) {
+        v2 = true;
+    } else if (memcmp(domain, FLEET_BOARD_POST_V1_DOMAIN, sizeof(domain)) == 0) {
+        v2 = false;
+        out->scope = FLEET_BOARD_SCOPE_LEGACY_PUBLIC;
+    } else {
+        memset(out, 0, sizeof(*out));
+        return FLEET_BOARD_ERR_KIND;
     }
     out->kind = fb_take_u8(&r);
     out->created_at = fb_take_u64(&r);
     out->ttl = fb_take_u32(&r);
     (void)fb_take(&r, out->ref, FLEET_BOARD_ID_BYTES);
     (void)fb_take(&r, out->host_pubkey, FLEET_BOARD_PUBKEY_BYTES);
+    if (v2) {
+        out->scope = fb_take_u8(&r);
+        (void)fb_take_str16(&r, out->room, sizeof(out->room));
+    }
     (void)fb_take_str16(&r, out->agent, sizeof(out->agent));
     (void)fb_take_str16(&r, out->slug, sizeof(out->slug));
     (void)fb_take_str16(&r, out->title, sizeof(out->title));

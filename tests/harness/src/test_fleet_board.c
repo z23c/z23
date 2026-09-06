@@ -1278,6 +1278,202 @@ static int test_fleet_board_rpc_concurrency(void)
     return failures;
 }
 
+static void fb_test_scope(struct fleet_board_post *post, uint8_t scope,
+                          const char *room)
+{
+    post->scope = scope;
+    (void)snprintf(post->room, sizeof(post->room), "%s", room ? room : "");
+}
+
+static int test_fleet_board_scope_codec(void)
+{
+    int failures = 0;
+    TEST("fleet board: the scope is signed, and v1 posts still verify") {
+        uint8_t seed[32], pk[32];
+        fb_test_identity(1, seed, pk);
+
+        /* A public post signs its room: encode/decode round-trips the scope
+         * fields and still verifies end to end. */
+        struct fleet_board_post pub;
+        fb_test_compose(&pub, FLEET_BOARD_KIND_NOTE, "lane-a",
+                        "ops room is open", 1000, 3600);
+        fb_test_scope(&pub, FLEET_BOARD_SCOPE_PUBLIC, "ops");
+        ASSERT_EQ(fleet_board_post_sign(&pub, seed, pk), FLEET_BOARD_OK);
+        ASSERT_EQ(fleet_board_post_verify(&pub), FLEET_BOARD_OK);
+        uint8_t wire[FLEET_BOARD_BODY_MAX + FLEET_BOARD_SIG_BYTES];
+        size_t wire_len = 0;
+        ASSERT_EQ(fleet_board_post_encode(&pub, wire, sizeof(wire),
+                                          &wire_len), FLEET_BOARD_OK);
+        struct fleet_board_post decoded;
+        ASSERT_EQ(fleet_board_post_decode(wire, wire_len, &decoded),
+                  FLEET_BOARD_OK);
+        ASSERT_EQ(decoded.scope, FLEET_BOARD_SCOPE_PUBLIC);
+        ASSERT(strcmp(decoded.room, "ops") == 0);
+        ASSERT(memcmp(decoded.id, pub.id, 32) == 0);
+
+        /* Moving the post to another room, or out of the public scope
+         * entirely, breaks the id — a relay cannot re-address a post. */
+        struct fleet_board_post moved = pub;
+        moved.room[0] = 'x';
+        ASSERT_EQ(fleet_board_post_verify(&moved), FLEET_BOARD_ERR_ID);
+        struct fleet_board_post hidden = pub;
+        hidden.scope = FLEET_BOARD_SCOPE_FLEET;
+        hidden.room[0] = '\0';
+        ASSERT_EQ(fleet_board_post_verify(&hidden), FLEET_BOARD_ERR_ID);
+
+        /* A legacy post decodes as legacy-public and re-encodes to the exact
+         * bytes it was signed over, so its id and signature survive scopes. */
+        struct fleet_board_post legacy;
+        fb_test_compose(&legacy, FLEET_BOARD_KIND_PROBLEM, "lane-b",
+                        "signed before rooms existed", 1000, 3600);
+        ASSERT_EQ(fleet_board_post_sign(&legacy, seed, pk), FLEET_BOARD_OK);
+        ASSERT_EQ(fleet_board_post_encode(&legacy, wire, sizeof(wire),
+                                          &wire_len), FLEET_BOARD_OK);
+        ASSERT_EQ(fleet_board_post_decode(wire, wire_len, &decoded),
+                  FLEET_BOARD_OK);
+        ASSERT_EQ(decoded.scope, FLEET_BOARD_SCOPE_LEGACY_PUBLIC);
+        ASSERT(decoded.room[0] == '\0');
+        ASSERT(memcmp(decoded.id, legacy.id, 32) == 0);
+        ASSERT(strcmp(fleet_board_room_name(&decoded), "general") == 0);
+        uint8_t rewire[FLEET_BOARD_BODY_MAX + FLEET_BOARD_SIG_BYTES];
+        size_t rewire_len = 0;
+        ASSERT_EQ(fleet_board_post_encode(&decoded, rewire, sizeof(rewire),
+                                          &rewire_len), FLEET_BOARD_OK);
+        ASSERT_EQ(rewire_len, wire_len);
+        ASSERT(memcmp(rewire, wire, wire_len) == 0);
+
+        /* Scope and room shape refusals. */
+        struct fleet_board_post bad;
+        fb_test_compose(&bad, FLEET_BOARD_KIND_NOTE, "a", "hi", 1000, 60);
+        fb_test_scope(&bad, FLEET_BOARD_SCOPE_PUBLIC, "");
+        ASSERT_EQ(fleet_board_post_validate(&bad), FLEET_BOARD_ERR_ROOM);
+        fb_test_scope(&bad, FLEET_BOARD_SCOPE_PUBLIC, "Bad Room");
+        ASSERT_EQ(fleet_board_post_validate(&bad), FLEET_BOARD_ERR_ROOM);
+        fb_test_scope(&bad, FLEET_BOARD_SCOPE_FLEET, "ops");
+        ASSERT_EQ(fleet_board_post_validate(&bad), FLEET_BOARD_ERR_ROOM);
+        fb_test_scope(&bad, FLEET_BOARD_SCOPE_LEGACY_PUBLIC, "ops");
+        ASSERT_EQ(fleet_board_post_validate(&bad), FLEET_BOARD_ERR_ROOM);
+        fb_test_scope(&bad, 9, "");
+        ASSERT_EQ(fleet_board_post_validate(&bad), FLEET_BOARD_ERR_SCOPE);
+
+        /* A fleet post with no room is a legal shape. */
+        fb_test_scope(&bad, FLEET_BOARD_SCOPE_FLEET, "");
+        ASSERT_EQ(fleet_board_post_validate(&bad), FLEET_BOARD_OK);
+
+        /* The names agents type. */
+        ASSERT(strcmp(fleet_board_scope_name(FLEET_BOARD_SCOPE_PUBLIC),
+                      "public") == 0);
+        ASSERT(strcmp(fleet_board_scope_name(FLEET_BOARD_SCOPE_LEGACY_PUBLIC),
+                      "public") == 0);
+        ASSERT(strcmp(fleet_board_scope_name(FLEET_BOARD_SCOPE_FLEET),
+                      "fleet") == 0);
+        ASSERT(strcmp(fleet_board_scope_name(9), "unknown") == 0);
+        uint8_t parsed = 0;
+        ASSERT(fleet_board_scope_from_name("public", &parsed));
+        ASSERT_EQ(parsed, FLEET_BOARD_SCOPE_PUBLIC);
+        ASSERT(fleet_board_scope_from_name("fleet", &parsed));
+        ASSERT_EQ(parsed, FLEET_BOARD_SCOPE_FLEET);
+        ASSERT(!fleet_board_scope_from_name("nope", &parsed));
+
+        ASSERT(fleet_board_room_valid("ops"));
+        ASSERT(fleet_board_room_valid("a"));
+        ASSERT(!fleet_board_room_valid(""));
+        ASSERT(!fleet_board_room_valid("-lead"));
+        ASSERT(!fleet_board_room_valid("trail-"));
+        ASSERT(!fleet_board_room_valid("Upper"));
+        ASSERT(!fleet_board_room_valid(
+            "this-room-name-is-far-too-long-to-sign"));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_fleet_board_scope_store(void)
+{
+    int failures = 0;
+    TEST("fleet board: the store filters by signed scope and room") {
+        struct node_db db;
+        memset(&db, 0, sizeof(db));
+        ASSERT(node_db_open(&db, ":memory:"));
+        ASSERT_EQ(node_db_schema_version(&db), NODE_DB_SCHEMA_LATEST);
+
+        uint8_t seed[32], pk[32];
+        fb_test_identity(1, seed, pk);
+        const int64_t now = 100000;
+
+        /* One post per scope situation: a pre-scope legacy row, a named
+         * public room, the default public room, and a fleet-private row. */
+        struct fleet_board_post legacy, ops, general, fleet;
+        fb_test_compose(&legacy, FLEET_BOARD_KIND_NOTE, "lane-a",
+                        "from before scopes", (uint64_t)now, 3600);
+        fb_test_compose(&ops, FLEET_BOARD_KIND_NOTE, "lane-a",
+                        "ops only", (uint64_t)now + 1, 3600);
+        fb_test_scope(&ops, FLEET_BOARD_SCOPE_PUBLIC, "ops");
+        fb_test_compose(&general, FLEET_BOARD_KIND_NOTE, "lane-a",
+                        "default room", (uint64_t)now + 2, 3600);
+        fb_test_scope(&general, FLEET_BOARD_SCOPE_PUBLIC, "general");
+        fb_test_compose(&fleet, FLEET_BOARD_KIND_NOTE, "lane-a",
+                        "fleet eyes only", (uint64_t)now + 3, 3600);
+        fb_test_scope(&fleet, FLEET_BOARD_SCOPE_FLEET, "");
+        ASSERT_EQ(fleet_board_post_sign(&legacy, seed, pk), FLEET_BOARD_OK);
+        ASSERT_EQ(fleet_board_post_sign(&ops, seed, pk), FLEET_BOARD_OK);
+        ASSERT_EQ(fleet_board_post_sign(&general, seed, pk), FLEET_BOARD_OK);
+        ASSERT_EQ(fleet_board_post_sign(&fleet, seed, pk), FLEET_BOARD_OK);
+        ASSERT_EQ(db_fleet_board_post_ingest(&db, &legacy, now, NULL),
+                  FLEET_BOARD_OK);
+        ASSERT_EQ(db_fleet_board_post_ingest(&db, &ops, now, NULL),
+                  FLEET_BOARD_OK);
+        ASSERT_EQ(db_fleet_board_post_ingest(&db, &general, now, NULL),
+                  FLEET_BOARD_OK);
+        ASSERT_EQ(db_fleet_board_post_ingest(&db, &fleet, now, NULL),
+                  FLEET_BOARD_OK);
+
+        struct db_fleet_board_post rows[8];
+        struct fleet_board_filter filter;
+
+        /* No filter sees all four. */
+        memset(&filter, 0, sizeof(filter));
+        ASSERT_EQ(db_fleet_board_list(&db, &filter, now, rows, 8), 4);
+
+        /* A named room sees only its own posts. */
+        memset(&filter, 0, sizeof(filter));
+        (void)snprintf(filter.room, sizeof(filter.room), "%s", "ops");
+        ASSERT_EQ(db_fleet_board_list(&db, &filter, now, rows, 8), 1);
+        ASSERT(memcmp(rows[0].post.id, ops.id, 32) == 0);
+
+        /* The default room also returns legacy rows: their empty signed room
+         * IS the default room, or the pre-scope board would vanish. */
+        memset(&filter, 0, sizeof(filter));
+        (void)snprintf(filter.room, sizeof(filter.room), "%s", "general");
+        ASSERT_EQ(db_fleet_board_list(&db, &filter, now, rows, 8), 2);
+
+        /* Scope filters. */
+        memset(&filter, 0, sizeof(filter));
+        filter.scope_set = true;
+        filter.scope = FLEET_BOARD_SCOPE_PUBLIC;
+        ASSERT_EQ(db_fleet_board_list(&db, &filter, now, rows, 8), 2);
+        filter.scope = FLEET_BOARD_SCOPE_FLEET;
+        ASSERT_EQ(db_fleet_board_list(&db, &filter, now, rows, 8), 1);
+        ASSERT(memcmp(rows[0].post.id, fleet.id, 32) == 0);
+        filter.scope = FLEET_BOARD_SCOPE_LEGACY_PUBLIC;
+        ASSERT_EQ(db_fleet_board_list(&db, &filter, now, rows, 8), 1);
+        ASSERT(memcmp(rows[0].post.id, legacy.id, 32) == 0);
+
+        /* A stored row re-verifies with its scope intact. */
+        struct db_fleet_board_post fetched;
+        ASSERT(db_fleet_board_post_find(&db, ops.id, &fetched));
+        ASSERT_EQ(fetched.post.scope, FLEET_BOARD_SCOPE_PUBLIC);
+        ASSERT(strcmp(fetched.post.room, "ops") == 0);
+        ASSERT(db_fleet_board_post_find(&db, legacy.id, &fetched));
+        ASSERT_EQ(fetched.post.scope, FLEET_BOARD_SCOPE_LEGACY_PUBLIC);
+        ASSERT(strcmp(fleet_board_room_name(&fetched.post), "general") == 0);
+
+        node_db_close(&db);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_fleet_board(void)
 {
     int failures = 0;
@@ -1298,5 +1494,7 @@ int test_fleet_board(void)
     failures += test_fleet_board_durable_wiki();
     failures += test_fleet_board_local_capacity_does_not_score_peer();
     failures += test_fleet_board_peer_inventory_cursor();
+    failures += test_fleet_board_scope_codec();
+    failures += test_fleet_board_scope_store();
     return failures;
 }

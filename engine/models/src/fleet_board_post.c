@@ -245,6 +245,8 @@ static bool board_insert(struct node_db *ndb,
     qb_value_blob(&q, QB_C_fleet_board_posts_chain_prev, record->chain_prev, 32);
     qb_value_blob(&q, QB_C_fleet_board_posts_chain_hash, record->chain_hash, 32);
     qb_value_int(&q, QB_C_fleet_board_posts_received_at, record->received_at);
+    qb_value_int(&q, QB_C_fleet_board_posts_scope, record->post.scope);
+    qb_value_text(&q, QB_C_fleet_board_posts_room, record->post.room);
     /* ar-lifecycle-ok:qb-adhoc-save-expands-to-AR_BEGIN_SAVE-and-AR_FINISH_SAVE */
     QB_ADHOC_SAVE(ndb, &q, s, cbs, "fleet_board_post", record,
                   db_fleet_board_post_validate);
@@ -438,6 +440,28 @@ static void board_apply_filter(struct qb *q,
                      filter->since);
     if (filter->slug[0])
         qb_where_text(q, QB_C_fleet_board_posts_slug, QB_EQ, filter->slug);
+    if (filter->scope_set)
+        qb_where_int(q, QB_C_fleet_board_posts_scope, QB_EQ, filter->scope);
+    if (filter->room[0]) {
+        /* The default room is where legacy posts live: their signed room is
+         * empty, and the room they read as is the default. Asking for the
+         * default must find them, or the pre-scope board would vanish from
+         * its own room. */
+        if (strcmp(filter->room, FLEET_BOARD_ROOM_DEFAULT) == 0) {
+            /* scope-0 rows always read as the default room (their signed
+             * room is empty), and no fleet-scoped row has either property,
+             * so this pair is exact without a nested group. */
+            qb_group_begin(q, QB_OR);
+            qb_where_text(q, QB_C_fleet_board_posts_room, QB_EQ,
+                          filter->room);
+            qb_where_int(q, QB_C_fleet_board_posts_scope, QB_EQ,
+                         FLEET_BOARD_SCOPE_LEGACY_PUBLIC);
+            qb_group_end(q);
+        } else {
+            qb_where_text(q, QB_C_fleet_board_posts_room, QB_EQ,
+                          filter->room);
+        }
+    }
     if (filter->open_only) {
         static const int64_t k_open_kinds[] = {
             FLEET_BOARD_KIND_PROBLEM, FLEET_BOARD_KIND_NEED,

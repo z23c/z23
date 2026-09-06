@@ -546,6 +546,36 @@ int node_db_migrate_features_v67_up(struct node_db *ndb, int *version)
         current_ver = 80;
         applied++;
     }
+    if (current_ver < 81) {
+        /* v81: every board row carries the scope its post was signed with —
+         * a public room any node key may post to, or fleet-private — and the
+         * public room's name. Rows written before scopes existed were gossiped
+         * to the whole network, so they migrate to scope 0 (legacy-public)
+         * with an empty room, which is exactly what their v1 signatures still
+         * commit to. The bounds mirror the signed wire bounds, so a row that
+         * could not have been a valid scoped post cannot exist here either. */
+        if (!node_db_exec(ndb,
+                "ALTER TABLE fleet_board_posts ADD COLUMN "
+                "scope INTEGER NOT NULL DEFAULT 0 "
+                "CHECK(scope BETWEEN 0 AND 2)"))
+            LOG_ERR("db", "migrate v81: board scope column failed");
+        if (!node_db_exec(ndb,
+                "ALTER TABLE fleet_board_posts ADD COLUMN "
+                "room TEXT NOT NULL DEFAULT '' "
+                "CHECK(length(room)<=32)"))
+            LOG_ERR("db", "migrate v81: board room column failed");
+        if (!node_db_exec(ndb,
+                "CREATE INDEX IF NOT EXISTS idx_fleet_board_room "
+                "ON fleet_board_posts(room,created_at DESC,id)"))
+            LOG_ERR("db", "migrate v81: board room index failed");
+        if (!node_db_exec(ndb,
+                "INSERT OR IGNORE INTO schema_migrations(version) "
+                "VALUES('081')"))
+            LOG_ERR("db", "migrate v81: migration stamp failed");
+        DB_MIGRATE_PERSIST_VERSION(ndb, 81);
+        current_ver = 81;
+        applied++;
+    }
     *version = current_ver;
     return applied;
 }

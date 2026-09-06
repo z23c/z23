@@ -1,7 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * Fleet board / wiki persistence: the node's local append-only ledger of
- * signed board posts (schema v80). One row per post, keyed by the post id,
+ * signed board posts (schema v81). One row per post, keyed by the post id,
  * which is the hash of the signed bytes — so a save is idempotent and a
  * different body can never take an id that is already bound.
  *
@@ -54,6 +54,13 @@ struct fleet_board_filter {
      * result naming it arrives, which is the whole point of the filter. */
     bool open_only;
     char slug[FLEET_BOARD_SLUG_MAX + 1];/* empty = any slug */
+    /* Scope filtering. scope_set=false means "every scope this caller may
+     * see" — the caller decides visibility; the store only matches. A room
+     * filter matches the room a post READS as: asking for the default room
+     * also returns legacy posts, whose empty signed room is that room. */
+    bool scope_set;
+    uint8_t scope;                      /* enum fleet_board_scope */
+    char room[FLEET_BOARD_ROOM_MAX + 1];/* empty = any room */
 };
 
 struct fleet_board_status {
