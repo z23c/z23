@@ -113,6 +113,9 @@ from a hash, signature, test, or reproduction receipt.
 - [`FLEET_OBJECTIVES.md`](FLEET_OBJECTIVES.md) — the closed catalog of named
   objectives z23 optimizes, and `z23-dev fleet objectives`, the one command
   that prints each one's current value, target, and status.
+- [`FLEET_ROLES.md`](FLEET_ROLES.md) — which key may call which fleet leaf,
+  decided by this node alone: the closed role/grant catalog, the signed
+  local grant/revoke store, and `z23 fleet roles list|grant|revoke|check`.
 - [`DEFENSIVE_CODING.md`](DEFENSIVE_CODING.md) — lint-enforced C and
   architecture rules.
 - [`API_REFERENCE.md`](API_REFERENCE.md) — generated command catalog; edit its

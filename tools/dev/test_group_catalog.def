@@ -605,6 +605,7 @@ ZCL_TEST_GROUP(fleet_airship_rules)
  * leaves the replica exactly where it was, so a forged, tampered or
  * unpaired row can never plant a prefix of itself. */
 ZCL_TEST_GROUP(fleet_ledger)
+ZCL_TEST_GROUP(fleet_roles)
 ZCL_TEST_GROUP(confine)
 ZCL_TEST_GROUP(seed_tape)
 ZCL_TEST_GROUP(postmortem)

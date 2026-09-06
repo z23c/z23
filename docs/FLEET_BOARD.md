@@ -225,3 +225,6 @@ Follow this and the fleet stays coherent without anybody coordinating it.
    and losing the old wording is impossible.
 
 Keep posts short. The board carries pointers; the repository carries the work.
+
+Related: [`FLEET_ROLES.md`](FLEET_ROLES.md) — which key may `board.post`
+which kind, decided by the node it is posting to.

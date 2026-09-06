@@ -1,0 +1,80 @@
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ * purpose: The closed set of fleet ROLES and the leaves each one may call.
+ *
+ * A fleet leaf that accepts a signed request from another machine's key
+ * checks that key's signature and, for a board post, the post's SCOPE — but
+ * neither says which LEAVES that key may call. This file is the missing
+ * map: one row per role, and one grant row per (role, leaf pattern) it may
+ * reach. A key with no active grant for a leaf is refused BY NAME before
+ * the leaf runs; there is no default-permit path.
+ *
+ * `operator` is never listed in the grant table below: it is not stored
+ * anywhere, because it does not need to be. It is this node's OWN key, and
+ * a node's own key can already do everything on its own node — a grant row
+ * for it would be a fact this file states about itself. Local, unsigned CLI
+ * use by the operator is unaffected by any of this: role enforcement is
+ * about a request signed by a key OTHER than the node's own.
+ *
+ * `leaf_pattern_` is an exact `fleet.<a>.<b>` name from
+ * engine/composition/commands/fleet.def and fleet_board.def, or such a name
+ * with a trailing `*` matching any leaf under that prefix. `kinds_` is the
+ * comma-separated closed vocabulary the grant additionally restricts when
+ * the leaf is a board post (`fleet.board.post`); `"*"` means every kind the
+ * leaf itself accepts. A leaf that is not a board post ignores `kinds_`. */
+
+#ifndef Z23_ROLE
+#define Z23_ROLE(role_, why_)
+#endif
+
+Z23_ROLE(operator, "everything on this node; this node's own key, implicit")
+Z23_ROLE(worker,
+        "post board rows of kind note, result, claim, problem, need or "
+        "chat in fleet-private scope; write experiment predict/result "
+        "rows; read everything")
+Z23_ROLE(observer, "read-only leaves")
+Z23_ROLE(landing,
+        "the landing machine's key: post board results about trains, "
+        "read the ledger")
+
+#undef Z23_ROLE
+
+#ifndef Z23_ROLE_GRANT
+#define Z23_ROLE_GRANT(role_, leaf_pattern_, kinds_)
+#endif
+
+/* worker: read everything, write board rows (restricted kinds) and
+ * experiment rows. */
+Z23_ROLE_GRANT(worker, "fleet.board.post", "note,result,claim,problem,need,chat")
+Z23_ROLE_GRANT(worker, "fleet.board.list", "*")
+Z23_ROLE_GRANT(worker, "fleet.board.show", "*")
+Z23_ROLE_GRANT(worker, "fleet.board.status", "*")
+Z23_ROLE_GRANT(worker, "fleet.wiki.*", "*")
+Z23_ROLE_GRANT(worker, "fleet.experiment.predict", "*")
+Z23_ROLE_GRANT(worker, "fleet.experiment.result", "*")
+Z23_ROLE_GRANT(worker, "fleet.experiment.stats", "*")
+Z23_ROLE_GRANT(worker, "fleet.ledger.status", "*")
+Z23_ROLE_GRANT(worker, "fleet.usage", "*")
+Z23_ROLE_GRANT(worker, "fleet.vitals.sample", "*")
+Z23_ROLE_GRANT(worker, "fleet.roles.check", "*")
+
+/* observer: read-only leaves. */
+Z23_ROLE_GRANT(observer, "fleet.board.list", "*")
+Z23_ROLE_GRANT(observer, "fleet.board.show", "*")
+Z23_ROLE_GRANT(observer, "fleet.board.status", "*")
+Z23_ROLE_GRANT(observer, "fleet.wiki.read", "*")
+Z23_ROLE_GRANT(observer, "fleet.wiki.list", "*")
+Z23_ROLE_GRANT(observer, "fleet.wiki.history", "*")
+Z23_ROLE_GRANT(observer, "fleet.ledger.status", "*")
+Z23_ROLE_GRANT(observer, "fleet.usage", "*")
+Z23_ROLE_GRANT(observer, "fleet.experiment.stats", "*")
+Z23_ROLE_GRANT(observer, "fleet.roles.check", "*")
+
+/* landing: board results about trains, plus ledger reads. */
+Z23_ROLE_GRANT(landing, "fleet.board.post", "result")
+Z23_ROLE_GRANT(landing, "fleet.board.list", "*")
+Z23_ROLE_GRANT(landing, "fleet.board.show", "*")
+Z23_ROLE_GRANT(landing, "fleet.board.status", "*")
+Z23_ROLE_GRANT(landing, "fleet.ledger.status", "*")
+Z23_ROLE_GRANT(landing, "fleet.usage", "*")
+
+#undef Z23_ROLE_GRANT

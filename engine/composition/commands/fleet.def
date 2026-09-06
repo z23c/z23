@@ -241,3 +241,87 @@ ZCL_COMMAND_READY_READ(
     ZCL_COMMAND_COST_LOW, ZCL_COMMAND_LANE_LOCAL,
     ZCL_COMMAND_CAP_DEV_STATE_READ, ZCL_COMMAND_TRAIT_IDEMPOTENT,
     ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_fleet_experiment_export)
+
+ZCL_COMMAND_BRANCH("fleet.roles", "fleet",
+                   "Which key may call which fleet leaf",
+                   ZCL_COMMAND_LAYER_OPS)
+
+ZCL_COMMAND_READY_READ(
+    "fleet.roles.list", "fleet.roles", "",
+    "Every fingerprint this node has ever granted or revoked a role",
+    "Reads this node's own signed role/grant store (see "
+    "engine/composition/roles.def) and reports every (fingerprint, role) "
+    "pair it has ever seen, newest state first: whether it is currently "
+    "active, and when it last changed. This node's own operator key is "
+    "never listed — it holds every role implicitly and is checked by "
+    "identity, not by a grant row. It contacts no peer.", 16384,
+    "fleet,roles,grants,access,permissions",
+    "zcl.command.empty_input.v1", "zcl.fleet_roles_list.v1", "", "",
+    "z23 fleet roles list",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_LATENCY_INSTANT,
+    ZCL_COMMAND_COST_LOW, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_DEV_STATE_READ, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_fleet_roles_list)
+
+ZCL_COMMAND_READY_COMMAND(
+    "fleet.roles.grant", "fleet.roles", "",
+    "Sign a row granting one role to one key's fingerprint",
+    "Appends one signed row to this node's own role store, granting `role` "
+    "(a name from the closed catalog in engine/composition/roles.def, never "
+    "`operator`) to the key whose SHA3-256 fingerprint is `fp` (64 hex "
+    "characters). The row is signed by this node's own delegated online "
+    "key: a grant is always this node's own decision about a key, never a "
+    "statement accepted from a peer. A later revoke of the same pair "
+    "supersedes it on the next check.", 0,
+    "fleet,roles,grant,access,permissions",
+    "zcl.fleet_roles_grant.input.v1", "zcl.fleet_roles_grant.v1", "fp,role",
+    "fp,role", "z23 fleet roles grant --fp=<64-hex> --role=worker",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_DEV_MUTATION, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW, ZCL_COMMAND_CONFIRM_NONE,
+    ZCL_COMMAND_LANE_LOCAL, ZCL_COMMAND_CAP_DEV_STATE_READ,
+    ZCL_COMMAND_TRAIT_NONE,
+    zcl_native_handle_fleet_roles_grant)
+
+ZCL_COMMAND_READY_COMMAND(
+    "fleet.roles.revoke", "fleet.roles", "",
+    "Sign a row revoking one role from one key's fingerprint",
+    "Appends one signed row to this node's own role store, revoking `role` "
+    "from the key whose fingerprint is `fp`. Nothing is deleted: the grant "
+    "row still exists, but the next check of this pair sees the revoke and "
+    "refuses. Revoking a role never granted is accepted and has no further "
+    "effect.", 0,
+    "fleet,roles,revoke,access,permissions",
+    "zcl.fleet_roles_revoke.input.v1", "zcl.fleet_roles_revoke.v1",
+    "fp,role", "fp,role",
+    "z23 fleet roles revoke --fp=<64-hex> --role=worker",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_DEV_MUTATION, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW, ZCL_COMMAND_CONFIRM_NONE,
+    ZCL_COMMAND_LANE_LOCAL, ZCL_COMMAND_CAP_DEV_STATE_READ,
+    ZCL_COMMAND_TRAIT_NONE,
+    zcl_native_handle_fleet_roles_revoke)
+
+ZCL_COMMAND_READY_READ(
+    "fleet.roles.check", "fleet.roles", "",
+    "Would this key's roles allow this leaf (and board kind)?",
+    "Resolves every active role the key named by `fp` currently holds in "
+    "this node's own store and reports whether any of them grants `leaf` "
+    "(an exact `fleet.<a>.<b>` name), restricted to `kind` when the leaf is "
+    "a board post. `fp` equal to this node's own operator fingerprint is "
+    "always allowed, matching that every unsigned local CLI use by this "
+    "node's operator is unaffected by roles. A refusal names the exact "
+    "typed reason a caller would have seen. It contacts no peer.", 4096,
+    "fleet,roles,check,access,permissions",
+    "zcl.fleet_roles_check.input.v1", "zcl.fleet_roles_check.v1",
+    "fp,leaf,kind", "fp,leaf",
+    "z23 fleet roles check --fp=<64-hex> --leaf=fleet.board.post "
+    "--kind=result",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_LATENCY_INSTANT,
+    ZCL_COMMAND_COST_LOW, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_DEV_STATE_READ, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_fleet_roles_check)

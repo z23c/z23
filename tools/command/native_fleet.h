@@ -31,5 +31,17 @@ void zcl_native_handle_fleet_experiment_stats(
 void zcl_native_handle_fleet_experiment_export(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
+void zcl_native_handle_fleet_roles_list(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
+void zcl_native_handle_fleet_roles_grant(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
+void zcl_native_handle_fleet_roles_revoke(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
+void zcl_native_handle_fleet_roles_check(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
 
 #endif /* ZCL_NATIVE_FLEET_H */

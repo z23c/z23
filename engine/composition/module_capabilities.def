@@ -698,6 +698,9 @@ ZCL_MODULE_CAPABILITY("cognition/modules/fingerprint/src/fp_emit.c", CAP_FS_READ
 ZCL_MODULE_CAPABILITY("cognition/modules/fingerprint/src/fp_index.c", CAP_FS_READ|CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("cognition/modules/fingerprint/src/fp_select.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("engine/modules/fleetledger/src/fleet_ledger.c", CAP_FS_WRITE, "")
+ZCL_MODULE_CAPABILITY("tools/dev/fleet_roles_store.c", CAP_FS_WRITE,
+                      "creates <datadir>/fleet_roles and appends to its "
+                      "signed chainlog")
 ZCL_MODULE_CAPABILITY("engine/modules/framework/src/app_catalog.c", CAP_FS_READ, "")
 ZCL_MODULE_CAPABILITY("engine/modules/framework/src/app_runtime.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("engine/modules/framework/src/condition.c", CAP_FS_WRITE, "")
