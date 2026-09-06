@@ -1217,6 +1217,7 @@ add/remove a gate.
 - `check-describe-budget`
 - `check-domain-purity`
 - `check-error-doc-refs`
+- `check-flag-registry`
 - `check-file-purpose`
 - `check-file-size-ceiling`
 - `check-framework-filename-suffix`

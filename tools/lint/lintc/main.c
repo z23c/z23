@@ -108,6 +108,7 @@ static const struct lint_gate k_gates[] = {
       check_file_purpose_selftest },
     { "check-route-command-parity", check_route_command_parity_run,
       check_route_command_parity_selftest },
+    { "check-flag-registry", check_flag_registry_run, check_flag_registry_selftest },
 };
 
 int main(int argc, char **argv)

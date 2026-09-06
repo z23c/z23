@@ -5314,6 +5314,7 @@ LINTC_SRCS = tools/lint/lintc/lib.c tools/lint/lintc/gate_boot_wiring.c tools/li
     tools/lint/lintc/gate_zclassicd_reach.c \
     tools/lint/lintc/gate_file_purpose.c \
     tools/lint/lintc/gate_route_command_parity.c \
+    tools/lint/lintc/gate_flag_registry.c \
     tools/lint/lintc/main.c
 LINTC_OBJS = $(LINTC_SRCS:tools/lint/lintc/%.c=build/lintc-obj/%.o)
 # Apple Clang enables -Wunused-but-set-variable under -Wextra -Werror for
@@ -11896,6 +11897,16 @@ check-posix-ere-only: $(LINTC_TOOL)
 	@echo "══ LINT: POSIX ERE only in lint-runtime regex patterns ══"
 	@./tools/lint/check_posix_ere_only.sh
 
+# Gate — the closed flags.def catalog is the ONE list of every ZCL_ runtime/
+# build/test flag and Makefile variable this tree reads out of its process
+# environment. A getenv()/${...} read whose name is not a row fails; a row
+# nothing reads any more fails (shrink-only); a row whose expires_ date is
+# before HEAD's commit date fails. See docs/FLAGS.md.
+check-flag-registry: $(LINTC_TOOL)
+	@echo "══ LINT: every ZCL_ flag is in the closed flags.def catalog ══"
+	@./tools/lint/check_flag_registry.sh --selftest
+	@./tools/lint/check_flag_registry.sh
+
 # The cheap half of the fuzz-artifact replay contract (21 ms, text + git only):
 # every saved finding under tests/harness/fuzz_seeds/ has a live fuzz binary behind
 # it and a written verdict in ARTIFACT_VERDICTS.txt, with no orphan entries and
@@ -13342,6 +13353,7 @@ LINT_GATES := \
     check-no-uncited-victory \
     check-doc-claims \
     check-error-doc-refs \
+    check-flag-registry \
     check-api-reference-generated \
     check-capability-inventory-generated \
     check-generated-artifact-contradictions \

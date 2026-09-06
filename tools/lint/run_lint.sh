@@ -207,6 +207,7 @@ gate_command() {
         check-no-shellouts)                echo './tools/lint/check_no_shellouts.sh' ;;
         check-no-api-keys)                 echo './tools/lint/check_no_api_keys.sh' ;;
         check-posix-ere-only)              echo './tools/lint/check_posix_ere_only.sh' ;;
+        check-flag-registry)               echo './tools/lint/check_flag_registry.sh --selftest && ./tools/lint/check_flag_registry.sh' ;;
         check-standalone-tools-link)       echo './tools/lint/check_standalone_tools_link.sh' ;;
         check-arena-view-stub)             echo './tools/lint/check_arena_view_stub.sh --selftest && ./tools/lint/check_arena_view_stub.sh' ;;
         check-app-bundle-reproducible)     echo './tools/lint/check_app_bundle_reproducible.sh --selftest && ./tools/lint/check_app_bundle_reproducible.sh' ;;

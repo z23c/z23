@@ -260,5 +260,7 @@ int check_file_purpose_run(int argc, char **argv);
 int check_file_purpose_selftest(void);
 int check_route_command_parity_run(int argc, char **argv);
 int check_route_command_parity_selftest(void);
+int check_flag_registry_run(int argc, char **argv);
+int check_flag_registry_selftest(void);
 
 #endif
