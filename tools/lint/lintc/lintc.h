@@ -202,5 +202,7 @@ int check_equihash_params_run(int argc, char **argv);
 int check_equihash_params_selftest(void);
 int check_arena_view_stub_run(int argc, char **argv);
 int check_arena_view_stub_selftest(void);
+int check_cyclomatic_complexity_run(int argc, char **argv);
+int check_cyclomatic_complexity_selftest(void);
 
 #endif

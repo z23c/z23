@@ -5309,6 +5309,7 @@ LINTC_SRCS = tools/lint/lintc/lib.c tools/lint/lintc/gate_boot_wiring.c tools/li
     tools/lint/lintc/gate_build_config.c tools/lint/lintc/gate_doc_index.c \
     tools/lint/lintc/gate_ratchet_ports.c tools/lint/lintc/gate_repo_shape.c tools/lint/lintc/gate_def_parsers.c tools/lint/lintc/gate_zcode_packages.c \
     tools/lint/lintc/gate_source_fences.c tools/lint/lintc/gate_compile_fixture.c \
+    tools/lint/lintc/gate_function_complexity.c \
     tools/lint/lintc/main.c
 LINTC_OBJS = $(LINTC_SRCS:tools/lint/lintc/%.c=build/lintc-obj/%.o)
 # Apple Clang enables -Wunused-but-set-variable under -Wextra -Werror for
@@ -5333,6 +5334,7 @@ LINT_FAST_GATES := \
     check-no-live-lab-history \
     check-raw-sqlite \
     check-malloc \
+    check-cyclomatic-complexity \
     check-raw-malloc \
     check-json-value-init \
     check-no-raw-sqlite-in-controllers \
@@ -11638,6 +11640,17 @@ check-long-functions:
 	@echo "══ LINT: long function cap (500 lines) ══"
 	@./tools/scripts/check_long_functions.sh --selftest && ./tools/scripts/check_long_functions.sh
 
+# Cyclomatic complexity cap 15 per C function definition (decision points:
+# if/for/while/case keywords, && and || operators, ternary ?, with comments
+# and string/char literals stripped). Legacy offenders are pinned at their
+# current M in tools/lint/cyclomatic_complexity_baseline.txt, a shrink-only
+# ratchet: exact pins pass; a new, grown, shrunk, or stale entry fails.
+# Re-pin after deliberate changes with
+# build/bin/z23-lint check-cyclomatic-complexity --write-baseline.
+check-cyclomatic-complexity: $(LINTC_TOOL)
+	@echo "══ LINT: cyclomatic complexity cap 15 per function ══"
+	@./tools/lint/check_cyclomatic_complexity.sh --selftest && ./tools/lint/check_cyclomatic_complexity.sh
+
 # Wave 9a: every register_*_rpc_commands callsite uses rpc_table_must_append.
 # rpc_table_append returns false silently on registration failure (duplicate
 # name / MAX_RPC_COMMANDS cap / table running) — that silent failure mode
@@ -13259,6 +13272,7 @@ LINT_GATES := \
     check-rule-vocabulary \
     check-cookbook \
     check-long-functions \
+    check-cyclomatic-complexity \
     check-rpc-registrar \
     check-lag-slo-observable \
     check-lib-layering \

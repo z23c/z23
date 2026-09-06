@@ -1244,6 +1244,7 @@ add/remove a gate.
 - `check-prompt-templates`
 - `check-rule-vocabulary`
 - `check-cookbook`
+- `check-cyclomatic-complexity`
 - `check-no-raw-clock-outside-platform`
 - `check-no-real-clock-test-deadline`
 - `check-sysinit-ordering`

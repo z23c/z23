@@ -163,6 +163,7 @@ gate_command() {
         check-model-validation)            echo './tools/scripts/check_model_validation.sh' ;;
         check-model-ar-lifecycle)          echo './tools/scripts/check_model_ar_lifecycle.sh' ;;
         check-long-functions)              echo './tools/scripts/check_long_functions.sh --selftest && ./tools/scripts/check_long_functions.sh' ;;
+        check-cyclomatic-complexity)       echo './tools/lint/check_cyclomatic_complexity.sh --selftest && ./tools/lint/check_cyclomatic_complexity.sh' ;;
         check-rpc-registrar)               echo './tools/scripts/check_rpc_registrar.sh' ;;
         check-lag-slo-observable)          echo './tools/scripts/check_lag_slo_observable.sh' ;;
         check-lib-layering)                echo './tools/scripts/check_lib_layering.sh' ;;
