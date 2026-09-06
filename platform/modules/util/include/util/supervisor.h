@@ -30,15 +30,14 @@
  * Children publish a `struct liveness_contract`, register it once at
  * boot, and either heartbeat (call supervisor_tick) on their own loop
  * OR let the supervisor drive them via `period_secs > 0 ⇒ on_tick`.
- * When a deadline is missed, the supervisor calls `on_stall(self)` on
- * its own thread, edge-triggered. The child observes the stall flag
- * on its next loop and re-initializes — supervisor never tears down a
+ * When a deadline is missed, the supervisor queues `on_stall(self)` to a
+ * dedicated bounded delivery thread, edge-triggered. The child observes the
+ * stall flag on its next loop and re-initializes — supervisor never tears down a
  * child mid-`AR_BEGIN_SAVE`.
  *
- * The supervisor thread itself does *no* I/O, no DB, no RPC. Just
- * snapshot atomics + dispatch callbacks. Callbacks may freely call any
- * other supervisor_* function; the supervisor never holds a lock when
- * invoking a callback. */
+ * Tick and stall callbacks run on dedicated workers and may freely call any
+ * other supervisor_* function; no registry lock is held while invoking one.
+ * Opted-in on_respawn remains inline on the root sweep and must stay bounded. */
 
 #ifndef ZCL_SUPERVISOR_H
 #define ZCL_SUPERVISOR_H
@@ -236,6 +235,13 @@ struct liveness_contract {
      * needs to tell "caught up" from "wedged". Child-owned. */
     _Atomic uint32_t idle_ticks;
     _Atomic uint32_t stall_fires;
+    /* One fixed stall-delivery slot. A nonzero value is the pending reason;
+     * repeated edges while occupied are counted rather than allocating an
+     * unbounded queue. The callback and observer run on the dedicated stall
+     * worker whenever the production supervisor is live. */
+    _Atomic int      stall_delivery_pending;
+    _Atomic uint32_t stall_delivery_coalesced;
+    _Atomic uint32_t stall_delivery_discarded;
     _Atomic uint32_t restart_count;
     _Atomic int64_t  last_restart_us;
 
@@ -275,8 +281,8 @@ struct liveness_contract {
     void  *ctx;
     void (*on_tick)(struct liveness_contract *self);
     void (*on_stall)(struct liveness_contract *self);
-    /* Respawn callback (restartable children only). The supervisor calls it on
-     * its own thread when the child's worker_state is EXITED and the restart
+    /* Respawn callback (restartable children only). The root sweep calls it
+     * inline when the child's worker_state is EXITED and the restart
      * policy + intensity cap permit. It MUST re-create the worker thread (via
      * thread_registry_spawn) and return true when it has handled the death
      * (spawned a fresh worker, or definitively failed to and wants the attempt
@@ -293,7 +299,9 @@ void liveness_contract_init(struct liveness_contract *c, const char *name);
 
 /* Register a caller-owned static contract. Returns the child id (>=0)
  * or SUPERVISOR_INVALID_ID on registry-full. The supervisor stores the
- * pointer — do NOT pass a stack-allocated contract. */
+ * pointer — do NOT pass a stack-allocated contract. Unregister is not a
+ * callback-quiescence barrier: retain the contract and its ctx until
+ * supervisor_stop() has joined every supervisor worker. */
 supervisor_child_id supervisor_register(struct liveness_contract *c);
 
 /* Create or return a named domain supervisor. Children registered in a
@@ -316,8 +324,9 @@ int supervisor_child_count_total(void);
  * tree it drives (Gate #23 exemption — see check_thread_supervision.sh),
  * so its ONLY exposed liveness signal is this counter. It increments once
  * per sweep_once() call — production thread loop AND the ZCL_TESTING
- * synchronous seam alike — BEFORE any child callback runs, so a thread
- * death or a hang inside a child's on_tick/on_stall freezes it forever.
+ * synchronous seam alike — before sweep work. Child tick and stall callbacks
+ * use dedicated workers; opted-in on_respawn remains inline and can freeze
+ * the root sweep.
  * An independent watcher (util/supervisor_backstop.h) and
  * boot_sd_watchdog.c both poll this with their OWN clock; no lock, no
  * dependency on any registered child. */
@@ -424,14 +433,15 @@ void supervisor_worker_exited(supervisor_child_id id);
 
 /* ── Process-wide stall observer (diagnostics auto-capture) ────────── */
 
-/* Invoked on the rising edge of EVERY stall fire (any trigger site:
+/* Invoked for delivered rising-edge stall reports (any trigger site:
  * child-reported, deadline lapse, frozen progress, restart-storm), in
- * addition to the per-contract on_stall. Runs on the DETECTING thread —
- * for sweep-detected stalls that is the supervisor thread, which drives
- * every child's on_tick, so the observer MUST be cheap and non-blocking
- * (rate-limit, then hand off to a worker; the ops.debug.bundle
- * auto-capture in app/controllers does exactly that). Register once at
- * boot; NULL clears. Release-store / acquire-load publication. */
+ * addition to the per-contract on_stall. While the production supervisor is
+ * live both run on its dedicated bounded stall-delivery worker, never on the
+ * root sweep. Pending reports can be coalesced or cancelled after recovery,
+ * completion, unregister or shutdown; their counters expose that disposition.
+ * Synchronous test seams with no live supervisor preserve their
+ * historical immediate delivery. Register once at boot; NULL clears.
+ * Release-store / acquire-load publication. */
 typedef void (*supervisor_stall_observer_fn)(
     const char *child_name, enum supervisor_stall_reason reason);
 void supervisor_set_stall_observer(supervisor_stall_observer_fn fn);
@@ -443,9 +453,10 @@ void supervisor_set_stall_observer(supervisor_stall_observer_fn fn);
  * spawning. Returns false if the thread could not be created. */
 bool supervisor_start(void);
 
-/* Request stop and join the supervisor thread. Outside process shutdown
- * the join gives up after ≤ 2 s; once shutdown is requested it keeps
- * waiting (progress-logged) for the in-flight tick so a draining stage
+/* Request stop and join the supervisor, tick, and stall-delivery threads.
+ * Outside process shutdown
+ * each worker join gives up after ≤ 2 s; once shutdown is requested it keeps
+ * waiting (progress-logged) for in-flight callbacks so a draining stage
  * never outlives the chainstate app_shutdown frees. Safe to call without
  * a prior start; safe to call multiple times. */
 void supervisor_stop(void);
@@ -526,6 +537,9 @@ struct supervisor_snapshot {
     uint32_t ticks_run;
     uint32_t idle_ticks;
     uint32_t stall_fires;
+    bool     stall_delivery_pending;
+    uint32_t stall_delivery_coalesced;
+    uint32_t stall_delivery_discarded;
     uint32_t restart_count;
     int      restart_policy;         /* enum supervisor_restart_policy */
     int      worker_state;           /* enum supervisor_worker_state */

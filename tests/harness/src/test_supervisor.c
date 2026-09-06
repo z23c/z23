@@ -69,6 +69,37 @@ static void slow_tick(struct liveness_contract *self)
     if (cc) atomic_fetch_add(&cc->tick_calls, 1);
 }
 
+struct blocking_stall {
+    pthread_mutex_t lock;
+    pthread_cond_t changed;
+    _Atomic bool entered;
+    _Atomic bool release;
+    _Atomic bool returned;
+};
+
+static void wait_stall(struct liveness_contract *self)
+{
+    struct blocking_stall *stall = self ? self->ctx : NULL;
+    if (!stall)
+        return;
+    pthread_mutex_lock(&stall->lock);
+    atomic_store(&stall->entered, true);
+    while (!atomic_load(&stall->release))
+        pthread_cond_wait(&stall->changed, &stall->lock);
+    pthread_mutex_unlock(&stall->lock);
+    atomic_store(&stall->returned, true);
+}
+
+static bool wait_for_flag(_Atomic bool *flag, int timeout_ms)
+{
+    for (int elapsed = 0; elapsed < timeout_ms; elapsed++) {
+        if (atomic_load(flag))
+            return true;
+        sleep_ms(1);
+    }
+    return atomic_load(flag);
+}
+
 /* Process-wide stall-observer probe (the supervisor_set_stall_observer
  * seam used by the ops.debug.bundle auto-capture). */
 static _Atomic int  g_obs_calls;
@@ -756,6 +787,158 @@ int test_supervisor(void)
         SUP_CHECK("active callback clears after the child returns",
             strcmp(supervisor_active_callback_name(), "none") == 0);
         SUP_CHECK("runner thread is alive", supervisor_tick_runner_running());
+        supervisor_stop();
+    }
+
+    /* A recovery callback may block on disk or another worker. Detection of
+     * that stall must not stall the root sweep which systemd independently
+     * uses as its keepalive gate. */
+    supervisor_reset_for_testing();
+    supervisor_set_tick_ms_for_testing(5);
+    {
+        static struct liveness_contract c;
+        static struct blocking_stall stall = {
+            .lock = PTHREAD_MUTEX_INITIALIZER,
+            .changed = PTHREAD_COND_INITIALIZER,
+        };
+        atomic_store(&stall.entered, false);
+        atomic_store(&stall.release, false);
+        atomic_store(&stall.returned, false);
+        liveness_contract_init(&c, "loop.blocked_stall");
+        c.ctx = &stall;
+        c.on_stall = wait_stall;
+        atomic_store(&c.deadline_secs, 1);
+        supervisor_child_id id = supervisor_register(&c);
+        bool started = id >= 0 && supervisor_start();
+        if (started)
+            atomic_store(&c.last_tick_us,
+                         atomic_load(&c.last_tick_us) - 5000000);
+        bool entered = started && wait_for_flag(&stall.entered, 500);
+        uint64_t hb0 = supervisor_sweep_heartbeat();
+        bool advanced = false;
+        for (int elapsed = 0; entered && elapsed < 100; elapsed++) {
+            if (supervisor_sweep_heartbeat() > hb0) {
+                advanced = true;
+                break;
+            }
+            sleep_ms(1);
+        }
+        SUP_CHECK("blocking on_stall callback is entered", entered);
+        SUP_CHECK("sweep advances while on_stall remains blocked",
+                  entered && advanced && !atomic_load(&stall.returned));
+
+        /* Queue later children behind the blocked callback. Recovery,
+         * completion and retiring a registry slot must invalidate pending
+         * delivery; a different contract reusing that slot inherits nothing. */
+        static struct liveness_contract pending[4], replacement;
+        static struct cb_counts counts[4], replacement_counts;
+        supervisor_child_id pending_ids[4];
+        const char *names[] = { "stall.recovered", "stall.completed",
+                               "stall.retired", "stall.remaining" };
+        for (int i = 0; i < 4; i++) {
+            atomic_store(&counts[i].stall_calls, 0);
+            liveness_contract_init(&pending[i], names[i]);
+            pending[i].ctx = &counts[i];
+            pending[i].on_stall = inc_stall;
+            atomic_store(&pending[i].deadline_secs, 1);
+            atomic_fetch_sub(&pending[i].last_tick_us, 5000000);
+            pending_ids[i] = supervisor_register(&pending[i]);
+        }
+        bool detected = false;
+        for (int elapsed = 0; advanced && elapsed < 500; elapsed++) {
+            detected = true;
+            for (int i = 0; i < 4; i++)
+                detected = detected && atomic_load(&pending[i].stall_fires) == 1;
+            if (detected) break;
+            sleep_ms(1);
+        }
+        SUP_CHECK("blocked recovery does not prevent later stall detection", detected);
+        /* A child may rearm its own atomic reason before reporting a new
+         * cause. Coalescing must retain the newest report, not leave an old
+         * pending cause that no longer matches the live contract. */
+        atomic_store(&pending[3].deadline_secs, 0);
+        uint64_t before_rearm = supervisor_sweep_heartbeat();
+        for (int elapsed = 0; detected && elapsed < 500; elapsed++) {
+            if (supervisor_sweep_heartbeat() >= before_rearm + 2) break;
+            sleep_ms(1);
+        }
+        atomic_store(&pending[3].stall_reason, SUPERVISOR_STALL_NONE);
+        if (detected)
+            supervisor_report_stall(pending_ids[3], SUPERVISOR_STALL_CHILD_REPORTED);
+        supervisor_tick(pending_ids[0]);
+        supervisor_child_complete(pending_ids[1]);
+        supervisor_unregister(pending_ids[2]);
+        liveness_contract_init(&replacement, "stall.replacement");
+        atomic_store(&replacement_counts.stall_calls, 0);
+        replacement.ctx = &replacement_counts;
+        replacement.on_stall = inc_stall;
+        supervisor_child_id replacement_id = supervisor_register(&replacement);
+        SUP_CHECK("replacement reuses retired slot", replacement_id == pending_ids[2]);
+
+        pthread_mutex_lock(&stall.lock);
+        atomic_store(&stall.release, true);
+        pthread_cond_broadcast(&stall.changed);
+        pthread_mutex_unlock(&stall.lock);
+        for (int elapsed = 0; detected && elapsed < 500; elapsed++) {
+            if (atomic_load(&counts[3].stall_calls) > 0) break;
+            sleep_ms(1);
+        }
+        if (started)
+            supervisor_stop();
+        SUP_CHECK("blocking on_stall callback returns before teardown",
+                  !entered || atomic_load(&stall.returned));
+        SUP_CHECK("remaining stalled child is delivered once after recovery",
+                  detected && atomic_load(&counts[3].stall_calls) == 1);
+        SUP_CHECK("newer pending reason coalesces with exact accounting",
+                  atomic_load(&pending[3].stall_fires) == 2 &&
+                  atomic_load(&pending[3].stall_delivery_coalesced) == 1 &&
+                  atomic_load(&pending[3].stall_delivery_discarded) == 0);
+        SUP_CHECK("recovered completed and retired callbacks are discarded",
+                  atomic_load(&counts[0].stall_calls) == 0 &&
+                  atomic_load(&counts[1].stall_calls) == 0 &&
+                  atomic_load(&counts[2].stall_calls) == 0 &&
+                  atomic_load(&replacement_counts.stall_calls) == 0);
+        SUP_CHECK("each cancelled pending delivery is accounted for",
+                  atomic_load(&pending[0].stall_delivery_discarded) == 1 &&
+                  atomic_load(&pending[1].stall_delivery_discarded) == 1 &&
+                  atomic_load(&pending[2].stall_delivery_discarded) == 1);
+    }
+
+    /* An incomplete bounded stop cannot authorize reinitializing a callback's
+     * storage or starting a second worker over it. Releasing the retained
+     * callback and retrying stop must make a later start possible. */
+    supervisor_reset_for_testing();
+    supervisor_set_tick_ms_for_testing(5);
+    {
+        static struct liveness_contract c;
+        static struct blocking_stall stall = {
+            .lock = PTHREAD_MUTEX_INITIALIZER,
+            .changed = PTHREAD_COND_INITIALIZER,
+        };
+        atomic_store(&stall.entered, false);
+        atomic_store(&stall.release, false);
+        atomic_store(&stall.returned, false);
+        liveness_contract_init(&c, "stall.stop_pending");
+        c.ctx = &stall;
+        c.on_stall = wait_stall;
+        atomic_store(&c.deadline_secs, 1);
+        atomic_fetch_sub(&c.last_tick_us, 5000000);
+        supervisor_child_id id = supervisor_register(&c);
+        bool started = id >= 0 && supervisor_start();
+        bool entered = started && wait_for_flag(&stall.entered, 500);
+        supervisor_stop();
+        SUP_CHECK("bounded stop preserves in-flight callback", entered &&
+                  !atomic_load(&stall.returned));
+        bool premature_start = supervisor_start();
+        SUP_CHECK("unjoined callback refuses supervisor restart", !premature_start);
+        pthread_mutex_lock(&stall.lock);
+        atomic_store(&stall.release, true);
+        pthread_cond_broadcast(&stall.changed);
+        pthread_mutex_unlock(&stall.lock);
+        supervisor_stop();
+        SUP_CHECK("retry stop joins retained callback", entered &&
+                  atomic_load(&stall.returned));
+        SUP_CHECK("restart succeeds after callback joined", supervisor_start());
         supervisor_stop();
     }
 

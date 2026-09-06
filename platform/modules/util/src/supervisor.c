@@ -14,10 +14,8 @@
  *     OR progress_max_quiet_us). All edge-triggered: stall_reason set
  *     to non-zero means "we already fired"; child clearing it by
  *     ticking re-arms the edge.
- *   - Registry mutex protects the array of pointers; supervisor
- *     snapshots pointers under lock, then releases the lock BEFORE
- *     invoking any callback — callbacks may freely call back into the
- *     supervisor API. */
+ *   - Registry mutex protects the array of pointers. Dedicated bounded
+ *     workers invoke child tick and stall callbacks without holding it. */
 
 #include "platform/time_compat.h"
 #include "platform/thread_compat.h"
@@ -56,8 +54,9 @@ static _Atomic int    g_tick_ms       = 1000;
 static pthread_t      g_thread_id;
 static _Atomic bool   g_thread_handle_set = false;
 
-/* Pillar 7 heartbeat: bumps once per sweep_once() call, before any child
- * callback runs, so a dead/wedged sweep freezes it. See
+/* Pillar 7 heartbeat: bumps once per sweep_once() call, before sweep work.
+ * Child tick and stall callbacks are isolated; inline on_respawn remains an
+ * explicit residual callback that can freeze the sweep. See
  * util/supervisor_backstop.h for the external watcher. */
 static _Atomic uint64_t g_sweep_heartbeat = 0;
 static _Atomic int64_t  g_sweep_last_us   = 0;
@@ -66,24 +65,81 @@ static _Atomic int64_t  g_sweep_last_us   = 0;
  * at boot). NULL by default; release-store / acquire-load publication. */
 static supervisor_stall_observer_fn _Atomic g_stall_observer = NULL;
 
+/* One fixed worker drains the one-slot handoff embedded in each contract.
+ * A blocked recovery action can delay other recovery actions, but cannot
+ * delay the root sweep heartbeat or allocate more work. */
+static _Atomic bool g_stall_runner_running = false;
+static pthread_t g_stall_runner_thread_id;
+static _Atomic bool g_stall_runner_handle_set = false;
+static pthread_mutex_t g_stall_wake_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t g_stall_wake_cond = PTHREAD_COND_INITIALIZER;
+static _Atomic uint64_t g_stall_wake_seq = 0;
+static _Atomic int64_t g_stall_runner_last_us = 0;
+static char g_stall_runner_active_name[SUPERVISOR_NAME_MAX];
+enum runner_blocker_action {
+    RUNNER_BLOCKER_NONE = 0,
+    RUNNER_BLOCKER_SET,
+    RUNNER_BLOCKER_CLEAR,
+};
+static _Atomic int g_runner_blocker_action = RUNNER_BLOCKER_NONE;
+static _Atomic uint32_t g_runner_blocker_coalesced = 0;
+static _Atomic uint32_t g_runner_blocker_discarded = 0;
+
 void supervisor_set_stall_observer(supervisor_stall_observer_fn fn)
 {
     atomic_store_explicit(&g_stall_observer, fn, memory_order_release);
 }
 
-/* Single stall-fire path for every trigger site: bump the fire counter,
- * run the per-contract callback, then the process-wide observer. Runs on
- * the DETECTING thread (the supervisor sweep thread for deadline/progress
- * stalls, the child itself for supervisor_report_stall) — the observer
- * contract (cheap, non-blocking) is documented in util/supervisor.h. */
+static void stall_wake(void)
+{
+    atomic_fetch_add(&g_stall_wake_seq, UINT64_C(1));
+    pthread_mutex_lock(&g_stall_wake_lock);
+    pthread_cond_signal(&g_stall_wake_cond);
+    pthread_mutex_unlock(&g_stall_wake_lock);
+}
+
+static void stall_deliver(struct liveness_contract *c,
+                          enum supervisor_stall_reason r)
+{
+    if (c->on_stall)
+        c->on_stall(c);
+    supervisor_stall_observer_fn obs =
+        atomic_load_explicit(&g_stall_observer, memory_order_acquire);
+    if (obs)
+        obs(c->name, r);
+}
+
+static void stall_cancel_pending(struct liveness_contract *c)
+{
+    if (atomic_exchange(&c->stall_delivery_pending,
+                        SUPERVISOR_STALL_NONE) != SUPERVISOR_STALL_NONE)
+        atomic_fetch_add(&c->stall_delivery_discarded, 1u);
+}
+
+/* Single stall-fire path for every trigger site. Production delivery uses a
+ * fixed per-contract slot; no caller callback or observer runs on the root
+ * sweep. Tests that drive sweep_once without starting threads remain
+ * synchronous. */
 static void note_stall_fire(struct liveness_contract *c,
                             enum supervisor_stall_reason r)
 {
     atomic_fetch_add(&c->stall_fires, 1u);
-    if (c->on_stall) c->on_stall(c);
-    supervisor_stall_observer_fn obs =
-        atomic_load_explicit(&g_stall_observer, memory_order_acquire);
-    if (obs) obs(c->name, r);
+    if (!atomic_load(&g_running)) {
+        /* Preserve the historical before-start/testing seam only when no
+         * production worker can still be draining. stop() clears g_running
+         * before joining the sweep, so a handle here means drop, never an
+         * inline callback on that in-flight sweep. */
+        if (!atomic_load(&g_thread_handle_set) &&
+            !atomic_load(&g_stall_runner_handle_set))
+            stall_deliver(c, r);
+        else
+            atomic_fetch_add(&c->stall_delivery_discarded, 1u);
+        return;
+    }
+    int previous = atomic_exchange(&c->stall_delivery_pending, (int)r);
+    if (previous != SUPERVISOR_STALL_NONE)
+        atomic_fetch_add(&c->stall_delivery_coalesced, 1u);
+    stall_wake();
 }
 
 /* ── Tick-runner thread ────────────────────────────────────────────────
@@ -101,10 +157,9 @@ static void note_stall_fire(struct liveness_contract *c,
  * the edge-triggered "supervisor.tick_runner_wedged" blocker — a NAMED blocker,
  * never a dead node — and clears it when the runner heartbeats again.
  *
- * g_runner_enabled doubles as the drain-ownership flag: true ⇒ the runner
- * thread drains due ticks and the sweep monitors it; false ⇒ no runner (spawn
- * failed, or the ZCL_TESTING synchronous seam) and the sweep drains due ticks
- * INLINE so children are never silently un-driven. */
+ * g_runner_enabled is the drain-ownership flag. Production startup requires
+ * the runner; the false/inline case exists only for the ZCL_TESTING
+ * synchronous seam. */
 #define SUPERVISOR_TICK_RUNNER_DEADLINE_SECS 30
 static _Atomic bool   g_runner_running    = false;
 /* Published by the runner thread from its own entry point (0 until it runs).
@@ -294,6 +349,8 @@ void supervisor_unregister(supervisor_child_id id)
      * above for what swap-remove broke. Retired slots are reused by
      * register, so restart cycles are allocation-stable; the count is
      * a high-water mark, and live-entry queries count non-NULL slots. */
+    if (g_contracts[id])
+        stall_cancel_pending(g_contracts[id]);
     g_contracts[id] = NULL;
     g_contract_domains[id] = NULL;
     pthread_mutex_unlock(&g_lock);
@@ -321,6 +378,7 @@ void supervisor_child_complete(supervisor_child_id id)
     atomic_store(&c->deadline_secs, 0);
     atomic_store(&c->progress_max_quiet_us, 0);
     atomic_store(&c->stall_reason, SUPERVISOR_STALL_NONE);
+    stall_cancel_pending(c);
     atomic_store(&c->last_tick_us, platform_time_monotonic_us());
     atomic_store(&c->completed, true);
 }
@@ -338,6 +396,7 @@ void supervisor_tick(supervisor_child_id id)
     if (prev == SUPERVISOR_STALL_TIME_DEADLINE ||
         prev == SUPERVISOR_STALL_CHILD_REPORTED) {
         atomic_store(&c->stall_reason, SUPERVISOR_STALL_NONE);
+        stall_cancel_pending(c);
     }
 }
 
@@ -354,6 +413,8 @@ void supervisor_progress(supervisor_child_id id, int64_t marker)
         int sr = atomic_load(&c->stall_reason);
         if (sr == SUPERVISOR_STALL_NO_PROGRESS)
             atomic_store(&c->stall_reason, SUPERVISOR_STALL_NONE);
+        if (sr == SUPERVISOR_STALL_NO_PROGRESS)
+            stall_cancel_pending(c);
     }
 }
 
@@ -370,6 +431,8 @@ void supervisor_progress_idle(supervisor_child_id id)
     int sr = atomic_load(&c->stall_reason);
     if (sr == SUPERVISOR_STALL_NO_PROGRESS)
         atomic_store(&c->stall_reason, SUPERVISOR_STALL_NONE);
+    if (sr == SUPERVISOR_STALL_NO_PROGRESS)
+        stall_cancel_pending(c);
 }
 
 void supervisor_report_stall(supervisor_child_id id,
@@ -618,10 +681,139 @@ static void runner_on_stall(struct liveness_contract *self)
         (void)blocker_set(&rec);
 }
 
+static void runner_blocker_apply(enum runner_blocker_action action)
+{
+    if (action == RUNNER_BLOCKER_SET)
+        runner_on_stall(&g_runner_contract);
+    else if (action == RUNNER_BLOCKER_CLEAR)
+        blocker_clear("supervisor.tick_runner_wedged");
+}
+
+static void runner_blocker_schedule(enum runner_blocker_action action)
+{
+    if (!atomic_load(&g_running)) {
+        if (!atomic_load(&g_thread_handle_set) &&
+            !atomic_load(&g_stall_runner_handle_set))
+            runner_blocker_apply(action);
+        else
+            atomic_fetch_add(&g_runner_blocker_discarded, 1u);
+        return;
+    }
+    int previous = atomic_exchange(&g_runner_blocker_action, (int)action);
+    if (previous != RUNNER_BLOCKER_NONE)
+        atomic_fetch_add(&g_runner_blocker_coalesced, 1u);
+    stall_wake();
+}
+
+static bool stall_deliver_one(void)
+{
+    struct liveness_contract *claimed = NULL;
+    enum supervisor_stall_reason reason = SUPERVISOR_STALL_NONE;
+
+    /* Claim only the next live slot. Do not snapshot pending pointers across
+     * an earlier blocking callback: completion/unregister can still cancel
+     * every later slot before this worker reaches it. */
+    pthread_mutex_lock(&g_lock);
+    if (!atomic_load(&g_stall_runner_running)) {
+        pthread_mutex_unlock(&g_lock);
+        return false;
+    }
+    for (int i = 0; i < g_contract_count; i++) {
+        struct liveness_contract *c = g_contracts[i];
+        if (!c)
+            continue;
+        int pending = atomic_load(&c->stall_delivery_pending);
+        if (pending == SUPERVISOR_STALL_NONE)
+            continue;
+        if (atomic_load(&c->completed) ||
+            atomic_load(&c->stall_reason) != pending) {
+            stall_cancel_pending(c);
+            continue;
+        }
+        int expected = pending;
+        if (atomic_compare_exchange_strong(&c->stall_delivery_pending,
+                                            &expected,
+                                            SUPERVISOR_STALL_NONE)) {
+            claimed = c;
+            reason = (enum supervisor_stall_reason)pending;
+            snprintf(g_stall_runner_active_name,
+                     sizeof(g_stall_runner_active_name), "%s", c->name);
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_lock);
+    if (!claimed)
+        return false;
+    /* Membership was valid when claimed. Unregister cancels work not yet
+     * claimed; it is deliberately not a quiescence barrier for this callback. */
+    atomic_store(&g_stall_runner_last_us, platform_time_monotonic_us());
+    stall_deliver(claimed, reason);
+    pthread_mutex_lock(&g_lock);
+    g_stall_runner_active_name[0] = '\0';
+    pthread_mutex_unlock(&g_lock);
+    atomic_store(&g_stall_runner_last_us, platform_time_monotonic_us());
+    return true;
+}
+
+static void stall_discard_all(void)
+{
+    pthread_mutex_lock(&g_lock);
+    for (int i = 0; i < g_contract_count; i++) {
+        if (g_contracts[i])
+            stall_cancel_pending(g_contracts[i]);
+    }
+    pthread_mutex_unlock(&g_lock);
+    if (atomic_exchange(&g_runner_blocker_action,
+                        RUNNER_BLOCKER_NONE) != RUNNER_BLOCKER_NONE)
+        atomic_fetch_add(&g_runner_blocker_discarded, 1u);
+}
+
+static void *supervisor_stall_runner_main(void *arg)
+{
+    (void)arg;
+    while (atomic_load(&g_stall_runner_running) &&
+           !thread_registry_shutdown_requested()) {
+        atomic_store(&g_stall_runner_last_us, platform_time_monotonic_us());
+        uint64_t wake_seq = atomic_load(&g_stall_wake_seq);
+        int action = atomic_load(&g_stall_runner_running)
+            ? atomic_exchange(&g_runner_blocker_action, RUNNER_BLOCKER_NONE)
+            : RUNNER_BLOCKER_NONE;
+        if (action != RUNNER_BLOCKER_NONE) {
+            pthread_mutex_lock(&g_lock);
+            snprintf(g_stall_runner_active_name,
+                     sizeof(g_stall_runner_active_name), "%s",
+                     "supervisor.tick_runner");
+            pthread_mutex_unlock(&g_lock);
+            runner_blocker_apply((enum runner_blocker_action)action);
+            pthread_mutex_lock(&g_lock);
+            g_stall_runner_active_name[0] = '\0';
+            pthread_mutex_unlock(&g_lock);
+            atomic_store(&g_stall_runner_last_us, platform_time_monotonic_us());
+        }
+        if (stall_deliver_one())
+            continue;
+
+        pthread_mutex_lock(&g_stall_wake_lock);
+        if (wake_seq == atomic_load(&g_stall_wake_seq) &&
+            atomic_load(&g_stall_runner_running) &&
+            !thread_registry_shutdown_requested()) {
+            struct timespec deadline;
+            platform_time_realtime_timespec(&deadline);
+            deadline.tv_sec += 1;
+            (void)pthread_cond_timedwait(&g_stall_wake_cond,
+                                         &g_stall_wake_lock, &deadline);
+        }
+        pthread_mutex_unlock(&g_stall_wake_lock);
+    }
+    stall_discard_all();
+    atomic_store(&g_stall_runner_running, false);
+    thread_registry_unregister_self();
+    return NULL;
+}
+
 /* Execute every child whose tick_pending flag is set. Runs on the tick-runner
- * thread in production; runs inline on the sweep thread only as the
- * runner-absent fallback. Snapshots pointers under the registry lock, releases
- * it, then invokes callbacks outside the lock (callbacks re-enter the API). */
+ * thread in production and inline only in the threadless test seam. Snapshots
+ * pointers under the registry lock, then invokes callbacks outside it. */
 static void run_due_ticks(void)
 {
     struct liveness_contract *snap[SUPERVISOR_CAP];
@@ -691,14 +883,13 @@ static void supervisor_monitor_runner(int64_t now)
         if (atomic_compare_exchange_strong(&g_runner_contract.stall_reason,
                 &expected, SUPERVISOR_STALL_TIME_DEADLINE)) {
             atomic_fetch_add(&g_runner_contract.stall_fires, 1u);
-            if (g_runner_contract.on_stall)
-                g_runner_contract.on_stall(&g_runner_contract);
+            runner_blocker_schedule(RUNNER_BLOCKER_SET);
         }
     } else if (rsr != SUPERVISOR_STALL_NONE) {
         /* Runner heartbeat resumed within the deadline: clear the latched
          * stall + the named blocker so a transient wedge self-heals. */
         atomic_store(&g_runner_contract.stall_reason, SUPERVISOR_STALL_NONE);
-        blocker_clear("supervisor.tick_runner_wedged");
+        runner_blocker_schedule(RUNNER_BLOCKER_CLEAR);
     }
 }
 
@@ -793,13 +984,12 @@ static void sweep_once(void)
         }
     }
 
-    /* Drain / monitor the tick-runner. When a runner thread is active it owns
-     * draining; the sweep just monitors its liveness (no I/O). When there is no
-     * runner (spawn failed, or the ZCL_TESTING synchronous seam) the sweep
-     * drains due ticks INLINE so children are never silently un-driven. */
+    /* Drain / monitor the tick-runner. Production startup requires it. Inline
+     * draining exists only for the threadless synchronous test seam; stop()
+     * cannot turn an in-flight root sweep into a callback runner. */
     if (atomic_load(&g_runner_enabled))
         supervisor_monitor_runner(now);
-    else
+    else if (!atomic_load(&g_thread_handle_set))
         run_due_ticks();
 }
 
@@ -877,29 +1067,71 @@ static void *supervisor_thread_main(void *arg)
 
 /* ── Lifecycle ─────────────────────────────────────────────────────── */
 
+static bool stall_runner_stop_and_join(void)
+{
+    atomic_store(&g_stall_runner_running, false);
+    stall_wake();
+    if (!atomic_load(&g_stall_runner_handle_set))
+        return true;
+    for (;;) {
+        struct timespec deadline;
+        platform_time_realtime_timespec(&deadline);
+        deadline.tv_sec += 2;
+        int rc = platform_thread_join_until(g_stall_runner_thread_id, NULL,
+                                             &deadline);
+        if (rc == 0) {
+            atomic_store(&g_stall_runner_handle_set, false);
+            return true;
+        }
+        if (rc != ETIMEDOUT || !thread_registry_shutdown_requested()) {
+            fprintf(stderr,  // obs-ok:supervisor-stall-runner-join
+                "[supervisor] WARN stall-delivery join rc=%d "
+                "(thread still alive)\n", rc);
+            return false;
+        }
+        fprintf(stderr,  // obs-ok:shutdown-join-progress
+            "[supervisor] shutdown join: stall delivery still draining; "
+            "waiting\n");
+    }
+}
+
 bool supervisor_start(void)
 {
     bool was = atomic_exchange(&g_running, true);
     if (was) return true;        /* idempotent */
-    atomic_store(&g_thread_alive, false);
-
-    pthread_t tid;
-    int rc = thread_registry_spawn("zcl_supervisor",
-                                       supervisor_thread_main, NULL, &tid);
-    if (rc != 0) {
+    if (atomic_load(&g_thread_handle_set) ||
+        atomic_load(&g_runner_handle_set) ||
+        atomic_load(&g_stall_runner_handle_set)) {
         atomic_store(&g_running, false);
-        fprintf(stderr,
-            "[supervisor] FAIL thread_registry_spawn rc=%d\n", rc);
+        fprintf(stderr,  // obs-ok:supervisor-unjoined-worker
+            "[supervisor] FAIL start: a prior worker handle is not joined\n");
         return false;
     }
-    g_thread_id = tid;
-    atomic_store(&g_thread_handle_set, true);
+    atomic_store(&g_thread_alive, false);
+
+    /* Recovery delivery is required: starting the sweep without it would
+     * either lose stalls or force callbacks back onto the keepalive thread. */
+    atomic_store(&g_stall_runner_running, true);
+    pthread_t stid;
+    // thread-supervision-ok:fixed-bounded-delivery-worker-joined-by-supervisor
+    int src = thread_registry_spawn("zcl_supervisor_stall",
+                                    supervisor_stall_runner_main, NULL,
+                                    &stid);
+    if (src != 0) {
+        atomic_store(&g_stall_runner_running, false);
+        atomic_store(&g_running, false);
+        stall_discard_all();
+        fprintf(stderr,  // obs-ok:supervisor-stall-runner-spawn-fail
+            "[supervisor] FAIL stall-delivery spawn rc=%d\n", src);
+        return false;
+    }
+    g_stall_runner_thread_id = stid;
+    atomic_store(&g_stall_runner_handle_set, true);
 
     /* Spawn the dedicated tick-runner. It, not the sweep, executes every
      * child's on_tick. Arm its liveness contract (deadline-monitored inline by
-     * the sweep — see supervisor_monitor_runner). If the spawn fails we leave
-     * g_runner_enabled=false so the sweep drains ticks inline (degraded but
-     * never un-driven); the sweep itself is already up, so the node lives. */
+     * the sweep — see supervisor_monitor_runner). Both callback workers must
+     * exist before the root sweep starts; otherwise startup refuses. */
     liveness_contract_init(&g_runner_contract, "supervisor.tick_runner");
     atomic_store(&g_runner_contract.deadline_secs,
                  (int64_t)SUPERVISOR_TICK_RUNNER_DEADLINE_SECS);
@@ -914,21 +1146,37 @@ bool supervisor_start(void)
     if (rrc != 0) {
         atomic_store(&g_runner_running, false);
         atomic_store(&g_runner_enabled, false);
+        atomic_store(&g_running, false);
+        (void)stall_runner_stop_and_join();
         fprintf(stderr,  // obs-ok:supervisor-tick-runner-spawn-fail
-            "[supervisor] WARN tick-runner spawn rc=%d — sweep drains ticks "
-            "inline (degraded: a slow child tick can freeze the sweep)\n", rrc);
-    } else {
-        g_runner_thread_id = rtid;
-        atomic_store(&g_runner_handle_set, true);
-        atomic_store(&g_runner_enabled, true);
+            "[supervisor] FAIL tick-runner spawn rc=%d\n", rrc);
+        return false;
     }
+    g_runner_thread_id = rtid;
+    atomic_store(&g_runner_handle_set, true);
+    atomic_store(&g_runner_enabled, true);
+
+    pthread_t tid;
+    int rc = thread_registry_spawn("zcl_supervisor",
+                                   supervisor_thread_main, NULL, &tid);
+    if (rc != 0) {
+        supervisor_stop();
+        fprintf(stderr,  // obs-ok:supervisor-root-spawn-fail
+            "[supervisor] FAIL root sweep spawn rc=%d\n", rc);
+        return false;
+    }
+    g_thread_id = tid;
+    atomic_store(&g_thread_handle_set, true);
     return true;
 }
 
 void supervisor_stop(void)
 {
-    if (!atomic_load(&g_running)) return;
     atomic_store(&g_running, false);
+    /* Start no new recovery callbacks during teardown. An already-claimed
+     * callback remains owned by the delivery worker and is joined below. */
+    atomic_store(&g_stall_runner_running, false);
+    stall_wake();
 
     /* Stop the tick-runner first (it may be mid-on_tick). Disable monitoring
      * so a slow drain during teardown doesn't spuriously name the blocker. */
@@ -989,6 +1237,7 @@ void supervisor_stop(void)
                 "[supervisor] shutdown join: in-flight tick still draining; waiting\n");
         }
     }
+    (void)stall_runner_stop_and_join();
 }
 
 void supervisor_set_tick_ms_for_testing(int ms)
@@ -1016,12 +1265,20 @@ void supervisor_reset_for_testing(void)
 {
     /* Stop first so the sweeper isn't iterating while we clear. */
     supervisor_stop();
+    if (atomic_load(&g_thread_handle_set) ||
+        atomic_load(&g_runner_handle_set) ||
+        atomic_load(&g_stall_runner_handle_set)) {
+        fprintf(stderr,  // obs-ok:supervisor-unjoined-worker
+            "[supervisor] FAIL reset: a worker remains unjoined\n");
+        return;
+    }
     pthread_mutex_lock(&g_lock);
     for (int i = 0; i < SUPERVISOR_CAP; i++) g_contracts[i] = NULL;
     for (int i = 0; i < SUPERVISOR_CAP; i++) g_contract_domains[i] = NULL;
     g_contract_count = 0;
     memset(g_domains, 0, sizeof(g_domains));
     g_domain_count = 0;
+    g_stall_runner_active_name[0] = '\0';
     pthread_mutex_unlock(&g_lock);
     atomic_store(&g_tick_ms, 1000);
     atomic_store_explicit(&g_stall_observer, NULL, memory_order_release);
@@ -1031,6 +1288,10 @@ void supervisor_reset_for_testing(void)
     atomic_store(&g_runner_enabled, false);
     atomic_store(&g_runner_contract.stall_reason, SUPERVISOR_STALL_NONE);
     atomic_store(&g_runner_contract.stall_fires, 0u);
+    atomic_store(&g_runner_blocker_action, RUNNER_BLOCKER_NONE);
+    atomic_store(&g_runner_blocker_coalesced, 0u);
+    atomic_store(&g_runner_blocker_discarded, 0u);
+    atomic_store(&g_stall_runner_last_us, 0);
     blocker_clear("supervisor.tick_runner_wedged");
 }
 
@@ -1092,6 +1353,17 @@ const char *supervisor_active_callback_name(void)
     return name;
 }
 
+static const char *supervisor_stall_active_callback_name(void)
+{
+    static _Thread_local char name[SUPERVISOR_NAME_MAX];
+    pthread_mutex_lock(&g_lock);
+    snprintf(name, sizeof(name), "%s",
+             g_stall_runner_active_name[0]
+                 ? g_stall_runner_active_name : "none");
+    pthread_mutex_unlock(&g_lock);
+    return name;
+}
+
 /* ── Introspection ─────────────────────────────────────────────────── */
 
 int supervisor_child_count_total(void)
@@ -1144,6 +1416,12 @@ int supervisor_snapshot_all(struct supervisor_snapshot *out, int max)
         out[n].ticks_run        = atomic_load(&c->ticks_run);
         out[n].idle_ticks       = atomic_load(&c->idle_ticks);
         out[n].stall_fires      = atomic_load(&c->stall_fires);
+        out[n].stall_delivery_pending =
+            atomic_load(&c->stall_delivery_pending) != SUPERVISOR_STALL_NONE;
+        out[n].stall_delivery_coalesced =
+            atomic_load(&c->stall_delivery_coalesced);
+        out[n].stall_delivery_discarded =
+            atomic_load(&c->stall_delivery_discarded);
         out[n].restart_count    = atomic_load(&c->restart_count);
         out[n].restart_policy   = atomic_load(&c->restart_policy);
         out[n].worker_state     = atomic_load(&c->worker_state);
@@ -1176,6 +1454,21 @@ bool supervisor_dump_state_json(struct json_value *out, const char *key)
                       supervisor_tick_runner_last_hb_age_us());
     json_push_kv_int (out, "tick_runner_stall_fires",
                       (int64_t)atomic_load(&g_runner_contract.stall_fires));
+    json_push_kv_bool(out, "stall_delivery_running",
+                      atomic_load(&g_stall_runner_running));
+    int64_t stall_hb = atomic_load(&g_stall_runner_last_us);
+    json_push_kv_int(out, "stall_delivery_last_hb_age_us",
+                     stall_hb > 0
+                         ? platform_time_monotonic_us() - stall_hb : 0);
+    json_push_kv_str(out, "stall_delivery_active_callback",
+                     supervisor_stall_active_callback_name());
+    json_push_kv_bool(out, "runner_blocker_delivery_pending",
+                      atomic_load(&g_runner_blocker_action) !=
+                          RUNNER_BLOCKER_NONE);
+    json_push_kv_int(out, "runner_blocker_delivery_coalesced",
+                     atomic_load(&g_runner_blocker_coalesced));
+    json_push_kv_int(out, "runner_blocker_delivery_discarded",
+                     atomic_load(&g_runner_blocker_discarded));
     json_push_kv_str(out, "active_callback",
                      supervisor_active_callback_name());
     /* Progress-policy debt, at the root where an operator reads it first:
@@ -1282,6 +1575,13 @@ static void push_contract_json(struct json_value *arr,
                       c->progress_exempt_reason);
     json_push_kv_int (&child, "stall_fires",
                       atomic_load(&c->stall_fires));
+    json_push_kv_bool(&child, "stall_delivery_pending",
+                      atomic_load(&c->stall_delivery_pending) !=
+                          SUPERVISOR_STALL_NONE);
+    json_push_kv_int (&child, "stall_delivery_coalesced",
+                      atomic_load(&c->stall_delivery_coalesced));
+    json_push_kv_int (&child, "stall_delivery_discarded",
+                      atomic_load(&c->stall_delivery_discarded));
     json_push_kv_int (&child, "restart_count",
                       atomic_load(&c->restart_count));
     json_push_kv_str (&child, "restart_policy",
