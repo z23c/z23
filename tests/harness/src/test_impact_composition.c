@@ -3755,7 +3755,7 @@ static int test_pw_seed_cold_without_seedables(void)
 static int test_ic_landing_proof_lint_argv(void)
 {
     int failures = 0;
-    TEST("proof lint: a landing root runs windows acceptance; a developer root does not") {
+    TEST("proof lint: a landing root runs every gate; a developer root keeps the fast subset") {
 #if defined(_WIN32)
         ASSERT(true);
 #else
@@ -3775,11 +3775,14 @@ static int test_ic_landing_proof_lint_argv(void)
         ASSERT(strcmp(argv[0], "make") == 0);
         ASSERT(strcmp(argv[1], "--no-print-directory") == 0);
         ASSERT(strcmp(argv[2], jobs) == 0);
-        ASSERT(strcmp(argv[3], "lint-fast") == 0);
+        /* The whole gate set, not the 27-gate fast subset: a red full-lint
+         * gate must fail the landing rather than reach main unseen. */
+        ASSERT(strcmp(argv[3], "lint") == 0);
         ASSERT(strcmp(argv[4], "check-windows-acceptance") == 0);
         ASSERT(argv[5] == NULL);
         ASSERT(fallback_ms == PROOF_LINT_LANDING_MS);
-        ASSERT(strcmp(targets, "lint-fast check-windows-acceptance") == 0);
+        ASSERT(strcmp(targets, "lint check-windows-acceptance") == 0);
+        ASSERT(zcl_dev_proof_test_lint_targets_are_full(targets));
 
         char dev_parent[4096], dev[4096];
         test_make_tmpdir(dev_parent, sizeof(dev_parent), "proof_lint", "dev");
@@ -3791,13 +3794,180 @@ static int test_ic_landing_proof_lint_argv(void)
         ASSERT(zcl_dev_proof_test_lint_argv(dev, jobs, argv, 8, &argc,
                                             &fallback_ms, &targets));
         ASSERT(argc == 4);
+        /* A lane proof is not widened: it still pays the fast subset. */
         ASSERT(strcmp(argv[3], "lint-fast") == 0);
         ASSERT(argv[4] == NULL);
         ASSERT(fallback_ms == PROOF_LINT_DEFAULT_MS);
+        ASSERT(fallback_ms < PROOF_LINT_LANDING_MS);
         ASSERT(strcmp(targets, "lint-fast") == 0);
+        ASSERT(!zcl_dev_proof_test_lint_targets_are_full(targets));
 
         ASSERT(test_rm_rf_recursive(land) == 0);
         ASSERT(test_rm_rf_recursive(dev_parent) == 0);
+#endif
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* Full lint inside a generation reads built artifacts -- the `lint:`
+ * umbrella's own prerequisites and check-capability-closure's nm walk --
+ * so the lint dimension has to be handed the same executables the test
+ * dimension is handed. When the two sets drifted, a landing judged
+ * `make lint` against artifacts the submitting checkout's own lint never
+ * saw. One table serves both dimensions; this pins that it stays one. */
+static int test_ic_proof_lint_and_test_share_admitted_executables(void)
+{
+    int failures = 0;
+    TEST("proof admission: the lint dimension gets exactly the test "
+         "dimension's admitted executables") {
+        const char *sources[8] = {0};
+        const char *targets[8] = {0};
+        size_t count = zcl_dev_proof_test_admitted_executables(sources,
+                                                               targets, 8);
+        ASSERT(count == 3);
+        /* Both dimensions read this one table, so equality is structural:
+         * a second reader of the same table cannot see a different set. */
+        const char *again_sources[8] = {0};
+        const char *again_targets[8] = {0};
+        ASSERT(zcl_dev_proof_test_admitted_executables(again_sources,
+                                                       again_targets, 8) ==
+               count);
+        for (size_t i = 0; i < count; i++) {
+            ASSERT(strcmp(sources[i], again_sources[i]) == 0);
+            ASSERT(strcmp(targets[i], again_targets[i]) == 0);
+        }
+        /* The confined package verifier and build/bin/z23-dev are what
+         * check-capability-closure walks and what Makefile's `lint:` line
+         * names as prerequisites; build/bin/zclassic23 is the alias the
+         * CLI groups exec. Every one is a path under the generation, and
+         * every source is a path under the submitting checkout. */
+        bool has_verifier = false, has_dev_node = false, has_alias = false;
+        for (size_t i = 0; i < count; i++) {
+            ASSERT(strncmp(targets[i], "build/bin/", 10) == 0);
+            ASSERT(strncmp(sources[i], "build/bin/", 10) == 0);
+            ASSERT(strstr(targets[i], "..") == NULL);
+            if (strcmp(targets[i],
+                       "build/bin/zclassic23-package-verify-dev") == 0)
+                has_verifier = true;
+            if (strcmp(targets[i], "build/bin/z23-dev") == 0)
+                has_dev_node = true;
+            if (strcmp(targets[i], "build/bin/zclassic23") == 0)
+                has_alias = true;
+        }
+        ASSERT(has_verifier);
+        ASSERT(has_dev_node);
+        ASSERT(has_alias);
+        /* A caller with no room for the whole set is refused rather than
+         * handed a truncated one. */
+        ASSERT(zcl_dev_proof_test_admitted_executables(sources, targets,
+                                                       count - 1) == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* `git worktree add` copies the submitting checkout's worktree-scoped
+ * core.hooksPath verbatim into the new worktree's own config.worktree.
+ * generation_prepare() materializes its own build/githooks copy, then calls
+ * the seam under test to point the generation's worktree config at that
+ * copy instead. Without the reconfiguration, check-git-hooks-installed
+ * inside the generation compares expected=<generation>/build/githooks
+ * against actual=<submitting checkout>/build/githooks and fails every
+ * landing that runs the full gate set. */
+static int test_ic_generation_hooks_configure_points_at_its_own_copy(void)
+{
+    int failures = 0;
+    TEST("proof generation: hooks reconfiguration points a generation at "
+        "its own build/githooks, not the submitting checkout's") {
+#if defined(_WIN32)
+        ASSERT(true);
+#else
+        char donor[4096], generation[4096], cmd[8192];
+        test_make_tmpdir(donor, sizeof(donor), "gen_hooks", "donor");
+        ASSERT(snprintf(generation, sizeof(generation), "%s-gen", donor) <
+              (int)sizeof(generation));
+
+        /* A real repo with a real worktree-scoped core.hooksPath, exactly
+         * what a submitting checkout arms via `make install-hooks`. */
+        ASSERT(ic_write(donor, "README", "seed\n"));
+        ASSERT((size_t)snprintf(
+            cmd, sizeof(cmd),
+            "cd %s && git init --quiet . && "
+            "git -c user.email=t@t -c user.name=t commit --quiet -m seed "
+            "--allow-empty && "
+            "git config extensions.worktreeConfig true && "
+            "git config --worktree core.hooksPath %s/build/githooks",
+            donor, donor) < sizeof(cmd));
+        ASSERT(system(cmd) == 0);
+
+        /* `git worktree add`: this is what carries the donor's hooksPath
+         * into the new worktree's own config.worktree. */
+        ASSERT((size_t)snprintf(
+            cmd, sizeof(cmd),
+            "git -C %s worktree add --quiet --detach %s >/dev/null 2>&1",
+            donor, generation) < sizeof(cmd));
+        ASSERT(system(cmd) == 0);
+
+        /* Before the fix runs, the generation still names the donor's
+         * hooks -- the defect this test exists for. */
+        char hooks_path[4096];
+        ASSERT(snprintf(hooks_path, sizeof(hooks_path),
+                        "%s/build/githooks", donor) > 0);
+        char before[4096];
+        ASSERT((size_t)snprintf(
+            cmd, sizeof(cmd),
+            "git -C %s config --worktree core.hooksPath", generation) <
+              sizeof(cmd));
+        FILE *p = popen(cmd, "r");
+        ASSERT(p != NULL);
+        ASSERT(fgets(before, sizeof(before), p) != NULL);
+        ASSERT(pclose(p) == 0);
+        size_t before_len = strlen(before);
+        while (before_len > 0 && (before[before_len - 1] == '\n' ||
+                                  before[before_len - 1] == '\r'))
+            before[--before_len] = 0;
+        ASSERT(strcmp(before, hooks_path) == 0);
+
+        /* The generation carries its own build/githooks copy -- exactly
+         * what generation_prepare() materializes before calling the seam
+         * under test. */
+        ASSERT(ic_write(generation, "build/githooks/pre-push", "#!/bin/sh\n"));
+
+        char why[256] = {0};
+        ASSERT(setenv("ZCL_DEVLOOP_TEST_PROCESS", "1", 1) == 0);
+        bool configured = zcl_dev_proof_test_generation_hooks_configure(
+            generation, why, sizeof(why));
+        (void)unsetenv("ZCL_DEVLOOP_TEST_PROCESS");
+        ASSERT(configured);
+
+        char gen_hooks_path[4096];
+        ASSERT(snprintf(gen_hooks_path, sizeof(gen_hooks_path),
+                        "%s/build/githooks", generation) > 0);
+        char after[4096];
+        ASSERT((size_t)snprintf(
+            cmd, sizeof(cmd),
+            "git -C %s config --worktree core.hooksPath", generation) <
+              sizeof(cmd));
+        p = popen(cmd, "r");
+        ASSERT(p != NULL);
+        ASSERT(fgets(after, sizeof(after), p) != NULL);
+        ASSERT(pclose(p) == 0);
+        size_t after_len = strlen(after);
+        while (after_len > 0 && (after[after_len - 1] == '\n' ||
+                                 after[after_len - 1] == '\r'))
+            after[--after_len] = 0;
+        /* The generation is now judged against the hooks it carries, not
+         * the submitting checkout's. */
+        ASSERT(strcmp(after, gen_hooks_path) == 0);
+        ASSERT(strcmp(after, hooks_path) != 0);
+
+        ASSERT((size_t)snprintf(
+            cmd, sizeof(cmd),
+            "git -C %s worktree remove --force %s >/dev/null 2>&1", donor,
+            generation) < sizeof(cmd));
+        (void)system(cmd);
+        ASSERT(test_rm_rf_recursive(donor) == 0);
 #endif
         PASS();
     } _test_next:;
@@ -3847,6 +4017,8 @@ int test_impact_composition(void)
     failures += test_ic_fast_sync_splits_keep_proof_lane();
     failures += test_ic_merkle_verifier_selects_proof_lane();
     failures += test_ic_landing_proof_lint_argv();
+    failures += test_ic_proof_lint_and_test_share_admitted_executables();
+    failures += test_ic_generation_hooks_configure_points_at_its_own_copy();
     failures += test_ic_proof_budget_grows_with_groups();
     failures += test_ic_proof_budget_learns_from_this_checkout();
     failures += test_ic_proof_ceiling_env_raises_only();
