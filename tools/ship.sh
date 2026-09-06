@@ -458,14 +458,16 @@ if [ "${1:-}" = "--selftest" ] || [ "${1:-}" = "--selftest-dev-guard" ]; then
              "$test_tmp/tor-missing-one/vendor/tor/src/ext/ed25519/donna" \
              "$test_tmp/tor-missing-one/vendor/tor/src/ext/ed25519/ref10" \
              "$test_tmp/tor-missing-one/vendor/tor/src/ext/keccak-tiny"
-    touch "$test_tmp/tor-present/vendor/tor/libtor.a" \
-          "$test_tmp/tor-present/vendor/tor/src/ext/ed25519/donna/libed25519_donna.a" \
-          "$test_tmp/tor-present/vendor/tor/src/ext/ed25519/ref10/libed25519_ref10.a" \
-          "$test_tmp/tor-present/vendor/tor/src/ext/keccak-tiny/libkeccak-tiny.a"
+    # An empty file is not an archive to the verifier, so these fixtures need
+    # real bytes, not just existence.
+    printf 'real bytes\n' >"$test_tmp/tor-present/vendor/tor/libtor.a"
+    printf 'real bytes\n' >"$test_tmp/tor-present/vendor/tor/src/ext/ed25519/donna/libed25519_donna.a"
+    printf 'real bytes\n' >"$test_tmp/tor-present/vendor/tor/src/ext/ed25519/ref10/libed25519_ref10.a"
+    printf 'real bytes\n' >"$test_tmp/tor-present/vendor/tor/src/ext/keccak-tiny/libkeccak-tiny.a"
     # Three of four: proves the check does not stop at libtor.a.
-    touch "$test_tmp/tor-missing-one/vendor/tor/libtor.a" \
-          "$test_tmp/tor-missing-one/vendor/tor/src/ext/ed25519/donna/libed25519_donna.a" \
-          "$test_tmp/tor-missing-one/vendor/tor/src/ext/ed25519/ref10/libed25519_ref10.a"
+    printf 'real bytes\n' >"$test_tmp/tor-missing-one/vendor/tor/libtor.a"
+    printf 'real bytes\n' >"$test_tmp/tor-missing-one/vendor/tor/src/ext/ed25519/donna/libed25519_donna.a"
+    printf 'real bytes\n' >"$test_tmp/tor-missing-one/vendor/tor/src/ext/ed25519/ref10/libed25519_ref10.a"
     # Existence alone is no longer the whole check: a fourth fixture has all
     # four archives but a provenance manifest that does not match their
     # bytes -- the exact "stale libtor.a" case ship_checkout_has_real_tor_
