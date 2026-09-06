@@ -92,6 +92,7 @@
 #endif
 
 #include "command/native_command.h"
+#include "command/native_dev_land_regen.h"
 #include "command/native_devagent.h"
 #include "dependency_links.h"
 
@@ -559,7 +560,16 @@ static bool dl_worktree_ok(const char *wt)
 }
 
 /* state:   queued | inflight | landed | failed | conflict | cancelled
- * phase:   "" | rebase | prebuild | prove | push  (meaningful when inflight) */
+ * phase:   "" | rebase | regen | prebuild | prove | push  (meaningful when
+ *          inflight). "regen" is native_dev_land_regen.c's unconditional
+ *          post-rebase pass over the generated-doc targets (capability
+ *          inventory, executor routing, doc-counts) — separate from the
+ *          rebase's own conflict-only auto-resolve of the same artifacts
+ *          (see "rebase conflicts on the artifacts every train
+ *          regenerates" below), which fires only when a rebase conflicts
+ *          on them. A regen commit it makes is folded into `local`: this
+ *          row schema gains no separate field for it, because `local` is
+ *          already "the tip everything downstream proves and pushes". */
 struct dl_row {
     long long seq;
     char ts[64];
@@ -3505,6 +3515,65 @@ static bool dl_already_landed(const struct dl_dirs *d, struct dl_row *row)
     return true;
 }
 
+/* Run the unconditional post-rebase regen phase (native_dev_land_regen.c)
+ * and fold its outcome into `row`. Returns true when step should continue
+ * to prebuild; false when this already recorded and replied a terminal
+ * "failed" outcome, mirroring every other phase's failure arm in
+ * dl_step_start() below. */
+static bool dl_step_regen(const struct dl_dirs *d, struct dl_row *row,
+                          struct zcl_command_reply *reply)
+{
+    char regen_head[80] = { 0 }, regen_why[512] = { 0 };
+    char *log;
+    int rc;
+    (void)snprintf(row->phase, sizeof(row->phase), "regen");
+    log = (char *)zcl_malloc(DL_LOG_CAP, "dev.land.regen.log");
+    rc = log ? zcl_dev_land_regen_phase(d->wt, row->tip, regen_head,
+                                        sizeof(regen_head), log, DL_LOG_CAP,
+                                        regen_why, sizeof(regen_why))
+             : -1;
+    if (log) {
+        dl_log(row, log);
+        free(log);
+    } else if (!regen_why[0]) {
+        (void)snprintf(regen_why, sizeof(regen_why), "%s",
+                      "out of memory preparing the regen transcript");
+    }
+    if (rc < 0) {
+        (void)snprintf(row->state, sizeof(row->state), "failed");
+        (void)snprintf(row->dimension, sizeof(row->dimension), "regen");
+        (void)snprintf(row->detail, sizeof(row->detail), "%s", regen_why);
+        dl_log(row, regen_why);
+        dl_log(row, "\n");
+        if (dl_commit_or_report(d, row, true, reply, "failed"))
+            dl_step_reply(reply, row, "failed");
+        return false;
+    }
+    if (dl_sha_ok(regen_head))
+        (void)snprintf(row->local, sizeof(row->local), "%s", regen_head);
+    return true;
+}
+
+/* After a successful rebase, log any regeneration note next to the attempt
+ * log and run the unconditional post-rebase regen phase. Returns true when
+ * dl_step_start() should continue on to prebuild; false when the regen phase
+ * itself already recorded and replied a terminal "failed" outcome. */
+static bool dl_step_after_rebase(const struct dl_dirs *d, struct dl_row *row,
+                                 struct zcl_command_reply *reply,
+                                 const char *regen_note)
+{
+    /* The rebase settled a conflict on the generated artifacts by
+     * regenerating them, which put a commit on the tip that the submitter
+     * never wrote. Say so -- in the row and in the attempt log -- rather
+     * than presenting a rewritten tree as an ordinary rebase. */
+    if (regen_note[0]) {
+        (void)snprintf(row->detail, sizeof(row->detail), "%s", regen_note);
+        dl_log(row, regen_note);
+        dl_log(row, "\n");
+    }
+    return dl_step_regen(d, row, reply);
+}
+
 static void dl_step_start(const struct dl_dirs *d, struct dl_row *row,
                           struct zcl_command_reply *reply)
 {
@@ -3560,15 +3629,8 @@ static void dl_step_start(const struct dl_dirs *d, struct dl_row *row,
             dl_step_reply(reply, row, "failed");
         return;
     }
-    /* The rebase settled a conflict on the generated artifacts by
-     * regenerating them, which put a commit on the tip that the submitter
-     * never wrote. Say so — in the row and in the attempt log — rather
-     * than presenting a rewritten tree as an ordinary rebase. */
-    if (regen_note[0]) {
-        (void)snprintf(row->detail, sizeof(row->detail), "%s", regen_note);
-        dl_log(row, regen_note);
-        dl_log(row, "\n");
-    }
+    if (!dl_step_after_rebase(d, row, reply, regen_note))
+        return;
     /* The lint pass is what the proof would discover last and cheapest to
      * discover first. The proof stub skips it: a test of this queue is not
      * a test of the lint suite. */

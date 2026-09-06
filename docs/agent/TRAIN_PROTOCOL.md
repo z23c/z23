@@ -142,6 +142,37 @@ The table is closed. A conflict touching any other path — even alongside
 these — stays an ordinary conflict, reported exactly as before, because
 nothing mechanical can settle it.
 
+### The regen phase (staleness that never conflicted)
+
+The conflict-only auto-resolve above only fires when a rebase actually
+conflicts on a generated artifact — the rare case. The common case is a tip
+that rebases cleanly onto origin/main and still leaves those artifacts as
+stale as the submitter's own checkout was, which used to cost every train a
+hand-made "Regenerate generated docs after ..." commit. `dev land` closes
+that gap itself: after every successful rebase, conflicted or not, it runs a
+`regen` phase (`tools/command/native_dev_land_regen.c`, called from one site
+in `dl_step_start()`) between `rebase` and `prebuild` — `dev land status`
+shows `phase=regen` while it runs.
+
+The phase runs, in order, `make docs-capability-inventory`,
+`make docs-executor-routing` and `make fix-doc-counts` in the landing
+worktree — the same three generators the conflict auto-resolve above uses,
+run through `make` only, the same process rule as the rest of this leaf —
+then diffs the one tracked path each target owns
+(`docs/CAPABILITY_INVENTORY.jsonl`, `docs/agent/EXECUTOR_HEURISTICS.md`,
+`docs/CODEBASE_MAP.md`). If nothing changed, nothing is committed and the
+row's tip is untouched. If something changed, it commits exactly those
+paths — signed by ambient `commit.gpgsign` configuration, the same as the
+conflict auto-resolve's commit — with the subject `Regenerate generated docs
+after <the submission's tip commit subject, truncated to 60 bytes>`. The row
+schema gains no separate field for this commit: `local` already names "the
+tip everything downstream proves and pushes", and a regen commit on top of
+the rebased tip is exactly that field's job, so the proof that follows runs
+on the regen'd tip automatically. If a generator or the diff/commit step
+itself fails, the row fails with `dimension=regen` and the first actionable
+line from the failing target's output — never a landing on a tree a
+generator refused to reproduce.
+
 ### vendor/tor in the landing worktree
 
 The proof's generation copies the vendored Tor archives out of the landing

@@ -690,6 +690,196 @@ static void dlx_land_wt(char *out, size_t cap)
     (void)snprintf(out, cap, "%s/wt", land);
 }
 
+/* `git add -A` then commit whatever is staged — dlx_commit() only ever
+ * writes and commits ONE file; the docregen rig below needs a Makefile
+ * plus three tracked doc files landing in a single seed commit. */
+static bool dlx_commit_all(const char *dir, const char *name, char out[64])
+{
+    const char *add[] = { "add", "-A", NULL };
+    const char *commit[] = { "-c", "user.name=land",
+                             "-c", "user.email=land@z23.invalid",
+                             "commit", "--quiet", "--no-verify",
+                             "--no-gpg-sign", "-m", name, NULL };
+    const char *head[] = { "rev-parse", "HEAD", NULL };
+    if (dlx_git(dir, add) != 0)
+        return false;
+    if (dlx_git(dir, commit) != 0)
+        return false;
+    return dlx_git_out(dir, head, out, 64) == 0 && strlen(out) == 40;
+}
+
+/* A rig carrying a real (but trivial) Makefile with the three targets
+ * native_dev_land_regen.c's regen phase runs after every successful
+ * rebase (docs-capability-inventory, docs-executor-routing,
+ * fix-doc-counts), plus the one tracked doc file each target owns. The
+ * three `*_recipe` strings are literal tab-indented Makefile recipe lines
+ * (e.g. "@:" for a no-op, or a shell one-liner that dirties or refuses),
+ * exercised through the SAME code path as a real landing worktree: the
+ * regen phase itself carries no test-only stub, it just finds this
+ * Makefile absent everywhere else and present here (see
+ * native_dev_land_regen.c's TEST SEAM comment). */
+static bool dlx_rig_make_docregen(struct dlx_rig *rig, const char *tag,
+                                  const char *cap_recipe,
+                                  const char *routing_recipe,
+                                  const char *counts_recipe)
+{
+    char base[512], makefile_body[1024];
+    const char *init_bare[] = { "init", "--quiet", "--bare",
+                                "--initial-branch=main", rig->bare, NULL };
+    const char *clone[] = { "clone", "--quiet", rig->bare, rig->clone,
+                            NULL };
+    const char *push[] = { "push", "--quiet", "origin", "HEAD:main", NULL };
+    const char *fetch[] = { "fetch", "--quiet", "origin", NULL };
+    char seed[64];
+    test_make_tmpdir(base, sizeof(base), "dev_land", tag);
+    (void)snprintf(rig->bare, sizeof(rig->bare), "%s/origin.git", base);
+    (void)snprintf(rig->clone, sizeof(rig->clone), "%s/clone", base);
+    if (dlx_git(NULL, init_bare) != 0)
+        return false;
+    if (dlx_git(NULL, clone) != 0)
+        return false;
+    if ((size_t)snprintf(makefile_body, sizeof(makefile_body),
+                         "docs-capability-inventory:\n\t%s\n"
+                         "docs-executor-routing:\n\t%s\n"
+                         "fix-doc-counts:\n\t%s\n",
+                         cap_recipe, routing_recipe, counts_recipe) >=
+            sizeof(makefile_body))
+        return false;
+    if (!dlx_write_dep(rig->clone, "Makefile", makefile_body))
+        return false;
+    if (!dlx_write_dep(rig->clone, "docs/CAPABILITY_INVENTORY.jsonl",
+                       "orig\n") ||
+        !dlx_write_dep(rig->clone, "docs/agent/EXECUTOR_HEURISTICS.md",
+                       "orig\n") ||
+        !dlx_write_dep(rig->clone, "docs/CODEBASE_MAP.md", "orig\n"))
+        return false;
+    if (!dlx_commit_all(rig->clone, "seed", seed))
+        return false;
+    if (dlx_git(rig->clone, push) != 0)
+        return false;
+    if (dlx_git(rig->clone, fetch) != 0)
+        return false;
+    if (!dlx_commit(rig->clone, "change.txt", "one\n", rig->tip))
+        return false;
+    return true;
+}
+
+/* The regen phase commits generated-doc drift after a clean rebase and
+ * re-requests proof for the new tip. */
+static int test_dev_land_regen_commits_drift(void)
+{
+    int failures = 0;
+    TEST("land: the regen phase commits generated-doc drift after a clean "
+        "rebase and re-requests proof for the new tip") {
+        struct dlx_rig rig;
+        struct dlx_call c;
+        char landwt[1300], subject[512], head[64];
+        const char *log_subject[] = { "log", "-1", "--pretty=%s", NULL };
+        const char *head_args[] = { "rev-parse", "HEAD", NULL };
+        dlx_isolate("regendocs_a");
+        ASSERT(dlx_rig_make_docregen(
+            &rig, "regendocs_a_rig",
+            "@printf 'regen\\n' >> docs/CAPABILITY_INVENTORY.jsonl", "@:",
+            "@:"));
+        setenv("ZCL_LAND_PROOF_STUB", "running", 1);
+        setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
+        dlx_submit(&c, &rig, rig.tip);
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        dlx_end(&c);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        /* Past the regen phase and into the proof: a dirtied generated
+         * artifact never became a terminal state. */
+        ASSERT(strcmp(dlx_str(&c, "state"), "started") == 0);
+        dlx_end(&c);
+        dlx_land_wt(landwt, sizeof(landwt));
+        ASSERT(dlx_git_out(landwt, log_subject, subject, sizeof(subject)) ==
+              0);
+        ASSERT(strcmp(subject, "Regenerate generated docs after "
+                              "change.txt") == 0);
+        /* The proof is requested for the NEW tip, not the pre-regen one:
+         * the regen commit sits on top of it. */
+        ASSERT(dlx_git_out(landwt, head_args, head, sizeof(head)) == 0);
+        ASSERT(strcmp(head, rig.tip) != 0);
+        dlx_restore();
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* The regen phase makes no commit when the doc generators change nothing. */
+static int test_dev_land_regen_no_commit_when_clean(void)
+{
+    int failures = 0;
+    TEST("land: the regen phase makes no commit when the doc generators "
+        "change nothing") {
+        struct dlx_rig rig;
+        struct dlx_call c;
+        char landwt[1300], subject[512], head[64];
+        const char *log_subject[] = { "log", "-1", "--pretty=%s", NULL };
+        const char *head_args[] = { "rev-parse", "HEAD", NULL };
+        dlx_isolate("regendocs_b");
+        ASSERT(dlx_rig_make_docregen(&rig, "regendocs_b_rig", "@:", "@:",
+                                     "@:"));
+        setenv("ZCL_LAND_PROOF_STUB", "running", 1);
+        setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
+        dlx_submit(&c, &rig, rig.tip);
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        dlx_end(&c);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        ASSERT(strcmp(dlx_str(&c, "state"), "started") == 0);
+        dlx_end(&c);
+        dlx_land_wt(landwt, sizeof(landwt));
+        /* No new commit: the tip is exactly the one submitted. */
+        ASSERT(dlx_git_out(landwt, head_args, head, sizeof(head)) == 0);
+        ASSERT(strcmp(head, rig.tip) == 0);
+        ASSERT(dlx_git_out(landwt, log_subject, subject, sizeof(subject)) ==
+              0);
+        ASSERT(strcmp(subject, "change.txt") == 0);
+        dlx_restore();
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* A failing regen target fails the row by name, with no commit made. */
+static int test_dev_land_regen_failure_fails_row(void)
+{
+    int failures = 0;
+    TEST("land: a failing regen target fails the row by name, with no "
+        "commit made") {
+        struct dlx_rig rig;
+        struct dlx_call c;
+        dlx_isolate("regendocs_c");
+        ASSERT(dlx_rig_make_docregen(
+            &rig, "regendocs_c_rig",
+            "@echo 'FAIL: synthetic regen failure' >&2; exit 1", "@:",
+            "@:"));
+        setenv("ZCL_LAND_PROOF_STUB", "running", 1);
+        setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
+        dlx_submit(&c, &rig, rig.tip);
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        dlx_end(&c);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        ASSERT(strcmp(dlx_str(&c, "state"), "failed") == 0);
+        ASSERT(strcmp(dlx_str(&c, "dimension"), "regen") == 0);
+        ASSERT(strstr(dlx_str(&c, "detail"),
+                      "FAIL: synthetic regen failure") != NULL);
+        dlx_end(&c);
+        dlx_restore();
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 #endif /* !defined(_WIN32) */
 
 int test_dev_land(void);
@@ -2390,6 +2580,10 @@ int test_dev_land(void)
         dlx_restore();
         PASS();
     }
+
+    failures += test_dev_land_regen_commits_drift();
+    failures += test_dev_land_regen_no_commit_when_clean();
+    failures += test_dev_land_regen_failure_fails_row();
 
 #endif /* !defined(_WIN32) */
 
