@@ -70,3 +70,8 @@
 
 #define FLEET_BOARD_SLUG_FIELDS \
     ZCL_MODEL_TEXT(slug, slug)
+
+/* The room index's own projection: one page of distinct public-visible room
+ * names never reads a post body. */
+#define FLEET_BOARD_ROOM_FIELDS \
+    ZCL_MODEL_TEXT(room, room)

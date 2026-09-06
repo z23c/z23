@@ -114,6 +114,16 @@ SITE_ROUTE(zcode, "/zcode", zcode_site_handle_request, DATADIR,
            "on-node ZCODE library.",
            NULL, NULL)
 
+/* Fleet board — the signed public discussion rooms every full node carries
+ * (ZRC-0004/ZRC-0012). Read-only: no POST surface. The room index and each
+ * room page render only non-fleet rows from the node's own
+ * fleet_board_posts store, so a fleet-private post's existence never reaches
+ * a page. Not in any nav: the rooms are a machine-facing surface first. */
+SITE_ROUTE(board, "/board", board_site_handle_request, DATADIR,
+           0, ZCL_SITE_COST_CHEAP, "",
+           NONE, NONE, NONE,
+           NULL, NULL, NULL, NULL, NULL, NULL)
+
 /* Metaverse — landing, sovereign property catalog, published spaces, and
  * the Living Commons (SIMULATION). Read-only: no POST surface. */
 SITE_ROUTE(metaverse, "/metaverse", metaverse_site_handle_request, DATADIR,

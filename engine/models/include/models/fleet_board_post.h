@@ -28,6 +28,8 @@ enum {
     FLEET_BOARD_STORE_MAX_BYTES = 16 * 1024 * 1024,
     /* One list/inventory page. */
     FLEET_BOARD_LIST_MAX = 256,
+    /* Distinct public rooms on one index page. */
+    FLEET_BOARD_ROOM_LIST_MAX = 64,
 };
 
 struct db_fleet_board_post {
@@ -139,6 +141,15 @@ int db_fleet_board_ids_before(struct node_db *ndb, int64_t now,
                               int64_t *last_seq_out);
 
 bool db_fleet_board_have(struct node_db *ndb, const uint8_t id[32]);
+
+/* The distinct rooms a public reader can reach, for the read-only /board
+ * pages: every room named by a non-fleet post, with legacy rows' empty
+ * signed room reported as the default room. Fleet-scoped posts never
+ * appear — even a room index must not reveal that they exist. Returns the
+ * number of rooms written, at most `max` (capped at 64). */
+int db_fleet_board_room_list(struct node_db *ndb,
+                             char (*rooms)[FLEET_BOARD_ROOM_MAX + 1],
+                             size_t max);
 
 /* Re-walk the stored chain in seq order and confirm every chain_hash is the
  * step its predecessor implies. Local integrity only. */

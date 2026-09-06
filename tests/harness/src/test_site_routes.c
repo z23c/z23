@@ -9,8 +9,8 @@
  * tables (core/modules/net/src/site_routes.c) or calls the real classifier:
  *
  *   1. Dispatch order: the def rows, in order, are exactly the pinned
- *      (id, prefix) list — store, /n/, /names, zcode, metaverse, blog,
- *      yardsale, /market/chunk, /observation.json, /install.sh.
+ *      (id, prefix) list — store, /n/, /names, zcode, board, metaverse,
+ *      blog, yardsale, /market/chunk, /observation.json, /install.sh.
  *   2. Every row's cost class is a valid onion_route_class, and the
  *      per-row classes are pinned at their current values (names_gateway
  *      EXPENSIVE with the "name-gateway" puzzle key, everything else
@@ -61,6 +61,7 @@ static const struct { const char *id; const char *prefix; } k_rows[] = {
     { "names_gateway", "/n/"           },
     { "names",         "/names"        },
     { "zcode",         "/zcode"        },
+    { "board",         "/board"        },
     { "metaverse",     "/metaverse"    },
     { "blog",          "/blog"         },
     { "yardsale",      "/yardsale"     },
@@ -218,7 +219,7 @@ int test_site_routes(void)
     for (size_t i = 0; i < K_ROW_COUNT && order_ok; i++)
         order_ok = strcmp(g_zcl_site_routes[i].id, k_rows[i].id) == 0 &&
                    strcmp(g_zcl_site_routes[i].prefix, k_rows[i].prefix) == 0;
-    SR_CHECK("dispatch order pinned (store,/n/,/names,zcode,metaverse,"
+    SR_CHECK("dispatch order pinned (store,/n/,/names,zcode,board,metaverse,"
              "blog,yardsale,/market/chunk,/observation.json,/install.sh)",
              order_ok);
 

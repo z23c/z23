@@ -136,6 +136,19 @@ static const enum qb_column k_board_slug_cols[] = {
 ZCL_MODEL_READ_ROW_FN(board_read_slug_ref, struct fleet_board_slug_ref,
                       FLEET_BOARD_SLUG_FIELDS)
 
+struct fleet_board_room_ref {
+    char room[FLEET_BOARD_ROOM_MAX + 1];
+};
+#define FB_QB_ROOM_COLUMN(kind, col, member, extra) \
+    ZCL_MF_CAT(QB_C_fleet_board_posts_, col),
+static const enum qb_column k_board_room_cols[] = {
+    ZCL_MODEL_EXPAND(FB_QB_ROOM_COLUMN, FLEET_BOARD_ROOM_FIELDS)
+};
+#define BOARD_ROOM_NCOLS \
+    (sizeof(k_board_room_cols) / sizeof(k_board_room_cols[0]))
+ZCL_MODEL_READ_ROW_FN(board_read_room_ref, struct fleet_board_room_ref,
+                      FLEET_BOARD_ROOM_FIELDS)
+
 bool db_fleet_board_post_validate(const struct db_fleet_board_post *record,
                                   struct ar_errors *errors)
 {
@@ -212,6 +225,48 @@ bool db_fleet_board_have(struct node_db *ndb, const uint8_t id[32])
     qb_select_one(&q);
     qb_where_blob(&q, QB_C_fleet_board_posts_id, QB_EQ, id, 32);
     QB_QUERY_EXISTS(ndb, &q, s);
+}
+
+int db_fleet_board_room_list(struct node_db *ndb,
+                             char (*rooms)[FLEET_BOARD_ROOM_MAX + 1],
+                             size_t max)
+{
+    if (!ndb || !ndb->open || !rooms || max == 0)
+        return 0;
+    if (max > FLEET_BOARD_ROOM_LIST_MAX)
+        max = FLEET_BOARD_ROOM_LIST_MAX;
+    struct qb q;
+    qb_select(&q, QB_T_fleet_board_posts);
+    qb_select_columns(&q, k_board_room_cols, BOARD_ROOM_NCOLS);
+    qb_where_int(&q, QB_C_fleet_board_posts_scope, QB_NE,
+                 FLEET_BOARD_SCOPE_FLEET);
+    qb_order_by(&q, QB_C_fleet_board_posts_room, QB_ASC);
+    sqlite3_stmt *s = NULL;
+    size_t count = 0;
+    if (!QB_PREPARE(ndb, &q, s))
+        return 0;
+    /* The walk is bounded by the store's own post ceiling. The raw column is
+     * ordered, but the effective name maps '' onto the default room, so
+     * duplicates are not guaranteed adjacent and the dedupe is a scan. The
+     * single-column read is not signature-verified; it is an advisory index,
+     * and the room page itself lists only fully re-verified rows. */
+    while (AR_STEP_ROW(s) && count < max) {
+        struct fleet_board_room_ref row;
+        board_read_room_ref(&row, s);
+        const char *name =
+            row.room[0] ? row.room : FLEET_BOARD_ROOM_DEFAULT;
+        bool seen = false;
+        for (size_t i = 0; i < count; i++)
+            if (strcmp(rooms[i], name) == 0) {
+                seen = true;
+                break;
+            }
+        if (!seen)
+            (void)snprintf(rooms[count++], FLEET_BOARD_ROOM_MAX + 1, "%s",
+                           name);
+    }
+    sqlite3_finalize(s);
+    return (int)count;
 }
 
 /* The AR-lifecycle insert. Split out so ingest can keep its decision logic
