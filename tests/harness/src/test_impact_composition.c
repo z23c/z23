@@ -2383,6 +2383,7 @@ static int test_ic_proof_dependency_crosses_filesystems(void)
         ASSERT(stat(same, &same_st) == 0);
         ASSERT(same_st.st_dev == source_st.st_dev);
         ASSERT(same_st.st_ino != source_st.st_ino);
+        ASSERT(same_st.st_nlink == 1);
         ASSERT((same_st.st_mode & 07777) == (source_st.st_mode & 07777));
         ASSERT(same_st.st_mtim.tv_sec == source_st.st_mtim.tv_sec);
         ASSERT(same_st.st_mtim.tv_nsec == source_st.st_mtim.tv_nsec);
@@ -2397,6 +2398,7 @@ static int test_ic_proof_dependency_crosses_filesystems(void)
         ASSERT(stat(second, &second_st) == 0);
         ASSERT(second_st.st_ino != source_st.st_ino);
         ASSERT(second_st.st_ino != same_st.st_ino);
+        ASSERT(second_st.st_nlink == 1);
         ASSERT((second_st.st_mode & 07777) == (source_st.st_mode & 07777));
         ASSERT(second_st.st_mtim.tv_sec == source_st.st_mtim.tv_sec);
         ASSERT(second_st.st_mtim.tv_nsec == source_st.st_mtim.tv_nsec);
