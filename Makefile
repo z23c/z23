@@ -5295,7 +5295,7 @@ EQUIHASH_FACT_TOOL = $(BIN_DIR)/equihash-params-fact
 LINTC_TOOL = $(BIN_DIR)/z23-lint
 LINTC_CFLAGS = -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
     -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS)
-LINTC_SRCS = tools/lint/lintc/lib.c tools/lint/lintc/gate_boot_wiring.c tools/lint/lintc/gate_hotswap_manifests.c \
+LINTC_SRCS = tools/lint/lintc/lib.c tools/lint/lintc/gate_boot_wiring.c tools/lint/lintc/gate_hotswap_manifests.c tools/lint/lintc/gate_source_patterns.c \
     tools/lint/lintc/gate_pattern_small.c \
     tools/lint/lintc/gate_tree_walk.c tools/lint/lintc/gate_git_scan_a.c \
     tools/lint/lintc/gate_git_scan_b.c tools/lint/lintc/gate_landing_proof.c \
@@ -12118,7 +12118,7 @@ check-macos-acceptance:
 # struct zcl_result fences off NEW silent discards but cannot excavate the
 # existing ones. This is the excavator: a shrink-only ratchet over the cast
 # discards that remain. Fix one with ZCL_IGNORE_RESULT(expr, "reason").
-check-result-discard:
+check-result-discard: $(LINTC_TOOL)
 	@echo "══ LINT: zcl_result cast-discard (RATCHET) ══"
 	@ZCL_LINT_MODE=FAIL ./tools/lint/check_result_discard.sh
 

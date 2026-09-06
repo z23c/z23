@@ -83,6 +83,8 @@ static const struct lint_gate k_gates[] = {
       check_hotswap_eligible_scope_selftest },
     { "check-hotswap-static-state", check_hotswap_static_state_run,
       check_hotswap_static_state_selftest },
+    { "check-result-discard", check_result_discard_run,
+      check_result_discard_selftest },
 };
 
 int main(int argc, char **argv)
