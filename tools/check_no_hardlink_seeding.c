@@ -5,8 +5,8 @@
 #define _POSIX_C_SOURCE 200809L
 #endif
 
+#include "dev/dependency_links.h"
 #include "platform/directory_compat.h"
-#include "platform/file_metadata.h"
 
 #include <stdbool.h>
 #include <stdio.h>
@@ -24,143 +24,46 @@
 #include <unistd.h>
 #endif
 
-#define GUARD_PATH_MAX 4096u
-#define GUARD_DEPTH_MAX 32u
-#define GUARD_ENTRIES_MAX 50000u
-
-struct guard_scan {
-    size_t entries;
-    size_t linked;
-};
-
-static bool path_join(char out[GUARD_PATH_MAX], const char *left,
+static bool path_join(char out[ZCL_DEPENDENCY_LINK_PATH_MAX], const char *left,
                       const char *right)
 {
     const size_t n = strlen(left);
-    const int wrote = snprintf(out, GUARD_PATH_MAX, "%s%s%s", left,
-                               n && left[n - 1] == '/' ? "" : "/", right);
-    return wrote > 0 && (size_t)wrote < GUARD_PATH_MAX;
+    const int wrote = snprintf(out, ZCL_DEPENDENCY_LINK_PATH_MAX, "%s%s%s",
+                               left, n && left[n - 1] == '/' ? "" : "/",
+                               right);
+    return wrote > 0 && (size_t)wrote < ZCL_DEPENDENCY_LINK_PATH_MAX;
 }
 
-static bool scan_directory(const char *path, unsigned depth,
-                           struct guard_scan *scan)
+static bool report_link(const char *relative_path, uint64_t links,
+                        void *context)
 {
-    if (depth > GUARD_DEPTH_MAX) {
-        fprintf(stderr, "hardlink-seeding: traversal depth exceeded at %s\n",
-                path);
-        return false;
-    }
-    if (platform_directory_probe_real(path) != PLATFORM_DIRECTORY_PROBE_OK) {
-        fprintf(stderr, "hardlink-seeding: refusing non-real directory %s\n",
-                path);
-        return false;
-    }
-
-    struct platform_directory_list directories = {0}, files = {0};
-    if (!platform_directory_list_children_sorted(path, &directories, &files)) {
-        fprintf(stderr, "hardlink-seeding: cannot inspect directory %s\n",
-                path);
-        return false;
-    }
-    bool ok = true;
-    for (size_t i = 0; ok && i < files.count; i++) {
-        if (++scan->entries > GUARD_ENTRIES_MAX) {
-            fprintf(stderr, "hardlink-seeding: entry limit exceeded\n");
-            ok = false;
-            break;
-        }
-        char child[GUARD_PATH_MAX];
-        struct platform_file_metadata metadata = {0};
-        if (!path_join(child, path, files.entries[i].name) ||
-            platform_file_metadata_read(child, &metadata) !=
-                PLATFORM_FILE_METADATA_OK) {
-            fprintf(stderr, "hardlink-seeding: cannot inspect file under %s\n",
-                    path);
-            ok = false;
-            break;
-        }
-        if (metadata.links > 1) {
-            fprintf(stderr,
-                    "hardlink-seeding: multiply-linked dependency %s "
-                    "(links=%llu)\n", child,
-                    (unsigned long long)metadata.links);
-            scan->linked++;
-        }
-    }
-    for (size_t i = 0; ok && i < directories.count; i++) {
-        if (++scan->entries > GUARD_ENTRIES_MAX) {
-            fprintf(stderr, "hardlink-seeding: entry limit exceeded\n");
-            ok = false;
-            break;
-        }
-        char child[GUARD_PATH_MAX];
-        if (!path_join(child, path, directories.entries[i].name) ||
-            !scan_directory(child, depth + 1u, scan))
-            ok = false;
-    }
-    platform_directory_list_free(&files);
-    platform_directory_list_free(&directories);
-    return ok;
-}
-
-static bool scan_optional_root(const char *root, const char *relative,
-                               struct guard_scan *scan)
-{
-    char path[GUARD_PATH_MAX];
-    if (!path_join(path, root, relative)) {
-        fprintf(stderr, "hardlink-seeding: root path is too long\n");
-        return false;
-    }
-    const enum platform_directory_probe_result probe =
-        platform_directory_probe_real(path);
-    if (probe == PLATFORM_DIRECTORY_PROBE_MISSING)
-        return true;
-    if (probe != PLATFORM_DIRECTORY_PROBE_OK) {
-        fprintf(stderr, "hardlink-seeding: refusing dependency root %s\n",
-                path);
-        return false;
-    }
-    return scan_directory(path, 0, scan);
+    (void)context;
+    fprintf(stderr,
+            "hardlink-seeding: multiply-linked dependency %s (links=%llu)\n",
+            relative_path, (unsigned long long)links);
+    return true;
 }
 
 static bool check_root(const char *root)
 {
-    struct guard_scan scan = {0};
-    if (!root || !root[0] ||
-        platform_directory_probe_real(root) != PLATFORM_DIRECTORY_PROBE_OK) {
-        fprintf(stderr, "hardlink-seeding: refusing non-real worktree root\n");
+    struct zcl_dependency_link_stats stats;
+    char why[ZCL_DEPENDENCY_LINK_PATH_MAX];
+    if (!zcl_dependency_links_scan(root, report_link, NULL, &stats, why,
+                                   sizeof(why))) {
+        fprintf(stderr, "hardlink-seeding: scan refused: %s\n",
+                why[0] ? why : "invalid_arguments");
         return false;
     }
-    char build[GUARD_PATH_MAX];
-    if (!path_join(build, root, "build")) {
-        fprintf(stderr, "hardlink-seeding: build path is too long\n");
-        return false;
-    }
-    const enum platform_directory_probe_result build_probe =
-        platform_directory_probe_real(build);
-    bool inspected = scan_optional_root(root, "vendor", &scan);
-    if (build_probe == PLATFORM_DIRECTORY_PROBE_OK)
-        inspected = inspected && scan_optional_root(build, "hotswap", &scan)
-            && scan_optional_root(build, "githooks", &scan);
-    else if (build_probe != PLATFORM_DIRECTORY_PROBE_MISSING) {
-        fprintf(stderr, "hardlink-seeding: refusing non-real build root %s\n",
-                build);
-        inspected = false;
-    }
-    if (!inspected)
-        return false;
-    if (scan.linked) {
-        fprintf(stderr, "hardlink-seeding: FAIL (%zu linked file%s)\n",
-                scan.linked, scan.linked == 1 ? "" : "s");
-        fprintf(stderr, "Run repairs only when no proof is in flight: "
-                "replacing a shared path changes its donor's ctime.\n"
-                "For each affected file, set f to its quoted path and use "
-                "a fresh temporary name:\n"
-                "  cp -a --reflink=auto -- \"$f\" \"$f.tmp\" && "
-                "mv -f -- \"$f.tmp\" \"$f\"\n");
-        return false;
-    }
-    return true;
+    if (!stats.linked)
+        return true;
+    fprintf(stderr, "hardlink-seeding: FAIL (%zu linked file%s)\n",
+            stats.linked, stats.linked == 1 ? "" : "s");
+    fprintf(stderr, "Run repairs only when no proof is in flight: replacing "
+            "a shared path changes its donor's ctime.\nFor each affected "
+            "file, set f to its quoted path and use a fresh temporary name:\n"
+            "  cp -a --reflink=auto -- \"$f\" \"$f.tmp\" && "
+            "mv -f -- \"$f.tmp\" \"$f\"\n");
+    return false;
 }
 
 static bool write_file(const char *path)
@@ -175,7 +78,8 @@ static bool write_file(const char *path)
 static int selftest(void)
 {
 #if defined(_WIN32)
-    char base[GUARD_PATH_MAX], temp[GUARD_PATH_MAX];
+    char base[ZCL_DEPENDENCY_LINK_PATH_MAX];
+    char temp[ZCL_DEPENDENCY_LINK_PATH_MAX];
     DWORD n = GetTempPathA((DWORD)sizeof(temp), temp);
     if (!n || n >= sizeof(temp) || !GetTempFileNameA(temp, "zhl", 0, base) ||
         !DeleteFileA(base) || !CreateDirectoryA(base, NULL))
@@ -185,13 +89,19 @@ static int selftest(void)
     if (!mkdtemp(base))
         return 1;
 #endif
-    char vendor[GUARD_PATH_MAX] = {0}, nested[GUARD_PATH_MAX] = {0};
-    char source[GUARD_PATH_MAX] = {0}, peer[GUARD_PATH_MAX] = {0};
-    char outside[GUARD_PATH_MAX] = {0}, outside_peer[GUARD_PATH_MAX] = {0};
-    char outside_link[GUARD_PATH_MAX] = {0}, build[GUARD_PATH_MAX] = {0};
-    char hotswap[GUARD_PATH_MAX] = {0}, external[GUARD_PATH_MAX] = {0};
-    char external_hotswap[GUARD_PATH_MAX] = {0};
-    char module[GUARD_PATH_MAX] = {0}, module_peer[GUARD_PATH_MAX] = {0};
+    char vendor[ZCL_DEPENDENCY_LINK_PATH_MAX] = {0};
+    char nested[ZCL_DEPENDENCY_LINK_PATH_MAX] = {0};
+    char source[ZCL_DEPENDENCY_LINK_PATH_MAX] = {0};
+    char peer[ZCL_DEPENDENCY_LINK_PATH_MAX] = {0};
+    char outside[ZCL_DEPENDENCY_LINK_PATH_MAX] = {0};
+    char outside_peer[ZCL_DEPENDENCY_LINK_PATH_MAX] = {0};
+    char outside_link[ZCL_DEPENDENCY_LINK_PATH_MAX] = {0};
+    char build[ZCL_DEPENDENCY_LINK_PATH_MAX] = {0};
+    char hotswap[ZCL_DEPENDENCY_LINK_PATH_MAX] = {0};
+    char external[ZCL_DEPENDENCY_LINK_PATH_MAX] = {0};
+    char external_hotswap[ZCL_DEPENDENCY_LINK_PATH_MAX] = {0};
+    char module[ZCL_DEPENDENCY_LINK_PATH_MAX] = {0};
+    char module_peer[ZCL_DEPENDENCY_LINK_PATH_MAX] = {0};
     bool ok = path_join(vendor, base, "vendor")
         && path_join(nested, vendor, "include")
         && path_join(source, nested, "generated.h")
@@ -200,7 +110,7 @@ static int selftest(void)
         && path_join(outside_peer, base, "outside-peer.a")
         && path_join(outside_link, vendor, "outside")
         && path_join(build, base, "build")
-        && path_join(hotswap, base, "build/hotswap")
+        && path_join(hotswap, build, "hotswap")
         && path_join(external, base, "external-build")
         && path_join(external_hotswap, external, "hotswap")
         && path_join(module, hotswap, "fixture.so")
@@ -217,8 +127,10 @@ static int selftest(void)
         && symlink(base, outside_link) == 0
 #endif
         && check_root(base);
-    char hooks[GUARD_PATH_MAX] = {0}, a[GUARD_PATH_MAX] = {0};
-    char b[GUARD_PATH_MAX] = {0}, linked[GUARD_PATH_MAX] = {0};
+    char hooks[ZCL_DEPENDENCY_LINK_PATH_MAX] = {0};
+    char a[ZCL_DEPENDENCY_LINK_PATH_MAX] = {0};
+    char b[ZCL_DEPENDENCY_LINK_PATH_MAX] = {0};
+    char linked[ZCL_DEPENDENCY_LINK_PATH_MAX] = {0};
     if (ok)
         ok = path_join(hooks, build, "githooks")
             && path_join(a, hooks, "pre-push")
@@ -235,13 +147,19 @@ static int selftest(void)
     if (a[0]) (void)unlink(a);
     if (b[0]) (void)unlink(b);
     if (hooks[0]) (void)rmdir(hooks);
+#if defined(ZCL_TESTING)
     if (ok) {
-        struct guard_scan edge = { .entries = GUARD_ENTRIES_MAX - 1u };
-        struct guard_scan over = { .entries = GUARD_ENTRIES_MAX };
-        ok = scan_directory(nested, 0, &edge)
-            && edge.entries == GUARD_ENTRIES_MAX
-            && !scan_directory(nested, 0, &over);
+        struct zcl_dependency_link_stats edge, over;
+        char why[128];
+        ok = zcl_dependency_links_scan_directory_for_testing(
+                 nested, ZCL_DEPENDENCY_LINK_ENTRIES_MAX - 1u, &edge, why,
+                 sizeof(why))
+            && edge.entries == ZCL_DEPENDENCY_LINK_ENTRIES_MAX
+            && !zcl_dependency_links_scan_directory_for_testing(
+                nested, ZCL_DEPENDENCY_LINK_ENTRIES_MAX, &over, why,
+                sizeof(why));
     }
+#endif
     if (ok) {
 #if defined(_WIN32)
         ok = CreateHardLinkA(peer, source, NULL) && !check_root(base);
@@ -259,7 +177,6 @@ static int selftest(void)
             && link(module, module_peer) == 0
 #endif
             && !check_root(base);
-
     if (module_peer[0]) (void)unlink(module_peer);
     if (module[0]) (void)unlink(module);
     if (hotswap[0]) (void)rmdir(hotswap);
@@ -273,8 +190,6 @@ static int selftest(void)
     if (build[0]) (void)unlink(build);
     if (external_hotswap[0]) (void)rmdir(external_hotswap);
     if (external[0]) (void)rmdir(external);
-    if (peer[0]) (void)unlink(peer);
-    if (source[0]) (void)unlink(source);
     if (outside_link[0]) (void)unlink(outside_link);
     if (outside_peer[0]) (void)unlink(outside_peer);
     if (outside[0]) (void)unlink(outside);

@@ -1669,8 +1669,12 @@ int test_dev_land(void)
         "dependencies from the submitting checkout") {
         struct dlx_rig rig;
         struct dlx_call c;
-        char wt[1200], check[1400], source[1400];
-        struct stat st, source_st;
+        char wt[1200], check[1400], source[1400], exclude[1400];
+        char alias_dir[512], alias[700];
+        char aaa_source[1400], aaa_target[1400], aaa_bytes[2][8] = {{0}};
+        char second[64], third[64], bytes[3][8] = {{0}};
+        struct stat st, source_st, landed_st, alias_st;
+        FILE *file;
         dlx_isolate("depsok");
         ASSERT(dlx_rig_make(&rig, "depsok_rig"));
         ASSERT(dlx_write_dep(rig.clone, "vendor/lib/libfoo.a", "fake\n"));
@@ -1760,6 +1764,118 @@ int test_dev_land(void)
             check, sizeof(check),
             "%s/wt/build/hotswap/zcl_rollback_fixture_b.so", wt);
         ASSERT(stat(check, &st) == 0);
+
+        /* An old generation may explain exactly two links: the submitting
+         * dependency and the landing copy. Repair that known old shape. */
+        (void)snprintf(exclude, sizeof(exclude), "%s/.git/info/exclude",
+                       rig.clone);
+        ASSERT(dlx_write(exclude, "vendor/\nbuild/\n"));
+        (void)snprintf(check, sizeof(check), "%s/wt/vendor/lib/libfoo.a", wt);
+        ASSERT(unlink(check) == 0);
+        ASSERT(link(source, check) == 0);
+        ASSERT(stat(source, &st) == 0 && st.st_nlink == 2);
+        ASSERT(dlx_commit(rig.clone, "second.txt", "two\n", second));
+        const char *const ignored[] = {
+            "check-ignore", "-q", "vendor/lib/libfoo.a", NULL,
+        };
+        const char *const tracked[] = {
+            "ls-files", "--error-unmatch", "vendor/lib/libfoo.a", NULL,
+        };
+        ASSERT(dlx_git(rig.clone, ignored) == 0);
+        ASSERT(dlx_git(rig.clone, tracked) != 0);
+        setenv("ZCL_LAND_PROOF_STUB", "running", 1);
+        dlx_submit(&c, &rig, second);
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        dlx_end(&c);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        ASSERT(strcmp(dlx_str(&c, "state"), "started") == 0);
+        dlx_end(&c);
+        ASSERT(stat(source, &st) == 0 && st.st_nlink == 1);
+        ASSERT(stat(check, &landed_st) == 0 && landed_st.st_nlink == 1);
+        ASSERT(st.st_dev != landed_st.st_dev || st.st_ino != landed_st.st_ino);
+        ASSERT((landed_st.st_mode & 07777) == (source_st.st_mode & 07777));
+#if defined(__APPLE__)
+        ASSERT(landed_st.st_mtimespec.tv_sec == source_st.st_mtimespec.tv_sec);
+        ASSERT(landed_st.st_mtimespec.tv_nsec ==
+               source_st.st_mtimespec.tv_nsec);
+#else
+        ASSERT(landed_st.st_mtim.tv_sec == source_st.st_mtim.tv_sec);
+        ASSERT(landed_st.st_mtim.tv_nsec == source_st.st_mtim.tv_nsec);
+#endif
+        file = fopen(check, "rb");
+        ASSERT(file != NULL);
+        ASSERT(fread(bytes[0], 1, sizeof(bytes[0]), file) == 5);
+        ASSERT(fclose(file) == 0);
+        ASSERT(memcmp(bytes[0], "fake\n", 5) == 0);
+        setenv("ZCL_LAND_PROOF_STUB", "pass", 1);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        ASSERT(strcmp(dlx_str(&c, "state"), "landed") == 0);
+        dlx_end(&c);
+
+        /* A third spelling has no unique explanation. Refuse atomically,
+         * leaving every link and byte untouched for operator inspection. */
+        test_make_tmpdir(alias_dir, sizeof(alias_dir), "dev_land",
+                         "dependency_extra_alias");
+        (void)snprintf(alias, sizeof(alias), "%s/libfoo.alias", alias_dir);
+        ASSERT(dlx_write_dep(rig.clone, "vendor/lib/libaaa.a", "aaa\n"));
+        (void)snprintf(aaa_source, sizeof(aaa_source),
+                       "%s/vendor/lib/libaaa.a", rig.clone);
+        (void)snprintf(aaa_target, sizeof(aaa_target),
+                       "%s/wt/vendor/lib/libaaa.a", wt);
+        ASSERT(link(aaa_source, aaa_target) == 0);
+        ASSERT(stat(aaa_source, &st) == 0 && st.st_nlink == 2);
+        ASSERT(unlink(check) == 0);
+        ASSERT(link(source, check) == 0);
+        ASSERT(link(source, alias) == 0);
+        ASSERT(stat(source, &st) == 0 && st.st_nlink == 3);
+        ASSERT(dlx_commit(rig.clone, "third.txt", "three\n", third));
+        const char *const ignored_aaa[] = {
+            "check-ignore", "-q", "vendor/lib/libaaa.a", NULL,
+        };
+        const char *const tracked_aaa[] = {
+            "ls-files", "--error-unmatch", "vendor/lib/libaaa.a", NULL,
+        };
+        ASSERT(dlx_git(rig.clone, ignored_aaa) == 0);
+        ASSERT(dlx_git(rig.clone, tracked_aaa) != 0);
+        setenv("ZCL_LAND_PROOF_STUB", "running", 1);
+        dlx_submit(&c, &rig, third);
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        dlx_end(&c);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        ASSERT(strcmp(dlx_str(&c, "state"), "failed") == 0);
+        ASSERT(strcmp(dlx_str(&c, "dimension"), "worktree_deps") == 0);
+        ASSERT(strstr(dlx_str(&c, "detail"),
+                      "proof_generation_dependency_unexplained_links:"
+                      "vendor/lib/libfoo.a") != NULL);
+        dlx_end(&c);
+        const char *const aaa_paths[] = {aaa_source, aaa_target};
+        for (size_t i = 0; i < 2; i++) {
+            ASSERT(stat(aaa_paths[i], &alias_st) == 0);
+            ASSERT(alias_st.st_nlink == 2);
+            file = fopen(aaa_paths[i], "rb");
+            ASSERT(file != NULL);
+            ASSERT(fread(aaa_bytes[i], 1, sizeof(aaa_bytes[i]), file) == 4);
+            ASSERT(fclose(file) == 0);
+            ASSERT(memcmp(aaa_bytes[i], "aaa\n", 4) == 0);
+        }
+        const char *const linked_paths[] = {source, check, alias};
+        for (size_t i = 0; i < 3; i++) {
+            ASSERT(stat(linked_paths[i], &alias_st) == 0);
+            ASSERT(alias_st.st_nlink == 3);
+            file = fopen(linked_paths[i], "rb");
+            ASSERT(file != NULL);
+            ASSERT(fread(bytes[i], 1, sizeof(bytes[i]), file) == 5);
+            ASSERT(fclose(file) == 0);
+            ASSERT(memcmp(bytes[i], "fake\n", 5) == 0);
+        }
         unsetenv("ZCL_LAND_DEPS_TEST_FORCE");
         dlx_restore();
         PASS();

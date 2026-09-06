@@ -85,6 +85,7 @@
 
 #include "command/native_command.h"
 #include "command/native_devagent.h"
+#include "dependency_links.h"
 
 #include "base/safe_alloc.h"
 #include "json/json.h"
@@ -1888,7 +1889,7 @@ static void dl_log_path(const struct dl_dirs *d, struct dl_row *row)
                    row->attempt);
 }
 
-static void dl_log(struct dl_row *row, const char *text)
+static void dl_log(const struct dl_row *row, const char *text)
 {
     if (row->log_path[0] && text)
         (void)dl_append_text(row->log_path, text);
@@ -2526,8 +2527,45 @@ static int dl_lint_fast(const struct dl_dirs *d, struct dl_row *row)
  * platform clone seam is available in every build profile; unsupported
  * cloning falls back to bytes copied into the same exclusive temporary file.
  * Preserve mode and mtime before publication, as the old hardlink did. */
+static bool dl_same_inode(const struct stat *a, const struct stat *b)
+{
+    return a->st_dev == b->st_dev && a->st_ino == b->st_ino;
+}
+
+static bool dl_same_copy_metadata(const struct stat *a, const struct stat *b)
+{
+    if (a->st_mode != b->st_mode || a->st_size != b->st_size)
+        return false;
+#if defined(__APPLE__)
+    return a->st_mtimespec.tv_sec == b->st_mtimespec.tv_sec &&
+           a->st_mtimespec.tv_nsec == b->st_mtimespec.tv_nsec;
+#elif defined(_WIN32)
+    return a->st_mtime == b->st_mtime;
+#else
+    return a->st_mtim.tv_sec == b->st_mtim.tv_sec &&
+           a->st_mtim.tv_nsec == b->st_mtim.tv_nsec;
+#endif
+}
+
+static bool dl_same_file_snapshot(const struct stat *a, const struct stat *b)
+{
+    if (!dl_same_inode(a, b) || !dl_same_copy_metadata(a, b) ||
+        a->st_nlink != b->st_nlink)
+        return false;
+#if defined(__APPLE__)
+    return a->st_ctimespec.tv_sec == b->st_ctimespec.tv_sec &&
+           a->st_ctimespec.tv_nsec == b->st_ctimespec.tv_nsec;
+#elif defined(_WIN32)
+    return a->st_ctime == b->st_ctime;
+#else
+    return a->st_ctim.tv_sec == b->st_ctim.tv_sec &&
+           a->st_ctim.tv_nsec == b->st_ctim.tv_nsec;
+#endif
+}
+
 static bool dl_materialize_file(const char *source, const char *target,
-                                const struct stat *source_st)
+                                const struct stat *source_st,
+                                const char *explained_alias)
 {
 #if defined(_WIN32)
     /* dev land step already refuses with STEP_WINDOWS_UNAVAILABLE before
@@ -2541,9 +2579,20 @@ static bool dl_materialize_file(const char *source, const char *target,
     int input, output;
     char tmp[4096 + 96];
     bool ok;
-    input = open(source, O_RDONLY | O_CLOEXEC);
+    struct stat observed, completed;
+    int flags = O_RDONLY | O_CLOEXEC;
+#if !defined(_WIN32)
+    flags |= O_NOFOLLOW;
+#endif
+    input = open(source, flags);
     if (input < 0)
         return false;
+    if (source_st->st_size < 0 || fstat(input, &observed) != 0 ||
+        !S_ISREG(observed.st_mode) ||
+        !dl_same_file_snapshot(source_st, &observed)) {
+        (void)close(input);
+        return false;
+    }
     if (snprintf(tmp, sizeof(tmp), "%s.tmp.%ld", target, (long)getpid()) >=
         (int)sizeof(tmp)) {
         (void)close(input);
@@ -2557,18 +2606,19 @@ static bool dl_materialize_file(const char *source, const char *target,
     enum platform_file_clone_result cloned =
         platform_file_clone_fd(input, output);
     ok = cloned != PLATFORM_FILE_CLONE_REFUSED;
-    while (ok && cloned == PLATFORM_FILE_CLONE_UNAVAILABLE) {
+    uint64_t remaining = (uint64_t)source_st->st_size;
+    while (ok && cloned == PLATFORM_FILE_CLONE_UNAVAILABLE && remaining) {
         unsigned char buf[65536];
-        ssize_t got = read(input, buf, sizeof(buf));
+        size_t want = remaining < sizeof(buf) ? (size_t)remaining : sizeof(buf);
+        ssize_t got = read(input, buf, want);
         ssize_t off = 0;
         if (got < 0 && errno == EINTR)
             continue;
-        if (got < 0) {
+        if (got <= 0) {
             ok = false;
             break;
         }
-        if (got == 0)
-            break;
+        remaining -= (uint64_t)got;
         while (ok && off < got) {
             ssize_t wrote = write(output, buf + off, (size_t)(got - off));
             if (wrote < 0 && errno == EINTR)
@@ -2592,13 +2642,36 @@ static bool dl_materialize_file(const char *source, const char *target,
     };
     if (ok)
         ok = futimens(output, times) == 0;
+    if (ok && explained_alias)
+        ok = fsync(output) == 0;
 #endif
+    if (ok)
+        ok = fstat(input, &observed) == 0 &&
+             dl_same_file_snapshot(source_st, &observed);
+    /* A repair may replace only the exact two names checked by preflight.
+     * Recheck after the bounded copy, before publishing a replacement. */
+    if (ok && explained_alias)
+        ok = lstat(target, &observed) == 0 &&
+             dl_same_file_snapshot(source_st, &observed) &&
+             lstat(explained_alias, &observed) == 0 &&
+             dl_same_file_snapshot(source_st, &observed);
+    if (ok)
+        ok = fstat(output, &completed) == 0 &&
+             S_ISREG(completed.st_mode) && completed.st_nlink == 1 &&
+             !dl_same_inode(source_st, &completed) &&
+             dl_same_copy_metadata(source_st, &completed) &&
+             lstat(tmp, &observed) == 0 &&
+             dl_same_file_snapshot(&completed, &observed);
     if (close(input) != 0)
         ok = false;
     if (close(output) != 0)
         ok = false;
     if (ok && rename(tmp, target) != 0)
         ok = false;
+    if (ok)
+        ok = lstat(target, &observed) == 0 && observed.st_nlink == 1 &&
+             dl_same_inode(&completed, &observed) &&
+             dl_same_copy_metadata(&completed, &observed);
     if (!ok)
         (void)unlink(tmp);
     return ok;
@@ -2620,7 +2693,7 @@ static bool dl_materialize(const char *source, const char *target)
     if (lstat(target, &target_st) == 0)
         return true; /* the caller already checked readiness */
     if (S_ISREG(source_st.st_mode))
-        return dl_materialize_file(source, target, &source_st);
+        return dl_materialize_file(source, target, &source_st, NULL);
     if (!S_ISDIR(source_st.st_mode))
         return false; /* fail closed: only plain files and directories */
     dir = opendir(source);
@@ -2682,7 +2755,7 @@ static bool dl_mkdir_parents(const char *path)
  * exact paths by `lstat` does not need); rather than shell out to that
  * make target — which would require this worktree, and every hermetic test
  * rig exercising this path, to carry its own Makefile — this uses the
- * dl_materialize() link-then-copy primitive above, which mirrors the
+ * dl_materialize() clone-or-copy primitive above, which mirrors the
  * proof's own generation-prep copier without depending on it (see that
  * function's comment for why). Each entry is checked and refused by name,
  * matching dev_proof.c's own vocabulary, so a dependency missing from the
@@ -3055,6 +3128,124 @@ static bool dl_wt_restart_env_ensure(const struct dl_dirs *d, char *why,
     return true;
 }
 
+struct dl_dependency_repair {
+    const struct dl_dirs *dirs;
+    const struct dl_row *row;
+    char *why;
+    size_t why_cap;
+    size_t repaired;
+    bool apply;
+    bool require_single;
+};
+
+/* A link count is explainable only when these are two distinct canonical
+ * names for the same regular inode. An extra name could be an old proof
+ * generation, so neither a queue scan nor the landing slot permits repair. */
+static bool dl_dependency_repair_one(const char *relative, uint64_t links,
+                                     void *opaque)
+{
+    struct dl_dependency_repair *repair = opaque;
+    if (repair->require_single) {
+        (void)snprintf(repair->why, repair->why_cap,
+                       "proof_generation_dependency_links_changed:%s",
+                       relative);
+        return false;
+    }
+#if !defined(_WIN32)
+    char target[4096 + 96], donor[4096 + 96];
+    char target_real[PATH_MAX], donor_real[PATH_MAX];
+    struct stat before, donor_st, after;
+    if (links != 2 ||
+        snprintf(target, sizeof(target), "%s/%s", repair->dirs->wt,
+                 relative) >= (int)sizeof(target) ||
+        snprintf(donor, sizeof(donor), "%s/%s", repair->row->worktree,
+                 relative) >= (int)sizeof(donor) ||
+        !realpath(target, target_real) || !realpath(donor, donor_real) ||
+        strcmp(target_real, donor_real) == 0 ||
+        lstat(target, &before) != 0 || !S_ISREG(before.st_mode) ||
+        before.st_nlink != 2 || lstat(donor, &donor_st) != 0 ||
+        !dl_same_file_snapshot(&before, &donor_st)) {
+        (void)snprintf(repair->why, repair->why_cap,
+                       "proof_generation_dependency_unexplained_links:%s",
+                       relative);
+        return false;
+    }
+    if (!repair->apply)
+        return true;
+    if (!dl_materialize_file(target, target, &before, donor) ||
+        lstat(target, &after) != 0 || !S_ISREG(after.st_mode) ||
+        after.st_nlink != 1 || dl_same_inode(&before, &after) ||
+        !dl_same_copy_metadata(&before, &after) ||
+        lstat(donor, &donor_st) != 0 || donor_st.st_nlink != 1 ||
+        !dl_same_inode(&before, &donor_st)) {
+        (void)snprintf(repair->why, repair->why_cap,
+                       "proof_generation_dependency_repair_failed:%s",
+                       relative);
+        return false;
+    }
+    repair->repaired++;
+    return true;
+#else
+    (void)links;
+    (void)snprintf(repair->why, repair->why_cap,
+                   "proof_generation_dependency_repair_unavailable:%s",
+                   relative);
+    return false;
+#endif
+}
+
+static bool dl_wt_dependency_links_repair(const struct dl_dirs *d,
+                                          const struct dl_row *r,
+                                          bool stubbed, char *why,
+                                          size_t why_cap)
+{
+    struct dl_dependency_repair repair = {
+        .dirs = d, .row = r, .why = why, .why_cap = why_cap,
+    };
+    struct zcl_dependency_link_stats stats;
+    char scan_why[4096];
+    why[0] = '\0';
+    /* Preflight the complete bounded set before changing any name. */
+    if (!zcl_dependency_links_scan(d->wt, dl_dependency_repair_one, &repair,
+                                   &stats, scan_why, sizeof(scan_why)))
+        goto scan_failed;
+    if (!stats.linked)
+        return true;
+#if !defined(ZCL_DEV_PROOF_MATERIALIZER_CLONES) || \
+    ZCL_DEV_PROOF_MATERIALIZER_CLONES != 1
+    if (!stubbed) {
+        (void)snprintf(why, why_cap, "%s",
+                       "proof_generation_dependency_materializer_unqualified");
+        return false;
+    }
+#else
+    (void)stubbed;
+#endif
+    repair.apply = true;
+    if (!zcl_dependency_links_scan(d->wt, dl_dependency_repair_one, &repair,
+                                   &stats, scan_why, sizeof(scan_why)))
+        goto scan_failed;
+    /* Any new unexplained link observed after repair still prevents proof
+     * admission. These pathname checks are not a cross-process lock. */
+    repair.require_single = true;
+    if (!zcl_dependency_links_scan(d->wt, dl_dependency_repair_one, &repair,
+                                   &stats, scan_why, sizeof(scan_why)))
+        goto scan_failed;
+    char note[160];
+    (void)snprintf(note, sizeof(note),
+                   "dependency_repair: files=%zu links=2->1 remaining_linked=0\n",
+                   repair.repaired);
+    dl_log(r, note);
+    return true;
+
+scan_failed:
+    if (!why[0])
+        (void)snprintf(why, why_cap,
+                       "proof_generation_dependency_scan_failed:%.4000s",
+                       scan_why);
+    return false;
+}
+
 /* The copy-based dependencies (vendor archives, hotswap fixtures) run
  * whenever a real proof is about to be requested, or when a test forces
  * them on despite the proof stub. The restart plan always needs a real
@@ -3073,6 +3264,8 @@ static bool dl_wt_proof_deps_ensure(const struct dl_dirs *d,
         if (!dl_wt_hotswap_ensure(d, r, why, why_cap))
             return false;
 #endif
+        if (!dl_wt_dependency_links_repair(d, r, stubbed, why, why_cap))
+            return false;
     }
     if (!stubbed && !dl_wt_restart_env_ensure(d, why, why_cap))
         return false;
