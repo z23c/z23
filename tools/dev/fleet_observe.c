@@ -124,7 +124,7 @@ bool fo_parse_line(const char *line, size_t line_no, struct fo_row *out,
     char buf[FO_LINE_CAP];
     char *fields[FO_FIELD_COUNT];
     size_t n = 0;
-    char *p, *save = NULL;
+    char *p;
 
     if (!line || !out) {
         fo_err(err, err_cap, line_no, "null row");
@@ -137,14 +137,23 @@ bool fo_parse_line(const char *line, size_t line_no, struct fo_row *out,
     }
     (void)snprintf(buf, sizeof(buf), "%s", line);
 
-    p = strtok_r(buf, "\t", &save);
-    while (p && n < FO_FIELD_COUNT) {
+    p = buf;
+    while (n < FO_FIELD_COUNT) {
         fields[n++] = p;
-        p = strtok_r(NULL, "\t", &save);
+        p = strchr(p, '\t');
+        if (!p)
+            break;
+        *p++ = '\0';
     }
     if (p != NULL || n != FO_FIELD_COUNT) {
         fo_err(err, err_cap, line_no, "does not have 22 tab-separated fields");
         return false;
+    }
+    for (size_t i = 0; i < n; i++) {
+        if (fields[i][0] == '\0') {
+            fo_err(err, err_cap, line_no, "contains an empty field");
+            return false;
+        }
     }
 
     /* columns: 0 ts 1 kind 2 box 3 task_id 4 task_class 5 story 6 executor

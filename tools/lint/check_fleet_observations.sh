@@ -146,6 +146,31 @@ if [ "${1:-}" = "--selftest" ]; then
         echo "  selftest ok: a missing committed file fails --check"
     fi
 
+    # Delimiters are column boundaries, including leading and trailing tabs.
+    for mutation in leading repeated trailing empty extra; do
+        ledger="$tmp/$mutation.tsv"
+        awk -F'\t' -v OFS='\t' -v mutation="$mutation" '
+            NR == 2 {
+                if (mutation == "leading") $0 = "\t" $0
+                if (mutation == "repeated") sub(/\t/, "\t\t")
+                if (mutation == "trailing") $0 = $0 "\t"
+                if (mutation == "empty") $3 = ""
+                if (mutation == "extra") $0 = $0 "\textra"
+            }
+            { print }
+        ' "$FIXTURE" > "$ledger"
+        cp "$good" "$bad"
+        "$BIN" --ledger="$ledger" --out="$bad" >"$tmp/error" 2>&1
+        rc=$?
+        if [ "$rc" -eq 2 ] && grep -q 'rows.tsv:2:' "$tmp/error" &&
+                cmp -s "$good" "$bad"; then
+            echo "  selftest ok: $mutation column refused without changing output"
+        else
+            echo "$GATE: SELFTEST FAILED — $mutation column was not safely refused" >&2
+            fails=$((fails + 1))
+        fi
+    done
+
     [ "$fails" -eq 0 ] || exit 1
     echo "[$GATE] SELFTEST PASS (a fresh regeneration checks clean; a hand-edited row and a missing file both fail --check)"
     exit 0
