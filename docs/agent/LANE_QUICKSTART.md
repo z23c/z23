@@ -38,9 +38,9 @@ make lint
 make verdict
 ```
 
-4. Red gate that is not your change: `check-git-hooks-installed` means this
-   worktree has not run `make install-hooks` yet; run it. Anything else
-   red after your change is yours.
+4. `check-git-hooks-installed` builds `z23-git-hook` itself, so `make lint`
+   passes on a plain checkout without a prior `make install-hooks`; a red
+   result there is yours like any other gate.
 
 5. Land. Main rejects merge commits. Re-run the routed groups after a
    rebase that touched your files, then hand off; the orchestrator pushes.

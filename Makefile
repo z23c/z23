@@ -10601,7 +10601,7 @@ git-hook: $(GIT_HOOK_BIN)
 # The ELF collector drops ed25519's unused batch-verification path. PE/COFF
 # retains its RNG references, so the Windows sources above provide the real
 # implementation instead of relying on section collection to close the link.
-$(GIT_HOOK_BIN): $(GIT_HOOK_SRCS)
+$(GIT_HOOK_BIN): $(GIT_HOOK_SRCS) tools/dev/dev_proof_receipt.h tools/dev/dev_proof_signer.h
 	@mkdir -p $(dir $@)
 	$(CC) $(GIT_HOOK_CFLAGS) -o $@ $(GIT_HOOK_SRCS) \
 		$(HARDEN_LDFLAGS) $(ZCL_GC_SECTIONS_LDFLAG) $(GIT_HOOK_LIBS)
@@ -10614,7 +10614,7 @@ install-hooks: $(GIT_HOOK_BIN)
 	  tools/scripts/install_git_hooks.sh
 
 .PHONY: check-git-hooks-installed
-check-git-hooks-installed:
+check-git-hooks-installed: $(GIT_HOOK_BIN)
 	@echo "══ LINT: local pre-push hook installed ══"
 	@./tools/scripts/check_git_hooks_installed.sh --self-test
 	@./tools/scripts/check_git_hooks_installed.sh
@@ -13416,7 +13416,7 @@ LINT_BUILT_PREREQS = tools/core_seal tools/check_observability_pairing \
 	$(FILE_SIZE_POLICY_BIN) $(Z23_BOOTSTRAP_BIN) $(EQUIHASH_FACT_TOOL) \
 	$(BIN_DIR)/z23_bounded_run $(BIN_DIR)/agent_sha3 $(RETRIEVAL_EVAL_BIN) \
 	$(BIN_DIR)/z23-fleet-observe \
-	$(TOR_PROVENANCE_BIN)
+	$(TOR_PROVENANCE_BIN) $(GIT_HOOK_BIN)
 # tor-provenance-ready runs BEFORE the lint driver ever forks a gate script:
 # run_lint.sh (both the parallel dispatcher above and the serial LINT_GATES
 # chain below) executes gate SCRIPTS directly, not Make recipes, so a

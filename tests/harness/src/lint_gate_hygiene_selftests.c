@@ -1160,6 +1160,8 @@ static bool lint_built_prereqs_contract(const char *makefile)
     const char *assignment_end = make_logical_line_end(assignment);
     if (!range_contains(assignment, assignment_end, "$(EQUIHASH_FACT_TOOL)"))
         return false;
+    if (!range_contains(assignment, assignment_end, "$(GIT_HOOK_BIN)"))
+        return false;
 
     const char *targets =
         strstr(makefile, "\nlint lint-cached lint-cold-audit:");
@@ -1187,6 +1189,15 @@ int t_lint_umbrellas_share_built_prereqs(void)
     int helper_mutation_trips = helper != NULL &&
         !lint_built_prereqs_contract(missing_helper);
 
+    char *missing_git_hook = read_ok ? strdup(makefile) : NULL;
+    char *git_hook_assignment = missing_git_hook
+        ? strstr(missing_git_hook, "\nLINT_BUILT_PREREQS =") : NULL;
+    char *git_hook_helper = git_hook_assignment
+        ? strstr(git_hook_assignment, "$(GIT_HOOK_BIN)") : NULL;
+    if (git_hook_helper) git_hook_helper[0] = '!';
+    int git_hook_mutation_trips = git_hook_helper != NULL &&
+        !lint_built_prereqs_contract(missing_git_hook);
+
     char *missing_target = read_ok ? strdup(makefile) : NULL;
     char *targets = missing_target
         ? strstr(missing_target, "\nlint lint-cached lint-cold-audit:") : NULL;
@@ -1200,11 +1211,13 @@ int t_lint_umbrellas_share_built_prereqs(void)
         ASSERT(read_ok);
         ASSERT(baseline_ok);
         ASSERT(helper_mutation_trips);
+        ASSERT(git_hook_mutation_trips);
         ASSERT(target_mutation_trips);
         PASS();
     } _test_next:;
     free(makefile);
     free(missing_helper);
+    free(missing_git_hook);
     free(missing_target);
     return failures;
 }
