@@ -214,3 +214,30 @@ ZCL_COMMAND_READY_READ(
     ZCL_COMMAND_COST_LOW, ZCL_COMMAND_LANE_LOCAL,
     ZCL_COMMAND_CAP_DEV_STATE_READ, ZCL_COMMAND_TRAIT_IDEMPOTENT,
     ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_fleet_experiment_stats)
+
+ZCL_COMMAND_READY_READ(
+    "fleet.experiment.export", "fleet.experiment", "",
+    "Every kept experiment row as exp.sh's 22-column TSV, one line each",
+    "Walks the experiment events this machine's index kept and prints one "
+    "TSV line per predict or result row, in the exact column order and "
+    "header exp.sh writes: ts, kind, box, task_id, task_class, story, "
+    "executor, harness, model, effort, tokens_in, tokens_out, "
+    "tokens_cached, tokens_reasoning, tool_uses, turns, wall_s, outcome, "
+    "lines_added, lines_removed, defects, note. A column this build never "
+    "kept for that row (a closed-vocabulary field the row did not carry, "
+    "or `note`, which the leaf does not yet keep apart from task_id) "
+    "prints empty rather than a guess; an absent counter prints 0, same as "
+    "exp.sh's own convention. since, in hours, and box, a 64-hex-character "
+    "box id, both restrict which rows print; omitted, every kept row from "
+    "every box prints. The answer comes from the in-memory index alone: no "
+    "peer is asked and no file but this machine's own chains is read.",
+    65536,
+    "fleet,experiment,export,delegation,tsv",
+    "zcl.fleet_experiment_export.input.v1", "zcl.fleet_experiment_export.v1",
+    "since,box", "",
+    "z23 fleet experiment export --since=24",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_LATENCY_INSTANT,
+    ZCL_COMMAND_COST_LOW, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_DEV_STATE_READ, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_fleet_experiment_export)

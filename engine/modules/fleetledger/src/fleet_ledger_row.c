@@ -60,6 +60,9 @@ enum zcl_fleet_status zcl_fleet_row_validate(const struct zcl_fleet_row *row)
 {
     if (!row)
         return ZCL_FLEET_ARGUMENT;
+    if (row->version != ZCL_FLEET_ROW_VERSION_V1 &&
+        row->version != ZCL_FLEET_ROW_VERSION)
+        return ZCL_FLEET_MALFORMED;
     if (row->seq == 0)
         return ZCL_FLEET_SEQUENCE;
     if (!zcl_fleet_kind_name(row->kind))
@@ -72,6 +75,14 @@ enum zcl_fleet_status zcl_fleet_row_validate(const struct zcl_fleet_row *row)
     if (row->note_len > ZCL_FLEET_NOTE_MAX)
         return ZCL_FLEET_MALFORMED;
     if (!note_bytes_ok(row->note, row->note_len))
+        return ZCL_FLEET_MALFORMED;
+    if (row->story_len > ZCL_FLEET_STORY_MAX)
+        return ZCL_FLEET_MALFORMED;
+    if (!note_bytes_ok(row->story, row->story_len))
+        return ZCL_FLEET_MALFORMED;
+    /* A version-1 row never carried the field: a nonzero story here can
+     * only be a decode bug or a forged struct, never a real v1 row. */
+    if (row->version == ZCL_FLEET_ROW_VERSION_V1 && row->story_len != 0)
         return ZCL_FLEET_MALFORMED;
     /* Ascending with no repeats: one canonical order, and a key can never
      * appear twice so a sum can never double-count one row. */
@@ -115,24 +126,43 @@ enum zcl_fleet_status zcl_fleet_row_validate(const struct zcl_fleet_row *row)
     return ZCL_FLEET_OK;
 }
 
+static bool row_is_v2(const struct zcl_fleet_row *row)
+{
+    return row->version != ZCL_FLEET_ROW_VERSION_V1;
+}
+
+static size_t row_head_bytes(const struct zcl_fleet_row *row)
+{
+    return row_is_v2(row) ? ZCL_FLEET_ROW_HEAD_BYTES
+                          : ZCL_FLEET_ROW_HEAD_BYTES_V1;
+}
+
 static size_t row_body_bytes(const struct zcl_fleet_row *row)
 {
-    return ZCL_FLEET_ROW_HEAD_BYTES +
+    size_t story_bytes = row_is_v2(row) ? (size_t)row->story_len : 0;
+    return row_head_bytes(row) +
            (size_t)row->pair_count * ZCL_FLEET_ROW_PAIR_BYTES +
-           (size_t)row->note_len;
+           (size_t)row->note_len + story_bytes;
 }
 
 /* Everything but the signature: what the signature is OVER, and the prefix
- * every encoded row starts with. */
+ * every encoded row starts with. Writes the row's OWN recorded version
+ * (never unconditionally the build's current one), so a version-1 row
+ * decoded from disk re-encodes byte-for-byte into what was actually
+ * signed — required for `zcl_fleet_ledger_replicate` to carry an old row
+ * on without altering the bytes its signature covers. */
 static size_t row_write_body(const struct zcl_fleet_row *row, uint8_t *out)
 {
+    bool v2 = row_is_v2(row);
     size_t n = 0;
-    out[n++] = (uint8_t)ZCL_FLEET_ROW_VERSION;
+    out[n++] = row->version;
     out[n++] = row->kind;
     out[n++] = (uint8_t)(row->subject >> 8);
     out[n++] = (uint8_t)(row->subject & 0xffu);
     out[n++] = row->pair_count;
     out[n++] = row->note_len;
+    if (v2)
+        out[n++] = row->story_len;
     zcl_write_u64_be(out + n, row->seq);
     n += 8;
     zcl_write_u64_be(out + n, (uint64_t)row->ts_unix);
@@ -151,6 +181,10 @@ static size_t row_write_body(const struct zcl_fleet_row *row, uint8_t *out)
     if (row->note_len)
         memcpy(out + n, row->note, row->note_len);
     n += row->note_len;
+    if (v2 && row->story_len) {
+        memcpy(out + n, row->story, row->story_len);
+        n += row->story_len;
+    }
     return n;
 }
 
@@ -173,12 +207,19 @@ enum zcl_fleet_status zcl_fleet_row_decode(const uint8_t *in, size_t len,
 {
     if (!in || !out)
         return ZCL_FLEET_ARGUMENT;
-    if (len < ZCL_FLEET_ROW_HEAD_BYTES + ZCL_FLEET_SIG_BYTES)
+    if (len < 1)
         return ZCL_FLEET_MALFORMED;
-    if (in[0] != (uint8_t)ZCL_FLEET_ROW_VERSION)
+    uint8_t wire_version = in[0];
+    if (wire_version != ZCL_FLEET_ROW_VERSION_V1 &&
+        wire_version != ZCL_FLEET_ROW_VERSION)
+        return ZCL_FLEET_MALFORMED;
+    bool v2 = wire_version != ZCL_FLEET_ROW_VERSION_V1;
+    size_t head = v2 ? ZCL_FLEET_ROW_HEAD_BYTES : ZCL_FLEET_ROW_HEAD_BYTES_V1;
+    if (len < head + ZCL_FLEET_SIG_BYTES)
         return ZCL_FLEET_MALFORMED;
 
     memset(out, 0, sizeof(*out));
+    out->version = wire_version;
     out->kind = in[1];
     out->subject = (uint16_t)(((uint16_t)in[2] << 8) | (uint16_t)in[3]);
     out->pair_count = in[4];
@@ -186,16 +227,21 @@ enum zcl_fleet_status zcl_fleet_row_decode(const uint8_t *in, size_t len,
     if (out->pair_count > ZCL_FLEET_PAIRS_MAX ||
         out->note_len > ZCL_FLEET_NOTE_MAX)
         return ZCL_FLEET_MALFORMED;
+    size_t n = 6;
+    if (v2) {
+        out->story_len = in[n++];
+        if (out->story_len > ZCL_FLEET_STORY_MAX)
+            return ZCL_FLEET_MALFORMED;
+    }
 
     /* The length is derived from the counts and checked against what is
      * actually in the buffer BEFORE any of it is read. */
-    size_t body = ZCL_FLEET_ROW_HEAD_BYTES +
-                  (size_t)out->pair_count * ZCL_FLEET_ROW_PAIR_BYTES +
-                  (size_t)out->note_len;
+    size_t body = head + (size_t)out->pair_count * ZCL_FLEET_ROW_PAIR_BYTES +
+                  (size_t)out->note_len +
+                  (v2 ? (size_t)out->story_len : 0u);
     if (len < body + ZCL_FLEET_SIG_BYTES)
         return ZCL_FLEET_MALFORMED;
 
-    size_t n = 6;
     out->seq = zcl_read_u64_be(in + n);
     n += 8;
     out->ts_unix = (int64_t)zcl_read_u64_be(in + n);
@@ -214,6 +260,10 @@ enum zcl_fleet_status zcl_fleet_row_decode(const uint8_t *in, size_t len,
     if (out->note_len)
         memcpy(out->note, in + n, out->note_len);
     n += out->note_len;
+    if (v2 && out->story_len) {
+        memcpy(out->story, in + n, out->story_len);
+        n += out->story_len;
+    }
     memcpy(out->sig, in + n, ZCL_FLEET_SIG_BYTES);
 
     enum zcl_fleet_status shape = zcl_fleet_row_validate(out);

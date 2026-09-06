@@ -28,5 +28,8 @@ void zcl_native_handle_fleet_experiment_result(
 void zcl_native_handle_fleet_experiment_stats(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
+void zcl_native_handle_fleet_experiment_export(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
 
 #endif /* ZCL_NATIVE_FLEET_H */

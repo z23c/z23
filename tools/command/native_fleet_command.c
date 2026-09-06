@@ -21,6 +21,7 @@
 
 #include "base/hex.h"
 #include "base/safe_alloc.h"
+#include "base/utc_tm.h"
 #include "config/boot_fleet_ledger.h"
 #include "fleetledger/fleet_ledger.h"
 #include "json/json.h"
@@ -198,7 +199,7 @@ void zcl_native_handle_fleet_ledger_add(
     }
     uint64_t seq = 0;
     enum zcl_fleet_status status = zcl_fleet_ledger_append(
-        ledger, kind, subject, pairs, pair_count, note, seed, &seq);
+        ledger, kind, subject, pairs, pair_count, note, NULL, seed, &seq);
     memset(seed, 0, sizeof seed);
     zcl_fleet_ledger_close(ledger);
     if (status != ZCL_FLEET_OK) {
@@ -610,7 +611,7 @@ void zcl_native_handle_fleet_vitals_sample(
         uint64_t seq = 0;
         enum zcl_fleet_status status = zcl_fleet_ledger_append(
             ledger, ZCL_FLEET_KIND_VITALS, subjects[i],
-            have ? &pair : NULL, have ? 1u : 0u, NULL, seed, &seq);
+            have ? &pair : NULL, have ? 1u : 0u, NULL, NULL, seed, &seq);
         if (status != ZCL_FLEET_OK) {
             memset(seed, 0, sizeof seed);
             zcl_fleet_ledger_close(ledger);
@@ -699,10 +700,36 @@ static void fleet_refuse_enum(struct zcl_command_reply *reply, const char *field
     fleet_refuse(reply, "EXPERIMENT_ENUM", message, evidence, false);
 }
 
+/* `executor` is optional on both predict and result, same treatment as
+ * `harness`/`effort` on result: passed, it must be in the closed
+ * vocabulary or the row is refused by that field's name; omitted, the row
+ * simply carries no opinion. Shared so predict and result refuse it
+ * identically instead of drifting apart one `if` at a time. */
+static bool fleet_experiment_add_executor(struct zcl_command_reply *reply,
+                                          const struct json_value *input,
+                                          struct zcl_fleet_pair *pairs,
+                                          size_t *n)
+{
+    const struct json_value *v = json_get(input, "executor");
+    if (!v)
+        return true;
+    uint8_t executor = 0;
+    if (!fleet_enum_stored(v, "executor", &executor)) {
+        fleet_refuse_enum(reply, "executor", "input.executor");
+        return false;
+    }
+    if (!fleet_pair_add(pairs, n, ZCL_FLEET_PAIR_EXECUTOR, executor)) {
+        fleet_refuse(reply, "LEDGER_REFUSED", "ledger_argument", "row", false);
+        return false;
+    }
+    return true;
+}
+
 static void fleet_experiment_write(struct zcl_command_reply *reply,
                                    uint16_t subject, const char *subject_name,
                                    const struct zcl_fleet_pair *pairs,
-                                   size_t pair_count, const char *note)
+                                   size_t pair_count, const char *note,
+                                   const char *story)
 {
     char dir[512];
     uint8_t box_id[32];
@@ -732,7 +759,7 @@ static void fleet_experiment_write(struct zcl_command_reply *reply,
     uint64_t seq = 0;
     enum zcl_fleet_status status = zcl_fleet_ledger_append(
         ledger, ZCL_FLEET_KIND_EXPERIMENT, subject, pairs, pair_count, note,
-        seed, &seq);
+        story, seed, &seq);
     memset(seed, 0, sizeof seed);
     zcl_fleet_ledger_close(ledger);
     if (status != ZCL_FLEET_OK) {
@@ -776,8 +803,7 @@ void zcl_native_handle_fleet_experiment_predict(
                      "input.task_id", false);
         return;
     }
-    (void)json_get(request->input, "story");
-    (void)json_get(request->input, "executor");
+    const char *story = fleet_input_str(json_get(request->input, "story"));
 
     uint8_t task_class = 0, harness = 0, model = 0, effort = 0;
     if (!fleet_enum_stored(json_get(request->input, "task_class"), "task_class",
@@ -810,6 +836,8 @@ void zcl_native_handle_fleet_experiment_predict(
         fleet_refuse(reply, "LEDGER_REFUSED", "ledger_argument", "row", false);
         return;
     }
+    if (!fleet_experiment_add_executor(reply, request->input, pairs, &n))
+        return;
     int64_t number = 0;
     if (fleet_input_i64(json_get(request->input, "tokens"), &number) &&
         !fleet_pair_add(pairs, &n, ZCL_FLEET_PAIR_TOKENS_IN, number)) {
@@ -835,7 +863,7 @@ void zcl_native_handle_fleet_experiment_predict(
         }
     }
     fleet_experiment_write(reply, ZCL_FLEET_EXPERIMENT_PREDICT, "predict",
-                           pairs, n, task_id);
+                           pairs, n, task_id, story);
 }
 
 void zcl_native_handle_fleet_experiment_result(
@@ -859,8 +887,7 @@ void zcl_native_handle_fleet_experiment_result(
                      "input.task_id", false);
         return;
     }
-    (void)json_get(request->input, "story");
-    (void)json_get(request->input, "executor");
+    const char *story = fleet_input_str(json_get(request->input, "story"));
 
     uint8_t task_class = 0, model = 0, outcome = 0;
     if (!fleet_enum_stored(json_get(request->input, "task_class"), "task_class",
@@ -914,6 +941,8 @@ void zcl_native_handle_fleet_experiment_result(
             return;
         }
     }
+    if (!fleet_experiment_add_executor(reply, request->input, pairs, &n))
+        return;
 
     int64_t number = 0;
     if (fleet_input_i64(json_get(request->input, "in"), &number) &&
@@ -967,7 +996,7 @@ void zcl_native_handle_fleet_experiment_result(
         return;
     }
     fleet_experiment_write(reply, ZCL_FLEET_EXPERIMENT_RESULT, "result", pairs,
-                           n, task_id);
+                           n, task_id, story);
 }
 
 static void fleet_exp_absent_or_i64(char *out, size_t cap, uint8_t have,
@@ -1153,6 +1182,263 @@ void zcl_native_handle_fleet_experiment_stats(
     (void)json_push_kv(&reply->data, "stats", &rows);
     (void)json_push_kv_str(&reply->data, "text", text);
     json_free(&rows);
+    reply->status = ZCL_COMMAND_STATUS_PASSED;
+    reply->exit_code = ZCL_COMMAND_EXIT_OK;
+}
+
+/* ── fleet experiment export ────────────────────────────────────────── */
+
+/* One TSV column's worth of scratch: long enough for any field this row
+ * shape carries (a story name, a hex box id, a decimal int64). */
+#define FLEET_EXPORT_FIELD_MAX 160u
+/* Matches fleet_ledger.c's own FLEET_EXPERIMENT_EVENTS_MAX: the index never
+ * retains more experiment rows than that, so a cap this size never
+ * truncates a walk the index itself already completed. */
+#define FLEET_EXPORT_ROWS_MAX 1024u
+#define FLEET_EXPORT_ROW_BYTES 512u
+
+static void exp_ts_iso(int64_t ts_unix, char out[32])
+{
+    struct tm tm;
+    time_t t = (time_t)ts_unix;
+    if (ts_unix < 0 || !zcl_utc_tm(t, &tm)) {
+        out[0] = 0;
+        return;
+    }
+    (void)snprintf(out, 32, "%04d-%02d-%02dT%02d:%02d:%02dZ",
+                  tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour,
+                  tm.tm_min, tm.tm_sec);
+}
+
+static void exp_str(char *out, size_t cap, const char *s)
+{
+    (void)snprintf(out, cap, "%s", s ? s : "");
+}
+
+static void exp_i64(char *out, size_t cap, uint8_t have, int64_t v)
+{
+    (void)snprintf(out, cap, "%lld", have ? (long long)v : 0LL);
+}
+
+/* One row, one TSV line, in exactly exp.sh's 22-column order. Written into
+ * `line` (caller-owned, FLEET_EXPORT_ROW_BYTES) rather than returned, so
+ * the caller controls its own growth strategy. `note` is always empty: the
+ * leaf does not yet keep a free-text note distinct from task_id (see
+ * docs/FLEET_LEDGER.md, "known gap"), and printing a wrong guess would be
+ * worse than an honest blank. */
+static void exp_row_line(char *line, size_t cap,
+                         const struct zcl_fleet_experiment_row *r)
+{
+    char ts[32], box[65], story[ZCL_FLEET_STORY_MAX + 1];
+    char kind[FLEET_EXPORT_FIELD_MAX], task_class[FLEET_EXPORT_FIELD_MAX];
+    char model[FLEET_EXPORT_FIELD_MAX];
+    char executor[FLEET_EXPORT_FIELD_MAX], harness[FLEET_EXPORT_FIELD_MAX];
+    char effort[FLEET_EXPORT_FIELD_MAX], outcome[FLEET_EXPORT_FIELD_MAX];
+    char in[32], out_[32], cache[32], reasoning[32], tool_uses[32];
+    char turns[32], wall_s[32], added[32], removed[32], defects[32];
+
+    exp_ts_iso(r->ts_unix, ts);
+    zcl_hex_encode(r->box_id, ZCL_FLEET_ID_BYTES, box);
+    exp_str(kind, sizeof kind,
+           zcl_fleet_subject_name(ZCL_FLEET_KIND_EXPERIMENT, r->phase));
+    exp_str(task_class, sizeof task_class,
+           zcl_fleet_experiment_enum_name("task_class", r->task_class));
+    exp_str(model, sizeof model,
+           zcl_fleet_experiment_enum_name("model", r->model));
+    exp_str(story, sizeof story, r->story);
+    exp_str(executor, sizeof executor,
+           r->have_executor
+               ? zcl_fleet_experiment_enum_name("executor", r->executor)
+               : NULL);
+    exp_str(harness, sizeof harness,
+           r->have_harness ? zcl_fleet_experiment_enum_name("harness",
+                                                            r->harness)
+                          : NULL);
+    exp_str(effort, sizeof effort,
+           r->have_effort ? zcl_fleet_experiment_enum_name("effort",
+                                                           r->effort)
+                         : NULL);
+    exp_str(outcome, sizeof outcome,
+           r->have_outcome ? zcl_fleet_experiment_enum_name("outcome",
+                                                            r->outcome)
+                          : NULL);
+    exp_i64(in, sizeof in, r->have_tokens_in, r->tokens_in);
+    exp_i64(out_, sizeof out_, r->have_tokens_out, r->tokens_out);
+    exp_i64(cache, sizeof cache, r->have_tokens_cache, r->tokens_cache);
+    exp_i64(reasoning, sizeof reasoning, r->have_tokens_reasoning,
+           r->tokens_reasoning);
+    exp_i64(tool_uses, sizeof tool_uses, r->have_tool_uses, r->tool_uses);
+    exp_i64(turns, sizeof turns, r->have_turns, r->turns);
+    exp_i64(wall_s, sizeof wall_s, r->have_wall_s, r->wall_s);
+    exp_i64(added, sizeof added, r->have_lines_added, r->lines_added);
+    exp_i64(removed, sizeof removed, r->have_lines_removed,
+           r->lines_removed);
+    exp_i64(defects, sizeof defects, r->have_defects, r->defects);
+
+    (void)snprintf(
+        line, cap,
+        "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t"
+        "%s\t%s\t%s\t%s\t\n",
+        ts, kind, box, r->task_id, task_class, story, executor, harness,
+        model, effort, in, out_, cache, reasoning, tool_uses, turns, wall_s,
+        outcome, added, removed, defects);
+}
+
+#define FLEET_EXPORT_HEADER                                                  \
+    "ts\tkind\tbox\ttask_id\ttask_class\tstory\texecutor\tharness\tmodel\t"   \
+    "effort\ttokens_in\ttokens_out\ttokens_cache\ttokens_reasoning\t"         \
+    "tool_uses\tturns\twall_s\toutcome\tlines_added\tlines_removed\t"         \
+    "defects\tnote\n"
+
+/* since_unix, and the box filter, exactly as the caller named them. A
+ * zero since_unix is "no floor"; have_box false means box_id is unused. */
+struct fleet_export_filter {
+    int64_t since_unix;
+    bool have_box;
+    uint8_t box_id[ZCL_FLEET_ID_BYTES];
+};
+
+/* Reads `since` (hours back from now) and `box` (a hex box id) out of the
+ * request, or leaves both at their "no filter" default when the request
+ * carries neither. Split out so the top-level handler's own decisions stay
+ * about what to do with a filter, never about how to parse one. */
+static bool fleet_export_parse_filter(
+    struct zcl_command_reply *reply, const struct zcl_command_request *request,
+    struct fleet_export_filter *out)
+{
+    memset(out, 0, sizeof *out);
+    if (!request || !request->input)
+        return true;
+    int64_t since_hours = 0;
+    (void)fleet_input_i64(json_get(request->input, "since"), &since_hours);
+    if (since_hours > 0)
+        out->since_unix =
+            (int64_t)platform_time_wall_time_t() - since_hours * 3600;
+    const char *box_hex = fleet_input_str(json_get(request->input, "box"));
+    if (!box_hex)
+        return true;
+    if (!zcl_hex_decode(box_hex, out->box_id, sizeof out->box_id)) {
+        fleet_refuse(reply, "MALFORMED_BOX",
+                    "box must be the 64-hex-character box id", "input.box",
+                    false);
+        return false;
+    }
+    out->have_box = true;
+    return true;
+}
+
+/* Opens the ledger under `dir`, walks it with `filter`, and closes it
+ * again before returning — the ledger's whole lifetime lives in this one
+ * call so the caller never has to reason about it. Refuses `reply` and
+ * returns false on either an unopenable ledger or a refused walk; the two
+ * carry different error codes because they are different facts for an
+ * operator to act on. */
+static bool fleet_export_query(struct zcl_command_reply *reply,
+                               const char *dir,
+                               const struct fleet_export_filter *filter,
+                               struct zcl_fleet_experiment_row *rows,
+                               size_t cap, size_t *count, bool *truncated)
+{
+    uint8_t self_id[32], self_signer[32], seed[32];
+    const char *why = "";
+    bool have_self = fleet_identity(self_id, self_signer, seed, &why);
+    memset(seed, 0, sizeof seed);
+
+    struct zcl_fleet_report report;
+    struct zcl_fleet_ledger *ledger = zcl_fleet_ledger_open(
+        dir, have_self ? self_id : NULL, have_self ? self_signer : NULL,
+        &report);
+    if (!ledger) {
+        fleet_refuse(reply, "LEDGER_UNAVAILABLE",
+                     zcl_fleet_status_label(report.status), "fleet_ledger",
+                     false);
+        return false;
+    }
+    enum zcl_fleet_status status = zcl_fleet_ledger_experiment_rows(
+        ledger, filter->since_unix,
+        filter->have_box ? filter->box_id : NULL, filter->have_box, rows,
+        cap, count);
+    zcl_fleet_ledger_close(ledger);
+    if (status != ZCL_FLEET_OK && status != ZCL_FLEET_FULL) {
+        fleet_refuse(reply, "LEDGER_REFUSED", zcl_fleet_status_label(status),
+                     "query", false);
+        return false;
+    }
+    *truncated = status == ZCL_FLEET_FULL;
+    return true;
+}
+
+/* Renders every row into one growing TSV buffer, header first. A short
+ * write is silently kept as far as it got rather than treated as a
+ * refusal: the `truncated` flag already says the row COUNT was cut, and a
+ * cap this generous (see FLEET_EXPORT_ROW_BYTES) is never expected to bite
+ * mid-row in practice. */
+static char *fleet_export_render(const struct zcl_fleet_experiment_row *rows,
+                                 size_t count)
+{
+    size_t cap = sizeof(FLEET_EXPORT_HEADER) + count * FLEET_EXPORT_ROW_BYTES;
+    char *text = zcl_malloc(cap, "fleet_experiment_export_text");
+    if (!text)
+        return NULL;
+    size_t tlen = (size_t)snprintf(text, cap, "%s", FLEET_EXPORT_HEADER);
+    for (size_t i = 0; i < count; i++) {
+        char line[FLEET_EXPORT_ROW_BYTES];
+        exp_row_line(line, sizeof line, &rows[i]);
+        int wrote = snprintf(text + tlen, cap - tlen, "%s", line);
+        if (wrote > 0 && (size_t)wrote < cap - tlen)
+            tlen += (size_t)wrote;
+    }
+    return text;
+}
+
+void zcl_native_handle_fleet_experiment_export(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply)
+{
+    if (!reply)
+        return;
+    zcl_command_reply_init(reply, "zcl.fleet_experiment_export.v1");
+
+    struct fleet_export_filter filter;
+    if (!fleet_export_parse_filter(reply, request, &filter))
+        return;
+
+    char dir[512];
+    if (!fleet_dir(dir, sizeof dir)) {
+        fleet_refuse(reply, "DATADIR_UNAVAILABLE",
+                     "the datadir must be an absolute path", "datadir", false);
+        return;
+    }
+
+    struct zcl_fleet_experiment_row *rows = zcl_calloc(
+        FLEET_EXPORT_ROWS_MAX, sizeof *rows, "fleet_experiment_export_rows");
+    if (!rows) {
+        fleet_refuse(reply, "OUT_OF_MEMORY", "could not allocate row buffer",
+                     "rows", false);
+        return;
+    }
+    size_t count = 0;
+    bool truncated = false;
+    if (!fleet_export_query(reply, dir, &filter, rows, FLEET_EXPORT_ROWS_MAX,
+                            &count, &truncated)) {
+        free(rows);
+        return;
+    }
+
+    char *text = fleet_export_render(rows, count);
+    free(rows);
+    if (!text) {
+        fleet_refuse(reply, "OUT_OF_MEMORY", "could not allocate export text",
+                     "text", false);
+        return;
+    }
+
+    (void)json_push_kv_str(&reply->data, "schema",
+                           "zcl.fleet_experiment_export.v1");
+    (void)json_push_kv_int(&reply->data, "rows", (int64_t)count);
+    (void)json_push_kv_bool(&reply->data, "truncated", truncated);
+    (void)json_push_kv_str(&reply->data, "text", text);
+    free(text);
     reply->status = ZCL_COMMAND_STATUS_PASSED;
     reply->exit_code = ZCL_COMMAND_EXIT_OK;
 }

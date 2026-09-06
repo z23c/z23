@@ -151,6 +151,7 @@ z23 fleet ledger add --kind=usage --subject=grok --tokens_in=... --note=<task>
 z23 fleet experiment predict --task_id=<task> --task_class=read --harness=manual --model=grok --effort=low
 z23 fleet experiment result --task_id=<task> --task_class=read --model=grok --outcome=LAND
 z23 fleet experiment stats
+z23 fleet experiment export --since=24
 ```
 
 `fleet ledger status` prints, per box, how many rows are held, the last
@@ -257,16 +258,37 @@ A box records a prediction before a delegated task, then the result after.
 chain can ask how they compare, from local files, without asking a peer.
 
 ```
-z23 fleet experiment predict --task_id=<task> --task_class=read --harness=manual --model=grok --effort=low --tokens=... --wall_s=...
-z23 fleet experiment result --task_id=<task> --task_class=read --model=grok --outcome=LAND --in=... --out=... --wall_s=...
+z23 fleet experiment predict --task_id=<task> --task_class=read --story=<name> --executor=grok --harness=manual --model=grok --effort=low --tokens=... --wall_s=...
+z23 fleet experiment result --task_id=<task> --task_class=read --story=<name> --executor=grok --model=grok --outcome=LAND --in=... --out=... --wall_s=...
 z23 fleet experiment stats
 z23 fleet experiment stats --task_class=read --model=grok
+z23 fleet experiment export --since=24
+z23 fleet experiment export --box=<64-hex-char box id>
 ```
 
 `fleet experiment predict` writes `kind=experiment` `subject=predict`.
 `fleet experiment result` writes `kind=experiment` `subject=result`.
 `fleet experiment stats` prints one line per (`task_class`, `model`) plus a
 total line.
+
+Both leaves keep `story` (free text — a story name, never a closed
+vocabulary) and `executor` (a closed vocabulary, same shape as `model`) on
+the signed row, alongside the fields already there. `task_id` is still what
+the row's `note` field carries; there is no separate free-text note kept
+apart from it yet, so `export`'s own `note` column is always empty.
+
+`fleet experiment export` walks this machine's own chains — no peer is
+asked and no file is read but this box's own chainlog — and prints one line
+per kept `predict` or `result` row, in exactly the column order and header
+`~/.local/lib/z23/tools/exp.sh` writes: `ts kind box task_id task_class
+story executor harness model effort tokens_in tokens_out tokens_cached
+tokens_reasoning tool_uses turns wall_s outcome lines_added lines_removed
+defects note` (22 tab-separated columns). A column this row never carried
+prints empty, the same convention `exp.sh` itself uses for a field it never
+wrote; an absent counter prints `0`. `--since=<hours>` and `--box=<64-hex
+box id>` both narrow which rows print; omitted, every kept row from every
+box prints. This is the same data the dashboard reads from the TSV file
+today, now reachable straight from the signed ledger.
 
 The vocabularies are closed. A name that is not in the field's table, or the
 named member `unknown`, is refused as `experiment_enum` by that field's name

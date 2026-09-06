@@ -109,7 +109,10 @@
  * so a reader knows when and where a row belongs before it has looked at
  * one byte of variable-length payload.
  *
- *     0  version   u8   = ZCL_FLEET_ROW_VERSION
+ * VERSION 1 (no story field — every row ever written before this field
+ * existed):
+ *
+ *     0  version   u8   = 1
  *     1  kind      u8
  *     2  subject   u16
  *     4  pairs     u8   <= ZCL_FLEET_PAIRS_MAX
@@ -125,6 +128,38 @@
  *   ...  sig       [64] Ed25519 over domain || every byte above, under
  *                       `signer`
  *
+ * VERSION 2 (current — adds `story_len`/`story`, one byte and a run of
+ * bytes inserted after note_len and after note respectively; every other
+ * field keeps its meaning and its place relative to the ones around it):
+ *
+ *     0  version   u8   = ZCL_FLEET_ROW_VERSION (2)
+ *     1  kind      u8
+ *     2  subject   u16
+ *     4  pairs     u8   <= ZCL_FLEET_PAIRS_MAX
+ *     5  note_len  u8   <= ZCL_FLEET_NOTE_MAX
+ *     6  story_len u8   <= ZCL_FLEET_STORY_MAX
+ *     7  seq       u64  1-based, dense within its own chain
+ *    15  ts_unix   i64  the writer's statement of WHEN, and never an order
+ *    23  box_id    [32] the delegation's master public key: which machine
+ *    55  signer    [32] the delegation's online public key: which key signed
+ *    87  prev_hash [32] SHA3-256(domain || the whole previous row, sig and
+ *                       all); 32 zero bytes for seq 1
+ *   119  pairs     each { key u8, value i64 }, ascending by key, no repeats
+ *   ...  note      note_len bytes, no NUL, no control bytes
+ *   ...  story     story_len bytes, no NUL, no control bytes — free text
+ *                  (a story name), unlike the closed-vocabulary pairs
+ *   ...  sig       [64] Ed25519 over domain || every byte above, under
+ *                       `signer`
+ *
+ * A reader decodes EITHER version from the leading version byte: a chain
+ * written before this field existed keeps reading exactly as it always
+ * did (story absent, never a refusal), and every row this build writes is
+ * version 2. The domain tag stays the literal bytes "zcl.fleet_ledger_row
+ * .v1" for both versions on purpose — it is what every already-signed row
+ * of either version was signed under, and changing it would invalidate
+ * every signature ever written rather than describe the row format that
+ * follows it.
+ *
  * The signature covers prev_hash and seq, so a row cannot be lifted out of
  * one chain and replayed into another, or moved within its own. It covers
  * box_id and signer together, so a row cannot be re-attributed to another
@@ -138,22 +173,28 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define ZCL_FLEET_ROW_VERSION 1u
+/* The version this build WRITES. A decoder accepts this version and every
+ * version below it (currently 1 and 2) — see the wire layout above. */
+#define ZCL_FLEET_ROW_VERSION    2u
+#define ZCL_FLEET_ROW_VERSION_V1 1u
 #define ZCL_FLEET_DOMAIN      "zcl.fleet_ledger_row.v1"
 
 #define ZCL_FLEET_PAIRS_MAX   16u
 #define ZCL_FLEET_NOTE_MAX    160u
+#define ZCL_FLEET_STORY_MAX   96u
 #define ZCL_FLEET_ID_BYTES    32u
 #define ZCL_FLEET_HASH_BYTES  32u
 #define ZCL_FLEET_SIG_BYTES   64u
 #define ZCL_FLEET_SEED_BYTES  32u
 
-/* Fixed header, one encoded pair, and the largest a whole row can be. */
-#define ZCL_FLEET_ROW_HEAD_BYTES 118u
+/* Fixed header (both wire versions), one encoded pair, and the largest a
+ * whole row can be. */
+#define ZCL_FLEET_ROW_HEAD_BYTES_V1 118u
+#define ZCL_FLEET_ROW_HEAD_BYTES    119u /* v2: adds the story_len byte */
 #define ZCL_FLEET_ROW_PAIR_BYTES 9u
 #define ZCL_FLEET_ROW_MAX_BYTES                                              \
     (ZCL_FLEET_ROW_HEAD_BYTES + ZCL_FLEET_PAIRS_MAX * ZCL_FLEET_ROW_PAIR_BYTES \
-     + ZCL_FLEET_NOTE_MAX + ZCL_FLEET_SIG_BYTES)
+     + ZCL_FLEET_NOTE_MAX + ZCL_FLEET_STORY_MAX + ZCL_FLEET_SIG_BYTES)
 
 /* Bounds on the whole store. Each is a refusal point, not a hope: a fleet
  * is the owner's own machines, and a store that would grow past these is
@@ -279,9 +320,10 @@ enum zcl_fleet_pair_key {
     ZCL_FLEET_PAIR_HARNESS = 18,
     ZCL_FLEET_PAIR_OUTCOME = 19,
     ZCL_FLEET_PAIR_MODEL = 20,
-    ZCL_FLEET_PAIR_EFFORT = 21
+    ZCL_FLEET_PAIR_EFFORT = 21,
+    ZCL_FLEET_PAIR_EXECUTOR = 22
 };
-#define ZCL_FLEET_PAIR_KEY_MAX ZCL_FLEET_PAIR_EFFORT
+#define ZCL_FLEET_PAIR_KEY_MAX ZCL_FLEET_PAIR_EXECUTOR
 
 /* A number the writer did not have is ABSENT, never zero: a task that
  * reported no cached tokens and a task whose provider does not report them
@@ -333,7 +375,7 @@ bool zcl_fleet_pair_from_name(const char *name, uint8_t *key_out);
 /* Experiment closed vocabularies. `unknown` is a named member so a
  * refusal can say the word; it is never stored. A name that is not in
  * the field's table is the same refusal. `field` is the input key
- * (`task_class`, `harness`, `outcome`, `model`, `effort`). */
+ * (`task_class`, `harness`, `outcome`, `model`, `effort`, `executor`). */
 bool zcl_fleet_experiment_enum_from_name(const char *field, const char *name,
                                          uint8_t *out);
 const char *zcl_fleet_experiment_enum_name(const char *field, uint8_t value);
@@ -357,6 +399,7 @@ struct zcl_fleet_pair {
 };
 
 struct zcl_fleet_row {
+    uint8_t version; /* which wire layout this row is: 1 or 2 (see above) */
     uint64_t seq;
     int64_t ts_unix;
     uint8_t box_id[ZCL_FLEET_ID_BYTES]; /* delegation doc.master_pubkey */
@@ -367,6 +410,8 @@ struct zcl_fleet_row {
     uint8_t note_len;
     struct zcl_fleet_pair pair[ZCL_FLEET_PAIRS_MAX];
     char note[ZCL_FLEET_NOTE_MAX];
+    uint8_t story_len; /* 0 on a version-1 row: the field did not exist yet */
+    char story[ZCL_FLEET_STORY_MAX];
     uint8_t prev_hash[ZCL_FLEET_HASH_BYTES];
     uint8_t sig[ZCL_FLEET_SIG_BYTES];
 };
@@ -443,11 +488,16 @@ void zcl_fleet_ledger_close(struct zcl_fleet_ledger *ledger);
  * chain's tail under the chainlog's exclusive lock before composing the
  * row, so two processes appending at once produce two dense rows rather
  * than two rows claiming the same sequence number. Returns after the
- * chainlog's two fsyncs. */
+ * chainlog's two fsyncs.
+ *
+ * `story` is free text (never a closed vocabulary, unlike the enum pairs)
+ * and may be NULL/empty when the kind does not carry one; every row this
+ * call writes is encoded at the current wire version, story included. */
 enum zcl_fleet_status zcl_fleet_ledger_append(
     struct zcl_fleet_ledger *ledger, uint8_t kind, uint16_t subject,
     const struct zcl_fleet_pair *pairs, size_t pair_count, const char *note,
-    const uint8_t seed[ZCL_FLEET_SEED_BYTES], uint64_t *out_seq);
+    const char *story, const uint8_t seed[ZCL_FLEET_SEED_BYTES],
+    uint64_t *out_seq);
 
 /* The highest sequence number held for `box_id`, or 0 for a box with no
  * chain here yet. This is the `since_seq` a PULL asks with. */
@@ -563,6 +613,45 @@ enum zcl_fleet_status zcl_fleet_ledger_experiment_stats(
     uint64_t *unpredicted, uint64_t *index_us);
 
 uint64_t zcl_fleet_ledger_experiment_overflow(const struct zcl_fleet_ledger *l);
+
+/* One experiment row, exactly as written — the export shape, not a merged
+ * answer. Every column exp.sh's TSV carries has a field here; absence is a
+ * `have_*` byte beside it, same rule as everywhere else in this module. */
+struct zcl_fleet_experiment_row {
+    int64_t ts_unix;
+    uint8_t box_id[ZCL_FLEET_ID_BYTES];
+    uint8_t phase; /* enum zcl_fleet_experiment_phase: predict or result */
+    char task_id[ZCL_FLEET_NOTE_MAX + 1];
+    uint8_t task_class;
+    char story[ZCL_FLEET_STORY_MAX + 1];
+    uint8_t have_executor, executor;
+    uint8_t have_harness, harness;
+    uint8_t model;
+    uint8_t have_effort, effort;
+    uint8_t have_tokens_in;        int64_t tokens_in;
+    uint8_t have_tokens_out;       int64_t tokens_out;
+    uint8_t have_tokens_cache;     int64_t tokens_cache;
+    uint8_t have_tokens_reasoning; int64_t tokens_reasoning;
+    uint8_t have_tool_uses;        int64_t tool_uses;
+    uint8_t have_turns;            int64_t turns;
+    uint8_t have_wall_s;           int64_t wall_s;
+    uint8_t have_outcome, outcome;
+    uint8_t have_lines_added;      int64_t lines_added;
+    uint8_t have_lines_removed;    int64_t lines_removed;
+    uint8_t have_defects;          int64_t defects;
+};
+
+/* Every experiment row the index kept, in chain order, optionally
+ * restricted to `since_unix` (0 = no floor) and to one box (NULL =
+ * every box). The answer comes from the in-memory index alone: no file is
+ * opened and no clock is read — `since_unix` is the caller's own. Returns
+ * `ZCL_FLEET_FULL` (rows still filled up to `cap`) when the index held more
+ * matching rows than `cap`, same convention as every other bounded walk
+ * here. */
+enum zcl_fleet_status zcl_fleet_ledger_experiment_rows(
+    const struct zcl_fleet_ledger *ledger, int64_t since_unix,
+    const uint8_t box_id[ZCL_FLEET_ID_BYTES], bool have_box,
+    struct zcl_fleet_experiment_row *out, size_t cap, size_t *count);
 
 /* The UTC day number a timestamp falls in — the index's bucket key, exposed
  * because a caller rendering a table needs the same arithmetic. */

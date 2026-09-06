@@ -23,6 +23,7 @@
 #include "test/mesh_stream_loopback.h"
 #include "test/mesh_term_fixture.h"
 
+#include "base/hex.h"
 #include "base/safe_alloc.h"
 #include "chain/chainparams.h"
 #include "command/native_command.h"
@@ -102,7 +103,7 @@ static enum zcl_fleet_status fl_add_usage(struct fl_box *b, uint16_t provider,
     pairs[1].key = ZCL_FLEET_PAIR_TOKENS_OUT;
     pairs[1].value = out;
     return zcl_fleet_ledger_append(b->ledger, ZCL_FLEET_KIND_USAGE, provider,
-                                   pairs, 2, note, b->seed, NULL);
+                                   pairs, 2, note, NULL, b->seed, NULL);
 }
 
 static enum zcl_fleet_status fl_add_vital(struct fl_box *b, const char *id,
@@ -113,7 +114,7 @@ static enum zcl_fleet_status fl_add_vital(struct fl_box *b, const char *id,
         return ZCL_FLEET_VITAL_UNKNOWN;
     struct zcl_fleet_pair pair = { ZCL_FLEET_PAIR_VALUE, value };
     return zcl_fleet_ledger_append(b->ledger, ZCL_FLEET_KIND_VITALS, subject,
-                                   &pair, 1, NULL, b->seed, NULL);
+                                   &pair, 1, NULL, NULL, b->seed, NULL);
 }
 
 static enum zcl_fleet_status fl_add_predict(struct fl_box *b, const char *id,
@@ -137,7 +138,32 @@ static enum zcl_fleet_status fl_add_predict(struct fl_box *b, const char *id,
     p[n++].value = effort;
     return zcl_fleet_ledger_append(b->ledger, ZCL_FLEET_KIND_EXPERIMENT,
                                    ZCL_FLEET_EXPERIMENT_PREDICT, p, n, id,
-                                   b->seed, NULL);
+                                   NULL, b->seed, NULL);
+}
+
+/* Same as `fl_add_predict`, plus the two fields this lane adds: `story`
+ * (free text) and `executor` (a closed-vocabulary pair, like model). Kept
+ * as its own helper rather than growing every existing call site's
+ * argument list. */
+static enum zcl_fleet_status fl_add_predict_full(
+    struct fl_box *b, const char *id, uint8_t task_class, uint8_t harness,
+    uint8_t model, uint8_t effort, uint8_t executor, const char *story)
+{
+    struct zcl_fleet_pair p[5];
+    size_t n = 0;
+    p[n].key = ZCL_FLEET_PAIR_TASK_CLASS;
+    p[n++].value = task_class;
+    p[n].key = ZCL_FLEET_PAIR_HARNESS;
+    p[n++].value = harness;
+    p[n].key = ZCL_FLEET_PAIR_MODEL;
+    p[n++].value = model;
+    p[n].key = ZCL_FLEET_PAIR_EFFORT;
+    p[n++].value = effort;
+    p[n].key = ZCL_FLEET_PAIR_EXECUTOR;
+    p[n++].value = executor;
+    return zcl_fleet_ledger_append(b->ledger, ZCL_FLEET_KIND_EXPERIMENT,
+                                   ZCL_FLEET_EXPERIMENT_PREDICT, p, n, id,
+                                   story, b->seed, NULL);
 }
 
 static enum zcl_fleet_status fl_add_result(struct fl_box *b, const char *id,
@@ -159,7 +185,28 @@ static enum zcl_fleet_status fl_add_result(struct fl_box *b, const char *id,
     p[n++].value = model;
     return zcl_fleet_ledger_append(b->ledger, ZCL_FLEET_KIND_EXPERIMENT,
                                    ZCL_FLEET_EXPERIMENT_RESULT, p, n, id,
-                                   b->seed, NULL);
+                                   NULL, b->seed, NULL);
+}
+
+/* Same as `fl_add_result`, plus `story`/`executor` — see
+ * `fl_add_predict_full`. */
+static enum zcl_fleet_status fl_add_result_full(
+    struct fl_box *b, const char *id, uint8_t task_class, uint8_t model,
+    uint8_t outcome, uint8_t executor, const char *story)
+{
+    struct zcl_fleet_pair p[4];
+    size_t n = 0;
+    p[n].key = ZCL_FLEET_PAIR_TASK_CLASS;
+    p[n++].value = task_class;
+    p[n].key = ZCL_FLEET_PAIR_OUTCOME;
+    p[n++].value = outcome;
+    p[n].key = ZCL_FLEET_PAIR_MODEL;
+    p[n++].value = model;
+    p[n].key = ZCL_FLEET_PAIR_EXECUTOR;
+    p[n++].value = executor;
+    return zcl_fleet_ledger_append(b->ledger, ZCL_FLEET_KIND_EXPERIMENT,
+                                   ZCL_FLEET_EXPERIMENT_RESULT, p, n, id,
+                                   story, b->seed, NULL);
 }
 
 static enum zcl_fleet_status fl_add_result_counters(
@@ -180,7 +227,7 @@ static enum zcl_fleet_status fl_add_result_counters(
     p[n++].value = model;
     return zcl_fleet_ledger_append(b->ledger, ZCL_FLEET_KIND_EXPERIMENT,
                                    ZCL_FLEET_EXPERIMENT_RESULT, p, n, id,
-                                   b->seed, NULL);
+                                   NULL, b->seed, NULL);
 }
 
 /* The one usage bucket for a provider over today, or false. */
@@ -358,12 +405,12 @@ int test_fleet_ledger(void)
         ASSERT(!zcl_fleet_kind_writable(ZCL_FLEET_KIND_REWARD));
         struct zcl_fleet_pair pair = { ZCL_FLEET_PAIR_VALUE, 1 };
         ASSERT_EQ(zcl_fleet_ledger_append(ma.ledger, ZCL_FLEET_KIND_ATTEST, 0,
-                                          &pair, 1, NULL, ma.seed, NULL),
+                                          &pair, 1, NULL, NULL, ma.seed, NULL),
                   ZCL_FLEET_KIND_NOT_WRITABLE);
         /* A vitals subject past the end of the catalog is not a metric. */
         ASSERT_EQ(zcl_fleet_ledger_append(ma.ledger, ZCL_FLEET_KIND_VITALS,
                                           (uint16_t)zcl_fleet_vital_count(),
-                                          &pair, 1, NULL, ma.seed, NULL),
+                                          &pair, 1, NULL, NULL, ma.seed, NULL),
                   ZCL_FLEET_VITAL_UNKNOWN);
         ASSERT_STR_EQ(zcl_fleet_status_label(ZCL_FLEET_VITAL_UNKNOWN),
                       "vital_unknown");
@@ -469,6 +516,130 @@ int test_fleet_ledger(void)
         ASSERT(led);
         ASSERT(zcl_fleet_ledger_peer_seq(led, sample_box) > before);
         zcl_fleet_ledger_close(led);
+        PASS();
+    }
+
+    TEST("fleet experiment predict/result CLI leaves persist story and "
+         "executor, and export prints exp.sh's 22-column TSV with its own "
+         "empty-column placeholder for a field this row never carried") {
+        struct json_value input;
+        struct zcl_command_reply reply;
+
+        json_init(&input);
+        json_set_object(&input);
+        ASSERT(json_push_kv_str(&input, "task_id", "t-cli-story"));
+        ASSERT(json_push_kv_str(&input, "task_class", "read"));
+        ASSERT(json_push_kv_str(&input, "story", "cli-story"));
+        ASSERT(json_push_kv_str(&input, "executor", "grok"));
+        ASSERT(json_push_kv_str(&input, "harness", "manual"));
+        ASSERT(json_push_kv_str(&input, "model", "grok"));
+        ASSERT(json_push_kv_str(&input, "effort", "low"));
+        struct zcl_command_request req_p1 = { .input = &input };
+        zcl_native_handle_fleet_experiment_predict(&req_p1, &reply);
+        ASSERT_EQ(reply.status, ZCL_COMMAND_STATUS_PASSED);
+        zcl_command_reply_free(&reply);
+        json_free(&input);
+
+        json_init(&input);
+        json_set_object(&input);
+        ASSERT(json_push_kv_str(&input, "task_id", "t-cli-story"));
+        ASSERT(json_push_kv_str(&input, "task_class", "read"));
+        ASSERT(json_push_kv_str(&input, "story", "cli-story"));
+        ASSERT(json_push_kv_str(&input, "executor", "grok"));
+        ASSERT(json_push_kv_str(&input, "model", "grok"));
+        ASSERT(json_push_kv_str(&input, "outcome", "LAND"));
+        struct zcl_command_request req_r1 = { .input = &input };
+        zcl_native_handle_fleet_experiment_result(&req_r1, &reply);
+        ASSERT_EQ(reply.status, ZCL_COMMAND_STATUS_PASSED);
+        zcl_command_reply_free(&reply);
+        json_free(&input);
+
+        /* No story, no executor at all: the export line for this row must
+         * print the SAME empty-column placeholder exp.sh's own missing-text
+         * convention uses, never a guess. */
+        json_init(&input);
+        json_set_object(&input);
+        ASSERT(json_push_kv_str(&input, "task_id", "t-cli-plain"));
+        ASSERT(json_push_kv_str(&input, "task_class", "read"));
+        ASSERT(json_push_kv_str(&input, "harness", "manual"));
+        ASSERT(json_push_kv_str(&input, "model", "grok"));
+        ASSERT(json_push_kv_str(&input, "effort", "low"));
+        struct zcl_command_request req_p2 = { .input = &input };
+        zcl_native_handle_fleet_experiment_predict(&req_p2, &reply);
+        ASSERT_EQ(reply.status, ZCL_COMMAND_STATUS_PASSED);
+        zcl_command_reply_free(&reply);
+        json_free(&input);
+
+        struct zcl_command_request req_all = { .input = NULL };
+        zcl_native_handle_fleet_experiment_export(&req_all, &reply);
+        ASSERT_EQ(reply.status, ZCL_COMMAND_STATUS_PASSED);
+        const char *text = json_get_str(json_get(&reply.data, "text"));
+        ASSERT(text != NULL);
+        ASSERT(strstr(text,
+                      "ts\tkind\tbox\ttask_id\ttask_class\tstory\texecutor\t"
+                      "harness\tmodel\teffort\ttokens_in\ttokens_out\t"
+                      "tokens_cache\ttokens_reasoning\ttool_uses\tturns\t"
+                      "wall_s\toutcome\tlines_added\tlines_removed\t"
+                      "defects\tnote\n") == text);
+        {
+            const char *nl = strchr(text, '\n');
+            ASSERT(nl != NULL);
+            size_t tabs = 0;
+            for (const char *p = text; p < nl; p++)
+                if (*p == '\t')
+                    tabs++;
+            /* 22 columns, 21 separators: the export's column COUNT. */
+            ASSERT_EQ(tabs, (size_t)21);
+        }
+        ASSERT(strstr(text, "\tt-cli-story\tread\tcli-story\tgrok\t") != NULL);
+        /* task_class then two empty columns (story, executor) then the
+         * harness that follows them — the placeholder round trip. */
+        ASSERT(strstr(text, "\tt-cli-plain\tread\t\t\tmanual\t") != NULL);
+        zcl_command_reply_free(&reply);
+
+        /* box filter: this machine's own box id keeps every row just
+         * written; a box id that never wrote one keeps none. */
+        json_init(&input);
+        json_set_object(&input);
+        char box_hex[65];
+        zcl_hex_encode(sample_box, 32, box_hex);
+        ASSERT(json_push_kv_str(&input, "box", box_hex));
+        struct zcl_command_request req_box = { .input = &input };
+        zcl_native_handle_fleet_experiment_export(&req_box, &reply);
+        ASSERT_EQ(reply.status, ZCL_COMMAND_STATUS_PASSED);
+        ASSERT(strstr(json_get_str(json_get(&reply.data, "text")),
+                      "t-cli-story") != NULL);
+        zcl_command_reply_free(&reply);
+        json_free(&input);
+
+        json_init(&input);
+        json_set_object(&input);
+        uint8_t other_box[32];
+        memset(other_box, 0x77, sizeof other_box);
+        char other_hex[65];
+        zcl_hex_encode(other_box, 32, other_hex);
+        ASSERT(json_push_kv_str(&input, "box", other_hex));
+        struct zcl_command_request req_other = { .input = &input };
+        zcl_native_handle_fleet_experiment_export(&req_other, &reply);
+        ASSERT_EQ(reply.status, ZCL_COMMAND_STATUS_PASSED);
+        ASSERT_EQ(json_get_int(json_get(&reply.data, "rows")), INT64_C(0));
+        zcl_command_reply_free(&reply);
+        json_free(&input);
+
+        /* since filter: a one-hour floor keeps the rows just written (the
+         * exclusion side of this same filter is proven at the ledger level
+         * below, where an arbitrary `since_unix` is reachable directly —
+         * the CLI's own `since` is hours-back-from-now and so can never
+         * name a floor in the future). */
+        json_init(&input);
+        json_set_object(&input);
+        ASSERT(json_push_kv_int(&input, "since", 1));
+        struct zcl_command_request req_since = { .input = &input };
+        zcl_native_handle_fleet_experiment_export(&req_since, &reply);
+        ASSERT_EQ(reply.status, ZCL_COMMAND_STATUS_PASSED);
+        ASSERT(json_get_int(json_get(&reply.data, "rows")) >= INT64_C(3));
+        zcl_command_reply_free(&reply);
+        json_free(&input);
         PASS();
     }
 
@@ -636,6 +807,104 @@ int test_fleet_ledger(void)
         PASS();
     }
 
+    TEST("fleet ledger: an experiment row's story and executor round-trip "
+         "through zcl_fleet_ledger_experiment_rows, and its since/box "
+         "filters narrow the walk") {
+        /* A fresh, dedicated box: the since-floor check below turns on
+         * "before every row this box holds" versus "before none of them",
+         * and a box shared with an earlier TEST block could, at whole-
+         * second clock resolution, hold a row stamped the very same
+         * second as `before` — a real flake, not a bug in the filter. */
+        struct fl_box rt;
+        ASSERT(fl_box_open(&rt, root, "exp-rowtrip", 0x46));
+        uint8_t task_class = 0, harness = 0, model = 0, effort = 0,
+                outcome = 0, executor_grok = 0;
+        ASSERT(zcl_fleet_experiment_enum_from_name("task_class", "read",
+                                                   &task_class));
+        ASSERT(zcl_fleet_experiment_enum_from_name("harness", "manual",
+                                                   &harness));
+        ASSERT(zcl_fleet_experiment_enum_from_name("model", "grok", &model));
+        ASSERT(zcl_fleet_experiment_enum_from_name("effort", "low", &effort));
+        ASSERT(zcl_fleet_experiment_enum_from_name("outcome", "LAND",
+                                                   &outcome));
+        ASSERT(zcl_fleet_experiment_enum_from_name("executor", "grok",
+                                                   &executor_grok));
+
+        int64_t before = (int64_t)platform_time_wall_time_t();
+        ASSERT_EQ(fl_add_predict_full(&rt, "t-row-story", task_class, harness,
+                                      model, effort, executor_grok,
+                                      "alpha-story"),
+                  ZCL_FLEET_OK);
+        ASSERT_EQ(fl_add_result_full(&rt, "t-row-story", task_class, model,
+                                     outcome, executor_grok, "alpha-story"),
+                  ZCL_FLEET_OK);
+        ASSERT_EQ(fl_add_predict(&rt, "t-row-plain", task_class, harness,
+                                 model, effort, 10, 5),
+                  ZCL_FLEET_OK);
+
+        struct zcl_fleet_experiment_row rows[32];
+        size_t count = 0;
+        ASSERT_EQ(zcl_fleet_ledger_experiment_rows(rt.ledger, 0, NULL, false,
+                                                   rows, 32, &count),
+                  ZCL_FLEET_OK);
+        ASSERT_EQ(count, (size_t)3);
+
+        bool found_story = false, found_plain = false;
+        for (size_t i = 0; i < count; i++) {
+            if (strcmp(rows[i].task_id, "t-row-story") == 0 &&
+                rows[i].phase == ZCL_FLEET_EXPERIMENT_PREDICT) {
+                found_story = true;
+                ASSERT_STR_EQ(rows[i].story, "alpha-story");
+                ASSERT_EQ(rows[i].have_executor, (uint8_t)1);
+                ASSERT_EQ(rows[i].executor, executor_grok);
+            }
+            if (strcmp(rows[i].task_id, "t-row-plain") == 0) {
+                found_plain = true;
+                ASSERT_STR_EQ(rows[i].story, "");
+                ASSERT_EQ(rows[i].have_executor, (uint8_t)0);
+            }
+        }
+        ASSERT(found_story);
+        ASSERT(found_plain);
+
+        /* since in the future excludes every row just written. */
+        size_t future_count = 999;
+        ASSERT_EQ(zcl_fleet_ledger_experiment_rows(rt.ledger, before + 3600,
+                                                   NULL, false, rows, 32,
+                                                   &future_count),
+                  ZCL_FLEET_OK);
+        ASSERT_EQ(future_count, (size_t)0);
+
+        /* since at or before the first append keeps every row this fresh
+         * box holds. */
+        size_t since_count = 0;
+        ASSERT_EQ(zcl_fleet_ledger_experiment_rows(rt.ledger, before, NULL,
+                                                   false, rows, 32,
+                                                   &since_count),
+                  ZCL_FLEET_OK);
+        ASSERT_EQ(since_count, (size_t)3);
+
+        /* box filter: a box id that never wrote here keeps nothing; this
+         * box's own id keeps every row. */
+        uint8_t other_box[32];
+        memset(other_box, 0xee, sizeof other_box);
+        size_t other_count = 999;
+        ASSERT_EQ(zcl_fleet_ledger_experiment_rows(rt.ledger, 0, other_box,
+                                                   true, rows, 32,
+                                                   &other_count),
+                  ZCL_FLEET_OK);
+        ASSERT_EQ(other_count, (size_t)0);
+
+        size_t own_count = 0;
+        ASSERT_EQ(zcl_fleet_ledger_experiment_rows(rt.ledger, 0, rt.box_id,
+                                                   true, rows, 32,
+                                                   &own_count),
+                  ZCL_FLEET_OK);
+        ASSERT_EQ(own_count, count);
+        fl_box_close(&rt);
+        PASS();
+    }
+
     TEST("fleet ledger: a bad task_class and a bad harness refuse by "
          "name") {
         if (!ex_open) {
@@ -673,7 +942,7 @@ int test_fleet_ledger(void)
         ASSERT_EQ(zcl_fleet_ledger_append(
                       ex.ledger, ZCL_FLEET_KIND_EXPERIMENT,
                       ZCL_FLEET_EXPERIMENT_PREDICT, bad_class, n, "t-bad-class",
-                      ex.seed, NULL),
+                      NULL, ex.seed, NULL),
                   ZCL_FLEET_EXPERIMENT_ENUM);
         struct zcl_fleet_pair bad_harness[4];
         n = 0;
@@ -688,7 +957,7 @@ int test_fleet_ledger(void)
         ASSERT_EQ(zcl_fleet_ledger_append(
                       ex.ledger, ZCL_FLEET_KIND_EXPERIMENT,
                       ZCL_FLEET_EXPERIMENT_PREDICT, bad_harness, n,
-                      "t-bad-harness", ex.seed, NULL),
+                      "t-bad-harness", NULL, ex.seed, NULL),
                   ZCL_FLEET_EXPERIMENT_ENUM);
         PASS();
     }

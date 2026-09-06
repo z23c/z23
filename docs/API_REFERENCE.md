@@ -110,6 +110,7 @@ Per source file:
 | `engine/composition/commands/mind.def` | 4 | 1 | 3 |
 | `engine/composition/commands/fleet.def` | 10 | 3 | 7 |
 | `engine/composition/commands/fleet_agents.def` | 1 | 0 | 1 |
+| `engine/composition/commands/fleet.def` | 11 | 3 | 8 |
 | `engine/composition/commands/fleet_enrol.def` | 4 | 0 | 4 |
 | `engine/composition/commands/telemetry/root.def` | 6 | 2 | 4 |
 | `engine/composition/commands/telemetry/watch.def` | 1 | 0 | 1 |
@@ -1791,6 +1792,7 @@ represented by its children's sections.
 | `fleet experiment predict` | ready | mutate / dev-mutation / operator · fast/low | **`task_id`**, `task_class`, `story`, `executor`, `harness`, `model`, `effort`, `tokens`, `wall_s`, `outcome`, `note` | `zcl.fleet_experiment_predict.v1` | `z23 fleet experiment predict --task_id=u1 --task_class=read --harness=manual --model=grok --effort=low --tokens=1200 --wall_s=30` | Append one signed predict row for a delegated task |
 | `fleet experiment result` | ready | mutate / dev-mutation / operator · fast/low | **`task_id`**, `task_class`, `story`, `executor`, `harness`, `model`, `effort`, `in`, `out`, `cache`, `reasoning`, `tool_uses`, `turns`, `wall_s`, `outcome`, `added`, `removed`, `defects`, `note` | `zcl.fleet_experiment_result.v1` | `z23 fleet experiment result --task_id=u1 --task_class=read --model=grok --outcome=LAND --in=800 --out=200 --wall_s=28` | Append one signed result row for a delegated task |
 | `fleet experiment stats` | ready | read / read / operator · instant/low | `task_class`, `model` | `zcl.fleet_experiment_stats.v1` | `z23 fleet experiment stats --task_class=read --model=grok` | Per task_class and model: counts, LAND rate, medians, predicted-vs-actual |
+| `fleet experiment export` | ready | read / read / operator · instant/low | `since`, `box` | `zcl.fleet_experiment_export.v1` | `z23 fleet experiment export --since=24` | Every kept experiment row as exp.sh's 22-column TSV, one line each |
 
 
 ## Aliases

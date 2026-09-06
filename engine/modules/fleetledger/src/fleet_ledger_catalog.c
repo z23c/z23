@@ -227,7 +227,7 @@ static const char *const k_pair_names[ZCL_FLEET_PAIR_KEY_MAX + 1] = {
     "wall_ms", "turns", "tool_uses", "cost_micro_usd",
     "value", "count", "bytes", "limit",
     "wall_s", "lines_added", "lines_removed", "defects",
-    "task_class", "harness", "outcome", "model", "effort",
+    "task_class", "harness", "outcome", "model", "effort", "executor",
 };
 
 /* The declared merge class of each key, in the same order. `value` is the
@@ -259,6 +259,7 @@ static const uint8_t k_pair_merge[ZCL_FLEET_PAIR_KEY_MAX + 1] = {
     ZCL_FLEET_MERGE_LWW,         /* outcome */
     ZCL_FLEET_MERGE_LWW,         /* model */
     ZCL_FLEET_MERGE_LWW,         /* effort */
+    ZCL_FLEET_MERGE_LWW,         /* executor */
 };
 
 const char *zcl_fleet_merge_name(enum zcl_fleet_merge merge)
@@ -369,6 +370,22 @@ static const struct exp_enum_row k_effort[] = {
     { 3, "high", true },
 };
 
+/* Matches exp.sh's EXECUTOR list (tools/exp.sh line 12) member for member.
+ * `unknown` is not a member there either — exp.sh's check_enum refuses any
+ * other name outright, same as here. */
+static const struct exp_enum_row k_executor[] = {
+    { 0, "claude-fable", true },
+    { 1, "claude-opus", true },
+    { 2, "claude-sonnet", true },
+    { 3, "claude-haiku", true },
+    { 4, "grok", true },
+    { 5, "glm", true },
+    { 6, "codex", true },
+    { 7, "muse", true },
+    { 8, "mac", true },
+    { 9, "kimi", true },
+};
+
 static const struct exp_enum_row *exp_table(const char *field, size_t *n)
 {
     if (!field || !n)
@@ -392,6 +409,10 @@ static const struct exp_enum_row *exp_table(const char *field, size_t *n)
     if (strcmp(field, "effort") == 0) {
         *n = sizeof k_effort / sizeof k_effort[0];
         return k_effort;
+    }
+    if (strcmp(field, "executor") == 0) {
+        *n = sizeof k_executor / sizeof k_executor[0];
+        return k_executor;
     }
     return NULL;
 }
@@ -440,7 +461,7 @@ bool zcl_fleet_experiment_enum_key(uint8_t key)
 {
     return key == ZCL_FLEET_PAIR_TASK_CLASS || key == ZCL_FLEET_PAIR_HARNESS ||
            key == ZCL_FLEET_PAIR_OUTCOME || key == ZCL_FLEET_PAIR_MODEL ||
-           key == ZCL_FLEET_PAIR_EFFORT;
+           key == ZCL_FLEET_PAIR_EFFORT || key == ZCL_FLEET_PAIR_EXECUTOR;
 }
 
 bool zcl_fleet_experiment_enum_pair_ok(uint8_t key, int64_t value)

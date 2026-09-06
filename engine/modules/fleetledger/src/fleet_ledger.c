@@ -101,6 +101,29 @@ struct fleet_experiment_event {
     char note[ZCL_FLEET_NOTE_MAX];
     int64_t tokens;
     int64_t wall_s;
+
+    /* Everything export needs beyond what stats groups by. Kept on the
+     * SAME retained event rather than a second array: one row, one place
+     * it lives in memory. */
+    int64_t ts_unix;
+    uint8_t box_id[ZCL_FLEET_ID_BYTES];
+    uint8_t story_len;
+    char story[ZCL_FLEET_STORY_MAX];
+    bool have_executor;
+    uint8_t executor;
+    bool have_harness;
+    uint8_t harness;
+    bool have_effort;
+    uint8_t effort;
+    bool have_tokens_in;        int64_t tokens_in;
+    bool have_tokens_out;       int64_t tokens_out;
+    bool have_tokens_cache;     int64_t tokens_cache;
+    bool have_tokens_reasoning; int64_t tokens_reasoning;
+    bool have_tool_uses;        int64_t tool_uses;
+    bool have_turns;            int64_t turns;
+    bool have_lines_added;      int64_t lines_added;
+    bool have_lines_removed;    int64_t lines_removed;
+    bool have_defects;          int64_t defects;
 };
 
 struct zcl_fleet_ledger {
@@ -342,6 +365,56 @@ static int64_t pair_value(const struct zcl_fleet_row *row, uint8_t key,
 
 /* Keep one event per experiment row so stats can take medians and pair
  * predict against result by task_id. Merged day cells cannot do that. */
+/* One pair, read once and never re-derived: `*have_out` is exactly whether
+ * the row carried `key`, and `*val_out` is its value or 0 when absent. */
+static void ev_pair(const struct zcl_fleet_row *row, uint8_t key,
+                    bool *have_out, int64_t *val_out)
+{
+    bool present = false;
+    int64_t v = pair_value(row, key, &present);
+    *have_out = present;
+    *val_out = v;
+}
+
+/* Everything export needs that stats does not: the box, the free-text
+ * story, the closed-vocabulary executor/harness/effort, and each token and
+ * change-size counter kept separately rather than summed. Split out of
+ * `index_experiment` so neither function needs to reason about the other's
+ * fields to stay under the complexity bound. */
+static void index_experiment_extra(struct fleet_experiment_event *e,
+                                   const struct zcl_fleet_row *row)
+{
+    e->ts_unix = row->ts_unix;
+    memcpy(e->box_id, row->box_id, ZCL_FLEET_ID_BYTES);
+    e->story_len = row->story_len;
+    if (row->story_len)
+        memcpy(e->story, row->story, row->story_len);
+    bool have = false;
+    int64_t v = 0;
+    ev_pair(row, ZCL_FLEET_PAIR_EXECUTOR, &have, &v);
+    e->have_executor = have;
+    e->executor = (uint8_t)v;
+    ev_pair(row, ZCL_FLEET_PAIR_HARNESS, &e->have_harness, &v);
+    e->harness = (uint8_t)v;
+    ev_pair(row, ZCL_FLEET_PAIR_EFFORT, &e->have_effort, &v);
+    e->effort = (uint8_t)v;
+    ev_pair(row, ZCL_FLEET_PAIR_TOKENS_IN, &e->have_tokens_in, &e->tokens_in);
+    ev_pair(row, ZCL_FLEET_PAIR_TOKENS_OUT, &e->have_tokens_out,
+           &e->tokens_out);
+    ev_pair(row, ZCL_FLEET_PAIR_TOKENS_CACHED, &e->have_tokens_cache,
+           &e->tokens_cache);
+    ev_pair(row, ZCL_FLEET_PAIR_TOKENS_REASONING, &e->have_tokens_reasoning,
+           &e->tokens_reasoning);
+    ev_pair(row, ZCL_FLEET_PAIR_TOOL_USES, &e->have_tool_uses,
+           &e->tool_uses);
+    ev_pair(row, ZCL_FLEET_PAIR_TURNS, &e->have_turns, &e->turns);
+    ev_pair(row, ZCL_FLEET_PAIR_LINES_ADDED, &e->have_lines_added,
+           &e->lines_added);
+    ev_pair(row, ZCL_FLEET_PAIR_LINES_REMOVED, &e->have_lines_removed,
+           &e->lines_removed);
+    ev_pair(row, ZCL_FLEET_PAIR_DEFECTS, &e->have_defects, &e->defects);
+}
+
 static void index_experiment(struct zcl_fleet_ledger *l,
                              const struct zcl_fleet_row *row)
 {
@@ -379,6 +452,7 @@ static void index_experiment(struct zcl_fleet_ledger *l,
     e->have_tokens = have;
     e->wall_s = pair_value(row, ZCL_FLEET_PAIR_WALL_S, &present);
     e->have_wall = present;
+    index_experiment_extra(e, row);
 }
 
 uint64_t zcl_fleet_ledger_index_overflow(const struct zcl_fleet_ledger *l)
@@ -623,7 +697,8 @@ static enum zcl_fleet_status chain_tail(struct zcl_chainlog *log,
 enum zcl_fleet_status zcl_fleet_ledger_append(
     struct zcl_fleet_ledger *ledger, uint8_t kind, uint16_t subject,
     const struct zcl_fleet_pair *pairs, size_t pair_count, const char *note,
-    const uint8_t seed[ZCL_FLEET_SEED_BYTES], uint64_t *out_seq)
+    const char *story, const uint8_t seed[ZCL_FLEET_SEED_BYTES],
+    uint64_t *out_seq)
 {
     if (!ledger || !seed || (!pairs && pair_count))
         return ZCL_FLEET_ARGUMENT;
@@ -638,15 +713,22 @@ enum zcl_fleet_status zcl_fleet_ledger_append(
     size_t note_len = note ? strlen(note) : 0;
     if (note_len > ZCL_FLEET_NOTE_MAX)
         return ZCL_FLEET_ARGUMENT;
+    size_t story_len = story ? strlen(story) : 0;
+    if (story_len > ZCL_FLEET_STORY_MAX)
+        return ZCL_FLEET_ARGUMENT;
 
     struct zcl_fleet_row row;
     memset(&row, 0, sizeof row);
+    row.version = ZCL_FLEET_ROW_VERSION;
     row.kind = kind;
     row.subject = subject;
     row.pair_count = (uint8_t)pair_count;
     row.note_len = (uint8_t)note_len;
     if (note_len)
         memcpy(row.note, note, note_len);
+    row.story_len = (uint8_t)story_len;
+    if (story_len)
+        memcpy(row.story, story, story_len);
     for (size_t i = 0; i < pair_count; i++)
         row.pair[i] = pairs[i];
     memcpy(row.box_id, ledger->self_id, ZCL_FLEET_ID_BYTES);
@@ -1133,5 +1215,73 @@ enum zcl_fleet_status zcl_fleet_ledger_experiment_stats(
     int64_t end = platform_time_monotonic_us();
     if (index_us)
         *index_us = end > start ? (uint64_t)(end - start) : 0u;
+    return status;
+}
+
+/* Copy one retained event into the export shape. A free function rather
+ * than inline in the walk below, so the walk's own decision count stays
+ * about which rows match rather than about how a row is copied. */
+static void experiment_row_fill(struct zcl_fleet_experiment_row *out,
+                                const struct fleet_experiment_event *e)
+{
+    memset(out, 0, sizeof(*out));
+    out->ts_unix = e->ts_unix;
+    memcpy(out->box_id, e->box_id, ZCL_FLEET_ID_BYTES);
+    out->phase = e->phase;
+    memcpy(out->task_id, e->note, e->note_len);
+    out->task_class = e->task_class;
+    memcpy(out->story, e->story, e->story_len);
+    out->have_executor = e->have_executor ? 1 : 0;
+    out->executor = e->executor;
+    out->have_harness = e->have_harness ? 1 : 0;
+    out->harness = e->harness;
+    out->model = e->model;
+    out->have_effort = e->have_effort ? 1 : 0;
+    out->effort = e->effort;
+    out->have_tokens_in = e->have_tokens_in ? 1 : 0;
+    out->tokens_in = e->tokens_in;
+    out->have_tokens_out = e->have_tokens_out ? 1 : 0;
+    out->tokens_out = e->tokens_out;
+    out->have_tokens_cache = e->have_tokens_cache ? 1 : 0;
+    out->tokens_cache = e->tokens_cache;
+    out->have_tokens_reasoning = e->have_tokens_reasoning ? 1 : 0;
+    out->tokens_reasoning = e->tokens_reasoning;
+    out->have_tool_uses = e->have_tool_uses ? 1 : 0;
+    out->tool_uses = e->tool_uses;
+    out->have_turns = e->have_turns ? 1 : 0;
+    out->turns = e->turns;
+    out->have_wall_s = e->have_wall ? 1 : 0;
+    out->wall_s = e->wall_s;
+    out->have_outcome = e->phase == ZCL_FLEET_EXPERIMENT_RESULT ? 1 : 0;
+    out->outcome = e->outcome;
+    out->have_lines_added = e->have_lines_added ? 1 : 0;
+    out->lines_added = e->lines_added;
+    out->have_lines_removed = e->have_lines_removed ? 1 : 0;
+    out->lines_removed = e->lines_removed;
+    out->have_defects = e->have_defects ? 1 : 0;
+    out->defects = e->defects;
+}
+
+enum zcl_fleet_status zcl_fleet_ledger_experiment_rows(
+    const struct zcl_fleet_ledger *ledger, int64_t since_unix,
+    const uint8_t box_id[ZCL_FLEET_ID_BYTES], bool have_box,
+    struct zcl_fleet_experiment_row *out, size_t cap, size_t *count)
+{
+    if (!ledger || !out || !count)
+        return ZCL_FLEET_ARGUMENT;
+    *count = 0;
+    enum zcl_fleet_status status = ZCL_FLEET_OK;
+    for (uint32_t i = 0; i < ledger->experiment_count; i++) {
+        const struct fleet_experiment_event *e = &ledger->experiment[i];
+        if (e->ts_unix < since_unix)
+            continue;
+        if (have_box && memcmp(e->box_id, box_id, ZCL_FLEET_ID_BYTES) != 0)
+            continue;
+        if (*count >= cap) {
+            status = ZCL_FLEET_FULL;
+            break;
+        }
+        experiment_row_fill(&out[(*count)++], e);
+    }
     return status;
 }
