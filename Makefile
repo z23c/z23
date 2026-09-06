@@ -13077,8 +13077,9 @@ $(TOR_PROVENANCE_BIN): $(TOR_PROVENANCE_SRCS)
 	    -Icontexts/commons/packages/zsha256/include \
 	    -o $@ $(TOR_PROVENANCE_SRCS)
 
-.PHONY: tools/tor-provenance check-tor-provenance
+.PHONY: tools/tor-provenance z23-tor-provenance check-tor-provenance
 tools/tor-provenance: $(TOR_PROVENANCE_BIN)
+z23-tor-provenance: $(TOR_PROVENANCE_BIN)
 
 # Gate — the bundled Tor archives are bound to the vendor/tor commit and
 # archive bytes that produced them, not merely present and non-empty (see

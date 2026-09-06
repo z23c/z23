@@ -459,7 +459,7 @@ TOR_STUB_REFUSAL='refusing to package a tor=stub binary: it cannot reach the oni
 # sets 1 so a sleeping fixture is a timeout, not a stall).
 verify_release_not_tor_stub() {
     local dir="$1" node="$1/z23" sidecar="$1/z23.tor-stamp"
-    local stamp="" rc=0 budget out err timeout_cmd="" line
+    local stamp="" sidecar_binary_sha256="" rc=0 budget out err timeout_cmd="" line
     [ -f "$node" ] || die "tor_stamp_unreadable: $TOR_STUB_REFUSAL (the release at $dir has no z23)"
 
     refuse_tor_stamp() {
@@ -467,25 +467,48 @@ verify_release_not_tor_stub() {
         die "$reason: $TOR_STUB_REFUSAL ($detail)"
     }
 
+    # Reads every line rather than stopping at the first match: the sidecar
+    # (unlike raw `-version` output) also carries a binary_sha256 line after
+    # its tor: line, and read_sidecar_stamp below needs both.
     stamp_from_text() {
         stamp=""
+        sidecar_binary_sha256=""
         while IFS= read -r line || [ -n "$line" ]; do
             line="${line%$'\r'}"
             case "$line" in
-                'tor: full') stamp=full; return 0 ;;
-                'tor: stub') stamp=stub; return 0 ;;
+                'tor: full') stamp=full ;;
+                'tor: stub') stamp=stub ;;
+                'binary_sha256: '*) sidecar_binary_sha256="${line#binary_sha256: }" ;;
             esac
         done
         return 0
     }
 
+    # The sidecar is only ever consulted when this host cannot EXECUTE the
+    # payload (foreign arch), so nothing here can re-derive "tor: full" from
+    # the binary itself. What it CAN do is bind the sidecar's claim to the
+    # exact bytes SHA256SUMS already verified for z23 -- manifest_digest_of
+    # reads a value validate_manifest_contract + sha256_check_manifest have
+    # already authenticated by the time verify_strict calls this function.
+    # Without that binding, any hand-written sidecar saying `tor: full`
+    # would be accepted next to any payload this host cannot run.
     read_sidecar_stamp() {
         [ -f "$sidecar" ] || refuse_tor_stamp tor_stamp_sidecar_missing \
             "the release at $dir is not executable here and carries no z23.tor-stamp sidecar"
         stamp=""
         stamp_from_text <"$sidecar"
         case "$stamp" in
-            full) return 0 ;;
+            full)
+                local expected_sha256
+                expected_sha256="$(manifest_digest_of "$dir" z23)"
+                [ -n "$expected_sha256" ] || refuse_tor_stamp tor_stamp_unbound \
+                    "the release at $dir has no z23 row in SHA256SUMS to bind the sidecar to"
+                [ -n "$sidecar_binary_sha256" ] || refuse_tor_stamp tor_stamp_unbound \
+                    "the release at $dir sidecar has no binary_sha256 line, so nothing binds it to this payload"
+                [ "$sidecar_binary_sha256" = "$expected_sha256" ] || refuse_tor_stamp tor_stamp_unbound \
+                    "the release at $dir sidecar's binary_sha256 does not match the checksummed z23 payload"
+                return 0
+                ;;
             stub)
                 refuse_tor_stamp tor_stamp_stub \
                     "the release at $dir sidecar reports tor: stub"
@@ -1250,7 +1273,10 @@ EOF
         tor_stamp_sidecar_missing \
         "a non-executable release with no tor-stamp sidecar"
 
-    # Same foreign payload, sidecar says full: that is enough to install.
+    # Same foreign payload, sidecar says full but is NOT bound to this
+    # payload's bytes (no binary_sha256 line at all): refused. A bare
+    # `tor: full` sidecar next to any foreign-arch payload used to be enough
+    # to install — that is precisely the forgery this binding closes.
     mkdir -p "$tmp/sidecar-full"
     printf '\177ELF\002\001\001\000not-runnable-on-this-host\n' \
         >"$tmp/sidecar-full/z23"
@@ -1261,11 +1287,48 @@ EOF
         "$tmp/sidecar-full/"
     printf 'tor: full\n' >"$tmp/sidecar-full/z23.tor-stamp"
     (cd "$tmp/sidecar-full" && sha256sum $RELEASE_MEMBERS >SHA256SUMS)
+    selftest_expect_stamp_refuse \
+        "$tmp/sidecar-full" "$tmp/sidecar-full-dest" "$tmp/sidecar-full.err" \
+        tor_stamp_unbound "a non-executable release whose sidecar has no binary_sha256"
+
+    # Same shape, but the sidecar carries a binary_sha256 that does not match
+    # this payload's actual (checksummed) bytes: also refused, and for the
+    # same reason -- the binding is what is being checked, not merely its
+    # presence.
+    mkdir -p "$tmp/sidecar-wrong-hash"
+    printf '\177ELF\002\001\001\000not-runnable-on-this-host\n' \
+        >"$tmp/sidecar-wrong-hash/z23"
+    chmod 755 "$tmp/sidecar-wrong-hash/z23"
+    ln -f -- "$tmp/sidecar-wrong-hash/z23" "$tmp/sidecar-wrong-hash/zclassic23"
+    cp -f -- "$tmp/good/zclassic23-package-verify" \
+        "$tmp/good/zclassic23-acme" "$tmp/good/AGENT_CARD.md" \
+        "$tmp/sidecar-wrong-hash/"
+    printf 'tor: full\nbinary_sha256: %s\n' \
+        "$(printf 'a%.0s' {1..64})" >"$tmp/sidecar-wrong-hash/z23.tor-stamp"
+    (cd "$tmp/sidecar-wrong-hash" && sha256sum $RELEASE_MEMBERS >SHA256SUMS)
+    selftest_expect_stamp_refuse \
+        "$tmp/sidecar-wrong-hash" "$tmp/sidecar-wrong-hash-dest" "$tmp/sidecar-wrong-hash.err" \
+        tor_stamp_unbound "a non-executable release whose sidecar binary_sha256 does not match"
+
+    # Same foreign payload, sidecar correctly bound to this exact z23's
+    # checksummed bytes: that is what "enough to install" now requires.
+    mkdir -p "$tmp/sidecar-bound"
+    printf '\177ELF\002\001\001\000not-runnable-on-this-host\n' \
+        >"$tmp/sidecar-bound/z23"
+    chmod 755 "$tmp/sidecar-bound/z23"
+    ln -f -- "$tmp/sidecar-bound/z23" "$tmp/sidecar-bound/zclassic23"
+    cp -f -- "$tmp/good/zclassic23-package-verify" \
+        "$tmp/good/zclassic23-acme" "$tmp/good/AGENT_CARD.md" \
+        "$tmp/sidecar-bound/"
+    (cd "$tmp/sidecar-bound" && sha256sum $RELEASE_MEMBERS >SHA256SUMS)
+    printf 'tor: full\nbinary_sha256: %s\n' \
+        "$(manifest_digest_of "$tmp/sidecar-bound" z23)" \
+        >"$tmp/sidecar-bound/z23.tor-stamp"
     rc=0
-    run_install "$tmp/sidecar-full-dest" "$tmp/units" "$tmp/sidecar-full" \
-        >/dev/null 2>"$tmp/sidecar-full.err" || rc=$?
-    [ "$rc" -eq 0 ] || die "selftest: a non-executable release with a full sidecar must install"
-    SELFTEST_TOR_CASES="${SELFTEST_TOR_CASES:+$SELFTEST_TOR_CASES }tor_stamp_sidecar_full"
+    run_install "$tmp/sidecar-bound-dest" "$tmp/units" "$tmp/sidecar-bound" \
+        >/dev/null 2>"$tmp/sidecar-bound.err" || rc=$?
+    [ "$rc" -eq 0 ] || die "selftest: a non-executable release with a correctly bound sidecar must install"
+    SELFTEST_TOR_CASES="${SELFTEST_TOR_CASES:+$SELFTEST_TOR_CASES }tor_stamp_sidecar_bound"
 
     # Positive control: the same shape, stamped full, must install.
     selftest_write_node_release "$tmp/full-release" <<'EOF'

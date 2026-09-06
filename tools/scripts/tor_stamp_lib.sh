@@ -55,16 +55,24 @@ zcl_tor_require_full() {
 }
 
 # Write <node>.tor-stamp containing the exact `-version` stamp line
-# (`tor: full` or `tor: stub`). Callers that already required `full` still
-# write the sidecar: the installer reads it when it cannot execute the payload.
+# (`tor: full` or `tor: stub`), plus the sha256 of the exact binary bytes it
+# stands in for. Callers that already required `full` still write the
+# sidecar: the installer reads it when it cannot execute the payload (a
+# foreign-arch release), and without the second line a hand-written sidecar
+# saying `tor: full` next to any payload would sail through unverified --
+# install_z23.sh's read_sidecar_stamp binds this field to the SAME digest
+# SHA256SUMS already recorded and verified for that payload, so the sidecar
+# can no longer be forged independently of the bytes it describes.
 zcl_tor_write_stamp_sidecar() {
-    local node="$1" stamp sidecar
+    local node="$1" stamp sidecar binary_sha256
     stamp="$(zcl_tor_stamp "$node" 2>/dev/null || true)"
     case "$stamp" in
         full|stub) ;;
         *) return 1 ;;
     esac
+    binary_sha256="$(sha256sum <"$node" 2>/dev/null | awk '{print $1}')"
+    [ -n "$binary_sha256" ] || return 1
     sidecar="${node}.tor-stamp"
-    printf 'tor: %s\n' "$stamp" >"$sidecar" || return 1
+    printf 'tor: %s\nbinary_sha256: %s\n' "$stamp" "$binary_sha256" >"$sidecar" || return 1
     return 0
 }

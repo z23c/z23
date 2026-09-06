@@ -60,6 +60,8 @@ cd "$REPO_ROOT"
 . "$REPO_ROOT/tools/scripts/source_identity_lib.sh"  # zcl_is_sha256, zcl_json_first_sha256
 # shellcheck source=tools/scripts/tor_stamp_lib.sh
 . "$REPO_ROOT/tools/scripts/tor_stamp_lib.sh"  # ZCL_TOR_STUB_REFUSAL, zcl_tor_require_full
+# shellcheck source=tools/scripts/tor_provenance_lib.sh
+. "$REPO_ROOT/tools/scripts/tor_provenance_lib.sh"  # zcl_tor_provenance_bin, zcl_tor_provenance_ensure_bin
 
 REMOTE_HOSTS_RAW="${ZCL_SHIP_HOSTS:-${ZCL_SHIP_REMOTE:-}}"
 PROOF_SERVER="${ZCL_SHIP_PROOF_SERVER:-}"
@@ -207,12 +209,21 @@ ship_candidate_has_real_tor() {
     [ "$tor_build" = real_tor ]
 }
 
-# True when the four archives Makefile TOR_FULL globs for exist in $1.
-# Absence means the link falls back to -ltor_stub and the candidate check
-# above will refuse after lint + test-parallel. This is the cheap filter;
-# it does not replace ship_candidate_has_real_tor.
+# True when the four archives Makefile TOR_FULL globs for exist in $1 AND are
+# bound to the vendor/tor commit and bytes z23-tor-provenance recorded for
+# them (tools/tor_provenance.c) -- existence alone used to be the whole
+# check, and a tree can have all four TOR_FULL archives that are stale (a
+# different compiler, a copied-over commit, a byte-flipped archive) and still
+# pass it. $2, when non-empty, is the vendor/tor commit this checkout's HEAD
+# pins to; omitted by the selftest fixtures below, which have no real
+# vendor/tor checkout to derive one from. $3 overrides the provenance binary
+# path, same injection shape as ship_candidate_has_real_tor's $2 jsonq.
+#
+# Absence or a provenance mismatch means the link falls back to -ltor_stub
+# and the candidate check above will refuse after lint + test-parallel. This
+# is the cheap filter; it does not replace ship_candidate_has_real_tor.
 ship_checkout_has_real_tor_archives() {
-    local root="$1" archive
+    local root="$1" tor_commit="${2:-}" provenance_bin="${3:-$REPO_ROOT/build/bin/z23-tor-provenance}" archive
     [ -n "$root" ] || return 1
     for archive in \
         vendor/tor/libtor.a \
@@ -222,7 +233,12 @@ ship_checkout_has_real_tor_archives() {
     do
         [ -f "$root/$archive" ] || return 1
     done
-    return 0
+    [ -x "$provenance_bin" ] || return 1
+    if [ -n "$tor_commit" ]; then
+        "$provenance_bin" check "$root/vendor/tor" --tor-commit "$tor_commit" >/dev/null 2>&1
+    else
+        "$provenance_bin" check "$root/vendor/tor" >/dev/null 2>&1
+    fi
 }
 
 # ── The unsippable dev artifact, under every name it can be reached by ──────
@@ -450,8 +466,32 @@ if [ "${1:-}" = "--selftest" ] || [ "${1:-}" = "--selftest-dev-guard" ]; then
     touch "$test_tmp/tor-missing-one/vendor/tor/libtor.a" \
           "$test_tmp/tor-missing-one/vendor/tor/src/ext/ed25519/donna/libed25519_donna.a" \
           "$test_tmp/tor-missing-one/vendor/tor/src/ext/ed25519/ref10/libed25519_ref10.a"
-    ship_checkout_has_real_tor_archives "$test_tmp/tor-present"
-    refute ship_checkout_has_real_tor_archives "$test_tmp/tor-missing-one"
+    # Existence alone is no longer the whole check: a fourth fixture has all
+    # four archives but a provenance manifest that does not match their
+    # bytes -- the exact "stale libtor.a" case ship_checkout_has_real_tor_
+    # archives exists to catch.
+    mkdir -p "$test_tmp/tor-bad-provenance/vendor/tor/src/ext/ed25519/donna" \
+             "$test_tmp/tor-bad-provenance/vendor/tor/src/ext/ed25519/ref10" \
+             "$test_tmp/tor-bad-provenance/vendor/tor/src/ext/keccak-tiny"
+    printf 'real bytes\n' >"$test_tmp/tor-bad-provenance/vendor/tor/libtor.a"
+    printf 'real bytes\n' >"$test_tmp/tor-bad-provenance/vendor/tor/src/ext/ed25519/donna/libed25519_donna.a"
+    printf 'real bytes\n' >"$test_tmp/tor-bad-provenance/vendor/tor/src/ext/ed25519/ref10/libed25519_ref10.a"
+    printf 'real bytes\n' >"$test_tmp/tor-bad-provenance/vendor/tor/src/ext/keccak-tiny/libkeccak-tiny.a"
+    zcl_tor_provenance_ensure_bin "$REPO_ROOT" ||
+        { echo "ship: selftest FAILED — could not build z23-tor-provenance for the fixture" >&2; exit 1; }
+    provenance_bin="$(zcl_tor_provenance_bin "$REPO_ROOT")"
+    "$provenance_bin" write "$test_tmp/tor-present/vendor/tor" \
+        "$(printf '%040x' 1)" fixture-cc "$(printf 'x' | sha256sum | awk '{print $1}')" >/dev/null ||
+        { echo "ship: selftest FAILED — could not write the tor-present fixture manifest" >&2; exit 1; }
+    "$provenance_bin" write "$test_tmp/tor-bad-provenance/vendor/tor" \
+        "$(printf '%040x' 1)" fixture-cc "$(printf 'x' | sha256sum | awk '{print $1}')" >/dev/null ||
+        { echo "ship: selftest FAILED — could not write the tor-bad-provenance fixture manifest" >&2; exit 1; }
+    # Now corrupt one archive AFTER its manifest was written, so the manifest
+    # records the bytes the archive no longer has.
+    printf 'different bytes\n' >"$test_tmp/tor-bad-provenance/vendor/tor/libtor.a"
+    ship_checkout_has_real_tor_archives "$test_tmp/tor-present" "" "$provenance_bin"
+    refute ship_checkout_has_real_tor_archives "$test_tmp/tor-missing-one" "" "$provenance_bin"
+    refute ship_checkout_has_real_tor_archives "$test_tmp/tor-bad-provenance" "" "$provenance_bin"
     refute ship_checkout_has_real_tor_archives "$test_tmp/tor-absent"
     selftest_stage() {
         printf 'stage-start %s\n' "$1" >> "$test_tmp/order"
@@ -575,12 +615,21 @@ if git rev-parse --verify -q origin/main >/dev/null; then
 fi
 say "source     $(git rev-parse --short HEAD)  $(git log -1 --format=%s | cut -c1-58)"
 
-# Fail in seconds, not after lint + test-parallel. Missing any of these four
-# makes TOR_LIBS fall back to -ltor_stub, and the post-build
-# ship_candidate_has_real_tor refusal is then the first signal. That later
-# check still runs: archives on disk do not prove the candidate linked them.
-ship_checkout_has_real_tor_archives "$REPO_ROOT" ||
-    die "$ZCL_TOR_STUB_REFUSAL (one or more of the four TOR_FULL archives is missing from vendor/tor, so this checkout would link the stub and the candidate would be refused after the gate; run make tor-ready — git worktree add does not populate the vendor/tor submodule)"
+# Fail in seconds, not after lint + test-parallel. Missing any of these four,
+# or a provenance mismatch (a stale libtor.a from a different compiler or
+# vendor/tor commit, or a byte-flipped archive), makes TOR_LIBS fall back to
+# -ltor_stub, and the post-build ship_candidate_has_real_tor refusal is then
+# the first signal. That later check still runs: archives on disk do not
+# prove the candidate linked them.
+if [ ! -x "$REPO_ROOT/build/bin/z23-tor-provenance" ]; then
+    printf 'ship: selftest CANNOT RUN — required tool is missing:\n' >&2
+    printf '  %s\n' "$REPO_ROOT/build/bin/z23-tor-provenance" >&2
+    printf '  The Tor archive preflight binds the archives to their commit + bytes with it.\n' >&2
+    printf '  Build it first:  make z23-tor-provenance\n' >&2
+    die "$ZCL_TOR_STUB_REFUSAL (z23-tor-provenance is not built)"
+fi
+ship_checkout_has_real_tor_archives "$REPO_ROOT" "$(git -C "$REPO_ROOT/vendor/tor" rev-parse HEAD 2>/dev/null || true)" ||
+    die "$ZCL_TOR_STUB_REFUSAL (one or more of the four TOR_FULL archives is missing from vendor/tor, or the present ones do not match their recorded provenance (commit/compiler/bytes) — this checkout would link the stub or an unbound Tor and the candidate would be refused after the gate; run make tor-ready — git worktree add does not populate the vendor/tor submodule)"
 say "tor        four TOR_FULL archives present"
 
 # Refuse in seconds, not after the gate and the 200-second build. Every name
