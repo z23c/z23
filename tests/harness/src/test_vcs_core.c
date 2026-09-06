@@ -49,6 +49,10 @@
 #include "crypto/ed25519.h"
 #include "crypto/sha3.h"
 #include "platform/time_compat.h"
+#if defined(_WIN32)
+#include <windows.h>
+#include "platform/windows_path.h"
+#endif
 
 #include <errno.h>
 #include <dirent.h>
@@ -56,6 +60,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if defined(_WIN32)
+#include <wchar.h>
+#endif
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
@@ -226,6 +233,48 @@ static bool vc_store_transport_with_license(
 static bool vc_file_matches(const char *dir, const char *rel,
                             const char *expect);
 
+/* Publish an explicitly declared canonical source tree. This gives the
+ * transport tests one exact mode authority on every host without pretending
+ * that Windows can discover a POSIX executable bit from NT file metadata. */
+static bool vc_publish_declared_source_tree(const char *workspace, bool full,
+                                            uint8_t root[32])
+{
+    static const struct {
+        const char *path;
+        uint32_t mode;
+    } files[] = {
+        {"LICENSE", 0100644u},
+        {"include/a.h", 0100644u},
+        {"run.sh", 0100755u},
+        {"src/a.c", 0100644u},
+    };
+    struct vcs_manifest manifest;
+    vcs_manifest_init(&manifest);
+    bool ok = vcs_object_store_init(workspace);
+    for (size_t i = 0; ok && i < sizeof(files) / sizeof(files[0]); i++) {
+        if (!full && strcmp(files[i].path, "LICENSE") != 0 &&
+            strcmp(files[i].path, "src/a.c") != 0)
+            continue;
+        size_t len = 0;
+        char *bytes = vc_read(workspace, files[i].path, &len);
+        uint8_t blob[32];
+        ok = bytes != NULL &&
+             vcs_object_put(workspace, (const uint8_t *)bytes, len,
+                            VCS_TAG_BLOB, blob) &&
+             vcs_manifest_add(&manifest, files[i].path, files[i].mode,
+                              (uint64_t)len, blob);
+        free(bytes);
+    }
+    uint8_t *wire = NULL;
+    size_t wire_len = 0;
+    ok = ok && vcs_manifest_tree_hash(&manifest, root) &&
+         vcs_manifest_serialize(&manifest, &wire, &wire_len) &&
+         vcs_object_put_addressed(workspace, root, wire, wire_len);
+    free(wire);
+    vcs_manifest_free(&manifest);
+    return ok;
+}
+
 static int t_source_bundle(void)
 {
     int failures = 0;
@@ -277,13 +326,33 @@ static int t_source_bundle(void)
     VC_CHECK("source bundle executable mode fixture",
              chmod(executable, 0755) == 0);
 
-    uint8_t first_root[32];
-    VC_CHECK("source bundle captures authoritative tree",
-             vcs_tree_capture_path(source, first_root) == VCS_OK);
+    uint8_t first_root[32] = {0}, declared_root[32] = {0};
+    bool declared = vc_publish_declared_source_tree(source, true,
+                                                     declared_root);
+    VC_CHECK("source bundle publishes declared canonical-mode tree", declared);
+#if defined(_WIN32)
+    /* This lane proves transport of the declared canonical 0644/0755 tree.
+     * It does not claim filesystem executable-bit discovery or capture-time
+     * exclusion, both of which remain unavailable without a mode authority. */
+    uint8_t refused_capture[32];
+    memset(refused_capture, 0xa5, sizeof(refused_capture));
+    bool capture_refused = vcs_tree_capture_path(source, refused_capture) ==
+        VCS_REFUSED;
+    uint8_t zero_root[32] = {0};
+    VC_CHECK("source bundle Windows local mode capture remains explicit refusal",
+             capture_refused &&
+             memcmp(refused_capture, zero_root, sizeof(zero_root)) == 0);
+    if (declared) memcpy(first_root, declared_root, sizeof(first_root));
+    else memset(first_root, 0, sizeof(first_root));
+#else
+    VC_CHECK("source bundle captures authoritative tree equal to declaration",
+             declared && vcs_tree_capture_path(source, first_root) == VCS_OK &&
+             memcmp(first_root, declared_root, sizeof(first_root)) == 0);
+#endif
     uint8_t *first_wire = NULL;
     size_t first_wire_len = 0;
     struct vcs_source_bundle_metrics created;
-    VC_CHECK("source bundle excludes cache and generated vendor outputs",
+    VC_CHECK("source bundle transports only declared tree, excluding generated outputs",
              vcs_source_bundle_create(source, first_root, &first_wire,
                                       &first_wire_len, &created) ==
                  VCS_SOURCE_BUNDLE_OK &&
@@ -311,26 +380,36 @@ static int t_source_bundle(void)
                  VCS_SOURCE_BUNDLE_OK &&
              sharded_verified.source_bytes == created.source_bytes);
     size_t complete_shards = first_sharded.shard_count;
-    first_sharded.shard_count--;
+    bool shard_fixture_ready = complete_shards > 0 &&
+        first_sharded.shards[0].wire != NULL &&
+        first_sharded.shards[0].wire_len > 0;
+    if (complete_shards > 0) first_sharded.shard_count--;
     VC_CHECK("source bundle v2 missing shard is refused",
-             vcs_source_bundle_sharded_verify(
+             complete_shards > 0 && vcs_source_bundle_sharded_verify(
                  &first_sharded, first_root, NULL) != VCS_SOURCE_BUNDLE_OK);
     first_sharded.shard_count = complete_shards;
-    uint8_t saved_shard_tail = first_sharded.shards[0].wire[
-        first_sharded.shards[0].wire_len - 1u];
-    first_sharded.shards[0].wire[
-        first_sharded.shards[0].wire_len - 1u] ^= 0x80u;
-    VC_CHECK("source bundle v2 corrupt shard is refused",
-             vcs_source_bundle_sharded_verify(
-                 &first_sharded, first_root, NULL) != VCS_SOURCE_BUNDLE_OK);
-    first_sharded.shards[0].wire[
-        first_sharded.shards[0].wire_len - 1u] = saved_shard_tail;
-    uint16_t saved_shard_index = first_sharded.shards[0].index;
-    first_sharded.shards[0].index = (uint16_t)(saved_shard_index ^ 1u);
-    VC_CHECK("source bundle v2 misplaced shard is refused",
-             vcs_source_bundle_sharded_verify(
-                 &first_sharded, first_root, NULL) != VCS_SOURCE_BUNDLE_OK);
-    first_sharded.shards[0].index = saved_shard_index;
+    if (shard_fixture_ready) {
+        uint8_t saved_shard_tail = first_sharded.shards[0].wire[
+            first_sharded.shards[0].wire_len - 1u];
+        first_sharded.shards[0].wire[
+            first_sharded.shards[0].wire_len - 1u] ^= 0x80u;
+        VC_CHECK("source bundle v2 corrupt shard is refused",
+                 vcs_source_bundle_sharded_verify(
+                     &first_sharded, first_root, NULL) !=
+                     VCS_SOURCE_BUNDLE_OK);
+        first_sharded.shards[0].wire[
+            first_sharded.shards[0].wire_len - 1u] = saved_shard_tail;
+        uint16_t saved_shard_index = first_sharded.shards[0].index;
+        first_sharded.shards[0].index = (uint16_t)(saved_shard_index ^ 1u);
+        VC_CHECK("source bundle v2 misplaced shard is refused",
+                 vcs_source_bundle_sharded_verify(
+                     &first_sharded, first_root, NULL) !=
+                     VCS_SOURCE_BUNDLE_OK);
+        first_sharded.shards[0].index = saved_shard_index;
+    } else {
+        VC_CHECK("source bundle v2 corrupt shard is refused", false);
+        VC_CHECK("source bundle v2 misplaced shard is refused", false);
+    }
     struct vcs_source_bundle_metrics sharded_imported;
     VC_CHECK("source bundle v2 verifies fully before CAS import",
              vcs_source_bundle_sharded_import(
@@ -360,14 +439,15 @@ static int t_source_bundle(void)
             VCS_ZCODE_DEV_OK;
     memset(lane_secret, 0, sizeof(lane_secret));
 
-    uint8_t unlicensed_root[32];
-    VC_CHECK("source package proprietary-license fixture captures",
+    uint8_t unlicensed_root[32] = {0};
+    bool unlicensed_files =
              vc_write(unlicensed_source, "LICENSE",
                       "Copyright 2026. All rights reserved.\n") &&
-                 vc_write(unlicensed_source, "src/a.c",
-                          "int a(void) { return 9; }\n") &&
-                 vcs_tree_capture_path(unlicensed_source, unlicensed_root) ==
-                     VCS_OK);
+             vc_write(unlicensed_source, "src/a.c",
+                      "int a(void) { return 9; }\n");
+    VC_CHECK("source package proprietary-license fixture publishes declared tree",
+             unlicensed_files && vc_publish_declared_source_tree(
+                 unlicensed_source, false, unlicensed_root));
     struct vcs_zcode_lane_receipt_v1 unlicensed_lane = lane;
     memcpy(unlicensed_lane.source_root, unlicensed_root, 32);
     unlicensed_lane.created_unix = 2;
@@ -567,12 +647,14 @@ static int t_source_bundle(void)
              vcs_source_bundle_verify(first_wire, first_wire_len, wrong_root,
                                       NULL) == VCS_SOURCE_BUNDLE_ERR_ROOT);
     VC_CHECK("source bundle interrupted wire refused before CAS writes",
+             first_wire && first_wire_len > 0 &&
              vcs_source_bundle_import(first_wire, first_wire_len - 1u,
                                       first_root, consumer, NULL) !=
                  VCS_SOURCE_BUNDLE_OK &&
              !vcs_object_store_initialized(consumer));
 
-    uint8_t *corrupt_wire = malloc(first_wire_len);
+    uint8_t *corrupt_wire = first_wire && first_wire_len > 0
+        ? malloc(first_wire_len) : NULL;
     VC_CHECK("source bundle corruption fixture allocated",
              corrupt_wire != NULL);
     if (corrupt_wire) {
@@ -622,10 +704,24 @@ static int t_source_bundle(void)
 
     VC_CHECK("source bundle successor fixture changed one file",
              vc_write(source, "src/a.c", "int a(void) { return 2; }\n"));
-    uint8_t second_root[32];
-    VC_CHECK("source bundle successor captures new tree",
+    uint8_t second_root[32] = {0}, second_declared_root[32] = {0};
+    bool second_declared = vc_publish_declared_source_tree(
+        source, true, second_declared_root);
+#if defined(_WIN32)
+    if (second_declared)
+        memcpy(second_root, second_declared_root, sizeof(second_root));
+    else
+        memset(second_root, 0, sizeof(second_root));
+    VC_CHECK("source bundle successor publishes changed declared tree",
+             second_declared && memcmp(second_root, first_root, 32) != 0);
+#else
+    VC_CHECK("source bundle successor capture equals changed declaration",
+             second_declared &&
              vcs_tree_capture_path(source, second_root) == VCS_OK &&
+             memcmp(second_root, second_declared_root,
+                    sizeof(second_root)) == 0 &&
              memcmp(second_root, first_root, 32) != 0);
+#endif
     uint8_t *second_wire = NULL;
     size_t second_wire_len = 0;
     VC_CHECK("source bundle successor creates transport",
@@ -692,6 +788,55 @@ static int vc_count_objects(const char *repo)
     char objects[4096];
     int n = snprintf(objects, sizeof(objects), "%s/.zvcs/objects", repo);
     if (n < 0 || (size_t)n >= sizeof(objects)) return -1;
+#if defined(_WIN32)
+    WIN32_FIND_DATAW data;
+    wchar_t wide_objects[32768], pattern[32768];
+    if (!platform_windows_wide_path(objects, wide_objects)) return -1;
+    n = _snwprintf(pattern, 32768, L"%ls\\*", wide_objects);
+    if (n < 0 || n >= 32768) return -1;
+    HANDLE root = FindFirstFileW(pattern, &data);
+    if (root == INVALID_HANDLE_VALUE) return -1;
+    int count = 0;
+    bool ok = true;
+    do {
+        const wchar_t *name = data.cFileName;
+        if (!wcscmp(name, L".") || !wcscmp(name, L"..") || !wcscmp(name, L"tmp"))
+            continue;
+        if (wcslen(name) != 2 || wcsspn(name, L"0123456789abcdef") != 2 ||
+            (data.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0 ||
+            (data.dwFileAttributes & FILE_ATTRIBUTE_DEVICE) != 0 ||
+            (data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0) {
+            ok = false;
+            break;
+        }
+        wchar_t shard_path[32768];
+        n = _snwprintf(shard_path, 32768, L"%ls\\%ls\\*", wide_objects, name);
+        if (n < 0 || n >= 32768) {
+            ok = false; break;
+        }
+        WIN32_FIND_DATAW entry_data;
+        HANDLE entries = FindFirstFileW(shard_path, &entry_data);
+        if (entries == INVALID_HANDLE_VALUE) { ok = false; break; }
+        bool shard_ok = true;
+        do {
+            const wchar_t *entry = entry_data.cFileName;
+            if (!wcscmp(entry, L".") || !wcscmp(entry, L"..")) continue;
+            if ((entry_data.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0 ||
+                (entry_data.dwFileAttributes & FILE_ATTRIBUTE_DEVICE) != 0 ||
+                (entry_data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
+                shard_ok = false;
+                break;
+            }
+            count++;
+        } while (FindNextFileW(entries, &entry_data));
+        if (GetLastError() != ERROR_NO_MORE_FILES) shard_ok = false;
+        if (!FindClose(entries)) shard_ok = false;
+        if (!shard_ok) { ok = false; break; }
+    } while (FindNextFileW(root, &data));
+    if (GetLastError() != ERROR_NO_MORE_FILES && ok) ok = false;
+    if (!FindClose(root)) ok = false;
+    return ok ? count : -1;
+#else
     DIR *root = opendir(objects);
     if (!root) return -1;
 
@@ -756,8 +901,10 @@ static int vc_count_objects(const char *repo)
         }
     }
     return count;
+#endif
 }
 
+#if !defined(_WIN32)
 /* Count leftover ZVCS staging temp files (<...>.zvcstmp.<pid>.<seq>) anywhere
  * under the worktree — a two-phase revert must leave none behind on failure. */
 static int vc_count_temps(const char *dir)
@@ -784,6 +931,7 @@ static void count_cb(enum vcs_diff_kind kind, const struct vcs_entry *a,
     else if (kind == VCS_DIFF_REMOVED) d->removed++;
     else if (kind == VCS_DIFF_MODIFIED) d->modified++;
 }
+#endif
 
 /* ── test 1: manifest serialize/parse/hash fixed-point ──────────── */
 static int t_manifest_fixedpoint(void)
@@ -1449,6 +1597,49 @@ static void seed_worktree(const char *dir)
     vc_write(dir, "docs/notes.md", "# notes\n");
 }
 
+#if defined(_WIN32)
+/* History verbs stay named-refused until POSIX mode capture is qualified.
+ * Materialize is a separate byte-reconstruction path and is proven above. */
+static int t_windows_history_refused(const char *dir)
+{
+    int failures = 0;
+    seed_worktree(dir);
+    struct vcs_repo *r = vcs_open(dir);
+    VC_CHECK("vcs_open named Windows NULL", r == NULL);
+
+    uint8_t out[32];
+    uint8_t zero[32] = {0};
+    memset(out, 0xa5, sizeof(out));
+    struct vcs_snapshot_meta meta = {0};
+    meta.phase = "green";
+    VC_CHECK("snapshot named Windows refusal",
+             vcs_snapshot(r, &meta, out) == VCS_REFUSED);
+    VC_CHECK("snapshot refusal clears commit id",
+             memcmp(out, zero, sizeof(zero)) == 0);
+
+    size_t nc = 999;
+    VC_CHECK("status named Windows refusal",
+             vcs_status(r, NULL, NULL, &nc) == VCS_REFUSED && nc == 0);
+    VC_CHECK("log named Windows refusal",
+             vcs_log(r, 0, NULL, NULL) == VCS_REFUSED);
+
+    uint8_t target[32];
+    memset(target, 0x11, sizeof(target));
+    memset(out, 0xa5, sizeof(out));
+    VC_CHECK("revert named Windows refusal",
+             vcs_revert(r, target, NULL, out) == VCS_REFUSED &&
+             memcmp(out, zero, sizeof(zero)) == 0);
+
+    memset(out, 0xa5, sizeof(out));
+    VC_CHECK("tree capture named Windows refusal",
+             vcs_tree_capture_path(dir, out) == VCS_REFUSED &&
+             memcmp(out, zero, sizeof(zero)) == 0);
+    vcs_close(r);
+    return failures;
+}
+#endif
+
+#if !defined(_WIN32)
 /* ── fake vcs_revert_relink_ops activators for the relink-half tests ── */
 struct fake_activator {
     int     calls;
@@ -1972,6 +2163,7 @@ static int t_seal_grant_operator_ritual(const char *dir)
     vcs_close(r);
     return failures;
 }
+#endif
 
 /* ── test: commit record round-trips + self-hash catches tamper ─── */
 static int t_commit_record(void)
@@ -2300,6 +2492,11 @@ int test_vcs_core(void)
     failures += t_generated_paths_ignored(dir);
     test_rm_rf_recursive(dir);
 
+#if defined(_WIN32)
+    test_make_tmpdir(dir, sizeof(dir), "vcs_core", "history_refused");
+    failures += t_windows_history_refused(dir);
+    test_rm_rf_recursive(dir);
+#else
     test_make_tmpdir(dir, sizeof(dir), "vcs_core", "snap");
     failures += t_snapshot_status_revert(dir);
     test_rm_rf_recursive(dir);
@@ -2323,6 +2520,7 @@ int test_vcs_core(void)
     test_make_tmpdir(dir, sizeof(dir), "vcs_core", "seal_grant");
     failures += t_seal_grant_operator_ritual(dir);
     test_rm_rf_recursive(dir);
+#endif
 
     printf("=== vcs_core complete: %d failure(s) ===\n", failures);
     return failures;

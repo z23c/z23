@@ -5,6 +5,8 @@
 #include "vcs/vcs_object.h"
 
 #if defined(_WIN32)
+#include "util/log_macros.h"
+
 #include <stdlib.h>
 #include <string.h>
 
@@ -31,7 +33,11 @@ bool vcs_tree_load(const char *repo_root, const uint8_t tree_hash[32],
     }
     return true;
 }
-struct vcs_repo *vcs_open(const char *root) { (void)root; return NULL; }
+struct vcs_repo *vcs_open(const char *root)
+{
+    (void)root;
+    LOG_NULL("vcs", "Windows snapshot/status/revert remain unavailable until POSIX mode capture is qualified");
+}
 void vcs_close(struct vcs_repo *repo) { free(repo); }
 struct vcs_index *vcs_repo_index(struct vcs_repo *repo)
 { return repo ? repo->idx : NULL; }

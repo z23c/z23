@@ -476,41 +476,6 @@ static bool source_checkout_windows_write_relative(
     return ok;
 }
 
-static bool source_checkout_windows_materialize(
-    const char *workspace, const uint8_t source_root[32],
-    const char *destination)
-{
-    struct vcs_manifest tree;
-    if (!vcs_tree_load(workspace, source_root, &tree)) return false;
-    struct platform_directory_transaction root;
-    platform_directory_transaction_init(&root);
-    bool ok = source_checkout_windows_open_directory(destination, &root);
-    uint64_t total = 0;
-    for (size_t i = 0; ok && i < tree.count; i++) {
-        const struct vcs_entry *entry = &tree.entries[i];
-        if ((entry->mode & 0170000u) != 0100000u ||
-            !vcs_package_path_valid(entry->path) ||
-            entry->size > SIZE_MAX ||
-            UINT64_MAX - total < entry->size ||
-            total + entry->size > VCS_SOURCE_BUNDLE_MAX_SOURCE_BYTES) {
-            ok = false;
-            break;
-        }
-        uint8_t *bytes = NULL;
-        size_t len = 0;
-        if (vcs_object_get(workspace, entry->blob, VCS_TAG_BLOB,
-                           &bytes, &len) != 0 || len != entry->size ||
-            !source_checkout_windows_write_relative(
-                &root, entry->path, bytes, len))
-            ok = false;
-        free(bytes);
-        total += entry->size;
-    }
-    platform_directory_transaction_close(&root);
-    vcs_manifest_free(&tree);
-    return ok;
-}
-
 static bool source_checkout_windows_mark_directory_delete(
     struct platform_directory_transaction *directory)
 {
@@ -787,14 +752,9 @@ static enum vcs_source_package_checkout_result source_package_checkout_common(
         result = VCS_SOURCE_PACKAGE_CHECKOUT_SOURCE;
     uint64_t offline_bytes = 0;
     if (result == VCS_SOURCE_PACKAGE_CHECKOUT_OK &&
-#if defined(_WIN32)
-        !source_checkout_windows_materialize(
-            workspace, source_root, destination))
-#else
         vcs_tree_materialize(
             workspace, source_root, destination,
             VCS_SOURCE_BUNDLE_MAX_SOURCE_BYTES, 0) != VCS_OK)
-#endif
         result = VCS_SOURCE_PACKAGE_CHECKOUT_DESTINATION;
     if (result == VCS_SOURCE_PACKAGE_CHECKOUT_OK &&
         !source_checkout_write_offline(
