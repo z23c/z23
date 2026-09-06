@@ -297,7 +297,8 @@ static int64_t onion_dump_int(const char *key, bool *found)
     return v;
 }
 
-int test_net(void)
+
+static int test_net_peer_liveness_ping_boundary_is_monotonic_60_s(void)
 {
     int failures = 0;
 
@@ -395,6 +396,12 @@ int test_net(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int test_net_peer_disconnect_first_cause_and_endpoint_gene(void)
+{
+    int failures = 0;
 
     printf("peer_disconnect: first cause and endpoint generation win... ");
     {
@@ -474,6 +481,12 @@ int test_net(void)
             failures++;
         }
     }
+    return failures;
+}
+
+static int test_net_msg_header(void)
+{
+    int failures = 0;
 
     printf("msg_header... ");
     {
@@ -578,6 +591,12 @@ int test_net(void)
         block_locator_free(&loc2);
         stream_free(&s);
     }
+    return failures;
+}
+
+static int test_net_version_message_serialize_deserialize_roundtr(void)
+{
+    int failures = 0;
 
     printf("version_message serialize/deserialize roundtrip... ");
     {
@@ -617,6 +636,12 @@ int test_net(void)
         else { printf("FAIL\n"); failures++; }
         stream_free(&s);
     }
+    return failures;
+}
+
+static int test_net_getdata_blocks_serialize(void)
+{
+    int failures = 0;
 
     printf("getdata blocks serialize... ");
     {
@@ -652,6 +677,12 @@ int test_net(void)
         }
         stream_free(&s);
     }
+    return failures;
+}
+
+static int test_net_getheaders_serialize(void)
+{
+    int failures = 0;
 
     printf("getheaders serialize... ");
     {
@@ -710,6 +741,12 @@ int test_net(void)
             printf("OK\n");
         else { printf("FAIL (host=%s port=%d)\n", host, port); failures++; }
     }
+    return failures;
+}
+
+static int test_net_lookup_host_numeric_ipv4(void)
+{
+    int failures = 0;
 
     printf("lookup_host numeric ipv4... ");
     {
@@ -736,51 +773,12 @@ int test_net(void)
             printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
-    printf("lookup_onion parse accept/refuse... ");
-    {
-        /* The .onion addnode parse branch (shared by RPC addnode, boot
-         * -addnode, and connman_add_seed_node): a valid v3 name — derived
-         * from a fixed pubkey through the shared codec, so the checksum is
-         * real — parses to the pubkey bytes and port; everything else
-         * fails CLOSED and never touches DNS. */
-        uint8_t pub[32];
-        for (int i = 0; i < 32; i++)
-            pub[i] = (uint8_t)(i * 7 + 1);
-        char host[ONION_V3_ADDRESS_LEN + 1];
-        bool ok = onion_v3_address_from_pubkey(pub, host);
-
-        char withport[ONION_V3_ADDRESS_LEN + 8];
-        snprintf(withport, sizeof(withport), "%s:8233", host);
-        struct net_service svc;
-        memset(&svc, 0, sizeof(svc));
-        ok = ok && lookup_onion(withport, &svc, 8033);
-        ok = ok && svc.addr.has_torv3 &&
-             memcmp(svc.addr.torv3, pub, 32) == 0 && svc.port == 8233;
-
-        /* No port in the string -> the caller's default port. */
-        ok = ok && lookup_onion(host, &svc, 8033) && svc.port == 8033 &&
-             svc.addr.has_torv3;
-
-        /* Refusals: corrupted checksum, truncated name, clearnet literal,
-         * and a non-onion name — all fail closed. */
-        char bad[ONION_V3_ADDRESS_LEN + 1];
-        snprintf(bad, sizeof(bad), "%s", host);
-        bad[0] = (bad[0] == 'a') ? 'b' : 'a';
-        ok = ok && !lookup_onion(bad, &svc, 8033) && !svc.addr.has_torv3;
-        ok = ok && !lookup_onion("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.onion",
-                                 &svc, 8033);
-        ok = ok && !lookup_onion("127.0.0.1:8233", &svc, 8033);
-        ok = ok && !lookup_onion("example.com", &svc, 8033);
-
-        /* Detection helper: suffix on the host part, with or without port. */
-        ok = ok && net_name_is_onion(host) && net_name_is_onion(withport) &&
-             !net_name_is_onion("10.0.0.1:8233") &&
-             !net_name_is_onion("example.com");
-
-        if (ok) printf("OK\n");
-        else { printf("FAIL\n"); failures++; }
-    }
+static int test_net_net_addr_onion_render_parse_round_trip(void)
+{
+    int failures = 0;
 
     printf("net_addr onion render/parse round-trip... ");
     {
@@ -827,6 +825,12 @@ int test_net(void)
             printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int test_net_net_addr_rfc_classification(void)
+{
+    int failures = 0;
 
     printf("net_addr RFC classification... ");
     {
@@ -880,6 +884,12 @@ int test_net(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int test_net_net_service_get_key_torv3_distinctness(void)
+{
+    int failures = 0;
 
     printf("net_service_get_key torv3 distinctness... ");
     {
@@ -973,6 +983,12 @@ int test_net(void)
         else { printf("FAIL (size=%zu sel=%d)\n", addrman_size(&am), selected); failures++; }
         addrman_free(&am);
     }
+    return failures;
+}
+
+static int test_net_addr_info_bucket_computation(void)
+{
+    int failures = 0;
 
     printf("addr_info bucket computation... ");
     {
@@ -1025,6 +1041,12 @@ int test_net(void)
         net_manager_free(&nm);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int test_net_net_message_framing(void)
+{
+    int failures = 0;
 
     printf("net_message framing... ");
     {
@@ -1079,6 +1101,12 @@ int test_net(void)
         net_manager_free(&nm);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int test_net_ban_management(void)
+{
+    int failures = 0;
 
     printf("ban management... ");
     {
@@ -1139,6 +1167,12 @@ int test_net(void)
         net_manager_free(&nm);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int test_net_node_stats_copy(void)
+{
+    int failures = 0;
 
     printf("node_stats copy... ");
     {
@@ -1190,6 +1224,12 @@ int test_net(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int test_net_net_addr_ipv6_classify(void)
+{
+    int failures = 0;
 
     /* net_addr: IPv6 classification */
     {
@@ -1261,6 +1301,12 @@ int test_net(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int test_net_net_addr_rfc1918_private(void)
+{
+    int failures = 0;
 
     /* net_addr: RFC1918 private ranges */
     {
@@ -1309,6 +1355,12 @@ int test_net(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int test_net_net_service_init_and_equality(void)
+{
+    int failures = 0;
 
     /* net_service: init and equality */
     {
@@ -1392,6 +1444,12 @@ int test_net(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int test_net_inv_item_init_and_types(void)
+{
+    int failures = 0;
 
     /* inv_item: init, types, string */
     {
@@ -1434,6 +1492,12 @@ int test_net(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int test_net_inv_item_serialize_roundtrip(void)
+{
+    int failures = 0;
 
     /* inv_item: serialization roundtrip */
     {
@@ -1489,6 +1553,12 @@ int test_net(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int test_net_net_message_read_header(void)
+{
+    int failures = 0;
 
     /* net_message: header read with valid magic */
     {
@@ -1553,6 +1623,12 @@ int test_net(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int test_net_net_message_partial_header_read(void)
+{
+    int failures = 0;
 
     /* net_message: partial header read */
     {
@@ -1576,6 +1652,12 @@ int test_net(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int test_net_net_message_recv_budget_rejects_over_cap_allo(void)
+{
+    int failures = 0;
 
     /* process-wide recv queue budget caps total bytes across
      * all net_messages, not just per-message. A swarm of peers
@@ -1648,275 +1730,12 @@ int test_net(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
-    /* Send-queue budget (getdata-flood / slow-reader DoS guard).
-     *
-     * A single getdata can request up to MAX_INV_SZ (50000) blocks and a
-     * slow-reader peer may never drain its socket, so serving the whole
-     * batch could buffer tens of GB of send_segments -> OOM. The fix
-     * charges every queued send_segment against a process-wide and a
-     * per-peer budget; process_getdata stops serving once over budget
-     * (without disconnecting), and every drain/disconnect path releases
-     * the bytes so the counter never leaks. This test exercises that
-     * accounting end-to-end through the public p2p_node send path. */
-    {
-        printf("net: send budget caps + counter returns to 0 ... ");
-
-        /* Small caps so a handful of queued messages trips them.
-         * Per-peer cap 4 KB, process cap 16 KB. */
-        setenv("ZCL_MAX_SENDBUFFER_PEER_BYTES", "4096", 1);
-        setenv("ZCL_MAX_SENDBUFFER_TOTAL_BYTES", "16384", 1);
-
-        struct net_manager nm;
-        net_manager_init(&nm);
-        unsigned char magic[MESSAGE_START_SIZE] = {0x24, 0xe9, 0x27, 0x64};
-        memcpy(nm.message_start, magic, MESSAGE_START_SIZE);
-
-        struct net_address addr;
-        net_address_init(&addr);
-        unsigned char ip4[4] = {127, 0, 0, 1};
-        net_addr_set_ipv4(&addr.svc.addr, ip4);
-        addr.svc.port = 8033;
-
-        /* Baseline: other peers/tests in this binary may have outstanding
-         * segments, so all assertions are on the delta from `base`. */
-        size_t base = net_send_total_bytes();
-
-        struct p2p_node *node = p2p_node_create(&nm, ZCL_INVALID_SOCKET,
-                                                 &addr, "flood-peer", true);
-        bool ok = (node != NULL);
-
-        /* Nothing queued yet -> not over budget. */
-        ok = ok && !net_send_over_budget(node);
-        ok = ok && (node->send_size == 0);
-
-        /* Queue several 2 KB "block" messages. send() on the invalid
-         * socket can't drain them, so they accumulate exactly like a
-         * slow-reader peer's queue would. */
-        unsigned char payload[2048];
-        memset(payload, 0x5a, sizeof(payload));
-
-        size_t before = net_send_total_bytes();
-        p2p_node_begin_message(node, "block", magic);
-        p2p_node_write_message_data(node, payload, sizeof(payload));
-        p2p_node_end_message(node);
-        /* One message bumped both the per-peer and process-wide counters
-         * by (header + payload). */
-        ok = ok && (net_send_total_bytes() > before);
-        ok = ok && (node->send_size > 0);
-        /* One 2 KB message is under the 4 KB per-peer cap. */
-        ok = ok && !net_send_over_budget(node);
-
-        /* Keep queueing until the per-peer cap (4 KB) is exceeded; the
-         * serving loop in process_getdata would break at exactly this
-         * point. Bound the loop so a regression can't hang the test. */
-        int guard = 0;
-        while (!net_send_over_budget(node) && guard++ < 1000) {
-            p2p_node_begin_message(node, "block", magic);
-            p2p_node_write_message_data(node, payload, sizeof(payload));
-            p2p_node_end_message(node);
-        }
-        ok = ok && net_send_over_budget(node);
-        ok = ok && (node->send_size > net_send_peer_bytes_cap());
-
-        /* Whitelisted/trusted peers are exempt even when over the cap. */
-        node->whitelisted = true;
-        ok = ok && !net_send_over_budget(node);
-        node->whitelisted = false;
-        ok = ok && net_send_over_budget(node);
-
-        /* Tearing the node down drains the send queue through
-         * send_segment_free, which releases every charged byte. After
-         * the drain the process-wide counter must return to baseline —
-         * proving the counter does not leak on disconnect/free. */
-        p2p_node_free(node);
-        ok = ok && (net_send_total_bytes() == base);
-
-        /* The cap helpers honour the env overrides. */
-        ok = ok && (net_send_peer_bytes_cap() == 4096);
-        ok = ok && (net_send_total_bytes_cap() == 16384);
-
-        /* Direct check of the disconnect-cleanup drain symmetry: a
-         * manually built queue freed with send_segment_free (the exact
-         * primitive connman's forced-disconnect path now uses) must also
-         * leave the counter at baseline. */
-        {
-            size_t b2 = net_send_total_bytes();
-            /* Build a segment via the same public send path on a fresh
-             * node, then free the node — whose drain calls the exact
-             * send_segment_free primitive connman's forced-disconnect
-             * cleanup now uses — to confirm the counter returns to baseline
-             * a second time. */
-            struct p2p_node *n2 = p2p_node_create(&nm, ZCL_INVALID_SOCKET,
-                                                  &addr, "flood-peer-2", true);
-            ok = ok && (n2 != NULL);
-            p2p_node_begin_message(n2, "block", magic);
-            p2p_node_write_message_data(n2, payload, sizeof(payload));
-            p2p_node_end_message(n2);
-            ok = ok && (net_send_total_bytes() > b2);
-            p2p_node_free(n2);
-            ok = ok && (net_send_total_bytes() == b2);
-        }
-
-        net_manager_free(&nm);
-        unsetenv("ZCL_MAX_SENDBUFFER_PEER_BYTES");
-        unsetenv("ZCL_MAX_SENDBUFFER_TOTAL_BYTES");
-
-        if (ok) printf("OK\n");
-        else { printf("FAIL\n"); failures++; }
-    }
-
-    /* Send-queue HARD ceiling: a peer that stops reading cannot make us
-     * hold unbounded memory.
-     *
-     * The budget exercised just above is ADVISORY — net_send_over_budget()
-     * only bites where a serve path remembers to call it, and exactly one
-     * path in the tree did. Everything else (headers, addr, inv, snapshot
-     * chunks, block pieces) appended to node->send_size unconditionally, so
-     * a peer that pipelined requests and then stopped reading its socket
-     * made the node retain arbitrary memory.
-     *
-     * The fixture is the real attack, not a mock: a socketpair whose far
-     * end is never read and whose kernel send buffer is squeezed to the
-     * minimum, so send() returns EAGAIN and the queue is the only place
-     * the bytes can go. Before the ceiling existed this loop queued every
-     * one of its 512 messages (≈4 MB for ONE peer, and unbounded in the
-     * real thing); with it, the queue stops at the ceiling and the peer is
-     * disconnected for not draining. */
-    {
-        printf("net: send queue hard ceiling bounds a non-draining peer ... ");
-
-        /* 256 KiB advisory cap -> 512 KiB hard ceiling. */
-        setenv("ZCL_MAX_SENDBUFFER_PEER_BYTES", "262144", 1);
-        unsetenv("ZCL_MAX_SENDBUFFER_TOTAL_BYTES");
-
-        struct net_manager nm;
-        net_manager_init(&nm);
-        unsigned char magic[MESSAGE_START_SIZE] = {0x24, 0xe9, 0x27, 0x64};
-        memcpy(nm.message_start, magic, MESSAGE_START_SIZE);
-
-        struct net_address addr;
-        net_address_init(&addr);
-        unsigned char ip4[4] = {127, 0, 0, 1};
-        net_addr_set_ipv4(&addr.svc.addr, ip4);
-        addr.svc.port = 8033;
-
-#if defined(_WIN32)
-        zcl_socket_t sv[2] = {ZCL_INVALID_SOCKET, ZCL_INVALID_SOCKET};
-        bool ok = platform_socket_pair(sv);
-        if (ok) {
-            /* Squeeze both ends so the kernel absorbs only a few KB and
-             * the rest has to sit in our own queue, exactly as it would
-             * for a peer on a congested circuit that has stopped reading. */
-            int small = 2048;
-            setsockopt(sv[0], SOL_SOCKET, SO_SNDBUF,
-                       (const char *)&small, sizeof(small));
-            setsockopt(sv[1], SOL_SOCKET, SO_RCVBUF,
-                       (const char *)&small, sizeof(small));
-        }
-#else
-        int sv[2] = {-1, -1};
-        bool ok = (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
-        if (ok) {
-            /* Squeeze both ends so the kernel absorbs only a few KB and
-             * the rest has to sit in our own queue, exactly as it would
-             * for a peer on a congested circuit that has stopped reading. */
-            int small = 2048;
-            setsockopt(sv[0], SOL_SOCKET, SO_SNDBUF, &small, sizeof(small));
-            setsockopt(sv[1], SOL_SOCKET, SO_RCVBUF, &small, sizeof(small));
-            ok = platform_socket_set_nonblocking(
-                (platform_socket_t)sv[0], true);
-        }
-#endif
-
-        const size_t hard_cap = net_send_peer_bytes_hard_cap();
-        ok = ok && (hard_cap == 2 * net_send_peer_bytes_cap());
-
-        struct p2p_node *node = ok
-            ? p2p_node_create(&nm, (zcl_socket_t)sv[0], &addr, "deaf-peer", true)
-            : NULL;
-        ok = ok && (node != NULL);
-
-        unsigned char payload[8192];
-        memset(payload, 0x5a, sizeof(payload));
-
-        int refused_at = -1;
-        size_t peak = 0;
-        if (ok) {
-            for (int i = 0; i < 512; i++) {
-                p2p_node_begin_message(node, "headers", magic);
-                p2p_node_write_message_data(node, payload, sizeof(payload));
-                if (!p2p_node_end_message(node)) {
-                    refused_at = i;
-                    break;
-                }
-                if (node->send_size > peak)
-                    peak = node->send_size;
-            }
-        }
-
-        /* The queue REFUSED, and it did so long before 512 messages: this
-         * is the property the old code did not have. */
-        ok = ok && (refused_at > 0) && (refused_at < 512);
-        /* Nothing ever went past the ceiling. */
-        ok = ok && (peak <= hard_cap);
-        ok = ok && (node && node->send_size <= hard_cap);
-        /* Refusing alone would leave the peer wedged with a full queue, so
-         * it is also flagged for disconnect. */
-        ok = ok && (node && node->disconnect);
-
-        /* An EMPTY queue always accepts one message however large, so a
-         * small operator-set cap bounds memory instead of wedging the
-         * connection. Fresh node, ceiling squeezed below one message. */
-        if (ok) {
-            setenv("ZCL_MAX_SENDBUFFER_PEER_BYTES", "1024", 1);
-            struct p2p_node *tiny = p2p_node_create(
-                &nm, ZCL_INVALID_SOCKET, &addr, "tiny-cap-peer", true);
-            ok = ok && (tiny != NULL);
-            if (tiny) {
-                p2p_node_begin_message(tiny, "headers", magic);
-                p2p_node_write_message_data(tiny, payload, sizeof(payload));
-                ok = ok && p2p_node_end_message(tiny);
-                p2p_node_free(tiny);
-            }
-            setenv("ZCL_MAX_SENDBUFFER_PEER_BYTES", "262144", 1);
-        }
-
-        /* A whitelisted peer is an explicit operator decision and is never
-         * capped — same exemption net_send_over_budget() already grants. */
-        if (ok) {
-            struct p2p_node *wl = p2p_node_create(
-                &nm, ZCL_INVALID_SOCKET, &addr, "whitelisted-peer", true);
-            ok = ok && (wl != NULL);
-            if (wl) {
-                wl->whitelisted = true;
-                bool all_accepted = true;
-                for (int i = 0; i < 256; i++) {
-                    p2p_node_begin_message(wl, "headers", magic);
-                    p2p_node_write_message_data(wl, payload, sizeof(payload));
-                    if (!p2p_node_end_message(wl)) { all_accepted = false; break; }
-                }
-                ok = ok && all_accepted;
-                p2p_node_free(wl);
-            }
-        }
-
-        if (node) p2p_node_free(node);
-#if defined(_WIN32)
-        if (sv[1] != ZCL_INVALID_SOCKET) platform_socket_close(sv[1]);
-#else
-        if (sv[1] >= 0) close(sv[1]);
-#endif
-        net_manager_free(&nm);
-        unsetenv("ZCL_MAX_SENDBUFFER_PEER_BYTES");
-
-        if (ok) printf("OK\n");
-        else {
-            printf("FAIL (refused_at=%d peak=%zu cap=%zu)\n",
-                   refused_at, peak, hard_cap);
-            failures++;
-        }
-    }
+static int test_net_version_message_serialize_roundtrip(void)
+{
+    int failures = 0;
 
     /* version_message: serialize/deserialize roundtrip */
     {
@@ -1957,6 +1776,12 @@ int test_net(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int test_net_msg_version_externalip_parses_optional_port(void)
+{
+    int failures = 0;
 
     /* msg_version: external IP accepts optional port */
     {
@@ -2015,6 +1840,12 @@ int test_net(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int test_net_addrman_multiple_addresses(void)
+{
+    int failures = 0;
 
     /* addrman: multiple addresses */
     {
@@ -2100,6 +1931,12 @@ int test_net(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int test_net_net_manager_ban_unban_clear(void)
+{
+    int failures = 0;
 
     /* net_manager: init, ban, unban, clear */
     {
@@ -2158,6 +1995,12 @@ int test_net(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int test_net_net_manager_init_defaults(void)
+{
+    int failures = 0;
 
     /* net_manager: init defaults */
     {
@@ -2196,114 +2039,12 @@ int test_net(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
-    /* accepted inbound socket is non-blocking
-     *
-     * accept(2) hands back a NEW socket that does not inherit the listener's
-     * non-blocking mode, and Winsock does not propagate FIONBIO either. The
-     * send path treats EWOULDBLOCK as its normal answer and never sets
-     * SO_SNDTIMEO, so a blocking peer socket can park the reactor inside
-     * send() while it holds cs_send -- and cs_nodes on the connman write
-     * path. On POSIX that stays hidden because socket_send_data() passes
-     * MSG_DONTWAIT per call; on Windows MSG_DONTWAIT is 0, so the stall is
-     * real there and invisible here.
-     *
-     * Winsock offers no way to READ a socket's blocking mode back, so the
-     * assertion below can only be made on the POSIX side. That is still the
-     * right regression lock: the bug is one missing statement on a shared
-     * code path, and this pins that statement's presence. */
-    {
-        printf("accept: inbound socket is set non-blocking... ");
-        struct net_manager nm;
-        struct net_service svc;
-        unsigned char ip4[4] = {127, 0, 0, 1};
-        net_manager_init(&nm);
-        net_service_init(&svc);
-        net_addr_set_ipv4(&svc.addr, ip4);
-        svc.port = 0;
-
-        bool ok = bind_listen_port(&nm, &svc, false);
-        ok = ok && nm.num_listen_sockets == 1;
-
-        zcl_socket_t client = ZCL_INVALID_SOCKET;
-        if (ok) {
-            struct sockaddr_in to;
-            memset(&to, 0, sizeof(to));
-            to.sin_family = AF_INET;
-            to.sin_port = htons(nm.listen_sockets[0].local_port);
-            to.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-            client = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-            ok = ok && client != ZCL_INVALID_SOCKET;
-            ok = ok && connect(client, (struct sockaddr *)&to, sizeof(to)) == 0;
-        }
-
-        /* The listener is non-blocking, so accept() can legitimately report
-         * EWOULDBLOCK before the kernel has completed the handshake. Retry
-         * rather than let a scheduling delay read as a defect. */
-        bool accepted = false;
-        for (int i = 0; ok && i < 200 && !accepted; i++) {
-            accepted = accept_connection(&nm, &nm.listen_sockets[0]);
-            if (!accepted) platform_sleep_ms(5); /* real-clock: pre-existing bounded poll loop, seeded when check_no_real_clock_test_deadline.sh was introduced */
-        }
-        ok = ok && accepted;
-        ok = ok && nm.num_nodes == 1;
-#ifndef _WIN32
-        if (ok) {
-            int flags = fcntl(nm.nodes[0]->socket, F_GETFL);
-            ok = ok && flags >= 0 && (flags & O_NONBLOCK) != 0;
-        }
-#endif
-        if (client != ZCL_INVALID_SOCKET) close_socket(&client);
-        net_manager_free(&nm);
-        if (ok) printf("OK\n");
-        else { printf("FAIL\n"); failures++; }
-    }
-
-    /* p2p_node: create and free lifecycle */
-    {
-        printf("p2p_node: create and free... ");
-        struct net_manager nm;
-        net_manager_init(&nm);
-        memset(nm.message_start, 0x24, MESSAGE_START_SIZE);
-
-        struct net_address addr;
-        net_address_init(&addr);
-        unsigned char ip4[4] = {127, 0, 0, 1};
-        net_addr_set_ipv4(&addr.svc.addr, ip4);
-        addr.svc.port = 8033;
-
-        struct p2p_node *node = p2p_node_create(&nm, ZCL_INVALID_SOCKET,
-                                                  &addr, "test-peer", true);
-        bool ok = (node != NULL);
-        ok = ok && node->inbound;
-        ok = ok && (node->socket == ZCL_INVALID_SOCKET);
-        ok = ok && (node->id == 0);
-        ok = ok && (node->recv_version == INIT_PROTO_VERSION);
-        ok = ok && (strcmp(node->addr_name, "test-peer") == 0);
-        ok = ok && (node->starting_height == -1);
-        ok = ok && !node->disconnect;
-        ok = ok && (node->state < PEER_HANDSHAKE_COMPLETE);
-
-        /* Verify addr was copied */
-        ok = ok && (node->addr.svc.port == 8033);
-        ok = ok && net_addr_eq(&node->addr.svc.addr, &addr.svc.addr);
-
-        p2p_node_free(node);
-
-        /* Second node gets id=1 */
-        struct p2p_node *node2 = p2p_node_create(&nm, ZCL_INVALID_SOCKET,
-                                                   &addr, NULL, false);
-        ok = ok && (node2 != NULL);
-        ok = ok && (node2->id == 1);
-        ok = ok && !node2->inbound;
-        /* NULL name -> auto-generated from IP */
-        ok = ok && (strlen(node2->addr_name) > 0);
-        p2p_node_free(node2);
-
-        net_manager_free(&nm);
-        if (ok) printf("OK\n");
-        else { printf("FAIL\n"); failures++; }
-    }
+static int test_net_p2p_node_receive_bytes_parses_message(void)
+{
+    int failures = 0;
 
     /* p2p_node: receive bytes parses message */
     {
@@ -2351,212 +2092,12 @@ int test_net(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
-    /* p2p_node: inventory tracking */
-    {
-        printf("p2p_node: inventory known + push... ");
-        struct net_manager nm;
-        net_manager_init(&nm);
-        memset(nm.message_start, 0x24, MESSAGE_START_SIZE);
-
-        struct net_address addr;
-        net_address_init(&addr);
-        unsigned char ip4[4] = {127, 0, 0, 1};
-        net_addr_set_ipv4(&addr.svc.addr, ip4);
-
-        struct p2p_node *node = p2p_node_create(&nm, ZCL_INVALID_SOCKET,
-                                                  &addr, "test", false);
-        bool ok = (node != NULL);
-        ok = ok && (node->inventory_known_count == 0);
-        ok = ok && (node->inventory_to_send_count == 0);
-
-        struct uint256 h;
-        uint256_set_null(&h);
-        h.data[0] = 0x42;
-        struct inv_item inv;
-        inv_item_init_typed(&inv, MSG_TX, &h);
-
-        /* push_inventory adds to send queue */
-        p2p_node_push_inventory(node, &inv);
-        ok = ok && (node->inventory_to_send_count == 1);
-
-        /* add_inventory_known marks it as known */
-        p2p_node_add_inventory_known(node, &inv);
-        ok = ok && (node->inventory_known_count == 1);
-
-        /* Pushing same hash again should not add duplicate */
-        size_t before = node->inventory_to_send_count;
-        p2p_node_push_inventory(node, &inv);
-        ok = ok && (node->inventory_to_send_count == before);
-
-        /* Known-ring index under growth + oldest-half eviction: 50002
-         * distinct hashes walk the capacity ladder to the first full-ring
-         * eviction. Membership must stay EXACT throughout — evicted hashes
-         * become unknown, survivors stay known — or relays silently
-         * re-advertise old inventory / drop fresh one. This is also the
-         * getblocks cost path: dedup used to linear-scan the whole ring
-         * per pushed item (25M compares for a single 500-item batch). */
-        struct inv_item binv;
-        for (uint32_t i = 0; i < 50002u; i++) {
-            struct uint256 bh;
-            memset(&bh, 0, sizeof(bh));
-            memcpy(bh.data, &i, sizeof(i));   /* unique per iteration */
-            bh.data[31] = 0x5a;               /* keep away from all-zero */
-            inv_item_init_typed(&binv, MSG_TX, &bh);
-            p2p_node_add_inventory_known(node, &binv);
-        }
-        /* Ring hit MAX_INVENTORY_KNOWN mid-walk, dropped its oldest half,
-         * and every add past that point (plus the evicting add itself)
-         * appended into the kept half. That end state is independent of
-         * what the earlier dedup checks left in the ring (they were
-         * evicted with it), so compute rather than hard-code it. */
-        ok = ok && (node->inventory_known_count ==
-                    MAX_INVENTORY_KNOWN / 2 +
-                        (50002u - MAX_INVENTORY_KNOWN) + 1);
-        ok = ok && (node->inventory_known_slot_mask != 0);
-
-        size_t q;
-        /* Newest (i = 50001) is known: pushing it queues nothing. */
-        uint32_t probe = 50001u;
-        memset(&inv, 0, sizeof(inv));
-        memcpy(inv.hash.data, &probe, sizeof(probe));
-        inv.hash.data[31] = 0x5a;
-        inv.type = MSG_TX;
-        q = node->inventory_to_send_count;
-        p2p_node_push_inventory(node, &inv);
-        ok = ok && (node->inventory_to_send_count == q);
-
-        /* Survivor from the kept half (i = 30000 >= 25000) still known. */
-        probe = 30000u;
-        memset(&inv, 0, sizeof(inv));
-        memcpy(inv.hash.data, &probe, sizeof(probe));
-        inv.hash.data[31] = 0x5a;
-        inv.type = MSG_TX;
-        q = node->inventory_to_send_count;
-        p2p_node_push_inventory(node, &inv);
-        ok = ok && (node->inventory_to_send_count == q);
-
-        /* Evicted old-half hash (i = 10000) is unknown again: it queues. */
-        probe = 10000u;
-        memset(&inv, 0, sizeof(inv));
-        memcpy(inv.hash.data, &probe, sizeof(probe));
-        inv.hash.data[31] = 0x5a;
-        inv.type = MSG_TX;
-        q = node->inventory_to_send_count;
-        p2p_node_push_inventory(node, &inv);
-        ok = ok && (node->inventory_to_send_count == q + 1);
-
-        /* Repeated peer announcements remain in the bounded history ring,
-         * but must refresh one hash-table slot instead of multiplying table
-         * occupancy or forcing a full rebuild for every duplicate. */
-        size_t occupied_before = 0;
-        for (size_t i = 0; i <= node->inventory_known_slot_mask; i++)
-            occupied_before += node->inventory_known_slots[i] != 0;
-        for (size_t i = 0; i < 64; i++)
-            p2p_node_add_inventory_known(node, &binv);
-        size_t occupied_after = 0;
-        for (size_t i = 0; i <= node->inventory_known_slot_mask; i++)
-            occupied_after += node->inventory_known_slots[i] != 0;
-        ok = ok && occupied_after == occupied_before;
-
-        p2p_node_free(node);
-        net_manager_free(&nm);
-        if (ok) printf("OK\n");
-        else { printf("FAIL\n"); failures++; }
-    }
-
-    /* p2p_node: inventory-index allocation failure */
-    {
-        printf("p2p_node: inventory index allocation failure... ");
-        struct net_manager nm;
-        net_manager_init(&nm);
-        struct net_address addr;
-        net_address_init(&addr);
-        unsigned char ip4[4] = {127, 0, 0, 1};
-        net_addr_set_ipv4(&addr.svc.addr, ip4);
-        struct p2p_node *node = p2p_node_create(
-            &nm, ZCL_INVALID_SOCKET, &addr, "index-oom", false);
-        bool ok = node != NULL;
-
-        /* Establish the 2,048-slot table, then fill the 1,024-entry ring to
-         * the capacity-growth boundary. */
-        struct inv_item inv;
-        for (uint32_t i = 0; ok && i < 1024u; i++) {
-            struct uint256 h;
-            memset(&h, 0, sizeof(h));
-            memcpy(h.data, &i, sizeof(i));
-            h.data[31] = 0xa5;
-            inv_item_init_typed(&inv, MSG_TX, &h);
-            p2p_node_add_inventory_known(node, &inv);
-        }
-        ok = ok && node->inventory_known_slots != NULL;
-
-        /* Hash-ring growth succeeds, but index growth fails. The old table
-         * is incomplete for the new ring and therefore must be discarded. */
-        zcl_alloc_fault_fail_next("inv_known_slots");
-        struct uint256 newest;
-        memset(&newest, 0, sizeof(newest));
-        uint32_t newest_id = 1024u;
-        memcpy(newest.data, &newest_id, sizeof(newest_id));
-        newest.data[31] = 0xa5;
-        inv_item_init_typed(&inv, MSG_TX, &newest);
-        if (ok)
-            p2p_node_add_inventory_known(node, &inv);
-        ok = ok && node->inventory_known_slots == NULL &&
-             node->inventory_known_slot_mask == 0;
-
-        /* Both an old and the just-appended member are found by the exact
-         * linear fallback, so neither is spuriously re-advertised. */
-        size_t queued = node->inventory_to_send_count;
-        struct uint256 oldest;
-        memset(&oldest, 0, sizeof(oldest));
-        oldest.data[31] = 0xa5;
-        inv_item_init_typed(&inv, MSG_TX, &oldest);
-        if (ok)
-            p2p_node_push_inventory(node, &inv);
-        inv_item_init_typed(&inv, MSG_TX, &newest);
-        if (ok)
-            p2p_node_push_inventory(node, &inv);
-        ok = ok && node->inventory_to_send_count == queued;
-
-        /* The next append retries one full rebuild and restores the bounded
-         * indexed path without changing membership. */
-        struct uint256 recovery;
-        memset(&recovery, 0, sizeof(recovery));
-        uint32_t recovery_id = 1025u;
-        memcpy(recovery.data, &recovery_id, sizeof(recovery_id));
-        recovery.data[31] = 0xa5;
-        inv_item_init_typed(&inv, MSG_TX, &recovery);
-        if (ok)
-            p2p_node_add_inventory_known(node, &inv);
-        ok = ok && node->inventory_known_slots != NULL;
-
-        /* A saturated/inconsistent table must terminate its probe, discard
-         * the index, and answer from the ring instead of hanging while the
-         * inventory mutex is held. Every synthetic slot points at valid ring
-         * position zero so this specifically exercises bounded saturation. */
-        if (ok) {
-            for (size_t i = 0; i <= node->inventory_known_slot_mask; i++)
-                node->inventory_known_slots[i] = 1;
-        }
-        struct uint256 absent;
-        memset(&absent, 0, sizeof(absent));
-        uint32_t absent_id = 999999u;
-        memcpy(absent.data, &absent_id, sizeof(absent_id));
-        absent.data[31] = 0xa5;
-        inv_item_init_typed(&inv, MSG_TX, &absent);
-        queued = node->inventory_to_send_count;
-        if (ok)
-            p2p_node_push_inventory(node, &inv);
-        ok = ok && node->inventory_known_slots == NULL &&
-             node->inventory_to_send_count == queued + 1;
-
-        zcl_alloc_fault_clear();
-        p2p_node_free(node);
-        net_manager_free(&nm);
-        if (ok) printf("OK\n");
-        else { printf("FAIL\n"); failures++; }
-    }
+static int test_net_p2p_node_push_address(void)
+{
+    int failures = 0;
 
     /* p2p_node: address tracking */
     {
@@ -2655,6 +2196,12 @@ int test_net(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int test_net_should_reject_oversized(void)
+{
+    int failures = 0;
 
     /* connman: init and free without start */
     {
@@ -2701,6 +2248,12 @@ int test_net(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int test_net_inv_item_less_comparison(void)
+{
+    int failures = 0;
 
     /* inv_item: less comparison */
     {
@@ -2771,6 +2324,12 @@ int test_net(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int test_net_compact_size_encoding(void)
+{
+    int failures = 0;
 
     printf("compact_size encoding... ");
     {
@@ -2847,6 +2406,12 @@ int test_net(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int test_net_fast_sync_pow_solve_and_verify(void)
+{
+    int failures = 0;
 
     /* ================================================================
      * Fast sync: PoW solve + verify round-trip
@@ -2936,6 +2501,12 @@ int test_net(void)
         if (all_ok && blocked) printf("OK (blocked after %d)\n", FAST_SYNC_MAX_CHUNKS_PER_HOUR);
         else { printf("FAIL (ok=%d blocked=%d)\n", all_ok, blocked); failures++; }
     }
+    return failures;
+}
+
+static int test_net_next_one_should_be_blocked(void)
+{
+    int failures = 0;
 
     /* ================================================================
      * Fast sync: peer_supports_fast_sync
@@ -2999,6 +2570,12 @@ int test_net(void)
         if (has_header && has_html && has_title) printf("OK (%zu bytes)\n", len);
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int test_net_onion_service_404_for_unknown_path(void)
+{
+    int failures = 0;
 
     printf("onion_service: 404 for unknown path... ");
     {
@@ -3032,6 +2609,12 @@ int test_net(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int test_net_onion_service_get_status_returns_json_with_no(void)
+{
+    int failures = 0;
 
     printf("onion_service: GET /status returns JSON with node info... ");
     {
@@ -3051,6 +2634,12 @@ int test_net(void)
         if (ok) printf("OK (%zu bytes)\n", len);
         else { printf("FAIL (%zu bytes: %.200s)\n", len, resp); failures++; }
     }
+    return failures;
+}
+
+static int test_net_onion_service_signed_blog_fails_closed_withou(void)
+{
+    int failures = 0;
 
     printf("onion_service: signed /blog fails closed without node.db... ");
     {
@@ -3172,6 +2761,12 @@ int test_net(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int test_net_version_message_protocol_version_below_minimu(void)
+{
+    int failures = 0;
 
     printf("version_message: protocol version below minimum rejected... ");
     {
@@ -3270,6 +2865,12 @@ int test_net(void)
             failures++;
         }
     }
+    return failures;
+}
+
+static int test_net_misbehavior_auto_ban_at_threshold(void)
+{
+    int failures = 0;
 
     printf("misbehavior auto-ban at threshold... ");
     {
@@ -3319,6 +2920,12 @@ int test_net(void)
         if (ok) printf("OK (%zu bytes)\n", n);
         else { printf("FAIL (n=%zu)\n", n); failures++; }
     }
+    return failures;
+}
+
+static int test_net_onion_get_status_returns_json_with_height(void)
+{
+    int failures = 0;
 
     printf("onion: GET /status returns JSON with height+version... ");
     {
@@ -3358,6 +2965,12 @@ int test_net(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int test_net_onion_get_hodl_redirects_to_explorer_hodl(void)
+{
+    int failures = 0;
 
     printf("onion: GET /hodl redirects to explorer hodl... ");
     {
@@ -3384,327 +2997,12 @@ int test_net(void)
         if (ok) printf("OK (not rate-limited)\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
-    /* ===== ONION ADMISSION: TIERED BUDGETS + PUZZLE ESCALATION ===== */
-
-    {
-        struct onion_fake_clock fake = {0};
-        const clock_iface_t iface = {
-            .now_monotonic_ns = onion_fake_now_mono,
-            .now_wall_ms      = onion_fake_now_wall,
-            .self             = &fake,
-        };
-        int64_t t0 = 2000000000; /* arbitrary base, far from any real clock */
-        onion_ratelimit_test_reset();
-        clock_set_default(&iface);
-        onion_fake_clock_set_secs(&fake, t0);
-
-        printf("onion_ratelimit: route classification by cost tier... ");
-        {
-            char key[32] = "x";
-            bool ok = true;
-            ok = ok && onion_route_classify("GET", "/", key) == ONION_ROUTE_STATIC;
-            ok = ok && key[0] == '\0';
-            ok = ok && onion_route_classify("GET", "/status", NULL) == ONION_ROUTE_STATIC;
-            ok = ok && onion_route_classify("GET", "/explorer/style.css", NULL) == ONION_ROUTE_STATIC;
-            ok = ok && onion_route_classify("GET", "/directory.json", NULL) == ONION_ROUTE_CHEAP;
-            ok = ok && onion_route_classify("GET", "/explorer/block/900000", NULL) == ONION_ROUTE_CHEAP;
-            ok = ok && onion_route_classify("GET", "/store/product/7", NULL) == ONION_ROUTE_CHEAP;
-            /* GET on the order collection is a status read, not a mint. */
-            ok = ok && onion_route_classify("GET", "/store/orders", NULL) == ONION_ROUTE_CHEAP;
-            ok = ok && onion_route_classify("POST", "/store/orders", key) == ONION_ROUTE_EXPENSIVE;
-            ok = ok && strcmp(key, "store-order") == 0;
-            ok = ok && onion_route_classify("GET", "/search?q=a", key) == ONION_ROUTE_EXPENSIVE;
-            ok = ok && strcmp(key, "search-hostname") == 0;
-            ok = ok && onion_route_classify("GET", "/explorer/search?q=a", key) == ONION_ROUTE_EXPENSIVE;
-            ok = ok && strcmp(key, "search-explorer") == 0;
-            if (ok) printf("OK\n");
-            else { printf("FAIL\n"); failures++; }
-        }
-
-        printf("onion_ratelimit: expensive flood starves neither static nor cheap... ");
-        {
-            /* Flood the EXPENSIVE budget far past its cap inside one
-             * window — most of these are intended to be denied. */
-            for (int i = 0; i < 200; i++)
-                (void)onion_ratelimit_admit("GET", "/search?q=flood", NULL, 0, NULL);
-
-            /* Requests on the other tiers, in the SAME window, must still
-             * be admitted: the budgets are independent, so a search or
-             * order flood cannot take down browsing or the landing page. */
-            bool all_ok = true;
-            for (int i = 0; i < 10; i++) {
-                if (onion_ratelimit_admit("GET", "/", NULL, 0, NULL) != ONION_ADMIT_OK)
-                    all_ok = false;
-                if (onion_ratelimit_admit("GET", "/directory.json", NULL, 0, NULL) != ONION_ADMIT_OK)
-                    all_ok = false;
-            }
-            if (all_ok) printf("OK\n");
-            else { printf("FAIL (a static/cheap request was denied during an expensive flood)\n"); failures++; }
-        }
-
-        printf("onion_ratelimit: cheap flood does not starve the static tier... ");
-        {
-            onion_fake_clock_set_secs(&fake, t0 + 500);
-            for (int i = 0; i < 400; i++)
-                (void)onion_ratelimit_admit("GET", "/directory.json", NULL, 0, NULL);
-            bool all_ok = true;
-            for (int i = 0; i < 10; i++) {
-                if (onion_ratelimit_admit("GET", "/status", NULL, 0, NULL) != ONION_ADMIT_OK)
-                    all_ok = false;
-            }
-            if (all_ok) printf("OK\n");
-            else { printf("FAIL (the landing/status tier was starved)\n"); failures++; }
-        }
-
-        printf("onion_ratelimit: no pressure -> expensive path needs no puzzle... ");
-        {
-            onion_fake_clock_set_secs(&fake, t0 + 1000); /* fresh, unsaturated window */
-            enum onion_admit_result r =
-                onion_ratelimit_admit("GET", "/search?q=hi", NULL, 0, NULL);
-            if (r == ONION_ADMIT_OK) printf("OK\n");
-            else { printf("FAIL (result=%d)\n", (int)r); failures++; }
-        }
-
-        printf("onion_ratelimit: escalation trips after sustained saturation... ");
-        struct onion_pow_challenge challenge = {0};
-        {
-            /* Saturate 5 consecutive one-second windows well past cap,
-             * then send one more request in the 6th second: that request
-             * triggers the rollover that evaluates the 5th window and
-             * flips escalation, and — carrying no puzzle — must itself
-             * come back POW_REQUIRED with a renderable challenge. */
-            int64_t base = t0 + 2000;
-            for (int w = 0; w < 5; w++) {
-                onion_fake_clock_set_secs(&fake, base + w);
-                for (int i = 0; i < 200; i++)
-                    (void)onion_ratelimit_admit("GET", "/search?q=flood",
-                                                NULL, 0, NULL);
-            }
-            onion_fake_clock_set_secs(&fake, base + 5);
-            enum onion_admit_result r = onion_ratelimit_admit(
-                "GET", "/search?q=trigger", NULL, 0, &challenge);
-
-            struct json_value dump = {0};
-            json_init(&dump);
-            bool have_dump = onion_ratelimit_dump_state_json(&dump, NULL);
-            const struct json_value *esc =
-                have_dump ? json_get(&dump, "expensive_escalated") : NULL;
-            bool escalated_flag = esc && json_get_bool(esc);
-            json_free(&dump);
-
-            bool ok = (r == ONION_ADMIT_POW_REQUIRED) && escalated_flag &&
-                      strlen(challenge.seed_hex) == 64 &&
-                      strlen(challenge.token_hex) == 64 &&
-                      challenge.bits >= PUZZLE_MIN_BITS &&
-                      challenge.server_time == base + 5;
-            if (ok) printf("OK (bits=%d)\n", challenge.bits);
-            else {
-                printf("FAIL (result=%d escalated=%d bits=%d)\n",
-                       (int)r, escalated_flag, challenge.bits);
-                failures++;
-            }
-        }
-
-        printf("onion_ratelimit: a solved route-bound puzzle admits while escalated... ");
-        char solved_path[256] = "";
-        uint8_t seed[32], token[32];
-        {
-            bool solved = false;
-            uint64_t nonce = 0;
-            int64_t ts = (int64_t)platform_time_wall_time_t();
-            if (challenge.seed_hex[0]) {
-                onion_hex_decode32(challenge.seed_hex, seed);
-                onion_hex_decode32(challenge.token_hex, token);
-                solved = puzzle_solve(seed, token, ts, challenge.bits, &nonce);
-            }
-            if (solved)
-                snprintf(solved_path, sizeof(solved_path),
-                         "/search?q=hi&pow_ts=%lld&pow_nonce=%llu",
-                         (long long)ts, (unsigned long long)nonce);
-            enum onion_admit_result r = solved
-                ? onion_ratelimit_admit("GET", solved_path, NULL, 0, NULL)
-                : ONION_ADMIT_RATE_LIMITED;
-            if (solved && r == ONION_ADMIT_OK) printf("OK\n");
-            else {
-                printf("FAIL (solved=%d result=%d)\n", solved, (int)r);
-                failures++;
-            }
-        }
-
-        printf("onion_ratelimit: replaying the same solved puzzle is refused... ");
-        {
-            bool found = false;
-            int64_t before = onion_dump_int("puzzle_failed_total", &found);
-            enum onion_admit_result r = solved_path[0]
-                ? onion_ratelimit_admit("GET", solved_path, NULL, 0, NULL)
-                : ONION_ADMIT_OK;
-            int64_t after = onion_dump_int("puzzle_failed_total", &found);
-            bool ok = solved_path[0] && r == ONION_ADMIT_POW_REQUIRED &&
-                      found && after == before + 1;
-            if (ok) printf("OK\n");
-            else {
-                printf("FAIL (result=%d failed_total %lld -> %lld)\n", (int)r,
-                       (long long)before, (long long)after);
-                failures++;
-            }
-        }
-
-        printf("onion_ratelimit: a puzzle solved for one route is refused on another... ");
-        {
-            /* Same seed, but the token binds the solution to /search. A
-             * store order must not accept it. */
-            uint64_t nonce = 0;
-            int64_t ts = (int64_t)platform_time_wall_time_t();
-            bool solved = puzzle_solve(seed, token, ts, challenge.bits, &nonce);
-            char body[128];
-            int blen = snprintf(body, sizeof(body),
-                                "pow_ts=%lld&pow_nonce=%llu",
-                                (long long)ts, (unsigned long long)nonce);
-            enum onion_admit_result r = solved
-                ? onion_ratelimit_admit("POST", "/store/orders",
-                                        (const uint8_t *)body, (size_t)blen,
-                                        NULL)
-                : ONION_ADMIT_OK;
-            if (solved && r == ONION_ADMIT_POW_REQUIRED) printf("OK\n");
-            else { printf("FAIL (solved=%d result=%d)\n", solved, (int)r); failures++; }
-        }
-
-        printf("onion_ratelimit: static tier is never puzzle-gated, even escalated... ");
-        {
-            bool all_ok = true;
-            for (int i = 0; i < 5; i++) {
-                if (onion_ratelimit_admit("GET", "/", NULL, 0, NULL) != ONION_ADMIT_OK)
-                    all_ok = false;
-                if (onion_ratelimit_admit("GET", "/directory.json", NULL, 0, NULL) != ONION_ADMIT_OK)
-                    all_ok = false;
-            }
-            if (all_ok) printf("OK\n");
-            else { printf("FAIL (an operator was locked out of a non-expensive route)\n"); failures++; }
-        }
-
-        printf("onion_ratelimit: escalation clears after sustained quiet... ");
-        {
-            /* One low-volume request per second. Each first-request-of-a-
-             * window rollover evaluates the prior window; after 15
-             * consecutive clear evaluations de-escalation fires, and the
-             * request that finalizes it — still carrying no puzzle — must
-             * itself come back OK. */
-            int64_t base = t0 + 2000;
-            enum onion_admit_result last = ONION_ADMIT_POW_REQUIRED;
-            for (int s = 6; s <= 21; s++) {
-                onion_fake_clock_set_secs(&fake, base + s);
-                last = onion_ratelimit_admit("GET", "/search?q=quiet",
-                                             NULL, 0, NULL);
-            }
-            bool found = false;
-            int64_t deesc = onion_dump_int("deescalate_total", &found);
-            if (last == ONION_ADMIT_OK && found && deesc >= 1) printf("OK\n");
-            else {
-                printf("FAIL (last result=%d deescalate_total=%lld)\n",
-                       (int)last, (long long)deesc);
-                failures++;
-            }
-        }
-
-        printf("onion_ratelimit: escalated flood never answers a bare 429 and cannot starve an honest solver... ");
-        {
-            /* Re-escalate: five saturated windows, then the trip. */
-            int64_t base2 = t0 + 5000;
-            int cap = onion_ratelimit_test_cap(ONION_ROUTE_EXPENSIVE);
-            for (int w = 0; w < 5; w++) {
-                onion_fake_clock_set_secs(&fake, base2 + w);
-                for (int i = 0; i < 200; i++)
-                    (void)onion_ratelimit_admit("GET", "/search?q=flood",
-                                                NULL, 0, NULL);
-            }
-            onion_fake_clock_set_secs(&fake, base2 + 5);
-            (void)onion_ratelimit_admit("GET", "/search?q=trigger", NULL, 0,
-                                        NULL);
-
-            /* One saturated escalated second: more puzzle-less requests
-             * than the whole budget. Every answer must be a challenge —
-             * the old ordering rejected on the budget first, so a flood
-             * could eat every slot and honest solvers would never even be
-             * offered the puzzle that admits them. The final challenge is
-             * the one the honest client solves. */
-            struct onion_pow_challenge solver_challenge = {0};
-            bool all_challenged = true;
-            for (int i = 0; i <= cap + 10; i++) {
-                enum onion_admit_result r = onion_ratelimit_admit(
-                    "GET", "/search?q=flood", NULL, 0,
-                    i == cap + 10 ? &solver_challenge : NULL);
-                if (r != ONION_ADMIT_POW_REQUIRED)
-                    all_challenged = false;
-            }
-
-            /* The budget is long spent past its cap; a valid solve must
-             * still admit. */
-            bool solved = false;
-            uint64_t nonce = 0;
-            int64_t ts = (int64_t)platform_time_wall_time_t();
-            uint8_t sseed[32], stoken[32];
-            if (all_challenged && solver_challenge.seed_hex[0]) {
-                onion_hex_decode32(solver_challenge.seed_hex, sseed);
-                onion_hex_decode32(solver_challenge.token_hex, stoken);
-                solved = puzzle_solve(sseed, stoken, ts,
-                                      solver_challenge.bits, &nonce);
-            }
-            char solver_path[256] = "";
-            if (solved)
-                snprintf(solver_path, sizeof(solver_path),
-                         "/search?q=mine&pow_ts=%lld&pow_nonce=%llu",
-                         (long long)ts, (unsigned long long)nonce);
-            enum onion_admit_result solver_r = solved
-                ? onion_ratelimit_admit("GET", solver_path, NULL, 0, NULL)
-                : ONION_ADMIT_RATE_LIMITED;
-            if (all_challenged && solved && solver_r == ONION_ADMIT_OK)
-                printf("OK\n");
-            else {
-                printf("FAIL (all_challenged=%d solved=%d result=%d)\n",
-                       all_challenged, solved, (int)solver_r);
-                failures++;
-            }
-        }
-
-        printf("onion_ratelimit: a puzzle-less flood cannot read as quiet and un-escalate... ");
-        {
-            /* Sixteen more saturated escalated seconds of puzzle-less
-             * flood — well past the 15-clear-window hysteresis. Feeding
-             * the budget on every escalated attempt (even refused ones)
-             * is what keeps these windows honest: if puzzle-less traffic
-             * skipped the counter, a flood would read as quiet, fire the
-             * de-escalation, and toggle the guard off without ever
-             * stopping. */
-            bool found_before = false;
-            int64_t before_deesc = onion_dump_int("deescalate_total",
-                                                  &found_before);
-            int64_t base3 = t0 + 5000;
-            for (int s = 6; s <= 21; s++) {
-                onion_fake_clock_set_secs(&fake, base3 + s);
-                for (int i = 0; i < 30; i++)
-                    (void)onion_ratelimit_admit("GET", "/search?q=flood",
-                                                NULL, 0, NULL);
-            }
-            struct json_value dump = {0};
-            json_init(&dump);
-            bool have_dump = onion_ratelimit_dump_state_json(&dump, NULL);
-            const struct json_value *esc =
-                have_dump ? json_get(&dump, "expensive_escalated") : NULL;
-            const struct json_value *deesc =
-                have_dump ? json_get(&dump, "deescalate_total") : NULL;
-            bool ok = esc && json_get_bool(esc) && deesc &&
-                       json_get_int(deesc) == before_deesc;
-            json_free(&dump);
-            if (ok) printf("OK\n");
-            else { printf("FAIL\n"); failures++; }
-        }
-
-        /* Never leak the virtual clock or admission state into later
-         * tests in this process. */
-        clock_reset_default();
-        onion_ratelimit_test_reset();
-    }
+static int test_net_block_already_seen_dedup_checks(void)
+{
+    int failures = 0;
 
     /* ===== BLOCK RELAY DEDUPLICATION TESTS ===== */
 
@@ -3789,117 +3087,12 @@ int test_net(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
-    printf("block dedupe: snapshot defer does not poison replayed block... ");
-    {
-        msgprocessor_test_reset_recent_blocks();
-        struct uint256 h;
-        memset(h.data, 0x5A, 32);
-        bool ok = !msgprocessor_test_accept_block_for_processing(&h, true);
-        ok = ok && !msgprocessor_test_block_already_seen(&h);
-        ok = ok && msgprocessor_test_accept_block_for_processing(&h, false);
-        ok = ok && msgprocessor_test_block_already_seen(&h);
-        if (ok) printf("OK\n");
-        else { printf("FAIL\n"); failures++; }
-    }
-
-    printf("snapshot offer gate: ignore duplicate offers while snapshot owns sync... ");
-    {
-        bool ok = true;
-        ok = ok && msgprocessor_test_should_ignore_snapshot_offer(
-            SNAPSYNC_RECEIVING, 7, PEER_ACTIVE, 7, SYNC_SNAPSHOT_RECEIVE);
-        ok = ok && msgprocessor_test_should_ignore_snapshot_offer(
-            SNAPSYNC_NEGOTIATING, 7, PEER_ACTIVE, 8, SYNC_BLOCKS_DOWNLOAD);
-        ok = ok && msgprocessor_test_should_ignore_snapshot_offer(
-            SNAPSYNC_VERIFYING, 7, PEER_ACTIVE, 8, SYNC_SNAPSHOT_RECEIVE);
-        ok = ok && msgprocessor_test_should_ignore_snapshot_offer(
-            SNAPSYNC_IDLE, 0, PEER_SNAPSHOT_RECEIVING, 8, SYNC_BLOCKS_DOWNLOAD);
-        ok = ok && msgprocessor_test_should_ignore_snapshot_offer(
-            SNAPSYNC_IDLE, 0, PEER_ACTIVE, 8, SYNC_AT_TIP);
-        ok = ok && !msgprocessor_test_should_ignore_snapshot_offer(
-            SNAPSYNC_IDLE, 0, PEER_ACTIVE, 8, SYNC_BLOCKS_DOWNLOAD);
-        if (ok) printf("OK\n");
-        else { printf("FAIL\n"); failures++; }
-    }
-
-    /* ── BitTorrent-style parallel chunk sync tests ──────── */
-
-    /* Helper: create a test UTXO database with N entries */
-    char test_sync_dir[256];
-    char test_sync_db[320];
-    test_make_tmpdir(test_sync_dir, sizeof(test_sync_dir),
-                     "net", "parallel_sync");
-    snprintf(test_sync_db, sizeof(test_sync_db), "%s/node.db",
-             test_sync_dir);
-
-    /* Create test database with 100 UTXOs */
-    sqlite3 *test_db = NULL;
-    {
-        int rc = sqlite3_open(test_sync_db, &test_db);
-        if (rc != SQLITE_OK) {
-            printf("parallel_sync: SKIP (cannot create test db)\n");
-            goto skip_parallel_tests;
-        }
-
-        TEST_DB_EXEC(test_db,
-            "CREATE TABLE IF NOT EXISTS node_state "
-            "(key TEXT PRIMARY KEY, value BLOB)");
-        TEST_DB_EXEC(test_db,
-            "CREATE TABLE IF NOT EXISTS utxos ("
-            "txid BLOB NOT NULL, vout INTEGER NOT NULL, "
-            "value INTEGER NOT NULL, script BLOB NOT NULL, "
-            "script_type INTEGER NOT NULL DEFAULT 0, "
-            "address_hash BLOB, height INTEGER NOT NULL, "
-            "is_coinbase INTEGER NOT NULL DEFAULT 0, "
-            "PRIMARY KEY (txid, vout))");
-
-        /* Set tip height and hash */
-        int64_t tip_height = 100000;
-        sqlite3_stmt *ins = NULL;
-        TEST_DB_RUN(test_db, ins,
-            "INSERT INTO node_state (key, value) VALUES (?, ?)",
-        {
-            sqlite3_bind_text(ins, 1, "tip_height", -1, SQLITE_STATIC);
-            sqlite3_bind_blob(ins, 2, &tip_height, sizeof(tip_height),
-                              SQLITE_STATIC);
-        });
-
-        uint8_t tip_hash[32];
-        memset(tip_hash, 0xAB, 32);
-        TEST_DB_RUN(test_db, ins,
-            "INSERT INTO node_state (key, value) VALUES (?, ?)",
-        {
-            sqlite3_bind_text(ins, 1, "tip_hash", -1, SQLITE_STATIC);
-            sqlite3_bind_blob(ins, 2, tip_hash, 32, SQLITE_STATIC);
-        });
-
-        /* Insert 100 test UTXOs with deterministic data */
-        TEST_DB_BEGIN(test_db);
-        sqlite3_prepare_v2(test_db,
-            "INSERT INTO utxos (txid, vout, value, script, height) "
-            "VALUES (?, ?, ?, ?, ?)", -1, &ins, NULL);
-
-        for (int i = 0; i < 100; i++) {
-            uint8_t txid[32];
-            memset(txid, 0, 32);
-            txid[0] = (uint8_t)(i & 0xFF);
-            txid[1] = (uint8_t)((i >> 8) & 0xFF);
-
-            uint8_t script[25];
-            memset(script, 0x76, sizeof(script));
-            script[0] = (uint8_t)i;
-
-            sqlite3_reset(ins);
-            sqlite3_bind_blob(ins, 1, txid, 32, SQLITE_STATIC);
-            sqlite3_bind_int(ins, 2, i % 3);
-            sqlite3_bind_int64(ins, 3, (int64_t)(i + 1) * 100000);
-            sqlite3_bind_blob(ins, 4, script, 25, SQLITE_STATIC);
-            sqlite3_bind_int(ins, 5, 50000 + i);
-            sqlite3_step(ins);
-        }
-        sqlite3_finalize(ins);
-        TEST_DB_COMMIT(test_db);
-    }
+static int test_net_parallel_sync_manifest_chunk_count(sqlite3 *test_db)
+{
+    int failures = 0;
 
     printf("parallel_sync: manifest chunk_count = ceil(100/500)... ");
     {
@@ -3968,6 +3161,12 @@ int test_net(void)
         else { printf("FAIL\n"); failures++; }
         free(c);
     }
+    return failures;
+}
+
+static int test_net_parallel_sync_serve_chunk_contents_match_db(sqlite3 *test_db)
+{
+    int failures = 0;
 
     printf("parallel_sync: serve_chunk contents match DB... ");
     {
@@ -4046,6 +3245,12 @@ int test_net(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int test_net_parallel_sync_bad_proof_fails_verification(const char *test_sync_dir)
+{
+    int failures = 0;
 
     printf("parallel_sync: bad proof fails verification... ");
     {
@@ -4108,6 +3313,12 @@ int test_net(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int test_net_parallel_sync_manifest_cache_publishes_stable(void)
+{
+    int failures = 0;
 
     printf("parallel_sync: manifest cache publishes stable header... ");
     {
@@ -4140,6 +3351,12 @@ int test_net(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int test_net_parallel_sync_block_manifest_cache_publishes_(void)
+{
+    int failures = 0;
 
     printf("parallel_sync: block manifest cache publishes stable header... ");
     {
@@ -4170,6 +3387,12 @@ int test_net(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int test_net_parallel_sync_snapshot_offer_cache_publishes_(void)
+{
+    int failures = 0;
 
     printf("parallel_sync: snapshot offer cache publishes stable copy... ");
     {
@@ -4208,6 +3431,12 @@ int test_net(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int test_net_swarm_sync_init_with_10_chunks(const char *test_sync_dir)
+{
+    int failures = 0;
 
     /* ── Swarm coordinator tests ─────────────────────────────── */
 
@@ -4242,6 +3471,12 @@ int test_net(void)
         swarm_sync_free(&ss);
         free(m.chunk_hashes);
     }
+    return failures;
+}
+
+static int test_net_swarm_sync_assign_3_chunks_to_different_peers(const char *test_sync_dir)
+{
+    int failures = 0;
 
     printf("swarm_sync: assign 3 chunks to different peers... ");
     {
@@ -4303,6 +3538,12 @@ int test_net(void)
         swarm_sync_free(&ss);
         free(m.chunk_hashes);
     }
+    return failures;
+}
+
+static int test_net_swarm_sync_timeout_resets_stale_inflight_to_n(void)
+{
+    int failures = 0;
 
     printf("swarm_sync: timeout resets stale INFLIGHT to NEEDED... ");
     {
@@ -4403,143 +3644,12 @@ int test_net(void)
         swarm_sync_free(&ss);
         free(m.chunk_hashes);
     }
+    return failures;
+}
 
-    /* ── per-chunk SHA3 verification gates chainstate writes ── */
-    printf("swarm_sync: corrupted chunk rejected and not applied... ");
-    {
-        char p24_dir[256];
-        test_make_tmpdir(p24_dir, sizeof(p24_dir),
-                         "net", "swarm_corrupt");
-
-        /* Bootstrap an empty node.db with the schema fast_sync_apply_chunk
-         * expects. We close it again so the swarm path can re-open it. */
-        char p24_path[1024];
-        snprintf(p24_path, sizeof(p24_path), "%s/node.db", p24_dir);
-        sqlite3 *p24_db = NULL;
-        bool ok = (sqlite3_open(p24_path, &p24_db) == SQLITE_OK);
-        if (ok) {
-            TEST_DB_EXEC(p24_db,
-                "CREATE TABLE IF NOT EXISTS utxos ("
-                "txid BLOB NOT NULL, vout INTEGER NOT NULL, "
-                "value INTEGER NOT NULL, script BLOB NOT NULL, "
-                "script_type INTEGER NOT NULL DEFAULT 0, "
-                "address_hash BLOB, height INTEGER NOT NULL, "
-                "is_coinbase INTEGER NOT NULL DEFAULT 0, "
-                "PRIMARY KEY (txid, vout))");
-        }
-        sqlite3_close(p24_db);
-
-        /* Synthetic chunk with 3 entries. Compute its real SHA3-256 hash —
-         * that's the value the manifest commits to. */
-        struct utxo_chunk *good = zcl_calloc(1, sizeof(*good), "p24_good");
-        ok = ok && good != NULL;
-        if (good) {
-            good->chunk_index = 0;
-            good->num_entries = 3;
-            for (uint32_t i = 0; i < good->num_entries; i++) {
-                memset(good->entries[i].txid, (int)(0xA0 + i), 32);
-                good->entries[i].vout = i;
-                good->entries[i].value = (int64_t)(i + 1) * 1000;
-                good->entries[i].script[0] = 0x76;
-                good->entries[i].script[1] = 0xA9;
-                good->entries[i].script_len = 2;
-                good->entries[i].height = 100 + (int32_t)i;
-            }
-        }
-        uint8_t expected[32] = {0};
-        if (good) fast_sync_chunk_hash(good, expected);
-
-        /* Single-chunk manifest: merkle_root is the leaf itself. */
-        struct sync_manifest m;
-        memset(&m, 0, sizeof(m));
-        m.height = 500;
-        m.num_utxos = good ? good->num_entries : 0;
-        m.num_chunks = 1;
-        m.chunk_size = SYNC_CHUNK_SIZE;
-        m.chunk_hashes = zcl_calloc(1, 32, "p24_hashes");
-        ok = ok && m.chunk_hashes != NULL;
-        if (m.chunk_hashes) memcpy(m.chunk_hashes[0], expected, 32);
-        fast_sync_merkle_root((const uint8_t (*)[32])m.chunk_hashes,
-                              m.num_chunks, m.merkle_root);
-
-        struct swarm_sync ss;
-        memset(&ss, 0, sizeof(ss));
-        ok = ok && swarm_sync_init(&ss, &m, p24_dir);
-        ok = ok && (swarm_sync_assign_chunk(&ss, 42) == 0);
-
-        /* Single-bit flip → chunk hash diverges from manifest. This is
-         * exactly the acceptance scenario from AGENT-2.md. */
-        struct utxo_chunk *bad = zcl_calloc(1, sizeof(*bad), "p24_bad");
-        ok = ok && bad != NULL;
-        if (good && bad) {
-            *bad = *good;
-            bad->entries[1].value ^= 0x01;
-        }
-
-        /* Acceptance #1: corrupted chunk rejected, state reset, no writes. */
-        bool received_bad = ok && swarm_sync_receive_chunk(&ss, bad, 42);
-        ok = ok && !received_bad;
-        ok = ok && (ss.chunk_states[0] == CHUNK_NEEDED);
-        ok = ok && (ss.chunk_retries[0] == 1);
-        ok = ok && (ss.chunk_peer[0] == -1);
-        ok = ok && (ss.chunks_inflight == 0);
-
-        /* Acceptance #1 (cont.): the utxos table must still be empty —
-         * the failed verification has to short-circuit before
-         * fast_sync_apply_chunk's AR_STEP_DONE writer runs. */
-        int bad_rows = -1;
-        {
-            sqlite3 *q = NULL;
-            if (sqlite3_open(p24_path, &q) == SQLITE_OK) {
-                sqlite3_stmt *st = NULL;
-                if (sqlite3_prepare_v2(q,
-                        "SELECT COUNT(*) FROM utxos", -1, &st, NULL)
-                    == SQLITE_OK && sqlite3_step(st) == SQLITE_ROW)
-                    bad_rows = sqlite3_column_int(st, 0);
-                sqlite3_finalize(st);
-                sqlite3_close(q);
-            }
-        }
-        ok = ok && (bad_rows == 0);
-
-        /* Acceptance #3: the same chunk re-requested from a different
-         * peer succeeds and lands in chainstate. */
-        int32_t reassigned = ok ? swarm_sync_assign_chunk(&ss, 99) : -1;
-        ok = ok && (reassigned == 0);
-        bool received_good = ok && swarm_sync_receive_chunk(&ss, good, 99);
-        ok = ok && received_good;
-        ok = ok && (ss.chunk_states[0] == CHUNK_COMPLETE);
-        ok = ok && swarm_sync_is_complete(&ss);
-
-        int good_rows = -1;
-        {
-            sqlite3 *q = NULL;
-            if (sqlite3_open(p24_path, &q) == SQLITE_OK) {
-                sqlite3_stmt *st = NULL;
-                if (sqlite3_prepare_v2(q,
-                        "SELECT COUNT(*) FROM utxos", -1, &st, NULL)
-                    == SQLITE_OK && sqlite3_step(st) == SQLITE_ROW)
-                    good_rows = sqlite3_column_int(st, 0);
-                sqlite3_finalize(st);
-                sqlite3_close(q);
-            }
-        }
-        ok = ok && (good_rows == 3);
-
-        if (ok) printf("OK (bad→reject 0 rows, good→apply 3 rows)\n");
-        else { printf("FAIL (received_bad=%d bad_rows=%d received_good=%d "
-                      "good_rows=%d state=%d retries=%d)\n",
-                      received_bad, bad_rows, received_good, good_rows,
-                      ss.chunk_states ? (int)ss.chunk_states[0] : -1,
-                      ss.chunk_retries ? ss.chunk_retries[0] : -1);
-                      failures++; }
-
-        free(good);
-        free(bad);
-        swarm_sync_free(&ss);
-        free(m.chunk_hashes);
-        test_cleanup_tmpdir(p24_dir);
-    }
+static int test_net_swarm_sync_init_rejects_null_chunk_hashes(void)
+{
+    int failures = 0;
 
     /* guard: swarm_sync_init must reject a manifest that omits
      * chunk_hashes. Otherwise verify-before-apply silently degrades to
@@ -4621,6 +3731,12 @@ int test_net(void)
                        accepted, rejected, dropped, FC_CHALLENGE_BURST);
                failures++; }
     }
+    return failures;
+}
+
+static int test_net_fc_rate_flood_registers_ban_score_exactly_onc(void)
+{
+    int failures = 0;
 
     /* A flood triggers a single ban-score event, not one per drop —
      * otherwise 1000 challenges would add 20_000 to the score and mask
@@ -4661,6 +3777,12 @@ int test_net(void)
                       recovered, flood2_drained, third_score);
                failures++; }
     }
+    return failures;
+}
+
+static int test_net_fc_rate_and_swarm_cas_race_checks(void)
+{
+    int failures = 0;
 
     /* Rate-limit is per-peer: one peer under load can't starve another. */
     printf("fc_rate: victim peer stays servable under attacker flood... ");
@@ -4747,98 +3869,12 @@ int test_net(void)
                       wins, still_active);
                failures++; }
     }
+    return failures;
+}
 
-    printf("swarm_cas: reset cycle re-arms the next CAS... ");
-    {
-        msgprocessor_test_swarm_release();
-
-        bool c1 = msgprocessor_test_swarm_try_claim();   /* claim 1 */
-        msgprocessor_test_swarm_release();               /* finish */
-        bool c2 = msgprocessor_test_swarm_try_claim();   /* claim 2 must succeed */
-        msgprocessor_test_swarm_release();
-
-        bool ok = c1 && c2;
-        if (ok) printf("OK\n");
-        else { printf("FAIL (c1=%d c2=%d)\n", c1, c2); failures++; }
-    }
-
-    /* Clean up test database */
-    sqlite3_close(test_db);
-    test_cleanup_tmpdir(test_sync_dir);
-
-skip_parallel_tests:
-
-    /* ── peer_strategy tests ─────────────────────────────── */
-
-    /* node_profile defaults to all false */
-    {
-        printf("peer_strategy: node_profile zero-init... ");
-        struct node_profile p;
-        memset(&p, 0, sizeof(p));
-        bool ok = !p.has_public_ip && !p.nat_pmp_available &&
-                  !p.upnp_available && !p.tor_available &&
-                  p.public_port == 0 && p.onion_address[0] == '\0';
-        if (ok) printf("OK\n");
-        else { printf("FAIL\n"); failures++; }
-    }
-
-    /* peer_strategy_select returns TRANSPORT_TOR for .onion */
-    {
-        printf("peer_strategy: select tor for .onion... ");
-        struct node_profile p;
-        memset(&p, 0, sizeof(p));
-        p.has_public_ip = true;
-        enum peer_transport t = peer_strategy_select(
-            &p, "abc123xyz.onion");
-        bool ok = (t == TRANSPORT_TOR);
-        /* Also with port suffix */
-        enum peer_transport t2 = peer_strategy_select(
-            &p, "zc23kenfdqqkgamthif3m7lbbdsyrotsl2dlw35qrh3iuzopozmpjnad.onion:8033");
-        ok = ok && (t2 == TRANSPORT_TOR);
-        if (ok) printf("OK\n");
-        else { printf("FAIL\n"); failures++; }
-    }
-
-    /* peer_strategy_select returns TRANSPORT_CLEARNET for IP */
-    {
-        printf("peer_strategy: select clearnet for IP... ");
-        struct node_profile p;
-        memset(&p, 0, sizeof(p));
-        p.has_public_ip = true;
-        enum peer_transport t = peer_strategy_select(
-            &p, "198.51.100.7:8033");
-        bool ok = (t == TRANSPORT_CLEARNET);
-        if (ok) printf("OK\n");
-        else { printf("FAIL\n"); failures++; }
-    }
-
-    /* peer_strategy_select falls back to TOR when no clearnet */
-    {
-        printf("peer_strategy: fallback to tor... ");
-        struct node_profile p;
-        memset(&p, 0, sizeof(p));
-        enum peer_transport t = peer_strategy_select(
-            &p, "203.0.113.9:8033");
-        bool ok = (t == TRANSPORT_TOR);
-        if (ok) printf("OK\n");
-        else { printf("FAIL\n"); failures++; }
-    }
-
-    /* peer_strategy_get_addresses returns .onion when tor available */
-    {
-        printf("peer_strategy: get_addresses onion... ");
-        struct node_profile p;
-        memset(&p, 0, sizeof(p));
-        p.tor_available = true;
-        snprintf(p.onion_address, sizeof(p.onion_address),
-                 "zc23kenfdqqkg.onion");
-        char addrs[4][68];
-        int n = peer_strategy_get_addresses(&p, addrs, 4);
-        bool ok = (n == 1) &&
-                  (strstr(addrs[0], ".onion") != NULL);
-        if (ok) printf("OK\n");
-        else { printf("FAIL\n"); failures++; }
-    }
+static int test_net_peer_strategy_get_addresses_both(void)
+{
+    int failures = 0;
 
     /* peer_strategy_get_addresses returns both when both available */
     {
@@ -4875,154 +3911,12 @@ skip_parallel_tests:
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
-    printf("msg_processor cache versioning... ");
-    {
-        bool ok = true;
-        uint8_t *manifest1_hashes = NULL;
-        uint8_t *manifest2_hashes = NULL;
-        uint8_t *bmanifest1_hashes = NULL;
-        uint8_t *bmanifest2_hashes = NULL;
-        struct snapshot_offer offer1 = {0};
-        struct snapshot_offer offer2 = {0};
-        struct snapshot_offer got_offer = {0};
-        struct sync_manifest manifest1 = {0};
-        struct sync_manifest manifest2 = {0};
-        struct sync_manifest manifest_out = {0};
-        struct block_piece_manifest bmanifest1 = {0};
-        struct block_piece_manifest bmanifest2 = {0};
-        struct block_piece_manifest bmanifest_out = {0};
-        struct sync_manifest manifest_bad = {0};
-        struct block_piece_manifest bmanifest_bad = {0};
-
-        offer1.height = 100;
-        offer2.height = 200;
-
-        boot_snapshot_offer_test_set_trust_override(1);
-        uint64_t offer_v0 = msg_processor_offer_cache_version();
-        msg_processor_update_offer(&offer1);
-        uint64_t offer_v1 = msg_processor_offer_cache_version();
-        ok = ok && offer_v1 > offer_v0;
-        ok = ok && msg_processor_get_offer(&got_offer);
-        ok = ok && got_offer.height == 100;
-
-        msg_processor_update_offer(&offer2);
-        uint64_t offer_v2 = msg_processor_offer_cache_version();
-        ok = ok && offer_v2 > offer_v1;
-        ok = ok && msg_processor_get_offer(&got_offer);
-        ok = ok && got_offer.height == 200;
-        msg_processor_invalidate_offer();
-        ok = ok && msg_processor_offer_cache_version() > offer_v2;
-        ok = ok && !msg_processor_get_offer(&got_offer);
-
-        manifest1_hashes = zcl_calloc(1, 32, "test_manifest_hashes");
-        manifest2_hashes = zcl_calloc(2, 32, "test_manifest_hashes");
-        bmanifest1_hashes = zcl_calloc(1, 32, "test_bmanifest_hashes");
-        bmanifest2_hashes = zcl_calloc(2, 32, "test_bmanifest_hashes");
-        if (!manifest1_hashes || !manifest2_hashes || !bmanifest1_hashes ||
-            !bmanifest2_hashes) {
-            ok = false;
-        } else {
-        manifest1.num_chunks = 1;
-        manifest1.chunk_size = 128;
-        manifest1.chunk_hashes = (uint8_t (*)[32]) manifest1_hashes;
-        memset(manifest1.chunk_hashes[0], 0xA0, 32);
-
-            uint64_t manifest_v0 = msg_processor_manifest_cache_version();
-            ok = ok && msg_processor_publish_manifest(&manifest1);
-            manifest1_hashes = NULL;
-            uint64_t manifest_v1 = msg_processor_manifest_cache_version();
-            ok = ok && manifest_v1 > manifest_v0;
-            ok = ok && msg_processor_get_manifest_header(&manifest_out);
-            ok = ok && manifest_out.num_chunks == 1;
-            ok = ok && manifest_out.chunk_size == 128;
-            boot_snapshot_offer_test_set_trust_override(0);
-            ok = ok && !msg_processor_get_manifest_header(&manifest_out);
-            boot_snapshot_offer_test_set_trust_override(1);
-
-            manifest2.num_chunks = 2;
-            manifest2.chunk_size = 64;
-            manifest2.chunk_hashes = (uint8_t (*)[32]) manifest2_hashes;
-            memset(manifest2.chunk_hashes[0], 0xB0, 32);
-            memset(manifest2.chunk_hashes[1], 0xB1, 32);
-            uint64_t manifest_v2 = msg_processor_manifest_cache_version();
-            ok = ok && msg_processor_publish_manifest(&manifest2);
-            manifest2_hashes = NULL;
-            uint64_t manifest_v3 = msg_processor_manifest_cache_version();
-            ok = ok && manifest_v3 > manifest_v2;
-            ok = ok && msg_processor_get_manifest_header(&manifest_out);
-            ok = ok && manifest_out.num_chunks == 2;
-            msg_processor_invalidate_manifest();
-            ok = ok && msg_processor_manifest_cache_version() > manifest_v3;
-            ok = ok && !msg_processor_get_manifest_header(&manifest_out);
-            manifest_bad.num_chunks = 0;
-            manifest_bad.chunk_size = 0;
-            manifest_bad.chunk_hashes = NULL;
-            uint64_t manifest_bad_v0 = msg_processor_manifest_cache_version();
-            ok = ok && !msg_processor_publish_manifest(&manifest_bad);
-            ok = ok && msg_processor_manifest_cache_version() == manifest_bad_v0;
-        }
-
-        if (manifest1_hashes) free(manifest1_hashes);
-        if (manifest2_hashes) free(manifest2_hashes);
-
-        bmanifest1.start_height = 1;
-        bmanifest1.end_height = 100;
-        bmanifest1.num_pieces = 1;
-        bmanifest1.piece_hashes = (uint8_t (*)[32]) bmanifest1_hashes;
-        if (ok) {
-            memset(bmanifest1.piece_hashes[0], 0xC0, 32);
-
-            uint64_t bmanifest_v0 = msg_processor_block_manifest_cache_version();
-            ok = ok && msg_processor_publish_block_manifest(&bmanifest1, 100);
-            bmanifest1_hashes = NULL;
-            uint64_t bmanifest_v1 = msg_processor_block_manifest_cache_version();
-            ok = ok && bmanifest_v1 > bmanifest_v0;
-            int32_t built_at_height = 0;
-            ok = ok && msg_processor_get_block_manifest_header(&bmanifest_out,
-                                                               &built_at_height);
-            ok = ok && built_at_height == 100;
-            ok = ok && bmanifest_out.start_height == 1;
-
-            bmanifest2.start_height = 101;
-            bmanifest2.end_height = 200;
-            bmanifest2.num_pieces = 2;
-            bmanifest2.piece_hashes = (uint8_t (*)[32]) bmanifest2_hashes;
-            memset(bmanifest2.piece_hashes[0], 0xD0, 32);
-            memset(bmanifest2.piece_hashes[1], 0xD1, 32);
-            uint64_t bmanifest_v2 = msg_processor_block_manifest_cache_version();
-            ok = ok && msg_processor_publish_block_manifest(&bmanifest2, 200);
-            bmanifest2_hashes = NULL;
-            uint64_t bmanifest_v3 = msg_processor_block_manifest_cache_version();
-            ok = ok && bmanifest_v3 > bmanifest_v2;
-            ok = ok && msg_processor_get_block_manifest_header(&bmanifest_out,
-                                                               &built_at_height);
-            ok = ok && built_at_height == 200;
-            msg_processor_invalidate_block_manifest();
-            ok = ok && msg_processor_block_manifest_cache_version() > bmanifest_v3;
-            ok = ok && !msg_processor_get_block_manifest_header(&bmanifest_out,
-                                                                &built_at_height);
-            ok = ok && built_at_height == 0;
-            bmanifest_bad.num_pieces = 1;
-            bmanifest_bad.piece_hashes = NULL;
-            uint64_t bmanifest_bad_v0 = msg_processor_block_manifest_cache_version();
-            ok = ok && !msg_processor_publish_block_manifest(&bmanifest_bad,
-                                                             300);
-            ok = ok && msg_processor_block_manifest_cache_version()
-                   == bmanifest_bad_v0;
-        }
-
-        if (bmanifest1_hashes) free(bmanifest1_hashes);
-        if (bmanifest2_hashes) free(bmanifest2_hashes);
-
-        if (ok) printf("OK\n");
-        else { printf("FAIL\n"); failures++; }
-
-        msg_processor_invalidate_offer();
-        msg_processor_invalidate_manifest();
-        msg_processor_invalidate_block_manifest();
-        boot_snapshot_offer_test_set_trust_override(-1);
-    }
+static int test_net_net_peer_misbehaving_accumulates_score(void)
+{
+    int failures = 0;
 
     /* ── Robustness: peer_misbehaving accumulates and bans ── */
     printf("net: peer_misbehaving accumulates score... ");
@@ -5090,6 +3984,12 @@ skip_parallel_tests:
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int test_net_dispatch_all_handlers_non_null(void)
+{
+    int failures = 0;
 
     printf("dispatch: all handlers non-NULL... ");
     {
@@ -5132,6 +4032,12 @@ skip_parallel_tests:
         if (found) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
+
+static int test_net_p74_watchdog_enters_active_after_61s_stall(void)
+{
+    int failures = 0;
 
     /* ── tip-stall backpressure watchdog ─────────────────────
      * Drive the watchdog with an explicit clock + queue size to
@@ -5221,6 +4127,12 @@ skip_parallel_tests:
 
     printf("p74_watchdog: cooldown elapsed clears even without "
            "tip advance... ");
+    return failures;
+}
+
+static int test_net_p74_watchdog_at_tip_in_flight_cap_estimate_ex(void)
+{
+    int failures = 0;
     {
         p74_register_observers();
         tip_watchdog_test_reset();
@@ -5330,6 +4242,12 @@ skip_parallel_tests:
 
     printf("p74_watchdog: queued-only backlog (100k entries) never "
            "activates... ");
+    return failures;
+}
+
+static int test_net_p74_watchdog_no_re_entry_after_cooldown_until(void)
+{
+    int failures = 0;
     {
         p74_register_observers();
         tip_watchdog_test_reset();
@@ -5365,6 +4283,12 @@ skip_parallel_tests:
 
     printf("p74_watchdog: no re-entry after cooldown until estimate "
            "drops below low water... ");
+    return failures;
+}
+
+static int test_net_blocked_emits(void)
+{
+    int failures = 0;
     {
         p74_register_observers();
         /* tip_watchdog_test_reset re-arms the hysteresis latch
@@ -5423,6 +4347,12 @@ skip_parallel_tests:
                           atomic_load(&g_p74_active_emits));
                failures++; }
     }
+    return failures;
+}
+
+static int test_net_zcl_stress_tests(void)
+{
+    int failures = 0;
 
     /* RSS-cap stress (opt-in via ZCL_STRESS_TESTS).
      *
@@ -5479,6 +4409,12 @@ skip_parallel_tests:
     event_clear_observers(EV_BACKPRESSURE_ACTIVE);
     event_clear_observers(EV_BACKPRESSURE_REJECT);
     event_clear_observers(EV_BACKPRESSURE_CLEAR);
+    return failures;
+}
+
+static int test_net_restore_baseline_so_later_tests_don(void)
+{
+    int failures = 0;
 
     printf("p25_connman: message cycle sends before inbound processing... ");
     {
@@ -5534,6 +4470,12 @@ skip_parallel_tests:
                       (unsigned long long)stats.recv_ready);
                failures++; }
     }
+    return failures;
+}
+
+static int test_net_zcl_stress_tests_2(void)
+{
+    int failures = 0;
 
     /* ── connman snapshot-iterate stress (opt-in) ──────────
      * Exercise the refactored message-cycle + deferred-free-sweep
@@ -5644,6 +4586,12 @@ skip_parallel_tests:
 
     printf("snap_pow: disarmed by default — gate stays open regardless "
            "of nonce... ");
+    return failures;
+}
+
+static int test_net_snap_pow_armed_gate_rejects_missing_wrong_non(void)
+{
+    int failures = 0;
     {
         msgprocessor_test_snap_pow_reset();
         int64_t t = 5000000;
@@ -5727,6 +4675,12 @@ skip_parallel_tests:
 
     printf("snap_pow: requester-visible challenge has fixed LE bytes and "
            "admits an external solve... ");
+    return failures;
+}
+
+static int test_net_snap_pow_stateless_recompute(void)
+{
+    int failures = 0;
     {
         /* This fixed-byte KAT catches host-endian serialization and any
          * accidental reintroduction of server-only address material. */
@@ -5801,6 +4755,12 @@ skip_parallel_tests:
 
     printf("snap_pow: a solve for time bucket N-1 still verifies at "
            "bucket N (grace epoch)... ");
+    return failures;
+}
+
+static int test_net_reject_after_grace(void)
+{
+    int failures = 0;
     {
         int64_t t0 = 8000000;
         int64_t t1 = t0 + SNAP_POW_BUCKET_SECS;
@@ -5870,6 +4830,12 @@ skip_parallel_tests:
                       floor_bits, last_bits, idle_bits);
                failures++; }
     }
+    return failures;
+}
+
+static int test_net_connman_noisetransport_census_accumulates_acr(void)
+{
+    int failures = 0;
 
     /* ================================================================
      * connman: Noise transport ADVERTISEMENT census
@@ -5926,6 +4892,1974 @@ skip_parallel_tests:
                       live_tracks, hw_monotonic, total_grows, samples_count);
                failures++; }
     }
+    return failures;
+}
+
+/* The .onion addnode parse branch (shared by RPC addnode, boot
+ * -addnode, and connman_add_seed_node): a valid v3 name — derived
+ * from a fixed pubkey through the shared codec, so the checksum is
+ * real — parses to the pubkey bytes and port; everything else
+ * fails CLOSED and never touches DNS. */
+struct lookup_onion_fixture {
+    uint8_t pub[32];
+    char host[ONION_V3_ADDRESS_LEN + 1];
+    char withport[ONION_V3_ADDRESS_LEN + 8];
+};
+
+static bool lookup_onion_fixture_setup(struct lookup_onion_fixture *fx)
+{
+    for (int i = 0; i < 32; i++)
+        fx->pub[i] = (uint8_t)(i * 7 + 1);
+    bool ok = onion_v3_address_from_pubkey(fx->pub, fx->host);
+    snprintf(fx->withport, sizeof(fx->withport), "%s:8233", fx->host);
+    return ok;
+}
+
+static bool lookup_onion_accepts_valid_v3(struct lookup_onion_fixture *fx)
+{
+    struct net_service svc;
+    memset(&svc, 0, sizeof(svc));
+    bool ok = lookup_onion(fx->withport, &svc, 8033);
+    ok = ok && svc.addr.has_torv3 &&
+         memcmp(svc.addr.torv3, fx->pub, 32) == 0 && svc.port == 8233;
+
+    /* No port in the string -> the caller's default port. */
+    ok = ok && lookup_onion(fx->host, &svc, 8033) && svc.port == 8033 &&
+         svc.addr.has_torv3;
+    return ok;
+}
+
+static bool lookup_onion_rejects_malformed(struct lookup_onion_fixture *fx)
+{
+    struct net_service svc;
+    memset(&svc, 0, sizeof(svc));
+    /* Refusals: corrupted checksum, truncated name, clearnet literal,
+     * and a non-onion name — all fail closed. */
+    char bad[ONION_V3_ADDRESS_LEN + 1];
+    snprintf(bad, sizeof(bad), "%s", fx->host);
+    bad[0] = (bad[0] == 'a') ? 'b' : 'a';
+    bool ok = !lookup_onion(bad, &svc, 8033) && !svc.addr.has_torv3;
+    ok = ok && !lookup_onion("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.onion",
+                             &svc, 8033);
+    ok = ok && !lookup_onion("127.0.0.1:8233", &svc, 8033);
+    ok = ok && !lookup_onion("example.com", &svc, 8033);
+    return ok;
+}
+
+static bool lookup_onion_name_detection(struct lookup_onion_fixture *fx)
+{
+    /* Detection helper: suffix on the host part, with or without port. */
+    return net_name_is_onion(fx->host) && net_name_is_onion(fx->withport) &&
+           !net_name_is_onion("10.0.0.1:8233") &&
+           !net_name_is_onion("example.com");
+}
+
+static int test_net_lookup_onion_parse_accept_refuse(void)
+{
+    int failures = 0;
+    printf("lookup_onion parse accept/refuse... ");
+
+    struct lookup_onion_fixture fx;
+    bool ok = lookup_onion_fixture_setup(&fx);
+    ok = ok && lookup_onion_accepts_valid_v3(&fx);
+    ok = ok && lookup_onion_rejects_malformed(&fx);
+    ok = ok && lookup_onion_name_detection(&fx);
+
+    if (ok) printf("OK\n");
+    else { printf("FAIL\n"); failures++; }
+    return failures;
+}
+
+/* Send-queue budget (getdata-flood / slow-reader DoS guard).
+ *
+ * A single getdata can request up to MAX_INV_SZ (50000) blocks and a
+ * slow-reader peer may never drain its socket, so serving the whole
+ * batch could buffer tens of GB of send_segments -> OOM. The fix
+ * charges every queued send_segment against a process-wide and a
+ * per-peer budget; process_getdata stops serving once over budget
+ * (without disconnecting), and every drain/disconnect path releases
+ * the bytes so the counter never leaks. This test exercises that
+ * accounting end-to-end through the public p2p_node send path.
+ *
+ * The three steps below share one env/manager/peer fixture and one `ok`
+ * short-circuit chain — later steps (the drain-to-baseline checks) only
+ * mean anything if the earlier queuing actually happened. */
+struct net_send_budget_fixture {
+    struct net_manager nm;
+    struct net_address addr;
+    unsigned char magic[MESSAGE_START_SIZE];
+    unsigned char payload[2048];
+    size_t base;
+    struct p2p_node *node;
+};
+
+static void net_send_budget_fixture_setup(struct net_send_budget_fixture *fx)
+{
+    memset(fx, 0, sizeof(*fx));
+    /* Small caps so a handful of queued messages trips them.
+     * Per-peer cap 4 KB, process cap 16 KB. */
+    setenv("ZCL_MAX_SENDBUFFER_PEER_BYTES", "4096", 1);
+    setenv("ZCL_MAX_SENDBUFFER_TOTAL_BYTES", "16384", 1);
+
+    net_manager_init(&fx->nm);
+    unsigned char magic[MESSAGE_START_SIZE] = {0x24, 0xe9, 0x27, 0x64};
+    memcpy(fx->magic, magic, MESSAGE_START_SIZE);
+    memcpy(fx->nm.message_start, magic, MESSAGE_START_SIZE);
+
+    net_address_init(&fx->addr);
+    unsigned char ip4[4] = {127, 0, 0, 1};
+    net_addr_set_ipv4(&fx->addr.svc.addr, ip4);
+    fx->addr.svc.port = 8033;
+
+    memset(fx->payload, 0x5a, sizeof(fx->payload));
+
+    /* Baseline: other peers/tests in this binary may have outstanding
+     * segments, so all assertions are on the delta from `base`. */
+    fx->base = net_send_total_bytes();
+}
+
+static void net_send_budget_fixture_teardown(struct net_send_budget_fixture *fx)
+{
+    net_manager_free(&fx->nm);
+    unsetenv("ZCL_MAX_SENDBUFFER_PEER_BYTES");
+    unsetenv("ZCL_MAX_SENDBUFFER_TOTAL_BYTES");
+}
+
+static void net_send_budget_queue_until_over_cap(
+    struct net_send_budget_fixture *fx, bool *ok)
+{
+    fx->node = p2p_node_create(&fx->nm, ZCL_INVALID_SOCKET,
+                               &fx->addr, "flood-peer", true);
+    *ok = *ok && (fx->node != NULL);
+
+    /* Nothing queued yet -> not over budget. */
+    *ok = *ok && !net_send_over_budget(fx->node);
+    *ok = *ok && (fx->node->send_size == 0);
+
+    /* Queue several 2 KB "block" messages. send() on the invalid
+     * socket can't drain them, so they accumulate exactly like a
+     * slow-reader peer's queue would. */
+    size_t before = net_send_total_bytes();
+    p2p_node_begin_message(fx->node, "block", fx->magic);
+    p2p_node_write_message_data(fx->node, fx->payload, sizeof(fx->payload));
+    p2p_node_end_message(fx->node);
+    /* One message bumped both the per-peer and process-wide counters
+     * by (header + payload). */
+    *ok = *ok && (net_send_total_bytes() > before);
+    *ok = *ok && (fx->node->send_size > 0);
+    /* One 2 KB message is under the 4 KB per-peer cap. */
+    *ok = *ok && !net_send_over_budget(fx->node);
+
+    /* Keep queueing until the per-peer cap (4 KB) is exceeded; the
+     * serving loop in process_getdata would break at exactly this
+     * point. Bound the loop so a regression can't hang the test. */
+    int guard = 0;
+    while (!net_send_over_budget(fx->node) && guard++ < 1000) {
+        p2p_node_begin_message(fx->node, "block", fx->magic);
+        p2p_node_write_message_data(fx->node, fx->payload, sizeof(fx->payload));
+        p2p_node_end_message(fx->node);
+    }
+    *ok = *ok && net_send_over_budget(fx->node);
+    *ok = *ok && (fx->node->send_size > net_send_peer_bytes_cap());
+
+    /* Whitelisted/trusted peers are exempt even when over the cap. */
+    fx->node->whitelisted = true;
+    *ok = *ok && !net_send_over_budget(fx->node);
+    fx->node->whitelisted = false;
+    *ok = *ok && net_send_over_budget(fx->node);
+}
+
+static void net_send_budget_drain_returns_to_baseline(
+    struct net_send_budget_fixture *fx, bool *ok)
+{
+    /* Tearing the node down drains the send queue through
+     * send_segment_free, which releases every charged byte. After
+     * the drain the process-wide counter must return to baseline —
+     * proving the counter does not leak on disconnect/free. */
+    p2p_node_free(fx->node);
+    *ok = *ok && (net_send_total_bytes() == fx->base);
+
+    /* The cap helpers honour the env overrides. */
+    *ok = *ok && (net_send_peer_bytes_cap() == 4096);
+    *ok = *ok && (net_send_total_bytes_cap() == 16384);
+}
+
+static void net_send_budget_second_peer_drain_symmetry(
+    struct net_send_budget_fixture *fx, bool *ok)
+{
+    /* Direct check of the disconnect-cleanup drain symmetry: a
+     * manually built queue freed with send_segment_free (the exact
+     * primitive connman's forced-disconnect path now uses) must also
+     * leave the counter at baseline. */
+    size_t b2 = net_send_total_bytes();
+    /* Build a segment via the same public send path on a fresh
+     * node, then free the node — whose drain calls the exact
+     * send_segment_free primitive connman's forced-disconnect
+     * cleanup now uses — to confirm the counter returns to baseline
+     * a second time. */
+    struct p2p_node *n2 = p2p_node_create(&fx->nm, ZCL_INVALID_SOCKET,
+                                          &fx->addr, "flood-peer-2", true);
+    *ok = *ok && (n2 != NULL);
+    p2p_node_begin_message(n2, "block", fx->magic);
+    p2p_node_write_message_data(n2, fx->payload, sizeof(fx->payload));
+    p2p_node_end_message(n2);
+    *ok = *ok && (net_send_total_bytes() > b2);
+    p2p_node_free(n2);
+    *ok = *ok && (net_send_total_bytes() == b2);
+}
+
+static int test_net_send_budget_caps(void)
+{
+    int failures = 0;
+    printf("net: send budget caps + counter returns to 0 ... ");
+
+    struct net_send_budget_fixture fx;
+    net_send_budget_fixture_setup(&fx);
+
+    bool ok = true;
+    net_send_budget_queue_until_over_cap(&fx, &ok);
+    net_send_budget_drain_returns_to_baseline(&fx, &ok);
+    net_send_budget_second_peer_drain_symmetry(&fx, &ok);
+
+    net_send_budget_fixture_teardown(&fx);
+
+    if (ok) printf("OK\n");
+    else { printf("FAIL\n"); failures++; }
+    return failures;
+}
+
+/* Send-queue HARD ceiling: a peer that stops reading cannot make us
+ * hold unbounded memory.
+ *
+ * The budget exercised just above is ADVISORY — net_send_over_budget()
+ * only bites where a serve path remembers to call it, and exactly one
+ * path in the tree did. Everything else (headers, addr, inv, snapshot
+ * chunks, block pieces) appended to node->send_size unconditionally, so
+ * a peer that pipelined requests and then stopped reading its socket
+ * made the node retain arbitrary memory.
+ *
+ * The fixture is the real attack, not a mock: a socketpair whose far
+ * end is never read and whose kernel send buffer is squeezed to the
+ * minimum, so send() returns EAGAIN and the queue is the only place
+ * the bytes can go. Before the ceiling existed this loop queued every
+ * one of its 512 messages (≈4 MB for ONE peer, and unbounded in the
+ * real thing); with it, the queue stops at the ceiling and the peer is
+ * disconnected for not draining. */
+struct net_send_ceiling_fixture {
+    struct net_manager nm;
+    struct net_address addr;
+    unsigned char magic[MESSAGE_START_SIZE];
+    unsigned char payload[8192];
+#if defined(_WIN32)
+    zcl_socket_t sv[2];
+#else
+    int sv[2];
+#endif
+    struct p2p_node *node;
+    size_t hard_cap;
+    int refused_at;
+    size_t peak;
+};
+
+static void net_send_ceiling_fixture_setup(struct net_send_ceiling_fixture *fx,
+                                           bool *ok)
+{
+    memset(fx, 0, sizeof(*fx));
+    fx->refused_at = -1;
+
+    /* 256 KiB advisory cap -> 512 KiB hard ceiling. */
+    setenv("ZCL_MAX_SENDBUFFER_PEER_BYTES", "262144", 1);
+    unsetenv("ZCL_MAX_SENDBUFFER_TOTAL_BYTES");
+
+    net_manager_init(&fx->nm);
+    unsigned char magic[MESSAGE_START_SIZE] = {0x24, 0xe9, 0x27, 0x64};
+    memcpy(fx->magic, magic, MESSAGE_START_SIZE);
+    memcpy(fx->nm.message_start, magic, MESSAGE_START_SIZE);
+
+    net_address_init(&fx->addr);
+    unsigned char ip4[4] = {127, 0, 0, 1};
+    net_addr_set_ipv4(&fx->addr.svc.addr, ip4);
+    fx->addr.svc.port = 8033;
+
+    memset(fx->payload, 0x5a, sizeof(fx->payload));
+
+#if defined(_WIN32)
+    fx->sv[0] = ZCL_INVALID_SOCKET;
+    fx->sv[1] = ZCL_INVALID_SOCKET;
+    *ok = platform_socket_pair(fx->sv);
+    if (*ok) {
+        /* Squeeze both ends so the kernel absorbs only a few KB and
+         * the rest has to sit in our own queue, exactly as it would
+         * for a peer on a congested circuit that has stopped reading. */
+        int small = 2048;
+        setsockopt(fx->sv[0], SOL_SOCKET, SO_SNDBUF,
+                   (const char *)&small, sizeof(small));
+        setsockopt(fx->sv[1], SOL_SOCKET, SO_RCVBUF,
+                   (const char *)&small, sizeof(small));
+    }
+#else
+    fx->sv[0] = -1;
+    fx->sv[1] = -1;
+    *ok = (socketpair(AF_UNIX, SOCK_STREAM, 0, fx->sv) == 0);
+    if (*ok) {
+        /* Squeeze both ends so the kernel absorbs only a few KB and
+         * the rest has to sit in our own queue, exactly as it would
+         * for a peer on a congested circuit that has stopped reading. */
+        int small = 2048;
+        setsockopt(fx->sv[0], SOL_SOCKET, SO_SNDBUF, &small, sizeof(small));
+        setsockopt(fx->sv[1], SOL_SOCKET, SO_RCVBUF, &small, sizeof(small));
+        *ok = platform_socket_set_nonblocking(
+            (platform_socket_t)fx->sv[0], true);
+    }
+#endif
+
+    fx->hard_cap = net_send_peer_bytes_hard_cap();
+    *ok = *ok && (fx->hard_cap == 2 * net_send_peer_bytes_cap());
+
+    fx->node = *ok
+        ? p2p_node_create(&fx->nm, (zcl_socket_t)fx->sv[0], &fx->addr,
+                          "deaf-peer", true)
+        : NULL;
+    *ok = *ok && (fx->node != NULL);
+}
+
+static void net_send_ceiling_queue_until_refused(
+    struct net_send_ceiling_fixture *fx, bool *ok)
+{
+    if (*ok) {
+        for (int i = 0; i < 512; i++) {
+            p2p_node_begin_message(fx->node, "headers", fx->magic);
+            p2p_node_write_message_data(fx->node, fx->payload, sizeof(fx->payload));
+            if (!p2p_node_end_message(fx->node)) {
+                fx->refused_at = i;
+                break;
+            }
+            if (fx->node->send_size > fx->peak)
+                fx->peak = fx->node->send_size;
+        }
+    }
+
+    /* The queue REFUSED, and it did so long before 512 messages: this
+     * is the property the old code did not have. */
+    *ok = *ok && (fx->refused_at > 0) && (fx->refused_at < 512);
+    /* Nothing ever went past the ceiling. */
+    *ok = *ok && (fx->peak <= fx->hard_cap);
+    *ok = *ok && (fx->node && fx->node->send_size <= fx->hard_cap);
+    /* Refusing alone would leave the peer wedged with a full queue, so
+     * it is also flagged for disconnect. */
+    *ok = *ok && (fx->node && fx->node->disconnect);
+}
+
+static void net_send_ceiling_tiny_cap_still_accepts_one(
+    struct net_send_ceiling_fixture *fx, bool *ok)
+{
+    /* An EMPTY queue always accepts one message however large, so a
+     * small operator-set cap bounds memory instead of wedging the
+     * connection. Fresh node, ceiling squeezed below one message. */
+    if (*ok) {
+        setenv("ZCL_MAX_SENDBUFFER_PEER_BYTES", "1024", 1);
+        struct p2p_node *tiny = p2p_node_create(
+            &fx->nm, ZCL_INVALID_SOCKET, &fx->addr, "tiny-cap-peer", true);
+        *ok = *ok && (tiny != NULL);
+        if (tiny) {
+            p2p_node_begin_message(tiny, "headers", fx->magic);
+            p2p_node_write_message_data(tiny, fx->payload, sizeof(fx->payload));
+            *ok = *ok && p2p_node_end_message(tiny);
+            p2p_node_free(tiny);
+        }
+        setenv("ZCL_MAX_SENDBUFFER_PEER_BYTES", "262144", 1);
+    }
+}
+
+static void net_send_ceiling_whitelisted_peer_never_capped(
+    struct net_send_ceiling_fixture *fx, bool *ok)
+{
+    /* A whitelisted peer is an explicit operator decision and is never
+     * capped — same exemption net_send_over_budget() already grants. */
+    if (*ok) {
+        struct p2p_node *wl = p2p_node_create(
+            &fx->nm, ZCL_INVALID_SOCKET, &fx->addr, "whitelisted-peer", true);
+        *ok = *ok && (wl != NULL);
+        if (wl) {
+            wl->whitelisted = true;
+            bool all_accepted = true;
+            for (int i = 0; i < 256; i++) {
+                p2p_node_begin_message(wl, "headers", fx->magic);
+                p2p_node_write_message_data(wl, fx->payload, sizeof(fx->payload));
+                if (!p2p_node_end_message(wl)) { all_accepted = false; break; }
+            }
+            *ok = *ok && all_accepted;
+            p2p_node_free(wl);
+        }
+    }
+}
+
+static void net_send_ceiling_fixture_teardown(struct net_send_ceiling_fixture *fx)
+{
+    if (fx->node) p2p_node_free(fx->node);
+#if defined(_WIN32)
+    if (fx->sv[1] != ZCL_INVALID_SOCKET) platform_socket_close(fx->sv[1]);
+#else
+    if (fx->sv[1] >= 0) close(fx->sv[1]);
+#endif
+    net_manager_free(&fx->nm);
+    unsetenv("ZCL_MAX_SENDBUFFER_PEER_BYTES");
+}
+
+static int test_net_send_queue_hard_ceiling(void)
+{
+    int failures = 0;
+    printf("net: send queue hard ceiling bounds a non-draining peer ... ");
+
+    struct net_send_ceiling_fixture fx;
+    bool ok = true;
+    net_send_ceiling_fixture_setup(&fx, &ok);
+    net_send_ceiling_queue_until_refused(&fx, &ok);
+    net_send_ceiling_tiny_cap_still_accepts_one(&fx, &ok);
+    net_send_ceiling_whitelisted_peer_never_capped(&fx, &ok);
+    net_send_ceiling_fixture_teardown(&fx);
+
+    if (ok) printf("OK\n");
+    else {
+        printf("FAIL (refused_at=%d peak=%zu cap=%zu)\n",
+               fx.refused_at, fx.peak, fx.hard_cap);
+        failures++;
+    }
+    return failures;
+}
+
+/* accepted inbound socket is non-blocking
+ *
+ * accept(2) hands back a NEW socket that does not inherit the listener's
+ * non-blocking mode, and Winsock does not propagate FIONBIO either. The
+ * send path treats EWOULDBLOCK as its normal answer and never sets
+ * SO_SNDTIMEO, so a blocking peer socket can park the reactor inside
+ * send() while it holds cs_send -- and cs_nodes on the connman write
+ * path. On POSIX that stays hidden because socket_send_data() passes
+ * MSG_DONTWAIT per call; on Windows MSG_DONTWAIT is 0, so the stall is
+ * real there and invisible here.
+ *
+ * Winsock offers no way to READ a socket's blocking mode back, so the
+ * assertion below can only be made on the POSIX side. That is still the
+ * right regression lock: the bug is one missing statement on a shared
+ * code path, and this pins that statement's presence. */
+struct accept_nonblocking_fixture {
+    struct net_manager nm;
+    zcl_socket_t client;
+};
+
+static bool accept_nonblocking_bind_connect_accept(
+    struct accept_nonblocking_fixture *fx)
+{
+    struct net_service svc;
+    unsigned char ip4[4] = {127, 0, 0, 1};
+    net_manager_init(&fx->nm);
+    net_service_init(&svc);
+    net_addr_set_ipv4(&svc.addr, ip4);
+    svc.port = 0;
+    fx->client = ZCL_INVALID_SOCKET;
+
+    bool ok = bind_listen_port(&fx->nm, &svc, false);
+    ok = ok && fx->nm.num_listen_sockets == 1;
+
+    if (ok) {
+        struct sockaddr_in to;
+        memset(&to, 0, sizeof(to));
+        to.sin_family = AF_INET;
+        to.sin_port = htons(fx->nm.listen_sockets[0].local_port);
+        to.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        fx->client = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        ok = ok && fx->client != ZCL_INVALID_SOCKET;
+        ok = ok && connect(fx->client, (struct sockaddr *)&to, sizeof(to)) == 0;
+    }
+
+    /* The listener is non-blocking, so accept() can legitimately report
+     * EWOULDBLOCK before the kernel has completed the handshake. Retry
+     * rather than let a scheduling delay read as a defect. */
+    bool accepted = false;
+    for (int i = 0; ok && i < 200 && !accepted; i++) {
+        accepted = accept_connection(&fx->nm, &fx->nm.listen_sockets[0]);
+        if (!accepted) platform_sleep_ms(5); /* real-clock: pre-existing bounded poll loop, seeded when check_no_real_clock_test_deadline.sh was introduced */
+    }
+    ok = ok && accepted;
+    ok = ok && fx->nm.num_nodes == 1;
+    return ok;
+}
+
+static bool accept_nonblocking_flag_is_set(struct accept_nonblocking_fixture *fx)
+{
+    bool ok = true;
+#ifndef _WIN32
+    int flags = fcntl(fx->nm.nodes[0]->socket, F_GETFL);
+    ok = flags >= 0 && (flags & O_NONBLOCK) != 0;
+#else
+    (void)fx;
+#endif
+    return ok;
+}
+
+static int test_net_accept_inbound_socket_is_set_non_blocking(void)
+{
+    int failures = 0;
+    printf("accept: inbound socket is set non-blocking... ");
+
+    struct accept_nonblocking_fixture fx = {0};
+    bool ok = accept_nonblocking_bind_connect_accept(&fx);
+    ok = ok && accept_nonblocking_flag_is_set(&fx);
+
+    if (fx.client != ZCL_INVALID_SOCKET) close_socket(&fx.client);
+    net_manager_free(&fx.nm);
+    if (ok) printf("OK\n");
+    else { printf("FAIL\n"); failures++; }
+    return failures;
+}
+
+/* p2p_node: create and free lifecycle */
+struct p2p_node_create_fixture {
+    struct net_manager nm;
+    struct net_address addr;
+};
+
+static void p2p_node_create_fixture_setup(struct p2p_node_create_fixture *fx)
+{
+    net_manager_init(&fx->nm);
+    memset(fx->nm.message_start, 0x24, MESSAGE_START_SIZE);
+
+    net_address_init(&fx->addr);
+    unsigned char ip4[4] = {127, 0, 0, 1};
+    net_addr_set_ipv4(&fx->addr.svc.addr, ip4);
+    fx->addr.svc.port = 8033;
+}
+
+static bool p2p_node_create_first_node_defaults(struct p2p_node_create_fixture *fx)
+{
+    struct p2p_node *node = p2p_node_create(&fx->nm, ZCL_INVALID_SOCKET,
+                                             &fx->addr, "test-peer", true);
+    bool ok = (node != NULL);
+    ok = ok && node->inbound;
+    ok = ok && (node->socket == ZCL_INVALID_SOCKET);
+    ok = ok && (node->id == 0);
+    ok = ok && (node->recv_version == INIT_PROTO_VERSION);
+    ok = ok && (strcmp(node->addr_name, "test-peer") == 0);
+    ok = ok && (node->starting_height == -1);
+    ok = ok && !node->disconnect;
+    ok = ok && (node->state < PEER_HANDSHAKE_COMPLETE);
+
+    /* Verify addr was copied */
+    ok = ok && (node->addr.svc.port == 8033);
+    ok = ok && net_addr_eq(&node->addr.svc.addr, &fx->addr.svc.addr);
+
+    p2p_node_free(node);
+    return ok;
+}
+
+static bool p2p_node_create_second_node_gets_id_1(struct p2p_node_create_fixture *fx)
+{
+    /* Second node gets id=1 */
+    struct p2p_node *node2 = p2p_node_create(&fx->nm, ZCL_INVALID_SOCKET,
+                                              &fx->addr, NULL, false);
+    bool ok = (node2 != NULL);
+    ok = ok && (node2->id == 1);
+    ok = ok && !node2->inbound;
+    /* NULL name -> auto-generated from IP */
+    ok = ok && (strlen(node2->addr_name) > 0);
+    p2p_node_free(node2);
+    return ok;
+}
+
+static int test_net_p2p_node_create_and_free(void)
+{
+    int failures = 0;
+    printf("p2p_node: create and free... ");
+
+    struct p2p_node_create_fixture fx;
+    p2p_node_create_fixture_setup(&fx);
+    bool ok = p2p_node_create_first_node_defaults(&fx);
+    ok = ok && p2p_node_create_second_node_gets_id_1(&fx);
+    net_manager_free(&fx.nm);
+
+    if (ok) printf("OK\n");
+    else { printf("FAIL\n"); failures++; }
+    return failures;
+}
+
+/* p2p_node: inventory tracking */
+struct p2p_inventory_fixture {
+    struct net_manager nm;
+    struct net_address addr;
+    struct p2p_node *node;
+    struct inv_item binv;
+};
+
+static bool p2p_inventory_fixture_setup(struct p2p_inventory_fixture *fx)
+{
+    memset(fx, 0, sizeof(*fx));
+    net_manager_init(&fx->nm);
+    memset(fx->nm.message_start, 0x24, MESSAGE_START_SIZE);
+
+    net_address_init(&fx->addr);
+    unsigned char ip4[4] = {127, 0, 0, 1};
+    net_addr_set_ipv4(&fx->addr.svc.addr, ip4);
+
+    fx->node = p2p_node_create(&fx->nm, ZCL_INVALID_SOCKET,
+                               &fx->addr, "test", false);
+    bool ok = (fx->node != NULL);
+    ok = ok && (fx->node->inventory_known_count == 0);
+    ok = ok && (fx->node->inventory_to_send_count == 0);
+    return ok;
+}
+
+static bool p2p_inventory_push_and_dedup(struct p2p_inventory_fixture *fx)
+{
+    struct uint256 h;
+    uint256_set_null(&h);
+    h.data[0] = 0x42;
+    struct inv_item inv;
+    inv_item_init_typed(&inv, MSG_TX, &h);
+
+    /* push_inventory adds to send queue */
+    p2p_node_push_inventory(fx->node, &inv);
+    bool ok = (fx->node->inventory_to_send_count == 1);
+
+    /* add_inventory_known marks it as known */
+    p2p_node_add_inventory_known(fx->node, &inv);
+    ok = ok && (fx->node->inventory_known_count == 1);
+
+    /* Pushing same hash again should not add duplicate */
+    size_t before = fx->node->inventory_to_send_count;
+    p2p_node_push_inventory(fx->node, &inv);
+    ok = ok && (fx->node->inventory_to_send_count == before);
+    return ok;
+}
+
+static bool p2p_inventory_ring_growth_and_eviction(struct p2p_inventory_fixture *fx)
+{
+    /* Known-ring index under growth + oldest-half eviction: 50002
+     * distinct hashes walk the capacity ladder to the first full-ring
+     * eviction. Membership must stay EXACT throughout — evicted hashes
+     * become unknown, survivors stay known — or relays silently
+     * re-advertise old inventory / drop fresh one. This is also the
+     * getblocks cost path: dedup used to linear-scan the whole ring
+     * per pushed item (25M compares for a single 500-item batch). */
+    for (uint32_t i = 0; i < 50002u; i++) {
+        struct uint256 bh;
+        memset(&bh, 0, sizeof(bh));
+        memcpy(bh.data, &i, sizeof(i));   /* unique per iteration */
+        bh.data[31] = 0x5a;               /* keep away from all-zero */
+        inv_item_init_typed(&fx->binv, MSG_TX, &bh);
+        p2p_node_add_inventory_known(fx->node, &fx->binv);
+    }
+    /* Ring hit MAX_INVENTORY_KNOWN mid-walk, dropped its oldest half,
+     * and every add past that point (plus the evicting add itself)
+     * appended into the kept half. That end state is independent of
+     * what the earlier dedup checks left in the ring (they were
+     * evicted with it), so compute rather than hard-code it. */
+    bool ok = (fx->node->inventory_known_count ==
+               MAX_INVENTORY_KNOWN / 2 +
+                   (50002u - MAX_INVENTORY_KNOWN) + 1);
+    ok = ok && (fx->node->inventory_known_slot_mask != 0);
+    return ok;
+}
+
+static bool p2p_inventory_probe_membership(struct p2p_inventory_fixture *fx)
+{
+    struct inv_item inv;
+    size_t q;
+    /* Newest (i = 50001) is known: pushing it queues nothing. */
+    uint32_t probe = 50001u;
+    memset(&inv, 0, sizeof(inv));
+    memcpy(inv.hash.data, &probe, sizeof(probe));
+    inv.hash.data[31] = 0x5a;
+    inv.type = MSG_TX;
+    q = fx->node->inventory_to_send_count;
+    p2p_node_push_inventory(fx->node, &inv);
+    bool ok = (fx->node->inventory_to_send_count == q);
+
+    /* Survivor from the kept half (i = 30000 >= 25000) still known. */
+    probe = 30000u;
+    memset(&inv, 0, sizeof(inv));
+    memcpy(inv.hash.data, &probe, sizeof(probe));
+    inv.hash.data[31] = 0x5a;
+    inv.type = MSG_TX;
+    q = fx->node->inventory_to_send_count;
+    p2p_node_push_inventory(fx->node, &inv);
+    ok = ok && (fx->node->inventory_to_send_count == q);
+
+    /* Evicted old-half hash (i = 10000) is unknown again: it queues. */
+    probe = 10000u;
+    memset(&inv, 0, sizeof(inv));
+    memcpy(inv.hash.data, &probe, sizeof(probe));
+    inv.hash.data[31] = 0x5a;
+    inv.type = MSG_TX;
+    q = fx->node->inventory_to_send_count;
+    p2p_node_push_inventory(fx->node, &inv);
+    ok = ok && (fx->node->inventory_to_send_count == q + 1);
+    return ok;
+}
+
+static bool p2p_inventory_repeated_announce_stable_occupancy(
+    struct p2p_inventory_fixture *fx)
+{
+    /* Repeated peer announcements remain in the bounded history ring,
+     * but must refresh one hash-table slot instead of multiplying table
+     * occupancy or forcing a full rebuild for every duplicate. */
+    size_t occupied_before = 0;
+    for (size_t i = 0; i <= fx->node->inventory_known_slot_mask; i++)
+        occupied_before += fx->node->inventory_known_slots[i] != 0;
+    for (size_t i = 0; i < 64; i++)
+        p2p_node_add_inventory_known(fx->node, &fx->binv);
+    size_t occupied_after = 0;
+    for (size_t i = 0; i <= fx->node->inventory_known_slot_mask; i++)
+        occupied_after += fx->node->inventory_known_slots[i] != 0;
+    return occupied_after == occupied_before;
+}
+
+static int test_net_p2p_node_inventory_known(void)
+{
+    int failures = 0;
+    printf("p2p_node: inventory known + push... ");
+
+    struct p2p_inventory_fixture fx;
+    bool ok = p2p_inventory_fixture_setup(&fx);
+    ok = ok && p2p_inventory_push_and_dedup(&fx);
+    ok = ok && p2p_inventory_ring_growth_and_eviction(&fx);
+    ok = ok && p2p_inventory_probe_membership(&fx);
+    ok = ok && p2p_inventory_repeated_announce_stable_occupancy(&fx);
+
+    p2p_node_free(fx.node);
+    net_manager_free(&fx.nm);
+    if (ok) printf("OK\n");
+    else { printf("FAIL\n"); failures++; }
+    return failures;
+}
+
+/* p2p_node: inventory-index allocation failure */
+struct p2p_inv_index_oom_fixture {
+    struct net_manager nm;
+    struct net_address addr;
+    struct p2p_node *node;
+    struct inv_item inv;
+    struct uint256 newest;
+    size_t queued;
+};
+
+static bool p2p_inv_index_oom_fill_1024(struct p2p_inv_index_oom_fixture *fx)
+{
+    memset(fx, 0, sizeof(*fx));
+    net_manager_init(&fx->nm);
+    net_address_init(&fx->addr);
+    unsigned char ip4[4] = {127, 0, 0, 1};
+    net_addr_set_ipv4(&fx->addr.svc.addr, ip4);
+    fx->node = p2p_node_create(
+        &fx->nm, ZCL_INVALID_SOCKET, &fx->addr, "index-oom", false);
+    bool ok = fx->node != NULL;
+
+    /* Establish the 2,048-slot table, then fill the 1,024-entry ring to
+     * the capacity-growth boundary. */
+    for (uint32_t i = 0; ok && i < 1024u; i++) {
+        struct uint256 h;
+        memset(&h, 0, sizeof(h));
+        memcpy(h.data, &i, sizeof(i));
+        h.data[31] = 0xa5;
+        inv_item_init_typed(&fx->inv, MSG_TX, &h);
+        p2p_node_add_inventory_known(fx->node, &fx->inv);
+    }
+    ok = ok && fx->node->inventory_known_slots != NULL;
+    return ok;
+}
+
+static bool p2p_inv_index_oom_growth_fails(struct p2p_inv_index_oom_fixture *fx,
+                                           bool ok)
+{
+    /* Hash-ring growth succeeds, but index growth fails. The old table
+     * is incomplete for the new ring and therefore must be discarded. */
+    zcl_alloc_fault_fail_next("inv_known_slots");
+    memset(&fx->newest, 0, sizeof(fx->newest));
+    uint32_t newest_id = 1024u;
+    memcpy(fx->newest.data, &newest_id, sizeof(newest_id));
+    fx->newest.data[31] = 0xa5;
+    inv_item_init_typed(&fx->inv, MSG_TX, &fx->newest);
+    if (ok)
+        p2p_node_add_inventory_known(fx->node, &fx->inv);
+    return ok && fx->node->inventory_known_slots == NULL &&
+           fx->node->inventory_known_slot_mask == 0;
+}
+
+static bool p2p_inv_index_oom_linear_fallback(struct p2p_inv_index_oom_fixture *fx,
+                                              bool ok)
+{
+    /* Both an old and the just-appended member are found by the exact
+     * linear fallback, so neither is spuriously re-advertised. */
+    fx->queued = fx->node->inventory_to_send_count;
+    struct uint256 oldest;
+    memset(&oldest, 0, sizeof(oldest));
+    oldest.data[31] = 0xa5;
+    inv_item_init_typed(&fx->inv, MSG_TX, &oldest);
+    if (ok)
+        p2p_node_push_inventory(fx->node, &fx->inv);
+    inv_item_init_typed(&fx->inv, MSG_TX, &fx->newest);
+    if (ok)
+        p2p_node_push_inventory(fx->node, &fx->inv);
+    return ok && fx->node->inventory_to_send_count == fx->queued;
+}
+
+static bool p2p_inv_index_oom_recovers_and_saturates(
+    struct p2p_inv_index_oom_fixture *fx, bool ok)
+{
+    /* The next append retries one full rebuild and restores the bounded
+     * indexed path without changing membership. */
+    struct uint256 recovery;
+    memset(&recovery, 0, sizeof(recovery));
+    uint32_t recovery_id = 1025u;
+    memcpy(recovery.data, &recovery_id, sizeof(recovery_id));
+    recovery.data[31] = 0xa5;
+    inv_item_init_typed(&fx->inv, MSG_TX, &recovery);
+    if (ok)
+        p2p_node_add_inventory_known(fx->node, &fx->inv);
+    ok = ok && fx->node->inventory_known_slots != NULL;
+
+    /* A saturated/inconsistent table must terminate its probe, discard
+     * the index, and answer from the ring instead of hanging while the
+     * inventory mutex is held. Every synthetic slot points at valid ring
+     * position zero so this specifically exercises bounded saturation. */
+    if (ok) {
+        for (size_t i = 0; i <= fx->node->inventory_known_slot_mask; i++)
+            fx->node->inventory_known_slots[i] = 1;
+    }
+    struct uint256 absent;
+    memset(&absent, 0, sizeof(absent));
+    uint32_t absent_id = 999999u;
+    memcpy(absent.data, &absent_id, sizeof(absent_id));
+    absent.data[31] = 0xa5;
+    inv_item_init_typed(&fx->inv, MSG_TX, &absent);
+    fx->queued = fx->node->inventory_to_send_count;
+    if (ok)
+        p2p_node_push_inventory(fx->node, &fx->inv);
+    return ok && fx->node->inventory_known_slots == NULL &&
+           fx->node->inventory_to_send_count == fx->queued + 1;
+}
+
+static int test_net_p2p_node_inventory_index_allocation_failure(void)
+{
+    int failures = 0;
+    printf("p2p_node: inventory index allocation failure... ");
+
+    struct p2p_inv_index_oom_fixture fx;
+    bool ok = p2p_inv_index_oom_fill_1024(&fx);
+    ok = p2p_inv_index_oom_growth_fails(&fx, ok);
+    ok = p2p_inv_index_oom_linear_fallback(&fx, ok);
+    ok = p2p_inv_index_oom_recovers_and_saturates(&fx, ok);
+
+    zcl_alloc_fault_clear();
+    p2p_node_free(fx.node);
+    net_manager_free(&fx.nm);
+    if (ok) printf("OK\n");
+    else { printf("FAIL\n"); failures++; }
+    return failures;
+}
+
+/* ===== ONION ADMISSION: TIERED BUDGETS + PUZZLE ESCALATION ===== */
+
+/* Shared virtual-clock + puzzle state: the escalation trip, the solve,
+ * the replay-refusal and the cross-route refusal are a genuinely ordered
+ * chain (each step consumes state the previous one produced), so they
+ * share one fixture instead of re-deriving it. */
+struct onion_admission_fixture {
+    struct onion_fake_clock fake;
+    clock_iface_t iface;
+    int64_t t0;
+    struct onion_pow_challenge challenge;
+    char solved_path[256];
+    uint8_t seed[32];
+    uint8_t token[32];
+};
+
+static void onion_admission_fixture_setup(struct onion_admission_fixture *fx)
+{
+    memset(fx, 0, sizeof(*fx));
+    fx->iface.now_monotonic_ns = onion_fake_now_mono;
+    fx->iface.now_wall_ms      = onion_fake_now_wall;
+    fx->iface.self             = &fx->fake;
+    fx->t0 = 2000000000; /* arbitrary base, far from any real clock */
+    onion_ratelimit_test_reset();
+    clock_set_default(&fx->iface);
+    onion_fake_clock_set_secs(&fx->fake, fx->t0);
+}
+
+static void onion_admission_fixture_teardown(void)
+{
+    /* Never leak the virtual clock or admission state into later
+     * tests in this process. */
+    clock_reset_default();
+    onion_ratelimit_test_reset();
+}
+
+static bool test_net_onion_route_classification_static_and_cheap(char *key)
+{
+    bool ok = true;
+    ok = ok && onion_route_classify("GET", "/", key) == ONION_ROUTE_STATIC;
+    ok = ok && key[0] == '\0';
+    ok = ok && onion_route_classify("GET", "/status", NULL) == ONION_ROUTE_STATIC;
+    ok = ok && onion_route_classify("GET", "/explorer/style.css", NULL) == ONION_ROUTE_STATIC;
+    ok = ok && onion_route_classify("GET", "/directory.json", NULL) == ONION_ROUTE_CHEAP;
+    ok = ok && onion_route_classify("GET", "/explorer/block/900000", NULL) == ONION_ROUTE_CHEAP;
+    ok = ok && onion_route_classify("GET", "/store/product/7", NULL) == ONION_ROUTE_CHEAP;
+    /* GET on the order collection is a status read, not a mint. */
+    ok = ok && onion_route_classify("GET", "/store/orders", NULL) == ONION_ROUTE_CHEAP;
+    return ok;
+}
+
+static bool test_net_onion_route_classification_expensive(char *key)
+{
+    bool ok = onion_route_classify("POST", "/store/orders", key) == ONION_ROUTE_EXPENSIVE;
+    ok = ok && strcmp(key, "store-order") == 0;
+    ok = ok && onion_route_classify("GET", "/search?q=a", key) == ONION_ROUTE_EXPENSIVE;
+    ok = ok && strcmp(key, "search-hostname") == 0;
+    ok = ok && onion_route_classify("GET", "/explorer/search?q=a", key) == ONION_ROUTE_EXPENSIVE;
+    ok = ok && strcmp(key, "search-explorer") == 0;
+    return ok;
+}
+
+static void test_net_onion_route_classification_by_cost_tier(
+    struct onion_admission_fixture *fx, int *failures)
+{
+    (void)fx;
+    printf("onion_ratelimit: route classification by cost tier... ");
+    char key[32] = "x";
+    bool ok = test_net_onion_route_classification_static_and_cheap(key);
+    ok = ok && test_net_onion_route_classification_expensive(key);
+    if (ok) printf("OK\n");
+    else { printf("FAIL\n"); (*failures)++; }
+}
+
+static void test_net_onion_expensive_flood_no_starve(
+    struct onion_admission_fixture *fx, int *failures)
+{
+    (void)fx;
+    printf("onion_ratelimit: expensive flood starves neither static nor cheap... ");
+    /* Flood the EXPENSIVE budget far past its cap inside one
+     * window — most of these are intended to be denied. */
+    for (int i = 0; i < 200; i++)
+        (void)onion_ratelimit_admit("GET", "/search?q=flood", NULL, 0, NULL);
+
+    /* Requests on the other tiers, in the SAME window, must still
+     * be admitted: the budgets are independent, so a search or
+     * order flood cannot take down browsing or the landing page. */
+    bool all_ok = true;
+    for (int i = 0; i < 10; i++) {
+        if (onion_ratelimit_admit("GET", "/", NULL, 0, NULL) != ONION_ADMIT_OK)
+            all_ok = false;
+        if (onion_ratelimit_admit("GET", "/directory.json", NULL, 0, NULL) != ONION_ADMIT_OK)
+            all_ok = false;
+    }
+    if (all_ok) printf("OK\n");
+    else { printf("FAIL (a static/cheap request was denied during an expensive flood)\n"); (*failures)++; }
+}
+
+static void test_net_onion_cheap_flood_no_starve_static(
+    struct onion_admission_fixture *fx, int *failures)
+{
+    printf("onion_ratelimit: cheap flood does not starve the static tier... ");
+    onion_fake_clock_set_secs(&fx->fake, fx->t0 + 500);
+    for (int i = 0; i < 400; i++)
+        (void)onion_ratelimit_admit("GET", "/directory.json", NULL, 0, NULL);
+    bool all_ok = true;
+    for (int i = 0; i < 10; i++) {
+        if (onion_ratelimit_admit("GET", "/status", NULL, 0, NULL) != ONION_ADMIT_OK)
+            all_ok = false;
+    }
+    if (all_ok) printf("OK\n");
+    else { printf("FAIL (the landing/status tier was starved)\n"); (*failures)++; }
+}
+
+static void test_net_onion_no_pressure_needs_no_puzzle(
+    struct onion_admission_fixture *fx, int *failures)
+{
+    printf("onion_ratelimit: no pressure -> expensive path needs no puzzle... ");
+    onion_fake_clock_set_secs(&fx->fake, fx->t0 + 1000); /* fresh, unsaturated window */
+    enum onion_admit_result r =
+        onion_ratelimit_admit("GET", "/search?q=hi", NULL, 0, NULL);
+    if (r == ONION_ADMIT_OK) printf("OK\n");
+    else { printf("FAIL (result=%d)\n", (int)r); (*failures)++; }
+}
+
+static void test_net_onion_escalation_trips_after_saturation(
+    struct onion_admission_fixture *fx, int *failures)
+{
+    printf("onion_ratelimit: escalation trips after sustained saturation... ");
+    /* Saturate 5 consecutive one-second windows well past cap,
+     * then send one more request in the 6th second: that request
+     * triggers the rollover that evaluates the 5th window and
+     * flips escalation, and — carrying no puzzle — must itself
+     * come back POW_REQUIRED with a renderable challenge. */
+    int64_t base = fx->t0 + 2000;
+    for (int w = 0; w < 5; w++) {
+        onion_fake_clock_set_secs(&fx->fake, base + w);
+        for (int i = 0; i < 200; i++)
+            (void)onion_ratelimit_admit("GET", "/search?q=flood",
+                                        NULL, 0, NULL);
+    }
+    onion_fake_clock_set_secs(&fx->fake, base + 5);
+    enum onion_admit_result r = onion_ratelimit_admit(
+        "GET", "/search?q=trigger", NULL, 0, &fx->challenge);
+
+    struct json_value dump = {0};
+    json_init(&dump);
+    bool have_dump = onion_ratelimit_dump_state_json(&dump, NULL);
+    const struct json_value *esc =
+        have_dump ? json_get(&dump, "expensive_escalated") : NULL;
+    bool escalated_flag = esc && json_get_bool(esc);
+    json_free(&dump);
+
+    bool ok = (r == ONION_ADMIT_POW_REQUIRED) && escalated_flag &&
+              strlen(fx->challenge.seed_hex) == 64 &&
+              strlen(fx->challenge.token_hex) == 64 &&
+              fx->challenge.bits >= PUZZLE_MIN_BITS &&
+              fx->challenge.server_time == base + 5;
+    if (ok) printf("OK (bits=%d)\n", fx->challenge.bits);
+    else {
+        printf("FAIL (result=%d escalated=%d bits=%d)\n",
+               (int)r, escalated_flag, fx->challenge.bits);
+        (*failures)++;
+    }
+}
+
+static void test_net_onion_solved_puzzle_admits_while_escalated(
+    struct onion_admission_fixture *fx, int *failures)
+{
+    printf("onion_ratelimit: a solved route-bound puzzle admits while escalated... ");
+    bool solved = false;
+    uint64_t nonce = 0;
+    int64_t ts = (int64_t)platform_time_wall_time_t();
+    if (fx->challenge.seed_hex[0]) {
+        onion_hex_decode32(fx->challenge.seed_hex, fx->seed);
+        onion_hex_decode32(fx->challenge.token_hex, fx->token);
+        solved = puzzle_solve(fx->seed, fx->token, ts, fx->challenge.bits, &nonce);
+    }
+    if (solved)
+        snprintf(fx->solved_path, sizeof(fx->solved_path),
+                 "/search?q=hi&pow_ts=%lld&pow_nonce=%llu",
+                 (long long)ts, (unsigned long long)nonce);
+    enum onion_admit_result r = solved
+        ? onion_ratelimit_admit("GET", fx->solved_path, NULL, 0, NULL)
+        : ONION_ADMIT_RATE_LIMITED;
+    if (solved && r == ONION_ADMIT_OK) printf("OK\n");
+    else {
+        printf("FAIL (solved=%d result=%d)\n", solved, (int)r);
+        (*failures)++;
+    }
+}
+
+static void test_net_onion_replay_same_puzzle_refused(
+    struct onion_admission_fixture *fx, int *failures)
+{
+    printf("onion_ratelimit: replaying the same solved puzzle is refused... ");
+    bool found = false;
+    int64_t before = onion_dump_int("puzzle_failed_total", &found);
+    enum onion_admit_result r = fx->solved_path[0]
+        ? onion_ratelimit_admit("GET", fx->solved_path, NULL, 0, NULL)
+        : ONION_ADMIT_OK;
+    int64_t after = onion_dump_int("puzzle_failed_total", &found);
+    bool ok = fx->solved_path[0] && r == ONION_ADMIT_POW_REQUIRED &&
+              found && after == before + 1;
+    if (ok) printf("OK\n");
+    else {
+        printf("FAIL (result=%d failed_total %lld -> %lld)\n", (int)r,
+               (long long)before, (long long)after);
+        (*failures)++;
+    }
+}
+
+static void test_net_onion_puzzle_bound_to_other_route_refused(
+    struct onion_admission_fixture *fx, int *failures)
+{
+    printf("onion_ratelimit: a puzzle solved for one route is refused on another... ");
+    /* Same seed, but the token binds the solution to /search. A
+     * store order must not accept it. */
+    uint64_t nonce = 0;
+    int64_t ts = (int64_t)platform_time_wall_time_t();
+    bool solved = puzzle_solve(fx->seed, fx->token, ts, fx->challenge.bits, &nonce);
+    char body[128];
+    int blen = snprintf(body, sizeof(body),
+                        "pow_ts=%lld&pow_nonce=%llu",
+                        (long long)ts, (unsigned long long)nonce);
+    enum onion_admit_result r = solved
+        ? onion_ratelimit_admit("POST", "/store/orders",
+                                (const uint8_t *)body, (size_t)blen,
+                                NULL)
+        : ONION_ADMIT_OK;
+    if (solved && r == ONION_ADMIT_POW_REQUIRED) printf("OK\n");
+    else { printf("FAIL (solved=%d result=%d)\n", solved, (int)r); (*failures)++; }
+}
+
+static void test_net_onion_static_tier_never_puzzle_gated(
+    struct onion_admission_fixture *fx, int *failures)
+{
+    (void)fx;
+    printf("onion_ratelimit: static tier is never puzzle-gated, even escalated... ");
+    bool all_ok = true;
+    for (int i = 0; i < 5; i++) {
+        if (onion_ratelimit_admit("GET", "/", NULL, 0, NULL) != ONION_ADMIT_OK)
+            all_ok = false;
+        if (onion_ratelimit_admit("GET", "/directory.json", NULL, 0, NULL) != ONION_ADMIT_OK)
+            all_ok = false;
+    }
+    if (all_ok) printf("OK\n");
+    else { printf("FAIL (an operator was locked out of a non-expensive route)\n"); (*failures)++; }
+}
+
+static void test_net_onion_escalation_clears_after_quiet(
+    struct onion_admission_fixture *fx, int *failures)
+{
+    printf("onion_ratelimit: escalation clears after sustained quiet... ");
+    /* One low-volume request per second. Each first-request-of-a-
+     * window rollover evaluates the prior window; after 15
+     * consecutive clear evaluations de-escalation fires, and the
+     * request that finalizes it — still carrying no puzzle — must
+     * itself come back OK. */
+    int64_t base = fx->t0 + 2000;
+    enum onion_admit_result last = ONION_ADMIT_POW_REQUIRED;
+    for (int s = 6; s <= 21; s++) {
+        onion_fake_clock_set_secs(&fx->fake, base + s);
+        last = onion_ratelimit_admit("GET", "/search?q=quiet",
+                                     NULL, 0, NULL);
+    }
+    bool found = false;
+    int64_t deesc = onion_dump_int("deescalate_total", &found);
+    if (last == ONION_ADMIT_OK && found && deesc >= 1) printf("OK\n");
+    else {
+        printf("FAIL (last result=%d deescalate_total=%lld)\n",
+               (int)last, (long long)deesc);
+        (*failures)++;
+    }
+}
+
+static void test_net_onion_escalated_flood_no_bare_429_honest_solver(
+    struct onion_admission_fixture *fx, int *failures)
+{
+    printf("onion_ratelimit: escalated flood never answers a bare 429 and cannot starve an honest solver... ");
+    /* Re-escalate: five saturated windows, then the trip. */
+    int64_t base2 = fx->t0 + 5000;
+    int cap = onion_ratelimit_test_cap(ONION_ROUTE_EXPENSIVE);
+    for (int w = 0; w < 5; w++) {
+        onion_fake_clock_set_secs(&fx->fake, base2 + w);
+        for (int i = 0; i < 200; i++)
+            (void)onion_ratelimit_admit("GET", "/search?q=flood",
+                                        NULL, 0, NULL);
+    }
+    onion_fake_clock_set_secs(&fx->fake, base2 + 5);
+    (void)onion_ratelimit_admit("GET", "/search?q=trigger", NULL, 0,
+                                NULL);
+
+    /* One saturated escalated second: more puzzle-less requests
+     * than the whole budget. Every answer must be a challenge —
+     * the old ordering rejected on the budget first, so a flood
+     * could eat every slot and honest solvers would never even be
+     * offered the puzzle that admits them. The final challenge is
+     * the one the honest client solves. */
+    struct onion_pow_challenge solver_challenge = {0};
+    bool all_challenged = true;
+    for (int i = 0; i <= cap + 10; i++) {
+        enum onion_admit_result r = onion_ratelimit_admit(
+            "GET", "/search?q=flood", NULL, 0,
+            i == cap + 10 ? &solver_challenge : NULL);
+        if (r != ONION_ADMIT_POW_REQUIRED)
+            all_challenged = false;
+    }
+
+    /* The budget is long spent past its cap; a valid solve must
+     * still admit. */
+    bool solved = false;
+    uint64_t nonce = 0;
+    int64_t ts = (int64_t)platform_time_wall_time_t();
+    uint8_t sseed[32], stoken[32];
+    if (all_challenged && solver_challenge.seed_hex[0]) {
+        onion_hex_decode32(solver_challenge.seed_hex, sseed);
+        onion_hex_decode32(solver_challenge.token_hex, stoken);
+        solved = puzzle_solve(sseed, stoken, ts,
+                              solver_challenge.bits, &nonce);
+    }
+    char solver_path[256] = "";
+    if (solved)
+        snprintf(solver_path, sizeof(solver_path),
+                 "/search?q=mine&pow_ts=%lld&pow_nonce=%llu",
+                 (long long)ts, (unsigned long long)nonce);
+    enum onion_admit_result solver_r = solved
+        ? onion_ratelimit_admit("GET", solver_path, NULL, 0, NULL)
+        : ONION_ADMIT_RATE_LIMITED;
+    if (all_challenged && solved && solver_r == ONION_ADMIT_OK)
+        printf("OK\n");
+    else {
+        printf("FAIL (all_challenged=%d solved=%d result=%d)\n",
+               all_challenged, solved, (int)solver_r);
+        (*failures)++;
+    }
+}
+
+static void test_net_onion_puzzleless_flood_cannot_unescalate(
+    struct onion_admission_fixture *fx, int *failures)
+{
+    printf("onion_ratelimit: a puzzle-less flood cannot read as quiet and un-escalate... ");
+    /* Sixteen more saturated escalated seconds of puzzle-less
+     * flood — well past the 15-clear-window hysteresis. Feeding
+     * the budget on every escalated attempt (even refused ones)
+     * is what keeps these windows honest: if puzzle-less traffic
+     * skipped the counter, a flood would read as quiet, fire the
+     * de-escalation, and toggle the guard off without ever
+     * stopping. */
+    bool found_before = false;
+    int64_t before_deesc = onion_dump_int("deescalate_total",
+                                          &found_before);
+    int64_t base3 = fx->t0 + 5000;
+    for (int s = 6; s <= 21; s++) {
+        onion_fake_clock_set_secs(&fx->fake, base3 + s);
+        for (int i = 0; i < 30; i++)
+            (void)onion_ratelimit_admit("GET", "/search?q=flood",
+                                        NULL, 0, NULL);
+    }
+    struct json_value dump = {0};
+    json_init(&dump);
+    bool have_dump = onion_ratelimit_dump_state_json(&dump, NULL);
+    const struct json_value *esc =
+        have_dump ? json_get(&dump, "expensive_escalated") : NULL;
+    const struct json_value *deesc =
+        have_dump ? json_get(&dump, "deescalate_total") : NULL;
+    bool ok = esc && json_get_bool(esc) && deesc &&
+               json_get_int(deesc) == before_deesc;
+    json_free(&dump);
+    if (ok) printf("OK\n");
+    else { printf("FAIL\n"); (*failures)++; }
+}
+
+static int test_net_onion_admission_tiered_budgets_and_puzzle_escalation(void)
+{
+    int failures = 0;
+    struct onion_admission_fixture fx;
+    onion_admission_fixture_setup(&fx);
+
+    test_net_onion_route_classification_by_cost_tier(&fx, &failures);
+    test_net_onion_expensive_flood_no_starve(&fx, &failures);
+    test_net_onion_cheap_flood_no_starve_static(&fx, &failures);
+    test_net_onion_no_pressure_needs_no_puzzle(&fx, &failures);
+    test_net_onion_escalation_trips_after_saturation(&fx, &failures);
+    test_net_onion_solved_puzzle_admits_while_escalated(&fx, &failures);
+    test_net_onion_replay_same_puzzle_refused(&fx, &failures);
+    test_net_onion_puzzle_bound_to_other_route_refused(&fx, &failures);
+    test_net_onion_static_tier_never_puzzle_gated(&fx, &failures);
+    test_net_onion_escalation_clears_after_quiet(&fx, &failures);
+    test_net_onion_escalated_flood_no_bare_429_honest_solver(&fx, &failures);
+    test_net_onion_puzzleless_flood_cannot_unescalate(&fx, &failures);
+
+    onion_admission_fixture_teardown();
+    return failures;
+}
+
+/* ── per-chunk SHA3 verification gates chainstate writes ── */
+
+/* Shared state for the "corrupted chunk rejected, honest re-request
+ * applies" scenario below: a single combined FAIL message names every
+ * field, so the steps stay linked through one fixture and one `ok`
+ * short-circuit chain instead of duplicating the diagnostic. */
+struct swarm_corrupt_fixture {
+    char dir[256];
+    char path[1024];
+    struct utxo_chunk *good;
+    struct utxo_chunk *bad;
+    struct sync_manifest m;
+    struct swarm_sync ss;
+    uint8_t expected[32];
+    bool received_bad;
+    bool received_good;
+    int bad_rows;
+    int good_rows;
+};
+
+static bool swarm_corrupt_fixture_setup(struct swarm_corrupt_fixture *fx)
+{
+    memset(fx, 0, sizeof(*fx));
+    fx->bad_rows = -1;
+    fx->good_rows = -1;
+
+    test_make_tmpdir(fx->dir, sizeof(fx->dir), "net", "swarm_corrupt");
+
+    /* Bootstrap an empty node.db with the schema fast_sync_apply_chunk
+     * expects. We close it again so the swarm path can re-open it. */
+    snprintf(fx->path, sizeof(fx->path), "%s/node.db", fx->dir);
+    sqlite3 *p24_db = NULL;
+    bool ok = (sqlite3_open(fx->path, &p24_db) == SQLITE_OK);
+    if (ok) {
+        TEST_DB_EXEC(p24_db,
+            "CREATE TABLE IF NOT EXISTS utxos ("
+            "txid BLOB NOT NULL, vout INTEGER NOT NULL, "
+            "value INTEGER NOT NULL, script BLOB NOT NULL, "
+            "script_type INTEGER NOT NULL DEFAULT 0, "
+            "address_hash BLOB, height INTEGER NOT NULL, "
+            "is_coinbase INTEGER NOT NULL DEFAULT 0, "
+            "PRIMARY KEY (txid, vout))");
+    }
+    sqlite3_close(p24_db);
+
+    /* Synthetic chunk with 3 entries. Compute its real SHA3-256 hash —
+     * that's the value the manifest commits to. */
+    fx->good = zcl_calloc(1, sizeof(*fx->good), "p24_good");
+    ok = ok && fx->good != NULL;
+    if (fx->good) {
+        fx->good->chunk_index = 0;
+        fx->good->num_entries = 3;
+        for (uint32_t i = 0; i < fx->good->num_entries; i++) {
+            memset(fx->good->entries[i].txid, (int)(0xA0 + i), 32);
+            fx->good->entries[i].vout = i;
+            fx->good->entries[i].value = (int64_t)(i + 1) * 1000;
+            fx->good->entries[i].script[0] = 0x76;
+            fx->good->entries[i].script[1] = 0xA9;
+            fx->good->entries[i].script_len = 2;
+            fx->good->entries[i].height = 100 + (int32_t)i;
+        }
+    }
+    if (fx->good) fast_sync_chunk_hash(fx->good, fx->expected);
+
+    /* Single-chunk manifest: merkle_root is the leaf itself. */
+    memset(&fx->m, 0, sizeof(fx->m));
+    fx->m.height = 500;
+    fx->m.num_utxos = fx->good ? fx->good->num_entries : 0;
+    fx->m.num_chunks = 1;
+    fx->m.chunk_size = SYNC_CHUNK_SIZE;
+    fx->m.chunk_hashes = zcl_calloc(1, 32, "p24_hashes");
+    ok = ok && fx->m.chunk_hashes != NULL;
+    if (fx->m.chunk_hashes) memcpy(fx->m.chunk_hashes[0], fx->expected, 32);
+    fast_sync_merkle_root((const uint8_t (*)[32])fx->m.chunk_hashes,
+                          fx->m.num_chunks, fx->m.merkle_root);
+
+    memset(&fx->ss, 0, sizeof(fx->ss));
+    ok = ok && swarm_sync_init(&fx->ss, &fx->m, fx->dir);
+    ok = ok && (swarm_sync_assign_chunk(&fx->ss, 42) == 0);
+
+    /* Single-bit flip → chunk hash diverges from manifest. This is
+     * exactly the acceptance scenario from AGENT-2.md. */
+    fx->bad = zcl_calloc(1, sizeof(*fx->bad), "p24_bad");
+    ok = ok && fx->bad != NULL;
+    if (fx->good && fx->bad) {
+        *fx->bad = *fx->good;
+        fx->bad->entries[1].value ^= 0x01;
+    }
+    return ok;
+}
+
+static void swarm_corrupt_fixture_teardown(struct swarm_corrupt_fixture *fx)
+{
+    free(fx->good);
+    free(fx->bad);
+    swarm_sync_free(&fx->ss);
+    free(fx->m.chunk_hashes);
+    test_cleanup_tmpdir(fx->dir);
+}
+
+/* Acceptance #1: corrupted chunk rejected, state reset, no writes. */
+static void swarm_corrupt_rejects_bad_chunk(struct swarm_corrupt_fixture *fx,
+                                            bool *ok)
+{
+    fx->received_bad = *ok && swarm_sync_receive_chunk(&fx->ss, fx->bad, 42);
+    *ok = *ok && !fx->received_bad;
+    *ok = *ok && (fx->ss.chunk_states[0] == CHUNK_NEEDED);
+    *ok = *ok && (fx->ss.chunk_retries[0] == 1);
+    *ok = *ok && (fx->ss.chunk_peer[0] == -1);
+    *ok = *ok && (fx->ss.chunks_inflight == 0);
+
+    /* Acceptance #1 (cont.): the utxos table must still be empty —
+     * the failed verification has to short-circuit before
+     * fast_sync_apply_chunk's AR_STEP_DONE writer runs. */
+    {
+        sqlite3 *q = NULL;
+        if (sqlite3_open(fx->path, &q) == SQLITE_OK) {
+            sqlite3_stmt *st = NULL;
+            if (sqlite3_prepare_v2(q,
+                    "SELECT COUNT(*) FROM utxos", -1, &st, NULL)
+                == SQLITE_OK && sqlite3_step(st) == SQLITE_ROW)
+                fx->bad_rows = sqlite3_column_int(st, 0);
+            sqlite3_finalize(st);
+            sqlite3_close(q);
+        }
+    }
+    *ok = *ok && (fx->bad_rows == 0);
+}
+
+/* Acceptance #3: the same chunk re-requested from a different
+ * peer succeeds and lands in chainstate. */
+static void swarm_corrupt_reassigned_chunk_applies(
+    struct swarm_corrupt_fixture *fx, bool *ok)
+{
+    int32_t reassigned = *ok ? swarm_sync_assign_chunk(&fx->ss, 99) : -1;
+    *ok = *ok && (reassigned == 0);
+    fx->received_good = *ok && swarm_sync_receive_chunk(&fx->ss, fx->good, 99);
+    *ok = *ok && fx->received_good;
+    *ok = *ok && (fx->ss.chunk_states[0] == CHUNK_COMPLETE);
+    *ok = *ok && swarm_sync_is_complete(&fx->ss);
+
+    {
+        sqlite3 *q = NULL;
+        if (sqlite3_open(fx->path, &q) == SQLITE_OK) {
+            sqlite3_stmt *st = NULL;
+            if (sqlite3_prepare_v2(q,
+                    "SELECT COUNT(*) FROM utxos", -1, &st, NULL)
+                == SQLITE_OK && sqlite3_step(st) == SQLITE_ROW)
+                fx->good_rows = sqlite3_column_int(st, 0);
+            sqlite3_finalize(st);
+            sqlite3_close(q);
+        }
+    }
+    *ok = *ok && (fx->good_rows == 3);
+}
+
+static int test_net_swarm_sync_corrupted_chunk_scenario(void)
+{
+    int failures = 0;
+    struct swarm_corrupt_fixture fx;
+    bool ok = swarm_corrupt_fixture_setup(&fx);
+
+    printf("swarm_sync: corrupted chunk rejected and not applied... ");
+    swarm_corrupt_rejects_bad_chunk(&fx, &ok);
+    swarm_corrupt_reassigned_chunk_applies(&fx, &ok);
+
+    if (ok) printf("OK (bad→reject 0 rows, good→apply 3 rows)\n");
+    else { printf("FAIL (received_bad=%d bad_rows=%d received_good=%d "
+                  "good_rows=%d state=%d retries=%d)\n",
+                  fx.received_bad, fx.bad_rows, fx.received_good, fx.good_rows,
+                  fx.ss.chunk_states ? (int)fx.ss.chunk_states[0] : -1,
+                  fx.ss.chunk_retries ? fx.ss.chunk_retries[0] : -1);
+                  failures++; }
+
+    swarm_corrupt_fixture_teardown(&fx);
+    return failures;
+}
+
+static int test_net_swarm_cas_reset_cycle_re_arms_the_next_cas(void)
+{
+    int failures = 0;
+    printf("swarm_cas: reset cycle re-arms the next CAS... ");
+    msgprocessor_test_swarm_release();
+
+    bool c1 = msgprocessor_test_swarm_try_claim();   /* claim 1 */
+    msgprocessor_test_swarm_release();               /* finish */
+    bool c2 = msgprocessor_test_swarm_try_claim();   /* claim 2 must succeed */
+    msgprocessor_test_swarm_release();
+
+    bool ok = c1 && c2;
+    if (ok) printf("OK\n");
+    else { printf("FAIL (c1=%d c2=%d)\n", c1, c2); failures++; }
+    return failures;
+}
+
+/* ── peer_strategy tests ─────────────────────────────── */
+static int test_net_peer_strategy_transport_selection_basics(void)
+{
+    int failures = 0;
+
+    /* node_profile defaults to all false */
+    {
+        printf("peer_strategy: node_profile zero-init... ");
+        struct node_profile p;
+        memset(&p, 0, sizeof(p));
+        bool ok = !p.has_public_ip && !p.nat_pmp_available &&
+                  !p.upnp_available && !p.tor_available &&
+                  p.public_port == 0 && p.onion_address[0] == '\0';
+        if (ok) printf("OK\n");
+        else { printf("FAIL\n"); failures++; }
+    }
+
+    /* peer_strategy_select returns TRANSPORT_TOR for .onion */
+    {
+        printf("peer_strategy: select tor for .onion... ");
+        struct node_profile p;
+        memset(&p, 0, sizeof(p));
+        p.has_public_ip = true;
+        enum peer_transport t = peer_strategy_select(
+            &p, "abc123xyz.onion");
+        bool ok = (t == TRANSPORT_TOR);
+        /* Also with port suffix */
+        enum peer_transport t2 = peer_strategy_select(
+            &p, "zc23kenfdqqkgamthif3m7lbbdsyrotsl2dlw35qrh3iuzopozmpjnad.onion:8033");
+        ok = ok && (t2 == TRANSPORT_TOR);
+        if (ok) printf("OK\n");
+        else { printf("FAIL\n"); failures++; }
+    }
+
+    /* peer_strategy_select returns TRANSPORT_CLEARNET for IP */
+    {
+        printf("peer_strategy: select clearnet for IP... ");
+        struct node_profile p;
+        memset(&p, 0, sizeof(p));
+        p.has_public_ip = true;
+        enum peer_transport t = peer_strategy_select(
+            &p, "198.51.100.7:8033");
+        bool ok = (t == TRANSPORT_CLEARNET);
+        if (ok) printf("OK\n");
+        else { printf("FAIL\n"); failures++; }
+    }
+
+    /* peer_strategy_select falls back to TOR when no clearnet */
+    {
+        printf("peer_strategy: fallback to tor... ");
+        struct node_profile p;
+        memset(&p, 0, sizeof(p));
+        enum peer_transport t = peer_strategy_select(
+            &p, "203.0.113.9:8033");
+        bool ok = (t == TRANSPORT_TOR);
+        if (ok) printf("OK\n");
+        else { printf("FAIL\n"); failures++; }
+    }
+
+    /* peer_strategy_get_addresses returns .onion when tor available */
+    {
+        printf("peer_strategy: get_addresses onion... ");
+        struct node_profile p;
+        memset(&p, 0, sizeof(p));
+        p.tor_available = true;
+        snprintf(p.onion_address, sizeof(p.onion_address),
+                 "zc23kenfdqqkg.onion");
+        char addrs[4][68];
+        int n = peer_strategy_get_addresses(&p, addrs, 4);
+        bool ok = (n == 1) &&
+                  (strstr(addrs[0], ".onion") != NULL);
+        if (ok) printf("OK\n");
+        else { printf("FAIL\n"); failures++; }
+    }
+
+    return failures;
+}
+
+static void msg_processor_cache_fixture_setup(void)
+{
+    boot_snapshot_offer_test_set_trust_override(1);
+}
+
+static void msg_processor_cache_fixture_teardown(void)
+{
+    msg_processor_invalidate_offer();
+    msg_processor_invalidate_manifest();
+    msg_processor_invalidate_block_manifest();
+    boot_snapshot_offer_test_set_trust_override(-1);
+}
+
+static bool msg_processor_offer_cache_versioning_checks(void)
+{
+    struct snapshot_offer offer1 = {0};
+    struct snapshot_offer offer2 = {0};
+    struct snapshot_offer got_offer = {0};
+    offer1.height = 100;
+    offer2.height = 200;
+
+    uint64_t offer_v0 = msg_processor_offer_cache_version();
+    msg_processor_update_offer(&offer1);
+    uint64_t offer_v1 = msg_processor_offer_cache_version();
+    bool ok = offer_v1 > offer_v0;
+    ok = ok && msg_processor_get_offer(&got_offer);
+    ok = ok && got_offer.height == 100;
+
+    msg_processor_update_offer(&offer2);
+    uint64_t offer_v2 = msg_processor_offer_cache_version();
+    ok = ok && offer_v2 > offer_v1;
+    ok = ok && msg_processor_get_offer(&got_offer);
+    ok = ok && got_offer.height == 200;
+    msg_processor_invalidate_offer();
+    ok = ok && msg_processor_offer_cache_version() > offer_v2;
+    ok = ok && !msg_processor_get_offer(&got_offer);
+    return ok;
+}
+
+static bool msg_processor_manifest1_publish_and_readback(
+    uint8_t **manifest1_hashes, struct sync_manifest *manifest_out)
+{
+    struct sync_manifest manifest1 = {0};
+    manifest1.num_chunks = 1;
+    manifest1.chunk_size = 128;
+    manifest1.chunk_hashes = (uint8_t (*)[32]) *manifest1_hashes;
+    memset(manifest1.chunk_hashes[0], 0xA0, 32);
+
+    uint64_t manifest_v0 = msg_processor_manifest_cache_version();
+    bool ok = msg_processor_publish_manifest(&manifest1);
+    *manifest1_hashes = NULL;
+    uint64_t manifest_v1 = msg_processor_manifest_cache_version();
+    ok = ok && manifest_v1 > manifest_v0;
+    ok = ok && msg_processor_get_manifest_header(manifest_out);
+    ok = ok && manifest_out->num_chunks == 1;
+    ok = ok && manifest_out->chunk_size == 128;
+    boot_snapshot_offer_test_set_trust_override(0);
+    ok = ok && !msg_processor_get_manifest_header(manifest_out);
+    boot_snapshot_offer_test_set_trust_override(1);
+    return ok;
+}
+
+static bool msg_processor_manifest2_publish_invalidate_and_reject_bad(
+    uint8_t **manifest2_hashes, struct sync_manifest *manifest_out)
+{
+    struct sync_manifest manifest2 = {0};
+    struct sync_manifest manifest_bad = {0};
+    manifest2.num_chunks = 2;
+    manifest2.chunk_size = 64;
+    manifest2.chunk_hashes = (uint8_t (*)[32]) *manifest2_hashes;
+    memset(manifest2.chunk_hashes[0], 0xB0, 32);
+    memset(manifest2.chunk_hashes[1], 0xB1, 32);
+    uint64_t manifest_v2 = msg_processor_manifest_cache_version();
+    bool ok = msg_processor_publish_manifest(&manifest2);
+    *manifest2_hashes = NULL;
+    uint64_t manifest_v3 = msg_processor_manifest_cache_version();
+    ok = ok && manifest_v3 > manifest_v2;
+    ok = ok && msg_processor_get_manifest_header(manifest_out);
+    ok = ok && manifest_out->num_chunks == 2;
+    msg_processor_invalidate_manifest();
+    ok = ok && msg_processor_manifest_cache_version() > manifest_v3;
+    ok = ok && !msg_processor_get_manifest_header(manifest_out);
+    manifest_bad.num_chunks = 0;
+    manifest_bad.chunk_size = 0;
+    manifest_bad.chunk_hashes = NULL;
+    uint64_t manifest_bad_v0 = msg_processor_manifest_cache_version();
+    ok = ok && !msg_processor_publish_manifest(&manifest_bad);
+    ok = ok && msg_processor_manifest_cache_version() == manifest_bad_v0;
+    return ok;
+}
+
+static bool msg_processor_manifest_cache_versioning_checks(void)
+{
+    uint8_t *manifest1_hashes = zcl_calloc(1, 32, "test_manifest_hashes");
+    uint8_t *manifest2_hashes = zcl_calloc(2, 32, "test_manifest_hashes");
+    struct sync_manifest manifest_out = {0};
+
+    bool ok = manifest1_hashes != NULL && manifest2_hashes != NULL;
+    if (ok) {
+        ok = msg_processor_manifest1_publish_and_readback(
+            &manifest1_hashes, &manifest_out);
+        ok = ok && msg_processor_manifest2_publish_invalidate_and_reject_bad(
+            &manifest2_hashes, &manifest_out);
+    }
+
+    if (manifest1_hashes) free(manifest1_hashes);
+    if (manifest2_hashes) free(manifest2_hashes);
+    return ok;
+}
+
+static bool msg_processor_bmanifest1_publish_and_readback(
+    uint8_t **bmanifest1_hashes, struct block_piece_manifest *bmanifest_out,
+    int32_t *built_at_height)
+{
+    struct block_piece_manifest bmanifest1 = {0};
+    bmanifest1.start_height = 1;
+    bmanifest1.end_height = 100;
+    bmanifest1.num_pieces = 1;
+    bmanifest1.piece_hashes = (uint8_t (*)[32]) *bmanifest1_hashes;
+    memset(bmanifest1.piece_hashes[0], 0xC0, 32);
+
+    uint64_t bmanifest_v0 = msg_processor_block_manifest_cache_version();
+    bool ok = msg_processor_publish_block_manifest(&bmanifest1, 100);
+    *bmanifest1_hashes = NULL;
+    uint64_t bmanifest_v1 = msg_processor_block_manifest_cache_version();
+    ok = ok && bmanifest_v1 > bmanifest_v0;
+    ok = ok && msg_processor_get_block_manifest_header(bmanifest_out,
+                                                       built_at_height);
+    ok = ok && *built_at_height == 100;
+    ok = ok && bmanifest_out->start_height == 1;
+    return ok;
+}
+
+static bool msg_processor_bmanifest2_publish_invalidate_and_reject_bad(
+    uint8_t **bmanifest2_hashes, struct block_piece_manifest *bmanifest_out,
+    int32_t *built_at_height)
+{
+    struct block_piece_manifest bmanifest2 = {0};
+    struct block_piece_manifest bmanifest_bad = {0};
+    bmanifest2.start_height = 101;
+    bmanifest2.end_height = 200;
+    bmanifest2.num_pieces = 2;
+    bmanifest2.piece_hashes = (uint8_t (*)[32]) *bmanifest2_hashes;
+    memset(bmanifest2.piece_hashes[0], 0xD0, 32);
+    memset(bmanifest2.piece_hashes[1], 0xD1, 32);
+    uint64_t bmanifest_v2 = msg_processor_block_manifest_cache_version();
+    bool ok = msg_processor_publish_block_manifest(&bmanifest2, 200);
+    *bmanifest2_hashes = NULL;
+    uint64_t bmanifest_v3 = msg_processor_block_manifest_cache_version();
+    ok = ok && bmanifest_v3 > bmanifest_v2;
+    ok = ok && msg_processor_get_block_manifest_header(bmanifest_out,
+                                                       built_at_height);
+    ok = ok && *built_at_height == 200;
+    msg_processor_invalidate_block_manifest();
+    ok = ok && msg_processor_block_manifest_cache_version() > bmanifest_v3;
+    ok = ok && !msg_processor_get_block_manifest_header(bmanifest_out,
+                                                        built_at_height);
+    ok = ok && *built_at_height == 0;
+    bmanifest_bad.num_pieces = 1;
+    bmanifest_bad.piece_hashes = NULL;
+    uint64_t bmanifest_bad_v0 = msg_processor_block_manifest_cache_version();
+    ok = ok && !msg_processor_publish_block_manifest(&bmanifest_bad, 300);
+    ok = ok && msg_processor_block_manifest_cache_version()
+           == bmanifest_bad_v0;
+    return ok;
+}
+
+static bool msg_processor_block_manifest_cache_versioning_checks(bool ok)
+{
+    uint8_t *bmanifest1_hashes = zcl_calloc(1, 32, "test_bmanifest_hashes");
+    uint8_t *bmanifest2_hashes = zcl_calloc(2, 32, "test_bmanifest_hashes");
+    struct block_piece_manifest bmanifest_out = {0};
+    int32_t built_at_height = 0;
+
+    ok = ok && bmanifest1_hashes != NULL && bmanifest2_hashes != NULL;
+    if (ok) {
+        ok = msg_processor_bmanifest1_publish_and_readback(
+            &bmanifest1_hashes, &bmanifest_out, &built_at_height);
+        ok = ok && msg_processor_bmanifest2_publish_invalidate_and_reject_bad(
+            &bmanifest2_hashes, &bmanifest_out, &built_at_height);
+    }
+
+    if (bmanifest1_hashes) free(bmanifest1_hashes);
+    if (bmanifest2_hashes) free(bmanifest2_hashes);
+    return ok;
+}
+
+static int test_net_msg_processor_cache_versioning(void)
+{
+    int failures = 0;
+    printf("msg_processor cache versioning... ");
+    msg_processor_cache_fixture_setup();
+
+    bool ok = msg_processor_offer_cache_versioning_checks();
+    ok = msg_processor_manifest_cache_versioning_checks() && ok;
+    ok = msg_processor_block_manifest_cache_versioning_checks(ok);
+
+    if (ok) printf("OK\n");
+    else { printf("FAIL\n"); failures++; }
+
+    msg_processor_cache_fixture_teardown();
+    return failures;
+}
+
+static int test_net_block_dedupe_snapshot_defer(void)
+{
+    int failures = 0;
+    printf("block dedupe: snapshot defer does not poison replayed block... ");
+    msgprocessor_test_reset_recent_blocks();
+    struct uint256 h;
+    memset(h.data, 0x5A, 32);
+    bool ok = !msgprocessor_test_accept_block_for_processing(&h, true);
+    ok = ok && !msgprocessor_test_block_already_seen(&h);
+    ok = ok && msgprocessor_test_accept_block_for_processing(&h, false);
+    ok = ok && msgprocessor_test_block_already_seen(&h);
+    if (ok) printf("OK\n");
+    else { printf("FAIL\n"); failures++; }
+    return failures;
+}
+
+static int test_net_snapshot_offer_gate_duplicate_offers(void)
+{
+    int failures = 0;
+    printf("snapshot offer gate: ignore duplicate offers while snapshot owns sync... ");
+    bool ok = true;
+    ok = ok && msgprocessor_test_should_ignore_snapshot_offer(
+        SNAPSYNC_RECEIVING, 7, PEER_ACTIVE, 7, SYNC_SNAPSHOT_RECEIVE);
+    ok = ok && msgprocessor_test_should_ignore_snapshot_offer(
+        SNAPSYNC_NEGOTIATING, 7, PEER_ACTIVE, 8, SYNC_BLOCKS_DOWNLOAD);
+    ok = ok && msgprocessor_test_should_ignore_snapshot_offer(
+        SNAPSYNC_VERIFYING, 7, PEER_ACTIVE, 8, SYNC_SNAPSHOT_RECEIVE);
+    ok = ok && msgprocessor_test_should_ignore_snapshot_offer(
+        SNAPSYNC_IDLE, 0, PEER_SNAPSHOT_RECEIVING, 8, SYNC_BLOCKS_DOWNLOAD);
+    ok = ok && msgprocessor_test_should_ignore_snapshot_offer(
+        SNAPSYNC_IDLE, 0, PEER_ACTIVE, 8, SYNC_AT_TIP);
+    ok = ok && !msgprocessor_test_should_ignore_snapshot_offer(
+        SNAPSYNC_IDLE, 0, PEER_ACTIVE, 8, SYNC_BLOCKS_DOWNLOAD);
+    if (ok) printf("OK\n");
+    else { printf("FAIL\n"); failures++; }
+    return failures;
+}
+
+/* ── BitTorrent-style parallel chunk sync tests ──────── */
+
+/* Shared fixture: a 100-UTXO node.db that every "parallel_sync:" and
+ * "swarm_sync:" step below reads (some also read test_sync_dir). If the
+ * database cannot even be created, the original code jumped straight to
+ * cleanup and skipped every one of those steps; an early return after a
+ * failed open reproduces that exactly. */
+static bool parallel_sync_fixture_setup(sqlite3 **out_db,
+                                        char *dir_buf, size_t dir_len)
+{
+    /* Helper: create a test UTXO database with N entries */
+    char test_sync_db[320];
+    test_make_tmpdir(dir_buf, dir_len, "net", "parallel_sync");
+    snprintf(test_sync_db, sizeof(test_sync_db), "%s/node.db", dir_buf);
+
+    /* Create test database with 100 UTXOs */
+    sqlite3 *test_db = NULL;
+    int rc = sqlite3_open(test_sync_db, &test_db);
+    if (rc != SQLITE_OK) {
+        printf("parallel_sync: SKIP (cannot create test db)\n");
+        *out_db = test_db;
+        return false;
+    }
+
+    TEST_DB_EXEC(test_db,
+        "CREATE TABLE IF NOT EXISTS node_state "
+        "(key TEXT PRIMARY KEY, value BLOB)");
+    TEST_DB_EXEC(test_db,
+        "CREATE TABLE IF NOT EXISTS utxos ("
+        "txid BLOB NOT NULL, vout INTEGER NOT NULL, "
+        "value INTEGER NOT NULL, script BLOB NOT NULL, "
+        "script_type INTEGER NOT NULL DEFAULT 0, "
+        "address_hash BLOB, height INTEGER NOT NULL, "
+        "is_coinbase INTEGER NOT NULL DEFAULT 0, "
+        "PRIMARY KEY (txid, vout))");
+
+    /* Set tip height and hash */
+    int64_t tip_height = 100000;
+    sqlite3_stmt *ins = NULL;
+    TEST_DB_RUN(test_db, ins,
+        "INSERT INTO node_state (key, value) VALUES (?, ?)",
+    {
+        sqlite3_bind_text(ins, 1, "tip_height", -1, SQLITE_STATIC);
+        sqlite3_bind_blob(ins, 2, &tip_height, sizeof(tip_height),
+                          SQLITE_STATIC);
+    });
+
+    uint8_t tip_hash[32];
+    memset(tip_hash, 0xAB, 32);
+    TEST_DB_RUN(test_db, ins,
+        "INSERT INTO node_state (key, value) VALUES (?, ?)",
+    {
+        sqlite3_bind_text(ins, 1, "tip_hash", -1, SQLITE_STATIC);
+        sqlite3_bind_blob(ins, 2, tip_hash, 32, SQLITE_STATIC);
+    });
+
+    /* Insert 100 test UTXOs with deterministic data */
+    TEST_DB_BEGIN(test_db);
+    sqlite3_prepare_v2(test_db,
+        "INSERT INTO utxos (txid, vout, value, script, height) "
+        "VALUES (?, ?, ?, ?, ?)", -1, &ins, NULL);
+
+    for (int i = 0; i < 100; i++) {
+        uint8_t txid[32];
+        memset(txid, 0, 32);
+        txid[0] = (uint8_t)(i & 0xFF);
+        txid[1] = (uint8_t)((i >> 8) & 0xFF);
+
+        uint8_t script[25];
+        memset(script, 0x76, sizeof(script));
+        script[0] = (uint8_t)i;
+
+        sqlite3_reset(ins);
+        sqlite3_bind_blob(ins, 1, txid, 32, SQLITE_STATIC);
+        sqlite3_bind_int(ins, 2, i % 3);
+        sqlite3_bind_int64(ins, 3, (int64_t)(i + 1) * 100000);
+        sqlite3_bind_blob(ins, 4, script, 25, SQLITE_STATIC);
+        sqlite3_bind_int(ins, 5, 50000 + i);
+        sqlite3_step(ins);
+    }
+    sqlite3_finalize(ins);
+    TEST_DB_COMMIT(test_db);
+
+    *out_db = test_db;
+    return true;
+}
+
+static int test_net_parallel_sync_and_swarm_fixture(void)
+{
+    int failures = 0;
+    char test_sync_dir[256];
+    sqlite3 *test_db = NULL;
+
+    if (!parallel_sync_fixture_setup(&test_db, test_sync_dir,
+                                     sizeof(test_sync_dir)))
+        return failures; /* setup already printed SKIP; nothing to run */
+
+    failures += test_net_parallel_sync_manifest_chunk_count(test_db);
+    failures += test_net_parallel_sync_serve_chunk_contents_match_db(test_db);
+    failures += test_net_parallel_sync_bad_proof_fails_verification(test_sync_dir);
+    failures += test_net_parallel_sync_manifest_cache_publishes_stable();
+    failures += test_net_parallel_sync_block_manifest_cache_publishes_();
+    failures += test_net_parallel_sync_snapshot_offer_cache_publishes_();
+    failures += test_net_swarm_sync_init_with_10_chunks(test_sync_dir);
+    failures += test_net_swarm_sync_assign_3_chunks_to_different_peers(test_sync_dir);
+    failures += test_net_swarm_sync_timeout_resets_stale_inflight_to_n();
+    failures += test_net_swarm_sync_corrupted_chunk_scenario();
+    failures += test_net_swarm_sync_init_rejects_null_chunk_hashes();
+    failures += test_net_fc_rate_flood_registers_ban_score_exactly_onc();
+    failures += test_net_fc_rate_and_swarm_cas_race_checks();
+    failures += test_net_swarm_cas_reset_cycle_re_arms_the_next_cas();
+
+    /* Clean up test database */
+    sqlite3_close(test_db);
+    test_cleanup_tmpdir(test_sync_dir);
+    return failures;
+}
+
+int test_net(void)
+{
+    int failures = 0;
+
+    failures += test_net_peer_liveness_ping_boundary_is_monotonic_60_s();
+    failures += test_net_peer_disconnect_first_cause_and_endpoint_gene();
+    failures += test_net_msg_header();
+    failures += test_net_version_message_serialize_deserialize_roundtr();
+    failures += test_net_getdata_blocks_serialize();
+    failures += test_net_getheaders_serialize();
+    failures += test_net_lookup_host_numeric_ipv4();
+    failures += test_net_lookup_onion_parse_accept_refuse();
+    failures += test_net_net_addr_onion_render_parse_round_trip();
+    failures += test_net_net_addr_rfc_classification();
+    failures += test_net_net_service_get_key_torv3_distinctness();
+    failures += test_net_addr_info_bucket_computation();
+    failures += test_net_net_message_framing();
+    failures += test_net_ban_management();
+    failures += test_net_node_stats_copy();
+    failures += test_net_net_addr_ipv6_classify();
+    failures += test_net_net_addr_rfc1918_private();
+    failures += test_net_net_service_init_and_equality();
+    failures += test_net_inv_item_init_and_types();
+    failures += test_net_inv_item_serialize_roundtrip();
+    failures += test_net_net_message_read_header();
+    failures += test_net_net_message_partial_header_read();
+    failures += test_net_net_message_recv_budget_rejects_over_cap_allo();
+    failures += test_net_send_budget_caps();
+    failures += test_net_send_queue_hard_ceiling();
+    failures += test_net_version_message_serialize_roundtrip();
+    failures += test_net_msg_version_externalip_parses_optional_port();
+    failures += test_net_addrman_multiple_addresses();
+    failures += test_net_net_manager_ban_unban_clear();
+    failures += test_net_net_manager_init_defaults();
+    failures += test_net_accept_inbound_socket_is_set_non_blocking();
+    failures += test_net_p2p_node_create_and_free();
+    failures += test_net_p2p_node_receive_bytes_parses_message();
+    failures += test_net_p2p_node_inventory_known();
+    failures += test_net_p2p_node_inventory_index_allocation_failure();
+    failures += test_net_p2p_node_push_address();
+    failures += test_net_should_reject_oversized();
+    failures += test_net_inv_item_less_comparison();
+    failures += test_net_compact_size_encoding();
+    failures += test_net_fast_sync_pow_solve_and_verify();
+    failures += test_net_next_one_should_be_blocked();
+    failures += test_net_onion_service_404_for_unknown_path();
+    failures += test_net_onion_service_get_status_returns_json_with_no();
+    failures += test_net_onion_service_signed_blog_fails_closed_withou();
+    failures += test_net_version_message_protocol_version_below_minimu();
+    failures += test_net_misbehavior_auto_ban_at_threshold();
+    failures += test_net_onion_get_status_returns_json_with_height();
+    failures += test_net_onion_get_hodl_redirects_to_explorer_hodl();
+    failures += test_net_onion_admission_tiered_budgets_and_puzzle_escalation();
+    failures += test_net_block_already_seen_dedup_checks();
+    failures += test_net_block_dedupe_snapshot_defer();
+    failures += test_net_snapshot_offer_gate_duplicate_offers();
+    failures += test_net_parallel_sync_and_swarm_fixture();
+    failures += test_net_peer_strategy_transport_selection_basics();
+    failures += test_net_peer_strategy_get_addresses_both();
+    failures += test_net_msg_processor_cache_versioning();
+    failures += test_net_net_peer_misbehaving_accumulates_score();
+    failures += test_net_dispatch_all_handlers_non_null();
+    failures += test_net_p74_watchdog_enters_active_after_61s_stall();
+    failures += test_net_p74_watchdog_at_tip_in_flight_cap_estimate_ex();
+    failures += test_net_p74_watchdog_no_re_entry_after_cooldown_until();
+    failures += test_net_blocked_emits();
+    failures += test_net_zcl_stress_tests();
+    failures += test_net_restore_baseline_so_later_tests_don();
+    failures += test_net_zcl_stress_tests_2();
+    failures += test_net_snap_pow_armed_gate_rejects_missing_wrong_non();
+    failures += test_net_snap_pow_stateless_recompute();
+    failures += test_net_reject_after_grace();
+    failures += test_net_connman_noisetransport_census_accumulates_acr();
 
     return failures;
 }
