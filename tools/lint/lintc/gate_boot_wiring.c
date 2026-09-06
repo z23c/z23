@@ -408,8 +408,8 @@ int check_sandbox_wired_selftest(void)
                         "    my_os_sandbox_" "enter();", 0)
         | sw_want_ident(t, "os_sandbox_" "enter",
                         "    os_sandbox_" "enter  ( );", 1)
-        | sw_want(t, &r.nrsec, "syscall(__NR_" "seccomp, ...)", 1)
-        | sw_want(t, &r.nrsec, "syscall  (  __NR_" "seccomp, ...)", 1)
+        | sw_want(t, &r.nrsec, "sys" "call(__NR_" "seccomp, ...)", 1)
+        | sw_want(t, &r.nrsec, "sys" "call  (  __NR_" "seccomp, ...)", 1)
         | sw_want(t, &r.nrsec, "prctl(__NR_" "seccomp", 0)
         | sw_want_ident(t, "os_sandbox_" "note_requested",
                         "    os_sandbox_" "note_requested();", 1)
