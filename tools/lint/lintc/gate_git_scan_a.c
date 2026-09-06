@@ -3,11 +3,11 @@
  * purpose: gate family — git-tracked-enumeration lint gates of the C23 lint
  * runtime, half A (check-no-stray-root-files, check-simd-os-support,
  * check-c23-only, check-no-api-keys, check-error-doc-refs,
- * check-framework-filename-suffix).
+ * check-framework-filename-suffix, check-equihash-params).
  */
 
 /*
- * Gates: check-no-stray-root-files, check-simd-os-support, check-c23-only, check-no-api-keys, check-error-doc-refs, check-framework-filename-suffix
+ * Gates: check-no-stray-root-files, check-simd-os-support, check-c23-only, check-no-api-keys, check-error-doc-refs, check-framework-filename-suffix, check-equihash-params
  * Default landing spot for a FUTURE gate port: a filesystem-tree-walking
  * gate (walk_src/clock_walk/repo_shape_room_dirs) joins gate_tree_walk.c;
  * a git-tracked-enumeration gate (each_zpath/each_zpath_st) joins whichever
@@ -715,7 +715,8 @@ int check_no_api_keys_selftest(void)
             | nak_skip_path("tools/lint/lintc/gate_repo_shape.c")
             | nak_skip_path("tools/lint/lintc/gate_def_parsers.c")
             | nak_skip_path("tools/lint/lintc/gate_zcode_packages.c")
-            | nak_skip_path("tools/lint/lintc/gate_source_fences.c");
+            | nak_skip_path("tools/lint/lintc/gate_source_fences.c")
+            | nak_skip_path("tools/lint/lintc/gate_compile_fixture.c");
     const char *const tokens[] = { sk, xai, gsk, ghp, glp, akia };
     static const struct { const char *prefix; int want; } boundaries[] = {
         { "", 1 }, { "\"", 1 }, { " ", 1 }, { "=", 1 },
@@ -1156,4 +1157,263 @@ int check_framework_filename_suffix_selftest(void)
     bad |= extra_cover;
     regfree(&re);
     return st_ok(bad, "check_framework_filename_suffix selftest: OK\n");
+}
+
+/* check-equihash-params: regenerate-and-diff plus tracked-file scan. */
+static const char k_eqp_doc[] = "docs/EQUIHASH_PARAMS.md";
+static const char k_eqp_tool[] = "build/bin/equihash-params-fact";
+static const char k_eqp_lit[] = "Equihash[ -]?\\(?200[,/ ]?9\\)?";
+static const char k_eqp_claim[] =
+    "ZClassic is|ZClassic uses|[Mm]ainnet|proof-of-work|PoW|"
+    "Consensus validation|Header chain|the chain is|network is";
+static const char k_eqp_qual[] =
+    "[Pp]re-Bubbles|[Bb]efore|[Bb]elow|launch|[Oo]riginal|height|epoch|"
+    "Sprout|legacy|historic|fixture|witness|baked|benchmark|until|"
+    "selected|[Uu]pgrade|192";
+enum { EQP_FILE = 2 * 1024 * 1024, EQP_MAXL = 65536, EQP_DIFF = 256 * 1024 };
+static char eqp_buf[EQP_FILE];
+static const char *eqp_lines[EQP_MAXL];
+
+static int eqp_keep_path(const char *path)
+{
+    if (!(c23_ends(path, ".md") || c23_ends(path, ".c") || c23_ends(path, ".h")
+          || c23_ends(path, ".def") || c23_ends(path, ".in")))
+        return 0;
+    return strncmp(path, "build/", 6) && strncmp(path, "vendor/", 7)
+        && strncmp(path, ".claude/worktrees/", 18) && strncmp(path, "test-tmp/", 9)
+        && strcmp(path, k_eqp_doc) && strcmp(path, "tools/equihash_params_fact.c");
+}
+
+static int eqp_comp(regex_t *lit, regex_t *claim, regex_t *qual)
+{
+    int e = reg_fail(lit, regcomp(lit, k_eqp_lit, REG_EXTENDED));
+    if (e) return e;
+    e = reg_fail(claim, regcomp(claim, k_eqp_claim, REG_EXTENDED));
+    if (e) { regfree(lit); return e; }
+    e = reg_fail(qual, regcomp(qual, k_eqp_qual, REG_EXTENDED));
+    if (e) drop2(lit, claim);
+    return e;
+}
+
+static int eqp_is_violation(const char *const *lines, int nlines, int idx,
+                            const regex_t *lit, const regex_t *claim,
+                            const regex_t *qual)
+{
+    if (idx < 0 || idx >= nlines) return 0;
+    const char *line = lines[idx];
+    if (regexec(lit, line, 0, NULL, 0) != 0 || regexec(claim, line, 0, NULL, 0) != 0)
+        return 0;
+    if (regexec(qual, line, 0, NULL, 0) == 0) return 0;
+    if (idx >= 1 && regexec(qual, lines[idx - 1], 0, NULL, 0) == 0) return 0;
+    return !(idx >= 2 && regexec(qual, lines[idx - 2], 0, NULL, 0) == 0);
+}
+
+static int eqp_load(const char *path, int *nlines)
+{
+    FILE *f = fopen(path, "r");
+    if (!f) return die("z23-lint: cannot open %s\n", path);
+    size_t n = fread(eqp_buf, 1, sizeof eqp_buf - 1, f);
+    int err = ferror(f);
+    if (fclose(f) != 0 && err == 0) return die("z23-lint: fclose failed: %s\n", path);
+    if (err) return die("z23-lint: read failed: %s\n", path);
+    if (n == sizeof eqp_buf - 1) return die("z23-lint: derived buffer overflow\n", "");
+    eqp_buf[n] = '\0';
+    *nlines = 0;
+    char *p = eqp_buf;
+    while (*p) {
+        if (*nlines >= EQP_MAXL) return die("z23-lint: derived buffer overflow\n", "");
+        eqp_lines[*nlines] = p;
+        char *nl = strchr(p, '\n');
+        if (!nl) {
+            size_t L = strlen(p);
+            if (L && p[L - 1] == '\r') p[L - 1] = '\0';
+            (*nlines)++;
+            break;
+        }
+        *nl = '\0';
+        if (nl > p && nl[-1] == '\r') nl[-1] = '\0';
+        (*nlines)++;
+        p = nl + 1;
+    }
+    return 0;
+}
+
+static int eqp_scan_lines(const char *disp, int nlines, const regex_t *lit,
+                          const regex_t *claim, const regex_t *qual, FILE *out,
+                          int *hits)
+{
+    for (int i = 0; i < nlines; i++) {
+        if (!eqp_is_violation(eqp_lines, nlines, i, lit, claim, qual)) continue;
+        (*hits)++;
+        if (out && fprintf(out, "  ./%s:%d:%s\n", disp, i + 1, eqp_lines[i]) < 0)
+            return die("z23-lint: write failed\n", "");
+    }
+    return 0;
+}
+
+struct eqp_acc { regex_t *lit, *claim, *qual; int hits, rc; };
+
+static int eqp_on_track(const char *path, void *ctx)
+{
+    struct eqp_acc *a = ctx;
+    int nlines = 0;
+    if (!eqp_keep_path(path) || a->rc) return a->rc;
+    a->rc = eqp_load(path, &nlines);
+    if (a->rc) return a->rc;
+    return (a->rc = eqp_scan_lines(path, nlines, a->lit, a->claim, a->qual,
+                                   stdout, &a->hits));
+}
+
+static int eqp_head40(const char *s)
+{
+    int n = 0;
+    const char *p = s;
+    while (*p && n < 40) {
+        const char *nl = strchr(p, '\n');
+        size_t len = nl ? (size_t)(nl - p + 1) : strlen(p);
+        if (fwrite(p, 1, len, stderr) != len) return die("z23-lint: write failed\n", "");
+        if (!nl) {
+            if (fputc('\n', stderr) == EOF) return die("z23-lint: write failed\n", "");
+            break;
+        }
+        p = nl + 1;
+        n++;
+    }
+    return 0;
+}
+
+static int eqp_scratch_file(char *path, size_t cap)
+{
+    const char *td = env_or("TMPDIR", "/tmp");
+    if (ovf(snprintf(path, cap, "%s/z23-eqparams-XXXXXX", td), cap)) return 2;
+    int fd = mkstemp(path);
+    if (fd < 0) return die("z23-lint: cannot open %s\n", td);
+    return close(fd) != 0 ? die("z23-lint: fclose failed: %s\n", path) : 0;
+}
+
+static int eqp_msg(void)
+{
+    return fputs(
+        "\n"
+        "check_equihash_params: the line(s) above state Equihash 200,9 as what the\n"
+        "chain IS. Mainnet has been height-selected 192,7 since the Bubbles activation\n"
+        "height; 200,9 describes only the blocks below it.\n"
+        "\n"
+        "  Say which blocks you mean — \"before Bubbles\", \"at launch\", \"pre-Bubbles\",\n"
+        "  or name the height — or point at docs/EQUIHASH_PARAMS.md, which is\n"
+        "  generated from the consensus tables and cannot drift.\n",
+        stderr) < 0 ? die("z23-lint: write failed\n", "") : 0;
+}
+
+int check_equihash_params_run(int argc, char **argv)
+{
+    (void)argc; (void)argv;
+    char root[4096], fresh[4096], qtool[8192], qfresh[8192], qdoc[8192], cmd[16384];
+    static char dump[EQP_DIFF];
+    int code = 0, status = 0, rc = 0;
+    if (cic_repo_root(root, sizeof root)) return 2;
+    if (chdir(root) != 0) return die("z23-lint: cannot scan %s\n", root);
+    if (access(k_eqp_tool, X_OK) != 0) {
+        fputs("check_equihash_params: FAIL — could not build "
+              "build/bin/equihash-params-fact\n", stderr);
+        fputs("  run: make tools/equihash-params-fact\n", stderr);
+        return 1;
+    }
+    if (eqp_scratch_file(fresh, sizeof fresh)) return 2;
+    if (sh_single_quote(k_eqp_tool, qtool, sizeof qtool)
+        || sh_single_quote(fresh, qfresh, sizeof qfresh)
+        || ovf(snprintf(cmd, sizeof cmd, "%s %s", qtool, qfresh), sizeof cmd)) {
+        unlink(fresh); return 2;
+    }
+    rc = capture_cmd(cmd, dump, sizeof dump, &code);
+    if (rc || code != 0) { unlink(fresh); return rc ? rc : 1; }
+    struct stat st;
+    if (stat(k_eqp_doc, &st) != 0 || !S_ISREG(st.st_mode)) {
+        fputs("check_equihash_params: FAIL — docs/EQUIHASH_PARAMS.md is missing;"
+              " run: make equihash-facts\n", stderr);
+        status = 1;
+    } else if (sh_single_quote(k_eqp_doc, qdoc, sizeof qdoc)
+               || ovf(snprintf(cmd, sizeof cmd, "diff -u %s %s", qdoc, qfresh),
+                      sizeof cmd)) {
+        unlink(fresh); return 2;
+    } else if ((rc = capture_cmd(cmd, dump, sizeof dump, &code)) != 0) {
+        unlink(fresh); return rc;
+    } else if (code == 1) {
+        fputs("check_equihash_params: FAIL — docs/EQUIHASH_PARAMS.md no "
+              "longer matches the consensus tables:\n", stderr);
+        if (eqp_head40(dump)) { unlink(fresh); return 2; }
+        fputs("  regenerate it: make equihash-facts\n", stderr);
+        status = 1;
+    } else if (code != 0) {
+        unlink(fresh); return die("z23-lint: command failed (%s)\n", cmd);
+    }
+    unlink(fresh);
+    regex_t lit, claim, qual;
+    rc = eqp_comp(&lit, &claim, &qual);
+    if (rc) return rc;
+    struct eqp_acc a = { .lit = &lit, .claim = &claim, .qual = &qual };
+    rc = each_zpath(k_ls_all, eqp_on_track, &a);
+    if (rc == 0) rc = a.rc;
+    if (rc == 0 && a.hits) { rc = eqp_msg(); status = 1; }
+    drop3(&lit, &claim, &qual);
+    if (rc) return rc;
+    if (status == 0
+        && fputs("check_equihash_params: OK — docs/EQUIHASH_PARAMS.md matches "
+                 "consensus, no flat 200,9 claim\n", stdout) < 0)
+        return die("z23-lint: write failed\n", "");
+    return status;
+}
+
+int check_equihash_params_selftest(void)
+{
+    regex_t lit, claim, qual;
+    int rc = eqp_comp(&lit, &claim, &qual), nlines = 0, hits = 0, bad;
+    if (rc) return rc;
+    char p_build[16], p_skill[32], p_disp[24];
+    if (ovf(snprintf(p_build, sizeof p_build, "build/x.%s", "md"), sizeof p_build)
+        || ovf(snprintf(p_skill, sizeof p_skill, ".claude/skills/w.%s", "md"),
+               sizeof p_skill)
+        || ovf(snprintf(p_disp, sizeof p_disp, "docs/PLANTED.%s", "md"),
+               sizeof p_disp)) {
+        drop3(&lit, &claim, &qual);
+        return 2;
+    }
+    bad = eqp_keep_path(p_build) | eqp_keep_path("vendor/y.c")
+        | eqp_keep_path(".claude/worktrees/z.h")
+        | !eqp_keep_path(p_skill)
+        | eqp_keep_path("docs/EQUIHASH_PARAMS.md")
+        | eqp_keep_path("tools/equihash_params_fact.c")
+        | eqp_keep_path("foo.py") | !eqp_keep_path("foo.def");
+    if (bad) fputs("check_equihash_params selftest: path filter failed\n", stderr);
+    const char *td = env_or("TMPDIR", "/tmp");
+    char tmpl[4096], planted[4096], line[96];
+    if (ovf(snprintf(tmpl, sizeof tmpl, "%s/z23-eqparams-st.XXXXXX", td),
+            sizeof tmpl)) { drop3(&lit, &claim, &qual); return 2; }
+    char *work = mkdtemp(tmpl);
+    if (!work) { drop3(&lit, &claim, &qual); return die("z23-lint: mkdir failed: %s\n", td); }
+    if (ovf(snprintf(planted, sizeof planted, "%s/%s", work, p_disp), sizeof planted)
+        || snprintf(line, sizeof line, "ZClassic is Equi%s 200,9 and always will be.\n",
+                    "hash") >= (int)sizeof line || csr_write(planted, line)) {
+        (void)rap_rm_rf(work); drop3(&lit, &claim, &qual); return 2;
+    }
+    rc = eqp_load(planted, &nlines);
+    if (rc == 0) rc = eqp_scan_lines(p_disp, nlines, &lit, &claim, &qual, NULL, &hits);
+    if (rc || hits == 0) {
+        fputs("check_equihash_params selftest: planted flat claim not detected\n", stderr);
+        bad = 1;
+    }
+    hits = 0; nlines = 0;
+    if (csr_write(planted,
+                  "Mainnet is 192,7 from the Bubbles height; 200,9 applies before it.\n")) {
+        (void)rap_rm_rf(work); drop3(&lit, &claim, &qual); return 2;
+    }
+    rc = eqp_load(planted, &nlines);
+    if (rc == 0) rc = eqp_scan_lines(p_disp, nlines, &lit, &claim, &qual, NULL, &hits);
+    if (rc || hits != 0) {
+        fputs("check_equihash_params selftest: qualified sentence was reported\n", stderr);
+        bad = 1;
+    }
+    (void)rap_rm_rf(work);
+    drop3(&lit, &claim, &qual);
+    return st_ok(bad, "check_equihash_params selftest: OK\n");
 }

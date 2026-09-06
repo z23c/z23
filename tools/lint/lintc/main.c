@@ -96,6 +96,8 @@ static const struct lint_gate k_gates[] = {
     { "check-honest-witness", check_honest_witness_run, check_honest_witness_selftest },
     { "check-mint-skip-crypto-offline-only", check_mint_skip_crypto_offline_only_run,
       check_mint_skip_crypto_offline_only_selftest },
+    { "check-equihash-params", check_equihash_params_run, check_equihash_params_selftest },
+    { "check-arena-view-stub", check_arena_view_stub_run, check_arena_view_stub_selftest },
 };
 
 int main(int argc, char **argv)

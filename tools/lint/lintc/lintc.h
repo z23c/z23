@@ -198,5 +198,9 @@ int check_honest_witness_run(int argc, char **argv);
 int check_honest_witness_selftest(void);
 int check_mint_skip_crypto_offline_only_run(int argc, char **argv);
 int check_mint_skip_crypto_offline_only_selftest(void);
+int check_equihash_params_run(int argc, char **argv);
+int check_equihash_params_selftest(void);
+int check_arena_view_stub_run(int argc, char **argv);
+int check_arena_view_stub_selftest(void);
 
 #endif

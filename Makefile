@@ -5301,7 +5301,8 @@ LINTC_SRCS = tools/lint/lintc/lib.c tools/lint/lintc/gate_boot_wiring.c tools/li
     tools/lint/lintc/gate_git_scan_b.c tools/lint/lintc/gate_landing_proof.c \
     tools/lint/lintc/gate_build_config.c tools/lint/lintc/gate_doc_index.c \
     tools/lint/lintc/gate_ratchet_ports.c tools/lint/lintc/gate_repo_shape.c tools/lint/lintc/gate_def_parsers.c tools/lint/lintc/gate_zcode_packages.c \
-    tools/lint/lintc/gate_source_fences.c tools/lint/lintc/main.c
+    tools/lint/lintc/gate_source_fences.c tools/lint/lintc/gate_compile_fixture.c \
+    tools/lint/lintc/main.c
 LINTC_OBJS = $(LINTC_SRCS:tools/lint/lintc/%.c=build/lintc-obj/%.o)
 # Apple Clang enables -Wunused-but-set-variable under -Wextra -Werror for
 # patterns (e.g. an increment-only counter) that gcc's -Wextra does not
@@ -6622,7 +6623,7 @@ arena-view-syntax:
 # Lint-lane wiring for the stub compile above (also in LINT_FAST_GATES and
 # the gate_command() table in tools/lint/run_lint.sh — a gate is a two-file
 # operation; check-lint-gate-wiring asserts both halves stay in step).
-check-arena-view-stub:
+check-arena-view-stub: $(LINTC_TOOL)
 	@echo "══ LINT: arena_view compiles against the raylib stub ══"
 	@./tools/lint/check_arena_view_stub.sh --selftest
 	@./tools/lint/check_arena_view_stub.sh
@@ -12792,7 +12793,7 @@ equihash-facts-check: check-equihash-params
 # Half of it regenerates docs/EQUIHASH_PARAMS.md from the consensus tables and
 # diffs; the other half scans prose for a flat "Equihash 200,9" claim about
 # what the chain IS, which is what was wrong across nine files.
-check-equihash-params: $(EQUIHASH_FACT_TOOL)
+check-equihash-params: $(LINTC_TOOL) $(EQUIHASH_FACT_TOOL)
 	@echo "══ LINT: Equihash parameters are height-selected, and said so ══"
 	@./tools/lint/check_equihash_params.sh --selftest
 	@./tools/lint/check_equihash_params.sh
