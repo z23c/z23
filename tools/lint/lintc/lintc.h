@@ -1,4 +1,8 @@
-/* Copyright 2026 Rhett Creighton - Apache License 2.0 */
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ *
+ * purpose: shared declarations for the split C23 lint runtime (the gate
+ * table entry type and every gate family's run/selftest prototypes).
+ */
 #ifndef LINTC_H
 #define LINTC_H
 

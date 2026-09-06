@@ -1,4 +1,9 @@
-/* Copyright 2026 Rhett Creighton - Apache License 2.0 */
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ *
+ * purpose: gate family — build-flag/CI-toggle-shaped lint gates of the C23
+ * lint runtime (check-tu-random-seed, check-privileged-transition-receipt,
+ * check-asan-adx-exception).
+ */
 
 /*
  * Gates: check-tu-random-seed, check-privileged-transition-receipt, check-asan-adx-exception

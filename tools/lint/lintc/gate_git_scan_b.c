@@ -1,4 +1,10 @@
-/* Copyright 2026 Rhett Creighton - Apache License 2.0 */
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ *
+ * purpose: gate family — git-tracked-enumeration lint gates of the C23 lint
+ * runtime, half B (check-no-retired-agent-protocol,
+ * check-no-warning-suppression, check-mind-owns-rebuild,
+ * check-no-stray-untracked-source).
+ */
 
 /*
  * Gates: check-no-retired-agent-protocol, check-no-warning-suppression, check-mind-owns-rebuild, check-no-stray-untracked-source

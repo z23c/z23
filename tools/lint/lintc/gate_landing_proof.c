@@ -1,4 +1,9 @@
-/* Copyright 2026 Rhett Creighton - Apache License 2.0 */
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ *
+ * purpose: gate family — proof/landing/receipt-shaped lint gates of the C23
+ * lint runtime (check-core-seal-root-mirror, check-peer-floor-single-source,
+ * check-proof-server-pin, check-stopwatch-skip-detector).
+ */
 
 /*
  * Gates: check-core-seal-root-mirror, check-peer-floor-single-source, check-proof-server-pin, check-stopwatch-skip-detector

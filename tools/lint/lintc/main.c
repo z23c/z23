@@ -1,4 +1,8 @@
-/* Copyright 2026 Rhett Creighton - Apache License 2.0 */
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ *
+ * purpose: the split C23 lint runtime's gate table and CLI entry point
+ * (z23-lint <gate-name> [--selftest] | z23-lint <gate-name> [args...] | --list).
+ */
 
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L

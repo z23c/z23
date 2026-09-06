@@ -1,4 +1,10 @@
-/* Copyright 2026 Rhett Creighton - Apache License 2.0 */
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ *
+ * purpose: gate family — small pattern-matching lint gates of the C23 lint
+ * runtime (check-no-python, check-malloc, check-dev-proof-native-fast-path,
+ * check-before-save-hooks, check-pthread-create, check-silent-error-returns,
+ * check-no-gnu-va-args).
+ */
 
 /*
  * Gates: check-no-python, check-malloc, check-dev-proof-native-fast-path, check-before-save-hooks, check-pthread-create, check-silent-error-returns, check-no-gnu-va-args

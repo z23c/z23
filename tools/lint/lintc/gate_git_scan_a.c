@@ -1,4 +1,10 @@
-/* Copyright 2026 Rhett Creighton - Apache License 2.0 */
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ *
+ * purpose: gate family — git-tracked-enumeration lint gates of the C23 lint
+ * runtime, half A (check-no-stray-root-files, check-simd-os-support,
+ * check-c23-only, check-no-api-keys, check-error-doc-refs,
+ * check-framework-filename-suffix).
+ */
 
 /*
  * Gates: check-no-stray-root-files, check-simd-os-support, check-c23-only, check-no-api-keys, check-error-doc-refs, check-framework-filename-suffix

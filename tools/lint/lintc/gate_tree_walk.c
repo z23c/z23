@@ -1,4 +1,11 @@
-/* Copyright 2026 Rhett Creighton - Apache License 2.0 */
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ *
+ * purpose: gate family — filesystem-tree-walking lint gates of the C23 lint
+ * runtime (check-sysinit-ordering, check-no-raw-clock-outside-platform,
+ * check-no-shellouts, check-command-contract,
+ * check-no-writer-below-sealed-frontier, check-proc-self-shim,
+ * check-hotswap-dev-only, check-no-new-coin-backfill-caller).
+ */
 
 /*
  * Gates: check-sysinit-ordering, check-no-raw-clock-outside-platform, check-no-shellouts, check-command-contract, check-no-writer-below-sealed-frontier, check-proc-self-shim, check-hotswap-dev-only, check-no-new-coin-backfill-caller

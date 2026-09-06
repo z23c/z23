@@ -1,4 +1,8 @@
-/* Copyright 2026 Rhett Creighton - Apache License 2.0 */
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ *
+ * purpose: gate family — codeindex/doc-coverage lint gates of the C23 lint
+ * runtime (check-codeindex-coverage).
+ */
 
 /*
  * Gates: check-codeindex-coverage
