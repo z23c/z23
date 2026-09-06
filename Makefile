@@ -4320,7 +4320,7 @@ t-changed:
 # the current immutable epoch; ccache/sccache recovers unchanged TU work. The
 # -Wno-deprecated-declarations matches the real node/test build (zclassic23,
 # test_parallel) so these targets don't false-fail on pre-existing deprecations.
-build-only: $(VIEW_GEN_HEADERS) $(ALL_OBJS)
+build-only: $(VIEW_GEN_HEADERS) $(ALL_OBJS) $(BIN_DIR)/z23-lint
 	@$(BUILD_EPOCH_SESSION_TOOL) verify "$(BUILD_ONLY_SESSION)" "$(BUILD_ONLY_LEASE)" \
 	  "$(OBJ_ROOT)" - "$(BUILD_EPOCH_KEEP)" "$(BUILD_SOURCE_ID)" \
 	  "$(BUILD_CLEAN)" "$(BUILD_MUTATION)" "$(BUILD_COMPILER_ID)" \
