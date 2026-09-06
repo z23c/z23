@@ -172,7 +172,7 @@ static int test_fleet_facts_table(void)
             ASSERT_STR_EQ(well.rows[i].relation, "handles_well");
         /* A relation the subject has no row for is UNKNOWN, not empty. */
         struct zcl_fleet_facts_answer_v1 none;
-        ASSERT(zcl_fleet_facts_query("sonnet", "trap_signature", NULL,
+        ASSERT(zcl_fleet_facts_query("sonnet", "lives_at", NULL,
                                      ZCL_FLEET_FACTS_MAX_ROWS, &none));
         ASSERT(none.unknown);
         ASSERT_EQ(none.row_count, (size_t)1);
@@ -254,6 +254,32 @@ static int test_fleet_facts_table(void)
                 saw_later = true;
         }
         ASSERT(saw_later);
+        PASS();
+    }
+
+    TEST("fleet_facts: full-lint trap_signature is standalone-tools-cold-build and test_hotswap_rollback trap_signature is stale-seal-fixture") {
+        struct zcl_fleet_facts_answer_v1 full_lint, hotswap;
+        bool saw_standalone = false;
+        bool saw_stale_seal = false;
+
+        ASSERT(zcl_fleet_facts_query("full-lint", "trap_signature", NULL,
+                                     ZCL_FLEET_FACTS_MAX_ROWS, &full_lint));
+        ASSERT(!full_lint.unknown);
+        for (size_t i = 0; i < full_lint.row_count; i++) {
+            ASSERT(full_lint.rows[i].confidence == ZCL_FLEET_CONFIDENCE_DOCTRINE);
+            if (strcmp(full_lint.rows[i].object, "standalone-tools-cold-build") == 0)
+                saw_standalone = true;
+        }
+        ASSERT(saw_standalone);
+
+        ASSERT(zcl_fleet_facts_query("test_hotswap_rollback", "trap_signature", NULL,
+                                     ZCL_FLEET_FACTS_MAX_ROWS, &hotswap));
+        ASSERT(!hotswap.unknown);
+        for (size_t i = 0; i < hotswap.row_count; i++) {
+            if (strcmp(hotswap.rows[i].object, "stale-seal-fixture") == 0)
+                saw_stale_seal = true;
+        }
+        ASSERT(saw_stale_seal);
         PASS();
     }
 

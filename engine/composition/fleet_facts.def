@@ -91,6 +91,7 @@ FLEET_TERM("bulk-copy-while-serving")
 FLEET_TERM("check-capability-closure")
 FLEET_TERM("check-windows-acceptance")
 FLEET_TERM("closure-truncated")
+FLEET_TERM("cold-attempt-stray")
 FLEET_TERM("commit")
 FLEET_TERM("cross-filesystem-hardlink")
 FLEET_TERM("ctime-bump")
@@ -109,6 +110,7 @@ FLEET_TERM("full-build-epoch")
 FLEET_TERM("full-lint")
 FLEET_TERM("gate-fixing")
 FLEET_TERM("gate-port-pair")
+FLEET_TERM("generation-flavour-mismatch")
 FLEET_TERM("git-stash")
 FLEET_TERM("glm-5.3")
 FLEET_TERM("glm-5.3-flash")
@@ -137,6 +139,7 @@ FLEET_TERM("one-make")
 FLEET_TERM("one-proof")
 FLEET_TERM("one-worktree")
 FLEET_TERM("opus")
+FLEET_TERM("permission-prompt-hang")
 FLEET_TERM("pinned-test")
 FLEET_TERM("private-inodes")
 FLEET_TERM("proof")
@@ -148,6 +151,7 @@ FLEET_TERM("push")
 FLEET_TERM("ram-backed-filesystem")
 FLEET_TERM("ram-generation-root")
 FLEET_TERM("rebase-onto-origin-main-tip")
+FLEET_TERM("root-temp-file")
 FLEET_TERM("scoped-implementation")
 FLEET_TERM("seam-finding")
 FLEET_TERM("self-skip")
@@ -159,9 +163,12 @@ FLEET_TERM("sonnet")
 FLEET_TERM("source-identity")
 FLEET_TERM("stale-generation")
 FLEET_TERM("stale-installed-hook")
+FLEET_TERM("stale-seal-fixture")
+FLEET_TERM("standalone-tools-cold-build")
 FLEET_TERM("stray-lane-watcher")
 FLEET_TERM("tests/harness/src/test_boot_phase.c")
 FLEET_TERM("test_boot_phase")
+FLEET_TERM("test_hotswap_rollback")
 FLEET_TERM("train")
 FLEET_TERM("train-protocol")
 FLEET_TERM("uncommitted-exit")
@@ -183,6 +190,8 @@ FLEET_FACT("sonnet", "handles_well", "scoped-implementation", "doctrine", "DOCTR
            "one well-scoped change with a named test group and a stated acceptance bar")
 FLEET_FACT("sonnet", "handles_poorly", "fixture-line-reading", "doctrine", "DOCTRINE",
            "a verifier reading a gate's selftest transcript reports the fixture's FAIL lines as a red gate although the exit is zero; the brief says only the exit and the final summary line count, and names the fixture lines in advance")
+FLEET_FACT("sonnet", "trap_signature", "permission-prompt-hang", "doctrine", "DOCTRINE",
+           "no-result Bash, no live process: permission-prompt hang; two verifiers sat 2h after rm -rf * and a write at root; forbid wildcard rm and writes outside the lane worktree and scratch; stop and redispatch, keep the worktree")
 FLEET_FACT("haiku", "handles_well", "mechanical-rows", "doctrine", "DOCTRINE",
            "row edits, doc counts, log triage; state the commit trailer literally or it goes missing")
 FLEET_FACT("glm-5.3", "handles_well", "audit-only", "doctrine", "DOCTRINE",
@@ -237,6 +246,8 @@ FLEET_FACT("push", "refuses_when", "not-fast-forward", "doctrine", "DOCTRINE",
            "fast-forward only; never force-push")
 FLEET_FACT("lane", "refuses_when", "git-stash", "doctrine", "DOCTRINE",
            "the stash is shared across every worktree of one checkout, so one lane's stash pops into another's tree")
+FLEET_FACT("lane", "refuses_when", "root-temp-file", "doctrine", "DOCTRINE",
+           "a temp at checkout root, as generate-compdb.sh did with mktemp, trips check-no-stray-root-files in every overlapping proof; temps live under build, .cache or the state scratch directory, never at a proof-scanned tree root")
 FLEET_FACT("check-capability-closure", "requires", "full-build-epoch", "lane_state:train", "DOCTRINE",
            "the closure and inventory checks read the whole package epoch (build/bin/zclassic23-package-verify-dev), not dev-bin; on a dev-bin-only tree they report a stale epoch, which is not a closure failure")
 FLEET_FACT("landing-worktree", "max", "one-driver", "lane_state:train", "DOCTRINE",
@@ -273,6 +284,8 @@ FLEET_FACT("landing-worktree", "trap_signature", "stale-installed-hook", "lane_s
            "landing-worktree pre-push is a symlink into build/githooks; proof rebuild of z23-git-hook trips check_git_hooks_installed and test_make_lint_gates_realroot; check out the tip and make install-hooks before every submit")
 FLEET_FACT("landing-worktree", "trap_signature", "unexplained-links", "lane_state:train", "DOCTRINE",
            "prebuild proof_generation_dependency_unexplained_links: landing vendor file has two links, partner not the train's copy; leftover disk generation hardlinked it; between landings replace via a temp name, never cp -al or ln")
+FLEET_FACT("landing-worktree", "trap_signature", "cold-attempt-stray", "lane_state:proof", "DOCTRINE",
+           "test_make_lint_gates failing only on check-no-stray-root-files (baseline_rc=0): 4/7 proofs, first cold never warm resubmit; one resubmit per train for that signature, name the stray from its transcript and root listing")
 FLEET_FACT("proof-accounting", "refuses_when", "self-skip", "lane_state:proof", "DOCTRINE",
            "test_log_account admits a landing only when ran+reused=selected and failed, skipped, unobserved are zero; SKIP because the host lacks a feature fails the landing, so observe what the host offers instead of skipping")
 FLEET_FACT("proof-accounting", "refuses_when", "unobserved-leg", "lane_state:proof", "DOCTRINE",
@@ -285,6 +298,12 @@ FLEET_FACT("lane", "requires", "private-inodes", "box:any", "DOCTRINE",
            "cp -al of a lane/scratch/liveness tree shares checkout inodes; each link bumps shared ctime, fails check-no-hardlink-seeding past two and supersedes a running ship gate; copy cp -a --reflink=auto via lane_new.sh or bundle")
 FLEET_FACT("lane", "trap_signature", "missing-gate-binary", "lane_state:proof", "DOCTRINE",
            "a check-* gate via make in a lane can fail only because its binary was never built, as check-fleet-observations without build/bin/z23-fleet-observe; parallel lint builds nothing, so build that binary and rerun first")
+FLEET_FACT("test_hotswap_rollback", "trap_signature", "stale-seal-fixture", "box:any", "DOCTRINE",
+           "module consensus core seal does not match this node on a passing suite means zcl_rollback_fixture_a.so and _b.so predate core_seal_root.h via -MMD so make never rebuilt them; delete two fixtures or make them by name, rerun")
+FLEET_FACT("full-lint", "trap_signature", "standalone-tools-cold-build", "lane_state:proof", "DOCTRINE",
+           "14-min silent gap in a proof generation's full lint is check-standalone-tools-link, the only lint gate that runs make, cold-building every standalone tool in a fresh generation; not check-onion-pair-watch (selftest 1/40 s)")
+FLEET_FACT("full-lint", "refuses_when", "generation-flavour-mismatch", "lane_state:proof", "DOCTRINE",
+           "full lint disagrees on check-doc-no-false-deleted (dev 1.5x release) and check-generated-artifact-contradictions (stale inventory, no package epoch); carry root flavour, epoch and standalone tools, or report unobserved")
 
 /* ── where the rest of the doctrine is written down ────────────────────── */
 FLEET_FACT("executor-routing", "lives_at", "engine/composition/fleet_facts.def", "doctrine", "DOCTRINE",
