@@ -87,6 +87,8 @@ static const struct lint_gate k_gates[] = {
       check_result_discard_selftest },
     { "check-wallet-raw-prepare-log", check_wallet_raw_prepare_log_run,
       check_wallet_raw_prepare_log_selftest },
+    { "check-persona-resolves", check_persona_resolves_run, check_persona_resolves_selftest },
+    { "check-prompt-templates", check_prompt_templates_run, check_prompt_templates_selftest },
 };
 
 int main(int argc, char **argv)

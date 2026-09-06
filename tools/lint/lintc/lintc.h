@@ -186,5 +186,9 @@ int check_result_discard_run(int argc, char **argv);
 int check_result_discard_selftest(void);
 int check_wallet_raw_prepare_log_run(int argc, char **argv);
 int check_wallet_raw_prepare_log_selftest(void);
+int check_persona_resolves_run(int argc, char **argv);
+int check_persona_resolves_selftest(void);
+int check_prompt_templates_run(int argc, char **argv);
+int check_prompt_templates_selftest(void);
 
 #endif

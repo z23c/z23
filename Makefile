@@ -5300,7 +5300,7 @@ LINTC_SRCS = tools/lint/lintc/lib.c tools/lint/lintc/gate_boot_wiring.c tools/li
     tools/lint/lintc/gate_tree_walk.c tools/lint/lintc/gate_git_scan_a.c \
     tools/lint/lintc/gate_git_scan_b.c tools/lint/lintc/gate_landing_proof.c \
     tools/lint/lintc/gate_build_config.c tools/lint/lintc/gate_doc_index.c \
-    tools/lint/lintc/gate_ratchet_ports.c tools/lint/lintc/gate_repo_shape.c \
+    tools/lint/lintc/gate_ratchet_ports.c tools/lint/lintc/gate_repo_shape.c tools/lint/lintc/gate_def_parsers.c \
     tools/lint/lintc/main.c
 LINTC_OBJS = $(LINTC_SRCS:tools/lint/lintc/%.c=build/lintc-obj/%.o)
 EQUIHASH_FACT_SRCS = tools/equihash_params_fact.c \
@@ -11568,9 +11568,8 @@ check-cookbook: $(ZCLASSIC23_DEV_BIN)
 	@./tools/lint/check_cookbook.sh --selftest
 	@./tools/lint/check_cookbook.sh
 
-check-persona-resolves:
+check-persona-resolves: $(LINTC_TOOL)
 	@echo "══ LINT: every authored persona still resolves ══"
-	@./tools/lint/check_persona_resolves.sh --selftest
 	@./tools/lint/check_persona_resolves.sh
 
 check-specialists:
@@ -11598,9 +11597,8 @@ check-fleet-vitals:
 	@./tools/lint/check_fleet_vitals.sh --selftest
 	@./tools/lint/check_fleet_vitals.sh
 
-check-prompt-templates:
+check-prompt-templates: $(LINTC_TOOL)
 	@echo "══ LINT: every prompt template names a declared section ══"
-	@./tools/lint/check_prompt_templates.sh --selftest
 	@./tools/lint/check_prompt_templates.sh
 
 # engine/composition/rule_vocab.def is the CLOSED vocabulary of rules an
