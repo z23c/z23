@@ -659,7 +659,8 @@ DEV_RESTART_PLAN = $(BUILD_DIR)/dev-loop/restart.env
 TEST_ZCL_BIN = $(BIN_DIR)/test_zcl
 TEST_PARALLEL_BIN = $(BIN_DIR)/test_parallel
 ZCLASSIC_CLI_BIN = $(BIN_DIR)/zclassic-cli
-ZCL_RPC_BIN = $(BIN_DIR)/zcl-rpc
+ZCL_RPC_BIN = $(BIN_DIR)/zcl-rpc$(ZCL_HOST_EXEEXT)
+PROCESS_GROUP_EXEC_BIN = $(BIN_DIR)/process-group-exec$(ZCL_HOST_EXEEXT)
 # Stable output names do not encode the compiler/sysroot that produced them.
 # The portable release therefore opts its whole-program products into a fresh
 # atomic link; otherwise a newer host-built file could pass Make's timestamp
@@ -6266,14 +6267,16 @@ $(eval $(call BUILD_NODE_TOOL,speedrun,tools/speedrun.c))
 zcl-rpc: $(ZCL_RPC_BIN)
 $(ZCL_RPC_BIN): FORCE tools/zcl-rpc.c
 	@mkdir -p $(dir $@)
-	$(CC) -std=c23 -O2 -Wall -o $@ $(filter-out FORCE,$^)
+	$(CC) -std=c23 -O2 -Wall -o $@ $(filter-out FORCE,$^) \
+	    $(if $(ZCL_HOST_WINDOWS),-lws2_32,)
 
 # Portable syscall-level replacement for the util-linux setsid(1) command,
 # which macOS does not ship.  Isolated acceptance harnesses use it so cleanup
 # can signal the spawned node's whole process group on every POSIX host.
+# Windows uses a kill-on-close Job Object; the supervisor PID is the job owner.
 .PHONY: process-group-exec
-process-group-exec: $(BIN_DIR)/process-group-exec
-$(BIN_DIR)/process-group-exec: tools/process_group_exec.c
+process-group-exec: $(PROCESS_GROUP_EXEC_BIN)
+$(PROCESS_GROUP_EXEC_BIN): tools/process_group_exec.c
 	@mkdir -p $(dir $@)
 	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -o $@ $<
 

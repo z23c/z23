@@ -44,6 +44,21 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 NODE_BIN="${ZCL_NODE_BIN:-$REPO_ROOT/build/bin/zclassic23}"
 RPC_BIN="${ZCL_RPC_BIN:-$REPO_ROOT/build/bin/zcl-rpc}"
 PROCESS_GROUP_EXEC="${ZCL_PROCESS_GROUP_EXEC:-$REPO_ROOT/build/bin/process-group-exec}"
+tn_resolve_bin() {
+    local p="$1"
+    if [ -x "$p" ]; then
+        printf '%s' "$p"
+        return 0
+    fi
+    if [ -x "$p.exe" ]; then
+        printf '%s' "$p.exe"
+        return 0
+    fi
+    printf '%s' "$p"
+}
+NODE_BIN="$(tn_resolve_bin "$NODE_BIN")"
+RPC_BIN="$(tn_resolve_bin "$RPC_BIN")"
+PROCESS_GROUP_EXEC="$(tn_resolve_bin "$PROCESS_GROUP_EXEC")"
 . "$REPO_ROOT/tools/scripts/port_probe.sh"
 
 # ── Live-port refuse-set (verbatim from isolated_node_env.sh) ──────
@@ -94,20 +109,32 @@ tn_assert_port_free() {
 tn_kill_group() {
     local pgid="$1"
     [ -n "$pgid" ] || return 0
+    # Positive PID first: Windows Job Object supervisors reap descendants
+    # when the owner process exits. Negative PGID remains the POSIX path.
+    # taskkill /T is the Win32 process-tree equivalent of kill -PGID.
+    if command -v taskkill >/dev/null 2>&1; then
+        taskkill /F /T /PID "$pgid" >/dev/null 2>&1 || true
+    fi
+    kill -TERM "$pgid" 2>/dev/null || true
     kill -TERM "-$pgid" 2>/dev/null || true
     local i
     for i in $(seq 1 25); do
-        kill -0 "-$pgid" 2>/dev/null || break
+        kill -0 "$pgid" 2>/dev/null || kill -0 "-$pgid" 2>/dev/null || break
         sleep 0.2
     done
+    kill -KILL "$pgid" 2>/dev/null || true
     kill -KILL "-$pgid" 2>/dev/null || true
+    if command -v taskkill >/dev/null 2>&1; then
+        taskkill /F /T /PID "$pgid" >/dev/null 2>&1 || true
+    fi
 }
 tn_rm_datadir() {
-    local dd="$1"
+    local dd="$1" base
     [ -n "$dd" ] && [ -d "$dd" ] || return 0
-    case "$dd" in
-        /tmp/zcl23-2node-*) rm -rf "$dd" 2>/dev/null || true ;;
-        *) echo "two-node-peer-tip: WARN: refusing to rm non-/tmp datadir '$dd'" >&2 ;;
+    base="$(basename "$dd")"
+    case "$base" in
+        zcl23-2node-*) rm -rf "$dd" 2>/dev/null || true ;;
+        *) echo "two-node-peer-tip: WARN: refusing to rm unexpected datadir '$dd'" >&2 ;;
     esac
 }
 tn_cleanup() {
@@ -147,6 +174,8 @@ tn_blockcount() {
 
 # ── Spawn a node in its OWN process group ──────────────────────────
 # $1=datadir $2=p2p $3=rpc $4=fs $5=https $6=connect-target
+tn_node_log() { printf '%s.node.log' "$1"; }
+
 tn_spawn() {
     local dd="$1" p2p="$2" rpc="$3" fs="$4" https="$5" conn="$6"
     "$PROCESS_GROUP_EXEC" "$NODE_BIN" \
@@ -154,8 +183,8 @@ tn_spawn() {
         -port="$p2p" -rpcport="$rpc" -fsport="$fs" -httpsport="$https" \
         -connect="$conn" \
         -nobgvalidation -nolegacyimport -showmetrics=0 \
-        >"$dd/node.log" 2>&1 &
-    echo "$!"   # PID == PGID (setsid leader)
+        >"$(tn_node_log "$dd")" 2>&1 &
+    echo "$!"   # PID == PGID (setsid leader / Windows job owner)
 }
 
 # Poll a node's RPC until getblockcount answers, or timeout. $1=dd $2=rpc $3=pid $4=secs
@@ -164,7 +193,7 @@ tn_wait_rpc() {
     deadline=$(( $(date +%s) + secs ))
     while [ "$(date +%s)" -lt "$deadline" ]; do
         if [ -n "$pid" ] && ! kill -0 "$pid" 2>/dev/null; then
-            echo "two-node-peer-tip: node (pid $pid) exited during RPC warmup (see $dd/node.log)" >&2
+            echo "two-node-peer-tip: node (pid $pid) exited during RPC warmup (see $(tn_node_log "$dd"))" >&2
             return 1
         fi
         if [ -f "$dd/.cookie" ]; then
@@ -206,10 +235,28 @@ for p in "$A_PORT" "$A_RPC" "$A_FS" "$A_HTTPS" \
     tn_assert_not_live_port "$p"
 done
 
-TN_DD_A="$(mktemp -d /tmp/zcl23-2node-A-XXXXXX)" || tn_die "mktemp A failed"
-TN_DD_B="$(mktemp -d /tmp/zcl23-2node-B-XXXXXX)" || tn_die "mktemp B failed"
-case "$TN_DD_A" in /tmp/zcl23-2node-A-*) : ;; *) tn_die "bad A datadir $TN_DD_A" ;; esac
-case "$TN_DD_B" in /tmp/zcl23-2node-B-*) : ;; *) tn_die "bad B datadir $TN_DD_B" ;; esac
+# Native Windows nodes cannot create owner-only stores under MSYS /tmp.
+# MSYS bash often strips LOCALAPPDATA; HOME/AppData/Local/Temp still exists
+# on a native Windows profile.
+TN_TMP="${ZCL_PEER_TIP_TMP:-}"
+if [ -z "$TN_TMP" ] && [ -d "${HOME:-}/AppData/Local/Temp" ]; then
+    TN_TMP="$HOME/AppData/Local/Temp"
+fi
+if [ -z "$TN_TMP" ] || [ ! -d "$TN_TMP" ]; then
+    TN_TMP="${TMPDIR:-${TEMP:-/tmp}}"
+fi
+# Leave the leaf absent: Windows SetDataDir creates an owner+SYSTEM ACL
+# directory. A pre-created mktemp leaf inherits the parent ACL and is refused.
+echo "two-node-peer-tip: scratch-root=$TN_TMP" >&2
+[ -d "$TN_TMP" ] || tn_die "scratch root does not exist: $TN_TMP"
+# MSYS mktemp honors TMPDIR over an absolute /c/... template.
+export TMPDIR="$TN_TMP"
+TN_DD_A="$TN_TMP/$(cd "$TN_TMP" && mktemp -u zcl23-2node-A-XXXXXX)" ||
+    tn_die "mktemp A failed"
+TN_DD_B="$TN_TMP/$(cd "$TN_TMP" && mktemp -u zcl23-2node-B-XXXXXX)" ||
+    tn_die "mktemp B failed"
+case "$(basename "$TN_DD_A")" in zcl23-2node-A-*) : ;; *) tn_die "bad A datadir $TN_DD_A" ;; esac
+case "$(basename "$TN_DD_B")" in zcl23-2node-B-*) : ;; *) tn_die "bad B datadir $TN_DD_B" ;; esac
 if [ -n "${HOME:-}" ]; then
     case "$TN_DD_A" in "$HOME"/.zclassic-c23*) tn_die "A datadir under live tree — refusing" ;; esac
     case "$TN_DD_B" in "$HOME"/.zclassic-c23*) tn_die "B datadir under live tree — refusing" ;; esac
@@ -230,7 +277,7 @@ echo "two-node-peer-tip: [1] spawning miner A + seeding $SEED_BLOCKS blocks..."
 TN_PID_A="$(tn_spawn "$TN_DD_A" "$A_PORT" "$A_RPC" "$A_FS" "$A_HTTPS" "127.0.0.1:$DEAD_SINK")"
 TN_PGID_A="$TN_PID_A"
 tn_wait_rpc "$TN_DD_A" "$A_RPC" "$TN_PID_A" "$RPC_WARMUP" \
-    || tn_die "miner A RPC never came up (see $TN_DD_A/node.log)"
+    || tn_die "miner A RPC never came up (see $(tn_node_log "$TN_DD_A"))"
 a_rpc generate "$SEED_BLOCKS" >/dev/null
 A_TIP="$(tn_blockcount "$TN_DD_A" "$A_RPC")"
 echo "two-node-peer-tip:     A tip after seed = ${A_TIP:-?}"
@@ -242,7 +289,7 @@ echo "two-node-peer-tip: [2] spawning follower B (connect-only → A); waiting �
 TN_PID_B="$(tn_spawn "$TN_DD_B" "$B_PORT" "$B_RPC" "$B_FS" "$B_HTTPS" "127.0.0.1:$A_PORT")"
 TN_PGID_B="$TN_PID_B"
 tn_wait_rpc "$TN_DD_B" "$B_RPC" "$TN_PID_B" "$RPC_WARMUP" \
-    || tn_die "follower B RPC never came up (see $TN_DD_B/node.log)"
+    || tn_die "follower B RPC never came up (see $(tn_node_log "$TN_DD_B"))"
 
 STEP2_PASS=no
 if B_FINAL="$(tn_wait_height "$TN_DD_B" "$B_RPC" "$TN_PID_B" "$A_TIP" "$SYNC_DEADLINE")"; then
@@ -251,7 +298,7 @@ if B_FINAL="$(tn_wait_height "$TN_DD_B" "$B_RPC" "$TN_PID_B" "$A_TIP" "$SYNC_DEA
 else
     echo "two-node-peer-tip:     B did NOT reach A tip $A_TIP within ${SYNC_DEADLINE}s (stuck at ${B_FINAL:-?})."
     echo "two-node-peer-tip:     B peer view:"; b_rpc getpeerinfo | head -c 400; echo ""
-    echo "two-node-peer-tip:     B log tail:"; tail -8 "$TN_DD_B/node.log" 2>/dev/null || true
+    echo "two-node-peer-tip:     B log tail:"; tail -8 "$(tn_node_log "$TN_DD_B")" 2>/dev/null || true
 fi
 
 # ── Step 3: kill-9 B, mine more on A, restart B, assert re-sync ────
@@ -259,10 +306,12 @@ STEP3_PASS=no
 if [ "$STEP2_PASS" = "yes" ]; then
     echo "two-node-peer-tip: [3] kill-9 B mid-life; A mines +$EXTRA_BLOCKS while B is down..."
     # SIGKILL B's whole process group (mid-block: no graceful shutdown).
-    kill -KILL "-$TN_PGID_B" 2>/dev/null || true
-    # Reap so the PID is gone before restart.
+    tn_kill_group "$TN_PGID_B"
     wait "$TN_PID_B" 2>/dev/null || true
     TN_PID_B=""; # group dead; restart below sets a fresh one
+    # Windows pid-lock (ERROR_SHARING_VIOLATION=32) can outlive the process
+    # by a beat; wait until a new node can take zclassic23.pid.
+    sleep 1
 
     a_rpc generate "$EXTRA_BLOCKS" >/dev/null
     NEW_TIP="$(tn_blockcount "$TN_DD_A" "$A_RPC")"
@@ -274,13 +323,13 @@ if [ "$STEP2_PASS" = "yes" ]; then
     TN_PID_B="$(tn_spawn "$TN_DD_B" "$B_PORT" "$B_RPC" "$B_FS" "$B_HTTPS" "127.0.0.1:$A_PORT")"
     TN_PGID_B="$TN_PID_B"
     if ! tn_wait_rpc "$TN_DD_B" "$B_RPC" "$TN_PID_B" "$RPC_WARMUP"; then
-        echo "two-node-peer-tip:     B RPC never came back after kill-9 restart (see $TN_DD_B/node.log)"
+        echo "two-node-peer-tip:     B RPC never came back after kill-9 restart (see $(tn_node_log "$TN_DD_B"))"
     elif B_FINAL2="$(tn_wait_height "$TN_DD_B" "$B_RPC" "$TN_PID_B" "$NEW_TIP" "$RESYNC_DEADLINE")"; then
         STEP3_PASS=yes
         echo "two-node-peer-tip:     B recovered + caught up to peer-tip $NEW_TIP after kill-9."
     else
         echo "two-node-peer-tip:     B did NOT re-reach peer-tip $NEW_TIP within ${RESYNC_DEADLINE}s (stuck at ${B_FINAL2:-?})."
-        echo "two-node-peer-tip:     B log tail:"; tail -8 "$TN_DD_B/node.log" 2>/dev/null || true
+        echo "two-node-peer-tip:     B log tail:"; tail -8 "$(tn_node_log "$TN_DD_B")" 2>/dev/null || true
     fi
 else
     echo "two-node-peer-tip: [3] SKIPPED — step 2 (initial peer sync) did not pass."

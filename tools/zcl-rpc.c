@@ -4,22 +4,31 @@
  * Reads cookie auth, sends JSON-RPC, prints result.
  * Usage: zcl-rpc <method> [param1] [param2] ... */
 
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#else
 #define _POSIX_C_SOURCE 200809L
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <sys/wait.h>
+#include <unistd.h>
+#endif
 #include <errno.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
-#include <sys/socket.h>
-#include <sys/wait.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
 
 /* Write every byte or report failure. A single write(2) may transfer fewer
  * bytes than requested; for the JSON-RPC body below a short write produces a
  * truncated request that the node rejects as malformed JSON, which surfaces
  * to the operator as an unexplained RPC error rather than an I/O error. */
+#if !defined(_WIN32)
 static bool write_all(int fd, const char *buf, size_t len)
 {
     size_t done = 0;
@@ -34,6 +43,7 @@ static bool write_all(int fd, const char *buf, size_t len)
     }
     return true;
 }
+#endif
 
 /* Read legacy zclassic.conf credentials without silently truncating them.
  * A truncated password is indistinguishable from a bad node to an operator,
@@ -89,6 +99,48 @@ static int load_conf_auth(const char *path, char *cookie, size_t cookie_cap)
     return 1;
 }
 
+#if defined(_WIN32)
+static const char b64_table[] =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+static bool b64_encode(const char *in, size_t in_len, char *out, size_t cap)
+{
+    size_t used = 0;
+    for (size_t i = 0; i < in_len; i += 3) {
+        unsigned a = (unsigned char)in[i];
+        unsigned b = (i + 1 < in_len) ? (unsigned char)in[i + 1] : 0;
+        unsigned c = (i + 2 < in_len) ? (unsigned char)in[i + 2] : 0;
+        unsigned triple = (a << 16) | (b << 8) | c;
+        if (used + 4 >= cap) return false;
+        out[used++] = b64_table[(triple >> 18) & 63];
+        out[used++] = b64_table[(triple >> 12) & 63];
+        out[used++] = (i + 1 < in_len) ? b64_table[(triple >> 6) & 63] : '=';
+        out[used++] = (i + 2 < in_len) ? b64_table[triple & 63] : '=';
+    }
+    if (used >= cap) return false;
+    out[used] = '\0';
+    return true;
+}
+
+static bool send_all(SOCKET sock, const char *buf, size_t len)
+{
+    size_t done = 0;
+    while (done < len) {
+        int n = send(sock, buf + done, (int)(len - done), 0);
+        if (n <= 0) return false;
+        done += (size_t)n;
+    }
+    return true;
+}
+
+static const char *http_body(const char *response)
+{
+    const char *body = strstr(response, "\r\n\r\n");
+    return body ? body + 4 : response;
+}
+#endif
+
+#if !defined(_WIN32)
 /* Quote one argument for the POSIX shell used by popen(). Credentials are
  * local configuration, but they are still data: $, backticks, quotes, and
  * whitespace must never become shell syntax. */
@@ -117,6 +169,7 @@ static bool shell_quote(const char *in, char *out, size_t cap)
     out[used] = '\0';
     return true;
 }
+#endif
 
 static int rpc_call(const char *host, int port, const char *cookie,
                     const char *method, const char *params_json,
@@ -130,6 +183,72 @@ static int rpc_call(const char *host, int port, const char *cookie,
         fprintf(stderr, "zcl-rpc: request body is too long\n");
         return -1;
     }
+#if defined(_WIN32)
+    WSADATA wsa;
+    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
+        fprintf(stderr, "zcl-rpc: WSAStartup failed\n");
+        return -1;
+    }
+    SOCKET sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (sock == INVALID_SOCKET) {
+        WSACleanup();
+        return -1;
+    }
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons((u_short)port);
+    if (inet_pton(AF_INET, host, &addr.sin_addr) != 1) {
+        closesocket(sock);
+        WSACleanup();
+        return -1;
+    }
+    DWORD timeout_ms = 30000;
+    (void)setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (const char *)&timeout_ms,
+                     sizeof(timeout_ms));
+    (void)setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, (const char *)&timeout_ms,
+                     sizeof(timeout_ms));
+    if (connect(sock, (const struct sockaddr *)&addr, sizeof(addr)) != 0) {
+        closesocket(sock);
+        WSACleanup();
+        return -1;
+    }
+    char auth_b64[512];
+    if (!b64_encode(cookie, strlen(cookie), auth_b64, sizeof(auth_b64))) {
+        closesocket(sock);
+        WSACleanup();
+        return -1;
+    }
+    char req[16384];
+    int rlen = snprintf(req, sizeof(req),
+        "POST / HTTP/1.1\r\nHost: %s:%d\r\n"
+        "Authorization: Basic %s\r\n"
+        "Content-Type: text/plain\r\n"
+        "Content-Length: %d\r\nConnection: close\r\n\r\n%s",
+        host, port, auth_b64, body_n, body);
+    if (rlen <= 0 || (size_t)rlen >= sizeof(req) ||
+        !send_all(sock, req, (size_t)rlen)) {
+        closesocket(sock);
+        WSACleanup();
+        return -1;
+    }
+    size_t total = 0;
+    while (total + 1 < out_len) {
+        int n = recv(sock, out + total, (int)(out_len - 1 - total), 0);
+        if (n <= 0) break;
+        total += (size_t)n;
+    }
+    out[total] = '\0';
+    closesocket(sock);
+    WSACleanup();
+    const char *payload = http_body(out);
+    if (payload != out) {
+        size_t payload_len = strlen(payload);
+        memmove(out, payload, payload_len + 1);
+        total = payload_len;
+    }
+    return total > 0 ? (int)total : -1;
+#else
 
     /* Write body to temp file to avoid shell quoting issues */
     char tmpf[] = "/tmp/zcl-rpc-XXXXXX";
@@ -184,6 +303,7 @@ static int rpc_call(const char *host, int port, const char *cookie,
         WEXITSTATUS(status) != 0)
         return -1;
     return (int)total;
+#endif
 }
 
 int main(int argc, char *argv[])
