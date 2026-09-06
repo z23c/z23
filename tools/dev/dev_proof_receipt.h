@@ -89,8 +89,10 @@ struct zcl_dev_verdict_leaf_v1 {
  * domain tags over one file that spelled the producer's checkout path, and
  * environment to the literal PATH; policy 2 keys them to the toolchain
  * capsule and to path-neutralised build-plan text, so two boxes with one
- * toolchain agree. */
-#define ZCL_DEV_PROOF_POLICY_VERSION 2u
+ * toolchain agree. Policy 3 binds the host-local plan mutation token to its
+ * own source tree separately from the portable graph; copied checkouts have
+ * different inode/timestamp tokens even when every build input agrees. */
+#define ZCL_DEV_PROOF_POLICY_VERSION 3u
 
 enum zcl_dev_proof_dimension_id {
     ZCL_DEV_PROOF_GENERATED = 0,

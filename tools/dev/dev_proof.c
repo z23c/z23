@@ -53,7 +53,10 @@
  * by policy version rather than compared (dev_proof_receipt.c). */
 #define PROOF_ENV_DOMAIN "zcl.dev_proof_environment.v2"
 #define PROOF_FLAGS_DOMAIN "zcl.dev_proof_flags.v2"
-#define PROOF_BUILD_GRAPH_DOMAIN "zcl.dev_proof_build_graph.v2"
+/* The local inode/timestamp token is verified against its own source tree;
+ * it is not a portable dependency-graph input. Policy 3 preserves that
+ * separate mutation binding while canonicalising its place in the graph. */
+#define PROOF_BUILD_GRAPH_DOMAIN "zcl.dev_proof_build_graph.v3"
 /* The directory the build tells the compiler to record instead of this
  * checkout: Makefile ZCL_REPRO_ROOT, fed to -ffile-prefix-map. */
 #define PROOF_PLAN_VIRTUAL_ROOT "/zclassic23"
@@ -2112,9 +2115,11 @@ static bool proof_plan_key_is_flag(const char *key)
  * nothing can neutralise it after the fact -- and the toolchain capsule now
  * says by content what COMPILER_ID said by name, including the header and
  * library redirections, which environment_root binds. Dropping it is the
- * whole reason two boxes can compare receipts at all. */
+ * whole reason two boxes can compare receipts at all. BASE_GENERATION is
+ * retained canonically in the graph and returned separately for verification
+ * against its own tree: inode/timestamp identity cannot survive a copy. */
 static bool proof_plan_roots(const char *root, uint8_t flags[32],
-                             uint8_t build_graph[32], char *why,
+                             uint8_t build_graph[32], char mutation[65], char *why,
                              size_t why_len)
 {
     char path[PATH_MAX], body[PROOF_PLAN_MAX_BYTES];
@@ -2151,6 +2156,7 @@ static bool proof_plan_roots(const char *root, uint8_t flags[32],
     struct sha3_256_ctx flags_sha, graph_sha;
     hash_begin(&flags_sha, PROOF_FLAGS_DOMAIN);
     hash_begin(&graph_sha, PROOF_BUILD_GRAPH_DOMAIN);
+    bool mutation_seen = false;
     char *save = NULL;
     for (char *line = strtok_r(body, "\n", &save); line;
          line = strtok_r(NULL, "\n", &save)) {
@@ -2161,7 +2167,23 @@ static bool proof_plan_roots(const char *root, uint8_t flags[32],
         struct sha3_256_ctx *sha =
             proof_plan_key_is_flag(line) ? &flags_sha : &graph_sha;
         sha3_256_write(sha, (const uint8_t *)line, strlen(line) + 1);
-        proof_hash_plan_value(sha, root, root_len, eq + 1);
+        if (strcmp(line, "BASE_GENERATION") == 0) {
+            uint8_t decoded[32];
+            if (mutation_seen || strlen(eq + 1) != 64 ||
+                !zcl_hex_decode_lower(eq + 1, decoded, sizeof(decoded))) {
+                fprintf(stderr, "[devproof] build plan: invalid or duplicate local mutation token\n");
+                return false;
+            }
+            mutation_seen = true;
+            if (mutation) memcpy(mutation, eq + 1, 65);
+            proof_hash_plan_value(sha, root, root_len, "<local-mutation>");
+        } else {
+            proof_hash_plan_value(sha, root, root_len, eq + 1);
+        }
+    }
+    if (!mutation_seen) {
+        fprintf(stderr, "[devproof] build plan: missing local mutation token\n");
+        return false;
     }
     sha3_256_finalize(&flags_sha, flags);
     sha3_256_finalize(&graph_sha, build_graph);
@@ -2221,18 +2243,55 @@ static bool proof_environment_root(uint8_t out[32])
  * None of the four carries this checkout's location, so the same tree at two
  * absolute paths yields the same four values. That is what makes a receipt
  * mean anything on a second box. */
-bool zcl_dev_proof_build_identity_v1_capture(
+static bool proof_build_identity_capture(
     const char *repo_root, struct zcl_dev_proof_build_identity_v1 *out,
-    char *why, size_t why_len)
+    char mutation[65], char *why, size_t why_len)
 {
     struct vcs_toolchain_capsule_v1 capsule;
+    if (why && why_len) why[0] = 0;
     if (!repo_root || !out) return false;
     memset(out, 0, sizeof(*out));
     return vcs_toolchain_capsule_v1_capture(&capsule) &&
            vcs_toolchain_capsule_v1_root(&capsule, out->compiler) &&
-           proof_plan_roots(repo_root, out->flags, out->build_graph, why,
+           proof_plan_roots(repo_root, out->flags, out->build_graph, mutation, why,
                             why_len) &&
            proof_environment_root(out->environment);
+}
+
+bool zcl_dev_proof_build_identity_v1_capture(
+    const char *repo_root, struct zcl_dev_proof_build_identity_v1 *out,
+    char *why, size_t why_len)
+{
+    return proof_build_identity_capture(repo_root, out, NULL, why, why_len);
+}
+
+bool zcl_dev_proof_build_plan_verify(
+    const char *root, const struct zcl_dev_proof_build_identity_v1 *expected,
+    const char *expected_mutation, char *why, size_t why_len)
+{
+    uint8_t flags[32], graph[32], decoded[32];
+    char mutation[65], plan_why[PATH_MAX + 160] = {0};
+    const char *reason = NULL;
+    if (!expected || !expected_mutation || strlen(expected_mutation) != 64 ||
+        !zcl_hex_decode_lower(expected_mutation, decoded, sizeof(decoded)) ||
+        !proof_plan_roots(root, flags, graph, mutation, plan_why,
+                          sizeof(plan_why)))
+        reason = "proof_offline_build_plan_unavailable";
+    else if (strcmp(mutation, expected_mutation) != 0)
+        reason = "proof_offline_build_mutation_changed";
+    else if (memcmp(flags, expected->flags, sizeof(flags)) != 0)
+        reason = "proof_offline_build_flags_changed";
+    else if (memcmp(graph, expected->build_graph, sizeof(graph)) != 0)
+        reason = "proof_offline_build_graph_changed";
+    if (reason) {
+        fprintf(stderr, "[devproof] build plan verification: %s\n", reason);
+        if (plan_why[0])
+            proof_whyf(why, why_len, "%s:%s", reason, plan_why);
+        else
+            proof_why(why, why_len, reason);
+        return false;
+    }
+    return true;
 }
 
 static bool proof_build_identity_equal(
@@ -4748,6 +4807,7 @@ static bool proof_worker_body(const struct proof_paths *paths,
     }
     char policy_path[PATH_MAX];
     struct zcl_dev_proof_build_identity_v1 identity;
+    struct dev_source_record original_plan_source = {0};
     if (snprintf(policy_path, sizeof(policy_path),
                  "%s/cognition/controllers/include/controllers/agent_impact_rules.def",
                  generation) >= (int)sizeof(policy_path) ||
@@ -4756,13 +4816,21 @@ static bool proof_worker_body(const struct proof_paths *paths,
         proof_why(why, why_len, "proof_toolchain_or_policy_unavailable");
         return false;
     }
-    if (!zcl_dev_proof_build_identity_v1_capture(paths->root, &identity, why,
-                                                 why_len)) {
-        /* build_identity_v1_capture names its own exact cause (for example
-         * restart_env_missing) through proof_plan_roots; fall back to the
-         * umbrella reason only when it left why untouched. */
+    if (!proof_build_identity_capture(paths->root, &identity,
+                                       original_plan_source.mutation_id,
+                                       why, why_len)) {
+        /* Keep the exact restart-plan diagnostic when capture supplied it. */
         if (!why || !why[0])
             proof_why(why, why_len, "proof_toolchain_or_policy_unavailable");
+        return false;
+    }
+    /* BASE_GENERATION names this plan's own source metadata, not the
+     * independent generation's inode/timestamp token. Check it locally
+     * before accepting the portable flags and graph as requested inputs. */
+    if (!zcl_dev_source_mutation_verify(paths->root, &original_plan_source,
+                                        why, why_len)) {
+        fprintf(stderr, "[devproof] original build plan: source mutation no longer matches\n");
+        proof_why(why, why_len, "proof_original_build_plan_source_changed");
         return false;
     }
     /* The same four roots the warm-start donor marker seals, from the same
@@ -5009,6 +5077,16 @@ static bool proof_worker_body(const struct proof_paths *paths,
                 proof_why(why, why_len, "proof_bundle_build_failed");
                 return false;
             }
+#if defined(__APPLE__)
+            /* Compare the executed bundle's plan to the requested
+             * flags and graph, binding its mutation token to this
+             * generation's own source metadata. */
+            if (!zcl_dev_proof_build_plan_verify(
+                    generation, &identity, sealed_mutation_id,
+                    why, why_len)) {
+                return false;
+            }
+#endif
             if (!test_binary_path(&execution, binary) ||
                 !proof_generation_inputs_prepare(
                     &execution, generation, &source_before,
@@ -5097,6 +5175,12 @@ static bool proof_worker_body(const struct proof_paths *paths,
     }
     if (strcmp(source_before.cas_root_sha3, source_after.cas_root_sha3) != 0) {
         proof_why(why, why_len, "source_epoch_superseded");
+        return false;
+    }
+    if (!zcl_dev_source_mutation_verify(generation, &source_before,
+                                        why, why_len)) {
+        fprintf(stderr, "[devproof] generation source mutation changed before receipt publication\n");
+        proof_why(why, why_len, "proof_generation_mutation_changed");
         return false;
     }
     receipt.created_unix = (uint64_t)platform_time_wall_unix();

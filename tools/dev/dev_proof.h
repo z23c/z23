@@ -119,6 +119,13 @@ bool zcl_dev_proof_build_identity_v1_capture(
     const char *repo_root, struct zcl_dev_proof_build_identity_v1 *out,
     char *why, size_t why_len);
 
+/* Compare the executed plan with the requested flags and dependency graph,
+ * and bind its local BASE_GENERATION to that tree's sealed mutation token.
+ * A relocation may change the token, never the other plan inputs. */
+bool zcl_dev_proof_build_plan_verify(
+    const char *root, const struct zcl_dev_proof_build_identity_v1 *expected,
+    const char *expected_mutation, char *why, size_t why_len);
+
 /* One captured base..local changed set. Heap-resident: the row ceiling is a
  * landing-batch ceiling (thousands of paths), which must never sit in a stack
  * frame. `files` holds `count` pointers into `bytes`; release both together. */

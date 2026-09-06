@@ -3195,19 +3195,22 @@ static int test_pw_marker_identity_invalidates_stale_donor(void)
 
 #if !defined(_WIN32)
 /* One build plan, written the way Make writes it for a checkout that lives
- * at `root`. The two values a second checkout genuinely cannot reproduce
+ * at `root`. The values a second checkout cannot reproduce
  * are part of it on purpose: the -ffile-prefix-map that names the checkout,
- * and the epoch digest, which comes from a compiler fingerprint that hashes
- * the CC command string and therefore the checkout path. */
-static bool ic_write_build_plan(const char *root, const char *epoch,
-                                const char *compiler_id, const char *cflags,
-                                const char *extra_line)
+ * the epoch digest, and the local mutation token over inodes/timestamps. */
+static bool ic_write_build_plan_mutation(
+    const char *root, const char *epoch, const char *compiler_id,
+    const char *cflags, const char *mutation, const char *extra_line)
 {
-    char plan[8192];
+    char plan[8192], base[160] = {0};
+    if (mutation) {
+        int n = snprintf(base, sizeof(base), "BASE_GENERATION=%s\n", mutation);
+        if (n <= 0 || (size_t)n >= sizeof(base)) return false;
+    }
     int n = snprintf(plan, sizeof(plan),
         "CC=%s/build/bin/zcc cc\n"
         "COMPILER_ID=%s\n"
-        "BASE_GENERATION=%s\n"
+        "%s"
         "DEV_CFLAGS=-std=c23 %s -ffile-prefix-map=%s=/zclassic23\n"
         "DEV_LDFLAGS=-pthread -pie\n"
         "DEV_LIBS=vendor/lib/libsecp256k1.a -lm\n"
@@ -3221,12 +3224,20 @@ static bool ic_write_build_plan(const char *root, const char *epoch,
         "TEST_LINK_RSP=build/test-obj/epochs/%s/link-inputs.rsp\n"
         "TEST_BASE_RELOC=build/test-obj/epochs/%s/restart-base.o\n"
         "%s",
-        root, compiler_id,
-        "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        root, compiler_id, base,
         cflags, root, epoch, epoch, epoch, root, epoch, epoch, epoch,
         extra_line ? extra_line : "");
     return n > 0 && (size_t)n < (int)sizeof(plan) &&
            ic_write(root, "build/dev-loop/restart.env", plan);
+}
+
+static bool ic_write_build_plan(const char *root, const char *epoch,
+                                const char *compiler_id, const char *cflags,
+                                const char *extra_line)
+{
+    return ic_write_build_plan_mutation(root, epoch, compiler_id, cflags,
+        "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        extra_line);
 }
 
 static bool ic_root_set(const uint8_t root[32])
@@ -3255,20 +3266,37 @@ static int test_pw_identity_survives_a_second_checkout_path(void)
             "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
         static const char compiler_id_b[] =
             "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+        static const char mutation_a[] =
+            "1111111111111111111111111111111111111111111111111111111111111111";
+        static const char mutation_b[] =
+            "2222222222222222222222222222222222222222222222222222222222222222";
         char root_a[4096], root_b[4096];
         test_make_tmpdir(root_a, sizeof(root_a), "proof_identity",
                          "checkout_a");
         test_make_tmpdir(root_b, sizeof(root_b), "proof_identity",
                          "checkout_b_longer_name");
         ASSERT(strcmp(root_a, root_b) != 0);
-        ASSERT(ic_write_build_plan(root_a, epoch_a, compiler_id_a, "-O2",
-                                   NULL));
-        ASSERT(ic_write_build_plan(root_b, epoch_b, compiler_id_b, "-O2",
-                                   NULL));
+        ASSERT(ic_write_build_plan_mutation(root_a, epoch_a, compiler_id_a,
+                                            "-O2", mutation_a, NULL));
+        ASSERT(ic_write_build_plan_mutation(root_b, epoch_b, compiler_id_b,
+                                            "-O2", mutation_b, NULL));
         struct zcl_dev_proof_build_identity_v1 a = {0}, b = {0};
         ASSERT(zcl_dev_proof_build_identity_v1_capture(root_a, &a, NULL, 0));
         ASSERT(zcl_dev_proof_build_identity_v1_capture(root_b, &b, NULL, 0));
         ASSERT(memcmp(&a, &b, sizeof(a)) == 0);
+        /* Location-independent graph equality never authorizes the other
+         * checkout's inode/timestamp token. Each plan keeps its own binding. */
+        char why[160];
+        ASSERT(zcl_dev_proof_build_plan_verify(root_a, &a, mutation_a,
+                                                why, sizeof(why)));
+        ASSERT(zcl_dev_proof_build_plan_verify(root_b, &a, mutation_b,
+                                                why, sizeof(why)));
+        ASSERT(!zcl_dev_proof_build_plan_verify(root_a, &a, mutation_b,
+                                                 why, sizeof(why)));
+        ASSERT(strstr(why, "mutation_changed") != NULL);
+        ASSERT(!zcl_dev_proof_build_plan_verify(root_b, &a, mutation_a,
+                                                 why, sizeof(why)));
+        ASSERT(strstr(why, "mutation_changed") != NULL);
         /* Equal-because-empty would satisfy the line above and prove
          * nothing, so every root has to carry something. */
         ASSERT(ic_root_set(a.compiler) && ic_root_set(a.flags) &&
@@ -3282,10 +3310,31 @@ static int test_pw_identity_survives_a_second_checkout_path(void)
         /* A checkout root a prefix rewrite cannot model is refused rather
          * than half-applied. */
         struct zcl_dev_proof_build_identity_v1 refused = {0};
-        ASSERT(!zcl_dev_proof_build_identity_v1_capture("/", &refused, NULL,
-                                                         0));
-        ASSERT(!zcl_dev_proof_build_identity_v1_capture(root_a, NULL, NULL,
-                                                         0));
+        ASSERT(!zcl_dev_proof_build_identity_v1_capture("/", &refused, NULL, 0));
+        ASSERT(!zcl_dev_proof_build_identity_v1_capture(root_a, NULL, NULL, 0));
+        const char *invalid_mutations[] = {
+            NULL, "", "not-a-mutation",
+            "111111111111111111111111111111111111111111111111111111111111111",
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        };
+        for (size_t i = 0; i < sizeof(invalid_mutations) /
+                                  sizeof(invalid_mutations[0]); i++) {
+            ASSERT(ic_write_build_plan_mutation(root_a, epoch_a, compiler_id_a,
+                "-O2", invalid_mutations[i], NULL));
+            ASSERT(!zcl_dev_proof_build_identity_v1_capture(root_a, &refused,
+                                                           NULL, 0));
+            ASSERT(!zcl_dev_proof_build_plan_verify(root_a, &a, mutation_a,
+                                                     why, sizeof(why)));
+            ASSERT(strstr(why, "unavailable") != NULL);
+        }
+        /* Even identical duplicate bindings are ambiguous and refused. */
+        ASSERT(ic_write_build_plan_mutation(root_a, epoch_a, compiler_id_a,
+            "-O2", mutation_a,
+            "BASE_GENERATION=1111111111111111111111111111111111111111111111111111111111111111\n"));
+        ASSERT(!zcl_dev_proof_build_identity_v1_capture(root_a, &refused, NULL, 0));
+        ASSERT(!zcl_dev_proof_build_plan_verify(root_a, &a, mutation_a,
+                                                 why, sizeof(why)));
+        ASSERT(strstr(why, "unavailable") != NULL);
         /* The four roots this box puts in a receipt, printed so two boxes
          * can be compared without either running a proof. */
         char compiler_hex[65], flags_hex[65], environment_hex[65];
@@ -3323,8 +3372,8 @@ static int test_pw_identity_keeps_its_four_roots_apart(void)
         test_make_tmpdir(root, sizeof(root), "proof_identity", "separation");
         struct zcl_dev_proof_build_identity_v1 baseline = {0}, moved = {0};
         ASSERT(ic_write_build_plan(root, epoch, compiler_id, "-O2", NULL));
-        ASSERT(zcl_dev_proof_build_identity_v1_capture(root, &baseline, NULL,
-                                                       0));
+        ASSERT(zcl_dev_proof_build_identity_v1_capture(root, &baseline, NULL, 0));
+        char why[160];
 
         /* A flag the plan passes moves flags_root and nothing else. */
         ASSERT(ic_write_build_plan(root, epoch, compiler_id, "-O0", NULL));
@@ -3333,6 +3382,9 @@ static int test_pw_identity_keeps_its_four_roots_apart(void)
         ASSERT(memcmp(moved.compiler, baseline.compiler, 32) == 0);
         ASSERT(memcmp(moved.environment, baseline.environment, 32) == 0);
         ASSERT(memcmp(moved.build_graph, baseline.build_graph, 32) == 0);
+        ASSERT(!zcl_dev_proof_build_plan_verify(root, &baseline, compiler_id,
+                                                 why, sizeof(why)));
+        ASSERT(strstr(why, "flags_changed") != NULL);
 
         /* A plan line this build has never heard of lands in the build
          * graph. It must never be silently dropped: an input nobody hashes
@@ -3344,6 +3396,10 @@ static int test_pw_identity_keeps_its_four_roots_apart(void)
         ASSERT(memcmp(moved.compiler, baseline.compiler, 32) == 0);
         ASSERT(memcmp(moved.flags, baseline.flags, 32) == 0);
         ASSERT(memcmp(moved.environment, baseline.environment, 32) == 0);
+
+        ASSERT(!zcl_dev_proof_build_plan_verify(root, &baseline, compiler_id,
+                                                 why, sizeof(why)));
+        ASSERT(strstr(why, "graph_changed") != NULL);
 
         /* A plan line that is not KEY=VALUE is refused, not guessed at. */
         ASSERT(ic_write_build_plan(root, epoch, compiler_id, "-O2",
@@ -3459,9 +3515,14 @@ static int test_pw_receipt_refuses_an_older_root_policy(void)
         char why[128];
         ASSERT(zcl_dev_proof_receipt_validate(&receipt, local, base,
                                               why, sizeof(why)));
-        ASSERT(ZCL_DEV_PROOF_POLICY_VERSION >= 2u);
+        ASSERT(ZCL_DEV_PROOF_POLICY_VERSION >= 3u);
         struct zcl_dev_acceptance_receipt_v1 old = receipt;
         old.policy_version = ZCL_DEV_PROOF_POLICY_VERSION - 1u;
+        ASSERT(zcl_dev_proof_receipt_seal(&old));
+        ASSERT(!zcl_dev_proof_receipt_validate(&old, local, base,
+                                               why, sizeof(why)));
+        ASSERT(strcmp(why, "receipt_schema_old") == 0);
+        old.policy_version = 2u; /* graph still bound a host-local mutation */
         ASSERT(zcl_dev_proof_receipt_seal(&old));
         ASSERT(!zcl_dev_proof_receipt_validate(&old, local, base,
                                                why, sizeof(why)));
