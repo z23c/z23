@@ -1,6 +1,5 @@
-/* Copyright 2026 Rhett Creighton - Apache License 2.0 */
-
-/*
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ *
  * Gates: check-architecture-tree
  * Default landing spot for a FUTURE gate port: a filesystem-tree-walking
  * gate (walk_src/clock_walk/repo_shape_room_dirs) joins gate_tree_walk.c;
