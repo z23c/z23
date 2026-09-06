@@ -5283,7 +5283,7 @@ LINTC_SRCS = tools/lint/lintc/lib.c tools/lint/lintc/gate_pattern_small.c \
     tools/lint/lintc/gate_tree_walk.c tools/lint/lintc/gate_git_scan_a.c \
     tools/lint/lintc/gate_git_scan_b.c tools/lint/lintc/gate_landing_proof.c \
     tools/lint/lintc/gate_build_config.c tools/lint/lintc/gate_doc_index.c \
-    tools/lint/lintc/main.c
+    tools/lint/lintc/gate_ratchet_ports.c tools/lint/lintc/main.c
 LINTC_OBJS = $(LINTC_SRCS:tools/lint/lintc/%.c=build/lintc-obj/%.o)
 EQUIHASH_FACT_SRCS = tools/equihash_params_fact.c \
     core/chainparams/src/chainparams.c core/chainparams/src/chainparamsbase.c \
@@ -12133,7 +12133,7 @@ check-file-purpose:
 # Gate P2 (docs/work/palace-design.md §3) — every navigator group node
 # emitted by ci_group_emit_all() has a non-empty ci_group_purpose() (HARD:
 # the group population is finite and filled in full, so no ratchet needed).
-check-group-purpose:
+check-group-purpose: $(LINTC_TOOL)
 	@echo "→ Gate P2: check_group_purpose"
 	@ZCL_LINT_MODE=FAIL ./tools/lint/check_group_purpose.sh
 
@@ -12228,7 +12228,7 @@ check-no-new-repair-rung:
 # BORROWED zclassicd-chainstate seed the self-verified-tip cure is deleting,
 # docs/work/self-verified-tip-plan.md Act 3). Callers are listed in
 # tools/lint/borrowed_seed_caller_baseline.txt (shrink-only); a new caller fails.
-check-no-new-borrowed-seed:
+check-no-new-borrowed-seed: $(LINTC_TOOL)
 	@echo "══ LINT: no new borrowed-seed caller (sovereign cure) ══"
 	@./tools/lint/check_no_new_borrowed_seed.sh .
 

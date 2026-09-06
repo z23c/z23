@@ -28,6 +28,10 @@ extern const char *const k_domain[2];
 extern const char *g_lint_argv0;
 extern int g_n_shapes;
 extern char g_shapes[RS_SHAPE][RS_NAME];
+extern int g_n_ctx;
+extern char g_ctx[RS_MAX][RS_NAME];
+extern int g_n_libs;
+extern char g_libs[RS_MAX][RS_NAME];
 
 int die(const char *msg, const char *arg);
 int fin(FILE *f, char *line, const char *path, int rc);
@@ -148,5 +152,9 @@ int check_framework_filename_suffix_run(int argc, char **argv);
 int check_framework_filename_suffix_selftest(void);
 int check_no_stray_untracked_source_run(int argc, char **argv);
 int check_no_stray_untracked_source_selftest(void);
+int check_group_purpose_run(int argc, char **argv);
+int check_group_purpose_selftest(void);
+int check_no_new_borrowed_seed_run(int argc, char **argv);
+int check_no_new_borrowed_seed_selftest(void);
 
 #endif

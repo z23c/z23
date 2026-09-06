@@ -5,7 +5,7 @@
  */
 
 /*
- * Gates: check-codeindex-coverage
+ * Gates: check-codeindex-coverage, check-group-purpose
  * Default landing spot for a FUTURE gate port: a filesystem-tree-walking
  * gate (walk_src/clock_walk/repo_shape_room_dirs) joins gate_tree_walk.c;
  * a git-tracked-enumeration gate (each_zpath/each_zpath_st) joins whichever
@@ -354,4 +354,272 @@ int check_codeindex_coverage_selftest(void)
               stdout) < 0)
         return die("z23-lint: write failed\n", "");
     return 0;
+}
+
+enum { GP_MAX = RS_MAX, GP_NAME = RS_NAME };
+
+static const char k_gp_src[] =
+    "cognition/modules/codeindex/src/codeindex_group.c";
+static const char k_gp_mod[] =
+    "module_group_is\\(group, \"%s\"\\)\\) return \"[^\"]";
+static const char k_gp_rootp[] =
+    "strcmp\\(group, \"%s\"\\) == 0\\) return \"[^\"]";
+static const char k_gp_shapep[] =
+    "group_ends_with\\(group, \"%s\"\\)\\) return \"[^\"]";
+static const char k_gp_authp[] =
+    "starts_seg\\(group, \"%s\"\\)\\) return \"[^\"]";
+static const char k_gp_modroom[] =
+    "group_ends_with\\(group, \"modules\"\\)\\) return \"[^\"]";
+static const char *const k_gp_roots[] = {
+    "root", "core", "engine", "contexts", "cognition", "platform", "tools", "tests"
+};
+static const char *const k_gp_auth[] = {
+    "contexts", "core", "engine", "cognition", "platform"
+};
+
+static int gp_extract_line(char *line, int *inside, const char *needle,
+                           char out[][GP_NAME], int max, int *n)
+{
+    if (!*inside && strstr(line, needle))
+        *inside = 1;
+    if (!*inside)
+        return 0;
+    for (char *p = line; ; ) {
+        char *q = strchr(p, '"');
+        if (!q)
+            break;
+        char *r = strchr(q + 1, '"');
+        if (!r)
+            break;
+        size_t len = (size_t)(r - q - 1);
+        if (*n >= max || len >= GP_NAME)
+            return die("z23-lint: derived buffer overflow\n", "");
+        memcpy(out[*n], q + 1, len);
+        out[*n][len] = '\0';
+        (*n)++;
+        p = r + 1;
+    }
+    if (strstr(line, "};"))
+        *inside = 0;
+    return 0;
+}
+
+static int gp_extract_fp(FILE *f, const char *name, char out[][GP_NAME], int max,
+                         int *n)
+{
+    char needle[128];
+    if (ovf(snprintf(needle, sizeof needle, "static const char *const %s[]",
+                     name), sizeof needle))
+        return 2;
+    char *line = NULL;
+    size_t cap = 0;
+    int inside = 0, rc = 0;
+    *n = 0;
+    while (rc == 0 && getline(&line, &cap, f) >= 0)
+        rc = gp_extract_line(line, &inside, needle, out, max, n);
+    if (rc == 0 && ferror(f))
+        rc = die("z23-lint: read failed: %s\n", "extract");
+    free(line);
+    return rc;
+}
+
+static int gp_extract_mem(const char *text, const char *name,
+                          char out[][GP_NAME], int max, int *n)
+{
+    FILE *t = tmpfile();
+    if (!t)
+        return die("z23-lint: tmpfile failed\n", "");
+    if (fputs(text, t) < 0 || fseek(t, 0, SEEK_SET) != 0) {
+        fclose(t);
+        return die("z23-lint: write failed\n", "");
+    }
+    int rc = gp_extract_fp(t, name, out, max, n);
+    if (fclose(t) != 0 && rc == 0)
+        rc = die("z23-lint: fclose failed: %s\n", "tmpfile");
+    return rc;
+}
+
+static int gp_extract_path(const char *path, const char *name,
+                           char out[][GP_NAME], int max, int *n)
+{
+    FILE *f = fopen(path, "r");
+    if (!f)
+        return die("z23-lint: cannot open %s\n", path);
+    int rc = gp_extract_fp(f, name, out, max, n);
+    if (fclose(f) != 0 && rc == 0)
+        rc = die("z23-lint: fclose failed: %s\n", path);
+    return rc;
+}
+
+static int gp_set_differs(char items[][GP_NAME], int n, char table[][RS_NAME],
+                          int tn)
+{
+    struct sr_set want = {0}, got = {0};
+    for (int i = 0; i < tn; i++) {
+        if (sr_add(&want, table[i]))
+            return 1;
+    }
+    for (int i = 0; i < n; i++) {
+        if (!sr_has(&want, items[i]))
+            return 1;
+        if (sr_add(&got, items[i]))
+            return 1;
+    }
+    return got.count != want.count;
+}
+
+static int gp_file_has(const char *path, const char *fmt, const char *name,
+                       int *has)
+{
+    char pat[256];
+    if (ovf(snprintf(pat, sizeof pat, fmt, name), sizeof pat))
+        return 2;
+    regex_t re;
+    int err = regcomp(&re, pat, REG_EXTENDED);
+    if (err)
+        return reg_fail(&re, err);
+    int hits = 0;
+    int rc = scan_re(path, &re, &hits, 0);
+    regfree(&re);
+    if (rc)
+        return rc;
+    *has = hits > 0;
+    return 0;
+}
+
+static int gp_check_named(const char *src, const char *fmt, const char *name,
+                          const char *kind, const char *tail, int *scanned,
+                          int *fail)
+{
+    (*scanned)++;
+    int has = 0;
+    int rc = gp_file_has(src, fmt, name, &has);
+    if (rc)
+        return rc;
+    if (!has) {
+        fprintf(stderr, "check-group-purpose: %s '%s' %s\n", kind, name, tail);
+        *fail = 1;
+    }
+    return 0;
+}
+
+int check_group_purpose_run(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+    int rc = rs_init();
+    if (rc)
+        return rc;
+    const char *src = env_or("ZCL_GROUP_PURPOSE_SRC", k_gp_src);
+    struct stat st;
+    if (stat(src, &st) != 0 || !S_ISREG(st.st_mode)) {
+        fprintf(stderr, "check-group-purpose: missing %s\n", src);
+        return 2;
+    }
+    char c_contexts[GP_MAX][GP_NAME];
+    int n_ctx = 0;
+    rc = gp_extract_path(src, "k_product_contexts", c_contexts, GP_MAX, &n_ctx);
+    if (rc)
+        return rc;
+    rc = gate_require_scanned(n_ctx, g_n_ctx, "check-group-purpose",
+                              "k_product_contexts[] is incomplete");
+    if (rc)
+        return rc;
+    if (gp_set_differs(c_contexts, n_ctx, g_ctx, g_n_ctx)) {
+        fputs("check-group-purpose: k_product_contexts[] differs from PRODUCT_CONTEXTS\n",
+              stderr);
+        return 1;
+    }
+    int fail = 0, scanned = 0;
+    for (int i = 0; i < g_n_libs; i++) {
+        rc = gp_check_named(src, k_gp_mod, g_libs[i], "module",
+                            "has no non-empty purpose", &scanned, &fail);
+        if (rc)
+            return rc;
+    }
+    for (size_t i = 0; i < sizeof k_gp_roots / sizeof k_gp_roots[0]; i++) {
+        rc = gp_check_named(src, k_gp_rootp, k_gp_roots[i], "root",
+                            "has no non-empty purpose", &scanned, &fail);
+        if (rc)
+            return rc;
+    }
+    for (int i = 0; i < g_n_shapes; i++) {
+        rc = gp_check_named(src, k_gp_shapep, g_shapes[i], "shape",
+                            "has no non-empty purpose", &scanned, &fail);
+        if (rc)
+            return rc;
+    }
+    for (size_t i = 0; i < sizeof k_gp_auth / sizeof k_gp_auth[0]; i++) {
+        rc = gp_check_named(src, k_gp_authp, k_gp_auth[i], "authority",
+                            "lacks a room fallback", &scanned, &fail);
+        if (rc)
+            return rc;
+    }
+    {
+        int has = 0;
+        rc = gp_file_has(src, "%s", k_gp_modroom, &has);
+        if (rc)
+            return rc;
+        if (!has) {
+            fputs("check-group-purpose: module-room fallback is missing\n",
+                  stderr);
+            fail = 1;
+        }
+    }
+    rc = gate_require_scanned(scanned, g_n_libs + 20, "check-group-purpose",
+                              "purpose scan was incomplete");
+    if (rc)
+        return rc;
+    if (printf("[check_group_purpose] scanned %d architecture purpose contracts\n",
+               scanned) < 0
+        || printf("[check_group_purpose] %d violation(s) found\n", fail) < 0)
+        return die("z23-lint: write failed\n", "");
+    return fail;
+}
+
+static int gp_st_pat(const char *fmt, const char *name, const char *line,
+                     int expect)
+{
+    char pat[256];
+    if (ovf(snprintf(pat, sizeof pat, fmt, name), sizeof pat))
+        return 1;
+    regex_t re;
+    int err = regcomp(&re, pat, REG_EXTENDED);
+    if (err) {
+        (void)reg_fail(&re, err);
+        return 1;
+    }
+    int hit = regexec(&re, line, 0, NULL, 0) == 0;
+    regfree(&re);
+    return hit != expect;
+}
+
+int check_group_purpose_selftest(void)
+{
+    static const char k_fix[] =
+        "prefix \"nope\"\n"
+        "static const char *const k_product_contexts[] = {\n"
+        "    \"a\", \"b\",\n"
+        "};\n"
+        "trailer \"c\"\n";
+    char got[GP_MAX][GP_NAME];
+    int n = 0, bad = 0;
+    if (gp_extract_mem(k_fix, "k_product_contexts", got, GP_MAX, &n))
+        return 1;
+    bad |= n != 2 || strcmp(got[0], "a") != 0 || strcmp(got[1], "b") != 0;
+    char match_t[][RS_NAME] = { "b", "a" };
+    char miss_t[][RS_NAME] = { "a", "c" };
+    bad |= gp_set_differs(got, n, match_t, 2);
+    bad |= !gp_set_differs(got, n, miss_t, 2);
+    bad |= gp_st_pat(k_gp_mod, "m",
+                     "if (module_group_is(group, \"m\")) return \"non-empty\";", 1);
+    bad |= gp_st_pat(k_gp_mod, "m",
+                     "if (module_group_is(group, \"m\")) return \"\";", 0);
+    bad |= gp_st_pat(k_gp_rootp, "core",
+                     "if (strcmp(group, \"core\") == 0) return \"x\";", 1);
+    bad |= gp_st_pat(k_gp_shapep, "models",
+                     "if (group_ends_with(group, \"models\")) return \"x\";", 1);
+    bad |= gp_st_pat(k_gp_authp, "engine",
+                     "if (starts_seg(group, \"engine\")) return \"x\";", 1);
+    return st_ok(bad, "check_group_purpose selftest: OK\n");
 }

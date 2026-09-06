@@ -64,6 +64,9 @@ static const struct lint_gate k_gates[] = {
       check_framework_filename_suffix_selftest },
     { "check-no-stray-untracked-source", check_no_stray_untracked_source_run,
       check_no_stray_untracked_source_selftest },
+    { "check-group-purpose", check_group_purpose_run, check_group_purpose_selftest },
+    { "check-no-new-borrowed-seed", check_no_new_borrowed_seed_run,
+      check_no_new_borrowed_seed_selftest },
 };
 
 int main(int argc, char **argv)
