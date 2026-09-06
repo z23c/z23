@@ -146,7 +146,7 @@ gate_require_scanned "$scanned" 2 "check_no_adx_overclaim" \
 # Make may first rebuild generated headers, whose progress records share
 # stdout with print-includes. Select the one record made entirely of -I flags;
 # accepting the first line silently graded five words of generator chatter.
-include_output="$(make --no-print-directory -s print-includes)"
+include_output="$(MAKEFLAGS= make --no-print-directory -s print-includes)"
 declare -a incs=()
 if ! extract_canonical_includes "$include_output" incs; then
     echo "check_no_adx_overclaim: FATAL — print-includes did not emit exactly one canonical -I record." >&2

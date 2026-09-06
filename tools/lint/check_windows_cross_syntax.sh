@@ -435,7 +435,7 @@ PROBE
     # real flag set. Everything above is hollow if a stale cached verdict
     # can be replayed, so the two are graded together.
     selftest_srcs="$WORK/selftest-srcs.txt"
-    if make -s ZCL_TARGET=windows-x86_64 print-node-c23-srcs 2>/dev/null |
+    if MAKEFLAGS= make -s ZCL_TARGET=windows-x86_64 print-node-c23-srcs 2>/dev/null |
             grep -E '\.c$' | LC_ALL=C sort -u > "$selftest_srcs.tmp"; then
         mv "$selftest_srcs.tmp" "$selftest_srcs"
     else
@@ -448,7 +448,7 @@ fi
 
 # ── Source set: every TU the release node binary actually compiles ───────
 SRC_LIST="$WORK/srcs.txt"
-if ! make -s ZCL_TARGET=windows-x86_64 print-node-c23-srcs > "$SRC_LIST.raw" 2>"$WORK/print-node-c23-srcs.err"; then
+if ! MAKEFLAGS= make -s ZCL_TARGET=windows-x86_64 print-node-c23-srcs > "$SRC_LIST.raw" 2>"$WORK/print-node-c23-srcs.err"; then
     echo "$GATE: FATAL — 'make -s ZCL_TARGET=windows-x86_64 print-node-c23-srcs' failed:" >&2
     sed 's/^/  /' "$WORK/print-node-c23-srcs.err" >&2
     exit 2

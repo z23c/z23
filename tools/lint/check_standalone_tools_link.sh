@@ -356,7 +356,7 @@ if ! make -j"$tl_jobs" --no-print-directory "${targets[@]}" >"$build_log" 2>&1; 
     # Re-probe serially so the report names every broken tool, not just the
     # one that happened to lose the race to fail first.
     for t in "${targets[@]}"; do
-        probe_out="$(make --no-print-directory "$t" 2>&1)" && continue
+        probe_out="$(MAKEFLAGS= make --no-print-directory "$t" 2>&1)" && continue
         # A Makefile parse failure is not this tool's fault. source-identity
         # capture refuses while the tree is being written, and the $(error ...)
         # it raises kills EVERY make invocation regardless of target, so the

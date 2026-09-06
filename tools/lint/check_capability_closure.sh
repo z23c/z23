@@ -431,7 +431,7 @@ cap_closure_load_defined_macros() {
     if [ -n "${CAP_CLOSURE_CFLAGS_OVERRIDE+x}" ]; then
         text="$CAP_CLOSURE_CFLAGS_OVERRIDE"
     else
-        text="$(cd "$root" && make -s print-CFLAGS 2>/dev/null)" || text=""
+        text="$(cd "$root" && MAKEFLAGS= make -s print-CFLAGS 2>/dev/null)" || text=""
     fi
     for tok in $text; do
         case "$tok" in
