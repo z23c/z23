@@ -63,6 +63,7 @@ z23 dev know --subject=glm-5.3-flash --relation=handles_poorly
 | muse | handles_well | long-wall-implementation | the only tier given a two-hour wall; specify interfaces (file, flags, error names, fixtures), never goals |
 | muse | requires | finisher | a unit is not done until a finisher has run, because the wall expires with the work uncommitted |
 | opus | handles_well | hard-implementation | deep debugging and design judgement; read its refusal, a brief that duplicates a landed subsystem is correctly declined |
+| sonnet | handles_poorly | fixture-line-reading | a verifier reading a gate's selftest transcript reports the fixture's FAIL lines as a red gate although the exit is zero; the brief says only the exit and the final summary line count, and names the fixture lines in advance |
 | sonnet | handles_well | finishing-rebase | finishes an unfinished unit and resolves a rebase conflict; the brief must forbid git stash explicitly |
 | sonnet | handles_well | gate-fixing | give it the exact gate name; a gate is never turned green by raising a baseline |
 | sonnet | handles_well | scoped-implementation | one well-scoped change with a named test group and a stated acceptance bar |

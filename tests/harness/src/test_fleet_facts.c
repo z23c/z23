@@ -231,6 +231,32 @@ static int test_fleet_facts_table(void)
         PASS();
     }
 
+    TEST("fleet_facts: source-identity trap_signature is ctime-bump and make-prerequisite trap_signature is later-defined-variable") {
+        struct zcl_fleet_facts_answer_v1 ident, makeprereq;
+        bool saw_ctime = false;
+        bool saw_later = false;
+
+        ASSERT(zcl_fleet_facts_query("source-identity", "trap_signature", NULL,
+                                     ZCL_FLEET_FACTS_MAX_ROWS, &ident));
+        ASSERT(!ident.unknown);
+        for (size_t i = 0; i < ident.row_count; i++) {
+            ASSERT(ident.rows[i].confidence == ZCL_FLEET_CONFIDENCE_DOCTRINE);
+            if (strcmp(ident.rows[i].object, "ctime-bump") == 0)
+                saw_ctime = true;
+        }
+        ASSERT(saw_ctime);
+
+        ASSERT(zcl_fleet_facts_query("make-prerequisite", "trap_signature", NULL,
+                                     ZCL_FLEET_FACTS_MAX_ROWS, &makeprereq));
+        ASSERT(!makeprereq.unknown);
+        for (size_t i = 0; i < makeprereq.row_count; i++) {
+            if (strcmp(makeprereq.rows[i].object, "later-defined-variable") == 0)
+                saw_later = true;
+        }
+        ASSERT(saw_later);
+        PASS();
+    }
+
     TEST("fleet_facts: the context filter selects one microtheory") {
         struct zcl_fleet_facts_answer_v1 proof, doctrine;
         ASSERT(zcl_fleet_facts_query("test_boot_phase", NULL, "lane_state:proof",
