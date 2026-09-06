@@ -31,6 +31,9 @@
 #include <stdint.h>
 #include <sys/stat.h>
 #include <sys/time.h>
+#if !defined(_WIN32)
+#include <strings.h>
+#endif
 #include "util/log_macros.h"
 #include "util/safe_alloc.h"
 #include "util/thread_registry.h"
@@ -733,6 +736,46 @@ static void https_write_all(SSL *ssl, const unsigned char *buf, size_t n)
 #include "net/site_routes.def"
 #undef SITE_ROUTE
 
+static int https_ascii_casecmp_n(const char *left, const char *right, size_t n)
+{
+#if defined(_WIN32)
+    return _strnicmp(left, right, n);
+#else
+    return strncasecmp(left, right, n);
+#endif
+}
+
+/* True when a request for "/" should get the install script instead of the
+ * browser redirect — a piped script client (curl or Wget, neither of which
+ * sends "Accept: text/html" by default) asking for the site root, exactly
+ * the case `curl -fsSL https://<site> | sh` needs
+ * (docs/work/BOOTSTRAP_PLAN.md:10). A browser's User-Agent never starts
+ * with either prefix, so this never intercepts a human visit. Kept as its
+ * own named function so it has its own test independent of the socket
+ * plumbing around it. */
+static bool https_root_wants_install_script(const char *user_agent,
+                                            const char *accept)
+{
+    if (!user_agent)
+        return false;
+    bool is_script_client =
+        https_ascii_casecmp_n(user_agent, "curl/", 5) == 0 ||
+        https_ascii_casecmp_n(user_agent, "Wget/", 5) == 0;
+    if (!is_script_client)
+        return false;
+    if (accept && strstr(accept, "text/html") != NULL)
+        return false;
+    return true;
+}
+
+#ifdef ZCL_TESTING
+bool https_root_wants_install_script_for_testing(const char *user_agent,
+                                                 const char *accept)
+{
+    return https_root_wants_install_script(user_agent, accept);
+}
+#endif
+
 /* ── HTTPS handler ────────────────────────────────────────── */
 
 static void handle_https_client(SSL *ssl, platform_socket_t fd,
@@ -750,8 +793,10 @@ static void handle_https_client(SSL *ssl, platform_socket_t fd,
     if (sscanf(line, "%15s %2047s", method, path) != 2)
         return;
 
-    /* Read remaining headers (discard). Cap the count so a peer streaming
-     * endless headers cannot pin this thread. */
+    /* Read remaining headers (discarded except the two the root
+     * curl/Wget short-circuit below needs). Cap the count so a peer
+     * streaming endless headers cannot pin this thread. */
+    char user_agent[256] = "", accept_hdr[256] = "";
     int hdr_count = 0;
     bool headers_complete = false;
     while (https_frontdoor_read_line(&reader,
@@ -760,6 +805,15 @@ static void handle_https_client(SSL *ssl, platform_socket_t fd,
         if (line[0] == '\0') {
             headers_complete = true;
             break;
+        }
+        if (https_ascii_casecmp_n(line, "User-Agent:", 11) == 0) {
+            const char *v = line + 11;
+            while (*v == ' ') v++;
+            snprintf(user_agent, sizeof(user_agent), "%s", v);
+        } else if (https_ascii_casecmp_n(line, "Accept:", 7) == 0) {
+            const char *v = line + 7;
+            while (*v == ' ') v++;
+            snprintf(accept_hdr, sizeof(accept_hdr), "%s", v);
         }
         if (++hdr_count > HTTP_MAX_REQUEST_HEADERS) return;
     }
@@ -785,8 +839,24 @@ static void handle_https_client(SSL *ssl, platform_socket_t fd,
     if (https_server_try_public_install(ssl, path))
         return;
 
-    /* Redirect root to explorer */
+    /* Root: a browser gets the explorer redirect it always got. A piped
+     * script client (curl -fsSL https://<site> | sh, with no
+     * Accept: text/html) gets the install script instead, so the bare
+     * one-liner documented in docs/work/BOOTSTRAP_PLAN.md:10 works without
+     * the /install.sh suffix. */
     if (strcmp(path, "/") == 0) {
+        if (https_root_wants_install_script(user_agent, accept_hdr)) {
+            unsigned char *buf = zcl_malloc(HTTPS_RESPONSE_BUFFER_SIZE,
+                                            "https_root_install_buf");
+            if (!buf) return;
+            size_t site_n_ = install_sh_handle_request(method, "/install.sh",
+                                                       NULL, 0, buf,
+                                                       HTTPS_RESPONSE_BUFFER_SIZE);
+            if (site_n_ > 0)
+                https_write_all(ssl, buf, site_n_);
+            free(buf);
+            return;
+        }
         const char *resp =
             "HTTP/1.1 302 Found\r\n"
             "Location: /explorer\r\n"

@@ -10,7 +10,7 @@
  *
  *   1. Dispatch order: the def rows, in order, are exactly the pinned
  *      (id, prefix) list — store, /n/, /names, zcode, metaverse, blog,
- *      yardsale, /market/chunk, /observation.json.
+ *      yardsale, /market/chunk, /observation.json, /install.sh.
  *   2. Every row's cost class is a valid onion_route_class, and the
  *      per-row classes are pinned at their current values (names_gateway
  *      EXPENSIVE with the "name-gateway" puzzle key, everything else
@@ -66,6 +66,7 @@ static const struct { const char *id; const char *prefix; } k_rows[] = {
     { "yardsale",      "/yardsale"     },
     { "market_chunk",  "/market/chunk" },
     { "observation",   "/observation.json" },
+    { "install_sh",    "/install.sh"   },
 };
 #define K_ROW_COUNT (sizeof(k_rows) / sizeof(k_rows[0]))
 
@@ -218,7 +219,8 @@ int test_site_routes(void)
         order_ok = strcmp(g_zcl_site_routes[i].id, k_rows[i].id) == 0 &&
                    strcmp(g_zcl_site_routes[i].prefix, k_rows[i].prefix) == 0;
     SR_CHECK("dispatch order pinned (store,/n/,/names,zcode,metaverse,"
-             "blog,yardsale,/market/chunk,/observation.json)", order_ok);
+             "blog,yardsale,/market/chunk,/observation.json,/install.sh)",
+             order_ok);
 
     /* 2. Cost classes valid + pinned; route keys pinned. */
     bool cost_ok = true;

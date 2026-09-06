@@ -366,7 +366,8 @@ endif
 # marker forces a parse restart whenever either generated header is missing or
 # stale, so the authoritative capture always observes the bytes actually used.
 VIEW_GEN_HEADERS_EARLY := contexts/wallet/views/include/views/wallet_templates_gen.h \
-	contexts/explorer/views/include/views/site_css.h
+	contexts/explorer/views/include/views/site_css.h \
+	contexts/commons/views/include/views/install_script_gen.h
 VIEW_BOOTSTRAP_MK := build/identity/view-inputs-ready.mk
 ifneq ($(ZCL_STANDALONE_CLEAN),1)
 ifeq ($(strip $(MAKE_RESTARTS)),)
@@ -3148,6 +3149,8 @@ TMPL_SRC = $(wildcard $(TMPL_DIR)/*.chtml) \
 TMPL_TOOL = $(BIN_DIR)/gen_templates
 SITE_CSS_GEN = contexts/explorer/views/include/views/site_css.h
 SITE_CSS_SRC = contexts/explorer/views/src/site.css
+INSTALL_SH_GEN = contexts/commons/views/include/views/install_script_gen.h
+INSTALL_SH_SRC = platform/packaging/install/install_from_source.sh
 VIEW_GEN_HEADERS = $(VIEW_GEN_HEADERS_EARLY)
 
 $(TMPL_TOOL): tools/gen_templates.c platform/modules/base/src/safe_alloc.c \
@@ -3173,6 +3176,10 @@ $(TMPL_GEN): $(TMPL_SRC) tools/gen_templates.c | $(TMPL_TOOL)
 
 $(SITE_CSS_GEN): $(SITE_CSS_SRC) tools/gen_templates.c | $(TMPL_TOOL)
 	@$(TMPL_TOOL) --single-css $< $@ site_css SITE_CSS_H
+
+$(INSTALL_SH_GEN): $(INSTALL_SH_SRC) tools/gen_templates.c | $(TMPL_TOOL)
+	@mkdir -p $(dir $@)
+	@$(TMPL_TOOL) --single-text $< $@ INSTALL_FROM_SOURCE_SH ZCL_VIEWS_INSTALL_SCRIPT_GEN_H
 
 # Included near the top of this file. Updating it after its generated-header
 # prerequisites makes GNU Make restart before any ordinary target recipe runs.

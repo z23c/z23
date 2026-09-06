@@ -409,6 +409,91 @@ static int write_single_css_header(const char *src_path, const char *out_path,
     return 0;
 }
 
+/* Embed one file byte-for-byte (no minification — a shell script's
+ * whitespace and newlines are load-bearing) as a chunked C string plus a
+ * `%s_get()` accessor, same shape as write_single_css_header above. */
+static int write_single_text_header(const char *src_path, const char *out_path,
+                                    const char *symbol, const char *guard)
+{
+    size_t src_len = 0;
+    char *src = NULL;
+    FILE *out = NULL;
+    int chunks = 0;
+    size_t chunk_size = 3000;
+
+    if (!valid_c_identifier(symbol) || !valid_c_identifier(guard)) {
+        fprintf(stderr, "gen_templates: invalid C identifier\n");
+        return 1;
+    }
+
+    src = read_file(src_path, &src_len);
+    if (!src) {
+        fprintf(stderr, "gen_templates: cannot read: %s\n", src_path);
+        return 1;
+    }
+
+    char tmp_path[1200];
+    out = open_staged(out_path, tmp_path, sizeof(tmp_path));
+    if (!out) {
+        fprintf(stderr, "gen_templates: cannot write: %s\n", out_path);
+        free(src);
+        return 1;
+    }
+
+    fprintf(out,
+        "/* Auto-generated from %s -- do not edit.\n"
+        " * Regenerate: make templates */\n\n"
+        "#ifndef %s\n"
+        "#define %s\n\n",
+        src_path, guard, guard);
+
+    for (size_t off = 0; off < src_len; off += chunk_size) {
+        size_t clen = src_len - off;
+        if (clen > chunk_size)
+            clen = chunk_size;
+        fprintf(out, "static const char %s_%d[] =\n", symbol, chunks);
+        write_c_string(out, src + off, clen);
+        fprintf(out, ";\n");
+        chunks++;
+    }
+    if (chunks == 0) {
+        fprintf(out, "static const char %s_0[] = \"\";\n", symbol);
+        chunks = 1;
+    }
+
+    fprintf(out, "\nstatic char _%s_buf[%zu];\n", symbol, src_len + 1);
+    fprintf(out,
+        "__attribute__((unused))\n"
+        "static const char *%s_get(void) {\n"
+        "    size_t off = 0;\n",
+        symbol);
+    for (int c = 0; c < chunks; c++) {
+        fprintf(out,
+            "    size_t l%d = __builtin_strlen(%s_%d);\n"
+            "    __builtin_memcpy(_%s_buf + off, %s_%d, l%d); off += l%d;\n",
+            c, symbol, c, symbol, symbol, c, c, c);
+    }
+    fprintf(out,
+        "    _%s_buf[off] = 0;\n"
+        "    return _%s_buf;\n"
+        "}\n"
+        "#define %s (%s_get())\n\n"
+        "#endif\n",
+        symbol, symbol, symbol, symbol);
+
+    bool changed = false;
+    if (commit_staged(out, tmp_path, out_path, &changed) != 0) {
+        fprintf(stderr, "gen_templates: cannot write: %s\n", out_path);
+        free(src);
+        return 1;
+    }
+    free(src);
+    fprintf(stderr, "gen_templates: text %s -> %s (%zu bytes, %s)\n",
+            src_path, out_path, src_len,
+            changed ? "updated" : "unchanged");
+    return 0;
+}
+
 /* Order two directory entries by name, so the emitted header depends on the
  * template SET and never on the filesystem that stored it. */
 static int name_cmp(const void *a, const void *b)
@@ -570,6 +655,15 @@ int main(int argc, char **argv) {
             return 1;
         }
         return write_single_css_header(argv[2], argv[3], argv[4], argv[5]);
+    }
+    if (argc >= 2 && strcmp(argv[1], "--single-text") == 0) {
+        if (argc != 6) {
+            fprintf(stderr,
+                "Usage: %s --single-text <input> <output.h> <symbol> <guard>\n",
+                argv[0]);
+            return 1;
+        }
+        return write_single_text_header(argv[2], argv[3], argv[4], argv[5]);
     }
 
     if (argc < 3 || argc > 4) {

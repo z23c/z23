@@ -115,6 +115,12 @@ bool https_server_acme_challenge_filepath_for_testing(const char *root,
                                                       const char *path,
                                                       char *out,
                                                       size_t out_len);
+/* True when a request for "/" carrying this User-Agent and Accept header
+ * value should be served the install script instead of the browser
+ * redirect to /explorer. See https_root_wants_install_script() in
+ * https_server.c. */
+bool https_root_wants_install_script_for_testing(const char *user_agent,
+                                                 const char *accept);
 void https_server_handle_http_for_testing(platform_socket_t fd,
                                           int64_t deadline_ms);
 bool https_server_public_install_filepath_for_testing(const char *root,

@@ -176,3 +176,17 @@ SITE_ROUTE(observation, "/observation.json",
            NONE, NONE, NONE,
            NULL, NULL, NULL, NULL,
            "Observation record unavailable.\n", NULL)
+
+/* The source-build installer — the honest front door for
+ * `curl -fsSL https://<site>/install.sh | sh`
+ * (docs/work/BOOTSTRAP_PLAN.md:10). GET/HEAD only, no nav/grid entry (it
+ * is a download, not a page), no app_id (not an app-catalog mount). The
+ * body is a static script embedded at build time
+ * (contexts/commons/views/include/views/install_script_gen.h); it is a
+ * SEPARATE, simpler front door from the digest-verified binary bootstrap
+ * chain (platform/packaging/install/install.sh), which stays unpublished
+ * until its signing gate is met. */
+SITE_ROUTE(install_sh, "/install.sh", install_sh_handle_request, PLAIN,
+           0, ZCL_SITE_COST_CHEAP, "",
+           NONE, NONE, NONE,
+           NULL, NULL, NULL, NULL, NULL, NULL)

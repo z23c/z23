@@ -72,6 +72,11 @@ make setup
 make -j4 z23
 ```
 
+The public node serves this same clone-and-build sequence as a script at
+`/install.sh`, so `curl -fsSL https://<site>/install.sh | sh` builds from
+source and downloads no binary (a separate, digest-verified binary
+bootstrap exists but stays unpublished until its signing gate is met).
+
 This bounded command is suitable for a 16 GB machine, including a slow disk.
 Increase `-j4` only after observing available memory and I/O wait. Use
 `make -j4 all` only when you also need the monolithic test harness and every
