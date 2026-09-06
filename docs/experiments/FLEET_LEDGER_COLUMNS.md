@@ -35,3 +35,8 @@ The selftest also passed with `-O1 -g -fsanitize=address,undefined
 -fno-omit-frame-pointer` replacing `-O2`. These are local parser and generator
 checks; they do not establish distributed fleet acceptance or a performance
 improvement.
+
+The current checkout also completed `make -j4 dev-bin` and
+`make -j4 t-fast ONLY=fleet_observe`. The registered runner reported one group
+run, zero failed groups, zero self-skips, and zero unobserved environments.
+The remaining 1,129 groups were outside this explicit focused selection.
