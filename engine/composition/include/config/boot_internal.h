@@ -481,6 +481,12 @@ void boot_ready_legs_describe(const struct boot_ready_legs *l,
                               char *out, size_t cap);
 
 #ifdef ZCL_TESTING
+/* Pillar 7's own refusal: a root supervisor sweep that has stopped advancing
+ * withholds the systemd keepalive, so systemd restarts the process. A sweep
+ * that has never run yet (heartbeat 0, very early boot) is not a wedge.
+ * Exercised by tests/harness/src/test_supervisor_backstop.c. */
+bool boot_sd_watchdog_test_sweep_alive(uint64_t sweep_heartbeat,
+                                       int64_t sweep_age_us);
 /* Test seam for the pure pet decision (tests/harness/src/test_sd_notify.c). */
 bool boot_sd_watchdog_test_pet_decide(bool runtime_gate_alive);
 bool boot_sd_watchdog_test_keepalive_supervisor(bool runtime_alive,

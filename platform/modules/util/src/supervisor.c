@@ -116,6 +116,20 @@ static void stall_cancel_pending(struct liveness_contract *c)
         atomic_fetch_add(&c->stall_delivery_discarded, 1u);
 }
 
+/* Cancel only the exact report the caller looked at. The delivery worker
+ * reads the pending reason and the live stall reason in two separate loads;
+ * between them a child can rearm and report a NEWER stall into the same slot.
+ * Clearing the slot unconditionally there would throw that fresh report away,
+ * and because stall_reason stays latched the sweep would never fire it again —
+ * the stall would be lost for the life of the process. */
+static void stall_cancel_stale(struct liveness_contract *c, int observed)
+{
+    int expected = observed;
+    if (atomic_compare_exchange_strong(&c->stall_delivery_pending,
+                                       &expected, SUPERVISOR_STALL_NONE))
+        atomic_fetch_add(&c->stall_delivery_discarded, 1u);
+}
+
 /* Single stall-fire path for every trigger site. Production delivery uses a
  * fixed per-contract slot; no caller callback or observer runs on the root
  * sweep. Tests that drive sweep_once without starting threads remain
@@ -727,7 +741,7 @@ static bool stall_deliver_one(void)
             continue;
         if (atomic_load(&c->completed) ||
             atomic_load(&c->stall_reason) != pending) {
-            stall_cancel_pending(c);
+            stall_cancel_stale(c, pending);
             continue;
         }
         int expected = pending;

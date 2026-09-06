@@ -29,6 +29,7 @@
 #include "util/supervisor.h"
 #include "util/boot_phase.h"
 #include "json/json.h"
+#include "config/boot_internal.h"
 
 #define BS_CHECK(name, expr) do { \
     printf("supervisor_backstop: %s... ", (name)); \
@@ -291,6 +292,24 @@ int test_supervisor_backstop(void)
         ok = ok && json_get(&out, "effective_freeze_threshold_us") != NULL;
         BS_CHECK("dump_state_json exposes the full contract", ok);
         json_free(&out);
+    }
+
+    /* Pillar 7's systemd keepalive refusal (boot_sd_watchdog.c). Recovery
+     * callbacks now run off the sweep so a blocked one cannot stop the ping —
+     * but a sweep that has genuinely stopped advancing still must. This is the
+     * one refusal the isolation work must never soften, so it is asserted here
+     * rather than left to the decision tables in test_sd_notify.c, which only
+     * ever see an already-computed sweep_alive boolean. */
+    {
+        const int64_t freeze = SUPERVISOR_BACKSTOP_DEFAULT_FREEZE_US;
+        BS_CHECK("a sweep that has never run yet is not a wedge",
+                 boot_sd_watchdog_test_sweep_alive(0, freeze * 10));
+        BS_CHECK("a sweep inside the freeze threshold keeps the ping",
+                 boot_sd_watchdog_test_sweep_alive(7, freeze - 1));
+        BS_CHECK("a stale sweep withholds the ping",
+                 !boot_sd_watchdog_test_sweep_alive(7, freeze));
+        BS_CHECK("a long-stale sweep withholds the ping",
+                 !boot_sd_watchdog_test_sweep_alive(7, freeze * 4));
     }
 
     supervisor_backstop_test_reset();

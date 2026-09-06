@@ -279,13 +279,19 @@ static void boot_sd_watchdog_maybe_notify_ready(void)
  * freeze threshold as the off-systemd fallback watcher
  * (platform/modules/util/src/supervisor_backstop.c) so the two escalation paths
  * agree on what "frozen" means. */
+static bool boot_sd_watchdog_sweep_alive(uint64_t sweep_heartbeat,
+                                         int64_t sweep_age_us)
+{
+    if (sweep_heartbeat == 0)
+        return true;
+    return sweep_age_us < SUPERVISOR_BACKSTOP_DEFAULT_FREEZE_US;
+}
+
 static bool boot_sd_watchdog_supervisor_alive(void)
 {
-    uint64_t hb = supervisor_sweep_heartbeat();
-    if (hb == 0)
-        return true;
-    int64_t age_us = platform_time_monotonic_us() - supervisor_sweep_last_us();
-    return age_us < SUPERVISOR_BACKSTOP_DEFAULT_FREEZE_US;
+    return boot_sd_watchdog_sweep_alive(
+        supervisor_sweep_heartbeat(),
+        platform_time_monotonic_us() - supervisor_sweep_last_us());
 }
 
 static int64_t boot_sd_watchdog_freshness_bound_us(void)
@@ -509,6 +515,12 @@ static bool boot_sd_watchdog_keepalive_supervisor(bool runtime_alive,
 }
 
 #ifdef ZCL_TESTING
+bool boot_sd_watchdog_test_sweep_alive(uint64_t sweep_heartbeat,
+                                       int64_t sweep_age_us)
+{
+    return boot_sd_watchdog_sweep_alive(sweep_heartbeat, sweep_age_us);
+}
+
 bool boot_sd_watchdog_test_pet_decide(bool runtime_gate_alive)
 {
     return boot_sd_watchdog_pet_decide(runtime_gate_alive);
