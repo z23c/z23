@@ -102,6 +102,9 @@ from a hash, signature, test, or reproduction receipt.
 - [`DEVELOPING.md`](DEVELOPING.md) — navigation, reflex feedback, focused tests,
   integration, push, and asynchronous deep proof.
 - [`CODEBASE_MAP.md`](CODEBASE_MAP.md) — source ownership and extension recipes.
+- [`INDEX.md`](INDEX.md) — local data-source ingest/search (`z23-dev dev
+  index`): the board, experiment ledger, landing outcomes, and logs, into
+  one sqlite+FTS5 file.
 - [`AGENT_TRAPS.md`](AGENT_TRAPS.md) — intentional behavior and already-solved
   problems to check before editing.
 - [`MIND.md`](MIND.md) — the per-node resident that owns rebuilding this box's

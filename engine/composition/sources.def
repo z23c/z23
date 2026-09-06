@@ -1,0 +1,77 @@
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ *
+ * sources.def — the CLOSED catalog of local data sources `z23-dev index`
+ * knows how to ingest. A source id not declared here cannot be ingested,
+ * queried by --source=, or reported by `dev index status`: the alternative
+ * (a path handed in on the command line) is a source nobody named, so a
+ * question about it later ("what does source X even contain") has no
+ * answer written down.
+ *
+ * Row shape:
+ *
+ *   Z23_SOURCE(id_, kind_, root_, path_, format_, why_)
+ *
+ *   id_      the source id, verbatim and stable. Renaming one starts a new
+ *            cursor (see the `cursors` table in native_dev_index_ingest.c)
+ *            — the old id's byte-offset bookmark does not carry over.
+ *   kind_    one of the CLOSED kinds below; picks the row-shape the
+ *            ingester extracts (which columns besides `text` it fills).
+ *   root_    which resolved root path_ is relative to (both are existing
+ *            seams; neither is a fresh getenv call):
+ *              ZCLASSIC23  evidence_ledger_resolve_path()'s HOME-relative
+ *                          default, ".local/state/zclassic23" — the fleet
+ *                          board/experiment-ledger/log root.
+ *              DEV_STATE   platform_state_root() — "~/.local/state/z23/dev"
+ *                          — the native dev-tooling root the landing leaf
+ *                          writes outcomes.jsonl under.
+ *   path_    relative to that root. A leaf that starts with a star means
+ *            "every regular file under that directory ending in the rest
+ *            of the leaf", used for the one-file-per-host board layout and
+ *            for scanning every log file under the state root.
+ *   format_  one of jsonl | tsv | text_kv — how a new line is parsed.
+ *   why_     what question this source answers, so a source ingested and
+ *            never queried is visible as dead weight, not silently kept.
+ *
+ * Kinds:
+ *   board_rows        one JSONL file per host under board/, fields
+ *                     ts,id,host,agent,kind,ref,text (see
+ *                     ~/.local/lib/z23/tools/board.sh).
+ *   experiment_rows    the 22-column TSV ledger (see
+ *                     ~/.local/lib/z23/tools/exp.sh lines 9-14), header on
+ *                     line 1.
+ *   landing_outcomes   one JSON object per line, newest last, from the
+ *                     native land leaf (tools/command/native_dev_land.c).
+ *   log_lines          free text; each line's key=value tokens are
+ *                     extracted as additional search terms alongside the
+ *                     raw line.
+ *
+ * docs/INDEX.md is the rendered explanation of this table for a reader;
+ * this file is the one declaration everything else derives from.
+ */
+
+#ifndef Z23_SOURCE
+#define Z23_SOURCE(id_, kind_, root_, path_, format_, why_)
+#define ZCL_SOURCES_LOCAL_
+#endif
+
+Z23_SOURCE("board", board_rows, ZCLASSIC23, "board/*.jsonl", jsonl,
+           "what did an agent or host post on the fleet board, and when")
+
+Z23_SOURCE("experiments", experiment_rows, ZCLASSIC23,
+           "experiments/rows.tsv", tsv,
+           "which executor/task/outcome combinations were predicted or "
+           "measured, without grepping the ledger by hand")
+
+Z23_SOURCE("landing", landing_outcomes, DEV_STATE, "land/outcomes.jsonl",
+           jsonl,
+           "what happened to a landing attempt (state, phase, detail) "
+           "without opening the land worktree")
+
+Z23_SOURCE("logs", log_lines, ZCLASSIC23, "**/*.log", text_kv,
+           "search free-text log lines and their key=value tokens across "
+           "every *.log under the state root without a manual grep")
+
+#ifdef ZCL_SOURCES_LOCAL_
+#undef Z23_SOURCE
+#undef ZCL_SOURCES_LOCAL_
+#endif

@@ -2524,6 +2524,20 @@ void zcl_native_handle_dev_train_drop(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
 
+/* dev.index.* — local data-source ingest/search
+ * (tools/command/native_dev_index_command.c backed by
+ * native_dev_index_{catalog,ingest,search}.c). Compiled unconditionally,
+ * same reasoning as dev.train.* above. */
+void zcl_native_handle_dev_index_ingest(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
+void zcl_native_handle_dev_index_status(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
+void zcl_native_handle_dev_index_search(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
+
 /* CLI-only: parses `z23 dev train <verb> --name=... --source=... [...]`
  * directly (repeated --source is not representable by the generic
  * --key=value flag parser), invokes the handler in-process, and prints one

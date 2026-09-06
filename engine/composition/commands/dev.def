@@ -1260,6 +1260,74 @@ ZCL_COMMAND_DEV_COMMAND(
     "stack removal requires the dev binary",
     "z23-dev dev train drop --name <n>")
 
+/* ── dev.index ─────────────────────────────────────────────────────────────
+ * Local data-source ingest/search over engine/composition/sources.def (the
+ * board, the experiment ledger, the landing outcomes ledger, and every
+ * *.log under the state root) into one sqlite+FTS5 file,
+ * ~/.local/state/zclassic23/index/index.db. `ingest` is incremental per
+ * source (a byte-offset cursor per file; a rotated/shrunk file restarts
+ * from 0). `status` reports rows/newest-ts/bytes-behind per source,
+ * read-only. `search` runs one FTS5 MATCH query, optionally scoped to one
+ * source, newest-first. See docs/INDEX.md. */
+ZCL_COMMAND_BRANCH("dev.index", "dev",
+                   "Ingest and search local data sources (board/experiments/"
+                   "landing/logs)",
+                   ZCL_COMMAND_LAYER_DEV)
+
+ZCL_COMMAND_DEV_COMMAND(
+    "dev.index.ingest", "dev.index", "",
+    "Ingest new rows from one or every declared source",
+    "Reads each declared source (or just --source=<id>) from its saved "
+    "byte-offset cursor to the last complete line, inserts one `rows` + "
+    "`rows_fts` row per new line, and advances the cursor. A source naming "
+    "no files yet, or with no new bytes, is success with rows_added=0.",
+    65536, "index,ingest,sources,board,experiments,landing,logs,fts5",
+    "zcl.dev_index_ingest_input.v1", "zcl.dev_index_ingest.v1", "source", "",
+    "z23 dev index ingest",
+    ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_DEV_MUTATION,
+    ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_MODE_SYNC, ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_DEV_STATE_WRITE, ZCL_COMMAND_TRAIT_DEV_ONLY,
+    zcl_native_handle_dev_index_ingest,
+    "index ingest requires the dev binary", "z23-dev dev index ingest")
+
+ZCL_COMMAND_DEV_READ(
+    "dev.index.status", "dev.index", "",
+    "Per-source row counts, newest timestamp, and bytes not yet ingested",
+    "Reads the index database only: for one source or every declared "
+    "source, its row count, the newest ts seen, seconds since that ts, and "
+    "bytes_behind (current file size minus the saved cursor offset, summed "
+    "over every file the source currently names). Never mutates the index.",
+    65536, "index,status,sources,cursor",
+    "zcl.dev_index_status_input.v1", "zcl.dev_index_status.v1", "source", "",
+    "z23 dev index status",
+    ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL, ZCL_COMMAND_CAP_DEV_STATE_READ,
+    ZCL_COMMAND_TRAIT_IDEMPOTENT | ZCL_COMMAND_TRAIT_DEV_ONLY,
+    zcl_native_handle_dev_index_status,
+    "index status requires the dev binary", "z23-dev dev index status")
+
+ZCL_COMMAND_DEV_READ(
+    "dev.index.search", "dev.index", "",
+    "Full-text search over every ingested row, newest first",
+    "One FTS5 MATCH query against the ingested rows (optionally scoped to "
+    "--source=<id>), ordered newest ts first, each hit carrying source, ts, "
+    "and the original line. `key:value` matches the flattened key=value "
+    "tokens a log line or a structured row's fields were indexed under, "
+    "same as a bare word. --limit defaults to 20, capped at 50.", 65536,
+    "index,search,fts5,query,logs",
+    "zcl.dev_index_search_input.v1", "zcl.dev_index_search.v1",
+    "query,source,limit", "query",
+    "z23 dev index search 'kind:result'",
+    ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL, ZCL_COMMAND_CAP_DEV_STATE_READ,
+    ZCL_COMMAND_TRAIT_IDEMPOTENT | ZCL_COMMAND_TRAIT_DEV_ONLY,
+    zcl_native_handle_dev_index_search,
+    "index search requires the dev binary", "z23-dev dev index search")
+
 /* ── dev.agent ─────────────────────────────────────────────────────────────
  * The checkout questions an agent asks most often, each of which was until
  * now a shell recipe an agent had to remember and repeatedly got wrong:
