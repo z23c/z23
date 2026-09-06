@@ -23,7 +23,10 @@ if "${CC:-cc}" -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
     echo "check-tor-provenance: compile without the hex include unexpectedly succeeded" >&2
     exit 1
 fi
-grep -F 'fatal error: base/hex.h' "$red_out" >/dev/null || {
+# Apple Clang quotes the include (`'base/hex.h' file not found`);
+# Linux gcc/clang says `fatal error: base/hex.h: No such file`.
+# Match the header token, not one compiler's wording.
+grep -F 'base/hex.h' "$red_out" >/dev/null || {
     echo "check-tor-provenance: omitting the hex include did not fail on base/hex.h" >&2
     cat "$red_out" >&2
     exit 1
