@@ -146,6 +146,135 @@ static int cyc_occ_emit(const char *path, const char *name, int line, int m,
     return o->on_func(path, disp, line, m, o->ctx);
 }
 
+/* Code-state handlers, one small helper per significant character so no
+ * single function carries the whole decision load. */
+
+static void cyc_ident_char(struct cyc_lx *lx, char c)
+{
+    if (lx->toklen >= 0) {
+        if (lx->toklen >= CYC_NAME - 1) {
+            lx->tok_ovf = 1;
+            lx->toklen = -1;
+        } else {
+            lx->tok[lx->toklen++] = c;
+        }
+    }
+    lx->sol = 0;
+}
+
+static void cyc_c_lparen(struct cyc_lx *lx, int lineno)
+{
+    if (!lx->pp && lx->brace == 0 && lx->paren == 0) {
+        lx->cand_ok = lx->last_sig == 'i'
+            && !cyc_is_kw(lx->last_tok, "if")
+            && !cyc_is_kw(lx->last_tok, "for")
+            && !cyc_is_kw(lx->last_tok, "while")
+            && !cyc_is_kw(lx->last_tok, "switch");
+        memcpy(lx->cand, lx->last_tok, sizeof lx->cand);
+        lx->cand_line = lineno;
+    }
+    if (!lx->pp)
+        lx->paren++;
+}
+
+static void cyc_c_rparen(struct cyc_lx *lx)
+{
+    if (!lx->pp && lx->paren > 0) {
+        lx->paren--;
+        if (lx->brace == 0 && lx->paren == 0) {
+            lx->head_ok = lx->cand_ok;
+            memcpy(lx->head_name, lx->cand, sizeof lx->head_name);
+            lx->head_line = lx->cand_line;
+        }
+    }
+}
+
+static void cyc_c_lbrace(struct cyc_lx *lx)
+{
+    if (!lx->pp && lx->brace == 0) {
+        if (lx->head_ok && lx->last_sig == ')') {
+            lx->in_func = 1;
+            lx->m = 1;
+            lx->func_line = lx->head_line;
+            memcpy(lx->func_name, lx->head_name, sizeof lx->func_name);
+        }
+        lx->head_ok = 0;
+    }
+    if (!lx->pp)
+        lx->brace++;
+}
+
+static int cyc_c_rbrace(struct cyc_lx *lx, const struct cyc_emit *em)
+{
+    if (lx->pp)
+        return 0;
+    lx->brace--;
+    if (lx->in_func && lx->brace == 0)
+        return cyc_close_func(lx, em);
+    return 0;
+}
+
+static void cyc_c_semi(struct cyc_lx *lx)
+{
+    if (!lx->pp && lx->brace == 0 && lx->paren == 0)
+        lx->head_ok = 0;
+}
+
+static void cyc_c_amp(struct cyc_lx *lx)
+{
+    if (lx->amp && lx->in_func && !lx->pp)
+        lx->m++;
+    lx->amp = !lx->amp;
+    lx->bar = 0;
+}
+
+static void cyc_c_bar(struct cyc_lx *lx)
+{
+    if (lx->bar && lx->in_func && !lx->pp)
+        lx->m++;
+    lx->bar = !lx->bar;
+    lx->amp = 0;
+}
+
+static void cyc_c_quest(struct cyc_lx *lx)
+{
+    if (lx->in_func && !lx->pp)
+        lx->m++;
+    lx->amp = 0;
+    lx->bar = 0;
+}
+
+static void cyc_c_other(struct cyc_lx *lx)
+{
+    lx->amp = 0;
+    lx->bar = 0;
+    if (!lx->pp && lx->brace == 0 && lx->paren == 0)
+        lx->head_ok = 0;
+}
+
+static int cyc_punct(struct cyc_lx *lx, const struct cyc_emit *em,
+                     char c, int lineno)
+{
+    switch (c) {
+    case '(': cyc_c_lparen(lx, lineno); break;
+    case ')': cyc_c_rparen(lx); break;
+    case '{': cyc_c_lbrace(lx); break;
+    case '}': {
+        int rc = cyc_c_rbrace(lx, em);
+        if (rc)
+            return rc;
+        break;
+    }
+    case ';': cyc_c_semi(lx); break;
+    case '&': cyc_c_amp(lx); break;
+    case '|': cyc_c_bar(lx); break;
+    case '?': cyc_c_quest(lx); break;
+    default: cyc_c_other(lx); break;
+    }
+    lx->last_sig = c;
+    return 0;
+}
+
 /* Feed one code-state character. Returns 0 or the callback/die rc. */
 static int cyc_code_char(struct cyc_lx *lx, const struct cyc_emit *em,
                          char c, int lineno)
@@ -153,96 +282,14 @@ static int cyc_code_char(struct cyc_lx *lx, const struct cyc_emit *em,
     if (lx->sol && c == '#')
         lx->pp = 1;
     if (cyc_is_ident((unsigned char)c)) {
-        if (lx->toklen >= 0) {
-            if (lx->toklen >= CYC_NAME - 1) {
-                lx->tok_ovf = 1;
-                lx->toklen = -1;
-            } else {
-                lx->tok[lx->toklen++] = c;
-            }
-        }
-        lx->sol = 0;
+        cyc_ident_char(lx, c);
         return 0;
     }
     cyc_tok_end(lx);
     if (c == ' ' || c == '\t' || c == '\n' || c == '\r')
         return 0;
     lx->sol = 0;
-    switch (c) {
-    case '(':
-        if (!lx->pp && lx->brace == 0 && lx->paren == 0) {
-            lx->cand_ok = lx->last_sig == 'i'
-                && !cyc_is_kw(lx->last_tok, "if")
-                && !cyc_is_kw(lx->last_tok, "for")
-                && !cyc_is_kw(lx->last_tok, "while")
-                && !cyc_is_kw(lx->last_tok, "switch");
-            memcpy(lx->cand, lx->last_tok, sizeof lx->cand);
-            lx->cand_line = lineno;
-        }
-        if (!lx->pp)
-            lx->paren++;
-        break;
-    case ')':
-        if (!lx->pp && lx->paren > 0) {
-            lx->paren--;
-            if (lx->brace == 0 && lx->paren == 0) {
-                lx->head_ok = lx->cand_ok;
-                memcpy(lx->head_name, lx->cand, sizeof lx->head_name);
-                lx->head_line = lx->cand_line;
-            }
-        }
-        break;
-    case '{':
-        if (!lx->pp && lx->brace == 0) {
-            if (lx->head_ok && lx->last_sig == ')') {
-                lx->in_func = 1;
-                lx->m = 1;
-                lx->func_line = lx->head_line;
-                memcpy(lx->func_name, lx->head_name, sizeof lx->func_name);
-            }
-            lx->head_ok = 0;
-        }
-        if (!lx->pp)
-            lx->brace++;
-        break;
-    case '}':
-        if (!lx->pp) {
-            lx->brace--;
-            if (lx->in_func && lx->brace == 0)
-                return cyc_close_func(lx, em);
-        }
-        break;
-    case ';':
-        if (!lx->pp && lx->brace == 0 && lx->paren == 0)
-            lx->head_ok = 0;
-        break;
-    case '&':
-        if (lx->amp && lx->in_func && !lx->pp)
-            lx->m++;
-        lx->amp = !lx->amp;
-        lx->bar = 0;
-        break;
-    case '|':
-        if (lx->bar && lx->in_func && !lx->pp)
-            lx->m++;
-        lx->bar = !lx->bar;
-        lx->amp = 0;
-        break;
-    case '?':
-        if (lx->in_func && !lx->pp)
-            lx->m++;
-        lx->amp = 0;
-        lx->bar = 0;
-        break;
-    default:
-        lx->amp = 0;
-        lx->bar = 0;
-        if (!lx->pp && lx->brace == 0 && lx->paren == 0)
-            lx->head_ok = 0;
-        break;
-    }
-    lx->last_sig = c;
-    return 0;
+    return cyc_punct(lx, em, c, lineno);
 }
 
 /* End-of-line: a trailing backslash splices line comments, literals, and
@@ -261,6 +308,61 @@ static void cyc_eol(struct cyc_lx *lx, const char *line, ssize_t n)
     lx->sol = 1;
 }
 
+/* Block-comment state: only `*` immediately followed by `/` closes (both
+ * chars consumed); every other char is comment text. */
+static void cyc_feed_block(struct cyc_lx *lx, const char *line, ssize_t n,
+                           ssize_t *i, char c)
+{
+    if (c == '*' && *i + 1 < n && line[*i + 1] == '/') {
+        lx->state = LX_CODE;
+        (*i)++;
+    }
+}
+
+/* String/char-literal state: an escape hides the next char; the matching
+ * quote closes the literal and counts as a significant character. */
+static void cyc_feed_strchr(struct cyc_lx *lx, char c)
+{
+    if (lx->esc) {
+        lx->esc = 0;
+        return;
+    }
+    if (c == '\\') {
+        lx->esc = 1;
+        return;
+    }
+    if ((lx->state == LX_STR && c == '"')
+        || (lx->state == LX_CHR && c == '\'')) {
+        lx->state = LX_CODE;
+        lx->last_sig = c;
+    }
+}
+
+/* Code-state openers: line comment, block comment, string, char. Returns 1
+ * when c left the code state (a block-comment opener consumes its * too). */
+static int cyc_open_nc(struct cyc_lx *lx, const char *line, ssize_t n,
+                       ssize_t *i, char c)
+{
+    if (c == '/' && *i + 1 < n && line[*i + 1] == '/') {
+        lx->state = LX_LINE;
+        return 1;
+    }
+    if (c == '/' && *i + 1 < n && line[*i + 1] == '*') {
+        lx->state = LX_BLOCK;
+        (*i)++;
+        return 1;
+    }
+    if (c == '"') {
+        lx->state = LX_STR;
+        return 1;
+    }
+    if (c == '\'') {
+        lx->state = LX_CHR;
+        return 1;
+    }
+    return 0;
+}
+
 static int cyc_feed_line(struct cyc_lx *lx, const struct cyc_emit *em,
                          const char *line, ssize_t n, int lineno)
 {
@@ -268,49 +370,18 @@ static int cyc_feed_line(struct cyc_lx *lx, const struct cyc_emit *em,
         char c = line[i];
         if (c == '\0')
             continue;
-        if (lx->state == LX_BLOCK && c == '*' && i + 1 < n
-            && line[i + 1] == '/') {
-            lx->state = LX_CODE;
-            i++;
+        if (lx->state == LX_BLOCK) {
+            cyc_feed_block(lx, line, n, &i, c);
             continue;
         }
-        if ((lx->state == LX_STR || lx->state == LX_CHR) && lx->esc) {
-            lx->esc = 0;
+        if (lx->state == LX_STR || lx->state == LX_CHR) {
+            cyc_feed_strchr(lx, c);
             continue;
         }
-        if ((lx->state == LX_STR || lx->state == LX_CHR) && c == '\\') {
-            lx->esc = 1;
+        if (lx->state == LX_LINE)
             continue;
-        }
-        if (lx->state == LX_STR && c == '"') {
-            lx->state = LX_CODE;
-            lx->last_sig = c;
+        if (cyc_open_nc(lx, line, n, &i, c))
             continue;
-        }
-        if (lx->state == LX_CHR && c == '\'') {
-            lx->state = LX_CODE;
-            lx->last_sig = c;
-            continue;
-        }
-        if (lx->state != LX_CODE)
-            continue;
-        if (c == '/' && i + 1 < n && line[i + 1] == '/') {
-            lx->state = LX_LINE;
-            continue;
-        }
-        if (c == '/' && i + 1 < n && line[i + 1] == '*') {
-            lx->state = LX_BLOCK;
-            i++;
-            continue;
-        }
-        if (c == '"') {
-            lx->state = LX_STR;
-            continue;
-        }
-        if (c == '\'') {
-            lx->state = LX_CHR;
-            continue;
-        }
         int rc = cyc_code_char(lx, em, c, lineno);
         if (rc)
             return rc;
@@ -543,6 +614,20 @@ static int cyc_dump_viol(const struct cyc_acc *a, FILE *hits,
     return strcmp(mode, "WARN") == 0 ? 0 : 1;
 }
 
+/* --report: distribution summary plus the top-M table. */
+static int cyc_report(const struct cyc_acc *a, int files, FILE *out)
+{
+    int rc2 = fprintf(out, "check_cyclomatic_complexity report: %d "
+                      "functions in %d files\n  M>10: %d  M>15: %d  "
+                      "M>20: %d\n  top %d by M:\n",
+                      a->funcs, files, a->gt10, a->gt15, a->gt20,
+                      CYC_TOP) < 0;
+    for (int i = 0; !rc2 && i < CYC_TOP && a->top[i].path[0]; i++)
+        rc2 = fprintf(out, "    M=%d %s:%s\n", a->top[i].m, a->top[i].path,
+                      a->top[i].name) < 0;
+    return rc2 ? die("z23-lint: write failed\n", "") : 0;
+}
+
 static int cyc_check(const char *root, const char *base_path,
                      const char *mode, int report, FILE *out, FILE *err)
 {
@@ -575,16 +660,9 @@ static int cyc_check(const char *root, const char *base_path,
         return rc;
     }
     if (report) {
-        int rc2 = fprintf(out, "check_cyclomatic_complexity report: %d "
-                          "functions in %d files\n  M>10: %d  M>15: %d  "
-                          "M>20: %d\n  top %d by M:\n",
-                          a.funcs, w.files, a.gt10, a.gt15, a.gt20,
-                          CYC_TOP) < 0;
-        for (int i = 0; !rc2 && i < CYC_TOP && a.top[i].path[0]; i++)
-            rc2 = fprintf(out, "    M=%d %s:%s\n", a.top[i].m, a.top[i].path,
-                          a.top[i].name) < 0;
+        rc = cyc_report(&a, w.files, out);
         fclose(hits);
-        return rc2 ? die("z23-lint: write failed\n", "") : 0;
+        return rc;
     }
     if (a.viol) {
         rc = cyc_dump_viol(&a, hits, mode, err);
@@ -899,6 +977,42 @@ static int cyc_st_case(const char *root, const char *base_body,
     return 0;
 }
 
+/* --write-baseline regenerates exact pins: verify the generated file pins
+ * the over-cap fixture function, excludes the under-cap one, and passes the
+ * gate unchanged. */
+static int cyc_st_writeback(const char *root)
+{
+    char wb[8192];
+    if (ovf(snprintf(wb, sizeof wb, "%s/gen_baseline.txt", root), sizeof wb))
+        return 1;
+    if (cyc_write_baseline(root, wb))
+        return 1;
+    FILE *g = fopen(wb, "r");
+    char body[8192];
+    if (!g || csr_slurp(g, body, sizeof body)) {
+        if (g)
+            fclose(g);
+        return 1;
+    }
+    fclose(g);
+    if (strstr(body, "case.c:over_cap:16\n") == NULL
+        || strstr(body, "calm") != NULL) {
+        fputs("check_cyclomatic_complexity selftest: generated baseline "
+              "content wrong\n", stderr);
+        return 1;
+    }
+    FILE *out = tmpfile(), *err = tmpfile();
+    int bad = !out || !err || cyc_check(root, wb, "RATCHET", 0, out, err);
+    if (bad)
+        fputs("check_cyclomatic_complexity selftest: generated baseline "
+              "did not pass\n", stderr);
+    if (out)
+        fclose(out);
+    if (err)
+        fclose(err);
+    return bad;
+}
+
 int check_cyclomatic_complexity_selftest(void)
 {
     int bad = cyc_st_metric();
@@ -940,43 +1054,7 @@ int check_cyclomatic_complexity_selftest(void)
         /* FAIL mode trips even an exactly pinned function */
         bad |= cyc_st_case(root, "case.c:over_cap:16\n", "FAIL", 1,
                            "baseline ignored");
-        /* --write-baseline regenerates exact pins, and the generated file
-         * then passes the gate unchanged */
-        char wb[8192];
-        if (ovf(snprintf(wb, sizeof wb, "%s/gen_baseline.txt", root),
-                sizeof wb))
-            bad |= 1;
-        else if (cyc_write_baseline(root, wb))
-            bad |= 1;
-        else {
-            FILE *g = fopen(wb, "r");
-            char body[8192];
-            if (!g || csr_slurp(g, body, sizeof body)) {
-                if (g)
-                    fclose(g);
-                bad |= 1;
-            } else {
-                fclose(g);
-                if (strstr(body, "case.c:over_cap:16\n") == NULL
-                    || strstr(body, "calm") != NULL) {
-                    fputs("check_cyclomatic_complexity selftest: generated "
-                          "baseline content wrong\n", stderr);
-                    bad |= 1;
-                } else {
-                    FILE *out = tmpfile(), *err = tmpfile();
-                    if (!out || !err
-                        || cyc_check(root, wb, "RATCHET", 0, out, err) != 0) {
-                        fputs("check_cyclomatic_complexity selftest: "
-                              "generated baseline did not pass\n", stderr);
-                        bad |= 1;
-                    }
-                    if (out)
-                        fclose(out);
-                    if (err)
-                        fclose(err);
-                }
-            }
-        }
+        bad |= cyc_st_writeback(root);
     }
     (void)rap_rm_rf(root);
     return st_ok(bad, "check_cyclomatic_complexity selftest: OK\n");
