@@ -511,12 +511,16 @@ static int lint_run_owned(int owner)
  * fixture chmod/write would be worse. test-tmp is created fresh. Returns 0.
  *
  * build/ is skipped wholesale (gigabytes of objects and node binaries) with
- * ONE exception: build/bin/file_size_policy, the E1 file-size gate. E1 is a
- * compiled C23 binary rather than a script, so unlike every other gate it
- * does not ride into the sandbox with the source tree, and its self-test
- * would exec a path that does not exist. The copy is best-effort — a tree
- * where it was never built must not fail every shard's sandbox
- * construction; t_e1_file_size_bands checks for it and says so instead.
+ * TWO exceptions: build/bin/file_size_policy, the E1 file-size gate, and
+ * build/bin/z23-lint, the shared C23 lint runtime several gate scripts now
+ * exec as a one-line shim (e.g. check_no_writer_below_sealed_frontier.sh).
+ * Both are compiled binaries rather than scripts, so unlike every other gate
+ * they do not ride into the sandbox with the source tree, and a self-test
+ * would otherwise exec a path that does not exist. Both copies are
+ * best-effort — a tree where one was never built must not fail every
+ * shard's sandbox construction; t_e1_file_size_bands checks for its binary
+ * and says so instead, and a z23-lint-backed gate fails loud with the same
+ * "No such file or directory" a missing dependency always produces.
  *
  * Uses fork_with_retry(), not a bare fork(): this runs once per shard (up to
  * LINT_GATE_SHARD_COUNT times concurrently) from the same large test_zcl
@@ -544,7 +548,8 @@ static int lint_sandbox_build(const char *real_root, const char *sb_root)
             "  cp -a --reflink=auto \"$e\" \"$2\"/\n"
             "done\n"
             "mkdir -p \"$2\"/test-tmp \"$2\"/build/bin\n"
-            "cp -a --reflink=auto \"$1\"/build/bin/file_size_policy \"$2\"/build/bin/ 2>/dev/null || :\n";
+            "cp -a --reflink=auto \"$1\"/build/bin/file_size_policy \"$2\"/build/bin/ 2>/dev/null || :\n"
+            "cp -a --reflink=auto \"$1\"/build/bin/z23-lint \"$2\"/build/bin/ 2>/dev/null || :\n";
         execl("/bin/sh", "sh", "-c", script, "sh",
               real_root, sb_root, (char *)NULL);
         _exit(127);
