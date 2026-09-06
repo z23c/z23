@@ -6,7 +6,7 @@
 |---|---|
 | ZRC | 0011 |
 | Title | Fast sync over the peer link |
-| Status | draft |
+| Status | landed |
 | Owner | orchestrator |
 | Created | 2026-09-05 |
 | Supersedes | none |
@@ -22,8 +22,8 @@ already named in the tree:
   `bootstrap.no_state_source` condition exists precisely to make that LOUD
   rather than let the node sit silently at height 0
   (`engine/conditions/src/no_state_source.c:28`). `docs/GETTING_STARTED.md:307`
-  says it plainly: "the node does not discover a file-service host on its
-  own."
+  said it plainly, before phase 1a of this ZRC landed: "the node does not
+  discover a file-service host on its own."
 - **Discovery already rides the peer link across restarts — the gap is
   first-boot live consumption and the absence of a freshness signal, not
   "no discovery."** A ZCL23 handshake already pushes a `zfileaddr` message
@@ -45,10 +45,11 @@ already named in the tree:
   content digest, or freshness signal — so even a cached endpoint is dialled
   blind; the seed either turns out to have a fresh bundle or it does not,
   discovered only by trying.
-  `docs/GETTING_STARTED.md:307` states the operator-visible symptom
+  `docs/GETTING_STARTED.md:307` stated the operator-visible symptom
   plainly: "the node does not discover a file-service host on its own"
-  (true for the specific case this gap describes — first boot, nothing
-  cached, no live peers consulted).
+  (true, before phase 1a landed, for the specific case this gap describes —
+  first boot, nothing cached, no live peers consulted; a first-boot node now
+  learns an offer from a live peer instead, per phase 1a below).
 - **Background history backfill is throttled by design; foreground catchup
   is not the same lane.** The ~13 blocks/second figure sometimes quoted for
   this codebase (64 blocks per 5-second tick,
@@ -476,7 +477,21 @@ to "any-height header commitment."
 
 ## Landing
 
-Not yet landed.
+Phase 1a (`offerlink`) has landed: "Offer what this node holds, and fetch
+what it accepts" and "Raise the stale-offer condition when the bounded wait
+gives up" wire the signed state-offer batch tail onto the existing handshake
+message, start the sink unconditionally at boot, consume a live offer on the
+peer-link tick once a peer is connected, and raise
+`bootstrap.stale_offers_only` when every offer seen is stale. A fresh node
+with no `-fileservice` and no `ZCL_CHECKPOINT_BUNDLE_SOURCE` set now lands
+and arms an offered bundle for install with no operator flag, no catalog,
+and no configured file service. Fetch and install of an offered bundle are
+not yet available on Windows.
+
+Phase 1b (`bundlestream`, moving the manifest fetch onto the ZRC-0002 peer-
+link stream so an onion-only offering peer becomes reachable), the
+`bundlefresh` lane (automatic post-upgrade producer recovery), and phases 2
+and 3 have not landed.
 
 ## Discussion
 

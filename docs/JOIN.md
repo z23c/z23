@@ -36,8 +36,12 @@ than refusing to run. See [`PARAMS.md`](PARAMS.md) if you intend to send.
 Two things a fresh node does *not* get by itself, so you know what you are
 choosing when you type nothing:
 
-- **No fast start.** The instant-on path needs a `-fileservice=HOST` you
-  supply. Without it the node logs the named blocker
+- **No fast start from a host you name yourself.** The instant-on path,
+  where the bundle is fetched before any peer is even dialled, needs a
+  `-fileservice=HOST` you supply. Without it, a node with at least one peer
+  still asks that peer for a signed state offer and installs one that is
+  accepted with no flag from you (see [`GETTING_STARTED.md`](GETTING_STARTED.md#syncing-to-the-chain-tip));
+  a node with no peers at all logs the named blocker
   `bootstrap.no_state_source` and syncs from genesis, which is correct and
   slow.
 - **No inbound reachability** unless you pass `-listen` and your port is
