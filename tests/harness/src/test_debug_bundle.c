@@ -35,6 +35,7 @@
 #include "platform/time_compat.h"
 #include "rpc/server.h"
 #include "util/safe_alloc.h"
+#include "util/shutdown_stagewatch.h"
 
 #include <errno.h>
 #include <pthread.h>
@@ -48,6 +49,11 @@
     if ((expr)) printf("OK\n"); \
     else { printf("FAIL\n"); failures++; } \
 } while (0)
+
+/* Injected monotonic clock for the driven offline-worker-drain scenario
+ * below (util/shutdown_stagewatch.h) — no real clock, no real alarm. */
+static int64_t g_dbb_fake_us;
+static int64_t dbb_fake_clock(void) { return g_dbb_fake_us; }
 
 /* Read a whole file into a fresh NUL-terminated buffer (zcl_malloc'd;
  * caller frees). NULL on any failure. */
@@ -126,6 +132,75 @@ static bool dbb_parse_bundle(const char *path, struct json_value *doc,
     bool ok = json_read(doc, raw, strlen(raw)) && doc->type == JSON_OBJ;
     free(raw);
     return ok;
+}
+
+/* (g)+(h) offline-worker-drain alarm gate + a driven fold-complete shutdown,
+ * split out of test_debug_bundle to keep that function's own complexity
+ * unchanged (this is a fresh function, budgeted at <=15 decision points on
+ * its own).
+ *
+ * (g) app_shutdown_offline negates boot_offline_shutdown_durable_already
+ * into the offline-worker-drain stage's arm_alarm argument: a completed
+ * one-shot (-mint-anchor / -full-fold, whose bundle already fsynced and
+ * whose node.db was already WAL-checkpointed before this call — see
+ * boot_mint_anchor.c's pre-export durability restore and boot_mint_anchor_
+ * bundle_export.c's atomic publish) must not have that stage's deadline
+ * armed, since a stalled unrelated worker (e.g. the health-sweep sweeper)
+ * there would otherwise misreport a durable run as failed.
+ *
+ * (h) drives the same stagewatch primitives app_shutdown_offline uses, with
+ * an injected clock (no real alarm). Scenario A mirrors a completed
+ * -full-fold: enter "offline-worker-drain" exactly as app_shutdown_offline
+ * does, with arm_alarm = !boot_offline_shutdown_durable_already(true) ==
+ * false, then let the injected clock run well past the 15s budget before
+ * completing — with no alarm armed, nothing can force an unclean exit no
+ * matter how long the stage actually took, so the run completes clean (exit
+ * code 0), the truthful outcome for a fold whose bundle already landed
+ * durably. Scenario B is the GOAL's required contrast: the ordinary
+ * (non-one-shot) offline path keeps the alarm armed; shutdown_deadline_
+ * decide is the exact pure function that armed alarm's handler would
+ * consult, and it still refuses a clean verdict (unclean exit code 1) for
+ * this stage/durability combination (non-critical, durability not yet
+ * secured). */
+static int debug_bundle_check_offline_drain_gate(const char *dir)
+{
+    int failures = 0;
+
+    DBB_CHECK("offline-drain gate: completed one-shot skips the alarm",
+              boot_offline_shutdown_durable_already(true));
+    DBB_CHECK("offline-drain gate: ordinary offline path keeps the alarm",
+              !boot_offline_shutdown_durable_already(false));
+
+    shutdown_stagewatch_reset_for_test();
+    g_dbb_fake_us = 1000000LL;
+    shutdown_stagewatch_set_clock_for_test(dbb_fake_clock);
+
+    shutdown_stagewatch_begin(dir);
+    bool skip_alarm = boot_offline_shutdown_durable_already(true);
+    DBB_CHECK("driven fold-complete: durable export skips the alarm",
+              skip_alarm);
+    shutdown_stagewatch_enter("offline-worker-drain", 15, false, !skip_alarm);
+    /* The straggler join takes far longer than the 15s budget — with no
+     * alarm armed, that elapsed time can never force an unclean exit. */
+    g_dbb_fake_us += 20 * 1000000LL;
+    bool clean = shutdown_stagewatch_complete_clean();
+    int code = shutdown_stagewatch_exit_code(SHUTDOWN_OUTCOME_CLEAN);
+    DBB_CHECK("driven fold-complete: completes clean past the budget", clean);
+    DBB_CHECK("driven fold-complete: exit code is truthfully 0", code == 0);
+    shutdown_stagewatch_set_clock_for_test(NULL);
+    shutdown_stagewatch_reset_for_test();
+
+    bool armed = !boot_offline_shutdown_durable_already(false);
+    enum shutdown_deadline_action verdict =
+        shutdown_deadline_decide(/*durable_secured=*/false,
+                                 /*durability_critical=*/false,
+                                 /*graces_used=*/0, /*grace_max=*/2);
+    DBB_CHECK("driven ordinary offline path: alarm stays armed", armed);
+    DBB_CHECK("driven ordinary offline path: refuses clean pre-durability",
+              verdict == SHUTDOWN_DEADLINE_EXIT_UNCLEAN &&
+              shutdown_stagewatch_exit_code(SHUTDOWN_OUTCOME_FORCED_UNCLEAN)
+                  == 1);
+    return failures;
 }
 
 int test_debug_bundle(void)
@@ -381,6 +456,8 @@ int test_debug_bundle(void)
         DBB_CHECK("marker: failed durability forbids with abandoned drain",
                   !shutdown_clean_marker_permitted(false, false));
     }
+
+    failures += debug_bundle_check_offline_drain_gate(dir);
 
     rmdir(dir);
     return failures;

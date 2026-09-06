@@ -643,7 +643,11 @@ int main(int argc, char **argv)
      * start while -mint-anchor-fast can be armed. */
     if (ctx.mint_anchor) {
         bool minted = boot_mint_anchor_run(ctx.datadir);
-        app_shutdown_offline();
+        /* minted==true means the fold reached its target AND (where
+         * applicable) its consensus-state bundle export already succeeded —
+         * durably, before this shutdown call — so a stalled non-critical
+         * offline worker below must not force a false unclean exit. */
+        app_shutdown_offline(minted);
         return minted ? 0 : 1;
     }
 
@@ -652,7 +656,7 @@ int main(int argc, char **argv)
      * clean-shutdown marker and exit so the cold-start driver's next stage
      * boots warm on a durable, clean-stopped datadir. */
     if (ctx.cold_start_seed_oneshot) {
-        app_shutdown_offline();
+        app_shutdown_offline(false);
         return 0;
     }
 

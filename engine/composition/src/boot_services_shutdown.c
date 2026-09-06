@@ -391,6 +391,39 @@ bool shutdown_clean_marker_permitted(bool durability_ok,
     return durability_ok;
 }
 
+/* Pure gate for app_shutdown_offline's "offline-worker-drain" alarm (pure;
+ * unit-tested in test_debug_bundle). A completed one-shot (-mint-anchor /
+ * -full-fold) already fsyncs its bundle and WAL-checkpoints node.db BEFORE
+ * app_shutdown_offline is ever called (boot_mint_anchor.c's pre-export
+ * durability restore; boot_mint_anchor_bundle_export.c's atomic publish), so
+ * the only thing left to join is background workers unrelated to that
+ * durability (e.g. the health-sweep sweeper). Returns true when the caller
+ * should skip arming that stage's alarm: the join then remains a plain
+ * blocking wait (boot_offline_join_workers_or_exit already retains ownership
+ * and waits for real, bounded by each worker's own timeout) instead of being
+ * cut off by an unrelated deadline that would misreport a durable run as a
+ * failure. False (the default, non-one-shot offline path) leaves the alarm
+ * armed exactly as before. */
+bool boot_offline_shutdown_durable_already(bool one_shot_output_durable)
+{
+    return one_shot_output_durable;
+}
+
+/* app_shutdown_offline's call site for the above: logs the fold-complete
+ * notice and returns the offline-worker-drain stage's arm_alarm argument
+ * (the negation of the durable-already gate). Kept as a thin wrapper so the
+ * decision stays independently pure-testable while boot.c stays a one-line
+ * call. */
+bool boot_offline_worker_drain_arm_alarm(bool output_already_durable)
+{
+    if (!boot_offline_shutdown_durable_already(output_already_durable))
+        return true;
+    fprintf(stderr, "[shutdown] fold complete: bundle exported and durable "
+            "before the offline worker drain; not arming the drain deadline "
+            "so a stalled non-critical worker cannot force a false unclean exit\n");
+    return false;
+}
+
 void app_shutdown_svc(struct boot_svc_ctx *svc)
 {
     extern volatile sig_atomic_t g_shutdown_requested;

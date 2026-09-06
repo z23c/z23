@@ -588,7 +588,12 @@ void wallet_at_rest_boot_report(enum wallet_boot_wallet_action action,
 
 bool app_init(struct app_context *ctx);
 void app_shutdown(void);
-void app_shutdown_offline(void);
+/* `output_already_durable`: true iff a completed one-shot's own durable
+ * output (a -mint-anchor / -full-fold consensus-state bundle) already landed
+ * before this call — see boot_offline_shutdown_durable_already. Pass false
+ * for every other offline one-shot (e.g. -coldstart-seed-oneshot), which
+ * leaves the offline-worker-drain deadline armed exactly as before. */
+void app_shutdown_offline(bool output_already_durable);
 
 /* Legacy -refold-staged is contained before boot writes: its ordinary reducer
  * replay cannot own the bounded shielded-history completion transaction. The

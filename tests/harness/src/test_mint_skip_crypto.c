@@ -1187,6 +1187,151 @@ static int test_source_epoch_authority_types(void)
     return failures;
 }
 
+/* Source-wiring pins for the mint-anchor/full-fold offline shutdown path,
+ * split out of test_mint_skip_crypto to keep that function's own complexity
+ * unchanged (this is a fresh function, budgeted at <=15 decision points on
+ * its own):
+ *   - -mint-anchor's app_init exits before app_init_services (the offline
+ *     driver never starts P2P/frontend services).
+ *   - main.c's -mint-anchor branch calls the OFFLINE shutdown (never the
+ *     full app_shutdown) before its `minted ? 0 : 1` return.
+ *   - app_shutdown_offline arms its offline-worker-drain deadline from
+ *     boot_offline_worker_drain_arm_alarm's return (boot_services_
+ *     shutdown.c) — the wrapper that logs the fold-complete notice and
+ *     negates boot_offline_shutdown_durable_already (pure-tested in
+ *     test_debug_bundle.c) — so a completed one-shot's already-durable
+ *     bundle export cannot have a stalled unrelated worker force a false
+ *     unclean exit, while -coldstart-seed-oneshot still passes `false` and
+ *     leaves that deadline armed exactly as before.
+ *   - the offline shutdown flushes + closes the wallet sqlite handle before
+ *     freeing the in-memory wallet. */
+/* main.c's -mint-anchor branch: app_init exits before services start, and
+ * calls the OFFLINE shutdown (never the full app_shutdown) before its
+ * `minted ? 0 : 1` return. */
+static int msc_check_mint_anchor_shutdown_ordering(const char *boot_src,
+                                                   const char *main_src)
+{
+    int failures = 0;
+    const char *offline_marker = boot_src
+        ? strstr(boot_src, "-mint-anchor: offline reducer stages initialized")
+        : NULL;
+    const char *services_start = boot_src
+        ? strstr(boot_src, "app_init_services(ctx, params, &g_svc)")
+        : NULL;
+    MSC_CHECK("mint-anchor app_init exits before app_init_services",
+              offline_marker && services_start && offline_marker < services_start);
+
+    const char *mint_branch = main_src
+        ? strstr(main_src, "if (ctx.mint_anchor) {")
+        : NULL;
+    const char *offline_shutdown = mint_branch
+        ? strstr(mint_branch, "app_shutdown_offline(minted);")
+        : NULL;
+    const char *mint_return = mint_branch
+        ? strstr(mint_branch, "return minted ? 0 : 1;")
+        : NULL;
+    const char *full_shutdown = mint_branch
+        ? strstr(mint_branch, "app_shutdown();")
+        : NULL;
+    MSC_CHECK("mint-anchor uses offline shutdown",
+              offline_shutdown && mint_return && offline_shutdown < mint_return);
+    MSC_CHECK("mint-anchor does not call full app_shutdown",
+              mint_return && (!full_shutdown || full_shutdown > mint_return));
+    return failures;
+}
+
+/* The offline shutdown flushes + closes the wallet sqlite handle before
+ * freeing the in-memory wallet. */
+static int msc_check_offline_shutdown_wallet_order(const char *boot_src)
+{
+    int failures = 0;
+    const char *offline_shutdown_fn = boot_src
+        ? strstr(boot_src, "void app_shutdown_offline(bool output_already_durable)")
+        : NULL;
+    const char *wallet_flush = offline_shutdown_fn
+        ? strstr(offline_shutdown_fn, "wallet_sqlite_flush_r(&g_wallet_sqlite")
+        : NULL;
+    const char *wallet_close = offline_shutdown_fn
+        ? strstr(offline_shutdown_fn, "wallet_sqlite_close(&g_wallet_sqlite)")
+        : NULL;
+    const char *wallet_free_call = offline_shutdown_fn
+        ? strstr(offline_shutdown_fn, "wallet_free(&g_wallet)")
+        : NULL;
+    MSC_CHECK("offline shutdown flushes wallet sqlite before wallet_free",
+              wallet_flush && wallet_free_call && wallet_flush < wallet_free_call);
+    MSC_CHECK("offline shutdown closes wallet sqlite before wallet_free",
+              wallet_close && wallet_free_call && wallet_close < wallet_free_call);
+    return failures;
+}
+
+/* A completed -mint-anchor / -full-fold's bundle is already durable before
+ * app_shutdown_offline runs (boot_mint_anchor.c's pre-export durability
+ * restore + boot_mint_anchor_bundle_export.c's atomic publish), so the
+ * offline-worker-drain stage must not arm a deadline that could misreport a
+ * durable run as failed. boot.c delegates the decision to boot_offline_
+ * worker_drain_arm_alarm (boot_services_shutdown.c, unit-tested with
+ * boot_offline_shutdown_durable_already in test_debug_bundle.c); pin the
+ * wiring here, and that -coldstart-seed-oneshot still passes `false` and
+ * leaves that deadline armed exactly as before. */
+static int msc_check_offline_drain_wiring(const char *boot_src,
+                                          const char *main_src)
+{
+    int failures = 0;
+    const char *offline_shutdown_fn = boot_src
+        ? strstr(boot_src, "void app_shutdown_offline(bool output_already_durable)")
+        : NULL;
+    const char *drain_enter = offline_shutdown_fn
+        ? strstr(offline_shutdown_fn,
+                 "shutdown_stagewatch_enter(\"offline-worker-drain\", 15, "
+                 "false, boot_offline_worker_drain_arm_alarm("
+                 "output_already_durable));")
+        : NULL;
+    MSC_CHECK("offline shutdown arms the drain stage from the durable-already "
+              "wrapper",
+              drain_enter != NULL);
+
+    char *shutdown_svc_src =
+        read_source_file("engine/composition/src/boot_services_shutdown.c");
+    const char *arm_alarm_fn = shutdown_svc_src
+        ? strstr(shutdown_svc_src,
+                 "bool boot_offline_worker_drain_arm_alarm(bool "
+                 "output_already_durable)")
+        : NULL;
+    const char *fold_complete_log = arm_alarm_fn
+        ? strstr(arm_alarm_fn,
+                 "\"[shutdown] fold complete: bundle exported and durable "
+                 "\"")
+        : NULL;
+    const char *returns_false = fold_complete_log
+        ? strstr(fold_complete_log, "return false;")
+        : NULL;
+    MSC_CHECK("drain-alarm wrapper logs fold-complete before skipping the "
+              "alarm",
+              fold_complete_log && returns_false &&
+                  fold_complete_log < returns_false);
+    free(shutdown_svc_src);
+
+    const char *cold_start_offline = main_src
+        ? strstr(main_src, "app_shutdown_offline(false);")
+        : NULL;
+    MSC_CHECK("coldstart-seed-oneshot still leaves the drain deadline armed",
+              cold_start_offline != NULL);
+    return failures;
+}
+
+static int msc_check_offline_shutdown_wiring(void)
+{
+    int failures = 0;
+    char *boot_src = read_source_file("engine/composition/src/boot.c");
+    char *main_src = read_source_file("engine/entry/main.c");
+    failures += msc_check_mint_anchor_shutdown_ordering(boot_src, main_src);
+    failures += msc_check_offline_shutdown_wallet_order(boot_src);
+    failures += msc_check_offline_drain_wiring(boot_src, main_src);
+    free(boot_src);
+    free(main_src);
+    return failures;
+}
+
 int test_mint_skip_crypto(void);
 int test_mint_skip_crypto(void)
 {
@@ -1264,50 +1409,7 @@ int test_mint_skip_crypto(void)
     MSC_CHECK("folded a non-trivial UTXO set",
               full.count == (int64_t)(2 * N));
 
-    char *boot_src = read_source_file("engine/composition/src/boot.c");
-    char *main_src = read_source_file("engine/entry/main.c");
-    const char *offline_marker = boot_src
-        ? strstr(boot_src, "-mint-anchor: offline reducer stages initialized")
-        : NULL;
-    const char *services_start = boot_src
-        ? strstr(boot_src, "app_init_services(ctx, params, &g_svc)")
-        : NULL;
-    MSC_CHECK("mint-anchor app_init exits before app_init_services",
-              offline_marker && services_start && offline_marker < services_start);
-
-    const char *mint_branch = main_src
-        ? strstr(main_src, "if (ctx.mint_anchor) {")
-        : NULL;
-    const char *offline_shutdown = mint_branch
-        ? strstr(mint_branch, "app_shutdown_offline();")
-        : NULL;
-    const char *mint_return = mint_branch
-        ? strstr(mint_branch, "return minted ? 0 : 1;")
-        : NULL;
-    const char *full_shutdown = mint_branch
-        ? strstr(mint_branch, "app_shutdown();")
-        : NULL;
-    MSC_CHECK("mint-anchor uses offline shutdown",
-              offline_shutdown && mint_return && offline_shutdown < mint_return);
-    MSC_CHECK("mint-anchor does not call full app_shutdown",
-              mint_return && (!full_shutdown || full_shutdown > mint_return));
-
-    const char *offline_shutdown_fn = boot_src
-        ? strstr(boot_src, "void app_shutdown_offline(void)")
-        : NULL;
-    const char *wallet_flush = offline_shutdown_fn
-        ? strstr(offline_shutdown_fn, "wallet_sqlite_flush_r(&g_wallet_sqlite")
-        : NULL;
-    const char *wallet_close = offline_shutdown_fn
-        ? strstr(offline_shutdown_fn, "wallet_sqlite_close(&g_wallet_sqlite)")
-        : NULL;
-    const char *wallet_free_call = offline_shutdown_fn
-        ? strstr(offline_shutdown_fn, "wallet_free(&g_wallet)")
-        : NULL;
-    MSC_CHECK("offline shutdown flushes wallet sqlite before wallet_free",
-              wallet_flush && wallet_free_call && wallet_flush < wallet_free_call);
-    MSC_CHECK("offline shutdown closes wallet sqlite before wallet_free",
-              wallet_close && wallet_free_call && wallet_close < wallet_free_call);
+    failures += msc_check_offline_shutdown_wiring();
 
     MSC_CHECK("mint-anchor emits 10k progress heartbeats",
               !boot_mint_anchor_should_log_progress(9999, 3056758) &&
@@ -1324,8 +1426,6 @@ int test_mint_skip_crypto(void)
     failures += test_mint_anchor_reset_fresh_datadir();
     failures += test_mint_anchor_reset_fail_closed();
     failures += test_source_epoch_authority_types();
-    free(boot_src);
-    free(main_src);
 
     synth_chain_free(&sc);
 
