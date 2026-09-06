@@ -6663,12 +6663,33 @@ static int sh_single_quote(const char *in, char *out, size_t cap)
     return 0;
 }
 
+/* The program's own absolute path, derived from argv[0] exactly the way the
+ * shell gates derive SCRIPT_DIR — `cd "$(dirname "$0")" && pwd` — by entering
+ * the directory and reading the working directory back. Every caller reaches
+ * this binary through the tools/lint shim, which always passes a path with a
+ * directory part; a bare name (found via PATH) is refused. No /proc read. */
+static const char *g_lint_argv0;
+
 static int lint_self_exe(char *buf, size_t cap)
 {
-    ssize_t n = readlink("/proc/self/exe", buf, cap > 0 ? cap - 1 : 0);
-    if (n < 0 || cap == 0 || (size_t)n >= cap - 1)
+    const char *a0 = g_lint_argv0;
+    const char *slash = a0 ? strrchr(a0, '/') : NULL;
+    char dir[4096], here[4096], there[4096];
+    if (!slash || cap == 0)
         return die("z23-lint: cannot resolve executable path\n", "");
-    buf[n] = '\0';
+    size_t dlen = slash == a0 ? 1 : (size_t)(slash - a0);
+    if (dlen >= sizeof dir || !getcwd(here, sizeof here))
+        return die("z23-lint: cannot resolve executable path\n", "");
+    memcpy(dir, a0, dlen);
+    dir[dlen] = '\0';
+    int ok = chdir(dir) == 0 && getcwd(there, sizeof there) != NULL;
+    if (chdir(here) != 0)
+        return die("z23-lint: cannot restore working directory\n", "");
+    if (!ok)
+        return die("z23-lint: cannot resolve executable path\n", "");
+    int n = snprintf(buf, cap, "%s/%s", there, slash + 1);
+    if (n < 0 || (size_t)n >= cap)
+        return die("z23-lint: cannot resolve executable path\n", "");
     return 0;
 }
 
@@ -7525,6 +7546,7 @@ static const struct lint_gate k_gates[] = {
 
 int main(int argc, char **argv)
 {
+    g_lint_argv0 = argc > 0 ? argv[0] : NULL;
     if (argc >= 2 && strcmp(argv[1], "--list") == 0) {
         for (size_t i = 0; i < sizeof k_gates / sizeof k_gates[0]; i++)
             printf("%s\n", k_gates[i].name);
