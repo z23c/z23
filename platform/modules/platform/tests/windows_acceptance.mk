@@ -52,6 +52,7 @@ ZCL_WINDOWS_ACCEPTANCE_TESTS := \
 	private_directory \
 	private_file \
 	private_file_path_swap \
+	process_group_exec \
 	process_lifecycle \
 	progress_store_refusal \
 	read_mapping \
@@ -463,6 +464,8 @@ ZCL_WINDOWS_ACCEPTANCE_private_file_path_swap_SOURCES := \
 	platform/modules/platform/src/private_file.c \
 	platform/modules/base/src/safe_alloc.c
 ZCL_WINDOWS_ACCEPTANCE_private_file_path_swap_LIBS := -ladvapi32
+ZCL_WINDOWS_ACCEPTANCE_process_group_exec_SOURCES := \
+	tests/harness/src/process_group_exec_windows_acceptance.c
 ZCL_WINDOWS_ACCEPTANCE_process_lifecycle_SOURCES := \
 	platform/modules/platform/tests/process_lifecycle_windows_acceptance.c \
 	platform/modules/platform/src/process_lifecycle.c \
