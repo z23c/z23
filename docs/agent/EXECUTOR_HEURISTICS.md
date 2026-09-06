@@ -55,6 +55,9 @@ z23 dev know --subject=glm-5.3-flash --relation=handles_poorly
 | glm-5.3-flash | handles_poorly | multi-file-implementation | writes outside the worktree, merges a foreign branch into its lane, rewrites a whole file when asked for one row |
 | glm-5.3-flash | handles_well | single-file-pinned-test | one file, one registered group that actually runs, and a per-file change ceiling |
 | glm-5.3-flash | requires | pinned-test | a registered group in tools/dev/test_group_catalog.def that runs, not a test file that merely exists |
+| grok | handles_poorly | seam-finding | a brief that says find where X is registered burns every round; name the seam yourself (file, function, table row) before queueing |
+| grok | handles_well | single-file-pinned-test | one function, one table row, one test: the lint-gate ports and the bip page cache each landed in one round; brief it with file:line, the literal output strings, and the mutation check |
+| grok | requires | finisher | a rounds-exhausted verdict is judged, not trusted: rerun the judged group in the unit worktree first; two of two such verdicts were stale judge logs over a fix already committed |
 | haiku | handles_well | mechanical-rows | row edits, doc counts, log triage; state the commit trailer literally or it goes missing |
 | muse | handles_well | long-wall-implementation | the only tier given a two-hour wall; specify interfaces (file, flags, error names, fixtures), never goals |
 | muse | requires | finisher | a unit is not done until a finisher has run, because the wall expires with the work uncommitted |

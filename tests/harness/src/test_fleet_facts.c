@@ -179,6 +179,32 @@ static int test_fleet_facts_table(void)
         PASS();
     }
 
+    TEST("fleet_facts: grok handles_well a pinned test and handles_poorly seam-finding") {
+        struct zcl_fleet_facts_answer_v1 well, poorly;
+        bool saw_pinned = false;
+        bool saw_seam = false;
+
+        ASSERT(zcl_fleet_facts_query("grok", "handles_well", NULL,
+                                     ZCL_FLEET_FACTS_MAX_ROWS, &well));
+        ASSERT(!well.unknown);
+        for (size_t i = 0; i < well.row_count; i++) {
+            ASSERT(well.rows[i].confidence == ZCL_FLEET_CONFIDENCE_DOCTRINE);
+            if (strcmp(well.rows[i].object, "single-file-pinned-test") == 0)
+                saw_pinned = true;
+        }
+        ASSERT(saw_pinned);
+
+        ASSERT(zcl_fleet_facts_query("grok", "handles_poorly", NULL,
+                                     ZCL_FLEET_FACTS_MAX_ROWS, &poorly));
+        ASSERT(!poorly.unknown);
+        for (size_t i = 0; i < poorly.row_count; i++) {
+            if (strcmp(poorly.rows[i].object, "seam-finding") == 0)
+                saw_seam = true;
+        }
+        ASSERT(saw_seam);
+        PASS();
+    }
+
     TEST("fleet_facts: the context filter selects one microtheory") {
         struct zcl_fleet_facts_answer_v1 proof, doctrine;
         ASSERT(zcl_fleet_facts_query("test_boot_phase", NULL, "lane_state:proof",

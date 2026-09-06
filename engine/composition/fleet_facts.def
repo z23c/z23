@@ -85,31 +85,42 @@ FLEET_CONTEXT("observation")
 /* ── vocabulary ────────────────────────────────────────────────────────── */
 FLEET_TERM("audit-only")
 FLEET_TERM("box")
+FLEET_TERM("branch-budget")
+FLEET_TERM("bulk-copy-while-serving")
+FLEET_TERM("check-capability-closure")
+FLEET_TERM("check-windows-acceptance")
 FLEET_TERM("closure-truncated")
 FLEET_TERM("commit")
 FLEET_TERM("cross-filesystem-hardlink")
 FLEET_TERM("dependency-unavailable")
+FLEET_TERM("dev-describe-branch")
 FLEET_TERM("docs/agent/TRAIN_PROTOCOL.md")
 FLEET_TERM("engine/composition/fleet_facts.def")
 FLEET_TERM("executor-routing")
 FLEET_TERM("finisher")
 FLEET_TERM("finishing-rebase")
 FLEET_TERM("four-lanes")
+FLEET_TERM("full-build-epoch")
 FLEET_TERM("gate-fixing")
 FLEET_TERM("git-stash")
 FLEET_TERM("glm-5.3")
 FLEET_TERM("glm-5.3-flash")
+FLEET_TERM("grok")
 FLEET_TERM("haiku")
 FLEET_TERM("hard-implementation")
+FLEET_TERM("identity-refusal")
 FLEET_TERM("impact-planner-refusal")
+FLEET_TERM("landing-worktree")
 FLEET_TERM("lane")
 FLEET_TERM("lint-fast-green")
+FLEET_TERM("live-datadir")
 FLEET_TERM("long-wall-implementation")
 FLEET_TERM("main")
 FLEET_TERM("mechanical-rows")
 FLEET_TERM("multi-file-implementation")
 FLEET_TERM("muse")
 FLEET_TERM("not-fast-forward")
+FLEET_TERM("one-driver")
 FLEET_TERM("one-proof")
 FLEET_TERM("one-worktree")
 FLEET_TERM("opus")
@@ -121,7 +132,10 @@ FLEET_TERM("ram-backed-filesystem")
 FLEET_TERM("ram-generation-root")
 FLEET_TERM("rebase-onto-origin-main-tip")
 FLEET_TERM("scoped-implementation")
+FLEET_TERM("seam-finding")
 FLEET_TERM("self-skip")
+FLEET_TERM("shared-inode")
+FLEET_TERM("ship-box-toolchain")
 FLEET_TERM("signature")
 FLEET_TERM("single-file-pinned-test")
 FLEET_TERM("sonnet")
@@ -155,6 +169,12 @@ FLEET_FACT("glm-5.3-flash", "handles_poorly", "multi-file-implementation", "doct
            "writes outside the worktree, merges a foreign branch into its lane, rewrites a whole file when asked for one row")
 FLEET_FACT("glm-5.3-flash", "requires", "pinned-test", "doctrine", "DOCTRINE",
            "a registered group in tools/dev/test_group_catalog.def that runs, not a test file that merely exists")
+FLEET_FACT("grok", "handles_well", "single-file-pinned-test", "doctrine", "DOCTRINE",
+           "one function, one table row, one test: the lint-gate ports and the bip page cache each landed in one round; brief it with file:line, the literal output strings, and the mutation check")
+FLEET_FACT("grok", "handles_poorly", "seam-finding", "doctrine", "DOCTRINE",
+           "a brief that says find where X is registered burns every round; name the seam yourself (file, function, table row) before queueing")
+FLEET_FACT("grok", "requires", "finisher", "doctrine", "DOCTRINE",
+           "a rounds-exhausted verdict is judged, not trusted: rerun the judged group in the unit worktree first; two of two such verdicts were stale judge logs over a fix already committed")
 FLEET_FACT("muse", "handles_well", "long-wall-implementation", "doctrine", "DOCTRINE",
            "the only tier given a two-hour wall; specify interfaces (file, flags, error names, fixtures), never goals")
 FLEET_FACT("muse", "requires", "finisher", "doctrine", "DOCTRINE",
@@ -179,6 +199,14 @@ FLEET_FACT("push", "refuses_when", "not-fast-forward", "doctrine", "DOCTRINE",
            "fast-forward only; never force-push")
 FLEET_FACT("lane", "refuses_when", "git-stash", "doctrine", "DOCTRINE",
            "the stash is shared across every worktree of one checkout, so one lane's stash pops into another's tree")
+FLEET_FACT("check-capability-closure", "requires", "full-build-epoch", "lane_state:train", "DOCTRINE",
+           "the closure and inventory checks read the whole package epoch (build/bin/zclassic23-package-verify-dev), not dev-bin; on a dev-bin-only tree they report a stale epoch, which is not a closure failure")
+FLEET_FACT("landing-worktree", "max", "one-driver", "lane_state:train", "DOCTRINE",
+           "one z23-land-train unit per box, landings serialised across boxes by hand, and nobody runs anything inside the landing worktree while its proof is in flight")
+FLEET_FACT("live-datadir", "refuses_when", "bulk-copy-while-serving", "box:any", "DOCTRINE",
+           "a 34 GB cp -a of a live datadir on the box serving it stalled the projection worker past its deadline and the watchdog killed the public node; copy from a stopped node or from a leaf")
+FLEET_FACT("dev-describe-branch", "max", "branch-budget", "doctrine", "DOCTRINE",
+           "ZCL_COMMAND_BRANCH_BUDGET caps one describe branch at 3072 bytes and the dev branch sat 14 bytes under it on 2026-09-06; a new dev.* command needs a trimmed summary or a regrouping first")
 
 /* ── proof traps: a failure signature, and what it actually means ──────── */
 FLEET_FACT("proof", "refuses_when", "self-skip", "lane_state:proof", "DOCTRINE",
@@ -193,6 +221,10 @@ FLEET_FACT("dependency-unavailable", "trap_signature", "cross-filesystem-hardlin
            "the dependency exists; link() answered EXDEV because the generation root is not the checkout's filesystem. make vendor does nothing for it")
 FLEET_FACT("closure-truncated", "trap_signature", "impact-planner-refusal", "lane_state:proof", "DOCTRINE",
            "tools/dev/devloop_plan.c refuses a dimension whose impact walk truncated; that is the planner or the index, never the train")
+FLEET_FACT("check-windows-acceptance", "trap_signature", "ship-box-toolchain", "platform:windows", "DOCTRINE",
+           "one box's mingw resolves clock_gettime and another's does not; a green acceptance on the assembling box proves nothing about the shipping box, so the gate that counts runs where make ship runs")
+FLEET_FACT("shared-inode", "trap_signature", "identity-refusal", "lane_state:proof", "DOCTRINE",
+           "replacing a hardlinked vendor input bumps the shared inode's ctime and every in-flight proof whose seal covered it refuses on identity; dedupe only between landings, and copy with reflink, never link")
 
 /* ── where the rest of the doctrine is written down ────────────────────── */
 FLEET_FACT("executor-routing", "lives_at", "engine/composition/fleet_facts.def", "doctrine", "DOCTRINE",
