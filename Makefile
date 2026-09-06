@@ -3506,7 +3506,8 @@ test-parallel:
 	    TEST_PARALLEL_ARGS='$(TEST_PARALLEL_ARGS)'
 
 .PHONY: test-parallel-locked
-test-parallel-locked: $(TEST_PARALLEL_REL_CANDIDATE) dev-package-verifier-ensure $(BIN_DIR)/z23-lint
+test-parallel-locked: $(TEST_PARALLEL_REL_CANDIDATE) dev-package-verifier-ensure \
+	$(BIN_DIR)/z23-git-hook$(ZCL_HOST_EXEEXT) $(BIN_DIR)/z23-lint
 	$(ZCL_TEST_STACK_SETUP) && $(LINKED_TEST_ENV) $(TEST_PARALLEL_REL_ACTIVE) $(TEST_PARALLEL_ARGS)
 
 # ── prove-cold-join — the one command a stranger can run ─────────────────
@@ -10594,6 +10595,9 @@ GIT_HOOK_SRCS = tools/dev/z23_git_hook.c tools/dev/dev_proof_receipt.c \
 	platform/modules/platform/src/private_file.c \
 	platform/modules/platform/src/rng.c \
 	platform/modules/platform/src/state_root.c
+# Policy version lives in the header. A .c-only prereq list leaves a leftover
+# hook binary that refuses current receipts as newer than itself.
+GIT_HOOK_HDRS = tools/dev/dev_proof_receipt.h tools/dev/dev_proof_signer.h
 GIT_HOOK_LIBS =
 ifeq ($(ZCL_HOST_WINDOWS),1)
 GIT_HOOK_SRCS += platform/modules/platform/src/private_acl_internal.c \
@@ -10618,7 +10622,7 @@ git-hook: $(GIT_HOOK_BIN)
 # The ELF collector drops ed25519's unused batch-verification path. PE/COFF
 # retains its RNG references, so the Windows sources above provide the real
 # implementation instead of relying on section collection to close the link.
-$(GIT_HOOK_BIN): $(GIT_HOOK_SRCS) tools/dev/dev_proof_receipt.h tools/dev/dev_proof_signer.h
+$(GIT_HOOK_BIN): $(GIT_HOOK_SRCS) $(GIT_HOOK_HDRS) Makefile
 	@mkdir -p $(dir $@)
 	$(CC) $(GIT_HOOK_CFLAGS) -o $@ $(GIT_HOOK_SRCS) \
 		$(HARDEN_LDFLAGS) $(ZCL_GC_SECTIONS_LDFLAG) $(GIT_HOOK_LIBS)
