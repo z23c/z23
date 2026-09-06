@@ -2370,8 +2370,13 @@ static int case_engine_unit_state_e2e(void)
     (void)snprintf(worktree, sizeof(worktree), "%s/wt", dir);
 #if defined(_WIN32)
     _mkdir(state_dir);
+    _mkdir(worktree);
 #else
     mkdir(state_dir, 0700);
+    /* git worktree add cannot target a path inside this checkout (and a
+     * git-worktree lane is already a worktree). The unit accepts an
+     * existing directory; the fixture only needs that arm. */
+    mkdir(worktree, 0700);
 #endif
 
     const bool wrote_task = write_whole_file(task_path,
