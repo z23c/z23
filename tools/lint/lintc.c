@@ -4593,6 +4593,575 @@ static int check_tu_random_seed_selftest(void)
     return st_ok(bad, "check_tu_random_seed selftest: OK\n");
 }
 
+static const char *const k_rap_drop[] = {
+    "__builtin_memcpy",
+    "memcpy_uses_blob_var",
+    "memcpys",
+    "memcpy",
+    "numcpus",
+};
+
+static int rap_ci_pref(const char *s, const char *n)
+{
+    for (; *n; s++, n++) {
+        if (!*s)
+            return 0;
+        if (tolower((unsigned char)*s) != tolower((unsigned char)*n))
+            return 0;
+    }
+    return 1;
+}
+
+static void rap_strip_one(char *s, const char *needle)
+{
+    char *w = s, *r = s;
+    size_t nlen = strlen(needle);
+    while (*r) {
+        if (rap_ci_pref(r, needle))
+            r += nlen;
+        else
+            *w++ = *r++;
+    }
+    *w = '\0';
+}
+
+static int rap_has_tok(const char *s, const char *tok)
+{
+    size_t n = strlen(tok);
+    for (const char *p = s; *p; p++) {
+        size_t i = 0;
+        for (; i < n && p[i]; i++) {
+            if (tolower((unsigned char)p[i]) != tolower((unsigned char)tok[i]))
+                break;
+        }
+        if (i == n)
+            return 1;
+    }
+    return 0;
+}
+
+struct rap_acc {
+    const char *root;
+    const char *tok;
+    FILE *out;
+    int tracked;
+    int regular;
+    int path_violation;
+};
+
+static int rap_on_track(const char *path, void *ctx)
+{
+    struct rap_acc *a = ctx;
+    a->tracked++;
+    char full[8192];
+    if (ovf(snprintf(full, sizeof full, "%s/%s", a->root, path), sizeof full))
+        return 2;
+    struct stat st;
+    if (stat(full, &st) != 0 || !S_ISREG(st.st_mode))
+        return 0;
+    a->regular++;
+    if (rap_has_tok(path, a->tok)) {
+        if (fprintf(a->out, "FAIL: retired agent protocol in tracked path: %s\n",
+                    path) < 0)
+            return die("z23-lint: write failed\n", "");
+        a->path_violation = 1;
+    }
+    return 0;
+}
+
+static int rap_filter(char *raw, const char *tok, FILE *out, int *hit)
+{
+    static char work[1024 * 1024];
+    char *p = raw;
+    while (*p) {
+        char *nl = strchr(p, '\n');
+        if (nl)
+            *nl = '\0';
+        if (ovf(snprintf(work, sizeof work, "%s", p), sizeof work))
+            return 2;
+        for (size_t i = 0; i < sizeof k_rap_drop / sizeof k_rap_drop[0]; i++)
+            rap_strip_one(work, k_rap_drop[i]);
+        if (rap_has_tok(work, tok)) {
+            if (fprintf(out, "%s\n", work) < 0)
+                return die("z23-lint: write failed\n", "");
+            *hit = 1;
+        }
+        if (!nl)
+            break;
+        p = nl + 1;
+    }
+    return 0;
+}
+
+static int rap_git_cmd(const char *root, const char *rest, char *out, size_t cap,
+                       int *code)
+{
+    char cmd[8192];
+    if (strchr(root, '\''))
+        return die("z23-lint: path too long: %s\n", root);
+    if (ovf(snprintf(cmd, sizeof cmd, "git -C '%s' %s", root, rest), sizeof cmd))
+        return 2;
+    return capture_cmd(cmd, out, cap, code);
+}
+
+static int rap_scan(const char *root, FILE *out, FILE *err)
+{
+    char tok[4] = { 'm', 'c', 'p', 0 };
+    char dump[64];
+    int code = 0, rc;
+
+    if (strchr(root, '\''))
+        return die("z23-lint: path too long: %s\n", root);
+    rc = rap_git_cmd(root, "rev-parse --is-inside-work-tree >/dev/null 2>&1",
+                     dump, sizeof dump, &code);
+    if (rc)
+        return rc;
+    if (code != 0) {
+        if (fprintf(err,
+                    "check_no_retired_agent_protocol: FATAL — '%s' is not a git worktree\n",
+                    root) < 0)
+            return die("z23-lint: write failed\n", "");
+        return 2;
+    }
+
+    struct rap_acc a = { .root = root, .tok = tok, .out = out };
+    char lscmd[8192];
+    if (ovf(snprintf(lscmd, sizeof lscmd, "git -C '%s' ls-files -z", root),
+            sizeof lscmd))
+        return 2;
+    rc = each_zpath(lscmd, rap_on_track, &a);
+    if (rc)
+        return rc;
+    if (a.tracked == 0) {
+        if (fputs("check_no_retired_agent_protocol: FATAL — tracked-file scan is empty\n",
+                  err) < 0)
+            return die("z23-lint: write failed\n", "");
+        return 2;
+    }
+    if (a.regular == 0) {
+        if (fputs("check_no_retired_agent_protocol: FATAL — no tracked regular files were scanned\n",
+                  err) < 0)
+            return die("z23-lint: write failed\n", "");
+        return 2;
+    }
+
+    char greprest[64];
+    if (ovf(snprintf(greprest, sizeof greprest, "grep -n -I -i -F '%s' -- .", tok),
+            sizeof greprest))
+        return 2;
+    static char raw[4 * 1024 * 1024];
+    rc = rap_git_cmd(root, greprest, raw, sizeof raw, &code);
+    if (rc)
+        return rc;
+    if (code >= 2) {
+        if (fprintf(err,
+                    "check_no_retired_agent_protocol: FATAL — tracked-content scan failed (exit %d)\n",
+                    code) < 0)
+            return die("z23-lint: write failed\n", "");
+        return 2;
+    }
+    int content_violation = 0;
+    if (code == 0) {
+        rc = rap_filter(raw, tok, out, &content_violation);
+        if (rc)
+            return rc;
+    }
+    if (a.path_violation || content_violation) {
+        if (fputs("FAIL: retired agent protocol remains in tracked files.\n", out) < 0)
+            return die("z23-lint: write failed\n", "");
+        return 1;
+    }
+    if (fprintf(out,
+                "  OK: %d tracked regular files contain no retired protocol token\n",
+                a.regular) < 0)
+        return die("z23-lint: write failed\n", "");
+    return 0;
+}
+
+static int check_no_retired_agent_protocol_run(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+    if (fputs("══ LINT: retired agent protocol absent from tracked files ══\n",
+              stdout) < 0)
+        return die("z23-lint: write failed\n", "");
+    char cwd[4096];
+    const char *env = getenv("ZCL_RETIRED_PROTOCOL_ROOT");
+    const char *root;
+    if (env && env[0])
+        root = env;
+    else {
+        if (!getcwd(cwd, sizeof cwd))
+            return die("z23-lint: getcwd failed\n", "");
+        root = cwd;
+    }
+    return rap_scan(root, stdout, stderr);
+}
+
+static int rap_rm_rf(const char *root)
+{
+    char cmd[8192], dump[64];
+    int code = 0;
+    if (strchr(root, '\''))
+        return die("z23-lint: path too long: %s\n", root);
+    if (ovf(snprintf(cmd, sizeof cmd, "rm -rf -- '%s'", root), sizeof cmd))
+        return 2;
+    return capture_cmd(cmd, dump, sizeof dump, &code);
+}
+
+static int check_no_retired_agent_protocol_selftest(void)
+{
+    char tok[4] = { 'm', 'c', 'p', 0 };
+    char cap[4] = { 'M', 'c', 'p', 0 };
+    char tmpl[] = "/tmp/z23-lint-rap-XXXXXX";
+    char *root = mkdtemp(tmpl);
+    if (!root)
+        return die("z23-lint: mkdir failed: %s\n", "/tmp");
+    FILE *out = tmpfile();
+    if (!out) {
+        (void)rap_rm_rf(root);
+        return die("z23-lint: tmpfile failed\n", "");
+    }
+    const char *oldenv = getenv("ZCL_RETIRED_PROTOCOL_ROOT");
+    char oldbuf[4096];
+    int had_env = 0;
+    if (oldenv) {
+        if (ovf(snprintf(oldbuf, sizeof oldbuf, "%s", oldenv), sizeof oldbuf)) {
+            fclose(out);
+            (void)rap_rm_rf(root);
+            return 2;
+        }
+        had_env = 1;
+    }
+    int bad = 0, rc = 0, code = 0;
+    char dump[256], path[8192], body[128], addrest[256], nam[64];
+    if (setenv("ZCL_RETIRED_PROTOCOL_ROOT", root, 1) != 0)
+        bad = 1;
+    rc = rap_git_cmd(root, "init -q", dump, sizeof dump, &code);
+    if (rc || code != 0)
+        bad = 1;
+
+    if (ovf(snprintf(path, sizeof path, "%s/clean.c", root), sizeof path))
+        bad = 1;
+    else if (csr_write(path, "memcpy(buffer, source, length);\nnumcpus=4\n"))
+        bad = 1;
+    rc = rap_git_cmd(root, "add -- clean.c", dump, sizeof dump, &code);
+    if (rc || code != 0)
+        bad = 1;
+    if (psp_st_reset(out))
+        bad = 1;
+    rc = rap_scan(root, out, stderr);
+    if (rc != 0) {
+        fputs("selftest: clean embedded substrings were rejected\n", stderr);
+        bad = 1;
+    }
+
+    if (ovf(snprintf(path, sizeof path, "%s/untracked.txt", root), sizeof path)
+        || ovf(snprintf(body, sizeof body, "Open%sClient\n", cap), sizeof body))
+        bad = 1;
+    else if (csr_write(path, body))
+        bad = 1;
+    if (psp_st_reset(out))
+        bad = 1;
+    rc = rap_scan(root, out, stderr);
+    if (rc != 0) {
+        fputs("selftest: untracked fixture entered the production scan\n", stderr);
+        bad = 1;
+    }
+
+    rc = rap_git_cmd(root, "add -- untracked.txt", dump, sizeof dump, &code);
+    if (rc || code != 0)
+        bad = 1;
+    if (psp_st_reset(out))
+        bad = 1;
+    rc = rap_scan(root, out, stderr);
+    if (rc == 0) {
+        fputs("selftest: tracked content violation was not detected\n", stderr);
+        bad = 1;
+    }
+    rc = rap_git_cmd(root, "rm -q --cached untracked.txt", dump, sizeof dump, &code);
+    if (rc || code != 0)
+        bad = 1;
+    if (ovf(snprintf(path, sizeof path, "%s/untracked.txt", root), sizeof path) == 0)
+        unlink(path);
+
+    if (ovf(snprintf(nam, sizeof nam, "old_%s_surface.txt", tok), sizeof nam)
+        || ovf(snprintf(path, sizeof path, "%s/%s", root, nam), sizeof path)
+        || ovf(snprintf(addrest, sizeof addrest, "add -- %s", nam), sizeof addrest))
+        bad = 1;
+    else if (csr_write(path, "clean body\n"))
+        bad = 1;
+    rc = rap_git_cmd(root, addrest, dump, sizeof dump, &code);
+    if (rc || code != 0)
+        bad = 1;
+    if (psp_st_reset(out))
+        bad = 1;
+    rc = rap_scan(root, out, stderr);
+    if (rc == 0) {
+        fputs("selftest: tracked path violation was not detected\n", stderr);
+        bad = 1;
+    }
+
+    fclose(out);
+    if (had_env)
+        (void)setenv("ZCL_RETIRED_PROTOCOL_ROOT", oldbuf, 1);
+    else
+        (void)unsetenv("ZCL_RETIRED_PROTOCOL_ROOT");
+    (void)rap_rm_rf(root);
+    if (bad)
+        fputs("FAIL: check_no_retired_agent_protocol selftest\n", stderr);
+    return st_ok(bad, "check_no_retired_agent_protocol selftest: OK\n");
+}
+
+static const char k_ssd_class[] = "tools/scripts/stopwatch_skip_class.sh";
+static const char k_ssd_judge[] = "tools/scripts/stopwatch_evidence_judge.sh";
+static const char k_ssd_def[] =
+    "engine/services/include/services/stopwatch_skip_classes.def";
+static const char k_ssd_table_cmd[] =
+    "bash -c '. tools/scripts/stopwatch_skip_class.sh; stopwatch_skip_class_table' | grep -c '|'";
+
+static int ssd_has_pass_line(const char *buf)
+{
+    static const char want[] = "selftest: PASS";
+    size_t w = sizeof want - 1;
+    const char *p = buf;
+    for (;;) {
+        const char *nl = strchr(p, '\n');
+        size_t n = nl ? (size_t)(nl - p) : strlen(p);
+        if (n == w && memcmp(p, want, w) == 0)
+            return 1;
+        if (!nl)
+            return 0;
+        p = nl + 1;
+    }
+}
+
+static int ssd_run_selftest(FILE *out, const char *script, int *fail)
+{
+    if (!csr_readable(script)) {
+        if (fprintf(out,
+                    "FAIL: %s is missing — the skip-streak detector has no shell-side regression guard\n",
+                    script) < 0)
+            return die("z23-lint: write failed\n", "");
+        *fail = 1;
+        return 0;
+    }
+    char cmd[512];
+    static char captured[262144];
+    if (ovf(snprintf(cmd, sizeof cmd, "bash %s --selftest 2>&1", script),
+            sizeof cmd))
+        return 2;
+    int code = 0;
+    int rc = capture_cmd(cmd, captured, sizeof captured, &code);
+    if (rc)
+        return rc;
+    if (code != 0 || !ssd_has_pass_line(captured)) {
+        if (fprintf(out, "FAIL: %s --selftest (rc=%d; no 'selftest: PASS' line)\n",
+                    script, code) < 0)
+            return die("z23-lint: write failed\n", "");
+        if (fprintf(out, "%s\n", captured) < 0)
+            return die("z23-lint: write failed\n", "");
+        *fail = 1;
+        return 0;
+    }
+    if (fprintf(out, "  ok: %s --selftest\n", script) < 0)
+        return die("z23-lint: write failed\n", "");
+    return 0;
+}
+
+static int ssd_count_def(int *count)
+{
+    regex_t re;
+    int cr = compile_pat(&re, REG_EXTENDED,
+                         "^STOPWATCH_SKIP_(CLASS|FALLBACK)\\(", "", "", "");
+    if (cr)
+        return cr;
+    FILE *f = fopen(k_ssd_def, "r");
+    if (!f) {
+        *count = 0;
+        regfree(&re);
+        return 0;
+    }
+    char *line = NULL;
+    size_t cap = 0;
+    ssize_t n;
+    int rc = 0;
+    *count = 0;
+    while ((n = getline(&line, &cap, f)) >= 0) {
+        if (n > 0 && line[n - 1] == '\n')
+            line[n - 1] = '\0';
+        if (regexec(&re, line, 0, NULL, 0) == 0)
+            (*count)++;
+    }
+    rc = fin(f, line, k_ssd_def, rc);
+    regfree(&re);
+    return rc;
+}
+
+static int ssd_check(FILE *out)
+{
+    (void)setenv("LC_ALL", "C", 1);
+    int fail = 0, rc;
+    rc = ssd_run_selftest(out, k_ssd_class, &fail);
+    if (rc)
+        return rc;
+    rc = ssd_run_selftest(out, k_ssd_judge, &fail);
+    if (rc)
+        return rc;
+
+    int rows_in_file = 0;
+    rc = ssd_count_def(&rows_in_file);
+    if (rc)
+        return rc;
+    char parsed[64];
+    int code = 0;
+    rc = capture_cmd(k_ssd_table_cmd, parsed, sizeof parsed, &code);
+    if (rc)
+        return rc;
+    /* The original enables `set -e` inside run_selftest, so a failing
+     * table pipeline (missing script, grep -c of zero matches) aborts
+     * before the row-count comparison. */
+    if (code != 0)
+        return 1;
+    int rows_parsed = atoi(parsed);
+    if (rows_in_file < 5 || rows_in_file != rows_parsed) {
+        if (fprintf(out, "FAIL: %s has %d rows but the shell parser sees %d\n",
+                    k_ssd_def, rows_in_file, rows_parsed) < 0)
+            return die("z23-lint: write failed\n", "");
+        if (fputs("      Every row must be ENTIRELY on one line — the parser is line-oriented.\n",
+                  out) < 0)
+            return die("z23-lint: write failed\n", "");
+        fail = 1;
+    } else if (fprintf(out,
+                       "  ok: %s — %d class rows, parsed identically by the shell side\n",
+                       k_ssd_def, rows_in_file) < 0) {
+        return die("z23-lint: write failed\n", "");
+    }
+    if (fail)
+        return 1;
+    return fputs("check_stopwatch_skip_detector: clean — shell skip-streak detector selftests pass\n",
+                 out) < 0
+               ? die("z23-lint: write failed\n", "") : 0;
+}
+
+static int check_stopwatch_skip_detector_run(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+    return ssd_check(stdout);
+}
+
+static const char k_ssd_class_ok[] =
+    "stopwatch_skip_class_table() {\n"
+    "echo 'a|'\n"
+    "echo 'b|'\n"
+    "echo 'c|'\n"
+    "echo 'd|'\n"
+    "echo 'e|'\n"
+    "}\n"
+    "if [ \"${1:-}\" = \"--selftest\" ]; then echo \"selftest: PASS\"; exit 0; fi\n";
+static const char k_ssd_class_fail[] =
+    "stopwatch_skip_class_table() {\n"
+    "echo 'a|'\n"
+    "}\n"
+    "if [ \"${1:-}\" = \"--selftest\" ]; then echo \"selftest: FAIL\"; exit 1; fi\n";
+static const char k_ssd_class_four[] =
+    "stopwatch_skip_class_table() {\n"
+    "echo 'a|'\n"
+    "echo 'b|'\n"
+    "echo 'c|'\n"
+    "echo 'd|'\n"
+    "}\n"
+    "if [ \"${1:-}\" = \"--selftest\" ]; then echo \"selftest: PASS\"; exit 0; fi\n";
+static const char k_ssd_judge_ok[] =
+    "if [ \"${1:-}\" = \"--selftest\" ]; then echo \"selftest: PASS\"; exit 0; fi\n";
+static const char k_ssd_def_five[] =
+    "STOPWATCH_SKIP_CLASS(a, 1)\n"
+    "STOPWATCH_SKIP_CLASS(b, 1)\n"
+    "STOPWATCH_SKIP_CLASS(c, 1)\n"
+    "STOPWATCH_SKIP_CLASS(d, 1)\n"
+    "STOPWATCH_SKIP_FALLBACK(\"unclassified\", 2)\n";
+
+static int check_stopwatch_skip_detector_selftest(void)
+{
+    char cwd[4096];
+    if (!getcwd(cwd, sizeof cwd))
+        return die("z23-lint: getcwd failed\n", "");
+    char tmpl[] = "/tmp/z23-lint-ssd-XXXXXX";
+    char *root = mkdtemp(tmpl);
+    if (!root)
+        return die("z23-lint: mkdir failed: %s\n", "/tmp");
+    FILE *out = tmpfile();
+    if (!out) {
+        rmdir(root);
+        return die("z23-lint: tmpfile failed\n", "");
+    }
+    char ob[4096];
+    int bad = 0, rc = 0;
+    if (chdir(root) != 0) {
+        fclose(out);
+        rmdir(root);
+        return die("z23-lint: cannot scan %s\n", root);
+    }
+
+    rc = ssd_check(out);
+    if (csr_slurp(out, ob, sizeof ob))
+        bad = 1;
+    bad |= rc != 1
+        || strstr(ob, "FAIL: tools/scripts/stopwatch_skip_class.sh is missing — "
+                      "the skip-streak detector has no shell-side regression guard") == NULL;
+
+    if (psp_st_reset(out))
+        bad = 1;
+    if (csr_write(k_ssd_class, k_ssd_class_fail)
+        || csr_write(k_ssd_judge, k_ssd_judge_ok)
+        || csr_write(k_ssd_def, k_ssd_def_five))
+        bad = 1;
+    rc = ssd_check(out);
+    if (csr_slurp(out, ob, sizeof ob))
+        bad = 1;
+    bad |= rc != 1
+        || strstr(ob, "FAIL: tools/scripts/stopwatch_skip_class.sh --selftest (rc=") == NULL
+        || strstr(ob, "no 'selftest: PASS' line)") == NULL;
+
+    if (psp_st_reset(out))
+        bad = 1;
+    if (csr_write(k_ssd_class, k_ssd_class_four))
+        bad = 1;
+    rc = ssd_check(out);
+    if (csr_slurp(out, ob, sizeof ob))
+        bad = 1;
+    bad |= rc != 1
+        || strstr(ob, "FAIL: engine/services/include/services/stopwatch_skip_classes.def has 5 rows but the shell parser sees 4") == NULL;
+
+    if (psp_st_reset(out))
+        bad = 1;
+    if (csr_write(k_ssd_class, k_ssd_class_ok))
+        bad = 1;
+    rc = ssd_check(out);
+    if (csr_slurp(out, ob, sizeof ob))
+        bad = 1;
+    bad |= rc != 0
+        || strstr(ob, "check_stopwatch_skip_detector: clean — shell skip-streak detector selftests pass") == NULL;
+
+    fclose(out);
+    unlink(k_ssd_class);
+    unlink(k_ssd_judge);
+    unlink(k_ssd_def);
+    (void)rmdir("engine/services/include/services");
+    (void)rmdir("engine/services/include");
+    (void)rmdir("engine/services");
+    (void)rmdir("engine");
+    (void)rmdir("tools/scripts");
+    (void)rmdir("tools");
+    if (chdir(cwd) != 0)
+        return die("z23-lint: cannot scan %s\n", cwd);
+    rmdir(root);
+    if (bad)
+        fputs("FAIL: check_stopwatch_skip_detector selftest\n", stderr);
+    return st_ok(bad, "check_stopwatch_skip_detector selftest: OK\n");
+}
+
 struct lint_gate {
     const char *name;
     int (*run)(int argc, char **argv);
@@ -4632,6 +5201,10 @@ static const struct lint_gate k_gates[] = {
       check_proof_server_pin_selftest },
     { "check-tu-random-seed", check_tu_random_seed_run,
       check_tu_random_seed_selftest },
+    { "check-no-retired-agent-protocol", check_no_retired_agent_protocol_run,
+      check_no_retired_agent_protocol_selftest },
+    { "check-stopwatch-skip-detector", check_stopwatch_skip_detector_run,
+      check_stopwatch_skip_detector_selftest },
 };
 
 int main(int argc, char **argv)

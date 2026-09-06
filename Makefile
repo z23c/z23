@@ -12355,7 +12355,7 @@ fix-doc-counts:
 # class-table parser both stopwatch scripts source, plus the judge's report
 # line and ALARM) had no automatic guard, and a detector whose own proof
 # nobody runs is the exact defect it exists to fix.
-check-stopwatch-skip-detector:
+check-stopwatch-skip-detector: $(LINTC_TOOL)
 	@echo "══ LINT: stopwatch skip-streak detector selftests ══"
 	@./tools/lint/check_stopwatch_skip_detector.sh
 
@@ -12921,7 +12921,7 @@ check-no-stray-root-files: $(LINTC_TOOL)
 	@echo "══ LINT: no stray files in the repository root ══"
 	@./tools/lint/check_no_stray_root_files.sh
 
-check-no-retired-agent-protocol:
+check-no-retired-agent-protocol: $(LINTC_TOOL)
 	@./tools/lint/check_no_retired_agent_protocol.sh
 
 # Nothing under test, and no command an agent is told to copy, may be aimed at
