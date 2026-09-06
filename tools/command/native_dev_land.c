@@ -3068,14 +3068,13 @@ static bool dl_wt_vendor_ensure(const struct dl_dirs *d,
 #endif
 }
 
-#if defined(__linux__)
-/* The rollback test group dlopens these two fixture images by name; the
- * proof's own dependency check names `make test_parallel` as their fix.
- * Since the landing worktree carries the same source revision the
- * submitting checkout does (after the rebase two steps up), copying an
- * already-built image from there is both cheap and no less faithful than
- * one built here would be, and avoids running a multi-minute full test
- * link inside a landing step just to obtain two small fixture images. */
+#if !defined(_WIN32)
+/* The rollback test group dlopens these two fixture images by name on
+ * Linux; the proof's own dependency check names `make test_parallel` as
+ * their fix and lists them only on Linux. Copying is still a POSIX file
+ * materialize, and Darwin tests force it via ZCL_LAND_DEPS_TEST_FORCE so
+ * a planted fixture is not left behind. Production Darwin land still
+ * skips the call (see dl_wt_proof_deps_ensure). */
 static const char *const DL_HOTSWAP_DEPS[] = {
     "build/hotswap/zcl_rollback_fixture_a.so",
     "build/hotswap/zcl_rollback_fixture_b.so",
@@ -3459,6 +3458,12 @@ static bool dl_wt_proof_deps_ensure(const struct dl_dirs *d,
             return false;
 #if defined(__linux__)
         if (!dl_wt_hotswap_ensure(d, r, why, why_cap))
+            return false;
+#elif !defined(_WIN32)
+        /* Production Darwin proofs do not require the Linux-only rollback
+         * fixtures. Tests that plant them still force the copy. */
+        if (dl_deps_test_force() &&
+            !dl_wt_hotswap_ensure(d, r, why, why_cap))
             return false;
 #endif
         if (!dl_wt_dependency_links_repair(d, r, stubbed, why, why_cap))
