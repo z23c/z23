@@ -38,7 +38,7 @@
 #       pair — the sealed core's identity, mirrored into
 #       hotswap/core_seal_root.h. FROZEN: SECTION/TREE are additive and
 #       do not enter this preimage.
-5cfffd4b80b25d0cb7417ef0ce9e9635814d851fa96545cbf464dffc1dd636eb  core/UNSEAL.md
+4ab9b4ad2996bc3708269b9380661f420b3fa7670f49400f72a7ae8079ec3dda  core/UNSEAL.md
 0154dee8b452e80f28e6d9c915483ab19cf93ee834518edc355885204dad4119  core/chainparams/include/chain/chainparams.h
 76417939b54d9b0d0b2309c66b90fd20a510de3492bb6f97a11f4198292aa01f  core/chainparams/include/chain/chainparamsbase.h
 d7a369b7b352bec129c14bb6cbea95d6907f1ac99f2616bac5b4d50ea503dbe6  core/chainparams/include/chain/checkpoints.h
@@ -271,7 +271,7 @@ b600c6006c04e7788d97c1f0fd5ee6bf220e4b530dc8caf203930e42c8e3036e  core/modules/n
 09045a840dd39275294c24f9dc216d949e7c7c68b93be5dddfeb05feee7bf42f  core/modules/net/include/net/site_routes.def
 368275e62d806ff8154be7ffca32d4c4001611491e857832d78b22ffc9af9771  core/modules/net/include/net/site_routes.h
 0b75587bbb5ef5252585ce29dd3a8e1773340e5e2174321441dde64f65222992  core/modules/net/include/net/snapshot_sync_contract.h
-b1316ad5bec0932df8e493739e84479d00928cd6450299441f0d8dccd2ab7af6  core/modules/net/include/net/state_offer.h
+91cdb697cde5b43b24f4d3b72d2ab8d01f3b7f156eca2518dfdc9928ea78965e  core/modules/net/include/net/state_offer.h
 4b30877b1782093c1afee8441a38225bf9169e862512ab17fc727b94f04e6429  core/modules/net/include/net/state_offer_relay.h
 002f0c43368f76ee8fd4ba97f9ba9fa1a3cec6355e07faa3647ae75945aea5ab  core/modules/net/include/net/sync_reduce_adapter.h
 27b946571132f1b1eace5756eaccdd7cbd47fc2dafbd8f3b17a4fc358a1463ab  core/modules/net/include/net/sync_shadow.h
@@ -405,7 +405,7 @@ a700714e1b3512a56cd8835469275bf3ff0084f3deaf28b0c525e035b0f46011  core/modules/n
 d0cadf7715ab92c1c9c32da83a15995762699eaf4f2754f199ebc4c4abe3714d  core/modules/net/src/rom_seed_report.c
 0e745d30f2d9eb62612e29c348706c64a357232fb9cae3facf686a8cb7120873  core/modules/net/src/rom_seed_throttle.c
 3e40b174a662bf91d6e1682930a96e28513727055d2fb45c927473a8e9f8066a  core/modules/net/src/site_routes.c
-2f8571c59aeb8bf837f7d612d3dce0641c5c1130003cf8883a5f4135bc5969ad  core/modules/net/src/state_offer.c
+768a85a58f9d6bf0124427891ed1430925fd78baefc3b82f5b9016d58264bfb1  core/modules/net/src/state_offer.c
 88801f12dcf67aebf5e43fbe6408920cac422c8379de46031ca5a7c64bfd964e  core/modules/net/src/state_offer_relay.c
 32d090e54ebe5ce883266faa5824feeda5f0e9c732593da3719aac0f3430eebc  core/modules/net/src/sync_reduce_adapter.c
 4de00337408d95f2b0629fe6f0aa056093f95e57038a59f6e5e6e86b1ab13265  core/modules/net/src/sync_shadow.c
@@ -587,7 +587,7 @@ e84a4566fb4a01985ccbec9a4d3136a278422e1efe4f00cb8d0cf01480531064  core/params/in
 5ed0e4562789e7ea0bd9ff1238a27172669074b3d26201195aafffe1f863558e  core/params/module.cfg
 4d62b9a9b8824925e2f7efebca536ff924a96c7464067472cb07b9dd57e356dc  core/params/src/params.c
 9907071da9b95e13d236ac70fe8fa95612c7873ff9a88102d988c83ba8492b89  core/params/src/upgrades.c
-SECTION  549  4  b4b6faa4cfffb87843a6aaa019297d6e50efe2c3be01aa2c9168846efd002284  core
+SECTION  549  4  6fe8172007e13b31b2d089cfe957169d8155d6c481cce924fca81ac4df849c35  core
 SECTION  12  16  8681e4e8469b454c43c9d715d1111a7702a3b9bc8527f8119234a18e030ec183  core/chainparams
 SECTION  6  24  1e5945d164d76144d16dcf3160716e529396441eef1b21a1687c7455aa89e6a8  core/chainparams/include
 SECTION  6  30  30a039b47f4f9e8eebe5efe28f0a4ba77b2d9f14f383db19b46c024eec2296ed  core/chainparams/include/chain
@@ -601,7 +601,7 @@ SECTION  10  9  4a12df854665934805645f7b11b9ce279b93b7568fe58dde37f68d84913813da
 SECTION  5  17  3d74828940990b6914192791641041d1ad63de1b84d7693d2533f1c9b29a7edd  core/math/include
 SECTION  5  22  13bc29100524578193cb79036f24fe9e1d8538c0f45dcc4dd87956a25f4f2b38  core/math/include/core
 SECTION  5  13  bed7851826222b99834c6ee74bb3e7ce6155798a5ef78c798fe2f836bbf30862  core/math/src
-SECTION  483  12  45d58076002de2575000beab4910bdbbf56d53459302c93a02ed4d52ff7f4080  core/modules
+SECTION  483  12  efc02fa9205a09b1c2ed9426d5826c346432e2a5f624d3b6f77a451323f88a8b  core/modules
 SECTION  6  18  d39a267ed7843199fea7ad58a9c6cbc6d0acd538ff04e13d69147a51924c8648  core/modules/bloom
 SECTION  3  26  25f9f764136ebc796a9aaed6dc708deba3347052954808e4efacd66eed7255c6  core/modules/bloom/include
 SECTION  3  32  2648501012a71f5658485e08ef8fb567f46f716f1fd96cbfcb93666c234a6686  core/modules/bloom/include/bloom
@@ -631,10 +631,10 @@ SECTION  4  19  0a6f516e812deaa72d749627be58241abf2a1f788572fb9f16de73ace2bfb23f
 SECTION  2  27  81e82305e0525b5d77a8532a519538cc4c174150a1faa38fb55b26c18839271d  core/modules/mining/include
 SECTION  2  34  b83813758d4a6dfa9da4b2e64d463cc78d0a0cc1da07a170cca30fc454996ba3  core/modules/mining/include/mining
 SECTION  2  23  5ee2e44bf3f636a1ab560b2ac53a7e58ccfce04e2f725d322ba0b121b97a191c  core/modules/mining/src
-SECTION  217  16  8b7f8477cdc264b2ddcb87ee222b843928a465121102c58811052a0391db1ff8  core/modules/net
-SECTION  82  24  7812af78de88d51395774b3ca1b58356a2d0b665f40615f04a4522b00331f174  core/modules/net/include
-SECTION  82  28  2c81dc79ff1c64ec1a609675f76614ff037b500f9d3862313045d4e5c733ab16  core/modules/net/include/net
-SECTION  135  20  1cc0725efda481699acd915f747ee9349ccaa42a19ffbf9955f704311896ac3e  core/modules/net/src
+SECTION  217  16  19db1db56050582c99a8de1b3d02bee37571d22c646d2c8a8a03eb9c6d695fa1  core/modules/net
+SECTION  82  24  f3b166f1c694d468dafac2ffbbad4c8ae6f3462142e52f6881bbaaf9ee43a40a  core/modules/net/include
+SECTION  82  28  026d199fedd1810698e97eb8b61aafc44ba1fb860dd15bc78a08b014001d1c09  core/modules/net/include/net
+SECTION  135  20  eac91c7de847315f2f847a0462b8602e906c123db40d86ccd697c1b3b23dac09  core/modules/net/src
 SECTION  4  18  a2e09def577166996ffa46fd3694f7c2d7633e3cf2da0bf3a8621cfb283f8c04  core/modules/noise
 SECTION  2  26  3eb0307ed7b4de64260956826200021628b42f9152f57674241485f7c764b29d  core/modules/noise/include
 SECTION  2  32  bebb3de57b8217f83c9d1bd6f4fa780983dc7210caaf121b5954a685484ac111  core/modules/noise/include/noise
@@ -667,5 +667,5 @@ SECTION  7  11  9b023bcd18300a51052f45e69609bb741b2832e3ce6e6a02fd21a12ea94647c0
 SECTION  4  19  e07dc0f2326862830b48105e02648f8d76dfeee9a859b7c56679c461e2cca7f1  core/params/include
 SECTION  4  29  5680a2f2d804163e77f94854ee18838480d785b74b297265f2f8a77db9d02242  core/params/include/consensus
 SECTION  2  15  8fdd673c41b8758e48c6fb225c15d7bbdf79f6816066a1d0c793d4bee2c5f6b1  core/params/src
-TREE  1e66403aa34cb0e192e859780495512d2c912a5d887742b16f3a28546ee323b5
-ROOT  30e82cac24cf9fb5f44c2e8de1af6d7fec714eae51c7a827e7809f35ba648a54
+TREE  0d2a8d7d60222ef55939a7b8171150dc2e133fba530774ed16935abbe501596a
+ROOT  6abf47d15167be4d6f33502201d0cc10f3ea9441a14140be15eb9288932b30a8

@@ -30,10 +30,14 @@
 #define STALE_OFFERS_ONLY_OWNER      "bootstrap"
 
 /* ZRC-0011: an offer is stale once its bundle height trails the offering
- * peer's own tip by more than this many blocks. Matches the contract text
- * verbatim ("more than 576 blocks behind"); used only in the reason string
- * below, never in a runtime comparison this condition performs itself — the
- * store already applied the rule before it ever falls back. */
+ * peer's own tip by more than this many blocks — UNLESS the bundle sits at
+ * exactly the compiled checkpoint height, which is exempt from this window
+ * (net/state_offer.h state_offer_height_is_fresh(): the installer already
+ * grants that one bundle full sovereign trust by height alone, so its age
+ * is irrelevant). Matches the contract text verbatim ("more than 576 blocks
+ * behind"); used only in the reason string below, never in a runtime
+ * comparison this condition performs itself — the store already applied the
+ * rule before it ever falls back. */
 #define STALE_OFFERS_ONLY_FRESHNESS_WINDOW_BLOCKS 576
 
 /* false = "not raised this process": the remedy keepalive no-ops until the

@@ -25,6 +25,7 @@
 
 #include "test/test_core.h"
 
+#include "chain/checkpoints.h"
 #include "conditions/stale_offers_only.h"
 #include "config/state_offer_store.h"
 #include "jobs/reducer_frontier.h"
@@ -268,6 +269,44 @@ static int witness_clears_on_offer_chosen(void)
     return failures;
 }
 
+/* ── (6) a checkpoint-height offer, far outside the 576-block window, is
+ * chosen rather than falling back — the condition never raises ──────────── */
+
+static int no_raise_for_checkpoint_bundle(void)
+{
+    int failures = 0;
+    TEST_CASE("does not raise when the only offer is the checkpoint bundle, "
+              "however old") {
+        blocker_module_init();
+        stale_offers_only_test_reset();
+        reducer_frontier_provable_tip_reset();
+        state_offer_store_reset();
+
+        struct sha3_utxo_checkpoint fixture;
+        memset(&fixture, 0, sizeof(fixture));
+        fixture.height = 700000;
+        checkpoints_set_sha3_override_for_test(&fixture);
+
+        int32_t tip = fixture.height + 184000; /* far outside the window */
+        uint8_t ip[16];
+        an_ip(ip, 55);
+        struct state_offer_v1 offer;
+        make_offer(&offer, fixture.height, tip, 0x90);
+        ASSERT_EQ(state_offer_store_record(&offer, ip, 18034, 7, 1000),
+                  STATE_OFFER_STORE_KEPT);
+
+        struct state_offer_record chosen;
+        ASSERT_EQ(state_offer_store_decide(2000, &chosen),
+                  STATE_OFFER_DECIDE_FETCH);
+
+        ASSERT(!blocker_exists(SOO_ID));
+        ASSERT(!stale_offers_only_test_detect());
+
+        checkpoints_reset_sha3_override_for_test();
+    } TEST_END
+    return failures;
+}
+
 /* ── (5) nothing raises while the bounded wait is still open ──────────────── */
 
 static int no_raise_while_wait_open(void)
@@ -301,6 +340,7 @@ int test_stale_offers_only(void)
     failures += raised_when_only_stale_offers_seen();
     failures += witness_clears_on_hstar_climb();
     failures += witness_clears_on_offer_chosen();
+    failures += no_raise_for_checkpoint_bundle();
     failures += no_raise_while_wait_open();
 
     stale_offers_only_test_reset();

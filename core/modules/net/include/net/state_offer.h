@@ -67,7 +67,9 @@
 /* ZRC-0011 section 4: an offer more than this many blocks behind the OFFERING
  * peer's own reported tip is not offered at all, and is refused on parse. A
  * stale offer is worse than no offer because it teaches a consumer the wrong
- * newest height. */
+ * newest height. Exception: an offer at exactly the compiled checkpoint
+ * height (get_sha3_utxo_checkpoint()->height) is always fresh regardless of
+ * how far it trails the tip — see state_offer_height_is_fresh(). */
 #define STATE_OFFER_FRESHNESS_BLOCKS 576
 
 /* ZRC-0011 section 6 DoS cap: offers accepted from one peer in one message.
@@ -153,9 +155,13 @@ struct state_offer_batch_v1 {
 const char *state_offer_error_string(enum state_offer_error error);
 
 /* True when bundle_height is within STATE_OFFER_FRESHNESS_BLOCKS of tip_height
- * and does not exceed it. THE single place the 576-block rule is decided: the
- * producer's eligibility filter, the parser's refusal and the consumer's choice
- * all call this, so the three can never drift apart. */
+ * and does not exceed it, OR bundle_height is exactly the compiled checkpoint
+ * height (get_sha3_utxo_checkpoint()->height) — that one bundle never goes
+ * stale, since the installer grants it full sovereign trust by height alone
+ * and the export verb only ever produces a bundle bound to it. THE single
+ * place this rule is decided: the producer's eligibility filter, the parser's
+ * refusal and the consumer's choice all call this, so the three can never
+ * drift apart. */
 bool state_offer_height_is_fresh(int32_t bundle_height, int32_t tip_height);
 
 /* Shape + freshness + RMF-consistency rules; the signature is not consulted. */

@@ -11,6 +11,7 @@
 #include "base/bytes.h"
 #include "base/cleanse.h"
 #include "base/serialize_le.h"
+#include "chain/checkpoints.h" /* get_sha3_utxo_checkpoint: the one exempt height */
 #include "crypto/ed25519.h"
 #include "crypto/sha3.h"
 
@@ -56,6 +57,15 @@ bool state_offer_height_is_fresh(int32_t bundle_height, int32_t tip_height)
         return false;
     if (bundle_height > tip_height)
         return false;
+    /* The compiled checkpoint height is exempt from the window: it is the
+     * one bundle every install grants full sovereign trust regardless of age
+     * (engine/composition/src/consensus_state_snapshot_install_checkpoint_authority.c),
+     * and the export verb only ever produces a bundle at that height. Without
+     * this exemption a checkpoint-bound bundle goes stale the day after every
+     * checkpoint move, which is exactly backwards: age is irrelevant by
+     * design for the one bundle the installer already re-derives trust for. */
+    if (bundle_height == get_sha3_utxo_checkpoint()->height)
+        return true;
     /* Both positive with bundle_height <= tip_height, so this subtraction can
      * neither overflow nor go negative. */
     return tip_height - bundle_height <= STATE_OFFER_FRESHNESS_BLOCKS;

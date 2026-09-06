@@ -313,8 +313,10 @@ on what you already have, so read the first line of each before picking:
   already on the machine.
 - **A node with peers now asks them.** Once connected, a node reads the signed
   state offers its peers append to the handshake — bundle height, digest,
-  producer — picks the newest one within 576 blocks of that peer's own tip, and
-  fetches and installs it with no flag from you, through the same chunk-by-chunk
+  producer — picks the newest one within 576 blocks of that peer's own tip (or
+  at exactly the compiled checkpoint height, which is always acceptable no
+  matter how old), and fetches and installs it with no flag from you, through
+  the same chunk-by-chunk
   verification and the same checkpoint-bound install an operator-supplied bundle
   goes through (see [`SYNC.md`](SYNC.md), "State offers over the peer link").
   If nobody offers anything acceptable within two minutes of your first peer,

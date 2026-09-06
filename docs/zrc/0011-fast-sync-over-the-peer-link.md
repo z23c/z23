@@ -296,7 +296,12 @@ already-checkpoint-anchored history. This threshold:
 - An offer whose `bundle_height` is more than 576 blocks behind the
   offering peer's own reported tip is not offered at all — a stale offer is
   worse than no offer, because it teaches a consumer the wrong newest
-  height.
+  height. Exception: an offer at exactly the compiled checkpoint height
+  (`get_sha3_utxo_checkpoint()->height`) is always fresh, however far it
+  trails the tip — the installer already grants that one bundle full
+  sovereign trust by height alone, and the export verb only ever produces a
+  bundle bound to it, so its age carries no information the installer does
+  not already discard.
 - A consumer that, after asking its connected peers, finds only stale
   offers (or none) refuses loudly with a typed condition (see naming below)
   naming the newest height it actually saw, and then folds forward from
@@ -378,7 +383,7 @@ Following the existing naming pattern in `engine/conditions/include/conditions/`
 | Work verification | Full header chain download, or trust the compiled checkpoint wholesale | FlyClient-style MMR/MMB sampling proof against an operator-visible checkpoint (proves *work*, not state — phase 2) |
 | Bundle self-consistency | Bundle content checked only against the compiled checkpoint at install | Bundle header additionally commits its own state root, so a bundle cannot silently disagree with itself (phase 2) — still not a chain-header commitment |
 | State-to-header binding | None at arbitrary heights; checkpoint height only, via re-derivation against the compiled checkpoint | Unchanged through phase 2 — checkpoint-height re-derivation remains mandatory; header commitment of the state root at arbitrary heights arrives only in phase 3 (consensus change) |
-| Freshness | No contract; a stale or absent bundle looks the same as "healthy but nothing new" (`bundle_exporter.c:167-172`) | 576-block offer ceiling, loud typed refusal naming the newest height seen, fold-forward never silent-to-genesis |
+| Freshness | No contract; a stale or absent bundle looks the same as "healthy but nothing new" (`bundle_exporter.c:167-172`) | 576-block offer ceiling (exempt at exactly the compiled checkpoint height, which never goes stale), loud typed refusal naming the newest height seen, fold-forward never silent-to-genesis |
 | Serving | Nothing serves via the peer link at all | On by default for any node holding a trusted bundle, with a bandwidth budget and opt-out |
 | Post-upgrade producer recovery | None — ticks forever reporting a healthy-looking zero/zero | Automatic retry named as the bundlefresh lane's acceptance line (phase 1) |
 

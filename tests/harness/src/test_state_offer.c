@@ -10,6 +10,7 @@
 #include "test/test_core.h"
 
 #include "base/bytes.h"
+#include "chain/checkpoints.h"
 #include "crypto/ed25519.h"
 #include "net/state_offer.h"
 
@@ -188,6 +189,68 @@ static int offer_freshness_refusal(void)
         ASSERT_EQ(state_offer_v1_validate(&above), STATE_OFFER_HEIGHT);
         make_offer(&above, 0, 1000000);
         ASSERT_EQ(state_offer_v1_validate(&above), STATE_OFFER_HEIGHT);
+    } TEST_END
+    return failures;
+}
+
+static int offer_checkpoint_exemption(void)
+{
+    int failures = 0;
+    TEST_CASE("an offer at the compiled checkpoint height is fresh no matter "
+              "how far it trails the tip") {
+        struct sha3_utxo_checkpoint fixture;
+        memset(&fixture, 0, sizeof(fixture));
+        fixture.height = 500000;
+        checkpoints_set_sha3_override_for_test(&fixture);
+
+        /* Far outside the 576-block window on purpose — this is the whole
+         * point of the exemption. */
+        int32_t tip = fixture.height + 184000;
+        ASSERT(state_offer_height_is_fresh(fixture.height, tip));
+        /* One block off the exempt height, same distance from tip: the
+         * ordinary window rule still applies and still refuses it. */
+        ASSERT(!state_offer_height_is_fresh(fixture.height - 1, tip));
+        ASSERT(!state_offer_height_is_fresh(fixture.height + 1, tip));
+        /* bundle_height <= 0 is refused even AT the checkpoint height — the
+         * exemption widens the window, it does not bypass the sign/bounds
+         * checks. */
+        ASSERT(!state_offer_height_is_fresh(0, tip));
+
+        struct state_offer_v1 offer;
+        uint8_t seed[32];
+        seed_bytes(seed, 0x33);
+        make_offer(&offer, fixture.height, tip);
+        ASSERT_EQ(state_offer_v1_validate(&offer), STATE_OFFER_OK);
+        ASSERT_EQ(state_offer_v1_sign(&offer, seed), STATE_OFFER_OK);
+        uint8_t wire[STATE_OFFER_V1_WIRE_BYTES];
+        ASSERT_EQ(state_offer_v1_encode(&offer, wire), STATE_OFFER_OK);
+        struct state_offer_v1 back;
+        ASSERT_EQ(state_offer_v1_decode(&back, wire, sizeof(wire)),
+                  STATE_OFFER_OK);
+        ASSERT_EQ(state_offer_v1_verify(&back), STATE_OFFER_OK);
+
+        /* A batch carrying only a checkpoint-height offer decodes intact —
+         * the batch loop applies the same per-row classifier. */
+        struct state_offer_batch_v1 batch;
+        memset(&batch, 0, sizeof(batch));
+        batch.version = STATE_OFFER_VERSION;
+        batch.count = 1;
+        batch.offerer_tip_height = tip;
+        batch.offers[0] = offer;
+        ASSERT_EQ(state_offer_batch_v1_validate(&batch), STATE_OFFER_OK);
+        uint8_t batch_wire[STATE_OFFER_BATCH_V1_MAX_WIRE_BYTES];
+        size_t batch_len = 0;
+        ASSERT_EQ(state_offer_batch_v1_encode(&batch, batch_wire,
+                                              sizeof(batch_wire), &batch_len),
+                  STATE_OFFER_OK);
+        struct state_offer_batch_v1 batch_back;
+        ASSERT_EQ(state_offer_batch_v1_decode(&batch_back, batch_wire,
+                                              batch_len),
+                  STATE_OFFER_OK);
+        ASSERT(batch_back.count == 1);
+        ASSERT(batch_back.offers[0].bundle_height == fixture.height);
+
+        checkpoints_reset_sha3_override_for_test();
     } TEST_END
     return failures;
 }
@@ -546,6 +609,7 @@ int test_state_offer(void)
 
     failures += offer_roundtrip();
     failures += offer_freshness_refusal();
+    failures += offer_checkpoint_exemption();
     failures += offer_field_refusals();
     failures += offer_signature();
     failures += batch_cap_and_bounds();

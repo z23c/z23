@@ -100,3 +100,7 @@ later lane flips it HARD.
 - 2026-09-06T19:29:27Z — REASON: reseal https_server_install.c land
   old ROOT: 45b721d0466f435e5d7c3c3f59fb61a8aad6a7c485aa6677fbcddb69b31fdf99
   by: owner unseal ritual (make core-unseal)
+
+- 2026-09-06T14:11:00Z — REASON: checkpoint-bound state offers never go stale (owner-authorized 2026-09-06 14:05Z, fast sync)
+  old ROOT: 30e82cac24cf9fb5f44c2e8de1af6d7fec714eae51c7a827e7809f35ba648a54
+  by: owner unseal ritual (make core-unseal)

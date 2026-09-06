@@ -97,7 +97,10 @@ What a consuming node does with them:
 - **Freshness is a refusal, not a preference.** An offer more than 576 blocks
   behind the *offering* peer's own tip is refused on parse, so a stale offer
   can never teach a consumer a wrong newest height. A node does not mint such
-  an offer either — the same predicate decides both sides.
+  an offer either — the same predicate decides both sides. The one exception:
+  an offer at exactly the compiled checkpoint height is always fresh, however
+  old — the installer already grants that bundle full sovereign trust by
+  height alone, so the 576-block window does not apply to it.
 - **An offer is a claim, never an authority.** The bytes are fetched through
   the unchanged ROM path: every chunk is content-verified against the offer's
   own chunk root *before* it is written, the whole file is SHA3-checked before
