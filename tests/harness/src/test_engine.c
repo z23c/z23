@@ -2425,6 +2425,15 @@ static int case_engine_unit_state_e2e(void)
     char chain[32768] = {0};
     const bool have_chain = read_whole_file(chain_path, chain, sizeof(chain));
 
+    char run_log_txt[4096] = {0};
+    char run_log_path[700];
+    (void)snprintf(run_log_path, sizeof(run_log_path), "%s/run.log", dir);
+    const bool have_run_log = read_whole_file(run_log_path, run_log_txt,
+                                              sizeof(run_log_txt));
+    EN_CHECK("--no-group fixture skips worktree-prime",
+             have_run_log
+             && strstr(run_log_txt, "prime skipped") != NULL
+             && strstr(run_log_txt, "could not prime") == NULL);
     EN_CHECK("the harness wrote state.txt after turn 1's reply", have_state);
     EN_CHECK("state.txt holds what turn 1's model wrote",
              have_state
@@ -2462,12 +2471,10 @@ static int case_engine_unit_state_e2e(void)
              strstr(chain, "\"cumulative_proof_ms\":0") &&
              strstr(chain, "\"unit_elapsed_ms\":"));
 
-    /* worktree_prepare() names the branch "engine/unit" whenever no
-     * --territory is given (as here), a FIXED name — so a worktree and
-     * branch left behind by this run would make the NEXT run's `git
-     * worktree add -b engine/unit` refuse outright. Best-effort, since the
-     * assertions above already ran: a failure to tidy up is not this case's
-     * failure to report. */
+    /* worktree_prepare() now adds a detached worktree, so a leftover cannot
+     * pin a branch name. Still remove the path: a killed run would otherwise
+     * leave a registered worktree under test-tmp. Best-effort, since the
+     * assertions above already ran. */
     char cleanup_cmd[1024];
     (void)snprintf(cleanup_cmd, sizeof(cleanup_cmd),
                    "git worktree remove %s --force >/dev/null 2>&1; "

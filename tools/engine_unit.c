@@ -458,28 +458,36 @@ static bool worktree_prepare(const struct unit_opts *o, char *out, size_t out_le
         engine_emit(stdout, "  worktree:   %s (existing)\n", out);
         return true;
     }
-    char branch[256];
-    (void)snprintf(branch, sizeof(branch), "engine/%s",
-                   o->territory && o->territory[0] ? o->territory : "unit");
-    const char *const add[] = { "git", "worktree", "add", "-b", branch,
+    /* Detached: a leftover `engine/unit` branch from a killed e2e run used
+     * to make the next `git worktree add -b engine/unit` refuse, so the
+     * fixture harness could not write state.txt. This program never pushes
+     * the worktree; the path is the identity the operator inspects. */
+    const char *const add[] = { "git", "worktree", "add", "--detach",
                                 out, "HEAD", NULL };
     char log[8192];
     if (run(add, log, sizeof(log), 120000) != 0)
         LOG_FAIL("engine_unit", "could not create the worktree at %s", out);
 
-    /* A git worktree does NOT inherit vendor archives or submodules. Skip this
-     * and the gate still builds — against the Tor STUB — and the failure
-     * surfaces about twenty-five minutes later, at ship time, long after the
-     * verdict was written. A gate that measured the wrong binary is exactly
-     * the hollow green this program exists to refuse, so priming is part of
-     * creating the worktree and its failure is the run's failure. */
+    /* --no-group never runs the gate, so a stub vendor tree cannot become a
+     * hollow green. Priming copies archives and initializes vendor/tor; on a
+     * nested worktree that work exceeds the 300s group budget and is why
+     * test_engine's fixture e2e failed under proof load. Skip it here.
+     * A git worktree that WILL run the gate still must prime: without vendor
+     * archives the gate builds against the Tor STUB and the failure surfaces
+     * about twenty-five minutes later at ship time. */
+    if (o->no_group) {
+        engine_emit(stdout,
+                    "  worktree:   %s (created detached; prime skipped: "
+                    "--no-group, no gate to measure)\n",
+                    out);
+        return true;
+    }
     const char *const prime[] = { "make", "-C", out, "worktree-prime", NULL };
     if (run(prime, log, sizeof(log), 600000) != 0)
         LOG_FAIL("engine_unit",
                  "could not prime %s: without vendor archives the gate would "
                  "measure a stub build", out);
-    engine_emit(stdout, "  worktree:   %s (created on %s, primed)\n", out,
-                branch);
+    engine_emit(stdout, "  worktree:   %s (created detached, primed)\n", out);
     return true;
 }
 
