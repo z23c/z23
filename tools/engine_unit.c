@@ -444,6 +444,21 @@ static bool state_dir_prepare(const struct unit_opts *o)
     return true;
 }
 
+/* An existing worktree is never primed, no matter whether the caller asked
+ * for --no-group. Say so explicitly when --no-group is set, so an operator
+ * (and the --no-group fixture, which pre-creates its worktree) can see that
+ * priming was skipped rather than simply never mentioned. */
+static void emit_worktree_existing(const struct unit_opts *o, const char *out)
+{
+    if (o->no_group)
+        engine_emit(stdout,
+                    "  worktree:   %s (existing; prime skipped: --no-group, "
+                    "no gate to measure)\n",
+                    out);
+    else
+        engine_emit(stdout, "  worktree:   %s (existing)\n", out);
+}
+
 static bool worktree_prepare(const struct unit_opts *o, char *out, size_t out_len)
 {
     if (!o->worktree || !o->worktree[0])
@@ -455,7 +470,7 @@ static bool worktree_prepare(const struct unit_opts *o, char *out, size_t out_le
                  "refusing a relative --worktree; pass an absolute path");
     (void)snprintf(out, out_len, "%s", o->worktree);
     if (worktree_exists(out)) {
-        engine_emit(stdout, "  worktree:   %s (existing)\n", out);
+        emit_worktree_existing(o, out);
         return true;
     }
     /* Detached: a leftover `engine/unit` branch from a killed e2e run used
