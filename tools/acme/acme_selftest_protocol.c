@@ -288,7 +288,7 @@ static int selftest_jws(void)
                                    "https://ca.example/x", "{}");
         AJ_CHECK("a nonce carrying a quote is refused, not escaped", body == NULL);
         free(body);
-        body = acme_jws_body(key, "kid\\bad", "nonce", "https://ca.example/x", "{}");
+        body = acme_jws_body(key, "kid\\bad", "nonce", "https://ca.example/x", "{}"); // posix-ere-ok:jws-backslash-fixture
         AJ_CHECK("a kid carrying a backslash is refused", body == NULL);
         free(body);
         body = acme_jws_body(key, NULL, "nonce", NULL, "{}");

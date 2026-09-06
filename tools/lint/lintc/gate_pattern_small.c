@@ -7,7 +7,7 @@
  */
 
 /*
- * Gates: check-no-python, check-malloc, check-dev-proof-native-fast-path, check-before-save-hooks, check-pthread-create, check-silent-error-returns, check-no-gnu-va-args, check-blob-read-bounds
+ * Gates: check-no-python, check-malloc, check-dev-proof-native-fast-path, check-before-save-hooks, check-pthread-create, check-silent-error-returns, check-no-gnu-va-args, check-blob-read-bounds, check-posix-ere-only
  * Default landing spot for a FUTURE gate port: a filesystem-tree-walking
  * gate (walk_src/clock_walk/repo_shape_room_dirs) joins gate_tree_walk.c;
  * a git-tracked-enumeration gate (each_zpath/each_zpath_st) joins whichever
@@ -1060,4 +1060,142 @@ int check_blob_read_bounds_selftest(void)
     bad |= brb_st_line(&b, var_cp, 0, NULL);
     brb_free(&b, 6);
     return st_ok(bad, "check_blob_read_bounds selftest: OK\n");
+}
+
+
+/* GNU ERE extension letters after a backslash. The two-byte bigram is never
+ * written adjacent in this file: the match pattern and the --selftest fixture
+ * are joined at runtime (same fragment technique as so_comp / the
+ * check_no_shellouts selftest fixture). */
+static int ere_gnu_letter(unsigned char c)
+{
+    return c == 'b' || c == 'B' || c == 'w' || c == 'W'
+        || c == 's' || c == 'S' || c == 'd' || c == 'D'
+        || c == '<' || c == '>';
+}
+
+static int ere_letter_at(const char *line)
+{
+    for (const char *p = line; *p; p++) {
+        if ((unsigned char)*p == '\\' && ere_gnu_letter((unsigned char)p[1]))
+            return (unsigned char)p[1];
+    }
+    return 0;
+}
+
+static int ere_comp(regex_t *re)
+{
+    char pat[32];
+    int n = snprintf(pat, sizeof pat, "%s%s", "\\\\[", "bBwWsSdD<>]");
+    if (n < 0 || (size_t)n >= sizeof pat)
+        return die("z23-lint: pattern buffer overflow\n", "");
+    return reg_fail(re, regcomp(re, pat, REG_EXTENDED));
+}
+
+static int ere_should_report(const char *path, const char *line)
+{
+    if (lint_path_is_excluded(path))
+        return 0;
+    if (strstr(line, "// posix-ere-ok:") != NULL)
+        return 0;
+    return ere_letter_at(line);
+}
+
+struct ere_acc { int hits; };
+
+static int scan_ere(const char *path, void *ctx)
+{
+    struct ere_acc *a = ctx;
+    if (lint_path_is_excluded(path))
+        return 0;
+    FILE *f = fopen(path, "r");
+    if (!f)
+        return die("z23-lint: cannot open %s\n", path);
+    char *line = NULL;
+    size_t cap = 0;
+    ssize_t n;
+    int lineno = 0, rc = 0;
+    while ((n = getline(&line, &cap, f)) >= 0) {
+        lineno++;
+        if (n > 0 && line[n - 1] == '\n')
+            line[n - 1] = '\0';
+        int x = ere_should_report(path, line);
+        if (!x)
+            continue;
+        if (fprintf(stderr, "%s:%d: \\%c\n", path, lineno, x) < 0) {
+            rc = die("z23-lint: write failed\n", "");
+            break;
+        }
+        a->hits++;
+    }
+    return fin(f, line, path, rc);
+}
+
+int check_posix_ere_only_run(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+    struct ere_acc a = { .hits = 0 };
+    int rc = walk_src("tools", 0, scan_ere, &a);
+    if (rc)
+        return rc;
+    if (a.hits) {
+        if (fputs("check-posix-ere-only: replace a GNU regex-extension escape "
+                  "with a POSIX ERE boundary form - (^|[^[:alnum:]_]) before, "
+                  "([^[:alnum:]_]|$) after\n", stderr) < 0)
+            return die("z23-lint: write failed\n", "");
+        return 1;
+    }
+    return printf("[check_posix_ere_only] 0 violation(s) found\n") < 0
+               ? die("z23-lint: write failed\n", "") : 0;
+}
+
+int check_posix_ere_only_selftest(void)
+{
+    regex_t re;
+    int cr = ere_comp(&re);
+    if (cr)
+        return cr;
+    char hit[72], clean[72], marked[96];
+    if (ovf(snprintf(hit, sizeof hit, "regcomp(&re, \"%s%s", "\\",
+                     "b\", REG_EXTENDED);"), sizeof hit)
+        || ovf(snprintf(clean, sizeof clean, "%s",
+                        "regcomp(&re, \"[[:space:]]+\", REG_EXTENDED);"),
+               sizeof clean)
+        || ovf(snprintf(marked, sizeof marked, "%s // posix-ere-ok:selftest",
+                        hit), sizeof marked)) {
+        regfree(&re);
+        return 2;
+    }
+    const char *t = "check_posix_ere_only";
+    const char *real = "tools/lint/lintc/x.c";
+    const char *excl = "tools/lint/fixtures/planted/x.c";
+    int bad = want(t, &re, hit, 1) | want(t, &re, clean, 0) | want(t, &re, marked, 1)
+            | (ere_letter_at(hit) != 'b') | (ere_letter_at(clean) != 0)
+            | (ere_should_report(real, hit) != 'b')
+            | (ere_should_report(real, clean) != 0)
+            | (ere_should_report(real, marked) != 0);
+    const char *old = getenv("ZCL_LINT_PRODUCTION_SCAN");
+    char saved[16];
+    int had = 0;
+    if (old) {
+        if (ovf(snprintf(saved, sizeof saved, "%s", old), sizeof saved)) {
+            regfree(&re);
+            return 2;
+        }
+        had = 1;
+    }
+    if (setenv("ZCL_LINT_PRODUCTION_SCAN", "1", 1) != 0)
+        bad = 1;
+    bad |= (ere_should_report(excl, hit) != 0)
+        | (ere_should_report(real, hit) != 'b')
+        | !lint_path_is_excluded(excl)
+        | lint_path_is_excluded(real);
+    if (had)
+        (void)setenv("ZCL_LINT_PRODUCTION_SCAN", saved, 1);
+    else
+        (void)unsetenv("ZCL_LINT_PRODUCTION_SCAN");
+    bad |= lint_path_is_excluded(excl);
+    regfree(&re);
+    return st_ok(bad, "check_posix_ere_only selftest: OK\n");
 }

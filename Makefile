@@ -2791,7 +2791,7 @@ $(filter-out $(ZCL_VENDOR_LIB)/libsecp256k1.a,$(VENDOR_LIBS)):
         install-replay-canary replay-canary-linger-status \
         coverage coverage-clean ci audit release \
         bench bench-crypto-verify bench-regress \
-	lint check-build-epoch-integrity check-checkout-lock check-malloc check-raw-sqlite check-vcs-no-git check-vcs-no-sha1 check-raw-malloc check-json-value-init check-stable-publish-contained check-no-retired-agent-protocol check-dev-proof-native-fast-path \
+	lint check-build-epoch-integrity check-checkout-lock check-malloc check-posix-ere-only check-raw-sqlite check-vcs-no-git check-vcs-no-sha1 check-raw-malloc check-json-value-init check-stable-publish-contained check-no-retired-agent-protocol check-dev-proof-native-fast-path \
         check-coins-lookup-nullcheck check-observability-pairing \
         check-silent-errors-services check-silent-errors-controllers \
         check-silent-errors-jobs check-silent-errors-conditions check-silent-errors-bool \
@@ -11840,6 +11840,10 @@ check-no-api-keys: $(LINTC_TOOL)
 	@echo "→ Gate: no_api_keys (no committed credential)"
 	@./tools/lint/check_no_api_keys.sh
 
+check-posix-ere-only: $(LINTC_TOOL)
+	@echo "══ LINT: POSIX ERE only in lint-runtime regex patterns ══"
+	@./tools/lint/check_posix_ere_only.sh
+
 # The cheap half of the fuzz-artifact replay contract (21 ms, text + git only):
 # every saved finding under tests/harness/fuzz_seeds/ has a live fuzz binary behind
 # it and a written verdict in ARTIFACT_VERDICTS.txt, with no orphan entries and
@@ -13274,6 +13278,7 @@ LINT_GATES := \
     check-sandbox-wired \
     check-no-shellouts \
     check-no-api-keys \
+    check-posix-ere-only \
     check-no-writer-below-sealed-frontier \
     check-peer-floor-single-source \
     check-proc-self-shim \

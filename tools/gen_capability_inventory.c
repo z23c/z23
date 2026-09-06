@@ -64,7 +64,7 @@ static void json_string(FILE *out, const char *text)
         switch (*p) {
         case '"': fputs("\\\"", out); break;
         case '\\': fputs("\\\\", out); break;
-        case '\b': fputs("\\b", out); break;
+        case '\b': fputs("\\b", out); break; // posix-ere-ok:json-backspace-escape
         case '\f': fputs("\\f", out); break;
         case '\n': fputs("\\n", out); break;
         case '\r': fputs("\\r", out); break;

@@ -283,6 +283,7 @@ assert green).
 | `check-observability-pairing` | HARD | `fprintf(stderr,…)` pairs with an event emit / terminal propagation. Override `// obs-ok:<tag>`. |
 | `check-no-hardlink-seeding` | HARD | Regular files beneath `vendor/`, `build/hotswap/`, and `build/githooks/`, including ignored dependencies, must own their inodes (`st_nlink == 1`). Lint and native landing share the uncached bounded C23 scanner; symlinks are not traversed. Native landing preflights the whole set and repairs only exact two-link donor/landing pairs with the independent generation materializer; unexplained aliases refuse by filename. Manual repair requires no proof in flight because replacement changes donor ctime. These pathname observations are not immutable proof or cross-process exclusion. |
 | `check-pthread-create` | HARD | Thread spawns go through the sanctioned registry, not raw `pthread_create`. |
+| `check-posix-ere-only` | HARD | GNU regex-extension escapes in `tools/*.c` source text (`regcomp(REG_EXTENDED)` is POSIX ERE only; macOS libc rejects GNU `\b`). Override `// posix-ere-ok:<reason>`. |
 | `check-no-runtime-abort` | RATCHET | New runtime `assert(` / `abort(` in network-reachable modules. `_Static_assert` is NOT counted. Override `// abort-ok:<reason>`. |
 
 ### Detailed gates
@@ -1356,6 +1357,7 @@ add/remove a gate.
 - `check-telemetry-ontology`
 - `check-privileged-transition-receipt`
 - `check-no-gnu-va-args`
+- `check-posix-ere-only`
 - `check-no-snapshot-struct-memcmp`
 - `check-clang-portability`
 - `check-windows-platform-seam`

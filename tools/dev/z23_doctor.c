@@ -212,7 +212,7 @@ static bool find_prog(const char *name, char *out, size_t cap)
     path = getenv("PATH");
     if (path == NULL || path[0] == 0)
 #if defined(_WIN32)
-        path = "C:\\Windows\\System32";
+        path = "C:\\Windows\\System32"; // posix-ere-ok:windows-path-literal
 #else
         path = "/usr/bin:/bin:/usr/local/bin";
 #endif

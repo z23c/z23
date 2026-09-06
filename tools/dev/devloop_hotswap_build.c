@@ -2158,7 +2158,7 @@ static int hs_hotfork_unity_source(
             " if (x) out->checks_passed++; else failed|=1u<<n; } while(0)\n"
             " HF_CHECK(path_is_safe(\"tools/dev/a.c\")"
             " && !path_is_safe(\"../a.c\") && !path_is_safe(\"/a.c\")"
-            " && !path_is_safe(\"a\\\\b.c\") && !path_is_safe(NULL));"
+            " && !path_is_safe(\"a\\\\b.c\") && !path_is_safe(NULL));" // posix-ere-ok:windows-path-literal
             " HF_CHECK(path_is_docs(\"docs/a.md\") && path_is_docs(\"README.md\")"
             " && !path_is_docs(\"lib/a.c\")"
             " && zcl_devloop_path_is_sealed_core(\"core/math/a.c\")"
