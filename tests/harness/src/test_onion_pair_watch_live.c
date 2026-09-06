@@ -218,7 +218,7 @@ static int opw_run_watched(const char *script_abs, const char *ledger_abs,
             for (int i = 0; i < 50; i++) {
                 if (waitpid(pid, &rc, WNOHANG) == pid) { wedged = 1; goto done; }
                 struct timespec ts = {0, 100 * 1000 * 1000};
-                nanosleep(&ts, NULL);
+                nanosleep(&ts, NULL); /* real-clock: SIGTERM grace — polls the kernel to reap a real child before SIGKILL; no fake-clock seam */
             }
             kill(-pid, SIGKILL);
             while (waitpid(pid, &rc, 0) < 0 && errno == EINTR) { }
