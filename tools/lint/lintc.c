@@ -3203,6 +3203,881 @@ static int check_error_doc_refs_selftest(void)
     return st_ok(bad, "check_error_doc_refs selftest: OK\n");
 }
 
+static const char k_csr_mirror[] =
+    "engine/modules/hotswap/include/hotswap/core_seal_root.h";
+static const char k_csr_mod[] =
+    "engine/modules/hotswap/include/hotswap/hotswap_module.h";
+static const char k_csr_act[] = "engine/modules/hotswap/src/hotswap_activate.c";
+static const char k_csr_gen[] = "tools/scripts/gen_core_seal_root.sh";
+
+static int csr_note(FILE *out, const char *msg)
+{
+    return fprintf(out, "  %s\n", msg) < 0 ? die("z23-lint: write failed\n", "") : 0;
+}
+
+static int csr_bad(FILE *err, int *fail, const char *msg)
+{
+    *fail = 1;
+    return fprintf(err, "core_seal_root_mirror: FAIL — %s\n", msg) < 0
+               ? die("z23-lint: write failed\n", "") : 0;
+}
+
+static int csr_readable(const char *path)
+{
+    return access(path, R_OK) == 0;
+}
+
+static int capture_cmd(const char *cmd, char *out, size_t cap, int *code)
+{
+    FILE *p = popen(cmd, "r");
+    if (!p)
+        return die("z23-lint: popen failed (%s)\n", cmd);
+    size_t used = 0;
+    out[0] = '\0';
+    int rc = 0;
+    char buf[4096];
+    size_t n;
+    while ((n = fread(buf, 1, sizeof buf, p)) > 0) {
+        if (used + n >= cap) {
+            rc = die("z23-lint: derived buffer overflow\n", "");
+            break;
+        }
+        memcpy(out + used, buf, n);
+        used += n;
+        out[used] = '\0';
+    }
+    if (rc == 0 && ferror(p))
+        rc = die("z23-lint: read failed (%s)\n", cmd);
+    int st = pclose(p);
+    if (rc)
+        return rc;
+    while (used && out[used - 1] == '\n')
+        out[--used] = '\0';
+    if (st == -1)
+        *code = 127;
+    else if (WIFEXITED(st))
+        *code = WEXITSTATUS(st);
+    else
+        *code = 127;
+    return 0;
+}
+
+static int csr_file_pred(const char *path, int (*pred)(const char *), int *found)
+{
+    FILE *f = fopen(path, "r");
+    if (!f) {
+        *found = 0;
+        return 0;
+    }
+    char *line = NULL;
+    size_t cap = 0;
+    ssize_t n;
+    int rc = 0;
+    *found = 0;
+    while ((n = getline(&line, &cap, f)) >= 0) {
+        if (n > 0 && line[n - 1] == '\n')
+            line[n - 1] = '\0';
+        if (pred(line)) {
+            *found = 1;
+            break;
+        }
+    }
+    return fin(f, line, path, rc);
+}
+
+static int csr_has_include(const char *line)
+{
+    static const char p[] = "#include \"" "hotswap/core_seal_root.h" "\"";
+    return strncmp(line, p, sizeof p - 1) == 0;
+}
+
+static int csr_has_pin(const char *line)
+{
+    return strstr(line, "zcl_hotswap_module_core_seal_root" "[] = "
+                        "ZCL_CORE_SEAL_ROOT;") != NULL;
+}
+
+static int csr_count_sub(const char *path, const char *needle, int *count)
+{
+    FILE *f = fopen(path, "r");
+    if (!f) {
+        *count = 0;
+        return 0;
+    }
+    char *line = NULL;
+    size_t cap = 0;
+    ssize_t n;
+    int rc = 0;
+    *count = 0;
+    while ((n = getline(&line, &cap, f)) >= 0) {
+        if (n > 0 && line[n - 1] == '\n')
+            line[--n] = '\0';
+        for (ssize_t i = 0; i < n; i++)
+            if (line[i] == '\0')
+                line[i] = ' ';
+        if (strstr(line, needle))
+            (*count)++;
+    }
+    return fin(f, line, path, rc);
+}
+
+static int csr_count_re(const char *path, const regex_t *re, int *count)
+{
+    FILE *f = fopen(path, "r");
+    if (!f) {
+        *count = 0;
+        return 0;
+    }
+    char *line = NULL;
+    size_t cap = 0;
+    ssize_t n;
+    int rc = 0;
+    *count = 0;
+    while ((n = getline(&line, &cap, f)) >= 0) {
+        if (n > 0 && line[n - 1] == '\n')
+            line[--n] = '\0';
+        for (ssize_t i = 0; i < n; i++)
+            if (line[i] == '\0')
+                line[i] = ' ';
+        if (regexec(re, line, 0, NULL, 0) == 0)
+            (*count)++;
+    }
+    return fin(f, line, path, rc);
+}
+
+static int csr_comp_dlsym(regex_t *re)
+{
+    return compile_pat(re, REG_EXTENDED,
+                       "dl" "sym\\(handle,($|[[:space:]]",
+                       "ZCL_HOTSWAP_MODULE_SYMBOL\\))", "", "");
+}
+
+static int csr_footer(FILE *err)
+{
+    if (fputs("core_seal_root_mirror: the hot-swap consensus pin is broken.\n", err) < 0
+        || fputs("  A module built against a different sealed consensus core carries its own\n",
+                 err) < 0
+        || fputs("  stale copy of the inline consensus arithmetic. The pin is what refuses it.\n",
+                 err) < 0)
+        return die("z23-lint: write failed\n", "");
+    return 1;
+}
+
+static int csr_check(FILE *out, FILE *err)
+{
+    static const char *const files[] = {
+        k_csr_mirror, k_csr_mod, k_csr_act, k_csr_gen
+    };
+    int fail = 0, rc = 0;
+    for (size_t i = 0; i < sizeof files / sizeof files[0]; i++) {
+        if (csr_readable(files[i]))
+            continue;
+        char msg[4096];
+        if (ovf(snprintf(msg, sizeof msg, "%s is missing or unreadable", files[i]),
+                sizeof msg))
+            return 2;
+        rc = csr_bad(err, &fail, msg);
+        if (rc)
+            return rc;
+    }
+    if (fail)
+        return 1;
+
+    char cmd[256], genout[8192], msg[4096], note[8192];
+    if (ovf(snprintf(cmd, sizeof cmd, "bash %s --check 2>&1", k_csr_gen), sizeof cmd))
+        return 2;
+    int code = 0;
+    rc = capture_cmd(cmd, genout, sizeof genout, &code);
+    if (rc)
+        return rc;
+    if (code == 0) {
+        const char pfx[] = "core_seal_root: ";
+        const char *rest = strncmp(genout, pfx, sizeof pfx - 1) == 0
+                               ? genout + (sizeof pfx - 1) : genout;
+        if (ovf(snprintf(note, sizeof note, "current  : %s", rest), sizeof note))
+            return 2;
+        rc = csr_note(out, note);
+        if (rc)
+            return rc;
+    } else {
+        if (fprintf(err, "%s\n", genout) < 0)
+            return die("z23-lint: write failed\n", "");
+        rc = csr_bad(err, &fail,
+                     "the mirror does not match core/MANIFEST.sha3 (run 'make core-seal')");
+        if (rc)
+            return rc;
+    }
+
+    int found = 0;
+    rc = csr_file_pred(k_csr_mod, csr_has_include, &found);
+    if (rc)
+        return rc;
+    if (found) {
+        if (ovf(snprintf(note, sizeof note, "exported : %s includes the mirror", k_csr_mod),
+                sizeof note))
+            return 2;
+        rc = csr_note(out, note);
+        if (rc)
+            return rc;
+    } else {
+        if (ovf(snprintf(msg, sizeof msg,
+                         "%s does not include \"hotswap/core_seal_root.h\" — "
+                         "modules would compile without a pin", k_csr_mod),
+                sizeof msg))
+            return 2;
+        rc = csr_bad(err, &fail, msg);
+        if (rc)
+            return rc;
+    }
+
+    rc = csr_file_pred(k_csr_mod, csr_has_pin, &found);
+    if (rc)
+        return rc;
+    if (found) {
+        rc = csr_note(out, "exported : the module emitter stamps the pin symbol");
+        if (rc)
+            return rc;
+    } else {
+        if (ovf(snprintf(msg, sizeof msg,
+                         "%s's ZCL_HOTSWAP_MODULE_LEAVES does not emit "
+                         "zcl_hotswap_module_core_seal_root", k_csr_mod),
+                sizeof msg))
+            return 2;
+        rc = csr_bad(err, &fail, msg);
+        if (rc)
+            return rc;
+    }
+
+    int enforced = 0;
+    rc = csr_count_sub(k_csr_act, "module_consensus_pin_ok(", &enforced);
+    if (rc)
+        return rc;
+    if (enforced >= 3) {
+        if (ovf(snprintf(note, sizeof note,
+                         "enforced : %s checks the pin on %d dlsym path(s)",
+                         k_csr_act, enforced - 1),
+                sizeof note))
+            return 2;
+        rc = csr_note(out, note);
+        if (rc)
+            return rc;
+    } else {
+        if (ovf(snprintf(msg, sizeof msg,
+                         "%s has %d module_consensus_pin_ok reference(s); "
+                         "expected a definition plus a call on BOTH dlsym paths",
+                         k_csr_act, enforced),
+                sizeof msg))
+            return 2;
+        rc = csr_bad(err, &fail, msg);
+        if (rc)
+            return rc;
+    }
+
+    regex_t dlre;
+    rc = csr_comp_dlsym(&dlre);
+    if (rc)
+        return rc;
+    int sites = 0;
+    rc = csr_count_re(k_csr_act, &dlre, &sites);
+    regfree(&dlre);
+    if (rc)
+        return rc;
+    if (sites != enforced - 1) {
+        if (ovf(snprintf(msg, sizeof msg,
+                         "%s resolves %d zcl_hotswap_module symbol(s) but pins %d; "
+                         "every dlsym path must carry the check",
+                         k_csr_act, sites, enforced - 1),
+                sizeof msg))
+            return 2;
+        rc = csr_bad(err, &fail, msg);
+        if (rc)
+            return rc;
+    }
+
+    if (fail)
+        return csr_footer(err);
+    return fputs("core_seal_root_mirror: OK — pin current, exported by the module "
+                 "emitter, enforced on every dlsym path\n", out) < 0
+               ? die("z23-lint: write failed\n", "") : 0;
+}
+
+static int check_core_seal_root_mirror_run(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+    return csr_check(stdout, stderr);
+}
+
+static int csr_mkdirs(const char *path)
+{
+    char buf[4096];
+    if (ovf(snprintf(buf, sizeof buf, "%s", path), sizeof buf))
+        return 2;
+    for (char *p = buf + 1; *p; p++) {
+        if (*p != '/')
+            continue;
+        *p = '\0';
+        if (mkdir(buf, 0700) != 0 && errno != EEXIST)
+            return die("z23-lint: mkdir failed: %s\n", buf);
+        *p = '/';
+    }
+    if (mkdir(buf, 0700) != 0 && errno != EEXIST)
+        return die("z23-lint: mkdir failed: %s\n", buf);
+    return 0;
+}
+
+static int csr_write(const char *path, const char *text)
+{
+    char dir[4096];
+    const char *slash = strrchr(path, '/');
+    if (!slash)
+        return die("z23-lint: path too long: %s\n", path);
+    size_t n = (size_t)(slash - path);
+    if (n >= sizeof dir)
+        return die("z23-lint: path too long: %s\n", path);
+    memcpy(dir, path, n);
+    dir[n] = '\0';
+    int rc = csr_mkdirs(dir);
+    if (rc)
+        return rc;
+    FILE *f = fopen(path, "w");
+    if (!f)
+        return die("z23-lint: cannot open %s\n", path);
+    size_t len = strlen(text);
+    rc = fwrite(text, 1, len, f) != len;
+    if (fclose(f) != 0 && rc == 0)
+        return die("z23-lint: fclose failed: %s\n", path);
+    return rc ? die("z23-lint: write failed\n", "") : 0;
+}
+
+static int csr_slurp(FILE *f, char *buf, size_t cap)
+{
+    rewind(f);
+    size_t n = fread(buf, 1, cap - 1, f);
+    buf[n] = '\0';
+    return ferror(f) ? die("z23-lint: read failed\n", "") : 0;
+}
+
+static int csr_plant_act(const char *path)
+{
+    char body[512];
+    int n = snprintf(body, sizeof body,
+                     "static bool module_consensus_pin_ok(void *h) { (void)h; return 1; }\n"
+                     "void mount(void *handle) {\n"
+                     "    (void)dl" "sym(handle, ZCL_HOTSWAP_MODULE_SYMBOL);\n"
+                     "    module_consensus_pin_ok(handle);\n"
+                     "}\n"
+                     "void verify(void *handle) {\n"
+                     "    (void)dl" "sym(handle,\n"
+                     "    module_consensus_pin_ok(handle);\n"
+                     "}\n");
+    if (ovf(n, sizeof body))
+        return 2;
+    return csr_write(path, body);
+}
+
+static int csr_plant_mod(const char *path, int with_include)
+{
+    char body[256];
+    int n;
+    if (with_include)
+        n = snprintf(body, sizeof body,
+                     "#include \"" "hotswap/core_seal_root.h" "\"\n"
+                     "const char zcl_hotswap_module_core_seal_root" "[] = "
+                     "ZCL_CORE_SEAL_ROOT;\n");
+    else
+        n = snprintf(body, sizeof body,
+                     "const char zcl_hotswap_module_core_seal_root" "[] = "
+                     "ZCL_CORE_SEAL_ROOT;\n");
+    if (ovf(n, sizeof body))
+        return 2;
+    return csr_write(path, body);
+}
+
+static int csr_plant_base(void)
+{
+    int rc = csr_write(k_csr_mirror, "/* fixture mirror */\n");
+    if (rc == 0)
+        rc = csr_plant_act(k_csr_act);
+    if (rc == 0)
+        rc = csr_write(k_csr_gen, "echo \"core_seal_root: OK — fixture\"\nexit 0\n");
+    return rc;
+}
+
+static int check_core_seal_root_mirror_selftest(void)
+{
+    char cwd[4096];
+    if (!getcwd(cwd, sizeof cwd))
+        return die("z23-lint: getcwd failed\n", "");
+    char tmpl[] = "/tmp/z23-lint-csr-XXXXXX";
+    char *root = mkdtemp(tmpl);
+    if (!root)
+        return die("z23-lint: mkdir failed: %s\n", "/tmp");
+    FILE *out = tmpfile(), *err = tmpfile();
+    if (!out || !err) {
+        if (out) fclose(out);
+        if (err) fclose(err);
+        rmdir(root);
+        return die("z23-lint: tmpfile failed\n", "");
+    }
+    char ob[4096], eb[4096];
+    int bad = 0, rc = 0;
+    if (chdir(root) != 0) {
+        fclose(out); fclose(err); rmdir(root);
+        return die("z23-lint: cannot scan %s\n", root);
+    }
+
+    rc = csr_check(out, err);
+    if (csr_slurp(out, ob, sizeof ob) || csr_slurp(err, eb, sizeof eb))
+        bad = 1;
+    bad |= rc != 1
+        || strstr(eb, "core_seal_root_mirror: FAIL — ") == NULL
+        || strstr(eb, " is missing or unreadable") == NULL;
+
+    rewind(out); rewind(err);
+    if (ftruncate(fileno(out), 0) != 0 || ftruncate(fileno(err), 0) != 0)
+        bad = 1;
+
+    if (csr_plant_base() || csr_plant_mod(k_csr_mod, 0))
+        bad = 1;
+    rc = csr_check(out, err);
+    if (csr_slurp(out, ob, sizeof ob) || csr_slurp(err, eb, sizeof eb))
+        bad = 1;
+    bad |= rc != 1
+        || strstr(eb, "does not include \"hotswap/core_seal_root.h\"") == NULL;
+
+    rewind(out); rewind(err);
+    if (ftruncate(fileno(out), 0) != 0 || ftruncate(fileno(err), 0) != 0)
+        bad = 1;
+    if (csr_plant_mod(k_csr_mod, 1))
+        bad = 1;
+    rc = csr_check(out, err);
+    if (csr_slurp(out, ob, sizeof ob) || csr_slurp(err, eb, sizeof eb))
+        bad = 1;
+    bad |= rc != 0
+        || strstr(ob, "core_seal_root_mirror: OK — pin current, exported by the "
+                      "module emitter, enforced on every dlsym path") == NULL;
+
+    fclose(out);
+    fclose(err);
+    unlink(k_csr_mirror);
+    unlink(k_csr_mod);
+    unlink(k_csr_act);
+    unlink(k_csr_gen);
+    (void)rmdir("engine/modules/hotswap/include/hotswap");
+    (void)rmdir("engine/modules/hotswap/include");
+    (void)rmdir("engine/modules/hotswap/src");
+    (void)rmdir("engine/modules/hotswap");
+    (void)rmdir("engine/modules");
+    (void)rmdir("engine");
+    (void)rmdir("tools/scripts");
+    (void)rmdir("tools");
+    if (chdir(cwd) != 0)
+        return die("z23-lint: cannot scan %s\n", cwd);
+    rmdir(root);
+    if (bad)
+        fputs("FAIL: check_core_seal_root_mirror selftest\n", stderr);
+    return st_ok(bad, "check_core_seal_root_mirror selftest: OK\n");
+}
+
+static const char k_pf_hdr[] = "core/modules/net/include/net/net.h";
+static const char *const k_pf_sites[] = {
+    "core/modules/net/src/connman.c",
+    "engine/supervisors/src/net_supervisor.c",
+    "engine/conditions/src/peer_floor_violated.c",
+};
+static const char *const k_pf_walk_roots[] = {
+    "lib", "app", "config", "core", "domain", "tools"
+};
+
+static int pf_comp_banned(regex_t *re)
+{
+    char pat[256];
+    int n = snprintf(pat, sizeof pat, "%s%s%s%s",
+                     "^[[:space:]]*#[[:space:]]*define[[:space:]]+(",
+                     "PEER_FLOOR_MIN|PEER_FLOOR_MIN_HEALTHY|",
+                     "PEER_FLOOR_TARGET|OUTBOUND_HEALTHY_FLOOR)",
+                     "[[:space:]]+[0-9]");
+    if (ovf(n, sizeof pat))
+        return 2;
+    return reg_fail(re, regcomp(re, pat, REG_EXTENDED));
+}
+
+static int pf_comp_def(regex_t *re)
+{
+    char pat[160];
+    int n = snprintf(pat, sizeof pat, "%s%s%s",
+                     "^[[:space:]]*#[[:space:]]*define[[:space:]]+",
+                     "ZCL_" "PEER_FLOOR_HEALTHY",
+                     "[[:space:]]+[0-9]");
+    if (ovf(n, sizeof pat))
+        return 2;
+    return reg_fail(re, regcomp(re, pat, REG_EXTENDED));
+}
+
+static int pf_comp_ref(regex_t *re)
+{
+    char pat[160];
+    int n = snprintf(pat, sizeof pat, "%s%s%s",
+                     "(^|[^[:alnum:]_])",
+                     "ZCL_" "PEER_FLOOR_HEALTHY",
+                     "([^[:alnum:]_]|$)");
+    if (ovf(n, sizeof pat))
+        return 2;
+    return reg_fail(re, regcomp(re, pat, REG_EXTENDED));
+}
+
+static int pf_count_re(const char *path, const regex_t *re, int *count)
+{
+    return csr_count_re(path, re, count);
+}
+
+static int pf_file_has_re(const char *path, const regex_t *re)
+{
+    int n = 0;
+    if (pf_count_re(path, re, &n))
+        return 0;
+    return n > 0;
+}
+
+enum { PF_MAX = 128, PF_NAME = 256 };
+struct pf_tree { char p[PF_MAX][PF_NAME]; int n; const regex_t *re; };
+
+static int pf_path_cmp(const void *a, const void *b)
+{
+    return strcmp((const char *)a, (const char *)b);
+}
+
+static int pf_add(struct pf_tree *t, const char *path)
+{
+    size_t n = strlen(path);
+    if (t->n >= PF_MAX || n >= PF_NAME)
+        return die("z23-lint: derived buffer overflow\n", "");
+    memcpy(t->p[t->n], path, n + 1);
+    t->n++;
+    return 0;
+}
+
+static int pf_walk(const char *dir, struct pf_tree *t)
+{
+    struct dirent **names = NULL;
+    int n = scandir(dir, &names, NULL, alphasort);
+    if (n < 0)
+        return 0;
+    int rc = 0;
+    for (int i = 0; i < n; i++) {
+        const char *name = names[i]->d_name;
+        if (rc == 0 && strcmp(name, ".") != 0 && strcmp(name, "..") != 0) {
+            char path[4096];
+            struct stat st;
+            int k = snprintf(path, sizeof path, "%s/%s", dir, name);
+            if (k < 0 || (size_t)k >= sizeof path)
+                rc = die("z23-lint: path too long: %s\n", dir);
+            else if (lstat(path, &st) != 0)
+                rc = 0;
+            else if (S_ISDIR(st.st_mode))
+                rc = pf_walk(path, t);
+            else if (S_ISREG(st.st_mode) && pf_file_has_re(path, t->re))
+                rc = pf_add(t, path);
+        }
+        free(names[i]);
+    }
+    free(names);
+    return rc;
+}
+
+static int pf_is_reg(const char *path)
+{
+    struct stat st;
+    return stat(path, &st) == 0 && S_ISREG(st.st_mode);
+}
+
+static int pf_selftest_mode(const char *f, FILE *out, FILE *err)
+{
+    if (!f || !f[0] || !pf_is_reg(f)) {
+        if (fprintf(err,
+                    "check_peer_floor_single_source: FATAL — selftest file missing: '%s'\n",
+                    f ? f : "") < 0)
+            return die("z23-lint: write failed\n", "");
+        return 2;
+    }
+    regex_t re;
+    int cr = pf_comp_banned(&re);
+    if (cr)
+        return cr;
+    int hit = pf_file_has_re(f, &re);
+    regfree(&re);
+    if (hit) {
+        if (fprintf(out,
+                    "check_peer_floor_single_source: selftest TRIP — banned floor literal in %s\n",
+                    f) < 0)
+            return die("z23-lint: write failed\n", "");
+        return 1;
+    }
+    if (fprintf(out,
+                "check_peer_floor_single_source: selftest CLEAN — no banned floor literal in %s\n",
+                f) < 0)
+        return die("z23-lint: write failed\n", "");
+    return 0;
+}
+
+static int pf_scan_banned_lines(const char *path, const regex_t *re, FILE *err)
+{
+    FILE *f = fopen(path, "r");
+    if (!f)
+        return 0;
+    char *line = NULL;
+    size_t cap = 0;
+    ssize_t n;
+    int lineno = 0, rc = 0, any = 0;
+    while ((n = getline(&line, &cap, f)) >= 0) {
+        lineno++;
+        if (n > 0 && line[n - 1] == '\n')
+            line[--n] = '\0';
+        for (ssize_t i = 0; i < n; i++)
+            if (line[i] == '\0')
+                line[i] = ' ';
+        if (regexec(re, line, 0, NULL, 0) != 0)
+            continue;
+        if (!any) {
+            if (fprintf(err,
+                        "check_peer_floor_single_source: FAIL — %s reintroduces a "
+                        "retired floor literal macro:\n", path) < 0) {
+                rc = die("z23-lint: write failed\n", "");
+                break;
+            }
+            any = 1;
+        }
+        if (fprintf(err, "    %d:%s\n", lineno, line) < 0) {
+            rc = die("z23-lint: write failed\n", "");
+            break;
+        }
+    }
+    int fr = fin(f, line, path, rc);
+    if (fr)
+        return fr;
+    if (any) {
+        if (fprintf(err, "    Use ZCL_" "PEER_FLOOR_HEALTHY from %s instead.\n",
+                    k_pf_hdr) < 0)
+            return die("z23-lint: write failed\n", "");
+        return 1;
+    }
+    return 0;
+}
+
+static int check_peer_floor_single_source_run(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+    const char *st = getenv("ZCL_PEER_FLOOR_SELFTEST");
+    if (st && strcmp(st, "1") == 0)
+        return pf_selftest_mode(getenv("ZCL_PEER_FLOOR_SELFTEST_FILE"),
+                                stdout, stderr);
+
+    if (!pf_is_reg(k_pf_hdr)) {
+        fprintf(stderr,
+                "check_peer_floor_single_source: FATAL — expected file missing: %s\n",
+                k_pf_hdr);
+        return 2;
+    }
+    for (size_t i = 0; i < sizeof k_pf_sites / sizeof k_pf_sites[0]; i++) {
+        if (pf_is_reg(k_pf_sites[i]))
+            continue;
+        fprintf(stderr,
+                "check_peer_floor_single_source: FATAL — expected file missing: %s\n",
+                k_pf_sites[i]);
+        return 2;
+    }
+
+    regex_t def, ref, banned;
+    int cr = pf_comp_def(&def);
+    if (cr)
+        return cr;
+    cr = pf_comp_ref(&ref);
+    if (cr) {
+        regfree(&def);
+        return cr;
+    }
+    cr = pf_comp_banned(&banned);
+    if (cr) {
+        drop2(&def, &ref);
+        return cr;
+    }
+
+    int fail = 0, def_count = 0, rc = pf_count_re(k_pf_hdr, &def, &def_count);
+    if (rc) {
+        drop3(&def, &ref, &banned);
+        return rc;
+    }
+    if (def_count != 1) {
+        if (fprintf(stderr,
+                    "check_peer_floor_single_source: FAIL — ZCL_"
+                    "PEER_FLOOR_HEALTHY must be #define'd exactly once (as a number) "
+                    "in %s (found %d)\n", k_pf_hdr, def_count) < 0) {
+            drop3(&def, &ref, &banned);
+            return die("z23-lint: write failed\n", "");
+        }
+        fail = 1;
+    }
+
+    struct pf_tree tree = { .re = &def };
+    for (size_t i = 0; rc == 0 && i < sizeof k_pf_walk_roots / sizeof k_pf_walk_roots[0]; i++)
+        rc = pf_walk(k_pf_walk_roots[i], &tree);
+    if (rc) {
+        drop3(&def, &ref, &banned);
+        return rc;
+    }
+    if (tree.n > 1)
+        qsort(tree.p, (size_t)tree.n, sizeof tree.p[0], pf_path_cmp);
+    int uniq = 0;
+    for (int i = 0; i < tree.n; i++) {
+        if (i && strcmp(tree.p[i], tree.p[i - 1]) == 0)
+            continue;
+        if (uniq != i)
+            memcpy(tree.p[uniq], tree.p[i], PF_NAME);
+        uniq++;
+    }
+    tree.n = uniq;
+    if (tree.n != 1) {
+        if (fprintf(stderr,
+                    "check_peer_floor_single_source: FAIL — ZCL_"
+                    "PEER_FLOOR_HEALTHY defined in %d files (expected 1):\n",
+                    tree.n) < 0) {
+            drop3(&def, &ref, &banned);
+            return die("z23-lint: write failed\n", "");
+        }
+        if (tree.n == 0) {
+            if (fputs("    \n", stderr) < 0) {
+                drop3(&def, &ref, &banned);
+                return die("z23-lint: write failed\n", "");
+            }
+        } else {
+            for (int i = 0; i < tree.n; i++) {
+                if (fprintf(stderr, "    %s\n", tree.p[i]) < 0) {
+                    drop3(&def, &ref, &banned);
+                    return die("z23-lint: write failed\n", "");
+                }
+            }
+        }
+        fail = 1;
+    }
+
+    int total_refs = 0;
+    for (size_t i = 0; i < sizeof k_pf_sites / sizeof k_pf_sites[0]; i++) {
+        int refs = 0;
+        rc = pf_count_re(k_pf_sites[i], &ref, &refs);
+        if (rc) {
+            drop3(&def, &ref, &banned);
+            return rc;
+        }
+        total_refs += refs;
+        if (refs < 1) {
+            if (fprintf(stderr,
+                        "check_peer_floor_single_source: FAIL — %s does not reference "
+                        "ZCL_" "PEER_FLOOR_HEALTHY (re-hardcoded floor?)\n",
+                        k_pf_sites[i]) < 0) {
+                drop3(&def, &ref, &banned);
+                return die("z23-lint: write failed\n", "");
+            }
+            fail = 1;
+        }
+        int br = pf_scan_banned_lines(k_pf_sites[i], &banned, stderr);
+        if (br == 2) {
+            drop3(&def, &ref, &banned);
+            return 2;
+        }
+        if (br == 1)
+            fail = 1;
+    }
+    drop3(&def, &ref, &banned);
+
+    if (total_refs < 1) {
+        fputs("check_peer_floor_single_source: FATAL — zero ZCL_"
+              "PEER_FLOOR_HEALTHY references across all floor sites; the wiring "
+              "drifted (refusing to report clean)\n", stderr);
+        return 2;
+    }
+    if (fail) {
+        fputs("check_peer_floor_single_source: the healthy-outbound floor has "
+              "drifted from its single source of truth.\n", stderr);
+        return 1;
+    }
+    return printf("[check_peer_floor_single_source] OK — ZCL_"
+                  "PEER_FLOOR_HEALTHY defined once in %s and read by all %d floor "
+                  "references across %zu sites\n",
+                  k_pf_hdr, total_refs,
+                  sizeof k_pf_sites / sizeof k_pf_sites[0]) < 0
+               ? die("z23-lint: write failed\n", "") : 0;
+}
+
+static int check_peer_floor_single_source_selftest(void)
+{
+    char tmpl[] = "/tmp/z23-lint-pf-XXXXXX";
+    char *root = mkdtemp(tmpl);
+    if (!root)
+        return die("z23-lint: mkdir failed: %s\n", "/tmp");
+    char miss[64], trip[256], clean[256], ob[512], eb[512];
+    int n = snprintf(trip, sizeof trip, "%s/trip.c", root);
+    if (ovf(n, sizeof trip))
+        return 2;
+    n = snprintf(clean, sizeof clean, "%s/clean.c", root);
+    if (ovf(n, sizeof clean))
+        return 2;
+    FILE *tf = fopen(trip, "w"), *cf = fopen(clean, "w");
+    if (!tf || !cf) {
+        if (tf) fclose(tf);
+        if (cf) fclose(cf);
+        rmdir(root);
+        return die("z23-lint: cannot open %s\n", root);
+    }
+    fputs("#define PEER_FLOOR_MIN 3\n", tf);
+    fputs("int x = ZCL_" "PEER_FLOOR_HEALTHY;\n", cf);
+    fclose(tf);
+    fclose(cf);
+
+    FILE *out = tmpfile(), *err = tmpfile();
+    if (!out || !err) {
+        if (out) fclose(out);
+        if (err) fclose(err);
+        unlink(trip); unlink(clean); rmdir(root);
+        return die("z23-lint: tmpfile failed\n", "");
+    }
+    int bad = 0;
+    miss[0] = '\0';
+    int rc = pf_selftest_mode(miss, out, err);
+    if (csr_slurp(out, ob, sizeof ob) || csr_slurp(err, eb, sizeof eb))
+        bad = 1;
+    bad |= rc != 2
+        || strstr(eb, "check_peer_floor_single_source: FATAL — selftest file missing: ''") == NULL;
+
+    rewind(out); rewind(err);
+    if (ftruncate(fileno(out), 0) != 0 || ftruncate(fileno(err), 0) != 0)
+        bad = 1;
+    rc = pf_selftest_mode(trip, out, err);
+    if (csr_slurp(out, ob, sizeof ob) || csr_slurp(err, eb, sizeof eb))
+        bad = 1;
+    bad |= rc != 1 || strstr(ob, "selftest TRIP — banned floor literal in ") == NULL
+        || strstr(ob, trip) == NULL;
+
+    rewind(out); rewind(err);
+    if (ftruncate(fileno(out), 0) != 0 || ftruncate(fileno(err), 0) != 0)
+        bad = 1;
+    rc = pf_selftest_mode(clean, out, err);
+    if (csr_slurp(out, ob, sizeof ob) || csr_slurp(err, eb, sizeof eb))
+        bad = 1;
+    bad |= rc != 0 || strstr(ob, "selftest CLEAN — no banned floor literal in ") == NULL
+        || strstr(ob, clean) == NULL;
+
+    fclose(out);
+    fclose(err);
+    unlink(trip);
+    unlink(clean);
+    rmdir(root);
+    if (bad)
+        fputs("FAIL: check_peer_floor_single_source selftest\n", stderr);
+    return st_ok(bad, "check_peer_floor_single_source selftest: OK\n");
+}
+
 struct lint_gate {
     const char *name;
     int (*run)(int argc, char **argv);
@@ -3234,6 +4109,10 @@ static const struct lint_gate k_gates[] = {
     { "check-hotswap-dev-only", check_hotswap_dev_only_run, check_hotswap_dev_only_selftest },
     { "check-no-api-keys", check_no_api_keys_run, check_no_api_keys_selftest },
     { "check-error-doc-refs", check_error_doc_refs_run, check_error_doc_refs_selftest },
+    { "check-core-seal-root-mirror", check_core_seal_root_mirror_run,
+      check_core_seal_root_mirror_selftest },
+    { "check-peer-floor-single-source", check_peer_floor_single_source_run,
+      check_peer_floor_single_source_selftest },
 };
 
 int main(int argc, char **argv)

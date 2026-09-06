@@ -11383,7 +11383,7 @@ check-core-include-boundary:
 # .so, and hotswap_activate.c must compare it on BOTH dlsym paths. A seal re-cut
 # that lands without regenerating the mirror leaves every module claiming the OLD
 # root, and the pin silently stops meaning anything.
-check-core-seal-root-mirror:
+check-core-seal-root-mirror: $(LINTC_TOOL)
 	@echo "══ LINT: hot-swap consensus pin (sealed-core ROOT mirror) ══"
 	@./tools/lint/check_core_seal_root_mirror.sh
 
@@ -11790,7 +11790,7 @@ check-sandbox-wired:
 # condition must all read it and never reintroduce a retired local literal
 # macro. Fails loud on an empty scan (repo law 10). See
 # check_peer_floor_single_source.sh.
-check-peer-floor-single-source:
+check-peer-floor-single-source: $(LINTC_TOOL)
 	@echo "→ Gate: peer_floor_single_source"
 	@./tools/lint/check_peer_floor_single_source.sh
 
