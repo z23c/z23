@@ -78,7 +78,7 @@ struct proof_paths {
     char failure[PATH_MAX];
     char changed[PATH_MAX];
     char bundle_log[PATH_MAX];
-    char helper_log[PATH_MAX];
+    char prefork_log[PATH_MAX];
     char attempt[PATH_MAX];
     char attempt_token[192];
     char phases[PATH_MAX];
@@ -470,8 +470,8 @@ static bool proof_paths_fill(const char *repo_root, const char *local,
         snprintf(out->bundle_log, sizeof(out->bundle_log),
                  "%s/%s.bundle.log", out->logs, out->key) >=
             (int)sizeof(out->bundle_log) ||
-        snprintf(out->helper_log, sizeof(out->helper_log), "%s/%s.helper.log",
-                 out->logs, out->key) >= (int)sizeof(out->helper_log) ||
+        snprintf(out->prefork_log, sizeof(out->prefork_log), "%s/%s.prefork.log",
+                 out->logs, out->key) >= (int)sizeof(out->prefork_log) ||
         snprintf(out->phases, sizeof(out->phases), "%s/%s.phases.txt",
                  out->state, out->key) >= (int)sizeof(out->phases) ||
         snprintf(out->warmstart, sizeof(out->warmstart), "%s/%s.warmstart",
@@ -1039,9 +1039,9 @@ static bool proof_attempt_paths_prepare(const struct proof_paths *pair,
         snprintf(attempt->bundle_log, sizeof(attempt->bundle_log),
                  "%s/logs/bundle.log", attempt->attempt) >=
             (int)sizeof(attempt->bundle_log) ||
-        snprintf(attempt->helper_log, sizeof(attempt->helper_log),
-                 "%s/logs/helpers.log", attempt->attempt) >=
-            (int)sizeof(attempt->helper_log) ||
+        snprintf(attempt->prefork_log, sizeof(attempt->prefork_log),
+                 "%s/logs/prefork.log", attempt->attempt) >=
+            (int)sizeof(attempt->prefork_log) ||
         snprintf(attempt->phases, sizeof(attempt->phases), "%s/phases.txt",
                  attempt->attempt) >= (int)sizeof(attempt->phases) ||
         !platform_private_directory_ensure(attempt->logs))
@@ -3576,8 +3576,17 @@ static struct zcl_dev_proof_budget proof_step_budget(
 #define PROOF_GENERATED_DEFAULT_MS 300000
 #define PROOF_COMPILE_DEFAULT_MS 900000
 #define PROOF_BUNDLE_DEFAULT_MS 1800000
-#define PROOF_HELPERS_DEFAULT_MS 120000
+/* The pre-fork build step. A lane proof builds the helper executables the
+ * test dimension execs; a landing proof additionally builds every target its
+ * full lint umbrella can build, which on a cold generation means linking ~47
+ * one-shot tools -- measured at 191 s of a 199 s lint wall. The landing
+ * figure is that cost moved, with headroom, not a new cost. */
+#define PROOF_PREFORK_DEFAULT_MS 120000
+#define PROOF_PREFORK_LANDING_MS 900000
 #define PROOF_LINT_ARGV_CAP 6u
+/* make, --no-print-directory, -jN, the 8 helper targets, proof-lint-prebuild
+ * and the NULL terminator: 13 slots, exactly. */
+#define PROOF_PREFORK_ARGV_CAP 13u
 
 static bool proof_root_is_landing(const char *root)
 {
@@ -3638,6 +3647,61 @@ static bool proof_lint_targets_are_full(const char *targets)
     return targets && strncmp(targets, "lint", 4) == 0 &&
            (targets[4] == '\0' || targets[4] == ' ');
 }
+
+/* Fill the pre-fork make argv: everything EITHER dimension can build, built
+ * once, before either starts.
+ *
+ * The two dimensions share one generation worktree. The test dimension runs
+ * no make at all -- it execs the admitted runner and reads build outputs
+ * (each lint-gate shard copies build/bin/z23-lint and
+ * build/bin/file_size_policy into its sandbox and execs them). The lint
+ * dimension does run make: `lint`'s own built prerequisites, and one nested
+ * make inside check_standalone_tools_link.sh that links every standalone
+ * tool rule the Makefile carries -- a set that includes z23-lint,
+ * zcl-nodectl, fbsh, file_size_policy, fleet-board-bridge and
+ * zclassic23-engine-unit, i.e. the very executables the test dimension is
+ * reading. A relink unlinks the output before it writes it, and on
+ * 2026-09-06 a landing proof's shard exec'd build/bin/z23-lint inside that
+ * window and got "No such file or directory" twice.
+ *
+ * So both target sets are built here, sequentially, and after the fork
+ * neither dimension has anything left to link. The helper targets are named
+ * literally because their hashes are folded into the
+ * zcl.dev_proof_test_helpers.v1 digest one by one; the lint side is a single
+ * Makefile target (proof-lint-prebuild) that names `lint`'s own prerequisite
+ * list, so the two can never drift apart. `jobs` is stored by pointer and
+ * must outlive argv. */
+static bool proof_prefork_argv(const char *jobs, bool lint_full,
+                               const char **argv, size_t argv_cap)
+{
+    static const char *const helpers[] = {
+        "zcl-nodectl", "zclassic23-acme", "fbsh", "engine-unit",
+        "tools/file_size_policy", "fleet-board-bridge", "git-hook",
+        "build/bin/z23-lint",
+    };
+    size_t n = 0;
+    if (!jobs || !*jobs || !argv || argv_cap < PROOF_PREFORK_ARGV_CAP)
+        return false;
+    argv[n++] = "make";
+    argv[n++] = "--no-print-directory";
+    argv[n++] = jobs;
+    for (size_t i = 0; i < sizeof(helpers) / sizeof(helpers[0]); i++)
+        argv[n++] = helpers[i];
+    if (lint_full) argv[n++] = "proof-lint-prebuild";
+    argv[n] = NULL;
+    return true;
+}
+
+#if defined(ZCL_TESTING)
+/* Seam for the pre-fork argv, so a test can prove what the step builds --
+ * and that no dimension is left a target the other one also builds --
+ * without driving a proof cycle. */
+bool zcl_dev_proof_test_prefork_argv(const char *jobs, bool lint_full,
+                                     const char **argv, size_t argv_cap)
+{
+    return proof_prefork_argv(jobs, lint_full, argv, argv_cap);
+}
+#endif
 static bool inventory_output_only(const char *const *files, size_t count)
 {
     return count == 1 &&
@@ -4324,20 +4388,96 @@ static bool test_depfiles_prepare(const struct proof_paths *paths,
     return true;
 }
 
-static bool test_helpers_prepare(
+/* Everything either dimension needs COPIED into the generation, admitted
+ * once, before anything builds. Split out of the old test_helpers_prepare()
+ * so the admission, the single build and the hashing are three ordered
+ * steps rather than one function that interleaved them: the admitted set is
+ * now materialized before the pre-fork make rather than half before and
+ * half after, and no dimension ever sees a generation mid-admission.
+ *
+ * want_test admits the test runner and the depfile tree; want_lint_artifacts
+ * says the lint dimension is running the full gate set, which reads
+ * build/bin/z23-dev and the confined package verifier. The shared table is
+ * materialized whenever EITHER is true, so the two dimensions cannot drift
+ * on to their own sets, and every entry still goes through
+ * admitted_executable_materialize()'s --source-record content check. */
+static bool proof_generation_inputs_prepare(
     const struct proof_paths *paths, const char *generation,
-    const char *runner_source, const struct dev_source_record *expected_source,
-    const char *make_jobs, char runner_target[PATH_MAX], uint8_t helper_root[32],
+    const struct dev_source_record *expected_source,
+    bool want_test, bool want_lint_artifacts, const char *runner_source,
+    char runner_target[PATH_MAX],
+    char admitted[PROOF_ADMITTED_EXECUTABLE_COUNT][PATH_MAX],
+    uint8_t depfile_root[32], char *why, size_t why_len)
+{
+    if (want_test &&
+        !admitted_executable_materialize(
+            paths, generation, runner_source, "build/bin/test_parallel_fast",
+            expected_source, runner_target, why, why_len)) {
+        if (!why || !why[0])
+            proof_why(why, why_len, "proof_test_runner_admission_failed");
+        return false;
+    }
+    /* The one admitted set, shared by both dimensions: same sources, same
+     * content check, same generation paths.
+     *
+     * Idempotent by content: an entry the generation already carries is
+     * re-read through the same executable_reuse() identity check and kept,
+     * so a generation that rebuilt its own bundle keeps the bytes it just
+     * built rather than being overwritten by a submitting checkout whose
+     * binaries are older than the commit under proof. */
+    if ((want_test || want_lint_artifacts) &&
+        !proof_admitted_executables_prepare(paths, generation,
+                                            expected_source, admitted,
+                                            why, why_len)) {
+        if (!why || !why[0])
+            proof_why(why, why_len, "proof_lint_admission_failed");
+        return false;
+    }
+    if (want_test &&
+        !test_depfiles_prepare(paths, generation, depfile_root, why, why_len))
+        return false;
+    return true;
+}
+
+/* The ONE build step both dimensions share, run alone before either starts.
+ * See proof_prefork_argv() for why it has to be one step and what it covers. */
+static bool proof_prefork_build(const struct proof_paths *paths,
+                                const char *generation, const char *make_jobs,
+                                bool lint_full, char *why, size_t why_len)
+{
+    const char *argv[PROOF_PREFORK_ARGV_CAP];
+    if (!proof_prefork_argv(make_jobs, lint_full, argv,
+                            PROOF_PREFORK_ARGV_CAP)) {
+        proof_why(why, why_len, "proof_prefork_argv_invalid");
+        return false;
+    }
+    struct zcl_dev_proof_budget budget = proof_step_budget(
+        paths, "prefork",
+        lint_full ? PROOF_PREFORK_LANDING_MS : PROOF_PREFORK_DEFAULT_MS);
+    if (run_step(paths, generation, paths->prefork_log, argv, "prefork",
+                 &budget, NULL) != 0) {
+        proof_why(why, why_len, "proof_prefork_build_failed");
+        return false;
+    }
+    return true;
+}
+
+/* Hash what the pre-fork step admitted and built into the one
+ * zcl.dev_proof_test_helpers.v1 digest the test receipt is bound to. Same
+ * eleven artifacts, same order, same domains as before the split: the
+ * receipt says exactly what it always said. */
+static bool test_helpers_hash(
+    const char *generation, const char *runner_target,
+    const char admitted[PROOF_ADMITTED_EXECUTABLE_COUNT][PATH_MAX],
+    const uint8_t depfile_root[32], uint8_t helper_root[32],
     char *why, size_t why_len)
 {
-    char admitted[PROOF_ADMITTED_EXECUTABLE_COUNT][PATH_MAX];
     const char *verifier_target = admitted[PROOF_ADMITTED_PACKAGE_VERIFY];
     const char *dev_node_target = admitted[PROOF_ADMITTED_DEV_NODE];
     const char *node_target = admitted[PROOF_ADMITTED_NODE_ALIAS];
     char nodectl_target[PATH_MAX], acme_target[PATH_MAX], fbsh_target[PATH_MAX];
     char file_size_policy_target[PATH_MAX], board_bridge_target[PATH_MAX];
     char git_hook_target[PATH_MAX], lint_tool_target[PATH_MAX];
-    uint8_t depfile_root[32];
     int nodectl_len = snprintf(nodectl_target, sizeof(nodectl_target),
                                "%s/build/bin/zcl-nodectl", generation);
     int acme_len = snprintf(acme_target, sizeof(acme_target),
@@ -4365,35 +4505,6 @@ static bool test_helpers_prepare(
         lint_tool_len <= 0 ||
         (size_t)lint_tool_len >= sizeof(lint_tool_target)) {
         proof_why(why, why_len, "proof_test_helper_path_invalid");
-        return false;
-    }
-    if (!admitted_executable_materialize(
-            paths, generation, runner_source, "build/bin/test_parallel_fast",
-            expected_source, runner_target, why, why_len)) {
-        if (!why || !why[0])
-            proof_why(why, why_len, "proof_test_runner_admission_failed");
-        return false;
-    }
-    /* The one admitted set, shared with the lint dimension: same sources,
-     * same content check, same generation paths. */
-    if (!proof_admitted_executables_prepare(paths, generation,
-                                            expected_source, admitted,
-                                            why, why_len))
-        return false;
-    if (!test_depfiles_prepare(paths, generation, depfile_root,
-                               why, why_len)) {
-        return false;
-    }
-    const char *prerequisite_argv[] = {
-        "make", "--no-print-directory", make_jobs, "zcl-nodectl",
-        "zclassic23-acme", "fbsh", "engine-unit", "tools/file_size_policy",
-        "fleet-board-bridge", "git-hook", "build/bin/z23-lint",
-        NULL};
-    struct zcl_dev_proof_budget helper_budget =
-        proof_step_budget(paths, "helpers", PROOF_HELPERS_DEFAULT_MS);
-    if (run_step(paths, generation, paths->helper_log, prerequisite_argv,
-                 "helpers", &helper_budget, NULL) != 0) {
-        proof_why(why, why_len, "proof_test_helper_build_failed");
         return false;
     }
     uint8_t runner_root[32], verifier_root[32], node_root[32], nodectl_root[32];
@@ -4436,7 +4547,7 @@ static bool test_helpers_prepare(
     sha3_256_write(&helpers, board_bridge_root, sizeof(board_bridge_root));
     sha3_256_write(&helpers, git_hook_root, sizeof(git_hook_root));
     sha3_256_write(&helpers, lint_tool_root, sizeof(lint_tool_root));
-    sha3_256_write(&helpers, depfile_root, sizeof(depfile_root));
+    sha3_256_write(&helpers, depfile_root, 32);
     sha3_256_finalize(&helpers, helper_root);
     return true;
 }
@@ -4771,14 +4882,25 @@ static bool proof_worker_body(const struct proof_paths *paths,
         /* Lint proves the source; the test dimension proves the built
          * runner. Neither feeds the other, so both children are launched
          * before either is waited on and the proof pays for the longer of the
-         * two rather than their sum. Everything above stays strictly
-         * sequential on purpose: those steps are all `make` in the one
-         * generation worktree, and two makes there race each other's build
-         * epochs. */
+         * two rather than their sum.
+         *
+         * EVERYTHING EITHER DIMENSION BUILDS OR IS HANDED HAPPENS BELOW,
+         * BEFORE THE FORK, IN ONE SEQUENCE: the shared admitted executables,
+         * the test runner, the depfile tree, and then a single `make` that
+         * builds the helper executables and -- for a landing, whose lint
+         * dimension runs the whole gate set -- every target that gate set
+         * can build. After the fork the lint dimension's make has nothing
+         * left to link and the test dimension runs no make at all, so
+         * neither can relink a file the other is reading. Two makes in one
+         * generation worktree race each other's build epochs, and a relink
+         * unlinks its output before writing it: that is how a landing
+         * proof's lint-gate shard exec'd a half-written build/bin/z23-lint
+         * and got rc=127 twice. */
         struct proof_dimension_run runs[2];
         size_t run_count = 0;
         char binary[PATH_MAX] = {0}, generation_binary[PATH_MAX] = {0};
-        uint8_t helper_root[32] = {0};
+        char admitted[PROOF_ADMITTED_EXECUTABLE_COUNT][PATH_MAX] = {{0}};
+        uint8_t helper_root[32] = {0}, depfile_root[32] = {0};
         const char *lint_argv[PROOF_LINT_ARGV_CAP];
         int64_t lint_fallback_ms = PROOF_LINT_DEFAULT_MS;
         const char *lint_targets = "lint-fast";
@@ -4795,6 +4917,13 @@ static bool proof_worker_body(const struct proof_paths *paths,
                                            lint_targets);
         if (!lint->selected) unused_dimension(ZCL_DEV_PROOF_LINT, lint);
         if (!test->selected) unused_dimension(ZCL_DEV_PROOF_TEST, test);
+        /* Only the full gate set reads built artifacts (check-capability-
+         * closure walks the undefined symbols of build/bin/z23-dev, and the
+         * `lint:` umbrella names it and the confined package verifier as its
+         * own prerequisites), so only it needs the admitted executables. A
+         * lane proof on lint-fast pays none of this. */
+        bool lint_reads_artifacts =
+            lint->selected && proof_lint_targets_are_full(lint_targets);
         only[0] = 0;
         if (test->selected) {
             if (strcmp(source_before.source_id, sealed_source_id) != 0 ||
@@ -4838,87 +4967,83 @@ static bool proof_worker_body(const struct proof_paths *paths,
                 proof_why(why, why_len, "test_selection_invalid_or_truncated");
                 return false;
             }
-            bool runner_ready = test_binary_path(paths, binary) &&
-                test_helpers_prepare(
-                    paths, generation, binary, &source_before,
-                    make_jobs, generation_binary, helper_root, why, why_len);
-            uint64_t bundle_ms = 0;
-            if (!runner_ready) {
-                if (why && why_len > 0) why[0] = 0;
-                const char *bundle_argv[] = {
-                    "make", "--no-print-directory", make_jobs,
-                    "dev-proof-bundle", NULL};
-                struct zcl_dev_proof_budget bundle_budget =
-                    proof_step_budget(paths, "bundle",
-                                      PROOF_BUNDLE_DEFAULT_MS);
-                int64_t bundle_us0 = platform_time_monotonic_us();
-                int bundle_rc = run_step(paths, generation, paths->bundle_log,
-                                         bundle_argv, "bundle",
-                                         &bundle_budget, NULL);
-                /* First attempt only; a recovery rerun is rare and stays
-                 * visible in the retry log. */
-                bundle_ms = (uint64_t)((platform_time_monotonic_us() -
-                                        bundle_us0) / 1000);
-                if (bundle_rc != 0 && proof_log_contains(
-                        paths->bundle_log,
-                        "unverified compile epoch appeared after recovery "
-                        "admission; rerun make")) {
-                    char retry_log[PATH_MAX];
-                    if (snprintf(retry_log, sizeof(retry_log), "%s.retry",
-                                 paths->bundle_log) >= (int)sizeof(retry_log)) {
-                        proof_why(why, why_len,
-                                  "proof_bundle_retry_log_invalid");
-                        return false;
-                    }
-                    bundle_rc = run_step(paths, generation, retry_log,
-                                         bundle_argv, "bundle",
-                                         &bundle_budget, NULL);
-                }
-                if (bundle_rc != 0) {
-                    proof_why(why, why_len,
-                              "proof_bundle_build_failed");
-                    return false;
-                }
-                runner_ready = test_binary_path(&execution, binary) &&
-                    test_helpers_prepare(
-                        &execution, generation, binary, &source_before,
-                        make_jobs, generation_binary, helper_root,
-                        why, why_len);
-                if (!runner_ready) {
-                    if (!why || !why[0])
-                        proof_why(why, why_len,
-                                  "proof_bundle_admission_failed");
-                    return false;
-                }
-                /* Both build phases are timed now: refresh the sidecar so
-                 * the receipt directory carries the full compile story. */
-                warm_sidecar_write(paths, warm, warm_compile_mode,
-                                   warm_compile_ms, bundle_ms);
-            }
         }
-        /* The lint dimension reads built artifacts too. check-capability-
-         * closure walks the undefined symbols of build/bin/z23-dev and the
-         * confined package verifier, and the `lint:` umbrella names both as
-         * prerequisites (Makefile:13323) -- so without this the generation
-         * would relink the whole dev object graph inside a gate, and would
-         * judge artifacts the submitting checkout's own `make lint` never
-         * saw. Hand it the same admitted set the test dimension gets,
-         * through the same content check. Running after the test block is
-         * deliberate: when that block rebuilt the bundle in the generation,
-         * this call re-reads and keeps those bytes instead of overwriting
-         * them with an older checkout's. The fast subset reads no built
-         * artifact, so a lane proof pays none of this cost. */
-        if (lint->selected && proof_lint_targets_are_full(lint_targets)) {
-            char lint_admitted[PROOF_ADMITTED_EXECUTABLE_COUNT][PATH_MAX];
-            if (!proof_admitted_executables_prepare(paths, generation,
-                                                    &source_before,
-                                                    lint_admitted, why,
-                                                    why_len)) {
-                if (!why || !why[0])
-                    proof_why(why, why_len, "proof_lint_admission_failed");
+        /* Admit, then build. The admission is content-checked against the
+         * source identity this proof sealed, and marks each entry fresh, so
+         * the build below treats them as up to date instead of relinking the
+         * dev object graph. Doing it first also means the build is the LAST
+         * thing that touches build/ before the fork. */
+        bool inputs_ready = !test->selected || test_binary_path(paths, binary);
+        inputs_ready = inputs_ready &&
+            proof_generation_inputs_prepare(
+                paths, generation, &source_before, test->selected != 0,
+                lint_reads_artifacts, binary, generation_binary, admitted,
+                depfile_root, why, why_len);
+        if (!inputs_ready && !test->selected) {
+            if (!why || !why[0])
+                proof_why(why, why_len, "proof_lint_admission_failed");
+            return false;
+        }
+        if (!inputs_ready) {
+            /* The submitting checkout could not supply an admissible runner
+             * or helper set: build one in the generation and re-admit. */
+            if (why && why_len > 0) why[0] = 0;
+            const char *bundle_argv[] = {
+                "make", "--no-print-directory", make_jobs,
+                "dev-proof-bundle", NULL};
+            struct zcl_dev_proof_budget bundle_budget =
+                proof_step_budget(paths, "bundle", PROOF_BUNDLE_DEFAULT_MS);
+            int64_t bundle_us0 = platform_time_monotonic_us();
+            int bundle_rc = run_step(paths, generation, paths->bundle_log,
+                                     bundle_argv, "bundle",
+                                     &bundle_budget, NULL);
+            /* First attempt only; a recovery rerun is rare and stays
+             * visible in the retry log. */
+            uint64_t bundle_ms = (uint64_t)((platform_time_monotonic_us() -
+                                             bundle_us0) / 1000);
+            if (bundle_rc != 0 && proof_log_contains(
+                    paths->bundle_log,
+                    "unverified compile epoch appeared after recovery "
+                    "admission; rerun make")) {
+                char retry_log[PATH_MAX];
+                if (snprintf(retry_log, sizeof(retry_log), "%s.retry",
+                             paths->bundle_log) >= (int)sizeof(retry_log)) {
+                    proof_why(why, why_len, "proof_bundle_retry_log_invalid");
+                    return false;
+                }
+                bundle_rc = run_step(paths, generation, retry_log,
+                                     bundle_argv, "bundle",
+                                     &bundle_budget, NULL);
+            }
+            if (bundle_rc != 0) {
+                proof_why(why, why_len, "proof_bundle_build_failed");
                 return false;
             }
+            if (!test_binary_path(&execution, binary) ||
+                !proof_generation_inputs_prepare(
+                    &execution, generation, &source_before,
+                    test->selected != 0, lint_reads_artifacts, binary,
+                    generation_binary, admitted, depfile_root, why, why_len)) {
+                if (!why || !why[0])
+                    proof_why(why, why_len, "proof_bundle_admission_failed");
+                return false;
+            }
+            /* Both build phases are timed now: refresh the sidecar so the
+             * receipt directory carries the full compile story. */
+            warm_sidecar_write(paths, warm, warm_compile_mode,
+                               warm_compile_ms, bundle_ms);
         }
+        /* The one build both dimensions share. Nothing after this links
+         * anything until both children have exited. */
+        if ((test->selected || lint_reads_artifacts) &&
+            !proof_prefork_build(paths, generation, make_jobs,
+                                 lint_reads_artifacts, why, why_len))
+            return false;
+        if (test->selected &&
+            !test_helpers_hash(generation, generation_binary, admitted,
+                               depfile_root, helper_root, why, why_len))
+            return false;
+        proof_phase_mark(phases, "prefork_inputs_and_build");
         const char *test_argv[] = {generation_binary, only, "--cache",
                                    "--activate-proof-contracts", NULL};
         struct zcl_dev_proof_budget test_budget =

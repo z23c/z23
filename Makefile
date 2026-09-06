@@ -13345,6 +13345,31 @@ lint: $(LINTC_TOOL)
 	@echo "══ LINT: all checks passed ══"
 endif
 
+# Everything the lint dimension of a landing proof can build, built BEFORE the
+# proof forks its two dimensions.
+#
+# A proof runs lint and tests concurrently in ONE generation worktree. The test
+# dimension runs no make at all — it only reads build outputs (each lint-gate
+# shard copies build/bin/z23-lint and build/bin/file_size_policy into its
+# sandbox and execs them). The lint dimension does run make: its own
+# prerequisites above, and one nested make inside
+# check_standalone_tools_link.sh, which links every standalone tool rule this
+# Makefile carries. Those two sets OVERLAP the helper executables the test
+# dimension reads, and a relink is an unlink followed by a write: on 2026-09-06
+# a landing proof's shard exec'd build/bin/z23-lint inside that window and got
+# "No such file or directory" twice.
+#
+# So the proof builds this target first, alone, and both dimensions then only
+# read. Name the lint umbrella's own built prerequisites, never a copy of the
+# list — one definition, no drift. $(ZCLASSIC23_DEV_BIN) and
+# $(DEV_PACKAGE_VERIFY_BIN) are deliberately absent: the proof admits those by
+# content through --source-record and marks them fresh, and building them here
+# would throw that admission away.
+.PHONY: proof-lint-prebuild
+proof-lint-prebuild: $(LINT_BUILT_PREREQS) $(LINTC_TOOL) $(EQUIHASH_FACT_TOOL)
+	@./tools/lint/check_standalone_tools_link.sh --build-only
+	@echo "proof-lint-prebuild: every target the lint dimension can build is fresh"
+
 # One screen of truth from the LAST recorded lint and test runs — reads only
 # .cache/lint-timing/last-run.json and .cache/test-timing/last-run.json (plus
 # the per-gate logs run_lint.sh drops alongside its own), runs no gate itself,

@@ -243,6 +243,14 @@ bool zcl_dev_proof_test_generation_hooks_configure(const char *generation,
 /* Seam for the lint-target split: true when a recorded target list is the
  * whole gate set rather than the fast subset. */
 bool zcl_dev_proof_test_lint_targets_are_full(const char *targets);
+/* Seam for the pre-fork build step: the exact make argv the proof runs ONCE,
+ * alone, before it forks its lint and test dimensions. A test uses it to
+ * prove that everything either dimension can build is built here, so no
+ * target is left for both children to link at the same time in the one
+ * generation worktree. Writes a NULL-terminated argv and returns false when
+ * `argv_cap` is too small. */
+bool zcl_dev_proof_test_prefork_argv(const char *jobs, bool lint_full,
+                                     const char **argv, size_t argv_cap);
 #endif
 
 /* Warm-start survey types. Inert data, declared unconditionally so every

@@ -37,6 +37,26 @@
 set -euo pipefail
 
 MODE="${ZCL_LINT_MODE:-FAIL}"
+
+# --build-only: link every covered tool and stop — no verdict, no self-test,
+# no prose. A landing proof runs this before it forks its lint and test
+# dimensions, because this gate's nested `make` is the one thing in the lint
+# dimension that relinks binaries the test dimension is reading. Deriving the
+# tool list twice is how the two would drift, so the pre-build calls the gate
+# that owns the derivation and asks it for the build alone; the gate still
+# adjudicates, in full, inside the lint dimension where it belongs.
+BUILD_ONLY=0
+if [ "$#" -gt 0 ]; then
+    for arg in "$@"; do
+        case "$arg" in
+            --build-only) BUILD_ONLY=1 ;;
+            *)
+                echo "check-standalone-tools-link: unknown argument '$arg'" >&2
+                exit 2
+                ;;
+        esac
+    done
+fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
@@ -307,7 +327,11 @@ trap 'rm -f "$build_log"' EXIT
 # absent output, not only the sibling `make agent-sha3` rule: the two source
 # lists once drifted, leaving every Makefile tool gate green while a fresh
 # `make gate-receipt` failed before its child gate could start.
-if helper_selftest="$(tools/agent/gate-receipt.sh --selftest-helper 2>&1)"; then
+if [ "$BUILD_ONLY" -eq 1 ]; then
+    echo "[check_standalone_tools_link] build-only: skipping the gate-receipt helper"
+    echo "[check_standalone_tools_link] self-test — that is a verdict, and the gate"
+    echo "[check_standalone_tools_link] still runs it in the lint dimension."
+elif helper_selftest="$(tools/agent/gate-receipt.sh --selftest-helper 2>&1)"; then
     echo "[check_standalone_tools_link] $helper_selftest"
 else
     echo "[check_standalone_tools_link] gate-receipt helper selftest failed:" >&2
@@ -349,6 +373,21 @@ if ! make -j"$tl_jobs" --no-print-directory "${targets[@]}" >"$build_log" 2>&1; 
         failed+=("$t")
         violations=$((violations + 1))
     done
+fi
+
+# --build-only stops here. A tool that would not link is still a hard failure —
+# fail-closed, exactly as the gate is — but the exempt-set prose and the gate's
+# own verdict belong to the run inside `make lint`, not to a pre-build.
+if [ "$BUILD_ONLY" -eq 1 ]; then
+    if (( violations > 0 )); then
+        echo "[check_standalone_tools_link] build-only: BUILD OUTPUT (first failure):" >&2
+        tail -n 30 "$build_log" | sed 's/^/    /' >&2
+        for t in "${failed[@]}"; do echo "    $t" >&2; done
+        echo "check-standalone-tools-link --build-only: ${violations} tool(s) do not build" >&2
+        exit 1
+    fi
+    echo "[check_standalone_tools_link] build-only: ${#targets[@]} tool target(s) built"
+    exit 0
 fi
 
 if (( violations > 0 )); then
