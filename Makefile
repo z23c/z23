@@ -11074,7 +11074,7 @@ check-json-value-init:
 	@tools/scripts/check_json_value_init.sh --self-test
 	@tools/scripts/check_json_value_init.sh
 
-check-blob-read-bounds:
+check-blob-read-bounds: $(LINTC_TOOL)
 	@echo "══ LINT: bounded sqlite blob reads in app models ══"
 	@bash tools/lint/check_blob_read_bounds.sh
 

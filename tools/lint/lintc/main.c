@@ -71,6 +71,8 @@ static const struct lint_gate k_gates[] = {
       check_silent_errors_bool_selftest },
     { "check-no-raw-sqlite-in-controllers", check_no_raw_sqlite_in_controllers_run,
       check_no_raw_sqlite_in_controllers_selftest },
+    { "check-blob-read-bounds", check_blob_read_bounds_run,
+      check_blob_read_bounds_selftest },
 };
 
 int main(int argc, char **argv)

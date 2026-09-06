@@ -3,11 +3,11 @@
  * purpose: gate family — small pattern-matching lint gates of the C23 lint
  * runtime (check-no-python, check-malloc, check-dev-proof-native-fast-path,
  * check-before-save-hooks, check-pthread-create, check-silent-error-returns,
- * check-no-gnu-va-args).
+ * check-no-gnu-va-args, check-blob-read-bounds).
  */
 
 /*
- * Gates: check-no-python, check-malloc, check-dev-proof-native-fast-path, check-before-save-hooks, check-pthread-create, check-silent-error-returns, check-no-gnu-va-args
+ * Gates: check-no-python, check-malloc, check-dev-proof-native-fast-path, check-before-save-hooks, check-pthread-create, check-silent-error-returns, check-no-gnu-va-args, check-blob-read-bounds
  * Default landing spot for a FUTURE gate port: a filesystem-tree-walking
  * gate (walk_src/clock_walk/repo_shape_room_dirs) joins gate_tree_walk.c;
  * a git-tracked-enumeration gate (each_zpath/each_zpath_st) joins whichever
@@ -21,6 +21,9 @@
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #endif
+#include <dirent.h>
+#include <errno.h>
+#include <locale.h>
 #include <regex.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -699,4 +702,362 @@ int check_no_gnu_va_args_selftest(void)
             | lg_want(t, &hit, &excl, &prev, NULL, "    x = a ## b;", 0);
     drop3(&hit, &excl, &prev);
     return st_ok(bad, "check_no_gnu_va_args selftest: OK\n");
+}
+
+/* check-blob-read-bounds — port of the awk state machine from the original
+ * tools/lint/check_blob_read_bounds.sh (now a shim). Fixed-size SQLite blob
+ * reads in app models must use AR_READ_BLOB or prove the SQLite blob length
+ * before memcpy: a short BLOB at rest must never be copied as 16/32/43/etc.
+ * bytes from sqlite3_column_blob(). Per file: a variable assigned from
+ * sqlite3_column_blob is tracked for 16 lines (then forgotten); a
+ * sqlite3_column_bytes / AR_COL_BYTES call guards every tracked variable and
+ * opens a 6-line nearby-guard window (the guard line itself plus five); an
+ * AR_READ_BLOB line is skipped whole. A memcpy with a fixed copy length
+ * ([0-9]+ or sizeof(...)) trips when it reads sqlite3_column_blob directly
+ * with no nearby guard, or reads a tracked, unguarded blob variable.
+ *
+ * Two deliberate choices:
+ *  - when one memcpy line references several tracked blob variables, the
+ *    original picks one through awk's unspecified associative-array
+ *    iteration order; no two awk implementations agree there. This port
+ *    checks the earliest-tracked matching variable.
+ *  - awk tracks unbounded variables; this port keeps 32 live variables of
+ *    up to 63 chars per file and dies loudly past that (the runtime's
+ *    bounded-buffer style) instead of silently changing verdicts.
+ * Parity note: the shell original's engine/models/src glob sorts in the
+ * user locale, so run() calls setlocale(LC_ALL, "") before
+ * scandir/alphasort to keep multi-file violation order byte-identical. */
+
+#define BRB_LIVE 32
+#define BRB_NAME 64
+
+struct brb_var { char name[BRB_NAME]; int guarded; int age; };
+
+struct brb {
+    regex_t re_ar, re_bytes, re_assign, re_memcpy, re_direct, re_fixlen;
+    struct brb_var v[BRB_LIVE];
+    int n, guard;
+};
+
+static void brb_free(struct brb *b, int n)
+{
+    regex_t *re[] = { &b->re_ar, &b->re_bytes, &b->re_assign,
+                      &b->re_memcpy, &b->re_direct, &b->re_fixlen };
+    for (int i = 0; i < n && i < 6; i++)
+        regfree(re[i]);
+}
+
+static int brb_compile(struct brb *b)
+{
+    static const char *const pat[] = {
+        "AR_READ_" "BLOB[ \t]*\\(",
+        "(sqlite3_column_" "bytes|AR_COL_" "BYTES)[ \t]*\\(",
+        "[A-Za-z_][A-Za-z0-9_]*[ \t]*=[ \t]*(\\([^)]*\\)[ \t]*)?"
+            "sqlite3_column_" "blob[ \t]*\\(",
+        "mem" "cpy[ \t]*\\(",
+        "sqlite3_column_" "blob[ \t]*\\(",
+        ",[ \t]*(\\(?size_t\\)?[ \t]*)?([0-9]+|sizeof[ \t]*\\([^;]*\\))"
+            "[ \t]*\\)[ \t]*;[ \t]*(//.*)?$",
+    };
+    regex_t *re[] = { &b->re_ar, &b->re_bytes, &b->re_assign,
+                      &b->re_memcpy, &b->re_direct, &b->re_fixlen };
+    for (int i = 0; i < 6; i++) {
+        int err = regcomp(re[i], pat[i], REG_EXTENDED);
+        if (err) {
+            brb_free(b, i);
+            return reg_fail(re[i], err);
+        }
+    }
+    b->n = 0;
+    b->guard = 0;
+    return 0;
+}
+
+/* awk's [A-Za-z0-9_] classes, spelled out so the answer cannot depend on
+ * the locale setlocale() just installed. */
+static int brb_word(int c)
+{
+    return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
+        || (c >= '0' && c <= '9') || c == '_';
+}
+
+static int brb_uses(const char *line, const char *var, size_t vlen)
+{
+    for (const char *p = line; (p = strstr(p, var)) != NULL; p++) {
+        int left = p == line || !brb_word((unsigned char)p[-1]);
+        const char *q = p + vlen;
+        int right = *q == '\0' || !brb_word((unsigned char)*q);
+        if (left && right)
+            return 1;
+    }
+    return 0;
+}
+
+/* One scanned line (newline stripped). Returns 1 and fills msg on a
+ * violation, 0 when clean, 2 on an internal error. */
+static int brb_line(struct brb *b, const char *line, char *msg, size_t cap)
+{
+    for (int i = 0; i < b->n; i++) {
+        if (++b->v[i].age > 16) {
+            memmove(&b->v[i], &b->v[i + 1],
+                    (size_t)(b->n - i - 1) * sizeof b->v[0]);
+            b->n--;
+            i--;
+        }
+    }
+    if (b->guard > 0)
+        b->guard--;
+    if (regexec(&b->re_ar, line, 0, NULL, 0) == 0)
+        return 0;
+    if (regexec(&b->re_bytes, line, 0, NULL, 0) == 0) {
+        b->guard = 6;
+        for (int i = 0; i < b->n; i++)
+            b->v[i].guarded = 1;
+    }
+    regmatch_t m[1];
+    if (regexec(&b->re_assign, line, 1, m, 0) == 0) {
+        const char *h = line + m[0].rm_so;
+        size_t vl = 0;
+        while (brb_word((unsigned char)h[vl]))
+            vl++;
+        if (vl == 0 || vl >= BRB_NAME)
+            return die("z23-lint: blob-var overflow\n", "");
+        int idx = -1;
+        for (int i = 0; i < b->n; i++) {
+            if (strlen(b->v[i].name) == vl && memcmp(b->v[i].name, h, vl) == 0) {
+                idx = i;
+                break;
+            }
+        }
+        if (idx < 0) {
+            if (b->n >= BRB_LIVE)
+                return die("z23-lint: blob-var overflow\n", "");
+            idx = b->n++;
+        }
+        memcpy(b->v[idx].name, h, vl);
+        b->v[idx].name[vl] = '\0';
+        b->v[idx].guarded = 0;
+        b->v[idx].age = 0;
+    }
+    if (regexec(&b->re_memcpy, line, 0, NULL, 0) != 0)
+        return 0;
+    if (regexec(&b->re_direct, line, 0, NULL, 0) == 0) {
+        if (b->guard == 0 && regexec(&b->re_fixlen, line, 0, NULL, 0) == 0) {
+            int k = snprintf(msg, cap, "%s",
+                "mem" "cpy directly from sqlite3_column_"
+                "blob without nearby column_" "bytes guard");
+            return ovf(k, cap) ? 2 : 1;
+        }
+        return 0;
+    }
+    for (int i = 0; i < b->n; i++) {
+        if (!brb_uses(line, b->v[i].name, strlen(b->v[i].name)))
+            continue;
+        if (!b->v[i].guarded && b->guard == 0
+            && regexec(&b->re_fixlen, line, 0, NULL, 0) == 0) {
+            int k = snprintf(msg, cap,
+                "mem" "cpy from sqlite3_column_" "blob variable %s without "
+                "column_" "bytes guard", b->v[i].name);
+            return ovf(k, cap) ? 2 : 1;
+        }
+        break;
+    }
+    return 0;
+}
+
+static int brb_scan_file(struct brb *b, const char *path, int *fail)
+{
+    FILE *f = fopen(path, "r");
+    if (!f)
+        return die("z23-lint: cannot open %s\n", path);
+    b->n = 0;
+    b->guard = 0;
+    char *line = NULL;
+    size_t cap = 0;
+    ssize_t n;
+    int lineno = 0, rc = 0;
+    while ((n = getline(&line, &cap, f)) >= 0) {
+        lineno++;
+        if (n > 0 && line[n - 1] == '\n')
+            line[n - 1] = '\0';
+        char msg[192];
+        int v = brb_line(b, line, msg, sizeof msg);
+        if (v == 2) {
+            rc = 2;
+            break;
+        }
+        if (v == 1) {
+            *fail = 1;
+            if (fprintf(stdout, "%s:%d: %s\n", path, lineno, msg) < 0) {
+                rc = die("z23-lint: write failed\n", "");
+                break;
+            }
+        }
+    }
+    return fin(f, line, path, rc);
+}
+
+int check_blob_read_bounds_run(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+    setlocale(LC_ALL, ""); /* bash globs sort in the user locale; alphasort
+                            * must too or multi-file violation order drifts */
+    struct brb b;
+    int rc = brb_compile(&b);
+    if (rc)
+        return rc;
+    struct dirent **names = NULL;
+    int nd = scandir("engine/models/src", &names, NULL, alphasort);
+    if (nd < 0 && errno == ENOENT)
+        nd = 0; /* nullglob: a missing scan dir is an empty file list */
+    else if (nd < 0)
+        rc = die("z23-lint: cannot scan %s\n", "engine/models/src");
+    int fail = 0;
+    for (int i = 0; i < nd; i++) {
+        const char *nm = names[i]->d_name;
+        size_t nl = strlen(nm);
+        if (rc == 0 && nl > 2 && nm[0] != '.' && strcmp(nm + nl - 2, ".c") == 0) {
+            char path[320];
+            int k = snprintf(path, sizeof path, "engine/models/src/%s", nm);
+            if (ovf(k, sizeof path))
+                rc = 2;
+            else if (!lint_path_is_excluded(path))
+                rc = brb_scan_file(&b, path, &fail);
+        }
+        free(names[i]);
+    }
+    free(names);
+    brb_free(&b, 6);
+    if (rc)
+        return rc;
+    if (fail) {
+        if (fputs("FAIL: unsafe fixed-size sqlite3_column_" "blob mem" "cpy "
+                  "in app models.\n"
+                  "      Use AR_READ_" "BLOB(stmt,col,dest,len), or guard with "
+                  "sqlite3_column_" "bytes first.\n", stderr) < 0)
+            return die("z23-lint: write failed\n", "");
+        return 1;
+    }
+    return printf("check_blob_read_bounds: clean — app model blob mem"
+                  "cpy sites are length-guarded\n") < 0
+               ? die("z23-lint: write failed\n", "") : 0;
+}
+
+static int brb_st_line(struct brb *b, const char *line, int want,
+                       const char *want_msg)
+{
+    char msg[192];
+    int v = brb_line(b, line, msg, sizeof msg);
+    if (v != want || (want == 1 && strcmp(msg, want_msg) != 0)) {
+        fprintf(stderr, "check_blob_read_bounds selftest: want %d got %d: %s\n",
+                want, v, line);
+        return 1;
+    }
+    return 0;
+}
+
+int check_blob_read_bounds_selftest(void)
+{
+    struct brb b;
+    int cr = brb_compile(&b);
+    if (cr)
+        return cr;
+    static const char m_direct[] =
+        "mem" "cpy directly from sqlite3_column_"
+        "blob without nearby column_" "bytes guard";
+    static const char m_var[] =
+        "mem" "cpy from sqlite3_column_" "blob variable row without column_"
+        "bytes guard";
+    const char *direct = "    mem" "cpy(dest, sqlite3_column_"
+        "blob(stmt, 0), 32);";
+    const char *assign = "    const void *row = sqlite3_column_"
+        "blob(stmt, 1);";
+    const char *guard = "    int n = sqlite3_column_" "bytes(stmt, 1);";
+    const char *var_cp = "    mem" "cpy(dest, row, 43);";
+    const char *filler = "    total += 1;";
+    int bad = 0;
+    /* Direct unguarded fixed-size read trips. */
+    bad |= brb_st_line(&b, direct, 1, m_direct);
+    /* sizeof(...) and (size_t) casts and trailing comments are fixed too. */
+    b.n = 0; b.guard = 0;
+    bad |= brb_st_line(&b, "    mem" "cpy(dest, sqlite3_column_"
+                       "blob(stmt, 0), sizeof(dest));",
+                       1, m_direct);
+    b.n = 0; b.guard = 0;
+    bad |= brb_st_line(&b, "    mem" "cpy(dest, sqlite3_column_"
+                       "blob(stmt, 0), (size_t)32); // hash",
+                       1, m_direct);
+    /* A variable length or sizeof without parens is not a fixed copy. */
+    b.n = 0; b.guard = 0;
+    bad |= brb_st_line(&b, "    mem" "cpy(dest, sqlite3_column_"
+                       "blob(stmt, 0), len);", 0, NULL);
+    bad |= brb_st_line(&b, "    mem" "cpy(dest, sqlite3_column_"
+                       "blob(stmt, 0), sizeof *dest);",
+                       0, NULL);
+    /* A column_bytes call guards the line itself and the next five. */
+    b.n = 0; b.guard = 0;
+    bad |= brb_st_line(&b, guard, 0, NULL);
+    bad |= brb_st_line(&b, direct, 0, NULL);
+    /* Window expiry: guard line + five lines guarded, the seventh trips. */
+    b.n = 0; b.guard = 0;
+    bad |= brb_st_line(&b, guard, 0, NULL);
+    for (int i = 0; i < 4; i++)
+        bad |= brb_st_line(&b, filler, 0, NULL);
+    bad |= brb_st_line(&b, direct, 0, NULL);   /* sixth line after the guard */
+    bad |= brb_st_line(&b, direct, 1, m_direct); /* seventh: window closed */
+    /* A tracked blob variable trips a later fixed-size memcpy. */
+    b.n = 0; b.guard = 0;
+    bad |= brb_st_line(&b, assign, 0, NULL);
+    bad |= brb_st_line(&b, var_cp, 1, m_var);
+    /* A casted assignment is still a blob assignment. */
+    b.n = 0; b.guard = 0;
+    bad |= brb_st_line(&b, "    const void *row = (const void *)sqlite3_column_"
+                       "blob(stmt, 1);",
+                       0, NULL);
+    bad |= brb_st_line(&b, var_cp, 1, m_var);
+    /* column_bytes marks every tracked variable guarded, past the window. */
+    b.n = 0; b.guard = 0;
+    bad |= brb_st_line(&b, assign, 0, NULL);
+    bad |= brb_st_line(&b, guard, 0, NULL);
+    for (int i = 0; i < 6; i++)
+        bad |= brb_st_line(&b, filler, 0, NULL);
+    bad |= brb_st_line(&b, var_cp, 0, NULL);
+    /* Re-assigning the variable drops its guarded mark. */
+    bad |= brb_st_line(&b, assign, 0, NULL);
+    bad |= brb_st_line(&b, var_cp, 1, m_var);
+    /* The variable is forgotten 16 lines after its assignment. */
+    b.n = 0; b.guard = 0;
+    bad |= brb_st_line(&b, assign, 0, NULL);
+    for (int i = 0; i < 15; i++)
+        bad |= brb_st_line(&b, filler, 0, NULL);
+    bad |= brb_st_line(&b, var_cp, 1, m_var);   /* age 16: still tracked */
+    b.n = 0; b.guard = 0;
+    bad |= brb_st_line(&b, assign, 0, NULL);
+    for (int i = 0; i < 16; i++)
+        bad |= brb_st_line(&b, filler, 0, NULL);
+    bad |= brb_st_line(&b, var_cp, 0, NULL);   /* age 17: forgotten */
+    /* `==` is not a blob assignment; the variable stays unknown. */
+    b.n = 0; b.guard = 0;
+    bad |= brb_st_line(&b, "    if (row == sqlite3_column_"
+                       "blob(stmt, 1))", 0, NULL);
+    bad |= brb_st_line(&b, var_cp, 0, NULL);
+    /* Non-boundary lookalikes (arrow, row2) do not name the variable. */
+    b.n = 0; b.guard = 0;
+    bad |= brb_st_line(&b, assign, 0, NULL);
+    bad |= brb_st_line(&b, "    mem" "cpy(dest, arrow, 43);", 0, NULL);
+    bad |= brb_st_line(&b, "    mem" "cpy(dest, row2, 43);", 0, NULL);
+    /* An AR_READ_BLOB line is skipped whole, memcpy and all. */
+    b.n = 0; b.guard = 0;
+    bad |= brb_st_line(&b, "    if (AR_READ_" "BLOB(stmt, 0, dest, 32)) mem"
+                       "cpy(t, s, 32);",
+                       0, NULL);
+    /* AR_COL_BYTES is a guard too. */
+    b.n = 0; b.guard = 0;
+    bad |= brb_st_line(&b, assign, 0, NULL);
+    bad |= brb_st_line(&b, "    if (AR_COL_" "BYTES(stmt, 1) != 43) return 0;",
+                       0, NULL);
+    bad |= brb_st_line(&b, var_cp, 0, NULL);
+    brb_free(&b, 6);
+    return st_ok(bad, "check_blob_read_bounds selftest: OK\n");
 }

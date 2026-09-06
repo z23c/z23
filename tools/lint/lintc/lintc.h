@@ -160,5 +160,7 @@ int check_silent_errors_bool_run(int argc, char **argv);
 int check_silent_errors_bool_selftest(void);
 int check_no_raw_sqlite_in_controllers_run(int argc, char **argv);
 int check_no_raw_sqlite_in_controllers_selftest(void);
+int check_blob_read_bounds_run(int argc, char **argv);
+int check_blob_read_bounds_selftest(void);
 
 #endif
