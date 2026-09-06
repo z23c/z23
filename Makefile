@@ -13070,8 +13070,10 @@ check-tor-full-default:
 	@./tools/lint/check_tor_full_default.sh --selftest
 	@./tools/lint/check_tor_full_default.sh
 
-# The Tor archive provenance verifier itself — no engine includes, links only
-# zsha256 (self-contained SHA-256, no dependencies beyond libc).
+# The Tor archive provenance verifier itself — links only zsha256
+# (self-contained SHA-256, no dependencies beyond libc) plus the header-only
+# canonical hex codec (platform/modules/base/include/base/hex.h — static
+# inline, adds no link dependency).
 TOR_PROVENANCE_SRCS = tools/tor_provenance.c \
     contexts/commons/packages/zsha256/src/zsha256.c
 $(TOR_PROVENANCE_BIN): $(TOR_PROVENANCE_SRCS)
@@ -13079,6 +13081,7 @@ $(TOR_PROVENANCE_BIN): $(TOR_PROVENANCE_SRCS)
 	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) \
 	    -Icontexts/commons/packages/zsha256/include \
+	    -Iplatform/modules/base/include \
 	    -o $@ $(TOR_PROVENANCE_SRCS)
 
 .PHONY: tools/tor-provenance z23-tor-provenance check-tor-provenance

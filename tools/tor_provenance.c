@@ -49,6 +49,7 @@
 #include <sys/types.h>
 #include <errno.h>
 
+#include "base/hex.h"
 #include "zsha256/zsha256.h"
 
 #define TOR_PROVENANCE_NAME ".provenance"
@@ -128,13 +129,8 @@ static int sha256_hex_of_file(const char *path, char out_hex[ZSHA256_HEX_LEN])
     uint8_t digest[ZSHA256_DIGEST_LEN];
     zsha256_final(&ctx, digest);
     /* zsha256_hex hashes fresh input rather than formatting a digest we
-     * already have, so format the digest ourselves. */
-    static const char hexdigits[] = "0123456789abcdef";
-    for (int i = 0; i < ZSHA256_DIGEST_LEN; i++) {
-        out_hex[2 * i] = hexdigits[(digest[i] >> 4) & 0xF];
-        out_hex[2 * i + 1] = hexdigits[digest[i] & 0xF];
-    }
-    out_hex[2 * ZSHA256_DIGEST_LEN] = '\0';
+     * already have, so format the digest with the canonical codec instead. */
+    zcl_hex_encode(digest, ZSHA256_DIGEST_LEN, out_hex);
     return 0;
 }
 
