@@ -117,6 +117,8 @@ static const struct lint_gate k_gates[] = {
       check_wire_harness_security_gate_selftest },
     { "check-tor-dial-prewarm", check_tor_dial_prewarm_run,
       check_tor_dial_prewarm_selftest },
+    { "check-describe-budget", check_describe_budget_run,
+      check_describe_budget_selftest },
 };
 
 int main(int argc, char **argv)

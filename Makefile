@@ -5317,6 +5317,7 @@ LINTC_SRCS = tools/lint/lintc/lib.c tools/lint/lintc/gate_boot_wiring.c tools/li
     tools/lint/lintc/gate_route_command_parity.c \
     tools/lint/lintc/gate_flag_registry.c \
     tools/lint/lintc/gate_pattern_guard.c \
+    tools/lint/lintc/gate_describe_budget.c \
     tools/lint/lintc/main.c
 LINTC_OBJS = $(LINTC_SRCS:tools/lint/lintc/%.c=build/lintc-obj/%.o)
 # Apple Clang enables -Wunused-but-set-variable under -Wextra -Werror for
@@ -12716,7 +12717,7 @@ check-api-reference-generated:
 # Baseline (may only shrink): tools/lint/describe_budget_baseline.txt.
 # Fix a failure by trimming `semantics`, NEVER by raising the budget.
 # Has --selftest (pads a leaf past the budget, proves the gate trips).
-check-describe-budget:
+check-describe-budget: $(LINTC_TOOL)
 	@echo "══ LINT: every leaf's describe document fits its budget ══"
 	@./tools/lint/check_describe_budget.sh --selftest
 	@./tools/lint/check_describe_budget.sh

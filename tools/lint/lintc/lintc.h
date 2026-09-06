@@ -270,5 +270,7 @@ int check_wire_harness_security_gate_run(int argc, char **argv);
 int check_wire_harness_security_gate_selftest(void);
 int check_tor_dial_prewarm_run(int argc, char **argv);
 int check_tor_dial_prewarm_selftest(void);
+int check_describe_budget_run(int argc, char **argv);
+int check_describe_budget_selftest(void);
 
 #endif
