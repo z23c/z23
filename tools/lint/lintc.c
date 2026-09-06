@@ -6636,6 +6636,832 @@ static int check_mind_owns_rebuild_selftest(void)
     return st_ok(bad, "check-mind-owns-rebuild selftest: OK\n");
 }
 
+static int sh_single_quote(const char *in, char *out, size_t cap)
+{
+    size_t used = 0;
+    if (cap < 3)
+        return die("z23-lint: derived buffer overflow\n", "");
+    out[used++] = '\'';
+    for (const char *p = in; *p; p++) {
+        if (*p == '\'') {
+            if (used + 4 >= cap)
+                return die("z23-lint: derived buffer overflow\n", "");
+            out[used++] = '\'';
+            out[used++] = '\\';
+            out[used++] = '\'';
+            out[used++] = '\'';
+        } else {
+            if (used + 2 > cap)
+                return die("z23-lint: derived buffer overflow\n", "");
+            out[used++] = *p;
+        }
+    }
+    if (used + 2 > cap)
+        return die("z23-lint: derived buffer overflow\n", "");
+    out[used++] = '\'';
+    out[used] = '\0';
+    return 0;
+}
+
+static int lint_self_exe(char *buf, size_t cap)
+{
+    ssize_t n = readlink("/proc/self/exe", buf, cap > 0 ? cap - 1 : 0);
+    if (n < 0 || cap == 0 || (size_t)n >= cap - 1)
+        return die("z23-lint: cannot resolve executable path\n", "");
+    buf[n] = '\0';
+    return 0;
+}
+
+static const char *env_or(const char *name, const char *fallback)
+{
+    const char *e = getenv(name);
+    return (e && e[0]) ? e : fallback;
+}
+
+static int cic_digits(const char *s)
+{
+    if (!s || !s[0])
+        return 0;
+    for (; *s; s++) {
+        if (*s < '0' || *s > '9')
+            return 0;
+    }
+    return 1;
+}
+
+static unsigned long cic_u32(const char *s)
+{
+    unsigned long v = 0;
+    for (; *s; s++)
+        v = v * 10UL + (unsigned long)(*s - '0');
+    return v;
+}
+
+static int cic_prefix_sed(const char *output)
+{
+    const char *p = output ? output : "";
+    do {
+        const char *nl = strchr(p, '\n');
+        size_t n = nl ? (size_t)(nl - p) : strlen(p);
+        if (fputs("  ", stderr) < 0
+            || fwrite(p, 1, n, stderr) != n
+            || fputc('\n', stderr) == EOF)
+            return die("z23-lint: write failed\n", "");
+        if (!nl)
+            break;
+        p = nl + 1;
+    } while (*p);
+    return 0;
+}
+
+static int cic_prefix_log(const char *buf)
+{
+    if (!buf || !buf[0])
+        return 0;
+    return cic_prefix_sed(buf);
+}
+
+static void cic_take_az(const char *buf, const char *key, char *out, size_t cap)
+{
+    out[0] = '\0';
+    size_t klen = strlen(key);
+    for (const char *p = buf; (p = strstr(p, key)) != NULL; ) {
+        p += klen;
+        size_t n = 0;
+        while (p[n] >= 'A' && p[n] <= 'Z')
+            n++;
+        if (p[n] != '"')
+            continue;
+        if (n >= cap)
+            n = cap - 1;
+        memcpy(out, p, n);
+        out[n] = '\0';
+        return;
+    }
+}
+
+static void cic_take_num(const char *buf, const char *key, char *out, size_t cap)
+{
+    out[0] = '\0';
+    size_t klen = strlen(key);
+    for (const char *p = buf; (p = strstr(p, key)) != NULL; ) {
+        p += klen;
+        if (*p < '0' || *p > '9')
+            continue;
+        size_t n = 0;
+        while (p[n] >= '0' && p[n] <= '9')
+            n++;
+        if (n >= cap)
+            n = cap - 1;
+        memcpy(out, p, n);
+        out[n] = '\0';
+        return;
+    }
+}
+
+static void cic_take_q(const char *buf, const char *key, char *out, size_t cap)
+{
+    out[0] = '\0';
+    size_t klen = strlen(key);
+    const char *p = strstr(buf, key);
+    if (!p)
+        return;
+    p += klen;
+    size_t n = 0;
+    while (p[n] && p[n] != '"')
+        n++;
+    if (n >= cap)
+        n = cap - 1;
+    memcpy(out, p, n);
+    out[n] = '\0';
+}
+
+static int cic_ceiling(const char *path, char *out, size_t cap)
+{
+    out[0] = '\0';
+    FILE *f = fopen(path, "r");
+    if (!f)
+        return 0;
+    char *line = NULL;
+    size_t lcap = 0;
+    ssize_t n;
+    int rc = 0;
+    while ((n = getline(&line, &lcap, f)) >= 0) {
+        if (line[0] == '#')
+            continue;
+        char *p = line;
+        while (*p && isspace((unsigned char)*p))
+            p++;
+        if (*p == '\0')
+            continue;
+        size_t i = 0;
+        while (p[i] && !isspace((unsigned char)p[i]))
+            i++;
+        if (i >= cap)
+            i = cap - 1;
+        memcpy(out, p, i);
+        out[i] = '\0';
+        break;
+    }
+    return fin(f, line, path, rc);
+}
+
+static int cic_repo_root(char *buf, size_t cap)
+{
+    if (lint_self_exe(buf, cap))
+        return 2;
+    /* $ROOT/build/bin/z23-lint → $ROOT (executable dir, then two parents). */
+    for (int i = 0; i < 3; i++) {
+        char *slash = strrchr(buf, '/');
+        if (!slash || slash == buf)
+            return die("z23-lint: cannot resolve executable path\n", "");
+        *slash = '\0';
+    }
+    return 0;
+}
+
+static int cic_invoke(const char *gate, int merge_err, char *out, size_t cap,
+                      int *code)
+{
+    char exe[4096], quoted[8192], cmd[8192];
+    if (lint_self_exe(exe, sizeof exe)
+        || sh_single_quote(exe, quoted, sizeof quoted)
+        || ovf(snprintf(cmd, sizeof cmd, "%s %s%s", quoted, gate,
+                        merge_err ? " 2>&1" : ""), sizeof cmd))
+        return 2;
+    return capture_cmd(cmd, out, cap, code);
+}
+
+static int check_codeindex_coverage_run(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+    char root[4096], bin_def[4096], base_def[4096], ceiling[64];
+    char qbin[8192], cmd[8192];
+    static char captured[256 * 1024];
+    char verdict[32], missing[32], summary[512];
+    if (cic_repo_root(root, sizeof root))
+        return 2;
+    if (ovf(snprintf(bin_def, sizeof bin_def, "%s/build/bin/z23-dev", root),
+            sizeof bin_def)
+        || ovf(snprintf(base_def, sizeof base_def,
+                        "%s/tools/lint/codeindex_coverage_baseline.txt", root),
+               sizeof base_def))
+        return 2;
+    const char *bin = env_or("ZCL_CODEINDEX_COVERAGE_BIN", bin_def);
+    const char *baseline = env_or("ZCL_CODEINDEX_COVERAGE_BASELINE", base_def);
+    const char *source_root = env_or("ZCL_CODEINDEX_COVERAGE_ROOT", root);
+    if (chdir(root) != 0)
+        return die("z23-lint: cannot scan %s\n", root);
+    if (access(bin, X_OK) != 0) {
+        if (fprintf(stderr,
+                    "check-codeindex-coverage: FATAL — missing executable %s\n",
+                    bin) < 0)
+            return die("z23-lint: write failed\n", "");
+        return 2;
+    }
+    struct stat st;
+    if (stat(baseline, &st) != 0 || !S_ISREG(st.st_mode)) {
+        if (fprintf(stderr,
+                    "check-codeindex-coverage: FATAL — missing baseline %s\n",
+                    baseline) < 0)
+            return die("z23-lint: write failed\n", "");
+        return 2;
+    }
+    if (cic_ceiling(baseline, ceiling, sizeof ceiling))
+        return 2;
+    if (!cic_digits(ceiling)) {
+        if (fputs("check-codeindex-coverage: FATAL — baseline must contain one nonnegative integer\n",
+                  stderr) < 0)
+            return die("z23-lint: write failed\n", "");
+        return 2;
+    }
+    if (setenv("ZCL_DEV_SOURCE_ROOT", source_root, 1) != 0)
+        return die("z23-lint: setenv failed\n", "");
+    if (sh_single_quote(bin, qbin, sizeof qbin)
+        || ovf(snprintf(cmd, sizeof cmd, "%s code coverage 2>&1", qbin),
+               sizeof cmd))
+        return 2;
+    int code = 0;
+    int rc = capture_cmd(cmd, captured, sizeof captured, &code);
+    if (rc)
+        return rc;
+    if (code != 0) {
+        if (fputs("check-codeindex-coverage: FATAL — code coverage could not measure the tree\n",
+                  stderr) < 0)
+            return die("z23-lint: write failed\n", "");
+        rc = cic_prefix_sed(captured);
+        return rc ? rc : 2;
+    }
+    cic_take_az(captured, "\"verdict\":\"", verdict, sizeof verdict);
+    cic_take_num(captured, "\"missing_files\":", missing, sizeof missing);
+    cic_take_q(captured, "\"summary\":\"", summary, sizeof summary);
+    if (!cic_digits(missing)) {
+        if (fputs("check-codeindex-coverage: FATAL — malformed code coverage reply\n",
+                  stderr) < 0)
+            return die("z23-lint: write failed\n", "");
+        rc = cic_prefix_sed(captured);
+        return rc ? rc : 2;
+    }
+    unsigned long miss_n = cic_u32(missing), ceil_n = cic_u32(ceiling);
+    if (miss_n > ceil_n) {
+        if (fprintf(stderr,
+                    "check-codeindex-coverage: FAIL — %s; shrink-only ceiling=%s\n",
+                    summary, ceiling) < 0)
+            return die("z23-lint: write failed\n", "");
+        rc = cic_prefix_sed(captured);
+        return rc ? rc : 1;
+    }
+    if (strcmp(verdict, "GREEN") != 0 && miss_n == 0) {
+        if (fputs("check-codeindex-coverage: FATAL — zero misses did not earn GREEN\n",
+                  stderr) < 0)
+            return die("z23-lint: write failed\n", "");
+        return 2;
+    }
+    if (printf("check-codeindex-coverage: PASS — %s; shrink-only ceiling=%s\n",
+               summary, ceiling) < 0)
+        return die("z23-lint: write failed\n", "");
+    return 0;
+}
+
+static int cic_st_fail(const char *msg, const char *log)
+{
+    if (fprintf(stderr, "check-codeindex-coverage: SELFTEST FAILED — %s\n",
+                msg) < 0)
+        return die("z23-lint: write failed\n", "");
+    int rc = cic_prefix_log(log);
+    return rc ? rc : 2;
+}
+
+static int check_codeindex_coverage_selftest(void)
+{
+    const char *td = env_or("TMPDIR", "/tmp");
+    char tmpl[4096];
+    if (ovf(snprintf(tmpl, sizeof tmpl, "%s/z23-codeindex-coverage.XXXXXX", td),
+            sizeof tmpl))
+        return 2;
+    char *tmp = mkdtemp(tmpl);
+    if (!tmp)
+        return die("z23-lint: mkdir failed: %s\n", td);
+    char fixture[4096], srcdir[4096], ac[4096], missp[4096], basep[4096];
+    static char logb[256 * 1024];
+    int code = 0, rc, bad = 0;
+    if (ovf(snprintf(fixture, sizeof fixture, "%s/repo", tmp), sizeof fixture)
+        || ovf(snprintf(srcdir, sizeof srcdir, "%s/src", fixture), sizeof srcdir)
+        || ovf(snprintf(ac, sizeof ac, "%s/a.c", srcdir), sizeof ac)
+        || ovf(snprintf(missp, sizeof missp, "%s/missing.c", srcdir),
+               sizeof missp)
+        || ovf(snprintf(basep, sizeof basep, "%s/baseline", tmp), sizeof basep)
+        || csr_write(ac, "int coverage_fixture(void) { return 23; }\n")
+        || csr_write(basep, "0\n")) {
+        (void)rap_rm_rf(tmp);
+        return 2;
+    }
+    char dump[256], gitcmd[8192];
+    if (strchr(fixture, '\'')) {
+        (void)rap_rm_rf(tmp);
+        return die("z23-lint: path too long: %s\n", fixture);
+    }
+    if (ovf(snprintf(gitcmd, sizeof gitcmd, "git -C '%s' init -q", fixture),
+            sizeof gitcmd)
+        || capture_cmd(gitcmd, dump, sizeof dump, &code) || code != 0
+        || ovf(snprintf(gitcmd, sizeof gitcmd, "git -C '%s' add src/a.c",
+                        fixture), sizeof gitcmd)
+        || capture_cmd(gitcmd, dump, sizeof dump, &code) || code != 0) {
+        (void)rap_rm_rf(tmp);
+        return die("z23-lint: command failed (%s)\n", "git");
+    }
+    if (setenv("ZCL_CODEINDEX_COVERAGE_ROOT", fixture, 1) != 0
+        || setenv("ZCL_CODEINDEX_COVERAGE_BASELINE", basep, 1) != 0) {
+        (void)rap_rm_rf(tmp);
+        return die("z23-lint: setenv failed\n", "");
+    }
+    rc = cic_invoke("check-codeindex-coverage", 1, logb, sizeof logb, &code);
+    if (rc) {
+        (void)rap_rm_rf(tmp);
+        return rc;
+    }
+    if (code != 0) {
+        bad = cic_st_fail("clean tracked source was not GREEN", logb);
+        (void)rap_rm_rf(tmp);
+        return bad;
+    }
+    if (csr_write(missp, "int planted_missing(void) { return 1; }\n")
+        || ovf(snprintf(gitcmd, sizeof gitcmd, "git -C '%s' add src/missing.c",
+                        fixture), sizeof gitcmd)
+        || capture_cmd(gitcmd, dump, sizeof dump, &code) || code != 0) {
+        (void)rap_rm_rf(tmp);
+        return die("z23-lint: command failed (%s)\n", "git");
+    }
+    if (unlink(missp) != 0) {
+        (void)rap_rm_rf(tmp);
+        return die("z23-lint: cannot open %s\n", missp);
+    }
+    rc = cic_invoke("check-codeindex-coverage", 1, logb, sizeof logb, &code);
+    if (rc) {
+        (void)rap_rm_rf(tmp);
+        return rc;
+    }
+    if (code != 1 || strstr(logb, "missing=1") == NULL) {
+        bad = cic_st_fail("planted tracked omission was not named RED", logb);
+        (void)rap_rm_rf(tmp);
+        return bad;
+    }
+    if (ovf(snprintf(gitcmd, sizeof gitcmd,
+                     "git -C '%s' rm -q --cached --ignore-unmatch src/missing.c",
+                     fixture), sizeof gitcmd)
+        || capture_cmd(gitcmd, dump, sizeof dump, &code) || code != 0) {
+        (void)rap_rm_rf(tmp);
+        return die("z23-lint: command failed (%s)\n", "git");
+    }
+    rc = cic_invoke("check-codeindex-coverage", 1, logb, sizeof logb, &code);
+    if (rc) {
+        (void)rap_rm_rf(tmp);
+        return rc;
+    }
+    if (code != 0) {
+        bad = cic_st_fail("removing the planted manifest row did not restore GREEN",
+                          logb);
+        (void)rap_rm_rf(tmp);
+        return bad;
+    }
+    (void)rap_rm_rf(tmp);
+    if (fputs("check-codeindex-coverage: SELFTEST PASS — clean and restored manifests are GREEN; one tracked missing file is RED\n",
+              stdout) < 0)
+        return die("z23-lint: write failed\n", "");
+    return 0;
+}
+
+static int aae_fail(const char *msg)
+{
+    if (fprintf(stderr, "check_asan_adx_exception: FAIL — %s\n", msg) < 0)
+        return die("z23-lint: write failed\n", "");
+    return 1;
+}
+
+static char *aae_trim(char *s)
+{
+    while (*s && isspace((unsigned char)*s))
+        s++;
+    size_t n = strlen(s);
+    while (n && isspace((unsigned char)s[n - 1]))
+        s[--n] = '\0';
+    return s;
+}
+
+static int aae_continued(const char *line)
+{
+    const char *p = line + strlen(line);
+    while (p > line && (p[-1] == '\n' || p[-1] == '\r'))
+        p--;
+    while (p > line && isspace((unsigned char)p[-1]))
+        p--;
+    return p > line && p[-1] == '\\';
+}
+
+static int aae_is_override(const char *line, const char *name, const char **rest)
+{
+    static const char ov[] = "override";
+    const char *p = line;
+    size_t nl = strlen(name);
+    if (strncmp(p, ov, sizeof ov - 1) != 0)
+        return 0;
+    p += sizeof ov - 1;
+    if (!isspace((unsigned char)*p))
+        return 0;
+    while (*p && isspace((unsigned char)*p))
+        p++;
+    if (strncmp(p, name, nl) != 0)
+        return 0;
+    p += nl;
+    while (*p && isspace((unsigned char)*p))
+        p++;
+    if (p[0] != ':' || p[1] != '=')
+        return 0;
+    *rest = p + 2;
+    return 1;
+}
+
+static int aae_append(char *value, size_t cap, const char *tok)
+{
+    if (!tok[0])
+        return 0;
+    size_t used = strlen(value), add = strlen(tok);
+    if (used) {
+        if (used + 1 + add + 1 > cap)
+            return die("z23-lint: derived buffer overflow\n", "");
+        value[used++] = ' ';
+        memcpy(value + used, tok, add + 1);
+        return 0;
+    }
+    if (add + 1 > cap)
+        return die("z23-lint: derived buffer overflow\n", "");
+    memcpy(value, tok, add + 1);
+    return 0;
+}
+
+static int aae_read_var(const char *path, const char *name, char *value,
+                        size_t cap)
+{
+    value[0] = '\0';
+    FILE *f = fopen(path, "r");
+    if (!f)
+        return 0;
+    char *line = NULL;
+    size_t lcap = 0;
+    ssize_t n;
+    int active = 0, rc = 0;
+    while ((n = getline(&line, &lcap, f)) >= 0) {
+        const char *body = line;
+        if (!active) {
+            if (!aae_is_override(line, name, &body))
+                continue;
+            active = 1;
+        }
+        int cont = aae_continued(body);
+        if (n > 0 && (line[n - 1] == '\n' || line[n - 1] == '\r')) {
+            line[n - 1] = '\0';
+            if (n > 1 && line[n - 2] == '\r')
+                line[n - 2] = '\0';
+        }
+        if (cont) {
+            size_t L = strlen((char *)body);
+            while (L && isspace((unsigned char)body[L - 1]))
+                L--;
+            if (L && body[L - 1] == '\\')
+                ((char *)body)[L - 1] = '\0';
+        }
+        char *tok = aae_trim((char *)body);
+        if (aae_append(value, cap, tok)) {
+            rc = 2;
+            break;
+        }
+        if (!cont)
+            break;
+    }
+    int fr = fin(f, line, path, rc);
+    return fr ? fr : rc;
+}
+
+static int aae_has_needle(const char *path, const char *needle, int *found)
+{
+    *found = 0;
+    FILE *f = fopen(path, "r");
+    if (!f)
+        return 0;
+    char *line = NULL;
+    size_t cap = 0;
+    ssize_t n;
+    int rc = 0;
+    while ((n = getline(&line, &cap, f)) >= 0) {
+        if (strstr(line, needle) != NULL) {
+            *found = 1;
+            break;
+        }
+    }
+    return fin(f, line, path, rc);
+}
+
+static int aae_count_substr(const char *path, const char *needle, int *count)
+{
+    *count = 0;
+    FILE *f = fopen(path, "r");
+    if (!f)
+        return 0;
+    char *line = NULL;
+    size_t cap = 0;
+    ssize_t n;
+    int rc = 0;
+    while ((n = getline(&line, &cap, f)) >= 0) {
+        if (strstr(line, needle) != NULL)
+            (*count)++;
+    }
+    return fin(f, line, path, rc);
+}
+
+static int aae_count_re(const char *path, const regex_t *re, int *count)
+{
+    *count = 0;
+    FILE *f = fopen(path, "r");
+    if (!f)
+        return 0;
+    char *line = NULL;
+    size_t cap = 0;
+    ssize_t n;
+    int rc = 0;
+    while ((n = getline(&line, &cap, f)) >= 0) {
+        if (n > 0 && line[n - 1] == '\n')
+            line[n - 1] = '\0';
+        if (regexec(re, line, 0, NULL, 0) == 0)
+            (*count)++;
+    }
+    return fin(f, line, path, rc);
+}
+
+static int aae_require(const char *path, const char *needle)
+{
+    int found = 0;
+    int rc = aae_has_needle(path, needle, &found);
+    if (rc)
+        return rc;
+    if (found)
+        return 0;
+    char msg[8192];
+    if (ovf(snprintf(msg, sizeof msg, "missing required Makefile wiring: %s",
+                     needle), sizeof msg))
+        return 2;
+    return aae_fail(msg);
+}
+
+static int aae_copy(const char *src, const char *dst)
+{
+    FILE *in = fopen(src, "r");
+    if (!in)
+        return die("z23-lint: cannot open %s\n", src);
+    FILE *out = fopen(dst, "w");
+    if (!out) {
+        fclose(in);
+        return die("z23-lint: cannot open %s\n", dst);
+    }
+    char buf[8192];
+    size_t n;
+    int rc = 0;
+    while ((n = fread(buf, 1, sizeof buf, in)) > 0) {
+        if (fwrite(buf, 1, n, out) != n) {
+            rc = die("z23-lint: write failed\n", "");
+            break;
+        }
+    }
+    if (rc == 0 && ferror(in))
+        rc = die("z23-lint: read failed: %s\n", src);
+    if (fclose(out) != 0 && rc == 0)
+        rc = die("z23-lint: fclose failed: %s\n", dst);
+    if (fclose(in) != 0 && rc == 0)
+        rc = die("z23-lint: fclose failed: %s\n", src);
+    return rc;
+}
+
+static int aae_rewrite_first(const char *src, const char *dst, const char *from,
+                             const char *to)
+{
+    FILE *in = fopen(src, "r");
+    if (!in)
+        return die("z23-lint: cannot open %s\n", src);
+    FILE *out = fopen(dst, "w");
+    if (!out) {
+        fclose(in);
+        return die("z23-lint: cannot open %s\n", dst);
+    }
+    char *line = NULL;
+    size_t cap = 0;
+    ssize_t n;
+    int done = 0, rc = 0;
+    while ((n = getline(&line, &cap, in)) >= 0) {
+        char *hit = !done ? strstr(line, from) : NULL;
+        if (hit) {
+            size_t pre = (size_t)(hit - line);
+            size_t fl = strlen(from), tl = strlen(to);
+            if (fwrite(line, 1, pre, out) != pre
+                || fwrite(to, 1, tl, out) != tl
+                || fputs(hit + fl, out) < 0) {
+                rc = die("z23-lint: write failed\n", "");
+                break;
+            }
+            done = 1;
+        } else if (fwrite(line, 1, (size_t)n, out) != (size_t)n) {
+            rc = die("z23-lint: write failed\n", "");
+            break;
+        }
+    }
+    free(line);
+    if (rc == 0 && ferror(in))
+        rc = die("z23-lint: read failed: %s\n", src);
+    if (fclose(out) != 0 && rc == 0)
+        rc = die("z23-lint: fclose failed: %s\n", dst);
+    if (fclose(in) != 0 && rc == 0)
+        rc = die("z23-lint: fclose failed: %s\n", src);
+    return rc;
+}
+
+static const char *aae_makefile(void)
+{
+    return env_or("ZCL_ASAN_ADX_MAKEFILE", "Makefile");
+}
+
+static int aae_check(const char *path)
+{
+    struct stat st;
+    if (stat(path, &st) != 0 || !S_ISREG(st.st_mode)) {
+        char msg[8192];
+        if (ovf(snprintf(msg, sizeof msg, "cannot read %s", path), sizeof msg))
+            return 2;
+        return aae_fail(msg);
+    }
+    char sources[8192], flags[4096], common[8192], msg[8192];
+    int rc = aae_read_var(path, "ASAN_ADX_FRAME_POINTER_EXCEPTION_SRCS",
+                          sources, sizeof sources);
+    if (rc)
+        return rc;
+    rc = aae_read_var(path, "ASAN_ADX_FRAME_POINTER_EXCEPTION_FLAGS",
+                      flags, sizeof flags);
+    if (rc)
+        return rc;
+    rc = aae_read_var(path, "ASAN_COMMON_SAN_FLAGS", common, sizeof common);
+    if (rc)
+        return rc;
+    if (strcmp(sources,
+               "core/modules/sapling/src/bn254_accel.c "
+               "core/modules/sapling/src/fr_avx512.c") != 0) {
+        if (ovf(snprintf(msg, sizeof msg,
+                         "exception source allowlist changed: '%s'", sources),
+                sizeof msg))
+            return 2;
+        return aae_fail(msg);
+    }
+    if (strcmp(flags, "-fomit-frame-pointer") != 0) {
+        if (ovf(snprintf(msg, sizeof msg, "exception flags changed: '%s'",
+                         flags), sizeof msg))
+            return 2;
+        return aae_fail(msg);
+    }
+    if (strcmp(common,
+               "-fsanitize=address,undefined -fno-omit-frame-pointer "
+               "-fno-sanitize=alignment") != 0) {
+        if (ovf(snprintf(msg, sizeof msg,
+                         "general ASan/UBSan flags changed: '%s'", common),
+                sizeof msg))
+            return 2;
+        return aae_fail(msg);
+    }
+    static const char *const needles[] = {
+        "TEST_ASAN_ADX_FRAME_POINTER_EXCEPTION_OBJS := $(addprefix $(TEST_ASAN_OBJ_DIR)/,$(ASAN_ADX_FRAME_POINTER_EXCEPTION_SRCS:.c=.o))",
+        "$(TEST_ASAN_ADX_FRAME_POINTER_EXCEPTION_OBJS): TEST_ASAN_OBJECT_CFLAGS += $(ASAN_ADX_FRAME_POINTER_EXCEPTION_FLAGS)",
+        "DEV_ASAN_ADX_FRAME_POINTER_EXCEPTION_OBJS := $(addprefix $(DEV_ASAN_OBJ_DIR)/,$(ASAN_ADX_FRAME_POINTER_EXCEPTION_SRCS:.c=.o))",
+        "$(DEV_ASAN_ADX_FRAME_POINTER_EXCEPTION_OBJS): DEV_ASAN_OBJECT_CFLAGS += $(ASAN_ADX_FRAME_POINTER_EXCEPTION_FLAGS)",
+    };
+    for (size_t i = 0; i < sizeof needles / sizeof needles[0]; i++) {
+        rc = aae_require(path, needles[i]);
+        if (rc)
+            return rc;
+    }
+    int epoch_count = 0;
+    rc = aae_count_substr(path,
+                          "adx-exception=$(ASAN_ADX_FRAME_POINTER_EXCEPTION_SRCS):$(ASAN_ADX_FRAME_POINTER_EXCEPTION_FLAGS)",
+                          &epoch_count);
+    if (rc)
+        return rc;
+    if (epoch_count != 2) {
+        if (ovf(snprintf(msg, sizeof msg,
+                         "expected the test and dev ASan compile epochs to bind the exception; found %d binding(s)",
+                         epoch_count), sizeof msg))
+            return 2;
+        return aae_fail(msg);
+    }
+    regex_t re;
+    rc = compile_pat(&re, REG_EXTENDED, "ASAN_COMMON_SAN_FLAGS",
+                     "[[:space:]]*=", "", "");
+    if (rc)
+        return rc;
+    int override_count = 0;
+    rc = aae_count_re(path, &re, &override_count);
+    regfree(&re);
+    if (rc)
+        return rc;
+    if (override_count != 0) {
+        if (ovf(snprintf(msg, sizeof msg,
+                         "found %d recipe/caller override(s) of ASAN_COMMON_SAN_FLAGS",
+                         override_count), sizeof msg))
+            return 2;
+        return aae_fail(msg);
+    }
+    rc = aae_require(path,
+                     "TEST_ASAN_CFLAGS = $(filter-out -O3 $(ZCL_LTO_FLAG) -Werror,$(CACHED_CFLAGS)) -O1 -g -DZCL_TESTING \\");
+    if (rc)
+        return rc;
+    return aae_require(path,
+                       "DEV_ASAN_CFLAGS = $(filter-out -O3 $(ZCL_LTO_FLAG) -Werror,$(CACHED_CFLAGS)) $(ZCL_DEV_OPT) -g3 -DZCL_DEV_BUILD \\");
+}
+
+static int check_asan_adx_exception_run(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+    char root[4096];
+    if (cic_repo_root(root, sizeof root))
+        return 2;
+    if (chdir(root) != 0)
+        return die("z23-lint: cannot scan %s\n", root);
+    int rc = aae_check(aae_makefile());
+    if (rc)
+        return rc;
+    if (fputs("check_asan_adx_exception: clean — exactly two ASan ADX TUs omit frame pointers; sanitizer coverage and epoch bindings remain intact\n",
+              stdout) < 0)
+        return die("z23-lint: write failed\n", "");
+    return 0;
+}
+
+static int check_asan_adx_exception_selftest(void)
+{
+    char root[4096];
+    if (cic_repo_root(root, sizeof root))
+        return 2;
+    if (chdir(root) != 0)
+        return die("z23-lint: cannot scan %s\n", root);
+    const char *mk = aae_makefile();
+    char tmpl[] = "/tmp/z23-lint-asan-adx-XXXXXX";
+    char *tmp = mkdtemp(tmpl);
+    if (!tmp)
+        return die("z23-lint: mkdir failed: %s\n", "/tmp");
+    char copy[4096], nextp[4096];
+    static char logb[256 * 1024];
+    int code = 0, rc;
+    if (ovf(snprintf(copy, sizeof copy, "%s/Makefile", tmp), sizeof copy)
+        || ovf(snprintf(nextp, sizeof nextp, "%s/Makefile.next", tmp),
+               sizeof nextp)
+        || aae_copy(mk, copy)) {
+        (void)rap_rm_rf(tmp);
+        return 2;
+    }
+    if (setenv("ZCL_ASAN_ADX_MAKEFILE", copy, 1) != 0) {
+        (void)rap_rm_rf(tmp);
+        return die("z23-lint: setenv failed\n", "");
+    }
+    rc = cic_invoke("check-asan-adx-exception", 0, logb, sizeof logb, &code);
+    if (rc) {
+        (void)rap_rm_rf(tmp);
+        return rc;
+    }
+    if (code != 0) {
+        (void)rap_rm_rf(tmp);
+        return code;
+    }
+    static const char from[] = "core/modules/sapling/src/bn254_accel.c";
+    static const char to[] =
+        "core/modules/sapling/src/bn254_accel.c core/modules/sapling/src/unaudited_accel.c";
+    if (aae_rewrite_first(copy, nextp, from, to) || rename(nextp, copy) != 0) {
+        (void)rap_rm_rf(tmp);
+        return die("z23-lint: write failed\n", "");
+    }
+    rc = cic_invoke("check-asan-adx-exception", 1, logb, sizeof logb, &code);
+    if (rc) {
+        (void)rap_rm_rf(tmp);
+        return rc;
+    }
+    if (code == 0) {
+        (void)rap_rm_rf(tmp);
+        return aae_fail("selftest expanded the exception allowlist but the gate passed");
+    }
+    if (strstr(logb, "exception source allowlist changed") == NULL) {
+        (void)rap_rm_rf(tmp);
+        return aae_fail("selftest failed for the wrong reason");
+    }
+    (void)rap_rm_rf(tmp);
+    if (fputs("check_asan_adx_exception: selftest PASS — an allowlist expansion is rejected\n",
+              stdout) < 0)
+        return die("z23-lint: write failed\n", "");
+    return 0;
+}
+
 struct lint_gate {
     const char *name;
     int (*run)(int argc, char **argv);
@@ -6687,6 +7513,10 @@ static const struct lint_gate k_gates[] = {
       check_no_new_coin_backfill_caller_selftest },
     { "check-mind-owns-rebuild", check_mind_owns_rebuild_run,
       check_mind_owns_rebuild_selftest },
+    { "check-codeindex-coverage", check_codeindex_coverage_run,
+      check_codeindex_coverage_selftest },
+    { "check-asan-adx-exception", check_asan_adx_exception_run,
+      check_asan_adx_exception_selftest },
 };
 
 int main(int argc, char **argv)

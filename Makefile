@@ -11407,7 +11407,7 @@ check-accel-oracle-pinned:
 # banner said "MULX+ADCX+ADOX" over an object with zero of either for months.
 # The gate compiles each claiming file the way the node ships it and reads the
 # disassembly.
-check-no-adx-overclaim:
+check-no-adx-overclaim: $(LINTC_TOOL)
 	@echo "══ LINT: no ADCX/ADOX carry-chain overclaim ══"
 	@./tools/lint/check_no_adx_overclaim.sh --selftest
 	@./tools/lint/check_no_adx_overclaim.sh
@@ -13026,7 +13026,7 @@ check-outparam-init-before-return:
 	@bash tools/lint/check_outparam_init_before_return.sh --selftest
 	@bash tools/lint/check_outparam_init_before_return.sh
 
-check-codeindex-coverage: $(ZCLASSIC23_DEV_BIN)
+check-codeindex-coverage: $(ZCLASSIC23_DEV_BIN) $(LINTC_TOOL)
 	@echo "══ LINT: every tracked maintained source node is indexed ══"
 	@./tools/lint/check_codeindex_coverage.sh --selftest
 	@./tools/lint/check_codeindex_coverage.sh
