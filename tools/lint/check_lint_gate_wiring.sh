@@ -37,6 +37,12 @@
 #      list is a broken fallback path that the default path cannot see.
 #   D. Every script path named by a table entry exists and is readable. The
 #      entry is a STRING; a typo'd path is only discovered when that gate runs.
+#   E. No C23 lint-runtime family file (tools/lint/lintc/gate_*.c) exceeds the
+#      LINT_FAMILY_CEILING line budget defined in lintc.h — the ceiling is what
+#      keeps each family reviewable in one sitting, and `z23-lint --families`
+#      is the operator-facing ledger of each family's headroom. When the lintc
+#      tree exists but the ceiling constant cannot be read, the gate fails
+#      closed: a budget it cannot see is a budget it cannot enforce.
 #
 # ── SOURCES OF TRUTH (never re-parsed by hand) ──────────────────────────────
 #   gate lists : the LINT_GATES / LINT_FAST_GATES backslash-continued blocks in
@@ -185,6 +191,45 @@ check_root() {
         echo ""
         echo "  The case table is a string table — nothing type-checks these paths."
         echo "  Fix the path, or add the script."
+    fi
+
+    # ── E. lint-runtime family files over the line ceiling ──────────────────
+    # The ledger half is `z23-lint --families`; this is the refusal. The
+    # ceiling number lives in exactly one place (lintc.h) and is read out of
+    # it here; when the lintc tree exists but the constant cannot be read the
+    # gate fails closed rather than waving an unverifiable budget through.
+    # A tree without tools/lint/lintc/ (pre-split fixtures) has nothing to
+    # check and skips.
+    local lintc_dir="$root/tools/lint/lintc"
+    if [ -d "$lintc_dir" ]; then
+        local ceiling
+        ceiling="$(sed -nE 's|^#define[[:space:]]+LINT_FAMILY_CEILING[[:space:]]+([0-9]+).*|\1|p' \
+                      "$lintc_dir/lintc.h" 2>/dev/null | head -1)"
+        if [ -z "$ceiling" ]; then
+            fail=1
+            echo "FAIL: $lintc_dir/lintc.h does not define LINT_FAMILY_CEILING."
+            echo "      The family-file line budget exists exactly once, in that header;"
+            echo "      a tree where it cannot be read is a tree whose budget cannot be"
+            echo "      verified. Restore the definition."
+        else
+            local ff flines over=""
+            for ff in "$lintc_dir"/gate_*.c; do
+                [ -e "$ff" ] || continue
+                flines="$(wc -l < "$ff")"
+                if [ "$flines" -gt "$ceiling" ]; then
+                    over="$over$ff has $flines lines (ceiling $ceiling)"$'\n'
+                fi
+            done
+            if [ -n "$over" ]; then
+                fail=1
+                echo "FAIL: lint-runtime family file(s) over the $ceiling-line ceiling:"
+                printf '%s' "$over" | sed 's/^/    /'
+                echo ""
+                echo "  'z23-lint --families' prints every family's headroom. Split the"
+                echo "  family or move the new gate to a family with room — the ceiling"
+                echo "  is what keeps each family file reviewable in one sitting."
+            fi
+        fi
     fi
 
     if [ "$fail" != 0 ]; then
@@ -344,16 +389,38 @@ run_selftest() {
     expect_reject "E: an empty/unparseable LINT_GATES fails closed" \
                   "LINT_GATES is empty" "$d" || rc=1
 
-    # F. positive control — a correctly wired fixture PASSES, so none of the
-    #    above can be an unconditional failure.
+    # F. a lint-runtime family file over the ceiling is refused, and named.
     d="$FIXTURE_ROOT/f"; mkdir -p "$d"; make_fixture "$d"
+    fixture_list "$d" check-sentinel-wired
+    fixture_wire "$d" check-sentinel-wired './tools/lint/sentinel_a.sh'
+    mkdir -p "$d/tools/lint/lintc"
+    printf '#define LINT_FAMILY_CEILING 1500\n' > "$d/tools/lint/lintc/lintc.h"
+    yes 'int pad;' | head -1501 > "$d/tools/lint/lintc/gate_big.c"
+    expect_reject "F: a family file over the ceiling is caught" \
+                  "gate_big.c" "$d" || rc=1
+
+    # G. the lintc tree is present but the ceiling constant is unreadable —
+    #    fail closed, never wave an unverifiable budget through.
+    d="$FIXTURE_ROOT/g"; mkdir -p "$d"; make_fixture "$d"
+    fixture_list "$d" check-sentinel-wired
+    fixture_wire "$d" check-sentinel-wired './tools/lint/sentinel_a.sh'
+    mkdir -p "$d/tools/lint/lintc"
+    printf '/* no ceiling here */\n' > "$d/tools/lint/lintc/lintc.h"
+    printf 'int small;\n' > "$d/tools/lint/lintc/gate_small.c"
+    expect_reject "G: a lintc.h without LINT_FAMILY_CEILING fails closed" \
+                  "LINT_FAMILY_CEILING" "$d" || rc=1
+
+    # H. positive control — a correctly wired fixture PASSES, so none of the
+    #    above can be an unconditional failure. (No lintc tree in the fixture:
+    #    the family check skips, as it does on any pre-split tree.)
+    d="$FIXTURE_ROOT/h"; mkdir -p "$d"; make_fixture "$d"
     fixture_list "$d" check-sentinel-wired check-sentinel-unwired
     fixture_wire "$d" check-sentinel-wired   './tools/lint/sentinel_a.sh'
     fixture_wire "$d" check-sentinel-unwired './tools/lint/sentinel_b.sh --selftest && ./tools/lint/sentinel_b.sh'
-    expect_accept "F: a fully wired tree passes (positive control)" "$d" || rc=1
+    expect_accept "H: a fully wired tree passes (positive control)" "$d" || rc=1
 
     if [ "$rc" -eq 0 ]; then
-        echo "══ selftest: PASS (6/6) ══"
+        echo "══ selftest: PASS (8/8) ══"
     else
         echo "══ selftest: FAIL ══"
     fi

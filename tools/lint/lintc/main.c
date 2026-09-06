@@ -84,8 +84,10 @@ int main(int argc, char **argv)
             printf("%s\n", k_gates[i].name);
         return 0;
     }
+    if (argc >= 2 && strcmp(argv[1], "--families") == 0)
+        return lint_families_ledger();
     if (argc < 2)
-        return die("z23-lint: usage: z23-lint <gate-name> [--selftest] | z23-lint <gate-name> [args...] | --list\n",
+        return die("z23-lint: usage: z23-lint <gate-name> [--selftest] | z23-lint <gate-name> [args...] | --list | --families\n",
                    "");
     const struct lint_gate *g = NULL;
     for (size_t i = 0; i < sizeof k_gates / sizeof k_gates[0]; i++) {

@@ -856,3 +856,86 @@ int cic_invoke(const char *gate, int merge_err, char *out, size_t cap,
         return 2;
     return capture_cmd(cmd, out, cap, code);
 }
+
+/* z23-lint --families: the family-size ledger. Lists every gate_*.c family
+ * file under tools/lint/lintc/ (relative to the caller's cwd, like every
+ * gate's scan) with its line count and headroom to LINT_FAMILY_CEILING. A
+ * file over the ceiling is named on stderr and fails the command, so the
+ * ledger doubles as the refusal the wiring gate enforces. Line counts are
+ * newline counts, matching wc -l exactly. */
+
+#define FL_MAX 64
+#define FL_NAME 256
+
+static int fl_count(const char *path, long *out)
+{
+    FILE *f = fopen(path, "r");
+    if (!f)
+        return die("z23-lint: cannot open %s\n", path);
+    long n = 0;
+    int c;
+    while ((c = fgetc(f)) != EOF)
+        if (c == '\n')
+            n++;
+    if (ferror(f)) {
+        fclose(f);
+        return die("z23-lint: read error on %s\n", path);
+    }
+    fclose(f);
+    *out = n;
+    return 0;
+}
+
+static int fl_cmp(const void *a, const void *b)
+{
+    return strcmp(a, b);
+}
+
+int lint_families_ledger(void)
+{
+    static const char k_dir[] = "tools/lint/lintc";
+    DIR *d = opendir(k_dir);
+    if (!d)
+        return die("z23-lint: cannot open %s (run from the repo root)\n",
+                   k_dir);
+    static char names[FL_MAX][FL_NAME];
+    int nf = 0;
+    struct dirent *de;
+    while ((de = readdir(d)) != NULL) {
+        const char *nm = de->d_name;
+        size_t nl = strlen(nm);
+        if (strncmp(nm, "gate_", 5) != 0 || nl < 7
+            || strcmp(nm + nl - 2, ".c") != 0)
+            continue;
+        if (nf >= FL_MAX || nl >= FL_NAME) {
+            closedir(d);
+            return die("z23-lint: too many family files under %s\n", k_dir);
+        }
+        memcpy(names[nf], nm, nl + 1);
+        nf++;
+    }
+    closedir(d);
+    if (nf == 0)
+        return die("z23-lint: no family files under %s\n", k_dir);
+    qsort(names, (size_t)nf, FL_NAME, fl_cmp);
+    int breach = 0;
+    for (int i = 0; i < nf; i++) {
+        char path[FL_NAME + 64];
+        if (ovf(snprintf(path, sizeof path, "%s/%s", k_dir, names[i]),
+                sizeof path))
+            return 2;
+        long lines;
+        int rc = fl_count(path, &lines);
+        if (rc)
+            return rc;
+        printf("%s: %ld lines, %ld headroom to %d\n", path, lines,
+               LINT_FAMILY_CEILING - lines, LINT_FAMILY_CEILING);
+        if (lines > LINT_FAMILY_CEILING) {
+            fprintf(stderr, "z23-lint: FAMILY CEILING BREACH — %s has %ld "
+                    "lines (ceiling %d)\n", path, lines,
+                    LINT_FAMILY_CEILING);
+            breach = 1;
+        }
+    }
+    return breach;
+}

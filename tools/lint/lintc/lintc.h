@@ -86,6 +86,14 @@ int cic_invoke(const char *gate, int merge_err, char *out, size_t cap,
 const char *clock_mode(void);
 int clock_grade(int v, const char *mode);
 
+/* The one family-file size ceiling. `z23-lint --families` reports each
+ * family's headroom against it and tools/lint/check_lint_gate_wiring.sh
+ * refuses a breach; the shell side reads this single definition out of
+ * this header, so the number exists exactly once. */
+#define LINT_FAMILY_CEILING 1500
+
+int lint_families_ledger(void);
+
 int check_no_python_run(int argc, char **argv);
 int check_no_python_selftest(void);
 int check_malloc_run(int argc, char **argv);
