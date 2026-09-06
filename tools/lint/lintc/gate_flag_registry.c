@@ -289,10 +289,14 @@ static int fr_find(const struct fr_row *rows, int n, const char *name)
     return -1;
 }
 
-/* ── read-site scanning: getenv("ZCL_...") in C, ${ZCL_...}/$ZCL_... in
- * shell and Makefile text. Both regexes capture the bare name in group 1;
- * an enum/status identifier such as ZCL_OK never follows a '$' or a
- * getenv(" prefix, so neither pattern ever mistakes one for a flag. */
+/* ── read-site scanning: getenv("ZCL_..."), and the lint runtime's env_or /
+ * env_int_or wrappers around it, in C; ${ZCL_...}/$ZCL_... in shell and
+ * Makefile text. A wrapper read is a read: scanning only getenv() would call
+ * a flag that only the lint gates consume dead and demand its row be deleted.
+ * The C regex captures the name in group 2 (group 1 is the reader's name),
+ * the shell regex in group 1; an enum/status identifier such as ZCL_OK never
+ * follows a '$' or one of those call prefixes, so neither pattern ever
+ * mistakes one for a flag. */
 
 static regex_t g_fr_c_re, g_fr_sh_re;
 static int g_fr_re_ok;
@@ -302,7 +306,8 @@ static int fr_ensure_re(void)
     if (g_fr_re_ok)
         return 0;
     int cr = pair_comp(&g_fr_c_re, REG_EXTENDED,
-                        "getenv\\(\"(ZCL_[A-Z0-9_]+)\"", "", "", "",
+                        "(getenv|env_or|env_int_or)\\(\"(ZCL_[A-Z0-9_]+)\"",
+                        "", "", "",
                         &g_fr_sh_re, REG_EXTENDED,
                         "\\$\\{?(ZCL_[A-Z0-9_]+)", "", "", "");
     if (cr)
@@ -326,31 +331,33 @@ static int fr_report_unreg(struct fr_ctx *ctx, const char *path, int lineno,
         ? die("z23-lint: write failed\n", "") : 0;
 }
 
+/* grp is the capture group holding the flag name: 2 for the C regex (whose
+ * first group is the reader — getenv, env_or or env_int_or), 1 for shell. */
 static int fr_cap_one(const regex_t *re, const char *cursor, char *name, size_t cap,
-                      size_t *adv, int base)
+                      size_t *adv, int base, int grp)
 {
-    regmatch_t m[2];
+    regmatch_t m[3];
     int eflags = base ? REG_NOTBOL : 0;
-    if (regexec(re, cursor, 2, m, eflags) != 0 || m[1].rm_so < 0)
+    if (regexec(re, cursor, 3, m, eflags) != 0 || m[grp].rm_so < 0)
         return 0;
-    size_t ln = (size_t)(m[1].rm_eo - m[1].rm_so);
+    size_t ln = (size_t)(m[grp].rm_eo - m[grp].rm_so);
     if (ln >= cap)
         ln = cap - 1;
-    memcpy(name, cursor + m[1].rm_so, ln);
+    memcpy(name, cursor + m[grp].rm_so, ln);
     name[ln] = '\0';
     *adv = (size_t)m[0].rm_eo;
     return 1;
 }
 
-static int fr_scan_line(struct fr_ctx *ctx, const regex_t *re, const char *path,
-                        int lineno, const char *line)
+static int fr_scan_line(struct fr_ctx *ctx, const regex_t *re, int grp,
+                        const char *path, int lineno, const char *line)
 {
     const char *cursor = line;
     int base = 0;
     for (;;) {
         char name[FR_NAME];
         size_t adv = 0;
-        if (!fr_cap_one(re, cursor, name, sizeof name, &adv, base))
+        if (!fr_cap_one(re, cursor, name, sizeof name, &adv, base, grp))
             return 0;
         ctx->reads++;
         int idx = fr_find(ctx->rows, ctx->n, name);
@@ -373,7 +380,9 @@ static int fr_scan_line(struct fr_ctx *ctx, const regex_t *re, const char *path,
 static int fr_scan_file(const char *path, void *vctx)
 {
     struct fr_ctx *ctx = vctx;
-    const regex_t *re = fr_is_c_path(path) ? &g_fr_c_re : &g_fr_sh_re;
+    int is_c = fr_is_c_path(path);
+    const regex_t *re = is_c ? &g_fr_c_re : &g_fr_sh_re;
+    int grp = is_c ? 2 : 1;
     FILE *f = fopen(path, "r");
     if (!f)
         return die("z23-lint: cannot open %s\n", path);
@@ -384,7 +393,7 @@ static int fr_scan_file(const char *path, void *vctx)
     int lineno = 0, rc = 0;
     while ((nread = getline(&line, &cap, f)) >= 0) {
         lineno++;
-        rc = fr_scan_line(ctx, re, path, lineno, line);
+        rc = fr_scan_line(ctx, re, grp, path, lineno, line);
         if (rc)
             break;
     }
@@ -538,6 +547,27 @@ int check_flag_registry_selftest(void)
     bad |= rc != 0
         || strstr(ob, "check_flag_registry: OK — 1 flags registered, 1 read "
                       "sites, 0 unregistered, 0 expired") == NULL;
+
+    /* A read through the lint runtime's env_or / env_int_or wrappers is a
+     * read. Without this the gate calls a flag only a C gate consumes dead
+     * and demands its row be deleted — the shape that first caught it. */
+    bad |= fr_st_case(
+            "Z23_FLAG(\"ZCL_KNOWN_X\", \"env_runtime\", \"-\", \"-\",\n \"why\")\n"
+            "Z23_FLAG(\"ZCL_KNOWN_Y\", \"env_runtime\", \"-\", \"-\",\n \"why\")\n",
+            "./w.c",
+            "int f(void){ return *env_or(\"ZCL_KNOWN_X\", \"d\")\n"
+            "                  + env_int_or(\"ZCL_KNOWN_Y\", 1); }\n",
+            "2026-01-01", "printf '%s\\0' w.c", out, ob, sizeof ob, &rc);
+    bad |= rc != 0
+        || strstr(ob, "check_flag_registry: OK — 2 flags registered, 2 read "
+                      "sites, 0 unregistered, 0 expired") == NULL;
+
+    /* ... and an UNregistered name reached through a wrapper still fails. */
+    bad |= fr_st_case("\n", "./x.c",
+            "int f(void){ return *env_or(\"ZCL_UNKNOWN_W\", \"d\"); }\n",
+            "2026-01-01", "printf '%s\\0' x.c", out, ob, sizeof ob, &rc);
+    bad |= rc != 1
+        || strstr(ob, "x.c:1: ZCL_UNKNOWN_W is not in engine/composition/flags.def") == NULL;
 
     bad |= fr_st_case(
             "/* example: Z23_FLAG(\"ZCL_NOT_A_FLAG\", \"env_runtime\", \"-\",\n"

@@ -170,6 +170,9 @@ Z23_FLAG("ZCL_ARTIFACT_CAPABILITY_INVENTORY", "env_build", "-", "-",
           "undocumented; first use tools/lint/check_generated_artifact_contradictions.sh:15")
 Z23_FLAG("ZCL_ARTIFACT_SKIP_FRESHNESS", "env_build", "0", "-",
           "undocumented; first use tools/lint/check_generated_artifact_contradictions.sh:98")
+Z23_FLAG("ZCL_ASAN_ADX_MAKEFILE", "env_build", "Makefile", "-",
+          "which Makefile the ASan/ADX build-config gate reads; a test rail so "
+          "the selftest can point it at a fixture")
 Z23_FLAG("ZCL_BASELINE_LINT_GATES", "env_build", "-", "-",
           "undocumented; first use tools/dev/agent-baseline.sh:90")
 Z23_FLAG("ZCL_BATCH_FSYNC_SLOW_EWMA_US", "env_runtime", "-", "-",
@@ -320,6 +323,15 @@ Z23_FLAG("ZCL_CLI_TEST_NO_SERVICE_LOOKUP", "env_runtime", "-", "-",
           "undocumented; first use engine/entry/main_cli_modes.c:1308")
 Z23_FLAG("ZCL_CLOCK_SKEW_TOLERANCE_SECS", "env_runtime", "-", "-",
           "undocumented; first use engine/conditions/src/clock_skew_reconcile.c:54")
+Z23_FLAG("ZCL_CODEINDEX_COVERAGE_BASELINE", "env_build", "tools/lint/codeindex_coverage_baseline.txt", "-",
+          "which baseline the codeindex coverage gate ratchets against; a test "
+          "rail so the selftest can pin a fixture instead of the tree baseline")
+Z23_FLAG("ZCL_CODEINDEX_COVERAGE_BIN", "env_build", "-", "-",
+          "which binary the codeindex coverage gate measures; a test rail so the "
+          "selftest can substitute a stub for the built tool")
+Z23_FLAG("ZCL_CODEINDEX_COVERAGE_ROOT", "env_build", "-", "-",
+          "which source root the codeindex coverage gate measures; a test rail so "
+          "the selftest can measure a planted fixture instead of the checkout")
 Z23_FLAG("ZCL_COIN_BACKFILL_ROOT_FOR_TEST", "env_runtime", "-", "-",
           "undocumented; first use tools/lint/lintc/gate_tree_walk.c:1190")
 Z23_FLAG("ZCL_COIN_MATRIX_RUNS", "env_build", "10", "-",
@@ -450,6 +462,12 @@ Z23_FLAG("ZCL_CUSTODY_RPC_BIN", "env_build", "build/bin/zcl-rpc", "-",
           "undocumented; first use tools/dev/custody-bind.sh:25")
 Z23_FLAG("ZCL_CUSTODY_STATUS_SELFTEST", "env_build", "0", "-",
           "undocumented; first use tools/dev/custody-status.sh:61")
+Z23_FLAG("ZCL_CYCLOMATIC_BASELINE", "env_build", "-", "-",
+          "which baseline file the complexity gate pins against; a test rail so "
+          "the selftest can point the gate at a fixture instead of the tree pins")
+Z23_FLAG("ZCL_CYCLOMATIC_ROOT", "env_build", "-", "-",
+          "which directory the complexity gate scans; a test rail so the selftest "
+          "can measure a planted fixture instead of the whole checkout")
 Z23_FLAG("ZCL_DATADIR", "env_runtime", "-", "-",
           "first use engine/entry/main_cli_modes.c:2421; documented at docs/BENCHMARKS_LOG.md:34: | 2026-06-04 | 671fd79e3 | #6 soak-ci proxy (make soak-ci, 180s --ci-proxy) | machinery...")
 Z23_FLAG("ZCL_DB_LIFETIME_TRACE", "env_runtime", "-", "-",
@@ -962,6 +980,9 @@ Z23_FLAG("ZCL_GOLDEN_FRESHNESS_TIP", "env_build", "-", "-",
           "undocumented; first use tools/scripts/check_golden_freshness.sh:76")
 Z23_FLAG("ZCL_GOLDEN_TIMING_STRICT", "env_test", "-", "-",
           "undocumented; first use tests/harness/src/test_golden_dev_cycle.c:336")
+Z23_FLAG("ZCL_GROUP_PURPOSE_SRC", "env_build", "-", "-",
+          "which catalog file the group-purpose gate reads; a test rail so the "
+          "selftest can point it at a fixture instead of the tree catalog")
 Z23_FLAG("ZCL_HEX_CODEC_BASELINE", "env_build", "-", "-",
           "undocumented; first use tools/lint/check_hex_codec_single.sh:66")
 Z23_FLAG("ZCL_HEX_CODEC_COVERAGE", "env_build", "1", "-",
@@ -994,8 +1015,10 @@ Z23_FLAG("ZCL_HOST_WATCHDOG_STATE", "env_build", "-", "-",
           "undocumented; first use platform/deploy/zclassic23-host-watchdog.sh:59")
 Z23_FLAG("ZCL_HOST_WATCHDOG_UNIT", "env_build", "zclassic23", "-",
           "undocumented; first use platform/deploy/zclassic23-host-watchdog.sh:60")
-Z23_FLAG("ZCL_HOST_WATCHDOG_USER", "env_build", "rhett", "-",
-          "undocumented; first use platform/deploy/install-host-watchdog.sh:33")
+Z23_FLAG("ZCL_HOST_WATCHDOG_USER", "env_build", "-", "-",
+          "which account the host watchdog installs and runs under; the read "
+          "site falls back to the deploy operator account, which this catalog "
+          "deliberately does not name")
 Z23_FLAG("ZCL_HOST_WATCHDOG_WEDGE_CYCLES", "env_build", "5", "-",
           "undocumented; first use platform/deploy/zclassic23-host-watchdog.sh:70")
 Z23_FLAG("ZCL_HOTSWAP_ACTIVATE", "env_runtime", "-", "-",
@@ -1471,7 +1494,8 @@ Z23_FLAG("ZCL_OPERATOR_PATHS_SCAN_FILES", "env_build", "-", "-",
 Z23_FLAG("ZCL_OPERATOR_PATHS_TEST_IDENTITIES", "env_build", "-", "-",
           "undocumented; first use tools/lint/check_no_operator_paths.sh:259")
 Z23_FLAG("ZCL_ORACLE_TIP_MARGIN", "env_runtime", "-", "-",
-          "undocumented; first use engine/services/src/zclassicd_oracle_service.c:313")
+          "test-only override of the oracle tip safety margin so a tiny synthetic "
+          "chain still exercises the periodic-tick path; production never sets it")
 Z23_FLAG("ZCL_ORPHAN_PLACEMENT_FILES", "env_build", "-", "-",
           "undocumented; first use tools/lint/check_no_orphan_placement.sh:36")
 Z23_FLAG("ZCL_OWP_SCAN_ROOTS", "env_build", "-", "-",
@@ -1786,8 +1810,6 @@ Z23_FLAG("ZCL_REPO_SHAPE_MODULE_DEF", "env_build", "-", "-",
           "undocumented; first use tools/lint/repo_shape.sh:13")
 Z23_FLAG("ZCL_REPO_SHAPE_ROOT", "env_runtime", "-", "-",
           "undocumented; first use tools/lint/lintc/lib.c:237")
-Z23_FLAG("ZCL_REPO_TOPS", "env_build", "-", "-",
-          "first use tools/lint/check_no_orphan_placement.sh:75; documented at docs/AGENT_TRAPS.md:270: Makefile and publishes ZCL_REPO_TOPS[], and check_no_orphan_placement.sh")
 Z23_FLAG("ZCL_REPRO_BUILD_DIR", "env_build", "-", "-",
           "undocumented; first use tools/scripts/repro_build.sh:69")
 Z23_FLAG("ZCL_REPRO_CAPTURE_NAME", "env_build", "-", "-",
@@ -2338,6 +2360,9 @@ Z23_FLAG("ZCL_WALLET_NO_PHRASE_BACKUP", "env_runtime", "-", "-",
           "first use engine/composition/src/boot_wallet_phrase.c:32; documented at docs/CUSTODY_MODEL.md:80: | a file or pipe | -wallet-no-phrase-backup / ZCL_WALLET_NO_PHRASE_BACKUP | SKIP | wall...")
 Z23_FLAG("ZCL_WALLET_PASSPHRASE", "env_runtime", "-", "-",
           "first use contexts/wallet/modules/wallet/src/wallet_keystore.c:46; documented at docs/CUSTODY_MODEL.md:46: layers use **independent passphrases**: ZCL_WALLET_PASSPHRASE wraps the rows,")
+Z23_FLAG("ZCL_WALLET_RAW_PREPARE_SCAN_DIRS_FOR_TEST", "env_build", "contexts/wallet", "-",
+          "which directories the wallet raw-prepare log gate scans; a test rail so "
+          "the selftest can point it at a planted fixture")
 Z23_FLAG("ZCL_WAL_MAX_BYTES", "env_runtime", "-", "-",
           "first use engine/services/src/db_maintenance.c:655; documented at docs/RUNBOOK.md:155: Prevention:** Set ZCL_WAL_MAX_BYTES=104857600 (100MB cap, auto-checkpoint). Monitor zcl...")
 Z23_FLAG("ZCL_WATCH_TEST_LOG", "env_build", "-", "-",
