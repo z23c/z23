@@ -128,6 +128,11 @@ check_root() {
 # gate rejects it. A gate nobody has seen fail is a gate nobody should trust.
 run_selftest() {
     local tmp rc bad
+    # A checkout that has not built anything yet -- a fresh clone, and every
+    # proof generation -- has no build/scratch, and mktemp does not create
+    # parents. Without this the gate died on its own selftest scratch dir
+    # instead of judging Tor defaults.
+    mkdir -p "$ROOT/build/scratch"
     tmp="$(mktemp -d "$ROOT/build/scratch/zcl-tor-gate.XXXXXX")"
     # shellcheck disable=SC2064
     trap "rm -rf '$tmp'" EXIT HUP INT TERM

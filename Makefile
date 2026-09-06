@@ -13331,7 +13331,8 @@ LINT_BUILT_PREREQS = tools/core_seal tools/check_observability_pairing \
 	$(BIN_DIR)/check_no_hardlink_seeding \
 	$(ZCODE_PACKAGE_REGISTRY_CHECK_BIN) $(JSONQ_BIN) \
 	$(FILE_SIZE_POLICY_BIN) $(Z23_BOOTSTRAP_BIN) $(EQUIHASH_FACT_TOOL) \
-	$(BIN_DIR)/z23_bounded_run $(BIN_DIR)/agent_sha3 $(RETRIEVAL_EVAL_BIN)
+	$(BIN_DIR)/z23_bounded_run $(BIN_DIR)/agent_sha3 $(RETRIEVAL_EVAL_BIN) \
+	$(BIN_DIR)/z23-fleet-observe
 lint lint-cached lint-cold-audit: $(ZCLASSIC23_DEV_BIN) \
 	$(DEV_PACKAGE_VERIFY_BIN) $(LINT_BUILT_PREREQS)
 

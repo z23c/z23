@@ -101,8 +101,22 @@ done
 # PART 2 — binary-size fact pinned to the real binary (band check).
 # Docs cite e.g. "~15 MB" / "16 MB" / "26 MB". The real binary must be
 # within [LO,HI] MB of every size an ADR/FRAMEWORK/CLAUDE doc cites.
+#
+# The size the docs cite is the RELEASE node's: -O3 + whole-program LTO,
+# no -DZCL_DEV_BUILD (Makefile CFLAGS / DEV_CFLAGS). Its canonical name is
+# $(ZCLASSIC23_BIN) = build/bin/z23 (Makefile 'ZCLASSIC23_BIN =' line);
+# build/bin/zclassic23 is only the migration alias, an `ln -sfn z23` on
+# POSIX. Name the release binary itself, not the alias: on any checkout
+# with a release build the two are the same bytes and this check is
+# identical, while the alias can also be holding a dev-profile binary that
+# some other tool put there -- a proof generation admits the dev node under
+# that name -- and judging a doc's release-size fact against a dev binary
+# fails for the wrong reason. No release build here means there is no
+# release size fact to check, which is the skip below.
 ##############################################################################
-BIN=build/bin/zclassic23
+BIN=build/bin/z23
+# A Windows host names the same release target build/bin/z23.exe.
+if [ ! -f "$BIN" ] && [ -f build/bin/z23.exe ]; then BIN=build/bin/z23.exe; fi
 SIZE_DOCS="docs/FRAMEWORK.md docs/adr/0001-personal-sovereignty-stack.md CLAUDE.md"
 SIZE_BAND_MB=6   # tolerance: a cited MB number may not differ from real by > this
 
