@@ -3253,6 +3253,37 @@ static void generation_zcc_bootstrap(const char *generation)
     (void)unsetenv("ZCL_BIN_DIR");
 }
 
+/* `git worktree add` copies the submitting checkout's worktree-scoped
+ * core.hooksPath verbatim into a fresh generation's own config.worktree, so
+ * a freshly materialized generation still names the checkout's
+ * build/githooks rather than the copy generation_prepare() just
+ * materialized. check-git-hooks-installed then compares
+ * expected=<generation>/build/githooks against
+ * actual=<submitting checkout>/build/githooks and fails closed on every
+ * proof that runs the full gate set. A generation must be judged against
+ * the hooks it carries, so point its own worktree config at its own copy;
+ * failing that reconfiguration fails the generation closed rather than
+ * judging it against someone else's checkout. */
+static bool generation_hooks_configure(const char *generation, char *why,
+                                       size_t why_len)
+{
+    char hooks_path[PATH_MAX];
+    if (snprintf(hooks_path, sizeof(hooks_path), "%s/build/githooks",
+                 generation) >= (int)sizeof(hooks_path)) {
+        proof_why(why, why_len, "proof_generation_hooks_path_too_long");
+        return false;
+    }
+    const char *hooks_argv[] = {"git", "config", "--worktree",
+                                "core.hooksPath", hooks_path, NULL};
+    char hooks_output[ZCL_DEVLOOP_OUTPUT_MAX];
+    if (!git_capture(generation, hooks_argv, hooks_output,
+                     sizeof(hooks_output))) {
+        proof_why(why, why_len, "proof_generation_hooks_path_not_reconfigured");
+        return false;
+    }
+    return true;
+}
+
 static bool generation_prepare(const struct proof_paths *paths,
                                const char *local,
                                struct platform_ram_scratch_lease *ram_lease,
@@ -3437,6 +3468,8 @@ static bool generation_prepare(const struct proof_paths *paths,
             return false;
         }
     }
+    if (!generation_hooks_configure(generation, why, why_len))
+        return false;
     if (!worktree_exact(generation, local, false, why, why_len)) {
         proof_why(why, why_len, "proof_generation_not_exact");
         return false;
@@ -3552,9 +3585,13 @@ static bool proof_root_is_landing(const char *root)
 }
 
 /* Fill the lint-dimension make argv. A landing root (sibling queue.lock)
- * runs lint-fast then check-windows-acceptance in one invocation; every
- * other proof stays on lint-fast. `jobs` is stored by pointer and must
- * outlive argv. */
+ * runs the full `lint` target -- every gate, not the 27-gate fast subset --
+ * so a red full-lint gate fails the landing instead of reaching main
+ * unseen; check-windows-acceptance rides the same invocation, where make
+ * runs it once whether or not the umbrella already names it. Every other
+ * proof stays on lint-fast: a lane proof pays the fast subset, a landing
+ * pays the whole gate set. `jobs` is stored by pointer and must outlive
+ * argv. */
 static bool proof_lint_prepare(const char *root, const char *jobs,
                                const char **argv, size_t argv_cap,
                                int64_t *fallback_ms, const char **targets)
@@ -3567,13 +3604,14 @@ static bool proof_lint_prepare(const char *root, const char *jobs,
     argv[0] = "make";
     argv[1] = "--no-print-directory";
     argv[2] = jobs;
-    argv[3] = "lint-fast";
     if (landing) {
+        argv[3] = "lint";
         argv[4] = "check-windows-acceptance";
         argv[5] = NULL;
         *fallback_ms = PROOF_LINT_LANDING_MS;
-        *targets = "lint-fast check-windows-acceptance";
+        *targets = "lint check-windows-acceptance";
     } else {
+        argv[3] = "lint-fast";
         argv[4] = NULL;
         argv[5] = NULL;
         *fallback_ms = PROOF_LINT_DEFAULT_MS;
@@ -3582,6 +3620,16 @@ static bool proof_lint_prepare(const char *root, const char *jobs,
     return true;
 }
 
+
+/* True when the lint dimension is running the whole gate set rather than
+ * the fast subset. Read off the targets proof_lint_prepare() just produced
+ * so there is one decision, not two that can drift: only the full set
+ * reads built artifacts, so only it needs the admitted executables. */
+static bool proof_lint_targets_are_full(const char *targets)
+{
+    return targets && strncmp(targets, "lint", 4) == 0 &&
+           (targets[4] == '\0' || targets[4] == ' ');
+}
 static bool inventory_output_only(const char *const *files, size_t count)
 {
     return count == 1 &&
@@ -3915,6 +3963,23 @@ bool zcl_dev_proof_test_lint_argv(const char *root, const char *jobs,
     if (targets_out) *targets_out = targets;
     return true;
 }
+/* Seam for the generation-hooks regression: the exact reconfiguration
+ * generation_prepare() applies after copying build/githooks into a fresh
+ * generation, so a test can prove a generation whose worktree config still
+ * names the submitting checkout's hooks gets pointed at its own copy. */
+bool zcl_dev_proof_test_generation_hooks_configure(const char *generation,
+                                                   char *why, size_t why_len)
+{
+    return generation_hooks_configure(generation, why, why_len);
+}
+
+/* Seam for the lint-target split: true when the recorded target list is the
+ * whole gate set rather than the fast subset. The proof asks this exact
+ * question to decide whether the generation needs the admitted set. */
+bool zcl_dev_proof_test_lint_targets_are_full(const char *targets)
+{
+    return proof_lint_targets_are_full(targets);
+}
 #endif
 
 static bool proof_make_jobs_arg(char out[16])
@@ -4008,6 +4073,134 @@ static bool admitted_executable_mark_fresh(const char *path)
     if (close(fd) != 0) ok = false;
     return ok;
 }
+
+/* The executables a generation is handed rather than rebuilt, and the one
+ * table both the lint and the test dimension read. Handing the lint
+ * dimension a different set from the test dimension is what let a landing
+ * proof judge `make lint` against artifacts the submitting checkout's own
+ * `make lint` never saw: the full gate set reads build/bin/z23-dev
+ * (check-capability-closure's nm closure, and the `lint:` umbrella's own
+ * prerequisite at Makefile:13323) and the confined package verifier
+ * alongside it. Every entry is admitted through
+ * admitted_executable_materialize(), so each one is content-checked --
+ * the source binary must report the exact source identity this proof
+ * sealed -- before it is copied in; there is no weaker path.
+ *
+ * build/bin/zclassic23 is the compatibility alias (Makefile:642), and the
+ * dev node is what a generation can admit: the release node exposes no
+ * --source-record seam (engine/entry/main.c:196 guards it on
+ * ZCL_DEV_BUILD), so it cannot be content-checked and is never admitted.
+ * gate_doc_no_false_deleted reads the release binary by its own name for
+ * exactly that reason. */
+struct proof_admitted_executable {
+    const char *source;  /* relative to the submitting checkout */
+    const char *target;  /* relative to the generation */
+};
+
+static const struct proof_admitted_executable proof_admitted_executables[] = {
+    {"build/bin/zclassic23-package-verify-dev",
+     "build/bin/zclassic23-package-verify-dev"},
+    {"build/bin/z23-dev", "build/bin/z23-dev"},
+    {"build/bin/z23-dev", "build/bin/zclassic23"},
+};
+
+#define PROOF_ADMITTED_EXECUTABLE_COUNT \
+    (sizeof(proof_admitted_executables) / sizeof(proof_admitted_executables[0]))
+
+/* Index each entry by name: a caller that wants one path out of the set
+ * must not have to count rows. */
+enum {
+    PROOF_ADMITTED_PACKAGE_VERIFY = 0,
+    PROOF_ADMITTED_DEV_NODE = 1,
+    PROOF_ADMITTED_NODE_ALIAS = 2,
+};
+
+/* Materialize that whole set into `generation`, marking each one fresh so
+ * the generation's own `make` treats it as up to date instead of relinking
+ * the whole dev object graph inside a gate. Both dimensions call this, so
+ * neither can drift on to its own private set.
+ *
+ * Idempotent by content, not by flag: an entry the generation already
+ * carries is re-read through the same executable_reuse() identity check
+ * and kept, so a second call costs three `--source-record` execs rather
+ * than three whole-binary copies, and a generation that rebuilt its own
+ * bundle keeps the bytes it just built rather than being overwritten by a
+ * submitting checkout whose binaries are older than the commit under
+ * proof. */
+static bool proof_admitted_executables_prepare(
+    const struct proof_paths *paths, const char *generation,
+    const struct dev_source_record *expected_source,
+    char targets[PROOF_ADMITTED_EXECUTABLE_COUNT][PATH_MAX],
+    char *why, size_t why_len)
+{
+    struct proof_paths carried = *paths;
+    if ((size_t)snprintf(carried.root, sizeof(carried.root), "%s",
+                         generation) >= sizeof(carried.root)) {
+        proof_why(why, why_len, "proof_admitted_generation_path_too_long");
+        return false;
+    }
+    for (size_t i = 0; i < PROOF_ADMITTED_EXECUTABLE_COUNT; i++) {
+        char source[PATH_MAX];
+        struct stat carried_st;
+        if (snprintf(source, sizeof(source), "%s/%s", paths->root,
+                     proof_admitted_executables[i].source) >=
+                (int)sizeof(source) ||
+            snprintf(targets[i], PATH_MAX, "%s/%s", generation,
+                     proof_admitted_executables[i].target) >= PATH_MAX) {
+            proof_whyf(why, why_len, "proof_admitted_path_too_long:%s",
+                       proof_admitted_executables[i].target);
+            return false;
+        }
+        struct zcl_dev_proof_dimension carried_artifact = {.selected = 1};
+        char carried_why[160] = {0};
+        if (lstat(targets[i], &carried_st) == 0 &&
+            S_ISREG(carried_st.st_mode) &&
+            executable_reuse(&carried, targets[i], expected_source,
+                             &carried_artifact, carried_why,
+                             sizeof(carried_why))) {
+            if (!admitted_executable_mark_fresh(targets[i])) {
+                proof_whyf(why, why_len,
+                           "proof_admitted_freshness_failed:%s",
+                           proof_admitted_executables[i].target);
+                return false;
+            }
+            continue;
+        }
+        if (!admitted_executable_materialize(
+                paths, generation, source,
+                proof_admitted_executables[i].target, expected_source,
+                targets[i], why, why_len)) {
+            if (!why || !why[0])
+                proof_whyf(why, why_len, "proof_admitted_refused:%s",
+                           proof_admitted_executables[i].target);
+            return false;
+        }
+        if (!admitted_executable_mark_fresh(targets[i])) {
+            proof_whyf(why, why_len, "proof_admitted_freshness_failed:%s",
+                       proof_admitted_executables[i].target);
+            return false;
+        }
+    }
+    return true;
+}
+#if defined(ZCL_TESTING)
+/* Seam for the shared admitted-executable set: the exact table both the
+ * lint and the test dimension materialize into a generation, so a test can
+ * prove the two dimensions are handed the same executables without driving
+ * a proof cycle. Returns the number of entries written. */
+size_t zcl_dev_proof_test_admitted_executables(const char **sources,
+                                               const char **targets,
+                                               size_t cap)
+{
+    size_t n = PROOF_ADMITTED_EXECUTABLE_COUNT;
+    if (n > cap) return 0;
+    for (size_t i = 0; i < n; i++) {
+        if (sources) sources[i] = proof_admitted_executables[i].source;
+        if (targets) targets[i] = proof_admitted_executables[i].target;
+    }
+    return n;
+}
+#endif
 
 static bool test_object_dir_relative(const struct proof_paths *paths,
                                      char object_dir[PATH_MAX])
@@ -4129,17 +4322,14 @@ static bool test_helpers_prepare(
     const char *make_jobs, char runner_target[PATH_MAX], uint8_t helper_root[32],
     char *why, size_t why_len)
 {
-    char verifier_source[PATH_MAX], verifier_target[PATH_MAX];
-    char node_source[PATH_MAX], node_target[PATH_MAX];
+    char admitted[PROOF_ADMITTED_EXECUTABLE_COUNT][PATH_MAX];
+    const char *verifier_target = admitted[PROOF_ADMITTED_PACKAGE_VERIFY];
+    const char *dev_node_target = admitted[PROOF_ADMITTED_DEV_NODE];
+    const char *node_target = admitted[PROOF_ADMITTED_NODE_ALIAS];
     char nodectl_target[PATH_MAX], acme_target[PATH_MAX], fbsh_target[PATH_MAX];
     char file_size_policy_target[PATH_MAX], board_bridge_target[PATH_MAX];
     char git_hook_target[PATH_MAX], lint_tool_target[PATH_MAX];
     uint8_t depfile_root[32];
-    int verifier_len = snprintf(
-        verifier_source, sizeof(verifier_source),
-        "%s/build/bin/zclassic23-package-verify-dev", paths->root);
-    int node_len = snprintf(node_source, sizeof(node_source),
-                            "%s/build/bin/z23-dev", paths->root);
     int nodectl_len = snprintf(nodectl_target, sizeof(nodectl_target),
                                "%s/build/bin/zcl-nodectl", generation);
     int acme_len = snprintf(acme_target, sizeof(acme_target),
@@ -4155,10 +4345,7 @@ static bool test_helpers_prepare(
                                 "%s/build/bin/z23-git-hook", generation);
     int lint_tool_len = snprintf(lint_tool_target, sizeof(lint_tool_target),
                                  "%s/build/bin/z23-lint", generation);
-    if (verifier_len <= 0 ||
-        (size_t)verifier_len >= sizeof(verifier_source) ||
-        node_len <= 0 || (size_t)node_len >= sizeof(node_source) ||
-        nodectl_len <= 0 || (size_t)nodectl_len >= sizeof(nodectl_target) ||
+    if (nodectl_len <= 0 || (size_t)nodectl_len >= sizeof(nodectl_target) ||
         acme_len <= 0 || (size_t)acme_len >= sizeof(acme_target) ||
         fbsh_len <= 0 || (size_t)fbsh_len >= sizeof(fbsh_target) ||
         file_size_policy_len <= 0 ||
@@ -4179,25 +4366,12 @@ static bool test_helpers_prepare(
             proof_why(why, why_len, "proof_test_runner_admission_failed");
         return false;
     }
-    if (!admitted_executable_materialize(
-            paths, generation, verifier_source,
-            "build/bin/zclassic23-package-verify-dev", expected_source,
-            verifier_target, why, why_len)) {
-        if (!why || !why[0])
-            proof_why(why, why_len, "proof_test_verifier_admission_failed");
+    /* The one admitted set, shared with the lint dimension: same sources,
+     * same content check, same generation paths. */
+    if (!proof_admitted_executables_prepare(paths, generation,
+                                            expected_source, admitted,
+                                            why, why_len))
         return false;
-    }
-    if (!admitted_executable_materialize(
-            paths, generation, node_source, "build/bin/zclassic23",
-            expected_source, node_target, why, why_len)) {
-        if (!why || !why[0])
-            proof_why(why, why_len, "proof_test_node_admission_failed");
-        return false;
-    }
-    if (!admitted_executable_mark_fresh(node_target)) {
-        proof_why(why, why_len, "proof_test_node_freshness_failed");
-        return false;
-    }
     if (!test_depfiles_prepare(paths, generation, depfile_root,
                                why, why_len)) {
         return false;
@@ -4215,6 +4389,7 @@ static bool test_helpers_prepare(
         return false;
     }
     uint8_t runner_root[32], verifier_root[32], node_root[32], nodectl_root[32];
+    uint8_t dev_node_root[32];
     uint8_t acme_root[32], fbsh_root[32], file_size_policy_root[32];
     uint8_t board_bridge_root[32], git_hook_root[32], lint_tool_root[32];
     if (!hash_file("zcl.dev_proof_test_runner.v1", runner_target,
@@ -4222,6 +4397,8 @@ static bool test_helpers_prepare(
         !hash_file("zcl.dev_proof_package_verifier.v1", verifier_target,
                    verifier_root) ||
         !hash_file("zcl.dev_proof_test_node.v1", node_target, node_root) ||
+        !hash_file("zcl.dev_proof_dev_node.v1", dev_node_target,
+                   dev_node_root) ||
         !hash_file("zcl.dev_proof_nodectl.v1", nodectl_target,
                    nodectl_root) ||
         !hash_file("zcl.dev_proof_acme_worker.v1", acme_target, acme_root) ||
@@ -4242,6 +4419,7 @@ static bool test_helpers_prepare(
     sha3_256_write(&helpers, runner_root, sizeof(runner_root));
     sha3_256_write(&helpers, verifier_root, sizeof(verifier_root));
     sha3_256_write(&helpers, node_root, sizeof(node_root));
+    sha3_256_write(&helpers, dev_node_root, sizeof(dev_node_root));
     sha3_256_write(&helpers, nodectl_root, sizeof(nodectl_root));
     sha3_256_write(&helpers, acme_root, sizeof(acme_root));
     sha3_256_write(&helpers, fbsh_root, sizeof(fbsh_root));
@@ -4710,6 +4888,29 @@ static bool proof_worker_body(const struct proof_paths *paths,
                                    warm_compile_ms, bundle_ms);
             }
         }
+        /* The lint dimension reads built artifacts too. check-capability-
+         * closure walks the undefined symbols of build/bin/z23-dev and the
+         * confined package verifier, and the `lint:` umbrella names both as
+         * prerequisites (Makefile:13323) -- so without this the generation
+         * would relink the whole dev object graph inside a gate, and would
+         * judge artifacts the submitting checkout's own `make lint` never
+         * saw. Hand it the same admitted set the test dimension gets,
+         * through the same content check. Running after the test block is
+         * deliberate: when that block rebuilt the bundle in the generation,
+         * this call re-reads and keeps those bytes instead of overwriting
+         * them with an older checkout's. The fast subset reads no built
+         * artifact, so a lane proof pays none of this cost. */
+        if (lint->selected && proof_lint_targets_are_full(lint_targets)) {
+            char lint_admitted[PROOF_ADMITTED_EXECUTABLE_COUNT][PATH_MAX];
+            if (!proof_admitted_executables_prepare(paths, generation,
+                                                    &source_before,
+                                                    lint_admitted, why,
+                                                    why_len)) {
+                if (!why || !why[0])
+                    proof_why(why, why_len, "proof_lint_admission_failed");
+                return false;
+            }
+        }
         const char *test_argv[] = {generation_binary, only, "--cache",
                                    "--activate-proof-contracts", NULL};
         struct zcl_dev_proof_budget test_budget =
@@ -4731,6 +4932,22 @@ static bool proof_worker_body(const struct proof_paths *paths,
         }
         if (test->selected) run_count++;
         dimension_runs_wait(runs, run_count);
+        /* Say how long lint actually took, beside the targets it ran. The
+         * full gate set's cold cost inside a fresh generation -- dominated
+         * by check-standalone-tools-link, which is the one gate that runs
+         * `make` and links ~47 one-shot tools no compile dimension ever
+         * built -- is the number the landing budget is set against, so the
+         * next reader measures it instead of guessing. */
+        for (size_t i = 0; i < run_count; i++) {
+            char wall[32];
+            if (runs[i].id != ZCL_DEV_PROOF_LINT || !paths->phases[0])
+                continue;
+            if (snprintf(wall, sizeof(wall), "%lld",
+                         (long long)runs[i].step.report.elapsed_ms) <
+                (int)sizeof(wall))
+                (void)zcl_dev_proof_phase_note(paths->phases, "lint_wall_ms",
+                                               wall);
+        }
         /* Fail closed on the first dimension that failed, in the order they
          * would have run sequentially, and always finish every child so each
          * one's log, receipt root and phases row survive the failure. */

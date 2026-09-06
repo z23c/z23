@@ -17,12 +17,18 @@
 #endif
 
 /* Compiled-in lint-dimension allowances until this checkout has measured
- * its own. Landing adds the Windows acceptance compile on top of lint-fast. */
+ * its own. A lane proof runs lint-fast; a landing proof runs the whole
+ * gate set, so the two budgets are different sizes of job. */
 #define PROOF_LINT_DEFAULT_MS 600000
-/* Warm `make check-windows-acceptance` on this host was 18 s to the first
- * mingw link (codeindex_freshness.exe, 2026-09-06). Six minutes of headroom
- * on the developer lint-fast budget covers a cold catalog link. */
-#define PROOF_LINT_LANDING_MS (PROOF_LINT_DEFAULT_MS + 360000)
+/* A landing runs `make lint` (every gate) plus check-windows-acceptance in
+ * one invocation, inside a fresh generation whose object tree has never
+ * compiled the ~47 one-shot standalone tools check-standalone-tools-link
+ * links, alongside the test dimension. That cold gate alone is the largest
+ * single item in the landing lint budget, so the landing allowance is set
+ * against the measured cold wall time with headroom for a loaded box; the
+ * proof prints the measured lint wall time in its phases file
+ * (lint_wall_ms) so the next reader never has to guess. */
+#define PROOF_LINT_LANDING_MS 2400000
 
 enum zcl_dev_proof_state {
     ZCL_DEV_PROOF_STATE_INVALID = -1,
@@ -204,12 +210,31 @@ bool zcl_dev_proof_test_warm_status_line(const char *warmstart_path,
                                          char *out, size_t out_len);
 /* Seam for the landing-lint regression: the same argv, fallback budget, and
  * recorded target list the proof worker uses for the lint dimension, so a
- * test can prove a landing root runs lint-fast then check-windows-acceptance
- * without driving a make or a proof cycle. */
+ * test can prove a landing root runs the whole gate set plus Windows
+ * acceptance while a lane root stays on the fast subset, without driving a
+ * make or a proof cycle. */
 bool zcl_dev_proof_test_lint_argv(const char *root, const char *jobs,
                                   const char **argv, size_t argv_cap,
                                   size_t *argc_out, int64_t *fallback_ms,
                                   const char **targets_out);
+/* Seam for the shared admitted-executable set: the one table both the lint
+ * and the test dimension materialize into a generation. Writes at most
+ * `cap` source/target pairs, relative to the submitting checkout and the
+ * generation respectively, and returns how many it wrote (0 if `cap` is
+ * too small). */
+size_t zcl_dev_proof_test_admitted_executables(const char **sources,
+                                               const char **targets,
+                                               size_t cap);
+/* Seam for the generation-hooks regression: the exact reconfiguration
+ * generation_prepare() applies after copying build/githooks into a fresh
+ * generation, so a test can prove a generation whose worktree config still
+ * names the submitting checkout's hooks gets pointed at its own copy,
+ * without driving a full proof cycle. */
+bool zcl_dev_proof_test_generation_hooks_configure(const char *generation,
+                                                   char *why, size_t why_len);
+/* Seam for the lint-target split: true when a recorded target list is the
+ * whole gate set rather than the fast subset. */
+bool zcl_dev_proof_test_lint_targets_are_full(const char *targets);
 #endif
 
 /* Warm-start survey types. Inert data, declared unconditionally so every
