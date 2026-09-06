@@ -244,7 +244,7 @@ static void boot_zcd_load_index(struct app_context *ctx, struct main_state *st,
          * is desirable even when the backward tip promotion above
          * was suppressed — OPTION 1's durable effect is the
          * skipped CSR promotion, not flat avoidance. */
-        save_block_index_flat(ctx->datadir, st);
+        boot_persist_block_index(ctx->datadir, st);
     }
     block_tree_db_close(&zcd_btdb);
 }
@@ -668,7 +668,7 @@ static bool sapling_tree_attempt_fold_forward(struct app_context *ctx,
     }
     atomic_store(&g_sapling_tree_rebuilding, false);
     node_db_wal_checkpoint(ndb);
-    save_block_index_flat(ctx->datadir, st);
+    boot_persist_block_index(ctx->datadir, st);
     return folded;
 }
 
@@ -852,7 +852,7 @@ static void boot_sapling_rebuild_after_mismatch(struct app_context *ctx,
      * the rebuild. This prevents needless 5-min rebuilds
      * on future boots AND ensures coins_best_block will
      * be resolvable after a crash. */
-    save_block_index_flat(ctx->datadir, st);
+    boot_persist_block_index(ctx->datadir, st);
 }
 
 /* Verify the Sapling tree root against the coins-applied endpoint. */

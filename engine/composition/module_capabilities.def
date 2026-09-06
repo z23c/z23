@@ -581,6 +581,7 @@ ZCL_MODULE_CAPABILITY("engine/composition/src/boot_snapshot_import.c", CAP_FS_WR
 ZCL_MODULE_CAPABILITY("engine/composition/src/boot_snapshot_install.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("engine/composition/src/boot_snapshot_offer.c", CAP_FS_WRITE|CAP_FS_READ, "")
 ZCL_MODULE_CAPABILITY("engine/composition/src/boot_stale_locks.c", CAP_FS_READ|CAP_FS_WRITE, "")
+ZCL_MODULE_CAPABILITY("engine/composition/src/boot_steps.c", CAP_FS_READ|CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("engine/composition/src/boot_tip_hooks.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("engine/composition/src/boot_utxo_parity.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("engine/composition/src/boot_utxo_replay.c", CAP_FS_READ|CAP_FS_WRITE, "")

@@ -197,6 +197,12 @@ void save_block_index_flat(const char *datadir, struct main_state *ms)
                       "legacy shutdown wrapper logs write failure");
 }
 
+/* Boot-composition seam: see block_index_loader.h. */
+void boot_persist_block_index(const char *datadir, struct main_state *ms)
+{
+    save_block_index_flat(datadir, ms);
+}
+
 struct zcl_result load_block_index_flat(const char *datadir, struct main_state *ms)
 {
     /* Identity is authority for bounded projection startup. Invalidate it

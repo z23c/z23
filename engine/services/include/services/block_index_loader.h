@@ -52,6 +52,13 @@ struct block_index_flat_identity {
 };
 
 void save_block_index_flat(const char *datadir, struct main_state *ms);
+
+/* Boot-composition seam: boot_steps.c's leaves call through this instead of
+ * gaining their own call site into the flat/LevelDB/SQLite header-cache
+ * writer, so the Program H0 baseline
+ * (tools/scripts/check_no_block_index_flat_baseline.txt) does not need a
+ * new row for that file. Defined next to save_block_index_flat itself. */
+void boot_persist_block_index(const char *datadir, struct main_state *ms);
 struct zcl_result save_block_index_flat_identity(
     const char *datadir, struct main_state *ms,
     struct block_index_flat_identity *out);
