@@ -107,6 +107,9 @@ from a hash, signature, test, or reproduction receipt.
 - [`MIND.md`](MIND.md) — the per-node resident that owns rebuilding this box's
   code index, what it holds, and why a stale answer is refused rather than
   rebuilt inside a query.
+- [`FLEET_AGENTS.md`](FLEET_AGENTS.md) — what every AI agent on this box is
+  doing right now, and each executor's grade over time: `z23-dev fleet agents`,
+  the ledger columns it reads, the grade formula, and what it does not collect.
 - [`DEFENSIVE_CODING.md`](DEFENSIVE_CODING.md) — lint-enforced C and
   architecture rules.
 - [`API_REFERENCE.md`](API_REFERENCE.md) — generated command catalog; edit its

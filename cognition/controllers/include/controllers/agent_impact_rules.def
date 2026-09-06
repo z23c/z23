@@ -2915,6 +2915,11 @@ AGENT_IMPACT_RULE("engine/composition/agent_rules.def", "devagent_rules devagent
 /* Fleet truth is a release-visible native command. Its three-worktree
  * acceptance exercises Git ref/worktree discovery plus receipt freshness. */
 AGENT_IMPACT_RULE("tools/command/native_dev_fleet.c|tools/command/native_dev_fleet.h|tools/command/native_dev_fleet_internal.h|tools/command/native_dev_fleet_command.c|tools/command/native_dev_fleet_process.c|tools/command/native_dev_fleet_receipts.c|tools/scripts/dev_fleet_selftest.sh|tests/harness/src/test_dev_fleet.c", "dev_fleet command_registry_catalog native_api_contract command_handler_snapshot command_input_bounds make_lint_gates")
+/* The fleet agent dashboard. It reads three unrelated surfaces — the
+ * workspace directories, /proc, and the delegation ledger — so its own group
+ * owns the arithmetic and the fixtures, and the registry groups own the fact
+ * that one more leaf and one more alias were declared. */
+AGENT_IMPACT_RULE("tools/command/native_dev_agents.h|tools/command/native_dev_agents_command.c|tools/command/native_dev_agents_ledger.c|tools/command/native_dev_agents_render.c|tools/command/native_dev_agents_scan.c|engine/composition/commands/fleet_agents.def|docs/FLEET_AGENTS.md|tests/harness/src/test_fleet_agents.c", "fleet_agents command_registry_catalog native_api_contract command_handler_snapshot command_input_bounds make_lint_gates")
 /* The install front door. platform/modules/install is pure judgement with no in-tree
  * dependencies, so the only things that can observe a change to it are its
  * own group and check-z23-release-install, which drives the real
