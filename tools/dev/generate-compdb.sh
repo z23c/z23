@@ -238,7 +238,7 @@ emit_compdb()
 
 main()
 {
-    local graph headers_line raw rows compdb_tmp status_tmp
+    local graph headers_line raw rows compdb_tmp compdb_tmp_dir status_tmp
     local object_count entry_count generated_at generated_epoch
     local compdb_hash compdb_size compdb_mtime input_hash latest_input
     local clangd_available=false clangd_version="" clangd_status="not_requested"
@@ -325,7 +325,19 @@ main()
         fail "parsed $entry_count compile commands for $object_count dev objects"
     fi
 
-    compdb_tmp="$(mktemp "$(dirname "$OUTPUT")/.compile_commands.json.XXXXXX")" ||
+    # Stage the atomic-rename temp file under build/ for the default OUTPUT
+    # so it never appears as a stray dotfile at the repository root; build/
+    # is on the same filesystem as ROOT, so mv -f below stays atomic.  A
+    # caller-overridden OUTPUT (ZCL_AGENT_COMPDB_PATH) may point outside the
+    # repo entirely, so its temp file must stay in OUTPUT's own directory --
+    # a rename across filesystems would not be atomic.
+    if [ "$OUTPUT" = "$ROOT/compile_commands.json" ]; then
+        compdb_tmp_dir="$ROOT/build"
+        mkdir -p "$compdb_tmp_dir"
+    else
+        compdb_tmp_dir="$(dirname "$OUTPUT")"
+    fi
+    compdb_tmp="$(mktemp "$compdb_tmp_dir/.compile_commands.json.XXXXXX")" ||
         fail 'could not create atomic compilation-database staging file'
     TMP_PATHS+=("$compdb_tmp")
     emit_compdb "$rows" "$compdb_tmp"
