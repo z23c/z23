@@ -34,12 +34,12 @@
  * feature-first controller rooms, floor 8 so a moved include pattern fails
  * loudly). All FAIL lines go to stderr and accumulate; a missing boot.c or
  * os_sandbox_linux.c is FATAL rc 2.
- * Parity notes: grep -Eq is a per-line ERE predicate; the shell's \b word
- * boundary has no POSIX regex form (glibc regcomp rejects [[:<:]]), so the
- * three \bIDENT( predicates are matched by sw_ident_call() instead; git's
- * stderr passes through both implementations untouched; the confinement-row
- * FAIL reports the resolved domain count, so the dumper set must resolve
- * fully before that message can print. */
+ * Parity notes: grep -Eq is a per-line ERE predicate; the shell word-boundary
+ * escape has no POSIX regex form (glibc regcomp rejects [[:<:]]), so the
+ * three word-boundary IDENT( predicates are matched by sw_ident_call()
+ * instead; git's stderr passes through both implementations untouched;
+ * the confinement-row FAIL reports the resolved domain count, so the
+ * dumper set must resolve fully before that message can print. */
 
 #define SW_MAX_DEFS 128
 #define SW_PATH 512
@@ -132,11 +132,12 @@ static int sw_file_has_lit(const char *path, const char *lit)
     return found;
 }
 
-/* grep -Eq '\bIDENT[[:space:]]*\(': an occurrence of IDENT whose left neighbor
- * is not a word character (or is line start), followed by optional whitespace
- * and '('. The right side needs no boundary: callers pass idents long enough
- * that any longer identifier continues with '_' or another word character,
- * which is exactly what the \b form also accepts. */
+/* The shell original's word-boundary IDENT[[:space:]]*\( predicate: an
+ * occurrence of IDENT whose left neighbor is not a word character (or is
+ * line start), followed by optional whitespace and '('. The right side
+ * needs no boundary: callers pass idents long enough that any longer
+ * identifier continues with '_' or another word character, which is
+ * exactly what the word-boundary form also accepts. */
 static int sw_ident_call(const char *line, const char *ident)
 {
     size_t il = strlen(ident);

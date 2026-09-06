@@ -583,8 +583,8 @@ static int hss_collect(const char *buf, size_t n, const char *tok, int second,
     return 0;
 }
 
-/* awk /\<const\>/: the letters c-o-n-s-t with a non-[A-Za-z0-9_] (or string
- * edge) on both sides. */
+/* The awk original's word-boundary const pattern: the letters c-o-n-s-t
+ * with a non-[A-Za-z0-9_] (or string edge) on both sides. */
 static int hss_has_word_const(const char *s)
 {
     const char *p = s;
