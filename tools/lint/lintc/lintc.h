@@ -308,5 +308,7 @@ int check_json_value_init_run(int argc, char **argv);
 int check_json_value_init_selftest(void);
 int check_one_write_path_run(int argc, char **argv);
 int check_one_write_path_selftest(void);
+int check_supervisor_domain_run(int argc, char **argv);
+int check_supervisor_domain_selftest(void);
 
 #endif

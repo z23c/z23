@@ -5319,6 +5319,8 @@ LINTC_SRCS = tools/lint/lintc/lib.c tools/lint/lintc/gate_boot_wiring.c tools/li
     tools/lint/lintc/gate_pattern_guard.c \
     tools/lint/lintc/gate_describe_budget.c \
     tools/lint/lintc/gate_state_hygiene_fences.c \
+    tools/lint/lintc/gate_supervisor_domain.c \
+    tools/lint/lintc/gate_supervisor_domain_workers.c \
     tools/lint/lintc/main.c
 LINTC_OBJS = $(LINTC_SRCS:tools/lint/lintc/%.c=build/lintc-obj/%.o)
 # Apple Clang enables -Wunused-but-set-variable under -Wextra -Werror for
@@ -12206,7 +12208,7 @@ check-model-column-drift:
 	@./tools/lint/check_model_column_drift.sh --selftest
 	@ZCL_LINT_MODE=RATCHET ./tools/lint/check_model_column_drift.sh
 
-check-supervisor-domain:
+check-supervisor-domain: $(LINTC_TOOL)
 	@echo "→ Gate #21: supervisor_domain"
 	@./tools/lint/check_supervisor_domain.sh --selftest && ./tools/lint/check_supervisor_domain.sh
 

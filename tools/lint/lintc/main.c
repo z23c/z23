@@ -123,6 +123,8 @@ static const struct lint_gate k_gates[] = {
       check_json_value_init_selftest },
     { "check-one-write-path", check_one_write_path_run,
       check_one_write_path_selftest },
+    { "check-supervisor-domain", check_supervisor_domain_run,
+      check_supervisor_domain_selftest },
 };
 
 int main(int argc, char **argv)
