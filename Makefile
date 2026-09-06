@@ -12364,7 +12364,7 @@ check-stopwatch-skip-detector:
 # it; this runs the pin recorder's hermetic self-test and asserts ship.sh still
 # calls `proof_server_pin.sh record` in its promotion path, so the same
 # prose-with-no-code defect cannot silently return.
-check-proof-server-pin:
+check-proof-server-pin: $(LINTC_TOOL)
 	@echo "══ LINT: proof-server promotion pin ══"
 	@./tools/lint/check_proof_server_pin.sh
 
@@ -13008,7 +13008,7 @@ check-dev-proof-native-fast-path: $(LINTC_TOOL)
 # not repeat even twice in one directory. $(ZCL_TU_RANDOM_SEED) pins the seed
 # per TU; this gate keeps every per-TU object recipe carrying it (coverage is
 # the one documented exemption). `make repro-build` is the end-to-end proof.
-check-tu-random-seed:
+check-tu-random-seed: $(LINTC_TOOL)
 	@echo "══ LINT: per-TU object recipes pin GCC's random seed ══"
 	@./tools/lint/check_tu_random_seed.sh
 

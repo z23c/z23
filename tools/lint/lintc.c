@@ -4078,6 +4078,503 @@ static int check_peer_floor_single_source_selftest(void)
     return st_ok(bad, "check_peer_floor_single_source selftest: OK\n");
 }
 
+static const char k_psp_pin[] = "tools/scripts/proof_server_pin.sh";
+static const char k_psp_ship[] = "tools/ship.sh";
+
+static int psp_has_pass_line(const char *buf)
+{
+    static const char want[] = "PROOF SERVER PIN SELF-TEST: PASS";
+    size_t w = sizeof want - 1;
+    const char *p = buf;
+    for (;;) {
+        const char *nl = strchr(p, '\n');
+        size_t n = nl ? (size_t)(nl - p) : strlen(p);
+        if (n == w && memcmp(p, want, w) == 0)
+            return 1;
+        if (!nl)
+            return 0;
+        p = nl + 1;
+    }
+}
+
+static int psp_file_has_record(const char *path, int *has)
+{
+    regex_t re;
+    int cr = compile_pat(&re, REG_EXTENDED,
+                        "proof_server_pin" "\\.sh[[:space:]]+",
+                        "record", "([^[:alnum:]_]|$)", "");
+    if (cr)
+        return cr;
+    FILE *f = fopen(path, "r");
+    if (!f) {
+        *has = 0;
+        regfree(&re);
+        return 0;
+    }
+    char *line = NULL;
+    size_t cap = 0;
+    ssize_t n;
+    int rc = 0;
+    *has = 0;
+    while ((n = getline(&line, &cap, f)) >= 0) {
+        if (n > 0 && line[n - 1] == '\n')
+            line[n - 1] = '\0';
+        if (regexec(&re, line, 0, NULL, 0) == 0) {
+            *has = 1;
+            break;
+        }
+    }
+    rc = fin(f, line, path, rc);
+    regfree(&re);
+    return rc;
+}
+
+static int psp_check(FILE *out)
+{
+    int fail = 0, rc;
+    if (!csr_readable(k_psp_pin)) {
+        if (fprintf(out,
+                    "FAIL: %s is missing — the proof-server promotion has no recorder\n",
+                    k_psp_pin) < 0)
+            return die("z23-lint: write failed\n", "");
+        fail = 1;
+    } else {
+        char cmd[256], captured[8192];
+        if (ovf(snprintf(cmd, sizeof cmd, "bash %s --self-test 2>&1", k_psp_pin),
+                sizeof cmd))
+            return 2;
+        int code = 0;
+        rc = capture_cmd(cmd, captured, sizeof captured, &code);
+        if (rc)
+            return rc;
+        if (code != 0 || !psp_has_pass_line(captured)) {
+            if (fprintf(out,
+                        "FAIL: %s --self-test (rc=%d; no 'PROOF SERVER PIN SELF-TEST: PASS' line)\n",
+                        k_psp_pin, code) < 0)
+                return die("z23-lint: write failed\n", "");
+            if (fprintf(out, "%s\n", captured) < 0)
+                return die("z23-lint: write failed\n", "");
+            fail = 1;
+        } else if (fprintf(out, "  ok: %s --self-test\n", k_psp_pin) < 0) {
+            return die("z23-lint: write failed\n", "");
+        }
+    }
+
+    if (!csr_readable(k_psp_ship)) {
+        if (fprintf(out, "FAIL: %s is missing\n", k_psp_ship) < 0)
+            return die("z23-lint: write failed\n", "");
+        fail = 1;
+    } else {
+        int has = 0;
+        rc = psp_file_has_record(k_psp_ship, &has);
+        if (rc)
+            return rc;
+        if (!has) {
+            if (fputs("FAIL: tools/ship.sh no longer calls 'proof_server_pin.sh record' — the\n"
+                      "      promotion path would go back to describing a binding it does\n"
+                      "      not record. Wire the call back in after the remote health\n"
+                      "      check confirms the running daemon reports the candidate's\n"
+                      "      source id.\n", out) < 0)
+                return die("z23-lint: write failed\n", "");
+            fail = 1;
+        } else if (fprintf(out, "  ok: %s calls 'proof_server_pin.sh record'\n",
+                           k_psp_ship) < 0) {
+            return die("z23-lint: write failed\n", "");
+        }
+    }
+    if (fail)
+        return 1;
+    return fputs("check_proof_server_pin: clean — recorder self-test passes and "
+                 "ship.sh still wires it into the promotion path\n", out) < 0
+               ? die("z23-lint: write failed\n", "") : 0;
+}
+
+static int check_proof_server_pin_run(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+    return psp_check(stdout);
+}
+
+static int psp_st_reset(FILE *out)
+{
+    rewind(out);
+    return ftruncate(fileno(out), 0) != 0;
+}
+
+static int check_proof_server_pin_selftest(void)
+{
+    char cwd[4096];
+    if (!getcwd(cwd, sizeof cwd))
+        return die("z23-lint: getcwd failed\n", "");
+    char tmpl[] = "/tmp/z23-lint-psp-XXXXXX";
+    char *root = mkdtemp(tmpl);
+    if (!root)
+        return die("z23-lint: mkdir failed: %s\n", "/tmp");
+    FILE *out = tmpfile();
+    if (!out) {
+        rmdir(root);
+        return die("z23-lint: tmpfile failed\n", "");
+    }
+    char ob[4096];
+    int bad = 0, rc = 0;
+    if (chdir(root) != 0) {
+        fclose(out);
+        rmdir(root);
+        return die("z23-lint: cannot scan %s\n", root);
+    }
+
+    rc = psp_check(out);
+    if (csr_slurp(out, ob, sizeof ob))
+        bad = 1;
+    bad |= rc != 1
+        || strstr(ob, "FAIL: tools/scripts/proof_server_pin.sh is missing — "
+                      "the proof-server promotion has no recorder") == NULL;
+
+    if (psp_st_reset(out))
+        bad = 1;
+    if (csr_write(k_psp_pin, "echo PROOF SERVER PIN SELF-TEST: PASS\n")
+        || csr_write(k_psp_ship,
+                     "# mention record elsewhere\n"
+                     "tools/scripts/proof_server_pin.sh check\n"))
+        bad = 1;
+    rc = psp_check(out);
+    if (csr_slurp(out, ob, sizeof ob))
+        bad = 1;
+    bad |= rc != 1
+        || strstr(ob, "FAIL: tools/ship.sh no longer calls "
+                      "'proof_server_pin.sh record' — the") == NULL;
+
+    if (psp_st_reset(out))
+        bad = 1;
+    if (csr_write(k_psp_ship,
+                  "tools/scripts/proof_server_pin.sh record \"$HEAD_SHA\"\n"))
+        bad = 1;
+    rc = psp_check(out);
+    if (csr_slurp(out, ob, sizeof ob))
+        bad = 1;
+    bad |= rc != 0
+        || strstr(ob, "check_proof_server_pin: clean — recorder self-test "
+                      "passes and ship.sh still wires it into the promotion "
+                      "path") == NULL;
+
+    fclose(out);
+    unlink(k_psp_pin);
+    unlink(k_psp_ship);
+    (void)rmdir("tools/scripts");
+    (void)rmdir("tools");
+    if (chdir(cwd) != 0)
+        return die("z23-lint: cannot scan %s\n", cwd);
+    rmdir(root);
+    if (bad)
+        fputs("FAIL: check_proof_server_pin selftest\n", stderr);
+    return st_ok(bad, "check_proof_server_pin selftest: OK\n");
+}
+
+static int trs_on_recipe(FILE *out, int cov, int start, const char *argv,
+                         int *dep_total, int *dep_seeded, int *cov_total,
+                         int *fail)
+{
+    static const char needle[] = "$(" "ZCL_TU_RANDOM_SEED" ")";
+    int has = strstr(argv, needle) != NULL;
+    if (!cov) {
+        (*dep_total)++;
+        if (has) {
+            (*dep_seeded)++;
+            return 0;
+        }
+        if (fprintf(out,
+                    "FAIL: Makefile:%d — per-TU object recipe does not carry $("
+                    "ZCL_TU_RANDOM_SEED)\n", start) < 0)
+            return die("z23-lint: write failed\n", "");
+        if (fprintf(out, "      %s\n", argv) < 0)
+            return die("z23-lint: write failed\n", "");
+        *fail = 1;
+        return 0;
+    }
+    (*cov_total)++;
+    if (!has)
+        return 0;
+    if (fprintf(out,
+                "FAIL: Makefile:%d — the coverage recipe carries $("
+                "ZCL_TU_RANDOM_SEED).\n", start) < 0)
+        return die("z23-lint: write failed\n", "");
+    if (fputs("      Coverage is the documented exemption (gcno/gcda pairing).\n"
+              "      If that changed, update this gate and the reason with it.\n",
+              out) < 0)
+        return die("z23-lint: write failed\n", "");
+    *fail = 1;
+    return 0;
+}
+
+static int trs_check(FILE *out)
+{
+    regex_t seedre, trig, covre, cont;
+    int cr = compile_pat(&seedre, REG_EXTENDED,
+                        "^ZCL_TU_" "RANDOM_SEED[[:space:]]*=", "", "", "");
+    if (cr)
+        return cr;
+    cr = compile_pat(&trig, REG_EXTENDED,
+                     "BUILD_(EPOCH_OBJECT_TOOL|FAST_EPOCH_OBJECT_COMMAND)\\)"
+                     "[[:space:]]+(dep|coverage)[[:space:]]",
+                     "", "", "");
+    if (cr) {
+        regfree(&seedre);
+        return cr;
+    }
+    cr = compile_pat(&covre, REG_EXTENDED, "[[:space:]]coverage[[:space:]]",
+                     "", "", "");
+    if (cr) {
+        drop2(&seedre, &trig);
+        return cr;
+    }
+    cr = compile_pat(&cont, REG_EXTENDED, "\\\\[[:space:]]*$", "", "", "");
+    if (cr) {
+        drop3(&seedre, &trig, &covre);
+        return cr;
+    }
+
+    FILE *f = fopen("Makefile", "r");
+    char seed_def[4096];
+    seed_def[0] = '\0';
+    int found_seed = 0;
+    if (f) {
+        char *line = NULL;
+        size_t cap = 0;
+        ssize_t n;
+        size_t used = 0;
+        int rc = 0;
+        while ((n = getline(&line, &cap, f)) >= 0) {
+            if (n > 0 && line[n - 1] == '\n')
+                line[n - 1] = '\0';
+            if (regexec(&seedre, line, 0, NULL, 0) != 0)
+                continue;
+            size_t ln = strlen(line);
+            if (found_seed) {
+                if (used + 1 >= sizeof seed_def) {
+                    rc = die("z23-lint: derived buffer overflow\n", "");
+                    break;
+                }
+                seed_def[used++] = '\n';
+                seed_def[used] = '\0';
+            }
+            if (used + ln >= sizeof seed_def) {
+                rc = die("z23-lint: derived buffer overflow\n", "");
+                break;
+            }
+            memcpy(seed_def + used, line, ln + 1);
+            used += ln;
+            found_seed = 1;
+        }
+        int fr = fin(f, line, "Makefile", rc);
+        if (fr) {
+            drop3(&seedre, &trig, &covre);
+            regfree(&cont);
+            return fr;
+        }
+    }
+    if (!found_seed) {
+        drop3(&seedre, &trig, &covre);
+        regfree(&cont);
+        if (fputs("FAIL: Makefile does not define ZCL_TU_RANDOM_SEED\n", out) < 0)
+            return die("z23-lint: write failed\n", "");
+        return 1;
+    }
+    const char *frs = strstr(seed_def, "-" "frandom-seed=");
+    if (!frs || !strstr(frs, "$<")) {
+        drop3(&seedre, &trig, &covre);
+        regfree(&cont);
+        if (fputs("FAIL: ZCL_TU_RANDOM_SEED must expand to -frandom-seed=<per-TU value>.\n"
+                  "      A seed that is the same for every TU is not a per-TU seed.\n",
+                  out) < 0)
+            return die("z23-lint: write failed\n", "");
+        if (fprintf(out, "      Found: %s\n", seed_def) < 0)
+            return die("z23-lint: write failed\n", "");
+        return 1;
+    }
+
+    f = fopen("Makefile", "r");
+    if (!f) {
+        drop3(&seedre, &trig, &covre);
+        regfree(&cont);
+        if (fputs("FAIL: found no compile-epoch-object.sh object recipes in Makefile\n",
+                  out) < 0)
+            return die("z23-lint: write failed\n", "");
+        return 1;
+    }
+    char *line = NULL;
+    size_t cap = 0;
+    ssize_t n;
+    int lineno = 0, rc = 0, found = 0, fail = 0;
+    int dep_total = 0, dep_seeded = 0, cov_total = 0;
+    while ((n = getline(&line, &cap, f)) >= 0) {
+        lineno++;
+        if (n > 0 && line[n - 1] == '\n')
+            line[n - 1] = '\0';
+        if (regexec(&trig, line, 0, NULL, 0) != 0)
+            continue;
+        found = 1;
+        int cov = regexec(&covre, line, 0, NULL, 0) == 0;
+        int start = lineno;
+        while (regexec(&cont, line, 0, NULL, 0) == 0) {
+            n = getline(&line, &cap, f);
+            if (n < 0)
+                break;
+            lineno++;
+            if (n > 0 && line[n - 1] == '\n')
+                line[n - 1] = '\0';
+        }
+        if (n < 0 && ferror(f)) {
+            rc = die("z23-lint: read failed: %s\n", "Makefile");
+            break;
+        }
+        /* bash `IFS=$'\t' read` collapses the delimiter tab with any
+         * leading tabs on the argv line, so those tabs never appear. */
+        const char *argv = line;
+        while (*argv == '\t')
+            argv++;
+        rc = trs_on_recipe(out, cov, start, argv, &dep_total, &dep_seeded,
+                           &cov_total, &fail);
+        if (rc)
+            break;
+    }
+    int fr = fin(f, line, "Makefile", rc);
+    drop3(&seedre, &trig, &covre);
+    regfree(&cont);
+    if (fr)
+        return fr;
+    if (!found) {
+        if (fputs("FAIL: found no compile-epoch-object.sh object recipes in Makefile\n",
+                  out) < 0)
+            return die("z23-lint: write failed\n", "");
+        return 1;
+    }
+    if (cov_total > 1) {
+        if (fprintf(out,
+                    "FAIL: expected exactly one coverage-mode object recipe, found %d.\n",
+                    cov_total) < 0)
+            return die("z23-lint: write failed\n", "");
+        if (fputs("      The exemption is documented for one recipe; a second one has to\n"
+                  "      justify itself rather than inherit the first one's reason.\n",
+                  out) < 0)
+            return die("z23-lint: write failed\n", "");
+        fail = 1;
+    }
+    if (fail) {
+        if (fputs("\n"
+                  "Fix: append $(ZCL_TU_RANDOM_SEED) to the compiler argv of the object recipe.\n"
+                  "     Proof of the property it buys: make repro-build\n",
+                  out) < 0)
+            return die("z23-lint: write failed\n", "");
+        return 1;
+    }
+    return fprintf(out,
+                   "check-tu-random-seed: PASS — %d/%d per-TU object recipes pin GCC's "
+                   "random seed (%d coverage recipe exempt)\n",
+                   dep_seeded, dep_total, cov_total) < 0
+               ? die("z23-lint: write failed\n", "") : 0;
+}
+
+static int check_tu_random_seed_run(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+    return trs_check(stdout);
+}
+
+static const char k_trs_ok[] =
+    "ZCL_TU_RANDOM_SEED = -frandom-seed=$<\n"
+    "all:\n"
+    "\t@$(BUILD_EPOCH_OBJECT_TOOL) dep \"$@\" \"$<\" \\\n"
+    "\t  -- \\\n"
+    "\t  $(CC) $(CFLAGS) $(ZCL_TU_RANDOM_SEED)\n"
+    "\t@$(BUILD_EPOCH_OBJECT_TOOL) coverage \"$@\" \"$<\" \\\n"
+    "\t  -- \\\n"
+    "\t  $(CC) $(COV)\n";
+
+static const char k_trs_missing[] =
+    "all:\n"
+    "\t@$(BUILD_EPOCH_OBJECT_TOOL) dep \"$@\" \"$<\" \\\n"
+    "\t  -- \\\n"
+    "\t  $(CC) $(CFLAGS) $(ZCL_TU_RANDOM_SEED)\n"
+    "\t@$(BUILD_EPOCH_OBJECT_TOOL) coverage \"$@\" \"$<\" \\\n"
+    "\t  -- \\\n"
+    "\t  $(CC) $(COV)\n";
+
+static const char k_trs_unseeded[] =
+    "ZCL_TU_RANDOM_SEED = -frandom-seed=$<\n"
+    "all:\n"
+    "\t@$(BUILD_EPOCH_OBJECT_TOOL) dep \"$@\" \"$<\" \\\n"
+    "\t  -- \\\n"
+    "\t  $(CC) $(CFLAGS)\n"
+    "\t@$(BUILD_EPOCH_OBJECT_TOOL) coverage \"$@\" \"$<\" \\\n"
+    "\t  -- \\\n"
+    "\t  $(CC) $(COV)\n";
+
+static int check_tu_random_seed_selftest(void)
+{
+    char cwd[4096];
+    if (!getcwd(cwd, sizeof cwd))
+        return die("z23-lint: getcwd failed\n", "");
+    char tmpl[] = "/tmp/z23-lint-trs-XXXXXX";
+    char *root = mkdtemp(tmpl);
+    if (!root)
+        return die("z23-lint: mkdir failed: %s\n", "/tmp");
+    FILE *out = tmpfile();
+    if (!out) {
+        rmdir(root);
+        return die("z23-lint: tmpfile failed\n", "");
+    }
+    char ob[4096];
+    int bad = 0, rc = 0;
+    if (chdir(root) != 0) {
+        fclose(out);
+        rmdir(root);
+        return die("z23-lint: cannot scan %s\n", root);
+    }
+
+    if (csr_write("./Makefile", k_trs_missing))
+        bad = 1;
+    rc = trs_check(out);
+    if (csr_slurp(out, ob, sizeof ob))
+        bad = 1;
+    bad |= rc != 1
+        || strstr(ob, "FAIL: Makefile does not define ZCL_TU_RANDOM_SEED") == NULL;
+
+    rewind(out);
+    if (ftruncate(fileno(out), 0) != 0)
+        bad = 1;
+    if (csr_write("./Makefile", k_trs_ok))
+        bad = 1;
+    rc = trs_check(out);
+    if (csr_slurp(out, ob, sizeof ob))
+        bad = 1;
+    bad |= rc != 0
+        || strstr(ob, "check-tu-random-seed: PASS — 1/1 per-TU object recipes "
+                      "pin GCC's random seed (1 coverage recipe exempt)") == NULL;
+
+    rewind(out);
+    if (ftruncate(fileno(out), 0) != 0)
+        bad = 1;
+    if (csr_write("./Makefile", k_trs_unseeded))
+        bad = 1;
+    rc = trs_check(out);
+    if (csr_slurp(out, ob, sizeof ob))
+        bad = 1;
+    bad |= rc != 1
+        || strstr(ob, "FAIL: Makefile:3 — per-TU object recipe does not carry $("
+                      "ZCL_TU_RANDOM_SEED)") == NULL;
+
+    fclose(out);
+    unlink("./Makefile");
+    if (chdir(cwd) != 0)
+        return die("z23-lint: cannot scan %s\n", cwd);
+    rmdir(root);
+    if (bad)
+        fputs("FAIL: check_tu_random_seed selftest\n", stderr);
+    return st_ok(bad, "check_tu_random_seed selftest: OK\n");
+}
+
 struct lint_gate {
     const char *name;
     int (*run)(int argc, char **argv);
@@ -4113,6 +4610,10 @@ static const struct lint_gate k_gates[] = {
       check_core_seal_root_mirror_selftest },
     { "check-peer-floor-single-source", check_peer_floor_single_source_run,
       check_peer_floor_single_source_selftest },
+    { "check-proof-server-pin", check_proof_server_pin_run,
+      check_proof_server_pin_selftest },
+    { "check-tu-random-seed", check_tu_random_seed_run,
+      check_tu_random_seed_selftest },
 };
 
 int main(int argc, char **argv)
