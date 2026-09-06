@@ -106,3 +106,24 @@ echo 'PASS: anti-hollow floor refuses one-file tree'
  if lint_cache_derive_tree_key "$repo" > "$work/no-pipefail.log" 2>&1; then exit 1; fi
 )
 echo 'PASS: missing-file hash failure refuses with caller pipefail disabled'
+# A record must be byte-exact what lint_cache_store_pass writes. Store a real
+# PASS, confirm it hits, then corrupt only its schema= line with an embedded
+# NUL and confirm lint_cache_has_pass refuses it — a plain `grep` would
+# truncate its match at the NUL as if it were a C-string terminator and
+# report a false hit.
+git init -q "$work/cacherepo"
+for ((i=0;i<100;i++)); do printf '%s\n' "$i" > "$work/cacherepo/file$i"; done
+git -C "$work/cacherepo" add -- .
+ZCL_LINT_CACHE_DIR="$work/cachedir" lint_cache_open "$work/cacherepo"
+[[ "$LINT_CACHE_AVAILABLE" -eq 1 ]]
+fixture_key="$(lint_cache_key "check-nul-fixture" "true")"
+lint_cache_store_pass "check-nul-fixture" "$fixture_key"
+lint_cache_has_pass "$fixture_key"
+fixture_rec="$(lint_cache_record_path "$fixture_key")"
+{ printf 'schema=%s' "$LINT_CACHE_SCHEMA"; printf '\0'; printf '\n'; tail -n +2 "$fixture_rec"; } > "$fixture_rec.nul"
+mv -f "$fixture_rec.nul" "$fixture_rec"
+if lint_cache_has_pass "$fixture_key" 2>"$work/nul-record.log"; then
+ echo 'FAIL: NUL-corrupted record still hits'; exit 1
+fi
+grep -q 'contains a NUL byte' "$work/nul-record.log"
+echo 'PASS: NUL inside a stored record refuses reuse'

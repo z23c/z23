@@ -367,10 +367,24 @@ lint_cache_record_path() {
     printf '%s/%s/%s' "$LINT_CACHE_DIR" "${1:0:2}" "${1:2}"
 }
 
-# True (0) iff a stored PASS exists at this key.
+# True (0) iff a stored PASS exists at this key. A record must be byte-exact
+# what lint_cache_store_pass writes: plain `grep` truncates its match at an
+# embedded NUL as if it were a C-string terminator, so a NUL anywhere in the
+# record would let a corrupted/tampered file still satisfy the schema check —
+# `/usr/bin/grep -a` forces text mode (no such truncation) and the NUL check
+# below is a second, independent guard that needs no extra tool.
 lint_cache_has_pass() {
     local rec; rec="$(lint_cache_record_path "$1")"
-    [ -f "$rec" ] && grep -q "^schema=$LINT_CACHE_SCHEMA\$" "$rec" 2>/dev/null
+    [ -f "$rec" ] || return 1
+    if ! tr -d '\0' < "$rec" 2>/dev/null | cmp -s - "$rec"; then
+        lint_cache_note "record refused: $rec contains a NUL byte"
+        return 1
+    fi
+    if ! /usr/bin/grep -aq "^schema=$LINT_CACHE_SCHEMA\$" "$rec" 2>/dev/null; then
+        lint_cache_note "record refused: $rec has no exact schema=$LINT_CACHE_SCHEMA line"
+        return 1
+    fi
+    return 0
 }
 
 # Store a PASS. Best effort by design — a failed store only costs a future
