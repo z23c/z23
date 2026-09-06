@@ -4133,7 +4133,7 @@ static bool test_helpers_prepare(
     char node_source[PATH_MAX], node_target[PATH_MAX];
     char nodectl_target[PATH_MAX], acme_target[PATH_MAX], fbsh_target[PATH_MAX];
     char file_size_policy_target[PATH_MAX], board_bridge_target[PATH_MAX];
-    char git_hook_target[PATH_MAX];
+    char git_hook_target[PATH_MAX], lint_tool_target[PATH_MAX];
     uint8_t depfile_root[32];
     int verifier_len = snprintf(
         verifier_source, sizeof(verifier_source),
@@ -4153,6 +4153,8 @@ static bool test_helpers_prepare(
                                     "%s/build/bin/fleet-board-bridge", generation);
     int git_hook_len = snprintf(git_hook_target, sizeof(git_hook_target),
                                 "%s/build/bin/z23-git-hook", generation);
+    int lint_tool_len = snprintf(lint_tool_target, sizeof(lint_tool_target),
+                                 "%s/build/bin/z23-lint", generation);
     if (verifier_len <= 0 ||
         (size_t)verifier_len >= sizeof(verifier_source) ||
         node_len <= 0 || (size_t)node_len >= sizeof(node_source) ||
@@ -4164,7 +4166,9 @@ static bool test_helpers_prepare(
         board_bridge_len <= 0 ||
         (size_t)board_bridge_len >= sizeof(board_bridge_target) ||
         git_hook_len <= 0 ||
-        (size_t)git_hook_len >= sizeof(git_hook_target)) {
+        (size_t)git_hook_len >= sizeof(git_hook_target) ||
+        lint_tool_len <= 0 ||
+        (size_t)lint_tool_len >= sizeof(lint_tool_target)) {
         proof_why(why, why_len, "proof_test_helper_path_invalid");
         return false;
     }
@@ -4201,7 +4205,7 @@ static bool test_helpers_prepare(
     const char *prerequisite_argv[] = {
         "make", "--no-print-directory", make_jobs, "zcl-nodectl",
         "zclassic23-acme", "fbsh", "engine-unit", "tools/file_size_policy",
-        "fleet-board-bridge", "git-hook",
+        "fleet-board-bridge", "git-hook", "build/bin/z23-lint",
         NULL};
     struct zcl_dev_proof_budget helper_budget =
         proof_step_budget(paths, "helpers", PROOF_HELPERS_DEFAULT_MS);
@@ -4212,7 +4216,7 @@ static bool test_helpers_prepare(
     }
     uint8_t runner_root[32], verifier_root[32], node_root[32], nodectl_root[32];
     uint8_t acme_root[32], fbsh_root[32], file_size_policy_root[32];
-    uint8_t board_bridge_root[32], git_hook_root[32];
+    uint8_t board_bridge_root[32], git_hook_root[32], lint_tool_root[32];
     if (!hash_file("zcl.dev_proof_test_runner.v1", runner_target,
                    runner_root) ||
         !hash_file("zcl.dev_proof_package_verifier.v1", verifier_target,
@@ -4227,7 +4231,9 @@ static bool test_helpers_prepare(
         !hash_file("zcl.dev_proof_board_bridge.v1", board_bridge_target,
                    board_bridge_root) ||
         !hash_file("zcl.dev_proof_git_hook.v1", git_hook_target,
-                   git_hook_root)) {
+                   git_hook_root) ||
+        !hash_file("zcl.dev_proof_lint_tool.v1", lint_tool_target,
+                   lint_tool_root)) {
         proof_why(why, why_len, "proof_test_helper_hash_failed");
         return false;
     }
@@ -4243,6 +4249,7 @@ static bool test_helpers_prepare(
                    sizeof(file_size_policy_root));
     sha3_256_write(&helpers, board_bridge_root, sizeof(board_bridge_root));
     sha3_256_write(&helpers, git_hook_root, sizeof(git_hook_root));
+    sha3_256_write(&helpers, lint_tool_root, sizeof(lint_tool_root));
     sha3_256_write(&helpers, depfile_root, sizeof(depfile_root));
     sha3_256_finalize(&helpers, helper_root);
     return true;

@@ -497,6 +497,7 @@ int t_blocker_escape_registered_gate(void);
 int t_lint_gates_fail_loud_on_empty_scan(void);
 int t_lint_gate_wiring_gate(void);
 int t_lint_umbrellas_share_built_prereqs(void);
+int t_dev_proof_helpers_include_lint_tool(void);
 void unlink_lint_fixtures(void);
 int t_raw_malloc_fixture_trips_gate(void);
 int t_raw_malloc_zcl_fixture_passes(void);

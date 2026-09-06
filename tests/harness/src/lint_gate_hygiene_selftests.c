@@ -1209,6 +1209,93 @@ int t_lint_umbrellas_share_built_prereqs(void)
     return failures;
 }
 
+/* A cold generation links its own build/bin/z23-lint from the helpers step
+ * (tools/dev/dev_proof.c: test_helpers_prepare), before either the LINT or
+ * TEST proof dimension starts. The test dimension's exclusive pre-pass
+ * (test_make_lint_gates) execs lint-gate shims that shell out to that same
+ * binary; without this prerequisite a cold generation can run those shims
+ * before the LINT dimension's own `make lint-fast` has linked it, and the
+ * shim fails with rc=127 "No such file or directory". Scan the real source
+ * for both halves of the fix: the make prerequisite that builds it, and the
+ * helper-root hash that binds it into the receipt's helper digest — a
+ * generation could build the binary and still forget to fold it into
+ * helper_root, which would silently drop it from what the receipt proves. */
+static bool dev_proof_prerequisite_argv_has_lint(const char *source)
+{
+    if (!source) return false;
+    const char *block = strstr(source, "const char *prerequisite_argv[] = {");
+    if (!block) return false;
+    const char *end = strstr(block, "NULL};");
+    return range_contains(block, end, "\"build/bin/z23-lint\"");
+}
+
+static bool dev_proof_helper_root_hashes_lint(const char *source)
+{
+    if (!source) return false;
+    const char *block = strstr(source, "hash_begin(&helpers, "
+                                        "\"zcl.dev_proof_test_helpers.v1\");");
+    if (!block) return false;
+    const char *end = strstr(block, "sha3_256_finalize(&helpers, helper_root);");
+    return range_contains(block, end, "lint_tool_root");
+}
+
+int t_dev_proof_helpers_include_lint_tool(void)
+{
+    int failures = 0;
+    char path[PATH_MAX];
+    char *source = NULL;
+    int read_ok = repo_path(path, sizeof(path), "tools/dev/dev_proof.c") == 0 &&
+                  read_entire_file(path, &source) == 0;
+    int prereq_ok = read_ok && dev_proof_prerequisite_argv_has_lint(source);
+    int hash_ok = read_ok && dev_proof_helper_root_hashes_lint(source);
+
+    char *missing_prereq = read_ok ? strdup(source) : NULL;
+    char *prereq_hit = missing_prereq
+        ? strstr(missing_prereq, "\"build/bin/z23-lint\"") : NULL;
+    if (prereq_hit) prereq_hit[0] = '!';
+    int prereq_mutation_trips = prereq_hit != NULL &&
+        !dev_proof_prerequisite_argv_has_lint(missing_prereq);
+
+    char *missing_hash = read_ok ? strdup(source) : NULL;
+    char *hash_block = missing_hash
+        ? strstr(missing_hash, "hash_begin(&helpers, "
+                               "\"zcl.dev_proof_test_helpers.v1\");") : NULL;
+    char *hash_end = hash_block
+        ? strstr(hash_block, "sha3_256_finalize(&helpers, helper_root);")
+        : NULL;
+    /* "lint_tool_root" appears twice on the same write line (the argument
+     * and the sizeof() beside it): blank every occurrence in the block, not
+     * only the first, or the sizeof() copy alone still satisfies the scan. */
+    int hash_hit_count = 0;
+    if (hash_block) {
+        char *cursor = hash_block;
+        for (;;) {
+            char *hit = strstr(cursor, "lint_tool_root");
+            if (!hit || (hash_end && hit >= hash_end)) break;
+            hit[0] = '!';
+            hash_hit_count++;
+            cursor = hit + 1;
+        }
+    }
+    int hash_mutation_trips = hash_hit_count > 0 &&
+        !dev_proof_helper_root_hashes_lint(missing_hash);
+
+    TEST("[lint-gate] a proof generation builds build/bin/z23-lint as a "
+         "test-dimension prerequisite and folds it into helper_root; "
+         "removal mutations of either half trip") {
+        ASSERT(read_ok);
+        ASSERT(prereq_ok);
+        ASSERT(hash_ok);
+        ASSERT(prereq_mutation_trips);
+        ASSERT(hash_mutation_trips);
+        PASS();
+    } _test_next:;
+    free(source);
+    free(missing_prereq);
+    free(missing_hash);
+    return failures;
+}
+
 #else  /* !ZCL_TESTING */
 
 /* Without ZCL_TESTING the lint-gate self-tests compile to nothing; this
