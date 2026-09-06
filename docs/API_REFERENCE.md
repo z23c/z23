@@ -74,11 +74,11 @@ z23 discover schema <path> --side=input|output
 
 | Catalog fact | Count |
 |---|---|
-| Registry entries (branches + leaves) | 852 |
+| Registry entries (branches + leaves) | 853 |
 | Top-level roots | 14 |
 | Branches | 192 |
-| Leaves (dispatchable command paths) | 660 |
-| … `ready` (live handler in this build) | 589 |
+| Leaves (dispatchable command paths) | 661 |
+| … `ready` (live handler in this build) | 590 |
 | … `compat` (metadata only, names a fallback) | 40 |
 | … `planned` (fail-closed BLOCKED, exit 3) | 31 |
 | … dev-gated 🔧 (`ready` only in `z23-dev`) | 39 |
@@ -109,6 +109,7 @@ Per source file:
 | `engine/composition/commands/fleet_board.def` | 11 | 3 | 8 |
 | `engine/composition/commands/mind.def` | 4 | 1 | 3 |
 | `engine/composition/commands/fleet.def` | 10 | 3 | 7 |
+| `engine/composition/commands/fleet_agents.def` | 1 | 0 | 1 |
 | `engine/composition/commands/fleet_enrol.def` | 4 | 0 | 4 |
 | `engine/composition/commands/telemetry/root.def` | 6 | 2 | 4 |
 | `engine/composition/commands/telemetry/watch.def` | 1 | 0 | 1 |
@@ -785,6 +786,7 @@ represented by its children's sections.
 | `dev fleet truth` | ready | read / read / operator · fast/low | none | `zcl.dev_fleet.v1` | `z23 dev fleet truth` | Show the Git and lint-receipt truth for every origin lane |
 | `dev fleet start` | ready | read / read / operator · foreground/low | `since`, `budget_bytes`, `board_dir`, `include_units`, `cwd` | `zcl.fleet_start.v1` | `z23 dev fleet start` | One opening answer for an orchestrator: the whole fleet in one bounded packet |
 | `dev fleet know` (aliases: `dev.know`) | ready | read / read / operator · instant/tiny | **`subject`**, `relation`, `context`, `budget_bytes` | `zcl.dev_know.v1` | `z23 dev know --subject=sonnet` | Ask what the fleet knows about a subject before acting on it |
+| `dev fleet agents` (aliases: `fleet.agents`) | ready | read / read / operator · foreground/low | `since`, `by`, `root`, `ledger`, `include_units` | `zcl.fleet_agents.v1` | `z23-dev fleet agents --since=168 --by=executor` | Every AI agent working on this box, and each executor's grade over time |
 
 #### `dev.fleet.tunnel` — Loopback TCP tunnels between paired machines
 
@@ -1849,6 +1851,7 @@ Every alias resolves through the same grammar as its canonical path
 | `zcode.package.offered` | `zcode.package.offered` |
 | `join` | `zcode.node.join` |
 | `update` | `zcode.node.update.status` |
+| `fleet.agents` | `dev.fleet.agents` |
 
 
 ## Shared output schemas
