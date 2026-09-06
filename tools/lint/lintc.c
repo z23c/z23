@@ -7408,10 +7408,14 @@ static int check_asan_adx_exception_selftest(void)
     if (chdir(root) != 0)
         return die("z23-lint: cannot scan %s\n", root);
     const char *mk = aae_makefile();
-    char tmpl[] = "/tmp/z23-lint-asan-adx-XXXXXX";
+    const char *td = env_or("TMPDIR", "/tmp");
+    char tmpl[4096];
+    if (ovf(snprintf(tmpl, sizeof tmpl, "%s/z23-lint-asan-adx-XXXXXX", td),
+            sizeof tmpl))
+        return 2;
     char *tmp = mkdtemp(tmpl);
     if (!tmp)
-        return die("z23-lint: mkdir failed: %s\n", "/tmp");
+        return die("z23-lint: mkdir failed: %s\n", td);
     char copy[4096], nextp[4096];
     static char logb[256 * 1024];
     int code = 0, rc;
