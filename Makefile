@@ -11865,7 +11865,7 @@ check-proc-self-shim: $(LINTC_TOOL)
 # dispositioned (receipt:/exempt:) in
 # tools/lint/privileged_transition_receipt_baseline.txt; a new one FAILS.
 .PHONY: check-privileged-transition-receipt
-check-privileged-transition-receipt:
+check-privileged-transition-receipt: $(LINTC_TOOL)
 	@echo "→ Gate: privileged-transition-receipt (Law 7, OS-A1)"
 	@./tools/lint/check_privileged_transition_receipt.sh
 
@@ -13697,7 +13697,7 @@ first-build-timing-selftest:
 # marker on its line or the line above. Carries hermetic detector fixtures and
 # runs them before it certifies the tree, so it cannot report clean while
 # blind. Self-test: tools/lint/check_no_warning_suppression.sh --self-test
-check-no-warning-suppression:
+check-no-warning-suppression: $(LINTC_TOOL)
 	@echo "══ LINT: unexplained warning suppressions ══"
 	@./tools/lint/check_no_warning_suppression.sh .
 

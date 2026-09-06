@@ -5162,6 +5162,1027 @@ static int check_stopwatch_skip_detector_selftest(void)
     return st_ok(bad, "check_stopwatch_skip_detector selftest: OK\n");
 }
 
+static const char k_nws_self[] = "tools/lint/check_no_warning_suppression.sh";
+static const char k_nws_ls[] =
+    "ls-files -z -- Makefile makefile GNUmakefile '*.mk' '*.mak' '*.make' "
+    "'*.c' '*.h' '*.sh'";
+
+static int nws_comp(regex_t *flag, regex_t *pragma, regex_t *marker)
+{
+    char fp[96], pp[160], mp[64];
+    if (ovf(snprintf(fp, sizeof fp, "-W" "no-(%s|%s)", "unused-result",
+                     "stringop-overflow"), sizeof fp))
+        return 2;
+    if (ovf(snprintf(pp, sizeof pp,
+                     "diagnostic[[:space:]]+ignored[[:space:]]+\"-W(%s|%s)",
+                     "unused-result", "stringop-overflow"), sizeof pp))
+        return 2;
+    if (ovf(snprintf(mp, sizeof mp, "suppression-ok:[[:space:]]*[^[:space:]]"),
+            sizeof mp))
+        return 2;
+    int e = regcomp(flag, fp, REG_EXTENDED);
+    if (e)
+        return reg_fail(flag, e);
+    e = regcomp(pragma, pp, REG_EXTENDED);
+    if (e) {
+        regfree(flag);
+        return reg_fail(pragma, e);
+    }
+    e = regcomp(marker, mp, REG_EXTENDED);
+    if (e) {
+        regfree(flag);
+        regfree(pragma);
+        return reg_fail(marker, e);
+    }
+    return 0;
+}
+
+static void nws_drop(regex_t *flag, regex_t *pragma, regex_t *marker)
+{
+    regfree(flag);
+    regfree(pragma);
+    regfree(marker);
+}
+
+struct nws_acc {
+    const char *root;
+    regex_t *flag, *pragma, *marker;
+    FILE *hits;
+    int scanned, nhits;
+};
+
+static int nws_on_track(const char *path, void *ctx)
+{
+    struct nws_acc *a = ctx;
+    if (strncmp(path, "vendor/", 7) == 0 || strcmp(path, k_nws_self) == 0)
+        return 0;
+    char full[8192];
+    if (ovf(snprintf(full, sizeof full, "%s/%s", a->root, path), sizeof full))
+        return 2;
+    struct stat st;
+    if (stat(full, &st) != 0 || !S_ISREG(st.st_mode))
+        return 0;
+    a->scanned++;
+    FILE *f = fopen(full, "r");
+    if (!f)
+        return die("z23-lint: cannot open %s\n", full);
+    static char prev[65536];
+    prev[0] = '\0';
+    char *line = NULL;
+    size_t cap = 0;
+    ssize_t n;
+    int lineno = 0, rc = 0;
+    while ((n = getline(&line, &cap, f)) >= 0) {
+        lineno++;
+        if (n > 0 && line[n - 1] == '\n')
+            line[n - 1] = '\0';
+        if (regexec(a->flag, line, 0, NULL, 0) == 0
+            || regexec(a->pragma, line, 0, NULL, 0) == 0) {
+            if (regexec(a->marker, line, 0, NULL, 0) != 0
+                && regexec(a->marker, prev, 0, NULL, 0) != 0) {
+                if (fprintf(a->hits, "%s:%d:%s\n", path, lineno, line) < 0) {
+                    rc = die("z23-lint: write failed\n", "");
+                    break;
+                }
+                a->nhits++;
+            }
+        }
+        if (ovf(snprintf(prev, sizeof prev, "%s", line), sizeof prev)) {
+            rc = 2;
+            break;
+        }
+    }
+    return fin(f, line, full, rc);
+}
+
+static int nws_scan(const char *root, FILE *out, FILE *err)
+{
+    regex_t flag, pragma, marker;
+    int cr = nws_comp(&flag, &pragma, &marker);
+    if (cr)
+        return cr;
+    FILE *hits = tmpfile();
+    if (!hits) {
+        nws_drop(&flag, &pragma, &marker);
+        return die("z23-lint: tmpfile failed\n", "");
+    }
+    if (strchr(root, '\'')) {
+        fclose(hits);
+        nws_drop(&flag, &pragma, &marker);
+        return die("z23-lint: path too long: %s\n", root);
+    }
+    char cmd[8192];
+    if (ovf(snprintf(cmd, sizeof cmd, "git -C '%s' %s", root, k_nws_ls),
+            sizeof cmd)) {
+        fclose(hits);
+        nws_drop(&flag, &pragma, &marker);
+        return 2;
+    }
+    struct nws_acc a = {
+        .root = root, .flag = &flag, .pragma = &pragma, .marker = &marker,
+        .hits = hits
+    };
+    int rc = each_zpath(cmd, nws_on_track, &a);
+    if (rc) {
+        fclose(hits);
+        nws_drop(&flag, &pragma, &marker);
+        return rc;
+    }
+    if (a.scanned < 1) {
+        fclose(hits);
+        nws_drop(&flag, &pragma, &marker);
+        if (fputs("check_no_warning_suppression: FATAL — build-surface scan set is empty\n",
+                  err) < 0)
+            return die("z23-lint: write failed\n", "");
+        return 2;
+    }
+    if (a.nhits) {
+        if (fseek(hits, 0, SEEK_SET) != 0) {
+            fclose(hits);
+            nws_drop(&flag, &pragma, &marker);
+            return die("z23-lint: fseek failed\n", "");
+        }
+        char *line = NULL;
+        size_t cap = 0;
+        ssize_t n;
+        while ((n = getline(&line, &cap, hits)) >= 0) {
+            if (n > 0 && line[n - 1] == '\n')
+                line[n - 1] = '\0';
+            if (fprintf(err, "FAIL: unmarked warning suppression — %s\n", line) < 0) {
+                free(line);
+                fclose(hits);
+                nws_drop(&flag, &pragma, &marker);
+                return die("z23-lint: write failed\n", "");
+            }
+        }
+        free(line);
+        fclose(hits);
+        nws_drop(&flag, &pragma, &marker);
+        if (fprintf(err,
+                    "check_no_warning_suppression: FAIL — hits=%d scanned=%d\n",
+                    a.nhits, a.scanned) < 0)
+            return die("z23-lint: write failed\n", "");
+        if (fprintf(err,
+                    "  -W" "no-%s also disables [[nodiscard]] reporting; -W"
+                    "no-%s hides\n",
+                    "unused-result", "stringop-overflow") < 0)
+            return die("z23-lint: write failed\n", "");
+        if (fputs("  a memory-safety diagnostic. Delete the flag, or state the reason on the line above it:\n",
+                  err) < 0)
+            return die("z23-lint: write failed\n", "");
+        if (fputs("      # suppression-ok: <why this build surface genuinely needs it>\n",
+                  err) < 0)
+            return die("z23-lint: write failed\n", "");
+        return 1;
+    }
+    fclose(hits);
+    nws_drop(&flag, &pragma, &marker);
+    if (fprintf(out, "check_no_warning_suppression: clean — scanned=%d build surfaces\n",
+                a.scanned) < 0)
+        return die("z23-lint: write failed\n", "");
+    return 0;
+}
+
+static int nws_fx_fail(const char *why)
+{
+    if (fprintf(stderr,
+                "z23-lint: INTERNAL — check_no_warning_suppression fixture: %s\n",
+                why) < 0)
+        return die("z23-lint: write failed\n", "");
+    return 3;
+}
+
+static int nws_fx_write(const char *path, const char *kind, const char *extra)
+{
+    char body[512];
+    if (kind) {
+        if (ovf(snprintf(body, sizeof body, "CFLAGS += -W" "no-%s%s", kind,
+                         extra ? extra : "\n"), sizeof body))
+            return 2;
+        return csr_write(path, body);
+    }
+    return csr_write(path, extra);
+}
+
+static int nws_fixtures(void)
+{
+    char tmpl[] = "/tmp/z23-lint-nws-XXXXXX";
+    char *tmp = mkdtemp(tmpl);
+    if (!tmp)
+        return die("z23-lint: mkdir failed: %s\n", "/tmp");
+    FILE *cap = tmpfile();
+    if (!cap) {
+        (void)rap_rm_rf(tmp);
+        return die("z23-lint: tmpfile failed\n", "");
+    }
+    char repo[4096], empty[4096], path[8192], body[512], ob[4096], dump[64];
+    int code = 0, rc = 0, scan_rc = 0, bad = 0;
+    if (ovf(snprintf(repo, sizeof repo, "%s/repo", tmp), sizeof repo)
+        || ovf(snprintf(empty, sizeof empty, "%s/empty", tmp), sizeof empty))
+        bad = 1;
+    if (!bad
+        && (csr_mkdirs(repo) || csr_mkdirs(empty)
+            || ovf(snprintf(path, sizeof path, "%s/tools/lint", repo), sizeof path)
+            || csr_mkdirs(path)
+            || ovf(snprintf(path, sizeof path, "%s/vendor", repo), sizeof path)
+            || csr_mkdirs(path)))
+        bad = 1;
+    if (!bad && (rap_git_cmd(repo, "init -q", dump, sizeof dump, &code) || code))
+        bad = 1;
+    if (!bad && (rap_git_cmd(empty, "init -q", dump, sizeof dump, &code) || code))
+        bad = 1;
+    if (!bad) {
+        if (ovf(snprintf(path, sizeof path, "%s/Makefile", repo), sizeof path)
+            || csr_write(path, "CFLAGS = -std=c23 -Wall -Wextra -Werror\n")
+            || ovf(snprintf(path, sizeof path, "%s/a.c", repo), sizeof path)
+            || csr_write(path, "int main(void){return 0;}\n")
+            || ovf(snprintf(path, sizeof path, "%s/vendor/third_party.mk", repo),
+                   sizeof path)
+            || nws_fx_write(path, "unused-result", "\n"))
+            bad = 1;
+    }
+    if (!bad
+        && (rap_git_cmd(repo, "add Makefile a.c vendor/third_party.mk", dump,
+                        sizeof dump, &code)
+            || code))
+        bad = 1;
+    if (bad) {
+        fclose(cap);
+        (void)rap_rm_rf(tmp);
+        return nws_fx_fail("could not plant detector fixture");
+    }
+
+    if (psp_st_reset(cap))
+        bad = 1;
+    scan_rc = nws_scan(repo, cap, cap);
+    if (csr_slurp(cap, ob, sizeof ob))
+        bad = 1;
+    if (bad || scan_rc != 0 || strstr(ob, "check_no_warning_suppression: clean") == NULL) {
+        fclose(cap);
+        (void)rap_rm_rf(tmp);
+        return nws_fx_fail("clean fixture rejected");
+    }
+    if (strstr(ob, "vendor/third_party.mk") != NULL) {
+        fclose(cap);
+        (void)rap_rm_rf(tmp);
+        return nws_fx_fail("vendor/ must be out of scope");
+    }
+
+    if (ovf(snprintf(path, sizeof path, "%s/Makefile", repo), sizeof path)
+        || ovf(snprintf(body, sizeof body,
+                        "CFLAGS = -std=c23 -Wall -Wextra -Werror\n"
+                        "CFLAGS += -W" "no-%s\n",
+                        "unused-result"), sizeof body)
+        || csr_write(path, body)) {
+        fclose(cap);
+        (void)rap_rm_rf(tmp);
+        return nws_fx_fail("could not plant flag-form fixture");
+    }
+    if (psp_st_reset(cap))
+        bad = 1;
+    scan_rc = nws_scan(repo, cap, cap);
+    if (csr_slurp(cap, ob, sizeof ob))
+        bad = 1;
+    if (bad || scan_rc != 1 || strstr(ob, "Makefile:2") == NULL) {
+        fclose(cap);
+        (void)rap_rm_rf(tmp);
+        return nws_fx_fail("flag form did not trip Makefile:2");
+    }
+
+    if (ovf(snprintf(body, sizeof body,
+                     "# suppression-ok:\nCFLAGS += -W" "no-%s\n",
+                     "unused-result"), sizeof body)
+        || csr_write(path, body)) {
+        fclose(cap);
+        (void)rap_rm_rf(tmp);
+        return nws_fx_fail("could not plant empty-reason fixture");
+    }
+    if (psp_st_reset(cap))
+        bad = 1;
+    scan_rc = nws_scan(repo, cap, cap);
+    if (csr_slurp(cap, ob, sizeof ob))
+        bad = 1;
+    if (bad || scan_rc != 1) {
+        fclose(cap);
+        (void)rap_rm_rf(tmp);
+        return nws_fx_fail("empty-reason marker must not exempt");
+    }
+
+    if (ovf(snprintf(body, sizeof body,
+                     "# suppression-ok: fixture proves the marker is honoured\n"
+                     "CFLAGS += -W" "no-%s\n",
+                     "unused-result"), sizeof body)
+        || csr_write(path, body)) {
+        fclose(cap);
+        (void)rap_rm_rf(tmp);
+        return nws_fx_fail("could not plant preceding-line fixture");
+    }
+    if (psp_st_reset(cap))
+        bad = 1;
+    scan_rc = nws_scan(repo, cap, cap);
+    if (csr_slurp(cap, ob, sizeof ob))
+        bad = 1;
+    if (bad || scan_rc != 0) {
+        fclose(cap);
+        (void)rap_rm_rf(tmp);
+        return nws_fx_fail("preceding-line marker not honoured");
+    }
+
+    if (ovf(snprintf(body, sizeof body,
+                     "CFLAGS += -W" "no-%s  # suppression-ok: fixture\n",
+                     "stringop-overflow"), sizeof body)
+        || csr_write(path, body)) {
+        fclose(cap);
+        (void)rap_rm_rf(tmp);
+        return nws_fx_fail("could not plant same-line fixture");
+    }
+    if (psp_st_reset(cap))
+        bad = 1;
+    scan_rc = nws_scan(repo, cap, cap);
+    if (csr_slurp(cap, ob, sizeof ob))
+        bad = 1;
+    if (bad || scan_rc != 0) {
+        fclose(cap);
+        (void)rap_rm_rf(tmp);
+        return nws_fx_fail("same-line marker not honoured");
+    }
+
+    if (csr_write(path, "CFLAGS = -Wall\n")
+        || ovf(snprintf(path, sizeof path, "%s/a.c", repo), sizeof path)
+        || ovf(snprintf(body, sizeof body,
+                        "#pragma GCC diagnostic ignored \"-W%s\"\n"
+                        "int main(void){return 0;}\n",
+                        "unused-result"), sizeof body)
+        || csr_write(path, body)) {
+        fclose(cap);
+        (void)rap_rm_rf(tmp);
+        return nws_fx_fail("could not plant pragma fixture");
+    }
+    if (psp_st_reset(cap))
+        bad = 1;
+    scan_rc = nws_scan(repo, cap, cap);
+    if (csr_slurp(cap, ob, sizeof ob))
+        bad = 1;
+    if (bad || scan_rc != 1 || strstr(ob, "a.c:1") == NULL) {
+        fclose(cap);
+        (void)rap_rm_rf(tmp);
+        return nws_fx_fail("pragma form did not trip a.c:1");
+    }
+
+    if (psp_st_reset(cap))
+        bad = 1;
+    scan_rc = nws_scan(empty, cap, cap);
+    if (csr_slurp(cap, ob, sizeof ob))
+        bad = 1;
+    if (bad || scan_rc != 2 || strstr(ob, "FATAL") == NULL) {
+        fclose(cap);
+        (void)rap_rm_rf(tmp);
+        return nws_fx_fail("empty scan expected FATAL exit 2");
+    }
+
+    fclose(cap);
+    rc = rap_rm_rf(tmp);
+    return rc ? rc : 0;
+}
+
+static int check_no_warning_suppression_run(int argc, char **argv)
+{
+    char cwd[4096];
+    const char *root;
+    if (argc >= 1 && argv[0] && argv[0][0])
+        root = argv[0];
+    else {
+        if (!getcwd(cwd, sizeof cwd))
+            return die("z23-lint: getcwd failed\n", "");
+        root = cwd;
+    }
+    struct stat st;
+    if (stat(root, &st) != 0 || !S_ISDIR(st.st_mode)) {
+        if (fprintf(stderr,
+                    "check_no_warning_suppression: FATAL — root is not a directory: %s\n",
+                    root) < 0)
+            return die("z23-lint: write failed\n", "");
+        return 2;
+    }
+    if (strchr(root, '\''))
+        return die("z23-lint: path too long: %s\n", root);
+    char dump[64];
+    int code = 0;
+    int rc = rap_git_cmd(root, "rev-parse --is-inside-work-tree >/dev/null 2>&1",
+                         dump, sizeof dump, &code);
+    if (rc)
+        return rc;
+    if (code != 0) {
+        if (fprintf(stderr,
+                    "check_no_warning_suppression: FATAL — not a Git worktree: %s\n",
+                    root) < 0)
+            return die("z23-lint: write failed\n", "");
+        return 2;
+    }
+    rc = nws_fixtures();
+    if (rc)
+        return rc;
+    return nws_scan(root, stdout, stderr);
+}
+
+static int check_no_warning_suppression_selftest(void)
+{
+    int rc = nws_fixtures();
+    if (rc) {
+        fputs("FAIL: check_no_warning_suppression selftest\n", stderr);
+        return st_ok(1, "check_no_warning_suppression selftest: OK\n");
+    }
+    return st_ok(0, "check_no_warning_suppression selftest: OK\n");
+}
+
+enum {
+    PTR_LEAF_MAX = 1024,
+    PTR_LEAF_LEN = 192,
+    PTR_DISP_LEN = 1024,
+    PTR_FILE_MAX = 2 * 1024 * 1024
+};
+
+static char g_ptr_file[PTR_FILE_MAX];
+static char g_ptr_leaf[PTR_LEAF_MAX][PTR_LEAF_LEN];
+static char g_ptr_dkey[PTR_LEAF_MAX][PTR_LEAF_LEN];
+static char g_ptr_dval[PTR_LEAF_MAX][PTR_DISP_LEN];
+
+static int ptr_cmp(const void *a, const void *b)
+{
+    return strcmp((const char *)a, (const char *)b);
+}
+
+static int ptr_add_leaf(const char *path, int *nleaf)
+{
+    if (!path[0])
+        return 0;
+    if (*nleaf >= PTR_LEAF_MAX)
+        return die("z23-lint: derived buffer overflow\n", "");
+    return ovf(snprintf(g_ptr_leaf[*nleaf], PTR_LEAF_LEN, "%s", path),
+               PTR_LEAF_LEN) ? 2 : ((*nleaf)++, 0);
+}
+
+static int ptr_tok_at(const char *buf, size_t n, size_t i, size_t *len)
+{
+    static const char *const toks[] = {
+        "ZCL_COMMAND_READY_COMMAND(",
+        "ZCL_COMMAND_PLANNED_COMMAND(",
+        "ZCL_COMMAND_COMPAT_COMMAND(",
+        "ZCL_COMMAND_DEV_COMMAND(",
+    };
+    for (size_t t = 0; t < sizeof toks / sizeof toks[0]; t++) {
+        size_t L = strlen(toks[t]);
+        if (i + L <= n && memcmp(buf + i, toks[t], L) == 0) {
+            *len = L;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int ptr_parse_buf(char *buf, size_t n, int *nleaf)
+{
+    size_t i = 0;
+    while (i < n) {
+        size_t L = 0;
+        if (!ptr_tok_at(buf, n, i, &L)) {
+            i++;
+            continue;
+        }
+        size_t j = i + L;
+        int depth = 1, in_str = 0, esc = 0;
+        size_t spec_at = j;
+        while (j < n && depth > 0) {
+            char c = buf[j];
+            if (in_str) {
+                if (esc)
+                    esc = 0;
+                else if (c == '\\')
+                    esc = 1;
+                else if (c == '"')
+                    in_str = 0;
+            } else if (c == '"')
+                in_str = 1;
+            else if (c == '(')
+                depth++;
+            else if (c == ')')
+                depth--;
+            j++;
+        }
+        size_t spec_end = (depth == 0) ? j - 1 : j;
+        char save = buf[spec_end];
+        buf[spec_end] = '\0';
+        const char *spec = buf + spec_at;
+        char path[PTR_LEAF_LEN];
+        path[0] = '\0';
+        const char *q1 = strchr(spec, '"');
+        if (q1) {
+            const char *q2 = strchr(q1 + 1, '"');
+            if (q2) {
+                size_t pl = (size_t)(q2 - q1 - 1);
+                if (pl >= sizeof path) {
+                    buf[spec_end] = save;
+                    return die("z23-lint: derived buffer overflow\n", "");
+                }
+                memcpy(path, q1 + 1, pl);
+                path[pl] = '\0';
+            }
+        }
+        int owner = strstr(spec, "ZCL_COMMAND_AUTH_OWNER") != NULL;
+        int mutate = strstr(spec, "ZCL_COMMAND_EFFECT_MUTATE") != NULL
+                  || strstr(spec, "ZCL_COMMAND_EFFECT_DESTRUCTIVE") != NULL;
+        int rcadd = 0;
+        if (owner && mutate && path[0])
+            rcadd = ptr_add_leaf(path, nleaf);
+        buf[spec_end] = save;
+        if (rcadd)
+            return rcadd;
+        i = j;
+    }
+    return 0;
+}
+
+static int ptr_read_file(const char *path, char *buf, size_t cap, size_t *outn)
+{
+    FILE *f = fopen(path, "r");
+    if (!f)
+        return die("z23-lint: cannot open %s\n", path);
+    size_t n = fread(buf, 1, cap - 1, f);
+    if (n == cap - 1) {
+        char extra;
+        if (fread(&extra, 1, 1, f) == 1) {
+            fclose(f);
+            return die("z23-lint: derived buffer overflow\n", "");
+        }
+    }
+    int err = ferror(f);
+    if (fclose(f) != 0 && !err)
+        return die("z23-lint: fclose failed: %s\n", path);
+    if (err)
+        return die("z23-lint: read failed: %s\n", path);
+    buf[n] = '\0';
+    *outn = n;
+    return 0;
+}
+
+static const char *ptr_disp_get(int ndisp, const char *leaf)
+{
+    for (int i = 0; i < ndisp; i++) {
+        if (strcmp(g_ptr_dkey[i], leaf) == 0)
+            return g_ptr_dval[i];
+    }
+    return NULL;
+}
+
+static int ptr_disp_set(int *ndisp, const char *leaf, const char *rest)
+{
+    for (int i = 0; i < *ndisp; i++) {
+        if (strcmp(g_ptr_dkey[i], leaf) == 0)
+            return ovf(snprintf(g_ptr_dval[i], PTR_DISP_LEN, "%s", rest),
+                       PTR_DISP_LEN);
+    }
+    if (*ndisp >= PTR_LEAF_MAX)
+        return die("z23-lint: derived buffer overflow\n", "");
+    if (ovf(snprintf(g_ptr_dkey[*ndisp], PTR_LEAF_LEN, "%s", leaf), PTR_LEAF_LEN))
+        return 2;
+    if (ovf(snprintf(g_ptr_dval[*ndisp], PTR_DISP_LEN, "%s", rest), PTR_DISP_LEN))
+        return 2;
+    (*ndisp)++;
+    return 0;
+}
+
+static int ptr_replay_pref(FILE *src, FILE *err)
+{
+    if (fseek(src, 0, SEEK_SET) != 0)
+        return die("z23-lint: fseek failed\n", "");
+    char *line = NULL;
+    size_t cap = 0;
+    ssize_t n;
+    int rc = 0;
+    while ((n = getline(&line, &cap, src)) >= 0) {
+        if (n > 0 && line[n - 1] == '\n')
+            line[n - 1] = '\0';
+        if (fprintf(err, "  %s\n", line) < 0) {
+            rc = die("z23-lint: write failed\n", "");
+            break;
+        }
+    }
+    free(line);
+    return rc;
+}
+
+static int ptr_scan(const char *defdir, const char *baseline, const char *workdir,
+                    FILE *out, FILE *err)
+{
+    int def_count = 0, nleaf = 0, ndisp = 0;
+    struct stat dst;
+    if (stat(defdir, &dst) == 0 && S_ISDIR(dst.st_mode)) {
+        DIR *d = opendir(defdir);
+        if (!d)
+            return die("z23-lint: cannot open %s\n", defdir);
+        struct dirent *de;
+        int prc = 0;
+        while (prc == 0 && (de = readdir(d)) != NULL) {
+            const char *nm = de->d_name;
+            size_t L = strlen(nm);
+            if (L < 5 || nm[0] == '.' || strcmp(nm + L - 4, ".def") != 0)
+                continue;
+            char full[8192];
+            if (ovf(snprintf(full, sizeof full, "%s/%s", defdir, nm), sizeof full)) {
+                prc = 2;
+                break;
+            }
+            struct stat st;
+            if (stat(full, &st) != 0 || !S_ISREG(st.st_mode))
+                continue;
+            def_count++;
+            size_t got = 0;
+            prc = ptr_read_file(full, g_ptr_file, sizeof g_ptr_file, &got);
+            if (prc == 0)
+                prc = ptr_parse_buf(g_ptr_file, got, &nleaf);
+        }
+        closedir(d);
+        if (prc)
+            return prc;
+    }
+
+    if (nleaf > 1)
+        qsort(g_ptr_leaf, (size_t)nleaf, PTR_LEAF_LEN, ptr_cmp);
+    int w = 0;
+    for (int i = 0; i < nleaf; i++) {
+        if (w && strcmp(g_ptr_leaf[w - 1], g_ptr_leaf[i]) == 0)
+            continue;
+        if (w != i)
+            memcpy(g_ptr_leaf[w], g_ptr_leaf[i], PTR_LEAF_LEN);
+        w++;
+    }
+    nleaf = w;
+
+    if (def_count == 0 || nleaf == 0) {
+        if (fprintf(err,
+                    "check_privileged_transition_receipt: FATAL — no owner-mutating leaves enumerated from %s/*.def (broken scan; refusing a hollow clean).\n",
+                    defdir) < 0)
+            return die("z23-lint: write failed\n", "");
+        return 2;
+    }
+
+    FILE *bf = fopen(baseline, "r");
+    if (bf) {
+        char *line = NULL;
+        size_t cap = 0;
+        ssize_t n;
+        int brc = 0;
+        while (brc == 0 && (n = getline(&line, &cap, bf)) >= 0) {
+            if (n > 0 && line[n - 1] == '\n')
+                line[n - 1] = '\0';
+            char *p = line;
+            while (*p && isspace((unsigned char)*p))
+                p++;
+            if (!*p || *p == '#')
+                continue;
+            char *leaf = p;
+            while (*p && !isspace((unsigned char)*p))
+                p++;
+            char *rest = p;
+            if (*p) {
+                *p++ = '\0';
+                while (*p && isspace((unsigned char)*p))
+                    p++;
+                rest = p;
+            }
+            brc = ptr_disp_set(&ndisp, leaf, rest);
+        }
+        int fr = fin(bf, line, baseline, brc);
+        if (fr)
+            return fr;
+    }
+
+    regex_t vre;
+    int e = regcomp(&vre,
+                    "authority_receipt_[a-z_]*_available[(]|"
+                    "consensus_state_replay_receipt_authority_available[(]",
+                    REG_EXTENDED);
+    if (e)
+        return reg_fail(&vre, e);
+
+    FILE *violf = tmpfile(), *lostf = tmpfile();
+    if (!violf || !lostf) {
+        if (violf) fclose(violf);
+        if (lostf) fclose(lostf);
+        regfree(&vre);
+        return die("z23-lint: tmpfile failed\n", "");
+    }
+
+    int n_total = 0, n_receipt = 0, n_exempt = 0, nviol = 0, nlost = 0, fail = 0;
+    int rc = 0;
+    for (int i = 0; i < nleaf && rc == 0; i++) {
+        n_total++;
+        const char *d = ptr_disp_get(ndisp, g_ptr_leaf[i]);
+        if (!d || !d[0]) {
+            if (fprintf(violf, "%s\n", g_ptr_leaf[i]) < 0)
+                rc = die("z23-lint: write failed\n", "");
+            nviol++;
+            continue;
+        }
+        if (strncmp(d, "receipt:", 8) == 0)
+            n_receipt++;
+        else if (strncmp(d, "exempt:", 7) == 0)
+            n_exempt++;
+        else if (fprintf(violf,
+                         "%s (malformed disposition: '%s' — must start receipt: or exempt:)\n",
+                         g_ptr_leaf[i], d) < 0)
+            rc = die("z23-lint: write failed\n", "");
+        else
+            nviol++;
+    }
+
+    for (int i = 0; i < ndisp && rc == 0; i++) {
+        const char *d = g_ptr_dval[i];
+        if (strncmp(d, "receipt:", 8) != 0)
+            continue;
+        const char *spec = d + 8;
+        size_t fl = 0;
+        while (spec[fl] && !isspace((unsigned char)spec[fl]))
+            fl++;
+        if (fl == 0 || fl >= 4096) {
+            rc = die("z23-lint: derived buffer overflow\n", "");
+            break;
+        }
+        char file[4096];
+        memcpy(file, spec, fl);
+        file[fl] = '\0';
+        char full[8192];
+        const char *openp = file;
+        if (file[0] != '/') {
+            if (ovf(snprintf(full, sizeof full, "%s/%s", workdir, file),
+                    sizeof full)) {
+                rc = 2;
+                break;
+            }
+            openp = full;
+        }
+        struct stat st;
+        if (stat(openp, &st) != 0 || !S_ISREG(st.st_mode)) {
+            if (fprintf(lostf, "%s -> %s (file not found)\n", g_ptr_dkey[i], file) < 0)
+                rc = die("z23-lint: write failed\n", "");
+            nlost++;
+            continue;
+        }
+        size_t got = 0;
+        rc = ptr_read_file(openp, g_ptr_file, sizeof g_ptr_file, &got);
+        if (rc)
+            break;
+        if (regexec(&vre, g_ptr_file, 0, NULL, 0) != 0) {
+            if (fprintf(lostf, "%s -> %s (no authority_receipt verify call)\n",
+                        g_ptr_dkey[i], file) < 0)
+                rc = die("z23-lint: write failed\n", "");
+            nlost++;
+        }
+    }
+    regfree(&vre);
+    if (rc) {
+        fclose(violf);
+        fclose(lostf);
+        return rc;
+    }
+
+    if (nviol) {
+        fail = 1;
+        if (fprintf(err,
+                    "check_privileged_transition_receipt: owner-mutating leaf/leaves with NO Law-7 disposition in %s:\n",
+                    baseline) < 0) {
+            fclose(violf);
+            fclose(lostf);
+            return die("z23-lint: write failed\n", "");
+        }
+        rc = ptr_replay_pref(violf, err);
+        if (rc == 0
+            && (fputs("\n", err) < 0
+                || fputs("Every ZCL_COMMAND_AUTH_OWNER + EFFECT_MUTATE/DESTRUCTIVE leaf must be dispositioned. Add ONE line:\n",
+                         err) < 0
+                || fputs("  <leaf.path>  receipt:<relative_handler_file>   # if it installs a privileged artifact — bind authority_receipt_header_* (or the replay-receipt verifier) over {artifact digest, context anchor, running binary}\n",
+                         err) < 0
+                || fputs("  <leaf.path>  exempt:<one-line reason>          # if it is not an artifact-install transition\n",
+                         err) < 0))
+            rc = die("z23-lint: write failed\n", "");
+    }
+    if (rc == 0 && nlost) {
+        fail = 1;
+        if (fputs("check_privileged_transition_receipt: a receipt: consumer no longer gates on an authority receipt:\n",
+                  err) < 0)
+            rc = die("z23-lint: write failed\n", "");
+        else
+            rc = ptr_replay_pref(lostf, err);
+        if (rc == 0
+            && fputs("  A wired privileged transition must keep calling authority_receipt_*_available( before mutating.\n",
+                     err) < 0)
+            rc = die("z23-lint: write failed\n", "");
+    }
+    fclose(violf);
+    fclose(lostf);
+    if (rc)
+        return rc;
+    if (fail)
+        return 1;
+    if (fprintf(out,
+                "check_privileged_transition_receipt: clean — %d owner-mutating leaves, all dispositioned (%d receipt, %d exempt)\n",
+                n_total, n_receipt, n_exempt) < 0)
+        return die("z23-lint: write failed\n", "");
+    return 0;
+}
+
+static int check_privileged_transition_receipt_run(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+    char cwd[4096], basebuf[4096];
+    if (!getcwd(cwd, sizeof cwd))
+        return die("z23-lint: getcwd failed\n", "");
+    const char *envd = getenv("ZCL_PRIV_RECEIPT_DEF_DIR");
+    const char *envb = getenv("ZCL_PRIV_RECEIPT_BASELINE");
+    const char *defdir = (envd && envd[0]) ? envd : "engine/composition/commands";
+    const char *baseline;
+    if (envb && envb[0])
+        baseline = envb;
+    else {
+        if (ovf(snprintf(basebuf, sizeof basebuf,
+                         "%s/tools/lint/privileged_transition_receipt_baseline.txt",
+                         cwd), sizeof basebuf))
+            return 2;
+        baseline = basebuf;
+    }
+    return ptr_scan(defdir, baseline, cwd, stdout, stderr);
+}
+
+static int ptr_st_env(const char *defdir, const char *baseline)
+{
+    if (setenv("ZCL_PRIV_RECEIPT_DEF_DIR", defdir, 1) != 0
+        || setenv("ZCL_PRIV_RECEIPT_BASELINE", baseline, 1) != 0)
+        return 1;
+    return 0;
+}
+
+static int ptr_st_clear_env(int had_d, const char *oldd, int had_b, const char *oldb)
+{
+    if (had_d)
+        (void)setenv("ZCL_PRIV_RECEIPT_DEF_DIR", oldd, 1);
+    else
+        (void)unsetenv("ZCL_PRIV_RECEIPT_DEF_DIR");
+    if (had_b)
+        (void)setenv("ZCL_PRIV_RECEIPT_BASELINE", oldb, 1);
+    else
+        (void)unsetenv("ZCL_PRIV_RECEIPT_BASELINE");
+    return 0;
+}
+
+static int check_privileged_transition_receipt_selftest(void)
+{
+    char tmpl[] = "/tmp/z23-lint-ptr-XXXXXX";
+    char *root = mkdtemp(tmpl);
+    if (!root)
+        return die("z23-lint: mkdir failed: %s\n", "/tmp");
+    FILE *out = tmpfile(), *err = tmpfile();
+    if (!out || !err) {
+        if (out) fclose(out);
+        if (err) fclose(err);
+        (void)rap_rm_rf(root);
+        return die("z23-lint: tmpfile failed\n", "");
+    }
+    const char *ed = getenv("ZCL_PRIV_RECEIPT_DEF_DIR");
+    const char *eb = getenv("ZCL_PRIV_RECEIPT_BASELINE");
+    char oldd[4096], oldb[4096];
+    int had_d = 0, had_b = 0, bad = 0, rc = 0;
+    if (ed) {
+        if (ovf(snprintf(oldd, sizeof oldd, "%s", ed), sizeof oldd))
+            bad = 1;
+        else
+            had_d = 1;
+    }
+    if (eb) {
+        if (ovf(snprintf(oldb, sizeof oldb, "%s", eb), sizeof oldb))
+            bad = 1;
+        else
+            had_b = 1;
+    }
+
+    char defs[4096], empty[4096], base[4096], handler[4096], defa[4096], ob[8192],
+        ebout[8192];
+    static const char k_def[] =
+        "ZCL_COMMAND_READY_COMMAND(\n"
+        "    \"app.test.clean\", \"parent\", \"has (parens) and \\\"quotes\\\" inside\",\n"
+        "    ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_EFFECT_MUTATE)\n"
+        "ZCL_COMMAND_DEV_COMMAND(\n"
+        "    \"app.test.dev\", ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_EFFECT_DESTRUCTIVE)\n";
+    static const char k_pub[] =
+        "ZCL_COMMAND_READY_COMMAND(\n"
+        "    \"app.test.public\", ZCL_COMMAND_AUTH_PUBLIC, ZCL_COMMAND_EFFECT_MUTATE)\n";
+    if (ovf(snprintf(defs, sizeof defs, "%s/defs", root), sizeof defs)
+        || ovf(snprintf(empty, sizeof empty, "%s/empty", root), sizeof empty)
+        || ovf(snprintf(base, sizeof base, "%s/baseline.txt", root), sizeof base)
+        || ovf(snprintf(handler, sizeof handler, "%s/handler.c", root), sizeof handler)
+        || ovf(snprintf(defa, sizeof defa, "%s/defs/a.def", root), sizeof defa)
+        || csr_mkdirs(defs) || csr_mkdirs(empty) || csr_write(defa, k_def))
+        bad = 1;
+
+    if (!bad && ptr_st_env(defs, base))
+        bad = 1;
+
+    if (psp_st_reset(out) || psp_st_reset(err))
+        bad = 1;
+    if (csr_write(base,
+                  "app.test.clean  exempt: fixture\n"
+                  "app.test.dev    exempt: fixture\n"))
+        bad = 1;
+    rc = ptr_scan(defs, base, root, out, err);
+    if (csr_slurp(out, ob, sizeof ob) || csr_slurp(err, ebout, sizeof ebout))
+        bad = 1;
+    bad |= rc != 0
+        || strstr(ob, "check_privileged_transition_receipt: clean — 2 owner-mutating leaves, all dispositioned (0 receipt, 2 exempt)") == NULL;
+
+    if (psp_st_reset(out) || psp_st_reset(err))
+        bad = 1;
+    if (csr_write(base, "# none\n"))
+        bad = 1;
+    rc = ptr_scan(defs, base, root, out, err);
+    if (csr_slurp(out, ob, sizeof ob) || csr_slurp(err, ebout, sizeof ebout))
+        bad = 1;
+    bad |= rc != 1
+        || strstr(ebout, "app.test.clean") == NULL
+        || strstr(ebout, "app.test.dev") == NULL
+        || strstr(ebout, "Every ZCL_COMMAND_AUTH_OWNER + EFFECT_MUTATE/DESTRUCTIVE leaf must be dispositioned.") == NULL;
+
+    if (psp_st_reset(out) || psp_st_reset(err))
+        bad = 1;
+    if (csr_write(base,
+                  "app.test.clean  nope:xyz\n"
+                  "app.test.dev    exempt: fixture\n"))
+        bad = 1;
+    rc = ptr_scan(defs, base, root, out, err);
+    if (csr_slurp(out, ob, sizeof ob) || csr_slurp(err, ebout, sizeof ebout))
+        bad = 1;
+    bad |= rc != 1
+        || strstr(ebout, "app.test.clean (malformed disposition: 'nope:xyz' — must start receipt: or exempt:)") == NULL;
+
+    if (psp_st_reset(out) || psp_st_reset(err))
+        bad = 1;
+    if (csr_write(handler, "int x(void) { authority_receipt_x_available(0); return 0; }\n")
+        || csr_write(base,
+                     "app.test.clean  receipt:handler.c\n"
+                     "app.test.dev    exempt: fixture\n"))
+        bad = 1;
+    rc = ptr_scan(defs, base, root, out, err);
+    if (csr_slurp(out, ob, sizeof ob) || csr_slurp(err, ebout, sizeof ebout))
+        bad = 1;
+    bad |= rc != 0
+        || strstr(ob, "(1 receipt, 1 exempt)") == NULL;
+
+    if (psp_st_reset(out) || psp_st_reset(err))
+        bad = 1;
+    if (csr_write(handler, "int x(void) { return 0; }\n"))
+        bad = 1;
+    rc = ptr_scan(defs, base, root, out, err);
+    if (csr_slurp(out, ob, sizeof ob) || csr_slurp(err, ebout, sizeof ebout))
+        bad = 1;
+    bad |= rc != 1
+        || strstr(ebout, "app.test.clean -> handler.c (no authority_receipt verify call)") == NULL;
+
+    if (psp_st_reset(out) || psp_st_reset(err))
+        bad = 1;
+    if (csr_write(base,
+                  "app.test.clean  receipt:missing.c\n"
+                  "app.test.dev    exempt: fixture\n"))
+        bad = 1;
+    rc = ptr_scan(defs, base, root, out, err);
+    if (csr_slurp(out, ob, sizeof ob) || csr_slurp(err, ebout, sizeof ebout))
+        bad = 1;
+    bad |= rc != 1
+        || strstr(ebout, "app.test.clean -> missing.c (file not found)") == NULL;
+
+    if (psp_st_reset(out) || psp_st_reset(err))
+        bad = 1;
+    rc = ptr_scan(empty, base, root, out, err);
+    if (csr_slurp(out, ob, sizeof ob) || csr_slurp(err, ebout, sizeof ebout))
+        bad = 1;
+    bad |= rc != 2 || strstr(ebout, "FATAL") == NULL;
+
+    if (psp_st_reset(out) || psp_st_reset(err))
+        bad = 1;
+    if (csr_write(defa, k_pub))
+        bad = 1;
+    rc = ptr_scan(defs, base, root, out, err);
+    if (csr_slurp(out, ob, sizeof ob) || csr_slurp(err, ebout, sizeof ebout))
+        bad = 1;
+    bad |= rc != 2 || strstr(ebout, "FATAL") == NULL;
+
+    fclose(out);
+    fclose(err);
+    ptr_st_clear_env(had_d, oldd, had_b, oldb);
+    (void)rap_rm_rf(root);
+    if (bad)
+        fputs("FAIL: check_privileged_transition_receipt selftest\n", stderr);
+    return st_ok(bad, "check_privileged_transition_receipt selftest: OK\n");
+}
+
 struct lint_gate {
     const char *name;
     int (*run)(int argc, char **argv);
@@ -5205,6 +6226,10 @@ static const struct lint_gate k_gates[] = {
       check_no_retired_agent_protocol_selftest },
     { "check-stopwatch-skip-detector", check_stopwatch_skip_detector_run,
       check_stopwatch_skip_detector_selftest },
+    { "check-no-warning-suppression", check_no_warning_suppression_run,
+      check_no_warning_suppression_selftest },
+    { "check-privileged-transition-receipt", check_privileged_transition_receipt_run,
+      check_privileged_transition_receipt_selftest },
 };
 
 int main(int argc, char **argv)
