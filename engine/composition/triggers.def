@@ -1,0 +1,66 @@
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ *
+ * triggers — the CLOSED catalog of reactions z23 owns over its own local
+ * event sources. Today the fleet's reactions to events are hand-run
+ * watchers OUTSIDE z23: a human noticing a landing failed, a person reading
+ * a board row, someone eyeballing an experiment row for a timeout. This
+ * file is the one declaration of what z23 itself watches for and does
+ * about it, so a reaction nobody wrote down here is not a reaction: an
+ * id, source and field that is not in this table cannot fire.
+ *
+ * Row shape:
+ *
+ *   Z23_TRIGGER(id_, source_, field_, op_, value_, action_, why_)
+ *
+ *   id_      the trigger id, verbatim and stable. Renaming one is a new
+ *            id, because a fired ledger row already carries the old one.
+ *   source_  which local event stream the trigger reads:
+ *              landing_outcomes  <platform_state_root>/land/outcomes.jsonl
+ *              board_rows        this box's own board file under
+ *                                <state>/zclassic23/board/<host>.jsonl
+ *              experiment_rows   <state>/zclassic23/experiments/rows.tsv
+ *   field_   the row's field name the trigger reads. A field a row does
+ *            not carry is ABSENT, not empty-string, and a trigger against
+ *            an absent field never fires — for any op, including "ne".
+ *   op_      how field_ is compared against value_: eq, ne, prefix,
+ *            contains.
+ *   value_   the literal to compare against.
+ *   action_  what happens on a match: "print" writes one line to stdout
+ *            (`TRIGGER <id> <source> <field>=<value>`); "ledger" appends
+ *            one JSON row to
+ *            <state>/zclassic23/triggers/fired.jsonl.
+ *   why_     one plain sentence: the reason this reaction exists.
+ *
+ * ORDER IS NOT IDENTITY here — ids are looked up by name, not position —
+ * but append new rows at the end anyway so a diff reads as a diff.
+ *
+ * This is the FIRST SLICE (see docs/FLEET_TRIGGERS.md): no daemon, no
+ * network, no board-post action yet — the native board leaf itself is
+ * changing in train 44. `z23-dev fleet triggers check` is run once, by a
+ * human or a script, and later by the resident mind service on the same
+ * evaluator this file drives.
+ */
+
+Z23_TRIGGER("landing_landed_to_ledger", "landing_outcomes", "state", "eq",
+           "landed", "ledger",
+           "A landed train is a fact worth keeping in the permanent record, "
+           "not a log line that scrolls away.")
+Z23_TRIGGER("landing_failed_print", "landing_outcomes", "state", "eq",
+           "failed", "print",
+           "A failed landing needs a human's eyes now, before the next "
+           "attempt starts, not a row nobody re-reads today.")
+Z23_TRIGGER("board_need_print", "board_rows", "kind", "eq", "need", "print",
+           "A posted need is a request for help that should surface "
+           "immediately to whoever is watching this box.")
+Z23_TRIGGER("board_problem_to_ledger", "board_rows", "kind", "eq", "problem",
+           "ledger",
+           "A problem row is worth keeping as a record of what went wrong "
+           "across the fleet, even after the board's own file rotates.")
+Z23_TRIGGER("experiment_timeout_print", "experiment_rows", "outcome", "eq",
+           "timeout", "print",
+           "A timeout is worth flagging live so someone notices the "
+           "executor stalled before the next delegation repeats it.")
+Z23_TRIGGER("experiment_wrong_to_ledger", "experiment_rows", "outcome", "eq",
+           "wrong", "ledger",
+           "A wrong result is worth keeping in the ledger as a pattern to "
+           "learn from later, not just a line in a growing TSV.")

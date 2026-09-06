@@ -3,14 +3,19 @@
  * Per-key transport type rules for the dev.agent leaves, split out of
  * command_registry.c's zcl_command_registry_input_validate() so that file
  * stays under its recorded file-size-ceiling baseline. Behaviour is
- * unchanged: this is the same else-if chain in its own translation unit.
+ * unchanged from the original else-if chain; each arm below is now its own
+ * small predicate so that dispatcher — zcl_command_registry_devagent_input_ok
+ * — is a flat sequence of "does this arm match" calls instead of one long
+ * chain, keeping it under the shrink-only cyclomatic-complexity ceiling as
+ * new leaf-specific rules (such as fleet.triggers.check's `dry-run`, added
+ * as a data row rather than a new inline branch) arrive over time.
  *
  * `key` has already been confirmed present in the leaf's declared
  * `input_keys` CSV before either the caller or this function runs.
  *
- * The three functions below (the extra bool-key set and the seq predicate)
- * are the overflow for dev land's --json/--seq/--force and dev train:
- * two lanes each added a rule to command_registry.c's
+ * The three public functions below (the extra bool-key set and the seq
+ * predicate) are the overflow for dev land's --json/--seq/--force and dev
+ * train: two lanes each added a rule to command_registry.c's
  * zcl_command_registry_input_validate() chain at the same time, and keeping
  * both pushed that file past its recorded ceiling in
  * tools/lint/file_size_policy_baseline.txt, so the two new rules live here
@@ -24,96 +29,176 @@
 
 #include <string.h>
 
+/* True if `key` is one of `keys[0..count)`. The one loop every fixed-set
+ * arm below shares, so a new key list is a new table, not a new loop. */
+static bool devagent_key_in_set(const char *key, const char *const *keys,
+                               size_t count)
+{
+    for (size_t i = 0; i < count; i++)
+        if (strcmp(key, keys[i]) == 0)
+            return true;
+    return false;
+}
+
+/* fleet.ledger.add's gauge/counter fields. Gauges can be signed; counters
+ * include measured zero. `value` and `limit` are scoped to this exact leaf
+ * because those names are common enough to mean something else elsewhere. */
+static bool devagent_ledger_add_int(const char *path, const char *key,
+                                    const struct json_value *value,
+                                    bool *type_ok)
+{
+    static const char *const keys[] = {
+        "tokens_in", "tokens_out", "tokens_cached", "tokens_reasoning",
+        "wall_ms", "turns", "tool_uses", "cost_micro_usd", "value", "count",
+        "bytes", "limit",
+    };
+    if (!path || strcmp(path, "fleet.ledger.add") != 0 ||
+        !devagent_key_in_set(key, keys, sizeof keys / sizeof keys[0]))
+        return false;
+    *type_ok = value->type == JSON_INT &&
+              (strcmp(key, "value") == 0 || json_get_int(value) >= 0);
+    return true;
+}
+
+/* dev.agent.queue's post attempt number: `--attempt=2` types as an integer,
+ * so the default string branch would make the leaf uninvokable from a
+ * shell while raw JSON worked. The handler owns the default (1) and the
+ * requeue ceiling (3); the transport only admits the positive integer
+ * shape, up to a generous round bound shared with the next arm. */
+static bool devagent_bounded_positive_int(const char *key,
+                                          const struct json_value *value,
+                                          bool *type_ok)
+{
+    static const char *const keys[] = {
+        "attempt", "max_age_days", "ceiling_lines",
+    };
+    if (!devagent_key_in_set(key, keys, sizeof keys / sizeof keys[0]))
+        return false;
+    *type_ok = value->type == JSON_INT && json_get_int(value) >= 1 &&
+              json_get_int(value) <= 1000000;
+    return true;
+}
+
+/* dev.agent.ceiling's declared scope: the paths the change was allowed to
+ * touch. Same bounded array-of-paths shape as `files`. */
+static bool devagent_requested_paths(const char *key,
+                                     const struct json_value *value,
+                                     bool *type_ok)
+{
+    if (strcmp(key, "requested") != 0)
+        return false;
+    *type_ok = value->type == JSON_ARR &&
+              value->num_children <= ZCL_COMMAND_INPUT_FILES_MAX_ITEMS;
+    for (size_t j = 0; *type_ok && j < value->num_children; j++) {
+        const struct json_value *item = &value->children[j];
+        const char *text = json_get_str(item);
+        *type_ok = item->type == JSON_STR && text && text[0] &&
+                  strlen(text) <= ZCL_COMMAND_INPUT_FILES_PATH_MAX;
+    }
+    return true;
+}
+
+/* dev.agent.outcomes' ledger path and model filter are nonempty bounded
+ * strings. The handler owns existence and content rules (BAD_INPUT /
+ * LEDGER_NOT_FOUND / LEDGER_UNREADABLE); the transport only admits the
+ * string shape so the documented `--ledger=<path>` CLI form reaches it. */
+static bool devagent_ledger_or_model_str(const char *key,
+                                        const struct json_value *value,
+                                        bool *type_ok)
+{
+    if (strcmp(key, "ledger") != 0 && strcmp(key, "model") != 0)
+        return false;
+    const char *text = json_get_str(value);
+    *type_ok = value->type == JSON_STR && text && text[0] &&
+              strlen(text) <= zcl_command_registry_input_str_max(key);
+    return true;
+}
+
+/* dev.fleet.start's packet size ceiling. `--budget_bytes=2048` types as an
+ * integer, so the default string branch would make the leaf uninvokable
+ * from a shell while raw JSON worked. The transport admits only the
+ * integer SHAPE and deliberately a wider range than the leaf accepts: the
+ * handler owns the 1024..65536 contract and refuses anything else by name
+ * (budget_out_of_range), so an operator who asks for 64 reads which rule
+ * fired instead of a generic type error. */
+static bool devagent_budget_bytes(const char *key,
+                                  const struct json_value *value,
+                                  bool *type_ok)
+{
+    if (strcmp(key, "budget_bytes") != 0)
+        return false;
+    *type_ok = value->type == JSON_INT && json_get_int(value) >= 0 &&
+              json_get_int(value) <= 1000000000;
+    return true;
+}
+
+/* fleet.experiment.predict|result measured and predicted quantities.
+ * `--tokens=1200` types as an integer, so the default string branch would
+ * make the leaves uninvokable from a shell. The handler owns presence
+ * versus absence; the transport only admits a non-negative integer shape.
+ * These names are unique to those leaves today. */
+static bool devagent_experiment_quantity(const char *key,
+                                        const struct json_value *value,
+                                        bool *type_ok)
+{
+    static const char *const keys[] = {
+        "tokens", "wall_s", "in", "out", "cache", "reasoning", "tool_uses",
+        "turns", "added", "removed", "defects",
+    };
+    if (!devagent_key_in_set(key, keys, sizeof keys / sizeof keys[0]))
+        return false;
+    *type_ok = value->type == JSON_INT && json_get_int(value) >= 0;
+    return true;
+}
+
+/* Leaf-scoped boolean flags: a data row per (path, key), not a branch per
+ * leaf. A bare flag (no `=value`) hands the CLI's value over as a JSON bool
+ * with nothing after it, so the default string branch would make the leaf
+ * uninvokable from a shell. Scoped by path rather than folded into
+ * command_registry.c's shared bool disjunction, whose keys are NOT
+ * leaf-scoped: the same key name on another leaf might mean something
+ * else. Add a row here, not a new arm, for the next one of these. */
+static bool devagent_scoped_bool(const char *path, const char *key,
+                                 const struct json_value *value,
+                                 bool *type_ok)
+{
+    static const struct {
+        const char *path;
+        const char *key;
+    } rows[] = {
+        /* fleet.triggers.check's `--dry-run`: performs the same actions as
+         * a real run but never advances a source's cursor. */
+        { "fleet.triggers.check", "dry-run" },
+    };
+    if (!path)
+        return false;
+    for (size_t i = 0; i < sizeof rows / sizeof rows[0]; i++) {
+        if (strcmp(path, rows[i].path) == 0 && strcmp(key, rows[i].key) == 0) {
+            *type_ok = value->type == JSON_BOOL;
+            return true;
+        }
+    }
+    return false;
+}
+
 bool zcl_command_registry_devagent_input_ok(const char *path, const char *key,
                                             const struct json_value *value,
                                             bool *type_ok)
 {
-    if (path && strcmp(path, "fleet.ledger.add") == 0 &&
-        (strcmp(key, "tokens_in") == 0 || strcmp(key, "tokens_out") == 0 ||
-         strcmp(key, "tokens_cached") == 0 ||
-         strcmp(key, "tokens_reasoning") == 0 || strcmp(key, "wall_ms") == 0 ||
-         strcmp(key, "turns") == 0 || strcmp(key, "tool_uses") == 0 ||
-         strcmp(key, "cost_micro_usd") == 0 || strcmp(key, "value") == 0 ||
-         strcmp(key, "count") == 0 || strcmp(key, "bytes") == 0 ||
-         strcmp(key, "limit") == 0)) {
-        /* Ledger gauges can be signed; counters include measured zero.
-         * Scope common names such as value and limit to this exact leaf. */
-        *type_ok = value->type == JSON_INT &&
-                   (strcmp(key, "value") == 0 || json_get_int(value) >= 0);
+    if (devagent_ledger_add_int(path, key, value, type_ok))
         return true;
-    }
-    if (strcmp(key, "attempt") == 0) {
-        /* dev.agent.queue's post attempt number: `--attempt=2` types as an
-         * integer, so the default string branch would make the leaf
-         * uninvokable from a shell while raw JSON worked. The handler owns
-         * the default (1) and the requeue ceiling (3); the transport only
-         * admits the positive integer shape. */
-        *type_ok = value->type == JSON_INT && json_get_int(value) >= 1 &&
-                   json_get_int(value) <= 1000000;
+    if (devagent_bounded_positive_int(key, value, type_ok))
         return true;
-    }
-    if (strcmp(key, "max_age_days") == 0 || strcmp(key, "ceiling_lines") == 0) {
-        /* dev.agent.triage staleness window and dev.agent.ceiling per-file
-         * line ceiling. Both are typed as integers by the CLI
-         * (`--max_age_days=14`), so the default string branch would make
-         * the leaves uninvokable from a shell while raw JSON worked. Each
-         * handler owns its own default; the transport only admits the
-         * positive integer shape. */
-        *type_ok = value->type == JSON_INT && json_get_int(value) >= 1 &&
-                   json_get_int(value) <= 1000000;
+    if (devagent_requested_paths(key, value, type_ok))
         return true;
-    }
-    if (strcmp(key, "requested") == 0) {
-        /* dev.agent.ceiling's declared scope: the paths the change was
-         * allowed to touch. Same bounded array-of-paths shape as `files`. */
-        *type_ok = value->type == JSON_ARR &&
-                   value->num_children <= ZCL_COMMAND_INPUT_FILES_MAX_ITEMS;
-        for (size_t j = 0; *type_ok && j < value->num_children; j++) {
-            const struct json_value *item = &value->children[j];
-            const char *text = json_get_str(item);
-            *type_ok = item->type == JSON_STR && text && text[0] &&
-                       strlen(text) <= ZCL_COMMAND_INPUT_FILES_PATH_MAX;
-        }
+    if (devagent_ledger_or_model_str(key, value, type_ok))
         return true;
-    }
-    if (strcmp(key, "ledger") == 0 || strcmp(key, "model") == 0) {
-        /* dev.agent.outcomes' ledger path and model filter are nonempty
-         * bounded strings. The handler owns existence and content rules
-         * (BAD_INPUT / LEDGER_NOT_FOUND / LEDGER_UNREADABLE); the transport
-         * only admits the string shape so the documented `--ledger=<path>`
-         * CLI form reaches it. */
-        const char *text = json_get_str(value);
-        *type_ok = value->type == JSON_STR && text && text[0] &&
-                   strlen(text) <= zcl_command_registry_input_str_max(key);
+    if (devagent_budget_bytes(key, value, type_ok))
         return true;
-    }
-    if (strcmp(key, "budget_bytes") == 0) {
-        /* dev.fleet.start's packet size ceiling. `--budget_bytes=2048` types
-         * as an integer, so the default string branch would make the leaf
-         * uninvokable from a shell while raw JSON worked. The transport
-         * admits only the integer SHAPE and deliberately a wider range than
-         * the leaf accepts: the handler owns the 1024..65536 contract and
-         * refuses anything else by name (budget_out_of_range), so an
-         * operator who asks for 64 reads which rule fired instead of a
-         * generic type error. */
-        *type_ok = value->type == JSON_INT && json_get_int(value) >= 0 &&
-                   json_get_int(value) <= 1000000000;
+    if (devagent_experiment_quantity(key, value, type_ok))
         return true;
-    }
-    if (strcmp(key, "tokens") == 0 || strcmp(key, "wall_s") == 0 ||
-        strcmp(key, "in") == 0 || strcmp(key, "out") == 0 ||
-        strcmp(key, "cache") == 0 || strcmp(key, "reasoning") == 0 ||
-        strcmp(key, "tool_uses") == 0 || strcmp(key, "turns") == 0 ||
-        strcmp(key, "added") == 0 || strcmp(key, "removed") == 0 ||
-        strcmp(key, "defects") == 0) {
-        /* fleet.experiment.predict|result measured and predicted quantities.
-         * `--tokens=1200` types as an integer, so the default string branch
-         * would make the leaves uninvokable from a shell. The handler owns
-         * presence versus absence; the transport only admits a non-negative
-         * integer shape. These names are unique to those leaves today. */
-        *type_ok = value->type == JSON_INT && json_get_int(value) >= 0;
+    if (devagent_scoped_bool(path, key, value, type_ok))
         return true;
-    }
     return false;
 }
 

@@ -3219,7 +3219,9 @@ static bool nc_is_prose_leaf(const char *path)
              * object, so the two can never disagree. */
             strcmp(path, "dev.fleet.agents") == 0 ||
             strcmp(path, "core.status.brief") == 0 ||
-            strcmp(path, "fleet.objectives") == 0);
+            strcmp(path, "fleet.objectives") == 0 ||
+            strcmp(path, "fleet.triggers.list") == 0 ||
+            strcmp(path, "fleet.triggers.check") == 0);
 }
 
 /* ── CLI UX contract: ONE-LINE status brief ──────────────────────────

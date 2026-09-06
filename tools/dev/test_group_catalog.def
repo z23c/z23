@@ -606,6 +606,13 @@ ZCL_TEST_GROUP(fleet_airship_rules)
  * unpaired row can never plant a prefix of itself. */
 ZCL_TEST_GROUP(fleet_ledger)
 ZCL_TEST_GROUP(fleet_roles)
+/* z23's own reactions to its local event sources (engine/composition/
+ * triggers.def): a run-once evaluator over landing outcomes, this box's
+ * board file, and the experiment TSV. The group exists for the property a
+ * daemon-free "check once" design rests on — the byte cursor survives two
+ * runs without double-firing, a dry run never advances it, a shrunk source
+ * restarts from zero, and a field a row does not carry never matches. */
+ZCL_TEST_GROUP(fleet_triggers)
 ZCL_TEST_GROUP(confine)
 ZCL_TEST_GROUP(seed_tape)
 ZCL_TEST_GROUP(postmortem)

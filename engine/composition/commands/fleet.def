@@ -193,6 +193,52 @@ ZCL_COMMAND_READY_COMMAND(
     ZCL_COMMAND_TRAIT_NONE,
     zcl_native_handle_fleet_experiment_result)
 
+ZCL_COMMAND_BRANCH("fleet.triggers", "fleet",
+                   "The closed registry of local-event reactions",
+                   ZCL_COMMAND_LAYER_OPS)
+
+ZCL_COMMAND_READY_READ(
+    "fleet.triggers.list", "fleet.triggers", "",
+    "Print the closed trigger registry",
+    "Prints every declared trigger (engine/composition/triggers.def): its "
+    "id, the source it reads, the field/op/value it matches, the action it "
+    "performs, and why it exists. Reads only the compiled-in registry; it "
+    "touches no file and contacts no peer.", 16384,
+    "fleet,triggers,registry,list",
+    "zcl.command.empty_input.v1", "zcl.fleet_triggers_list.v1", "", "",
+    "z23-dev fleet triggers list",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_LATENCY_INSTANT,
+    ZCL_COMMAND_COST_LOW, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_DEV_STATE_READ, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_fleet_triggers_list)
+
+ZCL_COMMAND_READY_COMMAND(
+    "fleet.triggers.check", "fleet.triggers", "",
+    "Run every trigger once against whatever is new in its source",
+    "Reads each source (landing outcomes, this box's board file, the "
+    "experiment TSV) from its own saved byte cursor, evaluates every "
+    "registered trigger against every row that is new since last time, "
+    "performs the matched action (print or append to "
+    "triggers/fired.jsonl), and advances the cursor past what it read. "
+    "since, in seconds, skips evaluating a row whose own timestamp is "
+    "older than that; dry-run performs the same actions but never moves "
+    "the cursor, so a re-run sees the same rows again. It contacts no "
+    "peer and starts no daemon: one call reads what is new and returns.",
+    0,
+    "fleet,triggers,check,run,evaluate",
+    "zcl.fleet_triggers_check.input.v1", "zcl.fleet_triggers_check.v1",
+    "since,dry-run", "",
+    "z23-dev fleet triggers check --since=3600",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_DEV_MUTATION, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_DEV_STATE_READ | ZCL_COMMAND_CAP_DEV_STATE_WRITE,
+    ZCL_COMMAND_TRAIT_NONE,
+    zcl_native_handle_fleet_triggers_check)
+
 ZCL_COMMAND_READY_READ(
     "fleet.experiment.stats", "fleet.experiment", "",
     "Per task_class and model: counts, LAND rate, medians, predicted-vs-actual",

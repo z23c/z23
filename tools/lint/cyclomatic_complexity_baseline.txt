@@ -2194,7 +2194,6 @@ engine/modules/kernel/src/command_registry.c:zcl_command_registry_replace_batch:
 engine/modules/kernel/src/command_registry.c:zcl_command_registry_resolve_words:23
 engine/modules/kernel/src/command_registry.c:zcl_command_registry_search_json:40
 engine/modules/kernel/src/command_registry.c:zcl_command_registry_validate:79
-engine/modules/kernel/src/command_registry_devagent_input.c:zcl_command_registry_devagent_input_ok:51
 engine/modules/kernel/src/service_binding.c:zcl_service_binding_catalog_validate_v1:16
 engine/modules/kernel/src/service_binding.c:zcl_service_binding_validate_v1:21
 engine/modules/kernel/src/service_binding.c:zcl_service_lifecycle_next_v1:23

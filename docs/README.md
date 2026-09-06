@@ -151,6 +151,8 @@ from a hash, signature, test, or reproduction receipt.
 ## Operate and recover a node
 
 - [`RUNBOOK.md`](RUNBOOK.md) — symptom-driven diagnostics and operations.
+- [`FLEET_TRIGGERS.md`](FLEET_TRIGGERS.md) — the closed registry of
+  reactions to local events (`z23-dev fleet triggers`).
 - [`TENACITY.md`](TENACITY.md) — copy-first recovery invariants.
 - [`work/fast-path.md`](work/fast-path.md) — diagnose and reproduce on a datadir
   copy.
