@@ -924,6 +924,65 @@ int t_no_uncited_victory(void)
  *     block. Runs on the real worktree (it reads git ls-files). */
 #define ROOT_STRAY_SCRIPT_REL  "tools/lint/check_no_stray_root_files.sh"
 
+/* Evidence for a failed run_gate_script(ROOT_STRAY_SCRIPT_REL, ...) call:
+ * three landing proofs failed baseline_rc == 0 for this gate, and by the
+ * time anyone looked the gate was clean again — the stray was transient and
+ * nobody could name the writer. run_gate_script_arg() already redirects the
+ * gate's stdout+stderr into lint_gate_out_path(); this just reads that same
+ * file back (bounded, so a runaway gate can't flood the test log) and lists
+ * the root directory *right now* so a still-present stray gets named even
+ * if the gate's own text is stale by the time this prints. Read-only: no
+ * new fork/exec beyond what run_gate_script* already did. */
+#define ROOT_STRAY_CAPTURE_MAX (8 * 1024)
+
+static void print_root_stray_gate_capture(void)
+{
+    char out_path[PATH_MAX];
+    if (lint_gate_out_path(out_path, sizeof(out_path)) != 0) {
+        fprintf(stderr,
+                "[lint-gate] (capture unavailable: could not resolve gate "
+                "output path)\n");
+        return;
+    }
+    char *buf = NULL;
+    if (read_entire_file(out_path, &buf) != 0 || !buf) {
+        fprintf(stderr, "[lint-gate] (capture unavailable: could not read %s)\n",
+                out_path);
+        free(buf);
+        return;
+    }
+    size_t len = strlen(buf);
+    if (len > ROOT_STRAY_CAPTURE_MAX) {
+        fprintf(stderr, "%.*s\n[lint-gate] (output truncated at %d bytes)\n",
+                ROOT_STRAY_CAPTURE_MAX, buf, ROOT_STRAY_CAPTURE_MAX);
+    } else {
+        fprintf(stderr, "%s", buf);
+        if (len == 0 || buf[len - 1] != '\n')
+            fprintf(stderr, "\n");
+    }
+    free(buf);
+}
+
+static void print_root_listing_now(void)
+{
+    struct dirent **names = NULL;
+    int nd = scandir(".", &names, NULL, alphasort);
+    if (nd < 0) {
+        fprintf(stderr,
+                "[lint-gate] root listing at failure: (scandir failed: %s)\n",
+                strerror(errno));
+        return;
+    }
+    fprintf(stderr, "[lint-gate] root listing at failure:\n");
+    for (int i = 0; i < nd; i++) {
+        if (strcmp(names[i]->d_name, ".") != 0 &&
+            strcmp(names[i]->d_name, "..") != 0)
+            fprintf(stderr, "  %s\n", names[i]->d_name);
+        free(names[i]);
+    }
+    free(names);
+}
+
 int t_no_stray_root_files(void)
 {
     int failures = 0;
@@ -932,9 +991,23 @@ int t_no_stray_root_files(void)
     char *doc_buf = NULL;
 
     int baseline_rc = run_gate_script(ROOT_STRAY_SCRIPT_REL, NULL);
+    if (baseline_rc != 0) {
+        fprintf(stderr,
+                "[lint-gate] check-no-stray-root-files baseline rc=%d; gate "
+                "output follows\n", baseline_rc);
+        print_root_stray_gate_capture();
+        print_root_listing_now();
+    }
     int trip_rc = run_gate_script_with_env(
         ROOT_STRAY_SCRIPT_REL, "ZCL_ROOT_STRAY_EXTRA_FOR_TEST", "Makefile");
     int recover_rc = run_gate_script(ROOT_STRAY_SCRIPT_REL, NULL);
+    if (recover_rc != 0) {
+        fprintf(stderr,
+                "[lint-gate] check-no-stray-root-files recover rc=%d; gate "
+                "output follows\n", recover_rc);
+        print_root_stray_gate_capture();
+        print_root_listing_now();
+    }
 
     int makefile_wired = 0;
     if (repo_path(path, sizeof(path), "Makefile") == 0 &&
