@@ -6183,6 +6183,459 @@ static int check_privileged_transition_receipt_selftest(void)
     return st_ok(bad, "check_privileged_transition_receipt selftest: OK\n");
 }
 
+enum { CBF_MAX = 256, CBF_PATH = 256 };
+static const char k_cbf_def[] = "engine/jobs/src/stage_repair_coin_backfill.c";
+static const char k_cbf_allow[] =
+    "engine/reducer/jobs/src/stage_repair_reducer_frontier_coin.c";
+static const char *const k_cbf_roots[] = {
+    "core", "engine", "contexts", "cognition", "platform", "tools"
+};
+struct cbf_ent { char path[CBF_PATH]; int count; };
+struct cbf_acc { const char *sym; struct cbf_ent *ent; int n; };
+
+static void cbf_sym(char *buf, size_t cap)
+{
+    (void)snprintf(buf, cap, "%s%s", "stage_repair_coin_backfill_try", "(");
+}
+
+static int cbf_cmp(const void *a, const void *b)
+{
+    return strcmp(((const struct cbf_ent *)a)->path,
+                  ((const struct cbf_ent *)b)->path);
+}
+
+static int cbf_count(const char *path, const char *sym, int *count)
+{
+    FILE *f = fopen(path, "r");
+    if (!f)
+        return die("z23-lint: cannot open %s\n", path);
+    char *line = NULL;
+    size_t cap = 0, slen = strlen(sym);
+    *count = 0;
+    while (getline(&line, &cap, f) >= 0) {
+        for (char *p = line; slen && (p = strstr(p, sym)) != NULL; p += slen)
+            (*count)++;
+    }
+    return fin(f, line, path, 0);
+}
+
+static int cbf_on_file(const char *path, void *ctx)
+{
+    struct cbf_acc *a = ctx;
+    if (strcmp(path, k_cbf_def) == 0 || lint_path_is_excluded(path))
+        return 0;
+    int n = 0, rc = cbf_count(path, a->sym, &n);
+    if (rc)
+        return rc;
+    if (n <= 0)
+        return 0;
+    size_t pl = strlen(path);
+    if (a->n >= CBF_MAX || pl >= CBF_PATH)
+        return die("z23-lint: derived buffer overflow\n", "");
+    memcpy(a->ent[a->n].path, path, pl + 1);
+    a->ent[a->n].count = n;
+    a->n++;
+    return 0;
+}
+
+static int cbf_has_sym(const char *path, const char *sym)
+{
+    FILE *f = fopen(path, "r");
+    if (!f)
+        return 0;
+    char *line = NULL;
+    size_t cap = 0;
+    int found = 0;
+    while (!found && getline(&line, &cap, f) >= 0)
+        found = strstr(line, sym) != NULL;
+    (void)fin(f, line, path, 0);
+    return found;
+}
+
+static int cbf_scan(FILE *out)
+{
+    char sym[64];
+    cbf_sym(sym, sizeof sym);
+    if (!cbf_has_sym(k_cbf_def, sym)) {
+        if (fprintf(out, "check_no_new_coin_backfill_caller: FATAL — '%s' no longer found in %s.\n",
+                    sym, k_cbf_def) < 0
+            || fputs("  - If the coin-backfill ladder was deleted, remove this gate and its Makefile wiring.\n",
+                     out) < 0
+            || fputs("  - If it moved or was renamed, update DEF_FILE/SYMBOL so the ratchet keeps firing.\n",
+                     out) < 0)
+            return die("z23-lint: write failed\n", "");
+        return 2;
+    }
+    struct cbf_ent ent[CBF_MAX];
+    struct cbf_acc a = { .sym = sym, .ent = ent, .n = 0 };
+    int rc = 0;
+    for (size_t i = 0; rc == 0 && i < sizeof k_cbf_roots / sizeof k_cbf_roots[0]; i++)
+        rc = walk_src(k_cbf_roots[i], 0, cbf_on_file, &a);
+    if (rc)
+        return rc;
+    qsort(ent, (size_t)a.n, sizeof ent[0], cbf_cmp);
+    int allowed_count = 0, nbad = 0, bad_i[CBF_MAX];
+    for (int i = 0; i < a.n; i++) {
+        if (strcmp(ent[i].path, k_cbf_allow) == 0)
+            allowed_count += ent[i].count;
+        else
+            bad_i[nbad++] = i;
+    }
+    if (nbad == 0 && allowed_count == 1)
+        return fputs("check_no_new_coin_backfill_caller: clean — one allowed production caller\n",
+                     out) < 0 ? die("z23-lint: write failed\n", "") : 0;
+    if (fputc('\n', out) == EOF)
+        return die("z23-lint: write failed\n", "");
+    if (allowed_count != 1
+        && fprintf(out, "check_no_new_coin_backfill_caller: expected exactly 1 call in %s, found %d\n",
+                   k_cbf_allow, allowed_count) < 0)
+        return die("z23-lint: write failed\n", "");
+    if (nbad) {
+        if (fprintf(out, "check_no_new_coin_backfill_caller: NEW production caller(s) of %s:\n",
+                    sym) < 0)
+            return die("z23-lint: write failed\n", "");
+        for (int i = 0; i < nbad; i++) {
+            int j = bad_i[i];
+            if (fprintf(out, "  %s:%d\n", ent[j].path, ent[j].count) < 0)
+                return die("z23-lint: write failed\n", "");
+        }
+    }
+    if (fputc('\n', out) == EOF
+        || fputs("Do NOT add another coin-backfill repair entry caller. Route reducer-frontier\n",
+                 out) < 0
+        || fputs("repair evidence through the existing dispatcher, or delete/shrink this ladder\n",
+                 out) < 0
+        || fputs("after the self-verified UTXO anchor rebuild cure (-refold-from-anchor).\n",
+                 out) < 0)
+        return die("z23-lint: write failed\n", "");
+    return 1;
+}
+
+static int cbf_with_root(const char *root, FILE *out)
+{
+    char cwd[4096];
+    if (!getcwd(cwd, sizeof cwd))
+        return die("z23-lint: getcwd failed\n", "");
+    if (chdir(root) != 0)
+        return die("z23-lint: cannot scan %s\n", root);
+    int rc = cbf_scan(out);
+    if (chdir(cwd) != 0 && rc == 0)
+        rc = die("z23-lint: getcwd failed\n", "");
+    return rc;
+}
+
+static const char *cbf_root(int argc, char **argv)
+{
+    const char *env = getenv("ZCL_COIN_BACKFILL_ROOT_FOR_TEST");
+    if (env && env[0])
+        return env;
+    if (argc >= 1 && argv[0] && argv[0][0])
+        return argv[0];
+    return ".";
+}
+
+static int check_no_new_coin_backfill_caller_run(int argc, char **argv)
+{
+    return cbf_with_root(cbf_root(argc, argv), stdout);
+}
+
+static int cbf_st_run(FILE *cap, int *rc)
+{
+    if (psp_st_reset(cap))
+        return 1;
+    fflush(stdout);
+    int saved = dup(STDOUT_FILENO);
+    if (saved < 0)
+        return 1;
+    if (dup2(fileno(cap), STDOUT_FILENO) < 0) {
+        close(saved);
+        return 1;
+    }
+    *rc = check_no_new_coin_backfill_caller_run(0, NULL);
+    fflush(stdout);
+    (void)dup2(saved, STDOUT_FILENO);
+    close(saved);
+    return 0;
+}
+
+static int check_no_new_coin_backfill_caller_selftest(void)
+{
+    char tmpl[] = "/tmp/z23-lint-cbf-XXXXXX";
+    char *root = mkdtemp(tmpl);
+    if (!root)
+        return die("z23-lint: mkdir failed: %s\n", "/tmp");
+    FILE *cap = tmpfile();
+    if (!cap) {
+        (void)rap_rm_rf(root);
+        return die("z23-lint: tmpfile failed\n", "");
+    }
+    const char *old_root = getenv("ZCL_COIN_BACKFILL_ROOT_FOR_TEST");
+    const char *old_prod = getenv("ZCL_LINT_PRODUCTION_SCAN");
+    char oldr[4096], oldp[64];
+    int had_root = 0, had_prod = 0, bad = 0, rc = 0;
+    if (old_root) {
+        if (ovf(snprintf(oldr, sizeof oldr, "%s", old_root), sizeof oldr))
+            bad = 1;
+        else
+            had_root = 1;
+    }
+    if (old_prod) {
+        if (ovf(snprintf(oldp, sizeof oldp, "%s", old_prod), sizeof oldp))
+            bad = 1;
+        else
+            had_prod = 1;
+    }
+    char sym[64], defp[4096], allp[4096], probep[4096], fx[4096], body[256], ob[8192];
+    cbf_sym(sym, sizeof sym);
+    if (ovf(snprintf(defp, sizeof defp, "%s/%s", root, k_cbf_def), sizeof defp)
+        || ovf(snprintf(allp, sizeof allp, "%s/%s", root, k_cbf_allow), sizeof allp)
+        || ovf(snprintf(probep, sizeof probep, "%s/core/probe.c", root), sizeof probep)
+        || ovf(snprintf(fx, sizeof fx, "%s/engine/_xfixture.c", root), sizeof fx)
+        || ovf(snprintf(body, sizeof body, "void %svoid) {}\n", sym), sizeof body)
+        || csr_write(defp, body)
+        || ovf(snprintf(body, sizeof body, "void f(void) { %s); }\n", sym), sizeof body)
+        || csr_write(allp, body)
+        || setenv("ZCL_COIN_BACKFILL_ROOT_FOR_TEST", root, 1) != 0)
+        bad = 1;
+
+    if (!bad && cbf_st_run(cap, &rc))
+        bad = 1;
+    if (csr_slurp(cap, ob, sizeof ob))
+        bad = 1;
+    bad |= rc != 0
+        || strstr(ob, "check_no_new_coin_backfill_caller: clean — one allowed production caller") == NULL;
+
+    if (ovf(snprintf(body, sizeof body, "void f(void) { %s); %s); }\n", sym, sym),
+            sizeof body)
+        || csr_write(allp, body))
+        bad = 1;
+    if (!bad && cbf_st_run(cap, &rc))
+        bad = 1;
+    if (csr_slurp(cap, ob, sizeof ob))
+        bad = 1;
+    bad |= rc != 1
+        || strstr(ob, "expected exactly 1 call in") == NULL
+        || strstr(ob, "found 2") == NULL;
+
+    if (ovf(snprintf(body, sizeof body, "void f(void) { %s); }\n", sym), sizeof body)
+        || csr_write(allp, body)
+        || ovf(snprintf(body, sizeof body, "void g(void) { %s); }\n", sym), sizeof body)
+        || csr_write(probep, body))
+        bad = 1;
+    if (!bad && cbf_st_run(cap, &rc))
+        bad = 1;
+    if (csr_slurp(cap, ob, sizeof ob))
+        bad = 1;
+    bad |= rc != 1
+        || strstr(ob, "NEW production caller(s)") == NULL
+        || strstr(ob, "core/probe.c:1") == NULL;
+    (void)unlink(probep);
+
+    (void)unlink(defp);
+    if (!bad && cbf_st_run(cap, &rc))
+        bad = 1;
+    if (csr_slurp(cap, ob, sizeof ob))
+        bad = 1;
+    bad |= rc != 2 || strstr(ob, "FATAL") == NULL;
+
+    if (ovf(snprintf(body, sizeof body, "void %svoid) {}\n", sym), sizeof body)
+        || csr_write(defp, body)
+        || ovf(snprintf(body, sizeof body, "void x(void) { %s); }\n", sym), sizeof body)
+        || csr_write(fx, body)
+        || setenv("ZCL_LINT_PRODUCTION_SCAN", "1", 1) != 0)
+        bad = 1;
+    if (!bad && cbf_st_run(cap, &rc))
+        bad = 1;
+    if (csr_slurp(cap, ob, sizeof ob))
+        bad = 1;
+    bad |= rc != 0
+        || strstr(ob, "check_no_new_coin_backfill_caller: clean — one allowed production caller") == NULL;
+    (void)unsetenv("ZCL_LINT_PRODUCTION_SCAN");
+    if (!bad && cbf_st_run(cap, &rc))
+        bad = 1;
+    if (csr_slurp(cap, ob, sizeof ob))
+        bad = 1;
+    bad |= rc != 1
+        || strstr(ob, "NEW production caller(s)") == NULL
+        || strstr(ob, "engine/_xfixture.c:1") == NULL;
+
+    fclose(cap);
+    if (had_root)
+        (void)setenv("ZCL_COIN_BACKFILL_ROOT_FOR_TEST", oldr, 1);
+    else
+        (void)unsetenv("ZCL_COIN_BACKFILL_ROOT_FOR_TEST");
+    if (had_prod)
+        (void)setenv("ZCL_LINT_PRODUCTION_SCAN", oldp, 1);
+    else
+        (void)unsetenv("ZCL_LINT_PRODUCTION_SCAN");
+    (void)rap_rm_rf(root);
+    if (bad)
+        fputs("FAIL: check_no_new_coin_backfill_caller selftest\n", stderr);
+    return st_ok(bad, "check_no_new_coin_backfill_caller selftest: OK\n");
+}
+
+static int mor_comment(const char *line)
+{
+    while (*line && isspace((unsigned char)*line))
+        line++;
+    return (line[0] == '/' && line[1] == '*')
+        || line[0] == '*'
+        || (line[0] == '/' && line[1] == '/');
+}
+
+struct mor_acc { regex_t *call; FILE *lines; int scanned; };
+
+static int mor_on_file(const char *path, void *ctx)
+{
+    struct mor_acc *a = ctx;
+    size_t n = strlen(path);
+    if (n < 2 || path[n - 2] != '.'
+        || (path[n - 1] != 'c' && path[n - 1] != 'h'))
+        return 0;
+    FILE *f = fopen(path, "r");
+    if (!f)
+        return die("z23-lint: cannot open %s\n", path);
+    char *line = NULL;
+    size_t cap = 0;
+    ssize_t len;
+    int lineno = 0, rc = 0;
+    while ((len = getline(&line, &cap, f)) >= 0) {
+        lineno++;
+        if (regexec(a->call, line, 0, NULL, 0) != 0)
+            continue;
+        if (len > 0 && line[len - 1] == '\n')
+            line[len - 1] = '\0';
+        if (mor_comment(line))
+            continue;
+        a->scanned++;
+        if (fprintf(a->lines, "%s:%d:%s\n", path, lineno, line) < 0) {
+            rc = die("z23-lint: write failed\n", "");
+            break;
+        }
+    }
+    return fin(f, line, path, rc);
+}
+
+static int check_mind_owns_rebuild_run(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+    regex_t call, allow;
+    int cr = compile_pat(&call, REG_EXTENDED, "codeindex",
+                         "_rebuild[[:space:]]*\\(", "", "");
+    if (cr)
+        return cr;
+    cr = compile_pat(&allow, REG_EXTENDED,
+                     "^(cognition/modules/codeindex/(src|include)/",
+                     "|tools/mind/|tests/harness/src/test_codeindex)", "", "");
+    if (cr) {
+        regfree(&call);
+        return cr;
+    }
+    FILE *hits = tmpfile(), *viol = tmpfile();
+    if (!hits || !viol) {
+        if (hits) fclose(hits);
+        if (viol) fclose(viol);
+        drop2(&call, &allow);
+        return die("z23-lint: tmpfile failed\n", "");
+    }
+    struct mor_acc a = { .call = &call, .lines = hits, .scanned = 0 };
+    int rc = each_zpath(k_ls_all, mor_on_file, &a);
+    if (rc == 0)
+        rc = gate_require_scanned(a.scanned, 4, "check-mind-owns-rebuild",
+                                  "codeindex_rebuild's own module should always appear; check the pathspec.");
+    int nviol = 0;
+    if (rc == 0 && fseek(hits, 0, SEEK_SET) != 0)
+        rc = die("z23-lint: fseek failed\n", "");
+    char *line = NULL;
+    size_t cap = 0;
+    ssize_t n;
+    while (rc == 0 && (n = getline(&line, &cap, hits)) >= 0) {
+        if (n > 0 && line[n - 1] == '\n')
+            line[n - 1] = '\0';
+        if (!line[0])
+            continue;
+        char *colon = strchr(line, ':');
+        char save = 0;
+        if (colon) {
+            save = *colon;
+            *colon = '\0';
+        }
+        int ok = colon && regexec(&allow, line, 0, NULL, 0) == 0;
+        if (colon)
+            *colon = save;
+        if (ok)
+            continue;
+        nviol++;
+        if (fprintf(viol, "%s\n", line) < 0)
+            rc = die("z23-lint: write failed\n", "");
+    }
+    free(line);
+    if (rc == 0 && ferror(hits))
+        rc = die("z23-lint: read failed\n", "");
+    if (rc == 0 && nviol) {
+        if (fputs("check-mind-owns-rebuild: FAIL — codeindex_rebuild called outside the mind and the codeindex module\n",
+                  stderr) < 0)
+            rc = die("z23-lint: write failed\n", "");
+        else if (fseek(viol, 0, SEEK_SET) != 0)
+            rc = die("z23-lint: fseek failed\n", "");
+        else
+            rc = replay(viol);
+        if (rc == 0
+            && (fputs("  A query that rebuilds is a second writer racing the node resident.\n",
+                      stderr) < 0
+                || fputs("  Read the published generation with codeindex_open_readonly() and\n",
+                         stderr) < 0
+                || fputs("  refuse a stale one; the mind rebuilds. See docs/MIND.md.\n",
+                         stderr) < 0))
+            rc = die("z23-lint: write failed\n", "");
+        if (rc == 0)
+            rc = 1;
+    } else if (rc == 0) {
+        if (printf("check-mind-owns-rebuild: PASS — %d call site(s), all inside the codeindex module, tools/mind/, or that module's own tests\n",
+                   a.scanned) < 0)
+            rc = die("z23-lint: write failed\n", "");
+    }
+    fclose(hits);
+    fclose(viol);
+    drop2(&call, &allow);
+    return rc;
+}
+
+static int check_mind_owns_rebuild_selftest(void)
+{
+    regex_t allow, call;
+    int cr = compile_pat(&allow, REG_EXTENDED,
+                         "^(cognition/modules/codeindex/(src|include)/",
+                         "|tools/mind/|tests/harness/src/test_codeindex)", "", "");
+    if (cr)
+        return cr;
+    cr = compile_pat(&call, REG_EXTENDED, "codeindex",
+                     "_rebuild[[:space:]]*\\(", "", "");
+    if (cr) {
+        regfree(&allow);
+        return cr;
+    }
+    int bad = 0;
+    if (regexec(&allow, "cognition/modules/codeindex/src/codeindex_build.c", 0, NULL, 0) != 0
+        || regexec(&allow, "tools/mind/mind_resident.c", 0, NULL, 0) != 0
+        || regexec(&allow, "tests/harness/src/test_codeindex.c", 0, NULL, 0) != 0
+        || regexec(&allow, "tools/command/native_code_command.c", 0, NULL, 0) == 0
+        || regexec(&allow, "cognition/services/src/zcode_goal_context_service.c", 0, NULL, 0) == 0)
+        bad = 1;
+    char s1[80], s2[96];
+    if (snprintf(s1, sizeof s1, "    if (!%s%s(ci))", "codeindex", "_rebuild")
+            >= (int)sizeof s1
+        || snprintf(s2, sizeof s2, " * Explicit %s%s() remains a forced recompute",
+                    "codeindex", "_rebuild") >= (int)sizeof s2)
+        bad = 1;
+    else if (regexec(&call, s1, 0, NULL, 0) != 0
+             || regexec(&call, s2, 0, NULL, 0) != 0)
+        bad = 1;
+    drop2(&allow, &call);
+    return st_ok(bad, "check-mind-owns-rebuild selftest: OK\n");
+}
+
 struct lint_gate {
     const char *name;
     int (*run)(int argc, char **argv);
@@ -6230,6 +6683,10 @@ static const struct lint_gate k_gates[] = {
       check_no_warning_suppression_selftest },
     { "check-privileged-transition-receipt", check_privileged_transition_receipt_run,
       check_privileged_transition_receipt_selftest },
+    { "check-no-new-coin-backfill-caller", check_no_new_coin_backfill_caller_run,
+      check_no_new_coin_backfill_caller_selftest },
+    { "check-mind-owns-rebuild", check_mind_owns_rebuild_run,
+      check_mind_owns_rebuild_selftest },
 };
 
 int main(int argc, char **argv)

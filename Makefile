@@ -12216,7 +12216,7 @@ check-no-new-borrowed-seed:
 # Coin-backfill ratchet — keep the borrowed-seed repair ladder owned by the
 # reducer-frontier dispatcher until the sovereign cure deletes it. A new
 # production caller, or a second call in the dispatcher, fails.
-check-no-new-coin-backfill-caller:
+check-no-new-coin-backfill-caller: $(LINTC_TOOL)
 	@echo "══ LINT: no new coin-backfill repair caller (sovereign cure) ══"
 	@./tools/lint/check_no_new_coin_backfill_caller.sh .
 
@@ -13038,7 +13038,7 @@ check-codeindex-coverage: $(ZCLASSIC23_DEV_BIN)
 # fail-closed because the tree moved underneath the build. A source-level
 # fact, so no binary and no index: it needs nothing but git and grep.
 .PHONY: check-mind-owns-rebuild
-check-mind-owns-rebuild:
+check-mind-owns-rebuild: $(LINTC_TOOL)
 	@echo "══ LINT: only the mind rebuilds a code index ══"
 	@./tools/lint/check_mind_owns_rebuild.sh --selftest
 	@./tools/lint/check_mind_owns_rebuild.sh
