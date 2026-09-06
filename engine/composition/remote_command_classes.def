@@ -1137,6 +1137,16 @@ REMOTE_COMMAND_CLASS("fleet.vitals.sample", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("fleet.experiment.predict", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("fleet.experiment.result", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("fleet.experiment.stats", REMOTE_CLASS_NEVER, "")
+/* ── what this fleet is optimizing ──────────────────────────────────────
+ * `fleet objectives` reads this box's own working state to score each
+ * objective: the checkout, the lint baselines, and the attempt ledgers.
+ * The numbers are a candid self-assessment — where the tree is weak, which
+ * measurements are not taken yet, and how far each one sits from target.
+ * That is the shape of a target list, and it is the reading a peer least
+ * needs from us: any node that wants its own objective values computes
+ * them from its own checkout, so the remote form buys no capability.
+ */
+REMOTE_COMMAND_CLASS("fleet.objectives", REMOTE_CLASS_NEVER, "")
 /* ── one-paste fleet enrolment ──────────────────────────────────────────
  * All four are NEVER, and `fleet.machines` is the reason the rule exists.
  * The fleet map — which computers this owner has, what they run, how much
