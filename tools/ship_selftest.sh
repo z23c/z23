@@ -135,6 +135,44 @@ for v in WEDGED CRASHED; do
     fi
 done
 
+printf '\nship-selftest: 2b. the local deploy verdict-file contract\n'
+# GNU make's own exit status for a failed recipe is a flat 2 no matter what
+# the recipe itself returned, so `make deploy`'s own `exit 3` (UNVERIFIED) is
+# unobservable from ship.sh's $rc. The `deploy` recipe writes
+# build/bin/.deploy-verdict right before every exit instead, and
+# ship_deploy_local_verdict_rc() is the pure reader that turns that file back
+# into rc=3 — but ONLY for the candidate ship actually froze.
+verdict_sha_want="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+verdict_sha_other="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+printf 'verify_rc=3 source_id=%s\n' "$verdict_sha_want" > "$SANDBOX/deploy-verdict.match"
+if [ "$(ship_deploy_local_verdict_rc "$SANDBOX/deploy-verdict.match" "$verdict_sha_want")" = "3" ]; then
+    pass "verify_rc=3 for THIS candidate's source id maps to rc 3"
+else
+    fail "verify_rc=3 for this candidate's source id did not map to rc 3"
+fi
+# A verdict for a DIFFERENT candidate must never be honoured — a stale file
+# from a prior run naming an old source id is not evidence about this one.
+if ship_deploy_local_verdict_rc "$SANDBOX/deploy-verdict.match" "$verdict_sha_other" >/dev/null; then
+    fail "a verdict naming a different candidate's source id was honoured"
+else
+    pass "a verdict naming a different candidate's source id is refused"
+fi
+# A successful deploy's own verdict (verify_rc=0) must never be reinterpreted
+# as UNVERIFIED — this reader answers one question only.
+printf 'verify_rc=0 source_id=%s\n' "$verdict_sha_want" > "$SANDBOX/deploy-verdict.success"
+if ship_deploy_local_verdict_rc "$SANDBOX/deploy-verdict.success" "$verdict_sha_want" >/dev/null; then
+    fail "verify_rc=0 was mapped to UNVERIFIED"
+else
+    pass "verify_rc=0 is never mapped to UNVERIFIED"
+fi
+# A missing file — the case where the deploy recipe never got far enough to
+# write one, i.e. a genuine failure — must fail closed, not pass silently.
+if ship_deploy_local_verdict_rc "$SANDBOX/deploy-verdict.absent" "$verdict_sha_want" >/dev/null; then
+    fail "a missing verdict file was honoured"
+else
+    pass "a missing verdict file fails closed"
+fi
+
 # ── 3. the /proc parsers ────────────────────────────────────────────────────
 printf '\nship-selftest: 3. /proc parsers — the slow-disk signal must be legible\n'
 # proc(5) after the "pid (comm) " strip: utime $12, stime $13, starttime $20,

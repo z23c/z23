@@ -9717,6 +9717,13 @@ c23-portable-install: c23-portable-release
 	@$(INSTALL_C23_PRODUCTS)
 
 deploy: vendor-ready lint zclassic-cli zcl-nodectl tools/wal_checkpoint
+	@# Drop any stale verdict from a prior run before this one can write its
+	@# own. A caller (ship.sh) reads this file ONLY when `make` itself
+	@# reports a failure, to tell an UNVERIFIED-but-installed candidate
+	@# (verify_rc=3) apart from a genuine failure; a real failure below
+	@# writes nothing here, which is what makes an absent/stale file the
+	@# fail-closed default.
+	@rm -f $(BIN_DIR)/.deploy-verdict
 	@if [ "$(ZCL_PROFILE)" = "dev" ]; then \
 	    echo "deploy: REFUSE: ZCL_PROFILE=dev produces the unsippable $(Z23_DEV_UNSHIPPABLE_BIN)" >&2; \
 	    exit 2; \
@@ -9988,6 +9995,7 @@ deploy: vendor-ready lint zclassic-cli zcl-nodectl tools/wal_checkpoint
 	set -e; \
 	if [ "$$verify_rc" -eq 3 ]; then \
 	    echo "deploy: SLOW BOX or IDLE TIP — verification window expired without a contract pass: either the node was still making observable progress (a slow disk is not a failed deploy) or it was synced and idle at the network tip with a live RPC (an idle tip is not a wedge). The candidate stays installed and NOTHING is rolled back. The verifier's own output above says which. Keep watching with ZCL_DEPLOY_VERIFY_WAIT=1 ZCL_DEPLOY_EXPECT_SOURCE_ID=$(BUILD_SOURCE_ID) ZCL_DEPLOY_EXPECT_ARTIFACT_SHA256=$$artifact_sha256 ./tools/deploy_verify.sh" >&2; \
+	    printf 'verify_rc=3 source_id=%s\n' "$(BUILD_SOURCE_ID)" > $(BIN_DIR)/.deploy-verdict; \
 	    rollback_armed=0; \
 	    rm -f "$$candidate"; candidate=""; \
 	    rm -f "$$rollback_bin" "$$rollback_dropin"; rollback_bin=""; rollback_dropin=""; \
@@ -9995,6 +10003,7 @@ deploy: vendor-ready lint zclassic-cli zcl-nodectl tools/wal_checkpoint
 	    exit 3; \
 	fi; \
 	[ "$$verify_rc" -eq 0 ] || exit "$$verify_rc"; \
+	printf 'verify_rc=0 source_id=%s\n' "$(BUILD_SOURCE_ID)" > $(BIN_DIR)/.deploy-verdict; \
 	rollback_armed=0; \
 	rm -f "$$candidate"; candidate=""; \
 	rm -f "$$rollback_bin" "$$rollback_dropin"; rollback_bin=""; rollback_dropin=""; \

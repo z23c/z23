@@ -606,6 +606,34 @@ ship_verdict_is_destructive() {
     esac
 }
 
+# ship_deploy_local_verdict_rc <verdict-file> <candidate-source-id>
+#
+# GNU make's own exit status for a failed recipe is a flat 2 regardless of the
+# recipe's own exit code, so ship.sh's `make deploy` call cannot see the
+# `deploy` recipe's own `exit 3` (Makefile, UNVERIFIED — no fault proven, the
+# candidate stays installed). The recipe writes
+# "verify_rc=<n> source_id=<sha256>\n" to $(BIN_DIR)/.deploy-verdict right
+# before every exit instead. This is the ONE place that reads that file back:
+# pure text, no side effects, so a fixture file proves it without a live make
+# or node. Prints "3" and returns 0 only when the file names verify_rc=3 for
+# EXACTLY this candidate's source id; prints nothing and returns 1 for a
+# missing file, a parse miss, any other verify_rc, or any other source id —
+# fail closed in every one of those cases, same as a genuine deploy failure.
+ship_deploy_local_verdict_rc() {
+    ship_verdict_file="$1"
+    ship_want_source_id="$2"
+    [ -f "$ship_verdict_file" ] || return 1
+    ship_verdict_line="$(cat "$ship_verdict_file" 2>/dev/null)"
+    ship_verdict_verify_rc="$(printf '%s\n' "$ship_verdict_line" |
+        sed -n 's/^verify_rc=\([0-9][0-9]*\) .*/\1/p')"
+    ship_verdict_source_id="$(printf '%s\n' "$ship_verdict_line" |
+        sed -n 's/^verify_rc=[0-9][0-9]* source_id=\([0-9a-f]*\)$/\1/p')"
+    [ "$ship_verdict_verify_rc" = "3" ] || return 1
+    [ -n "$ship_verdict_source_id" ] || return 1
+    [ "$ship_verdict_source_id" = "$ship_want_source_id" ] || return 1
+    printf '3\n'
+}
+
 # ── the loop ────────────────────────────────────────────────────────────────
 # ship_await <label> <observer-command> <want_sha>
 #

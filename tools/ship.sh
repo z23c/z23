@@ -893,6 +893,7 @@ deploy_local() {
     step "Deploy → local"
     if [ "$DRY_RUN" -eq 1 ]; then say "would install the frozen candidate + workers transactionally"; return 0; fi
     local pid svc_dir worker_backup i rc=0 prior_commit
+    local remapped_rc
     pid="$(systemctl --user show zclassic23 -p MainPID --value 2>/dev/null || true)"
     case "$pid" in
         ""|*[!0-9]*|0) die "local canonical service must be running before ship" ;;
@@ -928,6 +929,20 @@ deploy_local() {
     ZCL_DEPLOY_ALLOW_CANONICAL=1 \
     ZCL_DEPLOY_FROZEN_CANDIDATE="$CANDIDATE" \
         make deploy 2>&1 | tail -6 || rc="${PIPESTATUS[0]}"
+    # GNU make's own exit status for a failed recipe is a flat 2 regardless of
+    # what the recipe itself returned — the recipe's real code (here, the
+    # `deploy` recipe's own `exit 3` for UNVERIFIED) shows up only in make's
+    # printed "Error N" text, never in $?. So $rc above cannot tell UNVERIFIED
+    # (candidate installed, no fault proven) apart from a genuine failure; the
+    # `deploy` recipe writes build/bin/.deploy-verdict right before every exit
+    # (Makefile, target `deploy`) so ship_deploy_local_verdict_rc()
+    # (tools/scripts/ship_progress_lib.sh) can. It is trusted ONLY for exactly
+    # this candidate: any other source id, any other verify_rc, or a missing
+    # file stays a failure below — fail closed.
+    if [ "$rc" -ne 0 ]; then
+        remapped_rc="$(ship_deploy_local_verdict_rc build/bin/.deploy-verdict "$CAND_SOURCE_ID")" &&
+            rc="$remapped_rc"
+    fi
     # rc==3 is UNVERIFIED: deploy_verify.sh deliberately left the new candidate
     # installed because it proved no fault requiring rollback. Reverting
     # the workers here would run that new main binary against OLD workers — a
@@ -1620,8 +1635,9 @@ for target in $TARGETS; do
                     # No fault was proven, but health was not proven either. Keep
                     # the candidate and matching workers together and propagate
                     # the verifier's distinguishable result without overstating it.
-                    say "local is UNVERIFIED — the candidate and matching workers remain installed."
-                    say "  No rollback-triggering fault was observed. Re-run ship to re-check."
+                    say "local is UNVERIFIED but INSTALLED — the candidate and matching workers are running."
+                    say "  No rollback-triggering fault was observed; this is not a failed deploy. Keep watching with:"
+                    say "  ZCL_DEPLOY_VERIFY_WAIT=1 ZCL_DEPLOY_EXPECT_SOURCE_ID=$CAND_SOURCE_ID ZCL_DEPLOY_EXPECT_ARTIFACT_SHA256=$ARTIFACT_SHA ./tools/deploy_verify.sh"
                     exit 3
                     ;;
                 *) die "local deploy failed" ;;
