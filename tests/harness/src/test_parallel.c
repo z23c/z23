@@ -174,6 +174,12 @@ struct group_result {
     int load_flaky;             /* 1 if FAIL/WEDGED under the pool, PASS alone */
     int flaky_first_wedged;     /* 1 if the first attempt was a watchdog kill */
     char flaky_first_log[128];  /* preserved first-attempt capture, "" if n/a */
+    /* 1 if the first attempt PASSED but printed "UNOBSERVED (" and the alone
+     * rerun PASSED with zero UNOBSERVED lines. Reuses load_flaky/
+     * flaky_first_log for reporting (never a silent re-run), but — unlike an
+     * ordinary load-flaky PASS — this result is never handed to the verdict
+     * store: see the store gate in the cache-accounting block. */
+    int load_unobserved;
 };
 
 /* ── The per-group watchdog is on SILENCE, not on runtime ──────────────────
@@ -898,7 +904,21 @@ static bool run_parallel_phase(
  * before the alone rerun reuses the same tempfile path, so both attempts stay
  * inspectable. Groups that already ran exclusively (group_requires_exclusive_run)
  * are excluded: they already ran with the pool idle, so a second alone run
- * would prove nothing new. */
+ * would prove nothing new.
+ *
+ * A group whose first attempt PASSED but printed one or more "UNOBSERVED ("
+ * lines gets the same one-shot rerun-alone treatment: the assertions already
+ * passed, but a load-dependent leg (a bootstrap window, a timing budget)
+ * never got its observation inside the shared pool's contention. If the
+ * alone rerun passes AND prints zero UNOBSERVED lines, the leg is fully
+ * observed now — env_unobserved drops to 0 for this group — but the result
+ * is marked load_unobserved (and, for reporting parity, load_flaky) so it
+ * never looks like an ordinary silent pass, and it is barred from the
+ * verdict store outright (see the cache-accounting gate): a busy box must
+ * never mint a cached receipt for a leg it only observed once, under
+ * pressure to retry. If the alone rerun is still UNOBSERVED, or fails, the
+ * alone attempt's own result stands unmodified — the box genuinely could
+ * not observe the leg, and that is reported like any other run. */
 static void rerun_load_flaky_groups(struct group_result *results,
                                     pid_t parent_pid, int timeout_secs,
                                     bool verbose, bool activate_proof_contracts)
@@ -907,7 +927,13 @@ static void rerun_load_flaky_groups(struct group_result *results,
         if (results[i].skipped || results[i].cached) continue;
         if (group_requires_exclusive_run(g_groups[i].name)) continue;
         bool first_pass = !results[i].signaled && results[i].exit_code == 0;
-        if (first_pass) continue;
+        bool first_unobserved = false;
+        if (first_pass) {
+            int fu = results[i].out_path[0]
+                ? count_marker_lines(results[i].out_path, "UNOBSERVED (") : 0;
+            if (fu == 0) continue; /* an ordinary pass: nothing to rerun */
+            first_unobserved = true;
+        }
 
         bool first_wedged = results[i].wedged != 0;
         char first_log[128];
@@ -922,7 +948,9 @@ static void rerun_load_flaky_groups(struct group_result *results,
 
         printf("[rerun-alone] [%zu] %s — first attempt %s under the shared "
                "pool; retrying alone with the pool idle (at most once)\n",
-               i, g_groups[i].name, first_wedged ? "was WEDGED" : "FAILED");
+               i, g_groups[i].name,
+               first_unobserved ? "printed UNOBSERVED"
+                                 : (first_wedged ? "was WEDGED" : "FAILED"));
         fflush(stdout);
 
         /* Fresh watchdog/result state for a clean, independent attempt. */
@@ -932,6 +960,29 @@ static void rerun_load_flaky_groups(struct group_result *results,
                             activate_proof_contracts);
 
         bool alone_pass = !results[i].signaled && results[i].exit_code == 0;
+
+        if (first_unobserved) {
+            int alone_unobserved = results[i].out_path[0]
+                ? count_marker_lines(results[i].out_path, "UNOBSERVED (") : 0;
+            if (alone_pass && alone_unobserved == 0) {
+                results[i].load_flaky = 1;
+                results[i].load_unobserved = 1;
+                snprintf(results[i].flaky_first_log,
+                        sizeof(results[i].flaky_first_log), "%s",
+                        preserved_log[0] ? preserved_log : "(unavailable)");
+                printf("LOAD-UNOBSERVED %s first=UNOBSERVED alone=OBSERVED "
+                      "first_log=%s alone_log=%s\n",
+                      g_groups[i].name, results[i].flaky_first_log,
+                      results[i].out_path[0] ? results[i].out_path : "(none)");
+                fflush(stdout);
+            } else if (preserved_log[0]) {
+                /* Still can't observe it (or it failed outright) alone: the
+                 * alone attempt's own result is the honest one — keep it. */
+                unlink(preserved_log);
+            }
+            continue;
+        }
+
         if (alone_pass) {
             results[i].load_flaky = 1;
             results[i].flaky_first_wedged = first_wedged;
@@ -1973,12 +2024,15 @@ int main(int argc, char **argv)
         }
     }
     if (load_flaky_groups > 0) {
-        printf("Load-flaky groups (FAIL/WEDGED under the shared pool, PASS "
-               "alone — counted as PASS, never a silent cache hit; see the "
-               "LOAD-FLAKY lines above):\n");
+        printf("Load-flaky groups (FAIL/WEDGED, or PASS-with-UNOBSERVED, "
+               "under the shared pool; observed clean alone — counted as "
+               "PASS, never a silent cache hit; see the LOAD-FLAKY / "
+               "LOAD-UNOBSERVED lines above):\n");
         for (size_t i = 0; i < g_num_groups; i++) {
             if (results[i].skipped || !results[i].load_flaky) continue;
-            printf("  - %s\n", g_groups[i].name);
+            printf("  - %s%s\n", g_groups[i].name,
+                   results[i].load_unobserved ? " (was UNOBSERVED, never cached)"
+                                               : "");
         }
     }
     if (failed_groups > 0) {
@@ -2030,8 +2084,17 @@ int main(int argc, char **argv)
              * a later run reuses as if the leg had been proven, so it is
              * barred from the cache exactly like a skip. It does NOT fail the
              * run — the box's spare capacity is not a code verdict. */
+            /* A load-unobserved PASS (see rerun_load_flaky_groups) never
+             * reaches the store at all, even though it passed with
+             * env_unobserved == 0 here: the observation only happened once,
+             * alone, under a busy box's own back-pressure, and a stored
+             * receipt would let a later cache hit reuse it as if the leg
+             * were reliably observed on this host. Ordinary load-flaky
+             * PASSes (FAIL/WEDGED alone->PASS) are still cached, flagged, so
+             * they keep reprinting LOAD-FLAKY on every future hit. */
             if (pass && results[i].skip_markers == 0 &&
-                results[i].env_unobserved == 0 && probes &&
+                results[i].env_unobserved == 0 &&
+                !results[i].load_unobserved && probes &&
                 probes[i].cacheable) {
                 /* A flaky pass IS a pass — the group's actual code proved
                  * itself, alone. But it must never come back on a later

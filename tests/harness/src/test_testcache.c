@@ -946,7 +946,8 @@ int test_testcache(void)
                            "bool first_pass = !results[i].signaled && "
                            "results[i].exit_code == 0;") &&
              file_contains("tests/harness/src/test_parallel.c",
-                           "if (first_pass) continue;"));
+                           "if (fu == 0) continue; /* an ordinary pass: "
+                           "nothing to rerun */"));
     TC_CHECK("groups that already ran exclusively are excluded from rerun-alone",
              file_contains("tests/harness/src/test_parallel.c",
                            "if (group_requires_exclusive_run(g_groups[i].name)) "
@@ -991,6 +992,48 @@ int test_testcache(void)
              "(a cache hit sets it on the same field)",
              file_contains("tests/harness/src/test_parallel.c",
                            "if (results[i].load_flaky) load_flaky_groups++;"));
+
+    /* ── Phase M: a PASS that prints UNOBSERVED also gets rerun alone ──────
+     * The onion bootstrap window (test_onion_bootstrap) is the motivating
+     * case: it can print "UNOBSERVED (" under a saturated shared pool while
+     * every one of its assertions already passed. Before this phase existed,
+     * that group had no second chance the way a FAIL/WEDGED group does, so
+     * env_unobserved counted it against the suite verdict even though a
+     * clean, uncontended rerun would have observed it fine. Same source-
+     * contract-pin style as Phase L above: this module cannot fork a whole
+     * pool run to reproduce the race, so it pins the shapes that make the
+     * PASS-with-UNOBSERVED -> alone-and-OBSERVED path, and its never-cached
+     * guarantee, true. */
+    TC_CHECK("a PASS that printed UNOBSERVED also gets exactly one alone "
+             "rerun, not just FAIL/WEDGED groups",
+             file_contains("tests/harness/src/test_parallel.c",
+                           "int fu = results[i].out_path[0]\n"
+                           "                ? count_marker_lines(results[i]"
+                           ".out_path, \"UNOBSERVED (\") : 0;") &&
+             file_contains("tests/harness/src/test_parallel.c",
+                           "first_unobserved = true;"));
+    TC_CHECK("the [rerun-alone] announcement names UNOBSERVED as its own "
+             "reason, distinct from FAILED/WEDGED",
+             file_contains("tests/harness/src/test_parallel.c",
+                           "first_unobserved ? \"printed UNOBSERVED\""));
+    TC_CHECK("UNOBSERVED-then-OBSERVED prints LOAD-UNOBSERVED with first= "
+             "and alone= and marks the result load_unobserved",
+             file_contains("tests/harness/src/test_parallel.c",
+                           "results[i].load_unobserved = 1;") &&
+             file_contains("tests/harness/src/test_parallel.c",
+                           "printf(\"LOAD-UNOBSERVED %s first=UNOBSERVED "
+                           "alone=OBSERVED \""));
+    TC_CHECK("still-UNOBSERVED or failed alone: the alone attempt's own "
+             "result stands, the existing FAIL/UNOBSERVED accounting applies",
+             file_contains("tests/harness/src/test_parallel.c",
+                           "/* Still can't observe it (or it failed "
+                           "outright) alone: the\n"
+                           "                 * alone attempt's own result "
+                           "is the honest one — keep it. */"));
+    TC_CHECK("a load-unobserved PASS is never handed to the verdict store, "
+             "unlike an ordinary load-flaky PASS",
+             file_contains("tests/harness/src/test_parallel.c",
+                           "!results[i].load_unobserved && probes &&"));
 
     system("rm -rf " TC_FIX " " TC_STORE);
     tc_env_restore(&caller_store, "ZCL_TESTCACHE_STORE_ROOT");
