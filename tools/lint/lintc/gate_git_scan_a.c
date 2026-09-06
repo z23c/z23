@@ -474,19 +474,20 @@ int check_c23_only_selftest(void)
 static int nak_fill_pat(char *pat, size_t cap)
 {
     return ovf(snprintf(pat, cap, "%s%s%s%s%s%s%s%s",
-        "\\b" "s" "k-" "[A-Za-z0-9_-]{20,}|",
-        "\\b" "x" "ai-" "[A-Za-z0-9_-]{20,}|",
-        "\\b" "g" "sk_" "[A-Za-z0-9_-]{20,}|",
-        "\\b" "g" "hp_" "[A-Za-z0-9_-]{20,}|",
-        "\\b" "g" "lpat-" "[A-Za-z0-9_-]{20,}|",
-        "\\b" "A" "KIA" "[A-Z0-9]{16}|",
+        "(^|[^[:alnum:]_])" "s" "k-" "[A-Za-z0-9_-]{20,}|",
+        "(^|[^[:alnum:]_])" "x" "ai-" "[A-Za-z0-9_-]{20,}|",
+        "(^|[^[:alnum:]_])" "g" "sk_" "[A-Za-z0-9_-]{20,}|",
+        "(^|[^[:alnum:]_])" "g" "hp_" "[A-Za-z0-9_-]{20,}|",
+        "(^|[^[:alnum:]_])" "g" "lpat-" "[A-Za-z0-9_-]{20,}|",
+        "(^|[^[:alnum:]_])" "A" "KIA" "[A-Z0-9]{16}|",
         "Bearer[[:space:]]+[A-Za-z0-9._-]{24,}|",
         "[0-9a-f]{32,}\\.[A-Za-z0-9]{16,}"), cap);
 }
 
 static int nak_comp(regex_t *re)
 {
-    char pat[320];
+    /* POSIX ERE boundaries also work with macOS's default regex mode. */
+    char pat[512];
     int rc = nak_fill_pat(pat, sizeof pat);
     return rc ? rc : reg_fail(re, regcomp(re, pat, REG_EXTENDED));
 }
@@ -710,6 +711,22 @@ int check_no_api_keys_selftest(void)
             | !nak_skip_path("docs/x.png")
             | nak_skip_path("tools/lint/lintc/main.c")
             | nak_skip_path("tools/lint/lintc/lib.c");
+    const char *const tokens[] = { sk, xai, gsk, ghp, glp, akia };
+    static const struct { const char *prefix; int want; } boundaries[] = {
+        { "", 1 }, { "\"", 1 }, { " ", 1 }, { "=", 1 },
+        { "a", 0 }, { "0", 0 }, { "_", 0 }
+    };
+    for (size_t i = 0; i < sizeof tokens / sizeof tokens[0]; i++) {
+        for (size_t j = 0; j < sizeof boundaries / sizeof boundaries[0]; j++) {
+            char sample[80];
+            if (ovf(snprintf(sample, sizeof sample, "%s%s",
+                             boundaries[j].prefix, tokens[i]), sizeof sample)) {
+                regfree(&re);
+                return die("z23-lint: selftest boundary buffer overflow\n", "");
+            }
+            bad |= nak_want(&re, sample, boundaries[j].want);
+        }
+    }
     regfree(&re);
     return st_ok(bad, "check_no_api_keys selftest: OK\n");
 }
