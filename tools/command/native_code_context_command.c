@@ -89,6 +89,16 @@ static bool context_digest_row(
     return true;
 }
 
+/* Warm reads reuse the last derived map while the opened index is current.
+ * The first dispatch still walks every production file and include edge;
+ * the latency contract is the second. */
+static struct {
+    char root[1024];
+    int file_count;
+    struct json_value data;
+    bool valid;
+} g_map_warm;
+
 void zcl_native_handle_code_context_map(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
 {
@@ -112,6 +122,16 @@ void zcl_native_handle_code_context_map(
                                ZCL_COMMAND_EXIT_INTERNAL, "EMPTY_CODE_MAP",
                                "derive", false, false,
                                "the code index contains no source files", root);
+        return;
+    }
+    bool current = false;
+    if (g_map_warm.valid &&
+        g_map_warm.file_count == total &&
+        strlen(root) < sizeof g_map_warm.root &&
+        strcmp(g_map_warm.root, root) == 0 &&
+        codeindex_source_view_is_current(index, &current) && current) {
+        json_copy(&reply->data, &g_map_warm.data);
+        codeindex_close(index);
         return;
     }
     struct ci_file *files = zcl_calloc(CONTEXT_FILE_PAGE_CAP, sizeof(*files),
@@ -370,6 +390,16 @@ void zcl_native_handle_code_context_map(
                    "include edge(s)", classified, production, context_count,
                    orphans, overlaps, cross_edges);
     (void)json_push_kv_str(&reply->data, "summary", summary);
+
+    if (strlen(root) < sizeof g_map_warm.root) {
+        if (g_map_warm.valid)
+            json_free(&g_map_warm.data);
+        json_init(&g_map_warm.data);
+        json_copy(&g_map_warm.data, &reply->data);
+        (void)snprintf(g_map_warm.root, sizeof g_map_warm.root, "%s", root);
+        g_map_warm.file_count = total;
+        g_map_warm.valid = true;
+    }
 
     json_free(&taxonomy); json_free(&context_rows); json_free(&shape_rows);
     json_free(&orphan_files); json_free(&overlap_files);

@@ -20,6 +20,7 @@
 
 #include "json/json.h"
 #include "kernel/command_registry.h"
+#include "platform/file_metadata.h"
 #include "science/science_corpus.h"
 
 #include <stdio.h>
@@ -44,6 +45,29 @@ static const char *corpus_source_root(const struct zcl_command_request *request)
     return env && env[0] ? env : ".";
 }
 
+/* Warm reads reuse the last walk until the inventory artifact changes.
+ * The first dispatch still walks; the latency contract is the second. */
+static struct {
+    char root[1024];
+    uint64_t inv_size;
+    int64_t inv_mtime;
+    struct science_corpus_report report;
+    bool valid;
+} g_corpus_warm;
+
+static void corpus_inventory_stamp(const char *inventory, uint64_t *size,
+                                   int64_t *mtime)
+{
+    struct platform_file_metadata meta;
+    *size = 0;
+    *mtime = 0;
+    if (platform_file_metadata_read(inventory, &meta) ==
+        PLATFORM_FILE_METADATA_OK) {
+        *size = meta.size;
+        *mtime = meta.modified_seconds;
+    }
+}
+
 void zcl_native_handle_code_corpus(const struct zcl_command_request *request,
                                    struct zcl_command_reply *reply)
 {
@@ -60,13 +84,28 @@ void zcl_native_handle_code_corpus(const struct zcl_command_request *request,
     }
 
     struct science_corpus_report r;
-    if (!science_corpus_measure(root, inventory, &r)) {
+    uint64_t inv_size = 0;
+    int64_t inv_mtime = 0;
+    corpus_inventory_stamp(inventory, &inv_size, &inv_mtime);
+    if (g_corpus_warm.valid &&
+        strncmp(g_corpus_warm.root, root, sizeof g_corpus_warm.root) == 0 &&
+        g_corpus_warm.inv_size == inv_size &&
+        g_corpus_warm.inv_mtime == inv_mtime) {
+        r = g_corpus_warm.report;
+    } else if (!science_corpus_measure(root, inventory, &r)) {
         zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
                                ZCL_COMMAND_EXIT_INTERNAL, "CORPUS_WALK",
                                "dispatch", true, false,
                                "could not walk the maintained C23 source roots",
                                root);
         return;
+    } else if (strlen(root) < sizeof g_corpus_warm.root) {
+        (void)snprintf(g_corpus_warm.root, sizeof g_corpus_warm.root, "%s",
+                       root);
+        g_corpus_warm.inv_size = inv_size;
+        g_corpus_warm.inv_mtime = inv_mtime;
+        g_corpus_warm.report = r;
+        g_corpus_warm.valid = true;
     }
 
     char headline[1024];

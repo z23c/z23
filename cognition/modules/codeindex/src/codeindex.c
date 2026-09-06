@@ -264,11 +264,18 @@ int codeindex_group_metrics(struct codeindex *ci, struct ci_group_metric *out,
     ci_store_lock(ci->store);
     sqlite3_stmt *stmt = NULL;
     sqlite3 *db = ci_store_db(ci->store);
+    /* Two GROUP BY aggregations, not a correlated COUNT per group. The
+     * correlated form is O(groups × files) and made warm
+     * code.index.metrics miss its 750 ms FOREGROUND budget (~1.1 s on a
+     * 5k-file index). */
     static const char sql[] =
-        "SELECT g.path,"
-        "(SELECT COUNT(*) FROM files f WHERE f.\"group\"=g.path),"
-        "(SELECT COUNT(*) FROM symbols s WHERE s.\"group\"=g.path) "
-        "FROM groups g ORDER BY g.path";
+        "SELECT g.path, COALESCE(fc.n, 0), COALESCE(sc.n, 0) "
+        "FROM groups g "
+        "LEFT JOIN (SELECT \"group\" AS p, COUNT(*) AS n FROM files "
+        "GROUP BY \"group\") fc ON fc.p = g.path "
+        "LEFT JOIN (SELECT \"group\" AS p, COUNT(*) AS n FROM symbols "
+        "GROUP BY \"group\") sc ON sc.p = g.path "
+        "ORDER BY g.path";
     if (!db || sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) {
         ci_store_unlock(ci->store);
         LOG_ERR("codeindex", "prepare group_metrics");
