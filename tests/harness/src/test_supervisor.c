@@ -84,10 +84,29 @@ static void wait_stall(struct liveness_contract *self)
         return;
     pthread_mutex_lock(&stall->lock);
     atomic_store(&stall->entered, true);
+    pthread_cond_broadcast(&stall->changed);
     while (!atomic_load(&stall->release))
         pthread_cond_wait(&stall->changed, &stall->lock);
     pthread_mutex_unlock(&stall->lock);
     atomic_store(&stall->returned, true);
+}
+
+static bool wait_stall_entered(struct blocking_stall *stall)
+{
+    struct timespec limit;
+    bool entered;
+    if (!stall || timespec_get(&limit, TIME_UTC) != TIME_UTC)
+        return false;
+    limit.tv_sec += 2;
+    pthread_mutex_lock(&stall->lock);
+    while (!atomic_load(&stall->entered)) {
+        if (pthread_cond_timedwait(&stall->changed, &stall->lock,
+                                   &limit) != 0)
+            break;
+    }
+    entered = atomic_load(&stall->entered);
+    pthread_mutex_unlock(&stall->lock);
+    return entered;
 }
 
 static bool wait_for_flag(_Atomic bool *flag, int timeout_ms)
@@ -145,6 +164,150 @@ static void probe_stall(struct liveness_contract *self)
     struct restart_probe *p = (struct restart_probe *)self->ctx;
     if (p) atomic_fetch_add(&p->stall_calls, 1);
 }
+
+#ifdef ZCL_TESTING
+struct stale_cancel_probe;
+
+struct stale_delivery_probe {
+    struct stale_cancel_probe *owner;
+    _Atomic int calls;
+    _Atomic int last_reason;
+};
+
+struct stale_cancel_probe {
+    pthread_mutex_t lock;
+    pthread_cond_t changed;
+    struct liveness_contract *same_contract;
+    struct liveness_contract *different_contract;
+    supervisor_child_id same_id;
+    supervisor_child_id different_id;
+    _Atomic int hook_calls;
+    struct stale_delivery_probe delivery[3];
+};
+
+static void record_stale_delivery(struct liveness_contract *self)
+{
+    struct stale_delivery_probe *delivery = self ? self->ctx : NULL;
+    struct stale_cancel_probe *probe = delivery ? delivery->owner : NULL;
+    if (!probe)
+        return;
+    atomic_store(&delivery->last_reason, atomic_load(&self->stall_reason));
+    atomic_fetch_add(&delivery->calls, 1);
+    pthread_mutex_lock(&probe->lock);
+    pthread_cond_broadcast(&probe->changed);
+    pthread_mutex_unlock(&probe->lock);
+}
+
+static void republish_stale_report(struct liveness_contract *contract,
+                                   enum supervisor_stall_reason observed,
+                                   void *ctx)
+{
+    struct stale_cancel_probe *probe = ctx;
+    if (!probe)
+        return;
+    if (contract == probe->same_contract &&
+        observed == SUPERVISOR_STALL_CHILD_REPORTED)
+        supervisor_report_stall(probe->same_id,
+                                SUPERVISOR_STALL_CHILD_REPORTED);
+    else if (contract == probe->different_contract &&
+             observed == SUPERVISOR_STALL_TIME_DEADLINE)
+        supervisor_report_stall(probe->different_id,
+                                SUPERVISOR_STALL_NO_PROGRESS);
+    atomic_fetch_add(&probe->hook_calls, 1);
+    pthread_mutex_lock(&probe->lock);
+    pthread_cond_broadcast(&probe->changed);
+    pthread_mutex_unlock(&probe->lock);
+}
+
+static bool wait_stale_cancel_result(struct stale_cancel_probe *probe)
+{
+    struct timespec limit;
+    bool done;
+    if (!probe || timespec_get(&limit, TIME_UTC) != TIME_UTC)
+        return false;
+    limit.tv_sec += 2;
+    pthread_mutex_lock(&probe->lock);
+    for (;;) {
+        done = atomic_load(&probe->hook_calls) == 3 &&
+               atomic_load(&probe->delivery[0].calls) == 1 &&
+               atomic_load(&probe->delivery[1].calls) == 1;
+        if (done || pthread_cond_timedwait(&probe->changed, &probe->lock,
+                                           &limit) != 0)
+            break;
+    }
+    pthread_mutex_unlock(&probe->lock);
+    return done;
+}
+
+struct rearm_cancel_probe;
+
+struct rearm_delivery_probe {
+    struct rearm_cancel_probe *owner;
+    int index;
+};
+
+struct rearm_cancel_probe {
+    pthread_mutex_t lock;
+    pthread_cond_t changed;
+    struct liveness_contract *contracts[4];
+    supervisor_child_id ids[4];
+    enum supervisor_stall_reason reasons[4];
+    _Atomic int hook_calls;
+    _Atomic int calls[5];
+    _Atomic int delivered_reason[5];
+    struct rearm_delivery_probe delivery[5];
+};
+
+static void record_rearm_delivery(struct liveness_contract *self)
+{
+    struct rearm_delivery_probe *delivery = self ? self->ctx : NULL;
+    struct rearm_cancel_probe *probe = delivery ? delivery->owner : NULL;
+    int i = delivery ? delivery->index : -1;
+    if (!probe || i < 0 || i >= 5)
+        return;
+    atomic_store(&probe->delivered_reason[i],
+                 atomic_load(&self->stall_reason));
+    atomic_fetch_add(&probe->calls[i], 1);
+    pthread_mutex_lock(&probe->lock);
+    pthread_cond_broadcast(&probe->changed);
+    pthread_mutex_unlock(&probe->lock);
+}
+
+static void republish_during_rearm(struct liveness_contract *contract,
+                                   void *ctx)
+{
+    struct rearm_cancel_probe *probe = ctx;
+    if (!probe)
+        return;
+    for (int i = 0; i < 4; i++) {
+        if (contract == probe->contracts[i]) {
+            supervisor_report_stall(probe->ids[i], probe->reasons[i]);
+            atomic_fetch_add(&probe->hook_calls, 1);
+            return;
+        }
+    }
+}
+
+static bool wait_rearm_cancel_result(struct rearm_cancel_probe *probe)
+{
+    struct timespec limit;
+    bool done;
+    if (!probe || timespec_get(&limit, TIME_UTC) != TIME_UTC)
+        return false;
+    limit.tv_sec += 2;
+    pthread_mutex_lock(&probe->lock);
+    for (;;) {
+        done = atomic_load(&probe->hook_calls) == 4;
+        for (int i = 0; i < 5; i++)
+            done = done && atomic_load(&probe->calls[i]) == 1;
+        if (done || pthread_cond_timedwait(&probe->changed, &probe->lock,
+                                           &limit) != 0)
+            break;
+    }
+    pthread_mutex_unlock(&probe->lock);
+    return done;
+}
+#endif
 
 int test_supervisor(void)
 {
@@ -407,6 +570,191 @@ int test_supervisor(void)
         SUP_CHECK("cleared observer does not fire",
             atomic_load(&g_obs_calls) == 1);
     }
+
+#ifdef ZCL_TESTING
+    /* A stale delivery claim must cancel the exact report generation it read.
+     * If a producer publishes the same reason again before cancellation, a
+     * reason-only CAS cannot distinguish the fresh report from the old one. */
+    supervisor_reset_for_testing();
+    {
+        struct liveness_contract blocker, same, different, cancelled;
+        struct blocking_stall blocked = {
+            .lock = PTHREAD_MUTEX_INITIALIZER,
+            .changed = PTHREAD_COND_INITIALIZER,
+        };
+        struct stale_cancel_probe probe = {
+            .lock = PTHREAD_MUTEX_INITIALIZER,
+            .changed = PTHREAD_COND_INITIALIZER,
+        };
+        liveness_contract_init(&blocker, "stall.aba.blocker");
+        blocker.ctx = &blocked;
+        blocker.on_stall = wait_stall;
+        liveness_contract_init(&same, "stall.aba.same");
+        liveness_contract_init(&different, "stall.aba.different");
+        liveness_contract_init(&cancelled, "stall.aba.cancelled");
+        struct liveness_contract *targets[] = {
+            &same, &different, &cancelled
+        };
+        for (int i = 0; i < 3; i++) {
+            probe.delivery[i].owner = &probe;
+            atomic_store(&probe.delivery[i].calls, 0);
+            atomic_store(&probe.delivery[i].last_reason, -1);
+            targets[i]->ctx = &probe.delivery[i];
+            targets[i]->on_stall = record_stale_delivery;
+        }
+        supervisor_child_id blocker_id = supervisor_register(&blocker);
+        probe.same_id = supervisor_register(&same);
+        probe.different_id = supervisor_register(&different);
+        supervisor_child_id cancelled_id = supervisor_register(&cancelled);
+        probe.same_contract = &same;
+        probe.different_contract = &different;
+        bool registered = blocker_id >= 0 && probe.same_id >= 0 &&
+                          probe.different_id >= 0 && cancelled_id >= 0;
+        bool started = registered && supervisor_start();
+        if (started)
+            supervisor_report_stall(blocker_id,
+                                    SUPERVISOR_STALL_CHILD_REPORTED);
+        bool worker_blocked = started && wait_stall_entered(&blocked);
+
+        if (worker_blocked) {
+            supervisor_report_stall(probe.same_id,
+                                    SUPERVISOR_STALL_CHILD_REPORTED);
+            supervisor_report_stall(probe.different_id,
+                                    SUPERVISOR_STALL_TIME_DEADLINE);
+            supervisor_report_stall(cancelled_id,
+                                    SUPERVISOR_STALL_NO_PROGRESS);
+            /* Model recovery after each report has been queued, leaving its
+             * already-observed generation for the delivery worker to cancel. */
+            atomic_store(&same.stall_reason, SUPERVISOR_STALL_NONE);
+            atomic_store(&different.stall_reason, SUPERVISOR_STALL_NONE);
+            atomic_store(&cancelled.stall_reason, SUPERVISOR_STALL_NONE);
+            supervisor_set_stale_cancel_hook_for_testing(
+                republish_stale_report, &probe);
+        }
+        pthread_mutex_lock(&blocked.lock);
+        atomic_store(&blocked.release, true);
+        pthread_cond_broadcast(&blocked.changed);
+        pthread_mutex_unlock(&blocked.lock);
+        bool delivered = worker_blocked && wait_stale_cancel_result(&probe);
+        supervisor_set_stale_cancel_hook_for_testing(NULL, NULL);
+        if (started)
+            supervisor_stop();
+
+        SUP_CHECK("stale-cancel fixture reaches all exact claim points",
+                  delivered && atomic_load(&probe.hook_calls) == 3);
+        SUP_CHECK("fresh same-reason report survives stale cancellation",
+                  atomic_load(&probe.delivery[0].calls) == 1 &&
+                  atomic_load(&probe.delivery[0].last_reason) ==
+                      SUPERVISOR_STALL_CHILD_REPORTED);
+        SUP_CHECK("fresh different-reason report remains a control",
+                  atomic_load(&probe.delivery[1].calls) == 1 &&
+                  atomic_load(&probe.delivery[1].last_reason) ==
+                      SUPERVISOR_STALL_NO_PROGRESS);
+        SUP_CHECK("cancelled old report is never delivered",
+                  atomic_load(&probe.delivery[2].calls) == 0);
+        pthread_cond_destroy(&probe.changed);
+        pthread_mutex_destroy(&probe.lock);
+        pthread_cond_destroy(&blocked.changed);
+        pthread_mutex_destroy(&blocked.lock);
+    }
+
+    /* Rearming captures the report generation before clearing its live
+     * reason. A report published through the real API in that gap is newer
+     * work and must not be consumed by the rearm's cancellation. */
+    supervisor_reset_for_testing();
+    {
+        struct liveness_contract blocker, targets[5];
+        struct blocking_stall blocked = {
+            .lock = PTHREAD_MUTEX_INITIALIZER,
+            .changed = PTHREAD_COND_INITIALIZER,
+        };
+        struct rearm_cancel_probe probe = {
+            .lock = PTHREAD_MUTEX_INITIALIZER,
+            .changed = PTHREAD_COND_INITIALIZER,
+        };
+        static const char *names[5] = {
+            "stall.rearm.tick_child", "stall.rearm.tick_deadline",
+            "stall.rearm.progress", "stall.rearm.idle",
+            "stall.rearm.progress_unchanged"
+        };
+        const enum supervisor_stall_reason reasons[5] = {
+            SUPERVISOR_STALL_CHILD_REPORTED,
+            SUPERVISOR_STALL_TIME_DEADLINE,
+            SUPERVISOR_STALL_NO_PROGRESS,
+            SUPERVISOR_STALL_NO_PROGRESS,
+            SUPERVISOR_STALL_NO_PROGRESS
+        };
+        liveness_contract_init(&blocker, "stall.rearm.blocker");
+        blocker.ctx = &blocked;
+        blocker.on_stall = wait_stall;
+        supervisor_child_id blocker_id = supervisor_register(&blocker);
+        bool registered = blocker_id >= 0;
+        supervisor_child_id ids[5];
+        for (int i = 0; i < 5; i++) {
+            liveness_contract_init(&targets[i], names[i]);
+            probe.delivery[i].owner = &probe;
+            probe.delivery[i].index = i;
+            targets[i].ctx = &probe.delivery[i];
+            targets[i].on_stall = record_rearm_delivery;
+            atomic_store(&probe.calls[i], 0);
+            atomic_store(&probe.delivered_reason[i], -1);
+            ids[i] = supervisor_register(&targets[i]);
+            registered = registered && ids[i] >= 0;
+            if (i < 4) {
+                probe.contracts[i] = &targets[i];
+                probe.ids[i] = ids[i];
+                probe.reasons[i] = reasons[i];
+            }
+        }
+        bool started = registered && supervisor_start();
+        if (started)
+            supervisor_report_stall(blocker_id,
+                                    SUPERVISOR_STALL_CHILD_REPORTED);
+        bool worker_blocked = started && wait_stall_entered(&blocked);
+        if (worker_blocked) {
+            for (int i = 0; i < 5; i++)
+                supervisor_report_stall(ids[i], reasons[i]);
+            supervisor_set_rearm_cancel_hook_for_testing(
+                republish_during_rearm, &probe);
+            supervisor_tick(ids[0]);
+            supervisor_tick(ids[1]);
+            supervisor_progress(ids[2], 1);
+            supervisor_progress_idle(ids[3]);
+            supervisor_progress(ids[4], 0);
+        }
+        int hooks_before_release = atomic_load(&probe.hook_calls);
+        bool unchanged_kept_reason =
+            atomic_load(&targets[4].stall_reason) ==
+                SUPERVISOR_STALL_NO_PROGRESS;
+        pthread_mutex_lock(&blocked.lock);
+        atomic_store(&blocked.release, true);
+        pthread_cond_broadcast(&blocked.changed);
+        pthread_mutex_unlock(&blocked.lock);
+        bool delivered = worker_blocked && wait_rearm_cancel_result(&probe);
+        supervisor_set_rearm_cancel_hook_for_testing(NULL, NULL);
+        if (started)
+            supervisor_stop();
+
+        SUP_CHECK("each reason-clearing rearm reaches its exact-token seam",
+                  hooks_before_release == 4);
+        SUP_CHECK("unchanged progress does not rearm or run the seam",
+                  unchanged_kept_reason && hooks_before_release == 4);
+        SUP_CHECK("reports published during every rearm survive once",
+                  delivered);
+        SUP_CHECK("rearmed reports retain their published reasons",
+                  atomic_load(&probe.delivered_reason[0]) == (int)reasons[0] &&
+                  atomic_load(&probe.delivered_reason[1]) == (int)reasons[1] &&
+                  atomic_load(&probe.delivered_reason[2]) == (int)reasons[2] &&
+                  atomic_load(&probe.delivered_reason[3]) == (int)reasons[3]);
+        SUP_CHECK("unchanged progress delivers its original report once",
+                  atomic_load(&probe.calls[4]) == 1 &&
+                  atomic_load(&probe.delivered_reason[4]) == (int)reasons[4]);
+        pthread_cond_destroy(&probe.changed);
+        pthread_mutex_destroy(&probe.lock);
+        pthread_cond_destroy(&blocked.changed);
+        pthread_mutex_destroy(&blocked.lock);
+    }
+#endif
 
     /* ── supervisor loop drives on_tick when period_secs>0 ──────── */
     supervisor_reset_for_testing();

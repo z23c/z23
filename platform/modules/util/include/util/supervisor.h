@@ -235,11 +235,13 @@ struct liveness_contract {
      * needs to tell "caught up" from "wedged". Child-owned. */
     _Atomic uint32_t idle_ticks;
     _Atomic uint32_t stall_fires;
-    /* One fixed stall-delivery slot. A nonzero value is the pending reason;
-     * repeated edges while occupied are counted rather than allocating an
-     * unbounded queue. The callback and observer run on the dedicated stall
-     * worker whenever the production supervisor is live. */
-    _Atomic int      stall_delivery_pending;
+    /* One fixed stall-delivery slot. Low bits hold the pending reason; upper
+     * bits hold an incarnation that advances on every publication and is
+     * preserved when cancellation clears the reason. Claim/cancel compare the
+     * whole token, so rearm plus a same-reason report cannot suffer ABA.
+     * Repeated edges while occupied are counted rather than allocating an
+     * unbounded queue. */
+    _Atomic uint64_t stall_delivery_pending;
     _Atomic uint32_t stall_delivery_coalesced;
     _Atomic uint32_t stall_delivery_discarded;
     _Atomic uint32_t restart_count;
@@ -480,6 +482,25 @@ void supervisor_request_min_tick_ms(int ms);
  * this to keep test_supervisor side-effect free. */
 #ifdef ZCL_TESTING
 void supervisor_reset_for_testing(void);
+
+/* Invoked after the stall worker classifies one observed pending report as
+ * stale and immediately before it tries to cancel that exact report. The
+ * registry lock is released around the hook so a test can rearm and publish
+ * through the real API. Contract and context must outlive the callback. */
+typedef void (*supervisor_stale_cancel_hook_fn)(
+    struct liveness_contract *contract,
+    enum supervisor_stall_reason observed,
+    void *ctx);
+void supervisor_set_stale_cancel_hook_for_testing(
+    supervisor_stale_cancel_hook_fn fn, void *ctx);
+
+/* Runs after a producer rearm clears the applicable live stall reason and
+ * immediately before it cancels the pending token captured before rearm. The
+ * hook is unlocked and may publish through the real supervisor API. */
+typedef void (*supervisor_rearm_cancel_hook_fn)(
+    struct liveness_contract *contract, void *ctx);
+void supervisor_set_rearm_cancel_hook_for_testing(
+    supervisor_rearm_cancel_hook_fn fn, void *ctx);
 
 /* Run exactly one supervisor sweep synchronously on the CALLING thread (no
  * dedicated supervisor thread, no real-time wait). Lets restart-policy tests

@@ -88,10 +88,9 @@ static void self_heal_run_once(void)
                         (int64_t)condition_engine_get_active_count());
 }
 
-/* Runs on the ROOT supervisor sweep thread (edge-triggered, once) when the
- * runner's heartbeat lapses past the deadline: a condition remedy is wedged.
- * Never a frozen liveness root — name it as an operator blocker + page. Cheap
- * (in-memory blocker + one event), honoring the sweep-thread callback contract. */
+/* Runs on the dedicated supervisor stall-delivery worker (edge-triggered,
+ * once) when the runner heartbeat lapses. Name the wedge as an operator
+ * blocker and page without delaying the root supervisor sweep. */
 static void self_heal_on_stall(struct liveness_contract *c)
 {
     (void)c;
