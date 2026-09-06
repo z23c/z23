@@ -284,10 +284,11 @@ or pass `BUILD_SOURCE_RECORD` or `ZCL_FAST_BUILD_SOURCE_RECORD`; the owning
 build process captures and verifies them.
 
 Every profile links the real embedded Tor. A build that would link a node
-establishes the four `vendor/tor/` archives first — hardlinked from the
-checkout your worktree was created from when that one already has them
-(milliseconds), compiled from the pinned submodule otherwise (about two
-minutes, once per box). `make tor-ready` is that front door on its own and
+establishes the four `vendor/tor/` archives first — copied, with independent
+inodes (a reflink where the filesystem allows), from the checkout your
+worktree was created from when that one already has them (milliseconds),
+compiled from the pinned submodule otherwise (about two minutes, once per
+box). `make tor-ready` is that front door on its own and
 `make tor-full` forces the rebuild. Tor-routed dialing and the onion service
 are then ON at runtime with no flag; `-no-tor` opts out and is refused on a
 canonical, soak or standby operator lane.

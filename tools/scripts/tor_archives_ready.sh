@@ -14,10 +14,11 @@
 #
 # Three ways to get them, cheapest first:
 #   1. Already here.                                     (no work)
-#   2. Hardlink them from a sibling checkout that has    (milliseconds)
-#      them -- every `git worktree add` lane shares its
-#      object store with a primary checkout that has
-#      usually already paid for the build.
+#   2. Copy them from a sibling checkout that has them   (milliseconds)
+#      -- every `git worktree add` lane shares its object
+#      store with a primary checkout that has usually
+#      already paid for the build; a reflink shares the
+#      blocks, an independent inode either way.
 #   3. Build them from the pinned submodule.             (minutes)
 #
 # THE STUB IS STILL REACHABLE, but only by asking for it by name:
@@ -72,11 +73,21 @@ primary_checkout() {
     esac
 }
 
-# Hardlink (never copy) the archives from a checkout that already has them.
-# Hardlink because these are large, immutable build outputs of a PINNED
-# submodule commit: one inode shared by every lane on the box is the whole
-# point, and a copy would multiply 30 MB by the number of worktrees. Falls
-# back to a copy across filesystems (EXDEV).
+# Copy (never hardlink) the archives from a checkout that already has them.
+# A shared inode looks free, but it is not, for this tree specifically:
+#   1. check-no-hardlink-seeding fails any multiply-linked dependency in a
+#      checkout, so every lane that runs make would turn the primary
+#      checkout red the moment it links one of these archives.
+#   2. The landing leaf refuses a landing worktree whose vendor inputs carry
+#      links it cannot explain
+#      (proof_generation_dependency_unexplained_links).
+#   3. The build's source identity hashes the ctime of tracked sources and
+#      transients; a link() or unlink() on a shared inode moves the
+#      primary's ctime too, and that has refused ship gates with
+#      "source build superseded".
+# So each worktree gets its own inode: a reflink where the filesystem can
+# share blocks for free, a byte copy otherwise -- that copy is the accepted
+# price. Falls back to a copy across filesystems (EXDEV) same as before.
 link_from() {
     local src="$1" a linked=0
     [ -n "$src" ] || return 1
@@ -95,15 +106,14 @@ link_from() {
     for a in "${ARCHIVES[@]}"; do
         [ -s "$ROOT/$a" ] && continue
         mkdir -p "$ROOT/${a%/*}"
-        if ln -f "$src/$a" "$ROOT/$a" 2>/dev/null ||
-           cp -a "$src/$a" "$ROOT/$a" 2>/dev/null; then
+        if cp -a --reflink=auto -- "$src/$a" "$ROOT/$a" 2>/dev/null; then
             linked=$((linked + 1))
         else
             return 1
         fi
     done
     have_all || return 1
-    echo "tor-ready: hardlinked $linked vendored Tor archive(s) from $src (real-Tor link, no rebuild)"
+    echo "tor-ready: copied $linked vendored Tor archive(s) from $src (independent inodes; real-Tor link, no rebuild)"
     return 0
 }
 
@@ -168,6 +178,45 @@ case "${1:-ready}" in
             echo "tor_archives_ready: selftest FAILED — ZCL_TOR=yes was accepted" >&2
             exit 1
         fi
+        # link_from must give each worktree its own inode, never a link
+        # shared with the primary checkout (see the comment above the
+        # function). Build a fixture: a fake primary that has all four
+        # archives, and a fake empty worktree, then assert the copy landed
+        # with link count 1 and an inode that differs from the source's.
+        fixture="$HOME/.local/state/zclassic23/scratch/torlink/selftest.$$"
+        cleanup_fixture() { rm -rf -- "$fixture"; }
+        trap cleanup_fixture EXIT
+        fake_primary="$fixture/primary"
+        fake_wt="$fixture/worktree"
+        mkdir -p "$fake_primary" "$fake_wt"
+        for a in "${ARCHIVES[@]}"; do
+            mkdir -p "$fake_primary/${a%/*}"
+            printf 'fixture tor archive bytes\n' >"$fake_primary/$a"
+        done
+        (
+            ROOT="$fake_wt"
+            cd "$fake_wt"
+            link_from "$fake_primary" >/dev/null
+        )
+        for a in "${ARCHIVES[@]}"; do
+            dst="$fake_wt/$a"
+            src="$fake_primary/$a"
+            if [ ! -s "$dst" ]; then
+                echo "tor_archives_ready: selftest FAILED — link_from did not populate $a" >&2
+                exit 1
+            fi
+            nlink="$(ls -l "$dst" | awk '{print $2}')"
+            if [ "$nlink" != 1 ]; then
+                echo "tor_archives_ready: selftest FAILED — $a has link count $nlink, want 1 (shared inode)" >&2
+                exit 1
+            fi
+            if [ "$(ls -i "$dst" | awk '{print $1}')" = "$(ls -i "$src" | awk '{print $1}')" ]; then
+                echo "tor_archives_ready: selftest FAILED — $a shares an inode with the primary checkout" >&2
+                exit 1
+            fi
+        done
+        cleanup_fixture
+        trap - EXIT
         echo "tor_archives_ready: selftest PASS"
         ;;
     *) usage ;;

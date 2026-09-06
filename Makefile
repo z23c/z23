@@ -1416,7 +1416,7 @@ endif
 ifeq ($(ZCL_TOR),stub)
 $(warning ZCL_TOR=stub - LINKING THE OFFLINE TOR STUB. This binary is stamped tor=stub: it cannot reach the onion network, it refuses -tor and onion-node mode at runtime, and no ship or install step will accept it. Drop ZCL_TOR=stub for a real-Tor node.)
 else ifneq ($(strip $(TOR_MISSING_ARCHIVES)),)
-$(warning no Tor archives under $(ZCL_TOR_TREE) - anything linked now gets the OFFLINE TOR STUB and is stamped tor=stub. Run `make tor-full` (or `make tor-ready`, which hardlinks them from a sibling checkout when it can).)
+$(warning no Tor archives under $(ZCL_TOR_TREE) - anything linked now gets the OFFLINE TOR STUB and is stamped tor=stub. Run `make tor-full` (or `make tor-ready`, which copies them from a sibling checkout when it can).)
 endif
 # All dependencies bundled in vendor/lib as static archives.
 # Zero system library requirements beyond libc.
