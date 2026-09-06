@@ -1187,10 +1187,14 @@ int check_posix_ere_only_selftest(void)
     }
     if (setenv("ZCL_LINT_PRODUCTION_SCAN", "1", 1) != 0)
         bad = 1;
-    bad |= (ere_should_report(excl, hit) != 0)
-        | (ere_should_report(real, hit) != 'b')
-        | !lint_path_is_excluded(excl)
-        | lint_path_is_excluded(real);
+    bool r1 = (ere_should_report(excl, hit) != 0);
+    bool r2 = (ere_should_report(real, hit) != 'b');
+    bool r3 = !lint_path_is_excluded(excl);
+    bool r4 = lint_path_is_excluded(real);
+    bad |= r1;
+    bad |= r2;
+    bad |= r3;
+    bad |= r4;
     if (had)
         (void)setenv("ZCL_LINT_PRODUCTION_SCAN", saved, 1);
     else
