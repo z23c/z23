@@ -3467,6 +3467,11 @@ static bool generation_prepare(const struct proof_paths *paths,
          * generation is one more of them. */
         "vendor/sqlite3.c",
         "vendor/tor/libtor.a",
+        /* The manifest must travel with the archives it attests: a
+         * generation without it sees archives but no provenance, rebuilds
+         * Tor from source in RAM, and the next warm restart then re-copies
+         * the original libtor.a under a manifest that no longer matches it. */
+        "vendor/tor/.provenance",
         "vendor/tor/src/ext/ed25519/donna/libed25519_donna.a",
         "vendor/tor/src/ext/ed25519/ref10/libed25519_ref10.a",
         "vendor/tor/src/ext/keccak-tiny/libkeccak-tiny.a",
