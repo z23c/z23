@@ -199,7 +199,8 @@ ZCL_WINDOWS_ACCEPTANCE_codeindex_freshness_SOURCES := \
 	platform/modules/sha3/src/sha3.c
 ZCL_WINDOWS_ACCEPTANCE_codeindex_freshness_FLAGS := \
 	-DCI_WINDOWS_FRESHNESS_ONLY -Icognition/modules/codeindex/src
-ZCL_WINDOWS_ACCEPTANCE_codeindex_freshness_LIBS := -ladvapi32
+ZCL_WINDOWS_ACCEPTANCE_codeindex_freshness_LIBS := \
+	-ladvapi32 $(ZCL_WINDOWS_ACCEPTANCE_PTHREAD_LIB)
 
 ZCL_WINDOWS_ACCEPTANCE_mind_state_SOURCES := \
 	tests/harness/src/mind_state_windows_acceptance.c \
