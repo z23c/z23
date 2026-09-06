@@ -1,6 +1,5 @@
-/* Copyright 2026 Rhett Creighton - Apache License 2.0 */
-
-/*
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ *
  * Gates: check-no-new-borrowed-seed
  * Default landing spot for a FUTURE gate port: a shrink-only caller-baseline
  * ratchet (walk_src over production roots plus a comment-stripped baseline
