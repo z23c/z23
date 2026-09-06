@@ -71,16 +71,6 @@ PATH="$PORTABLE_CC_DIR:$PATH" VENDOR_CC=cc "$SCRIPT_DIR/build_vendor.sh" \
     libtor_stub.a libsqlite3.a libz.a libcrypto.a libssl.a \
     libevent.a libevent_openssl.a libevent_pthreads.a
 
-# Vendor archives and generated headers are source-identity inputs. Capture
-# only after the pinned archive rebuild has settled, then close the epoch after
-# every product is linked. This prevents a late source edit from leaving an
-# earlier node beside later helper products while the aggregate prints PASS.
-SOURCE_BEFORE="$($REPO_ROOT/tools/dev/source-identity.sh capture)"
-zcl_is_sha256 "$SOURCE_BEFORE" || {
-    echo "c23-portable-release: could not capture settled source identity" >&2
-    exit 1
-}
-
 # The portable release carries REAL Tor.
 #
 # It used to pass TOR_FULL= and ship the stub on purpose. The stated reason
@@ -92,6 +82,16 @@ zcl_is_sha256 "$SOURCE_BEFORE" || {
 # through the portable wrapper, at the same floor, before the products link.
 # build_tor_full.sh honors VENDOR_CC on a host build for exactly this call.
 PATH="$PORTABLE_CC_DIR:$PATH" VENDOR_CC=cc "$SCRIPT_DIR/build_tor_full.sh"
+
+# Vendor archives (including Tor) and generated headers are source-identity
+# inputs. Capture after all preparation has settled, then close the epoch
+# after every product is linked. This prevents a late source edit from leaving
+# an earlier node beside later helper products while the aggregate prints PASS.
+SOURCE_BEFORE="$($REPO_ROOT/tools/dev/source-identity.sh capture)"
+zcl_is_sha256 "$SOURCE_BEFORE" || {
+    echo "c23-portable-release: could not capture settled source identity" >&2
+    exit 1
+}
 
 products=(zclassic23 zcl-rpc zcl-nodectl zclassic23-package-sign zclassic23-package-verify zclassic23-acme)
 # The two tiny stable-name helpers are FORCE-built by their canonical rules;

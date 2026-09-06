@@ -43,7 +43,7 @@ ss	tools/scripts/ci_install_gate.sh	1
 ss	tools/scripts/cold_start_to_tip_stopwatch.sh	1
 ss	tools/scripts/devbox_init.sh	2
 ss	tools/scripts/isolated_mainnet_env.sh	6
-ss	tools/scripts/isolated_node_env.sh	9
+ss	tools/scripts/isolated_node_env.sh	4
 ss	tools/scripts/lane_health.sh	2
 ss	tools/scripts/netdisrupt_two_node_drill.sh	5
 ss	tools/scripts/onion_pair_watch.sh	1

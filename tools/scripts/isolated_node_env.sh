@@ -15,10 +15,10 @@
 #   2. Derive an isolated 39xxx port quad (port/rpcport/fsport/httpsport)
 #      plus a dead -connect sink (39999). REFUSE if any chosen port is in
 #      the hardcoded live set.
-#   3. ss(8) LISTEN preflight: REFUSE if ANY chosen port is already
+#   3. Cross-host LISTEN preflight: REFUSE if ANY chosen port is already
 #      bound — a collision means the operator's port math is wrong; we
 #      abort loud rather than silently dodging onto another port. This
-#      ss LISTEN check is the AUTHORITATIVE collision guard.
+#      LISTEN check refuses unavailable observations; bind remains final.
 #   4. Install an EXIT/INT/TERM cleanup trap that kills the spawned
 #      node's whole PROCESS GROUP and rm -rf's the /tmp datadir (only
 #      after re-asserting the datadir is under /tmp and non-empty).
@@ -37,13 +37,28 @@
 #   - The sourcing script MUST NOT install its own conflicting EXIT trap.
 #
 # WHY a process-GROUP kill: the node embeds Tor as an in-process pthread
-# (we never enable -tor here), and does not daemonize, so it is a single
+# and does not daemonize, so it is a single
 # process — but spawning under setsid and killing the GROUP is strictly
 # safer (no orphan can survive a harness crash). The final belt-and-
 # suspenders pkill matches ONLY our throwaway "-datadir=$ISO_DD" string,
 # which structurally cannot match the live "-datadir=%h/.zclassic-c23".
 
 set -euo pipefail
+# shellcheck source=tools/scripts/port_probe.sh
+. "$(cd "${BASH_SOURCE[0]%/*}" && pwd)/port_probe.sh"
+ISO_PROCESS_GROUP_EXEC="${ZCL_PROCESS_GROUP_EXEC:-$(cd "${BASH_SOURCE[0]%/*}/../.." && pwd)/build/bin/process-group-exec}"
+
+# Match node_lifecycle.sh's native-first launcher. exec preserves the
+# background shell PID as the node's group leader for existing cleanup.
+iso_process_group_exec() {
+    if [ -x "$ISO_PROCESS_GROUP_EXEC" ]; then
+        exec "$ISO_PROCESS_GROUP_EXEC" "$@"
+    elif command -v setsid >/dev/null 2>&1; then
+        exec setsid "$@"
+    else
+        iso_die "no process-group launcher; run make process-group-exec"
+    fi
+}
 
 # ── Live-port refuse-set ───────────────────────────────────────────
 # Every port any live zclassic23 / zclassicd / dev-peer is known to bind.
@@ -146,13 +161,14 @@ iso_assert_not_live_port() {
 
 # Abort if a chosen port is already LISTENING (the authoritative guard).
 iso_assert_port_free() {
-    local p="$1"
-    # ss -tlnH: TCP, listening, numeric, no header. Match the exact
-    # local port so we don't false-positive on a substring.
-    if [ -n "$(ss -tlnH "sport = :$p" 2>/dev/null)" ]; then
+    local p="$1" rc
+    if z23_tcp_port_listening "$p"; then
         iso_die "port $p is already LISTENING — refusing (operator port math is wrong)"
+    else
+        rc=$?
     fi
-    return 0
+    [ "$rc" -eq 1 ] && return 0
+    iso_die "port $p availability is UNOBSERVED — refusing"
 }
 
 # ── Cleanup: kill the process group + remove the /tmp datadir ───────
@@ -206,7 +222,11 @@ iso_cleanup() {
 #   first so a bad base aborts before anything is created.
 iso_init() {
     iso_drop_inherited_ttys
-    command -v ss   >/dev/null 2>&1 || iso_die "ss(8) not found (need iproute2 for the port preflight)"
+    command -v ss >/dev/null 2>&1 || command -v lsof >/dev/null 2>&1 ||
+        command -v netstat >/dev/null 2>&1 ||
+        iso_die "port preflight unavailable (need ss, lsof, or netstat)"
+    [ -x "$ISO_PROCESS_GROUP_EXEC" ] || command -v setsid >/dev/null 2>&1 ||
+        iso_die "no process-group launcher; run make process-group-exec"
     command -v mktemp >/dev/null 2>&1 || iso_die "mktemp not found"
     [ -x "$ISO_NODE_BIN" ] || iso_die "$ISO_NODE_BIN not built — run make first"
     [ -x "$ISO_RPC_BIN" ]  || iso_die "$ISO_RPC_BIN not built — run make zcl-rpc"
@@ -315,7 +335,7 @@ iso_spawn_node() {
     # keeps the TUI as stdin can wall(1) "Broadcast message from user@host"
     # onto every logged-in terminal.
     # shellcheck disable=SC2086
-    setsid "$ISO_NODE_BIN" \
+    iso_process_group_exec "$ISO_NODE_BIN" \
         -datadir="$ISO_DD" -regtest \
         -port="$ISO_PORT" -rpcport="$ISO_RPCPORT" \
         -fsport="$ISO_FSPORT" -httpsport="$ISO_HTTPSPORT" \
@@ -382,7 +402,7 @@ iso_spawn_peer() {
     # peer must not be dialling the primary when the primary dials it.
     # Either way the pair is a closed two-node loop.
     # shellcheck disable=SC2086
-    setsid "$ISO_NODE_BIN" \
+    iso_process_group_exec "$ISO_NODE_BIN" \
         -datadir="$ISO_PEER_DD" -regtest \
         -port="$ISO_PEER_PORT" -rpcport="$ISO_PEER_RPCPORT" \
         -fsport="$ISO_PEER_FSPORT" -httpsport="$ISO_PEER_HTTPSPORT" \

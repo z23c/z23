@@ -584,7 +584,7 @@ iso_cleanup() {
 # ── A: listen + tor + onion-persist (not iso_spawn_node: that is -regtest)
 STAGE=spawn_a
 T0=$(now_s)
-setsid "$ISO_NODE_BIN" \
+iso_process_group_exec "$ISO_NODE_BIN" \
     -datadir="$ISO_DD" \
     -port="$ISO_PORT" -rpcport="$ISO_RPCPORT" \
     -fsport="$ISO_FSPORT" -httpsport="$ISO_HTTPSPORT" \
@@ -658,7 +658,7 @@ done
 ISO_PEER_DD="$ISO_DD/peer"
 mkdir -p "$ISO_PEER_DD"
 
-setsid "$ISO_NODE_BIN" \
+iso_process_group_exec "$ISO_NODE_BIN" \
     -datadir="$ISO_PEER_DD" \
     -port="$ISO_PEER_PORT" -rpcport="$ISO_PEER_RPCPORT" \
     -fsport="$ISO_PEER_FSPORT" -httpsport="$ISO_PEER_HTTPSPORT" \

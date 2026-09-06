@@ -137,7 +137,10 @@ link_from() {
     for a in "${ARCHIVES[@]}"; do
         [ -s "$ROOT/$a" ] && continue
         mkdir -p "$ROOT/${a%/*}"
-        if cp -a --reflink=auto -- "$src/$a" "$ROOT/$a" 2>/dev/null; then
+        # GNU cp can share blocks; BSD cp lacks --reflink. Both paths copy
+        # into an independent inode instead of linking the donor's archive.
+        if cp -a --reflink=auto -- "$src/$a" "$ROOT/$a" 2>/dev/null ||
+           cp -p "$src/$a" "$ROOT/$a"; then
             linked=$((linked + 1))
         else
             return 1
@@ -224,7 +227,7 @@ case "${1:-ready}" in
         # function). Build a fixture: a fake primary that has all four
         # archives, and a fake empty worktree, then assert the copy landed
         # with link count 1 and an inode that differs from the source's.
-        fixture="$HOME/.local/state/zclassic23/scratch/torlink/selftest.$$"
+        fixture="$(mktemp -d "${TMPDIR:-/tmp}/zcl-tor-copy.XXXXXX")"
         cleanup_fixture() { rm -rf -- "$fixture"; }
         trap cleanup_fixture EXIT
         fake_primary="$fixture/primary"
@@ -263,6 +266,10 @@ case "${1:-ready}" in
             src="$fake_primary/$a"
             if [ ! -s "$dst" ]; then
                 echo "tor_archives_ready: selftest FAILED — link_from did not populate $a" >&2
+                exit 1
+            fi
+            if ! cmp -s "$src" "$dst"; then
+                echo "tor_archives_ready: selftest FAILED — $a differs from the source archive" >&2
                 exit 1
             fi
             nlink="$(ls -l "$dst" | awk '{print $2}')"

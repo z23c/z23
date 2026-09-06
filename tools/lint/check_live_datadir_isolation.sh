@@ -240,6 +240,34 @@ if [ "${1:-}" = "--selftest" ]; then
     trap 'rm -rf "$tmp"' EXIT
     mkdir -p "$tmp/t" "$tmp/d" "$tmp/defs"
 
+    # Exercise the production isolation adapter without starting a node or
+    # querying any host sockets. Only the port-observation backend is faked.
+    for port_verdict in 0 1 2; do
+        port_rc=0
+        port_output="$( (
+            . "$ROOT/tools/scripts/isolated_node_env.sh"
+            z23_tcp_port_listening() { return "$port_verdict"; }
+            iso_assert_port_free 39070
+        ) 2>&1 )" || port_rc=$?
+        case "$port_verdict" in
+            0)
+                if [ "$port_rc" -eq 0 ] || str_lacks "$port_output" LISTENING; then
+                    echo "$GATE: SELFTEST FAILED — listening port was not refused by name" >&2
+                    exit 2
+                fi ;;
+            1)
+                if [ "$port_rc" -ne 0 ]; then
+                    echo "$GATE: SELFTEST FAILED — observed free port refused: $port_output" >&2
+                    exit 2
+                fi ;;
+            2)
+                if [ "$port_rc" -eq 0 ] || str_lacks "$port_output" UNOBSERVED; then
+                    echo "$GATE: SELFTEST FAILED — unobserved port was not refused by name" >&2
+                    exit 2
+                fi ;;
+        esac
+    done
+
     # A minimal .def carrying one datadir leaf and one that is not.
     cat > "$tmp/defs/sand.def" <<'DEF'
 ZCL_COMMAND_READY_READ(

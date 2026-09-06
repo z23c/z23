@@ -4028,6 +4028,10 @@ t-fast-exact-locked: $(TEST_PARALLEL_FAST_CANDIDATE) dev-package-verifier-ensure
 	$(ZCL_TEST_STACK_SETUP) && \
 	  $(LINKED_TEST_ENV) $(TEST_PARALLEL_FAST_ACTIVE) --exact=$(EXACT_ONLY_MATCHED) $(T_FAST_EXACT_ARGS)
 
+ifeq ($(ZCL_HOST_OS),Darwin)
+test_parallel test-parallel t-fast t-fast-exact dev-proof-bundle: process-group-exec
+endif
+
 # Build every mutable prerequisite of the native proof runner without running
 # a test. dev_proof.c admits these exact artifacts into its private generation
 # and invokes that admitted runner once; no fallback target may both build and
