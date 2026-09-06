@@ -51,6 +51,6 @@
 
 /* SHA3-256 ROOT of core/MANIFEST.sha3 at generation time. */
 #define ZCL_CORE_SEAL_ROOT \
-    "d70cca70fed110bfb5183c84c3ec10c6788628d051a5d927271a3a1b36024166"
+    "45b721d0466f435e5d7c3c3f59fb61a8aad6a7c485aa6677fbcddb69b31fdf99"
 
 #endif /* ZCL_HOTSWAP_CORE_SEAL_ROOT_H */

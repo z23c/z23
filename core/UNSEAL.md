@@ -92,3 +92,7 @@ later lane flips it HARD.
 - 2026-09-05T17:23:18Z — REASON: disarm the ALPN challenge once validated so renewal needs no restart
   old ROOT: d603fa3418cbfb7ad75154d2cfcb1ba38c3f104c3d415c7026a98abca75a3446
   by: owner unseal ritual (make core-unseal)
+
+- 2026-09-06T03:37:19Z — REASON: Reseal after fast-sync state-offer additions to core/modules/net (24b6b4be3, 09f04fe20, 22684b47c)
+  old ROOT: d70cca70fed110bfb5183c84c3ec10c6788628d051a5d927271a3a1b36024166
+  by: owner unseal ritual (make core-unseal)
