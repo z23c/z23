@@ -96,3 +96,7 @@ later lane flips it HARD.
 - 2026-09-06T03:37:19Z — REASON: Reseal after fast-sync state-offer additions to core/modules/net (24b6b4be3, 09f04fe20, 22684b47c)
   old ROOT: d70cca70fed110bfb5183c84c3ec10c6788628d051a5d927271a3a1b36024166
   by: owner unseal ritual (make core-unseal)
+
+- 2026-09-06T19:29:27Z — REASON: reseal https_server_install.c land
+  old ROOT: 45b721d0466f435e5d7c3c3f59fb61a8aad6a7c485aa6677fbcddb69b31fdf99
+  by: owner unseal ritual (make core-unseal)
