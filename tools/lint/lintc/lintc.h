@@ -93,6 +93,40 @@ int clock_grade(int v, const char *mode);
 #define LINT_FAMILY_CEILING 1500
 
 int lint_families_ledger(void);
+/* Shared shrink-only ratchet baseline. A ratchet gate measures one integer
+ * M per scanned item (complexity, lines, whatever its cap is on) and pins
+ * the legacy over-cap items in a baseline file, one `key:M` row per line
+ * (`#` comments and blank lines skipped; M is the text after the LAST
+ * colon, so keys may themselves contain colons, e.g. `path:function:M`).
+ * Exact-pin semantics: an over-cap item whose key is not pinned is NEW
+ * (the caller reports it, since only the caller knows its cap and line);
+ * a pin whose item grew or shrank fails lint_base_finish; a pin whose key
+ * was never observed fails as stale. Pins may only ever fall.
+ *
+ * Keys must be unique per scan. When a scan can legitimately produce the
+ * same logical name twice for one key scope (e.g. a function defined once
+ * per platform #ifdef branch in a single file), the scan side suffixes
+ * repeats `name#2`, `name#3`, ... in scan order so every pin stays an
+ * exact match; lint_base_load rejects duplicate rows fail-closed.
+ *
+ * Call flow: lint_base_load once; lint_base_observe for EVERY scanned item
+ * (any M — a pinned item that dropped under the cap must still be seen so
+ * the ratchet-down is named, not misreported as stale); the caller emits
+ * its own NEW-item diagnostics; lint_base_finish emits the grew/shrank/
+ * stale diagnostics and returns their count. Generation (the gate's
+ * --write-baseline upkeep path): lint_base_pin per over-cap item, then
+ * lint_base_write. Storage is caller-owned fixed buffers; declare the
+ * struct in static storage (it is ~2.5 MB). */
+enum { LB_MAX = 8192, LB_KEY = 320 };
+struct lb_row { char key[LB_KEY]; int pinned, cur, seen; };
+struct lint_base { struct lb_row row[LB_MAX]; int n; };
+
+int lint_base_load(struct lint_base *b, const char *path, FILE *err);
+int lint_base_observe(struct lint_base *b, const char *key, int m);
+int lint_base_finish(const struct lint_base *b, FILE *out);
+int lint_base_pin(struct lint_base *b, const char *key, int m);
+int lint_base_write(struct lint_base *b, const char *path, const char *hdr);
+
 
 int check_no_python_run(int argc, char **argv);
 int check_no_python_selftest(void);

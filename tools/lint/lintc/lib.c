@@ -939,3 +939,156 @@ int lint_families_ledger(void)
     }
     return breach;
 }
+
+/* ── shared shrink-only ratchet baseline (contract in lintc.h) ────────── */
+
+static int lb_cmp(const void *a, const void *b)
+{
+    return strcmp(((const struct lb_row *)a)->key,
+                  ((const struct lb_row *)b)->key);
+}
+
+/* Parse one baseline line into row r. Returns -1 for a comment/blank line,
+ * 0 for a parsed row, 2 for a malformed line (named on err). */
+static int lb_parse_line(char *line, struct lb_row *r, FILE *err)
+{
+    char *p = line;
+    while (*p == ' ' || *p == '\t')
+        p++;
+    if (*p == '#' || *p == '\n' || *p == '\0')
+        return -1;
+    char *nl = strchr(p, '\n');
+    if (nl)
+        *nl = '\0';
+    char *colon = strrchr(p, ':');
+    if (!colon || colon == p) {
+        fprintf(err, "z23-lint: FATAL — malformed baseline line: %s\n", p);
+        return 2;
+    }
+    *colon = '\0';
+    char *end = NULL;
+    long v = strtol(colon + 1, &end, 10);
+    if (!end || *end != '\0' || v < 1 || v > 100000) {
+        fprintf(err, "z23-lint: FATAL — malformed baseline M in line: "
+                     "%s:%s\n", p, colon + 1);
+        return 2;
+    }
+    if (strlen(p) >= LB_KEY)
+        return die("z23-lint: baseline key too long: %s\n", p);
+    memcpy(r->key, p, strlen(p) + 1);
+    r->pinned = (int)v;
+    r->cur = 0;
+    r->seen = 0;
+    return 0;
+}
+
+int lint_base_load(struct lint_base *b, const char *path, FILE *err)
+{
+    FILE *f = fopen(path, "r");
+    if (!f) {
+        fprintf(err, "z23-lint: FATAL — missing baseline %s (create it, one "
+                     "key:M per line, or empty)\n", path);
+        return 2;
+    }
+    char *line = NULL;
+    size_t cap = 0;
+    int rc = 0;
+    b->n = 0;
+    while (rc == 0 && getline(&line, &cap, f) >= 0) {
+        if (b->n >= LB_MAX) {
+            rc = die("z23-lint: baseline overflow: %s\n", path);
+            break;
+        }
+        int pr = lb_parse_line(line, &b->row[b->n], err);
+        if (pr < 0)
+            continue;
+        if (pr) {
+            rc = pr;
+            break;
+        }
+        b->n++;
+    }
+    rc = fin(f, line, path, rc);
+    if (rc)
+        return rc;
+    qsort(b->row, (size_t)b->n, sizeof b->row[0], lb_cmp);
+    for (int i = 1; i < b->n; i++) {
+        if (strcmp(b->row[i - 1].key, b->row[i].key) == 0) {
+            fprintf(err, "z23-lint: FATAL — duplicate baseline entry %s\n",
+                    b->row[i].key);
+            return 2;
+        }
+    }
+    return 0;
+}
+
+int lint_base_observe(struct lint_base *b, const char *key, int m)
+{
+    struct lb_row k;
+    memset(&k, 0, sizeof k);
+    if (strlen(key) >= LB_KEY)
+        return -1;
+    memcpy(k.key, key, strlen(key) + 1);
+    struct lb_row *r = bsearch(&k, b->row, (size_t)b->n, sizeof b->row[0],
+                               lb_cmp);
+    if (!r)
+        return -1;
+    r->seen = 1;
+    r->cur = m;
+    return (int)(r - b->row);
+}
+
+int lint_base_finish(const struct lint_base *b, FILE *out)
+{
+    int viol = 0;
+    for (int i = 0; i < b->n; i++) {
+        const struct lb_row *r = &b->row[i];
+        int bad;
+        if (!r->seen)
+            bad = fprintf(out, "%s is pinned at M=%d but no longer exists — "
+                          "stale baseline, delete the line\n",
+                          r->key, r->pinned) < 0;
+        else if (r->cur > r->pinned)
+            bad = fprintf(out, "%s grew M=%d -> M=%d past its baseline pin\n",
+                          r->key, r->pinned, r->cur) < 0;
+        else if (r->cur < r->pinned)
+            bad = fprintf(out, "%s shrank M=%d -> M=%d — ratchet the "
+                          "baseline entry down to %d\n",
+                          r->key, r->pinned, r->cur, r->cur) < 0;
+        else
+            continue;
+        if (bad) {
+            (void)die("z23-lint: write failed\n", "");
+            return -1;
+        }
+        viol++;
+    }
+    return viol;
+}
+
+int lint_base_pin(struct lint_base *b, const char *key, int m)
+{
+    if (b->n >= LB_MAX || strlen(key) >= LB_KEY)
+        return die("z23-lint: baseline overflow\n", "");
+    struct lb_row *r = &b->row[b->n];
+    memcpy(r->key, key, strlen(key) + 1);
+    r->pinned = m;
+    r->cur = 0;
+    r->seen = 0;
+    b->n++;
+    return 0;
+}
+
+int lint_base_write(struct lint_base *b, const char *path, const char *hdr)
+{
+    qsort(b->row, (size_t)b->n, sizeof b->row[0], lb_cmp);
+    FILE *f = fopen(path, "w");
+    if (!f)
+        return die("z23-lint: cannot open %s\n", path);
+    int rc = hdr && fputs(hdr, f) < 0;
+    for (int i = 0; !rc && i < b->n; i++)
+        rc = fprintf(f, "%s:%d\n", b->row[i].key, b->row[i].pinned) < 0;
+    if (fclose(f) != 0 && rc == 0)
+        return die("z23-lint: fclose failed: %s\n", path);
+    return rc ? die("z23-lint: write failed\n", "") : 0;
+}

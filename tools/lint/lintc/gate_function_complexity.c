@@ -30,7 +30,7 @@
 #include <string.h>
 #include "lintc.h"
 
-enum { CYC_MAX = 15, CYC_NAME = 96, CYC_BASE_MAX = 8192, CYC_TOP = 20 };
+enum { CYC_MAX = 15, CYC_NAME = 96, CYC_TOP = 20 };
 enum { LX_CODE = 0, LX_LINE, LX_BLOCK, LX_STR, LX_CHR };
 
 static const char k_cyc_base_rel[] =
@@ -426,109 +426,16 @@ static int cyc_on_walk_file(const char *path, void *ctx)
     return cyc_scan_open(path, rel, w);
 }
 
-/* ── the baseline ──────────────────────────────────────────────────────── */
+/* ── the baseline ────────────────────────────────────────────────────────
+ * Exact-pin compare is the shared shrink-only ratchet helper in lib.c
+ * (lint_base_*; contract in lintc.h). Keys are `path:function`, with the
+ * lexer's `function#N` suffix for repeat definitions. */
 
-struct cyc_base_ent {
-    char path[RS_PATH];
-    char name[CYC_NAME];
-    int pinned, cur, seen;
-};
+static struct lint_base g_cyc_pins;
 
-static struct cyc_base_ent g_cyc_base[CYC_BASE_MAX];
-static int g_cyc_nbase;
-
-static int cyc_base_cmp(const void *a, const void *b)
+static int cyc_key(char *key, size_t cap, const char *path, const char *name)
 {
-    const struct cyc_base_ent *x = a, *y = b;
-    int c = strcmp(x->path, y->path);
-    return c ? c : strcmp(x->name, y->name);
-}
-
-static int cyc_base_load(const char *path, FILE *err)
-{
-    FILE *f = fopen(path, "r");
-    if (!f) {
-        fprintf(err, "check_cyclomatic_complexity: FATAL — missing baseline "
-                     "%s (create it, one path:function:M per line, or empty)\n",
-                path);
-        return 2;
-    }
-    char *line = NULL;
-    size_t cap = 0;
-    int rc = 0;
-    g_cyc_nbase = 0;
-    while (rc == 0 && getline(&line, &cap, f) >= 0) {
-        char *p = line;
-        while (*p == ' ' || *p == '\t')
-            p++;
-        if (*p == '#' || *p == '\n' || *p == '\0')
-            continue;
-        char *nl = strchr(p, '\n');
-        if (nl)
-            *nl = '\0';
-        char *c2 = strrchr(p, ':');
-        if (!c2 || c2 == p) {
-            fprintf(err, "check_cyclomatic_complexity: FATAL — malformed "
-                         "baseline line: %s\n", p);
-            rc = 2;
-            break;
-        }
-        *c2 = '\0';
-        char *c1 = strrchr(p, ':');
-        if (!c1 || c1 == p) {
-            fprintf(err, "check_cyclomatic_complexity: FATAL — malformed "
-                         "baseline line: %s\n", p);
-            rc = 2;
-            break;
-        }
-        *c1 = '\0';
-        if (g_cyc_nbase >= CYC_BASE_MAX || strlen(p) >= RS_PATH
-            || strlen(c1 + 1) >= CYC_NAME) {
-            rc = die("z23-lint: cyclomatic baseline overflow\n", "");
-            break;
-        }
-        struct cyc_base_ent *e = &g_cyc_base[g_cyc_nbase];
-        memcpy(e->path, p, strlen(p) + 1);
-        memcpy(e->name, c1 + 1, strlen(c1 + 1) + 1);
-        char *end = NULL;
-        long v = strtol(c2 + 1, &end, 10);
-        if (!end || *end != '\0' || v < 1 || v > 100000) {
-            fprintf(err, "check_cyclomatic_complexity: FATAL — malformed "
-                         "baseline M in line: %s:%s:%s\n", p, c1 + 1, c2 + 1);
-            rc = 2;
-            break;
-        }
-        e->pinned = (int)v;
-        e->cur = 0;
-        e->seen = 0;
-        g_cyc_nbase++;
-    }
-    rc = fin(f, line, path, rc);
-    if (rc)
-        return rc;
-    qsort(g_cyc_base, (size_t)g_cyc_nbase, sizeof g_cyc_base[0],
-          cyc_base_cmp);
-    for (int i = 1; i < g_cyc_nbase; i++) {
-        if (cyc_base_cmp(&g_cyc_base[i - 1], &g_cyc_base[i]) == 0) {
-            fprintf(err, "check_cyclomatic_complexity: FATAL — duplicate "
-                         "baseline entry %s:%s\n",
-                    g_cyc_base[i].path, g_cyc_base[i].name);
-            return 2;
-        }
-    }
-    return 0;
-}
-
-static struct cyc_base_ent *cyc_base_find(const char *path, const char *name)
-{
-    struct cyc_base_ent key;
-    if (strlen(path) >= RS_PATH || strlen(name) >= CYC_NAME)
-        return NULL;
-    memset(&key, 0, sizeof key);
-    memcpy(key.path, path, strlen(path) + 1);
-    memcpy(key.name, name, strlen(name) + 1);
-    return bsearch(&key, g_cyc_base, (size_t)g_cyc_nbase,
-                   sizeof g_cyc_base[0], cyc_base_cmp);
+    return ovf(snprintf(key, cap, "%s:%s", path, name), cap);
 }
 
 /* ── the run ───────────────────────────────────────────────────────────── */
@@ -581,54 +488,65 @@ static int cyc_on_func(const char *path, const char *name, int line, int m,
     if (m > 20)
         a->gt20++;
     cyc_top_feed(a, path, name, m);
-    struct cyc_base_ent *e = cyc_base_find(path, name);
-    if (e) {
-        e->seen = 1;
-        e->cur = m;
-    }
+    char key[LB_KEY];
+    if (cyc_key(key, sizeof key, path, name))
+        return 2;
+    int pinned = lint_base_observe(&g_cyc_pins, key, m) >= 0;
     if (m <= CYC_MAX)
         return 0;
     if (strcmp(a->mode, "FAIL") == 0)
         return cyc_note(a, "%s:%d: %s M=%d exceeds cap %d (FAIL mode: "
                            "baseline ignored)\n",
                         path, name, line, m, CYC_MAX);
-    if (!e)
+    if (!pinned)
         return cyc_note(a, "%s:%d: %s M=%d exceeds cap %d and is not pinned "
                            "in the baseline\n",
                         path, name, line, m, CYC_MAX);
     return 0;
 }
 
-static int cyc_base_cross_check(struct cyc_acc *a)
+/* Dump the captured violation lines from hits to err under a one-line
+ * summary plus the re-pin hint. Returns 0 in WARN mode, 1 otherwise, or a
+ * die() rc on a write/read failure. */
+static int cyc_dump_viol(const struct cyc_acc *a, FILE *hits,
+                         const char *mode, FILE *err)
 {
-    for (int i = 0; i < g_cyc_nbase; i++) {
-        struct cyc_base_ent *e = &g_cyc_base[i];
-        if (!e->seen) {
-            a->viol++;
-            if (fprintf(a->out, "%s: %s is pinned at M=%d but no longer "
-                        "exists — stale baseline, delete the line\n",
-                        e->path, e->name, e->pinned) < 0)
-                return die("z23-lint: write failed\n", "");
-        } else if (e->cur > e->pinned) {
-            a->viol++;
-            if (fprintf(a->out, "%s: %s grew M=%d -> M=%d past its baseline "
-                        "pin\n", e->path, e->name, e->pinned, e->cur) < 0)
-                return die("z23-lint: write failed\n", "");
-        } else if (e->cur < e->pinned) {
-            a->viol++;
-            if (fprintf(a->out, "%s: %s shrank M=%d -> M=%d — ratchet the "
-                        "baseline entry down to %d\n",
-                        e->path, e->name, e->pinned, e->cur, e->cur) < 0)
-                return die("z23-lint: write failed\n", "");
+    if (fprintf(err, "check_cyclomatic_complexity: %s — %d complexity "
+                "violation(s) at cap %d (mode: %s)\n",
+                strcmp(mode, "WARN") == 0 ? "WARN" : "FAIL",
+                a->viol, CYC_MAX, mode) < 0)
+        return die("z23-lint: write failed\n", "");
+    if (fseek(hits, 0, SEEK_SET) != 0)
+        return die("z23-lint: fseek failed\n", "");
+    char buf[4096];
+    size_t n;
+    int wrc = 0;
+    while ((n = fread(buf, 1, sizeof buf, hits)) > 0)
+        if (fwrite(buf, 1, n, err) != n) {
+            wrc = die("z23-lint: write failed\n", "");
+            break;
         }
-    }
-    return 0;
+    if (wrc == 0 && ferror(hits))
+        wrc = die("z23-lint: read failed\n", "");
+    if (wrc == 0
+        && fputs("  Fix: split the function under the cap. To re-pin at "
+                 "the CURRENT M, regenerate the baseline:\n"
+                 "  build/bin/z23-lint check-cyclomatic-complexity "
+                 "--write-baseline\n"
+                 "  (tools/lint/cyclomatic_complexity_baseline.txt — "
+                 "shrink-only ratchet: a pin may never rise, and a\n"
+                 "  function that got simpler must be re-pinned lower.)\n",
+                 err) < 0)
+        wrc = die("z23-lint: write failed\n", "");
+    if (wrc)
+        return wrc;
+    return strcmp(mode, "WARN") == 0 ? 0 : 1;
 }
 
 static int cyc_check(const char *root, const char *base_path,
                      const char *mode, int report, FILE *out, FILE *err)
 {
-    if (cyc_base_load(base_path, err))
+    if (!report && lint_base_load(&g_cyc_pins, base_path, err))
         return 2;
     FILE *hits = tmpfile();
     if (!hits)
@@ -645,8 +563,13 @@ static int cyc_check(const char *root, const char *base_path,
         rc = walk_src(root, 0, cyc_on_walk_file, &w);
     else
         rc = each_zpath(k_cyc_ls, cyc_on_path, &w);
-    if (rc == 0 && strcmp(mode, "FAIL") != 0)
-        rc = cyc_base_cross_check(&a);
+    if (rc == 0 && strcmp(mode, "FAIL") != 0 && !report) {
+        int cv = lint_base_finish(&g_cyc_pins, hits);
+        if (cv < 0)
+            rc = 2;
+        else
+            a.viol += cv;
+    }
     if (rc) {
         fclose(hits);
         return rc;
@@ -664,46 +587,14 @@ static int cyc_check(const char *root, const char *base_path,
         return rc2 ? die("z23-lint: write failed\n", "") : 0;
     }
     if (a.viol) {
-        if (fprintf(err, "check_cyclomatic_complexity: %s — %d complexity "
-                    "violation(s) at cap %d (mode: %s)\n",
-                    strcmp(mode, "WARN") == 0 ? "WARN" : "FAIL",
-                    a.viol, CYC_MAX, mode) < 0) {
-            fclose(hits);
-            return die("z23-lint: write failed\n", "");
-        }
-        if (fseek(hits, 0, SEEK_SET) != 0) {
-            fclose(hits);
-            return die("z23-lint: fseek failed\n", "");
-        }
-        char buf[4096];
-        size_t n;
-        int wrc = 0;
-        while ((n = fread(buf, 1, sizeof buf, hits)) > 0)
-            if (fwrite(buf, 1, n, err) != n) {
-                wrc = die("z23-lint: write failed\n", "");
-                break;
-            }
-        if (wrc == 0 && ferror(hits))
-            wrc = die("z23-lint: read failed\n", "");
-        if (wrc == 0
-            && fputs("  Fix: split the function under the cap. To re-pin at "
-                     "the CURRENT M, regenerate the baseline:\n"
-                     "  build/bin/z23-lint check-cyclomatic-complexity "
-                     "--write-baseline\n"
-                     "  (tools/lint/cyclomatic_complexity_baseline.txt — "
-                     "shrink-only ratchet: a pin may never rise, and a\n"
-                     "  function that got simpler must be re-pinned lower.)\n",
-                     err) < 0)
-            wrc = die("z23-lint: write failed\n", "");
+        rc = cyc_dump_viol(&a, hits, mode, err);
         fclose(hits);
-        if (wrc)
-            return wrc;
-        return strcmp(mode, "WARN") == 0 ? 0 : 1;
+        return rc;
     }
     if (fprintf(out, "check_cyclomatic_complexity: OK — %d functions "
                 "scanned in %d files, %d baseline pin(s) exact at cap "
                 "%d (mode: %s)\n",
-                a.funcs, w.files, g_cyc_nbase, CYC_MAX, mode) < 0) {
+                a.funcs, w.files, g_cyc_pins.n, CYC_MAX, mode) < 0) {
         fclose(hits);
         return die("z23-lint: write failed\n", "");
     }
@@ -730,17 +621,10 @@ static int cyc_collect_pin(const char *path, const char *name, int line,
     (*funcs)++;
     if (m <= CYC_MAX)
         return 0;
-    if (g_cyc_nbase >= CYC_BASE_MAX || strlen(path) >= RS_PATH
-        || strlen(name) >= CYC_NAME)
-        return die("z23-lint: cyclomatic baseline overflow\n", "");
-    struct cyc_base_ent *e = &g_cyc_base[g_cyc_nbase];
-    memcpy(e->path, path, strlen(path) + 1);
-    memcpy(e->name, name, strlen(name) + 1);
-    e->pinned = m;
-    e->cur = 0;
-    e->seen = 0;
-    g_cyc_nbase++;
-    return 0;
+    char key[LB_KEY];
+    if (cyc_key(key, sizeof key, path, name))
+        return 2;
+    return lint_base_pin(&g_cyc_pins, key, m);
 }
 
 static const char k_cyc_base_hdr[] =
@@ -757,7 +641,7 @@ static const char k_cyc_base_hdr[] =
 
 static int cyc_write_baseline(const char *root, const char *base_path)
 {
-    g_cyc_nbase = 0;
+    g_cyc_pins.n = 0;
     int funcs = 0;
     struct cyc_walk w = {
         root, root ? strlen(root) : 0, cyc_collect_pin, &funcs, 0
@@ -769,22 +653,11 @@ static int cyc_write_baseline(const char *root, const char *base_path)
         rc = each_zpath(k_cyc_ls, cyc_on_path, &w);
     if (rc)
         return rc;
-    qsort(g_cyc_base, (size_t)g_cyc_nbase, sizeof g_cyc_base[0],
-          cyc_base_cmp);
-    FILE *f = fopen(base_path, "w");
-    if (!f)
-        return die("z23-lint: cannot open %s\n", base_path);
-    rc = fputs(k_cyc_base_hdr, f) < 0;
-    for (int i = 0; !rc && i < g_cyc_nbase; i++)
-        rc = fprintf(f, "%s:%s:%d\n", g_cyc_base[i].path, g_cyc_base[i].name,
-                     g_cyc_base[i].pinned) < 0;
-    if (fclose(f) != 0 && rc == 0)
-        return die("z23-lint: fclose failed: %s\n", base_path);
-    if (rc)
-        return die("z23-lint: write failed\n", "");
+    if (lint_base_write(&g_cyc_pins, base_path, k_cyc_base_hdr))
+        return 2;
     return printf("check_cyclomatic_complexity: wrote %d pin(s) to %s "
                   "(%d functions scanned in %d files)\n",
-                  g_cyc_nbase, base_path, funcs, w.files) < 0
+                  g_cyc_pins.n, base_path, funcs, w.files) < 0
                ? die("z23-lint: write failed\n", "")
                : 0;
 }
@@ -1056,6 +929,12 @@ int check_cyclomatic_complexity_selftest(void)
         /* a pin for a missing function fails as stale */
         bad |= cyc_st_case(root, "case.c:over_cap:16\ncase.c:ghost:20\n",
                            "RATCHET", 1, "stale baseline, delete the line");
+        /* a duplicated baseline row fails closed at load */
+        bad |= cyc_st_case(root, "case.c:over_cap:16\ncase.c:over_cap:16\n",
+                           "RATCHET", 2, "duplicate baseline entry");
+        /* a row without :M fails closed at load */
+        bad |= cyc_st_case(root, "case.c:over_cap\n", "RATCHET", 2,
+                           "malformed baseline M in line");
         /* WARN reports but exits 0 */
         bad |= cyc_st_case(root, "", "WARN", 0, "not pinned");
         /* FAIL mode trips even an exactly pinned function */

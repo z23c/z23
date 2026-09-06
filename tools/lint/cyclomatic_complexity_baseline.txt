@@ -4728,8 +4728,7 @@ tools/lint/lintc/gate_doc_index.c:check_codeindex_coverage_run:30
 tools/lint/lintc/gate_doc_index.c:check_codeindex_coverage_selftest:35
 tools/lint/lintc/gate_doc_index.c:check_group_purpose_run:20
 tools/lint/lintc/gate_function_complexity.c:check_cyclomatic_complexity_selftest:18
-tools/lint/lintc/gate_function_complexity.c:cyc_base_load:24
-tools/lint/lintc/gate_function_complexity.c:cyc_check:26
+tools/lint/lintc/gate_function_complexity.c:cyc_check:18
 tools/lint/lintc/gate_function_complexity.c:cyc_code_char:52
 tools/lint/lintc/gate_function_complexity.c:cyc_feed_line:27
 tools/lint/lintc/gate_git_scan_a.c:check_framework_filename_suffix_run:19
