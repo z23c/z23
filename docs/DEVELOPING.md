@@ -608,6 +608,20 @@ submitting checkout's own `make lint` judges. The measured lint wall time
 lands in the receipt's phases file as `lint_wall_ms`, beside the
 `lint_targets` line naming what ran.
 
+Both dimensions run inside one generation worktree, so everything either of
+them builds or is handed happens once, before they start: the admitted
+executables, the test runner, the depfile tree, then a single `make` that
+builds the helper executables and -- for a landing -- `proof-lint-prebuild`,
+which names the lint umbrella's own built prerequisites and links every
+standalone tool the `check-standalone-tools-link` gate covers. After that
+step the lint dimension's make has nothing left to link and the test
+dimension runs no `make` at all, so neither can relink a binary the other is
+reading. It has a `step=prefork` line of its own in the phases file, with
+its budget and exit, and its log is `logs/prefork.log` in the attempt
+directory. Without it a landing proof's lint-gate shard could exec a
+build/bin/z23-lint that the lint dimension was relinking, and fail with
+"No such file or directory".
+
 The impact plan behind that policy can hit a capacity bound: a change whose
 reverse-caller closure or reverse-include set reaches more test groups than the
 plan can enumerate. That is not missing evidence, so it is not a refusal — the

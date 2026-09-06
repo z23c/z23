@@ -4,7 +4,7 @@ This document defines how fleet nodes land lanes on main one train at a time wit
 
 ## Purpose
 
-Main moves one train at a time. A node orders finished lanes into a train of at most 4 lanes. It rebases the train onto the exact current origin/main tip. lint-fast is green in the train worktree before the train goes further. The push-hook proof runs once, and because the train worktree is a landing root its lint dimension runs the whole gate set, not the fast subset. Then the node pushes.
+Main moves one train at a time. A node orders finished lanes into a train of at most 4 lanes. It rebases the train onto the exact current origin/main tip. lint-fast is green in the train worktree before the train goes further. The push-hook proof runs once, and because the train worktree is a landing root its lint dimension runs the whole gate set, not the fast subset. A landing proof builds every target that gate set can build in its `step=prefork` step, before the lint and test dimensions start, so neither relinks a binary the other is reading. Then the node pushes.
 
 Every push to main moves the base and invalidates every in-flight proof on every box. Because of this, trains stay small and results are posted the moment a push succeeds.
 
