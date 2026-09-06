@@ -669,6 +669,8 @@ MACOS_GENERATIONS=""
 MACOS_INCOMING=""
 MACOS_PREVIOUS_TARGET=""
 MACOS_PLIST=""
+MACOS_LAUNCHD_DOMAIN=""
+MACOS_LAUNCHD_SESSION=""
 MACOS_ACTIVE_PREFIX=""
 MACOS_ACTIVATION_PENDING=0
 
@@ -764,6 +766,33 @@ xml_escape() {
     printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'
 }
 
+select_macos_launchd_context() {
+    local uid gui_service=0 user_service=0
+    command -v launchctl >/dev/null 2>&1 || die "launchctl is required for the native macOS service install"
+    uid="$(id -u)"
+    launchctl print "gui/$uid/org.z23.zclassic" >/dev/null 2>&1 && gui_service=1
+    launchctl print "user/$uid/org.z23.zclassic" >/dev/null 2>&1 && user_service=1
+    [ "$gui_service$user_service" != 11 ] \
+        || die "z23 service exists in both GUI and Background launchd domains; refusing ambiguous activation"
+    # Preserve the existing service's domain when a GUI login appears. Moving
+    # only the new generation could leave a second node using the same datadir.
+    if [ "$gui_service" = 1 ]; then
+        MACOS_LAUNCHD_DOMAIN="gui/$uid"
+        MACOS_LAUNCHD_SESSION="Aqua"
+    elif [ "$user_service" = 1 ]; then
+        MACOS_LAUNCHD_DOMAIN="user/$uid"
+        MACOS_LAUNCHD_SESSION="Background"
+    elif launchctl print "gui/$uid" >/dev/null 2>&1; then
+        MACOS_LAUNCHD_DOMAIN="gui/$uid"
+        MACOS_LAUNCHD_SESSION="Aqua"
+    elif launchctl print "user/$uid" >/dev/null 2>&1; then
+        MACOS_LAUNCHD_DOMAIN="user/$uid"
+        MACOS_LAUNCHD_SESSION="Background"
+    else
+        die "no accessible launchd GUI or Background user domain"
+    fi
+}
+
 write_launchd_plist() {
     local prefix="$1" datadir="$2" launchd_dir="$3"
     local plist_tmp bin_xml datadir_xml
@@ -792,6 +821,7 @@ write_launchd_plist() {
         <string>-onion-persist</string>
     </array>
     <key>RunAtLoad</key><true/>
+    <key>LimitLoadToSessionType</key><string>$MACOS_LAUNCHD_SESSION</string>
     <key>KeepAlive</key><true/>
     <key>ProcessType</key><string>Background</string>
     <key>ThrottleInterval</key><integer>5</integer>
@@ -819,7 +849,8 @@ macos_switch_current() {
 macos_launchd_start_and_qualify() {
     local prefix="$1" datadir="$2" domain service pid running_path
     local expected_digest running_digest timeout_ms heartbeat_ms
-    domain="gui/$(id -u)"
+    domain="$MACOS_LAUNCHD_DOMAIN"
+    [ -n "$domain" ] || return 1
     service="$domain/org.z23.zclassic"
     timeout_ms="${Z23_LAUNCHD_READY_TIMEOUT_MS:-120000}"
     heartbeat_ms="${Z23_LAUNCHD_READY_HEARTBEAT_MS:-250}"
@@ -847,7 +878,8 @@ macos_launchd_start_and_qualify() {
 
 macos_restore_previous() {
     local prefix="$1" domain service root="$prefix/lib/z23"
-    domain="gui/$(id -u)"
+    domain="$MACOS_LAUNCHD_DOMAIN"
+    [ -n "$domain" ] || return 1
     service="$domain/org.z23.zclassic"
     launchctl bootout "$service" >/dev/null 2>&1 || true
     if [ -n "$MACOS_PREVIOUS_TARGET" ]; then
@@ -873,6 +905,9 @@ macos_activation_signal() {
 
 activate_macos_generation() {
     local prefix="$1" datadir="$2" root="$prefix/lib/z23"
+    # Keep one selected domain throughout activation and rollback, even if a
+    # GUI login appears while a headless install is being qualified.
+    select_macos_launchd_context
     MACOS_PREVIOUS_TARGET=""
     if [ -L "$root/current" ]; then
         MACOS_PREVIOUS_TARGET="$(readlink "$root/current")"
@@ -1237,13 +1272,13 @@ EOF
         "$tmp/missing-stamp" "$tmp/missing-dest" "$tmp/missing-stamp.err" \
         tor_stamp_missing "a release with no tor stamp"
 
-    # Sleeps longer than the selftest budget (Z23_INSTALL_TOR_STAMP_TIMEOUT=1).
+    # Keep the short deadline local to this deliberately sleeping fixture.
     selftest_write_node_release "$tmp/timeout-stamp" <<'EOF'
 #!/bin/sh
 sleep 5
 printf "tor: full\n"
 EOF
-    selftest_expect_stamp_refuse \
+    Z23_INSTALL_TOR_STAMP_TIMEOUT=1 selftest_expect_stamp_refuse \
         "$tmp/timeout-stamp" "$tmp/timeout-dest" "$tmp/timeout-stamp.err" \
         tor_stamp_timeout "a release whose -version exceeds the stamp deadline"
 
@@ -1865,14 +1900,20 @@ selftest_macos_transaction() {
 
     cat >"$mac/v1/z23" <<'EOF'
 #!/usr/bin/env bash
-printf 'tor: full\n'
-[ "${Z23_INSTALL_TEST_READY_FAIL:-0}" != 1 ]
+case "${1:-} ${2:-} ${3:-}" in
+    '-version  ') printf 'tor: full\n' ;;
+    'core node bootwait') [ "${Z23_INSTALL_TEST_READY_FAIL:-0}" != 1 ] ;;
+    *) exit 2 ;;
+esac
 EOF
     cat >"$mac/v2/z23" <<'EOF'
 #!/usr/bin/env bash
 # Distinct candidate bytes: readiness stays the same, identity does not.
-printf 'tor: full\n'
-[ "${Z23_INSTALL_TEST_READY_FAIL:-0}" != 1 ]
+case "${1:-} ${2:-} ${3:-}" in
+    '-version  ') printf 'tor: full\n' ;;
+    'core node bootwait') [ "${Z23_INSTALL_TEST_READY_FAIL:-0}" != 1 ] ;;
+    *) exit 2 ;;
+esac
 EOF
     chmod 755 "$mac/v1/z23" "$mac/v2/z23"
     local version
@@ -1920,14 +1961,36 @@ EOF
     cat >"$mock/launchctl" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >>"$Z23_INSTALL_TEST_LAUNCHCTL_LOG"
+service_state="$Z23_INSTALL_TEST_LAUNCHD_STATE"
+service_arg="${2:-}"
+[ "$1" != kickstart ] || service_arg="${3:-}"
+case "$service_arg" in
+    gui/*) service_state="$service_state.gui" ;;
+    user/*) service_state="$service_state.user" ;;
+esac
 case "$1" in
     print)
-        [ -e "$Z23_INSTALL_TEST_LAUNCHD_STATE" ] || exit 3
+        [ "${Z23_INSTALL_TEST_NO_DOMAIN:-0}" != 1 ] || exit 3
+        case "$2" in
+            "gui/$(id -u)")
+                [ "${Z23_INSTALL_TEST_HEADLESS:-0}" != 1 ] &&
+                    [ "${Z23_INSTALL_TEST_NO_DOMAIN:-0}" != 1 ]
+                exit $? ;;
+            "user/$(id -u)")
+                [ "${Z23_INSTALL_TEST_NO_DOMAIN:-0}" != 1 ]
+                exit $? ;;
+        esac
+        [ -e "$service_state" ] || exit 3
         printf '    pid = 4242\n'
         ;;
-    bootout) rm -f -- "$Z23_INSTALL_TEST_LAUNCHD_STATE" ;;
-    bootstrap) : >"$Z23_INSTALL_TEST_LAUNCHD_STATE" ;;
-    kickstart) [ -e "$Z23_INSTALL_TEST_LAUNCHD_STATE" ] ;;
+    bootout) rm -f -- "$service_state" ;;
+    bootstrap)
+        if [ "${Z23_INSTALL_TEST_HEADLESS:-0}" = 1 ]; then
+            [ "$2" = "user/$(id -u)" ] || exit 5
+            grep -q '<key>LimitLoadToSessionType</key><string>Background</string>' "$3" || exit 5
+        fi
+        : >"$service_state" ;;
+    kickstart) [ -e "$service_state" ] ;;
     *) exit 2 ;;
 esac
 EOF
@@ -2014,6 +2077,8 @@ EOF
         "$SCRIPT_DIR/install_z23.sh" --source="$mac/v2" \
         >/dev/null 2>"$mac/not-ready.err" || rc=$?
     [ "$rc" -eq 1 ] || die "selftest: unready Mac generation must refuse"
+    grep -q 'was rolled back' "$mac/not-ready.err" \
+        || die "selftest: unready Mac generation did not reach rollback"
     [ "$(readlink "$prefix/lib/z23/current")" = "generations/$v1_id" ] \
         || die "selftest: unready Mac generation did not restore v1"
 
@@ -2036,6 +2101,95 @@ EOF
         || die "selftest: macOS lifecycle did not use launchctl bootout"
     grep -q '^kickstart -k gui/' "$mac/launchctl.log" \
         || die "selftest: macOS lifecycle did not use launchctl kickstart"
+
+    # SSH-only hosts have no GUI domain. Background agents require an
+    # explicit session type as well as a user-domain bootstrap; prove both
+    # the first install and rollback use that same selected domain.
+    prefix="$mac/headless-prefix"
+    launchd="$mac/headless-agents"
+    datadir="$mac/headless-data"
+    run_headless_install() {
+        PATH="$mock:$PATH" Z23_INSTALL_TEST_PLATFORM=Darwin \
+            Z23_SKIP_SYSTEMD=0 Z23_INSTALL_PREFIX="$prefix" \
+            Z23_LAUNCHD_DIR="$launchd" Z23_DATADIR="$datadir" \
+            Z23_INSTALL_TEST_HEADLESS=1 \
+            Z23_INSTALL_TEST_READY_FAIL="$1" \
+            Z23_INSTALL_TEST_NO_DOMAIN="$2" \
+            Z23_INSTALL_TEST_LAUNCHCTL_LOG="$mac/headless-launchctl.log" \
+            Z23_INSTALL_TEST_LAUNCHD_STATE="$mac/headless.state" \
+            "$SCRIPT_DIR/install_z23.sh" --source="$mac/$3"
+    }
+    run_headless_install 0 0 v1 >"$mac/headless.out" 2>"$mac/headless.err" \
+        || die "selftest: Background macOS install failed"
+    [ "$(readlink "$prefix/lib/z23/current")" = "generations/$v1_id" ] \
+        || die "selftest: Background install did not activate v1"
+    rc=0
+    run_headless_install 1 0 v2 >/dev/null 2>"$mac/headless-rollback.err" || rc=$?
+    [ "$rc" -eq 1 ] || die "selftest: unready Background generation must refuse"
+    grep -q 'was rolled back' "$mac/headless-rollback.err" \
+        || die "selftest: unready Background generation did not reach rollback"
+    [ "$(readlink "$prefix/lib/z23/current")" = "generations/$v1_id" ] \
+        || die "selftest: Background rollback did not restore v1"
+    grep -q '^bootstrap user/' "$mac/headless-launchctl.log" \
+        || die "selftest: Background bootstrap did not use user domain"
+    grep -q '^bootout user/' "$mac/headless-launchctl.log" \
+        || die "selftest: Background rollback did not use user domain"
+    grep -q '^kickstart -k user/' "$mac/headless-launchctl.log" \
+        || die "selftest: Background activation did not use user domain"
+    : >"$mac/headless-launchctl.log"
+    rc=0
+    run_headless_install 0 1 v2 >/dev/null 2>"$mac/no-domain.err" || rc=$?
+    [ "$rc" -eq 1 ] || die "selftest: missing launchd domains must refuse"
+    [ "$(readlink "$prefix/lib/z23/current")" = "generations/$v1_id" ] \
+        || die "selftest: missing domain changed the current generation"
+    if grep -Eq '^(bootstrap|bootout|kickstart) ' "$mac/headless-launchctl.log"; then
+        die "selftest: missing domain attempted service mutation"
+    fi
+
+    # A GUI login must not create a second node beside the Background one.
+    : >"$mac/headless-launchctl.log"
+    PATH="$mock:$PATH" Z23_INSTALL_TEST_PLATFORM=Darwin \
+        Z23_SKIP_SYSTEMD=0 Z23_INSTALL_PREFIX="$prefix" \
+        Z23_LAUNCHD_DIR="$launchd" Z23_DATADIR="$datadir" \
+        Z23_INSTALL_TEST_HEADLESS=0 Z23_INSTALL_TEST_READY_FAIL=0 \
+        Z23_INSTALL_TEST_NO_DOMAIN=0 \
+        Z23_INSTALL_TEST_LAUNCHCTL_LOG="$mac/headless-launchctl.log" \
+        Z23_INSTALL_TEST_LAUNCHD_STATE="$mac/headless.state" \
+        "$SCRIPT_DIR/install_z23.sh" --source="$mac/v2" \
+        >"$mac/gui-login.out" 2>"$mac/gui-login.err" \
+        || die "selftest: upgrade after GUI login failed"
+    [ -e "$mac/headless.state.user" ] && [ ! -e "$mac/headless.state.gui" ] \
+        || { cat "$mac/headless-launchctl.log" >&2; die "selftest: GUI login upgrade duplicated the existing user-domain service"; }
+    grep -q '^bootstrap user/' "$mac/headless-launchctl.log" \
+        || die "selftest: GUI login upgrade did not retain the existing user domain"
+    [ "$(readlink "$prefix/lib/z23/current")" = "generations/$v2_id" ] \
+        || die "selftest: GUI login upgrade did not activate v2"
+    say "selftest: GUI login upgrade retained one user-domain service"
+
+    # An already ambiguous state must refuse before changing either service.
+    : >"$mac/headless.state.gui"
+    : >"$mac/headless-launchctl.log"
+    rc=0
+    PATH="$mock:$PATH" Z23_INSTALL_TEST_PLATFORM=Darwin \
+        Z23_SKIP_SYSTEMD=0 Z23_INSTALL_PREFIX="$prefix" \
+        Z23_LAUNCHD_DIR="$launchd" Z23_DATADIR="$datadir" \
+        Z23_INSTALL_TEST_HEADLESS=0 Z23_INSTALL_TEST_READY_FAIL=0 \
+        Z23_INSTALL_TEST_NO_DOMAIN=0 \
+        Z23_INSTALL_TEST_LAUNCHCTL_LOG="$mac/headless-launchctl.log" \
+        Z23_INSTALL_TEST_LAUNCHD_STATE="$mac/headless.state" \
+        "$SCRIPT_DIR/install_z23.sh" --source="$mac/v1" \
+        >"$mac/dual-domain.out" 2>"$mac/dual-domain.err" || rc=$?
+    [ "$rc" -eq 1 ] || die "selftest: dual-domain services must refuse"
+    grep -q 'refusing ambiguous activation' "$mac/dual-domain.err" \
+        || die "selftest: dual-domain refusal did not name ambiguity"
+    [ "$(readlink "$prefix/lib/z23/current")" = "generations/$v2_id" ] \
+        || die "selftest: dual-domain refusal changed current generation"
+    [ -e "$mac/headless.state.user" ] && [ -e "$mac/headless.state.gui" ] \
+        || die "selftest: dual-domain refusal changed existing service state"
+    if grep -Eq '^(bootstrap|bootout|kickstart) ' "$mac/headless-launchctl.log"; then
+        die "selftest: dual-domain refusal attempted service mutation"
+    fi
+    say "selftest: dual-domain ambiguity refused without service mutation"
 }
 
 # A fixture package into a scratch prefix, tampered so SHA256SUMS no longer
@@ -2102,9 +2256,9 @@ selftest_macos_tampered_manifest() {
 }
 
 selftest() {
-    # Only the selftest tightens the stamp deadline so a sleeping fixture is
-    # a timeout refusal rather than a 10 s stall.
-    export Z23_INSTALL_TOR_STAMP_TIMEOUT=1
+    # Ordinary fixtures use the production deadline, including cold launches
+    # under parallel lint load. Only the timeout fixture shortens it to 1 s.
+    export Z23_INSTALL_TOR_STAMP_TIMEOUT=10
     SELFTEST_TOR_CASES=""
     selftest_prepare
     selftest_prepare_curl_mock
