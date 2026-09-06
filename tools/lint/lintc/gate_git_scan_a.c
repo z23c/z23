@@ -714,7 +714,8 @@ int check_no_api_keys_selftest(void)
             | nak_skip_path("tools/lint/lintc/gate_ratchet_ports.c")
             | nak_skip_path("tools/lint/lintc/gate_repo_shape.c")
             | nak_skip_path("tools/lint/lintc/gate_def_parsers.c")
-            | nak_skip_path("tools/lint/lintc/gate_zcode_packages.c");
+            | nak_skip_path("tools/lint/lintc/gate_zcode_packages.c")
+            | nak_skip_path("tools/lint/lintc/gate_source_fences.c");
     const char *const tokens[] = { sk, xai, gsk, ghp, glp, akia };
     static const struct { const char *prefix; int want; } boundaries[] = {
         { "", 1 }, { "\"", 1 }, { " ", 1 }, { "=", 1 },

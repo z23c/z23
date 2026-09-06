@@ -93,6 +93,9 @@ static const struct lint_gate k_gates[] = {
       check_zcode_package_registry_selftest },
     { "check-zcode-package-standalone", check_zcode_package_standalone_run,
       check_zcode_package_standalone_selftest },
+    { "check-honest-witness", check_honest_witness_run, check_honest_witness_selftest },
+    { "check-mint-skip-crypto-offline-only", check_mint_skip_crypto_offline_only_run,
+      check_mint_skip_crypto_offline_only_selftest },
 };
 
 int main(int argc, char **argv)

@@ -5301,7 +5301,7 @@ LINTC_SRCS = tools/lint/lintc/lib.c tools/lint/lintc/gate_boot_wiring.c tools/li
     tools/lint/lintc/gate_git_scan_b.c tools/lint/lintc/gate_landing_proof.c \
     tools/lint/lintc/gate_build_config.c tools/lint/lintc/gate_doc_index.c \
     tools/lint/lintc/gate_ratchet_ports.c tools/lint/lintc/gate_repo_shape.c tools/lint/lintc/gate_def_parsers.c tools/lint/lintc/gate_zcode_packages.c \
-    tools/lint/lintc/main.c
+    tools/lint/lintc/gate_source_fences.c tools/lint/lintc/main.c
 LINTC_OBJS = $(LINTC_SRCS:tools/lint/lintc/%.c=build/lintc-obj/%.o)
 # Apple Clang enables -Wunused-but-set-variable under -Wextra -Werror for
 # patterns (e.g. an increment-only counter) that gcc's -Wextra does not
@@ -12308,13 +12308,7 @@ check-no-csr-lock-on-finalize-drive:
 	@echo "══ LINT: no csr->lock on post-finalize drive (LOCK-ORDER LAW / ABBA) ══"
 	@./tools/lint/gate_no_csr_lock_on_finalize_drive.sh .
 
-# Gate — OFFLINE-ONLY FENCE for the FAST-MINT crypto pass-through. The
-# mint_skip_crypto setter (which makes script_validate/proof_validate skip
-# per-block crypto) may be called ONLY from the offline -mint-anchor mint
-# driver TUs — never from a P2P/RPC/relay/connect_block path, so a signature
-# bypass on a running node is unreachable by construction. See
-# jobs/mint_skip_crypto.h.
-check-mint-skip-crypto-offline-only:
+check-mint-skip-crypto-offline-only: $(LINTC_TOOL)
 	@echo "══ LINT: fast-mint crypto pass-through is offline-only ══"
 	@./tools/lint/check_mint_skip_crypto_offline_only.sh .
 
@@ -12931,14 +12925,7 @@ check-no-silent-ready:
 	@echo "══ LINT: no-silent-ready (E8) ══"
 	@./tools/scripts/check_no_silent_ready.sh
 
-# Gate E12 — honest witness (Law 7). A Condition's witness must observe the
-# symptom MOVE (tip/cursor/block_map/SELECT/progress counter), never just a
-# constant, the pure inverse of detect, or an FSM/poison-flag the remedy
-# itself set (which lets a no-op remedy self-certify "cleared"). FAIL mode:
-# the tree is clean (every witness reads real progress or carries a reviewed
-# // honest-witness-ok:<reason> hatch); the baseline at
-# tools/lint/honest_witness_baseline.txt is empty and may only shrink.
-check-honest-witness:
+check-honest-witness: $(LINTC_TOOL)
 	@echo "══ LINT: honest witness (E12) ══"
 	@ZCL_LINT_MODE=FAIL ./tools/lint/check_honest_witness.sh
 

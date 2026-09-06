@@ -194,5 +194,9 @@ int check_zcode_package_registry_run(int argc, char **argv);
 int check_zcode_package_registry_selftest(void);
 int check_zcode_package_standalone_run(int argc, char **argv);
 int check_zcode_package_standalone_selftest(void);
+int check_honest_witness_run(int argc, char **argv);
+int check_honest_witness_selftest(void);
+int check_mint_skip_crypto_offline_only_run(int argc, char **argv);
+int check_mint_skip_crypto_offline_only_selftest(void);
 
 #endif
