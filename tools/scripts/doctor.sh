@@ -65,6 +65,16 @@ check_coverage() {
     return 0
 }
 
+# make setup arms native hooks at <checkout>/build/githooks. The older
+# spelling was <checkout>/tools/githooks. Either is armed; anything else
+# is not.
+doctor_hooks_shape() {
+    case "$1" in
+        */build/githooks|*/tools/githooks) printf 'ok\n' ;;
+        *)                                 printf 'no\n' ;;
+    esac
+}
+
 if [ "$MODE" = "--prereq-coverage" ]; then
     check_coverage || exit 1
     echo "doctor: prereq table covers every 'need' in build_vendor.sh ($(needed_tools | grep -c .) tools)"
@@ -105,6 +115,16 @@ if [ "$MODE" = "--self-test" ]; then
     if grep -Fq 'zcl-fixture-pkg' <<<"$out"; then
         echo "doctor selftest: FAIL — fixture leaked into the real report" >&2; exit 1
     fi
+
+    # (5) After `make setup`, hooks live at build/githooks. A shape check
+    #     that only accepts tools/githooks reports "not armed" on a green
+    #     setup. Born-red: a path that is neither is refused.
+    [ "$(doctor_hooks_shape /checkout/build/githooks)" = ok ] ||
+        { echo "doctor selftest: FAIL — native build/githooks path not armed" >&2; exit 1; }
+    [ "$(doctor_hooks_shape /checkout/tools/githooks)" = ok ] ||
+        { echo "doctor selftest: FAIL — legacy tools/githooks path not armed" >&2; exit 1; }
+    [ "$(doctor_hooks_shape /checkout/elsewhere)" = no ] ||
+        { echo "doctor selftest: FAIL — unknown hooks path was accepted" >&2; exit 1; }
 
     echo "doctor selftest: PASS"
     exit 0
@@ -203,14 +223,11 @@ esac
 echo
 echo "Repository setup:"
 # core.hooksPath lives in the SHARED config, so a linked worktree legitimately
-# sees an absolute spelling pointing at another checkout's tools/githooks. The
-# substance is "the tracked hooks are the armed hooks", not the spelling.
+# sees an absolute spelling pointing at another checkout's hooks. The
+# substance is "setup's armed hooks are the armed hooks", not the spelling.
 hooks="$(git -C "$ROOT" config --get core.hooksPath 2>/dev/null || true)"
 hooks_abs="$(realpath -m -- "${hooks:-/nonexistent}" 2>/dev/null || echo /nonexistent)"
-case "$hooks_abs" in
-    */tools/githooks) hooks_shape=ok ;;
-    *)                hooks_shape=no ;;
-esac
+hooks_shape="$(doctor_hooks_shape "$hooks_abs")"
 if [ "$hooks_shape" = ok ] && [ -x "$hooks_abs/pre-push" ]; then
     echo "  ok       git hooks       core.hooksPath -> $hooks"
 else
