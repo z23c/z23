@@ -511,6 +511,20 @@ without the doctor learning about it. Prose here can only describe it.
   incrementally produces the four archives the node links. Otherwise the node
   links the in-tree `libtor_stub.a` that `make vendor` builds from
   `vendor/tor_stub.c`.
+- The four archives are not trusted on sight. `make tor-full`
+  (`tools/scripts/build_tor_full.sh`) writes `vendor/tor/.provenance`
+  alongside them: the `vendor/tor` commit, the compiler identity that
+  actually built `libtor.a`, the sha256 of the configure flags used, and the
+  sha256 of each archive. `tools/tor_provenance.c`
+  (`build/bin/z23-tor-provenance`) is the one place that writes or checks
+  this manifest. Three sites verify it before treating the archives as
+  ready: `tools/scripts/tor_archives_ready.sh` (every plain `make`, and the
+  fast sibling-checkout copy path, which carries the source's manifest
+  alongside the bytes rather than writing a fresh one), `tools/ship.sh`'s
+  checkout preflight, and the `check-tor-provenance` lint gate (folded into
+  `check-vendor-provenance`). A byte-flipped archive, a stale build from a
+  different compiler, or an unrelated `vendor/tor` commit all refuse the
+  same way existence alone never could.
 
 ## Vendored archives
 

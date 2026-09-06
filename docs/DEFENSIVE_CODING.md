@@ -1325,6 +1325,7 @@ add/remove a gate.
 - `check-no-wallclock-assertion`
 - `check-blocker-remedy`
 - `check-vendor-provenance`
+- `check-tor-provenance`
 - `check-doc-no-false-deleted`
 - `check-stage-log-reorg-unsafe`
 - `check-stable-publish-contained`
