@@ -215,9 +215,12 @@ tu_cache_include_digest() {
     #     BASENAME is a deliberate superset: it can only over-invalidate.
     tr '\n' '\0' < "$all" |
         xargs -0 -r grep -hoE '#[[:space:]]*include[[:space:]]*"[^"]*\.c"' 2>/dev/null |
-        sed 's|.*/||; s|"$||; s|^|/|; s|$|$|' | LC_ALL=C sort -u > "$names" || true
+        sed 's/^[^"]*"//; s/"$//; s|.*/||' | LC_ALL=C sort -u > "$names" || true
     if [ -s "$names" ]; then
-        grep -E '\.c$' "$all" | grep -F -f "$names" >> "$list" || true
+        # Compare whole basenames literally: regex-shaped grep -F patterns
+        # treat an end anchor as a filename byte and omit included bodies.
+        awk -F/ 'NR == FNR { included[$0] = 1; next }
+                 $NF in included { print }' "$names" "$all" >> "$list" || return 1
     fi
 
     # The gate's own transient fixtures are excluded from a PRODUCTION scan
@@ -580,6 +583,16 @@ tu_cache_selftest() {
         i=$((i + 1))
     done
 
+    # Included C bodies are shared inputs even when they are not standalone
+    # TUs. Exercise bare names, qualified names, and literal metacharacters.
+    mkdir -p "$root/src/nested"
+    local included_c=(bare.c nested/qualified.c 'nested/regex[1].c')
+    local included
+    for included in "${included_c[@]}"; do
+        printf '/* included body */\n' > "$root/src/$included"
+        printf '#include "%s"\n' "$included" >> "$root/src/u0.c"
+    done
+
     # Stub compiler: counts its own invocations and FAILS on one unit, so a
     # replay is distinguishable from a re-run by the invocation counter and
     # the replayed bytes and status are checkable against the cold ones.
@@ -633,6 +646,13 @@ END_STUB
     read -r h m s <<<"$(tu_cache__self_sweep "$base" "$stub" "$root" "$flags" "$srclist")"
     { [ "$h" = "$n" ] && [ "$m" = 0 ]; } || tu_cache__self_fail \
         "a third run over an UNCHANGED tree reported '$h' hit / '$m' miss, wanted $n/0"
+
+    for included in "${included_c[@]}"; do
+        printf '/* changed included body */\n' > "$root/src/$included"
+        read -r h m s <<<"$(tu_cache__self_sweep "$base" "$stub" "$root" "$flags" "$srclist")"
+        { [ "$h" = 0 ] && [ "$m" = "$n" ] && [ "$s" = "$n" ]; } || tu_cache__self_fail \
+            "editing included C body '$included' left '$h' of $n TUs on a stale cache entry"
+    done
 
     # (4) EDITING A HEADER BUSTS EVERY TU.
     printf '#define TU_SELFTEST_SHARED 2\n' > "$root/src/shared.h"
@@ -715,7 +735,7 @@ END_STUB
     rm -rf "$base"
     echo "  OK: --self-test — tu-cache over $n synthetic TUs at 4 workers:"
     echo "      two consecutive runs on an unchanged tree are 100% hit and"
-    echo "      byte-identical (a third too), a header edit busts all $n, a"
+    echo "      byte-identical (a third too), header/included-C edits bust all $n, a"
     echo "      .c edit busts exactly 1 and reverting it hits again, a stored"
     echo "      FAIL replays as FAIL, ZCL_LINT_TU_CACHE=0 stores none, and"
     echo "      $real_cc replays a real TU byte-for-byte"
