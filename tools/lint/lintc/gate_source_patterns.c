@@ -529,7 +529,11 @@ int check_result_discard_selftest(void)
  * production-scan grep args map to basename predicates (--exclude-dir
  * matches at any depth). The awk machine reads only files containing the
  * prepare literal; scanning every *.c instead yields byte-identical output
- * because a file without the literal can never open a window. */
+ * because a file without the literal can never open a window. The scan
+ * roots are contexts/wallet (the original's app/ lib/ roots do not exist in
+ * this tree, so the gate could never fire); ZCL_WALLET_RAW_PREPARE_SCAN_
+ * DIRS_FOR_TEST overrides them for the selftest and fixtures, and an empty
+ * prepare-token scan now fails closed instead of passing vacuously. */
 
 #define WRPL_MAX_KEYS 4096
 #define WRPL_KEY 640
@@ -537,6 +541,7 @@ int check_result_discard_selftest(void)
 
 static char g_wrpl_keys[WRPL_MAX_KEYS][WRPL_KEY];
 static int g_wrpl_nkeys;
+static int g_wrpl_tok_files; /* files that carried the prepare token (floor) */
 
 static int wrpl_cmp(const void *a, const void *b)
 { return strcoll(a, b); }
@@ -615,7 +620,7 @@ static int wrpl_compile(struct wrpl_re *r)
 
 struct wrpl_st {
     char curfunc[WRPL_FUNC], pfunc[WRPL_FUNC];
-    int prep, gp, since, gsince, logseen;
+    int prep, gp, since, gsince, logseen, saw_tok;
 };
 
 static int wrpl_report(const char *path, const char *func)
@@ -716,13 +721,15 @@ static int wrpl_line(struct wrpl_st *st, const struct wrpl_re *r,
         }
     }
     /* open a window only for a BARE prepare (not inside an if-condition) */
-    if (strstr(line, "sqlite3_prepare_" "v2(") != NULL
-        && regexec(&r->cond, line, 0, NULL, 0) != 0) {
-        st->prep = 1;
-        st->since = 0;
-        st->logseen = 0;
-        st->gp = 0;
-        memcpy(st->pfunc, st->curfunc, WRPL_FUNC);
+    if (strstr(line, "sqlite3_prepare_" "v2(") != NULL) {
+        st->saw_tok = 1; /* grep -l semantics: the token anywhere counts */
+        if (regexec(&r->cond, line, 0, NULL, 0) != 0) {
+            st->prep = 1;
+            st->since = 0;
+            st->logseen = 0;
+            st->gp = 0;
+            memcpy(st->pfunc, st->curfunc, WRPL_FUNC);
+        }
     }
     return 0;
 }
@@ -748,6 +755,8 @@ static int wrpl_scan_file(const char *path, const struct wrpl_re *r)
     }
     free(line);
     fclose(f);
+    if (st.saw_tok)
+        g_wrpl_tok_files++;
     return rc;
 }
 
@@ -779,6 +788,21 @@ static int wrpl_walk(const char *dir, const struct wrpl_re *r)
         free(names[i]);
     }
     free(names);
+    return rc;
+}
+
+static int wrpl_for_each_dir(const char *dirs, const struct wrpl_re *r)
+{
+    char dbuf[4096];
+    if (ovf(snprintf(dbuf, sizeof dbuf, "%s", dirs), sizeof dbuf))
+        return 2;
+    int rc = 0;
+    for (char *save = NULL, *d = strtok_r(dbuf, " \t\n", &save);
+         d && rc == 0; d = strtok_r(NULL, " \t\n", &save)) {
+        struct stat st;
+        if (stat(d, &st) == 0 && S_ISDIR(st.st_mode)) /* [ -d ] || continue */
+            rc = wrpl_walk(d, r);
+    }
     return rc;
 }
 
@@ -910,21 +934,30 @@ int check_wallet_raw_prepare_log_run(int argc, char **argv)
     (void)argc;
     (void)argv;
     setlocale(LC_ALL, ""); /* sort/comm in the original obey the ambient locale */
+    const char *dirs = getenv("ZCL_WALLET_RAW_PREPARE_SCAN_DIRS_FOR_TEST");
+    if (!dirs)
+        dirs = "contexts/wallet";
     const char *mode = getenv("ZCL_LINT_MODE");
     g_wrpl_nkeys = 0;
+    g_wrpl_tok_files = 0;
     struct wrpl_re r;
     int rc = wrpl_compile(&r);
     if (rc)
         return rc;
-    static const char *const roots[] = { "app", "lib" };
-    for (size_t i = 0; rc == 0 && i < sizeof roots / sizeof roots[0]; i++) {
-        struct stat st;
-        if (stat(roots[i], &st) == 0 && S_ISDIR(st.st_mode))
-            rc = wrpl_walk(roots[i], &r);
-    }
+    rc = wrpl_for_each_dir(dirs, &r);
     wrpl_free(&r, 5);
     if (rc)
         return rc;
+    /* Scan floor: the shell original passed silently when its grep set came
+     * back empty — and its app/ lib/ roots do not exist in this tree, so the
+     * gate could never fire. An empty prepare-token scan here means the
+     * wallet root moved or the token was renamed; refuse to pass vacuously. */
+    if (g_wrpl_tok_files == 0) {
+        fprintf(stderr, "check_wallet_raw_prepare_log: FATAL — scan found no "
+                        "sqlite3_prepare_" "v2( under %s (the gate would pass "
+                        "vacuously)\n", dirs);
+        return 2;
+    }
     wrpl_sort_uniq((char *)g_wrpl_keys, WRPL_KEY, &g_wrpl_nkeys);
     if (mode && strcmp(mode, "UPDATE") == 0)
         return wrpl_update();
@@ -1095,6 +1128,20 @@ int check_wallet_raw_prepare_log_selftest(void)
                     1, "prototype does not rename the enclosing function");
 
     wrpl_free(&r, 5);
+    g_wrpl_nkeys = 0;
+
+    /* Scan floor: an empty prepare-token scan fails closed (rc 2); the real
+     * wallet root carries the token and the clean tree passes. docs/adr is
+     * markdown-only by convention, so its scan set is empty by construction. */
+    setenv("ZCL_LINT_MODE", "FAIL", 1);
+    setenv("ZCL_WALLET_RAW_PREPARE_SCAN_DIRS_FOR_TEST", "docs/adr", 1);
+    bad |= wrpl_want(t, check_wallet_raw_prepare_log_run(0, NULL), 2,
+                     "an empty prepare-token scan fails closed");
+    setenv("ZCL_WALLET_RAW_PREPARE_SCAN_DIRS_FOR_TEST", "contexts/wallet", 1);
+    bad |= wrpl_want(t, check_wallet_raw_prepare_log_run(0, NULL), 0,
+                     "the wallet root carries the prepare token");
+    unsetenv("ZCL_WALLET_RAW_PREPARE_SCAN_DIRS_FOR_TEST");
+    unsetenv("ZCL_LINT_MODE");
     g_wrpl_nkeys = 0;
     return st_ok(bad, "check_wallet_raw_prepare_log selftest: OK\n");
 }
