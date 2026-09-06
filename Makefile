@@ -3439,7 +3439,7 @@ test-parallel-active:
 	  $(MAKE) --no-print-directory test-parallel-active-locked
 
 test-parallel-active-locked: $(TEST_PARALLEL_REL_CANDIDATE) dev-package-verifier-ensure \
-	$(BIN_DIR)/z23-git-hook$(ZCL_HOST_EXEEXT)
+	$(BIN_DIR)/z23-git-hook$(ZCL_HOST_EXEEXT) $(BIN_DIR)/z23-lint
 	$(ZCL_TEST_STACK_SETUP) && $(LINKED_TEST_ENV) $(TEST_PARALLEL_REL_ACTIVE)
 
 test-parallel-fast-active:
@@ -3448,7 +3448,7 @@ test-parallel-fast-active:
 	  $(MAKE) --no-print-directory test-parallel-fast-active-locked
 
 test-parallel-fast-active-locked: $(TEST_PARALLEL_FAST_CANDIDATE) dev-package-verifier-ensure \
-	$(BIN_DIR)/z23-git-hook$(ZCL_HOST_EXEEXT)
+	$(BIN_DIR)/z23-git-hook$(ZCL_HOST_EXEEXT) $(BIN_DIR)/z23-lint
 	$(ZCL_TEST_STACK_SETUP) && $(LINKED_TEST_ENV) $(TEST_PARALLEL_FAST_ACTIVE)
 
 .PHONY: test-parallel
@@ -3476,7 +3476,7 @@ test-parallel:
 	    TEST_PARALLEL_ARGS='$(TEST_PARALLEL_ARGS)'
 
 .PHONY: test-parallel-locked
-test-parallel-locked: $(TEST_PARALLEL_REL_CANDIDATE) dev-package-verifier-ensure
+test-parallel-locked: $(TEST_PARALLEL_REL_CANDIDATE) dev-package-verifier-ensure $(BIN_DIR)/z23-lint
 	$(ZCL_TEST_STACK_SETUP) && $(LINKED_TEST_ENV) $(TEST_PARALLEL_REL_ACTIVE) $(TEST_PARALLEL_ARGS)
 
 # ── prove-cold-join — the one command a stranger can run ─────────────────
@@ -4004,7 +4004,7 @@ t-fast:
 	  $(MAKE) --no-print-directory t-fast-locked ONLY='$(ONLY)'
 
 t-fast-locked: $(TEST_PARALLEL_FAST_CANDIDATE) dev-package-verifier-ensure \
-	$(BIN_DIR)/z23-git-hook$(ZCL_HOST_EXEEXT)
+	$(BIN_DIR)/z23-git-hook$(ZCL_HOST_EXEEXT) $(BIN_DIR)/z23-lint
 	$(ZCL_TEST_STACK_SETUP) && $(LINKED_TEST_ENV) $(TEST_PARALLEL_FAST_ACTIVE) --only=$(ONLY)
 
 # Proof-facing sibling of t-fast. The human convenience target above keeps its
@@ -4017,7 +4017,7 @@ t-fast-exact:
 	    EXACT_ONLY_MATCHED='$(EXACT_ONLY_MATCHED)'
 
 t-fast-exact-locked: $(TEST_PARALLEL_FAST_CANDIDATE) dev-package-verifier-ensure \
-	$(BIN_DIR)/z23-git-hook$(ZCL_HOST_EXEEXT)
+	$(BIN_DIR)/z23-git-hook$(ZCL_HOST_EXEEXT) $(BIN_DIR)/z23-lint
 	$(ZCL_TEST_STACK_SETUP) && \
 	  $(LINKED_TEST_ENV) $(TEST_PARALLEL_FAST_ACTIVE) --exact=$(EXACT_ONLY_MATCHED) $(T_FAST_EXACT_ARGS)
 
