@@ -99,8 +99,12 @@ int test_board_site(void)
         bs_identity(1, seed, pk);
         /* The handler lists against real wall time, so the fixtures are
          * dated by the same clock: anything older would be expired history
-         * the discoverable view rightly hides. */
-        const int64_t now = (int64_t)platform_time_wall_time_t() - 60;
+         * the discoverable view rightly hides. The base is a BARE reading
+         * and every fixture offset is an addition — the five posts sit
+         * between now and now+4 s, inside FLEET_BOARD_FUTURE_SKEW_MAX (300)
+         * and nowhere near the 3600 s TTL — so no assertion below is graded
+         * on a difference between two clock readings. */
+        const int64_t now = (int64_t)platform_time_wall_time_t();
 
         struct fleet_board_post legacy, ops, general, fleet, hostile;
         bs_compose(&legacy, FLEET_BOARD_KIND_NOTE, FLEET_BOARD_SCOPE_LEGACY_PUBLIC,
