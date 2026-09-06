@@ -1,6 +1,6 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
- * Gates: check-hotswap-eligible-scope
+ * Gates: check-hotswap-eligible-scope, check-hotswap-static-state
  * Hot-swap manifest lint gates of the C23 lint runtime: gates that prove the
  * Tier-1 hot-swap eligibility manifest and the mutable-static-state ban hold
  * across every TU a hot-swap .so may be built from. Default landing spot for
@@ -457,5 +457,425 @@ int check_hotswap_eligible_scope_selftest(void)
     if (ef) fclose(ef);
     hes_free(&r, 4);
     return st_ok(bad, "check_hotswap_eligible_scope selftest: OK\n");
+}
+
+
+/* check-hotswap-static-state — port of
+ * tools/lint/check_hotswap_static_state.sh (now a shim). Every TU that can be
+ * recompiled into a hot-swap .so must define NO mutable file-scope statics: a
+ * generation/module .so recompiles the whole TU, so a mutable file-scope
+ * static becomes a fresh zero-initialized copy inside the .so and the live
+ * process state is silently lost. The scan set is the encounter-ordered union
+ * of the eligible, swappable, and island manifests, each parsed with the
+ * build-free column-1 paren-depth walk (a macro named in a header comment
+ * does not parse; a multi-line invocation does). The per-TU heuristic flags a
+ * file-scope line starting "static" that is not const, carries no '(', and
+ * has an initializer ('='), array bracket ('['), or aggregate opener
+ * ('{' + blanks at end of line); a same-line hotswap-static-ok comment
+ * escapes it. Manifest paths are overridable via ZCL_HOTSWAP_MANIFEST /
+ * ZCL_HOTSWAP_SWAPPABLE_MANIFEST / ZCL_HOTSWAP_ISLAND_MANIFEST so the
+ * lint-gate self-test can point at seeded fixtures.
+ * Parity notes: the awk original rebuilds the file as records plus '\n', so a
+ * final line without a newline still gets one in the scan buffer; violations
+ * accumulate across ALL files and print only in the FAIL branch (a later
+ * missing TU exits 2 without flushing earlier hits); the union keeps
+ * encounter order (no sort); empty string-literal args count toward the
+ * gate_require_scanned floors but are dropped from the union. */
+
+#define HSS_MAX_PATHS 512
+#define HSS_PATH 4096
+#define HSS_SPEC 8192
+#define HSS_MANIFEST_CAP (1u << 20)
+#define HSS_VIOL_CAP (1u << 20)
+
+static const char k_hss_eligible_tok[] = "HOTSWAP_" "ELIGIBLE(";
+static const char k_hss_swappable_tok[] = "HOTSWAP_" "SWAPPABLE(";
+static const char k_hss_island_tok[] = "HOTSWAP_" "ISLAND(";
+
+/* awk '{ buf = buf $0 "\n" }': the whole file, with a newline appended after
+ * every record — including a final line that lacks one. */
+static int hss_slurp(const char *path, char *buf, size_t cap, size_t *out_n)
+{
+    FILE *f = fopen(path, "r");
+    if (!f)
+        return die("z23-lint: cannot open %s\n", path);
+    size_t n = fread(buf, 1, cap - 1, f);
+    int rc = 0;
+    if (ferror(f))
+        rc = die("z23-lint: cannot read %s\n", path);
+    else if (!feof(f))
+        rc = die("z23-lint: manifest too large: %s\n", path);
+    fclose(f);
+    if (rc)
+        return rc;
+    if (n > 0 && buf[n - 1] != '\n')
+        buf[n++] = '\n';
+    buf[n] = '\0';
+    *out_n = n;
+    return 0;
+}
+
+/* Column-1 paren-depth walk: every invocation of tok (which includes its
+ * open paren) starting at column 1 contributes its first (second=0) or second
+ * (second=1) string literal's raw content. Parens inside strings do not
+ * count; backslash escapes only shield the depth counter, the literal
+ * extraction itself is the naive "..." pair, exactly like the awk original. */
+static int hss_collect(const char *buf, size_t n, const char *tok, int second,
+                       char out[][HSS_PATH], int *nout)
+{
+    size_t L = strlen(tok);
+    size_t i = 0;
+    while (i < n) {
+        if (i + L > n || memcmp(buf + i, tok, L) != 0
+            || (i > 0 && buf[i - 1] != '\n')) {
+            i++;
+            continue;
+        }
+        size_t j = i + L;
+        int depth = 1, in_str = 0, esc = 0;
+        char spec[HSS_SPEC];
+        size_t sl = 0;
+        while (j < n && depth > 0) {
+            char c = buf[j];
+            if (in_str) {
+                if (esc)
+                    esc = 0;
+                else if (c == '\\')
+                    esc = 1;
+                else if (c == '"')
+                    in_str = 0;
+            } else {
+                if (c == '"')
+                    in_str = 1;
+                else if (c == '(')
+                    depth++;
+                else if (c == ')')
+                    depth--;
+            }
+            if (depth > 0) {
+                if (sl + 1 >= sizeof spec)
+                    return die("z23-lint: hotswap manifest arg overflow\n", "");
+                spec[sl++] = c;
+            }
+            j++;
+        }
+        spec[sl] = '\0';
+        const char *p = spec;
+        for (int k = 0; k < (second ? 2 : 1); k++) {
+            const char *a = strchr(p, '"');
+            if (!a)
+                break;
+            const char *b = strchr(a + 1, '"');
+            if (!b)
+                break;
+            if (k == (second ? 1 : 0)) {
+                size_t len = (size_t)(b - a - 1);
+                if (len >= HSS_PATH || *nout >= HSS_MAX_PATHS)
+                    return die("z23-lint: hotswap manifest path overflow\n", "");
+                memcpy(out[*nout], a + 1, len);
+                out[*nout][len] = '\0';
+                (*nout)++;
+            }
+            p = b + 1;
+        }
+        i = j;
+    }
+    return 0;
+}
+
+/* awk /\<const\>/: the letters c-o-n-s-t with a non-[A-Za-z0-9_] (or string
+ * edge) on both sides. */
+static int hss_has_word_const(const char *s)
+{
+    const char *p = s;
+    while ((p = strstr(p, "const")) != NULL) {
+        int left = p == s
+            || !(isalnum((unsigned char)p[-1]) || p[-1] == '_');
+        int right = !(isalnum((unsigned char)p[5]) || p[5] == '_');
+        if (left && right)
+            return 1;
+        p += 5;
+    }
+    return 0;
+}
+
+/* One newline-stripped line through the mutable-static heuristic. */
+static int hss_flag_line(const char *line)
+{
+    if (strstr(line, "hotswap-static-" "ok:") != NULL)
+        return 0; /* explicit allowlist escape */
+    if (strncmp(line, "static", 6) != 0 || (line[6] != ' ' && line[6] != '\t'))
+        return 0;
+    if (hss_has_word_const(line))
+        return 0; /* immutable */
+    if (strchr(line, '(') != NULL)
+        return 0; /* function declarator/prototype */
+    if (strchr(line, '=') != NULL || strchr(line, '[') != NULL)
+        return 1;
+    size_t n = strlen(line);
+    while (n > 0 && (line[n - 1] == ' ' || line[n - 1] == '\t'))
+        n--;
+    return n > 0 && line[n - 1] == '{'; /* opens an aggregate */
+}
+
+static int hss_scan_file(const char *path, char *viol, size_t cap, size_t *used)
+{
+    FILE *f = fopen(path, "r");
+    if (!f)
+        return 0; /* awk-in-$(...) loses the race the same way: no hits */
+    char *line = NULL;
+    size_t lcap = 0;
+    ssize_t n;
+    int lineno = 0, rc = 0;
+    while ((n = getline(&line, &lcap, f)) >= 0) {
+        lineno++;
+        if (n > 0 && line[n - 1] == '\n')
+            line[--n] = '\0';
+        if (!hss_flag_line(line))
+            continue;
+        int k = snprintf(viol + *used, cap - *used, "%s:%d: %s\n",
+                         path, lineno, line);
+        if (ovf(k, cap - *used)) {
+            rc = 2;
+            break;
+        }
+        *used += (size_t)k;
+    }
+    free(line);
+    fclose(f);
+    return rc;
+}
+
+int check_hotswap_static_state_run(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+    const char *manifest = getenv("ZCL_HOTSWAP_MANIFEST");
+    if (!manifest)
+        manifest = "engine/composition/hotswap_eligible.def";
+    const char *swappable = getenv("ZCL_HOTSWAP_SWAPPABLE_MANIFEST");
+    if (!swappable)
+        swappable = "engine/composition/hotswap_swappable.def";
+    const char *islands = getenv("ZCL_HOTSWAP_ISLAND_MANIFEST");
+    if (!islands)
+        islands = "engine/composition/hotswap_islands.def";
+
+    fputs("══ LINT: hot-swap recompiled TUs hold no mutable file-scope statics ══\n",
+          stdout);
+
+    const char *const m[3] = { manifest, swappable, islands };
+    for (int i = 0; i < 3; i++) {
+        if (access(m[i], R_OK) != 0) {
+            fprintf(stderr, "check_hotswap_static_state: FATAL — manifest '%s' missing/unreadable.\n",
+                    m[i]);
+            fputs("  Refusing to report 'clean' with a manifest missing from the scan set.\n",
+                  stderr);
+            return 2;
+        }
+    }
+
+    static char buf[HSS_MANIFEST_CAP];
+    static char eligible[HSS_MAX_PATHS][HSS_PATH];
+    static char swap[HSS_MAX_PATHS][HSS_PATH];
+    static char isl_lists[HSS_MAX_PATHS][HSS_PATH];
+    static char isl[HSS_MAX_PATHS][HSS_PATH];
+    int ne = 0, ns = 0, nl = 0, ni = 0;
+    size_t n = 0;
+    if (hss_slurp(manifest, buf, sizeof buf, &n)
+        || hss_collect(buf, n, k_hss_eligible_tok, 0, eligible, &ne))
+        return 2;
+    if (hss_slurp(swappable, buf, sizeof buf, &n)
+        || hss_collect(buf, n, k_hss_swappable_tok, 0, swap, &ns))
+        return 2;
+    if (hss_slurp(islands, buf, sizeof buf, &n)
+        || hss_collect(buf, n, k_hss_island_tok, 1, isl_lists, &nl))
+        return 2;
+    for (int i = 0; i < nl; i++) {
+        char list[HSS_PATH];
+        memcpy(list, isl_lists[i], strlen(isl_lists[i]) + 1);
+        for (char *save = NULL, *p = strtok_r(list, " \t\n", &save);
+             p; p = strtok_r(NULL, " \t\n", &save)) {
+            if (ni >= HSS_MAX_PATHS)
+                return die("z23-lint: hotswap manifest path overflow\n", "");
+            size_t len = strlen(p);
+            memcpy(isl[ni], p, len + 1);
+            ni++;
+        }
+    }
+
+    char hint[4096];
+    if (ovf(snprintf(hint, sizeof hint,
+                     "no HOTSWAP_" "ELIGIBLE(\"...\") entries parsed from %s",
+                     manifest), sizeof hint))
+        return 2;
+    int rc = gate_require_scanned(ne, 1, "check_hotswap_static_state", hint);
+    if (rc)
+        return rc;
+    if (ovf(snprintf(hint, sizeof hint,
+                     "no HOTSWAP_" "SWAPPABLE(\"...\") entries parsed from %s",
+                     swappable), sizeof hint))
+        return 2;
+    rc = gate_require_scanned(ns, 1, "check_hotswap_static_state", hint);
+    if (rc)
+        return rc;
+    if (ovf(snprintf(hint, sizeof hint,
+                     "no HOTSWAP_" "ISLAND implementation members parsed from %s",
+                     islands), sizeof hint))
+        return 2;
+    rc = gate_require_scanned(ni, 1, "check_hotswap_static_state", hint);
+    if (rc)
+        return rc;
+
+    /* Union, de-duplicated, encounter order; empty args drop out. */
+    static char paths[HSS_MAX_PATHS][HSS_PATH];
+    int np = 0;
+    for (int src = 0; src < 3; src++) {
+        char (*set)[HSS_PATH] = src == 0 ? eligible : src == 1 ? swap : isl;
+        int cnt = src == 0 ? ne : src == 1 ? ns : ni;
+        for (int i = 0; i < cnt; i++) {
+            if (!set[i][0])
+                continue;
+            int dup = 0;
+            for (int j = 0; j < np; j++)
+                if (strcmp(paths[j], set[i]) == 0) {
+                    dup = 1;
+                    break;
+                }
+            if (dup)
+                continue;
+            if (np >= HSS_MAX_PATHS)
+                return die("z23-lint: hotswap manifest path overflow\n", "");
+            strcpy(paths[np++], set[i]);
+        }
+    }
+    if (ovf(snprintf(hint, sizeof hint,
+                     "the union of %s and %s parsed to zero TUs",
+                     manifest, swappable), sizeof hint))
+        return 2;
+    rc = gate_require_scanned(np, 1, "check_hotswap_static_state", hint);
+    if (rc)
+        return rc;
+
+    static char viol[HSS_VIOL_CAP];
+    size_t vused = 0;
+    viol[0] = '\0';
+    int scanned = 0;
+    for (int i = 0; i < np; i++) {
+        struct stat st;
+        if (stat(paths[i], &st) != 0 || !S_ISREG(st.st_mode)) {
+            fprintf(stderr, "check_hotswap_static_state: FATAL — hot-swap TU '%s' does not exist.\n",
+                    paths[i]);
+            fputs("  A manifest drifted; refusing to pass off an unscannable file.\n",
+                  stderr);
+            return 2;
+        }
+        scanned++;
+        /* hits="$(...)" strips the trailing newline, then the shell appends
+         * one: the violations block is exactly the hit lines, no separator. */
+        if (hss_scan_file(paths[i], viol, sizeof viol, &vused))
+            return 2;
+    }
+    rc = gate_require_scanned(scanned, 1, "check_hotswap_static_state",
+                              "no hot-swap TU scanned");
+    if (rc)
+        return rc;
+
+    if (vused > 0) {
+        if (fwrite(viol, 1, vused, stdout) != vused)
+            return die("z23-lint: write failed\n", "");
+        fputs("FAIL: a hot-swap recompiled TU defines a mutable file-scope static.\n"
+              "  Move it to a sibling NON-eligible resident trampoline TU (a .so\n"
+              "  gets its own zero copy), or, if provably swap-safe, annotate the\n"
+              "  declaration line with a comment reading  hotswap-static-"
+              "ok: <reason>.\n",
+              stdout);
+        return 1;
+    }
+    printf("  OK: %d hot-swap TU(s) free of mutable file-scope statics\n",
+           scanned);
+    printf("      (%d eligible + %d swappable + %d island members, de-duplicated)\n",
+           ne, ns, ni);
+    return 0;
+}
+
+static int hss_want(const char *tag, int got, int w, const char *s)
+{
+    if (got != w) {
+        fprintf(stderr, "%s selftest: want %d: %s\n", tag, w, s);
+        return 1;
+    }
+    return 0;
+}
+
+int check_hotswap_static_state_selftest(void)
+{
+    const char *t = "check_hotswap_static_state";
+    char out[8][HSS_PATH];
+    int nout = 0, bad = 0;
+
+    /* column-1 anchoring: a comment mention does not parse, a real row does */
+    const char *m1 = " * HOTSWAP_" "ELIGIBLE(\"fake/comment.c\") in a comment\n"
+                     "HOTSWAP_" "ELIGIBLE(\"engine/real.c\") HOTSWAP_"
+                     "PROBE(\"leaf\")\n";
+    bad |= hss_collect(m1, strlen(m1), k_hss_eligible_tok, 0, out, &nout)
+        | hss_want(t, nout == 1 && strcmp(out[0], "engine/real.c") == 0, 1,
+                   "column-1 anchoring");
+
+    /* multi-line invocation parses; parens inside strings do not count */
+    nout = 0;
+    const char *m2 = "HOTSWAP_" "ELIGIBLE(\n    \"engine/multi.c\"\n)\n"
+                     "HOTSWAP_" "ELIGIBLE(\"engine/pa)ren.c\")\n";
+    bad |= hss_collect(m2, strlen(m2), k_hss_eligible_tok, 0, out, &nout)
+        | hss_want(t, nout == 2 && strcmp(out[0], "engine/multi.c") == 0
+                       && strcmp(out[1], "engine/pa)ren.c") == 0, 1,
+                   "multi-line and in-string paren");
+
+    /* naive literal extraction: an escaped quote still terminates it */
+    nout = 0;
+    const char *m3 = "HOTSWAP_" "ELIGIBLE(\"engine/es\\\" \"c.c\")\n";
+    bad |= hss_collect(m3, strlen(m3), k_hss_eligible_tok, 0, out, &nout)
+        | hss_want(t, nout == 1 && strcmp(out[0], "engine/es\\") == 0, 1,
+                   "escaped quote ends the literal (awk-naive)");
+
+    /* second-arg extraction for islands */
+    nout = 0;
+    const char *m4 = "HOTSWAP_" "ISLAND(\"engine/owner.c\",\n"
+                     "               \"m1.c m2.c\")\n";
+    bad |= hss_collect(m4, strlen(m4), k_hss_island_tok, 1, out, &nout)
+        | hss_want(t, nout == 1 && strcmp(out[0], "m1.c m2.c") == 0, 1,
+                   "island member list is the second literal");
+
+    /* an invocation with no string literal emits nothing; an empty literal
+     * emits an empty string (floor-counted, union-dropped) */
+    nout = 0;
+    const char *m5 = "HOTSWAP_" "ELIGIBLE()\nHOTSWAP_" "ELIGIBLE(\"\")\n";
+    bad |= hss_collect(m5, strlen(m5), k_hss_eligible_tok, 0, out, &nout)
+        | hss_want(t, nout == 1 && out[0][0] == '\0', 1,
+                   "no-literal skipped, empty literal counted");
+
+    /* detector heuristic */
+    bad |= hss_want(t, hss_flag_line("static int g_counter = 0;"), 1,
+                   "initialized mutable static flags")
+        | hss_want(t, hss_flag_line("static int g_buf[4];"), 1,
+                   "array static flags")
+        | hss_want(t, hss_flag_line("static struct s g_x = {"), 1,
+                   "aggregate opener flags")
+        | hss_want(t, hss_flag_line("static const int k_t[] = {1};"), 0,
+                   "const is immutable")
+        | hss_want(t, hss_flag_line("static int f(void);"), 0,
+                   "declarator with paren is skipped")
+        | hss_want(t, hss_flag_line("static int g_x = 0; /* hotswap-static-"
+                                    "ok: resident */"), 0,
+                   "escape comment skips")
+        | hss_want(t, hss_flag_line("	static int g_x = 1;"), 0,
+                   "indented static is not file scope")
+        | hss_want(t, hss_flag_line("staticint g_x = 1;"), 0,
+                   "no blank after static")
+        | hss_want(t, hss_flag_line("static constint g_x = 1;"), 1,
+                   "constint is not the const word")
+        | hss_want(t, hss_flag_line("static struct s g_x;"), 0,
+                   "plain declaration without initializer passes");
+
+    return st_ok(bad, "check_hotswap_static_state selftest: OK\n");
 }
 

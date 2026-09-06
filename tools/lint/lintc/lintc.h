@@ -180,5 +180,7 @@ int check_sandbox_wired_run(int argc, char **argv);
 int check_sandbox_wired_selftest(void);
 int check_hotswap_eligible_scope_run(int argc, char **argv);
 int check_hotswap_eligible_scope_selftest(void);
+int check_hotswap_static_state_run(int argc, char **argv);
+int check_hotswap_static_state_selftest(void);
 
 #endif

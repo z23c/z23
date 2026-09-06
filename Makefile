@@ -11009,7 +11009,7 @@ check-remote-command-classes:
 # Scans the UNION of engine/composition/hotswap_eligible.def and
 # engine/composition/hotswap_swappable.def: every TU either manifest can recompile into a
 # .so must be free of mutable file-scope statics.
-check-hotswap-static-state:
+check-hotswap-static-state: $(LINTC_TOOL)
 	@tools/lint/check_hotswap_static_state.sh
 
 # Pure calculation service islands may own no ambient state or effects and may
