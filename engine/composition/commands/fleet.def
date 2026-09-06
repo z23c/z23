@@ -107,6 +107,36 @@ ZCL_COMMAND_READY_COMMAND(
     ZCL_COMMAND_TRAIT_NONE,
     zcl_native_handle_fleet_vitals_sample)
 
+ZCL_COMMAND_READY_READ(
+    "fleet.objectives", "fleet", "",
+    "Every objective z23 optimizes, its current value, target, and status",
+    "Prints one row per id in the closed catalog "
+    "(engine/composition/objectives.def): the objective id, the one file or "
+    "command its value is read from, whether lower or higher is better, "
+    "the current value, the target, the unit, and a status of met, unmet, "
+    "or unmeasured(<reason>). landing_latency_s and "
+    "landing_attempts_per_train read the landing outcomes ledger; "
+    "proof_lint_wall_s and proof_test_wall_s read the newest landing "
+    "attempt's phases.txt; commits_landed_today runs a local `git log` "
+    "through the no-shell spawn seam; lint_families_over_ceiling counts "
+    "oversized files under tools/lint/lintc; "
+    "functions_over_complexity_cap counts the cyclomatic baseline's rows "
+    "when that file exists. A value this tree cannot measure today is "
+    "reported unmeasured with the reason named, never as a fabricated "
+    "zero. outcomes, attempts_dir, repo, lintc_dir and baseline override "
+    "the five paths a producer reads, for pointing the command at a "
+    "fixture. It contacts no peer and writes nothing.",
+    8192,
+    "fleet,objectives,goals,targets,status,catalog",
+    "zcl.fleet_objectives_input.v1", "zcl.fleet_objectives.v1",
+    "outcomes,attempts_dir,repo,lintc_dir,baseline", "",
+    "z23-dev fleet objectives",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_LATENCY_FOREGROUND,
+    ZCL_COMMAND_COST_LOW, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_DEV_STATE_READ, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_fleet_objectives)
+
 ZCL_COMMAND_BRANCH("fleet.experiment", "fleet",
                    "Record and query delegation experiments",
                    ZCL_COMMAND_LAYER_OPS)

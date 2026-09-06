@@ -21,6 +21,7 @@
 #include "command/native_dev_agents.h"
 #include "command/native_dev_fleet.h"
 #include "command/native_fleet.h"
+#include "command/native_fleet_objectives.h"
 #include "kernel/command_registry.h"
 
 #include <stddef.h>

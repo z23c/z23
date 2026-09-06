@@ -110,6 +110,9 @@ from a hash, signature, test, or reproduction receipt.
 - [`FLEET_AGENTS.md`](FLEET_AGENTS.md) — what every AI agent on this box is
   doing right now, and each executor's grade over time: `z23-dev fleet agents`,
   the ledger columns it reads, the grade formula, and what it does not collect.
+- [`FLEET_OBJECTIVES.md`](FLEET_OBJECTIVES.md) — the closed catalog of named
+  objectives z23 optimizes, and `z23-dev fleet objectives`, the one command
+  that prints each one's current value, target, and status.
 - [`DEFENSIVE_CODING.md`](DEFENSIVE_CODING.md) — lint-enforced C and
   architecture rules.
 - [`API_REFERENCE.md`](API_REFERENCE.md) — generated command catalog; edit its

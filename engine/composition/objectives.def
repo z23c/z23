@@ -1,0 +1,73 @@
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ *
+ * objectives — the CLOSED catalog of named objective functions z23
+ * optimizes. Before this file, what the project was steering toward lived
+ * in prose (docs/ARCHITECTURE_NORTH_STAR.md, the owner's standing
+ * directives) and in an agent's head, never in the binary. An id not
+ * written here is not an objective: `fleet objectives` prints only the
+ * rows below, and a producer that cannot answer prints `unmeasured` with
+ * the reason rather than a fabricated number.
+ *
+ * This file is the ONE declaration. Everything else derives from it:
+ *
+ *   tools/command/native_fleet_objectives.c   the producer table
+ *   docs/FLEET_OBJECTIVES.md                  the rendered table
+ *
+ * Row shape:
+ *
+ *   Z23_OBJECTIVE(id_, source_, direction_, target_, unit_, why_)
+ *
+ *   id_        the objective id, verbatim and stable.
+ *   source_    the one thing the value is read from, named plainly:
+ *              "outcomes.jsonl", "phases.txt", "git_log",
+ *              "lintc_line_counts", "cyclomatic_baseline", or
+ *              "unmeasured" when no producer exists in the tree yet.
+ *   direction_ "min" (lower is better) or "max" (higher is better).
+ *   target_    the numeric threshold `met` is judged against.
+ *   unit_      what the value counts. Non-empty.
+ *   why_       one plain sentence naming the decision this number is for.
+ *
+ * ORDER IS NOT IDENTITY here — nothing outside this file indexes a row by
+ * position — but append new rows at the end anyway, so a diff against an
+ * older catalog reads as an addition rather than a reshuffle.
+ */
+
+Z23_OBJECTIVE("landing_latency_s", "outcomes.jsonl", "min", 1200, "s",
+             "per train, by its note: wall seconds from the newest landed "
+             "train's earliest attempt to its landed row's timestamp; a "
+             "train should land in the time one proof takes, not several")
+
+Z23_OBJECTIVE("landing_attempts_per_train", "outcomes.jsonl", "min", 1,
+             "count",
+             "per train, by its note: the newest landed train's count of "
+             "distinct landed-or-failed attempts; a train that needs more "
+             "than one attempt is throwing finished proof work away")
+
+Z23_OBJECTIVE("proof_lint_wall_s", "phases.txt", "min", 300, "s",
+             "lint is the gate a lane pays before it may ask for a proof, "
+             "and it should be fast enough nobody skips it")
+
+Z23_OBJECTIVE("proof_test_wall_s", "phases.txt", "min", 600, "s",
+             "the test wall is the dominant cost of landing anything")
+
+Z23_OBJECTIVE("commits_landed_today", "git_log", "max", 20, "count",
+             "the only measure of the loop that is an outcome, not activity")
+
+Z23_OBJECTIVE("lint_families_over_ceiling", "lintc_line_counts", "min", 0,
+             "count",
+             "a lint family past the line ceiling is a file nobody can "
+             "read on one screen")
+
+Z23_OBJECTIVE("functions_over_complexity_cap", "cyclomatic_baseline", "min",
+             0, "count",
+             "a function past the complexity cap hides a bug the reviewer "
+             "cannot see")
+
+Z23_OBJECTIVE("fresh_node_sync_eta_s", "unmeasured", "min", 3600, "s",
+             "a stranger joining the network should be caught up within an "
+             "hour, not days")
+
+Z23_OBJECTIVE("tokens_per_landed_commit", "unmeasured", "min", 200000,
+             "tokens",
+             "the cost of one landed commit is what the whole delegation "
+             "loop is spending to make progress")
