@@ -5312,6 +5312,7 @@ LINTC_SRCS = tools/lint/lintc/lib.c tools/lint/lintc/gate_boot_wiring.c tools/li
     tools/lint/lintc/gate_function_complexity.c \
     tools/lint/lintc/gate_framework_shape.c \
     tools/lint/lintc/gate_zclassicd_reach.c \
+    tools/lint/lintc/gate_file_purpose.c \
     tools/lint/lintc/main.c
 LINTC_OBJS = $(LINTC_SRCS:tools/lint/lintc/%.c=build/lintc-obj/%.o)
 # Apple Clang enables -Wunused-but-set-variable under -Wextra -Werror for
@@ -12189,7 +12190,7 @@ check-thread-supervision:
 # codeindex roots has a DERIVABLE one-line purpose (a substantive top-of-file
 # comment or an explicit `purpose:` override). RATCHET against the shrink-only
 # tools/lint/file_purpose_baseline.txt; graduates to FAIL when it empties.
-check-file-purpose:
+check-file-purpose: $(LINTC_TOOL)
 	@echo "→ Gate P1: check_file_purpose"
 	@ZCL_LINT_MODE=RATCHET ./tools/lint/check_file_purpose.sh
 

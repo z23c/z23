@@ -104,6 +104,8 @@ static const struct lint_gate k_gates[] = {
       check_framework_shape_selftest },
     { "check-zclassicd-reach-allowlist", check_zclassicd_reach_allowlist_run,
       check_zclassicd_reach_allowlist_selftest },
+    { "check-file-purpose", check_file_purpose_run,
+      check_file_purpose_selftest },
 };
 
 int main(int argc, char **argv)

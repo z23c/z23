@@ -256,5 +256,7 @@ int check_framework_shape_run(int argc, char **argv);
 int check_framework_shape_selftest(void);
 int check_zclassicd_reach_allowlist_run(int argc, char **argv);
 int check_zclassicd_reach_allowlist_selftest(void);
+int check_file_purpose_run(int argc, char **argv);
+int check_file_purpose_selftest(void);
 
 #endif
