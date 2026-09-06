@@ -5295,7 +5295,8 @@ EQUIHASH_FACT_TOOL = $(BIN_DIR)/equihash-params-fact
 LINTC_TOOL = $(BIN_DIR)/z23-lint
 LINTC_CFLAGS = -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
     -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS)
-LINTC_SRCS = tools/lint/lintc/lib.c tools/lint/lintc/gate_pattern_small.c \
+LINTC_SRCS = tools/lint/lintc/lib.c tools/lint/lintc/gate_boot_wiring.c \
+    tools/lint/lintc/gate_pattern_small.c \
     tools/lint/lintc/gate_tree_walk.c tools/lint/lintc/gate_git_scan_a.c \
     tools/lint/lintc/gate_git_scan_b.c tools/lint/lintc/gate_landing_proof.c \
     tools/lint/lintc/gate_build_config.c tools/lint/lintc/gate_doc_index.c \
@@ -11827,7 +11828,7 @@ check-sysinit-ordering: $(LINTC_TOOL)
 # Gate: sandbox wiring (HARD). Asserts boot registers the os_sandbox
 # steady-state record so -sandbox=steady can never regress to zero
 # confinement. See check_sandbox_wired.sh.
-check-sandbox-wired:
+check-sandbox-wired: $(LINTC_TOOL)
 	@echo "→ Gate: sandbox_wired"
 	@./tools/lint/check_sandbox_wired.sh
 

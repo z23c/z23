@@ -176,5 +176,7 @@ int check_no_orphan_placement_run(int argc, char **argv);
 int check_no_orphan_placement_selftest(void);
 int check_architecture_tree_run(int argc, char **argv);
 int check_architecture_tree_selftest(void);
+int check_sandbox_wired_run(int argc, char **argv);
+int check_sandbox_wired_selftest(void);
 
 #endif

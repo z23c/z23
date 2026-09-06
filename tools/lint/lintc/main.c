@@ -78,6 +78,7 @@ static const struct lint_gate k_gates[] = {
       check_no_orphan_placement_selftest },
     { "check-architecture-tree", check_architecture_tree_run,
       check_architecture_tree_selftest },
+    { "check-sandbox-wired", check_sandbox_wired_run, check_sandbox_wired_selftest },
 };
 
 int main(int argc, char **argv)
