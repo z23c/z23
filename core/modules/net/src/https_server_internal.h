@@ -28,4 +28,11 @@ const char *https_server_configured_hostname(void);
 void https_server_handle_http_client_fd(platform_socket_t fd,
                                         int64_t deadline_ms);
 
+/* Serve one GET from <datadir>/public-install when that tree exists.
+ * Returns true if the request was handled (file served or refused as too
+ * large after matching a public-install URL). False means the caller should
+ * keep the explorer redirect. */
+struct ssl_st;
+bool https_server_try_public_install(struct ssl_st *ssl, const char *url);
+
 #endif /* ZCL_NET_HTTPS_SERVER_INTERNAL_H */

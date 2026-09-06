@@ -293,6 +293,12 @@ static bool boot_https_explorer_start(void *ctx)
              "%s/ssl/self-signed-placeholder-key.pem", svc->datadir);
     snprintf(handoff_path, sizeof(handoff_path), "%s/ssl/%s", svc->datadir,
              ACME_HANDOFF_FILENAME);
+    {
+        char install_root[1024];
+        snprintf(install_root, sizeof(install_root), "%s/public-install",
+                 svc->datadir);
+        https_server_set_public_install_root(install_root);
+    }
     if (platform_directory_create(ssl_dir, 0700) != 0 && errno != EEXIST) {
         printf("HTTPS: cannot create %s - block explorer not on clearnet\n",
                ssl_dir);

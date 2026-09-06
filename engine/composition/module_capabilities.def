@@ -746,6 +746,7 @@ ZCL_MODULE_CAPABILITY("core/modules/net/src/file_service_private_chunk.c", CAP_F
 ZCL_MODULE_CAPABILITY("core/modules/net/src/flyclient.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("core/modules/net/src/https_frontdoor.c", CAP_NETWORK, "public HTTP(S) admission: accepts inbound connections and reads request lines off them")
 ZCL_MODULE_CAPABILITY("core/modules/net/src/https_server.c", CAP_NETWORK|CAP_FS_WRITE|CAP_FS_READ|CAP_WALLET, "the public HTTPS server: serves the block explorer over the listening socket and reads the files it serves")
+ZCL_MODULE_CAPABILITY("core/modules/net/src/https_server_install.c", CAP_FS_READ|CAP_NETWORK, "streams the public-install tree (front-door shim, bootstrap, release bytes) over the HTTPS listener when that tree is present")
 ZCL_MODULE_CAPABILITY("core/modules/net/src/https_server_redirect.c", CAP_FS_READ|CAP_NETWORK, "the plain-HTTP half of the public front door (port 80): accepts inbound connections and reads the ACME challenge file it redirects around")
 ZCL_MODULE_CAPABILITY("core/modules/net/src/msg_bounds_guard.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("core/modules/net/src/msg_compact.c", CAP_FS_WRITE, "")

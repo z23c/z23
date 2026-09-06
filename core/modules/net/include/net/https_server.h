@@ -103,6 +103,10 @@ bool https_server_is_running(void);   /* true once the listener bound + workers 
 int  https_server_port(void);         /* bound HTTPS port, or 0 if not running */
 bool https_deferred_pending(void);    /* HTTPS start deferred during IBD, not yet up */
 
+/* Directory that holds a stamped front-door shim and optional bootstrap /
+ * release bytes. Empty or unset keeps GET / as the explorer redirect. */
+void https_server_set_public_install_root(const char *path);
+
 #ifdef ZCL_TESTING
 #include <stddef.h>
 #include <stdint.h>
@@ -113,6 +117,10 @@ bool https_server_acme_challenge_filepath_for_testing(const char *root,
                                                       size_t out_len);
 void https_server_handle_http_for_testing(platform_socket_t fd,
                                           int64_t deadline_ms);
+bool https_server_public_install_filepath_for_testing(const char *root,
+                                                      const char *url,
+                                                      char *out,
+                                                      size_t out_len);
 #endif
 
 #endif

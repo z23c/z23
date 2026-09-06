@@ -96,7 +96,7 @@ static const char k_baked_pin[] =
 static const char k_default_origin[] = "https://z23.sh";
 static const char k_default_pin_dns[] = "_z23-pin.z23.sh";
 static const char k_default_pin_repo[] =
-    "https://raw.githubusercontent.com/ZclassiC23/zclassic/main/"
+    "https://raw.githubusercontent.com/z23c/z23/main/"
     "platform/packaging/install/RELEASE_PIN";
 
 /* The scratch directory, and the only two names we ever create inside it.

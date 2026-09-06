@@ -17,6 +17,7 @@
 #include "platform/time_compat.h"
 #include "util/file_io.h"
 #include "util/path_check.h"
+#include <errno.h>
 #include <limits.h>
 #include <stdatomic.h>
 #include <stdio.h>
@@ -430,6 +431,71 @@ int test_path_check(void)
                  !https_server_acme_challenge_filepath_for_testing(
                      root, "/.well-known/acme-challenge/link",
                      out, sizeof(out)));
+
+        test_cleanup_tmpdir(dir);
+    }
+
+    /* ── public-install path jail ────────────────────────────── */
+    {
+        char dir[256];
+        char root[PATH_MAX];
+        char shim_path[PATH_MAX];
+        char boot_dir[PATH_MAX];
+        char boot_path[PATH_MAX];
+        char outside_path[PATH_MAX];
+        char link_path[PATH_MAX];
+        char out[PATH_MAX];
+        char real_shim[PATH_MAX];
+
+        test_make_tmpdir(dir, sizeof(dir), "path_check", "pubinst");
+        snprintf(root, sizeof(root), "%s/public-install", dir);
+        PC_CHECK("public-install root mkdir", mkdir(root, 0700) == 0);
+        snprintf(shim_path, sizeof(shim_path), "%s/install.sh", root);
+        PC_CHECK("public-install shim fixture",
+                 write_small_file(shim_path, "#!/bin/sh\n"));
+        PC_CHECK("GET / maps to install.sh",
+                 realpath(shim_path, real_shim) &&
+                 https_server_public_install_filepath_for_testing(
+                     root, "/", out, sizeof(out)) &&
+                 strcmp(out, real_shim) == 0);
+        PC_CHECK("GET /install.sh maps to the same shim",
+                 https_server_public_install_filepath_for_testing(
+                     root, "/install.sh", out, sizeof(out)) &&
+                 strcmp(out, real_shim) == 0);
+        PC_CHECK("GET /explorer is not a public-install URL",
+                 !https_server_public_install_filepath_for_testing(
+                     root, "/explorer", out, sizeof(out)));
+        PC_CHECK("traversal segment is refused",
+                 !https_server_public_install_filepath_for_testing(
+                     root, "/release/../install.sh", out, sizeof(out)));
+
+        snprintf(boot_dir, sizeof(boot_dir), "%s/bootstrap/linux-x86_64",
+                 root);
+        PC_CHECK("bootstrap dir mkdir",
+                 mkdir(root, 0700) == 0 || errno == EEXIST);
+        {
+            char parent[PATH_MAX];
+            snprintf(parent, sizeof(parent), "%s/bootstrap", root);
+            PC_CHECK("bootstrap parent mkdir", mkdir(parent, 0700) == 0);
+            PC_CHECK("bootstrap platform mkdir", mkdir(boot_dir, 0700) == 0);
+        }
+        snprintf(boot_path, sizeof(boot_path), "%s/z23-bootstrap", boot_dir);
+        PC_CHECK("bootstrap fixture",
+                 write_small_file(boot_path, "bootstrap"));
+        PC_CHECK("GET /bootstrap/linux-x86_64/z23-bootstrap maps",
+                 https_server_public_install_filepath_for_testing(
+                     root, "/bootstrap/linux-x86_64/z23-bootstrap",
+                     out, sizeof(out)));
+
+        snprintf(outside_path, sizeof(outside_path), "%s/outside", dir);
+        snprintf(link_path, sizeof(link_path), "%s/install.sh", root);
+        PC_CHECK("public-install outside fixture",
+                 write_small_file(outside_path, "outside") &&
+                 remove(link_path) == 0 &&
+                 symlink("../outside", link_path) == 0);
+        PC_CHECK("public-install rejects symlink escape on GET /",
+                 !https_server_public_install_filepath_for_testing(
+                     root, "/", out, sizeof(out)));
 
         test_cleanup_tmpdir(dir);
     }

@@ -216,6 +216,68 @@ done:
     return ok;
 }
 
+/* GET `url` over the live listener; copies the response (headers+body) into
+ * `out`. Used to pin that GET / is the explorer redirect until a
+ * public-install tree is named, and the shim once it is. */
+static bool http_get(const char *url, char *out, size_t out_len)
+{
+    const int port = atomic_load(&g_port);
+    SSL_CTX *ctx = NULL;
+    SSL *ssl = NULL;
+    platform_socket_t fd = PLATFORM_SOCKET_INVALID;
+    struct sockaddr_in addr;
+    char req[256];
+    int n;
+    size_t got = 0;
+
+    if (port <= 0 || !url || !out || out_len == 0)
+        return false;
+    out[0] = '\0';
+    fd = platform_socket_open(AF_INET, SOCK_STREAM, 0, true, false);
+    if (fd == PLATFORM_SOCKET_INVALID)
+        return false;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port = htons((uint16_t)port);
+    if (platform_socket_connect(fd, (struct sockaddr *)&addr,
+                                sizeof(addr)) != 0)
+        goto fail;
+    ctx = SSL_CTX_new(TLS_client_method());
+    ssl = ctx ? SSL_new(ctx) : NULL;
+    if (!ssl || SSL_set_fd(ssl, (int)(intptr_t)fd) != 1)
+        goto fail;
+    if (SSL_connect(ssl) != 1) {
+        ERR_clear_error();
+        goto fail;
+    }
+    n = snprintf(req, sizeof(req),
+                 "GET %s HTTP/1.1\r\nHost: origin.example\r\n"
+                 "Connection: close\r\n\r\n", url);
+    if (n <= 0 || SSL_write(ssl, req, n) != n)
+        goto fail;
+    while (got + 1 < out_len) {
+        int r = SSL_read(ssl, out + got, (int)(out_len - got - 1));
+        if (r <= 0)
+            break;
+        got += (size_t)r;
+    }
+    out[got] = '\0';
+    SSL_shutdown(ssl);
+    SSL_free(ssl);
+    SSL_CTX_free(ctx);
+    platform_socket_close(fd);
+    return got > 0;
+fail:
+    if (ssl) {
+        SSL_free(ssl);
+    }
+    SSL_CTX_free(ctx);
+    if (fd != PLATFORM_SOCKET_INVALID)
+        platform_socket_close(fd);
+    return false;
+}
+
 /* Which certificate a plain browser-shaped client is served for `sni`. */
 static bool served_cn(const char *sni, char *out, size_t out_len)
 {
@@ -356,6 +418,38 @@ int test_https_sni_select(void)
         SN_CHECK("and a client that sends no name at all is too",
                  served_cn(NULL, cn, sizeof(cn)) &&
                  strcmp(cn, DEFAULT_CN) == 0);
+    }
+
+    {
+        char resp[1024];
+        char install_root[640];
+        char shim[768];
+        FILE *f;
+
+        SN_CHECK("GET / without a public-install tree is the explorer redirect",
+                 http_get("/", resp, sizeof(resp)) &&
+                 strstr(resp, "Location: /explorer") != NULL);
+        snprintf(install_root, sizeof(install_root), "%s/public-install", dir);
+        SN_CHECK("public-install directory is created",
+                 mkdir(install_root, 0700) == 0);
+        snprintf(shim, sizeof(shim), "%s/install.sh", install_root);
+        f = fopen(shim, "wb");
+        SN_CHECK("stamped shim fixture is written",
+                 f != NULL && fwrite("#!/bin/sh\necho z23-install\n", 1, 27,
+                                     f) == 27 &&
+                 fclose(f) == 0);
+        https_server_set_public_install_root(install_root);
+        SN_CHECK("GET / with a public-install tree serves the shim",
+                 http_get("/", resp, sizeof(resp)) &&
+                 strstr(resp, "HTTP/1.1 200 OK") != NULL &&
+                 strstr(resp, "echo z23-install") != NULL);
+        SN_CHECK("GET /explorer is not captured by the install tree",
+                 http_get("/explorer", resp, sizeof(resp)) &&
+                 strstr(resp, "echo z23-install") == NULL);
+        https_server_set_public_install_root(NULL);
+        SN_CHECK("clearing the install root restores the explorer redirect",
+                 http_get("/", resp, sizeof(resp)) &&
+                 strstr(resp, "Location: /explorer") != NULL);
     }
 
     /* ── one configured name ───────────────────────────────────────── */

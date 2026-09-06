@@ -448,9 +448,8 @@ static int sbe_on_file(const char *path, void *ctx)
         return die("z23-lint: cannot open %s\n", path);
     char *cur = NULL, *prev = NULL;
     size_t ccap = 0, pcap = 0;
-    int have = 0, lineno = 0, rc = 0;
+    int have = 0, rc = 0;
     while (rc == 0 && getline(&cur, &ccap, f) >= 0) {
-        lineno++;
         sbe_chomp(cur);
         if (strstr(cur, "return false;") && have) {
             char key[SBE_KEY];

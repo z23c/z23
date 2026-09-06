@@ -779,6 +779,12 @@ static void handle_https_client(SSL *ssl, platform_socket_t fd,
         return;
     }
 
+    /* A public-install tree, when present, owns GET / and the bootstrap /
+     * release paths. Absent files fall through so explorer nodes stay
+     * explorer nodes. */
+    if (https_server_try_public_install(ssl, path))
+        return;
+
     /* Redirect root to explorer */
     if (strcmp(path, "/") == 0) {
         const char *resp =
