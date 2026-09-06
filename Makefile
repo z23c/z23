@@ -3902,10 +3902,10 @@ zcode-package-asan: $(ZCODE_PACKAGE_BASE_ASAN_BIN) \
 	@echo "zcode-package-asan: OK (isolated base/sha3/codec + signed package lifecycle)"
 
 .PHONY: check-zcode-package-registry print-zcode-monolith-lib-sources
-check-zcode-package-registry: $(ZCODE_PACKAGE_REGISTRY_CHECK_BIN)
+check-zcode-package-registry: $(ZCODE_PACKAGE_REGISTRY_CHECK_BIN) $(LINTC_TOOL)
 	@tools/lint/check_zcode_package_registry.sh
 .PHONY: check-zcode-package-standalone
-check-zcode-package-standalone:
+check-zcode-package-standalone: $(LINTC_TOOL)
 	@tools/lint/check_zcode_package_standalone.sh
 .PHONY: check-package-capabilities
 check-package-capabilities:
@@ -5300,7 +5300,7 @@ LINTC_SRCS = tools/lint/lintc/lib.c tools/lint/lintc/gate_boot_wiring.c tools/li
     tools/lint/lintc/gate_tree_walk.c tools/lint/lintc/gate_git_scan_a.c \
     tools/lint/lintc/gate_git_scan_b.c tools/lint/lintc/gate_landing_proof.c \
     tools/lint/lintc/gate_build_config.c tools/lint/lintc/gate_doc_index.c \
-    tools/lint/lintc/gate_ratchet_ports.c tools/lint/lintc/gate_repo_shape.c tools/lint/lintc/gate_def_parsers.c \
+    tools/lint/lintc/gate_ratchet_ports.c tools/lint/lintc/gate_repo_shape.c tools/lint/lintc/gate_def_parsers.c tools/lint/lintc/gate_zcode_packages.c \
     tools/lint/lintc/main.c
 LINTC_OBJS = $(LINTC_SRCS:tools/lint/lintc/%.c=build/lintc-obj/%.o)
 # Apple Clang enables -Wunused-but-set-variable under -Wextra -Werror for

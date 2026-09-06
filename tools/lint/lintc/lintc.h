@@ -190,5 +190,9 @@ int check_persona_resolves_run(int argc, char **argv);
 int check_persona_resolves_selftest(void);
 int check_prompt_templates_run(int argc, char **argv);
 int check_prompt_templates_selftest(void);
+int check_zcode_package_registry_run(int argc, char **argv);
+int check_zcode_package_registry_selftest(void);
+int check_zcode_package_standalone_run(int argc, char **argv);
+int check_zcode_package_standalone_selftest(void);
 
 #endif

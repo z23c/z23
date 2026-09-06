@@ -89,6 +89,10 @@ static const struct lint_gate k_gates[] = {
       check_wallet_raw_prepare_log_selftest },
     { "check-persona-resolves", check_persona_resolves_run, check_persona_resolves_selftest },
     { "check-prompt-templates", check_prompt_templates_run, check_prompt_templates_selftest },
+    { "check-zcode-package-registry", check_zcode_package_registry_run,
+      check_zcode_package_registry_selftest },
+    { "check-zcode-package-standalone", check_zcode_package_standalone_run,
+      check_zcode_package_standalone_selftest },
 };
 
 int main(int argc, char **argv)
