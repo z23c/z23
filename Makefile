@@ -10722,6 +10722,8 @@ COV_LINK_RSP = $(COV_BUILD_DIR)/link-inputs.rsp
 
 COV_OBJECT_CFLAGS = $(COV_CFLAGS) -Wno-deprecated-declarations
 $(COV_BUILD_DIR)/platform/modules/util/src/clientversion.o: COV_OBJECT_CFLAGS += $(BUILD_IDENTITY_CPPFLAGS) $(DEV_SOURCE_RECEIPT_CPPFLAGS)
+$(COV_BUILD_DIR)/tests/harness/src/test_arena_view.o: COV_OBJECT_CFLAGS += \
+  $(ARENA_VIEW_INCLUDES)
 $(COV_BUILD_DIR)/%.o: %.c $(VIEW_GEN_HEADERS) $(BUILD_EPOCH_OBJECT_TOOL) | $(COV_LEASE)
 	@$(BUILD_EPOCH_OBJECT_TOOL) coverage "$@" "$<" \
 	  "$(BUILD_SOURCE_ID)" "$(BUILD_CLEAN)" "$(BUILD_MUTATION)" \
