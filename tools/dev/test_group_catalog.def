@@ -854,6 +854,9 @@ ZCL_TEST_GROUP(land_queue)
  * a log path, and that a base which moved mid-proof re-rebases instead of
  * landing evidence about a base nobody is on. */
 ZCL_TEST_GROUP(dev_land)
+/* Agent worktree construction: detached git worktree plus the proof's
+ * vendored dependencies cloned onto independent inodes (never hardlinked). */
+ZCL_TEST_GROUP(dev_lane)
 ZCL_TEST_GROUP(receipt)
 ZCL_TEST_GROUP(testcache)
 /* The push proof's test dimension must set ZCL_STRESS_TESTS=1 in its own

@@ -1113,6 +1113,7 @@ ZCL_MODULE_CAPABILITY("tools/command/native_dev_command.c", CAP_FS_READ|CAP_FS_W
 ZCL_MODULE_CAPABILITY("tools/command/native_dev_hotswap.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("tools/command/native_dev_retrieval_command.c", CAP_FS_READ|CAP_FS_WRITE, "reads sealed retrieval evidence and writes bounded replay outputs for native developer commands")
 ZCL_MODULE_CAPABILITY("tools/command/native_dev_land.c", CAP_FS_READ|CAP_FS_WRITE|CAP_CLOCK, "reads and rewrites the landing queue state under the build directory (fopen/fread, a write-then-rename of the queue file, mkdir of its parents) and stamps queue entries with wall-clock time")
+ZCL_MODULE_CAPABILITY("tools/command/native_dev_lane.c", CAP_FS_READ|CAP_FS_WRITE, "creates an agent worktree and clones vendored proof dependencies onto independent inodes (getcwd/lstat/open/mkdir/rename); git and make child processes go through the spawn seam, whose own module owns the process reach")
 ZCL_MODULE_CAPABILITY("tools/command/native_dev_train_command.c", CAP_FS_READ|CAP_FS_WRITE, "reads and writes the per-stack train-check state and log files in the stacked worktree; the git and make child processes go through the spawn seam, whose own module owns the process reach")
 ZCL_MODULE_CAPABILITY("tools/command/native_devagent.c", CAP_FS_READ|CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("tools/command/native_devagent_command.c", CAP_FS_READ|CAP_FS_WRITE, "")

@@ -1,7 +1,7 @@
 /* Checkout-local development commands. Native transport only. */
 
 ZCL_COMMAND_READY_READ(
-    "dev.status", "dev", "", "Read the latest native cycle verdict",
+    "dev.status", "dev", "", "Latest native cycle verdict",
     "The most recent native compile/test/lint cycle verdict persisted by "
     "the local dev-state store at call time, including exact ran, reused, "
     "failed, and runtime-skip proof counts when present; reports "
@@ -16,7 +16,7 @@ ZCL_COMMAND_READY_READ(
     ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_dev_status)
 
 ZCL_COMMAND_DEV_COMMAND(
-    "dev.begin", "dev", "", "Start or reattach to the warm C23 development service",
+    "dev.begin", "dev", "", "Start or reattach the warm C23 dev service",
     "Starts one checkout-local verify watcher by default, or reattaches "
     "idempotently to the existing watcher. The response names the resident "
     "watcher and one next command; it grants no canonical-node, wallet, "
@@ -35,7 +35,7 @@ ZCL_COMMAND_DEV_COMMAND(
     "z23-dev dev begin")
 
 ZCL_COMMAND_DEV_READ(
-    "dev.drive", "dev", "", "Wait for feedback and return one compact next action",
+    "dev.drive", "dev", "", "Wait for feedback, return the next action",
     "The first action-changing result newer than after_epoch, compacted with "
     "its live or fallback latency, proof state, ZVCS root and restart-safe publication "
     "phase. If a publication job exists, drive verifies and renders that "
@@ -56,7 +56,7 @@ ZCL_COMMAND_DEV_READ(
     "z23-dev dev drive")
 
 ZCL_COMMAND_READY_READ(
-    "dev.ff", "dev", "", "Fail-fast ladder: compile, test, lint",
+    "dev.ff", "dev", "", "Fail-fast: compile, test, lint",
     "Pass/fail result of a freshly executed compile+focused-test+lint "
     "ladder run synchronously against the current checkout via `make ff`; "
     "not cached, dev build only.", 0,
@@ -70,7 +70,7 @@ ZCL_COMMAND_READY_READ(
     ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_dev_ff)
 
 ZCL_COMMAND_BRANCH("dev.retrieval", "dev",
-                   "Observe retrieval quality on an exact source generation",
+                   "Retrieval quality for a source generation",
                    ZCL_COMMAND_LAYER_DEV)
 
 ZCL_COMMAND_DEV_READ(
@@ -257,7 +257,7 @@ ZCL_COMMAND_DEV_COMMAND(
 
 ZCL_COMMAND_DEV_READ(
     "dev.verify-change", "dev", "",
-    "Compile affected code and run mapped focused proofs with compact output",
+    "Compile changed code and run its focused proofs",
     "A fresh changed-scope verification: exact compile_commands.json recipes "
     "for changed C translation units (source-wide compile fallback for header "
     "or build-graph edits), mapped focused tests, and lint-fast. Full logs are "
@@ -962,7 +962,7 @@ ZCL_COMMAND_DEV_READ(
  * `truth` is the per-lane inventory; `start` is the whole fleet in one
  * bounded packet for the session that dispatches lanes. */
 ZCL_COMMAND_BRANCH("dev.fleet", "dev",
-                   "Fleet truth, the opening packet, and what is known",
+                   "Fleet truth and the opening packet",
                    ZCL_COMMAND_LAYER_DEV)
 
 ZCL_COMMAND_READY_READ(
@@ -1277,7 +1277,7 @@ ZCL_COMMAND_DEV_COMMAND(
  * `z23` it just built, and a compat leaf that redirects to a second binary is
  * the dead end this branch exists to remove. */
 ZCL_COMMAND_BRANCH("dev.agent", "dev",
-                   "Checkout questions answered without composing shell",
+                   "Checkout questions without composing shell",
                    ZCL_COMMAND_LAYER_DEV)
 
 ZCL_COMMAND_READY_READ(
@@ -1608,7 +1608,7 @@ ZCL_COMMAND_READY_READ(
  * reads the proof's own answer and fast-forwards origin/main. */
 ZCL_COMMAND_DEV_COMMAND(
     "dev.land", "dev", "",
-    "Queue a tip for proof and push without waiting for either",
+    "Queue a tip; prove and push without waiting",
     "One durable landing queue over the owner-private state root: submit "
     "checks that the tip exists, is signed, and shares history with "
     "origin/main, then appends {seq, tip, worktree, note} to "
@@ -1638,6 +1638,37 @@ ZCL_COMMAND_DEV_COMMAND(
     zcl_native_handle_dev_land,
     "the landing queue is a development-lane coordination surface",
     "z23-dev dev land")
+
+/* ── dev.lane ──────────────────────────────────────────────────────────────
+ * An agent worktree with the proof's vendored dependencies primed onto
+ * independent inodes. Hardlinks are forbidden: they bump the shared inode's
+ * ctime and refuse every in-flight proof whose seal covered that file. */
+ZCL_COMMAND_BRANCH("dev.lane", "dev",
+                   "Agent worktree with independent inodes",
+                   ZCL_COMMAND_LAYER_DEV)
+
+ZCL_COMMAND_DEV_COMMAND(
+    "dev.lane.new", "dev.lane", "",
+    "Create an agent worktree and clone proof dependencies onto new inodes",
+    "Creates a detached git worktree at --path from --base when <path>/.git "
+    "is absent, initialises vendor/tor when submodule status starts with '-', "
+    "and materialises vendor/tor/libtor.a, every vendor/tor/src/ext archive, "
+    "vendor/lib, vendor/include, build/githooks, and the hotswap rollback "
+    "fixtures from this checkout using file_clone (never link/linkat). "
+    "Runs make -s install-hooks in the worktree. Returns path, HEAD, the "
+    "count of newly materialised files, libtor_links (must be 1), and "
+    "hooks_installed.", 65536,
+    "lane,worktree,vendor,tor,proof,clone,inode",
+    "zcl.lane_new_input.v1", "zcl.lane_new.v1", "path,base", "",
+    "z23-dev dev lane new --path=$HOME/.z23/lanes/example --base=HEAD",
+    ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_DEV_MUTATION,
+    ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_MODE_SYNC, ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_DEV_STATE_WRITE, ZCL_COMMAND_TRAIT_DEV_ONLY,
+    zcl_native_handle_dev_lane_new,
+    "agent worktree construction requires the dev binary",
+    "z23-dev dev lane new --path=<abs> --base=<ref>")
 
 /* ── dev.agent.queue ───────────────────────────────────────────────────────
  * The fleet's unit dispatch as a typed, non-blocking API instead of shell.

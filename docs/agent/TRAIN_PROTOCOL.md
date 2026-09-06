@@ -149,6 +149,8 @@ as a real submodule gitlink, the landing worktree's own submodule is
 initialised first and its checked-out commit must equal the commit the tip
 pins.
 
+An agent worktree is made with `z23-dev dev lane new --path=<absolute> --base=<ref>`: a detached git worktree at that path, with the proof's vendored dependencies (`vendor/tor/libtor.a`, the `vendor/tor/src/ext` archives, `vendor/lib`, `vendor/include`, `build/githooks`, and the hotswap rollback fixtures) cloned onto independent inodes. Hardlinks are forbidden — `link()`/`linkat()` bump the shared inode's ctime and refuse every in-flight proof whose seal covered that file.
+
 Two things follow. When the landing worktree is already standing on the tip's
 pinned commit and still holds `vendor/tor/libtor.a` from an earlier train,
 that is accepted directly and the submitting checkout is never consulted —

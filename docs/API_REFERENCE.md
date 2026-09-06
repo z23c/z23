@@ -74,15 +74,15 @@ z23 discover schema <path> --side=input|output
 
 | Catalog fact | Count |
 |---|---|
-| Registry entries (branches + leaves) | 846 |
+| Registry entries (branches + leaves) | 848 |
 | Top-level roots | 14 |
-| Branches | 191 |
-| Leaves (dispatchable command paths) | 655 |
+| Branches | 192 |
+| Leaves (dispatchable command paths) | 656 |
 | … `ready` (live handler in this build) | 585 |
-| … `compat` (metadata only, names a fallback) | 39 |
+| … `compat` (metadata only, names a fallback) | 40 |
 | … `planned` (fail-closed BLOCKED, exit 3) | 31 |
-| … dev-gated 🔧 (`ready` only in `z23-dev`) | 38 |
-| Leaves with `effect=mutate` | 231 |
+| … dev-gated 🔧 (`ready` only in `z23-dev`) | 39 |
+| Leaves with `effect=mutate` | 232 |
 | Leaves with `effect=destructive` | 5 |
 | Leaves requiring **owner** authority | 122 |
 
@@ -96,7 +96,7 @@ Per source file:
 | `engine/composition/commands/app_features.def` | 75 | 20 | 55 |
 | `engine/composition/commands/store.def` | 18 | 0 | 18 |
 | `engine/composition/commands/ops.def` | 57 | 10 | 47 |
-| `engine/composition/commands/dev.def` | 96 | 19 | 77 |
+| `engine/composition/commands/dev.def` | 98 | 20 | 78 |
 | `engine/composition/commands/code.def` | 33 | 4 | 29 |
 | `engine/composition/commands/accounts.def` | 11 | 2 | 9 |
 | `engine/composition/commands/vault.def` | 24 | 4 | 20 |
@@ -652,14 +652,14 @@ represented by its children's sections.
 
 | Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
 |---|---|---|---|---|---|---|
-| `dev status` | ready | read / read / operator · instant/low | none | `zcl.dev_cycle.v1` | `z23 dev status` | Read the latest native cycle verdict |
-| `dev begin` | compat 🔧 → `z23-dev dev begin` | mutate / dev-mutation / **owner** · fast/low | `root`, `mode` | `zcl.dev_begin.v1` | `z23-dev dev begin` | Start or reattach to the warm C23 development service — *warm watcher ownership requires the dev-only executor* |
-| `dev drive` | compat 🔧 → `z23-dev dev drive` | read / read / operator · persistent/low | `after_epoch`, `timeout_ms`, `wait_for_edit` | `zcl.dev_drive.v1` | `z23-dev dev drive` | Wait for feedback and return one compact next action — *bounded warm-service driving requires the dev binary* |
-| `dev ff` | ready | read / read / operator · instant/low | none | `zcl.dev_ff.v1` | `z23 dev ff` | Fail-fast ladder: compile, test, lint |
-| `dev verify-change` | compat 🔧 → `make dev-bin, then z23-dev dev verify-change` | read / read / **owner** · background/high | none | `zcl.dev_verify_change.v1` | `z23-dev dev verify-change` | Compile affected code and run mapped focused proofs with compact output — *changed-scope verification requires the dev-only process executor* |
-| `dev land` | compat 🔧 → `z23-dev dev land` | mutate / dev-mutation / operator · fast/low | **`action`**, `tip`, `worktree`, `note`, `seq`, `json` | `zcl.land.v1` | `z23-dev dev land submit --tip=9afd46726` | Queue a tip for proof and push without waiting for either — *the landing queue is a development-lane coordination surface* |
+| `dev status` | ready | read / read / operator · instant/low | none | `zcl.dev_cycle.v1` | `z23 dev status` | Latest native cycle verdict |
+| `dev begin` | compat 🔧 → `z23-dev dev begin` | mutate / dev-mutation / **owner** · fast/low | `root`, `mode` | `zcl.dev_begin.v1` | `z23-dev dev begin` | Start or reattach the warm C23 dev service — *warm watcher ownership requires the dev-only executor* |
+| `dev drive` | compat 🔧 → `z23-dev dev drive` | read / read / operator · persistent/low | `after_epoch`, `timeout_ms`, `wait_for_edit` | `zcl.dev_drive.v1` | `z23-dev dev drive` | Wait for feedback, return the next action — *bounded warm-service driving requires the dev binary* |
+| `dev ff` | ready | read / read / operator · instant/low | none | `zcl.dev_ff.v1` | `z23 dev ff` | Fail-fast: compile, test, lint |
+| `dev verify-change` | compat 🔧 → `make dev-bin, then z23-dev dev verify-change` | read / read / **owner** · background/high | none | `zcl.dev_verify_change.v1` | `z23-dev dev verify-change` | Compile changed code and run its focused proofs — *changed-scope verification requires the dev-only process executor* |
+| `dev land` | compat 🔧 → `z23-dev dev land` | mutate / dev-mutation / operator · fast/low | **`action`**, `tip`, `worktree`, `note`, `seq`, `json` | `zcl.land.v1` | `z23-dev dev land submit --tip=9afd46726` | Queue a tip; prove and push without waiting — *the landing queue is a development-lane coordination surface* |
 
-#### `dev.retrieval` — Observe retrieval quality on an exact source generation
+#### `dev.retrieval` — Retrieval quality for a source generation
 
 | Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
 |---|---|---|---|---|---|---|
@@ -777,7 +777,7 @@ represented by its children's sections.
 |---|---|---|---|---|---|---|
 | `dev test background status` | planned | read / read / operator · instant/low | none | `zcl.dev_background_quality.v1` | `z23 dev test background status` | Read lint, sanitizer, replay, and reproducibility freshness — *native background-quality projection is not implemented* |
 
-#### `dev.fleet` — Fleet truth, the opening packet, and what is known
+#### `dev.fleet` — Fleet truth and the opening packet
 
 | Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
 |---|---|---|---|---|---|---|
@@ -804,7 +804,7 @@ represented by its children's sections.
 | `dev train status` | compat 🔧 → `z23-dev dev train status` | read / read / operator · fast/low | `name` | `zcl.train_status.v1` | `z23 dev train status` | List stack worktrees, their base, and last check verdict — *stack status requires the dev binary* |
 | `dev train drop` | compat 🔧 → `z23-dev dev train drop --name <n>` | destructive / dev-mutation / operator · fast/low | `name`, `force` | `zcl.train_drop.v1` | `z23 dev train drop --name q` | Remove a stack worktree — *stack removal requires the dev binary* |
 
-#### `dev.agent` — Checkout questions answered without composing shell
+#### `dev.agent` — Checkout questions without composing shell
 
 | Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
 |---|---|---|---|---|---|---|
@@ -824,6 +824,12 @@ represented by its children's sections.
 | `dev agent ticketkey` | ready | read / read / operator · fast/low | `group`, `cwd`, `tip` | `zcl.agent_ticketkey.v1` | `z23 dev agent ticketkey --group=devagent_situation` | Commuting-ticket key of one test group at one tip |
 | `dev agent queue` | compat 🔧 → `z23-dev dev agent queue` | mutate / dev-mutation / operator · fast/low | **`action`**, `kind`, `name`, `group`, `path`, `brief`, `model`, `attempt`, `json`, `cwd` | `zcl.agent_queue.v1` | `z23 dev agent queue post --kind=leaf --name=situation` | Post, dispatch, reap, and inspect async flash-unit runs without blocking — *the unit queue is a development-lane coordination surface* |
 | `dev agent mail` | compat 🔧 → `z23-dev dev agent mail` | mutate / dev-mutation / operator · fast/low | **`action`**, `to`, `kind`, `body`, `since`, `from`, **`cursor`**, `agent`, `ref`, `cwd` | `zcl.agent_mail.v1` | `z23 dev agent mail post --to=* --kind=note --body=hello` | Post, pull, and ack async agent mail without blocking — *agent mail is a development-lane coordination surface* |
+
+#### `dev.lane` — Agent worktree with independent inodes
+
+| Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
+|---|---|---|---|---|---|---|
+| `dev lane new` | compat 🔧 → `z23-dev dev lane new --path=<abs> --base=<ref>` | mutate / dev-mutation / operator · fast/moderate | `path`, `base` | `zcl.lane_new.v1` | `z23-dev dev lane new --path=$HOME/.z23/lanes/example --base=HEAD` | Create an agent worktree and clone proof dependencies onto new inodes — *agent worktree construction requires the dev binary* |
 
 #### `dev.fleet.mind` — The node's resident index owner, and what to ask it
 

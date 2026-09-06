@@ -2437,6 +2437,9 @@ void zcl_native_handle_dev_agent_mutate(
 void zcl_native_handle_dev_land(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
+void zcl_native_handle_dev_lane_new(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
 
 /* dev.fleet.know, aliased `dev know` — the fleet fact table, asked by
  * subject. It reads engine/composition/fleet_facts.def as an X-macro paste
