@@ -27,7 +27,6 @@ tools/dev/hotswap-module-fast.sh 2
 tools/dev/recover-dev-lane-selftest.sh 1
 tools/dev/zcode_adapter_benchmark.sh 1
 tools/dev/zcode_dht_acceptance.sh 1
-tools/lint/check_hotswap_eligible_scope.sh 1
 tools/lint/check_no_stale_pinned_facts.sh 1
 tools/lint/check_release_no_dev_symbols.sh 1
 tools/lint/check_thread_supervision.sh 1

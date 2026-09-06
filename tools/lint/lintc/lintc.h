@@ -178,5 +178,7 @@ int check_architecture_tree_run(int argc, char **argv);
 int check_architecture_tree_selftest(void);
 int check_sandbox_wired_run(int argc, char **argv);
 int check_sandbox_wired_selftest(void);
+int check_hotswap_eligible_scope_run(int argc, char **argv);
+int check_hotswap_eligible_scope_selftest(void);
 
 #endif

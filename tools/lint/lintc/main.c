@@ -79,6 +79,8 @@ static const struct lint_gate k_gates[] = {
     { "check-architecture-tree", check_architecture_tree_run,
       check_architecture_tree_selftest },
     { "check-sandbox-wired", check_sandbox_wired_run, check_sandbox_wired_selftest },
+    { "check-hotswap-eligible-scope", check_hotswap_eligible_scope_run,
+      check_hotswap_eligible_scope_selftest },
 };
 
 int main(int argc, char **argv)
