@@ -7344,7 +7344,8 @@ $(BIN_DIR)/fleet-board-bridge: tools/fleet_board_bridge.c \
     platform/modules/platform/include/platform/clock.h
 	@mkdir -p $(dir $@)
 	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
-	    -D_POSIX_C_SOURCE=200809L -Iplatform/modules/base/include \
+	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) \
+	    -Iplatform/modules/base/include \
 	    -Iplatform/modules/json/include -Iplatform/modules/platform/include \
 	    -Iplatform/modules/util/include -o $@ $(filter %.c,$^) -lm
 
@@ -11283,7 +11284,8 @@ engine-unit: $(ENGINE_UNIT_BIN)
 $(ENGINE_UNIT_BIN): $(ENGINE_UNIT_SRCS) $(NODE_VENDOR_LIBS)
 	@mkdir -p $(dir $@)
 	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
-	    -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE $(ENGINE_UNIT_INCLUDES) \
+	    -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE $(ZCL_PLATFORM_CPPFLAGS) \
+	    $(ENGINE_UNIT_INCLUDES) \
 	    -o $@ $(ENGINE_UNIT_SRCS) \
 	    vendor/lib/libssl.a vendor/lib/libcrypto.a -lpthread -lm \
 	    $(if $(ZCL_HOST_WINDOWS),-lws2_32 -lbcrypt -lcrypt32 -ladvapi32 -luserenv,)
