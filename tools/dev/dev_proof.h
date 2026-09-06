@@ -143,6 +143,19 @@ bool zcl_dev_proof_child_action_v1(
  * inode, preserving mode and mtime. No proof, lease, or admission authority. */
 bool zcl_dev_proof_dependency_materialize(const char *source,
                                           const char *target);
+/* Sweep both of this checkout's generation pools (the disk pool beside the
+ * checkout, and this host's RAM root when it offers one) for finished
+ * generations and remove them, bounded and lease-aware exactly like the
+ * reap the proof already runs on its own hot path -- this is the same
+ * policy invoked explicitly, not a second one. `removed_out`/`bytes_out`
+ * (either may be NULL) report what was actually deleted so a caller (the
+ * landing leaf, at attempt end or the next submit) can log it. Returns
+ * false only when neither pool path could even be computed from
+ * `repo_root`; finding nothing to remove is success, not a refusal. */
+bool zcl_dev_proof_generation_pool_sweep(const char *repo_root,
+                                         size_t *removed_out,
+                                         uint64_t *bytes_out, char *why,
+                                         size_t why_len);
 bool zcl_dev_proof_resolve_pair(const char *repo_root,
                                 const char *requested_local,
                                 const char *requested_base,

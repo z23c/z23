@@ -2865,17 +2865,50 @@ struct warm_reap_entry {
     bool complete;
 };
 
+/* Apparent size of every regular file under `dir`, summed recursively.
+ * Advisory only, for a hygiene log line: a read error or a sibling lane
+ * mutating the tree mid-walk just undercounts, it never fails the sweep
+ * that called this. */
+static uint64_t directory_bytes_sum(const char *dir)
+{
+    DIR *d = opendir(dir);
+    if (!d) return 0;
+    uint64_t total = 0;
+    for (struct dirent *entry = readdir(d); entry; entry = readdir(d)) {
+        if (strcmp(entry->d_name, ".") == 0 ||
+            strcmp(entry->d_name, "..") == 0)
+            continue;
+        char child[PATH_MAX];
+        if (snprintf(child, sizeof(child), "%s/%s", dir, entry->d_name) >=
+                (int)sizeof(child))
+            continue;
+        struct stat st;
+        if (lstat(child, &st) != 0) continue;
+        if (S_ISDIR(st.st_mode)) total += directory_bytes_sum(child);
+        else if (S_ISREG(st.st_mode)) total += (uint64_t)st.st_size;
+    }
+    (void)closedir(d);
+    return total;
+}
+
 /* With warm start, old generations are valuable donors, so the reaper
  * keeps the newest complete generation per root and may reap the rest.
- * Hygiene, never correctness: this returns nothing and the caller ignores
- * it, because a pool that fails to shrink costs disk while a proof that
- * failed over a delete would cost every lane on this host its push.
+ * Hygiene, never correctness: a pool that fails to shrink costs disk while
+ * a proof that failed over a delete would cost every lane on this host its
+ * push. `max_attempts` bounds how many candidates reach git (the prepare
+ * path's own call keeps its tight PROOF_WARM_REAP_MAX budget; an explicit
+ * sweep triggered off the proof's hot path can afford a larger one).
+ * `removed_out`/`bytes_out`, when non-NULL, are INCREMENTED (never reset)
+ * by what this call actually deleted, so a caller sweeping more than one
+ * pool root can accumulate one total across calls.
  *
  * A donor being seeded from while it is reaped degrades gracefully: the
  * seed walk skips files that vanish, and hard links already created keep
  * their inodes after the donor names are unlinked. */
-static void generation_pool_reap(const struct proof_paths *paths,
-                                 const char *parent, const char *in_use)
+static void generation_pool_reap_ex(const struct proof_paths *paths,
+                                    const char *parent, const char *in_use,
+                                    size_t max_attempts, size_t *removed_out,
+                                    uint64_t *bytes_out)
 {
     DIR *dir = opendir(parent);
     if (!dir || !paths || !parent || !in_use) {
@@ -2944,7 +2977,7 @@ static void generation_pool_reap(const struct proof_paths *paths,
     (void)closedir(dir);
     size_t attempts = 0;
     for (size_t i = 0; collect_ok && entries && i < count &&
-             attempts < PROOF_WARM_REAP_MAX;
+             attempts < max_attempts;
          i++) {
         bool reap = false;
         if (!entries[i].complete) {
@@ -3005,6 +3038,11 @@ static void generation_pool_reap(const struct proof_paths *paths,
         if (!warm_generation_touched(entries[i].path, &touched_again) ||
             touched_again != entries[i].touched)
             continue;
+        /* Measured before the delete: afterward there is nothing left to
+         * walk. Advisory only, so a size that changes mid-measurement
+         * just makes the log line approximate, never wrong enough to act
+         * on -- nothing downstream reads these numbers back. */
+        uint64_t freed = directory_bytes_sum(entries[i].path);
         /* --force is safe only because detached and clean were just
          * proven. What it overrides is git's refusal to delete a tree
          * that still holds untracked files, and a generation's untracked
@@ -3012,11 +3050,80 @@ static void generation_pool_reap(const struct proof_paths *paths,
         const char *argv[] = {"git", "worktree", "remove", "--force",
                               entries[i].path, NULL};
         char output[1024];
-        (void)git_capture_within(paths->root, argv,
-                                 PROOF_WARM_REMOVE_TIMEOUT_MS, output,
-                                 sizeof(output));
+        if (git_capture_within(paths->root, argv,
+                               PROOF_WARM_REMOVE_TIMEOUT_MS, output,
+                               sizeof(output))) {
+            if (removed_out) (*removed_out)++;
+            if (bytes_out) *bytes_out += freed;
+        }
     }
     free(entries);
+}
+
+static void generation_pool_reap(const struct proof_paths *paths,
+                                 const char *parent, const char *in_use)
+{
+    generation_pool_reap_ex(paths, parent, in_use, PROOF_WARM_REAP_MAX, NULL,
+                            NULL);
+}
+
+/* An explicit sweep of both this checkout's own generation pools (disk
+ * beside the landing worktree, and this host's RAM root when it offers
+ * one), unbounded by the tight per-prepare budget: triggered off the
+ * proof's hot path (attempt end, next submit), it can afford to look at
+ * more than eight candidates. Reports what it actually removed so the
+ * caller can log it; `why` carries a reason only when both pool paths
+ * were unusable to compute, never for "found nothing to remove" (that is
+ * success, not a refusal). */
+#define PROOF_POOL_SWEEP_MAX 512
+bool zcl_dev_proof_generation_pool_sweep(const char *repo_root,
+                                         size_t *removed_out,
+                                         uint64_t *bytes_out, char *why,
+                                         size_t why_len)
+{
+    if (why && why_len) why[0] = 0;
+    if (removed_out) *removed_out = 0;
+    if (bytes_out) *bytes_out = 0;
+    if (!repo_root || !repo_root[0]) {
+        proof_why(why, why_len, "proof_generation_pool_sweep_root_invalid");
+        return false;
+    }
+    char root_parent[PATH_MAX];
+    if (snprintf(root_parent, sizeof(root_parent), "%s", repo_root) >=
+            (int)sizeof(root_parent)) {
+        proof_why(why, why_len, "proof_generation_pool_sweep_root_invalid");
+        return false;
+    }
+    char *slash = strrchr(root_parent, '/');
+    if (!slash || slash == root_parent) {
+        proof_why(why, why_len, "proof_generation_pool_sweep_root_invalid");
+        return false;
+    }
+    *slash = 0;
+    char disk_parent[PATH_MAX];
+    if (snprintf(disk_parent, sizeof(disk_parent), "%s/.z23p", root_parent) >=
+            (int)sizeof(disk_parent)) {
+        proof_why(why, why_len, "proof_generation_pool_sweep_path_invalid");
+        return false;
+    }
+    struct proof_paths paths;
+    memset(&paths, 0, sizeof(paths));
+    (void)snprintf(paths.root, sizeof(paths.root), "%s", repo_root);
+    size_t removed = 0;
+    uint64_t bytes = 0;
+    generation_pool_reap_ex(&paths, disk_parent, "", PROOF_POOL_SWEEP_MAX,
+                            &removed, &bytes);
+    char ram_root[PATH_MAX];
+    if (platform_ram_scratch_root(ram_root, sizeof(ram_root), 0)) {
+        char ram_parent[PATH_MAX];
+        if (snprintf(ram_parent, sizeof(ram_parent), "%s/z23p", ram_root) <
+                (int)sizeof(ram_parent))
+            generation_pool_reap_ex(&paths, ram_parent, "",
+                                    PROOF_POOL_SWEEP_MAX, &removed, &bytes);
+    }
+    if (removed_out) *removed_out = removed;
+    if (bytes_out) *bytes_out = bytes;
+    return true;
 }
 
 /* Testable wrappers over the warm-start predicates. The ZCL_TESTING

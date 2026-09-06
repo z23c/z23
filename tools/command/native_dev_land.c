@@ -476,6 +476,44 @@ static bool dl_append_text(const char *path, const char *text)
     return len == 0 ? true : dl_append_row(path, text, len);
 }
 
+/* Sweep this leaf's own proof generation pools (disk beside the landing
+ * worktree, and this host's RAM root when it offers one) for generations
+ * whose attempt already finished, and log what came off disk. Called at
+ * the start of every submit (sweep stale ones at the next submit) and at
+ * the start of every step (which is what runs again right after an
+ * attempt lands, fails, or is superseded, so a pool left behind by one
+ * attempt is cleared before the next one asks for a generation). Advisory
+ * only, like the reap it wraps: finding nothing to remove is success,
+ * never a step or submit failure. */
+static void dl_pool_sweep_and_log(const struct dl_dirs *d)
+{
+#ifdef ZCL_DEV_BUILD
+    size_t removed = 0;
+    uint64_t bytes = 0;
+    char why[160] = {0}, line[256], path[4096 + 32];
+    bool ok = zcl_dev_proof_generation_pool_sweep(d->wt, &removed, &bytes,
+                                                  why, sizeof(why));
+    if (ok && !removed)
+        return;
+    if (snprintf(path, sizeof(path), "%s/pool-sweep.log", d->logs) >=
+            (int)sizeof(path))
+        return;
+    if (!ok)
+        (void)snprintf(line, sizeof(line),
+                       "pool_sweep: could not compute a pool path: %s\n",
+                       why);
+    else
+        (void)snprintf(line, sizeof(line),
+                       "pool_sweep: removed=%zu bytes=%llu\n", removed,
+                       (unsigned long long)bytes);
+    (void)dl_append_text(path, line);
+#else
+    /* No real dev_proof.c pool to sweep outside the dev binary (a hermetic
+     * land test stubs the proof itself, and never creates one). */
+    (void)d;
+#endif
+}
+
 /* ── rows ──────────────────────────────────────────────────────────────── */
 
 /* dl_rebase() and dl_already_landed() hand row->worktree to `git fetch` as
@@ -1386,6 +1424,7 @@ static void dl_submit(const struct zcl_command_request *req,
                 "platform_state_root");
         return;
     }
+    dl_pool_sweep_and_log(&d);
     worktree = dl_str(req, "worktree");
     root[0] = '\0';
     if (worktree) {
@@ -3788,6 +3827,10 @@ static void dl_step(const struct zcl_command_request *req,
         dl_step_busy(reply, d.land);
         return;
     }
+    /* A finished attempt's generation is swept here, once the lock proves
+     * this step actually runs -- never before the busy check, which the
+     * lock-contention test proves touches nothing. */
+    dl_pool_sweep_and_log(&d);
     if (!dl_load_rows(qpath, &rows, &nrows)) {
         dl_unlock(slot);
         dl_fail(reply, "QUEUE_READ_FAILED", "slot",

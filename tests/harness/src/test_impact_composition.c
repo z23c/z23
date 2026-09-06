@@ -3047,6 +3047,81 @@ static int test_pw_marker_round_trip_and_refusals(void)
     return failures;
 }
 
+static int test_pw_generation_pool_sweep(void)
+{
+    int failures = 0;
+    TEST("proof generation pool: a finished generation is swept, an "
+        "in-flight one is kept") {
+#if defined(_WIN32)
+        ASSERT(true);
+#else
+        char root[4096], repo[4096], gen_done[4096], gen_live[4096];
+        char tag_done[33], tag_live[33], cmd[8192], why[256] = {0};
+        memset(tag_done, '1', 32);
+        tag_done[32] = 0;
+        memset(tag_live, '2', 32);
+        tag_live[32] = 0;
+        test_make_tmpdir(root, sizeof(root), "proof_pool_sweep", "sweep");
+        ASSERT(snprintf(repo, sizeof(repo), "%s/checkout", root) > 0);
+        ASSERT(snprintf(cmd, sizeof(cmd),
+                       "mkdir -p '%s' && cd '%s' && git init -q && "
+                       "git -c user.name=t -c user.email=t@t.invalid "
+                       "commit --allow-empty -q -m init", repo, repo) > 0);
+        ASSERT(system(cmd) == 0);
+        ASSERT(snprintf(gen_done, sizeof(gen_done), "%s/.z23p/%s", root,
+                       tag_done) > 0);
+        ASSERT(snprintf(gen_live, sizeof(gen_live), "%s/.z23p/%s", root,
+                       tag_live) > 0);
+        ASSERT(snprintf(cmd, sizeof(cmd),
+                       "git -C '%s' worktree add --detach -q '%s' HEAD",
+                       repo, gen_done) > 0);
+        ASSERT(system(cmd) == 0);
+        ASSERT(snprintf(cmd, sizeof(cmd),
+                       "git -C '%s' worktree add --detach -q '%s' HEAD",
+                       repo, gen_live) > 0);
+        ASSERT(system(cmd) == 0);
+        /* gen_done looks finished: no warm marker (unmarked, like a
+         * generation from a build that never reached the marker write),
+         * backdated well past the unmarked-generation grace window.
+         * gen_live looks like it is still being worked: its just-created
+         * mtime alone keeps it, exactly like an in-flight generation with
+         * no marker yet. */
+        const struct timespec old_time[2] = {
+            { .tv_sec = 1000000000, .tv_nsec = 0 },
+            { .tv_sec = 1000000000, .tv_nsec = 0 },
+        };
+        ASSERT(utimensat(AT_FDCWD, gen_done, old_time, 0) == 0);
+        struct stat probe;
+        ASSERT(stat(gen_done, &probe) == 0);
+        ASSERT(stat(gen_live, &probe) == 0);
+
+        size_t removed = 0;
+        uint64_t bytes = 0;
+        ASSERT(setenv("ZCL_DEVLOOP_TEST_PROCESS", "1", 1) == 0);
+        ASSERT(zcl_dev_proof_generation_pool_sweep(repo, &removed, &bytes,
+                                                    why, sizeof(why)));
+        (void)unsetenv("ZCL_DEVLOOP_TEST_PROCESS");
+        ASSERT(removed == 1);
+        ASSERT(stat(gen_done, &probe) != 0 && errno == ENOENT);
+        ASSERT(stat(gen_live, &probe) == 0);
+
+        /* Refusal contract: an unresolvable root reports a reason, touches
+         * nothing (the counters it zeroed on entry stay zero), and never
+         * crashes. */
+        size_t removed2 = 0;
+        uint64_t bytes2 = 0;
+        ASSERT(!zcl_dev_proof_generation_pool_sweep(
+            "relative-not-absolute", &removed2, &bytes2, why, sizeof(why)));
+        ASSERT(why[0] != 0);
+        ASSERT(removed2 == 0 && bytes2 == 0);
+        ASSERT(stat(gen_live, &probe) == 0);
+        ASSERT(test_rm_rf_recursive(root) == 0);
+#endif
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_pw_marker_identity_invalidates_stale_donor(void)
 {
     int failures = 0;
@@ -3757,6 +3832,7 @@ int test_impact_composition(void)
     failures += test_pw_classify_link_copy_skip();
     failures += test_pw_pick_newest_complete_idle();
     failures += test_pw_marker_round_trip_and_refusals();
+    failures += test_pw_generation_pool_sweep();
     failures += test_pw_marker_identity_invalidates_stale_donor();
     failures += test_pw_identity_survives_a_second_checkout_path();
     failures += test_pw_identity_keeps_its_four_roots_apart();
