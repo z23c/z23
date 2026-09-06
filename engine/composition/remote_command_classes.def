@@ -1137,6 +1137,7 @@ REMOTE_COMMAND_CLASS("fleet.vitals.sample", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("fleet.experiment.predict", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("fleet.experiment.result", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("fleet.experiment.stats", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("fleet.experiment.export", REMOTE_CLASS_NEVER, "")
 /* ── what this fleet is optimizing ──────────────────────────────────────
  * `fleet objectives` reads this box's own working state to score each
  * objective: the checkout, the lint baselines, and the attempt ledgers.
