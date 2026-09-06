@@ -118,18 +118,25 @@ int db_fleet_board_wiki_history(struct node_db *ndb, const char *slug,
 bool db_fleet_board_status(struct node_db *ndb, int64_t now,
                            struct fleet_board_status *out);
 
-/* The ids this node holds, newest first, for a gossip inventory. */
+/* The ids this node holds, newest first. public_only excludes fleet-scoped
+ * rows; a PUBLIC gossip inventory is built with public_only=true so a
+ * fleet-private post's id never leaves the node on the public path. */
 int db_fleet_board_recent_ids(struct node_db *ndb, int64_t now,
-                              uint8_t (*ids)[32], size_t max);
+                              bool public_only, uint8_t (*ids)[32],
+                              size_t max);
 
 /* One verified, unexpired inventory page in descending local arrival order.
  * before_seq=0 starts at the head; otherwise only seq<before_seq is eligible.
- * last_seq_out is reset to zero and receives the last returned sequence, which
- * lets a caller advance to the next page. Returns -1 on query or verification
- * failure, 0 only at a verified end, and otherwise the number of ids. */
+ * public_only excludes fleet-scoped rows: the public gossip inventory must
+ * never reveal that a fleet-private post exists, so the announce path always
+ * pages with public_only=true. last_seq_out is reset to zero and receives the
+ * last returned sequence, which lets a caller advance to the next page.
+ * Returns -1 on query or verification failure, 0 only at a verified end, and
+ * otherwise the number of ids. */
 int db_fleet_board_ids_before(struct node_db *ndb, int64_t now,
-                              int64_t before_seq, uint8_t (*ids)[32],
-                              size_t max, int64_t *last_seq_out);
+                              int64_t before_seq, bool public_only,
+                              uint8_t (*ids)[32], size_t max,
+                              int64_t *last_seq_out);
 
 bool db_fleet_board_have(struct node_db *ndb, const uint8_t id[32]);
 

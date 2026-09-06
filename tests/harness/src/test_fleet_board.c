@@ -522,17 +522,20 @@ static int test_fleet_board_inventory_pages(void)
         uint8_t ids[FLEET_BOARD_FRAME_IDS_MAX][32];
         int64_t cursor = 0;
         ASSERT_EQ(db_fleet_board_ids_before(
-                      &db, 800, 0, ids, FLEET_BOARD_FRAME_IDS_MAX, &cursor),
+                      &db, 800, 0, true, ids, FLEET_BOARD_FRAME_IDS_MAX,
+                      &cursor),
                   FLEET_BOARD_FRAME_IDS_MAX);
         ASSERT_EQ(cursor, 3);
         ASSERT_EQ(db_fleet_board_ids_before(
-                      &db, 800, cursor, ids, FLEET_BOARD_FRAME_IDS_MAX, &cursor),
+                      &db, 800, cursor, true, ids, FLEET_BOARD_FRAME_IDS_MAX,
+                      &cursor),
                   2);
         ASSERT_EQ(cursor, 1);
         ASSERT(memcmp(ids[0], oldest[1], 32) == 0);
         ASSERT(memcmp(ids[1], oldest[0], 32) == 0);
         ASSERT_EQ(db_fleet_board_ids_before(
-                      &db, 800, cursor, ids, FLEET_BOARD_FRAME_IDS_MAX, &cursor),
+                      &db, 800, cursor, true, ids, FLEET_BOARD_FRAME_IDS_MAX,
+                      &cursor),
                   0);
         ASSERT_EQ(cursor, 0);
         node_db_close(&db);
@@ -709,9 +712,9 @@ static int test_fleet_board_two_nodes(void)
                   FLEET_BOARD_OK);
         ASSERT(!db_fleet_board_have(&b, problem.id));
 
-        /* A announces its inventory. */
+        /* A announces its public inventory. */
         uint8_t ids[FLEET_BOARD_FRAME_IDS_MAX][32];
-        int n = db_fleet_board_recent_ids(&a, now, ids,
+        int n = db_fleet_board_recent_ids(&a, now, true, ids,
                                           FLEET_BOARD_FRAME_IDS_MAX);
         ASSERT_EQ(n, 1);
         uint8_t inv[FLEET_BOARD_FRAME_MAX];
@@ -982,7 +985,7 @@ static int test_fleet_board_durable_wiki(void)
         ASSERT_EQ(db_fleet_board_post_ingest(&publisher, &wiki, 100, NULL), FLEET_BOARD_OK);
         const int64_t later = 100 + FLEET_BOARD_TTL_MAX + 1;
         uint8_t ids[1][32];
-        ASSERT_EQ(db_fleet_board_recent_ids(&publisher, later, ids, 1), 1);
+        ASSERT_EQ(db_fleet_board_recent_ids(&publisher, later, true, ids, 1), 1);
         ASSERT(memcmp(ids[0], wiki.id, 32) == 0);
         uint8_t frame[FLEET_BOARD_FRAME_MAX];
         size_t frame_len = 0;
@@ -1467,6 +1470,20 @@ static int test_fleet_board_scope_store(void)
         ASSERT(db_fleet_board_post_find(&db, legacy.id, &fetched));
         ASSERT_EQ(fetched.post.scope, FLEET_BOARD_SCOPE_LEGACY_PUBLIC);
         ASSERT(strcmp(fleet_board_room_name(&fetched.post), "general") == 0);
+
+        /* The public gossip inventory carries every public row and never a
+         * fleet row: announcing the fleet post's id would already reveal
+         * that a fleet-private post exists. The full local inventory still
+         * lists everything the node holds. */
+        uint8_t ids[FLEET_BOARD_FRAME_IDS_MAX][32];
+        ASSERT_EQ(db_fleet_board_recent_ids(&db, now, false, ids,
+                                            FLEET_BOARD_FRAME_IDS_MAX),
+                  4);
+        ASSERT_EQ(db_fleet_board_recent_ids(&db, now, true, ids,
+                                            FLEET_BOARD_FRAME_IDS_MAX),
+                  3);
+        for (int i = 0; i < 3; i++)
+            ASSERT(memcmp(ids[i], fleet.id, 32) != 0);
 
         node_db_close(&db);
         PASS();

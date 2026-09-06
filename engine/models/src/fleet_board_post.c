@@ -607,8 +607,9 @@ int db_fleet_board_wiki_list(struct node_db *ndb,
 }
 
 int db_fleet_board_ids_before(struct node_db *ndb, int64_t now,
-                              int64_t before_seq, uint8_t (*ids)[32],
-                              size_t max, int64_t *last_seq_out)
+                              int64_t before_seq, bool public_only,
+                              uint8_t (*ids)[32], size_t max,
+                              int64_t *last_seq_out)
 {
     if (last_seq_out)
         *last_seq_out = 0;
@@ -620,6 +621,9 @@ int db_fleet_board_ids_before(struct node_db *ndb, int64_t now,
     qb_select(&q, QB_T_fleet_board_posts);
     qb_select_columns(&q, k_board_cols, BOARD_NCOLS);
     board_where_discoverable(&q, now);
+    if (public_only)
+        qb_where_int(&q, QB_C_fleet_board_posts_scope, QB_NE,
+                     FLEET_BOARD_SCOPE_FLEET);
     if (before_seq > 0)
         qb_where_int(&q, QB_C_fleet_board_posts_seq, QB_LT, before_seq);
     qb_order_by(&q, QB_C_fleet_board_posts_seq, QB_DESC);
@@ -661,9 +665,10 @@ int db_fleet_board_ids_before(struct node_db *ndb, int64_t now,
 }
 
 int db_fleet_board_recent_ids(struct node_db *ndb, int64_t now,
-                              uint8_t (*ids)[32], size_t max)
+                              bool public_only, uint8_t (*ids)[32], size_t max)
 {
-    return db_fleet_board_ids_before(ndb, now, 0, ids, max, NULL);
+    return db_fleet_board_ids_before(ndb, now, 0, public_only, ids, max,
+                                     NULL);
 }
 
 static int64_t board_scalar(struct node_db *ndb, struct qb *q)

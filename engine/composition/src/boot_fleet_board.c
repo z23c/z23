@@ -319,7 +319,11 @@ static bool fleet_board_ingest_refused_locally(enum fleet_board_result result)
            result == FLEET_BOARD_ERR_ARGS;
 }
 
-/* Announce this node's newest ids to one peer. */
+/* Announce this node's newest ids to one peer. The public INV path carries
+ * public posts only: a fleet-scoped id announced here would already reveal
+ * that a fleet-private post exists, which is exactly what the scope is meant
+ * to keep off the public network. Fleet posts move between fleet members
+ * over directed paired channels, never over this flood. */
 static void fleet_board_announce_to(struct msg_processor *mp,
                                     struct p2p_node *node, int64_t now)
 {
@@ -331,7 +335,7 @@ static void fleet_board_announce_to(struct msg_processor *mp,
         return;
     uint8_t ids[FLEET_BOARD_FRAME_IDS_MAX][32];
     int64_t last_seq = 0;
-    int n = db_fleet_board_ids_before(ndb, now, before_seq, ids,
+    int n = db_fleet_board_ids_before(ndb, now, before_seq, true, ids,
                                       FLEET_BOARD_FRAME_IDS_MAX, &last_seq);
     if (n < 0)
         return;
@@ -396,7 +400,10 @@ static void fleet_board_handle_inv(struct msg_processor *mp,
 }
 
 /* GET: serve every requested id this node holds, one post per frame. Serving
- * is bounded by the id ceiling the request frame itself carries. */
+ * is bounded by the id ceiling the request frame itself carries. A
+ * fleet-scoped post is never served on this public path even when asked for
+ * by id: the requester learning the id does not make the post public, and
+ * fleet carriage is a directed paired-channel affair, not a flood verb. */
 static void fleet_board_handle_get(struct msg_processor *mp,
                                    struct p2p_node *node,
                                    const uint8_t (*ids)[32], size_t count,
@@ -405,6 +412,8 @@ static void fleet_board_handle_get(struct msg_processor *mp,
     for (size_t i = 0; i < count; i++) {
         struct db_fleet_board_post row;
         if (!db_fleet_board_post_find(ndb, ids[i], &row))
+            continue;
+        if (row.post.scope == FLEET_BOARD_SCOPE_FLEET)
             continue;
         uint8_t frame[FLEET_BOARD_FRAME_MAGIC_BYTES + 1 +
                       FLEET_BOARD_BODY_MAX + FLEET_BOARD_SIG_BYTES];
@@ -540,7 +549,10 @@ enum fleet_board_result boot_fleet_board_publish(
     if (r != FLEET_BOARD_OK)
         return r;
     /* Announced only after it is durable: a post the fleet can ask for but
-     * this node cannot serve is a promise nobody can keep. */
-    boot_fleet_board_announce(post->id);
+     * this node cannot serve is a promise nobody can keep. A fleet-scoped
+     * post is durable here and readable locally, but its id is never flooded
+     * on the public inventory path. */
+    if (post->scope != FLEET_BOARD_SCOPE_FLEET)
+        boot_fleet_board_announce(post->id);
     return FLEET_BOARD_OK;
 }
