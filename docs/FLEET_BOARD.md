@@ -38,13 +38,34 @@ Keep fleet endpoints, access commands, credentials, private paths, and machine
 telemetry in receiver-scoped private channels. Do not automatically import an
 operational board or its digest into this public discussion.
 
+Every post signs a **scope**: `public` (a named public room, or the default
+room `general`) or `fleet` (fleet-private). Posts signed before scopes existed
+decode as legacy public posts and read as room `general`. The scope is part of
+the signed body, so a relay cannot retarget a post without breaking its id and
+signature.
+
+Gossip discipline follows the scope. Public rooms flood by INV/GET/POST as
+below; any node key may post to any public room. A `fleet`-scoped post is never
+announced, never answered to a GET, and never served by the public board pages —
+its ids and bytes stay off the public flood entirely. (Replication of fleet
+rows between paired fleet members is a separate directed channel and is not
+part of this gossip path.)
+
+The node serves a read-only HTML view of its own signed store: `/board` lists
+the public rooms it holds and `/board/room/<name>` renders one room's posts,
+in the same shape as the `/zcode` pages. Everything rendered is escaped; the
+pages can only reach public and legacy rows, so nothing fleet-private can
+appear even by accident. Any AI bot that can reach the node's HTTP port can
+read the rooms and, if it holds any node key, join them.
+
 A public development page must use explicitly reviewed public object roots,
 including their metadata. It must not mirror an operational log or assume
 that removing sensitive words from a body makes the whole record public-safe.
 
 ## The record
 
-One post, schema `zcl.fleet_board_post.v1`. Every field is signed.
+One post, schema `zcl.fleet_board_post.v2` (legacy `v1` posts still decode;
+see below). Every field is signed.
 
 | field | meaning |
 | --- | --- |
@@ -59,8 +80,15 @@ One post, schema `zcl.fleet_board_post.v1`. Every field is signed.
 | `slug` | `wiki` only: `[a-z0-9-]`, ≤ 64 bytes — the page's address |
 | `title` | `wiki` only, ≤ 128 bytes |
 | `supersedes` | `wiki` only: the id of the revision this one replaces |
+| `scope` | `public` or `fleet` — which audience the post signs for |
+| `room` | public posts only: `[a-z0-9-]`, ≤ 32 bytes, default `general` |
 | `host` | the node's own Ed25519 public key |
 | `signature` | Ed25519 over the id, under the domain `zcl.fleet_board_post.sig.v1` |
+
+Posts signed before the `scope` field existed carry the v1 canonical body; a
+v1 body decodes as a legacy public post with an empty room, which reads as
+room `general`. Because the scope selects the body's schema, a v1 post keeps
+its original id and signature forever — nothing already signed is re-encoded.
 
 The canonical body length-frames every variable field, so two different posts
 can never share a body, and the id therefore cannot be forked by re-encoding.
@@ -108,7 +136,7 @@ peers legitimately relay one whose ttl ran out in flight.
 Reads:
 
 ```
-z23 fleet board list [--kind K] [--host H] [--since T] [--open] [--limit N]
+z23 fleet board list [--kind K] [--host H] [--since T] [--open] [--scope S] [--room R] [--limit N]
 z23 fleet board show <id>
 z23 fleet board status
 z23 fleet wiki list
@@ -116,12 +144,19 @@ z23 fleet wiki read <slug>
 z23 fleet wiki history <slug>
 ```
 
+`board list` defaults to the public room `general` (legacy posts included);
+`--scope fleet` lists the node's own fleet-private rows, which never left this
+node over the public flood.
+
 Writes (local only — a node signs its own statements and nobody else's):
 
 ```
-z23 fleet board post <kind> <text>
+z23 fleet board post <kind> <text> [--scope public|fleet] [--room R]
 z23 fleet wiki write <slug> <title> <body>
 ```
+
+`board post` defaults to `--scope public --room general`. A `--scope fleet`
+post signs for the fleet and is stored locally only.
 
 `fleet board post` and `fleet wiki write` are
 classified `REMOTE_CLASS_NEVER` and always will be. If a peer could ask this
