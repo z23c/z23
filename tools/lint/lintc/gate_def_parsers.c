@@ -334,8 +334,8 @@ int check_persona_resolves_selftest(void)
         "PERSONA(\"platform/modules/base\",\n"
         "    \"LOG_FAIL, LOG_ERR and LOG_NULL RETURN; they are not print statements.\",\n"
         "    \"platform/modules/base/include/base/deleted_yesterday.h\")\n",
-        "PERSONA(\"platform/modules/base\",\n    \"be careful\",\n"
-        "    \"platform/modules/base/include/base/log_macros.h\")\n"
+        ("PERSONA(\"platform/modules/base\",\n    \"be careful\",\n"
+        "    \"platform/modules/base/include/base/log_macros.h\")\n")
     };
     if (pr_scan(k_pr_good, faults, sizeof faults, &nrows, &nf) || nf) bad = 1;
     for (size_t i = 0; i < 2; i++) {
@@ -530,8 +530,8 @@ int check_prompt_templates_selftest(void)
     const char *dirty[] = {
         "ENGINE_PROMPT_TEMPLATE(fix-gate, epilogue, \"and finally\")\n",
         "ENGINE_PROMPT_TEMPLATE(half-done, task, \"only half\")\n",
-        "ENGINE_PROMPT_TEMPLATE(fix-gate, task, \"\")\n"
-        "ENGINE_PROMPT_TEMPLATE(fix-gate, protocol, \"write files\")\n"
+        ("ENGINE_PROMPT_TEMPLATE(fix-gate, task, \"\")\n"
+        "ENGINE_PROMPT_TEMPLATE(fix-gate, protocol, \"write files\")\n")
     };
     if (ovf(snprintf(buf, sizeof buf, "%s%s", k_prt_good, dirty[0]), sizeof buf)
         || prt_scan(buf, k_prt_secs, faults, sizeof faults, &nrows, &nsec, &nkinds, &nf)
