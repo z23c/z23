@@ -3576,17 +3576,7 @@ static struct zcl_dev_proof_budget proof_step_budget(
 #define PROOF_GENERATED_DEFAULT_MS 300000
 #define PROOF_COMPILE_DEFAULT_MS 900000
 #define PROOF_BUNDLE_DEFAULT_MS 1800000
-/* The pre-fork build step. A lane proof builds the helper executables the
- * test dimension execs; a landing proof additionally builds every target its
- * full lint umbrella can build, which on a cold generation means linking ~47
- * one-shot tools -- measured at 191 s of a 199 s lint wall. The landing
- * figure is that cost moved, with headroom, not a new cost. */
-#define PROOF_PREFORK_DEFAULT_MS 120000
-#define PROOF_PREFORK_LANDING_MS 900000
 #define PROOF_LINT_ARGV_CAP 6u
-/* make, --no-print-directory, -jN, the 8 helper targets, proof-lint-prebuild
- * and the NULL terminator: 13 slots, exactly. */
-#define PROOF_PREFORK_ARGV_CAP 13u
 
 static bool proof_root_is_landing(const char *root)
 {

@@ -38,6 +38,22 @@
  * replaces this number rather than trusting it. */
 #define PROOF_LINT_LANDING_MS 1800000
 
+/* The pre-fork build step: everything EITHER dimension can build, built once
+ * before both start. A lane proof builds the helper executables the test
+ * dimension execs; a landing proof additionally builds every target its full
+ * gate set can build, which is dominated by the ~47 one-shot standalone
+ * tools check-standalone-tools-link links -- 118 s, 120 s and 636 s in the
+ * three measured landing-shaped generations above. That work is moved, not
+ * new: it used to run inside the lint dimension, concurrently with the test
+ * dimension reading the same binaries. The landing allowance matches the
+ * lint one for that reason, and the step writes its measured wall into the
+ * phases file as `step=prefork` so the next reader replaces the number. */
+#define PROOF_PREFORK_DEFAULT_MS 120000
+#define PROOF_PREFORK_LANDING_MS 1800000
+/* make, --no-print-directory, -jN, the 8 helper targets, proof-lint-prebuild
+ * and the NULL terminator: 13 slots, exactly. */
+#define PROOF_PREFORK_ARGV_CAP 13u
+
 enum zcl_dev_proof_state {
     ZCL_DEV_PROOF_STATE_INVALID = -1,
     ZCL_DEV_PROOF_STATE_MISSING = 0,

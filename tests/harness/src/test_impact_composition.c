@@ -3867,6 +3867,112 @@ static int test_ic_proof_lint_and_test_share_admitted_executables(void)
     return failures;
 }
 
+
+/* Both proof dimensions live in ONE generation worktree, so any target both
+ * can build is a target both can LINK AT ONCE -- and a link unlinks its
+ * output before writing it. That is how a landing proof's lint-gate shard
+ * exec'd a half-written build/bin/z23-lint and got rc=127 twice: the lint
+ * dimension's nested standalone-tools make was relinking it while the test
+ * dimension was reading it. The fix is structural, so pin it structurally:
+ * one pre-fork step builds the whole shared set, and the lint dimension's
+ * argv names nothing the pre-fork step already built. */
+static bool ic_argv_has(const char *const *argv, const char *want)
+{
+    for (size_t i = 0; argv[i]; i++)
+        if (strcmp(argv[i], want) == 0) return true;
+    return false;
+}
+
+static int test_ic_proof_prefork_builds_the_shared_targets(void)
+{
+    int failures = 0;
+    TEST("proof prefork: one step builds every target both dimensions share, "
+         "and the lint dimension is left none of them") {
+        /* Every executable the test dimension execs out of the generation,
+         * and the one lint-side target that names the rest. */
+        static const char *const helpers[] = {
+            "zcl-nodectl", "zclassic23-acme", "fbsh", "engine-unit",
+            "tools/file_size_policy", "fleet-board-bridge", "git-hook",
+            "build/bin/z23-lint",
+        };
+        const size_t helper_count = sizeof(helpers) / sizeof(helpers[0]);
+        const char *landing[PROOF_PREFORK_ARGV_CAP];
+        const char *lane[PROOF_PREFORK_ARGV_CAP];
+        char jobs[] = "-j4";
+
+        ASSERT(zcl_dev_proof_test_prefork_argv(jobs, true, landing,
+                                               PROOF_PREFORK_ARGV_CAP));
+        ASSERT(strcmp(landing[0], "make") == 0);
+        ASSERT(strcmp(landing[1], "--no-print-directory") == 0);
+        ASSERT(strcmp(landing[2], jobs) == 0);
+        size_t landing_argc = 0;
+        while (landing[landing_argc]) landing_argc++;
+        ASSERT(landing_argc == 3 + helper_count + 1);
+        for (size_t i = 0; i < helper_count; i++)
+            ASSERT(ic_argv_has(landing, helpers[i]));
+        /* The landing shape also builds what `make lint` itself would build:
+         * one Makefile target that names the umbrella's own prerequisite
+         * list, so the two can never drift apart. */
+        ASSERT(ic_argv_has(landing, "proof-lint-prebuild"));
+
+        ASSERT(zcl_dev_proof_test_prefork_argv(jobs, false, lane,
+                                               PROOF_PREFORK_ARGV_CAP));
+        size_t lane_argc = 0;
+        while (lane[lane_argc]) lane_argc++;
+        ASSERT(lane_argc == 3 + helper_count);
+        for (size_t i = 0; i < helper_count; i++)
+            ASSERT(ic_argv_has(lane, helpers[i]));
+        /* A lane proof runs lint-fast, which reads no built artifact, so it
+         * does not pay for the lint umbrella's build set. */
+        ASSERT(!ic_argv_has(lane, "proof-lint-prebuild"));
+
+        /* Refused, never truncated, when the caller has no room. */
+        ASSERT(!zcl_dev_proof_test_prefork_argv(jobs, true, landing,
+                                                PROOF_PREFORK_ARGV_CAP - 1));
+        ASSERT(!zcl_dev_proof_test_prefork_argv(NULL, true, landing,
+                                                PROOF_PREFORK_ARGV_CAP));
+        ASSERT(!zcl_dev_proof_test_prefork_argv("", true, landing,
+                                                PROOF_PREFORK_ARGV_CAP));
+        ASSERT(!zcl_dev_proof_test_prefork_argv(jobs, true, NULL,
+                                                PROOF_PREFORK_ARGV_CAP));
+#if !defined(_WIN32)
+        /* DISJOINT: after the fork, no make target the lint dimension names
+         * is a target the pre-fork step built. The test dimension's argv is
+         * the admitted runner binary and its flags -- it invokes no make at
+         * all -- so this is the whole overlap surface between the two. */
+        char land[4096], wt[4096], dev_parent[4096], dev[4096];
+        const char *lint_argv[8];
+        size_t lint_argc = 0;
+        int64_t fallback_ms = 0;
+        const char *targets = NULL;
+        ASSERT(zcl_dev_proof_test_prefork_argv(jobs, true, landing,
+                                               PROOF_PREFORK_ARGV_CAP));
+        test_make_tmpdir(land, sizeof(land), "proof_prefork", "landing");
+        ASSERT(snprintf(wt, sizeof(wt), "%s/wt", land) > 0);
+        ASSERT(mkdir(wt, 0755) == 0);
+        ASSERT(ic_write(land, "queue.lock", ""));
+        ASSERT(zcl_dev_proof_test_lint_argv(wt, jobs, lint_argv, 8, &lint_argc,
+                                            &fallback_ms, &targets));
+        for (size_t i = 3; i < lint_argc; i++)
+            ASSERT(!ic_argv_has(landing, lint_argv[i]));
+
+        test_make_tmpdir(dev_parent, sizeof(dev_parent), "proof_prefork",
+                         "dev");
+        ASSERT(snprintf(dev, sizeof(dev), "%s/wt", dev_parent) > 0);
+        ASSERT(mkdir(dev, 0755) == 0);
+        lint_argc = 0;
+        ASSERT(zcl_dev_proof_test_lint_argv(dev, jobs, lint_argv, 8, &lint_argc,
+                                            &fallback_ms, &targets));
+        for (size_t i = 3; i < lint_argc; i++)
+            ASSERT(!ic_argv_has(lane, lint_argv[i]));
+
+        ASSERT(test_rm_rf_recursive(land) == 0);
+        ASSERT(test_rm_rf_recursive(dev_parent) == 0);
+#endif
+        PASS();
+    } _test_next:;
+    return failures;
+}
 /* `git worktree add` copies the submitting checkout's worktree-scoped
  * core.hooksPath verbatim into the new worktree's own config.worktree.
  * generation_prepare() materializes its own build/githooks copy, then calls
@@ -4018,6 +4124,7 @@ int test_impact_composition(void)
     failures += test_ic_merkle_verifier_selects_proof_lane();
     failures += test_ic_landing_proof_lint_argv();
     failures += test_ic_proof_lint_and_test_share_admitted_executables();
+    failures += test_ic_proof_prefork_builds_the_shared_targets();
     failures += test_ic_generation_hooks_configure_points_at_its_own_copy();
     failures += test_ic_proof_budget_grows_with_groups();
     failures += test_ic_proof_budget_learns_from_this_checkout();

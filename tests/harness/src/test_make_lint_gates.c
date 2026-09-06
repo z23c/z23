@@ -346,6 +346,7 @@ static const struct lint_gate_entry g_lint_gate_entries[] = {
     N_(t_lint_gate_wiring_gate),
     N_(t_lint_umbrellas_share_built_prereqs),
     N_(t_dev_proof_helpers_include_lint_tool),
+    N_(t_dev_proof_prefork_runs_before_the_dimensions),
     S_(t_no_dev_history_in_contracts),
     S_(t_no_uncited_victory),
     /* Read-only root probe retained in the historical base group. */

@@ -1209,23 +1209,24 @@ int t_lint_umbrellas_share_built_prereqs(void)
     return failures;
 }
 
-/* A cold generation links its own build/bin/z23-lint from the helpers step
- * (tools/dev/dev_proof.c: test_helpers_prepare), before either the LINT or
+/* A cold generation links its own build/bin/z23-lint in the PRE-FORK step
+ * (tools/dev/dev_proof.c: proof_prefork_argv), before either the LINT or
  * TEST proof dimension starts. The test dimension's exclusive pre-pass
  * (test_make_lint_gates) execs lint-gate shims that shell out to that same
- * binary; without this prerequisite a cold generation can run those shims
- * before the LINT dimension's own `make lint-fast` has linked it, and the
- * shim fails with rc=127 "No such file or directory". Scan the real source
- * for both halves of the fix: the make prerequisite that builds it, and the
- * helper-root hash that binds it into the receipt's helper digest — a
- * generation could build the binary and still forget to fold it into
- * helper_root, which would silently drop it from what the receipt proves. */
+ * binary; without this target a cold generation can run those shims before
+ * anything has linked it, and the shim fails with rc=127 "No such file or
+ * directory". Scan the real source for both halves of the fix: the make
+ * target that builds it, and the helper-root hash that binds it into the
+ * receipt's helper digest -- a generation could build the binary and still
+ * forget to fold it into helper_root, which would silently drop it from
+ * what the receipt proves. */
 static bool dev_proof_prerequisite_argv_has_lint(const char *source)
 {
     if (!source) return false;
-    const char *block = strstr(source, "const char *prerequisite_argv[] = {");
+    const char *block = strstr(source,
+                               "static const char *const helpers[] = {");
     if (!block) return false;
-    const char *end = strstr(block, "NULL};");
+    const char *end = strstr(block, "};");
     return range_contains(block, end, "\"build/bin/z23-lint\"");
 }
 
@@ -1281,7 +1282,7 @@ int t_dev_proof_helpers_include_lint_tool(void)
         !dev_proof_helper_root_hashes_lint(missing_hash);
 
     TEST("[lint-gate] a proof generation builds build/bin/z23-lint as a "
-         "test-dimension prerequisite and folds it into helper_root; "
+         "pre-fork target and folds it into helper_root; "
          "removal mutations of either half trip") {
         ASSERT(read_ok);
         ASSERT(prereq_ok);
@@ -1293,6 +1294,69 @@ int t_dev_proof_helpers_include_lint_tool(void)
     free(source);
     free(missing_prereq);
     free(missing_hash);
+    return failures;
+}
+
+/* ORDER IS THE FIX. Both proof dimensions run inside one generation
+ * worktree, so anything either of them builds after the fork can be relinked
+ * under the other's feet -- a link unlinks its output before it writes it,
+ * and that is how a landing proof's lint-gate shard exec'd a half-written
+ * build/bin/z23-lint and got rc=127 twice.
+ *
+ * proof_worker_body() therefore admits and builds everything shared BEFORE
+ * it starts either child. Pin that order in the real source, in the sequence
+ * it has to hold: the generation's inputs are admitted, then the one
+ * pre-fork make runs, then the helper digest is taken, and only then does
+ * the first dimension_start() appear. A rewrite that moves the build back
+ * below the fork -- the exact regression -- fails here. */
+static bool dev_proof_prefork_precedes_the_fork(const char *source)
+{
+    if (!source) return false;
+    const char *body = strstr(source, "static bool proof_worker_body(");
+    if (!body) return false;
+    const char *inputs = strstr(body, "proof_generation_inputs_prepare(");
+    const char *build = strstr(body, "proof_prefork_build(");
+    const char *hash = strstr(body, "test_helpers_hash(");
+    const char *fork = strstr(body, "dimension_start(");
+    if (!inputs || !build || !hash || !fork) return false;
+    return inputs < build && build < hash && hash < fork;
+}
+
+int t_dev_proof_prefork_runs_before_the_dimensions(void)
+{
+    int failures = 0;
+    char path[PATH_MAX];
+    char *source = NULL;
+    int read_ok = repo_path(path, sizeof(path), "tools/dev/dev_proof.c") == 0 &&
+                  read_entire_file(path, &source) == 0;
+    int order_ok = read_ok && dev_proof_prefork_precedes_the_fork(source);
+
+    /* The mutation is the regression itself: blank the pre-fork build call
+     * so nothing builds the shared set before the children start. */
+    char *moved = read_ok ? strdup(source) : NULL;
+    char *build_hit = moved ? strstr(moved, "proof_prefork_build(") : NULL;
+    if (build_hit) {
+        /* Blank every call, so the declaration alone cannot satisfy it. */
+        char *cursor = moved;
+        for (;;) {
+            char *hit = strstr(cursor, "proof_prefork_build(");
+            if (!hit) break;
+            hit[0] = '!';
+            cursor = hit + 1;
+        }
+    }
+    int mutation_trips = build_hit != NULL &&
+        !dev_proof_prefork_precedes_the_fork(moved);
+
+    TEST("[lint-gate] the proof admits and builds every shared target before "
+         "it forks its dimensions; deleting the pre-fork build trips") {
+        ASSERT(read_ok);
+        ASSERT(order_ok);
+        ASSERT(mutation_trips);
+        PASS();
+    } _test_next:;
+    free(source);
+    free(moved);
     return failures;
 }
 
