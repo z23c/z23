@@ -1,0 +1,59 @@
+/* The fleet's agent dashboard: what every AI developer on this box is doing
+ * right now, and how each one has graded out over time.
+ *
+ * WHY IT EXISTS. Several AI executors work this repository at once — lane
+ * worktrees, single units, landing trains, the native landing worktree — and
+ * the only way to see them was a dozen shell reads that were stale before
+ * they finished. Every delegation is already measured into one tab-separated
+ * ledger; nothing read it back. This leaf is that read.
+ *
+ * WHERE IT SITS. Under `dev fleet`, beside `truth`, `start` and `mind`, with
+ * `fleet.agents` as its alias so the command a person actually types
+ * (`z23-dev fleet agents`) reaches it. It is a dev-lane leaf: everything it
+ * reads is a developer's own workspace state, and none of it exists on a
+ * node.
+ *
+ * WHAT IT IS NOT. Not an authority. A running process is evidence of
+ * ACTIVITY, never of a result, and a letter grade summarizes past rows and
+ * permits nothing. No gate may cite it.
+ *
+ * Consumer defines ZCL_COMMAND_*; see engine/composition/src/command_catalog.c. */
+
+ZCL_COMMAND_READY_READ(
+    "dev.fleet.agents", "dev.fleet", "fleet.agents",
+    "Every AI agent working on this box, and each executor's grade over time",
+    "Three sections, always in this order. RUNNING NOW lists one row per agent "
+    "workspace under ~/.z23/lanes, ~/.z23/units, ~/.z23/trains and the native "
+    "landing worktree: its name, kind, short HEAD, count of files Git reports "
+    "dirty, how long ago its newest source file and its Git state changed, the "
+    "live processes whose working directory is inside the tree, and the tip "
+    "sha in its READY marker when it has written one. Every workspace is "
+    "counted; the expensive reads (Git and the source walk) are spent only on "
+    "the ones a process or a Git change makes live inside the window, and the "
+    "scanned, active and idle counts are all reported so the cheap answer is "
+    "never mistaken for a complete one. A running process is evidence of "
+    "ACTIVITY and never of a result. It also names this box's loaded z23-* "
+    "systemd user units, or says units: not collected when systemctl is "
+    "unavailable. GRADES reads the local delegation ledger and reports, per "
+    "executor (or per lane or task class with by), the result count, "
+    "successes, failures, unscored rows, success rate, median wall seconds, "
+    "median actual-over-predicted wall time, tokens per success, the age of "
+    "the last row, and a letter: A needs 90% success and a median ratio of "
+    "1.50 or better, B 80% and 2.00, C 65%, D 50%, F below, and fewer than "
+    "three results earns no letter at all. A malformed row is reported by "
+    "line number and skipped, never guessed at. OTHER HOSTS says, honestly, "
+    "that no other machine is collected yet. since is a window in HOURS "
+    "(0 means the whole ledger), root and ledger point the two readers at a "
+    "fixture, and include_units turns off the systemd read. It never fetches, "
+    "never dials a peer, never opens a datadir, and writes nothing.",
+    16384,
+    "fleet,agents,executors,grades,lanes,units,trains,ledger,delegation",
+    "zcl.fleet_agents_input.v1", "zcl.fleet_agents.v1",
+    "since,by,root,ledger,include_units", "",
+    "z23-dev fleet agents --since=168 --by=executor",
+    ZCL_COMMAND_LAYER_DEV, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_LATENCY_FOREGROUND,
+    ZCL_COMMAND_COST_LOW, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_DEV_STATE_READ,
+    ZCL_COMMAND_TRAIT_IDEMPOTENT | ZCL_COMMAND_TRAIT_DEV_ONLY,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_dev_agents)

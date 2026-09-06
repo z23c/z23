@@ -18,6 +18,7 @@
 #include "config/command_handler_index.h"
 
 #include "command/native_command.h"
+#include "command/native_dev_agents.h"
 #include "command/native_dev_fleet.h"
 #include "command/native_fleet.h"
 #include "kernel/command_registry.h"
@@ -262,6 +263,7 @@ static const struct zcl_command_spec g_catalog_commands[] = {
 #include "../commands/story.def"
 #include "../commands/fleet_board.def"
 #include "../commands/mind.def"
+#include "../commands/fleet_agents.def"
 #include "../commands/fleet.def"
 #include "../commands/fleet_enrol.def"
 #include "../commands/telemetry/root.def"
@@ -414,6 +416,7 @@ static const struct zcl_command_handler_entry g_handler_index_entries[] = {
 #include "../commands/story.def"
 #include "../commands/fleet_board.def"
 #include "../commands/mind.def"
+#include "../commands/fleet_agents.def"
 #include "../commands/fleet.def"
 #include "../commands/fleet_enrol.def"
 #include "../commands/telemetry/root.def"

@@ -3213,6 +3213,11 @@ static bool nc_is_prose_leaf(const char *path)
             strcmp(path, "ops.debug.profile") == 0 ||
             strcmp(path, "ops.debug.producer") == 0 ||
             strcmp(path, "ops.debug.rom") == 0 ||
+            /* The fleet agent dashboard is a wide aligned table nobody reads
+             * as JSON on purpose; `--json` (or --format=json) still pins the
+             * canonical envelope, and both are rendered from the same data
+             * object, so the two can never disagree. */
+            strcmp(path, "dev.fleet.agents") == 0 ||
             strcmp(path, "core.status.brief") == 0);
 }
 
@@ -3899,6 +3904,22 @@ int zcl_native_command_main(const char *root_word, const char *const *args,
             }
             seen_cursor = true;
             cursor = value;
+        } else if (strcmp(flag_key, "json") == 0) {
+            /* `--json` is the spelling people reach for when they want the
+             * machine document, and it means exactly `--format=json`. It is
+             * declared HERE, as a response control, rather than left to the
+             * typed-input path below: as an input key it would belong to
+             * whichever leaf happened to declare it, so the same word would
+             * mean "give me JSON" on one command and something else on the
+             * next. It takes no value for the same reason --next does. */
+            if (seen_format || value) {
+                flag_error = true;
+                (void)snprintf(flag_why, sizeof(flag_why),
+                               "--json takes no value and may appear once");
+                break;
+            }
+            seen_format = true;
+            g_nc_format_json = true;
         } else if (strcmp(flag_key, "format") == 0) {
             if (seen_format || !value || strcmp(value, "json") != 0) {
                 flag_error = true;
