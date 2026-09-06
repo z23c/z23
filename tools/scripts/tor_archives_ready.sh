@@ -59,16 +59,15 @@ ARCHIVES=(
     "$TOR_TREE/src/ext/keccak-tiny/libkeccak-tiny.a"
 )
 
-# The ambient compiler build_tor_full.sh's default (uninstrumented) host path
-# would resolve, mirroring VENDOR_CC/cross-triple precedence there: an
-# explicit pin wins, else the ambient $CC, else plain "cc" -- the same
-# fallback chain autoconf's own AC_PROG_CC applies.
+# The exact compiler build_tor_full.sh would record for this tree -- shared
+# via zcl_tor_effective_cc (tor_provenance_lib.sh) instead of a private guess,
+# because a private guess (plain "${CC:-cc}") drifted from what the host
+# build's own `configure` actually resolves CC to (typically "gcc"): same
+# binary, different command string, and compiler identity is bound to the
+# string (tools/dev/build-epoch-key.sh). That drift made a freshly rebuilt,
+# byte-accurate manifest fail its own readiness check.
 tor_ambient_compiler() {
-    if [ -n "$TRIPLE" ]; then
-        printf '%s\n' "${VENDOR_CC:-$TRIPLE-gcc}"
-    else
-        printf '%s\n' "${VENDOR_CC:-${CC:-cc}}"
-    fi
+    zcl_tor_effective_cc "$ROOT/$TOR_TREE" "$TRIPLE"
 }
 
 have_all() {
@@ -166,6 +165,22 @@ usage() {
     exit 2
 }
 
+# True when every archive is present (non-empty), independent of whether it
+# verifies -- used to tell "no archives at all" (a stub tree, or one that
+# never built Tor) apart from "archives present but wrong" (corruption, or a
+# stale build).
+archives_all_present() {
+    local a
+    for a in "${ARCHIVES[@]}"; do
+        [ -s "$ROOT/$a" ] || return 1
+    done
+    return 0
+}
+
+manifest_present() {
+    [ -s "$ROOT/$TOR_TREE/.provenance" ]
+}
+
 do_check() {
     if have_all; then
         echo "tor-ready: PASS real Tor archives present tree=$TOR_TREE"
@@ -188,6 +203,25 @@ do_ready() {
     if have_all; then
         echo "tor-ready: real Tor archives already present ($TOR_TREE)"
         return 0
+    fi
+    # have_all() failing means EITHER "no manifest yet" (safe: the archives
+    # are real, nothing has recorded what produced them, so establishing one
+    # -- by rebuilding, or by copying a sibling's matching archives+manifest
+    # -- is an honest repair) OR "a manifest exists and disagrees with the
+    # archives on disk" (corruption or tampering: the archive bytes changed
+    # out from under a record that used to be true). Only the first case
+    # falls through to link_from/build_tor_full.sh below. The second must
+    # fail here, loudly, and must NOT reach either: link_from would silently
+    # skip re-copying an archive that is merely non-empty (corrupted counts),
+    # and build_tor_full.sh's `make libtor.a` no-ops when the corrupted
+    # archive's mtime already looks newer than its inputs -- either path
+    # would let this function report success while quietly re-hashing (or
+    # re-labeling) bytes nothing actually rebuilt. That is exactly the
+    # "write a manifest from ambient values inside a check" failure mode
+    # this tool exists to prevent.
+    if manifest_present && archives_all_present; then
+        echo "tor-ready: FAIL $TOR_TREE has a provenance manifest that does not match its archives -- refusing to silently re-establish it; run 'make check-tor-provenance' for the exact mismatch, or 'make tor-full' to rebuild intentionally" >&2
+        return 1
     fi
     if [ "${1:-}" != no-link ] && link_from "$(primary_checkout)"; then
         return 0
@@ -241,12 +275,21 @@ case "${1:-ready}" in
         # so the fixture primary needs a manifest that matches its own
         # archive bytes and the compiler id have_all() will independently
         # recompute -- exactly what a real checkout's build_tor_full.sh run
-        # would have written.
+        # would have written. tor_ambient_compiler() itself is not used here:
+        # it now reads $ROOT/$TOR_TREE/Makefile (via zcl_tor_effective_cc) to
+        # match what the real Tor build's own configure picked, and the real
+        # $SCRIPT_ROOT's vendor/tor has one while this fixture's fake trees
+        # do not -- calling zcl_tor_effective_cc directly against the
+        # fixture path (same as have_all() will do inside the ROOT=$fake_wt
+        # subshell below, where there is also no Makefile) keeps this
+        # selftest's expectation and have_all()'s recomputation looking at
+        # the same absence and landing on the same fallback.
         zcl_tor_provenance_ensure_bin "$SCRIPT_ROOT" || {
             echo "tor_archives_ready: selftest FAILED — could not build z23-tor-provenance" >&2
             exit 1
         }
-        selftest_cid="$("$SCRIPT_ROOT/tools/dev/build-epoch-key.sh" compiler-id "$(tor_ambient_compiler)" "$(tor_ambient_compiler)" 2>/dev/null)" || {
+        selftest_cc="$(zcl_tor_effective_cc "$fake_primary/$TOR_TREE" "$TRIPLE")"
+        selftest_cid="$("$SCRIPT_ROOT/tools/dev/build-epoch-key.sh" compiler-id "$selftest_cc" "$selftest_cc" 2>/dev/null)" || {
             echo "tor_archives_ready: selftest FAILED — could not derive a fixture compiler id" >&2
             exit 1
         }
@@ -287,6 +330,38 @@ case "${1:-ready}" in
         # link_from's copy loop).
         if ! cmp -s "$fake_primary/$TOR_TREE/.provenance" "$fake_wt/$TOR_TREE/.provenance"; then
             echo "tor_archives_ready: selftest FAILED — link_from did not carry the source's .provenance manifest byte-for-byte" >&2
+            exit 1
+        fi
+        # have_all() must fail closed on a tree whose archives are present
+        # but whose .provenance manifest is simply absent -- the exact state
+        # a checkout ends up in when its archives were built before the
+        # manifest writer existed (see the header comment on this script and
+        # on tor_provenance.c). Reuse fake_wt: it already holds the four
+        # archives link_from just populated, and it also now holds the
+        # carried manifest, so delete only the manifest.
+        rm -f "$fake_wt/$TOR_TREE/.provenance"
+        if (ROOT="$fake_wt"; cd "$fake_wt" && have_all) >/dev/null 2>&1; then
+            echo "tor_archives_ready: selftest FAILED — have_all() passed with archives present and no manifest" >&2
+            exit 1
+        fi
+        # link_from must REFUSE a donor that has real archives but no
+        # provenance manifest at all -- never propagate a manifest-less
+        # donor's bytes into a worktree that then LOOKS established. Build a
+        # second, empty worktree and a donor that is a copy of fake_primary
+        # minus its .provenance file.
+        fake_primary_nomanifest="$fixture/primary_nomanifest"
+        fake_wt2="$fixture/worktree2"
+        mkdir -p "$fake_primary_nomanifest" "$fake_wt2"
+        for a in "${ARCHIVES[@]}"; do
+            mkdir -p "$fake_primary_nomanifest/${a%/*}"
+            cp -a -- "$fake_primary/$a" "$fake_primary_nomanifest/$a"
+        done
+        if (ROOT="$fake_wt2"; cd "$fake_wt2" && link_from "$fake_primary_nomanifest") >/dev/null 2>&1; then
+            echo "tor_archives_ready: selftest FAILED — link_from accepted a manifest-less donor" >&2
+            exit 1
+        fi
+        if [ -s "$fake_wt2/$TOR_TREE/.provenance" ]; then
+            echo "tor_archives_ready: selftest FAILED — link_from wrote a manifest of its own for a manifest-less donor" >&2
             exit 1
         fi
         cleanup_fixture

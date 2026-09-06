@@ -14,11 +14,47 @@ zcl_tor_provenance_bin() {
     printf '%s/build/bin/z23-tor-provenance\n' "$1"
 }
 
+# The compiler that actually built (or would build) libtor.a under
+# <build-dir> -- shared between build_tor_full.sh, which records this in the
+# provenance manifest it writes, and tor_archives_ready.sh's have_all(),
+# which re-derives it to check that record. Two independent derivations of
+# "the ambient compiler" drifted apart once: the host build lets Tor's own
+# `configure` run AC_PROG_CC and resolve to `gcc`, while a guess of
+# `${CC:-cc}` resolves to the literal string `cc` -- the SAME binary on most
+# systems, but compiler identity here is bound to the exact command string
+# (see tools/dev/build-epoch-key.sh's compiler-id preimage), so a freshly
+# rebuilt, byte-accurate manifest still failed its own readiness check. One
+# derivation, called from both sides, so they can never again disagree about
+# what "the compiler" was.
+zcl_tor_effective_cc() {
+    local build_dir="$1" triple="${2:-}" cc
+    if [ -n "$triple" ]; then
+        printf '%s\n' "${VENDOR_CC:-$triple-gcc}"
+        return 0
+    fi
+    if [ -n "${VENDOR_CC:-}" ]; then
+        printf '%s\n' "$VENDOR_CC"
+        return 0
+    fi
+    cc="$(awk -F'=' '/^CC[ \t]*=/{ sub(/^[ \t]*/, "", $2); print $2; exit }' \
+        "$build_dir/Makefile" 2>/dev/null || true)"
+    [ -n "$cc" ] || cc="${CC:-cc}"
+    printf '%s\n' "$cc"
+}
+
 # Build (or rebuild) the tool if missing or stale. A build failure is loud
 # and fails closed (returns 1): every caller of z23-tor-provenance treats
 # "cannot verify" the same as "archives absent", never as "archives present".
+#
+# This goes through the Makefile's own $(TOR_PROVENANCE_BIN) rule instead of
+# a hand-rolled compile line: that rule carries -Iplatform/modules/base/include
+# and $(ZCL_PLATFORM_CPPFLAGS), which tor_provenance.c needs for base/hex.h.
+# A private compile line here drifted from the rule the moment the source
+# grew that include, and the drift only shows up as "fatal error: base/hex.h:
+# No such file or directory" -- silent everywhere except a bootstrap build.
+# One rule, no drift.
 zcl_tor_provenance_ensure_bin() {
-    local root="$1" bin src1 src2 cc
+    local root="$1" bin src1 src2 rel
     bin="$(zcl_tor_provenance_bin "$root")"
     src1="$root/tools/tor_provenance.c"
     src2="$root/contexts/commons/packages/zsha256/src/zsha256.c"
@@ -29,14 +65,9 @@ zcl_tor_provenance_ensure_bin() {
     if [ -x "$bin" ] && [ "$bin" -nt "$src1" ] && [ "$bin" -nt "$src2" ]; then
         return 0
     fi
-    cc="${CC:-cc}"
-    mkdir -p "$(dirname "$bin")" || return 1
-    if ! "$cc" -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
-            -D_POSIX_C_SOURCE=200809L \
-            -I"$root/contexts/commons/packages/zsha256/include" \
-            -I"$root/platform/modules/base/include" \
-            -o "$bin" "$src1" "$src2"; then
-        echo "tor-provenance: could not build $bin with $cc" >&2
+    rel="${bin#"$root"/}"
+    if ! make -s -C "$root" "$rel"; then
+        echo "tor-provenance: could not build $bin via make -C $root $rel" >&2
         return 1
     fi
     return 0

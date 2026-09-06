@@ -1833,7 +1833,7 @@ endif
 # committed to git; `make vendor` builds the rest from source (pinned URL +
 # SHA256), so `git clone && make zclassic23` links in one shot.  See
 # docs/BUILD.md and tools/scripts/build_vendor.sh.
-.PHONY: vendor vendor-force vendor-provenance vendor-ready tor-full tor-ready tor-check check-vendor-provenance
+.PHONY: vendor vendor-force vendor-provenance vendor-ready tor-full tor-ready tor-check tor-provenance-ready check-vendor-provenance
 # Build every missing OR provenance-stale vendor/lib/*.a from its pinned,
 # SHA256-verified source. `make vendor-force` rebuilds all of them.
 vendor:
@@ -1869,6 +1869,22 @@ tor-check:
 	@ZCL_CROSS_TRIPLE='$(ZCL_CROSS_TRIPLE)' \
 	  tools/scripts/tor_archives_ready.sh check
 
+# check-tor-provenance's own prerequisite: an OPPORTUNISTIC, best-effort
+# attempt to establish the archives and their manifest before the gate runs
+# -- never a hard failure here. tor_archives_ready.sh's do_ready() only
+# repairs the one state that is safe to repair automatically (archives
+# present, manifest absent: rebuild and write a true manifest); it now
+# deliberately REFUSES to touch a tree whose manifest exists but disagrees
+# with the archives (corruption/tampering), returning non-zero instead of
+# silently re-attesting whatever bytes are on disk. That refusal must not
+# abort `make check-tor-provenance` before check_tor_provenance.sh gets to
+# run and print the precise MISMATCH -- this target's own failure is
+# swallowed (`|| true`) for exactly that reason; check_tor_provenance.sh is
+# what actually gates the build, using its own independent check.
+tor-provenance-ready:
+	@ZCL_TOR='$(ZCL_TOR)' ZCL_CROSS_TRIPLE='$(ZCL_CROSS_TRIPLE)' \
+	  tools/scripts/tor_archives_ready.sh ready || true
+
 # Establishes the Tor archives on the FIRST parse, then forces GNU Make to
 # restart so the second parse's TOR_FULL wildcard sees them. Mirrors
 # $(VENDOR_BOOTSTRAP_MK) below, including the session-cache drop: the
@@ -1901,7 +1917,7 @@ $(VENDOR_BOOTSTRAP_MK): vendor-ready
 	printf '%s\n' '# generated: vendor inputs established before source identity capture' > "$$tmp"; \
 	mv -f -- "$$tmp" "$@"; \
 	trap - EXIT HUP INT TERM
-check-vendor-provenance: $(TOR_PROVENANCE_BIN)
+check-vendor-provenance: tor-provenance-ready $(TOR_PROVENANCE_BIN)
 	@tools/scripts/test_vendor_provenance.sh
 	@tools/scripts/build_vendor_offline_selftest.sh
 	@tools/scripts/repro_network_policy_selftest.sh
@@ -5324,7 +5340,7 @@ ifeq ($(ZCL_LINT_SERIAL),1)
 lint-fast: $(LINT_FAST_GATES)
 	@echo "lint-fast: OK (serial)"
 else
-lint-fast: $(EQUIHASH_FACT_TOOL) $(LINTC_TOOL)
+lint-fast: $(EQUIHASH_FACT_TOOL) $(LINTC_TOOL) tor-provenance-ready $(TOR_PROVENANCE_BIN)
 	@tools/lint/run_lint.sh --jobs "$(ZCL_LINT_JOBS)" --bin-dir "$(BIN_DIR)" $(LINT_FAST_GATES)
 	@echo "lint-fast: OK"
 endif
@@ -13105,7 +13121,7 @@ z23-tor-provenance: $(TOR_PROVENANCE_BIN)
 # archive bytes that produced them, not merely present and non-empty (see
 # tools/tor_provenance.c). check-vendor-provenance also runs this so Tor is
 # covered where the other vendor trees already are.
-check-tor-provenance: $(TOR_PROVENANCE_BIN)
+check-tor-provenance: tor-provenance-ready $(TOR_PROVENANCE_BIN)
 	@echo "══ LINT: bundled Tor archives are bound to their commit + bytes ══"
 	@./tools/lint/check_tor_provenance.sh
 
@@ -13391,8 +13407,20 @@ LINT_BUILT_PREREQS = tools/core_seal tools/check_observability_pairing \
 	$(BIN_DIR)/z23_bounded_run $(BIN_DIR)/agent_sha3 $(RETRIEVAL_EVAL_BIN) \
 	$(BIN_DIR)/z23-fleet-observe \
 	$(TOR_PROVENANCE_BIN)
+# tor-provenance-ready runs BEFORE the lint driver ever forks a gate script:
+# run_lint.sh (both the parallel dispatcher above and the serial LINT_GATES
+# chain below) executes gate SCRIPTS directly, not Make recipes, so a
+# Makefile prerequisite on check-tor-provenance alone never reaches the
+# parallel path. Naming it here means a checkout whose vendor/tor archives
+# are present but whose .provenance manifest is simply absent gets the real
+# producer rerun (Tor rebuild, fresh manifest) before check-vendor-provenance
+# / check-tor-provenance ever run, instead of failing on a state nothing
+# upstream repairs. It is deliberately the best-effort target, not
+# tor-ready: a manifest that EXISTS but disagrees with the archives must
+# still reach check_tor_provenance.sh's own diagnostic and fail there, never
+# be silently re-attested here.
 lint lint-cached lint-cold-audit: $(ZCLASSIC23_DEV_BIN) \
-	$(DEV_PACKAGE_VERIFY_BIN) $(LINT_BUILT_PREREQS)
+	$(DEV_PACKAGE_VERIFY_BIN) $(LINT_BUILT_PREREQS) tor-provenance-ready
 
 ifeq ($(ZCL_LINT_SERIAL),1)
 lint: $(LINT_GATES)
@@ -13424,7 +13452,7 @@ endif
 # content through --source-record and marks them fresh, and building them here
 # would throw that admission away.
 .PHONY: proof-lint-prebuild
-proof-lint-prebuild: $(LINT_BUILT_PREREQS) $(LINTC_TOOL) $(EQUIHASH_FACT_TOOL)
+proof-lint-prebuild: $(LINT_BUILT_PREREQS) $(LINTC_TOOL) $(EQUIHASH_FACT_TOOL) tor-provenance-ready
 	@./tools/lint/check_standalone_tools_link.sh --build-only
 	@echo "proof-lint-prebuild: every target the lint dimension can build is fresh"
 

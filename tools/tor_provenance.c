@@ -25,8 +25,16 @@
  *       Recompute the archive hashes and compare every recorded field that
  *       was supplied on the command line, plus archive_sha256 always. Prints
  *       one line per checked field: "tor-provenance: <field> ok|MISMATCH ...".
- *       A missing manifest is a MISMATCH, never a pass. Exits 0 only when
- *       every checked field matched.
+ *       A missing manifest is a MISMATCH, never a pass, PROVIDED at least one
+ *       archive is present -- that is the real producer having run and left
+ *       an incomplete record, which some caller must rebuild. When NONE of
+ *       the four archives exist at all, that is a stub build (Tor was never
+ *       compiled), not a defect: prints "no Tor archives present (stub
+ *       build) -- nothing to attest" and exits 0 only when ZCL_TOR=stub is
+ *       set in the environment (the same variable tor_archives_ready.sh's
+ *       do_ready() reads to decide to link the offline stub); otherwise
+ *       exits 1, because a full build was expected and never happened.
+ *       Exits 0 only when every checked field matched.
  *
  *   --selftest
  *       Builds a throwaway fixture (under $TMPDIR, default /tmp — same
@@ -303,6 +311,37 @@ static int cmd_check(const char *tor_dir, const char *want_tor_commit, const cha
     if (join_path(manifest_path, tor_dir, TOR_PROVENANCE_NAME) != 0) {
         fprintf(stderr, "tor-provenance: check: tor-dir path too long\n");
         return 1;
+    }
+
+    /* Distinguish "the real producer ran and left no manifest" (a MISMATCH:
+     * archives exist, something upstream must rebuild them) from "the real
+     * producer never ran at all" (a stub build: vendor/tor was never
+     * compiled, so there is nothing here to attest). Both look like "no
+     * manifest" from parse_manifest()'s point of view, but only the first
+     * one should be reported as a defect to fix by rebuilding. The signal
+     * for the second is the SAME one tools/scripts/tor_archives_ready.sh's
+     * do_ready() reads to decide whether to link the offline stub instead of
+     * real Tor: the ZCL_TOR environment variable, "stub" vs. the default
+     * "full". */
+    {
+        int any_archive_present = 0;
+        for (int i = 0; i < ARCHIVE_COUNT; i++) {
+            char apath[PATH_BUF_MAX];
+            struct stat ast;
+            if (join_path(apath, tor_dir, ARCHIVE_RELPATHS[i]) == 0 &&
+                stat(apath, &ast) == 0 && ast.st_size > 0) {
+                any_archive_present = 1;
+                break;
+            }
+        }
+        if (!any_archive_present) {
+            const char *zcl_tor = getenv("ZCL_TOR");
+            printf("tor-provenance: no Tor archives present (stub build) — nothing to attest\n");
+            if (zcl_tor != NULL && strcmp(zcl_tor, "stub") == 0) {
+                return 0;
+            }
+            return 1;
+        }
     }
 
     provenance_t pv;

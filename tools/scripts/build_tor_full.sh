@@ -318,15 +318,11 @@ done
 # host build (VENDOR_TARGET empty, VENDOR_CC unset) lets Tor's own configure
 # autodetect CC, and nothing before this recorded which compiler it picked
 # (see build_tor_full.sh's own header comment on the cross/pinned-host
-# branches above -- this default-host arm was the one gap).
-if [ -n "$VENDOR_TARGET" ]; then
-    effective_cc="${VENDOR_CC:-$VENDOR_TARGET-gcc}"
-elif [ -n "${VENDOR_CC:-}" ]; then
-    effective_cc="$VENDOR_CC"
-else
-    effective_cc="$(awk -F'=' '/^CC[ \t]*=/{ sub(/^[ \t]*/, "", $2); print $2; exit }' "$TOR_BUILD_DIR/Makefile" 2>/dev/null || true)"
-    [ -n "$effective_cc" ] || effective_cc="${CC:-cc}"
-fi
+# branches above -- this default-host arm was the one gap). Derived by
+# zcl_tor_effective_cc so tor_archives_ready.sh's have_all() re-derives the
+# identical string when it checks this manifest afterward -- see that
+# function's comment for why the two must never drift apart again.
+effective_cc="$(zcl_tor_effective_cc "$TOR_BUILD_DIR" "$VENDOR_TARGET")"
 zcl_tor_provenance_ensure_bin "$ROOT" || {
     echo "tor-full: could not build the Tor provenance verifier" >&2
     exit 1

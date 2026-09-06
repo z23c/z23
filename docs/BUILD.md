@@ -524,7 +524,11 @@ without the doctor learning about it. Prose here can only describe it.
   checkout preflight, and the `check-tor-provenance` lint gate (folded into
   `check-vendor-provenance`). A byte-flipped archive, a stale build from a
   different compiler, or an unrelated `vendor/tor` commit all refuse the
-  same way existence alone never could.
+  same way existence alone never could. Plain `make` and `make lint` rebuild
+  Tor and rewrite this manifest whenever the archives are present but the
+  manifest is simply absent (an honest gap, safe to close); a manifest that
+  is present and does not match the archives on disk still fails instead of
+  being silently re-attested.
 
 ## Vendored archives
 
