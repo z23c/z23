@@ -174,9 +174,14 @@ if [ "$control_symbols" != $'exported_helper\nmultiline_helper\ntest_owner' ]; t
     exit 2
 fi
 
-read -r -a LEAF_INCLUDE_FLAGS <<< "$(make -s print-includes)"
+# Nested make under `make lint` inherits the umbrella jobserver via
+# MAKEFLAGS and can return a hollow include list (the parallel driver
+# then fails closed: "canonical include set came back hollow"). Other
+# tools already drop MAKEFLAGS before a nested parse.
+read -r -a LEAF_INCLUDE_FLAGS <<< "$(MAKEFLAGS= make -s --no-print-directory print-includes)"
 if [ "${#LEAF_INCLUDE_FLAGS[@]}" -lt 20 ]; then
-    echo "check_test_registration: FATAL — canonical include set came back hollow" >&2
+    echo "check_test_registration: FATAL — canonical include set came back hollow (${#LEAF_INCLUDE_FLAGS[@]} flags)" >&2
+    printf '  observed: %s\n' "${LEAF_INCLUDE_FLAGS[*]:-}" >&2
     exit 2
 fi
 if [ "$(uname -s)" = "Darwin" ]; then
