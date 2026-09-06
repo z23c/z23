@@ -5266,6 +5266,14 @@ syntax-check: $(VIEW_GEN_HEADERS)
 # Run full `make lint` at sub-wave boundaries / before commit.
 EQUIHASH_FACT_TOOL = $(BIN_DIR)/equihash-params-fact
 LINTC_TOOL = $(BIN_DIR)/z23-lint
+LINTC_CFLAGS = -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
+    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS)
+LINTC_SRCS = tools/lint/lintc/lib.c tools/lint/lintc/gate_pattern_small.c \
+    tools/lint/lintc/gate_tree_walk.c tools/lint/lintc/gate_git_scan_a.c \
+    tools/lint/lintc/gate_git_scan_b.c tools/lint/lintc/gate_landing_proof.c \
+    tools/lint/lintc/gate_build_config.c tools/lint/lintc/gate_doc_index.c \
+    tools/lint/lintc/main.c
+LINTC_OBJS = $(LINTC_SRCS:tools/lint/lintc/%.c=build/lintc-obj/%.o)
 EQUIHASH_FACT_SRCS = tools/equihash_params_fact.c \
     core/chainparams/src/chainparams.c core/chainparams/src/chainparamsbase.c \
     core/params/src/upgrades.c core/consensus/src/upgrades.c \
@@ -12716,11 +12724,13 @@ $(EQUIHASH_FACT_TOOL): $(EQUIHASH_FACT_SRCS)
 	    -Icore/modules/sapling/include -Icontexts/wallet/modules/keys/include -Iengine/modules/event/include \
 	    -o $@ $(EQUIHASH_FACT_SRCS)
 
-$(LINTC_TOOL): tools/lint/lintc.c
+build/lintc-obj/%.o: tools/lint/lintc/%.c tools/lint/lintc/lintc.h
 	@mkdir -p $(dir $@)
-	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
-	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) \
-	    -o $@ tools/lint/lintc.c
+	$(CC) $(LINTC_CFLAGS) -c -o $@ $<
+
+$(LINTC_TOOL): $(LINTC_OBJS)
+	@mkdir -p $(dir $@)
+	$(CC) $(LINTC_CFLAGS) -o $@ $(LINTC_OBJS)
 
 .PHONY: tools/equihash-params-fact docs-equihash-params equihash-facts equihash-facts-check
 tools/equihash-params-fact: $(EQUIHASH_FACT_TOOL)
