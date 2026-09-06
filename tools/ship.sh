@@ -926,6 +926,10 @@ deploy_local() {
         fi
     done
     install_local_workers "$svc_dir"
+    # A verdict left by an EARLIER `make deploy` for this same source id must
+    # never answer for this run: if a deploy prerequisite (lint, a tool build)
+    # fails, the recipe body — and its own rm — never runs, so clear it here first.
+    rm -f build/bin/.deploy-verdict
     ZCL_DEPLOY_ALLOW_CANONICAL=1 \
     ZCL_DEPLOY_FROZEN_CANDIDATE="$CANDIDATE" \
         make deploy 2>&1 | tail -6 || rc="${PIPESTATUS[0]}"
