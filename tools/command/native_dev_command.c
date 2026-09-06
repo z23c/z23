@@ -2526,7 +2526,8 @@ static bool dev_watcher_active_at(const char *lock,
         memset(info_out, 0, sizeof(*info_out));
     if (!lock || !lock[0])
         return false;
-    int fd = open(lock, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+    /* Presence arms post-commit proof hooks; an observation must not arm one. */
+    int fd = open(lock, O_RDWR | O_CLOEXEC);
     if (fd < 0)
         return false;
     if (flock(fd, LOCK_EX | LOCK_NB) == 0) {

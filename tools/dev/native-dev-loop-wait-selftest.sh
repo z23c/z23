@@ -15,6 +15,30 @@ fi
 SANDBOX="$(mktemp -d "${TMPDIR:-/tmp}/zcl-native-loop-wait.XXXXXX")"
 trap 'rm -rf "$SANDBOX"' EXIT HUP INT TERM
 umask 077
+
+# Status is an observation through the real dev-only command catalog.  Give
+# both lock locations existing parents so the former O_CREAT read path would
+# be visible, while keeping every byte in this fixture's private state.
+STATUS_REPO="$SANDBOX/status-repo"
+STATUS_XDG="$SANDBOX/xdg-state"
+WORK_LOCK="$STATUS_REPO/.cache/zcl-dev-watch.lock"
+LEGACY_LOCK="$SANDBOX/.local/state/zclassic23-dev/native-watch.lock"
+mkdir -p "$STATUS_REPO/.cache" "$(dirname "$LEGACY_LOCK")" "$STATUS_XDG"
+set +e
+STATUS_OUT="$(HOME="$SANDBOX" XDG_STATE_HOME="$STATUS_XDG" \
+    ZCL_DEV_SOURCE_ROOT="$STATUS_REPO" \
+    "$BIN" dev loop status --view=summary 2>&1)"
+STATUS_RC=$?
+set -e
+[[ "$STATUS_RC" -eq 0 && "$STATUS_OUT" == *'"active":false'* ]] || {
+    echo "native-dev-loop-wait-selftest: inactive status failed" >&2
+    exit 1
+}
+[[ ! -e "$WORK_LOCK" && ! -e "$LEGACY_LOCK" ]] || {
+    echo "native-dev-loop-wait-selftest: status created a watcher lock" >&2
+    exit 1
+}
+
 WORKSPACE="$(
     printf 'domain\0zcl.dev_workspace.v1\0canonical_root\0%s\0' "$ROOT" |
         openssl dgst -sha3-256 | awk '{print $NF}'

@@ -1568,5 +1568,7 @@ enum zcl_devloop_state_lookup zcl_devloop_cycle_state_wait_after(
     (void)inotify_rm_watch(notify_fd, watch);
     close(notify_fd);
 #endif
+    if (result == ZCL_DEVLOOP_STATE_ABSENT && epoch_out)
+        *epoch_out = after_epoch;
     return result;
 }
