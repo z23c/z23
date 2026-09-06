@@ -473,6 +473,17 @@ int main(int argc, char **argv)
         return 1;
     }
 
+    /* -full-fold-target pins the -full-fold ceiling; it means nothing without
+     * -full-fold (there is no header-tip ceiling to override). Refuse here,
+     * before any datadir is opened, rather than let the flag be silently
+     * ignored. */
+    if (ctx.full_fold_target > 0 && !ctx.full_fold) {
+        fprintf(stderr,
+                "[full-fold] refusing: -full-fold-target=%d requires "
+                "-full-fold\n", ctx.full_fold_target);
+        return 1;
+    }
+
     /* Fast file sync: download block files via SHA3 encrypted service
      * BEFORE starting the full node. Wire speed, not block-by-block. */
     for (int i = 1; i < argc; i++) {

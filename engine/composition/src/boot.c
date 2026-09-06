@@ -3367,10 +3367,10 @@ sapling_tree_boot_check_done:
      * test_stage_reducer_unwedge). No-op unless the cursor is ahead. */
     if (ctx->full_fold)
         /* GENESIS-FOLD-TO-TIP: same offline driver as -mint-anchor, but the fold
-         * ceiling/target is the local header TIP and the terminal checkpoint
-         * ceremony is skipped. ctx->full_fold implies ctx->mint_anchor, so this
-         * pre-empts the mint reset below. */
-        boot_full_fold_reset(&g_node_db, &g_state);
+         * ceiling/target is the local header TIP (or the -full-fold-target=<H>
+         * pin, when not above the tip) and the terminal checkpoint ceremony is
+         * skipped. full_fold implies mint_anchor, pre-empting the reset below. */
+        boot_full_fold_reset(&g_node_db, &g_state, ctx->full_fold_target);
     else if (ctx->mint_anchor) boot_mint_anchor_reset(&g_node_db, ctx->mint_anchor_fast); /* ANCHOR-SET MINT: genesis reset + fold-cap at the anchor; fast => crypto pass-through */
     /* Zero-flag starter-pack bootstrap. Auto-selects a bundled seed only when
      * the current coins authority is absent or below that seed; the loader still

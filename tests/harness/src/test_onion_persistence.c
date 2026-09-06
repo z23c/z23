@@ -439,6 +439,49 @@ static int test_stability_control_args_parse(void)
     return failures;
 }
 
+/* -full-fold-target=<H> parsing (config/boot.h's ctx->full_fold_target doc):
+ * -full-fold -full-fold-target=1234 sets both fields; a non-numeric, zero, or
+ * negative value is rejected the way -utxomirror=/-legacyoracle=/etc. reject
+ * garbage above (rc == 1, no partial state). Arming against a header tip is
+ * covered directly against boot_full_fold_resolve_target, not here — no
+ * datadir is open during argv parsing. */
+static int test_full_fold_target_args_parse(void)
+{
+    int failures = 0;
+    printf("test_full_fold_target_args_parse: ");
+
+    struct app_context ctx = {0};
+    bool show_metrics = false;
+    char *argv[] = { "zclassic23", "-full-fold", "-full-fold-target=1234" };
+    int rc = args_parse_node_options(3, argv, &ctx, &show_metrics);
+    bool parsed = rc == -1 && ctx.full_fold && ctx.full_fold_target == 1234;
+
+    struct app_context bad_abc = {0};
+    char *abc[] = { "zclassic23", "-full-fold-target=abc" };
+    bool abc_refused =
+        args_parse_node_options(2, abc, &bad_abc, &show_metrics) == 1;
+
+    struct app_context bad_zero = {0};
+    char *zero[] = { "zclassic23", "-full-fold-target=0" };
+    bool zero_refused =
+        args_parse_node_options(2, zero, &bad_zero, &show_metrics) == 1;
+
+    struct app_context bad_neg = {0};
+    char *neg[] = { "zclassic23", "-full-fold-target=-5" };
+    bool neg_refused =
+        args_parse_node_options(2, neg, &bad_neg, &show_metrics) == 1;
+
+    if (parsed && abc_refused && zero_refused && neg_refused) {
+        printf("OK\n");
+    } else {
+        printf("FAIL (parsed=%d abc_refused=%d zero_refused=%d "
+               "neg_refused=%d)\n",
+               parsed, abc_refused, zero_refused, neg_refused);
+        failures++;
+    }
+    return failures;
+}
+
 static int test_auto_local_peer_refuses_self_endpoint(void)
 {
     int failures = 0;
@@ -472,6 +515,7 @@ int test_onion_persistence(void)
     failures += test_onion_persist_args_parse();
     failures += test_onion_persist_fleet_default();
     failures += test_stability_control_args_parse();
+    failures += test_full_fold_target_args_parse();
     failures += test_auto_local_peer_refuses_self_endpoint();
 
     printf("Persistent onion identity: %d failures\n", failures);

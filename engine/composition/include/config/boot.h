@@ -144,6 +144,18 @@ struct app_context {
                                  * skips its ceremony. Resumable: continues from the
                                  * persisted utxo_apply cursor; ZCL_FULL_FOLD_FROM_
                                  * GENESIS=1 forces a genesis reset. Default false. */
+    int32_t full_fold_target;  /* -full-fold-target=<H> : pin the -full-fold
+                                 * ceiling at height H instead of the local
+                                 * header tip, so two independently-synced
+                                 * builders can fold to the SAME height and
+                                 * have their exported checkpoint rungs
+                                 * compared. H must not exceed the local
+                                 * header tip; a higher H, or this flag given
+                                 * without -full-fold, is a FATAL refusal
+                                 * (fail closed — never silently clamped).
+                                 * Default -1 (no pin: arm at the header
+                                 * tip, the historical -full-fold
+                                 * behavior). */
     bool ratify_mint_anchor;   /* -ratify-mint-anchor : TERMINAL offline ratifier
                                  * for a COMPLETED full-validation mint producer
                                  * datadir (run against a COPY). Re-derives the

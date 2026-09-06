@@ -46,6 +46,7 @@
 #include "chain/pow.h"
 #include "chain/subsidy.h"
 #include "config/boot.h"
+#include "config/boot_internal.h"   /* boot_full_fold_resolve_target */
 #include "consensus/validation.h"
 #include "core/arith_uint256.h"
 #include "core/uint256.h"
@@ -605,6 +606,51 @@ static int test_mfd_scenario_c_headers_and_bodies_reaches_ceiling(void)
     return failures;
 }
 
+/* -full-fold-target ceiling arming (config/boot_internal.h's
+ * boot_full_fold_resolve_target — the pure decision boot_full_fold_reset
+ * calls once it knows the local header tip). Pure/no-database, so it is
+ * exercised directly against a fake header tip rather than through a
+ * synthetic datadir: with a header tip of 2000, a pin below the tip arms
+ * there; a pin above the tip refuses (fail closed, never clamped); no pin
+ * (<= 0, the -full-fold default) arms at the tip. */
+static int test_mfd_full_fold_resolve_target(void)
+{
+    int failures = 0;
+    printf("test_mfd_full_fold_resolve_target: ");
+
+    int32_t out = -1;
+    bool below_ok = boot_full_fold_resolve_target(2000, 1500, &out) &&
+                    out == 1500;
+
+    out = -1;
+    bool above_refused = !boot_full_fold_resolve_target(2000, 2500, &out) &&
+                         out == -1;   /* never written on refusal */
+
+    out = -1;
+    bool unset_uses_tip = boot_full_fold_resolve_target(2000, -1, &out) &&
+                          out == 2000;
+
+    out = -1;
+    bool zero_uses_tip = boot_full_fold_resolve_target(2000, 0, &out) &&
+                         out == 2000;
+
+    out = -1;
+    bool at_tip_ok = boot_full_fold_resolve_target(2000, 2000, &out) &&
+                     out == 2000;
+
+    if (below_ok && above_refused && unset_uses_tip && zero_uses_tip &&
+        at_tip_ok) {
+        printf("OK\n");
+    } else {
+        printf("FAIL (below_ok=%d above_refused=%d unset_uses_tip=%d "
+               "zero_uses_tip=%d at_tip_ok=%d)\n",
+               below_ok, above_refused, unset_uses_tip, zero_uses_tip,
+               at_tip_ok);
+        failures++;
+    }
+    return failures;
+}
+
 int test_mint_anchor_fresh_datadir(void);
 int test_mint_anchor_fresh_datadir(void)
 {
@@ -616,6 +662,7 @@ int test_mint_anchor_fresh_datadir(void)
     failures += test_mfd_scenario_a_fresh_empty_preflight_refuses();
     failures += test_mfd_scenario_b_headers_no_bodies_walls_frontier();
     failures += test_mfd_scenario_c_headers_and_bodies_reaches_ceiling();
+    failures += test_mfd_full_fold_resolve_target();
 
     printf("=== test_mint_anchor_fresh_datadir complete: %d failure(s) ===\n",
            failures);

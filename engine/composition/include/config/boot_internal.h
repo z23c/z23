@@ -90,13 +90,28 @@ bool boot_mint_anchor_genesis_reset(struct node_db *ndb);
 
 /* -full-fold (GENESIS-FOLD-TO-TIP) setup. Runs at the boot.c mint-anchor reset
  * site when ctx->full_fold. Determines the local header TIP (highest connected
- * block that has a body on disk), sets the header_admit fold ceiling to it, and
- * ARMS the mint driver's full-fold override (target=tip, skip the terminal
- * checkpoint ceremony). Resumable by default: continues from the persisted
- * utxo_apply cursor; ZCL_FULL_FOLD_FROM_GENESIS=1 forces a genesis reset first.
- * No compiled-checkpoint requirement — the fold reaches whatever height local
- * headers+bodies allow, naming a typed blocker if a body is missing. */
-void boot_full_fold_reset(struct node_db *ndb, struct main_state *state);
+ * block that has a body on disk), resolves the fold ceiling against
+ * requested_target (ctx->full_fold_target: <= 0 means no pin, use the tip; a
+ * positive value pins the ceiling there iff it does not exceed the tip —
+ * otherwise this FATALs, fail closed), sets the header_admit fold ceiling to
+ * the resolved value, and ARMS the mint driver's full-fold override (target =
+ * the resolved ceiling, skip the terminal checkpoint ceremony). Resumable by
+ * default: continues from the persisted utxo_apply cursor; ZCL_FULL_FOLD_FROM_
+ * GENESIS=1 forces a genesis reset first. No compiled-checkpoint requirement —
+ * the fold reaches whatever height local headers+bodies allow, naming a typed
+ * blocker if a body is missing. */
+void boot_full_fold_reset(struct node_db *ndb, struct main_state *state,
+                          int32_t requested_target);
+
+/* Pure -full-fold ceiling decision, factored out of boot_full_fold_reset so it
+ * is testable without a database: header_tip is the local header tip;
+ * requested_target is ctx->full_fold_target (<= 0 means "no pin"). On success
+ * (true), *out_target is what to arm at — header_tip when unpinned, or
+ * requested_target when it is positive and <= header_tip. Returns false
+ * (never writes *out_target) when requested_target is positive but exceeds
+ * header_tip: fail closed, the caller must refuse rather than clamp. */
+bool boot_full_fold_resolve_target(int32_t header_tip, int32_t requested_target,
+                                   int32_t *out_target);
 
 /* full-fold driver override, consumed by boot_mint_anchor_run. When armed, the
  * mint driver folds toward *out_target (the header tip) instead of the compiled

@@ -518,6 +518,27 @@ int args_parse_node_options(int argc, char **argv, struct app_context *ctx,
              * -nolegacyimport, which would also drop the body link. */
             ctx->no_legacy_utxo_import = true;
         }
+        else if (strncmp(argv[i], "-full-fold-target=", 18) == 0) {
+            /* Pin the -full-fold ceiling at H instead of the local header
+             * tip (config/boot.h's ctx->full_fold_target doc). Validated the
+             * same way other numeric flags in this ladder reject garbage:
+             * a non-numeric value, trailing junk, or H <= 0 is refused here
+             * rather than silently coerced by atoi() to 0. Whether H exceeds
+             * the local header tip is not knowable yet (no datadir is open
+             * during argv parsing), so that check — and the "-full-fold-
+             * target requires -full-fold" cross-flag check — happen later,
+             * once the header tip is readable (boot_full_fold.c). */
+            const char *v = argv[i] + 18;
+            char *end = NULL;
+            long h = strtol(v, &end, 10);
+            if (end == v || *end != '\0' || h <= 0 || h > INT32_MAX) {
+                fprintf(stderr,
+                        "invalid -full-fold-target=%s (must be a positive "
+                        "height, e.g. -full-fold-target=1234)\n", v);
+                return 1;
+            }
+            ctx->full_fold_target = (int32_t)h;
+        }
         else if (strcmp(argv[i], "-reindex-explorer") == 0) ctx->reindex_explorer = true;
         else if (strcmp(argv[i], "-backfill-zslp") == 0) ctx->backfill_zslp = true;
         else if (strcmp(argv[i], "-backfill-nullifiers") == 0) ctx->backfill_nullifiers = true;

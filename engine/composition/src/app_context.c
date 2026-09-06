@@ -28,6 +28,7 @@ void app_context_defaults(struct app_context *ctx)
     ctx->runtime_profile = ZCL_RUNTIME_FULL;
     ctx->operator_lane = ZCL_OPERATOR_LANE_UNKNOWN;
     ctx->par_workers = 0;   /* 0 => verify engine sizes to GetNumCores()-1 */
+    ctx->full_fold_target = -1;   /* no pin: -full-fold arms at the header tip */
 }
 
 const char *app_runtime_profile_name(enum zcl_runtime_profile profile)

@@ -204,7 +204,25 @@ static int32_t full_fold_header_tip_height(struct node_db *ndb)
     return tip;
 }
 
-void boot_full_fold_reset(struct node_db *ndb, struct main_state *state)
+bool boot_full_fold_resolve_target(int32_t header_tip, int32_t requested_target,
+                                   int32_t *out_target)
+{
+    if (requested_target <= 0) {
+        /* No pin: the historical -full-fold behavior — arm at the header
+         * tip. */
+        if (out_target)
+            *out_target = header_tip;
+        return true;
+    }
+    if (requested_target > header_tip)
+        return false;   /* fail closed: never silently clamp to the tip */
+    if (out_target)
+        *out_target = requested_target;
+    return true;
+}
+
+void boot_full_fold_reset(struct node_db *ndb, struct main_state *state,
+                          int32_t requested_target)
 {
     (void)state;
     g_ff_ndb = ndb;
@@ -216,8 +234,8 @@ void boot_full_fold_reset(struct node_db *ndb, struct main_state *state)
         _exit(EXIT_FAILURE);
     }
 
-    int32_t tip = full_fold_header_tip_height(ndb);
-    if (tip <= 0) {
+    int32_t header_tip = full_fold_header_tip_height(ndb);
+    if (header_tip <= 0) {
         fprintf(stderr,
                 "FATAL: -full-fold: node.db `blocks` has no header tip — run "
                 "`--importblockindex <zclassicd-datadir> <datadir>/node.db` "
@@ -225,6 +243,20 @@ void boot_full_fold_reset(struct node_db *ndb, struct main_state *state)
         event_emitf(EV_BOOT_VALIDATION_FAILED, 0, "full_fold no_header_tip");
         _exit(EXIT_FAILURE);
     }
+
+    int32_t tip = -1;
+    if (!boot_full_fold_resolve_target(header_tip, requested_target, &tip)) {
+        fprintf(stderr,
+                "[full-fold] refusing: -full-fold-target=%d is above the "
+                "local header tip h=%d\n", requested_target, header_tip);
+        event_emitf(EV_BOOT_VALIDATION_FAILED, 0,
+                    "full_fold target_above_header_tip");
+        _exit(EXIT_FAILURE);
+    }
+    if (requested_target > 0)
+        fprintf(stderr,
+                "[full-fold] target pinned to h=%d (local header tip h=%d)\n",
+                tip, header_tip);
 
     /* Resume decision: continue from the durable applied height unless the
      * datadir is fresh (applied <= genesis) or a genesis re-fold is forced. The
@@ -238,8 +270,8 @@ void boot_full_fold_reset(struct node_db *ndb, struct main_state *state)
     if (resume) {
         fprintf(stderr,
                 "[full-fold] RESUMING the genesis fold at durable "
-                "applied-height=%d toward the header tip h=%d; NOT resetting to "
-                "genesis (the reducer fold is a valid prefix)\n",
+                "applied-height=%d toward the fold target h=%d; NOT resetting "
+                "to genesis (the reducer fold is a valid prefix)\n",
                 applied, tip);
     } else {
         if (!boot_mint_anchor_genesis_reset(ndb)) {
@@ -251,14 +283,15 @@ void boot_full_fold_reset(struct node_db *ndb, struct main_state *state)
             _exit(EXIT_FAILURE);
         }
         fprintf(stderr,
-                "[full-fold] reset to genesis; fold TARGET = local header tip "
-                "h=%d (all eight stages fold genesis..tip over on-disk bodies; "
-                "H* climbs as the logs fill — complete self-derived shielded "
-                "state, no borrowed snapshot)\n", tip);
+                "[full-fold] reset to genesis; fold TARGET = h=%d (all eight "
+                "stages fold genesis..target over on-disk bodies; H* climbs "
+                "as the logs fill — complete self-derived shielded state, no "
+                "borrowed snapshot)\n", tip);
     }
 
-    /* Cap header_admit at the tip so the whole pipeline converges there, and arm
-     * the mint driver's full-fold override (target=tip, skip the ceremony). */
+    /* Cap header_admit at the resolved target so the whole pipeline converges
+     * there, and arm the mint driver's full-fold override (skip the
+     * ceremony). */
     mint_fold_ceiling_set(tip);
     boot_full_fold_arm(tip);
 
