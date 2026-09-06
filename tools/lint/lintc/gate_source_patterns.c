@@ -1,6 +1,6 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
- * Gates: check-result-discard
+ * Gates: check-result-discard, check-wallet-raw-prepare-log
  * Source-pattern ratchet gates of the C23 lint runtime: shrink-only gates
  * that walk production sources, key each surviving instance of a forbidden
  * pattern, and refuse any key a baseline file does not already carry.
@@ -509,5 +509,593 @@ int check_result_discard_selftest(void)
                    "sort -u dedups and orders");
     g_rd_nfns = 0;
     return st_ok(bad, "check_result_discard selftest: OK\n");
+}
+
+
+/* check-wallet-raw-prepare-log — port of
+ * tools/lint/check_wallet_raw_prepare_log.sh (now a shim). A bare
+ * sqlite3_prepare_v2() call (one NOT inside an if-condition) whose
+ * prepared-stmt NULL check returns without logging is forbidden: the gate
+ * opens a 12-line window after each bare prepare, watches for an
+ * "if (!stmt)" guard, and reports "<relpath>::<enclosing_function>" when the
+ * guarded return carries no LOG_(FAIL|ERR|NULL|RETURN|WARN) between prepare
+ * and return. Shrink-only ratchet against
+ * tools/lint/wallet_raw_prepare_log_baseline.txt; ZCL_LINT_MODE=UPDATE
+ * regenerates. Parity notes: the awk original strips the record newline
+ * before matching, so every regex below runs on a newline-stripped line;
+ * sort -u / comm run under the ambient locale, so the run function enters
+ * the environment locale and orders key sets with strcoll; grep 2>/dev/null
+ * maps to silently skipping unreadable/missing dirs and files; the
+ * production-scan grep args map to basename predicates (--exclude-dir
+ * matches at any depth). The awk machine reads only files containing the
+ * prepare literal; scanning every *.c instead yields byte-identical output
+ * because a file without the literal can never open a window. */
+
+#define WRPL_MAX_KEYS 4096
+#define WRPL_KEY 640
+#define WRPL_FUNC 128
+
+static char g_wrpl_keys[WRPL_MAX_KEYS][WRPL_KEY];
+static int g_wrpl_nkeys;
+
+static int wrpl_cmp(const void *a, const void *b)
+{ return strcoll(a, b); }
+
+/* sort -u: locale-collated ascending, collation-equal duplicates collapse. */
+static void wrpl_sort_uniq(char *set, size_t row, int *n)
+{
+    if (*n <= 0)
+        return;
+    qsort(set, (size_t)*n, row, wrpl_cmp);
+    int w = 0;
+    for (int r = 1; r < *n; r++)
+        if (strcoll(set + (size_t)w * row, set + (size_t)r * row) != 0)
+            memmove(set + (size_t)++w * row, set + (size_t)r * row, row);
+    *n = w + 1;
+}
+
+/* grep --exclude-dir=<base> semantics, active only under a production scan. */
+static int wrpl_excl_dir(const char *base)
+{
+    static const char *const skip[] = {
+        "planted", "build", "vendor", ".claude", "test-tmp"
+    };
+    if (!lint_prod_scan())
+        return 0;
+    for (size_t i = 0; i < sizeof skip / sizeof skip[0]; i++)
+        if (strcmp(base, skip[i]) == 0)
+            return 1;
+    return 0;
+}
+
+/* grep --exclude='_*fixture*.[ch]' basename-glob semantics. */
+static int wrpl_excl_file(const char *base)
+{
+    if (!lint_prod_scan())
+        return 0;
+    return fnmatch("_*fix" "ture*.c", base, 0) == 0
+        || fnmatch("_*fix" "ture*.h", base, 0) == 0;
+}
+
+struct wrpl_re {
+    regex_t semi;  /* ;[ \t]*$            — prototype ender */
+    regex_t log;   /* LOG_(FAIL|ERR|NULL|RETURN|WARN) */
+    regex_t ret;   /* return[ \t;(] */
+    regex_t guard; /* if \( *! *[A-Za-z_][A-Za-z0-9_]* *\) */
+    regex_t cond;  /* (^|[^A-Za-z0-9_])if[ \t]*\(  — prepare inside if */
+};
+
+static void wrpl_free(struct wrpl_re *r, int n)
+{
+    regex_t *re[] = { &r->semi, &r->log, &r->ret, &r->guard, &r->cond };
+    for (int i = 0; i < n && i < 5; i++)
+        regfree(re[i]);
+}
+
+static int wrpl_compile(struct wrpl_re *r)
+{
+    static const char *const pat[] = {
+        ";[ \t]*$",
+        ("LOG_"
+            "(FAIL|ERR|NULL|RETURN|WARN)"),
+        "return[ \t;(]",
+        "if \\( *! *[A-Za-z_][A-Za-z0-9_]* *\\)",
+        "(^|[^A-Za-z0-9_])if[ \t]*\\(",
+    };
+    regex_t *re[] = { &r->semi, &r->log, &r->ret, &r->guard, &r->cond };
+    for (int i = 0; i < 5; i++) {
+        int err = regcomp(re[i], pat[i], REG_EXTENDED);
+        if (err) {
+            wrpl_free(r, i);
+            return reg_fail(re[i], err);
+        }
+    }
+    return 0;
+}
+
+struct wrpl_st {
+    char curfunc[WRPL_FUNC], pfunc[WRPL_FUNC];
+    int prep, gp, since, gsince, logseen;
+};
+
+static int wrpl_report(const char *path, const char *func)
+{
+    if (g_wrpl_nkeys >= WRPL_MAX_KEYS)
+        return die("z23-lint: raw-prepare key overflow\n", "");
+    int k = snprintf(g_wrpl_keys[g_wrpl_nkeys], WRPL_KEY, "%s::%s", path, func);
+    if (ovf(k, WRPL_KEY))
+        return 2;
+    g_wrpl_nkeys++;
+    return 0;
+}
+
+/* Enclosing-function detection: a column-0 definition header ("<type> name(")
+ * that does not end in ';' (which would be a prototype). head = text before
+ * the first '(', trailing blanks stripped, split on [ \t*]+ runs; the name is
+ * the last of >=2 parts when it is an identifier. */
+static void wrpl_curfunc(struct wrpl_st *st, const struct wrpl_re *r,
+                         const char *line)
+{
+    unsigned char c0 = (unsigned char)line[0];
+    if (!(isalpha(c0) || c0 == '_'))
+        return;
+    const char *paren = strchr(line, '(');
+    if (!paren || regexec(&r->semi, line, 0, NULL, 0) == 0)
+        return;
+    char head[4096];
+    size_t hl = (size_t)(paren - line);
+    if (hl >= sizeof head)
+        return; /* absurd header: awk would split it, we decline to track */
+    memcpy(head, line, hl);
+    head[hl] = '\0';
+    while (hl > 0 && (head[hl - 1] == ' ' || head[hl - 1] == '\t'))
+        head[--hl] = '\0';
+    int nparts = 0;
+    const char *last = NULL;
+    size_t last_len = 0;
+    for (size_t i = 0; i < hl;) {
+        if (head[i] == ' ' || head[i] == '\t' || head[i] == '*') {
+            i++;
+            continue;
+        }
+        size_t start = i;
+        while (i < hl && head[i] != ' ' && head[i] != '\t' && head[i] != '*')
+            i++;
+        nparts++;
+        last = head + start;
+        last_len = i - start;
+    }
+    if (nparts < 2 || last_len == 0 || last_len >= WRPL_FUNC)
+        return;
+    if (!(isalpha((unsigned char)last[0]) || last[0] == '_'))
+        return;
+    for (size_t i = 1; i < last_len; i++)
+        if (!isalnum((unsigned char)last[i]) && last[i] != '_')
+            return;
+    memcpy(st->curfunc, last, last_len);
+    st->curfunc[last_len] = '\0';
+}
+
+/* One newline-stripped line through the awk state machine. */
+static int wrpl_line(struct wrpl_st *st, const struct wrpl_re *r,
+                     const char *path, const char *line)
+{
+    wrpl_curfunc(st, r, line);
+    if (st->prep) {
+        st->since++;
+        if (st->since > 12) {
+            st->prep = 0;
+            st->gp = 0;
+        } else {
+            if (regexec(&r->log, line, 0, NULL, 0) == 0)
+                st->logseen = 1;
+            int hasret = regexec(&r->ret, line, 0, NULL, 0) == 0;
+            if (st->gp) {
+                st->gsince++;
+                if (hasret) {
+                    if (!st->logseen && wrpl_report(path, st->pfunc))
+                        return 2;
+                    st->prep = 0;
+                    st->gp = 0;
+                } else if (st->gsince > 4) {
+                    st->prep = 0;
+                    st->gp = 0;
+                }
+            } else if (regexec(&r->guard, line, 0, NULL, 0) == 0) {
+                if (hasret) {
+                    if (!st->logseen && wrpl_report(path, st->pfunc))
+                        return 2;
+                    st->prep = 0;
+                } else if (regexec(&r->log, line, 0, NULL, 0) == 0) {
+                    st->prep = 0;
+                } else {
+                    st->gp = 1;
+                    st->gsince = 0;
+                }
+            }
+        }
+    }
+    /* open a window only for a BARE prepare (not inside an if-condition) */
+    if (strstr(line, "sqlite3_prepare_" "v2(") != NULL
+        && regexec(&r->cond, line, 0, NULL, 0) != 0) {
+        st->prep = 1;
+        st->since = 0;
+        st->logseen = 0;
+        st->gp = 0;
+        memcpy(st->pfunc, st->curfunc, WRPL_FUNC);
+    }
+    return 0;
+}
+
+static int wrpl_scan_file(const char *path, const struct wrpl_re *r)
+{
+    FILE *f = fopen(path, "r");
+    if (!f)
+        return 0; /* grep 2>/dev/null: an unreadable file contributes nothing */
+    struct wrpl_st st;
+    memset(&st, 0, sizeof st);
+    char *line = NULL;
+    size_t cap = 0;
+    ssize_t n;
+    int rc = 0;
+    while ((n = getline(&line, &cap, f)) >= 0) {
+        if (n > 0 && line[n - 1] == '\n')
+            line[--n] = '\0'; /* awk records carry no newline */
+        if (wrpl_line(&st, r, path, line)) {
+            rc = 2;
+            break;
+        }
+    }
+    free(line);
+    fclose(f);
+    return rc;
+}
+
+static int wrpl_walk(const char *dir, const struct wrpl_re *r)
+{
+    struct dirent **names = NULL;
+    int n = scandir(dir, &names, NULL, alphasort);
+    if (n < 0)
+        return 0; /* grep 2>/dev/null: an unreadable dir contributes nothing */
+    int rc = 0;
+    for (int i = 0; i < n; i++) {
+        const char *name = names[i]->d_name;
+        if (rc == 0 && strcmp(name, ".") != 0 && strcmp(name, "..") != 0) {
+            char path[4096];
+            struct stat st;
+            size_t nl = strlen(name);
+            int k = snprintf(path, sizeof path, "%s/%s", dir, name);
+            if (k < 0 || (size_t)k >= sizeof path)
+                rc = die("z23-lint: path too long: %s\n", dir);
+            else if (lstat(path, &st) != 0)
+                rc = 0; /* vanished mid-scan: grep would just lose the race */
+            else if (S_ISDIR(st.st_mode)) {
+                if (!wrpl_excl_dir(name))
+                    rc = wrpl_walk(path, r);
+            } else if (S_ISREG(st.st_mode) && nl >= 2 && name[nl - 2] == '.'
+                       && name[nl - 1] == 'c' && !wrpl_excl_file(name))
+                rc = wrpl_scan_file(path, r);
+        }
+        free(names[i]);
+    }
+    free(names);
+    return rc;
+}
+
+/* grep -vE '^[[:space:]]*#|^[[:space:]]*$' line filter. */
+static int wrpl_skip_line(const char *s)
+{
+    while (*s && isspace((unsigned char)*s))
+        s++;
+    return *s == '#' || *s == '\0';
+}
+
+static int wrpl_base_read(char base[][WRPL_KEY], int *nb)
+{
+    *nb = 0;
+    FILE *f = fopen("tools/lint/wallet_raw_prepare_log_baseline.txt", "r");
+    if (!f)
+        return 0; /* grep 2>/dev/null: a missing baseline is an empty set */
+    char *line = NULL;
+    size_t cap = 0;
+    ssize_t n;
+    int rc = 0;
+    while ((n = getline(&line, &cap, f)) >= 0) {
+        while (n > 0 && line[n - 1] == '\n')
+            line[--n] = '\0';
+        if (wrpl_skip_line(line))
+            continue;
+        if (*nb >= WRPL_MAX_KEYS || (size_t)n >= WRPL_KEY) {
+            rc = die("z23-lint: raw-prepare baseline overflow\n", "");
+            break;
+        }
+        memcpy(base[*nb], line, (size_t)n + 1);
+        (*nb)++;
+    }
+    free(line);
+    fclose(f);
+    return rc;
+}
+
+static int wrpl_update(void)
+{
+    static const char *const hdr[] = {
+        "# check_wallet_raw_prepare_log RATCHET baseline (shrink-only).",
+        "# Stable key = <relpath>::<enclosing_function>. A swallowed prepare:",
+        ("#   sqlite3_prepare_" "v2(...); if (!stmt) return ...;   with no LOG_*."),
+        "# Regenerate after fixing some: ZCL_LINT_MODE=UPDATE ./tools/lint/check_wallet_raw_prepare_log.sh",
+    };
+    FILE *f = fopen("tools/lint/wallet_raw_prepare_log_baseline.txt", "w");
+    if (!f)
+        return die("z23-lint: cannot write raw-prepare baseline\n", "");
+    int rc = 0;
+    for (size_t i = 0; i < sizeof hdr / sizeof hdr[0]; i++)
+        if (fprintf(f, "%s\n", hdr[i]) < 0) {
+            rc = die("z23-lint: write failed\n", "");
+            break;
+        }
+    if (rc == 0 && g_wrpl_nkeys == 0) {
+        if (fputc('\n', f) == EOF) /* printf '%s\n' "" emits one blank line */
+            rc = die("z23-lint: write failed\n", "");
+    }
+    for (int i = 0; rc == 0 && i < g_wrpl_nkeys; i++)
+        if (fprintf(f, "%s\n", g_wrpl_keys[i]) < 0)
+            rc = die("z23-lint: write failed\n", "");
+    if (fclose(f) != 0 && rc == 0)
+        rc = die("z23-lint: write failed\n", "");
+    if (rc)
+        return rc;
+    printf("check_wallet_raw_prepare_log: baseline updated (%d entries)\n",
+           g_wrpl_nkeys);
+    return 0;
+}
+
+static int wrpl_fail_mode(void)
+{
+    static char base[WRPL_MAX_KEYS][WRPL_KEY];
+    int nb = 0;
+    int rc = wrpl_base_read(base, &nb);
+    if (rc)
+        return rc;
+    wrpl_sort_uniq((char *)base, WRPL_KEY, &nb);
+    /* comm -23 CUR BASE: keys present in the scan but absent from baseline. */
+    int bi = 0, nnew = 0, ngone = 0;
+    for (int i = 0; i < g_wrpl_nkeys; i++) {
+        while (bi < nb && strcoll(base[bi], g_wrpl_keys[i]) < 0) {
+            if (strstr(base[bi], "::") != NULL)
+                ngone++;
+            bi++;
+        }
+        if (bi < nb && strcoll(base[bi], g_wrpl_keys[i]) == 0)
+            bi++;
+        else
+            nnew++;
+    }
+    while (bi < nb) {
+        if (strstr(base[bi], "::") != NULL)
+            ngone++;
+        bi++;
+    }
+    if (nnew) {
+        fputs("FAIL: new raw sqlite3_prepare_" "v2() with an unlogged NULL-check return.\n"
+              "      Log the failure via LOG_FAIL/LOG_RETURN/LOG_ERR/LOG_NULL/LOG_WARN\n"
+              "      between the prepare and the 'if (!stmt)' return, or route the\n"
+              "      prepare through the AR_* lifecycle macros (activerecord.h):\n",
+              stdout);
+        bi = 0;
+        for (int i = 0; i < g_wrpl_nkeys; i++) {
+            while (bi < nb && strcoll(base[bi], g_wrpl_keys[i]) < 0)
+                bi++;
+            if (bi < nb && strcoll(base[bi], g_wrpl_keys[i]) == 0)
+                bi++;
+            else if (fprintf(stdout, "%s\n", g_wrpl_keys[i]) < 0)
+                return die("z23-lint: write failed\n", "");
+        }
+        return 1;
+    }
+    int nbase = 0;
+    for (int i = 0; i < nb; i++)
+        if (strstr(base[i], "::") != NULL)
+            nbase++;
+    printf("  OK: no new unlogged raw-prepare NULL-check (%d tracked; baseline %d)\n",
+           g_wrpl_nkeys, nbase);
+    if (ngone > 0)
+        printf("  (ratchet: %d fixed since baseline — run ZCL_LINT_MODE=UPDATE to shrink)\n",
+               ngone);
+    return 0;
+}
+
+int check_wallet_raw_prepare_log_run(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+    setlocale(LC_ALL, ""); /* sort/comm in the original obey the ambient locale */
+    const char *mode = getenv("ZCL_LINT_MODE");
+    g_wrpl_nkeys = 0;
+    struct wrpl_re r;
+    int rc = wrpl_compile(&r);
+    if (rc)
+        return rc;
+    static const char *const roots[] = { "app", "lib" };
+    for (size_t i = 0; rc == 0 && i < sizeof roots / sizeof roots[0]; i++) {
+        struct stat st;
+        if (stat(roots[i], &st) == 0 && S_ISDIR(st.st_mode))
+            rc = wrpl_walk(roots[i], &r);
+    }
+    wrpl_free(&r, 5);
+    if (rc)
+        return rc;
+    wrpl_sort_uniq((char *)g_wrpl_keys, WRPL_KEY, &g_wrpl_nkeys);
+    if (mode && strcmp(mode, "UPDATE") == 0)
+        return wrpl_update();
+    return wrpl_fail_mode();
+}
+
+static int wrpl_want(const char *tag, int got, int w, const char *s)
+{
+    if (got != w) {
+        fprintf(stderr, "%s selftest: want %d: %s\n", tag, w, s);
+        return 1;
+    }
+    return 0;
+}
+
+/* Feed a synthetic newline-free "file" through the machine, one line per
+ * array element; returns the number of keys emitted (in g_wrpl_keys). */
+static int wrpl_feed(struct wrpl_st *st, const struct wrpl_re *r,
+                     const char *path, const char *const *lines, int n)
+{
+    memset(st, 0, sizeof *st);
+    g_wrpl_nkeys = 0;
+    int rc = 0;
+    for (int i = 0; i < n && rc == 0; i++)
+        rc = wrpl_line(st, r, path, lines[i]);
+    return rc;
+}
+
+int check_wallet_raw_prepare_log_selftest(void)
+{
+    const char *t = "check_wallet_raw_prepare_log";
+    struct wrpl_re r;
+    int cr = wrpl_compile(&r);
+    if (cr)
+        return cr;
+    struct wrpl_st st;
+    int bad = 0;
+
+    /* bare prepare, guarded return on the guard line, no LOG_*: violation */
+    static const char *const f1[] = {
+        "int wallet_open(void) {",
+        "    sqlite3_stmt *s = 0;",
+        ("    sqlite3_prepare_" "v2(db, sql, -1, &s, 0);"),
+        "    if (!s) return 0;",
+        "    return 1;",
+        "}",
+    };
+    bad |= wrpl_feed(&st, &r, "app/x.c", f1, 6)
+        | wrpl_want(t, g_wrpl_nkeys == 1
+                        && strcmp(g_wrpl_keys[0], "app/x.c::wallet_open") == 0,
+                    1, "unguarded-logless prepare reports file::func");
+
+    /* LOG_RETURN on the guard line: compliant */
+    static const char *const f2[] = {
+        "int wallet_open(void) {",
+        "    sqlite3_stmt *s = 0;",
+        ("    sqlite3_prepare_" "v2(db, sql, -1, &s, 0);"),
+        "    if (!s) LOG_RETURN(0, \"prep\");",
+        "}",
+    };
+    bad |= wrpl_feed(&st, &r, "app/x.c", f2, 5)
+        | wrpl_want(t, g_wrpl_nkeys, 0, "LOG_RETURN on guard line complies");
+
+    /* LOG between prepare and a split guard/return: compliant */
+    static const char *const f3[] = {
+        "int wallet_open(void) {",
+        "    sqlite3_stmt *s = 0;",
+        ("    sqlite3_prepare_" "v2(db, sql, -1, &s, 0);"),
+        "    LOG_ERR(\"prep failed\");",
+        "    if (!s)",
+        "        return 0;",
+        "}",
+    };
+    bad |= wrpl_feed(&st, &r, "app/x.c", f3, 7)
+        | wrpl_want(t, g_wrpl_nkeys, 0, "LOG before split guard complies");
+
+    /* split guard/return without LOG: violation */
+    static const char *const f4[] = {
+        "static int wallet_close(void)",
+        "{",
+        "    sqlite3_stmt *s = 0;",
+        ("    sqlite3_prepare_" "v2(db, sql, -1, &s, 0);"),
+        "    if (!s)",
+        "        return 0;",
+        "    return 1;",
+        "}",
+    };
+    bad |= wrpl_feed(&st, &r, "app/x.c", f4, 8)
+        | wrpl_want(t, g_wrpl_nkeys == 1
+                        && strcmp(g_wrpl_keys[0], "app/x.c::wallet_close") == 0,
+                    1, "split guard/return without LOG reports");
+
+    /* prepare inside an if-condition opens no window */
+    static const char *const f5[] = {
+        "int wallet_open(void) {",
+        "    sqlite3_stmt *s = 0;",
+        ("    if (sqlite3_prepare_" "v2(db, sql, -1, &s, 0) != 0)"),
+        "        return 0;",
+        "}",
+    };
+    bad |= wrpl_feed(&st, &r, "app/x.c", f5, 5)
+        | wrpl_want(t, g_wrpl_nkeys, 0, "if-condition prepare ignored");
+
+    /* window expiry: guard+return 13 lines after the prepare is out of range */
+    static const char *const f6[] = {
+        "int wallet_open(void) {",
+        "    sqlite3_stmt *s = 0;",
+        ("    sqlite3_prepare_" "v2(db, sql, -1, &s, 0);"),
+        "    int a0=0;", "    int a1=0;", "    int a2=0;", "    int a3=0;",
+        "    int a4=0;", "    int a5=0;", "    int a6=0;", "    int a7=0;",
+        "    int a8=0;", "    int a9=0;", "    int aa=0;", "    int ab=0;",
+        "    if (!s) return 0;",
+        "}",
+    };
+    bad |= wrpl_feed(&st, &r, "app/x.c", f6, 17)
+        | wrpl_want(t, g_wrpl_nkeys, 0, "guard 13 lines out is out of window");
+
+    /* guard-body deadline: return on the 5th line after the guard reports,
+     * on the 6th the window is already closed */
+    static const char *const f7[] = {
+        "int wallet_open(void) {",
+        "    sqlite3_stmt *s = 0;",
+        ("    sqlite3_prepare_" "v2(db, sql, -1, &s, 0);"),
+        "    if (!s)",
+        "        a0();", "        a1();", "        a2();", "        a3();",
+        "        return 0;",
+        "}",
+    };
+    bad |= wrpl_feed(&st, &r, "app/x.c", f7, 10)
+        | wrpl_want(t, g_wrpl_nkeys, 1, "return 5 lines after guard reports");
+    static const char *const f8[] = {
+        "int wallet_open(void) {",
+        "    sqlite3_stmt *s = 0;",
+        ("    sqlite3_prepare_" "v2(db, sql, -1, &s, 0);"),
+        "    if (!s)",
+        "        a0();", "        a1();", "        a2();", "        a3();",
+        "        a4();",
+        "        return 0;",
+        "}",
+    };
+    bad |= wrpl_feed(&st, &r, "app/x.c", f8, 11)
+        | wrpl_want(t, g_wrpl_nkeys, 0, "return 6 lines after guard is dead");
+
+    /* no space after if: not a guard (window just expires) */
+    static const char *const f9[] = {
+        "int wallet_open(void) {",
+        "    sqlite3_stmt *s = 0;",
+        ("    sqlite3_prepare_" "v2(db, sql, -1, &s, 0);"),
+        "    if(!s) return 0;",
+        "}",
+    };
+    bad |= wrpl_feed(&st, &r, "app/x.c", f9, 5)
+        | wrpl_want(t, g_wrpl_nkeys, 0, "if(!s) without space is not a guard");
+
+    /* a prototype does not become the enclosing function; file scope keys
+     * carry an empty function side */
+    static const char *const f10[] = {
+        "int wallet_proto(int x);",
+        "static sqlite3_stmt *s;",
+        "int f(void) {",
+        ("    sqlite3_prepare_" "v2(db, sql, -1, &s, 0);"),
+        "    if (!s) return 0;",
+        "}",
+    };
+    bad |= wrpl_feed(&st, &r, "app/x.c", f10, 6)
+        | wrpl_want(t, g_wrpl_nkeys == 1
+                        && strcmp(g_wrpl_keys[0], "app/x.c::f") == 0,
+                    1, "prototype does not rename the enclosing function");
+
+    wrpl_free(&r, 5);
+    g_wrpl_nkeys = 0;
+    return st_ok(bad, "check_wallet_raw_prepare_log selftest: OK\n");
 }
 

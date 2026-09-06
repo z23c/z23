@@ -11507,7 +11507,7 @@ check-log-macro-return-type:
 # wallet_tx.c class the other silent-error gates do not see): a BARE prepare
 # followed by `if (!stmt) return ...;` with no LOG_* between them. RATCHET
 # (shrink-only) — today's population is baselined.
-check-wallet-raw-prepare-log:
+check-wallet-raw-prepare-log: $(LINTC_TOOL)
 	@echo "══ LINT: raw sqlite3_prepare_v2 unlogged NULL-check (RATCHET) ══"
 	@ZCL_LINT_MODE=FAIL ./tools/lint/check_wallet_raw_prepare_log.sh
 

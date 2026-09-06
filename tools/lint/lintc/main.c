@@ -85,6 +85,8 @@ static const struct lint_gate k_gates[] = {
       check_hotswap_static_state_selftest },
     { "check-result-discard", check_result_discard_run,
       check_result_discard_selftest },
+    { "check-wallet-raw-prepare-log", check_wallet_raw_prepare_log_run,
+      check_wallet_raw_prepare_log_selftest },
 };
 
 int main(int argc, char **argv)
