@@ -23,12 +23,20 @@
 /* A landing runs `make lint` (every gate) plus check-windows-acceptance in
  * one invocation, inside a fresh generation whose object tree has never
  * compiled the ~47 one-shot standalone tools check-standalone-tools-link
- * links, alongside the test dimension. That cold gate alone is the largest
- * single item in the landing lint budget, so the landing allowance is set
- * against the measured cold wall time with headroom for a loaded box; the
- * proof prints the measured lint wall time in its phases file
- * (lint_wall_ms) so the next reader never has to guess. */
-#define PROOF_LINT_LANDING_MS 2400000
+ * links. It runs alongside the test dimension on purpose: three measured
+ * landing-shaped proofs on a 32-core box under concurrent lane traffic
+ * (2026-09-06) put all 202 gates at 373 s, 507 s and 670 s of wall time
+ * against 188-230 s for the tests, so lint is always the longer of the two
+ * and running it first would simply add the test dimension to every
+ * landing. The cold check-standalone-tools-link inside those generations
+ * was 118 s, 120 s and 636 s -- the last of them the whole lint run's
+ * single largest item. Thirty minutes is about 2.6x the slowest total
+ * observed, and a budget only ends a step that has ALSO gone silent for
+ * PROOF_NO_PROGRESS_MS, which a run printing a gate line every few seconds
+ * does not. The proof writes its measured wall time into the phases file
+ * as lint_wall_ms beside the lint_targets line, so the next reader
+ * replaces this number rather than trusting it. */
+#define PROOF_LINT_LANDING_MS 1800000
 
 enum zcl_dev_proof_state {
     ZCL_DEV_PROOF_STATE_INVALID = -1,

@@ -596,6 +596,18 @@ compile, lint, and test accounting. A missing, stale, incomplete, skipped, or
 tampered dimension cannot be admitted. `make pre-push-ci` remains an explicit
 legacy parity oracle; it is not called by the installed push hook.
 
+The lint dimension's scope depends on what the proof is for. A landing root
+-- one with a sibling `queue.lock` -- runs the whole gate set, `make lint`
+plus `check-windows-acceptance`, so a gate the fast subset excludes cannot
+reach main unseen. Every other proof runs `make lint-fast`, which keeps a
+lane's own proof cheap. The generation is handed the built artifacts the
+full gate set reads (the confined package verifier, `build/bin/z23-dev`,
+and the `build/bin/zclassic23` alias) through the same content-checked
+admission the test dimension uses, so it judges the same artifacts the
+submitting checkout's own `make lint` judges. The measured lint wall time
+lands in the receipt's phases file as `lint_wall_ms`, beside the
+`lint_targets` line naming what ran.
+
 The impact plan behind that policy can hit a capacity bound: a change whose
 reverse-caller closure or reverse-include set reaches more test groups than the
 plan can enumerate. That is not missing evidence, so it is not a refusal — the
@@ -623,8 +635,10 @@ not translate between them or claim that either is the unfinished signed-commit
 promoter.
 
 Full `make lint` is the umbrella (every gate, including whole-node tool links).
-Run it only when an impact rule names a gate that `lint-fast` excludes, or at
-a sub-wave / release boundary. An uncached full suite is:
+A landing proof runs it for you inside its own generation, so main cannot go
+red on a gate the fast subset excludes. Run it by hand when an impact rule
+names such a gate, or at a sub-wave / release boundary. An uncached full
+suite is:
 
 ```bash
 make -j"$(getconf _NPROCESSORS_ONLN)" test-parallel TEST_PARALLEL_ARGS=--no-cache

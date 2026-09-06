@@ -34,7 +34,20 @@ cd "$ROOT"
 # shellcheck source=tools/lint/gate_lib.sh
 . tools/lint/gate_lib.sh
 
-BIN="${1:-build/bin/zclassic23}"
+# The RELEASE binary is $(ZCLASSIC23_BIN) = build/bin/z23 (Makefile), built
+# -O3 + LTO with no -DZCL_DEV_BUILD. build/bin/zclassic23 is only the
+# migration alias -- an `ln -sfn z23` on POSIX -- and anything may occupy
+# that name: a proof generation admits the DEV node there so the CLI test
+# groups have a node to exec. Reading the alias made this gate report a dev
+# binary's dev symbols as a release containment failure, which is a false
+# red about the wrong artifact. Name the release target itself: identical
+# bytes wherever a release build exists, and layer 2 below simply does not
+# run where one does not -- which is what its own header already says.
+BIN="${1:-build/bin/z23}"
+# A Windows host names the same release target build/bin/z23.exe.
+if [ $# -eq 0 ] && [ ! -f "$BIN" ] && [ -f build/bin/z23.exe ]; then
+    BIN=build/bin/z23.exe
+fi
 
 # The extern dev-mutation entry points that must never reach the release binary.
 FORBIDDEN=(

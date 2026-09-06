@@ -3399,6 +3399,14 @@ static bool generation_prepare(const struct proof_paths *paths,
      * needlessly rebuilt after the source checkpoint. */
     static const char *const dependencies[] = {
         "vendor/lib", "vendor/include",
+        /* The untracked amalgamated C source beside those two. No native
+         * build compiles it, so its absence looks like nothing at all --
+         * until the Windows acceptance link inside a full lint dies with
+         * "No rule to make target 'vendor/sqlite3.c'", naming a missing file
+         * rather than a missing priming step. The Makefile's worktree-prime
+         * comment names this exact trap for hand-primed worktrees; a proof
+         * generation is one more of them. */
+        "vendor/sqlite3.c",
         "vendor/tor/libtor.a",
         "vendor/tor/src/ext/ed25519/donna/libed25519_donna.a",
         "vendor/tor/src/ext/ed25519/ref10/libed25519_ref10.a",
