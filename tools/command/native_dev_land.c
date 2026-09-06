@@ -98,6 +98,7 @@
 #include "base/safe_alloc.h"
 #include "json/json.h"
 #include "platform/file_clone.h"
+#include "platform/ram_scratch.h"
 #include "platform/state_root.h"
 #include "platform/time_compat.h"
 #include "util/spawn.h"
@@ -3136,6 +3137,13 @@ static bool dl_wt_restart_env_ensure(const struct dl_dirs *d, char *why,
     return true;
 }
 
+/* Bound on how many extra names one dependency's inode may carry into the
+ * leaf's own generation pools before this refuses instead of repairing. A
+ * legitimate proof pool holds a handful of generations at once; anything
+ * past this is either a runaway pool (item C's sweep failed to run) or not
+ * this code's link to explain. */
+#define DL_DEPENDENCY_POOL_PARTNER_MAX 15
+
 struct dl_dependency_repair {
     const struct dl_dirs *dirs;
     const struct dl_row *row;
@@ -3144,11 +3152,94 @@ struct dl_dependency_repair {
     size_t repaired;
     bool apply;
     bool require_single;
+    /* The leaf's own generation roots (dev_proof.c's `.z23p` disk pool
+     * beside the landing worktree, and the RAM root's `z23p` pool when this
+     * host offers one). A link into either is this code's own doing, not a
+     * foreign alias, so it is explained and repaired rather than refused. */
+    char disk_gen_parent[4096];
+    char ram_gen_parent[4096];
+    bool has_ram_gen_parent;
 };
 
-/* A link count is explainable only when these are two distinct canonical
- * names for the same regular inode. An extra name could be an old proof
- * generation, so neither a queue scan nor the landing slot permits repair. */
+static void dl_generation_roots_compute(const struct dl_dirs *d,
+                                        struct dl_dependency_repair *repair)
+{
+    (void)snprintf(repair->disk_gen_parent, sizeof(repair->disk_gen_parent),
+                   "%s/.z23p", d->land);
+    char ram_root[PATH_MAX];
+    repair->has_ram_gen_parent = false;
+    if (platform_ram_scratch_root(ram_root, sizeof(ram_root), 0) &&
+        snprintf(repair->ram_gen_parent, sizeof(repair->ram_gen_parent),
+                 "%s/z23p", ram_root) < (int)sizeof(repair->ram_gen_parent))
+        repair->has_ram_gen_parent = true;
+}
+
+#if !defined(_WIN32)
+/* The 32-character lowercase hex tag dev_proof.c's generation_prepare()
+ * derives -- the only shape of entry either generation pool ever holds. */
+static bool dl_generation_tag_name(const char *name)
+{
+    size_t len = name ? strlen(name) : 0;
+    if (len != 32) return false;
+    for (size_t i = 0; i < len; i++) {
+        char c = name[i];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')))
+            return false;
+    }
+    return true;
+}
+
+/* Look for other names of the same inode as `before` under every generation
+ * directory inside `pool_parent`. Each match is a proof generation's own
+ * private materialised copy sharing an inode with the worktree file because
+ * an older binary linked it instead of copying -- exactly the legacy state
+ * item A's fix leaves behind. Every match found is appended to `partners`
+ * (bounded by DL_DEPENDENCY_POOL_PARTNER_MAX); returns false only when that
+ * bound overflows, never for an absent or otherwise-unreadable pool root. */
+static bool dl_generation_pool_scan(
+    const char *pool_parent, const char *relative, const struct stat *before,
+    const char *target_real, char partners[][4096 + 96],
+    size_t *partner_count)
+{
+    if (!pool_parent || !pool_parent[0]) return true;
+    DIR *dir = opendir(pool_parent);
+    if (!dir) return true;
+    struct dirent *entry;
+    bool ok = true;
+    while (ok && (entry = readdir(dir)) != NULL) {
+        if (!dl_generation_tag_name(entry->d_name)) continue;
+        char candidate[4096 + 96], candidate_real[PATH_MAX];
+        struct stat candidate_st;
+        if (snprintf(candidate, sizeof(candidate), "%s/%s/%s", pool_parent,
+                     entry->d_name, relative) >= (int)sizeof(candidate))
+            continue;
+        if (!realpath(candidate, candidate_real) ||
+            strcmp(candidate_real, target_real) == 0)
+            continue;
+        if (lstat(candidate, &candidate_st) != 0 ||
+            !S_ISREG(candidate_st.st_mode) ||
+            !dl_same_inode(before, &candidate_st))
+            continue;
+        if (*partner_count >= DL_DEPENDENCY_POOL_PARTNER_MAX) {
+            ok = false;
+            break;
+        }
+        (void)snprintf(partners[*partner_count], sizeof(partners[0]), "%s",
+                       candidate);
+        (*partner_count)++;
+    }
+    (void)closedir(dir);
+    return ok;
+}
+#endif
+
+/* A link count is explainable only when every extra name is either the
+ * submitting train's own checkout (the donor case dev land priming used
+ * before this repair existed) or one of the leaf's own generation pools
+ * (the case item A's fix could still leave behind from an older binary, or
+ * from a race with a proof generation still materialising this same file).
+ * Any name outside those roots is not this code's link, so it still
+ * refuses -- fail closed, same reason string as before. */
 static bool dl_dependency_repair_one(const char *relative, uint64_t links,
                                      void *opaque)
 {
@@ -3163,16 +3254,38 @@ static bool dl_dependency_repair_one(const char *relative, uint64_t links,
     char target[4096 + 96], donor[4096 + 96];
     char target_real[PATH_MAX], donor_real[PATH_MAX];
     struct stat before, donor_st, after;
-    if (links != 2 ||
+    bool have_train_donor = false;
+    if (links < 2 ||
         snprintf(target, sizeof(target), "%s/%s", repair->dirs->wt,
                  relative) >= (int)sizeof(target) ||
         snprintf(donor, sizeof(donor), "%s/%s", repair->row->worktree,
                  relative) >= (int)sizeof(donor) ||
-        !realpath(target, target_real) || !realpath(donor, donor_real) ||
-        strcmp(target_real, donor_real) == 0 ||
+        !realpath(target, target_real) ||
         lstat(target, &before) != 0 || !S_ISREG(before.st_mode) ||
-        before.st_nlink != 2 || lstat(donor, &donor_st) != 0 ||
-        !dl_same_file_snapshot(&before, &donor_st)) {
+        before.st_nlink != links) {
+        (void)snprintf(repair->why, repair->why_cap,
+                       "proof_generation_dependency_unexplained_links:%s",
+                       relative);
+        return false;
+    }
+    if (realpath(donor, donor_real) &&
+        strcmp(target_real, donor_real) != 0 &&
+        lstat(donor, &donor_st) == 0 &&
+        dl_same_file_snapshot(&before, &donor_st))
+        have_train_donor = true;
+
+    char partners[DL_DEPENDENCY_POOL_PARTNER_MAX][4096 + 96];
+    size_t partner_count = 0;
+    bool scan_ok =
+        dl_generation_pool_scan(repair->disk_gen_parent, relative, &before,
+                                target_real, partners, &partner_count) &&
+        (!repair->has_ram_gen_parent ||
+         dl_generation_pool_scan(repair->ram_gen_parent, relative, &before,
+                                 target_real, partners, &partner_count));
+
+    size_t accounted = (have_train_donor ? (size_t)1 : (size_t)0) +
+                       partner_count;
+    if (!scan_ok || accounted + 1 != links) {
         (void)snprintf(repair->why, repair->why_cap,
                        "proof_generation_dependency_unexplained_links:%s",
                        relative);
@@ -3180,16 +3293,42 @@ static bool dl_dependency_repair_one(const char *relative, uint64_t links,
     }
     if (!repair->apply)
         return true;
-    if (!dl_materialize_file(target, target, &before, donor) ||
+    const char *alias =
+        have_train_donor ? donor : (partner_count > 0 ? partners[0] : NULL);
+    if (!alias ||
+        !dl_materialize_file(target, target, &before, alias) ||
         lstat(target, &after) != 0 || !S_ISREG(after.st_mode) ||
         after.st_nlink != 1 || dl_same_inode(&before, &after) ||
-        !dl_same_copy_metadata(&before, &after) ||
-        lstat(donor, &donor_st) != 0 || donor_st.st_nlink != 1 ||
-        !dl_same_inode(&before, &donor_st)) {
+        !dl_same_copy_metadata(&before, &after)) {
         (void)snprintf(repair->why, repair->why_cap,
                        "proof_generation_dependency_repair_failed:%s",
                        relative);
         return false;
+    }
+    /* Every name that explained this link must still be exactly the
+     * pre-repair inode, now missing only the name just replaced. */
+    uint64_t expected_remaining = links - 1;
+    if (have_train_donor) {
+        struct stat recheck;
+        if (lstat(donor, &recheck) != 0 ||
+            (uint64_t)recheck.st_nlink != expected_remaining ||
+            !dl_same_inode(&before, &recheck)) {
+            (void)snprintf(repair->why, repair->why_cap,
+                           "proof_generation_dependency_repair_failed:%s",
+                           relative);
+            return false;
+        }
+    }
+    for (size_t i = 0; i < partner_count; i++) {
+        struct stat recheck;
+        if (lstat(partners[i], &recheck) != 0 ||
+            (uint64_t)recheck.st_nlink != expected_remaining ||
+            !dl_same_inode(&before, &recheck)) {
+            (void)snprintf(repair->why, repair->why_cap,
+                           "proof_generation_dependency_repair_failed:%s",
+                           relative);
+            return false;
+        }
     }
     repair->repaired++;
     return true;
@@ -3210,6 +3349,7 @@ static bool dl_wt_dependency_links_repair(const struct dl_dirs *d,
     struct dl_dependency_repair repair = {
         .dirs = d, .row = r, .why = why, .why_cap = why_cap,
     };
+    dl_generation_roots_compute(d, &repair);
     struct zcl_dependency_link_stats stats;
     char scan_why[4096];
     why[0] = '\0';

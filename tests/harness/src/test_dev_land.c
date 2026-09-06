@@ -1881,6 +1881,106 @@ int test_dev_land(void)
         PASS();
     }
 
+    TEST("land: a dependency link whose only extra name sits in the "
+        "leaf's own generation pool is repaired, not refused") {
+        struct dlx_rig rig;
+        struct dlx_call c;
+        char wt[1200], check[1400], gendir[1400], genfile[1400];
+        char second[64], exclude[1400];
+        struct stat before_st, after_st, gen_st;
+        dlx_isolate("gendeplink");
+        ASSERT(dlx_rig_make(&rig, "gendeplink_rig"));
+        ASSERT(dlx_write_dep(rig.clone, "vendor/lib/libfoo.a", "fake\n"));
+        ASSERT(dlx_write_dep(rig.clone, "vendor/include/foo.h", "fake\n"));
+        ASSERT(dlx_write_dep(rig.clone, "vendor/tor/libtor.a", "fake\n"));
+        ASSERT(dlx_write_dep(
+            rig.clone,
+            "vendor/tor/src/ext/ed25519/donna/libed25519_donna.a",
+            "fake\n"));
+        ASSERT(dlx_write_dep(
+            rig.clone, "vendor/tor/src/ext/ed25519/ref10/libed25519_ref10.a",
+            "fake\n"));
+        ASSERT(dlx_write_dep(
+            rig.clone, "vendor/tor/src/ext/keccak-tiny/libkeccak-tiny.a",
+            "fake\n"));
+        ASSERT(dlx_write_dep(rig.clone,
+                             "build/hotswap/zcl_rollback_fixture_a.so",
+                             "fake\n"));
+        ASSERT(dlx_write_dep(rig.clone,
+                             "build/hotswap/zcl_rollback_fixture_b.so",
+                             "fake\n"));
+        setenv("ZCL_LAND_DEPS_TEST_FORCE", "1", 1);
+        setenv("ZCL_LAND_PROOF_STUB", "running", 1);
+        setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
+        dlx_submit(&c, &rig, rig.tip);
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        dlx_end(&c);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        ASSERT(strcmp(dlx_str(&c, "state"), "started") == 0);
+        dlx_end(&c);
+        setenv("ZCL_LAND_PROOF_STUB", "pass", 1);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        ASSERT(strcmp(dlx_str(&c, "state"), "landed") == 0);
+        dlx_end(&c);
+        /* The landing worktree now owns its own independent copy of
+         * vendor/lib/libfoo.a. Simulate the legacy state item A's fix
+         * leaves behind: an older binary once linked a proof generation's
+         * materialised copy straight from this exact file, so the two
+         * still share an inode -- but the OTHER name lives under this
+         * leaf's own disk generation pool (<land>/.z23p/<tag>/...), never
+         * under a foreign path, so it is this code's own link to explain
+         * and repair rather than a stranger's alias to refuse over. */
+        dlx_landdir(wt, sizeof(wt));
+        (void)snprintf(check, sizeof(check), "%s/wt/vendor/lib/libfoo.a", wt);
+        ASSERT(stat(check, &before_st) == 0 && before_st.st_nlink == 1);
+        (void)snprintf(gendir, sizeof(gendir),
+                       "%s/.z23p/0123456789abcdef0123456789abcdef/vendor/lib",
+                       wt);
+        ASSERT(dlx_mkdir_p(gendir));
+        (void)snprintf(genfile, sizeof(genfile), "%s/libfoo.a", gendir);
+        ASSERT(link(check, genfile) == 0);
+        ASSERT(stat(check, &before_st) == 0 && before_st.st_nlink == 2);
+        /* dlx_commit() runs `git add -A`; without excluding vendor/ and
+         * build/ here the untracked dependency fixtures would be staged
+         * and committed, and the landing worktree's later checkout of
+         * that commit would overwrite `check` with a fresh blob before
+         * this repair ever runs -- silently discarding the very hardlink
+         * this test exists to exercise. */
+        (void)snprintf(exclude, sizeof(exclude), "%s/.git/info/exclude",
+                       rig.clone);
+        ASSERT(dlx_write(exclude, "vendor/\nbuild/\n"));
+        ASSERT(dlx_commit(rig.clone, "second.txt", "two\n", second));
+        setenv("ZCL_LAND_PROOF_STUB", "running", 1);
+        dlx_submit(&c, &rig, second);
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        dlx_end(&c);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        /* Repaired, not refused: the attempt proceeds past worktree_deps. */
+        ASSERT(strcmp(dlx_str(&c, "state"), "started") == 0);
+        dlx_end(&c);
+        ASSERT(stat(check, &after_st) == 0 && S_ISREG(after_st.st_mode));
+        ASSERT(after_st.st_nlink == 1);
+        ASSERT(before_st.st_dev != after_st.st_dev ||
+              before_st.st_ino != after_st.st_ino);
+        /* The generation pool's own copy is untouched: same inode as
+         * before, now missing only the landing worktree's name. */
+        ASSERT(stat(genfile, &gen_st) == 0 && S_ISREG(gen_st.st_mode));
+        ASSERT(gen_st.st_nlink == 1);
+        ASSERT(gen_st.st_dev == before_st.st_dev &&
+              gen_st.st_ino == before_st.st_ino);
+        unsetenv("ZCL_LAND_DEPS_TEST_FORCE");
+        dlx_restore();
+        PASS();
+    }
+
     TEST("land: a proof-generation dependency missing from the submitting "
         "checkout too refuses by name instead of proceeding") {
         struct dlx_rig rig;
