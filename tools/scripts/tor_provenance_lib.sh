@@ -34,6 +34,7 @@ zcl_tor_provenance_ensure_bin() {
     if ! "$cc" -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
             -D_POSIX_C_SOURCE=200809L \
             -I"$root/contexts/commons/packages/zsha256/include" \
+            -I"$root/platform/modules/base/include" \
             -o "$bin" "$src1" "$src2"; then
         echo "tor-provenance: could not build $bin with $cc" >&2
         return 1
