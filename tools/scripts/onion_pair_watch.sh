@@ -617,7 +617,9 @@ fi
 echo "rpc_a_ready_s=$(elapsed)"
 
 STAGE=onion
-onion_deadline=$(( $(now_s) + ONION_WAIT ))
+onion_start=$(now_s)
+onion_deadline=$(( onion_start + ONION_WAIT ))
+onion_progress_last=$onion_start
 while [ "$(now_s)" -lt "$onion_deadline" ]; do
     if [ -n "$ISO_NODE_PID" ] && ! kill -0 "$ISO_NODE_PID" 2>/dev/null; then
         VERDICT=SPAWN_A_FAILED
@@ -627,6 +629,11 @@ while [ "$(now_s)" -lt "$onion_deadline" ]; do
     fi
     if read_onion_hostname; then
         break
+    fi
+    now_onion=$(now_s)
+    if [ $((now_onion - onion_progress_last)) -ge 30 ]; then
+        echo "pair-watch: waiting onion $((now_onion - onion_start))s/${ONION_WAIT}s" >&2
+        onion_progress_last=$now_onion
     fi
     sleep 1
 done
@@ -674,7 +681,9 @@ fi
 echo "spawned B pid=$ISO_PEER_PID p2p=$ISO_PEER_PORT bootstrap_only=true"
 
 STAGE=rpc_b
-peer_deadline=$(( $(now_s) + RPC_WAIT ))
+peer_start=$(now_s)
+peer_deadline=$(( peer_start + RPC_WAIT ))
+peer_progress_last=$peer_start
 peer_ready=0
 while [ "$(now_s)" -lt "$peer_deadline" ]; do
     if [ -n "$ISO_PEER_PID" ] && ! kill -0 "$ISO_PEER_PID" 2>/dev/null; then
@@ -686,6 +695,11 @@ while [ "$(now_s)" -lt "$peer_deadline" ]; do
             peer_ready=1
             break
         fi
+    fi
+    now_peer=$(now_s)
+    if [ $((now_peer - peer_progress_last)) -ge 30 ]; then
+        echo "pair-watch: waiting rpc_b $((now_peer - peer_start))s/${RPC_WAIT}s" >&2
+        peer_progress_last=$now_peer
     fi
     sleep 0.5
 done
@@ -702,7 +716,9 @@ echo "rpc_b_ready_s=$(elapsed)"
 # bounded public-network allowance; this wait does not start or retry a
 # dynhost stream, so no circuit budget is spent before the descriptor exists.
 STAGE=ready
-ready_deadline=$(( $(now_s) + PAIR_POLL ))
+ready_start=$(now_s)
+ready_deadline=$(( ready_start + PAIR_POLL ))
+ready_progress_last=$ready_start
 while [ "$(now_s)" -lt "$ready_deadline" ]; do
     if [ -n "$ISO_NODE_PID" ] && ! kill -0 "$ISO_NODE_PID" 2>/dev/null; then
         VERDICT=SPAWN_A_FAILED
@@ -720,6 +736,11 @@ while [ "$(now_s)" -lt "$ready_deadline" ]; do
     if [ "$DESCRIPTOR_UPLOADED" = true ] &&
        [ "$CLIENT_TOR_READY" = true ]; then
         break
+    fi
+    now_ready=$(now_s)
+    if [ $((now_ready - ready_progress_last)) -ge 30 ]; then
+        echo "pair-watch: waiting ready $((now_ready - ready_start))s/${PAIR_POLL}s" >&2
+        ready_progress_last=$now_ready
     fi
     sleep 2
 done
@@ -746,7 +767,9 @@ observe_stages
 
 # ── poll getconnectioncount and exact framing stages
 STAGE=pair
-poll_deadline=$(( $(now_s) + PAIR_POLL ))
+poll_start=$(now_s)
+poll_deadline=$(( poll_start + PAIR_POLL ))
+poll_progress_last=$poll_start
 while [ "$(now_s)" -lt "$poll_deadline" ]; do
     if [ -n "$ISO_NODE_PID" ] && ! kill -0 "$ISO_NODE_PID" 2>/dev/null; then
         observe_stages
@@ -768,6 +791,11 @@ while [ "$(now_s)" -lt "$poll_deadline" ]; do
         PAIRED=1
         PAIRED_AT_S=$(elapsed)
         break
+    fi
+    now_poll=$(now_s)
+    if [ $((now_poll - poll_progress_last)) -ge 30 ]; then
+        echo "pair-watch: waiting pair $((now_poll - poll_start))s/${PAIR_POLL}s" >&2
+        poll_progress_last=$now_poll
     fi
     sleep 2
 done
