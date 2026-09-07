@@ -127,11 +127,11 @@ Z23_FLAG("ZCL_AGENT_TEST_SCENARIOS_DIR", "env_runtime", "-", "-",
 Z23_FLAG("ZCL_AGENT_TEST_STATUS_DIR", "env_runtime", "-", "-",
           "first use cognition/controllers/src/agent_test_controller.c:112; documented at docs/work/os-substrate-plan.md:236: when ZCL_AGENT_TEST_STATUS_DIR is unset — outside any datadir grant.")
 Z23_FLAG("ZCL_AIRSHIP_DEF", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_fleet_airship_rules.sh:30")
+          "undocumented; first use tools/lint/lintc/gate_fleet_airship_rules.c:138")
 Z23_FLAG("ZCL_AIRSHIP_FLOOR", "env_build", "5", "-",
-          "undocumented; first use tools/lint/check_fleet_airship_rules.sh:32")
+          "undocumented; first use tools/lint/lintc/gate_fleet_airship_rules.c:154")
 Z23_FLAG("ZCL_AIRSHIP_ROOT", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_fleet_airship_rules.sh:29")
+          "undocumented; first use tools/lint/lintc/gate_fleet_airship_rules.c:130")
 Z23_FLAG("ZCL_ALERTS_DISABLE", "env_runtime", "-", "-",
           "undocumented; first use engine/modules/event/src/alerts.c:277")
 Z23_FLAG("ZCL_ALERT_WEBHOOK_URL", "env_runtime", "-", "-",
@@ -2081,15 +2081,15 @@ Z23_FLAG("ZCL_SOAK_UNIT", "env_build", "zclassic23", "-",
 Z23_FLAG("ZCL_SOURCE_AUTHORITIES", "env_build", "-", "-",
           "undocumented; first use tools/lint/check_clang_portability.sh:296")
 Z23_FLAG("ZCL_SOURCE_AUTHORITY_BASELINE", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_source_identity_authority.sh:216")
+          "undocumented; first use tools/lint/lintc/gate_source_identity_authority.c:208")
 Z23_FLAG("ZCL_SOURCE_AUTHORITY_CEILING", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_source_identity_authority.sh:219")
+          "undocumented; first use tools/lint/lintc/gate_source_identity_authority.c:214")
 Z23_FLAG("ZCL_SOURCE_AUTHORITY_FILE_FLOOR", "env_build", "5", "-",
-          "undocumented; first use tools/lint/check_source_identity_authority.sh:230")
+          "undocumented; first use tools/lint/lintc/gate_source_identity_authority.c:215")
 Z23_FLAG("ZCL_SOURCE_AUTHORITY_MAKEFILE", "env_build", "Makefile", "-",
-          "undocumented; first use tools/lint/check_source_identity_authority.sh:218")
+          "undocumented; first use tools/lint/lintc/gate_source_identity_authority.c:212")
 Z23_FLAG("ZCL_SOURCE_AUTHORITY_SCAN_ROOT", "env_build", "tools", "-",
-          "undocumented; first use tools/lint/check_source_identity_authority.sh:217")
+          "undocumented; first use tools/lint/lintc/gate_source_identity_authority.c:210")
 Z23_FLAG("ZCL_SOURCE_IDENTITY_BATCH_DISABLE", "env_build", "0", "-",
           "undocumented; first use tools/dev/source-identity.sh:50")
 Z23_FLAG("ZCL_SOURCE_IDENTITY_BATCH_SHADOW", "env_build", "0", "-",
