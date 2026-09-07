@@ -134,6 +134,10 @@ static const struct lint_gate k_gates[] = {
       check_model_column_drift_selftest },
     { "check-thread-supervision", check_thread_supervision_run,
       check_thread_supervision_selftest },
+    { "check-model-validation", check_model_validation_run,
+      check_model_validation_selftest },
+    { "check-lag-slo-observable", check_lag_slo_observable_run,
+      check_lag_slo_observable_selftest },
 };
 
 int main(int argc, char **argv)

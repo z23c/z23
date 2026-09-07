@@ -320,5 +320,9 @@ int check_model_column_drift_run(int argc, char **argv);
 int check_model_column_drift_selftest(void);
 int check_thread_supervision_run(int argc, char **argv);
 int check_thread_supervision_selftest(void);
+int check_model_validation_run(int argc, char **argv);
+int check_model_validation_selftest(void);
+int check_lag_slo_observable_run(int argc, char **argv);
+int check_lag_slo_observable_selftest(void);
 
 #endif

@@ -5333,6 +5333,7 @@ LINTC_SRCS = tools/lint/lintc/lib.c tools/lint/lintc/gate_boot_wiring.c tools/li
     tools/lint/lintc/gate_thread_supervision.c \
     tools/lint/lintc/gate_thread_supervision_scan.c \
     tools/lint/lintc/gate_thread_supervision_workers.c \
+    tools/lint/lintc/gate_call_presence_fences.c \
     tools/lint/lintc/main.c
 LINTC_OBJS = $(LINTC_SRCS:tools/lint/lintc/%.c=build/lintc-obj/%.o)
 # Apple Clang enables -Wunused-but-set-variable under -Wextra -Werror for
@@ -11589,7 +11590,7 @@ check-pthread-create: $(LINTC_TOOL)
 # from engine/models/include/models/activerecord.h, or carries an
 # ar-validate-skip:<tag> marker explaining why the AR validation
 # lifecycle does not apply (infrastructure wrapper, registry, etc.).
-check-model-validation:
+check-model-validation: $(LINTC_TOOL)
 	@echo "══ LINT: model validation coverage ══"
 	@./tools/scripts/check_model_validation.sh
 
@@ -11704,7 +11705,7 @@ check-rpc-registrar:
 # EV_LAG_SLO_BREACH and EV_MIRROR_CONCURRENT_CATCHUP, and the
 # chain_advance_coordinator must honor mirror_lag_sla_breach_blocks.
 # Prevents the "silent lag" regression we shipped this gate to lock down.
-check-lag-slo-observable:
+check-lag-slo-observable: $(LINTC_TOOL)
 	@echo "══ LINT: lag SLO observability ══"
 	@./tools/scripts/check_lag_slo_observable.sh
 
