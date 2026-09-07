@@ -102,7 +102,6 @@ int lint_filter_excluded(const char *in, char *out, size_t cap);
 int lint_path_is_excluded(const char *path);
 int excl_ensure(void);
 int lint_prod_scan(void);
-int lint_git_index_foreach(int (*fn)(const char *path, void *ctx), void *ctx);
 int rs_init(void);
 int repo_shape_dirs(const char *family, const char *leaf,
                     char out[][RS_PATH], int max, int *n);

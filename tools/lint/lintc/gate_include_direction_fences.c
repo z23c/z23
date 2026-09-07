@@ -101,8 +101,10 @@ static int idf_add(struct idf_set *s, const char *path)
     return 0;
 }
 
-static int idf_on_index(const char *path, void *ctx)
+static int idf_on_index(const char *path, int stage, void *ctx)
 {
+    if (stage != 0)
+        return 0;
     struct idf_collect *c = ctx;
     if (idf_is_test(path) || !idf_src(path, c->inc))
         return 0;
@@ -154,6 +156,29 @@ static int idf_walk(const char *dir, struct idf_collect *c)
     return rc;
 }
 
+/* The shared native git-index reader refuses a mandatory extension it does
+ * not interpret by naming it in badext: reading past one could silently
+ * yield a PARTIAL file list (a split index's shared entries, a sparse
+ * directory's collapsed trees), so this gate refuses to grade rather than
+ * pass on a short list. Same message shape as the other index gates. */
+static int idf_from_index(struct idf_collect *c)
+{
+    char badext[5] = "";
+    int rc = lint_git_index_foreach(idf_on_index, c, badext);
+    if (badext[0]) {
+        fprintf(stderr,
+                "z23-lint: UNPROVEN — the git index carries a mandatory\n"
+                "  extension ('%s') this native reader does not interpret;\n"
+                "  reading past it could silently yield a PARTIAL file\n"
+                "  list. Refusing to grade. Re-create the index without\n"
+                "  split-index/sparse extensions, or teach\n"
+                "  lint_git_index_foreach the extension first.\n",
+                badext);
+        return 2;
+    }
+    return rc;
+}
+
 /* Production scan: git-tracked files only, via the index (fast, no directory
  * traversal) — an unread or refused index is UNPROVEN 2, same as any other
  * production-mode gate. Full/dev scan (the default, and what every fixture
@@ -166,7 +191,7 @@ static int idf_collect(struct idf_collect *c)
 {
     int rc, i;
     if (lint_prod_scan())
-        return lint_git_index_foreach(idf_on_index, c);
+        return idf_from_index(c);
     rc = 0;
     for (i = 0; rc == 0 && i < c->nroots; i++)
         rc = idf_walk(c->roots[i], c);
