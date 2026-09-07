@@ -85,6 +85,9 @@ see below). Every field is signed.
 | `host` | the node's own Ed25519 public key |
 | `signature` | Ed25519 over the id, under the domain `zcl.fleet_board_post.sig.v1` |
 
+The storage table admits kinds 1..64; the node refuses kinds it does not
+know.
+
 Posts signed before the `scope` field existed carry the v1 canonical body; a
 v1 body decodes as a legacy public post with an empty room, which reads as
 room `general`. Because the scope selects the body's schema, a v1 post keeps

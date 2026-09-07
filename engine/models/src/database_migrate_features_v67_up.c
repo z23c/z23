@@ -15,17 +15,21 @@ static bool mesh_capability_v79_present(struct node_db *ndb)
                SQLITE_OK;
 }
 
-/* v82 step 1: rebuild `fleet_board_posts` with `kind` widened to admit 8
- * (`agents`). SQLite cannot widen an existing CHECK constraint with ALTER
- * TABLE, so this creates a sibling table with the exact v80/v81 columns and
- * constraints, copies every row, then swaps it in under the old name. */
+/* v82 step 1: rebuild `fleet_board_posts` with `kind` widened to admit 1..64,
+ * far past today's 8 known kinds (through `agents`), so a future kind never
+ * forces another one-way table rebuild. The C layer stays the real gate: rows
+ * outside the known enum are still refused before they ever reach SQL by
+ * fleet_board_post_validate()'s FLEET_BOARD_ERR_KIND check. SQLite cannot
+ * widen an existing CHECK constraint with ALTER TABLE, so this creates a
+ * sibling table with the exact v80/v81 columns and constraints, copies every
+ * row, then swaps it in under the old name. */
 static int db_migrate_v82_rebuild_table(struct node_db *ndb)
 {
     if (!node_db_exec(ndb,
             "CREATE TABLE fleet_board_posts_v82("
             "id BLOB PRIMARY KEY CHECK(length(id)=32),"
             "seq INTEGER NOT NULL,"
-            "kind INTEGER NOT NULL CHECK(kind BETWEEN 1 AND 8),"
+            "kind INTEGER NOT NULL CHECK(kind BETWEEN 1 AND 64),"
             "created_at INTEGER NOT NULL CHECK(created_at>0),"
             "ttl INTEGER NOT NULL CHECK(ttl BETWEEN 1 AND 2592000),"
             "expires_at INTEGER NOT NULL CHECK(expires_at>created_at),"

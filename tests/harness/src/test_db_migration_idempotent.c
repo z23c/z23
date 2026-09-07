@@ -11,6 +11,9 @@
 
 #include "test/test_core.h"
 #include "models/database.h"
+#include "models/fleet_board_post.h"
+#include "session/fleet_board_proto.h"
+#include "crypto/ed25519.h"
 #include "sha3/sha3.h"
 
 #include <dirent.h>
@@ -414,6 +417,189 @@ static bool db_mig_seed_v20_wallet_notes_db(const char *dbpath)
         "VALUES(X'01',0,42,X'02',X'03',X'04',X'05',X'06',"
         "X'07',100,'zs-v20-note',100)");
     sqlite3_close(raw);
+    return ok;
+}
+
+/* v81-shaped `fleet_board_posts`: the exact v80 CREATE TABLE plus the v81 ADD
+ * COLUMNs, byte for byte, so seeding this and stamping schema_version=81
+ * reproduces what a real fleet node's board table looked like the moment
+ * before the v82 kind-ceiling rebuild ever ran. */
+static bool db_mig_seed_v81_board_schema(sqlite3 *raw)
+{
+    bool ok = true;
+    ok = ok && db_mig_exec_raw(raw,
+        "CREATE TABLE node_state (key TEXT PRIMARY KEY,value BLOB)");
+    ok = ok && db_mig_exec_raw(raw,
+        "INSERT INTO node_state(key,value) "
+        "VALUES('schema_version',X'51000000')"); /* 81, little-endian */
+    ok = ok && db_mig_exec_raw(raw,
+        "CREATE TABLE fleet_board_posts("
+        "id BLOB PRIMARY KEY CHECK(length(id)=32),"
+        "seq INTEGER NOT NULL,"
+        "kind INTEGER NOT NULL CHECK(kind BETWEEN 1 AND 7),"
+        "created_at INTEGER NOT NULL CHECK(created_at>0),"
+        "ttl INTEGER NOT NULL CHECK(ttl BETWEEN 1 AND 2592000),"
+        "expires_at INTEGER NOT NULL CHECK(expires_at>created_at),"
+        "ref BLOB NOT NULL CHECK(length(ref)=32),"
+        "host_pubkey BLOB NOT NULL CHECK(length(host_pubkey)=32),"
+        "agent TEXT NOT NULL CHECK(length(agent)<=64),"
+        "slug TEXT NOT NULL CHECK(length(slug)<=64),"
+        "title TEXT NOT NULL CHECK(length(title)<=128),"
+        "supersedes BLOB NOT NULL CHECK(length(supersedes)=32),"
+        "receipt TEXT NOT NULL CHECK(length(receipt)<=256),"
+        "text TEXT NOT NULL CHECK(length(text) BETWEEN 1 AND 16384),"
+        "body_bytes INTEGER NOT NULL CHECK(body_bytes BETWEEN 1 AND 17408),"
+        "signature BLOB NOT NULL CHECK(length(signature)=64),"
+        "chain_prev BLOB NOT NULL CHECK(length(chain_prev)=32),"
+        "chain_hash BLOB NOT NULL CHECK(length(chain_hash)=32),"
+        "received_at INTEGER NOT NULL CHECK(received_at>=0),"
+        "scope INTEGER NOT NULL DEFAULT 0 CHECK(scope BETWEEN 0 AND 2),"
+        "room TEXT NOT NULL DEFAULT '' CHECK(length(room)<=32))");
+    ok = ok && db_mig_exec_raw(raw,
+        "CREATE UNIQUE INDEX idx_fleet_board_seq ON fleet_board_posts(seq)");
+    return ok;
+}
+
+/* One deterministic row per kind, so the same formula both writes the seed
+ * row and checks the row read back after migration without duplicating the
+ * expected bytes in two places. */
+static void db_mig_board_row_fill(int kind, uint8_t id[32], uint8_t ref[32],
+                                  uint8_t host_pubkey[32],
+                                  uint8_t supersedes[32], uint8_t sig[64],
+                                  uint8_t chain_prev[32],
+                                  uint8_t chain_hash[32], char *agent,
+                                  size_t agent_cap, char *text,
+                                  size_t text_cap)
+{
+    memset(id, (uint8_t)(0x10 + kind), 32);
+    memset(ref, (uint8_t)(0x20 + kind), 32);
+    memset(host_pubkey, (uint8_t)(0x30 + kind), 32);
+    memset(supersedes, 0, 32);
+    memset(sig, (uint8_t)(0x40 + kind), 64);
+    memset(chain_prev, (uint8_t)(0x50 + kind), 32);
+    memset(chain_hash, (uint8_t)(0x60 + kind), 32);
+    snprintf(agent, agent_cap, "seed-agent-%d", kind);
+    snprintf(text, text_cap, "seed row for kind %d, byte-identical after v82",
+             kind);
+}
+
+static bool db_mig_seed_v81_board_row(sqlite3 *raw, int kind)
+{
+    uint8_t id[32], ref[32], host_pubkey[32], supersedes[32], sig[64];
+    uint8_t chain_prev[32], chain_hash[32];
+    char agent[32], text[96];
+    db_mig_board_row_fill(kind, id, ref, host_pubkey, supersedes, sig,
+                          chain_prev, chain_hash, agent, sizeof(agent), text,
+                          sizeof(text));
+    int64_t now = 500000 + kind;
+    size_t text_len = strlen(text);
+
+    sqlite3_stmt *st = NULL;
+    const char *sql =
+        "INSERT INTO fleet_board_posts(id,seq,kind,created_at,ttl,"
+        "expires_at,ref,host_pubkey,agent,slug,title,supersedes,receipt,"
+        "text,body_bytes,signature,chain_prev,chain_hash,received_at,"
+        "scope,room) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)";
+    if (sqlite3_prepare_v2(raw, sql, -1, &st, NULL) != SQLITE_OK)
+        return false;
+    sqlite3_bind_blob(st, 1, id, 32, SQLITE_TRANSIENT);
+    sqlite3_bind_int(st, 2, kind);
+    sqlite3_bind_int(st, 3, kind);
+    sqlite3_bind_int64(st, 4, now);
+    sqlite3_bind_int(st, 5, 3600);
+    sqlite3_bind_int64(st, 6, now + 3600);
+    sqlite3_bind_blob(st, 7, ref, 32, SQLITE_TRANSIENT);
+    sqlite3_bind_blob(st, 8, host_pubkey, 32, SQLITE_TRANSIENT);
+    sqlite3_bind_text(st, 9, agent, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(st, 10, "", -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(st, 11, "", -1, SQLITE_TRANSIENT);
+    sqlite3_bind_blob(st, 12, supersedes, 32, SQLITE_TRANSIENT);
+    sqlite3_bind_text(st, 13, "", -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(st, 14, text, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(st, 15, (int64_t)text_len);
+    sqlite3_bind_blob(st, 16, sig, 64, SQLITE_TRANSIENT);
+    sqlite3_bind_blob(st, 17, chain_prev, 32, SQLITE_TRANSIENT);
+    sqlite3_bind_blob(st, 18, chain_hash, 32, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(st, 19, now);
+    sqlite3_bind_int(st, 20, 0);
+    sqlite3_bind_text(st, 21, "", -1, SQLITE_TRANSIENT);
+    bool ok = sqlite3_step(st) == SQLITE_DONE;
+    sqlite3_finalize(st);
+    return ok;
+}
+
+/* Builds a v81-shaped board with one signed-shape row of every kind 1..7,
+ * exactly the non-empty table the v82 `INSERT ... SELECT *` row copy has
+ * never been proven against. */
+static bool db_mig_seed_v81_board_db(const char *dbpath)
+{
+    sqlite3 *raw = NULL;
+    if (sqlite3_open(dbpath, &raw) != SQLITE_OK)
+        return false;
+    bool ok = db_mig_seed_v81_board_schema(raw);
+    for (int kind = 1; ok && kind <= 7; kind++)
+        ok = db_mig_seed_v81_board_row(raw, kind);
+    sqlite3_close(raw);
+    return ok;
+}
+
+/* One expected blob column: which SELECT column, and the bytes it must
+ * hold. Table-driving the blob comparisons keeps the caller's decision
+ * count low no matter how many columns a row copy needs proven. */
+struct db_mig_blob_want {
+    int col;
+    const uint8_t *want;
+    int len;
+};
+
+static bool db_mig_row_blobs_match(sqlite3_stmt *st,
+                                   const struct db_mig_blob_want *checks,
+                                   size_t n)
+{
+    for (size_t i = 0; i < n; i++) {
+        if (sqlite3_column_bytes(st, checks[i].col) != checks[i].len)
+            return false;
+        if (memcmp(sqlite3_column_blob(st, checks[i].col), checks[i].want,
+                   (size_t)checks[i].len) != 0)
+            return false;
+    }
+    return true;
+}
+
+/* Reads the row for `kind` back and compares every migrated byte against the
+ * same formula the seed used, proving the v82 rebuild's row copy is lossless
+ * rather than merely row-count-preserving. */
+static bool db_mig_board_row_matches(sqlite3 *raw, int kind)
+{
+    uint8_t want_id[32], want_ref[32], want_host[32], want_super[32];
+    uint8_t want_sig[64], want_prev[32], want_hash[32];
+    char want_agent[32], want_text[96];
+    db_mig_board_row_fill(kind, want_id, want_ref, want_host, want_super,
+                          want_sig, want_prev, want_hash, want_agent,
+                          sizeof(want_agent), want_text, sizeof(want_text));
+
+    sqlite3_stmt *st = NULL;
+    const char *sql =
+        "SELECT id,ref,host_pubkey,supersedes,signature,chain_prev,"
+        "chain_hash,agent,text,kind FROM fleet_board_posts WHERE kind=?";
+    if (sqlite3_prepare_v2(raw, sql, -1, &st, NULL) != SQLITE_OK)
+        return false;
+    sqlite3_bind_int(st, 1, kind);
+    if (sqlite3_step(st) != SQLITE_ROW) {
+        sqlite3_finalize(st);
+        return false;
+    }
+    const struct db_mig_blob_want checks[] = {
+        {0, want_id, 32},   {1, want_ref, 32},  {2, want_host, 32},
+        {3, want_super, 32}, {4, want_sig, 64},  {5, want_prev, 32},
+        {6, want_hash, 32},
+    };
+    bool ok = db_mig_row_blobs_match(st, checks,
+                                     sizeof(checks) / sizeof(checks[0])) &&
+        strcmp((const char *)sqlite3_column_text(st, 7), want_agent) == 0 &&
+        strcmp((const char *)sqlite3_column_text(st, 8), want_text) == 0 &&
+        sqlite3_column_int(st, 9) == kind;
+    sqlite3_finalize(st);
     return ok;
 }
 
@@ -987,6 +1173,86 @@ static int t_v29_incompatible_schema_fails_without_stamp(void)
     return failures;
 }
 
+static int t_v82_board_kind_ceiling_row_copy_is_lossless(void)
+{
+    int failures = 0;
+    char dir[256];
+    db_mig_path(dir, sizeof(dir), "v82_board_copy");
+    mkdir_p(dir);
+    char dbpath[512];
+    snprintf(dbpath, sizeof(dbpath), "%s/node.db", dir);
+
+    TEST("db_mig: v82 board rebuild copies every v81 row byte-identical") {
+        ASSERT(db_mig_seed_v81_board_db(dbpath));
+
+        sqlite3 *before = NULL;
+        ASSERT(sqlite3_open(dbpath, &before) == SQLITE_OK);
+        int before_count =
+            db_mig_count(before, "SELECT count(*) FROM fleet_board_posts");
+        sqlite3_close(before);
+        printf("db_mig: v82 row copy before count = %d\n", before_count);
+        ASSERT_EQ(before_count, 7);
+
+        struct node_db ndb;
+        ASSERT(node_db_open(&ndb, dbpath));
+        ASSERT_EQ(node_db_schema_version(&ndb), NODE_DB_SCHEMA_LATEST);
+        node_db_close(&ndb);
+
+        sqlite3 *after = NULL;
+        ASSERT(sqlite3_open(dbpath, &after) == SQLITE_OK);
+        int after_count =
+            db_mig_count(after, "SELECT count(*) FROM fleet_board_posts");
+        printf("db_mig: v82 row copy after count = %d\n", after_count);
+        ASSERT_EQ(after_count, 7);
+        for (int kind = 1; kind <= 7; kind++)
+            ASSERT(db_mig_board_row_matches(after, kind));
+        sqlite3_close(after);
+
+        /* Post-migration, a fresh kind-8 (`agents`) row must still write and
+         * read back through the real ingest path: the widened CHECK admits
+         * it, and fleet_board_post_validate() remains the actual gate. */
+        struct node_db ndb2;
+        ASSERT(node_db_open(&ndb2, dbpath));
+        uint8_t seed[32], sk[32], pk[32];
+        memset(seed, 0, sizeof(seed));
+        seed[0] = 0x77;
+        ed25519_keypair(pk, sk, seed);
+
+        struct fleet_board_post agents_post;
+        memset(&agents_post, 0, sizeof(agents_post));
+        agents_post.kind = FLEET_BOARD_KIND_AGENTS;
+        agents_post.created_at = 600000;
+        agents_post.ttl = 3600;
+        snprintf(agents_post.agent, sizeof(agents_post.agent), "node-x");
+        const char *text = "v1|host=node-x|now=600000\n";
+        size_t text_len = strlen(text);
+        memcpy(agents_post.text, text, text_len);
+        agents_post.text[text_len] = '\0';
+        agents_post.text_len = (uint32_t)text_len;
+        agents_post.scope = FLEET_BOARD_SCOPE_FLEET;
+        ASSERT_EQ(fleet_board_post_sign(&agents_post, sk, pk), FLEET_BOARD_OK);
+
+        bool stored = false;
+        ASSERT_EQ(db_fleet_board_post_ingest(&ndb2, &agents_post, 600000,
+                                             &stored),
+                  FLEET_BOARD_OK);
+        ASSERT(stored);
+
+        struct fleet_board_filter filter;
+        memset(&filter, 0, sizeof(filter));
+        filter.kind = FLEET_BOARD_KIND_AGENTS;
+        filter.scope_set = true;
+        filter.scope = FLEET_BOARD_SCOPE_FLEET;
+        struct db_fleet_board_post rows[2];
+        ASSERT_EQ(db_fleet_board_list(&ndb2, &filter, 600000, rows, 2), 1);
+        ASSERT(strcmp(rows[0].post.text, text) == 0);
+        node_db_close(&ndb2);
+        PASS();
+    } _test_next:;
+    test_cleanup_tmpdir(dir);
+    return failures;
+}
+
 int test_db_migration_idempotent(void);
 
 int test_db_migration_idempotent(void)
@@ -1011,5 +1277,6 @@ int test_db_migration_idempotent(void)
     failures += t_existing_empty_database_may_initialize();
     failures += t_supported_current_schema_reopens_normally();
     failures += t_v29_incompatible_schema_fails_without_stamp();
+    failures += t_v82_board_kind_ceiling_row_copy_is_lossless();
     return failures;
 }

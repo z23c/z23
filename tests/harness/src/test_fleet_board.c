@@ -414,6 +414,39 @@ static int test_fleet_board_agents_kind(void)
     return failures;
 }
 
+static int test_fleet_board_kind_ceiling_refuses_unknown(void)
+{
+    int failures = 0;
+    TEST("fleet board: a kind past the known enum is refused, not admitted") {
+        /* The v82 table's SQL CHECK admits kind 1..64 so a future kind never
+         * forces another one-way schema bump, but the C layer stays the
+         * actual gate: any kind at or above FLEET_BOARD_KIND__COUNT (today,
+         * kind 9 and up) must never reach storage or a signed RPC write. */
+        uint8_t seed[32], pk[32];
+        fb_test_identity(5, seed, pk);
+        const int64_t now = 200000;
+
+        struct fleet_board_post bogus;
+        fb_test_compose(&bogus, FLEET_BOARD_KIND_AGENTS, "node1",
+                        "v1|host=node1|now=200000\n", (uint64_t)now, 3600);
+        bogus.kind = (uint8_t)(FLEET_BOARD_KIND__COUNT);
+        ASSERT_EQ(fleet_board_post_validate(&bogus), FLEET_BOARD_ERR_KIND);
+
+        /* Signing does not launder an unknown kind either: validate runs
+         * before storage regardless of whether the caller ever signs. */
+        struct node_db db;
+        memset(&db, 0, sizeof(db));
+        ASSERT(node_db_open(&db, ":memory:"));
+        bool stored = true;
+        ASSERT_EQ(db_fleet_board_post_ingest(&db, &bogus, now, &stored),
+                  FLEET_BOARD_ERR_KIND);
+        ASSERT(!stored);
+        node_db_close(&db);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_fleet_board_store_boundaries(void)
 {
     int failures = 0;
@@ -1545,6 +1578,7 @@ int test_fleet_board(void)
     failures += test_fleet_board_frames();
     failures += test_fleet_board_store();
     failures += test_fleet_board_agents_kind();
+    failures += test_fleet_board_kind_ceiling_refuses_unknown();
     failures += test_fleet_board_store_boundaries();
     failures += test_fleet_board_byte_boundary();
     failures += test_fleet_board_corrupt_reads();
