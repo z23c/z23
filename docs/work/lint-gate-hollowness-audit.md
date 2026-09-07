@@ -47,3 +47,34 @@ hollow only under a core-directory rename, which coincides with a build
 break; CI still catches them red without the loud-preflight pattern. A
 conservative "scanned 0 files → exit 2" preflight would still be cheap and
 defensive if any of them is touched.
+
+## Dead scan roots — the native (`tools/lint/lintc/`) equivalent
+
+The pattern above is for shell gates walking their scan set through a
+`find`/glob pipeline. The native C23 lint runtime's shared recursive walker,
+`walk_src()` (`tools/lint/lintc/lib.c`), has the identical hollowness risk
+one level down: it returns `0` on `ENOENT` so a directory that vanishes
+mid-recursion is not an error — but a gate's own literal, hardcoded TOP-level
+root silently going missing (a directory renamed out from under a gate that
+still names the old token) reads the exact same way: the loop just runs zero
+times and the gate reports "clean".
+
+Found 2026-09-06: a tree rename (`app lib config src domain application
+adapters` → `core engine contexts cognition platform tools`) left four
+gates scanning nothing but `tools/` and reporting false-clean over roughly
+4,000 unscanned production files (`check-malloc`, `check-pthread-create`,
+`check-proc-self-shim`, `check-hotswap-dev-only`), plus three more scanning
+a degraded subset of the real tree (`check-no-gnu-va-args`,
+`check-peer-floor-single-source`, `check-no-stray-untracked-source`). Fixed
+by `require_scan_root(gate, root)` / `walk_src_root(gate, root, hdrs, scan,
+ctx)` in `lib.c`: FATAL with `FATAL — scan root '<root>' does not exist
+(gate <name>)` the moment a gate's literal root is missing, rather than
+silently walking nothing. Every gate above was re-rooted onto the real
+production C tree (`core engine contexts cognition platform tools`) and now
+calls `walk_src_root()` instead of the unchecked `walk_src()`; debt the
+wider scan uncovered is pinned shrink-only in a per-gate
+`tools/lint/<gate>_baseline.txt`. Callers that already probe an optional or
+derived path themselves (`stat()`-check before walking, an env-overridable
+test fixture path, a runtime-supplied directory) keep calling `walk_src()`
+directly — see each such call site's own comment in `lib.c` and the gate
+files.
