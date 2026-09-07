@@ -5389,6 +5389,8 @@ LINTC_SRCS = tools/lint/lintc/lib.c tools/lint/lintc/gate_boot_wiring.c tools/li
     tools/lint/lintc/gate_no_unattended_publish.c \
     tools/lint/lintc/gate_hex_codec_single.c \
     tools/lint/lintc/gate_hex_codec_single_selftest.c \
+    tools/lint/lintc/gate_specialists.c \
+    tools/lint/lintc/gate_shell_host_assumptions.c \
     tools/lint/lintc/main.c
 LINTC_OBJS = $(LINTC_SRCS:tools/lint/lintc/%.c=build/lintc-obj/%.o)
 # Apple Clang enables -Wunused-but-set-variable under -Wextra -Werror for
@@ -11721,7 +11723,7 @@ check-persona-resolves: $(LINTC_TOOL)
 	@echo "══ LINT: every authored persona still resolves ══"
 	@./tools/lint/check_persona_resolves.sh
 
-check-specialists:
+check-specialists: $(LINTC_TOOL)
 	@echo "══ LINT: every specialist territory, gate and test group resolves ══"
 	@./tools/lint/check_specialists.sh --selftest
 	@./tools/lint/check_specialists.sh
@@ -12711,7 +12713,7 @@ check-pipefail-status-pipe:
 # Cross-host shell debt must only shrink.  The shared port helper is exercised
 # here too, so a fallback or fail-closed regression cannot hide behind an
 # unchanged spelling baseline.
-check-shell-host-assumptions:
+check-shell-host-assumptions: $(LINTC_TOOL)
 	@echo "══ LINT: Linux/GNU shell assumptions only shrink ══"
 	@./tools/lint/check_shell_host_assumptions.sh --selftest
 	@./tools/scripts/port_probe.sh --selftest

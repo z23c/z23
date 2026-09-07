@@ -419,5 +419,9 @@ int check_no_unattended_publish_run(int argc, char **argv);
 int check_no_unattended_publish_selftest(void);
 int check_hex_codec_single_run(int argc, char **argv);
 int check_hex_codec_single_selftest(void);
+int check_specialists_run(int argc, char **argv);
+int check_specialists_selftest(void);
+int check_shell_host_assumptions_run(int argc, char **argv);
+int check_shell_host_assumptions_selftest(void);
 
 #endif

@@ -231,6 +231,9 @@ static const struct lint_gate k_gates[] = {
       check_no_unattended_publish_selftest },
     { "check-hex-codec-single", check_hex_codec_single_run,
       check_hex_codec_single_selftest },
+    { "check-specialists", check_specialists_run, check_specialists_selftest },
+    { "check-shell-host-assumptions", check_shell_host_assumptions_run,
+      check_shell_host_assumptions_selftest },
 };
 
 int main(int argc, char **argv)
