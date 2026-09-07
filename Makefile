@@ -5407,6 +5407,9 @@ LINTC_SRCS = tools/lint/lintc/lib.c tools/lint/lintc/gate_boot_wiring.c tools/li
     tools/lint/lintc/gate_byte_order_codec_single_selftest.c \
     tools/lint/lintc/gate_hotswap_swappable_shape.c \
     tools/lint/lintc/gate_no_snapshot_struct_memcmp.c \
+    tools/lint/lintc/gate_remote_command_classes.c \
+    tools/lint/lintc/gate_remote_command_classes_parse.c \
+    tools/lint/lintc/gate_remote_command_classes_selftest.c \
     tools/lint/lintc/main.c
 LINTC_OBJS = $(LINTC_SRCS:tools/lint/lintc/%.c=build/lintc-obj/%.o)
 # Apple Clang enables -Wunused-but-set-variable under -Wextra -Werror for
@@ -11164,7 +11167,7 @@ check-hotswap-denied-leaves: $(LINTC_TOOL)
 # table. No baseline: the tree is clean, and a baseline here would only be
 # somewhere to hide the next omission. --selftest runs first and proves the gate
 # fires on each defect class.
-check-remote-command-classes:
+check-remote-command-classes: $(LINTC_TOOL)
 	@echo "══ LINT: remote command classes ══"
 	@./tools/lint/check_remote_command_classes.sh --selftest
 	@./tools/lint/check_remote_command_classes.sh

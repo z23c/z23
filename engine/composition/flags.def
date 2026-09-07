@@ -1763,11 +1763,11 @@ Z23_FLAG("ZCL_REMOTE_BRANCH", "env_build", "main", "-",
 Z23_FLAG("ZCL_REMOTE_BUILD", "env_build", "fast-rebuild", "-",
           "first use tools/scripts/remote_node_update.sh:222; documented at docs/AGENT_API.md:1377: ZCL_REMOTE_BUILD=none. Check it with make remote-status.")
 Z23_FLAG("ZCL_REMOTE_CLASS_AGENT_DEF", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_remote_command_classes.sh:103")
+          "undocumented; first use tools/lint/lintc/gate_remote_command_classes.c:359")
 Z23_FLAG("ZCL_REMOTE_CLASS_DEF_DIR", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_remote_command_classes.sh:102")
+          "undocumented; first use tools/lint/lintc/gate_remote_command_classes.c:357")
 Z23_FLAG("ZCL_REMOTE_CLASS_TABLE", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_remote_command_classes.sh:104")
+          "undocumented; first use tools/lint/lintc/gate_remote_command_classes.c:362")
 Z23_FLAG("ZCL_REMOTE_DRY_RUN", "env_build", "1", "-",
           "first use tools/scripts/remote_node_update.sh:112; documented at docs/AGENT_API.md:1345: ZCL_REMOTE_DRY_RUN=1 prints the host, branch, current HEAD,")
 Z23_FLAG("ZCL_REMOTE_GUARD_ACTION", "env_build", "-", "-",

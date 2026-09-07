@@ -247,6 +247,8 @@ static const struct lint_gate k_gates[] = {
       check_hotswap_swappable_shape_selftest },
     { "check-no-snapshot-struct-memcmp", check_no_snapshot_struct_memcmp_run,
       check_no_snapshot_struct_memcmp_selftest },
+    { "check-remote-command-classes", check_remote_command_classes_run,
+      check_remote_command_classes_selftest },
 };
 
 int main(int argc, char **argv)

@@ -435,5 +435,7 @@ int check_hotswap_swappable_shape_run(int argc, char **argv);
 int check_hotswap_swappable_shape_selftest(void);
 int check_no_snapshot_struct_memcmp_run(int argc, char **argv);
 int check_no_snapshot_struct_memcmp_selftest(void);
+int check_remote_command_classes_run(int argc, char **argv);
+int check_remote_command_classes_selftest(void);
 
 #endif
