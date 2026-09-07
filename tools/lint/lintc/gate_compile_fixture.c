@@ -90,6 +90,24 @@ static int avs_append(char *value, size_t cap, const char *tok)
     return 0;
 }
 
+static void avs_strip_eol(char *line, ssize_t n)
+{
+    if (n > 0 && (line[n - 1] == '\n' || line[n - 1] == '\r')) {
+        line[n - 1] = '\0';
+        if (n > 1 && line[n - 2] == '\r')
+            line[n - 2] = '\0';
+    }
+}
+
+static void avs_strip_slash(char *body)
+{
+    size_t L = strlen(body);
+    while (L && isspace((unsigned char)body[L - 1]))
+        L--;
+    if (L && body[L - 1] == '\\')
+        body[L - 1] = '\0';
+}
+
 static int avs_read_includes(const char *path, char *value, size_t cap)
 {
     value[0] = '\0';
@@ -108,18 +126,9 @@ static int avs_read_includes(const char *path, char *value, size_t cap)
             active = 1;
         }
         int cont = avs_continued(body);
-        if (n > 0 && (line[n - 1] == '\n' || line[n - 1] == '\r')) {
-            line[n - 1] = '\0';
-            if (n > 1 && line[n - 2] == '\r')
-                line[n - 2] = '\0';
-        }
-        if (cont) {
-            size_t L = strlen((char *)body);
-            while (L && isspace((unsigned char)body[L - 1]))
-                L--;
-            if (L && body[L - 1] == '\\')
-                ((char *)body)[L - 1] = '\0';
-        }
+        avs_strip_eol(line, n);
+        if (cont)
+            avs_strip_slash((char *)body);
         if (avs_append(value, cap, avs_trim((char *)body))) {
             rc = 2;
             break;
@@ -336,16 +345,16 @@ int check_arena_view_stub_run(int argc, char **argv)
     return rc ? rc : 1;
 }
 
-static int avs_selftest_body(const char *work, const char *includes)
+static int avs_selftest_prepare(const char *work, char *tdir, char *tu,
+                                char *stub, size_t cap)
 {
-    char tdir[4096], vdir[4096], tu[4096], stub[4096];
-    int rc, code, failed = 0;
-    if (ovf(snprintf(tdir, sizeof tdir, "%s/t", work), sizeof tdir)
+    char vdir[4096];
+    if (ovf(snprintf(tdir, cap, "%s/t", work), cap)
         || ovf(snprintf(vdir, sizeof vdir, "%s/vendor/typography", work),
                sizeof vdir)
-        || ovf(snprintf(tu, sizeof tu, "%s/t/arena_view.c", work), sizeof tu)
-        || ovf(snprintf(stub, sizeof stub, "%s/t/arena_view_raylib_stub.h", work),
-               sizeof stub))
+        || ovf(snprintf(tu, cap, "%s/t/arena_view.c", work), cap)
+        || ovf(snprintf(stub, cap, "%s/t/arena_view_raylib_stub.h", work),
+               cap))
         return 2;
     if (csr_mkdirs(tdir) || csr_mkdirs(vdir))
         return 2;
@@ -359,6 +368,13 @@ static int avs_selftest_body(const char *work, const char *includes)
         || avs_copy("vendor/typography/inter_semibold_ascii.inc", sdst)
         || avs_copy(k_avs_stub, stub))
         return 2;
+    return 0;
+}
+
+static int avs_selftest_fixture_copy(const char *tu, const char *tdir,
+                                     const char *includes, int *failed)
+{
+    int rc, code;
     rc = avs_stub_compile(tu, tdir, includes, &code);
     if (rc)
         return rc;
@@ -371,8 +387,16 @@ static int avs_selftest_body(const char *work, const char *includes)
               stderr);
         if (avs_prefix_log(avs_log))
             return 2;
-        failed = 1;
+        *failed = 1;
     }
+    return 0;
+}
+
+static int avs_selftest_dropped_decl(const char *tu, const char *tdir,
+                                     const char *stub, const char *includes,
+                                     int *failed)
+{
+    int rc, code;
     if (avs_drop_decl(k_avs_stub, stub, "LoadFontFromMemory", "codepointCount);"))
         return 2;
     rc = avs_stub_compile(tu, tdir, includes, &code);
@@ -381,7 +405,7 @@ static int avs_selftest_body(const char *work, const char *includes)
     if (code == 0) {
         fputs("SELFTEST FAIL: stub missing LoadFontFromMemory still compiled.\n",
               stderr);
-        failed = 1;
+        *failed = 1;
     } else if (strstr(avs_log, "LoadFontFromMemory")) {
         if (puts("  selftest ok: a dropped stub declaration is caught by name") < 0)
             return die("z23-lint: write failed\n", "");
@@ -390,8 +414,16 @@ static int avs_selftest_body(const char *work, const char *includes)
               stderr);
         if (avs_prefix_log(avs_log))
             return 2;
-        failed = 1;
+        *failed = 1;
     }
+    return 0;
+}
+
+static int avs_selftest_initwindow(const char *tu, const char *tdir,
+                                   const char *stub, const char *includes,
+                                   int *failed)
+{
+    int rc, code;
     if (avs_rewrite_initwindow(k_avs_stub, stub))
         return 2;
     rc = avs_stub_compile(tu, tdir, includes, &code);
@@ -400,7 +432,7 @@ static int avs_selftest_body(const char *work, const char *includes)
     if (code == 0) {
         fputs("SELFTEST FAIL: stub's InitWindow(void) prototype was accepted.\n",
               stderr);
-        failed = 1;
+        *failed = 1;
     } else if (strstr(avs_log, "InitWindow")) {
         if (puts("  selftest ok: stub signature drift is caught by name") < 0)
             return die("z23-lint: write failed\n", "");
@@ -408,8 +440,13 @@ static int avs_selftest_body(const char *work, const char *includes)
         fputs("SELFTEST FAIL: compile failed, but not on InitWindow:\n", stderr);
         if (avs_prefix_log(avs_log))
             return 2;
-        failed = 1;
+        *failed = 1;
     }
+    return 0;
+}
+
+static int avs_selftest_verdict(int failed)
+{
     if (!failed) {
         if (puts("══ selftest: PASS (3/3) ══") < 0)
             return die("z23-lint: write failed\n", "");
@@ -417,6 +454,24 @@ static int avs_selftest_body(const char *work, const char *includes)
     }
     fputs("══ selftest: FAIL ══\n", stderr);
     return 1;
+}
+
+static int avs_selftest_body(const char *work, const char *includes)
+{
+    char tdir[4096], tu[4096], stub[4096];
+    int rc, failed = 0;
+    if (avs_selftest_prepare(work, tdir, tu, stub, sizeof tdir))
+        return 2;
+    rc = avs_selftest_fixture_copy(tu, tdir, includes, &failed);
+    if (rc)
+        return rc;
+    rc = avs_selftest_dropped_decl(tu, tdir, stub, includes, &failed);
+    if (rc)
+        return rc;
+    rc = avs_selftest_initwindow(tu, tdir, stub, includes, &failed);
+    if (rc)
+        return rc;
+    return avs_selftest_verdict(failed);
 }
 
 int check_arena_view_stub_selftest(void)
