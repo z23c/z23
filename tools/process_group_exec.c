@@ -15,27 +15,43 @@
 #include <stdio.h>
 #include <string.h>
 
+/* Append `count` copies of ch to out[*used..], never writing past cap-1
+ * (the final NUL slot). Factored out of quote_arg() so its repeated
+ * bounded-append loops do not each add to that function's own complexity. */
+static void append_repeated(char *out, size_t cap, size_t *used, char ch,
+                            size_t count)
+{
+    for (size_t i = 0; i < count && *used + 1 < cap; i++)
+        out[(*used)++] = ch;
+}
+
+/* MS command-line quoting escapes a literal '"' as (2n+1) backslashes plus
+ * a quote, where n is the run of backslashes immediately preceding it. */
+static void quote_arg_emit_escaped_quote(char *out, size_t cap, size_t *used,
+                                         size_t slashes)
+{
+    append_repeated(out, cap, used, '\\', slashes * 2u + 1u);
+    append_repeated(out, cap, used, '"', 1);
+}
+
 static size_t quote_arg(char *out, size_t cap, const char *arg)
 {
     size_t used = 0, slashes = 0;
     bool quote = !arg[0] || strpbrk(arg, " \t\n\v\"") != NULL;
-    if (quote && used + 1 < cap) out[used++] = '"';
+    if (quote) append_repeated(out, cap, &used, '"', 1);
     for (const char *p = arg;; p++) {
         if (*p == '\\') { slashes++; continue; }
         if (*p == '"') {
-            for (size_t i = 0; i < slashes * 2u + 1u && used + 1 < cap; i++)
-                out[used++] = '\\';
-            if (used + 1 < cap) out[used++] = '"';
+            quote_arg_emit_escaped_quote(out, cap, &used, slashes);
         } else {
             if (*p == 0 && quote) slashes *= 2u;
-            for (size_t i = 0; i < slashes && used + 1 < cap; i++)
-                out[used++] = '\\';
+            append_repeated(out, cap, &used, '\\', slashes);
             if (*p == 0) break;
-            if (used + 1 < cap) out[used++] = *p;
+            append_repeated(out, cap, &used, *p, 1);
         }
         slashes = 0;
     }
-    if (quote && used + 1 < cap) out[used++] = '"';
+    if (quote) append_repeated(out, cap, &used, '"', 1);
     if (cap) out[used < cap ? used : cap - 1] = 0;
     return used;
 }

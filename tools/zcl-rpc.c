@@ -171,19 +171,11 @@ static bool shell_quote(const char *in, char *out, size_t cap)
 }
 #endif
 
-static int rpc_call(const char *host, int port, const char *cookie,
-                    const char *method, const char *params_json,
-                    char *out, size_t out_len)
-{
-    char body[8192];
-    int body_n = snprintf(body, sizeof(body),
-        "{\"jsonrpc\":\"1.0\",\"method\":\"%s\",\"params\":[%s],\"id\":1}",
-        method, params_json ? params_json : "");
-    if (body_n <= 0 || (size_t)body_n >= sizeof(body)) {
-        fprintf(stderr, "zcl-rpc: request body is too long\n");
-        return -1;
-    }
 #if defined(_WIN32)
+static int rpc_call_windows(const char *host, int port, const char *cookie,
+                            const char *body, int body_n, char *out,
+                            size_t out_len)
+{
     WSADATA wsa;
     if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
         fprintf(stderr, "zcl-rpc: WSAStartup failed\n");
@@ -248,8 +240,11 @@ static int rpc_call(const char *host, int port, const char *cookie,
         total = payload_len;
     }
     return total > 0 ? (int)total : -1;
+}
 #else
-
+static int rpc_call_posix(const char *host, int port, const char *cookie,
+                          const char *body, char *out, size_t out_len)
+{
     /* Write body to temp file to avoid shell quoting issues */
     char tmpf[] = "/tmp/zcl-rpc-XXXXXX";
     int tfd = mkstemp(tmpf);
@@ -303,6 +298,25 @@ static int rpc_call(const char *host, int port, const char *cookie,
         WEXITSTATUS(status) != 0)
         return -1;
     return (int)total;
+}
+#endif
+
+static int rpc_call(const char *host, int port, const char *cookie,
+                    const char *method, const char *params_json,
+                    char *out, size_t out_len)
+{
+    char body[8192];
+    int body_n = snprintf(body, sizeof(body),
+        "{\"jsonrpc\":\"1.0\",\"method\":\"%s\",\"params\":[%s],\"id\":1}",
+        method, params_json ? params_json : "");
+    if (body_n <= 0 || (size_t)body_n >= sizeof(body)) {
+        fprintf(stderr, "zcl-rpc: request body is too long\n");
+        return -1;
+    }
+#if defined(_WIN32)
+    return rpc_call_windows(host, port, cookie, body, body_n, out, out_len);
+#else
+    return rpc_call_posix(host, port, cookie, body, out, out_len);
 #endif
 }
 
