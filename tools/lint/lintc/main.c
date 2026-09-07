@@ -161,6 +161,10 @@ static const struct lint_gate k_gates[] = {
       check_no_silent_ready_selftest },
     { "check-stage-advances-or-blocks", check_stage_advances_or_blocks_run,
       check_stage_advances_or_blocks_selftest },
+    { "check-lib-layering", check_lib_layering_run,
+      check_lib_layering_selftest },
+    { "check-domain-purity", check_domain_purity_run,
+      check_domain_purity_selftest },
 };
 
 int main(int argc, char **argv)

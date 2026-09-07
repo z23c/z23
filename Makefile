@@ -5351,6 +5351,7 @@ LINTC_SRCS = tools/lint/lintc/lib.c tools/lint/lintc/gate_boot_wiring.c tools/li
     tools/lint/lintc/gate_typed_blocker_ratchets.c \
     tools/lint/lintc/gate_include_direction_fences.c \
     tools/lint/lintc/gate_progress_honesty_fences.c \
+    tools/lint/lintc/gate_layering_fences.c \
     tools/lint/lintc/main.c
 LINTC_OBJS = $(LINTC_SRCS:tools/lint/lintc/%.c=build/lintc-obj/%.o)
 # Apple Clang enables -Wunused-but-set-variable under -Wextra -Werror for
@@ -11731,8 +11732,9 @@ check-lag-slo-observable: $(LINTC_TOOL)
 # include is in the grandfathered baseline or has a documented per-line
 # override marker. Catches regressions; lets us pay down the existing
 # debt incrementally.
-check-lib-layering:
+check-lib-layering: $(LINTC_TOOL)
 	@echo "══ LINT: lib/ layer purity ══"
+	@./tools/scripts/check_lib_layering.sh --selftest
 	@./tools/scripts/check_lib_layering.sh
 
 # lib/ module link order. engine/composition/lib_module_order.def declares every lib module
@@ -11794,8 +11796,9 @@ check-controller-private-headers: $(LINTC_TOOL)
 # primitives script support util validation). Any include from an app/ shape
 # (controllers/models/services/views) or an unlisted lib/ subsystem fails the
 # build. HARD gate, no baseline (the tree is clean).
-check-domain-purity:
+check-domain-purity: $(LINTC_TOOL)
 	@echo "══ LINT: domain/ source purity ══"
+	@./tools/scripts/check_domain_purity.sh --selftest
 	@./tools/scripts/check_domain_purity.sh
 
 # Supervisor registration: every long-running service in

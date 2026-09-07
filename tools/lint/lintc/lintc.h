@@ -348,5 +348,9 @@ int check_no_silent_ready_run(int argc, char **argv);
 int check_no_silent_ready_selftest(void);
 int check_stage_advances_or_blocks_run(int argc, char **argv);
 int check_stage_advances_or_blocks_selftest(void);
+int check_lib_layering_run(int argc, char **argv);
+int check_lib_layering_selftest(void);
+int check_domain_purity_run(int argc, char **argv);
+int check_domain_purity_selftest(void);
 
 #endif

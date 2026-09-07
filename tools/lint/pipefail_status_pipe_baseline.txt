@@ -33,8 +33,6 @@ tools/lint/gate_doc_no_false_deleted.sh 1
 tools/lint/selftest_scanner_immunity.sh 1
 tools/mvp_gate.sh 6
 tools/scripts/check_condition_cooldown.sh 1
-tools/scripts/check_domain_purity.sh 1
-tools/scripts/check_lib_layering.sh 1
 tools/scripts/check_model_ar_lifecycle.sh 1
 tools/scripts/check_no_secret_printf.sh 1
 tools/scripts/check_no_uncited_victory.sh 1
