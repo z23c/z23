@@ -20,12 +20,14 @@
 #include <ctype.h>
 #include <regex.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include "lintc.h"
 
 /* A handful of bare json_value locals per file is plenty; overflow is fatal. */
 enum { JVI_PEND = 32, JVI_NAME = 64, JVI_LINE = 8192 };
 enum { OWP_MAX = 256, OWP_KEY = 2048, OWP_FLOOR = 200 };
+enum { OWP_ROOT_MAX = 16, OWP_ROOT_BUF = 4096 };
 
 struct jvi_slot { char n[JVI_NAME]; int line; };
 struct jvi_pend { struct jvi_slot e[JVI_PEND]; int n; };
@@ -519,12 +521,47 @@ static int owp_on_file(const char *path, void *ctx)
     return owp_scan_file(path, a);
 }
 
-static int owp_walk(struct owp_acc *a)
+static int owp_walk_roots(struct owp_acc *a, const char *const *roots, size_t n)
 {
     int rc = 0;
-    for (size_t i = 0; rc == 0 && i < sizeof k_owp_roots / sizeof k_owp_roots[0]; i++)
-        rc = walk_src(k_owp_roots[i], 1, owp_on_file, a);
+    for (size_t i = 0; rc == 0 && i < n; i++)
+        rc = walk_src(roots[i], 1, owp_on_file, a);
     return rc;
+}
+
+static int owp_walk(struct owp_acc *a)
+{
+    return owp_walk_roots(a, k_owp_roots,
+                          sizeof k_owp_roots / sizeof k_owp_roots[0]);
+}
+
+/* ZCL_OWP_SCAN_ROOTS (space-separated) lets the meta-gate selftest point
+ * this scan at a guaranteed-empty dir and prove the floor trips exit 2
+ * instead of a hollow "clean" — same contract as the shell gate this
+ * replaced. env is mutated in place (word-split like shell $SCAN_ROOTS);
+ * caller owns buf's lifetime for as long as *out entries are read. */
+static int owp_split_roots(char *env, const char *out[], size_t maxn,
+                           size_t *nout)
+{
+    size_t n = 0;
+    char *p = env;
+    while (*p) {
+        while (*p == ' ' || *p == '\t')
+            p++;
+        if (!*p)
+            break;
+        if (n >= maxn)
+            return 1;
+        out[n++] = p;
+        while (*p && *p != ' ' && *p != '\t')
+            p++;
+        if (*p) {
+            *p = '\0';
+            p++;
+        }
+    }
+    *nout = n;
+    return 0;
 }
 
 static int owp_base_skip(const char *s)
@@ -585,6 +622,28 @@ static int owp_report(const struct owp_acc *a)
     return 1;
 }
 
+/* ZCL_OWP_SCAN_ROOTS override, when set and non-empty, replaces the
+ * default root list AND drops the floor to 1 (a test-fed empty dir has
+ * no 200-file production floor to meet) — the same SCAN_FLOOR_OVERRIDE
+ * contract tools/scripts/check_one_write_path.sh used. */
+static int owp_scan(struct owp_acc *a, int *floor_out)
+{
+    const char *env = getenv("ZCL_OWP_SCAN_ROOTS");
+    if (!env || !env[0]) {
+        *floor_out = OWP_FLOOR;
+        return owp_walk(a);
+    }
+    static char buf[OWP_ROOT_BUF];
+    if (snprintf(buf, sizeof buf, "%s", env) >= (int)sizeof buf)
+        return die("z23-lint: ZCL_OWP_SCAN_ROOTS overflow\n", "");
+    const char *roots[OWP_ROOT_MAX];
+    size_t nroots = 0;
+    if (owp_split_roots(buf, roots, OWP_ROOT_MAX, &nroots))
+        return die("z23-lint: ZCL_OWP_SCAN_ROOTS names too many roots\n", "");
+    *floor_out = 1;
+    return owp_walk_roots(a, roots, nroots);
+}
+
 int check_one_write_path_run(int argc, char **argv)
 {
     (void)argc;
@@ -597,10 +656,11 @@ int check_one_write_path_run(int argc, char **argv)
     memset(&a, 0, sizeof a);
     a.re = &r;
     rc = owp_load_base(&a);
+    int floor = OWP_FLOOR;
     if (rc == 0)
-        rc = owp_walk(&a);
+        rc = owp_scan(&a, &floor);
     if (rc == 0)
-        rc = gate_require_scanned(a.nfiles, OWP_FLOOR, "check_one_write_path",
+        rc = gate_require_scanned(a.nfiles, floor, "check_one_write_path",
                                   "roots: core engine contexts cognition platform tools");
     if (rc == 0)
         rc = owp_report(&a);

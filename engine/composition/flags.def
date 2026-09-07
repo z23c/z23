@@ -1499,7 +1499,7 @@ Z23_FLAG("ZCL_ORACLE_TIP_MARGIN", "env_runtime", "-", "-",
 Z23_FLAG("ZCL_ORPHAN_PLACEMENT_FILES", "env_build", "-", "-",
           "undocumented; first use tools/lint/check_no_orphan_placement.sh:36")
 Z23_FLAG("ZCL_OWP_SCAN_ROOTS", "env_build", "-", "-",
-          "undocumented; first use tools/scripts/check_one_write_path.sh:27")
+          "undocumented; first use tools/lint/lintc/gate_state_hygiene_fences.c:635")
 Z23_FLAG("ZCL_PACKAGE_SIGN_BIN", "env_build", "-", "-",
           "undocumented; first use tools/dev/commons_journey_acceptance.sh:65")
 Z23_FLAG("ZCL_PARAMS_DIR", "env_build", "-", "-",
