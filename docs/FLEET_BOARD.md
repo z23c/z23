@@ -45,11 +45,18 @@ the signed body, so a relay cannot retarget a post without breaking its id and
 signature.
 
 Gossip discipline follows the scope. Public rooms flood by INV/GET/POST as
-below; any node key may post to any public room. A `fleet`-scoped post is never
-announced, never answered to a GET, and never served by the public board pages —
-its ids and bytes stay off the public flood entirely. (Replication of fleet
-rows between paired fleet members is a separate directed channel and is not
-part of this gossip path.)
+below; any node key may post to any public room, subject only to the per-key
+quota described later in this page — no operator grant is needed. A
+`fleet`-scoped post is never announced, never answered to a GET, and never
+served by the public board pages — its ids and bytes stay off the public
+flood entirely. (Replication of fleet rows between paired fleet members is a
+separate directed channel and is not part of this gossip path.)
+
+The board rides the ordinary P2P wire (the `zpkgswm` frame every connected
+peer already exchanges) and adds no command of its own: any peer this node
+has an ordinary P2P connection to — fleet member or not, no Noise pairing or
+prior enrollment required — can already send it INV/GET/POST frames for
+public rooms today. Fleet-scope gossip stays additionally gated by role.
 
 The node serves a read-only HTML view of its own signed store: `/board` lists
 the public rooms it holds and `/board/room/<name>` renders one room's posts,
@@ -103,14 +110,34 @@ future-dated beyond a small clock tolerance, malformed, carries trailing
 bytes, or whose stated id does not match its bytes. A duplicate is a no-op:
 the id *is* the bytes, so a row already under that id is that post.
 
-It also refuses a perfectly signed post whose host key holds no ROLE granting
-`fleet.board.post` for that kind on this node — see
-[`docs/FLEET_ROLES.md`](./FLEET_ROLES.md). A good signature says who wrote a
-post; it has never said that this box agreed to keep it.
+For `fleet`-scope (and legacy) posts, it also refuses a perfectly signed post
+whose host key holds no ROLE granting `fleet.board.post` for that kind on
+this node — see [`docs/FLEET_ROLES.md`](./FLEET_ROLES.md). A good signature
+says who wrote a post; it has never said that this box agreed to keep it.
+
+`public`-scope posts are the one exception: no operator grant is needed,
+because that is the whole point of a room any node key may join. A
+never-before-seen key's first-ever post to a public room is admitted on its
+signature alone, subject only to the per-key quota below. A fleet-scoped
+post from that same key is still refused with the ordinary role refusal.
 
 Upgrading does not stop the board: at node start every key this box is
 already storing posts from is granted that role, once, on the evidence
-of the posts themselves. A key that never posted here gets nothing.
+of the posts themselves. A key that never posted here needs no grant for
+`public` scope, and gets nothing for `fleet` scope.
+
+**Per-key quota (public scope only).** Because a public post needs no grant,
+the store's only defense against one key flooding it is a quota, checked
+against this node's own arrival records rather than the post's own signed
+timestamp (so a key cannot buy a fresh window by lying about its clock):
+at most `FLEET_BOARD_PUBLIC_QUOTA_WINDOW_MAX` (60) public posts per key in
+any `FLEET_BOARD_PUBLIC_QUOTA_WINDOW_SECONDS` (600-second) rolling window,
+and at most `FLEET_BOARD_PUBLIC_QUOTA_STORED_MAX` (1000) public posts from
+one key stored at all, ever. A post past either ceiling is refused, not
+evicted — nothing already stored, public or fleet, is ever deleted to make
+room for a new one; the global store cap above is a hard refusal too, so a
+public flood can at most fill remaining headroom and never displace a
+fleet-scope row.
 
 ## Storage
 
