@@ -227,22 +227,6 @@ ZCL_WINDOWS_ACCEPTANCE_dev_fleet_capture_SOURCES := \
 	tests/harness/src/dev_fleet_capture_windows_acceptance.c \
 	tools/command/native_dev_fleet_process.c
 
-ZCL_WINDOWS_ACCEPTANCE_mind_state_SOURCES := \
-	tests/harness/src/mind_state_windows_acceptance.c \
-	tools/mind/mind_state.c \
-	cognition/modules/codeindex/src/codeindex_owner.c \
-	platform/modules/json/src/json.c \
-	platform/modules/platform/src/path_replace.c \
-	platform/modules/platform/src/private_directory.c \
-	platform/modules/platform/src/private_acl_internal.c \
-	platform/modules/platform/src/state_root.c \
-	platform/modules/platform/src/clock.c \
-	platform/modules/base/src/safe_alloc.c \
-	platform/modules/base/src/log_level.c
-ZCL_WINDOWS_ACCEPTANCE_mind_state_FLAGS := -Itools/mind
-ZCL_WINDOWS_ACCEPTANCE_mind_state_LIBS := \
-	-ladvapi32 -lshell32 -lole32 -luuid $(ZCL_WINDOWS_ACCEPTANCE_PTHREAD_LIB)
-
 ZCL_WINDOWS_ACCEPTANCE_dev_agent_mail_SOURCES := \
 	tests/harness/src/dev_agent_mail_windows_acceptance.c \
 	tools/command/native_devagent_mail.c \
