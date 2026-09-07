@@ -344,5 +344,9 @@ int check_core_include_boundary_run(int argc, char **argv);
 int check_core_include_boundary_selftest(void);
 int check_shape_include_direction_run(int argc, char **argv);
 int check_shape_include_direction_selftest(void);
+int check_no_silent_ready_run(int argc, char **argv);
+int check_no_silent_ready_selftest(void);
+int check_stage_advances_or_blocks_run(int argc, char **argv);
+int check_stage_advances_or_blocks_selftest(void);
 
 #endif

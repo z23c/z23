@@ -157,6 +157,10 @@ static const struct lint_gate k_gates[] = {
       check_core_include_boundary_selftest },
     { "check-shape-include-direction", check_shape_include_direction_run,
       check_shape_include_direction_selftest },
+    { "check-no-silent-ready", check_no_silent_ready_run,
+      check_no_silent_ready_selftest },
+    { "check-stage-advances-or-blocks", check_stage_advances_or_blocks_run,
+      check_stage_advances_or_blocks_selftest },
 };
 
 int main(int argc, char **argv)

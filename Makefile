@@ -5346,6 +5346,7 @@ LINTC_SRCS = tools/lint/lintc/lib.c tools/lint/lintc/gate_boot_wiring.c tools/li
     tools/lint/lintc/gate_projection_purity_fences.c \
     tools/lint/lintc/gate_typed_blocker_ratchets.c \
     tools/lint/lintc/gate_include_direction_fences.c \
+    tools/lint/lintc/gate_progress_honesty_fences.c \
     tools/lint/lintc/main.c
 LINTC_OBJS = $(LINTC_SRCS:tools/lint/lintc/%.c=build/lintc-obj/%.o)
 # Apple Clang enables -Wunused-but-set-variable under -Wextra -Werror for
@@ -12979,7 +12980,7 @@ check-no-authoritative-ram-state: $(LINTC_TOOL)
 # step must surface JOB_BLOCKED/JOB_IDLE on non-progress AND reference a cursor
 # (cursor_out / c->cursor_in / stage_cursor) — no silent forward spin. The 8
 # stages already comply, so the gate runs HARD.
-check-stage-advances-or-blocks:
+check-stage-advances-or-blocks: $(LINTC_TOOL)
 	@echo "══ LINT: stage advances-or-blocks (E5) ══"
 	@./tools/scripts/check_stage_advances_or_blocks.sh
 
@@ -13006,7 +13007,7 @@ check-no-utxos-mirror-read:
 	@echo "══ LINT: no new node.db utxos-mirror reader (Program H) ══"
 	@./tools/scripts/check_no_utxos_mirror_read.sh
 
-check-no-silent-ready:
+check-no-silent-ready: $(LINTC_TOOL)
 	@echo "══ LINT: no-silent-ready (E8) ══"
 	@./tools/scripts/check_no_silent_ready.sh
 
