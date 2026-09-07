@@ -571,7 +571,7 @@ bool run_excerpts_json(
 }
 
 #if defined(_WIN32)
-static bool run_metadata_read_bytes(
+static bool run_metadata_read_win32(
     const char *path, char **wire_out, size_t *len_out)
 {
     char *wire = zcl_malloc(VCS_PACKAGE_DEPS_META_MAX_BYTES + 1u,
@@ -589,18 +589,28 @@ static bool run_metadata_read_bytes(
     return true;
 }
 #else
-static bool run_metadata_read_bytes(
-    const char *path, char **wire_out, size_t *len_out)
+/* Opens and stat-validates the candidate metadata file, returning an open
+ * fd and its verified length, or -1 on any validation failure (fd already
+ * closed). */
+static int run_metadata_open_valid(const char *path, size_t *len_out)
 {
     int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
-    if (fd < 0) return false;
+    if (fd < 0) return -1;
     struct stat st;
     bool ok = fstat(fd, &st) == 0 && S_ISREG(st.st_mode) && st.st_size > 0 &&
         (uint64_t)st.st_size <= VCS_PACKAGE_DEPS_META_MAX_BYTES;
-    size_t len = ok ? (size_t)st.st_size : 0;
-    char *wire = ok ? zcl_malloc(len + 1u,
-                                 "zcode.work.candidate_metadata") : NULL;
-    if (ok && !wire) ok = false;
+    if (!ok) {
+        close(fd);
+        return -1;
+    }
+    *len_out = (size_t)st.st_size;
+    return fd;
+}
+
+/* Reads exactly `len` bytes from `fd` into `wire`, always closing `fd`. */
+static bool run_metadata_read_loop(int fd, char *wire, size_t len)
+{
+    bool ok = true;
     size_t off = 0;
     while (ok && off < len) {
         ssize_t got = read(fd, wire + off, len - off);
@@ -609,7 +619,21 @@ static bool run_metadata_read_bytes(
         else off += (size_t)got;
     }
     if (close(fd) != 0) ok = false;
-    if (!ok) {
+    return ok;
+}
+
+static bool run_metadata_read_posix(
+    const char *path, char **wire_out, size_t *len_out)
+{
+    size_t len = 0;
+    int fd = run_metadata_open_valid(path, &len);
+    if (fd < 0) return false;
+    char *wire = zcl_malloc(len + 1u, "zcode.work.candidate_metadata");
+    if (!wire) {
+        close(fd);
+        return false;
+    }
+    if (!run_metadata_read_loop(fd, wire, len)) {
         free(wire);
         return false;
     }
@@ -628,7 +652,12 @@ bool run_candidate_metadata_read(
     if (n <= 0 || (size_t)n >= sizeof(path)) return false;
     char *wire = NULL;
     size_t len = 0;
-    if (!run_metadata_read_bytes(path, &wire, &len)) return false;
+#if defined(_WIN32)
+    bool read_ok = run_metadata_read_win32(path, &wire, &len);
+#else
+    bool read_ok = run_metadata_read_posix(path, &wire, &len);
+#endif
+    if (!read_ok) return false;
     wire[len] = '\0';
     json_init(document);
     bool ok = json_read(document, wire, len) && document->type == JSON_OBJ;
@@ -638,7 +667,7 @@ bool run_candidate_metadata_read(
 }
 
 #if defined(_WIN32)
-static bool run_metadata_write_bytes(
+static bool run_metadata_write_win32(
     const char *candidate_workspace, const char *wire, size_t len)
 {
     struct platform_directory_transaction directory;
@@ -665,19 +694,25 @@ static bool run_metadata_write_bytes(
     return ok;
 }
 #else
-static bool run_metadata_write_bytes(
-    const char *candidate_workspace, const char *wire, size_t len)
+/* Opens a fresh O_CLOEXEC temp file beside the metadata path via mkstemp,
+ * or returns -1 if either path could not be composed. */
+static int run_metadata_write_open_temp(
+    const char *candidate_workspace, char path[ZWORK_RUN_PATH_MAX],
+    char temporary[ZWORK_RUN_PATH_MAX])
 {
-    char path[ZWORK_RUN_PATH_MAX] = {0};
-    char temporary[ZWORK_RUN_PATH_MAX] = {0};
-    int pn = snprintf(path, sizeof(path), "%s/%s", candidate_workspace,
+    int pn = snprintf(path, ZWORK_RUN_PATH_MAX, "%s/%s", candidate_workspace,
                       VCS_PACKAGE_DEPS_META_PATH);
-    int tn = snprintf(temporary, sizeof(temporary),
+    int tn = snprintf(temporary, ZWORK_RUN_PATH_MAX,
                       "%s.zcode-package.compose.XXXXXX", candidate_workspace);
-    int fd = pn > 0 && (size_t)pn < sizeof(path) && tn > 0 &&
-                     (size_t)tn < sizeof(temporary)
-        ? mkstemp(temporary)
-        : -1;
+    if (pn <= 0 || (size_t)pn >= ZWORK_RUN_PATH_MAX ||
+        tn <= 0 || (size_t)tn >= ZWORK_RUN_PATH_MAX)
+        return -1;
+    return mkstemp(temporary);
+}
+
+/* Writes `len` bytes to `fd`, fsyncs, and always closes it. */
+static bool run_metadata_write_body(int fd, const char *wire, size_t len)
+{
     bool ok = fd >= 0 && fcntl(fd, F_SETFD, FD_CLOEXEC) == 0;
     size_t off = 0;
     while (ok && off < len) {
@@ -688,13 +723,32 @@ static bool run_metadata_write_bytes(
     }
     if (ok) ok = fsync(fd) == 0;
     if (fd >= 0 && close(fd) != 0) ok = false;
-    if (ok) ok = rename(temporary, path) == 0;
+    return ok;
+}
+
+/* Publishes the written temp file over the metadata path and durably
+ * fsyncs the containing directory. */
+static bool run_metadata_write_publish(
+    const char *candidate_workspace, const char *temporary, const char *path)
+{
+    bool ok = rename(temporary, path) == 0;
     if (ok) {
         int dir_fd = open(candidate_workspace,
                           O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
         ok = dir_fd >= 0 && fsync(dir_fd) == 0;
         if (dir_fd >= 0 && close(dir_fd) != 0) ok = false;
     }
+    return ok;
+}
+
+static bool run_metadata_write_posix(
+    const char *candidate_workspace, const char *wire, size_t len)
+{
+    char path[ZWORK_RUN_PATH_MAX] = {0};
+    char temporary[ZWORK_RUN_PATH_MAX] = {0};
+    int fd = run_metadata_write_open_temp(candidate_workspace, path, temporary);
+    bool ok = run_metadata_write_body(fd, wire, len);
+    if (ok) ok = run_metadata_write_publish(candidate_workspace, temporary, path);
     if (!ok && temporary[0]) (void)unlink(temporary);
     return ok;
 }
@@ -714,7 +768,11 @@ bool run_candidate_metadata_write(
     bool valid = vcs_package_deps_parse_meta(
         (const uint8_t *)wire, len, &checked, NULL, 0) ==
         VCS_PACKAGE_DEPS_OK;
-    bool ok = valid && run_metadata_write_bytes(candidate_workspace, wire, len);
+#if defined(_WIN32)
+    bool ok = valid && run_metadata_write_win32(candidate_workspace, wire, len);
+#else
+    bool ok = valid && run_metadata_write_posix(candidate_workspace, wire, len);
+#endif
     free(wire);
     return ok;
 }
