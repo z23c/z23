@@ -81,10 +81,16 @@
  *   byte-for-byte; any other mode string passes through verbatim.
  *
  * Preserved latent defects / parity notes:
- * - `while IFS= read -r line` silently DROPS an unterminated final baseline
- *   line (read fails at EOF without the delimiter, so the loop body never
- *   runs for it). Reproduced byte-exactly: mcd_base_load requires the
- *   newline. Flagged, not repaired.
+ * - REPAIRED BY VERIFIER RULING (the Linux-side fix on the port): the
+ *   shell's `while IFS= read -r line` silently DROPS an unterminated final
+ *   baseline line (read fails at EOF without the delimiter, so the loop
+ *   body never runs for it) — a fail-open defect, since a dropped row is
+ *   neither matched nor stale-checked. The port now reads the final line
+ *   like the others: a row without a trailing newline is still a row and
+ *   participates in matching and stale detection exactly as if it had the
+ *   newline. This deliberately diverges from the shell original on the
+ *   unterminated-final-line input (the A/B harness classifies that one
+ *   fixture EXPECTED-DIVERGE; every other input stays byte-identical).
  * - Stale-row report order: the shell iterates a bash ASSOCIATIVE array,
  *   i.e. hash order (unspecified); the port emits baseline FILE order.
  *   Identical for zero or one stale row; a multi-stale report orders
@@ -214,9 +220,8 @@ static int mcd_base_load(const char *path)
     ssize_t n;
     int rc = 0;
     while (rc == 0 && (n = getline(&line, &cap, f)) >= 0) {
-        if (line[n - 1] != '\n')
-            continue;
-        line[n - 1] = '\0';
+        if (line[n - 1] == '\n')
+            line[n - 1] = '\0';
         rc = mcd_base_line(line);
     }
     return fin(f, line, path, rc);
