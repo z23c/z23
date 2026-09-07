@@ -292,6 +292,67 @@ docs/             FRAMEWORK.md (this — §9 is the debt board) · work/ (assign
 **Rule:** every new `.c` under `app/` lives in exactly one shape folder. The
 `check-framework-shape` gate enforces it (RATCHET today → HARD).
 
+### Scaffolding an App resource slice
+
+A decentralized App on z23 grows one resource at a time, and every resource
+lands in the same shape folders above. Two commands own that step, and they
+read the same slice description, so a preview can never describe files the
+scaffold does not write:
+
+```
+z23 dev app plan social posts        # preview: paths only, writes nothing
+z23-dev dev app scaffold social posts # materialize those exact files
+```
+
+The scaffold writes five files and registers one row:
+
+```
+engine/models/include/models/<resource>.h          the record + its contract
+engine/models/src/<resource>.c                     validation, the App's boundary
+engine/services/include/services/<resource>_service.h
+engine/services/src/<resource>_service.c           the ONE admission path
+tests/harness/src/test_<app>_<resource>_slice.c    the slice's own proof
+tools/dev/test_group_catalog.def                   + ZCL_TEST_GROUP(<app>_<resource>_slice)
+```
+
+Nothing else is touched. The source folders are wildcarded by the build and
+the catalog row makes the test run, so the slice compiles and proves itself
+with no further wiring:
+
+```
+make -s -j8 dev-bin
+make t-fast ONLY=<app>_<resource>_slice
+```
+
+The plan's `wiring` array names the existing files a real resource
+eventually needs edited — the App manifest, the feature migration, the
+agent impact rules. The scaffold never edits them: which registry a resource
+joins is a reviewed decision, not boilerplate.
+
+**Refusal semantics.** The command is safe to run on a checkout you care
+about, because it decides before it writes:
+
+- Every target is classified in a read-only pass first. If **any** target
+  already exists with different content, the whole command refuses with
+  `refused: <path> exists with different content`, exits non-zero, and
+  writes nothing — never a half-materialised slice, never a temp file left
+  behind.
+- A target whose bytes already match is left alone. A second run of the same
+  command therefore reports `0 written, N unchanged` and leaves the tree
+  byte-identical; the registry row is matched as a whole line, so it is
+  never doubled.
+- Each file that is written lands as a temp file in the target's own
+  directory followed by `rename()`, so a reader never sees a partial file.
+- An inadmissible App id or resource name (anything but lowercase
+  snake_case starting with a letter, no doubled or trailing underscore) is
+  refused before the disk is touched.
+- `dev.app.scaffold` is dev-only. A release binary reports
+  `DEV_BUILD_REQUIRED`; build `z23-dev` with `make dev-bin`.
+
+Editing a generated file is expected — from the moment it is written it is
+ordinary committed source. Re-running the scaffold after you edit it will
+refuse, by design, rather than overwrite your work.
+
 ---
 
 ## 5. Beauty by the build — enforcement
