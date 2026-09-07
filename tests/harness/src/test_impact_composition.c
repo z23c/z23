@@ -2706,6 +2706,95 @@ static int test_ic_proof_optional_dependencies(void)
     return failures;
 }
 
+static bool ic_dependency_link(const char *target, const char *path)
+{
+    if (unlink(path) != 0 && errno != ENOENT) return false;
+    return symlink(target, path) == 0;
+}
+
+static int test_ic_proof_dependency_relative_links(void)
+{
+    int failures = 0;
+    TEST("proof generation: libtool parent links stay inside copied dependency root") {
+        char fixture[4096], source[4096], target[4096], link_path[4096];
+        ic_budget_fixture("deplinks", fixture);
+        ASSERT(ic_write(fixture, "source/libevent.la", "archive-metadata\n"));
+        ASSERT(ic_write(fixture, "source/.libs/keep", "fixture\n"));
+        snprintf(source, sizeof(source), "%s/source", fixture);
+        snprintf(target, sizeof(target), "%s/target", fixture);
+        snprintf(link_path, sizeof(link_path), "%s/.libs/libevent.la", source);
+        ASSERT(ic_dependency_link("../libevent.la", link_path));
+        snprintf(link_path, sizeof(link_path), "%s/.libs/chained.la", source);
+        ASSERT(ic_dependency_link("libevent.la", link_path));
+        ASSERT(zcl_dev_proof_dependency_materialize(source, target));
+        snprintf(link_path, sizeof(link_path), "%s/.libs/libevent.la", target);
+        char link_text[64] = {0};
+        ASSERT_EQ(readlink(link_path, link_text, sizeof(link_text) - 1), 14);
+        ASSERT_STR_EQ(link_text, "../libevent.la");
+        char content[64] = {0};
+        FILE *file = fopen(link_path, "rb");
+        ASSERT(file != NULL);
+        ASSERT_EQ(fread(content, 1, sizeof(content) - 1, file), 17);
+        ASSERT(fclose(file) == 0);
+        ASSERT_STR_EQ(content, "archive-metadata\n");
+        snprintf(link_path, sizeof(link_path), "%s/.libs/chained.la", target);
+        ASSERT(stat(link_path, &(struct stat){0}) == 0);
+        struct stat original, copied;
+        snprintf(link_path, sizeof(link_path), "%s/libevent.la", source);
+        ASSERT(stat(link_path, &original) == 0);
+        snprintf(link_path, sizeof(link_path), "%s/libevent.la", target);
+        ASSERT(stat(link_path, &copied) == 0);
+        ASSERT(original.st_ino != copied.st_ino || original.st_dev != copied.st_dev);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static bool ic_dependency_link_refused(const char *source, const char *target,
+                                       const char *link_text, int expected)
+{
+    char path[4096];
+    snprintf(path, sizeof(path), "%s/.libs/escape", source);
+    if (!ic_dependency_link(link_text, path)) return false;
+    errno = 0;
+    bool copied = zcl_dev_proof_dependency_materialize(source, target);
+    int copy_errno = errno;
+    if (unlink(path) != 0) return false;
+    return !copied && copy_errno == expected;
+}
+
+static int test_ic_proof_dependency_link_refusals(void)
+{
+    int failures = 0;
+    TEST("proof generation: dependency links cannot escape or hide missing inputs") {
+        char fixture[4096], source[4096], target[4096], link_path[4096];
+        ic_budget_fixture("deplinkrefuse", fixture);
+        ASSERT(ic_write(fixture, "source/.libs/keep", "fixture\n"));
+        ASSERT(ic_write(fixture, "source/libevent.la", "archive-metadata\n"));
+        ASSERT(ic_write(fixture, "outside", "external-input\n"));
+        ASSERT(ic_write(fixture, "source-neighbor/outside", "external-input\n"));
+        snprintf(source, sizeof(source), "%s/source", fixture);
+        snprintf(target, sizeof(target), "%s/target", fixture);
+        snprintf(link_path, sizeof(link_path), "%s/alias", source);
+        ASSERT(ic_dependency_link(".", link_path));
+        ASSERT(ic_dependency_link_refused(source, target, "../../outside", EACCES));
+        ASSERT(ic_dependency_link_refused(source, target, "../missing", ENOENT));
+        ASSERT(ic_dependency_link_refused(source, target, "../libevent.la/", ENOTDIR));
+        ASSERT(ic_dependency_link_refused(source, target,
+                                          "../../source/libevent.la", EACCES));
+        ASSERT(ic_dependency_link_refused(source, target,
+                                          "../alias/../source/libevent.la", EACCES));
+        ASSERT(ic_dependency_link_refused(source, target,
+                                          "../../source-neighbor/outside", EACCES));
+        ASSERT(ic_dependency_link_refused(source, target, "escape", ELOOP));
+        char outside[4096];
+        ASSERT(realpath(fixture, outside) != NULL);
+        ASSERT(ic_dependency_link_refused(source, target, outside, EACCES));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_ic_proof_dependency_crosses_filesystems(void)
 {
     int failures = 0;
@@ -4572,6 +4661,8 @@ int test_impact_composition(void)
 #endif
     failures += test_ic_proof_dependency_crosses_filesystems();
     failures += test_ic_proof_optional_dependencies();
+    failures += test_ic_proof_dependency_relative_links();
+    failures += test_ic_proof_dependency_link_refusals();
     failures += test_ic_ram_scratch_reservations_hold_under_concurrency();
 #endif
     failures += test_ic_changed_set_carries_a_landing_batch();

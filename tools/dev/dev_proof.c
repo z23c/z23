@@ -1808,19 +1808,86 @@ static bool dp_materialize_regular(const char *source, const char *target,
     return dependency_copy_stat(source, target, source_st);
 }
 
-/* A dependency symlink is recreated, never followed, and only when it points
- * inside the tree: an absolute or `..` target would reach out of the
- * generation. */
+static bool dp_source_parent(const char *source, char parent[PATH_MAX])
+{
+    size_t len = strlen(source);
+    if (len >= PATH_MAX) {
+        errno = ENAMETOOLONG;
+        return false;
+    }
+    memcpy(parent, source, len + 1);
+    char *slash = strrchr(parent, '/');
+    if (!slash) strcpy(parent, ".");
+    else if (slash == parent) slash[1] = 0;
+    else *slash = 0;
+    return true;
+}
+
+static bool dp_path_inside_root(const char *root, const char *path)
+{
+    size_t len = strlen(root);
+    return strcmp(root, "/") == 0 ||
+           (strncmp(root, path, len) == 0 &&
+            (path[len] == 0 || path[len] == '/'));
+}
+
+/* Check every resolved prefix, not just the endpoint: a relative link can
+ * leave the selected tree and reenter it, then point back into the submitting
+ * checkout when its original spelling is recreated in the generation.
+ * Resolving prefixes also accounts for directory aliases changing the depth
+ * at which a subsequent `..` is interpreted. */
+static bool dp_link_prefixes_inside(const char *source, const char *link_text,
+                                    const char *source_root)
+{
+    char prefix[PATH_MAX], resolved[PATH_MAX];
+    if (!dp_source_parent(source, prefix)) return false;
+    for (const char *part = link_text; *part;) {
+        size_t len = strcspn(part, "/");
+        if (len == 0) { part++; continue; }
+        size_t used = strlen(prefix);
+        int added = snprintf(prefix + used, sizeof(prefix) - used,
+                              "/%.*s", (int)len, part);
+        if (added < 0 || (size_t)added >= sizeof(prefix) - used) {
+            errno = ENAMETOOLONG;
+            return false;
+        }
+        if (!realpath(prefix, resolved)) return false;
+        if (!dp_path_inside_root(source_root, resolved)) {
+            errno = EACCES;
+            return false;
+        }
+        part += len;
+    }
+    /* The original spelling also carries a terminal slash's directory
+     * requirement, which component traversal alone would discard. */
+    if (!realpath(source, resolved)) return false;
+    if (!dp_path_inside_root(source_root, resolved)) {
+        errno = EACCES;
+        return false;
+    }
+    return true;
+}
+
+/* Preserve relative link bytes only after their resolution has been checked
+ * against the original selected dependency root, retained across recursion.
+ * This remains a pathname snapshot; proof input identity checks still guard
+ * source mutation before and after the generation's work. */
 static bool dp_materialize_symlink(const char *source, const char *target,
-                                   bool target_exists)
+                                   bool target_exists, const char *source_root)
 {
     char link_target[PATH_MAX];
     ssize_t len = readlink(source, link_target, sizeof(link_target) - 1);
-    if (len <= 0 || (size_t)len >= sizeof(link_target) - 1)
+    if (len < 0) return false;
+    if (len == 0 || (size_t)len >= sizeof(link_target) - 1) {
+        errno = len == 0 ? EINVAL : ENAMETOOLONG;
         return false;
+    }
     link_target[len] = 0;
-    if (link_target[0] == '/' || strstr(link_target, ".."))
+    if (link_target[0] == '/') {
+        errno = EACCES;
         return false;
+    }
+    if (!dp_link_prefixes_inside(source, link_target, source_root)) return false;
     if (target_exists && unlink(target) != 0) return false;
     return symlink(link_target, target) == 0;
 }
@@ -1835,7 +1902,8 @@ static bool dp_materialize_dir_ensure(const struct stat *source_st,
            (target_exists || mkdir(target, 0700) == 0);
 }
 
-static bool dependency_materialize(const char *source, const char *target)
+static bool dependency_materialize_at(const char *source, const char *target,
+                                      const char *source_root)
 {
     struct stat source_st, target_st;
     if (lstat(source, &source_st) != 0) return false;
@@ -1845,7 +1913,7 @@ static bool dependency_materialize(const char *source, const char *target)
     if (S_ISREG(source_st.st_mode))
         return dp_materialize_regular(source, target, &source_st);
     if (S_ISLNK(source_st.st_mode))
-        return dp_materialize_symlink(source, target, target_exists);
+        return dp_materialize_symlink(source, target, target_exists, source_root);
     if (!dp_materialize_dir_ensure(&source_st, target, &target_st,
                                    target_exists))
         return false;
@@ -1860,10 +1928,29 @@ static bool dependency_materialize(const char *source, const char *target)
         char child_source[PATH_MAX], child_target[PATH_MAX];
         if (!dp_child_paths(source, target, entry->d_name, child_source,
                             child_target) ||
-            !dependency_materialize(child_source, child_target))
+            !dependency_materialize_at(child_source, child_target, source_root)) {
             ok = false;
+            break;
+        }
     }
-    return closedir(dir) == 0 && ok;
+    int saved = errno;
+    int closed = closedir(dir);
+    if (!ok) errno = saved;
+    return closed == 0 && ok;
+}
+
+static bool dependency_materialize(const char *source, const char *target)
+{
+    struct stat source_st;
+    char source_root[PATH_MAX], parent[PATH_MAX];
+    if (lstat(source, &source_st) != 0) return false;
+    const char *root = source;
+    if (!S_ISDIR(source_st.st_mode)) {
+        if (!dp_source_parent(source, parent)) return false;
+        root = parent;
+    }
+    if (!realpath(root, source_root)) return false;
+    return dependency_materialize_at(source, target, source_root);
 }
 
 /* Testing seam: one generation dependency materialized exactly the way the

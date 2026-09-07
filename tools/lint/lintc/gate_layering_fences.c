@@ -368,7 +368,9 @@ int check_lib_layering_selftest(void)
     char here[4096], tmp[64];
     if (!getcwd(here, sizeof here))
         return die("z23-lint: getcwd failed\n", "");
-    if (ovf(snprintf(tmp, sizeof tmp, "z23-lf-%ld", (long)getpid()),
+    /* Scratch must stay outside the source-identity/watch universe: a root
+     * fixture otherwise looks like a new application and cancels proof. */
+    if (ovf(snprintf(tmp, sizeof tmp, "test-tmp/z23-lf-%ld", (long)getpid()),
             sizeof tmp) || csr_mkdirs(tmp))
         return 2;
     int bad = 0, got = 0;
@@ -402,7 +404,7 @@ int check_lib_layering_selftest(void)
 int check_domain_purity_selftest(void)
 {
     char tmp[64];
-    if (ovf(snprintf(tmp, sizeof tmp, "z23-dp-%ld", (long)getpid()),
+    if (ovf(snprintf(tmp, sizeof tmp, "test-tmp/z23-dp-%ld", (long)getpid()),
             sizeof tmp) || csr_mkdirs(tmp))
         return 2;
     char badp[256], okp[256];
