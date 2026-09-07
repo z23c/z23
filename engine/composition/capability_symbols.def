@@ -490,6 +490,8 @@ ZCL_CAPABILITY_SYMBOL("ptsname", CAP_FS_READ,
     "is copied before fork by the single-threaded engine harness.")
 ZCL_CAPABILITY_SYMBOL("read", CAP_FS_READ, "")
 ZCL_CAPABILITY_SYMBOL("readdir", CAP_FS_READ, "")
+ZCL_CAPABILITY_SYMBOL("rewinddir", CAP_FS_READ,
+    "Restarts enumeration through an already-open directory handle.")
 ZCL_CAPABILITY_SYMBOL("readlink", CAP_FS_READ, "")
 ZCL_CAPABILITY_SYMBOL("realpath", CAP_FS_READ, "")
 ZCL_CAPABILITY_SYMBOL("rewind", CAP_FS_READ, "")

@@ -713,7 +713,7 @@ ZCL_COMMAND_DEV_COMMAND(
     "refuses passed pairs, pending requests and live workers. Retry changes "
     "scheduling only and grants no receipt or publication authority.", 0,
     "dev,proof,retry,receipt,background",
-    "zcl.dev_proof_input.v1", "zcl.dev_proof_status.v1",
+    "zcl.dev_proof_retry_input.v1", "zcl.dev_proof_status.v1",
     "root,local_commit,remote_base", "",
     "z23-dev dev proof retry",
     ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_DEV_MUTATION,
