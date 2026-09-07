@@ -180,7 +180,7 @@ gate_command() {
         check-supervisor-registration)     echo './tools/scripts/check_supervisor_registration.sh --selftest && ./tools/scripts/check_supervisor_registration.sh' ;;
         check-test-registration)           echo './tools/scripts/check_test_registration.sh --selftest && ./tools/scripts/check_test_registration.sh' ;;
         check-typed-blocker)               echo './tools/scripts/check_typed_blocker.sh' ;;
-        check-blocker-escape-registered)   echo './tools/scripts/check_blocker_escape_registered.sh' ;;
+        check-blocker-escape-registered)   echo './tools/scripts/check_blocker_escape_registered.sh --selftest && ./tools/scripts/check_blocker_escape_registered.sh' ;;
         check-blocker-remedy)              echo './tools/scripts/check_blocker_remedy.sh' ;;
         check-blocker-handoff-declared)    echo './tools/lint/check_blocker_handoff_declared.sh' ;;
         check-supervisor-progress-declared) echo './tools/lint/check_supervisor_progress_declared.sh' ;;

@@ -403,5 +403,9 @@ int check_command_availability_truthful_run(int argc, char **argv);
 int check_command_availability_truthful_selftest(void);
 int check_rule_vocabulary_run(int argc, char **argv);
 int check_rule_vocabulary_selftest(void);
+int check_blocker_escape_registered_run(int argc, char **argv);
+int check_blocker_escape_registered_selftest(void);
+int check_git_hooks_installed_run(int argc, char **argv);
+int check_git_hooks_installed_selftest(void);
 
 #endif

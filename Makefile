@@ -5377,6 +5377,8 @@ LINTC_SRCS = tools/lint/lintc/lib.c tools/lint/lintc/gate_boot_wiring.c tools/li
     tools/lint/lintc/gate_hotswap_denied_leaves_selftest.c \
     tools/lint/lintc/gate_command_availability_truthful.c \
     tools/lint/lintc/gate_rule_vocabulary.c \
+    tools/lint/lintc/gate_blocker_escape.c \
+    tools/lint/lintc/gate_git_hooks_installed.c \
     tools/lint/lintc/main.c
 LINTC_OBJS = $(LINTC_SRCS:tools/lint/lintc/%.c=build/lintc-obj/%.o)
 # Apple Clang enables -Wunused-but-set-variable under -Wextra -Werror for
@@ -10738,7 +10740,7 @@ install-hooks: $(GIT_HOOK_BIN)
 	  tools/scripts/install_git_hooks.sh
 
 .PHONY: check-git-hooks-installed
-check-git-hooks-installed: $(GIT_HOOK_BIN)
+check-git-hooks-installed: $(GIT_HOOK_BIN) $(LINTC_TOOL)
 	@echo "══ LINT: local pre-push hook installed ══"
 	@./tools/scripts/check_git_hooks_installed.sh --self-test
 	@./tools/scripts/check_git_hooks_installed.sh
@@ -11908,9 +11910,9 @@ check-typed-blocker: $(LINTC_TOOL)
 # blocker_supervisor_sweep's lookup (platform/modules/util/src/blocker.c ~:492) and is
 # invisible to the blocker_stall_meta_detector.c empty-escape backstop too
 # (that one only catches an EMPTY string). Empty strings are exempt.
-check-blocker-escape-registered:
+check-blocker-escape-registered: $(LINTC_TOOL)
 	@echo "══ LINT: blocker escape-action totality ══"
-	@./tools/scripts/check_blocker_escape_registered.sh
+	@./tools/scripts/check_blocker_escape_registered.sh --selftest && ./tools/scripts/check_blocker_escape_registered.sh
 
 # Gate — blocker remedy totality (HARD, no baseline; ratchets by exhaustive
 # enumeration instead). Doctrine: docs/work/tenacity-roadmap.md "Hold-class

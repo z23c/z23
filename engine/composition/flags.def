@@ -202,7 +202,7 @@ Z23_FLAG("ZCL_BIN_DIR", "env_build", "-", "-",
 Z23_FLAG("ZCL_BIP_PAGE_CACHE_KIB", "env_runtime", "-", "-",
           "undocumented; first use engine/modules/storage/src/block_index_projection.c:94")
 Z23_FLAG("ZCL_BLOCKER_ESCAPE_SCAN_FILES", "env_build", "-", "-",
-          "undocumented; first use tools/scripts/check_blocker_escape_registered.sh:65")
+          "undocumented; first use tools/lint/lintc/gate_blocker_escape.c:382")
 Z23_FLAG("ZCL_BLOCKER_HANDOFF_BASELINE", "env_build", "-", "-",
           "undocumented; first use tools/lint/check_blocker_handoff_declared.sh:68")
 Z23_FLAG("ZCL_BLOCKER_HANDOFF_DECISION_FLOOR", "env_build", "1", "-",
@@ -949,25 +949,25 @@ Z23_FLAG("ZCL_GC_MAIN_REF", "env_build", "main", "-",
 Z23_FLAG("ZCL_GIT_HOOK_DIR", "env_build", "-", "-",
           "undocumented; first use tools/scripts/install_git_hooks.sh:10")
 Z23_FLAG("ZCL_GIT_HOOK_EXPECTED_DIR_FOR_TEST", "env_build", "-", "-",
-          "undocumented; first use tools/scripts/check_git_hooks_installed.sh:151")
+          "undocumented; first use tools/lint/lintc/gate_git_hooks_installed.c:279")
 Z23_FLAG("ZCL_GIT_HOOK_FILE_FOR_TEST", "env_build", "-", "-",
-          "undocumented; first use tools/scripts/check_git_hooks_installed.sh:189")
+          "undocumented; first use tools/lint/lintc/gate_git_hooks_installed.c:363")
 Z23_FLAG("ZCL_GIT_HOOK_HOST", "env_build", "-", "-",
           "undocumented; first use tools/scripts/install_git_hooks.sh:17")
 Z23_FLAG("ZCL_GIT_HOOK_HOST_FOR_TEST", "env_build", "-", "-",
-          "undocumented; first use tools/scripts/check_git_hooks_installed.sh:139")
+          "undocumented; first use tools/lint/lintc/gate_git_hooks_installed.c:43")
 Z23_FLAG("ZCL_GIT_HOOK_NATIVE_BIN", "env_build", "-", "-",
           "undocumented; first use tools/scripts/install_git_hooks.sh:30")
 Z23_FLAG("ZCL_GIT_HOOK_NATIVE_BIN_FOR_TEST", "env_build", "-", "-",
-          "undocumented; first use tools/scripts/check_git_hooks_installed.sh:23")
+          "undocumented; first use tools/lint/lintc/gate_git_hooks_installed.c:324")
 Z23_FLAG("ZCL_GIT_HOOK_PRECOMMIT_FILE_FOR_TEST", "env_build", "-", "-",
-          "undocumented; first use tools/scripts/check_git_hooks_installed.sh:169")
+          "undocumented; first use tools/lint/lintc/gate_git_hooks_installed.c:307")
 Z23_FLAG("ZCL_GIT_HOOK_ROOT", "env_build", "-", "-",
-          "undocumented; first use tools/scripts/check_git_hooks_installed.sh:9")
+          "undocumented; first use tools/lint/lintc/gate_git_hooks_installed.c:262")
 Z23_FLAG("ZCL_GIT_HOOK_SOURCE_ROOT", "env_build", "-", "-",
-          "undocumented; first use tools/scripts/check_git_hooks_installed.sh:8")
+          "undocumented; first use tools/lint/lintc/gate_git_hooks_installed.c:261")
 Z23_FLAG("ZCL_GIT_HOOKS_PATH_FOR_TEST", "env_build", "-", "-",
-          "undocumented; first use tools/scripts/check_git_hooks_installed.sh:152")
+          "undocumented; first use tools/lint/lintc/gate_git_hooks_installed.c:162")
 Z23_FLAG("ZCL_GOLDEN_FRESHNESS", "env_build", "0", "-",
           "undocumented; first use tools/scripts/check_golden_freshness.sh:33")
 Z23_FLAG("ZCL_GOLDEN_FRESHNESS_DATADIR", "env_build", "-", "-",

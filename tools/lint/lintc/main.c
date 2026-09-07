@@ -214,6 +214,10 @@ static const struct lint_gate k_gates[] = {
     { "check-command-availability-truthful", check_command_availability_truthful_run,
       check_command_availability_truthful_selftest },
     { "check-rule-vocabulary", check_rule_vocabulary_run, check_rule_vocabulary_selftest },
+    { "check-blocker-escape-registered", check_blocker_escape_registered_run,
+      check_blocker_escape_registered_selftest },
+    { "check-git-hooks-installed", check_git_hooks_installed_run,
+      check_git_hooks_installed_selftest },
 };
 
 int main(int argc, char **argv)
