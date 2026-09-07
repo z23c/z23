@@ -111,18 +111,9 @@ static char *mv_hex(const uint8_t *data, size_t len)
 
 /* ── 1: property_id pure rules ────────────────────────────────────── */
 
-static int t_property_id_rules(void)
+static int property_case_kind_names(void)
 {
     int failures = 0;
-    uint8_t root[32];
-    uint8_t zero[32];
-    struct metaverse_property_id id, back;
-    char text[METAVERSE_ID_TEXT_MAX];
-
-    memset(zero, 0, sizeof(zero));
-    for (int i = 0; i < 32; i++)
-        root[i] = (uint8_t)(0xa0 + i);
-
     MV_CHECK("id: kind names are the wire names",
              strcmp(metaverse_kind_name(METAVERSE_KIND_CONTENT),
                     "content") == 0 &&
@@ -155,13 +146,20 @@ static int t_property_id_rules(void)
              metaverse_kind_from_name("") == METAVERSE_KIND_UNKNOWN &&
              metaverse_kind_from_name("unknown") == METAVERSE_KIND_UNKNOWN &&
              metaverse_kind_from_name("world") == METAVERSE_KIND_UNKNOWN);
+    return failures;
+}
 
+static int property_case_make_and_valid(const uint8_t *root,
+                                         const uint8_t *zero,
+                                         struct metaverse_property_id *id)
+{
+    int failures = 0;
     MV_CHECK("id: make accepts a real kind and a non-zero root",
-             metaverse_property_id_make(METAVERSE_KIND_CONTENT, root, &id) &&
-             metaverse_property_id_valid(&id));
+             metaverse_property_id_make(METAVERSE_KIND_CONTENT, root, id) &&
+             metaverse_property_id_valid(id));
     MV_CHECK("id: an all-zero root is refused (uninitialized must not read "
              "as a real object)",
-             !metaverse_property_id_make(METAVERSE_KIND_CONTENT, zero, &id));
+             !metaverse_property_id_make(METAVERSE_KIND_CONTENT, zero, id));
     {
         struct metaverse_property_id z;
 
@@ -170,15 +168,23 @@ static int t_property_id_rules(void)
                  !metaverse_property_id_valid(&z));
     }
     MV_CHECK("id: UNKNOWN and out-of-range kinds are refused",
-             !metaverse_property_id_make(METAVERSE_KIND_UNKNOWN, root, &id) &&
-             !metaverse_property_id_make(METAVERSE_KIND_COUNT, root, &id));
+             !metaverse_property_id_make(METAVERSE_KIND_UNKNOWN, root, id) &&
+             !metaverse_property_id_make(METAVERSE_KIND_COUNT, root, id));
+    return failures;
+}
 
+static int property_case_format_and_parse(const uint8_t *root,
+                                           struct metaverse_property_id *id,
+                                           struct metaverse_property_id *back,
+                                           char *text, size_t text_cap)
+{
+    int failures = 0;
     MV_CHECK("id: format/parse round-trip",
              metaverse_property_id_make(METAVERSE_KIND_ZCODE_PACKAGE, root,
-                                        &id) &&
-             metaverse_property_id_format(&id, text, sizeof(text)) &&
-             metaverse_property_id_parse(text, &back) &&
-             metaverse_property_id_equal(&id, &back));
+                                        id) &&
+             metaverse_property_id_format(id, text, text_cap) &&
+             metaverse_property_id_parse(text, back) &&
+             metaverse_property_id_equal(id, back));
     MV_CHECK("id: the text form is '<kind>:<64 lowercase hex>'",
              strncmp(text, "zcode_package:", 14) == 0 &&
              strlen(text) == 14 + 64 &&
@@ -190,8 +196,8 @@ static int t_property_id_rules(void)
                  "A0A1A2A3A4A5A6A7A8A9AAABACADAEAFB0B1B2B3B4B5B6B7B8B9BABBBC"
                  "BDBEBF");
         MV_CHECK("id: parsing accepts uppercase hex",
-                 metaverse_property_id_parse(upper, &back) &&
-                 back.kind == METAVERSE_KIND_CONTENT);
+                 metaverse_property_id_parse(upper, back) &&
+                 back->kind == METAVERSE_KIND_CONTENT);
     }
     {
         struct metaverse_property_id a, b;
@@ -203,7 +209,14 @@ static int t_property_id_rules(void)
                                             root, &b) &&
                  !metaverse_property_id_equal(&a, &b));
     }
+    return failures;
+}
 
+static int property_case_malformed_and_edges(const uint8_t *root,
+                                              struct metaverse_property_id *id,
+                                              char *text, size_t text_cap)
+{
+    int failures = 0;
     {
         struct metaverse_property_id bad;
         char buf[160];
@@ -239,21 +252,41 @@ static int t_property_id_rules(void)
         MV_CHECK("id: malformed text is refused, never partially parsed", ok);
     }
     MV_CHECK("id: format refuses a buffer that cannot hold the whole id",
-             metaverse_property_id_make(METAVERSE_KIND_CONTENT, root, &id) &&
-             !metaverse_property_id_format(&id, text, 16) && text[0] == '\0');
+             metaverse_property_id_make(METAVERSE_KIND_CONTENT, root, id) &&
+             !metaverse_property_id_format(id, text, 16) && text[0] == '\0');
+    (void)text_cap;
     MV_CHECK("id: equality is NULL-safe and never true for NULL",
-             !metaverse_property_id_equal(NULL, &id) &&
-             !metaverse_property_id_equal(&id, NULL));
+             !metaverse_property_id_equal(NULL, id) &&
+             !metaverse_property_id_equal(id, NULL));
+    return failures;
+}
+
+static int t_property_id_rules(void)
+{
+    int failures = 0;
+    uint8_t root[32];
+    uint8_t zero[32];
+    struct metaverse_property_id id, back;
+    char text[METAVERSE_ID_TEXT_MAX];
+
+    memset(zero, 0, sizeof(zero));
+    for (int i = 0; i < 32; i++)
+        root[i] = (uint8_t)(0xa0 + i);
+
+    failures += property_case_kind_names();
+    failures += property_case_make_and_valid(root, zero, &id);
+    failures += property_case_format_and_parse(root, &id, &back, text,
+                                               sizeof(text));
+    failures += property_case_malformed_and_edges(root, &id, text,
+                                                  sizeof(text));
     return failures;
 }
 
 /* ── 2: the action vocabulary ─────────────────────────────────────── */
 
-static int t_action_vocabulary(void)
+static int action_case_names_and_masks(char *buf, size_t buf_cap)
 {
     int failures = 0;
-    char buf[METAVERSE_ACTION_LIST_MAX];
-
     {
         bool ok = true;
 
@@ -278,11 +311,11 @@ static int t_action_vocabulary(void)
              !metaverse_action_mask_valid(0x80000000u));
     MV_CHECK("actions: the empty mask is well-formed and renders empty",
              metaverse_action_mask_valid(0) &&
-             metaverse_action_mask_format(0, buf, sizeof(buf)) &&
+             metaverse_action_mask_format(0, buf, buf_cap) &&
              buf[0] == '\0');
     MV_CHECK("actions: ALL renders every name in table order",
              metaverse_action_mask_format(METAVERSE_ACTION_ALL, buf,
-                                          sizeof(buf)) &&
+                                          buf_cap) &&
              strncmp(buf, "host,publish_revision,", 22) == 0 &&
              strstr(buf, "revoke") != NULL &&
              /* The reserved name is legible on its own but must never appear
@@ -293,6 +326,12 @@ static int t_action_vocabulary(void)
              "(a short list must not read as fewer rights)",
              !metaverse_action_mask_format(METAVERSE_ACTION_ALL, buf, 12) &&
              buf[0] == '\0');
+    return failures;
+}
+
+static int action_case_semantics(void)
+{
+    int failures = 0;
     /* MUTATING is column 6 — state OUTSIDE this node — so the complement is
      * every action whose effect stays local: HOST (this node's own storage),
      * DELEGATE and REVOKE (this node's own grant records). Derived from the
@@ -322,9 +361,20 @@ static int t_action_vocabulary(void)
     return failures;
 }
 
+static int t_action_vocabulary(void)
+{
+    int failures = 0;
+    char buf[METAVERSE_ACTION_LIST_MAX];
+
+    failures += action_case_names_and_masks(buf, sizeof(buf));
+    failures += action_case_semantics();
+    return failures;
+}
+
 /* ── 3: adapter registry coverage ─────────────────────────────────── */
 
-static int t_adapter_registry(void)
+static int registry_case_rows_and_coverage(size_t *out_rows,
+                                            size_t *out_ready)
 {
     int failures = 0;
     size_t rows = metaverse_adapter_count();
@@ -351,6 +401,14 @@ static int t_adapter_registry(void)
              every_kind_has_a_row);
     MV_CHECK("registry: a kind without a reader still states why",
              every_unwired_says_why);
+    *out_rows = rows;
+    *out_ready = ready;
+    return failures;
+}
+
+static int registry_case_wired_and_index(size_t rows, size_t ready)
+{
+    int failures = 0;
     MV_CHECK("registry: content, zcode_package, znam_name, and zslp_asset "
              "are wired",
              ready == 4 &&
@@ -376,6 +434,17 @@ static int t_adapter_registry(void)
         }
         MV_CHECK("registry: index walk covers the same rows", ok);
     }
+    return failures;
+}
+
+static int t_adapter_registry(void)
+{
+    int failures = 0;
+    size_t rows = 0;
+    size_t ready = 0;
+
+    failures += registry_case_rows_and_coverage(&rows, &ready);
+    failures += registry_case_wired_and_index(rows, ready);
     return failures;
 }
 
@@ -470,7 +539,7 @@ static const struct mv_expected_settlement k_expected_settlement[] = {
       METAVERSE_SETTLEMENT_CONTENT_ADDRESSED },
 };
 
-static int t_settlement_classes(void)
+static int settlement_case_classified_and_matches(void)
 {
     int failures = 0;
     size_t expected_n = sizeof(k_expected_settlement) /
@@ -515,6 +584,12 @@ static int t_settlement_classes(void)
                  METAVERSE_SETTLEMENT_UNKNOWN &&
              metaverse_kind_settlement(METAVERSE_KIND_COUNT) ==
                  METAVERSE_SETTLEMENT_UNKNOWN);
+    return failures;
+}
+
+static int settlement_case_names_and_meanings(void)
+{
+    int failures = 0;
     MV_CHECK("settlement: class names are the wire names",
              strcmp(metaverse_settlement_name(
                         METAVERSE_SETTLEMENT_CONTENT_ADDRESSED),
@@ -555,6 +630,12 @@ static int t_settlement_classes(void)
              strstr(metaverse_settlement_means(
                         METAVERSE_SETTLEMENT_LOCAL_DECLARATION),
                     "nothing outside this node") != NULL);
+    return failures;
+}
+
+static int settlement_case_measurable_and_independence(void)
+{
+    int failures = 0;
     MV_CHECK("settlement: proof_of_work is the ONLY measurable class",
              metaverse_settlement_work_measurable(
                  METAVERSE_SETTLEMENT_PROOF_OF_WORK) &&
@@ -577,6 +658,15 @@ static int t_settlement_classes(void)
     return failures;
 }
 
+static int t_settlement_classes(void)
+{
+    int failures = 0;
+    failures += settlement_case_classified_and_matches();
+    failures += settlement_case_names_and_meanings();
+    failures += settlement_case_measurable_and_independence();
+    return failures;
+}
+
 /* ── 3c: the work measurement ─────────────────────────────────────── */
 
 /* Build the accumulated-work value a block index entry would carry. */
@@ -585,50 +675,51 @@ static void mv_work(struct arith_uint256 *w, uint64_t v)
     arith_uint256_set_u64(w, v);
 }
 
-static int t_work_measurement(void)
+static int work_case_non_pow_refused(struct arith_uint256 *anchor_work,
+                                      struct arith_uint256 *tip_work)
 {
     int failures = 0;
     struct metaverse_work_proof p;
-    struct arith_uint256 anchor_work, tip_work;
-
-    mv_work(&anchor_work, 1000);
-    mv_work(&tip_work, 1064);
-
     /* The whole point: a non-PoW kind gets UNKNOWN, not zero, no matter
      * what heights the caller passes. */
-    {
-        const enum metaverse_kind non_pow[] = {
-            METAVERSE_KIND_CONTENT, METAVERSE_KIND_ZCODE_PACKAGE,
-            METAVERSE_KIND_HOSTED_SERVICE, METAVERSE_KIND_ENDPOINT_ONION,
-            METAVERSE_KIND_STOREFRONT_PRODUCT, METAVERSE_KIND_CONTRACT_SWAP,
-        };
-        bool refused = true;
-        bool unknown_not_zero = true;
+    const enum metaverse_kind non_pow[] = {
+        METAVERSE_KIND_CONTENT, METAVERSE_KIND_ZCODE_PACKAGE,
+        METAVERSE_KIND_HOSTED_SERVICE, METAVERSE_KIND_ENDPOINT_ONION,
+        METAVERSE_KIND_STOREFRONT_PRODUCT, METAVERSE_KIND_CONTRACT_SWAP,
+    };
+    bool refused = true;
+    bool unknown_not_zero = true;
 
-        for (size_t i = 0; i < sizeof(non_pow) / sizeof(non_pow[0]); i++) {
-            if (metaverse_work_measure(non_pow[i], 100, &anchor_work, 900,
-                                       &tip_work, &p))
-                refused = false;
-            if (p.applicable || p.has_anchor_height || p.has_depth ||
-                p.has_chainwork || p.has_tip_height)
-                unknown_not_zero = false;
-            /* Distinguishable from zero, in the struct AND in the render. */
-            if (p.anchor_height != -1 || p.depth != -1 ||
-                p.tip_height != -1 || p.chainwork_hex[0] != '\0')
-                unknown_not_zero = false;
-            if (p.gap != METAVERSE_WORK_GAP_NOT_APPLICABLE)
-                unknown_not_zero = false;
-        }
-        MV_CHECK("work: a non-proof-of-work kind is refused a measurement "
-                 "even when a real tip is offered", refused);
-        MV_CHECK("work: for those kinds every number is UNKNOWN (-1/\"\"), "
-                 "never a plausible zero", unknown_not_zero);
+    for (size_t i = 0; i < sizeof(non_pow) / sizeof(non_pow[0]); i++) {
+        if (metaverse_work_measure(non_pow[i], 100, anchor_work, 900,
+                                   tip_work, &p))
+            refused = false;
+        if (p.applicable || p.has_anchor_height || p.has_depth ||
+            p.has_chainwork || p.has_tip_height)
+            unknown_not_zero = false;
+        /* Distinguishable from zero, in the struct AND in the render. */
+        if (p.anchor_height != -1 || p.depth != -1 ||
+            p.tip_height != -1 || p.chainwork_hex[0] != '\0')
+            unknown_not_zero = false;
+        if (p.gap != METAVERSE_WORK_GAP_NOT_APPLICABLE)
+            unknown_not_zero = false;
     }
+    MV_CHECK("work: a non-proof-of-work kind is refused a measurement "
+             "even when a real tip is offered", refused);
+    MV_CHECK("work: for those kinds every number is UNKNOWN (-1/\"\"), "
+             "never a plausible zero", unknown_not_zero);
+    return failures;
+}
 
+static int work_case_anchored_measures(struct arith_uint256 *anchor_work,
+                                        struct arith_uint256 *tip_work)
+{
+    int failures = 0;
+    struct metaverse_work_proof p;
     /* A chain-anchored fixture: anchor at 500, tip at 564. */
     MV_CHECK("work: a proof-of-work kind with an anchor and a tip measures",
              metaverse_work_measure(METAVERSE_KIND_ZNAM_NAME, 500,
-                                    &anchor_work, 564, &tip_work, &p));
+                                    anchor_work, 564, tip_work, &p));
     MV_CHECK("work: the anchor height is the record's, not the tip's",
              p.has_anchor_height && p.anchor_height == 500 &&
              p.has_tip_height && p.tip_height == 564);
@@ -641,7 +732,7 @@ static int t_work_measurement(void)
         char expect[65];
         struct arith_uint256 delta;
 
-        arith_uint256_sub(&delta, &tip_work, &anchor_work);
+        arith_uint256_sub(&delta, tip_work, anchor_work);
         arith_uint256_get_hex(&delta, expect);
         MV_CHECK("work: chainwork is the block index's own accumulated "
                  "work, differenced",
@@ -650,11 +741,18 @@ static int t_work_measurement(void)
                         "00000000000000000000000000000000000000000000000000"
                         "00000000000040") == 0);
     }
+    return failures;
+}
 
+static int work_case_depth_zero_and_missing_halves(
+    struct arith_uint256 *anchor_work, struct arith_uint256 *tip_work)
+{
+    int failures = 0;
+    struct metaverse_work_proof p;
     /* Depth 0 is a real answer and must not read as unknown. */
     MV_CHECK("work: an anchor AT the tip is depth 0, not unknown",
              metaverse_work_measure(METAVERSE_KIND_ZSLP_ASSET, 900,
-                                    &tip_work, 900, &tip_work, &p) &&
+                                    tip_work, 900, tip_work, &p) &&
              p.has_depth && p.depth == 0 && p.has_chainwork &&
              strcmp(p.chainwork_hex,
                     "000000000000000000000000000000000000000000000000000000"
@@ -663,18 +761,26 @@ static int t_work_measurement(void)
     /* Missing halves each degrade to a NAMED gap, never to a number. */
     MV_CHECK("work: no anchor height -> no_anchor, nothing measured",
              !metaverse_work_measure(METAVERSE_KIND_ZNAM_NAME, -1,
-                                     &anchor_work, 564, &tip_work, &p) &&
+                                     anchor_work, 564, tip_work, &p) &&
              p.applicable && p.gap == METAVERSE_WORK_GAP_NO_ANCHOR &&
              !p.has_depth && p.depth == -1 && !p.has_chainwork);
     MV_CHECK("work: no tip -> no_tip, and the anchor still reports",
              !metaverse_work_measure(METAVERSE_KIND_ZNAM_NAME, 500,
-                                     &anchor_work, -1, NULL, &p) &&
+                                     anchor_work, -1, NULL, &p) &&
              p.gap == METAVERSE_WORK_GAP_NO_TIP && p.has_anchor_height &&
              p.anchor_height == 500 && !p.has_depth && p.depth == -1);
+    return failures;
+}
+
+static int work_case_contradiction_and_backwards(
+    struct arith_uint256 *anchor_work, struct arith_uint256 *tip_work)
+{
+    int failures = 0;
+    struct metaverse_work_proof p;
     MV_CHECK("work: an anchor ABOVE the tip is a contradiction, not a "
              "negative or clamped depth",
              !metaverse_work_measure(METAVERSE_KIND_ZNAM_NAME, 600,
-                                     &anchor_work, 500, &tip_work, &p) &&
+                                     anchor_work, 500, tip_work, &p) &&
              !p.has_depth && p.depth == -1 && !p.has_chainwork &&
              p.gap == METAVERSE_WORK_GAP_ANCHOR_ABOVE_TIP);
     MV_CHECK("work: depth stands without chainwork when the block index "
@@ -684,60 +790,112 @@ static int t_work_measurement(void)
              p.has_depth && p.depth == 64 && !p.has_chainwork &&
              p.chainwork_hex[0] == '\0');
     MV_CHECK("work: work going BACKWARDS is not reported as a magnitude",
-             metaverse_work_measure(METAVERSE_KIND_ZNAM_NAME, 500, &tip_work,
-                                    564, &anchor_work, &p) &&
+             metaverse_work_measure(METAVERSE_KIND_ZNAM_NAME, 500, tip_work,
+                                    564, anchor_work, &p) &&
              p.has_depth && !p.has_chainwork);
     MV_CHECK("work: a NULL out is refused",
              !metaverse_work_measure(METAVERSE_KIND_ZNAM_NAME, 500,
-                                     &anchor_work, 564, &tip_work, NULL));
-    {
-        bool every_gap_explains = true;
+                                     anchor_work, 564, tip_work, NULL));
+    return failures;
+}
 
-        for (int g = METAVERSE_WORK_GAP_NOT_APPLICABLE;
-             g <= METAVERSE_WORK_GAP_ANCHOR_ABOVE_TIP; g++) {
-            const char *r =
-                metaverse_work_gap_reason((enum metaverse_work_gap)g);
-            const char *n =
-                metaverse_work_gap_name((enum metaverse_work_gap)g);
+static int work_case_depth_and_gaps(struct arith_uint256 *anchor_work,
+                                     struct arith_uint256 *tip_work)
+{
+    int failures = 0;
+    failures += work_case_depth_zero_and_missing_halves(anchor_work,
+                                                         tip_work);
+    failures += work_case_contradiction_and_backwards(anchor_work,
+                                                       tip_work);
+    return failures;
+}
 
-            if (!r || !*r || !n || !*n)
-                every_gap_explains = false;
-        }
-        MV_CHECK("work: every gap names itself and explains itself",
-                 every_gap_explains &&
-                 strcmp(metaverse_work_gap_name(METAVERSE_WORK_GAP_NONE),
-                        "none") == 0);
+static int work_case_gap_names(void)
+{
+    int failures = 0;
+    bool every_gap_explains = true;
+
+    for (int g = METAVERSE_WORK_GAP_NOT_APPLICABLE;
+         g <= METAVERSE_WORK_GAP_ANCHOR_ABOVE_TIP; g++) {
+        const char *r =
+            metaverse_work_gap_reason((enum metaverse_work_gap)g);
+        const char *n =
+            metaverse_work_gap_name((enum metaverse_work_gap)g);
+
+        if (!r || !*r || !n || !*n)
+            every_gap_explains = false;
     }
+    MV_CHECK("work: every gap names itself and explains itself",
+             every_gap_explains &&
+             strcmp(metaverse_work_gap_name(METAVERSE_WORK_GAP_NONE),
+                    "none") == 0);
+    return failures;
+}
+
+static int work_case_json_render_fields(const struct json_value *j)
+{
+    int failures = 0;
+    const char *cw  = json_get_str(json_get(j, "chainwork_since_anchor"));
+    const char *gap = json_get_str(json_get(j, "gap"));
+    const char *why = json_get_str(json_get(j, "gap_reason"));
+
+    MV_CHECK("work: a not-applicable proof renders measurable=false, "
+             "-1 heights and an empty chainwork",
+             !json_get_bool(json_get(j, "measurable")) &&
+             json_get_int(json_get(j, "anchor_height")) == -1 &&
+             json_get_int(json_get(j, "tip_height")) == -1 &&
+             json_get_int(json_get(j, "confirmation_depth")) == -1 &&
+             cw && *cw == '\0' && gap &&
+             strcmp(gap, "not_applicable") == 0 && why && *why);
+    return failures;
+}
+
+static int work_case_json_render_no_score(const char *doc)
+{
+    int failures = 0;
     /* No score, rating, or tier: the render carries mechanism + numbers. */
-    {
-        struct json_value j;
-        char doc[2048];
-        const char *cw, *gap, *why;
-        bool ok;
+    MV_CHECK("work: the render invents no score, rating, or trust tier",
+             doc[0] != '\0' && !strstr(doc, "score") &&
+             !strstr(doc, "rating") && !strstr(doc, "trust") &&
+             !strstr(doc, "tier") && !strstr(doc, "level"));
+    return failures;
+}
 
-        (void)metaverse_work_measure(METAVERSE_KIND_CONTENT, 100,
-                                     &anchor_work, 900, &tip_work, &p);
-        json_init(&j);
-        ok = metaverse_work_to_json(&p, &j);
-        cw  = json_get_str(json_get(&j, "chainwork_since_anchor"));
-        gap = json_get_str(json_get(&j, "gap"));
-        why = json_get_str(json_get(&j, "gap_reason"));
-        MV_CHECK("work: a not-applicable proof renders measurable=false, "
-                 "-1 heights and an empty chainwork",
-                 ok && !json_get_bool(json_get(&j, "measurable")) &&
-                 json_get_int(json_get(&j, "anchor_height")) == -1 &&
-                 json_get_int(json_get(&j, "tip_height")) == -1 &&
-                 json_get_int(json_get(&j, "confirmation_depth")) == -1 &&
-                 cw && *cw == '\0' && gap &&
-                 strcmp(gap, "not_applicable") == 0 && why && *why);
-        doc[0] = '\0';
-        (void)json_write(&j, doc, sizeof(doc));
-        MV_CHECK("work: the render invents no score, rating, or trust tier",
-                 doc[0] != '\0' && !strstr(doc, "score") &&
-                 !strstr(doc, "rating") && !strstr(doc, "trust") &&
-                 !strstr(doc, "tier") && !strstr(doc, "level"));
-        json_free(&j);
-    }
+static int work_case_json_render(struct arith_uint256 *anchor_work,
+                                  struct arith_uint256 *tip_work)
+{
+    int failures = 0;
+    struct metaverse_work_proof p;
+    struct json_value j;
+    char doc[2048];
+    bool ok;
+
+    (void)metaverse_work_measure(METAVERSE_KIND_CONTENT, 100,
+                                 anchor_work, 900, tip_work, &p);
+    json_init(&j);
+    ok = metaverse_work_to_json(&p, &j);
+    MV_CHECK("work: the render succeeds", ok);
+    failures += work_case_json_render_fields(&j);
+    doc[0] = '\0';
+    (void)json_write(&j, doc, sizeof(doc));
+    failures += work_case_json_render_no_score(doc);
+    json_free(&j);
+    return failures;
+}
+
+static int t_work_measurement(void)
+{
+    int failures = 0;
+    struct arith_uint256 anchor_work, tip_work;
+
+    mv_work(&anchor_work, 1000);
+    mv_work(&tip_work, 1064);
+
+    failures += work_case_non_pow_refused(&anchor_work, &tip_work);
+    failures += work_case_anchored_measures(&anchor_work, &tip_work);
+    failures += work_case_depth_and_gaps(&anchor_work, &tip_work);
+    failures += work_case_gap_names();
+    failures += work_case_json_render(&anchor_work, &tip_work);
     return failures;
 }
 
@@ -855,14 +1013,10 @@ static bool mv_render_begin(enum metaverse_kind kind, struct json_value *out)
     return metaverse_view_to_json(&view, out);
 }
 
-static int t_settlement_is_surfaced(void)
+static int surfaced_case_list_kinds(const char *dd)
 {
     int failures = 0;
-    char dd[256];
     struct mv_cmd c;
-
-    /* An empty datadir is enough: kinds[] is always fully populated. */
-    test_make_tmpdir(dd, sizeof(dd), "metaverse", "settlement");
 
     mv_list(&c, dd, NULL);
     MV_CHECK("surface: list succeeds on an empty datadir",
@@ -911,55 +1065,95 @@ static int t_settlement_is_surfaced(void)
                                 "content_addressed") == 0);
     }
     mv_cmd_free(&c);
+    return failures;
+}
 
+static int surfaced_case_content_view(void)
+{
+    int failures = 0;
+    struct json_value j;
+    const struct json_value *w;
+
+    json_init(&j);
+    MV_CHECK("surface: a content view renders its settlement class",
+             mv_render_begin(METAVERSE_KIND_CONTENT, &j) &&
+             strcmp(mv_str(&j, "settlement"), "content_addressed") == 0 &&
+             *mv_str(&j, "settlement_means") != '\0');
+    w = json_get(&j, "work");
+    MV_CHECK("surface: its work block is present, not-applicable, and "
+             "carries -1 rather than 0",
+             w && !json_get_bool(json_get(w, "measurable")) &&
+             json_get_int(json_get(w, "confirmation_depth")) == -1 &&
+             json_get_int(json_get(w, "anchor_height")) == -1 &&
+             strcmp(mv_str(w, "gap"), "not_applicable") == 0);
+    json_free(&j);
+    return failures;
+}
+
+static int surfaced_case_pow_view(void)
+{
+    int failures = 0;
+    struct json_value j;
+    const struct json_value *w;
+
+    json_init(&j);
+    MV_CHECK("surface: a proof-of-work kind's view says the question "
+             "applies but is unanswered, not that the depth is 0",
+             mv_render_begin(METAVERSE_KIND_ZNAM_NAME, &j) &&
+             strcmp(mv_str(&j, "settlement"), "proof_of_work") == 0);
+    w = json_get(&j, "work");
+    MV_CHECK("surface: measurable=true with a no_anchor gap and -1 "
+             "numbers",
+             w && json_get_bool(json_get(w, "measurable")) &&
+             strcmp(mv_str(w, "gap"), "no_anchor") == 0 &&
+             json_get_int(json_get(w, "confirmation_depth")) == -1 &&
+             !json_get_bool(json_get(w, "has_chainwork")) &&
+             strcmp(mv_str(w, "chainwork_since_anchor"), "") == 0);
+    json_free(&j);
+    return failures;
+}
+
+static int surfaced_case_local_declaration_view(void)
+{
+    int failures = 0;
+    struct json_value j;
+
+    /* Settlement and evidence are separate axes: a locally-declared
+     * property still gets a full view, and the view says both. */
+    json_init(&j);
+    MV_CHECK("surface: a locally-declared kind renders the blunt "
+             "wording alongside its evidence fields",
+             mv_render_begin(METAVERSE_KIND_STOREFRONT_PRODUCT, &j) &&
+             strcmp(mv_str(&j, "settlement"), "local_declaration") == 0 &&
+             strstr(mv_str(&j, "settlement_means"),
+                    "nothing outside this node") != NULL &&
+             json_get(&j, "evidence_grade") != NULL &&
+             json_get(&j, "chain_bound") != NULL);
+    json_free(&j);
+    return failures;
+}
+
+static int surfaced_case_property_views(void)
+{
+    int failures = 0;
     /* The per-property view, which is what `metaverse property show`
      * renders. */
-    {
-        struct json_value j;
-        const struct json_value *w;
+    failures += surfaced_case_content_view();
+    failures += surfaced_case_pow_view();
+    failures += surfaced_case_local_declaration_view();
+    return failures;
+}
 
-        json_init(&j);
-        MV_CHECK("surface: a content view renders its settlement class",
-                 mv_render_begin(METAVERSE_KIND_CONTENT, &j) &&
-                 strcmp(mv_str(&j, "settlement"), "content_addressed") == 0 &&
-                 *mv_str(&j, "settlement_means") != '\0');
-        w = json_get(&j, "work");
-        MV_CHECK("surface: its work block is present, not-applicable, and "
-                 "carries -1 rather than 0",
-                 w && !json_get_bool(json_get(w, "measurable")) &&
-                 json_get_int(json_get(w, "confirmation_depth")) == -1 &&
-                 json_get_int(json_get(w, "anchor_height")) == -1 &&
-                 strcmp(mv_str(w, "gap"), "not_applicable") == 0);
-        json_free(&j);
+static int t_settlement_is_surfaced(void)
+{
+    int failures = 0;
+    char dd[256];
 
-        json_init(&j);
-        MV_CHECK("surface: a proof-of-work kind's view says the question "
-                 "applies but is unanswered, not that the depth is 0",
-                 mv_render_begin(METAVERSE_KIND_ZNAM_NAME, &j) &&
-                 strcmp(mv_str(&j, "settlement"), "proof_of_work") == 0);
-        w = json_get(&j, "work");
-        MV_CHECK("surface: measurable=true with a no_anchor gap and -1 "
-                 "numbers",
-                 w && json_get_bool(json_get(w, "measurable")) &&
-                 strcmp(mv_str(w, "gap"), "no_anchor") == 0 &&
-                 json_get_int(json_get(w, "confirmation_depth")) == -1 &&
-                 !json_get_bool(json_get(w, "has_chainwork")) &&
-                 strcmp(mv_str(w, "chainwork_since_anchor"), "") == 0);
-        json_free(&j);
+    /* An empty datadir is enough: kinds[] is always fully populated. */
+    test_make_tmpdir(dd, sizeof(dd), "metaverse", "settlement");
 
-        /* Settlement and evidence are separate axes: a locally-declared
-         * property still gets a full view, and the view says both. */
-        json_init(&j);
-        MV_CHECK("surface: a locally-declared kind renders the blunt "
-                 "wording alongside its evidence fields",
-                 mv_render_begin(METAVERSE_KIND_STOREFRONT_PRODUCT, &j) &&
-                 strcmp(mv_str(&j, "settlement"), "local_declaration") == 0 &&
-                 strstr(mv_str(&j, "settlement_means"),
-                        "nothing outside this node") != NULL &&
-                 json_get(&j, "evidence_grade") != NULL &&
-                 json_get(&j, "chain_bound") != NULL);
-        json_free(&j);
-    }
+    failures += surfaced_case_list_kinds(dd);
+    failures += surfaced_case_property_views();
 
     test_rm_rf_recursive(dd);
     return failures;
@@ -967,126 +1161,152 @@ static int t_settlement_is_surfaced(void)
 
 /* ── 4: CONTENT adapter against a real blob ───────────────────────── */
 
-static int t_content_adapter(void)
-{
-    int failures = 0;
+struct content_adapter_ctx {
     char dd[256];
     char zcode_dir[512];
     char root_hex[65];
     char id_text[METAVERSE_ID_TEXT_MAX];
     char chunk_path[768];
     char manifest_path[768];
-    const uint8_t bytes[] = "sovereign content, byte-identical everywhere";
     uint8_t root[32];
     uint8_t chunk_hash[32];
     char chunk_hex[65];
-    struct vcs_package_store *store;
-    struct mv_cmd c;
+};
 
-    test_make_tmpdir(dd, sizeof(dd), "metaverse", "content");
-    snprintf(zcode_dir, sizeof(zcode_dir), "%s/zcode", dd);
-
-    store = vcs_package_store_open(dd, 4u * 1024u * 1024u);
+static int content_case_fixture_and_id(struct content_adapter_ctx *cc,
+                                        const uint8_t *bytes,
+                                        size_t bytes_len, bool *store_ok)
+{
+    int failures = 0;
+    struct vcs_package_store *store =
+        vcs_package_store_open(cc->dd, 4u * 1024u * 1024u);
     MV_CHECK("content: fixture store opens", store != NULL);
     if (!store) {
-        test_rm_rf_recursive(dd);
+        *store_ok = false;
         return failures;
     }
+    *store_ok = true;
     MV_CHECK("content: blob stores",
-             vcs_blob_put_to(store, bytes, sizeof(bytes) - 1, root) ==
+             vcs_blob_put_to(store, bytes, bytes_len, cc->root) ==
                  VCS_BLOB_OK);
     vcs_package_store_close(store);
 
-    mv_hex32(root, root_hex);
-    snprintf(id_text, sizeof(id_text), "content:%s", root_hex);
+    mv_hex32(cc->root, cc->root_hex);
+    snprintf(cc->id_text, sizeof(cc->id_text), "content:%s", cc->root_hex);
     {
         struct metaverse_property_id id;
 
         MV_CHECK("content: blob root parses as a content property id",
-                 metaverse_property_id_parse(id_text, &id) &&
+                 metaverse_property_id_parse(cc->id_text, &id) &&
                  id.kind == METAVERSE_KIND_CONTENT &&
-                 memcmp(id.root, root, 32) == 0);
+                 memcmp(id.root, cc->root, 32) == 0);
     }
+    return failures;
+}
 
-    /* show — present, byte-identity evidence, and NOT chain bound. */
-    mv_show(&c, dd, id_text);
-    MV_CHECK("content: show succeeds",
-             c.reply.status == ZCL_COMMAND_STATUS_PASSED);
+static int content_case_show_present_status(const struct json_value *data)
+{
+    int failures = 0;
     MV_CHECK("content: show reports the property present and determined",
-             strcmp(mv_str(&c.reply.data, "status"), "present") == 0 &&
-             json_get_bool(json_get(&c.reply.data, "determined")));
+             strcmp(mv_str(data, "status"), "present") == 0 &&
+             json_get_bool(json_get(data, "determined")));
     MV_CHECK("content: the evidence grade is the locally re-derived root",
-             strcmp(mv_str(&c.reply.data, "evidence_grade"),
+             strcmp(mv_str(data, "evidence_grade"),
                     "local_content_hash") == 0 &&
-             strcmp(mv_str(&c.reply.data, "evidence_source"),
+             strcmp(mv_str(data, "evidence_source"),
                     "mv_manifest_verify_possession") == 0);
     MV_CHECK("content: the view is explicitly NOT chain-bound and carries "
              "no freshness height",
-             !json_get_bool(json_get(&c.reply.data, "chain_bound")) &&
-             !json_get_bool(json_get(&c.reply.data,
-                                     "has_freshness_height")) &&
-             json_get_int(json_get(&c.reply.data, "freshness_height")) == -1);
+             !json_get_bool(json_get(data, "chain_bound")) &&
+             !json_get_bool(json_get(data, "has_freshness_height")) &&
+             json_get_int(json_get(data, "freshness_height")) == -1);
     /* And the same on a REAL adapter-filled view, not just view_begin: the
      * content adapter must not have overwritten the class or minted a
      * measurement out of the tip. */
     MV_CHECK("content: a really-read blob still reports content_addressed "
              "with no work measurement",
-             strcmp(mv_str(&c.reply.data, "settlement"),
-                    "content_addressed") == 0 &&
-             json_get(&c.reply.data, "work") &&
-             !json_get_bool(json_get(json_get(&c.reply.data, "work"),
+             strcmp(mv_str(data, "settlement"), "content_addressed") == 0 &&
+             json_get(data, "work") &&
+             !json_get_bool(json_get(json_get(data, "work"),
                                      "measurable")) &&
-             json_get_int(json_get(json_get(&c.reply.data, "work"),
+             json_get_int(json_get(json_get(data, "work"),
                                    "confirmation_depth")) == -1);
     MV_CHECK("content: no owner is recorded, and it says so by name",
-             strcmp(mv_str(&c.reply.data, "owner_principal"), "") == 0 &&
-             strcmp(mv_str(&c.reply.data, "owner_principal_kind"),
-                    "none") == 0);
+             strcmp(mv_str(data, "owner_principal"), "") == 0 &&
+             strcmp(mv_str(data, "owner_principal_kind"), "none") == 0);
+    return failures;
+}
+
+static int content_case_show_present_details(struct content_adapter_ctx *cc,
+                                              const struct json_value *data,
+                                              size_t bytes_len)
+{
+    int failures = 0;
     MV_CHECK("content: authority source is the blob store",
-             strcmp(mv_str(&c.reply.data, "authority_source"),
+             strcmp(mv_str(data, "authority_source"),
                     "vcs.blob_store") == 0);
     MV_CHECK("content: complete bytes support host and deliver, never "
              "transfer (there is no title to move)",
-             strstr(mv_str(&c.reply.data, "actions_csv"), "host") != NULL &&
-             strstr(mv_str(&c.reply.data, "actions_csv"), "deliver") != NULL &&
-             strstr(mv_str(&c.reply.data, "actions_csv"),
-                    "transfer") == NULL &&
-             strstr(mv_str(&c.reply.data, "actions_csv"),
+             strstr(mv_str(data, "actions_csv"), "host") != NULL &&
+             strstr(mv_str(data, "actions_csv"), "deliver") != NULL &&
+             strstr(mv_str(data, "actions_csv"), "transfer") == NULL &&
+             strstr(mv_str(data, "actions_csv"),
                     "publish_revision") == NULL);
     {
-        const char *ir = mv_str(&c.reply.data, "immutable_root");
-        const char *cr = mv_str(&c.reply.data, "content_root");
+        const char *ir = mv_str(data, "immutable_root");
+        const char *cr = mv_str(data, "content_root");
 
         MV_CHECK("content: the content root is the chunk hash, and the "
                  "immutable root is the manifest root",
-                 strcmp(ir, root_hex) == 0 && strlen(cr) == 64 &&
-                 strcmp(cr, root_hex) != 0);
+                 strcmp(ir, cc->root_hex) == 0 && strlen(cr) == 64 &&
+                 strcmp(cr, cc->root_hex) != 0);
     }
     MV_CHECK("content: chunk accounting is complete",
-             json_get_int(json_get(&c.reply.data, "chunk_total")) == 1 &&
-             json_get_int(json_get(&c.reply.data, "chunks_present")) == 1 &&
-             json_get_int(json_get(&c.reply.data, "chunks_verified")) == 1 &&
-             json_get_int(json_get(&c.reply.data, "bytes_verified")) ==
-                 (int64_t)(sizeof(bytes) - 1u) &&
-             json_get_bool(json_get(&c.reply.data,
-                                    "manifest_root_verified")) &&
-             json_get_bool(json_get(&c.reply.data,
-                                    "verification_complete")) &&
-             strcmp(mv_str(&c.reply.data, "verification_gap"), "") == 0 &&
-             json_get_int(json_get(&c.reply.data, "file_count")) == 1);
+             json_get_int(json_get(data, "chunk_total")) == 1 &&
+             json_get_int(json_get(data, "chunks_present")) == 1 &&
+             json_get_int(json_get(data, "chunks_verified")) == 1 &&
+             json_get_int(json_get(data, "bytes_verified")) ==
+                 (int64_t)bytes_len &&
+             json_get_bool(json_get(data, "manifest_root_verified")) &&
+             json_get_bool(json_get(data, "verification_complete")) &&
+             strcmp(mv_str(data, "verification_gap"), "") == 0 &&
+             json_get_int(json_get(data, "file_count")) == 1);
     /* Keep the chunk hash for the deletion step below. */
-    snprintf(chunk_hex, sizeof(chunk_hex), "%s",
-             mv_str(&c.reply.data, "content_root"));
-    snprintf(chunk_path, sizeof(chunk_path), "%s/cas/sha3/%.2s/%s",
-             zcode_dir, chunk_hex, chunk_hex);
+    snprintf(cc->chunk_hex, sizeof(cc->chunk_hex), "%s",
+             mv_str(data, "content_root"));
+    snprintf(cc->chunk_path, sizeof(cc->chunk_path), "%s/cas/sha3/%.2s/%s",
+             cc->zcode_dir, cc->chunk_hex, cc->chunk_hex);
+    return failures;
+}
+
+static int content_case_show_present(struct content_adapter_ctx *cc,
+                                      size_t bytes_len)
+{
+    int failures = 0;
+    struct mv_cmd c;
+
+    /* show — present, byte-identity evidence, and NOT chain bound. */
+    mv_show(&c, cc->dd, cc->id_text);
+    MV_CHECK("content: show succeeds",
+             c.reply.status == ZCL_COMMAND_STATUS_PASSED);
+    failures += content_case_show_present_status(&c.reply.data);
+    failures += content_case_show_present_details(cc, &c.reply.data,
+                                                   bytes_len);
     mv_cmd_free(&c);
+    return failures;
+}
+
+static int content_case_list_catalog(struct content_adapter_ctx *cc)
+{
+    int failures = 0;
+    struct mv_cmd c;
 
     /* list — the blob is in the catalog, and every kind reports a row. */
-    mv_list(&c, dd, NULL);
+    mv_list(&c, cc->dd, NULL);
     MV_CHECK("content: list succeeds",
              c.reply.status == ZCL_COMMAND_STATUS_PASSED);
     MV_CHECK("content: the blob appears in the unfiltered catalog",
-             mv_find_item(&c.reply.data, id_text) != NULL);
+             mv_find_item(&c.reply.data, cc->id_text) != NULL);
     MV_CHECK("content: a complete store reports no hidden integrity gap",
              json_get_bool(json_get(&c.reply.data, "integrity_ok")) &&
              json_get_int(json_get(&c.reply.data,
@@ -1109,91 +1329,125 @@ static int t_content_adapter(void)
                  "with a reason, not dropped", ok);
     }
     mv_cmd_free(&c);
+    return failures;
+}
+
+static int content_case_wrong_bytes_and_symlink(struct content_adapter_ctx *cc,
+                                                 const uint8_t *bytes,
+                                                 size_t bytes_len)
+{
+    int failures = 0;
+    struct mv_cmd c;
+    uint8_t wrong[sizeof("sovereign content, byte-identical everywhere") -
+                  1u];
+    FILE *f;
 
     /* A pathname-shaped CAS entry is not possession. Exercise every cheap
      * false-positive shape before the missing-file case below. */
-    {
-        uint8_t wrong[sizeof(bytes) - 1u];
-        FILE *f;
+    memset(wrong, 0xa5, bytes_len);
+    f = fopen(cc->chunk_path, "wb");
+    MV_CHECK("content: same-length wrong bytes are planted",
+             f && fwrite(wrong, 1, bytes_len, f) == bytes_len);
+    if (f)
+        fclose(f);
+    mv_show(&c, cc->dd, cc->id_text);
+    MV_CHECK("content: same-length wrong bytes never become PRESENT",
+             c.reply.status == ZCL_COMMAND_STATUS_PASSED &&
+             strcmp(mv_str(&c.reply.data, "status"), "incomplete") == 0 &&
+             json_get_int(json_get(&c.reply.data, "chunks_present")) == 1 &&
+             json_get_int(json_get(&c.reply.data, "chunks_verified")) == 0 &&
+             !json_get_bool(json_get(&c.reply.data,
+                                     "verification_complete")) &&
+             strcmp(mv_str(&c.reply.data, "verification_gap"),
+                    "chunk_hash_mismatch") == 0 &&
+             strcmp(mv_str(&c.reply.data, "actions_csv"), "") == 0);
+    mv_cmd_free(&c);
 
-        memset(wrong, 0xa5, sizeof(wrong));
-        f = fopen(chunk_path, "wb");
-        MV_CHECK("content: same-length wrong bytes are planted",
-                 f && fwrite(wrong, 1, sizeof(wrong), f) == sizeof(wrong));
-        if (f)
-            fclose(f);
-        mv_show(&c, dd, id_text);
-        MV_CHECK("content: same-length wrong bytes never become PRESENT",
-                 c.reply.status == ZCL_COMMAND_STATUS_PASSED &&
-                 strcmp(mv_str(&c.reply.data, "status"), "incomplete") == 0 &&
-                 json_get_int(json_get(&c.reply.data, "chunks_present")) == 1 &&
-                 json_get_int(json_get(&c.reply.data, "chunks_verified")) == 0 &&
-                 !json_get_bool(json_get(&c.reply.data,
-                                         "verification_complete")) &&
-                 strcmp(mv_str(&c.reply.data, "verification_gap"),
-                        "chunk_hash_mismatch") == 0 &&
-                 strcmp(mv_str(&c.reply.data, "actions_csv"), "") == 0);
-        mv_cmd_free(&c);
+    f = fopen(cc->chunk_path, "wb");
+    MV_CHECK("content: canonical bytes restore after hash mismatch",
+             f && fwrite(bytes, 1, bytes_len, f) == bytes_len);
+    if (f)
+        fclose(f);
+    MV_CHECK("content: canonical CAS path is removed for symlink case",
+             unlink(cc->chunk_path) == 0);
+    MV_CHECK("content: symlink is planted at the CAS coordinate",
+             symlink("/dev/null", cc->chunk_path) == 0);
+    mv_show(&c, cc->dd, cc->id_text);
+    MV_CHECK("content: O_NOFOLLOW rejects a symlink as possession",
+             strcmp(mv_str(&c.reply.data, "status"), "incomplete") == 0 &&
+             strcmp(mv_str(&c.reply.data, "verification_gap"),
+                    "chunk_symlink") == 0 &&
+             strcmp(mv_str(&c.reply.data, "actions_csv"), "") == 0);
+    mv_cmd_free(&c);
+    MV_CHECK("content: symlink is removed", unlink(cc->chunk_path) == 0);
+    return failures;
+}
 
-        f = fopen(chunk_path, "wb");
-        MV_CHECK("content: canonical bytes restore after hash mismatch",
-                 f && fwrite(bytes, 1, sizeof(bytes) - 1u, f) ==
-                          sizeof(bytes) - 1u);
-        if (f)
-            fclose(f);
-        MV_CHECK("content: canonical CAS path is removed for symlink case",
-                 unlink(chunk_path) == 0);
-        MV_CHECK("content: symlink is planted at the CAS coordinate",
-                 symlink("/dev/null", chunk_path) == 0);
-        mv_show(&c, dd, id_text);
-        MV_CHECK("content: O_NOFOLLOW rejects a symlink as possession",
-                 strcmp(mv_str(&c.reply.data, "status"), "incomplete") == 0 &&
-                 strcmp(mv_str(&c.reply.data, "verification_gap"),
-                        "chunk_symlink") == 0 &&
-                 strcmp(mv_str(&c.reply.data, "actions_csv"), "") == 0);
-        mv_cmd_free(&c);
-        MV_CHECK("content: symlink is removed", unlink(chunk_path) == 0);
+static int content_case_zero_length_and_dir(struct content_adapter_ctx *cc,
+                                             const uint8_t *bytes,
+                                             size_t bytes_len)
+{
+    int failures = 0;
+    struct mv_cmd c;
+    FILE *f;
 
-        f = fopen(chunk_path, "wb");
-        MV_CHECK("content: zero-length CAS object is planted", f != NULL);
-        if (f)
-            fclose(f);
-        mv_show(&c, dd, id_text);
-        MV_CHECK("content: wrong length never becomes possession",
-                 strcmp(mv_str(&c.reply.data, "status"), "incomplete") == 0 &&
-                 strcmp(mv_str(&c.reply.data, "verification_gap"),
-                        "chunk_length_mismatch") == 0 &&
-                 strcmp(mv_str(&c.reply.data, "actions_csv"), "") == 0);
-        mv_cmd_free(&c);
+    f = fopen(cc->chunk_path, "wb");
+    MV_CHECK("content: zero-length CAS object is planted", f != NULL);
+    if (f)
+        fclose(f);
+    mv_show(&c, cc->dd, cc->id_text);
+    MV_CHECK("content: wrong length never becomes possession",
+             strcmp(mv_str(&c.reply.data, "status"), "incomplete") == 0 &&
+             strcmp(mv_str(&c.reply.data, "verification_gap"),
+                    "chunk_length_mismatch") == 0 &&
+             strcmp(mv_str(&c.reply.data, "actions_csv"), "") == 0);
+    mv_cmd_free(&c);
 
-        MV_CHECK("content: zero-length object is removed",
-                 unlink(chunk_path) == 0);
-        MV_CHECK("content: directory is planted at the CAS coordinate",
-                 mkdir(chunk_path, 0700) == 0);
-        mv_show(&c, dd, id_text);
-        MV_CHECK("content: non-regular CAS coordinate never becomes present",
-                 strcmp(mv_str(&c.reply.data, "status"), "incomplete") == 0 &&
-                 strcmp(mv_str(&c.reply.data, "verification_gap"),
-                        "chunk_not_regular") == 0 &&
-                 strcmp(mv_str(&c.reply.data, "actions_csv"), "") == 0);
-        mv_cmd_free(&c);
-        MV_CHECK("content: directory coordinate is removed",
-                 rmdir(chunk_path) == 0);
-        f = fopen(chunk_path, "wb");
-        MV_CHECK("content: canonical bytes restore after shape cases",
-                 f && fwrite(bytes, 1, sizeof(bytes) - 1u, f) ==
-                          sizeof(bytes) - 1u);
-        if (f)
-            fclose(f);
-    }
+    MV_CHECK("content: zero-length object is removed",
+             unlink(cc->chunk_path) == 0);
+    MV_CHECK("content: directory is planted at the CAS coordinate",
+             mkdir(cc->chunk_path, 0700) == 0);
+    mv_show(&c, cc->dd, cc->id_text);
+    MV_CHECK("content: non-regular CAS coordinate never becomes present",
+             strcmp(mv_str(&c.reply.data, "status"), "incomplete") == 0 &&
+             strcmp(mv_str(&c.reply.data, "verification_gap"),
+                    "chunk_not_regular") == 0 &&
+             strcmp(mv_str(&c.reply.data, "actions_csv"), "") == 0);
+    mv_cmd_free(&c);
+    MV_CHECK("content: directory coordinate is removed",
+             rmdir(cc->chunk_path) == 0);
+    f = fopen(cc->chunk_path, "wb");
+    MV_CHECK("content: canonical bytes restore after shape cases",
+             f && fwrite(bytes, 1, bytes_len, f) == bytes_len);
+    if (f)
+        fclose(f);
+    return failures;
+}
+
+static int content_case_false_positive_shapes(struct content_adapter_ctx *cc,
+                                               const uint8_t *bytes,
+                                               size_t bytes_len)
+{
+    int failures = 0;
+    failures += content_case_wrong_bytes_and_symlink(cc, bytes, bytes_len);
+    failures += content_case_zero_length_and_dir(cc, bytes, bytes_len);
+    return failures;
+}
+
+static int content_case_no_stale_cache_delete(struct content_adapter_ctx *cc)
+{
+    int failures = 0;
+    struct mv_cmd c;
 
     /* THE NO-STALE-CACHE PROOF, step 1: delete the CAS byte. */
-    MV_CHECK("content: the chunk hash was captured", strlen(chunk_hex) == 64);
+    MV_CHECK("content: the chunk hash was captured",
+             strlen(cc->chunk_hex) == 64);
     MV_CHECK("content: the CAS object exists before deletion",
-             access(chunk_path, F_OK) == 0);
-    MV_CHECK("content: the CAS object is deleted", unlink(chunk_path) == 0);
+             access(cc->chunk_path, F_OK) == 0);
+    MV_CHECK("content: the CAS object is deleted",
+             unlink(cc->chunk_path) == 0);
 
-    mv_show(&c, dd, id_text);
+    mv_show(&c, cc->dd, cc->id_text);
     MV_CHECK("content: the very next read reports incomplete — the "
              "projection cached nothing",
              c.reply.status == ZCL_COMMAND_STATUS_PASSED &&
@@ -1210,13 +1464,20 @@ static int t_content_adapter(void)
                     "chunk_missing") == 0 &&
              strstr(mv_str(&c.reply.data, "reason"), "chunk_missing") != NULL);
     mv_cmd_free(&c);
+    return failures;
+}
+
+static int content_case_corrupt_manifest_show(struct content_adapter_ctx *cc)
+{
+    int failures = 0;
+    struct mv_cmd c;
 
     /* Step 2: corruption is not absence, and must not vanish from list
      * accounting without an explicit integrity gap. */
-    snprintf(manifest_path, sizeof(manifest_path), "%s/manifests/%s",
-             zcode_dir, root_hex);
+    snprintf(cc->manifest_path, sizeof(cc->manifest_path), "%s/manifests/%s",
+             cc->zcode_dir, cc->root_hex);
     {
-        FILE *f = fopen(manifest_path, "wb");
+        FILE *f = fopen(cc->manifest_path, "wb");
         bool wrote = f && fwrite("x", 1, 1, f) == 1;
 
         if (f)
@@ -1224,7 +1485,7 @@ static int t_content_adapter(void)
         MV_CHECK("content: the manifest is replaced by malformed bytes",
                  wrote);
     }
-    mv_show(&c, dd, id_text);
+    mv_show(&c, cc->dd, cc->id_text);
     MV_CHECK("content: malformed is unknown, not absent or determined",
              c.reply.status == ZCL_COMMAND_STATUS_PASSED &&
              strcmp(mv_str(&c.reply.data, "status"), "unknown") == 0 &&
@@ -1233,8 +1494,15 @@ static int t_content_adapter(void)
              strcmp(mv_str(&c.reply.data, "actions_csv"), "") == 0 &&
              strstr(mv_str(&c.reply.data, "reason"), "invalid") != NULL);
     mv_cmd_free(&c);
+    return failures;
+}
 
-    mv_list(&c, dd, "content");
+static int content_case_corrupt_manifest_list(struct content_adapter_ctx *cc)
+{
+    int failures = 0;
+    struct mv_cmd c;
+
+    mv_list(&c, cc->dd, "content");
     {
         const struct json_value *row =
             mv_find_kind(&c.reply.data, "content");
@@ -1249,10 +1517,26 @@ static int t_content_adapter(void)
                  strstr(mv_str(row, "integrity_reason"), "invalid") != NULL);
     }
     mv_cmd_free(&c);
+    return failures;
+}
+
+static int content_case_corruption_not_absence(struct content_adapter_ctx *cc)
+{
+    int failures = 0;
+    failures += content_case_corrupt_manifest_show(cc);
+    failures += content_case_corrupt_manifest_list(cc);
+    return failures;
+}
+
+static int content_case_deletion_absent(struct content_adapter_ctx *cc)
+{
+    int failures = 0;
+    struct mv_cmd c;
 
     /* Step 3: deletion alone means the object is gone entirely. */
-    MV_CHECK("content: the manifest is deleted", unlink(manifest_path) == 0);
-    mv_show(&c, dd, id_text);
+    MV_CHECK("content: the manifest is deleted",
+             unlink(cc->manifest_path) == 0);
+    mv_show(&c, cc->dd, cc->id_text);
     MV_CHECK("content: a removed object reads as absent, determined",
              c.reply.status == ZCL_COMMAND_STATUS_PASSED &&
              strcmp(mv_str(&c.reply.data, "status"), "absent") == 0 &&
@@ -1265,16 +1549,43 @@ static int t_content_adapter(void)
                                      "verification_complete")));
     mv_cmd_free(&c);
 
-    mv_list(&c, dd, "content");
+    mv_list(&c, cc->dd, "content");
     MV_CHECK("content: the removed blob is gone from the catalog too",
              c.reply.status == ZCL_COMMAND_STATUS_PASSED &&
-             mv_find_item(&c.reply.data, id_text) == NULL &&
+             mv_find_item(&c.reply.data, cc->id_text) == NULL &&
              json_get_int(json_get(&c.reply.data, "rendered")) == 0 &&
              json_get_bool(json_get(&c.reply.data, "integrity_ok")));
     mv_cmd_free(&c);
+    return failures;
+}
 
-    (void)vcs_package_cas_present_in(zcode_dir, chunk_hash);
-    test_rm_rf_recursive(dd);
+static int t_content_adapter(void)
+{
+    int failures = 0;
+    const uint8_t bytes[] = "sovereign content, byte-identical everywhere";
+    size_t bytes_len = sizeof(bytes) - 1u;
+    struct content_adapter_ctx cc;
+    bool store_ok = false;
+
+    memset(&cc, 0, sizeof(cc));
+    test_make_tmpdir(cc.dd, sizeof(cc.dd), "metaverse", "content");
+    snprintf(cc.zcode_dir, sizeof(cc.zcode_dir), "%s/zcode", cc.dd);
+
+    failures += content_case_fixture_and_id(&cc, bytes, bytes_len,
+                                            &store_ok);
+    if (!store_ok) {
+        test_rm_rf_recursive(cc.dd);
+        return failures;
+    }
+    failures += content_case_show_present(&cc, bytes_len);
+    failures += content_case_list_catalog(&cc);
+    failures += content_case_false_positive_shapes(&cc, bytes, bytes_len);
+    failures += content_case_no_stale_cache_delete(&cc);
+    failures += content_case_corruption_not_absence(&cc);
+    failures += content_case_deletion_absent(&cc);
+
+    (void)vcs_package_cas_present_in(cc.zcode_dir, cc.chunk_hash);
+    test_rm_rf_recursive(cc.dd);
     return failures;
 }
 
@@ -1385,6 +1696,31 @@ static bool mv_make_package(struct mv_pkg *p, const char *dir)
     return true;
 }
 
+static bool mv_use_recipe_add_file(struct vcs_package_recipe *r,
+                                   const char *path)
+{
+    size_t len = strlen(path);
+    bool ok = true;
+
+    if (len > 2 && strcmp(path + len - 2, ".h") == 0) {
+        const char *slash = strrchr(path, '/');
+
+        ok = vcs_package_recipe_add_header(r, path, NULL);
+        if (ok && slash) {
+            char dir[1024];
+            enum vcs_package_recipe_error rerr = VCS_PACKAGE_RECIPE_OK;
+
+            snprintf(dir, sizeof(dir), "%.*s", (int)(slash - path), path);
+            if (!vcs_package_recipe_add_include_dir(r, dir, &rerr) &&
+                rerr != VCS_PACKAGE_RECIPE_ERR_LIST_ORDER)
+                ok = false;
+        }
+    } else if (len > 2 && strcmp(path + len - 2, ".c") == 0) {
+        ok = vcs_package_recipe_add_source(r, path, NULL);
+    }
+    return ok;
+}
+
 static bool mv_use_recipe(const struct vcs_package_manifest *m)
 {
     struct vcs_package_recipe r;
@@ -1393,27 +1729,8 @@ static bool mv_use_recipe(const struct vcs_package_manifest *m)
     size_t wire_len = 0;
 
     vcs_package_recipe_init(&r);
-    for (size_t i = 0; ok && i < m->count; i++) {
-        const char *path = m->files[i].path;
-        size_t len = strlen(path);
-
-        if (len > 2 && strcmp(path + len - 2, ".h") == 0) {
-            const char *slash = strrchr(path, '/');
-
-            ok = vcs_package_recipe_add_header(&r, path, NULL);
-            if (ok && slash) {
-                char dir[1024];
-                enum vcs_package_recipe_error rerr = VCS_PACKAGE_RECIPE_OK;
-
-                snprintf(dir, sizeof(dir), "%.*s", (int)(slash - path), path);
-                if (!vcs_package_recipe_add_include_dir(&r, dir, &rerr) &&
-                    rerr != VCS_PACKAGE_RECIPE_ERR_LIST_ORDER)
-                    ok = false;
-            }
-        } else if (len > 2 && strcmp(path + len - 2, ".c") == 0) {
-            ok = vcs_package_recipe_add_source(&r, path, NULL);
-        }
-    }
+    for (size_t i = 0; ok && i < m->count; i++)
+        ok = mv_use_recipe_add_file(&r, m->files[i].path);
     if (ok)
         ok = vcs_package_recipe_add_define(&r, "ZCL_FIXTURE=1", NULL) &&
              vcs_package_recipe_add_library(&r, VCS_PACKAGE_RECIPE_LIB_LIBC,
@@ -1551,92 +1868,83 @@ static void mv_mutate_after_first_hash(void *context,
 
 /* ── 5: ZCODE_PACKAGE adapter against a real publication ──────────── */
 
-static int t_zcode_adapter(void)
-{
-    int failures = 0;
+struct zcode_adapter_ctx {
     char dd[256];
     char zcode_dir[512];
     char id_text[METAVERSE_ID_TEXT_MAX];
-    char pub_hex[67] = {0};
-    char release_id_hex[65] = {0};
+    char pub_hex[67];
+    char release_id_hex[65];
     char release_path[768];
     char manifest_path[768];
     struct mv_pkg p;
-    struct mv_cmd c;
-    bool published;
+};
 
-    chain_params_select(CHAIN_MAIN);
-    test_make_tmpdir(dd, sizeof(dd), "metaverse", "zcode");
-    snprintf(zcode_dir, sizeof(zcode_dir), "%s/zcode", dd);
-
-    published = mv_publish(dd, &p, pub_hex, release_id_hex);
-    MV_CHECK("zcode: the fixture package publishes", published);
-    if (!published) {
-        vcs_package_manifest_free(&p.manifest);
-        free(p.wire);
-        test_rm_rf_recursive(dd);
-        return failures;
-    }
-    snprintf(id_text, sizeof(id_text), "zcode_package:%s", p.root_hex);
-
+static int zcode_case_toctou_race(struct zcode_adapter_ctx *zc)
+{
+    int failures = 0;
     /* Deterministic TOCTOU proof: mutate the first coordinate after it was
      * hashed but before the verifier's final fingerprint pass. */
-    {
-        static const char first_file[] =
-            "MIT License\n\nPermission is hereby granted.\n";
-        struct mv_manifest_read manifest;
-        struct mv_verify_mutation mutation;
-        char first_hash[65];
-        char first_path[768];
-        uint64_t bytes_used = 0;
-        uint32_t operations_used = 0;
-        FILE *f;
+    static const char first_file[] =
+        "MIT License\n\nPermission is hereby granted.\n";
+    struct mv_manifest_read manifest;
+    struct mv_verify_mutation mutation;
+    char first_hash[65];
+    char first_path[768];
+    uint64_t bytes_used = 0;
+    uint32_t operations_used = 0;
+    FILE *f;
 
-        mv_hex32(p.manifest.files[0].chunk_hashes, first_hash);
-        snprintf(first_path, sizeof(first_path), "%s/cas/sha3/%.2s/%s",
-                 zcode_dir, first_hash, first_hash);
-        mutation = (struct mv_verify_mutation){
-            .path = first_path,
-            .length = sizeof(first_file) - 1u,
-            .fired = false,
-        };
-        MV_CHECK("zcode: canonical manifest opens for bounded race proof",
-                 mv_manifest_read(zcode_dir, p.root_hex, &manifest) ==
-                     MV_MANIFEST_READ_OK);
-        mv_manifest_verify_possession_test(
-            zcode_dir, &manifest, MV_PROPERTY_VERIFY_BYTES,
-            MV_PROPERTY_SHOW_VERIFY_OPS, mv_mutate_after_first_hash,
-            &mutation, &bytes_used, &operations_used);
-        MV_CHECK("zcode: mutation between hash and final recheck is caught",
-                 mutation.fired && !manifest.verification_complete &&
-                 strcmp(manifest.verification_gap,
-                        "chunk_mutated_during_verification") == 0 &&
-                 bytes_used == manifest.total_bytes &&
-                 operations_used > manifest.chunk_total);
-        mv_manifest_free(&manifest);
+    mv_hex32(zc->p.manifest.files[0].chunk_hashes, first_hash);
+    snprintf(first_path, sizeof(first_path), "%s/cas/sha3/%.2s/%s",
+             zc->zcode_dir, first_hash, first_hash);
+    mutation = (struct mv_verify_mutation){
+        .path = first_path,
+        .length = sizeof(first_file) - 1u,
+        .fired = false,
+    };
+    MV_CHECK("zcode: canonical manifest opens for bounded race proof",
+             mv_manifest_read(zc->zcode_dir, zc->p.root_hex, &manifest) ==
+                 MV_MANIFEST_READ_OK);
+    mv_manifest_verify_possession_test(
+        zc->zcode_dir, &manifest, MV_PROPERTY_VERIFY_BYTES,
+        MV_PROPERTY_SHOW_VERIFY_OPS, mv_mutate_after_first_hash, &mutation,
+        &bytes_used, &operations_used);
+    MV_CHECK("zcode: mutation between hash and final recheck is caught",
+             mutation.fired && !manifest.verification_complete &&
+             strcmp(manifest.verification_gap,
+                    "chunk_mutated_during_verification") == 0 &&
+             bytes_used == manifest.total_bytes &&
+             operations_used > manifest.chunk_total);
+    mv_manifest_free(&manifest);
 
-        f = fopen(first_path, "wb");
-        MV_CHECK("zcode: canonical first chunk restores after race proof",
-                 f && fwrite(first_file, 1, sizeof(first_file) - 1u, f) ==
-                          sizeof(first_file) - 1u);
-        if (f)
-            fclose(f);
+    f = fopen(first_path, "wb");
+    MV_CHECK("zcode: canonical first chunk restores after race proof",
+             f && fwrite(first_file, 1, sizeof(first_file) - 1u, f) ==
+                      sizeof(first_file) - 1u);
+    if (f)
+        fclose(f);
 
-        MV_CHECK("zcode: canonical manifest opens for strict budget proof",
-                 mv_manifest_read(zcode_dir, p.root_hex, &manifest) ==
-                     MV_MANIFEST_READ_OK);
-        mv_manifest_verify_possession_test(
-            zcode_dir, &manifest, 0, MV_PROPERTY_SHOW_VERIFY_OPS, NULL, NULL,
-            &bytes_used, &operations_used);
-        MV_CHECK("zcode: zero byte budget performs no content read",
-                 !manifest.verification_complete && bytes_used == 0 &&
-                 operations_used == 0 &&
-                 strcmp(manifest.verification_gap,
-                        "byte_budget_exhausted") == 0);
-        mv_manifest_free(&manifest);
-    }
+    MV_CHECK("zcode: canonical manifest opens for strict budget proof",
+             mv_manifest_read(zc->zcode_dir, zc->p.root_hex, &manifest) ==
+                 MV_MANIFEST_READ_OK);
+    mv_manifest_verify_possession_test(
+        zc->zcode_dir, &manifest, 0, MV_PROPERTY_SHOW_VERIFY_OPS, NULL, NULL,
+        &bytes_used, &operations_used);
+    MV_CHECK("zcode: zero byte budget performs no content read",
+             !manifest.verification_complete && bytes_used == 0 &&
+             operations_used == 0 &&
+             strcmp(manifest.verification_gap,
+                    "byte_budget_exhausted") == 0);
+    mv_manifest_free(&manifest);
+    return failures;
+}
 
-    mv_show(&c, dd, id_text);
+static int zcode_case_show_present(struct zcode_adapter_ctx *zc)
+{
+    int failures = 0;
+    struct mv_cmd c;
+
+    mv_show(&c, zc->dd, zc->id_text);
     MV_CHECK("zcode: show succeeds",
              c.reply.status == ZCL_COMMAND_STATUS_PASSED);
     MV_CHECK("zcode: the published package reads as present",
@@ -1653,7 +1961,8 @@ static int t_zcode_adapter(void)
              !json_get_bool(json_get(&c.reply.data,
                                      "has_freshness_height")));
     MV_CHECK("zcode: the controller principal is the publisher key",
-             strcmp(mv_str(&c.reply.data, "owner_principal"), pub_hex) == 0 &&
+             strcmp(mv_str(&c.reply.data, "owner_principal"),
+                    zc->pub_hex) == 0 &&
              strcmp(mv_str(&c.reply.data, "owner_principal_kind"),
                     "publisher_pubkey") == 0);
     MV_CHECK("zcode: the revision is the publisher sequence",
@@ -1661,11 +1970,12 @@ static int t_zcode_adapter(void)
              json_get_int(json_get(&c.reply.data, "revision")) == 7);
     MV_CHECK("zcode: the descriptor root is the signed release id",
              strcmp(mv_str(&c.reply.data, "descriptor_root"),
-                    release_id_hex) == 0);
+                    zc->release_id_hex) == 0);
     MV_CHECK("zcode: the immutable root is the manifest root",
              strcmp(mv_str(&c.reply.data, "immutable_root"),
-                    p.root_hex) == 0 &&
-             strcmp(mv_str(&c.reply.data, "content_root"), p.root_hex) == 0);
+                    zc->p.root_hex) == 0 &&
+             strcmp(mv_str(&c.reply.data, "content_root"),
+                    zc->p.root_hex) == 0);
     MV_CHECK("zcode: a signed, complete package may publish a revision",
              strstr(mv_str(&c.reply.data, "actions_csv"),
                     "publish_revision") != NULL &&
@@ -1681,11 +1991,18 @@ static int t_zcode_adapter(void)
                                     "verification_complete")) &&
              strcmp(mv_str(&c.reply.data, "verification_gap"), "") == 0);
     mv_cmd_free(&c);
+    return failures;
+}
 
-    mv_list(&c, dd, "zcode_package");
+static int zcode_case_list_filtered(struct zcode_adapter_ctx *zc)
+{
+    int failures = 0;
+    struct mv_cmd c;
+
+    mv_list(&c, zc->dd, "zcode_package");
     MV_CHECK("zcode: the package appears in the filtered catalog",
              c.reply.status == ZCL_COMMAND_STATUS_PASSED &&
-             mv_find_item(&c.reply.data, id_text) != NULL);
+             mv_find_item(&c.reply.data, zc->id_text) != NULL);
     {
         const struct json_value *kinds = json_get(&c.reply.data, "kinds");
         size_t n = kinds ? json_size(kinds) : 0;
@@ -1702,21 +2019,28 @@ static int t_zcode_adapter(void)
                  "not-scanned", found);
     }
     mv_cmd_free(&c);
+    return failures;
+}
+
+static int zcode_case_corrupt_manifest(struct zcode_adapter_ctx *zc)
+{
+    int failures = 0;
+    struct mv_cmd c;
 
     /* A signed release still proves authorship when its manifest is corrupt,
      * but it cannot prove possession or a locally re-derived content root.
      * The item stays visible and the catalog separately reports integrity. */
-    snprintf(manifest_path, sizeof(manifest_path), "%s/manifests/%s",
-             zcode_dir, p.root_hex);
+    snprintf(zc->manifest_path, sizeof(zc->manifest_path), "%s/manifests/%s",
+             zc->zcode_dir, zc->p.root_hex);
     {
-        FILE *f = fopen(manifest_path, "wb");
+        FILE *f = fopen(zc->manifest_path, "wb");
         bool wrote = f && fwrite("x", 1, 1, f) == 1;
 
         if (f)
             fclose(f);
         MV_CHECK("zcode: fixture manifest is made malformed", wrote);
     }
-    mv_show(&c, dd, id_text);
+    mv_show(&c, zc->dd, zc->id_text);
     MV_CHECK("zcode: malformed manifest keeps only verified authorship",
              c.reply.status == ZCL_COMMAND_STATUS_PASSED &&
              json_get_bool(json_get(&c.reply.data, "determined")) &&
@@ -1727,37 +2051,45 @@ static int t_zcode_adapter(void)
              strcmp(mv_str(&c.reply.data, "actions_csv"), "") == 0);
     mv_cmd_free(&c);
 
-    mv_list(&c, dd, "zcode_package");
+    mv_list(&c, zc->dd, "zcode_package");
     {
         const struct json_value *row =
             mv_find_kind(&c.reply.data, "zcode_package");
         MV_CHECK("zcode: malformed manifest is rendered and disclosed",
                  c.reply.status == ZCL_COMMAND_STATUS_PASSED && row &&
-                 mv_find_item(&c.reply.data, id_text) != NULL &&
+                 mv_find_item(&c.reply.data, zc->id_text) != NULL &&
                  !json_get_bool(json_get(row, "integrity_ok")) &&
                  json_get_int(json_get(row, "integrity_gap_count")) == 1);
     }
     mv_cmd_free(&c);
     {
-        FILE *f = fopen(manifest_path, "wb");
-        bool restored = f && fwrite(p.wire, 1, p.wire_len, f) == p.wire_len;
+        FILE *f = fopen(zc->manifest_path, "wb");
+        bool restored = f && fwrite(zc->p.wire, 1, zc->p.wire_len, f) ==
+                                 zc->p.wire_len;
 
         if (f)
             fclose(f);
         MV_CHECK("zcode: canonical manifest bytes are restored", restored);
     }
+    return failures;
+}
+
+static int zcode_case_unearned_claim(struct zcode_adapter_ctx *zc)
+{
+    int failures = 0;
+    struct mv_cmd c;
 
     /* THE UNEARNED-CLAIM PROOF: remove the signed envelope. The bytes are
      * untouched, so the package stays present — but the signature can no
      * longer be verified, so the grade must DROP. */
-    snprintf(release_path, sizeof(release_path), "%s/releases/%s", zcode_dir,
-             release_id_hex);
+    snprintf(zc->release_path, sizeof(zc->release_path), "%s/releases/%s",
+             zc->zcode_dir, zc->release_id_hex);
     MV_CHECK("zcode: the release envelope exists before deletion",
-             access(release_path, F_OK) == 0);
+             access(zc->release_path, F_OK) == 0);
     MV_CHECK("zcode: the release envelope is deleted",
-             unlink(release_path) == 0);
+             unlink(zc->release_path) == 0);
 
-    mv_show(&c, dd, id_text);
+    mv_show(&c, zc->dd, zc->id_text);
     /* The index is built from releases/, so with the envelope gone the
      * package root is no longer claimed by any release: absent, and still
      * a determined verdict. */
@@ -1772,30 +2104,65 @@ static int t_zcode_adapter(void)
                     "local_store_read") == 0 &&
              strcmp(mv_str(&c.reply.data, "descriptor_root"), "") == 0);
     mv_cmd_free(&c);
+    return failures;
+}
 
+static int zcode_case_content_shape_mismatch(struct zcode_adapter_ctx *zc)
+{
+    int failures = 0;
     /* The SAME bytes are still a content property, because the blob shape
      * question is about the manifest, not the release. A three-file package
      * is not a blob, and the content adapter says so by name rather than
      * claiming the object does not exist. */
-    {
-        char content_id[METAVERSE_ID_TEXT_MAX];
+    char content_id[METAVERSE_ID_TEXT_MAX];
+    struct mv_cmd c;
 
-        snprintf(content_id, sizeof(content_id), "content:%s", p.root_hex);
-        mv_show(&c, dd, content_id);
-        MV_CHECK("zcode: a multi-file package is not answered as an absent "
-                 "blob — the shape mismatch is named",
-                 c.reply.status == ZCL_COMMAND_STATUS_PASSED &&
-                 !json_get_bool(json_get(&c.reply.data, "determined")) &&
-                 strstr(mv_str(&c.reply.data, "reason"),
-                        "zcode_package") != NULL);
-        mv_cmd_free(&c);
+    snprintf(content_id, sizeof(content_id), "content:%s", zc->p.root_hex);
+    mv_show(&c, zc->dd, content_id);
+    MV_CHECK("zcode: a multi-file package is not answered as an absent "
+             "blob — the shape mismatch is named",
+             c.reply.status == ZCL_COMMAND_STATUS_PASSED &&
+             !json_get_bool(json_get(&c.reply.data, "determined")) &&
+             strstr(mv_str(&c.reply.data, "reason"), "zcode_package") !=
+                 NULL);
+    mv_cmd_free(&c);
+    return failures;
+}
+
+static int t_zcode_adapter(void)
+{
+    int failures = 0;
+    struct zcode_adapter_ctx zc;
+    bool published;
+
+    memset(&zc, 0, sizeof(zc));
+    chain_params_select(CHAIN_MAIN);
+    test_make_tmpdir(zc.dd, sizeof(zc.dd), "metaverse", "zcode");
+    snprintf(zc.zcode_dir, sizeof(zc.zcode_dir), "%s/zcode", zc.dd);
+
+    published = mv_publish(zc.dd, &zc.p, zc.pub_hex, zc.release_id_hex);
+    MV_CHECK("zcode: the fixture package publishes", published);
+    if (!published) {
+        vcs_package_manifest_free(&zc.p.manifest);
+        free(zc.p.wire);
+        test_rm_rf_recursive(zc.dd);
+        return failures;
     }
+    snprintf(zc.id_text, sizeof(zc.id_text), "zcode_package:%s",
+             zc.p.root_hex);
 
-    vcs_package_manifest_free(&p.manifest);
-    free(p.wire);
+    failures += zcode_case_toctou_race(&zc);
+    failures += zcode_case_show_present(&zc);
+    failures += zcode_case_list_filtered(&zc);
+    failures += zcode_case_corrupt_manifest(&zc);
+    failures += zcode_case_unearned_claim(&zc);
+    failures += zcode_case_content_shape_mismatch(&zc);
+
+    vcs_package_manifest_free(&zc.p.manifest);
+    free(zc.p.wire);
     free(g_mv_recipe_hex);
     g_mv_recipe_hex = NULL;
-    test_rm_rf_recursive(dd);
+    test_rm_rf_recursive(zc.dd);
     return failures;
 }
 
@@ -1831,47 +2198,54 @@ static size_t mv_count_files(const char *dir)
 }
 
 /* ZNAM through the canonical model and the strict read-only native open. */
-static int t_znam_adapter(void)
-{
-    int failures = 0;
+struct znam_adapter_ctx {
     char dd[256];
     char db_path[512];
     char root_hex[65];
     char update_hex[65];
     char id_text[METAVERSE_ID_TEXT_MAX];
-    struct node_db ndb;
     struct znam_entry entry;
-    struct mv_cmd c;
-    size_t files_before;
-    size_t files_after;
+};
 
-    test_make_tmpdir(dd, sizeof(dd), "metaverse", "znam");
-    snprintf(db_path, sizeof(db_path), "%s/node.db", dd);
+static int znam_case_fixture_setup(struct znam_adapter_ctx *zc)
+{
+    int failures = 0;
+    struct node_db ndb;
+
     memset(&ndb, 0, sizeof(ndb));
-    memset(&entry, 0, sizeof(entry));
+    memset(&zc->entry, 0, sizeof(zc->entry));
     MV_CHECK("znam: canonical node database opens for fixture setup",
-             node_db_open(&ndb, db_path));
-    snprintf(entry.name, sizeof(entry.name), "alice");
-    snprintf(entry.owner_address, sizeof(entry.owner_address),
+             node_db_open(&ndb, zc->db_path));
+    snprintf(zc->entry.name, sizeof(zc->entry.name), "alice");
+    snprintf(zc->entry.owner_address, sizeof(zc->entry.owner_address),
              "t1AlicePropertyOwner11111111111111111");
-    entry.target_type = ZNAM_TYPE_CONTENT;
-    snprintf(entry.target_value, sizeof(entry.target_value), "sha3:alice");
-    memset(entry.reg_txid, 0x71, sizeof(entry.reg_txid));
-    memset(entry.last_update_txid, 0x72, sizeof(entry.last_update_txid));
-    entry.reg_height = 777;
-    entry.expiry_height = 1777;
+    zc->entry.target_type = ZNAM_TYPE_CONTENT;
+    snprintf(zc->entry.target_value, sizeof(zc->entry.target_value),
+             "sha3:alice");
+    memset(zc->entry.reg_txid, 0x71, sizeof(zc->entry.reg_txid));
+    memset(zc->entry.last_update_txid, 0x72,
+           sizeof(zc->entry.last_update_txid));
+    zc->entry.reg_height = 777;
+    zc->entry.expiry_height = 1777;
     MV_CHECK("znam: fixture is saved through the canonical model",
-             ndb.open && db_znam_save(&ndb, &entry));
+             ndb.open && db_znam_save(&ndb, &zc->entry));
     node_db_close(&ndb);
 
-    mv_hex32(entry.reg_txid, root_hex);
-    mv_hex32(entry.last_update_txid, update_hex);
-    snprintf(id_text, sizeof(id_text), "znam_name:%s", root_hex);
-    files_before = mv_count_files(dd);
+    mv_hex32(zc->entry.reg_txid, zc->root_hex);
+    mv_hex32(zc->entry.last_update_txid, zc->update_hex);
+    snprintf(zc->id_text, sizeof(zc->id_text), "znam_name:%s", zc->root_hex);
+    return failures;
+}
 
-    mv_list(&c, dd, "znam_name");
+static int znam_case_list(struct znam_adapter_ctx *zc)
+{
+    int failures = 0;
+    struct mv_cmd c;
+
+    mv_list(&c, zc->dd, "znam_name");
     {
-        const struct json_value *item = mv_find_item(&c.reply.data, id_text);
+        const struct json_value *item =
+            mv_find_item(&c.reply.data, zc->id_text);
         const struct json_value *kind =
             mv_find_kind(&c.reply.data, "znam_name");
 
@@ -1883,7 +2257,7 @@ static int t_znam_adapter(void)
         MV_CHECK("znam: list projects owner and indexed-chain evidence",
                  item && strcmp(mv_str(item, "display_name"), "alice") == 0 &&
                  strcmp(mv_str(item, "owner_principal"),
-                                entry.owner_address) == 0 &&
+                                zc->entry.owner_address) == 0 &&
                  strcmp(mv_str(item, "owner_principal_kind"),
                         "zcl_address") == 0 &&
                  strcmp(mv_str(item, "evidence_grade"),
@@ -1891,8 +2265,15 @@ static int t_znam_adapter(void)
                  !json_get_bool(json_get(item, "chain_bound")));
     }
     mv_cmd_free(&c);
+    return failures;
+}
 
-    mv_show(&c, dd, id_text);
+static int znam_case_show(struct znam_adapter_ctx *zc)
+{
+    int failures = 0;
+    struct mv_cmd c;
+
+    mv_show(&c, zc->dd, zc->id_text);
     {
         const struct json_value *work = json_get(&c.reply.data, "work");
 
@@ -1909,7 +2290,7 @@ static int t_znam_adapter(void)
         MV_CHECK("znam: latest transaction is a descriptor, not a "
                  "fabricated revision counter",
                  strcmp(mv_str(&c.reply.data, "descriptor_root"),
-                        update_hex) == 0 &&
+                        zc->update_hex) == 0 &&
                  !json_get_bool(json_get(&c.reply.data, "has_revision")) &&
                  strstr(mv_str(&c.reply.data, "actions_csv"),
                         "update_pointer") != NULL &&
@@ -1917,59 +2298,92 @@ static int t_znam_adapter(void)
                         "transfer") != NULL);
     }
     mv_cmd_free(&c);
+    return failures;
+}
 
-    files_after = mv_count_files(dd);
-    MV_CHECK("znam: list/show create no WAL or SHM sidecars and change no "
-             "datadir files", files_after == files_before);
+static int znam_case_list_and_show(struct znam_adapter_ctx *zc)
+{
+    int failures = 0;
+    failures += znam_case_list(zc);
+    failures += znam_case_show(zc);
+    return failures;
+}
+
+static int znam_case_ownership_transition(struct znam_adapter_ctx *zc)
+{
+    int failures = 0;
+    struct node_db ndb;
+    struct mv_cmd c;
 
     /* No catalog ownership cache: the immutable registration root stays
      * stable while the authoritative owner changes. */
     memset(&ndb, 0, sizeof(ndb));
     MV_CHECK("znam: fixture reopens for an ownership transition",
-             node_db_open(&ndb, db_path));
-    snprintf(entry.owner_address, sizeof(entry.owner_address),
+             node_db_open(&ndb, zc->db_path));
+    snprintf(zc->entry.owner_address, sizeof(zc->entry.owner_address),
              "t1BobPropertyOwner222222222222222222");
-    memset(entry.last_update_txid, 0x73, sizeof(entry.last_update_txid));
+    memset(zc->entry.last_update_txid, 0x73,
+           sizeof(zc->entry.last_update_txid));
     MV_CHECK("znam: ownership transition saves through the model",
-             ndb.open && db_znam_save(&ndb, &entry));
+             ndb.open && db_znam_save(&ndb, &zc->entry));
     node_db_close(&ndb);
-    mv_show(&c, dd, id_text);
+    mv_show(&c, zc->dd, zc->id_text);
     MV_CHECK("znam: same property id immediately projects the new owner",
              c.reply.status == ZCL_COMMAND_STATUS_PASSED &&
-             strcmp(mv_str(&c.reply.data, "property_id"), id_text) == 0 &&
+             strcmp(mv_str(&c.reply.data, "property_id"), zc->id_text) ==
+                 0 &&
              strcmp(mv_str(&c.reply.data, "owner_principal"),
-                    entry.owner_address) == 0);
+                    zc->entry.owner_address) == 0);
     mv_cmd_free(&c);
+    return failures;
+}
 
-    test_rm_rf_recursive(dd);
+static int t_znam_adapter(void)
+{
+    int failures = 0;
+    struct znam_adapter_ctx zc;
+    size_t files_before;
+    size_t files_after;
+
+    memset(&zc, 0, sizeof(zc));
+    test_make_tmpdir(zc.dd, sizeof(zc.dd), "metaverse", "znam");
+    snprintf(zc.db_path, sizeof(zc.db_path), "%s/node.db", zc.dd);
+
+    failures += znam_case_fixture_setup(&zc);
+    files_before = mv_count_files(zc.dd);
+    failures += znam_case_list_and_show(&zc);
+    files_after = mv_count_files(zc.dd);
+    MV_CHECK("znam: list/show create no WAL or SHM sidecars and change no "
+             "datadir files", files_after == files_before);
+    failures += znam_case_ownership_transition(&zc);
+
+    test_rm_rf_recursive(zc.dd);
     return failures;
 }
 
 /* ZSLP through the canonical chain-derived token model and the same strict
  * read-only node.db open. */
-static int t_zslp_adapter(void)
-{
-    int failures = 0;
+struct zslp_adapter_ctx {
     char dd[256];
     char db_path[512];
     char root_hex[65];
     char id_text[METAVERSE_ID_TEXT_MAX];
     uint8_t token_id[32];
+};
+
+static int zslp_case_fixture_setup(struct zslp_adapter_ctx *zc)
+{
+    int failures = 0;
     struct node_db ndb;
     struct db_zslp_token_info token_probe;
-    struct mv_cmd c;
     size_t asset_count = 0;
-    size_t files_before;
-    size_t files_after;
 
-    test_make_tmpdir(dd, sizeof(dd), "metaverse", "zslp");
-    snprintf(db_path, sizeof(db_path), "%s/node.db", dd);
-    memset(token_id, 0x81, sizeof(token_id));
+    memset(zc->token_id, 0x81, sizeof(zc->token_id));
     memset(&ndb, 0, sizeof(ndb));
     MV_CHECK("zslp: canonical node database opens for fixture setup",
-             node_db_open(&ndb, db_path));
+             node_db_open(&ndb, zc->db_path));
     MV_CHECK("zslp: chain-derived GENESIS saves through the canonical model",
-             ndb.open && db_zslp_token_save(&ndb, token_id, "META",
+             ndb.open && db_zslp_token_save(&ndb, zc->token_id, "META",
                  "Metaverse Asset", 8, "https://example.invalid/meta",
                  888, 21000000));
     MV_CHECK("zslp: application-local token key also saves for exclusion "
@@ -1982,17 +2396,25 @@ static int t_zslp_adapter(void)
              asset_count == 1);
     MV_CHECK("zslp: model-owned lookup distinguishes the real GENESIS",
              ndb.open &&
-             db_zslp_asset_lookup(&ndb, token_id, &token_probe) == 1 &&
+             db_zslp_asset_lookup(&ndb, zc->token_id, &token_probe) == 1 &&
              strcmp(token_probe.ticker, "META") == 0);
     node_db_close(&ndb);
 
-    mv_hex32(token_id, root_hex);
-    snprintf(id_text, sizeof(id_text), "zslp_asset:%s", root_hex);
-    files_before = mv_count_files(dd);
+    mv_hex32(zc->token_id, zc->root_hex);
+    snprintf(zc->id_text, sizeof(zc->id_text), "zslp_asset:%s",
+             zc->root_hex);
+    return failures;
+}
 
-    mv_list(&c, dd, "zslp_asset");
+static int zslp_case_list(struct zslp_adapter_ctx *zc)
+{
+    int failures = 0;
+    struct mv_cmd c;
+
+    mv_list(&c, zc->dd, "zslp_asset");
     {
-        const struct json_value *item = mv_find_item(&c.reply.data, id_text);
+        const struct json_value *item =
+            mv_find_item(&c.reply.data, zc->id_text);
         const struct json_value *kind =
             mv_find_kind(&c.reply.data, "zslp_asset");
 
@@ -2018,8 +2440,15 @@ static int t_zslp_adapter(void)
                         "db_zslp_asset_lookup") == 0);
     }
     mv_cmd_free(&c);
+    return failures;
+}
 
-    mv_show(&c, dd, id_text);
+static int zslp_case_show(struct zslp_adapter_ctx *zc)
+{
+    int failures = 0;
+    struct mv_cmd c;
+
+    mv_show(&c, zc->dd, zc->id_text);
     {
         const struct json_value *work = json_get(&c.reply.data, "work");
 
@@ -2049,15 +2478,28 @@ static int t_zslp_adapter(void)
                         "no mint-baton controller") != NULL);
     }
     mv_cmd_free(&c);
+    return failures;
+}
 
-    files_after = mv_count_files(dd);
-    MV_CHECK("zslp: list/show create no WAL or SHM sidecars and change no "
-             "datadir files", files_after == files_before);
+static int zslp_case_list_and_show(struct zslp_adapter_ctx *zc)
+{
+    int failures = 0;
+    failures += zslp_case_list(zc);
+    failures += zslp_case_show(zc);
+    return failures;
+}
+
+static int zslp_case_removal(struct zslp_adapter_ctx *zc)
+{
+    int failures = 0;
+    struct node_db ndb;
+    struct mv_cmd c;
+    size_t asset_count;
 
     /* No catalog cache: removal from the authority is visible immediately. */
     memset(&ndb, 0, sizeof(ndb));
     MV_CHECK("zslp: fixture reopens for authoritative projection removal",
-             node_db_open(&ndb, db_path));
+             node_db_open(&ndb, zc->db_path));
     if (ndb.open)
         db_zslp_clear_all(&ndb);
     asset_count = SIZE_MAX;
@@ -2065,7 +2507,7 @@ static int t_zslp_adapter(void)
              ndb.open && db_zslp_asset_count(&ndb, &asset_count) &&
              asset_count == 0);
     node_db_close(&ndb);
-    mv_show(&c, dd, id_text);
+    mv_show(&c, zc->dd, zc->id_text);
     if (c.reply.status != ZCL_COMMAND_STATUS_PASSED ||
         strcmp(mv_str(&c.reply.data, "status"), "absent") != 0) {
         char doc[4096];
@@ -2080,8 +2522,29 @@ static int t_zslp_adapter(void)
              strcmp(mv_str(&c.reply.data, "status"), "absent") == 0 &&
              json_get_bool(json_get(&c.reply.data, "determined")));
     mv_cmd_free(&c);
+    return failures;
+}
 
-    test_rm_rf_recursive(dd);
+static int t_zslp_adapter(void)
+{
+    int failures = 0;
+    struct zslp_adapter_ctx zc;
+    size_t files_before;
+    size_t files_after;
+
+    memset(&zc, 0, sizeof(zc));
+    test_make_tmpdir(zc.dd, sizeof(zc.dd), "metaverse", "zslp");
+    snprintf(zc.db_path, sizeof(zc.db_path), "%s/node.db", zc.dd);
+
+    failures += zslp_case_fixture_setup(&zc);
+    files_before = mv_count_files(zc.dd);
+    failures += zslp_case_list_and_show(&zc);
+    files_after = mv_count_files(zc.dd);
+    MV_CHECK("zslp: list/show create no WAL or SHM sidecars and change no "
+             "datadir files", files_after == files_before);
+    failures += zslp_case_removal(&zc);
+
+    test_rm_rf_recursive(zc.dd);
     return failures;
 }
 
@@ -2194,17 +2657,10 @@ static int t_readonly_contract(void)
 
 /* ── 7: the CLI path ──────────────────────────────────────────────── */
 
-static int t_registry_path(void)
+static int registry_case_leaves_registered(const struct zcl_command_spec *list,
+                                            const struct zcl_command_spec *show)
 {
     int failures = 0;
-    char dd[256];
-    const struct zcl_command_spec *list = mv_leaf("metaverse.property.list");
-    const struct zcl_command_spec *show = mv_leaf("metaverse.property.show");
-    char why[192] = {0};
-    struct mv_cmd c;
-
-    test_make_tmpdir(dd, sizeof(dd), "metaverse", "registry");
-
     MV_CHECK("cli: both leaves are registered", list && show);
     MV_CHECK("cli: both leaves bind a handler",
              list && show && list->handler && show->handler);
@@ -2214,6 +2670,16 @@ static int t_registry_path(void)
              show->handler == zcl_native_handle_metaverse_property_show);
     MV_CHECK("cli: metaverse is a canonical root word",
              zcl_native_command_is_root("metaverse"));
+    return failures;
+}
+
+static int registry_case_list_and_show_valid(const char *dd,
+                                              const struct zcl_command_spec *list,
+                                              const struct zcl_command_spec *show)
+{
+    int failures = 0;
+    char why[192] = {0};
+    struct mv_cmd c;
 
     /* list — the operator's exact input, through input_validate. */
     mv_cmd_init(&c);
@@ -2252,6 +2718,15 @@ static int t_registry_path(void)
              c.reply.status != ZCL_COMMAND_STATUS_PASSED &&
              strcmp(c.reply.error.code, "BAD_PROPERTY_ID") == 0);
     mv_cmd_free(&c);
+    return failures;
+}
+
+static int registry_case_named_refusals(const char *dd,
+                                         const struct zcl_command_spec *list)
+{
+    int failures = 0;
+    char why[192] = {0};
+    struct mv_cmd c;
 
     /* A kind with no reader is a NAMED refusal, never an empty answer. */
     mv_cmd_init(&c);
@@ -2297,6 +2772,21 @@ static int t_registry_path(void)
              c.reply.status != ZCL_COMMAND_STATUS_PASSED &&
              strcmp(c.reply.error.code, "MISSING_DATADIR") == 0);
     mv_cmd_free(&c);
+    return failures;
+}
+
+static int t_registry_path(void)
+{
+    int failures = 0;
+    char dd[256];
+    const struct zcl_command_spec *list = mv_leaf("metaverse.property.list");
+    const struct zcl_command_spec *show = mv_leaf("metaverse.property.show");
+
+    test_make_tmpdir(dd, sizeof(dd), "metaverse", "registry");
+
+    failures += registry_case_leaves_registered(list, show);
+    failures += registry_case_list_and_show_valid(dd, list, show);
+    failures += registry_case_named_refusals(dd, list);
 
     test_rm_rf_recursive(dd);
     return failures;
@@ -2315,22 +2805,16 @@ static int t_registry_path(void)
  * long as it says "store": {"read": false} and names the affected kinds
  * unavailable; show must refuse outright, because a bare "absent" from it
  * IS the lie. */
-static int t_unreadable_store_is_disclosed(void)
+static int unreadable_case_plant_blocker(const char *dd, char *mpath,
+                                          size_t mpath_cap)
 {
     int failures = 0;
-    char dd[256];
     char zdir[512];
-    char mpath[768];
-    struct mv_cmd c;
     FILE *f;
-    const struct json_value *store;
-    const struct json_value *kinds;
-    bool content_named = false;
 
-    test_make_tmpdir(dd, sizeof(dd), "metaverse", "unreadable");
     snprintf(zdir, sizeof(zdir), "%s/zcode", dd);
     (void)mkdir(zdir, 0700);
-    snprintf(mpath, sizeof(mpath), "%s/manifests", zdir);
+    snprintf(mpath, mpath_cap, "%s/manifests", zdir);
     f = fopen(mpath, "wb");
     MV_CHECK("unreadable: a plain file sits where the store belongs",
              f != NULL);
@@ -2338,6 +2822,16 @@ static int t_unreadable_store_is_disclosed(void)
         fputs("not a directory", f);
         fclose(f);
     }
+    return failures;
+}
+
+static int unreadable_case_list_discloses(const char *dd)
+{
+    int failures = 0;
+    struct mv_cmd c;
+    const struct json_value *store;
+    const struct json_value *kinds;
+    bool content_named = false;
 
     mv_cmd_init(&c);
     (void)json_push_kv_str(&c.input, "datadir", dd);
@@ -2372,6 +2866,13 @@ static int t_unreadable_store_is_disclosed(void)
     MV_CHECK("unreadable: nothing is rendered as owned",
              json_get_int(json_get(&c.reply.data, "rendered")) == 0);
     mv_cmd_free(&c);
+    return failures;
+}
+
+static int unreadable_case_show_refuses(const char *dd)
+{
+    int failures = 0;
+    struct mv_cmd c;
 
     mv_cmd_init(&c);
     (void)json_push_kv_str(&c.input, "datadir", dd);
@@ -2383,6 +2884,14 @@ static int t_unreadable_store_is_disclosed(void)
              c.reply.status != ZCL_COMMAND_STATUS_PASSED &&
              c.reply.error.code[0] != '\0');
     mv_cmd_free(&c);
+    return failures;
+}
+
+static int unreadable_case_absent_store_control(const char *dd,
+                                                 const char *mpath)
+{
+    int failures = 0;
+    struct mv_cmd c;
 
     /* And the control: with the ZCODE store simply ABSENT, its own content
      * row remains readable.  The top-level aggregate may still be false
@@ -2402,6 +2911,21 @@ static int t_unreadable_store_is_disclosed(void)
                  json_get_int(json_get(content, "total")) == 0);
     }
     mv_cmd_free(&c);
+    return failures;
+}
+
+static int t_unreadable_store_is_disclosed(void)
+{
+    int failures = 0;
+    char dd[256];
+    char mpath[768];
+
+    test_make_tmpdir(dd, sizeof(dd), "metaverse", "unreadable");
+
+    failures += unreadable_case_plant_blocker(dd, mpath, sizeof(mpath));
+    failures += unreadable_case_list_discloses(dd);
+    failures += unreadable_case_show_refuses(dd);
+    failures += unreadable_case_absent_store_control(dd, mpath);
 
     test_rm_rf_recursive(dd);
     return failures;
