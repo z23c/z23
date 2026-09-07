@@ -395,6 +395,7 @@ int check_tor_full_default_selftest(void);
 int check_installed_acceptance_tools_run(int argc, char **argv);
 int check_installed_acceptance_tools_selftest(void);
 int check_hotswap_denied_leaves_run(int argc, char **argv);
+int check_hotswap_denied_leaves_run_io(FILE *out, FILE *err);
 int check_hotswap_denied_leaves_selftest(void);
 
 #endif

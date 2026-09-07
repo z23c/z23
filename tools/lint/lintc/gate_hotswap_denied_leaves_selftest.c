@@ -24,8 +24,6 @@
 #include <unistd.h>
 #include "lintc.h"
 
-extern FILE *g_hdl_out, *g_hdl_err;
-
 /* Each level below is built by one "%s/<literal-suffix>" onto the level
  * before it (dir -> sandbox -> turoot -> fixture); every level's cap grows
  * by a fixed margin over its source's so -Wformat-truncation's worst-case
@@ -112,14 +110,10 @@ static int hdls_run_case(const char *scan, const char *deny, const char *turoot,
         if (err_f) fclose(err_f);
         return die("z23-lint: tmpfile failed\n", "");
     }
-    g_hdl_out = out_f;
-    g_hdl_err = err_f;
-    *rc = check_hotswap_denied_leaves_run(0, NULL);
+    *rc = check_hotswap_denied_leaves_run_io(out_f, err_f);
     int bad = csr_slurp(out_f, out, outcap) || csr_slurp(err_f, err, errcap);
     fclose(out_f);
     fclose(err_f);
-    g_hdl_out = stdout;
-    g_hdl_err = stderr;
     unsetenv("ZCL_HOTSWAP_DENY_SCAN_DIR");
     unsetenv("ZCL_HOTSWAP_DENYLIST");
     unsetenv("ZCL_HOTSWAP_DENY_TU_ROOT");
