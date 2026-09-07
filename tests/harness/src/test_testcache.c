@@ -229,6 +229,18 @@ static bool file_contains(const char *path, const char *needle)
     return found;
 }
 
+/* AND several file_contains() pins into one boolean without spending an
+ * extra `&&` per pin inside test_testcache() itself — that function is
+ * cyclomatic-complexity-pinned, and a multi-line source-contract check
+ * otherwise grows it one decision point per additional needle. */
+static bool file_contains_all(const char *path, const char *const *needles,
+                              size_t count)
+{
+    for (size_t i = 0; i < count; i++)
+        if (!file_contains(path, needles[i])) return false;
+    return true;
+}
+
 /* Caller-environment preservation.
  *
  * Phase H must move ZCL_STRESS_TESTS to prove it is in the key. `test.c` runs
@@ -948,10 +960,27 @@ int test_testcache(void)
              file_contains("tests/harness/src/test_parallel.c",
                            "if (fu == 0) continue; /* an ordinary pass: "
                            "nothing to rerun */"));
-    TC_CHECK("groups that already ran exclusively are excluded from rerun-alone",
+    {
+        static const char *const exclusion_pins[] = {
+            "static bool group_excluded_from_rerun(",
+            "group_requires_exclusive_run(name)",
+            ("if (group_excluded_from_rerun(&results[i], "
+             "g_groups[i].name)) continue;"),
+        };
+        TC_CHECK("groups that already ran exclusively are excluded from "
+                 "rerun-alone",
+                 file_contains_all("tests/harness/src/test_parallel.c",
+                                   exclusion_pins,
+                                   sizeof(exclusion_pins) /
+                                       sizeof(exclusion_pins[0])));
+    }
+    TC_CHECK("a group SIGNALED for a reason the harness did not cause "
+             "(SIGSEGV/SIGABRT/SIGBUS/SIGFPE, or a SIGKILL nobody in this "
+             "process sent) stays a hard failure with no rerun — decided "
+             "from the `wedged` flag the deadline kill itself sets, never "
+             "inferred from the signal number alone",
              file_contains("tests/harness/src/test_parallel.c",
-                           "if (group_requires_exclusive_run(g_groups[i].name)) "
-                           "continue;"));
+                           "(r->signaled && !r->wedged);"));
     TC_CHECK("flaky-then-pass: an alone PASS sets load_flaky and prints "
              "LOAD-FLAKY with first= and alone_log=",
              file_contains("tests/harness/src/test_parallel.c",
@@ -968,6 +997,27 @@ int test_testcache(void)
                            "matters now. */") &&
              file_contains("tests/harness/src/test_parallel.c",
                            "unlink(preserved_log);"));
+    TC_CHECK("fail-then-fail records flaky_first_wedged too, so the "
+             "failed-groups report can still say a deadline kill was "
+             "retried alone instead of reading like a plain FAIL/signal",
+             file_contains("tests/harness/src/test_parallel.c",
+                           "results[i].flaky_first_wedged = first_wedged;\n"
+                           "            if (preserved_log[0]) {"));
+    {
+        static const char *const deadline_report_pins[] = {
+            "print_failed_group_prefix(const char *name,",
+            ("\"  - %s: timed out after %ds under the shared "
+             "pool; retried \""),
+            ("printf(\"  - %s: %s\", name, r->signaled ? "
+             "\"signaled\" : \"exit\");"),
+        };
+        TC_CHECK("the failed-groups report names a deadline kill distinctly "
+                 "from an ordinary signal/exit failure",
+                 file_contains_all("tests/harness/src/test_parallel.c",
+                                   deadline_report_pins,
+                                   sizeof(deadline_report_pins) /
+                                       sizeof(deadline_report_pins[0])));
+    }
     TC_CHECK("watchdog-then-pass: the printed line distinguishes a WEDGED "
              "first attempt from a plain FAIL",
              file_contains("tests/harness/src/test_parallel.c",

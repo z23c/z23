@@ -36,7 +36,18 @@ carries the same flag, and every later cache HIT on that record reprints
 `LOAD-FLAKY <group> first=CACHED alone=PASS ...` instead of serving it as a
 silent, indistinguishable hit. A group that fails again on its alone rerun
 stays FAIL exactly as before — the policy gives a real regression no extra
-cover, it only removes the box's own contention as a false accusation.
+cover, it only removes the box's own contention as a false accusation. A
+group that stays FAIL after being killed by the per-group deadline reports
+that distinctly in the "Failed groups:" list — `timed out after <n>s under
+the shared pool; retried alone, still signaled signal=<n>` — instead of a
+plain `signaled signal=<n>`, so a reader does not chase a hang that was
+actually the box's own load.
+
+"WEDGED once" above means the harness's own per-group deadline watchdog
+killed it (`wedged`, set only where that kill fires) — never inferred from
+the signal number alone. A group SIGNALED for any other reason (SIGSEGV,
+SIGABRT, SIGBUS, SIGFPE, or a SIGKILL nobody in the harness sent) is a real
+crash, not a load casualty: it gets no rerun and stays a hard failure.
 Only a **cold** run prints the bare token `ALL TESTS PASSED`; a cached run prints
 `ALL TESTS PASSED (CACHED)`. `tools/scripts/gate-and-report.sh` reads the
 `SUITE VERDICT` line, rejects anything whose `mode` is not `cold`, and rejects

@@ -3368,8 +3368,8 @@ tests/harness/src/test_overlay_parse_parity.c:ref_znam_parse:41
 tests/harness/src/test_overlay_parse_parity.c:test_overlay_parse_parity:108
 tests/harness/src/test_package_capability_claim.c:t_list_ends:24
 tests/harness/src/test_parallel.c:exact_selector_set_valid:18
-tests/harness/src/test_parallel.c:main:192
-tests/harness/src/test_parallel.c:rerun_load_flaky_groups:26
+tests/harness/src/test_parallel.c:main:191
+tests/harness/src/test_parallel.c:rerun_load_flaky_groups:24
 tests/harness/src/test_parallel.c:run_parallel_phase:25
 tests/harness/src/test_parallel.c:write_test_timing_json:37
 tests/harness/src/test_parallel_range_fold.c:build_fixture:28

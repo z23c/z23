@@ -919,13 +919,29 @@ static bool run_parallel_phase(
  * pressure to retry. If the alone rerun is still UNOBSERVED, or fails, the
  * alone attempt's own result stands unmodified — the box genuinely could
  * not observe the leg, and that is reported like any other run. */
+/* True for a group rerun_load_flaky_groups must leave untouched: already
+ * skipped/cached, required to run exclusively already (a second alone run
+ * would prove nothing new), or SIGNALED for a reason the harness did not
+ * cause (SIGSEGV/SIGABRT/SIGBUS/SIGFPE, or a SIGKILL nobody in this process
+ * sent) — a real crash, not a load casualty, that stays a hard failure with
+ * no rerun. Only `wedged` — set exactly where the per-group deadline
+ * watchdog's own kill fires (group_watchdog_expired's call sites) — proves
+ * the harness itself sent the kill; inferring that from the signal number
+ * alone would also excuse an actual crash. */
+static bool group_excluded_from_rerun(const struct group_result *r,
+                                      const char *name)
+{
+    return r->skipped || r->cached || group_requires_exclusive_run(name) ||
+           (r->signaled && !r->wedged);
+}
+
 static void rerun_load_flaky_groups(struct group_result *results,
                                     pid_t parent_pid, int timeout_secs,
                                     bool verbose, bool activate_proof_contracts)
 {
     for (size_t i = 0; i < g_num_groups; i++) {
-        if (results[i].skipped || results[i].cached) continue;
-        if (group_requires_exclusive_run(g_groups[i].name)) continue;
+        if (group_excluded_from_rerun(&results[i], g_groups[i].name)) continue;
+
         bool first_pass = !results[i].signaled && results[i].exit_code == 0;
         bool first_unobserved = false;
         if (first_pass) {
@@ -995,11 +1011,36 @@ static void rerun_load_flaky_groups(struct group_result *results,
                   results[i].flaky_first_log,
                   results[i].out_path[0] ? results[i].out_path : "(none)");
             fflush(stdout);
-        } else if (preserved_log[0]) {
-            /* Still FAIL: the alone log is the one that matters now. */
-            unlink(preserved_log);
+        } else {
+            /* Still a hard failure alone too: record whether the first
+             * attempt was a deadline kill so the failed-groups report can
+             * say "timed out ... retried alone" instead of a plain FAIL. */
+            results[i].flaky_first_wedged = first_wedged;
+            if (preserved_log[0]) {
+                /* Still FAIL: the alone log is the one that matters now. */
+                unlink(preserved_log);
+            }
         }
     }
+}
+
+/* Prefix line for one entry in the "Failed groups:" report. A group whose
+ * first (contended) attempt was killed by the harness's own per-group
+ * deadline — flaky_first_wedged, set in rerun_load_flaky_groups only for a
+ * group that stayed FAIL after its one alone retry — reads differently from
+ * an ordinary FAIL/signal: it names the deadline and says a retry already
+ * happened, so a reader does not chase a hang that was actually the box's
+ * load. The signal/code suffix is printed by the caller either way. */
+static void print_failed_group_prefix(const char *name,
+                                      const struct group_result *r,
+                                      int timeout_secs)
+{
+    if (r->flaky_first_wedged)
+        printf("  - %s: timed out after %ds under the shared pool; retried "
+               "alone, still %s",
+               name, timeout_secs, r->signaled ? "signaled" : "exit");
+    else
+        printf("  - %s: %s", name, r->signaled ? "signaled" : "exit");
 }
 
 /* What a run actually DID, as opposed to what it concluded. Carried to both the
@@ -2042,9 +2083,8 @@ int main(int argc, char **argv)
             bool pass =
                 !results[i].signaled && results[i].exit_code == 0;
             if (pass) continue;
-            printf("  - %s: %s",
-                   g_groups[i].name,
-                   results[i].signaled ? "signaled" : "exit");
+            print_failed_group_prefix(g_groups[i].name, &results[i],
+                                      timeout_secs);
             if (results[i].signaled)
                 printf(" signal=%d", results[i].exit_code);
             else
