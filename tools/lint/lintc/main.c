@@ -234,6 +234,8 @@ static const struct lint_gate k_gates[] = {
     { "check-specialists", check_specialists_run, check_specialists_selftest },
     { "check-shell-host-assumptions", check_shell_host_assumptions_run,
       check_shell_host_assumptions_selftest },
+    { "check-fleet-airship-rules", check_fleet_airship_rules_run,
+      check_fleet_airship_rules_selftest },
 };
 
 int main(int argc, char **argv)

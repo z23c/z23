@@ -423,5 +423,7 @@ int check_specialists_run(int argc, char **argv);
 int check_specialists_selftest(void);
 int check_shell_host_assumptions_run(int argc, char **argv);
 int check_shell_host_assumptions_selftest(void);
+int check_fleet_airship_rules_run(int argc, char **argv);
+int check_fleet_airship_rules_selftest(void);
 
 #endif

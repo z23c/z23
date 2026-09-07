@@ -5392,6 +5392,10 @@ LINTC_SRCS = tools/lint/lintc/lib.c tools/lint/lintc/gate_boot_wiring.c tools/li
     tools/lint/lintc/gate_specialists.c \
     tools/lint/lintc/gate_shell_host_assumptions.c \
     tools/lint/lintc/gate_shell_host_assumptions_selftest.c \
+    tools/lint/lintc/gate_fleet_airship_rules.c \
+    tools/lint/lintc/gate_fleet_airship_rules_parse.c \
+    tools/lint/lintc/gate_fleet_airship_rules_rules.c \
+    tools/lint/lintc/gate_fleet_airship_rules_selftest.c \
     tools/lint/lintc/main.c
 LINTC_OBJS = $(LINTC_SRCS:tools/lint/lintc/%.c=build/lintc-obj/%.o)
 # Apple Clang enables -Wunused-but-set-variable under -Wextra -Werror for
@@ -11729,10 +11733,10 @@ check-specialists: $(LINTC_TOOL)
 	@./tools/lint/check_specialists.sh --selftest
 	@./tools/lint/check_specialists.sh
 
-check-fleet-airship-rules:
+check-fleet-airship-rules: $(LINTC_TOOL)
 	@echo "══ LINT: no airship rule pays for a fact a node reported about itself ══"
-	@./tools/lint/check_fleet_airship_rules.sh --selftest
-	@./tools/lint/check_fleet_airship_rules.sh
+	@bash tools/lint/check_fleet_airship_rules.sh --selftest
+	@bash tools/lint/check_fleet_airship_rules.sh
 
 check-fleet-facts: $(LINTC_TOOL)
 	@echo "══ LINT: every fleet fact resolves and the routing doc renders it ══"
