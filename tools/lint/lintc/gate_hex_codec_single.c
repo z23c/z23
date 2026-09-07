@@ -387,34 +387,63 @@ static int hcs_coverage(char droots[][RS_PATH], int ndroots, char files[][HCS_PA
 
 /* ── the two shape detectors ─────────────────────────────────────────── */
 
-static int hcs_scan_file(const char *path, const regex_t *ladder,
-                         const regex_t *scanf_re, const regex_t *table,
-                         const regex_t *nibble, int *found)
+struct hcs_regs { const regex_t *ladder, *scanf_re, *table, *nibble; };
+struct hcs_flags { int has_dec, has_tbl, has_nib; };
+
+static int hcs_flags_done(const struct hcs_flags *fl)
+{ return fl->has_dec || (fl->has_tbl && fl->has_nib); }
+
+/* Test one already-read line against the four detector regexes, updating
+ * whichever flags have not already latched. Split out of hcs_scan_file so
+ * the loop that owns it stays under the complexity cap. */
+static void hcs_scan_line(const char *line, const struct hcs_regs *re,
+                          struct hcs_flags *fl)
+{
+    if (!fl->has_dec && (regexec(re->ladder, line, 0, NULL, 0) == 0
+                         || regexec(re->scanf_re, line, 0, NULL, 0) == 0))
+        fl->has_dec = 1;
+    if (!fl->has_tbl && regexec(re->table, line, 0, NULL, 0) == 0)
+        fl->has_tbl = 1;
+    if (!fl->has_nib && regexec(re->nibble, line, 0, NULL, 0) == 0)
+        fl->has_nib = 1;
+}
+
+/* Read one line into `line` (stripped of its trailing newline); sets *eof
+ * when the file is exhausted. */
+static int hcs_read_line(FILE *f, const char *path, char *line, size_t cap,
+                         int *eof)
+{
+    size_t n;
+    if (!fgets(line, (int)cap, f)) {
+        *eof = 1;
+        return 0;
+    }
+    *eof = 0;
+    n = strlen(line);
+    if (n + 1 >= cap && (n == 0 || line[n - 1] != '\n'))
+        return die("z23-lint: source line too long: %s\n", path);
+    if (n && line[n - 1] == '\n')
+        line[--n] = '\0';
+    return 0;
+}
+
+static int hcs_scan_file(const char *path, const struct hcs_regs *re, int *found)
 {
     FILE *f = fopen(path, "r");
     char line[HCS_LINE];
-    int rc = 0, has_dec = 0, has_tbl = 0, has_nib = 0;
+    struct hcs_flags fl = {0};
+    int rc = 0, eof = 0;
     *found = 0;
     if (!f) {
         fprintf(stderr, "z23-lint: UNPROVEN — cannot read %s\n", path);
         return 2;
     }
-    while (rc == 0 && fgets(line, (int)sizeof line, f)) {
-        size_t n = strlen(line);
-        if (n + 1 >= sizeof line && (n == 0 || line[n - 1] != '\n')) {
-            rc = die("z23-lint: source line too long: %s\n", path);
+    while (rc == 0) {
+        rc = hcs_read_line(f, path, line, sizeof line, &eof);
+        if (rc || eof)
             break;
-        }
-        if (n && line[n - 1] == '\n')
-            line[--n] = '\0';
-        if (!has_dec && (regexec(ladder, line, 0, NULL, 0) == 0
-                         || regexec(scanf_re, line, 0, NULL, 0) == 0))
-            has_dec = 1;
-        if (!has_tbl && regexec(table, line, 0, NULL, 0) == 0)
-            has_tbl = 1;
-        if (!has_nib && regexec(nibble, line, 0, NULL, 0) == 0)
-            has_nib = 1;
-        if (has_dec || (has_tbl && has_nib))
+        hcs_scan_line(line, re, &fl);
+        if (hcs_flags_done(&fl))
             break;
     }
     if (rc == 0 && ferror(f))
@@ -423,7 +452,7 @@ static int hcs_scan_file(const char *path, const regex_t *ladder,
         rc = die("z23-lint: fclose failed: %s\n", path);
     if (rc)
         return rc;
-    *found = has_dec || (has_tbl && has_nib);
+    *found = hcs_flags_done(&fl);
     return 0;
 }
 
@@ -558,13 +587,18 @@ static int hcs_active_roots(char droots[][RS_PATH], int ndroots,
 static int hcs_detect(char files[][HCS_PATH], int nfiles, struct bln_set *found)
 {
     regex_t ladder, scanf_re, table, nibble;
+    struct hcs_regs re;
     int rc = hcs_compile(&ladder, &scanf_re, &table, &nibble);
     if (rc)
         return rc;
+    re.ladder = &ladder;
+    re.scanf_re = &scanf_re;
+    re.table = &table;
+    re.nibble = &nibble;
     found->count = 0;
     for (int i = 0; rc == 0 && i < nfiles; i++) {
         int hit = 0;
-        rc = hcs_scan_file(files[i], &ladder, &scanf_re, &table, &nibble, &hit);
+        rc = hcs_scan_file(files[i], &re, &hit);
         if (rc == 0 && hit)
             rc = bln_add(found, files[i]);
     }

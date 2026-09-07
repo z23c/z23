@@ -142,6 +142,40 @@ static int nup_hits_append(char *buf, size_t cap, size_t *used, int lineno,
     return 0;
 }
 
+/* Read one line into `line` (stripped of its trailing newline); sets *eof
+ * when the file is exhausted. Split out of nup_scan_lines so the loop that
+ * owns it stays under the complexity cap. */
+static int nup_read_line(FILE *f, const char *path, char *line, size_t cap,
+                         int *eof)
+{
+    size_t n;
+    if (!fgets(line, (int)cap, f)) {
+        *eof = 1;
+        return 0;
+    }
+    *eof = 0;
+    n = strlen(line);
+    if (n + 1 >= cap && (n == 0 || line[n - 1] != '\n'))
+        return die("z23-lint: source line too long: %s\n", path);
+    if (n && line[n - 1] == '\n')
+        line[--n] = '\0';
+    return 0;
+}
+
+/* Test one already-read line against `re`, recording a hit when it matches
+ * and (unless skip_comments says otherwise) is not a comment line. */
+static int nup_test_line(const char *line, const regex_t *re,
+                         int skip_comments, int lineno, int *matched,
+                         char *hitbuf, size_t hitcap, size_t *used)
+{
+    if (skip_comments && nup_line_is_comment(line))
+        return 0;
+    if (regexec(re, line, 0, NULL, 0) != 0)
+        return 0;
+    *matched = 1;
+    return nup_hits_append(hitbuf, hitcap, used, lineno, line);
+}
+
 /* Scan one file line by line against `re`; every matching line becomes a
  * hit (lineno:text). When `skip_comments` is set, a line whose first
  * non-blank byte is '#' is never tested — documentation naming the
@@ -152,7 +186,7 @@ static int nup_scan_lines(const char *path, const regex_t *re,
 {
     FILE *f = fopen(path, "r");
     char line[NUP_LINE];
-    int rc = 0, lineno = 0;
+    int rc = 0, lineno = 0, eof = 0;
     size_t used = 0;
     *matched = 0;
     hitbuf[0] = '\0';
@@ -160,21 +194,13 @@ static int nup_scan_lines(const char *path, const regex_t *re,
         fprintf(stderr, "z23-lint: UNPROVEN — cannot read %s\n", path);
         return 2;
     }
-    while (rc == 0 && fgets(line, (int)sizeof line, f)) {
-        size_t n = strlen(line);
-        if (n + 1 >= sizeof line && (n == 0 || line[n - 1] != '\n')) {
-            rc = die("z23-lint: source line too long: %s\n", path);
+    while (rc == 0) {
+        rc = nup_read_line(f, path, line, sizeof line, &eof);
+        if (rc || eof)
             break;
-        }
-        if (n && line[n - 1] == '\n')
-            line[--n] = '\0';
         lineno++;
-        if (skip_comments && nup_line_is_comment(line))
-            continue;
-        if (regexec(re, line, 0, NULL, 0) == 0) {
-            *matched = 1;
-            rc = nup_hits_append(hitbuf, hitcap, &used, lineno, line);
-        }
+        rc = nup_test_line(line, re, skip_comments, lineno, matched, hitbuf,
+                           hitcap, &used);
     }
     if (rc == 0 && ferror(f))
         rc = die("z23-lint: read failed: %s\n", path);
@@ -411,27 +437,30 @@ static int nup_compile(regex_t *publish, regex_t *push_lit, regex_t *spawn,
     return 0;
 }
 
-int check_no_unattended_publish_run(int argc, char **argv)
+/* Resolve the scan set: an explicit override (its own file list, verbatim)
+ * or the default (git index in a production scan, filesystem walk
+ * otherwise). Split out of check_no_unattended_publish_run so the
+ * top-level driver stays under the complexity cap. */
+static int nup_gather(char files[][NUP_PATH], int max, int *nf, int *override)
 {
-    static char files[NUP_MAXF][NUP_PATH];
-    static struct nup_ctx c;
-    int nf = 0, override = 0, rc;
     const char *ovr = getenv("ZCL_UNATTENDED_PUBLISH_SCAN_FILES");
+    if (ovr && ovr[0]) {
+        *override = 1;
+        return nup_split_lines(ovr, files, max, nf);
+    }
+    *override = 0;
+    return nup_collect_default(files, max, nf);
+}
+
+/* Compile the four detector regexes and scan every candidate file with
+ * them, freeing the regexes on every exit path. */
+static int nup_scan_all(char files[][NUP_PATH], int nf, int override,
+                        struct nup_ctx *c)
+{
     const char *pub_pat = k_nup_publish_re;
     regex_t publish, push_lit, spawn, report;
     struct nup_regs re;
-    (void)argc;
-    (void)argv;
-    c.scanned = 0;
-    c.nv = 0;
-    if (ovr && ovr[0]) {
-        override = 1;
-        rc = nup_split_lines(ovr, files, NUP_MAXF, &nf);
-    } else {
-        rc = nup_collect_default(files, NUP_MAXF, &nf);
-    }
-    if (rc)
-        return rc;
+    int rc;
     if (override) {
         const char *tr = getenv("ZCL_UNATTENDED_PUBLISH_TEST_REGEX");
         if (tr && tr[0])
@@ -445,11 +474,27 @@ int check_no_unattended_publish_run(int argc, char **argv)
     re.spawn = &spawn;
     re.report = &report;
     for (int i = 0; rc == 0 && i < nf; i++)
-        rc = nup_process_file(files[i], &re, &c);
+        rc = nup_process_file(files[i], &re, c);
     regfree(&publish);
     regfree(&push_lit);
     regfree(&spawn);
     regfree(&report);
+    return rc;
+}
+
+int check_no_unattended_publish_run(int argc, char **argv)
+{
+    static char files[NUP_MAXF][NUP_PATH];
+    static struct nup_ctx c;
+    int nf = 0, override = 0, rc;
+    (void)argc;
+    (void)argv;
+    c.scanned = 0;
+    c.nv = 0;
+    rc = nup_gather(files, NUP_MAXF, &nf, &override);
+    if (rc)
+        return rc;
+    rc = nup_scan_all(files, nf, override, &c);
     if (rc)
         return rc;
     if (!override) {
@@ -494,6 +539,98 @@ static int nup_st_case(int want, const char *label, const char *file)
     return 0;
 }
 
+/* Plant one fixture file and grade the resulting scan in one step. Split
+ * out so each selftest case below costs the top-level driver a single
+ * branch instead of a plant-then-grade pair. */
+static int nup_st_pc(const char *root, const char *rel, const char *body,
+                     int want, const char *msg, char *p, int *fails)
+{
+    int rc = nup_plant(root, rel, body, p, 4096);
+    if (rc)
+        return rc;
+    *fails |= nup_st_case(want, msg, p);
+    return 0;
+}
+
+/* Case 5 needs a regex override held only for the duration of its own
+ * grading — the one case that cannot go through nup_st_pc verbatim. */
+static int nup_st_grep_error_case(const char *root, char *p, int *fails)
+{
+    int rc = nup_plant(root, "grep_error.sh", "#!/bin/sh\necho clean\n", p, 4096);
+    if (rc)
+        return rc;
+    if (setenv("ZCL_UNATTENDED_PUBLISH_TEST_REGEX", "[", 1) != 0)
+        return die("z23-lint: setenv failed\n", "");
+    *fails |= nup_st_case(2, "a scan error fails loud", p);
+    unsetenv("ZCL_UNATTENDED_PUBLISH_TEST_REGEX");
+    return 0;
+}
+
+/* Cases 1-8: the shell-kind fixtures (plain PUBLISH_RE matching, plus the
+ * comment exemption and the fatal-regex case). */
+static int nup_st_shell_cases(const char *root, char *p, int *fails)
+{
+    int rc = nup_st_pc(root, "clean.sh",
+        "#!/bin/sh\nprintf \"%s\\n\" up > \"$STATE_DIR/box.sync\"\n", 0,
+        "a script that records its state locally", p, fails);
+    if (rc == 0)
+        rc = nup_st_pc(root, "push.sh", "#!/bin/sh\ngit push origin main --quiet\n",
+                       1, "a script that pushes to the shared remote", p, fails);
+    if (rc == 0)
+        rc = nup_st_pc(root, "push_cwd.sh", "#!/bin/sh\ngit -C \"$repo\" push origin main\n",
+                       1, "git -C cannot hide a push", p, fails);
+    if (rc == 0)
+        rc = nup_st_pc(root, "push_config.sh",
+            "#!/bin/sh\ngit -c core.hooksPath=/dev/null push origin main\n", 1,
+            "git -c cannot hide a push", p, fails);
+    if (rc == 0)
+        rc = nup_st_pc(root, "tree_gitdir.sh",
+            "#!/bin/sh\ngit --git-dir=\"$repo/.git\" commit-tree \"$t\"\n", 1,
+            "a long global option cannot hide commit-tree", p, fails);
+    if (rc == 0)
+        rc = nup_st_pc(root, "tree.sh",
+            "#!/bin/sh\nc=$(git commit-tree \"$t\" -p \"$b\" -m heartbeat)\n", 1,
+            "a script that builds a commit object out of band", p, fails);
+    if (rc == 0)
+        rc = nup_st_grep_error_case(root, p, fails);
+    if (rc == 0)
+        rc = nup_st_pc(root, "comment.sh",
+            "#!/bin/sh\n# there is no git push path here any more\necho ok\n", 0,
+            "a comment that names the forbidden command", p, fails);
+    return rc;
+}
+
+/* Cases 9-12: the native-kind fixtures under tools/command/ and tools/dev/
+ * (the push+spawn shape, the URL-remote shape, and the prose non-match). */
+static int nup_st_native_cases(const char *root, char *p, int *fails)
+{
+    int rc = nup_st_pc(root, "tools/command/native_push.c",
+        "static void go(void) {\n"
+        "    const char *argv[] = { \"git\", \"push\", \"origin\", \"HEAD:main\", NULL };\n"
+        "    zcl_spawn_capture(argv, buf, sizeof(buf), 1000);\n}\n", 1,
+        "a native leaf under tools/command/ that pushes via spawn", p, fails);
+    if (rc == 0)
+        rc = nup_st_pc(root, "tools/dev/native_push.c",
+            "static void go(void) {\n"
+            "    const char *argv[] = { \"git\", \"push\", \"origin\", \"HEAD:main\", NULL };\n"
+            "    zcl_spawn(argv);\n}\n", 1,
+            "a native leaf under tools/dev/ that pushes via spawn", p, fails);
+    if (rc == 0)
+        rc = nup_st_pc(root, "tools/command/native_push_url.c",
+            "static void go(void) {\n"
+            "    const char *argv[] = { \"git\", \"push\", \"https://host/r.git\",\n"
+            "                           \"HEAD:main\", NULL };\n"
+            "    zcl_spawn(argv);\n}\n", 1,
+            "a native leaf that pushes to a URL remote, not \"origin\"", p, fails);
+    if (rc == 0)
+        rc = nup_st_pc(root, "tools/command/native_prose.c",
+            "/* purpose: explains that \"push\" to \"origin\" is the landing "
+            "service's job,\n * not this leaf's. This file never calls a "
+            "spawn function. */\nstatic void go(void) { return; }\n", 0,
+            "push/origin prose with no spawn call is not a violation", p, fails);
+    return rc;
+}
+
 int check_no_unattended_publish_selftest(void)
 {
     const char *td = env_or("TMPDIR", "/tmp");
@@ -508,60 +645,9 @@ int check_no_unattended_publish_selftest(void)
         return die("z23-lint: mkdtemp failed: %s\n", tmpl);
     unsetenv("ZCL_UNATTENDED_PUBLISH_TEST_REGEX");
 
-    rc = nup_plant(root, "clean.sh",
-                   "#!/bin/sh\nprintf \"%s\\n\" up > \"$STATE_DIR/box.sync\"\n",
-                   p, sizeof p);
-    if (rc == 0) fails |= nup_st_case(0, "a script that records its state locally", p);
-
-    if (rc == 0) rc = nup_plant(root, "push.sh", "#!/bin/sh\ngit push origin main --quiet\n", p, sizeof p);
-    if (rc == 0) fails |= nup_st_case(1, "a script that pushes to the shared remote", p);
-
-    if (rc == 0) rc = nup_plant(root, "push_cwd.sh", "#!/bin/sh\ngit -C \"$repo\" push origin main\n", p, sizeof p);
-    if (rc == 0) fails |= nup_st_case(1, "git -C cannot hide a push", p);
-
-    if (rc == 0) rc = nup_plant(root, "push_config.sh", "#!/bin/sh\ngit -c core.hooksPath=/dev/null push origin main\n", p, sizeof p);
-    if (rc == 0) fails |= nup_st_case(1, "git -c cannot hide a push", p);
-
-    if (rc == 0) rc = nup_plant(root, "tree_gitdir.sh", "#!/bin/sh\ngit --git-dir=\"$repo/.git\" commit-tree \"$t\"\n", p, sizeof p);
-    if (rc == 0) fails |= nup_st_case(1, "a long global option cannot hide commit-tree", p);
-
-    if (rc == 0) rc = nup_plant(root, "tree.sh", "#!/bin/sh\nc=$(git commit-tree \"$t\" -p \"$b\" -m heartbeat)\n", p, sizeof p);
-    if (rc == 0) fails |= nup_st_case(1, "a script that builds a commit object out of band", p);
-
-    if (rc == 0) rc = nup_plant(root, "grep_error.sh", "#!/bin/sh\necho clean\n", p, sizeof p);
-    if (rc == 0 && setenv("ZCL_UNATTENDED_PUBLISH_TEST_REGEX", "[", 1) != 0)
-        rc = die("z23-lint: setenv failed\n", "");
-    if (rc == 0) fails |= nup_st_case(2, "a scan error fails loud", p);
-    unsetenv("ZCL_UNATTENDED_PUBLISH_TEST_REGEX");
-
-    if (rc == 0) rc = nup_plant(root, "comment.sh", "#!/bin/sh\n# there is no git push path here any more\necho ok\n", p, sizeof p);
-    if (rc == 0) fails |= nup_st_case(0, "a comment that names the forbidden command", p);
-
-    if (rc == 0) rc = nup_plant(root, "tools/command/native_push.c",
-        "static void go(void) {\n"
-        "    const char *argv[] = { \"git\", \"push\", \"origin\", \"HEAD:main\", NULL };\n"
-        "    zcl_spawn_capture(argv, buf, sizeof(buf), 1000);\n}\n", p, sizeof p);
-    if (rc == 0) fails |= nup_st_case(1, "a native leaf under tools/command/ that pushes via spawn", p);
-
-    if (rc == 0) rc = nup_plant(root, "tools/dev/native_push.c",
-        "static void go(void) {\n"
-        "    const char *argv[] = { \"git\", \"push\", \"origin\", \"HEAD:main\", NULL };\n"
-        "    zcl_spawn(argv);\n}\n", p, sizeof p);
-    if (rc == 0) fails |= nup_st_case(1, "a native leaf under tools/dev/ that pushes via spawn", p);
-
-    if (rc == 0) rc = nup_plant(root, "tools/command/native_push_url.c",
-        "static void go(void) {\n"
-        "    const char *argv[] = { \"git\", \"push\", \"https://host/r.git\",\n"
-        "                           \"HEAD:main\", NULL };\n"
-        "    zcl_spawn(argv);\n}\n", p, sizeof p);
-    if (rc == 0) fails |= nup_st_case(1, "a native leaf that pushes to a URL remote, not \"origin\"", p);
-
-    if (rc == 0) rc = nup_plant(root, "tools/command/native_prose.c",
-        "/* purpose: explains that \"push\" to \"origin\" is the landing "
-        "service's job,\n * not this leaf's. This file never calls a "
-        "spawn function. */\nstatic void go(void) { return; }\n", p, sizeof p);
-    if (rc == 0) fails |= nup_st_case(0, "push/origin prose with no spawn call is not a violation", p);
-
+    rc = nup_st_shell_cases(root, p, &fails);
+    if (rc == 0)
+        rc = nup_st_native_cases(root, p, &fails);
     if (rc == 0)
         rc = rap_rm_rf(root);
     if (rc)
