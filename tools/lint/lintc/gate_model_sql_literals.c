@@ -48,20 +48,50 @@ static int msl_is_the_rail(const char *path)
  * this gate looks for), same contract as tools/lint/strip_c_comments.awk
  * with strings=0. *in_block persists across calls for one file (a block
  * comment can span lines); reset to 0 per file. */
+/* Copies one "..." or '...' literal body VERBATIM (escapes included), from
+ * line[*i] (the opening quote) through its close or end of line. */
+static void msl_copy_literal(const char *line, size_t n, char *out,
+                             size_t cap, size_t *i, size_t *o)
+{
+    char q = line[*i];
+    out[(*o)++] = line[(*i)++];
+    while (*i < n && *o + 1 < cap) {
+        if (line[*i] == '\\' && *i + 1 < n && *o + 2 < cap) {
+            out[(*o)++] = line[*i];
+            out[(*o)++] = line[*i + 1];
+            *i += 2;
+            continue;
+        }
+        out[(*o)++] = line[*i];
+        if (line[*i] == q) { (*i)++; break; }
+        (*i)++;
+    }
+}
+
+/* Advances one step of an already-open block comment, blanking it; clears
+ * *in_block on its closing "*" "/" pair. Returns 1 (handled — caller must
+ * `continue`) whenever a block comment was open on entry, 0 otherwise. */
+static int msl_advance_block(const char *line, size_t n, char *out,
+                             size_t cap, size_t *i, size_t *o, int *in_block)
+{
+    if (!*in_block)
+        return 0;
+    if (line[*i] == '*' && *i + 1 < n && line[*i + 1] == '/') {
+        *in_block = 0;
+        *i += 2;
+        if (*o + 1 < cap) out[(*o)++] = ' ';
+    } else {
+        (*i)++;
+    }
+    return 1;
+}
+
 static void msl_strip_line(int *in_block, const char *line, char *out, size_t cap)
 {
     size_t i = 0, o = 0, n = strlen(line);
     while (i < n && o + 1 < cap) {
-        if (*in_block) {
-            if (line[i] == '*' && i + 1 < n && line[i + 1] == '/') {
-                *in_block = 0;
-                i += 2;
-                out[o++] = ' ';
-            } else {
-                i++;
-            }
+        if (msl_advance_block(line, n, out, cap, &i, &o, in_block))
             continue;
-        }
         if (line[i] == '/' && i + 1 < n && line[i + 1] == '*') {
             *in_block = 1;
             i += 2;
@@ -73,19 +103,7 @@ static void msl_strip_line(int *in_block, const char *line, char *out, size_t ca
             break;
         }
         if (line[i] == '"' || line[i] == '\'') {
-            char q = line[i];
-            out[o++] = line[i++];
-            while (i < n && o + 1 < cap) {
-                if (line[i] == '\\' && i + 1 < n && o + 2 < cap) {
-                    out[o++] = line[i];
-                    out[o++] = line[i + 1];
-                    i += 2;
-                    continue;
-                }
-                out[o++] = line[i];
-                if (line[i] == q) { i++; break; }
-                i++;
-            }
+            msl_copy_literal(line, n, out, cap, &i, &o);
             continue;
         }
         out[o++] = line[i++];
@@ -233,20 +251,58 @@ static const char k_msl_fix_hint[] =
     "  Identifiers come from engine/models/include/models/query_schema.def\n"
     "  (add the table there first); values are bound, never pasted.\n";
 
+static int msl_diff(const struct bln_set *base, const struct bln_set *found,
+                    struct bln_set *newc, struct bln_set *stale)
+{
+    newc->count = 0;
+    stale->count = 0;
+    int rc = 0;
+    for (int i = 0; rc == 0 && i < found->count; i++)
+        if (!bln_has(base, found->n[i]))
+            rc = bln_add(newc, found->n[i]);
+    for (int i = 0; rc == 0 && i < base->count; i++)
+        if (!bln_has(found, base->n[i]))
+            rc = bln_add(stale, base->n[i]);
+    return rc;
+}
+
+static int msl_print_new(FILE *out, const struct bln_set *newc,
+                         const char *baseline_path)
+{
+    if (newc->count == 0)
+        return 0;
+    fprintf(out, "\n[%s] %d model file(s) carry a hand-written SQL "
+           "statement and are not in the shrink-only baseline:\n",
+           k_msl_gate, newc->count);
+    for (int i = 0; i < newc->count; i++)
+        fprintf(out, "  %s\n", newc->n[i]);
+    fputs(k_msl_fix_hint, out);
+    return fprintf(out, "  Adding a row to %s is NOT a fix; the list may "
+                  "only shrink.\n", baseline_path) < 0
+        ? die("z23-lint: write failed\n", "") : 0;
+}
+
+static int msl_print_stale(FILE *out, const struct bln_set *stale,
+                           const char *baseline_path)
+{
+    if (stale->count == 0)
+        return 0;
+    fprintf(out, "\n[%s] %d STALE baseline row(s) — the file no longer "
+           "carries literal SQL. Delete them from %s:\n", k_msl_gate,
+           stale->count, baseline_path);
+    for (int i = 0; i < stale->count; i++)
+        fprintf(out, "  %s\n", stale->n[i]);
+    return fputs("\n  Leaving a converted file listed would let it "
+                "silently regress.\n", out) < 0
+        ? die("z23-lint: write failed\n", "") : 0;
+}
+
 static int msl_report(FILE *out, const struct bln_set *base,
                       const struct bln_set *found, const char *baseline_path,
                       const char *mode, int total)
 {
     static struct bln_set newc, stale;
-    newc.count = 0;
-    stale.count = 0;
-    int rc = 0;
-    for (int i = 0; rc == 0 && i < found->count; i++)
-        if (!bln_has(base, found->n[i]))
-            rc = bln_add(&newc, found->n[i]);
-    for (int i = 0; rc == 0 && i < base->count; i++)
-        if (!bln_has(found, base->n[i]))
-            rc = bln_add(&stale, base->n[i]);
+    int rc = msl_diff(base, found, &newc, &stale);
     if (rc)
         return rc;
     if (newc.count == 0 && stale.count == 0) {
@@ -255,25 +311,12 @@ static int msl_report(FILE *out, const struct bln_set *base,
                        total, found->count, base->count) < 0
             ? die("z23-lint: write failed\n", "") : 0;
     }
-    if (newc.count > 0) {
-        fprintf(out, "\n[%s] %d model file(s) carry a hand-written SQL "
-               "statement and are not in the shrink-only baseline:\n",
-               k_msl_gate, newc.count);
-        for (int i = 0; i < newc.count; i++)
-            fprintf(out, "  %s\n", newc.n[i]);
-        fputs(k_msl_fix_hint, out);
-        fprintf(out, "  Adding a row to %s is NOT a fix; the list may only "
-               "shrink.\n", baseline_path);
-    }
-    if (stale.count > 0) {
-        fprintf(out, "\n[%s] %d STALE baseline row(s) — the file no longer "
-               "carries literal SQL. Delete them from %s:\n", k_msl_gate,
-               stale.count, baseline_path);
-        for (int i = 0; i < stale.count; i++)
-            fprintf(out, "  %s\n", stale.n[i]);
-        fputs("\n  Leaving a converted file listed would let it silently "
-             "regress.\n", out);
-    }
+    rc = msl_print_new(out, &newc, baseline_path);
+    if (rc)
+        return rc;
+    rc = msl_print_stale(out, &stale, baseline_path);
+    if (rc)
+        return rc;
     return strcmp(mode, "FAIL") == 0 ? 1 : 0;
 }
 
@@ -338,10 +381,13 @@ int check_model_sql_literals_run(int argc, char **argv)
     struct msl_walk w = { .found = &found };
     rc = msl_scan_all(roots, nroots, &re, &w);
     regfree(&re);
-    if (rc)
-        return rc;
+    /* w.unreadable_rc takes priority: msl_visit signals a stop with a
+     * plain rc=1 (not itself a die()'d code) when it hits an unreadable
+     * file, so that must be checked before treating rc as a hard error. */
     if (w.unreadable_rc)
         return msl_report_unreadable(&w);
+    if (rc)
+        return rc;
 
     rc = gate_require_scanned(w.total, floor, k_msl_gate,
                               "no model .c/.h under the physical model rooms");
