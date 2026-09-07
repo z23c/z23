@@ -147,6 +147,10 @@ void zcl_native_handle_fleet_triggers_check(
     json_free(&fired_ids);
 
     if (failed > 0) {
+        /* The envelope drops `data` on a failed reply (only `error` prints),
+         * so the counts line would otherwise never reach the terminal — say
+         * it here, the same way a print action always reaches stdout. */
+        fputs(text, stdout);
         zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
                               ZCL_COMMAND_EXIT_FAILED, "ACTION_FAILED",
                               "execute", true, fired > 0,
