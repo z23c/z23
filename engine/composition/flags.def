@@ -2368,9 +2368,9 @@ Z23_FLAG("ZCL_WATCH_TEST_LOG", "env_build", "-", "-",
 Z23_FLAG("ZCL_WINDOWS_ACCEPTANCE_CC", "env_build", "x86_64-w64-mingw32-gcc", "-",
           "undocumented; first use tools/lint/check_windows_acceptance.sh:358")
 Z23_FLAG("ZCL_WINDOWS_ACCEPTANCE_GUARD_ROOT", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_windows_acceptance_guard.sh:416")
+          "undocumented; first use tools/lint/lintc/gate_windows_acceptance_guard.c:447")
 Z23_FLAG("ZCL_WINDOWS_ACCEPTANCE_GUARD_SCRATCH", "env_build", "-", "-",
-          "first use tools/lint/check_windows_acceptance_guard.sh:311; documented at docs/experiments/2026-09-03-muse-vs-glm-lint-gate.md:27: | /tmp, python, jq, perl | none used; fixtures under $HOME/.local/state/zclassic23/scra...")
+          "first use tools/lint/lintc/gate_windows_acceptance_guard_selftest.c:313; documented at docs/experiments/2026-09-03-muse-vs-glm-lint-gate.md:27: | /tmp, python, jq, perl | none used; fixtures under $HOME/.local/state/zclassic23/scra...")
 Z23_FLAG("ZCL_WINDOWS_ACCEPTANCE_ROOT", "env_build", "-", "-",
           "undocumented; first use tools/lint/check_windows_acceptance.sh:522")
 Z23_FLAG("ZCL_WRS_DIR", "env_test", "-", "-",

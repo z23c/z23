@@ -253,6 +253,8 @@ static const struct lint_gate k_gates[] = {
       check_no_runtime_abort_selftest },
     { "check-model-sql-literals", check_model_sql_literals_run,
       check_model_sql_literals_selftest },
+    { "check-windows-acceptance-guard", check_windows_acceptance_guard_run,
+      check_windows_acceptance_guard_selftest },
 };
 
 int main(int argc, char **argv)

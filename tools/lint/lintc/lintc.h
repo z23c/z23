@@ -441,5 +441,7 @@ int check_no_runtime_abort_run(int argc, char **argv);
 int check_no_runtime_abort_selftest(void);
 int check_model_sql_literals_run(int argc, char **argv);
 int check_model_sql_literals_selftest(void);
+int check_windows_acceptance_guard_run(int argc, char **argv);
+int check_windows_acceptance_guard_selftest(void);
 
 #endif
