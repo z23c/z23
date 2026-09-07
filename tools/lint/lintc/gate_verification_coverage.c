@@ -489,55 +489,83 @@ static int vc_report_unreadable(const char *path)
     return 2;
 }
 
-int check_verification_coverage_run(int argc, char **argv)
+static int vc_check_inputs(void)
 {
-    (void)argc; (void)argv;
-    char root[4096];
-    if (cic_repo_root(root, sizeof root) || chdir(root) != 0)
-        return die("z23-lint: cannot chdir to repo root\n", "");
-
     int mrc = vc_readable(k_vc_manifest);
     if (mrc == -1) return vc_report_missing_manifest();
     if (mrc == -2) return vc_report_unreadable(k_vc_manifest);
     int wrc = vc_readable(k_vc_workflow);
     if (wrc == -1) return vc_report_missing_workflow();
     if (wrc == -2) return vc_report_unreadable(k_vc_workflow);
+    return 0;
+}
 
-    static char workflow_text[VC_WFBUF];
-    if (vc_slurp(k_vc_workflow, workflow_text, sizeof workflow_text)) return 2;
-    static struct vc_strset jobs = { .n = 0 };
-    if (vc_parse_jobs(workflow_text, &jobs)) return 2;
+static int vc_load_jobs(char *workflow_text, struct vc_strset *jobs)
+{
+    if (vc_slurp(k_vc_workflow, workflow_text, VC_WFBUF)) return 2;
+    if (vc_parse_jobs(workflow_text, jobs)) return 2;
     char jhint[128];
     if (ovf(snprintf(jhint, sizeof jhint,
                      "no job keys parsed out of %s — the awk job-level indent match "
                      "broke", k_vc_workflow), sizeof jhint))
         return 2;
-    if (gate_require_scanned(jobs.n, 2, k_vc_gate, jhint)) return 2;
+    return gate_require_scanned(jobs->n, 2, k_vc_gate, jhint);
+}
 
-    static char manifest_text[VC_MANBUF];
-    if (vc_slurp(k_vc_manifest, manifest_text, sizeof manifest_text)) return 2;
-    static struct vc_row rows[VC_ROWS];
-    static struct vc_strset claimed = { .n = 0 };
-    int rn = 0, fail = 0;
-    static char faults[VC_CAPBUF * 2];
-    size_t used = 0;
-    if (vc_parse_manifest(manifest_text, rows, &rn, &claimed, faults, sizeof faults,
-                          &used, &fail))
+static int vc_load_manifest(char *manifest_text, struct vc_row *rows, int *rn,
+                            struct vc_strset *claimed, char *faults, size_t cap,
+                            size_t *used, int *fail)
+{
+    if (vc_slurp(k_vc_manifest, manifest_text, VC_MANBUF)) return 2;
+    if (vc_parse_manifest(manifest_text, rows, rn, claimed, faults, cap, used, fail))
         return 2;
     char rhint[128];
     if (ovf(snprintf(rhint, sizeof rhint,
                      "only %d row(s) parsed from %s — the parse broke or the file was "
-                     "emptied", rn, k_vc_manifest), sizeof rhint))
+                     "emptied", *rn, k_vc_manifest), sizeof rhint))
         return 2;
-    if (gate_require_scanned(rn, (int)(sizeof k_vc_required / sizeof k_vc_required[0]),
-                             k_vc_gate, rhint))
-        return 2;
+    return gate_require_scanned(*rn, (int)(sizeof k_vc_required / sizeof k_vc_required[0]),
+                                k_vc_gate, rhint);
+}
 
-    if (vc_prong2(rows, rn, faults, sizeof faults, &used, &fail)) return 2;
-    if (vc_prong3(rows, rn, &jobs, faults, sizeof faults, &used, &fail)) return 2;
-    if (vc_prong4(&jobs, &claimed, faults, sizeof faults, &used, &fail)) return 2;
-    if (vc_prong5(workflow_text, faults, sizeof faults, &used, &fail)) return 2;
-    if (vc_prong6(workflow_text, faults, sizeof faults, &used, &fail)) return 2;
+static int vc_run_prongs(struct vc_row *rows, int rn, struct vc_strset *jobs,
+                         struct vc_strset *claimed, char *workflow_text, char *faults,
+                         size_t cap, size_t *used, int *fail)
+{
+    if (vc_prong2(rows, rn, faults, cap, used, fail)) return 2;
+    if (vc_prong3(rows, rn, jobs, faults, cap, used, fail)) return 2;
+    if (vc_prong4(jobs, claimed, faults, cap, used, fail)) return 2;
+    if (vc_prong5(workflow_text, faults, cap, used, fail)) return 2;
+    return vc_prong6(workflow_text, faults, cap, used, fail);
+}
+
+int check_verification_coverage_run(int argc, char **argv)
+{
+    (void)argc; (void)argv;
+    char root[4096];
+    if (cic_repo_root(root, sizeof root) || chdir(root) != 0)
+        return die("z23-lint: cannot chdir to repo root\n", "");
+    int rc = vc_check_inputs();
+    if (rc) return rc;
+
+    static char workflow_text[VC_WFBUF];
+    static struct vc_strset jobs = { .n = 0 };
+    rc = vc_load_jobs(workflow_text, &jobs);
+    if (rc) return rc;
+
+    static char manifest_text[VC_MANBUF];
+    static struct vc_row rows[VC_ROWS];
+    static struct vc_strset claimed = { .n = 0 };
+    static char faults[VC_CAPBUF * 2];
+    int rn = 0, fail = 0;
+    size_t used = 0;
+    rc = vc_load_manifest(manifest_text, rows, &rn, &claimed, faults, sizeof faults,
+                          &used, &fail);
+    if (rc) return rc;
+
+    if (vc_run_prongs(rows, rn, &jobs, &claimed, workflow_text, faults, sizeof faults,
+                      &used, &fail))
+        return 2;
 
     fputs(faults, stdout);
     if (fail) return 1;

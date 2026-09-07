@@ -521,31 +521,42 @@ static int ff_floor(void)
     return (e && e[0]) ? atoi(e) : 20;
 }
 
+static int ff_scan_malformed(const struct ff_row *rows, int n, char *out,
+                             size_t cap, size_t *used)
+{
+    for (int i = 0; i < n; i++)
+        if (strcmp(rows[i].tag, "MALFORMED") == 0)
+            return ff_append(out, cap, used,
+                             "  a row does not carry the right number of strings\n");
+    return 0;
+}
+
+static int ff_scan_dupe_sets(const struct ff_strset *terms, const struct ff_strset *rels,
+                             const struct ff_strset *ctxs, char *out, size_t cap,
+                             size_t *used)
+{
+    static char tcopy[FF_TERMCAP][FF_FIELD];
+    memcpy(tcopy, terms->v, sizeof(char) * (size_t)terms->n * FF_FIELD);
+    if (ff_report_dupes(tcopy, terms->n, "term '%s' is declared twice", out, cap, used))
+        return 2;
+    static char rc_copy[FF_TERMCAP][FF_FIELD];
+    int rcn = 0;
+    for (int i = 0; i < rels->n; i++) memcpy(rc_copy[rcn++], rels->v[i], FF_FIELD);
+    for (int i = 0; i < ctxs->n; i++) memcpy(rc_copy[rcn++], ctxs->v[i], FF_FIELD);
+    return ff_report_dupes(rc_copy, rcn, "relation or context '%s' is declared twice",
+                           out, cap, used);
+}
+
 static int ff_scan(const struct ff_row *rows, int n, const char *root, char *out,
                    size_t cap, size_t *used)
 {
-    int any_malformed = 0;
-    for (int i = 0; i < n; i++)
-        if (strcmp(rows[i].tag, "MALFORMED") == 0) { any_malformed = 1; break; }
-    if (any_malformed
-        && ff_append(out, cap, used, "  a row does not carry the right number of strings\n"))
-        return 2;
+    if (ff_scan_malformed(rows, n, out, cap, used)) return 2;
     struct ff_strset terms = { .n = 0 }, rels = { .n = 0 }, ctxs = { .n = 0 };
     if (ff_collect(rows, n, "TERM", &terms) || ff_collect(rows, n, "RELATION", &rels)
         || ff_collect(rows, n, "CONTEXT", &ctxs))
         return 2;
     if (ff_check_terms(&terms, root, out, cap, used)) return 2;
-    static char tcopy[FF_TERMCAP][FF_FIELD];
-    memcpy(tcopy, terms.v, sizeof(char) * (size_t)terms.n * FF_FIELD);
-    if (ff_report_dupes(tcopy, terms.n, "term '%s' is declared twice", out, cap, used))
-        return 2;
-    static char rc_copy[FF_TERMCAP][FF_FIELD];
-    int rcn = 0;
-    for (int i = 0; i < rels.n; i++) memcpy(rc_copy[rcn++], rels.v[i], FF_FIELD);
-    for (int i = 0; i < ctxs.n; i++) memcpy(rc_copy[rcn++], ctxs.v[i], FF_FIELD);
-    if (ff_report_dupes(rc_copy, rcn, "relation or context '%s' is declared twice",
-                        out, cap, used))
-        return 2;
+    if (ff_scan_dupe_sets(&terms, &rels, &ctxs, out, cap, used)) return 2;
     if (ff_check_facts(rows, n, &terms, &rels, &ctxs, out, cap, used)) return 2;
     if (ff_check_duplicate_facts(rows, n, out, cap, used)) return 2;
     return ff_check_unused_terms(rows, n, &terms, out, cap, used);
@@ -598,21 +609,48 @@ static int ff_report_floor(int fact_n, int term_n, int rel_n, int ctx_n, int flo
     return 2;
 }
 
+static int ff_open_table(char *root, char *def, char *doc, const char **def_rel,
+                         struct ff_row *rows, int *n)
+{
+    if (ff_resolve_root(root, 4096)) return 2;
+    *def_rel = ff_def_rel();
+    if (ovf(snprintf(def, 4096, "%s/%s", root, *def_rel), 4096)
+        || ovf(snprintf(doc, 4096, "%s/%s", root, k_ff_doc_rel), 4096))
+        return 2;
+    int prc = ff_parse_def(def, rows, FF_ROWS, n);
+    if (prc == -1) return ff_report_missing(def);
+    if (prc == -2) return ff_report_unreadable(def);
+    return prc;
+}
+
+static int ff_report_scan(const struct ff_row *rows, int n, const char *root,
+                          const char *doc, int fact_n, int term_n, int rel_n,
+                          int ctx_n)
+{
+    static char faults[FF_FAULTBUF];
+    size_t used = 0;
+    faults[0] = '\0';
+    if (ff_scan(rows, n, root, faults, sizeof faults, &used)) return 2;
+    if (ff_scan_doc_block(rows, n, doc, faults, sizeof faults, &used)) return 2;
+    if (used > 0) {
+        printf("[%s] FAIL — the fleet fact table has false rows:\n", k_ff_gate);
+        fputs(faults, stdout);
+        return 1;
+    }
+    printf("[%s] OK — %d facts over %d terms, %d relations and %d contexts; every "
+          "term resolves and %s renders this table\n", k_ff_gate, fact_n, term_n,
+          rel_n, ctx_n, k_ff_doc_rel);
+    return 0;
+}
+
 int check_fleet_facts_run(int argc, char **argv)
 {
     char root[4096], def[4096], doc[4096];
-    if (ff_resolve_root(root, sizeof root)) return 2;
-    const char *def_rel = ff_def_rel();
-    if (ovf(snprintf(def, sizeof def, "%s/%s", root, def_rel), sizeof def)
-        || ovf(snprintf(doc, sizeof doc, "%s/%s", root, k_ff_doc_rel), sizeof doc))
-        return 2;
-
+    const char *def_rel = NULL;
     static struct ff_row rows[FF_ROWS];
     int n = 0;
-    int prc = ff_parse_def(def, rows, FF_ROWS, &n);
-    if (prc == -1) return ff_report_missing(def);
-    if (prc == -2) return ff_report_unreadable(def);
-    if (prc) return prc;
+    int rc = ff_open_table(root, def, doc, &def_rel, rows, &n);
+    if (rc) return rc;
 
     int fact_n, term_n, rel_n, ctx_n;
     ff_counts(rows, n, &fact_n, &term_n, &rel_n, &ctx_n);
@@ -623,19 +661,5 @@ int check_fleet_facts_run(int argc, char **argv)
     if (argc >= 1 && argv[0] && strcmp(argv[0], "--write-doc") == 0)
         return ff_write_doc(rows, n, doc, k_ff_doc_rel, def_rel);
 
-    static char faults[FF_FAULTBUF];
-    size_t used = 0;
-    faults[0] = '\0';
-    if (ff_scan(rows, n, root, faults, sizeof faults, &used)) return 2;
-    if (ff_scan_doc_block(rows, n, doc, faults, sizeof faults, &used)) return 2;
-
-    if (used > 0) {
-        printf("[%s] FAIL — the fleet fact table has false rows:\n", k_ff_gate);
-        fputs(faults, stdout);
-        return 1;
-    }
-    printf("[%s] OK — %d facts over %d terms, %d relations and %d contexts; every "
-          "term resolves and %s renders this table\n", k_ff_gate, fact_n, term_n,
-          rel_n, ctx_n, k_ff_doc_rel);
-    return 0;
+    return ff_report_scan(rows, n, root, doc, fact_n, term_n, rel_n, ctx_n);
 }
