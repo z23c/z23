@@ -984,15 +984,15 @@ Z23_FLAG("ZCL_GROUP_PURPOSE_SRC", "env_build", "-", "-",
           "which catalog file the group-purpose gate reads; a test rail so the "
           "selftest can point it at a fixture instead of the tree catalog")
 Z23_FLAG("ZCL_HEX_CODEC_BASELINE", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_hex_codec_single.sh:66")
+          "undocumented; first use tools/lint/lintc/gate_hex_codec_single.c:661")
 Z23_FLAG("ZCL_HEX_CODEC_COVERAGE", "env_build", "1", "-",
-          "undocumented; first use tools/lint/check_hex_codec_single.sh:229")
+          "undocumented; first use tools/lint/lintc/gate_hex_codec_single.c:653")
 Z23_FLAG("ZCL_HEX_CODEC_COVERAGE_ALLOWANCE", "env_build", "0", "-",
-          "undocumented; first use tools/lint/check_hex_codec_single.sh:228")
+          "undocumented; first use tools/lint/lintc/gate_hex_codec_single.c:374")
 Z23_FLAG("ZCL_HEX_CODEC_FILE_FLOOR", "env_build", "800", "-",
-          "undocumented; first use tools/lint/check_hex_codec_single.sh:200")
+          "undocumented; first use tools/lint/lintc/gate_hex_codec_single.c:649")
 Z23_FLAG("ZCL_HEX_CODEC_SCAN_ROOTS", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_hex_codec_single.sh:70")
+          "undocumented; first use tools/lint/lintc/gate_hex_codec_single.c:578")
 Z23_FLAG("ZCL_HOOKS_STATUS_ROOT", "env_build", "-", "-",
           "undocumented; first use tools/scripts/hooks_status.sh:28")
 Z23_FLAG("ZCL_HOST_WATCHDOG_DOWN_CYCLES", "env_build", "2", "-",
@@ -2327,9 +2327,9 @@ Z23_FLAG("ZCL_TU_SELF_OUT", "env_build", "-", "-",
 Z23_FLAG("ZCL_TU_STUB_RUNS", "env_build", "-", "-",
           "undocumented; first use tools/lint/tu_result_cache.sh:605")
 Z23_FLAG("ZCL_UNATTENDED_PUBLISH_SCAN_FILES", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_no_unattended_publish.sh:211")
+          "undocumented; first use tools/lint/lintc/gate_no_unattended_publish.c:446")
 Z23_FLAG("ZCL_UNATTENDED_PUBLISH_TEST_REGEX", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_no_unattended_publish.sh:221")
+          "undocumented; first use tools/lint/lintc/gate_no_unattended_publish.c:465")
 Z23_FLAG("ZCL_USE_CCACHE", "env_build", "unset", "-",
           "first use tools/scripts/repro_network_policy_selftest.sh:42; documented at docs/AGENT_API.md:1286: installed, otherwise ccache. Set ZCL_USE_CCACHE=0 to force a direct")
 Z23_FLAG("ZCL_UTXO_LADDER_HEAVY", "env_test", "-", "-",
