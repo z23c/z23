@@ -235,17 +235,13 @@ static int hdls_case_probe_case(const char *sandbox, const char *deny)
     return bad;
 }
 
-/* Case 4 (comment-only) reuses the eligible.orig backup left behind by
- * hdls_case_probe; case 4b (the C leaf table, with a stray star in its
- * comment body to prove the block-comment stripper anchors on the real
- * close sequence rather than the first star it meets) plants a fixture TU
- * under its own turoot. */
-static int hdls_case_comment_and_gen_table(const char *sandbox, const char *deny)
+/* Case 4: a leaf named only in a COMMENT (with a stray star in its body, to
+ * prove the block-comment stripper anchors on the real close sequence
+ * rather than the first star it meets) must not trip the gate. Reuses the
+ * eligible.orig backup left behind by hdls_case_probe. */
+static int hdls_case_comment_only(const char *sandbox, const char *deny,
+                                  const char *eligible, const char *backup)
 {
-    char eligible[HDLS_L2], backup[HDLS_L2];
-    snprintf(eligible, sizeof eligible, "%s/hotswap_eligible.def", sandbox);
-    snprintf(backup, sizeof backup, "%s/eligible.orig", sandbox);
-
     if (hdls_append(eligible,
         "/* core.chain.block.get is denied * see hotswap_denied_leaves.def */\n"))
         return die("z23-lint: write failed\n", "");
@@ -258,8 +254,15 @@ static int hdls_case_comment_and_gen_table(const char *sandbox, const char *deny
         : 0;
     if (hdls_copy_file(backup, eligible) && !bad)
         return die("z23-lint: write failed: %s\n", eligible);
-    if (bad) return bad;
+    return bad;
+}
 
+/* Case 4b: the C-side leaf table — a denied leaf inside a ZCL_HOTSWAP_GEN
+ * block must trip the gate and name the TU; the same leaf named only in
+ * RESIDENT code (outside the block) must not be reported. */
+static int hdls_case_gen_table(const char *sandbox, const char *deny,
+                               const char *eligible, const char *backup)
+{
     char turoot[HDLS_L2], fixture[HDLS_L3];
     snprintf(turoot, sizeof turoot, "%s/turoot", sandbox);
     if (mkdir(turoot, 0700) != 0 && errno != EEXIST)
@@ -278,16 +281,32 @@ static int hdls_case_comment_and_gen_table(const char *sandbox, const char *deny
     if (hdls_append(eligible,
         "HOTSWAP_ELIGIBLE(\"gen_fixture.c\") HOTSWAP_PROBE(\"core.status\")\n"))
         return die("z23-lint: write failed\n", "");
+    char out[HDLS_BUF], err[HDLS_BUF];
+    int rc;
     if (hdls_run_case(sandbox, deny, turoot, out, sizeof out, err, sizeof err, &rc))
         return die("z23-lint: read failed\n", "");
+    int bad;
     if (rc != 1)
         bad = hdls_fail("a denied leaf in a ZCL_HOTSWAP_GEN leaf table did not trip the gate", out, err);
     else if (!strstr(err, "gen_fixture.c stages denied leaf"))
         bad = hdls_fail("the C-table failure did not name the TU", out, err);
     else if (strstr(err, "core.chain.transaction.get"))
         bad = hdls_fail("a leaf named only in RESIDENT code was reported", out, err);
+    else
+        bad = 0;
     if (hdls_copy_file(backup, eligible) && !bad)
         bad = die("z23-lint: write failed: %s\n", eligible);
+    return bad;
+}
+
+static int hdls_case_comment_and_gen_table(const char *sandbox, const char *deny)
+{
+    char eligible[HDLS_L2], backup[HDLS_L2];
+    snprintf(eligible, sizeof eligible, "%s/hotswap_eligible.def", sandbox);
+    snprintf(backup, sizeof backup, "%s/eligible.orig", sandbox);
+
+    int bad = hdls_case_comment_only(sandbox, deny, eligible, backup);
+    if (!bad) bad = hdls_case_gen_table(sandbox, deny, eligible, backup);
     return bad;
 }
 

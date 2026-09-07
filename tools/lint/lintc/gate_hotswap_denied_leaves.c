@@ -83,36 +83,60 @@ static int hdl_note(FILE *viol, int *nv, const char *fmt, ...)
  * literal may span lines), reset to 0 at the start of each scan. Comment
  * text is dropped; string-literal bodies (including a `*` inside them) are
  * copied through untouched, exactly like the shell gate's awk stripper. */
+/* One step inside an already-open block comment: blank it, clear *in_block
+ * on the closing star-slash. Returns the new i. */
+static size_t hdl_strip_block_step(int *in_block, const char *in, size_t n, size_t i)
+{
+    if (in[i] == '*' && i + 1 < n && in[i + 1] == '/') { *in_block = 0; return i + 2; }
+    return i + 1;
+}
+
+/* One step inside an already-open "..." literal: copy the char through
+ * (a backslash escape copies both bytes verbatim), clear *in_string on the
+ * closing quote. Returns the new i. */
+static size_t hdl_strip_string_step(int *in_string, const char *in, size_t n,
+                                    size_t i, char *out, size_t cap, size_t *oi)
+{
+    char c = in[i];
+    if (c == '\\' && i + 1 < n) {
+        if (*oi + 2 < cap) { out[*oi] = c; out[*oi + 1] = in[i + 1]; *oi += 2; }
+        return i + 2;
+    }
+    if (*oi + 1 < cap) out[(*oi)++] = c;
+    if (c == '"') *in_string = 0;
+    return i + 1;
+}
+
+/* One step outside any comment/string: recognizes a line comment (blanks
+ * the rest of the line), a block-comment open, and a quote opening a
+ * literal; anything else is copied through. Returns the new i, or n to
+ * stop the line. */
+static size_t hdl_strip_default_step(int *in_block, int *in_string, const char *in,
+                                     size_t n, size_t i, char *out, size_t cap,
+                                     size_t *oi)
+{
+    if (in[i] == '/' && i + 1 < n && in[i + 1] == '/') return n;
+    if (in[i] == '/' && i + 1 < n && in[i + 1] == '*') { *in_block = 1; return i + 2; }
+    if (in[i] == '"') {
+        if (*oi + 1 < cap) out[(*oi)++] = in[i];
+        *in_string = 1;
+        return i + 1;
+    }
+    if (*oi + 1 < cap) out[(*oi)++] = in[i];
+    return i + 1;
+}
+
 static void hdl_strip_line(int *in_block, int *in_string, const char *in,
                            char *out, size_t cap)
 {
     size_t n = strlen(in), oi = 0, i = 0;
     while (i < n) {
-        if (*in_block) {
-            if (in[i] == '*' && i + 1 < n && in[i + 1] == '/') {
-                *in_block = 0; i += 2;
-            } else {
-                i++;
-            }
-            continue;
-        }
-        if (*in_string) {
-            char c = in[i];
-            if (c == '\\' && i + 1 < n) {
-                if (oi + 2 < cap) { out[oi++] = c; out[oi++] = in[i + 1]; }
-                i += 2;
-                continue;
-            }
-            if (oi + 1 < cap) out[oi++] = c;
-            i++;
-            if (c == '"') *in_string = 0;
-            continue;
-        }
-        if (in[i] == '/' && i + 1 < n && in[i + 1] == '/') break;
-        if (in[i] == '/' && i + 1 < n && in[i + 1] == '*') { *in_block = 1; i += 2; continue; }
-        if (in[i] == '"') { if (oi + 1 < cap) out[oi++] = in[i]; i++; *in_string = 1; continue; }
-        if (oi + 1 < cap) out[oi++] = in[i];
-        i++;
+        if (*in_block)
+            i = hdl_strip_block_step(in_block, in, n, i);
+        else if (*in_string)
+            i = hdl_strip_string_step(in_string, in, n, i, out, cap, &oi);
+        else
+            i = hdl_strip_default_step(in_block, in_string, in, n, i, out, cap, &oi);
     }
     out[oi < cap ? oi : cap - 1] = '\0';
 }
@@ -313,6 +337,31 @@ static int hdl_leaf_name_valid(const char *leaf)
 /* grep -rqF "\"<leaf>\"," over CATALOG, every regular file recursively (the
  * original scans the whole tree, not just *.def, so README.md would count
  * too — it never matches, but parity means not assuming the extension). */
+/* One regular file's contribution to the recursive grep -rqF scan: sets
+ * *found and returns 0, or UNPROVEN-exit-2 naming the path on an open/read
+ * failure. */
+static int hdl_file_has_leaf(const char *path, const char *needle, int *found)
+{
+    FILE *f = fopen(path, "r");
+    if (!f) {
+        fprintf(g_hdl_err, "check_hotswap_denied_leaves: cannot open %s\n", path);
+        return 2;
+    }
+    char *line = NULL;
+    size_t cap = 0;
+    ssize_t rn;
+    while (!*found && (rn = getline(&line, &cap, f)) >= 0)
+        if (strstr(line, needle)) *found = 1;
+    int rc = 0;
+    if (!*found && ferror(f)) {
+        fprintf(g_hdl_err, "check_hotswap_denied_leaves: cannot open %s\n", path);
+        rc = 2;
+    }
+    free(line);
+    fclose(f);
+    return rc;
+}
+
 static int hdl_dir_has_leaf(const char *dir, const char *needle, int *found)
 {
     DIR *d = opendir(dir);
@@ -336,28 +385,10 @@ static int hdl_dir_has_leaf(const char *dir, const char *needle, int *found)
             rc = 2;
             break;
         }
-        if (S_ISDIR(st.st_mode)) {
+        if (S_ISDIR(st.st_mode))
             rc = hdl_dir_has_leaf(path, needle, found);
-            continue;
-        }
-        if (!S_ISREG(st.st_mode)) continue;
-        FILE *f = fopen(path, "r");
-        if (!f) {
-            fprintf(g_hdl_err, "check_hotswap_denied_leaves: cannot open %s\n", path);
-            rc = 2;
-            break;
-        }
-        char *line = NULL;
-        size_t cap = 0;
-        ssize_t rn;
-        while (!*found && (rn = getline(&line, &cap, f)) >= 0)
-            if (strstr(line, needle)) *found = 1;
-        if (!*found && ferror(f)) {
-            fprintf(g_hdl_err, "check_hotswap_denied_leaves: cannot open %s\n", path);
-            rc = 2;
-        }
-        free(line);
-        fclose(f);
+        else if (S_ISREG(st.st_mode))
+            rc = hdl_file_has_leaf(path, needle, found);
     }
     closedir(d);
     return rc;
@@ -487,6 +518,29 @@ static int hdl_gen_block_dir(const char *line)
     return *p == '#';
 }
 
+/* One #if/#ifdef/#ifndef or #endif directive line's effect on the
+ * nesting-aware on/depth state that tracks whether we're inside a
+ * ZCL_HOTSWAP_GEN / ZCL_HOTSWAP_MODULE_GEN block. */
+static void hdl_gen_block_directive(const char *line, int *on, int *depth)
+{
+    const char *p = line;
+    while (*p == ' ' || *p == '\t') p++;
+    p++; /* '#' */
+    while (*p == ' ' || *p == '\t') p++;
+    if (strncmp(p, "if", 2) == 0) {
+        if (!*on) {
+            if (strstr(line, "ZCL_HOTSWAP_GEN") || strstr(line, "ZCL_HOTSWAP_MODULE_GEN")) {
+                *on = 1; *depth = 1;
+            }
+        } else {
+            (*depth)++;
+        }
+    } else if (strncmp(p, "endif", 5) == 0 && *on) {
+        (*depth)--;
+        if (*depth == 0) *on = 0;
+    }
+}
+
 static int hdl_extract_gen_tokens(const char *tu_path, struct hdl_tokset *ts)
 {
     FILE *f = fopen(tu_path, "r");
@@ -501,24 +555,7 @@ static int hdl_extract_gen_tokens(const char *tu_path, struct hdl_tokset *ts)
     int rc = 0;
     while (rc == 0 && (n = getline(&line, &cap, f)) >= 0) {
         if (hdl_gen_block_dir(line)) {
-            const char *p = line;
-            while (*p == ' ' || *p == '\t') p++;
-            p++; /* '#' */
-            while (*p == ' ' || *p == '\t') p++;
-            int is_if = strncmp(p, "if", 2) == 0;
-            int is_endif = strncmp(p, "endif", 5) == 0;
-            if (is_if) {
-                if (!on) {
-                    if (strstr(line, "ZCL_HOTSWAP_GEN")
-                        || strstr(line, "ZCL_HOTSWAP_MODULE_GEN")) {
-                        on = 1; depth = 1;
-                    }
-                } else {
-                    depth++;
-                }
-            } else if (is_endif) {
-                if (on) { depth--; if (depth == 0) on = 0; }
-            }
+            hdl_gen_block_directive(line, &on, &depth);
             continue;
         }
         if (!on) continue;
@@ -615,15 +652,10 @@ static int hdl_scan_gen_tables(char tus[][HDL_PATH], int nt, const char *tu_root
     return rc;
 }
 
-int check_hotswap_denied_leaves_run(int argc, char **argv)
+/* Header line + the three fail-closed existence checks (denylist readable,
+ * catalog and scan dir present). */
+static int hdl_preflight(const char *denylist, const char *scan_dir, const char *catalog)
 {
-    (void)argc; (void)argv;
-    hdl_io_prod();
-    const char *denylist = hdl_denylist();
-    const char *scan_dir = hdl_scan_dir();
-    const char *catalog = hdl_catalog();
-    const char *tu_root = hdl_tu_root();
-
     if (fputs("══ LINT: hot-swap leaf denylist (never-swappable command leaves) ══\n",
               g_hdl_out) < 0)
         return die("z23-lint: write failed\n", "");
@@ -646,13 +678,70 @@ int check_hotswap_denied_leaves_run(int argc, char **argv)
                 "missing.\n", scan_dir);
         return 2;
     }
+    return 0;
+}
+
+/* The C-side TU list: every hotswap_eligible.def / hotswap_swappable.def
+ * row among the enumerated manifests. */
+static int hdl_collect_all_tus(char manifests[][HDL_PATH], int nm,
+                               char tus[][HDL_PATH], int *nt)
+{
+    int rc = 0;
+    for (int i = 0; i < nm && rc == 0; i++) {
+        const char *slash = strrchr(manifests[i], '/');
+        const char *base = slash ? slash + 1 : manifests[i];
+        if (strcmp(base, "hotswap_eligible.def") == 0
+            || strcmp(base, "hotswap_swappable.def") == 0)
+            rc = hdl_collect_tus_from(manifests[i], base, tus, nt);
+    }
+    if (rc == 0)
+        rc = gate_require_scanned(*nt, 1, "check_hotswap_denied_leaves",
+            "no hot-swappable translation units parsed from the manifests");
+    return rc;
+}
+
+/* Dump the accumulated violation lines to g_hdl_err and print the shared
+ * FAIL explanation. `viol` is always closed on the way out. */
+static int hdl_emit_violations(FILE *viol, const char *denylist)
+{
+    if (fseek(viol, 0, SEEK_SET) != 0) { fclose(viol); return die("z23-lint: fseek failed\n", ""); }
+    char *line = NULL;
+    size_t cap = 0;
+    ssize_t n;
+    while ((n = getline(&line, &cap, viol)) >= 0)
+        if (fwrite(line, 1, (size_t)n, g_hdl_err) != (size_t)n) {
+            free(line); fclose(viol);
+            return die("z23-lint: write failed\n", "");
+        }
+    free(line);
+    fclose(viol);
+    fputs("FAIL: a hot-swap manifest names a leaf the owner ruled never swappable.\n"
+          "  These leaves render block/transaction bytes: a swapped generation\n"
+          "  misreports the chain to every RPC reader without touching\n"
+          "  validation. 'Read-only' is not the test on a rendering path.\n", g_hdl_err);
+    fprintf(g_hdl_err, "  The rule and its per-leaf reason live in %s.\n", denylist);
+    fputs("  Removing a row there is an OWNER decision, not a lane's.\n", g_hdl_err);
+    return 1;
+}
+
+int check_hotswap_denied_leaves_run(int argc, char **argv)
+{
+    (void)argc; (void)argv;
+    hdl_io_prod();
+    const char *denylist = hdl_denylist();
+    const char *scan_dir = hdl_scan_dir();
+    const char *catalog = hdl_catalog();
+    const char *tu_root = hdl_tu_root();
+
+    int rc = hdl_preflight(denylist, scan_dir, catalog);
+    if (rc) return rc;
 
     FILE *viol = tmpfile();
     if (!viol) return die("z23-lint: tmpfile failed\n", "");
     int nv = 0;
     static char leaves[HDL_ENTRIES][HDL_LEAF];
     int nleaves = 0;
-    int rc = hdl_load_and_validate_entries(denylist, catalog, viol, &nv, leaves, &nleaves);
+    rc = hdl_load_and_validate_entries(denylist, catalog, viol, &nv, leaves, &nleaves);
     if (rc) { fclose(viol); return rc; }
 
     static char manifests[HDL_MANIFESTS][HDL_PATH];
@@ -672,41 +761,14 @@ int check_hotswap_denied_leaves_run(int argc, char **argv)
 
     static char tus[HDL_TUS][HDL_PATH];
     int nt = 0;
-    for (int i = 0; i < nm && rc == 0; i++) {
-        const char *slash = strrchr(manifests[i], '/');
-        const char *base = slash ? slash + 1 : manifests[i];
-        if (strcmp(base, "hotswap_eligible.def") == 0
-            || strcmp(base, "hotswap_swappable.def") == 0)
-            rc = hdl_collect_tus_from(manifests[i], base, tus, &nt);
-    }
-    if (rc == 0)
-        rc = gate_require_scanned(nt, 1, "check_hotswap_denied_leaves",
-            "no hot-swappable translation units parsed from the manifests");
+    rc = hdl_collect_all_tus(manifests, nm, tus, &nt);
     if (rc) { fclose(viol); return rc; }
 
     rc = hdl_scan_gen_tables(tus, nt, tu_root, leaves, nleaves, viol, &nv);
     if (rc) { fclose(viol); return rc; }
 
-    if (nv > 0) {
-        if (fseek(viol, 0, SEEK_SET) != 0) { fclose(viol); return die("z23-lint: fseek failed\n", ""); }
-        char *line = NULL;
-        size_t cap = 0;
-        ssize_t n;
-        while ((n = getline(&line, &cap, viol)) >= 0)
-            if (fwrite(line, 1, (size_t)n, g_hdl_err) != (size_t)n) {
-                free(line); fclose(viol);
-                return die("z23-lint: write failed\n", "");
-            }
-        free(line);
-        fclose(viol);
-        fputs("FAIL: a hot-swap manifest names a leaf the owner ruled never swappable.\n"
-              "  These leaves render block/transaction bytes: a swapped generation\n"
-              "  misreports the chain to every RPC reader without touching\n"
-              "  validation. 'Read-only' is not the test on a rendering path.\n", g_hdl_err);
-        fprintf(g_hdl_err, "  The rule and its per-leaf reason live in %s.\n", denylist);
-        fputs("  Removing a row there is an OWNER decision, not a lane's.\n", g_hdl_err);
-        return 1;
-    }
+    if (nv > 0)
+        return hdl_emit_violations(viol, denylist);
     fclose(viol);
     if (fprintf(g_hdl_out, "  OK: %d denied leaf/leaves absent from %d hot-swap manifest(s)\n",
                 nleaves, nm) < 0)
