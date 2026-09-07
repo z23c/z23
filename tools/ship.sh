@@ -434,7 +434,13 @@ ship_hardlink_tool_path() {
         return 0
     fi
     local tool="$REPO_ROOT/build/bin/check_no_hardlink_seeding"
-    [ -x "$tool" ] || $SHIP_MAKE build/bin/check_no_hardlink_seeding ||
+    # Always run make, never only when the binary is missing: make is a
+    # no-op when the binary is already newer than its source, so this costs
+    # nothing when the tool is current — but it is the only thing that
+    # catches a STALE binary (source changed, binary did not get relinked),
+    # which otherwise runs happily and answers with its old command-line
+    # surface instead of refusing to run at all.
+    $SHIP_MAKE build/bin/check_no_hardlink_seeding ||
         die "prepare hardlinks FAILED — make build/bin/check_no_hardlink_seeding did not succeed"
     [ -x "$tool" ] ||
         die "prepare hardlinks FAILED — $tool still missing after the build"
@@ -450,10 +456,17 @@ ship_hardlink_tool_path() {
 # one via the same reflink-copy-then-rename shape the tool's own FAIL
 # message advises, done natively.
 ship_prepare_hardlink_report() {
-    local root="$1" dry="$2" tool n unit
+    local root="$1" dry="$2" tool n unit rc err_file err
     tool="$(ship_hardlink_tool_path)"
-    n="$("$tool" --count "$root")" ||
-        die "prepare hardlinks FAILED — $tool --count $root refused (a transient walk error, not a silent abort)"
+    err_file="$(mktemp "${TMPDIR:-/tmp}/z23-ship-hardlink-count.XXXXXX")"
+    n="$("$tool" --count "$root" 2>"$err_file")"
+    rc=$?
+    if [ "$rc" -ne 0 ]; then
+        err="$(cat "$err_file")"
+        rm -f "$err_file"
+        die "prepare hardlinks FAILED — $tool --count $root refused (exit $rc, not a silent abort): ${err:-no stderr output}"
+    fi
+    rm -f "$err_file"
     if [ "$dry" -eq 1 ]; then
         say "prepare hardlinks (dry run) $n multiply-linked file(s) reported"
         return 0
@@ -800,6 +813,23 @@ if [ "${1:-}" = "--selftest" ] || [ "${1:-}" = "--selftest-dev-guard" ]; then
     [ "$("$SHIP_HARDLINK_TOOL" --count "$prep_root")" -eq 2 ]
     grep -q 'dry run' <<<"$dry_out"
     [ ! -s "$prep_calls" ]
+    # (e) a STALE tool binary (old command-line surface, e.g. missing
+    # --count) must refuse with its exit code AND its own stderr forwarded
+    # verbatim, not the fixed "a transient walk error" sentence: that is
+    # the actual failure this incident hit — the binary predated --count
+    # entirely, so it printed only a usage line and exited 2, which the
+    # old sentence made indistinguishable from a real walk error.
+    fake_stale_tool="$prep_root/fake-stale-hardlink-tool"
+    printf '#!/bin/sh\nprintf '"'"'usage: check_no_hardlink_seeding [--selftest|worktree]\n'"'"' >&2\nexit 2\n' \
+        > "$fake_stale_tool"
+    chmod +x "$fake_stale_tool"
+    SHIP_HARDLINK_TOOL="$fake_stale_tool"
+    prep_refuse_rc=0
+    ( ship_prepare_hardlink_report "$prep_root" 0 ) \
+        >/dev/null 2>"$prep_root/stale.err" || prep_refuse_rc=$?
+    [ "$prep_refuse_rc" -ne 0 ]
+    grep -q 'exit 2' "$prep_root/stale.err"
+    grep -q 'usage:' "$prep_root/stale.err"
     SHIP_LAND_TRAIN_QUERY=ship_land_train_query_real
     SHIP_HARDLINK_TOOL=""
     SHIP_MAKE="make -s"

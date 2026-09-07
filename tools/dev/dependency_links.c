@@ -6,6 +6,7 @@
 #include "platform/directory_compat.h"
 #include "platform/file_metadata.h"
 
+#include <errno.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
@@ -58,9 +59,10 @@ static bool scan_directory(struct dependency_scan *scan, const char *path,
                       relative_path(scan, path));
 
     struct platform_directory_list directories = {0}, files = {0};
-    if (!platform_directory_list_children_sorted(path, &directories, &files))
-        return refuse(scan, "directory_unreadable:%s",
-                      relative_path(scan, path));
+    if (!platform_directory_list_children_sorted(path, &directories, &files)) {
+        int walk_errno = errno;
+        return refuse(scan, "cannot walk %s: %s", path, strerror(walk_errno));
+    }
     bool ok = true;
     for (size_t i = 0; ok && i < files.count; i++) {
         if (++scan->stats->entries > ZCL_DEPENDENCY_LINK_ENTRIES_MAX) {
@@ -76,8 +78,9 @@ static bool scan_directory(struct dependency_scan *scan, const char *path,
         }
         if (platform_file_metadata_read(child, &metadata) !=
             PLATFORM_FILE_METADATA_OK) {
-            ok = refuse(scan, "file_unreadable:%s",
-                        relative_path(scan, child));
+            int walk_errno = errno;
+            ok = refuse(scan, "cannot walk %s: %s", child,
+                        strerror(walk_errno));
             break;
         }
         if (metadata.links > 1) {

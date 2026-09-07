@@ -47,14 +47,33 @@ static bool report_link(const char *relative_path, uint64_t links,
     return true;
 }
 
+/* A scan refusal prints two lines: the human-readable summary this tool has
+ * always printed, and — when the refusal came from an actual filesystem
+ * walk error (why starts with "cannot walk ", set by
+ * zcl_dependency_links_scan() around the failing opendir/lstat) — a second,
+ * machine-greppable line naming exactly which path and errno, plus how many
+ * entries the scan had already walked before hitting it. Before this, a
+ * walk error reported no path, no errno, and no count: an operator had to
+ * guess which of vendor/, build/hotswap/, or build/githooks/ (and how deep)
+ * the scan died in. */
+static void report_scan_refusal(const char *why, size_t entries_walked)
+{
+    fprintf(stderr, "hardlink-seeding: scan refused: %s\n",
+            why[0] ? why : "invalid_arguments");
+    if (strncmp(why, "cannot walk ", 12) == 0)
+        fprintf(stderr, "check_no_hardlink_seeding: %s\n", why);
+    fprintf(stderr,
+            "check_no_hardlink_seeding: walked %zu entr%s before failing\n",
+            entries_walked, entries_walked == 1 ? "y" : "ies");
+}
+
 static bool check_root(const char *root)
 {
     struct zcl_dependency_link_stats stats;
     char why[ZCL_DEPENDENCY_LINK_PATH_MAX];
     if (!zcl_dependency_links_scan(root, report_link, NULL, &stats, why,
                                    sizeof(why))) {
-        fprintf(stderr, "hardlink-seeding: scan refused: %s\n",
-                why[0] ? why : "invalid_arguments");
+        report_scan_refusal(why, stats.entries);
         return false;
     }
     if (!stats.linked)
@@ -81,8 +100,7 @@ static int count_root(const char *root)
     char why[ZCL_DEPENDENCY_LINK_PATH_MAX];
     if (!zcl_dependency_links_scan(root, NULL, NULL, &stats, why,
                                    sizeof(why))) {
-        fprintf(stderr, "hardlink-seeding: scan refused: %s\n",
-                why[0] ? why : "invalid_arguments");
+        report_scan_refusal(why, stats.entries);
         return 1;
     }
     printf("%zu\n", stats.linked);
@@ -460,12 +478,66 @@ static int selftest_repair(void)
            "hardlink outside the scan scope is never touched)\n");
     return 0;
 }
+
+/* An unreadable directory inside the scan scope (vendor/blocked, chmod 000)
+ * must make zcl_dependency_links_scan() fail with a reason that names the
+ * exact failing path and a strerror(errno) message, not a bare tag with
+ * neither — the fix for an incident where a walk failure gave the operator
+ * no path to investigate. */
+static bool selftest_walk_error(const char *base)
+{
+    char vendor[ZCL_DEPENDENCY_LINK_PATH_MAX] = {0};
+    char blocked[ZCL_DEPENDENCY_LINK_PATH_MAX] = {0};
+    bool ok = path_join(vendor, base, "vendor")
+        && path_join(blocked, vendor, "blocked")
+        && platform_directory_ensure(vendor, 0700)
+        && platform_directory_ensure(blocked, 0700)
+        && chmod(blocked, 0000) == 0;
+    if (ok) {
+        struct zcl_dependency_link_stats stats;
+        char why[ZCL_DEPENDENCY_LINK_PATH_MAX] = {0};
+        ok = !zcl_dependency_links_scan(base, NULL, NULL, &stats, why,
+                                        sizeof(why)) &&
+            strncmp(why, "cannot walk ", 12) == 0 &&
+            strstr(why, "blocked") != NULL && strlen(why) > 12u &&
+            /* strerror() text follows the path, e.g. "Permission denied" */
+            strstr(why, ": ") != NULL;
+    }
+    if (blocked[0]) (void)chmod(blocked, 0700);
+    if (blocked[0]) (void)rmdir(blocked);
+    if (vendor[0]) (void)rmdir(vendor);
+    return ok;
+}
+
+static int selftest_walk_error_suite(void)
+{
+    char base[] = "/tmp/z23-hardlink-walk-error.XXXXXX";
+    if (!mkdtemp(base))
+        return 1;
+    bool ok = selftest_walk_error(base);
+    (void)rmdir(base);
+    if (!ok) {
+        fprintf(stderr, "hardlink-seeding: walk-error selftest FAIL\n");
+        return 1;
+    }
+    printf("hardlink-seeding: walk-error selftest PASS (an unreadable "
+           "directory's refusal names its path and strerror(errno))\n");
+    return 0;
+}
 #else
 static int selftest_repair(void)
 {
     printf("hardlink-seeding: repair selftest SKIPPED (Windows: --repair "
            "itself is portable; this fixture harness uses POSIX "
            "link/stat/chmod/mkdtemp directly, same as selftest() above)\n");
+    return 0;
+}
+
+static int selftest_walk_error_suite(void)
+{
+    printf("hardlink-seeding: walk-error selftest SKIPPED (Windows: this "
+           "fixture harness uses POSIX chmod/mkdtemp directly, same as "
+           "selftest_repair() above)\n");
     return 0;
 }
 #endif
@@ -479,7 +551,8 @@ static bool is_known_verb(const char *s)
 static int dispatch(const char *verb, const char *root)
 {
     if (strcmp(verb, "--selftest") == 0)
-        return (selftest() == 0 && selftest_repair() == 0) ? 0 : 1;
+        return (selftest() == 0 && selftest_repair() == 0 &&
+                selftest_walk_error_suite() == 0) ? 0 : 1;
     if (strcmp(verb, "--count") == 0)
         return count_root(root);
     if (strcmp(verb, "--dry-run") == 0)
