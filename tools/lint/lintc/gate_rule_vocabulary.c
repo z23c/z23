@@ -556,6 +556,7 @@ static int rv_hush(int (*fn)(void))
     if (n < 0 || o < 0 || e < 0) return die("z23-lint: tmpfile failed\n", "");
     int rc = 2;
     if (dup2(n, 1) >= 0 && dup2(n, 2) >= 0) rc = fn();
+    fflush(stdout); fflush(stderr); /* buffered stdout else leaks post-restore */
     (void)dup2(o, 1); (void)dup2(e, 2);
     close(n); close(o); close(e);
     return rc;
