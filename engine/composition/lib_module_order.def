@@ -201,6 +201,14 @@ LIB_MODULE("health")
 /* Application-facing subsystems. */
 LIB_MODULE("wallet")
 LIB_MODULE("framework")
+/* The bounded PULL wire one node uses to fetch another node's signed App
+ * events for one (app_id, topic). It references engine/modules/framework
+ * for the canonical event encoding and the one verifier — and nothing else
+ * — so directly above framework is its LOWEST legal rank, not a convenient
+ * one. It opens no database, no socket and no clock: it turns bytes into
+ * refusals or verified events, which is why it can rank here rather than
+ * above the storage and transport it is used with. */
+LIB_MODULE("appsync")
 
 /* On-chain overlays and the top of the stack. */
 LIB_MODULE("zslp")
