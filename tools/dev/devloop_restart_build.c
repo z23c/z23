@@ -2332,6 +2332,408 @@ static bool rr_failed_group_from_output(
     return true;
 }
 
+struct rr_prove_ctx {
+    const char *repo_root;
+    const char *const *source_tus;
+    size_t source_count;
+    const struct zcl_devloop_plan *proof_plan;
+    struct zcl_devloop_restart_proof_receipt *receipt;
+    struct zcl_devloop_process_result *process;
+    char *why;
+    size_t why_len;
+    bool immediate_only;
+    bool guard_source;
+    const struct dev_source_record *epoch_source;
+    int64_t started;
+    char root[PATH_MAX];
+    struct rr_plan plan;
+    struct dev_source_record source_before;
+    const struct dev_source_record *identity;
+};
+
+static bool rr_prove_validate_inputs(struct rr_prove_ctx *ctx)
+{
+    if (!ctx->repo_root || !ctx->source_tus || !ctx->proof_plan ||
+        !ctx->receipt || !ctx->process || ctx->source_count == 0 ||
+        ctx->source_count > RR_SOURCE_MAX) {
+        rr_why(ctx->why, ctx->why_len, "restart proof source set is invalid");
+        return false;
+    }
+    memset(ctx->receipt, 0, sizeof(*ctx->receipt));
+    memset(ctx->process, 0, sizeof(*ctx->process));
+    return true;
+}
+
+static bool rr_prove_select_groups(struct rr_prove_ctx *ctx)
+{
+    int64_t selection_started = platform_time_monotonic_us();
+    if (!rr_plan_matches_sources(ctx->proof_plan, ctx->source_tus,
+                                 ctx->source_count)) {
+        rr_why(ctx->why, ctx->why_len,
+               "affected proof plan does not match the changed source set");
+        return false;
+    }
+    if (!rr_collect_groups(ctx->proof_plan, ctx->immediate_only,
+                           ctx->receipt->groups, &ctx->receipt->group_count,
+                           ctx->receipt->deferred_groups,
+                           &ctx->receipt->deferred_group_count,
+                           &ctx->receipt->bounded_proof_deferred)) {
+        rr_why(ctx->why, ctx->why_len,
+               "affected proof plan is incomplete or has no exact groups");
+        return false;
+    }
+    if (ctx->immediate_only &&
+        ctx->receipt->group_count > RR_IMMEDIATE_GROUP_MAX) {
+        rr_why(ctx->why, ctx->why_len,
+               "affected immediate proof set exceeds resident bound");
+        return false;
+    }
+    rr_sha256_bytes(ctx->receipt->groups, strlen(ctx->receipt->groups),
+                    ctx->receipt->groups_sha256);
+    if (ctx->receipt->deferred_group_count > 0)
+        rr_sha256_bytes(ctx->receipt->deferred_groups,
+                        strlen(ctx->receipt->deferred_groups),
+                        ctx->receipt->deferred_groups_sha256);
+    for (size_t i = 0; i < ctx->source_count; i++) {
+        if (!rr_source_is_c(ctx->source_tus[i])) {
+            rr_why(ctx->why, ctx->why_len,
+                   "restart proof requires changed C translation units");
+            return false;
+        }
+    }
+    ctx->receipt->selection_us =
+        platform_time_monotonic_us() - selection_started;
+    return true;
+}
+
+static bool rr_prove_resolve_plan(struct rr_prove_ctx *ctx)
+{
+    if (!platform_directory_canonical_real(ctx->repo_root, ctx->root,
+                                           sizeof(ctx->root))) {
+        rr_why(ctx->why, ctx->why_len,
+               "restart proof checkout root could not be resolved");
+        return false;
+    }
+    struct rr_plan base = {0};
+    bool cache_hit = false;
+    int64_t plan_us = 0;
+    pthread_mutex_lock(&g_rr_mu);
+    bool plan_ok = rr_plan_load_locked(ctx->root, &base, &cache_hit, &plan_us,
+                                       ctx->why, ctx->why_len);
+    pthread_mutex_unlock(&g_rr_mu);
+    (void)cache_hit;
+    (void)plan_us;
+    if (!plan_ok) return false;
+
+    ctx->plan = base;
+    (void)snprintf(ctx->plan.cflags, sizeof(ctx->plan.cflags), "%s",
+                   base.test_cflags);
+    (void)snprintf(ctx->plan.ldflags, sizeof(ctx->plan.ldflags), "%s",
+                   base.test_ldflags);
+    (void)snprintf(ctx->plan.libs, sizeof(ctx->plan.libs), "%s",
+                   base.test_libs);
+    (void)snprintf(ctx->plan.obj_dir, sizeof(ctx->plan.obj_dir), "%s",
+                   base.test_obj_dir);
+    (void)snprintf(ctx->plan.link_rsp, sizeof(ctx->plan.link_rsp), "%s",
+                   base.test_link_rsp);
+    (void)snprintf(ctx->plan.base_reloc, sizeof(ctx->plan.base_reloc), "%s",
+                   base.test_base_reloc);
+    return true;
+}
+
+static bool rr_prove_capture_before(struct rr_prove_ctx *ctx)
+{
+    if (ctx->guard_source) ctx->receipt->source_guard_captures++;
+    if (ctx->guard_source &&
+        (!zcl_dev_source_cas_capture(ctx->root, &ctx->source_before) ||
+         !ctx->source_before.cas_present)) {
+        rr_why(ctx->why, ctx->why_len,
+               "proof source snapshot could not be captured before compile");
+        return false;
+    }
+    ctx->identity = ctx->epoch_source ? ctx->epoch_source
+                                      : &ctx->source_before;
+    if (!rr_source_record_valid(ctx->identity)) {
+        rr_why(ctx->why, ctx->why_len,
+               "proof epoch source CAS record is unavailable");
+        return false;
+    }
+    (void)snprintf(ctx->receipt->source_cas_sha3,
+                   sizeof(ctx->receipt->source_cas_sha3), "%s",
+                   ctx->identity->cas_root_sha3);
+    return true;
+}
+
+static bool rr_prove_compile_and_link(struct rr_prove_ctx *ctx)
+{
+    struct rr_overlay *overlays = zcl_calloc(RR_OVERLAY_MAX, sizeof(*overlays),
+                                             "restart proof overlays");
+    if (!overlays) {
+        rr_why(ctx->why, ctx->why_len,
+               "restart proof overlay allocation failed");
+        return false;
+    }
+    size_t overlay_count = 0;
+    bool ok = rr_prepare_overlays(
+        &ctx->plan, ctx->root, ctx->source_tus, ctx->source_count,
+        ctx->identity, "build/dev-loop/restart-test-objects", overlays,
+        &overlay_count, ctx->process, &ctx->receipt->compiler_processes,
+        &ctx->receipt->compile_us, &ctx->receipt->compile_startup_us,
+        &ctx->receipt->compile_body_us, ctx->why, ctx->why_len);
+    ctx->receipt->source_identity_overlay = ok;
+    char rsp[PATH_MAX] = {0};
+    if (ok && !rr_write_response(&ctx->plan, ctx->root, overlays,
+                                 overlay_count,
+                                 "build/dev-loop/restart-test-objects", false,
+                                 rsp, ctx->why, ctx->why_len))
+        ok = false;
+    if (ok) {
+        ok = rr_link_cached(&ctx->plan, ctx->root, rsp,
+                            "build/dev-loop/restart-test-candidates",
+                            ctx->receipt->artifact_path,
+                            ctx->receipt->artifact_cache_key,
+                            &ctx->receipt->artifact_cache_hit,
+                            &ctx->receipt->linker_processes, ctx->process,
+                            &ctx->receipt->link_us,
+                            &ctx->receipt->link_startup_us,
+                            &ctx->receipt->link_body_us, ctx->why,
+                            ctx->why_len);
+    }
+    if (rsp[0]) (void)unlink(rsp);
+    free(overlays);
+    if (!ok)
+        ctx->receipt->total_us = platform_time_monotonic_us() - ctx->started;
+    return ok;
+}
+
+static bool rr_prove_verify_after(struct rr_prove_ctx *ctx)
+{
+    if (ctx->guard_source) ctx->receipt->source_guard_captures++;
+    struct dev_source_record source_after = {0};
+    if ((ctx->guard_source &&
+         (!zcl_dev_source_cas_capture(ctx->root, &source_after) ||
+          !source_after.cas_present ||
+          strcmp(ctx->source_before.cas_root_sha3,
+                 source_after.cas_root_sha3) != 0)) ||
+        !rr_sha256_file(ctx->receipt->artifact_path,
+                        ctx->receipt->artifact_sha256)) {
+        rr_why(ctx->why, ctx->why_len,
+               "proof source changed or its candidate could not be rehashed");
+        ctx->receipt->total_us = platform_time_monotonic_us() - ctx->started;
+        return false;
+    }
+    return true;
+}
+
+struct rr_prove_test_args {
+    char exact[4096 + 16];
+    const char *argv[RR_SOURCE_MAX + 5];
+    char changed[RR_SOURCE_MAX][ZCL_DEVLOOP_PATH_MAX + 24];
+    size_t argc;
+};
+
+/* The exact story has already run in HOT_SHADOW. Within affected proof,
+ * run the last RED for this checkout/task first when it is still selected;
+ * otherwise run the direct owner invariant. The complete batch still runs
+ * afterward and accounts for every required group. */
+static bool rr_prove_build_test_args(struct rr_prove_ctx *ctx,
+                                     struct rr_prove_test_args *ta)
+{
+    if (snprintf(ta->exact, sizeof(ta->exact), "--exact=%s",
+                ctx->receipt->groups) >= (int)sizeof(ta->exact)) {
+        rr_why(ctx->why, ctx->why_len,
+               "affected proof selector exceeds its bound");
+        return false;
+    }
+    ta->argv[0] = ctx->receipt->artifact_path;
+    ta->argv[1] = ta->exact;
+    ta->argv[2] = "--cache";
+    ta->argv[3] = "--cache-snapshot";
+    ta->argc = 4;
+    for (size_t i = 0; i < ctx->source_count; i++) {
+        if (snprintf(ta->changed[i], sizeof(ta->changed[i]),
+                     "--changed-source=%s", ctx->source_tus[i]) >=
+            (int)sizeof(ta->changed[i])) {
+            rr_why(ctx->why, ctx->why_len,
+                   "changed source selector exceeds its bound");
+            return false;
+        }
+        ta->argv[ta->argc++] = ta->changed[i];
+    }
+    ta->argv[ta->argc] = NULL;
+    return true;
+}
+
+static bool rr_prove_priority_run_and_parse(
+    const char *root, const char **priority_argv,
+    struct zcl_devloop_process_result *priority_process,
+    uint32_t *ran_count, uint32_t *cached, uint32_t *failed, uint32_t *skips)
+{
+    bool priority_ran = zcl_devloop_process_run_test(
+        root, priority_argv, 300000, priority_process);
+    bool priority_summary = priority_ran &&
+        rr_summary_value(priority_process->output, "groups_ran=",
+                         ran_count) &&
+        rr_summary_value(priority_process->output, "groups_cached=",
+                         cached) &&
+        rr_summary_value(priority_process->output, "groups_failed=",
+                         failed) &&
+        rr_summary_value(priority_process->output, "self_skips=", skips);
+    return priority_summary && !priority_process->timed_out &&
+        !priority_process->term_signal && priority_process->exit_code == 0 &&
+        *ran_count + *cached == 1 && *failed == 0 && *skips == 0;
+}
+
+static bool rr_prove_run_priority(struct rr_prove_ctx *ctx,
+                                  struct rr_prove_test_args *ta)
+{
+    char direct_full[ZCL_TEST_GROUP_FULL_MAX] = {0};
+    const char *direct_group = ctx->proof_plan->proof_group &&
+        zcl_test_group_resolve_exact(ctx->proof_plan->proof_group,
+                                     direct_full)
+            ? direct_full : NULL;
+    char priority_full[ZCL_TEST_GROUP_FULL_MAX] = {0};
+    char priority_reason[64] = {0};
+    bool have_priority = rr_failure_priority_select(
+        ctx->root, ctx->receipt->groups, direct_group, priority_full,
+        priority_reason);
+    if (!have_priority)
+        return true;
+    char priority_exact[ZCL_TEST_GROUP_FULL_MAX + 16];
+    if (snprintf(priority_exact, sizeof(priority_exact), "--exact=%s",
+                priority_full) >= (int)sizeof(priority_exact)) {
+        rr_why(ctx->why, ctx->why_len,
+               "priority group selector exceeds its bound");
+        return false;
+    }
+    const char *priority_argv[RR_SOURCE_MAX + 5] = {
+        ctx->receipt->artifact_path, priority_exact, "--cache",
+        "--cache-snapshot",
+    };
+    for (size_t i = 0; i < ctx->source_count; i++)
+        priority_argv[4 + i] = ta->changed[i];
+    priority_argv[4 + ctx->source_count] = NULL;
+    struct zcl_devloop_process_result priority_process = {0};
+    int64_t priority_started = platform_time_monotonic_us();
+    ctx->receipt->test_processes++;
+    uint32_t priority_ran_count = 0, priority_cached = 0;
+    uint32_t priority_failed = 0, priority_skips = 0;
+    bool priority_ok = rr_prove_priority_run_and_parse(
+        ctx->root, priority_argv, &priority_process, &priority_ran_count,
+        &priority_cached, &priority_failed, &priority_skips);
+    ctx->receipt->priority_test_us =
+        platform_time_monotonic_us() - priority_started;
+    (void)snprintf(ctx->receipt->priority_group,
+                   sizeof(ctx->receipt->priority_group), "%s", priority_full);
+    (void)snprintf(ctx->receipt->priority_reason,
+                   sizeof(ctx->receipt->priority_reason), "%s",
+                   priority_reason);
+    if (!priority_ok) {
+        if (!priority_process.cancelled)
+            rr_failure_priority_store(ctx->root, priority_full);
+        *ctx->process = priority_process;
+        ctx->receipt->test_us += ctx->receipt->priority_test_us;
+        ctx->receipt->test_startup_us += priority_process.startup_us;
+        ctx->receipt->test_body_us += priority_process.body_us;
+        ctx->receipt->groups_ran = priority_ran_count;
+        ctx->receipt->groups_cached = priority_cached;
+        ctx->receipt->groups_failed = priority_failed;
+        ctx->receipt->self_skips = priority_skips;
+        ctx->receipt->total_us = platform_time_monotonic_us() - ctx->started;
+        rr_why(ctx->why, ctx->why_len,
+               "failure-first direct owner invariant failed");
+        return false;
+    }
+    if (strcmp(priority_reason, "previous_failure") == 0)
+        rr_failure_priority_clear(ctx->root, priority_full);
+    return true;
+}
+
+static void rr_prove_run_main_test(struct rr_prove_ctx *ctx,
+                                   struct rr_prove_test_args *ta,
+                                   bool *ran_out, bool *summary_ok_out,
+                                   bool *accounted_out)
+{
+    ctx->receipt->test_processes++;
+    int64_t test_started = platform_time_monotonic_us();
+    bool ran = zcl_devloop_process_run_test(ctx->root, ta->argv, 300000,
+                                            ctx->process);
+    ctx->receipt->test_us += platform_time_monotonic_us() - test_started;
+    ctx->receipt->test_startup_us += ctx->process->startup_us;
+    ctx->receipt->test_body_us += ctx->process->body_us;
+    bool summary_ok = ran &&
+        rr_summary_value(ctx->process->output, "groups_ran=",
+                         &ctx->receipt->groups_ran) &&
+        rr_summary_value(ctx->process->output, "groups_cached=",
+                         &ctx->receipt->groups_cached) &&
+        rr_summary_value(ctx->process->output, "groups_failed=",
+                         &ctx->receipt->groups_failed) &&
+        rr_summary_value(ctx->process->output, "self_skips=",
+                         &ctx->receipt->self_skips);
+    bool accounted = summary_ok &&
+        ctx->receipt->groups_ran <= ctx->receipt->group_count &&
+        ctx->receipt->groups_cached ==
+            ctx->receipt->group_count - ctx->receipt->groups_ran;
+    ctx->receipt->immediate_proof_complete = ran && !ctx->process->timed_out &&
+        !ctx->process->term_signal && ctx->process->exit_code == 0 &&
+        accounted && ctx->receipt->groups_failed == 0 &&
+        ctx->receipt->self_skips == 0;
+    ctx->receipt->integration_proof_deferred =
+        ctx->receipt->deferred_group_count > 0;
+    ctx->receipt->proof_complete = ctx->receipt->immediate_proof_complete &&
+        !ctx->receipt->integration_proof_deferred;
+    ctx->receipt->total_us = platform_time_monotonic_us() - ctx->started;
+    *ran_out = ran;
+    *summary_ok_out = summary_ok;
+    *accounted_out = accounted;
+}
+
+static void rr_prove_report_failure(struct rr_prove_ctx *ctx, bool ran,
+                                    bool summary_ok, bool accounted)
+{
+    char failed_group[ZCL_TEST_GROUP_FULL_MAX];
+    if (!ctx->process->cancelled && rr_failed_group_from_output(
+            ctx->process->output, ctx->receipt->groups, failed_group))
+        rr_failure_priority_store(ctx->root, failed_group);
+    char detail[256];
+    if (!ran) {
+        rr_why(ctx->why, ctx->why_len,
+               "affected proof runner could not be executed");
+    } else if (ctx->process->timed_out) {
+        rr_why(ctx->why, ctx->why_len,
+               "affected proof runner exceeded the 300000 ms bound");
+    } else if (ctx->process->term_signal) {
+        (void)snprintf(detail, sizeof(detail),
+                       "affected proof runner terminated by signal %d",
+                       ctx->process->term_signal);
+        rr_why(ctx->why, ctx->why_len, detail);
+    } else if (summary_ok && ctx->receipt->groups_failed > 0) {
+        (void)snprintf(
+            detail, sizeof(detail),
+            "affected proofs failed: %u of %u exact groups failed; see process_output",
+            ctx->receipt->groups_failed, ctx->receipt->group_count);
+        rr_why(ctx->why, ctx->why_len, detail);
+    } else if (summary_ok && ctx->receipt->self_skips > 0) {
+        (void)snprintf(
+            detail, sizeof(detail),
+            "affected proofs incomplete: %u exact groups self-skipped; see process_output",
+            ctx->receipt->self_skips);
+        rr_why(ctx->why, ctx->why_len, detail);
+    } else if (!summary_ok) {
+        rr_why(ctx->why, ctx->why_len,
+               "affected proof runner omitted the canonical suite summary");
+    } else if (!accounted) {
+        rr_why(ctx->why, ctx->why_len,
+               "affected proof runner did not account for every exact group");
+    } else {
+        (void)snprintf(
+            detail, sizeof(detail),
+            "affected proof runner exited %d despite a zero-failure summary",
+            ctx->process->exit_code);
+        rr_why(ctx->why, ctx->why_len, detail);
+    }
+}
+
 static bool rr_restart_prove(
     const char *repo_root, const char *const *source_tus, size_t source_count,
     const struct zcl_devloop_plan *proof_plan,
@@ -2340,308 +2742,40 @@ static bool rr_restart_prove(
     char *why, size_t why_len, bool immediate_only, bool guard_source,
     const struct dev_source_record *epoch_source)
 {
-    int64_t started = platform_time_monotonic_us();
-    if (why && why_len) why[0] = 0;
-    if (!repo_root || !source_tus || !proof_plan || !receipt || !process ||
-        source_count == 0 || source_count > RR_SOURCE_MAX) {
-        rr_why(why, why_len, "restart proof source set is invalid");
-        return false;
-    }
-    memset(receipt, 0, sizeof(*receipt));
-    memset(process, 0, sizeof(*process));
-    int64_t selection_started = platform_time_monotonic_us();
-    if (!rr_plan_matches_sources(proof_plan, source_tus, source_count)) {
-        rr_why(why, why_len,
-               "affected proof plan does not match the changed source set");
-        return false;
-    }
-    if (!rr_collect_groups(proof_plan, immediate_only, receipt->groups,
-                           &receipt->group_count, receipt->deferred_groups,
-                           &receipt->deferred_group_count,
-                           &receipt->bounded_proof_deferred)) {
-        rr_why(why, why_len,
-               "affected proof plan is incomplete or has no exact groups");
-        return false;
-    }
-    if (immediate_only && receipt->group_count > RR_IMMEDIATE_GROUP_MAX) {
-        rr_why(why, why_len,
-               "affected immediate proof set exceeds resident bound");
-        return false;
-    }
-    rr_sha256_bytes(receipt->groups, strlen(receipt->groups),
-                    receipt->groups_sha256);
-    if (receipt->deferred_group_count > 0)
-        rr_sha256_bytes(receipt->deferred_groups,
-                        strlen(receipt->deferred_groups),
-                        receipt->deferred_groups_sha256);
-    for (size_t i = 0; i < source_count; i++) {
-        if (!rr_source_is_c(source_tus[i])) {
-            rr_why(why, why_len,
-                   "restart proof requires changed C translation units");
-            return false;
-        }
-    }
-    receipt->selection_us =
-        platform_time_monotonic_us() - selection_started;
-    char root[PATH_MAX];
-    if (!platform_directory_canonical_real(repo_root, root, sizeof(root))) {
-        rr_why(why, why_len, "restart proof checkout root could not be resolved");
-        return false;
-    }
-    struct rr_plan base = {0};
-    bool cache_hit = false;
-    int64_t plan_us = 0;
-    pthread_mutex_lock(&g_rr_mu);
-    bool plan_ok = rr_plan_load_locked(root, &base, &cache_hit, &plan_us,
-                                       why, why_len);
-    pthread_mutex_unlock(&g_rr_mu);
-    (void)cache_hit;
-    (void)plan_us;
-    if (!plan_ok) return false;
-
-    struct rr_plan plan = base;
-    (void)snprintf(plan.cflags, sizeof(plan.cflags), "%s", base.test_cflags);
-    (void)snprintf(plan.ldflags, sizeof(plan.ldflags), "%s", base.test_ldflags);
-    (void)snprintf(plan.libs, sizeof(plan.libs), "%s", base.test_libs);
-    (void)snprintf(plan.obj_dir, sizeof(plan.obj_dir), "%s", base.test_obj_dir);
-    (void)snprintf(plan.link_rsp, sizeof(plan.link_rsp), "%s",
-                   base.test_link_rsp);
-    (void)snprintf(plan.base_reloc, sizeof(plan.base_reloc), "%s",
-                   base.test_base_reloc);
-
-    struct dev_source_record source_before = {0}, source_after = {0};
-    if (guard_source) receipt->source_guard_captures++;
-    if (guard_source &&
-        (!zcl_dev_source_cas_capture(root, &source_before) ||
-         !source_before.cas_present)) {
-        rr_why(why, why_len,
-               "proof source snapshot could not be captured before compile");
-        return false;
-    }
-    const struct dev_source_record *identity =
-        epoch_source ? epoch_source : &source_before;
-    if (!rr_source_record_valid(identity)) {
-        rr_why(why, why_len, "proof epoch source CAS record is unavailable");
-        return false;
-    }
-    (void)snprintf(receipt->source_cas_sha3,
-                   sizeof(receipt->source_cas_sha3), "%s",
-                   identity->cas_root_sha3);
-    struct rr_overlay *overlays = zcl_calloc(RR_OVERLAY_MAX,
-                                              sizeof(*overlays),
-                                              "restart proof overlays");
-    if (!overlays) {
-        rr_why(why, why_len, "restart proof overlay allocation failed");
-        return false;
-    }
-    size_t overlay_count = 0;
-    bool ok = rr_prepare_overlays(
-        &plan, root, source_tus, source_count, identity,
-        "build/dev-loop/restart-test-objects", overlays, &overlay_count,
-        process, &receipt->compiler_processes, &receipt->compile_us,
-        &receipt->compile_startup_us, &receipt->compile_body_us,
-        why, why_len);
-    receipt->source_identity_overlay = ok;
-    char rsp[PATH_MAX] = {0};
-    if (ok && !rr_write_response(&plan, root, overlays, overlay_count,
-                                 "build/dev-loop/restart-test-objects", false,
-                                 rsp,
-                                 why, why_len))
-        ok = false;
-    if (ok) {
-        ok = rr_link_cached(&plan, root, rsp,
-                            "build/dev-loop/restart-test-candidates",
-                            receipt->artifact_path,
-                            receipt->artifact_cache_key,
-                            &receipt->artifact_cache_hit,
-                            &receipt->linker_processes, process,
-                            &receipt->link_us, &receipt->link_startup_us,
-                            &receipt->link_body_us, why, why_len);
-    }
-    if (rsp[0]) (void)unlink(rsp);
-    free(overlays);
-    if (!ok) {
-        receipt->total_us = platform_time_monotonic_us() - started;
-        return false;
-    }
-    if (guard_source) receipt->source_guard_captures++;
-    if ((guard_source &&
-         (!zcl_dev_source_cas_capture(root, &source_after) ||
-          !source_after.cas_present ||
-          strcmp(source_before.cas_root_sha3,
-                 source_after.cas_root_sha3) != 0)) ||
-        !rr_sha256_file(receipt->artifact_path, receipt->artifact_sha256)) {
-        rr_why(why, why_len,
-               "proof source changed or its candidate could not be rehashed");
-        receipt->total_us = platform_time_monotonic_us() - started;
-        return false;
-    }
-    char exact[sizeof(receipt->groups) + 16];
-    if (snprintf(exact, sizeof(exact), "--exact=%s", receipt->groups) >=
-        (int)sizeof(exact)) {
-        rr_why(why, why_len, "affected proof selector exceeds its bound");
-        return false;
-    }
-    const char *test_argv[RR_SOURCE_MAX + 5] = {
-        receipt->artifact_path, exact, "--cache", "--cache-snapshot",
+    struct rr_prove_ctx ctx = {
+        .repo_root = repo_root, .source_tus = source_tus,
+        .source_count = source_count, .proof_plan = proof_plan,
+        .receipt = receipt, .process = process, .why = why,
+        .why_len = why_len, .immediate_only = immediate_only,
+        .guard_source = guard_source, .epoch_source = epoch_source,
+        .started = platform_time_monotonic_us(),
     };
-    char changed_args[RR_SOURCE_MAX][ZCL_DEVLOOP_PATH_MAX + 24];
-    size_t test_argc = 4;
-    for (size_t i = 0; i < source_count; i++) {
-        if (snprintf(changed_args[i], sizeof(changed_args[i]),
-                     "--changed-source=%s", source_tus[i]) >=
-            (int)sizeof(changed_args[i])) {
-            rr_why(why, why_len, "changed source selector exceeds its bound");
-            return false;
-        }
-        test_argv[test_argc++] = changed_args[i];
-    }
-    test_argv[test_argc] = NULL;
-    /* The exact story has already run in HOT_SHADOW. Within affected proof,
-     * run the last RED for this checkout/task first when it is still selected;
-     * otherwise run the direct owner invariant. The complete batch still runs
-     * afterward and accounts for every required group. */
-    char direct_full[ZCL_TEST_GROUP_FULL_MAX] = {0};
-    const char *direct_group = proof_plan->proof_group &&
-        zcl_test_group_resolve_exact(proof_plan->proof_group, direct_full)
-            ? direct_full : NULL;
-    char priority_full[ZCL_TEST_GROUP_FULL_MAX] = {0};
-    char priority_reason[64] = {0};
-    bool have_priority = rr_failure_priority_select(
-        root, receipt->groups, direct_group, priority_full, priority_reason);
-    if (have_priority) {
-        char priority_exact[ZCL_TEST_GROUP_FULL_MAX + 16];
-        if (snprintf(priority_exact, sizeof(priority_exact), "--exact=%s",
-                     priority_full) >= (int)sizeof(priority_exact)) {
-            rr_why(why, why_len, "priority group selector exceeds its bound");
-            return false;
-        }
-        const char *priority_argv[RR_SOURCE_MAX + 5] = {
-            receipt->artifact_path, priority_exact, "--cache",
-            "--cache-snapshot",
-        };
-        for (size_t i = 0; i < source_count; i++)
-            priority_argv[4 + i] = changed_args[i];
-        priority_argv[4 + source_count] = NULL;
-        struct zcl_devloop_process_result priority_process = {0};
-        int64_t priority_started = platform_time_monotonic_us();
-        receipt->test_processes++;
-        bool priority_ran = zcl_devloop_process_run_test(
-            root, priority_argv, 300000, &priority_process);
-        receipt->priority_test_us =
-            platform_time_monotonic_us() - priority_started;
-        (void)snprintf(receipt->priority_group,
-                       sizeof(receipt->priority_group), "%s", priority_full);
-        (void)snprintf(receipt->priority_reason,
-                       sizeof(receipt->priority_reason), "%s",
-                       priority_reason);
-        uint32_t priority_ran_count = 0, priority_cached = 0;
-        uint32_t priority_failed = 0, priority_skips = 0;
-        bool priority_summary = priority_ran &&
-            rr_summary_value(priority_process.output, "groups_ran=",
-                             &priority_ran_count) &&
-            rr_summary_value(priority_process.output, "groups_cached=",
-                             &priority_cached) &&
-            rr_summary_value(priority_process.output, "groups_failed=",
-                             &priority_failed) &&
-            rr_summary_value(priority_process.output, "self_skips=",
-                             &priority_skips);
-        bool priority_ok = priority_summary && !priority_process.timed_out &&
-            !priority_process.term_signal && priority_process.exit_code == 0 &&
-            priority_ran_count + priority_cached == 1 &&
-            priority_failed == 0 && priority_skips == 0;
-        if (!priority_ok) {
-            if (!priority_process.cancelled)
-                rr_failure_priority_store(root, priority_full);
-            *process = priority_process;
-            receipt->test_us += receipt->priority_test_us;
-            receipt->test_startup_us += priority_process.startup_us;
-            receipt->test_body_us += priority_process.body_us;
-            receipt->groups_ran = priority_ran_count;
-            receipt->groups_cached = priority_cached;
-            receipt->groups_failed = priority_failed;
-            receipt->self_skips = priority_skips;
-            receipt->total_us = platform_time_monotonic_us() - started;
-            rr_why(why, why_len,
-                   "failure-first direct owner invariant failed");
-            return false;
-        }
-        if (strcmp(priority_reason, "previous_failure") == 0)
-            rr_failure_priority_clear(root, priority_full);
-    }
-    receipt->test_processes++;
-    int64_t test_started = platform_time_monotonic_us();
-    bool ran = zcl_devloop_process_run_test(root, test_argv, 300000, process);
-    receipt->test_us += platform_time_monotonic_us() - test_started;
-    receipt->test_startup_us += process->startup_us;
-    receipt->test_body_us += process->body_us;
-    bool summary_ok = ran &&
-        rr_summary_value(process->output, "groups_ran=",
-                         &receipt->groups_ran) &&
-        rr_summary_value(process->output, "groups_cached=",
-                         &receipt->groups_cached) &&
-        rr_summary_value(process->output, "groups_failed=",
-                         &receipt->groups_failed) &&
-        rr_summary_value(process->output, "self_skips=",
-                         &receipt->self_skips);
-    bool accounted = summary_ok &&
-        receipt->groups_ran <= receipt->group_count &&
-        receipt->groups_cached ==
-            receipt->group_count - receipt->groups_ran;
-    receipt->immediate_proof_complete = ran && !process->timed_out &&
-        !process->term_signal && process->exit_code == 0 && accounted &&
-        receipt->groups_failed == 0 && receipt->self_skips == 0;
-    receipt->integration_proof_deferred = receipt->deferred_group_count > 0;
-    receipt->proof_complete = receipt->immediate_proof_complete &&
-        !receipt->integration_proof_deferred;
-    receipt->total_us = platform_time_monotonic_us() - started;
+    if (why && why_len) why[0] = 0;
+    if (!rr_prove_validate_inputs(&ctx))
+        return false;
+    if (!rr_prove_select_groups(&ctx))
+        return false;
+    if (!rr_prove_resolve_plan(&ctx))
+        return false;
+    if (!rr_prove_capture_before(&ctx))
+        return false;
+    if (!rr_prove_compile_and_link(&ctx))
+        return false;
+    if (!rr_prove_verify_after(&ctx))
+        return false;
+    struct rr_prove_test_args ta = {0};
+    if (!rr_prove_build_test_args(&ctx, &ta))
+        return false;
+    if (!rr_prove_run_priority(&ctx, &ta))
+        return false;
+    bool ran, summary_ok, accounted;
+    rr_prove_run_main_test(&ctx, &ta, &ran, &summary_ok, &accounted);
     if (!receipt->immediate_proof_complete) {
-        char failed_group[ZCL_TEST_GROUP_FULL_MAX];
-        if (!process->cancelled && rr_failed_group_from_output(
-                process->output, receipt->groups, failed_group))
-            rr_failure_priority_store(root, failed_group);
-        char detail[256];
-        if (!ran) {
-            rr_why(why, why_len,
-                   "affected proof runner could not be executed");
-        } else if (process->timed_out) {
-            rr_why(why, why_len,
-                   "affected proof runner exceeded the 300000 ms bound");
-        } else if (process->term_signal) {
-            (void)snprintf(detail, sizeof(detail),
-                           "affected proof runner terminated by signal %d",
-                           process->term_signal);
-            rr_why(why, why_len, detail);
-        } else if (summary_ok && receipt->groups_failed > 0) {
-            (void)snprintf(
-                detail, sizeof(detail),
-                "affected proofs failed: %u of %u exact groups failed; see process_output",
-                receipt->groups_failed, receipt->group_count);
-            rr_why(why, why_len, detail);
-        } else if (summary_ok && receipt->self_skips > 0) {
-            (void)snprintf(
-                detail, sizeof(detail),
-                "affected proofs incomplete: %u exact groups self-skipped; see process_output",
-                receipt->self_skips);
-            rr_why(why, why_len, detail);
-        } else if (!summary_ok) {
-            rr_why(why, why_len,
-                   "affected proof runner omitted the canonical suite summary");
-        } else if (!accounted) {
-            rr_why(why, why_len,
-                   "affected proof runner did not account for every exact group");
-        } else {
-            (void)snprintf(
-                detail, sizeof(detail),
-                "affected proof runner exited %d despite a zero-failure summary",
-                process->exit_code);
-            rr_why(why, why_len, detail);
-        }
+        rr_prove_report_failure(&ctx, ran, summary_ok, accounted);
         return false;
     }
     return true;
 }
-
 
 bool zcl_devloop_restart_prove(
     const char *repo_root, const char *const *source_tus, size_t source_count,
