@@ -138,6 +138,9 @@ static const struct lint_gate k_gates[] = {
       check_model_validation_selftest },
     { "check-lag-slo-observable", check_lag_slo_observable_run,
       check_lag_slo_observable_selftest },
+    { "check-vcs-no-git", check_vcs_no_git_run, check_vcs_no_git_selftest },
+    { "check-no-authoritative-ram-state", check_no_authoritative_ram_state_run,
+      check_no_authoritative_ram_state_selftest },
 };
 
 int main(int argc, char **argv)

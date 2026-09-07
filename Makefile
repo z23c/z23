@@ -5335,6 +5335,7 @@ LINTC_SRCS = tools/lint/lintc/lib.c tools/lint/lintc/gate_boot_wiring.c tools/li
     tools/lint/lintc/gate_thread_supervision_scan.c \
     tools/lint/lintc/gate_thread_supervision_workers.c \
     tools/lint/lintc/gate_call_presence_fences.c \
+    tools/lint/lintc/gate_authority_fences.c \
     tools/lint/lintc/main.c
 LINTC_OBJS = $(LINTC_SRCS:tools/lint/lintc/%.c=build/lintc-obj/%.o)
 # Apple Clang enables -Wunused-but-set-variable under -Wextra -Werror for
@@ -11012,7 +11013,7 @@ check-raw-sqlite:
 	@echo "══ LINT: raw sqlite3_step in app code ══"
 	@tools/scripts/check_raw_sqlite.sh
 
-check-vcs-no-git:
+check-vcs-no-git: $(LINTC_TOOL)
 	@echo "══ LINT: contexts/commons/modules/vcs is git-free + spawns no processes ══"
 	@tools/scripts/check_vcs_no_git.sh
 
@@ -12959,7 +12960,7 @@ check-one-write-path: $(LINTC_TOOL)
 
 # Gate E7 — no authoritative RAM state (RATCHET). Direct active_chain
 # internals/global active_chain state are forbidden outside the baseline.
-check-no-authoritative-ram-state:
+check-no-authoritative-ram-state: $(LINTC_TOOL)
 	@echo "══ LINT: no authoritative RAM state (E7) ══"
 	@./tools/scripts/check_no_authoritative_ram_state.sh
 

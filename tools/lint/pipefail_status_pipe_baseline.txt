@@ -37,7 +37,6 @@ tools/scripts/check_core_include_boundary.sh 1
 tools/scripts/check_domain_purity.sh 1
 tools/scripts/check_lib_layering.sh 1
 tools/scripts/check_model_ar_lifecycle.sh 1
-tools/scripts/check_no_authoritative_ram_state.sh 1
 tools/scripts/check_no_secret_printf.sh 1
 tools/scripts/check_no_silent_ready.sh 1
 tools/scripts/check_no_uncited_victory.sh 1

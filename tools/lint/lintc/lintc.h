@@ -324,5 +324,9 @@ int check_model_validation_run(int argc, char **argv);
 int check_model_validation_selftest(void);
 int check_lag_slo_observable_run(int argc, char **argv);
 int check_lag_slo_observable_selftest(void);
+int check_vcs_no_git_run(int argc, char **argv);
+int check_vcs_no_git_selftest(void);
+int check_no_authoritative_ram_state_run(int argc, char **argv);
+int check_no_authoritative_ram_state_selftest(void);
 
 #endif
