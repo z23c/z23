@@ -1698,10 +1698,6 @@ Z23_FLAG("ZCL_REAL_HOME", "env_build", "-", "-",
           "undocumented; first use tools/scripts/step1_refold_rate_proof.sh:49")
 Z23_FLAG("ZCL_RECEIPT_DIR", "env_build", "-", "-",
           "undocumented; first use tools/agent/agent-velocity.sh:35")
-Z23_FLAG("ZCL_RECEIPT_GATE_SANDBOX_ROOT", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_hotswap_package_receipt_is_not_authority.sh:99")
-Z23_FLAG("ZCL_RECEIPT_GATE_SELFTEST", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_hotswap_package_receipt_is_not_authority.sh:104")
 Z23_FLAG("ZCL_RECEIPT_KEY", "env_build", "-", "-",
           "first use tools/scripts/promotion_receipt.sh:121; documented at docs/PROMOTION_RECEIPTS.md:42: ZCL_RECEIPT_KEY names a key whose only job is signing evidence.")
 Z23_FLAG("ZCL_RECEIPT_LEDGER", "env_build", "-", "-",

@@ -238,6 +238,9 @@ static const struct lint_gate k_gates[] = {
       check_fleet_airship_rules_selftest },
     { "check-source-identity-authority", check_source_identity_authority_run,
       check_source_identity_authority_selftest },
+    { "check-hotswap-package-receipt-is-not-authority",
+      check_hotswap_package_receipt_is_not_authority_run,
+      check_hotswap_package_receipt_is_not_authority_selftest },
 };
 
 int main(int argc, char **argv)

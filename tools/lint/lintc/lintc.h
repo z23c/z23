@@ -427,5 +427,7 @@ int check_fleet_airship_rules_run(int argc, char **argv);
 int check_fleet_airship_rules_selftest(void);
 int check_source_identity_authority_run(int argc, char **argv);
 int check_source_identity_authority_selftest(void);
+int check_hotswap_package_receipt_is_not_authority_run(int argc, char **argv);
+int check_hotswap_package_receipt_is_not_authority_selftest(void);
 
 #endif

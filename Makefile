@@ -5400,6 +5400,8 @@ LINTC_SRCS = tools/lint/lintc/lib.c tools/lint/lintc/gate_boot_wiring.c tools/li
     tools/lint/lintc/gate_source_identity_authority_scan.c \
     tools/lint/lintc/gate_source_identity_authority_ratchet.c \
     tools/lint/lintc/gate_source_identity_authority_selftest.c \
+    tools/lint/lintc/gate_hotswap_package_receipt_is_not_authority.c \
+    tools/lint/lintc/gate_hotswap_package_receipt_is_not_authority_selftest.c \
     tools/lint/lintc/main.c
 LINTC_OBJS = $(LINTC_SRCS:tools/lint/lintc/%.c=build/lintc-obj/%.o)
 # Apple Clang enables -Wunused-but-set-variable under -Wextra -Werror for
@@ -11211,7 +11213,7 @@ check-hotswap-candidates-ledger: $(LINTC_TOOL)
 # never opens, stats, or parses a .manifest: no quoted ".manifest" literal, no
 # `zcl.hotswap_package` schema string, and no file-opening call on a line
 # mentioning a manifest, anywhere under the loader/activation sources.
-check-hotswap-package-receipt-is-not-authority:
+check-hotswap-package-receipt-is-not-authority: $(LINTC_TOOL)
 	@tools/lint/check_hotswap_package_receipt_is_not_authority.sh --selftest
 	@tools/lint/check_hotswap_package_receipt_is_not_authority.sh
 
