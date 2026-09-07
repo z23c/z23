@@ -975,7 +975,7 @@ static int case_durability(void)
 
         /* The claim's spec survives verbatim: a falsifier that came back
          * different would mean the register replayed a different claim. */
-        struct science_claim_spec back;
+        struct science_claim_spec back = {0};
         char statement[SCIENCE_STATEMENT_MAX], treatment[SCIENCE_TREATMENT_MAX];
         char source[SCIENCE_SOURCE_MAX];
         SC_CHECK("the spec reads back",
