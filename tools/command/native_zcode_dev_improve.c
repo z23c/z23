@@ -768,7 +768,11 @@ static void zdev_improve_init_candidate(
     memcpy(ctx->candidate.base_source_root, ctx->task.source_root, 32);
 }
 
-static bool zdev_improve_candidate_claim_matches(
+/* Compare the caller's claimed patch_root/candidate_source_root against the
+ * roots captured from the workspace. Does not touch source_sha_check/hex:
+ * that is only derived once this check passes (see the sha check below),
+ * matching the original inline ordering exactly. */
+static bool zdev_improve_candidate_root_claim_matches(
     const struct zcl_command_request *request, struct zdev_improve_ctx *ctx)
 {
     const char *claimed_patch = zdev_str(request->input, "patch_root");
@@ -779,13 +783,20 @@ static bool zdev_improve_candidate_claim_matches(
         (!zcl_hex_decode_lower(claimed_patch, claim, 32) ||
          memcmp(claim, ctx->candidate.patch_root, 32) != 0))
         return false;
-    if (claimed_source && claimed_source[0] &&
-        (!zcl_hex_decode_lower(claimed_source, claim, 32) ||
-         memcmp(claim, ctx->candidate.candidate_source_root, 32) != 0))
-        return false;
+    return !(claimed_source && claimed_source[0] &&
+             (!zcl_hex_decode_lower(claimed_source, claim, 32) ||
+              memcmp(claim, ctx->candidate.candidate_source_root, 32) != 0));
+}
+
+/* Compare the caller's claimed candidate_source_sha256 against the sha
+ * captured from the workspace, once the root claims have already matched. */
+static bool zdev_improve_candidate_sha_claim_matches(
+    const struct zcl_command_request *request, struct zdev_improve_ctx *ctx)
+{
     zcl_hex_encode(ctx->source_sha_check, 32, ctx->source_sha_hex);
     const char *claimed_sha =
         zdev_str(request->input, "candidate_source_sha256");
+    uint8_t claim[32];
     return !(claimed_sha && claimed_sha[0] &&
              (!zcl_hex_decode_lower(claimed_sha, claim, 32) ||
               memcmp(claim, ctx->source_sha_check, 32) != 0));
@@ -801,9 +812,14 @@ static bool zdev_improve_candidate_roots_explicit(
             ctx->source_sha_check, &ctx->changed_files, &ctx->patch_bytes,
             reply))
         return false;
-    if (!zdev_improve_candidate_claim_matches(request, ctx)) {
+    if (!zdev_improve_candidate_root_claim_matches(request, ctx)) {
         zdev_fail(reply, "CANDIDATE_ROOT_MISMATCH",
                   "claimed candidate roots do not match the captured workspace");
+        return false;
+    }
+    if (!zdev_improve_candidate_sha_claim_matches(request, ctx)) {
+        zdev_fail(reply, "CANDIDATE_SHA256_MISMATCH",
+                  "candidate_source_sha256 does not match the canonical candidate manifest");
         return false;
     }
     return true;

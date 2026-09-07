@@ -489,10 +489,12 @@ void zcl_native_handle_zcode_tasks(
 /* Validate accept input and resolve the requested lane target. */
 static bool zdev_accept_validate_input(
     const struct zcl_command_request *request, char workspace[ZDEV_PATH_MAX],
-    uint8_t action_root[32], int *target, struct zcl_command_reply *reply)
+    uint8_t action_root[32], int *target, const char **action_id_out,
+    struct zcl_command_reply *reply)
 {
     const char *workspace_arg = zdev_str(request->input, "workspace");
     const char *action_id = zdev_str(request->input, "action_id");
+    *action_id_out = action_id;
     const char *lane = zdev_str(request->input, "lane");
     *target = lane && strcmp(lane, "CANDIDATE") == 0
         ? VCS_ZCODE_LANE_CANDIDATE : 0;
@@ -517,10 +519,10 @@ void zcl_native_handle_zcode_accept(
     char workspace[ZDEV_PATH_MAX];
     uint8_t action_root[32];
     int target;
+    const char *action_id;
     if (!zdev_accept_validate_input(
-            request, workspace, action_root, &target, reply))
+            request, workspace, action_root, &target, &action_id, reply))
         return;
-    const char *action_id = zdev_str(request->input, "action_id");
     const char *datadir = zdev_str(request->input, "datadir");
     if (!datadir || !datadir[0]) datadir = zcl_native_command_datadir();
     struct node_db ndb = {0};
