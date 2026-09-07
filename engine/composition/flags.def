@@ -1354,11 +1354,11 @@ Z23_FLAG("ZCL_MODEL_DRIFT_BASELINE", "env_build", "-", "-",
 Z23_FLAG("ZCL_MODEL_DRIFT_ROOT", "env_build", "-", "-",
           "undocumented; first use tools/lint/check_model_column_drift.sh:174")
 Z23_FLAG("ZCL_MODEL_SQL_BASELINE", "env_build", "-", "-",
-          "undocumented; first use tools/lint/lintc/gate_model_sql_literals.c:318")
+          "undocumented; first use tools/lint/lintc/gate_model_sql_literals.c:361")
 Z23_FLAG("ZCL_MODEL_SQL_FILE_FLOOR", "env_build", "80", "-",
-          "undocumented; first use tools/lint/lintc/gate_model_sql_literals.c:184")
+          "undocumented; first use tools/lint/lintc/gate_model_sql_literals.c:202")
 Z23_FLAG("ZCL_MODEL_SQL_SCAN_ROOT", "env_build", "-", "-",
-          "undocumented; first use tools/lint/lintc/gate_model_sql_literals.c:172")
+          "undocumented; first use tools/lint/lintc/gate_model_sql_literals.c:190")
 Z23_FLAG("ZCL_MODULE_DIRS", "env_build", "-", "-",
           "undocumented; first use tools/lint/check_accel_oracle_pinned.sh:107")
 Z23_FLAG("ZCL_MSC_PRODUCER", "env_test", "-", "-",
@@ -2368,9 +2368,9 @@ Z23_FLAG("ZCL_WATCH_TEST_LOG", "env_build", "-", "-",
 Z23_FLAG("ZCL_WINDOWS_ACCEPTANCE_CC", "env_build", "x86_64-w64-mingw32-gcc", "-",
           "undocumented; first use tools/lint/check_windows_acceptance.sh:358")
 Z23_FLAG("ZCL_WINDOWS_ACCEPTANCE_GUARD_ROOT", "env_build", "-", "-",
-          "undocumented; first use tools/lint/lintc/gate_windows_acceptance_guard.c:447")
+          "undocumented; first use tools/lint/lintc/gate_windows_acceptance_guard.c:473")
 Z23_FLAG("ZCL_WINDOWS_ACCEPTANCE_GUARD_SCRATCH", "env_build", "-", "-",
-          "first use tools/lint/lintc/gate_windows_acceptance_guard_selftest.c:313; documented at docs/experiments/2026-09-03-muse-vs-glm-lint-gate.md:27: | /tmp, python, jq, perl | none used; fixtures under $HOME/.local/state/zclassic23/scra...")
+          "first use tools/lint/lintc/gate_windows_acceptance_guard_selftest.c:334; documented at docs/experiments/2026-09-03-muse-vs-glm-lint-gate.md:27: | /tmp, python, jq, perl | none used; fixtures under $HOME/.local/state/zclassic23/scra...")
 Z23_FLAG("ZCL_WINDOWS_ACCEPTANCE_ROOT", "env_build", "-", "-",
           "undocumented; first use tools/lint/check_windows_acceptance.sh:522")
 Z23_FLAG("ZCL_WRS_DIR", "env_test", "-", "-",
