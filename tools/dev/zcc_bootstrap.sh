@@ -60,18 +60,24 @@ case "$HOST_SYSTEM" in
         ;;
     *)                    BOOTSTRAP_CC="${ZCL_BOOTSTRAP_CC:-cc}" ;;
 esac
-BOOTSTRAP_FLAGS=(-std=c23 -O2 -D_POSIX_C_SOURCE=200809L)
+BOOTSTRAP_FLAGS=(-std=c23 -O2 -D_POSIX_C_SOURCE=200809L
+                 "-ffile-prefix-map=$REPO_ROOT=/zclassic23")
 if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
     BOOTSTRAP_FLAGS+=(-D_DARWIN_C_SOURCE -Dst_mtim=st_mtimespec)
 fi
 mkdir -p "$(dirname "$BIN")" 2>/dev/null || exit 0
-tmp="$BIN.build.$$"
+# The Darwin linker uses the output basename as its ad-hoc signing identity.
+# A PID in that name changes the signature and content-derived UUID on every
+# bootstrap, which impersonates a compiler replacement to the epoch key.
+# Keep publication private/atomic while giving every linker the same name.
+staging="$(mktemp -d "$BIN.build.XXXXXX")" || exit 0
+trap 'rm -rf -- "$staging"' EXIT
+trap 'exit 0' HUP INT TERM
+tmp="$staging/zcc"
 if "$BOOTSTRAP_CC" "${BOOTSTRAP_FLAGS[@]}" \
         -I"$REPO_ROOT/platform/modules/sha3/include" -I"$REPO_ROOT/platform/modules/base/include" \
         -I"$REPO_ROOT/platform/modules/platform/include" \
         -o "$tmp" "$SRC" "$SHA3" "$ALLOC" >/dev/null 2>&1; then
     mv -f "$tmp" "$BIN" 2>/dev/null && printf '%s\n' "$BIN"
-else
-    rm -f "$tmp" 2>/dev/null
 fi
 exit 0

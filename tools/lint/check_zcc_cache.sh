@@ -222,10 +222,85 @@ fi
 unkey="$("$ZCC" --zcc-stats | awk '/unkeyable/ {print $2}')"
 [ "${unkey:-0}" = 0 ] || fail "$unkey compile(s) could not be keyed at all"
 
+# The bootstrap executable is itself a compiler-identity input. Rebuilding
+# its unchanged sources must not alter that identity because a private
+# staging filename or a different physical checkout leaked into its bytes.
+bootstrap_fixture()
+{
+    local destination="$1" input
+    while IFS= read -r input || [ -n "$input" ]; do
+        case "$input" in license=*) continue ;; esac
+        mkdir -p "$destination/$(dirname "$input")"
+        cp "$ROOT/$input" "$destination/$input"
+    done < "$ROOT/tools/dev/zcc-bootstrap-inputs.list"
+}
+
+bootstrap_run()
+{
+    local checkout="$1" output="$2" built
+    built="$(ZCL_BIN_DIR="$output" "$checkout/tools/dev/zcc_bootstrap.sh")"
+    [ "$built" = "$output/zcc" ] && [ -x "$built" ] || {
+        fail 'isolated bootstrap did not publish its executable'
+        return 1
+    }
+}
+
+bootstrap_one="$WORK/bootstrap-one"
+bootstrap_two="$WORK/bootstrap-two"
+bootstrap_fixture "$bootstrap_one"
+bootstrap_fixture "$bootstrap_two"
+bootstrap_run "$bootstrap_one" "$WORK/bootstrap-out-one" || exit 1
+bootstrap_run "$bootstrap_one" "$WORK/bootstrap-out-repeat" || exit 1
+bootstrap_run "$bootstrap_two" "$WORK/bootstrap-out-two" || exit 1
+bootstrap_bin="$WORK/bootstrap-out-one/zcc"
+cmp -s "$bootstrap_bin" "$WORK/bootstrap-out-repeat/zcc" ||
+    fail 'identical bootstrap sources rebuilt to different compiler bytes'
+cmp -s "$bootstrap_bin" "$WORK/bootstrap-out-two/zcc" ||
+    fail 'physical checkout location changed bootstrap compiler bytes'
+bootstrap_hash="$(sha256sum < "$bootstrap_bin" | awk '{print $1}')"
+
+if [ "$(uname -s)" = Darwin ]; then
+    for built in "$bootstrap_bin" "$WORK/bootstrap-out-repeat/zcc" \
+            "$WORK/bootstrap-out-two/zcc"; do
+        codesign --verify --strict "$built" || fail 'bootstrap signature is invalid'
+        codesign -dvv "$built" > "$WORK/bootstrap-signature" 2>&1
+        grep -Fxq 'Identifier=zcc' "$WORK/bootstrap-signature" ||
+            fail 'bootstrap signature identity depends on its staging filename'
+        uuid="$(otool -l "$built" | awk '/LC_UUID/{getline;getline;print $2}')"
+        [ -n "$uuid" ] && [ "$uuid" != 00000000-0000-0000-0000-000000000000 ] ||
+            fail 'bootstrap lost its nonzero content-derived UUID'
+    done
+fi
+
+# A source edit must invalidate freshness and alter actual behavior; restoring
+# exactly the original source must restore exactly the original executable.
+sed 's/usage: zcc <compiler>/usage: zcc-fixture <compiler>/' \
+    "$bootstrap_one/tools/zcc.c" > "$WORK/bootstrap-source"
+mv "$WORK/bootstrap-source" "$bootstrap_one/tools/zcc.c"
+bootstrap_run "$bootstrap_one" "$WORK/bootstrap-out-one" || exit 1
+"$bootstrap_bin" > "$WORK/bootstrap-usage" 2>&1 || true
+grep -Fq 'usage: zcc-fixture <compiler>' "$WORK/bootstrap-usage" ||
+    fail 'bootstrap source edit did not change the published behavior'
+[ "$(sha256sum < "$bootstrap_bin" | awk '{print $1}')" != "$bootstrap_hash" ] ||
+    fail 'bootstrap source edit did not change compiler bytes'
+cp "$ROOT/tools/zcc.c" "$bootstrap_one/tools/zcc.c"
+bootstrap_run "$bootstrap_one" "$WORK/bootstrap-out-one" || exit 1
+[ "$(sha256sum < "$bootstrap_bin" | awk '{print $1}')" = "$bootstrap_hash" ] ||
+    fail 'restoring bootstrap source did not restore compiler bytes'
+
+# Build flags live in the bootstrap script, which the input catalog includes.
+# Its optimization change must invalidate a previously published executable.
+sed 's/BOOTSTRAP_FLAGS=(-std=c23 -O2 /BOOTSTRAP_FLAGS=(-std=c23 -O0 /' \
+    "$bootstrap_one/tools/dev/zcc_bootstrap.sh" > "$WORK/bootstrap-flags"
+cat "$WORK/bootstrap-flags" > "$bootstrap_one/tools/dev/zcc_bootstrap.sh"
+bootstrap_run "$bootstrap_one" "$WORK/bootstrap-out-one" || exit 1
+[ "$(sha256sum < "$bootstrap_bin" | awk '{print $1}')" != "$bootstrap_hash" ] ||
+    fail 'bootstrap flag edit did not change compiler bytes'
+
 if [ "$failures" -ne 0 ]; then
     echo "check_zcc_cache: $failures failure(s); the compile cache is NOT trustworthy" >&2
     echo "  clear it now: make cc-cache-clear" >&2
     exit 1
 fi
 
-echo "check_zcc_cache: OK — hits are byte-identical, header edits are misses"
+echo "check_zcc_cache: OK — hits are byte-identical, header edits are misses, bootstrap bytes reproduce and retain source/flag sensitivity"
