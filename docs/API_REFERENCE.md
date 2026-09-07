@@ -79,10 +79,10 @@ z23 discover schema <path> --side=input|output
 | Branches | 195 |
 | Leaves (dispatchable command paths) | 673 |
 | … `ready` (live handler in this build) | 599 |
-| … `compat` (metadata only, names a fallback) | 43 |
-| … `planned` (fail-closed BLOCKED, exit 3) | 31 |
-| … dev-gated 🔧 (`ready` only in `z23-dev`) | 42 |
-| Leaves with `effect=mutate` | 240 |
+| … `compat` (metadata only, names a fallback) | 44 |
+| … `planned` (fail-closed BLOCKED, exit 3) | 30 |
+| … dev-gated 🔧 (`ready` only in `z23-dev`) | 43 |
+| Leaves with `effect=mutate` | 241 |
 | Leaves with `effect=destructive` | 5 |
 | Leaves requiring **owner** authority | 126 |
 
@@ -696,7 +696,7 @@ represented by its children's sections.
 | `dev app list` | ready | read / read / operator · fast/low | none | `zcl.dev_app_index.v1` | `z23 dev app list` | List checkout App manifests |
 | `dev app describe` | ready | read / read / operator · fast/low | **`app_id`** | `zcl.dev_app.v1` | `z23 dev app describe social` | Describe an App manifest and its proofs |
 | `dev app plan` | ready | read / read / operator · instant/tiny | **`app_id`**, **`resource`** | `zcl.dev_app_plan.v1` | `z23 dev app plan social posts` | Plan one conventional App resource slice |
-| `dev app scaffold` | planned | mutate / dev-mutation / **owner** · foreground/moderate | **`app_id`**, **`resource`** | `zcl.dev_app_scaffold.v1` | `z23 dev app scaffold social posts` | Materialize a conventional App resource slice — *native bounded file materializer is not implemented* |
+| `dev app scaffold` | compat 🔧 → `z23-dev dev app scaffold <app> <resource>` | mutate / dev-mutation / **owner** · foreground/moderate | **`app_id`**, **`resource`** | `zcl.dev_app_scaffold.v1` | `z23 dev app scaffold social posts` | Materialize a conventional App resource slice — *materializing checkout files requires a dev build* |
 | `dev app simulate` | ready | read / read / operator · fast/moderate | **`app_id`**, `scenario`, `seed` | `zcl.dev_app_sim.v1` | `z23 dev app simulate social --seed=0x534f4349414c0001` | Run deterministic App network scenarios |
 | `dev app inspect` | planned | read / read / operator · fast/low | **`app_id`** | `zcl.dev_app_inspect.v1` | `z23 dev app inspect social` | Inspect a resident App generation — *public App ABI is not connected to resident generations yet* |
 | `dev app publish` | planned | mutate / dev-mutation / **owner**, job, idempotency · foreground/high | **`app_id`**, `idempotency_key` | `zcl.dev_app_publish.v1` | `z23 dev app publish social --idempotency-key=<key>` | Atomically publish a proven App generation — *App ABI generation publication is not wired yet* |
