@@ -453,6 +453,7 @@ static int sbe_prev_drop(const char *pl)
         || strstr(pl, "raw-return-ok:") != NULL;
 }
 
+/* Match helpers return 1 for a hit, 0 for no hit, and -1 for an error. */
 static int sbe_extract_call(const regex_t *re, const char *pl, char *out, size_t cap)
 {
     regmatch_t m;
@@ -464,8 +465,10 @@ static int sbe_extract_call(const regex_t *re, const char *pl, char *out, size_t
     const char *span = pl + m.rm_so;
     /* strip leading "if (!" and trailing "(" */
     size_t ident = n - 6;
-    if (ident == 0 || ident >= cap)
+    if (ident == 0)
         return 0;
+    if (ident >= cap)
+        return -die("z23-lint: derived buffer overflow\n", "");
     memcpy(out, span + 5, ident);
     out[ident] = '\0';
     return 1;
@@ -475,22 +478,18 @@ static int sbe_pair_key(const regex_t *re, const char *prev, const char *hit,
                         const char *rel, char *out, size_t cap)
 {
     char call[SBE_CALL];
-    if (sbe_hit_drop(hit) || sbe_prev_drop(prev)
-        || !sbe_extract_call(re, prev, call, sizeof call))
+    if (sbe_hit_drop(hit) || sbe_prev_drop(prev))
         return 0;
+    int match = sbe_extract_call(re, prev, call, sizeof call);
+    if (match <= 0)
+        return match;
     if (rel[0] == '.' && rel[1] == '/')
         rel += 2;
-    return ovf(snprintf(out, cap, "%s::%s", rel, call), cap) ? 0 : 1;
+    return ovf(snprintf(out, cap, "%s::%s", rel, call), cap) ? -1 : 1;
 }
 
-static int sbe_on_file(const char *path, void *ctx)
+static int sbe_scan_stream(FILE *f, const char *path, struct sbe_acc *a)
 {
-    struct sbe_acc *a = ctx;
-    if (lint_path_is_excluded(path))
-        return 0;
-    FILE *f = fopen(path, "r");
-    if (!f)
-        return die("z23-lint: cannot open %s\n", path);
     char *cur = NULL, *prev = NULL;
     size_t ccap = 0, pcap = 0;
     int have = 0, rc = 0;
@@ -498,7 +497,10 @@ static int sbe_on_file(const char *path, void *ctx)
         sbe_chomp(cur);
         if (strstr(cur, "return false;") && have) {
             char key[SBE_KEY];
-            if (sbe_pair_key(a->re, prev, cur, path, key, sizeof key))
+            int match = sbe_pair_key(a->re, prev, cur, path, key, sizeof key);
+            if (match < 0)
+                rc = 1;
+            else if (match > 0)
                 rc = sbe_add(a->cur, key);
         }
         char *tmp = prev;
@@ -511,6 +513,17 @@ static int sbe_on_file(const char *path, void *ctx)
     }
     free(cur);
     free(prev);
+    return rc;
+}
+
+static int sbe_on_file(const char *path, void *ctx)
+{
+    if (lint_path_is_excluded(path))
+        return 0;
+    FILE *f = fopen(path, "r");
+    if (!f)
+        return die("z23-lint: cannot open %s\n", path);
+    int rc = sbe_scan_stream(f, path, ctx);
     return fin(f, NULL, path, rc);
 }
 
@@ -655,13 +668,55 @@ int check_silent_errors_bool_run(int argc, char **argv)
     return rc;
 }
 
+static int sbe_boundary_scan(regex_t *re, const char *path, const char *call,
+                             int overflow, size_t key_len)
+{
+    FILE *f = tmpfile();
+    if (!f)
+        return 1;
+    if (fprintf(f, "if (!%s())\n    return false;\n", call) < 0
+        || fseek(f, 0, SEEK_SET) != 0) {
+        fclose(f);
+        return 1;
+    }
+    struct sbe_set cur = {0};
+    struct sbe_acc a = { .re = re, .cur = &cur };
+    int rc = sbe_scan_stream(f, path, &a);
+    int bad = ferror(f) != 0;
+    bad |= fclose(f) != 0;
+    if (overflow)
+        return bad || rc == 0 || cur.count != 0;
+    return bad || rc != 0 || cur.count != 1
+        || strlen(cur.n[0]) != key_len;
+}
+
+static int sbe_boundary_selftest(regex_t *re)
+{
+    /* The key includes "::ok_call" (9 bytes), plus its terminator. */
+    char path[SBE_KEY - 9 + 1];
+    memset(path, 'a', sizeof path - 1);
+    path[sizeof path - 1] = '\0';
+    path[sizeof path - 2] = '\0';
+    int bad = sbe_boundary_scan(re, path, "ok_call", 0, 159);
+    path[sizeof path - 2] = 'a';
+    bad |= sbe_boundary_scan(re, path, "ok_call", 1, 160);
+    char call[SBE_CALL + 1];
+    memset(call, 'a', sizeof call - 1);
+    call[sizeof call - 1] = '\0';
+    call[sizeof call - 2] = '\0';
+    bad |= sbe_boundary_scan(re, "a.c", call, 0, 100);
+    call[sizeof call - 2] = 'a';
+    bad |= sbe_boundary_scan(re, "a.c", call, 1, 101);
+    return bad;
+}
+
 int check_silent_errors_bool_selftest(void)
 {
     regex_t re;
     int rc = compile_pat(&re, REG_EXTENDED, k_sbe_guard, "", "", "");
     if (rc)
         return rc;
-    int bad = 0;
+    int bad = sbe_boundary_selftest(&re);
     bad |= !sbe_hit_drop("        return false; LOG_WARN(\"x\");");
     bad |= !sbe_hit_drop("        return false; // raw-return-ok:reason");
     bad |= sbe_hit_drop("        return false;");

@@ -1262,7 +1262,7 @@ Z23_FLAG("ZCL_LINT_GATE_TIMING", "env_test", "-", "-",
 Z23_FLAG("ZCL_LINT_JOBS", "env_build", "8", "-",
           "undocumented; first use tools/lint/run_lint.sh:79")
 Z23_FLAG("ZCL_LINT_MODE", "env_runtime", "FAIL", "-",
-          "first use tools/lint/lintc/gate_ratchet_ports.c:626; documented at docs/AI_SAFETY_GATES.md:153: invokes it as ZCL_LINT_MODE=FAIL, which fails on any violation and ignores the")
+          "first use tools/lint/lintc/gate_ratchet_ports.c:639; documented at docs/AI_SAFETY_GATES.md:153: invokes it as ZCL_LINT_MODE=FAIL, which fails on any violation and ignores the")
 Z23_FLAG("ZCL_LINT_PATTERNINIT_BIN_DIR", "env_build", "-", "-",
           "undocumented; first use tools/lint/check_fuzz_artifact_replay.sh:195")
 Z23_FLAG("ZCL_LINT_PRODUCTION_SCAN", "env_runtime", "0", "-",
@@ -1497,7 +1497,7 @@ Z23_FLAG("ZCL_ORACLE_TIP_MARGIN", "env_runtime", "-", "-",
           "test-only override of the oracle tip safety margin so a tiny synthetic "
           "chain still exercises the periodic-tick path; production never sets it")
 Z23_FLAG("ZCL_ORPHAN_PLACEMENT_FILES", "env_build", "-", "-",
-          "undocumented; first use tools/lint/lintc/gate_ratchet_ports.c:1218")
+          "undocumented; first use tools/lint/lintc/gate_ratchet_ports.c:1273")
 Z23_FLAG("ZCL_OWP_SCAN_ROOTS", "env_build", "-", "-",
           "undocumented; first use tools/lint/lintc/gate_state_hygiene_fences.c:635")
 Z23_FLAG("ZCL_PACKAGE_SIGN_BIN", "env_build", "-", "-",
@@ -1971,7 +1971,7 @@ Z23_FLAG("ZCL_SHIP_TEST_SOURCE", "env_build", "-", "-",
 Z23_FLAG("ZCL_SHIP_UNKNOWN_SAMPLES", "env_build", "5", "-",
           "undocumented; first use tools/ship.sh:156")
 Z23_FLAG("ZCL_SILENT_BOOL_SCAN_DIRS_FOR_TEST", "env_runtime", "-", "-",
-          "undocumented; first use tools/lint/lintc/gate_ratchet_ports.c:635")
+          "undocumented; first use tools/lint/lintc/gate_ratchet_ports.c:648")
 Z23_FLAG("ZCL_SIMNET_CONTRACT_SEED", "env_test", "-", "-",
           "undocumented; first use tests/harness/src/test_simnet_contract.c:281")
 Z23_FLAG("ZCL_SIMNET_FUZZ_SEED", "env_test", "-", "-",
