@@ -15,6 +15,7 @@
 #include "services/build_fabric_worker.h"
 #include "services/build_fabric_worker_evidence.h"
 #include "config/db_service.h"
+#include "config/c23_commons_build_profile.h"
 #include "config/runtime.h"
 #include "base/hex.h"
 #include "crypto/ed25519.h"
@@ -28,6 +29,7 @@
 #include "vcs/build_release_qualification.h"
 #include "vcs/build_release_regressions.h"
 #include "vcs/package_store.h"
+#include "vcs/package_build.h"
 #include "vcs/vcs_object.h"
 #include "vcs/zcode_dev.h"
 #include "crypto/sha3.h"
@@ -1988,6 +1990,394 @@ static int test_bf_content_contracts(void)
     return failures;
 }
 
+enum bf_conflict_case {
+    BF_CONFLICT_FAIL,
+    BF_CONFLICT_OUTPUT,
+    BF_CONFLICT_UNAPPROVED,
+    BF_CONFLICT_REVOKED,
+    BF_CONFLICT_EXPIRED,
+    BF_CONFLICT_FORGED,
+    BF_CONFLICT_OTHER_ACTION,
+    BF_CONFLICT_LOCAL_OUTPUT,
+    BF_CONFLICT_SAME_SIGNER,
+    BF_CONFLICT_MATCHING_PASS,
+    BF_CONFLICT_FAIL_ONLY,
+    BF_CONFLICT_EXIT_PROJECTION,
+    BF_CONFLICT_CASE_COUNT,
+};
+
+static int test_bf_proof_conflict_expect(
+    struct node_db *ndb, const char *dir, int64_t now, const char *action_id,
+    const uint8_t original_root[32], const uint8_t other_root[32],
+    const struct db_build_receipt *other_row, enum bf_conflict_case scenario)
+{
+    int failures = 0;
+    TEST("build_fabric: conflict admission preserves evidence and projections") {
+        bool conflict = scenario == BF_CONFLICT_FAIL ||
+            scenario == BF_CONFLICT_SAME_SIGNER ||
+            scenario == BF_CONFLICT_OUTPUT || scenario == BF_CONFLICT_LOCAL_OUTPUT;
+        int changes = sqlite3_total_changes(ndb->db);
+        for (unsigned mode = 0; mode < (conflict ? 3u : 2u); mode++) {
+            struct build_fabric_proof_evaluation evaluation = {0};
+            struct zcl_result result = mode == 0
+                ? build_fabric_proof_evaluate_readonly(
+                    ndb, dir, action_id, now, &evaluation)
+                : mode == 1
+                    ? build_fabric_proof_materialize(
+                        ndb, dir, action_id, now, &evaluation)
+                    : build_fabric_proof_evaluate(
+                        ndb, dir, action_id, now, &evaluation);
+            if (conflict) {
+                ASSERT(!result.ok);
+                ASSERT_STR_EQ(result.message, "proof_observation_conflict");
+                ASSERT(!evaluation.policy_satisfied);
+                ASSERT(evaluation.proof_set_root_sha3[0] == '\0');
+            } else {
+                ASSERT(result.ok);
+                if (scenario == BF_CONFLICT_FAIL_ONLY) {
+                    ASSERT(!evaluation.compile_satisfied);
+                    ASSERT(!evaluation.policy_satisfied);
+                    ASSERT_EQ(evaluation.compile_receipts, 0);
+                    ASSERT(evaluation.proof_set_root_sha3[0] == '\0');
+                } else {
+                    ASSERT(evaluation.compile_satisfied);
+                    ASSERT_EQ(evaluation.compile_receipts,
+                        scenario == BF_CONFLICT_MATCHING_PASS ? 2 : 1);
+                    ASSERT(evaluation.proof_set_root_sha3[0] != '\0');
+                }
+            }
+            ASSERT_EQ(sqlite3_total_changes(ndb->db), changes);
+            ASSERT(vcs_object_has(dir, original_root));
+            ASSERT(vcs_object_has(dir, other_root));
+            struct db_build_receipt retained;
+            ASSERT(db_build_receipt_find(ndb, other_row->receipt_id, &retained));
+            ASSERT_STR_EQ(retained.trust_state, "REMOTE_OBSERVED");
+        }
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static bool bf_conflict_success(enum bf_conflict_case scenario)
+{
+    return scenario == BF_CONFLICT_OUTPUT ||
+           scenario == BF_CONFLICT_LOCAL_OUTPUT ||
+           scenario == BF_CONFLICT_MATCHING_PASS;
+}
+
+static int test_bf_proof_conflict_case(
+    struct node_db *ndb, const char *dir, int64_t now,
+    const struct test_accepted_work_fixture *fixture,
+    const struct db_build_job *job, const struct db_build_action *action,
+    const struct vcs_zcode_work_receipt_v1 *work,
+    const struct vcs_build_execution_observation_v1 *observation,
+    const struct db_build_receipt *row, enum bf_conflict_case scenario)
+{
+    static const char *const names[] = {
+        "signed PASS and FAIL", "signed distinct successful outputs",
+        "unapproved failure", "revoked failure", "expired failure",
+        "forged failure", "failure for another action",
+        "local success and conflicting approved output",
+        "same signer contradicts its success", "matching repeated success",
+        "failure alone cannot satisfy compile policy",
+        "projection exit differs from signed failure",
+    };
+    int failures = 0;
+    bool transaction_open = false;
+    TEST("build_fabric: exact observations refuse eligible conflicts") {
+        printf("  conflict scenario: %s\n", names[scenario]);
+        ASSERT(node_db_begin(ndb));
+        transaction_open = true;
+        struct db_build_job other_job = *job;
+        struct db_build_action other_action = *action;
+        if (scenario == BF_CONFLICT_OTHER_ACTION) {
+            uint8_t other_input[32];
+            memset(other_input, 0x91, sizeof(other_input));
+            zcl_hex_encode(other_input, 32, other_action.input_root_sha3);
+            other_action.sequence++;
+            ASSERT(bf_canonicalize(&other_job, &other_action));
+            ASSERT(db_build_job_save(ndb, &other_job));
+            ASSERT(db_build_action_save(ndb, &other_action));
+        }
+        uint8_t seed[32], secret[32], pubkey[32];
+        memset(seed, 0x63, sizeof(seed));
+        ed25519_keypair(pubkey, secret, seed);
+        if (scenario == BF_CONFLICT_SAME_SIGNER) {
+            memcpy(secret, fixture->signer_secret, sizeof(secret));
+            memcpy(pubkey, fixture->signer_pubkey, sizeof(pubkey));
+        }
+        struct db_build_worker other_worker;
+        bf_worker(&other_worker);
+        bf_worker_id_from_pubkey(pubkey, other_worker.worker_id);
+        zcl_hex_encode(pubkey, 32, other_worker.signer_pubkey);
+        other_worker.approved = scenario != BF_CONFLICT_UNAPPROVED;
+        other_worker.revoked = scenario == BF_CONFLICT_REVOKED;
+        other_worker.expires_at = scenario == BF_CONFLICT_EXPIRED ? now : 0;
+        ASSERT(db_build_worker_save(ndb, &other_worker));
+
+        struct vcs_zcode_work_receipt_v1 other_work = *work;
+        other_work.started_unix -= (int64_t)scenario;
+        other_work.finished_unix -= (int64_t)scenario;
+        bool success = bf_conflict_success(scenario);
+        other_work.status = success ? VCS_ZCODE_WORK_PASS : VCS_ZCODE_WORK_FAIL;
+        other_work.exit_status = success ? 0 : 1;
+        ASSERT(zcl_hex_decode_lower(
+            other_action.action_id, other_work.action_root, 32));
+        ASSERT(zcl_hex_decode_lower(
+            other_action.input_root_sha3, other_work.input_root, 32));
+        if (scenario != BF_CONFLICT_MATCHING_PASS)
+            memset(other_work.output_root, 0x92, 32);
+        struct vcs_build_execution_observation_v1 other_observation =
+            *observation;
+        other_observation.exit_status = other_work.exit_status;
+        if (scenario == BF_CONFLICT_EXIT_PROJECTION)
+            other_observation.exit_status = 0;
+        memcpy(other_observation.action_root, other_work.action_root, 32);
+        memcpy(other_observation.action_input_root, other_work.input_root, 32);
+        memcpy(other_observation.artifact_root, other_work.output_root, 32);
+        vcs_build_execution_read_set_root(
+            other_observation.action_input_root,
+            other_observation.observed_input_bytes_root,
+            other_observation.toolchain_root,
+            other_observation.declared_reads_root);
+        memcpy(other_observation.observed_reads_root,
+               other_observation.declared_reads_root, 32);
+        ASSERT(vcs_build_execution_observation_v1_root(
+            &other_observation, other_work.evidence_root));
+        uint8_t observation_wire[VCS_BUILD_EXECUTION_OBSERVATION_WIRE_BYTES];
+        ASSERT(vcs_build_execution_observation_v1_serialize(
+            &other_observation, observation_wire));
+        ASSERT(vcs_object_put_addressed(
+            dir, other_work.evidence_root, observation_wire,
+            sizeof(observation_wire)));
+        ASSERT_EQ(vcs_zcode_work_receipt_seal(
+            &other_work, secret, pubkey), VCS_ZCODE_DEV_OK);
+        ASSERT_EQ(vcs_zcode_work_receipt_validate_for_candidate(
+            &fixture->accepted.task, &fixture->accepted.candidate,
+            &other_work, now), VCS_ZCODE_DEV_OK);
+        if (scenario == BF_CONFLICT_FORGED)
+            other_work.signature[0] ^= 1;
+        uint8_t other_root[32], original_root[32];
+        uint8_t other_wire[VCS_ZCODE_WORK_RECEIPT_WIRE_BYTES];
+        ASSERT_EQ(vcs_zcode_work_receipt_id(&other_work, other_root),
+                  VCS_ZCODE_DEV_OK);
+        ASSERT_EQ(vcs_zcode_work_receipt_id(work, original_root),
+                  VCS_ZCODE_DEV_OK);
+        ASSERT(memcmp(original_root, other_root, 32) != 0);
+        ASSERT_EQ(vcs_zcode_work_receipt_serialize(&other_work, other_wire),
+                  VCS_ZCODE_DEV_OK);
+        ASSERT(vcs_object_put_addressed(
+            dir, other_root, other_wire, sizeof(other_wire)));
+        struct db_build_receipt other_row = *row;
+        zcl_hex_encode(other_root, 32, other_row.receipt_id);
+        zcl_hex_encode(other_root, 32, other_row.work_receipt_sha3);
+        zcl_hex_encode(other_work.action_root, 32, other_row.action_id);
+        zcl_hex_encode(other_work.action_root, 32, other_row.action_sha3);
+        (void)snprintf(other_row.job_id, sizeof(other_row.job_id), "%s",
+                       other_job.job_id);
+        (void)snprintf(other_row.worker_id, sizeof(other_row.worker_id), "%s",
+                       other_worker.worker_id);
+        zcl_hex_encode(other_work.output_root, 32, other_row.output_sha3);
+        zcl_hex_encode(other_work.evidence_root, 32, other_row.observation_sha3);
+        zcl_hex_encode(other_work.signature, 64, other_row.signature);
+        other_row.exit_status = other_work.exit_status;
+        if (scenario == BF_CONFLICT_EXIT_PROJECTION)
+            other_row.exit_status = 0;
+        ASSERT(db_build_receipt_save(ndb, &other_row));
+        if (scenario == BF_CONFLICT_LOCAL_OUTPUT) {
+            struct db_build_receipt local = *row;
+            (void)snprintf(local.trust_state, sizeof(local.trust_state),
+                           "LOCAL_ACCEPTED");
+            ASSERT(db_build_receipt_save(ndb, &local));
+        }
+        if (scenario == BF_CONFLICT_FAIL_ONLY) {
+            struct db_build_receipt absent = *row;
+            absent.work_receipt_sha3[0] = '\0';
+            ASSERT(db_build_receipt_save(ndb, &absent));
+        }
+        failures += test_bf_proof_conflict_expect(
+            ndb, dir, now, action->action_id, original_root, other_root,
+            &other_row, scenario);
+        PASS();
+    } _test_next:;
+    /* Restore only fixture projections. Immutable contradictory observations
+     * stay in CAS; the pre-existing capacity witness keeps its original rows. */
+    if (transaction_open && !node_db_rollback(ndb)) failures++;
+    return failures;
+}
+
+static struct zcl_result bf_package_conflict_receipt(
+    struct node_db *ndb, const char *dir,
+    const struct test_accepted_work_fixture *fixture,
+    const struct db_build_action *action,
+    struct vcs_zcode_work_receipt_v1 *work,
+    const struct db_build_receipt *template_row, bool evidence_failed)
+{
+    struct vcs_package_build_receipt package;
+    vcs_package_build_receipt_init(&package);
+    memcpy(package.package_root,
+           fixture->accepted.candidate.candidate_source_root, 32);
+    memcpy(package.recipe_root, fixture->accepted.task.acceptance_tests_root, 32);
+    memcpy(package.lock_root, fixture->accepted.task.dependency_lock_root, 32);
+    (void)snprintf(package.compiler_id, sizeof(package.compiler_id), "gcc");
+    (void)snprintf(package.compiler_version, sizeof(package.compiler_version),
+                   "fixture");
+    (void)snprintf(package.flags, sizeof(package.flags), "%s",
+                   ZCL_C23_COMMONS_BUILD_FLAGS_QUICK_V2);
+    package.result_class = evidence_failed ? VCS_PACKAGE_BUILD_RESULT_TEST_FAIL
+                                          : VCS_PACKAGE_BUILD_RESULT_TEST_PASS;
+    package.isolation = VCS_PACKAGE_BUILD_ISOLATION_FULL;
+    package.test_ran = true;
+    package.test_exit_code = evidence_failed ? 7 : 0;
+    if (vcs_package_build_add_output(
+            &package, "bin/fixture", work->output_root, 1) !=
+            VCS_PACKAGE_BUILD_OK)
+        return ZCL_ERR(-1, "package conflict fixture output invalid");
+    uint8_t *wire = NULL;
+    size_t wire_len = 0;
+    if (vcs_package_build_serialize(&package, &wire, &wire_len) !=
+            VCS_PACKAGE_BUILD_OK)
+        return ZCL_ERR(-1, "package conflict fixture serialization failed");
+    struct vcs_build_artifact_manifest_v1 manifest = {
+        .total_bytes = wire_len,
+        .chunk_bytes = VCS_BUILD_ARTIFACT_CHUNK_BYTES,
+        .chunk_count = 1,
+    };
+    memcpy(manifest.action_sha3, work->action_root, 32);
+    sha3_256(wire, wire_len, manifest.chunk_sha3[0]);
+    bool stored = vcs_object_put_addressed(
+        dir, manifest.chunk_sha3[0], wire, wire_len);
+    free(wire);
+    uint8_t manifest_wire[VCS_BUILD_ARTIFACT_WIRE_MAX];
+    size_t manifest_len = 0;
+    if (!stored || !vcs_build_artifact_manifest_v1_root(
+            &manifest, work->output_root) ||
+        !vcs_build_artifact_manifest_v1_serialize(
+            &manifest, manifest_wire, sizeof(manifest_wire), &manifest_len) ||
+        !vcs_object_put_addressed(
+            dir, work->output_root, manifest_wire, manifest_len))
+        return ZCL_ERR(-1, "package conflict fixture manifest failed");
+    memcpy(work->evidence_root, work->output_root, 32);
+    uint8_t receipt_wire[VCS_ZCODE_WORK_RECEIPT_WIRE_BYTES], root[32];
+    if (vcs_zcode_work_receipt_seal(
+            work, fixture->signer_secret, fixture->signer_pubkey) !=
+            VCS_ZCODE_DEV_OK ||
+        vcs_zcode_work_receipt_serialize(work, receipt_wire) != VCS_ZCODE_DEV_OK ||
+        vcs_zcode_work_receipt_id(work, root) != VCS_ZCODE_DEV_OK ||
+        !vcs_object_put_addressed(dir, root, receipt_wire, sizeof(receipt_wire)))
+        return ZCL_ERR(-1, "package conflict fixture receipt failed");
+    struct db_build_receipt row = *template_row;
+    zcl_hex_encode(root, 32, row.receipt_id);
+    zcl_hex_encode(root, 32, row.work_receipt_sha3);
+    zcl_hex_encode(work->action_root, 32, row.action_id);
+    zcl_hex_encode(work->action_root, 32, row.action_sha3);
+    (void)snprintf(row.job_id, sizeof(row.job_id), "%s", action->job_id);
+    zcl_hex_encode(work->output_root, 32, row.output_sha3);
+    zcl_hex_encode(work->signature, 64, row.signature);
+    row.observation_sha3[0] = '\0';
+    row.exit_status = work->exit_status;
+    row.created_at = work->finished_unix;
+    if (!db_build_receipt_save(ndb, &row))
+        return ZCL_ERR(-1, "package conflict fixture projection failed");
+    return ZCL_OK;
+}
+
+static int test_bf_package_proof_conflicts(
+    struct node_db *ndb, const char *dir, int64_t now,
+    const struct test_accepted_work_fixture *fixture,
+    const struct db_build_job *job, const struct db_build_action *action,
+    const struct vcs_zcode_work_receipt_v1 *work,
+    const struct db_build_receipt *row, unsigned scenario)
+{
+    static const char *const names[] = {
+        "signed PASS and verified TEST_FAIL",
+        "signed PASS with failing package evidence",
+        "signed FAIL with passing package evidence",
+        "signed failure exit differs from package test exit",
+    };
+    int failures = 0;
+    bool transaction_open = false;
+    TEST("build_fabric: package failure conflicts require matching signed evidence") {
+        printf("  package conflict scenario: %s\n", names[scenario]);
+        ASSERT(node_db_begin(ndb));
+        transaction_open = true;
+        struct db_build_job package_job = *job;
+        struct db_build_action package_action = *action;
+        (void)snprintf(package_action.kind, sizeof(package_action.kind), "%s",
+                       VCS_BUILD_ACTION_KIND_PACKAGE_V1);
+        (void)snprintf(package_job.profile, sizeof(package_job.profile), "%s",
+                       VCS_BUILD_PACKAGE_PROFILE_QUICK_V1);
+        (void)snprintf(package_action.virtual_workdir,
+                       sizeof(package_action.virtual_workdir), "%s",
+                       VCS_BUILD_PACKAGE_VIRTUAL_ROOT_V1);
+        (void)snprintf(package_action.declared_outputs,
+                       sizeof(package_action.declared_outputs), "%s",
+                       VCS_BUILD_PACKAGE_OUTPUT_V1);
+        (void)snprintf(package_action.resource_policy,
+                       sizeof(package_action.resource_policy), "%s",
+                       VCS_BUILD_PACKAGE_RESOURCE_POLICY_V1);
+        uint8_t flags[32], environment[32];
+        ASSERT(vcs_build_action_v1_fixed_flags_root_for_kind(
+            package_action.kind, flags));
+        ASSERT(vcs_build_action_v1_fixed_environment_root_for_kind(
+            package_action.kind, environment));
+        zcl_hex_encode(flags, 32, package_action.flags_sha3);
+        zcl_hex_encode(environment, 32, package_action.environment_sha3);
+        package_action.sequence++;
+        ASSERT(bf_canonicalize(&package_job, &package_action));
+        ASSERT(db_build_job_save(ndb, &package_job));
+        ASSERT(db_build_action_save(ndb, &package_action));
+        struct vcs_zcode_work_receipt_v1 passed = *work;
+        ASSERT(zcl_hex_decode_lower(
+            package_action.action_id, passed.action_root, 32));
+        ASSERT(bf_package_conflict_receipt(
+            ndb, dir, fixture, &package_action, &passed, row, false).ok);
+        struct build_fabric_proof_evaluation initial = {0};
+        ASSERT(build_fabric_proof_evaluate_readonly(
+            ndb, dir, package_action.action_id, now, &initial).ok);
+        ASSERT(initial.policy_satisfied);
+        struct vcs_zcode_work_receipt_v1 failed = *work;
+        memcpy(failed.action_root, passed.action_root, 32);
+        failed.status = scenario == 1 ? VCS_ZCODE_WORK_PASS : VCS_ZCODE_WORK_FAIL;
+        failed.exit_status = scenario == 1 ? 0 : scenario == 3 ? 8 : 7;
+        failed.finished_unix--;
+        ASSERT(bf_package_conflict_receipt(
+            ndb, dir, fixture, &package_action, &failed, row, scenario != 2).ok);
+        int changes = sqlite3_total_changes(ndb->db);
+        for (unsigned mode = 0; mode < (scenario == 0 ? 3u : 2u); mode++) {
+            struct build_fabric_proof_evaluation evaluation = {0};
+            struct zcl_result result = mode == 0
+                ? build_fabric_proof_evaluate_readonly(
+                    ndb, dir, package_action.action_id, now, &evaluation)
+                : mode == 1
+                    ? build_fabric_proof_materialize(
+                        ndb, dir, package_action.action_id, now, &evaluation)
+                    : build_fabric_proof_evaluate(
+                        ndb, dir, package_action.action_id, now, &evaluation);
+            if (scenario == 0) {
+                ASSERT(!result.ok);
+                ASSERT_STR_EQ(result.message, "proof_observation_conflict");
+                ASSERT(!evaluation.policy_satisfied);
+                ASSERT(evaluation.proof_set_root_sha3[0] == '\0');
+            } else {
+                ASSERT(result.ok);
+                ASSERT(evaluation.policy_satisfied);
+                ASSERT_STR_EQ(evaluation.proof_set_root_sha3,
+                              initial.proof_set_root_sha3);
+            }
+            ASSERT_EQ(sqlite3_total_changes(ndb->db), changes);
+            uint8_t root[32];
+            ASSERT_EQ(vcs_zcode_work_receipt_id(&passed, root), VCS_ZCODE_DEV_OK);
+            ASSERT(vcs_object_has(dir, root));
+            ASSERT_EQ(vcs_zcode_work_receipt_id(&failed, root), VCS_ZCODE_DEV_OK);
+            ASSERT(vcs_object_has(dir, root));
+        }
+        PASS();
+    } _test_next:;
+    if (transaction_open && !node_db_rollback(ndb)) failures++;
+    return failures;
+}
+
 static int test_bf_proof_materialization(void)
 {
     int failures = 0;
@@ -2294,6 +2684,16 @@ static int test_bf_proof_materialization(void)
         free(stored);
         ASSERT(db_build_receipt_find(&ndb, row.receipt_id, &observed));
         ASSERT_STR_EQ(observed.trust_state, "REMOTE_OBSERVED");
+
+        for (unsigned scenario = 0; scenario < BF_CONFLICT_CASE_COUNT;
+             scenario++)
+            failures += test_bf_proof_conflict_case(
+                &ndb, dir, now, &fixture, &job, &action, &work,
+                &observation, &row, (enum bf_conflict_case)scenario);
+        for (unsigned scenario = 0; scenario < 4; scenario++)
+            failures += test_bf_package_proof_conflicts(
+                &ndb, dir, now, &fixture, &job, &action, &work, &row, scenario);
+        db_changes = sqlite3_total_changes(ndb.db);
 
         struct build_fabric_proof_evaluation authoritative = {0};
         ASSERT(build_fabric_proof_evaluate(

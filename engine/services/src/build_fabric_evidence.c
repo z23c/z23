@@ -184,6 +184,68 @@ static bool bf_receipt_trusted(const struct bf_verified_receipt *receipt)
     return receipt && (receipt->local || receipt->approved);
 }
 
+/* Inspect all eligible observations before selecting successes. A majority or
+ * a local success cannot erase a contradictory observation for identical
+ * inputs. Other actions and untrusted signers do not veto this action. */
+static bool bf_observations_conflict(
+    const struct bf_verified_receipt *valid, size_t count)
+{
+    for (size_t i = 0; i < count; i++) {
+        if (!bf_receipt_trusted(&valid[i])) continue;
+        for (size_t j = i + 1; j < count; j++) {
+            if (!bf_receipt_trusted(&valid[j]) ||
+                valid[i].work_kind != valid[j].work_kind ||
+                memcmp(valid[i].receipt.action_root,
+                       valid[j].receipt.action_root, 32) != 0 ||
+                memcmp(valid[i].receipt.input_root,
+                       valid[j].receipt.input_root, 32) != 0)
+                continue;
+            if (valid[i].receipt.status != valid[j].receipt.status ||
+                (valid[i].receipt.status == VCS_ZCODE_WORK_PASS &&
+                 valid[i].work_kind == VCS_ZCODE_WORK_BUILD &&
+                 memcmp(valid[i].evidence_output,
+                        valid[j].evidence_output, 32) != 0))
+                return true;
+        }
+    }
+    return false;
+}
+
+static size_t bf_successful_observations(
+    struct bf_verified_receipt *valid, size_t count)
+{
+    size_t passes = 0;
+    for (size_t i = 0; i < count; i++)
+        if (valid[i].receipt.status == VCS_ZCODE_WORK_PASS)
+            valid[passes++] = valid[i];
+    return passes;
+}
+
+static bool bf_receipt_current(
+    const struct vcs_zcode_work_receipt_v1 *receipt,
+    const struct db_build_receipt *row,
+    const struct vcs_zcode_proof_policy_v1 *policy, int64_t now)
+{
+    return (receipt->status == VCS_ZCODE_WORK_PASS ||
+            receipt->status == VCS_ZCODE_WORK_FAIL) &&
+        receipt->exit_status == row->exit_status &&
+        receipt->finished_unix <= now &&
+        (policy->maximum_proof_age_seconds == 0 ||
+         now - receipt->finished_unix <=
+             (int64_t)policy->maximum_proof_age_seconds);
+}
+
+static bool bf_package_result_matches(
+    const struct vcs_zcode_work_receipt_v1 *receipt,
+    const struct vcs_package_build_receipt *package)
+{
+    bool passed = vcs_package_build_installable(package);
+    if (receipt->status == VCS_ZCODE_WORK_PASS) return passed;
+    return receipt->status == VCS_ZCODE_WORK_FAIL && !passed &&
+        receipt->exit_status == (package->test_exit_code != 0
+            ? (int)package->test_exit_code : 1);
+}
+
 static bool bf_package_evidence_wire(
     const char *workspace, const struct vcs_zcode_work_receipt_v1 *receipt,
     uint8_t **out, size_t *out_len)
@@ -277,7 +339,7 @@ static bool bf_package_evidence_verify(
         memcmp(package.lock_root, task->dependency_lock_root, 32) == 0 &&
         strcmp(package.flags, expected_flags) == 0 &&
         package.isolation == VCS_PACKAGE_BUILD_ISOLATION_FULL &&
-        vcs_package_build_installable(&package) &&
+        bf_package_result_matches(receipt, &package) &&
         vcs_package_build_id(&package, evidence_output) ==
             VCS_PACKAGE_BUILD_OK;
     free(wire);
@@ -562,11 +624,7 @@ static struct zcl_result bf_proof_evaluate(
             memcmp(receipt.action_root, action_root, 32) == 0 &&
             memcmp(receipt.input_root, input_root, 32) == 0 &&
             receipt.work_kind == expected_kind &&
-            receipt.status == VCS_ZCODE_WORK_PASS &&
-            receipt.finished_unix <= now &&
-            (policy.maximum_proof_age_seconds == 0 ||
-             now - receipt.finished_unix <=
-                 (int64_t)policy.maximum_proof_age_seconds);
+            bf_receipt_current(&receipt, &rows[i], &policy, now);
         if (verified && compile_action) {
             uint8_t projected_output[32], projected_observation[32];
             verified = zcl_hex_decode_lower(
@@ -596,9 +654,9 @@ static struct zcl_result bf_proof_evaluate(
         if (!db_build_worker_find(ndb, rows[i].worker_id, &worker) ||
             strcmp(worker.signer_pubkey, receipt_signer_hex) != 0)
             continue;
-        bool approved = worker.approved &&
-            !worker.revoked &&
+        bool current = !worker.revoked &&
             (worker.expires_at == 0 || now < worker.expires_at);
+        bool approved = worker.approved && current;
         valid[valid_count].row = rows[i];
         valid[valid_count].receipt = receipt;
         memcpy(valid[valid_count].root, receipt_root, 32);
@@ -606,10 +664,15 @@ static struct zcl_result bf_proof_evaluate(
         valid[valid_count].work_kind = expected_kind;
         valid[valid_count].approved = approved;
         valid[valid_count].local =
-            strcmp(rows[i].trust_state, "LOCAL_ACCEPTED") == 0;
+            current && strcmp(rows[i].trust_state, "LOCAL_ACCEPTED") == 0;
         valid[valid_count].package_test_passed = package_test_passed;
         valid_count++;
     }
+    if (bf_observations_conflict(valid, valid_count))
+        return ZCL_ERR(-1, "proof_observation_conflict");
+    /* Failed observations remain immutable in CAS and in the receipt ledger,
+     * but cannot satisfy any positive proof dimension or be promoted. */
+    valid_count = bf_successful_observations(valid, valid_count);
     for (size_t i = 0; i < valid_count; i++)
         if (valid[i].work_kind == VCS_ZCODE_WORK_REVIEW &&
             bf_receipt_trusted(&valid[i]))

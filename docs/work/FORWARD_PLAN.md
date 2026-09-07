@@ -2,357 +2,278 @@
 
 # Z23 current forward plan
 
-This file is the current ordered development mission. Durable product direction
-and agent authority live in [`../../AGENTS.md`](../../AGENTS.md); public-node
-acceptance lives in [`../MVP.md`](../MVP.md); current state of the maintainer's
-hosted node lives only in [`../HANDOFF.md`](../HANDOFF.md).
+This is the current ordered development mission. Durable product direction and
+agent authority live in [`../../AGENTS.md`](../../AGENTS.md); public-node
+acceptance lives in [`../MVP.md`](../MVP.md). Maintainer-host live state belongs
+only in [`../HANDOFF.md`](../HANDOFF.md), consulted for an explicit host
+assignment. Do not copy live heights, process state, or benchmark anecdotes here.
 
-Do not copy live heights, process state, or dated benchmark anecdotes here.
-Derive them from the named commands and evidence ledgers. Earlier detailed
-plans and incident narratives remain available through Git history.
+## Current mission: fast C23 development with fleet Insight + Control
 
-## Current mission: one canonical landing lifecycle
+Make Z23 the durable P2P platform through which interchangeable agents
+understand real problems, reuse C23, produce verified improvements, operate
+permitted systems, and measure the consequences:
 
-New fleet features are frozen. The current mission is to converge Z23 onto one
-lifecycle — `NEED -> JOB -> CANDIDATE -> PROOF_SET -> PUBLICATION ->
-REMOTE_RECEIPT` — with every durable object immutable, signed, content-addressed
-and rooted, local databases reduced to rebuildable projections, and exactly one
-rule for publication. The design, the object fields, the removal table for the
-competing landing machines, the acceptance harness, and the ordered lanes are in
-[`CANONICAL_LIFECYCLE.md`](./CANONICAL_LIFECYCLE.md).
+> Observe → understand → propose → build → independently reproduce → publish
+> → operate → measure.
+
+Deliver native APIs and CLI first on Linux and arm64 macOS; a browser console
+follows. Aggregate fleet membership has no fixed ceiling, while every node's
+connections, work, storage and responses remain bounded. Native documents and
+signed task objects are the first live business sources. Transcripts, Slack,
+email, tickets, CRM, analytics and feedback receive bounded import support;
+direct connectors subsequently reuse the same adapter contract.
+
+Canonical lifecycle convergence is the first milestone. The continuation queue
+below replaces the earlier blanket fleet freeze and temporary P0.5 queue.
+Existing design records supply scoped implementation detail; they do not reorder
+this mission. Requirements below are acceptance targets, not claims of completed
+implementation or measured performance.
+
+## Invariants and authority
+
+P0 consensus, wallet custody and public-node correctness retain absolute
+priority; the durable P1–P4 ordering in `AGENTS.md` still applies. Insight,
+Control and development machinery advance public-node reliability and C23
+Commons acceptance. Telemetry, indexing, builds, transfers and application
+operations may not delay chain advancement, synchronization or peer health.
+Consensus predicates and byte-sealed core remain unchanged without the explicit
+owner ritual. Custody and canonical node deployment retain separate authority.
+
+Use existing signed objects, CAS, task, candidate, action, lease, receipt and
+receiver-policy authorities. Databases and views are rebuildable projections.
+Imported text and downloaded C remain inert; storing never authorizes building,
+execution, installation or deployment. No central scheduler, mandatory SaaS
+account, model vendor or permanent privileged worker becomes a dependency.
+Token economics and speculative marketplace expansion remain simulation-only.
+
+Autonomous live mutations require fresh, scoped receiver authority. A partition
+allows observation and preparation but blocks new live mutations when freshness
+cannot be established. Scope includes machines, services, capacity, cost and
+permitted stages; privileged supervision installation needs its own grant.
+This mission authorizes implementation and isolated qualification, not an
+ungranted production operation or signing on another operator's behalf.
+
+## Owned public surfaces
+
+Extend existing command families and authorities. New names in this table are
+target interfaces; discover implemented schemas from the built binary.
+
+| Surface | Result |
+|---|---|
+| `code.*`, `zcode.work.*`, `dev.*` | Bounded context, reusable C23, distributed proposals and proofs, canonical publication |
+| `fleet.machines`, new `fleet.query`, `fleet.watch` | Paginated membership, private observations, subscriptions and freshness |
+| `ops.telemetry.*` | Continuous logs, traces, metrics, resource pressure, sync progress and agent activity |
+| New `fleet.insight.*`, existing `story.*` | Permissioned ingestion, retrieval, evidence explanations, incidents, costs and experiment outcomes |
+| New `ops.service.*` | Typed deployment, scaling, configuration, migration, status and rollback plans |
+| New `ops.traffic.*` | Versioned routing, traffic mirroring, A/B allocation and canary progression |
+
+Evidence and retrieval belong under cognition; package/application lifecycle
+under Commons; node telemetry under engine services; OS integrations behind
+platform ports and adapters. Product implementation is C23 with existing
+dependencies. Extend action and receipt types instead of adding an operations
+ledger. Queries identify source generation, policy, coverage, observation age,
+missing information and continuation cursor. Plans bind exact targets,
+artifacts, configuration, schema, authority, preconditions and rollback.
+
+## Ordered continuation queue
+
+### 1. Finish the foundation for fast, coordinated work
+
+Read [`CANONICAL_LIFECYCLE.md`](./CANONICAL_LIFECYCLE.md) before changing
+landing, proof, board, train or lane behavior. Its lifecycle remains:
+
+```text
+NEED → JOB → CANDIDATE → PROOF_SET → PUBLICATION → REMOTE_RECEIPT
+```
+
 <!-- claim: file-present docs/work/CANONICAL_LIFECYCLE.md -->
 
-Read that document before starting any landing, proof, board, train, or lane
-work. The ordered product program below resumes once its lanes are done.
+1. Freeze evidence interfaces, then develop runner, lifecycle and federation
+   changes in parallel with one primary writer per component. Connect candidate
+   bundles, signed observations and proof admission into the canonical chain.
+2. Separate reusable input keys from immutable observation roots. Compute keys
+   from actual source, dependencies, compiler, flags, environment, harness and
+   policy inputs. Preserve contradictory observations and refuse unresolved
+   eligible conflicts. Navigator keys remain advisory.
+3. Reuse unchanged unit evidence across candidates only when its exact input
+   closure and receiver policy permit it. Changed or incomplete closures trigger
+   required proof; reuse never omits mandatory publication evidence.
+4. Persist publication intent before updating Git. Require fast-forward ancestry
+   and an expected-base check; independently observe the remote result and
+   reconcile after publisher failure. Retain competing P2P heads under receiver
+   policy. An enqueue acknowledgement is not publication evidence.
+5. Exchange context and candidates by root, verify received bindings and fetch
+   only missing chunks. Attach exact duplicate requests to eligible existing
+   work. Bind context to task, source, goal and explicit completeness; remote
+   navigation or evidence never acquires local acceptance authority.
 
-## 0. Earlier mission: one clear agent route
+Retire competing lifecycle formats only after canonical reconstruction and
+acceptance pass. Read-only context reuse precedes remote diagnosis, scoped
+proposal and independent review. Missing qualified worker isolation is a named
+refusal on either platform.
 
-Before selecting another product or operations project, remove inherited
-context that sends fresh agents toward completed work. Work in this order:
+### 2. Make fleet visibility private, continuous and scalable
 
-1. [x] Delete the completed architecture quest board that still presented
-   itself as the whole current queue. Its history remains in Git.
-2. [x] Make vendor-specific agent files thin adapters to `AGENTS.md`, this
-   plan, and `docs/DEVELOPING.md`; they carry no independent workflow doctrine.
-3. [x] Keep live-node, uptime, soak, server-lane, and deployment state in
-   `docs/HANDOFF.md` or an explicitly operator-only runbook. Ordinary
-   development entry documents link there only conditionally.
-4. [x] Rename or label retained plans as scoped design records, references, or
-   historical rationale. They do not choose the next task.
-5. [x] Run the documentation and lint gates, then ask whether a fresh agent can
-   choose the first open mission item without reading an old session history.
-   Repeat until the answer is yes.
+1. Replace total-member limits with indexed pagination and immutable history
+   shards. Bound active connections, streams, batches, caches and fair refresh;
+   each receiver chooses the history it retains and serves.
+2. Subscribe and selectively replicate through existing authenticated encrypted
+   transport. Keep private membership, telemetry and evidence roots off public
+   discovery channels. Use bounded local projections for immediate answers and
+   asynchronous queries for broader history.
+3. Complete telemetry watch coverage after replacing blocking runtime and agent
+   collection with bounded snapshots. Batch stream changes with backpressure,
+   resumable cursors, restart epochs and explicit lost intervals. Slow
+   subscribers cannot block node work.
+4. Anchor issuer policy heads with monotonic sequence and predecessor roots;
+   retain receiver high-water marks. Lost authority state requires a fresh
+   authenticated head before control resumes.
+5. Revocation cancels queued actions and prevents subsequent stages of running
+   operations. Already-running services continue unless the grant explicitly
+   authorizes termination.
 
-Fresh-agent check: **yes**. `AGENTS.md` routes directly here, this is the only
-indexed `PLAN`, retained documents label their narrower scope, and live-node
-procedures require an explicit maintainer-host assignment. With this cleanup
-checkpoint closed, continue at the first unmet item in the ordered product
-program below; do not revive a deleted scorecard or historical queue.
+### 3. Connect operational evidence to useful outcomes
 
-Do not start a time-running soak, uptime watch, server-lane operation, or live
-node intervention during this mission unless the owner explicitly requests
-that operation or a P0 incident requires it. Do not rewrite working
-architecture merely to simplify its documentation.
+1. Continuously watch native documents and signed tasks, including updates,
+   deletions and access changes. Add bounded JSONL/API imports for transcripts,
+   Slack, email, tickets, CRM, analytics and feedback using one adapter contract.
+   Preserve provenance, external identity, timestamps, access policy and links
+   to services, code, work and releases.
+2. Reuse evidence envelopes and local indexes. Enforce permissions before
+   storage, replication, retrieval and agent-context assembly. Imported text
+   remains inert evidence, including instructions embedded in its content.
+3. Correlate logs, traces, incidents, costs, experiments and feedback with exact
+   deployed generations. Distinguish measured facts, estimates and proposed
+   explanations. Implement OTLP/HTTP JSON interoperability using the published
+   [OTLP encoding](https://opentelemetry.io/docs/specs/otlp/), without requiring
+   a separate collector service.
+4. Assemble a bounded agent context packet containing the objective, relevant
+   evidence, reusable code, current work, permitted actions and one next action.
+5. Bound retention by age and bytes with visible coverage loss. Preserve
+   accepted lifecycle evidence and explicit pins until locally released;
+   exhausted pin budgets refuse additional admission.
 
-## Near-term proof
+### 4. Make live operations transactional on both platforms
 
-One person creates or improves a real C23 application from reusable parts,
-sees the consequence, reproduces it elsewhere, accepts the exact version, and
-uses it. Everything below is ordered to make that one journey work end to end:
-`z23 zcode guide` -> `zcode work start` -> `zcode work run` -> `zcode work
-show` -> `zcode create` -> `zcode package fetch` -> `zcode package source
-reproduce` -> `zcode work accept` -> `zcode use`. A change that does not make
-some step of that journey work, or make it smaller, faster, safer, or easier
-to reproduce, is not the current mission.
+1. Extend the existing activation transaction through native systemd and launchd
+   adapters. Repair service-unit placement and test the real preparation
+   adapter. Use a trusted C23 executor that verifies permitted artifacts and
+   running-image identity. Qualify Linux descriptor execution and macOS
+   suspended-spawn image verification separately; one platform's evidence does
+   not establish the other's guarantee.
+2. Immediately before each mutation, the receiver checks current authority,
+   action identity and expected artifact/configuration/schema generations.
+   Duplicates reconcile with the existing action; lost acknowledgements never
+   cause blind reexecution. Support deployment, replica scaling, configuration
+   and migrations within the exact grant.
+3. Run application HTTP routing in a separate bounded worker. Route revisions
+   bind backend identities, weights, stable cohorts, deadlines and health
+   conditions. Canary plans declare stages and observation windows; missing or
+   stale health stops progression. Failure restores the verified prior route
+   and compatible service generation.
+4. Mirror only permitted replay-safe traffic into isolated shadow state. Shadow
+   failures cannot delay primary responses.
+5. Require migration rehearsal, checkpoints and compatibility evidence. Data
+   rollback is a declared capability; binary rollback does not imply it.
+   Rearchitecture is a dependency graph of ordinary code, service, routing and
+   migration actions.
 
-## Product priority order
+### 5. Accelerate chain and software synchronization
 
-1. **P0 — public-node correctness and remaining V1 acceptance.** Consensus,
-   wallet custody, block processing, synchronization, peer health, and recovery
-   retain absolute resource and authority priority.
-2. **Temporary P0.5 — Fearless Scale code, proof, and science fabric.** Build
-   the bounded, content-addressed navigation and evidence rails needed to work
-   safely across a federated billion-line C23 corpus. This program may consume
-   only resources left after P0 work and grants no consensus, custody,
-   deployment, publication-signing, or fetched-code execution authority.
-3. **C23 Commons Alpha complete user story.** An ordinary full node can
-   publish, discover, fetch, verify, build, independently reproduce, and serve
-   an exact C23 package without GitHub or a central registry.
-4. **Core consolidation only when driven by that user story.** Reuse existing
-   source, CAS, DHT, queue, lease, action, receipt, and policy authorities.
-5. **Developer tooling outside the P0.5 mission is frozen except for
-   correctness or product blockers.** The reflex reactor is factory equipment,
-   not the product.
-6. **Token economics and speculative expansion remain simulation-only.** They
-   do not displace public-node or package-network acceptance.
+1. Complete the chain stopwatch's production wiring through verified
+   installation, readiness and durable catch-up. Report bootstrap readiness and
+   complete sovereign validation separately. Actual canonical installation or
+   node restart still requires its separate owner grant.
+2. Measure download, installation and validation stage costs; optimize scheduling
+   without changing consensus predicates or mandatory verification.
+3. Reuse CAS accounting, resumable downloads and proof caches. Warm identical
+   transfers move no content payload; interrupted transfers retain verified
+   chunks, and edits transfer only missing content.
+4. Qualify maximum admitted background load while blockchain advancement and
+   peer-health acceptance remain green.
 
-The blockchain wins every resource and authority conflict. Package work must
-remain bounded and asynchronous; it may not delay consensus, transaction relay,
-sync, peer health, wallet custody, or deployment.
+## Acceptance and performance
 
-## Temporary P0.5: Fearless Scale
+Every claim names exact source, hardware, topology, cache state and offered
+load. Failed operations and missing required observations count as misses.
+Targets must be demonstrated with useful requested fields and sustained work,
+not empty queries or idle subscribers.
 
-The user outcome is one versioned native interface through which an agent can
-orient, query, assemble bounded context, plan conservative proof, and verify
-the exact evidence behind each answer across local and federated C23 source.
-The same existing Commons authorities carry immutable index shards and
-universal science statements. SQLite remains an optional rebuildable local
-catalog; metaverse remains a derived collection and visualization view.
+| Area | Required evidence |
+|---|---|
+| Interactive access | Warm bounded local queries: p95 below 100 ms |
+| Live telemetry | Subscribed observations through applied acknowledgement: p95 within 1 second on healthy direct links |
+| Development feedback | Warm compile and focused proof: p95 within 10 seconds on a frozen small-change corpus; publication retains all mandatory evidence |
+| Chain sync | Fresh datadir: captured peer tip through durable H* within 600 seconds at 100 Mbps; sovereign validation reported separately |
+| Fleet growth | 1,000, 10,000 and 100,000 simulated members with bounded active resources, churn, partitions and fair refresh |
+| Transfer reuse | Zero repeat content payload, only missing content after edits, no redownload of verified chunks after interruption |
 
-Work proceeds in this order:
+Qualify telemetry on declared 100 Mbps, ≤20 ms RTT direct links, with useful
+subscriptions and sustained event load. Report broader propagation separately
+for each topology. Measure model-context bytes, tokenizer estimates, reads,
+corpus walks and duplicate work separately from transport savings.
 
-1. Govern one source universe and close the current index correctness gaps.
-2. Use native immutable receipt admission; push hooks never compile, lint,
-   test, wait, fetch, or invoke Make or shell.
-3. Ship local navigation v2 behind born-red fixtures and dual-run it against
-   v1 wherever v1 claims completeness.
-4. Federate immutable shards through the existing Commons CAS/DHT and prove
-   bounded 1M, 10M, 100M, and 1B non-deduplicated-line fixtures.
-5. Project existing science evidence into universal statement and realm-head
-   envelopes with rights-aware inert fetch and local action acceptance.
-6. Retire compatibility only after two green release cycles and demonstrated
-   reconstruction from immutable shards.
+Required correctness scenarios:
 
-Temporary P0.5 ends only when all of these exit gates are evidenced:
+- Twenty three-node lifecycle cycles with candidate races, stale bases,
+  reordered objects, contradictory proofs, worker crashes and publisher crashes.
+- Forged evidence, revoked grants, truncated policy history, expired
+  subscriptions, privacy capture and poisoned shards.
+- Real Linux and arm64 macOS installation, upgrade, restart, image substitution,
+  PID reuse, crash recovery and verified rollback in permitted environments.
+- Stable A/B cohorts, stalled shadows, unhealthy canaries, incompatible schemas
+  and interrupted migrations.
+- Maximum admitted fleet load with chain advancement and peer health green.
 
-- census, Merkle, inventory, and index agree on one governed source universe;
-- clean and incremental Linux/macOS builds produce identical manifest and
-  shard roots, with missing dimensions reported as typed `INCOMPLETE`;
-- warm exact, ranked, context, incremental-delta, and federated billion-line
-  acceptance meet their declared latency, RSS, and storage budgets without
-  silent truncation, false completeness, overflow, or root disagreement;
-- receipt admission and status meet their bounded latency contracts, ordinary
-  small changes reach verified green within the program budget, and cold
-  audits show no unexplained selector miss, cache disagreement, accounting
-  hole, duplicate action, or omitted mandatory P0/P1 gate;
-- the frozen multi-agent task corpus records exact model, prompt, tool schema,
-  source root, outcome, context cost, proof latency, and landed correctness;
-- three isolated peers can publish, discover, fetch, rederive, review,
-  replicate, conflict, supersede, and retract rights-compatible science
-  statements and realm heads while poisoned or incomplete evidence fails
-  closed; and
-- maximum corpus, science-radar, and indexing load demonstrably preserves
-  blockchain sync, peer health, wallet custody, and consensus priority.
+The release demonstration uses three consenting physical hosts: an agent finds
+one real problem, reuses C23, produces a candidate, another host reproduces it,
+the canonical lifecycle publishes it, owner policy permits a canary, telemetry
+measures the outcome, and rollback is exercised. Before distributed dispatch,
+qualify authenticated bounded commands and exact-object transfer in both
+directions for each pair, under each receiver's permitted workspace and limits.
+Missing host access or authority is an explicit unmet prerequisite.
 
-After these gates pass, public-node and Commons feature ordering above resumes
-without the temporary elevation; the proven fabric continues as ordinary
-Commons infrastructure.
+### Existing acceptance remains mandatory
 
-## 1. Public-node V1 acceptance
-
-The aggregate contract is [`../MVP.md`](../MVP.md).
+Use canonical registered groups and existing aggregate targets:
 
 ```bash
 make mvp
 make mvp-verify
-```
-
-`make mvp` is the honest criterion reporter: PASS is earned only by the full
-declared observation; unavailable external prerequisites remain named BLOCKED,
-not silently green. `make mvp-verify` runs the local aggregate.
-
-The remaining work follows the first non-PASS criterion in that reporter, with
-these invariants:
-
-1. Diagnose and reproduce on isolated datadir copies; no live database surgery.
-2. Cold-start acceptance observes a fresh node reach the captured peer tip
-   within the declared budget. A boot or intermediate climb is not completion.
-3. Recovery acceptance observes post-fault H* climb and persistence, not only
-   process survival.
-4. Consensus parity uses a fresh from-genesis replay and exact same-height
-   state comparison with `zclassicd`.
-5. The soak clock starts only on an exact candidate after its baseline restart
-   and resets on binary, configuration, datadir, restart, parity, or evidence
-   discontinuity.
-
-Primary exact gates include:
-
-```bash
-make mvp-coldstart-to-tip-stopwatch
-make replay-canary-genesis
-make test-crash-bootstrap
-make test-two-node-peer-tip
-make soak-evidence-report
-```
-
-Some require operator fixtures, real peers, parameters, or sustained time.
-Their named BLOCKED result is evidence of an unmet prerequisite, never
-permission to weaken the assertion.
-
-## 2. C23 Commons Alpha complete user story
-
-The user outcome is one end-to-end path:
-
-```text
-author publishes exact source/package facts
-    -> ordinary peers discover and fetch inert bytes
-    -> local policy admits bounded build/test work
-    -> interchangeable untrusted workers execute immutable actions
-    -> signed receipts bind exact inputs and outputs
-    -> another node independently reproduces the result
-    -> each receiver verifies and accepts or refuses locally
-```
-
-Fetching never authorizes building; building never authorizes installing,
-linking, executing outside the bounded worker, or deployment. Evidence proves
-only its exact declared observation.
-
-Run the existing aggregate surfaces rather than adding another package network:
-
-```bash
 make zcode-development-acceptance
 make zcode-async-proof-acceptance
 make sovereign-source-network-acceptance
 make zcode-reproduction-acceptance
+make commons-multihost-acceptance
 ```
 
-Acceptance requires:
+`make mvp` reports the actual criterion; unavailable external prerequisites are
+named BLOCKED, never PASS. Public-node acceptance retains fresh-node captured-tip
+catch-up, post-fault durable H* climb, fresh from-genesis parity against
+`zclassicd`, and an exact-candidate soak whose clock resets on evidence or
+candidate discontinuity. Operator fixtures and sustained observation are not
+replaced by unit tests. Start live operations or soaks only with the applicable
+authority. Diagnose recovery on isolated copies.
 
-- exact source, package, recipe, dependency, toolchain, action input, artifact,
-  and receipt roots remain bound end to end;
-- fetched package bytes remain inert until explicit local admission;
-- work leases are atomic, recoverable, and stale results fail closed by name;
-- exact duplicate actions deduplicate without conflating tasks or candidates;
-- requester foreground work stays responsive while remote proof runs;
-- no node, AI vendor, scheduler, signer, or host has a permanent special role;
-- independent signers and independently reconstructed inputs agree on exact
-  artifact bytes where the claim requires reproduction;
-- no GitHub access or central package registry is required by the acceptance;
-- package resource budgets preserve blockchain responsiveness;
-- the original publisher can disappear: `make commons-multihost-acceptance`
-  runs the same journey with node B and node C on separate physical hosts,
-  then takes host A down and proves host C still discovers, fetches,
-  reproduces and runs the exact accepted bytes from B.
+Commons acceptance continues to require exact source, package, recipe,
+dependency, toolchain, action, artifact and receipt roots; inert fetch; atomic
+recoverable leases; exact duplicate handling; independent reproduction; local
+acceptance; and survival of the original publisher's disappearance without
+GitHub or a central registry. Fix the first violated invariant and add its
+regression; retries or a parallel state machine cannot substitute for proof.
 
-### Token-efficient peer work inside the same journey
+## Integration and continuation
 
-Agents do not need a chat network or a second coordinator. They need the
-existing task, source, context, action, candidate, and receipt roots to be
-reusable across nodes without retransmitting repository copies or accumulated
-prose. Keep this asynchronous and content-addressed:
+For each coherent slice, record its owned surface, failing witness, exact
+focused acceptance and residual uncertainty. Run canonical registered tests,
+required lint/build checks, architecture and generated-interface gates as
+applicable, and independent review. Freeze shared interfaces before parallel
+implementation; keep one writer per component.
 
-```text
-exact task/source generation
-    -> bounded local context or navigator-fact root
-    -> peer asks for roots first and fetches only missing CAS chunks
-    -> receiver re-roots bytes and verifies task/source/generation bindings
-    -> exact active action attaches; exact completed work is revalidated
-    -> model sees only selected bytes and explicit completeness gaps
-```
-
-The ordered checkpoints are:
-
-1. Measure model-context bytes, approximate tokenizer counts, whole-file reads,
-   unchanged-source reads, corpus walks, CAS hits/misses, peer bytes, and
-   duplicate actions on the representative task corpus. Do not claim a token
-   win from transport bytes alone.
-2. Reuse the existing `agent_context.v1` wire by root. Transport it only as an
-   ordinary inert `content.v2` carrier through the existing package swarm.
-   Require the receiver to re-root it and check its expected task, source, goal,
-   and completeness before use. The fixed task carrier and task authority do
-   not change merely to make context convenient.
-3. Make navigator facts generation/configuration/query-bound, canonical, and
-   cursor-safe. A remote fact is a cacheable byte proposal; exact edit, impact,
-   or proof selection still requires local verification. Missing call/include/
-   build/policy dimensions widen proofs or refuse by name.
-4. Rendezvous before spending model tokens: resolve already accepted work for
-   the exact task, attach to an identical active action, or revalidate an exact
-   completed action and its locally held outputs. A stranger's receipt remains
-   `UNVERIFIED` until local policy and reproduction say otherwise.
-5. Only after those read-only savings are measured, add candidate-free remote
-   `DIAGNOSE`, then scoped `PROPOSE`, then independent `REVIEW` through the
-   existing ZCode work swarm. A missing qualified out-of-process isolation
-   backend, including on macOS, is a named refusal; fetched source never enters
-   the node process.
-
-Acceptance for the first checkpoint is two independent peers deriving the same
-context root for the same exact generation, a warm handoff transferring no
-excerpt chunks, no warm corpus-wide walk or unchanged-source read, explicit
-truncation and stale-generation refusals, and unchanged proof selection. The
-blockchain-priority assertion in the async-proof scaling gate remains
-mandatory.
-
-When the aggregate fails, fix the first violated ownership or identity boundary
-and add a permanent regression there. Do not add retries, sleeps, alternate
-state machines, or a new cache authority to mask it.
-
-## 3. Consolidation driven by acceptance
-
-Consolidate only after an acceptance exposes duplicated work or authority.
-Prefer deletion and reuse over a new abstraction. In particular:
-
-- one content carrier and one content-addressed store;
-- one canonical task/candidate/action/receipt fact chain;
-- one durable work/lease authority with derived lifecycle projections;
-- one local policy decision point per receiving node;
-- immutable IDs across transport, reconstruction, execution, and receipt
-  verification.
-
-Distributed workers share immutable CAS objects where practical and minimize
-shared mutable SQLite state. A subsystem may not close, replace, rename,
-checkpoint, or remove database files it does not own or explicitly lease.
-
-The current development reactor has two transitional orchestration paths: the
-per-checkout native proof queue and the separate `tools/land` batching
-chainlog. Both are duplicate transitional lifecycle models and neither is
-product authority. Consolidation is complete only when a
-signed Git intent freezes into the existing source/task/candidate/action/work
-context, the build fabric owns its request and lease, canonical work receipts
-materialize one proof-set root, a PROVEN lane yields one accepted-work root,
-and a versioned Git publication job records immutable progress and outcome. The
-existing package-publication job does not yet provide those Git phases.
-Git identities remain provenance; no landing verdict may replace a source,
-action, proof-set, or accepted-work root.
-
-The action-fabric local Git adapter, shared resident coordinator, Git-target
-publication phases, and native epoch-batch executor remain unfinished. Native
-`zcc --epoch-object` currently covers the build-only and fast-test object
-paths; a batch manifest codec is not a worker pool or object-set publisher.
-Keep those distinctions explicit in code, commands, and documentation.
-
-## 4. Developer tooling freeze
-
-Do not expand HOT_FORK, hot-swap, reflex, agent fleet, or benchmark machinery
-for its own coverage. A tooling change enters the queue only when a current
-public-node or C23 Commons acceptance is blocked by a demonstrated tooling
-correctness defect or missing product capability.
-
-The local feedback path must remain independent of peer networking:
-
-```text
-immutable candidate/action becomes available
-    -> asynchronous peer proof consumes it
-    -> signed events and receipts appear later
-```
-
-There is no direct agent-to-agent coordination and no dependency from local
-editing back into remote proof.
-
-Today an integrator still fetches, merges normally, waits for the exact local
-receipt, pushes, and verifies the remote SHA. The target workflow replaces that
-waiting with a durable signed-commit handoff to one resident coordinator. That
-coordinator alone reconciles current `origin/main`, reuses canonical child
-proofs, admits the exact aggregate, performs a normal main-only publication,
-and records the remotely observed outcome. Until that path exists and is
-qualified, documentation must not describe enqueue as publish.
-
-## 5. Simulation and reference work
-
-Metaverse, marketplace expansion, live-token design, and speculative services
-are reference or simulation work until priorities 1 and 2 are green or an
-owner explicitly changes the product decision. They must not change ZClassic
-consensus or imply live ZC23 economics.
-
-## Integration cadence
-
-For each coherent slice:
-
-1. Run its focused acceptance.
-2. Fetch current `origin/main` and integrate safely.
-3. Rerun the exact affected gates. Run full lint or an uncached broad suite
-   only when the changed closure or acceptance policy requires it.
-4. Commit only owned files, push normally, and verify the remote SHA.
-5. Continue to the next unfinished item.
-
-A push is a checkpoint, not completion. A status report does not suspend work.
-Escalate only under the conditions in [`../../AGENTS.md`](../../AGENTS.md).
+Fetch current `origin/main`, integrate safely and rerun affected gates. Publish
+through the qualified canonical lifecycle and record the independently observed
+remote SHA; follow the current enforced publication policy while convergence is
+unfinished. Do not describe a local commit or queue receipt as publication.
+Continue with the first unfinished item after every checkpoint until the full
+journey passes. Escalate only under [`../../AGENTS.md`](../../AGENTS.md).
